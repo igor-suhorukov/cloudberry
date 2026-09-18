@@ -28,6 +28,7 @@
 #include "postgres.h"
 
 #include "nodes/parsenodes.h"
+#include "utils/rel.h"
 #include "tcop/utility.h"
 
 /*
@@ -49,8 +50,16 @@ extern void GpIvmCheckQuery(Query *query);
 extern Query *GpIvmRewriteQuery(Query *query, List *colNames);
 extern void GpIvmAfterCreate(Oid matviewOid, Query *rewritten);
 extern bool GpIvmIsIncremental(Oid matviewOid);
+extern char *ivm_companion_name(const char *resname);
 
 /* ivm_maintain.c */
 extern void GpIvmRefresh(Oid matviewOid);
+
+/* ivm_delta.c */
+struct TriggerData;
+extern Query *GpIvmGetViewQuery(Relation matviewRel);
+extern bool GpIvmDeltaSupported(Query *viewQuery, Oid baseRelid, int *rti);
+extern bool GpIvmApplyDelta(Oid matviewOid, Oid baseRelid,
+							struct TriggerData *trigdata);
 
 #endif							/* GP_MATVIEW_H */

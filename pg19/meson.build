@@ -219,6 +219,7 @@ modules = [
     'name': 'gp_matview', 'preload': true, 'extension': true, 'build': true,
     'sources': files('modules/gp_matview/gp_matview.c',
                      'modules/gp_matview/ivm_create.c',
+                     'modules/gp_matview/ivm_delta.c',
                      'modules/gp_matview/ivm_maintain.c'),
   },
   {

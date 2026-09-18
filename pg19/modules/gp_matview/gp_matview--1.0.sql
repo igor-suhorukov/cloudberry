@@ -19,3 +19,15 @@ LANGUAGE C;
 
 REVOKE ALL ON FUNCTION gp_matview.ivm_immediate_before() FROM PUBLIC;
 REVOKE ALL ON FUNCTION gp_matview.ivm_immediate_maintenance() FROM PUBLIC;
+
+/*
+ * How views have been kept up to date since the counters were reset. The
+ * contents of a view do not say whether a delta or a whole recomputation
+ * produced them, and the tests need to know.
+ */
+CREATE FUNCTION gp_matview.stats_reset() RETURNS void
+  AS 'MODULE_PATHNAME', 'gp_ivm_stats_reset' LANGUAGE C;
+CREATE FUNCTION gp_matview.applied_delta() RETURNS bigint
+  AS 'MODULE_PATHNAME', 'gp_ivm_stats_delta' LANGUAGE C;
+CREATE FUNCTION gp_matview.recomputed() RETURNS bigint
+  AS 'MODULE_PATHNAME', 'gp_ivm_stats_recompute' LANGUAGE C;

@@ -50,6 +50,8 @@
 #include "optimizer/optimizer.h"
 #include "parser/parse_agg.h"
 #include "parser/parse_clause.h"
+#include "catalog/pg_aggregate.h"
+#include "catalog/pg_type.h"
 #include "parser/parse_func.h"
 #include "parser/parser.h"
 #include "parser/parsetree.h"
@@ -195,15 +197,15 @@ GpIvmCheckQuery(Query *query)
 /* ------------------------------------------------------------------------- */
 
 /*
- * Add the hidden columns maintenance counts with.
- *
- * A view without aggregates or DISTINCT needs none: every row of the view
- * comes from exactly one combination of base rows.  With DISTINCT or GROUP BY
- * a view row can stand for several, so it carries a count of how many, and a
- * delta that takes the count to zero is what removes the row.
- *
- * Ported from Cloudberry's rewriteQueryForIMMV.
+ * What the count that goes with an aggregate column is called.  Cloudberry
+ * spells it the same way, through IVM_colname("count", resname).
  */
+char *
+ivm_companion_name(const char *resname)
+{
+	return makeObjectName(GP_IVM_PREFIX "count", resname, "_");
+}
+
 Query *
 GpIvmRewriteQuery(Query *query, List *colNames)
 {
@@ -232,6 +234,56 @@ GpIvmRewriteQuery(Query *query, List *colNames)
 														 &rewritten->targetList,
 														 rewritten->sortClause,
 														 false);
+	}
+
+	/*
+	 * sum() cannot be maintained on its own: when the last row of a group
+	 * goes, its sum is NULL rather than zero, and only a count of the
+	 * non-null inputs says which.  So each sum() gains a count() of the same
+	 * expression, named after it.  This is Cloudberry's makeIvmAggColumn,
+	 * for the aggregates the delta path handles.
+	 */
+	if (rewritten->hasAggs)
+	{
+		List	   *extra = NIL;
+		ListCell   *lc;
+		AttrNumber	next_resno = list_length(rewritten->targetList) + 1;
+
+		foreach(lc, rewritten->targetList)
+		{
+			TargetEntry *tle = (TargetEntry *) lfirst(lc);
+			Aggref	   *aggref;
+			char	   *aggname;
+			FuncCall   *fn;
+			Node	   *counter;
+
+			if (tle->resjunk || !IsA(tle->expr, Aggref))
+				continue;
+			aggref = (Aggref *) tle->expr;
+			aggname = get_func_name(aggref->aggfnoid);
+			if (aggname == NULL || strcmp(aggname, "sum") != 0)
+				continue;
+			if (list_length(aggref->args) != 1)
+				continue;
+
+			/*
+			 * count() over the same argument.  Built through the parser, so
+			 * that the transition type and everything else an Aggref carries
+			 * are what they would be had the user written it.
+			 */
+			fn = makeFuncCall(SystemFuncName("count"), NIL,
+							  COERCE_EXPLICIT_CALL, -1);
+			counter = ParseFuncOrColumn(pstate, fn->funcname,
+										list_make1(copyObject(((TargetEntry *) linitial(aggref->args))->expr)),
+										NULL, fn, false, -1);
+
+			extra = lappend(extra,
+							makeTargetEntry((Expr *) counter, next_resno++,
+											ivm_companion_name(tle->resname),
+											false));
+		}
+
+		rewritten->targetList = list_concat(rewritten->targetList, extra);
 	}
 
 	if (rewritten->distinctClause || rewritten->hasAggs)

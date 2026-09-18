@@ -68,6 +68,37 @@ PG_FUNCTION_INFO_V1(gp_ivm_immediate_maintenance);
 static List *maintained_this_statement = NIL;
 
 /*
+ * How the views have been kept up to date since the counters were reset: by a
+ * delta, or by computing the whole view again.  A test can then tell which
+ * happened, which the view's contents alone do not say.
+ */
+static int64 maintained_by_delta = 0;
+static int64 maintained_by_recompute = 0;
+
+PG_FUNCTION_INFO_V1(gp_ivm_stats_reset);
+PG_FUNCTION_INFO_V1(gp_ivm_stats_delta);
+PG_FUNCTION_INFO_V1(gp_ivm_stats_recompute);
+
+Datum
+gp_ivm_stats_reset(PG_FUNCTION_ARGS)
+{
+	maintained_by_delta = maintained_by_recompute = 0;
+	PG_RETURN_VOID();
+}
+
+Datum
+gp_ivm_stats_delta(PG_FUNCTION_ARGS)
+{
+	PG_RETURN_INT64(maintained_by_delta);
+}
+
+Datum
+gp_ivm_stats_recompute(PG_FUNCTION_ARGS)
+{
+	PG_RETURN_INT64(maintained_by_recompute);
+}
+
+/*
  * Recompute a view from its own definition, writing it with ordinary DML.
  *
  * The definition already carries the hidden columns, because the query was
@@ -190,7 +221,21 @@ gp_ivm_immediate_maintenance(PG_FUNCTION_ARGS)
 	PG_TRY();
 	{
 		OpenMatViewIncrementalMaintenanceExternal();
-		gp_ivm_apply(matviewOid);
+
+		/*
+		 * A delta if this view's shape allows one, and the whole view
+		 * otherwise -- both leave the view correct, and only the first is
+		 * incremental.
+		 */
+		if (GpIvmApplyDelta(matviewOid, RelationGetRelid(trigdata->tg_relation),
+							trigdata))
+			maintained_by_delta++;
+		else
+		{
+			gp_ivm_apply(matviewOid);
+			maintained_by_recompute++;
+		}
+
 		CloseMatViewIncrementalMaintenanceExternal();
 	}
 	PG_CATCH();
