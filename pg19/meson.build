@@ -259,6 +259,31 @@ foreach m : modules
   endif
 endforeach
 
+###############################################################################
+# Test-only modules
+#
+# gp_probe sets every hook of the core patch series so that the hook tests can
+# check it is called.  It is not part of the port: it is built and installed
+# only where those tests run.
+###############################################################################
+
+if get_option('hook_tests')
+  shared_module('gp_probe', files('test/hooks/gp_probe.c'),
+    c_args: mod_c_args,
+    link_args: mod_link_args,
+    include_directories: [pg_inc, cb_inc],
+    name_prefix: '',
+    install: true,
+    install_dir: pg_pkglibdir,
+  )
+  install_data(
+    'test/hooks/gp_probe.control',
+    'test/hooks/gp_probe--1.0.sql',
+    install_dir: pg_extensiondir,
+  )
+  built_modules += 'gp_probe (test only)'
+endif
+
 subdir('test')
 
 summary({

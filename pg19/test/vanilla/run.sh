@@ -40,8 +40,12 @@ export PG_PATCHED="${PG_PATCHED:-/pg/patched}"
 
 for p in "$PG_VANILLA" "$PG_PATCHED"; do
 	if [ ! -x "$p/bin/postgres" ]; then
-		echo "no PostgreSQL at $p (set PG_VANILLA and PG_PATCHED)" >&2
-		exit 1
+		# These checks need both builds side by side, which only the compare
+		# image has.  Exit 77, which the suite dispatcher reads as "skipped",
+		# so running the tests anywhere else does not fail over it.
+		echo "  skipped: no PostgreSQL at $p"
+		echo "  (set PG_VANILLA and PG_PATCHED, or use the compare image)"
+		exit 77
 	fi
 done
 

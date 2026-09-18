@@ -39,6 +39,7 @@ else
 fi
 
 failed=()
+skipped=()
 for s in "${suites[@]}"; do
 	if [ ! -x "$here/$s/run.sh" ]; then
 		echo "no such suite: $s" >&2
@@ -48,10 +49,17 @@ for s in "${suites[@]}"; do
 	echo "=============================================================="
 	echo "suite: $s"
 	echo "=============================================================="
-	"$here/$s/run.sh" || failed+=("$s")
+	"$here/$s/run.sh"
+	rc=$?
+	if [ "$rc" -eq 77 ]; then
+		skipped+=("$s")
+	elif [ "$rc" -ne 0 ]; then
+		failed+=("$s")
+	fi
 	echo
 done
 
+[ "${#skipped[@]}" -gt 0 ] && echo "skipped suites: ${skipped[*]}"
 if [ "${#failed[@]}" -gt 0 ]; then
 	echo "failed suites: ${failed[*]}"
 	exit 1
