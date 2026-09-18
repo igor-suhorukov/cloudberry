@@ -68,8 +68,12 @@ RUN meson setup /cb/build /cb/pg19 \
 FROM ${PG_IMAGE} AS runtime
 ###############################################################################
 USER root
-COPY --from=build /usr/local/pgsql/lib /usr/local/pgsql/lib
-COPY --from=build /usr/local/pgsql/share/postgresql/extension /usr/local/pgsql/share/postgresql/extension
+# The whole prefix, rather than lib/ and share/extension/ separately: where
+# PostgreSQL puts its data files depends on the prefix -- $prefix/share when
+# the prefix ends in "pgsql" or "postgres", $prefix/share/postgresql when it
+# does not -- so naming the subdirectories here would tie this file to one
+# prefix.  The build stage installed the modules into the same tree.
+COPY --from=build /usr/local/pgsql /usr/local/pgsql
 # The test harness is run from the image, so it comes along.
 COPY --from=build /cb/pg19/test /cb/pg19/test
 RUN chown -R postgres:postgres /cb
