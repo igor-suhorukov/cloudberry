@@ -1,0 +1,43 @@
+#-------------------------------------------------------------------------
+#
+# Licensed to the Apache Software Foundation (ASF) under one
+# or more contributor license agreements.  See the NOTICE file
+# distributed with this work for additional information
+# regarding copyright ownership.  The ASF licenses this file
+# to you under the Apache License, Version 2.0 (the
+# "License"); you may not use this file except in compliance
+# with the License.  You may obtain a copy of the License at
+#
+#   http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing,
+# software distributed under the License is distributed on an
+# "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+# KIND, either express or implied.  See the License for the
+# specific language governing permissions and limitations
+# under the License.
+#
+#-------------------------------------------------------------------------
+#
+# Statements the series adds whose dormancy rests on something other than a
+# name the series introduces.
+#
+# unused_paths.py cannot decide these, because the argument is about what an
+# existing name can hold rather than about a hook being NULL.  Each one is
+# read by hand, recorded here with that reading, and printed on every run --
+# a suppression nobody sees is worse than no check.
+#
+# Adding an entry is a review decision.  The question it has to answer is:
+# on a server where no extension of this port is loaded, can control reach
+# this statement?  If yes, it does not belong here; redesign the patch.
+#
+# Format:  <path> : <function> : <reason>
+#
+
+src/backend/access/transam/xact.c : EstimateTransactionStateSpace : The shortcut is
+	guarded by "nParallelCurrentXids > 0 && !IsParallelWorker()".  In an
+	unpatched server the only assignment that makes nParallelCurrentXids
+	non-zero is in StartParallelWorkerTransaction(), which runs only in a
+	parallel worker, so the second test is false wherever the first is true and
+	the branch cannot be reached.  The other writer is XactAdoptCurrentXids(),
+	which this series adds and which refuses to run in a parallel worker.

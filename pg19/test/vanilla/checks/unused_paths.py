@@ -42,6 +42,31 @@ HEAD = os.environ.get("PG_HEAD", "REL_19_STABLE_CLOUDBERRY")
 
 DIRS = ["src/backend", "src/bin", "src/common"]
 
+ALLOW_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                          "unused_paths.allow")
+
+
+def read_allowlist():
+    """Statements read by hand, with the reading; see unused_paths.allow."""
+    allowed = {}
+    if not os.path.exists(ALLOW_FILE):
+        return allowed
+    key, reason = None, []
+    for raw in open(ALLOW_FILE):
+        if raw.lstrip().startswith("#") or not raw.strip():
+            continue
+        if raw[0].isspace():                    # continuation of a reason
+            if key:
+                reason.append(raw.strip())
+            continue
+        if key:
+            allowed[key] = " ".join(reason)
+        path, fn, first = (x.strip() for x in raw.split(":", 2))
+        key, reason = (path, fn), [first]
+    if key:
+        allowed[key] = " ".join(reason)
+    return allowed
+
 
 def git(*args):
     return subprocess.run(["git", "-C", REPO, *args],
@@ -196,13 +221,35 @@ def main():
         print(f"    {k:26} {v}")
     print()
 
-    if unexplained:
+    allowed = read_allowlist()
+
+    def allow_reason(path, fn):
+        name = fn.split("(")[0].strip()
+        return allowed.get((path, name))
+
+    accounted = [u for u in unexplained if allow_reason(u[1], u[2])]
+    remaining = [u for u in unexplained if not allow_reason(u[1], u[2])]
+
+    # Printed every run, never silently: a suppression nobody sees is worse
+    # than no check.
+    if accounted:
+        print("read by hand, recorded in unused_paths.allow:")
+        seen = set()
+        for sha, path, fn, span in accounted:
+            if (path, fn) in seen:
+                continue
+            seen.add((path, fn))
+            print(f"  {path}  {fn}")
+            print(f"      {allow_reason(path, fn)}")
+        print()
+
+    if remaining:
         print("added statements not gated by a name the series introduces:")
-        for sha, path, fn, span in unexplained:
+        for sha, path, fn, span in remaining:
             print(f"  {sha}  {path}  {fn}")
             for line in span:
                 print(f"      {line.rstrip()}")
-    return 1 if unexplained else 0
+    return 1 if remaining else 0
 
 
 if __name__ == "__main__":
