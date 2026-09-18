@@ -172,7 +172,8 @@ endif
 modules = [
   {
     'name': 'gp_core', 'preload': true, 'extension': true, 'build': true,
-    'sources': files('modules/gp_core/gp_core.c'),
+    'sources': files('modules/gp_core/gp_core.c',
+                     'modules/gp_core/gp_label.c'),
   },
   {
     'name': 'interconnect', 'preload': true, 'extension': false, 'build': true,
@@ -215,8 +216,10 @@ modules = [
     'sources': files('modules/gp_task/gp_task.c'),
   },
   {
-    'name': 'gp_matview', 'preload': false, 'extension': true, 'build': true,
-    'sources': files('modules/gp_matview/gp_matview.c'),
+    'name': 'gp_matview', 'preload': true, 'extension': true, 'build': true,
+    'sources': files('modules/gp_matview/gp_matview.c',
+                     'modules/gp_matview/ivm_create.c',
+                     'modules/gp_matview/ivm_maintain.c'),
   },
   {
     'name': 'gp_sql', 'preload': false, 'extension': true, 'build': true,

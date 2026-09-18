@@ -40,6 +40,7 @@
 
 #include "cb_module.h"
 #include "gp_core_api.h"
+#include "gp_label.h"
 
 PG_MODULE_MAGIC_EXT(
 					.name = "gp_core",
@@ -172,6 +173,13 @@ _PG_init(void)
 	 * Publish ourselves last, so that a module which finds us also finds the
 	 * settings above already defined.
 	 */
+	/*
+	 * The "gp" security label, which is where the port keeps what Cloudberry
+	 * keeps in catalog columns of its own.  It is registered here, in the
+	 * module every other one needs, because several of them use it.
+	 */
+	GpLabelRegisterProvider();
+
 	rv = find_rendezvous_variable(CB_CORE_RENDEZVOUS);
 	*rv = unconstify(GpCoreApi *, &gp_core_api);
 }

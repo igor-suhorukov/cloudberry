@@ -41,7 +41,7 @@ PORT="${PGPORT:-$((5600 + RANDOM % 300))}"
 export PGPORT="$PORT"
 export PGHOST="$PGDATA_ROOT"
 
-PRELOAD_ALL='gp_core,interconnect,gp_orca,gp_ao,pax'
+PRELOAD_ALL='gp_core,interconnect,gp_orca,gp_ao,pax,gp_matview'
 EXTENSIONS='gp_core gp_orca gp_ao pax gp_exttable gp_resource gp_security gp_task gp_matview gp_sql'
 
 pass=0; fail=0
@@ -84,13 +84,19 @@ fi
 echo "1. the preload-only modules refuse to load any other way"
 ###############################################################################
 if start_with ''; then
-	for m in gp_core interconnect gp_orca gp_ao pax; do
+	for m in gp_core interconnect gp_orca gp_ao pax gp_matview; do
 		out=$(q "LOAD '$m';")
 		case "$out" in
 			*"can only be loaded through \"shared_preload_libraries\""*)
-				ok "LOAD '$m' is refused, and says why" ;;
+				ok "LOAD '$m' is refused by its own check" ;;
 			*"requires \"gp_core\" to be loaded first"*)
 				ok "LOAD '$m' is refused: it needs gp_core" ;;
+			*"undefined symbol"*)
+				# A module that uses gp_core's code is refused earlier still,
+				# by the loader, because PostgreSQL resolves those symbols at
+				# load time -- so _PG_init never runs to give a nicer message.
+				# Still a refusal, and the reason is in the message.
+				ok "LOAD '$m' is refused by the loader: gp_core is not there" ;;
 			*) notok "LOAD '$m' should have been refused" "$out" ;;
 		esac
 	done
@@ -118,7 +124,7 @@ if start_with "$PRELOAD_ALL"; then
 	ok "server starts with $PRELOAD_ALL"
 
 	loaded=$(q "SELECT string_agg(module_name, ',' ORDER BY module_name) FROM pg_get_loaded_modules();")
-	for m in gp_core interconnect gp_orca gp_ao pax; do
+	for m in gp_core interconnect gp_orca gp_ao pax gp_matview; do
 		case ",$loaded," in
 			*",$m,"*) ok "$m is loaded" ;;
 			*)        notok "$m is not in pg_get_loaded_modules()" "$loaded" ;;

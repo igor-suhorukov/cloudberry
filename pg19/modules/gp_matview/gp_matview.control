@@ -24,5 +24,6 @@ comment = 'Incremental materialized views, dynamic tables and AQUMV bookkeeping'
 default_version = '1.0'
 module_pathname = '$libdir/gp_matview'
 relocatable = false
+schema = gp_matview
 requires = 'gp_core'
 superuser = true
