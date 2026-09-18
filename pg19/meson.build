@@ -212,8 +212,19 @@ modules = [
     'sources': files('modules/gp_security/gp_security.c'),
   },
   {
-    'name': 'gp_task', 'preload': false, 'extension': true, 'build': true,
-    'sources': files('modules/gp_task/gp_task.c'),
+    # Preloaded: a background worker can only be registered while libraries
+    # are being preloaded, so a scheduler that arrived through CREATE
+    # EXTENSION would have nothing running its jobs.
+    'name': 'gp_task', 'preload': true, 'extension': true, 'build': true,
+    'sources': files('modules/gp_task/gp_task.c',
+                     'modules/gp_task/task_jobs.c',
+                     'modules/gp_task/task_worker.c',
+                     'modules/gp_task/task_vixie.c',
+                     # Cloudberry's cron expression parser, compiled where it
+                     # lies: Paul Vixie's cron, under its own licence, reached
+                     # through the include overlay in compat/task/.
+                     '../src/backend/task/entry.c',
+                     '../src/backend/task/misc.c'),
   },
   {
     'name': 'gp_matview', 'preload': true, 'extension': true, 'build': true,

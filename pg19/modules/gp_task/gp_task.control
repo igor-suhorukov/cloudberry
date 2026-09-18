@@ -26,3 +26,4 @@ module_pathname = '$libdir/gp_task'
 relocatable = false
 requires = 'gp_core'
 superuser = true
+schema = gp_task
