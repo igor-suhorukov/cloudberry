@@ -66,6 +66,13 @@ isl() {
 	[ "$got" = "$3" ] && ok "$1" || notok "$1" "want [$3], got [$got]"
 }
 
+# same <label> <what the view says> <the same thing computed fresh>
+#		A view is right when it holds neither more nor less than its own
+#		query would answer now.
+same() {
+	is "$1" "SELECT count(*) FROM (($2 EXCEPT ALL $3) UNION ALL ($3 EXCEPT ALL $2)) d;" "0"
+}
+
 # refused <label> <sql> <text the error must contain>
 refused() {
 	local got; got=$(q "$2")
@@ -189,43 +196,196 @@ isl "TRUNCATE has no transition tables, so it recomputes instead" \
 q "INSERT INTO base VALUES (1,1,7);" > /dev/null
 
 ###############################################################################
-echo "3c. what the delta cannot do yet is recomputed, and still correct"
+echo "3c. a view over two tables is maintained by delta"
 ###############################################################################
-q "CREATE TABLE other (grp int, tag text);
-   INSERT INTO other VALUES (1,'a'),(2,'b');
+# On tables of their own, so that the counters below count only these views.
+# This is what the pre-update state is for: one table's delta has to be joined
+# against the other as it was before the statement, and the statement has
+# already changed it by the time the trigger runs.
+JOIN_FRESH="SELECT l.grp, r.tag FROM j1 l, j2 r WHERE l.grp = r.grp"
+q "CREATE TABLE j1 (id int, grp int, amt numeric);
+   CREATE TABLE j2 (grp int, tag text);
+   INSERT INTO j1 VALUES (1,1,10),(2,2,20);
+   INSERT INTO j2 VALUES (1,'a'),(2,'b');
    CREATE MATERIALIZED VIEW mv_join WITH (gp.incremental) AS
-     SELECT b.grp, o.tag FROM base b, other o WHERE b.grp = o.grp;" > /dev/null
-isl "a view over two tables is recomputed, not delta'd" \
-    "SELECT gp_matview.stats_reset();
-     INSERT INTO base VALUES (20,2,3);
-     SELECT gp_matview.recomputed() > 0;" "t"
-is "and it is still correct" \
-   "SELECT count(*) FROM (
-      (SELECT grp, tag FROM mv_join
-       EXCEPT ALL
-       SELECT b.grp, o.tag FROM base b, other o WHERE b.grp = o.grp)
-      UNION ALL
-      (SELECT b.grp, o.tag FROM base b, other o WHERE b.grp = o.grp
-       EXCEPT ALL
-       SELECT grp, tag FROM mv_join)) d;" "0"
+     SELECT l.grp, r.tag FROM j1 l, j2 r WHERE l.grp = r.grp;" > /dev/null
+same "it starts out saying what the join says" "SELECT grp, tag FROM mv_join" "$JOIN_FRESH"
 
-q "CREATE MATERIALIZED VIEW mv_avg WITH (gp.incremental) AS
-     SELECT grp, avg(amt) AS a FROM base GROUP BY grp;" > /dev/null
-# avg() needs more than a count beside it, so such a view is recomputed.
-isl "a view with avg() is recomputed, not delta'd" \
+isl "changing one side is a delta, not a recomputation" \
     "SELECT gp_matview.stats_reset();
-     INSERT INTO base VALUES (21,1,4);
-     SELECT gp_matview.recomputed() > 0;" "t"
-is "and it is still correct" \
-   "SELECT count(*) FROM (
-      (SELECT grp, a FROM mv_avg
-       EXCEPT ALL
-       SELECT grp, avg(amt) FROM base GROUP BY grp)
-      UNION ALL
-      (SELECT grp, avg(amt) FROM base GROUP BY grp
-       EXCEPT ALL
-       SELECT grp, a FROM mv_avg)) d;" "0"
-q "DROP MATERIALIZED VIEW mv_avg; DROP MATERIALIZED VIEW mv_join; DROP TABLE other;" > /dev/null
+     INSERT INTO j1 VALUES (3,2,3);
+     SELECT gp_matview.applied_delta() || '/' || gp_matview.recomputed();" "1/0"
+same "and the view still says what the join says" "SELECT grp, tag FROM mv_join" "$JOIN_FRESH"
+
+isl "so is changing the other side" \
+    "SELECT gp_matview.stats_reset();
+     INSERT INTO j2 VALUES (2,'b2');
+     SELECT gp_matview.applied_delta() || '/' || gp_matview.recomputed();" "1/0"
+same "and it still does" "SELECT grp, tag FROM mv_join" "$JOIN_FRESH"
+
+# Both tables in one statement: the case the pre-update state exists for.  The
+# view is maintained once, from one delta per table, and the rows the two
+# additions make with each other must be counted once rather than twice.
+isl "a statement that changes both sides at once maintains the view once" \
+    "SELECT gp_matview.stats_reset();
+     WITH ins AS (INSERT INTO j1 VALUES (4,7,9) RETURNING grp)
+       INSERT INTO j2 SELECT 7, 'c' FROM ins;
+     SELECT gp_matview.applied_delta() || '/' || gp_matview.recomputed();" "1/0"
+same "and the row they make together appears exactly once" \
+     "SELECT grp, tag FROM mv_join" "$JOIN_FRESH"
+
+isl "the same when both sides lose rows at once" \
+    "SELECT gp_matview.stats_reset();
+     WITH del AS (DELETE FROM j2 WHERE tag = 'c' RETURNING grp)
+       DELETE FROM j1 WHERE id = 4;
+     SELECT gp_matview.applied_delta() || '/' || gp_matview.recomputed();" "1/0"
+same "and nothing of them is left behind" "SELECT grp, tag FROM mv_join" "$JOIN_FRESH"
+
+isl "an UPDATE on one side, which is a delta both ways at once" \
+    "SELECT gp_matview.stats_reset();
+     UPDATE j2 SET grp = 1 WHERE tag = 'b2';
+     SELECT gp_matview.applied_delta() || '/' || gp_matview.recomputed();" "1/0"
+same "moves the rows it should and no others" "SELECT grp, tag FROM mv_join" "$JOIN_FRESH"
+
+# A row trigger on one base table that writes another one.  The second table's
+# AFTER trigger fires inside a nested query, which ends -- and frees what it
+# left behind -- before the outer statement's own trigger runs.  So the view is
+# maintained from something the module took out of that query rather than from
+# the query's own transition table.
+K_FRESH="SELECT a.grp, b.tag FROM k1 a, k2 b WHERE a.grp = b.grp"
+q "CREATE TABLE k1 (id int, grp int);
+   CREATE TABLE k2 (grp int, tag text);
+   INSERT INTO k1 VALUES (1,1);
+   INSERT INTO k2 VALUES (1,'x');
+   CREATE FUNCTION mirror() RETURNS trigger LANGUAGE plpgsql AS \$\$
+     BEGIN INSERT INTO k2 VALUES (NEW.grp, 'auto'); RETURN NEW; END \$\$;
+   CREATE TRIGGER mirror AFTER INSERT ON k1
+     FOR EACH ROW EXECUTE FUNCTION mirror();
+   CREATE MATERIALIZED VIEW mv_k WITH (gp.incremental) AS
+     SELECT a.grp, b.tag FROM k1 a, k2 b WHERE a.grp = b.grp;" > /dev/null
+isl "a base table written from a row trigger is still a delta" \
+    "SELECT gp_matview.stats_reset();
+     INSERT INTO k1 VALUES (2,1);
+     SELECT gp_matview.applied_delta() || '/' || gp_matview.recomputed();" "1/0"
+same "and the rows both changes make are all there, once each" \
+     "SELECT grp, tag FROM mv_k" "$K_FRESH"
+q "DROP MATERIALIZED VIEW mv_k; DROP TABLE k1; DROP TABLE k2; DROP FUNCTION mirror();" > /dev/null
+
+# A table joined to itself is two places in one query, and each gets its own
+# delta against the state the other has not reached yet.
+SELF_FRESH="SELECT a.id AS x, b.id AS y FROM j1 a, j1 b WHERE a.grp = b.grp"
+q "CREATE MATERIALIZED VIEW mv_self WITH (gp.incremental) AS
+     SELECT a.id AS x, b.id AS y FROM j1 a, j1 b WHERE a.grp = b.grp;
+   DROP MATERIALIZED VIEW mv_join;" > /dev/null
+isl "a self-join is maintained by delta" \
+    "SELECT gp_matview.stats_reset();
+     INSERT INTO j1 VALUES (5,1,2);
+     SELECT gp_matview.applied_delta() || '/' || gp_matview.recomputed();" "1/0"
+same "and the pair the new row makes with itself appears once" \
+     "SELECT x, y FROM mv_self" "$SELF_FRESH"
+q "DELETE FROM j1 WHERE id = 5;" > /dev/null
+same "and goes again when the row does" "SELECT x, y FROM mv_self" "$SELF_FRESH"
+q "DROP MATERIALIZED VIEW mv_self;" > /dev/null
+
+# Counts and sums over a join: the delta has to carry those across too.
+JA_FRESH="SELECT r.tag, count(*), sum(l.amt) FROM j1 l, j2 r WHERE l.grp = r.grp GROUP BY r.tag"
+q "CREATE MATERIALIZED VIEW mv_ja WITH (gp.incremental) AS
+     SELECT r.tag, count(*) AS n, sum(l.amt) AS total
+       FROM j1 l, j2 r WHERE l.grp = r.grp GROUP BY r.tag;" > /dev/null
+isl "an aggregate over a join is a delta as well" \
+    "SELECT gp_matview.stats_reset();
+     INSERT INTO j1 VALUES (6,1,100);
+     SELECT gp_matview.applied_delta() || '/' || gp_matview.recomputed();" "1/0"
+same "and its counts and sums are right" "SELECT tag, n, total FROM mv_ja" "$JA_FRESH"
+q "DELETE FROM j1 WHERE id = 6;" > /dev/null
+same "still right after a delete" "SELECT tag, n, total FROM mv_ja" "$JA_FRESH"
+q "DROP MATERIALIZED VIEW mv_ja;" > /dev/null
+
+###############################################################################
+echo "3f. avg() is maintained, from the sum and count beside it"
+###############################################################################
+AVG_FRESH="SELECT grp, avg(amt) FROM av GROUP BY grp"
+q "CREATE TABLE av (id int, grp int, amt numeric);
+   INSERT INTO av VALUES (1,1,10),(2,1,20),(3,2,30);
+   CREATE MATERIALIZED VIEW mv_avg WITH (gp.incremental) AS
+     SELECT grp, avg(amt) AS a FROM av GROUP BY grp;" > /dev/null
+is "it is stored with a sum and a count of its own" \
+   "SELECT count(*) FROM pg_attribute WHERE attrelid = 'mv_avg'::regclass
+      AND attname IN ('__ivm_sum_a__', '__ivm_count_a__');" "2"
+same "and it starts out right" "SELECT grp, a FROM mv_avg" "$AVG_FRESH"
+isl "a change to its base table is a delta" \
+    "SELECT gp_matview.stats_reset();
+     INSERT INTO av VALUES (4,1,4);
+     SELECT gp_matview.applied_delta() || '/' || gp_matview.recomputed();" "1/0"
+same "and the average is right" "SELECT grp, a FROM mv_avg" "$AVG_FRESH"
+q "DELETE FROM av WHERE id = 4;" > /dev/null
+same "and right again when the row goes" "SELECT grp, a FROM mv_avg" "$AVG_FRESH"
+q "UPDATE av SET amt = 40 WHERE id = 1;" > /dev/null
+same "and after an UPDATE" "SELECT grp, a FROM mv_avg" "$AVG_FRESH"
+q "INSERT INTO av VALUES (5,9,NULL),(6,9,10),(7,9,20);" > /dev/null
+same "a NULL input is left out, as avg() leaves it out" "SELECT grp, a FROM mv_avg" "$AVG_FRESH"
+q "DELETE FROM av WHERE id IN (6,7);" > /dev/null
+is "and with only the NULL left the average is NULL, not zero" \
+   "SELECT a IS NULL FROM mv_avg WHERE grp = 9;" "t"
+q "DELETE FROM av WHERE grp = 9;" > /dev/null
+is "a group whose rows all go leaves no row behind" \
+   "SELECT count(*) FROM mv_avg WHERE grp = 9;" "0"
+q "DROP MATERIALIZED VIEW mv_avg; DROP TABLE av;" > /dev/null
+
+###############################################################################
+echo "3g. what the delta still cannot express is recomputed, and still correct"
+###############################################################################
+# Each of these leaves the view correct.  What it does not have is the cost of
+# an incremental view, which is why it is the counters that are asserted.
+OUTER_FRESH="SELECT l.grp, r.tag FROM j1 l LEFT JOIN j2 r ON l.grp = r.grp"
+q "CREATE MATERIALIZED VIEW mv_outer WITH (gp.incremental) AS
+     SELECT l.grp, r.tag FROM j1 l LEFT JOIN j2 r ON l.grp = r.grp;" > /dev/null
+# An outer join's delta is not this arithmetic: losing the last matching row
+# turns the inner columns null instead of removing a view row.
+isl "an outer join is recomputed" \
+    "SELECT gp_matview.stats_reset();
+     INSERT INTO j1 VALUES (7,2,1);
+     SELECT gp_matview.applied_delta() || '/' || gp_matview.recomputed();" "0/1"
+same "and it is still correct" "SELECT grp, tag FROM mv_outer" "$OUTER_FRESH"
+q "DELETE FROM j2 WHERE grp = 2;" > /dev/null
+same "including when a row loses its last match" "SELECT grp, tag FROM mv_outer" "$OUTER_FRESH"
+q "DROP MATERIALIZED VIEW mv_outer;" > /dev/null
+
+MM_FRESH="SELECT grp, min(amt), max(amt) FROM j1 GROUP BY grp"
+q "CREATE MATERIALIZED VIEW mv_mm WITH (gp.incremental) AS
+     SELECT grp, min(amt) AS lo, max(amt) AS hi FROM j1 GROUP BY grp;" > /dev/null
+# When the row holding the extreme goes, the new extreme is somewhere in the
+# group and only the base table knows where.  Cloudberry refuses such a view
+# outright; here it is made, and recomputed.
+isl "min() and max() are recomputed" \
+    "SELECT gp_matview.stats_reset();
+     INSERT INTO j1 VALUES (8,1,1000);
+     SELECT gp_matview.applied_delta() || '/' || gp_matview.recomputed();" "0/1"
+same "and they are still correct" "SELECT grp, lo, hi FROM mv_mm" "$MM_FRESH"
+q "DELETE FROM j1 WHERE id = 8;" > /dev/null
+same "including after the row holding the largest value goes" \
+     "SELECT grp, lo, hi FROM mv_mm" "$MM_FRESH"
+q "DROP MATERIALIZED VIEW mv_mm; DROP TABLE j1; DROP TABLE j2;" > /dev/null
+
+# A dropped column keeps its place in the table but loses its type, so a
+# subquery standing in for the table cannot reproduce the column numbering the
+# view was built against.  Reading the column next door would be worse than
+# being slow, so such a view is recomputed.
+q "CREATE TABLE holes (a int, junk int, b int);
+   INSERT INTO holes VALUES (1,1,10),(2,2,20);
+   CREATE MATERIALIZED VIEW mv_holes WITH (gp.incremental) AS
+     SELECT a, b FROM holes;
+   ALTER TABLE holes DROP COLUMN junk;" > /dev/null
+is "a column no view reads can still be dropped" \
+   "SELECT count(*) FROM pg_attribute
+      WHERE attrelid = 'holes'::regclass AND attname = 'junk';" "0"
+isl "and the view over that table is recomputed from then on" \
+    "SELECT gp_matview.stats_reset();
+     INSERT INTO holes VALUES (3,30);
+     SELECT gp_matview.applied_delta() || '/' || gp_matview.recomputed();" "0/1"
+same "reading the columns it was built against, not the ones beside them" \
+     "SELECT a, b FROM mv_holes" "SELECT a, b FROM holes"
+q "DROP MATERIALIZED VIEW mv_holes; DROP TABLE holes;" > /dev/null
 
 ###############################################################################
 echo "3e. sum() is maintained, including when a group empties"

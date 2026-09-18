@@ -29,12 +29,13 @@
  * when a transaction aborts: a depth left raised would leave DML on
  * materialized views permitted for the rest of the session.
  *
- * What is applied here is a whole recomputation, not yet a delta.  The view
- * is correct after every statement, which is what an incrementally maintained
- * view promises; what it does not yet have is the cost of one.  Cloudberry's
- * delta algebra -- rewrite_query_for_preupdate_state and the apply_*_delta
- * family, about 2,000 lines -- replaces the body of gp_ivm_apply below, and
- * the tests around it do not change when it does.
+ * What is applied is a delta wherever ivm_delta.c can express one, and a
+ * whole recomputation otherwise -- an outer join, an aggregate it does not
+ * know how to carry, a TRUNCATE, which leaves no transition tables to work
+ * from.  Both leave the view correct after every statement, which is what an
+ * incrementally maintained view promises; only the first has the cost of one.
+ * The counters below are how a test tells which happened, since the contents
+ * of a view do not say.
  *
  *-------------------------------------------------------------------------
  */
@@ -59,13 +60,6 @@
 
 PG_FUNCTION_INFO_V1(gp_ivm_immediate_before);
 PG_FUNCTION_INFO_V1(gp_ivm_immediate_maintenance);
-
-/*
- * The views this statement has already brought up to date, so that a
- * statement touching a table twice, or two tables of one view, maintains it
- * once.  Reset when the statement's maintenance finishes.
- */
-static List *maintained_this_statement = NIL;
 
 /*
  * How the views have been kept up to date since the counters were reset: by a
@@ -169,9 +163,11 @@ matview_from_trigger_args(TriggerData *trigdata, const char *caller)
 }
 
 /*
- * BEFORE: nothing to do yet, but the trigger exists so that the shape matches
- * Cloudberry's, where this is where the pre-update state is captured.  It also
- * forces the base table to be locked before the statement runs.
+ * BEFORE: take the snapshot that says what the base tables held before this
+ * statement, and start counting the triggers it fires for this view.  A delta
+ * over more than one table is taken against that snapshot; ivm_state.c says
+ * why.  The trigger also forces the base table to be locked before the
+ * statement runs.
  */
 Datum
 gp_ivm_immediate_before(PG_FUNCTION_ARGS)
@@ -181,34 +177,46 @@ gp_ivm_immediate_before(PG_FUNCTION_ARGS)
 	if (!CALLED_AS_TRIGGER(fcinfo))
 		elog(ERROR, "gp_ivm_immediate_before is a trigger function");
 
-	(void) matview_from_trigger_args(trigdata, "gp_ivm_immediate_before");
+	GpIvmEntryBefore(matview_from_trigger_args(trigdata,
+											   "gp_ivm_immediate_before"));
 
 	return PointerGetDatum(NULL);
 }
 
 /*
- * AFTER: bring the view up to date.
+ * AFTER: collect what this trigger changed, and once the statement has fired
+ * the last of them, bring the view up to date.
+ *
+ * Waiting for the last one is what lets a statement that writes two of a
+ * view's base tables -- which a data-modifying CTE does, and MERGE does by
+ * firing three triggers -- be accounted for once, as one delta per table.
  */
 Datum
 gp_ivm_immediate_maintenance(PG_FUNCTION_ARGS)
 {
 	TriggerData *trigdata = (TriggerData *) fcinfo->context;
 	Oid			matviewOid;
+	IvmEntry   *entry;
+	bool		is_last;
 	int			save_depth;
-	MemoryContext oldcxt;
 
 	if (!CALLED_AS_TRIGGER(fcinfo))
 		elog(ERROR, "gp_ivm_immediate_maintenance is a trigger function");
 
 	matviewOid = matview_from_trigger_args(trigdata, "gp_ivm_immediate_maintenance");
 
-	/* Once per statement per view, however many triggers fired. */
-	if (list_member_oid(maintained_this_statement, matviewOid))
+	entry = GpIvmEntryAfter(matviewOid, trigdata, &is_last);
+	if (!is_last)
 		return PointerGetDatum(NULL);
 
-	oldcxt = MemoryContextSwitchTo(TopTransactionContext);
-	maintained_this_statement = lappend_oid(maintained_this_statement, matviewOid);
-	MemoryContextSwitchTo(oldcxt);
+	/*
+	 * What follows reads the base tables as the statement left them -- a
+	 * table whose delta has been taken is read again for the next one -- so
+	 * the statement's own writes have to be visible first.
+	 */
+	CommandCounterIncrement();
+	PushCopiedSnapshot(GetActiveSnapshot());
+	UpdateActiveSnapshotCommandId();
 
 	/*
 	 * Writing to a materialized view needs maintenance mode.  Remember the
@@ -227,8 +235,7 @@ gp_ivm_immediate_maintenance(PG_FUNCTION_ARGS)
 		 * otherwise -- both leave the view correct, and only the first is
 		 * incremental.
 		 */
-		if (GpIvmApplyDelta(matviewOid, RelationGetRelid(trigdata->tg_relation),
-							trigdata))
+		if (GpIvmApplyDelta(entry))
 			maintained_by_delta++;
 		else
 		{
@@ -241,14 +248,12 @@ gp_ivm_immediate_maintenance(PG_FUNCTION_ARGS)
 	PG_CATCH();
 	{
 		RestoreMatViewIncrementalMaintenanceDepthExternal(save_depth);
-		maintained_this_statement = list_delete_oid(maintained_this_statement,
-												   matviewOid);
 		PG_RE_THROW();
 	}
 	PG_END_TRY();
 
-	maintained_this_statement = list_delete_oid(maintained_this_statement,
-											   matviewOid);
+	PopActiveSnapshot();
+	GpIvmEntryForget(entry);
 
 	return PointerGetDatum(NULL);
 }

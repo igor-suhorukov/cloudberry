@@ -197,13 +197,36 @@ GpIvmCheckQuery(Query *query)
 /* ------------------------------------------------------------------------- */
 
 /*
- * What the count that goes with an aggregate column is called.  Cloudberry
- * spells it the same way, through IVM_colname("count", resname).
+ * What a column that goes with an aggregate column is called.  Cloudberry
+ * spells it the same way, through IVM_colname(kind, resname).
  */
 char *
-ivm_companion_name(const char *resname)
+ivm_companion_name(const char *kind, const char *resname)
 {
-	return makeObjectName(GP_IVM_PREFIX "count", resname, "_");
+	return makeObjectName(psprintf("%s%s", GP_IVM_PREFIX, kind), resname, "_");
+}
+
+/*
+ * A count() or sum() over the same argument as an aggregate already in the
+ * target list, named after it.
+ *
+ * Built through the parser, so that the transition type and everything else
+ * an Aggref carries are what they would be had the user written it.
+ */
+static TargetEntry *
+make_companion(ParseState *pstate, Aggref *aggref, char *kind,
+			   const char *resname, AttrNumber resno)
+{
+	FuncCall   *fn = makeFuncCall(SystemFuncName(kind), NIL,
+								  COERCE_EXPLICIT_CALL, -1);
+	Node	   *node;
+	List	   *args;
+
+	args = list_make1(copyObject(((TargetEntry *) linitial(aggref->args))->expr));
+	node = ParseFuncOrColumn(pstate, fn->funcname, args, NULL, fn, false, -1);
+
+	return makeTargetEntry((Expr *) node, resno,
+						   ivm_companion_name(kind, resname), false);
 }
 
 Query *
@@ -240,8 +263,9 @@ GpIvmRewriteQuery(Query *query, List *colNames)
 	 * sum() cannot be maintained on its own: when the last row of a group
 	 * goes, its sum is NULL rather than zero, and only a count of the
 	 * non-null inputs says which.  So each sum() gains a count() of the same
-	 * expression, named after it.  This is Cloudberry's makeIvmAggColumn,
-	 * for the aggregates the delta path handles.
+	 * expression, named after it.  avg() is that sum divided by that count,
+	 * so it gains both and is read off them.  This is Cloudberry's
+	 * makeIvmAggColumn, for the aggregates the delta path handles.
 	 */
 	if (rewritten->hasAggs)
 	{
@@ -254,33 +278,27 @@ GpIvmRewriteQuery(Query *query, List *colNames)
 			TargetEntry *tle = (TargetEntry *) lfirst(lc);
 			Aggref	   *aggref;
 			char	   *aggname;
-			FuncCall   *fn;
-			Node	   *counter;
 
 			if (tle->resjunk || !IsA(tle->expr, Aggref))
 				continue;
 			aggref = (Aggref *) tle->expr;
 			aggname = get_func_name(aggref->aggfnoid);
-			if (aggname == NULL || strcmp(aggname, "sum") != 0)
-				continue;
-			if (list_length(aggref->args) != 1)
+			if (aggname == NULL || list_length(aggref->args) != 1)
 				continue;
 
-			/*
-			 * count() over the same argument.  Built through the parser, so
-			 * that the transition type and everything else an Aggref carries
-			 * are what they would be had the user written it.
-			 */
-			fn = makeFuncCall(SystemFuncName("count"), NIL,
-							  COERCE_EXPLICIT_CALL, -1);
-			counter = ParseFuncOrColumn(pstate, fn->funcname,
-										list_make1(copyObject(((TargetEntry *) linitial(aggref->args))->expr)),
-										NULL, fn, false, -1);
-
-			extra = lappend(extra,
-							makeTargetEntry((Expr *) counter, next_resno++,
-											ivm_companion_name(tle->resname),
-											false));
+			if (strcmp(aggname, "sum") == 0)
+				extra = lappend(extra,
+								make_companion(pstate, aggref, "count",
+											   tle->resname, next_resno++));
+			else if (strcmp(aggname, "avg") == 0)
+			{
+				extra = lappend(extra,
+								make_companion(pstate, aggref, "sum",
+											   tle->resname, next_resno++));
+				extra = lappend(extra,
+								make_companion(pstate, aggref, "count",
+											   tle->resname, next_resno++));
+			}
 		}
 
 		rewritten->targetList = list_concat(rewritten->targetList, extra);

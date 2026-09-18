@@ -21,6 +21,20 @@ REVOKE ALL ON FUNCTION gp_matview.ivm_immediate_before() FROM PUBLIC;
 REVOKE ALL ON FUNCTION gp_matview.ivm_immediate_maintenance() FROM PUBLIC;
 
 /*
+ * Was this row of a base table there before the statement ran?  A view over
+ * more than one table is maintained by reading the tables the statement
+ * changed as they were before it, and this is what says which rows those
+ * were.  It is called from a subquery the module builds, in the statement's
+ * own session, and errors unless that session is maintaining the view it is
+ * asked about -- so it is left executable, because the maintenance runs as
+ * whoever wrote to the base table.
+ */
+CREATE FUNCTION gp_matview.visible_in_prestate(tableoid oid, ctid tid, matview oid)
+RETURNS boolean
+AS 'MODULE_PATHNAME', 'gp_ivm_visible_in_prestate'
+LANGUAGE C STRICT;
+
+/*
  * How views have been kept up to date since the counters were reset. The
  * contents of a view do not say whether a delta or a whole recomputation
  * produced them, and the tests need to know.

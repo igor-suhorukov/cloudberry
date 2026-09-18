@@ -18,16 +18,13 @@
  * under the License.
  *
  * ivm_delta.c
- *	  Applying a delta to an incrementally maintained materialized view.
- *
- * The view is kept up to date by computing what its contents would change by,
- * rather than by computing its contents again.
+ *	  Bringing a materialized view up to date by what changed, not by asking
+ *	  its query again.
  *
  * A statement that changes a base table leaves two transition tables behind:
- * the rows as they were and the rows as they are.  Running the view's own
- * query over each of those, instead of over the base table, gives the rows the
- * view loses and the rows it gains -- its old and new delta.  Applying them is
- * then arithmetic on the view:
+ * the rows it removed and the rows it added.  Running the view's own query
+ * over each of those, in place of the table, gives the rows the view loses
+ * and the rows it gains.  Applying them is then arithmetic on the view:
  *
  *	- a view with GROUP BY or DISTINCT carries __ivm_count__, how many base
  *	  rows each view row stands for.  The old delta subtracts from it, and the
@@ -36,19 +33,33 @@
  *	- a view without them carries no count, and a view row corresponds to one
  *	  base row, so the old delta deletes and the new delta inserts.
  *
+ * A view over more than one table needs one thing more.  Its delta is taken
+ * one table at a time, and each step has to see the other tables as they were
+ * *before* the statement -- otherwise a statement that changed two of them
+ * would count the interaction twice.  The tables a step has already handled
+ * are past that point and must be seen as they are now.  So every table this
+ * statement changed starts in its pre-update state, which prestate_subquery()
+ * below builds out of the table as it is now plus the rows the statement
+ * deleted, and moves to its real self once its own delta has been taken.
+ * ivm_state.c holds the snapshot that says which is which.
+ *
+ * The common case pays nothing for this.  The pre-update state of the table
+ * being handled is overwritten by its own transition table before the query
+ * runs, so with one table changed once -- which is what an ordinary INSERT,
+ * UPDATE or DELETE does -- no prestate subquery is ever executed.
+ *
  * This is Cloudberry's algebra, which is in turn the IVM patch's.  Two things
  * differ.  Cloudberry cannot use a data-modifying CTE, so it writes each
  * apply step through a temporary table keyed by ctid and gp_segment_id, and
  * says in a CBDB_IVM_FIXME that the CTE form should come back when
  * multiple-write CTEs are supported.  On PostgreSQL 19 they are, so the CTE
  * form is what is here.  And the transition tables reach SQL through
- * SPI_register_trigger_data rather than through tuplestores passed by hand.
+ * ephemeral named relations rather than through tuplestores passed by hand.
  *
- * What is not here yet is a view over more than one table.  Its delta needs
- * the other tables as they were before the statement, which is what
- * Cloudberry's rewrite_query_for_preupdate_state and ivm_visible_in_prestate
- * are for.  Until that is ported, such a view is recomputed whole, which is
- * correct but not incremental; GpIvmDeltaSupported says which is which.
+ * What is still recomputed whole rather than maintained is listed in
+ * delta_supported(): outer joins, aggregates other than count, sum and avg,
+ * TRUNCATE, and a base table that has had a column dropped.  Each of those
+ * leaves the view correct, just not incrementally.
  *
  *-------------------------------------------------------------------------
  */
@@ -81,8 +92,6 @@
 
 #include "gp_matview.h"
 
-#define IVM_OLD_TRANSITION	"__ivm_oldtable"
-#define IVM_NEW_TRANSITION	"__ivm_newtable"
 #define IVM_OLD_DELTA		"__ivm_delta_old"
 #define IVM_NEW_DELTA		"__ivm_delta_new"
 
@@ -114,35 +123,50 @@ GpIvmGetViewQuery(Relation matviewRel)
 }
 
 /*
- * Whether this view's delta can be computed: for now, one base table, which
- * is what a single-table view has.  Returns the range table index of that
- * table in *rti.
+ * Where each table this statement changed sits in the view's query.  A table
+ * joined to itself sits in more than one place, and each place gets its own
+ * delta.
  */
-bool
-GpIvmDeltaSupported(Query *viewQuery, Oid baseRelid, int *rti)
+static void
+locate_modified_tables(Query *viewQuery, IvmEntry *entry)
 {
-	int			found_rti = 0;
-	int			nrel = 0;
-	int			i = 0;
 	ListCell   *lc;
+	int			rti = 0;
 
 	foreach(lc, viewQuery->rtable)
 	{
 		RangeTblEntry *rte = (RangeTblEntry *) lfirst(lc);
+		IvmModifiedTable *table;
 
-		i++;
+		rti++;
 		if (rte->rtekind != RTE_RELATION)
 			continue;
-		nrel++;
-		if (rte->relid == baseRelid)
-			found_rti = i;
+
+		table = GpIvmFindTable(entry, rte->relid);
+		if (table != NULL)
+			table->rte_indexes = lappend_int(table->rte_indexes, rti);
+	}
+}
+
+/*
+ * Does this table have a column that has been dropped?
+ *
+ * A dropped column keeps its place in the relation's descriptor but loses its
+ * type, so a subquery standing in for the table cannot reproduce the
+ * numbering that the view's Vars were built against: the columns after the
+ * hole would shift by one.  Rather than read the wrong column, such a view is
+ * recomputed.
+ */
+static bool
+has_dropped_column(TupleDesc desc)
+{
+	for (int i = 0; i < desc->natts; i++)
+	{
+		if (TupleDescAttr(desc, i)->attisdropped)
+			return true;
 	}
 
-	if (nrel != 1 || found_rti == 0)
-		return false;
-
-	*rti = found_rti;
-	return true;
+	return false;
 }
 
 /* ------------------------------------------------------------------------- */
@@ -150,29 +174,24 @@ GpIvmDeltaSupported(Query *viewQuery, Oid baseRelid, int *rti)
 /* ------------------------------------------------------------------------- */
 
 /*
- * Point the view query at a transition table instead of its base table.
+ * Replace the range table entry at rti with a parsed subquery.
  *
- * The substitution is a parsed "SELECT * FROM <transition>", so the range
- * table entry that results is whatever PostgreSQL builds for a named
- * tuplestore -- there is nothing to construct by hand.
+ * The substitution is whatever PostgreSQL builds for the text, so there is no
+ * range table entry to construct by hand.
  */
 static void
-point_at_transition(Query *query, int rti, const char *enrname,
-					QueryEnvironment *queryEnv)
+point_at_subquery(Query *query, int rti, const char *sql,
+				  QueryEnvironment *queryEnv)
 {
 	RangeTblEntry *rte = (RangeTblEntry *) list_nth(query->rtable, rti - 1);
 	ParseState *pstate = make_parsestate(NULL);
-	StringInfoData buf;
 	RawStmt    *raw;
 	Query	   *sub;
 
 	pstate->p_queryEnv = queryEnv;
 	pstate->p_expr_kind = EXPR_KIND_SELECT_TARGET;
 
-	initStringInfo(&buf);
-	appendStringInfo(&buf, "SELECT * FROM %s", quote_identifier(enrname));
-
-	raw = (RawStmt *) linitial(raw_parser(buf.data, RAW_PARSE_DEFAULT));
+	raw = (RawStmt *) linitial(raw_parser(sql, RAW_PARSE_DEFAULT));
 	sub = transformStmt(pstate, raw->stmt);
 
 	rte->rtekind = RTE_SUBQUERY;
@@ -188,7 +207,61 @@ point_at_transition(Query *query, int rti, const char *enrname,
 	rte->inh = false;
 
 	free_parsestate(pstate);
-	pfree(buf.data);
+}
+
+/*
+ * "SELECT * FROM <t1> UNION ALL SELECT * FROM <t2> ..." over a table's
+ * transition tables.  There is more than one when a single statement wrote
+ * the same table twice, which a data-modifying CTE does.
+ */
+static char *
+transitions_subquery(List *transitions)
+{
+	StringInfoData buf;
+	ListCell   *lc;
+
+	initStringInfo(&buf);
+	foreach(lc, transitions)
+	{
+		IvmTransition *tr = (IvmTransition *) lfirst(lc);
+
+		if (buf.len > 0)
+			appendStringInfoString(&buf, " UNION ALL ");
+		appendStringInfo(&buf, "SELECT * FROM %s", quote_identifier(tr->name));
+	}
+
+	return buf.data;
+}
+
+/*
+ * The table as the statement found it: what is there now and was already
+ * there, plus what the statement deleted, which no scan can reach any more.
+ */
+static char *
+prestate_subquery(Oid matviewOid, IvmModifiedTable *table)
+{
+	StringInfoData buf;
+	char	   *relname;
+	ListCell   *lc;
+
+	relname = quote_qualified_identifier(get_namespace_name(get_rel_namespace(table->relid)),
+										 get_rel_name(table->relid));
+
+	initStringInfo(&buf);
+	appendStringInfo(&buf,
+					 "SELECT t.* FROM %s t"
+					 " WHERE gp_matview.visible_in_prestate(t.tableoid, t.ctid, %u::pg_catalog.oid)",
+					 relname, matviewOid);
+
+	foreach(lc, table->old_stores)
+	{
+		IvmTransition *tr = (IvmTransition *) lfirst(lc);
+
+		appendStringInfo(&buf, " UNION ALL SELECT * FROM %s",
+						 quote_identifier(tr->name));
+	}
+
+	return buf.data;
 }
 
 /*
@@ -227,50 +300,54 @@ run_into_tuplestore(Query *query, QueryEnvironment *queryEnv,
 }
 
 /*
- * Make one transition table visible to the delta queries, under the name its
- * trigger gave it.  This is what SPI_register_trigger_data does for SPI.
+ * Make one transition table visible to the delta queries, under the name this
+ * statement's bookkeeping gave it.
  */
 static void
-register_transition(QueryEnvironment *queryEnv, TriggerData *trigdata,
-					Tuplestorestate *ts, const char *name)
+register_transition(QueryEnvironment *queryEnv, IvmModifiedTable *table,
+					IvmTransition *tr)
 {
 	EphemeralNamedRelation enr;
 
-	if (ts == NULL || name == NULL)
-		return;
-
 	enr = palloc0(sizeof(EphemeralNamedRelationData));
-	enr->md.name = pstrdup(name);
-	enr->md.reliddesc = RelationGetRelid(trigdata->tg_relation);
+	enr->md.name = tr->name;
+	enr->md.reliddesc = table->relid;
 	enr->md.tupdesc = NULL;
 	enr->md.enrtype = ENR_NAMED_TUPLESTORE;
-	enr->md.enrtuples = tuplestore_tuple_count(ts);
-	enr->reldata = ts;
+	enr->md.enrtuples = tuplestore_tuple_count(tr->store);
+	enr->reldata = tr->store;
 
 	register_ENR(queryEnv, enr);
 }
 
 /*
  * Compute one delta and hand it to SPI under a name the apply statements use.
- * Returns false when the transition table was empty, so there is nothing to
- * apply.
+ * Returns false when nothing came out, so there is nothing to apply.
  */
 static bool
-make_delta(Relation matviewRel, Query *viewQuery, int rti,
-		   const char *transition, const char *deltaname,
-		   QueryEnvironment *queryEnv)
+make_delta(Relation matviewRel, Query *working, int rti, List *transitions,
+		   const char *deltaname, QueryEnvironment *queryEnv,
+		   Tuplestorestate **ts_out)
 {
 	Query	   *delta_query;
 	Tuplestorestate *ts;
 	TupleDesc	tupdesc;
 	double		ntuples;
 	EphemeralNamedRelation enr;
+	char	   *sql;
 
-	if (get_visible_ENR_metadata(queryEnv, transition) == NULL)
+	*ts_out = NULL;
+	if (transitions == NIL)
 		return false;
 
-	delta_query = copyObject(viewQuery);
-	point_at_transition(delta_query, rti, transition, queryEnv);
+	/*
+	 * The working query keeps the range table's state from step to step, so
+	 * what is planned is a copy of it: planning scribbles on its input.
+	 */
+	sql = transitions_subquery(transitions);
+	delta_query = copyObject(working);
+	point_at_subquery(delta_query, rti, sql, queryEnv);
+	pfree(sql);
 
 	ts = run_into_tuplestore(delta_query, queryEnv, &tupdesc, &ntuples);
 
@@ -292,12 +369,34 @@ make_delta(Relation matviewRel, Query *viewQuery, int rti,
 		elog(ERROR, "could not register the %s delta of \"%s\"",
 			 deltaname, RelationGetRelationName(matviewRel));
 
+	*ts_out = ts;
 	return true;
+}
+
+static void
+drop_delta(const char *deltaname, Tuplestorestate *ts)
+{
+	if (ts == NULL)
+		return;
+
+	SPI_unregister_relation(deltaname);
+	tuplestore_end(ts);
 }
 
 /* ------------------------------------------------------------------------- */
 /* Applying a delta                                                          */
 /* ------------------------------------------------------------------------- */
+
+/*
+ * An avg() column and the two columns that make it maintainable: the sum of
+ * its inputs and how many of them were not null.
+ */
+typedef struct ViewAvg
+{
+	Form_pg_attribute col;
+	Form_pg_attribute sum;
+	Form_pg_attribute count;
+} ViewAvg;
 
 /*
  * What a view's columns are for.
@@ -314,9 +413,29 @@ typedef struct ViewShape
 	List	   *counts;			/* Form_pg_attribute: count() columns */
 	List	   *sums;			/* Form_pg_attribute: sum() columns */
 	List	   *companions;		/* the count that goes with each sum */
+	List	   *avgs;			/* ViewAvg *: avg() columns */
 	Form_pg_attribute count_col;	/* __ivm_count__, or NULL */
 	bool		supported;		/* can this view's delta be applied? */
 } ViewShape;
+
+/*
+ * The column a rewritten view query put beside an aggregate, by name.
+ */
+static Form_pg_attribute
+find_companion(TupleDesc desc, const char *kind, const char *resname)
+{
+	char	   *want = ivm_companion_name(kind, resname);
+
+	for (int i = 0; i < desc->natts; i++)
+	{
+		Form_pg_attribute att = TupleDescAttr(desc, i);
+
+		if (!att->attisdropped && strcmp(NameStr(att->attname), want) == 0)
+			return att;
+	}
+
+	return NULL;
+}
 
 static void
 describe_view(Relation matviewRel, Query *viewQuery, ViewShape *shape)
@@ -328,6 +447,7 @@ describe_view(Relation matviewRel, Query *viewQuery, ViewShape *shape)
 	shape->counts = NIL;
 	shape->sums = NIL;
 	shape->companions = NIL;
+	shape->avgs = NIL;
 	shape->count_col = NULL;
 	shape->supported = true;
 
@@ -348,7 +468,7 @@ describe_view(Relation matviewRel, Query *viewQuery, ViewShape *shape)
 			continue;
 		}
 
-		/* A companion count travels with its sum, not on its own. */
+		/* A companion column travels with its aggregate, not on its own. */
 		if (IsIvmColumn(NameStr(att->attname)))
 			continue;
 
@@ -360,8 +480,12 @@ describe_view(Relation matviewRel, Query *viewQuery, ViewShape *shape)
 			 * count() is maintainable on its own.  sum() is too, given the
 			 * count of its non-null inputs that the rewrite added beside it:
 			 * without that, an empty group could not be told from one that
-			 * sums to nothing.  min(), max() and avg() need more than that,
-			 * so a view using them is recomputed rather than maintained.
+			 * sums to nothing.  avg() is that sum and that count divided.
+			 *
+			 * min() and max() are not: when the row holding the extreme goes,
+			 * the new extreme is somewhere in the group and only the base
+			 * table knows where.  Cloudberry refuses such a view outright;
+			 * here it is made, and recomputed whole on every change.
 			 */
 			if (aggname == NULL)
 				shape->supported = false;
@@ -369,6 +493,18 @@ describe_view(Relation matviewRel, Query *viewQuery, ViewShape *shape)
 				shape->counts = lappend(shape->counts, att);
 			else if (strcmp(aggname, "sum") == 0)
 				shape->sums = lappend(shape->sums, att);
+			else if (strcmp(aggname, "avg") == 0)
+			{
+				ViewAvg    *avg = palloc0(sizeof(ViewAvg));
+
+				avg->col = att;
+				avg->sum = find_companion(desc, "sum", NameStr(att->attname));
+				avg->count = find_companion(desc, "count", NameStr(att->attname));
+				if (avg->sum == NULL || avg->count == NULL)
+					shape->supported = false;
+				else
+					shape->avgs = lappend(shape->avgs, avg);
+			}
 			else
 				shape->supported = false;
 			continue;
@@ -384,19 +520,8 @@ describe_view(Relation matviewRel, Query *viewQuery, ViewShape *shape)
 	foreach(lc, shape->sums)
 	{
 		Form_pg_attribute sum = (Form_pg_attribute) lfirst(lc);
-		char	   *want = ivm_companion_name(NameStr(sum->attname));
-		Form_pg_attribute found = NULL;
-
-		for (int i = 0; i < desc->natts; i++)
-		{
-			Form_pg_attribute att = TupleDescAttr(desc, i);
-
-			if (!att->attisdropped && strcmp(NameStr(att->attname), want) == 0)
-			{
-				found = att;
-				break;
-			}
-		}
+		Form_pg_attribute found = find_companion(desc, "count",
+												 NameStr(sum->attname));
 
 		if (found == NULL)
 		{
@@ -407,7 +532,8 @@ describe_view(Relation matviewRel, Query *viewQuery, ViewShape *shape)
 	}
 
 	/* Without a count column, a view row stands for exactly one base row. */
-	if (shape->count_col == NULL && shape->counts == NIL && shape->sums == NIL)
+	if (shape->count_col == NULL && shape->counts == NIL &&
+		shape->sums == NIL && shape->avgs == NIL)
 	{
 		shape->keys = NIL;
 		for (int i = 0; i < desc->natts; i++)
@@ -469,57 +595,89 @@ column_list(List *cols, const char *prefix)
 	return buf.data;
 }
 
+/* What a count column becomes: the view's, plus or minus the delta's. */
+static char *
+new_count_expr(const char *op, const char *src, const char *cnt)
+{
+	return psprintf("(mv.%s OPERATOR(pg_catalog.%s) %s.%s)", cnt, op, src, cnt);
+}
+
 /*
- * The SET clauses that carry the count columns across, "+" for a new delta
- * and "-" for an old one.  <src> is where the delta row is called.
+ * What a sum column becomes.
+ *
+ * A sum is NULL when it has no non-null inputs left, which is what its
+ * companion count says.  Otherwise a NULL on either side means that side
+ * contributed nothing.
  */
 static char *
-count_set_clauses(ViewShape *shape, const char *op, const char *src)
+new_sum_expr(const char *op, const char *src, const char *sum, const char *cnt)
+{
+	return psprintf("(CASE WHEN %s OPERATOR(pg_catalog.=) 0 THEN NULL"
+					" WHEN mv.%s IS NULL THEN %s.%s"
+					" WHEN %s.%s IS NULL THEN mv.%s"
+					" ELSE mv.%s OPERATOR(pg_catalog.%s) %s.%s END)",
+					new_count_expr(op, src, cnt),
+					sum, src, sum,
+					src, sum, sum,
+					sum, op, src, sum);
+}
+
+/*
+ * The SET clauses that carry the aggregate columns across, "+" for a new
+ * delta and "-" for an old one.  <src> is what the delta row is called.
+ */
+static char *
+aggregate_set_clauses(ViewShape *shape, const char *op, const char *src)
 {
 	StringInfoData buf;
 	ListCell   *lc;
-	bool		adding = (op[0] == '+');
 
 	initStringInfo(&buf);
 
 	foreach(lc, shape->counts)
 	{
 		Form_pg_attribute att = (Form_pg_attribute) lfirst(lc);
-		char	   *name = quote_identifier(NameStr(att->attname));
+		const char *name = quote_identifier(NameStr(att->attname));
 
-		appendStringInfo(&buf, ", %s = mv.%s OPERATOR(pg_catalog.%s) %s.%s",
-						 name, name, op, src, name);
+		appendStringInfo(&buf, ", %s = %s", name,
+						 new_count_expr(op, src, name));
 	}
 
 	foreach(lc, shape->sums)
 	{
 		Form_pg_attribute att = (Form_pg_attribute) lfirst(lc);
-		char	   *name = quote_identifier(NameStr(att->attname));
-		char	   *cnt = quote_identifier(ivm_companion_name(NameStr(att->attname)));
+		const char *name = quote_identifier(NameStr(att->attname));
+		const char *cnt = quote_identifier(ivm_companion_name("count", NameStr(att->attname)));
+
+		appendStringInfo(&buf, ", %s = %s", name,
+						 new_sum_expr(op, src, name, cnt));
+		/* and the companion count moves with it */
+		appendStringInfo(&buf, ", %s = %s", cnt, new_count_expr(op, src, cnt));
+	}
+
+	foreach(lc, shape->avgs)
+	{
+		ViewAvg    *avg = (ViewAvg *) lfirst(lc);
+		const char *name = quote_identifier(NameStr(avg->col->attname));
+		const char *sum = quote_identifier(NameStr(avg->sum->attname));
+		const char *cnt = quote_identifier(NameStr(avg->count->attname));
+		char	   *count_expr = new_count_expr(op, src, cnt);
+		char	   *sum_expr = new_sum_expr(op, src, sum, cnt);
 
 		/*
-		 * A sum is NULL when it has no non-null inputs left, which the
-		 * companion count is what says.  Otherwise a NULL on either side
-		 * means that side contributed nothing.
+		 * The average is not carried across; it is the sum and the count that
+		 * are, and it is read off them.  Every SET clause of one UPDATE sees
+		 * the row as it was, so what the other two clauses will store has to
+		 * be written out again here rather than referred to.
 		 */
 		appendStringInfo(&buf,
-						 ", %s = (CASE WHEN %s THEN NULL"
-						 " WHEN mv.%s IS NULL THEN %s.%s"
-						 " WHEN %s.%s IS NULL THEN mv.%s"
-						 " ELSE mv.%s OPERATOR(pg_catalog.%s) %s.%s END)",
-						 name,
-						 adding
-						 ? psprintf("mv.%s OPERATOR(pg_catalog.=) 0 AND %s.%s OPERATOR(pg_catalog.=) 0",
-									cnt, src, cnt)
-						 : psprintf("mv.%s OPERATOR(pg_catalog.=) %s.%s",
-									cnt, src, cnt),
-						 name, src, name,
-						 src, name, name,
-						 name, op, src, name);
-
-		/* and the companion count moves with it */
-		appendStringInfo(&buf, ", %s = mv.%s OPERATOR(pg_catalog.%s) %s.%s",
-						 cnt, cnt, op, src, cnt);
+						 ", %s = (CASE WHEN %s OPERATOR(pg_catalog.=) 0 THEN NULL"
+						 " ELSE CAST(%s AS %s) OPERATOR(pg_catalog./) %s END)",
+						 name, count_expr,
+						 sum_expr, format_type_be(avg->col->atttypid),
+						 count_expr);
+		appendStringInfo(&buf, ", %s = %s", sum, sum_expr);
+		appendStringInfo(&buf, ", %s = %s", cnt, count_expr);
 	}
 
 	return buf.data;
@@ -530,9 +688,41 @@ static List *
 all_view_columns(ViewShape *shape)
 {
 	List	   *all = list_concat_copy(shape->keys, shape->counts);
+	ListCell   *lc;
 
 	all = list_concat(all, list_copy(shape->sums));
 	all = list_concat(all, list_copy(shape->companions));
+
+	foreach(lc, shape->avgs)
+	{
+		ViewAvg    *avg = (ViewAvg *) lfirst(lc);
+
+		all = lappend(all, avg->col);
+		all = lappend(all, avg->sum);
+		all = lappend(all, avg->count);
+	}
+
+	return all;
+}
+
+/* The aggregate columns a delta row carries, for the old delta's CTE. */
+static List *
+all_aggregate_columns(ViewShape *shape)
+{
+	List	   *all = list_concat_copy(shape->counts, shape->sums);
+	ListCell   *lc;
+
+	all = list_concat(all, list_copy(shape->companions));
+
+	foreach(lc, shape->avgs)
+	{
+		ViewAvg    *avg = (ViewAvg *) lfirst(lc);
+
+		all = lappend(all, avg->col);
+		all = lappend(all, avg->sum);
+		all = lappend(all, avg->count);
+	}
+
 	return all;
 }
 
@@ -558,12 +748,8 @@ apply_old_delta_with_count(const char *mvname, ViewShape *shape)
 	char	   *match = matching_condition(shape->keys);
 	const char *count = quote_identifier(NameStr(shape->count_col->attname));
 	bool		no_group_by = (shape->keys == NIL);
-	char	   *sets = count_set_clauses(shape, "-", "t");
-	List	   *aggcols = list_concat_copy(shape->counts, shape->sums);
-	char	   *carried;
-
-	aggcols = list_concat(aggcols, list_copy(shape->companions));
-	carried = column_list(aggcols, "diff");
+	char	   *sets = aggregate_set_clauses(shape, "-", "t");
+	char	   *carried = column_list(all_aggregate_columns(shape), "diff");
 
 	initStringInfo(&buf);
 	appendStringInfo(&buf,
@@ -592,12 +778,19 @@ apply_old_delta_with_count(const char *mvname, ViewShape *shape)
  * Without a count, a view row stands for one base row, so exactly as many
  * view rows go as the delta holds -- which is what the row number is for when
  * the view has duplicates.
+ *
+ * The delta is folded to one row per distinct value first.  Left as it is, a
+ * delta that itself holds duplicates would join to every matching view row
+ * once per copy, and the row numbering would then run over a view row more
+ * than once and delete fewer rows than it should.  A join view is where both
+ * sides hold duplicates at once.
  */
 static void
 apply_old_delta_no_count(const char *mvname, ViewShape *shape)
 {
 	StringInfoData buf;
 	char	   *match = matching_condition(shape->keys);
+	char	   *keys = column_list(shape->keys, NULL);
 
 	initStringInfo(&buf);
 	appendStringInfo(&buf,
@@ -606,15 +799,14 @@ apply_old_delta_no_count(const char *mvname, ViewShape *shape)
 					 "    SELECT pg_catalog.row_number() OVER (PARTITION BY %s) AS __rn,"
 					 "           mv.ctid AS __tid, diff.__cnt"
 					 "    FROM %s AS mv,"
-					 "         (SELECT *, pg_catalog.count(*) OVER (PARTITION BY %s) AS __cnt"
-					 "          FROM %s) AS diff"
+					 "         (SELECT %s, pg_catalog.count(*) AS __cnt"
+					 "          FROM %s GROUP BY %s) AS diff"
 					 "    WHERE %s) v"
 					 "  WHERE v.__rn OPERATOR(pg_catalog.<=) v.__cnt)",
 					 mvname,
 					 column_list(shape->keys, "mv"),
 					 mvname,
-					 column_list(shape->keys, NULL),
-					 IVM_OLD_DELTA,
+					 keys, IVM_OLD_DELTA, keys,
 					 match);
 	run(buf.data, SPI_OK_DELETE);
 	pfree(buf.data);
@@ -630,7 +822,7 @@ apply_new_delta_with_count(const char *mvname, ViewShape *shape)
 	StringInfoData buf;
 	char	   *match = matching_condition(shape->keys);
 	const char *count = quote_identifier(NameStr(shape->count_col->attname));
-	char	   *sets = count_set_clauses(shape, "+", "diff");
+	char	   *sets = aggregate_set_clauses(shape, "+", "diff");
 	List	   *all = all_view_columns(shape);
 	char	   *returning = column_list(shape->keys, "mv");
 
@@ -670,41 +862,83 @@ apply_new_delta_no_count(const char *mvname, ViewShape *shape)
 /* ------------------------------------------------------------------------- */
 
 /*
- * Bring a view up to date from the transition tables of the statement that
- * changed one of its base tables.  Returns false when this view's delta
- * cannot be computed yet, so the caller recomputes it whole instead.
+ * Can this statement's effect on this view be expressed as a delta?
+ */
+static bool
+delta_supported(Query *viewQuery, IvmEntry *entry, ViewShape *shape)
+{
+	ListCell   *lc;
+
+	/*
+	 * TRUNCATE leaves no transition tables, so there is nothing to compute a
+	 * delta from: what the view loses is everything that came from that
+	 * table.
+	 */
+	if (entry->truncated)
+		return false;
+
+	if (!shape->supported)
+		return false;
+
+	/*
+	 * An outer join's delta is not this arithmetic.  Deleting the last row on
+	 * the inner side does not remove a view row, it turns the inner columns
+	 * to null, and knowing which needs a count per outer row that the rewrite
+	 * does not add.  Such a view is recomputed.
+	 */
+	foreach(lc, viewQuery->rtable)
+	{
+		RangeTblEntry *rte = (RangeTblEntry *) lfirst(lc);
+
+		if (rte->rtekind == RTE_JOIN && rte->jointype != JOIN_INNER)
+			return false;
+	}
+
+	foreach(lc, entry->tables)
+	{
+		IvmModifiedTable *table = (IvmModifiedTable *) lfirst(lc);
+
+		/* A table the view does not read cannot have changed it. */
+		if (table->rte_indexes == NIL)
+			return false;
+
+		if (has_dropped_column(table->tupdesc))
+			return false;
+	}
+
+	return true;
+}
+
+/*
+ * Bring a view up to date from the transition tables the statement left.
+ * Returns false when this view's delta cannot be computed, so the caller
+ * recomputes it whole instead.
  */
 bool
-GpIvmApplyDelta(Oid matviewOid, Oid baseRelid, TriggerData *trigdata)
+GpIvmApplyDelta(IvmEntry *entry)
 {
 	Relation	matviewRel;
 	Query	   *viewQuery;
+	Query	   *working;
 	QueryEnvironment *queryEnv;
 	ViewShape	shape;
-	int			rti;
 	char	   *mvname;
-	bool		old_delta,
-				new_delta;
-
-	/*
-	 * TRUNCATE leaves no transition tables, so there is no delta to compute:
-	 * what the view loses is everything that came from that table.  The
-	 * caller recomputes instead.
-	 */
-	if (TRIGGER_FIRED_BY_TRUNCATE(trigdata->tg_event))
-		return false;
+	RangeTblEntry **original;
+	int			nrtable;
+	ListCell   *lc;
 
 	/*
 	 * The apply statements find view rows by ctid and then write them, so no
 	 * one else may be maintaining this view at the same time.  This is the
 	 * lock Cloudberry takes, and for the same reason.
 	 */
-	matviewRel = table_open(matviewOid, ExclusiveLock);
+	matviewRel = table_open(entry->matviewOid, ExclusiveLock);
 	viewQuery = GpIvmGetViewQuery(matviewRel);
 
 	describe_view(matviewRel, viewQuery, &shape);
+	locate_modified_tables(viewQuery, entry);
 
-	if (!shape.supported || !GpIvmDeltaSupported(viewQuery, baseRelid, &rti))
+	if (!delta_supported(viewQuery, entry, &shape))
 	{
 		table_close(matviewRel, NoLock);
 		return false;
@@ -714,46 +948,103 @@ GpIvmApplyDelta(Oid matviewOid, Oid baseRelid, TriggerData *trigdata)
 		elog(ERROR, "SPI_connect failed");
 
 	/*
-	 * The transition tables have to be visible twice over: to the queries
-	 * that compute the deltas, which are planned and run here, and to the
-	 * statements that apply them, which go through SPI.  SPI keeps its own
-	 * environment private, so it is told separately.
+	 * The transition tables are what the delta queries read, so they are put
+	 * in an environment of their own; the apply statements read the deltas
+	 * instead, which SPI is told about as each one is computed.
 	 */
 	queryEnv = create_queryEnv();
-	register_transition(queryEnv, trigdata, trigdata->tg_oldtable,
-						trigdata->tg_trigger->tgoldtable);
-	register_transition(queryEnv, trigdata, trigdata->tg_newtable,
-						trigdata->tg_trigger->tgnewtable);
+	foreach(lc, entry->tables)
+	{
+		IvmModifiedTable *table = (IvmModifiedTable *) lfirst(lc);
+		ListCell   *lc2;
 
-	if (SPI_register_trigger_data(trigdata) != SPI_OK_TD_REGISTER)
-		elog(ERROR, "could not register the transition tables");
+		foreach(lc2, table->old_stores)
+			register_transition(queryEnv, table, (IvmTransition *) lfirst(lc2));
+		foreach(lc2, table->new_stores)
+			register_transition(queryEnv, table, (IvmTransition *) lfirst(lc2));
+	}
 
-	mvname = quote_qualified_identifier(
-										get_namespace_name(RelationGetNamespace(matviewRel)),
+	mvname = quote_qualified_identifier(get_namespace_name(RelationGetNamespace(matviewRel)),
 										RelationGetRelationName(matviewRel));
 
-	/* The view query is copied per delta, so this one is never scribbled on. */
-	old_delta = trigdata->tg_oldtable != NULL &&
-		make_delta(matviewRel, viewQuery, rti,
-				   trigdata->tg_trigger->tgoldtable, IVM_OLD_DELTA, queryEnv);
-	new_delta = trigdata->tg_newtable != NULL &&
-		make_delta(matviewRel, viewQuery, rti,
-				   trigdata->tg_trigger->tgnewtable, IVM_NEW_DELTA, queryEnv);
+	/*
+	 * The working copy carries the range table from step to step.  Its RTEs
+	 * come from a stored rule, so they are locked here rather than left to
+	 * the planner.
+	 */
+	working = copyObject(viewQuery);
+	AcquireRewriteLocks(working, true, false);
 
-	/* Old before new: a row that is both removed and added must not be lost. */
-	if (old_delta)
+	nrtable = list_length(working->rtable);
+	original = (RangeTblEntry **) palloc0((nrtable + 1) * sizeof(RangeTblEntry *));
+
+	/* Every table this statement changed starts as the statement found it. */
+	foreach(lc, entry->tables)
 	{
-		if (shape.count_col != NULL)
-			apply_old_delta_with_count(mvname, &shape);
-		else
-			apply_old_delta_no_count(mvname, &shape);
+		IvmModifiedTable *table = (IvmModifiedTable *) lfirst(lc);
+		ListCell   *lc2;
+
+		foreach(lc2, table->rte_indexes)
+		{
+			int			rti = lfirst_int(lc2);
+			char	   *sql = prestate_subquery(entry->matviewOid, table);
+
+			/*
+			 * Kept whole, because pointing the entry at the pre-update state
+			 * overwrites it in place, and it is what the table goes back to
+			 * once its own delta has been taken.
+			 */
+			original[rti] = copyObject((RangeTblEntry *) list_nth(working->rtable, rti - 1));
+			point_at_subquery(working, rti, sql, queryEnv);
+			pfree(sql);
+		}
 	}
-	if (new_delta)
+
+	/*
+	 * One table at a time, and one place in the query at a time: take that
+	 * place's delta, then leave the table as it is now, so the next step sees
+	 * a change that has already been accounted for.
+	 */
+	foreach(lc, entry->tables)
 	{
-		if (shape.count_col != NULL)
-			apply_new_delta_with_count(mvname, &shape);
-		else
-			apply_new_delta_no_count(mvname, &shape);
+		IvmModifiedTable *table = (IvmModifiedTable *) lfirst(lc);
+		ListCell   *lc2;
+
+		foreach(lc2, table->rte_indexes)
+		{
+			int			rti = lfirst_int(lc2);
+			Tuplestorestate *old_ts;
+			Tuplestorestate *new_ts;
+			bool		old_delta;
+			bool		new_delta;
+
+			old_delta = make_delta(matviewRel, working, rti, table->old_stores,
+								   IVM_OLD_DELTA, queryEnv, &old_ts);
+			new_delta = make_delta(matviewRel, working, rti, table->new_stores,
+								   IVM_NEW_DELTA, queryEnv, &new_ts);
+
+			/* This place is now past its change. */
+			lfirst(list_nth_cell(working->rtable, rti - 1)) = original[rti];
+
+			/* Old before new: a row that is both removed and added stays. */
+			if (old_delta)
+			{
+				if (shape.count_col != NULL)
+					apply_old_delta_with_count(mvname, &shape);
+				else
+					apply_old_delta_no_count(mvname, &shape);
+			}
+			if (new_delta)
+			{
+				if (shape.count_col != NULL)
+					apply_new_delta_with_count(mvname, &shape);
+				else
+					apply_new_delta_no_count(mvname, &shape);
+			}
+
+			drop_delta(IVM_OLD_DELTA, old_ts);
+			drop_delta(IVM_NEW_DELTA, new_ts);
+		}
 	}
 
 	SPI_finish();
