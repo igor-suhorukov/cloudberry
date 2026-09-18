@@ -1,0 +1,78 @@
+# syntax=docker/dockerfile:1.7
+#-------------------------------------------------------------------------
+#
+# Licensed to the Apache Software Foundation (ASF) under one
+# or more contributor license agreements.  See the NOTICE file
+# distributed with this work for additional information
+# regarding copyright ownership.  The ASF licenses this file
+# to you under the Apache License, Version 2.0 (the
+# "License"); you may not use this file except in compliance
+# with the License.  You may obtain a copy of the License at
+#
+#   http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing,
+# software distributed under the License is distributed on an
+# "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+# KIND, either express or implied.  See the License for the
+# specific language governing permissions and limitations
+# under the License.
+#
+#-------------------------------------------------------------------------
+
+#
+# The port's modules, built against the patched PostgreSQL 19.
+#
+# This tree arrives as a read-only build context named "cbsrc", and the build
+# takes the branch out of it with "git archive", so the build never sees an
+# unclean working tree.  Set CB_REF to build something other than the port
+# branch.
+
+ARG PG_IMAGE=cloudberry/pg19-patched:latest
+ARG CB_REF=extension_postgresql_19
+
+###############################################################################
+FROM ${PG_IMAGE} AS pg
+###############################################################################
+
+###############################################################################
+FROM debian:trixie-slim AS build
+###############################################################################
+ARG CB_REF
+USER root
+
+RUN apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+        build-essential meson ninja-build pkg-config git ca-certificates \
+        libreadline-dev zlib1g-dev libicu-dev libssl-dev liblz4-dev libzstd-dev \
+        libxml2-dev libxslt1-dev \
+    && rm -rf /var/lib/apt/lists/*
+
+COPY --from=pg /usr/local/pgsql /usr/local/pgsql
+ENV PATH=/usr/local/pgsql/bin:$PATH \
+    LD_LIBRARY_PATH=/usr/local/pgsql/lib:/usr/local/pgsql/lib/x86_64-linux-gnu
+
+WORKDIR /cb
+RUN --mount=type=bind,from=cbsrc,target=/cbsrc,ro \
+    git -C /cbsrc archive "$CB_REF" | tar -x -C /cb
+
+# The modules are built against the installed PostgreSQL, found through
+# pg_config.  Configuration fails if that PostgreSQL does not carry the core
+# patch series, which is the point: the modules are written against it.
+RUN meson setup /cb/build /cb/pg19 \
+        -Dpg_config=/usr/local/pgsql/bin/pg_config \
+        --prefix=/usr/local/pgsql \
+ && ninja -C /cb/build \
+ && ninja -C /cb/build install
+
+###############################################################################
+FROM ${PG_IMAGE} AS runtime
+###############################################################################
+USER root
+COPY --from=build /usr/local/pgsql/lib /usr/local/pgsql/lib
+COPY --from=build /usr/local/pgsql/share/postgresql/extension /usr/local/pgsql/share/postgresql/extension
+# The test harness is run from the image, so it comes along.
+COPY --from=build /cb/pg19/test /cb/pg19/test
+RUN chown -R postgres:postgres /cb
+USER postgres
+WORKDIR /cb
+CMD ["postgres"]

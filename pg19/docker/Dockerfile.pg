@@ -1,0 +1,89 @@
+# syntax=docker/dockerfile:1.7
+#-------------------------------------------------------------------------
+#
+# Licensed to the Apache Software Foundation (ASF) under one
+# or more contributor license agreements.  See the NOTICE file
+# distributed with this work for additional information
+# regarding copyright ownership.  The ASF licenses this file
+# to you under the Apache License, Version 2.0 (the
+# "License"); you may not use this file except in compliance
+# with the License.  You may obtain a copy of the License at
+#
+#   http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing,
+# software distributed under the License is distributed on an
+# "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+# KIND, either express or implied.  See the License for the
+# specific language governing permissions and limitations
+# under the License.
+#
+#-------------------------------------------------------------------------
+
+#
+# PostgreSQL 19 for the port, built from the fork in github/postgres.
+#
+# The fork arrives as a read-only build context named "pgsrc", and the build
+# takes a tree out of it with "git archive", so it never needs a worktree or a
+# branch switch, and the same definition builds both refs:
+#
+#   PG_REF=REL_19_STABLE_CLOUDBERRY   the patch series   -> pg19-patched
+#   PG_REF=origin/REL_19_STABLE       vanilla PostgreSQL -> pg19-vanilla
+#
+# The two images differ only in that argument, which is what makes them
+# comparable; see cloudberry.md, "Checking that the server stays vanilla".
+
+ARG PG_REF=REL_19_STABLE_CLOUDBERRY
+
+###############################################################################
+FROM debian:trixie-slim AS build
+###############################################################################
+ARG PG_REF
+ARG PG_BUILDTYPE=debugoptimized
+# cassert and injection points are on: this is the build the port is tested
+# against, and the assertions are what catch a hook that breaks an invariant.
+ARG PG_CASSERT=true
+
+RUN apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+        build-essential meson ninja-build pkg-config bison flex perl python3 git \
+        ca-certificates gettext tzdata \
+        libreadline-dev zlib1g-dev libicu-dev libssl-dev liblz4-dev libzstd-dev \
+        libxml2-dev libxslt1-dev libipc-run-perl libtest-simple-perl \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /src
+RUN --mount=type=bind,from=pgsrc,target=/pgsrc,ro \
+    git -C /pgsrc archive "$PG_REF" | tar -x -C /src \
+ && git -C /pgsrc rev-parse "$PG_REF" > /src/.pg_ref_commit
+
+RUN meson setup build --prefix=/usr/local/pgsql \
+        --buildtype="$PG_BUILDTYPE" \
+        -Dcassert="$PG_CASSERT" -Dinjection_points=true -Dtap_tests=enabled \
+        -Dssl=openssl -Dicu=enabled -Dlz4=enabled -Dzstd=enabled \
+ && ninja -C build \
+ && ninja -C build install
+
+###############################################################################
+FROM debian:trixie-slim AS runtime
+###############################################################################
+ARG PG_REF
+LABEL org.opencontainers.image.title="PostgreSQL 19 for Apache Cloudberry"
+LABEL org.apache.cloudberry.pg_ref="${PG_REF}"
+
+RUN apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+        libreadline8t64 zlib1g libicu76 libssl3t64 liblz4-1 libzstd1 libxml2 libxslt1.1 \
+        ca-certificates locales tzdata \
+    && rm -rf /var/lib/apt/lists/* \
+    && useradd -m -u 1000 -s /bin/bash postgres
+
+COPY --from=build /usr/local/pgsql /usr/local/pgsql
+COPY --from=build /src/.pg_ref_commit /usr/local/pgsql/.pg_ref_commit
+
+ENV PATH=/usr/local/pgsql/bin:$PATH \
+    LD_LIBRARY_PATH=/usr/local/pgsql/lib:/usr/local/pgsql/lib/x86_64-linux-gnu \
+    PGDATA=/var/lib/postgresql/data
+
+RUN mkdir -p "$PGDATA" && chown -R postgres:postgres /var/lib/postgresql
+USER postgres
+WORKDIR /var/lib/postgresql
+CMD ["postgres"]

@@ -1,0 +1,85 @@
+#-------------------------------------------------------------------------
+#
+# Licensed to the Apache Software Foundation (ASF) under one
+# or more contributor license agreements.  See the NOTICE file
+# distributed with this work for additional information
+# regarding copyright ownership.  The ASF licenses this file
+# to you under the Apache License, Version 2.0 (the
+# "License"); you may not use this file except in compliance
+# with the License.  You may obtain a copy of the License at
+#
+#   http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing,
+# software distributed under the License is distributed on an
+# "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+# KIND, either express or implied.  See the License for the
+# specific language governing permissions and limitations
+# under the License.
+#
+#-------------------------------------------------------------------------
+
+# The port's Compose project.  Nothing is installed on the host.
+#
+#   docker compose -f pg19/docker/compose.yml build
+#   docker compose -f pg19/docker/compose.yml run --rm tests
+#
+# The two repositories are passed as build contexts, so the paths below are the
+# only thing to change if they live somewhere else:
+#
+#   PG_SRC=/path/to/postgres CB_SRC=/path/to/cloudberry docker compose ... build
+
+name: cloudberry-pg19
+
+services:
+  # Vanilla PostgreSQL 19, from the same commit the patch series is based on.
+  # It is the reference for every "is the server still vanilla" comparison.
+  pg19-vanilla:
+    image: cloudberry/pg19-vanilla:latest
+    build:
+      context: .
+      dockerfile: Dockerfile.pg
+      additional_contexts:
+        pgsrc: ${PG_SRC:-../../../postgres}
+      args:
+        PG_REF: ${PG_VANILLA_REF:-origin/REL_19_STABLE}
+    profiles: ["compare"]
+
+  # The same tree with the core patch series applied.
+  pg19-patched:
+    image: cloudberry/pg19-patched:latest
+    build:
+      context: .
+      dockerfile: Dockerfile.pg
+      additional_contexts:
+        pgsrc: ${PG_SRC:-../../../postgres}
+      args:
+        PG_REF: ${PG_PATCHED_REF:-REL_19_STABLE_CLOUDBERRY}
+
+  # The port's modules, on top of the patched server.
+  cb-ext:
+    image: cloudberry/cb-ext:latest
+    depends_on: [pg19-patched]
+    build:
+      context: .
+      dockerfile: Dockerfile.cbext
+      additional_contexts:
+        cbsrc: ${CB_SRC:-../..}
+      args:
+        PG_IMAGE: cloudberry/pg19-patched:latest
+        CB_REF: ${CB_REF:-extension_postgresql_19}
+
+  # The port's test suites.  With no argument it runs them all.
+  #
+  #   docker compose -f pg19/docker/compose.yml run --rm tests load
+  tests:
+    image: cloudberry/cb-ext:latest
+    depends_on: [cb-ext]
+    entrypoint: ["/cb/pg19/test/run.sh"]
+    tmpfs:
+      - /tmp
+
+  # A coordinator, a standby coordinator and two segment hosts with mirrors --
+  # the topology of Cloudberry's own sandbox.  It arrives with M2, which is the
+  # first milestone that has anything to dispatch; see cloudberry.md,
+  # "Milestones".
