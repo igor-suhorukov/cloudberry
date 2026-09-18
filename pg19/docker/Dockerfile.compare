@@ -1,0 +1,59 @@
+# syntax=docker/dockerfile:1.7
+#-------------------------------------------------------------------------
+#
+# Licensed to the Apache Software Foundation (ASF) under one
+# or more contributor license agreements.  See the NOTICE file
+# distributed with this work for additional information
+# regarding copyright ownership.  The ASF licenses this file
+# to you under the Apache License, Version 2.0 (the
+# "License"); you may not use this file except in compliance
+# with the License.  You may obtain a copy of the License at
+#
+#   http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing,
+# software distributed under the License is distributed on an
+# "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+# KIND, either express or implied.  See the License for the
+# specific language governing permissions and limitations
+# under the License.
+#
+#-------------------------------------------------------------------------
+#
+# Both PostgreSQL builds in one image, so the vanilla-equivalence checks can
+# run them against each other.  It carries no Cloudberry module: the question
+# these checks ask is how the patched server behaves with nothing loaded.
+
+ARG PG_VANILLA_IMAGE=cloudberry/pg19-vanilla:latest
+ARG PG_PATCHED_IMAGE=cloudberry/pg19-patched:latest
+ARG CB_REF=extension_postgresql_19
+
+FROM ${PG_VANILLA_IMAGE} AS vanilla
+FROM ${PG_PATCHED_IMAGE} AS patched
+
+FROM debian:trixie-slim
+ARG CB_REF
+USER root
+RUN apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+        libreadline8t64 zlib1g libicu76 libssl3t64 liblz4-1 libzstd1 libxml2 libxslt1.1 \
+        ca-certificates locales tzdata python3 git abigail-tools diffutils procps \
+    && rm -rf /var/lib/apt/lists/* \
+    && useradd -m -u 1000 -s /bin/bash postgres
+
+COPY --from=vanilla /usr/local/pgsql /pg/vanilla
+COPY --from=patched /usr/local/pgsql /pg/patched
+
+# The harness comes out of the branch, as it does for cb-ext, so that what runs
+# is what is committed rather than whatever the working tree happens to hold.
+RUN --mount=type=bind,from=cbsrc,target=/cbsrc,ro \
+    mkdir -p /cb && git -C /cbsrc archive "$CB_REF" pg19/test | tar -x -C /cb
+
+ENV PG_VANILLA=/pg/vanilla \
+    PG_PATCHED=/pg/patched \
+    PG_SRC_REPO=/pgsrc \
+    TMPDIR=/tmp
+
+RUN chown -R postgres:postgres /cb /pg
+USER postgres
+WORKDIR /cb
+ENTRYPOINT ["/cb/pg19/test/vanilla/run.sh"]

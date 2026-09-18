@@ -79,6 +79,30 @@ services:
     tmpfs:
       - /tmp
 
+  # Does the patched server still behave like vanilla PostgreSQL 19?  It runs
+  # both builds against each other and loads no Cloudberry module.  Check 10
+  # reads the patch series, so the PostgreSQL repository is mounted read-only.
+  #
+  #   docker compose -f pg19/docker/compose.yml run --rm compare
+  #   docker compose -f pg19/docker/compose.yml run --rm compare 03 05
+  compare:
+    image: cloudberry/pg19-compare:latest
+    depends_on: [pg19-vanilla, pg19-patched]
+    build:
+      context: .
+      dockerfile: Dockerfile.compare
+      additional_contexts:
+        cbsrc: ${CB_SRC:-../..}
+      args:
+        PG_VANILLA_IMAGE: cloudberry/pg19-vanilla:latest
+        PG_PATCHED_IMAGE: cloudberry/pg19-patched:latest
+        CB_REF: ${CB_REF:-extension_postgresql_19}
+    volumes:
+      - ${PG_SRC:-../../../postgres}:/pgsrc:ro
+    tmpfs:
+      - /tmp
+    profiles: ["compare"]
+
   # A coordinator, a standby coordinator and two segment hosts with mirrors --
   # the topology of Cloudberry's own sandbox.  It arrives with M2, which is the
   # first milestone that has anything to dispatch; see cloudberry.md,
