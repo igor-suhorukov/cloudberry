@@ -256,14 +256,53 @@ else
 fi
 
 session o27 <<'SQL'
+SELECT 'depth0=' || gp_probe.matview_depth();
 SELECT 'opened=' || gp_probe.matview_maintenance(true);
+SELECT 'depth1=' || gp_probe.matview_depth();
 INSERT INTO o27_mv VALUES (99);
 SELECT 'applied=' || count(*) FROM o27_mv WHERE a = 99;
 SELECT 'closed=' || gp_probe.matview_maintenance(false);
 SQL
+is "the depth starts at zero" o27 depth0 0
 is "opening maintenance mode reports it is on" o27 opened true
+is "and raises the depth" o27 depth1 1
 is "the delta can now be applied with ordinary DML" o27 applied 1
 is "closing reports it is off again" o27 closed false
+
+# What an extension actually does: open, run code that can fail, and leave the
+# depth where it found it.  Nothing lowers the depth when a transaction aborts,
+# so without the restore maintenance mode would stay open for the session --
+# and DML on materialized views with it.
+session o27_recover <<'SQL'
+SELECT 'before=' || gp_probe.matview_depth();
+SELECT gp_probe.matview_apply_failing();
+SQL
+session o27_after <<'SQL'
+SELECT 'after=' || gp_probe.matview_depth();
+INSERT INTO o27_mv VALUES (1234);
+SQL
+is "the depth is zero before a delta is applied" o27_recover before 0
+if grep -q 'pretending the delta failed' "$WORK/o27_recover.out"; then
+	ok "a delta that fails raises its own error"
+else
+	notok "the failing delta should have errored" "$(cat "$WORK/o27_recover.out")"
+fi
+is "and the depth is back where it started" o27_after after 0
+if grep -q 'cannot change materialized view' "$WORK/o27_after.out"; then
+	ok "so DML on the view is refused again afterwards"
+else
+	notok "maintenance mode leaked past the failure" "$(cat "$WORK/o27_after.out")"
+fi
+
+# Restoring may only put the depth back, never raise it.
+session o27_guard <<'SQL'
+SELECT 'raise=' || gp_probe.matview_restore_depth(2);
+SQL
+if grep -q 'cannot restore materialized view maintenance depth' "$WORK/o27_guard.out"; then
+	ok "restoring cannot raise the depth"
+else
+	notok "raising the depth should be refused" "$(cat "$WORK/o27_guard.out")"
+fi
 
 ###############################################################################
 echo "O28 star_expansion_filter_hook: a column stays out of SELECT *"

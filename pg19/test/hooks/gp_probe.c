@@ -423,6 +423,9 @@ PG_FUNCTION_INFO_V1(gp_probe_load_combocids);
 PG_FUNCTION_INFO_V1(gp_probe_current_xids);
 PG_FUNCTION_INFO_V1(gp_probe_adopt_xids);
 PG_FUNCTION_INFO_V1(gp_probe_matview_maintenance);
+PG_FUNCTION_INFO_V1(gp_probe_matview_depth);
+PG_FUNCTION_INFO_V1(gp_probe_matview_restore_depth);
+PG_FUNCTION_INFO_V1(gp_probe_matview_apply_failing);
 PG_FUNCTION_INFO_V1(gp_probe_syncrep_hold);
 
 Datum
@@ -676,6 +679,48 @@ gp_probe_matview_maintenance(PG_FUNCTION_ARGS)
 				 errmsg("materialized view maintenance mode is not open")));
 	}
 	PG_RETURN_BOOL(MatViewIncrementalMaintenanceIsEnabled());
+}
+
+Datum
+gp_probe_matview_depth(PG_FUNCTION_ARGS)
+{
+	PG_RETURN_INT32(MatViewIncrementalMaintenanceDepthExternal());
+}
+
+Datum
+gp_probe_matview_restore_depth(PG_FUNCTION_ARGS)
+{
+	RestoreMatViewIncrementalMaintenanceDepthExternal(PG_GETARG_INT32(0));
+	PG_RETURN_INT32(MatViewIncrementalMaintenanceDepthExternal());
+}
+
+/*
+ * What an extension applying a delta really does: open maintenance mode, run
+ * code that may fail, and leave the depth where it found it either way.  This
+ * one always fails, which is the case worth testing -- without the restore,
+ * maintenance mode would stay open for the rest of the session.
+ */
+Datum
+gp_probe_matview_apply_failing(PG_FUNCTION_ARGS)
+{
+	int			save = MatViewIncrementalMaintenanceDepthExternal();
+
+	PG_TRY();
+	{
+		OpenMatViewIncrementalMaintenanceExternal();
+		ereport(ERROR,
+				(errcode(ERRCODE_RAISE_EXCEPTION),
+				 errmsg("gp_probe: pretending the delta failed")));
+		CloseMatViewIncrementalMaintenanceExternal();	/* not reached */
+	}
+	PG_CATCH();
+	{
+		RestoreMatViewIncrementalMaintenanceDepthExternal(save);
+		PG_RE_THROW();
+	}
+	PG_END_TRY();
+
+	PG_RETURN_VOID();
 }
 
 /* R3: the flag exists and is settable from an extension. */

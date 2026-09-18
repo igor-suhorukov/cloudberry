@@ -85,7 +85,7 @@ echo "  $pass passed, $fail failed, $skipped skipped"
 echo
 echo "  not covered here: check 8 (third-party binaries) needs PGDG packages"
 echo "  for this PostgreSQL; check 9 (instruction counts) needs perf or"
-echo "  cachegrind; checks 11 and 12 belong to the extension repository and to"
-echo "  M5, when the modules first write data of their own."
+echo "  cachegrind; check 12 belongs to M5, when the modules first write data"
+echo "  of their own.  Check 11, that the hooks are called, is the hooks suite."
 
 [ "$fail" -eq 0 ]

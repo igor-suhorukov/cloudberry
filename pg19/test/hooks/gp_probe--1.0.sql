@@ -42,5 +42,12 @@ CREATE FUNCTION gp_probe.adopt_xids(xids xid[]) RETURNS void
 -- O27 and R3.
 CREATE FUNCTION gp_probe.matview_maintenance(open_it boolean) RETURNS boolean
   AS 'MODULE_PATHNAME', 'gp_probe_matview_maintenance' LANGUAGE C STRICT;
+CREATE FUNCTION gp_probe.matview_depth() RETURNS int
+  AS 'MODULE_PATHNAME', 'gp_probe_matview_depth' LANGUAGE C;
+CREATE FUNCTION gp_probe.matview_restore_depth(depth int) RETURNS int
+  AS 'MODULE_PATHNAME', 'gp_probe_matview_restore_depth' LANGUAGE C STRICT;
+-- Opens maintenance mode, fails, and restores the depth from PG_CATCH.
+CREATE FUNCTION gp_probe.matview_apply_failing() RETURNS void
+  AS 'MODULE_PATHNAME', 'gp_probe_matview_apply_failing' LANGUAGE C;
 CREATE FUNCTION gp_probe.syncrep_hold(on_off boolean) RETURNS boolean
   AS 'MODULE_PATHNAME', 'gp_probe_syncrep_hold' LANGUAGE C STRICT;
