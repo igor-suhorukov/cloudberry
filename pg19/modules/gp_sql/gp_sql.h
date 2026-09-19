@@ -29,6 +29,8 @@
 
 #include "nodes/parsenodes.h"
 
+struct QueryDesc;
+
 /* The extension's own schema, and the label provider tags are kept in. */
 #define GP_SQL_SCHEMA		"gp_sql"
 #define GP_TAG_PROVIDER		"gp_tag"
@@ -76,6 +78,26 @@ extern void GpTagIndexDropped(Oid indexRelId);
 
 /* Registered during preload. */
 extern void GpTagRegisterProvider(void);
+
+/* dirtable.c */
+
+/* Cloudberry's allow_dml_directory_table. */
+extern PGDLLIMPORT bool gp_allow_dml_directory_table;
+
+/* Where a relation keeps its files, or NULL if it is not a directory table. */
+extern char *GpDirTableLocation(Oid relid);
+
+/* Refuse the DML on a directory table that Cloudberry refuses in ExecMain. */
+extern void GpDirTableCheckDML(struct QueryDesc *queryDesc);
+
+/* TRUNCATE would orphan every file a directory table has. */
+extern void GpDirTableCheckTruncate(TruncateStmt *stmt);
+
+/* A directory table is being dropped: its files follow it at commit. */
+extern void GpDirTableDropped(Oid relid);
+
+/* Registered during preload; drains the files a transaction leaves behind. */
+extern void GpDirTableRegisterXactCallback(void);
 
 /*
  * Refuse a tag name or value the definitions in gp_sql.tag do not allow.

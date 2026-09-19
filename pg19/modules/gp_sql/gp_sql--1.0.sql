@@ -594,3 +594,151 @@ GRANT SELECT ON gp_sql.database_tag_descriptions,
 				gp_sql.tablespace_tag_descriptions,
 				gp_sql.schema_tag_descriptions,
 				gp_sql.relation_tag_descriptions TO PUBLIC;
+
+/******************************************************************************
+ * Directory tables
+ *
+ * Cloudberry gives a directory table a relkind of its own, a fixed schema and
+ * a row in pg_directory_table saying where its files are.  Here it is an
+ * ordinary table with the same five columns and a "gp" label holding the
+ * location, so the label is both the flag and the value.  Its files live
+ * where Cloudberry puts them, in a directory per table inside the database
+ * directory.  See dirtable.c.
+ *****************************************************************************/
+
+CREATE FUNCTION gp_sql.directory_table_location(dirtable regclass) RETURNS text
+AS 'MODULE_PATHNAME', 'gp_sql_dirtable_location'
+LANGUAGE C STRICT STABLE;
+
+COMMENT ON FUNCTION gp_sql.directory_table_location(regclass) IS
+	'where a directory table keeps its files, or NULL if it is not one';
+
+CREATE FUNCTION gp_sql.claim_directory_table(dirtable regclass) RETURNS text
+AS 'MODULE_PATHNAME', 'gp_sql_dirtable_claim'
+LANGUAGE C STRICT;
+
+COMMENT ON FUNCTION gp_sql.claim_directory_table(regclass) IS
+	'make an existing table of the right shape into a directory table';
+
+/*
+ * CREATE DIRECTORY TABLE becomes this.  The columns are Cloudberry's
+ * GetDirectoryTableSchema, in its order, because the tag column is found by
+ * number when DML is checked.
+ */
+CREATE FUNCTION gp_sql.create_directory_table(dirtable text,
+											  tablespace name DEFAULT NULL)
+RETURNS regclass
+LANGUAGE plpgsql
+AS $$
+DECLARE
+	qname text;
+	rel	  regclass;
+BEGIN
+	/* parse_ident, so that a schema-qualified name is quoted a part at a time */
+	SELECT string_agg(pg_catalog.quote_ident(p), '.' ORDER BY ord)
+	  INTO qname
+	  FROM unnest(pg_catalog.parse_ident(dirtable)) WITH ORDINALITY AS u(p, ord);
+
+	EXECUTE format('CREATE TABLE %s ('
+				   '  relative_path text PRIMARY KEY,'
+				   '  size bigint,'
+				   '  last_modified timestamptz,'
+				   '  md5 text,'
+				   '  tag text)%s',
+				   qname,
+				   CASE WHEN tablespace IS NULL THEN ''
+						ELSE format(' TABLESPACE %I', tablespace) END);
+
+	rel := qname::regclass;
+	PERFORM gp_sql.claim_directory_table(rel);
+	RETURN rel;
+END;
+$$;
+
+COMMENT ON FUNCTION gp_sql.create_directory_table(text, name) IS
+	'create a directory table; what Cloudberry writes as CREATE DIRECTORY TABLE';
+
+CREATE FUNCTION gp_sql.directory_table_put(dirtable regclass,
+										   relative_path text,
+										   content bytea,
+										   tag text DEFAULT NULL)
+RETURNS bigint
+AS 'MODULE_PATHNAME', 'gp_sql_dirtable_put'
+LANGUAGE C;
+
+COMMENT ON FUNCTION gp_sql.directory_table_put(regclass, text, bytea, text) IS
+	'write a file and the row that describes it; Cloudberry writes COPY ... INTO a directory table';
+
+CREATE FUNCTION gp_sql.directory_table_get(dirtable regclass, relative_path text)
+RETURNS bytea
+AS 'MODULE_PATHNAME', 'gp_sql_dirtable_get'
+LANGUAGE C STRICT STABLE;
+
+COMMENT ON FUNCTION gp_sql.directory_table_get(regclass, text) IS
+	'read one file of a directory table; NULL when it is not there';
+
+CREATE FUNCTION gp_sql.remove_file(dirtable regclass, relative_path text)
+RETURNS boolean
+AS 'MODULE_PATHNAME', 'gp_sql_dirtable_remove'
+LANGUAGE C STRICT;
+
+COMMENT ON FUNCTION gp_sql.remove_file(regclass, text) IS
+	'remove a file and its row; the file goes when the transaction commits';
+
+/*
+ * Cloudberry's directory_table(regclass), column for column.  The content of
+ * every file is read, so it is for looking at a small directory table rather
+ * than for walking a large one.
+ */
+CREATE FUNCTION gp_sql.directory_table(dirtable regclass)
+RETURNS TABLE (scoped_file_url text,
+			   relative_path text,
+			   tag text,
+			   size bigint,
+			   last_modified timestamptz,
+			   md5 text,
+			   content bytea)
+LANGUAGE plpgsql STABLE
+AS $$
+DECLARE
+	loc text;
+	r	record;
+BEGIN
+	loc := gp_sql.directory_table_location(dirtable);
+	IF loc IS NULL THEN
+		RAISE EXCEPTION '"%" is not a directory table', dirtable::text
+			USING ERRCODE = 'wrong_object_type';
+	END IF;
+
+	FOR r IN EXECUTE format('SELECT relative_path, tag, size, last_modified, md5'
+							'  FROM %s ORDER BY relative_path', dirtable::text)
+	LOOP
+		scoped_file_url := loc || '/' || r.relative_path;
+		relative_path := r.relative_path;
+		tag := r.tag;
+		size := r.size;
+		last_modified := r.last_modified;
+		md5 := r.md5;
+		content := gp_sql.directory_table_get(dirtable, r.relative_path);
+		RETURN NEXT;
+	END LOOP;
+END;
+$$;
+
+COMMENT ON FUNCTION gp_sql.directory_table(regclass) IS
+	'every file of a directory table, with its contents';
+
+CREATE VIEW gp_sql.directory_tables AS
+	SELECT n.nspname AS schemaname,
+		   c.relname AS tablename,
+		   pg_catalog.pg_get_userbyid(c.relowner) AS tableowner,
+		   l.location
+	  FROM pg_catalog.pg_class c
+	  JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace
+	  CROSS JOIN LATERAL gp_sql.directory_table_location(c.oid) AS l(location)
+	 WHERE c.relkind = 'r' AND l.location IS NOT NULL;
+
+COMMENT ON VIEW gp_sql.directory_tables IS
+	'the tables that hold files; Cloudberry keeps these in pg_directory_table';
+
+GRANT SELECT ON gp_sql.directory_tables TO PUBLIC;

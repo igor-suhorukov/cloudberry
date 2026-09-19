@@ -38,12 +38,14 @@
 #include "catalog/objectaccess.h"
 #include "catalog/pg_class.h"
 #include "commands/defrem.h"
+#include "executor/executor.h"
 #include "fmgr.h"
 #include "miscadmin.h"
 #include "nodes/makefuncs.h"
 #include "nodes/nodeFuncs.h"
 #include "nodes/parsenodes.h"
 #include "tcop/utility.h"
+#include "utils/guc.h"
 #include "utils/lsyscache.h"
 
 #include "cb_module.h"
@@ -57,6 +59,7 @@ PG_MODULE_MAGIC_EXT(
 
 static ProcessUtility_hook_type prev_ProcessUtility = NULL;
 static object_access_hook_type prev_object_access = NULL;
+static ExecutorStart_hook_type prev_ExecutorStart = NULL;
 
 /*
  * Which object a tagged CREATE statement made, and whether to watch for one.
@@ -214,7 +217,24 @@ gp_sql_object_access(ObjectAccessType access, Oid classId, Oid objectId,
 
 		if (relkind == RELKIND_INDEX || relkind == RELKIND_PARTITIONED_INDEX)
 			GpTagIndexDropped(objectId);
+		else if (relkind == RELKIND_RELATION)
+			GpDirTableDropped(objectId);
 	}
+}
+
+/*
+ * The rule Cloudberry applies in ExecMain: a directory table's rows are
+ * written by its own functions, not by DML.
+ */
+static void
+gp_sql_ExecutorStart(QueryDesc *queryDesc, int eflags)
+{
+	GpDirTableCheckDML(queryDesc);
+
+	if (prev_ExecutorStart)
+		prev_ExecutorStart(queryDesc, eflags);
+	else
+		standard_ExecutorStart(queryDesc, eflags);
 }
 
 static void
@@ -227,6 +247,9 @@ gp_sql_ProcessUtility(PlannedStmt *pstmt, const char *queryString,
 	List	  **options;
 	List	   *tags = NIL;
 	bool		is_alter = false;
+
+	if (IsA(parsetree, TruncateStmt))
+		GpDirTableCheckTruncate((TruncateStmt *) parsetree);
 
 	options = create_options_of(parsetree);
 
@@ -322,7 +345,22 @@ _PG_init(void)
 	CB_REQUIRE_PRELOAD("gp_sql");
 	CB_REQUIRE_CORE("gp_sql");
 
+	DefineCustomBoolVariable("gp.allow_dml_directory_table",
+							 "Allow ordinary DML on a directory table.",
+							 "Its rows describe files on disk, so writing them "
+							 "by hand makes the two disagree.  Cloudberry calls "
+							 "this allow_dml_directory_table.",
+							 &gp_allow_dml_directory_table,
+							 false,
+							 PGC_SUSET,
+							 0,
+							 NULL, NULL, NULL);
+
 	GpTagRegisterProvider();
+	GpDirTableRegisterXactCallback();
+
+	prev_ExecutorStart = ExecutorStart_hook;
+	ExecutorStart_hook = gp_sql_ExecutorStart;
 
 	prev_ProcessUtility = ProcessUtility_hook;
 	ProcessUtility_hook = gp_sql_ProcessUtility;
