@@ -39,11 +39,13 @@ Milestone **M1**, in progress.  Every module builds and loads, and the ones
 that may only be preloaded refuse to load any other way.  Two of them carry a
 feature rather than a stub:
 
-- `gp_matview` — incrementally maintained materialized views, complete as far
-  as one node goes.  A view over one table, over several, or over a table
-  joined to itself is maintained by delta, as are `count`, `sum` and `avg`.
-  What the delta cannot express — an outer join, `min`, `max`, TRUNCATE — is
-  recomputed, which is slower and just as correct.
+- `gp_matview` — incrementally maintained materialized views and dynamic
+  tables, complete as far as one node goes.  A view over one table, over
+  several, or over a table joined to itself is maintained by delta, as are
+  `count`, `sum` and `avg`; what the delta cannot express — an outer join,
+  `min`, `max`, TRUNCATE — is recomputed, which is slower and just as correct.
+  A dynamic table is `WITH (gp.dynamic_schedule = '…')` and refreshes itself
+  through `gp_task`.
 - `gp_task` — the task scheduler.  `gp_task.create_task()` and friends over
   tables in one database, run on their schedules by a background worker.
 

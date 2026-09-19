@@ -45,3 +45,33 @@ CREATE FUNCTION gp_matview.applied_delta() RETURNS bigint
   AS 'MODULE_PATHNAME', 'gp_ivm_stats_delta' LANGUAGE C;
 CREATE FUNCTION gp_matview.recomputed() RETURNS bigint
   AS 'MODULE_PATHNAME', 'gp_ivm_stats_recompute' LANGUAGE C;
+
+/*
+ * Dynamic tables: a materialized view that refreshes on a schedule.
+ *
+ * Cloudberry marks one with pg_class.relisdynamic and keeps the schedule in
+ * its task; here the "gp" label is both, so the schedule is what says a view
+ * is dynamic.  This is Cloudberry's pg_get_dynamic_table_schedule.
+ */
+CREATE FUNCTION gp_matview.dynamic_schedule(matview regclass)
+RETURNS text
+AS 'MODULE_PATHNAME', 'gp_dynamic_schedule'
+LANGUAGE C STABLE STRICT;
+
+COMMENT ON FUNCTION gp_matview.dynamic_schedule(regclass) IS
+	'the schedule a dynamic table refreshes on, or NULL if it is not one';
+
+CREATE VIEW gp_matview.dynamic_tables AS
+	SELECT n.nspname AS schemaname,
+		   c.relname AS matviewname,
+		   pg_catalog.pg_get_userbyid(c.relowner) AS matviewowner,
+		   s.schedule
+	  FROM pg_catalog.pg_class c
+	  JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace
+	  CROSS JOIN LATERAL gp_matview.dynamic_schedule(c.oid) AS s(schedule)
+	 WHERE c.relkind = 'm' AND s.schedule IS NOT NULL;
+
+COMMENT ON VIEW gp_matview.dynamic_tables IS
+	'the materialized views that refresh on a schedule; Cloudberry calls this pg_dynamic_tables';
+
+GRANT SELECT ON gp_matview.dynamic_tables TO PUBLIC;

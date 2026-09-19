@@ -46,6 +46,9 @@
 /* The option that asks for one: CREATE MATERIALIZED VIEW ... WITH (gp.incremental) */
 #define GP_IVM_OPTION		"gp.incremental"
 
+/* And the one that asks for a dynamic table; see dynamic.c. */
+#define GP_DYN_OPTION		"gp.dynamic_schedule"
+
 /*
  * What one statement leaves for the maintenance that follows it.  ivm_state.c
  * says why this has to be kept, and ivm_delta.c is what reads it.
@@ -94,6 +97,11 @@ extern Query *GpIvmRewriteQuery(Query *query, List *colNames);
 extern void GpIvmAfterCreate(Oid matviewOid, Query *rewritten);
 extern bool GpIvmIsIncremental(Oid matviewOid);
 extern char *ivm_companion_name(const char *kind, const char *resname);
+
+/* dynamic.c */
+extern bool GpDynTakeOption(List **options, char **schedule);
+extern void GpDynAfterCreate(Oid matviewOid, const char *schedule);
+extern void GpDynDropped(Oid matviewOid);
 
 /* ivm_state.c */
 extern void GpIvmEntryBefore(Oid matviewOid);

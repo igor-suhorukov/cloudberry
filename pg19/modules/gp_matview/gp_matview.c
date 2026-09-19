@@ -32,6 +32,7 @@
 #include "postgres.h"
 
 #include "catalog/namespace.h"
+#include "catalog/objectaccess.h"
 #include "catalog/pg_class.h"
 #include "commands/createas.h"
 #include "fmgr.h"
@@ -55,6 +56,7 @@ PG_MODULE_MAGIC_EXT(
 
 static ProcessUtility_hook_type prev_ProcessUtility = NULL;
 static star_expansion_filter_hook_type prev_star_filter = NULL;
+static object_access_hook_type prev_object_access = NULL;
 
 /* ------------------------------------------------------------------------- */
 /* O28: the hidden columns stay out of "*"                                   */
@@ -91,6 +93,32 @@ gp_matview_star_filter(Oid relid)
 }
 
 /* ------------------------------------------------------------------------- */
+/* Dropping one                                                              */
+/* ------------------------------------------------------------------------- */
+
+/*
+ * Cloudberry makes a dynamic table's refresh task an internal dependency of
+ * the view, so that dropping one drops the other.  A job here is a row in
+ * gp_task's table rather than a catalog object, so this stands in for that
+ * dependency.  The triggers and the label of an incremental view need nothing
+ * here: those are real dependencies and PostgreSQL drops them itself.
+ */
+static void
+gp_matview_object_access(ObjectAccessType access, Oid classId, Oid objectId,
+						 int subId, void *arg)
+{
+	if (prev_object_access)
+		prev_object_access(access, classId, objectId, subId, arg);
+
+	if (access != OAT_DROP || classId != RelationRelationId || subId != 0)
+		return;
+	if (get_rel_relkind(objectId) != RELKIND_MATVIEW)
+		return;
+
+	GpDynDropped(objectId);
+}
+
+/* ------------------------------------------------------------------------- */
 /* The create path                                                           */
 /* ------------------------------------------------------------------------- */
 
@@ -110,6 +138,8 @@ gp_matview_ProcessUtility(PlannedStmt *pstmt, const char *queryString,
 	Node	   *parsetree = pstmt->utilityStmt;
 	CreateTableAsStmt *ctas = NULL;
 	bool		incremental = false;
+	bool		dynamic = false;
+	char	   *schedule = NULL;
 	Query	   *rewritten = NULL;
 
 	if (IsA(parsetree, CreateTableAsStmt))
@@ -117,10 +147,13 @@ gp_matview_ProcessUtility(PlannedStmt *pstmt, const char *queryString,
 		ctas = (CreateTableAsStmt *) parsetree;
 
 		if (ctas->objtype == OBJECT_MATVIEW && ctas->into != NULL)
+		{
 			incremental = GpIvmTakeOption(&ctas->into->options);
+			dynamic = GpDynTakeOption(&ctas->into->options, &schedule);
+		}
 	}
 
-	if (!incremental)
+	if (!incremental && !dynamic)
 	{
 		if (prev_ProcessUtility)
 			prev_ProcessUtility(pstmt, queryString, readOnlyTree, context,
@@ -131,20 +164,23 @@ gp_matview_ProcessUtility(PlannedStmt *pstmt, const char *queryString,
 		return;
 	}
 
-	/* What the view is made of has to be something maintenance can follow. */
-	GpIvmCheckQuery((Query *) ctas->query);
+	if (incremental)
+	{
+		/* What the view is made of has to be something maintenance can follow. */
+		GpIvmCheckQuery((Query *) ctas->query);
 
-	/*
-	 * Both copies of the query have to gain the hidden columns: ctas->query
-	 * is what fills the view, and into->viewQuery is what becomes its rule.
-	 * Rewriting only one leaves the rule and the relation disagreeing on how
-	 * many columns there are.
-	 */
-	rewritten = GpIvmRewriteQuery((Query *) ctas->query, ctas->into->colNames);
-	ctas->query = (Node *) rewritten;
-	if (ctas->into->viewQuery != NULL)
-		ctas->into->viewQuery =
-			GpIvmRewriteQuery((Query *) ctas->into->viewQuery, ctas->into->colNames);
+		/*
+		 * Both copies of the query have to gain the hidden columns:
+		 * ctas->query is what fills the view, and into->viewQuery is what
+		 * becomes its rule.  Rewriting only one leaves the rule and the
+		 * relation disagreeing on how many columns there are.
+		 */
+		rewritten = GpIvmRewriteQuery((Query *) ctas->query, ctas->into->colNames);
+		ctas->query = (Node *) rewritten;
+		if (ctas->into->viewQuery != NULL)
+			ctas->into->viewQuery =
+				GpIvmRewriteQuery((Query *) ctas->into->viewQuery, ctas->into->colNames);
+	}
 
 	if (prev_ProcessUtility)
 		prev_ProcessUtility(pstmt, queryString, readOnlyTree, context,
@@ -160,7 +196,10 @@ gp_matview_ProcessUtility(PlannedStmt *pstmt, const char *queryString,
 	{
 		Oid			matviewOid = RangeVarGetRelid(ctas->into->rel, NoLock, false);
 
-		GpIvmAfterCreate(matviewOid, rewritten);
+		if (incremental)
+			GpIvmAfterCreate(matviewOid, rewritten);
+		if (dynamic)
+			GpDynAfterCreate(matviewOid, schedule);
 	}
 }
 
@@ -182,4 +221,7 @@ _PG_init(void)
 
 	prev_star_filter = star_expansion_filter_hook;
 	star_expansion_filter_hook = gp_matview_star_filter;
+
+	prev_object_access = object_access_hook;
+	object_access_hook = gp_matview_object_access;
 }
