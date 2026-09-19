@@ -41,7 +41,7 @@ PORT="${PGPORT:-$((5600 + RANDOM % 300))}"
 export PGPORT="$PORT"
 export PGHOST="$PGDATA_ROOT"
 
-PRELOAD_ALL='gp_core,interconnect,gp_orca,gp_ao,pax,gp_matview,gp_task'
+PRELOAD_ALL='gp_core,interconnect,gp_orca,gp_ao,pax,gp_matview,gp_task,gp_sql'
 EXTENSIONS='gp_core gp_orca gp_ao pax gp_exttable gp_resource gp_security gp_task gp_matview gp_sql'
 
 pass=0; fail=0
@@ -84,7 +84,7 @@ fi
 echo "1. the preload-only modules refuse to load any other way"
 ###############################################################################
 if start_with ''; then
-	for m in gp_core interconnect gp_orca gp_ao pax gp_matview gp_task; do
+	for m in gp_core interconnect gp_orca gp_ao pax gp_matview gp_task gp_sql; do
 		out=$(q "LOAD '$m';")
 		case "$out" in
 			*"can only be loaded through \"shared_preload_libraries\""*)
@@ -124,7 +124,7 @@ if start_with "$PRELOAD_ALL"; then
 	ok "server starts with $PRELOAD_ALL"
 
 	loaded=$(q "SELECT string_agg(module_name, ',' ORDER BY module_name) FROM pg_get_loaded_modules();")
-	for m in gp_core interconnect gp_orca gp_ao pax gp_matview gp_task; do
+	for m in gp_core interconnect gp_orca gp_ao pax gp_matview gp_task gp_sql; do
 		case ",$loaded," in
 			*",$m,"*) ok "$m is loaded" ;;
 			*)        notok "$m is not in pg_get_loaded_modules()" "$loaded" ;;

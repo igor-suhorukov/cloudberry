@@ -24,5 +24,6 @@ comment = 'Cloudberry-only SQL surface: tags, directory tables, storage servers'
 default_version = '1.0'
 module_pathname = '$libdir/gp_sql'
 relocatable = false
+schema = gp_sql
 requires = 'gp_core'
 superuser = true

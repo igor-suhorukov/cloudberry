@@ -236,8 +236,12 @@ modules = [
                      'modules/gp_matview/ivm_state.c'),
   },
   {
-    'name': 'gp_sql', 'preload': false, 'extension': true, 'build': true,
-    'sources': files('modules/gp_sql/gp_sql.c'),
+    # Preloaded: it reads CREATE TABLE and its friends before PostgreSQL does,
+    # and registers a security label provider, which every backend that reads
+    # such a label needs registered.
+    'name': 'gp_sql', 'preload': true, 'extension': true, 'build': true,
+    'sources': files('modules/gp_sql/gp_sql.c',
+                     'modules/gp_sql/tag.c'),
   },
 ]
 
