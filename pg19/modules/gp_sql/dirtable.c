@@ -433,6 +433,27 @@ gp_sql_dirtable_claim(PG_FUNCTION_ARGS)
 				(errcode(ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE),
 				 errmsg("\"%s\" is already a directory table", get_rel_name(relid))));
 
+	{
+		Oid			reltablespace = get_rel_tablespace(relid);
+		char	   *server = GpStorageTablespaceServer(OidIsValid(reltablespace)
+													   ? reltablespace
+													   : MyDatabaseTableSpace);
+
+		/*
+		 * The tablespace says its files go through a storage server, and
+		 * nothing has registered a handler for one.  Writing local files
+		 * where the user asked for remote ones would be worse than refusing.
+		 */
+		if (server != NULL)
+			ereport(ERROR,
+					(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+					 errmsg("cannot create a directory table in a tablespace that reaches storage server \"%s\"",
+							server),
+					 errdetail("No module has registered a handler for a storage server, so its files could only be written locally."),
+					 errhint("Use a tablespace without %s.server, or load a module that provides the handler.",
+							 GP_OPTION_NS)));
+	}
+
 	location = dirtable_compute_location(relid);
 
 	if (stat(location, &st) == 0)

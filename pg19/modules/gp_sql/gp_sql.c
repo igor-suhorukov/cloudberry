@@ -127,6 +127,24 @@ has_tag_options(List *options)
 	return false;
 }
 
+/* The same for the port's own namespace, which tablespaces use. */
+static bool
+has_gp_options(List *options)
+{
+	ListCell   *lc;
+
+	foreach(lc, options)
+	{
+		DefElem    *def = (DefElem *) lfirst(lc);
+
+		if (def->defnamespace != NULL &&
+			strcmp(def->defnamespace, GP_OPTION_NS) == 0)
+			return true;
+	}
+
+	return false;
+}
+
 /* The same, over the SET/RESET subcommands of an ALTER TABLE. */
 static bool
 alter_has_tag_options(AlterTableStmt *stmt)
@@ -237,6 +255,65 @@ gp_sql_ExecutorStart(QueryDesc *queryDesc, int eflags)
 		standard_ExecutorStart(queryDesc, eflags);
 }
 
+/*
+ * CREATE TABLESPACE ... WITH (gp.server = 's') and ALTER TABLESPACE ... SET.
+ *
+ * Cloudberry names a library and a function in two pg_tablespace columns;
+ * here the tablespace names a storage server and the handler for one
+ * registers itself.  The option is taken out before tablespace_reloptions
+ * would reject it, and recorded once the tablespace exists.
+ */
+static void
+gp_sql_tablespace_options(PlannedStmt *pstmt, const char *queryString,
+						  bool readOnlyTree, ProcessUtilityContext context,
+						  ParamListInfo params, QueryEnvironment *queryEnv,
+						  DestReceiver *dest, QueryCompletion *qc)
+{
+	Node	   *parsetree = pstmt->utilityStmt;
+	List	  **options;
+	List	   *opts;
+	const char *spcname;
+
+	if (IsA(parsetree, CreateTableSpaceStmt))
+		options = &((CreateTableSpaceStmt *) parsetree)->options;
+	else
+		options = &((AlterTableSpaceOptionsStmt *) parsetree)->options;
+
+	if (has_gp_options(*options))
+	{
+		if (readOnlyTree)
+		{
+			pstmt = copyObject(pstmt);
+			parsetree = pstmt->utilityStmt;
+			readOnlyTree = false;
+			if (IsA(parsetree, CreateTableSpaceStmt))
+				options = &((CreateTableSpaceStmt *) parsetree)->options;
+			else
+				options = &((AlterTableSpaceOptionsStmt *) parsetree)->options;
+		}
+		opts = GpStorageTakeTablespaceOptions(options);
+	}
+	else
+		opts = NIL;
+
+	if (prev_ProcessUtility)
+		prev_ProcessUtility(pstmt, queryString, readOnlyTree, context,
+							params, queryEnv, dest, qc);
+	else
+		standard_ProcessUtility(pstmt, queryString, readOnlyTree, context,
+								params, queryEnv, dest, qc);
+
+	if (opts == NIL)
+		return;
+
+	if (IsA(parsetree, CreateTableSpaceStmt))
+		spcname = ((CreateTableSpaceStmt *) parsetree)->tablespacename;
+	else
+		spcname = ((AlterTableSpaceOptionsStmt *) parsetree)->tablespacename;
+
+	GpStorageApplyToTablespace(spcname, opts);
+}
+
 static void
 gp_sql_ProcessUtility(PlannedStmt *pstmt, const char *queryString,
 					  bool readOnlyTree, ProcessUtilityContext context,
@@ -250,6 +327,14 @@ gp_sql_ProcessUtility(PlannedStmt *pstmt, const char *queryString,
 
 	if (IsA(parsetree, TruncateStmt))
 		GpDirTableCheckTruncate((TruncateStmt *) parsetree);
+
+	if (IsA(parsetree, CreateTableSpaceStmt) ||
+		IsA(parsetree, AlterTableSpaceOptionsStmt))
+	{
+		gp_sql_tablespace_options(pstmt, queryString, readOnlyTree, context,
+								  params, queryEnv, dest, qc);
+		return;
+	}
 
 	options = create_options_of(parsetree);
 

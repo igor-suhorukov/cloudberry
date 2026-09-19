@@ -60,7 +60,8 @@
 	X(distributed_by,  true,  "the distribution key of a table") \
 	X(execute_on,      true,  "where a function may run") \
 	X(directory_location, true, "where a directory table keeps its files") \
-	X(profile,         true,  "the password profile a role is under")
+	X(profile,         true,  "the password profile a role is under") \
+	X(storage_server,  true,  "the storage server a tablespace's files go through")
 
 typedef enum GpLabelKey
 {

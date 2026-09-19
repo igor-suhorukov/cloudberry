@@ -742,3 +742,190 @@ COMMENT ON VIEW gp_sql.directory_tables IS
 	'the tables that hold files; Cloudberry keeps these in pg_directory_table';
 
 GRANT SELECT ON gp_sql.directory_tables TO PUBLIC;
+
+/******************************************************************************
+ * Storage servers
+ *
+ * Cloudberry's gp_storage_server and gp_storage_user_mapping have a foreign
+ * server's columns and a foreign server's rules about who may change a
+ * mapping, so they become ordinary SERVER and USER MAPPING objects of a
+ * data-less foreign data wrapper.  Nothing is reimplemented -- the option
+ * bookkeeping, the ownership rules, pg_dump and the pg_user_mappings view
+ * that hides another user's options all come with them.
+ *
+ * The wrapper has no handler on purpose: a storage server is somewhere files
+ * live, not something to read foreign tables from.
+ *****************************************************************************/
+
+CREATE FOREIGN DATA WRAPPER gp_storage;
+
+COMMENT ON FOREIGN DATA WRAPPER gp_storage IS
+	'the wrapper Cloudberry''s storage servers become; it reads nothing itself';
+
+CREATE FUNCTION gp_sql.create_storage_server(servername name,
+											 options jsonb DEFAULT NULL)
+RETURNS void
+LANGUAGE plpgsql
+AS $$
+DECLARE
+	opts text;
+BEGIN
+	/* jsonb keeps no insertion order, so write them in a stable one. */
+	SELECT string_agg(format('%I %L', key, value), ', ' ORDER BY key)
+	  INTO opts FROM jsonb_each_text(coalesce(options, '{}'::jsonb));
+
+	EXECUTE format('CREATE SERVER %I FOREIGN DATA WRAPPER gp_storage%s',
+				   servername,
+				   CASE WHEN opts IS NULL THEN '' ELSE ' OPTIONS (' || opts || ')' END);
+END;
+$$;
+
+COMMENT ON FUNCTION gp_sql.create_storage_server(name, jsonb) IS
+	'define a storage server; what Cloudberry writes as CREATE STORAGE SERVER';
+
+CREATE FUNCTION gp_sql.alter_storage_server(servername name,
+											set_options jsonb DEFAULT NULL,
+											drop_options text[] DEFAULT NULL)
+RETURNS void
+LANGUAGE plpgsql
+AS $$
+DECLARE
+	have jsonb;
+	parts text[] := '{}';
+	k	 text;
+BEGIN
+	SELECT coalesce(jsonb_object_agg(o.k, o.v), '{}'::jsonb) INTO have
+	  FROM gp_sql.storage_server_options(servername) AS o(k, v);
+
+	FOR k IN SELECT jsonb_object_keys(coalesce(set_options, '{}'::jsonb)) LOOP
+		parts := parts || format('%s %I %L',
+								 CASE WHEN have ? k THEN 'SET' ELSE 'ADD' END,
+								 k, set_options ->> k);
+	END LOOP;
+
+	IF drop_options IS NOT NULL THEN
+		FOREACH k IN ARRAY drop_options LOOP
+			parts := parts || format('DROP %I', k);
+		END LOOP;
+	END IF;
+
+	IF array_length(parts, 1) IS NULL THEN
+		RETURN;
+	END IF;
+
+	EXECUTE format('ALTER SERVER %I OPTIONS (%s)',
+				   servername, array_to_string(parts, ', '));
+END;
+$$;
+
+COMMENT ON FUNCTION gp_sql.alter_storage_server(name, jsonb, text[]) IS
+	'change a storage server''s options; what Cloudberry writes as ALTER STORAGE SERVER';
+
+CREATE FUNCTION gp_sql.drop_storage_server(servername name,
+										   missing_ok boolean DEFAULT false)
+RETURNS void
+LANGUAGE plpgsql
+AS $$
+BEGIN
+	EXECUTE format('DROP SERVER %s %I',
+				   CASE WHEN missing_ok THEN 'IF EXISTS' ELSE '' END, servername);
+END;
+$$;
+
+CREATE FUNCTION gp_sql.create_storage_user_mapping(servername name,
+												   username name DEFAULT CURRENT_USER,
+												   options jsonb DEFAULT NULL)
+RETURNS void
+LANGUAGE plpgsql
+AS $$
+DECLARE
+	opts text;
+BEGIN
+	SELECT string_agg(format('%I %L', key, value), ', ' ORDER BY key)
+	  INTO opts FROM jsonb_each_text(coalesce(options, '{}'::jsonb));
+
+	EXECUTE format('CREATE USER MAPPING FOR %I SERVER %I%s',
+				   username, servername,
+				   CASE WHEN opts IS NULL THEN '' ELSE ' OPTIONS (' || opts || ')' END);
+END;
+$$;
+
+COMMENT ON FUNCTION gp_sql.create_storage_user_mapping(name, name, jsonb) IS
+	'what Cloudberry writes as CREATE STORAGE USER MAPPING; credentials stay in pg_user_mapping, which is revoked';
+
+CREATE FUNCTION gp_sql.drop_storage_user_mapping(servername name,
+												 username name DEFAULT CURRENT_USER,
+												 missing_ok boolean DEFAULT false)
+RETURNS void
+LANGUAGE plpgsql
+AS $$
+BEGIN
+	EXECUTE format('DROP USER MAPPING %s FOR %I SERVER %I',
+				   CASE WHEN missing_ok THEN 'IF EXISTS' ELSE '' END,
+				   username, servername);
+END;
+$$;
+
+/* A storage server's options, for whoever may see them. */
+CREATE FUNCTION gp_sql.storage_server_options(servername name)
+RETURNS TABLE (key text, value text)
+LANGUAGE sql STABLE STRICT
+BEGIN ATOMIC
+	SELECT pg_catalog.split_part(o, '=', 1),
+		   pg_catalog.substr(o, pg_catalog.strpos(o, '=') + 1)
+	  FROM pg_catalog.pg_foreign_server s
+	  CROSS JOIN LATERAL unnest(coalesce(s.srvoptions, '{}'::text[])) AS u(o)
+	 WHERE s.srvname = servername;
+END;
+
+CREATE VIEW gp_sql.storage_servers AS
+	SELECT s.srvname AS servername,
+		   pg_catalog.pg_get_userbyid(s.srvowner) AS serverowner,
+		   s.srvoptions AS options
+	  FROM pg_catalog.pg_foreign_server s
+	  JOIN pg_catalog.pg_foreign_data_wrapper w ON w.oid = s.srvfdw
+	 WHERE w.fdwname = 'gp_storage';
+
+COMMENT ON VIEW gp_sql.storage_servers IS
+	'the storage servers of this database; Cloudberry keeps these in the shared catalog gp_storage_server';
+
+GRANT SELECT ON gp_sql.storage_servers TO PUBLIC;
+
+/*
+ * Mappings, with the options as pg_user_mappings shows them: a user who may
+ * not see another user's credentials gets NULL, which is what protects them.
+ */
+CREATE VIEW gp_sql.storage_user_mappings AS
+	SELECT m.srvname AS servername,
+		   m.usename AS username,
+		   m.umoptions AS options
+	  FROM pg_catalog.pg_user_mappings m
+	  JOIN pg_catalog.pg_foreign_server s ON s.srvname = m.srvname
+	  JOIN pg_catalog.pg_foreign_data_wrapper w ON w.oid = s.srvfdw
+	 WHERE w.fdwname = 'gp_storage';
+
+COMMENT ON VIEW gp_sql.storage_user_mappings IS
+	'the storage user mappings of this database; Cloudberry keeps these in gp_storage_user_mapping';
+
+GRANT SELECT ON gp_sql.storage_user_mappings TO PUBLIC;
+
+/*
+ * Which storage server a tablespace's files go through, which Cloudberry
+ * keeps in pg_tablespace.spcfilehandlersrc and spcfilehandlerbin.  It is
+ * written as CREATE TABLESPACE ... WITH (gp.server = 's').
+ */
+CREATE FUNCTION gp_sql.tablespace_storage_server(spcname name) RETURNS text
+AS 'MODULE_PATHNAME', 'gp_sql_tablespace_storage_server'
+LANGUAGE C STRICT STABLE;
+
+COMMENT ON FUNCTION gp_sql.tablespace_storage_server(name) IS
+	'the storage server a tablespace reaches, or NULL for an ordinary local one';
+
+CREATE VIEW gp_sql.storage_tablespaces AS
+	SELECT t.spcname AS tablespacename,
+		   s.servername
+	  FROM pg_catalog.pg_tablespace t
+	  CROSS JOIN LATERAL gp_sql.tablespace_storage_server(t.spcname) AS s(servername)
+	 WHERE s.servername IS NOT NULL;
+
+GRANT SELECT ON gp_sql.storage_tablespaces TO PUBLIC;

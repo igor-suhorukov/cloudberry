@@ -242,7 +242,8 @@ modules = [
     'name': 'gp_sql', 'preload': true, 'extension': true, 'build': true,
     'sources': files('modules/gp_sql/gp_sql.c',
                      'modules/gp_sql/tag.c',
-                     'modules/gp_sql/dirtable.c'),
+                     'modules/gp_sql/dirtable.c',
+                     'modules/gp_sql/storage.c'),
   },
 ]
 

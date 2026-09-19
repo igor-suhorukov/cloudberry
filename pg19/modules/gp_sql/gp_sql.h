@@ -44,6 +44,9 @@ struct QueryDesc;
  */
 #define GP_TAG_OPTION_NS	"gp_tag"
 
+/* The port's own option namespace, which gp_core owns. */
+#define GP_OPTION_NS		"gp"
+
 /* tag.c */
 
 /*
@@ -98,6 +101,17 @@ extern void GpDirTableDropped(Oid relid);
 
 /* Registered during preload; drains the files a transaction leaves behind. */
 extern void GpDirTableRegisterXactCallback(void);
+
+/* storage.c */
+
+/* Take WITH (gp.server = '...') out of a tablespace's option list. */
+extern List *GpStorageTakeTablespaceOptions(List **options);
+
+/* Record it on the tablespace, once the statement has made one. */
+extern void GpStorageApplyToTablespace(const char *spcname, List *opts);
+
+/* Which storage server a tablespace reaches, or NULL for a local one. */
+extern char *GpStorageTablespaceServer(Oid spcId);
 
 /*
  * Refuse a tag name or value the definitions in gp_sql.tag do not allow.
