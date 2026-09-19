@@ -46,10 +46,14 @@
 #include "nodes/parsenodes.h"
 #include "tcop/utility.h"
 #include "utils/guc.h"
+#include "utils/acl.h"
+#include "utils/builtins.h"
 #include "utils/lsyscache.h"
 
 #include "cb_module.h"
 #include "gp_core_api.h"
+#include "gp_grammar.h"
+#include "gp_label.h"
 #include "gp_sql.h"
 
 PG_MODULE_MAGIC_EXT(
@@ -414,6 +418,53 @@ gp_sql_ProcessUtility(PlannedStmt *pstmt, const char *queryString,
 	PG_END_TRY();
 }
 
+PG_FUNCTION_INFO_V1(gp_sql_set_distribution);
+PG_FUNCTION_INFO_V1(gp_sql_distribution);
+
+/*
+ * gp_sql.set_distribution(regclass, text)
+ *
+ * What DISTRIBUTED BY says, recorded on the table.  What reads it is the
+ * dispatch of M2; on one node every table is on the one node, so recording it
+ * is all there is to do here.
+ */
+Datum
+gp_sql_set_distribution(PG_FUNCTION_ARGS)
+{
+	Oid			relid = PG_GETARG_OID(0);
+	ObjectAddress addr;
+
+	if (!object_ownercheck(RelationRelationId, relid, GetUserId()))
+		aclcheck_error(ACLCHECK_NOT_OWNER, OBJECT_TABLE, get_rel_name(relid));
+
+	ObjectAddressSet(addr, RelationRelationId, relid);
+
+	if (PG_ARGISNULL(1))
+		GpLabelSet(&addr, GP_LABEL_distributed_by, NULL);
+	else
+		GpLabelSet(&addr, GP_LABEL_distributed_by,
+				   text_to_cstring(PG_GETARG_TEXT_PP(1)));
+
+	PG_RETURN_VOID();
+}
+
+/* gp_sql.distribution(regclass) -> text */
+Datum
+gp_sql_distribution(PG_FUNCTION_ARGS)
+{
+	Oid			relid = PG_GETARG_OID(0);
+	ObjectAddress addr;
+	char	   *policy;
+
+	ObjectAddressSet(addr, RelationRelationId, relid);
+	policy = GpLabelGet(&addr, GP_LABEL_distributed_by);
+
+	if (policy == NULL)
+		PG_RETURN_NULL();
+
+	PG_RETURN_TEXT_P(cstring_to_text(policy));
+}
+
 void
 _PG_init(void)
 {
@@ -443,6 +494,12 @@ _PG_init(void)
 
 	GpTagRegisterProvider();
 	GpDirTableRegisterXactCallback();
+
+	/*
+	 * O26: Cloudberry's own spelling of a statement is rewritten into
+	 * PostgreSQL's before the grammar sees it.  See pg19/grammar/.
+	 */
+	GpGrammarInstallHook();
 
 	prev_ExecutorStart = ExecutorStart_hook;
 	ExecutorStart_hook = gp_sql_ExecutorStart;

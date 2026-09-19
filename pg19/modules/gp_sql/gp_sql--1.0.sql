@@ -929,3 +929,38 @@ CREATE VIEW gp_sql.storage_tablespaces AS
 	 WHERE s.servername IS NOT NULL;
 
 GRANT SELECT ON gp_sql.storage_tablespaces TO PUBLIC;
+
+/******************************************************************************
+ * Where DISTRIBUTED BY lands
+ *
+ * O26's grammar rewrites DISTRIBUTED BY (a, b), DISTRIBUTED RANDOMLY and
+ * DISTRIBUTED REPLICATED into a call to this.  What reads the policy is the
+ * dispatch of M2; on one node every table is on the one node, so recording it
+ * is all there is to do here.
+ *****************************************************************************/
+
+CREATE FUNCTION gp_sql.set_distribution(rel regclass, policy text)
+RETURNS void
+AS 'MODULE_PATHNAME', 'gp_sql_set_distribution'
+LANGUAGE C;
+
+COMMENT ON FUNCTION gp_sql.set_distribution(regclass, text) IS
+	'record what DISTRIBUTED BY said; a NULL policy takes it away';
+
+CREATE FUNCTION gp_sql.distribution(rel regclass) RETURNS text
+AS 'MODULE_PATHNAME', 'gp_sql_distribution'
+LANGUAGE C STRICT STABLE;
+
+COMMENT ON FUNCTION gp_sql.distribution(regclass) IS
+	'the distribution policy a table was given, or NULL';
+
+/*
+ * What O26's hook would hand to PostgreSQL's parser.  For looking at a
+ * rewrite, and for the tests to assert on one.
+ */
+CREATE FUNCTION gp_sql.desugar(statement text) RETURNS text
+AS 'MODULE_PATHNAME', 'gp_sql_desugar'
+LANGUAGE C STRICT IMMUTABLE;
+
+COMMENT ON FUNCTION gp_sql.desugar(text) IS
+	'Cloudberry''s spelling of a statement, rewritten into PostgreSQL 19''s';

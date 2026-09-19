@@ -47,6 +47,10 @@ static const struct
 /*
  * Parse a label into its keys.  Returns a list of "key=value" strings in
  * order, so that setting one key can put the others back unchanged.
+ *
+ * A value may hold a comma -- a distribution key list is one -- so a value
+ * that would be ambiguous is written in double quotes, with a quote inside it
+ * doubled, and the split has to know that.
  */
 static List *
 gp_label_parse(const char *label)
@@ -56,32 +60,85 @@ gp_label_parse(const char *label)
 
 	while (p && *p)
 	{
-		const char *comma = strchr(p, ',');
-		int			len = comma ? (int) (comma - p) : (int) strlen(p);
+		const char *start;
+		bool		in_quotes = false;
+		int			len;
 		char	   *item;
 
-		while (len > 0 && (*p == ' ' || *p == '\t'))
-		{
+		while (*p == ' ' || *p == '\t')
 			p++;
-			len--;
+		start = p;
+
+		while (*p != '\0' && (in_quotes || *p != ','))
+		{
+			if (*p == '"')
+				in_quotes = !in_quotes;
+			p++;
 		}
-		while (len > 0 && (p[len - 1] == ' ' || p[len - 1] == '\t'))
+
+		len = (int) (p - start);
+		while (len > 0 && (start[len - 1] == ' ' || start[len - 1] == '\t'))
 			len--;
 
 		if (len > 0)
 		{
 			item = palloc(len + 1);
-			memcpy(item, p, len);
+			memcpy(item, start, len);
 			item[len] = '\0';
 			items = lappend(items, item);
 		}
 
-		if (!comma)
-			break;
-		p = comma + 1;
+		if (*p == ',')
+			p++;
 	}
 
 	return items;
+}
+
+/* Undo the quoting above.  The result is palloc'd. */
+static char *
+gp_label_unquote(const char *value)
+{
+	StringInfoData buf;
+
+	if (value[0] != '"')
+		return pstrdup(value);
+
+	initStringInfo(&buf);
+	for (const char *p = value + 1; *p != '\0'; p++)
+	{
+		if (*p == '"')
+		{
+			if (p[1] == '"')	/* a quote inside, written twice */
+				p++;
+			else
+				break;			/* the closing quote */
+		}
+		appendStringInfoChar(&buf, *p);
+	}
+
+	return buf.data;
+}
+
+/* Quote a value that would otherwise be read as two items, or as a quote. */
+static void
+gp_label_append_value(StringInfo buf, const char *value)
+{
+	if (strchr(value, ',') == NULL && strchr(value, '"') == NULL &&
+		value[0] != ' ' && value[strlen(value) - 1] != ' ')
+	{
+		appendStringInfoString(buf, value);
+		return;
+	}
+
+	appendStringInfoChar(buf, '"');
+	for (const char *p = value; *p != '\0'; p++)
+	{
+		if (*p == '"')
+			appendStringInfoChar(buf, '"');
+		appendStringInfoChar(buf, *p);
+	}
+	appendStringInfoChar(buf, '"');
 }
 
 /* The key an item names, or -1 if it names none of ours. */
@@ -138,6 +195,8 @@ gp_label_check(const ObjectAddress *object, const char *seclabel)
 					 errmsg("unrecognized \"%s\" security label key in \"%s\"",
 							GP_LABEL_PROVIDER, item)));
 
+		value = gp_label_unquote(value);
+
 		if (!gp_label_key[key].takes_value && value[0] != '\0')
 			ereport(ERROR,
 					(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
@@ -165,7 +224,7 @@ GpLabelGet(const ObjectAddress *object, GpLabelKey key)
 		const char *value = NULL;
 
 		if (gp_label_item_key(item, &value) == (int) key)
-			return pstrdup(value);
+			return gp_label_unquote(value);
 	}
 
 	return NULL;
@@ -207,7 +266,10 @@ GpLabelSet(const ObjectAddress *object, GpLabelKey key, const char *value)
 			appendStringInfoChar(&buf, ',');
 		appendStringInfoString(&buf, gp_label_key[key].name);
 		if (value[0] != '\0')
-			appendStringInfo(&buf, "=%s", value);
+		{
+			appendStringInfoChar(&buf, '=');
+			gp_label_append_value(&buf, value);
+		}
 	}
 
 	/* An object with nothing left to say loses its label entirely. */

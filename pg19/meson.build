@@ -248,11 +248,14 @@ modules = [
     'sources': files('modules/gp_sql/gp_sql.c',
                      'modules/gp_sql/tag.c',
                      'modules/gp_sql/dirtable.c',
-                     'modules/gp_sql/storage.c'),
+                     'modules/gp_sql/storage.c',
+                     # O26's desugaring: Cloudberry's spelling of a statement
+                     # rewritten into PostgreSQL's, before the grammar sees it.
+                     'grammar/gp_desugar.c'),
   },
 ]
 
-cb_inc = include_directories('include', 'compat')
+cb_inc = include_directories('include', 'compat', 'grammar')
 
 built_modules = []
 preload_modules = []
