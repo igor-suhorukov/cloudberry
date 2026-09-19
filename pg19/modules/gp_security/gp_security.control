@@ -24,5 +24,6 @@ comment = 'Password profiles, account locking and login windows'
 default_version = '1.0'
 module_pathname = '$libdir/gp_security'
 relocatable = false
+schema = gp_security
 requires = 'gp_core'
 superuser = true

@@ -27,6 +27,7 @@
  */
 #include "postgres.h"
 
+#include "access/xact.h"
 #include "commands/seclabel.h"
 #include "lib/stringinfo.h"
 #include "utils/builtins.h"
@@ -212,6 +213,13 @@ GpLabelSet(const ObjectAddress *object, GpLabelKey key, const char *value)
 	/* An object with nothing left to say loses its label entirely. */
 	SetSecurityLabel(object, GP_LABEL_PROVIDER, buf.len > 0 ? buf.data : NULL);
 	pfree(buf.data);
+
+	/*
+	 * Setting two keys of one object is two writes to the same row, and the
+	 * second has to see the first -- otherwise it reads the label as it was
+	 * and then fails with "tuple already updated by self".
+	 */
+	CommandCounterIncrement();
 }
 
 void

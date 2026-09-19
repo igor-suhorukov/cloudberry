@@ -208,8 +208,13 @@ modules = [
     'sources': files('modules/gp_resource/gp_resource.c'),
   },
   {
-    'name': 'gp_security', 'preload': false, 'extension': true, 'build': true,
-    'sources': files('modules/gp_security/gp_security.c'),
+    # Preloaded: it registers a background worker and the authentication hook,
+    # and neither can be done once the postmaster is running.
+    'name': 'gp_security', 'preload': true, 'extension': true, 'build': true,
+    'sources': files('modules/gp_security/gp_security.c',
+                     'modules/gp_security/profile.c',
+                     'modules/gp_security/login.c',
+                     'modules/gp_security/password.c'),
   },
   {
     # Preloaded: a background worker can only be registered while libraries
