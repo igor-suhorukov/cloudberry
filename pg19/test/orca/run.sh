@@ -1,0 +1,179 @@
+#!/bin/bash
+#
+# Licensed to the Apache Software Foundation (ASF) under one
+# or more contributor license agreements.  See the NOTICE file
+# distributed with this work for additional information
+# regarding copyright ownership.  The ASF licenses this file
+# to you under the Apache License, Version 2.0 (the
+# "License"); you may not use this file except in compliance
+# with the License.  You may obtain a copy of the License at
+#
+#   http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing,
+# software distributed under the License is distributed on an
+# "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+# KIND, either express or implied.  See the License for the
+# specific language governing permissions and limitations
+# under the License.
+#
+# gp_orca: ORCA is linked in, comes up, and is Cloudberry's.
+#
+# The module is ORCA's four core libraries compiled from Cloudberry's own tree
+# at their own paths -- 920 sources, unmodified, because not one file under
+# them includes a PostgreSQL header -- plus a translator under pg19/orca/ that
+# is the port's own code, being the only part that knows what a PostgreSQL is.
+#
+# What these tests are for: to show that the ORCA the server runs is the one
+# the port means to run.  A build that quietly picked up the single-node fork
+# of ORCA would pass "does it load"; it would not pass "does it carry
+# Cloudberry's own transformation rules".
+
+set -u
+
+BINDIR="${PG_BINDIR:-$(dirname "$(command -v pg_config || echo /usr/local/pgsql/bin/pg_config)")}"
+PSQL="$BINDIR/psql"
+export LD_LIBRARY_PATH="$("$BINDIR/pg_config" --libdir)${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+
+# gp_orca is built only where -Dorca=true, so skip rather than fail when the
+# library is not there.
+if [ ! -f "$("$BINDIR/pg_config" --pkglibdir)/gp_orca.so" ]; then
+	echo "gp_orca was not built (-Dorca=false); skipping"
+	exit 77
+fi
+
+WORK="$(mktemp -d "${TMPDIR:-/tmp}/cb-orca-XXXXXX")"
+SOCK="$(mktemp -d /tmp/cbo-XXXXXX)"
+PORT="${PGPORT:-$((6500 + RANDOM % 200))}"
+export PGPORT="$PORT" PGHOST="$SOCK"
+
+pass=0; fail=0
+ok()    { printf '  ok     %s\n' "$1"; pass=$((pass + 1)); }
+notok() { printf '  NOT OK %s\n' "$1"
+          [ -n "${2:-}" ] && printf '%s\n' "$2" | head -8 | sed 's/^/         /'
+          fail=$((fail + 1)); }
+
+cleanup() {
+	"$BINDIR/pg_ctl" -D "$WORK/data" -m immediate stop > /dev/null 2>&1
+	[ -n "${KEEP:-}" ] && echo "kept: $WORK" || rm -rf "$WORK"
+	rm -rf "$SOCK"
+}
+trap cleanup EXIT
+
+q() { "$PSQL" -X -q -t -A -d postgres -c "$1" 2>&1; }
+
+is() {
+	local got; got=$(q "$2")
+	[ "$got" = "$3" ] && ok "$1" || notok "$1" "want [$3], got [$got]"
+}
+
+has() {
+	local got; got=$(q "$2")
+	case "$got" in
+		*"$3"*) ok "$1" ;;
+		*) notok "$1" "expected [$3] in [$got]" ;;
+	esac
+}
+
+echo "gp_orca: ORCA on PostgreSQL 19"
+echo "  bindir $BINDIR"
+echo
+
+"$BINDIR/initdb" -D "$WORK/data" -N --locale=C --encoding=UTF8 > "$WORK/initdb.log" 2>&1 \
+	|| { echo "initdb failed"; tail -20 "$WORK/initdb.log"; exit 1; }
+{
+	echo "unix_socket_directories = '$SOCK'"
+	echo "listen_addresses = ''"
+	echo "port = $PORT"
+	echo "shared_preload_libraries = 'gp_core,gp_orca'"
+} >> "$WORK/data/postgresql.conf"
+
+"$BINDIR/pg_ctl" -D "$WORK/data" -l "$WORK/log" -w -t 60 start > /dev/null 2>&1 \
+	|| { echo "server did not start"; tail -20 "$WORK/log"; exit 1; }
+
+q "CREATE EXTENSION gp_orca CASCADE;" > /dev/null
+
+echo "1. ORCA is linked in and comes up"
+
+is "the module loads and reports its source" \
+   "SELECT source FROM gp_orca.version();" \
+   "Apache Cloudberry"
+
+is "asking brings it up in this backend" \
+   "SELECT initialized FROM gp_orca.version();" "t"
+
+is "it carries transformation rules" \
+   "SELECT xforms > 100 FROM gp_orca.version();" "t"
+
+is "the count and the listing agree" \
+   "SELECT (SELECT xforms FROM gp_orca.version()) = (SELECT count(*) FROM gp_orca.xforms());" \
+   "t"
+
+echo
+echo "2. it is Cloudberry's ORCA, not the single-node fork"
+
+# These three rules exist only in Cloudberry's tree.  They come with the core,
+# which the port takes whole, so their presence is what says the port did not
+# quietly build somebody else's ORCA.
+for x in CXformGet2ParallelTableScan \
+         CXformPushPartialAggBelowJoin \
+         CXformImplementHashSequenceProject; do
+	is "$x is present" \
+	   "SELECT count(*) FROM gp_orca.xforms() x WHERE x = '$x';" "1"
+done
+
+is "so are the rules every ORCA has" \
+   "SELECT count(*) FROM gp_orca.xforms() x
+      WHERE x IN ('CXformGet2TableScan', 'CXformLeftOuterJoin2HashJoin');" "2"
+
+echo
+echo "3. the id space has holes, and walking it does not fall into them"
+
+# Twenty-four rules have been retired over ORCA's life.  Their ids stay in the
+# enum so that the ids around them do not move -- every stored minidump
+# depends on that -- and the factory has no entry for them.  ORCA's own
+# Pxf() dereferences what it finds before returning it, so a walk that does
+# not ask IsXformIdUsed() first takes an assert-enabled backend down.  This
+# test is here because writing it that way did exactly that.
+is "no rule comes back nameless" \
+   "SELECT count(*) FROM gp_orca.xforms() x WHERE x IS NULL OR x = '' OR x = '?';" "0"
+
+is "every rule is named for its class" \
+   "SELECT count(*) FROM gp_orca.xforms() x WHERE x NOT LIKE 'CXform%';" "0"
+
+is "no rule is listed twice" \
+   "SELECT count(*) FROM (SELECT x FROM gp_orca.xforms() x GROUP BY x HAVING count(*) > 1) d;" \
+   "0"
+
+is "the id space is wider than the rules in it" \
+   "SELECT count(*) < 177 FROM gp_orca.xforms();" "t"
+
+echo
+echo "4. ORCA comes up per backend, on demand"
+
+# It is not brought up in _PG_init: its libraries build process-local state
+# that a postmaster has no use for and that every backend would then inherit
+# through fork.  The failure that would hide here is the one ORCA asserts on
+# itself -- "Xform factory was already initialized" -- so what is worth
+# testing is that a second backend brings it up again from nothing, and that
+# one backend asking twice does not try to.
+for n in 1 2 3; do
+	got=$("$PSQL" -X -q -t -A -d postgres \
+	      -c "SELECT xforms FROM gp_orca.version();" 2>&1)
+	[ "$got" -gt 100 ] 2>/dev/null \
+		&& ok "backend $n brings ORCA up from nothing" \
+		|| notok "backend $n brings ORCA up from nothing" "got [$got]"
+done
+
+is "asking twice in one backend is not a second init" \
+   "SELECT count(DISTINCT xforms) FROM (
+      SELECT (gp_orca.version()).xforms UNION ALL
+      SELECT (gp_orca.version()).xforms UNION ALL
+      SELECT (gp_orca.version()).xforms) v(xforms);" "1"
+
+is "the server carries none of ORCA's settings of its own" \
+   "SELECT count(*) FROM pg_settings WHERE name LIKE 'optimizer%';" "0"
+
+echo
+echo "  $pass passed, $fail failed"
+[ "$fail" -eq 0 ]

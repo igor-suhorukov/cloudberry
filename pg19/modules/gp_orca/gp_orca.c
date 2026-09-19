@@ -27,28 +27,133 @@
  * records every plan that falls back and why (decision 1).  O4 makes the
  * Motion lines read as they do on Cloudberry.
  *
- * Cloudberry sources this module is made of:
- *	  src/backend/gpopt/, src/backend/gporca/, src/include/gpopt/
+ * Where the code comes from, and why it is split the way it is:
  *
- * At this milestone the module only loads.
+ *	  ORCA's four core libraries -- libgpos, libnaucrates, libgpopt,
+ *	  libgpdbcost, 920 sources and some 380k lines -- are compiled from
+ *	  Cloudberry's own tree at their own paths, unmodified.  Not one file
+ *	  under them includes a PostgreSQL header, so there is no PostgreSQL 16
+ *	  in them to port, and taking them whole is what keeps Cloudberry's ORCA
+ *	  features -- plan hints, parallel scans, the dedup-superset
+ *	  preprocessor, partial aggregation below joins -- without porting a line.
+ *
+ *	  The translator, under pg19/orca/, is the port's own code, because it is
+ *	  the only part that knows what a PostgreSQL is, and so the only part
+ *	  where PostgreSQL 16 had to become PostgreSQL 19.
+ *
+ * At this milestone the module brings ORCA up and reports what is linked;
+ * planning through it comes next.
  *
  *-------------------------------------------------------------------------
  */
 #include "postgres.h"
 
+#include "access/htup_details.h"
 #include "fmgr.h"
+#include "funcapi.h"
+#include "utils/builtins.h"
 
 #include "cb_module.h"
 #include "gp_core_api.h"
+#include "gp_orca_api.h"
 
 PG_MODULE_MAGIC_EXT(
 					.name = "gp_orca",
 					.version = GP_VERSION
 );
 
+PG_FUNCTION_INFO_V1(gp_orca_version);
+PG_FUNCTION_INFO_V1(gp_orca_xforms);
+
+/*
+ * gp_orca.version()
+ *
+ * What ORCA is linked in, and whether it comes up.  The xform count is the
+ * number that tells one ORCA from another: Cloudberry's tree and pgorca's
+ * carry different transformation rules, so the tests read it to confirm the
+ * port is running the ORCA it means to.
+ */
+Datum
+gp_orca_version(PG_FUNCTION_ARGS)
+{
+	TupleDesc	tupdesc;
+	Datum		values[3];
+	bool		nulls[3] = {false, false, false};
+	HeapTuple	tuple;
+
+	if (get_call_result_type(fcinfo, NULL, &tupdesc) != TYPEFUNC_COMPOSITE)
+		elog(ERROR, "return type must be a row type");
+	tupdesc = BlessTupleDesc(tupdesc);
+
+	GpOrcaEnsureInitialized();
+
+	values[0] = CStringGetTextDatum("Apache Cloudberry");
+	values[1] = Int32GetDatum(GpOrcaXformCount());
+	values[2] = BoolGetDatum(GpOrcaIsInitialized());
+
+	tuple = heap_form_tuple(tupdesc, values, nulls);
+	PG_RETURN_DATUM(HeapTupleGetDatum(tuple));
+}
+
+/*
+ * gp_orca.xforms()
+ *
+ * Every transformation rule this ORCA carries, by name.
+ *
+ * A rule is what ORCA searches with, so this is the honest answer to "what
+ * can this optimizer do".  It is also how to see which ORCA is linked in:
+ * Cloudberry's tree carries ExfGet2ParallelTableScan,
+ * ExfPushPartialAggBelowJoin and ExfImplementHashSequenceProject, which the
+ * single-node fork of ORCA does not.
+ */
+Datum
+gp_orca_xforms(PG_FUNCTION_ARGS)
+{
+	FuncCallContext *funcctx;
+
+	if (SRF_IS_FIRSTCALL())
+	{
+		MemoryContext oldcontext;
+
+		funcctx = SRF_FIRSTCALL_INIT();
+		oldcontext = MemoryContextSwitchTo(funcctx->multi_call_memory_ctx);
+
+		GpOrcaEnsureInitialized();
+		funcctx->max_calls = GpOrcaXformIdLimit();
+
+		MemoryContextSwitchTo(oldcontext);
+	}
+
+	funcctx = SRF_PERCALL_SETUP();
+
+	/*
+	 * Walk the id space rather than the rules, and skip the holes in it:
+	 * rules retired over ORCA's life keep their ids so that the rules around
+	 * them do not move, and those ids have no name.
+	 */
+	while (funcctx->call_cntr < funcctx->max_calls)
+	{
+		const char *name = GpOrcaXformName((int) funcctx->call_cntr);
+
+		if (name != NULL)
+			SRF_RETURN_NEXT(funcctx, CStringGetTextDatum(name));
+
+		funcctx->call_cntr++;
+	}
+
+	SRF_RETURN_DONE(funcctx);
+}
+
 void
 _PG_init(void)
 {
 	CB_REQUIRE_PRELOAD("gp_orca");
 	CB_REQUIRE_CORE("gp_orca");
+
+	/*
+	 * ORCA is not brought up here.  Its libraries build process-local state
+	 * that a postmaster has no use for, and that every backend would then
+	 * inherit through fork; a backend that never plans with ORCA should pay
+	 * nothing for it.  GpOrcaEnsureInitialized() does it on first use.
+	 */
 }

@@ -31,10 +31,19 @@ project('cloudberry-pg19', 'c',
   meson_version: '>= 0.57',
   # gnu11, not c11: PostgreSQL's headers use POSIX declarations such as
   # sigjmp_buf and clock_gettime, which strict ISO mode hides.
-  default_options: ['c_std=gnu11', 'warning_level=1', 'b_ndebug=if-release'],
+  # c++17 is what ORCA is written against.
+  default_options: ['c_std=gnu11', 'cpp_std=c++17', 'warning_level=1',
+                    'b_ndebug=if-release'],
 )
 
 cc = meson.get_compiler('c')
+
+# ORCA is C++.  Ask for the language only when it is being built, so that a
+# build with -Dorca=false needs no C++ compiler at all.
+if get_option('orca')
+  add_languages('cpp', native: false, required: true)
+  cpp = meson.get_compiler('cpp')
+endif
 
 ###############################################################################
 # The PostgreSQL we build against
@@ -157,6 +166,25 @@ if not have_patched_pg and get_option('require_patched_pg')
 endif
 
 ###############################################################################
+# ORCA
+#
+# Built before the module table, because gp_orca's entry names what comes out
+# of it: orca_core (Cloudberry's ORCA, unmodified), orca_transl_sources (the
+# translator, which is the port's own code), and the include paths and
+# xerces-c that both need.  See orca/meson.build.
+###############################################################################
+
+orca_core = []
+orca_deps = []
+orca_inc = []
+orca_transl_sources = []
+orca_cpp_args = []
+
+if get_option('orca')
+  subdir('orca')
+endif
+
+###############################################################################
 # The modules
 #
 #   preload   this module may only be loaded through shared_preload_libraries
@@ -184,8 +212,16 @@ modules = [
     'sources': files('modules/udp2/udp2.c'),
   },
   {
+    # ORCA, which is C++: the module is its four core libraries from
+    # Cloudberry's tree, unmodified, plus the translator under orca/, which is
+    # the only part that knows about PostgreSQL and so the only part the port
+    # had to write.
     'name': 'gp_orca', 'preload': true, 'extension': true, 'build': get_option('orca'),
-    'sources': files('modules/gp_orca/gp_orca.c'),
+    'sources': files('modules/gp_orca/gp_orca.c') + orca_transl_sources,
+    'cpp_args': orca_cpp_args,
+    'link_with': orca_core,
+    'dependencies': orca_deps,
+    'include_directories': orca_inc,
   },
   {
     'name': 'gp_ao', 'preload': true, 'extension': true, 'build': true,
@@ -269,8 +305,11 @@ foreach m : modules
 
   shared_module(name, m['sources'],
     c_args: mod_c_args,
+    cpp_args: m.get('cpp_args', []),
     link_args: mod_link_args,
-    include_directories: [pg_inc, cb_inc],
+    link_with: m.get('link_with', []),
+    dependencies: m.get('dependencies', []),
+    include_directories: [pg_inc, cb_inc] + m.get('include_directories', []),
     name_prefix: '',
     install: true,
     install_dir: pg_pkglibdir,

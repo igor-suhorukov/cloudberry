@@ -41,10 +41,13 @@ FROM debian:trixie-slim AS build
 ARG CB_REF
 USER root
 
+# libxerces-c-dev is ORCA's: its intermediate form, DXL, is XML, and the
+# parser and serializer are written against xerces.  g++ comes with
+# build-essential; ORCA is C++17.
 RUN apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
         build-essential meson ninja-build pkg-config git ca-certificates \
         libreadline-dev zlib1g-dev libicu-dev libssl-dev liblz4-dev libzstd-dev \
-        libxml2-dev libxslt1-dev \
+        libxml2-dev libxslt1-dev libxerces-c-dev \
     && rm -rf /var/lib/apt/lists/*
 
 COPY --from=pg /usr/local/pgsql /usr/local/pgsql
@@ -68,6 +71,11 @@ RUN meson setup /cb/build /cb/pg19 \
 FROM ${PG_IMAGE} AS runtime
 ###############################################################################
 USER root
+# gp_orca links against xerces-c, so the runtime image needs the library even
+# though it does not need the headers.
+RUN apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+        libxerces-c3.2 \
+    && rm -rf /var/lib/apt/lists/*
 # The whole prefix, rather than lib/ and share/extension/ separately: where
 # PostgreSQL puts its data files depends on the prefix -- $prefix/share when
 # the prefix ends in "pgsql" or "postgres", $prefix/share/postgresql when it
