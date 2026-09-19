@@ -40,3 +40,29 @@ LANGUAGE C STRICT;
 
 COMMENT ON FUNCTION gp_orca.xforms() IS
 	'the transformation rules this ORCA was built with';
+
+/*
+ * What the server-side checks say about a query, before ORCA is asked to plan
+ * it.  ORCA declines some shapes on these answers.
+ *
+ * "orderby_ordering_op" is the KNN shape: ORDER BY over an ordering operator
+ * on a plain column, which PostgreSQL's planner turns into a GiST index scan
+ * and ORCA cannot, so ORCA leaves the query to the planner.
+ *
+ * "non_default_collation" is whether anything in the query carries a collation
+ * that is not the default one.  Cloudberry's own copy of this check still
+ * carries a merge marker from PostgreSQL 9.1 ("GPDB_91_MERGE_FIXME:
+ * collation"), so it answers that one question and no more.
+ */
+CREATE FUNCTION gp_orca.explain_refusal(
+	sql text,
+	OUT orderby_ordering_op boolean,
+	OUT non_default_collation boolean)
+RETURNS record
+AS 'MODULE_PATHNAME', 'gp_orca_explain_refusal'
+LANGUAGE C STRICT;
+
+REVOKE ALL ON FUNCTION gp_orca.explain_refusal(text) FROM PUBLIC;
+
+COMMENT ON FUNCTION gp_orca.explain_refusal(text) IS
+	'what the checks in front of ORCA say about a query';

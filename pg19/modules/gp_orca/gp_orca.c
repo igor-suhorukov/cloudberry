@@ -51,7 +51,12 @@
 #include "access/htup_details.h"
 #include "fmgr.h"
 #include "funcapi.h"
+#include "nodes/pg_list.h"
+#include "parser/analyze.h"
+#include "tcop/tcopprot.h"
 #include "utils/builtins.h"
+
+#include "optimizer/walkers.h"
 
 #include "cb_module.h"
 #include "gp_core_api.h"
@@ -64,6 +69,7 @@ PG_MODULE_MAGIC_EXT(
 
 PG_FUNCTION_INFO_V1(gp_orca_version);
 PG_FUNCTION_INFO_V1(gp_orca_xforms);
+PG_FUNCTION_INFO_V1(gp_orca_explain_refusal);
 
 /*
  * gp_orca.version()
@@ -142,6 +148,57 @@ gp_orca_xforms(PG_FUNCTION_ARGS)
 	}
 
 	SRF_RETURN_DONE(funcctx);
+}
+
+/*
+ * gp_orca.explain_refusal(sql)
+ *
+ * What the server-side checks say about a query, before ORCA is asked to plan
+ * it.  ORCA declines some queries on the answers, and this is how to see why
+ * without reading a log: ORDER BY over an ordering operator on a plain column
+ * is the KNN shape PostgreSQL's planner turns into a GiST index scan and ORCA
+ * cannot, so ORCA leaves those alone.
+ *
+ * It is also how the port's own copies of those checks are tested.  They are
+ * re-implementations of functions Cloudberry adds to PostgreSQL's
+ * lsyscache.c and walkers.c, and the port does not build those files, so
+ * something has to say that the copies answer the same way.
+ */
+Datum
+gp_orca_explain_refusal(PG_FUNCTION_ARGS)
+{
+	char	   *sql = text_to_cstring(PG_GETARG_TEXT_PP(0));
+	List	   *raw;
+	Query	   *query;
+	TupleDesc	tupdesc;
+	Datum		values[2];
+	bool		nulls[2] = {false, false};
+	HeapTuple	tuple;
+
+	if (get_call_result_type(fcinfo, NULL, &tupdesc) != TYPEFUNC_COMPOSITE)
+		elog(ERROR, "return type must be a row type");
+	tupdesc = BlessTupleDesc(tupdesc);
+
+	raw = pg_parse_query(sql);
+	if (list_length(raw) != 1)
+		ereport(ERROR,
+				(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+				 errmsg("expected exactly one statement, got %d",
+						list_length(raw))));
+
+	query = parse_analyze_fixedparams(linitial_node(RawStmt, raw), sql,
+									  NULL, 0, NULL);
+
+	values[0] = BoolGetDatum(has_orderby_ordering_op(query));
+	/*
+	 * check_collation() answers 1 or -1, not an OID: it says only whether
+	 * something in the query carries a collation other than the default.
+	 * Cloudberry's copy still carries the merge marker that says so.
+	 */
+	values[1] = BoolGetDatum(check_collation((Node *) query) == 1);
+
+	tuple = heap_form_tuple(tupdesc, values, nulls);
+	PG_RETURN_DATUM(HeapTupleGetDatum(tuple));
 }
 
 void

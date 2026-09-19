@@ -75,6 +75,14 @@ has() {
 	esac
 }
 
+refused() {
+	local got; got=$(q "$2")
+	case "$got" in
+		*"$3"*) ok "$1" ;;
+		*) notok "$1" "expected an error containing [$3], got [$got]" ;;
+	esac
+}
+
 echo "gp_orca: ORCA on PostgreSQL 19"
 echo "  bindir $BINDIR"
 echo
@@ -173,6 +181,53 @@ is "asking twice in one backend is not a second init" \
 
 is "the server carries none of ORCA's settings of its own" \
    "SELECT count(*) FROM pg_settings WHERE name LIKE 'optimizer%';" "0"
+
+echo
+echo "5. the checks in front of ORCA answer as Cloudberry's do"
+
+# These two are the port's own copies of functions Cloudberry adds to
+# PostgreSQL's optimizer/walkers.c.  The port does not build that file, so
+# nothing would otherwise say that the copies answer the same way -- and one of
+# them decides whether ORCA declines a query, so a wrong answer is a plan
+# silently going somewhere else.
+#
+# has_orderby_ordering_op is the KNN shape: ORDER BY over an ordering operator
+# whose argument is a plain column.  PostgreSQL's planner turns those into a
+# GiST index scan and ORCA cannot, so ORCA leaves them alone.  The distinction
+# it has to draw is between a bare column and a column inside a function.
+q "CREATE TABLE pts (id int, p point, t text, u text COLLATE \"C\");" > /dev/null
+
+is "ORDER BY over an ordering operator on a plain column is the KNN shape" \
+   "SELECT orderby_ordering_op FROM gp_orca.explain_refusal(
+      'SELECT id FROM pts ORDER BY p <-> point ''(0,0)''');" "t"
+
+is "the same operator over a computed argument is not" \
+   "SELECT orderby_ordering_op FROM gp_orca.explain_refusal(
+      'SELECT id FROM pts ORDER BY center(box(p,p)) <-> point ''(0,0)''');" "f"
+
+is "an ordinary ORDER BY is not" \
+   "SELECT orderby_ordering_op FROM gp_orca.explain_refusal(
+      'SELECT id FROM pts ORDER BY id');" "f"
+
+is "and neither is no ORDER BY at all" \
+   "SELECT orderby_ordering_op FROM gp_orca.explain_refusal(
+      'SELECT id FROM pts');" "f"
+
+is "nothing collatable means no non-default collation" \
+   "SELECT non_default_collation FROM gp_orca.explain_refusal(
+      'SELECT id FROM pts');" "f"
+
+is "a column with the default collation does not count either" \
+   "SELECT non_default_collation FROM gp_orca.explain_refusal(
+      'SELECT t FROM pts');" "f"
+
+is "a column declared COLLATE \"C\" does" \
+   "SELECT non_default_collation FROM gp_orca.explain_refusal(
+      'SELECT u FROM pts');" "t"
+
+refused "more than one statement is refused rather than half read" \
+        "SELECT gp_orca.explain_refusal('SELECT 1; SELECT 2');" \
+        "exactly one statement"
 
 echo
 echo "  $pass passed, $fail failed"

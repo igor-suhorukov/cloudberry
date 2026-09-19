@@ -121,12 +121,21 @@ orca_core = static_library('gporca_core',
 # already sets for PostgreSQL files Cloudberry modified.
 ###############################################################################
 
-orca_transl_inc = include_directories('include')
+orca_transl_inc = include_directories('include', 'compat')
+
+# compat/ is the port's re-implementation of what ORCA asks of a PostgreSQL
+# that Cloudberry had patched.  Those functions live in PostgreSQL files
+# Cloudberry edited, which the port does not build, so ORCA would otherwise
+# have nothing to call.  It is C, not C++: it is server code, and it is the
+# translator above it that crosses into C++.
+orca_compat_sources = files(
+  'compat/walkers.c',
+)
 
 orca_transl_sources = files(
   'gpdbwrappers.cpp',
   'orca_api.cpp',
-)
+) + orca_compat_sources
 
 ###############################################################################
 # What the module links against
