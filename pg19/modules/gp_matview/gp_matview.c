@@ -123,6 +123,41 @@ gp_matview_object_access(ObjectAccessType access, Oid classId, Oid objectId,
 /* ------------------------------------------------------------------------- */
 
 /*
+ * Is one of this module's options in the list?
+ *
+ * Asked before anything is taken out of it, because taking one out is a
+ * change to the statement, and a statement that arrives with readOnlyTree may
+ * not be changed.  It builds the dotted name the same way the two take
+ * functions do, because the parser splits "gp.incremental" into a namespace
+ * and a name and only the pair means anything.
+ */
+static bool
+has_matview_option(List *options)
+{
+	ListCell   *lc;
+
+	foreach(lc, options)
+	{
+		DefElem    *def = (DefElem *) lfirst(lc);
+		char	   *name;
+		bool		ours;
+
+		name = def->defnamespace != NULL
+			? psprintf("%s.%s", def->defnamespace, def->defname)
+			: pstrdup(def->defname);
+
+		ours = (strcmp(name, GP_IVM_OPTION) == 0 ||
+				strcmp(name, GP_DYN_OPTION) == 0);
+		pfree(name);
+
+		if (ours)
+			return true;
+	}
+
+	return false;
+}
+
+/*
  * CREATE MATERIALIZED VIEW ... WITH (gp.incremental) AS <query>
  *
  * The option is taken out here, before transformRelOptions would reject it,
@@ -146,8 +181,33 @@ gp_matview_ProcessUtility(PlannedStmt *pstmt, const char *queryString,
 	{
 		ctas = (CreateTableAsStmt *) parsetree;
 
-		if (ctas->objtype == OBJECT_MATVIEW && ctas->into != NULL)
+		if (ctas->objtype == OBJECT_MATVIEW && ctas->into != NULL &&
+			has_matview_option(ctas->into->options))
 		{
+			/*
+			 * Everything below this point changes the statement: the option
+			 * comes out of the option list, and for an incremental view both
+			 * copies of the query are replaced by rewritten ones.  When
+			 * readOnlyTree says the tree is not ours to change -- it belongs
+			 * to a plan cache -- change a copy instead, and tell the rest of
+			 * the chain that the copy is writable.  gp_sql does the same.
+			 *
+			 * Nothing observable depends on this today, and it is worth
+			 * saying why rather than leaving someone to find out: for a
+			 * saved plan BuildCachedPlan copies query_list before planning
+			 * (pg19/src/backend/utils/cache/plancache.c:1072-1082), and DDL
+			 * invalidates cached plans in any case, so the tree that reaches
+			 * this hook is freshly parsed every time.  What is being kept
+			 * here is the contract, not that accident.
+			 */
+			if (readOnlyTree)
+			{
+				pstmt = copyObject(pstmt);
+				parsetree = pstmt->utilityStmt;
+				ctas = (CreateTableAsStmt *) parsetree;
+				readOnlyTree = false;
+			}
+
 			incremental = GpIvmTakeOption(&ctas->into->options);
 			dynamic = GpDynTakeOption(&ctas->into->options, &schedule);
 		}

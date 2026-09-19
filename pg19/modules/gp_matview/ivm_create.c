@@ -85,13 +85,18 @@ GpIvmTakeOption(List **options)
 
 		if (strcmp(name, GP_IVM_OPTION) == 0)
 		{
-			/* A flag: it takes no value, and saying otherwise is a mistake. */
-			if (def->arg != NULL && !defGetBoolean(def))
-			{
-				pfree(name);
-				continue;		/* WITH (gp.incremental = false): an ordinary view */
-			}
-			found = true;
+			/*
+			 * The option comes out whatever it says, because what is left has
+			 * to be something PostgreSQL will accept and it rejects anything
+			 * in a namespace it does not know.  Only whether an incremental
+			 * view was asked for depends on the value, so
+			 * WITH (gp.incremental = false) is an ordinary materialized view
+			 * and not an error.  Leaving it in was: it reached
+			 * transformRelOptions and failed with "unrecognized parameter
+			 * namespace".
+			 */
+			if (def->arg == NULL || defGetBoolean(def))
+				found = true;
 			*options = foreach_delete_current(*options, lc);
 		}
 		pfree(name);

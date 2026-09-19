@@ -491,13 +491,40 @@ refused "a column named like the hidden ones" \
 ###############################################################################
 echo "7. the option is an option, and an ordinary view is still ordinary"
 ###############################################################################
+# The first of these used to pass for the wrong reason: the statement failed
+# with "unrecognized parameter namespace", no view was made, and a count of
+# labels on a view that does not exist is also zero.  So ask whether the view
+# is there before asking what it is.
 q "CREATE MATERIALIZED VIEW mv3 WITH (gp.incremental = false) AS SELECT grp FROM base;" > /dev/null
-is "WITH (gp.incremental = false) makes an ordinary view" \
+is "WITH (gp.incremental = false) makes a view at all" \
+   "SELECT count(*) FROM pg_class WHERE relname = 'mv3' AND relkind = 'm';" "1"
+is "and it is an ordinary one" \
    "SELECT count(*) FROM pg_seclabels WHERE objname = 'mv3' AND provider = 'gp';" "0"
+is "with no counter column" \
+   "SELECT count(*) FROM pg_attribute
+      WHERE attrelid = 'mv3'::regclass AND attname = '__ivm_count__';" "0"
+is "and no triggers on its base table" \
+   "SELECT count(*) FROM pg_trigger t JOIN pg_class c ON c.oid = t.tgrelid
+     WHERE c.relname = 'base' AND t.tgname LIKE '%' || 'mv3';" "0"
+# The same trap as above: a trigger count of zero is also what a view that was
+# never created gives, so establish the view first.
 q "CREATE MATERIALIZED VIEW mv4 AS SELECT grp FROM base;" > /dev/null
-is "and so does no option at all" \
+is "no option at all makes a view too" \
+   "SELECT count(*) FROM pg_class WHERE relname = 'mv4' AND relkind = 'm';" "1"
+is "and it is ordinary as well" \
    "SELECT count(*) FROM pg_trigger t JOIN pg_class c ON c.oid = t.tgrelid
      WHERE c.relname = 'base' AND t.tgname LIKE '%' || 'mv4';" "0"
+q "CREATE MATERIALIZED VIEW mv5 WITH (gp.incremental = true) AS
+     SELECT grp, count(*) AS n FROM base GROUP BY grp;" > /dev/null
+is "and WITH (gp.incremental = true) says it the long way" \
+   "SELECT count(*) FROM pg_seclabels
+      WHERE objname = 'mv5' AND provider = 'gp' AND label = 'incremental';" "1"
+# It goes again straight away: it is an incremental view over the same base
+# table, so its triggers would otherwise be counted by section 8.
+q "DROP MATERIALIZED VIEW mv5;" > /dev/null
+refused "a value that is not a boolean is refused, and says so" \
+        "CREATE MATERIALIZED VIEW x WITH (gp.incremental = 'banana') AS SELECT 1;" \
+        "requires a Boolean value"
 refused "an unknown gp option is still rejected" \
         "CREATE MATERIALIZED VIEW x WITH (gp.nosuchthing) AS SELECT 1;" \
         "unrecognized parameter namespace"
@@ -527,6 +554,53 @@ refused "a value on a flag" \
 refused "a flag where a value belongs" \
         "SECURITY LABEL FOR gp ON TABLE base IS 'execute_on';" \
         "needs a value"
+
+###############################################################################
+echo "10. the statement is not scribbled on when it is not ours to scribble on"
+###############################################################################
+# Taking the option out and rewriting the query both change the statement, and
+# three callers of ProcessUtility pass readOnlyTree because the tree belongs to
+# a plan cache: SPI (so PL/pgSQL), a SQL-language function, and a portal with a
+# cached plan.  The module copies first in that case.
+#
+# What these tests can and cannot show.  They cannot show the bug the copy
+# prevents: BuildCachedPlan copies query_list for any saved plan
+# (pg19/src/backend/utils/cache/plancache.c:1072-1082), and DDL invalidates
+# cached plans anyway, so for CREATE MATERIALIZED VIEW the tree handed to the
+# hook is freshly parsed every time and a scribble never survives to be seen.
+# What they do show is that the copy is right -- a copy whose ctas pointer was
+# not re-derived, which is the easy mistake here, fails all of these.
+
+q "CREATE TABLE b10 (id int, grp int);
+   INSERT INTO b10 VALUES (1,1),(2,1),(3,2);
+   CREATE FUNCTION mk10() RETURNS void LANGUAGE plpgsql AS \$\$
+   BEGIN
+     DROP MATERIALIZED VIEW IF EXISTS m10;
+     CREATE MATERIALIZED VIEW m10 WITH (gp.incremental) AS
+       SELECT grp, count(*) AS n FROM b10 GROUP BY grp;
+   END \$\$;" > /dev/null
+
+for n in 1 2 3; do
+	q "SELECT mk10();" > /dev/null
+	is "through PL/pgSQL, call $n leaves an incremental view" \
+	   "SELECT count(*) FROM pg_seclabels
+	      WHERE objname = 'm10' AND provider = 'gp' AND label = 'incremental';" "1"
+done
+
+is "and it is maintained, so the rewrite reached the right tree" \
+   "SELECT n FROM m10 WHERE grp = 1;" "2"
+q "INSERT INTO b10 VALUES (4,1);" > /dev/null
+is "still maintained after the last copy" \
+   "SELECT n FROM m10 WHERE grp = 1;" "3"
+
+q "CREATE FUNCTION mksql10() RETURNS void LANGUAGE sql AS \$\$
+     CREATE MATERIALIZED VIEW s10 WITH (gp.incremental) AS
+       SELECT grp, count(*) AS n FROM b10 GROUP BY grp;
+   \$\$;" > /dev/null
+q "SELECT mksql10();" > /dev/null
+is "through a SQL-language function too" \
+   "SELECT count(*) FROM pg_seclabels
+      WHERE objname = 's10' AND provider = 'gp' AND label = 'incremental';" "1"
 
 echo
 echo "  $pass passed, $fail failed"
