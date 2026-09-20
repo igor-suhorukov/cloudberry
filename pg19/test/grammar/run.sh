@@ -563,7 +563,20 @@ is "and the clause is gone from what the parser is handed" \
    "t"
 
 is "a statement with no clause is handed back untouched" \
-   "SELECT gp_sql.desugar('GRANT EXECUTE ON FUNCTION xf10(int) TO PUBLIC') IS NULL;" "t"
+   "SELECT gp_sql.desugar('GRANT EXECUTE ON FUNCTION xf10(int) TO PUBLIC')
+         = 'GRANT EXECUTE ON FUNCTION xf10(int) TO PUBLIC';" "t"
+
+# Taking the clause out of an ALTER leaves no action, and ALTER FUNCTION will
+# not accept that -- so the label replaces the statement.  Written beside
+# another action the ALTER stays and does the rest.  Same shape as
+# ALTER TABLE t TAG (...).
+isl "ALTER FUNCTION with another action keeps the ALTER" \
+   "ALTER FUNCTION xf2(int) STRICT EXECUTE ON ALL SEGMENTS;
+    SELECT proisstrict::text || ' ' ||
+           (SELECT label FROM pg_seclabel WHERE objoid = p.oid
+              AND classoid = 'pg_proc'::regclass AND provider = 'gp')
+      FROM pg_proc p WHERE p.oid = 'xf2(int)'::regprocedure;" \
+   "t execute_on=all_segments"
 
 echo
 echo "  $pass passed, $fail failed"

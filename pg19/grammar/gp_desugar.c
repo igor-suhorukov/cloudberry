@@ -1442,16 +1442,23 @@ rw_execute_on(GpRewrite *rw)
 	StringInfoData sig;
 	int			depth = 0;
 	bool		found = false;
+	bool		altering;
+	int			clause_first = -1;
+	int			clause_after = -1;
 
 	/* CREATE [OR REPLACE] FUNCTION|PROCEDURE, or ALTER FUNCTION|PROCEDURE. */
 	if (tok_is(ts, i, "create"))
 	{
+		altering = false;
 		i++;
 		if (tok_is(ts, i, "or") && tok_is(ts, i + 1, "replace"))
 			i += 2;
 	}
 	else if (tok_is(ts, i, "alter"))
+	{
+		altering = true;
 		i++;
+	}
 	else
 		return false;
 
@@ -1566,11 +1573,26 @@ rw_execute_on(GpRewrite *rw)
 							 objtype, sig.data, locations[k].value);
 			rw_edit(rw, ts->toks[j].off,
 					(after < ts->ntoks) ? ts->toks[after].off : ts->srclen, " ");
+			clause_first = j;
+			clause_after = after;
 			j = after - 1;
 			found = true;
 			break;
 		}
 	}
+
+	/*
+	 * ALTER FUNCTION f(int) EXECUTE ON ANY is a whole statement of
+	 * Cloudberry's, not an action on one of PostgreSQL's: take the clause out
+	 * and there is no action left, which ALTER FUNCTION will not accept.  So
+	 * when the clause is the entire action list, the label replaces the
+	 * statement rather than following it.  Written beside another action --
+	 * ALTER FUNCTION f(int) STRICT EXECUTE ON ANY -- the ALTER stays and does
+	 * the rest.  This is the same shape as ALTER TABLE t TAG (...).
+	 */
+	if (found && altering &&
+		clause_first == sig_end && clause_after == rw->last)
+		rw_whole(rw);
 
 	return found;
 }
