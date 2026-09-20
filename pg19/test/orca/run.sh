@@ -1070,7 +1070,7 @@ is "an interval of a day is a day" \
    "SELECT value FROM gp_orca.timevalue_scalar('interval ''1 day''');" "86400000000"
 
 is "and one of a month is an average month" \
-   "SELECT round(value / 86400000000.0, 4)
+   "SELECT round((value / 86400000000.0)::numeric, 4)
       FROM gp_orca.timevalue_scalar('interval ''1 month''');" "30.4375"
 
 # The failure flag has to be looked at: 0 is a perfectly good timestamp, so
@@ -1098,7 +1098,7 @@ is "and so does its negative" \
 
 refused "a plain cast would have raised instead" \
         "SELECT ('1' || repeat('0', 400))::numeric::float8;" \
-        "value out of range"
+        "is out of range for type double precision"
 
 echo
 echo "  $pass passed, $fail failed"
