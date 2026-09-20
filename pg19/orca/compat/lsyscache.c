@@ -59,12 +59,14 @@
 #include "utils/catcache.h"
 #include "utils/fmgroids.h"
 #include "utils/lsyscache.h"
+#include "utils/regproc.h"
 #include "utils/rel.h"
 #include "utils/relcache.h"
 #include "utils/syscache.h"
 #include "utils/typcache.h"
 
 #include "cb_lsyscache.h"
+#include "gp_label.h"
 
 /*
  * pfree_ptr_array
@@ -225,6 +227,80 @@ get_func_output_arg_types(Oid funcid)
 }
 
 /*
+ * func_exec_location
+ *		Where this function may run: 'a'ny node, the 'c'oordinator only, 'i'n
+ *		an init plan, or all 's'egments.
+ *
+ * Cloudberry reads pg_proc.proexeclocation, a column it adds.  An extension
+ * cannot add a column, so the port reads the "gp" label's execute_on key --
+ * the decision the plan records for EXECUTE ON, and the reason it is a label
+ * rather than a SET in proconfig: PG19 routes a function with a proconfig
+ * through the security-definer call path and never inlines it
+ * (pg19/src/backend/utils/fmgr/fmgr.c:208,
+ * pg19/src/backend/optimizer/util/clauses.c:5489,6038), which would cost
+ * every EXECUTE ON function its inlining whether or not anything dispatched.
+ *
+ * WHAT ORCA DOES WITH THE ANSWER.  One comparison, against ANY: a function
+ * that must run somewhere in particular is a shape ORCA declines to plan
+ * (CTranslatorRelcacheToDXL.cpp:1491).  So an unlabelled function -- which is
+ * every function until something labels one -- is the case that plans, and
+ * ANY is both PostgreSQL's only possible answer and Cloudberry's own default
+ * for the column.
+ *
+ * A value the port does not know is an error rather than a default.  The
+ * alternative is to read an unrecognised word as ANY, which is the one answer
+ * that lets the function run anywhere -- so a typo would quietly widen where
+ * a function may run, which is the opposite of what the label was written to
+ * do.
+ */
+char
+func_exec_location(Oid funcid)
+{
+	static const struct
+	{
+		const char *name;
+		char		location;
+	}			names[] =
+	{
+		{"any", PROEXECLOCATION_ANY},
+		{"coordinator", PROEXECLOCATION_COORDINATOR},
+		/* Cloudberry's older spelling of the same place, still in its docs. */
+		{"master", PROEXECLOCATION_COORDINATOR},
+		{"all_segments", PROEXECLOCATION_ALL_SEGMENTS},
+		{"initplan", PROEXECLOCATION_INITPLAN},
+	};
+	ObjectAddress addr;
+	char	   *value;
+
+	/*
+	 * Cloudberry's syscache lookup raises on an OID that is not a function,
+	 * and ORCA calls this only for a function it has already found; keep the
+	 * check so that a caller which has not gets the same error it always did.
+	 */
+	if (!SearchSysCacheExists1(PROCOID, ObjectIdGetDatum(funcid)))
+		elog(ERROR, "cache lookup failed for function %u", funcid);
+
+	ObjectAddressSet(addr, ProcedureRelationId, funcid);
+	value = GpLabelGet(&addr, GP_LABEL_execute_on);
+
+	if (value == NULL)
+		return PROEXECLOCATION_ANY;
+
+	for (size_t i = 0; i < lengthof(names); i++)
+	{
+		if (pg_strcasecmp(value, names[i].name) == 0)
+			return names[i].location;
+	}
+
+	ereport(ERROR,
+			(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+			 errmsg("unrecognized \"execute_on\" value \"%s\" on function %s",
+					value, format_procedure(funcid)),
+			 errhint("Valid values are \"any\", \"coordinator\", \"all_segments\" and \"initplan\".")));
+	pg_unreachable();
+}
+
+/*
  * get_agg_transtype
  *		The type of this aggregate's transition state.
  *
@@ -245,6 +321,114 @@ get_agg_transtype(Oid aggid)
 	result = ((Form_pg_aggregate) GETSTRUCT(tp))->aggtranstype;
 	ReleaseSysCache(tp);
 	return result;
+}
+
+/*
+ * is_agg_ordered
+ *		Is this an ordered-set or hypothetical-set aggregate?
+ *
+ * Nothing here is Cloudberry's but the name: pg_aggregate.aggkind is
+ * PostgreSQL's own column and AGGKIND_IS_ORDERED_SET its own macro.  The
+ * function exists because ORCA reaches the catalogs only through this layer.
+ *
+ * ORCA asks so that it does not split one.  An ordered-set aggregate is
+ * defined over the whole sorted input, so a partial computed per segment and
+ * combined afterwards would be a different question answered.
+ */
+bool
+is_agg_ordered(Oid aggid)
+{
+	HeapTuple	tp;
+	char		aggkind;
+
+	tp = SearchSysCache1(AGGFNOID, ObjectIdGetDatum(aggid));
+	if (!HeapTupleIsValid(tp))
+		elog(ERROR, "cache lookup failed for aggregate %u", aggid);
+
+	/*
+	 * Cloudberry reads the column through SysCacheGetAttr and asserts it is
+	 * not null.  aggkind is a fixed-width NOT NULL column, so GETSTRUCT
+	 * reaches it directly and the assertion has nothing left to say.
+	 */
+	aggkind = ((Form_pg_aggregate) GETSTRUCT(tp))->aggkind;
+	ReleaseSysCache(tp);
+
+	return AGGKIND_IS_ORDERED_SET(aggkind);
+}
+
+/*
+ * is_agg_partial_capable
+ *		May this aggregate be computed in two phases?
+ *
+ * It needs a combine function to merge two transition values, and, when the
+ * transition value is internal -- a pointer into the aggregate's own memory,
+ * which nothing can send anywhere -- a serial and a deserial function to turn
+ * it into bytea and back.
+ *
+ * ORCA asks twice, for two decisions (CTranslatorRelcacheToDXL.cpp:1628,1633):
+ * whether it may split the aggregate across a Motion, and whether it may hash
+ * rather than sort.  The second looks unrelated and is not: a hash aggregate
+ * may spill, and reading a spilled batch back is the same merge of two
+ * transition values that a split needs.
+ */
+bool
+is_agg_partial_capable(Oid aggid)
+{
+	HeapTuple	tp;
+	Form_pg_aggregate aggform;
+	bool		result = true;
+
+	tp = SearchSysCache1(AGGFNOID, ObjectIdGetDatum(aggid));
+	if (!HeapTupleIsValid(tp))
+		elog(ERROR, "cache lookup failed for aggregate %u", aggid);
+	aggform = (Form_pg_aggregate) GETSTRUCT(tp);
+
+	if (aggform->aggcombinefn == InvalidOid)
+		result = false;
+	else if (aggform->aggtranstype == INTERNALOID)
+	{
+		if (aggform->aggserialfn == InvalidOid ||
+			aggform->aggdeserialfn == InvalidOid)
+			result = false;
+	}
+
+	ReleaseSysCache(tp);
+	return result;
+}
+
+/*
+ * is_agg_repsafe
+ *		May this aggregate be computed on a replicated slice?
+ *
+ * A replicated slice holds the same rows on every segment, so an aggregate
+ * over one is computed everywhere and must give every segment the same
+ * answer.  Most do; one whose result depends on the order rows arrive in, or
+ * on anything local to a segment, does not, and Cloudberry has to gather
+ * instead.
+ *
+ * Cloudberry reads pg_aggregate.aggrepsafeexec, a column it adds, defaulting
+ * to false.  The port reads the "gp" label's replicate_safe flag on the
+ * aggregate's pg_proc entry, which is the same default: absent means no.
+ * Both are the conservative answer, and at this milestone nothing is
+ * replicated, so nothing yet sets the flag -- what this function has to get
+ * right is that it can be set at all, and on the object SECURITY LABEL ... ON
+ * AGGREGATE addresses.
+ */
+bool
+is_agg_repsafe(Oid aggid)
+{
+	ObjectAddress addr;
+
+	if (!SearchSysCacheExists1(AGGFNOID, ObjectIdGetDatum(aggid)))
+		elog(ERROR, "cache lookup failed for aggregate %u", aggid);
+
+	/*
+	 * An aggregate's OID is its pg_proc OID -- AGGFNOID is keyed on
+	 * aggfnoid -- so the object a label goes on is the pg_proc row, which is
+	 * also what SECURITY LABEL ... ON AGGREGATE resolves to.
+	 */
+	ObjectAddressSet(addr, ProcedureRelationId, aggid);
+	return GpLabelHas(&addr, GP_LABEL_replicate_safe);
 }
 
 /*

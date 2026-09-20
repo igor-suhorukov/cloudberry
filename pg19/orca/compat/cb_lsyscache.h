@@ -81,6 +81,25 @@ typedef enum CmpType
 extern char *get_type_name(Oid oid);
 
 /*
+ * Where a function may run.
+ *
+ * Cloudberry keeps this in pg_proc.proexeclocation, a column of its own; the
+ * port keeps it in the "gp" label's execute_on key, which is what the plan
+ * decided for it ("SQL surface", EXECUTE ON).  The characters are
+ * Cloudberry's, unchanged, because ORCA's translator compares against them
+ * by name (CTranslatorRelcacheToDXL.cpp:1491) and the port does not edit
+ * ORCA.  They are redeclared here rather than included from Cloudberry's
+ * pg_proc.h, which is a PostgreSQL 16 header.
+ *
+ * The label spells them out in words -- execute_on=all_segments -- so that a
+ * label a person reads, and pg_dump writes, says what it means.
+ */
+#define PROEXECLOCATION_ANY			'a'
+#define PROEXECLOCATION_COORDINATOR	'c'
+#define PROEXECLOCATION_INITPLAN	'i'
+#define PROEXECLOCATION_ALL_SEGMENTS 's'
+
+/*
  * Functions and aggregates.
  *
  * PostgreSQL answers most of these already, but for one function at a time
@@ -93,6 +112,18 @@ extern List *get_func_arg_types(Oid funcid);
 extern List *get_func_output_arg_types(Oid funcid);
 extern Oid	get_agg_transtype(Oid aggid);
 extern Oid	get_aggregate(const char *aggname, Oid oidType);
+extern char func_exec_location(Oid funcid);
+
+/*
+ * What ORCA may do with an aggregate.
+ *
+ * All three are asked once, when the aggregate's metadata object is built
+ * (CTranslatorRelcacheToDXL.cpp:1623-1637), and together they decide whether
+ * ORCA may split it into a partial and a final half and whether it may hash.
+ */
+extern bool is_agg_ordered(Oid aggid);
+extern bool is_agg_partial_capable(Oid aggid);
+extern bool is_agg_repsafe(Oid aggid);
 
 /*
  * Casts.

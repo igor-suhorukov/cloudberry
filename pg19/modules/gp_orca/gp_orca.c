@@ -77,6 +77,8 @@ PG_FUNCTION_INFO_V1(gp_orca_version);
 PG_FUNCTION_INFO_V1(gp_orca_type_name);
 PG_FUNCTION_INFO_V1(gp_orca_function_fact);
 PG_FUNCTION_INFO_V1(gp_orca_find_aggregate);
+PG_FUNCTION_INFO_V1(gp_orca_aggregate_fact);
+PG_FUNCTION_INFO_V1(gp_orca_exec_location);
 PG_FUNCTION_INFO_V1(gp_orca_cast_fact);
 PG_FUNCTION_INFO_V1(gp_orca_operator_fact);
 PG_FUNCTION_INFO_V1(gp_orca_comparison_operator);
@@ -329,6 +331,63 @@ gp_orca_find_aggregate(PG_FUNCTION_ARGS)
 		PG_RETURN_NULL();
 
 	PG_RETURN_OID(result);
+}
+
+/*
+ * gp_orca.aggregate_fact(oid)
+ *
+ * What ORCA records about an aggregate when it builds its metadata object.
+ * NULL for an OID that is not an aggregate: the compat functions raise on
+ * one, as Cloudberry's do, and ORCA asks only after aggregate_exists().
+ */
+Datum
+gp_orca_aggregate_fact(PG_FUNCTION_ARGS)
+{
+	Oid			aggid = PG_GETARG_OID(0);
+	TupleDesc	tupdesc;
+	Datum		values[4];
+	bool		nulls[4] = {false, false, false, false};
+	HeapTuple	tuple;
+	bool		is_ordered;
+
+	if (get_call_result_type(fcinfo, NULL, &tupdesc) != TYPEFUNC_COMPOSITE)
+		elog(ERROR, "return type must be a row type");
+	tupdesc = BlessTupleDesc(tupdesc);
+
+	if (!aggregate_exists(aggid))
+		PG_RETURN_NULL();
+
+	is_ordered = is_agg_ordered(aggid);
+
+	values[0] = BoolGetDatum(is_ordered);
+	values[1] = BoolGetDatum(is_agg_partial_capable(aggid));
+	values[2] = BoolGetDatum(is_agg_repsafe(aggid));
+
+	/*
+	 * The answer ORCA actually acts on, and it is a conjunction rather than
+	 * either column: it splits an aggregate, and hashes one, only when the
+	 * aggregate is not ordered and has the functions to combine two
+	 * transition values (CTranslatorRelcacheToDXL.cpp:1628,1633).
+	 */
+	values[3] = BoolGetDatum(!is_ordered && is_agg_partial_capable(aggid));
+
+	tuple = heap_form_tuple(tupdesc, values, nulls);
+	PG_RETURN_DATUM(HeapTupleGetDatum(tuple));
+}
+
+/*
+ * gp_orca.exec_location(oid)
+ *
+ * Where a function may run, as the single character ORCA compares against.
+ * 'a' is the answer for every function nothing has labelled, and the only one
+ * ORCA will plan a call of.
+ */
+Datum
+gp_orca_exec_location(PG_FUNCTION_ARGS)
+{
+	char		location = func_exec_location(PG_GETARG_OID(0));
+
+	PG_RETURN_TEXT_P(cstring_to_text_with_len(&location, 1));
 }
 
 /*

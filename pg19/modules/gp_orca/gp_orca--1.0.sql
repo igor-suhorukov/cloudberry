@@ -136,6 +136,60 @@ COMMENT ON FUNCTION gp_orca.find_aggregate(text, oid) IS
 	'the one-argument aggregate of this name over this type';
 
 /*
+ * What ORCA records about an aggregate.
+ *
+ * "is_ordered" is an ordered-set or hypothetical-set aggregate, which is
+ * defined over the whole sorted input and so cannot be computed in halves.
+ * "is_partial_capable" is whether two transition values can be merged: a
+ * combine function, and serial/deserial functions when the transition value
+ * is internal.  "splittable" is the conjunction ORCA acts on, and it decides
+ * both whether the aggregate may be split across a Motion and whether it may
+ * hash -- a hash aggregate may spill, and reading a spilled batch back is the
+ * same merge.
+ *
+ * "is_repsafe" is whether the aggregate may be computed on a replicated
+ * slice, where every segment holds the same rows and so must reach the same
+ * answer.  Cloudberry keeps it in a pg_aggregate column; the port keeps it in
+ * the "gp" label's replicate_safe flag, and absent means no, which is
+ * Cloudberry's default too.
+ *
+ * NULL for an OID that is not an aggregate.
+ */
+CREATE FUNCTION gp_orca.aggregate_fact(
+	oid,
+	OUT is_ordered boolean,
+	OUT is_partial_capable boolean,
+	OUT is_repsafe boolean,
+	OUT splittable boolean)
+RETURNS record
+AS 'MODULE_PATHNAME', 'gp_orca_aggregate_fact'
+LANGUAGE C STRICT;
+
+COMMENT ON FUNCTION gp_orca.aggregate_fact(oid) IS
+	'what ORCA records about an aggregate, and what it may do with it';
+
+/*
+ * Where a function may run: 'a'ny node, the 'c'oordinator only, 'i'n an init
+ * plan, or all 's'egments.
+ *
+ * Cloudberry reads pg_proc.proexeclocation, a column of its own; the port
+ * reads the "gp" label's execute_on key, which is what EXECUTE ON becomes:
+ *
+ *     SECURITY LABEL FOR gp ON FUNCTION f() IS 'execute_on=all_segments'
+ *
+ * An unlabelled function is 'a', which is both PostgreSQL's only possible
+ * answer and the only one ORCA will plan a call of: a function that has to
+ * run somewhere in particular is a shape it declines.
+ */
+CREATE FUNCTION gp_orca.exec_location(oid)
+RETURNS text
+AS 'MODULE_PATHNAME', 'gp_orca_exec_location'
+LANGUAGE C STRICT;
+
+COMMENT ON FUNCTION gp_orca.exec_location(oid) IS
+	'where a function may run, as the character ORCA compares against';
+
+/*
  * Whether an implicit cast exists between two types, and what it costs.
  *
  * "binary_coercible" means the value is already in the target's

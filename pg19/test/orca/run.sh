@@ -300,6 +300,127 @@ is "the wrong argument type finds nothing" \
 is "and a plain function is not an aggregate however it is spelled" \
    "SELECT gp_orca.find_aggregate('abs', 'int4'::regtype) IS NULL;" "t"
 
+# What ORCA records about an aggregate, and the conjunction it acts on.  Two
+# of the three answers are PostgreSQL's own columns under Cloudberry's names;
+# the third, is_repsafe, is a column Cloudberry adds and the port keeps in a
+# label.
+
+is "an ordinary aggregate is not ordered, and can be computed in halves" \
+   "SELECT NOT is_ordered AND is_partial_capable AND splittable
+      FROM gp_orca.aggregate_fact('sum(int4)'::regprocedure);" "t"
+
+# The case the serial/deserial branch exists for: the transition value is a
+# pointer into the aggregate's own memory, so it can only travel once there
+# is something to turn it into bytea and back.
+is "an internal transition type is still splittable when it serialises" \
+   "SELECT is_partial_capable
+      FROM gp_orca.aggregate_fact('string_agg(text,text)'::regprocedure);" "t"
+
+is "an aggregate with no combine function cannot be split" \
+   "SELECT NOT is_ordered AND NOT is_partial_capable AND NOT splittable
+      FROM gp_orca.aggregate_fact('xmlagg(xml)'::regprocedure);" "t"
+
+# An ordered-set aggregate is defined over the whole sorted input, so a
+# partial per segment would answer a different question.
+is "an ordered-set aggregate is ordered, and so not splittable" \
+   "SELECT is_ordered AND NOT splittable
+      FROM gp_orca.aggregate_fact('percentile_cont(float8,float8)'::regprocedure);" "t"
+
+# AGGKIND_IS_ORDERED_SET means "not normal", so it covers the hypothetical-set
+# aggregates too -- which the name does not say and ORCA depends on.
+is "and so is a hypothetical-set aggregate, which the name does not say" \
+   "SELECT is_ordered FROM gp_orca.aggregate_fact('rank(\"any\")'::regprocedure);" "t"
+
+is "a plain function is not an aggregate, and has no facts" \
+   "SELECT gp_orca.aggregate_fact('abs(int4)'::regprocedure) IS NULL;" "t"
+
+# is_repsafe is Cloudberry's pg_aggregate.aggrepsafeexec, which the port keeps
+# in the "gp" label.  Absent means no, which is Cloudberry's default for the
+# column, and at this milestone nothing is replicated -- so what is worth
+# testing is that the label can be set at all, and on the object SECURITY
+# LABEL ... ON AGGREGATE addresses.
+is "no aggregate is replicate-safe until something says so" \
+   "SELECT is_repsafe FROM gp_orca.aggregate_fact('sum(int4)'::regprocedure);" "f"
+
+q "SECURITY LABEL FOR gp ON AGGREGATE sum(int4) IS 'replicate_safe';" > /dev/null
+
+is "and labelling the aggregate is what says so" \
+   "SELECT is_repsafe FROM gp_orca.aggregate_fact('sum(int4)'::regprocedure);" "t"
+
+is "the label goes on the aggregate's pg_proc row, which is its OID" \
+   "SELECT objoid = 'sum(int4)'::regprocedure::oid FROM pg_seclabel
+      WHERE provider = 'gp' AND classoid = 'pg_proc'::regclass;" "t"
+
+is "a sibling aggregate is untouched" \
+   "SELECT is_repsafe FROM gp_orca.aggregate_fact('sum(int8)'::regprocedure);" "f"
+
+q "SECURITY LABEL FOR gp ON AGGREGATE sum(int4) IS NULL;" > /dev/null
+
+is "and removing the label puts it back" \
+   "SELECT is_repsafe FROM gp_orca.aggregate_fact('sum(int4)'::regprocedure);" "f"
+
+refused "replicate_safe is a flag, so a value is a mistake" \
+   "SECURITY LABEL FOR gp ON AGGREGATE sum(int4) IS 'replicate_safe=yes';" \
+   "takes no value"
+
+# Where a function may run.  Cloudberry reads pg_proc.proexeclocation; the
+# port reads the "gp" label's execute_on key, which is what EXECUTE ON
+# becomes.  ORCA makes one comparison with the answer -- against ANY -- and
+# declines to plan a call of anything else.
+q "CREATE FUNCTION placed() RETURNS int LANGUAGE sql AS \$\$ SELECT 1 \$\$;" > /dev/null
+
+is "an unlabelled function may run anywhere" \
+   "SELECT gp_orca.exec_location('placed()'::regprocedure);" "a"
+
+is "which is the only answer ORCA will plan a call of" \
+   "SELECT gp_orca.exec_location('abs(int4)'::regprocedure);" "a"
+
+q "SECURITY LABEL FOR gp ON FUNCTION placed() IS 'execute_on=all_segments';" > /dev/null
+
+is "EXECUTE ON ALL SEGMENTS is a label, and reads back as 's'" \
+   "SELECT gp_orca.exec_location('placed()'::regprocedure);" "s"
+
+q "SECURITY LABEL FOR gp ON FUNCTION placed() IS 'execute_on=coordinator';" > /dev/null
+
+is "the coordinator is 'c'" \
+   "SELECT gp_orca.exec_location('placed()'::regprocedure);" "c"
+
+# Cloudberry's older spelling of the same place, still in its documentation,
+# so a label written by hand from those docs has to mean what it says.
+q "SECURITY LABEL FOR gp ON FUNCTION placed() IS 'execute_on=master';" > /dev/null
+
+is "and so is master, which is what Cloudberry used to call it" \
+   "SELECT gp_orca.exec_location('placed()'::regprocedure);" "c"
+
+q "SECURITY LABEL FOR gp ON FUNCTION placed() IS 'execute_on=initplan';" > /dev/null
+
+is "an init plan is 'i'" \
+   "SELECT gp_orca.exec_location('placed()'::regprocedure);" "i"
+
+# A typo must not read as "runs anywhere".  That is the one value that lets
+# the function run everywhere, so defaulting to it would quietly undo the
+# label rather than report it.
+q "SECURITY LABEL FOR gp ON FUNCTION placed() IS 'execute_on=segments';" > /dev/null
+
+refused "a value the port does not know is an error, not ANY" \
+   "SELECT gp_orca.exec_location('placed()'::regprocedure);" \
+   "unrecognized \"execute_on\" value \"segments\""
+
+has "and the error names the function it is on" \
+   "SELECT gp_orca.exec_location('placed()'::regprocedure);" "placed()"
+
+q "SECURITY LABEL FOR gp ON FUNCTION placed() IS NULL;" > /dev/null
+
+is "removing the label puts the function back everywhere" \
+   "SELECT gp_orca.exec_location('placed()'::regprocedure);" "a"
+
+refused "execute_on needs a value; the bare key is a mistake" \
+   "SECURITY LABEL FOR gp ON FUNCTION placed() IS 'execute_on';" \
+   "needs a value"
+
+refused "and nothing is at OID 0" \
+   "SELECT gp_orca.exec_location(0);" "cache lookup failed for function 0"
+
 is "a cast that needs a function reports it" \
    "SELECT cast_exists AND NOT binary_coercible AND path_type = 'func'
       FROM gp_orca.cast_fact('int4'::regtype, 'int8'::regtype);" "t"
