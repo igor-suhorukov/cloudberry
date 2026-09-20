@@ -129,7 +129,10 @@ orca_transl_inc = include_directories('include', 'compat')
 # have nothing to call.  It is C, not C++: it is server code, and it is the
 # translator above it that crosses into C++.
 orca_compat_sources = files(
+  'compat/clauses.c',
   'compat/lsyscache.c',
+  'compat/plancat.c',
+  'compat/tlist.c',
   'compat/walkers.c',
 )
 

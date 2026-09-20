@@ -375,3 +375,124 @@ LANGUAGE C STRICT;
 
 COMMENT ON FUNCTION gp_orca.att_stats_kinds(oid, int) IS
 	'the statistic kinds ORCA would read for a column';
+
+/*
+ * The extended statistics objects ORCA is told a relation has.
+ *
+ * One row per (object, kind, stxdinherit) triple, which is the shape the
+ * translator walks.  A relation analyzed both with and without inheritance
+ * reports each kind twice, differing only in "inherit"; compat/plancat.c says
+ * why the port keeps that rather than deduplicating.
+ */
+CREATE FUNCTION gp_orca.ext_stats(
+	rel regclass,
+	OUT statoid oid,
+	OUT name text,
+	OUT kind "char",
+	OUT keys int[],
+	OUT inherit boolean)
+RETURNS SETOF record
+AS 'MODULE_PATHNAME', 'gp_orca_ext_stats'
+LANGUAGE C STRICT;
+
+COMMENT ON FUNCTION gp_orca.ext_stats(regclass) IS
+	'the extended statistics objects ORCA is told a relation has';
+
+/*
+ * The kinds one statistics object was asked to hold.
+ *
+ * Asked for, not built: stxkind records what CREATE STATISTICS requested, and
+ * whether ANALYZE has since produced anything is another catalog's business.
+ */
+CREATE FUNCTION gp_orca.ext_stats_kinds(oid)
+RETURNS "char"[]
+AS 'MODULE_PATHNAME', 'gp_orca_ext_stats_kinds'
+LANGUAGE C STRICT;
+
+COMMENT ON FUNCTION gp_orca.ext_stats_kinds(oid) IS
+	'the kinds an extended statistics object was asked to hold';
+
+/*
+ * How big ORCA is told a partitioned table is, summed over its leaves.
+ *
+ * PostgreSQL's planner never asks this: it plans each partition separately
+ * and adds the costs at the Append.  ORCA costs the table as one object, so
+ * it needs the total before it has looked at a leaf.  On a table with no
+ * children the answer is that table's own numbers.
+ */
+CREATE FUNCTION gp_orca.partitioned_size(
+	rel regclass,
+	OUT numtuples float8,
+	OUT pages bigint,
+	OUT allvisible_pages bigint)
+RETURNS record
+AS 'MODULE_PATHNAME', 'gp_orca_partitioned_size'
+LANGUAGE C STRICT;
+
+COMMENT ON FUNCTION gp_orca.partitioned_size(regclass) IS
+	'the rows and pages of a partitioned table, summed over its leaves';
+
+/*
+ * The resnos of every target entry computing the same expression as the one
+ * at "resno".
+ *
+ * PostgreSQL's tlist_member() answers with the first match and stops, which
+ * is right for its callers; ORCA rewrites references rather than picking one,
+ * so it needs them all.  For 'SELECT a, a, b FROM t' this answers {1,2}.
+ */
+CREATE FUNCTION gp_orca.tlist_members(sql text, resno int DEFAULT 1)
+RETURNS int[]
+AS 'MODULE_PATHNAME', 'gp_orca_tlist_members'
+LANGUAGE C STRICT;
+
+COMMENT ON FUNCTION gp_orca.tlist_members(text, int) IS
+	'every target entry matching one of them, not just the first';
+
+/*
+ * Which range table entries a target list refers to, before and after its
+ * join alias Vars are flattened.
+ *
+ * A Var naming a JOIN's output column resolves only against the query that
+ * owns the JOIN, and ORCA's normalization moves the target list out of it.
+ * After flattening the target list names the base relations instead -- two of
+ * them for a USING column, whose merged value is a COALESCE of both sides.
+ *
+ * "where_after" is the other half of the contract: the WHERE clause is
+ * deliberately not flattened, because it does not move, and ORCA resolves its
+ * alias Vars during translation instead.  "window_after" covers the frame
+ * bounds, which are the one part walked by hand -- a WindowClause is not an
+ * expression, so the mutator would not reach inside it.
+ */
+CREATE FUNCTION gp_orca.flatten_join_aliases(
+	sql text,
+	OUT before int[],
+	OUT after int[],
+	OUT where_after int[],
+	OUT window_after int[])
+RETURNS record
+AS 'MODULE_PATHNAME', 'gp_orca_flatten_join_aliases'
+LANGUAGE C STRICT;
+
+COMMENT ON FUNCTION gp_orca.flatten_join_aliases(text) IS
+	'which relations a target list names, before and after flattening';
+
+/*
+ * What an array constant becomes when ORCA is given it.
+ *
+ * ORCA cannot look inside an array datum of a type it was never compiled
+ * against, so the elements are handed to it as separate Consts inside an
+ * ArrayExpr.  "in_collation" and "out_collation" are the point: they must
+ * agree, or the value has changed on the way into the optimizer.
+ */
+CREATE FUNCTION gp_orca.array_const_to_expr(
+	expr text,
+	OUT kind text,
+	OUT nelems int,
+	OUT in_collation oid,
+	OUT out_collation oid)
+RETURNS record
+AS 'MODULE_PATHNAME', 'gp_orca_array_const_to_expr'
+LANGUAGE C STRICT;
+
+COMMENT ON FUNCTION gp_orca.array_const_to_expr(text) IS
+	'an array constant as the ArrayExpr ORCA can look inside';

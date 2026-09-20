@@ -778,6 +778,213 @@ refused "and a key column that is not there is named" \
         "SELECT kind FROM gp_orca.relation_policy('dist_none'::regclass);" \
         "column \"nosuch\" of the distribution policy of \"dist_none\" does not exist"
 
+
+echo
+echo "9. extended statistics, as ORCA is told about them"
+
+q "CREATE TABLE es (a int, b int, c text);
+   INSERT INTO es SELECT i % 10, i % 5, 'x' FROM generate_series(1, 1000) i;
+   CREATE STATISTICS es_stx (ndistinct, dependencies) ON a, b FROM es;" > /dev/null
+
+# stxkind is what CREATE STATISTICS asked for.  pg_statistic_ext_data is what
+# ANALYZE has since produced, and the two are different questions -- which is
+# the distinction the two functions draw.
+is "the kinds asked for are readable before anything is built" \
+   "SELECT array_length(gp_orca.ext_stats_kinds(oid), 1)
+      FROM pg_statistic_ext WHERE stxname = 'es_stx';" "2"
+
+is "and they are the two that were asked for" \
+   "SELECT gp_orca.ext_stats_kinds(oid) <@ '{d,f}'::\"char\"[]
+       AND gp_orca.ext_stats_kinds(oid) @> '{d,f}'::\"char\"[]
+      FROM pg_statistic_ext WHERE stxname = 'es_stx';" "t"
+
+is "an object nobody has analyzed reports nothing built" \
+   "SELECT count(*) FROM gp_orca.ext_stats('es'::regclass);" "0"
+
+q "ANALYZE es;" > /dev/null
+
+is "after ANALYZE both kinds are there" \
+   "SELECT count(*) FROM gp_orca.ext_stats('es'::regclass);" "2"
+
+is "each names the object it came from" \
+   "SELECT count(DISTINCT name) || ' ' || min(name)
+      FROM gp_orca.ext_stats('es'::regclass);" "1 es_stx"
+
+# The columns an object covers are what ORCA matches against a relation's
+# attributes, so they are reported by attribute number, as ORCA reads them.
+is "and the columns it covers, by attribute number" \
+   "SELECT DISTINCT keys::text FROM gp_orca.ext_stats('es'::regclass);" "{1,2}"
+
+is "a plain table has no inherited row, so nothing is reported twice" \
+   "SELECT count(*) FROM gp_orca.ext_stats('es'::regclass) WHERE inherit;" "0"
+
+# GetExtStatisticsName used to read its tuple after releasing the syscache
+# entry it came from.  Nothing here can observe a use-after-release directly;
+# what it can observe is that the name comes back at all, for every row.
+is "the name survives the lookup that produced it" \
+   "SELECT count(*) FROM gp_orca.ext_stats('es'::regclass) WHERE name = 'es_stx';" "2"
+
+is "a relation with no statistics objects reports none" \
+   "SELECT count(*) FROM gp_orca.ext_stats('dist_hash'::regclass);" "0"
+
+echo
+echo "10. how big a partitioned table is, summed over its leaves"
+
+q "CREATE TABLE ps (a int) PARTITION BY RANGE (a);
+   CREATE TABLE ps1 PARTITION OF ps FOR VALUES FROM (0) TO (100);
+   CREATE TABLE ps2 PARTITION OF ps FOR VALUES FROM (100) TO (200);
+   INSERT INTO ps SELECT i FROM generate_series(0, 199) i;" > /dev/null
+
+# THE DEFECT THIS EXISTS TO CATCH.  Since PostgreSQL 14 an unanalyzed relation
+# has reltuples = -1, meaning "unknown".  Cloudberry adds that -1 into the
+# total, so a partitioned table whose leaves are all fresh reports a negative
+# row count to the optimizer -- a root and two leaves make -3.  Unknown
+# contributes nothing to a sum.
+is "a table nobody has analyzed reports no rows, not minus one per leaf" \
+   "SELECT numtuples FROM gp_orca.partitioned_size('ps'::regclass);" "0"
+
+is "and no pages" \
+   "SELECT pages FROM gp_orca.partitioned_size('ps'::regclass);" "0"
+
+q "ANALYZE ps1; ANALYZE ps2;" > /dev/null
+
+# The root is still unanalyzed, so this is the summing path: PostgreSQL's
+# planner would never ask, because it costs each partition on its own.
+is "leaves that have been analyzed are summed" \
+   "SELECT numtuples FROM gp_orca.partitioned_size('ps'::regclass);" "200"
+
+is "and so are their pages" \
+   "SELECT pages = (SELECT sum(relpages) FROM pg_class
+                     WHERE relname IN ('ps1', 'ps2'))
+      FROM gp_orca.partitioned_size('ps'::regclass);" "t"
+
+q "ANALYZE ps;" > /dev/null
+
+# Once the root has numbers of its own they are the answer, and no leaf is
+# opened at all.
+is "a root with numbers of its own answers from them" \
+   "SELECT numtuples FROM gp_orca.partitioned_size('ps'::regclass);" "200"
+
+is "a table with no children reports its own numbers" \
+   "SELECT numtuples FROM gp_orca.partitioned_size('es'::regclass);" "1000"
+
+# gp.enable_relsize_collection means "go and ask how big it really is".  On a
+# cluster that is a dispatch to the segments; on one node this backend can
+# read the relation, which is the same answer.  M2 is where the two part.
+q "CREATE TABLE ps_fresh (a int) PARTITION BY RANGE (a);
+   CREATE TABLE ps_fresh1 PARTITION OF ps_fresh FOR VALUES FROM (0) TO (100);
+   INSERT INTO ps_fresh SELECT i FROM generate_series(0, 99) i;" > /dev/null
+
+is "with relsize collection off, an unanalyzed leaf stays unknown" \
+   "SET gp.enable_relsize_collection = off;
+    SELECT numtuples FROM gp_orca.partitioned_size('ps_fresh'::regclass);" "0"
+
+is "with it on, the relation itself is asked" \
+   "SET gp.enable_relsize_collection = on;
+    SELECT numtuples > 0 FROM gp_orca.partitioned_size('ps_fresh'::regclass);" "t"
+
+echo
+echo "11. every target entry that computes an expression, not just the first"
+
+# PostgreSQL's tlist_member() answers with the first match and stops, which is
+# right for its callers: they want *a* place the expression is computed.  ORCA
+# rewrites references rather than picking one, so leaving the second
+# occurrence pointing at the first one's column would change what the plan
+# projects.
+is "a column named twice is found twice" \
+   "SELECT gp_orca.tlist_members('SELECT a, a, b FROM es', 1)::text;" "{1,2}"
+
+is "a column named once is found once" \
+   "SELECT gp_orca.tlist_members('SELECT a, a, b FROM es', 3)::text;" "{3}"
+
+is "and it matches on the expression, not on the column" \
+   "SELECT gp_orca.tlist_members('SELECT a + 1, b, a + 1 FROM es', 1)::text;" "{1,3}"
+
+is "an expression that differs is not a match" \
+   "SELECT gp_orca.tlist_members('SELECT a + 1, a + 2 FROM es', 1)::text;" "{1}"
+
+refused "a resno that is not there says so" \
+        "SELECT gp_orca.tlist_members('SELECT a FROM es', 7);" \
+        "no target entry with resno 7"
+
+echo
+echo "12. join alias Vars, flattened where they move and left where they do not"
+
+q "CREATE TABLE ja1 (x int, y int);
+   CREATE TABLE ja2 (x int, z int);" > /dev/null
+
+# A Var naming a JOIN's output column resolves only against the query that
+# owns the JOIN.  ORCA's normalization moves the target list out of that
+# query, so it has to name the base relations by then.  Under USING the
+# merged column is a COALESCE of both sides, which is why one Var becomes two.
+is "a USING column names the join before, and both sides after" \
+   "SELECT before::text || ' -> ' || after::text
+      FROM gp_orca.flatten_join_aliases(
+        'SELECT x FROM ja1 JOIN ja2 USING (x)');" "{3} -> {1,2}"
+
+is "a query with no join is left alone" \
+   "SELECT before::text || ' -> ' || after::text
+      FROM gp_orca.flatten_join_aliases('SELECT x FROM ja1');" "{1} -> {1}"
+
+is "a column taken from one side names that side already" \
+   "SELECT before::text || ' -> ' || after::text
+      FROM gp_orca.flatten_join_aliases(
+        'SELECT ja1.x FROM ja1 JOIN ja2 ON ja1.x = ja2.x');" "{1} -> {1}"
+
+# The other half of the contract, and the half that would fail silently: the
+# WHERE clause is deliberately not flattened.  It does not move, and ORCA
+# resolves its alias Vars during translation through its own <query level,
+# varno, varattno> mapping.  Flattening it too would look like an improvement.
+is "the WHERE clause still names the join afterwards" \
+   "SELECT where_after::text
+      FROM gp_orca.flatten_join_aliases(
+        'SELECT y FROM ja1 JOIN ja2 USING (x) WHERE x > 0');" "{3}"
+
+# A window frame bound travels with the target list, so it is flattened -- and
+# a WindowClause is not an expression, so it is the one part the function has
+# to walk by hand.  Nothing else in this section would notice if that loop
+# were dropped.
+is "a window frame bound is flattened, because it travels too" \
+   "SELECT window_after::text FROM gp_orca.flatten_join_aliases(
+      'SELECT count(*) OVER (ORDER BY y RANGE BETWEEN x PRECEDING AND CURRENT ROW)
+         FROM ja1 JOIN ja2 USING (x)');" "{1,2}"
+
+echo
+echo "13. an array constant ORCA can look inside"
+
+# ORCA derives constraints from an IN list by reading the elements out.  It
+# cannot look inside an array datum of a type it was never compiled against,
+# so the elements are handed to it as separate Consts.
+is "an array constant becomes an expression with its elements" \
+   "SELECT kind || ' ' || nelems
+      FROM gp_orca.array_const_to_expr('''{1,2,3}''::int[]');" "ArrayExpr 3"
+
+is "an empty array is still an expression" \
+   "SELECT kind || ' ' || nelems
+      FROM gp_orca.array_const_to_expr('''{}''::int[]');" "ArrayExpr 0"
+
+is "something that is not an array comes back unchanged" \
+   "SELECT kind FROM gp_orca.array_const_to_expr('42');" "Const"
+
+is "and so does a NULL of array type, which has no elements" \
+   "SELECT kind FROM gp_orca.array_const_to_expr('NULL::int[]');" "Const"
+
+# THE POSTGRESQL 19 DIFFERENCE.  ArrayExpr grew array_collid after Cloudberry
+# forked, and Cloudberry's rewrite does not set it -- so on Cloudberry a
+# text[] constant arrives at the optimizer with no collation at all, and
+# exprCollation() of the rewritten expression disagrees with the Const it
+# replaced.
+is "a collatable array keeps its collation" \
+   "SELECT in_collation = out_collation
+      FROM gp_orca.array_const_to_expr('''{a,b}''::text[]');" "t"
+
+is "and that collation is a real one, so the check has teeth" \
+   "SELECT out_collation <> 0
+      FROM gp_orca.array_const_to_expr('''{a,b}''::text[]');" "t"
+
+is "a non-collatable array has none either way" \
+   "SELECT in_collation = 0 AND out_collation = 0
+      FROM gp_orca.array_const_to_expr('''{1,2}''::int[]');" "t"
 echo
 echo "  $pass passed, $fail failed"
 [ "$fail" -eq 0 ]
