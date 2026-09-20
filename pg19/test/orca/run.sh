@@ -1601,9 +1601,16 @@ aggs "the same one twice is still one" \
      "SELECT percentile_cont(0.5) WITHIN GROUP (ORDER BY c),
              percentile_cont(0.5) WITHIN GROUP (ORDER BY c) FROM aggt" "0/0,0/0"
 
-aggs "a different percentile is a different aggregate" \
+# A different percentile is a different aggregate that shares the state, and
+# this is the sharing rule at its sharpest.  find_compatible_agg compares the
+# aggregated arguments, ORDER BY, DISTINCT, FILTER, collation and transition
+# type -- but it compares the *direct* arguments only when deciding whether
+# the call is identical.  So 0.5 and 0.9 are not the same aggregate, and they
+# do accumulate the same rows the same way: two final functions over one
+# transition state.
+aggs "a different percentile is a different aggregate over the same state" \
      "SELECT percentile_cont(0.5) WITHIN GROUP (ORDER BY c),
-             percentile_cont(0.9) WITHIN GROUP (ORDER BY c) FROM aggt" "0/0,1/1"
+             percentile_cont(0.9) WITHIN GROUP (ORDER BY c) FROM aggt" "0/0,1/0"
 
 # --- a polymorphic transition type -------------------------------------------
 #
