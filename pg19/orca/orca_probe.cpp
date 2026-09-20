@@ -561,7 +561,8 @@ ProbeReplayAggrefs(void *ptr)
 }
 
 extern "C" int
-GpOrcaReplayAggrefs(List *aggrefs, int **aggnos, int **transnos, bool *raised)
+GpOrcaReplayAggrefs(struct List *aggrefs, int **aggnos, int **transnos,
+					bool *raised)
 {
 	ProbeResult r;
 

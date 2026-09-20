@@ -130,8 +130,8 @@ extern char *GpOrcaUnportedRaise(void);
  * planner decided, which PostgreSQL leaves on Aggref.aggno and
  * Aggref.aggtransno.
  */
-extern int	GpOrcaReplayAggrefs(List *aggrefs, int **aggnos, int **transnos,
-								bool *raised);
+extern int	GpOrcaReplayAggrefs(struct List *aggrefs, int **aggnos,
+								int **transnos, bool *raised);
 
 #ifdef __cplusplus
 }
