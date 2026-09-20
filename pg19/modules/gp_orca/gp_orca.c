@@ -49,15 +49,18 @@
 #include "postgres.h"
 
 #include "access/htup_details.h"
+#include "catalog/pg_type.h"
 #include "fmgr.h"
 #include "funcapi.h"
 #include "nodes/pg_list.h"
 #include "parser/analyze.h"
 #include "tcop/tcopprot.h"
+#include "utils/array.h"
 #include "utils/builtins.h"
 
 #include "optimizer/walkers.h"
 
+#include "cb_lsyscache.h"
 #include "cb_module.h"
 #include "gp_core_api.h"
 #include "gp_orca_api.h"
@@ -68,6 +71,10 @@ PG_MODULE_MAGIC_EXT(
 );
 
 PG_FUNCTION_INFO_V1(gp_orca_version);
+PG_FUNCTION_INFO_V1(gp_orca_type_name);
+PG_FUNCTION_INFO_V1(gp_orca_function_fact);
+PG_FUNCTION_INFO_V1(gp_orca_find_aggregate);
+PG_FUNCTION_INFO_V1(gp_orca_cast_fact);
 PG_FUNCTION_INFO_V1(gp_orca_xforms);
 PG_FUNCTION_INFO_V1(gp_orca_explain_refusal);
 
@@ -196,6 +203,180 @@ gp_orca_explain_refusal(PG_FUNCTION_ARGS)
 	 * Cloudberry's copy still carries the merge marker that says so.
 	 */
 	values[1] = BoolGetDatum(check_collation((Node *) query) == 1);
+
+	tuple = heap_form_tuple(tupdesc, values, nulls);
+	PG_RETURN_DATUM(HeapTupleGetDatum(tuple));
+}
+
+/*
+ * The compat layer, seen from SQL.
+ *
+ * Everything below reports what pg19/orca/compat/ answers.  Those functions
+ * are the port's re-implementations of what Cloudberry adds to PostgreSQL's
+ * own files, which the port does not build, and they are called from C++ by
+ * the gpdb:: wrapper layer -- so without a surface like this, the only thing
+ * that could say whether a re-implementation is right would be the
+ * translator, which is several milestones of work away.  They are diagnostic
+ * as well as testable: "what does ORCA see about this object" is a question
+ * worth being able to ask of a live server.
+ */
+
+/*
+ * A List of OIDs as an oid[], for the probes below.  An empty list is an
+ * empty array rather than NULL: ORCA is told "no output arguments", which is
+ * not the same as "unknown".
+ */
+static Datum
+oid_list_to_array(List *oids)
+{
+	Datum	   *elems = palloc(sizeof(Datum) * list_length(oids));
+	int			i = 0;
+	ListCell   *lc;
+
+	foreach(lc, oids)
+		elems[i++] = ObjectIdGetDatum(lfirst_oid(lc));
+
+	return PointerGetDatum(construct_array_builtin(elems, i, OIDOID));
+}
+
+/*
+ * gp_orca.type_name(oid)
+ *
+ * pg_type.typname, which is not format_type_be(): no schema qualification and
+ * no "[]" on an array type.  NULL for an OID that is not a type, which is the
+ * contract ORCA's metadata cache relies on.
+ */
+Datum
+gp_orca_type_name(PG_FUNCTION_ARGS)
+{
+	char	   *name = get_type_name(PG_GETARG_OID(0));
+
+	if (name == NULL)
+		PG_RETURN_NULL();
+
+	PG_RETURN_TEXT_P(cstring_to_text(name));
+}
+
+/*
+ * gp_orca.function_fact(oid)
+ *
+ * What ORCA asks about a function before it can build metadata for it.
+ */
+Datum
+gp_orca_function_fact(PG_FUNCTION_ARGS)
+{
+	Oid			funcid = PG_GETARG_OID(0);
+	TupleDesc	tupdesc;
+	Datum		values[5];
+	bool		nulls[5] = {false, false, false, false, false};
+	HeapTuple	tuple;
+	bool		exists = function_exists(funcid);
+	bool		is_agg = aggregate_exists(funcid);
+
+	if (get_call_result_type(fcinfo, NULL, &tupdesc) != TYPEFUNC_COMPOSITE)
+		elog(ERROR, "return type must be a row type");
+	tupdesc = BlessTupleDesc(tupdesc);
+
+	values[0] = BoolGetDatum(exists);
+	values[1] = BoolGetDatum(is_agg);
+
+	/*
+	 * The list accessors raise on an OID that is not a function, so ask them
+	 * only once function_exists() has said there is one.  That asymmetry is
+	 * Cloudberry's and ORCA depends on it: the existence checks are how it
+	 * decides whether to go on.
+	 */
+	if (exists)
+	{
+		values[2] = oid_list_to_array(get_func_arg_types(funcid));
+		values[3] = oid_list_to_array(get_func_output_arg_types(funcid));
+	}
+	else
+		nulls[2] = nulls[3] = true;
+
+	if (is_agg)
+		values[4] = ObjectIdGetDatum(get_agg_transtype(funcid));
+	else
+		nulls[4] = true;
+
+	tuple = heap_form_tuple(tupdesc, values, nulls);
+	PG_RETURN_DATUM(HeapTupleGetDatum(tuple));
+}
+
+/*
+ * gp_orca.find_aggregate(name, argtype)
+ *
+ * The one-argument aggregate of this name over this type, in any schema.
+ * InvalidOid -- reported as NULL -- when there is none.
+ */
+Datum
+gp_orca_find_aggregate(PG_FUNCTION_ARGS)
+{
+	char	   *name = text_to_cstring(PG_GETARG_TEXT_PP(0));
+	Oid			result = get_aggregate(name, PG_GETARG_OID(1));
+
+	if (!OidIsValid(result))
+		PG_RETURN_NULL();
+
+	PG_RETURN_OID(result);
+}
+
+/*
+ * gp_orca.cast_fact(src, dst)
+ *
+ * Whether an implicit cast exists between two types, what performs it, and
+ * whether it costs anything at run time.
+ */
+Datum
+gp_orca_cast_fact(PG_FUNCTION_ARGS)
+{
+	Oid			src = PG_GETARG_OID(0);
+	Oid			dst = PG_GETARG_OID(1);
+	TupleDesc	tupdesc;
+	Datum		values[4];
+	bool		nulls[4] = {false, false, false, false};
+	HeapTuple	tuple;
+	bool		binary_coercible = false;
+	Oid			castfunc = InvalidOid;
+	CoercionPathType pathtype = COERCION_PATH_NONE;
+	bool		exists;
+	const char *pathname;
+
+	if (get_call_result_type(fcinfo, NULL, &tupdesc) != TYPEFUNC_COMPOSITE)
+		elog(ERROR, "return type must be a row type");
+	tupdesc = BlessTupleDesc(tupdesc);
+
+	exists = get_cast_func(src, dst, &binary_coercible, &castfunc, &pathtype);
+
+	switch (pathtype)
+	{
+		case COERCION_PATH_NONE:
+			pathname = "none";
+			break;
+		case COERCION_PATH_FUNC:
+			pathname = "func";
+			break;
+		case COERCION_PATH_RELABELTYPE:
+			pathname = "relabel";
+			break;
+		case COERCION_PATH_COERCEVIAIO:
+			pathname = "io";
+			break;
+		case COERCION_PATH_ARRAYCOERCE:
+			pathname = "arraycoerce";
+			break;
+		default:
+			pathname = "unknown";
+			break;
+	}
+
+	values[0] = BoolGetDatum(exists);
+	values[1] = BoolGetDatum(binary_coercible);
+	if (OidIsValid(castfunc))
+		values[2] = ObjectIdGetDatum(castfunc);
+	else
+		nulls[2] = true;
+	values[3] = CStringGetTextDatum(pathname);
 
 	tuple = heap_form_tuple(tupdesc, values, nulls);
 	PG_RETURN_DATUM(HeapTupleGetDatum(tuple));

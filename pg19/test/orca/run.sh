@@ -238,5 +238,93 @@ refused "more than one statement is refused rather than half read" \
         "exactly one statement"
 
 echo
+echo "6. the compat layer answers about types, functions and casts"
+
+# pg19/orca/compat/lsyscache.c re-implements what Cloudberry adds to
+# PostgreSQL's lsyscache.c.  ORCA reaches it from C++ through the gpdb::
+# wrapper layer, so these probes are what lets a test see the answers before
+# the translator exists to consume them.
+
+is "typname, not the SQL spelling of a type" \
+   "SELECT gp_orca.type_name('int4'::regtype);" "int4"
+
+is "an array type is named as pg_type names it" \
+   "SELECT gp_orca.type_name('int4[]'::regtype);" "_int4"
+
+is "a type that is not there is a miss, not an error" \
+   "SELECT gp_orca.type_name(0) IS NULL;" "t"
+
+is "a function exists and is not an aggregate" \
+   "SELECT function_exists AND NOT is_aggregate
+      FROM gp_orca.function_fact('abs(int4)'::regprocedure);" "t"
+
+is "and its declared argument types come back in order" \
+   "SELECT arg_types::text
+      FROM gp_orca.function_fact('substr(text,int4,int4)'::regprocedure);" \
+   "{25,23,23}"
+
+is "a scalar function has no output arguments" \
+   "SELECT output_arg_types = '{}'::oid[]
+      FROM gp_orca.function_fact('abs(int4)'::regprocedure);" "t"
+
+# A function with OUT parameters is what tells ORCA a call yields a row.
+q "CREATE FUNCTION two_out(IN a int, OUT b text, OUT c bigint)
+     LANGUAGE sql AS \$\$ SELECT 'x'::text, 1::bigint \$\$;" > /dev/null
+
+is "OUT parameters are reported, and the IN one is not" \
+   "SELECT output_arg_types::text
+      FROM gp_orca.function_fact('two_out(int4)'::regprocedure);" "{25,20}"
+
+is "while arg_types still reports the input" \
+   "SELECT arg_types::text
+      FROM gp_orca.function_fact('two_out(int4)'::regprocedure);" "{23}"
+
+is "an aggregate is both, and carries a transition type" \
+   "SELECT is_aggregate AND agg_transtype = 'int8'::regtype::oid
+      FROM gp_orca.function_fact('count(\"any\")'::regprocedure);" "t"
+
+is "a non-aggregate has no transition type" \
+   "SELECT agg_transtype IS NULL
+      FROM gp_orca.function_fact('abs(int4)'::regprocedure);" "t"
+
+is "nothing exists at OID 0" \
+   "SELECT function_exists OR is_aggregate FROM gp_orca.function_fact(0);" "f"
+
+is "an aggregate is found by name and argument type" \
+   "SELECT gp_orca.find_aggregate('sum', 'int4'::regtype) =
+           'sum(int4)'::regprocedure::oid;" "t"
+
+is "the wrong argument type finds nothing" \
+   "SELECT gp_orca.find_aggregate('sum', 'text'::regtype) IS NULL;" "t"
+
+is "and a plain function is not an aggregate however it is spelled" \
+   "SELECT gp_orca.find_aggregate('abs', 'int4'::regtype) IS NULL;" "t"
+
+is "a cast that needs a function reports it" \
+   "SELECT cast_exists AND NOT binary_coercible AND path_type = 'func'
+      FROM gp_orca.cast_fact('int4'::regtype, 'int8'::regtype);" "t"
+
+is "and names the function that performs it" \
+   "SELECT cast_func = 'int8(int4)'::regprocedure::oid
+      FROM gp_orca.cast_fact('int4'::regtype, 'int8'::regtype);" "t"
+
+is "there is no implicit cast from text to integer" \
+   "SELECT cast_exists FROM gp_orca.cast_fact('text'::regtype, 'int4'::regtype);" "f"
+
+# The defect this fixes: Cloudberry returns from the binary-coercible branch
+# without writing *pathtype, and CTranslatorRelcacheToDXL switches on the
+# uninitialised value.  RELABELTYPE is the case that branch was always meant
+# to take -- no function, nothing to do at run time -- and its arm in that
+# switch asserts the InvalidOid this path returns.
+is "a binary-coercible cast is free, and says which path it took" \
+   "SELECT cast_exists AND binary_coercible AND path_type = 'relabel'
+      AND cast_func IS NULL
+      FROM gp_orca.cast_fact('text'::regtype, 'varchar'::regtype);" "t"
+
+is "a type to itself is free too, by the same path" \
+   "SELECT binary_coercible AND path_type = 'relabel'
+      FROM gp_orca.cast_fact('int4'::regtype, 'int4'::regtype);" "t"
+
+echo
 echo "  $pass passed, $fail failed"
 [ "$fail" -eq 0 ]
