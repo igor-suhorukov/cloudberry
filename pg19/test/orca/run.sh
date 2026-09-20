@@ -1011,5 +1011,95 @@ is "a non-collatable array has none either way" \
    "SELECT in_collation = 0 AND out_collation = 0
       FROM gp_orca.array_const_to_expr('''{1,2}''::int[]');" "t"
 echo
+echo "14. two more files the compat layer needs than the plan said"
+
+# cloudberry.md records, under "Corrections to the plan", that selfuncs.c and
+# subselect.c "are not part of the compat layer" because the functions ORCA
+# calls from them exist in PostgreSQL 19 unchanged.  They do exist -- and they
+# are static, so nothing outside their own file can call them.  Cloudberry's
+# whole contribution to both files is to delete the word "static".  The check
+# that produced the wrong answer looked for the function in PostgreSQL's
+# sources; what decides it is whether a header declares it.
+
+# A hashable, strict, binary operator with a constant on the right: the shape
+# a hashed subplan needs.
+is "an equality against a constant could be hashed" \
+   "SELECT gp_orca.testexpr_is_hashable('SELECT 1 FROM es WHERE a = 1');" "t"
+
+# A Var of the outer query on the right-hand side is exactly what the rule
+# forbids: that side belongs to the subquery.
+is "but not one whose right-hand side names a column" \
+   "SELECT gp_orca.testexpr_is_hashable('SELECT 1 FROM es WHERE a = b');" "f"
+
+is "an operator that cannot hash is refused" \
+   "SELECT gp_orca.testexpr_is_hashable('SELECT 1 FROM es WHERE a < 1');" "f"
+
+is "an AND of hashable comparisons is hashable" \
+   "SELECT gp_orca.testexpr_is_hashable('SELECT 1 FROM es WHERE a = 1 AND b = 2');" "t"
+
+is "an OR of them is not, because it is not an AND-clause" \
+   "SELECT gp_orca.testexpr_is_hashable('SELECT 1 FROM es WHERE a = 1 OR b = 2');" "f"
+
+is "and neither is an AND with something else in it" \
+   "SELECT gp_orca.testexpr_is_hashable('SELECT 1 FROM es WHERE a = 1 AND b < 2');" "f"
+
+is "a text equality is, and collation does not change that" \
+   "SELECT gp_orca.testexpr_is_hashable('SELECT 1 FROM es WHERE c = ''x''');" "t"
+
+# The scale is PostgreSQL's own: microseconds since 2000-01-01 for the
+# timestamp family.  What matters to ORCA is not the origin but that every
+# value of one type lands on the same one.
+is "a timestamp is microseconds since 2000-01-01" \
+   "SELECT value FROM gp_orca.timevalue_scalar('timestamp ''2000-01-02 00:00:00''');" \
+   "86400000000"
+
+is "a date lands on the same scale as a timestamp" \
+   "SELECT value FROM gp_orca.timevalue_scalar('date ''2000-01-02''');" "86400000000"
+
+is "a timestamptz too" \
+   "SET TimeZone = 'UTC';
+    SELECT value FROM gp_orca.timevalue_scalar('timestamptz ''2000-01-02 00:00:00+00''');" \
+   "86400000000"
+
+is "a time is microseconds since midnight" \
+   "SELECT value FROM gp_orca.timevalue_scalar('time ''01:00:00''');" "3600000000"
+
+# An interval's months are days of an average month, because a month has no
+# fixed length: not accurate, and not meant to be.
+is "an interval of a day is a day" \
+   "SELECT value FROM gp_orca.timevalue_scalar('interval ''1 day''');" "86400000000"
+
+is "and one of a month is an average month" \
+   "SELECT round(value / 86400000000.0, 4)
+      FROM gp_orca.timevalue_scalar('interval ''1 month''');" "30.4375"
+
+# The failure flag has to be looked at: 0 is a perfectly good timestamp, so
+# the value alone cannot say that the type was not understood.
+is "a type it does not know says so rather than guessing" \
+   "SELECT ok FROM gp_orca.timevalue_scalar('42');" "f"
+
+is "and a type it does know says so too" \
+   "SELECT ok FROM gp_orca.timevalue_scalar('date ''2000-01-01''');" "t"
+
+# "No overflow" is the whole reason this is not just a cast: a numeric holds
+# values no double can, and a histogram bound that is out of range is still a
+# usable bound once it is an infinity.
+is "an ordinary numeric converts" \
+   "SELECT gp_orca.numeric_scalar(1.5);" "1.5"
+
+is "a negative one too" \
+   "SELECT gp_orca.numeric_scalar(-2.25);" "-2.25"
+
+is "one no double can hold saturates instead of raising" \
+   "SELECT gp_orca.numeric_scalar(('1' || repeat('0', 400))::numeric);" "Infinity"
+
+is "and so does its negative" \
+   "SELECT gp_orca.numeric_scalar(('-1' || repeat('0', 400))::numeric);" "-Infinity"
+
+refused "a plain cast would have raised instead" \
+        "SELECT ('1' || repeat('0', 400))::numeric::float8;" \
+        "value out of range"
+
+echo
 echo "  $pass passed, $fail failed"
 [ "$fail" -eq 0 ]

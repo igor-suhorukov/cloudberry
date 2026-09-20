@@ -72,6 +72,8 @@
 #include "cb_lsyscache.h"
 #include "cb_module.h"
 #include "cb_plancat.h"
+#include "cb_selfuncs.h"
+#include "cb_subselect.h"
 #include "cb_tlist.h"
 #include "gp_core_api.h"
 #include "gp_orca_api.h"
@@ -102,6 +104,9 @@ PG_FUNCTION_INFO_V1(gp_orca_partitioned_size);
 PG_FUNCTION_INFO_V1(gp_orca_tlist_members);
 PG_FUNCTION_INFO_V1(gp_orca_flatten_join_aliases);
 PG_FUNCTION_INFO_V1(gp_orca_array_const_to_expr);
+PG_FUNCTION_INFO_V1(gp_orca_testexpr_is_hashable);
+PG_FUNCTION_INFO_V1(gp_orca_timevalue_scalar);
+PG_FUNCTION_INFO_V1(gp_orca_numeric_scalar);
 PG_FUNCTION_INFO_V1(gp_orca_xforms);
 PG_FUNCTION_INFO_V1(gp_orca_explain_refusal);
 
@@ -134,6 +139,7 @@ gp_orca_version(PG_FUNCTION_ARGS)
 	tuple = heap_form_tuple(tupdesc, values, nulls);
 	PG_RETURN_DATUM(HeapTupleGetDatum(tuple));
 }
+
 
 /*
  * gp_orca.xforms()
@@ -1088,6 +1094,107 @@ gp_orca_flatten_join_aliases(PG_FUNCTION_ARGS)
 
 	tuple = heap_form_tuple(tupdesc, values, nulls);
 	PG_RETURN_DATUM(HeapTupleGetDatum(tuple));
+}
+
+/*
+ * gp_orca.testexpr_is_hashable(sql)
+ *
+ * Would ORCA be allowed to hash this WHERE clause, if it were an ANY
+ * SubLink's test expression?
+ *
+ * The question decides whether a subplan builds its subquery into a hash
+ * table once or re-runs the comparison per outer row, and PostgreSQL keeps
+ * the answer to itself -- see compat/subselect.c.
+ *
+ * The probe passes an empty list of subquery Param ids, so what it exercises
+ * is the operator half of the rule: hashable, strict, binary, and with no
+ * Var of the outer query on the right.  The Param half needs a subplan,
+ * which is the translator's to build.
+ */
+Datum
+gp_orca_testexpr_is_hashable(PG_FUNCTION_ARGS)
+{
+	char	   *sql = text_to_cstring(PG_GETARG_TEXT_PP(0));
+	Query	   *query = probe_parse_one(sql);
+	Node	   *qual;
+
+	if (query->jointree == NULL || query->jointree->quals == NULL)
+		ereport(ERROR,
+				(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+				 errmsg("the statement has no WHERE clause to look at")));
+
+	qual = query->jointree->quals;
+
+	PG_RETURN_BOOL(testexpr_is_hashable(qual, NIL));
+}
+
+/*
+ * gp_orca.timevalue_scalar(expr)
+ *
+ * A time-shaped constant on the one scale ORCA compares such values on.
+ *
+ * "ok" is false for a type the conversion does not know, which the caller has
+ * to look at: 0 is a perfectly good timestamp, so the value alone cannot say.
+ */
+Datum
+gp_orca_timevalue_scalar(PG_FUNCTION_ARGS)
+{
+	char	   *expr = text_to_cstring(PG_GETARG_TEXT_PP(0));
+	StringInfoData buf;
+	Query	   *query;
+	TargetEntry *tle;
+	Const	   *c;
+	bool		failure = false;
+	double		scalar;
+	TupleDesc	tupdesc;
+	Datum		values[2];
+	bool		nulls[2] = {false, false};
+	HeapTuple	tuple;
+
+	if (get_call_result_type(fcinfo, NULL, &tupdesc) != TYPEFUNC_COMPOSITE)
+		elog(ERROR, "return type must be a row type");
+	tupdesc = BlessTupleDesc(tupdesc);
+
+	initStringInfo(&buf);
+	appendStringInfo(&buf, "SELECT %s", expr);
+	query = probe_parse_one(buf.data);
+
+	tle = (TargetEntry *) linitial(query->targetList);
+	if (!IsA(tle->expr, Const))
+		ereport(ERROR,
+				(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+				 errmsg("expression is not a constant")));
+
+	c = (Const *) tle->expr;
+	if (c->constisnull)
+		ereport(ERROR,
+				(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+				 errmsg("a null has no scalar value")));
+
+	scalar = convert_timevalue_to_scalar(c->constvalue, c->consttype,
+										 &failure);
+
+	values[0] = BoolGetDatum(!failure);
+	values[1] = Float8GetDatum(scalar);
+
+	tuple = heap_form_tuple(tupdesc, values, nulls);
+	PG_RETURN_DATUM(HeapTupleGetDatum(tuple));
+}
+
+/*
+ * gp_orca.numeric_scalar(numeric)
+ *
+ * A numeric as the double ORCA holds a histogram bound in.  "No overflow" is
+ * the point: a numeric holds values no double can, and a bound that is out of
+ * range is still a usable bound once it becomes an infinity.  Raising here
+ * would lose the whole histogram over one bucket.
+ */
+Datum
+gp_orca_numeric_scalar(PG_FUNCTION_ARGS)
+{
+	Numeric		num = PG_GETARG_NUMERIC(0);
+
+	PG_RETURN_FLOAT8(numeric_to_double_no_overflow(num));
 }
 
 /*

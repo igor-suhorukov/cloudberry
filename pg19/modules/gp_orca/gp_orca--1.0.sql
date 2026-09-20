@@ -496,3 +496,57 @@ LANGUAGE C STRICT;
 
 COMMENT ON FUNCTION gp_orca.array_const_to_expr(text) IS
 	'an array constant as the ArrayExpr ORCA can look inside';
+
+/*
+ * Would ORCA be allowed to hash this WHERE clause, if it were an ANY
+ * SubLink's test expression?
+ *
+ * The question decides whether a subplan builds its subquery into a hash
+ * table once or re-runs the comparison per outer row.  PostgreSQL asks it
+ * too, and keeps the answer static, so the port re-implements it.
+ *
+ * The probe passes no subquery Param ids, so what it reaches is the operator
+ * half of the rule: hashable, strict, binary, and with no Var of the outer
+ * query on the right-hand side.
+ */
+CREATE FUNCTION gp_orca.testexpr_is_hashable(sql text)
+RETURNS boolean
+AS 'MODULE_PATHNAME', 'gp_orca_testexpr_is_hashable'
+LANGUAGE C STRICT;
+
+COMMENT ON FUNCTION gp_orca.testexpr_is_hashable(text) IS
+	'whether an ANY SubLink test expression of this shape could be hashed';
+
+/*
+ * A time-shaped constant on the one scale ORCA compares such values on:
+ * microseconds since 2000-01-01 for the timestamp types, microseconds since
+ * midnight for the time ones.
+ *
+ * "ok" is false for a type the conversion does not know, and has to be looked
+ * at: 0 is a perfectly good timestamp, so the value alone cannot say.
+ */
+CREATE FUNCTION gp_orca.timevalue_scalar(
+	expr text,
+	OUT ok boolean,
+	OUT value float8)
+RETURNS record
+AS 'MODULE_PATHNAME', 'gp_orca_timevalue_scalar'
+LANGUAGE C STRICT;
+
+COMMENT ON FUNCTION gp_orca.timevalue_scalar(text) IS
+	'a time-shaped constant as the number ORCA compares it as';
+
+/*
+ * A numeric as the double ORCA holds a histogram bound in.
+ *
+ * "No overflow" is the point: a numeric holds values no double can, and a
+ * bound that is out of range is still a usable bound once it becomes an
+ * infinity.  Raising would lose the whole histogram over one bucket.
+ */
+CREATE FUNCTION gp_orca.numeric_scalar(numeric)
+RETURNS float8
+AS 'MODULE_PATHNAME', 'gp_orca_numeric_scalar'
+LANGUAGE C STRICT IMMUTABLE;
+
+COMMENT ON FUNCTION gp_orca.numeric_scalar(numeric) IS
+	'a numeric as a double, saturating instead of raising';

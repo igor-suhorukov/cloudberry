@@ -132,6 +132,8 @@ orca_compat_sources = files(
   'compat/clauses.c',
   'compat/lsyscache.c',
   'compat/plancat.c',
+  'compat/selfuncs.c',
+  'compat/subselect.c',
   'compat/tlist.c',
   'compat/walkers.c',
 )
