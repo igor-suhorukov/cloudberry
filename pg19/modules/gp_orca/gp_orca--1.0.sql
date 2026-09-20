@@ -221,3 +221,77 @@ LANGUAGE C STRICT;
 
 COMMENT ON FUNCTION gp_orca.default_partition_opfamily(oid) IS
 	'the btree family a range partition key of this type would use';
+
+/*
+ * What ORCA asks about a table it is considering.
+ *
+ * "unique_keys" is one text array per key, because a relation's keys are not
+ * all the same width and a two-dimensional SQL array would have to be
+ * rectangular.  ORCA turns each into a functional dependency, which is what
+ * lets it drop a grouping or prove a join does not duplicate rows.  Only
+ * UNIQUE and PRIMARY KEY constraints count, and not deferrable ones -- a
+ * deferrable constraint may be false in the middle of a transaction, which is
+ * when a query runs.
+ *
+ * "check_constraints" lists only validated ones: a constraint added NOT VALID
+ * may be false of rows already there, so ORCA must not reason with it.
+ *
+ * "has_subclass" is the exhaustive answer, not pg_class.relhassubclass, which
+ * is a hint that can say yes where the answer is no.
+ *
+ * The two trigger columns differ in whether a partitioned table's children
+ * are consulted.  ORCA does not expand children the way the Postgres planner
+ * does, so it has to ask about the whole tree at once.
+ */
+CREATE FUNCTION gp_orca.relation_fact(
+	oid,
+	OUT unique_keys text[],
+	OUT check_constraints oid[],
+	OUT has_subclass boolean,
+	OUT has_update_triggers boolean,
+	OUT has_update_triggers_deep boolean)
+RETURNS record
+AS 'MODULE_PATHNAME', 'gp_orca_relation_fact'
+LANGUAGE C STRICT;
+
+COMMENT ON FUNCTION gp_orca.relation_fact(oid) IS
+	'what the compat layer answers about a relation';
+
+/*
+ * What ORCA reads off a check constraint before turning it into a predicate.
+ *
+ * "expr" is the stored node tree, not a deparse: what matters is that a tree
+ * came back and that it is the one pg_constraint holds.
+ */
+CREATE FUNCTION gp_orca.constraint_fact(
+	oid,
+	OUT name text,
+	OUT relid oid,
+	OUT expr text)
+RETURNS record
+AS 'MODULE_PATHNAME', 'gp_orca_constraint_fact'
+LANGUAGE C STRICT;
+
+COMMENT ON FUNCTION gp_orca.constraint_fact(oid) IS
+	'what the compat layer answers about a check constraint';
+
+/*
+ * The statistic kinds in the pg_statistic row ORCA would read for a column,
+ * and whether that row is the inherited one.
+ *
+ * ORCA does not know there are two kinds of statistics.  A partitioned
+ * table's useful ones are the inherited rows, which cover the children, so
+ * the lookup prefers those and falls back to the non-inherited row.  NULL
+ * when the column has no statistics at all.
+ */
+CREATE FUNCTION gp_orca.att_stats_kinds(
+	relid oid,
+	attnum int,
+	OUT inherited boolean,
+	OUT kinds int[])
+RETURNS record
+AS 'MODULE_PATHNAME', 'gp_orca_att_stats_kinds'
+LANGUAGE C STRICT;
+
+COMMENT ON FUNCTION gp_orca.att_stats_kinds(oid, int) IS
+	'the statistic kinds ORCA would read for a column';

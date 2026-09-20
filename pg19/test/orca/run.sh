@@ -428,5 +428,136 @@ is "a type with no btree ordering cannot" \
    "SELECT gp_orca.default_partition_opfamily('point'::regtype) IS NULL;" "t"
 
 echo
+echo "8. and about constraints, keys, statistics and triggers"
+
+q "CREATE TABLE rel_probe (
+     a int PRIMARY KEY,
+     b int,
+     c int,
+     d int,
+     CONSTRAINT b_pos CHECK (b > 0),
+     CONSTRAINT bc_uniq UNIQUE (b, c),
+     CONSTRAINT d_def UNIQUE (d) DEFERRABLE);
+   ALTER TABLE rel_probe ADD CONSTRAINT c_pos CHECK (c > 0) NOT VALID;
+   INSERT INTO rel_probe SELECT g, g, g, g FROM generate_series(1, 200) g;
+   ANALYZE rel_probe;" > /dev/null
+
+is "a primary key is a unique key" \
+   "SELECT '{1}' = ANY(unique_keys) FROM gp_orca.relation_fact('rel_probe'::regclass);" "t"
+
+is "and so is a multi-column UNIQUE constraint, in column order" \
+   "SELECT '{2,3}' = ANY(unique_keys) FROM gp_orca.relation_fact('rel_probe'::regclass);" "t"
+
+# A deferrable constraint may be false in the middle of a transaction, which
+# is exactly when a query runs, so it promises nothing to the optimizer.
+is "a deferrable unique constraint is not a key" \
+   "SELECT '{4}' = ANY(unique_keys) FROM gp_orca.relation_fact('rel_probe'::regclass);" "f"
+
+is "so two keys are reported, not three" \
+   "SELECT array_length(unique_keys, 1) FROM gp_orca.relation_fact('rel_probe'::regclass);" "2"
+
+# NOT VALID means the constraint may be false of rows already there.  ORCA
+# would prune with it, so it must not see it.
+is "only the validated check constraint is reported" \
+   "SELECT array_length(check_constraints, 1)
+      FROM gp_orca.relation_fact('rel_probe'::regclass);" "1"
+
+is "and it is the one that was validated" \
+   "SELECT name FROM gp_orca.constraint_fact(
+      (SELECT check_constraints[1] FROM gp_orca.relation_fact('rel_probe'::regclass)));" \
+   "b_pos"
+
+q "ALTER TABLE rel_probe VALIDATE CONSTRAINT c_pos;" > /dev/null
+
+is "validating the other one makes it visible too" \
+   "SELECT array_length(check_constraints, 1)
+      FROM gp_orca.relation_fact('rel_probe'::regclass);" "2"
+
+is "a check constraint names its relation" \
+   "SELECT relid = 'rel_probe'::regclass FROM gp_orca.constraint_fact(
+      (SELECT oid FROM pg_constraint WHERE conname = 'b_pos'));" "t"
+
+is "and hands back the stored expression tree" \
+   "SELECT expr LIKE '%OPEXPR%' FROM gp_orca.constraint_fact(
+      (SELECT oid FROM pg_constraint WHERE conname = 'b_pos'));" "t"
+
+# A unique constraint has no conbin, and ORCA only ever asks this of OIDs
+# get_check_constraint_oids() gave it, so a null expression is not an error.
+is "a constraint with no expression has none, rather than failing" \
+   "SELECT expr IS NULL FROM gp_orca.constraint_fact(
+      (SELECT oid FROM pg_constraint WHERE conname = 'bc_uniq'));" "t"
+
+is "a constraint that is not there is all nulls" \
+   "SELECT name IS NULL AND relid IS NULL AND expr IS NULL
+      FROM gp_orca.constraint_fact(0);" "t"
+
+is "an analyzed column has statistics" \
+   "SELECT kinds IS NOT NULL FROM gp_orca.att_stats_kinds('rel_probe'::regclass, 1);" "t"
+
+is "and among them the one ORCA needs most, a histogram" \
+   "SELECT 2 = ANY(kinds) FROM gp_orca.att_stats_kinds('rel_probe'::regclass, 1);" "t"
+
+is "a plain table's statistics are not the inherited ones" \
+   "SELECT inherited FROM gp_orca.att_stats_kinds('rel_probe'::regclass, 1);" "f"
+
+is "a column never analyzed has none" \
+   "SELECT gp_orca.att_stats_kinds('rel_probe'::regclass, 5) IS NULL;" "t"
+
+q "CREATE TABLE parent_probe (a int, b int) PARTITION BY RANGE (a);
+   CREATE TABLE child_probe PARTITION OF parent_probe FOR VALUES FROM (1) TO (100);
+   INSERT INTO parent_probe SELECT g, g FROM generate_series(1, 99) g;
+   ANALYZE parent_probe;" > /dev/null
+
+# A partitioned table's own row is empty; the statistics that describe its
+# data are the inherited ones.  ORCA does not know there are two kinds, so
+# asking for inherited first is what makes one call serve both.
+is "a partitioned table's statistics are the inherited ones" \
+   "SELECT inherited FROM gp_orca.att_stats_kinds('parent_probe'::regclass, 1);" "t"
+
+is "a parent with a partition really has a subclass" \
+   "SELECT has_subclass FROM gp_orca.relation_fact('parent_probe'::regclass);" "t"
+
+is "and a table with none does not" \
+   "SELECT has_subclass FROM gp_orca.relation_fact('rel_probe'::regclass);" "f"
+
+q "CREATE FUNCTION noop_trig() RETURNS trigger LANGUAGE plpgsql
+     AS \$\$ BEGIN RETURN NEW; END \$\$;
+   CREATE TRIGGER t_upd BEFORE UPDATE ON child_probe
+     FOR EACH ROW EXECUTE FUNCTION noop_trig();" > /dev/null
+
+# ORCA asks before planning an update that moves a row: a split update is a
+# delete and an insert, which would fire the wrong triggers.
+q "CREATE TABLE bare_probe (a int, b int);" > /dev/null
+
+is "a table with no triggers has no update triggers" \
+   "SELECT has_update_triggers FROM gp_orca.relation_fact('bare_probe'::regclass);" "f"
+
+# Found by a test that asserted the opposite of the truth about its own
+# fixture.  A DEFERRABLE unique constraint creates an internal
+# Unique_ConstraintTrigger whose tgtype is row|insert|update, so a table
+# nobody put a trigger on reports an update trigger and ORCA will not split
+# an update on it.  Cloudberry behaves the same way; what is new here is that
+# it is written down.
+is "but a deferrable unique constraint quietly makes one" \
+   "SELECT has_update_triggers FROM gp_orca.relation_fact('rel_probe'::regclass);" "t"
+
+is "and it is internal, not something the user created" \
+   "SELECT bool_and(tgisinternal) FROM pg_trigger
+      WHERE tgrelid = 'rel_probe'::regclass;" "t"
+
+is "a child's trigger is not the parent's own" \
+   "SELECT has_update_triggers FROM gp_orca.relation_fact('parent_probe'::regclass);" "f"
+
+# This is the asymmetry the "including_children" argument exists for: the
+# Postgres planner sees each leaf and asks about each, ORCA sees the parent.
+is "but it is found when the whole partition tree is asked about" \
+   "SELECT has_update_triggers_deep FROM gp_orca.relation_fact('parent_probe'::regclass);" "t"
+
+q "ALTER TABLE child_probe DISABLE TRIGGER t_upd;" > /dev/null
+
+is "a disabled trigger would not fire, so it does not count" \
+   "SELECT has_update_triggers_deep FROM gp_orca.relation_fact('parent_probe'::regclass);" "f"
+
+echo
 echo "  $pass passed, $fail failed"
 [ "$fail" -eq 0 ]

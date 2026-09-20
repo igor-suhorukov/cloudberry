@@ -49,9 +49,12 @@
 #include "postgres.h"
 
 #include "access/htup_details.h"
+#include "catalog/pg_statistic.h"
 #include "catalog/pg_type.h"
 #include "fmgr.h"
 #include "funcapi.h"
+#include "lib/stringinfo.h"
+#include "nodes/nodes.h"
 #include "nodes/pg_list.h"
 #include "parser/analyze.h"
 #include "tcop/tcopprot.h"
@@ -79,6 +82,9 @@ PG_FUNCTION_INFO_V1(gp_orca_operator_fact);
 PG_FUNCTION_INFO_V1(gp_orca_comparison_operator);
 PG_FUNCTION_INFO_V1(gp_orca_index_opfamilies);
 PG_FUNCTION_INFO_V1(gp_orca_default_partition_opfamily);
+PG_FUNCTION_INFO_V1(gp_orca_relation_fact);
+PG_FUNCTION_INFO_V1(gp_orca_constraint_fact);
+PG_FUNCTION_INFO_V1(gp_orca_att_stats_kinds);
 PG_FUNCTION_INFO_V1(gp_orca_xforms);
 PG_FUNCTION_INFO_V1(gp_orca_explain_refusal);
 
@@ -505,6 +511,162 @@ gp_orca_default_partition_opfamily(PG_FUNCTION_ARGS)
 		PG_RETURN_NULL();
 
 	PG_RETURN_OID(result);
+}
+
+/*
+ * gp_orca.relation_fact(oid)
+ *
+ * What ORCA asks about a table it is considering.
+ */
+Datum
+gp_orca_relation_fact(PG_FUNCTION_ARGS)
+{
+	Oid			relid = PG_GETARG_OID(0);
+	TupleDesc	tupdesc;
+	Datum		values[5];
+	bool		nulls[5] = {false, false, false, false, false};
+	HeapTuple	tuple;
+	List	   *keys = get_relation_keys(relid);
+	Datum	   *keyarrays;
+	int			nkeys = 0;
+	ListCell   *lc;
+
+	if (get_call_result_type(fcinfo, NULL, &tupdesc) != TYPEFUNC_COMPOSITE)
+		elog(ERROR, "return type must be a row type");
+	tupdesc = BlessTupleDesc(tupdesc);
+
+	/*
+	 * A key is a list of attribute numbers and a relation has several, so
+	 * this is an array of arrays.  It is reported as text, because a
+	 * two-dimensional SQL array would have to be rectangular and these are
+	 * not: a table can have a one-column key and a three-column one.
+	 */
+	keyarrays = palloc(sizeof(Datum) * list_length(keys));
+	foreach(lc, keys)
+	{
+		List	   *key = (List *) lfirst(lc);
+		StringInfoData buf;
+		ListCell   *kc;
+		bool		first = true;
+
+		initStringInfo(&buf);
+		appendStringInfoChar(&buf, '{');
+		foreach(kc, key)
+		{
+			appendStringInfo(&buf, "%s%d", first ? "" : ",", lfirst_int(kc));
+			first = false;
+		}
+		appendStringInfoChar(&buf, '}');
+
+		keyarrays[nkeys++] = CStringGetTextDatum(buf.data);
+	}
+
+	values[0] = PointerGetDatum(construct_array_builtin(keyarrays, nkeys,
+													   TEXTOID));
+	values[1] = oid_list_to_array(get_check_constraint_oids(relid));
+	values[2] = BoolGetDatum(has_subclass_slow(relid));
+	values[3] = BoolGetDatum(has_update_triggers(relid, false));
+	values[4] = BoolGetDatum(has_update_triggers(relid, true));
+
+	tuple = heap_form_tuple(tupdesc, values, nulls);
+	PG_RETURN_DATUM(HeapTupleGetDatum(tuple));
+}
+
+/*
+ * gp_orca.constraint_fact(oid)
+ *
+ * What ORCA reads off a check constraint before turning it into a predicate.
+ */
+Datum
+gp_orca_constraint_fact(PG_FUNCTION_ARGS)
+{
+	Oid			conoid = PG_GETARG_OID(0);
+	TupleDesc	tupdesc;
+	Datum		values[3];
+	bool		nulls[3] = {false, false, false};
+	HeapTuple	tuple;
+	char	   *name = get_check_constraint_name(conoid);
+	Oid			relid = get_check_constraint_relid(conoid);
+	Node	   *expr = get_check_constraint_expr_tree(conoid);
+
+	if (get_call_result_type(fcinfo, NULL, &tupdesc) != TYPEFUNC_COMPOSITE)
+		elog(ERROR, "return type must be a row type");
+	tupdesc = BlessTupleDesc(tupdesc);
+
+	if (name != NULL)
+		values[0] = CStringGetTextDatum(name);
+	else
+		nulls[0] = true;
+
+	if (OidIsValid(relid))
+		values[1] = ObjectIdGetDatum(relid);
+	else
+		nulls[1] = true;
+
+	/*
+	 * The expression round-trips through nodeToString rather than being
+	 * deparsed: what matters here is that a tree came back at all and that
+	 * it is the tree pg_constraint holds, not how it reads.
+	 */
+	if (expr != NULL)
+		values[2] = CStringGetTextDatum(nodeToString(expr));
+	else
+		nulls[2] = true;
+
+	tuple = heap_form_tuple(tupdesc, values, nulls);
+	PG_RETURN_DATUM(HeapTupleGetDatum(tuple));
+}
+
+/*
+ * gp_orca.att_stats_kinds(relid, attnum)
+ *
+ * The statistic kinds in the pg_statistic row ORCA would read for a column,
+ * and whether that row is the inherited one.  NULL when there are no
+ * statistics at all.
+ *
+ * The kinds are what makes this worth asking: ORCA unpacks the slots itself,
+ * so what it can do with a column depends on which slots are filled.
+ */
+Datum
+gp_orca_att_stats_kinds(PG_FUNCTION_ARGS)
+{
+	Oid			relid = PG_GETARG_OID(0);
+	AttrNumber	attnum = (AttrNumber) PG_GETARG_INT32(1);
+	HeapTuple	stats = get_att_stats(relid, attnum);
+	TupleDesc	tupdesc;
+	Datum		values[2];
+	bool		nulls[2] = {false, false};
+	HeapTuple	tuple;
+	Form_pg_statistic form;
+	Datum		kinds[STATISTIC_NUM_SLOTS];
+	int			nkinds = 0;
+
+	if (get_call_result_type(fcinfo, NULL, &tupdesc) != TYPEFUNC_COMPOSITE)
+		elog(ERROR, "return type must be a row type");
+	tupdesc = BlessTupleDesc(tupdesc);
+
+	if (!HeapTupleIsValid(stats))
+		PG_RETURN_NULL();
+
+	form = (Form_pg_statistic) GETSTRUCT(stats);
+
+	values[0] = BoolGetDatum(form->stainherit);
+
+	kinds[nkinds++] = Int32GetDatum(form->stakind1);
+	kinds[nkinds++] = Int32GetDatum(form->stakind2);
+	kinds[nkinds++] = Int32GetDatum(form->stakind3);
+	kinds[nkinds++] = Int32GetDatum(form->stakind4);
+	kinds[nkinds++] = Int32GetDatum(form->stakind5);
+
+	values[1] = PointerGetDatum(construct_array_builtin(kinds, nkinds,
+													   INT4OID));
+
+	tuple = heap_form_tuple(tupdesc, values, nulls);
+
+	/* get_att_stats hands back a copy, and the caller owns it. */
+	heap_freetuple(stats);
+
+	PG_RETURN_DATUM(HeapTupleGetDatum(tuple));
 }
 
 void

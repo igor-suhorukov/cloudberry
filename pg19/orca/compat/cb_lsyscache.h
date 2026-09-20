@@ -118,6 +118,29 @@ extern List *get_index_opfamilies(Oid oidIndex);
 extern Oid	default_partition_opfamily_for_type(Oid typeoid);
 
 /*
+ * Relations: constraints, keys, statistics and triggers.
+ *
+ * What ORCA asks about a table once it has decided to consider one.  The
+ * check constraints become predicates it can use to prune; the unique keys
+ * become the functional dependencies it reasons with; the statistics tuple
+ * is the raw pg_statistic row, which ORCA unpacks itself.
+ */
+extern List *get_check_constraint_oids(Oid oidRel);
+extern char *get_check_constraint_name(Oid oidCheckconstraint);
+extern Oid	get_check_constraint_relid(Oid oidCheckconstraint);
+extern Node *get_check_constraint_expr_tree(Oid oidCheckconstraint);
+extern List *get_relation_keys(Oid relid);
+extern HeapTuple get_att_stats(Oid relid, AttrNumber attrnum);
+extern bool has_subclass_slow(Oid relationId);
+extern bool has_update_triggers(Oid relid, bool including_children);
+
+/*
+ * Two helpers has_update_triggers() needs, which Cloudberry adds beside it.
+ */
+extern int32 get_trigger_type(Oid triggerid);
+extern bool trigger_enabled(Oid triggerid);
+
+/*
  * A helper Cloudberry keeps beside them, for the arrays get_func_arg_info
  * hands back.
  */

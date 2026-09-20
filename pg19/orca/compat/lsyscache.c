@@ -45,13 +45,22 @@
 #include "catalog/pg_aggregate.h"
 #include "catalog/pg_am.h"
 #include "catalog/pg_amop.h"
+#include "catalog/pg_constraint.h"
 #include "catalog/pg_index.h"
+#include "catalog/pg_inherits.h"
 #include "catalog/pg_proc.h"
+#include "catalog/pg_trigger.h"
 #include "catalog/pg_type.h"
+#include "commands/trigger.h"
 #include "funcapi.h"
+#include "nodes/nodes.h"
+#include "utils/array.h"
 #include "utils/builtins.h"
 #include "utils/catcache.h"
 #include "utils/fmgroids.h"
+#include "utils/lsyscache.h"
+#include "utils/rel.h"
+#include "utils/relcache.h"
 #include "utils/syscache.h"
 #include "utils/typcache.h"
 
@@ -603,4 +612,429 @@ default_partition_opfamily_for_type(Oid typeoid)
 		return InvalidOid;
 
 	return tcache->btree_opf;
+}
+
+/*
+ * get_check_constraint_oids
+ *		Every validated CHECK constraint on this relation.
+ *
+ * Validated only: a constraint added NOT VALID may be false of rows already
+ * there, so ORCA must not reason with it.  That test is Cloudberry's and is
+ * the whole reason this is not a two-line wrapper over a syscache list.
+ */
+List *
+get_check_constraint_oids(Oid oidRel)
+{
+	List	   *result = NIL;
+	HeapTuple	htup;
+	Relation	conrel;
+	ScanKeyData scankey;
+	SysScanDesc sscan;
+
+	conrel = table_open(ConstraintRelationId, AccessShareLock);
+
+	ScanKeyInit(&scankey,
+				Anum_pg_constraint_conrelid,
+				BTEqualStrategyNumber, F_OIDEQ,
+				ObjectIdGetDatum(oidRel));
+	sscan = systable_beginscan(conrel, ConstraintRelidTypidNameIndexId, true,
+							   NULL, 1, &scankey);
+
+	while (HeapTupleIsValid(htup = systable_getnext(sscan)))
+	{
+		Form_pg_constraint contuple = (Form_pg_constraint) GETSTRUCT(htup);
+
+		if (contuple->contype != CONSTRAINT_CHECK || !contuple->convalidated)
+			continue;
+
+		result = lappend_oid(result, contuple->oid);
+	}
+
+	systable_endscan(sscan);
+	table_close(conrel, AccessShareLock);
+
+	return result;
+}
+
+/*
+ * get_check_constraint_name
+ *		The name of a check constraint, palloc'd, or NULL.
+ *
+ * PostgreSQL's own get_constraint_name() answers this already; Cloudberry
+ * keeps the alias so that ORCA's calls read as being about check
+ * constraints, and it is kept for the same reason.
+ */
+char *
+get_check_constraint_name(Oid oidCheckconstraint)
+{
+	return get_constraint_name(oidCheckconstraint);
+}
+
+/*
+ * get_check_constraint_relid
+ *		The relation a check constraint is on, or InvalidOid.
+ */
+Oid
+get_check_constraint_relid(Oid oidCheckconstraint)
+{
+	HeapTuple	tp;
+
+	tp = SearchSysCache1(CONSTROID, ObjectIdGetDatum(oidCheckconstraint));
+	if (HeapTupleIsValid(tp))
+	{
+		Form_pg_constraint contup = (Form_pg_constraint) GETSTRUCT(tp);
+		Oid			result;
+
+		result = contup->conrelid;
+		ReleaseSysCache(tp);
+		return result;
+	}
+
+	return InvalidOid;
+}
+
+/*
+ * get_check_constraint_expr_tree
+ *		A check constraint's expression, as a palloc'd node tree, or NULL.
+ *
+ * NULL for a constraint with no expression as well as for one that is not
+ * there: pg_constraint.conbin is null for every constraint that is not a
+ * CHECK, and ORCA only ever asks this of OIDs get_check_constraint_oids()
+ * gave it.
+ */
+Node *
+get_check_constraint_expr_tree(Oid oidCheckconstraint)
+{
+	HeapTuple	tp;
+	Node	   *result = NULL;
+
+	tp = SearchSysCache1(CONSTROID, ObjectIdGetDatum(oidCheckconstraint));
+	if (HeapTupleIsValid(tp))
+	{
+		Datum		conbin;
+		bool		isnull;
+
+		conbin = SysCacheGetAttr(CONSTROID, tp, Anum_pg_constraint_conbin,
+								 &isnull);
+		if (!isnull)
+			result = stringToNode(TextDatumGetCString(conbin));
+
+		ReleaseSysCache(tp);
+	}
+
+	return result;
+}
+
+/*
+ * get_relation_keys
+ *		The unique keys of a relation: a List of Lists of attribute numbers.
+ *
+ * ORCA turns each into a functional dependency, which is what lets it drop a
+ * grouping or prove a join does not duplicate rows.
+ *
+ * Two filters, both Cloudberry's and both load-bearing.  UNIQUE and PRIMARY
+ * KEY only, because those are the constraint kinds that promise uniqueness.
+ * And not deferrable, because a deferrable constraint may be false in the
+ * middle of a transaction -- which is exactly when a query might run.
+ *
+ * Note this reads pg_constraint and not pg_index, so a plain unique index
+ * with no constraint behind it is not reported.  That is Cloudberry's
+ * behaviour and ORCA is built on it; it costs a missed inference, never a
+ * wrong one.
+ */
+List *
+get_relation_keys(Oid relid)
+{
+	List	   *keys = NIL;
+	Relation	rel;
+	ScanKeyData skey;
+	SysScanDesc scan;
+	HeapTuple	htup;
+
+	rel = table_open(ConstraintRelationId, AccessShareLock);
+
+	ScanKeyInit(&skey,
+				Anum_pg_constraint_conrelid,
+				BTEqualStrategyNumber, F_OIDEQ,
+				ObjectIdGetDatum(relid));
+	scan = systable_beginscan(rel, ConstraintRelidTypidNameIndexId, true,
+							  NULL, 1, &skey);
+
+	while (HeapTupleIsValid(htup = systable_getnext(scan)))
+	{
+		Form_pg_constraint contuple = (Form_pg_constraint) GETSTRUCT(htup);
+		List	   *key = NIL;
+		Datum		dat;
+		bool		isnull = false;
+		Datum	   *dats = NULL;
+		int			numKeys = 0;
+
+		if (contuple->contype != CONSTRAINT_UNIQUE &&
+			contuple->contype != CONSTRAINT_PRIMARY)
+			continue;
+
+		if (contuple->condeferrable)
+			continue;
+
+		dat = heap_getattr(htup, Anum_pg_constraint_conkey,
+						   RelationGetDescr(rel), &isnull);
+		if (isnull)
+			continue;
+
+		deconstruct_array(DatumGetArrayTypeP(dat), INT2OID, 2, true, TYPALIGN_SHORT,
+						  &dats, NULL, &numKeys);
+
+		for (int i = 0; i < numKeys; i++)
+			key = lappend_int(key, DatumGetInt16(dats[i]));
+
+		keys = lappend(keys, key);
+	}
+
+	systable_endscan(scan);
+	table_close(rel, AccessShareLock);
+
+	return keys;
+}
+
+/*
+ * get_att_stats
+ *		A copy of the pg_statistic row for a column, or NULL if there is none.
+ *
+ * The caller owns the tuple and frees it.  ORCA unpacks the slots itself
+ * rather than going through get_attstatsslot(), because it turns them into
+ * its own histogram objects.
+ *
+ * Inherited statistics are preferred, and the comment Cloudberry leaves here
+ * is worth keeping: ORCA does not know there are two kinds.  A partitioned
+ * table's useful statistics are the inherited ones, which cover the
+ * children; the non-inherited row describes the parent alone, which for a
+ * partitioned table is empty.  Asking for inherited first and falling back
+ * is how one call serves both.
+ */
+HeapTuple
+get_att_stats(Oid relid, AttrNumber attrnum)
+{
+	HeapTuple	result;
+
+	result = SearchSysCacheCopy3(STATRELATTINH,
+								 ObjectIdGetDatum(relid),
+								 Int16GetDatum(attrnum),
+								 BoolGetDatum(true));
+	if (!result)
+		result = SearchSysCacheCopy3(STATRELATTINH,
+									 ObjectIdGetDatum(relid),
+									 Int16GetDatum(attrnum),
+									 BoolGetDatum(false));
+
+	return result;
+}
+
+/*
+ * has_subclass_slow
+ *		Does this relation really have a child?
+ *
+ * PostgreSQL's has_subclass() reads pg_class.relhassubclass, which is a hint:
+ * it is set when a child is added and not always cleared when the last one
+ * goes, so it can say yes where the answer is no.  This asks pg_inherits.
+ *
+ * The cheap test comes first and short-circuits, so the scan runs only for
+ * relations that might have children -- which means the expensive answer is
+ * paid for only when the cheap one was true.
+ */
+bool
+has_subclass_slow(Oid relationId)
+{
+	ScanKeyData scankey;
+	Relation	rel;
+	SysScanDesc sscan;
+	bool		result;
+
+	if (!has_subclass(relationId))
+		return false;
+
+	rel = table_open(InheritsRelationId, AccessShareLock);
+
+	ScanKeyInit(&scankey, Anum_pg_inherits_inhparent,
+				BTEqualStrategyNumber, F_OIDEQ,
+				ObjectIdGetDatum(relationId));
+
+	/* No index on inhparent. */
+	sscan = systable_beginscan(rel, InvalidOid, false, NULL, 1, &scankey);
+
+	result = (systable_getnext(sscan) != NULL);
+
+	systable_endscan(sscan);
+	table_close(rel, AccessShareLock);
+
+	return result;
+}
+
+/*
+ * get_trigger_type
+ *		The tgtype bitmask of a trigger.
+ */
+int32
+get_trigger_type(Oid triggerid)
+{
+	Relation	rel;
+	HeapTuple	tp;
+	int32		result;
+	ScanKeyData scankey;
+	SysScanDesc sscan;
+
+	ScanKeyInit(&scankey, Anum_pg_trigger_oid,
+				BTEqualStrategyNumber, F_OIDEQ,
+				ObjectIdGetDatum(triggerid));
+	rel = table_open(TriggerRelationId, AccessShareLock);
+	sscan = systable_beginscan(rel, TriggerOidIndexId, true, NULL, 1, &scankey);
+
+	tp = systable_getnext(sscan);
+	if (!HeapTupleIsValid(tp))
+		elog(ERROR, "cache lookup failed for trigger %u", triggerid);
+
+	result = ((Form_pg_trigger) GETSTRUCT(tp))->tgtype;
+
+	systable_endscan(sscan);
+	table_close(rel, AccessShareLock);
+
+	return result;
+}
+
+/*
+ * trigger_enabled
+ *		Would this trigger fire?
+ *
+ * Cloudberry's FIXME on the ORIGIN case is kept, because the question it
+ * raises is still open here: a trigger set to fire on origin does not fire
+ * when session_replication_role is "replica", so strictly this should
+ * consult that setting -- and then ORCA's metadata cache would have to be
+ * flushed whenever it changed, since a cached plan would have been built on
+ * the old answer.  Answering "yes" is the safe direction: ORCA keeps the
+ * update path that respects triggers, which is correct either way, just not
+ * always the cheapest.
+ */
+bool
+trigger_enabled(Oid triggerid)
+{
+	Relation	rel;
+	HeapTuple	tp;
+	bool		result;
+	char		tgenabled;
+	ScanKeyData scankey;
+	SysScanDesc sscan;
+
+	ScanKeyInit(&scankey, Anum_pg_trigger_oid,
+				BTEqualStrategyNumber, F_OIDEQ,
+				ObjectIdGetDatum(triggerid));
+	rel = table_open(TriggerRelationId, AccessShareLock);
+	sscan = systable_beginscan(rel, TriggerOidIndexId, true, NULL, 1, &scankey);
+
+	tp = systable_getnext(sscan);
+	if (!HeapTupleIsValid(tp))
+		elog(ERROR, "cache lookup failed for trigger %u", triggerid);
+
+	tgenabled = ((Form_pg_trigger) GETSTRUCT(tp))->tgenabled;
+
+	switch (tgenabled)
+	{
+		case TRIGGER_FIRES_ON_ORIGIN:
+			/* FIXME: see the note above about session_replication_role. */
+		case TRIGGER_FIRES_ALWAYS:
+			result = true;
+			break;
+		case TRIGGER_FIRES_ON_REPLICA:
+		case TRIGGER_DISABLED:
+			result = false;
+			break;
+		default:
+			elog(ERROR, "unknown trigger enabled state: %c", tgenabled);
+			result = false;		/* not reached */
+			break;
+	}
+
+	systable_endscan(sscan);
+	table_close(rel, AccessShareLock);
+
+	return result;
+}
+
+/*
+ * has_update_triggers
+ *		Does this relation have an enabled UPDATE trigger?
+ *
+ * ORCA asks before it plans an update that would move a row: a split update
+ * is a delete and an insert, which would fire the wrong triggers, so a table
+ * with update triggers keeps the plan that does not split.
+ *
+ * "including_children" is Cloudberry's and exists because ORCA does not
+ * expand a partitioned table's children the way the Postgres planner does.
+ * The planner sees each leaf as a relation of its own and asks about each;
+ * ORCA sees the parent, so it has to ask about the whole tree at once.
+ *
+ * NoLock on the children is safe for the same reason it is in Cloudberry:
+ * the parent is already locked by the statement that led here, so no
+ * partition can be detached underneath this.
+ *
+ * A TABLE NOBODY PUT A TRIGGER ON CAN ANSWER YES.  A DEFERRABLE unique or
+ * primary key constraint is enforced by an internal AFTER ROW trigger, whose
+ * tgtype carries row|insert|update -- so a table whose only unusual feature
+ * is a deferrable constraint reports an update trigger, and ORCA will not
+ * plan a split update on it.  This is Cloudberry's behaviour too, and it is
+ * not obviously wrong: the trigger really would fire, and a split update
+ * really would fire it as an insert instead.  It is recorded because it is
+ * invisible from the SQL a user wrote, and the tests pin it.
+ */
+bool
+has_update_triggers(Oid relid, bool including_children)
+{
+	Relation	relation;
+	bool		result = false;
+
+	relation = RelationIdGetRelation(relid);
+	if (!RelationIsValid(relation))
+		elog(ERROR, "could not open relation with OID %u", relid);
+
+	if (relation->rd_rel->relhastriggers)
+	{
+		if (relation->trigdesc == NULL)
+			RelationBuildTriggers(relation);
+
+		if (relation->trigdesc)
+		{
+			for (int i = 0; i < relation->trigdesc->numtriggers; i++)
+			{
+				Trigger		trigger = relation->trigdesc->triggers[i];
+
+				if (trigger_enabled(trigger.tgoid) &&
+					(get_trigger_type(trigger.tgoid) & TRIGGER_TYPE_UPDATE) ==
+					TRIGGER_TYPE_UPDATE)
+				{
+					result = true;
+					break;
+				}
+			}
+		}
+	}
+
+	if (including_children && !result &&
+		relation->rd_rel->relkind == RELKIND_PARTITIONED_TABLE)
+	{
+		List	   *partitions = find_inheritance_children(relid, NoLock);
+		ListCell   *lc;
+
+		foreach(lc, partitions)
+		{
+			if (has_update_triggers(lfirst_oid(lc), true))
+			{
+				result = true;
+				break;
+			}
+		}
+
+		list_free(partitions);
+	}
+
+	RelationClose(relation);
+
+	return result;
 }
