@@ -33,17 +33,41 @@
 #ifndef CB_COMPAT_H
 #define CB_COMPAT_H
 
+#include "fmgr.h"
+
+#include "cb_module.h"
 #include "gp_core_api.h"
 
 /*
- * Cached on first use.  A module may only ask after gp_core is loaded, which
- * CB_REQUIRE_CORE has checked by then.
+ * gp_core, found through the rendezvous variable it publishes and remembered
+ * per translation unit.
+ *
+ * An accessor rather than a variable somebody has to define: a module that
+ * uses one of the role macros below would otherwise have to remember to
+ * define the variable and to assign it in _PG_init, and forgetting either is
+ * an undefined symbol at load time rather than a compile error.  A module may
+ * only ask after gp_core is loaded, which CB_REQUIRE_CORE has checked by
+ * then; find_rendezvous_variable() creates an empty slot if it has not been,
+ * so the lookup is retried rather than cached as NULL.
  */
-extern const GpCoreApi *cb_core;
+static inline const GpCoreApi *
+cb_core_api(void)
+{
+	static const GpCoreApi *cached = NULL;
 
-#define Gp_role					(cb_core->get_role())
-#define GpIdentity_segindex		(cb_core->get_content_id())
-#define getgpsegmentCount()		(cb_core->get_segment_count())
+	if (cached == NULL)
+	{
+		void	  **rv = find_rendezvous_variable(CB_CORE_RENDEZVOUS);
+
+		cached = (const GpCoreApi *) *rv;
+	}
+
+	return cached;
+}
+
+#define Gp_role					(cb_core_api()->get_role())
+#define GpIdentity_segindex		(cb_core_api()->get_content_id())
+#define getgpsegmentCount()		(cb_core_api()->get_segment_count())
 
 #define IS_QUERY_DISPATCHER() \
 	(Gp_role == GP_ROLE_DISPATCH)
@@ -55,7 +79,7 @@ extern const GpCoreApi *cb_core;
  * asked of a flag instead, as Cloudberry asks it of gp_internal_is_singlenode.
  */
 #define IS_SINGLENODE() \
-	(cb_core->is_single_node())
+	(cb_core_api()->is_single_node())
 #define IS_QD_OR_SINGLENODE() \
 	(IS_QUERY_DISPATCHER() || IS_SINGLENODE())
 #define IS_UTILITY_OR_SINGLENODE() \
