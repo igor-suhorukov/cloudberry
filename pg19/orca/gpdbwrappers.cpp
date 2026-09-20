@@ -2799,12 +2799,33 @@ gpdb::IsTypeRange(Oid typid)
 	return false;
 }
 
+// The name of the access method a relation is stored with.
+//
+// NOT a rename.  Cloudberry calls GetAmName(reloid), and GetAmName takes an
+// *access method* OID: it looks the argument up in AMOID and reports "cache
+// lookup failed for relam object" when it misses.  Passing a relation OID to
+// it finds whatever access method happens to share that OID, or nothing.
+// The relation's own access method is in pg_class.relam and has to be read
+// first.  Cloudberry's parameter is even named `reloid`.
+//
+// Its other defect is not carried over either: GetAmName releases the
+// syscache tuple and then returns a pointer into it.  That is the third
+// function of this shape the port has met, after get_cast_func and
+// GetExtStatisticsName.
 char *
 gpdb::GetRelAmName(Oid reloid)
 {
 	GP_WRAP_START;
 	{
-		return get_am_name(reloid);
+		/* catalog tables: pg_class, pg_am */
+		Oid amoid = get_rel_relam(reloid);
+
+		if (!OidIsValid(amoid))
+		{
+			return nullptr;
+		}
+
+		return get_am_name(amoid);
 	}
 	GP_WRAP_END;
 	return nullptr;

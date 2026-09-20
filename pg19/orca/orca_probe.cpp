@@ -34,6 +34,23 @@
 //		the answer into the caller's context, because the pool goes when the
 //		task ends.  See the note over GpOrcaTraceFlags in orca_api.cpp.
 //
+//		AND A FOURTH, WHICH BELONGS TO THE CALLER.  When *raised is set
+//		because a PostgreSQL error was swallowed -- GP_WRAP catches it with
+//		sigsetjmp and re-raises it as a GPOS exception -- PostgreSQL's own
+//		error handling never ran.  The transaction is not aborted, the
+//		resource owner still holds what the failed call took, and the error
+//		stack still has an entry on it.  A caller that then returns a value
+//		leaves the backend in that state, and the next thing it does takes
+//		the server down.  So every caller of these raises a PostgreSQL error
+//		when *raised is set, which is what hands the cleanup back to
+//		PostgreSQL.  Cloudberry does the same, in CGPOptimizer, through
+//		errstart(ERROR).
+//
+//		GpOrcaUnportedRaise is the one exception, and it is safe for a
+//		reason worth naming: the exception it catches is a GPOS_RAISE from
+//		GP_UNPORTED, thrown by C++ that never entered PostgreSQL, so there is
+//		no half-finished PostgreSQL error behind it.
+//
 //		These probe what the *port* changed, not what Cloudberry wrote:
 //		the operator OIDs the port had to name itself, the extended-statistics
 //		call whose "not built" case PostgreSQL raises on and Cloudberry does

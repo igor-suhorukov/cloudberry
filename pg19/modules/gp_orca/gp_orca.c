@@ -1462,8 +1462,22 @@ gp_orca_index_am_resolves(PG_FUNCTION_ARGS)
 	bool		raised = false;
 	bool		result = GpOrcaIndexAmRoutineExists(PG_GETARG_OID(0), &raised);
 
+	/*
+	 * An error, not a NULL, and this is the rule rather than a preference:
+	 * when GP_WRAP catches a PostgreSQL error it jumps over PostgreSQL's own
+	 * error handling, so nothing has aborted the transaction, released the
+	 * resource owner or flushed the error stack.  Returning normally leaves
+	 * the backend in that half-torn-down state, and the next thing it does
+	 * takes it down -- which is what happened when this returned NULL.
+	 *
+	 * Raising here is what puts PostgreSQL back in charge of the cleanup,
+	 * and it is what Cloudberry does: CGPOptimizer catches every GPOS
+	 * exception and re-raises it through errstart(ERROR).
+	 */
 	if (raised)
-		PG_RETURN_NULL();
+		ereport(ERROR,
+				(errcode(ERRCODE_INTERNAL_ERROR),
+				 errmsg("this is not an index access method handler")));
 
 	PG_RETURN_BOOL(result);
 }

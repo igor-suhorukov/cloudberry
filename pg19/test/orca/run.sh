@@ -1366,11 +1366,22 @@ is "and so does hash's" \
    "SELECT gp_orca.index_am_resolves(
       (SELECT amhandler FROM pg_am WHERE amname = 'hash'));" "t"
 
-# A table access method handler is not an index one, and PostgreSQL says so
-# rather than returning something unusable.
-is "a table access method handler is refused, not mistaken for an index one" \
+# A table access method handler is not an index one, and PostgreSQL raises
+# rather than returning something unusable.  This is the whole error path in
+# one line: a PostgreSQL elog becomes a GPOS exception inside GP_WRAP, the
+# probe catches it, and the caller turns it back into a PostgreSQL error.
+#
+# The caller has to raise.  Returning a value would leave the backend with a
+# transaction PostgreSQL never aborted, and this test took the server down
+# when it expected NULL here.
+refused "a table access method handler is refused, not mistaken for an index one" \
    "SELECT gp_orca.index_am_resolves(
-      (SELECT amhandler FROM pg_am WHERE amname = 'heap')) IS NULL;" "t"
+      (SELECT amhandler FROM pg_am WHERE amname = 'heap'));" \
+   "not an index access method handler"
+
+is "and the session is still usable afterwards" \
+   "SELECT gp_orca.index_am_resolves(
+      (SELECT amhandler FROM pg_am WHERE amname = 'btree'));" "t"
 
 # --- the one that would have been wrong --------------------------------------
 #
@@ -1455,8 +1466,8 @@ is "and a replicated one says so" \
 # different path: one is the compat layer in C, the other the wrapper in C++.
 # They must not disagree.
 is "the wrapper and the compat layer read the same label" \
-   "SELECT gp_orca.wrapper_policy('wrap_heap'::regclass)
-           = gp_orca.relation_policy('wrap_heap'::regclass);" "t"
+   "SELECT (gp_orca.relation_policy('wrap_heap'::regclass)).kind || '/' ||
+           gp_orca.wrapper_policy('wrap_heap'::regclass);" "replicated/replicated"
 
 # --- the fallback path, made visible -----------------------------------------
 #
