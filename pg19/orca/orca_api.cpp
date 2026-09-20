@@ -267,7 +267,19 @@ GpOrcaTraceFlags(int **flags)
 	{
 		major = ex.Major();
 		minor = ex.Minor();
-		GPOS_RESET_EX;
+		/*
+		 * No GPOS_RESET_EX here, and this is the trap.  It expands to
+		 * ITask::Self()->GetErrCtxt()->Reset(), and ITask::Self() is null
+		 * outside a task -- which is exactly where this catch runs, because
+		 * gpos_exec has already unwound the task by the time it rethrows.
+		 * Calling it segfaults the backend, in a release build with no
+		 * assertion to say why.
+		 *
+		 * There is nothing to reset in any case: the error context belonged
+		 * to the task and went with it.  Cloudberry's two catches around
+		 * gpos_exec, in COptTasks::Execute and CGPOptimizer, do not reset
+		 * either.
+		 */
 		rc = -1;
 	}
 	GPOS_CATCH_END;

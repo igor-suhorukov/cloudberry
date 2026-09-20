@@ -80,9 +80,8 @@ extern "C"
 
 #include "gp_orca_api.h"
 
-// GPOS_TRY and GPOS_RESET_EX name CErrorHandler and ITask without
-// qualification, so they only compile with gpos in scope.  Cloudberry's
-// files do the same thing.
+// GPOS_TRY names CErrorHandler without qualification, so it only compiles
+// with gpos in scope.  Cloudberry's files do the same thing.
 using namespace gpos;
 
 namespace
@@ -146,7 +145,19 @@ RunProbe(void *(*body)(void *), ProbeResult *r)
 		r->raised = true;
 		r->major = ex.Major();
 		r->minor = ex.Minor();
-		GPOS_RESET_EX;
+		/*
+		 * No GPOS_RESET_EX here, and this is the trap.  It expands to
+		 * ITask::Self()->GetErrCtxt()->Reset(), and ITask::Self() is null
+		 * outside a task -- which is exactly where this catch runs, because
+		 * gpos_exec has already unwound the task by the time it rethrows.
+		 * Calling it segfaults the backend, in a release build with no
+		 * assertion to say why.
+		 *
+		 * There is nothing to reset in any case: the error context belonged
+		 * to the task and went with it.  Cloudberry's two catches around
+		 * gpos_exec, in COptTasks::Execute and CGPOptimizer, do not reset
+		 * either.
+		 */
 		rc = 0;					// reported through r->raised, not as failure
 	}
 	GPOS_CATCH_END;
