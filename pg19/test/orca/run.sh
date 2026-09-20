@@ -1407,14 +1407,24 @@ is "one built for another kind answers no, and does not raise" \
    "SELECT gp_orca.mv_dependencies(
       (SELECT oid FROM pg_statistic_ext WHERE stxname = 'wrap_ndist'));" "f"
 
-# And before ANALYZE there is no data row at all, which is the same question
-# asked one step earlier.
+# Before ANALYZE there is no pg_statistic_ext_data row at all, and that is a
+# different question: allow_null covers "the row is there and this kind of
+# statistic is null", not "there is no row".  Cloudberry raises here too, so
+# the port matching it is the right answer rather than a gap.
+#
+# ORCA never asks it.  GetRelationExtStatistics returns nothing for an object
+# with no data row and reports only the kinds that are built, so the objects
+# it goes on to ask about always have both.
 q "CREATE TABLE wrap_fresh(a int, b int);
    CREATE STATISTICS wrap_unbuilt (dependencies) ON a, b FROM wrap_fresh;" > /dev/null
 
-is "and one never analyzed answers no as well" \
+refused "one never analyzed at all raises, as it does on Cloudberry" \
    "SELECT gp_orca.mv_dependencies(
-      (SELECT oid FROM pg_statistic_ext WHERE stxname = 'wrap_unbuilt'));" "f"
+      (SELECT oid FROM pg_statistic_ext WHERE stxname = 'wrap_unbuilt'));" \
+   "the optimizer raised asking for functional dependencies"
+
+is "and the compat layer never offers ORCA such an object" \
+   "SELECT count(*) FROM gp_orca.ext_stats('wrap_fresh'::regclass);" "0"
 
 # --- the syscache callback whose signature changed ---------------------------
 #
@@ -1424,10 +1434,12 @@ is "and one never analyzed answers no as well" \
 # metadata cache would never be told the catalog had changed.
 # Both calls have to be in one session, because the counter is per-backend
 # and each q() opens its own.  The first call registers the callbacks and
-# always answers true; the second has nothing to report.
-is "two calls in one backend: the first wants a reset, the second does not" \
+# answers no: Cloudberry compares the counter with the last one it saw, and
+# on the first call both are zero.  So a backend that has never planned
+# anything is told its metadata cache is fresh, which it is.
+is "two calls in one backend, with nothing between them, want no reset" \
    "SELECT gp_orca.mdcache_needs_reset();
-    SELECT gp_orca.mdcache_needs_reset();" "t
+    SELECT gp_orca.mdcache_needs_reset();" "f
 f"
 
 # And a catalog change between them is noticed -- which, given the line
@@ -1436,7 +1448,7 @@ f"
 is "and a catalog change between them is noticed" \
    "SELECT gp_orca.mdcache_needs_reset();
     CREATE TABLE mdc_probe(a int);
-    SELECT gp_orca.mdcache_needs_reset();" "t
+    SELECT gp_orca.mdcache_needs_reset();" "f
 t"
 
 # --- the wrapper that gained an answer with the "gp" label -------------------

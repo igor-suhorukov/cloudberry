@@ -356,15 +356,23 @@ static void *
 ProbePolicyKind(void *ptr)
 {
 	ProbeResult *r = (ProbeResult *) ptr;
-	Relation	rel = gpdb::GetRelation(r->arg).get();
+
+	// The wrapper is held, not .get()'d off a temporary.  A temporary
+	// RelationWrapper is destroyed at the end of the full expression, and
+	// its destructor closes the relation -- so `Relation rel =
+	// GetRelation(oid).get();` hands back a pointer to a relation that has
+	// already been closed, and the next line reads freed memory.  That is
+	// the mistake RelationWrapper exists to prevent, and it is still
+	// available to anyone who writes .get() one line too early.
+	gpdb::RelationWrapper rel = gpdb::GetRelation(r->arg);
 	GpPolicy   *policy;
 
-	if (rel == nullptr)
+	if (!rel)
 	{
 		return nullptr;
 	}
 
-	policy = gpdb::GetDistributionPolicy(rel);
+	policy = gpdb::GetDistributionPolicy(rel.get());
 	if (policy == nullptr)
 	{
 		r->text = nullptr;
@@ -390,7 +398,7 @@ ProbePolicyKind(void *ptr)
 		r->text = CopyOut(r, "unknown");
 	}
 
-	gpdb::CloseRelation(rel);
+	// No CloseRelation: the wrapper does it when it goes out of scope.
 	return nullptr;
 }
 
