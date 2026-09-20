@@ -117,6 +117,7 @@ typedef struct GpTokens
 static const char *const gp_trigger_words[] = {
 	"tag", "profile", "distributed", "randomly", "replicated", "task",
 	"directory", "storage", "dynamic", "incremental", "unset", "account",
+	"execute",
 	NULL
 };
 
@@ -1396,6 +1397,184 @@ rw_role_profile(GpRewrite *rw)
 	return true;
 }
 
+/*
+ * EXECUTE ON ANY | COORDINATOR | MASTER | INITPLAN | ALL SEGMENTS, on
+ * CREATE [OR REPLACE] FUNCTION and PROCEDURE and on ALTER FUNCTION and
+ * PROCEDURE.
+ *
+ *	 CREATE FUNCTION f(int) RETURNS int ... EXECUTE ON ALL SEGMENTS
+ *	   -> CREATE FUNCTION f(int) RETURNS int ...
+ *	      ; SECURITY LABEL FOR gp ON FUNCTION f(int) IS 'execute_on=all_segments'
+ *
+ * The label is what func_exec_location() reads, and ORCA asks it of every
+ * function it meets, so this closes the loop between the syntax and the
+ * reader that has been waiting for it.
+ *
+ * WHAT THIS DOES NOT COVER, and why: the data-access attributes that share
+ * Cloudberry's grammar production -- NO SQL, CONTAINS SQL, READS SQL DATA,
+ * MODIFIES SQL DATA.  Nothing reads pg_proc.prodataaccess: Cloudberry
+ * validates it at DDL time and dumps it, and no planner or executor decision
+ * turns on it.  Recognising them would also cost the rewriter a trigger word
+ * for "NO SQL", whose only distinctive token is "no" -- a word common enough
+ * in ordinary SQL that every statement holding it would be tokenised for
+ * nothing.  They stay a syntax error until something needs them.
+ */
+static bool
+rw_execute_on(GpRewrite *rw)
+{
+	const GpTokens *ts = rw->ts;
+	static const struct
+	{
+		const char *word;		/* the word after EXECUTE ON */
+		const char *second;		/* and the one after that, or NULL */
+		const char *value;		/* what the label records */
+	}			locations[] = {
+		{"any", NULL, "any"},
+		{"coordinator", NULL, "coordinator"},
+		{"master", NULL, "coordinator"},
+		{"initplan", NULL, "initplan"},
+		{"all", "segments", "all_segments"},
+	};
+	int			i = rw->first;
+	const char *objtype;
+	int			sig_first;
+	int			sig_end;
+	StringInfoData sig;
+	int			depth = 0;
+	bool		found = false;
+
+	/* CREATE [OR REPLACE] FUNCTION|PROCEDURE, or ALTER FUNCTION|PROCEDURE. */
+	if (tok_is(ts, i, "create"))
+	{
+		i++;
+		if (tok_is(ts, i, "or") && tok_is(ts, i + 1, "replace"))
+			i += 2;
+	}
+	else if (tok_is(ts, i, "alter"))
+		i++;
+	else
+		return false;
+
+	if (tok_is(ts, i, "function"))
+		objtype = "FUNCTION";
+	else if (tok_is(ts, i, "procedure"))
+		objtype = "PROCEDURE";
+	else
+		return false;
+	i++;
+
+	sig_first = i;
+	i = skip_qualified_name(ts, i);
+	if (i == sig_first)
+		return false;
+
+	initStringInfo(&sig);
+	appendStringInfoString(&sig, rw_text(ts, sig_first, i));
+
+	/*
+	 * The parameter list, rewritten into the form SECURITY LABEL will take.
+	 * A default belongs to CREATE FUNCTION and not to a signature, so
+	 * "a int DEFAULT 5" has to become "a int"; everything else is copied,
+	 * including OUT parameters, which PostgreSQL ignores when it looks a
+	 * function up.  ALTER FUNCTION is already written this way and passes
+	 * through unchanged.
+	 */
+	if (tok_is_char(ts, i, '('))
+	{
+		int			close = skip_parens(ts, i);
+		int			inner = 0;
+		bool		skipping = false;
+		bool		first_in_group = true;
+
+		appendStringInfoChar(&sig, '(');
+		for (int j = i + 1; j < close - 1; j++)
+		{
+			if (tok_is_char(ts, j, '('))
+				inner++;
+			else if (tok_is_char(ts, j, ')'))
+				inner--;
+
+			if (inner == 0 && tok_is_char(ts, j, ','))
+			{
+				appendStringInfoString(&sig, ", ");
+				skipping = false;
+				first_in_group = true;
+				continue;
+			}
+
+			if (inner == 0 &&
+				(tok_is(ts, j, "default") || tok_is_char(ts, j, '=')))
+				skipping = true;
+
+			if (skipping)
+				continue;
+
+			if (!first_in_group && !tok_is_char(ts, j, ',') &&
+				!tok_is_char(ts, j, '(') && !tok_is_char(ts, j, ')') &&
+				!tok_is_char(ts, j, '[') && !tok_is_char(ts, j, ']'))
+				appendStringInfoChar(&sig, ' ');
+			appendStringInfoString(&sig, rw_text(ts, j, j + 1));
+			first_in_group = false;
+		}
+		appendStringInfoChar(&sig, ')');
+		sig_end = close;
+	}
+	else
+	{
+		/* ALTER FUNCTION f EXECUTE ON ANY: PostgreSQL allows a bare name. */
+		sig_end = i;
+	}
+
+	/*
+	 * Now look for the clause.  It is written among the function's other
+	 * options, which is depth 0; a SQL-standard body is where real SQL
+	 * tokens start and nothing of Cloudberry's follows, so stop there.
+	 */
+	for (int j = sig_end; j < rw->last; j++)
+	{
+		if (tok_is_char(ts, j, '('))
+		{
+			depth++;
+			continue;
+		}
+		if (tok_is_char(ts, j, ')'))
+		{
+			depth--;
+			continue;
+		}
+		if (depth != 0)
+			continue;
+		if (tok_is(ts, j, "begin"))
+			break;
+		if (!tok_is(ts, j, "execute") || !tok_is(ts, j + 1, "on"))
+			continue;
+
+		for (size_t k = 0; k < lengthof(locations); k++)
+		{
+			int			after;
+
+			if (!tok_is(ts, j + 2, locations[k].word))
+				continue;
+			if (locations[k].second != NULL &&
+				!tok_is(ts, j + 3, locations[k].second))
+				continue;
+
+			after = j + 3 + (locations[k].second != NULL ? 1 : 0);
+
+			appendStringInfo(&rw->after,
+							 "; SECURITY LABEL FOR gp ON %s %s IS 'execute_on=%s'",
+							 objtype, sig.data, locations[k].value);
+			rw_edit(rw, ts->toks[j].off,
+					(after < ts->ntoks) ? ts->toks[after].off : ts->srclen, " ");
+			j = after - 1;
+			found = true;
+			break;
+		}
+	}
+
+	return found;
+}
+
 /* ------------------------------------------------------------------------- */
 /* The driver                                                                */
 /* ------------------------------------------------------------------------- */
@@ -1420,6 +1599,7 @@ rw_statement(GpRewrite *rw)
 
 	(void) rw_storage_and_dynamic(rw);
 	(void) rw_matview_options(rw);
+	(void) rw_execute_on(rw);
 
 	kind = find_subject(rw->ts, rw->first, rw->last, &name, &after_name);
 	if (kind != GP_SUBJ_NONE)

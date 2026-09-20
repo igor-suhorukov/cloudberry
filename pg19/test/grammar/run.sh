@@ -446,6 +446,125 @@ is "and PL/pgSQL, which parses through the same hook" \
 is "a prepared statement is parsed once and still works" \
    "PREPARE p AS SELECT \$1::int; EXECUTE p(42);" "42"
 
+###############################################################################
+echo "10. EXECUTE ON, which says where a function may run"
+###############################################################################
+# The label this writes is what func_exec_location() reads, and ORCA asks it
+# of every function it meets.  The reader has existed since the compat layer
+# landed; until now the label could only be set by hand, so the syntax was
+# still a syntax error on the port.  The two halves are tested against the
+# same strings: the ORCA suite asserts the reading, this one the writing.
+
+isl "EXECUTE ON ALL SEGMENTS" \
+   "CREATE FUNCTION xf1(int) RETURNS int LANGUAGE sql AS 'SELECT \$1'
+      EXECUTE ON ALL SEGMENTS;
+    SELECT label FROM pg_seclabel WHERE objoid = 'xf1(int)'::regprocedure
+       AND classoid = 'pg_proc'::regclass AND provider = 'gp';" \
+   "execute_on=all_segments"
+
+isl "EXECUTE ON ANY" \
+   "CREATE FUNCTION xf2(int) RETURNS int LANGUAGE sql AS 'SELECT \$1'
+      EXECUTE ON ANY;
+    SELECT label FROM pg_seclabel WHERE objoid = 'xf2(int)'::regprocedure
+       AND classoid = 'pg_proc'::regclass AND provider = 'gp';" \
+   "execute_on=any"
+
+isl "EXECUTE ON COORDINATOR" \
+   "CREATE FUNCTION xf3(int) RETURNS int LANGUAGE sql AS 'SELECT \$1'
+      EXECUTE ON COORDINATOR;
+    SELECT label FROM pg_seclabel WHERE objoid = 'xf3(int)'::regprocedure
+       AND classoid = 'pg_proc'::regclass AND provider = 'gp';" \
+   "execute_on=coordinator"
+
+# Cloudberry's older spelling, which its own grammar still accepts and maps to
+# the same value.  A label a person reads says "coordinator" either way.
+isl "EXECUTE ON MASTER, which means the same thing" \
+   "CREATE FUNCTION xf4(int) RETURNS int LANGUAGE sql AS 'SELECT \$1'
+      EXECUTE ON MASTER;
+    SELECT label FROM pg_seclabel WHERE objoid = 'xf4(int)'::regprocedure
+       AND classoid = 'pg_proc'::regclass AND provider = 'gp';" \
+   "execute_on=coordinator"
+
+isl "EXECUTE ON INITPLAN" \
+   "CREATE FUNCTION xf5(int) RETURNS int LANGUAGE sql AS 'SELECT \$1'
+      EXECUTE ON INITPLAN;
+    SELECT label FROM pg_seclabel WHERE objoid = 'xf5(int)'::regprocedure
+       AND classoid = 'pg_proc'::regclass AND provider = 'gp';" \
+   "execute_on=initplan"
+
+isl "ALTER FUNCTION changes it" \
+   "ALTER FUNCTION xf1(int) EXECUTE ON COORDINATOR;
+    SELECT label FROM pg_seclabel WHERE objoid = 'xf1(int)'::regprocedure
+       AND classoid = 'pg_proc'::regclass AND provider = 'gp';" \
+   "execute_on=coordinator"
+
+# A DEFAULT belongs to CREATE FUNCTION and not to a signature: SECURITY LABEL
+# takes a function_with_argtypes, which the grammar will not let one into.
+isl "a parameter with a DEFAULT still finds its function" \
+   "CREATE FUNCTION xf6(a int, b int DEFAULT 5) RETURNS int LANGUAGE sql
+      AS 'SELECT a + b' EXECUTE ON ALL SEGMENTS;
+    SELECT label FROM pg_seclabel WHERE objoid = 'xf6(int,int)'::regprocedure
+       AND classoid = 'pg_proc'::regclass AND provider = 'gp';" \
+   "execute_on=all_segments"
+
+isl "and so does an OUT parameter, which the lookup ignores" \
+   "CREATE FUNCTION xf7(IN a int, OUT b int) LANGUAGE sql AS 'SELECT a'
+      EXECUTE ON ALL SEGMENTS;
+    SELECT label FROM pg_seclabel WHERE objoid = 'xf7(int)'::regprocedure
+       AND classoid = 'pg_proc'::regclass AND provider = 'gp';" \
+   "execute_on=all_segments"
+
+isl "a type that is spelled with a comma inside parentheses" \
+   "CREATE FUNCTION xf8(a numeric(10,2)) RETURNS int LANGUAGE sql AS 'SELECT 1'
+      EXECUTE ON ALL SEGMENTS;
+    SELECT label FROM pg_seclabel WHERE objoid = 'xf8(numeric)'::regprocedure
+       AND classoid = 'pg_proc'::regclass AND provider = 'gp';" \
+   "execute_on=all_segments"
+
+isl "a schema-qualified name" \
+   "CREATE SCHEMA xs;
+    CREATE FUNCTION xs.xf9(int) RETURNS int LANGUAGE sql AS 'SELECT \$1'
+      EXECUTE ON ALL SEGMENTS;
+    SELECT label FROM pg_seclabel WHERE objoid = 'xs.xf9(int)'::regprocedure
+       AND classoid = 'pg_proc'::regclass AND provider = 'gp';" \
+   "execute_on=all_segments"
+
+isl "a procedure, which shares the clause in Cloudberry's grammar" \
+   "CREATE PROCEDURE xp1(int) LANGUAGE sql AS 'SELECT \$1' EXECUTE ON ANY;
+    SELECT label FROM pg_seclabel WHERE objoid = 'xp1(int)'::regprocedure
+       AND classoid = 'pg_proc'::regclass AND provider = 'gp';" \
+   "execute_on=any"
+
+is "a function written without the clause carries no label" \
+   "CREATE FUNCTION xf10(int) RETURNS int LANGUAGE sql AS 'SELECT \$1';
+    SELECT count(*) FROM pg_seclabel WHERE objoid = 'xf10(int)'::regprocedure
+       AND classoid = 'pg_proc'::regclass;" "0"
+
+# THE COLLISION WORTH TESTING.  "EXECUTE ON" is also how every GRANT of the
+# execute privilege is written, and the rewriter now looks for the word
+# "execute" in every statement.  What keeps them apart is that the clause is
+# only read on a CREATE or ALTER of a function.
+is "GRANT EXECUTE ON FUNCTION is not a place to run one" \
+   "GRANT EXECUTE ON FUNCTION xf10(int) TO PUBLIC;
+    SELECT count(*) FROM pg_seclabel WHERE objoid = 'xf10(int)'::regprocedure;" "0"
+
+is "and REVOKE EXECUTE ON ALL FUNCTIONS IN SCHEMA is not either" \
+   "REVOKE EXECUTE ON ALL FUNCTIONS IN SCHEMA public FROM PUBLIC;
+    SELECT count(*) FROM pg_seclabel WHERE objoid = 'xf10(int)'::regprocedure;" "0"
+
+is "the words inside a function body are left where they are" \
+   "CREATE FUNCTION xf11() RETURNS text LANGUAGE sql
+      AS \$\$ SELECT 'EXECUTE ON ALL SEGMENTS' \$\$;
+    SELECT xf11();" "EXECUTE ON ALL SEGMENTS"
+
+is "and the clause is gone from what the parser is handed" \
+   "SELECT gp_sql.desugar('CREATE FUNCTION g(int) RETURNS int LANGUAGE sql
+      AS ''SELECT 1'' EXECUTE ON ALL SEGMENTS') LIKE '%SECURITY LABEL FOR gp ON FUNCTION g(int) IS ''execute_on=all_segments''%';" \
+   "t"
+
+is "a statement with no clause is handed back untouched" \
+   "SELECT gp_sql.desugar('GRANT EXECUTE ON FUNCTION xf10(int) TO PUBLIC') IS NULL;" "t"
+
 echo
 echo "  $pass passed, $fail failed"
 [ "$fail" -eq 0 ]
