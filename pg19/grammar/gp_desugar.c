@@ -121,6 +121,25 @@ static const char *const gp_trigger_words[] = {
 	NULL
 };
 
+/*
+ * Two-word triggers, for a clause whose words are each too common to list
+ * above.
+ *
+ * The data-access attributes are all "<word> SQL".  "sql" on its own would
+ * fire on every LANGUAGE sql, which is most function DDL, and "no" on a large
+ * share of ordinary SQL; the pair fires on neither.  This is a prefilter, so
+ * being approximate is allowed in one direction only -- it may say yes to a
+ * statement with nothing to rewrite, but a no must be right.  The one thing
+ * it would miss is a comment between the two words, which nothing writes.
+ */
+static const char *const gp_trigger_pairs[][2] = {
+	{"no", "sql"},
+	{"contains", "sql"},
+	{"reads", "sql"},
+	{"modifies", "sql"},
+	{NULL, NULL}
+};
+
 /* ------------------------------------------------------------------------- */
 /* Tokens                                                                    */
 /* ------------------------------------------------------------------------- */
@@ -151,6 +170,31 @@ looks_interesting(const char *str)
 				continue;
 			if (i + wl <= len &&
 				pg_strncasecmp(str + i, gp_trigger_words[w], wl) == 0)
+				return true;
+		}
+
+		for (int w = 0; gp_trigger_pairs[w][0] != NULL; w++)
+		{
+			int			wl = strlen(gp_trigger_pairs[w][0]);
+			int			sl = strlen(gp_trigger_pairs[w][1]);
+			int			j;
+
+			if (pg_tolower((unsigned char) str[i]) != gp_trigger_pairs[w][0][0])
+				continue;
+			if (i + wl > len ||
+				pg_strncasecmp(str + i, gp_trigger_pairs[w][0], wl) != 0)
+				continue;
+
+			/* The first word has to end here, or "no" would match "node". */
+			j = i + wl;
+			if (j < len && is_word_char(str[j]))
+				continue;
+
+			while (j < len && !is_word_char(str[j]))
+				j++;
+
+			if (j + sl <= len &&
+				pg_strncasecmp(str + j, gp_trigger_pairs[w][1], sl) == 0)
 				return true;
 		}
 	}
@@ -1397,75 +1441,49 @@ rw_role_profile(GpRewrite *rw)
 	return true;
 }
 
+/* ------------------------------------------------------------------------- */
+/* Function attributes: where a function may run, and what it does with SQL   */
+/* ------------------------------------------------------------------------- */
+
 /*
- * EXECUTE ON ANY | COORDINATOR | MASTER | INITPLAN | ALL SEGMENTS, on
- * CREATE [OR REPLACE] FUNCTION and PROCEDURE and on ALTER FUNCTION and
- * PROCEDURE.
+ * The head of CREATE [OR REPLACE] FUNCTION|PROCEDURE, or of ALTER FUNCTION|
+ * PROCEDURE: the object type, the signature written the way SECURITY LABEL
+ * takes it, and where the option list begins.
  *
- *	 CREATE FUNCTION f(int) RETURNS int ... EXECUTE ON ALL SEGMENTS
- *	   -> CREATE FUNCTION f(int) RETURNS int ...
- *	      ; SECURITY LABEL FOR gp ON FUNCTION f(int) IS 'execute_on=all_segments'
- *
- * The label is what func_exec_location() reads, and ORCA asks it of every
- * function it meets, so this closes the loop between the syntax and the
- * reader that has been waiting for it.
- *
- * WHAT THIS DOES NOT COVER, and why: the data-access attributes that share
- * Cloudberry's grammar production -- NO SQL, CONTAINS SQL, READS SQL DATA,
- * MODIFIES SQL DATA.  Nothing reads pg_proc.prodataaccess: Cloudberry
- * validates it at DDL time and dumps it, and no planner or executor decision
- * turns on it.  Recognising them would also cost the rewriter a trigger word
- * for "NO SQL", whose only distinctive token is "no" -- a word common enough
- * in ordinary SQL that every statement holding it would be tokenised for
- * nothing.  They stay a syntax error until something needs them.
+ * The signature goes to SECURITY LABEL as text rather than through
+ * regprocedure, and that is deliberate.  PostgreSQL resolves a function
+ * signature for SECURITY LABEL by the same rules as for ALTER FUNCTION, so
+ * "f(a int, OUT b int)" finds f; regprocedure parses a bare type list and
+ * rejects both the parameter names and the OUT.  Letting PostgreSQL parse
+ * what the user wrote is the only way to accept everything it would.
  */
 static bool
-rw_execute_on(GpRewrite *rw)
+rw_function_head(GpRewrite *rw, const char **objtype, StringInfo sig,
+				 int *sig_end, bool *altering)
 {
 	const GpTokens *ts = rw->ts;
-	static const struct
-	{
-		const char *word;		/* the word after EXECUTE ON */
-		const char *second;		/* and the one after that, or NULL */
-		const char *value;		/* what the label records */
-	}			locations[] = {
-		{"any", NULL, "any"},
-		{"coordinator", NULL, "coordinator"},
-		{"master", NULL, "coordinator"},
-		{"initplan", NULL, "initplan"},
-		{"all", "segments", "all_segments"},
-	};
 	int			i = rw->first;
-	const char *objtype;
 	int			sig_first;
-	int			sig_end;
-	StringInfoData sig;
-	int			depth = 0;
-	bool		found = false;
-	bool		altering;
-	int			clause_first = -1;
-	int			clause_after = -1;
 
-	/* CREATE [OR REPLACE] FUNCTION|PROCEDURE, or ALTER FUNCTION|PROCEDURE. */
 	if (tok_is(ts, i, "create"))
 	{
-		altering = false;
+		*altering = false;
 		i++;
 		if (tok_is(ts, i, "or") && tok_is(ts, i + 1, "replace"))
 			i += 2;
 	}
 	else if (tok_is(ts, i, "alter"))
 	{
-		altering = true;
+		*altering = true;
 		i++;
 	}
 	else
 		return false;
 
 	if (tok_is(ts, i, "function"))
-		objtype = "FUNCTION";
+		*objtype = "FUNCTION";
 	else if (tok_is(ts, i, "procedure"))
-		objtype = "PROCEDURE";
+		*objtype = "PROCEDURE";
 	else
 		return false;
 	i++;
@@ -1475,8 +1493,8 @@ rw_execute_on(GpRewrite *rw)
 	if (i == sig_first)
 		return false;
 
-	initStringInfo(&sig);
-	appendStringInfoString(&sig, rw_text(ts, sig_first, i));
+	initStringInfo(sig);
+	appendStringInfoString(sig, rw_text(ts, sig_first, i));
 
 	/*
 	 * The parameter list, rewritten into the form SECURITY LABEL will take.
@@ -1493,7 +1511,7 @@ rw_execute_on(GpRewrite *rw)
 		bool		skipping = false;
 		bool		first_in_group = true;
 
-		appendStringInfoChar(&sig, '(');
+		appendStringInfoChar(sig, '(');
 		for (int j = i + 1; j < close - 1; j++)
 		{
 			if (tok_is_char(ts, j, '('))
@@ -1503,7 +1521,7 @@ rw_execute_on(GpRewrite *rw)
 
 			if (inner == 0 && tok_is_char(ts, j, ','))
 			{
-				appendStringInfoString(&sig, ", ");
+				appendStringInfoString(sig, ", ");
 				skipping = false;
 				first_in_group = true;
 				continue;
@@ -1519,26 +1537,111 @@ rw_execute_on(GpRewrite *rw)
 			if (!first_in_group && !tok_is_char(ts, j, ',') &&
 				!tok_is_char(ts, j, '(') && !tok_is_char(ts, j, ')') &&
 				!tok_is_char(ts, j, '[') && !tok_is_char(ts, j, ']'))
-				appendStringInfoChar(&sig, ' ');
-			appendStringInfoString(&sig, rw_text(ts, j, j + 1));
+				appendStringInfoChar(sig, ' ');
+			appendStringInfoString(sig, rw_text(ts, j, j + 1));
 			first_in_group = false;
 		}
-		appendStringInfoChar(&sig, ')');
-		sig_end = close;
+		appendStringInfoChar(sig, ')');
+		*sig_end = close;
 	}
 	else
 	{
 		/* ALTER FUNCTION f EXECUTE ON ANY: PostgreSQL allows a bare name. */
-		sig_end = i;
+		*sig_end = i;
 	}
 
+	return true;
+}
+
+/*
+ * EXECUTE ON ANY | COORDINATOR | MASTER | INITPLAN | ALL SEGMENTS, and the
+ * data-access attributes NO SQL | CONTAINS SQL | READS SQL DATA | MODIFIES
+ * SQL DATA, on CREATE [OR REPLACE] FUNCTION and PROCEDURE and on ALTER
+ * FUNCTION and PROCEDURE.
+ *
+ *	 CREATE FUNCTION f(int) RETURNS int ... EXECUTE ON ALL SEGMENTS
+ *	   -> CREATE FUNCTION f(int) RETURNS int ...
+ *	      ; SECURITY LABEL FOR gp ON FUNCTION f(int) IS 'execute_on=all_segments'
+ *
+ * The execute_on label is what func_exec_location() reads, and ORCA asks it of
+ * every function it meets.
+ *
+ * THE TWO FAMILIES ARE READ TOGETHER, in one pass, and write one label.  They
+ * have to be: SECURITY LABEL *replaces* a provider's label rather than merging
+ * into it, so two statements would leave only the second key.  Writing both in
+ * one label is also why the keys come out in a fixed order rather than the
+ * order they were written -- two spellings of the same function then produce
+ * the same label.
+ *
+ * WHAT DATA ACCESS IS FOR.  Nothing reads it, and that is not a gap in the
+ * port: Cloudberry writes pg_proc.prodataaccess, dumps it, and reads it
+ * nowhere outside the DDL path -- no planner, executor or dispatcher decision
+ * turns on it.  Its whole observable behaviour is the three rules below, from
+ * validate_sql_data_access() in Cloudberry's functioncmds.c, and they are
+ * checked here rather than in the label provider because Cloudberry rejects
+ * the statement before the function is created, and a check on the SECURITY
+ * LABEL that follows would reject it after.
+ *
+ * The default is not written down.  Cloudberry fills in CONTAINS SQL for a
+ * LANGUAGE SQL function and NO SQL for everything else at DDL time; here the
+ * absence of the key means exactly that, so an ordinary function carries no
+ * label at all.
+ */
+static bool
+rw_function_clauses(GpRewrite *rw)
+{
+	const GpTokens *ts = rw->ts;
+	static const struct
+	{
+		const char *word;		/* the word after EXECUTE ON */
+		const char *second;		/* and the one after that, or NULL */
+		const char *value;		/* what the label records */
+	}			locations[] = {
+		{"any", NULL, "any"},
+		{"coordinator", NULL, "coordinator"},
+		{"master", NULL, "coordinator"},
+		{"initplan", NULL, "initplan"},
+		{"all", "segments", "all_segments"},
+	};
+	static const struct
+	{
+		const char *w1;
+		const char *w2;
+		const char *w3;			/* or NULL */
+		const char *value;
+	}			accesses[] = {
+		{"no", "sql", NULL, "none"},
+		{"contains", "sql", NULL, "contains"},
+		{"reads", "sql", "data", "reads"},
+		{"modifies", "sql", "data", "modifies"},
+	};
+	const char *objtype;
+	StringInfoData sig;
+	int			sig_end;
+	bool		altering;
+	int			depth = 0;
+	const char *exec_on = NULL;
+	const char *data_access = NULL;
+	bool		saw_immutable = false;
+	bool		saw_language_sql = false;
+	int			covered_from = -1;
+	int			covered_to = -1;
+	int			covered_tokens = 0;
+
+	if (!rw_function_head(rw, &objtype, &sig, &sig_end, &altering))
+		return false;
+
 	/*
-	 * Now look for the clause.  It is written among the function's other
-	 * options, which is depth 0; a SQL-standard body is where real SQL
+	 * One pass over the option list.  It is written among the function's
+	 * other options, which is depth 0; a SQL-standard body is where real SQL
 	 * tokens start and nothing of Cloudberry's follows, so stop there.
 	 */
 	for (int j = sig_end; j < rw->last; j++)
 	{
+		int			after = -1;
+		const char *key_value = NULL;
+		bool		is_exec = false;
+
 		if (tok_is_char(ts, j, '('))
 		{
 			depth++;
@@ -1553,48 +1656,110 @@ rw_execute_on(GpRewrite *rw)
 			continue;
 		if (tok_is(ts, j, "begin"))
 			break;
-		if (!tok_is(ts, j, "execute") || !tok_is(ts, j + 1, "on"))
+
+		/* Remembered for the three validation rules below. */
+		if (tok_is(ts, j, "immutable"))
+			saw_immutable = true;
+		if (tok_is(ts, j, "language") && tok_is(ts, j + 1, "sql"))
+			saw_language_sql = true;
+
+		if (tok_is(ts, j, "execute") && tok_is(ts, j + 1, "on"))
+		{
+			for (size_t k = 0; k < lengthof(locations); k++)
+			{
+				if (!tok_is(ts, j + 2, locations[k].word))
+					continue;
+				if (locations[k].second != NULL &&
+					!tok_is(ts, j + 3, locations[k].second))
+					continue;
+
+				after = j + 3 + (locations[k].second != NULL ? 1 : 0);
+				key_value = locations[k].value;
+				is_exec = true;
+				break;
+			}
+		}
+		else
+		{
+			for (size_t k = 0; k < lengthof(accesses); k++)
+			{
+				if (!tok_is(ts, j, accesses[k].w1) ||
+					!tok_is(ts, j + 1, accesses[k].w2))
+					continue;
+				if (accesses[k].w3 != NULL && !tok_is(ts, j + 2, accesses[k].w3))
+					continue;
+
+				after = j + 2 + (accesses[k].w3 != NULL ? 1 : 0);
+				key_value = accesses[k].value;
+				break;
+			}
+		}
+
+		if (key_value == NULL)
 			continue;
 
-		for (size_t k = 0; k < lengthof(locations); k++)
-		{
-			int			after;
+		if (is_exec)
+			exec_on = key_value;
+		else
+			data_access = key_value;
 
-			if (!tok_is(ts, j + 2, locations[k].word))
-				continue;
-			if (locations[k].second != NULL &&
-				!tok_is(ts, j + 3, locations[k].second))
-				continue;
+		rw_edit(rw, ts->toks[j].off,
+				(after < ts->ntoks) ? ts->toks[after].off : ts->srclen, " ");
 
-			after = j + 3 + (locations[k].second != NULL ? 1 : 0);
-
-			appendStringInfo(&rw->after,
-							 "; SECURITY LABEL FOR gp ON %s %s IS 'execute_on=%s'",
-							 objtype, sig.data, locations[k].value);
-			rw_edit(rw, ts->toks[j].off,
-					(after < ts->ntoks) ? ts->toks[after].off : ts->srclen, " ");
-			clause_first = j;
-			clause_after = after;
-			j = after - 1;
-			found = true;
-			break;
-		}
+		if (covered_from < 0)
+			covered_from = j;
+		covered_to = after;
+		covered_tokens += after - j;
+		j = after - 1;
 	}
+
+	if (exec_on == NULL && data_access == NULL)
+		return false;
+
+	/*
+	 * Cloudberry's three rules, from validate_sql_data_access().  They are
+	 * the whole of what the attribute does.
+	 */
+	if (data_access != NULL && saw_immutable &&
+		(strcmp(data_access, "reads") == 0 ||
+		 strcmp(data_access, "modifies") == 0))
+		ereport(ERROR,
+				(errcode(ERRCODE_SYNTAX_ERROR),
+				 errmsg("conflicting options"),
+				 errhint("IMMUTABLE conflicts with %s SQL DATA.",
+						 strcmp(data_access, "reads") == 0 ? "READS" : "MODIFIES")));
+
+	if (data_access != NULL && saw_language_sql &&
+		strcmp(data_access, "none") == 0)
+		ereport(ERROR,
+				(errcode(ERRCODE_SYNTAX_ERROR),
+				 errmsg("conflicting options"),
+				 errhint("A SQL function cannot specify NO SQL.")));
+
+	appendStringInfo(&rw->after, "; SECURITY LABEL FOR gp ON %s %s IS '",
+					 objtype, sig.data);
+	if (exec_on != NULL)
+		appendStringInfo(&rw->after, "execute_on=%s", exec_on);
+	if (exec_on != NULL && data_access != NULL)
+		appendStringInfoChar(&rw->after, ',');
+	if (data_access != NULL)
+		appendStringInfo(&rw->after, "data_access=%s", data_access);
+	appendStringInfoChar(&rw->after, '\'');
 
 	/*
 	 * ALTER FUNCTION f(int) EXECUTE ON ANY is a whole statement of
 	 * Cloudberry's, not an action on one of PostgreSQL's: take the clause out
 	 * and there is no action left, which ALTER FUNCTION will not accept.  So
-	 * when the clause is the entire action list, the label replaces the
+	 * when the clauses are the entire action list, the label replaces the
 	 * statement rather than following it.  Written beside another action --
 	 * ALTER FUNCTION f(int) STRICT EXECUTE ON ANY -- the ALTER stays and does
 	 * the rest.  This is the same shape as ALTER TABLE t TAG (...).
 	 */
-	if (found && altering &&
-		clause_first == sig_end && clause_after == rw->last)
+	if (altering && covered_from == sig_end && covered_to == rw->last &&
+		covered_tokens == rw->last - sig_end)
 		rw_whole(rw);
 
-	return found;
+	return true;
 }
 
 /* ------------------------------------------------------------------------- */
@@ -1621,7 +1786,7 @@ rw_statement(GpRewrite *rw)
 
 	(void) rw_storage_and_dynamic(rw);
 	(void) rw_matview_options(rw);
-	(void) rw_execute_on(rw);
+	(void) rw_function_clauses(rw);
 
 	kind = find_subject(rw->ts, rw->first, rw->last, &name, &after_name);
 	if (kind != GP_SUBJ_NONE)

@@ -59,6 +59,7 @@
 	X(dynamic_schedule, true, "the schedule a dynamic table refreshes on") \
 	X(distributed_by,  true,  "the distribution key of a table") \
 	X(execute_on,      true,  "where a function may run") \
+	X(data_access,     true,  "what a function does with SQL") \
 	X(replicate_safe,  false, "this aggregate may run on a replicated slice") \
 	X(directory_location, true, "where a directory table keeps its files") \
 	X(profile,         true,  "the password profile a role is under") \

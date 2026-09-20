@@ -578,6 +578,158 @@ isl "ALTER FUNCTION with another action keeps the ALTER" \
       FROM pg_proc p WHERE p.oid = 'xf2(int)'::regprocedure;" \
    "true execute_on=all_segments"
 
+###############################################################################
+echo
+echo "11. the data-access attributes, and what they compose with"
+###############################################################################
+# NO SQL, CONTAINS SQL, READS SQL DATA, MODIFIES SQL DATA.  Nothing reads
+# them, in the port or in Cloudberry: prodataaccess is written by pg_proc.c,
+# defaulted and validated in functioncmds.c, and read nowhere outside the DDL
+# path.  So the whole feature is the syntax, the three rules below, and a
+# place to keep the answer.
+
+isl "NO SQL on a plpgsql function" \
+   "CREATE FUNCTION da1() RETURNS int LANGUAGE plpgsql NO SQL
+      AS \$\$ BEGIN RETURN 1; END \$\$;
+    SELECT label FROM pg_seclabel WHERE objoid = 'da1()'::regprocedure
+       AND classoid = 'pg_proc'::regclass AND provider = 'gp';" \
+   "data_access=none"
+
+isl "CONTAINS SQL" \
+   "CREATE FUNCTION da2(int) RETURNS int LANGUAGE sql CONTAINS SQL
+      AS 'SELECT \$1';
+    SELECT label FROM pg_seclabel WHERE objoid = 'da2(int)'::regprocedure
+       AND classoid = 'pg_proc'::regclass AND provider = 'gp';" \
+   "data_access=contains"
+
+isl "READS SQL DATA" \
+   "CREATE FUNCTION da3(int) RETURNS int LANGUAGE sql READS SQL DATA
+      AS 'SELECT \$1';
+    SELECT label FROM pg_seclabel WHERE objoid = 'da3(int)'::regprocedure
+       AND classoid = 'pg_proc'::regclass AND provider = 'gp';" \
+   "data_access=reads"
+
+isl "MODIFIES SQL DATA" \
+   "CREATE FUNCTION da4(int) RETURNS int LANGUAGE sql MODIFIES SQL DATA
+      AS 'SELECT \$1';
+    SELECT label FROM pg_seclabel WHERE objoid = 'da4(int)'::regprocedure
+       AND classoid = 'pg_proc'::regclass AND provider = 'gp';" \
+   "data_access=modifies"
+
+# A procedure takes them too.
+isl "a procedure takes them as well" \
+   "CREATE PROCEDURE da5(int) LANGUAGE sql READS SQL DATA AS 'SELECT \$1';
+    SELECT label FROM pg_seclabel WHERE objoid = 'da5(int)'::regprocedure
+       AND classoid = 'pg_proc'::regclass AND provider = 'gp';" \
+   "data_access=reads"
+
+# --- Cloudberry's three rules ------------------------------------------------
+#
+# They are validate_sql_data_access() in its functioncmds.c, and they are the
+# only thing the attribute does.  They are checked in the rewriter rather than
+# in the label provider, because Cloudberry rejects the statement before the
+# function is created and a check on the SECURITY LABEL that follows would
+# reject it after -- leaving the function behind.
+refused "IMMUTABLE conflicts with READS SQL DATA" \
+   "CREATE FUNCTION dbad1(int) RETURNS int LANGUAGE sql IMMUTABLE
+      READS SQL DATA AS 'SELECT \$1';" \
+   "IMMUTABLE conflicts with READS SQL DATA."
+
+refused "IMMUTABLE conflicts with MODIFIES SQL DATA" \
+   "CREATE FUNCTION dbad2(int) RETURNS int LANGUAGE sql IMMUTABLE
+      MODIFIES SQL DATA AS 'SELECT \$1';" \
+   "IMMUTABLE conflicts with MODIFIES SQL DATA."
+
+refused "a SQL function cannot say NO SQL" \
+   "CREATE FUNCTION dbad3(int) RETURNS int LANGUAGE sql NO SQL
+      AS 'SELECT \$1';" \
+   "A SQL function cannot specify NO SQL."
+
+# The rejection has to happen before the function exists, which is the whole
+# reason the check is in the rewriter.
+is "and the rejected function was not created" \
+   "SELECT count(*) FROM pg_proc WHERE proname LIKE 'dbad%';" "0"
+
+isl "IMMUTABLE with CONTAINS SQL is allowed" \
+   "CREATE FUNCTION da6(int) RETURNS int LANGUAGE sql IMMUTABLE CONTAINS SQL
+      AS 'SELECT \$1';
+    SELECT label FROM pg_seclabel WHERE objoid = 'da6(int)'::regprocedure
+       AND classoid = 'pg_proc'::regclass AND provider = 'gp';" \
+   "data_access=contains"
+
+# --- composing with EXECUTE ON -----------------------------------------------
+#
+# This is why the two families are read in one pass.  SECURITY LABEL replaces
+# a provider's label rather than merging into it, so a statement per clause
+# would leave only the second key.
+isl "both clauses on one function write both keys" \
+   "CREATE FUNCTION da7(int) RETURNS int LANGUAGE sql READS SQL DATA
+      EXECUTE ON ALL SEGMENTS AS 'SELECT \$1';
+    SELECT label FROM pg_seclabel WHERE objoid = 'da7(int)'::regprocedure
+       AND classoid = 'pg_proc'::regclass AND provider = 'gp';" \
+   "execute_on=all_segments,data_access=reads"
+
+# The keys come out in a fixed order, so two spellings of the same function
+# produce the same label rather than two that compare unequal.
+isl "written the other way round, the label is the same" \
+   "CREATE FUNCTION da8(int) RETURNS int LANGUAGE sql EXECUTE ON ALL SEGMENTS
+      READS SQL DATA AS 'SELECT \$1';
+    SELECT label FROM pg_seclabel WHERE objoid = 'da8(int)'::regprocedure
+       AND classoid = 'pg_proc'::regclass AND provider = 'gp';" \
+   "execute_on=all_segments,data_access=reads"
+
+is "and the two agree" \
+   "SELECT (SELECT label FROM pg_seclabel WHERE objoid = 'da7(int)'::regprocedure
+              AND classoid = 'pg_proc'::regclass AND provider = 'gp')
+         = (SELECT label FROM pg_seclabel WHERE objoid = 'da8(int)'::regprocedure
+              AND classoid = 'pg_proc'::regclass AND provider = 'gp');" "t"
+
+# --- ALTER -------------------------------------------------------------------
+isl "ALTER FUNCTION can set it on its own" \
+   "ALTER FUNCTION da2(int) MODIFIES SQL DATA;
+    SELECT label FROM pg_seclabel WHERE objoid = 'da2(int)'::regprocedure
+       AND classoid = 'pg_proc'::regclass AND provider = 'gp';" \
+   "data_access=modifies"
+
+isl "and beside another action the ALTER still does the rest" \
+   "ALTER FUNCTION da3(int) STRICT CONTAINS SQL;
+    SELECT proisstrict::text || ' ' ||
+           (SELECT label FROM pg_seclabel WHERE objoid = p.oid
+              AND classoid = 'pg_proc'::regclass AND provider = 'gp')
+      FROM pg_proc p WHERE p.oid = 'da3(int)'::regprocedure;" \
+   "true data_access=contains"
+
+# --- the prefilter -----------------------------------------------------------
+#
+# "sql" alone would fire on every LANGUAGE sql and "no" on a large share of
+# ordinary SQL, so the trigger is the pair.  These check it says no to the
+# words apart and yes to them together.
+is "an ordinary statement with 'no' in it is left alone" \
+   "SELECT gp_sql.desugar('SELECT 1 WHERE no_such_column IS NULL') IS NULL;" "t"
+
+is "and one with 'sql' in it is too" \
+   "SELECT gp_sql.desugar('SELECT ''sql'' AS sql') IS NULL;" "t"
+
+is "a function with only LANGUAGE sql is not rewritten" \
+   "SELECT gp_sql.desugar('CREATE FUNCTION z(int) RETURNS int LANGUAGE sql AS ''x''') IS NULL;" "t"
+
+is "but NO SQL is seen" \
+   "SELECT gp_sql.desugar('CREATE FUNCTION z() RETURNS int LANGUAGE plpgsql NO SQL AS ''x''') LIKE '%data_access=none%';" "t"
+
+# The first word has to end where it ends: "node_sql" must not match "no sql".
+is "a word that merely starts with a trigger does not fire it" \
+   "SELECT gp_sql.desugar('SELECT node_sql FROM t') IS NULL;" "t"
+
+# --- the default is absence --------------------------------------------------
+#
+# Cloudberry fills in CONTAINS SQL for a LANGUAGE SQL function and NO SQL for
+# everything else at DDL time.  Here the absence of the key means exactly
+# that, so an ordinary function carries no label at all.
+is "a function with no clause carries no label" \
+   "CREATE FUNCTION da9(int) RETURNS int LANGUAGE sql AS 'SELECT \$1';
+    SELECT count(*) FROM pg_seclabel WHERE objoid = 'da9(int)'::regprocedure
+       AND classoid = 'pg_proc'::regclass AND provider = 'gp';" "0"
+
 echo
 echo "  $pass passed, $fail failed"
 [ "$fail" -eq 0 ]
