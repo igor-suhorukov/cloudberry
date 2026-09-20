@@ -780,7 +780,7 @@ refused "and a key column that is not there is named" \
 
 
 echo
-echo "9. extended statistics, as ORCA is told about them"
+echo "10. extended statistics, as ORCA is told about them"
 
 q "CREATE TABLE es (a int, b int, c text);
    INSERT INTO es SELECT i % 10, i % 5, 'x' FROM generate_series(1, 1000) i;
@@ -828,7 +828,7 @@ is "a relation with no statistics objects reports none" \
    "SELECT count(*) FROM gp_orca.ext_stats('dist_hash'::regclass);" "0"
 
 echo
-echo "10. how big a partitioned table is, summed over its leaves"
+echo "11. how big a partitioned table is, summed over its leaves"
 
 q "CREATE TABLE ps (a int) PARTITION BY RANGE (a);
    CREATE TABLE ps1 PARTITION OF ps FOR VALUES FROM (0) TO (100);
@@ -884,7 +884,7 @@ is "with it on, the relation itself is asked" \
     SELECT numtuples > 0 FROM gp_orca.partitioned_size('ps_fresh'::regclass);" "t"
 
 echo
-echo "11. every target entry that computes an expression, not just the first"
+echo "12. every target entry that computes an expression, not just the first"
 
 # PostgreSQL's tlist_member() answers with the first match and stops, which is
 # right for its callers: they want *a* place the expression is computed.  ORCA
@@ -908,7 +908,7 @@ refused "a resno that is not there says so" \
         "no target entry with resno 7"
 
 echo
-echo "12. join alias Vars, flattened where they move and left where they do not"
+echo "13. join alias Vars, flattened where they move and left where they do not"
 
 q "CREATE TABLE ja1 (x int, y int);
    CREATE TABLE ja2 (x int, z int);" > /dev/null
@@ -975,7 +975,7 @@ is "so a frame bound that is accepted has nothing to flatten" \
       'SELECT x, count(*) OVER (ORDER BY y ROWS BETWEEN 1 PRECEDING AND CURRENT ROW)
          FROM ja1 FULL JOIN ja2 USING (x)');" "{}"
 echo
-echo "13. an array constant ORCA can look inside"
+echo "14. an array constant ORCA can look inside"
 
 # ORCA derives constraints from an IN list by reading the elements out.  It
 # cannot look inside an array datum of a type it was never compiled against,
@@ -1011,7 +1011,7 @@ is "a non-collatable array has none either way" \
    "SELECT in_collation = 0 AND out_collation = 0
       FROM gp_orca.array_const_to_expr('''{1,2}''::int[]');" "t"
 echo
-echo "14. two more files the compat layer needs than the plan said"
+echo "15. two more files the compat layer needs than the plan said"
 
 # cloudberry.md records, under "Corrections to the plan", that selfuncs.c and
 # subselect.c "are not part of the compat layer" because the functions ORCA
@@ -1101,7 +1101,7 @@ refused "a plain cast would have raised instead" \
         "is out of range for type double precision"
 
 echo
-echo "15. planner_hook, and the count of what ORCA would not plan"
+echo "16. planner_hook, and the count of what ORCA would not plan"
 
 # Decision 1 asks for these counters "from the first milestone, on real
 # workloads": whether to build Route B as well is decided at M7 from how
@@ -1177,7 +1177,7 @@ is "and EXPLAIN shows PostgreSQL's plan for it" \
       SELECT * FROM (VALUES (1)) v) t;" "1"
 
 echo
-echo "16. ORCA's settings, and what they add up to"
+echo "17. ORCA's settings, and what they add up to"
 
 # ORCA has no settings of its own.  Everything a person can turn on or off in
 # it is a bit in a set handed to the optimizer when a query is planned, and
@@ -1278,6 +1278,201 @@ is "no flag is asked for twice" \
 is "and the flags come back sorted, which is how a bit set reads out" \
    "SELECT gp_orca.traceflags() = (SELECT array_agg(f ORDER BY f)
                                      FROM unnest(gp_orca.traceflags()) f);" "t"
+
+###############################################################################
+echo
+echo "18. the gpdb:: wrapper layer, which nothing else can call yet"
+###############################################################################
+# gpdbwrappers.cpp is what the translator calls to reach the server: 198
+# functions, each one a place where a PostgreSQL longjmp becomes a GPOS
+# exception.  It has no caller until the translator exists, so these probes
+# reach it from SQL instead -- otherwise the whole layer would go untested
+# through the largest part of the port, at the moment it is most likely to be
+# wrong.
+#
+# What is probed is what the port had to change, not what Cloudberry wrote.
+
+# --- the eleven operator OIDs the port had to name itself --------------------
+#
+# PostgreSQL has these operators and gives none of them a C name; Cloudberry
+# adds an oid_symbol to pg_operator.dat, which the port cannot do without
+# patching a catalog.  So compat/cb_operator_oids.h names them, and a wrong
+# number there would compile and would quietly tell ORCA that a lossy
+# operator preserves distinct values.
+#
+# The test resolves each operator by signature rather than by OID, so it
+# compares the header against the catalog and not against itself.
+is "text || text preserves distinct values" \
+   "SELECT gp_orca.ndv_preserving('||(text,text)'::regoperator::oid);" "t"
+
+is "int4 + int4 does" \
+   "SELECT gp_orca.ndv_preserving('+(int4,int4)'::regoperator::oid);" "t"
+
+is "int8 + int8 does" \
+   "SELECT gp_orca.ndv_preserving('+(int8,int8)'::regoperator::oid);" "t"
+
+is "numeric + numeric does" \
+   "SELECT gp_orca.ndv_preserving('+(numeric,numeric)'::regoperator::oid);" "t"
+
+is "date + interval does" \
+   "SELECT gp_orca.ndv_preserving('+(date,interval)'::regoperator::oid);" "t"
+
+is "date + int4 does" \
+   "SELECT gp_orca.ndv_preserving('+(date,int4)'::regoperator::oid);" "t"
+
+is "int4 + date does" \
+   "SELECT gp_orca.ndv_preserving('+(int4,date)'::regoperator::oid);" "t"
+
+is "date + time does" \
+   "SELECT gp_orca.ndv_preserving('+(date,time)'::regoperator::oid);" "t"
+
+is "date + timetz does" \
+   "SELECT gp_orca.ndv_preserving('+(date,timetz)'::regoperator::oid);" "t"
+
+is "timestamp + interval does" \
+   "SELECT gp_orca.ndv_preserving('+(timestamp,interval)'::regoperator::oid);" "t"
+
+is "interval + timestamp does" \
+   "SELECT gp_orca.ndv_preserving('+(interval,timestamp)'::regoperator::oid);" "t"
+
+# All eleven at once, which is the test that would catch one of them having
+# been given the number of a different operator.
+is "and that is exactly eleven operators, no more" \
+   "SELECT count(*) FROM (
+      SELECT oid FROM pg_operator WHERE gp_orca.ndv_preserving(oid)) t;" "11"
+
+# The ones that are not.  Multiplication changes the number of distinct
+# values when one side repeats; subtraction of two columns does too.
+is "int4 - int4 does not preserve distinct values" \
+   "SELECT gp_orca.ndv_preserving('-(int4,int4)'::regoperator::oid);" "f"
+
+is "int4 * int4 does not" \
+   "SELECT gp_orca.ndv_preserving('*(int4,int4)'::regoperator::oid);" "f"
+
+is "and neither does equality" \
+   "SELECT gp_orca.ndv_preserving('=(int4,int4)'::regoperator::oid);" "f"
+
+# --- two access-method functions PostgreSQL renamed or made const ------------
+q "CREATE TABLE wrap_heap(a int, b text);" > /dev/null
+
+is "a heap table is stored with the heap access method" \
+   "SELECT gp_orca.rel_am_name('wrap_heap'::regclass);" "heap"
+
+is "btree's handler resolves to an IndexAmRoutine" \
+   "SELECT gp_orca.index_am_resolves(
+      (SELECT amhandler FROM pg_am WHERE amname = 'btree'));" "t"
+
+is "and so does hash's" \
+   "SELECT gp_orca.index_am_resolves(
+      (SELECT amhandler FROM pg_am WHERE amname = 'hash'));" "t"
+
+# A table access method handler is not an index one, and PostgreSQL says so
+# rather than returning something unusable.
+is "a table access method handler is refused, not mistaken for an index one" \
+   "SELECT gp_orca.index_am_resolves(
+      (SELECT amhandler FROM pg_am WHERE amname = 'heap')) IS NULL;" "t"
+
+# --- the one that would have been wrong --------------------------------------
+#
+# Cloudberry calls a three-argument statext_dependencies_load() whose third
+# argument means "return nothing rather than raising when the dependencies
+# are not built".  PostgreSQL's takes two arguments and raises.  ORCA asks
+# this of every extended statistics object it meets, so "not built" is the
+# ordinary case, and a port that simply dropped the argument would fail to
+# plan any query over a table carrying a statistics object of another kind.
+q "CREATE TABLE wrap_stats(a int, b int, c int);
+   INSERT INTO wrap_stats SELECT i, i % 10, i % 100 FROM generate_series(1, 200) i;
+   CREATE STATISTICS wrap_deps (dependencies) ON a, b FROM wrap_stats;
+   CREATE STATISTICS wrap_ndist (ndistinct) ON a, c FROM wrap_stats;
+   ANALYZE wrap_stats;" > /dev/null
+
+is "a statistics object with dependencies built reports them" \
+   "SELECT gp_orca.mv_dependencies(
+      (SELECT oid FROM pg_statistic_ext WHERE stxname = 'wrap_deps'));" "t"
+
+# The point of the whole change: this one has no dependencies, and asking
+# must be an answer rather than an error.
+is "one built for another kind answers no, and does not raise" \
+   "SELECT gp_orca.mv_dependencies(
+      (SELECT oid FROM pg_statistic_ext WHERE stxname = 'wrap_ndist'));" "f"
+
+# And before ANALYZE there is no data row at all, which is the same question
+# asked one step earlier.
+q "CREATE TABLE wrap_fresh(a int, b int);
+   CREATE STATISTICS wrap_unbuilt (dependencies) ON a, b FROM wrap_fresh;" > /dev/null
+
+is "and one never analyzed answers no as well" \
+   "SELECT gp_orca.mv_dependencies(
+      (SELECT oid FROM pg_statistic_ext WHERE stxname = 'wrap_unbuilt'));" "f"
+
+# --- the syscache callback whose signature changed ---------------------------
+#
+# PostgreSQL 19 types the callback's cache id as SysCacheIdentifier rather
+# than int.  In C that is the same argument; in C++ it is a different one, so
+# a port that only silenced the compile error would register nothing and the
+# metadata cache would never be told the catalog had changed.
+# Both calls have to be in one session, because the counter is per-backend
+# and each q() opens its own.  The first call registers the callbacks and
+# always answers true; the second has nothing to report.
+is "two calls in one backend: the first wants a reset, the second does not" \
+   "SELECT gp_orca.mdcache_needs_reset();
+    SELECT gp_orca.mdcache_needs_reset();" "t
+f"
+
+# And a catalog change between them is noticed -- which, given the line
+# above, is what proves the callbacks were registered with something
+# PostgreSQL actually calls, rather than merely accepted.
+is "and a catalog change between them is noticed" \
+   "SELECT gp_orca.mdcache_needs_reset();
+    CREATE TABLE mdc_probe(a int);
+    SELECT gp_orca.mdcache_needs_reset();" "t
+t"
+
+# --- the wrapper that gained an answer with the "gp" label -------------------
+#
+# ORCA's relcache translator asks every relation how its rows are spread, so
+# this wrapper had to work at M1.  A relation with no policy is ordinary here
+# and impossible in Cloudberry, whose DDL gives every table one.
+is "a table with no gp label has no distribution policy" \
+   "SELECT gp_orca.wrapper_policy('wrap_heap'::regclass) IS NULL;" "t"
+
+q "SECURITY LABEL FOR gp ON TABLE wrap_heap IS 'distributed_by=(\"a\")';" > /dev/null
+
+is "and one labelled with a key is hash-partitioned on it" \
+   "SELECT gp_orca.wrapper_policy('wrap_heap'::regclass);" "partitioned"
+
+q "SECURITY LABEL FOR gp ON TABLE wrap_heap IS 'distributed_by=random';" > /dev/null
+
+is "a randomly distributed one says so" \
+   "SELECT gp_orca.wrapper_policy('wrap_heap'::regclass);" "random"
+
+q "SECURITY LABEL FOR gp ON TABLE wrap_heap IS 'distributed_by=replicated';" > /dev/null
+
+is "and a replicated one says so" \
+   "SELECT gp_orca.wrapper_policy('wrap_heap'::regclass);" "replicated"
+
+# The wrapper reads the same label gp_orca.relation_policy() does, through a
+# different path: one is the compat layer in C, the other the wrapper in C++.
+# They must not disagree.
+is "the wrapper and the compat layer read the same label" \
+   "SELECT gp_orca.wrapper_policy('wrap_heap'::regclass)
+           = gp_orca.relation_policy('wrap_heap'::regclass);" "t"
+
+# --- the fallback path, made visible -----------------------------------------
+#
+# Fifteen wrappers belong to M2 or M5 and raise rather than returning a
+# plausible answer, because a plan built on a false premise is the one
+# outcome the fallback design exists to prevent.  This calls one and reads
+# the exception back: ExmaDXL is 200, and the minor is the unsupported-feature
+# code.
+has "a wrapper that is not ported yet raises rather than answering" \
+   "SELECT gp_orca.unported_raise();" "200/"
+
+is "and it does not take the backend down with it" \
+   "SELECT 1;" "1"
+
+is "nor leave the session unable to plan" \
+   "SELECT count(*) FROM wrap_stats;" "200"
 
 echo
 echo "  $pass passed, $fail failed"

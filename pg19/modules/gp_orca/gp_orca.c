@@ -114,6 +114,13 @@ PG_FUNCTION_INFO_V1(gp_orca_reset_fallbacks);
 PG_FUNCTION_INFO_V1(gp_orca_traceflags);
 PG_FUNCTION_INFO_V1(gp_orca_xforms);
 PG_FUNCTION_INFO_V1(gp_orca_explain_refusal);
+PG_FUNCTION_INFO_V1(gp_orca_ndv_preserving);
+PG_FUNCTION_INFO_V1(gp_orca_rel_am_name);
+PG_FUNCTION_INFO_V1(gp_orca_index_am_resolves);
+PG_FUNCTION_INFO_V1(gp_orca_mv_dependencies);
+PG_FUNCTION_INFO_V1(gp_orca_mdcache_needs_reset);
+PG_FUNCTION_INFO_V1(gp_orca_wrapper_policy);
+PG_FUNCTION_INFO_V1(gp_orca_unported_raise);
 
 /*
  * gp_orca.version()
@@ -1382,4 +1389,181 @@ _PG_init(void)
 	 * inherit through fork; a backend that never plans with ORCA should pay
 	 * nothing for it.  GpOrcaEnsureInitialized() does it on first use.
 	 */
+}
+
+/*
+ * The wrapper layer, reached from SQL.
+ *
+ * gpdbwrappers.cpp is C++ and has no caller until the translator exists, so
+ * without these the 198 wrappers would sit untested through the largest part
+ * of the port.  Each of these probes something the port had to change rather
+ * than carry: see orca_probe.cpp.
+ *
+ * Every one of them raises if ORCA raised, rather than returning a value that
+ * looks like an answer.  A probe that swallowed the exception would make the
+ * unported wrappers look implemented.
+ */
+
+/*
+ * gp_orca.ndv_preserving(oid)
+ *
+ * Does ORCA believe this operator keeps the number of distinct values?
+ *
+ * The answer is a switch over eleven operator OIDs that PostgreSQL has and
+ * does not name; the port names them itself, checked against PostgreSQL 19's
+ * own pg_operator.dat.  See orca/compat/cb_operator_oids.h.
+ */
+Datum
+gp_orca_ndv_preserving(PG_FUNCTION_ARGS)
+{
+	bool		raised = false;
+	bool		result = GpOrcaOpNDVPreserving(PG_GETARG_OID(0), &raised);
+
+	if (raised)
+		ereport(ERROR,
+				(errcode(ERRCODE_INTERNAL_ERROR),
+				 errmsg("the optimizer would not answer for this operator")));
+
+	PG_RETURN_BOOL(result);
+}
+
+/*
+ * gp_orca.rel_am_name(regclass)
+ *
+ * The access method a relation is stored with, as ORCA asks for it.
+ * Cloudberry's GetAmName() is PostgreSQL 19's get_am_name().
+ */
+Datum
+gp_orca_rel_am_name(PG_FUNCTION_ARGS)
+{
+	bool		raised = false;
+	char	   *name = GpOrcaRelAmName(PG_GETARG_OID(0), &raised);
+
+	if (raised)
+		ereport(ERROR,
+				(errcode(ERRCODE_INTERNAL_ERROR),
+				 errmsg("the optimizer would not name this relation's access method")));
+
+	if (name == NULL)
+		PG_RETURN_NULL();
+
+	PG_RETURN_TEXT_P(cstring_to_text(name));
+}
+
+/*
+ * gp_orca.index_am_resolves(oid)
+ *
+ * Does this index access method handler give ORCA an IndexAmRoutine?
+ * PostgreSQL 19 returns it const, where Cloudberry's wrapper does not.
+ */
+Datum
+gp_orca_index_am_resolves(PG_FUNCTION_ARGS)
+{
+	bool		raised = false;
+	bool		result = GpOrcaIndexAmRoutineExists(PG_GETARG_OID(0), &raised);
+
+	if (raised)
+		PG_RETURN_NULL();
+
+	PG_RETURN_BOOL(result);
+}
+
+/*
+ * gp_orca.mv_dependencies(oid)
+ *
+ * Whether an extended statistics object has functional dependencies built.
+ *
+ * The point of the probe is that asking must not be an error when they are
+ * not.  Cloudberry passes allow_null to a three-argument
+ * statext_dependencies_load(); PostgreSQL's takes two and raises.  ORCA asks
+ * this of every statistics object it meets, so a port that dropped the
+ * argument would fail to plan any query over a table with a "distinct"- or
+ * "mcv"-only statistics object on it.
+ */
+Datum
+gp_orca_mv_dependencies(PG_FUNCTION_ARGS)
+{
+	bool		raised = false;
+	int			state = GpOrcaMVDependencyState(PG_GETARG_OID(0), &raised);
+
+	if (raised)
+		ereport(ERROR,
+				(errcode(ERRCODE_INTERNAL_ERROR),
+				 errmsg("the optimizer raised asking for functional dependencies"),
+				 errdetail("A statistics object with none built must answer, not raise.")));
+
+	PG_RETURN_BOOL(state != 0);
+}
+
+/*
+ * gp_orca.mdcache_needs_reset()
+ *
+ * Has the catalog changed since this backend last asked?  Registers the
+ * invalidation callbacks the first time it is called, which is what makes it
+ * worth probing: PostgreSQL 19 types the callback's cache id as
+ * SysCacheIdentifier, and C++ does not let that pass as an int.
+ *
+ * The first call in a backend is always true.
+ */
+Datum
+gp_orca_mdcache_needs_reset(PG_FUNCTION_ARGS)
+{
+	bool		raised = false;
+	bool		result = GpOrcaMDCacheNeedsReset(&raised);
+
+	if (raised)
+		ereport(ERROR,
+				(errcode(ERRCODE_INTERNAL_ERROR),
+				 errmsg("the optimizer would not say whether its metadata cache is stale")));
+
+	PG_RETURN_BOOL(result);
+}
+
+/*
+ * gp_orca.wrapper_policy(regclass)
+ *
+ * The distribution policy ORCA sees, through the wrapper rather than through
+ * gp_core directly -- "entry", "partitioned", "replicated", "random", or NULL
+ * when the relation has none.
+ *
+ * NULL is ordinary here and impossible in Cloudberry, whose DDL gives every
+ * table a policy where the port has only a label that may be absent.
+ */
+Datum
+gp_orca_wrapper_policy(PG_FUNCTION_ARGS)
+{
+	bool		raised = false;
+	char	   *kind = GpOrcaPolicyKind(PG_GETARG_OID(0), &raised);
+
+	if (raised)
+		ereport(ERROR,
+				(errcode(ERRCODE_INTERNAL_ERROR),
+				 errmsg("the optimizer would not report this relation's distribution")));
+
+	if (kind == NULL)
+		PG_RETURN_NULL();
+
+	PG_RETURN_TEXT_P(cstring_to_text(kind));
+}
+
+/*
+ * gp_orca.unported_raise()
+ *
+ * Call a wrapper that belongs to a later milestone and report the ORCA
+ * exception it raised, as "major/minor".
+ *
+ * This is the fallback path, made visible.  Fifteen wrappers raise like this
+ * rather than returning a plausible answer, because a plan built on a false
+ * premise is the one outcome the fallback design exists to prevent.  NULL
+ * would mean one of them had started answering.
+ */
+Datum
+gp_orca_unported_raise(PG_FUNCTION_ARGS)
+{
+	char	   *code = GpOrcaUnportedRaise();
+
+	if (code == NULL)
+		PG_RETURN_NULL();
+
+	PG_RETURN_TEXT_P(cstring_to_text(code));
 }

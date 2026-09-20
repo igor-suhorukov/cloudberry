@@ -86,6 +86,41 @@ extern const char *GpOrcaXformName(int xform_id);
  */
 extern int	GpOrcaTraceFlags(int **flags);
 
+/*
+ * The probes below reach the gpdb:: wrapper layer, which is C++ and so
+ * otherwise unreachable from the module until the translator exists.  Each
+ * sets *raised when ORCA raised instead of answering; see orca_probe.cpp for
+ * why the layer needs testing before it has a caller.
+ */
+
+/* Is this operator NDV-preserving?  Tests compat/cb_operator_oids.h. */
+extern bool GpOrcaOpNDVPreserving(Oid opno, bool *raised);
+
+/* The access method a relation is stored with. */
+extern char *GpOrcaRelAmName(Oid reloid, bool *raised);
+
+/* Does this index access method handler resolve? */
+extern bool GpOrcaIndexAmRoutineExists(Oid am_handler, bool *raised);
+
+/*
+ * 1 when this extended statistics object has functional dependencies, 0 when
+ * it has none.  *raised would mean the port had dropped Cloudberry's
+ * allow_null, which turns every unbuilt statistics object into a failed plan.
+ */
+extern int	GpOrcaMVDependencyState(Oid stat_oid, bool *raised);
+
+/* Has the catalog changed since this backend last asked? */
+extern bool GpOrcaMDCacheNeedsReset(bool *raised);
+
+/* The distribution policy ORCA sees, or NULL when the relation has none. */
+extern char *GpOrcaPolicyKind(Oid relid, bool *raised);
+
+/*
+ * Call a wrapper that belongs to a later milestone, and return the ORCA
+ * exception it raised as "major/minor", or NULL if it did not raise.
+ */
+extern char *GpOrcaUnportedRaise(void);
+
 #ifdef __cplusplus
 }
 #endif

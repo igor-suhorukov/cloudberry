@@ -605,3 +605,98 @@ LANGUAGE C STRICT;
 
 COMMENT ON FUNCTION gp_orca.traceflags() IS
 	'what the gp.optimizer_* settings add up to, in ORCA''s own terms';
+
+/*
+ * The gpdb:: wrapper layer.
+ *
+ * gpdbwrappers.cpp is what the translator calls to reach the server, and it
+ * is C++, so until the translator exists nothing calls it.  These reach it
+ * from SQL, so that the layer can be tested at the point it is most likely
+ * to be wrong -- just after being ported -- rather than in 33k lines' time.
+ *
+ * Each probes something the port had to change rather than carry.
+ */
+
+/*
+ * Does ORCA believe this operator keeps the number of distinct values?
+ *
+ * Eleven operator OIDs that PostgreSQL has and does not name; the port names
+ * them itself, checked against PostgreSQL 19's own catalog data.
+ */
+CREATE FUNCTION gp_orca.ndv_preserving(oid)
+RETURNS boolean
+AS 'MODULE_PATHNAME', 'gp_orca_ndv_preserving'
+LANGUAGE C STRICT;
+
+COMMENT ON FUNCTION gp_orca.ndv_preserving(oid) IS
+	'whether ORCA treats this operator as preserving distinct values';
+
+/* The access method a relation is stored with, as ORCA asks for it. */
+CREATE FUNCTION gp_orca.rel_am_name(regclass)
+RETURNS text
+AS 'MODULE_PATHNAME', 'gp_orca_rel_am_name'
+LANGUAGE C STRICT;
+
+COMMENT ON FUNCTION gp_orca.rel_am_name(regclass) IS
+	'the access method ORCA is told a relation is stored with';
+
+/* Does this index access method handler give ORCA an IndexAmRoutine? */
+CREATE FUNCTION gp_orca.index_am_resolves(oid)
+RETURNS boolean
+AS 'MODULE_PATHNAME', 'gp_orca_index_am_resolves'
+LANGUAGE C STRICT;
+
+COMMENT ON FUNCTION gp_orca.index_am_resolves(oid) IS
+	'whether an index access method handler resolves for ORCA';
+
+/*
+ * Whether an extended statistics object has functional dependencies built.
+ *
+ * Asking must not be an error when it has none: PostgreSQL's
+ * statext_dependencies_load() raises in that case and Cloudberry's takes an
+ * allow_null argument.  ORCA asks this of every statistics object it meets.
+ */
+CREATE FUNCTION gp_orca.mv_dependencies(oid)
+RETURNS boolean
+AS 'MODULE_PATHNAME', 'gp_orca_mv_dependencies'
+LANGUAGE C STRICT;
+
+COMMENT ON FUNCTION gp_orca.mv_dependencies(oid) IS
+	'whether an extended statistics object has functional dependencies built';
+
+/*
+ * Has the catalog changed since this backend last asked?  The first call in
+ * a backend registers the invalidation callbacks, and is always true.
+ */
+CREATE FUNCTION gp_orca.mdcache_needs_reset()
+RETURNS boolean
+AS 'MODULE_PATHNAME', 'gp_orca_mdcache_needs_reset'
+LANGUAGE C STRICT;
+
+COMMENT ON FUNCTION gp_orca.mdcache_needs_reset() IS
+	'whether ORCA would throw away its metadata cache before planning';
+
+/*
+ * The distribution policy ORCA sees, through the wrapper: "entry",
+ * "partitioned", "replicated", "random", or NULL when the relation has none.
+ */
+CREATE FUNCTION gp_orca.wrapper_policy(regclass)
+RETURNS text
+AS 'MODULE_PATHNAME', 'gp_orca_wrapper_policy'
+LANGUAGE C STRICT;
+
+COMMENT ON FUNCTION gp_orca.wrapper_policy(regclass) IS
+	'the distribution policy ORCA is told a relation has';
+
+/*
+ * Call a wrapper that belongs to a later milestone, and report the ORCA
+ * exception it raised as "major/minor".  NULL would mean it had started
+ * answering.
+ */
+CREATE FUNCTION gp_orca.unported_raise()
+RETURNS text
+AS 'MODULE_PATHNAME', 'gp_orca_unported_raise'
+LANGUAGE C STRICT;
+
+COMMENT ON FUNCTION gp_orca.unported_raise() IS
+	'the exception a wrapper that is not ported yet raises, as major/minor';

@@ -132,6 +132,7 @@ orca_compat_sources = files(
   'compat/clauses.c',
   'compat/lsyscache.c',
   'compat/plancat.c',
+  'compat/prepagg.c',
   'compat/selfuncs.c',
   'compat/subselect.c',
   'compat/tlist.c',
@@ -139,10 +140,12 @@ orca_compat_sources = files(
 )
 
 orca_transl_sources = files(
+  'RelationWrapper.cpp',
   'config/CConfigParamMapping.cpp',
   'config/gp_orca_guc.c',
   'gpdbwrappers.cpp',
   'orca_api.cpp',
+  'orca_probe.cpp',
 ) + orca_compat_sources
 
 ###############################################################################
