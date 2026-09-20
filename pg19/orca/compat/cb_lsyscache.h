@@ -47,6 +47,9 @@
 #include "nodes/pg_list.h"
 #include "parser/parse_coerce.h"
 #include "utils/lsyscache.h"
+#include "utils/relcache.h"
+
+#include "gp_policy.h"
 
 /*
  * The comparison kinds ORCA reasons about.
@@ -164,6 +167,22 @@ extern List *get_relation_keys(Oid relid);
 extern HeapTuple get_att_stats(Oid relid, AttrNumber attrnum);
 extern bool has_subclass_slow(Oid relationId);
 extern bool has_update_triggers(Oid relid, bool including_children);
+
+/*
+ * Distribution.
+ *
+ * Nothing about ORCA's metadata is single-node: its relcache translator asks
+ * every relation it sees how its rows are spread, and builds the distribution
+ * spec it plans with out of the answer.  So these are needed at M1, ahead of
+ * the milestone that has segments to spread over.
+ *
+ * Cloudberry reads rel->rd_cdbpolicy, a relcache field of its own.  The port
+ * has no such field, so gp_core builds the policy from the "gp" label; see
+ * gp_policy.h.  The signatures stay Cloudberry's, taking a Relation, because
+ * ORCA's wrapper layer calls them that way.
+ */
+extern GpPolicy *relation_policy(Relation rel);
+extern bool child_distribution_mismatch(Relation rel);
 
 /*
  * Two helpers has_update_triggers() needs, which Cloudberry adds beside it.

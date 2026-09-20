@@ -303,13 +303,39 @@ CREATE FUNCTION gp_orca.relation_fact(
 	OUT check_constraints oid[],
 	OUT has_subclass boolean,
 	OUT has_update_triggers boolean,
-	OUT has_update_triggers_deep boolean)
+	OUT has_update_triggers_deep boolean,
+	OUT child_distribution_mismatch boolean)
 RETURNS record
 AS 'MODULE_PATHNAME', 'gp_orca_relation_fact'
 LANGUAGE C STRICT;
 
 COMMENT ON FUNCTION gp_orca.relation_fact(oid) IS
 	'what the compat layer answers about a relation';
+
+/*
+ * How ORCA is told a relation's rows are spread.
+ *
+ * gp.policy() answers the same question from gp_core; this reaches it the way
+ * ORCA does, through relation_policy(Relation).  "kind" is named for the
+ * Ereldistrpolicy the translator derives -- hash, random, replicated or
+ * masteronly -- rather than for the struct it derives it from, and "attrs" is
+ * the distribution key by attribute number, which is what ORCA matches
+ * against a relation's columns.
+ *
+ * NULL for a relation with no policy, which the translator makes masteronly
+ * of: all rows in one place, which is what one node means.
+ */
+CREATE FUNCTION gp_orca.relation_policy(
+	rel regclass,
+	OUT kind text,
+	OUT attrs int[],
+	OUT numsegments int)
+RETURNS record
+AS 'MODULE_PATHNAME', 'gp_orca_relation_policy'
+LANGUAGE C STRICT STABLE;
+
+COMMENT ON FUNCTION gp_orca.relation_policy(regclass) IS
+	'how ORCA is told a relation''s rows are spread over the segments';
 
 /*
  * What ORCA reads off a check constraint before turning it into a predicate.

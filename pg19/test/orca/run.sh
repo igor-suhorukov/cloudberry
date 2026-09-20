@@ -679,6 +679,105 @@ q "ALTER TABLE child_probe DISABLE TRIGGER t_upd;" > /dev/null
 is "a disabled trigger would not fire, so it does not count" \
    "SELECT has_update_triggers_deep FROM gp_orca.relation_fact('parent_probe'::regclass);" "f"
 
+###############################################################################
+echo
+echo "9. and about distribution, which its metadata asks even on one node"
+###############################################################################
+# Nothing about ORCA's metadata is single-node: its relcache translator asks
+# every relation it sees how its rows are spread, so the port needs this at M1
+# rather than at the milestone that has segments to spread over.
+#
+# The labels are set directly here rather than through DISTRIBUTED BY,
+# because this suite preloads gp_core and gp_orca and not gp_sql.  That is
+# also the harder test: the reader cannot lean on the writer having checked
+# the shape.
+
+q "CREATE TABLE dist_none (a int, b int);
+   CREATE TABLE dist_rand (a int, b int);
+   CREATE TABLE dist_repl (a int, b int);
+   CREATE TABLE dist_hash (a int, b int);
+   SECURITY LABEL FOR gp ON TABLE dist_rand IS 'distributed_by=random';
+   SECURITY LABEL FOR gp ON TABLE dist_repl IS 'distributed_by=replicated';
+   SECURITY LABEL FOR gp ON TABLE dist_hash IS 'distributed_by=\"(a,b)\"';" > /dev/null
+
+# The common answer, and the one that needed no decision: a null policy is
+# what the translator makes EreldistrMasterOnly of, which is all rows in one
+# place -- what one node means.
+is "a relation nobody distributed has no policy" \
+   "SELECT gp_orca.relation_policy('dist_none'::regclass) IS NULL;" "t"
+
+is "a random policy has no key" \
+   "SELECT kind || ' ' || attrs::text
+      FROM gp_orca.relation_policy('dist_rand'::regclass);" "random {}"
+
+is "a replicated one says so" \
+   "SELECT kind FROM gp_orca.relation_policy('dist_repl'::regclass);" "replicated"
+
+# ORCA matches these attribute numbers against the relation's columns, and
+# asserts "Column not found" if one is not there.
+is "and a hash policy carries the key by attribute number" \
+   "SELECT kind || ' ' || attrs::text
+      FROM gp_orca.relation_policy('dist_hash'::regclass);" "hash {1,2}"
+
+is "the policy carries a segment count ORCA can divide by" \
+   "SELECT numsegments >= 1 FROM gp_orca.relation_policy('dist_hash'::regclass);" "t"
+
+# child_distribution_mismatch: the one mismatch Cloudberry allows is a
+# hash-distributed root with a randomly distributed part, and ORCA has to know
+# because a scan of the tree cannot then claim the root's hash distribution.
+q "CREATE TABLE dist_root (a int, b int) PARTITION BY RANGE (a);
+   CREATE TABLE dist_p1 PARTITION OF dist_root FOR VALUES FROM (1) TO (10);
+   CREATE TABLE dist_p2 PARTITION OF dist_root FOR VALUES FROM (10) TO (20);" > /dev/null
+
+# Cloudberry asserts a partitioned table has a policy at all -- its DDL sees
+# to that.  The port reaches an unlabelled partitioned table constantly, and
+# a root whose rows are all in one place has nothing a child could differ
+# from.
+is "an unlabelled partitioned table has no mismatch to report" \
+   "SELECT child_distribution_mismatch
+      FROM gp_orca.relation_fact('dist_root'::regclass);" "f"
+
+q "SECURITY LABEL FOR gp ON TABLE dist_root IS 'distributed_by=\"(a)\"';
+   SECURITY LABEL FOR gp ON TABLE dist_p1 IS 'distributed_by=\"(a)\"';
+   SECURITY LABEL FOR gp ON TABLE dist_p2 IS 'distributed_by=\"(a)\"';" > /dev/null
+
+is "nor does one whose parts all match the root" \
+   "SELECT child_distribution_mismatch
+      FROM gp_orca.relation_fact('dist_root'::regclass);" "f"
+
+q "SECURITY LABEL FOR gp ON TABLE dist_p2 IS 'distributed_by=random';" > /dev/null
+
+is "a random part under a hashed root is the mismatch" \
+   "SELECT child_distribution_mismatch
+      FROM gp_orca.relation_fact('dist_root'::regclass);" "t"
+
+# A random root is already as unconstrained as a child can be, so no child can
+# differ from it -- which is why Cloudberry returns early there too.
+q "SECURITY LABEL FOR gp ON TABLE dist_root IS 'distributed_by=random';" > /dev/null
+
+is "but under a random root there is nothing to differ from" \
+   "SELECT child_distribution_mismatch
+      FROM gp_orca.relation_fact('dist_root'::regclass);" "f"
+
+is "and a table that is not partitioned never has one" \
+   "SELECT child_distribution_mismatch
+      FROM gp_orca.relation_fact('dist_hash'::regclass);" "f"
+
+# The reader raises rather than shrugs, because a policy read wrong is a plan
+# built on the wrong distribution.  gp_sql.set_distribution() refuses these
+# shapes; SECURITY LABEL will take them, which is why the reader checks too.
+q "SECURITY LABEL FOR gp ON TABLE dist_none IS 'distributed_by=sideways';" > /dev/null
+
+refused "a shape the port does not know is an error" \
+        "SELECT kind FROM gp_orca.relation_policy('dist_none'::regclass);" \
+        "unrecognized distribution policy \"sideways\""
+
+q "SECURITY LABEL FOR gp ON TABLE dist_none IS 'distributed_by=\"(nosuch)\"';" > /dev/null
+
+refused "and a key column that is not there is named" \
+        "SELECT kind FROM gp_orca.relation_policy('dist_none'::regclass);" \
+        "column \"nosuch\" of the distribution policy of \"dist_none\" does not exist"
+
 echo
 echo "  $pass passed, $fail failed"
 [ "$fail" -eq 0 ]

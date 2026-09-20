@@ -67,6 +67,7 @@
 
 #include "cb_lsyscache.h"
 #include "gp_label.h"
+#include "gp_policy.h"
 
 /*
  * pfree_ptr_array
@@ -1051,6 +1052,94 @@ has_subclass_slow(Oid relationId)
 	table_close(rel, AccessShareLock);
 
 	return result;
+}
+
+/*
+ * relation_policy
+ *		How this relation's rows are spread over the segments.
+ *
+ * Cloudberry returns rel->rd_cdbpolicy, built once when the relcache entry
+ * was, and its comment says "not a partitioned table" because a partitioned
+ * table's policy is the root's and every child shares it.  The port has no
+ * relcache field to return, so gp_core builds the policy from the "gp" label
+ * each time; the question this answers is the same one.
+ *
+ * NULL is the answer for a relation nobody wrote DISTRIBUTED BY for, which on
+ * one node is nearly all of them.  ORCA's translator makes EreldistrMasterOnly
+ * of a null policy (CTranslatorRelcacheToDXL.cpp:737-742), which becomes
+ * CDistributionSpecSingleton(EstMaster) -- all rows in one place, which is
+ * exactly what one node means.  So the common path here is the one that
+ * needed no decision.
+ */
+GpPolicy *
+relation_policy(Relation rel)
+{
+	Assert(rel != NULL);
+
+	return GpPolicyGet(RelationGetRelid(rel));
+}
+
+/*
+ * child_distribution_mismatch
+ *		Is this a partitioned table with a child distributed differently?
+ *
+ * The one mismatch Cloudberry allows is a hash-distributed root with a
+ * randomly distributed part, and ORCA has to know because a scan of the tree
+ * cannot then claim the root's hash distribution.
+ *
+ * TWO OF CLOUDBERRY'S ASSERTIONS ARE NOT CARRIED OVER, and both for the same
+ * reason: they are true of Cloudberry's catalogs and not of the port's label.
+ * It asserts the root has a policy at all ("Partitioned tables cannot be
+ * master-only"), which here is false of every partitioned table nobody wrote
+ * DISTRIBUTED BY for; a root with no policy has all its rows in one place and
+ * so nothing to mismatch.  And it asserts no child is replicated, which its
+ * DDL enforces and the port's label cannot -- a replicated child is not the
+ * random-under-hash case either, so it is not a mismatch here.
+ *
+ * The children are read by OID.  Cloudberry opens each one with
+ * RelationIdGetRelation because the policy is on the relcache entry; the
+ * port's is on the label, which is reached with the OID alone, so the opens
+ * and closes go away.
+ */
+bool
+child_distribution_mismatch(Relation rel)
+{
+	GpPolicy   *root_policy;
+	List	   *child_oids;
+	ListCell   *lc;
+
+	Assert(rel != NULL);
+
+	if (rel->rd_rel->relkind != RELKIND_PARTITIONED_TABLE)
+		return false;
+
+	root_policy = relation_policy(rel);
+
+	/*
+	 * No policy, or a random one: every child either shares the one place the
+	 * root's rows are in, or is already as unconstrained as a child can be.
+	 * Either way there is nothing a child could differ from.
+	 */
+	if (root_policy == NULL || GpPolicyIsRandomPartitioned(root_policy))
+		return false;
+
+	child_oids = find_all_inheritors(RelationGetRelid(rel), NoLock, NULL);
+
+	foreach(lc, child_oids)
+	{
+		Oid			child_oid = lfirst_oid(lc);
+
+		if (GpPolicyIsRandomPartitioned(GpPolicyGet(child_oid)))
+		{
+			list_free(child_oids);
+			return true;
+		}
+	}
+
+	list_free(child_oids);
+
+	/* Every child matches the root's distribution. */
+	return false;
 }
 
 /*

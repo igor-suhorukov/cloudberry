@@ -49,6 +49,7 @@
 #include "postgres.h"
 
 #include "access/htup_details.h"
+#include "access/relation.h"
 #include "catalog/pg_statistic.h"
 #include "catalog/pg_type.h"
 #include "fmgr.h"
@@ -85,6 +86,7 @@ PG_FUNCTION_INFO_V1(gp_orca_comparison_operator);
 PG_FUNCTION_INFO_V1(gp_orca_index_opfamilies);
 PG_FUNCTION_INFO_V1(gp_orca_default_partition_opfamily);
 PG_FUNCTION_INFO_V1(gp_orca_relation_fact);
+PG_FUNCTION_INFO_V1(gp_orca_relation_policy);
 PG_FUNCTION_INFO_V1(gp_orca_constraint_fact);
 PG_FUNCTION_INFO_V1(gp_orca_att_stats_kinds);
 PG_FUNCTION_INFO_V1(gp_orca_xforms);
@@ -582,8 +584,8 @@ gp_orca_relation_fact(PG_FUNCTION_ARGS)
 {
 	Oid			relid = PG_GETARG_OID(0);
 	TupleDesc	tupdesc;
-	Datum		values[5];
-	bool		nulls[5] = {false, false, false, false, false};
+	Datum		values[6];
+	bool		nulls[6] = {false, false, false, false, false, false};
 	HeapTuple	tuple;
 	List	   *keys = get_relation_keys(relid);
 	Datum	   *keyarrays;
@@ -626,6 +628,74 @@ gp_orca_relation_fact(PG_FUNCTION_ARGS)
 	values[2] = BoolGetDatum(has_subclass_slow(relid));
 	values[3] = BoolGetDatum(has_update_triggers(relid, false));
 	values[4] = BoolGetDatum(has_update_triggers(relid, true));
+
+	{
+		Relation	rel = relation_open(relid, AccessShareLock);
+
+		values[5] = BoolGetDatum(child_distribution_mismatch(rel));
+		relation_close(rel, AccessShareLock);
+	}
+
+	tuple = heap_form_tuple(tupdesc, values, nulls);
+	PG_RETURN_DATUM(HeapTupleGetDatum(tuple));
+}
+
+/*
+ * gp_orca.relation_policy(regclass)
+ *
+ * How ORCA is told this relation's rows are spread.  gp.policy() answers the
+ * same question from gp_core; this reaches it the way ORCA does, through
+ * relation_policy(Relation), so that the entry point the wrapper layer calls
+ * is the one under test.
+ *
+ * NULL when the relation has no policy, which is what ORCA's translator makes
+ * EreldistrMasterOnly of -- all rows in one place, which is what one node
+ * means.
+ */
+Datum
+gp_orca_relation_policy(PG_FUNCTION_ARGS)
+{
+	Oid			relid = PG_GETARG_OID(0);
+	Relation	rel = relation_open(relid, AccessShareLock);
+	GpPolicy   *policy = relation_policy(rel);
+	TupleDesc	tupdesc;
+	Datum		values[3];
+	bool		nulls[3] = {false, false, false};
+	HeapTuple	tuple;
+	const char *kind;
+	Datum	   *cols;
+
+	relation_close(rel, AccessShareLock);
+
+	if (get_call_result_type(fcinfo, NULL, &tupdesc) != TYPEFUNC_COMPOSITE)
+		elog(ERROR, "return type must be a row type");
+	tupdesc = BlessTupleDesc(tupdesc);
+
+	if (policy == NULL)
+		PG_RETURN_NULL();
+
+	/*
+	 * The four names are the Ereldistrpolicy values the translator derives
+	 * from these fields, so that a test reads what ORCA would be told rather
+	 * than the struct it is told it with.
+	 */
+	if (GpPolicyIsReplicated(policy))
+		kind = "replicated";
+	else if (GpPolicyIsHashPartitioned(policy))
+		kind = "hash";
+	else if (GpPolicyIsRandomPartitioned(policy))
+		kind = "random";
+	else
+		kind = "masteronly";
+
+	cols = (Datum *) palloc(sizeof(Datum) * Max(policy->nattrs, 1));
+	for (int i = 0; i < policy->nattrs; i++)
+		cols[i] = Int32GetDatum((int32) policy->attrs[i]);
+
+	values[0] = CStringGetTextDatum(kind);
+	values[1] = PointerGetDatum(construct_array_builtin(cols, policy->nattrs,
+													   INT4OID));
+	values[2] = Int32GetDatum(policy->numsegments);
 
 	tuple = heap_form_tuple(tupdesc, values, nulls);
 	PG_RETURN_DATUM(HeapTupleGetDatum(tuple));
