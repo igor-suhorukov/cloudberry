@@ -699,26 +699,33 @@ isl "and beside another action the ALTER still does the rest" \
       FROM pg_proc p WHERE p.oid = 'da3(int)'::regprocedure;" \
    "true data_access=contains"
 
-# --- the prefilter -----------------------------------------------------------
+# --- what the trigger pair buys, and what is observable of it ----------------
 #
-# "sql" alone would fire on every LANGUAGE sql and "no" on a large share of
-# ordinary SQL, so the trigger is the pair.  These check it says no to the
-# words apart and yes to them together.
-is "an ordinary statement with 'no' in it is left alone" \
-   "SELECT gp_sql.desugar('SELECT 1 WHERE no_such_column IS NULL') IS NULL;" "t"
+# The four forms all end in SQL, so the trigger is the pair rather than either
+# word: "sql" alone would fire on every LANGUAGE sql, which is most function
+# DDL, and "no" on a large share of ordinary SQL.
+#
+# The prefilter itself is invisible from here on purpose -- a statement it
+# skips and a statement the rewriter finds nothing in are both handed back
+# unchanged -- so what these check is the contract rather than the
+# optimization: ordinary SQL comes back byte for byte, and NO SQL does not.
+is "an ordinary statement with 'no' in it comes back unchanged" \
+   "SELECT gp_sql.desugar('SELECT 1 WHERE no_such_column IS NULL')
+         = 'SELECT 1 WHERE no_such_column IS NULL';" "t"
 
-is "and one with 'sql' in it is too" \
-   "SELECT gp_sql.desugar('SELECT ''sql'' AS sql') IS NULL;" "t"
+is "and one with 'sql' in it does too" \
+   "SELECT gp_sql.desugar('SELECT ''sql'' AS sql') = 'SELECT ''sql'' AS sql';" "t"
 
 is "a function with only LANGUAGE sql is not rewritten" \
-   "SELECT gp_sql.desugar('CREATE FUNCTION z(int) RETURNS int LANGUAGE sql AS ''x''') IS NULL;" "t"
+   "SELECT gp_sql.desugar('CREATE FUNCTION z(int) RETURNS int LANGUAGE sql AS ''x''')
+         = 'CREATE FUNCTION z(int) RETURNS int LANGUAGE sql AS ''x''';" "t"
 
 is "but NO SQL is seen" \
    "SELECT gp_sql.desugar('CREATE FUNCTION z() RETURNS int LANGUAGE plpgsql NO SQL AS ''x''') LIKE '%data_access=none%';" "t"
 
-# The first word has to end where it ends: "node_sql" must not match "no sql".
-is "a word that merely starts with a trigger does not fire it" \
-   "SELECT gp_sql.desugar('SELECT node_sql FROM t') IS NULL;" "t"
+# "node_sql" is one word, not "no" followed by "sql", and must not be rewritten.
+is "a word that merely starts with a trigger is left alone" \
+   "SELECT gp_sql.desugar('SELECT node_sql FROM t') = 'SELECT node_sql FROM t';" "t"
 
 # --- the default is absence --------------------------------------------------
 #
