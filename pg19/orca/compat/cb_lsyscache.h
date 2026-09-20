@@ -49,6 +49,33 @@
 #include "utils/lsyscache.h"
 
 /*
+ * The comparison kinds ORCA reasons about.
+ *
+ * This is Cloudberry's enum, kept under Cloudberry's name because ORCA's own
+ * code is written against it and the port does not edit ORCA's core.
+ *
+ * PostgreSQL 19 has its own version of the same idea, CompareType in
+ * access/cmptype.h, which it grew after Cloudberry forked: an index access
+ * method now maps its strategy numbers onto COMPARE_LT and friends, so the
+ * system can know what an operator means without hardcoded knowledge of a
+ * particular AM's numbering.  That is the same job CmpType does here, so the
+ * two map onto each other exactly, and compat/lsyscache.c is where the
+ * mapping lives.  Keeping both spellings is not duplication for its own
+ * sake: CmptOther has no COMPARE_ counterpart, because PostgreSQL says
+ * "invalid" where ORCA says "some other operator".
+ */
+typedef enum CmpType
+{
+	CmptEq,						/* equality */
+	CmptNEq,					/* inequality */
+	CmptLT,						/* less than */
+	CmptLEq,					/* less than or equal to */
+	CmptGT,						/* greater than */
+	CmptGEq,					/* greater than or equal to */
+	CmptOther					/* some other operator */
+} CmpType;
+
+/*
  * Types.
  */
 extern char *get_type_name(Oid oid);
@@ -75,6 +102,20 @@ extern Oid	get_aggregate(const char *aggname, Oid oidType);
  */
 extern bool get_cast_func(Oid oidSrc, Oid oidDest, bool *is_binary_coercible,
 						  Oid *oidCastFunc, CoercionPathType *pathtype);
+
+/*
+ * Operators and operator families.
+ *
+ * ORCA does not ask "is this the int4 less-than operator".  It asks what an
+ * operator means and which families it belongs to, and builds its own
+ * metadata from the answers -- which is how it can reason about types it was
+ * never compiled against.
+ */
+extern CmpType get_comparison_type(Oid oidOp);
+extern Oid	get_comparison_operator(Oid oidLeft, Oid oidRight, CmpType cmpt);
+extern List *get_operator_opfamilies(Oid opno);
+extern List *get_index_opfamilies(Oid oidIndex);
+extern Oid	default_partition_opfamily_for_type(Oid typeoid);
 
 /*
  * A helper Cloudberry keeps beside them, for the arrays get_func_arg_info

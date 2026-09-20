@@ -37,14 +37,23 @@
  */
 #include "postgres.h"
 
+#include "access/cmptype.h"
+#include "access/genam.h"
 #include "access/htup_details.h"
+#include "access/stratnum.h"
+#include "access/table.h"
 #include "catalog/pg_aggregate.h"
+#include "catalog/pg_am.h"
+#include "catalog/pg_amop.h"
+#include "catalog/pg_index.h"
 #include "catalog/pg_proc.h"
 #include "catalog/pg_type.h"
 #include "funcapi.h"
 #include "utils/builtins.h"
 #include "utils/catcache.h"
+#include "utils/fmgroids.h"
 #include "utils/syscache.h"
+#include "utils/typcache.h"
 
 #include "cb_lsyscache.h"
 
@@ -327,4 +336,271 @@ get_cast_func(Oid oidSrc, Oid oidDest, bool *is_binary_coercible,
 		*is_binary_coercible = true;
 
 	return *pathtype != COERCION_PATH_NONE;
+}
+
+/*
+ * get_comparison_type
+ *		What this operator means, as a comparison.
+ *
+ * CmptOther when it is not a comparison at all, or belongs to no index
+ * family that says what it means.
+ *
+ * THIS IS THE FUNCTION PostgreSQL 19 CHANGED MOST.  Cloudberry calls
+ * get_op_btree_interpretation(), reads a StrategyNumber out of an
+ * OpBtreeInterpretation, and switches on BTLessStrategyNumber and friends --
+ * with ROWCOMPARE_NE standing in for "not equal", which has no btree
+ * strategy number of its own.  All three names moved:
+ *
+ *	get_op_btree_interpretation	-> get_op_index_interpretation
+ *	OpBtreeInterpretation		-> OpIndexInterpretation
+ *	.strategy (StrategyNumber)	-> .cmptype (CompareType)
+ *	ROWCOMPARE_NE				-> COMPARE_NE, in access/cmptype.h
+ *
+ * The last one is not a rename but a change of kind, and it is the point of
+ * the exercise upstream: the field no longer holds an index AM's private
+ * numbering, it holds what the operator means, and the AM is asked to do the
+ * translation.  So the switch below is over meanings and no longer over
+ * btree's numbers, which is what ORCA wanted in the first place -- it was
+ * only ever reading the strategy to recover the meaning.
+ *
+ * The "first family wins" rule is Cloudberry's and is kept.  An operator can
+ * belong to several families -- a reverse-ordering family that sorts
+ * descending would call its "<" a greater-than -- so the answer is ambiguous
+ * in principle.  Taking the first is arbitrary, and correct for every
+ * operator in practice.
+ */
+CmpType
+get_comparison_type(Oid oidOp)
+{
+	List	   *interpretations;
+	OpIndexInterpretation *interpretation;
+
+	interpretations = get_op_index_interpretation(oidOp);
+
+	if (interpretations == NIL)
+		return CmptOther;		/* belongs to no index family */
+
+	interpretation = (OpIndexInterpretation *) linitial(interpretations);
+
+	switch (interpretation->cmptype)
+	{
+		case COMPARE_LT:
+			return CmptLT;
+		case COMPARE_LE:
+			return CmptLEq;
+		case COMPARE_EQ:
+			return CmptEq;
+		case COMPARE_GE:
+			return CmptGEq;
+		case COMPARE_GT:
+			return CmptGT;
+		case COMPARE_NE:
+			return CmptNEq;
+		default:
+
+			/*
+			 * COMPARE_OVERLAP and COMPARE_CONTAINED_BY reach here.  They are
+			 * real meanings, and PostgreSQL 19 grew them for the index AMs
+			 * that have them; ORCA has no counterpart, so they are "some
+			 * other operator".  Cloudberry raised an error in this arm
+			 * because a btree strategy outside its five really was
+			 * impossible.  That is no longer true, so this returns rather
+			 * than raising: an operator ORCA cannot classify is not a
+			 * failure, it is one ORCA will not reason about.
+			 */
+			return CmptOther;
+	}
+}
+
+/*
+ * get_comparison_operator
+ *		The btree operator of this meaning over these two types, or InvalidOid.
+ *
+ * The inverse of get_comparison_type(), and ORCA uses it to build a
+ * comparison the query did not write -- the equality a hash join needs
+ * between two columns whose types it has just decided on, for instance.
+ *
+ * Only equality-shaped and ordering-shaped meanings can be built this way:
+ * CmptNEq and CmptOther return InvalidOid, because "not equal" has no btree
+ * strategy number to look up, which is the same asymmetry that made
+ * Cloudberry borrow ROWCOMPARE_NE on the way out.
+ *
+ * The scan is Cloudberry's and is kept as it is, including its two
+ * roughnesses: pg_amop has no index on this combination, so this reads the
+ * whole catalog, and there can be several matching operators, of which the
+ * first is taken.  PostgreSQL 19 has get_opfamily_member_for_cmptype(), but
+ * it answers within one family, and this question is deliberately not asked
+ * of a family: ORCA has two types and a meaning, and no family in hand.
+ */
+Oid
+get_comparison_operator(Oid oidLeft, Oid oidRight, CmpType cmpt)
+{
+	int16		opstrat;
+	HeapTuple	ht;
+	Oid			result = InvalidOid;
+	Relation	pg_amop;
+	ScanKeyData scankey[4];
+	SysScanDesc sscan;
+
+	switch (cmpt)
+	{
+		case CmptLT:
+			opstrat = BTLessStrategyNumber;
+			break;
+		case CmptLEq:
+			opstrat = BTLessEqualStrategyNumber;
+			break;
+		case CmptEq:
+			opstrat = BTEqualStrategyNumber;
+			break;
+		case CmptGEq:
+			opstrat = BTGreaterEqualStrategyNumber;
+			break;
+		case CmptGT:
+			opstrat = BTGreaterStrategyNumber;
+			break;
+		default:
+			return InvalidOid;
+	}
+
+	pg_amop = table_open(AccessMethodOperatorRelationId, AccessShareLock);
+
+	/*
+	 * SELECT amopopr FROM pg_amop
+	 *  WHERE amoplefttype = :1 AND amoprighttype = :2
+	 *    AND amopmethod = btree AND amopstrategy = :3
+	 */
+	ScanKeyInit(&scankey[0],
+				Anum_pg_amop_amoplefttype,
+				BTEqualStrategyNumber, F_OIDEQ,
+				ObjectIdGetDatum(oidLeft));
+	ScanKeyInit(&scankey[1],
+				Anum_pg_amop_amoprighttype,
+				BTEqualStrategyNumber, F_OIDEQ,
+				ObjectIdGetDatum(oidRight));
+	ScanKeyInit(&scankey[2],
+				Anum_pg_amop_amopmethod,
+				BTEqualStrategyNumber, F_OIDEQ,
+				ObjectIdGetDatum(BTREE_AM_OID));
+	ScanKeyInit(&scankey[3],
+				Anum_pg_amop_amopstrategy,
+				BTEqualStrategyNumber, F_INT2EQ,
+				Int16GetDatum(opstrat));
+
+	sscan = systable_beginscan(pg_amop, InvalidOid, false, NULL, 4, scankey);
+
+	if (HeapTupleIsValid(ht = systable_getnext(sscan)))
+		result = ((Form_pg_amop) GETSTRUCT(ht))->amopopr;
+
+	systable_endscan(sscan);
+	table_close(pg_amop, AccessShareLock);
+
+	return result;
+}
+
+/*
+ * get_operator_opfamilies
+ *		Every operator family this operator belongs to.
+ *
+ * ORCA uses the families to decide whether two operators can be reasoned
+ * about together -- whether a join's equality and a table's distribution
+ * hash agree, for instance.
+ */
+List *
+get_operator_opfamilies(Oid opno)
+{
+	List	   *opfam_oids = NIL;
+	CatCList   *catlist;
+
+	catlist = SearchSysCacheList1(AMOPOPID, ObjectIdGetDatum(opno));
+
+	for (int i = 0; i < catlist->n_members; i++)
+	{
+		HeapTuple	htup = &catlist->members[i]->tuple;
+		Form_pg_amop amop_tuple = (Form_pg_amop) GETSTRUCT(htup);
+
+		opfam_oids = lappend_oid(opfam_oids, amop_tuple->amopfamily);
+	}
+
+	ReleaseSysCacheList(catlist);
+	return opfam_oids;
+}
+
+/*
+ * get_index_opfamilies
+ *		The operator family of each key column of this index, in order.
+ *
+ * Key columns only: an index's INCLUDE columns have no opclass, so
+ * indnkeyatts is the bound rather than indnatts.  ORCA needs this to know
+ * which quals an index can answer.
+ */
+List *
+get_index_opfamilies(Oid oidIndex)
+{
+	HeapTuple	htup;
+	List	   *opfam_oids = NIL;
+	bool		isnull = false;
+	int			indnkeyatts;
+	Datum		indclassDatum;
+	oidvector  *indclass;
+
+	htup = SearchSysCache1(INDEXRELID, ObjectIdGetDatum(oidIndex));
+	if (!HeapTupleIsValid(htup))
+		elog(ERROR, "cache lookup failed for index %u", oidIndex);
+
+	indnkeyatts = DatumGetInt16(SysCacheGetAttr(INDEXRELID, htup,
+												Anum_pg_index_indnkeyatts,
+												&isnull));
+	Assert(!isnull);
+
+	indclassDatum = SysCacheGetAttr(INDEXRELID, htup, Anum_pg_index_indclass,
+									&isnull);
+	if (isnull)
+	{
+		ReleaseSysCache(htup);
+		return NIL;
+	}
+	indclass = (oidvector *) DatumGetPointer(indclassDatum);
+
+	for (int i = 0; i < indnkeyatts; i++)
+		opfam_oids = lappend_oid(opfam_oids,
+								 get_opclass_family(indclass->values[i]));
+
+	ReleaseSysCache(htup);
+	return opfam_oids;
+}
+
+/*
+ * default_partition_opfamily_for_type
+ *		The btree family a range partition key of this type would use.
+ *
+ * InvalidOid when the type cannot be a range partition key at all -- it has
+ * no btree family, no comparison procedure, or none of the three ordering
+ * operators.
+ *
+ * The full flag set is Cloudberry's and is kept.  Only TYPECACHE_BTREE_OPFAMILY
+ * is needed for the answer; the rest are asked for so that one lookup fills
+ * the cache entry the checks below then read, instead of the checks each
+ * faulting something in.
+ */
+Oid
+default_partition_opfamily_for_type(Oid typeoid)
+{
+	TypeCacheEntry *tcache;
+
+	tcache = lookup_type_cache(typeoid,
+							   TYPECACHE_EQ_OPR | TYPECACHE_LT_OPR |
+							   TYPECACHE_GT_OPR | TYPECACHE_CMP_PROC |
+							   TYPECACHE_EQ_OPR_FINFO |
+							   TYPECACHE_CMP_PROC_FINFO |
+							   TYPECACHE_BTREE_OPFAMILY);
+
+	if (!tcache->btree_opf)
+		return InvalidOid;
+	if (!tcache->cmp_proc)
+		return InvalidOid;
+	if (!tcache->eq_opr && !tcache->lt_opr && !tcache->gt_opr)
+		return InvalidOid;
+
+	return tcache->btree_opf;
 }

@@ -156,3 +156,68 @@ LANGUAGE C STRICT;
 
 COMMENT ON FUNCTION gp_orca.cast_fact(oid, oid) IS
 	'whether an implicit cast exists between two types, and what performs it';
+
+/*
+ * What an operator means, and which families say so.
+ *
+ * ORCA does not ask "is this int4's less-than".  It asks what an operator
+ * means and which operator families it belongs to, and builds metadata from
+ * the answers -- which is how it reasons about types it was never compiled
+ * against.  "cmptype" is eq, neq, lt, leq, gt, geq, or other for an operator
+ * ORCA will not reason about.
+ */
+CREATE FUNCTION gp_orca.operator_fact(
+	oid,
+	OUT cmptype text,
+	OUT opfamilies oid[])
+RETURNS record
+AS 'MODULE_PATHNAME', 'gp_orca_operator_fact'
+LANGUAGE C STRICT;
+
+COMMENT ON FUNCTION gp_orca.operator_fact(oid) IS
+	'what an operator means to ORCA, and the families that say so';
+
+/*
+ * The inverse: the btree operator of this meaning over these two types.
+ *
+ * ORCA uses it to build a comparison the query did not write -- the equality
+ * a hash join needs between two columns whose types it has just settled on.
+ * NULL for "neq" and "other", because those have no btree strategy number to
+ * look up.
+ */
+CREATE FUNCTION gp_orca.comparison_operator(
+	lefttype oid,
+	righttype oid,
+	cmptype text)
+RETURNS oid
+AS 'MODULE_PATHNAME', 'gp_orca_comparison_operator'
+LANGUAGE C STRICT;
+
+COMMENT ON FUNCTION gp_orca.comparison_operator(oid, oid, text) IS
+	'the btree operator of a given meaning over two types';
+
+/*
+ * The operator family of each key column of an index, in order.
+ *
+ * Key columns only: an INCLUDE column has no opclass.  ORCA needs this to
+ * know which quals the index can answer.
+ */
+CREATE FUNCTION gp_orca.index_opfamilies(oid)
+RETURNS oid[]
+AS 'MODULE_PATHNAME', 'gp_orca_index_opfamilies'
+LANGUAGE C STRICT;
+
+COMMENT ON FUNCTION gp_orca.index_opfamilies(oid) IS
+	'the operator family of each key column of an index';
+
+/*
+ * The btree family a range partition key of this type would use, or NULL when
+ * the type cannot be one.
+ */
+CREATE FUNCTION gp_orca.default_partition_opfamily(oid)
+RETURNS oid
+AS 'MODULE_PATHNAME', 'gp_orca_default_partition_opfamily'
+LANGUAGE C STRICT;
+
+COMMENT ON FUNCTION gp_orca.default_partition_opfamily(oid) IS
+	'the btree family a range partition key of this type would use';

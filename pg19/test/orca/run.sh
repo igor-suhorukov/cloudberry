@@ -326,5 +326,107 @@ is "a type to itself is free too, by the same path" \
       FROM gp_orca.cast_fact('int4'::regtype, 'int4'::regtype);" "t"
 
 echo
+echo "7. and about operators, families and index keys"
+
+# get_comparison_type is the function PostgreSQL 19 changed most: Cloudberry
+# reads a btree StrategyNumber out of an OpBtreeInterpretation, PG19 reads a
+# CompareType out of an OpIndexInterpretation.  The switch is now over
+# meanings rather than over btree's numbering, which is what ORCA wanted --
+# it only ever read the strategy to recover the meaning.
+
+is "an equality operator means equality" \
+   "SELECT cmptype FROM gp_orca.operator_fact('=(int4,int4)'::regoperator);" "eq"
+
+is "less-than means less-than" \
+   "SELECT cmptype FROM gp_orca.operator_fact('<(int4,int4)'::regoperator);" "lt"
+
+is "greater-or-equal means greater-or-equal" \
+   "SELECT cmptype FROM gp_orca.operator_fact('>=(int4,int4)'::regoperator);" "geq"
+
+# Not-equal has no btree strategy number of its own.  Cloudberry borrowed
+# ROWCOMPARE_NE to say so on the way out; PG19 has COMPARE_NE as a meaning in
+# its own right, so this arrives directly.
+is "not-equal is a meaning even though btree has no strategy for it" \
+   "SELECT cmptype FROM gp_orca.operator_fact('<>(int4,int4)'::regoperator);" "neq"
+
+is "an operator in no index family is not a comparison" \
+   "SELECT cmptype FROM gp_orca.operator_fact('+(int4,int4)'::regoperator);" "other"
+
+# COMPARE_OVERLAP and COMPARE_CONTAINED_BY are meanings PG19 grew and ORCA has
+# no counterpart for.  Cloudberry raised an error in this arm, because a btree
+# strategy outside its five really was impossible; that is no longer true, so
+# an unclassifiable operator is answered rather than raised.
+is "a meaning ORCA has no name for is answered, not raised" \
+   "SELECT cmptype FROM gp_orca.operator_fact('&&(anyrange,anyrange)'::regoperator);" \
+   "other"
+
+is "an equality operator belongs to at least one family" \
+   "SELECT array_length(opfamilies, 1) >= 1
+      FROM gp_orca.operator_fact('=(int4,int4)'::regoperator);" "t"
+
+is "and the integer btree family is among them" \
+   "SELECT EXISTS (
+      SELECT 1
+        FROM gp_orca.operator_fact('=(int4,int4)'::regoperator) o
+        JOIN pg_opfamily f ON f.oid = ANY(o.opfamilies)
+       WHERE f.opfname = 'integer_ops' AND f.opfmethod = 403);" "t"
+
+is "the operator of a meaning is found from its two types" \
+   "SELECT gp_orca.comparison_operator('int4'::regtype, 'int4'::regtype, 'lt')
+         = '<(int4,int4)'::regoperator::oid;" "t"
+
+is "and it round-trips with what the operator means" \
+   "SELECT cmptype FROM gp_orca.operator_fact(
+      gp_orca.comparison_operator('text'::regtype, 'text'::regtype, 'geq'));" "geq"
+
+is "a cross-type comparison is found too" \
+   "SELECT gp_orca.comparison_operator('int4'::regtype, 'int8'::regtype, 'eq')
+         = '=(int4,int8)'::regoperator::oid;" "t"
+
+is "not-equal cannot be built, having no btree strategy" \
+   "SELECT gp_orca.comparison_operator('int4'::regtype, 'int4'::regtype, 'neq')
+      IS NULL;" "t"
+
+is "nor can a meaning ORCA does not classify" \
+   "SELECT gp_orca.comparison_operator('int4'::regtype, 'int4'::regtype, 'other')
+      IS NULL;" "t"
+
+is "two types with no btree operator between them find nothing" \
+   "SELECT gp_orca.comparison_operator('int4'::regtype, 'point'::regtype, 'lt')
+      IS NULL;" "t"
+
+refused "a comparison type that is not one is refused by name" \
+        "SELECT gp_orca.comparison_operator('int4'::regtype, 'int4'::regtype, 'sideways');" \
+        "unknown comparison type"
+
+q "CREATE TABLE idx_probe (a int, b text, c float8);
+   CREATE INDEX idx_two ON idx_probe (a, b);
+   CREATE INDEX idx_incl ON idx_probe (a) INCLUDE (c);" > /dev/null
+
+is "an index reports one family per key column, in order" \
+   "SELECT array_length(gp_orca.index_opfamilies('idx_two'::regclass), 1);" "2"
+
+is "and they are the families of the key columns' types" \
+   "SELECT gp_orca.index_opfamilies('idx_two'::regclass)
+         = ARRAY[(SELECT opcfamily FROM pg_opclass
+                   WHERE opcname = 'int4_ops' AND opcmethod = 403),
+                 (SELECT opcfamily FROM pg_opclass
+                   WHERE opcname = 'text_ops' AND opcmethod = 403)];" "t"
+
+# An INCLUDE column carries no opclass, so indnkeyatts is the bound and not
+# indnatts.  Getting that wrong would read past the opclass vector.
+is "an INCLUDE column is not a key column and has no family" \
+   "SELECT array_length(gp_orca.index_opfamilies('idx_incl'::regclass), 1);" "1"
+
+is "a sortable type can be a range partition key" \
+   "SELECT gp_orca.default_partition_opfamily('int4'::regtype) IS NOT NULL;" "t"
+
+is "and text can too" \
+   "SELECT gp_orca.default_partition_opfamily('text'::regtype) IS NOT NULL;" "t"
+
+is "a type with no btree ordering cannot" \
+   "SELECT gp_orca.default_partition_opfamily('point'::regtype) IS NULL;" "t"
+
+echo
 echo "  $pass passed, $fail failed"
 [ "$fail" -eq 0 ]

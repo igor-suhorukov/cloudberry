@@ -75,6 +75,10 @@ PG_FUNCTION_INFO_V1(gp_orca_type_name);
 PG_FUNCTION_INFO_V1(gp_orca_function_fact);
 PG_FUNCTION_INFO_V1(gp_orca_find_aggregate);
 PG_FUNCTION_INFO_V1(gp_orca_cast_fact);
+PG_FUNCTION_INFO_V1(gp_orca_operator_fact);
+PG_FUNCTION_INFO_V1(gp_orca_comparison_operator);
+PG_FUNCTION_INFO_V1(gp_orca_index_opfamilies);
+PG_FUNCTION_INFO_V1(gp_orca_default_partition_opfamily);
 PG_FUNCTION_INFO_V1(gp_orca_xforms);
 PG_FUNCTION_INFO_V1(gp_orca_explain_refusal);
 
@@ -380,6 +384,127 @@ gp_orca_cast_fact(PG_FUNCTION_ARGS)
 
 	tuple = heap_form_tuple(tupdesc, values, nulls);
 	PG_RETURN_DATUM(HeapTupleGetDatum(tuple));
+}
+
+/*
+ * The CmpType spellings, shared by the two probes below.  These are the names
+ * a test reads, so they are ORCA's own rather than PostgreSQL's COMPARE_*.
+ */
+static const struct
+{
+	const char *name;
+	CmpType		cmpt;
+}			cmptype_names[] =
+{
+	{"eq", CmptEq},
+	{"neq", CmptNEq},
+	{"lt", CmptLT},
+	{"leq", CmptLEq},
+	{"gt", CmptGT},
+	{"geq", CmptGEq},
+	{"other", CmptOther},
+};
+
+/*
+ * gp_orca.operator_fact(oid)
+ *
+ * What an operator means, and which families say so.
+ */
+Datum
+gp_orca_operator_fact(PG_FUNCTION_ARGS)
+{
+	Oid			opno = PG_GETARG_OID(0);
+	TupleDesc	tupdesc;
+	Datum		values[2];
+	bool		nulls[2] = {false, false};
+	HeapTuple	tuple;
+	CmpType		cmpt = get_comparison_type(opno);
+	const char *name = "other";
+
+	if (get_call_result_type(fcinfo, NULL, &tupdesc) != TYPEFUNC_COMPOSITE)
+		elog(ERROR, "return type must be a row type");
+	tupdesc = BlessTupleDesc(tupdesc);
+
+	for (size_t i = 0; i < lengthof(cmptype_names); i++)
+	{
+		if (cmptype_names[i].cmpt == cmpt)
+		{
+			name = cmptype_names[i].name;
+			break;
+		}
+	}
+
+	values[0] = CStringGetTextDatum(name);
+	values[1] = oid_list_to_array(get_operator_opfamilies(opno));
+
+	tuple = heap_form_tuple(tupdesc, values, nulls);
+	PG_RETURN_DATUM(HeapTupleGetDatum(tuple));
+}
+
+/*
+ * gp_orca.comparison_operator(lefttype, righttype, cmptype)
+ *
+ * The inverse: build the operator of a given meaning over two types.
+ */
+Datum
+gp_orca_comparison_operator(PG_FUNCTION_ARGS)
+{
+	Oid			lefttype = PG_GETARG_OID(0);
+	Oid			righttype = PG_GETARG_OID(1);
+	char	   *want = text_to_cstring(PG_GETARG_TEXT_PP(2));
+	CmpType		cmpt = CmptOther;
+	bool		found = false;
+	Oid			result;
+
+	for (size_t i = 0; i < lengthof(cmptype_names); i++)
+	{
+		if (strcmp(cmptype_names[i].name, want) == 0)
+		{
+			cmpt = cmptype_names[i].cmpt;
+			found = true;
+			break;
+		}
+	}
+
+	if (!found)
+		ereport(ERROR,
+				(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+				 errmsg("unknown comparison type \"%s\"", want),
+				 errhint("Use eq, neq, lt, leq, gt, geq or other.")));
+
+	result = get_comparison_operator(lefttype, righttype, cmpt);
+
+	if (!OidIsValid(result))
+		PG_RETURN_NULL();
+
+	PG_RETURN_OID(result);
+}
+
+/*
+ * gp_orca.index_opfamilies(oid)
+ *
+ * The operator family of each key column of an index, in order.
+ */
+Datum
+gp_orca_index_opfamilies(PG_FUNCTION_ARGS)
+{
+	PG_RETURN_DATUM(oid_list_to_array(get_index_opfamilies(PG_GETARG_OID(0))));
+}
+
+/*
+ * gp_orca.default_partition_opfamily(oid)
+ *
+ * The btree family a range partition key of this type would use.
+ */
+Datum
+gp_orca_default_partition_opfamily(PG_FUNCTION_ARGS)
+{
+	Oid			result = default_partition_opfamily_for_type(PG_GETARG_OID(0));
+
+	if (!OidIsValid(result))
+		PG_RETURN_NULL();
+
+	PG_RETURN_OID(result);
 }
 
 void
