@@ -1123,9 +1123,23 @@ rw_tag_clauses(GpRewrite *rw, GpSubjKind kind, const char *name, int from)
 /*
  * DISTRIBUTED BY (a, b) / DISTRIBUTED RANDOMLY / DISTRIBUTED REPLICATED
  *
- * The policy is recorded on the table; what reads it is the dispatch of M2,
- * which is Track C's work.  On one node every table is on the one node, so
- * nothing changes for the statement itself.
+ * The policy is recorded on the table; what reads it is ORCA's relcache
+ * translator, which asks every relation what it is distributed by, and the
+ * dispatch of M2.  On one node every table is on the one node, so nothing
+ * changes for the statement itself.
+ *
+ * THE COLUMN LIST KEEPS ITS PARENTHESES, and that is not decoration.  Written
+ * bare, a one-column list is indistinguishable from the word that names a
+ * policy: DISTRIBUTED BY (random) and DISTRIBUTED RANDOMLY both recorded
+ * "random", and nothing downstream could tell a table hashed on a column
+ * called "random" from a randomly distributed one.  That is two different
+ * distributions under one spelling, and the reader would have answered the
+ * wrong one.  So a column list is "(a,b)" and the two policy words stay bare.
+ *
+ * Each name is quoted as an identifier where it needs to be, so that a column
+ * whose name holds a comma or a capital survives the round trip.  The scanner
+ * has already downcased an unquoted name and dequoted a quoted one, so what
+ * is quoted here is the true column name.
  */
 static void
 rw_distributed(GpRewrite *rw, const char *name, int from)
@@ -1165,6 +1179,7 @@ rw_distributed(GpRewrite *rw, const char *name, int from)
 			bool		first = true;
 
 			initStringInfo(&cols);
+			appendStringInfoChar(&cols, '(');
 			for (int j = i + 3; j < after - 1; j++)
 			{
 				if (tok_is_char(ts, j, ','))
@@ -1173,9 +1188,10 @@ rw_distributed(GpRewrite *rw, const char *name, int from)
 					continue;
 				if (!first)
 					appendStringInfoChar(&cols, ',');
-				appendStringInfoString(&cols, tok_name(ts, j));
+				appendStringInfoString(&cols, quote_identifier(tok_name(ts, j)));
 				first = false;
 			}
+			appendStringInfoChar(&cols, ')');
 
 			appendStringInfo(&rw->after, "; SELECT gp_sql.set_distribution(%s::regclass, %s)",
 							 quote_literal_cstr(name),

@@ -174,11 +174,11 @@ refused "a tag nobody defined is still refused" \
         "tag \"nope\" does not exist"
 
 ###############################################################################
-echo "4. DISTRIBUTED BY, which M2's dispatch will read"
+echo "4. DISTRIBUTED BY, which ORCA and M2's dispatch both read"
 ###############################################################################
 isl "DISTRIBUTED BY (cols)" \
    "CREATE TABLE dist (a int, b int) DISTRIBUTED BY (a, b);
-    SELECT gp_sql.distribution('dist'::regclass);" "a,b"
+    SELECT gp_sql.distribution('dist'::regclass);" "(a,b)"
 isl "DISTRIBUTED RANDOMLY" \
    "CREATE TABLE dist_r (a int) DISTRIBUTED RANDOMLY;
     SELECT gp_sql.distribution('dist_r'::regclass);" "random"
@@ -188,13 +188,55 @@ isl "DISTRIBUTED REPLICATED" \
 isl "and after the query of a CREATE TABLE AS" \
    "CREATE TABLE dist_as AS SELECT 1 AS a DISTRIBUTED BY (a);
     SELECT gp_sql.distribution('dist_as'::regclass) || ' ' || (SELECT a::text FROM dist_as);" \
-   "a 1"
+   "(a) 1"
 is "an ordinary table has no policy" \
    "SELECT gp_sql.distribution('plain'::regclass) IS NULL;" "t"
 isl "both clauses on one statement" \
    "CREATE TABLE combo (a int) DISTRIBUTED BY (a) TAG (env = 'prod');
     SELECT gp_sql.distribution('combo'::regclass) || ' ' ||
-           (gp_sql.relation_tags('combo'::regclass) ->> 'env');" "a prod"
+           (gp_sql.relation_tags('combo'::regclass) ->> 'env');" "(a) prod"
+
+# THE DEFECT THE PARENTHESES FIX, which was found while writing the reader
+# that ORCA's relcache translator needs.  Written bare, a one-column list is
+# the policy word: both of these recorded "random", and nothing downstream
+# could tell a table hashed on a column called "random" from a randomly
+# distributed one.  Two different distributions under one spelling, and ORCA
+# would have been told the wrong one.
+isl "a column called random is not DISTRIBUTED RANDOMLY" \
+   "CREATE TABLE dist_word (random int, b int) DISTRIBUTED BY (random);
+    SELECT gp_sql.distribution('dist_word'::regclass);" "(random)"
+isl "and one called replicated is not DISTRIBUTED REPLICATED" \
+   "CREATE TABLE dist_word2 (replicated int) DISTRIBUTED BY (replicated);
+    SELECT gp_sql.distribution('dist_word2'::regclass);" "(replicated)"
+is "so the two spellings no longer collide" \
+   "SELECT gp_sql.distribution('dist_word'::regclass)
+         <> gp_sql.distribution('dist_r'::regclass);" "t"
+
+# A column name that needs quoting survives the round trip: the scanner has
+# already downcased an unquoted name and dequoted a quoted one, so what goes
+# into the label is the true column name, quoted again where it needs to be.
+isl "a quoted column name keeps its case" \
+   "CREATE TABLE dist_q (\"Mixed\" int) DISTRIBUTED BY (\"Mixed\");
+    SELECT gp_sql.distribution('dist_q'::regclass);" '("Mixed")'
+isl "and an unquoted one is downcased, as PostgreSQL downcases it" \
+   "CREATE TABLE dist_u (Mixed int) DISTRIBUTED BY (Mixed);
+    SELECT gp_sql.distribution('dist_u'::regclass);" "(mixed)"
+isl "a column name holding a comma survives too" \
+   "CREATE TABLE dist_c (\"a,b\" int) DISTRIBUTED BY (\"a,b\");
+    SELECT gp_sql.distribution('dist_c'::regclass);" '("a,b")'
+
+# The shape is refused when it is set, not ignored when it is read -- the
+# rule the "gp" label already follows for its keys.  The old bare form is
+# what a caller that has not been told about the parentheses would pass.
+refused "the old bare column list is refused now" \
+        "SELECT gp_sql.set_distribution('dist'::regclass, 'a,b');" \
+        "unrecognized distribution policy \"a,b\""
+refused "and so is anything else" \
+        "SELECT gp_sql.set_distribution('dist'::regclass, 'sideways');" \
+        "unrecognized distribution policy \"sideways\""
+refused "and the error says what the accepted forms are" \
+        "SELECT gp_sql.set_distribution('dist'::regclass, 'sideways');" \
+        "parenthesised column list"
 
 ###############################################################################
 echo "5. incremental materialized views and dynamic tables"

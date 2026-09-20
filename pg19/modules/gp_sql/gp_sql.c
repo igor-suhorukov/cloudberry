@@ -422,11 +422,51 @@ PG_FUNCTION_INFO_V1(gp_sql_set_distribution);
 PG_FUNCTION_INFO_V1(gp_sql_distribution);
 
 /*
+ * The three shapes a recorded distribution policy may have.
+ *
+ *	   random			 no key; a row may be on any segment
+ *	   replicated		 every segment holds every row
+ *	   (a,b)			 hashed on those columns, each quoted where it needs
+ *						 to be
+ *
+ * The parentheses are what tells a one-column list from a policy word.
+ * Without them DISTRIBUTED BY (random) recorded "random", exactly as
+ * DISTRIBUTED RANDOMLY did, and a reader could not tell a table hashed on a
+ * column called "random" from a randomly distributed one.
+ *
+ * Refused when it is set rather than ignored when it is read, which is the
+ * rule the "gp" label already follows for its keys: a value this function
+ * does not understand is far more likely to be a caller that has not been
+ * told about the parentheses than a message from the future.  The columns
+ * themselves are not resolved here -- that is the reader's work, and it has
+ * to be done against the relation as it stands when the plan is made, not as
+ * it stood when the label was written.
+ */
+static void
+check_distribution_policy(const char *policy)
+{
+	size_t		len = strlen(policy);
+
+	if (strcmp(policy, "random") == 0 || strcmp(policy, "replicated") == 0)
+		return;
+
+	if (len >= 3 && policy[0] == '(' && policy[len - 1] == ')')
+		return;
+
+	ereport(ERROR,
+			(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+			 errmsg("unrecognized distribution policy \"%s\"", policy),
+			 errhint("Use \"random\", \"replicated\", or a parenthesised "
+					 "column list such as \"(a,b)\".")));
+}
+
+/*
  * gp_sql.set_distribution(regclass, text)
  *
- * What DISTRIBUTED BY says, recorded on the table.  What reads it is the
- * dispatch of M2; on one node every table is on the one node, so recording it
- * is all there is to do here.
+ * What DISTRIBUTED BY says, recorded on the table.  What reads it is ORCA's
+ * relcache translator, which asks every relation what it is distributed by,
+ * and the dispatch of M2; on one node every table is on the one node, so
+ * recording it is all there is to do here.
  */
 Datum
 gp_sql_set_distribution(PG_FUNCTION_ARGS)
@@ -442,8 +482,12 @@ gp_sql_set_distribution(PG_FUNCTION_ARGS)
 	if (PG_ARGISNULL(1))
 		GpLabelSet(&addr, GP_LABEL_distributed_by, NULL);
 	else
-		GpLabelSet(&addr, GP_LABEL_distributed_by,
-				   text_to_cstring(PG_GETARG_TEXT_PP(1)));
+	{
+		char	   *policy = text_to_cstring(PG_GETARG_TEXT_PP(1));
+
+		check_distribution_policy(policy);
+		GpLabelSet(&addr, GP_LABEL_distributed_by, policy);
+	}
 
 	PG_RETURN_VOID();
 }

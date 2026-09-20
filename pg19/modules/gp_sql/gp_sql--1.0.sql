@@ -934,9 +934,20 @@ GRANT SELECT ON gp_sql.storage_tablespaces TO PUBLIC;
  * Where DISTRIBUTED BY lands
  *
  * O26's grammar rewrites DISTRIBUTED BY (a, b), DISTRIBUTED RANDOMLY and
- * DISTRIBUTED REPLICATED into a call to this.  What reads the policy is the
- * dispatch of M2; on one node every table is on the one node, so recording it
- * is all there is to do here.
+ * DISTRIBUTED REPLICATED into a call to this.  What reads the policy is
+ * ORCA's relcache translator, which asks every relation what it is
+ * distributed by, and the dispatch of M2; on one node every table is on the
+ * one node, so recording it is all there is to do here.
+ *
+ * Three shapes, and nothing else is accepted:
+ *
+ *	   random			 no key; a row may be on any segment
+ *	   replicated		 every segment holds every row
+ *	   (a,b)			 hashed on those columns
+ *
+ * The parentheses are what tells a one-column list from a policy word:
+ * DISTRIBUTED BY (random) is not DISTRIBUTED RANDOMLY, and before they were
+ * there the two recorded the same thing.
  *****************************************************************************/
 
 CREATE FUNCTION gp_sql.set_distribution(rel regclass, policy text)
@@ -945,7 +956,7 @@ AS 'MODULE_PATHNAME', 'gp_sql_set_distribution'
 LANGUAGE C;
 
 COMMENT ON FUNCTION gp_sql.set_distribution(regclass, text) IS
-	'record what DISTRIBUTED BY said; a NULL policy takes it away';
+	'record what DISTRIBUTED BY said: random, replicated or (a,b); a NULL policy takes it away';
 
 CREATE FUNCTION gp_sql.distribution(rel regclass) RETURNS text
 AS 'MODULE_PATHNAME', 'gp_sql_distribution'
