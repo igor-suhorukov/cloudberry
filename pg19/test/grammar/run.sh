@@ -576,7 +576,7 @@ isl "ALTER FUNCTION with another action keeps the ALTER" \
            (SELECT label FROM pg_seclabel WHERE objoid = p.oid
               AND classoid = 'pg_proc'::regclass AND provider = 'gp')
       FROM pg_proc p WHERE p.oid = 'xf2(int)'::regprocedure;" \
-   "t execute_on=all_segments"
+   "true execute_on=all_segments"
 
 echo
 echo "  $pass passed, $fail failed"
