@@ -52,6 +52,17 @@
  * mapping.  That reasoning is Cloudberry's, and it still holds on
  * PostgreSQL 19.
  *
+ * WHERE IT ACTUALLY DOES ANYTHING, measured rather than assumed.  A USING
+ * column only becomes a join alias Var that needs flattening when the join is
+ * a FULL OUTER one.  For an inner or one-sided outer join the merged column
+ * is exactly one of the inputs, and the parser resolves the reference to that
+ * input as it analyzes it -- so "SELECT x FROM a JOIN b USING (x)" arrives
+ * here already naming a base relation and nothing happens.  Under FULL JOIN
+ * the merged value is COALESCE(a.x, b.x), which is not a Var, so the
+ * reference stays pointed at the join and one Var becomes two.  A whole-row
+ * reference to any join is the other case: it expands into a RowExpr naming
+ * the inputs.
+ *
  * WHAT CHANGED FOR POSTGRESQL 19.  Two things, and neither is in the shape
  * of the function.
  *
@@ -103,10 +114,20 @@ flatten_join_alias_var_optimizer(Query *query, int queryLevel)
 			flatten_join_alias_vars(NULL, queryNew, queryNew->limitCount);
 
 	/*
-	 * A window frame's bounds are expressions like any other, and RANGE
-	 * BETWEEN <expr> PRECEDING can name a join column.  The clause itself is
-	 * not an expression, so it is walked by hand rather than handed to the
-	 * mutator whole.
+	 * A window frame's bounds are expressions, and a WindowClause is not, so
+	 * Cloudberry walks them by hand rather than handing them to the mutator.
+	 *
+	 * It cannot fire.  PostgreSQL requires a frame offset to be free of
+	 * variables at the query's own level -- transformFrameOffset calls
+	 * checkExprIsVarFree, and "ROWS BETWEEN x PRECEDING" is rejected with
+	 * "argument of ROWS must not contain variables" -- and a Var at a deeper
+	 * level is not this call's to substitute.  So there is never a join alias
+	 * Var here to flatten, on PostgreSQL 19 or on Cloudberry's PostgreSQL 16.
+	 *
+	 * The loop stays because it is Cloudberry's and costs nothing, and
+	 * because the reason it is unreachable is a rule of the parser's that
+	 * could be relaxed.  The test beside it pins that rule rather than the
+	 * loop, so if it ever changes the loop is what gets looked at.
 	 */
 	foreach(lc, queryNew->windowClause)
 	{

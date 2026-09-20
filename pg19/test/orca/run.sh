@@ -914,22 +914,42 @@ q "CREATE TABLE ja1 (x int, y int);
    CREATE TABLE ja2 (x int, z int);" > /dev/null
 
 # A Var naming a JOIN's output column resolves only against the query that
-# owns the JOIN.  ORCA's normalization moves the target list out of that
-# query, so it has to name the base relations by then.  Under USING the
-# merged column is a COALESCE of both sides, which is why one Var becomes two.
-is "a USING column names the join before, and both sides after" \
+# owns the JOIN, and ORCA's normalization moves the target list out of that
+# query -- so it has to name the base relations by then.
+#
+# WHERE THAT ACTUALLY HAPPENS, which is narrower than it sounds.  A USING
+# column only stays pointed at the join when the join is a FULL OUTER one,
+# because only then is the merged value COALESCE(a.x, b.x) rather than one of
+# the inputs.  That is why one Var becomes two here.
+is "a FULL JOIN's USING column names the join before, and both sides after" \
    "SELECT before::text || ' -> ' || after::text
       FROM gp_orca.flatten_join_aliases(
-        'SELECT x FROM ja1 JOIN ja2 USING (x)');" "{3} -> {1,2}"
+        'SELECT x FROM ja1 FULL JOIN ja2 USING (x)');" "{3} -> {1,2}"
+
+# And the other side of that: an inner join's merged column is exactly the
+# left input, so the parser resolves it while analyzing and there is nothing
+# left to flatten.  This is worth a test because it is easy to assume
+# otherwise, and because it says how rarely the function does anything.
+is "an inner join's USING column was already resolved by the parser" \
+   "SELECT before::text || ' -> ' || after::text
+      FROM gp_orca.flatten_join_aliases(
+        'SELECT x FROM ja1 JOIN ja2 USING (x)');" "{1} -> {1}"
+
+is "and so was a LEFT JOIN's" \
+   "SELECT before::text || ' -> ' || after::text
+      FROM gp_orca.flatten_join_aliases(
+        'SELECT x FROM ja1 LEFT JOIN ja2 USING (x)');" "{1} -> {1}"
 
 is "a query with no join is left alone" \
    "SELECT before::text || ' -> ' || after::text
       FROM gp_orca.flatten_join_aliases('SELECT x FROM ja1');" "{1} -> {1}"
 
-is "a column taken from one side names that side already" \
+# A whole-row reference to a join is the other case that has to be expanded:
+# there is no such row on disk, so it becomes a RowExpr naming the inputs.
+is "a whole-row reference to a join becomes its inputs" \
    "SELECT before::text || ' -> ' || after::text
       FROM gp_orca.flatten_join_aliases(
-        'SELECT ja1.x FROM ja1 JOIN ja2 ON ja1.x = ja2.x');" "{1} -> {1}"
+        'SELECT ROW(j) FROM (ja1 FULL JOIN ja2 USING (x)) j');" "{3} -> {1,2}"
 
 # The other half of the contract, and the half that would fail silently: the
 # WHERE clause is deliberately not flattened.  It does not move, and ORCA
@@ -938,17 +958,22 @@ is "a column taken from one side names that side already" \
 is "the WHERE clause still names the join afterwards" \
    "SELECT where_after::text
       FROM gp_orca.flatten_join_aliases(
-        'SELECT y FROM ja1 JOIN ja2 USING (x) WHERE x > 0');" "{3}"
+        'SELECT y FROM ja1 FULL JOIN ja2 USING (x) WHERE x > 0');" "{3}"
 
-# A window frame bound travels with the target list, so it is flattened -- and
-# a WindowClause is not an expression, so it is the one part the function has
-# to walk by hand.  Nothing else in this section would notice if that loop
-# were dropped.
-is "a window frame bound is flattened, because it travels too" \
+# The frame-bound loop cannot fire, and this is why: PostgreSQL will not
+# accept a frame offset that names a column at the query's own level.  The
+# assertion is on that rule rather than on the loop, so if the rule is ever
+# relaxed this is what says to go and look at the loop.
+refused "a frame bound may not name a column at all" \
+        "SELECT window_after FROM gp_orca.flatten_join_aliases(
+           'SELECT count(*) OVER (ORDER BY y ROWS BETWEEN x PRECEDING AND CURRENT ROW)
+              FROM ja1');" \
+        "argument of ROWS must not contain variables"
+
+is "so a frame bound that is accepted has nothing to flatten" \
    "SELECT window_after::text FROM gp_orca.flatten_join_aliases(
-      'SELECT count(*) OVER (ORDER BY y RANGE BETWEEN x PRECEDING AND CURRENT ROW)
-         FROM ja1 JOIN ja2 USING (x)');" "{1,2}"
-
+      'SELECT x, count(*) OVER (ORDER BY y ROWS BETWEEN 1 PRECEDING AND CURRENT ROW)
+         FROM ja1 FULL JOIN ja2 USING (x)');" "{}"
 echo
 echo "13. an array constant ORCA can look inside"
 
