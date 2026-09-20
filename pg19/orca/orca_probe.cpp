@@ -65,6 +65,7 @@ extern "C"
 {
 #include "postgres.h"
 
+#include "nodes/pathnodes.h"
 #include "utils/memutils.h"
 #include "utils/rel.h"
 
@@ -105,6 +106,11 @@ struct ProbeResult
 	bool		flag = false;
 	int			number = 0;
 	char	   *text = nullptr;
+
+	/* the aggregate replay at the foot of this file */
+	List	   *aggrefs = nullptr;
+	int		   *aggnos = nullptr;
+	int		   *transnos = nullptr;
 };
 
 //	Copy into the caller's context; the pool dies with the task.
@@ -412,4 +418,159 @@ GpOrcaPolicyKind(Oid relid, bool *raised)
 	RunProbe(ProbePolicyKind, &r);
 	*raised = r.raised;
 	return r.text;
+}
+
+//---------------------------------------------------------------------------
+//	Replay the planner's aggregate bookkeeping over the port's copies of
+//	find_compatible_agg() and find_compatible_trans().
+//
+//	Those two decide which aggregates in a query may share an Agg node's
+//	transition state.  They are the last two functions of the compat layer
+//	with no caller -- CTranslatorDXLToPlStmt is the only one there will be --
+//	and a wrong answer from either is a wrong plan rather than a failure: too
+//	much sharing computes one aggregate's state and reads it as another's.
+//
+//	So they are tested against the planner rather than against expectations.
+//	PostgreSQL 19 records the answer on the node: Aggref.aggno and
+//	Aggref.aggtransno are -1 after parsing and are set by preprocess_aggref
+//	(prepagg.c), so gp_orca.planner_aggnos() reads what the planner decided
+//	and this produces what the port would have decided, over the same Aggrefs
+//	in the same order.  Any difference is a defect.
+//
+//	The loop is preprocess_aggref's, minus what only PlannerInfo needs:
+//	numOrderedAggs and the partial-aggregation flags, which record what a
+//	plan may do later and take no part in choosing aggno or transno.
+//---------------------------------------------------------------------------
+static void *
+ProbeReplayAggrefs(void *ptr)
+{
+	ProbeResult *a = (ProbeResult *) ptr;
+	List	   *agginfos = NIL;
+	List	   *aggtransinfos = NIL;
+	ListCell   *lc;
+	int			n = list_length(a->aggrefs);
+	int			i = 0;
+
+	a->aggnos = (int *) MemoryContextAlloc(a->caller, sizeof(int) * (n > 0 ? n : 1));
+	a->transnos = (int *) MemoryContextAlloc(a->caller, sizeof(int) * (n > 0 ? n : 1));
+
+	foreach(lc, a->aggrefs)
+	{
+		Aggref	   *aggref = (Aggref *) lfirst(lc);
+		Oid			aggtransfn;
+		Oid			aggfinalfn;
+		Oid			aggcombinefn;
+		Oid			aggserialfn;
+		Oid			aggdeserialfn;
+		Oid			aggtranstype;
+		int			aggtransspace;
+		Datum		initValue;
+		bool		initValueIsNull;
+		bool		shareable;
+		int32		aggtranstypmod;
+		int16		transtypeLen;
+		bool		transtypeByVal;
+		List	   *same_input_transnos = NIL;
+		int			aggno;
+		int			transno;
+
+		gpdb::GetAggregateInfo(aggref, &aggtransfn, &aggfinalfn, &aggcombinefn,
+							   &aggserialfn, &aggdeserialfn, &aggtranstype,
+							   &aggtransspace, &initValue, &initValueIsNull,
+							   &shareable);
+
+		// The wrapper resolves the polymorphic transition type and hands it
+		// back, and does NOT write it into the Aggref -- but
+		// find_compatible_agg compares newagg->aggtranstype against the ones
+		// it has already seen.  A caller that left this line out would be
+		// comparing whatever the parser put there, which for a polymorphic
+		// aggregate is the unresolved pseudo-type, and every such aggregate
+		// would look compatible with every other.  Cloudberry's translator
+		// sets it here too.
+		aggref->aggtranstype = aggtranstype;
+
+		aggtranstypmod = -1;
+		if (aggref->args)
+		{
+			TargetEntry *tle = (TargetEntry *) linitial(aggref->args);
+
+			if (aggtranstype == gpdb::ExprType((Node *) tle->expr))
+				aggtranstypmod = gpdb::ExprTypeMod((Node *) tle->expr);
+		}
+
+		// 1. the same aggregate call as one already seen?
+		aggno = gpdb::FindCompatibleAgg(agginfos, aggref, &same_input_transnos);
+		if (aggno != -1)
+		{
+			AggInfo    *agginfo = (AggInfo *) gpdb::ListNth(agginfos, aggno);
+
+			agginfo->aggrefs = gpdb::LAppend(agginfo->aggrefs, aggref);
+			transno = agginfo->transno;
+		}
+		else
+		{
+			AggInfo    *agginfo = MakeNode(AggInfo);
+
+			agginfo->finalfn_oid = aggfinalfn;
+			agginfo->aggrefs = ListMake1(aggref);
+			agginfo->shareable = shareable;
+
+			aggno = (int) gpdb::ListLength(agginfos);
+			agginfos = gpdb::LAppend(agginfos, agginfo);
+
+			gpdb::TypLenByVal(aggtranstype, &transtypeLen, &transtypeByVal);
+
+			// 2. can it share a transition state with one already set up?
+			transno = gpdb::FindCompatibleTrans(aggtransinfos, shareable,
+												aggtransfn, aggtranstype,
+												transtypeLen, transtypeByVal,
+												aggcombinefn,
+												aggserialfn, aggdeserialfn,
+												initValue, initValueIsNull,
+												same_input_transnos);
+			if (transno == -1)
+			{
+				AggTransInfo *transinfo = MakeNode(AggTransInfo);
+
+				transinfo->args = aggref->args;
+				transinfo->aggfilter = aggref->aggfilter;
+				transinfo->transfn_oid = aggtransfn;
+				transinfo->combinefn_oid = aggcombinefn;
+				transinfo->serialfn_oid = aggserialfn;
+				transinfo->deserialfn_oid = aggdeserialfn;
+				transinfo->aggtranstype = aggtranstype;
+				transinfo->aggtranstypmod = aggtranstypmod;
+				transinfo->transtypeLen = transtypeLen;
+				transinfo->transtypeByVal = transtypeByVal;
+				transinfo->aggtransspace = aggtransspace;
+				transinfo->initValue = initValue;
+				transinfo->initValueIsNull = initValueIsNull;
+
+				transno = (int) gpdb::ListLength(aggtransinfos);
+				aggtransinfos = gpdb::LAppend(aggtransinfos, transinfo);
+			}
+			agginfo->transno = transno;
+		}
+
+		a->aggnos[i] = aggno;
+		a->transnos[i] = transno;
+		i++;
+	}
+
+	return nullptr;
+}
+
+extern "C" int
+GpOrcaReplayAggrefs(List *aggrefs, int **aggnos, int **transnos, bool *raised)
+{
+	ProbeResult r;
+
+	r.aggrefs = aggrefs;
+	r.caller = CurrentMemoryContext;
+	RunProbe(ProbeReplayAggrefs, &r);
+
+	*raised = r.raised;
+	*aggnos = r.aggnos;
+	*transnos = r.transnos;
+	return list_length(aggrefs);
 }

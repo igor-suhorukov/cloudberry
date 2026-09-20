@@ -700,3 +700,31 @@ LANGUAGE C STRICT;
 
 COMMENT ON FUNCTION gp_orca.unported_raise() IS
 	'the exception a wrapper that is not ported yet raises, as major/minor';
+
+/*
+ * Which aggregates in a query may share an Agg node's transition state,
+ * asked of PostgreSQL's planner and of the port's copies of
+ * find_compatible_agg() and find_compatible_trans(), over the same Aggrefs.
+ *
+ * Those two are the last of the compat layer with no caller of their own --
+ * CTranslatorDXLToPlStmt is the only one there will be -- and a wrong answer
+ * from either is a wrong plan rather than a failure: share too much and one
+ * aggregate's transition state is read as another's.  They need no fixture,
+ * because PostgreSQL records its own answer on the node.
+ *
+ * planner_aggno and compat_aggno must be equal on every row, and so must the
+ * transnos.
+ */
+CREATE FUNCTION gp_orca.agg_sharing(
+	query text,
+	OUT n int,
+	OUT planner_aggno int,
+	OUT planner_transno int,
+	OUT compat_aggno int,
+	OUT compat_transno int)
+RETURNS SETOF record
+AS 'MODULE_PATHNAME', 'gp_orca_agg_sharing'
+LANGUAGE C STRICT;
+
+COMMENT ON FUNCTION gp_orca.agg_sharing(text) IS
+	'what the planner and the port each decide about sharing aggregate state';

@@ -59,6 +59,7 @@
 #include "nodes/nodes.h"
 #include "nodes/pg_list.h"
 #include "optimizer/optimizer.h"
+#include "optimizer/planner.h"
 #include "parser/analyze.h"
 #include "tcop/tcopprot.h"
 #include "utils/array.h"
@@ -121,6 +122,7 @@ PG_FUNCTION_INFO_V1(gp_orca_mv_dependencies);
 PG_FUNCTION_INFO_V1(gp_orca_mdcache_needs_reset);
 PG_FUNCTION_INFO_V1(gp_orca_wrapper_policy);
 PG_FUNCTION_INFO_V1(gp_orca_unported_raise);
+PG_FUNCTION_INFO_V1(gp_orca_agg_sharing);
 
 /*
  * gp_orca.version()
@@ -1580,4 +1582,123 @@ gp_orca_unported_raise(PG_FUNCTION_ARGS)
 		PG_RETURN_NULL();
 
 	PG_RETURN_TEXT_P(cstring_to_text(code));
+}
+
+/*
+ * gp_orca.agg_sharing(text)
+ *
+ * Which aggregates in a query may share an Agg node's transition state --
+ * asked twice, of PostgreSQL's planner and of the port's copies of
+ * find_compatible_agg() and find_compatible_trans(), over the same Aggref
+ * nodes.
+ *
+ * Those two are the last of the compat layer with no caller of their own;
+ * CTranslatorDXLToPlStmt is the only one there will be.  Waiting for it would
+ * leave them untested through the whole translator, and a wrong answer from
+ * either is a wrong plan rather than a failure: share too much and one
+ * aggregate's transition state is read as another's.
+ *
+ * They need no fixture, because PostgreSQL 19 records its own answer on the
+ * node.  Aggref.aggno and Aggref.aggtransno are -1 after parsing and are set
+ * by preprocess_aggref(), so planning the query is the expected side, and
+ * replaying the port's matchers over the very same nodes is the actual side.
+ * One list of Aggrefs, so the two answers cannot be about different
+ * aggregates or come out in a different order.
+ */
+static bool
+probe_collect_aggrefs(Node *node, void *context)
+{
+	List	  **out = (List **) context;
+
+	if (node == NULL)
+		return false;
+	if (IsA(node, Aggref))
+	{
+		/*
+		 * No recursion into an aggregate: the parser has already refused an
+		 * aggregate inside another one's arguments, direct arguments or
+		 * filter, which is the same assumption preprocess_aggrefs_walker
+		 * makes.
+		 */
+		*out = lappend(*out, node);
+		return false;
+	}
+	return expression_tree_walker(node, probe_collect_aggrefs, context);
+}
+
+Datum
+gp_orca_agg_sharing(PG_FUNCTION_ARGS)
+{
+	char	   *sql = text_to_cstring(PG_GETARG_TEXT_PP(0));
+	ReturnSetInfo *rsinfo = (ReturnSetInfo *) fcinfo->resultinfo;
+	List	   *raw;
+	List	   *queries;
+	Query	   *query;
+	List	   *aggrefs = NIL;
+	ListCell   *lc;
+	int		   *aggnos;
+	int		   *transnos;
+	bool		raised = false;
+	int			n;
+	int			i = 0;
+
+	InitMaterializedSRF(fcinfo, 0);
+
+	raw = pg_parse_query(sql);
+	if (list_length(raw) != 1)
+		ereport(ERROR,
+				(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+				 errmsg("give this one statement, not %d", list_length(raw))));
+
+	queries = pg_analyze_and_rewrite_fixedparams(linitial_node(RawStmt, raw),
+												 sql, NULL, 0, NULL);
+	if (list_length(queries) != 1)
+		ereport(ERROR,
+				(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+				 errmsg("the statement rewrote into %d queries",
+						list_length(queries))));
+	query = linitial_node(Query, queries);
+
+	/*
+	 * standard_planner rather than planner(): the hook is gp_orca's own, and
+	 * what this wants is PostgreSQL's answer.  It plans the Query in place,
+	 * so the Aggrefs collected afterwards are the ones it decided about.
+	 */
+	(void) standard_planner(query, sql, 0, NULL, NULL);
+
+	/*
+	 * The order subquery_planner walks them in: the target list, then HAVING.
+	 */
+	(void) probe_collect_aggrefs((Node *) query->targetList, &aggrefs);
+	(void) probe_collect_aggrefs(query->havingQual, &aggrefs);
+
+	if (aggrefs == NIL)
+		ereport(ERROR,
+				(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+				 errmsg("this query has no aggregates to compare")));
+
+	n = GpOrcaReplayAggrefs(aggrefs, &aggnos, &transnos, &raised);
+	if (raised)
+		ereport(ERROR,
+				(errcode(ERRCODE_INTERNAL_ERROR),
+				 errmsg("the optimizer raised matching aggregates")));
+
+	foreach(lc, aggrefs)
+	{
+		Aggref	   *aggref = (Aggref *) lfirst(lc);
+		Datum		values[5];
+		bool		nulls[5] = {false, false, false, false, false};
+
+		values[0] = Int32GetDatum(i);
+		values[1] = Int32GetDatum(aggref->aggno);
+		values[2] = Int32GetDatum(aggref->aggtransno);
+		values[3] = Int32GetDatum(aggnos[i]);
+		values[4] = Int32GetDatum(transnos[i]);
+
+		tuplestore_putvalues(rsinfo->setResult, rsinfo->setDesc, values, nulls);
+		i++;
+	}
+
+	Assert(i == n);
+	PG_RETURN_VOID();
 }

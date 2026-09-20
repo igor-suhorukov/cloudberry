@@ -121,6 +121,18 @@ extern char *GpOrcaPolicyKind(Oid relid, bool *raised);
  */
 extern char *GpOrcaUnportedRaise(void);
 
+/*
+ * Replay the planner's aggregate bookkeeping over the port's copies of
+ * find_compatible_agg() and find_compatible_trans(), for a list of Aggrefs.
+ *
+ * Returns the number of aggregates, and sets *aggnos and *transnos to what
+ * the port's matchers decided.  The caller compares them against what the
+ * planner decided, which PostgreSQL leaves on Aggref.aggno and
+ * Aggref.aggtransno.
+ */
+extern int	GpOrcaReplayAggrefs(List *aggrefs, int **aggnos, int **transnos,
+								bool *raised);
+
 #ifdef __cplusplus
 }
 #endif

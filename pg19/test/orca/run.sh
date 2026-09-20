@@ -1497,6 +1497,136 @@ is "and it does not take the backend down with it" \
 is "nor leave the session unable to plan" \
    "SELECT count(*) FROM wrap_stats;" "200"
 
+###############################################################################
+echo
+echo "19. sharing an aggregate's transition state, against the planner"
+###############################################################################
+# find_compatible_agg() and find_compatible_trans() decide which aggregates in
+# a query may share an Agg node's transition state.  They are the last two
+# functions of the compat layer with no caller -- CTranslatorDXLToPlStmt is the
+# only one there will be -- and a wrong answer from either is a wrong plan
+# rather than a failure: share too much and one aggregate's transition state
+# is read as another's.
+#
+# They need no fixture.  PostgreSQL records its own answer on the node:
+# Aggref.aggno and Aggref.aggtransno are -1 after parsing and are set by
+# preprocess_aggref().  So gp_orca.agg_sharing() plans the query, then replays
+# the port's matchers over the very same Aggrefs, and the two answers sit side
+# by side.  Any difference is a defect in the port.
+
+q "CREATE TABLE aggt(a int, b int8, c numeric, d text);
+   INSERT INTO aggt SELECT i, i, i, i::text FROM generate_series(1, 50) i;" > /dev/null
+
+# Every row must agree.  $3, when given, is the planner's shape as
+# aggno/transno per aggregate -- asserted as well, so that each case says
+# which sharing it is exercising rather than only that the two agree.
+aggs() {
+	local dis shape
+	dis=$(q "SELECT count(*) FROM gp_orca.agg_sharing('$2')
+	          WHERE planner_aggno IS DISTINCT FROM compat_aggno
+	             OR planner_transno IS DISTINCT FROM compat_transno;")
+	shape=$(q "SELECT string_agg(planner_aggno || '/' || planner_transno, ',' ORDER BY n)
+	             FROM gp_orca.agg_sharing('$2');")
+	if [ "$dis" != "0" ]; then
+		notok "$1" "the port disagreed with the planner on $dis of them (shape $shape)"
+	elif [ -n "${3:-}" ] && [ "$shape" != "$3" ]; then
+		notok "$1" "agreed, but on [$shape] where [$3] was expected"
+	else
+		ok "$1"
+	fi
+}
+
+# --- the two ends of the range ----------------------------------------------
+aggs "the same call twice is one aggregate" \
+     "SELECT count(a), count(a) FROM aggt" "0/0,0/0"
+
+aggs "two different aggregates share nothing" \
+     "SELECT count(a), sum(b) FROM aggt" "0/0,1/1"
+
+# --- the case the second function exists for ---------------------------------
+#
+# sum(numeric) and avg(numeric) are different aggregates with different final
+# functions, and both accumulate with numeric_avg_accum.  find_compatible_agg
+# finds no exact match and reports the transno as a candidate;
+# find_compatible_trans then matches on the transition function.  Two
+# aggregates, one transition state.
+aggs "sum and avg over numeric share one transition state" \
+     "SELECT sum(c), avg(c) FROM aggt" "0/0,1/0"
+
+aggs "and so do var_samp and stddev_samp" \
+     "SELECT var_samp(c), stddev_samp(c) FROM aggt" "0/0,1/0"
+
+aggs "three aggregates, two of which share" \
+     "SELECT sum(c), avg(c), count(c) FROM aggt" "0/0,1/0,2/1"
+
+# --- same inputs, but nothing to share ---------------------------------------
+aggs "max and min take the same input and cannot share" \
+     "SELECT max(a), min(a) FROM aggt" "0/0,1/1"
+
+# --- what makes two calls different ------------------------------------------
+aggs "DISTINCT makes it a different aggregate" \
+     "SELECT count(a), count(DISTINCT a) FROM aggt" "0/0,1/1"
+
+aggs "so does a FILTER" \
+     "SELECT count(a) FILTER (WHERE b > 0), count(a) FROM aggt" "0/0,1/1"
+
+aggs "so does counting rows rather than a column" \
+     "SELECT count(a), count(*) FROM aggt" "0/0,1/1"
+
+aggs "and so does the argument type" \
+     "SELECT sum(a), sum(b) FROM aggt" "0/0,1/1"
+
+# --- a volatile argument stops all of it -------------------------------------
+#
+# find_compatible_agg refuses to reuse an aggregate whose arguments contain a
+# volatile function, because the second call would not compute the same thing.
+aggs "a volatile argument is never shared, even with itself" \
+     "SELECT count(random()), count(random()) FROM aggt" "0/0,1/1"
+
+# --- more than one place aggregates are found --------------------------------
+#
+# subquery_planner walks the target list and then HAVING, and so does the
+# probe.  An aggregate written in both places is one aggregate.
+aggs "HAVING is walked after the target list" \
+     "SELECT a, count(b) FROM aggt GROUP BY a HAVING count(b) > 0" "0/0,0/0"
+
+aggs "and an aggregate only in HAVING is found" \
+     "SELECT a FROM aggt GROUP BY a HAVING sum(b) > 0" "0/0"
+
+# --- ordering and direct arguments -------------------------------------------
+aggs "an ordered-set aggregate" \
+     "SELECT percentile_cont(0.5) WITHIN GROUP (ORDER BY c) FROM aggt" "0/0"
+
+aggs "the same one twice is still one" \
+     "SELECT percentile_cont(0.5) WITHIN GROUP (ORDER BY c),
+             percentile_cont(0.5) WITHIN GROUP (ORDER BY c) FROM aggt" "0/0,0/0"
+
+aggs "a different percentile is a different aggregate" \
+     "SELECT percentile_cont(0.5) WITHIN GROUP (ORDER BY c),
+             percentile_cont(0.9) WITHIN GROUP (ORDER BY c) FROM aggt" "0/0,1/1"
+
+# --- a polymorphic transition type -------------------------------------------
+#
+# array_agg's declared transition type is internal and its real one is
+# resolved from the input.  GetAggregateInfo resolves it and hands it back
+# without writing it into the Aggref, so the caller has to -- and
+# find_compatible_agg compares that field.  A translator that left the line
+# out would find every polymorphic aggregate compatible with every other.
+aggs "array_agg over two different types is two aggregates" \
+     "SELECT array_agg(a), array_agg(d) FROM aggt" "0/0,1/1"
+
+aggs "and over the same type, written twice, is one" \
+     "SELECT array_agg(a), array_agg(a) FROM aggt" "0/0,0/0"
+
+# --- the probe's own edges ---------------------------------------------------
+refused "a query with no aggregates is refused rather than reported empty" \
+   "SELECT count(*) FROM gp_orca.agg_sharing('SELECT 1');" \
+   "no aggregates to compare"
+
+refused "and so is more than one statement" \
+   "SELECT count(*) FROM gp_orca.agg_sharing('SELECT count(1); SELECT count(2);');" \
+   "one statement"
+
 echo
 echo "  $pass passed, $fail failed"
 [ "$fail" -eq 0 ]
