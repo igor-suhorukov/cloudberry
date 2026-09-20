@@ -40,10 +40,18 @@ extern "C"
 }
 
 #include "gpos/_api.h"
+#include "gpos/error/CAutoExceptionStack.h"
+#include "gpos/error/CException.h"
+#include "gpos/common/CAutoP.h"
+#include "gpos/common/CBitSet.h"
+#include "gpos/common/CBitSetIter.h"
+#include "gpos/memory/CAutoMemoryPool.h"
 #include "gpopt/init.h"
 #include "gpopt/xforms/CXform.h"
 #include "gpopt/xforms/CXformFactory.h"
 #include "naucrates/init.h"
+
+#include "config/CConfigParamMapping.h"
 
 #include "gp_orca_api.h"
 
@@ -153,4 +161,123 @@ GpOrcaXformName(int xform_id)
 		factory->Pxf((gpopt::CXform::EXformId) xform_id);
 
 	return xform == NULL ? NULL : xform->SzId();
+}
+
+//---------------------------------------------------------------------------
+//	The trace flags the current settings ask for.
+//
+//	ORCA has no settings of its own: everything a person can turn on or off
+//	in it is a bit in a set handed to the optimizer when a query is planned.
+//	config/CConfigParamMapping.cpp is where the settings on the outside become
+//	the bits on the inside, and this is how a caller in C can read the result
+//	before there is an optimizer to hand it to.
+//
+//	IT RUNS INSIDE gpos_exec, AND HAS TO.  ORCA's memory pools, and the
+//	assertions its debug build makes about them, are keyed to a CTask, and
+//	there is no task in a plain backend: allocating from a CAutoMemoryPool
+//	outside one takes the backend down rather than failing.  Cloudberry never
+//	meets this because every entry into ORCA goes through COptTasks::Execute,
+//	which is this same wrapper.  Anything else the port calls into ORCA from
+//	C will need it too.
+//
+//	The array is palloc'd in the caller's context; the count is returned.
+//---------------------------------------------------------------------------
+struct GpOrcaTraceFlagsArg
+{
+	int		   *flags;
+	int			count;
+	MemoryContext caller;
+};
+
+static void *
+GpOrcaTraceFlagsTask(void *ptr)
+{
+	GpOrcaTraceFlagsArg *arg = (GpOrcaTraceFlagsArg *) ptr;
+	gpos::CAutoMemoryPool amp;
+	gpos::CMemoryPool *mp = amp.Pmp();
+
+	gpos::CBitSet *bitset = gpdxl::CConfigParamMapping::PackConfigParamInBitset(
+		mp, (gpos::ULONG) gpopt::CXform::ExfSentinel, false /* create_vec_plan */);
+
+	int			n = 0;
+
+	{
+		gpos::CBitSetIter iter(*bitset);
+
+		while (iter.Advance())
+			n++;
+	}
+
+	/*
+	 * Into the caller's context, not ORCA's pool: the pool goes when this
+	 * task ends, and the answer has to outlive it.
+	 */
+	arg->flags = (int *) MemoryContextAlloc(arg->caller,
+											sizeof(int) * (n > 0 ? n : 1));
+	arg->count = n;
+
+	{
+		gpos::CBitSetIter iter(*bitset);
+		int			i = 0;
+
+		while (iter.Advance())
+			arg->flags[i++] = (int) iter.Bit();
+	}
+
+	bitset->Release();
+
+	return nullptr;
+}
+
+extern "C" int
+GpOrcaTraceFlags(int **flags)
+{
+	GpOrcaTraceFlagsArg arg;
+	gpos_exec_params params;
+	bool		abort_flag = false;
+	int			rc = 0;
+	ULONG		major = 0;
+	ULONG		minor = 0;
+
+	GpOrcaEnsureInitialized();
+
+	arg.flags = NULL;
+	arg.count = 0;
+	arg.caller = CurrentMemoryContext;
+
+	memset(&params, 0, sizeof(params));
+	params.func = GpOrcaTraceFlagsTask;
+	params.arg = &arg;
+	params.stack_start = &params;
+	params.abort_requested = &abort_flag;
+
+	/*
+	 * gpos_exec rethrows, so the catch has to be here.  A C++ exception that
+	 * reaches a C frame is not an error PostgreSQL can report; it is
+	 * std::terminate, which takes the whole server down and restarts it --
+	 * which is exactly what happened when this was written without the
+	 * catch.  Every entry into ORCA needs this pair, and Cloudberry has it in
+	 * CGPOptimizer for the same reason.
+	 */
+	GPOS_TRY
+	{
+		rc = gpos_exec(&params);
+	}
+	GPOS_CATCH_EX(ex)
+	{
+		major = ex.Major();
+		minor = ex.Minor();
+		GPOS_RESET_EX;
+		rc = -1;
+	}
+	GPOS_CATCH_END;
+
+	if (rc != 0)
+		ereport(ERROR,
+				(errcode(ERRCODE_INTERNAL_ERROR),
+				 errmsg("the optimizer could not report its trace flags"),
+				 rc < 0 ? errdetail("ORCA raised %u/%u.", major, minor) : 0));
+
+	*flags = arg.flags;
+	return arg.count;
 }

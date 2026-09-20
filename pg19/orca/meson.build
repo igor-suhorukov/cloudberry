@@ -121,7 +121,7 @@ orca_core = static_library('gporca_core',
 # already sets for PostgreSQL files Cloudberry modified.
 ###############################################################################
 
-orca_transl_inc = include_directories('include', 'compat')
+orca_transl_inc = include_directories('include', 'compat', 'config', '.')
 
 # compat/ is the port's re-implementation of what ORCA asks of a PostgreSQL
 # that Cloudberry had patched.  Those functions live in PostgreSQL files
@@ -139,6 +139,8 @@ orca_compat_sources = files(
 )
 
 orca_transl_sources = files(
+  'config/CConfigParamMapping.cpp',
+  'config/gp_orca_guc.c',
   'gpdbwrappers.cpp',
   'orca_api.cpp',
 ) + orca_compat_sources

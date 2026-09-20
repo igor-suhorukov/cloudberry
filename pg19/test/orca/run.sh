@@ -1177,5 +1177,108 @@ is "and EXPLAIN shows PostgreSQL's plan for it" \
       SELECT * FROM (VALUES (1)) v) t;" "1"
 
 echo
+echo "16. ORCA's settings, and what they add up to"
+
+# ORCA has no settings of its own.  Everything a person can turn on or off in
+# it is a bit in a set handed to the optimizer when a query is planned, and
+# config/CConfigParamMapping.cpp is where the outside becomes the inside.
+# Until there is a translator to hand that set to, this is the only way to
+# see that the settings reach ORCA at all.
+
+is "the settings are there, under names PostgreSQL 19 will take" \
+   "SELECT count(*) > 70 FROM pg_settings WHERE name LIKE 'gp.optimizer%';" "t"
+
+# All 438 of Cloudberry's settings change name, not only the ones written to
+# a file: PostgreSQL will not define a custom variable without a dot in its
+# name.  This is the correction cloudberry.md records, and it is checkable.
+is "and Cloudberry's undotted spelling is not one of them" \
+   "SELECT count(*) FROM pg_settings WHERE name = 'optimizer_join_order';" "0"
+
+is "the enum settings take Cloudberry's words" \
+   "SET gp.optimizer_join_order = 'greedy';
+    SELECT setting FROM pg_settings WHERE name = 'gp.optimizer_join_order';" "greedy"
+
+refused "and refuse a word that is not one of them" \
+        "SET gp.optimizer_join_order = 'sideways';" \
+        "invalid value for parameter"
+
+is "the strategy setting keeps its range" \
+   "RESET gp.optimizer_join_order;
+    SELECT max_val FROM pg_settings WHERE name = 'gp.optimizer_agg_pds_strategy';" "3"
+
+# The defaults already ask for flags: two are set unconditionally, and the
+# join-order heuristic contributes a set of its own.
+is "the default settings ask for trace flags" \
+   "SELECT array_length(gp_orca.traceflags(), 1) > 0;" "t"
+
+# Turning a scan off adds exactly the two rules that produce it -- the plain
+# one and Cloudberry's parallel one, which comes with ORCA's core whether or
+# not the port plans with it.
+is "switching table scans off adds exactly two rules" \
+   "SELECT array_length(t2.f, 1) - array_length(t1.f, 1) FROM
+      (SELECT gp_orca.traceflags() AS f) t1,
+      LATERAL (SELECT set_config('gp.optimizer_enable_tablescan', 'off', true),
+                      gp_orca.traceflags() AS f) t2;" "2"
+
+is "and switching it back on takes them away again" \
+   "SET gp.optimizer_enable_tablescan = on;
+    SELECT count(*) FROM (SELECT gp_orca.traceflags()) t;" "1"
+
+# A setting the mapping reads through the table rather than by hand.
+is "a print setting turns its flag on" \
+   "SELECT array_length(t2.f, 1) - array_length(t1.f, 1) FROM
+      (SELECT gp_orca.traceflags() AS f) t1,
+      LATERAL (SELECT set_config('gp.optimizer_print_plan', 'on', true),
+                      gp_orca.traceflags() AS f) t2;" "1"
+
+# A negated entry: the flag is set when the setting is OFF.  Getting the
+# polarity of one of these backwards would be invisible without a test.
+is "a negated setting sets its flag when it is switched off" \
+   "SELECT array_length(t2.f, 1) - array_length(t1.f, 1) FROM
+      (SELECT gp_orca.traceflags() AS f) t1,
+      LATERAL (SELECT set_config('gp.optimizer_enable_outerjoin_rewrite', 'off', true),
+                      gp_orca.traceflags() AS f) t2;" "1"
+
+# The join-order heuristic is a set of rules rather than one flag, and each
+# choice is a different set.
+is "each join-order heuristic asks for a different set of rules" \
+   "SELECT count(DISTINCT f) FROM (
+      SELECT set_config('gp.optimizer_join_order', o, true),
+             gp_orca.traceflags()::text AS f
+        FROM unnest(ARRAY['query','greedy','exhaustive','exhaustive2']) o) t;" "4"
+
+is "the cost model asks for a flag when it is not the calibrated one" \
+   "SELECT array_length(t2.f, 1) - array_length(t1.f, 1) FROM
+      (SELECT gp_orca.traceflags() AS f) t1,
+      LATERAL (SELECT set_config('gp.optimizer_cost_model', 'legacy', true),
+                      gp_orca.traceflags() AS f) t2;" "1"
+
+# optimizer_minidump is the entry Cloudberry reads through "(bool *) &" past a
+# FIXME of its own: it was a bool once and is an enum now, so that reads one
+# byte of an int.  The port compares it as an enum, which is what makes this
+# testable at all.
+is "the minidump setting is read as the enum it is" \
+   "SELECT array_length(t2.f, 1) - array_length(t1.f, 1) FROM
+      (SELECT gp_orca.traceflags() AS f) t1,
+      LATERAL (SELECT set_config('gp.optimizer_minidump', 'always', true),
+                      gp_orca.traceflags() AS f) t2;" "1"
+
+is "and asks for nothing when it is left on failures only" \
+   "SELECT array_length(t2.f, 1) - array_length(t1.f, 1) FROM
+      (SELECT gp_orca.traceflags() AS f) t1,
+      LATERAL (SELECT set_config('gp.optimizer_minidump', 'onerror', true),
+                      gp_orca.traceflags() AS f) t2;" "0"
+
+# The disabled-xform array is sized from ORCA's own sentinel rather than a
+# constant, because the id space grows with every rule added upstream.
+is "no flag is asked for twice" \
+   "SELECT count(*) FROM (
+      SELECT unnest(gp_orca.traceflags()) f GROUP BY 1 HAVING count(*) > 1) d;" "0"
+
+is "and the flags come back sorted, which is how a bit set reads out" \
+   "SELECT gp_orca.traceflags() = (SELECT array_agg(f ORDER BY f)
+                                     FROM unnest(gp_orca.traceflags()) f);" "t"
+
+echo
 echo "  $pass passed, $fail failed"
 [ "$fail" -eq 0 ]

@@ -589,3 +589,19 @@ REVOKE ALL ON FUNCTION gp_orca.reset_fallbacks() FROM PUBLIC;
 
 COMMENT ON FUNCTION gp_orca.reset_fallbacks() IS
 	'forget the plan and fallback counts, for everybody';
+
+/*
+ * The trace flags the current settings ask for.
+ *
+ * ORCA has no settings of its own: everything a person can turn on or off in
+ * it is a bit in a set handed to the optimizer when a query is planned, and
+ * every gp.optimizer_* setting adds up to this.  The ids are ORCA's own, and
+ * the large ones name a transformation rule that is switched off.
+ */
+CREATE FUNCTION gp_orca.traceflags()
+RETURNS int[]
+AS 'MODULE_PATHNAME', 'gp_orca_traceflags'
+LANGUAGE C STRICT;
+
+COMMENT ON FUNCTION gp_orca.traceflags() IS
+	'what the gp.optimizer_* settings add up to, in ORCA''s own terms';

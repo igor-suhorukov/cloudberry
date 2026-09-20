@@ -77,6 +77,15 @@ extern int	GpOrcaXformIdLimit(void);
  */
 extern const char *GpOrcaXformName(int xform_id);
 
+/*
+ * The trace flags the current settings ask for.
+ *
+ * ORCA has no settings of its own -- everything that can be turned on or off
+ * in it is a bit in a set the optimizer is handed -- so this is what
+ * gp.optimizer_* adds up to.  The array is palloc'd; the count is returned.
+ */
+extern int	GpOrcaTraceFlags(int **flags);
+
 #ifdef __cplusplus
 }
 #endif

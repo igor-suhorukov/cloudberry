@@ -77,6 +77,7 @@
 #include "cb_tlist.h"
 #include "gp_core_api.h"
 #include "gp_orca_api.h"
+#include "gp_orca_guc.h"
 #include "gp_orca_planner.h"
 
 PG_MODULE_MAGIC_EXT(
@@ -110,6 +111,7 @@ PG_FUNCTION_INFO_V1(gp_orca_timevalue_scalar);
 PG_FUNCTION_INFO_V1(gp_orca_numeric_scalar);
 PG_FUNCTION_INFO_V1(gp_orca_fallbacks);
 PG_FUNCTION_INFO_V1(gp_orca_reset_fallbacks);
+PG_FUNCTION_INFO_V1(gp_orca_traceflags);
 PG_FUNCTION_INFO_V1(gp_orca_xforms);
 PG_FUNCTION_INFO_V1(gp_orca_explain_refusal);
 
@@ -197,6 +199,33 @@ gp_orca_reset_fallbacks(PG_FUNCTION_ARGS)
 {
 	GpOrcaResetCounters();
 	PG_RETURN_VOID();
+}
+
+/*
+ * gp_orca.traceflags()
+ *
+ * The trace flags the current settings ask for.
+ *
+ * ORCA has no settings of its own.  Everything a person can turn on or off in
+ * it is a bit in a set handed to the optimizer when a query is planned, and
+ * config/CConfigParamMapping.cpp is where the settings on the outside become
+ * the bits on the inside.  This reads that answer, which is otherwise
+ * invisible until there is an optimizer to hand it to.
+ *
+ * The ids are ORCA's own, and the ones above EopttraceDisableXformBase name a
+ * transformation rule that is switched off.
+ */
+Datum
+gp_orca_traceflags(PG_FUNCTION_ARGS)
+{
+	int		   *flags = NULL;
+	int			n = GpOrcaTraceFlags(&flags);
+	Datum	   *elems = palloc(sizeof(Datum) * (n > 0 ? n : 1));
+
+	for (int i = 0; i < n; i++)
+		elems[i] = Int32GetDatum(flags[i]);
+
+	PG_RETURN_ARRAYTYPE_P(construct_array_builtin(elems, n, INT4OID));
 }
 
 /*
@@ -1344,6 +1373,7 @@ _PG_init(void)
 	 * placeholders belonging to modules that have not loaded yet.
 	 */
 
+	GpOrcaDefineSettings();
 	GpOrcaInstallPlannerHook();
 
 	/*
