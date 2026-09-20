@@ -201,7 +201,8 @@ modules = [
   {
     'name': 'gp_core', 'preload': true, 'extension': true, 'build': true,
     'sources': files('modules/gp_core/gp_core.c',
-                     'modules/gp_core/gp_label.c'),
+                     'modules/gp_core/gp_label.c',
+                     'modules/gp_core/gp_policy.c'),
   },
   {
     'name': 'interconnect', 'preload': true, 'extension': false, 'build': true,

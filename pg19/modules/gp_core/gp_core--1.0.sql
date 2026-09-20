@@ -39,3 +39,38 @@ LANGUAGE C STRICT;
 
 COMMENT ON FUNCTION gp.node() IS
 	'the role, segment count, content id and single-node flag of this node';
+
+/*
+ * How a relation's rows are spread over the segments.
+ *
+ * gp_sql.set_distribution() records what DISTRIBUTED BY said as text on the
+ * "gp" label; this is the policy that text becomes, which is what ORCA's
+ * relcache translator asks for about every relation it sees, and what M2's
+ * dispatch will read.
+ *
+ * "kind" is one of hash, random, replicated or entry.  "columns" is the
+ * distribution key by name, empty unless the kind is hash, and "opfamilies"
+ * is the operator family each of those columns is hashed with -- PostgreSQL's
+ * default hash family for the type, which is the same one Cloudberry chooses.
+ *
+ * NULL for a relation with no policy: not a missing answer, but what an
+ * unlabelled relation means, which on one node is every relation nobody wrote
+ * DISTRIBUTED BY for.  Readers take it as entry -- all the rows in one place.
+ *
+ * It raises if the label is there but cannot be read: a column it names that
+ * the relation no longer has, a type that cannot be hashed, or a shape the
+ * port does not know.  Answering "no policy" to any of those would plan the
+ * wrong distribution instead of reporting the problem.
+ */
+CREATE FUNCTION gp.policy(
+	rel regclass,
+	OUT kind text,
+	OUT columns text[],
+	OUT opfamilies oid[],
+	OUT numsegments int)
+RETURNS record
+AS 'MODULE_PATHNAME', 'gp_policy'
+LANGUAGE C STRICT STABLE;
+
+COMMENT ON FUNCTION gp.policy(regclass) IS
+	'how a relation''s rows are spread over the segments, or NULL for none';

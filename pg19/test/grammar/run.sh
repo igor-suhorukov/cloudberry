@@ -238,6 +238,110 @@ refused "and the error says what the accepted forms are" \
         "SELECT gp_sql.set_distribution('dist'::regclass, 'sideways');" \
         "parenthesised column list"
 
+# And what the recorded text becomes when something reads it.  gp.policy() is
+# gp_core's, not the rewriter's, but it is tested here because the round trip
+# is the thing worth testing: the label is only as good as what comes back out
+# of it, and the defect above was invisible until something tried to read one.
+#
+# ORCA's relcache translator asks this of every relation it sees, and turns
+# the kind into EreldistrHash, EreldistrRandom, EreldistrReplicated or
+# EreldistrMasterOnly.
+
+is "a column list reads back as a hash policy" \
+   "SELECT kind FROM gp.policy('dist'::regclass);" "hash"
+is "with the key columns, in the order they were written" \
+   "SELECT columns::text FROM gp.policy('dist'::regclass);" "{a,b}"
+is "DISTRIBUTED RANDOMLY reads back as random, with no key" \
+   "SELECT kind || ' ' || columns::text FROM gp.policy('dist_r'::regclass);" "random {}"
+is "DISTRIBUTED REPLICATED reads back as replicated" \
+   "SELECT kind FROM gp.policy('dist_p'::regclass);" "replicated"
+
+# The same distinction the parentheses were added for, now from the reader's
+# side: one is a key of one column, the other has no key at all.
+is "a column called random is a hash policy on that column" \
+   "SELECT kind || ' ' || columns::text FROM gp.policy('dist_word'::regclass);" \
+   "hash {random}"
+
+is "an unlabelled table has no policy, which is not an error" \
+   "SELECT gp.policy('plain'::regclass) IS NULL;" "t"
+
+# A NULL policy is what every table means on one node, so it is the common
+# case here and not the odd one -- in Cloudberry only a catalog table has it.
+is "and a catalog table has none either" \
+   "SELECT gp.policy('pg_class'::regclass) IS NULL;" "t"
+
+is "a quoted column name resolves to the column it names" \
+   "SELECT columns::text FROM gp.policy('dist_q'::regclass);" '{Mixed}'
+is "and so does one holding a comma, which is why it was quoted" \
+   "SELECT columns::text FROM gp.policy('dist_c'::regclass);" '{"a,b"}'
+
+# What ORCA carries into DXL beside the columns: the family each key column is
+# hashed with.  PostgreSQL's default hash family for the type, which is what
+# Cloudberry's cdb_default_distribution_opclass_for_type() also resolves to.
+is "each key column reports its hash operator family" \
+   "SELECT array_agg(f.opfname || '/' || am.amname ORDER BY f.oid)::text
+      FROM gp.policy('dist'::regclass) p,
+           unnest(p.opfamilies) AS u(oid)
+      JOIN pg_opfamily f ON f.oid = u.oid
+      JOIN pg_am am ON am.oid = f.opfmethod;" \
+   "{integer_ops/hash,integer_ops/hash}"
+is "which is the family PostgreSQL would hash that column with" \
+   "SELECT opfamilies[1] = (SELECT oc.opcfamily FROM pg_opclass oc
+                              JOIN pg_am am ON am.oid = oc.opcmethod
+                             WHERE am.amname = 'hash'
+                               AND oc.opcintype = 'int4'::regtype
+                               AND oc.opcdefault)
+      FROM gp.policy('dist'::regclass);" "t"
+is "and a random policy has no families to report" \
+   "SELECT opfamilies::text FROM gp.policy('dist_r'::regclass);" "{}"
+
+# The segment count is not a flag: ORCA divides by it.  One, on one node.
+is "the policy carries the segment count, which is never zero" \
+   "SELECT numsegments >= 1 FROM gp.policy('dist_r'::regclass);" "t"
+
+# A policy that cannot be read is an error naming the problem, not a shrug.
+# Cloudberry cannot reach the first of these -- its policy is a catalog row
+# with dependencies, and it refuses to drop a distribution key column -- but
+# the port has no such hook yet, so the case is real.
+q "CREATE TABLE dist_drop (a int, b int) DISTRIBUTED BY (a, b);
+   ALTER TABLE dist_drop DROP COLUMN b;" > /dev/null
+refused "a key column that was dropped is named, not ignored" \
+        "SELECT kind FROM gp.policy('dist_drop'::regclass);" \
+        "column \"b\" of the distribution policy of \"dist_drop\" does not exist"
+
+# What ORCA would otherwise do with an attribute number it cannot find is
+# assert "Column not found", from inside the optimizer, with no column name
+# in it.
+q "CREATE TABLE dist_bad (a int);
+   SECURITY LABEL FOR gp ON TABLE dist_bad IS 'distributed_by=sideways';" > /dev/null
+refused "a shape the reader does not know is refused too" \
+        "SELECT kind FROM gp.policy('dist_bad'::regclass);" \
+        "unrecognized distribution policy \"sideways\""
+
+q "SECURITY LABEL FOR gp ON TABLE dist_bad IS 'distributed_by=\"(a,)\"';" > /dev/null
+refused "so is a column list with a hole in it" \
+        "SELECT kind FROM gp.policy('dist_bad'::regclass);" \
+        "empty column name"
+
+# A label may be set by hand, so the reader cannot rely on the writer having
+# checked the shape.
+q "SECURITY LABEL FOR gp ON TABLE dist_bad IS 'distributed_by=\"(a\"';" > /dev/null
+refused "and an unclosed one" \
+        "SELECT kind FROM gp.policy('dist_bad'::regclass);" \
+        "malformed distribution policy"
+
+# A type with no default hash operator class cannot be a distribution key.
+# Cloudberry refuses it when the table is created and gives this message; the
+# port gives it when the policy is read, and says which column it was.
+q "CREATE TABLE dist_nohash (p point);
+   SECURITY LABEL FOR gp ON TABLE dist_nohash IS 'distributed_by=\"(p)\"';" > /dev/null
+refused "a type that cannot be hashed cannot be a key" \
+        "SELECT kind FROM gp.policy('dist_nohash'::regclass);" \
+        "has no default operator class for access method \"hash\""
+refused "and the error says which column it was" \
+        "SELECT kind FROM gp.policy('dist_nohash'::regclass);" \
+        "Column \"p\" of \"dist_nohash\" cannot be a distribution key."
+
 ###############################################################################
 echo "5. incremental materialized views and dynamic tables"
 ###############################################################################

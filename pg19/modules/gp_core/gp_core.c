@@ -34,15 +34,19 @@
 #include "postgres.h"
 
 #include "access/htup_details.h"
+#include "catalog/pg_type.h"
 #include "fmgr.h"
 #include "funcapi.h"
 #include "miscadmin.h"
+#include "utils/array.h"
 #include "utils/builtins.h"
 #include "utils/guc.h"
+#include "utils/lsyscache.h"
 
 #include "cb_module.h"
 #include "gp_core_api.h"
 #include "gp_label.h"
+#include "gp_policy.h"
 
 PG_MODULE_MAGIC_EXT(
 					.name = "gp_core",
@@ -218,6 +222,7 @@ _PG_init(void)
 
 PG_FUNCTION_INFO_V1(gp_version);
 PG_FUNCTION_INFO_V1(gp_node);
+PG_FUNCTION_INFO_V1(gp_policy);
 
 /*
  * gp.version()
@@ -269,6 +274,70 @@ gp_node(PG_FUNCTION_ARGS)
 	values[1] = Int32GetDatum(gp_core_api.get_segment_count());
 	values[2] = Int32GetDatum(gp_core_api.get_content_id());
 	values[3] = BoolGetDatum(gp_core_api.is_single_node());
+
+	tuple = heap_form_tuple(tupdesc, values, nulls);
+	PG_RETURN_DATUM(HeapTupleGetDatum(tuple));
+}
+
+/*
+ * gp.policy(regclass)
+ *		How this relation's rows are spread, as the readers see it.
+ *
+ * The label holds text; this is the policy that text becomes -- the kind, the
+ * distribution key by column name, and the opclass family each column is
+ * hashed with, which is what ORCA carries into DXL.  NULL for a relation with
+ * no policy, which is what an unlabelled relation means and what every table
+ * means on one node.
+ *
+ * It reports names rather than attribute numbers because a number says
+ * nothing about whether the right column was found, which is the question a
+ * reader of this has.
+ */
+Datum
+gp_policy(PG_FUNCTION_ARGS)
+{
+	Oid			relid = PG_GETARG_OID(0);
+	GpPolicy   *policy = GpPolicyGet(relid);
+	TupleDesc	tupdesc;
+	Datum		values[4];
+	bool		nulls[4] = {false, false, false, false};
+	HeapTuple	tuple;
+	const char *kind;
+	Datum	   *cols;
+	Datum	   *families;
+
+	if (get_call_result_type(fcinfo, NULL, &tupdesc) != TYPEFUNC_COMPOSITE)
+		elog(ERROR, "return type must be a row type");
+	tupdesc = BlessTupleDesc(tupdesc);
+
+	if (policy == NULL)
+		PG_RETURN_NULL();
+
+	if (GpPolicyIsReplicated(policy))
+		kind = "replicated";
+	else if (GpPolicyIsHashPartitioned(policy))
+		kind = "hash";
+	else if (GpPolicyIsRandomPartitioned(policy))
+		kind = "random";
+	else
+		kind = "entry";
+
+	cols = (Datum *) palloc(sizeof(Datum) * Max(policy->nattrs, 1));
+	families = (Datum *) palloc(sizeof(Datum) * Max(policy->nattrs, 1));
+
+	for (int i = 0; i < policy->nattrs; i++)
+	{
+		cols[i] = CStringGetTextDatum(get_attname(relid, policy->attrs[i],
+												  false));
+		families[i] = ObjectIdGetDatum(get_opclass_family(policy->opclasses[i]));
+	}
+
+	values[0] = CStringGetTextDatum(kind);
+	values[1] = PointerGetDatum(construct_array_builtin(cols, policy->nattrs,
+														TEXTOID));
+	values[2] = PointerGetDatum(construct_array_builtin(families,
+														policy->nattrs, OIDOID));
+	values[3] = Int32GetDatum(policy->numsegments);
 
 	tuple = heap_form_tuple(tupdesc, values, nulls);
 	PG_RETURN_DATUM(HeapTupleGetDatum(tuple));
