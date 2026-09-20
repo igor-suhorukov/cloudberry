@@ -117,6 +117,14 @@ is "the count and the listing agree" \
    "SELECT (SELECT xforms FROM gp_orca.version()) = (SELECT count(*) FROM gp_orca.xforms());" \
    "t"
 
+# ORCA asserts 0 < segments when it builds its cost model, and divides by the
+# number in its skew model, so what gp_core reports has to be at least one even
+# on a server that has no segments at all.  gp_core answered 0 once, which
+# would make ORCA decline every query in this build and mis-cost in a release
+# one; the load suite tests the value, and this says why ORCA cares.
+is "the segment count ORCA will be handed is a usable divisor" \
+   "SELECT segments >= 1 FROM gp.node();" "t"
+
 echo
 echo "2. it is Cloudberry's ORCA, not the single-node fork"
 

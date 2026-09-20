@@ -33,7 +33,9 @@
  */
 #include "postgres.h"
 
+#include "access/htup_details.h"
 #include "fmgr.h"
+#include "funcapi.h"
 #include "miscadmin.h"
 #include "utils/builtins.h"
 #include "utils/guc.h"
@@ -68,6 +70,7 @@ static const struct config_enum_entry gp_role_options[] = {
 static int	gp_api_get_role(void);
 static int	gp_api_get_segment_count(void);
 static int	gp_api_get_content_id(void);
+static bool gp_api_is_single_node(void);
 
 /*
  * What the other modules see of us.  It is static storage, so the pointer we
@@ -79,6 +82,7 @@ static const GpCoreApi gp_core_api = {
 	.get_role = gp_api_get_role,
 	.get_segment_count = gp_api_get_segment_count,
 	.get_content_id = gp_api_get_content_id,
+	.is_single_node = gp_api_is_single_node,
 };
 
 static int
@@ -91,11 +95,39 @@ static int
 gp_api_get_segment_count(void)
 {
 	/*
-	 * Until the cluster configuration is read (M2), this node knows of no
-	 * segments, which is what single-node mode means: the extension is
-	 * loaded and there are no segments to dispatch to.
+	 * One, not zero, and the difference matters.
+	 *
+	 * This is how many segments to *compute with*, and a consumer divides by
+	 * it.  ORCA asserts 0 < segments when it builds its cost model
+	 * (CCostModelGPDB) and again in COptimizer, and its skew model computes
+	 * 1.0 / segments; with zero it declines every query in a build with
+	 * assertions and, without them, divides by zero and carries the clamped
+	 * infinity into a cost.  Cloudberry answers 1 here for the same reason,
+	 * and says so: "1 represents a singleton postgresql in utility mode".
+	 *
+	 * Whether this server has segments at all is a different question, and
+	 * gp_api_is_single_node() is where it is asked.
+	 *
+	 * Until the cluster configuration is read (M2) there is one node, and it
+	 * is this one.
 	 */
-	return 0;
+	return 1;
+}
+
+static bool
+gp_api_is_single_node(void)
+{
+	/*
+	 * Single-node mode is the extension loaded with no segments configured.
+	 * It is a state of its own, not a segment count -- see
+	 * gp_api_get_segment_count() for why the count cannot carry it.
+	 *
+	 * Until the cluster configuration is read (M2) there are no segments, so
+	 * this is always a single-node server.  M2 derives it from that
+	 * configuration, as Cloudberry derives its gp_internal_is_singlenode from
+	 * a setting.
+	 */
+	return true;
 }
 
 static int
@@ -185,6 +217,7 @@ _PG_init(void)
 }
 
 PG_FUNCTION_INFO_V1(gp_version);
+PG_FUNCTION_INFO_V1(gp_node);
 
 /*
  * gp.version()
@@ -194,4 +227,49 @@ Datum
 gp_version(PG_FUNCTION_ARGS)
 {
 	PG_RETURN_TEXT_P(cstring_to_text(GP_VERSION_STR));
+}
+
+/*
+ * gp.node()
+ *		What this node thinks it is.
+ *
+ * Two of these are easy to confuse, and confusing them cost something once:
+ * "segments" is how many segments to compute with and is never zero, because
+ * consumers divide by it -- ORCA asserts 0 < segments and its skew model
+ * computes 1.0 / segments.  Whether this server has segments configured at
+ * all is "single_node", a flag.  On a single node the two read 1 and true.
+ */
+Datum
+gp_node(PG_FUNCTION_ARGS)
+{
+	TupleDesc	tupdesc;
+	Datum		values[4];
+	bool		nulls[4] = {false, false, false, false};
+	HeapTuple	tuple;
+	const char *role;
+
+	if (get_call_result_type(fcinfo, NULL, &tupdesc) != TYPEFUNC_COMPOSITE)
+		elog(ERROR, "return type must be a row type");
+	tupdesc = BlessTupleDesc(tupdesc);
+
+	switch (gp_core_api.get_role())
+	{
+		case GP_ROLE_DISPATCH:
+			role = "dispatch";
+			break;
+		case GP_ROLE_EXECUTE:
+			role = "execute";
+			break;
+		default:
+			role = "utility";
+			break;
+	}
+
+	values[0] = CStringGetTextDatum(role);
+	values[1] = Int32GetDatum(gp_core_api.get_segment_count());
+	values[2] = Int32GetDatum(gp_core_api.get_content_id());
+	values[3] = BoolGetDatum(gp_core_api.is_single_node());
+
+	tuple = heap_form_tuple(tupdesc, values, nulls);
+	PG_RETURN_DATUM(HeapTupleGetDatum(tuple));
 }

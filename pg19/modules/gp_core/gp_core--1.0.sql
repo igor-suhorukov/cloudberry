@@ -18,3 +18,24 @@ LANGUAGE C IMMUTABLE STRICT PARALLEL SAFE;
 
 COMMENT ON FUNCTION gp.version() IS
 	'Apache Cloudberry version, as version() reports it on Cloudberry itself';
+
+/*
+ * What this node thinks it is.
+ *
+ * "segments" is how many segments to compute with, and is never 0: a consumer
+ * divides by it -- ORCA asserts 0 < segments and its skew model computes
+ * 1.0 / segments -- which is why Cloudberry's own getgpsegmentCount() answers
+ * 1 for a singleton.  Whether this server has segments configured at all is
+ * the separate question "single_node" answers.
+ */
+CREATE FUNCTION gp.node(
+	OUT role text,
+	OUT segments int,
+	OUT content_id int,
+	OUT single_node boolean)
+RETURNS record
+AS 'MODULE_PATHNAME', 'gp_node'
+LANGUAGE C STRICT;
+
+COMMENT ON FUNCTION gp.node() IS
+	'the role, segment count, content id and single-node flag of this node';

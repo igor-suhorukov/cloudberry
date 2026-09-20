@@ -168,6 +168,29 @@ if start_with "$PRELOAD_ALL"; then
 	else
 		notok "DROP EXTENSION gp_sql" "$out"
 	fi
+
+	###########################################################################
+	echo "6. this node knows what it is, and its segment count is a divisor"
+	###########################################################################
+	# The segment count is not a flag.  A consumer divides by it -- ORCA
+	# asserts 0 < segments when it builds its cost model and computes
+	# 1.0 / segments in its skew model -- so it is never 0, and Cloudberry's
+	# own getgpsegmentCount() answers 1 for a singleton for that reason.
+	# Whether this server has segments configured at all is single_node.
+	#
+	# This test exists because the count was 0 and nothing could see it.
+	out=$(q "SELECT segments FROM gp.node();")
+	[ "$out" -ge 1 ] 2>/dev/null \
+		&& ok "gp.node() reports at least one segment ($out)" \
+		|| notok "segment count must be >= 1, it is a divisor" "$out"
+
+	out=$(q "SELECT single_node FROM gp.node();")
+	[ "$out" = "t" ] && ok "and says it is a single node" \
+		|| notok "single_node on a server with no segments" "$out"
+
+	out=$(q "SELECT role || ' ' || content_id FROM gp.node();")
+	[ "$out" = "utility -1" ] && ok "as the coordinator, in utility role" \
+		|| notok "role and content id" "$out"
 else
 	notok "server starts with all modules preloaded" "$(tail -20 "$PGDATA_ROOT/log")"
 fi

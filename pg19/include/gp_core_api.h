@@ -37,7 +37,7 @@
  * here changes meaning or moves.
  */
 #define GP_CORE_API_VERSION_MAJOR	1
-#define GP_CORE_API_VERSION_MINOR	0
+#define GP_CORE_API_VERSION_MINOR	1
 
 /*
  * What the rendezvous variable points at.  It is the first thing a module
@@ -51,11 +51,23 @@ typedef struct GpCoreApi
 	/* The role this server was started in; see gp.role. */
 	int			(*get_role) (void);
 
-	/* Number of primary segments the extension knows about, 0 in single node. */
+	/*
+	 * How many primary segments to compute with.  Never 0: it is a divisor,
+	 * not a flag -- ORCA's cost model asserts 0 < segments and divides by it,
+	 * and Cloudberry's own getgpsegmentCount() answers 1 for a singleton for
+	 * the same reason.  Ask is_single_node() for the question this is not.
+	 */
 	int			(*get_segment_count) (void);
 
 	/* This node's content id: -1 on the coordinator, 0..n-1 on segments. */
 	int			(*get_content_id) (void);
+
+	/*
+	 * Is this a single-node server -- the extension loaded, with no segments
+	 * configured?  It is a flag of its own and not a segment count of zero,
+	 * as Cloudberry's gp_internal_is_singlenode is.  Added in API 1.1.
+	 */
+	bool		(*is_single_node) (void);
 } GpCoreApi;
 
 /*

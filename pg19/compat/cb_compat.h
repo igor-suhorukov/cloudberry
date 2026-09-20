@@ -49,8 +49,13 @@ extern const GpCoreApi *cb_core;
 	(Gp_role == GP_ROLE_DISPATCH)
 #define IS_QUERY_EXECUTOR_BACKEND() \
 	(Gp_role == GP_ROLE_EXECUTE)
+/*
+ * Not "the segment count is zero".  The count is a divisor -- ORCA asserts
+ * 0 < segments and divides by it -- so it is never zero, and this question is
+ * asked of a flag instead, as Cloudberry asks it of gp_internal_is_singlenode.
+ */
 #define IS_SINGLENODE() \
-	(getgpsegmentCount() == 0)
+	(cb_core->is_single_node())
 #define IS_QD_OR_SINGLENODE() \
 	(IS_QUERY_DISPATCHER() || IS_SINGLENODE())
 #define IS_UTILITY_OR_SINGLENODE() \
