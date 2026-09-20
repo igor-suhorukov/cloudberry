@@ -218,7 +218,8 @@ modules = [
     # the only part that knows about PostgreSQL and so the only part the port
     # had to write.
     'name': 'gp_orca', 'preload': true, 'extension': true, 'build': get_option('orca'),
-    'sources': files('modules/gp_orca/gp_orca.c') + orca_transl_sources,
+    'sources': files('modules/gp_orca/gp_orca.c',
+                     'modules/gp_orca/gp_orca_planner.c') + orca_transl_sources,
     'cpp_args': orca_cpp_args,
     'link_with': orca_core,
     'dependencies': orca_deps,

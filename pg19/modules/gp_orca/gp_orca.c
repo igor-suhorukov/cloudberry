@@ -77,6 +77,7 @@
 #include "cb_tlist.h"
 #include "gp_core_api.h"
 #include "gp_orca_api.h"
+#include "gp_orca_planner.h"
 
 PG_MODULE_MAGIC_EXT(
 					.name = "gp_orca",
@@ -107,6 +108,8 @@ PG_FUNCTION_INFO_V1(gp_orca_array_const_to_expr);
 PG_FUNCTION_INFO_V1(gp_orca_testexpr_is_hashable);
 PG_FUNCTION_INFO_V1(gp_orca_timevalue_scalar);
 PG_FUNCTION_INFO_V1(gp_orca_numeric_scalar);
+PG_FUNCTION_INFO_V1(gp_orca_fallbacks);
+PG_FUNCTION_INFO_V1(gp_orca_reset_fallbacks);
 PG_FUNCTION_INFO_V1(gp_orca_xforms);
 PG_FUNCTION_INFO_V1(gp_orca_explain_refusal);
 
@@ -140,6 +143,61 @@ gp_orca_version(PG_FUNCTION_ARGS)
 	PG_RETURN_DATUM(HeapTupleGetDatum(tuple));
 }
 
+
+/*
+ * gp_orca.fallbacks()
+ *
+ * How many statements ORCA planned, and how many it did not and why.
+ *
+ * Decision 1 asks for this from the first milestone: whether to build Route B
+ * as well as Route A is to be decided at M7 from how often the fallback fires
+ * on real workloads, and a number that only starts being collected once
+ * everything works would not answer that.
+ *
+ * The counts are the server's, not the session's, and survive a backend.
+ */
+Datum
+gp_orca_fallbacks(PG_FUNCTION_ARGS)
+{
+	ReturnSetInfo *rsinfo = (ReturnSetInfo *) fcinfo->resultinfo;
+	Datum		values[3];
+	bool		nulls[3] = {false, false, false};
+
+	InitMaterializedSRF(fcinfo, 0);
+
+	/*
+	 * "planned" is a row like the others so that a reader can take the whole
+	 * table and work out a rate without a second call, which would see a
+	 * different moment.
+	 */
+	values[0] = CStringGetTextDatum("planned");
+	values[1] = CStringGetTextDatum("ORCA produced the plan");
+	values[2] = Int64GetDatum((int64) GpOrcaPlanCount());
+	tuplestore_putvalues(rsinfo->setResult, rsinfo->setDesc, values, nulls);
+
+	for (int i = 0; i < GP_FALLBACK_NREASONS; i++)
+	{
+		values[0] = CStringGetTextDatum(GpOrcaFallbackReasonName(i));
+		values[1] = CStringGetTextDatum(GpOrcaFallbackReasonDoc(i));
+		values[2] = Int64GetDatum((int64) GpOrcaFallbackCount(i));
+		tuplestore_putvalues(rsinfo->setResult, rsinfo->setDesc, values, nulls);
+	}
+
+	return (Datum) 0;
+}
+
+/*
+ * gp_orca.reset_fallbacks()
+ *
+ * Start counting again.  Useful between the runs of a workload; restricted,
+ * because one session resetting them loses another's numbers.
+ */
+Datum
+gp_orca_reset_fallbacks(PG_FUNCTION_ARGS)
+{
+	GpOrcaResetCounters();
+	PG_RETURN_VOID();
+}
 
 /*
  * gp_orca.xforms()
@@ -1285,6 +1343,8 @@ _PG_init(void)
 	 * prefix is shared by every module, and reserving it would drop the
 	 * placeholders belonging to modules that have not loaded yet.
 	 */
+
+	GpOrcaInstallPlannerHook();
 
 	/*
 	 * ORCA is not brought up here.  Its libraries build process-local state

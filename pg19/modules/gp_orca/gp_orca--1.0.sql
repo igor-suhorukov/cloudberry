@@ -550,3 +550,42 @@ LANGUAGE C STRICT IMMUTABLE;
 
 COMMENT ON FUNCTION gp_orca.numeric_scalar(numeric) IS
 	'a numeric as a double, saturating instead of raising';
+
+/*
+ * How many statements ORCA planned, and how many it did not and why.
+ *
+ * Decision 1 asks for this from the first milestone: whether to build the
+ * MPP PostgreSQL planner as well as ORCA is to be decided at M7 from how
+ * often the fallback fires on real workloads, and numbers that only start
+ * being collected once everything works would not answer that question.
+ *
+ * "planned" is a row like the others, so that a reader can take the whole
+ * table at one moment and work out a rate from it.  The counts belong to the
+ * server rather than the session, and outlive a backend.
+ */
+CREATE FUNCTION gp_orca.fallbacks(
+	OUT reason text,
+	OUT means text,
+	OUT count bigint)
+RETURNS SETOF record
+AS 'MODULE_PATHNAME', 'gp_orca_fallbacks'
+LANGUAGE C STRICT;
+
+COMMENT ON FUNCTION gp_orca.fallbacks() IS
+	'how many statements ORCA planned, and what it would not plan and why';
+
+/*
+ * Start counting again.
+ *
+ * Restricted, because one session resetting the counters loses every other
+ * session's numbers.
+ */
+CREATE FUNCTION gp_orca.reset_fallbacks()
+RETURNS void
+AS 'MODULE_PATHNAME', 'gp_orca_reset_fallbacks'
+LANGUAGE C STRICT;
+
+REVOKE ALL ON FUNCTION gp_orca.reset_fallbacks() FROM PUBLIC;
+
+COMMENT ON FUNCTION gp_orca.reset_fallbacks() IS
+	'forget the plan and fallback counts, for everybody';

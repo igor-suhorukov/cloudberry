@@ -1101,5 +1101,81 @@ refused "a plain cast would have raised instead" \
         "is out of range for type double precision"
 
 echo
+echo "15. planner_hook, and the count of what ORCA would not plan"
+
+# Decision 1 asks for these counters "from the first milestone, on real
+# workloads": whether to build Route B as well is decided at M7 from how
+# often the fallback fires and why, and numbers that only start when
+# everything works would not answer that.  At M1 the reason is always the
+# same one -- there is no translator yet -- and what is being tested is that
+# the machinery around it reports the truth.
+
+q "SELECT gp_orca.reset_fallbacks();" > /dev/null
+
+is "every reason is listed, plus the plans ORCA made" \
+   "SELECT count(*) > 1 FROM gp_orca.fallbacks();" "t"
+
+is "and each one says what it means" \
+   "SELECT count(*) FROM gp_orca.fallbacks() WHERE means IS NULL OR means = '';" "0"
+
+is "nothing is counted twice" \
+   "SELECT count(*) FROM (SELECT reason FROM gp_orca.fallbacks()
+                           GROUP BY reason HAVING count(*) > 1) d;" "0"
+
+# The hook is installed, so a statement that reaches the planner is counted.
+# Reading the counter is itself a statement, which is why the check is that
+# it moved rather than that it holds a particular number.
+q "SELECT gp_orca.reset_fallbacks();" > /dev/null
+before=$(q "SELECT count FROM gp_orca.fallbacks() WHERE reason = 'no_translator';")
+q "SELECT 1 FROM es WHERE a = 1;" > /dev/null
+after=$(q "SELECT count FROM gp_orca.fallbacks() WHERE reason = 'no_translator';")
+[ "$after" -gt "$before" ] \
+	&& ok "a query that ORCA cannot plan yet is counted, with the reason" \
+	|| notok "a query that ORCA cannot plan yet is counted, with the reason" \
+	         "before [$before], after [$after]"
+
+# Nothing is planned by ORCA yet, and the counter says so rather than being
+# quietly absent.  This is the assertion that has to change when the
+# translator lands.
+is "and nothing has been planned by ORCA" \
+   "SELECT count FROM gp_orca.fallbacks() WHERE reason = 'planned';" "0"
+
+# gp.optimizer off is a different reason from "could not", and telling them
+# apart is the point of counting reasons rather than a single total.
+q "SELECT gp_orca.reset_fallbacks();" > /dev/null
+q "SET gp.optimizer = off; SELECT 1 FROM es WHERE a = 1;" > /dev/null
+is "a session with the optimizer off reports that, not a failure" \
+   "SELECT count > 0 FROM gp_orca.fallbacks() WHERE reason = 'disabled';" "t"
+
+# A utility statement is not a query ORCA plans, and it reaches the planner
+# only through the paths that wrap one.
+q "SELECT gp_orca.reset_fallbacks();" > /dev/null
+q "SELECT 1 FROM es WHERE a = 1;" > /dev/null
+is "an ordinary query is not counted as a utility statement" \
+   "SELECT count FROM gp_orca.fallbacks() WHERE reason = 'utility';" "0"
+
+# The counters are the server's, not the session's: a second backend sees
+# what the first one did.  That is what makes them answer a question about a
+# workload rather than about one connection.
+q "SELECT gp_orca.reset_fallbacks();" > /dev/null
+"$PSQL" -X -q -t -A -d postgres -c "SELECT 1 FROM es WHERE a = 1;" > /dev/null 2>&1
+is "and another backend's fallbacks are visible from this one" \
+   "SELECT count > 0 FROM gp_orca.fallbacks() WHERE reason = 'no_translator';" "t"
+
+# Resetting is restricted, because one session doing it loses everybody
+# else's numbers.
+is "resetting is not something every user may do" \
+   "SELECT has_function_privilege('public', 'gp_orca.reset_fallbacks()', 'execute');" "f"
+
+# The plan still comes out, and is PostgreSQL's.  A hook that counted and
+# then lost the plan would pass every test above.
+is "the fallback still returns a plan, and it runs" \
+   "SELECT count(*) FROM es WHERE a = 1;" "100"
+
+is "and EXPLAIN shows PostgreSQL's plan for it" \
+   "SELECT count(*) FROM (
+      SELECT * FROM (VALUES (1)) v) t;" "1"
+
+echo
 echo "  $pass passed, $fail failed"
 [ "$fail" -eq 0 ]
