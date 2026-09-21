@@ -2965,10 +2965,19 @@ CTranslatorRelcacheToDXL::IsIndexSupported(Relation index_rel)
 	// index. However, the downside of that is that it will lead to many more
 	// fall backs when a table has an unsupported index. That could severely
 	// limit ORCA's ability to operate on that table.
+	//
+	// The index's own OID, where Cloudberry passes its access method's:
+	// Cloudberry's GetRelAmName hands its argument to GetAmName, which takes
+	// an access method, so the two mistakes cancelled.  The port's wrapper
+	// reads the relation's access method first, as its name says, and with
+	// an access method's OID it raised "cache lookup failed for relation
+	// 4000" -- SP-GiST's -- for every table carrying an index ORCA is not
+	// told about: a partial one, an expression one, an SP-GiST one.  A query
+	// on such a table failed rather than being planned without that index.
 	CAutoMemoryPool amp;
 	CMemoryPool *mp = amp.Pmp();
 	CWStringDynamic *am_name_str = CDXLUtils::CreateDynamicStringFromCharArray(
-		mp, gpdb::GetRelAmName(index_rel->rd_rel->relam));
+		mp, gpdb::GetRelAmName(index_rel->rd_id));
 
 	if (am_name_str->Equals(GPOS_WSZ_LIT("ivfflat")) ||
 		am_name_str->Equals(GPOS_WSZ_LIT("hnsw")))

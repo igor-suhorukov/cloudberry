@@ -2501,6 +2501,27 @@ q "BEGIN; UPDATE t1_hot SET a = a + 100000 WHERE b = 5;
 shape "and once it is old enough, ORCA uses it" "Index" \
       "SELECT b FROM t1_hot WHERE a = 100005"
 
+# An index ORCA is not told about -- partial, on an expression, or of an
+# access method it does not plan -- is left out of its metadata, and the
+# table is planned without it.  Until the PostGIS suite made one, every such
+# table failed instead: the check that looks for pgvector's indexes asked for
+# a relation's access method with an access method's OID, and raised "cache
+# lookup failed for relation 4000", which is SP-GiST's.
+q "CREATE TABLE t1_idx (i int, j int, p point);
+   INSERT INTO t1_idx SELECT g, g % 10, point(g % 50, g / 50) FROM generate_series(1, 2000) g;
+   CREATE INDEX t1_idx_i ON t1_idx (i);
+   CREATE INDEX t1_idx_part ON t1_idx (j) WHERE i < 100;
+   CREATE INDEX t1_idx_expr ON t1_idx ((i + j));
+   CREATE INDEX t1_idx_spg ON t1_idx USING spgist (p);
+   ANALYZE t1_idx;" > /dev/null
+
+same "a table with partial, expression and SP-GiST indexes is planned" \
+     "SELECT count(*), sum(i) FROM t1_idx WHERE j = 3 AND i < 100"
+same "and so is a predicate only one of those could have answered" \
+     "SELECT count(*) FROM t1_idx WHERE p <@ box '((0,0),(10,10))'"
+shape "and an index ORCA is told about is still the one it uses" "Index Scan" \
+      "SELECT j FROM t1_idx WHERE i = 17"
+
 # ORCA plans no index or bitmap scan of a relation with security quals -- its
 # transforms decline such a Get -- so the table scan, which applies them, is
 # the only scan that meets them.
