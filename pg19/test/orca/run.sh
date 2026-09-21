@@ -1279,6 +1279,81 @@ is "and the flags come back sorted, which is how a bit set reads out" \
    "SELECT gp_orca.traceflags() = (SELECT array_agg(f ORDER BY f)
                                      FROM unnest(gp_orca.traceflags()) f);" "t"
 
+# --- the settings that are not trace flags -----------------------------------
+#
+# "ORCA's settings" is two surfaces and not one, which is not obvious and was
+# not in the plan.  Everything above becomes a bit in the set the optimizer is
+# handed.  These do not: they configure the optimizer's context -- the cost
+# model's factors, the search strategy, the size of the metadata cache, the
+# thresholds at which a transform stops being tried -- and COptTasks reads
+# them once per query when it builds a COptimizerConfig.  CConfigParamMapping
+# never sees one.
+#
+# They arrive now because the translator cannot be sized without them: they are
+# 33 of the names it reads.
+
+is "the context settings are there too" \
+   "SELECT count(*) FROM pg_settings WHERE name IN (
+      'gp.optimizer_mdcache_size', 'gp.optimizer_segments',
+      'gp.optimizer_nestloop_factor', 'gp.optimizer_damping_factor_join',
+      'gp.optimizer_search_strategy_path', 'gp.optimizer_use_gpdb_allocators');" "6"
+
+is "and carry Cloudberry's defaults" \
+   "SELECT string_agg(name || '=' || setting, ' ' ORDER BY name)
+      FROM pg_settings WHERE name IN (
+        'gp.optimizer_mdcache_size', 'gp.optimizer_join_order_threshold',
+        'gp.optimizer_nestloop_factor');" \
+   "gp.optimizer_join_order_threshold=10 gp.optimizer_mdcache_size=16384 gp.optimizer_nestloop_factor=1024"
+
+is "and Cloudberry's bounds, which are narrower than an int for two of them" \
+   "SELECT string_agg(name || ' ' || min_val || '..' || max_val, ', ' ORDER BY name)
+      FROM pg_settings WHERE name IN (
+        'gp.optimizer_join_order_threshold', 'gp.optimizer_skew_factor');" \
+   "gp.optimizer_join_order_threshold 0..12, gp.optimizer_skew_factor 0..100"
+
+refused "so a value outside them is refused" \
+        "SET gp.optimizer_join_order_threshold = 13;" \
+        "outside the valid range"
+
+is "the damping factors are reals with a 0..1 range" \
+   "SELECT vartype || ' ' || min_val || '..' || max_val FROM pg_settings
+     WHERE name = 'gp.optimizer_damping_factor_groupby';" "real 0..1"
+
+is "the search strategy is a string, empty for ORCA's own defaults" \
+   "SELECT vartype || '[' || setting || ']' FROM pg_settings
+     WHERE name = 'gp.optimizer_search_strategy_path';" "string[]"
+
+# The allocator is chosen when ORCA's memory pool manager is built and every
+# pool made afterwards inherits the choice, so a session may not change it.
+# Cloudberry makes it PGC_POSTMASTER for the same reason.
+is "the allocator setting is postmaster context, as in Cloudberry" \
+   "SELECT context FROM pg_settings WHERE name = 'gp.optimizer_use_gpdb_allocators';" \
+   "postmaster"
+
+refused "and a session cannot change it" \
+        "SET gp.optimizer_use_gpdb_allocators = off;" \
+        "cannot be changed"
+
+# This is the assertion that the split is real.  If one of these ever became a
+# trace flag by accident -- a row added to the wrong list -- the flag set would
+# move when it was set, and nothing else would notice.
+is "and none of them moves the flag set, because none is a flag" \
+   "SELECT count(DISTINCT f) FROM (
+      SELECT gp_orca.traceflags()::text AS f
+      UNION ALL
+      SELECT (SELECT gp_orca.traceflags()::text
+                FROM (SELECT set_config(n, v, true)) s)
+        FROM (VALUES ('gp.optimizer_mdcache_size', '4096'),
+                     ('gp.optimizer_segments', '7'),
+                     ('gp.optimizer_nestloop_factor', '2048'),
+                     ('gp.optimizer_damping_factor_join', '0.5'),
+                     ('gp.optimizer_skew_factor', '50'),
+                     ('gp.optimizer_xform_bind_threshold', '100'),
+                     ('gp.optimizer_plan_id', '3'),
+                     ('gp.optimizer_metadata_caching', 'off'),
+                     ('gp.optimizer_enable_dml', 'off'),
+                     ('gp.optimizer_enable_foreign_table', 'off')) v(n, v)) t;" "1"
+
 ###############################################################################
 echo
 echo "18. the gpdb:: wrapper layer, which nothing else can call yet"
