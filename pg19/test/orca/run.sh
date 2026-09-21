@@ -2885,7 +2885,7 @@ declined "MERGE" \
 
 q "CREATE TABLE t2a (a int, b int); INSERT INTO t2a VALUES (1, 1), (1, 2), (2, 3); ANALYZE t2a;" > /dev/null
 
-shape "a scalar subquery is checked for one row" "Custom Scan (Assert)" \
+shape "a scalar subquery is checked for one row" $'->  Assert\n' \
       "SELECT a, (SELECT b FROM t2a WHERE a = 2) FROM t2a ORDER BY 1"
 
 has "and EXPLAIN shows the test" \
@@ -2896,7 +2896,7 @@ refused "and more than one row is the planner's error" \
         "SELECT (SELECT b FROM t2a WHERE a = 1) FROM t2a" \
         "more than one row returned by a subquery used as an expression"
 case "$got" in
-	*"Custom Scan (Assert)"*"Optimizer: GPORCA"*) ok "raised by ORCA's plan, not the planner's" ;;
+	*"->  Assert"$'\n'*"Optimizer: GPORCA"*) ok "raised by ORCA's plan, not the planner's" ;;
 	*) notok "raised by ORCA's plan, not the planner's" "$got" ;;
 esac
 
@@ -3055,12 +3055,13 @@ q "ANALYZE t3j; ANALYZE t3k; ANALYZE t3tl;" > /dev/null
 
 # --- the partitions ORCA's static pruning left ------------------------------
 
-shape "a scan of a partitioned table is a scan of each partition" "Custom Scan (Dynamic Scan)" \
+shape "a scan of a partitioned table is a scan of each partition" "Dynamic Seq Scan on public.t3p" \
       "SELECT count(*), sum(a) FROM t3p"
 
 # Not "a < 50", which the default partition can hold too.
 has "and only of the ones static pruning left" \
-    "EXPLAIN (COSTS OFF) SELECT count(*) FROM t3p WHERE a BETWEEN 10 AND 50" "Partitions: 1"
+    "EXPLAIN (COSTS OFF) SELECT count(*) FROM t3p WHERE a BETWEEN 10 AND 50" \
+    "Number of partitions to scan: 1 (out of 4)"
 
 # A partition can have its columns in another order, or a dropped one: each
 # scan reads its own columns by name.
@@ -3114,7 +3115,7 @@ same "and rescanned under a nested loop" \
 # before it reads the outer side for that to happen, and PostgreSQL 19's
 # decides by the costs.
 
-shape "a Partition Selector chooses the partitions a join can match" "Custom Scan (Partition Selector)" \
+shape "a Partition Selector chooses the partitions a join can match" "Partition Selector (selector id: \$" \
       "SELECT count(*) FROM t3p JOIN t3k ON t3p.a = t3k.a"
 
 has "and the Dynamic Scan reads only the one it chose, after it chose" \
@@ -3170,6 +3171,139 @@ if [ "$(q "SELECT count(*) FROM pg_available_extensions WHERE name = 'file_fdw'"
 	# table has none, and should not be given one.
 	declined "a foreign partition" \
 	         "SELECT count(*) FROM t3f" "DynamicForeignScan"
+fi
+
+echo
+echo "25. what EXPLAIN calls the nodes of ORCA's plans, through O4"
+
+# Assert, the dynamic scans and the Partition Selector are CustomScans here,
+# because PostgreSQL 19 has no such nodes and a module cannot add one, and
+# EXPLAIN prints a CustomScan as "Custom Scan (name)" unless the module that
+# owns it names it.  O4, explain_node_label_hook, lets it; gp_orca names them
+# as Cloudberry's EXPLAIN does, so that its users read the plan they know and
+# its expected test output can carry over.  Each check reads one whole line.
+
+# explains <name> <query> <line> [setup] [options]: ORCA planned it, and a
+# line of its EXPLAIN reads exactly that, the indentation and arrow aside.
+explains() {
+	local setup="${4:-SELECT}" opts="${5:-COSTS OFF}" plan
+	plan=$(q2 "$setup" "EXPLAIN ($opts) $2")
+	case "$plan" in
+		*"Optimizer: GPORCA"*) ;;
+		*) notok "$1" "not planned by ORCA: $(printf '%s' "$plan" | tail -3 | tr '\n' '|')"; return ;;
+	esac
+	printf '%s\n' "$plan" | sed 's/^ *//; s/^->  //' | grep -qxF -- "$3" \
+		&& ok "$1" || notok "$1" "no line [$3] in: $(printf '%s' "$plan" | tr '\n' '|')"
+}
+
+explains "a scan of a partitioned table is a Dynamic Seq Scan on it" \
+         "SELECT count(*), sum(a) FROM t3p" "Dynamic Seq Scan on t3p"
+
+explains "which says how many partitions it scans, out of how many" \
+         "SELECT count(*), sum(a) FROM t3p" "Number of partitions to scan: 4 (out of 4)"
+
+explains "under the name the query gave the table, as a scan's target is named" \
+         "SELECT count(*) FROM t3p x WHERE x.b = 'v1'" "Dynamic Seq Scan on t3p x"
+
+explains "and with its schema under VERBOSE" \
+         "SELECT count(*) FROM t3p x WHERE x.b = 'v1'" "Dynamic Seq Scan on public.t3p x" \
+         "SELECT" "COSTS OFF, VERBOSE"
+
+explains "a Dynamic Index Scan names the table's index, then the table" \
+         "SELECT count(*) FROM t3p WHERE c = 3 AND a < 150" "Dynamic Index Scan on t3p_c_idx on t3p"
+
+explains "and so does a Dynamic Index Only Scan" \
+         "SELECT count(*) FROM t3q JOIN t3k ON t3q.a = t3k.a" "Dynamic Index Only Scan on t3q_a_idx on t3q"
+
+explains "a Dynamic Bitmap Heap Scan names the table" \
+         "SELECT count(*) FROM t3p WHERE c = 3 OR c = 5" "Dynamic Bitmap Heap Scan on t3p" \
+         "SET gp.optimizer_enable_dynamictablescan = off; SET gp.optimizer_enable_dynamicindexscan = off;
+          SET gp.optimizer_enable_dynamicindexonlyscan = off"
+
+explains "an Assert is an Assert" \
+         "SELECT (SELECT b FROM t2a WHERE a = 2) FROM t2a" "Assert"
+
+# The table counts as used, as an Append's does, so a condition over its
+# columns names it -- Cloudberry prints "Hash Cond: (pt.ptid = t.tid)" -- and
+# its partitions' scans take the names after it.  Before O4 was used the
+# table had no name in the plan at all, and this line read "(a = t3k.a)".
+explains "a condition over the table's columns names the table" \
+         "SELECT count(*) FROM t3p JOIN t3k ON t3p.a = t3k.a" "Hash Cond: (t3p.a = t3k.a)"
+
+orca=$(q "EXPLAIN (COSTS OFF) SELECT count(*), sum(a) FROM t3p" | grep -o 'Seq Scan on [a-z0-9]* [a-z0-9_]*$')
+pg=$(q2 "SET gp.optimizer = off" "EXPLAIN (COSTS OFF) SELECT count(*), sum(a) FROM t3p" | grep -o 'Seq Scan on [a-z0-9]* [a-z0-9_]*$')
+[ -n "$orca" ] && [ "$orca" = "$pg" ] \
+	&& ok "the partitions' scans are named as under the planner's Append" \
+	|| notok "the partitions' scans are named as under the planner's Append" "orca [$orca], planner [$pg]"
+
+# A Partition Selector is named by the parameter it hands its choice over
+# in, and the Dynamic Scan names the selectors it takes a choice from by the
+# same parameter, which is how a reader matches the two up.
+plan=$(q "EXPLAIN (COSTS OFF) SELECT count(*) FROM t3p JOIN t3k ON t3p.a = t3k.a")
+sel=$(printf '%s\n' "$plan" | sed -n 's/.*->  Partition Selector (selector id: \(\$[0-9]*\))$/\1/p')
+used=$(printf '%s\n' "$plan" | sed -n 's/^ *Partition Selectors: \(.*\)$/\1/p')
+[ -n "$sel" ] && [ "$sel" = "$used" ] \
+	&& ok "a Partition Selector's id is the one its Dynamic Scan names" \
+	|| notok "a Partition Selector's id is the one its Dynamic Scan names" "selector [$sel], scan [$used]: $(printf '%s' "$plan" | tr '\n' '|')"
+
+got=$(q "EXPLAIN (COSTS OFF) SELECT count(*) FROM t3p JOIN t3k ON t3p.a = t3k.a;
+         EXPLAIN (COSTS OFF) SELECT count(*) FROM t3p WHERE c = 3 AND a < 150;
+         EXPLAIN (COSTS OFF) SELECT (SELECT b FROM t2a WHERE a = 2) FROM t2a")
+case "$got" in
+	*"Custom Scan"*) notok "no node of ORCA's plans is left a Custom Scan" "$(printf '%s' "$got" | tr '\n' '|')" ;;
+	*) ok "no node of ORCA's plans is left a Custom Scan" ;;
+esac
+
+# Only text output prints a node's name, so in the other formats each node
+# stays a Custom Scan, with the plan provider's name beside it, and says what
+# the name says as properties -- the ones EXPLAIN writes for a scan's target
+# and index, and Cloudberry's "Selector ID".  The paths are strict because
+# a lax ".**" reaches each object twice, once more through the array around
+# it.
+q "CREATE FUNCTION t25_json(query text) RETURNS jsonb LANGUAGE plpgsql AS \$\$
+   DECLARE j json;
+   BEGIN EXECUTE 'EXPLAIN (COSTS OFF, FORMAT JSON) ' || query INTO j; RETURN j::jsonb; END \$\$;" > /dev/null
+
+T25J="SELECT count(*) FROM t3p JOIN t3k ON t3p.a = t3k.a"
+is "in JSON a Dynamic Scan is still a Custom Scan, and names the table" \
+   "SELECT n->>'Node Type', n->>'Relation Name', n->>'Alias', n->>'Number of partitions to scan'
+      FROM jsonb_path_query(t25_json('$T25J'), 'strict \$.** ? (@.\"Custom Plan Provider\" == \"Dynamic Scan\")') n" \
+   "Custom Scan|t3p|t3p|4"
+
+is "and the selector it takes a choice from is the one whose id that is" \
+   "SELECT (SELECT n->'Partition Selectors'->>0
+              FROM jsonb_path_query(t25_json('$T25J'), 'strict \$.** ? (@.\"Custom Plan Provider\" == \"Dynamic Scan\")') n)
+         = (SELECT '\$' || (n->>'Selector ID')
+              FROM jsonb_path_query(t25_json('$T25J'), 'strict \$.** ? (@.\"Custom Plan Provider\" == \"Partition Selector\")') n)" \
+   "t"
+
+is "an index scan's index is named, as ExplainIndexScanDetails names one" \
+   "SELECT n->>'Index Name'
+      FROM jsonb_path_query(t25_json('SELECT count(*) FROM t3p WHERE c = 3 AND a < 150'),
+                            'strict \$.** ? (@.\"Custom Plan Provider\" == \"Dynamic Scan\")') n" \
+   "t3p_c_idx"
+
+# A CustomScan that is not ORCA's is its own module's to name.  gp_probe,
+# the hook tests' module, puts one over every plan when armed and names it
+# the way Cloudberry names a Motion; loaded before gp_orca, its label hook is
+# the one gp_orca's has to pass that node on to.  So the server comes back
+# with both, and each module's nodes are called what that module calls them.
+{
+	echo "shared_preload_libraries = 'gp_probe,gp_core,gp_orca,gp_matview'"
+} >> "$WORK/data/postgresql.conf"
+if "$BINDIR/pg_ctl" -D "$WORK/data" -l "$WORK/log" -w -t 60 restart > /dev/null 2>&1; then
+	q "CREATE EXTENSION gp_probe;" > /dev/null
+
+	got=$(q2 "SET gp.optimizer = off; SELECT gp_probe.arm_explain(true)" "EXPLAIN (COSTS OFF) SELECT 1")
+	case "$got" in
+		*"Probe Motion 3:1  (slice1; segments: 3)"*) ok "another module's CustomScan is left to it to name" ;;
+		*) notok "another module's CustomScan is left to it to name" "$(printf '%s' "$got" | tr '\n' '|')" ;;
+	esac
+
+	explains "and ORCA's are still ORCA's to name beside it" \
+	         "SELECT count(*), sum(a) FROM t3p" "Dynamic Seq Scan on t3p"
+else
+	notok "the server comes back with gp_probe loaded beside gp_orca" "$(tail -5 "$WORK/log" | tr '\n' '|')"
 fi
 
 echo

@@ -55,4 +55,13 @@ extern const CustomScanMethods gp_orca_assert_methods;
  */
 extern void gp_orca_register_assert(void);
 
+/*
+ * EXPLAIN's name for the node, through explain_node_label_hook (O4):
+ * "Assert", as Cloudberry's EXPLAIN calls AssertOp, where PostgreSQL would
+ * print "Custom Scan (Assert)".  False, touching nothing, for a node that is
+ * not one.
+ */
+extern bool gp_orca_label_assert(PlanState *planstate, ExplainState *es,
+								 const char **pname, const char **suffix);
+
 #endif							/* CB_ASSERTOP_H */

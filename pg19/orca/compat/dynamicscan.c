@@ -52,6 +52,8 @@
 #include "access/transam.h"
 #include "catalog/partition.h"
 #include "catalog/pg_index.h"
+#include "catalog/pg_inherits.h"
+#include "commands/explain.h"
 #include "commands/explain_format.h"
 #include "commands/explain_state.h"
 #include "executor/executor.h"
@@ -62,6 +64,7 @@
 #include "partitioning/partdesc.h"
 #include "partitioning/partprune.h"
 #include "rewrite/rewriteManip.h"
+#include "utils/builtins.h"
 #include "utils/lsyscache.h"
 #include "utils/memutils.h"
 #include "utils/partcache.h"
@@ -436,7 +439,7 @@ begin_dynamic_scan(CustomScanState *node, EState *estate, int eflags)
 	ListCell   *lc;
 	int			i = 0;
 
-	Assert(list_length(cscan->custom_private) == 2);
+	Assert(list_length(cscan->custom_private) == 4);
 	Assert(list_length(part_index) == list_length(cscan->custom_plans));
 
 	state->nchildren = list_length(cscan->custom_plans);
@@ -561,16 +564,154 @@ rescan_dynamic_scan(CustomScanState *node)
 	state->current = -1;
 }
 
+/* What EXPLAIN calls a Dynamic Scan, by the scan ORCA planned for the table. */
+static const char *
+dynamic_scan_name(CustomScan *cscan)
+{
+	switch ((NodeTag) intVal(lthird(cscan->custom_private)))
+	{
+		case T_SeqScan:
+			return "Dynamic Seq Scan";
+		case T_IndexScan:
+			return "Dynamic Index Scan";
+		case T_IndexOnlyScan:
+			return "Dynamic Index Only Scan";
+		case T_BitmapHeapScan:
+			return "Dynamic Bitmap Heap Scan";
+		default:
+			return NULL;
+	}
+}
+
+/* The index a Dynamic Scan's index or index-only scans are of, or 0. */
+static Oid
+dynamic_scan_index(CustomScan *cscan)
+{
+	return (Oid) intVal(lfourth(cscan->custom_private));
+}
+
+/* The table a Dynamic Scan reads: its range table index. */
+static Index
+dynamic_scan_table(CustomScan *cscan)
+{
+	return (Index) bms_singleton_member(cscan->custom_relids);
+}
+
+/* As explain.c's explain_get_index_name(), which is static. */
+static const char *
+index_name(Oid index_oid)
+{
+	const char *result = NULL;
+
+	if (explain_get_index_name_hook)
+		result = explain_get_index_name_hook(index_oid);
+	if (result == NULL)
+	{
+		result = get_rel_name(index_oid);
+		if (result == NULL)
+			elog(ERROR, "cache lookup failed for index %u", index_oid);
+	}
+	return result;
+}
+
+/*
+ * The index and the table a Dynamic Scan reads, as EXPLAIN names the index
+ * and the target of a scan (explain.c, ExplainIndexScanDetails() and
+ * ExplainTargetRel()): in text, appended to `text`; otherwise as properties,
+ * the ones those functions write.
+ */
+static void
+explain_dynamic_scan_target(CustomScan *cscan, ExplainState *es,
+							StringInfo text)
+{
+	Index		rti = dynamic_scan_table(cscan);
+	RangeTblEntry *rte = rt_fetch(rti, es->rtable);
+	char	   *refname = (char *) list_nth(es->rtable_names, rti - 1);
+	char	   *objectname = get_rel_name(rte->relid);
+	char	   *namespace = NULL;
+	Oid			index_oid = dynamic_scan_index(cscan);
+
+	Assert(rte->rtekind == RTE_RELATION);
+	if (refname == NULL)
+		refname = rte->eref->aliasname;
+	if (es->verbose)
+		namespace = get_namespace_name_or_temp(get_rel_namespace(rte->relid));
+
+	if (es->format == EXPLAIN_FORMAT_TEXT)
+	{
+		/*
+		 * The index first, as Cloudberry's "Dynamic Index Scan on i on t"
+		 * puts it; quoted, which Cloudberry's is not, as every other name
+		 * EXPLAIN prints is.
+		 */
+		if (OidIsValid(index_oid))
+			appendStringInfo(text, " on %s",
+							 quote_identifier(index_name(index_oid)));
+		appendStringInfoString(text, " on");
+		if (namespace != NULL)
+			appendStringInfo(text, " %s.%s", quote_identifier(namespace),
+							 quote_identifier(objectname));
+		else
+			appendStringInfo(text, " %s", quote_identifier(objectname));
+		if (strcmp(refname, objectname) != 0)
+			appendStringInfo(text, " %s", quote_identifier(refname));
+	}
+	else
+	{
+		if (OidIsValid(index_oid))
+			ExplainPropertyText("Index Name", index_name(index_oid), es);
+		ExplainPropertyText("Relation Name", objectname, es);
+		if (namespace != NULL)
+			ExplainPropertyText("Schema", namespace, es);
+		ExplainPropertyText("Alias", refname, es);
+	}
+}
+
+/* The parameters in `paramids`, spelled as EXPLAIN spells a parameter. */
+static List *
+param_names(List *paramids)
+{
+	List	   *names = NIL;
+	ListCell   *lc;
+
+	foreach(lc, paramids)
+		names = lappend(names, psprintf("$%d", lfirst_int(lc)));
+	return names;
+}
+
 static void
 explain_dynamic_scan(CustomScanState *node, List *ancestors, ExplainState *es)
 {
 	DynamicScanState *state = (DynamicScanState *) node;
 	CustomScan *cscan = (CustomScan *) node->ss.ps.plan;
+	RangeTblEntry *rte = rt_fetch(dynamic_scan_table(cscan), es->rtable);
+	List	   *paramids = (List *) lsecond(cscan->custom_private);
 
-	ExplainPropertyInteger("Partitions", NULL,
+	/* in text, the node's name says this, through gp_orca_label_dynamic_scans */
+	if (es->format != EXPLAIN_FORMAT_TEXT)
+		explain_dynamic_scan_target(cscan, es, NULL);
+
+	/*
+	 * Cloudberry's words: the partitions static pruning left, out of the
+	 * table's partitions, counted as its countLeafPartTables() counts them
+	 * (github/cloudberry/src/backend/commands/explain.c:2546-2565,6258-6268).
+	 */
+	ExplainPropertyInteger("Number of partitions to scan",
+						   psprintf("(out of %d)",
+									list_length(find_all_inheritors(rte->relid,
+																	NoLock,
+																	NULL)) - 1),
 						   list_length(cscan->custom_plans), es);
-	if (lsecond(cscan->custom_private) != NIL)
-		ExplainPropertyText("Partitions Selected By", "Partition Selector", es);
+
+	/*
+	 * Which Partition Selectors choose among them, by the parameter each
+	 * hands its choice over in, as Cloudberry's EXPLAIN names the selectors
+	 * of an Append (the same file, 4527-4546).  Its dynamic scans say nothing
+	 * of their selectors; this one prints its partitions' scans too, so it
+	 * reads differently from Cloudberry's in any case.
+	 */
+	if (paramids != NIL)
+		ExplainPropertyList("Partition Selectors", param_names(paramids), es);
 	if (es->analyze)
 		ExplainPropertyInteger("Partitions Scanned", NULL, state->nscanned, es);
 }
@@ -586,6 +727,8 @@ static void begin_partition_selector(CustomScanState *node, EState *estate,
 static TupleTableSlot *exec_partition_selector(CustomScanState *node);
 static void end_partition_selector(CustomScanState *node);
 static void rescan_partition_selector(CustomScanState *node);
+static void explain_partition_selector(CustomScanState *node, List *ancestors,
+									   ExplainState *es);
 
 const CustomScanMethods gp_orca_partition_selector_methods = {
 	.CustomName = "Partition Selector",
@@ -598,6 +741,7 @@ static const CustomExecMethods partition_selector_exec_methods = {
 	.ExecCustomScan = exec_partition_selector,
 	.EndCustomScan = end_partition_selector,
 	.ReScanCustomScan = rescan_partition_selector,
+	.ExplainCustomScan = explain_partition_selector,
 };
 
 static Node *
@@ -757,6 +901,22 @@ rescan_partition_selector(CustomScanState *node)
 		ExecReScan(outerPlanState(node));
 }
 
+static void
+explain_partition_selector(CustomScanState *node, List *ancestors,
+						   ExplainState *es)
+{
+	CustomScan *cscan = (CustomScan *) node->ss.ps.plan;
+
+	/*
+	 * In text, the node's name says this, through
+	 * gp_orca_label_dynamic_scans; otherwise it is the property Cloudberry
+	 * writes.
+	 */
+	if (es->format != EXPLAIN_FORMAT_TEXT)
+		ExplainPropertyInteger("Selector ID", NULL,
+							   intVal(linitial(cscan->custom_private)), es);
+}
+
 /* ------------------------------------------------------------------------- */
 
 void
@@ -764,4 +924,46 @@ gp_orca_register_dynamic_scans(void)
 {
 	RegisterCustomScanMethods(&gp_orca_dynamic_scan_methods);
 	RegisterCustomScanMethods(&gp_orca_partition_selector_methods);
+}
+
+bool
+gp_orca_label_dynamic_scans(PlanState *planstate, ExplainState *es,
+							const char **pname, const char **suffix)
+{
+	CustomScan *cscan = (CustomScan *) planstate->plan;
+
+	/*
+	 * Only text output prints a node's name.  Both nodes are claimed all the
+	 * same, so that nobody else names them.
+	 */
+	if (cscan->methods == &gp_orca_partition_selector_methods)
+	{
+		/* github/cloudberry/src/backend/commands/explain.c:1972-1973,2254-2267 */
+		if (es->format == EXPLAIN_FORMAT_TEXT)
+		{
+			*pname = "Partition Selector";
+			*suffix = psprintf(" (selector id: $%d)",
+							   intVal(linitial(cscan->custom_private)));
+		}
+		return true;
+	}
+
+	if (cscan->methods == &gp_orca_dynamic_scan_methods)
+	{
+		const char *name = dynamic_scan_name(cscan);
+
+		/* the same file, 1690-1729 and 2111-2140 */
+		if (es->format == EXPLAIN_FORMAT_TEXT && name != NULL)
+		{
+			StringInfoData target;
+
+			initStringInfo(&target);
+			explain_dynamic_scan_target(cscan, es, &target);
+			*pname = name;
+			*suffix = target.data;
+		}
+		return true;
+	}
+
+	return false;
 }

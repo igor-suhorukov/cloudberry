@@ -62,7 +62,9 @@
 #include "storage/dsm_registry.h"
 #include "utils/guc.h"
 
+#include "cb_assertop.h"
 #include "cb_compat.h"
+#include "cb_dynamicscan.h"
 #include "gp_orca_api.h"
 #include "gp_orca_planner.h"
 #include "optimizer/orca.h"
@@ -91,6 +93,7 @@ typedef struct GpOrcaCounters
 static GpOrcaCounters *counters = NULL;
 static planner_hook_type prev_planner_hook = NULL;
 static explain_per_plan_hook_type prev_explain_per_plan_hook = NULL;
+static explain_node_label_hook_type prev_explain_node_label_hook = NULL;
 
 /*
  * How a plan says ORCA made it: an entry in PlannedStmt.extension_state,
@@ -337,6 +340,34 @@ gp_orca_explain_per_plan(PlannedStmt *plannedstmt, IntoClause *into,
 							es);
 }
 
+/*
+ * explain_node_label_hook, which is O4: what the nodes of ORCA's plans are
+ * called.
+ *
+ * Cloudberry's executor has Assert, the dynamic scans and the Partition
+ * Selector as nodes of its own.  PostgreSQL 19's does not, and a module
+ * cannot add a node type, so here each is a CustomScan -- which EXPLAIN would
+ * print as "Custom Scan (Assert)".  Cloudberry's users know them by the names
+ * its EXPLAIN gives them, and its expected test output is written in those
+ * names, so the port prints them the same way.  Each node's own file says
+ * what it is called; this asks them in turn.  Only text output prints a
+ * node's name: other formats keep "Custom Scan", with the plan provider's
+ * name beside it.
+ */
+static void
+gp_orca_explain_node_label(PlanState *planstate, ExplainState *es,
+						   const char **pname, const char **suffix)
+{
+	Assert(IsA(planstate->plan, CustomScan));
+
+	if (gp_orca_label_assert(planstate, es, pname, suffix) ||
+		gp_orca_label_dynamic_scans(planstate, es, pname, suffix))
+		return;
+
+	if (prev_explain_node_label_hook)
+		prev_explain_node_label_hook(planstate, es, pname, suffix);
+}
+
 void
 GpOrcaInstallPlannerHook(void)
 {
@@ -365,4 +396,7 @@ GpOrcaInstallPlannerHook(void)
 
 	prev_explain_per_plan_hook = explain_per_plan_hook;
 	explain_per_plan_hook = gp_orca_explain_per_plan;
+
+	prev_explain_node_label_hook = explain_node_label_hook;
+	explain_node_label_hook = gp_orca_explain_node_label;
 }

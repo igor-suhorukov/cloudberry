@@ -84,6 +84,18 @@ gp_orca_register_assert(void)
 	RegisterCustomScanMethods(&gp_orca_assert_methods);
 }
 
+bool
+gp_orca_label_assert(PlanState *planstate, ExplainState *es,
+					 const char **pname, const char **suffix)
+{
+	if (((CustomScan *) planstate->plan)->methods != &gp_orca_assert_methods)
+		return false;
+
+	/* github/cloudberry/src/backend/commands/explain.c:1969-1970 */
+	*pname = "Assert";
+	return true;
+}
+
 static Node *
 create_assert_state(CustomScan *cscan)
 {

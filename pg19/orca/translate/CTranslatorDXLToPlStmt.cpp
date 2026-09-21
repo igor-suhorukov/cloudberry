@@ -4954,12 +4954,37 @@ CTranslatorDXLToPlStmt::TranslateDynamicScan(
 	// node's own target list reads by position, and EXPLAIN by name.
 	dynamic_scan->custom_scan_tlist = gpdb::DynamicScanTlist(scan);
 
+	// The table the node reads.  EXPLAIN names it, and counts it as used, as
+	// it counts an Append's table, so that a condition over the table's
+	// columns names the table and the partitions' scans take the names after
+	// it: t, then t_1, t_2 and so on, as under the planner's Append.
+	dynamic_scan->custom_relids = gpdb::BmsAddMember(nullptr, root_rti);
+
 	OID oid_type =
 		CMDIdGPDB::CastMdid(m_md_accessor->PtMDType<IMDTypeInt4>()->MDId())
 			->Oid();
+
+	// For EXPLAIN, which calls the node what Cloudberry calls its dynamic
+	// scan of the same kind, over the same index (cb_dynamicscan.h).
+	Oid index_oid = InvalidOid;
+	if (IsA(scan, IndexScan))
+	{
+		index_oid = ((IndexScan *) scan)->indexid;
+	}
+	else if (IsA(scan, IndexOnlyScan))
+	{
+		index_oid = ((IndexOnlyScan *) scan)->indexid;
+	}
+
 	dynamic_scan->custom_private = ListMake2(
 		part_indexes, TranslateJoinPruneParamids(selector_ids, oid_type,
 												 m_dxl_to_plstmt_context));
+	dynamic_scan->custom_private =
+		gpdb::LAppend(dynamic_scan->custom_private,
+					  gpdb::MakeIntegerValue((long) nodeTag(scan)));
+	dynamic_scan->custom_private =
+		gpdb::LAppend(dynamic_scan->custom_private,
+					  gpdb::MakeIntegerValue((long) index_oid));
 
 	Plan *plan = &(dynamic_scan->scan.plan);
 	plan->plan_node_id = m_dxl_to_plstmt_context->GetNextPlanId();

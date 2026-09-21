@@ -36,12 +36,17 @@
  *						(gp_orca_plan_for_partition); custom_scan_tlist is
  *						that scan's target list, in the partitioned table's
  *						terms, and the node's own target list reads it through
- *						INDEX_VAR.  custom_private: an IntList with the index,
+ *						INDEX_VAR.  custom_relids is the table's range table
+ *						index, so that EXPLAIN names the table, as it names an
+ *						Append's.  custom_private: an IntList with the index,
  *						in the table's partition descriptor, of the partition
- *						each child scans or is under, and an IntList of the
+ *						each child scans or is under; an IntList of the
  *						parameters of the Partition Selectors that choose among
- *						them.  It runs the children a selector chose, or all
- *						of them if none has.
+ *						them; and, for EXPLAIN, the node tag of the scan ORCA
+ *						planned for the table (Integer) and the index it
+ *						scans (Integer, an Oid; 0 for a Seq Scan or a Bitmap
+ *						Heap Scan).  It runs the children a selector chose, or
+ *						all of them if none has.
  *
  *	Partition Selector	its child is the outer plan, whose rows it passes on;
  *						for each, it finds the partitions of the table that
@@ -70,6 +75,18 @@ extern const CustomScanMethods gp_orca_dynamic_scan_methods;
 extern const CustomScanMethods gp_orca_partition_selector_methods;
 
 extern void gp_orca_register_dynamic_scans(void);
+
+/*
+ * EXPLAIN's name for either node, through explain_node_label_hook (O4): the
+ * name Cloudberry's EXPLAIN gives its own -- "Dynamic Seq Scan on t", "Dynamic
+ * Index Scan on i on t", "Partition Selector (selector id: $0)" -- where
+ * PostgreSQL would print "Custom Scan (Dynamic Scan)".  False, touching
+ * nothing, for a node that is neither.
+ */
+extern bool gp_orca_label_dynamic_scans(PlanState *planstate,
+										ExplainState *es,
+										const char **pname,
+										const char **suffix);
 
 /* Why gp_orca_plan_for_partition() made no plan. */
 #define GP_ORCA_PARTITION_OK			0
