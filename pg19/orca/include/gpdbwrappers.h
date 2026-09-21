@@ -795,6 +795,18 @@ bool GetOpHashFunctions(Oid opno, Oid *lhs_procno, Oid *rhs_procno);
 // get_relation_info).  Not in Cloudberry's layer; see TranslateDXLIndexScan.
 bool IndexUsableBySnapshots(Oid index_oid);
 
+// pg_attribute.attgenerated of a column: '\0', or 's' for a stored generated
+// column.  Not in Cloudberry's layer, whose INSERT gives such a column the
+// value ORCA computed where the executor insists on a NULL constant; see
+// CreateTargetListWithNullsForDroppedCols.
+char GetAttGenerated(Oid relid, AttrNumber attnum);
+
+// The NULL an INSERT gives a column it leaves out, with no default: for a
+// domain, one that has passed the domain's constraints, as the planner makes
+// it (preptlist.c).  Not in Cloudberry's layer; see
+// CTranslatorQueryToDXL::CreateDXLProjElemForOmittedColumn.
+Node *CoerceNullToDomain(Oid typid, int32 typmod);
+
 // get the OID of base elementtype fora given typid
 Oid GetBaseType(Oid typid);
 

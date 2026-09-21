@@ -60,6 +60,8 @@ extern "C" {
 #include "nodes/nodes.h"
 // AGGSPLIT_INTERMEDIATE, which Cloudberry adds to nodes/nodes.h.
 #include "cb_nodes.h"
+// Cloudberry's AssertOp, as a CustomScan; see TranslateDXLAssert.
+#include "cb_assertop.h"
 #include "nodes/plannodes.h"
 #include "nodes/primnodes.h"
 #include "partitioning/partdesc.h"
@@ -379,6 +381,14 @@ CTranslatorDXLToPlStmt::TranslateDXLOperatorToPlan(
 		case EdxlopPhysicalWindow:
 		case EdxlopPhysicalCTEConsumer:
 		case EdxlopPhysicalSequence:
+		// T2: INSERT, UPDATE and DELETE, assertions, functions in FROM,
+		// foreign tables.  Not ORCA's CTAS operator, which plans the new
+		// table's distribution with it and is M2's; on one node a CREATE
+		// TABLE AS is planned as its query (CheckSupportedCmdType).
+		case EdxlopPhysicalDML:
+		case EdxlopPhysicalAssert:
+		case EdxlopPhysicalTVF:
+		case EdxlopPhysicalForeignScan:
 			break;
 		default:
 			GPOS_RAISE(gpdxl::ExmaDXL, gpdxl::ExmiDXL2PlStmtConversion,
@@ -4743,16 +4753,377 @@ CTranslatorDXLToPlStmt::TranslateDXLDynForeignScan(
 //	@doc:
 //		Translates a DXL DML node
 //
+//		Cloudberry's body, for PostgreSQL 19's ModifyTable.  What changed:
+//
+//		- No split update.  Cloudberry's ModifyTable can run an UPDATE as a
+//		  DELETE and an INSERT, told apart by a "DMLAction" column, which is
+//		  how a row moves to another segment; PostgreSQL 19's cannot.  ORCA
+//		  plans one when a distribution or partition key changes, which on
+//		  one node is never a heap table's -- UPDATE of a partitioned table
+//		  is refused before ORCA sees it -- so it is refused here.
+//		- Cloudberry's refusal of an UPDATE of a table with UPDATE triggers
+//		  is dropped.  With no split, ModifyTable fires them as it does
+//		  under the planner's plan, a trigger declared UPDATE OF a column
+//		  included, which the ORCA suite checks.
+//		- The row is found by "ctid" alone.  Cloudberry adds "gp_segment_id"
+//		  beside it, a system column PostgreSQL 19 does not have; the Query
+//		  translator gives ORCA tableoid in its place, and it stops here.
+//		- An UPDATE names in updateColnos the columns it sets, as the
+//		  planner's does, not every column; see CreateUpdateTargetList.
+//		- ORCA's permission entry for the table is completed from the
+//		  Query's.  PostgreSQL 19 reads the updated columns from it -- to
+//		  recompute the generated columns that depend on them, and to fire a
+//		  trigger declared UPDATE OF a column -- and ORCA's has none.
+//		- An EvalPlanQual parameter.  Under READ COMMITTED a row another
+//		  transaction has just updated is re-read and the plan re-run over
+//		  it; every node below has to see the parameter change to be
+//		  re-run.  Cloudberry's plan has none, and is re-run only where
+//		  Cloudberry does not lock the table for the statement (see
+//		  CTranslatorQueryToDXL::CheckDMLReadsOnlyTarget).
+//		- rootRelation is zero and forceTupleRouting gone: PostgreSQL 19 sets
+//		  up tuple routing for an INSERT into a partitioned table by itself,
+//		  and names a root relation only when there are several result
+//		  relations, which there never are here.
+//
 //---------------------------------------------------------------------------
 Plan *
 CTranslatorDXLToPlStmt::TranslateDXLDml(
 	const CDXLNode *dml_dxlnode, CDXLTranslateContext *output_context,
 	CDXLTranslationContextArray *ctxt_translation_prev_siblings)
 {
-	// T2: INSERT, UPDATE and DELETE.  This body refuses until then, and Cloudberry's is
-	// in github/cloudberry/src/backend/gpopt/translate/CTranslatorDXLToPlStmt.cpp,
-	// unchanged, for the step that brings it back.
-	GP_UNPORTED("INSERT, UPDATE and DELETE");
+	// translate table descriptor into a range table entry
+	CDXLPhysicalDML *phy_dml_dxlop =
+		CDXLPhysicalDML::Cast(dml_dxlnode->GetOperator());
+
+	// create ModifyTable node
+	ModifyTable *dml = MakeNode(ModifyTable);
+	Plan *plan = &(dml->plan);
+
+	switch (phy_dml_dxlop->GetDmlOpType())
+	{
+		case gpdxl::Edxldmldelete:
+		{
+			m_cmd_type = CMD_DELETE;
+			break;
+		}
+		case gpdxl::Edxldmlupdate:
+		{
+			m_cmd_type = CMD_UPDATE;
+			break;
+		}
+		case gpdxl::Edxldmlinsert:
+		{
+			m_cmd_type = CMD_INSERT;
+			break;
+		}
+		case gpdxl::EdxldmlSentinel:
+		default:
+		{
+			GPOS_RAISE(
+				gpdxl::ExmaDXL, gpdxl::ExmiDXL2PlStmtConversion,
+				GPOS_WSZ_LIT("Unexpected error during plan generation."));
+			break;
+		}
+	}
+
+	IMDId *mdid_target_table = phy_dml_dxlop->GetDXLTableDescr()->MDId();
+	const IMDRelation *md_rel = m_md_accessor->RetrieveRel(mdid_target_table);
+
+	// ORCA marks every INSERT and DELETE split too (CXformUtils,
+	// PexprLogicalDMLOverProject), where it means nothing; for an UPDATE it
+	// means the DMLAction column.  Cloudberry also splits every update of an
+	// append-only table, which is M5's, and which the relcache translator
+	// does not report on this node.
+	if (CMD_UPDATE == m_cmd_type &&
+		(phy_dml_dxlop->FSplit() || md_rel->IsNonBlockTable()))
+	{
+		GP_UNPORTED("an UPDATE run as a DELETE and an INSERT");
+	}
+
+	// translation context for column mappings in the base relation
+	CDXLTranslateContextBaseTable base_table_context(m_mp);
+
+	CDXLTableDescr *table_descr = phy_dml_dxlop->GetDXLTableDescr();
+
+	Index index = ProcessDXLTblDescr(table_descr, &base_table_context);
+
+	m_result_rel_list = gpdb::LAppendInt(m_result_rel_list, index);
+
+	CompleteResultRelationPermissions(index);
+
+	CDXLNode *project_list_dxlnode = (*dml_dxlnode)[0];
+	CDXLNode *child_dxlnode = (*dml_dxlnode)[1];
+
+	CDXLTranslateContext child_context(m_mp, false,
+									   output_context->GetColIdToParamIdMap());
+
+	Plan *child_plan = TranslateDXLOperatorToPlan(
+		child_dxlnode, &child_context, ctxt_translation_prev_siblings);
+
+	CDXLTranslationContextArray *child_contexts =
+		GPOS_NEW(m_mp) CDXLTranslationContextArray(m_mp);
+	child_contexts->Append(&child_context);
+
+	List *dml_target_list =
+		TranslateDXLProjList(project_list_dxlnode,
+							 nullptr,  // translate context for the base table
+							 child_contexts, output_context);
+
+	// The new row: for an INSERT, one entry per attribute, a NULL for a
+	// dropped one (and for a stored generated one), as the executor checks
+	// it; for an UPDATE, the new values of the columns the statement sets,
+	// named in updateColnos.  A DELETE needs none: on one node ORCA's
+	// DELETE carries no column but the row's identity.
+	List *update_colnos = NIL;
+	if (CMD_INSERT == m_cmd_type)
+	{
+		dml_target_list = CreateTargetListWithNullsForDroppedCols(
+			dml_target_list, md_rel, true /* keepDropedAsNull */);
+	}
+	else if (CMD_UPDATE == m_cmd_type)
+	{
+		dml_target_list =
+			CreateUpdateTargetList(dml_target_list, md_rel, &update_colnos);
+	}
+
+	// The row to change, by the junk column the executor finds by name.
+	if (CMD_UPDATE == m_cmd_type || CMD_DELETE == m_cmd_type)
+	{
+		AddJunkTargetEntryForColId(&dml_target_list, &child_context,
+								   phy_dml_dxlop->GetCtIdColId(), "ctid");
+	}
+
+	// Add a Result node on top of the child plan, to coerce the target
+	// list to match the exact physical layout of the target table,
+	// including dropped columns.  Often, the Result node isn't really
+	// needed, as the child node could do the projection, but we don't have
+	// the information to determine that here. There's a step in the
+	// backend optimize_query() function to eliminate unnecessary Results
+	// through the plan, hopefully this Result gets eliminated there.
+	Result *result = MakeNode(Result);
+	Plan *result_plan = &(result->plan);
+
+	result_plan->plan_node_id = m_dxl_to_plstmt_context->GetNextPlanId();
+	result_plan->lefttree = child_plan;
+
+	result_plan->targetlist = dml_target_list;
+	SetParamIds(result_plan);
+
+	dml->operation = m_cmd_type;
+	dml->canSetTag = m_dxl_to_plstmt_context->m_orig_query->canSetTag;
+	dml->nominalRelation = index;
+	dml->rootRelation = 0;
+	dml->resultRelations = ListMake1Int(index);
+	if (CMD_UPDATE == m_cmd_type)
+	{
+		dml->updateColnosLists = ListMake1(update_colnos);
+	}
+	// one entry per result relation, whether or not it is a foreign table
+	dml->fdwPrivLists = ListMake1(NIL);
+	dml->onConflictAction = ONCONFLICT_NONE;
+
+	// The planner gives every ModifyTable one (planner.c,
+	// assign_special_exec_param), and makes every node below depend on it
+	// (subselect.c, finalize_plan).  No value passes through it; a change
+	// to it is how EvalPlanQual tells the plan under ModifyTable to start
+	// again.
+	dml->epqParam = (int) m_dxl_to_plstmt_context->GetNextParamId(InvalidOid);
+	AddParamToPlanTree(result_plan, dml->epqParam);
+
+	plan->lefttree = result_plan;
+	plan->righttree = nullptr;
+	plan->targetlist = NIL;
+	plan->plan_node_id = m_dxl_to_plstmt_context->GetNextPlanId();
+
+	SetParamIds(plan);
+
+	// cleanup
+	child_contexts->Release();
+
+	// translate operator costs
+	TranslatePlanCosts(dml_dxlnode, plan);
+
+	return (Plan *) dml;
+}
+
+//---------------------------------------------------------------------------
+//	@function:
+//		CTranslatorDXLToPlStmt::CreateUpdateTargetList
+//
+//	@doc:
+//		The new values of the columns an UPDATE sets, in the order the
+//		Query sets them, with their attribute numbers in *update_colnos.
+//
+//		PostgreSQL's convention (preptlist.c,
+//		extract_update_targetlist_colnos): ExecBuildUpdateProjection()
+//		takes every other column from the old row, and whatever reads the
+//		plan takes updateColnos as the columns the statement changes.
+//		Cloudberry named every column that is not dropped and passed each
+//		one's value, which builds the same row and tells a reader of the
+//		plan that every column changed -- gp_sql's guard, which lets an
+//		UPDATE of a directory table set its tag and nothing else, refused
+//		an UPDATE of the tag.  ORCA's DML operator passes every column,
+//		one per column that is not dropped, and this takes the ones the
+//		statement sets.
+//
+//---------------------------------------------------------------------------
+List *
+CTranslatorDXLToPlStmt::CreateUpdateTargetList(List *target_list,
+											   const IMDRelation *md_rel,
+											   List **update_colnos)
+{
+	Query *query = m_dxl_to_plstmt_context->m_orig_query;
+	List *result = NIL;
+
+	ListCell *lc = nullptr;
+	ForEach(lc, query->targetList)
+	{
+		TargetEntry *query_te = (TargetEntry *) lfirst(lc);
+		if (query_te->resjunk)
+		{
+			continue;
+		}
+
+		// the column's place among the ones that are not dropped, which is
+		// its place in what ORCA's DML operator passes
+		const IMDColumn *md_col = nullptr;
+		ULONG pos = 0;
+		for (ULONG ul = 0; ul < md_rel->ColumnCount(); ul++)
+		{
+			const IMDColumn *col = md_rel->GetMdCol(ul);
+			if (col->IsSystemColumn() || col->IsDropped())
+			{
+				continue;
+			}
+			if (col->AttrNum() == query_te->resno)
+			{
+				md_col = col;
+				break;
+			}
+			pos++;
+		}
+		GPOS_ASSERT(nullptr != md_col);
+		if (nullptr == md_col)
+		{
+			GPOS_RAISE(gpdxl::ExmaDXL, gpdxl::ExmiDXL2PlStmtAttributeNotFound,
+					   query_te->resno);
+		}
+
+		TargetEntry *target_entry =
+			(TargetEntry *) gpdb::ListNth(target_list, pos);
+		CHAR *name_str =
+			CTranslatorUtils::CreateMultiByteCharStringFromWCString(
+				md_col->Mdname().GetMDName()->GetBuffer());
+		result = gpdb::LAppend(
+			result, gpdb::MakeTargetEntry(
+						(Expr *) gpdb::CopyObject(target_entry->expr),
+						gpdb::ListLength(result) + 1, name_str,
+						false /*resjunk*/));
+		*update_colnos = gpdb::LAppendInt(*update_colnos, query_te->resno);
+	}
+
+	return result;
+}
+
+//---------------------------------------------------------------------------
+//	@function:
+//		CTranslatorDXLToPlStmt::CompleteResultRelationPermissions
+//
+//	@doc:
+//		Complete the permission entry of the result relation from the
+//		Query's.  ProcessDXLTblDescr gives it the privileges the table
+//		descriptor asks for and no columns; PostgreSQL 19's executor reads
+//		the columns an UPDATE sets (ExecGetUpdatedCols) to know which
+//		generated columns to recompute and which UPDATE OF triggers fire,
+//		and the inserted and updated ones to decide what an error may show.
+//		Not in Cloudberry's translator, though its executor reads the entry
+//		the same way (execUtils.c, ExecGetUpdatedCols).
+//
+//---------------------------------------------------------------------------
+void
+CTranslatorDXLToPlStmt::CompleteResultRelationPermissions(Index index)
+{
+	Query *query = m_dxl_to_plstmt_context->m_orig_query;
+	GPOS_ASSERT(0 < query->resultRelation);
+
+	RangeTblEntry *query_rte = (RangeTblEntry *) gpdb::ListNth(
+		query->rtable, query->resultRelation - 1);
+	RTEPermissionInfo *query_perminfo =
+		gpdb::GetRTEPermissionInfo(query->rteperminfos, query_rte);
+
+	RangeTblEntry *rte = m_dxl_to_plstmt_context->GetRTEByIndex(index);
+	GPOS_ASSERT(nullptr != rte && 0 != rte->perminfoindex);
+	GPOS_ASSERT(rte->relid == query_rte->relid);
+
+	RTEPermissionInfo *perminfo =
+		m_dxl_to_plstmt_context->GetPermInfoByIndex(rte->perminfoindex);
+
+	perminfo->requiredPerms |= query_perminfo->requiredPerms;
+	perminfo->checkAsUser = query_perminfo->checkAsUser;
+	perminfo->selectedCols = gpdb::BmsUnion(perminfo->selectedCols,
+											query_perminfo->selectedCols);
+	perminfo->insertedCols = gpdb::BmsUnion(perminfo->insertedCols,
+											query_perminfo->insertedCols);
+	perminfo->updatedCols = gpdb::BmsUnion(perminfo->updatedCols,
+										   query_perminfo->updatedCols);
+
+	rte->rellockmode = query_rte->rellockmode;
+}
+
+//---------------------------------------------------------------------------
+//	@function:
+//		CTranslatorDXLToPlStmt::AddParamToPlanTree
+//
+//	@doc:
+//		Make every node of a plan tree depend on a parameter -- the node and
+//		its children, not the subplans its expressions call, which the
+//		planner's finalize_plan() does not reach either.
+//
+//---------------------------------------------------------------------------
+void
+CTranslatorDXLToPlStmt::AddParamToPlanTree(Plan *plan, int paramid)
+{
+	if (nullptr == plan)
+	{
+		return;
+	}
+
+	plan->extParam = gpdb::BmsAddMember(plan->extParam, paramid);
+	plan->allParam = gpdb::BmsAddMember(plan->allParam, paramid);
+
+	AddParamToPlanTree(plan->lefttree, paramid);
+	AddParamToPlanTree(plan->righttree, paramid);
+
+	List *children = NIL;
+	switch (nodeTag(plan))
+	{
+		case T_Append:
+			children = ((Append *) plan)->appendplans;
+			break;
+		case T_MergeAppend:
+			children = ((MergeAppend *) plan)->mergeplans;
+			break;
+		case T_BitmapAnd:
+			children = ((BitmapAnd *) plan)->bitmapplans;
+			break;
+		case T_BitmapOr:
+			children = ((BitmapOr *) plan)->bitmapplans;
+			break;
+		case T_CustomScan:
+			children = ((CustomScan *) plan)->custom_plans;
+			break;
+		case T_SubqueryScan:
+			AddParamToPlanTree(((SubqueryScan *) plan)->subplan, paramid);
+			break;
+		default:
+			break;
+	}
+
+	ListCell *lc = nullptr;
+	ForEach(lc, children)
+	{
+		AddParamToPlanTree((Plan *) lfirst(lc), paramid);
+	}
 }
 
 //---------------------------------------------------------------------------
@@ -4886,15 +5257,106 @@ CTranslatorDXLToPlStmt::TranslateDXLSplit(
 //		Translate DXL assert node into GPDB assert plan node
 //
 //---------------------------------------------------------------------------
+//
+//		ORCA asserts three things, each with its own SQLSTATE:
+//
+//		- 23502 and 23514, that a row an INSERT or UPDATE writes meets the
+//		  table's NOT NULL and CHECK constraints.  PostgreSQL 19's
+//		  ModifyTable checks both itself (ExecConstraints), after the BEFORE
+//		  ROW triggers that may change the row and with PostgreSQL's
+//		  messages, so the Assert is left out and a Result projects what it
+//		  would have.  Kept, it would refuse a row a trigger was about to
+//		  fix, in words PostgreSQL does not use.
+//		- P0003, that a scalar subquery ORCA turned into a join gave at most
+//		  one row.  Nothing else checks that, so it is an Assert node --
+//		  Cloudberry's AssertOp, which PostgreSQL 19 does not have, as a
+//		  CustomScan (compat/assertop.c) -- and it raises the planner's error
+//		  for the same case, "more than one row returned by a subquery used
+//		  as an expression" (21000), not ORCA's.
+//
+//---------------------------------------------------------------------------
 Plan *
 CTranslatorDXLToPlStmt::TranslateDXLAssert(
 	const CDXLNode *assert_dxlnode, CDXLTranslateContext *output_context,
 	CDXLTranslationContextArray *ctxt_translation_prev_siblings)
 {
-	// T2: runtime assertions.  This body refuses until then, and Cloudberry's is
-	// in github/cloudberry/src/backend/gpopt/translate/CTranslatorDXLToPlStmt.cpp,
-	// unchanged, for the step that brings it back.
-	GP_UNPORTED("runtime assertions");
+	CDXLPhysicalAssert *assert_dxlop =
+		CDXLPhysicalAssert::Cast(assert_dxlnode->GetOperator());
+
+	const CHAR *error_code = assert_dxlop->GetSQLState();
+	GPOS_ASSERT(GPOS_SQLSTATE_LENGTH == clib::Strlen(error_code));
+
+	BOOL is_constraint = (0 == clib::Strcmp(error_code, "23502") ||
+						  0 == clib::Strcmp(error_code, "23514"));
+	BOOL is_max_one_row = (0 == clib::Strcmp(error_code, "P0003"));
+
+	if (!is_constraint && !is_max_one_row)
+	{
+		GP_UNPORTED("an assertion of neither a constraint nor one row");
+	}
+
+	CDXLTranslateContext child_context(m_mp, false,
+									   output_context->GetColIdToParamIdMap());
+
+	// translate child plan
+	CDXLNode *child_dxlnode =
+		(*assert_dxlnode)[CDXLPhysicalAssert::EdxlassertIndexChild];
+	Plan *child_plan = TranslateDXLOperatorToPlan(
+		child_dxlnode, &child_context, ctxt_translation_prev_siblings);
+
+	GPOS_ASSERT(nullptr != child_plan && "child plan cannot be NULL");
+
+	CDXLTranslationContextArray *child_contexts =
+		GPOS_NEW(m_mp) CDXLTranslationContextArray(m_mp);
+	child_contexts->Append(&child_context);
+
+	CDXLNode *project_list_dxlnode =
+		(*assert_dxlnode)[CDXLPhysicalAssert::EdxlassertIndexProjList];
+
+	// translate proj list
+	List *target_list =
+		TranslateDXLProjList(project_list_dxlnode,
+							 nullptr,  // translate context for the base table
+							 child_contexts, output_context);
+
+	Plan *plan = nullptr;
+	if (is_constraint)
+	{
+		Result *result = MakeNode(Result);
+		result->result_type = RESULT_TYPE_GATING;
+		plan = &(result->plan);
+	}
+	else
+	{
+		CDXLNode *filter_dxlnode =
+			(*assert_dxlnode)[CDXLPhysicalAssert::EdxlassertIndexFilter];
+
+		CustomScan *assert_scan = MakeNode(CustomScan);
+		assert_scan->methods = &gp_orca_assert_methods;
+		assert_scan->scan.scanrelid = 0;
+		assert_scan->custom_exprs = TranslateDXLAssertConstraints(
+			filter_dxlnode, output_context, child_contexts);
+		assert_scan->custom_private = ListMake2(
+			gpdb::MakeStringValue(PStrDup("21000")),
+			gpdb::MakeStringValue(PStrDup(
+				"more than one row returned by a subquery used as an "
+				"expression")));
+		plan = &(assert_scan->scan.plan);
+	}
+
+	plan->plan_node_id = m_dxl_to_plstmt_context->GetNextPlanId();
+	plan->lefttree = child_plan;
+	plan->targetlist = target_list;
+
+	// translate operator costs
+	TranslatePlanCosts(assert_dxlnode, plan);
+
+	SetParamIds(plan);
+
+	// cleanup
+	child_contexts->Release();
+
+	return plan;
 }
 
 //---------------------------------------------------------------------------
@@ -5202,6 +5664,7 @@ CTranslatorDXLToPlStmt::CreateTargetListWithNullsForDroppedCols(
 	ULONG resno = 1;
 
 	const ULONG num_of_rel_cols = md_rel->ColumnCount();
+	const OID rel_oid = CMDIdGPDB::CastMdid(md_rel->MDId())->Oid();
 
 	for (ULONG ul = 0; ul < num_of_rel_cols; ul++)
 	{
@@ -5231,8 +5694,25 @@ CTranslatorDXLToPlStmt::CreateTargetListWithNullsForDroppedCols(
 		{
 			TargetEntry *target_entry =
 				(TargetEntry *) gpdb::ListNth(target_list, last_tgt_elem);
-			expr = (Expr *) gpdb::CopyObject(target_entry->expr);
 			last_tgt_elem++;
+
+			// A stored generated column, in the INSERT shape.  The executor
+			// computes it, and insists that the plan give it a NULL
+			// constant (ExecCheckPlanOutput), as the planner's
+			// expand_insert_targetlist() does.  ORCA gives it the NULL the
+			// Query translator adds for a column the Query leaves out -- but
+			// as a column of the plan below, which is not a constant.  Not
+			// in Cloudberry's, which has the same check in its executor.
+			if (keepDropedAsNull &&
+				'\0' != gpdb::GetAttGenerated(rel_oid, md_col->AttrNum()))
+			{
+				expr = (Expr *) gpdb::MakeNULLConst(
+					gpdb::ExprType((Node *) target_entry->expr));
+			}
+			else
+			{
+				expr = (Expr *) gpdb::CopyObject(target_entry->expr);
+			}
 		}
 
 		CHAR *name_str =

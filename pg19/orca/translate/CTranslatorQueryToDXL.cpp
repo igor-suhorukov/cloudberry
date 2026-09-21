@@ -873,16 +873,13 @@ CTranslatorQueryToDXL::TranslateQueryToDXL()
 			return TranslateSelectQueryToDXL();
 
 		case CMD_INSERT:
+			return TranslateInsertQueryToDXL();
+
 		case CMD_DELETE:
+			return TranslateDeleteQueryToDXL();
+
 		case CMD_UPDATE:
-			// T2: INSERT, UPDATE and DELETE.  Refused here, before ORCA plans
-			// them, rather than when DXL to PlannedStmt reaches the DML
-			// operator and refuses it there: the answer is the same, and the
-			// translators that would run first are T2's to make ready.  T2
-			// puts back the three calls that were here --
-			// TranslateInsertQueryToDXL, TranslateDeleteQueryToDXL and
-			// TranslateUpdateQueryToDXL.
-			GP_UNPORTED("INSERT, UPDATE and DELETE");
+			return TranslateUpdateQueryToDXL();
 
 		default:
 			GPOS_ASSERT(!"Statement type not supported");
@@ -922,6 +919,7 @@ CTranslatorQueryToDXL::TranslateInsertQueryToDXL()
 		GPOS_RAISE(gpdxl::ExmaDXL, gpdxl::ExmiQuery2DXLUnsupportedFeature,
 				   GPOS_WSZ_LIT("Inserts with foreign tables"));
 	}
+	CheckDMLTarget(rte);
 	const RTEPermissionInfo *perminfo = gpdb::GetRTEPermissionInfo(
 		m_query->rteperminfos, rte);
 
@@ -1006,8 +1004,7 @@ CTranslatorQueryToDXL::TranslateInsertQueryToDXL()
 		// target entry corresponding to the tables column not found, therefore
 		// add a project element with null value scalar child
 		CDXLNode *project_elem_dxlnode =
-			CTranslatorUtils::CreateDXLProjElemConstNULL(
-				m_mp, m_md_accessor, m_context->m_colid_counter, mdcol);
+			CreateDXLProjElemForOmittedColumn(md_rel, mdcol);
 		ULONG colid =
 			CDXLScalarProjElem::Cast(project_elem_dxlnode->GetOperator())->Id();
 		project_list_dxlnode->AddChild(project_elem_dxlnode);
@@ -1029,6 +1026,49 @@ CTranslatorQueryToDXL::TranslateInsertQueryToDXL()
 	}
 
 	return GPOS_NEW(m_mp) CDXLNode(m_mp, insert_dxlnode, query_dxlnode);
+}
+
+//---------------------------------------------------------------------------
+//	@function:
+//		CTranslatorQueryToDXL::CreateDXLProjElemForOmittedColumn
+//
+//	@doc:
+//		The value of a column an INSERT leaves out, which has no default: a
+//		NULL, and for a column whose type is a domain, a NULL that has been
+//		through the domain's constraints, as the planner makes it
+//		(preptlist.c, expand_insert_targetlist, by coerce_null_to_domain()).
+//		A bare NULL of the domain's type is stored without them, so a NOT
+//		NULL domain would take one.  Not in Cloudberry's, which does exactly
+//		that.  A generated column is the planner's exception, and this one's:
+//		its value is computed later, so its NULL is not checked, lest the
+//		check raise for a value that is never stored.
+//
+//---------------------------------------------------------------------------
+CDXLNode *
+CTranslatorQueryToDXL::CreateDXLProjElemForOmittedColumn(
+	const IMDRelation *md_rel, const IMDColumn *mdcol)
+{
+	OID type_oid = CMDIdGPDB::CastMdid(mdcol->MdidType())->Oid();
+	OID rel_oid = CMDIdGPDB::CastMdid(md_rel->MDId())->Oid();
+
+	if (gpdb::GetBaseType(type_oid) == type_oid ||
+		'\0' != gpdb::GetAttGenerated(rel_oid, mdcol->AttrNum()))
+	{
+		return CTranslatorUtils::CreateDXLProjElemConstNULL(
+			m_mp, m_md_accessor, m_context->m_colid_counter, mdcol);
+	}
+
+	Expr *null_expr =
+		(Expr *) gpdb::CoerceNullToDomain(type_oid, mdcol->TypeModifier());
+	CDXLNode *scalar_dxlnode =
+		m_scalar_translator->TranslateScalarToDXL(null_expr, m_var_to_colid_map);
+
+	ULONG colid = m_context->m_colid_counter->next_id();
+	CMDName *mdname = GPOS_NEW(m_mp) CMDName(m_mp, mdcol->Mdname().GetMDName());
+
+	return GPOS_NEW(m_mp) CDXLNode(
+		m_mp, GPOS_NEW(m_mp) CDXLScalarProjElem(m_mp, colid, mdname),
+		scalar_dxlnode);
 }
 
 //---------------------------------------------------------------------------
@@ -1074,24 +1114,110 @@ CTranslatorQueryToDXL::ExtractStorageOptionStr(DefElem *def_elem)
 
 //---------------------------------------------------------------------------
 //	@function:
+//		CTranslatorQueryToDXL::CheckDMLTarget
+//
+//	@doc:
+//		Refuse a target ORCA's DML operator cannot change.  A view is one
+//		only when it has an INSTEAD OF trigger, which the rewriter leaves
+//		for ModifyTable to fire with the whole old row -- a "wholerow" junk
+//		column, where ORCA's operator carries a ctid.  Not in Cloudberry,
+//		whose translator refuses only a foreign table.
+//
+//---------------------------------------------------------------------------
+void
+CTranslatorQueryToDXL::CheckDMLTarget(const RangeTblEntry *rte)
+{
+	if (RELKIND_VIEW == rte->relkind)
+	{
+		GP_UNPORTED("a view's INSTEAD OF trigger");
+	}
+}
+
+//---------------------------------------------------------------------------
+//	@function:
+//		CTranslatorQueryToDXL::CheckDMLReadsOnlyTarget
+//
+//	@doc:
+//		Refuse an UPDATE or DELETE that reads a relation besides its target.
+//
+//		Under READ COMMITTED, PostgreSQL 19 re-checks a row another
+//		transaction has just updated (EvalPlanQual): it re-runs the plan
+//		over the row's new version, with the rows the statement joined it
+//		to fetched again as they were -- through a row mark on each other
+//		relation, which carries its row's identity to ModifyTable in a junk
+//		column.  ORCA's DML operator carries the target's identity and
+//		nothing else, so a plan that read another relation would re-check
+//		against whatever rows of it match now, not the ones it was joined
+//		to, and read all of it again for each such row.  Cloudberry mostly
+//		escapes the question: without its global deadlock detector it
+//		takes an ExclusiveLock for an UPDATE or DELETE, and no row is
+//		updated under one (table.c, CdbTryOpenTable).  With the detector,
+//		and in its single-node mode, it re-checks as PostgreSQL does, over
+//		the same plans.  A sublink is refused with a join, since ORCA makes
+//		most of them one.
+//
+//---------------------------------------------------------------------------
+void
+CTranslatorQueryToDXL::CheckDMLReadsOnlyTarget() const
+{
+	List *fromlist = m_query->jointree->fromlist;
+	BOOL reads_only_target =
+		1 == gpdb::ListLength(fromlist) &&
+		IsA(gpdb::ListNth(fromlist, 0), RangeTblRef) &&
+		((RangeTblRef *) gpdb::ListNth(fromlist, 0))->rtindex ==
+			m_query->resultRelation &&
+		!m_query->hasSubLinks;
+
+	if (!reads_only_target)
+	{
+		GP_UNPORTED("an UPDATE or DELETE that reads another relation");
+	}
+}
+
+//---------------------------------------------------------------------------
+//	@function:
 //		CTranslatorQueryToDXL::GetCtidAndSegmentId
 //
 //	@doc:
 //		Obtains the ids of the ctid and segmentid columns for the target
 //		table of a DML query
 //
+//		The two columns an UPDATE or DELETE plan carries to find the row it
+//		changes: ctid, and in Cloudberry gp_segment_id, the system column
+//		that says which segment has the row.  PostgreSQL 19 has no such
+//		column -- its system columns stop at tableoid -- and on one node
+//		every row is on the one segment there is.  ORCA still wants a
+//		column: its DML operator asserts one, and asks for it from the plan
+//		below.  tableoid stands in, the nearest thing PostgreSQL has to
+//		"where the row is" and a column of every table; ORCA reads it only
+//		to route a row of a randomly distributed table, which no relation
+//		is on one node, and DXL to PlannedStmt finds the row by ctid alone.
+//		M2 decides what a cluster's plan carries.
+//
 //---------------------------------------------------------------------------
 void
 CTranslatorQueryToDXL::GetCtidAndSegmentId(ULONG *ctid, ULONG *segment_id)
 {
-	// T2: the two columns an UPDATE or DELETE plan carries to find the row it
-	// changes.  ctid is PostgreSQL's; gp_segment_id is a system column
-	// Cloudberry adds, which says which segment has the row, and PostgreSQL
-	// 19 has no such column.  What a plan on one node carries in its place is
-	// T2's to decide.  Cloudberry's body is in
-	// github/cloudberry/src/backend/gpopt/translate/CTranslatorQueryToDXL.cpp,
-	// unchanged, for the step that brings it back.
-	GP_UNPORTED("the row-locating columns of an UPDATE or DELETE");
+	const FormData_pg_attribute *att_tup_tupid =
+		SystemAttributeDefinition(SelfItemPointerAttributeNumber);
+	const FormData_pg_attribute *att_tup_tableoid =
+		SystemAttributeDefinition(TableOidAttributeNumber);
+
+	// ctid column id
+	IMDId *mdid =
+		GPOS_NEW(m_mp) CMDIdGPDB(IMDId::EmdidGeneral, att_tup_tupid->atttypid);
+	*ctid = CTranslatorUtils::GetColId(m_query_level, m_query->resultRelation,
+									   SelfItemPointerAttributeNumber, mdid,
+									   m_var_to_colid_map);
+	mdid->Release();
+
+	// tableoid, in the segment id's place
+	mdid = GPOS_NEW(m_mp)
+		CMDIdGPDB(IMDId::EmdidGeneral, att_tup_tableoid->atttypid);
+	*segment_id = CTranslatorUtils::GetColId(
+		m_query_level, m_query->resultRelation, TableOidAttributeNumber, mdid,
+		m_var_to_colid_map);
+	mdid->Release();
 }
 
 //---------------------------------------------------------------------------
@@ -1122,6 +1248,8 @@ CTranslatorQueryToDXL::TranslateDeleteQueryToDXL()
 		GPOS_RAISE(gpdxl::ExmaDXL, gpdxl::ExmiQuery2DXLUnsupportedFeature,
 				   GPOS_WSZ_LIT("Deletes with foreign tables"));
 	}
+	CheckDMLTarget(rte);
+	CheckDMLReadsOnlyTarget();
 	const RTEPermissionInfo *perminfo = gpdb::GetRTEPermissionInfo(
 		m_query->rteperminfos, rte);
 
@@ -1207,6 +1335,8 @@ CTranslatorQueryToDXL::TranslateUpdateQueryToDXL()
 		GPOS_RAISE(gpdxl::ExmaDXL, gpdxl::ExmiQuery2DXLUnsupportedFeature,
 				   GPOS_WSZ_LIT("Updates with foreign tables"));
 	}
+	CheckDMLTarget(rte);
+	CheckDMLReadsOnlyTarget();
 	const RTEPermissionInfo *perminfo = gpdb::GetRTEPermissionInfo(
 		m_query->rteperminfos, rte);
 

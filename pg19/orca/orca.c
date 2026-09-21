@@ -295,6 +295,214 @@ has_virtual_generated_columns_walker(Node *node, void *context)
 }
 
 /*
+ * Does a subquery or a CTE compute a volatile expression in an output column
+ * nothing above it reads?
+ *
+ * ORCA's preprocessor prunes a computed column nothing reads
+ * (CExpressionPreprocessor::PexprPruneUnusedComputedCols), keeping only
+ * set-returning functions.  The planner keeps a volatile one as well
+ * (allpaths.c, remove_unused_subquery_outputs), because what it does is part
+ * of what the query does.  Under ORCA,
+ *
+ *		SELECT count(*) FROM (SELECT nextval('s'), a FROM t) x;
+ *
+ * counted the rows and never advanced the sequence.  So such a query is
+ * refused: ORCA's core is taken unmodified, and nothing the translator hands
+ * it makes it keep a column its parent does not ask for.
+ *
+ * A column is volatile if its expression calls a volatile function, or reads
+ * a volatile column of a subquery below it, which ORCA would prune with it;
+ * a set operation's column, if any branch's is.  It is read if a Var of the
+ * query above names it, at any depth -- other than through a join's alias
+ * list, which the parser leaves only for a FULL JOIN's merged column, and
+ * counting that as unread only refuses more.  A CTE is refused if any of its
+ * columns is volatile, read or not: which columns ORCA keeps of a CTE is
+ * not worth working out for a case this rare.
+ */
+typedef struct columns_read_context
+{
+	Index		rtindex;		/* the range table entry whose columns count */
+	int			sublevels_up;	/* how far below its query the walk is */
+	Bitmapset  *read;			/* the columns some Var reads */
+	bool		whole_row;		/* a whole-row Var reads them all */
+} columns_read_context;
+
+static bool
+columns_read_walker(Node *node, columns_read_context *context)
+{
+	if (node == NULL)
+		return false;
+
+	if (IsA(node, Var))
+	{
+		Var		   *var = (Var *) node;
+
+		if (var->varno == context->rtindex &&
+			var->varlevelsup == context->sublevels_up)
+		{
+			if (var->varattno == InvalidAttrNumber)
+				context->whole_row = true;
+			else if (var->varattno > 0)
+				context->read = bms_add_member(context->read, var->varattno);
+		}
+		return false;
+	}
+
+	if (IsA(node, Query))
+	{
+		bool		result;
+
+		context->sublevels_up++;
+		result = query_tree_walker((Query *) node, columns_read_walker,
+								   (void *) context, QTW_IGNORE_JOINALIASES);
+		context->sublevels_up--;
+		return result;
+	}
+
+	return expression_tree_walker(node, columns_read_walker, (void *) context);
+}
+
+static Bitmapset *volatile_columns(Query *query);
+
+/* Does the expression, of `query`, read a volatile column of a subquery? */
+static bool
+reads_volatile_column_walker(Node *node, Query *query)
+{
+	if (node == NULL)
+		return false;
+
+	if (IsA(node, Var))
+	{
+		Var		   *var = (Var *) node;
+		RangeTblEntry *rte;
+		Bitmapset  *volatile_cols;
+
+		if (var->varlevelsup != 0)
+			return false;
+
+		rte = rt_fetch(var->varno, query->rtable);
+		if (rte->rtekind != RTE_SUBQUERY)
+			return false;
+
+		volatile_cols = volatile_columns(rte->subquery);
+		if (var->varattno == InvalidAttrNumber)
+			return !bms_is_empty(volatile_cols);
+		return bms_is_member(var->varattno, volatile_cols);
+	}
+
+	/* a sublink's own query is not this query's; contain_volatile_functions() looked in it */
+	if (IsA(node, Query))
+		return false;
+
+	return expression_tree_walker(node, reads_volatile_column_walker,
+								  (void *) query);
+}
+
+/* The branches of a set operation, into `result`. */
+static Bitmapset *
+set_operation_volatile_columns(Node *setop, Query *query, Bitmapset *result)
+{
+	if (IsA(setop, RangeTblRef))
+	{
+		RangeTblEntry *rte = rt_fetch(((RangeTblRef *) setop)->rtindex,
+									  query->rtable);
+
+		return bms_add_members(result, volatile_columns(rte->subquery));
+	}
+
+	result = set_operation_volatile_columns(((SetOperationStmt *) setop)->larg,
+											query, result);
+	return set_operation_volatile_columns(((SetOperationStmt *) setop)->rarg,
+										  query, result);
+}
+
+/* The output columns of a query ORCA would prune with what they compute. */
+static Bitmapset *
+volatile_columns(Query *query)
+{
+	Bitmapset  *result = NULL;
+	ListCell   *lc;
+
+	if (query->setOperations != NULL)
+		return set_operation_volatile_columns(query->setOperations, query,
+											  NULL);
+
+	foreach(lc, query->targetList)
+	{
+		TargetEntry *tle = lfirst_node(TargetEntry, lc);
+
+		if (tle->resjunk)
+			continue;
+
+		if (contain_volatile_functions((Node *) tle->expr) ||
+			reads_volatile_column_walker((Node *) tle->expr, query))
+			result = bms_add_member(result, tle->resno);
+	}
+
+	return result;
+}
+
+static bool
+has_unread_volatile_output_walker(Node *node, void *context)
+{
+	if (node == NULL)
+		return false;
+
+	if (IsA(node, Query))
+	{
+		Query	   *query = (Query *) node;
+		ListCell   *lc;
+		Index		rtindex = 0;
+
+		foreach(lc, query->cteList)
+		{
+			CommonTableExpr *cte = lfirst_node(CommonTableExpr, lc);
+
+			if (IsA(cte->ctequery, Query) &&
+				!bms_is_empty(volatile_columns((Query *) cte->ctequery)))
+				return true;
+		}
+
+		/* A set operation reads every column of every branch itself. */
+		if (query->setOperations == NULL)
+		{
+			foreach(lc, query->rtable)
+			{
+				RangeTblEntry *rte = lfirst_node(RangeTblEntry, lc);
+				Bitmapset  *volatile_cols;
+
+				rtindex++;
+				if (rte->rtekind != RTE_SUBQUERY)
+					continue;
+
+				volatile_cols = volatile_columns(rte->subquery);
+				if (!bms_is_empty(volatile_cols))
+				{
+					columns_read_context read;
+
+					read.rtindex = rtindex;
+					read.sublevels_up = 0;
+					read.read = NULL;
+					read.whole_row = false;
+					(void) query_tree_walker(query, columns_read_walker,
+											 (void *) &read,
+											 QTW_IGNORE_JOINALIASES);
+					if (!read.whole_row &&
+						!bms_is_subset(volatile_cols, read.read))
+						return true;
+				}
+			}
+		}
+
+		return query_tree_walker(query, has_unread_volatile_output_walker,
+								 context, 0);
+	}
+
+	return expression_tree_walker(node, has_unread_volatile_output_walker,
+								  context);
+}
+
+/*
  * Fold the grouping step back into the queries above it.
  *
  * PostgreSQL 18 gave a query with GROUP BY an RTE_GROUP range table entry,
@@ -712,6 +920,19 @@ optimize_query(Query *parse, int cursorOptions, ParamListInfo boundParams,
 
 	/* PostgreSQL 18's grouping step, folded back first, as the planner does. */
 	(void) flatten_group_rtes_walker((Node *) pqueryCopy, NULL);
+
+	/*
+	 * A volatile expression ORCA would prune; see the walker.  After the
+	 * grouping step is folded, so that a Var reads a column rather than a
+	 * grouping expression.
+	 */
+	if (has_unread_volatile_output_walker((Node *) pqueryCopy, NULL))
+	{
+		failure->message = pstrdup("Falling back to Postgres-based planner because "
+								   "GPORCA does not support the following feature: "
+								   "a volatile function in a column nothing reads");
+		return NULL;
+	}
 
 	/*
 	 * Constant folding will add dependencies to functions or relations in

@@ -488,6 +488,16 @@ CTranslatorScalarToDXL::TranslateScalarToDXL(
 			return CTranslatorScalarToDXL::TranslateFieldSelectToDXL(
 				expr, var_colid_mapping);
 		}
+		case T_NextValueExpr:
+		{
+			// An identity column's next value, which an INSERT asks for
+			// wherever it leaves such a column out.  Named here, because
+			// the default above prints the node, and every INSERT into an
+			// identity column meets it.  ORCA could carry it as a function
+			// call, but not as nextval(): an identity column's sequence
+			// takes no USAGE privilege, and nextval() checks one.
+			GP_UNPORTED("an identity column's next value");
+		}
 	}
 }
 

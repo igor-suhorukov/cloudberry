@@ -396,6 +396,10 @@ private:
 	// translate an insert query
 	CDXLNode *TranslateInsertQueryToDXL();
 
+	// the value of a column an INSERT leaves out
+	CDXLNode *CreateDXLProjElemForOmittedColumn(const IMDRelation *md_rel,
+												const IMDColumn *mdcol);
+
 	// translate a delete query
 	CDXLNode *TranslateDeleteQueryToDXL();
 
@@ -414,6 +418,12 @@ private:
 	// obtain the ids of the ctid and segmentid columns for the target
 	// table of a DML query
 	void GetCtidAndSegmentId(ULONG *ctid, ULONG *segment_id);
+
+	// refuse a DML target ORCA's DML operator cannot change
+	static void CheckDMLTarget(const RangeTblEntry *rte);
+
+	// refuse an UPDATE or DELETE that reads a relation besides its target
+	void CheckDMLReadsOnlyTarget() const;
 
 	// translate a grouping func expression
 	CDXLNode *TranslateGroupingFuncToDXL(

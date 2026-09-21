@@ -93,7 +93,9 @@ echo
 	echo "unix_socket_directories = '$SOCK'"
 	echo "listen_addresses = ''"
 	echo "port = $PORT"
-	echo "shared_preload_libraries = 'gp_core,gp_orca'"
+	# gp_matview for section 23: it maintains an incremental view with
+	# queries it hands the planner, which ORCA plans.
+	echo "shared_preload_libraries = 'gp_core,gp_orca,gp_matview'"
 } >> "$WORK/data/postgresql.conf"
 
 "$BINDIR/pg_ctl" -D "$WORK/data" -l "$WORK/log" -w -t 60 start > /dev/null 2>&1 \
@@ -2263,9 +2265,6 @@ declined "the system catalogs, as in Cloudberry" \
          "SELECT count(*) FROM pg_class WHERE relname = 't0'" \
          "Queries on master-only tables"
 
-declined "INSERT, UPDATE and DELETE, which T2 brings" \
-         "UPDATE t0 SET c = c WHERE a = -1" "INSERT, UPDATE and DELETE"
-
 # A data-modifying statement in WITH runs whether or not anything reads it.
 # ORCA's CTE producer is a SELECT, and until this was refused ORCA read the
 # rows such a statement would change and changed none of them.
@@ -2283,6 +2282,22 @@ got=$("$PSQL" -X -q -t -A -d postgres \
 	&& ok "and the DELETE and the INSERT in WITH both ran" \
 	|| notok "and the DELETE and the INSERT in WITH both ran" "got [$got]"
 
+# The same kind of loss, found by T2: ORCA prunes a computed column nothing
+# reads, volatile or not, where the planner keeps a volatile one -- so a
+# sequence a subquery's unread column advances was never advanced.
+declined "a volatile function in a column nothing reads" \
+         "SELECT count(*) FROM (SELECT nextval('t0_seq') n, a FROM t0) x" \
+         "a volatile function in a column nothing reads" \
+         "CREATE TEMP SEQUENCE t0_seq"
+
+is "and the planner that plans it advances the sequence for every row" \
+   "CREATE TEMP SEQUENCE t0_seq; SELECT count(*) FROM (SELECT nextval('t0_seq') n, a FROM t0) x;
+    SELECT last_value FROM t0_seq" "$(printf '1001\n1001')"
+
+same "a volatile column the query reads is ORCA's to plan" \
+     "SELECT count(*), count(DISTINCT n) FROM (SELECT nextval('t0_seq') n, a FROM t0) x" \
+     "CREATE TEMP SEQUENCE t0_seq"
+
 # --- ORCA's memory ----------------------------------------------------------------
 
 # gp.optimizer_use_gpdb_allocators is on, as in Cloudberry, and read now: ORCA
@@ -2290,12 +2305,19 @@ got=$("$PSQL" -X -q -t -A -d postgres \
 is "ORCA allocates through PostgreSQL memory contexts" \
    "SELECT count(*) > 0 FROM pg_backend_memory_contexts WHERE name = 'GPORCA memory pool';" "t"
 
+# Measured by the planner: a query ORCA plans adds what it looks up to ORCA's
+# metadata cache, which is ORCA's to keep, and since T2 ORCA plans the
+# measurement itself -- pg_backend_memory_contexts is a function in FROM.  A
+# leak is growth while nothing new is asked.
 is "and a thousand plans later it holds no more than it did" \
    "DO \$\$ DECLARE n bigint; BEGIN
       FOR i IN 1..1000 LOOP EXECUTE format('SELECT count(*) FROM t0 WHERE a < %s GROUP BY b LIMIT 1', i) INTO n; END LOOP; END \$\$;
+    SET gp.optimizer = off;
     CREATE TEMP TABLE t0_mem AS SELECT sum(total_bytes) AS b FROM pg_backend_memory_contexts WHERE name LIKE 'GPORCA%';
+    RESET gp.optimizer;
     DO \$\$ DECLARE n bigint; BEGIN
       FOR i IN 1..1000 LOOP EXECUTE format('SELECT count(*) FROM t0 WHERE a < %s GROUP BY b LIMIT 1', i) INTO n; END LOOP; END \$\$;
+    SET gp.optimizer = off;
     SELECT sum(total_bytes) <= (SELECT b FROM t0_mem) FROM pg_backend_memory_contexts WHERE name LIKE 'GPORCA%';" "t"
 
 echo
@@ -2569,6 +2591,427 @@ declined "a CTE with an outer reference, which ORCA declines itself" \
          "SELECT i, (WITH c AS (SELECT k FROM t1b WHERE t1b.i = t1a.i) SELECT count(*) FROM c c1, c c2) FROM t1a WHERE i < 8 ORDER BY 1" \
          "CTE with outer references" \
          "SET gp.optimizer_enforce_subplans = on"
+
+echo
+echo "23. INSERT, UPDATE and DELETE, assertions, functions in FROM and foreign tables, planned by ORCA"
+
+# T2 of the translator.  A statement that changes rows is checked by what it
+# leaves: "dml" runs it under ORCA and under the planner, each in a session
+# of its own from the same setup -- temporary tables, so the two do not see
+# each other -- and compares what a query afterwards reads, after checking
+# that ORCA planned it and that its plan has the node the check is about.
+
+# dml <name> <node> <statement> <check> <setup>
+dml() {
+	local plan orca pg
+	plan=$(q2 "$5" "EXPLAIN (COSTS OFF, VERBOSE) $3")
+	case "$plan" in
+		*"Optimizer: GPORCA"*) ;;
+		*) notok "$1" "not planned by ORCA: $(printf '%s' "$plan" | tail -3 | tr '\n' '|')"; return ;;
+	esac
+	case "$plan" in
+		*"$2"*) ;;
+		*) notok "$1" "no [$2] in the plan: $(printf '%s' "$plan" | tr '\n' '|')"; return ;;
+	esac
+	orca=$("$PSQL" -X -q -t -A -d postgres -c "$5" -c "$3" -c "$4" 2>&1)
+	pg=$("$PSQL" -X -q -t -A -d postgres -c "$5; SET gp.optimizer = off" -c "$3" -c "$4" 2>&1)
+	[ "$orca" = "$pg" ] && ok "$1" || notok "$1" "orca [$orca], planner [$pg]"
+}
+
+# raised <name> <statements> <error>: ORCA planned them, and running them
+# raised that error.
+raised() {
+	local got; got=$(q "SET gp.optimizer_trace_fallback = on; $2")
+	case "$got" in
+		*"GPORCA failed"*) notok "$1" "not planned by ORCA: $got" ;;
+		*"$3"*) ok "$1" ;;
+		*) notok "$1" "expected an error containing [$3], got [$got]" ;;
+	esac
+}
+
+T2D="CREATE TEMP TABLE t2d AS SELECT g AS a, g % 10 AS b, 'x' || g AS c FROM generate_series(1, 100) g"
+
+# --- rows written -----------------------------------------------------------
+
+dml "an INSERT of values" "Insert on" \
+    "INSERT INTO t2d VALUES (1000, 1, 'y'), (1001, NULL, NULL)" \
+    "SELECT count(*), sum(a), count(b), count(c) FROM t2d" "$T2D"
+
+dml "an INSERT of a query's rows, from its own target" "Insert on" \
+    "INSERT INTO t2d SELECT a + 1000, b, c FROM t2d WHERE b = 3" \
+    "SELECT count(*), sum(a) FROM t2d" "$T2D"
+
+dml "an UPDATE, in place" "Update on" \
+    "UPDATE t2d SET b = b + 100, c = upper(c) WHERE a <= 10" \
+    "SELECT count(*), sum(b), max(c) FROM t2d WHERE b >= 100" "$T2D"
+
+dml "a DELETE" "Delete on" \
+    "DELETE FROM t2d WHERE a > 90 OR b = 0" \
+    "SELECT count(*), sum(a) FROM t2d" "$T2D"
+
+dml "an UPDATE through an index" "Update on" \
+    "UPDATE t2d SET c = 'hit' WHERE a = 5000" \
+    "SELECT a, c FROM t2d WHERE c = 'hit'" \
+    "CREATE TEMP TABLE t2d AS SELECT g AS a, g % 10 AS b, 'x' || g AS c FROM generate_series(1, 20000) g;
+     CREATE INDEX ON t2d (a); ANALYZE t2d"
+
+# The columns an UPDATE sets, and no others, as the planner's plan names
+# them: ModifyTable takes the rest from the old row, and a reader of the plan
+# takes updateColnos as what the statement changes -- gp_sql's guard on a
+# directory table refused an UPDATE of its tag when every column was named.
+has "an UPDATE passes the columns it sets and the row's ctid, as the planner's does" \
+    "$T2D; EXPLAIN (COSTS OFF, VERBOSE) UPDATE t2d SET b = b + 1 WHERE a = 1" \
+    "Output: (t2d.b + 1), t2d.ctid"
+
+# PostgreSQL 19 has no gp_segment_id, and the port gives ORCA tableoid in its
+# place; ModifyTable finds the row by ctid alone, and the stand-in goes no
+# further than ORCA.
+got=$(q2 "$T2D" "EXPLAIN (COSTS OFF, VERBOSE) UPDATE t2d SET b = 0 WHERE a = 1")
+case "$got" in
+	*tableoid*|*gp_segment_id*) notok "the row is found by ctid, with nothing in gp_segment_id's place" "$got" ;;
+	*"t2d.ctid"*) ok "the row is found by ctid, with nothing in gp_segment_id's place" ;;
+	*) notok "the row is found by ctid, with nothing in gp_segment_id's place" "$got" ;;
+esac
+
+dml "a dropped column, which the executor wants a NULL for" "Insert on" \
+    "INSERT INTO t2x VALUES (3, 30); UPDATE t2x SET b = b + 1 WHERE a > 1" \
+    "SELECT * FROM t2x ORDER BY a" \
+    "CREATE TEMP TABLE t2x (a int, gone text, b int); INSERT INTO t2x VALUES (1, 'g', 10), (2, 'g', 20);
+     ALTER TABLE t2x DROP COLUMN gone"
+
+# The executor computes a stored generated column, and insists on a NULL
+# constant for it in an INSERT's plan; an UPDATE recomputes it from the
+# columns the statement set, which ORCA's permission entry did not name.
+dml "a stored generated column, computed on INSERT and on UPDATE" "Update on" \
+    "UPDATE t2g SET a = a + 10 WHERE a = 1" \
+    "INSERT INTO t2g (a) VALUES (3); SELECT * FROM t2g ORDER BY a" \
+    "CREATE TEMP TABLE t2g (a int, g int GENERATED ALWAYS AS (a * 2) STORED); INSERT INTO t2g (a) VALUES (1), (2)"
+
+# --- constraints, which ModifyTable checks, not an Assert --------------------
+#
+# ORCA puts an Assert for a table's NOT NULL and CHECK constraints under the
+# DML node.  ModifyTable checks both itself, after the BEFORE triggers that
+# may change the row, so the Assert is left out.
+
+T2N="CREATE TEMP TABLE t2n (a int PRIMARY KEY, b int NOT NULL CHECK (b > 0))"
+
+got=$(q2 "$T2N" "EXPLAIN (COSTS OFF) INSERT INTO t2n VALUES (1, 1)")
+case "$got" in
+	*Assert*) notok "no Assert for the constraints ModifyTable checks" "$got" ;;
+	*"Optimizer: GPORCA"*) ok "no Assert for the constraints ModifyTable checks" ;;
+	*) notok "no Assert for the constraints ModifyTable checks" "$got" ;;
+esac
+
+raised "a NOT NULL violation, in PostgreSQL's words" \
+       "$T2N; INSERT INTO t2n VALUES (2, NULL)" \
+       "null value in column \"b\" of relation \"t2n\" violates not-null constraint"
+
+raised "a CHECK violation, likewise" \
+       "$T2N; INSERT INTO t2n VALUES (1, 1); UPDATE t2n SET b = 0" \
+       "new row for relation \"t2n\" violates check constraint \"t2n_b_check\""
+
+dml "a BEFORE trigger mends a row before the constraint sees it" "Insert on" \
+    "INSERT INTO t2n VALUES (4, NULL)" \
+    "SELECT * FROM t2n" \
+    "$T2N; CREATE FUNCTION pg_temp.t2_fix() RETURNS trigger LANGUAGE plpgsql AS
+       'BEGIN IF NEW.b IS NULL THEN NEW.b := 42; END IF; RETURN NEW; END';
+     CREATE TRIGGER t2_fix BEFORE INSERT ON t2n FOR EACH ROW EXECUTE FUNCTION pg_temp.t2_fix()"
+
+# The planner's NULL for a column an INSERT leaves out has been through its
+# domain's constraints; a bare NULL of the domain's type would be stored.
+raised "an omitted column of a NOT NULL domain is refused, as the planner refuses it" \
+       "CREATE DOMAIN t2_nn AS int NOT NULL; CREATE TEMP TABLE t2m (a int, d t2_nn);
+        INSERT INTO t2m (a) VALUES (1)" \
+       "domain t2_nn does not allow null values"
+
+# --- triggers, rules and the permission entry -----------------------------------
+
+dml "an UPDATE OF trigger fires when its column changes, and only then" "Update on" \
+    "UPDATE t2u SET c = 5; UPDATE t2u SET b = 6" \
+    "SELECT * FROM t2u_log" \
+    "CREATE TEMP TABLE t2u (a int, b int, c int); CREATE TEMP TABLE t2u_log (msg text);
+     INSERT INTO t2u VALUES (1, 1, 1);
+     CREATE FUNCTION pg_temp.t2_log() RETURNS trigger LANGUAGE plpgsql AS
+       'BEGIN INSERT INTO t2u_log VALUES (OLD.b || ''->'' || NEW.b); RETURN NEW; END';
+     CREATE TRIGGER t2_log AFTER UPDATE OF b ON t2u FOR EACH ROW EXECUTE FUNCTION pg_temp.t2_log()"
+
+dml "a statement trigger's transition table has the rows" "Insert on" \
+    "INSERT INTO t2s SELECT generate_series(1, 7)" \
+    "SELECT * FROM t2s_log" \
+    "CREATE TEMP TABLE t2s (a int); CREATE TEMP TABLE t2s_log (n bigint);
+     CREATE FUNCTION pg_temp.t2_count() RETURNS trigger LANGUAGE plpgsql AS
+       'BEGIN INSERT INTO t2s_log SELECT count(*) FROM newtab; RETURN NULL; END';
+     CREATE TRIGGER t2_count AFTER INSERT ON t2s REFERENCING NEW TABLE AS newtab
+       FOR EACH STATEMENT EXECUTE FUNCTION pg_temp.t2_count()"
+
+dml "a rule's DO ALSO action runs beside the INSERT" "Insert on" \
+    "INSERT INTO t2r VALUES (1), (2)" \
+    "SELECT * FROM t2r_log ORDER BY a" \
+    "CREATE TEMP TABLE t2r (a int); CREATE TEMP TABLE t2r_log (a int);
+     CREATE RULE t2r_also AS ON INSERT TO t2r DO ALSO INSERT INTO t2r_log VALUES (NEW.a)"
+
+dml "an INSERT into a partitioned table routes each row" "Insert on" \
+    "INSERT INTO t2p SELECT g, 'p' || g FROM generate_series(1, 199) g" \
+    "SELECT tableoid::regclass, count(*) FROM t2p GROUP BY 1 ORDER BY 1" \
+    "CREATE TEMP TABLE t2p (a int, b text) PARTITION BY RANGE (a);
+     CREATE TEMP TABLE t2p1 PARTITION OF t2p FOR VALUES FROM (0) TO (100);
+     CREATE TEMP TABLE t2p2 PARTITION OF t2p FOR VALUES FROM (100) TO (200)"
+
+dml "an UPDATE through a view" "Update on" \
+    "UPDATE t2v SET b = b * 100; DELETE FROM t2v WHERE a = 10" \
+    "SELECT * FROM t2vt ORDER BY a" \
+    "CREATE TEMP TABLE t2vt AS SELECT g AS a, g AS b FROM generate_series(1, 10) g;
+     CREATE TEMP VIEW t2v AS SELECT a, b FROM t2vt WHERE a > 5"
+
+dml "a prepared UPDATE, past the plan cache's switch to a generic plan" "Update on" \
+    "EXECUTE t2up(1, 11); EXECUTE t2up(2, 22); EXECUTE t2up(3, 33);
+     EXECUTE t2up(4, 44); EXECUTE t2up(6, 66); EXECUTE t2up(7, 77)" \
+    "SELECT * FROM t2d WHERE a <= 7 ORDER BY a" \
+    "$T2D; PREPARE t2up(int, int) AS UPDATE t2d SET b = \$2 WHERE a = \$1"
+
+# Row-level security's USING clause is the target's security qual, which
+# ORCA's scan applies; its WITH CHECK is a check option, which is refused.
+q "DROP TABLE IF EXISTS t2_rls; DROP ROLE IF EXISTS t2_alice;
+   CREATE ROLE t2_alice; CREATE TABLE t2_rls (a int, owner text);
+   ALTER TABLE t2_rls ENABLE ROW LEVEL SECURITY;
+   CREATE POLICY t2_own ON t2_rls USING (owner = current_user);
+   GRANT ALL ON t2_rls TO t2_alice;" > /dev/null
+T2RLS="TRUNCATE t2_rls; INSERT INTO t2_rls VALUES (1, 't2_alice'), (2, 'bob'), (3, 't2_alice'); SET ROLE t2_alice"
+dml "a DELETE under a row-level security policy deletes only the rows it may see" "Delete on" \
+    "DELETE FROM t2_rls WHERE a > 0" \
+    "RESET ROLE; SELECT * FROM t2_rls ORDER BY a" "$T2RLS"
+
+# --- EvalPlanQual -----------------------------------------------------------------
+#
+# Under READ COMMITTED, an UPDATE or DELETE that waits for another
+# transaction's update of its row re-runs its plan over the new version.
+# Every node below ModifyTable depends on its EvalPlanQual parameter, so that
+# a second re-check in the same statement starts the plan again.
+
+# epq <name> <statement> <other transaction's update> <check>
+epq() {
+	local plan orca pg opt res
+	plan=$(q2 "SELECT" "EXPLAIN (COSTS OFF) $2")
+	case "$plan" in
+		*"Optimizer: GPORCA"*) ;;
+		*) notok "$1" "not planned by ORCA: $(printf '%s' "$plan" | tail -3 | tr '\n' '|')"; return ;;
+	esac
+	for opt in on off; do
+		q "TRUNCATE t2e; INSERT INTO t2e SELECT g, g FROM generate_series(1, 5) g;" > /dev/null
+		( "$PSQL" -X -q -d postgres -c "BEGIN" -c "$3" -c "SELECT pg_sleep(1)" -c "COMMIT" > /dev/null 2>&1 ) &
+		# until the other transaction holds the row, as it sleeps
+		local tries=0
+		until [ "$(q "SELECT count(*) FROM pg_stat_activity WHERE query = 'SELECT pg_sleep(1)' AND state = 'active'")" = 1 ]; do
+			tries=$((tries + 1))
+			[ "$tries" -gt 400 ] && { notok "$1" "the other transaction never started"; wait; return; }
+			sleep 0.05
+		done
+		"$PSQL" -X -q -d postgres -c "SET gp.optimizer = $opt" -c "$2" > /dev/null 2>&1
+		wait
+		res=$(q "$4")
+		if [ "$opt" = on ]; then orca=$res; else pg=$res; fi
+	done
+	[ "$orca" = "$pg" ] && ok "$1" || notok "$1" "orca [$orca], planner [$pg]"
+}
+
+q "CREATE TABLE t2e (a int, b int); CREATE INDEX ON t2e (a);" > /dev/null
+
+epq "an UPDATE that waited acts on the new version of its row" \
+    "UPDATE t2e SET b = b * 10 WHERE a = 1" \
+    "UPDATE t2e SET b = b + 100 WHERE a = 1" \
+    "SELECT a, b FROM t2e ORDER BY a"
+
+epq "and skips a row that no longer qualifies" \
+    "UPDATE t2e SET b = -1 WHERE b = 2" \
+    "UPDATE t2e SET b = 100 WHERE a = 2" \
+    "SELECT a, b FROM t2e ORDER BY a"
+
+epq "a DELETE that waited deletes the new version" \
+    "DELETE FROM t2e WHERE b >= 3" \
+    "UPDATE t2e SET b = 50 WHERE a = 3" \
+    "SELECT a, b FROM t2e ORDER BY a"
+
+epq "two rows re-checked in one statement" \
+    "UPDATE t2e SET b = b * 2 WHERE a <= 3" \
+    "UPDATE t2e SET b = b + 1000 WHERE a IN (1, 2)" \
+    "SELECT a, b FROM t2e ORDER BY a"
+
+# --- what is refused --------------------------------------------------------------
+
+declined "an UPDATE that reads another relation, which row marks would re-read" \
+         "UPDATE t2d SET b = 0 FROM t0 WHERE t2d.a = t0.a" \
+         "an UPDATE or DELETE that reads another relation" "$T2D"
+
+declined "a DELETE with a subquery, which ORCA would make a join" \
+         "DELETE FROM t2d WHERE a IN (SELECT a FROM t0 WHERE a < 5)" \
+         "an UPDATE or DELETE that reads another relation" "$T2D"
+
+declined "an UPDATE of a partitioned table, as in Cloudberry" \
+         "UPDATE t2p SET b = 'u' WHERE a = 5" \
+         "DML(update) on partitioned tables" \
+         "CREATE TEMP TABLE t2p (a int, b text) PARTITION BY RANGE (a);
+          CREATE TEMP TABLE t2p1 PARTITION OF t2p FOR VALUES FROM (0) TO (100)"
+
+declined "RETURNING" \
+         "INSERT INTO t2d VALUES (1000, 1, 'r') RETURNING a, c" "RETURNING clause" "$T2D"
+
+declined "ON CONFLICT" \
+         "INSERT INTO t2d VALUES (1, 1, 'r') ON CONFLICT (a) DO UPDATE SET c = 'conflict'" \
+         "ON CONFLICT clause" "$T2D; CREATE UNIQUE INDEX ON t2d (a)"
+
+declined "a view's INSTEAD OF trigger, which needs the whole old row" \
+         "INSERT INTO t2vi VALUES (42, 42)" "a view's INSTEAD OF trigger" \
+         "CREATE TEMP TABLE t2vt (a int, b int); CREATE TEMP VIEW t2vi AS SELECT * FROM t2vt;
+          CREATE FUNCTION pg_temp.t2_vi() RETURNS trigger LANGUAGE plpgsql AS
+            'BEGIN INSERT INTO t2vt VALUES (NEW.a, NEW.b); RETURN NEW; END';
+          CREATE TRIGGER t2_vi INSTEAD OF INSERT ON t2vi FOR EACH ROW EXECUTE FUNCTION pg_temp.t2_vi()"
+
+declined "an identity column's next value, which nextval() would take a privilege for" \
+         "INSERT INTO t2i (v) VALUES ('a')" "an identity column's next value" \
+         "CREATE TEMP TABLE t2i (id int GENERATED ALWAYS AS IDENTITY, v text)"
+
+declined "row-level security's WITH CHECK, a check option" \
+         "UPDATE t2_rls SET a = a + 10" "View with WITH CHECK OPTION" "$T2RLS"
+
+declined "MERGE" \
+         "MERGE INTO t2d USING (SELECT 1 AS a) s ON t2d.a = s.a WHEN MATCHED THEN UPDATE SET c = 'm'" \
+         "MERGE command" "$T2D"
+
+# --- Assert -------------------------------------------------------------------------
+#
+# A scalar subquery ORCA turns into a join is checked for giving at most one
+# row by an Assert, Cloudberry's AssertOp, a CustomScan here.  It raises the
+# planner's error for the same case.
+
+q "CREATE TABLE t2a (a int, b int); INSERT INTO t2a VALUES (1, 1), (1, 2), (2, 3); ANALYZE t2a;" > /dev/null
+
+shape "a scalar subquery is checked for one row" "Custom Scan (Assert)" \
+      "SELECT a, (SELECT b FROM t2a WHERE a = 2) FROM t2a ORDER BY 1"
+
+has "and EXPLAIN shows the test" \
+    "EXPLAIN (COSTS OFF) SELECT (SELECT b FROM t2a WHERE a = 2) FROM t2a" "Assert Cond:"
+
+got=$(q "EXPLAIN (COSTS OFF) SELECT (SELECT b FROM t2a WHERE a = 1) FROM t2a")
+refused "and more than one row is the planner's error" \
+        "SELECT (SELECT b FROM t2a WHERE a = 1) FROM t2a" \
+        "more than one row returned by a subquery used as an expression"
+case "$got" in
+	*"Custom Scan (Assert)"*"Optimizer: GPORCA"*) ok "raised by ORCA's plan, not the planner's" ;;
+	*) notok "raised by ORCA's plan, not the planner's" "$got" ;;
+esac
+
+# --- functions in FROM --------------------------------------------------------------
+
+shape "a function in FROM" "Function Scan" \
+      "SELECT g FROM generate_series(1, 5) g WHERE g % 2 = 1"
+
+same "one with a column definition list" \
+     "SELECT * FROM json_to_recordset('[{\"a\":1,\"b\":\"x\"},{\"a\":2,\"b\":\"y\"}]') AS x(a int, b text) ORDER BY a"
+
+same "a set-returning SQL function, called rather than inlined" \
+     "SELECT a, b FROM pg_temp.t2_rows() ORDER BY a" \
+     "CREATE FUNCTION pg_temp.t2_rows() RETURNS TABLE (a int, b text) LANGUAGE sql AS
+        'SELECT g, ''r'' || g FROM generate_series(1, 4) g'"
+
+same "a function joined to a table" \
+     "SELECT t0.a, g FROM t0 JOIN generate_series(2, 4) g ON g = t0.a ORDER BY 1"
+
+declined "a function reading a column of the table beside it" \
+         "SELECT t0.a, g FROM t0, generate_series(1, t0.a) g WHERE t0.a < 3 ORDER BY 1, 2" "LATERAL"
+
+declined "WITH ORDINALITY" \
+         "SELECT * FROM generate_series(1, 2) WITH ORDINALITY" "WITH ORDINALITY"
+
+# --- foreign tables -------------------------------------------------------------------
+#
+# The foreign-data wrapper plans its own scan, and ORCA has to let it: the
+# port hands it a PlannerInfo it can plan with, where Cloudberry patched
+# clausesel.c to cope with one it could not.
+
+if [ "$(q "SELECT count(*) FROM pg_available_extensions WHERE name IN ('file_fdw', 'postgres_fdw')")" = 2 ]; then
+	printf '%s\n' "a,b" "1,one" "2,two" "3,three" > "$WORK/t2.csv"
+	q "CREATE EXTENSION file_fdw; CREATE EXTENSION postgres_fdw;
+	   CREATE SERVER t2_file FOREIGN DATA WRAPPER file_fdw;
+	   CREATE FOREIGN TABLE t2_ft (a int, b text) SERVER t2_file
+	     OPTIONS (filename '$WORK/t2.csv', format 'csv', header 'true');
+	   CREATE SERVER t2_loop FOREIGN DATA WRAPPER postgres_fdw
+	     OPTIONS (host '$SOCK', port '$PORT', dbname 'postgres');
+	   CREATE USER MAPPING FOR CURRENT_USER SERVER t2_loop;
+	   CREATE TABLE t2_remote AS SELECT g AS a, 'r' || g AS b FROM generate_series(1, 50) g;
+	   CREATE FOREIGN TABLE t2_pft (a int, b text) SERVER t2_loop OPTIONS (table_name 't2_remote');" > /dev/null
+
+	shape "a file_fdw table" "Foreign File:" \
+	      "SELECT * FROM t2_ft WHERE a > 1 ORDER BY a"
+
+	shape "a postgres_fdw table, with the filter sent to the remote server" \
+	      "Remote SQL: SELECT a, b FROM public.t2_remote WHERE ((a > 45))" \
+	      "SELECT * FROM t2_pft WHERE a > 45 ORDER BY a"
+
+	# One AND of two conditions, which the planner hands a wrapper as two:
+	# as one, it failed an assertion in make_restrictinfo().
+	shape "an AND of conditions, split as the planner splits it" \
+	      "WHERE ((b ~~ 'r1%')) AND (((a % 2) = 0))" \
+	      "SELECT b FROM t2_pft WHERE b LIKE 'r1%' AND a % 2 = 0 ORDER BY 1"
+
+	# Past five custom plans the plan cache keeps a generic one, and the
+	# parameter goes to the remote server as one.
+	got=$(q "PREPARE t2_fq(int) AS SELECT b FROM t2_pft WHERE a = \$1;
+	         EXECUTE t2_fq(1); EXECUTE t2_fq(2); EXECUTE t2_fq(3); EXECUTE t2_fq(4); EXECUTE t2_fq(5);
+	         EXPLAIN (COSTS OFF, VERBOSE) EXECUTE t2_fq(6)")
+	case "$got" in
+		*'(a = $1::integer)'*"Optimizer: GPORCA"*) ok "a generic plan sends its parameter" ;;
+		*) notok "a generic plan sends its parameter" "$got" ;;
+	esac
+
+	same "a foreign table joined to a local one" \
+	     "SELECT p.a, f.b, p.b FROM t2_pft p JOIN t2_ft f ON p.a = f.a ORDER BY 1"
+
+	declined "and one as the target, as in Cloudberry" \
+	         "INSERT INTO t2_pft VALUES (100, 'x')" "Inserts with foreign tables" \
+	         "SELECT"
+else
+	echo "  (file_fdw or postgres_fdw is not installed; foreign tables not tested)"
+fi
+
+# --- an incremental view, maintained under ORCA ----------------------------------------
+#
+# gp_matview maintains a view from inside the statement that changed its base
+# table, with queries it builds and hands the planner -- ORCA, here.  One puts
+# a subquery in a table's place and leaves the table's permission entry,
+# which PostgreSQL's planner never reads and ORCA's permission check handed to
+# ExecCheckPermissions(), which asserts that every entry is used: the first
+# maintenance under ORCA stopped an assert-enabled server.
+
+q "CREATE EXTENSION gp_matview CASCADE;
+   CREATE TABLE t2_base (id int, grp int, amt numeric);
+   INSERT INTO t2_base VALUES (1,1,10),(2,1,20),(3,2,30);
+   CREATE MATERIALIZED VIEW t2_ivm WITH (gp.incremental) AS
+     SELECT grp, count(*) AS n, sum(amt) AS total FROM t2_base GROUP BY grp;" > /dev/null
+
+has "a change to an incremental view's table is ORCA's to plan" \
+    "EXPLAIN (COSTS OFF) UPDATE t2_base SET amt = 1 WHERE id = 2" "Optimizer: GPORCA"
+
+is "and the view follows an INSERT, a DELETE and an UPDATE" \
+   "INSERT INTO t2_base VALUES (4,2,5); DELETE FROM t2_base WHERE id = 1;
+    UPDATE t2_base SET amt = 100 WHERE id = 2;
+    SELECT string_agg(t::text, ' ' ORDER BY t::text) FROM (SELECT * FROM t2_ivm) t" \
+   "(1,1,100) (2,2,35)"
+
+# --- CREATE TABLE AS -----------------------------------------------------------------
+#
+# On one node it is planned as the query it is; ORCA's CTAS operator, which
+# plans the new table's distribution with it, is M2's.
+
+has "CREATE TABLE AS is planned by ORCA as its query" \
+    "EXPLAIN (COSTS OFF) CREATE TABLE t2_ctas AS SELECT a, b FROM t0 WHERE a < 10" "Optimizer: GPORCA"
+
+is "and writes that query's rows" \
+   "CREATE TEMP TABLE t2_ctas AS SELECT a, b FROM t0 WHERE a < 10; SELECT count(*), sum(a) FROM t2_ctas" "9|45"
+
+is "and so does a materialized view, and its refresh" \
+   "CREATE MATERIALIZED VIEW t2_mv AS SELECT b, count(*) n FROM t0 GROUP BY b;
+    INSERT INTO t0 VALUES (-5, 'v1', 0, NULL); REFRESH MATERIALIZED VIEW t2_mv;
+    SELECT n FROM t2_mv WHERE b = 'v1'; DELETE FROM t0 WHERE a = -5; DROP MATERIALIZED VIEW t2_mv" "101"
 
 echo
 echo "  $pass passed, $fail failed"

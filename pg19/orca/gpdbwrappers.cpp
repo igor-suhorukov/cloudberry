@@ -87,6 +87,7 @@ extern "C" {
 #include "partitioning/partdesc.h"
 #include "storage/lmgr.h"
 #include "utils/fmgroids.h"
+#include "parser/parse_coerce.h"
 #include "utils/lsyscache.h"
 #include "utils/memutils.h"
 #include "utils/partcache.h"
@@ -102,6 +103,12 @@ extern "C" {
  * they are the same operators in PostgreSQL 19.
  */
 #include "cb_operator_oids.h"
+
+/*
+ * Cloudberry's BuildForeignScan(), from foreign/foreign.c, which it patched;
+ * see CreateForeignScan.
+ */
+#include "cb_foreign.h"
 
 /*
  * Left out of Cloudberry's list:
@@ -2105,9 +2112,17 @@ ForeignScan *
 gpdb::CreateForeignScan(Oid rel_oid, Index scanrelid, List *qual,
 						List *targetlist, Query *query, RangeTblEntry *rte)
 {
-	// M5.  Cloudberry's BuildForeignScan() is in access/external.h,
-	// which comes with the external-table work.
-	GP_UNPORTED("a scan of a foreign table");
+	// Cloudberry's BuildForeignScan() is in foreign/foreign.c, a file it
+	// patched, beside the external-table code that is M5's; the foreign
+	// scan is not external tables, and the port's is in compat/foreign.c.
+	GP_WRAP_START;
+	{
+		/* catalog tables: whatever the foreign-data wrapper reads */
+		return BuildForeignScan(rel_oid, scanrelid, qual, targetlist, query,
+								rte);
+	}
+	GP_WRAP_END;
+	return nullptr;
 }
 
 TargetEntry *
@@ -2272,12 +2287,42 @@ gpdb::CdbHashRandomSeg(int num_segments)
 }
 
 // check permissions on range table
+//
+// Only the permission entries the range table points at, each under a copy
+// of its entry renumbered to match, as the planner copies them into a plan
+// (setrefs.c, add_rte_to_flat_rtable).  PostgreSQL 19's
+// ExecCheckPermissions asserts that every entry in the list is pointed at,
+// which a plan's list always is and a Query's need not be: gp_matview's delta
+// queries put a subquery in a table's place and leave the table's entry,
+// which no planner ever checks.  Handed the Query's lists as they were, an
+// assert-enabled server stopped at the first incremental view maintained
+// under ORCA.  Cloudberry had removed the assertion.
 void
 gpdb::CheckRTPermissions(List *rtable, List *rteperminfos)
 {
 	GP_WRAP_START;
 	{
-		ExecCheckPermissions(rtable, rteperminfos, true);
+		List *rtes = NIL;
+		List *perminfos = NIL;
+		ListCell *lc;
+
+		foreach (lc, rtable)
+		{
+			RangeTblEntry *rte = (RangeTblEntry *) lfirst(lc);
+			RangeTblEntry *copy;
+
+			if (0 == rte->perminfoindex)
+				continue;
+
+			perminfos =
+				lappend(perminfos, getRTEPermissionInfo(rteperminfos, rte));
+			copy = (RangeTblEntry *) palloc(sizeof(RangeTblEntry));
+			memcpy(copy, rte, sizeof(RangeTblEntry));
+			copy->perminfoindex = list_length(perminfos);
+			rtes = lappend(rtes, copy);
+		}
+
+		ExecCheckPermissions(rtes, perminfos, true);
 		return;
 	}
 	GP_WRAP_END;
@@ -2453,6 +2498,35 @@ gpdb::IndexUsableBySnapshots(Oid index_oid)
 	}
 	GP_WRAP_END;
 	return false;
+}
+
+Node *
+gpdb::CoerceNullToDomain(Oid typid, int32 typmod)
+{
+	GP_WRAP_START;
+	{
+		/* catalog tables: pg_type */
+		int16 typlen;
+		bool typbyval;
+
+		get_typlenbyval(typid, &typlen, &typbyval);
+		return coerce_null_to_domain(typid, typmod, get_typcollation(typid),
+									 typlen, typbyval);
+	}
+	GP_WRAP_END;
+	return nullptr;
+}
+
+char
+gpdb::GetAttGenerated(Oid relid, AttrNumber attnum)
+{
+	GP_WRAP_START;
+	{
+		/* catalog tables: pg_attribute */
+		return get_attgenerated(relid, attnum);
+	}
+	GP_WRAP_END;
+	return '\0';
 }
 
 

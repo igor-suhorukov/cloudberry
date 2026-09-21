@@ -69,6 +69,7 @@
 
 #include "optimizer/walkers.h"
 
+#include "cb_assertop.h"
 #include "cb_clauses.h"
 #include "cb_lsyscache.h"
 #include "cb_module.h"
@@ -1385,6 +1386,9 @@ _PG_init(void)
 
 	GpOrcaDefineSettings();
 	GpOrcaInstallPlannerHook();
+
+	/* The executor nodes ORCA's plans use that PostgreSQL 19 does not have. */
+	gp_orca_register_assert();
 
 	/*
 	 * ORCA is not brought up here.  Its libraries build process-local state

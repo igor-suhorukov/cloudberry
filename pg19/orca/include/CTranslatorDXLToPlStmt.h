@@ -451,6 +451,16 @@ private:
 			ctxt_translation_prev_siblings	// translation contexts of previous siblings
 	);
 
+	// the new values of the columns an UPDATE sets, and their numbers
+	List *CreateUpdateTargetList(List *target_list, const IMDRelation *md_rel,
+								 List **update_colnos);
+
+	// complete the result relation's permission entry from the Query's
+	void CompleteResultRelationPermissions(Index index);
+
+	// make every node of a plan tree depend on a parameter
+	static void AddParamToPlanTree(Plan *plan, int paramid);
+
 	// translate a Split operator
 	Plan *TranslateDXLSplit(
 		const CDXLNode *split_dxlnode, CDXLTranslateContext *output_context,
