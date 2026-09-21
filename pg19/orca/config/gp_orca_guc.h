@@ -48,6 +48,15 @@
 #include "postgres.h"
 
 /*
+ * The bounds below are written as INT_MAX and DBL_MAX, as Cloudberry's own
+ * table writes them.  postgres.h brings in neither, so this header does: a
+ * limit named inside an X-macro is expanded in whatever file uses the macro,
+ * and that file should not have to know what the macro needed.
+ */
+#include <float.h>
+#include <limits.h>
+
+/*
  * The boolean settings, taken from Cloudberry's guc_gp.c with their defaults
  * and their descriptions: X(variable, default, description)
  */
