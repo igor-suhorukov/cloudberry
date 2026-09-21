@@ -2266,6 +2266,23 @@ declined "the system catalogs, as in Cloudberry" \
 declined "INSERT, UPDATE and DELETE, which T2 brings" \
          "UPDATE t0 SET c = c WHERE a = -1" "INSERT, UPDATE and DELETE"
 
+# A data-modifying statement in WITH runs whether or not anything reads it.
+# ORCA's CTE producer is a SELECT, and until this was refused ORCA read the
+# rows such a statement would change and changed none of them.
+declined "a data-modifying statement in WITH" \
+         "WITH d AS (DELETE FROM t0_mcte WHERE a <= 5) SELECT 1" \
+         "a data-modifying statement in WITH" \
+         "CREATE TEMP TABLE t0_mcte AS SELECT generate_series(1, 10) a"
+
+got=$("$PSQL" -X -q -t -A -d postgres \
+	-c "CREATE TEMP TABLE t0_mcte AS SELECT generate_series(1, 10) a" \
+	-c "WITH d AS (DELETE FROM t0_mcte WHERE a <= 5) SELECT 1" \
+	-c "WITH i AS (INSERT INTO t0_mcte VALUES (100)) SELECT 2" \
+	-c "SELECT count(*), max(a) FROM t0_mcte" 2>&1)
+[ "$got" = "$(printf '1\n2\n6|100')" ] \
+	&& ok "and the DELETE and the INSERT in WITH both ran" \
+	|| notok "and the DELETE and the INSERT in WITH both ran" "got [$got]"
+
 # --- ORCA's memory ----------------------------------------------------------------
 
 # gp.optimizer_use_gpdb_allocators is on, as in Cloudberry, and read now: ORCA

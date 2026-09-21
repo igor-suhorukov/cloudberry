@@ -182,6 +182,19 @@ CTranslatorQueryToDXL::CTranslatorQueryToDXL(
 		GP_UNPORTED("FOR UPDATE and FOR SHARE");
 	}
 
+	// A data-modifying statement in WITH.  PostgreSQL runs one whether or
+	// not anything reads it, once, to completion; ORCA has nowhere to put it.
+	// Its CTE producer is a SELECT, and ConstructCTEProducerList would
+	// translate the statement's query as one -- the rows it would change,
+	// read and never changed -- so until this refusal a DELETE in WITH
+	// deleted nothing, and an INSERT inserted nothing, and neither said so.
+	// PostgreSQL allows such a WITH only at the top level, which is where
+	// hasModifyingCTE is set; ConstructCTEProducerList checks each CTE too.
+	if (query->hasModifyingCTE)
+	{
+		GP_UNPORTED("a data-modifying statement in WITH");
+	}
+
 	// Window functions and grouping at one query level.  The translation
 	// below assumes what transformGroupedWindows() makes true before ORCA is
 	// called -- that a query with a window clause does no grouping, which is
@@ -4697,6 +4710,13 @@ CTranslatorQueryToDXL::ConstructCTEProducerList(List *cte_list,
 		{
 			GPOS_RAISE(gpdxl::ExmaDXL, gpdxl::ExmiQuery2DXLUnsupportedFeature,
 					   GPOS_WSZ_LIT("WITH RECURSIVE"));
+		}
+
+		// See the constructor: translated below as a SELECT, a statement
+		// that changes rows would change none.
+		if (CMD_SELECT != ((Query *) cte->ctequery)->commandType)
+		{
+			GP_UNPORTED("a data-modifying statement in WITH");
 		}
 
 		Query *cte_query = CQueryMutators::NormalizeQuery(
