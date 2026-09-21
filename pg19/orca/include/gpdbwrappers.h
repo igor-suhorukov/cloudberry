@@ -817,6 +817,15 @@ Plan *PlanForPartition(Plan *scan, Index root_rti, Index part_rti,
 int TopPartitionIndex(Oid root_oid, Oid leaf_oid);
 List *DynamicScanTlist(Plan *scan);
 
+// An identity column's next value: the call of gp_orca's function ORCA is
+// handed for a NextValueExpr (NULL where gp_orca's extension is not
+// installed), whether a function is one of those, and the NextValueExpr a
+// call of one stands for.  Not in Cloudberry's layer, whose translator
+// refuses a NextValueExpr; see compat/cb_nextvalue.h.
+FuncExpr *NextValueCall(const NextValueExpr *next_value);
+bool IsNextValueFunc(Oid funcid);
+NextValueExpr *NextValueFromCall(const FuncExpr *call);
+
 // get the OID of base elementtype fora given typid
 Oid GetBaseType(Oid typid);
 

@@ -113,6 +113,9 @@ extern "C" {
 /* The scans of a partitioned table's partitions; see PlanForPartition. */
 #include "cb_dynamicscan.h"
 
+/* An identity column's next value, as ORCA carries it; see NextValueCall. */
+#include "cb_nextvalue.h"
+
 /*
  * Left out of Cloudberry's list:
  *
@@ -2555,6 +2558,42 @@ gpdb::DynamicScanTlist(Plan *scan)
 	}
 	GP_WRAP_END;
 	return NIL;
+}
+
+FuncExpr *
+gpdb::NextValueCall(const NextValueExpr *next_value)
+{
+	GP_WRAP_START;
+	{
+		/* catalog tables: pg_namespace, pg_proc */
+		return gp_orca_next_value_call(next_value);
+	}
+	GP_WRAP_END;
+	return nullptr;
+}
+
+bool
+gpdb::IsNextValueFunc(Oid funcid)
+{
+	GP_WRAP_START;
+	{
+		/* catalog tables: pg_proc, pg_namespace */
+		return gp_orca_is_next_value_func(funcid);
+	}
+	GP_WRAP_END;
+	return false;
+}
+
+NextValueExpr *
+gpdb::NextValueFromCall(const FuncExpr *call)
+{
+	GP_WRAP_START;
+	{
+		/* catalog tables: pg_namespace, pg_proc */
+		return gp_orca_next_value_from_call(call);
+	}
+	GP_WRAP_END;
+	return nullptr;
 }
 
 int

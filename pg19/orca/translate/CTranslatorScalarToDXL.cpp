@@ -420,6 +420,15 @@ CTranslatorScalarToDXL::TranslateScalarToDXL(
 		}
 		case T_FuncExpr:
 		{
+			// A call of the function that stands for an identity column's
+			// next value, made by the query itself rather than below: it
+			// would come back as that next value, taken without the
+			// privilege nextval() asks for (compat/nextvalue.c).
+			if (gpdb::IsNextValueFunc(((FuncExpr *) expr)->funcid))
+			{
+				GP_UNPORTED(
+					"a call of gp_orca's function for an identity column's next value");
+			}
 			return CTranslatorScalarToDXL::TranslateFuncExprToDXL(
 				expr, var_colid_mapping);
 		}
@@ -491,12 +500,20 @@ CTranslatorScalarToDXL::TranslateScalarToDXL(
 		case T_NextValueExpr:
 		{
 			// An identity column's next value, which an INSERT asks for
-			// wherever it leaves such a column out.  Named here, because
-			// the default above prints the node, and every INSERT into an
-			// identity column meets it.  ORCA could carry it as a function
-			// call, but not as nextval(): an identity column's sequence
-			// takes no USAGE privilege, and nextval() checks one.
-			GP_UNPORTED("an identity column's next value");
+			// wherever it leaves such a column out.  ORCA has no scalar for
+			// it, and not nextval() either, which checks a USAGE privilege
+			// on the sequence that this does not.  So it is handed a call
+			// of gp_orca's own function for it, which DXL to PlannedStmt
+			// turns back (compat/nextvalue.c) -- past the check above,
+			// which is for a call the query makes.
+			FuncExpr *call = gpdb::NextValueCall((NextValueExpr *) expr);
+			if (nullptr == call)
+			{
+				GP_UNPORTED(
+					"an identity column's next value, where gp_orca's extension is not installed");
+			}
+			return CTranslatorScalarToDXL::TranslateFuncExprToDXL(
+				(Expr *) call, var_colid_mapping);
 		}
 	}
 }

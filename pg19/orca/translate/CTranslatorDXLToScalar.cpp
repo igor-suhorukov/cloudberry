@@ -837,6 +837,15 @@ CTranslatorDXLToScalar::TranslateDXLScalarFuncExprToScalar(
 	func_expr->inputcollid = gpdb::ExprCollation((Node *) func_expr->args);
 	func_expr->funccollid = gpdb::TypeCollation(func_expr->funcresulttype);
 
+	// An identity column's next value, which ORCA was handed as a call of
+	// gp_orca's function for it, goes back to being itself; no plan runs the
+	// function (compat/nextvalue.c).
+	NextValueExpr *next_value = gpdb::NextValueFromCall(func_expr);
+	if (nullptr != next_value)
+	{
+		return (Expr *) next_value;
+	}
+
 	return (Expr *) func_expr;
 }
 

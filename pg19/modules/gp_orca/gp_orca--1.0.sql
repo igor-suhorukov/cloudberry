@@ -751,3 +751,41 @@ LANGUAGE C;
 COMMENT ON FUNCTION gp_orca.md_dxl(text, oid, int) IS
 	'what ORCA''s metadata accessor says about a catalog object, as DXL';
 
+
+/*
+ * What ORCA is handed for an identity column's next value.
+ *
+ * An INSERT that leaves an identity column out asks for its next value with
+ * a NextValueExpr, which ORCA has no scalar for.  It is not nextval(): it
+ * takes no USAGE privilege on the sequence.  So ORCA is handed a call of one
+ * of these instead, over the sequence's OID -- volatile, as nextval() is, so
+ * that ORCA evaluates it once per row -- and the plan it makes has the
+ * NextValueExpr back in its place.  No plan runs these, and a query that
+ * calls one itself is left to the planner, so nobody may execute them but a
+ * superuser, and their body only says so.  See pg19/orca/compat/nextvalue.c.
+ */
+CREATE FUNCTION gp_orca.identity_nextval_int2(seq oid)
+RETURNS int2
+AS 'MODULE_PATHNAME', 'gp_orca_identity_nextval'
+LANGUAGE C STRICT VOLATILE PARALLEL UNSAFE;
+
+CREATE FUNCTION gp_orca.identity_nextval_int4(seq oid)
+RETURNS int4
+AS 'MODULE_PATHNAME', 'gp_orca_identity_nextval'
+LANGUAGE C STRICT VOLATILE PARALLEL UNSAFE;
+
+CREATE FUNCTION gp_orca.identity_nextval_int8(seq oid)
+RETURNS int8
+AS 'MODULE_PATHNAME', 'gp_orca_identity_nextval'
+LANGUAGE C STRICT VOLATILE PARALLEL UNSAFE;
+
+REVOKE ALL ON FUNCTION gp_orca.identity_nextval_int2(oid) FROM PUBLIC;
+REVOKE ALL ON FUNCTION gp_orca.identity_nextval_int4(oid) FROM PUBLIC;
+REVOKE ALL ON FUNCTION gp_orca.identity_nextval_int8(oid) FROM PUBLIC;
+
+COMMENT ON FUNCTION gp_orca.identity_nextval_int2(oid) IS
+	'stands for an identity column''s next value in ORCA''s plans; not callable';
+COMMENT ON FUNCTION gp_orca.identity_nextval_int4(oid) IS
+	'stands for an identity column''s next value in ORCA''s plans; not callable';
+COMMENT ON FUNCTION gp_orca.identity_nextval_int8(oid) IS
+	'stands for an identity column''s next value in ORCA''s plans; not callable';
