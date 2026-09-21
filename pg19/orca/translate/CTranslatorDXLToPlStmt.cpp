@@ -46,6 +46,10 @@ extern "C" {
 #include "access/sysattr.h"
 #include "catalog/gp_distribution_policy.h"
 #include "catalog/pg_collation.h"
+// INT4OID and Int4EqualOperator, for the NULL-safe hash keys of IS NOT
+// DISTINCT FROM.
+#include "catalog/pg_operator.h"
+#include "catalog/pg_type.h"
 // Not cdb/cdbutil.h or utils/uri.h: Cloudberry includes both here and uses
 // nothing from either.  The slice table's types come from cdb_plan_nodes.h.
 #include "cdb/cdb_plan_nodes.h"
@@ -265,7 +269,9 @@ CTranslatorDXLToPlStmt::GetPlannedStmtFromDXL(const CDXLNode *dxlnode,
 	planned_stmt->canSetTag = can_set_tag;
 
 	// transientPlan is the planner's answer for an index that is not usable
-	// by every snapshot yet, which T0 plans no scans of.  dependsOnRole is set
+	// by every snapshot yet, which no ORCA plan uses: a query that would is
+	// refused, and goes to the planner (CheckIndexUsableBySnapshots).
+	// dependsOnRole is set
 	// by the planner only for a foreign join that assumed the current user and
 	// for an inlined SQL function with row security; ORCA plans neither, and
 	// the plan cache takes the Query's own row-security dependence separately
@@ -341,15 +347,20 @@ CTranslatorDXLToPlStmt::TranslateDXLOperatorToPlan(
 	const CDXLOperator *dxlop = dxlnode->GetOperator();
 	gpdxl::Edxlopid ulOpId = dxlop->GetDXLOperator();
 
-	// The operators the port translates, which is the first group of
-	// cloudberry.md's "Next": T0.  Every other operator is refused here, by its
-	// own name, before anything is built -- including the ones whose
-	// translation compiles, such as the index scans, because compiling is not
-	// the same as having been tested against PostgreSQL 19's executor.  Each
-	// later group adds its operators to this list with the tests that prove
-	// them, and the refusal is what the fallback counters report until then.
+	// The operators the port translates, group by group of cloudberry.md's
+	// "Next".  Every other operator is refused here, by its own name, before
+	// anything is built -- including the ones whose translation compiles,
+	// because compiling is not the same as having been tested against
+	// PostgreSQL 19's executor.  Each group adds its operators to this list
+	// with the tests that prove them, and the refusal is what the fallback
+	// counters report until then.
+	//
+	// A CTE producer is not among them, though T1 translates it: it is only
+	// ever a child of a Sequence, and TranslateDXLSequence translates it
+	// itself, so meeting one anywhere else is a shape the port does not know.
 	switch (ulOpId)
 	{
+		// T0: the queries of one table
 		case EdxlopPhysicalTableScan:
 		case EdxlopPhysicalResult:
 		case EdxlopPhysicalLimit:
@@ -357,6 +368,17 @@ CTranslatorDXLToPlStmt::TranslateDXLOperatorToPlan(
 		case EdxlopPhysicalAgg:
 		case EdxlopPhysicalValuesScan:
 		case EdxlopPhysicalMaterialize:
+		// T1: joins, index and bitmap scans, Append, window functions, CTEs
+		case EdxlopPhysicalHashJoin:
+		case EdxlopPhysicalNLJoin:
+		case EdxlopPhysicalMergeJoin:
+		case EdxlopPhysicalIndexScan:
+		case EdxlopPhysicalIndexOnlyScan:
+		case EdxlopPhysicalBitmapTableScan:
+		case EdxlopPhysicalAppend:
+		case EdxlopPhysicalWindow:
+		case EdxlopPhysicalCTEConsumer:
+		case EdxlopPhysicalSequence:
 			break;
 		default:
 			GPOS_RAISE(gpdxl::ExmaDXL, gpdxl::ExmiDXL2PlStmtConversion,
@@ -831,6 +853,26 @@ CTranslatorDXLToPlStmt::SetIndexVarAttnoWalker(
 }
 
 
+// An index that this transaction's snapshots may not read through yet.
+//
+// NOT IN CLOUDBERRY.  CREATE INDEX over a table whose HOT chains are broken
+// marks the index indcheckxmin, and a snapshot taken before it was built can
+// miss rows through it.  The planner skips such an index for as long as that
+// is so, and marks the plan transient so that the plan cache replans once it
+// is not (plancat.c, get_relation_info).  ORCA's metadata admits every valid
+// index, and its metadata cache would keep an index it had once left out, so
+// the check is made where a plan uses one: the query goes to the planner,
+// which skips the index itself.  Rare -- it needs a transaction older than
+// the index -- and counted like any other fallback.
+static void
+CheckIndexUsableBySnapshots(Oid index_oid)
+{
+	if (!gpdb::IndexUsableBySnapshots(index_oid))
+	{
+		GP_UNPORTED("an index newer than this transaction's snapshots");
+	}
+}
+
 //---------------------------------------------------------------------------
 //	@function:
 //		CTranslatorDXLToPlStmt::TranslateDXLIndexScan
@@ -927,6 +969,7 @@ CTranslatorDXLToPlStmt::TranslateDXLIndexScan(
 	// Lock any index we are to scan, since it may not have been properly locked
 	// by the parser (e.g in case of generated scans for partitioned indexes)
 	gpdb::GPDBLockRelationOid(index_oid, dxl_table_descr->LockMode());
+	CheckIndexUsableBySnapshots(index_oid);
 	index_scan->indexid = index_oid;
 
 	Plan *plan = &(index_scan->scan.plan);
@@ -1078,6 +1121,7 @@ CTranslatorDXLToPlStmt::TranslateDXLIndexOnlyScan(
 	Oid index_oid = mdid_index->Oid();
 
 	GPOS_ASSERT(InvalidOid != index_oid);
+	CheckIndexUsableBySnapshots(index_oid);
 	index_scan->indexid = index_oid;
 
 	CDXLTranslateContextBaseTable index_context(m_mp);
@@ -1112,6 +1156,16 @@ CTranslatorDXLToPlStmt::TranslateDXLIndexOnlyScan(
 	}
 
 	index_scan->indexqual = index_cond;
+
+	// PostgreSQL 15 added recheckqual, which Cloudberry's IndexOnlyScan does
+	// not have: the index quals that the executor re-evaluates when the
+	// index says a match was lossy, as a GiST one may.  It is evaluated
+	// against the index tuple, so it is the quals in index-column form --
+	// which is what indexqual already is, its key Vars INDEX_VAR and numbered
+	// by index column (TranslateIndexConditions) -- and not indexqualorig,
+	// whose columns are the table's.  Left NIL, a lossy match would be
+	// returned unchecked.
+	index_scan->recheckqual = (List *) gpdb::CopyObject(index_cond);
 	SetParamIds(plan);
 
 	return (Plan *) index_scan;
@@ -1468,15 +1522,251 @@ CTranslatorDXLToPlStmt::TranslateDXLLimit(
 //		Translates a DXL hash join node into a HashJoin node
 //
 //---------------------------------------------------------------------------
+// A hash key for one side of an IS NOT DISTINCT FROM condition, which has to
+// put a NULL in a bucket like any other value.
+//
+// Cloudberry's HashJoin evaluates such a condition in hashqualclauses, a
+// field of its own, and hashes only non-NULL keys: its executor checks the
+// condition against every tuple of the NULL bucket.  PostgreSQL 19's has no
+// such field, and a strict hash function makes a NULL key skip the hash table
+// altogether -- on the inner side it is never inserted, on the outer side it
+// never probes -- so a NULL could never match a NULL.
+//
+// So the key is the side's own hash function, the one its family pairs with
+// the condition's equality operator, applied to the value, with a NULL hashed
+// as 0: an int4 that is never NULL.  The HashJoin hashes that int4 again with
+// int4's own function, which changes nothing about which keys meet, and the
+// condition itself, among the hashclauses, decides whether two rows in a
+// bucket match -- so a NULL that shares a bucket with a 0 is still told apart
+// from it.  Hashing a value of the key's own type in NULL's place would be
+// simpler, but not every type has a value to make up: an empty varlena is
+// not a numeric, and a hash function would read past its end.
+static Expr *
+NullSafeHashKey(Expr *key, Oid hashfn, Oid inputcollid)
+{
+	FuncExpr *hash = MakeNode(FuncExpr);
+	hash->funcid = hashfn;
+	hash->funcresulttype = INT4OID;
+	hash->funcretset = false;
+	hash->funcvariadic = false;
+	hash->funcformat = COERCE_EXPLICIT_CALL;
+	hash->funccollid = InvalidOid;
+	hash->inputcollid = inputcollid;
+	hash->args = ListMake1(key);
+	hash->location = -1;
+
+	CoalesceExpr *coalesce = MakeNode(CoalesceExpr);
+	coalesce->coalescetype = INT4OID;
+	coalesce->coalescecollid = InvalidOid;
+	coalesce->args = ListMake2(hash, gpdb::MakeIntConst(0));
+	coalesce->location = -1;
+
+	return (Expr *) coalesce;
+}
+
 Plan *
 CTranslatorDXLToPlStmt::TranslateDXLHashJoin(
 	const CDXLNode *hj_dxlnode, CDXLTranslateContext *output_context,
 	CDXLTranslationContextArray *ctxt_translation_prev_siblings)
 {
-	// T1: hash joins.  This body refuses until then, and Cloudberry's is
-	// in github/cloudberry/src/backend/gpopt/translate/CTranslatorDXLToPlStmt.cpp,
-	// unchanged, for the step that brings it back.
-	GP_UNPORTED("hash joins");
+	GPOS_ASSERT(hj_dxlnode->GetOperator()->GetDXLOperator() ==
+				EdxlopPhysicalHashJoin);
+	GPOS_ASSERT(hj_dxlnode->Arity() == EdxlhjIndexSentinel);
+
+	// create hash join node
+	HashJoin *hashjoin = MakeNode(HashJoin);
+
+	Join *join = &(hashjoin->join);
+	Plan *plan = &(join->plan);
+	plan->plan_node_id = m_dxl_to_plstmt_context->GetNextPlanId();
+
+	CDXLPhysicalHashJoin *hashjoin_dxlop =
+		CDXLPhysicalHashJoin::Cast(hj_dxlnode->GetOperator());
+
+	// set join type
+	//
+	// Not Cloudberry's prefetch_inner, a Join field of its own that makes the
+	// executor build the hash table before it reads the outer side, so that a
+	// Motion below cannot deadlock.  PostgreSQL 19 decides that itself, from
+	// the costs, and nothing here moves between processes.
+	join->jointype =
+		GetGPDBJoinTypeFromDXLJoinType(hashjoin_dxlop->GetJoinType());
+
+	// translate operator costs
+	TranslatePlanCosts(hj_dxlnode, plan);
+
+	// translate join children
+	CDXLNode *left_tree_dxlnode = (*hj_dxlnode)[EdxlhjIndexHashLeft];
+	CDXLNode *right_tree_dxlnode = (*hj_dxlnode)[EdxlhjIndexHashRight];
+	CDXLNode *project_list_dxlnode = (*hj_dxlnode)[EdxlhjIndexProjList];
+	CDXLNode *filter_dxlnode = (*hj_dxlnode)[EdxlhjIndexFilter];
+	CDXLNode *join_filter_dxlnode = (*hj_dxlnode)[EdxlhjIndexJoinFilter];
+	CDXLNode *hash_cond_list_dxlnode = (*hj_dxlnode)[EdxlhjIndexHashCondList];
+
+	CDXLTranslateContext left_dxl_translate_ctxt(
+		m_mp, false, output_context->GetColIdToParamIdMap());
+	CDXLTranslateContext right_dxl_translate_ctxt(
+		m_mp, false, output_context->GetColIdToParamIdMap());
+
+	Plan *left_plan =
+		TranslateDXLOperatorToPlan(left_tree_dxlnode, &left_dxl_translate_ctxt,
+								   ctxt_translation_prev_siblings);
+
+	// the right side of the join is the one where the hash phase is done
+	CDXLTranslationContextArray *translation_context_arr_with_siblings =
+		GPOS_NEW(m_mp) CDXLTranslationContextArray(m_mp);
+	translation_context_arr_with_siblings->Append(&left_dxl_translate_ctxt);
+	translation_context_arr_with_siblings->AppendArray(
+		ctxt_translation_prev_siblings);
+	Plan *right_plan =
+		(Plan *) TranslateDXLHash(right_tree_dxlnode, &right_dxl_translate_ctxt,
+								  translation_context_arr_with_siblings);
+
+	CDXLTranslationContextArray *child_contexts =
+		GPOS_NEW(m_mp) CDXLTranslationContextArray(m_mp);
+	child_contexts->Append(&left_dxl_translate_ctxt);
+	child_contexts->Append(&right_dxl_translate_ctxt);
+	// translate proj list and filter
+	TranslateProjListAndFilter(project_list_dxlnode, filter_dxlnode,
+							   nullptr,	 // translate context for the base table
+							   child_contexts, &plan->targetlist, &plan->qual,
+							   output_context);
+
+	// translate join filter
+	join->joinqual = TranslateDXLFilterToQual(
+		join_filter_dxlnode,
+		nullptr,  // translate context for the base table
+		child_contexts, output_context);
+
+	// translate hash cond
+	//
+	// The conditions go into hashclauses as they are, IS NOT DISTINCT FROM
+	// among them, and that is what the executor checks two rows of one bucket
+	// against.  Cloudberry puts the equality form of an IS NOT DISTINCT FROM
+	// there and the condition itself in hashqualclauses, a field PostgreSQL
+	// 19's HashJoin does not have; the NULLs it is for are hashed below.
+	List *hash_conditions_list = NIL;
+
+	const ULONG arity = hash_cond_list_dxlnode->Arity();
+	for (ULONG ul = 0; ul < arity; ul++)
+	{
+		CDXLNode *hash_cond_dxlnode = (*hash_cond_list_dxlnode)[ul];
+
+		List *hash_cond_list =
+			TranslateDXLScCondToQual(hash_cond_dxlnode,
+									 nullptr,  // base table translation context
+									 child_contexts, output_context);
+
+		GPOS_ASSERT(1 == gpdb::ListLength(hash_cond_list));
+
+		hash_conditions_list =
+			gpdb::ListConcat(hash_conditions_list, hash_cond_list);
+	}
+
+	hashjoin->hashclauses = hash_conditions_list;
+
+	GPOS_ASSERT(NIL != hashjoin->hashclauses);
+
+	CDXLTranslationContextArray *hash_child_contexts =
+		GPOS_NEW(m_mp) CDXLTranslationContextArray(m_mp);
+	hash_child_contexts->Append(&left_dxl_translate_ctxt);
+	left_dxl_translate_ctxt.MergeTcxt(&right_dxl_translate_ctxt);
+	hash_child_contexts->Append(&right_dxl_translate_ctxt);
+
+	List* hashclause_list = NIL;
+
+	for (ULONG ul = 0; ul < arity; ul++)
+	{
+		CDXLNode *hash_cond_dxlnode = (*hash_cond_list_dxlnode)[ul];
+
+		if (EdxlopScalarBoolExpr ==
+			hash_cond_dxlnode->GetOperator()->GetDXLOperator())
+		{
+			// clause is a NOT DISTINCT FROM check -> extract the distinct comparison node
+			GPOS_ASSERT(Edxlnot == CDXLScalarBoolExpr::Cast(
+										hash_cond_dxlnode->GetOperator())
+										->GetDxlBoolTypeStr());
+			hash_cond_dxlnode = (*hash_cond_dxlnode)[0];
+			GPOS_ASSERT(EdxlopScalarDistinct ==
+						hash_cond_dxlnode->GetOperator()->GetDXLOperator());
+		}
+
+		CMappingColIdVarPlStmt hj_colid_var_mapping =
+				CMappingColIdVarPlStmt(m_mp, nullptr, hash_child_contexts,
+									   output_context, m_dxl_to_plstmt_context);
+
+		// translate the DXL scalar or scalar distinct comparison into an equality comparison
+		// to store in the hashclause_list
+		Expr *hash_clause_expr =
+			(Expr *)
+				m_translator_dxl_to_scalar->TranslateDXLToScalar(
+					hash_cond_dxlnode, &hj_colid_var_mapping);
+		hashclause_list =
+			gpdb::LAppend(hashclause_list, hash_clause_expr);
+
+	}
+
+	List	   *hashoperators = NIL;
+	List	   *hashcollations = NIL;
+	List	   *inner_hashkeys = NIL;
+	List	   *outer_hashkeys = NIL;
+	ListCell   *lc;
+
+	Hash *hash = (Hash *) right_plan;
+
+	ForEach(lc, hashclause_list)
+	{
+		Node	   *clause = (Node *) lfirst(lc);
+		GPOS_ASSERT((IsA(clause, OpExpr) || IsA(clause, DistinctExpr)));
+		OpExpr	   *hclause = (OpExpr *) clause;
+
+		Expr *outer_key = (Expr *) linitial(hclause->args);
+		Expr *inner_key = (Expr *) lsecond(hclause->args);
+
+		if (IsA(clause, DistinctExpr))
+		{
+			// IS NOT DISTINCT FROM: see NullSafeHashKey.  A DistinctExpr's
+			// opno is the equality operator it negates.
+			Oid outer_hashfn = InvalidOid;
+			Oid inner_hashfn = InvalidOid;
+			if (!gpdb::GetOpHashFunctions(hclause->opno, &outer_hashfn,
+										  &inner_hashfn))
+			{
+				GP_UNPORTED("IS NOT DISTINCT FROM over an operator that cannot hash");
+			}
+			hashoperators = gpdb::LAppendOid(hashoperators, Int4EqualOperator);
+			hashcollations = gpdb::LAppendOid(hashcollations, InvalidOid);
+			outer_key =
+				NullSafeHashKey(outer_key, outer_hashfn, hclause->inputcollid);
+			inner_key =
+				NullSafeHashKey(inner_key, inner_hashfn, hclause->inputcollid);
+		}
+		else
+		{
+			hashoperators = gpdb::LAppendOid(hashoperators, hclause->opno);
+			hashcollations =
+				gpdb::LAppendOid(hashcollations, hclause->inputcollid);
+		}
+
+		outer_hashkeys = gpdb::LAppend(outer_hashkeys, outer_key);
+		inner_hashkeys = gpdb::LAppend(inner_hashkeys, inner_key);
+	}
+
+	hashjoin->hashoperators = hashoperators;
+	hashjoin->hashcollations = hashcollations;
+	hashjoin->hashkeys = outer_hashkeys;
+	hash->hashkeys = inner_hashkeys;
+
+	plan->lefttree = left_plan;
+	plan->righttree = right_plan;
+	SetParamIds(plan);
+
+	// cleanup
+	translation_context_arr_with_siblings->Release();
+	child_contexts->Release();
+	hash_child_contexts->Release();
+
+	return (Plan *) hashjoin;
 }
 
 //---------------------------------------------------------------------------
@@ -1807,10 +2097,143 @@ CTranslatorDXLToPlStmt::TranslateDXLNLJoin(
 	const CDXLNode *nl_join_dxlnode, CDXLTranslateContext *output_context,
 	CDXLTranslationContextArray *ctxt_translation_prev_siblings)
 {
-	// T1: nested loop joins.  This body refuses until then, and Cloudberry's is
-	// in github/cloudberry/src/backend/gpopt/translate/CTranslatorDXLToPlStmt.cpp,
-	// unchanged, for the step that brings it back.
-	GP_UNPORTED("nested loop joins");
+	GPOS_ASSERT(nl_join_dxlnode->GetOperator()->GetDXLOperator() ==
+				EdxlopPhysicalNLJoin);
+	GPOS_ASSERT(nl_join_dxlnode->Arity() == EdxlnljIndexSentinel);
+
+	// create hash join node
+	NestLoop *nested_loop = MakeNode(NestLoop);
+
+	Join *join = &(nested_loop->join);
+	Plan *plan = &(join->plan);
+	plan->plan_node_id = m_dxl_to_plstmt_context->GetNextPlanId();
+
+	CDXLPhysicalNLJoin *dxl_nlj =
+		CDXLPhysicalNLJoin::PdxlConvert(nl_join_dxlnode->GetOperator());
+
+	// set join type
+	join->jointype = GetGPDBJoinTypeFromDXLJoinType(dxl_nlj->GetJoinType());
+
+	// translate operator costs
+	TranslatePlanCosts(nl_join_dxlnode, plan);
+
+	// translate join children
+	CDXLNode *left_tree_dxlnode = (*nl_join_dxlnode)[EdxlnljIndexLeftChild];
+	CDXLNode *right_tree_dxlnode = (*nl_join_dxlnode)[EdxlnljIndexRightChild];
+
+	CDXLNode *project_list_dxlnode = (*nl_join_dxlnode)[EdxlnljIndexProjList];
+	CDXLNode *filter_dxlnode = (*nl_join_dxlnode)[EdxlnljIndexFilter];
+	CDXLNode *join_filter_dxlnode = (*nl_join_dxlnode)[EdxlnljIndexJoinFilter];
+
+	CDXLTranslateContext left_dxl_translate_ctxt(
+		m_mp, false, output_context->GetColIdToParamIdMap());
+	CDXLTranslateContext right_dxl_translate_ctxt(
+		m_mp, false, output_context->GetColIdToParamIdMap());
+
+	// Not Cloudberry's prefetch_inner, which it sets for every nested loop
+	// but an index one, whose inner side cannot run before the outer row it
+	// is parameterised by exists.  See TranslateDXLHashJoin for what the field
+	// is for, and why PostgreSQL 19 needs none.
+
+	CDXLTranslationContextArray *translation_context_arr_with_siblings =
+		GPOS_NEW(m_mp) CDXLTranslationContextArray(m_mp);
+	Plan *left_plan = nullptr;
+	Plan *right_plan = nullptr;
+	if (dxl_nlj->IsIndexNLJ())
+	{
+		const CDXLColRefArray *pdrgdxlcrOuterRefs =
+			dxl_nlj->GetNestLoopParamsColRefs();
+		const ULONG ulLen = pdrgdxlcrOuterRefs->Size();
+		for (ULONG ul = 0; ul < ulLen; ul++)
+		{
+			CDXLColRef *pdxlcr = (*pdrgdxlcrOuterRefs)[ul];
+			IMDId *pmdid = pdxlcr->MdidType();
+			ULONG ulColid = pdxlcr->Id();
+			INT iTypeModifier = pdxlcr->TypeModifier();
+			OID iTypeOid = CMDIdGPDB::CastMdid(pmdid)->Oid();
+
+			if (nullptr ==
+				right_dxl_translate_ctxt.GetParamIdMappingElement(ulColid))
+			{
+				ULONG param_id =
+					m_dxl_to_plstmt_context->GetNextParamId(iTypeOid);
+				CMappingElementColIdParamId *pmecolidparamid =
+					GPOS_NEW(m_mp) CMappingElementColIdParamId(
+						ulColid, param_id, pmdid, iTypeModifier);
+#ifdef GPOS_DEBUG
+				BOOL fInserted GPOS_ASSERTS_ONLY =
+#endif
+					right_dxl_translate_ctxt.FInsertParamMapping(
+						ulColid, pmecolidparamid);
+				GPOS_ASSERT(fInserted);
+			}
+		}
+		// right child (the index scan side) has references to left child's columns,
+		// we need to translate left child first to load its columns into translation context
+		left_plan = TranslateDXLOperatorToPlan(left_tree_dxlnode,
+											   &left_dxl_translate_ctxt,
+											   ctxt_translation_prev_siblings);
+
+		translation_context_arr_with_siblings->Append(&left_dxl_translate_ctxt);
+		translation_context_arr_with_siblings->AppendArray(
+			ctxt_translation_prev_siblings);
+
+		// translate right child after left child translation is complete
+		right_plan = TranslateDXLOperatorToPlan(
+			right_tree_dxlnode, &right_dxl_translate_ctxt,
+			translation_context_arr_with_siblings);
+	}
+	else
+	{
+		// left child may include a PartitionSelector with references to right child's columns,
+		// we need to translate right child first to load its columns into translation context
+		right_plan = TranslateDXLOperatorToPlan(right_tree_dxlnode,
+												&right_dxl_translate_ctxt,
+												ctxt_translation_prev_siblings);
+
+		translation_context_arr_with_siblings->Append(
+			&right_dxl_translate_ctxt);
+		translation_context_arr_with_siblings->AppendArray(
+			ctxt_translation_prev_siblings);
+
+		// translate left child after right child translation is complete
+		left_plan = TranslateDXLOperatorToPlan(
+			left_tree_dxlnode, &left_dxl_translate_ctxt,
+			translation_context_arr_with_siblings);
+	}
+	CDXLTranslationContextArray *child_contexts =
+		GPOS_NEW(m_mp) CDXLTranslationContextArray(m_mp);
+	child_contexts->Append(&left_dxl_translate_ctxt);
+	child_contexts->Append(&right_dxl_translate_ctxt);
+
+	// translate proj list and filter
+	TranslateProjListAndFilter(project_list_dxlnode, filter_dxlnode,
+							   nullptr,	 // translate context for the base table
+							   child_contexts, &plan->targetlist, &plan->qual,
+							   output_context);
+
+	// translate join condition
+	join->joinqual = TranslateDXLFilterToQual(
+		join_filter_dxlnode,
+		nullptr,  // translate context for the base table
+		child_contexts, output_context);
+
+	// create nest loop params for index nested loop joins
+	if (dxl_nlj->IsIndexNLJ())
+	{
+		((NestLoop *) plan)->nestParams = TranslateNestLoopParamList(
+			dxl_nlj->GetNestLoopParamsColRefs(), &left_dxl_translate_ctxt,
+			&right_dxl_translate_ctxt);
+	}
+	plan->lefttree = left_plan;
+	plan->righttree = right_plan;
+	SetParamIds(plan);
+
+	// cleanup
+	translation_context_arr_with_siblings->Release();
+	child_contexts->Release();
+
+	return (Plan *) nested_loop;
 }
 
 //---------------------------------------------------------------------------
@@ -1826,10 +2249,160 @@ CTranslatorDXLToPlStmt::TranslateDXLMergeJoin(
 	const CDXLNode *merge_join_dxlnode, CDXLTranslateContext *output_context,
 	CDXLTranslationContextArray *ctxt_translation_prev_siblings)
 {
-	// T1: merge joins.  This body refuses until then, and Cloudberry's is
-	// in github/cloudberry/src/backend/gpopt/translate/CTranslatorDXLToPlStmt.cpp,
-	// unchanged, for the step that brings it back.
-	GP_UNPORTED("merge joins");
+	GPOS_ASSERT(merge_join_dxlnode->GetOperator()->GetDXLOperator() ==
+				EdxlopPhysicalMergeJoin);
+	GPOS_ASSERT(merge_join_dxlnode->Arity() == EdxlmjIndexSentinel);
+
+	// create merge join node
+	MergeJoin *merge_join = MakeNode(MergeJoin);
+
+	Join *join = &(merge_join->join);
+	Plan *plan = &(join->plan);
+	plan->plan_node_id = m_dxl_to_plstmt_context->GetNextPlanId();
+
+	CDXLPhysicalMergeJoin *merge_join_dxlop =
+		CDXLPhysicalMergeJoin::Cast(merge_join_dxlnode->GetOperator());
+
+	// set join type
+	join->jointype =
+		GetGPDBJoinTypeFromDXLJoinType(merge_join_dxlop->GetJoinType());
+
+	// translate operator costs
+	TranslatePlanCosts(merge_join_dxlnode, plan);
+
+	// translate join children
+	CDXLNode *left_tree_dxlnode = (*merge_join_dxlnode)[EdxlmjIndexLeftChild];
+	CDXLNode *right_tree_dxlnode = (*merge_join_dxlnode)[EdxlmjIndexRightChild];
+
+	CDXLNode *project_list_dxlnode = (*merge_join_dxlnode)[EdxlmjIndexProjList];
+	CDXLNode *filter_dxlnode = (*merge_join_dxlnode)[EdxlmjIndexFilter];
+	CDXLNode *join_filter_dxlnode =
+		(*merge_join_dxlnode)[EdxlmjIndexJoinFilter];
+	CDXLNode *merge_cond_list_dxlnode =
+		(*merge_join_dxlnode)[EdxlmjIndexMergeCondList];
+
+	CDXLTranslateContext left_dxl_translate_ctxt(
+		m_mp, false, output_context->GetColIdToParamIdMap());
+	CDXLTranslateContext right_dxl_translate_ctxt(
+		m_mp, false, output_context->GetColIdToParamIdMap());
+
+	Plan *left_plan =
+		TranslateDXLOperatorToPlan(left_tree_dxlnode, &left_dxl_translate_ctxt,
+								   ctxt_translation_prev_siblings);
+
+	CDXLTranslationContextArray *translation_context_arr_with_siblings =
+		GPOS_NEW(m_mp) CDXLTranslationContextArray(m_mp);
+	translation_context_arr_with_siblings->Append(&left_dxl_translate_ctxt);
+	translation_context_arr_with_siblings->AppendArray(
+		ctxt_translation_prev_siblings);
+
+	Plan *right_plan = TranslateDXLOperatorToPlan(
+		right_tree_dxlnode, &right_dxl_translate_ctxt,
+		translation_context_arr_with_siblings);
+
+	CDXLTranslationContextArray *child_contexts =
+		GPOS_NEW(m_mp) CDXLTranslationContextArray(m_mp);
+	child_contexts->Append(&left_dxl_translate_ctxt);
+	child_contexts->Append(&right_dxl_translate_ctxt);
+
+	// translate proj list and filter
+	TranslateProjListAndFilter(project_list_dxlnode, filter_dxlnode,
+							   nullptr,	 // translate context for the base table
+							   child_contexts, &plan->targetlist, &plan->qual,
+							   output_context);
+
+	// translate join filter
+	join->joinqual = TranslateDXLFilterToQual(
+		join_filter_dxlnode,
+		nullptr,  // translate context for the base table
+		child_contexts, output_context);
+
+	// translate merge cond
+	List *merge_conditions_list = NIL;
+
+	const ULONG num_join_conds = merge_cond_list_dxlnode->Arity();
+	for (ULONG ul = 0; ul < num_join_conds; ul++)
+	{
+		CDXLNode *merge_condition_dxlnode = (*merge_cond_list_dxlnode)[ul];
+		List *merge_condition_list =
+			TranslateDXLScCondToQual(merge_condition_dxlnode,
+									 nullptr,  // base table translation context
+									 child_contexts, output_context);
+
+		GPOS_ASSERT(1 == gpdb::ListLength(merge_condition_list));
+		merge_conditions_list =
+			gpdb::ListConcat(merge_conditions_list, merge_condition_list);
+	}
+
+	GPOS_ASSERT(NIL != merge_conditions_list);
+
+	merge_join->mergeclauses = merge_conditions_list;
+
+	plan->lefttree = left_plan;
+	plan->righttree = right_plan;
+	SetParamIds(plan);
+
+	// PostgreSQL 18 replaced the per-clause btree strategy numbers with
+	// mergeReversals, a flag saying whether each clause's sort is descending.
+	// ORCA sorts both sides ascending, NULLs last, for a merge join -- which
+	// is what Cloudberry's BTLessStrategyNumber and NullsFirst = false said,
+	// and must match CPhysicalFullMergeJoin::PosRequired() -- so no clause is
+	// reversed.
+	merge_join->mergeFamilies =
+		(Oid *) gpdb::GPDBAlloc(sizeof(Oid) * num_join_conds);
+	merge_join->mergeCollations =
+		(Oid *) gpdb::GPDBAlloc(sizeof(Oid) * num_join_conds);
+	merge_join->mergeReversals =
+		(bool *) gpdb::GPDBAlloc(sizeof(bool) * num_join_conds);
+	merge_join->mergeNullsFirst =
+		(bool *) gpdb::GPDBAlloc(sizeof(bool) * num_join_conds);
+
+	ListCell *lc;
+	ULONG ul = 0;
+	foreach (lc, merge_join->mergeclauses)
+	{
+		Expr *expr = (Expr *) lfirst(lc);
+
+		if (IsA(expr, OpExpr))
+		{
+			// we are ok - phew
+			OpExpr *opexpr = (OpExpr *) expr;
+			List *mergefamilies = gpdb::GetMergeJoinOpFamilies(opexpr->opno);
+
+			GPOS_ASSERT(nullptr != mergefamilies &&
+						gpdb::ListLength(mergefamilies) > 0);
+
+			// Pick the first - it's probably what we want
+			merge_join->mergeFamilies[ul] = gpdb::ListNthOid(mergefamilies, 0);
+
+			GPOS_ASSERT(gpdb::ListLength(opexpr->args) == 2);
+			Expr *leftarg = (Expr *) gpdb::ListNth(opexpr->args, 0);
+
+			Expr *rightarg PG_USED_FOR_ASSERTS_ONLY =
+				(Expr *) gpdb::ListNth(opexpr->args, 1);
+			GPOS_ASSERT(gpdb::ExprCollation((Node *) leftarg) ==
+						gpdb::ExprCollation((Node *) rightarg));
+
+			merge_join->mergeCollations[ul] =
+				gpdb::ExprCollation((Node *) leftarg);
+
+			merge_join->mergeReversals[ul] = false;
+			merge_join->mergeNullsFirst[ul] = false;
+			++ul;
+		}
+		else
+		{
+			GPOS_RAISE(gpdxl::ExmaDXL, gpdxl::ExmiQuery2DXLUnsupportedFeature,
+					   GPOS_WSZ_LIT("Not an op expression in merge clause"));
+			break;
+		}
+	}
+
+	// cleanup
+	translation_context_arr_with_siblings->Release();
+	child_contexts->Release();
+
+	return (Plan *) merge_join;
 }
 
 //---------------------------------------------------------------------------
@@ -1845,10 +2418,49 @@ CTranslatorDXLToPlStmt::TranslateDXLHash(
 	const CDXLNode *dxlnode, CDXLTranslateContext *output_context,
 	CDXLTranslationContextArray *ctxt_translation_prev_siblings)
 {
-	// T1: hash joins.  This body refuses until then, and Cloudberry's is
-	// in github/cloudberry/src/backend/gpopt/translate/CTranslatorDXLToPlStmt.cpp,
-	// unchanged, for the step that brings it back.
-	GP_UNPORTED("hash joins");
+	Hash *hash = MakeNode(Hash);
+
+	Plan *plan = &(hash->plan);
+	plan->plan_node_id = m_dxl_to_plstmt_context->GetNextPlanId();
+
+	// translate dxl node
+	CDXLTranslateContext dxl_translate_ctxt(
+		m_mp, false, output_context->GetColIdToParamIdMap());
+
+	Plan *left_plan = TranslateDXLOperatorToPlan(
+		dxlnode, &dxl_translate_ctxt, ctxt_translation_prev_siblings);
+
+	GPOS_ASSERT(0 < dxlnode->Arity());
+
+	// create a reference to each entry in the child project list to create the target list of
+	// the hash node
+	CDXLNode *project_list_dxlnode = (*dxlnode)[0];
+	List *target_list = TranslateDXLProjectListToHashTargetList(
+		project_list_dxlnode, &dxl_translate_ctxt, output_context);
+
+	// copy costs from child node; the startup cost for the hash node is the total cost
+	// of the child plan, see make_hash in createplan.c
+	plan->startup_cost = left_plan->total_cost;
+	plan->total_cost = left_plan->total_cost;
+	plan->plan_rows = left_plan->plan_rows;
+	plan->plan_width = left_plan->plan_width;
+
+	plan->targetlist = target_list;
+	plan->lefttree = left_plan;
+	plan->righttree = nullptr;
+	plan->qual = NIL;
+
+	// Not Cloudberry's rescannable, a Hash field of its own that keeps the
+	// hash table's batches on disk for a rescan of a hash join below a
+	// Motion.  PostgreSQL 19's hash join rebuilds or keeps its table on a
+	// rescan by itself, from whether the inner side's parameters changed.
+	//
+	// No skew table: skewTable stays InvalidOid, as it does for a planner's
+	// hash join whose outer side is not a plain relation scan.
+
+	SetParamIds(plan);
+
+	return (Plan *) hash;
 }
 
 //---------------------------------------------------------------------------
@@ -2234,10 +2846,7 @@ CTranslatorDXLToPlStmt::TranslateDXLAgg(
 	return (Plan *) agg;
 }
 
-// The four helpers below are TranslateDXLWindowAgg's, and have no caller
-// while its body refuses; T1 brings it back.  [[maybe_unused]] rather than
-// removing them, so that they come back with it unchanged.
-[[maybe_unused]] static
+static
 int WindowFrameSpecToOptions(const EdxlFrameSpec &dxlFS) {
 	int winFrameOptions = 0;
 	if (EdxlfsRow == dxlFS)
@@ -2255,7 +2864,7 @@ int WindowFrameSpecToOptions(const EdxlFrameSpec &dxlFS) {
 	return winFrameOptions;
 }
 
-[[maybe_unused]] static
+static
 int WindowFrameExclusionStrategyToOptions(const EdxlFrameExclusionStrategy &dxlFES) {
 	int winFrameOptions = 0;
 	if (dxlFES == EdxlfesCurrentRow)
@@ -2274,7 +2883,7 @@ int WindowFrameExclusionStrategyToOptions(const EdxlFrameExclusionStrategy &dxlF
 	return winFrameOptions;
 }
 
-[[maybe_unused]] static
+static
 int WindowFrameStartBoundaryToOptions(const EdxlFrameBoundary &dxlFB) {
 	int winFrameOptions = 0;
 	if (dxlFB == EdxlfbUnboundedPreceding)
@@ -2308,7 +2917,7 @@ int WindowFrameStartBoundaryToOptions(const EdxlFrameBoundary &dxlFB) {
 	return winFrameOptions;
 }
 
-[[maybe_unused]] static
+static
 int WindowFrameEndBoundaryToOptions(const EdxlFrameBoundary &dxlFB) {
 	int winFrameOptions = 0;
 	if (dxlFB == EdxlfbUnboundedPreceding)
@@ -2355,10 +2964,229 @@ CTranslatorDXLToPlStmt::TranslateDXLWindowAgg(
 	const CDXLNode *window_dxlnode, CDXLTranslateContext *output_context,
 	CDXLTranslationContextArray *ctxt_translation_prev_siblings)
 {
-	// T1: window functions.  This body refuses until then, and Cloudberry's is
-	// in github/cloudberry/src/backend/gpopt/translate/CTranslatorDXLToPlStmt.cpp,
-	// unchanged, for the step that brings it back.
-	GP_UNPORTED("window functions");
+	// create a WindowAgg plan node
+	WindowAgg *window = MakeNode(WindowAgg);
+
+	Plan *plan = &(window->plan);
+	plan->plan_node_id = m_dxl_to_plstmt_context->GetNextPlanId();
+
+	CDXLPhysicalWindow *window_dxlop =
+		CDXLPhysicalWindow::Cast(window_dxlnode->GetOperator());
+
+	// translate the operator costs
+	TranslatePlanCosts(window_dxlnode, plan);
+
+	// translate children
+	CDXLNode *child_dxlnode = (*window_dxlnode)[EdxlwindowIndexChild];
+	CDXLNode *project_list_dxlnode = (*window_dxlnode)[EdxlwindowIndexProjList];
+	CDXLNode *filter_dxlnode = (*window_dxlnode)[EdxlwindowIndexFilter];
+
+	CDXLTranslateContext child_context(m_mp, true,
+									   output_context->GetColIdToParamIdMap());
+	Plan *child_plan = TranslateDXLOperatorToPlan(
+		child_dxlnode, &child_context, ctxt_translation_prev_siblings);
+
+	CDXLTranslationContextArray *child_contexts =
+		GPOS_NEW(m_mp) CDXLTranslationContextArray(m_mp);
+	child_contexts->Append(&child_context);
+
+	// translate proj list and filter
+	TranslateProjListAndFilter(project_list_dxlnode, filter_dxlnode,
+							   nullptr,	 // translate context for the base table
+							   child_contexts,	// pdxltrctxRight,
+							   &plan->targetlist, &plan->qual, output_context);
+
+	ListCell *lc;
+
+	foreach (lc, plan->targetlist)
+	{
+		TargetEntry *target_entry = (TargetEntry *) lfirst(lc);
+		if (IsA(target_entry->expr, WindowFunc))
+		{
+			WindowFunc *window_func = (WindowFunc *) target_entry->expr;
+			window->winref = window_func->winref;
+			break;
+		}
+	}
+
+	// PostgreSQL 18 made EXPLAIN print each window's definition under its
+	// name, and it quotes the name without asking whether there is one.  The
+	// planner's are the query's window names, or w1, w2 and so on; ORCA's
+	// DXL carries no name, so the window is named for its winref, the same
+	// way.
+	CHAR winname[NAMEDATALEN];
+	snprintf(winname, sizeof(winname), "w%u", window->winref);
+	window->winname = PStrDup(winname);
+
+	// PostgreSQL 15's run conditions, which the planner derives from a
+	// monotonic window function under a filter, and ORCA does not.  With none,
+	// topWindow decides one thing: whether the node may carry a qual, which
+	// PostgreSQL 19 asserts only the top window does, because its run-condition
+	// logic filters there.  ORCA puts a filter on whichever window node it
+	// chose, and without a run condition the executor applies a qual in any of
+	// them the same way (nodeWindowAgg.c), so every one says it is the top.
+	window->runCondition = NIL;
+	window->runConditionOrig = NIL;
+	window->topWindow = true;
+
+	plan->lefttree = child_plan;
+
+	// translate partition columns
+	const ULongPtrArray *part_by_cols_array =
+		window_dxlop->GetPartByColsArray();
+	window->partNumCols = part_by_cols_array->Size();
+
+	if (window->partNumCols > 0)
+	{
+		window->partColIdx = (AttrNumber *) gpdb::GPDBAlloc(
+			window->partNumCols * sizeof(AttrNumber));
+		window->partOperators =
+			(Oid *) gpdb::GPDBAlloc(window->partNumCols * sizeof(Oid));
+		window->partCollations =
+			(Oid *) gpdb::GPDBAlloc(window->partNumCols * sizeof(Oid));
+	} else {
+		window->partColIdx = nullptr;
+		window->partOperators = nullptr;
+		window->partCollations = nullptr;
+	}
+
+	const ULONG num_of_part_cols = part_by_cols_array->Size();
+	for (ULONG ul = 0; ul < num_of_part_cols; ul++)
+	{
+		ULONG part_colid = *((*part_by_cols_array)[ul]);
+		const TargetEntry *te_part_colid =
+			child_context.GetTargetEntry(part_colid);
+		if (nullptr == te_part_colid)
+		{
+			GPOS_RAISE(gpdxl::ExmaDXL, gpdxl::ExmiDXL2PlStmtAttributeNotFound,
+					   part_colid);
+		}
+		window->partColIdx[ul] = te_part_colid->resno;
+
+		// Also find the equality operators to use for each partitioning key col.
+		Oid type_id = gpdb::ExprType((Node *) te_part_colid->expr);
+		window->partOperators[ul] = gpdb::GetEqualityOp(type_id);
+		Assert(window->partOperators[ul] != 0);
+		window->partCollations[ul] =
+			gpdb::ExprCollation((Node *) te_part_colid->expr);
+	}
+
+	// translate window keys
+	const ULONG size = window_dxlop->WindowKeysCount();
+	if (size > 1)
+	{
+		GpdbEreport(ERRCODE_INTERNAL_ERROR, ERROR,
+					"ORCA produced a plan with more than one window key",
+					nullptr);
+	}
+	GPOS_ASSERT(size <= 1 && "cannot have more than one window key");
+
+	if (size == 1)
+	{
+		// translate the sorting columns used in the window key
+		const CDXLWindowKey *window_key = window_dxlop->GetDXLWindowKeyAt(0);
+		const CDXLWindowFrame *window_frame = window_key->GetWindowFrame();
+		const CDXLNode *sort_col_list_dxlnode = window_key->GetSortColListDXL();
+
+		const ULONG num_of_cols = sort_col_list_dxlnode->Arity();
+
+		window->ordNumCols = num_of_cols;
+		window->ordColIdx =
+			(AttrNumber *) gpdb::GPDBAlloc(num_of_cols * sizeof(AttrNumber));
+		window->ordOperators =
+			(Oid *) gpdb::GPDBAlloc(num_of_cols * sizeof(Oid));
+		window->ordCollations =
+			(Oid *) gpdb::GPDBAlloc(num_of_cols * sizeof(Oid));
+		bool *is_nulls_first =
+			(bool *) gpdb::GPDBAlloc(num_of_cols * sizeof(bool));
+		TranslateSortCols(sort_col_list_dxlnode, &child_context,
+						  window->ordColIdx, window->ordOperators,
+						  window->ordCollations, is_nulls_first);
+
+		// Not Cloudberry's firstOrderCol, firstOrderCmpOperator and
+		// firstOrderNullsFirst, WindowAgg fields of its own that PostgreSQL
+		// 19's executor finds from the window frame instead.
+		gpdb::GPDBFree(is_nulls_first);
+
+		// The ordOperators array is actually supposed to contain equality operators,
+		// not ordering operators (< or >). So look up the corresponding equality
+		// operator for each ordering operator.
+		for (ULONG i = 0; i < num_of_cols; i++)
+		{
+			window->ordOperators[i] = gpdb::GetEqualityOpForOrderingOp(
+				window->ordOperators[i], nullptr);
+		}
+
+		// translate the window frame specified in the window key
+		if (nullptr != window_key->GetWindowFrame())
+		{
+			window->frameOptions = FRAMEOPTION_NONDEFAULT | FRAMEOPTION_BETWEEN;
+			window->frameOptions |= WindowFrameSpecToOptions(window_frame->ParseDXLFrameSpec());
+			window->frameOptions |= WindowFrameExclusionStrategyToOptions(
+				window_frame->ParseFrameExclusionStrategy());
+
+			// translate the CDXLNodes representing the leading and trailing edge
+			CDXLTranslationContextArray *child_contexts =
+				GPOS_NEW(m_mp) CDXLTranslationContextArray(m_mp);
+			child_contexts->Append(&child_context);
+
+			CMappingColIdVarPlStmt colid_var_mapping =
+				CMappingColIdVarPlStmt(m_mp, nullptr, child_contexts,
+									   output_context, m_dxl_to_plstmt_context);
+
+			// Translate lead boundary
+			//
+			// Note that we don't distinguish between the delayed and undelayed
+			// versions beoynd this point. Executor will make that decision
+			// without our help.
+			//
+			CDXLNode *win_frame_leading_dxlnode = window_frame->PdxlnLeading();
+			window->frameOptions |= WindowFrameStartBoundaryToOptions(
+					CDXLScalarWindowFrameEdge::Cast(win_frame_leading_dxlnode->GetOperator())
+					->ParseDXLFrameBoundary());
+			if (0 != win_frame_leading_dxlnode->Arity())
+			{
+				window->startOffset =
+					(Node *) m_translator_dxl_to_scalar->TranslateDXLToScalar(
+						(*win_frame_leading_dxlnode)[0], &colid_var_mapping);
+			}
+
+			// And the same for the trail boundary
+			CDXLNode *win_frame_trailing_dxlnode =
+				window_frame->PdxlnTrailing();
+			window->frameOptions |= WindowFrameEndBoundaryToOptions(
+				CDXLScalarWindowFrameEdge::Cast(
+					win_frame_trailing_dxlnode->GetOperator())
+					->ParseDXLFrameBoundary());
+
+			if (0 != win_frame_trailing_dxlnode->Arity())
+			{
+				window->endOffset =
+					(Node *) m_translator_dxl_to_scalar->TranslateDXLToScalar(
+						(*win_frame_trailing_dxlnode)[0], &colid_var_mapping);
+			}
+
+			window->startInRangeFunc = window_frame->PdxlnStartInRangeFunc();
+			window->endInRangeFunc = window_frame->PdxlnEndInRangeFunc();
+			window->inRangeColl = window_frame->PdxlnInRangeColl();
+			window->inRangeAsc = window_frame->PdxlnInRangeAsc();
+			window->inRangeNullsFirst = window_frame->PdxlnInRangeNullsFirst();
+
+			// cleanup
+			child_contexts->Release();
+		}
+		else
+		{
+			window->frameOptions = FRAMEOPTION_DEFAULTS;
+		}
+	}
+
+	SetParamIds(plan);
+
+	// cleanup
+	child_contexts->Release();
+
+	return (Plan *) window;
 }
 
 //---------------------------------------------------------------------------
@@ -2766,11 +3594,14 @@ FilterReadsStableColumns(List *qual, List *child_tlist)
 //		    -- there is nothing for the filter to read but constants and
 //		    parameters, and it is evaluated once either way;
 //
-//		  * into the child's own qual, when the child is a sequential or
-//		    values scan or an aggregate, the nodes that test their qual on
-//		    the rows they are about to project.  That is where the planner
-//		    puts a WHERE and a HAVING.  The filter then computes the child's
-//		    columns a second time, so only when none it reads is volatile;
+//		  * into the child's own qual, when the child is a scan or an
+//		    aggregate, the nodes that test their qual on the rows they are
+//		    about to project -- every scan through ExecScan().  That is where
+//		    the planner puts a WHERE and a HAVING.  The filter then computes
+//		    the child's columns a second time, so only when none it reads is
+//		    volatile.  The scans are T0's and T1's; a CTE Scan is the one
+//		    that meets this most, because a CTE consumer in DXL has no filter
+//		    of its own, so every filter on one arrives on a Result;
 //
 //		  * and otherwise under a SubqueryScan of the child, which is
 //		    PostgreSQL's node for filtering and projecting another plan's
@@ -2798,6 +3629,8 @@ CTranslatorDXLToPlStmt::PlaceResultFilter(Result *result)
 	}
 
 	if ((IsA(child_plan, SeqScan) || IsA(child_plan, ValuesScan) ||
+		 IsA(child_plan, IndexScan) || IsA(child_plan, IndexOnlyScan) ||
+		 IsA(child_plan, BitmapHeapScan) || IsA(child_plan, CteScan) ||
 		 IsA(child_plan, Agg)) &&
 		FilterReadsStableColumns(plan->qual, child_plan->targetlist))
 	{
@@ -3251,10 +4084,140 @@ CTranslatorDXLToPlStmt::TranslateDXLAppend(
 	const CDXLNode *append_dxlnode, CDXLTranslateContext *output_context,
 	CDXLTranslationContextArray *ctxt_translation_prev_siblings)
 {
-	// T1: Append.  This body refuses until then, and Cloudberry's is
-	// in github/cloudberry/src/backend/gpopt/translate/CTranslatorDXLToPlStmt.cpp,
-	// unchanged, for the step that brings it back.
-	GP_UNPORTED("Append");
+	// create append plan node
+	Append *append = MakeNode(Append);
+
+	// No run-time pruning: PostgreSQL 18 made part_prune_index an index into
+	// PlannedStmt.partPruneInfos, with -1 for none, and makeNode's 0 would
+	// name the first entry of a list that is empty.
+	append->part_prune_index = -1;
+
+	Plan *plan = &(append->plan);
+	plan->plan_node_id = m_dxl_to_plstmt_context->GetNextPlanId();
+
+	// translate operator costs
+	TranslatePlanCosts(append_dxlnode, plan);
+
+	const ULONG arity = append_dxlnode->Arity();
+	GPOS_ASSERT(EdxlappendIndexFirstChild < arity);
+	append->appendplans = NIL;
+
+	// translate table descriptor into a range table entry
+	CDXLPhysicalAppend *phy_append_dxlop =
+		CDXLPhysicalAppend::Cast(append_dxlnode->GetOperator());
+
+	// An Append ORCA made of a dynamic table scan, one child per partition,
+	// carries the root partitioned table's descriptor, and in Cloudberry the
+	// ids of the partition selectors that prune it.  That is T3's, with the
+	// rest of partitioning; the Append of a UNION ALL carries neither.
+	if (phy_append_dxlop->GetScanId() != gpos::ulong_max)
+	{
+		GP_UNPORTED("an Append over the partitions of a table");
+	}
+
+	// translate children
+	CDXLTranslateContext child_context(m_mp, false,
+									   output_context->GetColIdToParamIdMap());
+	for (ULONG ul = EdxlappendIndexFirstChild; ul < arity; ul++)
+	{
+		CDXLNode *child_dxlnode = (*append_dxlnode)[ul];
+
+		Plan *child_plan = TranslateDXLOperatorToPlan(
+			child_dxlnode, &child_context, ctxt_translation_prev_siblings);
+
+		GPOS_ASSERT(nullptr != child_plan && "child plan cannot be NULL");
+
+		append->appendplans = gpdb::LAppend(append->appendplans, child_plan);
+	}
+
+	CDXLNode *project_list_dxlnode = (*append_dxlnode)[EdxlappendIndexProjList];
+	CDXLNode *filter_dxlnode = (*append_dxlnode)[EdxlappendIndexFilter];
+
+	plan->targetlist = NIL;
+	const ULONG length = project_list_dxlnode->Arity();
+	for (ULONG ul = 0; ul < length; ++ul)
+	{
+		CDXLNode *proj_elem_dxlnode = (*project_list_dxlnode)[ul];
+		GPOS_ASSERT(EdxlopScalarProjectElem ==
+					proj_elem_dxlnode->GetOperator()->GetDXLOperator());
+
+		CDXLScalarProjElem *sc_proj_elem_dxlop =
+			CDXLScalarProjElem::Cast(proj_elem_dxlnode->GetOperator());
+		GPOS_ASSERT(1 == proj_elem_dxlnode->Arity());
+
+		// translate proj element expression
+		CDXLNode *expr_dxlnode = (*proj_elem_dxlnode)[0];
+		CDXLScalarIdent *sc_ident_dxlop =
+			CDXLScalarIdent::Cast(expr_dxlnode->GetOperator());
+
+		Index idxVarno = OUTER_VAR;
+		AttrNumber attno = (AttrNumber)(ul + 1);
+
+		Var *var = gpdb::MakeVar(
+			idxVarno, attno,
+			CMDIdGPDB::CastMdid(sc_ident_dxlop->MdidType())->Oid(),
+			sc_ident_dxlop->TypeModifier(),
+			0  // varlevelsup
+		);
+
+		TargetEntry *target_entry = MakeNode(TargetEntry);
+		target_entry->expr = (Expr *) var;
+		target_entry->resname =
+			CTranslatorUtils::CreateMultiByteCharStringFromWCString(
+				sc_proj_elem_dxlop->GetMdNameAlias()->GetMDName()->GetBuffer());
+		target_entry->resno = attno;
+
+		// restore aliases that failed the wide character conversion
+		restore_unknown_locale_resname(output_context->GetQuery(),
+									   target_entry);
+
+		// add column mapping to output translation context
+		output_context->InsertMapping(sc_proj_elem_dxlop->Id(), target_entry);
+
+		plan->targetlist = gpdb::LAppend(plan->targetlist, target_entry);
+	}
+
+	CDXLTranslationContextArray *child_contexts =
+		GPOS_NEW(m_mp) CDXLTranslationContextArray(m_mp);
+	child_contexts->Append(output_context);
+
+	// translate filter
+	plan->qual = TranslateDXLFilterToQual(
+		filter_dxlnode,
+		nullptr,  // translate context for the base table
+		child_contexts, output_context);
+
+	SetParamIds(plan);
+
+	// cleanup
+	child_contexts->Release();
+
+	// PostgreSQL 19's Append evaluates no qual, as its Result does not: the
+	// planner never gives it one, and ExecInitAppend initialises none.  The
+	// filter is translated against the Append's own output -- OUTER_VAR, by
+	// position -- which is also what a Result above it reads, so it moves up
+	// onto one unchanged, and PlaceResultFilter puts it where PostgreSQL 19
+	// evaluates a filter.
+	if (NIL != plan->qual)
+	{
+		Result *result = MakeNode(Result);
+		result->result_type = RESULT_TYPE_GATING;
+		Plan *result_plan = &(result->plan);
+		result_plan->plan_node_id = m_dxl_to_plstmt_context->GetNextPlanId();
+		result_plan->startup_cost = plan->startup_cost;
+		result_plan->total_cost = plan->total_cost;
+		result_plan->plan_rows = plan->plan_rows;
+		result_plan->plan_width = plan->plan_width;
+		result_plan->targetlist = CreateDirectCopyTargetList(plan->targetlist);
+		result_plan->qual = plan->qual;
+		result_plan->lefttree = plan;
+		plan->qual = NIL;
+		SetParamIds(result_plan);
+
+		return PlaceResultFilter(result);
+	}
+
+	return (Plan *) append;
 }
 
 //---------------------------------------------------------------------------
@@ -3334,18 +4297,118 @@ CTranslatorDXLToPlStmt::TranslateDXLMaterialize(
 //		CTranslatorDXLToPlStmt::TranslateDXLCTEProducerToSharedScan
 //
 //	@doc:
-//		Translate DXL CTE Producer node into GPDB share input scan plan node
+//		Translate DXL CTE Producer node into a subplan and the initplan that
+//		runs it
 //
+//		NOT CLOUDBERRY'S SHAPE.  Cloudberry makes a producer a ShareInputScan
+//		that writes its child's rows to a store the consumers' ShareInputScans
+//		read, under a Sequence node that runs the producers first.  PostgreSQL
+//		19 has neither node, and does the same thing for its own CTEs another
+//		way: the CTE is a subplan, run by an initplan SubPlan of CTE_SUBLINK
+//		type, and every CteScan of it reads one tuplestore, which the first to
+//		start fills from the subplan as the scans ask for rows.  So the
+//		producer becomes the subplan and its initplan, the consumers become
+//		CteScans, and TranslateDXLSequence attaches the initplans where the
+//		Sequence was.  Only TranslateDXLSequence calls this.
+//
+//		The producer's project list becomes a Result over its child, which
+//		post-processing removes when the child can project it itself.
 //---------------------------------------------------------------------------
 Plan *
 CTranslatorDXLToPlStmt::TranslateDXLCTEProducerToSharedScan(
 	const CDXLNode *cte_producer_dxlnode, CDXLTranslateContext *output_context,
 	CDXLTranslationContextArray *ctxt_translation_prev_siblings)
 {
-	// T1: common table expressions.  This body refuses until then, and Cloudberry's is
-	// in github/cloudberry/src/backend/gpopt/translate/CTranslatorDXLToPlStmt.cpp,
-	// unchanged, for the step that brings it back.
-	GP_UNPORTED("common table expressions");
+	CDXLPhysicalCTEProducer *cte_prod_dxlop =
+		CDXLPhysicalCTEProducer::Cast(cte_producer_dxlnode->GetOperator());
+	ULONG cte_id = cte_prod_dxlop->Id();
+
+	// the rows of the CTE: the producer's projection over its child
+	Result *result = MakeNode(Result);
+	result->result_type = RESULT_TYPE_GATING;
+	Plan *plan = &(result->plan);
+	plan->plan_node_id = m_dxl_to_plstmt_context->GetNextPlanId();
+
+	// translate cost of the producer
+	TranslatePlanCosts(cte_producer_dxlnode, plan);
+
+	// translate child plan
+	CDXLNode *project_list_dxlnode = (*cte_producer_dxlnode)[0];
+	CDXLNode *child_dxlnode = (*cte_producer_dxlnode)[1];
+
+	CDXLTranslateContext child_context(m_mp, false,
+									   output_context->GetColIdToParamIdMap());
+	Plan *child_plan = TranslateDXLOperatorToPlan(
+		child_dxlnode, &child_context, ctxt_translation_prev_siblings);
+	GPOS_ASSERT(nullptr != child_plan && "child plan cannot be NULL");
+
+	CDXLTranslationContextArray *child_contexts =
+		GPOS_NEW(m_mp) CDXLTranslationContextArray(m_mp);
+	child_contexts->Append(&child_context);
+	// translate proj list
+	plan->targetlist =
+		TranslateDXLProjList(project_list_dxlnode,
+							 nullptr,  // base table translation context
+							 child_contexts, output_context);
+
+	plan->lefttree = child_plan;
+	plan->qual = NIL;
+	SetParamIds(plan);
+
+	// cleanup
+	child_contexts->Release();
+
+	// The subplan, and the initplan that runs it, as SS_process_ctes() makes
+	// them: CTE_SUBLINK, no inputs, and one output parameter that carries no
+	// value -- the CteScans share their tuplestore through its slot -- so its
+	// type is none, as assign_special_exec_param() records it.  isInitPlan
+	// stays false, as the planner leaves it for a CTE.
+	m_dxl_to_plstmt_context->AddSubplan(plan);
+
+	SubPlan *initplan = MakeNode(SubPlan);
+	initplan->subLinkType = CTE_SUBLINK;
+	initplan->testexpr = nullptr;
+	initplan->paramIds = NIL;
+	initplan->plan_id =
+		gpdb::ListLength(m_dxl_to_plstmt_context->GetSubplanEntriesList());
+
+	// ORCA's DXL does not carry the query's name for the CTE, and ORCA makes
+	// CTEs of its own that have none; EXPLAIN shows "CTE cte<id>".
+	CHAR cte_name[NAMEDATALEN];
+	snprintf(cte_name, sizeof(cte_name), "cte%u", cte_id);
+	initplan->plan_name = PStrDup(cte_name);
+
+	// the first column's type, as get_first_col_type() finds it
+	initplan->firstColType = VOIDOID;
+	initplan->firstColTypmod = -1;
+	initplan->firstColCollation = InvalidOid;
+	if (NIL != plan->targetlist)
+	{
+		TargetEntry *te = (TargetEntry *) gpdb::ListNth(plan->targetlist, 0);
+		if (!te->resjunk)
+		{
+			initplan->firstColType = gpdb::ExprType((Node *) te->expr);
+			initplan->firstColTypmod = gpdb::ExprTypeMod((Node *) te->expr);
+			initplan->firstColCollation =
+				gpdb::ExprCollation((Node *) te->expr);
+		}
+	}
+	initplan->isInitPlan = false;
+	initplan->useHashTable = false;
+	initplan->unknownEqFalse = false;
+	initplan->parallel_safe = false;
+	initplan->setParam = ListMake1Int(
+		(int) m_dxl_to_plstmt_context->GetNextParamId(InvalidOid));
+	initplan->parParam = NIL;
+	initplan->args = NIL;
+	initplan->disabled_nodes = 0;
+	initplan->startup_cost = plan->total_cost;
+	initplan->per_call_cost = 0;
+
+	m_dxl_to_plstmt_context->RegisterCTEProducerInfo(
+		cte_id, cte_prod_dxlop->GetOutputColIdxMap(), plan, initplan);
+
+	return plan;
 }
 
 //---------------------------------------------------------------------------
@@ -3353,18 +4416,145 @@ CTranslatorDXLToPlStmt::TranslateDXLCTEProducerToSharedScan(
 //		CTranslatorDXLToPlStmt::TranslateDXLCTEConsumerToSharedScan
 //
 //	@doc:
-//		Translate DXL CTE Consumer node into GPDB share input scan plan node
+//		Translate DXL CTE Consumer node into a CteScan
 //
+//		A CteScan, not Cloudberry's ShareInputScan; see
+//		TranslateDXLCTEProducerToSharedScan.  Which of the producer's columns
+//		each output column reads is worked out as Cloudberry works it out; only
+//		what reads them changes, from OUTER_VAR of a ShareInputScan's child to
+//		a Var of the CTE's range table entry.
 //---------------------------------------------------------------------------
 Plan *
 CTranslatorDXLToPlStmt::TranslateDXLCTEConsumerToSharedScan(
 	const CDXLNode *cte_consumer_dxlnode, CDXLTranslateContext *output_context,
 	CDXLTranslationContextArray * /*ctxt_translation_prev_siblings*/)
 {
-	// T1: common table expressions.  This body refuses until then, and Cloudberry's is
-	// in github/cloudberry/src/backend/gpopt/translate/CTranslatorDXLToPlStmt.cpp,
-	// unchanged, for the step that brings it back.
-	GP_UNPORTED("common table expressions");
+	CDXLPhysicalCTEConsumer *cte_consumer_dxlop =
+		CDXLPhysicalCTEConsumer::Cast(cte_consumer_dxlnode->GetOperator());
+	ULONG cte_id = cte_consumer_dxlop->Id();
+	ULongPtrArray *output_colidx_map = cte_consumer_dxlop->GetOutputColIdxMap();
+
+	// ORCA puts the producers of a Sequence before the plan that reads them,
+	// and TranslateDXLSequence translates them in that order.
+	const CContextDXLToPlStmt::SCTEEntryInfo *producer_info =
+		m_dxl_to_plstmt_context->GetCTEProducerInfo(cte_id);
+	if (nullptr == producer_info)
+	{
+		GP_UNPORTED("a CTE read before the plan that produces it");
+	}
+	ULongPtrArray *producer_colidx_map = producer_info->m_pidxmap;
+	Plan *producer_plan = producer_info->m_cte_producer_plan;
+	SubPlan *initplan = producer_info->m_initplan;
+
+	// The range table entry the scan reads, as the parser makes one for a
+	// reference to a CTE.  Its columns are the producer's.
+	RangeTblEntry *rte = MakeNode(RangeTblEntry);
+	rte->rtekind = RTE_CTE;
+	rte->ctename = PStrDup(initplan->plan_name);
+	rte->ctelevelsup = 0;
+	rte->self_reference = false;
+	rte->perminfoindex = 0;
+
+	Alias *alias = MakeNode(Alias);
+	alias->aliasname = PStrDup(initplan->plan_name);
+	alias->colnames = NIL;
+	ListCell *lc = nullptr;
+	ForEach(lc, producer_plan->targetlist)
+	{
+		TargetEntry *te = (TargetEntry *) lfirst(lc);
+		alias->colnames = gpdb::LAppend(
+			alias->colnames,
+			gpdb::MakeStringValue(
+				PStrDup(nullptr != te->resname ? te->resname : "?column?")));
+		rte->coltypes = gpdb::LAppendOid(rte->coltypes,
+										 gpdb::ExprType((Node *) te->expr));
+		rte->coltypmods = gpdb::LAppendInt(
+			rte->coltypmods, gpdb::ExprTypeMod((Node *) te->expr));
+		rte->colcollations = gpdb::LAppendOid(
+			rte->colcollations, gpdb::ExprCollation((Node *) te->expr));
+	}
+	rte->eref = alias;
+
+	m_dxl_to_plstmt_context->AddRTE(rte);
+	Index scanrelid =
+		gpdb::ListLength(m_dxl_to_plstmt_context->GetRTableEntriesList());
+
+	CteScan *cte_scan = MakeNode(CteScan);
+	cte_scan->scan.scanrelid = scanrelid;
+	cte_scan->ctePlanId = initplan->plan_id;
+	cte_scan->cteParam = linitial_int(initplan->setParam);
+
+	Plan *plan = &(cte_scan->scan.plan);
+	plan->plan_node_id = m_dxl_to_plstmt_context->GetNextPlanId();
+
+	// translate operator costs
+	TranslatePlanCosts(cte_consumer_dxlnode, plan);
+
+#ifdef GPOS_DEBUG
+	ULongPtrArray *output_colids_array =
+		cte_consumer_dxlop->GetOutputColIdsArray();
+#endif
+
+	// generate the target list of the CTE Consumer
+	plan->targetlist = NIL;
+	CDXLNode *project_list_dxlnode = (*cte_consumer_dxlnode)[0];
+	const ULONG num_of_proj_list_elem = project_list_dxlnode->Arity();
+	GPOS_ASSERT(num_of_proj_list_elem == output_colids_array->Size());
+	for (ULONG ul = 0; ul < num_of_proj_list_elem; ul++)
+	{
+		AttrNumber varattno = (AttrNumber)ul + 1;
+		if (output_colidx_map) {
+			ULONG remapping_idx;
+			remapping_idx = *(*output_colidx_map)[ul];
+			if (producer_colidx_map) {
+				remapping_idx = *(*producer_colidx_map)[remapping_idx];
+			}
+			GPOS_ASSERT(remapping_idx != gpos::ulong_max);
+			varattno = (AttrNumber)remapping_idx + 1;
+		}
+
+		CDXLNode *proj_elem_dxlnode = (*project_list_dxlnode)[ul];
+		CDXLScalarProjElem *sc_proj_elem_dxlop =
+			CDXLScalarProjElem::Cast(proj_elem_dxlnode->GetOperator());
+		ULONG colid = sc_proj_elem_dxlop->Id();
+		GPOS_ASSERT(colid == *(*output_colids_array)[ul]);
+
+		CDXLNode *sc_ident_dxlnode = (*proj_elem_dxlnode)[0];
+		CDXLScalarIdent *sc_ident_dxlop =
+			CDXLScalarIdent::Cast(sc_ident_dxlnode->GetOperator());
+		OID oid_type = CMDIdGPDB::CastMdid(sc_ident_dxlop->MdidType())->Oid();
+
+		Var *var =
+			gpdb::MakeVar(scanrelid, varattno, oid_type,
+						  sc_ident_dxlop->TypeModifier(), 0 /* varlevelsup */);
+		// the column's collation is the producer's, which a type's default
+		// is not when the CTE's query wrote COLLATE
+		var->varcollid = (Oid) gpdb::ListNthOid(rte->colcollations,
+											   varattno - 1);
+
+		CHAR *resname = CTranslatorUtils::CreateMultiByteCharStringFromWCString(
+			sc_proj_elem_dxlop->GetMdNameAlias()->GetMDName()->GetBuffer());
+		TargetEntry *target_entry = gpdb::MakeTargetEntry(
+			(Expr *) var, (AttrNumber)(ul + 1), resname, false /* resjunk */);
+		plan->targetlist = gpdb::LAppend(plan->targetlist, target_entry);
+
+		output_context->InsertMapping(colid, target_entry);
+	}
+
+	plan->qual = NIL;
+
+	SetParamIds(plan);
+
+	// A CteScan depends on what the CTE depends on, as finalize_plan() has
+	// it: when a parameter the CTE's rows were computed from changes -- a
+	// CTE inside a correlated subquery -- the scan has to start over, and
+	// its chgParam is what says so.  Not the shared parameter, which only
+	// links the scans (subselect.c, "You might think we should add the
+	// node's cteParam to paramids").
+	plan->extParam = gpdb::BmsUnion(plan->extParam, producer_plan->extParam);
+	plan->allParam = gpdb::BmsUnion(plan->allParam, producer_plan->extParam);
+
+	return (Plan *) cte_scan;
 }
 
 //---------------------------------------------------------------------------
@@ -3372,18 +4562,87 @@ CTranslatorDXLToPlStmt::TranslateDXLCTEConsumerToSharedScan(
 //		CTranslatorDXLToPlStmt::TranslateDXLSequence
 //
 //	@doc:
-//		Translate DXL sequence node into GPDB Sequence plan node
+//		Translate DXL sequence node
 //
+//		NOT CLOUDBERRY'S SHAPE.  A Sequence runs its children in order and
+//		returns the last one's rows, and PostgreSQL 19 has no such node.  ORCA
+//		makes one for two reasons: to run CTE producers before the plan that
+//		reads them, and to run partition selectors before the dynamic scans
+//		they prune.  The first is here: the producers become subplans whose
+//		initplans are attached to the last child's plan -- where the planner
+//		attaches a query level's CTEs, above everything that reads them -- and
+//		the Sequence's projection becomes a Result over that plan, which
+//		post-processing removes when the plan can project it itself.  The
+//		second is T3's, with partition selection.
 //---------------------------------------------------------------------------
 Plan *
 CTranslatorDXLToPlStmt::TranslateDXLSequence(
 	const CDXLNode *sequence_dxlnode, CDXLTranslateContext *output_context,
 	CDXLTranslationContextArray *ctxt_translation_prev_siblings)
 {
-	// T3: Sequence.  This body refuses until then, and Cloudberry's is
-	// in github/cloudberry/src/backend/gpopt/translate/CTranslatorDXLToPlStmt.cpp,
-	// unchanged, for the step that brings it back.
-	GP_UNPORTED("Sequence");
+	ULONG arity = sequence_dxlnode->Arity();
+	GPOS_ASSERT(2 <= arity);
+
+	CDXLTranslateContext child_context(m_mp, false,
+									   output_context->GetColIdToParamIdMap());
+
+	// every child but the projection list and the last: the producers
+	List *initplans = NIL;
+	for (ULONG ul = 1; ul < arity - 1; ul++)
+	{
+		CDXLNode *child_dxlnode = (*sequence_dxlnode)[ul];
+		if (EdxlopPhysicalCTEProducer !=
+			child_dxlnode->GetOperator()->GetDXLOperator())
+		{
+			GP_UNPORTED("a Sequence that selects partitions");
+		}
+
+		(void) TranslateDXLCTEProducerToSharedScan(
+			child_dxlnode, &child_context, ctxt_translation_prev_siblings);
+
+		ULONG cte_id =
+			CDXLPhysicalCTEProducer::Cast(child_dxlnode->GetOperator())->Id();
+		initplans = gpdb::LAppend(
+			initplans,
+			m_dxl_to_plstmt_context->GetCTEProducerInfo(cte_id)->m_initplan);
+	}
+
+	// the last child, whose rows the Sequence returns
+	Plan *child_plan = TranslateDXLOperatorToPlan(
+		(*sequence_dxlnode)[arity - 1], &child_context,
+		ctxt_translation_prev_siblings);
+	GPOS_ASSERT(nullptr != child_plan && "child plan cannot be NULL");
+
+	child_plan->initPlan = gpdb::ListConcat(child_plan->initPlan, initplans);
+
+	// the Sequence's projection
+	Result *result = MakeNode(Result);
+	result->result_type = RESULT_TYPE_GATING;
+	Plan *plan = &(result->plan);
+	plan->plan_node_id = m_dxl_to_plstmt_context->GetNextPlanId();
+
+	// translate operator costs
+	TranslatePlanCosts(sequence_dxlnode, plan);
+
+	CDXLNode *project_list_dxlnode = (*sequence_dxlnode)[0];
+
+	CDXLTranslationContextArray *child_contexts =
+		GPOS_NEW(m_mp) CDXLTranslationContextArray(m_mp);
+	child_contexts->Append(&child_context);
+
+	// translate proj list
+	plan->targetlist =
+		TranslateDXLProjList(project_list_dxlnode,
+							 nullptr,  // base table translation context
+							 child_contexts, output_context);
+
+	plan->lefttree = child_plan;
+	SetParamIds(plan);
+
+	// cleanup
+	child_contexts->Release();
+
+	return plan;
 }
 
 //---------------------------------------------------------------------------
@@ -4596,7 +5855,17 @@ CTranslatorDXLToPlStmt::GetGPDBJoinTypeFromDXLJoinType(EdxlJoinType join_type)
 			// on either side the way NOT IN does.  PostgreSQL 19 has no such
 			// join type, and its executor no such semantics -- the planner
 			// never makes NOT IN an anti-join, for exactly that reason -- so
-			// whether ORCA may plan one at all is T1's to decide.
+			// such a plan is refused, and the query goes to the planner,
+			// which makes NOT IN a hashed SubPlan.
+			//
+			// Decided at T1, by measuring the alternative.  With the two
+			// transforms that make this join turned off, ORCA keeps NOT IN as
+			// an apply and implements it as a SubPlan that counts matches
+			// and NULLs for every outer row: correct, and 6.8 seconds for a
+			// NOT IN of 20,000 rows over 10,000, where the planner's hashed
+			// SubPlan takes 6 milliseconds.  A NULL-aware hash anti-join is
+			// executor work, and the fallback counters say how often it is
+			// wanted.
 			GP_UNPORTED("NOT IN as an anti-join");
 		default:
 			GPOS_ASSERT(!"Unrecognized join type");
@@ -4834,10 +6103,72 @@ CTranslatorDXLToPlStmt::TranslateDXLBitmapTblScan(
 	const CDXLNode *bitmapscan_dxlnode, CDXLTranslateContext *output_context,
 	CDXLTranslationContextArray *ctxt_translation_prev_siblings)
 {
-	// T1: bitmap table scans.  This body refuses until then, and Cloudberry's is
-	// in github/cloudberry/src/backend/gpopt/translate/CTranslatorDXLToPlStmt.cpp,
-	// unchanged, for the step that brings it back.
-	GP_UNPORTED("bitmap table scans");
+	const CDXLTableDescr *table_descr = nullptr;
+
+	// The dynamic form scans the partitions of a table through Cloudberry's
+	// DynamicBitmapHeapScan, which is T3's with the other dynamic scans.
+	CDXLOperator *dxl_operator = bitmapscan_dxlnode->GetOperator();
+	if (EdxlopPhysicalBitmapTableScan != dxl_operator->GetDXLOperator())
+	{
+		GP_UNPORTED("dynamic bitmap table scans");
+	}
+	table_descr =
+		CDXLPhysicalBitmapTableScan::Cast(dxl_operator)->GetDXLTableDescr();
+
+	// translation context for column mappings in the base relation
+	CDXLTranslateContextBaseTable base_table_context(m_mp);
+
+	const IMDRelation *md_rel = m_md_accessor->RetrieveRel(table_descr->MDId());
+
+	// Lock any table we are to scan, since it may not have been properly locked
+	// by the parser (e.g in case of generated scans for partitioned tables)
+	CMDIdGPDB *mdid = CMDIdGPDB::CastMdid(md_rel->MDId());
+	GPOS_ASSERT(table_descr->LockMode() != -1);
+	gpdb::GPDBLockRelationOid(mdid->Oid(), table_descr->LockMode());
+
+	Index index = ProcessDXLTblDescr(table_descr, &base_table_context);
+
+	BitmapHeapScan *bitmap_tbl_scan = MakeNode(BitmapHeapScan);
+	bitmap_tbl_scan->scan.scanrelid = index;
+
+	Plan *plan = &(bitmap_tbl_scan->scan.plan);
+	plan->plan_node_id = m_dxl_to_plstmt_context->GetNextPlanId();
+
+	// translate operator costs
+	TranslatePlanCosts(bitmapscan_dxlnode, plan);
+
+	GPOS_ASSERT(4 == bitmapscan_dxlnode->Arity());
+
+	// translate proj list and filter
+	CDXLNode *project_list_dxlnode = (*bitmapscan_dxlnode)[0];
+	CDXLNode *filter_dxlnode = (*bitmapscan_dxlnode)[1];
+	CDXLNode *recheck_cond_dxlnode = (*bitmapscan_dxlnode)[2];
+	CDXLNode *bitmap_access_path_dxlnode = (*bitmapscan_dxlnode)[3];
+
+	List *quals_list = nullptr;
+	TranslateProjListAndFilter(
+		project_list_dxlnode, filter_dxlnode,
+		&base_table_context,  // translate context for the base table
+		ctxt_translation_prev_siblings, &plan->targetlist, &quals_list,
+		output_context);
+
+	// No security quals here, unlike TranslateDXLTblScan, and that is safe:
+	// ORCA plans no bitmap scan of a relation whose range table entry has
+	// any -- CXformSelect2BitmapBoolOp declines a Get that says it has them,
+	// as the index scan transforms do -- so the table scan is the only scan
+	// that meets them.
+	plan->qual = quals_list;
+
+	bitmap_tbl_scan->bitmapqualorig = TranslateDXLFilterToQual(
+		recheck_cond_dxlnode, &base_table_context,
+		ctxt_translation_prev_siblings, output_context);
+
+	bitmap_tbl_scan->scan.plan.lefttree = TranslateDXLBitmapAccessPath(
+		bitmap_access_path_dxlnode, output_context, md_rel, table_descr,
+		&base_table_context, ctxt_translation_prev_siblings, bitmap_tbl_scan);
+	SetParamIds(plan);
+
+	return (Plan *) bitmap_tbl_scan;
 }
 
 //---------------------------------------------------------------------------
@@ -4952,10 +6283,48 @@ CTranslatorDXLToPlStmt::TranslateDXLBitmapIndexProbe(
 	CDXLTranslationContextArray *ctxt_translation_prev_siblings,
 	BitmapHeapScan *bitmap_tbl_scan)
 {
-	// T1: bitmap index scans.  This body refuses until then, and Cloudberry's is
-	// in github/cloudberry/src/backend/gpopt/translate/CTranslatorDXLToPlStmt.cpp,
-	// unchanged, for the step that brings it back.
-	GP_UNPORTED("bitmap index scans");
+	CDXLScalarBitmapIndexProbe *sc_bitmap_idx_probe_dxlop =
+		CDXLScalarBitmapIndexProbe::Cast(
+			bitmap_index_probe_dxlnode->GetOperator());
+
+	// Only the plain form: Cloudberry's DynamicBitmapIndexScan comes with the
+	// dynamic bitmap table scan, at T3.
+	BitmapIndexScan *bitmap_idx_scan = MakeNode(BitmapIndexScan);
+	bitmap_idx_scan->scan.scanrelid = bitmap_tbl_scan->scan.scanrelid;
+
+	CMDIdGPDB *mdid_index = CMDIdGPDB::CastMdid(
+		sc_bitmap_idx_probe_dxlop->GetDXLIndexDescr()->MDId());
+	const IMDIndex *index = m_md_accessor->RetrieveIndex(mdid_index);
+	Oid index_oid = mdid_index->Oid();
+	// Lock any index we are to scan, since it may not have been properly locked
+	// by the parser (e.g in case of generated scans for partitioned indexes)
+	gpdb::GPDBLockRelationOid(index_oid, table_descr->LockMode());
+
+	GPOS_ASSERT(InvalidOid != index_oid);
+	CheckIndexUsableBySnapshots(index_oid);
+	bitmap_idx_scan->indexid = index_oid;
+	Plan *plan = &(bitmap_idx_scan->scan.plan);
+	plan->plan_node_id = m_dxl_to_plstmt_context->GetNextPlanId();
+
+	GPOS_ASSERT(1 == bitmap_index_probe_dxlnode->Arity());
+	CDXLNode *index_cond_list_dxlnode = (*bitmap_index_probe_dxlnode)[0];
+	List *index_cond = NIL;
+	List *index_orig_cond = NIL;
+
+	TranslateIndexConditions(
+		index_cond_list_dxlnode, table_descr, true /*is_bitmap_index_probe*/,
+		index, md_rel, output_context, base_table_context,
+		ctxt_translation_prev_siblings, &index_cond, &index_orig_cond);
+
+	bitmap_idx_scan->indexqual = index_cond;
+	bitmap_idx_scan->indexqualorig = index_orig_cond;
+	/*
+	 * As of 8.4, the indexstrategy and indexsubtype fields are no longer
+	 * available or needed in IndexScan. Ignore them.
+	 */
+	SetParamIds(plan);
+
+	return plan;
 }
 
 // translates a DXL Value Scan node into a GPDB Value scan node

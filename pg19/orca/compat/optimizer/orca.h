@@ -68,9 +68,10 @@ extern PlannedStmt *optimize_query(Query *parse, int cursorOptions,
 								   GpOrcaFailure *failure);
 
 /*
- * Flatten a query's grouped windows, which ORCA cannot express.
+ * Not transformGroupedWindows(), which Cloudberry's orca.h declares: only
+ * orca.c calls it, so it is static there, and not one more name in the
+ * namespace every library shares.
  */
-extern Node *transformGroupedWindows(Node *node, void *context);
 
 /*
  * How a hint extension tells ORCA what it parsed out of a query.

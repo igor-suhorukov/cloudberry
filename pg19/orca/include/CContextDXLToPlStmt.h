@@ -84,29 +84,39 @@ using HMUlDxltrctx =
 //---------------------------------------------------------------------------
 class CContextDXLToPlStmt
 {
-private:
+public:
 	// cte producer information
+	//
+	// Not Cloudberry's ShareInputScan, which PostgreSQL 19 does not have.  A
+	// CTE producer becomes what the planner makes of a CTE: a subplan, run
+	// once through an initplan SubPlan of CTE_SUBLINK type, whose rows every
+	// CteScan of it reads from one tuplestore.  The CteScans find the subplan
+	// by plan_id and share the tuplestore through the initplan's output
+	// parameter, which no value ever passes through (nodeCtescan.c).
 	struct SCTEEntryInfo
 	{
 		// producer idx mapping
 		ULongPtrArray *m_pidxmap;
 
-		// producer plan
-		// A Plan, not Cloudberry's ShareInputScan: that node does not exist on
-		// PostgreSQL 19, and what a CTE producer becomes here is decided with
-		// the CTE operators, at T1.  Until then nothing stores one.
+		// the producer's rows, as a subplan in PlannedStmt.subplans
 		Plan *m_cte_producer_plan;
 
+		// the initplan that runs it: its plan_id, and in setParam the
+		// parameter its CteScans share
+		SubPlan *m_initplan;
 
 		// ctor
-		SCTEEntryInfo(ULongPtrArray *idxmap, Plan *plan_cte) : 
-		m_pidxmap(idxmap), m_cte_producer_plan(plan_cte)
+		SCTEEntryInfo(ULongPtrArray *idxmap, Plan *plan_cte, SubPlan *initplan)
+			: m_pidxmap(idxmap), m_cte_producer_plan(plan_cte), m_initplan(initplan)
 		{
 			GPOS_ASSERT(plan_cte);
+			GPOS_ASSERT(initplan);
 		}
 
 		~SCTEEntryInfo() = default;
 	};
+
+private:
 
 	// hash maps mapping ULONG -> SCTEEntryInfo
 	using HMUlCTEProducerInfo =
@@ -196,10 +206,12 @@ public:
 	ULONG GetNextParamId(OID typeoid);
 
 	// register a newly CTE producer
-	void RegisterCTEProducerInfo(ULONG cte_id, ULongPtrArray *producer_output_colidx_map, Plan *producer);
+	void RegisterCTEProducerInfo(ULONG cte_id,
+								 ULongPtrArray *producer_output_colidx_map,
+								 Plan *producer, SubPlan *initplan);
 
-	// return the Share Input Scan plans representing the CTE producer
-	std::pair<ULongPtrArray *, Plan *> GetCTEProducerInfo(ULONG cte_id) const;
+	// what a CTE producer became, or nullptr for one not translated yet
+	const SCTEEntryInfo *GetCTEProducerInfo(ULONG cte_id) const;
 
 	// return list of range table entries
 	List *

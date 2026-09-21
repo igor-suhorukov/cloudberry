@@ -267,6 +267,10 @@ bool AggregateExists(Oid oid);
 // add member to Bitmapset
 Bitmapset *BmsAddMember(Bitmapset *a, int x);
 
+// union of two Bitmapsets, a new one; not in Cloudberry's layer, and wanted by
+// a CteScan, which depends on what its CTE depends on
+Bitmapset *BmsUnion(const Bitmapset *a, const Bitmapset *b);
+
 // next member of Bitmapset
 int BmsNextMember(const Bitmapset *a, int prevbit);
 
@@ -777,6 +781,19 @@ List *GetIndexOpFamilies(Oid index_oid);
 
 // get oids of op classes for the merge join
 List *GetMergeJoinOpFamilies(Oid opno);
+
+// The hash support functions of each input of a hashable equality operator,
+// from the hash family it is in.  Not in Cloudberry's layer: its hash join
+// keeps IS NOT DISTINCT FROM out of the hash keys through a field PostgreSQL
+// 19's HashJoin does not have, and the port hashes those keys itself; see
+// TranslateDXLHashJoin.
+bool GetOpHashFunctions(Oid opno, Oid *lhs_procno, Oid *rhs_procno);
+
+// May this transaction's snapshots read through the index?  Not when it was
+// built over broken HOT chains after the oldest of them was taken; the planner
+// skips such an index and marks its plan transient (plancat.c,
+// get_relation_info).  Not in Cloudberry's layer; see TranslateDXLIndexScan.
+bool IndexUsableBySnapshots(Oid index_oid);
 
 // get the OID of base elementtype fora given typid
 Oid GetBaseType(Oid typid);

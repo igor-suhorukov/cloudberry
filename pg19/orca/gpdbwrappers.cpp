@@ -67,9 +67,12 @@
 extern "C" {
 #include "access/amapi.h"
 #include "access/genam.h"
+#include "access/htup_details.h"
 #include "access/parallel.h"
+#include "access/transam.h"
 #include "catalog/pg_aggregate.h"
 #include "catalog/pg_am.h"
+#include "catalog/pg_index.h"
 #include "catalog/pg_inherits.h"
 #include "catalog/pg_statistic_ext_data.h"
 #include "commands/defrem.h"
@@ -87,6 +90,7 @@ extern "C" {
 #include "utils/lsyscache.h"
 #include "utils/memutils.h"
 #include "utils/partcache.h"
+#include "utils/snapmgr.h"
 
 /* gp_core's, over the "gp" security label */
 #include "gp_policy.h"
@@ -157,6 +161,17 @@ gpdb::BmsAddMember(Bitmapset *a, int x)
 	GP_WRAP_START;
 	{
 		return bms_add_member(a, x);
+	}
+	GP_WRAP_END;
+	return nullptr;
+}
+
+Bitmapset *
+gpdb::BmsUnion(const Bitmapset *a, const Bitmapset *b)
+{
+	GP_WRAP_START;
+	{
+		return bms_union(a, b);
 	}
 	GP_WRAP_END;
 	return nullptr;
@@ -2401,6 +2416,43 @@ gpdb::GetMergeJoinOpFamilies(Oid opno)
 	}
 	GP_WRAP_END;
 	return NIL;
+}
+
+bool
+gpdb::GetOpHashFunctions(Oid opno, Oid *lhs_procno, Oid *rhs_procno)
+{
+	GP_WRAP_START;
+	{
+		/* catalog tables: pg_amop, pg_amproc */
+		return get_op_hash_functions(opno, lhs_procno, rhs_procno);
+	}
+	GP_WRAP_END;
+	return false;
+}
+
+bool
+gpdb::IndexUsableBySnapshots(Oid index_oid)
+{
+	GP_WRAP_START;
+	{
+		/* catalog tables: pg_index */
+		HeapTuple tup = SearchSysCache1(INDEXRELID, ObjectIdGetDatum(index_oid));
+		if (!HeapTupleIsValid(tup))
+		{
+			elog(ERROR, "cache lookup failed for index %u", index_oid);
+		}
+
+		Form_pg_index index = (Form_pg_index) GETSTRUCT(tup);
+		bool usable =
+			!(index->indcheckxmin &&
+			  !TransactionIdPrecedes(HeapTupleHeaderGetXmin(tup->t_data),
+									 TransactionXmin));
+		ReleaseSysCache(tup);
+
+		return usable;
+	}
+	GP_WRAP_END;
+	return false;
 }
 
 

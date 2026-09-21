@@ -191,11 +191,12 @@ CContextDXLToPlStmt::GetParamTypes()
 void
 CContextDXLToPlStmt::RegisterCTEProducerInfo(
 	ULONG cte_id, ULongPtrArray *producer_output_colidx_map,
-	Plan *producer)
+	Plan *producer, SubPlan *initplan)
 {
 	ULONG *key = GPOS_NEW(m_mp) ULONG(cte_id);
 	BOOL result GPOS_ASSERTS_ONLY = m_cte_producer_info->Insert(
-		key, GPOS_NEW(m_mp) SCTEEntryInfo(producer_output_colidx_map, producer));
+		key, GPOS_NEW(m_mp) SCTEEntryInfo(producer_output_colidx_map,
+										  producer, initplan));
 
 	GPOS_ASSERT(result);
 }
@@ -205,15 +206,13 @@ CContextDXLToPlStmt::RegisterCTEProducerInfo(
 //		CContextDXLToPlStmt::GetCTEProducerInfo
 //
 //	@doc:
-//		Return the producer in CTE
+//		Return what the CTE producer became, or nullptr if it has not been
+//		translated
 //---------------------------------------------------------------------------
-std::pair<ULongPtrArray *, Plan *>
+const CContextDXLToPlStmt::SCTEEntryInfo *
 CContextDXLToPlStmt::GetCTEProducerInfo(ULONG cte_id) const
 {
-	SCTEEntryInfo *sctepinfo = m_cte_producer_info->Find(&cte_id);
-	GPOS_ASSERT(sctepinfo);
-
-	return std::make_pair(sctepinfo->m_pidxmap, sctepinfo->m_cte_producer_plan);
+	return m_cte_producer_info->Find(&cte_id);
 }
 
 //---------------------------------------------------------------------------

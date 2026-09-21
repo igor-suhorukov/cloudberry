@@ -264,7 +264,22 @@ plan_tree_walker(Node *node,
 				return true;
 			break;
 
+		/*
+		 * Each of ForeignScan, IndexScan and BitmapIndexScan shared its body
+		 * with the Dynamic scan of the same kind below it, which is M2's and
+		 * left out, and the body went with the label: each then fell through
+		 * to the case below, and read a field of another node's struct at its
+		 * own offset -- a BitmapIndexScan's index OID as TidScan's tidquals,
+		 * which crashed the first plan with a bitmap index in it.  Cloudberry's
+		 * bodies, each under its own label again.
+		 */
 		case T_ForeignScan:
+			if (walk_scan_node_fields((Scan *) node, walker, context))
+				return true;
+			if (walker((Node *) ((ForeignScan *) node)->fdw_exprs, context))
+				return true;
+			break;
+
 		case T_CustomScan:
 			if (walk_scan_node_fields((Scan *) node, walker, context))
 				return true;
@@ -298,6 +313,13 @@ plan_tree_walker(Node *node,
 			break;
 
 		case T_IndexScan:
+			if (walk_scan_node_fields((Scan *) node, walker, context))
+				return true;
+			if (walker((Node *) ((IndexScan *) node)->indexqual, context))
+				return true;
+			/* Other fields are lists of basic items, nothing to walk. */
+			break;
+
 		case T_IndexOnlyScan:
 			if (walk_scan_node_fields((Scan *) node, walker, context))
 				return true;
@@ -306,6 +328,13 @@ plan_tree_walker(Node *node,
 			break;
 
 		case T_BitmapIndexScan:
+			if (walk_scan_node_fields((Scan *) node, walker, context))
+				return true;
+			if (walker((Node *) ((BitmapIndexScan *) node)->indexqual, context))
+				return true;
+			/* Other fields are lists of basic items, nothing to walk. */
+			break;
+
 		case T_TidScan:
 			if (walk_scan_node_fields((Scan *) node, walker, context))
 				return true;

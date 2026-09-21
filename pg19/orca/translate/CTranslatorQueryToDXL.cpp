@@ -182,15 +182,18 @@ CTranslatorQueryToDXL::CTranslatorQueryToDXL(
 		GP_UNPORTED("FOR UPDATE and FOR SHARE");
 	}
 
-	// T1: window functions.  Refused here, and not only where DXL to
-	// PlannedStmt meets a WindowAgg, because the translation below assumes
-	// what Cloudberry's transformGroupedWindows() made true before it ran --
-	// no grouping in a query with a window clause -- and in a build without
-	// assertions it would drop the GROUP BY rather than say so.  T1 brings
-	// transformGroupedWindows() with the rest of Window.
-	if (NIL != query->windowClause)
+	// Window functions and grouping at one query level.  The translation
+	// below assumes what transformGroupedWindows() makes true before ORCA is
+	// called -- that a query with a window clause does no grouping, which is
+	// moved into a subquery under it (orca.c) -- and in a build without
+	// assertions it would drop the GROUP BY rather than say so.  Every query
+	// optimize_query() hands ORCA has been through it; this says so if one
+	// ever arrives that has not.
+	if (NIL != query->windowClause &&
+		(NIL != query->groupClause || NIL != query->groupingSets ||
+		 query->hasAggs))
 	{
-		GP_UNPORTED("window functions");
+		GP_UNPORTED("window functions and grouping in one query level");
 	}
 
 	m_query_id = m_context->GetNextQueryId();

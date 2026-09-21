@@ -1151,10 +1151,11 @@ after=$(q "SELECT count FROM gp_orca.fallbacks() WHERE reason = 'planned';")
 	|| notok "a query ORCA plans is counted as planned" \
 	         "before [$before], after [$after]"
 
-# A join is T1's, so ORCA looks at it and declines it: counted, with that
-# reason, and planned by PostgreSQL instead.
+# A row lock is a query ORCA looks at and declines (see "FOR UPDATE, which
+# would lock nothing" in section 21): counted, with that reason, and planned
+# by PostgreSQL instead.  Until T1 this was a join, which ORCA now plans.
 before=$(q "SELECT count FROM gp_orca.fallbacks() WHERE reason = 'declined';")
-q "SELECT count(*) FROM es e1 JOIN es e2 USING (a);" > /dev/null
+q "SELECT count(*) FROM (SELECT e1.a FROM es e1 JOIN es e2 USING (a) FOR UPDATE OF e1) s;" > /dev/null
 after=$(q "SELECT count FROM gp_orca.fallbacks() WHERE reason = 'declined';")
 [ "$after" -gt "$before" ] \
 	&& ok "a query ORCA will not plan yet is counted as declined" \
@@ -1179,7 +1180,7 @@ is "an ordinary query is not counted as a utility statement" \
 # what the first one did.  That is what makes them answer a question about a
 # workload rather than about one connection.
 q "SELECT gp_orca.reset_fallbacks();" > /dev/null
-"$PSQL" -X -q -t -A -d postgres -c "SELECT count(*) FROM es e1 JOIN es e2 USING (a);" > /dev/null 2>&1
+"$PSQL" -X -q -t -A -d postgres -c "SELECT count(*) FROM (SELECT e1.a FROM es e1 JOIN es e2 USING (a) FOR UPDATE OF e1) s;" > /dev/null 2>&1
 is "and another backend's fallbacks are visible from this one" \
    "SELECT count > 0 FROM gp_orca.fallbacks() WHERE reason = 'declined';" "t"
 
@@ -1191,10 +1192,10 @@ is "resetting is not something every user may do" \
 # The plan still comes out when ORCA declines, and it is PostgreSQL's.  A hook
 # that counted and then lost the plan would pass every test above.
 is "a declined query still gets a plan, and it runs" \
-   "SELECT count(*) FROM es e1 JOIN es e2 USING (a) WHERE e1.a = 1;" "10000"
+   "SELECT count(*) FROM (SELECT e1.a FROM es e1 JOIN es e2 USING (a) WHERE e1.a = 1 FOR UPDATE OF e1) s;" "10000"
 
 has "and EXPLAIN says whose plan it is" \
-    "EXPLAIN (COSTS OFF) SELECT count(*) FROM es e1 JOIN es e2 USING (a);" \
+    "EXPLAIN (COSTS OFF) SELECT count(*) FROM (SELECT e1.a FROM es e1 JOIN es e2 USING (a) FOR UPDATE OF e1) s;" \
     "Optimizer: Postgres query optimizer"
 
 echo
@@ -2248,14 +2249,8 @@ same "and ORCA plans the next statement in that backend" \
 # --- what ORCA declines, and says so ---------------------------------------------
 
 has "the trace is Cloudberry's, word for word" \
-    "SET gp.optimizer_trace_fallback = on; SELECT count(*) FROM t0 t1 JOIN t0 t2 USING (a);" \
+    "SET gp.optimizer_trace_fallback = on; SELECT a FROM t0 WHERE a = 1 FOR UPDATE;" \
     "GPORCA failed to produce a plan, falling back to Postgres-based planner"
-
-declined "a join, which T1 brings" \
-         "SELECT count(*) FROM t0 t1 JOIN t0 t2 USING (a)" "HashJoin"
-
-declined "window functions, which T1 brings" \
-         "SELECT a, rank() OVER (ORDER BY a) FROM t0 WHERE a < 3" "window functions"
 
 # ORCA ignores row marks, because Cloudberry locks the whole table for them;
 # PostgreSQL locks the rows, in a node the plan must have.
@@ -2285,6 +2280,278 @@ is "and a thousand plans later it holds no more than it did" \
     DO \$\$ DECLARE n bigint; BEGIN
       FOR i IN 1..1000 LOOP EXECUTE format('SELECT count(*) FROM t0 WHERE a < %s GROUP BY b LIMIT 1', i) INTO n; END LOOP; END \$\$;
     SELECT sum(total_bytes) <= (SELECT b FROM t0_mem) FROM pg_backend_memory_contexts WHERE name LIKE 'GPORCA%';" "t"
+
+echo
+echo "22. joins, index and bitmap scans, Append, windows and CTEs, planned by ORCA"
+
+# T1 of the translator.  Most checks are "shape": ORCA planned it, the plan
+# has the node the check is about, and the answer is the planner's.  The
+# middle clause is the one "same" does not have, and what it guards against
+# is a check that passes through a plan that went around the node it names.
+
+# shape <name> <node> <query> [setup]
+shape() {
+	local setup="${4:-SELECT}" orca pg plan
+	plan=$(q2 "$setup" "EXPLAIN (COSTS OFF, VERBOSE) $3")
+	case "$plan" in
+		*"Optimizer: GPORCA"*) ;;
+		*) notok "$1" "not planned by ORCA: $(printf '%s' "$plan" | tail -3 | tr '\n' '|')"; return ;;
+	esac
+	case "$plan" in
+		*"$2"*) ;;
+		*) notok "$1" "no [$2] in the plan: $(printf '%s' "$plan" | tr '\n' '|')"; return ;;
+	esac
+	orca=$(q2 "$setup" "$3")
+	pg=$(q2 "$setup; SET gp.optimizer = off" "$3")
+	[ "$orca" = "$pg" ] && ok "$1" || notok "$1" "orca [$orca], planner [$pg]"
+}
+
+q "CREATE TABLE t1a (i int, j int, t text);
+   CREATE TABLE t1b (i int, k int, u text);
+   INSERT INTO t1a SELECT g, g % 10, 'a' || (g % 7) FROM generate_series(1, 2000) g;
+   INSERT INTO t1a VALUES (NULL, NULL, NULL), (NULL, 3, 'x');
+   INSERT INTO t1b SELECT g * 2, g % 5, 'b' || (g % 3) FROM generate_series(1, 1000) g;
+   INSERT INTO t1b VALUES (NULL, NULL, NULL), (4, NULL, 'y');
+   CREATE INDEX t1a_i ON t1a (i);
+   CREATE INDEX t1a_j_i ON t1a (j, i);
+   CREATE INDEX t1b_i ON t1b (i);" > /dev/null
+# VACUUM, for the visibility map an index-only scan is costed by; one
+# statement each, since a -c string runs in one transaction and VACUUM will
+# not run in one.
+q "VACUUM ANALYZE t1a;" > /dev/null
+q "VACUUM ANALYZE t1b;" > /dev/null
+
+# --- joins ------------------------------------------------------------------
+
+shape "a hash join" "Hash Join" \
+      "SELECT t1a.i, t1b.k FROM t1a JOIN t1b ON t1a.i = t1b.i WHERE t1a.j < 3 ORDER BY 1, 2"
+
+shape "a left join, with its NULLs" "Left Join" \
+      "SELECT t1a.i, t1b.k FROM t1a LEFT JOIN t1b ON t1a.i = t1b.i WHERE t1a.i < 20 OR t1a.i IS NULL ORDER BY 1, 2"
+
+same "a right join" \
+     "SELECT t1a.i, t1b.k FROM t1a RIGHT JOIN t1b ON t1a.i = t1b.i ORDER BY 2, 1 LIMIT 20"
+
+shape "a full join" "Full Join" \
+      "SELECT t1a.i, t1b.i FROM t1a FULL JOIN t1b ON t1a.i = t1b.i WHERE coalesce(t1a.i, t1b.i) < 20 OR t1a.i IS NULL OR t1b.i IS NULL ORDER BY 1, 2"
+
+shape "EXISTS, as a semi-join" "Semi Join" \
+      "SELECT count(*) FROM t1a WHERE EXISTS (SELECT 1 FROM t1b WHERE t1b.i = t1a.i)"
+
+shape "NOT EXISTS, as an anti-join" "Anti Join" \
+      "SELECT count(*) FROM t1a WHERE NOT EXISTS (SELECT 1 FROM t1b WHERE t1b.i = t1a.i)"
+
+same "IN" \
+     "SELECT count(*) FROM t1a WHERE t1a.i IN (SELECT i FROM t1b)"
+
+shape "a nested loop, on an inequality" "Nested Loop" \
+      "SELECT count(*) FROM t1a JOIN t1b ON t1a.i < t1b.i WHERE t1a.i < 10 AND t1b.i < 30"
+
+# ORCA merge-joins only a full join -- CXformImplementFullOuterMergeJoin is its
+# one merge join -- so that is the one shape with no hash join to fall to.
+shape "a merge join" "Merge Full Join" \
+      "SELECT t1a.i, t1b.i FROM t1a FULL JOIN t1b ON t1a.i = t1b.i WHERE coalesce(t1a.i, t1b.i) < 20 OR t1a.i IS NULL OR t1b.i IS NULL ORDER BY 1, 2" \
+      "SET gp.optimizer_enable_hashjoin = off"
+
+shape "an index nested loop, its parameter set for each outer row" "Index Cond: (t1b.i = t1a.i)" \
+      "SELECT t1a.i, t1b.k FROM t1a JOIN t1b ON t1a.i = t1b.i WHERE t1a.j = 1 ORDER BY 1" \
+      "SET gp.optimizer_enable_hashjoin = off; SET gp.optimizer_enable_mergejoin = off"
+
+same "three tables" \
+     "SELECT count(*) FROM t1a JOIN t1b ON t1a.i = t1b.i JOIN t1a a2 ON a2.j = t1b.k WHERE t1a.j < 2"
+
+# PostgreSQL 19 has no anti-join that answers NOT IN's NULLs, and ORCA's
+# other plan for it -- an apply kept as a SubPlan, when the two transforms
+# that make the join are turned off -- was measured at T1 at 6.8 seconds
+# against the planner's 6 milliseconds.  So it is declined, and counted.
+declined "NOT IN, which ORCA makes an anti-join PostgreSQL 19 cannot run" \
+         "SELECT count(*) FROM t1a WHERE t1a.j NOT IN (SELECT k FROM t1b)" \
+         "NOT IN as an anti-join"
+
+# --- IS NOT DISTINCT FROM ------------------------------------------------------
+#
+# PostgreSQL 19's hash join never lets a NULL key meet another, and has no
+# field of Cloudberry's to check NULLs apart; the port hashes each side with its
+# own hash function and a NULL as 0, and leaves the condition to tell a NULL
+# from a 0.  INTERSECT and EXCEPT are hash joins on it, over every column.
+
+shape "INTERSECT, whose NULLs meet in a hash join" "IS DISTINCT FROM" \
+      "SELECT j FROM t1a INTERSECT SELECT k FROM t1b ORDER BY 1"
+
+same "EXCEPT, NULLs included" \
+     "SELECT j FROM t1a EXCEPT SELECT k FROM t1b ORDER BY 1"
+
+same "IS NOT DISTINCT FROM between two integer types" \
+     "SELECT count(*) FROM t1a JOIN t1b ON t1a.j IS NOT DISTINCT FROM t1b.k::int8"
+
+same "and over text" \
+     "SELECT count(*) FROM t1a JOIN t1b ON t1a.t IS NOT DISTINCT FROM t1b.u"
+
+# A value of the key's own type in a NULL's place would be simpler, and would
+# not exist for every type: an empty varlena is not a numeric.
+same "and over numeric, which has no value to stand in for a NULL" \
+     "SELECT count(*) FROM t1a JOIN t1b ON (t1a.j::numeric) IS NOT DISTINCT FROM (t1b.k::numeric)"
+
+same "a 0 still told apart from a NULL" \
+     "SELECT count(*) FROM (VALUES (0), (NULL), (1)) x(v) JOIN (VALUES (NULL::int), (0)) y(w) ON x.v IS NOT DISTINCT FROM y.w"
+
+# --- Append -------------------------------------------------------------------
+
+shape "UNION ALL, as an Append" "Append" \
+      "SELECT i FROM t1a WHERE i < 5 UNION ALL SELECT i FROM t1b WHERE i < 10 ORDER BY 1"
+
+same "UNION" \
+     "SELECT j FROM t1a UNION SELECT k FROM t1b ORDER BY 1"
+
+# --- index scans ------------------------------------------------------------------
+
+shape "an index scan" "Index Scan" \
+      "SELECT * FROM t1a WHERE i = 17"
+
+shape "an index-only scan" "Index Only Scan" \
+      "SELECT j, i FROM t1a WHERE j = 3 AND i < 50 ORDER BY 1, 2" \
+      "SET gp.optimizer_enable_indexscan = off"
+
+shape "a bitmap scan, two ranges ORed" "BitmapOr" \
+      "SELECT count(*) FROM t1a WHERE i < 30 OR i > 1990"
+
+same "a prepared index scan, custom plans and then the generic one" \
+     "EXECUTE p1(10); EXECUTE p1(20); EXECUTE p1(30); EXECUTE p1(40); EXECUTE p1(50); EXECUTE p1(60); EXECUTE p1(70)" \
+     "PREPARE p1(int) AS SELECT j FROM t1a WHERE i = \$1"
+
+# A lossy index says a match may not be one, and PostgreSQL 15's
+# IndexOnlyScan.recheckqual is what checks it against the index tuple.  GiST's
+# point <@ polygon is lossy: the index answers for the bounding box.
+q "CREATE TABLE t1p (p point);
+   INSERT INTO t1p SELECT point(g % 10, g / 10) FROM generate_series(0, 99) g;
+   CREATE INDEX t1p_p ON t1p USING gist (p);" > /dev/null
+q "VACUUM ANALYZE t1p;" > /dev/null
+
+# The triangle holds 55 of the grid's points and its bounding box all 100, so
+# an index-only scan that skipped the recheck would answer 100.
+shape "a lossy GiST index-only scan, whose matches are rechecked" "Index Only Scan" \
+      "SELECT p[0], p[1] FROM t1p WHERE p <@ polygon '((0,0),(9,0),(0,9))' ORDER BY 1, 2"
+
+# The planner skips an index that this transaction's snapshots may not read
+# through yet, and marks its plan transient; ORCA's metadata admits it, so the
+# port refuses a plan that uses one.  Such an index is built over a HOT chain
+# that a snapshot may still need the old end of -- the simplest being a chain
+# the building transaction itself broke -- and the fixture is checked before
+# the test relies on it.  fillfactor leaves the page room for the HOT update.
+q "CREATE TABLE t1_hot (a int, b int) WITH (fillfactor = 50);
+   INSERT INTO t1_hot SELECT g, g FROM generate_series(1, 5000) g;
+   ANALYZE t1_hot;" > /dev/null
+
+is "an index built over a HOT chain its own transaction broke is marked so" \
+   "BEGIN; UPDATE t1_hot SET a = a + 100000 WHERE b = 5;
+    CREATE INDEX t1_hot_a ON t1_hot (a);
+    SELECT indcheckxmin FROM pg_index WHERE indexrelid = 't1_hot_a'::regclass;
+    ROLLBACK;" "t"
+
+got=$(q "SET gp.optimizer_trace_fallback = on;
+         BEGIN; UPDATE t1_hot SET a = a + 100000 WHERE b = 5;
+         CREATE INDEX t1_hot_a ON t1_hot (a);
+         SELECT b FROM t1_hot WHERE a = 100005; ROLLBACK;")
+case "$got" in
+	*"an index newer than this transaction's snapshots"*5*) ok "and a plan through it, in that transaction, goes to the planner" ;;
+	*) notok "and a plan through it, in that transaction, goes to the planner" "$got" ;;
+esac
+
+q "BEGIN; UPDATE t1_hot SET a = a + 100000 WHERE b = 5;
+   CREATE INDEX t1_hot_a ON t1_hot (a); COMMIT;" > /dev/null
+shape "and once it is old enough, ORCA uses it" "Index" \
+      "SELECT b FROM t1_hot WHERE a = 100005"
+
+# ORCA plans no index or bitmap scan of a relation with security quals -- its
+# transforms decline such a Get -- so the table scan, which applies them, is
+# the only scan that meets them.
+q "CREATE TABLE t1_rls (owner text, val int);
+   INSERT INTO t1_rls SELECT CASE WHEN g % 2 = 0 THEN 't1_reader' ELSE 'other' END, g
+     FROM generate_series(1, 5000) g;
+   CREATE INDEX t1_rls_val ON t1_rls (val);
+   ALTER TABLE t1_rls ENABLE ROW LEVEL SECURITY;
+   CREATE POLICY t1_own ON t1_rls USING (owner = current_user);
+   CREATE ROLE t1_reader; GRANT SELECT ON t1_rls TO t1_reader;
+   ANALYZE t1_rls;" > /dev/null
+
+same "row security applies where an index would have been used" \
+     "SELECT val FROM t1_rls WHERE val BETWEEN 10 AND 20 ORDER BY val" "SET ROLE t1_reader"
+
+# --- window functions --------------------------------------------------------------
+
+shape "a window function" "WindowAgg" \
+      "SELECT i, j, rank() OVER (PARTITION BY j ORDER BY i) FROM t1a WHERE i < 30 ORDER BY 1"
+
+same "a ROWS frame" \
+     "SELECT i, sum(i) OVER (ORDER BY i ROWS BETWEEN 2 PRECEDING AND CURRENT ROW) FROM t1a WHERE i < 20 ORDER BY 1"
+
+same "a RANGE frame with offsets" \
+     "SELECT i, sum(i) OVER (ORDER BY i RANGE BETWEEN 3 PRECEDING AND 1 FOLLOWING) FROM t1a WHERE i < 15 ORDER BY 1"
+
+same "OVER ()" \
+     "SELECT i, count(*) OVER () FROM t1a WHERE i < 5 ORDER BY 1"
+
+# PostgreSQL 18 made EXPLAIN print every window's definition under its name.
+has "EXPLAIN names each window, as it now always does" \
+    "EXPLAIN (COSTS OFF, VERBOSE) SELECT i, rank() OVER (ORDER BY i) FROM t1a WHERE i < 3" \
+    "Window: w1 AS"
+
+# ORCA can put a filter on any window node; PostgreSQL 19 asserts that only
+# the top one has a qual, which is about run conditions, and ORCA makes none.
+same "a filter over a window function" \
+     "SELECT * FROM (SELECT i, rank() OVER (ORDER BY i) r FROM t1a WHERE i < 50) s WHERE r < 4 ORDER BY 1"
+
+# transformGroupedWindows(), before ORCA: the grouping goes into a subquery.
+shape "window functions over a GROUP BY, split in two before ORCA sees them" "WindowAgg" \
+      "SELECT j, count(*), rank() OVER (ORDER BY count(*) DESC, j) FROM t1a GROUP BY j ORDER BY 1"
+
+same "and a window over an aggregate, with a HAVING" \
+     "SELECT j, sum(count(*)) OVER (ORDER BY j) FROM t1a GROUP BY j HAVING count(*) > 100 ORDER BY 1"
+
+# PostgreSQL 19 added IGNORE NULLS, which ORCA's window reference has no
+# field for: planned, it would come back as RESPECT NULLS.
+declined "IGNORE NULLS, which ORCA's window reference cannot carry" \
+         "SELECT i, lag(j) IGNORE NULLS OVER (ORDER BY i) FROM t1a WHERE i < 10 ORDER BY 1" \
+         "window function with IGNORE NULLS"
+
+# --- CTEs ------------------------------------------------------------------------------
+#
+# A CTE producer is a subplan run by an initplan, and each consumer a CTE Scan
+# of it, as the planner makes a CTE; Cloudberry's ShareInputScan and Sequence
+# are not PostgreSQL 19's.
+
+shape "a CTE read twice" "CTE Scan" \
+      "WITH c AS (SELECT j, count(*) n FROM t1a GROUP BY j) SELECT x.j, y.n FROM c x JOIN c y ON x.j = y.j ORDER BY 1"
+
+same "a CTE whose readers read different columns" \
+     "WITH c AS (SELECT i, j, t FROM t1a WHERE i < 100) SELECT x.i, y.t FROM c x JOIN c y ON x.i = y.j ORDER BY 1, 2"
+
+# A CTE reader in DXL has no filter of its own, so ORCA puts one on a Result
+# above it, which the port moves into the CTE Scan -- a scan tests a qual on
+# the rows it is about to return -- rather than under a Subquery Scan.
+got=$(q "EXPLAIN (COSTS OFF) WITH c AS (SELECT i, j, t FROM t1a WHERE i < 100)
+         SELECT x.i, y.t FROM c x JOIN c y ON x.i = y.j")
+case "$got" in
+	*"Subquery Scan"*) notok "and a filter on a reader goes into its CTE Scan" "$got" ;;
+	*"CTE Scan"*"Filter:"*) ok "and a filter on a reader goes into its CTE Scan" ;;
+	*) notok "and a filter on a reader goes into its CTE Scan" "$got" ;;
+esac
+
+same "a CTE that reads a CTE" \
+     "WITH c1 AS (SELECT j FROM t1a WHERE i < 50), c2 AS (SELECT j, count(*) n FROM c1 GROUP BY j)
+      SELECT * FROM c2 x JOIN c2 y USING (j) JOIN c1 z USING (j) ORDER BY 1"
+
+same "a CTE inside a subquery" \
+     "SELECT count(*) FROM (WITH c AS (SELECT k FROM t1b WHERE k > 2) SELECT * FROM c c1 JOIN c c2 USING (k)) s"
+
+shape "several DISTINCT aggregates, which ORCA answers with CTEs of its own" "CTE Scan" \
+      "SELECT count(DISTINCT j), count(DISTINCT t), count(*) FROM t1a" \
+      "SET gp.optimizer_enable_multiple_distinct_aggs = on"
+
+declined "a CTE with an outer reference, which ORCA declines itself" \
+         "SELECT i, (WITH c AS (SELECT k FROM t1b WHERE t1b.i = t1a.i) SELECT count(*) FROM c c1, c c2) FROM t1a WHERE i < 8 ORDER BY 1" \
+         "CTE with outer references" \
+         "SET gp.optimizer_enforce_subplans = on"
 
 echo
 echo "  $pass passed, $fail failed"
