@@ -21,19 +21,61 @@
 #-------------------------------------------------------------------------
 
 #
-# The port's modules, built against the patched PostgreSQL 19.
+# The port's modules, built against the patched PostgreSQL 19, and stock
+# PostGIS beside them.
 #
 # This tree arrives as a read-only build context named "cbsrc", and the build
 # takes the branch out of it with "git archive", so the build never sees an
 # unclean working tree.  Set CB_REF to build something other than the port
-# branch.
+# branch.  PostGIS is cloned from upstream at a tag, and the commit the tag
+# points at is checked; see POSTGIS_TAG.
 
 ARG PG_IMAGE=cloudberry/pg19-patched:latest
 ARG CB_REF=extension_postgresql_19
+# PostGIS 3.7 is the first release line for PostgreSQL 19, and 3.7.0rc2 is its
+# newest tag.  The commit is checked, so the image is built from the source
+# cloudberry.md cites and not from whatever the tag has been moved to since.
+ARG POSTGIS_TAG=3.7.0rc2
+ARG POSTGIS_COMMIT=e2ea03ad0bfcf4b15ccb748113be3c5741809a08
 
 ###############################################################################
 FROM ${PG_IMAGE} AS pg
 ###############################################################################
+
+###############################################################################
+FROM debian:trixie-slim AS postgis
+###############################################################################
+# Stock PostGIS, built against the patched server exactly as it would be
+# against a vanilla one: PGXS, found through pg_config, with no patch to
+# PostGIS and nothing of the port's on its include path.  The stage depends
+# only on the server image, so rebuilding the modules does not rebuild it.
+ARG POSTGIS_TAG
+ARG POSTGIS_COMMIT
+USER root
+
+# GEOS, PROJ, libxml2 and json-c are PostGIS's own; GDAL is raster's;
+# protobuf-c is ST_AsMVT's and ST_AsGeobuf's.  autoconf and libtool are for
+# autogen.sh, because the source is a git tree rather than a release tarball.
+RUN apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+        build-essential pkg-config git ca-certificates autoconf automake libtool \
+        libxml2-dev libgeos-dev libproj-dev libgdal-dev libjson-c-dev \
+        libprotobuf-c-dev protobuf-c-compiler \
+    && rm -rf /var/lib/apt/lists/*
+
+COPY --from=pg /usr/local/pgsql /usr/local/pgsql
+ENV PATH=/usr/local/pgsql/bin:$PATH \
+    LD_LIBRARY_PATH=/usr/local/pgsql/lib:/usr/local/pgsql/lib/x86_64-linux-gnu
+
+RUN git clone --quiet --depth 1 --branch "$POSTGIS_TAG" \
+        https://github.com/postgis/postgis.git /postgis \
+ && test "$(git -C /postgis rev-parse HEAD)" = "$POSTGIS_COMMIT" \
+ && echo "$POSTGIS_COMMIT" > /postgis/.postgis_commit
+
+WORKDIR /postgis
+RUN ./autogen.sh > /dev/null \
+ && ./configure --with-pgconfig=/usr/local/pgsql/bin/pg_config > configure.log \
+ && make -j"$(nproc)" > make.log \
+ && make install DESTDIR=/postgis-root > install.log
 
 ###############################################################################
 FROM debian:trixie-slim AS build
@@ -72,16 +114,21 @@ FROM ${PG_IMAGE} AS runtime
 ###############################################################################
 USER root
 # gp_orca links against xerces-c, so the runtime image needs the library even
-# though it does not need the headers.
+# though it does not need the headers; the rest are the libraries of the
+# PostGIS stage's -dev packages.
 RUN apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
         libxerces-c3.2 \
+        libgeos-c1t64 libproj25 libgdal36 libjson-c5 libprotobuf-c1 \
     && rm -rf /var/lib/apt/lists/*
 # The whole prefix, rather than lib/ and share/extension/ separately: where
 # PostgreSQL puts its data files depends on the prefix -- $prefix/share when
 # the prefix ends in "pgsql" or "postgres", $prefix/share/postgresql when it
 # does not -- so naming the subdirectories here would tie this file to one
-# prefix.  The build stage installed the modules into the same tree.
+# prefix.  The build stage installed the modules into the same tree, and
+# PostGIS was installed under the same prefix, beneath a DESTDIR.
 COPY --from=build /usr/local/pgsql /usr/local/pgsql
+COPY --from=postgis /postgis-root/usr/local/pgsql /usr/local/pgsql
+COPY --from=postgis /postgis/.postgis_commit /usr/local/pgsql/.postgis_commit
 # The test harness is run from the image, so it comes along.
 COPY --from=build /cb/pg19/test /cb/pg19/test
 RUN chown -R postgres:postgres /cb
