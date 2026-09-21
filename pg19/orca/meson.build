@@ -139,6 +139,25 @@ orca_compat_sources = files(
   'compat/walkers.c',
 )
 
+# The translator proper, built by operator group rather than by file; see
+# cloudberry.md, "The translator, measured per file".  What is here now is
+# the first step: ORCA's metadata provider and the relcache translator under
+# it, with the scalar translator and the utilities they call.  Query to DXL is
+# not here yet; the scalar translator's four subquery methods refuse until it
+# is.  Most of these files are Cloudberry's, unchanged but for include paths;
+# the head of each says whether it is.
+orca_translate_sources = files(
+  'relcache/CMDProviderRelcache.cpp',
+  'translate/CCTEListEntry.cpp',
+  'translate/CContextQueryToDXL.cpp',
+  'translate/CDXLTranslateContext.cpp',
+  'translate/CMappingElementColIdParamId.cpp',
+  'translate/CMappingVarColId.cpp',
+  'translate/CTranslatorRelcacheToDXL.cpp',
+  'translate/CTranslatorScalarToDXL.cpp',
+  'translate/CTranslatorUtils.cpp',
+)
+
 orca_transl_sources = files(
   'RelationWrapper.cpp',
   'config/CConfigParamMapping.cpp',
@@ -146,7 +165,7 @@ orca_transl_sources = files(
   'gpdbwrappers.cpp',
   'orca_api.cpp',
   'orca_probe.cpp',
-) + orca_compat_sources
+) + orca_translate_sources + orca_compat_sources
 
 ###############################################################################
 # What the module links against
