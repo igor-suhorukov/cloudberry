@@ -463,6 +463,15 @@ char *GetTypeName(Oid typid);
 // number of GP segments
 int GetGPSegmentCount(void);
 
+// is this a single node: gp_core loaded, no cluster to dispatch to?  Asked
+// of gp_core's flag and never of the segment count, which is at least 1.
+bool IsSingleNode(void);
+
+// is am_oid the access method called am_name?  False when none has that
+// name, and false for InvalidOid, which is what a partitioned table's relam
+// is -- so it is safe to ask of any relam.
+bool IsAccessMethodNamed(Oid am_oid, const char *am_name);
+
 // heap attribute is null
 bool HeapAttIsNull(HeapTuple tup, int attnum);
 

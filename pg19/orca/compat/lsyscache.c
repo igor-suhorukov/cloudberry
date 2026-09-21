@@ -1311,3 +1311,41 @@ has_update_triggers(Oid relid, bool including_children)
 
 	return result;
 }
+
+/*
+ * get_compatible_hash_opfamily
+ *		The hash operator family in which opno is the equality operator.
+ *
+ * Cloudberry's body, unchanged
+ * (github/cloudberry/src/backend/utils/cache/lsyscache.c).  If the operator is
+ * the equality operator of several hash families, any one will do, as
+ * Cloudberry says: they hash the same values alike by construction, which is
+ * what a hash family promises.
+ */
+Oid
+get_compatible_hash_opfamily(Oid opno)
+{
+	Oid			result = InvalidOid;
+	CatCList   *catlist;
+	int			i;
+
+	catlist = SearchSysCacheList1(AMOPOPID, ObjectIdGetDatum(opno));
+
+	for (i = 0; i < catlist->n_members; i++)
+	{
+		HeapTuple	tuple = &catlist->members[i]->tuple;
+		Form_pg_amop aform = (Form_pg_amop) GETSTRUCT(tuple);
+
+		if (aform->amopmethod == HASH_AM_OID &&
+			aform->amopstrategy == HTEqualStrategyNumber)
+		{
+			result = aform->amopfamily;
+			break;
+		}
+	}
+
+	ReleaseSysCacheList(catlist);
+
+	return result;
+}
+

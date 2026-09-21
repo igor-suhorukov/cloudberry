@@ -185,6 +185,19 @@ extern GpPolicy *relation_policy(Relation rel);
 extern bool child_distribution_mismatch(Relation rel);
 
 /*
+ * The hash operator family in which this operator is the equality operator,
+ * or InvalidOid.  ORCA's relcache translator asks it of every operator it
+ * describes, to know which joins on it can be co-located.
+ *
+ * Despite its name this is a catalog question and nothing more: the body is
+ * a pg_amop search, and cdbhash does not come into it.  The plan said the
+ * opposite, reasoning from the name, and deferred it to M2 -- which would
+ * have made ORCA refuse every operator on one node.  Only the legacy variant
+ * asks about cdbhash's own functions; see gpdb::GetCompatibleLegacyHashOpFamily.
+ */
+extern Oid	get_compatible_hash_opfamily(Oid opno);
+
+/*
  * Two helpers has_update_triggers() needs, which Cloudberry adds beside it.
  */
 extern int32 get_trigger_type(Oid triggerid);

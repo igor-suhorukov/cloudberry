@@ -95,6 +95,18 @@ GpOrcaEnsureInitialized(void)
 	gpdxl_init();
 	gpopt_init();
 
+	/*
+	 * And a fourth, which is not in InitGPOPT: DXL support -- Xerces, the DXL
+	 * token map and the parse-handler factory.  Cloudberry calls InitDXL()
+	 * from COptTasks::Execute on every entry into ORCA, so nothing of its
+	 * own ever meets DXL without it; the port's first user of DXL outside
+	 * COptTasks was the metadata probe, which failed its first serialization
+	 * on "Token map not initialized yet".  InitDXL() counts its calls and
+	 * does the work once, so here is as good as there, and it covers every
+	 * way into ORCA the module has, not only the optimizer's.
+	 */
+	InitDXL();
+
 	orca_initialized = true;
 }
 

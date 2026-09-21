@@ -31,10 +31,16 @@
 //		file's includes.  The other 28 are marked, in six groups, and the
 //		comment on each says what it is waiting for.
 //
-//		NEVER RETURN FROM INSIDE GP_WRAP.  Cloudberry's own header note, and
-//		it is still true: the return value goes to a local and comes back
-//		after GP_WRAP_END, so that the longjmp stack is restored.  The
-//		bodies here keep that shape unchanged.
+//		RETURNING FROM INSIDE GP_WRAP IS SAFE, and 173 of the 179 bodies
+//		here do it, as 188 of Cloudberry's 194 do.  GP_WRAP_START puts a
+//		CAutoExceptionStack on the stack, and its destructor puts
+//		PG_exception_stack and error_context_stack back on every way out of
+//		the block -- a return, the GPOS_RAISE after a longjmp, or an
+//		exception passing through.  (An earlier version of this comment said
+//		the opposite and attributed it to Cloudberry.  Cloudberry says no
+//		such thing, and the guard makes it unnecessary.)  What is not safe
+//		is a return from inside PostgreSQL's own PG_TRY, which leaves
+//		PG_exception_stack pointing at a dead frame; nothing here uses one.
 //
 //		./README in Cloudberry's tree lists the catalog tables each wrapper
 //		reads, and the `catalog tables:` comments in the bodies are what
@@ -124,20 +130,11 @@ extern "C" {
 	}                                                      \
 	}
 //---------------------------------------------------------------------------
-//	A wrapper for something this port does not have yet.
-//
-//	It raises instead of returning a plausible-looking answer, and ORCA turns
-//	that into a fallback: gp_orca_planner counts it and PostgreSQL's planner
-//	takes the query.  The alternative -- returning nullptr, or 0, or an empty
-//	policy -- would hand ORCA a false premise and get a plan built on it,
-//	which is the one outcome the fallback design exists to prevent.
-//
-//	Not inside GP_WRAP: that is for turning a PostgreSQL longjmp into a GPOS
-//	exception, and this is already a GPOS exception.
+//	A wrapper for something this port does not have yet raises through
+//	GP_UNPORTED, which the translator shares; see gp_unported.h for why it
+//	raises rather than answering.
 //---------------------------------------------------------------------------
-#define GP_UNPORTED(what)                                              \
-	GPOS_RAISE(gpdxl::ExmaDXL, gpdxl::ExmiQuery2DXLUnsupportedFeature, \
-			   GPOS_WSZ_LIT(what))
+#include "gp_unported.h"
 
 
 using namespace gpos;
@@ -841,6 +838,24 @@ gpdb::GetRelationPartitionKey(Relation rel)
 PartitionDesc
 gpdb::RelationGetPartitionDesc(Relation rel, bool omit_detached)
 {
+	// Cloudberry changed this function's contract without changing its
+	// signature, and the translator depends on the change.  PostgreSQL's
+	// RelationGetPartitionDesc asserts that the relation is partitioned;
+	// Cloudberry's returns NULL when it is not
+	// (github/cloudberry/src/backend/partitioning/partdesc.c), and six
+	// callers in the relcache translator ask it as the question "is this
+	// partitioned?" -- CheckUnsupportedRelation first, for every relation.
+	// Against PostgreSQL 19 the call resolves and compiles, and the
+	// wrapper measurement counted it among those that needed nothing; the
+	// first plain table the translator met failed the assertion in an
+	// assert-enabled build, and in a release build would have read the
+	// partition descriptor of a table that has none.  So the wrapper keeps
+	// Cloudberry's contract.
+	if (rel->rd_rel->relkind != RELKIND_PARTITIONED_TABLE)
+	{
+		return nullptr;
+	}
+
 	GP_WRAP_START;
 	{
 		return ::RelationGetPartitionDesc(rel, omit_detached);
@@ -1128,6 +1143,53 @@ gpdb::GetGPSegmentCount(void)
 }
 
 bool
+gpdb::IsAccessMethodNamed(Oid am_oid, const char *am_name)
+{
+	// Cloudberry compares relam against BITMAP_AM_OID, AO_ROW_TABLE_AM_OID,
+	// AO_COLUMN_TABLE_AM_OID and PAX_AM_OID, fixed OIDs it adds to pg_am.dat.
+	// In the port each of those access methods belongs to a module -- gp_ao
+	// and pax, at M5 -- and is created by CREATE EXTENSION with an ordinary
+	// OID, so it can only be found by name, as Track A 2.2 proposed for PAX.
+	//
+	// The InvalidOid test is the one that matters.  A partitioned table, a
+	// view and a composite type all have relam 0, and so does the answer to
+	// looking up an access method that is not installed -- which on
+	// PostgreSQL 19 is every one of these until its module is.  Compared bare,
+	// every partitioned table would have been PAX.
+	//
+	// No invalidation callback on pg_am, for the reason GetRelAmName has
+	// none: a relation's relam changes only through pg_class, whose
+	// invalidations the metadata cache already takes, and no relation can
+	// use an access method that does not exist yet.
+	GP_WRAP_START;
+	{
+		/* catalog tables: pg_am */
+		return OidIsValid(am_oid) && get_am_oid(am_name, true) == am_oid;
+	}
+	GP_WRAP_END;
+	return false;
+}
+
+bool
+gpdb::IsSingleNode(void)
+{
+	// Not in Cloudberry's wrapper layer, which asks IS_SINGLENODE() in one
+	// place (IsParallelModeOK) and otherwise leaves single-node mode to
+	// code outside ORCA.  The port's relcache translator needs the answer
+	// for every relation -- on one node every relation is reported as
+	// coordinator-only, whatever its label records -- so it is asked through
+	// a wrapper, as every other question to the server is: the rendezvous
+	// lookup behind the macro allocates the first time, and an error there
+	// has to become a GPOS exception rather than a longjmp through C++.
+	GP_WRAP_START;
+	{
+		return IS_SINGLENODE();
+	}
+	GP_WRAP_END;
+	return false;
+}
+
+bool
 gpdb::HeapAttIsNull(HeapTuple tup, int attno)
 {
 	GP_WRAP_START;
@@ -1206,9 +1268,13 @@ gpdb::IsLegacyCdbHashFunction(Oid funcid)
 Oid
 gpdb::GetLegacyCdbHashOpclassForBaseType(Oid typid)
 {
-	// M2: the cluster has one node until then, so nothing is distributed
-	// and nothing hashes a distribution key.
-	GP_UNPORTED("the legacy hash opclass for a type");
+	// No type has a legacy hash opclass on this port, for the reason
+	// GetCompatibleLegacyHashOpFamily gives: the legacy opclasses are
+	// Cloudberry built-ins that neither PostgreSQL 19 nor any of the port's
+	// modules installs.  ORCA's relcache translator asks this of every type
+	// it describes, so raising here would refuse every type.
+	(void) typid;
+	return InvalidOid;
 }
 
 Oid
@@ -2246,21 +2312,39 @@ gpdb::GetOpFamiliesForScOp(Oid opno)
 Oid
 gpdb::GetCompatibleHashOpFamily(Oid opno)
 {
-	// M2.  This is the half of the group that really does need
-	// cdbhash: two opfamilies hash compatibly when their hash
-	// functions agree, which is a property of cdbhash and not of
-	// the catalog.  See "Corrections to the plan" in cloudberry.md.
-	GP_UNPORTED("whether two operator families hash compatibly");
+	// Not M2 after all.  This comment used to say it was the half of the
+	// group that really needs cdbhash; Cloudberry's body is a pg_amop search
+	// and never touches cdbhash, and ORCA's relcache translator asks it of
+	// every operator it describes -- so deferring it made ORCA refuse every
+	// operator on one node, which the first run of the metadata probe showed.
+	GP_WRAP_START;
+	{
+		/* catalog tables: pg_amop */
+		return get_compatible_hash_opfamily(opno);
+	}
+	GP_WRAP_END;
+	return InvalidOid;
 }
 
 // get the OID of hash equality operator(s) compatible with the given op
 Oid
 gpdb::GetCompatibleLegacyHashOpFamily(Oid opno)
 {
-	// M2, with GetCompatibleHashOpFamily above.  The legacy scheme is
-	// the pre-Greenplum-6 hash, kept so that an upgraded cluster does
-	// not have to redistribute every table.
-	GP_UNPORTED("whether two operator families hash compatibly under the legacy scheme");
+	// The legacy scheme is the pre-Greenplum-6 hash, kept so that an
+	// upgraded cluster does not have to redistribute every table.  Cloudberry
+	// answers by finding the operator's hash families and keeping the one
+	// whose hash function is one of its cdblegacyhash_* built-ins.
+	//
+	// The port has none of those: they are Cloudberry's pg_proc entries,
+	// with fixed OIDs, and neither PostgreSQL 19's catalog nor any of the
+	// port's modules has them.  So no operator belongs to a legacy family,
+	// and InvalidOid is the true answer rather than a stand-in for one.
+	// ORCA asks it of every operator it describes, and uses it only under
+	// EopttraceUseLegacyOpfamilies, which COptTasks sets for a query over
+	// tables distributed with legacy opclasses -- none, on this port.  If a
+	// module ever installs the legacy opclasses, this has to find them.
+	(void) opno;
+	return InvalidOid;
 }
 
 List *
@@ -2722,6 +2806,19 @@ gpdb::SplitPathtargetAtSrfs(PlannerInfo *root, PathTarget *target,
 							PathTarget *input_target, List **targets,
 							List **targets_contain_srfs)
 {
+	// Cloudberry changed split_pathtarget_at_srfs to accept a null root --
+	// it skips set_pathtarget_cost_width then -- and its one caller, in
+	// CTranslatorDXLToPlStmt, passes exactly that.  PostgreSQL 19's
+	// dereferences root, so passing it through would take the backend down
+	// on the first set-returning function in a target list that ORCA plans.
+	// It is refused here until the translator's caller stops needing a null
+	// root, or the compat layer carries the function with Cloudberry's guard;
+	// either way it is a fallback, not a crash.
+	if (root == nullptr)
+	{
+		GP_UNPORTED("set-returning functions in a target list");
+	}
+
 	GP_WRAP_START;
 	{
 		split_pathtarget_at_srfs(root, target, input_target, targets,
