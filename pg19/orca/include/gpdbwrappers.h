@@ -585,12 +585,18 @@ void GPDBFree(void *ptr);
 char *MemCtxtStrdup(MemoryContext context, const char *string);
 
 // similar to ereport for logging messages
+//
+// __func__, not Cloudberry's PG_FUNCNAME_MACRO: PostgreSQL 19 no longer
+// defines that name, and its own ereport() passes __func__ to errfinish().
+// This macro compiled for as long as nothing expanded it, which was until the
+// first translator file that reports through it -- the same shape as the
+// compat declaration of cb_core that nothing had linked against.
 void GpdbEreportImpl(int xerrcode, int severitylevel, const char *xerrmsg,
 					 const char *xerrhint, const char *filename, int lineno,
 					 const char *funcname);
 #define GpdbEreport(xerrcode, severitylevel, xerrmsg, xerrhint)       \
 	gpdb::GpdbEreportImpl(xerrcode, severitylevel, xerrmsg, xerrhint, \
-						  __FILE__, __LINE__, PG_FUNCNAME_MACRO)
+						  __FILE__, __LINE__, __func__)
 
 // string representation of a node
 char *NodeToString(void *obj);
