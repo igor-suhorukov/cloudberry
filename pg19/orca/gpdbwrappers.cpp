@@ -110,6 +110,9 @@ extern "C" {
  */
 #include "cb_foreign.h"
 
+/* The scans of a partitioned table's partitions; see PlanForPartition. */
+#include "cb_dynamicscan.h"
+
 /*
  * Left out of Cloudberry's list:
  *
@@ -2515,6 +2518,55 @@ gpdb::CoerceNullToDomain(Oid typid, int32 typmod)
 	}
 	GP_WRAP_END;
 	return nullptr;
+}
+
+RangeTblEntry *
+gpdb::PartitionRTE(const RangeTblEntry *root_rte, Oid part_oid)
+{
+	GP_WRAP_START;
+	{
+		/* catalog tables: pg_class, pg_attribute */
+		return gp_orca_partition_rte(root_rte, part_oid);
+	}
+	GP_WRAP_END;
+	return nullptr;
+}
+
+Plan *
+gpdb::PlanForPartition(Plan *scan, Index root_rti, Index part_rti,
+					   Oid root_oid, Oid part_oid, int *failure)
+{
+	GP_WRAP_START;
+	{
+		/* catalog tables: pg_class, pg_attribute, pg_index, pg_inherits */
+		return gp_orca_plan_for_partition(scan, root_rti, part_rti, root_oid,
+										  part_oid, failure);
+	}
+	GP_WRAP_END;
+	return nullptr;
+}
+
+List *
+gpdb::DynamicScanTlist(Plan *scan)
+{
+	GP_WRAP_START;
+	{
+		return gp_orca_dynamic_scan_tlist(scan);
+	}
+	GP_WRAP_END;
+	return NIL;
+}
+
+int
+gpdb::TopPartitionIndex(Oid root_oid, Oid leaf_oid)
+{
+	GP_WRAP_START;
+	{
+		/* catalog tables: pg_class, pg_inherits */
+		return gp_orca_top_partition_index(root_oid, leaf_oid);
+	}
+	GP_WRAP_END;
+	return -1;
 }
 
 char

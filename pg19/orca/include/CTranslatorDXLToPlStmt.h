@@ -444,6 +444,19 @@ private:
 			ctxt_translation_prev_siblings	// translation contexts of previous siblings
 	);
 
+	// the Dynamic Scan over a scan of a partitioned table
+	Plan *TranslateDynamicScan(
+		const CDXLNode *dynamic_scan_dxlnode, Plan *scan, Index root_rti,
+		const CDXLTableDescr *table_descr, IMdIdArray *parts,
+		const ULongPtrArray *selector_ids, CDXLTranslateContext *output_context,
+		CDXLTranslationContextArray *ctxt_translation_prev_siblings);
+
+	// number a copied plan and its children afresh
+	void SetPlanNodeIds(Plan *plan);
+
+	// is there a Partition Selector in the plan?
+	static BOOL HasPartitionSelector(Plan *plan);
+
 	// translate a DML operator
 	Plan *TranslateDXLDml(
 		const CDXLNode *dml_dxlnode, CDXLTranslateContext *output_context,

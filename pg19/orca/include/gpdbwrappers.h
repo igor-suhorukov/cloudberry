@@ -807,6 +807,16 @@ char GetAttGenerated(Oid relid, AttrNumber attnum);
 // CTranslatorQueryToDXL::CreateDXLProjElemForOmittedColumn.
 Node *CoerceNullToDomain(Oid typid, int32 typmod);
 
+// A partitioned table's scan, and the partitions it reads: the range table
+// entry of a partition, the scan of it made from the table's, and where it
+// sits in the table's partition descriptor.  Not in Cloudberry's layer,
+// whose executor reads the partitions itself; see compat/cb_dynamicscan.h.
+RangeTblEntry *PartitionRTE(const RangeTblEntry *root_rte, Oid part_oid);
+Plan *PlanForPartition(Plan *scan, Index root_rti, Index part_rti,
+					   Oid root_oid, Oid part_oid, int *failure);
+int TopPartitionIndex(Oid root_oid, Oid leaf_oid);
+List *DynamicScanTlist(Plan *scan);
+
 // get the OID of base elementtype fora given typid
 Oid GetBaseType(Oid typid);
 
@@ -926,6 +936,8 @@ gpos::BOOL WalkQueryTree(Query *query, bool (*walker)(), void *context,
 #define ListMake1(x1) gpdb::LPrepend(x1, NIL)
 
 #define ListMake2(x1, x2) gpdb::LPrepend(x1, ListMake1(x2))
+
+#define ListMake3(x1, x2, x3) gpdb::LPrepend(x1, ListMake2(x2, x3))
 
 #define ListMake1Int(x1) gpdb::LPrependInt(x1, NIL)
 

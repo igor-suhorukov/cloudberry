@@ -62,6 +62,8 @@ extern "C" {
 #include "cb_nodes.h"
 // Cloudberry's AssertOp, as a CustomScan; see TranslateDXLAssert.
 #include "cb_assertop.h"
+// The scans of a partitioned table; see TranslateDXLDynTblScan.
+#include "cb_dynamicscan.h"
 #include "nodes/plannodes.h"
 #include "nodes/primnodes.h"
 #include "partitioning/partdesc.h"
@@ -389,6 +391,15 @@ CTranslatorDXLToPlStmt::TranslateDXLOperatorToPlan(
 		case EdxlopPhysicalAssert:
 		case EdxlopPhysicalTVF:
 		case EdxlopPhysicalForeignScan:
+		// T3: the scans of a partitioned table, and the selection of its
+		// partitions while the query runs.  Not the dynamic foreign scan, and
+		// not an Append over the partitions, which ORCA plans only with
+		// foreign partitions or gp.optimizer_disable_dynamic_table_scan.
+		case EdxlopPhysicalDynamicTableScan:
+		case EdxlopPhysicalDynamicIndexScan:
+		case EdxlopPhysicalDynamicIndexOnlyScan:
+		case EdxlopPhysicalDynamicBitmapTableScan:
+		case EdxlopPhysicalPartitionSelector:
 			break;
 		default:
 			GPOS_RAISE(gpdxl::ExmaDXL, gpdxl::ExmiDXL2PlStmtConversion,
@@ -1771,12 +1782,68 @@ CTranslatorDXLToPlStmt::TranslateDXLHashJoin(
 	plan->righttree = right_plan;
 	SetParamIds(plan);
 
+	// A Partition Selector on the hash side chooses the partitions a Dynamic
+	// Scan on the other side reads, and has chosen once the hash table is
+	// built.  PostgreSQL 19's hash join may fetch an outer row first, to skip
+	// building the table when the outer side is empty -- whenever the outer
+	// side's start-up cost is below the Hash node's total -- and the Dynamic
+	// Scan would then start before the choice, and read every partition.
+	// Cloudberry's hash join has prefetch_inner to say "build first";
+	// PostgreSQL 19's decides by the costs, so the outer side's start-up cost
+	// is raised to the Hash node's, as far as EXPLAIN shows it.
+	if (HasPartitionSelector(right_plan) &&
+		left_plan->startup_cost < right_plan->total_cost)
+	{
+		left_plan->startup_cost = right_plan->total_cost;
+		left_plan->total_cost =
+			std::max(left_plan->total_cost, left_plan->startup_cost);
+	}
+
 	// cleanup
 	translation_context_arr_with_siblings->Release();
 	child_contexts->Release();
 	hash_child_contexts->Release();
 
 	return (Plan *) hashjoin;
+}
+
+//---------------------------------------------------------------------------
+//	@function:
+//		CTranslatorDXLToPlStmt::HasPartitionSelector
+//
+//	@doc:
+//		Is there a Partition Selector in the plan -- not inside a subplan an
+//		expression calls, which runs on its own schedule?
+//
+//---------------------------------------------------------------------------
+BOOL
+CTranslatorDXLToPlStmt::HasPartitionSelector(Plan *plan)
+{
+	if (nullptr == plan)
+	{
+		return false;
+	}
+
+	if (IsA(plan, CustomScan))
+	{
+		CustomScan *cscan = (CustomScan *) plan;
+		if (cscan->methods == &gp_orca_partition_selector_methods)
+		{
+			return true;
+		}
+
+		ListCell *lc = nullptr;
+		ForEach(lc, cscan->custom_plans)
+		{
+			if (HasPartitionSelector((Plan *) lfirst(lc)))
+			{
+				return true;
+			}
+		}
+	}
+
+	return HasPartitionSelector(plan->lefttree) ||
+		   HasPartitionSelector(plan->righttree);
 }
 
 //---------------------------------------------------------------------------
@@ -4032,10 +4099,99 @@ CTranslatorDXLToPlStmt::TranslateDXLPartSelector(
 	CDXLTranslateContext *output_context,
 	CDXLTranslationContextArray *ctxt_translation_prev_siblings)
 {
-	// T3: partition selection.  This body refuses until then, and Cloudberry's is
-	// in github/cloudberry/src/backend/gpopt/translate/CTranslatorDXLToPlStmt.cpp,
-	// unchanged, for the step that brings it back.
-	GP_UNPORTED("partition selection");
+	// Cloudberry's body, for a Partition Selector CustomScan
+	// (compat/dynamicscan.c) rather than Cloudberry's node: the pruning steps
+	// are the same, built by CPartPruneStepsBuilder from ORCA's filter over
+	// the rows the selector passes on, and go in custom_private; their
+	// expressions go in custom_exprs too, where the plan's walkers find the
+	// parameters they read.
+	CDXLPhysicalPartitionSelector *partition_selector_dxlop =
+		CDXLPhysicalPartitionSelector::Cast(
+			partition_selector_dxlnode->GetOperator());
+
+	CustomScan *selector = MakeNode(CustomScan);
+	selector->methods = &gp_orca_partition_selector_methods;
+	selector->scan.scanrelid = 0;
+
+	Plan *plan = &(selector->scan.plan);
+	plan->plan_node_id = m_dxl_to_plstmt_context->GetNextPlanId();
+
+	TranslatePlanCosts(partition_selector_dxlnode, plan);
+
+	CDXLTranslationContextArray *child_contexts =
+		GPOS_NEW(m_mp) CDXLTranslationContextArray(m_mp);
+
+	CDXLTranslateContext child_context(m_mp, false,
+									   output_context->GetColIdToParamIdMap());
+
+	// translate child plan
+	CDXLNode *child_dxlnode = (*partition_selector_dxlnode)[2];
+
+	Plan *child_plan = TranslateDXLOperatorToPlan(
+		child_dxlnode, &child_context, ctxt_translation_prev_siblings);
+	GPOS_ASSERT(nullptr != child_plan && "child plan cannot be NULL");
+
+	plan->lefttree = child_plan;
+
+	child_contexts->Append(&child_context);
+
+	CDXLNode *project_list_dxlnode = (*partition_selector_dxlnode)[0];
+	plan->targetlist = TranslateDXLProjList(project_list_dxlnode,
+											nullptr /*base_table_context*/,
+											child_contexts, output_context);
+
+	CMDIdGPDB *mdid =
+		CMDIdGPDB::CastMdid(partition_selector_dxlop->GetRelMdId());
+	gpdb::RelationWrapper relation = gpdb::GetRelation(mdid->Oid());
+
+	CMappingColIdVarPlStmt colid_var_mapping = CMappingColIdVarPlStmt(
+		m_mp, nullptr /*base_table_context*/, child_contexts, output_context,
+		m_dxl_to_plstmt_context);
+
+	OID oid_type =
+		CMDIdGPDB::CastMdid(m_md_accessor->PtMDType<IMDTypeInt4>()->MDId())
+			->Oid();
+	ULONG paramid = m_dxl_to_plstmt_context->GetParamIdForSelector(
+		oid_type, partition_selector_dxlop->SelectorId());
+
+	// The table's entry, which the scan the selector selects for made: the
+	// scan is on the outer side of the hash join whose inner side this is,
+	// and TranslateDXLHashJoin translates that side first.
+	Index rtindex = m_dxl_to_plstmt_context->FindRTE(mdid->Oid());
+	if (0 == rtindex || (Index) -1 == rtindex)
+	{
+		GP_UNPORTED("a Partition Selector before the scan it selects for");
+	}
+
+	CDXLNode *filterNode = (*partition_selector_dxlnode)[1];
+	List *prune_infos = CPartPruneStepsBuilder::CreatePartPruneInfos(
+		filterNode, relation.get(), rtindex,
+		partition_selector_dxlop->Partitions(), &colid_var_mapping,
+		m_translator_dxl_to_scalar);
+	PartitionedRelPruneInfo *pinfo = (PartitionedRelPruneInfo *) gpdb::ListNth(
+		(List *) gpdb::ListNth(prune_infos, 0), 0);
+	List *steps = pinfo->exec_pruning_steps;
+
+	ListCell *lc = nullptr;
+	ForEach(lc, steps)
+	{
+		PartitionPruneStep *step = (PartitionPruneStep *) lfirst(lc);
+		if (IsA(step, PartitionPruneStepOp))
+		{
+			selector->custom_exprs = gpdb::ListConcat(
+				selector->custom_exprs,
+				(List *) gpdb::CopyObject(((PartitionPruneStepOp *) step)->exprs));
+		}
+	}
+	selector->custom_private =
+		ListMake3(gpdb::MakeIntegerValue(paramid),
+				  gpdb::MakeIntegerValue((long) (int) mdid->Oid()), steps);
+
+	SetParamIds(plan);
+	// cleanup
+	child_contexts->Release();
+
+	return plan;
 }
 
 //---------------------------------------------------------------------------
@@ -4118,8 +4274,11 @@ CTranslatorDXLToPlStmt::TranslateDXLAppend(
 
 	// An Append ORCA made of a dynamic table scan, one child per partition,
 	// carries the root partitioned table's descriptor, and in Cloudberry the
-	// ids of the partition selectors that prune it.  That is T3's, with the
-	// rest of partitioning; the Append of a UNION ALL carries neither.
+	// ids of the partition selectors that prune it, through join_prune_paramids,
+	// an Append field PostgreSQL 19 does not have; the Append of a UNION ALL
+	// carries neither.  ORCA makes one only with a foreign partition or with
+	// gp.optimizer_disable_dynamic_table_scan on, and T3's Dynamic Scan is
+	// what prunes the dynamic scans, so this stays refused.
 	if (phy_append_dxlop->GetScanId() != gpos::ulong_max)
 	{
 		GP_UNPORTED("an Append over the partitions of a table");
@@ -4576,14 +4735,20 @@ CTranslatorDXLToPlStmt::TranslateDXLCTEConsumerToSharedScan(
 //
 //		NOT CLOUDBERRY'S SHAPE.  A Sequence runs its children in order and
 //		returns the last one's rows, and PostgreSQL 19 has no such node.  ORCA
-//		makes one for two reasons: to run CTE producers before the plan that
-//		reads them, and to run partition selectors before the dynamic scans
-//		they prune.  The first is here: the producers become subplans whose
-//		initplans are attached to the last child's plan -- where the planner
-//		attaches a query level's CTEs, above everything that reads them -- and
-//		the Sequence's projection becomes a Result over that plan, which
-//		post-processing removes when the plan can project it itself.  The
-//		second is T3's, with partition selection.
+//		makes one to run CTE producers before the plan that reads them: the
+//		producers become subplans whose initplans are attached to the last
+//		child's plan -- where the planner attaches a query level's CTEs, above
+//		everything that reads them -- and the Sequence's projection becomes a
+//		Result over that plan, which post-processing removes when the plan
+//		can project it itself.
+//
+//		Cloudberry's Sequence also ran partition selectors before the dynamic
+//		scans they pruned, and the plan counted that among T3's.  Its ORCA no
+//		longer makes one: the only logical Sequence is a CTE anchor's
+//		(CXformCTEAnchor2Sequence), and a Partition Selector is an enforcer
+//		ORCA puts over one side of a join (CPartitionPropagationSpec::
+//		AppendEnforcers).  A Sequence with any other child is refused, by the
+//		name it had, in case that changes.
 //---------------------------------------------------------------------------
 Plan *
 CTranslatorDXLToPlStmt::TranslateDXLSequence(
@@ -4660,18 +4825,204 @@ CTranslatorDXLToPlStmt::TranslateDXLSequence(
 //		CTranslatorDXLToPlStmt::TranslateDXLDynTblScan
 //
 //	@doc:
-//		Translates a DXL dynamic table scan node into a DynamicSeqScan node
+//		Translates a DXL dynamic table scan node into a Dynamic Scan
+//
+//		NOT CLOUDBERRY'S SHAPE, for all five dynamic scans.  Cloudberry's
+//		DynamicSeqScan opens the partitions one after another while the
+//		query runs, remapping the scan's columns to each, through changes to
+//		PostgreSQL's scan nodes that PostgreSQL 19 does not have.  The port
+//		plans the scan ORCA chose for the partitioned table, then makes a
+//		scan of each partition ORCA's static pruning left from it -- a copy
+//		whose columns and indexes are the partition's
+//		(gp_orca_plan_for_partition) -- and puts them under a Dynamic Scan
+//		(compat/dynamicscan.c), which runs the ones a Partition Selector
+//		chose.  The partitions' scans are ordinary scans, run and explained
+//		as the planner's children of an Append are.
 //
 //---------------------------------------------------------------------------
 Plan *
 CTranslatorDXLToPlStmt::TranslateDXLDynTblScan(
 	const CDXLNode *dyn_tbl_scan_dxlnode, CDXLTranslateContext *output_context,
-	CDXLTranslationContextArray * /*ctxt_translation_prev_siblings*/)
+	CDXLTranslationContextArray *ctxt_translation_prev_siblings)
 {
-	// T3: dynamic table scans.  This body refuses until then, and Cloudberry's is
-	// in github/cloudberry/src/backend/gpopt/translate/CTranslatorDXLToPlStmt.cpp,
-	// unchanged, for the step that brings it back.
-	GP_UNPORTED("dynamic table scans");
+	CDXLPhysicalDynamicTableScan *dyn_tbl_scan_dxlop =
+		CDXLPhysicalDynamicTableScan::Cast(dyn_tbl_scan_dxlnode->GetOperator());
+	const CDXLTableDescr *dxl_table_descr =
+		dyn_tbl_scan_dxlop->GetDXLTableDescr();
+	GPOS_ASSERT(dxl_table_descr->LockMode() != -1);
+
+	// translation context for column mappings in the base relation
+	CDXLTranslateContextBaseTable base_table_context(m_mp);
+
+	Index index = ProcessDXLTblDescr(dxl_table_descr, &base_table_context);
+
+	const IMDRelation *md_rel =
+		m_md_accessor->RetrieveRel(dxl_table_descr->MDId());
+	OID oidRel = CMDIdGPDB::CastMdid(md_rel->MDId())->Oid();
+
+	// The scan of the partitioned table, which each partition's is made from.
+	SeqScan *seq_scan = MakeNode(SeqScan);
+	seq_scan->scan.scanrelid = index;
+	Plan *plan = &(seq_scan->scan.plan);
+	plan->plan_node_id = m_dxl_to_plstmt_context->GetNextPlanId();
+	TranslatePlanCosts(dyn_tbl_scan_dxlnode, plan);
+
+	GPOS_ASSERT(2 == dyn_tbl_scan_dxlnode->Arity());
+
+	// translate proj list and filter
+	CDXLNode *project_list_dxlnode =
+		(*dyn_tbl_scan_dxlnode)[EdxltsIndexProjList];
+	CDXLNode *filter_dxlnode = (*dyn_tbl_scan_dxlnode)[EdxltsIndexFilter];
+
+	List *query_quals = NIL;
+	TranslateProjListAndFilter(
+		project_list_dxlnode, filter_dxlnode,
+		&base_table_context,  // translate context for the base table
+		nullptr,			  // translate_ctxt_left and pdxltrctxRight,
+		&plan->targetlist, &query_quals, output_context);
+
+	// The security quals first, as TranslateDXLTblScan puts them: a row the
+	// policy hides is not tested by anything the query says.
+	List *security_query_quals = NIL;
+	AddSecurityQuals(oidRel, &security_query_quals, &index);
+	plan->qual = gpdb::ListConcat(security_query_quals, query_quals);
+
+	return TranslateDynamicScan(
+		dyn_tbl_scan_dxlnode, plan, index, dxl_table_descr,
+		dyn_tbl_scan_dxlop->GetParts(), dyn_tbl_scan_dxlop->GetSelectorIds(),
+		output_context, ctxt_translation_prev_siblings);
+}
+
+//---------------------------------------------------------------------------
+//	@function:
+//		CTranslatorDXLToPlStmt::TranslateDynamicScan
+//
+//	@doc:
+//		The Dynamic Scan over a scan of a partitioned table: a copy of the
+//		scan for each partition in parts, each under a range table entry of
+//		its own, as the planner's children are, with no permission entry --
+//		the table's is what the executor checks -- and a lock taken on it
+//		here, as TranslatePartOids takes Cloudberry's.  The partitions'
+//		scans are in parts' order, which is the partition descriptor's.
+//
+//---------------------------------------------------------------------------
+Plan *
+CTranslatorDXLToPlStmt::TranslateDynamicScan(
+	const CDXLNode *dynamic_scan_dxlnode, Plan *scan, Index root_rti,
+	const CDXLTableDescr *table_descr, IMdIdArray *parts,
+	const ULongPtrArray *selector_ids, CDXLTranslateContext *,
+	CDXLTranslationContextArray *)
+{
+	OID root_oid = CMDIdGPDB::CastMdid(table_descr->MDId())->Oid();
+	RangeTblEntry *root_rte = m_dxl_to_plstmt_context->GetRTEByIndex(root_rti);
+
+	List *children = NIL;
+	List *part_indexes = NIL;
+	for (ULONG ul = 0; ul < parts->Size(); ul++)
+	{
+		OID part_oid = CMDIdGPDB::CastMdid((*parts)[ul])->Oid();
+		gpdb::GPDBLockRelationOid(part_oid, table_descr->LockMode());
+
+		m_dxl_to_plstmt_context->AddRTE(gpdb::PartitionRTE(root_rte, part_oid));
+		Index part_rti =
+			gpdb::ListLength(m_dxl_to_plstmt_context->GetRTableEntriesList());
+
+		int failure = GP_ORCA_PARTITION_OK;
+		Plan *child = gpdb::PlanForPartition(scan, root_rti, part_rti,
+											 root_oid, part_oid, &failure);
+		if (GP_ORCA_PARTITION_NO_INDEX == failure)
+		{
+			GP_UNPORTED("a partition without its table's index");
+		}
+		if (GP_ORCA_PARTITION_INDEX_TOO_NEW == failure)
+		{
+			GP_UNPORTED("an index newer than this transaction's snapshots");
+		}
+
+		SetPlanNodeIds(child);
+		children = gpdb::LAppend(children, child);
+		part_indexes = gpdb::LAppendInt(
+			part_indexes, gpdb::TopPartitionIndex(root_oid, part_oid));
+	}
+
+	CustomScan *dynamic_scan = MakeNode(CustomScan);
+	dynamic_scan->methods = &gp_orca_dynamic_scan_methods;
+	dynamic_scan->scan.scanrelid = 0;
+	dynamic_scan->custom_plans = children;
+
+	// What the partitions' scans return, in the table's terms, which the
+	// node's own target list reads by position, and EXPLAIN by name.
+	dynamic_scan->custom_scan_tlist = gpdb::DynamicScanTlist(scan);
+
+	OID oid_type =
+		CMDIdGPDB::CastMdid(m_md_accessor->PtMDType<IMDTypeInt4>()->MDId())
+			->Oid();
+	dynamic_scan->custom_private = ListMake2(
+		part_indexes, TranslateJoinPruneParamids(selector_ids, oid_type,
+												 m_dxl_to_plstmt_context));
+
+	Plan *plan = &(dynamic_scan->scan.plan);
+	plan->plan_node_id = m_dxl_to_plstmt_context->GetNextPlanId();
+	TranslatePlanCosts(dynamic_scan_dxlnode, plan);
+
+	ListCell *lc = nullptr;
+	ForEach(lc, dynamic_scan->custom_scan_tlist)
+	{
+		TargetEntry *te = (TargetEntry *) lfirst(lc);
+		Var *var = gpdb::MakeVar(INDEX_VAR, te->resno,
+								 gpdb::ExprType((Node *) te->expr),
+								 gpdb::ExprTypeMod((Node *) te->expr),
+								 0 /* varlevelsup */);
+		var->varcollid = gpdb::ExprCollation((Node *) te->expr);
+		plan->targetlist = gpdb::LAppend(
+			plan->targetlist,
+			gpdb::MakeTargetEntry((Expr *) var, te->resno,
+								  te->resname ? PStrDup(te->resname) : nullptr,
+								  te->resjunk));
+	}
+
+	SetParamIds(plan);
+
+	return plan;
+}
+
+//---------------------------------------------------------------------------
+//	@function:
+//		CTranslatorDXLToPlStmt::SetPlanNodeIds
+//
+//	@doc:
+//		Number a plan made by copying another, and its children, afresh:
+//		EXPLAIN ANALYZE and the executor's instrumentation tell nodes apart
+//		by plan_node_id.
+//
+//---------------------------------------------------------------------------
+void
+CTranslatorDXLToPlStmt::SetPlanNodeIds(Plan *plan)
+{
+	if (nullptr == plan)
+	{
+		return;
+	}
+
+	plan->plan_node_id = m_dxl_to_plstmt_context->GetNextPlanId();
+	SetPlanNodeIds(plan->lefttree);
+	SetPlanNodeIds(plan->righttree);
+
+	List *children = NIL;
+	if (IsA(plan, BitmapAnd))
+	{
+		children = ((BitmapAnd *) plan)->bitmapplans;
+	}
+	else if (IsA(plan, BitmapOr))
+	{
+		children = ((BitmapOr *) plan)->bitmapplans;
+	}
+
+	ListCell *lc = nullptr;
+	ForEach(lc, children)
+	{
+		SetPlanNodeIds((Plan *) lfirst(lc));
+	}
 }
 
 //---------------------------------------------------------------------------
@@ -4679,8 +5030,8 @@ CTranslatorDXLToPlStmt::TranslateDXLDynTblScan(
 //		CTranslatorDXLToPlStmt::TranslateDXLDynIdxOnlyScan
 //
 //	@doc:
-//		Translates a DXL dynamic index scan node into a DynamicIndexOnlyScan
-//		node
+//		Translates a DXL dynamic index-only scan node into a Dynamic Scan of
+//		index-only scans; see TranslateDXLDynTblScan
 //
 //---------------------------------------------------------------------------
 Plan *
@@ -4689,10 +5040,72 @@ CTranslatorDXLToPlStmt::TranslateDXLDynIdxOnlyScan(
 	CDXLTranslateContext *output_context,
 	CDXLTranslationContextArray *ctxt_translation_prev_siblings)
 {
-	// T3: dynamic index-only scans.  This body refuses until then, and Cloudberry's is
-	// in github/cloudberry/src/backend/gpopt/translate/CTranslatorDXLToPlStmt.cpp,
-	// unchanged, for the step that brings it back.
-	GP_UNPORTED("dynamic index-only scans");
+	CDXLPhysicalDynamicIndexOnlyScan *dyn_index_only_scan_dxlop =
+		CDXLPhysicalDynamicIndexOnlyScan::Cast(
+			dyn_idx_only_scan_dxlnode->GetOperator());
+	const CDXLTableDescr *table_desc =
+		dyn_index_only_scan_dxlop->GetDXLTableDescr();
+
+	// The index-only scan of the partitioned table, as TranslateDXLIndexOnlyScan
+	// makes one, which each partition's is made from.
+	CDXLTranslateContextBaseTable base_table_context(m_mp);
+
+	const IMDRelation *md_rel = m_md_accessor->RetrieveRel(table_desc->MDId());
+
+	Index index = ProcessDXLTblDescr(table_desc, &base_table_context);
+
+	IndexOnlyScan *index_scan = MakeNode(IndexOnlyScan);
+	index_scan->scan.scanrelid = index;
+
+	CMDIdGPDB *mdid_index = CMDIdGPDB::CastMdid(
+		dyn_index_only_scan_dxlop->GetDXLIndexDescr()->MDId());
+	const IMDIndex *md_index = m_md_accessor->RetrieveIndex(mdid_index);
+	Oid index_oid = mdid_index->Oid();
+
+	GPOS_ASSERT(InvalidOid != index_oid);
+	index_scan->indexid = index_oid;
+
+	CDXLTranslateContextBaseTable index_context(m_mp);
+
+	// translate index targetlist
+	index_scan->indextlist = TranslateDXLIndexTList(md_rel, md_index, index,
+													table_desc, &index_context);
+
+	Plan *plan = &(index_scan->scan.plan);
+	TranslatePlan(plan, dyn_idx_only_scan_dxlnode, output_context,
+				  m_dxl_to_plstmt_context, &index_context,
+				  ctxt_translation_prev_siblings);
+
+	index_scan->indexorderdir = CTranslatorUtils::GetScanDirection(
+		dyn_index_only_scan_dxlop->GetIndexScanDir());
+
+	// translate index condition list
+	List *index_cond = NIL;
+	List *index_orig_cond = NIL;
+
+	if (!IsIndexForOrderBy(
+			&base_table_context, ctxt_translation_prev_siblings, output_context,
+			(*dyn_idx_only_scan_dxlnode)
+				[CDXLPhysicalDynamicIndexScan::EdxldisIndexCondition]))
+	{
+		TranslateIndexConditions(
+			(*dyn_idx_only_scan_dxlnode)
+				[CDXLPhysicalDynamicIndexScan::EdxldisIndexCondition],
+			table_desc,
+			false,	// is_bitmap_index_probe
+			md_index, md_rel, output_context, &base_table_context,
+			ctxt_translation_prev_siblings, &index_cond, &index_orig_cond);
+	}
+
+	index_scan->indexqual = index_cond;
+	// see TranslateDXLIndexOnlyScan
+	index_scan->recheckqual = (List *) gpdb::CopyObject(index_cond);
+
+	return TranslateDynamicScan(
+		dyn_idx_only_scan_dxlnode, plan, index, table_desc,
+		dyn_index_only_scan_dxlop->GetParts(),
+		dyn_index_only_scan_dxlop->GetSelectorIds(), output_context,
+		ctxt_translation_prev_siblings);
 }
 
 //---------------------------------------------------------------------------
@@ -4700,25 +5113,79 @@ CTranslatorDXLToPlStmt::TranslateDXLDynIdxOnlyScan(
 //		CTranslatorDXLToPlStmt::TranslateDXLDynIdxScan
 //
 //	@doc:
-//		Translates a DXL dynamic index scan node into a DynamicIndexScan node
+//		Translates a DXL dynamic index scan node into a Dynamic Scan of index
+//		scans; see TranslateDXLDynTblScan
 //
 //---------------------------------------------------------------------------
 Plan *
 CTranslatorDXLToPlStmt::TranslateDXLDynIdxScan(
-	const CDXLNode *dyn_idx_only_scan_dxlnode,
-	CDXLTranslateContext *output_context,
+	const CDXLNode *dyn_idx_scan_dxlnode, CDXLTranslateContext *output_context,
 	CDXLTranslationContextArray *ctxt_translation_prev_siblings)
 {
-	// T3: dynamic index scans.  This body refuses until then, and Cloudberry's is
-	// in github/cloudberry/src/backend/gpopt/translate/CTranslatorDXLToPlStmt.cpp,
-	// unchanged, for the step that brings it back.
-	GP_UNPORTED("dynamic index scans");
+	CDXLPhysicalDynamicIndexScan *dyn_index_scan_dxlop =
+		CDXLPhysicalDynamicIndexScan::Cast(dyn_idx_scan_dxlnode->GetOperator());
+	const CDXLTableDescr *table_desc = dyn_index_scan_dxlop->GetDXLTableDescr();
+
+	// The index scan of the partitioned table, as TranslateDXLIndexScan makes
+	// one, which each partition's is made from.
+	CDXLTranslateContextBaseTable base_table_context(m_mp);
+
+	const IMDRelation *md_rel = m_md_accessor->RetrieveRel(table_desc->MDId());
+
+	Index index = ProcessDXLTblDescr(table_desc, &base_table_context);
+
+	IndexScan *index_scan = MakeNode(IndexScan);
+	index_scan->scan.scanrelid = index;
+
+	CMDIdGPDB *mdid_index = CMDIdGPDB::CastMdid(
+		dyn_index_scan_dxlop->GetDXLIndexDescr()->MDId());
+	const IMDIndex *md_index = m_md_accessor->RetrieveIndex(mdid_index);
+	Oid index_oid = mdid_index->Oid();
+
+	GPOS_ASSERT(InvalidOid != index_oid);
+	index_scan->indexid = index_oid;
+
+	Plan *plan = &(index_scan->scan.plan);
+
+	TranslatePlan(plan, dyn_idx_scan_dxlnode, output_context,
+				  m_dxl_to_plstmt_context, &base_table_context,
+				  ctxt_translation_prev_siblings);
+
+	index_scan->indexorderdir = CTranslatorUtils::GetScanDirection(
+		dyn_index_scan_dxlop->GetIndexScanDir());
+
+	// translate index condition list
+	List *index_cond = NIL;
+	List *index_orig_cond = NIL;
+
+	if (!IsIndexForOrderBy(
+			&base_table_context, ctxt_translation_prev_siblings, output_context,
+			(*dyn_idx_scan_dxlnode)
+				[CDXLPhysicalDynamicIndexScan::EdxldisIndexCondition]))
+	{
+		TranslateIndexConditions(
+			(*dyn_idx_scan_dxlnode)
+				[CDXLPhysicalDynamicIndexScan::EdxldisIndexCondition],
+			table_desc,
+			false,	// is_bitmap_index_probe
+			md_index, md_rel, output_context, &base_table_context,
+			ctxt_translation_prev_siblings, &index_cond, &index_orig_cond);
+	}
+
+	index_scan->indexqual = index_cond;
+	index_scan->indexqualorig = index_orig_cond;
+
+	return TranslateDynamicScan(
+		dyn_idx_scan_dxlnode, plan, index, table_desc,
+		dyn_index_scan_dxlop->GetParts(), dyn_index_scan_dxlop->GetSelectorIds(),
+		output_context, ctxt_translation_prev_siblings);
 }
 
 // Not RemapAttrsFromTupDesc, the helper that renumbers a qual's columns from
-// the root partition to a leaf: TranslateDXLDynForeignScan was its only
-// caller, and that is T3's.  It comes back with it, from Cloudberry's file,
-// and brings Cloudberry's change_varattnos_of_a_varno (executor.h) with it.
+// the root partition to a leaf, through Cloudberry's
+// change_varattnos_of_a_varno: TranslateDXLDynForeignScan was its only
+// caller, and the partitions' scans are renumbered by
+// gp_orca_plan_for_partition, with PostgreSQL's map_partition_varattnos().
 
 //---------------------------------------------------------------------------
 //	@function:
@@ -4740,9 +5207,14 @@ CTranslatorDXLToPlStmt::TranslateDXLDynForeignScan(
 	CDXLTranslateContext *output_context,
 	CDXLTranslationContextArray *ctxt_translation_prev_siblings)
 {
-	// T3: dynamic foreign scans.  This body refuses until then, and Cloudberry's is
-	// in github/cloudberry/src/backend/gpopt/translate/CTranslatorDXLToPlStmt.cpp,
-	// unchanged, for the step that brings it back.
+	// Refused, and not admitted by TranslateDXLOperatorToPlan.  A foreign
+	// partition's scan is planned by its wrapper (BuildForeignScan), and
+	// build_simple_rel() takes the user to plan as from the partition's own
+	// permission entry; a partition read through its table has none, as the
+	// planner's children have none, and giving it one would have the
+	// executor check a privilege on the partition that PostgreSQL does not.
+	// Cloudberry's body is in
+	// github/cloudberry/src/backend/gpopt/translate/CTranslatorDXLToPlStmt.cpp.
 	GP_UNPORTED("dynamic foreign scans");
 }
 
@@ -6585,15 +7057,22 @@ CTranslatorDXLToPlStmt::TranslateDXLBitmapTblScan(
 {
 	const CDXLTableDescr *table_descr = nullptr;
 
-	// The dynamic form scans the partitions of a table through Cloudberry's
-	// DynamicBitmapHeapScan, which is T3's with the other dynamic scans.
+	// The dynamic form is this scan of the partitioned table, with a copy of
+	// it for each partition put under a Dynamic Scan at the end; see
+	// TranslateDXLDynTblScan.
 	CDXLOperator *dxl_operator = bitmapscan_dxlnode->GetOperator();
-	if (EdxlopPhysicalBitmapTableScan != dxl_operator->GetDXLOperator())
+	BOOL is_dynamic = (EdxlopPhysicalDynamicBitmapTableScan ==
+					   dxl_operator->GetDXLOperator());
+	if (is_dynamic)
 	{
-		GP_UNPORTED("dynamic bitmap table scans");
+		table_descr = CDXLPhysicalDynamicBitmapTableScan::Cast(dxl_operator)
+						  ->GetDXLTableDescr();
 	}
-	table_descr =
-		CDXLPhysicalBitmapTableScan::Cast(dxl_operator)->GetDXLTableDescr();
+	else
+	{
+		table_descr =
+			CDXLPhysicalBitmapTableScan::Cast(dxl_operator)->GetDXLTableDescr();
+	}
 
 	// translation context for column mappings in the base relation
 	CDXLTranslateContextBaseTable base_table_context(m_mp);
@@ -6646,6 +7125,17 @@ CTranslatorDXLToPlStmt::TranslateDXLBitmapTblScan(
 	bitmap_tbl_scan->scan.plan.lefttree = TranslateDXLBitmapAccessPath(
 		bitmap_access_path_dxlnode, output_context, md_rel, table_descr,
 		&base_table_context, ctxt_translation_prev_siblings, bitmap_tbl_scan);
+
+	if (is_dynamic)
+	{
+		CDXLPhysicalDynamicBitmapTableScan *dyn_bitmap_dxlop =
+			CDXLPhysicalDynamicBitmapTableScan::Cast(dxl_operator);
+		return TranslateDynamicScan(
+			bitmapscan_dxlnode, plan, index, table_descr,
+			dyn_bitmap_dxlop->GetParts(), dyn_bitmap_dxlop->GetSelectorIds(),
+			output_context, ctxt_translation_prev_siblings);
+	}
+
 	SetParamIds(plan);
 
 	return (Plan *) bitmap_tbl_scan;
@@ -6767,8 +7257,9 @@ CTranslatorDXLToPlStmt::TranslateDXLBitmapIndexProbe(
 		CDXLScalarBitmapIndexProbe::Cast(
 			bitmap_index_probe_dxlnode->GetOperator());
 
-	// Only the plain form: Cloudberry's DynamicBitmapIndexScan comes with the
-	// dynamic bitmap table scan, at T3.
+	// Only the plain form, Cloudberry's DynamicBitmapIndexScan included: under
+	// a dynamic bitmap table scan it scans the partitioned table's index, and
+	// each partition's scan is made from it (TranslateDXLDynTblScan).
 	BitmapIndexScan *bitmap_idx_scan = MakeNode(BitmapIndexScan);
 	bitmap_idx_scan->scan.scanrelid = bitmap_tbl_scan->scan.scanrelid;
 

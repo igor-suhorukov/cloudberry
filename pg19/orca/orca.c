@@ -78,6 +78,7 @@
 #include "utils/rel.h"
 #include "utils/syscache.h"
 
+#include "cb_dynamicscan.h"
 #include "gp_orca_api.h"
 #include "gp_orca_guc.h"
 #include "optimizer/orca.h"
@@ -500,6 +501,57 @@ has_unread_volatile_output_walker(Node *node, void *context)
 
 	return expression_tree_walker(node, has_unread_volatile_output_walker,
 								  context);
+}
+
+/*
+ * Does the plan read a partitioned table through a Dynamic Scan?  See the
+ * caller, in optimize_query().
+ */
+static bool
+plan_tree_has_dynamic_scan(Plan *plan)
+{
+	ListCell   *lc;
+
+	if (plan == NULL)
+		return false;
+
+	if (IsA(plan, CustomScan) &&
+		((CustomScan *) plan)->methods == &gp_orca_dynamic_scan_methods)
+		return true;
+
+	if (plan_tree_has_dynamic_scan(plan->lefttree) ||
+		plan_tree_has_dynamic_scan(plan->righttree))
+		return true;
+
+	if (IsA(plan, Append))
+	{
+		foreach(lc, ((Append *) plan)->appendplans)
+			if (plan_tree_has_dynamic_scan((Plan *) lfirst(lc)))
+				return true;
+	}
+	else if (IsA(plan, SubqueryScan))
+		return plan_tree_has_dynamic_scan(((SubqueryScan *) plan)->subplan);
+	else if (IsA(plan, CustomScan))
+	{
+		foreach(lc, ((CustomScan *) plan)->custom_plans)
+			if (plan_tree_has_dynamic_scan((Plan *) lfirst(lc)))
+				return true;
+	}
+
+	return false;
+}
+
+static bool
+plan_has_dynamic_scan(PlannedStmt *stmt)
+{
+	ListCell   *lc;
+
+	if (plan_tree_has_dynamic_scan(stmt->planTree))
+		return true;
+	foreach(lc, stmt->subplans)
+		if (plan_tree_has_dynamic_scan((Plan *) lfirst(lc)))
+			return true;
+	return false;
 }
 
 /*
@@ -980,6 +1032,27 @@ optimize_query(Query *parse, int cursorOptions, ParamListInfo boundParams,
 	 */
 	if (!result)
 		return NULL;
+
+	/*
+	 * A cursor over the partitions of a table.  UPDATE or DELETE ... WHERE
+	 * CURRENT OF finds the row a cursor is on by looking for the scan of the
+	 * table under the cursor's plan, and it looks inside an Append, where the
+	 * planner puts a partitioned table's scans, but not inside a CustomScan
+	 * (execCurrent.c, search_plan_tree), where the port puts them.  So a
+	 * cursor ORCA planned over a partitioned table could not be updated
+	 * through, where the planner's can; a cursor's plan is the one made with
+	 * CURSOR_OPT_FAST_PLAN, which DECLARE and PL/pgSQL's cursors ask for.
+	 * Cloudberry's search_plan_tree() knows nothing of its dynamic scans
+	 * either.
+	 */
+	if ((cursorOptions & CURSOR_OPT_FAST_PLAN) &&
+		plan_has_dynamic_scan(result))
+	{
+		failure->message = pstrdup("Falling back to Postgres-based planner because "
+								   "GPORCA does not support the following feature: "
+								   "a cursor over the partitions of a table");
+		return NULL;
+	}
 
 	/*
 	 * Post-process the plan.

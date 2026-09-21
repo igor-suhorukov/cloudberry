@@ -131,6 +131,7 @@ orca_transl_inc = include_directories('include', 'compat', 'config', '.')
 orca_compat_sources = files(
   'compat/assertop.c',
   'compat/clauses.c',
+  'compat/dynamicscan.c',
   'compat/foreign.c',
   'compat/lsyscache.c',
   'compat/plancat.c',

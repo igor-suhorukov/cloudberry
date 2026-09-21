@@ -3014,5 +3014,164 @@ is "and so does a materialized view, and its refresh" \
     SELECT n FROM t2_mv WHERE b = 'v1'; DELETE FROM t0 WHERE a = -5; DROP MATERIALIZED VIEW t2_mv" "101"
 
 echo
+echo "24. the partitions of a table, and the choice of them while the query runs, planned by ORCA"
+
+# T3 of the translator.  ORCA scans a partitioned table with a dynamic scan
+# of the partitions its static pruning left, and chooses among them again
+# while the query runs with a Partition Selector on the other side of a hash
+# join.  The port plans the scan ORCA chose for the table, makes a scan of
+# each partition from it, and puts them under a Dynamic Scan, a CustomScan
+# that runs the ones the selector chose.
+
+q "CREATE TABLE t3p (a int, b text, c int) PARTITION BY RANGE (a);
+   CREATE TABLE t3p1 PARTITION OF t3p FOR VALUES FROM (0) TO (100);
+   CREATE TABLE t3p2 (c int, gone int, b text, a int);
+   ALTER TABLE t3p2 DROP COLUMN gone;
+   ALTER TABLE t3p ATTACH PARTITION t3p2 FOR VALUES FROM (100) TO (200);
+   CREATE TABLE t3p3 PARTITION OF t3p FOR VALUES FROM (200) TO (300);
+   CREATE TABLE t3pdef PARTITION OF t3p DEFAULT;
+   INSERT INTO t3p SELECT g, 'v' || g, g % 7 FROM generate_series(0, 299) g;
+   INSERT INTO t3p VALUES (NULL, 'null', 1), (500, 'big', 2), (-5, 'neg', 3);
+   CREATE INDEX ON t3p (c);
+   CREATE TABLE t3l (k text, v int) PARTITION BY LIST (k);
+   CREATE TABLE t3l_ab PARTITION OF t3l FOR VALUES IN ('a', 'b');
+   CREATE TABLE t3l_c PARTITION OF t3l FOR VALUES IN ('c', NULL);
+   CREATE TABLE t3l_def PARTITION OF t3l DEFAULT;
+   INSERT INTO t3l SELECT (ARRAY['a','b','c','d',NULL])[1 + g % 5], g FROM generate_series(1, 100) g;
+   CREATE TABLE t3h (id int, v text) PARTITION BY HASH (id);
+   CREATE TABLE t3h0 PARTITION OF t3h FOR VALUES WITH (MODULUS 3, REMAINDER 0);
+   CREATE TABLE t3h1 PARTITION OF t3h FOR VALUES WITH (MODULUS 3, REMAINDER 1);
+   CREATE TABLE t3h2 PARTITION OF t3h FOR VALUES WITH (MODULUS 3, REMAINDER 2);
+   INSERT INTO t3h SELECT g, 'h' || g FROM generate_series(1, 90) g;
+   CREATE TABLE t3j (a int, x int);
+   INSERT INTO t3j SELECT g, g % 5 FROM generate_series(0, 299, 3) g;
+   INSERT INTO t3j VALUES (NULL, 1), (500, 2);
+   CREATE TABLE t3k (a int); INSERT INTO t3k SELECT g FROM generate_series(150, 160) g;
+   CREATE TABLE t3tl (k text); INSERT INTO t3tl VALUES ('a'), ('c'), (NULL);" > /dev/null
+q "VACUUM ANALYZE t3p;" > /dev/null
+q "VACUUM ANALYZE t3l;" > /dev/null
+q "VACUUM ANALYZE t3h;" > /dev/null
+q "ANALYZE t3j; ANALYZE t3k; ANALYZE t3tl;" > /dev/null
+
+# --- the partitions ORCA's static pruning left ------------------------------
+
+shape "a scan of a partitioned table is a scan of each partition" "Custom Scan (Dynamic Scan)" \
+      "SELECT count(*), sum(a) FROM t3p"
+
+# Not "a < 50", which the default partition can hold too.
+has "and only of the ones static pruning left" \
+    "EXPLAIN (COSTS OFF) SELECT count(*) FROM t3p WHERE a BETWEEN 10 AND 50" "Partitions: 1"
+
+# A partition can have its columns in another order, or a dropped one: each
+# scan reads its own columns by name.
+same "a partition whose columns are in another order, or dropped" \
+     "SELECT a, b, c FROM t3p WHERE a IN (1, 150, 250, 500, -5) ORDER BY a"
+
+same "tableoid names the partition a row came from" \
+     "SELECT tableoid::regclass, count(*) FROM t3p GROUP BY 1 ORDER BY 1"
+
+same "the default partition, and a NULL key" \
+     "SELECT a, b FROM t3p WHERE a IS NULL OR a > 400 OR a < 0 ORDER BY a NULLS FIRST"
+
+shape "each partition through its own index" "Index Scan using t3p2_c_idx" \
+      "SELECT count(*) FROM t3p WHERE c = 3 AND a < 150"
+
+# On a table of its own: an index on t3p's join column would take the hash
+# join, and its Partition Selector, from the tests below.
+q "CREATE TABLE t3q (a int, b text) PARTITION BY RANGE (a);
+   CREATE TABLE t3q1 PARTITION OF t3q FOR VALUES FROM (0) TO (150);
+   CREATE TABLE t3q2 PARTITION OF t3q FOR VALUES FROM (150) TO (300);
+   INSERT INTO t3q SELECT g, 'q' || g FROM generate_series(0, 299) g;
+   CREATE INDEX ON t3q (a);" > /dev/null
+q "VACUUM ANALYZE t3q;" > /dev/null
+
+shape "an index-only scan of each, under a nested loop" "Index Only Scan using t3q2_a_idx" \
+      "SELECT count(*) FROM t3q JOIN t3k ON t3q.a = t3k.a"
+
+shape "a bitmap scan of each" "Bitmap Index Scan on t3p3_c_idx" \
+      "SELECT count(*) FROM t3p WHERE c = 3 OR c = 5" \
+      "SET gp.optimizer_enable_dynamictablescan = off; SET gp.optimizer_enable_dynamicindexscan = off;
+       SET gp.optimizer_enable_dynamicindexonlyscan = off"
+
+same "a list-partitioned table, NULL and the default partition among them" \
+     "SELECT k, count(*) FROM t3l GROUP BY k ORDER BY k NULLS FIRST"
+
+same "a hash-partitioned table" \
+     "SELECT count(*), min(v), max(v) FROM t3h WHERE id IN (7, 8, 9)"
+
+same "a partitioned table read twice" \
+     "SELECT count(*) FROM t3p x JOIN t3p y ON x.a = y.a + 1"
+
+# Under a nested loop the partitions' scans are rescanned for each row.
+same "and rescanned under a nested loop" \
+     "SELECT t3j.a, (SELECT count(*) FROM t3p WHERE t3p.a = t3j.a) FROM t3j WHERE t3j.a < 20 ORDER BY 1"
+
+# --- the choice while the query runs --------------------------------------------
+#
+# A Partition Selector on a hash join's inner side works out, from the rows it
+# passes on, which partitions can hold a match, and the Dynamic Scan on the
+# outer side runs only those.  The hash join has to build its hash table
+# before it reads the outer side for that to happen, and PostgreSQL 19's
+# decides by the costs.
+
+shape "a Partition Selector chooses the partitions a join can match" "Custom Scan (Partition Selector)" \
+      "SELECT count(*) FROM t3p JOIN t3k ON t3p.a = t3k.a"
+
+has "and the Dynamic Scan reads only the one it chose, after it chose" \
+    "EXPLAIN (ANALYZE, COSTS OFF, TIMING OFF, SUMMARY OFF, BUFFERS OFF)
+       SELECT count(*) FROM t3p JOIN t3k ON t3p.a = t3k.a" "Partitions Scanned: 1"
+
+has "a selector that saw no row chooses no partition" \
+    "EXPLAIN (ANALYZE, COSTS OFF, TIMING OFF, SUMMARY OFF, BUFFERS OFF)
+       SELECT count(*) FROM t3p JOIN t3k ON t3p.a = t3k.a AND t3k.a > 1000" "Partitions Scanned: 0"
+
+same "a join on a list partition's key, NULLs and all" \
+     "SELECT count(*) FROM t3l JOIN t3tl ON t3l.k = t3tl.k"
+
+same "a join on a hash partition's key" \
+     "SELECT count(*) FROM t3h JOIN t3j ON t3h.id = t3j.a"
+
+same "a subquery's value, which ORCA selects by as a join" \
+     "SELECT count(*) FROM t3p WHERE a = (SELECT max(a) FROM t3k)"
+
+same "a semi-join, an anti-join, and a join the table is outer to" \
+     "SELECT (SELECT count(*) FROM t3p WHERE a IN (SELECT a FROM t3j WHERE x = 2)),
+             (SELECT count(*) FROM t3p WHERE NOT EXISTS (SELECT 1 FROM t3j WHERE t3j.a = t3p.a)),
+             (SELECT count(*) FROM t3j LEFT JOIN t3p ON t3p.a = t3j.a)"
+
+# --- what is refused ---------------------------------------------------------------
+
+# WHERE CURRENT OF looks for the scan of the table under the cursor's plan,
+# inside an Append but not inside a CustomScan.
+declined "a cursor over the partitions of a table, which WHERE CURRENT OF could not see into" \
+         "DECLARE t3c CURSOR FOR SELECT a FROM t3p WHERE a < 5" \
+         "a cursor over the partitions of a table" "BEGIN"
+
+q "CREATE TABLE t3m (y int, mo int, v int) PARTITION BY RANGE (y);
+   CREATE TABLE t3m2020 PARTITION OF t3m FOR VALUES FROM (2020) TO (2021) PARTITION BY LIST (mo);
+   CREATE TABLE t3m2020a PARTITION OF t3m2020 FOR VALUES IN (1, 2, 3);
+   CREATE TABLE t3m2021 PARTITION OF t3m FOR VALUES FROM (2021) TO (2022);
+   INSERT INTO t3m VALUES (2020, 1, 1), (2021, 5, 2);" > /dev/null
+
+declined "a table partitioned on more than one level, as in Cloudberry" \
+         "SELECT count(*), sum(v) FROM t3m" "Multi-level partitioned tables"
+
+if [ "$(q "SELECT count(*) FROM pg_available_extensions WHERE name = 'file_fdw'")" = 1 ]; then
+	printf '%s\n' "300,f300" "301,f301" > "$WORK/t3.csv"
+	q "CREATE EXTENSION IF NOT EXISTS file_fdw; CREATE SERVER t3_file FOREIGN DATA WRAPPER file_fdw;
+	   CREATE TABLE t3f (a int, b text) PARTITION BY RANGE (a);
+	   CREATE TABLE t3f1 PARTITION OF t3f FOR VALUES FROM (0) TO (300);
+	   CREATE FOREIGN TABLE t3f2 PARTITION OF t3f FOR VALUES FROM (300) TO (400)
+	     SERVER t3_file OPTIONS (filename '$WORK/t3.csv', format 'csv');
+	   INSERT INTO t3f1 VALUES (1, 'h1'), (2, 'h2');" > /dev/null
+
+	# A foreign partition's scan is planned by its wrapper, which needs a
+	# permission entry of the partition's own; a partition read through its
+	# table has none, and should not be given one.
+	declined "a foreign partition" \
+	         "SELECT count(*) FROM t3f" "DynamicForeignScan"
+fi
+
+echo
 echo "  $pass passed, $fail failed"
 [ "$fail" -eq 0 ]
