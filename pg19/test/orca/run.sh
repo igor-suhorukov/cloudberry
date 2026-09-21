@@ -1709,6 +1709,248 @@ refused "and so is more than one statement" \
    "SELECT count(*) FROM gp_orca.agg_sharing('SELECT count(1); SELECT count(2);');" \
    "one statement"
 
+###############################################################################
+echo
+echo "20. ORCA's metadata, from the relcache translator"
+###############################################################################
+# The first of the translator proper.  gp_orca.md_dxl() asks ORCA's metadata
+# accessor for an object the way the optimizer will -- through a
+# CMDProviderRelcache, with the metadata cache in front -- and returns the DXL
+# it gets back.  Until Query to DXL exists to consume the relcache translator,
+# this is the only thing that can; afterwards it is still the answer to "what
+# does ORCA think this table is".
+#
+# Each assertion is on something the port changed or found by running this,
+# not on something Cloudberry wrote.
+
+q "CREATE TABLE md_plain (a int, b text);
+   CREATE INDEX md_plain_a ON md_plain (a);
+   INSERT INTO md_plain SELECT i % 7, 'x' FROM generate_series(1, 1000) i;
+   ANALYZE md_plain;
+   CREATE TABLE md_keyed (id int PRIMARY KEY, v int CHECK (v > 0));
+   CREATE TABLE md_parts (k int, v int) PARTITION BY RANGE (k);
+   CREATE TABLE md_parts_1 PARTITION OF md_parts FOR VALUES FROM (0) TO (10);
+   CREATE TABLE md_parent (a int);
+   CREATE TABLE md_child () INHERITS (md_parent);
+   CREATE TABLE md_ml (k int, j int) PARTITION BY RANGE (k);
+   CREATE TABLE md_ml_1 PARTITION OF md_ml FOR VALUES FROM (0) TO (10) PARTITION BY RANGE (j);
+   CREATE FOREIGN DATA WRAPPER md_nofdw;
+   CREATE SERVER md_nosrv FOREIGN DATA WRAPPER md_nofdw;
+   CREATE FOREIGN TABLE md_ft (a int) SERVER md_nosrv;" > /dev/null
+
+# --- the first things running it found ---------------------------------------
+#
+# Cloudberry changed RelationGetPartitionDesc's contract without changing its
+# signature: PostgreSQL asserts the relation is partitioned, Cloudberry returns
+# NULL when it is not, and the translator asks it of every relation as "is this
+# partitioned?".  The first plain table failed the assertion.
+has "a plain table is described, which asks the partition question of a table that has none" \
+    "SELECT gp_orca.md_dxl('relation', 'md_plain'::regclass);" 'Name="md_plain"'
+
+# InitDXL() is ORCA's fourth initialisation step, which Cloudberry takes in
+# COptTasks rather than in InitGPOPT.  Without it the first serialization
+# failed on "Token map not initialized yet".
+has "and serialized, which needs the DXL token map" \
+    "SELECT gp_orca.md_dxl('relation', 'md_plain'::regclass);" '<dxl:Columns>'
+
+# --- one node: every relation is where every row is ---------------------------
+#
+# COptTasks turns Motions off for a query that touches no distributed table,
+# and that is what keeps a Motion out of every M1 plan -- not the one segment.
+# So the relcache translator reports every relation as coordinator-only on one
+# node, whatever its label records.  A DISTRIBUTED BY label would otherwise make
+# ORCA plan a Gather Motion from a segment that does not exist.
+is "a heap table reads as heap, on the coordinator" \
+   "SELECT substring(gp_orca.md_dxl('relation', 'md_plain'::regclass)
+                     from 'StorageType=\"[^\"]*\" DistributionPolicy=\"[^\"]*\"');" \
+   'StorageType="Heap" DistributionPolicy="MasterOnly"'
+
+is "a hash-distributed label is still recorded" \
+   "SELECT kind FROM gp_orca.relation_policy('dist_hash'::regclass);" "hash"
+
+is "and ORCA is told the table is on the coordinator all the same" \
+   "SELECT substring(gp_orca.md_dxl('relation', 'dist_hash'::regclass)
+                     from 'DistributionPolicy=\"[^\"]*\"');" 'DistributionPolicy="MasterOnly"'
+
+is "so is a replicated one, and a random one" \
+   "SELECT string_agg(substring(gp_orca.md_dxl('relation', t::regclass)
+                                from 'DistributionPolicy=\"[^\"]*\"'), ' ')
+      FROM unnest(ARRAY['dist_repl', 'dist_rand']) t;" \
+   'DistributionPolicy="MasterOnly" DistributionPolicy="MasterOnly"'
+
+# --- no gp_segment_id ---------------------------------------------------------
+#
+# Cloudberry's system attributes run to -8, and gp_segment_id is -7; PostgreSQL
+# 19's stop at tableoid, -6.  AddSystemColumns loops down to
+# FirstLowInvalidHeapAttributeNumber, so it is right as written; the key sets
+# were not.
+is "the system columns stop at tableoid" \
+   "SELECT string_agg(m[1], ',' ORDER BY m[1]::int DESC)
+      FROM regexp_matches(gp_orca.md_dxl('relation', 'md_plain'::regclass),
+                          'Attno=\"(-[0-9]+)\"', 'g') m;" "-1,-2,-3,-4,-5,-6"
+
+# The default key is {ctid}: Cloudberry's is {gp_segment_id, ctid}, because a
+# ctid is unique only within one segment's copy of a table.  On one node every
+# row is in one place.  Keys are positions in the column list, which for
+# md_plain (a, b) puts ctid at 2.
+is "a table with no key of its own is keyed on ctid alone" \
+   "SELECT substring(gp_orca.md_dxl('relation', 'md_plain'::regclass) from 'Keys=\"[^\"]*\"');" \
+   'Keys="2"'
+
+is "a primary key comes first, and the default key after it" \
+   "SELECT substring(gp_orca.md_dxl('relation', 'md_keyed'::regclass) from 'Keys=\"[^\"]*\"');" \
+   'Keys="0;2"'
+
+is "a partitioned table is keyed on tableoid and ctid" \
+   "SELECT substring(gp_orca.md_dxl('relation', 'md_parts'::regclass) from 'Keys=\"[^\"]*\"');" \
+   'Keys="7,2"'
+
+# --- access methods that are extension objects in the port --------------------
+#
+# AO, AOCO, PAX and bitmap have fixed OIDs in Cloudberry and none here, so they
+# are found by name.  A partitioned table's relam is 0, and so is the answer to
+# looking up an access method that is not installed; compared bare, every
+# partitioned table would have been PAX.
+is "a partitioned table has no access method of its own" \
+   "SELECT relam FROM pg_class WHERE oid = 'md_parts'::regclass;" "0"
+
+is "and reads as the storage of its leaves, not as PAX" \
+   "SELECT substring(gp_orca.md_dxl('relation', 'md_parts'::regclass) from 'StorageType=\"[^\"]*\"');" \
+   'StorageType="Heap"'
+
+# A foreign table runs where PostgreSQL runs it, on the coordinator: Cloudberry
+# reads ForeignTable.exec_location, a field PostgreSQL 19 does not have.
+is "a foreign table reads as foreign, on the coordinator" \
+   "SELECT substring(gp_orca.md_dxl('relation', 'md_ft'::regclass)
+                     from 'StorageType=\"[^\"]*\" DistributionPolicy=\"[^\"]*\"');" \
+   'StorageType="Foreign" DistributionPolicy="MasterOnly"'
+
+# --- the other kinds of object ------------------------------------------------
+has "an index is described" \
+    "SELECT gp_orca.md_dxl('index', 'md_plain_a'::regclass);" 'IndexType="B-tree"'
+
+# The scalar translator's stand-alone path: a constraint's expression, turned
+# into DXL.  A subquery is the one thing it refuses there, and PostgreSQL does
+# not allow one in a CHECK constraint.
+has "a check constraint comes back as its expression" \
+    "SELECT gp_orca.md_dxl('check_constraint',
+              (SELECT oid FROM pg_constraint
+                WHERE conrelid = 'md_keyed'::regclass AND contype = 'c'));" \
+    'ComparisonOperator="&gt;"'
+
+has "a type is described" \
+    "SELECT gp_orca.md_dxl('type', 'int4'::regtype);" 'Name="int4"'
+
+# get_compatible_hash_opfamily was deferred to M2 because its name says it asks
+# whether two families hash compatibly.  Its body is a pg_amop search, and ORCA
+# asks it of every operator; deferred, it made ORCA refuse every operator.  The
+# answer is compared with the catalog, not with a number.
+is "an equality operator names the hash family it is equality in" \
+   "SELECT substring(gp_orca.md_dxl('operator', '=(int4,int4)'::regoperator)
+                     from 'HashOpfamily Mdid=\"0\\.([0-9]+)\\.')::oid
+         = (SELECT f.oid FROM pg_opfamily f JOIN pg_am a ON a.oid = f.opfmethod
+             WHERE f.opfname = 'integer_ops' AND a.amname = 'hash');" "t"
+
+# Cloudberry's legacy cdbhash opclasses are built-ins with fixed OIDs that
+# neither PostgreSQL 19 nor any module of the port installs, so no operator
+# belongs to one.  That is the true answer, not a stand-in for one.
+is "and no legacy hash family, because there are none" \
+   "SELECT position('LegacyHashOpfamily' IN
+                    gp_orca.md_dxl('operator', '=(int4,int4)'::regoperator));" "0"
+
+has "a function is described" \
+    "SELECT gp_orca.md_dxl('function', 'lower(text)'::regprocedure);" 'Name="lower"'
+
+has "an aggregate is described" \
+    "SELECT gp_orca.md_dxl('aggregate', 'count(\"any\")'::regprocedure);" 'Name="count"'
+
+# --- statistics ---------------------------------------------------------------
+has "a table's row count comes from ANALYZE" \
+    "SELECT gp_orca.md_dxl('relation_stats', 'md_plain'::regclass);" 'Rows="1000.000000"'
+
+# MCVs become ORCA datums through the scalar translator, and that needs an
+# optimizer context: without one the first column_stats request dereferenced a
+# null context and took the backend down.
+is "a column's seven most common values become seven buckets" \
+   "SELECT count(*) FROM regexp_matches(
+      gp_orca.md_dxl('column_stats', 'md_plain'::regclass, 1), '<dxl:StatsBucket', 'g');" "7"
+
+has "and each bucket's bound is an ORCA datum of the column's type" \
+    "SELECT gp_orca.md_dxl('column_stats', 'md_plain'::regclass, 1);" \
+    '<dxl:LowerBound Closed="true" TypeMdid="0.23.1.0" Value="0"/>'
+
+# --- the metadata cache -------------------------------------------------------
+#
+# The cache is reset when the catalog has changed since the last ask, which is
+# what MDCacheNeedsReset's invalidation callbacks are for.  A stale cache here
+# is a plan built for a table that no longer looks like that.
+is "a column added between two asks is seen by the second" \
+   "SELECT count(*) FROM regexp_matches(gp_orca.md_dxl('relation', 'md_keyed'::regclass),
+                                       'Attno=\"[0-9]+\"', 'g');" "2"
+
+is "after the ALTER" \
+   "ALTER TABLE md_keyed ADD COLUMN extra int;
+    SELECT count(*) FROM regexp_matches(gp_orca.md_dxl('relation', 'md_keyed'::regclass),
+                                       'Attno=\"[0-9]+\"', 'g');" "3"
+
+# --- what ORCA refuses, and that the reason arrives ---------------------------
+refused "an inherited table is refused, and says so" \
+        "SELECT gp_orca.md_dxl('relation', 'md_parent'::regclass);" \
+        "does not support the following feature: Inherited tables"
+
+refused "a multi-level partitioned table is refused, and says so" \
+        "SELECT gp_orca.md_dxl('relation', 'md_ml'::regclass);" \
+        "Multi-level partitioned tables"
+
+refused "a relation that does not exist is a failed lookup" \
+        "SELECT gp_orca.md_dxl('relation', 999999);" \
+        "Lookup of object 6.999999.1.0 in cache failed"
+
+refused "a zero OID never reaches ORCA, which would assert on it" \
+        "SELECT gp_orca.md_dxl('relation', 0);" \
+        "not an object ORCA can be asked about"
+
+refused "an unknown kind is refused before ORCA is entered" \
+        "SELECT gp_orca.md_dxl('frobnicate', 'md_plain'::regclass);" \
+        "not a kind of metadata object"
+
+refused "column statistics need a column" \
+        "SELECT gp_orca.md_dxl('column_stats', 'md_plain'::regclass);" \
+        "needs the column's attribute number"
+
+# A PostgreSQL error inside ORCA: looking up a type that does not exist
+# raises in the server, and GP_WRAP catches it before PostgreSQL's handler
+# runs.  The original is still on the error stack, and it is re-thrown as it
+# stands, as Cloudberry's CGPOptimizer does -- so PostgreSQL's own message
+# arrives rather than "PG exception raised".
+refused "a PostgreSQL error inside ORCA arrives as itself" \
+        "SELECT gp_orca.md_dxl('type', 999999);" \
+        "type with OID 999999 does not exist"
+
+# Every refusal above was in a session of its own.  This is nine in one
+# backend, each caught and rolled back to a savepoint, and then an answer from
+# the same backend.  Three of the nine leave ORCA carrying a PostgreSQL error
+# that PostgreSQL has not cleaned up; re-throwing it is what hands the cleanup
+# back.  PostgreSQL allows five nested error levels, so a bridge that leaked
+# one level per error would have stopped the backend well before the end.
+is "one backend refuses nine times in a row and then answers" \
+   "CREATE OR REPLACE FUNCTION md_refusals() RETURNS int LANGUAGE plpgsql AS \$\$
+    DECLARE n int := 0;
+    BEGIN
+      FOR i IN 1..3 LOOP
+        BEGIN PERFORM gp_orca.md_dxl('relation', 'md_parent'::regclass);
+        EXCEPTION WHEN OTHERS THEN n := n + 1; END;
+        BEGIN PERFORM gp_orca.md_dxl('relation', 999999);
+        EXCEPTION WHEN OTHERS THEN n := n + 1; END;
+        BEGIN PERFORM gp_orca.md_dxl('type', 999999);
+        EXCEPTION WHEN OTHERS THEN n := n + 1; END;
+      END LOOP;
+      RETURN n;
+    END \$\$;
+    SELECT md_refusals()
+           || ' ' || substring(gp_orca.md_dxl('relation', 'md_plain'::regclass)
+                               from 'Name=\"[^\"]*\"');" '9 Name="md_plain"'
+
 echo
 echo "  $pass passed, $fail failed"
 [ "$fail" -eq 0 ]

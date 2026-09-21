@@ -123,6 +123,7 @@ PG_FUNCTION_INFO_V1(gp_orca_mdcache_needs_reset);
 PG_FUNCTION_INFO_V1(gp_orca_wrapper_policy);
 PG_FUNCTION_INFO_V1(gp_orca_unported_raise);
 PG_FUNCTION_INFO_V1(gp_orca_agg_sharing);
+PG_FUNCTION_INFO_V1(gp_orca_md_dxl);
 
 /*
  * gp_orca.version()
@@ -1701,4 +1702,98 @@ gp_orca_agg_sharing(PG_FUNCTION_ARGS)
 
 	Assert(i == n);
 	PG_RETURN_VOID();
+}
+
+/*
+ * gp_orca.md_dxl(kind text, obj oid, attnum int DEFAULT NULL)
+ *
+ * What ORCA's metadata accessor says about one catalog object, as DXL -- the
+ * relcache translator's answer, through the metadata cache, as the optimizer
+ * will ask for it.  It is the only way to test the relcache translator until
+ * Query to DXL exists to consume it, and it stays useful after that: it is
+ * the answer to "what does ORCA think this table is".
+ *
+ * A refusal is an error whose detail is what ORCA said, because the reason
+ * is the point: a table ORCA will not describe is a query ORCA will not plan.
+ */
+Datum
+gp_orca_md_dxl(PG_FUNCTION_ARGS)
+{
+	static const char *const kinds[] = {
+		"relation", "index", "check_constraint", "type", "operator",
+		"function", "aggregate", "relation_stats", "column_stats", NULL
+	};
+	char	   *kind;
+	int			attno = 0;
+	bool		known = false;
+	bool		raised = false;
+	bool		from_postgres = false;
+	char	   *message = NULL;
+	char	   *dxl;
+
+	if (PG_ARGISNULL(0) || PG_ARGISNULL(1))
+		PG_RETURN_NULL();
+
+	kind = text_to_cstring(PG_GETARG_TEXT_PP(0));
+	for (int i = 0; kinds[i] != NULL; i++)
+	{
+		if (strcmp(kind, kinds[i]) == 0)
+			known = true;
+	}
+	if (!known)
+		ereport(ERROR,
+				(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+				 errmsg("\"%s\" is not a kind of metadata object ORCA asks for", kind),
+				 errhint("Use relation, index, check_constraint, type, operator, function, aggregate, relation_stats or column_stats.")));
+
+	if (strcmp(kind, "column_stats") == 0)
+	{
+		if (PG_ARGISNULL(2))
+			ereport(ERROR,
+					(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+					 errmsg("column_stats needs the column's attribute number")));
+		attno = PG_GETARG_INT32(2);
+		if (attno < 1)
+			ereport(ERROR,
+					(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+					 errmsg("column_stats is for a user column, and attribute numbers for those start at 1")));
+	}
+
+	/*
+	 * ORCA asserts on an invalid mdid rather than reporting it, so a zero OID
+	 * never reaches it.
+	 */
+	if (!OidIsValid(PG_GETARG_OID(1)))
+		ereport(ERROR,
+				(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+				 errmsg("%s 0 is not an object ORCA can be asked about", kind)));
+
+	dxl = GpOrcaMDDxl(kind, PG_GETARG_OID(1), attno, &raised, &from_postgres,
+					  &message);
+
+	/*
+	 * Always an error when ORCA raised, never a NULL: if what it caught was a
+	 * PostgreSQL error, PostgreSQL's own error handling has not run yet, and
+	 * raising one is what hands the cleanup back.  See orca_probe.cpp.
+	 *
+	 * When it was a PostgreSQL error, that error is re-thrown as it stands:
+	 * it is still on the error stack, GP_WRAP having caught it before
+	 * PostgreSQL's handler ran, and its message is the reason.  Cloudberry's
+	 * CGPOptimizer does the same, and the port's will.
+	 */
+	if (raised && from_postgres)
+		PG_RE_THROW();
+
+	if (raised)
+		ereport(ERROR,
+				(errcode(ERRCODE_INTERNAL_ERROR),
+				 errmsg("the optimizer would not describe this %s", kind),
+				 message != NULL ? errdetail("%s", message) : 0));
+
+	if (dxl == NULL)
+		ereport(ERROR,
+				(errcode(ERRCODE_CHARACTER_NOT_IN_REPERTOIRE),
+				 errmsg("the optimizer's description of this %s will not convert to this database's encoding", kind)));
+
+	PG_RETURN_TEXT_P(cstring_to_text(dxl));
 }

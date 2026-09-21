@@ -728,3 +728,26 @@ LANGUAGE C STRICT;
 
 COMMENT ON FUNCTION gp_orca.agg_sharing(text) IS
 	'what the planner and the port each decide about sharing aggregate state';
+
+/*
+ * What ORCA's metadata accessor says about one catalog object, as DXL.
+ *
+ * The relcache translator's answer, through the metadata cache, exactly as the
+ * optimizer will ask for it.  "kind" is one of relation, index,
+ * check_constraint, type, operator, function, aggregate, relation_stats and
+ * column_stats; attnum is for column_stats, and names a user column.
+ *
+ * On one node every relation reads as DistributionPolicy="MasterOnly",
+ * whatever its label records: every row is here, and that is what keeps ORCA
+ * from planning a Motion.  gp_orca.relation_policy() still reports the label.
+ *
+ * A refusal is an error whose detail is what ORCA said.
+ */
+CREATE FUNCTION gp_orca.md_dxl(kind text, obj oid, attnum int DEFAULT NULL)
+RETURNS text
+AS 'MODULE_PATHNAME', 'gp_orca_md_dxl'
+LANGUAGE C;
+
+COMMENT ON FUNCTION gp_orca.md_dxl(text, oid, int) IS
+	'what ORCA''s metadata accessor says about a catalog object, as DXL';
+

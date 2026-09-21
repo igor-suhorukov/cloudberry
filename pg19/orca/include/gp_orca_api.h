@@ -133,6 +133,22 @@ extern char *GpOrcaUnportedRaise(void);
 extern int	GpOrcaReplayAggrefs(struct List *aggrefs, int **aggnos,
 								int **transnos, bool *raised);
 
+/*
+ * What ORCA's metadata accessor says about one catalog object, as DXL: the
+ * relcache translator's answer, through the metadata cache, exactly as the
+ * optimizer will ask for it.
+ *
+ * kind is one of relation, index, check_constraint, type, operator,
+ * function, aggregate, relation_stats and column_stats, and the caller checks
+ * it; attno is read by column_stats alone.  On a raise *message holds what
+ * ORCA logged on the way out, or NULL, and the caller must raise a
+ * PostgreSQL error (see orca_probe.cpp for why) -- re-throwing the original
+ * when *from_postgres says it is still on the error stack.  The DXL is
+ * palloc'd.
+ */
+extern char *GpOrcaMDDxl(const char *kind, Oid oid, int attno, bool *raised,
+						 bool *from_postgres, char **message);
+
 #ifdef __cplusplus
 }
 #endif

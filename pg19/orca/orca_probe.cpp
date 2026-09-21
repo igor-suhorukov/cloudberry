@@ -72,11 +72,33 @@ extern "C"
 #include "gp_policy.h"
 }
 
+#include <cstdlib>	// wcstombs
+
 #include "gpos/_api.h"
 #include "gpos/error/CException.h"
 #include "gpos/memory/CAutoMemoryPool.h"
+#include "gpos/string/CWStringDynamic.h"
+#include "gpopt/base/CAutoOptCtxt.h"
+#include "gpopt/mdcache/CMDAccessor.h"
+#include "gpopt/mdcache/CMDCache.h"
+#include "gpopt/optimizer/COptimizerConfig.h"
+#include "naucrates/dxl/CDXLUtils.h"
 #include "naucrates/exception.h"
+#include "naucrates/md/CMDIdColStats.h"
+#include "naucrates/md/CMDIdGPDB.h"
+#include "naucrates/md/CMDIdRelStats.h"
+#include "naucrates/md/IMDAggregate.h"
+#include "naucrates/md/IMDCheckConstraint.h"
+#include "naucrates/md/IMDColStats.h"
+#include "naucrates/md/IMDFunction.h"
+#include "naucrates/md/IMDIndex.h"
+#include "naucrates/md/IMDRelStats.h"
+#include "naucrates/md/IMDRelation.h"
+#include "naucrates/md/IMDScalarOp.h"
+#include "naucrates/md/IMDType.h"
 
+#include "CMDProviderRelcache.h"
+#include "gp_orca_guc.h"
 #include "gpdbwrappers.h"
 
 #include "gp_orca_api.h"
@@ -111,6 +133,29 @@ struct ProbeResult
 	List	   *aggrefs = nullptr;
 	int		   *aggnos = nullptr;
 	int		   *transnos = nullptr;
+
+	/* the metadata probe: which kind of object, and a column for statistics */
+	const char *kind = nullptr;
+	int			attno = 0;
+
+	/*
+	 * What ORCA said when it raised, for a probe that asks for it.  gpos_exec
+	 * sends the task's log to a buffer the caller passes, and an exception is
+	 * logged there on its way out -- which is how Cloudberry's COptTasks gets
+	 * a fallback's reason, and the only way to get it at all once the task has
+	 * unwound.
+	 */
+	bool		want_message = false;
+	char	   *message = nullptr;
+
+	/*
+	 * Was the exception a PostgreSQL error that GP_WRAP turned into a GPOS
+	 * one?  Then the original is still on PostgreSQL's error stack, and the
+	 * caller can re-throw it instead of reporting a generic failure -- which
+	 * is what Cloudberry's CGPOptimizer does, and what keeps "cache lookup
+	 * failed for type 999999" from arriving as "PG exception raised".
+	 */
+	bool		from_postgres = false;
 };
 
 //	Copy into the caller's context; the pool dies with the task.
@@ -123,6 +168,66 @@ CopyOut(ProbeResult *r, const char *s)
 	}
 	return MemoryContextStrdup(r->caller, s);
 }
+
+//	The same for ORCA's wide strings.  NULL if the text will not convert in
+//	this backend's LC_CTYPE, which the DXL serializer converted it from.
+char *
+CopyOutWide(ProbeResult *r, const wchar_t *w)
+{
+	if (w == nullptr)
+	{
+		return nullptr;
+	}
+	size_t		n = wcstombs(nullptr, w, 0);
+
+	if (n == (size_t) -1)
+	{
+		return nullptr;
+	}
+	char	   *out = (char *) MemoryContextAlloc(r->caller, n + 1);
+
+	wcstombs(out, w, n + 1);
+	return out;
+}
+
+//	What gpos_exec logged is a line of ORCA's own format --
+//
+//	  2026-09-21 03:28:36:955904 UTC,THD000,NOTICE,"<the message>",
+//
+//	-- sometimes with a stack trace after it.  The quoted part is the only part
+//	a reader wants, so keep that and drop the rest, in place.  A buffer in any
+//	other shape is left alone rather than guessed at.
+void
+TrimLogLine(char *line)
+{
+	if (line == nullptr)
+	{
+		return;
+	}
+	char	   *open = strchr(line, '"');
+
+	if (open == nullptr)
+	{
+		return;
+	}
+	char	   *close = strstr(open + 1, "\",");
+
+	if (close == nullptr)
+	{
+		close = strrchr(open + 1, '"');
+	}
+	if (close == nullptr)
+	{
+		return;
+	}
+	size_t		n = (size_t) (close - (open + 1));
+
+	memmove(line, open + 1, n);
+	line[n] = '\0';
+}
+
+//	Big enough for an exception's message and the log lines before it.
+const int	probe_error_buffer_size = 64 * 1024;
 
 //---------------------------------------------------------------------------
 //	Run one probe body as a GPOS task, and turn any exception into a flag.
@@ -142,6 +247,15 @@ RunProbe(void *(*body)(void *), ProbeResult *r)
 	params.stack_start = &params;
 	params.abort_requested = &abort_flag;
 
+	char	   *error_buffer = nullptr;
+
+	if (r->want_message)
+	{
+		error_buffer = (char *) palloc0(probe_error_buffer_size);
+		params.error_buffer = error_buffer;
+		params.error_buffer_size = probe_error_buffer_size;
+	}
+
 	GPOS_TRY
 	{
 		rc = gpos_exec(&params);
@@ -151,6 +265,8 @@ RunProbe(void *(*body)(void *), ProbeResult *r)
 		r->raised = true;
 		r->major = ex.Major();
 		r->minor = ex.Minor();
+		r->from_postgres = (ex.Major() == gpdxl::ExmaGPDB &&
+							ex.Minor() == gpdxl::ExmiGPDBError);
 		/*
 		 * No GPOS_RESET_EX here, and this is the trap.  It expands to
 		 * ITask::Self()->GetErrCtxt()->Reset(), and ITask::Self() is null
@@ -167,6 +283,16 @@ RunProbe(void *(*body)(void *), ProbeResult *r)
 		rc = 0;					// reported through r->raised, not as failure
 	}
 	GPOS_CATCH_END;
+
+	if (error_buffer != nullptr)
+	{
+		if (r->raised)
+		{
+			r->message = CopyOutWide(r, (const wchar_t *) error_buffer);
+			TrimLogLine(r->message);
+		}
+		pfree(error_buffer);
+	}
 
 	return rc;
 }
@@ -574,4 +700,210 @@ GpOrcaReplayAggrefs(struct List *aggrefs, int **aggnos, int **transnos,
 	*aggnos = r.aggnos;
 	*transnos = r.transnos;
 	return list_length(aggrefs);
+}
+
+//---------------------------------------------------------------------------
+//	What ORCA's metadata accessor says about one catalog object, as DXL.
+//
+//	The relcache translator's test surface, and its only one until Query to
+//	DXL exists to consume it.  It asks for an object the way the optimizer
+//	will -- through a CMDAccessor over a CMDProviderRelcache, with the
+//	metadata cache in front -- and serializes what comes back.  Each kind is
+//	one way into CTranslatorRelcacheToDXL:
+//
+//	  relation          RetrieveRel: columns, keys, indexes, distribution
+//	  index             RetrieveIndex
+//	  check_constraint  RetrieveCheckConstraints, which is the scalar
+//	                    translator's stand-alone path
+//	  type, operator, function, aggregate
+//	  relation_stats    RetrieveRelStats
+//	  column_stats      RetrieveColStats, which turns a column's MCVs and
+//	                    histogram bounds into ORCA datums through the scalar
+//	                    translator
+//
+//	The metadata cache is handled as COptTasks::OptimizeTask handles it:
+//	built on first use, reset when the catalog has changed since the last
+//	time, and shut down if a lookup fails, so that nothing half-read stays
+//	cached.  The kind has been checked by the caller.
+//---------------------------------------------------------------------------
+// The metadata probe speaks ORCA's metadata and DXL types, which live in three
+// namespaces besides gpos; the translator's own files open all four the same
+// way.
+using namespace gpdxl;
+using namespace gpmd;
+using namespace gpopt;
+
+namespace
+{
+const CSystemId probe_sysid(IMDId::EmdidGeneral, GPOS_WSZ_STR_LENGTH("GPDB"));
+
+void
+EnsureMDCache(void)
+{
+	// Called every time, as COptTasks calls it: the first call is what
+	// registers the invalidation callbacks the answer depends on.
+	bool		reset = gpdb::MDCacheNeedsReset();
+	ULLONG		quota = (ULLONG) optimizer_mdcache_size * 1024L;
+
+	if (!CMDCache::FInitialized())
+	{
+		CMDCache::Init();
+		CMDCache::SetCacheQuota(quota);
+	}
+	else if (reset)
+	{
+		CMDCache::Reset();
+		CMDCache::SetCacheQuota(quota);
+	}
+	else if (CMDCache::ULLGetCacheQuota() != quota)
+	{
+		CMDCache::SetCacheQuota(quota);
+	}
+}
+
+const IMDCacheObject *
+RetrieveByKind(CMemoryPool *mp, CMDAccessor *mda, const char *kind, Oid oid,
+			   int attno, IMDId **mdid_out)
+{
+	IMDId	   *mdid = nullptr;
+	const IMDCacheObject *obj = nullptr;
+
+	if (0 == strcmp(kind, "relation"))
+	{
+		mdid = GPOS_NEW(mp) CMDIdGPDB(IMDId::EmdidRel, oid);
+		obj = mda->RetrieveRel(mdid);
+	}
+	else if (0 == strcmp(kind, "index"))
+	{
+		mdid = GPOS_NEW(mp) CMDIdGPDB(IMDId::EmdidInd, oid);
+		obj = mda->RetrieveIndex(mdid);
+	}
+	else if (0 == strcmp(kind, "check_constraint"))
+	{
+		mdid = GPOS_NEW(mp) CMDIdGPDB(IMDId::EmdidCheckConstraint, oid);
+		obj = mda->RetrieveCheckConstraints(mdid);
+	}
+	else if (0 == strcmp(kind, "type"))
+	{
+		mdid = GPOS_NEW(mp) CMDIdGPDB(IMDId::EmdidGeneral, oid);
+		obj = mda->RetrieveType(mdid);
+	}
+	else if (0 == strcmp(kind, "operator"))
+	{
+		mdid = GPOS_NEW(mp) CMDIdGPDB(IMDId::EmdidGeneral, oid);
+		obj = mda->RetrieveScOp(mdid);
+	}
+	else if (0 == strcmp(kind, "function"))
+	{
+		mdid = GPOS_NEW(mp) CMDIdGPDB(IMDId::EmdidGeneral, oid);
+		obj = mda->RetrieveFunc(mdid);
+	}
+	else if (0 == strcmp(kind, "aggregate"))
+	{
+		mdid = GPOS_NEW(mp) CMDIdGPDB(IMDId::EmdidGeneral, oid);
+		obj = mda->RetrieveAgg(mdid);
+	}
+	else if (0 == strcmp(kind, "relation_stats"))
+	{
+		// The stats mdid takes over the relation's.
+		mdid = GPOS_NEW(mp)
+			CMDIdRelStats(GPOS_NEW(mp) CMDIdGPDB(IMDId::EmdidRel, oid));
+		obj = mda->Pmdrelstats(mdid);
+	}
+	else
+	{
+		GPOS_ASSERT(0 == strcmp(kind, "column_stats"));
+		// A position in ORCA's column list rather than an attribute number:
+		// the list holds every attribute, dropped ones included, in attnum
+		// order, so the position is attnum - 1.
+		mdid = GPOS_NEW(mp) CMDIdColStats(
+			GPOS_NEW(mp) CMDIdGPDB(IMDId::EmdidRel, oid), (ULONG) (attno - 1));
+		obj = mda->Pmdcolstats(mdid);
+	}
+
+	*mdid_out = mdid;
+	return obj;
+}
+
+void *
+ProbeMDDxl(void *ptr)
+{
+	ProbeResult *r = (ProbeResult *) ptr;
+	CAutoMemoryPool amp;
+	CMemoryPool *mp = amp.Pmp();
+
+	EnsureMDCache();
+
+	CMDProviderRelcache *provider = GPOS_NEW(mp) CMDProviderRelcache();
+
+	GPOS_TRY
+	{
+		// The accessor takes over the reference GPOS_NEW gave the provider --
+		// RegisterProvider stores it without an AddRef, and the accessor's
+		// provider element releases it on the way out -- so nothing here
+		// releases it, as nothing in COptTasks does.  (RegisterProviders, the
+		// array form, is the one that adds a reference; reading its AddRef as
+		// RegisterProvider's is what the first version of this probe did, and
+		// it freed the provider twice.)
+		CMDAccessor mda(mp, CMDCache::Pcache(), probe_sysid, provider);
+
+		// An optimizer context, as COptimizer sets one up around every
+		// optimization.  ORCA's metadata code assumes it runs inside one:
+		// turning a column's MCVs and histogram bounds into ORCA datums asks
+		// the context for the metadata accessor, and without one the first
+		// column_stats request dereferenced a null context and took the
+		// backend down.  The other kinds happen not to need it, which is why
+		// they worked first.  Default configuration, and the constant
+		// evaluator that evaluates nothing: this plans nothing.
+		// The null configuration is spelled with its type: CAutoOptCtxt has
+		// a second constructor that takes an ICostModel in the same place.
+		CAutoOptCtxt aoc(mp, &mda, nullptr /* constant evaluator */,
+						 static_cast<COptimizerConfig *>(nullptr));
+
+		IMDId	   *mdid = nullptr;
+		const IMDCacheObject *obj =
+			RetrieveByKind(mp, &mda, r->kind, r->arg, r->attno, &mdid);
+
+		// Inside the accessor's scope: the object is pinned only while the
+		// accessor holds it.
+		CWStringDynamic *dxl = CDXLUtils::SerializeMDObj(
+			mp, obj, false /* document header and footer */,
+			true /* indentation */);
+
+		r->text = CopyOutWide(r, dxl->GetBuffer());
+		GPOS_DELETE(dxl);
+		mdid->Release();
+	}
+	GPOS_CATCH_EX(ex)
+	{
+		CMDCache::Shutdown();
+		GPOS_RETHROW(ex);
+	}
+	GPOS_CATCH_END;
+
+	if (!optimizer_metadata_caching)
+	{
+		CMDCache::Shutdown();
+	}
+
+	return nullptr;
+}
+}  // namespace
+
+extern "C" char *
+GpOrcaMDDxl(const char *kind, Oid oid, int attno, bool *raised,
+			bool *from_postgres, char **message)
+{
+	ProbeResult r;
+
+	r.kind = kind;
+	r.arg = oid;
+	r.attno = attno;
+	r.caller = CurrentMemoryContext;
+	r.want_message = true;
+	RunProbe(ProbeMDDxl, &r);
+	*raised = r.raised;
+	*from_postgres = r.from_postgres;
+	*message = r.message;
+	return r.text;
 }
