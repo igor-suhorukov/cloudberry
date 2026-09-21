@@ -114,6 +114,17 @@ extern "C" {
 #include "cb_compat.h"
 
 /*
+ * ORCA's settings.  Cloudberry reads these from cdb/cdbvars.h too -- one
+ * header for the cluster and for the 438 settings of guc_gp.c -- and its
+ * gpdbdefs.h pulls that header in, which is how every translator file that
+ * reads a setting comes to see it declared.  The port keeps the two apart and
+ * so has to name both here: leaving this one out makes a file that reads
+ * gp.optimizer_enable_foreign_table fail in the file that reads it rather than
+ * in the umbrella, which is a worse place to find out.
+ */
+#include "gp_orca_guc.h"
+
+/*
  * Left out of Cloudberry's list, and why:
  *
  *	 cdb/cdbhash.h				M2.  Hashing a distribution key, and asking

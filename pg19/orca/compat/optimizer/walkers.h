@@ -79,8 +79,12 @@ extern List *extract_nodes_expression(Node *node, int nodeTag,
 extern int	find_nodes(Node *node, List *nodeTags);
 
 /*
- * Which collations an expression mixes: -1 for none, 0 for several or a
- * non-default one, otherwise the single collation's OID.
+ * Does anything in this expression carry a collation that is not the default?
+ *
+ * 1 if so, -1 if not.  It is a flag and never a collation OID, despite the
+ * name and despite Cloudberry's callers: Cloudberry's own copy still carries
+ * the marker that says as much ("GPDB_91_MERGE_FIXME: collation").  Anything
+ * that treats the result as an OID is wrong.
  */
 extern int	check_collation(Node *node);
 

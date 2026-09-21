@@ -44,6 +44,24 @@
 GP_ORCA_BOOL_GUCS(X)
 #undef X
 
+#define X(var, dflt, lo, hi, doc)	int var = dflt;
+GP_ORCA_INT_GUCS(X)
+#undef X
+
+#define X(var, dflt, lo, hi, doc)	double var = dflt;
+GP_ORCA_REAL_GUCS(X)
+#undef X
+
+/*
+ * DefineCustomStringVariable writes through this pointer and frees what it
+ * finds, so the initial value has to be one free() may be called on -- NULL,
+ * never a string literal.  It is set to the empty string when the variable is
+ * defined.
+ */
+char	   *optimizer_search_strategy_path = NULL;
+
+bool		optimizer_use_gpdb_allocators = true;
+
 int			optimizer_minidump = OPTIMIZER_MINIDUMP_FAIL;
 int			optimizer_cost_model = OPTIMIZER_GPDB_CALIBRATED;
 int			optimizer_join_order = JOIN_ORDER_EXHAUSTIVE2_SEARCH;
@@ -84,6 +102,38 @@ GpOrcaDefineSettings(void)
 							 PGC_USERSET, 0, NULL, NULL, NULL);
 	GP_ORCA_BOOL_GUCS(X)
 #undef X
+
+	/* The numbers, from the same two lists. */
+#define X(var, dflt, lo, hi, doc) \
+	DefineCustomIntVariable("gp." #var, doc, NULL, &var, dflt, lo, hi, \
+							PGC_USERSET, 0, NULL, NULL, NULL);
+	GP_ORCA_INT_GUCS(X)
+#undef X
+
+#define X(var, dflt, lo, hi, doc) \
+	DefineCustomRealVariable("gp." #var, doc, NULL, &var, dflt, lo, hi, \
+							 PGC_USERSET, 0, NULL, NULL, NULL);
+	GP_ORCA_REAL_GUCS(X)
+#undef X
+
+	DefineCustomStringVariable("gp.optimizer_search_strategy_path",
+							   "Sets the search strategy used by the optimizer.",
+							   NULL,
+							   &optimizer_search_strategy_path,
+							   "",
+							   PGC_USERSET, 0, NULL, NULL, NULL);
+
+	/*
+	 * Postmaster context, as in Cloudberry: the allocator is chosen when
+	 * ORCA's memory pool manager is built, and every pool made afterwards
+	 * inherits the choice, so changing it in a session would mean nothing.
+	 */
+	DefineCustomBoolVariable("gp.optimizer_use_gpdb_allocators",
+							 "Have the optimizer allocate through PostgreSQL memory contexts.",
+							 NULL,
+							 &optimizer_use_gpdb_allocators,
+							 true,
+							 PGC_POSTMASTER, 0, NULL, NULL, NULL);
 
 	DefineCustomEnumVariable("gp.optimizer_minidump",
 							 "Generate optimizer minidump.",

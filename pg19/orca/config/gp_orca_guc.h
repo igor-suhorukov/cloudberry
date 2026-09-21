@@ -64,12 +64,17 @@
 	X(optimizer_enable_bitmapscan, true, "Enable bitmap plans in the optimizer.") \
 	X(optimizer_enable_broadcast_nestloop_outer_child, true, "Enable nested loops join plans with replicated outer child in the optimizer.") \
 	X(optimizer_enable_constant_expression_evaluation, true, "Enable constant expression evaluation in the optimizer.") \
+	X(optimizer_enable_ctas, true, "Enable CTAS plans in the optimizer.") \
 	X(optimizer_enable_derive_stats_all_groups, false, "Enable stats derivation for all groups after exploration.") \
+	X(optimizer_enable_direct_dispatch, true, "Enable direct dispatch in the optimizer.") \
+	X(optimizer_enable_dml, true, "Enable DML plans in GPORCA.") \
+	X(optimizer_enable_dml_constraints, true, "Support DML with CHECK constraints and NOT NULL constraints.") \
 	X(optimizer_enable_dynamicbitmapscan, true, "Enables the optimizer's use of plans with dynamic bitmap scan.") \
 	X(optimizer_enable_dynamicindexonlyscan, true, "Enables the optimizer's use of plans with dynamic index only scan.") \
 	X(optimizer_enable_dynamicindexscan, true, "Enables the optimizer's use of plans with dynamic index scan.") \
 	X(optimizer_enable_dynamictablescan, true, "Enables the optimizer's use of plans with dynamic table scan.") \
 	X(optimizer_enable_eageragg, false, "Enable Eager Agg transform for pushing aggregate below an innerjoin.") \
+	X(optimizer_enable_foreign_table, true, "Enable foreign tables in Orca.") \
 	X(optimizer_enable_gather_on_segment_for_dml, true, "Enable DML optimization by enforcing a non-master gather in the optimizer.") \
 	X(optimizer_enable_groupagg, true, "Enables GPORCA to use group aggregates.") \
 	X(optimizer_enable_hashagg, true, "Enables GPORCA to use hash aggregates.") \
@@ -78,12 +83,15 @@
 	X(optimizer_enable_indexjoin, true, "Enable index nested loops join plans in the optimizer.") \
 	X(optimizer_enable_indexonlyscan, true, "Enables the optimizer's use of plans with index only scan.") \
 	X(optimizer_enable_indexscan, true, "Enables the optimizer's use of plans with index scan.") \
+	X(optimizer_enable_master_only_queries, false, "Process master only queries via the optimizer.") \
 	X(optimizer_enable_materialize, true, "Enable plans with Materialize operators in the optimizer.") \
 	X(optimizer_enable_mergejoin, true, "Enables the optimizer's support of merge joins.") \
 	X(optimizer_enable_motion_broadcast, true, "Enable plans with Motion Broadcast operators in the optimizer.") \
 	X(optimizer_enable_motion_gather, true, "Enable plans with Motion Gather operators in the optimizer.") \
 	X(optimizer_enable_motion_redistribute, true, "Enable plans with Motion Redistribute operators in the optimizer.") \
 	X(optimizer_enable_motions, true, "Enable plans with Motion operators in the optimizer.") \
+	X(optimizer_enable_motions_masteronly_queries, false, "Enable plans with Motion operators in the optimizer for queries with no distributed tables.") \
+	X(optimizer_enable_multiple_distinct_aggs, false, "Enable plans with multiple distinct aggregates in the optimizer.") \
 	X(optimizer_enable_nljoin, true, "Enable nested loops join plans in the optimizer.") \
 	X(optimizer_enable_orderedagg, true, "Enable ordered aggregate plans.") \
 	X(optimizer_enable_outerjoin_rewrite, true, "Enable outer join to inner join rewrite in the optimizer.") \
@@ -91,8 +99,10 @@
 	X(optimizer_enable_partition_propagation, true, "Enable plans with Partition Propagation operators in the optimizer.") \
 	X(optimizer_enable_partition_selection, true, "Enable plans with Partition Selection operators in the optimizer.") \
 	X(optimizer_enable_push_join_below_union_all, false, "Enable transform of join of union all to union all of joins. May improve the join performance.") \
+	X(optimizer_enable_query_parameter, true, "Enable query parameters in Orca.") \
 	X(optimizer_enable_range_predicate_dpe, false, "Enable range predicates for dynamic partition elimination.") \
 	X(optimizer_enable_redistribute_nestloop_loj_inner_child, true, "Enable nested loops left join plans with redistributed inner child in the optimizer.") \
+	X(optimizer_enable_replicated_table, true, "Enable replicated tables.") \
 	X(optimizer_enable_right_outer_join, true, "Enable Orca to generate plans containing right outer joins.") \
 	X(optimizer_enable_sort, true, "Enable plans with Sort operators in the optimizer.") \
 	X(optimizer_enable_space_pruning, true, "Enable space pruning in the optimizer.") \
@@ -111,6 +121,8 @@
 	X(optimizer_force_split_window_function, false, "Always split the window function.") \
 	X(optimizer_force_three_stage_scalar_dqa, true, "Force optimizer to always pick 3 stage aggregate plan for scalar distinct qualified aggregate.") \
 	X(optimizer_force_window_hash_agg, false, "Enable create window hash agg.") \
+	X(optimizer_metadata_caching, true, "This guc enables the optimizer to cache and reuse metadata.") \
+	X(optimizer_multilevel_partitioning, true, "Enable optimization of queries on multilevel partitioned tables.") \
 	X(optimizer_parallel_union, false, "Enable parallel execution for UNION/UNION ALL queries.") \
 	X(optimizer_penalize_skew, true, "Penalize operators with skewed hash redistribute below it.") \
 	X(optimizer_print_expression_properties, false, "Print expression properties.") \
@@ -138,6 +150,68 @@
 #define X(var, dflt, doc)	extern PGDLLIMPORT bool var;
 GP_ORCA_BOOL_GUCS(X)
 #undef X
+
+/*
+ * The numbers, and the one string.
+ *
+ * These are the settings that configure the optimizer's *context* -- the cost
+ * model's factors, the search strategy, the size of the metadata cache, the
+ * thresholds at which a transform stops being tried -- rather than switching a
+ * rule on or off.  CConfigParamMapping does not see any of them: it turns
+ * settings into trace flags, and none of these is a flag.  COptTasks reads
+ * them, once per query, when it builds the COptimizerConfig.
+ *
+ * That is why they arrive later than the booleans above, and it is worth
+ * recording: "ORCA's settings" is two surfaces, not one.  Each row's default
+ * and bounds are Cloudberry's, read off guc_gp.c.
+ */
+#define GP_ORCA_INT_GUCS(X) \
+	X(optimizer_array_expansion_threshold, 20, 0, INT_MAX, "Item limit for expansion of arrays in WHERE clause for constraint derivation.") \
+	X(optimizer_cte_inlining_bound, 0, 0, INT_MAX, "Set the CTE inlining cutoff.") \
+	X(optimizer_join_arity_for_associativity_commutativity, 18, 0, INT_MAX, "Maximum number of children n-ary-join have without disabling commutativity and associativity transform.") \
+	X(optimizer_join_order_threshold, 10, 0, 12, "Maximum number of join children to use dynamic programming based join ordering algorithm.") \
+	X(optimizer_mdcache_size, 16384, 0, INT_MAX, "Sets the size of MDCache.") \
+	X(optimizer_penalize_broadcast_threshold, 100000, 0, INT_MAX, "Maximum number of rows of a relation that can be broadcasted without penalty. A value of 0 disables.") \
+	X(optimizer_plan_id, 0, 0, INT_MAX, "Choose a plan alternative.") \
+	X(optimizer_push_group_by_below_setop_threshold, 10, 0, INT_MAX, "Maximum number of children setops have to consider pushing group bys below it.") \
+	X(optimizer_samples_number, 1000, 1, INT_MAX, "Set the number of plan samples.") \
+	X(optimizer_segments, 0, 0, INT_MAX, "Number of segments to be considered by the optimizer during costing, or 0 to take the actual number of segments.") \
+	X(optimizer_skew_factor, 0, 0, 100, "Coefficient of skew ratio computed from sample statistics. 0 turns skew computation off; 1 to 100 multiplies the ratio used for costing.") \
+	X(optimizer_xform_bind_threshold, 0, 0, INT_MAX, "Maximum number bindings per xform per group expression. A value of 0 disables.")
+
+#define X(var, dflt, lo, hi, doc)	extern PGDLLIMPORT int var;
+GP_ORCA_INT_GUCS(X)
+#undef X
+
+#define GP_ORCA_REAL_GUCS(X) \
+	X(optimizer_cost_threshold, 0.0, 0.0, INT_MAX, "Set the threshold for plan sampling relative to the cost of best plan; 0.0 means unbounded.") \
+	X(optimizer_damping_factor_filter, 0.75, 0.0, 1.0, "Select predicate damping factor in optimizer; 1.0 means no damping.") \
+	X(optimizer_damping_factor_groupby, 0.75, 0.0, 1.0, "Groupby operator damping factor in optimizer; 1.0 means no damping.") \
+	X(optimizer_damping_factor_join, 0.0, 0.0, 1.0, "Join predicate damping factor in optimizer; 1.0 means no damping, 0.0 means square root method.") \
+	X(optimizer_nestloop_factor, 1024.0, 1.0, DBL_MAX, "Set the nestloop join cost factor in the optimizer.") \
+	X(optimizer_sort_factor, 1.0, 0.0, DBL_MAX, "Set the sort cost factor in the optimizer; 1.0 is the default cost, above is more costly, below is less.") \
+	X(optimizer_spilling_mem_threshold, 0.0, 0.0, DBL_MAX, "Set the optimizer factor for threshold of spilling to memory; 0.0 means unbounded.")
+
+#define X(var, dflt, lo, hi, doc)	extern PGDLLIMPORT double var;
+GP_ORCA_REAL_GUCS(X)
+#undef X
+
+/*
+ * The search strategy, as a path to an XML file describing it.  Empty means
+ * ORCA's own default strategies, which is what every installation that has not
+ * been tuned by hand uses.
+ */
+extern PGDLLIMPORT char *optimizer_search_strategy_path;
+
+/*
+ * Whether ORCA allocates through PostgreSQL memory contexts.
+ *
+ * It is PGC_POSTMASTER in Cloudberry and stays so here, because the allocator
+ * is chosen when ORCA's memory pool manager is built and every pool made after
+ * that inherits the choice.  gp_orca is in shared_preload_libraries, so a
+ * postmaster-context custom variable is one it may define.
+ */
+extern PGDLLIMPORT bool optimizer_use_gpdb_allocators;
 
 /*
  * The four that are not booleans.
