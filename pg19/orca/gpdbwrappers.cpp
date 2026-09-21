@@ -116,6 +116,9 @@ extern "C" {
 /* An identity column's next value, as ORCA carries it; see NextValueCall. */
 #include "cb_nextvalue.h"
 
+/* PostGIS's index support function; see IsPostgisIndexSupport. */
+#include "gp_orca_postgis.h"
+
 /*
  * Left out of Cloudberry's list:
  *
@@ -2594,6 +2597,18 @@ gpdb::NextValueFromCall(const FuncExpr *call)
 	}
 	GP_WRAP_END;
 	return nullptr;
+}
+
+bool
+gpdb::IsPostgisIndexSupport(Oid supportfn)
+{
+	GP_WRAP_START;
+	{
+		/* catalog tables: pg_proc */
+		return GpOrcaIsPostgisIndexSupport(supportfn);
+	}
+	GP_WRAP_END;
+	return false;
 }
 
 int

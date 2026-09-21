@@ -49,6 +49,10 @@
  *	 * transformGroupedWindows() is Cloudberry's, with PostgreSQL 19's
  *	   IncrementVarSublevelsUp walker under it, which is static there.
  *
+ *	 * PostGIS's spatial predicates are given, before ORCA sees them, the
+ *	   index conditions PostGIS's support function would give the planner,
+ *	   so that ORCA can plan them rather than refuse them (postgis.c).
+ *
  *	 * No ShareInputScan post-processing: a CTE becomes PostgreSQL's own
  *	   CteScan and initplan, which need none (see the translator's
  *	   TranslateDXLSequence).  No remove_subquery_in_RTEs, which exists to make
@@ -81,6 +85,7 @@
 #include "cb_dynamicscan.h"
 #include "gp_orca_api.h"
 #include "gp_orca_guc.h"
+#include "gp_orca_postgis.h"
 #include "optimizer/orca.h"
 #include "optimizer/walkers.h"
 
@@ -213,8 +218,17 @@ check_support_functions_walker(Node *node, support_functions_check_context *cont
 		{
 			procform = (Form_pg_proc) GETSTRUCT(proctup);
 			has_support = OidIsValid(procform->prosupport);
-			/* Skip pg_catalog namespace support functions - they are safe */
-			if (has_support && procform->pronamespace != PG_CATALOG_NAMESPACE)
+			/*
+			 * Skip pg_catalog namespace support functions - they are safe.
+			 *
+			 * So is PostGIS's, which the port lets ORCA plan (postgis.c).
+			 * What this check guards against is a support function that
+			 * reads the range table while constants are folded; PostGIS's
+			 * answers that request only for ST_OrderingEquals, and reads
+			 * nothing but the call's own arguments to do it.
+			 */
+			if (has_support && procform->pronamespace != PG_CATALOG_NAMESPACE &&
+				!GpOrcaIsPostgisIndexSupport(procform->prosupport))
 			{
 				elog(DEBUG1, "Found %s with non-pg_catalog prosupport function, falling back to standard planner", exprtype);
 				ReleaseSysCache(proctup);
@@ -993,6 +1007,29 @@ optimize_query(Query *parse, int cursorOptions, ParamListInfo boundParams,
 	 */
 	pqueryCopy = (Query *) fold_constants_mutator((Node *) pqueryCopy, root);
 	root->parse = parse;
+
+	/*
+	 * PostGIS's indexable functions: the rewrite in front of ORCA, which
+	 * decision 1 asks for (postgis.c).  After folding, because folding
+	 * inlines the SQL-language wrappers PostGIS has over its C functions,
+	 * and a call that only appears then is one the planner would see too.
+	 *
+	 * Switched off, such a query is refused here, as Cloudberry's translator
+	 * refuses every extension function with a support function; the
+	 * translator itself no longer refuses PostGIS's.
+	 */
+	if (!gp_optimizer_postgis_rewrite)
+	{
+		if (GpOrcaQueryCallsPostgisIndexable(pqueryCopy))
+		{
+			failure->message = pstrdup("Falling back to Postgres-based planner because "
+									   "GPORCA does not support the following feature: "
+									   "extension functions with prosupport unsupported");
+			return NULL;
+		}
+	}
+	else
+		GpOrcaPostgisRewrite(pqueryCopy);
 
 	/*
 	 * If any Query in the tree mixes window functions and aggregates, we need to

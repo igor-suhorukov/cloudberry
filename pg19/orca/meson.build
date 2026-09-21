@@ -185,6 +185,7 @@ orca_transl_sources = files(
   'orca.c',
   'orca_api.cpp',
   'orca_probe.cpp',
+  'postgis.c',
 ) + orca_translate_sources + orca_compat_sources
 
 ###############################################################################

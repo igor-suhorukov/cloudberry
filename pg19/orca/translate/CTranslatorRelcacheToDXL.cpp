@@ -1532,9 +1532,19 @@ CTranslatorRelcacheToDXL::LookupFuncProps(
 		  CBDB_FIXME:
 		  Check if function is NOT in pg_catalog namespace
 		  Functions outside pg_catalog are likely extension functions that unsupported yet.
+
+		  Not in Cloudberry: PostGIS's support function is accepted.  What it
+		  gives a plan -- the bounding-box conditions that let a spatial
+		  predicate use an index -- the rewrite in front of ORCA has put into
+		  the query already, by asking it (postgis.c); its selectivity
+		  estimate is one ORCA has no use for, as for every predicate; and
+		  its one simplification was made when constants were folded.  With
+		  the rewrite switched off, orca.c refuses such a query before it
+		  gets here, so this is not where that is decided.
 		*/
 		Oid func_namespace = gpdb::FuncNamespace(func_oid);
-		if (func_namespace != PG_CATALOG_NAMESPACE)
+		if (func_namespace != PG_CATALOG_NAMESPACE &&
+			!gpdb::IsPostgisIndexSupport(prosupport))
 		{
 			GPOS_RAISE(gpdxl::ExmaDXL, gpdxl::ExmiQuery2DXLUnsupportedFeature,
 					   GPOS_WSZ_LIT("extension functions with prosupport unsupported"));

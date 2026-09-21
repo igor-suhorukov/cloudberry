@@ -67,6 +67,7 @@
 #include "cb_dynamicscan.h"
 #include "gp_orca_api.h"
 #include "gp_orca_planner.h"
+#include "gp_orca_postgis.h"
 #include "optimizer/orca.h"
 
 /* gp.optimizer, and gp.optimizer_trace_fallback. */
@@ -387,6 +388,24 @@ GpOrcaInstallPlannerHook(void)
 							 NULL,
 							 &gp_optimizer_trace_fallback,
 							 false,
+							 PGC_USERSET,
+							 0,
+							 NULL, NULL, NULL);
+
+	/*
+	 * The port's own, not one of Cloudberry's: whether PostGIS's spatial
+	 * predicates are planned by ORCA, with the index conditions its support
+	 * function gives (postgis.c), or refused, as Cloudberry refuses every
+	 * extension function with a support function.
+	 */
+	DefineCustomBoolVariable("gp.optimizer_postgis_rewrite",
+							 "Plan PostGIS's indexable functions with ORCA.",
+							 "Before ORCA is called, each such call gains the "
+							 "index conditions PostGIS's support function "
+							 "gives.  When off, a query calling one is "
+							 "planned by PostgreSQL instead.",
+							 &gp_optimizer_postgis_rewrite,
+							 true,
 							 PGC_USERSET,
 							 0,
 							 NULL, NULL, NULL);

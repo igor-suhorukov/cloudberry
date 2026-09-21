@@ -826,6 +826,12 @@ FuncExpr *NextValueCall(const NextValueExpr *next_value);
 bool IsNextValueFunc(Oid funcid);
 NextValueExpr *NextValueFromCall(const FuncExpr *call);
 
+// Is a support function PostGIS's index support function, which the
+// translator accepts because the rewrite in front of ORCA has done its work?
+// Not in Cloudberry's layer, whose translator refuses every extension
+// function with a support function; see postgis.c.
+bool IsPostgisIndexSupport(Oid supportfn);
+
 // get the OID of base elementtype fora given typid
 Oid GetBaseType(Oid typid);
 
