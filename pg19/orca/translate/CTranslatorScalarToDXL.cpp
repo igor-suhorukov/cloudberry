@@ -18,8 +18,10 @@
 // under the License.
 //
 //	Ported from github/cloudberry/src/backend/gpopt/translate/CTranslatorScalarToDXL.cpp,
-//	unchanged but for the include paths.  Cloudberry's notice for
-//	the original follows, as the Apache License requires it to.
+//	and changed for PostgreSQL 19: past the include paths, a comment beside
+//	each change, or beside what replaced it, says what and why.
+//	Cloudberry's notice for the original follows, as the Apache License
+//	requires it to.
 //
 //---------------------------------------------------------------------------
 //---------------------------------------------------------------------------
@@ -180,11 +182,11 @@ CTranslatorScalarToDXL::CreateSubqueryTranslator(
 				   GPOS_WSZ_LIT("Subquery in a stand-alone expression"));
 	}
 
-	// Subqueries need CTranslatorQueryToDXL, which arrives with the first
-	// group of operators; until then this refuses, and the query falls back.
-	// Cloudberry's body is in github/cloudberry/src/backend/gpopt/translate/
-	// CTranslatorScalarToDXL.cpp, unchanged, to be restored with it.
-	GP_UNPORTED("subqueries");
+	return GPOS_NEW(m_context->m_mp)
+		CTranslatorQueryToDXL(m_context, m_md_accessor, var_colid_mapping,
+							  subquery, m_query_level + 1,
+							  false,  // is_top_query_dml
+							  m_cte_entries);
 }
 
 CDXLNode *
@@ -1988,13 +1990,76 @@ CDXLNode *
 CTranslatorScalarToDXL::CreateQuantifiedSubqueryFromSublink(
 	const SubLink *sublink, const CMappingVarColId *var_colid_mapping)
 {
-	GPOS_ASSERT(nullptr != sublink);
+	CAutoP<CTranslatorQueryToDXL> query_to_dxl_translator;
+	query_to_dxl_translator = CreateSubqueryTranslator(
+		(Query *) sublink->subselect, var_colid_mapping);
 
-	// Subqueries need CTranslatorQueryToDXL, which arrives with the first
-	// group of operators; until then this refuses, and the query falls back.
-	// Cloudberry's body is in github/cloudberry/src/backend/gpopt/translate/
-	// CTranslatorScalarToDXL.cpp, unchanged, to be restored with it.
-	GP_UNPORTED("subqueries");
+	CDXLNode *inner_dxlnode =
+		query_to_dxl_translator->TranslateSelectQueryToDXL();
+
+	CDXLNodeArray *query_output_dxlnode_array =
+		query_to_dxl_translator->GetQueryOutputCols();
+	CDXLNodeArray *cte_dxlnode_array = query_to_dxl_translator->GetCTEs();
+	CUtils::AddRefAppend(m_cte_producers, cte_dxlnode_array);
+
+	if (1 != query_output_dxlnode_array->Size())
+	{
+		GPOS_RAISE(gpdxl::ExmaDXL, gpdxl::ExmiQuery2DXLUnsupportedFeature,
+				   GPOS_WSZ_LIT("Non-Scalar Subquery"));
+	}
+
+	CDXLNode *dxl_sc_ident = (*query_output_dxlnode_array)[0];
+	GPOS_ASSERT(nullptr != dxl_sc_ident);
+
+	// get dxl scalar identifier
+	CDXLScalarIdent *scalar_ident =
+		dynamic_cast<CDXLScalarIdent *>(dxl_sc_ident->GetOperator());
+
+	// get the dxl column reference
+	const CDXLColRef *dxl_colref = scalar_ident->GetDXLColRef();
+	const ULONG colid = dxl_colref->Id();
+
+	// get the test expression
+	GPOS_ASSERT(IsA(sublink->testexpr, OpExpr));
+	OpExpr *op_expr = (OpExpr *) sublink->testexpr;
+
+	IMDId *mdid = GPOS_NEW(m_mp) CMDIdGPDB(IMDId::EmdidGeneral, op_expr->opno);
+
+	// get operator name
+	const CWStringConst *str = GetDXLArrayCmpType(mdid);
+
+	// translate left hand side of the expression
+	GPOS_ASSERT(nullptr != op_expr->args);
+	Expr *LHS_expr = (Expr *) gpdb::ListNth(op_expr->args, 0);
+
+	CDXLNode *outer_dxlnode = TranslateScalarToDXL(LHS_expr, var_colid_mapping);
+
+	CDXLNode *dxlnode = nullptr;
+	CDXLScalar *subquery = nullptr;
+
+	GPOS_ASSERT(ALL_SUBLINK == sublink->subLinkType ||
+				ANY_SUBLINK == sublink->subLinkType);
+	if (ALL_SUBLINK == sublink->subLinkType)
+	{
+		subquery = GPOS_NEW(m_mp) CDXLScalarSubqueryAll(
+			m_mp, mdid, GPOS_NEW(m_mp) CMDName(m_mp, str), colid);
+	}
+	else
+	{
+		subquery = GPOS_NEW(m_mp) CDXLScalarSubqueryAny(
+			m_mp, mdid, GPOS_NEW(m_mp) CMDName(m_mp, str), colid);
+	}
+
+	dxlnode = GPOS_NEW(m_mp) CDXLNode(m_mp, subquery);
+
+	dxlnode->AddChild(outer_dxlnode);
+	dxlnode->AddChild(inner_dxlnode);
+
+#ifdef GPOS_DEBUG
+	dxlnode->GetOperator()->AssertValid(dxlnode, false /* fValidateChildren */);
+#endif
+
+	return dxlnode;
 }
 
 //---------------------------------------------------------------------------
@@ -2008,13 +2073,38 @@ CDXLNode *
 CTranslatorScalarToDXL::CreateScalarSubqueryFromSublink(
 	const SubLink *sublink, const CMappingVarColId *var_colid_mapping)
 {
-	GPOS_ASSERT(nullptr != sublink);
+	Query *subselect = (Query *) sublink->subselect;
+	CAutoP<CTranslatorQueryToDXL> query_to_dxl_translator;
+	query_to_dxl_translator =
+		CreateSubqueryTranslator(subselect, var_colid_mapping);
+	CDXLNode *subquery_dxlnode =
+		query_to_dxl_translator->TranslateSelectQueryToDXL();
 
-	// Subqueries need CTranslatorQueryToDXL, which arrives with the first
-	// group of operators; until then this refuses, and the query falls back.
-	// Cloudberry's body is in github/cloudberry/src/backend/gpopt/translate/
-	// CTranslatorScalarToDXL.cpp, unchanged, to be restored with it.
-	GP_UNPORTED("subqueries");
+	CDXLNodeArray *query_output_dxlnode_array =
+		query_to_dxl_translator->GetQueryOutputCols();
+
+	GPOS_ASSERT(1 == query_output_dxlnode_array->Size());
+
+	CDXLNodeArray *cte_dxlnode_array = query_to_dxl_translator->GetCTEs();
+	CUtils::AddRefAppend(m_cte_producers, cte_dxlnode_array);
+
+	// get dxl scalar identifier
+	CDXLNode *dxl_sc_ident = (*query_output_dxlnode_array)[0];
+	GPOS_ASSERT(nullptr != dxl_sc_ident);
+
+	CDXLScalarIdent *scalar_ident =
+		CDXLScalarIdent::Cast(dxl_sc_ident->GetOperator());
+
+	// get the dxl column reference
+	const CDXLColRef *dxl_colref = scalar_ident->GetDXLColRef();
+	const ULONG colid = dxl_colref->Id();
+
+	CDXLNode *dxlnode = GPOS_NEW(m_mp)
+		CDXLNode(m_mp, GPOS_NEW(m_mp) CDXLScalarSubquery(m_mp, colid));
+
+	dxlnode->AddChild(subquery_dxlnode);
+
+	return dxlnode;
 }
 
 //---------------------------------------------------------------------------
@@ -2205,12 +2295,20 @@ CTranslatorScalarToDXL::CreateExistSubqueryFromSublink(
 	const SubLink *sublink, const CMappingVarColId *var_colid_mapping)
 {
 	GPOS_ASSERT(nullptr != sublink);
+	CAutoP<CTranslatorQueryToDXL> query_to_dxl_translator;
+	query_to_dxl_translator = CreateSubqueryTranslator(
+		(Query *) sublink->subselect, var_colid_mapping);
+	CDXLNode *root_dxlnode =
+		query_to_dxl_translator->TranslateSelectQueryToDXL();
 
-	// Subqueries need CTranslatorQueryToDXL, which arrives with the first
-	// group of operators; until then this refuses, and the query falls back.
-	// Cloudberry's body is in github/cloudberry/src/backend/gpopt/translate/
-	// CTranslatorScalarToDXL.cpp, unchanged, to be restored with it.
-	GP_UNPORTED("subqueries");
+	CDXLNodeArray *cte_dxlnode_array = query_to_dxl_translator->GetCTEs();
+	CUtils::AddRefAppend(m_cte_producers, cte_dxlnode_array);
+
+	CDXLNode *dxlnode = GPOS_NEW(m_mp)
+		CDXLNode(m_mp, GPOS_NEW(m_mp) CDXLScalarSubqueryExists(m_mp));
+	dxlnode->AddChild(root_dxlnode);
+
+	return dxlnode;
 }
 
 //---------------------------------------------------------------------------

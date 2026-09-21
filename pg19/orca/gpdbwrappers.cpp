@@ -69,6 +69,7 @@ extern "C" {
 #include "access/genam.h"
 #include "access/parallel.h"
 #include "catalog/pg_aggregate.h"
+#include "catalog/pg_am.h"
 #include "catalog/pg_inherits.h"
 #include "catalog/pg_statistic_ext_data.h"
 #include "commands/defrem.h"
@@ -1211,15 +1212,46 @@ gpdb::FreeHeapTuple(HeapTuple htup)
 	GP_WRAP_END;
 }
 
+//---------------------------------------------------------------------------
+//	The default distribution opfamily and opclass of a type.
+//
+//	Cloudberry's cdb_default_distribution_opfamily_for_type() and
+//	cdb_default_distribution_opclass_for_type(), from
+//	src/backend/cdb/cdbhash.c:366-403.  They were refused here as M2, and
+//	are not: ORCA asks for the family of every type it is told about --
+//	whether the type could be a distribution key is part of the type's
+//	metadata (CTranslatorRelcacheToDXL::RetrieveType) -- so without them no
+//	query that names a type could be planned, on one node or on many.  Nor
+//	do they need cdbhash: a type can be a distribution key when the type
+//	cache finds a hash family, a hash function and an equality operator for
+//	it, and then the answer is the hash AM's default.  gp_core runs the same
+//	test for DISTRIBUTED BY, as distribution_opclass_for_type() in
+//	gp_policy.c.
+//---------------------------------------------------------------------------
+static bool
+TypeIsDistributable(TypeCacheEntry *tcache)
+{
+	return OidIsValid(tcache->hash_opf) && OidIsValid(tcache->hash_proc) &&
+		   OidIsValid(tcache->eq_opr);
+}
+
 Oid
 gpdb::GetDefaultDistributionOpclassForType(Oid typid)
 {
-	// M2, but only to export it: gp_core already has this body, as
-	// distribution_opclass_for_type() in gp_policy.c, because
-	// DISTRIBUTED BY has to resolve an opclass when it writes the
-	// label.  It needs no cdbhash -- it is GetDefaultOpClass() for
-	// the hash AM after three type-cache checks.
-	GP_UNPORTED("the default distribution opclass for a type");
+	GP_WRAP_START;
+	{
+		TypeCacheEntry *tcache =
+			lookup_type_cache(typid, TYPECACHE_HASH_OPFAMILY |
+										 TYPECACHE_HASH_PROC |
+										 TYPECACHE_EQ_OPR);
+
+		if (!TypeIsDistributable(tcache))
+			return InvalidOid;
+
+		return GetDefaultOpClass(typid, HASH_AM_OID);
+	}
+	GP_WRAP_END;
+	return InvalidOid;
 }
 
 Oid
@@ -1232,9 +1264,20 @@ gpdb::GetColumnDefOpclassForType(List *opclassName, Oid typid)
 Oid
 gpdb::GetDefaultDistributionOpfamilyForType(Oid typid)
 {
-	// M2, with GetDefaultDistributionOpclassForType above: the
-	// opfamily is the opclass's family.
-	GP_UNPORTED("the default distribution opfamily for a type");
+	GP_WRAP_START;
+	{
+		TypeCacheEntry *tcache =
+			lookup_type_cache(typid, TYPECACHE_HASH_OPFAMILY |
+										 TYPECACHE_HASH_PROC |
+										 TYPECACHE_EQ_OPR);
+
+		if (!TypeIsDistributable(tcache))
+			return InvalidOid;
+
+		return tcache->hash_opf;
+	}
+	GP_WRAP_END;
+	return InvalidOid;
 }
 
 Oid
@@ -2722,6 +2765,17 @@ gpdb::ExpressionReturnsSet(Node *clause)
 	GP_WRAP_END;
 }
 
+bool
+gpdb::ContainsVolatileFunctions(Node *node)
+{
+	GP_WRAP_START;
+	{
+		return contain_volatile_functions(node);
+	}
+	GP_WRAP_END;
+	return true;
+}
+
 List *
 gpdb::GetRelChildIndexes(Oid reloid)
 {
@@ -2809,20 +2863,12 @@ gpdb::SplitPathtargetAtSrfs(PlannerInfo *root, PathTarget *target,
 	// Cloudberry changed split_pathtarget_at_srfs to accept a null root --
 	// it skips set_pathtarget_cost_width then -- and its one caller, in
 	// CTranslatorDXLToPlStmt, passes exactly that.  PostgreSQL 19's
-	// dereferences root, so passing it through would take the backend down
-	// on the first set-returning function in a target list that ORCA plans.
-	// It is refused here until the translator's caller stops needing a null
-	// root, or the compat layer carries the function with Cloudberry's guard;
-	// either way it is a fallback, not a crash.
-	if (root == nullptr)
-	{
-		GP_UNPORTED("set-returning functions in a target list");
-	}
-
+	// dereferences root, so the compat layer carries PostgreSQL 19's copy
+	// with Cloudberry's guard, under a name of its own (compat/tlist.c).
 	GP_WRAP_START;
 	{
-		split_pathtarget_at_srfs(root, target, input_target, targets,
-								 targets_contain_srfs);
+		cb_split_pathtarget_at_srfs(root, target, input_target, targets,
+									targets_contain_srfs);
 	}
 	GP_WRAP_END;
 }

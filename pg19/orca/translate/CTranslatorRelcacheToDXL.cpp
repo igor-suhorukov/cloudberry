@@ -18,8 +18,10 @@
 // under the License.
 //
 //	Ported from github/cloudberry/src/backend/gpopt/translate/CTranslatorRelcacheToDXL.cpp,
-//	unchanged but for the include paths.  Cloudberry's notice for
-//	the original follows, as the Apache License requires it to.
+//	and changed for PostgreSQL 19: past the include paths, a comment beside
+//	each change, or beside what replaced it, says what and why.
+//	Cloudberry's notice for the original follows, as the Apache License
+//	requires it to.
 //
 //---------------------------------------------------------------------------
 //---------------------------------------------------------------------------

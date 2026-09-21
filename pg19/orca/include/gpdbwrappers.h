@@ -278,6 +278,9 @@ Size DatumSize(Datum value, bool type_by_val, int type_len);
 
 bool ExpressionReturnsSet(Node *clause);
 
+// does the expression call a volatile function?
+bool ContainsVolatileFunctions(Node *node);
+
 // expression type
 Oid ExprType(Node *expr);
 

@@ -27,12 +27,13 @@
  * gathers everything first, so the decision between Route A alone and also
  * building Route B is to be made at M7 from how often this happens and why.
  *
- * THAT IS WHY THE COUNTERS ARE HERE BEFORE THE TRANSLATOR IS.  Decision 1
- * asks for them "from the first milestone, on real workloads", and numbers
- * that only start being collected once everything works would not answer the
- * question they exist for.  At M1 every query falls back for one reason --
- * there is no translator yet -- and the machinery that will report the
- * interesting reasons is in place and tested around it.
+ * THAT IS WHY THE COUNTERS CAME BEFORE THE TRANSLATOR DID.  Decision 1 asks
+ * for them "from the first milestone, on real workloads", and numbers that
+ * only start being collected once everything works would not answer the
+ * question they exist for.  Until the translator's first group of operators
+ * landed every query fell back for one reason, that there was no translator;
+ * now ORCA is asked, and a fallback is counted as ORCA declining the query or
+ * as ORCA failing on it, with ORCA's own reason in the trace.
  *
  * WHAT COULD NOT BE PORTED AS WRITTEN.  Cloudberry gates ORCA on two cursor
  * option bits (planner.c:399-403): CURSOR_OPT_PARALLEL_RETRIEVE, which it
@@ -50,7 +51,12 @@
  */
 #include "postgres.h"
 
+#include "commands/explain.h"
+#include "commands/explain_format.h"
+#include "commands/explain_state.h"
 #include "miscadmin.h"
+#include "nodes/makefuncs.h"
+#include "nodes/value.h"
 #include "optimizer/optimizer.h"
 #include "optimizer/planner.h"
 #include "storage/dsm_registry.h"
@@ -59,6 +65,7 @@
 #include "cb_compat.h"
 #include "gp_orca_api.h"
 #include "gp_orca_planner.h"
+#include "optimizer/orca.h"
 
 /* gp.optimizer, and gp.optimizer_trace_fallback. */
 bool		gp_optimizer = true;
@@ -83,6 +90,31 @@ typedef struct GpOrcaCounters
 
 static GpOrcaCounters *counters = NULL;
 static planner_hook_type prev_planner_hook = NULL;
+static explain_per_plan_hook_type prev_explain_per_plan_hook = NULL;
+
+/*
+ * How a plan says ORCA made it: an entry in PlannedStmt.extension_state,
+ * which PostgreSQL 19 provides for exactly this -- one DefElem per extension,
+ * named after it, whose argument survives copyObject(), so the mark stays
+ * with a plan the plan cache keeps.  Cloudberry has PlannedStmt.planGen for
+ * it, which PostgreSQL 19 does not.
+ */
+#define GP_ORCA_PLAN_MARK	"gp_orca"
+
+static bool
+planned_by_orca(PlannedStmt *plannedstmt)
+{
+	ListCell   *lc;
+
+	foreach(lc, plannedstmt->extension_state)
+	{
+		DefElem    *def = lfirst_node(DefElem, lc);
+
+		if (strcmp(def->defname, GP_ORCA_PLAN_MARK) == 0)
+			return true;
+	}
+	return false;
+}
 
 static const struct
 {
@@ -159,22 +191,27 @@ GpOrcaResetCounters(void)
 }
 
 /*
- * Record one fallback, and say so in the log if asked.
+ * Record one fallback, and say so if asked.
  *
- * Cloudberry's optimizer_trace_fallback prints a line per fallback; the port
- * keeps that, because a counter says how often and a log line says which
- * statement.
+ * Cloudberry's optimizer_trace_fallback reports, to the client, each
+ * statement ORCA was asked to plan and did not, with ORCA's reason; the port
+ * keeps that, word for word, because a counter says how often and the
+ * report says which statement and why.  A statement ORCA was not asked about
+ * at all -- gp.optimizer off, a segment, a utility statement -- is counted
+ * and not reported, as Cloudberry does not report it either.
  */
 static void
-record_fallback(GpFallbackReason reason)
+record_fallback(GpFallbackReason reason, const char *detail)
 {
 	counters_attach();
 	pg_atomic_fetch_add_u64(&counters->fallback[reason], 1);
 
-	if (gp_optimizer_trace_fallback)
-		ereport(LOG,
-				(errmsg("ORCA did not plan this statement: %s",
-						fallback_reasons[reason].doc)));
+	if (gp_optimizer_trace_fallback &&
+		(reason == GP_FALLBACK_declined || reason == GP_FALLBACK_error))
+		ereport(INFO,
+				(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+				 errmsg("GPORCA failed to produce a plan, falling back to Postgres-based planner"),
+				 detail ? errdetail("%s", detail) : 0));
 }
 
 /*
@@ -231,24 +268,28 @@ gp_orca_planner(Query *parse, const char *query_string, int cursorOptions,
 				ParamListInfo boundParams, ExplainState *es)
 {
 	PlannedStmt *result = NULL;
-	GpFallbackReason reason = GP_FALLBACK_no_translator;
+	GpFallbackReason reason = GP_FALLBACK_declined;
+	GpOrcaFailure failure = {false, false, NULL};
 
 	if (orca_should_try(parse, cursorOptions, &reason))
 	{
 		/*
-		 * Where ORCA is asked.  It is not asked yet: the translator that
-		 * turns a Query into DXL and DXL back into a PlannedStmt is the next
-		 * thing to be built, and until it exists there is nothing to ask.
-		 * The reason is recorded rather than assumed, so that the day the
-		 * translator lands this counter goes to zero and the interesting ones
-		 * start moving.
+		 * What orcaopt.h says the port decides for itself: no vectorised
+		 * plan, which needs an executor the open-source tree does not have,
+		 * and no parallel one, which decision 2 defers until after M7.
 		 */
-		reason = GP_FALLBACK_no_translator;
+		OptimizerOptions options = {false, false};
+
+		result = optimize_query(parse, cursorOptions, boundParams, &options,
+								&failure);
+		if (result == NULL)
+			reason = failure.unexpected ? GP_FALLBACK_error
+				: GP_FALLBACK_declined;
 	}
 
 	if (result == NULL)
 	{
-		record_fallback(reason);
+		record_fallback(reason, failure.message);
 
 		if (prev_planner_hook)
 			result = prev_planner_hook(parse, query_string, cursorOptions,
@@ -261,9 +302,39 @@ gp_orca_planner(Query *parse, const char *query_string, int cursorOptions,
 	{
 		counters_attach();
 		pg_atomic_fetch_add_u64(&counters->planned, 1);
+
+		result->extension_state =
+			lappend(result->extension_state,
+					makeDefElem(pstrdup(GP_ORCA_PLAN_MARK),
+								(Node *) makeString(pstrdup("GPORCA")), -1));
 	}
 
 	return result;
+}
+
+/*
+ * explain_per_plan_hook: which optimizer made the plan.
+ *
+ * Cloudberry's EXPLAIN ends every text-format plan with this line, and its
+ * expected test output is full of it, so the port prints it the same way and
+ * in the same words.  PostgreSQL 19 lets an extension add to EXPLAIN only
+ * here, after the planning time where Cloudberry prints it before; in the
+ * form its tests read -- no summary -- the line is last either way.
+ */
+static void
+gp_orca_explain_per_plan(PlannedStmt *plannedstmt, IntoClause *into,
+						 ExplainState *es, const char *queryString,
+						 ParamListInfo params, QueryEnvironment *queryEnv)
+{
+	if (prev_explain_per_plan_hook)
+		prev_explain_per_plan_hook(plannedstmt, into, es, queryString,
+								   params, queryEnv);
+
+	if (es->format == EXPLAIN_FORMAT_TEXT)
+		ExplainPropertyText("Optimizer",
+							planned_by_orca(plannedstmt) ?
+							"GPORCA" : "Postgres query optimizer",
+							es);
 }
 
 void
@@ -281,7 +352,7 @@ GpOrcaInstallPlannerHook(void)
 							 NULL, NULL, NULL);
 
 	DefineCustomBoolVariable("gp.optimizer_trace_fallback",
-							 "Log a line for every statement ORCA did not plan.",
+							 "Report each statement ORCA was asked to plan and did not, and why.",
 							 NULL,
 							 &gp_optimizer_trace_fallback,
 							 false,
@@ -291,4 +362,7 @@ GpOrcaInstallPlannerHook(void)
 
 	prev_planner_hook = planner_hook;
 	planner_hook = gp_orca_planner;
+
+	prev_explain_per_plan_hook = explain_per_plan_hook;
+	explain_per_plan_hook = gp_orca_explain_per_plan;
 }

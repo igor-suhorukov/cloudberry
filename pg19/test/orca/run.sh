@@ -233,6 +233,19 @@ is "a column declared COLLATE \"C\" does" \
    "SELECT non_default_collation FROM gp_orca.explain_refusal(
       'SELECT u FROM pts');" "t"
 
+# The walker has one case for thirty-odd expression nodes -- function calls,
+# aggregates, IS NULL -- which reads their collation.  A port that lost that
+# case's body fell through to the one below it, which refuses outright, and
+# every query with a function call or an aggregate in it read as a
+# non-default collation.  Running the translator found it.
+is "a function call and an aggregate over the default collation do not count" \
+   "SELECT non_default_collation FROM gp_orca.explain_refusal(
+      'SELECT upper(t), count(*) FROM pts WHERE t IS NOT NULL GROUP BY 1');" "f"
+
+is "and a function call over COLLATE \"C\" still does" \
+   "SELECT non_default_collation FROM gp_orca.explain_refusal(
+      'SELECT upper(u) FROM pts');" "t"
+
 refused "more than one statement is refused rather than half read" \
         "SELECT gp_orca.explain_refusal('SELECT 1; SELECT 2');" \
         "exactly one statement"
@@ -1106,9 +1119,10 @@ echo "16. planner_hook, and the count of what ORCA would not plan"
 # Decision 1 asks for these counters "from the first milestone, on real
 # workloads": whether to build Route B as well is decided at M7 from how
 # often the fallback fires and why, and numbers that only start when
-# everything works would not answer that.  At M1 the reason is always the
-# same one -- there is no translator yet -- and what is being tested is that
-# the machinery around it reports the truth.
+# everything works would not answer that.  Until the translator's first group
+# of operators the reason was always the same one, that there was no
+# translator; now a query is planned, or declined with ORCA's reason, and
+# what is tested is that the counters tell the two apart.
 
 q "SELECT gp_orca.reset_fallbacks();" > /dev/null
 
@@ -1122,25 +1136,32 @@ is "nothing is counted twice" \
    "SELECT count(*) FROM (SELECT reason FROM gp_orca.fallbacks()
                            GROUP BY reason HAVING count(*) > 1) d;" "0"
 
+is "and there is no reason left that says the translator is missing" \
+   "SELECT count(*) FROM gp_orca.fallbacks() WHERE reason = 'no_translator';" "0"
+
 # The hook is installed, so a statement that reaches the planner is counted.
-# Reading the counter is itself a statement, which is why the check is that
-# it moved rather than that it holds a particular number.
+# Reading the counter is itself a statement, which is why each check is that
+# a counter moved rather than that it holds a particular number.
 q "SELECT gp_orca.reset_fallbacks();" > /dev/null
-before=$(q "SELECT count FROM gp_orca.fallbacks() WHERE reason = 'no_translator';")
+before=$(q "SELECT count FROM gp_orca.fallbacks() WHERE reason = 'planned';")
 q "SELECT 1 FROM es WHERE a = 1;" > /dev/null
-after=$(q "SELECT count FROM gp_orca.fallbacks() WHERE reason = 'no_translator';")
+after=$(q "SELECT count FROM gp_orca.fallbacks() WHERE reason = 'planned';")
 [ "$after" -gt "$before" ] \
-	&& ok "a query that ORCA cannot plan yet is counted, with the reason" \
-	|| notok "a query that ORCA cannot plan yet is counted, with the reason" \
+	&& ok "a query ORCA plans is counted as planned" \
+	|| notok "a query ORCA plans is counted as planned" \
 	         "before [$before], after [$after]"
 
-# Nothing is planned by ORCA yet, and the counter says so rather than being
-# quietly absent.  This is the assertion that has to change when the
-# translator lands.
-is "and nothing has been planned by ORCA" \
-   "SELECT count FROM gp_orca.fallbacks() WHERE reason = 'planned';" "0"
+# A join is T1's, so ORCA looks at it and declines it: counted, with that
+# reason, and planned by PostgreSQL instead.
+before=$(q "SELECT count FROM gp_orca.fallbacks() WHERE reason = 'declined';")
+q "SELECT count(*) FROM es e1 JOIN es e2 USING (a);" > /dev/null
+after=$(q "SELECT count FROM gp_orca.fallbacks() WHERE reason = 'declined';")
+[ "$after" -gt "$before" ] \
+	&& ok "a query ORCA will not plan yet is counted as declined" \
+	|| notok "a query ORCA will not plan yet is counted as declined" \
+	         "before [$before], after [$after]"
 
-# gp.optimizer off is a different reason from "could not", and telling them
+# gp.optimizer off is a different reason from "would not", and telling them
 # apart is the point of counting reasons rather than a single total.
 q "SELECT gp_orca.reset_fallbacks();" > /dev/null
 q "SET gp.optimizer = off; SELECT 1 FROM es WHERE a = 1;" > /dev/null
@@ -1158,23 +1179,23 @@ is "an ordinary query is not counted as a utility statement" \
 # what the first one did.  That is what makes them answer a question about a
 # workload rather than about one connection.
 q "SELECT gp_orca.reset_fallbacks();" > /dev/null
-"$PSQL" -X -q -t -A -d postgres -c "SELECT 1 FROM es WHERE a = 1;" > /dev/null 2>&1
+"$PSQL" -X -q -t -A -d postgres -c "SELECT count(*) FROM es e1 JOIN es e2 USING (a);" > /dev/null 2>&1
 is "and another backend's fallbacks are visible from this one" \
-   "SELECT count > 0 FROM gp_orca.fallbacks() WHERE reason = 'no_translator';" "t"
+   "SELECT count > 0 FROM gp_orca.fallbacks() WHERE reason = 'declined';" "t"
 
 # Resetting is restricted, because one session doing it loses everybody
 # else's numbers.
 is "resetting is not something every user may do" \
    "SELECT has_function_privilege('public', 'gp_orca.reset_fallbacks()', 'execute');" "f"
 
-# The plan still comes out, and is PostgreSQL's.  A hook that counted and
-# then lost the plan would pass every test above.
-is "the fallback still returns a plan, and it runs" \
-   "SELECT count(*) FROM es WHERE a = 1;" "100"
+# The plan still comes out when ORCA declines, and it is PostgreSQL's.  A hook
+# that counted and then lost the plan would pass every test above.
+is "a declined query still gets a plan, and it runs" \
+   "SELECT count(*) FROM es e1 JOIN es e2 USING (a) WHERE e1.a = 1;" "10000"
 
-is "and EXPLAIN shows PostgreSQL's plan for it" \
-   "SELECT count(*) FROM (
-      SELECT * FROM (VALUES (1)) v) t;" "1"
+has "and EXPLAIN says whose plan it is" \
+    "EXPLAIN (COSTS OFF) SELECT count(*) FROM es e1 JOIN es e2 USING (a);" \
+    "Optimizer: Postgres query optimizer"
 
 echo
 echo "17. ORCA's settings, and what they add up to"
@@ -1520,11 +1541,26 @@ f"
 # And a catalog change between them is noticed -- which, given the line
 # above, is what proves the callbacks were registered with something
 # PostgreSQL actually calls, rather than merely accepted.
+#
+# With gp.optimizer off, because ORCA asks the same question before it plans
+# each statement -- that is what the answer is for -- and the probe's own
+# SELECT is a statement ORCA would be asked about, which would take the
+# answer before the probe ran.
 is "and a catalog change between them is noticed" \
-   "SELECT gp_orca.mdcache_needs_reset();
+   "SET gp.optimizer = off;
+    SELECT gp_orca.mdcache_needs_reset();
     CREATE TABLE mdc_probe(a int);
     SELECT gp_orca.mdcache_needs_reset();" "f
 t"
+
+is "and with ORCA asked in between, ORCA is the one told" \
+   "SELECT gp_orca.mdcache_needs_reset();
+    CREATE TABLE mdc_probe2(a int);
+    SELECT count(*) FROM mdc_probe2;
+    SET gp.optimizer = off;
+    SELECT gp_orca.mdcache_needs_reset();" "f
+0
+f"
 
 # --- the wrapper that gained an answer with the "gp" label -------------------
 #
@@ -1950,6 +1986,305 @@ is "one backend refuses nine times in a row and then answers" \
     SELECT md_refusals()
            || ' ' || substring(gp_orca.md_dxl('relation', 'md_plain'::regclass)
                                from 'Name=\"[^\"]*\"');" '9 Name="md_plain"'
+
+echo
+echo "21. the queries of one table, planned by ORCA"
+
+# T0 of the translator: Query to DXL, the optimizer's task and DXL to
+# PlannedStmt together, for TableScan, Result, Limit, Sort, Agg, ValuesScan
+# and Materialize.  DXL to PlannedStmt refuses every other operator, each
+# body naming the group that brings it back, so a query either gets an ORCA
+# plan made of those or falls back and says why.
+#
+# Most checks here are the same two ways: the query's answer under ORCA and
+# under the planner, and that ORCA was the one that planned it -- an ORCA
+# plan that returned the planner's rows because it quietly fell back would
+# pass the first half alone.
+
+q "CREATE TABLE t0 (a int, b text, c numeric, d date);
+   INSERT INTO t0 SELECT i, 'v' || (i % 10), i * 1.5, date '2020-01-01' + i
+     FROM generate_series(1, 1000) i;
+   INSERT INTO t0 VALUES (NULL, NULL, NULL, NULL);
+   ANALYZE t0;" > /dev/null
+
+# q2 <setup> <query>: the query's output, after the setup, in one session.
+q2() { "$PSQL" -X -q -t -A -d postgres -c "$1" -c "$2" 2>&1; }
+
+# same <name> <query> [setup]: ORCA planned it, and answered as the planner does.
+same() {
+	local setup="${3:-SELECT}" orca pg plan
+	plan=$(q2 "$setup" "EXPLAIN (COSTS OFF) $2")
+	case "$plan" in
+		*"Optimizer: GPORCA"*) ;;
+		*) notok "$1" "not planned by ORCA: $(printf '%s' "$plan" | tail -3 | tr '\n' '|')"; return ;;
+	esac
+	orca=$(q2 "$setup" "$2")
+	pg=$(q2 "$setup; SET gp.optimizer = off" "$2")
+	[ "$orca" = "$pg" ] && ok "$1" || notok "$1" "orca [$orca], planner [$pg]"
+}
+
+# declined <name> <query> <reason> [setup]: ORCA declined it, for that
+# reason, and the planner's plan answers.
+declined() {
+	local setup="${4:-SELECT}" got pg
+	got=$(q2 "$setup; SET gp.optimizer_trace_fallback = on" "$2")
+	case "$got" in
+		*"GPORCA failed to produce a plan"*"$3"*) ;;
+		*) notok "$1" "expected a fallback for [$3], got [$(printf '%s' "$got" | head -3 | tr '\n' '|')]"; return ;;
+	esac
+	got=$(printf '%s\n' "$got" | grep -v 'GPORCA failed\|^DETAIL:')
+	pg=$(q2 "$setup; SET gp.optimizer = off" "$2")
+	[ "$got" = "$pg" ] && ok "$1" || notok "$1" "orca [$got], planner [$pg]"
+}
+
+# --- the operators ------------------------------------------------------------
+
+same "a scan with a filter" \
+     "SELECT * FROM t0 WHERE a < 3 ORDER BY a"
+
+has "and EXPLAIN says ORCA made the plan, as Cloudberry's does" \
+    "EXPLAIN (COSTS OFF) SELECT * FROM t0 WHERE a < 3" "Optimizer: GPORCA"
+
+same "a sort and a limit" \
+     "SELECT a, b FROM t0 ORDER BY a DESC NULLS LAST LIMIT 3"
+
+same "an offset" \
+     "SELECT a FROM t0 ORDER BY a LIMIT 3 OFFSET 2"
+
+same "a hash aggregate" \
+     "SELECT b, count(*), sum(c) FROM t0 GROUP BY b ORDER BY b"
+
+same "a plain aggregate, several of them sharing one scan" \
+     "SELECT count(*), min(a), max(a), avg(c), sum(c) FROM t0"
+
+same "values" \
+     "SELECT * FROM (VALUES (1, 'x'), (2, 'y'), (NULL, 'z')) v(i, s) ORDER BY 1"
+
+same "a query that reads no table" \
+     "SELECT 1 + 1, 'a' || 'b'"
+
+same "set-returning functions in the target list, split with no planner state" \
+     "SELECT a, generate_series(1, a) FROM t0 WHERE a < 3 ORDER BY 1, 2"
+
+# WHERE false becomes a Result with a one-time filter and no child.  PostgreSQL
+# 19's Result says what it stands in for, and EXPLAIN asserts that a Result it
+# takes for a gating one has a child: left at zero, the field made EXPLAIN of
+# this query take the backend down.
+same "WHERE false, as a Result with no child" \
+     "SELECT count(*) FROM t0 WHERE false"
+
+has "and EXPLAIN shows it" \
+    "EXPLAIN (COSTS OFF) SELECT count(*) FROM t0 WHERE false" "One-Time Filter: false"
+
+# --- what PostgreSQL 18 put in the query ---------------------------------------
+
+# A grouped expression is a Var of an RTE_GROUP entry now, which ORCA's
+# translator has never heard of; the port folds it back, as the planner does.
+same "GROUP BY an expression" \
+     "SELECT a % 3, count(*) FROM t0 GROUP BY a % 3 ORDER BY 1"
+
+same "GROUP BY an output column, and HAVING on a grouped one" \
+     "SELECT a FROM t0 GROUP BY a HAVING a > 997 ORDER BY a"
+
+q "CREATE TABLE t0_gen (a int, b int GENERATED ALWAYS AS (a * 2) VIRTUAL);
+   INSERT INTO t0_gen (a) VALUES (1), (2);" > /dev/null
+
+declined "a virtual generated column, which the planner expands and ORCA would read as NULL" \
+         "SELECT * FROM t0_gen ORDER BY a" "virtual generated columns"
+
+# --- a filter on a Result -----------------------------------------------------
+#
+# PostgreSQL 19's Result evaluates no qual, and Cloudberry's does: ORCA's
+# translator puts every filter it cannot push into a node on a Result above
+# it, and on PostgreSQL 19 such a filter was printed by EXPLAIN and never
+# applied.  HAVING returned groups it should not have.
+
+same "HAVING, which ORCA filters on a Result" \
+     "SELECT a % 3 AS m, count(*) FROM t0 GROUP BY 1 HAVING count(*) > 300 ORDER BY 1"
+
+has "and the filter goes on the aggregate, where the planner puts a HAVING" \
+    "EXPLAIN (COSTS OFF) SELECT b, count(*) FROM t0 GROUP BY b HAVING count(*) > 100" \
+    "Filter: (count(*) > 100)"
+
+same "a filter over a limit, which no node below can take" \
+     "SELECT * FROM (SELECT a, b FROM t0 ORDER BY a LIMIT 20) s WHERE s.b = 'v3' ORDER BY a"
+
+has "and goes under a Subquery Scan, PostgreSQL's node for filtering a plan's rows" \
+    "EXPLAIN (COSTS OFF) SELECT * FROM (SELECT a, b FROM t0 ORDER BY a LIMIT 20) s WHERE s.b = 'v3'" \
+    "Subquery Scan"
+
+same "ALL, which ORCA turns into a count under a filter" \
+     "SELECT a FROM t0 WHERE a > ALL (SELECT a FROM t0 WHERE a < 998) ORDER BY a"
+
+# --- subqueries as SubPlans ---------------------------------------------------
+#
+# ORCA turns most subqueries into joins, which are T1's; this setting makes it
+# keep them as SubPlans, which T0 can plan.
+
+same "EXISTS as a SubPlan" \
+     "SELECT a FROM t0 WHERE a < 5 AND EXISTS (SELECT 1 FROM t0 t2 WHERE t2.a = t0.a + 1) ORDER BY a" \
+     "SET gp.optimizer_enforce_subplans = on"
+
+# PostgreSQL 19 has no SubLinkType for NOT EXISTS; the translator builds it as
+# NOT over an EXISTS SubPlan, which is what the parser writes.
+same "NOT EXISTS, which PostgreSQL 19 has no sublink type for" \
+     "SELECT a FROM t0 WHERE a < 10 AND NOT EXISTS (SELECT 1 FROM t0 t2 WHERE t2.a = t0.a AND t2.a % 2 = 0) ORDER BY a" \
+     "SET gp.optimizer_enforce_subplans = on"
+
+same "IN as a SubPlan" \
+     "SELECT a FROM t0 WHERE a IN (SELECT a * 2 FROM t0 WHERE a < 3) ORDER BY a" \
+     "SET gp.optimizer_enforce_subplans = on"
+
+same "NOT IN as a SubPlan, NULLs included" \
+     "SELECT a FROM t0 WHERE a < 10 AND a NOT IN (SELECT a * 2 FROM t0 WHERE a < 4) ORDER BY a" \
+     "SET gp.optimizer_enforce_subplans = on"
+
+same "a correlated scalar subquery" \
+     "SELECT a, (SELECT b FROM t0 t2 WHERE t2.a = t0.a + 1) FROM t0 WHERE a < 4 ORDER BY a" \
+     "SET gp.optimizer_enforce_subplans = on"
+
+# --- aggregation in stages -----------------------------------------------------
+
+# A partial and a final Agg, with the transition state serialised between
+# them for avg(numeric), whose state is internal.
+same "two-stage aggregation" \
+     "SELECT b, avg(c), count(*), sum(a) FROM t0 GROUP BY b ORDER BY b" \
+     "SET gp.optimizer_force_multistage_agg = on"
+
+# PostgreSQL 19 runs an Agg in one split mode; Cloudberry's executor finishes
+# each Aggref by its own, and ORCA mixes them in one node here.
+declined "an aggregate that mixes stages in one node" \
+         "SELECT avg(c), stddev(a), count(DISTINCT b) FROM t0" \
+         "mixes aggregation stages" \
+         "SET gp.optimizer_force_multistage_agg = on"
+
+# ORCA's core rewrites percentile_cont into Cloudberry's gp_percentile_cont,
+# by OID (naucrates/dxl/gpdb_types.h), and PostgreSQL 19 has no such function.
+declined "percentile_cont, which ORCA rewrites to a Cloudberry function" \
+         "SELECT percentile_cont(0.5) WITHIN GROUP (ORDER BY c) FROM t0" \
+         "0.9189"
+
+# --- how the plan is used -------------------------------------------------------
+
+same "a prepared statement, custom plans and then the generic one" \
+     "EXECUTE p0(10); EXECUTE p0(20); EXECUTE p0(30); EXECUTE p0(40); EXECUTE p0(50); EXECUTE p0(60); EXECUTE p0(70)" \
+     "PREPARE p0(int) AS SELECT count(*) FROM t0 WHERE a < \$1"
+
+# An aggregate cannot run backwards, so a scroll cursor over one needs a
+# Material on top; standard_planner adds it, and so does the port.
+has "a scroll cursor over a plan that cannot run backwards gets a Material" \
+    "EXPLAIN (COSTS OFF) DECLARE c0 SCROLL CURSOR FOR SELECT count(*) FROM t0;" \
+    "Materialize"
+
+is "and reads backwards" \
+   "BEGIN; DECLARE c0 SCROLL CURSOR FOR SELECT count(*) FROM t0;
+    FETCH ALL FROM c0; FETCH BACKWARD 1 FROM c0; COMMIT;" "1001
+1001"
+
+is "CREATE TABLE AS plans its SELECT, and the table gets the SELECT's types" \
+   "CREATE TABLE t0_ctas AS SELECT a, c::numeric(10,2) AS c2 FROM t0 WHERE a < 5;
+    SELECT string_agg(attname || ':' || format_type(atttypid, atttypmod), ',' ORDER BY attnum)
+      FROM pg_attribute WHERE attrelid = 't0_ctas'::regclass AND attnum > 0;" \
+   "a:integer,c2:numeric(10,2)"
+
+# PL/pgSQL takes a fast path for an expression like r := x + 1, which it can
+# only take when the plan is a lone Result.
+is "PL/pgSQL's simple expressions still take their fast path" \
+   "CREATE FUNCTION t0_plus(int) RETURNS int LANGUAGE plpgsql
+      AS \$\$ DECLARE r int; BEGIN r := \$1 + 1; RETURN r; END \$\$;
+    SELECT t0_plus(41);" "42"
+
+# --- what the plan must still check ----------------------------------------------
+#
+# ORCA's translator builds a permission entry for each table it scans and
+# nothing else, so the port adds the query's own: a view's, and one for any
+# table ORCA plans no scan of.  PostgreSQL checks all of them.
+
+q "CREATE TABLE t0_secret (x int); INSERT INTO t0_secret VALUES (42);
+   CREATE VIEW t0_view AS SELECT x FROM t0_secret;
+   CREATE ROLE t0_reader; GRANT SELECT ON t0, t0_view TO t0_reader;" > /dev/null
+
+is "a view its owner may read is read through" \
+   "SET ROLE t0_reader; SELECT * FROM t0_view;" "42"
+
+refused "a table behind WHERE false is still checked" \
+        "SET ROLE t0_reader; SELECT count(*) FROM t0_secret WHERE false;" \
+        "permission denied for table t0_secret"
+
+q "REVOKE SELECT ON t0_view FROM t0_reader;" > /dev/null
+refused "and a view's own privilege is checked" \
+        "SET ROLE t0_reader; SELECT * FROM t0_view;" \
+        "permission denied for view t0_view"
+
+q "CREATE TABLE t0_rls (owner text, val int);
+   INSERT INTO t0_rls VALUES ('t0_reader', 1), ('somebody', 2);
+   ALTER TABLE t0_rls ENABLE ROW LEVEL SECURITY;
+   CREATE POLICY t0_own ON t0_rls USING (owner = current_user);
+   GRANT SELECT ON t0_rls TO t0_reader;" > /dev/null
+
+same "row security applies to ORCA's scan" \
+     "SELECT val FROM t0_rls ORDER BY val" "SET ROLE t0_reader"
+
+# --- errors ---------------------------------------------------------------------
+
+# Raised by the constant folding done before ORCA is asked, which is where
+# most errors a query can raise at plan time are.
+refused "a PostgreSQL error raised before ORCA is asked is the statement's error" \
+        "SELECT a FROM t0 WHERE a = 1 / 0;" "division by zero"
+
+# And one raised inside ORCA's task.  The translator checks the query's
+# permissions as it translates it (TranslateSelectQueryToDXL), through the
+# wrapper layer, so a refusal there is a PostgreSQL error that becomes an ORCA
+# exception, unwinds ORCA, and is re-thrown as itself by the C caller -- not
+# reported as a failed plan, and not fallen back from.
+refused "a PostgreSQL error raised inside ORCA comes back as itself" \
+        "SET ROLE t0_reader; SELECT count(*) FROM t0_secret;" \
+        "permission denied for table t0_secret"
+
+same "and ORCA plans the next statement in that backend" \
+     "SELECT count(*) FROM t0 WHERE a < 50" \
+     "SET ROLE t0_reader; DO \$\$ BEGIN PERFORM count(*) FROM t0_secret; EXCEPTION WHEN insufficient_privilege THEN NULL; END \$\$"
+
+# --- what ORCA declines, and says so ---------------------------------------------
+
+has "the trace is Cloudberry's, word for word" \
+    "SET gp.optimizer_trace_fallback = on; SELECT count(*) FROM t0 t1 JOIN t0 t2 USING (a);" \
+    "GPORCA failed to produce a plan, falling back to Postgres-based planner"
+
+declined "a join, which T1 brings" \
+         "SELECT count(*) FROM t0 t1 JOIN t0 t2 USING (a)" "HashJoin"
+
+declined "window functions, which T1 brings" \
+         "SELECT a, rank() OVER (ORDER BY a) FROM t0 WHERE a < 3" "window functions"
+
+# ORCA ignores row marks, because Cloudberry locks the whole table for them;
+# PostgreSQL locks the rows, in a node the plan must have.
+declined "FOR UPDATE, which would lock nothing" \
+         "SELECT a FROM t0 WHERE a = 1 FOR UPDATE" "FOR UPDATE and FOR SHARE"
+
+# On one node every relation is coordinator-only, and Cloudberry's refusal of
+# a coordinator-only table is kept for what it was for, the catalogs.
+declined "the system catalogs, as in Cloudberry" \
+         "SELECT count(*) FROM pg_class WHERE relname = 't0'" \
+         "Queries on master-only tables"
+
+declined "INSERT, UPDATE and DELETE, which T2 brings" \
+         "UPDATE t0 SET c = c WHERE a = -1" "INSERT, UPDATE and DELETE"
+
+# --- ORCA's memory ----------------------------------------------------------------
+
+# gp.optimizer_use_gpdb_allocators is on, as in Cloudberry, and read now: ORCA
+# allocates through PostgreSQL memory contexts, which a leak would show in.
+is "ORCA allocates through PostgreSQL memory contexts" \
+   "SELECT count(*) > 0 FROM pg_backend_memory_contexts WHERE name = 'GPORCA memory pool';" "t"
+
+is "and a thousand plans later it holds no more than it did" \
+   "DO \$\$ DECLARE n bigint; BEGIN
+      FOR i IN 1..1000 LOOP EXECUTE format('SELECT count(*) FROM t0 WHERE a < %s GROUP BY b LIMIT 1', i) INTO n; END LOOP; END \$\$;
+    CREATE TEMP TABLE t0_mem AS SELECT sum(total_bytes) AS b FROM pg_backend_memory_contexts WHERE name LIKE 'GPORCA%';
+    DO \$\$ DECLARE n bigint; BEGIN
+      FOR i IN 1..1000 LOOP EXECUTE format('SELECT count(*) FROM t0 WHERE a < %s GROUP BY b LIMIT 1', i) INTO n; END LOOP; END \$\$;
+    SELECT sum(total_bytes) <= (SELECT b FROM t0_mem) FROM pg_backend_memory_contexts WHERE name LIKE 'GPORCA%';" "t"
 
 echo
 echo "  $pass passed, $fail failed"

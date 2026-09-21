@@ -97,6 +97,7 @@ extern "C" {
  */
 #include "cb_clauses.h"		  /* optimizer/clauses.h */
 #include "cb_lsyscache.h"	  /* utils/lsyscache.h */
+#include "cb_nodes.h"		  /* nodes/nodes.h */
 #include "cb_plancat.h"		  /* optimizer/plancat.h */
 #include "cb_prepagg.h"		  /* optimizer/prep.h */
 #include "cb_selfuncs.h"	  /* utils/selfuncs.h */

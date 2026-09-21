@@ -34,6 +34,11 @@ extern "C"
 {
 #endif
 
+struct List;
+struct OptimizerOptions;
+struct PlannedStmt;
+struct Query;
+
 /*
  * Bring ORCA up in this backend, if it is not up already.
  *
@@ -46,6 +51,35 @@ extern void GpOrcaEnsureInitialized(void);
 
 /* Is ORCA up in this backend? */
 extern bool GpOrcaIsInitialized(void);
+
+/*
+ * Why ORCA made no plan, when it made none.
+ *
+ * Three answers, and each wants something different of the caller.  ORCA
+ * declined -- the query uses something it does not plan, which is the
+ * expected kind -- or failed, which is the kind somebody should look at:
+ * both fall back, and are counted apart.  Or what stopped it was a
+ * PostgreSQL error, which is still raised, on PostgreSQL's error stack: that
+ * is the statement's error rather than a reason to fall back, and the caller
+ * must re-throw it with PG_RE_THROW().
+ */
+typedef struct GpOrcaFailure
+{
+	bool		unexpected;		/* failed, rather than declined */
+	bool		from_postgres;	/* a PostgreSQL error, still raised */
+	char	   *message;		/* ORCA's reason, palloc'd, or NULL */
+} GpOrcaFailure;
+
+/*
+ * Plan a query with ORCA: the plan, or NULL and why in *failure.
+ *
+ * The query is ORCA's to change -- the translator normalises it in place --
+ * so the caller passes a copy.  ORCA must be up; see
+ * GpOrcaEnsureInitialized().
+ */
+extern struct PlannedStmt *GpOrcaOptimize(struct Query *query,
+										  struct OptimizerOptions *opts,
+										  GpOrcaFailure *failure);
 
 /*
  * There is no counterpart that takes ORCA down.  Outside an assert-enabled

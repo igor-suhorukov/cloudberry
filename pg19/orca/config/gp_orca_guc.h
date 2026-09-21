@@ -130,6 +130,7 @@
 	X(optimizer_force_split_window_function, false, "Always split the window function.") \
 	X(optimizer_force_three_stage_scalar_dqa, true, "Force optimizer to always pick 3 stage aggregate plan for scalar distinct qualified aggregate.") \
 	X(optimizer_force_window_hash_agg, false, "Enable create window hash agg.") \
+	X(optimizer_log, true, "Log optimizer messages.") \
 	X(optimizer_metadata_caching, true, "This guc enables the optimizer to cache and reuse metadata.") \
 	X(optimizer_multilevel_partitioning, true, "Enable optimization of queries on multilevel partitioned tables.") \
 	X(optimizer_parallel_union, false, "Enable parallel execution for UNION/UNION ALL queries.") \
@@ -223,11 +224,17 @@ extern PGDLLIMPORT char *optimizer_search_strategy_path;
 extern PGDLLIMPORT bool optimizer_use_gpdb_allocators;
 
 /*
- * The four that are not booleans.
+ * The five that are not booleans.
  *
  * The values keep Cloudberry's spelling, because ORCA's own code and its
  * stored minidumps are written against them.
  */
+
+/* gp.optimizer_log_failure: which failures gp.optimizer_log reports */
+#define OPTIMIZER_ALL_FAIL			0	/* all failures */
+#define OPTIMIZER_UNEXPECTED_FAIL	1	/* unexpected failures */
+#define OPTIMIZER_EXPECTED_FAIL		2	/* expected failures */
+extern PGDLLIMPORT int optimizer_log_failure;
 
 /* gp.optimizer_minidump */
 #define OPTIMIZER_MINIDUMP_FAIL		0	/* on failure */

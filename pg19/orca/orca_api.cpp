@@ -24,11 +24,13 @@
 //		Bringing ORCA up and down inside a PostgreSQL backend.
 //
 //		Cloudberry does this in CGPOptimizer::InitGPOPT (see
-//		github/cloudberry/src/backend/gpopt/CGPOptimizer.cpp).  The three
-//		library inits are the same three; what differs is where the abort
-//		callback comes from, because gpdb::IsAbortRequested lives in the
-//		wrapper layer that the port has not ported yet, and because the port
-//		initialises on demand rather than from _PG_init.
+//		github/cloudberry/src/backend/gpopt/CGPOptimizer.cpp), which the port
+//		does not carry.  The three library inits are the same three, and
+//		gp.optimizer_use_gpdb_allocators is read here as it is there.  What
+//		differs is that the port initialises on demand rather than from the
+//		planner's first call, and adds a fourth init, for DXL; see below.
+//		The abort callback is the port's own, written before the wrapper
+//		layer was, and asks what gpdb::IsAbortRequested asks.
 //
 //---------------------------------------------------------------------------
 
@@ -49,11 +51,18 @@ extern "C"
 #include "gpopt/init.h"
 #include "gpopt/xforms/CXform.h"
 #include "gpopt/xforms/CXformFactory.h"
+#include "naucrates/exception.h"
 #include "naucrates/init.h"
 
 #include "config/CConfigParamMapping.h"
 
+#include "CMemoryPoolPallocManager.h"
 #include "gp_orca_api.h"
+
+extern "C"
+{
+#include "gp_orca_guc.h"
+}
 
 //---------------------------------------------------------------------------
 //	Is the backend being asked to give up?
@@ -84,16 +93,63 @@ GpOrcaEnsureInitialized(void)
 		return;
 
 	struct gpos_init_params params = {GpOrcaAbortRequested};
+	bool		from_postgres = false;
+	bool		failed = false;
+	const char *filename = NULL;
+	ULONG		line = 0;
 
 	/*
-	 * One init per library, in dependency order, as Cloudberry does:
-	 * gpos_init builds the memory pool manager, gpdxl_init the DXL token
-	 * table, gpopt_init the xform factory.  libgpdbcost has no init of its
-	 * own; it is reached when ORCA builds a cost model.
+	 * Caught, and reported after the catch, as Cloudberry's InitGPOPT does
+	 * it but for where: with PostgreSQL's allocators, what gpos_init builds
+	 * is palloc'd, so running out of memory here is a PostgreSQL error that
+	 * the wrapper layer turns into an ORCA exception -- and an ORCA exception
+	 * that reaches a C frame is std::terminate.  The report waits for the
+	 * catch to end, because a longjmp out of a catch handler leaves the
+	 * exception it was handling behind (see CGPOptimizer.cpp).
 	 */
-	gpos_init(&params);
-	gpdxl_init();
-	gpopt_init();
+	GPOS_TRY
+	{
+		/*
+		 * gp.optimizer_use_gpdb_allocators, which Cloudberry's InitGPOPT
+		 * reads: ORCA's pools are PostgreSQL memory contexts when it is on,
+		 * as it is by default, and malloc'd when it is off.  It has to be
+		 * decided before gpos_init, which builds the default manager when
+		 * none has been set up, and it is decided once -- the setting is
+		 * PGC_POSTMASTER for that reason.
+		 */
+		if (optimizer_use_gpdb_allocators)
+			CMemoryPoolPallocManager::Init();
+
+		/*
+		 * One init per library, in dependency order, as Cloudberry does:
+		 * gpos_init builds the memory pool manager, gpdxl_init the DXL token
+		 * table, gpopt_init the xform factory.  libgpdbcost has no init of
+		 * its own; it is reached when ORCA builds a cost model.
+		 */
+		gpos_init(&params);
+		gpdxl_init();
+		gpopt_init();
+	}
+	GPOS_CATCH_EX(ex)
+	{
+		failed = true;
+		from_postgres = GPOS_MATCH_EX(ex, gpdxl::ExmaGPDB, gpdxl::ExmiGPDBError);
+		filename = ex.Filename();
+		line = ex.Line();
+	}
+	GPOS_CATCH_END;
+
+	if (from_postgres)
+		PG_RE_THROW();
+	if (failed)
+	{
+		if (errstart(ERROR, TEXTDOMAIN))
+		{
+			errcode(ERRCODE_INTERNAL_ERROR);
+			errmsg("optimizer failed to init");
+			errfinish(filename, line, NULL);
+		}
+	}
 
 	/*
 	 * And a fourth, which is not in InitGPOPT: DXL support -- Xerces, the DXL

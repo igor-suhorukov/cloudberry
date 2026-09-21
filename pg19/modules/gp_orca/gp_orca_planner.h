@@ -43,7 +43,6 @@
 	X(not_dispatcher, "this backend does not plan for the cluster") \
 	X(cursor_option,  "a cursor ORCA does not plan") \
 	X(utility,        "not a query ORCA plans") \
-	X(no_translator,  "ORCA's translator is not built yet") \
 	X(declined,       "ORCA looked and would not plan it") \
 	X(error,          "ORCA raised while planning")
 

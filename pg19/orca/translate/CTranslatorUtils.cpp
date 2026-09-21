@@ -18,8 +18,10 @@
 // under the License.
 //
 //	Ported from github/cloudberry/src/backend/gpopt/translate/CTranslatorUtils.cpp,
-//	unchanged but for the include paths.  Cloudberry's notice for
-//	the original follows, as the Apache License requires it to.
+//	and changed for PostgreSQL 19: past the include paths, a comment beside
+//	each change, or beside what replaced it, says what and why.
+//	Cloudberry's notice for the original follows, as the Apache License
+//	requires it to.
 //
 //---------------------------------------------------------------------------
 //---------------------------------------------------------------------------
@@ -42,6 +44,7 @@ extern "C" {
 #include "postgres.h"
 
 #include "access/sysattr.h"
+#include "catalog/catalog.h"
 #include "catalog/pg_proc.h"
 #include "catalog/pg_statistic.h"
 #include "catalog/pg_type.h"
@@ -176,11 +179,19 @@ CTranslatorUtils::GetTableDescr(CMemoryPool *mp, CMDAccessor *md_accessor,
 	}
 	else if (IMDRelation::ErelstorageForeign != rel->RetrieveRelStorageType() &&
 			 !optimizer_enable_master_only_queries &&
-			 (IMDRelation::EreldistrMasterOnly == distribution_policy))
+			 (IMDRelation::EreldistrMasterOnly == distribution_policy) &&
+			 (!gpdb::IsSingleNode() || IsCatalogRelationOid(rel_oid)))
 	{
 		// fall back to the planner for queries on master-only table if they are disabled with Orca. This is due to
 		// the fact that catalog tables (master-only) are not analyzed often and will result in Orca producing
 		// inferior plans.
+		//
+		// On one node every relation is master-only -- the relcache
+		// translator reports it so, because every row is here -- and the
+		// refusal would send every query back to the planner.  So there it
+		// is kept for what it was for, the system catalogs, and a user table
+		// is planned.  IsCatalogRelationOid() is PostgreSQL's own test for a
+		// catalog, pinned OIDs only, so information_schema counts as a user's.
 
 		GPOS_THROW_EXCEPTION(gpdxl::ExmaDXL,						  // major
 							 gpdxl::ExmiQuery2DXLUnsupportedFeature,  // minor
@@ -2284,11 +2295,12 @@ CTranslatorUtils::MapDXLSubplanToSublinkType(EdxlSubPlanType dxl_subplan_type)
 	GPOS_ASSERT(EdxlSubPlanTypeSentinel > dxl_subplan_type);
 	// ORCA can plan a NOT EXISTS subplan, and PostgreSQL 19 has no
 	// SubLinkType for one: NOT EXISTS is NOT over an EXISTS sublink, and
-	// NOT_EXISTS_SUBLINK is Cloudberry's.  So the caller has to build that
-	// NOT itself, and this refuses rather than fall through: in a release
-	// build the lookup below answers EXPR_SUBLINK for a type it does not
-	// know, which for NOT EXISTS would be a scalar subquery -- a plan that
-	// runs and returns the wrong thing.
+	// NOT_EXISTS_SUBLINK is Cloudberry's.  So the caller builds that NOT
+	// itself -- CTranslatorDXLToScalar::TranslateDXLScalarSubplanToScalar
+	// does, and does not ask this -- and this refuses rather than fall
+	// through: in a release build the lookup below answers EXPR_SUBLINK for a
+	// type it does not know, which for NOT EXISTS would be a scalar subquery,
+	// a plan that runs and returns the wrong thing.
 	if (EdxlSubPlanTypeNotExists == dxl_subplan_type)
 	{
 		GPOS_RAISE(gpdxl::ExmaDXL, gpdxl::ExmiQuery2DXLUnsupportedFeature,

@@ -62,11 +62,19 @@ char	   *optimizer_search_strategy_path = NULL;
 
 bool		optimizer_use_gpdb_allocators = true;
 
+int			optimizer_log_failure = OPTIMIZER_UNEXPECTED_FAIL;
 int			optimizer_minidump = OPTIMIZER_MINIDUMP_FAIL;
 int			optimizer_cost_model = OPTIMIZER_GPDB_CALIBRATED;
 int			optimizer_join_order = JOIN_ORDER_EXHAUSTIVE2_SEARCH;
 int			optimizer_agg_pds_strategy = OPTIMIZER_AGG_PDS_ALL_KEY;
 bool	   *optimizer_xforms = NULL;
+
+static const struct config_enum_entry optimizer_log_failure_options[] = {
+	{"all", OPTIMIZER_ALL_FAIL, false},
+	{"unexpected", OPTIMIZER_UNEXPECTED_FAIL, false},
+	{"expected", OPTIMIZER_EXPECTED_FAIL, false},
+	{NULL, 0, false}
+};
 
 static const struct config_enum_entry optimizer_minidump_options[] = {
 	{"onerror", OPTIMIZER_MINIDUMP_FAIL, false},
@@ -134,6 +142,14 @@ GpOrcaDefineSettings(void)
 							 &optimizer_use_gpdb_allocators,
 							 true,
 							 PGC_POSTMASTER, 0, NULL, NULL, NULL);
+
+	DefineCustomEnumVariable("gp.optimizer_log_failure",
+							 "Sets which optimizer failures are logged.",
+							 "Valid values are unexpected, expected, all",
+							 &optimizer_log_failure,
+							 OPTIMIZER_UNEXPECTED_FAIL,
+							 optimizer_log_failure_options,
+							 PGC_USERSET, 0, NULL, NULL, NULL);
 
 	DefineCustomEnumVariable("gp.optimizer_minidump",
 							 "Generate optimizer minidump.",

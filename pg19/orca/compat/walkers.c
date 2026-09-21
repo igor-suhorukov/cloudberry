@@ -837,7 +837,7 @@ check_collation_in_list(List *colllist, check_collation_context *context)
 static bool
 check_collation_walker(Node *node, check_collation_context *context)
 {
-	Oid			collation, type;
+	Oid			collation, inputCollation, type;
 
 	if (NULL == node)
 	{
@@ -903,6 +903,23 @@ check_collation_walker(Node *node, check_collation_context *context)
 		case T_SubPlan:
 		case T_AlternativeSubPlan:
 		case T_GroupingFunc:
+			/*
+			 * Cloudberry lists T_TableValueExpr and T_DMLActionExpr here too,
+			 * which are its own nodes.  They were once dropped from this list
+			 * together with this case's body, which left these tags falling
+			 * through to T_CollateClause's -- so every function call,
+			 * aggregate and IS NULL read as a non-default collation, and
+			 * ORCA declined every query that had one.  Running the
+			 * translator found it.
+			 */
+			collation = exprCollation(node);
+			inputCollation = exprInputCollation(node);
+			if ((InvalidOid != collation && DEFAULT_COLLATION_OID != collation) ||
+				(InvalidOid != inputCollation && DEFAULT_COLLATION_OID != inputCollation))
+			{
+				context->foundNonDefaultCollation = 1;
+			}
+			break;
 		case T_CollateClause:
 			/* unsupported */
 			context->foundNonDefaultCollation = 1;
