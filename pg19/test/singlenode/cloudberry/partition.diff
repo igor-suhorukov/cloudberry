@@ -1,0 +1,1604 @@
+@@
+- gp_segment_id |       relname        | relkind 
+----------------+----------------------+---------
+-            -1 | region               | p
+-            -1 | region_1_prt_region1 | p
+-            -1 | region_1_prt_region2 | p
+-            -1 | region_1_prt_region3 | p
+-(4 rows)
+-
++ERROR:  function gp_dist_random(unknown) does not exist
++LINE 1: select gp_segment_id, relname, relkind from gp_dist_random('...
++                                                    ^
++DETAIL:  There is no function of that name.
+@@
+-                           List of relations
+- Schema |        Name        |       Type        |   Owner   | Storage 
+---------+--------------------+-------------------+-----------+---------
+- public | foo_p              | partitioned table | part_role | 
+- public | foo_p_1_prt_2      | table             | part_role | heap
+- public | foo_p_1_prt_prt_11 | table             | part_role | heap
+- public | foo_p_1_prt_prt_12 | table             | part_role | heap
++                       List of tables
++ Schema |        Name        |       Type        |   Owner   
++--------+--------------------+-------------------+-----------
++ public | foo_p              | partitioned table | part_role
++ public | foo_p_1_prt_2      | table             | part_role
++ public | foo_p_1_prt_prt_11 | table             | part_role
++ public | foo_p_1_prt_prt_12 | table             | part_role
+@@
+-NOTICE:  no privileges could be revoked
+@@
++ERROR:  access method "ao_row" does not exist
+@@
++ERROR:  relation "foo_p" does not exist
++LINE 1: insert into foo_p values(1, 1), (2, 1), (3, 1);
++                    ^
+@@
++ERROR:  relation "foo_p" does not exist
+@@
++ERROR:  relation "foo_p" does not exist
+@@
+- i | j 
+----+---
+- 1 | 1
+- 2 | 1
+- 3 | 1
+- 6 | 6
+-(4 rows)
+-
++ERROR:  relation "foo_p" does not exist
++LINE 1: select * from foo_p;
++                      ^
+@@
++ERROR:  table "foo_p" does not exist
+@@
++ERROR:  unrecognized parameter "appendonly"
+@@
++ERROR:  relation "bar_p" does not exist
++LINE 1: insert into bar_p values(6, 6);
++                    ^
+@@
++ERROR:  relation "bar_p" does not exist
+@@
+- 6 | 6
+-(4 rows)
++(3 rows)
+@@
++ERROR:  table "bar_p" does not exist
+@@
++ERROR:  access method "ao_row" does not exist
+@@
++ERROR:  unrecognized parameter "appendonly"
+@@
++ERROR:  relation "foo_p" does not exist
++LINE 1: insert into foo_p values(1, 2), (2, 3), (3, 4);
++                    ^
+@@
++ERROR:  relation "bar_p" does not exist
++LINE 1: insert into bar_p values(6, 6);
++                    ^
+@@
++ERROR:  relation "foo_p" does not exist
+@@
++ERROR:  relation "foo_p" does not exist
+@@
+- i | j 
+----+---
+- 1 | 2
+- 2 | 3
+- 3 | 4
+- 6 | 6
+-(4 rows)
+-
++ERROR:  relation "foo_p" does not exist
++LINE 1: select * from foo_p;
++                      ^
+@@
++ERROR:  table "bar_p" does not exist
+@@
++ERROR:  table "foo_p" does not exist
+@@
++ERROR:  access method "ao_row" does not exist
+@@
++ERROR:  relation "sto_ao_ao" does not exist
++LINE 1: create table exh_ao_ao (like sto_ao_ao) with (appendonly=tru...
++                                     ^
+@@
++ERROR:  relation "sto_ao_ao" does not exist
+@@
+-ERROR:  cannot EXCHANGE PARTITION for relation "sto_ao_ao" -- partition has children
++ERROR:  relation "sto_ao_ao" does not exist
+@@
++ERROR:  syntax error at or near "readable"
++LINE 1: create readable external table bar_p(i int, j int) location ...
++               ^
+@@
+-NOTICE:  partition constraints are not validated when attaching a readable external table
++ERROR:  relation "bar_p" does not exist
+@@
+-ERROR:  cannot truncate foreign table "foo_p_1_prt_2"
+@@
++ERROR:  table "bar_p" does not exist
+@@
+-Partitions: foo_p_1_prt_1 FOR VALUES FROM (1) TO (2),
+-            foo_p_1_prt_2 FOR VALUES FROM (2) TO (3)
++Partitions:
++    foo_p_1_prt_1 FOR VALUES FROM (1) TO (2)
++    foo_p_1_prt_2 FOR VALUES FROM (2) TO (3)
+@@
+-Partitions: foo_p_1_prt_1 FOR VALUES FROM (1) TO (2),
+-            foo_p_1_prt_2 FOR VALUES FROM (2) TO (3)
++Partitions:
++    foo_p_1_prt_1 FOR VALUES FROM (1) TO (2)
++    foo_p_1_prt_2 FOR VALUES FROM (2) TO (3)
+@@
+-Partitions: foo_p_1_prt_1 FOR VALUES FROM (1) TO (12),
+-            foo_p_1_prt_2 FOR VALUES FROM (12) TO (20)
++Partitions:
++    foo_p_1_prt_1 FOR VALUES FROM (1) TO (12)
++    foo_p_1_prt_2 FOR VALUES FROM (12) TO (20)
+@@
+-Partitions: foo_p_1_prt_1 FOR VALUES FROM ('01-01-2007') TO ('01-02-2007'),
+-            foo_p_1_prt_2 FOR VALUES FROM ('01-02-2007') TO ('01-03-2007'),
+-            foo_p_1_prt_3 FOR VALUES FROM ('01-03-2007') TO ('01-04-2007'),
+-            foo_p_1_prt_4 FOR VALUES FROM ('01-04-2007') TO ('01-05-2007')
++Partitions:
++    foo_p_1_prt_1 FOR VALUES FROM ('01-01-2007') TO ('01-02-2007')
++    foo_p_1_prt_2 FOR VALUES FROM ('01-02-2007') TO ('01-03-2007')
++    foo_p_1_prt_3 FOR VALUES FROM ('01-03-2007') TO ('01-04-2007')
++    foo_p_1_prt_4 FOR VALUES FROM ('01-04-2007') TO ('01-05-2007')
+@@
+-Partitions: foo_p_1_prt_1 FOR VALUES FROM ('Mon Jan 01 00:00:00 2007') TO ('Tue Jan 02 04:48:00 2007'),
+-            foo_p_1_prt_2 FOR VALUES FROM ('Tue Jan 02 04:48:00 2007') TO ('Wed Jan 03 09:36:00 2007'),
+-            foo_p_1_prt_3 FOR VALUES FROM ('Wed Jan 03 09:36:00 2007') TO ('Thu Jan 04 14:24:00 2007'),
+-            foo_p_1_prt_4 FOR VALUES FROM ('Thu Jan 04 14:24:00 2007') TO ('Fri Jan 05 00:00:00 2007')
++Partitions:
++    foo_p_1_prt_1 FOR VALUES FROM ('Mon Jan 01 00:00:00 2007') TO ('Tue Jan 02 04:48:00 2007')
++    foo_p_1_prt_2 FOR VALUES FROM ('Tue Jan 02 04:48:00 2007') TO ('Wed Jan 03 09:36:00 2007')
++    foo_p_1_prt_3 FOR VALUES FROM ('Wed Jan 03 09:36:00 2007') TO ('Thu Jan 04 14:24:00 2007')
++    foo_p_1_prt_4 FOR VALUES FROM ('Thu Jan 04 14:24:00 2007') TO ('Fri Jan 05 00:00:00 2007')
+@@
+-Partitions: supplier2_1_prt_p1 FOR VALUES FROM (0) TO (12),
+-            supplier2_1_prt_p2 FOR VALUES FROM (12) TO (13),
+-            supplier2_1_prt_p3 FOR VALUES FROM (13) TO (21),
+-            supplier2_1_prt_p4 FOR VALUES FROM (21) TO (22),
+-            supplier2_1_prt_p5 FOR VALUES FROM (22) TO (25)
++Partitions:
++    supplier2_1_prt_p1 FOR VALUES FROM (0) TO (12)
++    supplier2_1_prt_p2 FOR VALUES FROM (12) TO (13)
++    supplier2_1_prt_p3 FOR VALUES FROM (13) TO (21)
++    supplier2_1_prt_p4 FOR VALUES FROM (21) TO (22)
++    supplier2_1_prt_p5 FOR VALUES FROM (22) TO (25)
+@@
+-Partitions: foo_p_1_prt_p1 FOR VALUES FROM (1) TO (2639161),
+-            foo_p_1_prt_p2 FOR VALUES FROM (2639161) TO (5957166),
+-            foo_p_1_prt_p3 FOR VALUES FROM (5957166) TO (5981976),
+-            foo_p_1_prt_p4 FOR VALUES FROM (5981976) TO (5994377),
+-            foo_p_1_prt_p5 FOR VALUES FROM (5994377) TO (6000001)
++Partitions:
++    foo_p_1_prt_p1 FOR VALUES FROM (1) TO (2639161)
++    foo_p_1_prt_p2 FOR VALUES FROM (2639161) TO (5957166)
++    foo_p_1_prt_p3 FOR VALUES FROM (5957166) TO (5981976)
++    foo_p_1_prt_p4 FOR VALUES FROM (5981976) TO (5994377)
++    foo_p_1_prt_p5 FOR VALUES FROM (5994377) TO (6000001)
+@@
+-Partitions: foo_p_1_prt_p1 FOR VALUES FROM (1) TO (5),
+-            foo_p_1_prt_p2 FOR VALUES FROM (10) TO (MAXVALUE),
+-            foo_p_1_prt_p3 FOR VALUES FROM (5) TO (10)
++Partitions:
++    foo_p_1_prt_p1 FOR VALUES FROM (1) TO (5)
++    foo_p_1_prt_p2 FOR VALUES FROM (10) TO (MAXVALUE)
++    foo_p_1_prt_p3 FOR VALUES FROM (5) TO (10)
+@@
+-Partitions: foo_p_1_prt_p1 FOR VALUES FROM (1) TO (5),
+-            foo_p_1_prt_p2 FOR VALUES FROM (11) TO (MAXVALUE),
+-            foo_p_1_prt_p3 FOR VALUES FROM (5) TO (11)
++Partitions:
++    foo_p_1_prt_p1 FOR VALUES FROM (1) TO (5)
++    foo_p_1_prt_p2 FOR VALUES FROM (11) TO (MAXVALUE)
++    foo_p_1_prt_p3 FOR VALUES FROM (5) TO (11)
+@@
++ERROR:  access method "ao_row" does not exist
+@@
++ERROR:  relation "foo_p" does not exist
+@@
+- i 
+----
+- 1
+- 2
+- 3
+- 4
+-(4 rows)
+-
++ERROR:  relation "foo_p" does not exist
++LINE 1: select * from foo_p;
++                      ^
+@@
+- i 
+----
+- 1
+- 2
+- 3
+-(3 rows)
+-
++ERROR:  relation "foo_p_1_prt_p1" does not exist
++LINE 1: select * from foo_p_1_prt_p1;
++                      ^
+@@
+- i 
+----
+- 4
+-(1 row)
+-
++ERROR:  relation "foo_p_1_prt_p2" does not exist
++LINE 1: select * from foo_p_1_prt_p2;
++                      ^
+@@
++ERROR:  table "foo_p" does not exist
+@@
++ERROR:  access method "ao_row" does not exist
+@@
++ERROR:  relation "foo_p" does not exist
+@@
+- i 
+----
+- 1
+- 2
+- 3
+- 4
+-(4 rows)
+-
++ERROR:  relation "foo_p" does not exist
++LINE 1: select * from foo_p;
++                      ^
+@@
+- i 
+----
+- 1
+- 2
+- 3
+-(3 rows)
+-
++ERROR:  relation "foo_p_1_prt_p1" does not exist
++LINE 1: select * from foo_p_1_prt_p1;
++                      ^
+@@
+- i 
+----
+- 4
+-(1 row)
+-
++ERROR:  relation "foo_p_1_prt_p2" does not exist
++LINE 1: select * from foo_p_1_prt_p2;
++                      ^
+@@
++ERROR:  table "foo_p" does not exist
+@@
++ERROR:  access method "ao_row" does not exist
+@@
++ERROR:  relation "mixed_ao_part" does not exist
+@@
+- distkey | partkey 
+----------+---------
+-       1 |      95
+-       1 |     100
+-       2 |      96
+-       2 |     101
+-       3 |      97
+-       3 |     102
+-       4 |      98
+-       4 |     103
+-       5 |      99
+-       5 |     104
+-(10 rows)
+-
++ERROR:  relation "mixed_ao_part" does not exist
++LINE 1: select * from mixed_ao_part;
++                      ^
+@@
+-Partitions: partlineitem_1_prt_p1_1 FOR VALUES FROM ('01-31-1992') TO ('09-30-1993'),
+-            partlineitem_1_prt_p1_2 FOR VALUES FROM ('09-30-1993') TO ('05-30-1995'),
+-            partlineitem_1_prt_p1_3 FOR VALUES FROM ('05-30-1995') TO ('01-30-1997'),
+-            partlineitem_1_prt_p1_4 FOR VALUES FROM ('01-30-1997') TO ('09-30-1998'),
+-            partlineitem_1_prt_p1_5 FOR VALUES FROM ('09-30-1998') TO ('11-01-1998')
++Partitions:
++    partlineitem_1_prt_p1_1 FOR VALUES FROM ('01-31-1992') TO ('09-30-1993')
++    partlineitem_1_prt_p1_2 FOR VALUES FROM ('09-30-1993') TO ('05-30-1995')
++    partlineitem_1_prt_p1_3 FOR VALUES FROM ('05-30-1995') TO ('01-30-1997')
++    partlineitem_1_prt_p1_4 FOR VALUES FROM ('01-30-1997') TO ('09-30-1998')
++    partlineitem_1_prt_p1_5 FOR VALUES FROM ('09-30-1998') TO ('11-01-1998')
+@@
++ERROR:  cannot specify storage parameters for a partitioned table
++HINT:  Specify storage parameters for its leaf partitions instead.
+@@
++ERROR:  unrecognized parameter "checksum"
+@@
++ERROR:  relation "tmp_nation" does not exist
++LINE 1: delete from tmp_nation where n_regionkey in (select n_region...
++                    ^
+@@
++ERROR:  table "tmp_nation" does not exist
+@@
+-Partitions: k_1_prt_2 FOR VALUES FROM (1) TO (3),
+-            k_1_prt_3 FOR VALUES FROM (3) TO (5),
+-            k_1_prt_4 FOR VALUES FROM (5) TO (7),
+-            k_1_prt_5 FOR VALUES FROM (7) TO (9),
+-            k_1_prt_6 FOR VALUES FROM (9) TO (10),
+-            k_1_prt_bar FOR VALUES FROM (23) TO (26),
+-            k_1_prt_foo FOR VALUES FROM (15) TO (20),
+-            k_1_prt_mydef DEFAULT
++Partitions:
++    k_1_prt_2 FOR VALUES FROM (1) TO (3)
++    k_1_prt_3 FOR VALUES FROM (3) TO (5)
++    k_1_prt_4 FOR VALUES FROM (5) TO (7)
++    k_1_prt_5 FOR VALUES FROM (7) TO (9)
++    k_1_prt_6 FOR VALUES FROM (9) TO (10)
++    k_1_prt_bar FOR VALUES FROM (23) TO (26)
++    k_1_prt_foo FOR VALUES FROM (15) TO (20)
++    k_1_prt_mydef DEFAULT
+@@
++ERROR:  access method "ao_column" does not exist
+@@
++ERROR:  relation "k" does not exist
+@@
++ERROR:  relation "k" does not exist
+@@
++ERROR:  table "k" does not exist
+@@
++ERROR:  access method "ao_row" does not exist
+@@
++ERROR:  relation "k" does not exist
+@@
++ERROR:  table "k" does not exist
+@@
++ERROR:  access method "ao_row" does not exist
+@@
+-NOTICE:  found 2 data formatting errors (2 or more input rows), rejected related input data
++ERROR:  syntax error at or near "log"
++LINE 1: copy ao_p from stdin log errors segment reject limit 100;
++                             ^
+@@
+- i 
+----
+- 2
+- 3
+-(2 rows)
+-
++ERROR:  relation "ao_p" does not exist
++LINE 1: select * from ao_p;
++                      ^
+@@
++ERROR:  table "ao_p" does not exist
+@@
+-Partitions: k_1_prt_1 FOR VALUES FROM (1) TO (26),
+-            k_1_prt_2 FOR VALUES FROM (26) TO (51),
+-            k_1_prt_3 FOR VALUES FROM (51) TO (76),
+-            k_1_prt_4 FOR VALUES FROM (76) TO (101)
++Partitions:
++    k_1_prt_1 FOR VALUES FROM (1) TO (26)
++    k_1_prt_2 FOR VALUES FROM (26) TO (51)
++    k_1_prt_3 FOR VALUES FROM (51) TO (76)
++    k_1_prt_4 FOR VALUES FROM (76) TO (101)
+@@
+-NOTICE:  no privileges could be revoked
+@@
+-NOTICE:  no privileges could be revoked
+@@
+- relid | level | template 
+--------+-------+----------
+-(0 rows)
+-
++ERROR:  relation "gp_partition_template" does not exist
++LINE 1: select relid, level, template from gp_partition_template whe...
++                                           ^
+@@
+- relid | level 
+--------+-------
+-(0 rows)
+-
++ERROR:  relation "gp_partition_template" does not exist
++LINE 1: select relid::regclass, level from gp_partition_template whe...
++                                           ^
+@@
+-    relid     | level |                                                                                                                         template                                                                                                                          
+---------------+-------+-----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+- rank_settemp |     1 | {GPPARTITIONDEFINITION :partDefElems ({GPPARTDEFELEM :partName def2 :boundSpec <> :subSpec <> :isDefault true :options <> :accessMethod <> :tablespacename <> :colencs <> :location 52}) :encClauses <> :isTemplate true :fromCatalog false :location 51}
+-(1 row)
+-
++ERROR:  relation "gp_partition_template" does not exist
++LINE 1: select relid::regclass, level, template from gp_partition_te...
++                                                     ^
+@@
+-    relid     | level |                                                                                                                         template                                                                                                                          
+---------------+-------+-----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+- rank_settemp |     1 | {GPPARTITIONDEFINITION :partDefElems ({GPPARTDEFELEM :partName def2 :boundSpec <> :subSpec <> :isDefault true :options <> :accessMethod <> :tablespacename <> :colencs <> :location 52}) :encClauses <> :isTemplate true :fromCatalog false :location 51}
+-(1 row)
+-
++ERROR:  relation "gp_partition_template" does not exist
++LINE 1: select relid::regclass, level, template from gp_partition_te...
++                                                     ^
+@@
++ERROR:  access method "ao_row" does not exist
+@@
++ERROR:  unrecognized parameter "compresslevel"
+@@
+-    relid     | level |                                                                                                                                                                                                                                                                                                                                     template                                                                                                                                                                                                                                                                                                                                      
+---------------+-------+-----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+- rank_settemp |     1 | {GPPARTITIONDEFINITION :partDefElems ({GPPARTDEFELEM :partName <> :boundSpec {GPPARTITIONRANGESPEC :partStart {GPPARTITIONRANGEITEM :val ({TYPECAST :arg {A_CONST :val "\2007-01-01" :location 64} :typeName {TYPENAME :names ("date") :typeOid 0 :setof false :pct_type false :typmods <> :typemod -1 :arrayBounds <> :location 59} :location -1}) :edge 1 :location 52} :partEnd <> :partEvery <> :location 52} :subSpec <> :isDefault false :options ({DEFELEM :defnamespace <> :defname compresslevel :arg 5 :defaction 0 :location 101}) :accessMethod ao_row :tablespacename <> :colencs <> :location 52}) :encClauses <> :isTemplate true :fromCatalog false :location 51}
+-(1 row)
+-
++ERROR:  relation "gp_partition_template" does not exist
++LINE 1: select relid::regclass, level, template from gp_partition_te...
++                                                     ^
+@@
++LINE 1: alter table rank_damage_1_prt_1 alter column i type bigint;
++                                                     ^
+@@
++ERROR:  cannot specify storage parameters for a partitioned table
++HINT:  Specify storage parameters for its leaf partitions instead.
+@@
++ERROR:  relation "sg_cal_event_silvertail_hour" does not exist
+@@
+-                                  Partitioned table "public.sg_cal_event_silvertail_hour"
+-     Column      |              Type              | Collation | Nullable | Default | Storage  | Stats target | Description 
+------------------+--------------------------------+-----------+----------+---------+----------+--------------+-------------
+- caldt           | date                           |           | not null |         | plain    |              | 
+- calhr           | smallint                       |           | not null |         | plain    |              | 
+- ip              | character varying(128)         |           |          |         | extended |              | 
+- transactionid   | character varying(32)          |           |          |         | extended |              | 
+- transactiontime | timestamp(2) without time zone |           |          |         | plain    |              | 
+-Partition key: RANGE (transactiontime)
+-Partitions: "sg_cal_event_silvertail_hour_1_prt_P2009041607" FOR VALUES FROM ('Thu Apr 16 07:00:00 2009') TO ('Thu Apr 16 08:00:00 2009'),
+-            "sg_cal_event_silvertail_hour_1_prt_P2009041608" FOR VALUES FROM ('Thu Apr 16 08:00:00 2009') TO ('Thu Apr 16 09:00:00 2009'),
+-            sg_cal_event_silvertail_hour_1_prt_p2009042907 FOR VALUES FROM ('Wed Apr 29 07:00:00 2009') TO ('Wed Apr 29 08:00:00 2009'),
+-            sg_cal_event_silvertail_hour_1_prt_st_default DEFAULT
+-Options: compresslevel=5
+-
+@@
+-                               Table "public.sg_cal_event_silvertail_hour_1_prt_p2009042907"
+-     Column      |              Type              | Collation | Nullable | Default | Storage  | Stats target | Description 
+------------------+--------------------------------+-----------+----------+---------+----------+--------------+-------------
+- caldt           | date                           |           | not null |         | plain    |              | 
+- calhr           | smallint                       |           | not null |         | plain    |              | 
+- ip              | character varying(128)         |           |          |         | extended |              | 
+- transactionid   | character varying(32)          |           |          |         | extended |              | 
+- transactiontime | timestamp(2) without time zone |           |          |         | plain    |              | 
+-Partition of: sg_cal_event_silvertail_hour FOR VALUES FROM ('Wed Apr 29 07:00:00 2009') TO ('Wed Apr 29 08:00:00 2009')
+-Partition constraint: ((transactiontime IS NOT NULL) AND (transactiontime >= 'Wed Apr 29 07:00:00 2009'::timestamp(2) without time zone) AND (transactiontime < 'Wed Apr 29 08:00:00 2009'::timestamp(2) without time zone))
+-Compression Type: zlib
+-Compression Level: 5
+-Block Size: 32768
+-Checksum: t
+-Options: compresslevel=5
+-
+@@
++ERROR:  table "sg_cal_event_silvertail_hour" does not exist
+@@
++ERROR:  cannot specify storage parameters for a partitioned table
++HINT:  Specify storage parameters for its leaf partitions instead.
+@@
++ERROR:  relation "foo_p" does not exist
++LINE 1: insert into foo_p select i, i+1, repeat('fooo', 9000) from g...
++                    ^
+@@
++ERROR:  relation "foo_p" does not exist
+@@
+-        oid         | relkind | amname |    reloptions     
+---------------------+---------+--------+-------------------
+- foo_p_1_prt_p10_20 | r       | ao_row | {compresslevel=5}
+-(1 row)
+-
++ERROR:  relation "foo_p_1_prt_p10_20" does not exist
++LINE 1: ...eft join pg_am am on am.oid = relam where c.oid = 'foo_p_1_p...
++                                                             ^
+@@
+- count 
+--------
+-     1
+-(1 row)
+-
++ERROR:  relation "foo_p" does not exist
++LINE 1: select count(distinct k) from foo_p;
++                                      ^
+@@
++ERROR:  table "foo_p" does not exist
+@@
++ERROR:  access method "ao_row" does not exist
+@@
++ERROR:  relation "foo_p" does not exist
++LINE 1: insert into foo_p select i, i+1, repeat('fooo', 9000) from g...
++                    ^
+@@
++ERROR:  relation "foo_p" does not exist
+@@
+-        oid         | relkind | amname | reloptions 
+---------------------+---------+--------+------------
+- foo_p_1_prt_def    | r       | ao_row | 
+- foo_p_1_prt_p10_20 | r       | ao_row | 
+-(2 rows)
+-
++ERROR:  relation "foo_p_1_prt_p10_20" does not exist
++LINE 1: ...t join pg_am am on am.oid = relam where c.oid in ('foo_p_1_p...
++                                                             ^
+@@
+- count 
+--------
+-     1
+-(1 row)
+-
++ERROR:  relation "foo_p" does not exist
++LINE 1: select count(distinct k) from foo_p;
++                                      ^
+@@
++ERROR:  table "foo_p" does not exist
+@@
+-  relid  | level 
+----------+-------
+- mpp5941 |     1
+- mpp5941 |     2
+- mpp5941 |     3
+-(3 rows)
+-
++ERROR:  relation "gp_partition_template" does not exist
++LINE 1: select relid::regclass, level from gp_partition_template whe...
++                                           ^
+@@
+-  relid  | level 
+----------+-------
+- mpp5941 |     2
+- mpp5941 |     3
+-(2 rows)
+-
++ERROR:  relation "gp_partition_template" does not exist
++LINE 1: select relid::regclass, level from gp_partition_template whe...
++                                           ^
+@@
+-  relid  | level 
+----------+-------
+- mpp5941 |     3
+-(1 row)
+-
++ERROR:  relation "gp_partition_template" does not exist
++LINE 1: select relid::regclass, level from gp_partition_template whe...
++                                           ^
+@@
+- relid | level 
+--------+-------
+-(0 rows)
+-
++ERROR:  relation "gp_partition_template" does not exist
++LINE 1: select relid::regclass, level from gp_partition_template whe...
++                                           ^
+@@
+- relid | level 
+--------+-------
+-(0 rows)
+-
++ERROR:  relation "gp_partition_template" does not exist
++LINE 1: select relid::regclass, level from gp_partition_template whe...
++                                           ^
+@@
+- relid | level 
+--------+-------
+-(0 rows)
+-
++ERROR:  relation "gp_partition_template" does not exist
++LINE 1: select relid::regclass, level from gp_partition_template whe...
++                                           ^
+@@
+-  relid  | level 
+----------+-------
+- mpp5941 |     3
+-(1 row)
+-
++ERROR:  relation "gp_partition_template" does not exist
++LINE 1: select relid::regclass, level from gp_partition_template whe...
++                                           ^
+@@
+-  relid  | level 
+----------+-------
+- mpp5941 |     2
+- mpp5941 |     3
+-(2 rows)
+-
++ERROR:  relation "gp_partition_template" does not exist
++LINE 1: select relid::regclass, level from gp_partition_template whe...
++                                           ^
+@@
+-  relid  | level 
+----------+-------
+- mpp5941 |     1
+- mpp5941 |     2
+- mpp5941 |     3
+-(3 rows)
+-
++ERROR:  relation "gp_partition_template" does not exist
++LINE 1: select relid::regclass, level from gp_partition_template whe...
++                                           ^
+@@
++ERROR:  unrecognized parameter "checksum"
+@@
++ERROR:  access method "bitmap" does not exist
+@@
+- public     | ti         | ti_j_idx           |            | CREATE INDEX ti_j_idx ON ONLY public.ti USING bitmap (j)
+@@
+- public     | ti_1_prt_1 | ti_1_prt_1_j_idx   |            | CREATE INDEX ti_1_prt_1_j_idx ON public.ti_1_prt_1 USING bitmap (j)
+@@
+- public     | ti_1_prt_2 | ti_1_prt_2_j_idx   |            | CREATE INDEX ti_1_prt_2_j_idx ON public.ti_1_prt_2 USING bitmap (j)
+-(6 rows)
++(3 rows)
+@@
+- public     | ti          | ti_j_idx            |            | CREATE INDEX ti_j_idx ON ONLY public.ti USING bitmap (j)
+@@
+- public     | ti_1_prt_1  | ti_1_prt_1_j_idx    |            | CREATE INDEX ti_1_prt_1_j_idx ON public.ti_1_prt_1 USING bitmap (j)
+@@
+- public     | ti_1_prt_2  | ti_1_prt_2_j_idx    |            | CREATE INDEX ti_1_prt_2_j_idx ON public.ti_1_prt_2 USING bitmap (j)
+@@
+- public     | ti_1_prt_p3 | ti_1_prt_p3_j_idx   |            | CREATE INDEX ti_1_prt_p3_j_idx ON public.ti_1_prt_p3 USING bitmap (j)
+-(8 rows)
++(4 rows)
+@@
+-ERROR:  cannot drop index ti_1_prt_p3_j_idx because index ti_j_idx requires it
+-HINT:  You can drop index ti_j_idx instead.
++ERROR:  index "ti_1_prt_p3_j_idx" does not exist
+@@
+- public     | ti             | ti_j_idx               |            | CREATE INDEX ti_j_idx ON ONLY public.ti USING bitmap (j)
+@@
+- public     | ti_1_prt_1     | ti_1_prt_1_j_idx       |            | CREATE INDEX ti_1_prt_1_j_idx ON public.ti_1_prt_1 USING bitmap (j)
+@@
+- public     | ti_1_prt_2     | ti_1_prt_2_j_idx       |            | CREATE INDEX ti_1_prt_2_j_idx ON public.ti_1_prt_2 USING bitmap (j)
+@@
+- public     | ti_1_prt_pnew1 | ti_1_prt_pnew1_j_idx   |            | CREATE INDEX ti_1_prt_pnew1_j_idx ON public.ti_1_prt_pnew1 USING bitmap (j)
+@@
+- public     | ti_1_prt_pnew2 | ti_1_prt_pnew2_j_idx   |            | CREATE INDEX ti_1_prt_pnew2_j_idx ON public.ti_1_prt_pnew2 USING bitmap (j)
+-(10 rows)
++(5 rows)
+@@
+-ERROR:  cannot drop index ti_1_prt_pnew1_j_idx because index ti_j_idx requires it
+-HINT:  You can drop index ti_j_idx instead.
++ERROR:  index "ti_1_prt_pnew1_j_idx" does not exist
+@@
+-ERROR:  cannot drop index ti_1_prt_pnew2_j_idx because index ti_j_idx requires it
+-HINT:  You can drop index ti_j_idx instead.
++ERROR:  index "ti_1_prt_pnew2_j_idx" does not exist
+@@
++ERROR:  index "ti_j_idx" does not exist
+@@
++ERROR:  unrecognized configuration parameter "gp_segments_for_planner"
+@@
++ERROR:  unrecognized configuration parameter "gp_segments_for_planner"
+@@
+-ERROR:  exclusion constraints are not supported on partitioned tables
+-LINE 4:   CONSTRAINT part_excl EXCLUDE (i WITH =) )
+-          ^
+@@
++ERROR:  relation "parttab_with_excl_constraint" already exists
+@@
+-ERROR:  exclusion constraints are not supported on partitioned tables
+-LINE 1: alter table parttab_with_excl_constraint ADD CONSTRAINT part...
+-                                                     ^
++ERROR:  relation "part_excl" already exists
+@@
+-Partitions: mpp6297_1_prt_p1_1_1 FOR VALUES FROM ('01-31-1992') TO ('02-28-1993'),
+-            mpp6297_1_prt_p1_2_1 FOR VALUES FROM ('02-28-1993') TO ('03-28-1994'),
+-            mpp6297_1_prt_p1_2_2 FOR VALUES FROM ('03-28-1994') TO ('03-31-1994'),
+-            mpp6297_1_prt_p1_3_1 FOR VALUES FROM ('03-31-1994') TO ('04-30-1995')
++Partitions:
++    mpp6297_1_prt_p1_1_1 FOR VALUES FROM ('01-31-1992') TO ('02-28-1993')
++    mpp6297_1_prt_p1_2_1 FOR VALUES FROM ('02-28-1993') TO ('03-28-1994')
++    mpp6297_1_prt_p1_2_2 FOR VALUES FROM ('03-28-1994') TO ('03-31-1994')
++    mpp6297_1_prt_p1_3_1 FOR VALUES FROM ('03-31-1994') TO ('04-30-1995')
+@@
+-Partitions: mpp6297_1_prt_p1_1 FOR VALUES FROM ('01-31-1992') TO ('02-28-1993'),
+-            mpp6297_1_prt_p1_2 FOR VALUES FROM ('02-28-1993') TO ('03-31-1994'),
+-            mpp6297_1_prt_p1_3 FOR VALUES FROM ('03-31-1994') TO ('04-30-1995')
++Partitions:
++    mpp6297_1_prt_p1_1 FOR VALUES FROM ('01-31-1992') TO ('02-28-1993')
++    mpp6297_1_prt_p1_2 FOR VALUES FROM ('02-28-1993') TO ('03-31-1994')
++    mpp6297_1_prt_p1_3 FOR VALUES FROM ('03-31-1994') TO ('04-30-1995')
+@@
+-Partitions: mpp6297_1_prt_1 FOR VALUES FROM (1) TO (2),
+-            mpp6297_1_prt_10 FOR VALUES FROM (10) TO (11),
+-            mpp6297_1_prt_2 FOR VALUES FROM (2) TO (3),
+-            mpp6297_1_prt_3 FOR VALUES FROM (3) TO (4),
+-            mpp6297_1_prt_4 FOR VALUES FROM (4) TO (5),
+-            mpp6297_1_prt_5 FOR VALUES FROM (5) TO (6),
+-            mpp6297_1_prt_6 FOR VALUES FROM (6) TO (7),
+-            mpp6297_1_prt_7 FOR VALUES FROM (7) TO (8),
+-            mpp6297_1_prt_8 FOR VALUES FROM (8) TO (9),
+-            mpp6297_1_prt_9 FOR VALUES FROM (9) TO (10)
++Partitions:
++    mpp6297_1_prt_1 FOR VALUES FROM (1) TO (2)
++    mpp6297_1_prt_10 FOR VALUES FROM (10) TO (11)
++    mpp6297_1_prt_2 FOR VALUES FROM (2) TO (3)
++    mpp6297_1_prt_3 FOR VALUES FROM (3) TO (4)
++    mpp6297_1_prt_4 FOR VALUES FROM (4) TO (5)
++    mpp6297_1_prt_5 FOR VALUES FROM (5) TO (6)
++    mpp6297_1_prt_6 FOR VALUES FROM (6) TO (7)
++    mpp6297_1_prt_7 FOR VALUES FROM (7) TO (8)
++    mpp6297_1_prt_8 FOR VALUES FROM (8) TO (9)
++    mpp6297_1_prt_9 FOR VALUES FROM (9) TO (10)
+@@
+-Partitions: mpp6297_1_prt_1 FOR VALUES FROM (1) TO (2),
+-            mpp6297_1_prt_10 FOR VALUES FROM (10) TO (11),
+-            mpp6297_1_prt_2 FOR VALUES FROM (2) TO (3),
+-            mpp6297_1_prt_4 FOR VALUES FROM (4) TO (5),
+-            mpp6297_1_prt_5 FOR VALUES FROM (5) TO (6),
+-            mpp6297_1_prt_6 FOR VALUES FROM (6) TO (7),
+-            mpp6297_1_prt_7 FOR VALUES FROM (7) TO (8),
+-            mpp6297_1_prt_8 FOR VALUES FROM (8) TO (9),
+-            mpp6297_1_prt_9 FOR VALUES FROM (9) TO (10)
++Partitions:
++    mpp6297_1_prt_1 FOR VALUES FROM (1) TO (2)
++    mpp6297_1_prt_10 FOR VALUES FROM (10) TO (11)
++    mpp6297_1_prt_2 FOR VALUES FROM (2) TO (3)
++    mpp6297_1_prt_4 FOR VALUES FROM (4) TO (5)
++    mpp6297_1_prt_5 FOR VALUES FROM (5) TO (6)
++    mpp6297_1_prt_6 FOR VALUES FROM (6) TO (7)
++    mpp6297_1_prt_7 FOR VALUES FROM (7) TO (8)
++    mpp6297_1_prt_8 FOR VALUES FROM (8) TO (9)
++    mpp6297_1_prt_9 FOR VALUES FROM (9) TO (10)
+@@
+-Partitions: mpp6297_1_prt_1 FOR VALUES FROM (1) TO (2),
+-            mpp6297_1_prt_10 FOR VALUES FROM (10) TO (11),
+-            mpp6297_1_prt_11 FOR VALUES FROM (3) TO (4),
+-            mpp6297_1_prt_2 FOR VALUES FROM (2) TO (3),
+-            mpp6297_1_prt_4 FOR VALUES FROM (4) TO (5),
+-            mpp6297_1_prt_5 FOR VALUES FROM (5) TO (6),
+-            mpp6297_1_prt_6 FOR VALUES FROM (6) TO (7),
+-            mpp6297_1_prt_7 FOR VALUES FROM (7) TO (8),
+-            mpp6297_1_prt_8 FOR VALUES FROM (8) TO (9),
+-            mpp6297_1_prt_9 FOR VALUES FROM (9) TO (10)
++Partitions:
++    mpp6297_1_prt_1 FOR VALUES FROM (1) TO (2)
++    mpp6297_1_prt_10 FOR VALUES FROM (10) TO (11)
++    mpp6297_1_prt_11 FOR VALUES FROM (3) TO (4)
++    mpp6297_1_prt_2 FOR VALUES FROM (2) TO (3)
++    mpp6297_1_prt_4 FOR VALUES FROM (4) TO (5)
++    mpp6297_1_prt_5 FOR VALUES FROM (5) TO (6)
++    mpp6297_1_prt_6 FOR VALUES FROM (6) TO (7)
++    mpp6297_1_prt_7 FOR VALUES FROM (7) TO (8)
++    mpp6297_1_prt_8 FOR VALUES FROM (8) TO (9)
++    mpp6297_1_prt_9 FOR VALUES FROM (9) TO (10)
+@@
+-Partitions: mpp6297_1_prt_1 FOR VALUES FROM (1) TO (2),
+-            mpp6297_1_prt_2 FOR VALUES FROM (2) TO (3),
+-            mpp6297_1_prt_3 FOR VALUES FROM (3) TO (4),
+-            mpp6297_1_prt_4 FOR VALUES FROM (4) TO (5),
+-            mpp6297_1_prt_5 FOR VALUES FROM (5) TO (6),
+-            mpp6297_1_prt_6 FOR VALUES FROM (6) TO (7),
+-            mpp6297_1_prt_7 FOR VALUES FROM (7) TO (8),
+-            mpp6297_1_prt_8 FOR VALUES FROM (8) TO (9),
+-            mpp6297_1_prt_9 FOR VALUES FROM (9) TO (10)
++Partitions:
++    mpp6297_1_prt_1 FOR VALUES FROM (1) TO (2)
++    mpp6297_1_prt_2 FOR VALUES FROM (2) TO (3)
++    mpp6297_1_prt_3 FOR VALUES FROM (3) TO (4)
++    mpp6297_1_prt_4 FOR VALUES FROM (4) TO (5)
++    mpp6297_1_prt_5 FOR VALUES FROM (5) TO (6)
++    mpp6297_1_prt_6 FOR VALUES FROM (6) TO (7)
++    mpp6297_1_prt_7 FOR VALUES FROM (7) TO (8)
++    mpp6297_1_prt_8 FOR VALUES FROM (8) TO (9)
++    mpp6297_1_prt_9 FOR VALUES FROM (9) TO (10)
+@@
+-Partitions: mpp6297_1_prt_1 FOR VALUES FROM (1) TO (2),
+-            mpp6297_1_prt_2 FOR VALUES FROM (2) TO (3),
+-            mpp6297_1_prt_3 FOR VALUES FROM (3) TO (4),
+-            mpp6297_1_prt_4 FOR VALUES FROM (4) TO (5),
+-            mpp6297_1_prt_5 FOR VALUES FROM (6) TO (7),
+-            mpp6297_1_prt_6 FOR VALUES FROM (7) TO (8),
+-            mpp6297_1_prt_7 FOR VALUES FROM (8) TO (9),
+-            mpp6297_1_prt_8 FOR VALUES FROM (9) TO (10)
++Partitions:
++    mpp6297_1_prt_1 FOR VALUES FROM (1) TO (2)
++    mpp6297_1_prt_2 FOR VALUES FROM (2) TO (3)
++    mpp6297_1_prt_3 FOR VALUES FROM (3) TO (4)
++    mpp6297_1_prt_4 FOR VALUES FROM (4) TO (5)
++    mpp6297_1_prt_5 FOR VALUES FROM (6) TO (7)
++    mpp6297_1_prt_6 FOR VALUES FROM (7) TO (8)
++    mpp6297_1_prt_7 FOR VALUES FROM (8) TO (9)
++    mpp6297_1_prt_8 FOR VALUES FROM (9) TO (10)
+@@
+-Partitions: mpp6297_1_prt_1 FOR VALUES FROM (1) TO (2),
+-            mpp6297_1_prt_2 FOR VALUES FROM (2) TO (3),
+-            mpp6297_1_prt_3 FOR VALUES FROM (3) TO (4),
+-            mpp6297_1_prt_4 FOR VALUES FROM (4) TO (5),
+-            mpp6297_1_prt_5 FOR VALUES FROM (5) TO (6),
+-            mpp6297_1_prt_6 FOR VALUES FROM (6) TO (7),
+-            mpp6297_1_prt_7 FOR VALUES FROM (7) TO (8),
+-            mpp6297_1_prt_8 FOR VALUES FROM (8) TO (9),
+-            mpp6297_1_prt_9 FOR VALUES FROM (9) TO (10)
++Partitions:
++    mpp6297_1_prt_1 FOR VALUES FROM (1) TO (2)
++    mpp6297_1_prt_2 FOR VALUES FROM (2) TO (3)
++    mpp6297_1_prt_3 FOR VALUES FROM (3) TO (4)
++    mpp6297_1_prt_4 FOR VALUES FROM (4) TO (5)
++    mpp6297_1_prt_5 FOR VALUES FROM (5) TO (6)
++    mpp6297_1_prt_6 FOR VALUES FROM (6) TO (7)
++    mpp6297_1_prt_7 FOR VALUES FROM (7) TO (8)
++    mpp6297_1_prt_8 FOR VALUES FROM (8) TO (9)
++    mpp6297_1_prt_9 FOR VALUES FROM (9) TO (10)
+@@
+-Partitions: mpp6297_1_prt_1 FOR VALUES FROM (2) TO (3),
+-            mpp6297_1_prt_2 FOR VALUES FROM (3) TO (4),
+-            mpp6297_1_prt_3 FOR VALUES FROM (4) TO (5),
+-            mpp6297_1_prt_4 FOR VALUES FROM (5) TO (6),
+-            mpp6297_1_prt_5 FOR VALUES FROM (6) TO (7),
+-            mpp6297_1_prt_6 FOR VALUES FROM (7) TO (8),
+-            mpp6297_1_prt_7 FOR VALUES FROM (8) TO (9),
+-            mpp6297_1_prt_8 FOR VALUES FROM (9) TO (10),
+-            mpp6297_1_prt_9 FOR VALUES FROM (10) TO (11)
++Partitions:
++    mpp6297_1_prt_1 FOR VALUES FROM (2) TO (3)
++    mpp6297_1_prt_2 FOR VALUES FROM (3) TO (4)
++    mpp6297_1_prt_3 FOR VALUES FROM (4) TO (5)
++    mpp6297_1_prt_4 FOR VALUES FROM (5) TO (6)
++    mpp6297_1_prt_5 FOR VALUES FROM (6) TO (7)
++    mpp6297_1_prt_6 FOR VALUES FROM (7) TO (8)
++    mpp6297_1_prt_7 FOR VALUES FROM (8) TO (9)
++    mpp6297_1_prt_8 FOR VALUES FROM (9) TO (10)
++    mpp6297_1_prt_9 FOR VALUES FROM (10) TO (11)
+@@
+-Partitions: mpp6297_1_prt_1 FOR VALUES FROM (2) TO (3),
+-            mpp6297_1_prt_3 FOR VALUES FROM (4) TO (5),
+-            mpp6297_1_prt_4 FOR VALUES FROM (5) TO (6),
+-            mpp6297_1_prt_5 FOR VALUES FROM (6) TO (7),
+-            mpp6297_1_prt_6 FOR VALUES FROM (7) TO (8),
+-            mpp6297_1_prt_7 FOR VALUES FROM (8) TO (9),
+-            mpp6297_1_prt_8 FOR VALUES FROM (9) TO (10),
+-            mpp6297_1_prt_9 FOR VALUES FROM (10) TO (11)
++Partitions:
++    mpp6297_1_prt_1 FOR VALUES FROM (2) TO (3)
++    mpp6297_1_prt_3 FOR VALUES FROM (4) TO (5)
++    mpp6297_1_prt_4 FOR VALUES FROM (5) TO (6)
++    mpp6297_1_prt_5 FOR VALUES FROM (6) TO (7)
++    mpp6297_1_prt_6 FOR VALUES FROM (7) TO (8)
++    mpp6297_1_prt_7 FOR VALUES FROM (8) TO (9)
++    mpp6297_1_prt_8 FOR VALUES FROM (9) TO (10)
++    mpp6297_1_prt_9 FOR VALUES FROM (10) TO (11)
+@@
+-Partitions: mpp6297_1_prt_1 FOR VALUES FROM (1) TO (2),
+-            mpp6297_1_prt_2 FOR VALUES FROM (2) TO (3),
+-            mpp6297_1_prt_3 FOR VALUES FROM (3) TO (4),
+-            mpp6297_1_prt_4 FOR VALUES FROM (4) TO (5),
+-            mpp6297_1_prt_5 FOR VALUES FROM (5) TO (6),
+-            mpp6297_1_prt_6 FOR VALUES FROM (6) TO (7),
+-            mpp6297_1_prt_7 FOR VALUES FROM (7) TO (8),
+-            mpp6297_1_prt_8 FOR VALUES FROM (8) TO (9),
+-            mpp6297_1_prt_9 FOR VALUES FROM (9) TO (10)
++Partitions:
++    mpp6297_1_prt_1 FOR VALUES FROM (1) TO (2)
++    mpp6297_1_prt_2 FOR VALUES FROM (2) TO (3)
++    mpp6297_1_prt_3 FOR VALUES FROM (3) TO (4)
++    mpp6297_1_prt_4 FOR VALUES FROM (4) TO (5)
++    mpp6297_1_prt_5 FOR VALUES FROM (5) TO (6)
++    mpp6297_1_prt_6 FOR VALUES FROM (6) TO (7)
++    mpp6297_1_prt_7 FOR VALUES FROM (7) TO (8)
++    mpp6297_1_prt_8 FOR VALUES FROM (8) TO (9)
++    mpp6297_1_prt_9 FOR VALUES FROM (9) TO (10)
+@@
++ERROR:  access method "ao_column" does not exist
+@@
++ERROR:  relation "mpp5992" does not exist
+@@
++ERROR:  relation "mpp5992" does not exist
+@@
++ERROR:  relation "mpp5992" does not exist
+@@
++ERROR:  relation "mpp5992" does not exist
+@@
++ERROR:  relation "mpp5992" does not exist
+@@
++ERROR:  relation "mpp5992" does not exist
+@@
++ERROR:  relation "mpp5992" does not exist
+@@
+-  relid  | level |                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                    template                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                    
+----------+-------+------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+- mpp5992 |     1 | {GPPARTITIONDEFINITION :partDefElems ({GPPARTDEFELEM :partName l1 :boundSpec {GPPARTITIONLISTSPEC :partValues (({A_CONST :val 1 :location 72}) ({A_CONST :val 2 :location 74}) ({A_CONST :val 3 :location 76})) :location 64} :subSpec <> :isDefault false :options <> :accessMethod <> :tablespacename <> :colencs <> :location 48} {GPPARTDEFELEM :partName l2 :boundSpec {GPPARTITIONLISTSPEC :partValues (({A_CONST :val 4 :location 105}) ({A_CONST :val 5 :location 107}) ({A_CONST :val 6 :location 109})) :location 97} :subSpec <> :isDefault false :options <> :accessMethod <> :tablespacename <> :colencs <> :location 81} {GPPARTDEFELEM :partName l3 :boundSpec {GPPARTITIONLISTSPEC :partValues (({A_CONST :val 7 :location 137}) ({A_CONST :val 8 :location 139}) ({A_CONST :val 9 :location 141}) ({A_CONST :val 10 :location 143})) :location 129} :subSpec <> :isDefault false :options <> :accessMethod <> :tablespacename <> :colencs <> :location 113}) :encClauses <> :isTemplate true :fromCatalog false :location 47}
+- mpp5992 |     2 | {GPPARTITIONDEFINITION :partDefElems ({GPPARTDEFELEM :partName ll1 :boundSpec {GPPARTITIONLISTSPEC :partValues (({A_CONST :val "Engineering" :location 108})) :location 100} :subSpec <> :isDefault false :options <> :accessMethod <> :tablespacename <> :colencs <> :location 83} {GPPARTDEFELEM :partName ll2 :boundSpec {GPPARTITIONLISTSPEC :partValues (({A_CONST :val "QA" :location 149})) :location 141} :subSpec <> :isDefault false :options <> :accessMethod <> :tablespacename <> :colencs <> :location 124}) :encClauses <> :isTemplate true :fromCatalog false :location 81}
+- mpp5992 |     3 | {GPPARTITIONDEFINITION :partDefElems ({GPPARTDEFELEM :partName lll1 :boundSpec {GPPARTITIONLISTSPEC :partValues (({A_CONST :val "M" :location 133})) :location 125} :subSpec <> :isDefault false :options <> :accessMethod <> :tablespacename <> :colencs <> :location 107} {GPPARTDEFELEM :partName lll2 :boundSpec {GPPARTITIONLISTSPEC :partValues (({A_CONST :val "F" :location 165})) :location 157} :subSpec <> :isDefault false :options <> :accessMethod <> :tablespacename <> :colencs <> :location 139}) :encClauses <> :isTemplate true :fromCatalog false :location 105}
+-(3 rows)
+-
++ERROR:  relation "gp_partition_template" does not exist
++LINE 1: select relid::regclass, level, template from gp_partition_te...
++                                                     ^
+@@
++ERROR:  relation "mpp5992" does not exist
+@@
++ERROR:  relation "mpp5992" does not exist
+@@
++ERROR:  relation "mpp5992" does not exist
+@@
+-                      relid                       |              parentrelid              | isleaf | level 
+---------------------------------------------------+---------------------------------------+--------+-------
+- mpp5992                                          |                                       | f      |     0
+- mpp5992_1_prt_1                                  | mpp5992                               | f      |     1
+- mpp5992_1_prt_1_2_prt_l1                         | mpp5992_1_prt_1                       | f      |     2
+- mpp5992_1_prt_1_2_prt_l1_3_prt_ll1               | mpp5992_1_prt_1_2_prt_l1              | f      |     3
+- mpp5992_1_prt_1_2_prt_l1_3_prt_ll1_4_prt_lll1    | mpp5992_1_prt_1_2_prt_l1_3_prt_ll1    | t      |     4
+- mpp5992_1_prt_1_2_prt_l1_3_prt_ll1_4_prt_lll2    | mpp5992_1_prt_1_2_prt_l1_3_prt_ll1    | t      |     4
+- mpp5992_1_prt_1_2_prt_l1_3_prt_ll2               | mpp5992_1_prt_1_2_prt_l1              | f      |     3
+- mpp5992_1_prt_1_2_prt_l1_3_prt_ll2_4_prt_lll1    | mpp5992_1_prt_1_2_prt_l1_3_prt_ll2    | t      |     4
+- mpp5992_1_prt_1_2_prt_l1_3_prt_ll2_4_prt_lll2    | mpp5992_1_prt_1_2_prt_l1_3_prt_ll2    | t      |     4
+- mpp5992_1_prt_1_2_prt_l2                         | mpp5992_1_prt_1                       | f      |     2
+- mpp5992_1_prt_1_2_prt_l2_3_prt_ll1               | mpp5992_1_prt_1_2_prt_l2              | f      |     3
+- mpp5992_1_prt_1_2_prt_l2_3_prt_ll1_4_prt_lll1    | mpp5992_1_prt_1_2_prt_l2_3_prt_ll1    | t      |     4
+- mpp5992_1_prt_1_2_prt_l2_3_prt_ll1_4_prt_lll2    | mpp5992_1_prt_1_2_prt_l2_3_prt_ll1    | t      |     4
+- mpp5992_1_prt_1_2_prt_l2_3_prt_ll2               | mpp5992_1_prt_1_2_prt_l2              | f      |     3
+- mpp5992_1_prt_1_2_prt_l2_3_prt_ll2_4_prt_lll1    | mpp5992_1_prt_1_2_prt_l2_3_prt_ll2    | t      |     4
+- mpp5992_1_prt_1_2_prt_l2_3_prt_ll2_4_prt_lll2    | mpp5992_1_prt_1_2_prt_l2_3_prt_ll2    | t      |     4
+- mpp5992_1_prt_2                                  | mpp5992                               | f      |     1
+- mpp5992_1_prt_2_2_prt_l1                         | mpp5992_1_prt_2                       | f      |     2
+- mpp5992_1_prt_2_2_prt_l1_3_prt_ll1               | mpp5992_1_prt_2_2_prt_l1              | f      |     3
+- mpp5992_1_prt_2_2_prt_l1_3_prt_ll1_4_prt_lll1    | mpp5992_1_prt_2_2_prt_l1_3_prt_ll1    | t      |     4
+- mpp5992_1_prt_2_2_prt_l1_3_prt_ll1_4_prt_lll2    | mpp5992_1_prt_2_2_prt_l1_3_prt_ll1    | t      |     4
+- mpp5992_1_prt_2_2_prt_l1_3_prt_ll2               | mpp5992_1_prt_2_2_prt_l1              | f      |     3
+- mpp5992_1_prt_2_2_prt_l1_3_prt_ll2_4_prt_lll1    | mpp5992_1_prt_2_2_prt_l1_3_prt_ll2    | t      |     4
+- mpp5992_1_prt_2_2_prt_l1_3_prt_ll2_4_prt_lll2    | mpp5992_1_prt_2_2_prt_l1_3_prt_ll2    | t      |     4
+- mpp5992_1_prt_2_2_prt_l2                         | mpp5992_1_prt_2                       | f      |     2
+- mpp5992_1_prt_2_2_prt_l2_3_prt_ll1               | mpp5992_1_prt_2_2_prt_l2              | f      |     3
+- mpp5992_1_prt_2_2_prt_l2_3_prt_ll1_4_prt_lll1    | mpp5992_1_prt_2_2_prt_l2_3_prt_ll1    | t      |     4
+- mpp5992_1_prt_2_2_prt_l2_3_prt_ll1_4_prt_lll2    | mpp5992_1_prt_2_2_prt_l2_3_prt_ll1    | t      |     4
+- mpp5992_1_prt_2_2_prt_l2_3_prt_ll2               | mpp5992_1_prt_2_2_prt_l2              | f      |     3
+- mpp5992_1_prt_2_2_prt_l2_3_prt_ll2_4_prt_lll1    | mpp5992_1_prt_2_2_prt_l2_3_prt_ll2    | t      |     4
+- mpp5992_1_prt_2_2_prt_l2_3_prt_ll2_4_prt_lll2    | mpp5992_1_prt_2_2_prt_l2_3_prt_ll2    | t      |     4
+- mpp5992_1_prt_3                                  | mpp5992                               | f      |     1
+- mpp5992_1_prt_3_2_prt_l1                         | mpp5992_1_prt_3                       | f      |     2
+- mpp5992_1_prt_3_2_prt_l1_3_prt_ll1               | mpp5992_1_prt_3_2_prt_l1              | f      |     3
+- mpp5992_1_prt_3_2_prt_l1_3_prt_ll1_4_prt_lll1    | mpp5992_1_prt_3_2_prt_l1_3_prt_ll1    | t      |     4
+- mpp5992_1_prt_3_2_prt_l1_3_prt_ll1_4_prt_lll2    | mpp5992_1_prt_3_2_prt_l1_3_prt_ll1    | t      |     4
+- mpp5992_1_prt_3_2_prt_l1_3_prt_ll2               | mpp5992_1_prt_3_2_prt_l1              | f      |     3
+- mpp5992_1_prt_3_2_prt_l1_3_prt_ll2_4_prt_lll1    | mpp5992_1_prt_3_2_prt_l1_3_prt_ll2    | t      |     4
+- mpp5992_1_prt_3_2_prt_l1_3_prt_ll2_4_prt_lll2    | mpp5992_1_prt_3_2_prt_l1_3_prt_ll2    | t      |     4
+- mpp5992_1_prt_3_2_prt_l2                         | mpp5992_1_prt_3                       | f      |     2
+- mpp5992_1_prt_3_2_prt_l2_3_prt_ll1               | mpp5992_1_prt_3_2_prt_l2              | f      |     3
+- mpp5992_1_prt_3_2_prt_l2_3_prt_ll1_4_prt_lll1    | mpp5992_1_prt_3_2_prt_l2_3_prt_ll1    | t      |     4
+- mpp5992_1_prt_3_2_prt_l2_3_prt_ll1_4_prt_lll2    | mpp5992_1_prt_3_2_prt_l2_3_prt_ll1    | t      |     4
+- mpp5992_1_prt_3_2_prt_l2_3_prt_ll2               | mpp5992_1_prt_3_2_prt_l2              | f      |     3
+- mpp5992_1_prt_3_2_prt_l2_3_prt_ll2_4_prt_lll1    | mpp5992_1_prt_3_2_prt_l2_3_prt_ll2    | t      |     4
+- mpp5992_1_prt_3_2_prt_l2_3_prt_ll2_4_prt_lll2    | mpp5992_1_prt_3_2_prt_l2_3_prt_ll2    | t      |     4
+- mpp5992_1_prt_foo1                               | mpp5992                               | f      |     1
+- mpp5992_1_prt_foo1_2_prt_l1                      | mpp5992_1_prt_foo1                    | f      |     2
+- mpp5992_1_prt_foo1_2_prt_l1_3_prt_ll1            | mpp5992_1_prt_foo1_2_prt_l1           | f      |     3
+- mpp5992_1_prt_foo1_2_prt_l1_3_prt_ll1_4_prt_lll1 | mpp5992_1_prt_foo1_2_prt_l1_3_prt_ll1 | t      |     4
+- mpp5992_1_prt_foo1_2_prt_l1_3_prt_ll1_4_prt_lll2 | mpp5992_1_prt_foo1_2_prt_l1_3_prt_ll1 | t      |     4
+- mpp5992_1_prt_foo1_2_prt_l1_3_prt_ll2            | mpp5992_1_prt_foo1_2_prt_l1           | f      |     3
+- mpp5992_1_prt_foo1_2_prt_l1_3_prt_ll2_4_prt_lll1 | mpp5992_1_prt_foo1_2_prt_l1_3_prt_ll2 | t      |     4
+- mpp5992_1_prt_foo1_2_prt_l1_3_prt_ll2_4_prt_lll2 | mpp5992_1_prt_foo1_2_prt_l1_3_prt_ll2 | t      |     4
+- mpp5992_1_prt_foo1_2_prt_l2                      | mpp5992_1_prt_foo1                    | f      |     2
+- mpp5992_1_prt_foo1_2_prt_l2_3_prt_ll1            | mpp5992_1_prt_foo1_2_prt_l2           | f      |     3
+- mpp5992_1_prt_foo1_2_prt_l2_3_prt_ll1_4_prt_lll1 | mpp5992_1_prt_foo1_2_prt_l2_3_prt_ll1 | t      |     4
+- mpp5992_1_prt_foo1_2_prt_l2_3_prt_ll1_4_prt_lll2 | mpp5992_1_prt_foo1_2_prt_l2_3_prt_ll1 | t      |     4
+- mpp5992_1_prt_foo1_2_prt_l2_3_prt_ll2            | mpp5992_1_prt_foo1_2_prt_l2           | f      |     3
+- mpp5992_1_prt_foo1_2_prt_l2_3_prt_ll2_4_prt_lll1 | mpp5992_1_prt_foo1_2_prt_l2_3_prt_ll2 | t      |     4
+- mpp5992_1_prt_foo1_2_prt_l2_3_prt_ll2_4_prt_lll2 | mpp5992_1_prt_foo1_2_prt_l2_3_prt_ll2 | t      |     4
+- mpp5992_1_prt_foo1_2_prt_l3                      | mpp5992_1_prt_foo1                    | f      |     2
+- mpp5992_1_prt_foo1_2_prt_l3_3_prt_ll1            | mpp5992_1_prt_foo1_2_prt_l3           | f      |     3
+- mpp5992_1_prt_foo1_2_prt_l3_3_prt_ll1_4_prt_lll1 | mpp5992_1_prt_foo1_2_prt_l3_3_prt_ll1 | t      |     4
+- mpp5992_1_prt_foo1_2_prt_l3_3_prt_ll1_4_prt_lll2 | mpp5992_1_prt_foo1_2_prt_l3_3_prt_ll1 | t      |     4
+- mpp5992_1_prt_foo1_2_prt_l3_3_prt_ll2            | mpp5992_1_prt_foo1_2_prt_l3           | f      |     3
+- mpp5992_1_prt_foo1_2_prt_l3_3_prt_ll2_4_prt_lll1 | mpp5992_1_prt_foo1_2_prt_l3_3_prt_ll2 | t      |     4
+- mpp5992_1_prt_foo1_2_prt_l3_3_prt_ll2_4_prt_lll2 | mpp5992_1_prt_foo1_2_prt_l3_3_prt_ll2 | t      |     4
+- mpp5992_1_prt_foo2                               | mpp5992                               | f      |     1
+- mpp5992_1_prt_foo2_2_prt_l1                      | mpp5992_1_prt_foo2                    | f      |     2
+- mpp5992_1_prt_foo2_2_prt_l1_3_prt_ll1            | mpp5992_1_prt_foo2_2_prt_l1           | f      |     3
+- mpp5992_1_prt_foo2_2_prt_l1_3_prt_ll1_4_prt_lll1 | mpp5992_1_prt_foo2_2_prt_l1_3_prt_ll1 | t      |     4
+- mpp5992_1_prt_foo2_2_prt_l1_3_prt_ll1_4_prt_lll2 | mpp5992_1_prt_foo2_2_prt_l1_3_prt_ll1 | t      |     4
+- mpp5992_1_prt_foo2_2_prt_l1_3_prt_ll2            | mpp5992_1_prt_foo2_2_prt_l1           | f      |     3
+- mpp5992_1_prt_foo2_2_prt_l1_3_prt_ll2_4_prt_lll1 | mpp5992_1_prt_foo2_2_prt_l1_3_prt_ll2 | t      |     4
+- mpp5992_1_prt_foo2_2_prt_l1_3_prt_ll2_4_prt_lll2 | mpp5992_1_prt_foo2_2_prt_l1_3_prt_ll2 | t      |     4
+- mpp5992_1_prt_foo2_2_prt_l2                      | mpp5992_1_prt_foo2                    | f      |     2
+- mpp5992_1_prt_foo2_2_prt_l2_3_prt_ll1            | mpp5992_1_prt_foo2_2_prt_l2           | f      |     3
+- mpp5992_1_prt_foo2_2_prt_l2_3_prt_ll1_4_prt_lll1 | mpp5992_1_prt_foo2_2_prt_l2_3_prt_ll1 | t      |     4
+- mpp5992_1_prt_foo2_2_prt_l2_3_prt_ll1_4_prt_lll2 | mpp5992_1_prt_foo2_2_prt_l2_3_prt_ll1 | t      |     4
+- mpp5992_1_prt_foo2_2_prt_l2_3_prt_ll2            | mpp5992_1_prt_foo2_2_prt_l2           | f      |     3
+- mpp5992_1_prt_foo2_2_prt_l2_3_prt_ll2_4_prt_lll1 | mpp5992_1_prt_foo2_2_prt_l2_3_prt_ll2 | t      |     4
+- mpp5992_1_prt_foo2_2_prt_l2_3_prt_ll2_4_prt_lll2 | mpp5992_1_prt_foo2_2_prt_l2_3_prt_ll2 | t      |     4
+- mpp5992_1_prt_foo2_2_prt_l3                      | mpp5992_1_prt_foo2                    | f      |     2
+- mpp5992_1_prt_foo2_2_prt_l3_3_prt_ll1            | mpp5992_1_prt_foo2_2_prt_l3           | f      |     3
+- mpp5992_1_prt_foo2_2_prt_l3_3_prt_ll1_4_prt_lll1 | mpp5992_1_prt_foo2_2_prt_l3_3_prt_ll1 | t      |     4
+- mpp5992_1_prt_foo2_2_prt_l3_3_prt_ll1_4_prt_lll2 | mpp5992_1_prt_foo2_2_prt_l3_3_prt_ll1 | t      |     4
+- mpp5992_1_prt_foo2_2_prt_l3_3_prt_ll2            | mpp5992_1_prt_foo2_2_prt_l3           | f      |     3
+- mpp5992_1_prt_foo2_2_prt_l3_3_prt_ll2_4_prt_lll1 | mpp5992_1_prt_foo2_2_prt_l3_3_prt_ll2 | t      |     4
+- mpp5992_1_prt_foo2_2_prt_l3_3_prt_ll2_4_prt_lll2 | mpp5992_1_prt_foo2_2_prt_l3_3_prt_ll2 | t      |     4
+- mpp5992_1_prt_foo3                               | mpp5992                               | f      |     1
+- mpp5992_1_prt_foo3_2_prt_l1                      | mpp5992_1_prt_foo3                    | f      |     2
+- mpp5992_1_prt_foo3_2_prt_l1_3_prt_ll1            | mpp5992_1_prt_foo3_2_prt_l1           | f      |     3
+- mpp5992_1_prt_foo3_2_prt_l1_3_prt_ll1_4_prt_lll1 | mpp5992_1_prt_foo3_2_prt_l1_3_prt_ll1 | t      |     4
+- mpp5992_1_prt_foo3_2_prt_l1_3_prt_ll1_4_prt_lll2 | mpp5992_1_prt_foo3_2_prt_l1_3_prt_ll1 | t      |     4
+- mpp5992_1_prt_foo3_2_prt_l1_3_prt_ll2            | mpp5992_1_prt_foo3_2_prt_l1           | f      |     3
+- mpp5992_1_prt_foo3_2_prt_l1_3_prt_ll2_4_prt_lll1 | mpp5992_1_prt_foo3_2_prt_l1_3_prt_ll2 | t      |     4
+- mpp5992_1_prt_foo3_2_prt_l1_3_prt_ll2_4_prt_lll2 | mpp5992_1_prt_foo3_2_prt_l1_3_prt_ll2 | t      |     4
+- mpp5992_1_prt_foo3_2_prt_l2                      | mpp5992_1_prt_foo3                    | f      |     2
+- mpp5992_1_prt_foo3_2_prt_l2_3_prt_ll1            | mpp5992_1_prt_foo3_2_prt_l2           | f      |     3
+- mpp5992_1_prt_foo3_2_prt_l2_3_prt_ll1_4_prt_lll1 | mpp5992_1_prt_foo3_2_prt_l2_3_prt_ll1 | t      |     4
+- mpp5992_1_prt_foo3_2_prt_l2_3_prt_ll1_4_prt_lll2 | mpp5992_1_prt_foo3_2_prt_l2_3_prt_ll1 | t      |     4
+- mpp5992_1_prt_foo3_2_prt_l2_3_prt_ll2            | mpp5992_1_prt_foo3_2_prt_l2           | f      |     3
+- mpp5992_1_prt_foo3_2_prt_l2_3_prt_ll2_4_prt_lll1 | mpp5992_1_prt_foo3_2_prt_l2_3_prt_ll2 | t      |     4
+- mpp5992_1_prt_foo3_2_prt_l2_3_prt_ll2_4_prt_lll2 | mpp5992_1_prt_foo3_2_prt_l2_3_prt_ll2 | t      |     4
+- mpp5992_1_prt_foo3_2_prt_l3                      | mpp5992_1_prt_foo3                    | f      |     2
+- mpp5992_1_prt_foo3_2_prt_l3_3_prt_ll1            | mpp5992_1_prt_foo3_2_prt_l3           | f      |     3
+- mpp5992_1_prt_foo3_2_prt_l3_3_prt_ll1_4_prt_lll1 | mpp5992_1_prt_foo3_2_prt_l3_3_prt_ll1 | t      |     4
+- mpp5992_1_prt_foo3_2_prt_l3_3_prt_ll1_4_prt_lll2 | mpp5992_1_prt_foo3_2_prt_l3_3_prt_ll1 | t      |     4
+- mpp5992_1_prt_foo3_2_prt_l3_3_prt_ll2            | mpp5992_1_prt_foo3_2_prt_l3           | f      |     3
+- mpp5992_1_prt_foo3_2_prt_l3_3_prt_ll2_4_prt_lll1 | mpp5992_1_prt_foo3_2_prt_l3_3_prt_ll2 | t      |     4
+- mpp5992_1_prt_foo3_2_prt_l3_3_prt_ll2_4_prt_lll2 | mpp5992_1_prt_foo3_2_prt_l3_3_prt_ll2 | t      |     4
+-(112 rows)
+-
++ERROR:  relation "mpp5992" does not exist
++LINE 1: select * from pg_partition_tree('mpp5992');
++                                        ^
+@@
+-                     relname                      | relam |                   pg_get_expr                    
+---------------------------------------------------+-------+--------------------------------------------------
+- mpp5992                                          |  7166 | 
+- mpp5992_1_prt_1                                  |  7166 | FOR VALUES FROM ('01-01-2007') TO ('01-01-2008')
+- mpp5992_1_prt_1_2_prt_l1                         |  7166 | FOR VALUES IN (1, 2, 3, 4, 5)
+- mpp5992_1_prt_1_2_prt_l1_3_prt_ll1               |  7166 | FOR VALUES IN ('Engineering')
+- mpp5992_1_prt_1_2_prt_l1_3_prt_ll1_4_prt_lll1    |  7166 | FOR VALUES IN ('M')
+- mpp5992_1_prt_1_2_prt_l1_3_prt_ll1_4_prt_lll2    |  7166 | FOR VALUES IN ('F')
+- mpp5992_1_prt_1_2_prt_l1_3_prt_ll2               |  7166 | FOR VALUES IN ('QA')
+- mpp5992_1_prt_1_2_prt_l1_3_prt_ll2_4_prt_lll1    |  7166 | FOR VALUES IN ('M')
+- mpp5992_1_prt_1_2_prt_l1_3_prt_ll2_4_prt_lll2    |  7166 | FOR VALUES IN ('F')
+- mpp5992_1_prt_1_2_prt_l2                         |  7166 | FOR VALUES IN (6, 7, 8, 9, 10)
+- mpp5992_1_prt_1_2_prt_l2_3_prt_ll1               |  7166 | FOR VALUES IN ('Engineering')
+- mpp5992_1_prt_1_2_prt_l2_3_prt_ll1_4_prt_lll1    |  7166 | FOR VALUES IN ('M')
+- mpp5992_1_prt_1_2_prt_l2_3_prt_ll1_4_prt_lll2    |  7166 | FOR VALUES IN ('F')
+- mpp5992_1_prt_1_2_prt_l2_3_prt_ll2               |  7166 | FOR VALUES IN ('QA')
+- mpp5992_1_prt_1_2_prt_l2_3_prt_ll2_4_prt_lll1    |  7166 | FOR VALUES IN ('M')
+- mpp5992_1_prt_1_2_prt_l2_3_prt_ll2_4_prt_lll2    |  7166 | FOR VALUES IN ('F')
+- mpp5992_1_prt_2                                  |  7166 | FOR VALUES FROM ('01-01-2008') TO ('01-01-2009')
+- mpp5992_1_prt_2_2_prt_l1                         |  7166 | FOR VALUES IN (1, 2, 3, 4, 5)
+- mpp5992_1_prt_2_2_prt_l1_3_prt_ll1               |  7166 | FOR VALUES IN ('Engineering')
+- mpp5992_1_prt_2_2_prt_l1_3_prt_ll1_4_prt_lll1    |  7166 | FOR VALUES IN ('M')
+- mpp5992_1_prt_2_2_prt_l1_3_prt_ll1_4_prt_lll2    |  7166 | FOR VALUES IN ('F')
+- mpp5992_1_prt_2_2_prt_l1_3_prt_ll2               |  7166 | FOR VALUES IN ('QA')
+- mpp5992_1_prt_2_2_prt_l1_3_prt_ll2_4_prt_lll1    |  7166 | FOR VALUES IN ('M')
+- mpp5992_1_prt_2_2_prt_l1_3_prt_ll2_4_prt_lll2    |  7166 | FOR VALUES IN ('F')
+- mpp5992_1_prt_2_2_prt_l2                         |  7166 | FOR VALUES IN (6, 7, 8, 9, 10)
+- mpp5992_1_prt_2_2_prt_l2_3_prt_ll1               |  7166 | FOR VALUES IN ('Engineering')
+- mpp5992_1_prt_2_2_prt_l2_3_prt_ll1_4_prt_lll1    |  7166 | FOR VALUES IN ('M')
+- mpp5992_1_prt_2_2_prt_l2_3_prt_ll1_4_prt_lll2    |  7166 | FOR VALUES IN ('F')
+- mpp5992_1_prt_2_2_prt_l2_3_prt_ll2               |  7166 | FOR VALUES IN ('QA')
+- mpp5992_1_prt_2_2_prt_l2_3_prt_ll2_4_prt_lll1    |  7166 | FOR VALUES IN ('M')
+- mpp5992_1_prt_2_2_prt_l2_3_prt_ll2_4_prt_lll2    |  7166 | FOR VALUES IN ('F')
+- mpp5992_1_prt_3                                  |  7166 | FOR VALUES FROM ('01-01-2009') TO ('01-01-2010')
+- mpp5992_1_prt_3_2_prt_l1                         |  7166 | FOR VALUES IN (1, 2, 3, 4, 5)
+- mpp5992_1_prt_3_2_prt_l1_3_prt_ll1               |  7166 | FOR VALUES IN ('Engineering')
+- mpp5992_1_prt_3_2_prt_l1_3_prt_ll1_4_prt_lll1    |  7166 | FOR VALUES IN ('M')
+- mpp5992_1_prt_3_2_prt_l1_3_prt_ll1_4_prt_lll2    |  7166 | FOR VALUES IN ('F')
+- mpp5992_1_prt_3_2_prt_l1_3_prt_ll2               |  7166 | FOR VALUES IN ('QA')
+- mpp5992_1_prt_3_2_prt_l1_3_prt_ll2_4_prt_lll1    |  7166 | FOR VALUES IN ('M')
+- mpp5992_1_prt_3_2_prt_l1_3_prt_ll2_4_prt_lll2    |  7166 | FOR VALUES IN ('F')
+- mpp5992_1_prt_3_2_prt_l2                         |  7166 | FOR VALUES IN (6, 7, 8, 9, 10)
+- mpp5992_1_prt_3_2_prt_l2_3_prt_ll1               |  7166 | FOR VALUES IN ('Engineering')
+- mpp5992_1_prt_3_2_prt_l2_3_prt_ll1_4_prt_lll1    |  7166 | FOR VALUES IN ('M')
+- mpp5992_1_prt_3_2_prt_l2_3_prt_ll1_4_prt_lll2    |  7166 | FOR VALUES IN ('F')
+- mpp5992_1_prt_3_2_prt_l2_3_prt_ll2               |  7166 | FOR VALUES IN ('QA')
+- mpp5992_1_prt_3_2_prt_l2_3_prt_ll2_4_prt_lll1    |  7166 | FOR VALUES IN ('M')
+- mpp5992_1_prt_3_2_prt_l2_3_prt_ll2_4_prt_lll2    |  7166 | FOR VALUES IN ('F')
+- mpp5992_1_prt_foo1                               |  7166 | FOR VALUES FROM ('01-01-2011') TO ('01-01-2012')
+- mpp5992_1_prt_foo1_2_prt_l1                      |  7166 | FOR VALUES IN (1, 2, 3)
+- mpp5992_1_prt_foo1_2_prt_l1_3_prt_ll1            |  7166 | FOR VALUES IN ('Engineering')
+- mpp5992_1_prt_foo1_2_prt_l1_3_prt_ll1_4_prt_lll1 |  7166 | FOR VALUES IN ('M')
+- mpp5992_1_prt_foo1_2_prt_l1_3_prt_ll1_4_prt_lll2 |  7166 | FOR VALUES IN ('F')
+- mpp5992_1_prt_foo1_2_prt_l1_3_prt_ll2            |  7166 | FOR VALUES IN ('QA')
+- mpp5992_1_prt_foo1_2_prt_l1_3_prt_ll2_4_prt_lll1 |  7166 | FOR VALUES IN ('M')
+- mpp5992_1_prt_foo1_2_prt_l1_3_prt_ll2_4_prt_lll2 |  7166 | FOR VALUES IN ('F')
+- mpp5992_1_prt_foo1_2_prt_l2                      |  7166 | FOR VALUES IN (4, 5, 6)
+- mpp5992_1_prt_foo1_2_prt_l2_3_prt_ll1            |  7166 | FOR VALUES IN ('Engineering')
+- mpp5992_1_prt_foo1_2_prt_l2_3_prt_ll1_4_prt_lll1 |  7166 | FOR VALUES IN ('M')
+- mpp5992_1_prt_foo1_2_prt_l2_3_prt_ll1_4_prt_lll2 |  7166 | FOR VALUES IN ('F')
+- mpp5992_1_prt_foo1_2_prt_l2_3_prt_ll2            |  7166 | FOR VALUES IN ('QA')
+- mpp5992_1_prt_foo1_2_prt_l2_3_prt_ll2_4_prt_lll1 |  7166 | FOR VALUES IN ('M')
+- mpp5992_1_prt_foo1_2_prt_l2_3_prt_ll2_4_prt_lll2 |  7166 | FOR VALUES IN ('F')
+- mpp5992_1_prt_foo1_2_prt_l3                      |  7166 | FOR VALUES IN (7, 8, 9, 10)
+- mpp5992_1_prt_foo1_2_prt_l3_3_prt_ll1            |  7166 | FOR VALUES IN ('Engineering')
+- mpp5992_1_prt_foo1_2_prt_l3_3_prt_ll1_4_prt_lll1 |  7166 | FOR VALUES IN ('M')
+- mpp5992_1_prt_foo1_2_prt_l3_3_prt_ll1_4_prt_lll2 |  7166 | FOR VALUES IN ('F')
+- mpp5992_1_prt_foo1_2_prt_l3_3_prt_ll2            |  7166 | FOR VALUES IN ('QA')
+- mpp5992_1_prt_foo1_2_prt_l3_3_prt_ll2_4_prt_lll1 |  7166 | FOR VALUES IN ('M')
+- mpp5992_1_prt_foo1_2_prt_l3_3_prt_ll2_4_prt_lll2 |  7166 | FOR VALUES IN ('F')
+- mpp5992_1_prt_foo2                               |  7166 | FOR VALUES FROM ('01-01-2012') TO ('01-01-2013')
+- mpp5992_1_prt_foo2_2_prt_l1                      |  7166 | FOR VALUES IN (1, 2, 3)
+- mpp5992_1_prt_foo2_2_prt_l1_3_prt_ll1            |  7166 | FOR VALUES IN ('Engineering')
+- mpp5992_1_prt_foo2_2_prt_l1_3_prt_ll1_4_prt_lll1 |  7166 | FOR VALUES IN ('M')
+- mpp5992_1_prt_foo2_2_prt_l1_3_prt_ll1_4_prt_lll2 |  7166 | FOR VALUES IN ('F')
+- mpp5992_1_prt_foo2_2_prt_l1_3_prt_ll2            |  7166 | FOR VALUES IN ('QA')
+- mpp5992_1_prt_foo2_2_prt_l1_3_prt_ll2_4_prt_lll1 |  7166 | FOR VALUES IN ('M')
+- mpp5992_1_prt_foo2_2_prt_l1_3_prt_ll2_4_prt_lll2 |  7166 | FOR VALUES IN ('F')
+- mpp5992_1_prt_foo2_2_prt_l2                      |  7166 | FOR VALUES IN (4, 5, 6)
+- mpp5992_1_prt_foo2_2_prt_l2_3_prt_ll1            |  7166 | FOR VALUES IN ('Engineering')
+- mpp5992_1_prt_foo2_2_prt_l2_3_prt_ll1_4_prt_lll1 |  7166 | FOR VALUES IN ('M')
+- mpp5992_1_prt_foo2_2_prt_l2_3_prt_ll1_4_prt_lll2 |  7166 | FOR VALUES IN ('F')
+- mpp5992_1_prt_foo2_2_prt_l2_3_prt_ll2            |  7166 | FOR VALUES IN ('QA')
+- mpp5992_1_prt_foo2_2_prt_l2_3_prt_ll2_4_prt_lll1 |  7166 | FOR VALUES IN ('M')
+- mpp5992_1_prt_foo2_2_prt_l2_3_prt_ll2_4_prt_lll2 |  7166 | FOR VALUES IN ('F')
+- mpp5992_1_prt_foo2_2_prt_l3                      |  7166 | FOR VALUES IN (7, 8, 9, 10)
+- mpp5992_1_prt_foo2_2_prt_l3_3_prt_ll1            |  7166 | FOR VALUES IN ('Engineering')
+- mpp5992_1_prt_foo2_2_prt_l3_3_prt_ll1_4_prt_lll1 |  7166 | FOR VALUES IN ('M')
+- mpp5992_1_prt_foo2_2_prt_l3_3_prt_ll1_4_prt_lll2 |  7166 | FOR VALUES IN ('F')
+- mpp5992_1_prt_foo2_2_prt_l3_3_prt_ll2            |  7166 | FOR VALUES IN ('QA')
+- mpp5992_1_prt_foo2_2_prt_l3_3_prt_ll2_4_prt_lll1 |  7166 | FOR VALUES IN ('M')
+- mpp5992_1_prt_foo2_2_prt_l3_3_prt_ll2_4_prt_lll2 |  7166 | FOR VALUES IN ('F')
+- mpp5992_1_prt_foo3                               |  7024 | FOR VALUES FROM ('01-01-2013') TO ('01-01-2014')
+- mpp5992_1_prt_foo3_2_prt_l1                      |  7024 | FOR VALUES IN (1, 2, 3)
+- mpp5992_1_prt_foo3_2_prt_l1_3_prt_ll1            |  7024 | FOR VALUES IN ('Engineering')
+- mpp5992_1_prt_foo3_2_prt_l1_3_prt_ll1_4_prt_lll1 |  7024 | FOR VALUES IN ('M')
+- mpp5992_1_prt_foo3_2_prt_l1_3_prt_ll1_4_prt_lll2 |  7024 | FOR VALUES IN ('F')
+- mpp5992_1_prt_foo3_2_prt_l1_3_prt_ll2            |  7024 | FOR VALUES IN ('QA')
+- mpp5992_1_prt_foo3_2_prt_l1_3_prt_ll2_4_prt_lll1 |  7024 | FOR VALUES IN ('M')
+- mpp5992_1_prt_foo3_2_prt_l1_3_prt_ll2_4_prt_lll2 |  7024 | FOR VALUES IN ('F')
+- mpp5992_1_prt_foo3_2_prt_l2                      |  7024 | FOR VALUES IN (4, 5, 6)
+- mpp5992_1_prt_foo3_2_prt_l2_3_prt_ll1            |  7024 | FOR VALUES IN ('Engineering')
+- mpp5992_1_prt_foo3_2_prt_l2_3_prt_ll1_4_prt_lll1 |  7024 | FOR VALUES IN ('M')
+- mpp5992_1_prt_foo3_2_prt_l2_3_prt_ll1_4_prt_lll2 |  7024 | FOR VALUES IN ('F')
+- mpp5992_1_prt_foo3_2_prt_l2_3_prt_ll2            |  7024 | FOR VALUES IN ('QA')
+- mpp5992_1_prt_foo3_2_prt_l2_3_prt_ll2_4_prt_lll1 |  7024 | FOR VALUES IN ('M')
+- mpp5992_1_prt_foo3_2_prt_l2_3_prt_ll2_4_prt_lll2 |  7024 | FOR VALUES IN ('F')
+- mpp5992_1_prt_foo3_2_prt_l3                      |  7024 | FOR VALUES IN (7, 8, 9, 10)
+- mpp5992_1_prt_foo3_2_prt_l3_3_prt_ll1            |  7024 | FOR VALUES IN ('Engineering')
+- mpp5992_1_prt_foo3_2_prt_l3_3_prt_ll1_4_prt_lll1 |  7024 | FOR VALUES IN ('M')
+- mpp5992_1_prt_foo3_2_prt_l3_3_prt_ll1_4_prt_lll2 |  7024 | FOR VALUES IN ('F')
+- mpp5992_1_prt_foo3_2_prt_l3_3_prt_ll2            |  7024 | FOR VALUES IN ('QA')
+- mpp5992_1_prt_foo3_2_prt_l3_3_prt_ll2_4_prt_lll1 |  7024 | FOR VALUES IN ('M')
+- mpp5992_1_prt_foo3_2_prt_l3_3_prt_ll2_4_prt_lll2 |  7024 | FOR VALUES IN ('F')
+-(112 rows)
++ relname | relam | pg_get_expr 
++---------+-------+-------------
++(0 rows)
+@@
+-  relid  | level |                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                    template                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                    
+----------+-------+------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+- mpp5992 |     1 | {GPPARTITIONDEFINITION :partDefElems ({GPPARTDEFELEM :partName l1 :boundSpec {GPPARTITIONLISTSPEC :partValues (({A_CONST :val 1 :location 72}) ({A_CONST :val 2 :location 74}) ({A_CONST :val 3 :location 76})) :location 64} :subSpec <> :isDefault false :options <> :accessMethod <> :tablespacename <> :colencs <> :location 48} {GPPARTDEFELEM :partName l2 :boundSpec {GPPARTITIONLISTSPEC :partValues (({A_CONST :val 4 :location 105}) ({A_CONST :val 5 :location 107}) ({A_CONST :val 6 :location 109})) :location 97} :subSpec <> :isDefault false :options <> :accessMethod <> :tablespacename <> :colencs <> :location 81} {GPPARTDEFELEM :partName l3 :boundSpec {GPPARTITIONLISTSPEC :partValues (({A_CONST :val 7 :location 137}) ({A_CONST :val 8 :location 139}) ({A_CONST :val 9 :location 141}) ({A_CONST :val 10 :location 143})) :location 129} :subSpec <> :isDefault false :options <> :accessMethod <> :tablespacename <> :colencs <> :location 113}) :encClauses <> :isTemplate true :fromCatalog false :location 47}
+- mpp5992 |     2 | {GPPARTITIONDEFINITION :partDefElems ({GPPARTDEFELEM :partName ll1 :boundSpec {GPPARTITIONLISTSPEC :partValues (({A_CONST :val "Engineering" :location 108})) :location 100} :subSpec <> :isDefault false :options <> :accessMethod <> :tablespacename <> :colencs <> :location 83} {GPPARTDEFELEM :partName ll2 :boundSpec {GPPARTITIONLISTSPEC :partValues (({A_CONST :val "QA" :location 149})) :location 141} :subSpec <> :isDefault false :options <> :accessMethod <> :tablespacename <> :colencs <> :location 124}) :encClauses <> :isTemplate true :fromCatalog false :location 81}
+- mpp5992 |     3 | {GPPARTITIONDEFINITION :partDefElems ({GPPARTDEFELEM :partName lll1 :boundSpec {GPPARTITIONLISTSPEC :partValues (({A_CONST :val "M" :location 133})) :location 125} :subSpec <> :isDefault false :options <> :accessMethod <> :tablespacename <> :colencs <> :location 107} {GPPARTDEFELEM :partName lll2 :boundSpec {GPPARTITIONLISTSPEC :partValues (({A_CONST :val "F" :location 165})) :location 157} :subSpec <> :isDefault false :options <> :accessMethod <> :tablespacename <> :colencs <> :location 139}) :encClauses <> :isTemplate true :fromCatalog false :location 105}
+-(3 rows)
+-
++ERROR:  relation "gp_partition_template" does not exist
++LINE 1: select relid::regclass, level, template from gp_partition_te...
++                                                     ^
+@@
+-  relid   | level |                                                                                                                                                                                                                                                              template                                                                                                                                                                                                                                                               
+-----------+-------+-------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+- mpp10480 |     1 | {GPPARTITIONDEFINITION :partDefElems ({GPPARTDEFELEM :partName <> :boundSpec {GPPARTITIONRANGESPEC :partStart {GPPARTITIONRANGEITEM :val ({A_CONST :val 1 :location 122}) :edge 1 :location 115} :partEnd {GPPARTITIONRANGEITEM :val ({A_CONST :val 10 :location 130}) :edge 2 :location 125} :partEvery ({A_CONST :val 1 :location 141}) :location 115} :subSpec <> :isDefault false :options <> :accessMethod <> :tablespacename <> :colencs <> :location 115}) :encClauses <> :isTemplate true :fromCatalog false :location 114}
+-(1 row)
+-
++ERROR:  relation "gp_partition_template" does not exist
++LINE 1: select relid::regclass, level, template from gp_partition_te...
++                                                     ^
+@@
+- relname | distribution_attributes 
+----------+-------------------------
+-(0 rows)
+-
++ERROR:  relation "gp_distribution_policy" does not exist
++LINE 2: gp_distribution_policy p, pg_class c
++        ^
+@@
+- relname | distribution_attributes 
+----------+-------------------------
+-(0 rows)
+-
++ERROR:  relation "gp_distribution_policy" does not exist
++LINE 2: gp_distribution_policy p, pg_class c where p.localoid = c.oi...
++        ^
+@@
+- relname | distribution_attributes 
+----------+-------------------------
+-(0 rows)
+-
++ERROR:  relation "gp_distribution_policy" does not exist
++LINE 2: gp_distribution_policy p, pg_class c where p.localoid = c.oi...
++        ^
+@@
++ERROR:  unrecognized parameter "appendonly"
+@@
+-       relname       |   nspname    | relispartition 
+----------------------+--------------+----------------
+- mpp6979part         | public       | f
+- mpp6979part_1_prt_1 | public       | t
+- mpp6979part_1_prt_2 | public       | t
+- mpp6979part_1_prt_3 | public       | t
+- mpp6979part_1_prt_4 | public       | t
+- mpp6979part_1_prt_5 | public       | t
+- mpp6979part_1_prt_6 | public       | t
+- mpp6979part_1_prt_7 | public       | t
+- mpp6979part_1_prt_8 | public       | t
+- mpp6979part_1_prt_9 | public       | t
+- mpp6979tab          | mpp6979dummy | f
+-(11 rows)
++       relname       | nspname | relispartition 
++---------------------+---------+----------------
++ mpp6979part         | public  | f
++ mpp6979part_1_prt_1 | public  | t
++ mpp6979part_1_prt_2 | public  | t
++ mpp6979part_1_prt_3 | public  | t
++ mpp6979part_1_prt_4 | public  | t
++ mpp6979part_1_prt_5 | public  | t
++ mpp6979part_1_prt_6 | public  | t
++ mpp6979part_1_prt_7 | public  | t
++ mpp6979part_1_prt_8 | public  | t
++ mpp6979part_1_prt_9 | public  | t
++(10 rows)
+@@
+-   nspname    |       relname       | amname 
+---------------+---------------------+--------
+- mpp6979dummy | mpp6979tab          | ao_row
+- public       | mpp6979part         | 
+- public       | mpp6979part_1_prt_1 | heap
+- public       | mpp6979part_1_prt_2 | heap
+- public       | mpp6979part_1_prt_3 | heap
+- public       | mpp6979part_1_prt_4 | heap
+- public       | mpp6979part_1_prt_5 | heap
+- public       | mpp6979part_1_prt_6 | heap
+- public       | mpp6979part_1_prt_7 | heap
+- public       | mpp6979part_1_prt_8 | heap
+- public       | mpp6979part_1_prt_9 | heap
+-(11 rows)
++ nspname |       relname       | amname 
++---------+---------------------+--------
++ public  | mpp6979part         | 
++ public  | mpp6979part_1_prt_1 | heap
++ public  | mpp6979part_1_prt_2 | heap
++ public  | mpp6979part_1_prt_3 | heap
++ public  | mpp6979part_1_prt_4 | heap
++ public  | mpp6979part_1_prt_5 | heap
++ public  | mpp6979part_1_prt_6 | heap
++ public  | mpp6979part_1_prt_7 | heap
++ public  | mpp6979part_1_prt_8 | heap
++ public  | mpp6979part_1_prt_9 | heap
++(10 rows)
+@@
++ERROR:  relation "mpp6979dummy.mpp6979tab" does not exist
+@@
+-       relname       |   nspname    | relispartition 
+----------------------+--------------+----------------
+- mpp6979part         | public       | f
+- mpp6979part_1_prt_1 | public       | t
+- mpp6979part_1_prt_2 | public       | t
+- mpp6979part_1_prt_3 | public       | t
+- mpp6979part_1_prt_4 | public       | t
+- mpp6979part_1_prt_5 | public       | t
+- mpp6979part_1_prt_6 | public       | t
+- mpp6979part_1_prt_7 | public       | t
+- mpp6979part_1_prt_8 | public       | t
+- mpp6979part_1_prt_9 | public       | t
+- mpp6979tab          | mpp6979dummy | f
+-(11 rows)
++       relname       | nspname | relispartition 
++---------------------+---------+----------------
++ mpp6979part         | public  | f
++ mpp6979part_1_prt_1 | public  | t
++ mpp6979part_1_prt_2 | public  | t
++ mpp6979part_1_prt_3 | public  | t
++ mpp6979part_1_prt_4 | public  | t
++ mpp6979part_1_prt_5 | public  | t
++ mpp6979part_1_prt_6 | public  | t
++ mpp6979part_1_prt_7 | public  | t
++ mpp6979part_1_prt_8 | public  | t
++ mpp6979part_1_prt_9 | public  | t
++(10 rows)
+@@
+-       relname       |   nspname    | relispartition | amname 
+----------------------+--------------+----------------+--------
+- mpp6979part         | public       | f              | 
+- mpp6979part_1_prt_1 | public       | t              | ao_row
+- mpp6979part_1_prt_2 | public       | t              | heap
+- mpp6979part_1_prt_3 | public       | t              | heap
+- mpp6979part_1_prt_4 | public       | t              | heap
+- mpp6979part_1_prt_5 | public       | t              | heap
+- mpp6979part_1_prt_6 | public       | t              | heap
+- mpp6979part_1_prt_7 | public       | t              | heap
+- mpp6979part_1_prt_8 | public       | t              | heap
+- mpp6979part_1_prt_9 | public       | t              | heap
+- mpp6979tab          | mpp6979dummy | f              | heap
+-(11 rows)
++       relname       | nspname | relispartition | amname 
++---------------------+---------+----------------+--------
++ mpp6979part         | public  | f              | 
++ mpp6979part_1_prt_1 | public  | t              | heap
++ mpp6979part_1_prt_2 | public  | t              | heap
++ mpp6979part_1_prt_3 | public  | t              | heap
++ mpp6979part_1_prt_4 | public  | t              | heap
++ mpp6979part_1_prt_5 | public  | t              | heap
++ mpp6979part_1_prt_6 | public  | t              | heap
++ mpp6979part_1_prt_7 | public  | t              | heap
++ mpp6979part_1_prt_8 | public  | t              | heap
++ mpp6979part_1_prt_9 | public  | t              | heap
++(10 rows)
+@@
++ERROR:  table "mpp6979tab" does not exist
+@@
+-ERROR:  unique constraint on partitioned table must include all partitioning columns
++ERROR:  PRIMARY KEY constraint on partitioned table must include all partitioning columns
+@@
+-ERROR:  unique constraint on partitioned table must include all partitioning columns
++ERROR:  PRIMARY KEY constraint on partitioned table must include all partitioning columns
+@@
+-ERROR:  unique constraint on partitioned table must include all partitioning columns
++ERROR:  PRIMARY KEY constraint on partitioned table must include all partitioning columns
+@@
++LINE 2:     alter column b
++                         ^
+@@
++ERROR:  access method "ao_row" does not exist
+@@
++ERROR:  relation "mpp17707" does not exist
+@@
++ERROR:  relation "mpp17707" does not exist
+@@
+-Partitions: plst2_1_prt_p1 FOR VALUES IN ('(1,2)', '(3,4)'),
+-            plst2_1_prt_p2 FOR VALUES IN ('(5,6)'),
+-            plst2_1_prt_p3 FOR VALUES IN ('(2,1)')
++Not-null constraints:
++    "plst2_b_not_null" NOT NULL "b"
++Partitions:
++    plst2_1_prt_p1 FOR VALUES IN ('(1,2)', '(3,4)')
++    plst2_1_prt_p2 FOR VALUES IN ('(5,6)')
++    plst2_1_prt_p3 FOR VALUES IN ('(2,1)')
+@@
+-Partitions: plst2_1_prt_p0 FOR VALUES IN ('(1,2)', '(3,4)'),
+-            plst2_1_prt_p1 FOR VALUES IN ('(4,3)', '(2,1)'),
+-            plst2_1_prt_p2 FOR VALUES IN ('(4,4)', '(5,5)'),
+-            plst2_1_prt_p3 FOR VALUES IN ('(4,5)', '(5,6)'),
+-            plst2_1_prt_p4 FOR VALUES IN ('(5,4)', '(6,5)'),
+-            plst2_1_prt_p5 FOR VALUES IN ('(7,8)')
++Partitions:
++    plst2_1_prt_p0 FOR VALUES IN ('(1,2)', '(3,4)')
++    plst2_1_prt_p1 FOR VALUES IN ('(4,3)', '(2,1)')
++    plst2_1_prt_p2 FOR VALUES IN ('(4,4)', '(5,5)')
++    plst2_1_prt_p3 FOR VALUES IN ('(4,5)', '(5,6)')
++    plst2_1_prt_p4 FOR VALUES IN ('(5,4)', '(6,5)')
++    plst2_1_prt_p5 FOR VALUES IN ('(7,8)')
+@@
+-                                          ^
++                                                        ^
+@@
++ERROR:  unrecognized parameter "appendonly"
+@@
++ERROR:  relation "s_heap_ex_abc" does not exist
+@@
++ERROR:  relation "s_heap_ex_abc" does not exist
++LINE 1: insert into s_heap_ex_abc select 1, 'abc1', 2, 2, true from ...
++                    ^
+@@
++ERROR:  relation "s_heap_ex_abc" does not exist
+@@
++ERROR:  relation "s_heap_ex_abc" does not exist
+@@
++ERROR:  table "s_heap_ex_abc" does not exist
+@@
++ERROR:  relation "s_heap" already exists
+@@
++ERROR:  column "i3" of relation "s_heap" does not exist
++LINE 1: insert into s_heap(t1, i1, i2, i3, n1, b1)
++                                       ^
+@@
++ERROR:  column "i3" of relation "s_heap" does not exist
+@@
++ERROR:  relation "public.s_heap_1_prt_def" does not exist
+@@
+- i1 |  t1  | i2 | n1  | b1 
+-----+------+----+-----+----
+-  1 | def0 |  1 | 2.3 | t
+-  1 | def0 |  1 | 2.3 | t
+-  1 | def0 |  1 | 2.3 | t
+-  1 | def0 |  1 | 2.3 | t
+-  1 | def0 |  1 | 2.3 | t
+-(5 rows)
+-
++ERROR:  relation "s_heap_1_prt_def0" does not exist
++LINE 1: select * from s_heap_1_prt_def0;
++                      ^
+@@
++ERROR:  syntax error at or near "row"
++LINE 4:         with (appendonly=true, orientation=row));
++                                                   ^
+@@
++ERROR:  relation "s_heap_ao" does not exist
++LINE 1: insert into s_heap_ao(t1, i1, i2, i3, n1, b1)
++                    ^
+@@
++ERROR:  relation "s_heap_ao" does not exist
++LINE 1: insert into s_heap_ao(t1, i1, i2, i3, n1, b1)
++                    ^
+@@
++ERROR:  relation "s_heap_ao" does not exist
+@@
++ERROR:  relation "s_heap_ao" does not exist
+@@
++ERROR:  relation "s_heap_ao" does not exist
+@@
+- i1 |  t1  | i2 | n1  | b1 
+-----+------+----+-----+----
+-  1 | def4 |  1 | 2.3 | t
+-  1 | def4 |  1 | 2.3 | t
+-(2 rows)
+-
++ERROR:  relation "s_heap_ao_1_prt_def0" does not exist
++LINE 1: select * from s_heap_ao_1_prt_def0;
++                      ^
+@@
++ERROR:  table "s_heap_ao" does not exist
+@@
++ERROR:  access method "ao_column" does not exist
+@@
++ERROR:  relation "s_heap_co" does not exist
++LINE 1: insert into s_heap_co(t1, i1, i2, i3, n1, b1)
++                    ^
+@@
++ERROR:  relation "s_heap_co" does not exist
++LINE 1: insert into s_heap_co(t1, i1, i2, i3, n1, b1)
++                    ^
+@@
++ERROR:  relation "s_heap_co" does not exist
+@@
++ERROR:  relation "s_heap_co" does not exist
+@@
++ERROR:  relation "s_heap_co" does not exist
+@@
+- i1 |  t1  | i2 | n1  | b1 
+-----+------+----+-----+----
+-  1 | def4 |  1 | 2.3 | t
+-  1 | def4 |  1 | 2.3 | t
+-(2 rows)
+-
++ERROR:  relation "s_heap_co_1_prt_def0" does not exist
++LINE 1: select * from s_heap_co_1_prt_def0;
++                      ^
+@@
++ERROR:  table "s_heap_co" does not exist
+@@
++ERROR:  syntax error at or near "ENCODING"
++LINE 2:     lead_key integer NOT NULL ENCODING (compresstype=zlib,co...
++                                      ^
+@@
++ERROR:  relation "non_ws_phone_leads" does not exist
++LINE 1: INSERT INTO non_ws_phone_leads VALUES (63962490, 'CA6qOEyxOm...
++                    ^
+@@
+- duration_second | dim_program_key | dim_site_key | dim_date_key 
+------------------+-----------------+--------------+--------------
+-             207 |              79 |       999901 |      2455441
+-(1 row)
+-
++ERROR:  relation "non_ws_phone_leads" does not exist
++LINE 2: FROM NON_WS_PHONE_LEADS PL
++             ^
+@@
+- duration_second | dim_program_key | dim_site_key | dim_date_key 
+------------------+-----------------+--------------+--------------
+-             207 |              79 |       999901 |      2455441
+-(1 row)
+-
++ERROR:  relation "non_ws_phone_leads" does not exist
++LINE 2: FROM NON_WS_PHONE_LEADS PL
++             ^
+@@
+- duration_second | dim_program_key | dim_site_key | dim_date_key 
+------------------+-----------------+--------------+--------------
+-             207 |              79 |       999901 |      2455441
+-(1 row)
+-
++ERROR:  relation "non_ws_phone_leads" does not exist
++LINE 2: FROM NON_WS_PHONE_LEADS PL
++             ^
+@@
+- duration_second | dim_program_key | dim_site_key | dim_date_key 
+------------------+-----------------+--------------+--------------
+-             207 |              79 |       999901 |      2455441
+-(1 row)
+-
++ERROR:  relation "non_ws_phone_leads" does not exist
++LINE 2: FROM NON_WS_PHONE_LEADS PL
++             ^
+@@
+- duration_second | dim_program_key | dim_site_key | dim_date_key | source_system_lead_id 
+------------------+-----------------+--------------+--------------+-----------------------
+-             207 |              79 |       999901 |      2455441 | CA6qOEyxOmNJUQC7
+-(1 row)
+-
++ERROR:  relation "non_ws_phone_leads" does not exist
++LINE 2: FROM NON_WS_PHONE_LEADS PL
++             ^
+@@
++ERROR:  table "non_ws_phone_leads" does not exist
+@@
+-Partitions: mpp7232a_1_prt_1 FOR VALUES FROM (1) TO (2),
+-            mpp7232a_1_prt_2 FOR VALUES FROM (2) TO (3)
++Partitions:
++    mpp7232a_1_prt_1 FOR VALUES FROM (1) TO (2)
++    mpp7232a_1_prt_2 FOR VALUES FROM (2) TO (3)
+@@
+-Partitions: mpp7232a_1_prt_alpha FOR VALUES FROM (1) TO (2),
+-            mpp7232a_1_prt_bravo FOR VALUES FROM (2) TO (3)
++Partitions:
++    mpp7232a_1_prt_alpha FOR VALUES FROM (1) TO (2)
++    mpp7232a_1_prt_bravo FOR VALUES FROM (2) TO (3)
+@@
+-Partitions: mpp7232b_1_prt_alpha_2 FOR VALUES FROM (2) TO (3),
+-            mpp7232b_1_prt_foo FOR VALUES FROM (1) TO (2)
++Partitions:
++    mpp7232b_1_prt_alpha_2 FOR VALUES FROM (2) TO (3)
++    mpp7232b_1_prt_foo FOR VALUES FROM (1) TO (2)
+@@
++ERROR:  access method "ao_column" does not exist
+@@
+-      relname      |                   pg_get_expr                    
+--------------------+--------------------------------------------------
+- mpp17740          | 
+- mpp17740_20120523 | FOR VALUES FROM ('05-23-2012') TO ('05-24-2012')
+- mpp17740_20120524 | FOR VALUES FROM ('05-24-2012') TO ('05-25-2012')
+-(3 rows)
++ relname | pg_get_expr 
++---------+-------------
++(0 rows)
+@@
++ERROR:  relation "mpp17740" does not exist
+@@
+-      relname      |                   pg_get_expr                    
+--------------------+--------------------------------------------------
+- mpp17740          | 
+- mpp17740_20120520 | FOR VALUES FROM ('05-20-2012') TO ('05-21-2012')
+- mpp17740_20120523 | FOR VALUES FROM ('05-23-2012') TO ('05-24-2012')
+- mpp17740_20120524 | FOR VALUES FROM ('05-24-2012') TO ('05-25-2012')
+-(4 rows)
++ relname | pg_get_expr 
++---------+-------------
++(0 rows)
+@@
++ERROR:  cannot specify storage parameters for a partitioned table
++HINT:  Specify storage parameters for its leaf partitions instead.
+@@
++ERROR:  relation "pt_tab_encode" does not exist
+@@
+-          relname          |      pg_get_expr      
+----------------------------+-----------------------
+- pt_tab_encode             | 
+- pt_tab_encode_1_prt_s_abc | FOR VALUES IN ('abc')
+- pt_tab_encode_1_prt_s_xyz | FOR VALUES IN ('xyz')
+-(3 rows)
++ relname | pg_get_expr 
++---------+-------------
++(0 rows)
+@@
+- gp_segment_id |         attrelid          | attnum |                     attoptions                      
+----------------+---------------------------+--------+-----------------------------------------------------
+-            -1 | pt_tab_encode_1_prt_s_abc |      1 | {compresstype=zlib,compresslevel=1,blocksize=32768}
+-            -1 | pt_tab_encode_1_prt_s_abc |      2 | {compresstype=zlib,compresslevel=1,blocksize=32768}
+-(2 rows)
+-
++ERROR:  relation "pg_attribute_encoding" does not exist
++LINE 1: ...t_id, attrelid::regclass, attnum, attoptions from pg_attribu...
++                                                             ^
+@@
+- gp_segment_id |         attrelid          | attnum |                     attoptions                      
+----------------+---------------------------+--------+-----------------------------------------------------
+-            -1 | pt_tab_encode_1_prt_s_xyz |      1 | {compresstype=zlib,compresslevel=1,blocksize=32768}
+-            -1 | pt_tab_encode_1_prt_s_xyz |      2 | {compresstype=zlib,compresslevel=1,blocksize=32768}
+-(2 rows)
+-
++ERROR:  relation "pg_attribute_encoding" does not exist
++LINE 1: ...t_id, attrelid::regclass, attnum, attoptions from pg_attribu...
++                                                             ^
+@@
+-            oid            | relkind |  amname   |             reloptions              
+----------------------------+---------+-----------+-------------------------------------
+- pt_tab_encode_1_prt_s_abc | r       | ao_column | {compresstype=zlib,compresslevel=1}
+-(1 row)
+-
++ERROR:  relation "pt_tab_encode_1_prt_s_abc" does not exist
++LINE 1: ...eft join pg_am am on am.oid = relam where c.oid = 'pt_tab_en...
++                                                             ^
+@@
+-            oid            | relkind |  amname   |             reloptions              
+----------------------------+---------+-----------+-------------------------------------
+- pt_tab_encode_1_prt_s_xyz | r       | ao_column | {compresstype=zlib,compresslevel=1}
+-(1 row)
+-
++ERROR:  relation "pt_tab_encode_1_prt_s_xyz" does not exist
++LINE 1: ...eft join pg_am am on am.oid = relam where c.oid = 'pt_tab_en...
++                                                             ^

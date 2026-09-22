@@ -233,7 +233,7 @@ run  union_gp
 run  create_table_like_gp
 skip matview_ao  append-optimized tables, M5
 run  gpcopy
-skip incremental_analyze  Greenplum's PARTITION BY ... START/EVERY syntax, which the port does not carry: its SQL surface is Cloudberry's own statements, and the Greenplum 7 surface is still ahead; and append-optimized tables, M5
+skip incremental_analyze  append-optimized tables, M5
 run  indexjoin
 skip workfile/hashagg_spill  the workfile manager and its views, and PL/Python; Track B's spill-file hook is not built
 skip workfile/hashjoin_spill  the workfile manager and its views, and PL/Python; Track B's spill-file hook is not built
@@ -243,15 +243,15 @@ run  tidscan_gp
 skip agg_pushdown  gp_enable_agg_pushdown, which the plan replaces with PostgreSQL 19's eager aggregation (Track A 2.7)
 run  subselect_gp
 run  subselect_gp2
-skip partition  Greenplum's PARTITION BY ... START/EVERY syntax, which the port does not carry: its SQL surface is Cloudberry's own statements, and the Greenplum 7 surface is still ahead
-skip partition1  Greenplum's PARTITION BY ... START/EVERY syntax, which the port does not carry: its SQL surface is Cloudberry's own statements, and the Greenplum 7 surface is still ahead
-skip partition_indexing  Greenplum's PARTITION BY ... START/EVERY syntax, which the port does not carry: its SQL surface is Cloudberry's own statements, and the Greenplum 7 surface is still ahead
-skip partition_storage  append-optimized tables, M5; and Greenplum's PARTITION BY ... START/EVERY syntax, which the port does not carry: its SQL surface is Cloudberry's own statements, and the Greenplum 7 surface is still ahead
-skip partition_ddl  Greenplum's PARTITION BY ... START/EVERY syntax, which the port does not carry: its SQL surface is Cloudberry's own statements, and the Greenplum 7 surface is still ahead
-skip partition_with_user_defined_function  Greenplum's PARTITION BY ... START/EVERY syntax, which the port does not carry: its SQL surface is Cloudberry's own statements, and the Greenplum 7 surface is still ahead
-skip partition_unlogged  Greenplum's PARTITION BY ... START/EVERY syntax, which the port does not carry: its SQL surface is Cloudberry's own statements, and the Greenplum 7 surface is still ahead
-skip partition_subquery  Greenplum's PARTITION BY ... START/EVERY syntax, which the port does not carry: its SQL surface is Cloudberry's own statements, and the Greenplum 7 surface is still ahead
-skip partition_with_user_defined_function_that_truncates  Greenplum's PARTITION BY ... START/EVERY syntax, which the port does not carry: its SQL surface is Cloudberry's own statements, and the Greenplum 7 surface is still ahead
+run  partition
+run  partition1
+run  partition_indexing
+skip partition_storage  append-optimized tables, M5
+run  partition_ddl
+run  partition_with_user_defined_function
+run  partition_unlogged
+run  partition_subquery
+run  partition_with_user_defined_function_that_truncates
 skip brin_ao  append-optimized tables, M5
 skip brin_aocs  append-optimized tables, M5
 skip aoco_privileges  append-optimized tables, M5
@@ -265,10 +265,10 @@ run  bfv_catalog
 run  bfv_index
 run  bfv_olap
 run  bfv_aggregate
-skip bfv_partition_plans  Greenplum's PARTITION BY ... START/EVERY syntax, which the port does not carry: its SQL surface is Cloudberry's own statements, and the Greenplum 7 surface is still ahead
+run  bfv_partition_plans
 run  gp_recursive_cte
 run  qp_with_clause
-skip qp_query_execution  Greenplum's PARTITION BY ... START/EVERY syntax, which the port does not carry: its SQL surface is Cloudberry's own statements, and the Greenplum 7 surface is still ahead
+run  qp_query_execution
 run  qp_left_anti_semi_join
 run  qp_union_intersect
 skip uao_compaction/*  append-optimized tables, M5

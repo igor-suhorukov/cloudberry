@@ -30,9 +30,27 @@ The reasons, by what brings them, and then each test:
 
   statement_mem and gp_workfile_compression: M6, resource management.
 
-  Cloudberry's classic partition syntax -- PARTITION BY RANGE (c) (START (1)
-  END (10) EVERY (1)), ALTER TABLE ... DROP DEFAULT PARTITION -- and its table
-  functions, TABLE (...) and anytable: grammar the port's O26 does not have.
+  Cloudberry's table functions, TABLE (...) and anytable: grammar the port's
+  O26 does not have, and a pseudo-type an extension cannot add.
+
+  Cloudberry's classic partition syntax, which O26 takes since M2's first step,
+  where the port and Cloudberry still part:
+    - ADD, DROP, ALTER and RENAME PARTITION can be PostgreSQL's too, about a
+      column called "partition", which PostgreSQL 19 lets be a name and
+      Cloudberry reserves.  Where PostgreSQL's grammar takes the statement
+      the port leaves it PostgreSQL's, so ALTER TABLE t DROP partition is
+      "column "partition" of relation "t" does not exist" where Cloudberry's
+      is a syntax error, and ADD partition cc a column of type cc where
+      Cloudberry's is a partition with no boundary.  Both fail in Cloudberry.
+    - A SUBPARTITION TEMPLATE is kept, as written, in its table's gp label;
+      Cloudberry's catalog gp_partition_template, and the node dump its
+      tests print from it, is not there to query.
+    - An error about a partition an ALTER TABLE made is reported by
+      Cloudberry at the 35th character of the statement, the length of the
+      text it runs the partition's CREATE as, "(internally generated SQL
+      command)"; the port reports it at the value it is about.
+  Cloudberry's REVOKE says "no privileges could be revoked" when it revokes
+  nothing, which PostgreSQL's does not, on any object.
 
   gp_autostats_mode, enable_groupagg and gp_recursive_cte: settings the port
   has no counterpart of.  Recursive CTEs are always on, as in PostgreSQL.
@@ -50,7 +68,15 @@ The reasons, by what brings them, and then each test:
   standard_conforming_strings = off and escape_string_warning, which
   PostgreSQL 19 no longer has, NOT NULL constraints, which PostgreSQL 18
   keeps in pg_constraint, and "operator does not exist", which PostgreSQL 19
-  explains in a DETAIL and a HINT where PostgreSQL 14 had one HINT.
+  explains in a DETAIL and a HINT where PostgreSQL 14 had one HINT.  And of
+  partitioned tables: none may be UNLOGGED ("partitioned tables cannot be
+  unlogged"), an exclusion constraint on one is allowed (PostgreSQL 17),
+  "UNIQUE constraint" or "PRIMARY KEY constraint on partitioned table must
+  include all partitioning columns" names the constraint's kind, and
+  "cannot alter column ... because it is part of the partition key" has a
+  caret; PUBLIC may no longer CREATE in schema public (PostgreSQL 15), so a
+  table a role of the test's makes there is refused; and psql's \d+ lists
+  each partition on a line of its own, under "Partitions:".
 
   DECODE and CASE x WHEN IS NOT DISTINCT FROM y, which Cloudberry's parser
   makes a CASE with an operand and the port's rewrite a searched CASE with
@@ -68,10 +94,15 @@ bfv_catalog  count_operator(), pg_stat_last_operation (Cloudberry's catalog of
   when an object was last changed), escape_string_warning and
   standard_conforming_strings = off, PL/Python, and one row more in a query
   over pg_constraint: the table's NOT NULL constraint.
-bfv_dd, bfv_dd_multicolumn, bfv_dd_types  direct dispatch's test setting,
-  gp_autostats_mode, the classic partition syntax, the bitmap index.
-bfv_index  count_index_scans(), append-optimized tables, the classic
-  partition syntax.
+bfv_dd, bfv_dd_multicolumn, bfv_dd_types  direct dispatch's test setting and
+  gp_autostats_mode; bfv_dd's the bitmap index as well.
+bfv_index  count_index_scans(), append-optimized and column-oriented
+  tables, whose compression options a partitioned table is refused for
+  before its access method.
+bfv_partition_plans  count_operator() and find_operator() of PL/Python,
+  gp_segment_id, append-optimized and column-oriented tables and the bitmap
+  index, and a plan gpdiff.pl does not take for one after the
+  column-oriented table's statements fail.
 bfv_olap  gp_motion_cost_per_row, OVER (w) with a frame.
 case_gp  The deparse of IS NOT DISTINCT FROM, and of the CASE form, which
   prints as the searched CASE it was rewritten into; blip(1), the operand of
@@ -93,20 +124,38 @@ gpcopy  COPY's LOG ERRORS, FILL MISSING FIELDS, NEWLINE and ESCAPE outside
   CSV mode, the error log functions, gp_configuration_history,
   gp_autostats_mode, and the broken_int4 type of Cloudberry's regress.so.
 indexjoin  an append-optimized table.
-join_gp  gp_dist_random(), the classic partition syntax, statement_mem,
+join_gp  gp_dist_random(), statement_mem,
   gp_workfile_compression, test_print_prefetch_joinqual.
 limit_gp  statement_mem.
+partition  Every reason above: its templates and gp_partition_template;
+  append-optimized and column-oriented tables, column ENCODING, external
+  tables and COPY ... LOG ERRORS; gp_dist_random(), gp_distribution_policy
+  and gp_segments_for_planner; a role that may not CREATE in schema public;
+  Cloudberry's REVOKE notice; an exclusion constraint PostgreSQL 19 allows;
+  the caret of an error in a partition an ALTER TABLE made; psql's \d+.
+partition1  append-optimized tables -- hhh and foz are, and most of its
+  ALTER TABLE cases are about hhh; PostgreSQL's reading of ALTER TABLE ...
+  DROP partition; the wording and caret of PostgreSQL 19's partition key
+  errors; the bitmap index; psql's \d+.
+partition_ddl  append-optimized tables and their options; "operator does
+  not exist" explained in a DETAIL.
+partition_indexing  the bitmap index, and "UNIQUE constraint on partitioned
+  table".
+partition_unlogged  an unlogged partitioned table, which PostgreSQL 19 has
+  none of.
+qp_query_execution  qx_count_operator() of PL/Python, statement_mem, a
+  column-oriented table.
 qp_union_intersect  gp_enable_direct_dispatch, set inside a transaction the
   rest of which is then refused.
 qp_with_clause  gp_cte_sharing, append-optimized and column-oriented tables,
   the bitmap index, enable_groupagg.
-returning_gp  the classic partition syntax, an append-optimized table.
+returning_gp  an append-optimized table.
 singlenode_compatibility_cbdb  the warning Cloudberry's single-node mode
   gives for DISTRIBUTED BY (the port records the policy, for ORCA and M2),
   append-optimized tables, TABLE (...) and anytable, and ALTER TABLE ... SET
   DISTRIBUTED BY, which Cloudberry refuses in single-node mode and the port's
   grammar does not have.
-subselect_gp  the classic partition syntax, gp_segment_id,
+subselect_gp  gp_segment_id,
   gp_distribution_policy, gp_interconnect_queue_depth, append-optimized
   tables.
 subselect_gp2  an external web table.
@@ -127,4 +176,4 @@ tag  Tag definitions are the database's here, in gp_sql.tag, and Cloudberry's
 union_gp  count_operator(), gp_distribution_policy, an external table, PL/
   Python, and a chain of UNIONs over NULLs.
 update_gp  gp_segment_id, gp_segment_configuration, append-optimized tables,
-  the classic partition syntax, gp_autostats_mode.
+  gp_autostats_mode.

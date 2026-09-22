@@ -97,49 +97,8 @@
 
 #include "cb_module.h"
 #include "gp_grammar.h"
-
-/*
- * The core scanner's token codes.  scanner.h does not define them -- bison
- * insists on doing that -- but it does promise what they are: the ASCII
- * characters, and then these, in this order, starting at 258.
- */
-#define GP_IDENT		258
-#define GP_UIDENT		259
-#define GP_FCONST		260
-#define GP_SCONST		261
-#define GP_USCONST		262
-#define GP_BCONST		263
-#define GP_XCONST		264
-#define GP_OP			265
-#define GP_ICONST		266
-#define GP_PARAM		267
-#define GP_TYPECAST		268
-#define GP_DOT_DOT		269
-#define GP_COLON_EQUALS	270
-#define GP_EQUALS_GREATER 271
-#define GP_LESS_EQUALS	272
-#define GP_GREATER_EQUALS 273
-#define GP_NOT_EQUALS	274
-
-/* Anything above the last of those is a keyword of PostgreSQL's own. */
-#define GP_FIRST_KEYWORD	275
-
-typedef struct GpTok
-{
-	int			code;
-	int			off;			/* byte offset of the token's first character */
-	const char *kw;				/* canonical spelling, for a keyword */
-	char	   *str;			/* the value, for an identifier or literal */
-	int			ival;
-} GpTok;
-
-typedef struct GpTokens
-{
-	GpTok	   *toks;
-	int			ntoks;
-	const char *src;
-	int			srclen;
-} GpTokens;
+#include "gp_grammar_int.h"
+#include "gp_partition.h"
 
 /*
  * Words that can only appear in Cloudberry's spelling of something.  A
@@ -149,9 +108,34 @@ typedef struct GpTokens
 static const char *const gp_trigger_words[] = {
 	"tag", "profile", "noprofile", "distributed", "randomly", "replicated",
 	"task", "directory", "storage", "dynamic", "incremental", "unset",
-	"account", "execute", "decode",
+	"account", "execute", "decode", "subpartition",
 	NULL
 };
+
+/*
+ * The classic partition clauses all say PARTITION, and so do a window's
+ * PARTITION BY and PostgreSQL's own partitioning, which are far commoner.
+ * Every one of Cloudberry's is in a CREATE or an ALTER, so the word counts
+ * only in a text that has one of those too: a query with OVER (PARTITION BY
+ * ...) is not tokenised for it.
+ */
+static const char *const gp_trigger_ddl_words[] = {"partition", NULL};
+static const char *const gp_ddl_words[] = {"create", "alter", NULL};
+
+/* Does one of `words` start at str[i]? */
+static bool
+word_at(const char *str, int len, int i, const char *const *words)
+{
+	for (int w = 0; words[w] != NULL; w++)
+	{
+		int			wl = strlen(words[w]);
+
+		if (pg_tolower((unsigned char) str[i]) == words[w][0] &&
+			i + wl <= len && pg_strncasecmp(str + i, words[w], wl) == 0)
+			return true;
+	}
+	return false;
+}
 
 /*
  * Two-word triggers, for a clause whose words are each too common to list
@@ -192,12 +176,21 @@ static bool
 looks_interesting(const char *str)
 {
 	int			len = strlen(str);
+	bool		ddl_word = false;
+	bool		ddl = false;
 
 	for (int i = 0; i < len; i++)
 	{
 		/* Only where a word can start, so this is one pass and no more. */
 		if (i > 0 && is_word_char(str[i - 1]))
 			continue;
+
+		if (!ddl_word && word_at(str, len, i, gp_trigger_ddl_words))
+			ddl_word = true;
+		if (!ddl && word_at(str, len, i, gp_ddl_words))
+			ddl = true;
+		if (ddl_word && ddl)
+			return true;
 
 		for (int w = 0; gp_trigger_words[w] != NULL; w++)
 		{
@@ -243,8 +236,8 @@ looks_interesting(const char *str)
  * Tokenise with the server's own scanner, so that what counts as a token here
  * is what counts as one everywhere else.
  */
-static GpTokens *
-gp_tokenize(const char *str)
+GpTokens *
+GpTokenize(const char *str)
 {
 	core_yyscan_t yyscanner;
 	core_yy_extra_type yyextra;
@@ -290,134 +283,6 @@ gp_tokenize(const char *str)
 	scanner_finish(yyscanner);
 
 	return out;
-}
-
-/* Where a token ends, for the purpose of cutting text out. */
-static int
-tok_end(const GpTokens *ts, int i)
-{
-	if (i + 1 < ts->ntoks)
-		return ts->toks[i + 1].off;
-	return ts->srclen;
-}
-
-/*
- * Is token `i` this word?  A word Cloudberry made a keyword and PostgreSQL
- * did not arrives as an identifier; one they both have arrives as a keyword.
- */
-static bool
-tok_is(const GpTokens *ts, int i, const char *word)
-{
-	const GpTok *t;
-
-	if (i < 0 || i >= ts->ntoks)
-		return false;
-
-	t = &ts->toks[i];
-
-	if (t->kw != NULL)
-		return pg_strcasecmp(t->kw, word) == 0;
-	if (t->code == GP_IDENT && t->str != NULL)
-		return pg_strcasecmp(t->str, word) == 0;
-
-	return false;
-}
-
-static bool
-tok_is_char(const GpTokens *ts, int i, char c)
-{
-	return i >= 0 && i < ts->ntoks && ts->toks[i].code == (int) c;
-}
-
-/* The keyword `word` itself, not an identifier spelled the same, quoted. */
-static bool
-tok_is_kw(const GpTokens *ts, int i, const char *word)
-{
-	return i >= 0 && i < ts->ntoks && ts->toks[i].kw != NULL &&
-		pg_strcasecmp(ts->toks[i].kw, word) == 0;
-}
-
-/* An identifier or keyword, as a name the rewritten text can use. */
-static bool
-tok_is_name(const GpTokens *ts, int i)
-{
-	if (i < 0 || i >= ts->ntoks)
-		return false;
-	return ts->toks[i].code == GP_IDENT || ts->toks[i].kw != NULL;
-}
-
-static char *
-tok_name(const GpTokens *ts, int i)
-{
-	const GpTok *t = &ts->toks[i];
-
-	if (t->code == GP_IDENT)
-		return t->str;
-	return pstrdup(t->kw);
-}
-
-static bool
-tok_is_string(const GpTokens *ts, int i)
-{
-	return i >= 0 && i < ts->ntoks && ts->toks[i].code == GP_SCONST;
-}
-
-/* Skip a parenthesised group that starts at `i`; returns the index after it. */
-static int
-skip_parens(const GpTokens *ts, int i)
-{
-	int			depth = 0;
-
-	for (; i < ts->ntoks; i++)
-	{
-		if (tok_is_char(ts, i, '('))
-			depth++;
-		else if (tok_is_char(ts, i, ')'))
-		{
-			depth--;
-			if (depth == 0)
-				return i + 1;
-		}
-	}
-
-	return i;
-}
-
-/*
- * Where token i's own text ends, which tok_end() does not say: it runs to the
- * next token, whitespace and comments included.  A single character and a
- * keyword are as long as they are; anything else ends where the whitespace
- * before the next token begins, so a comment between the two stays with the
- * first.
- */
-static int
-tok_stop(const GpTokens *ts, int i)
-{
-	const GpTok *t = &ts->toks[i];
-	int			end = tok_end(ts, i);
-
-	if (t->code > 0 && t->code < 256)
-		return t->off + 1;
-	if (t->kw != NULL)
-		return t->off + strlen(t->kw);
-
-	switch (t->code)
-	{
-		case GP_TYPECAST:
-		case GP_DOT_DOT:
-		case GP_COLON_EQUALS:
-		case GP_EQUALS_GREATER:
-		case GP_LESS_EQUALS:
-		case GP_GREATER_EQUALS:
-		case GP_NOT_EQUALS:
-			return t->off + 2;
-		case GP_OP:
-			return t->off + strlen(t->str);
-	}
-
-	while (end > t->off && scanner_isspace(ts->src[end - 1]))
-		end--;
-	return end;
 }
 
 /* ------------------------------------------------------------------------- */
@@ -607,6 +472,27 @@ GpPosMapCopied(const GpPosMap *map, int offset)
 	return s->copied ? s->src + (offset - s->out) : -1;
 }
 
+GpPosMap *
+GpPosMapSpan(int prefix, int from, int len, int suffix, int srclen)
+{
+	GpPosMap   *m = palloc(sizeof(GpPosMap));
+	GpSeg	   *s = palloc(3 * sizeof(GpSeg));
+	int			n = 0;
+
+	if (prefix > 0)
+		s[n++] = (GpSeg) {0, prefix, from, false};
+	if (len > 0)
+		s[n++] = (GpSeg) {prefix, len, from, from >= 0};
+	if (suffix > 0)
+		s[n++] = (GpSeg) {prefix + len, suffix, from >= 0 ? from + len : -1, false};
+
+	m->segs = s;
+	m->nsegs = n;
+	m->outlen = prefix + len + suffix;
+	m->srclen = srclen;
+	return m;
+}
+
 /* ------------------------------------------------------------------------- */
 /* Rewriting                                                                 */
 /* ------------------------------------------------------------------------- */
@@ -624,6 +510,7 @@ typedef struct GpEdit
 	char	   *text;			/* what goes there instead */
 	GpOut	   *piece;			/* or this, which keeps where its parts came
 								 * from; for an expression's rewrite */
+	int			seq;			/* the order it was made in */
 } GpEdit;
 
 typedef struct GpRewrite
@@ -634,13 +521,15 @@ typedef struct GpRewrite
 	bool		changed;
 	bool		whole;			/* body replaces the statement outright */
 	List	   *edits;			/* GpEdit, in whatever order they were found */
+	int			nedits;
 	StringInfoData body;		/* what the statement becomes, when whole */
 	GpOut		text;			/* the statement with its edits, when not */
 	char		object;			/* what find_subject found: 't' a table, 'f' a
 								 * foreign table, 'v' a view, 'm' a materialized
 								 * view, 'S' a sequence, 'i' an index, or 0 */
 	int			subject_end;	/* the token after the subject's name, or -1 */
-	StringInfoData options;		/* namespaced options for its WITH list */
+	GpOut		options;		/* namespaced options for its WITH list, each
+								 * standing for the clause it came from */
 	StringInfoData fdw_options; /* a foreign table's, for its OPTIONS list */
 	List	   *carriers;		/* DefElem for its parse node; see
 								 * GpAttachCarriers */
@@ -655,11 +544,12 @@ rw_init(GpRewrite *rw, const GpTokens *ts, int first, int last)
 	rw->changed = false;
 	rw->whole = false;
 	rw->edits = NIL;
+	rw->nedits = 0;
 	initStringInfo(&rw->body);
 	out_init(&rw->text, ts->src);
 	rw->object = 0;
 	rw->subject_end = -1;
-	initStringInfo(&rw->options);
+	out_init(&rw->options, ts->src);
 	initStringInfo(&rw->fdw_options);
 	rw->carriers = NIL;
 }
@@ -674,6 +564,7 @@ rw_edit(GpRewrite *rw, int from, int to, const char *text)
 	e->to = to;
 	e->text = text ? pstrdup(text) : pstrdup("");
 	e->piece = NULL;
+	e->seq = rw->nedits++;
 	rw->edits = lappend(rw->edits, e);
 	rw->changed = true;
 }
@@ -688,6 +579,7 @@ rw_edit_piece(GpRewrite *rw, int from, int to, GpOut *piece)
 	e->to = to;
 	e->text = NULL;
 	e->piece = piece;
+	e->seq = rw->nedits++;
 	rw->edits = lappend(rw->edits, e);
 	rw->changed = true;
 }
@@ -753,7 +645,8 @@ edit_cmp(const ListCell *a, const ListCell *b)
 	/* an insertion goes in before the text an edit at the same place cuts */
 	if (ea->to != eb->to)
 		return (ea->to < eb->to) ? -1 : 1;
-	return 0;
+	/* and two insertions in the order they were made */
+	return (ea->seq < eb->seq) ? -1 : (ea->seq > eb->seq);
 }
 
 /*
@@ -761,13 +654,34 @@ edit_cmp(const ListCell *a, const ListCell *b)
  * gp.distributed_by = '(a)': what a clause of Cloudberry's becomes when the
  * statement it is on can take one, so that the statement stays one statement.
  * rw_place_options puts them in, all together, once the clauses are read.
+ *
+ * The option stands for the clause it came from, at `at` in the user's text,
+ * wherever in the statement it is put: that is its DefElem's location once
+ * the grammar has built one, and where an error about it is reported.  The
+ * classic partition clause depends on it, being carried verbatim in its
+ * option: a position in the option's value is one in the user's text,
+ * counted from there.
  */
 static void
-rw_add_option(GpRewrite *rw, const char *option)
+rw_add_option(GpRewrite *rw, const char *option, int at)
 {
-	if (rw->options.len > 0)
-		appendStringInfoString(&rw->options, ", ");
-	appendStringInfoString(&rw->options, option);
+	if (rw->options.buf.len > 0)
+		out_text(&rw->options, ", ", at);
+	out_text(&rw->options, option, at);
+}
+
+/* Replace [from, to) with the options, between `before` and `after`. */
+static void
+rw_edit_options(GpRewrite *rw, int from, int to, const char *before,
+				const char *after)
+{
+	GpOut	   *piece = palloc(sizeof(GpOut));
+
+	out_init(piece, rw->ts->src);
+	out_text(piece, before, from);
+	out_append(piece, &rw->options);
+	out_text(piece, after, from);
+	rw_edit_piece(rw, from, to, piece);
 }
 
 /*
@@ -785,7 +699,7 @@ rw_place_options(GpRewrite *rw)
 	int			depth = 0;
 	int			at;
 
-	if (rw->options.len == 0 || rw->whole)
+	if (rw->options.buf.len == 0 || rw->whole)
 		return;
 
 	for (int j = (rw->subject_end >= 0 ? rw->subject_end : rw->first); j < rw->last; j++)
@@ -794,8 +708,7 @@ rw_place_options(GpRewrite *rw)
 		{
 			if (depth == 0 && tok_is_kw(ts, j - 1, "with"))
 			{
-				rw_edit(rw, tok_end(ts, j), tok_end(ts, j),
-						psprintf("%s, ", rw->options.data));
+				rw_edit_options(rw, tok_end(ts, j), tok_end(ts, j), "", ", ");
 				return;
 			}
 			depth++;
@@ -811,22 +724,22 @@ rw_place_options(GpRewrite *rw)
 
 		if (tok_is_kw(ts, j, "without") && tok_is(ts, j + 1, "oids"))
 		{
-			rw_edit(rw, ts->toks[j].off, tok_end(ts, j + 1),
-					psprintf("WITH (%s)", rw->options.data));
+			rw_edit_options(rw, ts->toks[j].off, tok_end(ts, j + 1),
+							"WITH (", ")");
 			return;
 		}
 		if ((tok_is_kw(ts, j, "on") && tok_is_kw(ts, j + 1, "commit")) ||
 			tok_is_kw(ts, j, "tablespace") || tok_is_kw(ts, j, "as") ||
 			tok_is_kw(ts, j, "where"))
 		{
-			rw_edit(rw, ts->toks[j].off, ts->toks[j].off,
-					psprintf("WITH (%s) ", rw->options.data));
+			rw_edit_options(rw, ts->toks[j].off, ts->toks[j].off,
+							"WITH (", ") ");
 			return;
 		}
 	}
 
 	at = (rw->last < ts->ntoks) ? ts->toks[rw->last].off : ts->srclen;
-	rw_edit(rw, at, at, psprintf(" WITH (%s)", rw->options.data));
+	rw_edit_options(rw, at, at, " WITH (", ")");
 }
 
 /*
@@ -1464,7 +1377,7 @@ rw_create_directory_table(GpRewrite *rw, char **name, int *after)
 	rw_edit(rw, tok_stop(ts, nameend - 1), tok_stop(ts, nameend - 1),
 			" (relative_path text PRIMARY KEY, size bigint,"
 			" last_modified timestamptz, md5 text, tag text)");
-	rw_add_option(rw, "gp.directory_table = true");
+	rw_add_option(rw, "gp.directory_table = true", ts->toks[rw->first + 1].off);
 
 	rw->object = 't';
 	*name = rw_text(ts, i, nameend);
@@ -1925,7 +1838,8 @@ rw_tag_clauses(GpRewrite *rw, GpSubjKind kind, const char *name, int from)
 			forboth(k, c->keys, v, c->values)
 				rw_add_option(rw, psprintf("gp_tag.%s = %s",
 										   quote_identifier((char *) lfirst(k)),
-										   quote_literal_cstr((char *) lfirst(v))));
+										   quote_literal_cstr((char *) lfirst(v))),
+							  start);
 		}
 		else if (kind == GP_SUBJ_RELATION && rw->object == 'f')
 		{
@@ -1989,13 +1903,13 @@ rw_tag_clauses(GpRewrite *rw, GpSubjKind kind, const char *name, int from)
  * is quoted here is the true column name.
  */
 static void
-rw_distribution(GpRewrite *rw, const char *policy)
+rw_distribution(GpRewrite *rw, const char *policy, int at)
 {
 	if (rw->object == 'f')
 		rw_add_fdw_option(rw, "gp.distributed_by", policy);
 	else
 		rw_add_option(rw, psprintf("gp.distributed_by = %s",
-								   quote_literal_cstr(policy)));
+								   quote_literal_cstr(policy)), at);
 }
 
 static void
@@ -2025,7 +1939,8 @@ rw_distributed(GpRewrite *rw, int from)
 
 		if (tok_is(ts, i + 1, "randomly") || tok_is(ts, i + 1, "replicated"))
 		{
-			rw_distribution(rw, tok_is(ts, i + 1, "randomly") ? "random" : "replicated");
+			rw_distribution(rw, tok_is(ts, i + 1, "randomly") ? "random" : "replicated",
+							ts->toks[i].off);
 			rw_edit(rw, ts->toks[i].off,
 					(i + 2 < ts->ntoks) ? ts->toks[i + 2].off : ts->srclen, " ");
 			i++;
@@ -2051,7 +1966,7 @@ rw_distributed(GpRewrite *rw, int from)
 			}
 			appendStringInfoChar(&cols, ')');
 
-			rw_distribution(rw, cols.data);
+			rw_distribution(rw, cols.data, ts->toks[i].off);
 			rw_edit(rw, ts->toks[i].off,
 					(after < ts->ntoks) ? ts->toks[after].off : ts->srclen, " ");
 			i = after - 1;
@@ -2137,10 +2052,12 @@ rw_matview_options(GpRewrite *rw)
 	int			i = rw->first;
 	const char *option = NULL;
 	char	   *schedule = NULL;
+	int			at;
 	int			depth = 0;
 
 	if (!tok_is(ts, i, "create"))
 		return false;
+	at = (i + 1 < ts->ntoks) ? ts->toks[i + 1].off : ts->srclen;
 
 	if (tok_is(ts, i + 1, "incremental") && tok_is(ts, i + 2, "materialized") &&
 		tok_is(ts, i + 3, "view"))
@@ -2177,6 +2094,7 @@ rw_matview_options(GpRewrite *rw)
 		if (option == NULL && tok_is(ts, j, "schedule") && tok_is_string(ts, j + 1))
 		{
 			schedule = ts->toks[j + 1].str;
+			at = ts->toks[j].off;
 			rw_edit(rw, ts->toks[j].off,
 					(j + 2 < ts->ntoks) ? ts->toks[j + 2].off : ts->srclen, " ");
 			j++;
@@ -2196,7 +2114,7 @@ rw_matview_options(GpRewrite *rw)
 	 * become (rw_place_options): a DISTRIBUTED BY or a TAG on the same
 	 * statement goes there too.
 	 */
-	rw_add_option(rw, option);
+	rw_add_option(rw, option, at);
 	return true;
 }
 
@@ -2244,6 +2162,305 @@ rw_role_profile(GpRewrite *rw)
 	/* The option goes; ALTER USER u stays, and PostgreSQL takes it as is. */
 	rw_edit(rw, at, (rw->last < ts->ntoks) ? ts->toks[rw->last].off : ts->srclen, "");
 	return true;
+}
+
+/* ------------------------------------------------------------------------- */
+/* The classic partition clauses                                             */
+/* ------------------------------------------------------------------------- */
+
+/*
+ * `text` in dollar quotes whose tag is in neither it nor where it ends, so
+ * that the literal is the text exactly.
+ */
+static char *
+dollar_quote(const char *text)
+{
+	int			len = strlen(text);
+
+	for (int n = 0;; n++)
+	{
+		char	   *tag = (n == 0) ? pstrdup("$gp$") : psprintf("$gp%d$", n);
+		char	   *body = psprintf("%s%s", text, tag);
+		char	   *hit = strstr(body, tag);
+
+		if (hit == body + len)
+			return psprintf("%s%s", tag, body);
+	}
+}
+
+/*
+ * Where PostgreSQL's PARTITION BY goes in CREATE TABLE, the token at `i`
+ * being the one after the table's name: after the column list, OF type and
+ * its list, or PARTITION OF parent, its list and its bound, and INHERITS
+ * (...).  -1 for a statement with none of those, CREATE TABLE AS.
+ */
+static int
+table_structure_end(const GpTokens *ts, int i, int last)
+{
+	if (tok_is_char(ts, i, '('))
+		i = skip_parens(ts, i);
+	else if (tok_is_kw(ts, i, "of"))
+	{
+		i = skip_qualified_name(ts, i + 1);
+		if (tok_is_char(ts, i, '('))
+			i = skip_parens(ts, i);
+	}
+	else if (tok_is_kw(ts, i, "partition") && tok_is_kw(ts, i + 1, "of"))
+	{
+		i = skip_qualified_name(ts, i + 2);
+		if (tok_is_char(ts, i, '('))
+			i = skip_parens(ts, i);
+		if (tok_is_kw(ts, i, "default"))
+			i++;
+		else if (tok_is_kw(ts, i, "for") && tok_is_kw(ts, i + 1, "values"))
+		{
+			i += 2;
+			if (tok_is_kw(ts, i, "from"))
+			{
+				i = skip_parens(ts, i + 1);
+				if (tok_is_kw(ts, i, "to"))
+					i = skip_parens(ts, i + 1);
+			}
+			else
+				i = skip_parens(ts, i + 1);		/* IN (...) or WITH (...) */
+		}
+		return Min(i, last);
+	}
+	else
+		return -1;
+
+	if (tok_is_kw(ts, i, "inherits") && tok_is_char(ts, i + 1, '('))
+		i = skip_parens(ts, i + 1);
+	return Min(i, last);
+}
+
+/*
+ * CREATE TABLE t AS SELECT ... PARTITION BY ...: Cloudberry's grammar reads
+ * the clause after the query, where PARTITION, reserved there, cannot be an
+ * alias, and refuses it (gram.y's CreateAsStmt).  In PostgreSQL 19 PARTITION
+ * is an alias there, and BY a syntax error; a PARTITION BY outside every
+ * bracket of a query can only be the clause, so it is read, for its own
+ * syntax errors, and refused as Cloudberry refuses it.
+ */
+static void
+rw_ctas_partition_by(GpRewrite *rw, int after_name)
+{
+	const GpTokens *ts = rw->ts;
+	GpPartParser p = {ts, rw->last, ts->src, 0, true};
+	int			depth = 0;
+	bool		query = false;
+
+	for (int j = after_name; j < rw->last; j++)
+	{
+		if (tok_is_char(ts, j, '('))
+			depth++;
+		else if (tok_is_char(ts, j, ')'))
+			depth--;
+		if (depth != 0)
+			continue;
+		if (tok_is_kw(ts, j, "as"))
+			query = true;
+		if (query && tok_is_kw(ts, j, "partition") && tok_is_kw(ts, j + 1, "by"))
+		{
+			(void) GpPartParseClause(&p, j);
+			ereport(ERROR,
+					(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+					 errmsg("cannot create a partitioned table using CREATE TABLE AS SELECT"),
+					 errhint("Use CREATE TABLE...LIKE (followed by INSERT...SELECT) instead.")));
+		}
+	}
+}
+
+/*
+ * CREATE TABLE ... PARTITION BY RANGE (d) [SUBPARTITION BY ...]
+ *	   (START (...) END (...) EVERY (...), DEFAULT PARTITION other)
+ *	 -> CREATE TABLE ... PARTITION BY RANGE (d)
+ *		  WITH (gp.partition_by = $gp$PARTITION BY RANGE (d) ... other)$gp$)
+ *
+ * Cloudberry's classic partition clause, which gp_sql's partition.c turns
+ * into the partitions once the table exists.  PostgreSQL's grammar keeps the
+ * table's own key -- PARTITION BY RANGE (d) is PostgreSQL's too -- and the
+ * rest of the clause, which is not, is carried whole and as written in one
+ * option of the statement: one statement for one, as the clauses of CREATE
+ * TABLE are.  The option stands for the clause's start in the user's text,
+ * so that a position in it is a position there.
+ *
+ * The clause is parsed here as well (gp_partition.c), so that where it ends
+ * is known and its syntax errors are raised when the statement is parsed, at
+ * the token Cloudberry's grammar raises them at.
+ *
+ * Cloudberry takes PARTITION BY where PostgreSQL has it and at the end of the
+ * statement, after DISTRIBUTED BY (gram.y's OptFirstPartitionSpec and
+ * OptSecondPartitionSpec).  At the end, the key moves to where PostgreSQL
+ * has it -- which a PostgreSQL PARTITION BY there, with no partition list,
+ * needs too.
+ */
+static void
+rw_partition_by(GpRewrite *rw, int after_name)
+{
+	const GpTokens *ts = rw->ts;
+	GpPartParser p = {ts, rw->last, ts->src, 0, true};
+	GpPartClause *clause = NULL;
+	int			clause_at = -1;
+	int			pg_at;
+	int			depth = 0;
+	int			key_from;
+	int			key_to;
+	int			end;
+
+	if (!tok_is_kw(ts, rw->first, "create") || rw->object != 't')
+		return;
+
+	/* CREATE TABLE ... AS: an AS outside every bracket */
+	for (int j = after_name; j < rw->last; j++)
+	{
+		if (tok_is_char(ts, j, '('))
+			depth++;
+		else if (tok_is_char(ts, j, ')'))
+			depth--;
+		else if (depth == 0 && tok_is_kw(ts, j, "as"))
+		{
+			rw_ctas_partition_by(rw, after_name);
+			return;
+		}
+	}
+
+	pg_at = table_structure_end(ts, after_name, rw->last);
+	if (pg_at < 0)
+		return;
+
+	depth = 0;
+	for (int j = pg_at; j < rw->last; j++)
+	{
+		GpPartClause *c;
+
+		if (tok_is_char(ts, j, '('))
+			depth++;
+		else if (tok_is_char(ts, j, ')'))
+			depth--;
+		if (depth != 0 || !tok_is_kw(ts, j, "partition") ||
+			!tok_is_kw(ts, j + 1, "by"))
+			continue;
+
+		c = GpPartParseClause(&p, j);
+		if (clause != NULL)
+			ereport(ERROR,
+					(errcode(ERRCODE_SYNTAX_ERROR),
+					 errmsg("only one PARTITION BY clause is allowed"),
+					 errposition(pg_mbstrlen_with_len(ts->src, ts->toks[j].off) + 1)));
+		clause = c;
+		clause_at = j;
+		j = c->end - 1;
+	}
+
+	/* PostgreSQL's own, where PostgreSQL has it: nothing to do */
+	if (clause == NULL || (clause->def == NULL && clause_at == pg_at))
+		return;
+
+	key_from = ts->toks[clause_at].off;
+	key_to = tok_stop(ts, clause->key_end - 1);
+	end = tok_stop(ts, clause->end - 1);
+
+	if (clause->def != NULL)
+		rw_add_option(rw, psprintf("gp.%s = %s", GP_PARTITION_BY_OPTION,
+								   dollar_quote(pnstrdup(ts->src + key_from,
+														 end - key_from))),
+					  key_from);
+
+	if (clause_at == pg_at)
+	{
+		/* the key is where PostgreSQL has it; the rest goes */
+		rw_edit(rw, key_to, end, "");
+	}
+	else
+	{
+		/* the key moves there, as the user wrote it */
+		GpOut	   *piece = palloc(sizeof(GpOut));
+		int			at = (pg_at < ts->ntoks) ? ts->toks[pg_at].off : ts->srclen;
+
+		out_init(piece, ts->src);
+		out_text(piece, " ", key_from);
+		out_copy(piece, key_from, key_to);
+		out_text(piece, " ", key_from);
+		rw_edit_piece(rw, at, at, piece);
+		rw_edit(rw, key_from, end, " ");
+	}
+}
+
+/*
+ * ALTER TABLE t ADD PARTITION ..., DROP PARTITION ..., ALTER PARTITION ...,
+ * EXCHANGE, RENAME, SPLIT and TRUNCATE PARTITION, SET SUBPARTITION TEMPLATE
+ *	 -> ALTER TABLE t SET (gp.partition_cmd = $gp$ADD PARTITION ...$gp$)
+ *
+ * Each of Cloudberry's partition commands becomes an option of ALTER TABLE's
+ * SET, in place among the statement's other commands, as TAG does; gp_sql's
+ * partition.c takes it out and does what it says once the rest has run.  The
+ * option stands for the command in the user's text.  A command is parsed here
+ * too, for where it ends and for its syntax errors.
+ *
+ * Four of them can be PostgreSQL's as well -- ADD, DROP, ALTER and RENAME of
+ * a column called "partition" -- and are taken only where PostgreSQL's
+ * grammar would refuse them (GpPartIsCmd).
+ */
+static void
+rw_partition_cmds(GpRewrite *rw)
+{
+	const GpTokens *ts = rw->ts;
+	GpPartParser p = {ts, rw->last, ts->src, 0, true};
+	int			i = rw->first;
+	int			e;
+
+	if (!tok_is_kw(ts, i, "alter") || !tok_is_kw(ts, i + 1, "table"))
+		return;
+	i += 2;
+	if (tok_is_kw(ts, i, "if") && tok_is_kw(ts, i + 1, "exists"))
+		i += 2;
+	if (tok_is_kw(ts, i, "only"))
+	{
+		i++;
+		if (tok_is_char(ts, i, '('))
+			i++;
+	}
+	e = skip_qualified_name(ts, i);
+	if (e == i)
+		return;
+	i = e;
+	if (tok_is_char(ts, i, ')') || tok_is_char(ts, i, '*'))
+		i++;
+
+	/* its commands, comma-separated */
+	while (i < rw->last)
+	{
+		if (GpPartIsCmd(ts, i, rw->last))
+		{
+			int			from = ts->toks[i].off;
+			int			to;
+
+			(void) GpPartParseCmd(&p, i, &e);
+			to = tok_stop(ts, e - 1);
+			rw_edit(rw, from, to,
+					psprintf("SET (gp.%s = %s)", GP_PARTITION_CMD_OPTION,
+							 dollar_quote(pnstrdup(ts->src + from, to - from))));
+			i = e;
+		}
+		else
+		{
+			int			depth = 0;
+
+			for (; i < rw->last; i++)
+			{
+				if (tok_is_char(ts, i, '(') || tok_is_char(ts, i, '['))
+					depth++;
+				else if (tok_is_char(ts, i, ')') || tok_is_char(ts, i, ']'))
+					depth--;
+				else if (depth == 0 && tok_is_char(ts, i, ','))
+					break;
+			}
+		}
+		if (!tok_is_char(ts, i, ','))
+			break;
+		i++;
+	}
 }
 
 /* ------------------------------------------------------------------------- */
@@ -2475,32 +2692,6 @@ typedef struct GpExprScan
 
 static int	construct_at(const GpExprScan *sc, int i, int limit);
 static void emit_construct(GpOut *o, const GpExprScan *sc, int i, int stop);
-
-/*
- * The token that closes the bracket at `open`, counting ( ) and [ ] together,
- * or -1 if it is not closed before `limit`.
- */
-static int
-match_close(const GpTokens *ts, int open, int limit)
-{
-	int			depth = 0;
-
-	for (int j = open; j < limit; j++)
-	{
-		int			c = ts->toks[j].code;
-
-		if (c == '(' || c == '[')
-			depth++;
-		else if (c == ')' || c == ']')
-		{
-			if (--depth == 0)
-				return j;
-			if (depth < 0)
-				return -1;
-		}
-	}
-	return -1;
-}
 
 /*
  * The user's text from byte `from` to byte `to`, which covers tokens
@@ -3063,8 +3254,14 @@ rw_statement(GpRewrite *rw)
 		rw->subject_end = after_name;
 		rw_tag_clauses(rw, kind, name, after_name);
 		if (kind == GP_SUBJ_RELATION)
+		{
 			rw_distributed(rw, after_name);
+			rw_partition_by(rw, after_name);
+		}
 	}
+
+	/* ALTER TABLE's partition commands */
+	rw_partition_cmds(rw);
 
 	/* DECODE and CASE ... WHEN IS NOT DISTINCT FROM, wherever they are. */
 	if (!rw->whole)
@@ -3137,7 +3334,7 @@ desugar(const char *str, bool expr_only, GpPosMap **map, List **carried,
 	if (str == NULL || !looks_interesting(str))
 		return NULL;
 
-	ts = gp_tokenize(str);
+	ts = GpTokenize(str);
 	if (ts->ntoks == 0)
 		return NULL;
 
@@ -3354,13 +3551,6 @@ GpAttachCarriers(List *parsetree, List *carried)
 
 static raw_parser_hook_type prev_raw_parser = NULL;
 
-typedef struct GpParseErrorArg
-{
-	const char *original;		/* what the caller asked to parse */
-	const char *rewritten;		/* what the grammar read */
-	const GpPosMap *map;
-} GpParseErrorArg;
-
 /*
  * A syntax error in a rewritten statement, reported where the user wrote what
  * the grammar stopped at.  The grammar gives its position as a character
@@ -3371,8 +3561,8 @@ typedef struct GpParseErrorArg
  * last: PL/pgSQL's moves the position into the function's body, and has to
  * be given one in the text it handed over.
  */
-static void
-gp_parse_error_callback(void *arg)
+void
+GpParseErrorCallback(void *arg)
 {
 	GpParseErrorArg *a = (GpParseErrorArg *) arg;
 	int			pos = geterrposition();
@@ -3385,7 +3575,10 @@ gp_parse_error_callback(void *arg)
 		offset += pg_mblen_cstr(a->rewritten + offset);
 
 	offset = GpPosMapSource(a->map, offset);
-	errposition(pg_mbstrlen_with_len(a->original, offset) + 1);
+	if (offset < 0)
+		errposition(0);			/* in text with no place in the user's */
+	else
+		errposition(pg_mbstrlen_with_len(a->original, offset) + 1);
 }
 
 static List *
@@ -3419,7 +3612,7 @@ gp_raw_parser(const char *str, RawParseMode mode)
 	errarg.original = str;
 	errarg.rewritten = rewritten;
 	errarg.map = map;
-	errcallback.callback = gp_parse_error_callback;
+	errcallback.callback = GpParseErrorCallback;
 	errcallback.arg = &errarg;
 	errcallback.previous = error_context_stack;
 	error_context_stack = &errcallback;

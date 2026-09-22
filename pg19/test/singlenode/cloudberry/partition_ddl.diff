@@ -1,0 +1,122 @@
+@@
++DETAIL:  No operator of that name accepts the given argument types.
+@@
++ERROR:  access method "ao_row" does not exist
+@@
+-ERROR:  missing boundary specification in partition "aa" of type RANGE
++ERROR:  relation "mpp3045_hhh" does not exist
+@@
+-ERROR:  relation "mpp3045_hhh_1_prt_aa" already exists
++ERROR:  relation "mpp3045_hhh" does not exist
+@@
++ERROR:  unrecognized parameter "checksum"
+@@
++ERROR:  relation "mpp3287_nation" does not exist
++LINE 1: delete from mpp3287_nation;
++                    ^
+@@
++ERROR:  relation "mpp3287_nation" does not exist
++LINE 1: INSERT INTO mpp3287_nation VALUES (1, 'ARGENTINA            ...
++                    ^
+@@
++ERROR:  relation "mpp3287_nation" does not exist
++LINE 1: INSERT INTO mpp3287_nation VALUES (3, 'CANADA               ...
++                    ^
+@@
++ERROR:  relation "mpp3287_nation" does not exist
++LINE 1: INSERT INTO mpp3287_nation VALUES (5, 'ETHIOPIA             ...
++                    ^
+@@
++ERROR:  relation "mpp3287_nation" does not exist
++LINE 1: INSERT INTO mpp3287_nation VALUES (7, 'GERMANY              ...
++                    ^
+@@
++ERROR:  relation "mpp3287_nation" does not exist
++LINE 1: INSERT INTO mpp3287_nation VALUES (9, 'INDONESIA            ...
++                    ^
+@@
++ERROR:  relation "mpp3287_nation" does not exist
++LINE 1: INSERT INTO mpp3287_nation VALUES (11, 'IRAQ                ...
++                    ^
+@@
++ERROR:  relation "mpp3287_nation" does not exist
++LINE 1: INSERT INTO mpp3287_nation VALUES (13, 'JORDAN              ...
++                    ^
+@@
++ERROR:  relation "mpp3287_nation" does not exist
++LINE 1: INSERT INTO mpp3287_nation VALUES (15, 'MOROCCO             ...
++                    ^
+@@
++ERROR:  relation "mpp3287_nation" does not exist
++LINE 1: INSERT INTO mpp3287_nation VALUES (17, 'PERU                ...
++                    ^
+@@
++ERROR:  relation "mpp3287_nation" does not exist
++LINE 1: INSERT INTO mpp3287_nation VALUES (19, 'ROMANIA             ...
++                    ^
+@@
++ERROR:  relation "mpp3287_nation" does not exist
++LINE 1: INSERT INTO mpp3287_nation VALUES (21, 'VIETNAM             ...
++                    ^
+@@
++ERROR:  relation "mpp3287_nation" does not exist
++LINE 1: INSERT INTO mpp3287_nation VALUES (23, 'UNITED KINGDOM      ...
++                    ^
+@@
++ERROR:  relation "mpp3287_nation" does not exist
++LINE 1: INSERT INTO mpp3287_nation VALUES (0, 'ALGERIA              ...
++                    ^
+@@
++ERROR:  relation "mpp3287_nation" does not exist
++LINE 1: INSERT INTO mpp3287_nation VALUES (2, 'BRAZIL               ...
++                    ^
+@@
++ERROR:  relation "mpp3287_nation" does not exist
++LINE 1: INSERT INTO mpp3287_nation VALUES (4, 'EGYPT                ...
++                    ^
+@@
++ERROR:  relation "mpp3287_nation" does not exist
++LINE 1: INSERT INTO mpp3287_nation VALUES (6, 'FRANCE               ...
++                    ^
+@@
++ERROR:  relation "mpp3287_nation" does not exist
++LINE 1: INSERT INTO mpp3287_nation VALUES (8, 'INDIA                ...
++                    ^
+@@
++ERROR:  relation "mpp3287_nation" does not exist
++LINE 1: INSERT INTO mpp3287_nation VALUES (10, 'IRAN                ...
++                    ^
+@@
++ERROR:  relation "mpp3287_nation" does not exist
++LINE 1: INSERT INTO mpp3287_nation VALUES (12, 'JAPAN               ...
++                    ^
+@@
++ERROR:  relation "mpp3287_nation" does not exist
++LINE 1: INSERT INTO mpp3287_nation VALUES (14, 'KENYA               ...
++                    ^
+@@
++ERROR:  relation "mpp3287_nation" does not exist
++LINE 1: INSERT INTO mpp3287_nation VALUES (16, 'MOZAMBIQUE          ...
++                    ^
+@@
++ERROR:  relation "mpp3287_nation" does not exist
++LINE 1: INSERT INTO mpp3287_nation VALUES (18, 'CHINA               ...
++                    ^
+@@
++ERROR:  relation "mpp3287_nation" does not exist
++LINE 1: INSERT INTO mpp3287_nation VALUES (20, 'SAUDI ARABIA        ...
++                    ^
+@@
++ERROR:  relation "mpp3287_nation" does not exist
++LINE 1: INSERT INTO mpp3287_nation VALUES (22, 'RUSSIA              ...
++                    ^
+@@
++ERROR:  relation "mpp3287_nation" does not exist
++LINE 1: INSERT INTO mpp3287_nation VALUES (24, 'UNITED STATES       ...
++                    ^
+@@
++ERROR:  relation "mpp3287_nation" does not exist
++LINE 1: delete from mpp3287_nation;
++                    ^
+@@
++ERROR:  table "mpp3287_nation" does not exist

@@ -1519,6 +1519,280 @@ ALTER FUNCTION
 ALTER FUNCTION
 execute_on=all_segments,data_access=reads"
 
+###############################################################################
+echo
+echo "15. Cloudberry's classic partition clauses"
+###############################################################################
+
+# PARTITION BY ... (START (...) END (...) EVERY (...), DEFAULT PARTITION ...)
+# on CREATE TABLE, and ADD, DROP, ALTER, EXCHANGE, RENAME, SPLIT and TRUNCATE
+# PARTITION and SET SUBPARTITION TEMPLATE on ALTER TABLE.  The rewrite checks
+# the clause with a parser of Cloudberry's productions (gp_partition.c) and
+# carries it, as written, in one option of the statement; gp_sql makes the
+# partitions once the table exists.  What is checked here: what the rewrite
+# hands the grammar, the syntax errors Cloudberry's tests expect at the token
+# they expect them, the partitions made -- names, bounds, subpartitions,
+# owner, privileges, distribution -- and what each ALTER TABLE command does.
+
+# --- what the rewrite hands PostgreSQL's grammar -------------------------------
+
+is "PostgreSQL's own PARTITION BY, where PostgreSQL has it, is left alone" \
+   "SELECT gp_sql.desugar('CREATE TABLE t (a int) PARTITION BY RANGE (a)');" \
+   "CREATE TABLE t (a int) PARTITION BY RANGE (a)"
+is "and a window's, though it has PARTITION and it is in no bracket of the rewrite's" \
+   "SELECT gp_sql.desugar('SELECT rank() OVER (PARTITION BY a) FROM t');" \
+   "SELECT rank() OVER (PARTITION BY a) FROM t"
+is "the classic clause: the key stays PostgreSQL's, the rest rides in the WITH list as written" \
+   "SELECT gp_sql.desugar('CREATE TABLE t (a int, b int) PARTITION BY RANGE (b) (START (1) END (3) EVERY (1))');" \
+   'CREATE TABLE t (a int, b int) PARTITION BY RANGE (b) WITH (gp.partition_by = $gp$PARTITION BY RANGE (b) (START (1) END (3) EVERY (1))$gp$)'
+is "after DISTRIBUTED BY, the key moves to where PostgreSQL has it" \
+   "SELECT gp_sql.desugar('CREATE TABLE t (a int, b int) DISTRIBUTED BY (a) PARTITION BY LIST (b) (PARTITION p VALUES (1), DEFAULT PARTITION other)');" \
+   'CREATE TABLE t (a int, b int)  PARTITION BY LIST (b)    WITH (gp.distributed_by = '"'"'(a)'"'"', gp.partition_by = $gp$PARTITION BY LIST (b) (PARTITION p VALUES (1), DEFAULT PARTITION other)$gp$)'
+is "and so does PostgreSQL's own, written at the end as Cloudberry lets it be" \
+   "SELECT gp_sql.desugar('CREATE TABLE t (a int) WITH (fillfactor = 70) PARTITION BY RANGE (a)');" \
+   "CREATE TABLE t (a int)  PARTITION BY RANGE (a) WITH (fillfactor = 70)  "
+is "the option goes before TABLESPACE, where PostgreSQL has WITH" \
+   "SELECT gp_sql.desugar('CREATE TABLE t (a int, b int) PARTITION BY RANGE (b) (START (1) END (2)) TABLESPACE pg_default');" \
+   'CREATE TABLE t (a int, b int) PARTITION BY RANGE (b) WITH (gp.partition_by = $gp$PARTITION BY RANGE (b) (START (1) END (2))$gp$) TABLESPACE pg_default'
+is "a dollar quote in the clause, and the option's is another" \
+   "SELECT gp_sql.desugar(\$q\$CREATE TABLE t (a text) PARTITION BY LIST (a) (PARTITION p VALUES ('\$gp\$'))\$q\$);" \
+   "CREATE TABLE t (a text) PARTITION BY LIST (a) WITH (gp.partition_by = \$gp1\$PARTITION BY LIST (a) (PARTITION p VALUES ('\$gp\$'))\$gp1\$)"
+is "each ALTER TABLE command becomes a SET among the statement's commands" \
+   "SELECT gp_sql.desugar('ALTER TABLE t ADD PARTITION p3 START (3) END (4), DROP PARTITION p1');" \
+   'ALTER TABLE t SET (gp.partition_cmd = $gp$ADD PARTITION p3 START (3) END (4)$gp$), SET (gp.partition_cmd = $gp$DROP PARTITION p1$gp$)'
+
+# ADD, DROP, ALTER and RENAME are PostgreSQL's too, about a column called
+# "partition", which PostgreSQL 19 lets be a name and Cloudberry reserves.
+# Where PostgreSQL's grammar takes one, it is PostgreSQL's.
+for c in "ALTER TABLE t DROP partition" "ALTER TABLE t ADD partition int" \
+         "ALTER TABLE t RENAME partition TO part" "ALTER TABLE t ALTER partition TYPE bigint"; do
+	is "PostgreSQL's reading stands: $c" "SELECT gp_sql.desugar('$c');" "$c"
+done
+q "CREATE TABLE gpp_col (a int, partition int);" > /dev/null
+is "and does what it does in PostgreSQL" \
+   "ALTER TABLE gpp_col RENAME partition TO part; ALTER TABLE gpp_col DROP part;
+    ALTER TABLE gpp_col ADD partition int;
+    SELECT string_agg(attname, ',' ORDER BY attnum) FROM pg_attribute
+     WHERE attrelid = 'gpp_col'::regclass AND attnum > 0 AND NOT attisdropped;" "a,partition"
+
+# --- syntax errors, where Cloudberry's grammar raises them ---------------------
+#
+# Each of these is one of Cloudberry's tests' (partition, partition1,
+# bfv_partition, partition_ddl), raised when the statement is parsed.
+
+at "SUBPARTITION TEMPLATE without SUBPARTITION BY" \
+   "CREATE TABLE gpp_e (a int, b text) PARTITION BY LIST (b) SUBPARTITION TEMPLATE (SUBPARTITION usa VALUES ('usa'))" \
+   'syntax error at or near "TEMPLATE"' "TEMPLATE"
+at "EVERY takes its value in parentheses" \
+   "CREATE TABLE gpp_e (a int, b int) PARTITION BY RANGE (b) (START (1) END (20) EVERY 5 (1))" \
+   'syntax error at or near "5"' "5"
+at "a default partition has no boundary" \
+   "CREATE TABLE gpp_e (a int, b int) PARTITION BY RANGE (b) (DEFAULT PARTITION x START (0) END (2))" \
+   'syntax error at or near "START"' "START"
+at "a strategy is a word" \
+   "CREATE TABLE gpp_e (a int, b int) PARTITION BY (b) (START (1) END (10))" \
+   'syntax error at or near "("' "(b"
+refused "an unknown one is Cloudberry's error, which has no position" \
+        "CREATE TABLE gpp_e (a int, b int) PARTITION BY funky (b) (START (1) END (10))" \
+        'unrecognized partitioning strategy "funky"'
+at "an expression is no key of the classic syntax" \
+   "CREATE TABLE gpp_e (a int, b int) PARTITION BY RANGE ((b + 1)) (START (1) END (10))" \
+   "expressions in partition key not supported in legacy GPDB partition syntax" "(b + 1)"
+at "a syntax error in a boundary's expression is PostgreSQL's grammar's, where it is" \
+   "CREATE TABLE gpp_e (a int, b int) PARTITION BY RANGE (b) (START (1 + ) END (10))" \
+   'syntax error at or near ")"' ") END"
+at "a template holds partitions, and NULL is none" \
+   "ALTER TABLE gpp_e SET SUBPARTITION TEMPLATE (NULL)" 'syntax error at or near "NULL"' "NULL"
+at "FOR takes a value" \
+   "ALTER TABLE gpp_e DROP PARTITION FOR ()" 'syntax error at or near ")"' ")"
+at "a call is no value: Cloudberry's grammar stops after it" \
+   "ALTER TABLE gpp_e DROP PARTITION FOR (funky(1)@@)" 'syntax error at or near ")"' ")"
+refused "and RANK(n) is Greenplum 6's, refused by name" \
+        "ALTER TABLE gpp_e DROP PARTITION FOR (RANK(1))" \
+        "addressing partition by RANK is no longer supported"
+at "ADD PARTITION has no EVERY" \
+   "ALTER TABLE gpp_e ADD PARTITION START (3) END (4) EVERY (1)" 'syntax error at or near "EVERY"' "EVERY"
+at "DEFAULT is no partition's name" \
+   "ALTER TABLE gpp_e ADD DEFAULT PARTITION @@default" 'syntax error at or near "default"' "default"
+refused "a default partition is added by name" \
+        "ALTER TABLE gpp_e ADD DEFAULT PARTITION FOR (1)" "can only ADD a partition by name"
+refused "CREATE TABLE AS takes no partition clause, as in Cloudberry" \
+        "CREATE TABLE gpp_e AS SELECT 1 AS a PARTITION BY LIST (a) (PARTITION p VALUES (1))" \
+        "cannot create a partitioned table using CREATE TABLE AS SELECT"
+at "nor may a CREATE TABLE have two" \
+   "CREATE TABLE gpp_e (a int) PARTITION BY RANGE (a) (START (1) END (2)) DISTRIBUTED BY (a) @@PARTITION BY RANGE (a) (START (1) END (2))" \
+   "only one PARTITION BY clause is allowed" "PARTITION"
+refused "a template's partition has no partitions of its own" \
+        "CREATE TABLE gpp_e (a int, b int) PARTITION BY RANGE (a) SUBPARTITION BY RANGE (b)
+           SUBPARTITION TEMPLATE (SUBPARTITION s START (1) END (2) (SUBPARTITION x START (1) END (2)))
+           (START (1) END (2))" \
+        "template cannot contain specification for child partition"
+
+# --- the partitions made --------------------------------------------------------
+
+# parts <table>: its partitions and their bounds, a level at a time, as the
+# partitions of each are ordered by name.
+parts() {
+	q "SELECT string_agg(c.relname || ' ' || pg_get_expr(c.relpartbound, c.oid), '; '
+	                    ORDER BY t.level, c.relname)
+	     FROM pg_partition_tree('$1') t JOIN pg_class c ON c.oid = t.relid WHERE t.level > 0;"
+}
+isparts() {
+	local got; got=$(parts "$2")
+	[ "$got" = "$3" ] && ok "$1" || notok "$1" "want [$3], got [$got]"
+}
+
+q "CREATE TABLE gpp_r (a int, b date) DISTRIBUTED BY (a) PARTITION BY RANGE (b)
+     (START (date '2020-01-01') INCLUSIVE END (date '2020-04-01') EXCLUSIVE EVERY (interval '1 month'),
+      DEFAULT PARTITION other);" > /dev/null
+isparts "EVERY steps with the key's +, and the default partition is numbered first" gpp_r \
+   "gpp_r_1_prt_2 FOR VALUES FROM ('2020-01-01') TO ('2020-02-01'); gpp_r_1_prt_3 FOR VALUES FROM ('2020-02-01') TO ('2020-03-01'); gpp_r_1_prt_4 FOR VALUES FROM ('2020-03-01') TO ('2020-04-01'); gpp_r_1_prt_other DEFAULT"
+is "each partition is distributed as the table is" \
+   "SELECT count(*) FROM pg_seclabel s JOIN pg_class c ON c.oid = s.objoid
+     WHERE s.provider = 'gp' AND s.label = 'distributed_by=(a)' AND c.relname LIKE 'gpp_r%';" "5"
+
+q "CREATE TABLE gpp_k (i int) PARTITION BY RANGE (i) (START (0) EXCLUSIVE END (100) INCLUSIVE EVERY (25));" > /dev/null
+isparts "START EXCLUSIVE and END INCLUSIVE are PostgreSQL's bounds, a step in" gpp_k \
+   "gpp_k_1_prt_1 FOR VALUES FROM (1) TO (26); gpp_k_1_prt_2 FOR VALUES FROM (26) TO (51); gpp_k_1_prt_3 FOR VALUES FROM (51) TO (76); gpp_k_1_prt_4 FOR VALUES FROM (76) TO (101)"
+q "CREATE TABLE gpp_m (i bigint) PARTITION BY RANGE (i) (PARTITION hi START (9223372036854775806) END (9223372036854775807) INCLUSIVE);" > /dev/null
+isparts "and an END INCLUSIVE at the type's largest value is MAXVALUE" gpp_m \
+   "gpp_m_1_prt_hi FOR VALUES FROM ('9223372036854775806') TO (MAXVALUE)"
+
+q "CREATE TABLE gpp_i (a int) PARTITION BY RANGE (a)
+     (PARTITION a START (0), PARTITION b START (3), PARTITION c START (5) END (8), PARTITION d END (20));" > /dev/null
+isparts "a START or END left out is the neighbour's, or MINVALUE and MAXVALUE at the ends" gpp_i \
+   "gpp_i_1_prt_a FOR VALUES FROM (0) TO (3); gpp_i_1_prt_b FOR VALUES FROM (3) TO (5); gpp_i_1_prt_c FOR VALUES FROM (5) TO (8); gpp_i_1_prt_d FOR VALUES FROM (8) TO (20)"
+
+q "CREATE TABLE gpp_s (id int, region text, d date) PARTITION BY LIST (region)
+     SUBPARTITION BY RANGE (d) SUBPARTITION TEMPLATE (START (date '2020-01-01') END (date '2020-03-01') EVERY (interval '1 month'))
+     (PARTITION usa VALUES ('usa'), PARTITION asia VALUES ('asia', 'japan'), DEFAULT PARTITION rest);" > /dev/null
+isparts "SUBPARTITION BY and its template, a level at a time" gpp_s \
+   "gpp_s_1_prt_asia FOR VALUES IN ('asia', 'japan'); gpp_s_1_prt_rest DEFAULT; gpp_s_1_prt_usa FOR VALUES IN ('usa'); gpp_s_1_prt_asia_2_prt_1 FOR VALUES FROM ('2020-01-01') TO ('2020-02-01'); gpp_s_1_prt_asia_2_prt_2 FOR VALUES FROM ('2020-02-01') TO ('2020-03-01'); gpp_s_1_prt_rest_2_prt_1 FOR VALUES FROM ('2020-01-01') TO ('2020-02-01'); gpp_s_1_prt_rest_2_prt_2 FOR VALUES FROM ('2020-02-01') TO ('2020-03-01'); gpp_s_1_prt_usa_2_prt_1 FOR VALUES FROM ('2020-01-01') TO ('2020-02-01'); gpp_s_1_prt_usa_2_prt_2 FOR VALUES FROM ('2020-02-01') TO ('2020-03-01')"
+is "the template is kept with the table, as written, in its gp label" \
+   "SELECT label FROM pg_seclabel WHERE objoid = 'gpp_s'::regclass AND provider = 'gp';" \
+   "partition_templates=1:78:(START (date '2020-01-01') END (date '2020-03-01') EVERY (interval '1 month'))"
+is "rows go where the bounds say" \
+   "INSERT INTO gpp_s VALUES (1, 'japan', '2020-02-15'), (2, 'usa', '2020-01-02'), (3, 'mars', '2020-01-31');
+    SELECT string_agg(tableoid::regclass || ':' || id, ' ' ORDER BY id) FROM gpp_s;" \
+   "gpp_s_1_prt_asia_2_prt_2:1 gpp_s_1_prt_usa_2_prt_1:2 gpp_s_1_prt_rest_2_prt_1:3"
+at "an error in a bound value is reported at the value" \
+   "CREATE TABLE gpp_e (a int) PARTITION BY LIST (a) (PARTITION p VALUES (1, 'abc'))" \
+   'invalid input syntax for type integer: "abc"' "'abc'"
+refused "a WITH (appendonly = false) partition is heap, which it names" \
+        "CREATE TABLE gpp_ao (a int, b int) PARTITION BY LIST (b)
+           (PARTITION p VALUES (1) WITH (appendonly = false, fillfactor = 70), PARTITION q VALUES (2) WITH (appendonly = true));" \
+        'access method "ao_row" does not exist'
+refused "and gp.max_partition_level limits the levels, as gp_max_partition_level does" \
+        "SET gp.max_partition_level = 1;
+         CREATE TABLE gpp_e (a int, b int) PARTITION BY RANGE (a) SUBPARTITION BY RANGE (b)
+           SUBPARTITION TEMPLATE (START (1) END (2)) (START (1) END (2));" \
+        "Exceeds maximum configured partitioning level of 1"
+
+# --- ALTER TABLE ----------------------------------------------------------------
+
+q "CREATE ROLE gpp_owner; GRANT CREATE ON SCHEMA public TO gpp_owner;
+   SET ROLE gpp_owner;
+   CREATE TABLE gpp_a (a int, b int) PARTITION BY RANGE (b) (PARTITION p1 START (0) END (10), PARTITION p2 START (10) END (20));
+   RESET ROLE;
+   CREATE ROLE gpp_reader; GRANT SELECT ON gpp_a TO gpp_reader;" > /dev/null
+q "ALTER TABLE gpp_a ADD PARTITION p3 START (20) END (30);" > /dev/null
+isparts "ADD PARTITION" gpp_a \
+   "gpp_a_1_prt_p1 FOR VALUES FROM (0) TO (10); gpp_a_1_prt_p2 FOR VALUES FROM (10) TO (20); gpp_a_1_prt_p3 FOR VALUES FROM (20) TO (30)"
+is "a partition a superuser adds is the table owner's, as in Cloudberry" \
+   "SELECT relowner::regrole FROM pg_class WHERE relname = 'gpp_a_1_prt_p3';" "gpp_owner"
+is "GRANT on the table reached its partitions, and the new one has the table's privileges" \
+   "SELECT string_agg(c.relname || '=' || has_table_privilege('gpp_reader', c.oid, 'SELECT'), ' ' ORDER BY c.relname)
+      FROM pg_class c WHERE c.relname LIKE 'gpp_a%';" \
+   "gpp_a=true gpp_a_1_prt_p1=true gpp_a_1_prt_p2=true gpp_a_1_prt_p3=true"
+is "as does one made with PostgreSQL's syntax" \
+   "CREATE TABLE gpp_a_pg PARTITION OF gpp_a FOR VALUES FROM (40) TO (50);
+    SELECT has_table_privilege('gpp_reader', 'gpp_a_pg', 'SELECT');" "t"
+q "ALTER TABLE gpp_a ADD PARTITION p4 END (35);" > /dev/null
+isparts "an ADD with no START starts where the partition below it ends" gpp_a \
+   "gpp_a_1_prt_p1 FOR VALUES FROM (0) TO (10); gpp_a_1_prt_p2 FOR VALUES FROM (10) TO (20); gpp_a_1_prt_p3 FOR VALUES FROM (20) TO (30); gpp_a_1_prt_p4 FOR VALUES FROM (30) TO (35); gpp_a_pg FOR VALUES FROM (40) TO (50)"
+# Cloudberry's own rule: with a partition starting where the new one ends,
+# the START it finds is MINVALUE, and the partition overlaps.
+refused "and one ending where another starts cannot be placed" \
+        "ALTER TABLE gpp_a ADD PARTITION p5 END (40)" 'partition "gpp_a_1_prt_p5" would overlap partition "gpp_a_1_prt_p1"'
+q "INSERT INTO gpp_a SELECT i, i FROM generate_series(0, 34) i;" > /dev/null
+is "TRUNCATE PARTITION empties one" \
+   "ALTER TABLE gpp_a TRUNCATE PARTITION FOR (5); SELECT count(*) FROM gpp_a;" "25"
+is "SPLIT PARTITION ... AT: two in its place, and its rows put back through the table" \
+   "ALTER TABLE gpp_a SPLIT PARTITION p2 AT (15) INTO (PARTITION p2a, PARTITION p2b);
+    SELECT string_agg(tableoid::regclass || ':' || count, ' ' ORDER BY 1) FROM
+      (SELECT tableoid, count(*) FROM gpp_a WHERE b BETWEEN 10 AND 19 GROUP BY 1) s;" \
+   "gpp_a_1_prt_p2a:5 gpp_a_1_prt_p2b:5"
+is "RENAME PARTITION" \
+   "ALTER TABLE gpp_a RENAME PARTITION p2a TO early; SELECT to_regclass('gpp_a_1_prt_early') IS NOT NULL;" "t"
+q "CREATE TABLE gpp_x (a int, b int); INSERT INTO gpp_x VALUES (1, 31), (2, 32);" > /dev/null
+is "EXCHANGE PARTITION swaps a table in: the partition's name is the table's now, and the rows" \
+   "ALTER TABLE gpp_a EXCHANGE PARTITION p4 WITH TABLE gpp_x;
+    SELECT (SELECT count(*) FROM gpp_a_1_prt_p4), (SELECT count(*) FROM gpp_x);" "2|5"
+refused "DROP PARTITION of one that is not there" \
+        "ALTER TABLE gpp_a DROP PARTITION nosuch" 'relation "public.gpp_a_1_prt_nosuch" does not exist'
+is "and with IF EXISTS, nothing" \
+   "ALTER TABLE gpp_a DROP PARTITION IF EXISTS nosuch; ALTER TABLE gpp_a DROP PARTITION p1;
+    SELECT count(*) FROM pg_inherits WHERE inhparent = 'gpp_a'::regclass;" "5"
+# A name too long to fit in <parent>_<level>_prt_<name> is no partition's:
+# makeObjectName, which makes that name, asserts on one, and Cloudberry's
+# lookup by name does not check for it.
+long=$(printf 'p%.0s' $(seq 57))
+refused "a name longer than a partition's can be names none" \
+        "ALTER TABLE gpp_a TRUNCATE PARTITION $long" "partition \"$long\" of \"gpp_a\" does not exist"
+is "and DROP PARTITION IF EXISTS of it does nothing" \
+   "ALTER TABLE gpp_a DROP PARTITION IF EXISTS $long;
+    SELECT count(*) FROM pg_inherits WHERE inhparent = 'gpp_a'::regclass;" "5"
+refused "nor can a new partition be given one" \
+        "ALTER TABLE gpp_a SPLIT PARTITION FOR (31) AT (33) INTO (PARTITION $long, PARTITION p4b)" \
+        "name \"$long\" for child partition is too long"
+refused "FOR (value) of the default partition's is refused" \
+        "ALTER TABLE gpp_r DROP PARTITION FOR (date '1999-01-01')" \
+        'FOR expression matches DEFAULT partition for specified value of relation "gpp_r"'
+refused "and the last partition cannot go" \
+        "CREATE TABLE gpp_one (a int) PARTITION BY RANGE (a) (START (1) END (2));
+         ALTER TABLE gpp_one DROP PARTITION FOR (1);" \
+        'cannot drop partition "gpp_one_1_prt_1" of "gpp_one" -- only one remains'
+refused "a partition command on a table that is not partitioned" \
+        "ALTER TABLE gpp_x ADD PARTITION p START (1) END (2)" 'table "gpp_x" is not partitioned'
+
+q "ALTER TABLE gpp_s ADD PARTITION eu VALUES ('eu');" > /dev/null
+isparts "ADD PARTITION of a table with a template makes the new partition's partitions from it" gpp_s_1_prt_eu \
+   "gpp_s_1_prt_eu_2_prt_1 FOR VALUES FROM ('2020-01-01') TO ('2020-02-01'); gpp_s_1_prt_eu_2_prt_2 FOR VALUES FROM ('2020-02-01') TO ('2020-03-01')"
+q "ALTER TABLE gpp_s ALTER PARTITION usa ADD PARTITION march START (date '2020-03-01') END (date '2020-04-01');" > /dev/null
+is "ALTER PARTITION goes down to the partition its command is for" \
+   "SELECT pg_get_expr(relpartbound, oid) FROM pg_class WHERE relname = 'gpp_s_1_prt_usa_2_prt_march';" \
+   "FOR VALUES FROM ('2020-03-01') TO ('2020-04-01')"
+is "SET SUBPARTITION TEMPLATE replaces it, and () takes it away" \
+   "ALTER TABLE gpp_s SET SUBPARTITION TEMPLATE (START (date '2021-01-01') END (date '2021-02-01'));
+    ALTER TABLE gpp_s ADD PARTITION cn VALUES ('cn');
+    SELECT string_agg(pg_get_expr(relpartbound, oid), ' ') FROM pg_class WHERE relname LIKE 'gpp_s_1_prt_cn_2_prt%';
+    ALTER TABLE gpp_s SET SUBPARTITION TEMPLATE ();
+    SELECT count(*) FROM pg_seclabel WHERE objoid = 'gpp_s'::regclass;" \
+   "FOR VALUES FROM ('2021-01-01') TO ('2021-02-01')
+0"
+refused "and there is none to take away then" \
+        "ALTER TABLE gpp_s SET SUBPARTITION TEMPLATE ()" \
+        'relation "gpp_s" does not have a level 1 subpartition template specification'
+is "renaming the table renames its partitions, as Cloudberry's RENAME does" \
+   "ALTER TABLE gpp_i RENAME TO gpp_i2;
+    SELECT string_agg(relname, ' ' ORDER BY relname) FROM pg_class WHERE relname LIKE 'gpp_i2%';" \
+   "gpp_i2 gpp_i2_1_prt_a gpp_i2_1_prt_b gpp_i2_1_prt_c gpp_i2_1_prt_d"
+is "and one made with PostgreSQL's syntax renames as PostgreSQL does" \
+   "CREATE TABLE gpp_pg (a int) PARTITION BY RANGE (a);
+    CREATE TABLE gpp_pg_1_part PARTITION OF gpp_pg FOR VALUES FROM (1) TO (2);
+    ALTER TABLE gpp_pg RENAME TO gpp_pg2;
+    SELECT string_agg(relname, ' ' ORDER BY relname) FROM pg_class WHERE relname LIKE 'gpp_pg%';" \
+   "gpp_pg2 gpp_pg_1_part"
+
+# --- one statement for one ------------------------------------------------------
+
+answers "CREATE TABLE with the classic clause, prepared" \
+        "CREATE TABLE gpp_b (a int) PARTITION BY RANGE (a) (START (1) END (3) EVERY (1))" "CREATE TABLE"
+answers "and ALTER TABLE's commands" \
+        "ALTER TABLE gpp_b ADD PARTITION START (3) END (4), DROP PARTITION FOR (1)" "ALTER TABLE"
+isparts "which did what they say" gpp_b \
+   "gpp_b_1_prt_11 FOR VALUES FROM (3) TO (4); gpp_b_1_prt_2 FOR VALUES FROM (2) TO (3)"
+
 echo
 echo "  $pass passed, $fail failed"
 [ "$fail" -eq 0 ]

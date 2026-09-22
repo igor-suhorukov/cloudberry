@@ -30,11 +30,13 @@
  *
  * Cloudberry sources this module is made of:
  *	  src/backend/commands/tag.c, dirtablecmds.c, storagecmds.c,
- *	  storage/file/ufile.c, parser/parse_partition_gp.c
+ *	  tablecmds_gp.c, storage/file/ufile.c, parser/parse_partition_gp.c
  *
  *-------------------------------------------------------------------------
  */
 #include "postgres.h"
+
+#include <limits.h>
 
 #include "access/xact.h"
 #include "catalog/namespace.h"
@@ -65,6 +67,7 @@
 #include "gp_core_api.h"
 #include "gp_grammar.h"
 #include "gp_label.h"
+#include "gp_partition.h"
 #include "gp_sql.h"
 
 PG_MODULE_MAGIC_EXT(
@@ -758,6 +761,8 @@ gp_sql_ProcessUtility(PlannedStmt *pstmt, const char *queryString,
 	List	   *tags = NIL;
 	char	   *policy = NULL;
 	bool		directory_table = false;
+	DefElem    *partition_by = NULL;
+	List	   *partition_cmds = NIL;
 	bool		is_alter = false;
 	List	  **carried;
 	GpSqlPending save;
@@ -787,6 +792,48 @@ gp_sql_ProcessUtility(PlannedStmt *pstmt, const char *queryString,
 		return;
 	}
 
+	/*
+	 * GRANT and REVOKE on a partitioned table of Cloudberry's reach its
+	 * partitions, as they do in Cloudberry (partition.c).
+	 */
+	if (IsA(parsetree, GrantStmt))
+	{
+		List	   *objects = GpPartitionGrantObjects((GrantStmt *) parsetree);
+
+		if (objects != NIL)
+		{
+			if (readOnlyTree)
+			{
+				pstmt = copyObject(pstmt);
+				parsetree = pstmt->utilityStmt;
+				readOnlyTree = false;
+			}
+			((GrantStmt *) parsetree)->objects = objects;
+		}
+	}
+
+	/*
+	 * ALTER TABLE t RENAME TO t2 renames t's partitions too, t_1_prt_a to
+	 * t2_1_prt_a, as Cloudberry's does (partition.c, GpPartitionRenamed).
+	 */
+	if (IsA(parsetree, RenameStmt) &&
+		((RenameStmt *) parsetree)->renameType == OBJECT_TABLE &&
+		((RenameStmt *) parsetree)->relation != NULL)
+	{
+		RenameStmt *rs = (RenameStmt *) parsetree;
+		Oid			relid = RangeVarGetRelid(rs->relation, NoLock, true);
+		char	   *oldname = OidIsValid(relid) ? get_rel_name(relid) : NULL;
+
+		GpSqlProcessUtilityNext(pstmt, queryString, readOnlyTree, context,
+								params, queryEnv, dest, qc);
+		if (oldname != NULL)
+		{
+			CommandCounterIncrement();
+			GpPartitionRenamed(relid, oldname, rs->newname);
+		}
+		return;
+	}
+
 	carried = carried_list_of(parsetree);
 	if (carried != NULL && GpTagHasCarried(*carried))
 	{
@@ -800,12 +847,14 @@ gp_sql_ProcessUtility(PlannedStmt *pstmt, const char *queryString,
 
 	if ((options != NULL &&
 		 (has_tag_options(*options) || has_gp_option(*options, "distributed_by") ||
-		  has_gp_option(*options, "directory_table"))) ||
+		  has_gp_option(*options, "directory_table") ||
+		  has_gp_option(*options, GP_PARTITION_BY_OPTION))) ||
 		(fdw_options != NULL &&
 		 (has_prefixed_option(*fdw_options, GP_TAG_OPTION_NS ".") ||
 		  has_prefixed_option(*fdw_options, GP_OPTION_NS ".distributed_by"))) ||
 		(IsA(parsetree, AlterTableStmt) &&
-		 alter_has_tag_options((AlterTableStmt *) parsetree)))
+		 (alter_has_tag_options((AlterTableStmt *) parsetree) ||
+		  GpPartitionHasCmds((AlterTableStmt *) parsetree))))
 	{
 		/*
 		 * The tree is about to be changed, so it must be ours to change.  A
@@ -823,6 +872,7 @@ gp_sql_ProcessUtility(PlannedStmt *pstmt, const char *queryString,
 		if (IsA(parsetree, AlterTableStmt))
 		{
 			tags = alter_take_tags((AlterTableStmt *) parsetree);
+			partition_cmds = GpPartitionTakeCmds((AlterTableStmt *) parsetree);
 			is_alter = true;
 		}
 		else if (fdw_options != NULL)
@@ -850,13 +900,31 @@ gp_sql_ProcessUtility(PlannedStmt *pstmt, const char *queryString,
 							 errmsg("only CREATE TABLE makes a directory table")));
 				directory_table = (def->arg == NULL || defGetBoolean(def));
 			}
+			partition_by = take_gp_option(options, GP_PARTITION_BY_OPTION, false);
+			if (partition_by != NULL && !IsA(parsetree, CreateStmt))
+				ereport(ERROR,
+						(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+						 errmsg("only CREATE TABLE takes a partition clause")));
+
+			/*
+			 * The table's WITH (appendonly = ...) chooses its storage, which
+			 * its partitions then have: a partitioned table has no storage
+			 * parameters of its own in PostgreSQL.
+			 */
+			if (partition_by != NULL)
+				((CreateStmt *) parsetree)->accessMethod =
+					GpPartitionLegacyAccessMethod(((CreateStmt *) parsetree)->accessMethod,
+												  options);
 		}
 	}
 
-	if (tags == NIL && policy == NULL && !directory_table)
+	if (tags == NIL && policy == NULL && !directory_table &&
+		partition_by == NULL && partition_cmds == NIL)
 	{
 		GpSqlProcessUtilityNext(pstmt, queryString, readOnlyTree, context,
 								params, queryEnv, dest, qc);
+		if (IsA(parsetree, CreateStmt))
+			GpPartitionMade((CreateStmt *) parsetree);
 		return;
 	}
 
@@ -900,7 +968,15 @@ gp_sql_ProcessUtility(PlannedStmt *pstmt, const char *queryString,
 			GpTagApplyToRelation(relid, tags);
 			if (directory_table)
 				GpDirTableClaim(relid);
+
+			/* the partitions, once the table is distributed and tagged */
+			if (partition_by != NULL)
+				GpPartitionCreate(relid, partition_by, queryString, queryEnv);
 		}
+
+		if (partition_cmds != NIL)
+			GpPartitionAlter((AlterTableStmt *) parsetree, partition_cmds,
+							 queryString, queryEnv);
 	}
 	PG_FINALLY();
 	{
@@ -1016,6 +1092,16 @@ _PG_init(void)
 	 */
 	CB_REQUIRE_PRELOAD("gp_sql");
 	CB_REQUIRE_CORE("gp_sql");
+
+	DefineCustomIntVariable("gp.max_partition_level",
+							"Sets the maximum number of levels allowed when creating a partitioned table using Greenplum classic syntax.",
+							"0, the default, is no limit.  Cloudberry calls "
+							"this gp_max_partition_level.",
+							&gp_max_partition_level,
+							0, 0, INT_MAX,
+							PGC_SUSET,
+							0,
+							NULL, NULL, NULL);
 
 	DefineCustomBoolVariable("gp.allow_dml_directory_table",
 							 "Allow ordinary DML on a directory table.",

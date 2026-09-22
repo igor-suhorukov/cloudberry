@@ -293,7 +293,12 @@ modules = [
                      # rewritten into PostgreSQL's, before the grammar sees it,
                      # and the parse tree's positions put back in the user's.
                      'grammar/gp_desugar.c',
-                     'grammar/gp_parseloc.c'),
+                     'grammar/gp_parseloc.c',
+                     # Cloudberry's classic partition clauses: the parser the
+                     # rewrite checks them with, and gp_sql's side, which
+                     # makes the partitions they describe.
+                     'grammar/gp_partition.c',
+                     'modules/gp_sql/partition.c'),
   },
 ]
 

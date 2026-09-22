@@ -289,10 +289,18 @@ for pass in ${PASSES:-planner orca}; do
 	esac
 	watchdog "$WORK/$pass/cancelled" &
 	WATCHDOG=$!
+	# From Cloudberry's suite's directory, as its Makefile runs it: one of its
+	# tests, partition_indexing, reads data/onek.data there by a relative
+	# path.  PostgreSQL 19's tests name their files by absolute path.  The
+	# expected outputs are named, because pg_regress looks for them in
+	# expected/ of the directory it runs in before the one --inputdir names,
+	# and Cloudberry's directory has its copies of PostgreSQL 14's.
+	cd "$CB"
 	PATH="$EXEC/bin:$PATH" CB_DIFF_MODE="$pass" PGOPTIONS="-c gp.optimizer=$optimizer" \
 		"$PG_REGRESS" \
 			--bindir="$BINDIR" \
 			--inputdir="$SN" \
+			--expecteddir="$SN" \
 			--outputdir="$WORK/$pass" \
 			--dlpath="$PGSUITE" \
 			--schedule="$SN/schedule" \

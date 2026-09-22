@@ -1,0 +1,106 @@
+@@
+-ERROR:  unique constraint on partitioned table must include all partitioning columns
++ERROR:  UNIQUE constraint on partitioned table must include all partitioning columns
+@@
+-ERROR:  unique constraint on partitioned table must include all partitioning columns
++ERROR:  UNIQUE constraint on partitioned table must include all partitioning columns
+@@
+-ERROR:  unique constraint on partitioned table must include all partitioning columns
++ERROR:  UNIQUE constraint on partitioned table must include all partitioning columns
+@@
+-ERROR:  unique constraint on partitioned table must include all partitioning columns
++ERROR:  UNIQUE constraint on partitioned table must include all partitioning columns
+@@
+-ERROR:  unique constraint on partitioned table must include all partitioning columns
++ERROR:  UNIQUE constraint on partitioned table must include all partitioning columns
+@@
+-ERROR:  unique constraint on partitioned table must include all partitioning columns
++ERROR:  UNIQUE constraint on partitioned table must include all partitioning columns
+@@
+-ERROR:  unique constraint on partitioned table must include all partitioning columns
++ERROR:  UNIQUE constraint on partitioned table must include all partitioning columns
+@@
++ERROR:  access method "bitmap" does not exist
+@@
++ERROR:  access method "bitmap" does not exist
+@@
++ERROR:  access method "bitmap" does not exist
+@@
++ERROR:  access method "bitmap" does not exist
+@@
++ERROR:  access method "bitmap" does not exist
+@@
++ERROR:  access method "bitmap" does not exist
+@@
++ERROR:  access method "bitmap" does not exist
+@@
++ERROR:  access method "bitmap" does not exist
+@@
++ERROR:  relation "mpp3033a_unique1" does not exist
+@@
++ERROR:  relation "mpp3033a_unique2" does not exist
+@@
++ERROR:  relation "mpp3033a_hundred" does not exist
+@@
++ERROR:  relation "mpp3033a_stringu1" does not exist
+@@
++ERROR:  relation "mpp3033b_unique1" does not exist
+@@
++ERROR:  relation "mpp3033b_unique2" does not exist
+@@
++ERROR:  relation "mpp3033b_hundred" does not exist
+@@
++ERROR:  relation "mpp3033b_stringu1" does not exist
+@@
+-ERROR:  unique constraint on partitioned table must include all partitioning columns
++ERROR:  UNIQUE constraint on partitioned table must include all partitioning columns
+@@
+-ERROR:  unique constraint on partitioned table must include all partitioning columns
++ERROR:  UNIQUE constraint on partitioned table must include all partitioning columns
+@@
+-ERROR:  unique constraint on partitioned table must include all partitioning columns
++ERROR:  UNIQUE constraint on partitioned table must include all partitioning columns
+@@
+-ERROR:  unique constraint on partitioned table must include all partitioning columns
++ERROR:  UNIQUE constraint on partitioned table must include all partitioning columns
+@@
+-ERROR:  unique constraint on partitioned table must include all partitioning columns
++ERROR:  UNIQUE constraint on partitioned table must include all partitioning columns
+@@
+-ERROR:  unique constraint on partitioned table must include all partitioning columns
++ERROR:  UNIQUE constraint on partitioned table must include all partitioning columns
+@@
+-ERROR:  unique constraint on partitioned table must include all partitioning columns
++ERROR:  UNIQUE constraint on partitioned table must include all partitioning columns
+@@
++ERROR:  access method "bitmap" does not exist
+@@
++ERROR:  access method "bitmap" does not exist
+@@
++ERROR:  access method "bitmap" does not exist
+@@
++ERROR:  access method "bitmap" does not exist
+@@
++ERROR:  access method "bitmap" does not exist
+@@
++ERROR:  access method "bitmap" does not exist
+@@
++ERROR:  access method "bitmap" does not exist
+@@
++ERROR:  access method "bitmap" does not exist
+@@
++ERROR:  relation "mpp3033a_unique1" does not exist
+@@
++ERROR:  relation "mpp3033a_unique2" does not exist
+@@
++ERROR:  relation "mpp3033a_hundred" does not exist
+@@
++ERROR:  relation "mpp3033a_stringu1" does not exist
+@@
++ERROR:  relation "mpp3033b_unique1" does not exist
+@@
++ERROR:  relation "mpp3033b_unique2" does not exist
+@@
++ERROR:  relation "mpp3033b_hundred" does not exist
+@@
++ERROR:  relation "mpp3033b_stringu1" does not exist

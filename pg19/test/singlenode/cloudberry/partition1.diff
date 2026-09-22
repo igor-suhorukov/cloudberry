@@ -1,0 +1,679 @@
+@@
+-Partitions: ggg_1_prt_1 FOR VALUES FROM ('aaa') TO ('b'),
+-            ggg_1_prt_2 FOR VALUES FROM ('b') TO ('c'),
+-            ggg_1_prt_3 FOR VALUES FROM ('c') TO ('d'),
+-            ggg_1_prt_4 FOR VALUES FROM ('d') TO ('e'),
+-            ggg_1_prt_5 FOR VALUES FROM ('e') TO ('f'),
+-            ggg_1_prt_6 FOR VALUES FROM ('f') TO ('foobar')
++Partitions:
++    ggg_1_prt_1 FOR VALUES FROM ('aaa') TO ('b')
++    ggg_1_prt_2 FOR VALUES FROM ('b') TO ('c')
++    ggg_1_prt_3 FOR VALUES FROM ('c') TO ('d')
++    ggg_1_prt_4 FOR VALUES FROM ('d') TO ('e')
++    ggg_1_prt_5 FOR VALUES FROM ('e') TO ('f')
++    ggg_1_prt_6 FOR VALUES FROM ('f') TO ('foobar')
+@@
++ERROR:  access method "ao_row" does not exist
+@@
++ERROR:  relation "foz" does not exist
++LINE 1: insert into foz select i, '2001-01-01'::date + ('1 day'::int...
++                    ^
+@@
+- count 
+--------
+-  1000
+-(1 row)
+-
++ERROR:  relation "foz" does not exist
++LINE 1: select count(*) from foz;
++                             ^
+@@
+- count 
+--------
+-   364
+-(1 row)
+-
++ERROR:  relation "foz_1_prt_1" does not exist
++LINE 1: select count(*) from foz_1_prt_1;
++                             ^
+@@
+-    min     |    max     
+-------------+------------
+- 01-02-2001 | 09-28-2003
+-(1 row)
+-
++ERROR:  relation "foz" does not exist
++LINE 1: select min(d), max(d) from foz;
++                                   ^
+@@
+-    min     |    max     
+-------------+------------
+- 01-02-2001 | 12-31-2001
+-(1 row)
+-
++ERROR:  relation "foz_1_prt_1" does not exist
++LINE 1: select min(d), max(d) from foz_1_prt_1;
++                                   ^
+@@
+-    min     |    max     
+-------------+------------
+- 01-01-2002 | 12-31-2002
+-(1 row)
+-
++ERROR:  relation "foz_1_prt_2" does not exist
++LINE 1: select min(d), max(d) from foz_1_prt_2;
++                                   ^
+@@
+-    min     |    max     
+-------------+------------
+- 01-01-2003 | 09-28-2003
+-(1 row)
+-
++ERROR:  relation "foz_1_prt_3" does not exist
++LINE 1: select min(d), max(d) from foz_1_prt_3;
++                                   ^
+@@
+- min | max 
+------+-----
+-     | 
+-(1 row)
+-
++ERROR:  relation "foz_1_prt_4" does not exist
++LINE 1: select min(d), max(d) from foz_1_prt_4;
++                                   ^
+@@
++ERROR:  table "foz" does not exist
+@@
++ERROR:  access method "ao_row" does not exist
+@@
++ERROR:  relation "foz" does not exist
+@@
+- i |     d      
+----+------------
+- 1 | 01-02-2001
+- 2 | 10-10-2001
+-(2 rows)
+-
++ERROR:  relation "foz_1_prt_1" does not exist
++LINE 1: select * from foz_1_prt_1;
++                      ^
+@@
+- i |     d      
+----+------------
+- 3 | 10-30-2002
+-(1 row)
+-
++ERROR:  relation "foz_1_prt_2" does not exist
++LINE 1: select * from foz_1_prt_2;
++                      ^
+@@
+- i |     d      
+----+------------
+- 4 | 01-01-2003
+-(1 row)
+-
++ERROR:  relation "foz_1_prt_3" does not exist
++LINE 1: select * from foz_1_prt_3;
++                      ^
+@@
+- i |     d      
+----+------------
+- 5 | 05-05-2004
+-(1 row)
+-
++ERROR:  relation "foz_1_prt_4" does not exist
++LINE 1: select * from foz_1_prt_4;
++                      ^
+@@
+-DETAIL:  Partition key of the failing row contains (d) = (01-01-2010).
+-ERROR:  no partition of relation "foz" found for row
+-CONTEXT:  COPY foz, line 1: "6|2010-01-01"
++ERROR:  relation "foz" does not exist
+@@
++ERROR:  table "foz" does not exist
+@@
++ERROR:  access method "ao_row" does not exist
+@@
+-ERROR:  relation "hhh_1_prt_aa" already exists
++ERROR:  relation "hhh" does not exist
+@@
+-ERROR:  missing boundary specification in partition "cc" of type RANGE
++ERROR:  relation "hhh" does not exist
+@@
+-ERROR:  partition "hhh_1_prt_cc" would overlap partition "hhh_1_prt_bb"
++ERROR:  relation "hhh" does not exist
+@@
+-ERROR:  partition "hhh_1_prt_cc" would overlap partition "hhh_1_prt_aa"
++ERROR:  relation "hhh" does not exist
+@@
+-DETAIL:  Specified lower bound ('01-01-2010') is greater than or equal to upper bound ('01-01-2009').
+-ERROR:  empty range bound specified for partition "hhh_1_prt_cc"
++ERROR:  relation "hhh" does not exist
+@@
++ERROR:  relation "hhh" does not exist
+@@
++ERROR:  relation "hhh" does not exist
+@@
+-ERROR:  tablespace "foo_p" does not exist
++ERROR:  relation "hhh" does not exist
+@@
+-ERROR:  tablespace "foo_p" does not exist
++ERROR:  relation "hhh" does not exist
+@@
++ERROR:  relation "hhh" does not exist
+@@
+-ERROR:  relation "public.hhh_1_prt_cc" does not exist
++ERROR:  relation "hhh" does not exist
+@@
+-ERROR:  relation "public.hhh_1_prt_cc" does not exist
++ERROR:  relation "hhh" does not exist
+@@
++ERROR:  relation "hhh" does not exist
+@@
+-ERROR:  partition for specified value of hhh does not exist
++ERROR:  relation "hhh" does not exist
+@@
+-ERROR:  syntax error at or near ";"
+-LINE 1: alter table hhh_l1 drop partition;
+-                                         ^
++ERROR:  column "partition" of relation "hhh_l1" does not exist
+@@
+-ERROR:  syntax error at or near ";"
+-LINE 1: alter table hhh_r1 drop partition;
+-                                         ^
++ERROR:  column "partition" of relation "hhh_r1" does not exist
+@@
+-ERROR:  relation "public.hhh_1_prt_cc" does not exist
++ERROR:  relation "hhh" does not exist
+@@
+-ERROR:  relation "nosuchtable" does not exist
++ERROR:  relation "hhh" does not exist
+@@
+-ERROR:  relation "public.hhh_1_prt_cc" does not exist
++ERROR:  relation "hhh" does not exist
+@@
+-ERROR:  relation "hhh_1_prt_aa" already exists
++ERROR:  relation "hhh" does not exist
+@@
+-ERROR:  relation "hhh_1_prt_aa" already exists
++ERROR:  relation "hhh" does not exist
+@@
++ERROR:  relation "hhh" does not exist
+@@
++ERROR:  relation "hhh" does not exist
+@@
++ERROR:  relation "hhh" does not exist
+@@
++ERROR:  relation "hhh" does not exist
+@@
+-ERROR:  relation "hhh" does not have a level 1 subpartition template specification
++ERROR:  relation "hhh" does not exist
+@@
+-ERROR:  relation "public.hhh_1_prt_cc" does not exist
++ERROR:  relation "hhh" does not exist
+@@
+-ERROR:  relation "public.hhh_1_prt_cc" does not exist
++ERROR:  relation "hhh" does not exist
+@@
+-ERROR:  invalid input syntax for type date: "a"
+-LINE 1: alter table hhh split partition aa at ('a');
+-                                               ^
++ERROR:  relation "hhh" does not exist
+@@
+-ERROR:  relation "public.hhh_1_prt_cc" does not exist
++ERROR:  relation "hhh" does not exist
+@@
++ERROR:  relation "hhh" does not exist
+@@
++ERROR:  relation "hhh" does not exist
++LINE 1: insert into hhh values('a', date '2007-01-02', 'b');
++                    ^
+@@
++ERROR:  relation "hhh" does not exist
++LINE 1: insert into hhh values('a', date '2007-02-01', 'b');
++                    ^
+@@
++ERROR:  relation "hhh" does not exist
++LINE 1: insert into hhh values('a', date '2007-03-01', 'b');
++                    ^
+@@
++ERROR:  relation "hhh" does not exist
++LINE 1: insert into hhh values('a', date '2007-04-01', 'b');
++                    ^
+@@
++ERROR:  relation "hhh" does not exist
++LINE 1: insert into hhh values('a', date '2007-05-01', 'b');
++                    ^
+@@
++ERROR:  relation "hhh" does not exist
++LINE 1: insert into hhh values('a', date '2007-06-01', 'b');
++                    ^
+@@
++ERROR:  relation "hhh" does not exist
++LINE 1: insert into hhh values('a', date '2007-07-01', 'b');
++                    ^
+@@
++ERROR:  relation "hhh" does not exist
++LINE 1: insert into hhh values('a', date '2007-08-01', 'b');
++                    ^
+@@
++ERROR:  relation "hhh" does not exist
++LINE 1: insert into hhh values('a', date '2007-09-01', 'b');
++                    ^
+@@
++ERROR:  relation "hhh" does not exist
++LINE 1: insert into hhh values('a', date '2007-10-01', 'b');
++                    ^
+@@
++ERROR:  relation "hhh" does not exist
++LINE 1: insert into hhh values('a', date '2007-11-01', 'b');
++                    ^
+@@
++ERROR:  relation "hhh" does not exist
++LINE 1: insert into hhh values('a', date '2007-12-01', 'b');
++                    ^
+@@
++ERROR:  relation "hhh" does not exist
++LINE 1: insert into hhh values('a', date '2008-01-02', 'b');
++                    ^
+@@
++ERROR:  relation "hhh" does not exist
++LINE 1: insert into hhh values('a', date '2008-02-01', 'b');
++                    ^
+@@
++ERROR:  relation "hhh" does not exist
++LINE 1: insert into hhh values('a', date '2008-03-01', 'b');
++                    ^
+@@
++ERROR:  relation "hhh" does not exist
++LINE 1: insert into hhh values('a', date '2008-04-01', 'b');
++                    ^
+@@
++ERROR:  relation "hhh" does not exist
++LINE 1: insert into hhh values('a', date '2008-05-01', 'b');
++                    ^
+@@
++ERROR:  relation "hhh" does not exist
++LINE 1: insert into hhh values('a', date '2008-06-01', 'b');
++                    ^
+@@
++ERROR:  relation "hhh" does not exist
++LINE 1: insert into hhh values('a', date '2008-07-01', 'b');
++                    ^
+@@
++ERROR:  relation "hhh" does not exist
++LINE 1: insert into hhh values('a', date '2008-08-01', 'b');
++                    ^
+@@
++ERROR:  relation "hhh" does not exist
++LINE 1: insert into hhh values('a', date '2008-09-01', 'b');
++                    ^
+@@
++ERROR:  relation "hhh" does not exist
++LINE 1: insert into hhh values('a', date '2008-10-01', 'b');
++                    ^
+@@
++ERROR:  relation "hhh" does not exist
++LINE 1: insert into hhh values('a', date '2008-11-01', 'b');
++                    ^
+@@
++ERROR:  relation "hhh" does not exist
++LINE 1: insert into hhh values('a', date '2008-12-01', 'b');
++                    ^
+@@
+- a |     b      |  d  
+----+------------+-----
+- a | 01-02-2007 | b  
+- a | 01-02-2008 | b  
+- a | 02-01-2007 | b  
+- a | 02-01-2008 | b  
+- a | 03-01-2007 | b  
+- a | 03-01-2008 | b  
+- a | 04-01-2007 | b  
+- a | 04-01-2008 | b  
+- a | 05-01-2007 | b  
+- a | 05-01-2008 | b  
+- a | 06-01-2007 | b  
+- a | 06-01-2008 | b  
+- a | 07-01-2007 | b  
+- a | 07-01-2008 | b  
+- a | 08-01-2007 | b  
+- a | 08-01-2008 | b  
+- a | 09-01-2007 | b  
+- a | 09-01-2008 | b  
+- a | 10-01-2007 | b  
+- a | 10-01-2008 | b  
+- a | 11-01-2007 | b  
+- a | 11-01-2008 | b  
+- a | 12-01-2007 | b  
+- a | 12-01-2008 | b  
+-(24 rows)
+-
++ERROR:  relation "hhh" does not exist
++LINE 1: select * from hhh;
++                      ^
+@@
++ERROR:  relation "hhh" does not exist
+@@
+- a |     b      |  d  
+----+------------+-----
+- a | 01-02-2008 | b  
+- a | 02-01-2008 | b  
+- a | 03-01-2008 | b  
+- a | 04-01-2008 | b  
+- a | 05-01-2008 | b  
+- a | 06-01-2008 | b  
+- a | 07-01-2008 | b  
+- a | 08-01-2008 | b  
+- a | 09-01-2008 | b  
+- a | 10-01-2008 | b  
+- a | 11-01-2008 | b  
+- a | 12-01-2008 | b  
+-(12 rows)
+-
++ERROR:  relation "hhh" does not exist
++LINE 1: select * from hhh;
++                      ^
+@@
++ERROR:  relation "hhh" does not exist
+@@
+- a | b | d 
+----+---+---
+-(0 rows)
+-
++ERROR:  relation "hhh" does not exist
++LINE 1: select * from hhh;
++                      ^
+@@
++ERROR:  relation "hhh" does not exist
++LINE 1: insert into hhh values('a', date '2007-01-02', 'b');
++                    ^
+@@
++ERROR:  relation "hhh" does not exist
++LINE 1: insert into hhh values('a', date '2007-02-01', 'b');
++                    ^
+@@
++ERROR:  relation "hhh" does not exist
++LINE 1: insert into hhh values('a', date '2007-03-01', 'b');
++                    ^
+@@
++ERROR:  relation "hhh" does not exist
++LINE 1: insert into hhh values('a', date '2007-04-01', 'b');
++                    ^
+@@
++ERROR:  relation "hhh" does not exist
++LINE 1: insert into hhh values('a', date '2007-05-01', 'b');
++                    ^
+@@
++ERROR:  relation "hhh" does not exist
++LINE 1: insert into hhh values('a', date '2007-06-01', 'b');
++                    ^
+@@
++ERROR:  relation "hhh" does not exist
++LINE 1: insert into hhh values('a', date '2007-07-01', 'b');
++                    ^
+@@
++ERROR:  relation "hhh" does not exist
++LINE 1: insert into hhh values('a', date '2007-08-01', 'b');
++                    ^
+@@
++ERROR:  relation "hhh" does not exist
++LINE 1: insert into hhh values('a', date '2007-09-01', 'b');
++                    ^
+@@
++ERROR:  relation "hhh" does not exist
++LINE 1: insert into hhh values('a', date '2007-10-01', 'b');
++                    ^
+@@
++ERROR:  relation "hhh" does not exist
++LINE 1: insert into hhh values('a', date '2007-11-01', 'b');
++                    ^
+@@
++ERROR:  relation "hhh" does not exist
++LINE 1: insert into hhh values('a', date '2007-12-01', 'b');
++                    ^
+@@
++ERROR:  relation "hhh" does not exist
++LINE 1: insert into hhh values('a', date '2008-01-02', 'b');
++                    ^
+@@
++ERROR:  relation "hhh" does not exist
++LINE 1: insert into hhh values('a', date '2008-02-01', 'b');
++                    ^
+@@
++ERROR:  relation "hhh" does not exist
++LINE 1: insert into hhh values('a', date '2008-03-01', 'b');
++                    ^
+@@
++ERROR:  relation "hhh" does not exist
++LINE 1: insert into hhh values('a', date '2008-04-01', 'b');
++                    ^
+@@
++ERROR:  relation "hhh" does not exist
++LINE 1: insert into hhh values('a', date '2008-05-01', 'b');
++                    ^
+@@
++ERROR:  relation "hhh" does not exist
++LINE 1: insert into hhh values('a', date '2008-06-01', 'b');
++                    ^
+@@
++ERROR:  relation "hhh" does not exist
++LINE 1: insert into hhh values('a', date '2008-07-01', 'b');
++                    ^
+@@
++ERROR:  relation "hhh" does not exist
++LINE 1: insert into hhh values('a', date '2008-08-01', 'b');
++                    ^
+@@
++ERROR:  relation "hhh" does not exist
++LINE 1: insert into hhh values('a', date '2008-09-01', 'b');
++                    ^
+@@
++ERROR:  relation "hhh" does not exist
++LINE 1: insert into hhh values('a', date '2008-10-01', 'b');
++                    ^
+@@
++ERROR:  relation "hhh" does not exist
++LINE 1: insert into hhh values('a', date '2008-11-01', 'b');
++                    ^
+@@
++ERROR:  relation "hhh" does not exist
++LINE 1: insert into hhh values('a', date '2008-12-01', 'b');
++                    ^
+@@
+- a |     b      |  d  
+----+------------+-----
+- a | 01-02-2007 | b  
+- a | 01-02-2008 | b  
+- a | 02-01-2007 | b  
+- a | 02-01-2008 | b  
+- a | 03-01-2007 | b  
+- a | 03-01-2008 | b  
+- a | 04-01-2007 | b  
+- a | 04-01-2008 | b  
+- a | 05-01-2007 | b  
+- a | 05-01-2008 | b  
+- a | 06-01-2007 | b  
+- a | 06-01-2008 | b  
+- a | 07-01-2007 | b  
+- a | 07-01-2008 | b  
+- a | 08-01-2007 | b  
+- a | 08-01-2008 | b  
+- a | 09-01-2007 | b  
+- a | 09-01-2008 | b  
+- a | 10-01-2007 | b  
+- a | 10-01-2008 | b  
+- a | 11-01-2007 | b  
+- a | 11-01-2008 | b  
+- a | 12-01-2007 | b  
+- a | 12-01-2008 | b  
+-(24 rows)
+-
++ERROR:  relation "hhh" does not exist
++LINE 1: select * from hhh;
++                      ^
+@@
++ERROR:  relation "hhh" does not exist
+@@
+- a | b | d 
+----+---+---
+-(0 rows)
+-
++ERROR:  relation "hhh" does not exist
++LINE 1: select * from hhh;
++                      ^
+@@
++ERROR:  table "hhh" does not exist
+@@
+-Partitions: d_1_prt_1 FOR VALUES FROM (10) TO (50),
+-            d_1_prt_2 FOR VALUES FROM (5) TO (10),
+-            d_1_prt_3 FOR VALUES FROM (50) TO (60)
++Partitions:
++    d_1_prt_1 FOR VALUES FROM (10) TO (50)
++    d_1_prt_2 FOR VALUES FROM (5) TO (10)
++    d_1_prt_3 FOR VALUES FROM (50) TO (60)
+@@
+-Partitions: d_1_prt_a FOR VALUES IN ('(1,2)', '(3,4)'),
+-            d_1_prt_b FOR VALUES IN ('(100,20)'),
+-            d_1_prt_c FOR VALUES IN ('(1000,1001)', '(1001,1002)', '(1003,1004)')
++Partitions:
++    d_1_prt_a FOR VALUES IN ('(1,2)', '(3,4)')
++    d_1_prt_b FOR VALUES IN ('(100,20)')
++    d_1_prt_c FOR VALUES IN ('(1000,1001)', '(1001,1002)', '(1003,1004)')
+@@
++ERROR:  unrecognized parameter "appendonly"
+@@
++ERROR:  relation "dcl_candidate" does not exist
++LINE 1: insert into dcl_candidate(message_create_date) values (times...
++                    ^
+@@
++ERROR:  relation "dcl_candidate" does not exist
+@@
++LINE 1: alter table mpp18179 alter column b type varchar(20);
++                                          ^
+@@
++ERROR:  access method "bitmap" does not exist
+@@
+- schemaname |         tablename          |             indexname             | tablespace |                                               indexdef                                                
+-------------+----------------------------+-----------------------------------+------------+-------------------------------------------------------------------------------------------------------
+- public     | mpp7635_aoi_table2         | mpp7635_ix3                       |            | CREATE INDEX mpp7635_ix3 ON ONLY public.mpp7635_aoi_table2 USING bitmap (id)
+- public     | mpp7635_aoi_table2_1_prt_1 | mpp7635_aoi_table2_1_prt_1_id_idx |            | CREATE INDEX mpp7635_aoi_table2_1_prt_1_id_idx ON public.mpp7635_aoi_table2_1_prt_1 USING bitmap (id)
+- public     | mpp7635_aoi_table2_1_prt_2 | mpp7635_aoi_table2_1_prt_2_id_idx |            | CREATE INDEX mpp7635_aoi_table2_1_prt_2_id_idx ON public.mpp7635_aoi_table2_1_prt_2 USING bitmap (id)
+-(3 rows)
++ schemaname | tablename | indexname | tablespace | indexdef 
++------------+-----------+-----------+------------+----------
++(0 rows)
+@@
++ERROR:  index "mpp7635_ix3" does not exist
+@@
+-ERROR:  unique constraint on partitioned table must include all partitioning columns
++ERROR:  UNIQUE constraint on partitioned table must include all partitioning columns
+@@
+-ERROR:  unique constraint on partitioned table must include all partitioning columns
++ERROR:  UNIQUE constraint on partitioned table must include all partitioning columns
+@@
+-Partitions: end_inclusive_bigint_1_prt_p1 FOR VALUES FROM ('1') TO ('4'),
+-            end_inclusive_bigint_1_prt_p20 FOR VALUES FROM ('20') TO ('9223372036854775805'),
+-            end_inclusive_bigint_1_prt_p7 FOR VALUES FROM ('7') TO ('11'),
+-            end_inclusive_bigint_1_prt_pmax_create_1 FOR VALUES FROM ('9223372036854775805') TO ('9223372036854775806'),
+-            end_inclusive_bigint_1_prt_pmax_create_2 FOR VALUES FROM ('9223372036854775806') TO (MAXVALUE),
+-            end_inclusive_bigint_1_prt_other DEFAULT
++Partitions:
++    end_inclusive_bigint_1_prt_p1 FOR VALUES FROM ('1') TO ('4')
++    end_inclusive_bigint_1_prt_p20 FOR VALUES FROM ('20') TO ('9223372036854775805')
++    end_inclusive_bigint_1_prt_p7 FOR VALUES FROM ('7') TO ('11')
++    end_inclusive_bigint_1_prt_pmax_create_1 FOR VALUES FROM ('9223372036854775805') TO ('9223372036854775806')
++    end_inclusive_bigint_1_prt_pmax_create_2 FOR VALUES FROM ('9223372036854775806') TO (MAXVALUE)
++    end_inclusive_bigint_1_prt_other DEFAULT
+@@
+-Partitions: end_inclusive_bigint_1_prt_p1 FOR VALUES FROM ('1') TO ('4'),
+-            end_inclusive_bigint_1_prt_p20 FOR VALUES FROM ('20') TO ('9223372036854775805'),
+-            end_inclusive_bigint_1_prt_p7 FOR VALUES FROM ('7') TO ('11'),
+-            end_inclusive_bigint_1_prt_pmax_add FOR VALUES FROM ('9223372036854775805') TO (MAXVALUE),
+-            end_inclusive_bigint_1_prt_other DEFAULT
++Partitions:
++    end_inclusive_bigint_1_prt_p1 FOR VALUES FROM ('1') TO ('4')
++    end_inclusive_bigint_1_prt_p20 FOR VALUES FROM ('20') TO ('9223372036854775805')
++    end_inclusive_bigint_1_prt_p7 FOR VALUES FROM ('7') TO ('11')
++    end_inclusive_bigint_1_prt_pmax_add FOR VALUES FROM ('9223372036854775805') TO (MAXVALUE)
++    end_inclusive_bigint_1_prt_other DEFAULT
+@@
+-Partitions: end_inclusive_bigint_1_prt_p1 FOR VALUES FROM ('1') TO ('4'),
+-            end_inclusive_bigint_1_prt_p20 FOR VALUES FROM ('20') TO ('9223372036854775805'),
+-            end_inclusive_bigint_1_prt_p7 FOR VALUES FROM ('7') TO ('11'),
+-            end_inclusive_bigint_1_prt_pmax_split FOR VALUES FROM ('9223372036854775805') TO (MAXVALUE),
+-            end_inclusive_bigint_1_prt_other DEFAULT
++Partitions:
++    end_inclusive_bigint_1_prt_p1 FOR VALUES FROM ('1') TO ('4')
++    end_inclusive_bigint_1_prt_p20 FOR VALUES FROM ('20') TO ('9223372036854775805')
++    end_inclusive_bigint_1_prt_p7 FOR VALUES FROM ('7') TO ('11')
++    end_inclusive_bigint_1_prt_pmax_split FOR VALUES FROM ('9223372036854775805') TO (MAXVALUE)
++    end_inclusive_bigint_1_prt_other DEFAULT
+@@
+-Partitions: end_inclusive_int_1_prt_p1 FOR VALUES FROM (MINVALUE) TO (4),
+-            end_inclusive_int_1_prt_pmax FOR VALUES FROM (4) TO (MAXVALUE)
++Partitions:
++    end_inclusive_int_1_prt_p1 FOR VALUES FROM (MINVALUE) TO (4)
++    end_inclusive_int_1_prt_pmax FOR VALUES FROM (4) TO (MAXVALUE)
+@@
+-Partitions: end_inclusive_smallint_1_prt_p1 FOR VALUES FROM ('1') TO ('4'),
+-            end_inclusive_smallint_1_prt_pmax FOR VALUES FROM ('4') TO (MAXVALUE)
++Partitions:
++    end_inclusive_smallint_1_prt_p1 FOR VALUES FROM ('1') TO ('4')
++    end_inclusive_smallint_1_prt_pmax FOR VALUES FROM ('4') TO (MAXVALUE)
+@@
+-Partitions: end_inclusive_date_1_prt_p1 FOR VALUES FROM ('06-16-2020') TO ('06-18-2020'),
+-            end_inclusive_date_1_prt_pmax FOR VALUES FROM ('06-18-2020') TO (MAXVALUE)
++Partitions:
++    end_inclusive_date_1_prt_p1 FOR VALUES FROM ('06-16-2020') TO ('06-18-2020')
++    end_inclusive_date_1_prt_pmax FOR VALUES FROM ('06-18-2020') TO (MAXVALUE)
+@@
+-Partitions: end_inclusive_time_1_prt_p1 FOR VALUES FROM ('00:00:00.000001') TO ('01:00:00.000001'),
+-            end_inclusive_time_1_prt_pmax FOR VALUES FROM ('23:00:00') TO (MAXVALUE)
++Partitions:
++    end_inclusive_time_1_prt_p1 FOR VALUES FROM ('00:00:00.000001') TO ('01:00:00.000001')
++    end_inclusive_time_1_prt_pmax FOR VALUES FROM ('23:00:00') TO (MAXVALUE)
+@@
+-Partitions: end_inclusive_timetz_1_prt_p1 FOR VALUES FROM ('00:00:00-05') TO ('01:00:00.000001-08'),
+-            end_inclusive_timetz_1_prt_pmax FOR VALUES FROM ('23:00:00-05') TO (MAXVALUE)
++Partitions:
++    end_inclusive_timetz_1_prt_p1 FOR VALUES FROM ('00:00:00-05') TO ('01:00:00.000001-08')
++    end_inclusive_timetz_1_prt_pmax FOR VALUES FROM ('23:00:00-05') TO (MAXVALUE)
+@@
+-Partitions: end_inclusive_timestamp_1_prt_p1 FOR VALUES FROM ('Tue Jun 16 00:00:00 2020') TO ('Tue Jun 16 01:00:00.000001 2020'),
+-            end_inclusive_timestamp_1_prt_pmax FOR VALUES FROM ('Tue Jun 16 23:00:00 2020') TO (MAXVALUE)
++Partitions:
++    end_inclusive_timestamp_1_prt_p1 FOR VALUES FROM ('Tue Jun 16 00:00:00 2020') TO ('Tue Jun 16 01:00:00.000001 2020')
++    end_inclusive_timestamp_1_prt_pmax FOR VALUES FROM ('Tue Jun 16 23:00:00 2020') TO (MAXVALUE)
+@@
+-Partitions: end_inclusive_timestamptz_1_prt_p1 FOR VALUES FROM ('Tue Jun 16 01:00:00 2020 PDT') TO ('Tue Jun 16 02:00:00.000001 2020 PDT'),
+-            end_inclusive_timestamptz_1_prt_pmax FOR VALUES FROM ('Tue Jun 16 21:00:00 2020 PDT') TO (MAXVALUE)
++Partitions:
++    end_inclusive_timestamptz_1_prt_p1 FOR VALUES FROM ('Tue Jun 16 01:00:00 2020 PDT') TO ('Tue Jun 16 02:00:00.000001 2020 PDT')
++    end_inclusive_timestamptz_1_prt_pmax FOR VALUES FROM ('Tue Jun 16 21:00:00 2020 PDT') TO (MAXVALUE)
+@@
+-Partitions: end_inclusive_interval_1_prt_p1 FOR VALUES FROM ('@ 1 year') TO ('@ 2 years 0.000001 secs')
++Partitions:
++    end_inclusive_interval_1_prt_p1 FOR VALUES FROM ('@ 1 year') TO ('@ 2 years 0.000001 secs')
+@@
+-Partitions: end_inclusive_int_1_prt_p1 FOR VALUES FROM (1) TO (2),
+-            end_inclusive_int_1_prt_p2 FOR VALUES FROM (2) TO (6),
+-            end_inclusive_int_1_prt_pmax FOR VALUES FROM (6) TO (MAXVALUE)
++Partitions:
++    end_inclusive_int_1_prt_p1 FOR VALUES FROM (1) TO (2)
++    end_inclusive_int_1_prt_p2 FOR VALUES FROM (2) TO (6)
++    end_inclusive_int_1_prt_pmax FOR VALUES FROM (6) TO (MAXVALUE)
+@@
+-Partitions: end_inclusive_int_1_prt_p1 FOR VALUES FROM (1) TO (2),
+-            end_inclusive_int_1_prt_p2 FOR VALUES FROM (2) TO (6),
+-            end_inclusive_int_1_prt_pmax FOR VALUES FROM (6) TO (MAXVALUE)
++Partitions:
++    end_inclusive_int_1_prt_p1 FOR VALUES FROM (1) TO (2)
++    end_inclusive_int_1_prt_p2 FOR VALUES FROM (2) TO (6)
++    end_inclusive_int_1_prt_pmax FOR VALUES FROM (6) TO (MAXVALUE)
+@@
+-Partitions: start_exclusive_smallint_1_prt_p1 FOR VALUES FROM ('1') TO ('4'),
+-            start_exclusive_smallint_1_prt_pmax FOR VALUES FROM ('5') TO (MAXVALUE)
++Partitions:
++    start_exclusive_smallint_1_prt_p1 FOR VALUES FROM ('1') TO ('4')
++    start_exclusive_smallint_1_prt_pmax FOR VALUES FROM ('5') TO (MAXVALUE)

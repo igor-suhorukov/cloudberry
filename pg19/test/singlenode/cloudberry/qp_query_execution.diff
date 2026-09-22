@@ -1,0 +1,427 @@
+@@
++ERROR:  unrecognized configuration parameter "statement_mem"
+@@
++ERROR:  access method "ao_column" does not exist
+@@
++ERROR:  relation "lossmithe_colstor" does not exist
++LINE 1: insert into lossmithe_colstor
++                    ^
+@@
+- sum  | isinterestonly 
+-------+----------------
+- 1040 | t
+-(1 row)
+-
++ERROR:  relation "lossmithe_colstor" does not exist
++LINE 2:   FROM lossmithe_colstor b 
++               ^
+@@
+- qx_count_operator 
+--------------------
+-                 0
+-(1 row)
+-
++ERROR:  function qx_count_operator(unknown, unknown, unknown) does not exist
++LINE 1: select qx_count_operator('select foo_p.b, foo_p.t from foo_p...
++               ^
++DETAIL:  There is no function of that name.
+@@
+- qx_count_operator 
+--------------------
+-                 1
+-(1 row)
+-
++ERROR:  function qx_count_operator(unknown, unknown, unknown) does not exist
++LINE 1: select qx_count_operator('select foo_p.k, foo_p.t from foo_p...
++               ^
++DETAIL:  There is no function of that name.
+@@
+- qx_count_operator 
+--------------------
+-                 1
+-(1 row)
+-
++ERROR:  function qx_count_operator(unknown, unknown, unknown) does not exist
++LINE 1: select qx_count_operator('select abbp.k, abbp.t from abbp le...
++               ^
++DETAIL:  There is no function of that name.
+@@
+- qx_count_operator 
+--------------------
+-                 0
+-(1 row)
+-
++ERROR:  function qx_count_operator(unknown, unknown, unknown) does not exist
++LINE 1: select qx_count_operator('select abbp.b, abbp.t from abbp le...
++               ^
++DETAIL:  There is no function of that name.
+@@
+- qx_count_operator 
+--------------------
+-                 1
+-(1 row)
+-
++ERROR:  function qx_count_operator(unknown, unknown, unknown) does not exist
++LINE 1: select qx_count_operator('select abbp.k, abbp.t from abbp le...
++               ^
++DETAIL:  There is no function of that name.
+@@
+- qx_count_operator 
+--------------------
+-                 0
+-(1 row)
+-
++ERROR:  function qx_count_operator(unknown, unknown, unknown) does not exist
++LINE 1: select qx_count_operator('select abbp.b, abbp.t from abbp le...
++               ^
++DETAIL:  There is no function of that name.
+@@
+- qx_count_operator 
+--------------------
+-                 1
+-(1 row)
+-
++ERROR:  function qx_count_operator(unknown, unknown, unknown) does not exist
++LINE 1: select qx_count_operator('select foo_p.k, foo_p.t from foo_p...
++               ^
++DETAIL:  There is no function of that name.
+@@
+- qx_count_operator 
+--------------------
+-                 0
+-(1 row)
+-
++ERROR:  function qx_count_operator(unknown, unknown, unknown) does not exist
++LINE 1: select qx_count_operator('select foo_p.b, foo_p.t from foo_p...
++               ^
++DETAIL:  There is no function of that name.
+@@
+- qx_count_operator 
+--------------------
+-                 1
+-(1 row)
+-
++ERROR:  function qx_count_operator(unknown, unknown, unknown) does not exist
++LINE 1: select qx_count_operator('select abbp.k, abbp.t from abbp le...
++               ^
++DETAIL:  There is no function of that name.
+@@
+- qx_count_operator 
+--------------------
+-                 0
+-(1 row)
+-
++ERROR:  function qx_count_operator(unknown, unknown, unknown) does not exist
++LINE 1: select qx_count_operator('select abbp.b, abbp.t from abbp le...
++               ^
++DETAIL:  There is no function of that name.
+@@
+- qx_count_operator 
+--------------------
+-                 1
+-(1 row)
+-
++ERROR:  function qx_count_operator(unknown, unknown, unknown) does not exist
++LINE 1: select qx_count_operator('select foo_p.k, foo_p.t from foo_p...
++               ^
++DETAIL:  There is no function of that name.
+@@
+- qx_count_operator 
+--------------------
+-                 0
+-(1 row)
+-
++ERROR:  function qx_count_operator(unknown, unknown, unknown) does not exist
++LINE 1: select qx_count_operator('select foo_p.b, foo_p.t from foo_p...
++               ^
++DETAIL:  There is no function of that name.
+@@
+- qx_count_operator 
+--------------------
+-                 1
+-(1 row)
+-
++ERROR:  function qx_count_operator(unknown, unknown, unknown) does not exist
++LINE 1: select qx_count_operator('select foo_p.b, foo_p.t from foo_p...
++               ^
++DETAIL:  There is no function of that name.
+@@
+- qx_count_operator 
+--------------------
+-                 1
+-(1 row)
+-
++ERROR:  function qx_count_operator(unknown, unknown, unknown) does not exist
++LINE 1: select qx_count_operator('select bar_p.a, foo_p.b, foo_p.t f...
++               ^
++DETAIL:  There is no function of that name.
+@@
+- qx_count_operator 
+--------------------
+-                 1
+-(1 row)
+-
++ERROR:  function qx_count_operator(unknown, unknown, unknown) does not exist
++LINE 1: select qx_count_operator('select  foo_p.b, foo_p.t from foo_...
++               ^
++DETAIL:  There is no function of that name.
+@@
+- qx_count_operator 
+--------------------
+-                 1
+-(1 row)
+-
++ERROR:  function qx_count_operator(unknown, unknown, unknown) does not exist
++LINE 1: select qx_count_operator('select  foo_p.b, foo_p.t from foo_...
++               ^
++DETAIL:  There is no function of that name.
+@@
+- qx_count_operator 
+--------------------
+-                 1
+-(1 row)
+-
++ERROR:  function qx_count_operator(unknown, unknown, unknown) does not exist
++LINE 1: select qx_count_operator('select  foo_p.b, foo_p.t from foo_...
++               ^
++DETAIL:  There is no function of that name.
+@@
+- qx_count_operator 
+--------------------
+-                 0
+-(1 row)
+-
++ERROR:  function qx_count_operator(unknown, unknown, unknown) does not exist
++LINE 1: select qx_count_operator('select foo_p.b, foo_p.t from foo_p...
++               ^
++DETAIL:  There is no function of that name.
+@@
+- qx_count_operator 
+--------------------
+-                 0
+-(1 row)
+-
++ERROR:  function qx_count_operator(unknown, unknown, unknown) does not exist
++LINE 1: select qx_count_operator('select foo_p.b, foo_p.t from foo_p...
++               ^
++DETAIL:  There is no function of that name.
+@@
+- qx_count_operator 
+--------------------
+-                 0
+-(1 row)
+-
++ERROR:  function qx_count_operator(unknown, unknown, unknown) does not exist
++LINE 1: select qx_count_operator('select foo_p.b, foo_p.t from foo_p...
++               ^
++DETAIL:  There is no function of that name.
+@@
+- qx_count_operator 
+--------------------
+-                 1
+-(1 row)
+-
++ERROR:  function qx_count_operator(unknown, unknown, unknown) does not exist
++LINE 1: select qx_count_operator('select foo_p.b, foo_p.t from foo_p...
++               ^
++DETAIL:  There is no function of that name.
+@@
+- qx_count_operator 
+--------------------
+-                 1
+-(1 row)
+-
++ERROR:  function qx_count_operator(unknown, unknown, unknown) does not exist
++LINE 1: select qx_count_operator('select foo_p.k, foo_p.t from foo_p...
++               ^
++DETAIL:  There is no function of that name.
+@@
+- qx_count_operator 
+--------------------
+-                 1
+-(1 row)
+-
++ERROR:  function qx_count_operator(unknown, unknown, unknown) does not exist
++LINE 1: select qx_count_operator('select a_p.k, a_p.t from a_p inner...
++               ^
++DETAIL:  There is no function of that name.
+@@
+- qx_count_operator 
+--------------------
+-                 1
+-(1 row)
+-
++ERROR:  function qx_count_operator(unknown, unknown, unknown) does not exist
++LINE 1: select qx_count_operator('select a_p.b, a_p.t from a_p inner...
++               ^
++DETAIL:  There is no function of that name.
+@@
+- qx_count_operator 
+--------------------
+-                 1
+-(1 row)
+-
++ERROR:  function qx_count_operator(unknown, unknown, unknown) does not exist
++LINE 1: select qx_count_operator('select a_p.k, a_p.t from a_p inner...
++               ^
++DETAIL:  There is no function of that name.
+@@
+- qx_count_operator 
+--------------------
+-                 1
+-(1 row)
+-
++ERROR:  function qx_count_operator(unknown, unknown, unknown) does not exist
++LINE 1: select qx_count_operator('select a_p.b, a_p.t from a_p inner...
++               ^
++DETAIL:  There is no function of that name.
+@@
+- qx_count_operator 
+--------------------
+-                 1
+-(1 row)
+-
++ERROR:  function qx_count_operator(unknown, unknown, unknown) does not exist
++LINE 1: select qx_count_operator('select foo_p.k, foo_p.t from foo_p...
++               ^
++DETAIL:  There is no function of that name.
+@@
+- qx_count_operator 
+--------------------
+-                 1
+-(1 row)
+-
++ERROR:  function qx_count_operator(unknown, unknown, unknown) does not exist
++LINE 1: select qx_count_operator('select foo_p.b, foo_p.t from foo_p...
++               ^
++DETAIL:  There is no function of that name.
+@@
+- qx_count_operator 
+--------------------
+-                 1
+-(1 row)
+-
++ERROR:  function qx_count_operator(unknown, unknown, unknown) does not exist
++LINE 1: select qx_count_operator('select a_p.k, a_p.t from a_p inner...
++               ^
++DETAIL:  There is no function of that name.
+@@
+- qx_count_operator 
+--------------------
+-                 1
+-(1 row)
+-
++ERROR:  function qx_count_operator(unknown, unknown, unknown) does not exist
++LINE 1: select qx_count_operator('select a_p.b, a_p.t from a_p inner...
++               ^
++DETAIL:  There is no function of that name.
+@@
+- qx_count_operator 
+--------------------
+-                 1
+-(1 row)
+-
++ERROR:  function qx_count_operator(unknown, unknown, unknown) does not exist
++LINE 1: select qx_count_operator('select foo_p.k, foo_p.t from foo_p...
++               ^
++DETAIL:  There is no function of that name.
+@@
+- qx_count_operator 
+--------------------
+-                 1
+-(1 row)
+-
++ERROR:  function qx_count_operator(unknown, unknown, unknown) does not exist
++LINE 1: select qx_count_operator('select foo_p.b, foo_p.t from foo_p...
++               ^
++DETAIL:  There is no function of that name.
+@@
+- qx_count_operator 
+--------------------
+-                 1
+-(1 row)
+-
++ERROR:  function qx_count_operator(unknown, unknown, unknown) does not exist
++LINE 1: select qx_count_operator('select foo_p.b, foo_p.t from foo_p...
++               ^
++DETAIL:  There is no function of that name.
+@@
+- qx_count_operator 
+--------------------
+-                 1
+-(1 row)
+-
++ERROR:  function qx_count_operator(unknown, unknown, unknown) does not exist
++LINE 1: select qx_count_operator('select bar_p.a, foo_p.b, foo_p.t f...
++               ^
++DETAIL:  There is no function of that name.
+@@
+- qx_count_operator 
+--------------------
+-                 1
+-(1 row)
+-
++ERROR:  function qx_count_operator(unknown, unknown, unknown) does not exist
++LINE 1: select qx_count_operator('select  foo_p.b, foo_p.t from foo_...
++               ^
++DETAIL:  There is no function of that name.
+@@
+- qx_count_operator 
+--------------------
+-                 1
+-(1 row)
+-
++ERROR:  function qx_count_operator(unknown, unknown, unknown) does not exist
++LINE 1: select qx_count_operator('select  foo_p.b, foo_p.t from foo_...
++               ^
++DETAIL:  There is no function of that name.
+@@
+- qx_count_operator 
+--------------------
+-                 1
+-(1 row)
+-
++ERROR:  function qx_count_operator(unknown, unknown, unknown) does not exist
++LINE 1: select qx_count_operator('select  foo_p.b, foo_p.t from foo_...
++               ^
++DETAIL:  There is no function of that name.
+@@
+- qx_count_operator 
+--------------------
+-                 1
+-(1 row)
+-
++ERROR:  function qx_count_operator(unknown, unknown, unknown) does not exist
++LINE 1: select qx_count_operator('select foo_p.b, foo_p.t from foo_p...
++               ^
++DETAIL:  There is no function of that name.
+@@
+- qx_count_operator 
+--------------------
+-                 1
+-(1 row)
+-
++ERROR:  function qx_count_operator(unknown, unknown, unknown) does not exist
++LINE 1: select qx_count_operator('select foo_p.b, foo_p.t from foo_p...
++               ^
++DETAIL:  There is no function of that name.
+@@
+- qx_count_operator 
+--------------------
+-                 1
+-(1 row)
+-
++ERROR:  function qx_count_operator(unknown, unknown, unknown) does not exist
++LINE 1: select qx_count_operator('select foo_p.b, foo_p.t from foo_p...
++               ^
++DETAIL:  There is no function of that name.
+@@
+- qx_count_operator 
+--------------------
+-                 1
+-(1 row)
+-
++ERROR:  function qx_count_operator(unknown, unknown, unknown) does not exist
++LINE 1: select qx_count_operator('select foo_p.b, foo_p.t from foo_p...
++               ^
++DETAIL:  There is no function of that name.

@@ -177,6 +177,46 @@ extern void GpStorageApplyToTablespace(const char *spcname, List *opts);
 /* Which storage server a tablespace reaches, or NULL for a local one. */
 extern char *GpStorageTablespaceServer(Oid spcId);
 
+/* partition.c */
+
+/* Cloudberry's gp_max_partition_level: 0, no limit. */
+extern PGDLLIMPORT int gp_max_partition_level;
+
+/*
+ * The partitions of a table CREATE TABLE ... PARTITION BY ... (...) has just
+ * made, from the gp.partition_by option the rewrite put in its WITH list.
+ */
+extern void GpPartitionCreate(Oid relid, DefElem *option, const char *queryString,
+							  QueryEnvironment *queryEnv);
+
+/*
+ * ALTER TABLE's partition commands, which the rewrite wrote as SET
+ * (gp.partition_cmd = '...'): whether a statement has them, taking them out
+ * before PostgreSQL runs it, and doing them once it has.
+ */
+extern bool GpPartitionHasCmds(AlterTableStmt *stmt);
+extern List *GpPartitionTakeCmds(AlterTableStmt *stmt);
+extern void GpPartitionAlter(AlterTableStmt *stmt, List *options,
+							 const char *queryString, QueryEnvironment *queryEnv);
+
+/*
+ * WITH (appendonly = ..., orientation = ...) taken out of an option list, and
+ * the access method it names returned: Cloudberry's greenplumLegacyAOoptions.
+ */
+extern char *GpPartitionLegacyAccessMethod(const char *accessMethod, List **options);
+
+/* CREATE TABLE ... PARTITION OF has run: a Cloudberry table's gets its ACL. */
+extern void GpPartitionMade(CreateStmt *stmt);
+
+/* Is it a partitioned table of Cloudberry's, whose partitions it named? */
+extern bool GpPartitionIsClassic(Oid relid);
+
+/* GRANT and REVOKE on one reach its partitions: the objects, or NIL. */
+extern List *GpPartitionGrantObjects(GrantStmt *stmt);
+
+/* A partitioned table was renamed: its partitions follow, as Cloudberry's do. */
+extern void GpPartitionRenamed(Oid relid, const char *oldname, const char *newname);
+
 /*
  * Refuse a tag name or value the definitions in gp_sql.tag do not allow.
  * Shared by the label check hook and the shorthand, so that both answer the

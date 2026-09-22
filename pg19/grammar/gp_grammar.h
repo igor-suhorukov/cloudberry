@@ -70,6 +70,31 @@ extern int	GpPosMapCopied(const GpPosMap *map, int offset);
 /* Every location in a raw parse tree of a rewrite, put in the user's text. */
 extern void GpRemapParseLocations(List *parsetree, const GpPosMap *map);
 
+/*
+ * A map for text that is `prefix` bytes written, then `len` bytes copied from
+ * offset `from` of the user's text, then `suffix` bytes written: a piece of
+ * the user's statement given to PostgreSQL's grammar on its own, as the
+ * expressions of a partition clause are (gp_partition.c).  What is written
+ * stands for the piece's start and end.  With from < 0 nothing in it has a
+ * place in the user's text, and every location comes back unknown.
+ */
+extern GpPosMap *GpPosMapSpan(int prefix, int from, int len, int suffix,
+							  int srclen);
+
+/*
+ * An error context callback that puts the position of a syntax error in text
+ * the grammar read where the user wrote it: the rewrite, or a piece like the
+ * above.
+ */
+typedef struct GpParseErrorArg
+{
+	const char *original;		/* what the user sent */
+	const char *rewritten;		/* what the grammar read */
+	const GpPosMap *map;
+} GpParseErrorArg;
+
+extern void GpParseErrorCallback(void *arg);
+
 /* Installed during preload; O26's raw_parser_hook. */
 extern void GpGrammarInstallHook(void);
 

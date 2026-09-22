@@ -1,0 +1,27 @@
+@@
++ERROR:  partitioned tables cannot be unlogged
+@@
+- relpersistence |       relname        
+-----------------+----------------------
+- u              | unlogged_pt1
+- u              | unlogged_pt1_1_prt_1
+- u              | unlogged_pt1_1_prt_2
+-(3 rows)
++ relpersistence | relname 
++----------------+---------
++(0 rows)
+@@
++ERROR:  relation "unlogged_pt1" does not exist
+@@
+- relpersistence |        relname        
+-----------------+-----------------------
+- u              | unlogged_pt1
+- u              | unlogged_pt1_1_prt_2
+- u              | unlogged_pt1_1_prt_p1
+- u              | unlogged_pt1_1_prt_p2
+-(4 rows)
++ relpersistence | relname 
++----------------+---------
++(0 rows)
+@@
++ERROR:  relation "unlogged_pt1" does not exist

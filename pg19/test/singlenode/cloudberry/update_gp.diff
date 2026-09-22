@@ -1,49 +1,4 @@
 @@
-+ERROR:  syntax error at or near "("
-+LINE 2:         partition by range (c) (start(1) end(5) every(1), de...
-+                                       ^
-@@
-+ERROR:  relation "target" does not exist
-+LINE 1: insert into target select g, 0, 3 from generate_series(1, 5)...
-+                    ^
-@@
-+ERROR:  relation "target" does not exist
-+LINE 1: insert into target select g, 0, 1 from generate_series(1, 5)...
-+                    ^
-@@
-+ERROR:  relation "target" does not exist
-+LINE 1: delete from target where c = 3 and a in (select b from todel...
-+                    ^
-@@
-+ERROR:  relation "target" does not exist
-+LINE 1: update target set b=target.b+100 where c = 3 and a in (selec...
-+               ^
-@@
-- a |  b  | c 
-----+-----+---
-- 1 |   0 | 1
-- 2 |   0 | 1
-- 3 |   0 | 1
-- 4 |   0 | 1
-- 4 |   0 | 3
-- 5 |   0 | 1
-- 5 | 100 | 3
--(7 rows)
--
-+ERROR:  relation "target" does not exist
-+LINE 1: select * from target;
-+                      ^
-@@
-+ERROR:  syntax error at or near "default"
-+LINE 1: alter table target drop default partition;
-+                                ^
-@@
-+ERROR:  relation "target" does not exist
-+LINE 1: update target set b = 10 where c = 10;
-+               ^
-@@
-+ERROR:  table "target" does not exist
-@@
 +ERROR:  unrecognized configuration parameter "gp_autostats_mode"
 @@
 +ERROR:  unrecognized configuration parameter "gp_autostats_mode"
@@ -321,32 +276,3 @@
 +ERROR:  relation "gp_segment_configuration" does not exist
 +LINE 1: ...entry set c = s.a from (select count(*) as a from gp_segment...
 +                                                             ^
-@@
-+ERROR:  syntax error at or near "PARTITION"
-+LINE 7: WITH (appendonly=false) PARTITION BY RANGE(c_part)
-+                                ^
-@@
-+ERROR:  syntax error at or near "PARTITION"
-+LINE 7: WITH (appendonly=false) PARTITION BY RANGE(c_part)
-+                                ^
-@@
-+ERROR:  relation "update_gp_foo" does not exist
-+LINE 1: INSERT INTO update_gp_foo VALUES (12, 40, 1, 50);
-+                    ^
-@@
-+ERROR:  relation "update_gp_foo1" does not exist
-+LINE 1: INSERT INTO update_gp_foo1 VALUES (12, 3, 1, 50);
-+                    ^
-@@
-+ERROR:  relation "update_gp_foo" does not exist
-+LINE 1: UPDATE update_gp_foo
-+               ^
-@@
-- a_dist | b | c_part | d  
----------+---+--------+----
--     12 | 1 |      1 | 12
--(1 row)
--
-+ERROR:  relation "update_gp_foo" does not exist
-+LINE 1: SELECT * from update_gp_foo;
-+                      ^
