@@ -37,9 +37,8 @@
  * scanner is the real one, so comments, dollar quoting, Unicode escapes and
  * standard_conforming_strings behave exactly as they do everywhere else.
  *
- * What a fork would give that this does not: a comment written inside a
- * clause that is replaced is dropped with it.  Two more were true until
- * DECODE made this rewrite inside expressions, and are not now:
+ * What a fork would give that this does not: nothing a user sees any more.
+ * Three things were counted, and none holds:
  *
  *   - Cloudberry's syntax nested inside an expression is reached: DECODE and
  *     CASE x WHEN IS NOT DISTINCT FROM y, the only such syntax the port
@@ -49,9 +48,16 @@
  *     of it came from, and the caret under a syntax error, and every
  *     location in the parse tree, is put back where the user wrote it --
  *     text the rewrite wrote standing for the token it replaces.
+ *   - A comment written inside a clause that is replaced is dropped with it,
+ *     but only from the text handed to the grammar, which nothing else
+ *     reads.  Parse analysis, the logs and pg_stat_statements are given the
+ *     text the user sent, and a fork's scanner would skip the comment just
+ *     as this one does.
  *
- * What it gives that a fork would not: nothing to re-base when PostgreSQL
- * changes its grammar, and no second copy of 20,000 lines of it.
+ * What it gives that a fork would not: no copy of PostgreSQL's grammar, of
+ * 20,000 lines, to re-base whenever PostgreSQL changes it.  What it keeps
+ * instead is gp_parseloc.c's list of the nodes that carry a location, which
+ * each release that adds one has to be checked against.
  *
  * Cloudberry source this file is made of:
  *	  the Cloudberry-only productions of src/backend/parser/gram.y
