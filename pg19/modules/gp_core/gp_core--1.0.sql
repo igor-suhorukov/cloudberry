@@ -85,10 +85,16 @@ COMMENT ON FUNCTION gp.policy(regclass) IS
  * median(x); their support functions are gp's.
  *
  * The final functions sort the state, so they are SHAREABLE: two median(x)
- * in one query may share it, and none may be run over a window.  SSPACE is
- * what a group's sort costs before its first row -- three memory contexts and
- * an array of 1,024 sort tuples -- so that the planner does not take a
- * group's state for one pointer when it weighs hashing the groups.
+ * in one query may share it, and no row can follow.  SSPACE is what a
+ * group's sort costs before its first row -- three memory contexts and an
+ * array of 1,024 sort tuples -- so that the planner does not take a group's
+ * state for one pointer when it weighs hashing the groups.
+ *
+ * A window, which calls the final function for every row and adds the next
+ * ones after, needs a final function that changes nothing.  The moving-
+ * aggregate functions are that: two heaps of the frame's values, a row added
+ * and removed in a logarithm of the frame, and a final function that reads
+ * the heaps' tops, READ_ONLY -- which makes a window take them for any frame.
  */
 CREATE FUNCTION gp.median_transfn(internal, float8)
 RETURNS internal
@@ -108,6 +114,66 @@ LANGUAGE C PARALLEL SAFE;
 CREATE FUNCTION gp.median_transfn(internal, timestamptz)
 RETURNS internal
 AS 'MODULE_PATHNAME', 'gp_median_transfn'
+LANGUAGE C PARALLEL SAFE;
+
+CREATE FUNCTION gp.median_mtransfn(internal, float8)
+RETURNS internal
+AS 'MODULE_PATHNAME', 'gp_median_mtransfn'
+LANGUAGE C PARALLEL SAFE;
+
+CREATE FUNCTION gp.median_mtransfn(internal, interval)
+RETURNS internal
+AS 'MODULE_PATHNAME', 'gp_median_mtransfn'
+LANGUAGE C PARALLEL SAFE;
+
+CREATE FUNCTION gp.median_mtransfn(internal, timestamp)
+RETURNS internal
+AS 'MODULE_PATHNAME', 'gp_median_mtransfn'
+LANGUAGE C PARALLEL SAFE;
+
+CREATE FUNCTION gp.median_mtransfn(internal, timestamptz)
+RETURNS internal
+AS 'MODULE_PATHNAME', 'gp_median_mtransfn'
+LANGUAGE C PARALLEL SAFE;
+
+CREATE FUNCTION gp.median_minvfn(internal, float8)
+RETURNS internal
+AS 'MODULE_PATHNAME', 'gp_median_minvfn'
+LANGUAGE C PARALLEL SAFE;
+
+CREATE FUNCTION gp.median_minvfn(internal, interval)
+RETURNS internal
+AS 'MODULE_PATHNAME', 'gp_median_minvfn'
+LANGUAGE C PARALLEL SAFE;
+
+CREATE FUNCTION gp.median_minvfn(internal, timestamp)
+RETURNS internal
+AS 'MODULE_PATHNAME', 'gp_median_minvfn'
+LANGUAGE C PARALLEL SAFE;
+
+CREATE FUNCTION gp.median_minvfn(internal, timestamptz)
+RETURNS internal
+AS 'MODULE_PATHNAME', 'gp_median_minvfn'
+LANGUAGE C PARALLEL SAFE;
+
+CREATE FUNCTION gp.median_float8_mfinal(internal)
+RETURNS float8
+AS 'MODULE_PATHNAME', 'gp_median_mfinalfn'
+LANGUAGE C PARALLEL SAFE;
+
+CREATE FUNCTION gp.median_interval_mfinal(internal)
+RETURNS interval
+AS 'MODULE_PATHNAME', 'gp_median_mfinalfn'
+LANGUAGE C PARALLEL SAFE;
+
+CREATE FUNCTION gp.median_timestamp_mfinal(internal)
+RETURNS timestamp
+AS 'MODULE_PATHNAME', 'gp_median_mfinalfn'
+LANGUAGE C PARALLEL SAFE;
+
+CREATE FUNCTION gp.median_timestamptz_mfinal(internal)
+RETURNS timestamptz
+AS 'MODULE_PATHNAME', 'gp_median_mfinalfn'
 LANGUAGE C PARALLEL SAFE;
 
 CREATE FUNCTION gp.median_float8_final(internal)
@@ -136,6 +202,11 @@ CREATE AGGREGATE pg_catalog.median(float8) (
 	SSPACE = 49152,
 	FINALFUNC = gp.median_float8_final,
 	FINALFUNC_MODIFY = SHAREABLE,
+	MSFUNC = gp.median_mtransfn,
+	MINVFUNC = gp.median_minvfn,
+	MSTYPE = internal,
+	MFINALFUNC = gp.median_float8_mfinal,
+	MFINALFUNC_MODIFY = READ_ONLY,
 	PARALLEL = SAFE
 );
 
@@ -145,6 +216,11 @@ CREATE AGGREGATE pg_catalog.median(interval) (
 	SSPACE = 49152,
 	FINALFUNC = gp.median_interval_final,
 	FINALFUNC_MODIFY = SHAREABLE,
+	MSFUNC = gp.median_mtransfn,
+	MINVFUNC = gp.median_minvfn,
+	MSTYPE = internal,
+	MFINALFUNC = gp.median_interval_mfinal,
+	MFINALFUNC_MODIFY = READ_ONLY,
 	PARALLEL = SAFE
 );
 
@@ -154,6 +230,11 @@ CREATE AGGREGATE pg_catalog.median(timestamp) (
 	SSPACE = 49152,
 	FINALFUNC = gp.median_timestamp_final,
 	FINALFUNC_MODIFY = SHAREABLE,
+	MSFUNC = gp.median_mtransfn,
+	MINVFUNC = gp.median_minvfn,
+	MSTYPE = internal,
+	MFINALFUNC = gp.median_timestamp_mfinal,
+	MFINALFUNC_MODIFY = READ_ONLY,
 	PARALLEL = SAFE
 );
 
@@ -163,6 +244,11 @@ CREATE AGGREGATE pg_catalog.median(timestamptz) (
 	SSPACE = 49152,
 	FINALFUNC = gp.median_timestamptz_final,
 	FINALFUNC_MODIFY = SHAREABLE,
+	MSFUNC = gp.median_mtransfn,
+	MINVFUNC = gp.median_minvfn,
+	MSTYPE = internal,
+	MFINALFUNC = gp.median_timestamptz_mfinal,
+	MFINALFUNC_MODIFY = READ_ONLY,
 	PARALLEL = SAFE
 );
 

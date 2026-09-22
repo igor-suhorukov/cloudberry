@@ -3645,6 +3645,13 @@ same "over timestamp, timestamptz and interval" \
 same "beside other aggregates, and twice over the same rows" \
      "SELECT count(*), median(a), median(a) + 1, avg(a) FROM t0 WHERE a % 7 = 0"
 
+# Over a window the executor takes its moving-aggregate implementation, which
+# is the executor's choice and not ORCA's; ORCA plans the window as any.
+same "over a window, a sliding frame and a partition's running one" \
+     "SELECT a, median(a) OVER (ORDER BY a ROWS BETWEEN 3 PRECEDING AND CURRENT ROW),
+             median(c) OVER (PARTITION BY b ORDER BY a)
+        FROM t0 WHERE a <= 60 ORDER BY a"
+
 echo
 echo "  $pass passed, $fail failed"
 [ "$fail" -eq 0 ]

@@ -945,12 +945,63 @@ is "hashed or sorted, grouped past work_mem, the answers are percentile_cont's" 
     SELECT (SELECT h FROM med_med) = (SELECT h FROM med_pct);" "t
 t"
 
-# The final function sorts its state, so the aggregate is declared to modify
-# it, and PostgreSQL will not run it over a window.  Cloudberry refuses OVER
-# for every ordered-set aggregate, of which its median is one.
-refused "not over a window, which Cloudberry refuses too" \
-        "SELECT median(i) OVER () FROM generate_series(1, 3) i;" \
-        "does not support use as a window function"
+# Over a window it is computed by its moving-aggregate implementation: a
+# window calls the final function for every row and adds the next rows to the
+# same state, which a sorted tuplesort cannot take.  Cloudberry's grammar has
+# no OVER after MEDIAN (...), so there each of these is a syntax error.
+is "a running median, over a frame that only grows" \
+   "SELECT string_agg(m::text, ' ' ORDER BY i) FROM
+      (SELECT i, median(i) OVER (ORDER BY i) AS m FROM generate_series(1, 6) i) s;" \
+   "1 1.5 2 2.5 3 3.5"
+
+is "over each partition whole" \
+   "SELECT string_agg(DISTINCT g || '=' || m, ' ' ORDER BY g || '=' || m) FROM
+      (SELECT i % 3 AS g, median(i) OVER (PARTITION BY i % 3) AS m
+         FROM generate_series(1, 10) i) s;" "0=6 1=5.5 2=5"
+
+q "CREATE TABLE medw AS
+     SELECT i, CASE WHEN i % 11 = 0 THEN NULL ELSE ((i * 7919) % 23) / 2.0 END::float8 AS x,
+            interval '1 minute' * ((i * 31) % 17) AS iv,
+            timestamp '2020-01-01' + interval '1 hour' * ((i * 13) % 29) AS ts
+       FROM generate_series(1, 300) i;" > /dev/null
+
+# A frame that moves takes rows out as well as in, through the inverse
+# function; each frame is checked against percentile_cont over the same rows,
+# with the duplicates and nulls medw has.
+is "over a sliding frame, as percentile_cont over the same rows" \
+   "SELECT count(*) FROM
+      (SELECT i, median(x) OVER (ORDER BY i ROWS BETWEEN 6 PRECEDING AND 3 FOLLOWING) AS m
+         FROM medw) a
+     WHERE m IS DISTINCT FROM (SELECT percentile_cont(0.5) WITHIN GROUP (ORDER BY x)
+                                 FROM medw b WHERE b.i BETWEEN a.i - 6 AND a.i + 3);" "0"
+
+is "and over interval and timestamp, by RANGE" \
+   "SELECT count(*) FROM
+      (SELECT i, median(iv) OVER w AS mi, median(ts) OVER w AS mt FROM medw
+        WINDOW w AS (ORDER BY i RANGE BETWEEN 4 PRECEDING AND CURRENT ROW)) a
+     WHERE mi IS DISTINCT FROM (SELECT percentile_cont(0.5) WITHIN GROUP (ORDER BY iv)
+                                  FROM medw b WHERE b.i BETWEEN a.i - 4 AND a.i)
+        OR mt IS DISTINCT FROM (SELECT median(ts) FROM medw b WHERE b.i BETWEEN a.i - 4 AND a.i);" "0"
+
+is "with the current row excluded, which the window recomputes for each row" \
+   "SELECT count(*) FROM
+      (SELECT i, median(x) OVER (ORDER BY i ROWS BETWEEN 3 PRECEDING AND 3 FOLLOWING
+                                  EXCLUDE CURRENT ROW) AS m
+         FROM medw) a
+     WHERE m IS DISTINCT FROM (SELECT percentile_cont(0.5) WITHIN GROUP (ORDER BY x)
+                                 FROM medw b WHERE b.i BETWEEN a.i - 3 AND a.i + 3
+                                  AND b.i <> a.i);" "0"
+
+is "a window over all the rows answers as the aggregate does" \
+   "SELECT (SELECT DISTINCT median(x) OVER () FROM medw) = (SELECT median(x) FROM medw);" "t"
+
+# A volatile argument is evaluated again as its row leaves the frame, and is
+# then another value than the one that went in; the inverse function sees it
+# is not the oldest value's and says so, and the window starts the frame again.
+is "a volatile argument, whose value changes as its row leaves, restarts the frame" \
+   "SELECT count(m), bool_and(m >= 0 AND m < 1) FROM
+      (SELECT median(random()) OVER (ORDER BY i ROWS BETWEEN 2 PRECEDING AND CURRENT ROW) AS m
+         FROM generate_series(1, 50) i) s;" "50|t"
 
 # Cloudberry prints MEDIAN(a) with the cast hidden; PostgreSQL 19 shows an
 # aggregate argument's implicit cast, as it does for any aggregate.

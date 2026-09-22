@@ -34,16 +34,18 @@
  *     Cloudberry's median in it would go to the planner.  A plain aggregate
  *     it plans like any other.
  *   - A view prints it as median(x), which is how it was written.
- *   - OVER is refused when the query starts rather than when it is parsed.
- *     The final function sorts the rows it was given, so it is declared to
- *     modify its state, and PostgreSQL will not run such an aggregate over a
- *     window; Cloudberry refuses OVER for every ordered-set aggregate.
+ *   - It runs over a window.  Cloudberry's grammar has no OVER after MEDIAN
+ *     (...), so there median(x) OVER (...) is a syntax error.
  *
  * The answer is percentile_cont(0.5)'s, computed the way percentile_cont
  * computes it: the non-null rows go into a tuplesort, which spills to disk
  * past work_mem as an ordered-set aggregate's does, and the final function
  * takes the middle one, or interpolates halfway between the middle two with
  * Cloudberry's interpolation for the type.
+ *
+ * Over a window it is computed another way, below: a window calls the final
+ * function for every row and goes on adding rows to the same state, which a
+ * sorted tuplesort cannot take.
  *
  * Cloudberry source this file is made of:
  *	  src/backend/utils/adt/orderedsetaggs.c: percentile_cont_final_common(),
@@ -61,6 +63,9 @@
 #include "fmgr.h"
 #include "miscadmin.h"
 #include "utils/builtins.h"
+#include "utils/datum.h"
+#include "utils/lsyscache.h"
+#include "utils/sortsupport.h"
 #include "utils/timestamp.h"
 #include "utils/tuplesort.h"
 #include "utils/typcache.h"
@@ -296,4 +301,342 @@ gp_median_finalfn(PG_FUNCTION_ARGS)
 
 	PG_RETURN_DATUM(median_lerp(state->typid, first_val, second_val,
 								0.5 * (state->nrows - 1) - first_row));
+}
+
+/* ------------------------------------------------------------------------- */
+/* Over a window: the moving-aggregate implementation                        */
+/* ------------------------------------------------------------------------- */
+
+/*
+ * PostgreSQL runs an aggregate over a window only if its final function
+ * leaves the state as it found it (nodeWindowAgg.c, initialize_peragg): the
+ * window calls it for each row, and then goes on adding the next rows to the
+ * same state.  The final function above sorts the tuplesort, after which no
+ * row can be added.  So the aggregates also carry a moving-aggregate
+ * implementation, whose final function only reads; and because its final
+ * function is READ_ONLY where the plain one is not, a window takes it for
+ * every frame, moving or not ("decision forced by safety"), while GROUP BY
+ * goes on sorting, and spilling past work_mem.
+ *
+ * The state is the frame's non-null values in two heaps: the lower half in
+ * a max-heap, the upper half in a min-heap, the lower holding the one more
+ * when the count is odd.  The median is then the lower heap's top, or halfway
+ * between the two tops -- the middle row, or the two middle rows, of the
+ * frame sorted, which is what percentile_cont(0.5) reads.  A row entering
+ * the frame is pushed into one heap and the two rebalanced; one leaving is
+ * taken out of the heap it is in.  Each costs a logarithm of the frame, so a
+ * running median over a long partition, whose frame only grows, stays cheap.
+ *
+ * Which value is leaving is known without looking for it.  A window takes
+ * rows out of a frame in the order it put them in, from the frame's head, so
+ * the value leaving is the oldest, which a queue keeps in front with its
+ * place in its heap.  The inverse function checks that it is the same bytes
+ * it is given, which is what a volatile argument breaks -- evaluated again as
+ * the row leaves, it is another value -- and answers NULL then, on which the
+ * window aggregates the frame again from nothing.
+ */
+typedef struct MedianItem
+{
+	Datum		value;			/* a copy, in the state's context */
+	int			pos;			/* where it is in its heap */
+	bool		low;			/* in the lower half's heap */
+} MedianItem;
+
+typedef struct MedianHeaps
+{
+	Oid			typid;
+	int16		typlen;
+	bool		typbyval;
+	SortSupportData ssup;		/* the type's btree ordering, tuplesort's own */
+	MemoryContext cxt;			/* the window aggregate's context */
+	MedianItem **low;			/* max-heap of the lower half */
+	int			nlow;
+	int			maxlow;
+	MedianItem **high;			/* min-heap of the upper half */
+	int			nhigh;
+	int			maxhigh;
+	MedianItem **queue;			/* ring of the items, oldest at qhead */
+	int			qhead;
+	int			qlen;
+	int			qmax;
+} MedianHeaps;
+
+/* Does a belong above b in the heap of that half? */
+static inline bool
+item_above(MedianHeaps *mh, bool low, const MedianItem *a, const MedianItem *b)
+{
+	int			c = ApplySortComparator(a->value, false, b->value, false, &mh->ssup);
+
+	return low ? (c > 0) : (c < 0);
+}
+
+static inline void
+heap_place(MedianItem **heap, int i, MedianItem *it)
+{
+	heap[i] = it;
+	it->pos = i;
+}
+
+static void
+heap_sift_up(MedianHeaps *mh, bool low, int i)
+{
+	MedianItem **heap = low ? mh->low : mh->high;
+	MedianItem *it = heap[i];
+
+	while (i > 0)
+	{
+		int			parent = (i - 1) / 2;
+
+		if (!item_above(mh, low, it, heap[parent]))
+			break;
+		heap_place(heap, i, heap[parent]);
+		i = parent;
+	}
+	heap_place(heap, i, it);
+}
+
+static void
+heap_sift_down(MedianHeaps *mh, bool low, int i)
+{
+	MedianItem **heap = low ? mh->low : mh->high;
+	int			n = low ? mh->nlow : mh->nhigh;
+	MedianItem *it = heap[i];
+
+	for (;;)
+	{
+		int			child = 2 * i + 1;
+
+		if (child >= n)
+			break;
+		if (child + 1 < n && item_above(mh, low, heap[child + 1], heap[child]))
+			child++;
+		if (!item_above(mh, low, heap[child], it))
+			break;
+		heap_place(heap, i, heap[child]);
+		i = child;
+	}
+	heap_place(heap, i, it);
+}
+
+static void
+heap_push(MedianHeaps *mh, bool low, MedianItem *it)
+{
+	MedianItem ***heap = low ? &mh->low : &mh->high;
+	int		   *n = low ? &mh->nlow : &mh->nhigh;
+	int		   *max = low ? &mh->maxlow : &mh->maxhigh;
+
+	if (*n == *max)
+	{
+		*max *= 2;
+		*heap = repalloc(*heap, *max * sizeof(MedianItem *));
+	}
+	it->low = low;
+	heap_place(*heap, (*n)++, it);
+	heap_sift_up(mh, low, *n - 1);
+}
+
+/* Take the item at position i out of its heap. */
+static MedianItem *
+heap_take(MedianHeaps *mh, bool low, int i)
+{
+	MedianItem **heap = low ? mh->low : mh->high;
+	int		   *n = low ? &mh->nlow : &mh->nhigh;
+	MedianItem *it = heap[i];
+	MedianItem *last = heap[--(*n)];
+
+	if (i < *n)
+	{
+		/* the last item fills the hole, and may belong above it or below */
+		heap_place(heap, i, last);
+		heap_sift_up(mh, low, i);
+		heap_sift_down(mh, low, last->pos);
+	}
+	return it;
+}
+
+/* The lower half holds as many as the upper, or one more. */
+static void
+heaps_rebalance(MedianHeaps *mh)
+{
+	if (mh->nlow > mh->nhigh + 1)
+		heap_push(mh, false, heap_take(mh, true, 0));
+	else if (mh->nhigh > mh->nlow)
+		heap_push(mh, true, heap_take(mh, false, 0));
+}
+
+static MedianHeaps *
+heaps_create(FunctionCallInfo fcinfo, MemoryContext aggcontext)
+{
+	Oid			typid = get_fn_expr_argtype(fcinfo->flinfo, 1);
+	TypeCacheEntry *tce;
+	MedianHeaps *mh;
+	MemoryContext oldcontext;
+
+	if (typid != FLOAT8OID && typid != INTERVALOID &&
+		typid != TIMESTAMPOID && typid != TIMESTAMPTZOID)
+		elog(ERROR, "median() is not defined for type %s",
+			 format_type_be(typid));
+
+	tce = lookup_type_cache(typid, TYPECACHE_LT_OPR);
+	if (!OidIsValid(tce->lt_opr))
+		elog(ERROR, "could not identify an ordering operator for type %s",
+			 format_type_be(typid));
+
+	oldcontext = MemoryContextSwitchTo(aggcontext);
+
+	mh = palloc0_object(MedianHeaps);
+	mh->typid = typid;
+	get_typlenbyval(typid, &mh->typlen, &mh->typbyval);
+	mh->ssup.ssup_cxt = aggcontext;
+	mh->ssup.ssup_collation = InvalidOid;
+	mh->ssup.ssup_nulls_first = false;
+	PrepareSortSupportFromOrderingOp(tce->lt_opr, &mh->ssup);
+	mh->cxt = aggcontext;
+	mh->maxlow = mh->maxhigh = mh->qmax = 16;
+	mh->low = palloc(mh->maxlow * sizeof(MedianItem *));
+	mh->high = palloc(mh->maxhigh * sizeof(MedianItem *));
+	mh->queue = palloc(mh->qmax * sizeof(MedianItem *));
+
+	MemoryContextSwitchTo(oldcontext);
+
+	return mh;
+}
+
+static void
+heaps_add(MedianHeaps *mh, Datum value)
+{
+	MemoryContext oldcontext = MemoryContextSwitchTo(mh->cxt);
+	MedianItem *it = palloc_object(MedianItem);
+
+	it->value = datumCopy(value, mh->typbyval, mh->typlen);
+	if (mh->nlow == 0 ||
+		ApplySortComparator(it->value, false, mh->low[0]->value, false,
+							&mh->ssup) <= 0)
+		heap_push(mh, true, it);
+	else
+		heap_push(mh, false, it);
+	heaps_rebalance(mh);
+
+	/* at the back of the queue, the ring unrolled when it is full */
+	if (mh->qlen == mh->qmax)
+	{
+		MedianItem **queue = palloc(mh->qmax * 2 * sizeof(MedianItem *));
+
+		for (int k = 0; k < mh->qlen; k++)
+			queue[k] = mh->queue[(mh->qhead + k) % mh->qmax];
+		pfree(mh->queue);
+		mh->queue = queue;
+		mh->qhead = 0;
+		mh->qmax *= 2;
+	}
+	mh->queue[(mh->qhead + mh->qlen++) % mh->qmax] = it;
+
+	MemoryContextSwitchTo(oldcontext);
+}
+
+/*
+ * Take out the oldest value, which has to be `value`, byte for byte; false,
+ * with nothing changed, if it is not.
+ */
+static bool
+heaps_remove(MedianHeaps *mh, Datum value)
+{
+	MedianItem *it;
+
+	if (mh->qlen == 0)
+		return false;
+	it = mh->queue[mh->qhead];
+	if (!datumIsEqual(it->value, value, mh->typbyval, mh->typlen))
+		return false;
+
+	mh->qhead = (mh->qhead + 1) % mh->qmax;
+	mh->qlen--;
+	(void) heap_take(mh, it->low, it->pos);
+	heaps_rebalance(mh);
+
+	if (!mh->typbyval)
+		pfree(DatumGetPointer(it->value));
+	pfree(it);
+	return true;
+}
+
+PG_FUNCTION_INFO_V1(gp_median_mtransfn);
+PG_FUNCTION_INFO_V1(gp_median_minvfn);
+PG_FUNCTION_INFO_V1(gp_median_mfinalfn);
+
+/*
+ * gp.median_mtransfn(internal, float8 | interval | timestamp | timestamptz)
+ *
+ * A row entering the frame.  Not strict, like the plain one, and so neither
+ * is the inverse, which PostgreSQL requires of the pair: a null row is not
+ * counted, and nothing is taken out for it when it leaves.
+ */
+Datum
+gp_median_mtransfn(PG_FUNCTION_ARGS)
+{
+	MemoryContext aggcontext;
+	MedianHeaps *mh;
+
+	if (!AggCheckCallContext(fcinfo, &aggcontext))
+		elog(ERROR, "median() called in non-aggregate context");
+
+	if (PG_ARGISNULL(0))
+		mh = heaps_create(fcinfo, aggcontext);
+	else
+		mh = (MedianHeaps *) PG_GETARG_POINTER(0);
+
+	if (!PG_ARGISNULL(1))
+		heaps_add(mh, PG_GETARG_DATUM(1));
+
+	PG_RETURN_POINTER(mh);
+}
+
+/*
+ * gp.median_minvfn(internal, float8 | interval | timestamp | timestamptz)
+ *
+ * A row leaving the frame, which is the oldest in it.  NULL -- "cannot take
+ * it out" -- if the value is not the oldest one's, and the window starts the
+ * frame again.
+ */
+Datum
+gp_median_minvfn(PG_FUNCTION_ARGS)
+{
+	MedianHeaps *mh;
+
+	if (!AggCheckCallContext(fcinfo, NULL))
+		elog(ERROR, "median() called in non-aggregate context");
+
+	if (PG_ARGISNULL(0))
+		PG_RETURN_NULL();
+	mh = (MedianHeaps *) PG_GETARG_POINTER(0);
+
+	if (!PG_ARGISNULL(1) && !heaps_remove(mh, PG_GETARG_DATUM(1)))
+		PG_RETURN_NULL();
+
+	PG_RETURN_POINTER(mh);
+}
+
+/*
+ * gp.median_<type>_mfinal(internal)
+ *
+ * The median of the frame, read from the tops of the heaps and changing
+ * neither: MFINALFUNC_MODIFY = READ_ONLY, which is what lets a window call it
+ * and go on.  The value is a copy, so that none of the state is handed out.
+ */
+Datum
+gp_median_mfinalfn(PG_FUNCTION_ARGS)
+{
+	MedianHeaps *mh;
+
+	if (PG_ARGISNULL(0))
+		PG_RETURN_NULL();
+	mh = (MedianHeaps *) PG_GETARG_POINTER(0);
+
+	if (mh->nlow == 0)
+		PG_RETURN_NULL();
+	if (mh->nlow > mh->nhigh)
+		PG_RETURN_DATUM(datumCopy(mh->low[0]->value, mh->typbyval, mh->typlen));
+
+	PG_RETURN_DATUM(median_lerp(mh->typid, mh->low[0]->value,
+								mh->high[0]->value, 0.5));
 }
