@@ -29,6 +29,7 @@
 
 #include "postgres.h"
 
+#include "nodes/execnodes.h"
 #include "nodes/plannodes.h"
 
 /* The CustomScan provider's name, which a serialized plan carries. */
@@ -39,6 +40,7 @@
 #define GP_MOTION_HASH			1	/* each to the segment its keys hash to */
 #define GP_MOTION_BROADCAST		2	/* each to every segment */
 #define GP_MOTION_RANDOM		3	/* each to the next segment in turn */
+#define GP_MOTION_DML			4	/* a write the segments carry out */
 
 /* A Motion whose sender is the coordinator, where "content" names a segment. */
 #define GP_MOTION_FROM_COORDINATOR	(-2)
@@ -82,6 +84,32 @@ extern Plan *GpMotionMakeSend(int type, Plan *fragment, List *targetlist,
 extern Plan *GpMotionMakeHashFilter(Plan *child, List *targetlist, List *qual,
 									int nkeys, const AttrNumber *cols,
 									const Oid *hashfuncs, int segment);
+
+/*
+ * A write of a distributed table, where its rows are: "modify", a
+ * ModifyTable, runs on the segments -- every one, or "content" -- in the
+ * slice Cloudberry calls its writer gang, and the coordinator counts the
+ * rows they changed.  Carries out the Motions below it first, as a Gather.
+ */
+extern Plan *GpMotionMakeDml(Plan *modify, int content, int slice);
+
+/*
+ * ORCA's Split, for an UPDATE of a distribution key (gp_split.c): each row of
+ * "child" as a DELETE of its old values and an INSERT of its new ones, the
+ * columns of the output being "deletecols" and "insertcols" of the child's,
+ * and "actioncol" the action.  And what applies them on a segment: the rows
+ * of "child", the table's "natts" attributes first, then the action and the
+ * ctid, against range table entry "rti".
+ */
+extern Plan *GpSplitMake(Plan *child, List *targetlist, List *deletecols,
+						 List *insertcols, AttrNumber actioncol);
+extern Plan *GpSplitModifyMake(Plan *child, Index rti, int natts,
+							   AttrNumber actioncol, AttrNumber ctidcol);
+extern bool GpSplitModifyIs(Plan *plan, Index *rti);
+struct ExplainState;
+extern bool GpSplitExplainLabel(PlanState *planstate, struct ExplainState *es,
+								const char **pname, const char **suffix);
+extern void GpSplitInit(void);
 
 /* Its kind, and the slice that sends. */
 extern int	GpMotionType(Plan *plan);

@@ -721,12 +721,66 @@ mine" ] && ok "a transaction reads its own rows, and a LIMIT leaves the connecti
 		"SELECT a, rank() OVER (PARTITION BY b ORDER BY a DESC) FROM o WHERE a > 990 ORDER BY b, a;" \
 		"Merge Key"
 
+	# ORCA's writes, carried out where the rows are.
+	placed() {					# placed <table>: rows on the wrong segment
+		local w1 w2
+		w1=$(q 1 "SELECT count(*) FROM $1 WHERE expected_seg(a, 2) <> 0;")
+		w2=$(q 2 "SELECT count(*) FROM $1 WHERE expected_seg(a, 2) <> 1;")
+		echo "$w1|$w2"
+	}
+	q 0 "CREATE TABLE wo (a int, b int, c text) DISTRIBUTED BY (a);" >/dev/null
+	q 0 "CREATE INDEX wo_b ON wo (b);" >/dev/null
+	plan=$(q 0 "EXPLAIN (COSTS OFF) INSERT INTO wo SELECT y, x, 'p' || x FROM po;")
+	tag=$("$PSQL" -X -t -A -h "$(sockdir 0)" -p "$(port 0)" -d postgres \
+		-c "INSERT INTO wo SELECT y, x, 'p' || x FROM po;" 2>&1)
+	out=$(q 0 "SELECT count(*), sum(a), sum(b) FROM wo;")
+	case "$plan" in
+		*"Dispatch  (slice1; segments: 2)"*"Insert on wo"*"Redistribute Motion 2:2"*"Optimizer: GPORCA"*)
+			[ "$tag|$out|$(placed wo)" = "INSERT 0 500|500|1497|125250|0|0" ] \
+				&& ok "INSERT ... SELECT: redistributed by the target's key, written on the segments" \
+				|| notok "ORCA's INSERT ... SELECT" "$tag / $out / misplaced $(placed wo)" ;;
+		*) notok "ORCA's INSERT ... SELECT: the plan" "$plan" ;;
+	esac
+
+	tag=$("$PSQL" -X -t -A -h "$(sockdir 0)" -p "$(port 0)" -d postgres \
+		-c "UPDATE wo SET c = 'u' WHERE a = 3;" 2>&1)
+	out=$(q 0 "SELECT count(*) FROM wo WHERE c = 'u';")
+	[ "$tag|$out" = "UPDATE 72|72" ] && ok "an UPDATE on the segments, counted ($tag)" \
+		|| notok "ORCA's UPDATE" "$tag / $out"
+
+	tag=$("$PSQL" -X -t -A -h "$(sockdir 0)" -p "$(port 0)" -d postgres \
+		-c "DELETE FROM o WHERE a = 5;" 2>&1)
+	out=$(q 0 "SELECT count(*) FROM o;")
+	[ "$tag|$out" = "DELETE 1|999" ] && ok "a DELETE on the segments ($tag)" \
+		|| notok "ORCA's DELETE" "$tag / $out"
+
+	# Split: the key changes, and each row moves to the segment it hashes to.
+	plan=$(q 0 "EXPLAIN (COSTS OFF) UPDATE wo SET a = a + 1000 WHERE b < 50;")
+	tag=$("$PSQL" -X -t -A -h "$(sockdir 0)" -p "$(port 0)" -d postgres \
+		-c "UPDATE wo SET a = a + 1000 WHERE b < 50;" 2>&1)
+	out=$(q 0 "SELECT count(*), sum(a), count(*) FILTER (WHERE a >= 1000) FROM wo;")
+	idx=$(q 0 "SET enable_seqscan = off; SELECT count(*) FROM wo WHERE b = 7;")
+	case "$plan" in
+		*"Update on wo"*"Redistribute Motion 2:2"*"Split Update"*)
+			[ "$tag|$out|$idx|$(placed wo)" = "UPDATE 49|500|50497|49|1|0|0" ] \
+				&& ok "an UPDATE of the key: Split, each row moved where it hashes, its index entries with it" \
+				|| notok "a split update" "$tag / $out / index $idx / misplaced $(placed wo)" ;;
+		*) notok "a split update: the plan" "$plan" ;;
+	esac
+
+	out=$(printf '%s\n' "BEGIN;" "UPDATE wo SET a = -a;" "ROLLBACK;" \
+		"SELECT count(*), sum(a) FROM wo;" | qf 0)
+	[ "$out" = "500|50497" ] && ok "a split update rolled back leaves every row where it was" \
+		|| notok "a split update rolled back" "$out"
+
+	q 0 "CREATE TABLE wt (a int, b int) DISTRIBUTED BY (a);" >/dev/null
+	q 0 "CREATE FUNCTION wt_noop() RETURNS trigger LANGUAGE plpgsql AS \$\$ BEGIN RETURN NEW; END \$\$;" >/dev/null
+	q 0 "CREATE TRIGGER wt_t BEFORE INSERT ON wt FOR EACH ROW EXECUTE FUNCTION wt_noop();" >/dev/null
 	out=$(printf '%s\n' "SET gp.optimizer_trace_fallback = on;" \
-		"DELETE FROM o WHERE a = 5;" "SELECT count(*) FROM o;" | qf 0)
+		"UPDATE wt SET a = a + 1;" | qf 0)
 	case "$out" in
-		*"a distributed table in the coordinator's slice"*999)
-			ok "a DELETE ORCA would run here goes to the planner, which runs it on the segments" ;;
-		*) notok "DELETE with ORCA" "$out" ;;
+		*"on a table with triggers"*) ok "an UPDATE of the key of a table with triggers is refused, and says why" ;;
+		*) notok "a split update with triggers" "$out" ;;
 	esac
 
 	out=$(printf '%s\n' "SET gp.optimizer_trace_fallback = on;" \

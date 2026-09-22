@@ -465,6 +465,8 @@ CTranslatorDXLToPlStmt::TranslateDXLOperatorToPlan(
 		case EdxlopPhysicalMotionRedistribute:
 		case EdxlopPhysicalMotionRandom:
 		case EdxlopPhysicalMotionRoutedDistribute:
+		// M2: an UPDATE of a distribution key, carried out by gp_core.
+		case EdxlopPhysicalSplit:
 			break;
 		default:
 			GPOS_RAISE(gpdxl::ExmaDXL, gpdxl::ExmiDXL2PlStmtConversion,
@@ -5798,10 +5800,57 @@ CTranslatorDXLToPlStmt::TranslateDXLDml(
 	// means the DMLAction column.  Cloudberry also splits every update of an
 	// append-only table, which is M5's, and which the relcache translator
 	// does not report on this node.
-	if (CMD_UPDATE == m_cmd_type &&
-		(phy_dml_dxlop->FSplit() || md_rel->IsNonBlockTable()))
+	// A split update: the row moves to another segment, and gp_core applies
+	// it as a DELETE there and an INSERT where it goes (gp_split.c).  Only on
+	// a cluster, where the table is hash distributed; on one node ORCA plans
+	// none.  Not a table with triggers: they would not fire, as Cloudberry's
+	// do not for a split update, and a foreign key's checks are triggers.
+	BOOL split = CMD_UPDATE == m_cmd_type && phy_dml_dxlop->FSplit();
+	if (CMD_UPDATE == m_cmd_type && md_rel->IsNonBlockTable())
 	{
 		GP_UNPORTED("an UPDATE run as a DELETE and an INSERT");
+	}
+	if (split)
+	{
+		if (IMDRelation::EreldistrHash != md_rel->GetRelDistribution())
+		{
+			GP_UNPORTED("an UPDATE run as a DELETE and an INSERT");
+		}
+		if (gpdb::HasAnyTriggers(CMDIdGPDB::CastMdid(mdid_target_table)->Oid()))
+		{
+			GP_UNPORTED("an UPDATE of a distribution key, on a table with triggers");
+		}
+	}
+
+	// On a cluster a distributed table is written where its rows are: the
+	// ModifyTable runs in a slice of its own on the segments -- Cloudberry's
+	// writer gang -- and the coordinator dispatches it and counts the rows
+	// they changed (gp_core's gp_motion.c).
+	PlanSlice *recvslice = m_dxl_to_plstmt_context->GetCurrentSlice();
+	PlanSlice *writeslice = nullptr;
+	IMDRelation::Ereldistrpolicy target_distribution =
+		md_rel->GetRelDistribution();
+	if (IMDRelation::EreldistrHash == target_distribution ||
+		IMDRelation::EreldistrRandom == target_distribution ||
+		IMDRelation::EreldistrReplicated == target_distribution)
+	{
+		if (!gpdb::CanDispatchPlans())
+		{
+			GP_UNPORTED("a Motion, without gp.cluster_secret");
+		}
+		if (0 != recvslice->sliceIndex)
+		{
+			GP_UNPORTED("a write inside a slice the segments run");
+		}
+
+		writeslice = (PlanSlice *) gpdb::GPDBAlloc(sizeof(PlanSlice));
+		memset(writeslice, 0, sizeof(PlanSlice));
+		writeslice->sliceIndex = m_dxl_to_plstmt_context->AddSlice(writeslice);
+		writeslice->parentIndex = recvslice->sliceIndex;
+		writeslice->gangType = GANGTYPE_PRIMARY_WRITER;
+		writeslice->numsegments = m_num_of_segments;
+		writeslice->segindex = 0;
+		m_dxl_to_plstmt_context->SetCurrentSlice(writeslice);
 	}
 
 	// translation context for column mappings in the base relation
@@ -5839,8 +5888,9 @@ CTranslatorDXLToPlStmt::TranslateDXLDml(
 	// named in updateColnos.  A DELETE needs none: on one node ORCA's
 	// DELETE carries no column but the row's identity.
 	List *update_colnos = NIL;
-	if (CMD_INSERT == m_cmd_type)
+	if (CMD_INSERT == m_cmd_type || split)
 	{
+		// a split update's rows are whole rows, as an INSERT's are
 		dml_target_list = CreateTargetListWithNullsForDroppedCols(
 			dml_target_list, md_rel, true /* keepDropedAsNull */);
 	}
@@ -5850,12 +5900,24 @@ CTranslatorDXLToPlStmt::TranslateDXLDml(
 			CreateUpdateTargetList(dml_target_list, md_rel, &update_colnos);
 	}
 
+	// A split update's action: which of its rows is a DELETE, which an
+	// INSERT.  Cloudberry's column, by Cloudberry's name.
+	int natts = gpdb::ListLength(dml_target_list);
+	AttrNumber action_col = 0;
+	if (split)
+	{
+		AddJunkTargetEntryForColId(&dml_target_list, &child_context,
+								   phy_dml_dxlop->ActionColId(), "DMLAction");
+		action_col = (AttrNumber) gpdb::ListLength(dml_target_list);
+	}
+
 	// The row to change, by the junk column the executor finds by name.
 	if (CMD_UPDATE == m_cmd_type || CMD_DELETE == m_cmd_type)
 	{
 		AddJunkTargetEntryForColId(&dml_target_list, &child_context,
 								   phy_dml_dxlop->GetCtIdColId(), "ctid");
 	}
+	AttrNumber ctid_col = (AttrNumber) gpdb::ListLength(dml_target_list);
 
 	// Add a Result node on top of the child plan, to coerce the target
 	// list to match the exact physical layout of the target table,
@@ -5906,6 +5968,37 @@ CTranslatorDXLToPlStmt::TranslateDXLDml(
 
 	// translate operator costs
 	TranslatePlanCosts(dml_dxlnode, plan);
+
+	if (nullptr != writeslice)
+	{
+		m_dxl_to_plstmt_context->SetCurrentSlice(recvslice);
+
+		// A split update is applied by gp_core's node in ModifyTable's place,
+		// over the same rows.
+		Plan *write = plan;
+		if (split)
+		{
+			write = gpdb::MakeSplitModify(result_plan, index, natts,
+										  action_col, ctid_col);
+			write->plan_node_id = plan->plan_node_id;
+			write->startup_cost = plan->startup_cost;
+			write->total_cost = plan->total_cost;
+			write->plan_rows = plan->plan_rows;
+			write->plan_width = plan->plan_width;
+			SetParamIds(write);
+		}
+
+		Plan *dispatch =
+			gpdb::MakeDmlMotion(write, -1, writeslice->sliceIndex);
+		dispatch->plan_node_id = m_dxl_to_plstmt_context->GetNextPlanId();
+		dispatch->startup_cost = plan->startup_cost;
+		dispatch->total_cost = plan->total_cost;
+		dispatch->plan_rows = 0;
+		dispatch->plan_width = 0;
+		m_motions = gpdb::LAppend(m_motions, dispatch);
+		SetParamIds(dispatch);
+		return dispatch;
+	}
 
 	return (Plan *) dml;
 }
@@ -6193,10 +6286,66 @@ CTranslatorDXLToPlStmt::TranslateDXLSplit(
 	const CDXLNode *split_dxlnode, CDXLTranslateContext *output_context,
 	CDXLTranslationContextArray *ctxt_translation_prev_siblings)
 {
-	// M2: updates that move a row between segments.  This body refuses until then, and Cloudberry's is
-	// in github/cloudberry/src/backend/gpopt/translate/CTranslatorDXLToPlStmt.cpp,
-	// unchanged, for the step that brings it back.
-	GP_UNPORTED("updates that move a row between segments");
+	// Cloudberry's body, building gp_core's Split Update (gp_split.c).
+	CDXLPhysicalSplit *phy_split_dxlop =
+		CDXLPhysicalSplit::Cast(split_dxlnode->GetOperator());
+
+	int plan_node_id = m_dxl_to_plstmt_context->GetNextPlanId();
+
+	CDXLNode *project_list_dxlnode = (*split_dxlnode)[0];
+	CDXLNode *child_dxlnode = (*split_dxlnode)[1];
+
+	CDXLTranslateContext child_context(m_mp, false,
+									   output_context->GetColIdToParamIdMap());
+
+	Plan *child_plan = TranslateDXLOperatorToPlan(
+		child_dxlnode, &child_context, ctxt_translation_prev_siblings);
+
+	CDXLTranslationContextArray *child_contexts =
+		GPOS_NEW(m_mp) CDXLTranslationContextArray(m_mp);
+	child_contexts->Append(&child_context);
+
+	// translate proj list and filter
+	List *targetlist =
+		TranslateDXLProjList(project_list_dxlnode,
+							 nullptr,  // translate context for the base table
+							 child_contexts, output_context);
+
+	// translate delete and insert columns
+	ULongPtrArray *deletion_colid_array =
+		phy_split_dxlop->GetDeletionColIdArray();
+	ULongPtrArray *insertion_colid_array =
+		phy_split_dxlop->GetInsertionColIdArray();
+
+	GPOS_ASSERT(insertion_colid_array->Size() == deletion_colid_array->Size());
+
+	List *delete_cols = CTranslatorUtils::ConvertColidToAttnos(
+		deletion_colid_array, &child_context);
+	List *insert_cols = CTranslatorUtils::ConvertColidToAttnos(
+		insertion_colid_array, &child_context);
+
+	const TargetEntry *te_action_col =
+		output_context->GetTargetEntry(phy_split_dxlop->ActionColId());
+
+	if (nullptr == te_action_col)
+	{
+		GPOS_RAISE(gpdxl::ExmaDXL, gpdxl::ExmiDXL2PlStmtAttributeNotFound,
+				   phy_split_dxlop->ActionColId());
+	}
+
+	Plan *plan = gpdb::MakeSplit(child_plan, targetlist, delete_cols,
+								 insert_cols, te_action_col->resno);
+	plan->plan_node_id = plan_node_id;
+
+	SetParamIds(plan);
+
+	// cleanup
+	child_contexts->Release();
+
+	// translate operator costs
+	TranslatePlanCosts(split_dxlnode, plan);
+
+	return plan;
 }
 
 //---------------------------------------------------------------------------

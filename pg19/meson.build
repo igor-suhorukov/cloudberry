@@ -219,6 +219,7 @@ modules = [
                      'modules/gp_core/gp_modify.c',
                      'modules/gp_core/gp_analyze.c',
                      'modules/gp_core/gp_motion.c',
+                     'modules/gp_core/gp_split.c',
                      'modules/gp_core/gp_label.c',
                      'modules/gp_core/gp_median.c',
                      'modules/gp_core/gp_policy.c'),

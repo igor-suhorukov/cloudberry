@@ -846,6 +846,12 @@ Plan *MakeSendMotion(int type, Plan *fragment, List *targetlist, List *qual,
 Plan *MakeHashFilter(Plan *child, List *targetlist, List *qual, int nkeys,
 					 const AttrNumber *cols, const Oid *hashfuncs,
 					 int segment);
+Plan *MakeDmlMotion(Plan *modify, int content, int slice);
+Plan *MakeSplit(Plan *child, List *targetlist, List *deletecols,
+				List *insertcols, AttrNumber actioncol);
+Plan *MakeSplitModify(Plan *child, Index rti, int natts, AttrNumber actioncol,
+					  AttrNumber ctidcol);
+bool HasAnyTriggers(Oid relid);
 int MotionType(Plan *motion);
 int MotionSegment(Plan *motion);
 void SetMotionSegment(Plan *motion, int content);

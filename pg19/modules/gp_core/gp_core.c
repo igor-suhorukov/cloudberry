@@ -93,6 +93,9 @@ static const GpCoreApi gp_core_api = {
 	.motion_slice = GpMotionSlice,
 	.motion_set_prepare = GpMotionSetPrepare,
 	.motion_make_hash_filter = GpMotionMakeHashFilter,
+	.motion_make_dml = GpMotionMakeDml,
+	.split_make = GpSplitMake,
+	.split_modify_make = GpSplitModifyMake,
 };
 
 /*

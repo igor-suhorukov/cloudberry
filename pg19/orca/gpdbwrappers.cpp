@@ -2762,6 +2762,59 @@ gpdb::MakeHashFilter(Plan *child, List *targetlist, List *qual, int nkeys,
 	return nullptr;
 }
 
+Plan *
+gpdb::MakeDmlMotion(Plan *modify, int content, int slice)
+{
+	GP_WRAP_START;
+	{
+		return motion_api()->motion_make_dml(modify, content, slice);
+	}
+	GP_WRAP_END;
+	return nullptr;
+}
+
+Plan *
+gpdb::MakeSplit(Plan *child, List *targetlist, List *deletecols,
+				List *insertcols, AttrNumber actioncol)
+{
+	GP_WRAP_START;
+	{
+		return motion_api()->split_make(child, targetlist, deletecols,
+										insertcols, actioncol);
+	}
+	GP_WRAP_END;
+	return nullptr;
+}
+
+Plan *
+gpdb::MakeSplitModify(Plan *child, Index rti, int natts, AttrNumber actioncol,
+					  AttrNumber ctidcol)
+{
+	GP_WRAP_START;
+	{
+		return motion_api()->split_modify_make(child, rti, natts, actioncol,
+											   ctidcol);
+	}
+	GP_WRAP_END;
+	return nullptr;
+}
+
+bool
+gpdb::HasAnyTriggers(Oid relid)
+{
+	GP_WRAP_START;
+	{
+		/* the statement's parser has the table locked */
+		Relation	rel = RelationIdGetRelation(relid);
+		bool		has = rel->rd_rel->relhastriggers;
+
+		RelationClose(rel);
+		return has;
+	}
+	GP_WRAP_END;
+	return true;
+}
+
 int
 gpdb::MotionType(Plan *motion)
 {

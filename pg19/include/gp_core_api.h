@@ -118,6 +118,15 @@ typedef struct GpCoreApi
 											 const AttrNumber *cols,
 											 const Oid *hashfuncs,
 											 int segment);
+	struct Plan *(*motion_make_dml) (struct Plan *modify, int content,
+									 int slice);
+	struct Plan *(*split_make) (struct Plan *child, struct List *targetlist,
+								struct List *deletecols,
+								struct List *insertcols,
+								AttrNumber actioncol);
+	struct Plan *(*split_modify_make) (struct Plan *child, Index rti,
+									   int natts, AttrNumber actioncol,
+									   AttrNumber ctidcol);
 } GpCoreApi;
 
 /*

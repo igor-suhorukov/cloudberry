@@ -2326,13 +2326,13 @@ CTranslatorDXLToScalar::TranslateDXLScalarDMLActionToScalar(
 	GPOS_ASSERT(EdxlopScalarDMLAction ==
 				dml_action_node->GetOperator()->GetDXLOperator());
 
-	// M2: the action column of a split update, which says whether a row
-	// below a SplitUpdate is to be deleted or inserted.  DMLActionExpr is
-	// Cloudberry's node, read by its SplitUpdate and nothing else, and both
-	// come with M2.  Cloudberry's body is in
-	// github/cloudberry/src/backend/gpopt/translate/CTranslatorDXLToScalar.cpp,
-	// unchanged, for the step that brings it back.
-	GP_UNPORTED("the action column of a split update");
+	// The action column of a split update, which says whether a row below
+	// a Split Update is to be deleted or inserted.  Cloudberry's is a
+	// DMLActionExpr, a node of its own that its SplitUpdate recognises and
+	// nothing else reads.  gp_core's Split Update is told which column it is
+	// (gp_split.c) and sets it on each row it makes; what stands in the
+	// column until then is an int4, the type Cloudberry's has.
+	return (Expr *) gpdb::MakeIntConst(0);
 }
 
 

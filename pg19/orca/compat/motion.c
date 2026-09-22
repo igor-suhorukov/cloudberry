@@ -54,6 +54,7 @@ typedef struct motion_check_context
 	Bitmapset  *produced;
 	int			problem;
 	List	  **order;			/* the enclosing Gather's Motions, senders first */
+	bool		may_write;		/* the fragment a write is dispatched as */
 } motion_check_context;
 
 static bool
@@ -85,11 +86,15 @@ motion_check_walker(Node *node, void *arg)
 	{
 		Plan	   *plan = (Plan *) node;
 		const GpCoreApi *api = cb_core_api();
-		bool		gather = api->motion_type(plan) == GP_MOTION_GATHER;
+		int			type = api->motion_type(plan);
+		bool		gather = type == GP_MOTION_GATHER || type == GP_MOTION_DML;
 		List	   *order = NIL;
 		motion_check_context sub;
 
-		/* A Gather's rows go to the coordinator, from where it runs. */
+		/*
+		 * A Gather's rows go to the coordinator, from where it runs; so do a
+		 * dispatched write's counts.
+		 */
 		if (gather && ctx->in_fragment)
 		{
 			ctx->problem = GP_ORCA_MOTION_NESTED;
@@ -106,6 +111,7 @@ motion_check_walker(Node *node, void *arg)
 		sub.produced = NULL;
 		sub.problem = GP_ORCA_MOTION_OK;
 		sub.order = gather ? &order : ctx->order;
+		sub.may_write = type == GP_MOTION_DML;
 		if (motion_check_walker((Node *) plan->lefttree, &sub))
 		{
 			ctx->problem = sub.problem;
@@ -182,8 +188,12 @@ motion_check_walker(Node *node, void *arg)
 												 ((WorkTableScan *) node)->wtParam);
 				break;
 			case T_ModifyTable:
-				ctx->problem = GP_ORCA_MOTION_WRITE;
-				return true;
+				if (!ctx->may_write)
+				{
+					ctx->problem = GP_ORCA_MOTION_WRITE;
+					return true;
+				}
+				break;
 			case T_CustomScan:
 				{
 					CustomScan *cscan = (CustomScan *) node;
@@ -217,6 +227,7 @@ gp_orca_check_motions(PlannedStmt *stmt)
 	ctx.produced = NULL;
 	ctx.problem = GP_ORCA_MOTION_OK;
 	ctx.order = NULL;
+	ctx.may_write = false;
 
 	(void) motion_check_walker((Node *) stmt->planTree, &ctx);
 	return ctx.problem;

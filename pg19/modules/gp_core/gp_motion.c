@@ -343,6 +343,14 @@ motion_make(int type, Plan *fragment, List *targetlist, List *qual,
 	return cscan;
 }
 
+Plan *
+GpMotionMakeDml(Plan *modify, int content, int slice)
+{
+	Assert(IsA(modify, ModifyTable) || GpSplitModifyIs(modify, NULL));
+	return (Plan *) motion_make(GP_MOTION_DML, modify, NIL, NIL, content,
+								slice);
+}
+
 int
 GpMotionType(Plan *plan)
 {
@@ -362,7 +370,9 @@ GpMotionSlice(Plan *plan)
 void
 GpMotionSetPrepare(Plan *plan, List *slices)
 {
-	Assert(GpMotionIs(plan) && GpMotionType(plan) == GP_MOTION_GATHER);
+	Assert(GpMotionIs(plan) &&
+		   (GpMotionType(plan) == GP_MOTION_GATHER ||
+			GpMotionType(plan) == GP_MOTION_DML));
 	list_nth_cell(((CustomScan *) plan)->custom_private,
 				  MOTION_PRIVATE_PREPARE)->ptr_value = slices;
 }
@@ -724,7 +734,8 @@ motion_begin(CustomScanState *node, EState *estate, int eflags)
 	 * key.  A Gather is never run on a segment.
 	 */
 	if (GpClusterBackendRole() == GP_ROLE_EXECUTE &&
-		state->type != GP_MOTION_GATHER &&
+		(state->type == GP_MOTION_HASH || state->type == GP_MOTION_BROADCAST ||
+		 state->type == GP_MOTION_RANDOM) &&
 		!(eflags & EXEC_FLAG_EXPLAIN_ONLY))
 	{
 		TupleDesc	tupdesc = node->ss.ss_ScanTupleSlot->tts_tupleDescriptor;
@@ -785,14 +796,19 @@ fragment_sql(EState *estate, Plan *fragment, const char *key)
 {
 	PlannedStmt *whole = estate->es_plannedstmt;
 	PlannedStmt *frag = makeNode(PlannedStmt);
+	bool		split = GpSplitModifyIs(fragment, NULL);
+	bool		write = IsA(fragment, ModifyTable) || split;
 
+	/* a write is the statement's own command; everything else reads */
 	memcpy(frag, whole, sizeof(PlannedStmt));
-	frag->commandType = CMD_SELECT;
+	frag->commandType = !write ? CMD_SELECT
+		: split ? CMD_UPDATE : ((ModifyTable *) fragment)->operation;
 	frag->hasReturning = false;
 	frag->hasModifyingCTE = false;
 	frag->canSetTag = true;
 	frag->planTree = fragment;
-	frag->resultRelationRelids = NULL;
+	if (!write)
+		frag->resultRelationRelids = NULL;
 	frag->rowMarks = NIL;
 	frag->extension_state = NIL;
 	frag->utilityStmt = NULL;
@@ -1133,6 +1149,56 @@ motion_prepare(MotionState *state)
 	}
 }
 
+/*
+ * A write of a distributed table: its Motions first, then the ModifyTable
+ * on the segments, and the rows they changed are the statement's.
+ */
+static void
+motion_dml_run(MotionState *state)
+{
+	EState	   *estate = state->css.ss.ps.state;
+	Plan	   *write = outerPlan(state->css.ss.ps.plan);
+	Index		rti;
+	CmdType		operation;
+	RangeTblEntry *rte;
+	GpPolicy   *policy;
+	int			nsegs = GpClusterSegmentCount();
+	uint64	   *counts = palloc0_array(uint64, nsegs);
+	uint64		total = 0;
+
+	if (GpSplitModifyIs(write, &rti))
+		operation = CMD_UPDATE;
+	else
+	{
+		rti = linitial_int(((ModifyTable *) write)->resultRelations);
+		operation = ((ModifyTable *) write)->operation;
+	}
+	rte = rt_fetch(rti, estate->es_range_table);
+	policy = GpPolicyGet(rte->relid);
+
+	/*
+	 * Cloudberry without its global deadlock detector: an UPDATE or DELETE
+	 * of a distributed table locks the table, so that two of them never wait
+	 * for each other on different segments.
+	 */
+	if (operation == CMD_UPDATE || operation == CMD_DELETE)
+		LockRelationOid(rte->relid, ExclusiveLock);
+
+	if (!state->prepared)
+		motion_prepare(state);
+
+	GpDispatchCommandParams(fragment_sql(estate, write, state->key),
+							0, NULL, state->content, counts);
+
+	/* every segment writes a replicated table's rows alike: count them once */
+	if (policy != NULL && GpPolicyIsReplicated(policy))
+		total = counts[0];
+	else
+		for (int i = 0; i < nsegs; i++)
+			total += counts[i];
+	estate->es_processed += total;
+}
+
 static void
 motion_start(MotionState *state)
 {
@@ -1267,6 +1333,13 @@ motion_next(ScanState *ss)
 	if (state->receiving)
 		return motion_recv_next(state);
 
+	if (state->type == GP_MOTION_DML)
+	{
+		motion_dml_run(state);
+		state->done = true;
+		return ExecClearTuple(slot);
+	}
+
 	if (state->gather == NULL)
 		motion_start(state);
 
@@ -1361,6 +1434,8 @@ motion_type_name(int type)
 			return "Broadcast";
 		case GP_MOTION_RANDOM:
 			return "Redistribute";	/* Cloudberry prints a random one so too */
+		case GP_MOTION_DML:
+			return "Dispatch";
 		default:
 			return "Gather";
 	}
@@ -1426,6 +1501,9 @@ static void
 motion_explain_label(PlanState *planstate, ExplainState *es,
 					 const char **pname, const char **suffix)
 {
+	if (GpSplitExplainLabel(planstate, es, pname, suffix))
+		return;
+
 	if (IsA(planstate, CustomScanState) &&
 		((CustomScanState *) planstate)->methods == &motion_exec_methods)
 	{
@@ -1434,6 +1512,13 @@ motion_explain_label(PlanState *planstate, ExplainState *es,
 		int			receivers = state->type == GP_MOTION_GATHER ? 1
 			: GpClusterSegmentCount();
 
+		if (state->type == GP_MOTION_DML)
+		{
+			/* the segments write, and send nothing up but their counts */
+			*pname = "Dispatch";
+			*suffix = psprintf("  (slice%d; segments: %d)", state->slice, nsegs);
+			return;
+		}
 		*pname = psprintf("%s Motion %d:%d", motion_type_name(state->type),
 						  nsegs, receivers);
 		*suffix = psprintf("  (slice%d; segments: %d)", state->slice, nsegs);
@@ -1751,8 +1836,9 @@ fragment_plan(const char *payload, const char *key)
 	 * resjunk column would be dropped by the portal's junk filter, and the
 	 * rows would arrive a column short.
 	 */
-	foreach(lc, stmt->planTree->targetlist)
-		lfirst_node(TargetEntry, lc)->resjunk = false;
+	if (stmt->commandType == CMD_SELECT)
+		foreach(lc, stmt->planTree->targetlist)
+			lfirst_node(TargetEntry, lc)->resjunk = false;
 
 	stmt->extension_state = list_make1(makeDefElem(pstrdup(GP_FRAGMENT_MARK),
 												   (Node *) makeString(pstrdup(key)),
@@ -1891,6 +1977,7 @@ GpMotionInit(void)
 
 	RegisterCustomScanMethods(&motion_scan_methods);
 	RegisterCustomScanMethods(&hash_filter_scan_methods);
+	GpSplitInit();
 
 	prev_explain_node_label = explain_node_label_hook;
 	explain_node_label_hook = motion_explain_label;
