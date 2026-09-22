@@ -1,0 +1,85 @@
+PostGIS's tests under ORCA: the differences from PostGIS's expected output
+that have been reviewed, and are ORCA's plans rather than wrong answers.
+
+Each file is a test's difference in the form ../../singlenode/canon.pl gives
+it -- the lines removed and added, hunk by hunk, with no file names or line
+numbers -- under the test's own path.  run.sh counts a test as passing when
+its difference is exactly the file's; any other difference fails it, and is
+left for review.  None of these tests differs in the planner pass.
+
+A test inspects its own plan (7)
+
+    regress/core/regress_brin_index
+    regress/core/regress_brin_index_3d
+    regress/core/regress_brin_index_geography
+    regress/core/regress_index
+    regress/core/regress_spgist_index_2d
+    regress/core/regress_spgist_index_3d
+    regress/core/regress_spgist_index_nd
+
+  Each sets enable_seqscan, enable_indexscan and enable_bitmapscan, reads the
+  names of the scans back from EXPLAIN, and prints them.  ORCA does not read
+  PostgreSQL's enable_* settings, and plans no SP-GiST index scan at all (it
+  is not an access method ORCA's translator lets through), so the scan named
+  is ORCA's choice.
+
+  Where the scan differs, two of them print different rows as well, and the
+  rows are PostgreSQL's own: regress_brin_index_3d's query
+  'BOX(125 125,126 126)'::box2d ~ the_geom returns eighteen POINT Z EMPTY
+  rows by a seq scan and one by a BRIN bitmap scan under PostgreSQL's planner
+  too, and the test expects each answer where it forces each scan.  ORCA
+  chose the bitmap scan where the test forces a seq scan, and answered what
+  the planner answers by that scan.  regress_index's selectivity checks
+  ("&&|1|5+-5") compare the planner's estimate with the rows; ORCA's is not
+  PostGIS's, whose selectivity functions it does not call.
+
+A subquery's ORDER BY, and no other (4)
+
+    regress/core/tickets                 (#680)
+    topology/test/regress/st_addedgemodface
+    topology/test/regress/st_addedgenewfaces
+    raster/test/regress/rt_gdalwarp
+
+  ORCA removes an ORDER BY in a subquery that has no LIMIT of its own
+  (CExpressionPreprocessor::PexprRemoveSuperfluousLimit), as the SQL standard
+  lets it and Cloudberry's ORCA does.  #680 takes the first row of such a
+  subquery with a LIMIT outside it; the others print a GROUP BY or a select
+  list over one with no ORDER BY of their own.  The rows are the same, in
+  another order, or another first row.
+
+No ORDER BY at all (1)
+
+    raster/test/regress/rt_clip
+
+  Its metadata query has no ORDER BY, and prints raster_clip_out in the
+  order the test's INSERT ... SELECT wrote it, which ORCA planned with the
+  joins in another order.  The rows are the same.
+
+The order PostGIS's own queries return rows in (1)
+
+    topology/test/regress/st_createtopogeo
+
+  T14 reports the face an isolated node lies in.  ST_CreateTopoGeo assigns
+  face ids in the order its own queries, which ORCA plans, return the
+  geometry's parts; the nodes, edges and faces it counts are the same ("22
+  nodes|24 edges|9 faces"), and the face holding the node is 5 rather than 7.
+
+A NOTICE or WARNING from a function called more often (5)
+
+    regress/core/estimatedextent
+    raster/test/regress/rt_summarystats
+    raster/test/regress/rt_mapalgebraexpr
+    raster/test/regress/rt_mapalgebrafct
+    raster/test/regress/rt_mapalgebrafctngb
+
+  estimatedextent's queries read ST_EstimatedExtent(...) from a subquery
+  with OFFSET 0 four times, and ORCA, which takes no OFFSET 0 for a fence,
+  evaluates the STABLE function for each reference: four "stats do not
+  exist" warnings where the planner has one.
+
+  The raster tests call an IMMUTABLE function with constant arguments, which
+  the port's preprocessing in front of ORCA folds -- calling it, and raising
+  its NOTICE -- before ORCA declines the query for a reason of its own ("SIRV
+  functions", "Row-type variable"); the planner then plans the query from
+  the start and folds the call again.  Cloudberry's fold_constants runs in
+  the same place and has the same effect.

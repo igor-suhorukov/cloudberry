@@ -1,0 +1,25 @@
+@@
+-scan_idx|Seq Scan
++scan_idx|Index Scan
+@@
+-gist 2d @ seq|Seq Scan|11
+-gist 2d ~ seq|Seq Scan|11
++gist 2d @ seq|Index Scan|11
++gist 2d ~ seq|Index Scan|11
+@@
+-&&|1|5+-5:true
+-&&|2|912+-60:true
+-&&|3|12505+-500:true
+-&&|4|50000+-600:true
+-expr &&|1|5+-5:true
+-expr &&|2|912+-60:true
+-expr &&|3|12505+-500:true
+-expr &&|4|50000+-600:true
++&&|1|5+-5:false:19995
++&&|2|912+-60:false:19088
++&&|3|12505+-500:false:7495
++&&|4|50000+-600:false:30000
++expr &&|1|5+-5:false:19995
++expr &&|2|912+-60:false:19088
++expr &&|3|12505+-500:false:7495
++expr &&|4|50000+-600:false:30000

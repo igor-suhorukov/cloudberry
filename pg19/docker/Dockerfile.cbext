@@ -77,6 +77,18 @@ RUN ./autogen.sh > /dev/null \
  && make -j"$(nproc)" > make.log \
  && make install DESTDIR=/postgis-root > install.log
 
+# PostGIS's own regression suite, for the postgis_regress suite.  It runs
+# from the build tree -- run_test.pl, the tests and the loaders it calls are
+# all there -- over the tests, flags and hook scripts this build's configure
+# chose, which make assembles from the tests.mk files.  They are written out
+# here, as make would pass them to run_test.pl for "make installcheck", so the
+# suite needs no make: flags, then hook scripts, then tests, a line each.
+RUN make -C topology/test check-regress-deps > /dev/null \
+ && printf 'print-regress:\n\t@echo "$(RUNTESTFLAGS)"\n\t@echo "$(RUNTESTFLAGS_INTERNAL)"\n\t@echo "$(TESTS)"\n' \
+        | make -s -f GNUmakefile -f - print-regress RUNTESTFLAGS=--extension \
+        > regress/port-regress.txt \
+ && test "$(wc -l < regress/port-regress.txt)" = 3
+
 ###############################################################################
 FROM debian:trixie-slim AS build
 ###############################################################################
@@ -133,10 +145,10 @@ USER root
 # gp_orca links against xerces-c, so the runtime image needs the library even
 # though it does not need the headers; the rest are the libraries of the
 # PostGIS stage's -dev packages.  perl is the whole of it, not perl-base:
-# Cloudberry's gpdiff.pl, which the suites compare with, wants modules
-# perl-base leaves out.  diffutils for pg_regress, whose diff the suites
-# wrap.  Python with PyGreSQL for Cloudberry's isolation2 driver,
-# sql_isolation_testcase.py.
+# Cloudberry's gpdiff.pl and PostGIS's run_test.pl are the port's test
+# drivers, and each wants modules perl-base leaves out.  diffutils for
+# pg_regress, whose diff the suites wrap.  Python with PyGreSQL for
+# Cloudberry's isolation2 driver, sql_isolation_testcase.py.
 RUN apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
         libxerces-c3.2 \
         libgeos-c1t64 libproj25 libgdal36 libjson-c5 libprotobuf-c1 \
@@ -163,7 +175,8 @@ COPY --from=build /cb/src/test/regress/gpdiff.pl /cb/src/test/regress/atmsort.pm
 COPY --from=build /cb/src/test/singlenode_regress /cb/src/test/singlenode_regress
 COPY --from=build /cb/src/test/singlenode_isolation2 /cb/src/test/singlenode_isolation2
 COPY --from=build /pgregress /cb/pgregress
-RUN chown -R postgres:postgres /cb
+COPY --from=postgis /postgis /postgis
+RUN chown -R postgres:postgres /cb /postgis
 USER postgres
 WORKDIR /cb
 CMD ["postgres"]

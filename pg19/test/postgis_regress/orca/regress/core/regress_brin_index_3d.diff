@@ -1,0 +1,57 @@
+@@
+-scan_seq|Seq Scan
++scan_seq|Bitmap Heap Scan,Bitmap Index Scan
+@@
+-scan_seq|Seq Scan
++scan_seq|Bitmap Heap Scan,Bitmap Index Scan
+@@
+-2200|POINT Z EMPTY
+-3300|POINT Z EMPTY
+-4400|POINT Z EMPTY
+-5500|POINT Z EMPTY
+-6600|POINT Z EMPTY
+-7700|POINT Z EMPTY
+-8800|POINT Z EMPTY
+-9900|POINT Z EMPTY
+-12100|POINT Z EMPTY
+-13200|POINT Z EMPTY
+-14300|POINT Z EMPTY
+-15400|POINT Z EMPTY
+-16500|POINT Z EMPTY
+-17600|POINT Z EMPTY
+-18700|POINT Z EMPTY
+-19800|POINT Z EMPTY
+-scan_seq|Seq Scan
++scan_seq|Bitmap Heap Scan,Bitmap Index Scan
+@@
+-2200|POINT Z EMPTY
+-3300|POINT Z EMPTY
+-4400|POINT Z EMPTY
+-5500|POINT Z EMPTY
+-6600|POINT Z EMPTY
+-7700|POINT Z EMPTY
+-8800|POINT Z EMPTY
+-9900|POINT Z EMPTY
+-12100|POINT Z EMPTY
+-13200|POINT Z EMPTY
+-14300|POINT Z EMPTY
+-15400|POINT Z EMPTY
+-16500|POINT Z EMPTY
+-17600|POINT Z EMPTY
+-18700|POINT Z EMPTY
+-19800|POINT Z EMPTY
+@@
+-scan_idx|Bitmap Heap Scan,Bitmap Index Scan
++scan_idx|Seq Scan
+@@
+-scan_seq|Seq Scan
++scan_seq|Bitmap Heap Scan,Bitmap Index Scan
+@@
+-scan_idx|Bitmap Heap Scan,Bitmap Index Scan
++scan_idx|Seq Scan
+@@
+-scan_seq|Seq Scan
++scan_seq|Bitmap Heap Scan,Bitmap Index Scan
+@@
+-scan_idx|Bitmap Heap Scan,Bitmap Index Scan
++scan_idx|Seq Scan

@@ -1,0 +1,15 @@
+@@
+-scan_seq|Seq Scan
++scan_seq|Bitmap Heap Scan,Bitmap Index Scan
+@@
+-scan_seq|Seq Scan
++scan_seq|Bitmap Heap Scan,Bitmap Index Scan
+@@
+-scan_seq|Seq Scan
++scan_seq|Bitmap Heap Scan,Bitmap Index Scan
+@@
+-scan_seq|Seq Scan
++scan_seq|Bitmap Heap Scan,Bitmap Index Scan
+@@
+-scan_seq|Seq Scan
++scan_seq|Bitmap Heap Scan,Bitmap Index Scan
