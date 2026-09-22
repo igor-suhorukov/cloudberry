@@ -85,6 +85,14 @@ q() {						# q <n> <sql>
 		-c "$2" 2>&1
 }
 
+# Several statements in one session, which is one gang: the connections to the
+# segments are the session's, so what one statement leaves behind is what the
+# next one finds.
+qf() {						# qf <n>, statements on stdin
+	"$PSQL" -X -q -t -A -h "$(sockdir "$1")" -p "$(port "$1")" -d postgres \
+		-f - 2>&1
+}
+
 echo "M2 cluster tests"
 echo "  bindir   $BINDIR"
 echo "  root     $ROOT"
@@ -157,10 +165,150 @@ if [ "$started" -eq 1 ]; then
 	out=$(q 1 "SELECT count(*) FROM gp.segment_configuration();")
 	[ "$out" = "3" ] && ok "a segment reads the same file" \
 		|| notok "gp.segment_configuration() on a segment" "$out"
+
+	###########################################################################
+	echo "3. the coordinator reaches the segments"
+	###########################################################################
+	out=$(q 0 "SELECT content || '=' || result FROM gp.exec_on_segments('SELECT content_id FROM gp.node()') ORDER BY content;")
+	[ "$out" = "0=0
+1=1" ] && ok "every segment answers, and each one for itself" \
+		|| notok "gp.exec_on_segments()" "$out"
+
+	# The identity is what makes the backend on the other end a segment
+	# process rather than somebody's psql, and this is where that is decided.
+	out=$(q 0 "SELECT DISTINCT result FROM gp.exec_on_segments('SELECT role FROM gp.node()');")
+	[ "$out" = "execute" ] \
+		&& ok "a dispatched backend executes, where a psql on the same node is utility" \
+		|| notok "the role of a dispatched backend" "$out"
+
+	out=$(q 0 "SELECT result FROM gp.exec_on_segments('SELECT current_setting(''gp.qe_identity'')') WHERE content = 0;")
+	case "$out" in
+		seg0/dbid1/sess*) ok "and carries the identity the coordinator gave it ($out)" ;;
+		*) notok "gp.qe_identity on a segment" "$out" ;;
+	esac
+
+	out=$(q 0 "SELECT DISTINCT result FROM gp.exec_on_segments('SELECT current_database() || '' as '' || current_user');")
+	[ "$out" = "postgres as $(whoami)" ] \
+		&& ok "in the same database, as the session's own user ($out)" \
+		|| notok "database and user on a segment" "$out"
+
+	# An error on one segment is this session's error, with its SQLSTATE and
+	# the segment it came from -- and the other segment is waited for first,
+	# so the connections are left usable.
+	out=$(printf '%s\n' \
+		"SELECT gp.exec_on_segments('SELECT 1 / content_id FROM gp.node()');" \
+		"SELECT count(*) FROM gp.exec_on_segments('SELECT 1');" | qf 0)
+	case "$out" in
+		*"division by zero"*"segment 0"*"2"*)
+			ok "an error on one segment is raised here, naming it" ;;
+		*) notok "an error on a segment" "$out" ;;
+	esac
+
+	out=$(printf '%s\n' \
+		"\\set ON_ERROR_STOP off" \
+		"SELECT gp.exec_on_segments('SELECT 1/0');" \
+		"SELECT sqlstate FROM (SELECT 1) t, LATERAL (SELECT '22012'::text AS sqlstate) s;" | qf 0)
+	case "$out" in *"division by zero"*) ok "and it is the segment's own message" ;;
+		*) notok "the segment's message" "$out" ;; esac
+
+	# The gang is the session's: a second statement uses the same connections,
+	# which is why the identity above holds a session id.
+	out=$(printf '%s\n' \
+		"SELECT count(*) FROM gp.exec_on_segments('SELECT pg_backend_pid()');" \
+		"SELECT count(DISTINCT result) FROM gp.exec_on_segments('SELECT pg_backend_pid()');" | qf 0)
+	[ "$out" = "2
+2" ] && ok "the connections are the session's, and there are two of them" \
+		|| notok "the gang's connections" "$out"
+
+	# Every node reads the same file, so a segment knows where the other
+	# segments are -- and would dispatch to them, and to itself, if nothing
+	# said otherwise.  Only the coordinator dispatches.
+	out=$(q 1 "SELECT count(*) FROM gp.exec_on_segments('SELECT 1');")
+	case "$out" in
+		*"only the coordinator dispatches"*) ok "a segment does not dispatch, though it could reach the others" ;;
+		*) notok "dispatch from a segment" "$out" ;;
+	esac
+
+	###########################################################################
+	echo "4. a relation's rows, as the segments hold them"
+	###########################################################################
+	# gp.dist_random() is Cloudberry's gp_dist_random: the rows of a relation
+	# from every segment, with nothing planned around it.  The table is made on
+	# the segments by hand here, because dispatching DDL is the next step.
+	q 0 "CREATE TABLE t (a int, b text);" >/dev/null
+	q 0 "SELECT gp.exec_on_segments('CREATE TABLE t (a int, b text)');" >/dev/null
+	q 0 "SELECT gp.exec_on_segments('INSERT INTO t SELECT g, ''row'' || g FROM generate_series(1, 3) g');" >/dev/null
+
+	out=$(printf '%s\n' "SELECT count(*), sum(a), min(b), max(b) FROM gp.dist_random(NULL::t);" | qf 0)
+	[ "$out" = "6|12|row1|row3" ] \
+		&& ok "every segment's rows arrive, and only theirs ($out)" \
+		|| notok "gp.dist_random()" "$out"
+
+	out=$(q 0 "SELECT count(*) FROM t;")
+	[ "$out" = "0" ] && ok "while the coordinator's own copy is empty" \
+		|| notok "the coordinator's copy" "$out"
+
+	# The binary path is the one that runs for types with a send function; a
+	# type that has none makes the whole result text, which is why both are
+	# worth a row here.
+	q 0 "SELECT gp.exec_on_segments('CREATE TABLE tt (a numeric, b timestamptz, c point, d int[])');" >/dev/null
+	q 0 "SELECT gp.exec_on_segments('INSERT INTO tt VALUES (1.25, ''2026-09-22 10:00:00+00'', ''(1,2)'', ARRAY[1,2,3])');" >/dev/null
+	q 0 "CREATE TABLE tt (a numeric, b timestamptz, c point, d int[]);" >/dev/null
+	out=$(printf '%s\n' "SET timezone = 'UTC';" "SELECT a, b, c, d FROM gp.dist_random(NULL::tt) LIMIT 1;" | qf 0)
+	[ "$out" = "1.25|2026-09-22 10:00:00+00|(1,2)|{1,2,3}" ] \
+		&& ok "values come back as themselves, through the binary path ($out)" \
+		|| notok "gp.dist_random() of several types" "$out"
+
+	out=$(q 0 "SELECT count(*) FROM gp.dist_random(NULL::int);")
+	case "$out" in
+		*"not a relation's row type"*) ok "and it has to be given a relation" ;;
+		*) notok "gp.dist_random(NULL::int)" "$out" ;;
+	esac
+
+	###########################################################################
+	echo "5. the segments authenticate the coordinator, with SCRAM"
+	###########################################################################
+	# Decision 5 asks for SCRAM on the early milestones.  The dispatcher is an
+	# ordinary client, so this is ordinary authentication: the segment asks,
+	# and the coordinator answers from the password file gp.internal_passfile
+	# names -- a file, because a setting is readable by anyone who can SHOW it.
+	for n in 1 2; do
+		q "$n" "ALTER ROLE $(whoami) PASSWORD 'cluster-secret';" >/dev/null
+		sed -i 's/^local *all *all *trust$/local all all scram-sha-256/' \
+			"$(datadir "$n")/pg_hba.conf"
+		"$BINDIR/pg_ctl" -D "$(datadir "$n")" -w -t 30 reload >/dev/null 2>&1
+	done
+
+	printf '*:*:*:*:cluster-secret\n' > "$ROOT/passfile"
+	chmod 600 "$ROOT/passfile"
+
+	out=$(q 0 "SELECT count(*) FROM gp.exec_on_segments('SELECT 1');")
+	case "$out" in
+		*"authentication failed"*|*"no password supplied"*)
+			ok "without the password file the segments refuse the dispatcher" ;;
+		*) notok "a segment should have asked for a password" "$out" ;;
+	esac
+
+	if start_node 0 "gp.internal_passfile = '$ROOT/passfile'"; then
+		out=$(q 0 "SELECT count(*) FROM gp.exec_on_segments('SELECT 1');")
+		[ "$out" = "2" ] && ok "with it, the dispatcher authenticates and both segments answer" \
+			|| notok "dispatch with a password file" "$out"
+	else
+		notok "the coordinator starts with gp.internal_passfile" \
+			"$(tail -3 "$ROOT/node0.log")"
+	fi
+
+	# Put the segments back to trust, so that what follows is about the
+	# cluster configuration and not about passwords.
+	for n in 1 2; do
+		sed -i 's/^local all all scram-sha-256$/local   all   all   trust/' \
+			"$(datadir "$n")/pg_hba.conf"
+		"$BINDIR/pg_ctl" -D "$(datadir "$n")" -w -t 30 reload >/dev/null 2>&1
+	done
 fi
 
 ###############################################################################
-echo "3. a cluster described wrongly is a server that does not start"
+echo "6. a cluster described wrongly is a server that does not start"
 ###############################################################################
 # The message has to name the file and the line: this is read in the
 # postmaster while it starts, so it is all the operator is given.
@@ -230,7 +378,7 @@ refuses "a file that is not there is refused" \
 	"gp.cluster_config = '$ROOT/nowhere.conf'"
 
 ###############################################################################
-echo "4. with no cluster configured, this is a single node"
+echo "7. with no cluster configured, this is a single node"
 ###############################################################################
 if start_node 0 "gp.cluster_config = ''" ; then
 	notok "node 0 should not have started: gp.role is dispatch with no cluster"

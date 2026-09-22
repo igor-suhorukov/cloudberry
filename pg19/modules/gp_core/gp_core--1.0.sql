@@ -68,6 +68,50 @@ COMMENT ON FUNCTION gp.segment_configuration() IS
 	'the nodes of this cluster, as the cluster configuration file lists them';
 
 /*
+ * Run a statement on every segment, and report what each one said.
+ *
+ * The answer is the first column of the first row, as text: this is for asking
+ * a cluster about itself -- what each segment thinks it is, how many rows each
+ * one holds -- and not for reading a table, which is what a scan of a
+ * distributed table does.
+ *
+ * Superuser only: it runs arbitrary SQL on a machine the caller may have no
+ * other way to reach.
+ */
+CREATE FUNCTION gp.exec_on_segments(
+	sql text,
+	OUT content int,
+	OUT result text)
+RETURNS SETOF record
+AS 'MODULE_PATHNAME', 'gp_exec_on_segments'
+LANGUAGE C STRICT;
+
+REVOKE ALL ON FUNCTION gp.exec_on_segments(text) FROM PUBLIC;
+
+COMMENT ON FUNCTION gp.exec_on_segments(text) IS
+	'run a statement on every segment and report the first column of each answer';
+
+/*
+ * The rows of a relation as the segments hold them.
+ *
+ * Cloudberry's gp_dist_random('t') has its result type filled in by its own
+ * planner, which an extension cannot do; polymorphism gives the same thing --
+ * the argument is a value of the relation's row type, so NULL::t says which
+ * relation without reading one, and the result is a set of that type:
+ *
+ *     SELECT * FROM gp.dist_random(NULL::t);
+ *
+ * It is a scan of a distributed table with nothing planned around it.
+ */
+CREATE FUNCTION gp.dist_random(rel anyelement)
+RETURNS SETOF anyelement
+AS 'MODULE_PATHNAME', 'gp_dist_random'
+LANGUAGE C;
+
+COMMENT ON FUNCTION gp.dist_random(anyelement) IS
+	'the rows of a relation as the segments hold them (Apache Cloudberry: gp_dist_random)';
+
+/*
  * How a relation's rows are spread over the segments.
  *
  * gp_sql.set_distribution() records what DISTRIBUTED BY said as text on the

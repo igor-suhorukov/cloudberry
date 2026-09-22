@@ -51,8 +51,8 @@ endif
 
 pg_config = find_program(get_option('pg_config'), required: true)
 
-pg_query = ['--includedir-server', '--pkglibdir', '--sharedir', '--bindir',
-            '--version']
+pg_query = ['--includedir-server', '--includedir', '--libdir', '--pkglibdir',
+            '--sharedir', '--bindir', '--version']
 pg = {}
 foreach opt : pg_query
   res = run_command(pg_config, opt, check: true)
@@ -60,6 +60,8 @@ foreach opt : pg_query
 endforeach
 
 pg_includedir_server = pg['includedir-server']
+pg_includedir        = pg['includedir']
+pg_libdir            = pg['libdir']
 pg_pkglibdir         = pg['pkglibdir']
 pg_sharedir          = pg['sharedir']
 pg_extensiondir      = pg_sharedir / 'extension'
@@ -72,6 +74,14 @@ if pg_major.to_int() < 19
 endif
 
 pg_inc = include_directories(pg_includedir_server)
+
+# libpq, for the dispatcher.  A backend may not link libpq in code built into
+# the server, but an extension may and must: PostgreSQL 19 says so in
+# libpq-be-fe.h, and the helpers in libpq-be-fe-helpers.h exist for exactly
+# this.  The client headers are not the server's, so they are asked for
+# separately.
+pg_client_inc = include_directories(pg_includedir)
+libpq_dep = cc.find_library('pq', dirs: [pg_libdir], required: true)
 
 # PostgreSQL leaves extension symbols to be resolved at load time, and opens
 # libraries with RTLD_GLOBAL, which is how the modules listed after gp_core
@@ -90,7 +100,9 @@ mod_c_args += cc.get_supported_arguments(
   '-Wimplicit-fallthrough=3',
   '-Wdeclaration-after-statement',
 )
-mod_link_args = []
+# As PGXS does, so that a module which links libpq finds it at load time
+# without anyone setting LD_LIBRARY_PATH.
+mod_link_args = ['-Wl,-rpath,' + pg_libdir]
 if host_machine.system() == 'darwin'
   mod_link_args += ['-bundle', '-undefined', 'dynamic_lookup']
 endif
@@ -202,9 +214,13 @@ modules = [
     'name': 'gp_core', 'preload': true, 'extension': true, 'build': true,
     'sources': files('modules/gp_core/gp_core.c',
                      'modules/gp_core/gp_cluster.c',
+                     'modules/gp_core/gp_dispatch.c',
                      'modules/gp_core/gp_label.c',
                      'modules/gp_core/gp_median.c',
                      'modules/gp_core/gp_policy.c'),
+    # The dispatcher is a libpq client of the segments; see gp_dispatch.c.
+    'dependencies': [libpq_dep],
+    'include_directories': [pg_client_inc],
   },
   {
     'name': 'interconnect', 'preload': true, 'extension': false, 'build': true,

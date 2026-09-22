@@ -46,6 +46,7 @@
 #include "cb_module.h"
 #include "gp_cluster.h"
 #include "gp_core_api.h"
+#include "gp_dispatch.h"
 #include "gp_label.h"
 #include "gp_policy.h"
 
@@ -114,6 +115,12 @@ _PG_init(void)
 	 * start, which is why this runs here rather than at the first query.
 	 */
 	GpClusterInit();
+
+	/*
+	 * The dispatcher's settings, and the transaction callback that stops a
+	 * segment still working for a statement that has already failed here.
+	 */
+	GpDispatchInit();
 
 	/*
 	 * Deliberately no MarkGUCPrefixReserved("gp") here.  It drops every
