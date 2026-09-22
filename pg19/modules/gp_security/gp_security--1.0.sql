@@ -273,5 +273,21 @@ GRANT SELECT ON gp_security.role_profiles TO PUBLIC;
  * pg_default; a role may not be named pg_*, so this one is gp_default.
  * Everything in it is left unset, so nothing is enforced until an
  * administrator says what it should be.
+ *
+ * A profile is a role, and a role is the cluster's rather than a database's:
+ * the extension created in a second database finds the gp_default the first
+ * one made, and keeps it.  A role of that name that is not a profile is still
+ * refused, by create_profile.
  */
-SELECT gp_security.create_profile('gp_default');
+DO $$
+BEGIN
+	IF NOT EXISTS (SELECT 1
+					 FROM pg_catalog.pg_shseclabel l
+					 JOIN pg_catalog.pg_roles r ON r.oid = l.objoid
+					WHERE r.rolname = 'gp_default'
+					  AND l.classoid = 'pg_catalog.pg_authid'::pg_catalog.regclass
+					  AND l.provider = 'gp_profile') THEN
+		PERFORM gp_security.create_profile('gp_default');
+	END IF;
+END
+$$;

@@ -113,6 +113,16 @@ is "the default profile arrives with the extension" \
    "SELECT profile FROM gp_security.profiles WHERE profile = 'gp_default';" "gp_default"
 is "it is a role that cannot log in" \
    "SELECT rolcanlogin FROM pg_roles WHERE rolname = 'gp_default';" "f"
+
+# A role is the cluster's, so the extension created in a second database
+# finds the first one's gp_default.  The singlenode suite found that it then
+# failed, "role gp_default already exists", on its second pass.
+got=$("$PSQL" -X -q -t -A -d postgres -U postgres -c "CREATE DATABASE second_db" 2>&1 &&
+      "$PSQL" -X -q -t -A -d second_db -U postgres \
+          -c "CREATE EXTENSION gp_core" -c "CREATE EXTENSION gp_security" \
+          -c "SELECT profile FROM gp_security.profiles WHERE profile = 'gp_default'" 2>&1)
+[ "$got" = "gp_default" ] && ok "and a second database's extension keeps the one it finds" \
+	|| notok "and a second database's extension keeps the one it finds" "got [$got]"
 isl "one can be defined with the limits Cloudberry names" \
    "SELECT gp_security.create_profile('strict',
              failed_login_attempts => 3, password_lock_time => 1,
