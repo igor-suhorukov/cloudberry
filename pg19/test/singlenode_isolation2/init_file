@@ -1,0 +1,12 @@
+-- The port's patterns for Cloudberry's singlenode_isolation2 tests, beside
+-- Cloudberry's own init files.
+
+-- start_matchsubs
+
+# An OID in PostgreSQL 19's error for a view dropped while its definition was
+# being read (cloudberry/README, pg_views_concurrent_drop): it changes from
+# run to run.
+m/^ERROR:  could not open relation with OID \d+/
+s/OID \d+/OID NNNN/
+
+-- end_matchsubs

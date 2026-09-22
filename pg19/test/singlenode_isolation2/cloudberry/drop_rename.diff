@@ -1,0 +1,9 @@
+@@
+- relname 
+----------
+- t3_new  
+-(1 row)
++ERROR:  function gp_dist_random(unknown) does not exist
++LINE 1: select relname from gp_dist_random('pg_class') where relname...
++                            ^
++DETAIL:  There is no function of that name.

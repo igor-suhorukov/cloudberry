@@ -1,0 +1,25 @@
+Cloudberry's singlenode_isolation2 tests on the port: the differences from
+Cloudberry's expected output that have been reviewed, and are the port's for
+a reason of its own.
+
+Each file is a test's difference in the form ../../singlenode/canon.pl gives
+it -- the lines removed and added, hunk by hunk, with no file names or line
+numbers -- named for the expected output it differs from; a name with a pass
+in it (test.orca.diff) holds for that pass alone.  run.sh counts a test as
+passing when its difference is exactly the file's.  Both differences below
+are the same in both passes.
+
+drop_rename.diff
+    Its last statement reads pg_class on every segment through
+    gp_dist_random(), which arrives with M2's dispatch.  One statement; the
+    three concurrent DROPs before it, which the test is about, answer as in
+    Cloudberry.
+
+pg_views_concurrent_drop.diff
+    A view dropped in one session while another reads its definition from
+    pg_views: Greenplum made the definition come back NULL (MPP-25160,
+    try_relation_open in ruleutils.c's make_viewdef), and PostgreSQL raises
+    "could not open relation with OID ...", which the test's own comment
+    says.  The port runs PostgreSQL 19's ruleutils.c, which no extension can
+    change, so the second session gets PostgreSQL's error.  The OID is
+    masked by ../init_file.
