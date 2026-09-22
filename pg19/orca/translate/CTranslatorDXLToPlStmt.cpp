@@ -1859,7 +1859,6 @@ CTranslatorDXLToPlStmt::TranslateDXLTvf(
 	const CDXLNode *tvf_dxlnode, CDXLTranslateContext *output_context,
 	CDXLTranslationContextArray * /*ctxt_translation_prev_siblings*/)
 {
-	CDXLPhysicalTVF *dxlop = CDXLPhysicalTVF::Cast(tvf_dxlnode->GetOperator());
 	// translation context for column mappings
 	CDXLTranslateContextBaseTable base_table_context(m_mp);
 
@@ -1895,38 +1894,15 @@ CTranslatorDXLToPlStmt::TranslateDXLTvf(
 	// translate proj list
 	List *target_list = TranslateDXLProjList(
 		project_list_dxlnode, &base_table_context, nullptr, output_context);
-
-	if (dxlop->FuncMdId()->IsValid())
-	{
-		target_list = gpdb::ProcessRecordFuncTargetList(CMDIdGPDB::CastMdid(dxlop->FuncMdId())->Oid(), target_list);
-	}
 	plan->targetlist = target_list;
 
-	ListCell *lc_target_entry = nullptr;
-
-	rtfunc->funccolnames = NIL;
-	rtfunc->funccoltypes = NIL;
-	rtfunc->funccoltypmods = NIL;
-	rtfunc->funccolcollations = NIL;
-	rtfunc->funccolcount = gpdb::ListLength(target_list);
-	ForEach(lc_target_entry, target_list)
-	{
-		TargetEntry *target_entry = (TargetEntry *) lfirst(lc_target_entry);
-		OID oid_type = gpdb::ExprType((Node *) target_entry->expr);
-		GPOS_ASSERT(InvalidOid != oid_type);
-
-		INT typ_mod = gpdb::ExprTypeMod((Node *) target_entry->expr);
-		Oid collation_type_oid = gpdb::TypeCollation(oid_type);
-
-		rtfunc->funccolnames = gpdb::LAppend(
-			rtfunc->funccolnames, gpdb::MakeStringValue(target_entry->resname));
-		rtfunc->funccoltypes = gpdb::LAppendOid(rtfunc->funccoltypes, oid_type);
-		rtfunc->funccoltypmods =
-			gpdb::LAppendInt(rtfunc->funccoltypmods, typ_mod);
-		// GPDB_91_MERGE_FIXME: collation
-		rtfunc->funccolcollations =
-			gpdb::LAppendOid(rtfunc->funccolcollations, collation_type_oid);
-	}
+	// The function's columns are what TranslateDXLTvfToRangeTblEntry said
+	// they are: all of them, in the function's order, and the column
+	// definition list of one that returns a record.  Cloudberry rebuilt them
+	// here from the target list, in ORCA's order, and renumbered the target
+	// list by the names of a function's OUT parameters (its
+	// ProcessRecordFuncTargetList, from commit e4310714c5d), which mended the
+	// output and left the scan reading the wrong column.
 	func_scan->functions = ListMake1(rtfunc);
 
 	SetParamIds(plan);
@@ -1960,26 +1936,7 @@ CTranslatorDXLToPlStmt::TranslateDXLTvfToRangeTblEntry(
 
 	// project list
 	CDXLNode *project_list_dxlnode = (*tvf_dxlnode)[EdxltsIndexProjList];
-
-	// get column names
 	const ULONG num_of_cols = project_list_dxlnode->Arity();
-	for (ULONG ul = 0; ul < num_of_cols; ul++)
-	{
-		CDXLNode *proj_elem_dxlnode = (*project_list_dxlnode)[ul];
-		CDXLScalarProjElem *dxl_proj_elem =
-			CDXLScalarProjElem::Cast(proj_elem_dxlnode->GetOperator());
-
-		CHAR *col_name_char_array =
-			CTranslatorUtils::CreateMultiByteCharStringFromWCString(
-				dxl_proj_elem->GetMdNameAlias()->GetMDName()->GetBuffer());
-
-		String *val_colname = gpdb::MakeStringValue(col_name_char_array);
-		alias->colnames = gpdb::LAppend(alias->colnames, val_colname);
-
-		// save mapping col id -> index in translate context
-		(void) base_table_context->InsertMapping(dxl_proj_elem->Id(),
-												 ul + 1 /*attno*/);
-	}
 
 	RangeTblFunction *rtfunc = MakeNode(RangeTblFunction);
 	Bitmapset *funcparams = nullptr;
@@ -2057,10 +2014,65 @@ CTranslatorDXLToPlStmt::TranslateDXLTvfToRangeTblEntry(
 		rtfunc->funcexpr = (Node *) func_expr;
 	}
 
-	rtfunc->funccolcount = (int) num_of_cols;
+	// Which column of the function's each of ORCA's is.  Cloudberry took the
+	// project list's order for the function's, and it is not always: ORCA
+	// lists a scan's columns in the order of their ids (CTranslatorExprToDXL::
+	// PdxlnTVF), and a copy of the scan -- a CTE ORCA puts in place of its
+	// reader -- takes the reader's ids for the columns it reads and new ones
+	// for the rest.  The scan then read one column for another, and PostGIS's
+	// raster and topology tests stopped: "function return row and
+	// query-specified return row do not match".  So each is matched by name,
+	// among the columns of the query's own call of the function, named as the
+	// query names them -- a record's are its column definition list -- and
+	// one that cannot be matched for certain is refused (gpdb::
+	// FunctionScanColumns).
+	char **names = (char **) gpdb::GPDBAlloc(sizeof(char *) * (num_of_cols + 1));
+	int *attnos = (int *) gpdb::GPDBAlloc(sizeof(int) * (num_of_cols + 1));
+	for (ULONG ul = 0; ul < num_of_cols; ul++)
+	{
+		CDXLScalarProjElem *dxl_proj_elem = CDXLScalarProjElem::Cast(
+			(*project_list_dxlnode)[ul]->GetOperator());
+
+		names[ul] = CTranslatorUtils::CreateMultiByteCharStringFromWCString(
+			dxl_proj_elem->GetMdNameAlias()->GetMDName()->GetBuffer());
+	}
+
+	List *colnames = NIL;
+	RangeTblFunction *coldef = nullptr;
+	if (!gpdb::FunctionScanColumns(rtfunc->funcexpr,
+								   m_dxl_to_plstmt_context->m_orig_query,
+								   (int) num_of_cols, names, attnos, &colnames,
+								   &coldef))
+	{
+		GPOS_RAISE(gpdxl::ExmaDXL, gpdxl::ExmiQuery2DXLUnsupportedFeature,
+				   GPOS_WSZ_LIT("a function in FROM whose columns cannot be "
+								"told apart by name"));
+	}
+
+	for (ULONG ul = 0; ul < num_of_cols; ul++)
+	{
+		CDXLScalarProjElem *dxl_proj_elem = CDXLScalarProjElem::Cast(
+			(*project_list_dxlnode)[ul]->GetOperator());
+
+		// save mapping col id -> the function's column, in translate context
+		(void) base_table_context->InsertMapping(dxl_proj_elem->Id(),
+												 attnos[ul]);
+	}
+	alias->colnames = colnames;
+
+	// As the planner has them: a column definition list for a record, and no
+	// list otherwise; the count is of every column the function returns.
+	rtfunc->funccolcount = gpdb::ListLength(colnames);
+	if (nullptr != coldef)
+	{
+		rtfunc->funccolnames = (List *) gpdb::CopyObject(coldef->funccolnames);
+		rtfunc->funccoltypes = (List *) gpdb::CopyObject(coldef->funccoltypes);
+		rtfunc->funccoltypmods =
+			(List *) gpdb::CopyObject(coldef->funccoltypmods);
+		rtfunc->funccolcollations =
+			(List *) gpdb::CopyObject(coldef->funccolcollations);
+	}
 	rtfunc->funcparams = funcparams;
-	// GPDB_91_MERGE_FIXME: collation
-	// set rtfunc->funccoltypemods & rtfunc->funccolcollations?
 	rte->functions = ListMake1(rtfunc);
 
 	rte->inFromCl = true;
@@ -3243,6 +3255,26 @@ CTranslatorDXLToPlStmt::TranslateDXLWindowAgg(
 						(*win_frame_trailing_dxlnode)[0], &colid_var_mapping);
 			}
 
+			// PostgreSQL 19's WindowAgg evaluates a frame offset once, before
+			// it has a row to evaluate it over (nodeWindowAgg.c,
+			// calculate_frame_offsets), which is why its parser refuses an
+			// offset that names a column.  Greenplum allows one, and
+			// Cloudberry's WindowAgg evaluates the offset per row, so ORCA
+			// may hand one down: a scalar subquery in the offset comes back
+			// as a column of a join beneath the window, and a generic plan's
+			// parameter as a column its cast is projected into.  Given to
+			// PostgreSQL 19's executor, that Var is read with no slot, and
+			// the backend crashes; so such a plan is refused, and the planner
+			// evaluates the offset as an initplan or a parameter.
+			if ((nullptr != window->startOffset &&
+				 gpdb::ContainsVars(window->startOffset)) ||
+				(nullptr != window->endOffset &&
+				 gpdb::ContainsVars(window->endOffset)))
+			{
+				GPOS_RAISE(gpdxl::ExmaDXL, gpdxl::ExmiQuery2DXLUnsupportedFeature,
+						   GPOS_WSZ_LIT("a window frame offset that reads a column"));
+			}
+
 			window->startInRangeFunc = window_frame->PdxlnStartInRangeFunc();
 			window->endInRangeFunc = window_frame->PdxlnEndInRangeFunc();
 			window->inRangeColl = window_frame->PdxlnInRangeColl();
@@ -4033,7 +4065,9 @@ CTranslatorDXLToPlStmt::TranslateDXLResult(
 
 	plan->qual = quals_list;
 	result->resconstantqual = (Node *) one_time_quals_list;
-	SetParamIds(plan);
+
+	// Not SetParamIds here, as Cloudberry has it: the parameters a node's
+	// subtree reads are only all there once its child is attached, below.
 
 	// Creating project set nodes plan tree
 	Plan *project_set_parent_plan = CreateProjectSetNodeTree(
@@ -4055,6 +4089,17 @@ CTranslatorDXLToPlStmt::TranslateDXLResult(
 		// gating Result has a child.  Cloudberry's Result has neither field.
 		result->result_type =
 			(nullptr == child_plan) ? RESULT_TYPE_SCAN : RESULT_TYPE_GATING;
+
+		// The parameters the Result and its child read, with the child
+		// there to be read.  Cloudberry took them before attaching it, and
+		// so gave a Result only its own: a parameter that changed below it
+		// then never reached it (execUtils.c, UpdateChangedParamSet), and a
+		// node above that keeps what it computed -- a hash aggregate, a sort,
+		// a Material -- kept it.  PostgreSQL's partition_join test found it:
+		// under a nested loop, a hash aggregate over a Result over an index
+		// scan of the loop's parameter answered every outer row with the
+		// first row's hash table.
+		SetParamIds(plan);
 
 		child_contexts->Release();
 		return PlaceResultFilter(result);
@@ -4079,6 +4124,14 @@ CTranslatorDXLToPlStmt::TranslateDXLResult(
 
 	// Attaching the child plan
 	project_set_child_plan->lefttree = child_plan;
+
+	// And then the parameters of each node made here, for the same reason
+	// as above; TranslateDXLProjectSet took a ProjectSet's before it had a
+	// target list or a child.
+	for (Plan *node = final_plan; node != child_plan; node = node->lefttree)
+	{
+		SetParamIds(node);
+	}
 
 	// cleanup
 	child_contexts->Release();

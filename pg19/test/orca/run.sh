@@ -2095,6 +2095,22 @@ q "CREATE TABLE t0_gen (a int, b int GENERATED ALWAYS AS (a * 2) VIRTUAL);
 declined "a virtual generated column, which the planner expands and ORCA would read as NULL" \
          "SELECT * FROM t0_gen ORDER BY a" "virtual generated columns"
 
+# A NOT NULL constraint can be NOT VALID now, and attnotnull is set for it all
+# the same.  ORCA took the column for one with no NULL in it and answered IS
+# NULL with false, and PostgreSQL's replica_identity test deleted nothing.
+q "CREATE TABLE t0nv (id int); INSERT INTO t0nv VALUES (1), (NULL);
+   ALTER TABLE t0nv ADD CONSTRAINT t0nv_nn NOT NULL id NOT VALID;" > /dev/null
+
+same "a NOT VALID NOT NULL, which leaves the rows before it as they were" \
+     "SELECT count(*) FROM t0nv WHERE id IS NULL"
+
+is "and a DELETE of them deletes them, so that the constraint validates" \
+   "DELETE FROM t0nv WHERE id IS NULL; ALTER TABLE t0nv VALIDATE CONSTRAINT t0nv_nn;
+    SELECT count(*) FROM t0nv" "1"
+
+has "validated, it is one ORCA answers IS NULL by without reading the table" \
+    "EXPLAIN (COSTS OFF) SELECT * FROM t0nv WHERE id IS NULL" "One-Time Filter: false"
+
 # --- a filter on a Result -----------------------------------------------------
 #
 # PostgreSQL 19's Result evaluates no qual, and Cloudberry's does: ORCA's
@@ -2145,6 +2161,19 @@ same "NOT IN as a SubPlan, NULLs included" \
 same "a correlated scalar subquery" \
      "SELECT a, (SELECT b FROM t0 t2 WHERE t2.a = t0.a + 1) FROM t0 WHERE a < 4 ORDER BY a" \
      "SET gp.optimizer_enforce_subplans = on"
+
+# A subplan in a scan's filter that passes on a column of the query two
+# levels up was given, for it, a whole-row Var of the table scanned, and the
+# executor stopped: "type integer is not composite".  PostgreSQL's subselect
+# test found it.  The column is the enclosing subplan's parameter.
+q "CREATE TABLE t0ta (id int, val int); INSERT INTO t0ta VALUES (1, 1), (2, 2);
+   CREATE TABLE t0tb (id int, aval int); INSERT INTO t0tb VALUES (1, 1), (2, 1), (3, 2), (4, 2);
+   CREATE TABLE t0tc (id int, aid int); INSERT INTO t0tc VALUES (1, 1), (2, 2);" > /dev/null
+
+same "a subplan in a scan's filter reads a column of the query two levels up" \
+     "SELECT (SELECT min(t0tb.id) FROM t0tb
+               WHERE t0tb.aval = (SELECT t0ta.val FROM t0ta WHERE t0ta.id = t0tc.aid))
+        FROM t0tc ORDER BY 1"
 
 # --- aggregation in stages -----------------------------------------------------
 
@@ -2297,6 +2326,23 @@ is "and the planner that plans it advances the sequence for every row" \
 same "a volatile column the query reads is ORCA's to plan" \
      "SELECT count(*), count(DISTINCT n) FROM (SELECT nextval('t0_seq') n, a FROM t0) x" \
      "CREATE TEMP SEQUENCE t0_seq"
+
+# A row's IS NULL is true when every one of its fields is NULL, and ORCA's
+# NullTest tests the whole value.  The planner's folding, before ORCA, splits
+# ROW(a, b) IS NULL into a test of each field; what is left is refused.
+# PostgreSQL's rowtypes test found ROW() IS NULL answered false.
+declined "IS NULL of a row that folding made a constant" \
+         "SELECT ROW() IS NULL, ROW(NULL) IS NULL, ROW(NULL, 1) IS NULL" "IS NULL of a composite value"
+
+q "CREATE TYPE t0_pair AS (x int, y int);
+   CREATE TABLE t0comp (id int, p t0_pair);
+   INSERT INTO t0comp VALUES (1, NULL), (2, ROW(NULL, NULL)), (3, ROW(1, NULL)), (4, ROW(1, 2));" > /dev/null
+
+declined "and of a composite column, which a row of NULLs is" \
+         "SELECT id FROM t0comp WHERE p IS NULL ORDER BY id" "IS NULL of a composite value"
+
+same "ROW(a, b) IS NULL, split into its fields before ORCA sees it, is ORCA's" \
+     "SELECT id, ROW(id, NULL::int) IS NULL, ROW(id, id * 2) IS NOT NULL FROM t0comp ORDER BY id"
 
 # --- ORCA's memory ----------------------------------------------------------------
 
@@ -2568,11 +2614,34 @@ shape "window functions over a GROUP BY, split in two before ORCA sees them" "Wi
 same "and a window over an aggregate, with a HAVING" \
      "SELECT j, sum(count(*)) OVER (ORDER BY j) FROM t1a GROUP BY j HAVING count(*) > 100 ORDER BY 1"
 
-# PostgreSQL 19 added IGNORE NULLS, which ORCA's window reference has no
-# field for: planned, it would come back as RESPECT NULLS.
+# PostgreSQL 19 added IGNORE NULLS and RESPECT NULLS, which ORCA's window
+# reference has no field for: planned, IGNORE NULLS would come back as
+# neither.
 declined "IGNORE NULLS, which ORCA's window reference cannot carry" \
          "SELECT i, lag(j) IGNORE NULLS OVER (ORDER BY i) FROM t1a WHERE i < 10 ORDER BY 1" \
-         "window function with IGNORE NULLS"
+         "window function with RESPECT NULLS or IGNORE NULLS"
+# And RESPECT NULLS, which row_number() refuses when it runs; ORCA's plan,
+# without the clause, answered instead.  PostgreSQL's window test found it.
+declined "RESPECT NULLS on a function that takes no null treatment, which the planner's plan refuses" \
+         "SELECT row_number() RESPECT NULLS OVER () FROM t1a WHERE i < 3" \
+         "window function with RESPECT NULLS or IGNORE NULLS"
+
+# A scalar subquery in a frame offset comes back from ORCA as a column of a
+# join beneath the window -- Greenplum's executor evaluates an offset per row
+# -- and PostgreSQL 19's evaluates it once, with no row, so the Var crashed the
+# backend.  Found by PostgreSQL's own window test, run under ORCA.
+declined "a frame offset that is a subquery, which ORCA hands down as a column, is the planner's" \
+         "SELECT i, sum(i) OVER (ORDER BY i ROWS (SELECT min(i) FROM t1a) + 1 PRECEDING) FROM t1a WHERE i < 10 ORDER BY 1" \
+         "a window frame offset that reads a column"
+# So does a parameter: ORCA projects its cast beneath the window.  Before the
+# refusal, a prepared statement with a parameter for its frame offset crashed
+# the backend as soon as its plan went generic.
+declined "and so does a generic plan's parameter, and the planner answers" \
+         "EXECUTE w1(2)" "a window frame offset that reads a column" \
+         "PREPARE w1(int) AS SELECT i, sum(i) OVER (ORDER BY i ROWS \$1 PRECEDING) FROM t1a WHERE i < 10 ORDER BY 1; SET plan_cache_mode = force_generic_plan"
+same "a custom plan's is a constant by then, and ORCA's" \
+     "EXECUTE w2(2)" \
+     "PREPARE w2(int) AS SELECT i, sum(i) OVER (ORDER BY i ROWS \$1 PRECEDING) FROM t1a WHERE i < 10 ORDER BY 1; SET plan_cache_mode = force_custom_plan"
 
 # --- CTEs ------------------------------------------------------------------------------
 #
@@ -2612,6 +2681,79 @@ declined "a CTE with an outer reference, which ORCA declines itself" \
          "SELECT i, (WITH c AS (SELECT k FROM t1b WHERE t1b.i = t1a.i) SELECT count(*) FROM c c1, c c2) FROM t1a WHERE i < 8 ORDER BY 1" \
          "CTE with outer references" \
          "SET gp.optimizer_enforce_subplans = on"
+
+# --- a filter past a grouping ------------------------------------------------------
+#
+# ORCA moves a filter below a GROUP BY, a DISTINCT, a window's partition or a
+# set operation without asking how the grouping compares the columns the
+# filter reads.  record_image_ops' *= tells ROW(1.0) from ROW(1.00), which
+# GROUP BY puts in one group, so moved below it the filter counts one row of
+# a group of two.  PostgreSQL 19's planner stopped making the same move
+# (98d5d7ee641), and the tests that came with it found ORCA making it; such a
+# query is refused, with the planner's own test for the conflict.  The group
+# of ROW(1.0) and ROW(1.00) shows ROW(1.0), its first row, under both.
+
+q "CREATE TYPE g_rec AS (x numeric);
+   CREATE TABLE g1 (id int, a g_rec);
+   INSERT INTO g1 VALUES (1, ROW(1.0)), (2, ROW(1.00)), (3, ROW(2));
+   CREATE TABLE g2 (id int, a g_rec);
+   INSERT INTO g2 VALUES (1, ROW(1.00)), (2, ROW(2));
+   CREATE VIEW g1v AS SELECT a, count(*) n FROM g1 GROUP BY a;" > /dev/null
+
+grouping="a filter that compares a grouped column by another equality"
+
+declined "a HAVING that compares the grouped column by *=, which ORCA would move below the GROUP BY" \
+         "SELECT a, count(*) FROM g1 GROUP BY a HAVING a *= ROW(1.0)::g_rec" "$grouping"
+declined "and *= ANY" \
+         "SELECT a, count(*) FROM g1 GROUP BY a HAVING a *= ANY (ARRAY[ROW(1.0)::g_rec])" "$grouping"
+same "the grouping's own = is ORCA's to move" \
+     "SELECT a, count(*) FROM g1 GROUP BY a HAVING a = ROW(1.0)::g_rec"
+same "and so are a cross-type = and < of the grouping's opfamily" \
+     "SELECT j, count(*) FROM t1a GROUP BY j HAVING j = 3::int8 OR j < 2::int8 ORDER BY 1"
+same "a conjunct with an aggregate in it stays above the grouping, and is ORCA's" \
+     "SELECT a, count(*) FROM g1 GROUP BY a HAVING a *= ROW(1.0)::g_rec OR count(*) > 5"
+# The check reads HAVING before the planner would have made its sublinks
+# SubPlans; the planner's own test for an aggregate asserts it never meets
+# one, and PostgreSQL's aggregates and groupingsets tests took the server
+# down through it.
+got=$(q "SELECT a, count(*) FROM g1 GROUP BY a HAVING EXISTS (SELECT 1 FROM g2 WHERE g2.id = count(*)) ORDER BY 1")
+pg=$(q2 "SET gp.optimizer = off" "SELECT a, count(*) FROM g1 GROUP BY a HAVING EXISTS (SELECT 1 FROM g2 WHERE g2.id = count(*)) ORDER BY 1")
+[ "$got" = "$pg" ] && ok "a HAVING whose sublink uses the query's aggregate answers as the planner does" \
+	|| notok "a HAVING whose sublink uses the query's aggregate answers as the planner does" "orca [$got], planner [$pg]"
+declined "and one whose sublink compares the grouped column by *= is refused" \
+         "SELECT a, count(*) FROM g1 GROUP BY a HAVING EXISTS (SELECT 1 FROM g2 WHERE g1.a *= ROW(1.0)::g_rec)" "$grouping"
+declined "a filter over a DISTINCT" \
+         "SELECT * FROM (SELECT DISTINCT a FROM g1) s WHERE a *= ROW(1.00)::g_rec" "$grouping"
+declined "over a UNION" \
+         "SELECT * FROM (SELECT a FROM g1 UNION SELECT a FROM g2) s WHERE a *= ROW(1.00)::g_rec" "$grouping"
+declined "over an INTERSECT ALL" \
+         "SELECT * FROM (SELECT a FROM g1 INTERSECT ALL SELECT a FROM g2) s WHERE a *= ROW(1.00)::g_rec" "$grouping"
+declined "over an EXCEPT" \
+         "SELECT * FROM (SELECT a FROM g1 EXCEPT SELECT a FROM g2 WHERE id = 2) s WHERE a *= ROW(1.00)::g_rec" "$grouping"
+same "a UNION ALL groups nothing, and is ORCA's" \
+     "SELECT * FROM (SELECT a FROM g1 UNION ALL SELECT a FROM g2) s WHERE a *= ROW(1.00)::g_rec"
+declined "but a GROUP BY in one of its branches does" \
+         "SELECT * FROM (SELECT a, count(*) n FROM g1 GROUP BY a UNION ALL SELECT a, 0 FROM g2) s WHERE a *= ROW(1.0)::g_rec" "$grouping"
+declined "a filter over a window's partition" \
+         "SELECT * FROM (SELECT a, count(*) OVER (PARTITION BY a) n FROM g1) s WHERE a *= ROW(1.00)::g_rec" "$grouping"
+same "a window with no partition groups nothing, and is ORCA's" \
+     "SELECT * FROM (SELECT a, count(*) OVER () n FROM g1) s WHERE a *= ROW(1.00)::g_rec"
+declined "a view's GROUP BY" \
+         "SELECT * FROM g1v WHERE a *= ROW(1.0)::g_rec" "$grouping"
+declined "through a subquery that passes the column up, and a join's merged column" \
+         "SELECT * FROM (SELECT * FROM (SELECT DISTINCT a FROM g1) s1) s2 JOIN g2 USING (a) WHERE a *= ROW(1.00)::g_rec" "$grouping"
+declined "an outer join's condition on the grouped side" \
+         "SELECT g2.id, s.a, s.n FROM g2 LEFT JOIN g1v s ON s.a *= ROW(1.0)::g_rec ORDER BY 1" "$grouping"
+declined "an EXISTS that reads only the grouped column, which ORCA pulls up" \
+         "SELECT * FROM g1v s WHERE EXISTS (SELECT 1 FROM g2 WHERE s.a *= ROW(1.0)::g_rec)" "$grouping"
+same "a CTE's grouping, which ORCA moves no filter past, is ORCA's" \
+     "WITH c AS (SELECT a, count(*) n FROM g1 GROUP BY a) SELECT * FROM c WHERE a *= ROW(1.0)::g_rec"
+same "and so is one under a LIMIT" \
+     "SELECT * FROM (SELECT a, count(*) n FROM g1 GROUP BY a LIMIT 10) s WHERE a *= ROW(1.0)::g_rec"
+same "a column no grouping reads is ORCA's" \
+     "SELECT * FROM (SELECT id, a FROM g1) s WHERE a *= ROW(1.0)::g_rec"
+same "and so is a filter the query puts below its GROUP BY itself" \
+     "SELECT a, count(*) FROM g1 WHERE a *= ROW(1.0)::g_rec GROUP BY a"
 
 echo
 echo "23. INSERT, UPDATE and DELETE, assertions, functions in FROM and foreign tables, planned by ORCA"
@@ -3046,6 +3188,32 @@ declined "a function reading a column of the table beside it" \
 declined "WITH ORDINALITY" \
          "SELECT * FROM generate_series(1, 2) WITH ORDINALITY" "WITH ORDINALITY"
 
+# ORCA lists a function scan's columns in the order of their ids, and a CTE it
+# puts in place of its one reader takes the reader's ids for the columns read
+# and new ones for the rest, so the scan read one column for another.
+# PostGIS's raster and topology tests found it -- "function return row and
+# query-specified return row do not match" -- and Cloudberry had mended the
+# output of it and not the scan (e4310714c5d).  Each column is now matched by
+# name to the query's own call of the function.
+q "CREATE FUNCTION t23_tf(x int) RETURNS TABLE (bandnum int, pixeltype text, path text, n bigint)
+     LANGUAGE plpgsql IMMUTABLE AS \$\$ BEGIN RETURN QUERY SELECT x, 'p'::text, 'path' || x, 7::bigint; END \$\$;
+   CREATE FUNCTION t23_rf(x int) RETURNS SETOF record
+     LANGUAGE plpgsql IMMUTABLE AS \$\$ BEGIN RETURN QUERY SELECT x, 'p'::text, 'path' || x, 7::bigint; END \$\$;" > /dev/null
+
+same "a function's column read through a CTE ORCA puts in its reader's place" \
+     "WITH foo AS (SELECT path FROM t23_tf(1) LIMIT 1) SELECT path FROM foo"
+same "one with a column definition list" \
+     "WITH foo AS (SELECT path FROM t23_rf(1) AS t (bandnum int, pixeltype text, path text, n bigint))
+      SELECT path FROM foo"
+same "and columns an alias renames" \
+     "WITH foo AS (SELECT p, b FROM t23_tf(2) AS t (b, pt, p)) SELECT p, b FROM foo"
+same "Cloudberry's own case, pg_config through a CTE" \
+     "WITH conf AS (SELECT setting FROM pg_catalog.pg_config WHERE name = 'BINDIR') SELECT setting IS NOT NULL FROM conf"
+declined "two calls that list the same names in two orders cannot be told apart" \
+         "WITH a AS (SELECT x FROM t23_rf(1) AS t (n int, x text, y text, z bigint)),
+               b AS (SELECT x FROM t23_rf(1) AS t (n int, y text, x text, z bigint))
+          SELECT a.x, b.x FROM a, b" "a function in FROM whose columns cannot be told apart by name"
+
 # --- foreign tables -------------------------------------------------------------------
 #
 # The foreign-data wrapper plans its own scan, and ORCA has to let it: the
@@ -3263,6 +3431,30 @@ same "a semi-join, an anti-join, and a join the table is outer to" \
      "SELECT (SELECT count(*) FROM t3p WHERE a IN (SELECT a FROM t3j WHERE x = 2)),
              (SELECT count(*) FROM t3p WHERE NOT EXISTS (SELECT 1 FROM t3j WHERE t3j.a = t3p.a)),
              (SELECT count(*) FROM t3j LEFT JOIN t3p ON t3p.a = t3j.a)"
+
+# A nested loop's parameter, read by an index scan of the partitions under a
+# Result under a hash aggregate.  The Result's parameters were taken before
+# its child was attached, so the change never reached the node above it, and
+# the hash aggregate answered every outer row with the first row's hash
+# table.  PostgreSQL's partition_join test found it, with these tables.
+q "CREATE TABLE t3a1 (a int, b int, c varchar) PARTITION BY RANGE (a);
+   CREATE TABLE t3a1_p1 PARTITION OF t3a1 FOR VALUES FROM (100) TO (200);
+   CREATE TABLE t3a1_p2 PARTITION OF t3a1 FOR VALUES FROM (200) TO (300);
+   CREATE TABLE t3a1_p3 PARTITION OF t3a1 FOR VALUES FROM (300) TO (400);
+   CREATE INDEX ON t3a1 (a);
+   INSERT INTO t3a1 SELECT i, i % 25, to_char(i, 'FM0000') FROM generate_series(100, 399) i;
+   CREATE TABLE t3a2 (a int, b int, c varchar) PARTITION BY RANGE (b);
+   CREATE TABLE t3a2_p1 PARTITION OF t3a2 FOR VALUES FROM (100) TO (150);
+   CREATE TABLE t3a2_p2 PARTITION OF t3a2 FOR VALUES FROM (200) TO (300);
+   CREATE TABLE t3a2_p3 PARTITION OF t3a2 FOR VALUES FROM (350) TO (500);
+   CREATE INDEX ON t3a2 (b);
+   INSERT INTO t3a2 SELECT i % 25, i, to_char(i, 'FM0000') FROM generate_series(100, 149) i;
+   INSERT INTO t3a2 SELECT i % 25, i, to_char(i, 'FM0000') FROM generate_series(200, 299) i;
+   INSERT INTO t3a2 SELECT i % 25, i, to_char(i, 'FM0000') FROM generate_series(350, 499) i;" > /dev/null
+q "ANALYZE t3a1; ANALYZE t3a2;" > /dev/null
+
+shape "a hash aggregate over a Result, rescanned for each row of a nested loop" "HashAggregate" \
+      "SELECT t1.* FROM t3a1 t1 WHERE EXISTS (SELECT 1 FROM t3a2 t2 WHERE t1.a = t2.b) AND t1.b = 0 ORDER BY t1.a"
 
 # --- what is refused ---------------------------------------------------------------
 

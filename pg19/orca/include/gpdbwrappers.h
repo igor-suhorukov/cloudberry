@@ -285,6 +285,9 @@ bool ExpressionReturnsSet(Node *clause);
 // does the expression call a volatile function?
 bool ContainsVolatileFunctions(Node *node);
 
+// does the expression read a column?
+bool ContainsVars(Node *node);
+
 // expression type
 Oid ExprType(Node *expr);
 
@@ -434,8 +437,16 @@ char *GetFuncName(Oid funcid);
 // output argument types of the given function
 List *GetFuncOutputArgTypes(Oid funcid);
 
-// process targetlist when function return type is record
-List *ProcessRecordFuncTargetList(Oid funcid, List *targetList);
+// Where each column ORCA lists for a function scan is in what the function
+// returns, by name: among the columns of the query's own call of it, as the
+// query names them, or failing a call, in the function's result.  Fills
+// attnos, the names of every column the function returns, and, for one that
+// returns a record, the call whose column definition list they are; false if
+// that cannot be told for certain.  It replaces Cloudberry's
+// ProcessRecordFuncTargetList; see TranslateDXLTvfToRangeTblEntry.
+bool FunctionScanColumns(Node *funcexpr, Query *query, int ncols, char **names,
+						 int *attnos, List **colnames,
+						 RangeTblFunction **coldef);
 
 // argument types of the given function
 List *GetFuncArgTypes(Oid funcid);

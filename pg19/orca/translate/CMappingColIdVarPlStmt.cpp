@@ -18,8 +18,9 @@
 // under the License.
 //
 //	Ported from github/cloudberry/src/backend/gpopt/translate/CMappingColIdVarPlStmt.cpp,
-//	unchanged but for the include paths.  Cloudberry's notice for
-//	the original follows, as the Apache License requires it to.
+//	unchanged but for the include paths and an outer reference in a
+//	scan, which VarFromDXLNodeScId says about where it is.  Cloudberry's
+//	notice for the original follows, as the Apache License requires it to.
 //
 //---------------------------------------------------------------------------
 //---------------------------------------------------------------------------
@@ -242,6 +243,18 @@ CMappingColIdVarPlStmt::VarFromDXLNodeScId(const CDXLScalarIdent *dxlop)
 			varno_old = varno;
 			attno_old = attno;
 		}
+	}
+
+	// Not a column of the scanned table, and no children to look in: an
+	// outer reference, which the caller makes a Param of.  Cloudberry went
+	// on to make a Var of attribute 0 of the table -- a whole-row Var, with
+	// the column's type -- which is what a subplan in a scan's filter was
+	// given for a column of a query two levels up.  PostgreSQL's subselect
+	// test found it, and its executor stopped with "type integer is not
+	// composite".
+	if (0 == attno)
+	{
+		return nullptr;
 	}
 
 	Var *var = gpdb::MakeVar(varno, attno,

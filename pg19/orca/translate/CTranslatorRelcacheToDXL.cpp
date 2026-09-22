@@ -763,9 +763,20 @@ CTranslatorRelcacheToDXL::RetrieveRelColumns(CMemoryPool *mp,
 
 
 
+		// Not NULL only under a validated constraint.  PostgreSQL 18 lets a
+		// NOT NULL constraint be NOT VALID and sets attnotnull for it all the
+		// same, while rows from before it may still be null; the compact
+		// attribute says which it is, and the planner reads that (plancat.c,
+		// get_relation_notnullatts).  From attnotnull, ORCA took WHERE c IS
+		// NULL for false: PostgreSQL's replica_identity test deleted the
+		// null row that makes such a constraint fail to validate, and under
+		// ORCA the DELETE deleted nothing.
+		BOOL is_nullable = ATTNULLABLE_VALID !=
+						   TupleDescCompactAttr(rel->rd_att, ul)->attnullability;
+
 		CMDColumn *md_col = GPOS_NEW(mp)
 			CMDColumn(md_colname, att->attnum, mdid_col, att->atttypmod,
-					  !att->attnotnull, att->attisdropped, col_len);
+					  is_nullable, att->attisdropped, col_len);
 
 		mdcol_array->Append(md_col);
 	}

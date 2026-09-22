@@ -953,6 +953,20 @@ CTranslatorScalarToDXL::TranslateNullTestToDXL(
 	const NullTest *null_test = (NullTest *) expr;
 
 	GPOS_ASSERT(nullptr != null_test->arg);
+
+	// A row's IS [NOT] NULL tests each of its fields (ExecEvalRowNull), and
+	// ORCA's NullTest cannot say so: it comes back a test of the whole value,
+	// which a row of nulls is not.  The planner's constant folding, run before
+	// ORCA, splits ROW(...) IS NULL into a test of each field; what reaches
+	// here is a test of a composite value itself -- a column, a function's
+	// result, or a row that folding made a constant.  PostgreSQL's rowtypes
+	// test found it: ROW() IS NULL came back false.
+	if (null_test->argisrow)
+	{
+		GPOS_RAISE(gpdxl::ExmaDXL, gpdxl::ExmiQuery2DXLUnsupportedFeature,
+				   GPOS_WSZ_LIT("IS NULL of a composite value"));
+	}
+
 	CDXLNode *child_node =
 		TranslateScalarToDXL(null_test->arg, var_colid_mapping);
 
@@ -1855,19 +1869,20 @@ CTranslatorScalarToDXL::TranslateWindowFuncToDXL(
 	 * Fortunately, the executor currently doesn't need those fields to
 	 * be set correctly.
 	 */
-	// PostgreSQL 19 added IGNORE NULLS to window functions (commit
-	// 25a30bbd423), as WindowFunc.ignore_nulls, and ORCA's window reference
-	// has nothing to carry it in.  Translated field by field, as the call
-	// below does, lag(x) IGNORE NULLS OVER (...) would come back from ORCA
-	// meaning lag(x) RESPECT NULLS -- no error, a wrong answer.  So a call
-	// that asks for it is refused and falls back.  RESPECT NULLS is what a
-	// window function does anyway, so NO_NULLTREATMENT and
-	// PARSER_RESPECT_NULLS translate as before.
-	if (window_func->ignore_nulls == PARSER_IGNORE_NULLS ||
-		window_func->ignore_nulls == IGNORE_NULLS)
+	// PostgreSQL 19 added RESPECT NULLS and IGNORE NULLS to window
+	// functions (commit 25a30bbd423), as WindowFunc.ignore_nulls, and ORCA's
+	// window reference has nothing to carry either in.  Translated field by
+	// field, as the call below does, lag(x) IGNORE NULLS OVER (...) would come
+	// back from ORCA meaning lag(x) -- no error, a wrong answer.  RESPECT NULLS
+	// is what lag() does anyway, but a window function that takes no null
+	// treatment at all -- row_number(), rank() -- refuses both when it runs
+	// (WinCheckAndInitializeNullTreatment), and without the clause ORCA's
+	// plan answered instead; PostgreSQL's window test found it.  So a call
+	// with either clause is refused and falls back.
+	if (window_func->ignore_nulls != NO_NULLTREATMENT)
 	{
 		GPOS_RAISE(gpdxl::ExmaDXL, gpdxl::ExmiQuery2DXLUnsupportedFeature,
-				   GPOS_WSZ_LIT("window function with IGNORE NULLS"));
+				   GPOS_WSZ_LIT("window function with RESPECT NULLS or IGNORE NULLS"));
 	}
 
 	// windistinct is Cloudberry's field and not PostgreSQL's: PostgreSQL 19

@@ -1000,59 +1000,170 @@ gpdb::GetFuncOutputArgTypes(Oid funcid)
 	return NIL;
 }
 
-List *
-gpdb::ProcessRecordFuncTargetList(Oid funcid, List *targetList)
+namespace
+{
+// The query's calls of one function in FROM, each a range table entry of its
+// own; see FunctionScanColumns.
+struct SFunctionCallSearch
+{
+	Oid funcid;
+	List *found;  // RangeTblEntry *
+};
+
+bool
+FindFunctionCallsWalker(Node *node, void *context)
+{
+	SFunctionCallSearch *search = (SFunctionCallSearch *) context;
+
+	if (node == nullptr)
+		return false;
+
+	if (IsA(node, Query))
+		return query_tree_walker((Query *) node, FindFunctionCallsWalker,
+								 context, QTW_EXAMINE_RTES_BEFORE);
+
+	if (IsA(node, RangeTblEntry))
+	{
+		RangeTblEntry *rte = (RangeTblEntry *) node;
+
+		if (rte->rtekind == RTE_FUNCTION && list_length(rte->functions) == 1 &&
+			!rte->funcordinality)
+		{
+			RangeTblFunction *rtfunc =
+				(RangeTblFunction *) linitial(rte->functions);
+
+			if (IsA(rtfunc->funcexpr, FuncExpr) &&
+				((FuncExpr *) rtfunc->funcexpr)->funcid == search->funcid)
+				search->found = lappend(search->found, rte);
+		}
+		return false;
+	}
+
+	return expression_tree_walker(node, FindFunctionCallsWalker, context);
+}
+
+// Where `name` is among `colnames`, from 1, or 0 unless it is there once.
+int
+ColumnNamePosition(List *colnames, const char *name)
+{
+	ListCell *lc;
+	int n = 0;
+	int found = 0;
+
+	foreach (lc, colnames)
+	{
+		n++;
+		if (strcmp(strVal(lfirst(lc)), name) == 0)
+		{
+			if (found != 0)
+				return 0;
+			found = n;
+		}
+	}
+	return found;
+}
+}  // namespace
+
+bool
+gpdb::FunctionScanColumns(Node *funcexpr, Query *query, int ncols,
+						  char **names, int *attnos, List **colnames,
+						  RangeTblFunction **coldef)
 {
 	GP_WRAP_START;
 	{
-		HeapTuple	tp;
-		int			numargs;
-		Oid		   *argtypes = NULL;
-		char	  **argnames = NULL;
-		char	   *argmodes = NULL;
-		int         i;
-		Datum       datum;
-		bool        isNull;
-		Oid         prorettype;
-		ListCell    *lc = NULL;
-		int         index;
+		Oid rettype;
+		TupleDesc tupdesc;
+		TypeFuncClass functypclass =
+			get_expr_result_type(funcexpr, &rettype, &tupdesc);
+		RangeTblEntry *call = nullptr;
 
-		tp = SearchSysCache1(PROCOID,
-		                     ObjectIdGetDatum(funcid));
-		if (!HeapTupleIsValid(tp))
-			elog(ERROR, "cache lookup failed for function %u", funcid);
-		datum = SysCacheGetAttr(PROCOID, tp, Anum_pg_proc_prorettype, &isNull);
-		prorettype = DatumGetObjectId(datum);
-		ReleaseSysCache(tp);
+		*colnames = NIL;
+		*coldef = nullptr;
 
-		if (prorettype != RECORDOID)
-			return targetList;
-
-		numargs = get_func_arg_info(tp, &argtypes, &argnames, &argmodes);
-
-		if (numargs > 0 && argtypes && argnames && argmodes)
+		/*
+		 * The call in the query's range table: its columns are named as the
+		 * query names them, aliases and all, which is how ORCA names them, and
+		 * a record's are its column definition list.  It is found by the
+		 * function and the names, and used only if every such call the query
+		 * makes puts the names in the same order.
+		 */
+		if (IsA(funcexpr, FuncExpr) && query != nullptr)
 		{
-			foreach (lc, targetList)
-			{
-				index = 0;
-				TargetEntry *target_entry = (TargetEntry *) lfirst(lc);
-				for (i = 0; i < numargs; i++)
-				{
-					if (PROARGMODE_INOUT == argmodes[i] || PROARGMODE_OUT == argmodes[i] || PROARGMODE_TABLE == argmodes[i])
-						index++;
+			SFunctionCallSearch search = {((FuncExpr *) funcexpr)->funcid, NIL};
+			int *these = (int *) palloc(sizeof(int) * Max(ncols, 1));
+			ListCell *lc;
 
-					if (!strcmp(target_entry->resname, argnames[i]) &&
-						(PROARGMODE_INOUT == argmodes[i] || PROARGMODE_OUT == argmodes[i] || PROARGMODE_TABLE == argmodes[i]))
-					{
-						target_entry->resno = index;
-						break;
-					}
+			(void) FindFunctionCallsWalker((Node *) query, &search);
+
+			foreach (lc, search.found)
+			{
+				RangeTblEntry *rte = (RangeTblEntry *) lfirst(lc);
+				bool all = true;
+
+				for (int i = 0; i < ncols && all; i++)
+				{
+					these[i] = ColumnNamePosition(rte->eref->colnames, names[i]);
+					all = (these[i] != 0);
 				}
+				if (!all)
+					continue;
+				if (call == nullptr)
+				{
+					memcpy(attnos, these, sizeof(int) * ncols);
+					call = rte;
+				}
+				else if (memcmp(attnos, these, sizeof(int) * ncols) != 0)
+					return false; /* two calls, two orders */
+			}
+
+			if (call != nullptr)
+			{
+				RangeTblFunction *rtfunc =
+					(RangeTblFunction *) linitial(call->functions);
+
+				*colnames = list_copy_deep(call->eref->colnames);
+				if (rtfunc->funccolnames != NIL)
+					*coldef = rtfunc;
+				return true;
 			}
 		}
+
+		/*
+		 * None: a call ORCA folded to a constant.  A composite result has
+		 * names of its own, and a scalar one has one column.
+		 */
+		if (functypclass == TYPEFUNC_COMPOSITE ||
+			functypclass == TYPEFUNC_COMPOSITE_DOMAIN)
+		{
+			for (int a = 0; a < tupdesc->natts; a++)
+			{
+				Form_pg_attribute att = TupleDescAttr(tupdesc, a);
+
+				*colnames = lappend(
+					*colnames,
+					makeString(pstrdup(att->attisdropped ? ""
+														 : NameStr(att->attname))));
+			}
+			for (int i = 0; i < ncols; i++)
+			{
+				attnos[i] = ColumnNamePosition(*colnames, names[i]);
+				if (attnos[i] == 0)
+					return false;
+			}
+			return true;
+		}
+
+		if (functypclass == TYPEFUNC_SCALAR && ncols == 1)
+		{
+			attnos[0] = 1;
+			*colnames = list_make1(makeString(pstrdup(names[0])));
+			return true;
+		}
+
+		return false;
 	}
 	GP_WRAP_END;
-	return targetList;
+	return false;
 }
 
 List *
@@ -3003,6 +3114,19 @@ gpdb::ContainsVolatileFunctions(Node *node)
 	GP_WRAP_START;
 	{
 		return contain_volatile_functions(node);
+	}
+	GP_WRAP_END;
+	return true;
+}
+
+// Not in Cloudberry's layer: whether an expression reads a column, which a
+// window frame offset may not in PostgreSQL 19; see TranslateDXLWindow.
+bool
+gpdb::ContainsVars(Node *node)
+{
+	GP_WRAP_START;
+	{
+		return contain_var_clause(node);
 	}
 	GP_WRAP_END;
 	return true;

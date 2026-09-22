@@ -39,6 +39,11 @@
  *	   generated one.  The first is undone here the way the planner undoes
  *	   it; the second is refused, because undoing it needs what ORCA lacks.
  *
+ *	 * ORCA moves a filter past a GROUP BY, a DISTINCT, a window partition or
+ *	   a set operation without asking whether it compares the grouped column
+ *	   as the grouping does.  PostgreSQL 19's planner asks; a query where the
+ *	   answer is no is refused, with the planner's own test.
+ *
  *	 * Cloudberry's fold_constants() is a mode of its own patched
  *	   eval_const_expressions().  PostgreSQL 19's is called instead, level by
  *	   level, with Cloudberry's one exception kept.
@@ -569,6 +574,312 @@ plan_has_dynamic_scan(PlannedStmt *stmt)
 }
 
 /*
+ * Would ORCA move a filter past a grouping that does not share its equality?
+ *
+ * ORCA's normalizer pushes a conjunct down through a GROUP BY or DISTINCT, a
+ * window's PARTITION BY and a set operation whenever what is below produces
+ * every column the conjunct reads (CNormalizer::FPushable and
+ * FPushableThruSeqPrjChild), and never asks how the grouping compares those
+ * columns.  That is only right if the conjunct cannot tell apart values the
+ * grouping takes for equal.  One that compares a grouped column by another
+ * opfamily's equality can: record_image_ops' *= tells ROW(1.0) from
+ * ROW(1.00), which record_ops, and so GROUP BY, puts in one group.  Pushed
+ * below the grouping, the conjunct drops members of a group, so count(*)
+ * counts fewer, or it passes a group the grouping would have shown by another
+ * of its members.  PostgreSQL 19 fixed its planner for the same mistake (commit
+ * 98d5d7ee641, "Fix qual pushdown past grouping with mismatched equivalence"),
+ * and the tests it added found ORCA making it.
+ *
+ * So such a query is refused.  The conflict is PostgreSQL's own test,
+ * expression_has_grouping_conflict(); the callback says which grouping, if
+ * any, a column comes from, following it the way ORCA's normalizer would move
+ * a filter on it: through a join's alias list, down a subquery's output column
+ * passed up unchanged, and into every branch of a set operation, to a GROUP
+ * BY, a DISTINCT, a window's partition or a set operation that groups.  Every
+ * qual in every query's join tree is asked, and each conjunct of HAVING that
+ * has no aggregate, which is the one ORCA can move below the query's own GROUP
+ * BY.  A qual in a sublink is asked about the columns it reads of the queries
+ * around it as well, because ORCA can pull such a qual up out of an EXISTS
+ * and push it down the other side.  A qual ORCA would not have moved -- a
+ * join's condition, a filter in a scalar subquery -- is refused all the same,
+ * which only refuses more.
+ *
+ * Two things end the search, because they stop ORCA: a LIMIT or OFFSET, which
+ * the normalizer moves nothing through, and a CTE, whose readers' filters ORCA
+ * adds to its producer only after normalizing, above the grouping
+ * (CExpressionPreprocessor::AddPredsToCTEProducers).  ORCA refuses a query
+ * with a collation other than the default (CheckCollation), so only the
+ * opfamily half of PostgreSQL's test can find anything here.
+ */
+typedef struct grouping_conflict_context
+{
+	List	   *queries;		/* the query the qual is in, then the ones
+								 * around it, innermost first */
+} grouping_conflict_context;
+
+static Oid	column_grouping_eqop(Query *query, Index varno, AttrNumber attno,
+								 int depth);
+
+/*
+ * The equality the query's own GROUP BY compares a GROUP Var's column by.  The
+ * group entry's columns are the GROUP BY's clauses, in order, as the planner
+ * recovers them (planner.c, group_var_eqop).
+ */
+static Oid
+group_column_eqop(Query *query, AttrNumber attno)
+{
+	ListCell   *lc;
+	int			n = 0;
+
+	foreach(lc, query->groupClause)
+	{
+		SortGroupClause *sgc = lfirst_node(SortGroupClause, lc);
+
+		if (get_sortgroupclause_tle(sgc, query->targetList) == NULL)
+			continue;
+		if (++n == attno)
+			return sgc->eqop;
+	}
+	return InvalidOid;
+}
+
+static Oid	output_grouping_eqop(Query *query, AttrNumber attno, int depth);
+
+/*
+ * The equality a set operation groups its column attno by, at its top or in
+ * any branch.  Every set operation but UNION ALL has one clause per column
+ * (parse_clause.c, makeSortGroupClauseForSetOp).
+ */
+static Oid
+setop_grouping_eqop(Query *query, Node *setop, AttrNumber attno, int depth)
+{
+	SetOperationStmt *op;
+	Oid			eqop;
+
+	if (IsA(setop, RangeTblRef))
+	{
+		RangeTblEntry *rte = rt_fetch(((RangeTblRef *) setop)->rtindex,
+									  query->rtable);
+
+		if (rte->rtekind != RTE_SUBQUERY)
+			return InvalidOid;
+		return output_grouping_eqop(rte->subquery, attno, depth + 1);
+	}
+
+	op = castNode(SetOperationStmt, setop);
+	if (op->groupClauses != NIL && attno <= list_length(op->groupClauses))
+		return list_nth_node(SortGroupClause, op->groupClauses, attno - 1)->eqop;
+
+	eqop = setop_grouping_eqop(query, op->larg, attno, depth);
+	if (OidIsValid(eqop))
+		return eqop;
+	return setop_grouping_eqop(query, op->rarg, attno, depth);
+}
+
+/*
+ * The equality of the grouping the query's output column attno comes from, if
+ * a filter on the column could be moved down to it; InvalidOid if not.
+ */
+static Oid
+output_grouping_eqop(Query *query, AttrNumber attno, int depth)
+{
+	TargetEntry *tle;
+	Node	   *expr;
+	ListCell   *lc;
+
+	if (depth > 32 || attno < 1 || attno > list_length(query->targetList))
+		return InvalidOid;
+
+	if (query->limitCount != NULL || query->limitOffset != NULL)
+		return InvalidOid;
+
+	if (query->setOperations != NULL)
+		return setop_grouping_eqop(query, query->setOperations, attno, depth);
+
+	tle = list_nth_node(TargetEntry, query->targetList, attno - 1);
+
+	if (tle->ressortgroupref != 0)
+	{
+		foreach(lc, query->groupClause)
+		{
+			SortGroupClause *sgc = lfirst_node(SortGroupClause, lc);
+
+			if (sgc->tleSortGroupRef == tle->ressortgroupref)
+				return sgc->eqop;
+		}
+		foreach(lc, query->distinctClause)
+		{
+			SortGroupClause *sgc = lfirst_node(SortGroupClause, lc);
+
+			if (sgc->tleSortGroupRef == tle->ressortgroupref)
+				return sgc->eqop;
+		}
+		/* any window's partition: ORCA pushes through each window alone */
+		foreach(lc, query->windowClause)
+		{
+			WindowClause *wc = lfirst_node(WindowClause, lc);
+			ListCell   *lc2;
+
+			foreach(lc2, wc->partitionClause)
+			{
+				SortGroupClause *sgc = lfirst_node(SortGroupClause, lc2);
+
+				if (sgc->tleSortGroupRef == tle->ressortgroupref)
+					return sgc->eqop;
+			}
+		}
+	}
+
+	/* a column passed up from below */
+	expr = (Node *) tle->expr;
+	while (IsA(expr, RelabelType))
+		expr = (Node *) ((RelabelType *) expr)->arg;
+	if (IsA(expr, Var) && ((Var *) expr)->varlevelsup == 0)
+		return column_grouping_eqop(query, ((Var *) expr)->varno,
+									((Var *) expr)->varattno, depth + 1);
+
+	return InvalidOid;
+}
+
+/* The same, for column attno of the query's range table entry varno. */
+static Oid
+column_grouping_eqop(Query *query, Index varno, AttrNumber attno, int depth)
+{
+	RangeTblEntry *rte;
+	Node	   *alias;
+
+	if (depth > 32 || varno < 1 || varno > list_length(query->rtable))
+		return InvalidOid;
+
+	rte = rt_fetch(varno, query->rtable);
+	switch (rte->rtekind)
+	{
+		case RTE_GROUP:
+			return group_column_eqop(query, attno);
+
+		case RTE_SUBQUERY:
+			return output_grouping_eqop(rte->subquery, attno, depth + 1);
+
+		case RTE_JOIN:
+			if (attno < 1 || attno > list_length(rte->joinaliasvars))
+				return InvalidOid;
+			alias = (Node *) list_nth(rte->joinaliasvars, attno - 1);
+			while (alias != NULL && IsA(alias, RelabelType))
+				alias = (Node *) ((RelabelType *) alias)->arg;
+			if (alias != NULL && IsA(alias, Var) &&
+				((Var *) alias)->varlevelsup == 0)
+				return column_grouping_eqop(query, ((Var *) alias)->varno,
+											((Var *) alias)->varattno,
+											depth + 1);
+			return InvalidOid;
+
+		default:
+			return InvalidOid;
+	}
+}
+
+/* expression_has_grouping_conflict()'s callback, for a Var of any level. */
+static Oid
+qual_column_grouping_eqop(Var *var, void *context)
+{
+	grouping_conflict_context *ctx = (grouping_conflict_context *) context;
+
+	if (var->varlevelsup >= list_length(ctx->queries))
+		return InvalidOid;
+	return column_grouping_eqop(list_nth_node(Query, ctx->queries,
+											  var->varlevelsup),
+								var->varno, var->varattno, 0);
+}
+
+static bool
+jointree_has_grouping_conflict(Node *jtnode, grouping_conflict_context *ctx)
+{
+	ListCell   *lc;
+
+	if (jtnode == NULL || IsA(jtnode, RangeTblRef))
+		return false;
+
+	if (IsA(jtnode, FromExpr))
+	{
+		FromExpr   *f = (FromExpr *) jtnode;
+
+		foreach(lc, f->fromlist)
+			if (jointree_has_grouping_conflict((Node *) lfirst(lc), ctx))
+				return true;
+		return expression_has_grouping_conflict(f->quals,
+												qual_column_grouping_eqop, ctx);
+	}
+	else
+	{
+		JoinExpr   *j = castNode(JoinExpr, jtnode);
+
+		return jointree_has_grouping_conflict(j->larg, ctx) ||
+			jointree_has_grouping_conflict(j->rarg, ctx) ||
+			expression_has_grouping_conflict(j->quals,
+											 qual_column_grouping_eqop, ctx);
+	}
+}
+
+/* HAVING, conjunct by conjunct, as ORCA splits it. */
+static bool
+having_has_grouping_conflict(Node *qual, grouping_conflict_context *ctx)
+{
+	ListCell   *lc;
+
+	if (qual == NULL)
+		return false;
+
+	if (is_andclause(qual))
+	{
+		foreach(lc, ((BoolExpr *) qual)->args)
+			if (having_has_grouping_conflict((Node *) lfirst(lc), ctx))
+				return true;
+		return false;
+	}
+
+	/*
+	 * Not contain_agg_clause(), which is the planner's and expects its
+	 * sublinks already made SubPlans.  This one looks inside a sublink too, for
+	 * an aggregate of this query used there.
+	 */
+	if (contain_aggs_of_level(qual, 0))
+		return false;
+	return expression_has_grouping_conflict(qual, qual_column_grouping_eqop,
+											ctx);
+}
+
+static bool
+has_grouping_conflict_walker(Node *node, grouping_conflict_context *ctx)
+{
+	if (node == NULL)
+		return false;
+
+	if (IsA(node, Query))
+	{
+		Query	   *query = (Query *) node;
+		bool		result;
+
+		ctx->queries = lcons(query, ctx->queries);
+		result = jointree_has_grouping_conflict((Node *) query->jointree, ctx) ||
+			having_has_grouping_conflict(query->havingQual, ctx) ||
+			query_tree_walker(query, has_grouping_conflict_walker, ctx, 0);
+		ctx->queries = list_delete_first(ctx->queries);
+		return result;
+	}
+
+	return expression_tree_walker(node, has_grouping_conflict_walker, ctx);
+}
+
+static bool
+query_has_grouping_conflict(Query *query)
+{
+	grouping_conflict_context ctx;
+
+	ctx.queries = NIL;
+	return has_grouping_conflict_walker((Node *) query, &ctx);
+}
+
+/*
  * Fold the grouping step back into the queries above it.
  *
  * PostgreSQL 18 gave a query with GROUP BY an RTE_GROUP range table entry,
@@ -981,6 +1292,19 @@ optimize_query(Query *parse, int cursorOptions, ParamListInfo boundParams,
 		failure->message = pstrdup("Falling back to Postgres-based planner because "
 								   "GPORCA does not support the following feature: "
 								   "virtual generated columns");
+		return NULL;
+	}
+
+	/*
+	 * A filter ORCA would move past a grouping that compares by another
+	 * equality; see the walker.  Before the grouping step is folded, while
+	 * HAVING still reads the GROUP BY's columns as Vars of it.
+	 */
+	if (query_has_grouping_conflict(pqueryCopy))
+	{
+		failure->message = pstrdup("Falling back to Postgres-based planner because "
+								   "GPORCA does not support the following feature: "
+								   "a filter that compares a grouped column by another equality");
 		return NULL;
 	}
 
