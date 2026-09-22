@@ -32,13 +32,40 @@ CREATE FUNCTION gp.node(
 	OUT role text,
 	OUT segments int,
 	OUT content_id int,
-	OUT single_node boolean)
+	OUT single_node boolean,
+	OUT dbid int)
 RETURNS record
 AS 'MODULE_PATHNAME', 'gp_node'
 LANGUAGE C STRICT;
 
 COMMENT ON FUNCTION gp.node() IS
-	'the role, segment count, content id and single-node flag of this node';
+	'the role, segment count, content id, single-node flag and dbid of this node';
+
+/*
+ * The cluster, as this node knows it.
+ *
+ * Cloudberry keeps this in gp_segment_configuration, a shared catalog.  An
+ * extension can create no shared catalog, and the answer is needed before any
+ * database is open, so the port reads it from the file "gp.cluster_config"
+ * names -- which is the step Cloudberry's own external-FTS builds already take,
+ * where the rows come from etcd and the catalog becomes a view over a function.
+ *
+ * "mode" and "status" are not here: they are what FTS maintains, and FTS is
+ * M4's.
+ */
+CREATE FUNCTION gp.segment_configuration(
+	OUT dbid int,
+	OUT content int,
+	OUT role text,
+	OUT hostname text,
+	OUT port int,
+	OUT datadir text)
+RETURNS SETOF record
+AS 'MODULE_PATHNAME', 'gp_segment_configuration'
+LANGUAGE C STRICT;
+
+COMMENT ON FUNCTION gp.segment_configuration() IS
+	'the nodes of this cluster, as the cluster configuration file lists them';
 
 /*
  * How a relation's rows are spread over the segments.

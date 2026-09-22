@@ -37,7 +37,7 @@
  * here changes meaning or moves.
  */
 #define GP_CORE_API_VERSION_MAJOR	1
-#define GP_CORE_API_VERSION_MINOR	1
+#define GP_CORE_API_VERSION_MINOR	2
 
 /*
  * What the rendezvous variable points at.  It is the first thing a module
@@ -48,7 +48,12 @@ typedef struct GpCoreApi
 	int			version_major;
 	int			version_minor;
 
-	/* The role this server was started in; see gp.role. */
+	/*
+	 * What this backend is: a connection the dispatcher opened executes, the
+	 * coordinator dispatches, and anything else is a utility session -- which
+	 * is what a psql opened on a segment is, here as in Cloudberry.  It is not
+	 * always the node's role; see gp.role for that one.
+	 */
 	int			(*get_role) (void);
 
 	/*
@@ -68,6 +73,12 @@ typedef struct GpCoreApi
 	 * as Cloudberry's gp_internal_is_singlenode is.  Added in API 1.1.
 	 */
 	bool		(*is_single_node) (void);
+
+	/*
+	 * Which node of the cluster this is: the dbid of its line in the cluster
+	 * configuration.  The coordinator keeps 1.  Added in API 1.2.
+	 */
+	int			(*get_dbid) (void);
 } GpCoreApi;
 
 /*

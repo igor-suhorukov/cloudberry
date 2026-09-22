@@ -44,6 +44,7 @@
 #include "utils/lsyscache.h"
 
 #include "cb_module.h"
+#include "gp_cluster.h"
 #include "gp_core_api.h"
 #include "gp_label.h"
 #include "gp_policy.h"
@@ -60,85 +61,25 @@ PG_MODULE_MAGIC_EXT(
  */
 #define GP_VERSION_STR	PG_VERSION_STR " (Apache Cloudberry " GP_VERSION ")"
 
-/* Settings.  Every name a file may hold is dotted; see the note below. */
-static int	gp_role = GP_ROLE_UTILITY;
-static char *gp_qe_identity = NULL;
-
-static const struct config_enum_entry gp_role_options[] = {
-	{"utility", GP_ROLE_UTILITY, false},
-	{"dispatch", GP_ROLE_DISPATCH, false},
-	{"execute", GP_ROLE_EXECUTE, false},
-	{NULL, 0, false}
-};
-
-static int	gp_api_get_role(void);
-static int	gp_api_get_segment_count(void);
-static int	gp_api_get_content_id(void);
-static bool gp_api_is_single_node(void);
-
 /*
  * What the other modules see of us.  It is static storage, so the pointer we
  * publish stays valid for the life of the process.
+ *
+ * Everything here is the cluster's, and gp_cluster.c answers it: the role this
+ * *backend* plays, which is not always the node's, how many segments to
+ * compute with, which never falls to zero because consumers divide by it, and
+ * whether there are any segments at all, which is the question the count
+ * cannot carry.
  */
 static const GpCoreApi gp_core_api = {
 	.version_major = GP_CORE_API_VERSION_MAJOR,
 	.version_minor = GP_CORE_API_VERSION_MINOR,
-	.get_role = gp_api_get_role,
-	.get_segment_count = gp_api_get_segment_count,
-	.get_content_id = gp_api_get_content_id,
-	.is_single_node = gp_api_is_single_node,
+	.get_role = GpClusterBackendRole,
+	.get_segment_count = GpClusterSegmentCount,
+	.get_content_id = GpClusterContentId,
+	.is_single_node = GpClusterIsSingleNode,
+	.get_dbid = GpClusterDbid,
 };
-
-static int
-gp_api_get_role(void)
-{
-	return gp_role;
-}
-
-static int
-gp_api_get_segment_count(void)
-{
-	/*
-	 * One, not zero, and the difference matters.
-	 *
-	 * This is how many segments to *compute with*, and a consumer divides by
-	 * it.  ORCA asserts 0 < segments when it builds its cost model
-	 * (CCostModelGPDB) and again in COptimizer, and its skew model computes
-	 * 1.0 / segments; with zero it declines every query in a build with
-	 * assertions and, without them, divides by zero and carries the clamped
-	 * infinity into a cost.  Cloudberry answers 1 here for the same reason,
-	 * and says so: "1 represents a singleton postgresql in utility mode".
-	 *
-	 * Whether this server has segments at all is a different question, and
-	 * gp_api_is_single_node() is where it is asked.
-	 *
-	 * Until the cluster configuration is read (M2) there is one node, and it
-	 * is this one.
-	 */
-	return 1;
-}
-
-static bool
-gp_api_is_single_node(void)
-{
-	/*
-	 * Single-node mode is the extension loaded with no segments configured.
-	 * It is a state of its own, not a segment count -- see
-	 * gp_api_get_segment_count() for why the count cannot carry it.
-	 *
-	 * Until the cluster configuration is read (M2) there are no segments, so
-	 * this is always a single-node server.  M2 derives it from that
-	 * configuration, as Cloudberry derives its gp_internal_is_singlenode from
-	 * a setting.
-	 */
-	return true;
-}
-
-static int
-gp_api_get_content_id(void)
-{
-	return -1;					/* coordinator */
-}
 
 /*
  * GpCoreApiLookup
@@ -167,33 +108,12 @@ _PG_init(void)
 	CB_REQUIRE_PRELOAD("gp_core");
 
 	/*
-	 * Settings are named "gp.*".  An undotted name that PostgreSQL does not
-	 * know is an error when it reads postgresql.conf, and that file is read
-	 * before shared_preload_libraries is loaded; a dotted name becomes a
-	 * placeholder instead and is picked up when we define it here.  So every
-	 * setting that may end up in a file has to be dotted, whatever its
-	 * context.
+	 * The cluster first: it defines "gp.role", "gp.qe_identity",
+	 * "gp.cluster_config" and "gp.dbid", and reads the file that says which
+	 * nodes there are.  A cluster described wrongly is a server that does not
+	 * start, which is why this runs here rather than at the first query.
 	 */
-	DefineCustomEnumVariable("gp.role",
-							 "Role this node plays in the cluster.",
-							 "\"dispatch\" is the coordinator, \"execute\" a segment, "
-							 "\"utility\" a node used on its own.",
-							 &gp_role,
-							 GP_ROLE_UTILITY,
-							 gp_role_options,
-							 PGC_POSTMASTER,
-							 0,
-							 NULL, NULL, NULL);
-
-	DefineCustomStringVariable("gp.qe_identity",
-							   "Identity the dispatcher gave this segment process.",
-							   "Set by the coordinator on the connection that starts a "
-							   "segment process; empty in every other backend.",
-							   &gp_qe_identity,
-							   "",
-							   PGC_BACKEND,
-							   0,
-							   NULL, NULL, NULL);
+	GpClusterInit();
 
 	/*
 	 * Deliberately no MarkGUCPrefixReserved("gp") here.  It drops every
@@ -206,15 +126,16 @@ _PG_init(void)
 	 */
 
 	/*
-	 * Publish ourselves last, so that a module which finds us also finds the
-	 * settings above already defined.
-	 */
-	/*
 	 * The "gp" security label, which is where the port keeps what Cloudberry
 	 * keeps in catalog columns of its own.  It is registered here, in the
 	 * module every other one needs, because several of them use it.
 	 */
 	GpLabelRegisterProvider();
+
+	/*
+	 * Publish ourselves last, so that a module which finds us also finds the
+	 * settings above already defined.
+	 */
 
 	rv = find_rendezvous_variable(CB_CORE_RENDEZVOUS);
 	*rv = unconstify(GpCoreApi *, &gp_core_api);
@@ -243,13 +164,19 @@ gp_version(PG_FUNCTION_ARGS)
  * consumers divide by it -- ORCA asserts 0 < segments and its skew model
  * computes 1.0 / segments.  Whether this server has segments configured at
  * all is "single_node", a flag.  On a single node the two read 1 and true.
+ *
+ * "role" is this *backend's* role, which on a segment is not the node's: a
+ * connection the dispatcher opened executes, and one somebody opened with
+ * psql is a utility session, as it is in Cloudberry.  "dbid" says which node
+ * of the cluster this is, so that a dispatched session can be told apart from
+ * the coordinator's in a log or a test.
  */
 Datum
 gp_node(PG_FUNCTION_ARGS)
 {
 	TupleDesc	tupdesc;
-	Datum		values[4];
-	bool		nulls[4] = {false, false, false, false};
+	Datum		values[5];
+	bool		nulls[5] = {false, false, false, false, false};
 	HeapTuple	tuple;
 	const char *role;
 
@@ -274,6 +201,7 @@ gp_node(PG_FUNCTION_ARGS)
 	values[1] = Int32GetDatum(gp_core_api.get_segment_count());
 	values[2] = Int32GetDatum(gp_core_api.get_content_id());
 	values[3] = BoolGetDatum(gp_core_api.is_single_node());
+	values[4] = Int32GetDatum(gp_core_api.get_dbid());
 
 	tuple = heap_form_tuple(tupdesc, values, nulls);
 	PG_RETURN_DATUM(HeapTupleGetDatum(tuple));
