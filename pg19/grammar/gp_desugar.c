@@ -96,6 +96,7 @@
 #include "utils/json.h"
 
 #include "cb_module.h"
+#include "gp_dispatch.h"
 #include "gp_grammar.h"
 #include "gp_grammar_int.h"
 #include "gp_partition.h"
@@ -3590,6 +3591,18 @@ gp_raw_parser(const char *str, RawParseMode mode)
 	GpParseErrorArg errarg;
 	ErrorContextCallback errcallback;
 	List	   *result;
+
+	/*
+	 * A statement the coordinator dispatched arrives as its parse tree, and
+	 * gp_core's parser turns it back into one; there is nothing of
+	 * Cloudberry's in it to rewrite, and its text is not SQL.
+	 */
+	if (GpDispatchIsTreeText(str))
+	{
+		if (prev_raw_parser)
+			return prev_raw_parser(str, mode);
+		return standard_raw_parser(str, mode);
+	}
 
 	/*
 	 * A whole statement can hold anything of Cloudberry's.  The PL/pgSQL

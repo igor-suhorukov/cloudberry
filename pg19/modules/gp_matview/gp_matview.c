@@ -47,6 +47,7 @@
 
 #include "cb_module.h"
 #include "gp_core_api.h"
+#include "gp_dispatch.h"
 #include "gp_matview.h"
 
 PG_MODULE_MAGIC_EXT(
@@ -176,6 +177,22 @@ gp_matview_ProcessUtility(PlannedStmt *pstmt, const char *queryString,
 	bool		dynamic = false;
 	char	   *schedule = NULL;
 	Query	   *rewritten = NULL;
+
+	/*
+	 * On a segment, the statement the coordinator dispatched: whatever this
+	 * hook does besides it was done on the coordinator, and dispatched on its
+	 * own if it was a statement.  See GpDispatchIsDispatchedStatement().
+	 */
+	if (GpDispatchIsDispatchedStatement(pstmt->utilityStmt))
+	{
+		if (prev_ProcessUtility)
+			prev_ProcessUtility(pstmt, queryString, readOnlyTree, context,
+								params, queryEnv, dest, qc);
+		else
+			standard_ProcessUtility(pstmt, queryString, readOnlyTree, context,
+									params, queryEnv, dest, qc);
+		return;
+	}
 
 	if (IsA(parsetree, CreateTableAsStmt))
 	{

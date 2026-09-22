@@ -52,6 +52,7 @@
 
 #include "cb_module.h"
 #include "gp_core_api.h"
+#include "gp_dispatch.h"
 #include "gp_label.h"
 #include "gp_security.h"
 
@@ -221,6 +222,22 @@ gp_security_ProcessUtility(PlannedStmt *pstmt, const char *queryString,
 	char	   *rolename = NULL;
 	List	   *carried = NIL;
 	Oid			roleid = InvalidOid;
+
+	/*
+	 * On a segment, the statement the coordinator dispatched: whatever this
+	 * hook does besides it was done on the coordinator, and dispatched on its
+	 * own if it was a statement.  See GpDispatchIsDispatchedStatement().
+	 */
+	if (GpDispatchIsDispatchedStatement(pstmt->utilityStmt))
+	{
+		if (prev_ProcessUtility)
+			prev_ProcessUtility(pstmt, queryString, readOnlyTree, context,
+								params, queryEnv, dest, qc);
+		else
+			standard_ProcessUtility(pstmt, queryString, readOnlyTree, context,
+									params, queryEnv, dest, qc);
+		return;
+	}
 
 	if (IsA(pstmt->utilityStmt, AlterRoleStmt) &&
 		has_role_carriers(((AlterRoleStmt *) pstmt->utilityStmt)->options))

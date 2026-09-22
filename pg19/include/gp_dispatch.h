@@ -31,10 +31,9 @@
  * session ends or one of them breaks.  Cloudberry calls a set of them a gang,
  * and so does this.
  *
- * What is *not* here yet is the distributed transaction: at M2 a dispatched
- * statement commits on each segment by itself, so a failure on one leaves the
- * others committed.  Two-phase commit is M3's, and until then nothing writes
- * from more than one statement at a time.
+ * Whatever is sent is done inside the coordinator's transaction, savepoints
+ * included, and committed when the coordinator commits; see gp_dispatch.c.
+ * Two-phase commit and distributed snapshots are M3's.
  *
  *-------------------------------------------------------------------------
  */
@@ -83,10 +82,35 @@ extern bool GpGatherNext(GpGatherState *gather, TupleTableSlot *slot,
 /* Done with it, whether or not it was read to the end. */
 extern void GpGatherEnd(GpGatherState *gather);
 
+/*
+ * Send a dispatched statement (gp_ddl.c builds it) to every segment and wait.
+ * "own_xact" is for a statement that cannot run inside a transaction block --
+ * CREATE DATABASE, VACUUM, CREATE INDEX CONCURRENTLY -- which each segment
+ * runs in a transaction of its own; everything else joins the coordinator's.
+ */
+extern void GpDispatchUtility(const char *payload, bool own_xact);
+
+/*
+ * On a segment: is this the statement the coordinator dispatched?
+ *
+ * The coordinator ran it through every module's ProcessUtility hook, and what
+ * those hooks did besides the statement -- a label, the partitions of a table
+ * -- they did there, and dispatched separately if it was a statement of its
+ * own.  So the port's hooks pass such a statement straight on here, and the
+ * segment runs it as PostgreSQL alone would.
+ */
+extern bool GpDispatchIsDispatchedStatement(Node *utilityStmt);
+
+/* Is this the text a dispatched statement travels as?  O26 leaves it alone. */
+extern bool GpDispatchIsTreeText(const char *str);
+
 /* Close every connection: the session is over, or something went wrong. */
 extern void GpDispatchResetGang(void);
 
 /* Defines the settings; called from gp_core's _PG_init. */
 extern void GpDispatchInit(void);
+
+/* Installs the DDL dispatch hooks, where there is a cluster; see gp_ddl.c. */
+extern void GpDdlInit(void);
 
 #endif							/* GP_DISPATCH_H */

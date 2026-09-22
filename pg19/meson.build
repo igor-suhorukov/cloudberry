@@ -215,6 +215,7 @@ modules = [
     'sources': files('modules/gp_core/gp_core.c',
                      'modules/gp_core/gp_cluster.c',
                      'modules/gp_core/gp_dispatch.c',
+                     'modules/gp_core/gp_ddl.c',
                      'modules/gp_core/gp_label.c',
                      'modules/gp_core/gp_median.c',
                      'modules/gp_core/gp_policy.c'),

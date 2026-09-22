@@ -35,17 +35,31 @@
  * any user who can SHOW it, and this is a password for every database in the
  * cluster.
  *
+ * THE TRANSACTION.  Whatever the segments are sent is done inside the
+ * coordinator's transaction: the first statement a transaction dispatches
+ * opens one on every segment, a savepoint here is a savepoint there once
+ * something is sent inside it, and the segments commit when the coordinator
+ * is about to and roll back when it does.  So BEGIN; CREATE TABLE ...;
+ * ROLLBACK leaves no table anywhere, and a statement that fails on a segment
+ * undoes itself on the coordinator.  What this is not is two-phase commit: a
+ * segment that fails to commit after the others have leaves them committed,
+ * and a reader on one segment does not see the others' snapshot.  Both are
+ * M3's, with distributed snapshots; until then, this closes every gap that
+ * does not need them.
+ *
  * Cloudberry sources this file stands in for:
  *	  src/backend/cdb/dispatcher/ (cdbdisp.c, cdbdisp_query.c, cdbconn.c,
  *	  cdbgang.c), less the parts that exist because Cloudberry speaks its own
- *	  protocol
+ *	  protocol, and the one-phase half of cdbtm.c
  *
  *-------------------------------------------------------------------------
  */
 #include "postgres.h"
 
+#include "access/htup_details.h"
 #include "access/table.h"
 #include "access/xact.h"
+#include "catalog/pg_type.h"
 #include "commands/dbcommands.h"
 #include "fmgr.h"
 #include "funcapi.h"
@@ -58,11 +72,12 @@
 #include "storage/latch.h"
 #include "storage/waiteventset.h"
 #include "utils/acl.h"
-#include "utils/rel.h"
 #include "utils/builtins.h"
+#include "utils/fmgroids.h"
 #include "utils/guc.h"
 #include "utils/lsyscache.h"
 #include "utils/memutils.h"
+#include "utils/rel.h"
 #include "utils/syscache.h"
 #include "utils/timestamp.h"
 #include "utils/tuplestore.h"
@@ -74,6 +89,37 @@
 
 /* Where libpq finds the password for the segments; see the file header. */
 static char *gp_internal_passfile = NULL;
+
+/*
+ * The settings a segment has to share with the coordinator for a statement to
+ * mean the same thing there: which schema a name is looked up in, which role
+ * is doing it, how a date is read and written, where a table goes.
+ * Cloudberry marks the ones it ships with GUC_GPDB_NEED_SYNC, 189 of them;
+ * these are the ones anything the port dispatches yet can tell apart.
+ * default_tablespace is not among them: a tablespace is a directory on one
+ * machine, and at M2 each node keeps its own.
+ */
+static const char *const synced_settings[] = {
+	"search_path",
+	"role",
+	"DateStyle",
+	"IntervalStyle",
+	"TimeZone",
+	"default_table_access_method",
+	"check_function_bodies",
+	"bytea_output",
+	"extra_float_digits",
+	"standard_conforming_strings",
+	"xmloption",
+	"lc_monetary",
+	"lc_numeric",
+	"lc_time",
+};
+
+#define NUM_SYNCED_SETTINGS	lengthof(synced_settings)
+
+/* How many rows a segment sends at a time when a relation is read. */
+#define GATHER_FETCH_ROWS	1000
 
 /* One segment's connection. */
 typedef struct GpSegmentConn
@@ -89,11 +135,25 @@ typedef struct GpGang
 	int			nconns;
 	GpSegmentConn *conns;
 	WaitEventSet *wes;			/* MyLatch plus every connection's socket */
-	int			wes_latch_pos;
+
+	/* What the segments have been told of the settings above; NULL unknown. */
+	char	   *sent[NUM_SYNCED_SETTINGS];
 } GpGang;
 
 static GpGang *gang = NULL;
 static bool exit_callback_registered = false;
+
+/*
+ * The coordinator's transaction, as the segments know it.  "depth" counts the
+ * transaction levels they have been given: 1 for the BEGIN, one more for each
+ * savepoint, named after the level it stands for.
+ */
+static bool gang_in_xact = false;
+static int	gang_xact_depth = 0;
+static bool gang_xact_lost = false;	/* the gang closed with work in it */
+
+/* Names the cursors of the gathers of one transaction apart. */
+static uint32 gather_counter = 0;
 
 /* What a segment answered when it failed. */
 typedef struct GpSegmentError
@@ -103,7 +163,6 @@ typedef struct GpSegmentError
 	char	   *message;
 	char	   *detail;
 	char	   *hint;
-	char	   *context;
 } GpSegmentError;
 
 static void gang_close(void);
@@ -137,14 +196,22 @@ gang_atexit(int code, Datum arg)
 
 /*
  * Give up on the connections.  Called when one of them breaks, when the
- * session ends, and when an abort finds a statement still running on a
- * segment that will not answer.
+ * session ends, and when an abort finds a segment that will not answer.
+ *
+ * A gang that closes with a transaction open on it takes the segments' part of
+ * that transaction with it, and the coordinator's part must not commit alone:
+ * gang_xact_lost makes the commit fail instead.
  */
 static void
 gang_close(void)
 {
 	if (gang == NULL)
 		return;
+
+	if (gang_in_xact)
+		gang_xact_lost = true;
+	gang_in_xact = false;
+	gang_xact_depth = 0;
 
 	for (int i = 0; i < gang->nconns; i++)
 	{
@@ -156,6 +223,9 @@ gang_close(void)
 	}
 	if (gang->wes != NULL)
 		FreeWaitEventSet(gang->wes);
+	for (int i = 0; i < NUM_SYNCED_SETTINGS; i++)
+		if (gang->sent[i] != NULL)
+			pfree(gang->sent[i]);
 
 	pfree(gang->conns);
 	pfree(gang);
@@ -179,18 +249,13 @@ GpDispatchResetGang(void)
 static char *
 qe_identity_option(int content)
 {
-	StringInfoData buf;
-
-	initStringInfo(&buf);
 	/*
 	 * libpq's "options" splits on whitespace, so the value may hold none; the
 	 * three numbers are joined with characters no shell or parser will take an
 	 * interest in.
 	 */
-	appendStringInfo(&buf, "-c gp.qe_identity=seg%d/dbid%d/sess%d",
-					 content, GpClusterDbid(), MyProcPid);
-
-	return buf.data;
+	return psprintf("-c gp.qe_identity=seg%d/dbid%d/sess%d",
+					content, GpClusterDbid(), MyProcPid);
 }
 
 /*
@@ -206,8 +271,8 @@ gang_connect(void)
 	const GpSegmentConfig *segs;
 	int			nsegs;
 	MemoryContext oldcxt;
-	const char *dbname = get_database_name(MyDatabaseId);
-	const char *username = GetUserNameFromId(GetSessionUserId(), false);
+	const char *dbname;
+	const char *username;
 
 	Assert(gang == NULL);
 
@@ -223,13 +288,16 @@ gang_connect(void)
 	 * segments are and would dispatch to them -- and to itself -- if it were
 	 * asked to.  Only the coordinator dispatches: that is what makes one
 	 * statement one statement, and it is what Cloudberry's own role check
-	 * means.  (Running it here found a segment doing exactly that.)
+	 * means.  (Running it found a segment doing exactly that.)
 	 */
 	if (GpClusterBackendRole() != GP_ROLE_DISPATCH)
 		ereport(ERROR,
 				(errcode(ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE),
 				 errmsg("only the coordinator dispatches to the segments"),
 				 errdetail("This node has content id %d.", GpClusterContentId())));
+
+	dbname = get_database_name(MyDatabaseId);
+	username = GetUserNameFromId(GetSessionUserId(), false);
 
 	if (!exit_callback_registered)
 	{
@@ -248,12 +316,10 @@ gang_connect(void)
 		const char *keywords[10];
 		const char *values[10];
 		char		portbuf[16];
-		char	   *options;
 		int			n = 0;
 		PGconn	   *conn;
 
 		snprintf(portbuf, sizeof(portbuf), "%d", segs[i].port);
-		options = qe_identity_option(segs[i].content);
 
 		keywords[n] = "host";
 		values[n++] = segs[i].hostname;
@@ -268,7 +334,7 @@ gang_connect(void)
 		keywords[n] = "client_encoding";
 		values[n++] = GetDatabaseEncodingName();
 		keywords[n] = "options";
-		values[n++] = options;
+		values[n++] = qe_identity_option(segs[i].content);
 		if (gp_internal_passfile != NULL && gp_internal_passfile[0] != '\0')
 		{
 			keywords[n] = "passfile";
@@ -308,8 +374,7 @@ gang_connect(void)
 	 * transaction that opened it.
 	 */
 	gang->wes = CreateWaitEventSet(NULL, nsegs + 2);
-	gang->wes_latch_pos = AddWaitEventToSet(gang->wes, WL_LATCH_SET,
-											PGINVALID_SOCKET, MyLatch, NULL);
+	AddWaitEventToSet(gang->wes, WL_LATCH_SET, PGINVALID_SOCKET, MyLatch, NULL);
 	AddWaitEventToSet(gang->wes, WL_EXIT_ON_PM_DEATH, PGINVALID_SOCKET,
 					  NULL, NULL);
 	for (int i = 0; i < nsegs; i++)
@@ -340,7 +405,6 @@ gang_wait(GpGang *g)
 {
 	WaitEvent	occurred[1];
 
-	/* One event is enough: the caller re-reads every busy connection. */
 	CHECK_FOR_INTERRUPTS();
 
 	if (WaitEventSetWait(g->wes, -1, occurred, 1, dispatch_wait_event()) > 0)
@@ -353,11 +417,35 @@ gang_wait(GpGang *g)
 	}
 }
 
-/*
- * Remember why a segment failed, in the caller's context.
- */
+/* Send a statement to one segment, as the simple protocol sends it. */
 static void
-collect_error(List **errors, int content, PGresult *res, PGconn *conn)
+conn_send(GpSegmentConn *c, const char *sql)
+{
+	if (!PQsendQuery(c->conn, sql))
+	{
+		char	   *msg = pstrdup(PQerrorMessage(c->conn));
+		int			content = c->content;
+
+		gang_close();
+		ereport(ERROR,
+				(errcode(ERRCODE_CONNECTION_FAILURE),
+				 errmsg("could not send a statement to segment %d", content),
+				 errdetail_internal("%s", msg)));
+	}
+	c->busy = true;
+}
+
+static void
+gang_send_all(GpGang *g, const char *sql)
+{
+	for (int i = 0; i < g->nconns; i++)
+		conn_send(&g->conns[i], sql);
+}
+
+/* Remember why a segment failed, in the caller's context. */
+static void
+collect_error(List **errors, int content, PGresult *res, PGconn *conn,
+			  const char *why)
 {
 	GpSegmentError *err = (GpSegmentError *) palloc0(sizeof(GpSegmentError));
 	const char *field;
@@ -367,9 +455,14 @@ collect_error(List **errors, int content, PGresult *res, PGconn *conn)
 	field = res ? PQresultErrorField(res, PG_DIAG_SQLSTATE) : NULL;
 	err->sqlstate = field ? pstrdup(field) : NULL;
 
-	field = res ? PQresultErrorField(res, PG_DIAG_MESSAGE_PRIMARY) : NULL;
-	if (field == NULL)
-		field = PQerrorMessage(conn);
+	if (why != NULL)
+		field = why;
+	else
+	{
+		field = res ? PQresultErrorField(res, PG_DIAG_MESSAGE_PRIMARY) : NULL;
+		if (field == NULL)
+			field = PQerrorMessage(conn);
+	}
 	err->message = pstrdup(field ? field : "unknown error");
 	/* libpq's connection-level message ends in a newline; a message does not. */
 	if (err->message[0] != '\0' &&
@@ -380,8 +473,6 @@ collect_error(List **errors, int content, PGresult *res, PGconn *conn)
 	err->detail = field ? pstrdup(field) : NULL;
 	field = res ? PQresultErrorField(res, PG_DIAG_MESSAGE_HINT) : NULL;
 	err->hint = field ? pstrdup(field) : NULL;
-	field = res ? PQresultErrorField(res, PG_DIAG_CONTEXT) : NULL;
-	err->context = field ? pstrdup(field) : NULL;
 
 	*errors = lappend(*errors, err);
 }
@@ -428,10 +519,13 @@ raise_segment_errors(List *errors)
  *
  * Every segment is waited for even after one has failed, so that the
  * connections are left idle and usable; a connection that broke is not, and
- * takes the gang with it.
+ * takes the gang with it.  "keep", when given, receives each segment's first
+ * result with rows.  "commit" says the statement was a COMMIT, whose answer
+ * is ROLLBACK -- and no error -- when the segment's transaction had already
+ * failed; that is an error here.
  */
 static void
-gang_wait_all(GpGang *g, PGresult **keep)
+gang_wait_all(GpGang *g, PGresult **keep, bool commit)
 {
 	List	   *errors = NIL;
 	bool		broken = false;
@@ -449,7 +543,7 @@ gang_wait_all(GpGang *g, PGresult **keep)
 
 			if (PQconsumeInput(c->conn) == 0)
 			{
-				collect_error(&errors, c->content, NULL, c->conn);
+				collect_error(&errors, c->content, NULL, c->conn, NULL);
 				c->busy = false;
 				broken = true;
 				continue;
@@ -470,11 +564,13 @@ gang_wait_all(GpGang *g, PGresult **keep)
 				if (status != PGRES_COMMAND_OK && status != PGRES_TUPLES_OK &&
 					status != PGRES_EMPTY_QUERY)
 				{
-					collect_error(&errors, c->content, res, c->conn);
-					if (status == PGRES_FATAL_ERROR &&
-						PQstatus(c->conn) == CONNECTION_BAD)
+					collect_error(&errors, c->content, res, c->conn, NULL);
+					if (PQstatus(c->conn) == CONNECTION_BAD)
 						broken = true;
 				}
+				else if (commit && strcmp(PQcmdStatus(res), "ROLLBACK") == 0)
+					collect_error(&errors, c->content, res, c->conn,
+								  "the segment's part of this transaction had already failed");
 				else if (keep != NULL && keep[i] == NULL &&
 						 status == PGRES_TUPLES_OK)
 				{
@@ -500,34 +596,17 @@ gang_wait_all(GpGang *g, PGresult **keep)
 }
 
 /*
- * Stop whatever the segments are still doing and read what is left, so that
- * every connection is idle again.  One that will not come back idle is closed,
- * and the gang with it: half a gang answers with half a table.
- *
- * It may not raise -- an abort calls it while an error is being handled -- so
- * a segment that does not answer costs the gang rather than an error.
+ * Read whatever is in flight and throw it away, without raising: the paths
+ * that call this are handling an error already.  A segment that does not
+ * answer within a while, or whose connection breaks, costs the gang.
  */
 static void
-gang_cancel_and_drain(void)
+gang_drain_quietly(void)
 {
 	GpGang	   *g = gang;
 
 	if (g == NULL)
 		return;
-
-	for (int i = 0; i < g->nconns; i++)
-	{
-		if (g->conns[i].busy)
-		{
-			const char *err = libpqsrv_cancel(g->conns[i].conn,
-											  GetCurrentTimestamp() +
-											  30 * USECS_PER_SEC);
-
-			if (err != NULL)
-				elog(DEBUG1, "could not cancel the query on segment %d: %s",
-					 g->conns[i].content, err);
-		}
-	}
 
 	for (int i = 0; i < g->nconns; i++)
 	{
@@ -560,8 +639,7 @@ gang_cancel_and_drain(void)
 				/*
 				 * Not gang_wait(): that checks for interrupts, and this runs
 				 * where an error is already on its way.  A segment that never
-				 * answers would hang the abort, so the wait has a deadline and
-				 * the gang is dropped when it passes.
+				 * answers would hang the abort, so the wait has a deadline.
 				 */
 				if (WaitEventSetWait(g->wes, 30 * 1000, occurred, 1,
 									 dispatch_wait_event()) == 0)
@@ -576,28 +654,291 @@ gang_cancel_and_drain(void)
 	}
 }
 
+/* Stop whatever the segments are doing, and read what is left. */
+static void
+gang_cancel_and_drain(void)
+{
+	if (gang == NULL)
+		return;
+
+	for (int i = 0; i < gang->nconns; i++)
+	{
+		if (gang->conns[i].busy)
+		{
+			const char *err = libpqsrv_cancel(gang->conns[i].conn,
+											  GetCurrentTimestamp() +
+											  30 * USECS_PER_SEC);
+
+			if (err != NULL)
+				elog(DEBUG1, "could not cancel the query on segment %d: %s",
+					 gang->conns[i].content, err);
+		}
+	}
+	gang_drain_quietly();
+}
+
+/* Send a statement to every segment and wait for it, without raising. */
+static void
+gang_send_all_quietly(const char *sql)
+{
+	if (gang == NULL)
+		return;
+
+	for (int i = 0; i < gang->nconns; i++)
+	{
+		if (!PQsendQuery(gang->conns[i].conn, sql))
+		{
+			gang_close();
+			return;
+		}
+		gang->conns[i].busy = true;
+	}
+	gang_drain_quietly();
+}
+
+/* ------------------------------------------------------------------------- */
+/* The segments' part of the coordinator's transaction                       */
+/* ------------------------------------------------------------------------- */
+
+/*
+ * Tell the segments the settings that changed since they were last told.
+ *
+ * set_config() rather than SET: it takes a value as SHOW prints it, which is
+ * the one form every setting reads back -- a list like search_path included.
+ */
+static void
+gang_sync_settings(GpGang *g)
+{
+	StringInfoData sql;
+	const char *values[NUM_SYNCED_SETTINGS];
+	bool		any = false;
+
+	initStringInfo(&sql);
+	appendStringInfoString(&sql, "SELECT ");
+
+	for (int i = 0; i < NUM_SYNCED_SETTINGS; i++)
+	{
+		values[i] = GetConfigOption(synced_settings[i], true, false);
+		if (values[i] == NULL)
+			continue;
+		if (g->sent[i] != NULL && strcmp(g->sent[i], values[i]) == 0)
+			continue;
+
+		appendStringInfo(&sql, "%spg_catalog.set_config(%s, %s, false)",
+						 any ? ", " : "",
+						 quote_literal_cstr(synced_settings[i]),
+						 quote_literal_cstr(values[i]));
+		any = true;
+	}
+
+	if (!any)
+		return;
+
+	gang_send_all(g, sql.data);
+	gang_wait_all(g, NULL, false);
+
+	for (int i = 0; i < NUM_SYNCED_SETTINGS; i++)
+	{
+		if (values[i] == NULL)
+			continue;
+		if (g->sent[i] != NULL)
+			pfree(g->sent[i]);
+		g->sent[i] = MemoryContextStrdup(TopMemoryContext, values[i]);
+	}
+}
+
+/* Forget what the segments were told: a rollback may have undone it. */
+static void
+gang_forget_settings(void)
+{
+	if (gang == NULL)
+		return;
+	for (int i = 0; i < NUM_SYNCED_SETTINGS; i++)
+	{
+		if (gang->sent[i] != NULL)
+			pfree(gang->sent[i]);
+		gang->sent[i] = NULL;
+	}
+}
+
+static const char *
+isolation_level_name(void)
+{
+	switch (XactIsoLevel)
+	{
+		case XACT_SERIALIZABLE:
+			return "SERIALIZABLE";
+		case XACT_REPEATABLE_READ:
+			return "REPEATABLE READ";
+		case XACT_READ_UNCOMMITTED:
+			return "READ UNCOMMITTED";
+		default:
+			return "READ COMMITTED";
+	}
+}
+
+/*
+ * Get the segments ready for a statement: the settings it depends on, and --
+ * unless it is one that runs in a transaction of its own -- the coordinator's
+ * transaction, down to the savepoint it is being run in.
+ */
+static void
+gang_prepare(GpGang *g, bool in_xact)
+{
+	int			level;
+
+	gang_sync_settings(g);
+
+	if (!in_xact)
+	{
+		if (gang_in_xact)
+			ereport(ERROR,
+					(errcode(ERRCODE_ACTIVE_SQL_TRANSACTION),
+					 errmsg("cannot run this statement on the segments inside a transaction that has already used them")));
+		return;
+	}
+
+	if (!gang_in_xact)
+	{
+		gang_send_all(g, psprintf("BEGIN ISOLATION LEVEL %s%s",
+								  isolation_level_name(),
+								  XactReadOnly ? " READ ONLY" : ""));
+		gang_wait_all(g, NULL, false);
+		gang_in_xact = true;
+		gang_xact_depth = 1;
+		gather_counter = 0;
+	}
+
+	level = GetCurrentTransactionNestLevel();
+	while (gang_xact_depth < level)
+	{
+		gang_send_all(g, psprintf("SAVEPOINT gp_sp_%d", gang_xact_depth + 1));
+		gang_wait_all(g, NULL, false);
+		gang_xact_depth++;
+	}
+}
+
+static void
+dispatch_xact_callback(XactEvent event, void *arg)
+{
+	switch (event)
+	{
+		case XACT_EVENT_PRE_COMMIT:
+		case XACT_EVENT_PARALLEL_PRE_COMMIT:
+			if (gang_xact_lost)
+			{
+				gang_xact_lost = false;
+				ereport(ERROR,
+						(errcode(ERRCODE_CONNECTION_FAILURE),
+						 errmsg("lost the segments' part of this transaction"),
+						 errdetail("A connection to a segment closed while the transaction was open.")));
+			}
+
+			/*
+			 * Before the coordinator commits: raising here still undoes the
+			 * coordinator's part.  After it, nothing could.
+			 */
+			if (gang != NULL && gang_in_xact)
+			{
+				gang_in_xact = false;
+				gang_xact_depth = 0;
+				gang_send_all(gang, "COMMIT");
+				gang_wait_all(gang, NULL, true);
+			}
+			break;
+
+		case XACT_EVENT_PRE_PREPARE:
+			if (gang_in_xact)
+				ereport(ERROR,
+						(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+						 errmsg("cannot PREPARE a transaction that has used the segments"),
+						 errdetail("Two-phase commit across the segments arrives with distributed transactions.")));
+			break;
+
+		case XACT_EVENT_ABORT:
+		case XACT_EVENT_PARALLEL_ABORT:
+
+			/*
+			 * An error is already being handled here, so nothing may be
+			 * raised; libpqsrv_cancel() can raise on an out-of-memory, so it
+			 * is caught, and the gang dropped instead.
+			 */
+			PG_TRY();
+			{
+				gang_cancel_and_drain();
+				if (gang != NULL && gang_in_xact)
+					gang_send_all_quietly("ROLLBACK");
+			}
+			PG_CATCH();
+			{
+				FlushErrorState();
+				gang_close();
+			}
+			PG_END_TRY();
+
+			gang_in_xact = false;
+			gang_xact_depth = 0;
+			gang_xact_lost = false;
+			gang_forget_settings();
+			break;
+
+		default:
+			break;
+	}
+}
+
+static void
+dispatch_subxact_callback(SubXactEvent event, SubTransactionId mySubid,
+						  SubTransactionId parentSubid, void *arg)
+{
+	int			level = GetCurrentTransactionNestLevel();
+
+	if (gang == NULL || !gang_in_xact || gang_xact_depth < level)
+		return;
+
+	switch (event)
+	{
+		case SUBXACT_EVENT_PRE_COMMIT_SUB:
+			gang_send_all(gang, psprintf("RELEASE SAVEPOINT gp_sp_%d", level));
+			gang_wait_all(gang, NULL, false);
+			gang_xact_depth = level - 1;
+			break;
+
+		case SUBXACT_EVENT_ABORT_SUB:
+			PG_TRY();
+			{
+				gang_cancel_and_drain();
+				if (gang != NULL)
+					gang_send_all_quietly(psprintf("ROLLBACK TO SAVEPOINT gp_sp_%d; RELEASE SAVEPOINT gp_sp_%d",
+												   level, level));
+			}
+			PG_CATCH();
+			{
+				FlushErrorState();
+				gang_close();
+			}
+			PG_END_TRY();
+			gang_xact_depth = level - 1;
+			gang_forget_settings();
+			break;
+
+		default:
+			break;
+	}
+}
+
+/* ------------------------------------------------------------------------- */
+/* Statements                                                                */
+/* ------------------------------------------------------------------------- */
+
 void
 GpDispatchCommand(const char *sql)
 {
 	GpGang	   *g = gang_get();
 
-	for (int i = 0; i < g->nconns; i++)
-	{
-		if (!PQsendQuery(g->conns[i].conn, sql))
-		{
-			char	   *msg = pstrdup(PQerrorMessage(g->conns[i].conn));
-
-			gang_close();
-			ereport(ERROR,
-					(errcode(ERRCODE_CONNECTION_FAILURE),
-					 errmsg("could not send a statement to segment %d",
-							i),
-					 errdetail_internal("%s", msg)));
-		}
-		g->conns[i].busy = true;
-	}
-
-	gang_wait_all(g, NULL);
+	gang_prepare(g, true);
+	gang_send_all(g, sql);
+	gang_wait_all(g, NULL, false);
 }
 
 void
@@ -615,19 +956,19 @@ GpDispatchCommandOnContent(int content, const char *sql)
 				(errcode(ERRCODE_UNDEFINED_OBJECT),
 				 errmsg("there is no segment with content id %d", content)));
 
-	if (!PQsendQuery(c->conn, sql))
-	{
-		char	   *msg = pstrdup(PQerrorMessage(c->conn));
+	gang_prepare(g, true);
+	conn_send(c, sql);
+	gang_wait_all(g, NULL, false);
+}
 
-		gang_close();
-		ereport(ERROR,
-				(errcode(ERRCODE_CONNECTION_FAILURE),
-				 errmsg("could not send a statement to segment %d", content),
-				 errdetail_internal("%s", msg)));
-	}
-	c->busy = true;
+void
+GpDispatchUtility(const char *payload, bool own_xact)
+{
+	GpGang	   *g = gang_get();
 
-	gang_wait_all(g, NULL);
+	gang_prepare(g, !own_xact);
+	gang_send_all(g, payload);
+	gang_wait_all(g, NULL, false);
 }
 
 /* ------------------------------------------------------------------------- */
@@ -637,11 +978,11 @@ GpDispatchCommandOnContent(int content, const char *sql)
 /*
  * How a column of a segment's answer becomes a Datum.
  *
- * Binary for the whole result or text for the whole result, because libpq asks
- * for one format for all of the columns: a type with no binary send function
- * -- an extension's, usually -- makes it text for its neighbours too.  Text
- * costs a conversion and loses nothing: PostgreSQL 19's float output is
- * round-trip exact, which is what made text safe to fall back to.
+ * Binary for the whole result or text for the whole result, because a cursor
+ * is one or the other: a type with no binary send function -- an extension's,
+ * usually -- makes it text for its neighbours too.  Text costs a conversion
+ * and loses nothing: PostgreSQL 19's float output is round-trip exact, which
+ * is what made text safe to fall back to.
  */
 typedef struct GpColumnIn
 {
@@ -650,16 +991,57 @@ typedef struct GpColumnIn
 	int32		typmod;
 } GpColumnIn;
 
+/* One segment's side of a gather. */
+typedef struct GpGatherSeg
+{
+	GpSegmentConn *conn;
+	PGresult   *batch;			/* the rows being handed out */
+	int			row;			/* the next of them */
+	PGresult   *arrived;		/* a batch read but not yet handed out */
+	bool		done;			/* the cursor has nothing more */
+} GpGatherSeg;
+
 struct GpGatherState
 {
 	GpGang	   *gang;
 	TupleDesc	tupdesc;
 	bool		binary;
 	GpColumnIn *columns;
-	int			next;			/* which connection to look at first */
-	List	   *errors;
-	bool		broken;
+	GpGatherSeg *segs;
+	char	   *cursor;
+	int			next;			/* which segment to look at first */
 };
+
+/*
+ * Can a value of this type travel in binary?  Only if it has both halves, and
+ * an array or a domain only if what it is made of has them too: array_send()
+ * calls the element's send function, and fails at the first row if there is
+ * none, which is too late to fall back to text.
+ */
+static bool
+type_has_binary_io(Oid typid)
+{
+	HeapTuple	tp;
+	Form_pg_type typ;
+	bool		result;
+	Oid			inner = InvalidOid;
+
+	tp = SearchSysCache1(TYPEOID, ObjectIdGetDatum(typid));
+	if (!HeapTupleIsValid(tp))
+		elog(ERROR, "cache lookup failed for type %u", typid);
+	typ = (Form_pg_type) GETSTRUCT(tp);
+
+	result = OidIsValid(typ->typsend) && OidIsValid(typ->typreceive);
+	if (OidIsValid(typ->typelem) && IsTrueArrayType(typ))
+		inner = typ->typelem;
+	else if (typ->typtype == TYPTYPE_DOMAIN)
+		inner = typ->typbasetype;
+	ReleaseSysCache(tp);
+
+	if (result && OidIsValid(inner))
+		result = type_has_binary_io(inner);
+	return result;
+}
 
 static bool
 gather_can_use_binary(TupleDesc tupdesc)
@@ -667,13 +1049,10 @@ gather_can_use_binary(TupleDesc tupdesc)
 	for (int i = 0; i < tupdesc->natts; i++)
 	{
 		Form_pg_attribute att = TupleDescAttr(tupdesc, i);
-		Oid			typreceive;
-		Oid			ioparam;
 
 		if (att->attisdropped)
 			continue;
-		getTypeBinaryInputInfo(att->atttypid, &typreceive, &ioparam);
-		if (!OidIsValid(typreceive))
+		if (!type_has_binary_io(att->atttypid))
 			return false;
 	}
 	return true;
@@ -685,10 +1064,23 @@ GpGatherStart(const char *sql, TupleDesc tupdesc)
 	GpGatherState *gather = (GpGatherState *) palloc0(sizeof(GpGatherState));
 	GpGang	   *g = gang_get();
 
+	/*
+	 * Through a cursor, inside the coordinator's transaction.  A gather that
+	 * is not read to the end -- a LIMIT above it -- closes the cursor, where
+	 * reading a plain query to the end would cost the rest of the table and
+	 * cancelling it would abort the segment's transaction.  The cursor's first
+	 * batch is asked for with it, and each next one as soon as the one before
+	 * has arrived, so a segment is producing rows while the coordinator hands
+	 * out the ones it already has.
+	 */
+	gang_prepare(g, true);
+
 	gather->gang = g;
 	gather->tupdesc = tupdesc;
 	gather->binary = gather_can_use_binary(tupdesc);
 	gather->columns = (GpColumnIn *) palloc0_array(GpColumnIn, tupdesc->natts);
+	gather->segs = (GpGatherSeg *) palloc0_array(GpGatherSeg, g->nconns);
+	gather->cursor = psprintf("gp_gather_%u", ++gather_counter);
 
 	for (int i = 0; i < tupdesc->natts; i++)
 	{
@@ -709,39 +1101,20 @@ GpGatherStart(const char *sql, TupleDesc tupdesc)
 
 	for (int i = 0; i < g->nconns; i++)
 	{
-		GpSegmentConn *c = &g->conns[i];
-
-		if (!PQsendQueryParams(c->conn, sql, 0, NULL, NULL, NULL, NULL,
-							   gather->binary ? 1 : 0))
-		{
-			char	   *msg = pstrdup(PQerrorMessage(c->conn));
-
-			gang_close();
-			ereport(ERROR,
-					(errcode(ERRCODE_CONNECTION_FAILURE),
-					 errmsg("could not send a query to segment %d", c->content),
-					 errdetail_internal("%s", msg)));
-		}
-
-		/*
-		 * One row at a time, so that the coordinator holds a row per segment
-		 * rather than a segment's whole answer, and a segment with more rows
-		 * does not wait for one with fewer.
-		 */
-		if (!PQsetSingleRowMode(c->conn))
-			elog(ERROR, "could not switch segment %d to single-row mode",
-				 c->content);
-		c->busy = true;
+		gather->segs[i].conn = &g->conns[i];
+		conn_send(&g->conns[i],
+				  psprintf("DECLARE %s %sNO SCROLL CURSOR FOR %s; FETCH %d FROM %s",
+						   gather->cursor, gather->binary ? "BINARY " : "",
+						   sql, GATHER_FETCH_ROWS, gather->cursor));
 	}
 
 	return gather;
 }
 
-/*
- * One row of a segment's answer, into the slot.
- */
+/* One row of a segment's answer, into the slot. */
 static void
-gather_store_row(GpGatherState *gather, PGresult *res, TupleTableSlot *slot)
+gather_store_row(GpGatherState *gather, PGresult *res, int row,
+				 TupleTableSlot *slot)
 {
 	TupleDesc	tupdesc = gather->tupdesc;
 
@@ -755,7 +1128,7 @@ gather_store_row(GpGatherState *gather, PGresult *res, TupleTableSlot *slot)
 
 	for (int i = 0; i < tupdesc->natts; i++)
 	{
-		if (PQgetisnull(res, 0, i))
+		if (PQgetisnull(res, row, i))
 		{
 			slot->tts_isnull[i] = true;
 			slot->tts_values[i] = (Datum) 0;
@@ -768,18 +1141,16 @@ gather_store_row(GpGatherState *gather, PGresult *res, TupleTableSlot *slot)
 		{
 			StringInfoData buf;
 
-			initStringInfo(&buf);
-			appendBinaryStringInfo(&buf, PQgetvalue(res, 0, i),
-								   PQgetlength(res, 0, i));
+			initReadOnlyStringInfo(&buf, PQgetvalue(res, row, i),
+								   PQgetlength(res, row, i));
 			slot->tts_values[i] = ReceiveFunctionCall(&gather->columns[i].proc,
 													  &buf,
 													  gather->columns[i].ioparam,
 													  gather->columns[i].typmod);
-			pfree(buf.data);
 		}
 		else
 			slot->tts_values[i] = InputFunctionCall(&gather->columns[i].proc,
-												   PQgetvalue(res, 0, i),
+												   PQgetvalue(res, row, i),
 												   gather->columns[i].ioparam,
 												   gather->columns[i].typmod);
 	}
@@ -787,127 +1158,164 @@ gather_store_row(GpGatherState *gather, PGresult *res, TupleTableSlot *slot)
 	ExecStoreVirtualTuple(slot);
 }
 
+/*
+ * Read whatever a segment has sent of the batch in flight, without waiting.
+ * When the whole answer is in, the batch becomes the segment's "arrived" one
+ * and the next is asked for, if there can be one.
+ */
+static bool
+gather_poll(GpGatherState *gather, GpGatherSeg *s)
+{
+	GpSegmentConn *c = s->conn;
+	bool		progress = false;
+
+	if (!c->busy)
+		return false;
+
+	if (PQconsumeInput(c->conn) == 0)
+	{
+		List	   *errors = NIL;
+
+		collect_error(&errors, c->content, NULL, c->conn, NULL);
+		gang_close();
+		raise_segment_errors(errors);
+	}
+
+	while (!PQisBusy(c->conn))
+	{
+		PGresult   *res = PQgetResult(c->conn);
+		ExecStatusType status;
+
+		progress = true;
+
+		if (res == NULL)
+		{
+			c->busy = false;
+			break;
+		}
+
+		status = PQresultStatus(res);
+		if (status == PGRES_TUPLES_OK)
+		{
+			Assert(s->arrived == NULL);
+			s->arrived = res;
+			continue;
+		}
+		if (status == PGRES_COMMAND_OK)
+		{
+			PQclear(res);		/* the DECLARE */
+			continue;
+		}
+
+		{
+			List	   *errors = NIL;
+
+			collect_error(&errors, c->content, res, c->conn, NULL);
+			PQclear(res);
+			if (PQstatus(c->conn) == CONNECTION_BAD)
+				gang_close();
+			raise_segment_errors(errors);
+		}
+	}
+
+	/* The answer is complete: ask for the next batch while this one is used. */
+	if (!c->busy && s->arrived != NULL && !s->done)
+	{
+		if (PQntuples(s->arrived) < GATHER_FETCH_ROWS)
+			s->done = true;
+		else
+			conn_send(c, psprintf("FETCH %d FROM %s", GATHER_FETCH_ROWS,
+								  gather->cursor));
+	}
+
+	return progress;
+}
+
 bool
 GpGatherNext(GpGatherState *gather, TupleTableSlot *slot, int *content)
 {
-	GpGang	   *g = gather->gang;
+	int			nsegs = gather->gang->nconns;
 
 	for (;;)
 	{
-		bool		any_busy = false;
-		bool		made_progress = false;
+		bool		unfinished = false;
+		bool		progress = false;
 
-		for (int n = 0; n < g->nconns; n++)
+		for (int n = 0; n < nsegs; n++)
 		{
-			int			i = (gather->next + n) % g->nconns;
-			GpSegmentConn *c = &g->conns[i];
+			int			i = (gather->next + n) % nsegs;
+			GpGatherSeg *s = &gather->segs[i];
 
-			if (!c->busy)
-				continue;
-
-			any_busy = true;
-
-			if (PQconsumeInput(c->conn) == 0)
+			if (s->batch != NULL && s->row < PQntuples(s->batch))
 			{
-				collect_error(&gather->errors, c->content, NULL, c->conn);
-				c->busy = false;
-				gather->broken = true;
+				gather_store_row(gather, s->batch, s->row++, slot);
+				if (content != NULL)
+					*content = s->conn->content;
+				/* The next row from the next segment: they take turns. */
+				gather->next = (i + 1) % nsegs;
+				return true;
+			}
+
+			if (s->batch != NULL)
+			{
+				PQclear(s->batch);
+				s->batch = NULL;
+			}
+
+			if (gather_poll(gather, s))
+				progress = true;
+
+			if (s->arrived != NULL)
+			{
+				s->batch = s->arrived;
+				s->arrived = NULL;
+				s->row = 0;
+				progress = true;
+				n--;			/* look at this segment again */
 				continue;
 			}
 
-			while (!PQisBusy(c->conn))
-			{
-				PGresult   *res = PQgetResult(c->conn);
-				ExecStatusType status;
-
-				if (res == NULL)
-				{
-					c->busy = false;
-					made_progress = true;
-					break;
-				}
-
-				status = PQresultStatus(res);
-				if (status == PGRES_SINGLE_TUPLE)
-				{
-					gather_store_row(gather, res, slot);
-					PQclear(res);
-					if (content != NULL)
-						*content = c->content;
-					/* Look at the next segment first, to take turns. */
-					gather->next = (i + 1) % g->nconns;
-					return true;
-				}
-				if (status != PGRES_TUPLES_OK && status != PGRES_COMMAND_OK)
-				{
-					collect_error(&gather->errors, c->content, res, c->conn);
-					if (PQstatus(c->conn) == CONNECTION_BAD)
-						gather->broken = true;
-				}
-				PQclear(res);
-			}
+			if (s->conn->busy || !s->done)
+				unfinished = true;
 		}
 
-		if (!any_busy)
-			break;
-		if (!made_progress)
-			gang_wait(g);
+		if (!unfinished)
+			return false;
+		if (!progress)
+			gang_wait(gather->gang);
 	}
-
-	if (gather->broken)
-		gang_close();
-	if (gather->errors != NIL)
-		raise_segment_errors(gather->errors);
-
-	return false;
 }
 
 void
 GpGatherEnd(GpGatherState *gather)
 {
-	/*
-	 * A gather that was not read to the end -- a LIMIT above it, or an error
-	 * -- leaves rows on the way.  Cloudberry stops a segment with its own
-	 * "squelch" message; here the honest thing is to cancel what is still
-	 * running and read what is already in flight, so that the connections are
-	 * idle again and the next statement can use them.
-	 */
-	gang_cancel_and_drain();
-}
+	GpGang	   *g = gather->gang;
 
-/* ------------------------------------------------------------------------- */
-/* Start-up                                                                  */
-/* ------------------------------------------------------------------------- */
-
-/*
- * A transaction that ends while a segment is still working leaves a connection
- * that will not answer the next statement.  Cancel what is running and read
- * what is left; a connection that will not come back is closed, and the gang
- * with it, because half a gang answers with half a table.
- */
-static void
-dispatch_xact_callback(XactEvent event, void *arg)
-{
-	if (gang == NULL)
-		return;
-	if (event != XACT_EVENT_ABORT && event != XACT_EVENT_PARALLEL_ABORT)
-		return;
+	if (gang != g)
+		return;					/* the gang was lost, and its cursors with it */
 
 	/*
-	 * An error is already being handled here, so nothing this raises would be
-	 * reported; libpqsrv_cancel() can raise on an out-of-memory, so it is
-	 * caught and the gang dropped instead.
+	 * Read what is still on its way, which is at most a batch, and close the
+	 * cursors: the segments' transaction goes on, and may gather again.
 	 */
-	PG_TRY();
+	for (int i = 0; i < g->nconns; i++)
 	{
-		gang_cancel_and_drain();
+		GpGatherSeg *s = &gather->segs[i];
+
+		while (s->conn->busy)
+		{
+			if (!gather_poll(gather, s))
+				gang_wait(g);
+		}
+		if (s->arrived != NULL)
+			PQclear(s->arrived);
+		if (s->batch != NULL)
+			PQclear(s->batch);
+		s->arrived = s->batch = NULL;
 	}
-	PG_CATCH();
-	{
-		FlushErrorState();
-		gang_close();
-	}
-	PG_END_TRY();
+
+	gang_send_all(g, psprintf("CLOSE %s", gather->cursor));
+	gang_wait_all(g, NULL, false);
 }
 
 /* ------------------------------------------------------------------------- */
@@ -923,7 +1331,8 @@ PG_FUNCTION_INFO_V1(gp_exec_on_segments);
  * The answer is the first column of the first row, as text, because this is
  * for asking a cluster about itself -- "what does each segment think it is",
  * "how many rows does each one hold" -- and not for reading a table, which is
- * what the scan of a distributed table does.
+ * what the scan of a distributed table does.  It runs in the coordinator's
+ * transaction, like everything else sent to the segments.
  *
  * Superuser only.  It runs arbitrary SQL on a machine the caller may have no
  * other way to reach, and a segment is not a place to widen anyone's reach.
@@ -944,25 +1353,11 @@ gp_exec_on_segments(PG_FUNCTION_ARGS)
 	InitMaterializedSRF(fcinfo, 0);
 
 	g = gang_get();
+	gang_prepare(g, true);
 	results = (PGresult **) palloc0_array(PGresult *, g->nconns);
 
-	for (int i = 0; i < g->nconns; i++)
-	{
-		if (!PQsendQuery(g->conns[i].conn, sql))
-		{
-			char	   *msg = pstrdup(PQerrorMessage(g->conns[i].conn));
-
-			gang_close();
-			ereport(ERROR,
-					(errcode(ERRCODE_CONNECTION_FAILURE),
-					 errmsg("could not send a statement to segment %d",
-							g->conns[i].content),
-					 errdetail_internal("%s", msg)));
-		}
-		g->conns[i].busy = true;
-	}
-
-	gang_wait_all(g, results);
+	gang_send_all(g, sql);
+	gang_wait_all(g, results, false);
 
 	for (int i = 0; i < g->nconns; i++)
 	{
@@ -1000,8 +1395,7 @@ PG_FUNCTION_INFO_V1(gp_dist_random);
  * constantly, which is why it is here rather than later.
  *
  * It is the scan of a distributed table with nothing planned around it: no
- * qual pushed down, no column left out.  What the executor will do with a
- * distributed table is the same gather, under a plan.
+ * qual pushed down, no column left out.
  */
 Datum
 gp_dist_random(PG_FUNCTION_ARGS)
@@ -1041,23 +1435,19 @@ gp_dist_random(PG_FUNCTION_ARGS)
 
 	slot = MakeSingleTupleTableSlot(tupdesc, &TTSOpsVirtual);
 	gather = GpGatherStart(sql.data, tupdesc);
-
-	PG_TRY();
-	{
-		while (GpGatherNext(gather, slot, NULL))
-			tuplestore_puttupleslot(rsinfo->setResult, slot);
-	}
-	PG_FINALLY();
-	{
-		GpGatherEnd(gather);
-	}
-	PG_END_TRY();
+	while (GpGatherNext(gather, slot, NULL))
+		tuplestore_puttupleslot(rsinfo->setResult, slot);
+	GpGatherEnd(gather);
 
 	ExecDropSingleTupleTableSlot(slot);
 	table_close(rel, AccessShareLock);
 
 	return (Datum) 0;
 }
+
+/* ------------------------------------------------------------------------- */
+/* Start-up                                                                  */
+/* ------------------------------------------------------------------------- */
 
 void
 GpDispatchInit(void)
@@ -1075,4 +1465,5 @@ GpDispatchInit(void)
 							   NULL, NULL, NULL);
 
 	RegisterXactCallback(dispatch_xact_callback, NULL);
+	RegisterSubXactCallback(dispatch_subxact_callback, NULL);
 }

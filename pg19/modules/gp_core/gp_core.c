@@ -123,6 +123,12 @@ _PG_init(void)
 	GpDispatchInit();
 
 	/*
+	 * DDL dispatch, with R1 giving every object the coordinator's OID.  Only
+	 * where there is a cluster: a single node installs none of its hooks.
+	 */
+	GpDdlInit();
+
+	/*
 	 * Deliberately no MarkGUCPrefixReserved("gp") here.  It drops every
 	 * "gp.*" placeholder that is not defined yet, with a warning, and the
 	 * modules that load on demand define their own "gp.*" settings long after
