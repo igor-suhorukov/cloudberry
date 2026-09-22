@@ -789,3 +789,15 @@ COMMENT ON FUNCTION gp_orca.identity_nextval_int4(oid) IS
 	'stands for an identity column''s next value in ORCA''s plans; not callable';
 COMMENT ON FUNCTION gp_orca.identity_nextval_int8(oid) IS
 	'stands for an identity column''s next value in ORCA''s plans; not callable';
+
+/*
+ * The slice table of the plan a query gets: each slice, the one it sends
+ * to, the gang Cloudberry would run it in, and its segments -- what
+ * Cloudberry's EXPLAIN (SLICETABLE) prints, from PlannedStmt.extension_state.
+ */
+CREATE FUNCTION gp_orca.slices(query text,
+	OUT slice int, OUT parent int, OUT gang text, OUT segments int,
+	OUT segment int, OUT direct_segment int)
+RETURNS SETOF record
+AS 'MODULE_PATHNAME', 'gp_orca_slices'
+LANGUAGE C STRICT;

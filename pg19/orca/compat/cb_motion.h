@@ -37,6 +37,8 @@
 
 #include "nodes/plannodes.h"
 
+#include "cdb/cdb_plan_nodes.h"
+
 #define GP_ORCA_MOTION_OK			0
 #define GP_ORCA_MOTION_NESTED		1	/* a Gather in a slice the segments run */
 #define GP_ORCA_MOTION_PARAM		2	/* a value computed outside a fragment */
@@ -48,5 +50,18 @@
  * none, in which case each Gather has been given its Motions to carry out.
  */
 extern int	gp_orca_check_motions(PlannedStmt *stmt);
+
+/*
+ * The plan's slice table, as PlannedStmt.extension_state keeps it: a DefElem
+ * named GP_SLICE_TABLE whose argument is one list per slice of Integers --
+ * its index, its parent's, its gang type, how many segments run it, which
+ * one if it is one, and the segment direct dispatch sends it to, or -1.
+ * Cloudberry keeps it in PlannedStmt.slices, which PostgreSQL 19 does not
+ * have; "slices" is a List of the translator's PlanSlice, "motions" its
+ * Motions.
+ */
+#define GP_SLICE_TABLE	"gp_slice_table"
+
+extern Node *gp_orca_slice_table(List *slices, List *motions);
 
 #endif							/* CB_MOTION_H */

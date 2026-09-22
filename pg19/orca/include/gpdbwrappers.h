@@ -858,6 +858,7 @@ void SetMotionSegment(Plan *motion, int content);
 int DirectDispatchSegment(Oid relid, int nvalues, const Oid *types,
 						  const Datum *values, const bool *isnull);
 int CheckMotions(PlannedStmt *stmt);
+Node *SliceTable(List *slices, List *motions);
 
 // An identity column's next value: the call of gp_orca's function ORCA is
 // handed for a NextValueExpr (NULL where gp_orca's extension is not

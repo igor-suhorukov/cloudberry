@@ -692,6 +692,15 @@ mine" ] && ok "a transaction reads its own rows, and a LIMIT leaves the connecti
 		"SELECT a FROM o WHERE a IN (SELECT b FROM o WHERE a < 20) ORDER BY a;" \
 		"(slice2; segments: 2)"
 
+	# The slice table, in PlannedStmt.extension_state, as Cloudberry's
+	# EXPLAIN (SLICETABLE) would print it.
+	out=$(q 0 "SELECT string_agg(concat_ws(',', slice, parent, gang, segments, direct_segment), ' ' ORDER BY slice) FROM gp_orca.slices('SELECT y, count(*) FROM o JOIN po ON o.b = po.y GROUP BY y');")
+	out2=$(q 0 "SELECT string_agg(concat_ws(',', slice, gang, direct_segment), ' ' ORDER BY slice) FROM gp_orca.slices('SELECT * FROM o WHERE a = 42');")
+	[ "$out" = "0,unallocated,1 1,0,primary reader,2 2,1,primary reader,2 3,1,primary reader,2" ] && \
+		[[ "$out2" == "0,unallocated 1,primary reader,"[01] ]] \
+		&& ok "the slice table: each slice, the one it sends to, its gang, and direct dispatch's segment" \
+		|| notok "the slice table" "$out / $out2"
+
 	out=$(q 0 "EXPLAIN (ANALYZE, COSTS OFF, TIMING OFF, SUMMARY OFF, BUFFERS OFF) SELECT count(*) FROM o;")
 	case "$out" in
 		*"Gather Motion 2:1"*"(actual rows=2"*"Seq Scan on o (never executed)"*)

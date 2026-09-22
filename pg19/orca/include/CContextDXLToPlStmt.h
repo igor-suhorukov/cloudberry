@@ -245,6 +245,13 @@ public:
 
 	PlanSlice *GetSlices(int *numSlices_p);
 
+	// the slices as they are, a List of PlanSlice, for the slice table
+	List *
+	GetSliceList() const
+	{
+		return m_slices_list;
+	}
+
 	// add a range table entry
 	void AddRTE(RangeTblEntry *rte, BOOL is_result_relation = false);
 

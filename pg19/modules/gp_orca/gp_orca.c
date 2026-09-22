@@ -71,6 +71,7 @@
 
 #include "cb_assertop.h"
 #include "cb_dynamicscan.h"
+#include "cb_motion.h"
 #include "cb_clauses.h"
 #include "cb_lsyscache.h"
 #include "cb_module.h"
@@ -126,6 +127,7 @@ PG_FUNCTION_INFO_V1(gp_orca_wrapper_policy);
 PG_FUNCTION_INFO_V1(gp_orca_unported_raise);
 PG_FUNCTION_INFO_V1(gp_orca_agg_sharing);
 PG_FUNCTION_INFO_V1(gp_orca_md_dxl);
+PG_FUNCTION_INFO_V1(gp_orca_slices);
 
 /*
  * gp_orca.version()
@@ -1802,4 +1804,79 @@ gp_orca_md_dxl(PG_FUNCTION_ARGS)
 				 errmsg("the optimizer's description of this %s will not convert to this database's encoding", kind)));
 
 	PG_RETURN_TEXT_P(cstring_to_text(dxl));
+}
+
+/*
+ * gp_orca.slices(query)
+ *
+ * The slice table of the plan the query gets, as the translator keeps it in
+ * PlannedStmt.extension_state (compat/cb_motion.h): each slice, the one it
+ * sends to, the gang Cloudberry would give it, and how many segments run it.
+ * Cloudberry's EXPLAIN (SLICETABLE) prints the same.  No rows when the plan
+ * has no Motion -- one node, or a plan the planner made.
+ */
+Datum
+gp_orca_slices(PG_FUNCTION_ARGS)
+{
+	char	   *sql = text_to_cstring(PG_GETARG_TEXT_PP(0));
+	ReturnSetInfo *rsinfo = (ReturnSetInfo *) fcinfo->resultinfo;
+	static const char *const gangs[] = {
+		"unallocated", "entrydb reader", "singleton reader",
+		"primary reader", "primary writer"
+	};
+	List	   *raw;
+	List	   *queries;
+	PlannedStmt *stmt;
+	ListCell   *lc;
+
+	InitMaterializedSRF(fcinfo, 0);
+
+	raw = pg_parse_query(sql);
+	if (list_length(raw) != 1)
+		ereport(ERROR,
+				(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+				 errmsg("give this one statement, not %d", list_length(raw))));
+	queries = pg_analyze_and_rewrite_fixedparams(linitial_node(RawStmt, raw),
+												 sql, NULL, 0, NULL);
+	if (list_length(queries) != 1)
+		ereport(ERROR,
+				(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+				 errmsg("the statement rewrote into %d queries",
+						list_length(queries))));
+
+	/* planner(), hooks and all: the plan the statement would run with */
+	stmt = planner(linitial_node(Query, queries), sql, 0, NULL, NULL);
+
+	foreach(lc, stmt->extension_state)
+	{
+		DefElem    *def = lfirst_node(DefElem, lc);
+		ListCell   *ls;
+
+		if (strcmp(def->defname, GP_SLICE_TABLE) != 0)
+			continue;
+
+		foreach(ls, (List *) def->arg)
+		{
+			List	   *slice = (List *) lfirst(ls);
+			int			gang = intVal(list_nth(slice, 2));
+			int			direct = intVal(list_nth(slice, 5));
+			Datum		values[6];
+			bool		nulls[6] = {false, false, false, false, false, false};
+
+			values[0] = Int32GetDatum(intVal(linitial(slice)));
+			values[1] = Int32GetDatum(intVal(lsecond(slice)));
+			nulls[1] = intVal(lsecond(slice)) < 0;
+			values[2] = CStringGetTextDatum(gang >= 0 && gang < lengthof(gangs)
+											? gangs[gang] : "?");
+			values[3] = Int32GetDatum(intVal(lfourth(slice)));
+			values[4] = Int32GetDatum(intVal(list_nth(slice, 4)));
+			nulls[4] = gang != GANGTYPE_SINGLETON_READER;
+			values[5] = Int32GetDatum(direct);
+			nulls[5] = direct < 0;
+			tuplestore_putvalues(rsinfo->setResult, rsinfo->setDesc,
+								 values, nulls);
+		}
+	}
+
+	return (Datum) 0;
 }

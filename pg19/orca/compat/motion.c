@@ -36,6 +36,7 @@
 
 #include "nodes/bitmapset.h"
 #include "nodes/extensible.h"
+#include "nodes/makefuncs.h"
 #include "nodes/nodeFuncs.h"
 #include "nodes/plannodes.h"
 
@@ -231,4 +232,41 @@ gp_orca_check_motions(PlannedStmt *stmt)
 
 	(void) motion_check_walker((Node *) stmt->planTree, &ctx);
 	return ctx.problem;
+}
+
+Node *
+gp_orca_slice_table(List *slices, List *motions)
+{
+	const GpCoreApi *api = cb_core_api();
+	List	   *table = NIL;
+	ListCell   *lc;
+
+	foreach(lc, slices)
+	{
+		PlanSlice  *slice = (PlanSlice *) lfirst(lc);
+		int			direct = -1;
+		ListCell   *lm;
+
+		/* a Gather that direct dispatch sent to one segment says which */
+		foreach(lm, motions)
+		{
+			Plan	   *motion = (Plan *) lfirst(lm);
+
+			if (api->motion_slice(motion) == slice->sliceIndex &&
+				api->motion_type(motion) == GP_MOTION_GATHER &&
+				slice->gangType == GANGTYPE_PRIMARY_READER &&
+				api->motion_segment(motion) >= 0)
+				direct = api->motion_segment(motion);
+		}
+
+		table = lappend(table,
+						list_make5(makeInteger(slice->sliceIndex),
+								   makeInteger(slice->parentIndex),
+								   makeInteger((int) slice->gangType),
+								   makeInteger(slice->numsegments),
+								   makeInteger(slice->segindex)));
+		llast(table) = lappend((List *) llast(table), makeInteger(direct));
+	}
+
+	return (Node *) makeDefElem(pstrdup(GP_SLICE_TABLE), (Node *) table, -1);
 }

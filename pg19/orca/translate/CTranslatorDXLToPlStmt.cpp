@@ -382,6 +382,14 @@ CTranslatorDXLToPlStmt::GetPlannedStmtFromDXL(const CDXLNode *dxlnode,
 			default:
 				break;
 		}
+
+		// The slice table, where PostgreSQL 19 keeps an extension's own
+		// parts of a plan: Cloudberry's PlannedStmt.slices.
+		planned_stmt->extension_state =
+			gpdb::LAppend(planned_stmt->extension_state,
+						  gpdb::SliceTable(
+							  m_dxl_to_plstmt_context->GetSliceList(),
+							  m_motions));
 	}
 
 	return planned_stmt;

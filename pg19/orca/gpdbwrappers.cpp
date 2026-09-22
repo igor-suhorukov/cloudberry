@@ -2865,6 +2865,17 @@ gpdb::DirectDispatchSegment(Oid relid, int nvalues, const Oid *types,
 	return -1;
 }
 
+Node *
+gpdb::SliceTable(List *slices, List *motions)
+{
+	GP_WRAP_START;
+	{
+		return gp_orca_slice_table(slices, motions);
+	}
+	GP_WRAP_END;
+	return nullptr;
+}
+
 int
 gpdb::CheckMotions(PlannedStmt *stmt)
 {
