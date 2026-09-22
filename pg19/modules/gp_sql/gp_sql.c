@@ -764,6 +764,91 @@ gp_sql_carried_tags(PlannedStmt *pstmt, const char *queryString,
 /* A CREATE TABLE AS on a cluster is being made, and this is it again. */
 static bool in_cluster_ctas = false;
 
+/* The FOREIGN KEY constraints a CREATE TABLE or ALTER TABLE makes. */
+static List *
+foreign_keys_of(Node *parsetree)
+{
+	List	   *fks = NIL;
+	List	   *constraints = NIL;
+	ListCell   *lc;
+
+	if (IsA(parsetree, CreateStmt))
+	{
+		CreateStmt *stmt = (CreateStmt *) parsetree;
+
+		constraints = list_copy(stmt->constraints);
+		foreach(lc, stmt->tableElts)
+		{
+			if (IsA(lfirst(lc), ColumnDef))
+				constraints = list_concat(constraints,
+										  ((ColumnDef *) lfirst(lc))->constraints);
+			else if (IsA(lfirst(lc), Constraint))
+				constraints = lappend(constraints, lfirst(lc));
+		}
+	}
+	else if (IsA(parsetree, AlterTableStmt))
+	{
+		foreach(lc, ((AlterTableStmt *) parsetree)->cmds)
+		{
+			AlterTableCmd *cmd = lfirst_node(AlterTableCmd, lc);
+
+			if (cmd->subtype == AT_AddConstraint && IsA(cmd->def, Constraint))
+				constraints = lappend(constraints, cmd->def);
+			else if (cmd->subtype == AT_AddColumn && IsA(cmd->def, ColumnDef))
+				constraints = list_concat(constraints,
+										  ((ColumnDef *) cmd->def)->constraints);
+		}
+	}
+
+	foreach(lc, constraints)
+	{
+		Constraint *con = (Constraint *) lfirst(lc);
+
+		if (IsA(con, Constraint) && con->contype == CONSTR_FOREIGN &&
+			con->is_enforced)
+			fks = lappend(fks, con);
+	}
+	return fks;
+}
+
+/*
+ * A foreign key on a cluster is made and not enforced, as Cloudberry makes
+ * one, with Cloudberry's warning: a segment checking it would look for the
+ * referenced row among its own share of the table, and refuse a row whose
+ * key is on another segment.  PostgreSQL 19 has constraints that are made
+ * and not enforced -- NOT ENFORCED, which creates no triggers -- so the
+ * constraint is still there for pg_dump and \d to show.  Returns the
+ * statement, copied if it had to be changed and was not ours to change.
+ */
+static PlannedStmt *
+unenforce_foreign_keys(PlannedStmt *pstmt, bool *readOnlyTree)
+{
+	List	   *fks = foreign_keys_of(pstmt->utilityStmt);
+	ListCell   *lc;
+
+	if (fks == NIL)
+		return pstmt;
+	if (*readOnlyTree)
+	{
+		pstmt = copyObject(pstmt);
+		*readOnlyTree = false;
+		fks = foreign_keys_of(pstmt->utilityStmt);
+	}
+
+	foreach(lc, fks)
+	{
+		Constraint *con = (Constraint *) lfirst(lc);
+
+		con->is_enforced = false;
+		con->skip_validation = true;
+		con->initially_valid = false;
+		ereport(WARNING,
+				(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+				 errmsg("referential integrity (FOREIGN KEY) constraints are not supported in Apache Cloudberry, will not be enforced")));
+	}
+	return pstmt;
+}
+
 static void gp_sql_ProcessUtility(PlannedStmt *pstmt, const char *queryString,
 								  bool readOnlyTree, ProcessUtilityContext context,
 								  ParamListInfo params, QueryEnvironment *queryEnv,
@@ -873,6 +958,13 @@ gp_sql_ProcessUtility(PlannedStmt *pstmt, const char *queryString,
 			standard_ProcessUtility(pstmt, queryString, readOnlyTree, context,
 									params, queryEnv, dest, qc);
 		return;
+	}
+
+	if ((IsA(parsetree, CreateStmt) || IsA(parsetree, AlterTableStmt)) &&
+		on_cluster_coordinator())
+	{
+		pstmt = unenforce_foreign_keys(pstmt, &readOnlyTree);
+		parsetree = pstmt->utilityStmt;
 	}
 
 	/*
