@@ -754,15 +754,83 @@ make_custom_scan(Plan *replaced, const CustomScanMethods *methods)
 	cscan->scan.plan.plan_rows = replaced->plan_rows;
 	cscan->scan.plan.plan_width = replaced->plan_width;
 	cscan->scan.plan.plan_node_id = replaced->plan_node_id;
+	/* A scalar subquery in what is written is an initplan of the node replaced. */
+	cscan->scan.plan.initPlan = replaced->initPlan;
+	cscan->scan.plan.extParam = replaced->extParam;
+	cscan->scan.plan.allParam = replaced->allParam;
 	cscan->scan.plan.targetlist = NIL;
 	cscan->scan.scanrelid = 0;
 	cscan->methods = methods;
 	return cscan;
 }
 
+static PlannedStmt *gp_modify_planner_routed(Query *parse,
+											 const char *query_string,
+											 int cursorOptions,
+											 ParamListInfo boundParams,
+											 ExplainState *es);
+
+/*
+ * A ModifyTable left in a plan that writes a distributed table.
+ *
+ * What the routing above takes -- an INSERT, an UPDATE or DELETE it can send
+ * -- becomes a node of its own; what it does not take would otherwise run on
+ * the coordinator, against its empty copy, with rows gathered from the
+ * segments whose ctid means nothing here: a data-modifying WITH query, whose
+ * ModifyTable is a subplan, and a partitioned table's partitions, which are
+ * several result relations.  Refused, by name, rather than run.
+ */
+static void
+refuse_local_write(Plan *plan, PlannedStmt *stmt, bool in_with)
+{
+	ModifyTable *mt;
+	ListCell   *lc;
+
+	if (plan == NULL || !IsA(plan, ModifyTable))
+		return;
+	mt = (ModifyTable *) plan;
+
+	foreach(lc, mt->resultRelations)
+	{
+		RangeTblEntry *rte = rt_fetch(lfirst_int(lc), stmt->rtable);
+
+		if (GpScanDistributedPolicy(rte->relid) == NULL)
+			continue;
+		ereport(ERROR,
+				(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+				 errmsg("cannot %s distributed table \"%s\" this way yet",
+						mt->operation == CMD_INSERT ? "INSERT INTO" :
+						mt->operation == CMD_UPDATE ? "UPDATE" :
+						mt->operation == CMD_DELETE ? "DELETE FROM" : "MERGE INTO",
+						get_rel_name(rte->relid)),
+				 errdetail("%s", in_with ?
+						   "It is a data-modifying WITH query." :
+						   list_length(mt->resultRelations) > 1 ?
+						   "It changes the partitions of a partitioned table." :
+						   "The coordinator's plan would change the coordinator's copy, which has no rows.")));
+	}
+}
+
 static PlannedStmt *
 gp_modify_planner(Query *parse, const char *query_string, int cursorOptions,
 				  ParamListInfo boundParams, ExplainState *es)
+{
+	PlannedStmt *stmt = gp_modify_planner_routed(parse, query_string,
+												 cursorOptions, boundParams, es);
+	ListCell   *lc;
+
+	if (GpClusterBackendRole() != GP_ROLE_DISPATCH)
+		return stmt;
+
+	refuse_local_write(stmt->planTree, stmt, false);
+	foreach(lc, stmt->subplans)
+		refuse_local_write((Plan *) lfirst(lc), stmt, true);
+	return stmt;
+}
+
+static PlannedStmt *
+gp_modify_planner_routed(Query *parse, const char *query_string, int cursorOptions,
+						 ParamListInfo boundParams, ExplainState *es)
 {
 	PlannedStmt *stmt;
 	Query	   *original = NULL;

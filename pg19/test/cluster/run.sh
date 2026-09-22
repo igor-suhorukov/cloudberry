@@ -594,6 +594,25 @@ mine" ] && ok "a transaction reads its own rows, and a LIMIT leaves the connecti
 		&& ok "... with its DISTRIBUTED BY, and WITH NO DATA" \
 		|| notok "CREATE TABLE AS DISTRIBUTED BY, WITH NO DATA" "$out / $out2"
 
+	# What the routed writes do not take is refused, never run here against
+	# the coordinator's empty copy -- which crashed on a ctid from a segment.
+	out=$(q 0 "WITH w AS (UPDATE d SET b = b WHERE a < 3 RETURNING *) SELECT count(*) FROM w;")
+	case "$out" in
+		*"cannot UPDATE distributed table \"d\" this way yet"*"data-modifying WITH query"*)
+			ok "an UPDATE in a WITH query is refused, not run on the coordinator" ;;
+		*) notok "a data-modifying WITH query" "$out" ;;
+	esac
+	out=$(q 0 "DELETE FROM sales WHERE amt = 1;")
+	case "$out" in
+		*"cannot DELETE FROM distributed table"*"partitions of a partitioned table"*)
+			ok "so is a DELETE of a partitioned table's partitions" ;;
+		*) notok "a DELETE of a partitioned table" "$out" ;;
+	esac
+	q 0 "CREATE TABLE sq (a int, v text) DISTRIBUTED BY (a);" >/dev/null
+	out=$(q 0 "INSERT INTO sq SELECT 7, (SELECT max(b) FROM d); SELECT count(*), max(v) = (SELECT max(b) FROM d) FROM sq;")
+	[ "$out" = "1|t" ] && ok "an INSERT whose row holds a scalar subquery keeps the subquery's initplan" \
+		|| notok "INSERT with a scalar subquery" "$out"
+
 	# ALTER TABLE ... SET DISTRIBUTED: the policy, and the rows moved with it.
 	q 0 "CREATE TABLE sd (a int, b int) DISTRIBUTED BY (a);" >/dev/null
 	q 0 "INSERT INTO sd SELECT i, i % 7 FROM generate_series(1, 200) i;" >/dev/null
