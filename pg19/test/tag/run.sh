@@ -162,6 +162,31 @@ isl "unsetting the list lets any value through" \
     SELECT gp_sql.set_relation_tag('t'::regclass, 'tier', 'anything');
     SELECT gp_sql.relation_tags('t'::regclass)->>'tier';" "anything"
 
+# Cloudberry's rules for the list (tag.c, transformTagValues), which its own
+# tag test holds the port to: each value once, none of more than 256 bytes,
+# no more than 300, and none dropped that is not there.  Adding and dropping
+# were once a union and a difference, and answered where Cloudberry refuses.
+refused "a value already on the list is refused, not added again" \
+        "SELECT gp_sql.alter_tag('tier', add_values => ARRAY['gold']);
+         SELECT gp_sql.alter_tag('tier', add_values => ARRAY['gold']);" \
+        'allowed value "gold" has been added'
+refused "and so is one given twice" \
+        "SELECT gp_sql.create_tag('twice', ARRAY['a', 'a']);" \
+        'allowed value "a" has been added'
+refused "or one of more than 256 bytes" \
+        "SELECT gp_sql.create_tag('long', ARRAY[repeat('x', 257)]);" \
+        "has exceeded max 256 length"
+refused "or a 301st" \
+        "SELECT gp_sql.create_tag('many', (SELECT array_agg(g::text) FROM generate_series(1, 301) g));" \
+        "Allowed_values only allow 300 values."
+refused "and dropping one that is not there is refused" \
+        "SELECT gp_sql.alter_tag('tier', drop_values => ARRAY['platinum']);" \
+        'allowed value "platinum" not found'
+isl "a value added goes after the ones there, as Cloudberry keeps them" \
+   "SELECT gp_sql.create_tag('order_kept', ARRAY['z', 'a']);
+    SELECT gp_sql.alter_tag('order_kept', add_values => ARRAY['m']);
+    SELECT array_to_string(allowed_values, ',') FROM gp_sql.tag WHERE tagname = 'order_kept';" "z,a,m"
+
 ###############################################################################
 echo "4. the WITH (gp_tag.x = 'y') shorthand, which is Cloudberry's TAG clause"
 ###############################################################################

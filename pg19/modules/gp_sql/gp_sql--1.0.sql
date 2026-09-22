@@ -87,6 +87,42 @@ GRANT SELECT, INSERT, UPDATE, DELETE ON gp_sql.index_tag TO PUBLIC;
 -- Defining a tag: CREATE TAG, ALTER TAG, DROP TAG
 -----------------------------------------------------------------------------
 
+/*
+ * A tag's allowed values with more added, by Cloudberry's rules
+ * (src/backend/commands/tag.c, transformTagValues): each value once, none of
+ * more than 256 bytes, and no more than 300 of them; a new value goes after
+ * the ones there, in the order given, and the messages are Cloudberry's.
+ * NULL, for no list, where there are none.
+ */
+CREATE FUNCTION gp_sql.add_allowed_values(cur text[], add_values text[])
+RETURNS text[]
+LANGUAGE plpgsql IMMUTABLE
+AS $$
+DECLARE
+	result text[] := coalesce(cur, '{}'::text[]);
+	v	text;
+BEGIN
+	FOREACH v IN ARRAY coalesce(add_values, '{}'::text[]) LOOP
+		IF v = ANY (result) THEN
+			RAISE EXCEPTION 'allowed value "%" has been added', v
+				USING ERRCODE = 'duplicate_object';
+		END IF;
+		IF octet_length(v) > 256 THEN
+			RAISE EXCEPTION 'added allowed value "%" has exceeded max 256 length', v
+				USING ERRCODE = 'program_limit_exceeded';
+		END IF;
+		result := result || v;
+	END LOOP;
+
+	IF cardinality(result) > 300 THEN
+		RAISE EXCEPTION 'Allowed_values only allow 300 values.'
+			USING ERRCODE = 'program_limit_exceeded';
+	END IF;
+
+	RETURN CASE WHEN cardinality(result) = 0 THEN NULL ELSE result END;
+END;
+$$;
+
 CREATE FUNCTION gp_sql.create_tag(tagname name,
 								  allowed_values text[] DEFAULT NULL,
 								  if_not_exists boolean DEFAULT false)
@@ -106,7 +142,7 @@ BEGIN
 	INSERT INTO gp_sql.tag (tagname, tagowner, allowed_values)
 		 VALUES (tagname,
 				 pg_catalog.to_regrole(CURRENT_USER::text)::oid,
-				 allowed_values);
+				 gp_sql.add_allowed_values(NULL, allowed_values));
 END;
 $$;
 
@@ -114,8 +150,11 @@ COMMENT ON FUNCTION gp_sql.create_tag(name, text[], boolean) IS
 	'define a tag; what Cloudberry writes as CREATE TAG';
 
 /*
- * ALTER TAG ... ADD/DROP ALLOWED_VALUES and UNSET ALLOWED_VALUES.  Adding is
- * a union and dropping a difference, so that repeating either is harmless.
+ * ALTER TAG ... ADD/DROP ALLOWED_VALUES and UNSET ALLOWED_VALUES, by
+ * Cloudberry's rules: a value added is refused if it is there already, and
+ * one dropped if it is not (add_allowed_values says the rest).  This was once
+ * a union and a difference, so that repeating either was harmless, and
+ * Cloudberry's tag test found the port answering where Cloudberry refuses.
  *
  * Cloudberry refuses to drop a value that some object is tagged with
  * (checkDropTagValue).  The same is done here, over this database: a value in
@@ -147,21 +186,25 @@ BEGIN
 
 	IF drop_values IS NOT NULL THEN
 		FOREACH v IN ARRAY drop_values LOOP
+			IF cur IS NULL OR NOT (v = ANY (cur)) THEN
+				RAISE EXCEPTION 'allowed value "%" not found', v
+					USING ERRCODE = 'undefined_object';
+			END IF;
 			IF EXISTS (SELECT 1 FROM gp_sql.tag_descriptions d
 						WHERE d.tagname = alter_tag.tagname AND d.tagvalue = v) THEN
 				RAISE EXCEPTION 'cannot drop tag "%" value "%", which is in use',
 					tagname, v
 					USING ERRCODE = 'check_violation';
 			END IF;
+			cur := array_remove(cur, v);
 		END LOOP;
-		SELECT array_agg(x ORDER BY ord) INTO cur
-		  FROM unnest(cur) WITH ORDINALITY AS u(x, ord)
-		 WHERE NOT (x = ANY (drop_values));
+		IF cardinality(cur) = 0 THEN
+			cur := NULL;
+		END IF;
 	END IF;
 
 	IF add_values IS NOT NULL THEN
-		SELECT array_agg(DISTINCT x) INTO cur
-		  FROM unnest(coalesce(cur, '{}'::text[]) || add_values) AS u(x);
+		cur := gp_sql.add_allowed_values(cur, add_values);
 	END IF;
 
 	UPDATE gp_sql.tag t SET allowed_values = cur

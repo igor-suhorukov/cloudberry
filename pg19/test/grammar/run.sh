@@ -160,9 +160,31 @@ isl "on CREATE VIEW" \
    "CREATE VIEW tagged_v AS SELECT 1 AS x;
     ALTER VIEW tagged_v TAG (env = 'prod');
     SELECT gp_sql.relation_tags('tagged_v'::regclass)::text;" '{"env": "prod"}'
-isl "on CREATE SCHEMA" \
-   "CREATE SCHEMA tagged_s TAG (env = 'prod');
+# Cloudberry's CREATE SCHEMA takes WITH TAG (...), and nothing else: its tag
+# test expects a bare TAG there to be a syntax error, which it is, left for
+# PostgreSQL's grammar to find.
+isl "on CREATE SCHEMA, as WITH TAG" \
+   "CREATE SCHEMA tagged_s WITH TAG (env = 'prod');
     SELECT gp_sql.schema_tags('tagged_s'::regnamespace)::text;" '{"env": "prod"}'
+refused "and a bare TAG there is Cloudberry's syntax error" \
+        "CREATE SCHEMA tagged_s2 TAG (env = 'prod');" 'syntax error at or near "TAG"'
+# CREATE DATABASE and CREATE TABLESPACE may not run in a transaction block,
+# and PostgreSQL runs a string of statements as one, so a statement followed
+# by the call that tags it was refused.  Their tags go into the statement.
+q "CREATE DATABASE tagged_db TAG (env = 'prod', tier = 'gold');" > /dev/null
+is "on CREATE DATABASE, as options gp_sql takes out again" \
+   "SELECT gp_sql.database_tags('tagged_db')::text;" '{"env": "prod", "tier": "gold"}'
+refused "an undefined one is refused before the database is made" \
+        "CREATE DATABASE never_db TAG (nope = 'x');" 'tag "nope" does not exist'
+is "and none is" "SELECT count(*) FROM pg_database WHERE datname = 'never_db';" "0"
+mkdir -p "$WORK/ts1" "$WORK/ts2"
+q "CREATE TABLESPACE tagged_ts LOCATION '$WORK/ts1' TAG (env = 'prod');" > /dev/null
+is "on CREATE TABLESPACE" \
+   "SELECT gp_sql.tablespace_tags('tagged_ts')::text;" '{"env": "prod"}'
+q "CREATE TABLESPACE tagged_ts2 LOCATION '$WORK/ts2' WITH (random_page_cost = 3.0) TAG (env = 'prod');" > /dev/null
+is "and on one with a WITH list of its own, which keeps it" \
+   "SELECT gp_sql.tablespace_tags('tagged_ts2')::text || ' ' || array_to_string(spcoptions, ',')
+      FROM pg_tablespace WHERE spcname = 'tagged_ts2';" '{"env": "prod"} random_page_cost=3.0'
 isl "on CREATE USER" \
    "CREATE USER tagged_u TAG (env = 'prod');
     SELECT gp_sql.role_tags('tagged_u'::regrole)::text;" '{"env": "prod"}'
@@ -195,6 +217,55 @@ isl "both clauses on one statement" \
    "CREATE TABLE combo (a int) DISTRIBUTED BY (a) TAG (env = 'prod');
     SELECT gp_sql.distribution('combo'::regclass) || ' ' ||
            (gp_sql.relation_tags('combo'::regclass) ->> 'env');" "(a) prod"
+
+# ONE STATEMENT FOR ONE.  These clauses used to become the statement followed
+# by SELECTs of gp_sql's setters: two statements for one, which cannot be
+# prepared -- a driver on the extended protocol, as JDBC and most are, got
+# "cannot insert multiple commands into a prepared statement" -- and whose
+# SELECT's row psql printed after CREATE TABLE.  The singlenode suite found
+# it.  Now each is an option of the statement, in its WITH list, which
+# gp_sql's hook takes out again; the statement stays one.
+is "DISTRIBUTED BY and TAG become options of CREATE TABLE, and it stays one statement" \
+   "SELECT gp_sql.desugar('CREATE TABLE one1 (a int) DISTRIBUTED BY (a) TAG (env = ''prod'')')
+           ~ '^CREATE TABLE one1 \(a int\) +WITH \(gp_tag.env = ''prod'', gp.distributed_by = ''\(a\)''\) *$';" "t"
+got=$(printf '%s\n' "CREATE TABLE ext1 (a int, b int) DISTRIBUTED BY (b) TAG (env = 'prod') \\bind \\g" \
+                    "SELECT gp_sql.distribution('ext1'::regclass) || ' ' || (gp_sql.relation_tags('ext1'::regclass) ->> 'env');" |
+      "$PSQL" -X -q -t -A -d postgres 2>&1)
+[ "$got" = "(b) prod" ] && ok "so it can be prepared, as a driver on the extended protocol does" \
+	|| notok "so it can be prepared, as a driver on the extended protocol does" "got [$got]"
+isl "into the WITH list the statement has, if it has one" \
+   "CREATE TABLE one2 (a int) WITH (fillfactor = 70) DISTRIBUTED BY (a);
+    SELECT array_to_string(reloptions, ',') || ' ' || gp_sql.distribution('one2'::regclass)
+      FROM pg_class WHERE relname = 'one2';" "fillfactor=70 (a)"
+isl "and before AS, on CREATE TABLE AS" \
+   "CREATE TABLE one4 AS SELECT 1 AS a, 2 AS b DISTRIBUTED BY (b) TAG (env = 'prod');
+    SELECT gp_sql.distribution('one4'::regclass) || ' ' || (gp_sql.relation_tags('one4'::regclass) ->> 'env');" \
+   "(b) prod"
+# The tags used to go on the first relation the statement made, and a serial
+# column's sequence is made before its table.
+isl "a table with a serial column gets its tags, and its sequence none" \
+   "CREATE TABLE one3 (id serial, a int) TAG (env = 'prod');
+    SELECT gp_sql.relation_tags('one3'::regclass)::text || ' ' ||
+           coalesce(gp_sql.relation_tags('one3_id_seq'::regclass)::text, 'none');" '{"env": "prod"} none'
+isl "CREATE TABLE IF NOT EXISTS of one that is there leaves its tags alone" \
+   "CREATE TABLE IF NOT EXISTS one3 (id int) TAG (env = 'dev');
+    SELECT gp_sql.relation_tags('one3'::regclass) ->> 'env';" "prod"
+isl "TAG on CREATE INDEX, which Cloudberry's grammar has too" \
+   "CREATE INDEX one3_a ON one3 (a) TAG (env = 'prod');
+    SELECT tagvalue FROM gp_sql.index_tag WHERE indexrelid = 'one3_a'::regclass;" "prod"
+is "ALTER TABLE ... TAG is ALTER TABLE ... SET, in place" \
+   "SELECT gp_sql.desugar('ALTER TABLE one3 ADD COLUMN c int, TAG (env = ''dev'')')
+           ~ '^ALTER TABLE one3 ADD COLUMN c int, SET \(gp_tag.env = ''dev''\) *$';" "t"
+isl "and runs as one" \
+   "ALTER TABLE one3 ADD COLUMN c int, TAG (env = 'dev');
+    SELECT (gp_sql.relation_tags('one3'::regclass) ->> 'env') || ' ' || count(*)
+      FROM pg_attribute WHERE attrelid = 'one3'::regclass AND attname = 'c';" "dev 1"
+isl "and UNSET TAG is RESET" \
+   "ALTER TABLE one3 UNSET TAG (env);
+    SELECT coalesce(gp_sql.relation_tags('one3'::regclass)::text, 'none');" "none"
+is "where no statement has a place for them, the calls are one SELECT" \
+   "SELECT gp_sql.desugar('ALTER SCHEMA s TAG (env = ''prod'', tier = ''gold'')')
+           !~ ';' AND gp_sql.desugar('DROP TAG t1, t2') !~ ';';" "t"
 
 # THE DEFECT THE PARENTHESES FIX, which was found while writing the reader
 # that ORCA's relcache translator needs.  Written bare, a one-column list is

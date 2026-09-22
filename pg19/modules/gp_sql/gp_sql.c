@@ -34,10 +34,15 @@
  */
 #include "postgres.h"
 
+#include "access/xact.h"
 #include "catalog/namespace.h"
 #include "catalog/objectaccess.h"
 #include "catalog/pg_class.h"
+#include "catalog/pg_database.h"
+#include "catalog/pg_tablespace.h"
+#include "commands/dbcommands.h"
 #include "commands/defrem.h"
+#include "commands/tablespace.h"
 #include "executor/executor.h"
 #include "fmgr.h"
 #include "miscadmin.h"
@@ -49,6 +54,7 @@
 #include "utils/acl.h"
 #include "utils/builtins.h"
 #include "utils/lsyscache.h"
+#include "utils/memutils.h"
 
 #include "cb_module.h"
 #include "gp_core_api.h"
@@ -66,15 +72,15 @@ static object_access_hook_type prev_object_access = NULL;
 static ExecutorStart_hook_type prev_ExecutorStart = NULL;
 
 /*
- * Which object a tagged CREATE statement made, and whether to watch for one.
- *
- * CREATE INDEX may not name its index, so the only way to learn what was made
- * is to be told; the first relation the statement creates is the one the
- * clause was written on.  The same route is taken for CREATE TABLE, VIEW and
- * MATERIALIZED VIEW, so that there is one rule rather than one per statement.
+ * The relations a CREATE statement carrying tags or a distribution has made,
+ * while it runs, and whether to watch for them; see created_relation.  The
+ * list is in TopTransactionContext, since the hook that adds to it runs in
+ * whatever context the statement is in at the time.
  */
-static bool pending_tags_armed = false;
-static Oid	pending_relid = InvalidOid;
+static bool pending_armed = false;
+static List *pending_created = NIL;
+
+static void check_distribution_policy(const char *policy);
 
 /* ------------------------------------------------------------------------- */
 /* Where the shorthand may be written                                        */
@@ -149,6 +155,58 @@ has_gp_options(List *options)
 	return false;
 }
 
+/*
+ * WITH (gp.distributed_by = '(a,b)'): what DISTRIBUTED BY on CREATE TABLE,
+ * CREATE TABLE AS and CREATE MATERIALIZED VIEW becomes (gp_desugar.c,
+ * rw_distribution).  Other options of the port's namespace are other
+ * modules' to take.
+ */
+static bool
+is_distribution_option(DefElem *def)
+{
+	return def->defnamespace != NULL &&
+		strcmp(def->defnamespace, GP_OPTION_NS) == 0 &&
+		strcmp(def->defname, "distributed_by") == 0;
+}
+
+static bool
+has_distribution_option(List *options)
+{
+	ListCell   *lc;
+
+	foreach(lc, options)
+	{
+		if (is_distribution_option((DefElem *) lfirst(lc)))
+			return true;
+	}
+
+	return false;
+}
+
+/* Take it out of the option list, before the statement would refuse it. */
+static char *
+take_distribution_option(List **options)
+{
+	char	   *policy = NULL;
+	ListCell   *lc;
+
+	foreach(lc, *options)
+	{
+		DefElem    *def = (DefElem *) lfirst(lc);
+
+		if (!is_distribution_option(def))
+			continue;
+		if (policy != NULL)
+			ereport(ERROR,
+					(errcode(ERRCODE_SYNTAX_ERROR),
+					 errmsg("a table can be given one distribution")));
+		policy = defGetString(def);
+		*options = foreach_delete_current(*options, lc);
+	}
+
+	return policy;
+}
+
 /* The same, over the SET/RESET subcommands of an ALTER TABLE. */
 static bool
 alter_has_tag_options(AlterTableStmt *stmt)
@@ -210,13 +268,13 @@ alter_take_tags(AlterTableStmt *stmt)
 /* ------------------------------------------------------------------------- */
 
 /*
- * The first relation a tagged CREATE statement makes is the one the clause
- * was written on.
+ * The relations a CREATE statement carrying tags or a distribution makes.
  *
- * Only its OID is taken here.  index_create fires this hook before the
+ * Only their OIDs are taken here.  index_create fires this hook before the
  * CommandCounterIncrement that makes the new pg_class row visible, so nothing
  * that reads the catalog for it can run yet -- not even to ask what relkind
- * it is.  The tags are put on once the statement is over.
+ * it is.  Which of them the clauses were written on is worked out once the
+ * statement is over (created_relation).
  */
 static void
 gp_sql_object_access(ObjectAccessType access, Oid classId, Oid objectId,
@@ -230,8 +288,13 @@ gp_sql_object_access(ObjectAccessType access, Oid classId, Oid objectId,
 
 	if (access == OAT_POST_CREATE)
 	{
-		if (pending_tags_armed && !OidIsValid(pending_relid))
-			pending_relid = objectId;
+		if (pending_armed)
+		{
+			MemoryContext oldcxt = MemoryContextSwitchTo(TopTransactionContext);
+
+			pending_created = lappend_oid(pending_created, objectId);
+			MemoryContextSwitchTo(oldcxt);
+		}
 	}
 	else if (access == OAT_DROP)
 	{
@@ -275,30 +338,41 @@ gp_sql_tablespace_options(PlannedStmt *pstmt, const char *queryString,
 {
 	Node	   *parsetree = pstmt->utilityStmt;
 	List	  **options;
-	List	   *opts;
+	List	   *opts = NIL;
+	List	   *tags = NIL;
+	bool		creating = IsA(parsetree, CreateTableSpaceStmt);
 	const char *spcname;
 
-	if (IsA(parsetree, CreateTableSpaceStmt))
+	if (creating)
 		options = &((CreateTableSpaceStmt *) parsetree)->options;
 	else
 		options = &((AlterTableSpaceOptionsStmt *) parsetree)->options;
 
-	if (has_gp_options(*options))
+	if (has_gp_options(*options) || (creating && has_tag_options(*options)))
 	{
 		if (readOnlyTree)
 		{
 			pstmt = copyObject(pstmt);
 			parsetree = pstmt->utilityStmt;
 			readOnlyTree = false;
-			if (IsA(parsetree, CreateTableSpaceStmt))
+			if (creating)
 				options = &((CreateTableSpaceStmt *) parsetree)->options;
 			else
 				options = &((AlterTableSpaceOptionsStmt *) parsetree)->options;
 		}
 		opts = GpStorageTakeTablespaceOptions(options);
+
+		/*
+		 * CREATE TABLESPACE ... TAG (...), which the desugarer writes into the
+		 * WITH list: the statement may not run in a transaction block, so a
+		 * call after it could not be how its tags are set.
+		 */
+		if (creating)
+			tags = GpTagTakeOptions(options);
 	}
-	else
-		opts = NIL;
+
+	/* An undefined tag is refused before the tablespace is made. */
+	GpTagCheckAll(tags);
 
 	if (prev_ProcessUtility)
 		prev_ProcessUtility(pstmt, queryString, readOnlyTree, context,
@@ -307,15 +381,129 @@ gp_sql_tablespace_options(PlannedStmt *pstmt, const char *queryString,
 		standard_ProcessUtility(pstmt, queryString, readOnlyTree, context,
 								params, queryEnv, dest, qc);
 
-	if (opts == NIL)
-		return;
-
-	if (IsA(parsetree, CreateTableSpaceStmt))
+	if (creating)
 		spcname = ((CreateTableSpaceStmt *) parsetree)->tablespacename;
 	else
 		spcname = ((AlterTableSpaceOptionsStmt *) parsetree)->tablespacename;
 
-	GpStorageApplyToTablespace(spcname, opts);
+	if (opts != NIL)
+		GpStorageApplyToTablespace(spcname, opts);
+
+	if (tags != NIL)
+	{
+		CommandCounterIncrement();
+		GpTagApplyToObject(TableSpaceRelationId,
+						   get_tablespace_oid(spcname, false), tags);
+	}
+}
+
+/*
+ * CREATE DATABASE ... TAG (...), which the desugarer writes as options named
+ * "gp_tag.<name>", because the statement may not run in a transaction block
+ * and so cannot be followed by the call that would set them.  They are taken
+ * out before createdb() would refuse them, and the database is labelled once
+ * it exists, in the statement's own transaction.
+ */
+static void
+gp_sql_createdb_tags(PlannedStmt *pstmt, const char *queryString,
+					 bool readOnlyTree, ProcessUtilityContext context,
+					 ParamListInfo params, QueryEnvironment *queryEnv,
+					 DestReceiver *dest, QueryCompletion *qc)
+{
+	CreatedbStmt *stmt;
+	List	   *tags;
+
+	if (readOnlyTree)
+	{
+		pstmt = copyObject(pstmt);
+		readOnlyTree = false;
+	}
+	stmt = (CreatedbStmt *) pstmt->utilityStmt;
+	tags = GpTagTakeDatabaseOptions(&stmt->options);
+
+	/* An undefined tag is refused before the database is made. */
+	GpTagCheckAll(tags);
+
+	if (prev_ProcessUtility)
+		prev_ProcessUtility(pstmt, queryString, readOnlyTree, context,
+							params, queryEnv, dest, qc);
+	else
+		standard_ProcessUtility(pstmt, queryString, readOnlyTree, context,
+								params, queryEnv, dest, qc);
+
+	CommandCounterIncrement();
+	GpTagApplyToObject(DatabaseRelationId, get_database_oid(stmt->dbname, false),
+					   tags);
+}
+
+/* Does CREATE DATABASE carry the desugarer's tag options? */
+static bool
+createdb_has_tags(CreatedbStmt *stmt)
+{
+	ListCell   *lc;
+
+	foreach(lc, stmt->options)
+	{
+		DefElem    *def = (DefElem *) lfirst(lc);
+
+		if (strncmp(def->defname, GP_TAG_OPTION_NS ".",
+					strlen(GP_TAG_OPTION_NS ".")) == 0)
+			return true;
+	}
+
+	return false;
+}
+
+/*
+ * The relation a CREATE statement carrying tags or a distribution made, or
+ * InvalidOid if it made none -- CREATE TABLE IF NOT EXISTS of one that was
+ * there already.  The statement names it, all but CREATE INDEX, which need
+ * not, and it is the one of that name among the relations the statement
+ * made.  It used to be the first relation the statement made, which for a
+ * table with a serial column is the column's sequence: the tags of
+ * CREATE TABLE t (id serial) WITH (gp_tag.env = 'prod') went on t_id_seq.
+ * CREATE OR REPLACE VIEW of a view that was there already made nothing, and
+ * is the view it replaced.  CREATE INDEX makes one index, and child indexes
+ * after it on a partitioned table; the first index is the one.
+ */
+static Oid
+created_relation(Node *parsetree)
+{
+	RangeVar   *rv;
+	Oid			relid;
+	ListCell   *lc;
+
+	/* what the statement made, visible */
+	CommandCounterIncrement();
+
+	switch (nodeTag(parsetree))
+	{
+		case T_CreateStmt:
+			rv = ((CreateStmt *) parsetree)->relation;
+			break;
+		case T_CreateTableAsStmt:
+			rv = ((CreateTableAsStmt *) parsetree)->into->rel;
+			break;
+		case T_ViewStmt:
+			rv = ((ViewStmt *) parsetree)->view;
+			if (((ViewStmt *) parsetree)->replace)
+				return RangeVarGetRelid(rv, NoLock, true);
+			break;
+		case T_IndexStmt:
+			foreach(lc, pending_created)
+			{
+				char		relkind = get_rel_relkind(lfirst_oid(lc));
+
+				if (relkind == RELKIND_INDEX || relkind == RELKIND_PARTITIONED_INDEX)
+					return lfirst_oid(lc);
+			}
+			return InvalidOid;
+		default:
+			return InvalidOid;
+	}
+
+	relid = RangeVarGetRelid(rv, NoLock, true);
+	return list_member_oid(pending_created, relid) ? relid : InvalidOid;
 }
 
 static void
@@ -327,6 +515,7 @@ gp_sql_ProcessUtility(PlannedStmt *pstmt, const char *queryString,
 	Node	   *parsetree = pstmt->utilityStmt;
 	List	  **options;
 	List	   *tags = NIL;
+	char	   *policy = NULL;
 	bool		is_alter = false;
 
 	if (IsA(parsetree, TruncateStmt))
@@ -340,9 +529,18 @@ gp_sql_ProcessUtility(PlannedStmt *pstmt, const char *queryString,
 		return;
 	}
 
+	if (IsA(parsetree, CreatedbStmt) &&
+		createdb_has_tags((CreatedbStmt *) parsetree))
+	{
+		gp_sql_createdb_tags(pstmt, queryString, readOnlyTree, context,
+							 params, queryEnv, dest, qc);
+		return;
+	}
+
 	options = create_options_of(parsetree);
 
-	if ((options != NULL && has_tag_options(*options)) ||
+	if ((options != NULL &&
+		 (has_tag_options(*options) || has_distribution_option(*options))) ||
 		(IsA(parsetree, AlterTableStmt) &&
 		 alter_has_tag_options((AlterTableStmt *) parsetree)))
 	{
@@ -364,10 +562,13 @@ gp_sql_ProcessUtility(PlannedStmt *pstmt, const char *queryString,
 			is_alter = true;
 		}
 		else
+		{
 			tags = GpTagTakeOptions(options);
+			policy = take_distribution_option(options);
+		}
 	}
 
-	if (tags == NIL)
+	if (tags == NIL && policy == NULL)
 	{
 		if (prev_ProcessUtility)
 			prev_ProcessUtility(pstmt, queryString, readOnlyTree, context,
@@ -379,19 +580,23 @@ gp_sql_ProcessUtility(PlannedStmt *pstmt, const char *queryString,
 	}
 
 	/*
-	 * An undefined tag is refused before the statement runs, so that a
-	 * misspelled one does not leave a table behind.
+	 * An undefined tag, or a policy that is not one, is refused before the
+	 * statement runs, so that a misspelled one does not leave a table behind.
 	 */
 	GpTagCheckAll(tags);
+	if (policy != NULL)
+		check_distribution_policy(policy);
 
 	if (!is_alter)
 	{
-		pending_tags_armed = true;
-		pending_relid = InvalidOid;
+		pending_armed = true;
+		pending_created = NIL;
 	}
 
 	PG_TRY();
 	{
+		Oid			relid;
+
 		if (prev_ProcessUtility)
 			prev_ProcessUtility(pstmt, queryString, readOnlyTree, context,
 								params, queryEnv, dest, qc);
@@ -403,17 +608,28 @@ gp_sql_ProcessUtility(PlannedStmt *pstmt, const char *queryString,
 		{
 			AlterTableStmt *stmt = (AlterTableStmt *) parsetree;
 
-			pending_relid = RangeVarGetRelid(stmt->relation, NoLock,
-											 stmt->missing_ok);
+			relid = RangeVarGetRelid(stmt->relation, NoLock, stmt->missing_ok);
 		}
+		else
+			relid = created_relation(parsetree);
 
-		if (OidIsValid(pending_relid))
-			GpTagApplyToRelation(pending_relid, tags);
+		if (OidIsValid(relid))
+		{
+			if (policy != NULL)
+			{
+				ObjectAddress addr;
+
+				/* the statement made it, so the user running it owns it */
+				ObjectAddressSet(addr, RelationRelationId, relid);
+				GpLabelSet(&addr, GP_LABEL_distributed_by, policy);
+			}
+			GpTagApplyToRelation(relid, tags);
+		}
 	}
 	PG_FINALLY();
 	{
-		pending_tags_armed = false;
-		pending_relid = InvalidOid;
+		pending_armed = false;
+		pending_created = NIL;
 	}
 	PG_END_TRY();
 }

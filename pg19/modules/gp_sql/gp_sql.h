@@ -64,17 +64,28 @@ extern List *GpTagTakeOptions(List **options);
 extern List *GpTagTakeResetOptions(List **options);
 
 /*
+ * The same for CREATE DATABASE, which has no namespaced options: the tags are
+ * the options named "gp_tag.<name>".
+ */
+extern List *GpTagTakeDatabaseOptions(List **options);
+
+/*
  * Refuse any tag in the list that is not defined, or whose value the
  * definition does not allow.  Called before the statement carrying them runs.
  */
 extern void GpTagCheckAll(List *tags);
 
 /*
- * Give an object the tags a stripped option list named.  `classId` is
- * RelationRelationId for everything the shorthand reaches.  Indexes cannot
+ * Give a relation the tags a stripped option list named.  Indexes cannot
  * carry a security label, so theirs go to gp_sql.index_tag instead.
  */
 extern void GpTagApplyToRelation(Oid relId, List *tags);
+
+/*
+ * Give an object the statement has just made -- a relation, a database or a
+ * tablespace -- the tags, as its gp_tag label.  The tags are not checked here.
+ */
+extern void GpTagApplyToObject(Oid classId, Oid objectId, List *tags);
 
 /* An index is being dropped: forget the tags kept for it. */
 extern void GpTagIndexDropped(Oid indexRelId);

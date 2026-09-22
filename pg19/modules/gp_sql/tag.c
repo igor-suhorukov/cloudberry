@@ -371,6 +371,33 @@ GpTagTakeOptions(List **options)
 	return taken;
 }
 
+/*
+ * The same for CREATE DATABASE, whose options have no namespace: the
+ * desugarer writes each tag there as an option named "gp_tag.<name>"
+ * (gp_desugar.c, tag_option).
+ */
+List *
+GpTagTakeDatabaseOptions(List **options)
+{
+	List	   *taken = NIL;
+	const char *prefix = GP_TAG_OPTION_NS ".";
+	ListCell   *lc;
+
+	foreach(lc, *options)
+	{
+		DefElem    *def = (DefElem *) lfirst(lc);
+
+		if (strncmp(def->defname, prefix, strlen(prefix)) != 0)
+			continue;
+
+		taken = lappend(taken, makeDefElem(pstrdup(def->defname + strlen(prefix)),
+										   def->arg, -1));
+		*options = foreach_delete_current(*options, lc);
+	}
+
+	return taken;
+}
+
 List *
 GpTagTakeResetOptions(List **options)
 {
@@ -473,9 +500,7 @@ tag_apply_to_index(Oid indexRelId, List *tags)
 void
 GpTagApplyToRelation(Oid relId, List *tags)
 {
-	ObjectAddress addr;
 	char		relkind;
-	char	   *merged;
 
 	if (tags == NIL)
 		return;
@@ -489,12 +514,27 @@ GpTagApplyToRelation(Oid relId, List *tags)
 		return;
 	}
 
-	/*
-	 * SetSecurityLabel rather than a SECURITY LABEL statement: the object was
-	 * created by this statement, so its owner is the user running it, and
-	 * there is nothing left for the ownership check to find out.
-	 */
-	ObjectAddressSet(addr, RelationRelationId, relId);
+	GpTagApplyToObject(RelationRelationId, relId, tags);
+}
+
+/*
+ * The label of an object the statement being run has just made, with the
+ * tags added: a relation, a database or a tablespace.
+ *
+ * SetSecurityLabel rather than a SECURITY LABEL statement: the object was
+ * created by this statement, so its owner is the user running it, and there
+ * is nothing left for the ownership check to find out.
+ */
+void
+GpTagApplyToObject(Oid classId, Oid objectId, List *tags)
+{
+	ObjectAddress addr;
+	char	   *merged;
+
+	if (tags == NIL)
+		return;
+
+	ObjectAddressSet(addr, classId, objectId);
 	merged = tag_merge(GetSecurityLabel(&addr, GP_TAG_PROVIDER), tags);
 
 	/* An object with no tags left loses its label rather than keeping "{}". */
