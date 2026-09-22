@@ -137,6 +137,9 @@ _PG_init(void)
 	GpScanInit();
 	GpModifyInit();
 
+	/* O3: ANALYZE samples a distributed table on the segments. */
+	GpAnalyzeInit();
+
 	/*
 	 * Deliberately no MarkGUCPrefixReserved("gp") here.  It drops every
 	 * "gp.*" placeholder that is not defined yet, with a warning, and the

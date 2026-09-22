@@ -52,6 +52,7 @@
 #include "postgres.h"
 
 #include "access/table.h"
+#include "access/htup_details.h"
 #include "catalog/pg_class.h"
 #include "catalog/pg_opfamily.h"
 #include "commands/explain.h"
@@ -72,6 +73,7 @@
 #include "utils/lsyscache.h"
 #include "utils/rel.h"
 #include "utils/ruleutils.h"
+#include "utils/syscache.h"
 
 #include "gp_cluster.h"
 #include "gp_core_api.h"
@@ -86,6 +88,7 @@
 #define GATHER_ROW_COST			(10.0 * DEFAULT_CPU_TUPLE_COST)
 
 static set_rel_pathlist_hook_type prev_set_rel_pathlist = NULL;
+static build_simple_rel_hook_type prev_build_simple_rel = NULL;
 
 static Plan *gather_plan(PlannerInfo *root, RelOptInfo *rel,
 						 CustomPath *best_path, List *tlist,
@@ -302,6 +305,43 @@ direct_dispatch_segment(GpPolicy *policy, Relation rel, List *quals,
 /* ------------------------------------------------------------------------- */
 /* Planning                                                                  */
 /* ------------------------------------------------------------------------- */
+
+/*
+ * The size of a distributed table.  The planner scales pg_class's reltuples
+ * by the pages the table has now, and the coordinator's copy has none, so a
+ * table ANALYZE has counted would be estimated at no rows at all.  What
+ * ANALYZE wrote is the size across the segments (gp_analyze.c), and is taken
+ * as it stands.  A table never analyzed keeps the planner's own guess.
+ */
+static void
+gp_build_simple_rel(PlannerInfo *root, RelOptInfo *rel, RangeTblEntry *rte)
+{
+	HeapTuple	tuple;
+	Form_pg_class classForm;
+
+	if (prev_build_simple_rel)
+		prev_build_simple_rel(root, rel, rte);
+
+	if (GpClusterBackendRole() != GP_ROLE_DISPATCH)
+		return;
+	if (rte->rtekind != RTE_RELATION || rte->relkind != RELKIND_RELATION)
+		return;
+	if (GpScanDistributedPolicy(rte->relid) == NULL)
+		return;
+
+	tuple = SearchSysCache1(RELOID, ObjectIdGetDatum(rte->relid));
+	if (!HeapTupleIsValid(tuple))
+		return;
+	classForm = (Form_pg_class) GETSTRUCT(tuple);
+	if (classForm->relpages > 0 && classForm->reltuples >= 0)
+	{
+		rel->pages = (BlockNumber) classForm->relpages;
+		rel->tuples = classForm->reltuples;
+		rel->allvisfrac = Min(1.0, (double) classForm->relallvisible /
+							  classForm->relpages);
+	}
+	ReleaseSysCache(tuple);
+}
 
 static void
 gp_set_rel_pathlist(PlannerInfo *root, RelOptInfo *rel, Index rti,
@@ -618,4 +658,7 @@ GpScanInit(void)
 
 	prev_set_rel_pathlist = set_rel_pathlist_hook;
 	set_rel_pathlist_hook = gp_set_rel_pathlist;
+
+	prev_build_simple_rel = build_simple_rel_hook;
+	build_simple_rel_hook = gp_build_simple_rel;
 }

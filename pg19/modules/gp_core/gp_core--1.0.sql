@@ -5,11 +5,30 @@
 
 /*
  * "gp" holds what users call; "gp_internal" holds what the dispatcher calls on
- * a segment.  Keeping them apart means the segment entry points can be revoked
- * from PUBLIC without taking the user-facing functions with them.
+ * a segment.  Anyone may reach the schema: the dispatcher connects to a
+ * segment as the session's own user, and ANALYZE by a table's owner has to be
+ * able to call sample_rows() there.  So every function in it either checks the
+ * caller's privileges itself or has EXECUTE revoked from PUBLIC.
  */
 CREATE SCHEMA IF NOT EXISTS gp_internal;
-REVOKE ALL ON SCHEMA gp_internal FROM PUBLIC;
+GRANT USAGE ON SCHEMA gp_internal TO PUBLIC;
+
+/*
+ * A segment's sample of a table, for ANALYZE on the coordinator (O3).  The
+ * first row is the segment's live and dead row counts; every other row is a
+ * sampled row of the table's own type.  It checks that the caller may read or
+ * ANALYZE the table, and is not STRICT because NULL::t is how it is told
+ * which table.
+ */
+CREATE FUNCTION gp_internal.sample_rows(
+	rel anyelement,
+	targrows int,
+	OUT totalrows float8,
+	OUT totaldeadrows float8,
+	OUT sample anyelement)
+RETURNS SETOF record
+AS 'MODULE_PATHNAME', 'gp_sample_rows'
+LANGUAGE C;
 
 CREATE FUNCTION gp.version()
 RETURNS text

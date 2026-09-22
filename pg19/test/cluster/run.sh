@@ -566,7 +566,67 @@ mine" ] && ok "a transaction reads its own rows, and a LIMIT leaves the connecti
 	[ "$out|$n1" = "0|0" ] && ok "TRUNCATE empties the segments" || notok "TRUNCATE" "$out|$n1"
 
 	###########################################################################
-	echo "9. the segments authenticate the coordinator, with SCRAM"
+	echo "9. ANALYZE samples the segments, and the planner believes it"
+	###########################################################################
+	# O3: the coordinator's copy of a distributed table is empty, so ANALYZE
+	# asks every segment for a sample and for its count, and pg_class and
+	# pg_statistic on the coordinator describe the rows where they are.
+	q 0 "CREATE TABLE st (a int, g int, v text) DISTRIBUTED BY (a);" >/dev/null
+	q 0 "INSERT INTO st SELECT i, i % 10, CASE WHEN i % 4 = 0 THEN NULL ELSE md5(i::text) END FROM generate_series(1, 2000) i;" >/dev/null
+	q 0 "ANALYZE st;" >/dev/null
+
+	out=$(q 0 "SELECT reltuples FROM pg_class WHERE relname = 'st';")
+	[ "$out" = "2000" ] && ok "reltuples on the coordinator counts the rows on every segment" \
+		|| notok "reltuples after ANALYZE" "$out"
+
+	pages=$(q 0 "SELECT relpages FROM pg_class WHERE relname = 'st';")
+	seg=0
+	for n in 1 2; do
+		p=$(q "$n" "SELECT pg_relation_size('st') / current_setting('block_size')::int;")
+		isnum "$p" && seg=$((seg + p))
+	done
+	[ "$pages" = "$seg" ] && ok "relpages is the segments' pages together ($pages)" \
+		|| notok "relpages after ANALYZE" "$pages, segments: $seg"
+
+	out=$(q 0 "SELECT n_distinct, null_frac FROM pg_stats WHERE tablename = 'st' AND attname IN ('g', 'v') ORDER BY attname;" | tr '\n' ' ')
+	[ "$out" = "10|0 -0.75|0.25 " ] \
+		&& ok "pg_stats is computed from the segments' rows" \
+		|| notok "pg_stats after ANALYZE" "$out"
+
+	out=$(q 0 "EXPLAIN SELECT * FROM st WHERE g = 3;" | sed -n 's/.*rows=\([0-9]*\).*/\1/p' | head -1)
+	isnum "$out" && [ "$out" -ge 150 ] && [ "$out" -le 250 ] \
+		&& ok "the planner estimates from those statistics, not the empty copy ($out rows)" \
+		|| notok "the estimate after ANALYZE" "$out"
+
+	q 0 "CREATE TABLE rst (a int) DISTRIBUTED REPLICATED;" >/dev/null
+	q 0 "INSERT INTO rst SELECT generate_series(1, 300); ANALYZE rst;" >/dev/null
+	out=$(q 0 "SELECT reltuples FROM pg_class WHERE relname = 'rst';")
+	[ "$out" = "300" ] && ok "a replicated table's rows are counted once, not once a segment" \
+		|| notok "reltuples of a replicated table" "$out"
+
+	q 0 "ANALYZE sales;" >/dev/null
+	out=$(q 0 "SELECT reltuples FROM pg_class WHERE relname = 'sales';")
+	out2=$(q 0 "SELECT count(*) FROM pg_stats WHERE tablename = 'sales' AND inherited;")
+	[ "$out" = "90" ] && isnum "$out2" && [ "$out2" -eq 3 ] \
+		&& ok "a partitioned table is analyzed through its partitions" \
+		|| notok "ANALYZE of a partitioned table" "$out / inherited stats: $out2"
+
+	# On a segment, a utility session analyzes the rows it has, as vanilla does.
+	own=$(q 1 "SELECT count(*) FROM st;")
+	q 1 "ANALYZE st;" >/dev/null
+	out=$(q 1 "SELECT reltuples FROM pg_class WHERE relname = 'st';")
+	[ "$out" = "$own" ] && ok "ANALYZE in a utility session on a segment counts that segment's rows" \
+		|| notok "ANALYZE on a segment" "$out, has $own"
+
+	q 0 "CREATE ROLE analyze_nobody LOGIN;" >/dev/null
+	out=$(q 0 "SET ROLE analyze_nobody; SELECT count(*) FROM gp_internal.sample_rows(NULL::st, 5);")
+	case "$out" in
+		*"permission denied"*) ok "a sample is refused to a role that cannot read the table" ;;
+		*) notok "gp_internal.sample_rows without SELECT" "$out" ;;
+	esac
+
+	###########################################################################
+	echo "10. the segments authenticate the coordinator, with SCRAM"
 	###########################################################################
 	# Decision 5 asks for SCRAM on the early milestones.  The dispatcher is an
 	# ordinary client, so this is ordinary authentication: the segment asks,
@@ -608,7 +668,7 @@ mine" ] && ok "a transaction reads its own rows, and a LIMIT leaves the connecti
 fi
 
 ###############################################################################
-echo "10. a cluster described wrongly is a server that does not start"
+echo "11. a cluster described wrongly is a server that does not start"
 ###############################################################################
 # The message has to name the file and the line: this is read in the
 # postmaster while it starts, so it is all the operator is given.
@@ -678,7 +738,7 @@ refuses "a file that is not there is refused" \
 	"gp.cluster_config = '$ROOT/nowhere.conf'"
 
 ###############################################################################
-echo "11. with no cluster configured, this is a single node"
+echo "12. with no cluster configured, this is a single node"
 ###############################################################################
 if start_node 0 "gp.cluster_config = ''" ; then
 	notok "node 0 should not have started: gp.role is dispatch with no cluster"

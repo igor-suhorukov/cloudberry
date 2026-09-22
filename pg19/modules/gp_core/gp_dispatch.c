@@ -81,6 +81,7 @@
 #include "utils/syscache.h"
 #include "utils/timestamp.h"
 #include "utils/tuplestore.h"
+#include "utils/typcache.h"
 #include "utils/wait_event.h"
 
 #include "gp_cluster.h"
@@ -1270,6 +1271,14 @@ type_has_binary_io(Oid typid)
 		inner = typ->typelem;
 	else if (typ->typtype == TYPTYPE_DOMAIN)
 		inner = typ->typbasetype;
+	else if (typ->typtype == TYPTYPE_COMPOSITE && result)
+	{
+		/* record_send() calls each column's send function in turn */
+		TupleDesc	td = lookup_rowtype_tupdesc(typid, -1);
+
+		result = GpTupleDescHasBinaryIO(td);
+		ReleaseTupleDesc(td);
+	}
 	ReleaseSysCache(tp);
 
 	if (result && OidIsValid(inner))
@@ -1615,6 +1624,38 @@ GpGatherEnd(GpGatherState *gather)
 /* ------------------------------------------------------------------------- */
 /* The SQL surface                                                           */
 /* ------------------------------------------------------------------------- */
+
+/*
+ * Run a query on every segment (content -1) or one, and answer the first
+ * column of each one's first row, as text, NULL where there was none; one
+ * entry per segment asked, in content order.
+ */
+void
+GpDispatchQueryFirstValues(const char *sql, int content, char **values)
+{
+	GpGang	   *g = gang_get();
+	PGresult  **results;
+	int			n = 0;
+
+	gang_prepare(g, true);
+	results = (PGresult **) palloc0_array(PGresult *, g->nconns);
+
+	for (int i = 0; i < g->nconns; i++)
+		if (content < 0 || g->conns[i].content == content)
+			conn_send(&g->conns[i], sql);
+	gang_wait_all(g, results, false);
+
+	for (int i = 0; i < g->nconns; i++)
+	{
+		if (content >= 0 && g->conns[i].content != content)
+			continue;
+		values[n++] = (results[i] != NULL && PQntuples(results[i]) > 0 &&
+					   PQnfields(results[i]) > 0 && !PQgetisnull(results[i], 0, 0))
+			? pstrdup(PQgetvalue(results[i], 0, 0)) : NULL;
+		if (results[i] != NULL)
+			PQclear(results[i]);
+	}
+}
 
 PG_FUNCTION_INFO_V1(gp_exec_on_segments);
 

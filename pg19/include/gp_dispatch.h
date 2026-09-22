@@ -129,6 +129,13 @@ extern void GpCopyInBegin(int content, const char *sql);
 extern void GpCopyInData(const char *data, int len);
 extern uint64 GpCopyInEnd(void);
 
+/*
+ * A query on every segment (content -1) or one: the first column of each
+ * segment's first row, as text, or NULL; one entry per segment asked.
+ */
+extern void GpDispatchQueryFirstValues(const char *sql, int content,
+									   char **values);
+
 /* Close every connection: the session is over, or something went wrong. */
 extern void GpDispatchResetGang(void);
 

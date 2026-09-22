@@ -42,4 +42,7 @@ extern void GpScanInit(void);
 /* The write path, where there is a cluster; see gp_modify.c. */
 extern void GpModifyInit(void);
 
+/* ANALYZE of a distributed table through O3, where there is a cluster. */
+extern void GpAnalyzeInit(void);
+
 #endif							/* GP_SCAN_H */
