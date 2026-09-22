@@ -1,0 +1,16 @@
+@@
+- id | val | sum | mysum1 | mysum2 
+-----+-----+-----+--------+--------
+-  1 |   1 |   1 |      1 |      1
+-  2 |   2 |   3 |      3 |      3
+-  3 |   3 |   6 |      6 |      6
+-  4 |   4 |   9 |      9 |      9
+-  5 |   5 |  12 |     12 |     12
+-(5 rows)
+-
++ERROR:  cannot copy window "w" because it has a frame clause
++LINE 1: select id, val, sum(val) over (w), mysum1(val) over (w), mys...
++                                      ^
++HINT:  Omit the parentheses in this OVER clause.
+@@
++ERROR:  unrecognized configuration parameter "gp_motion_cost_per_row"

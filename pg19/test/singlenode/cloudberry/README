@@ -1,0 +1,117 @@
+Cloudberry's singlenode tests on the port: the differences from Cloudberry's
+expected output that have been reviewed, and are the port's for a reason of
+its own.
+
+Each file is one test's difference in the form ../canon.pl gives it -- the
+lines removed and added, hunk by hunk, with no file names, line numbers or
+plan lines -- named for the expected output it differs from; a name with a
+pass in it (test.orca.diff) holds for that pass alone.  run.sh counts a test
+as passing when gpdiff.pl, under Cloudberry's init_file and the port's, finds
+no difference or exactly the file's.
+
+Most of every difference is a statement that fails, for a reason its error
+names, and what comes of it: the rows a query over a table that was never
+made would have returned, a later statement in the same transaction refused.
+The reasons, by what brings them, and then each test:
+
+  Append-optimized and column-oriented tables, their catalogs and the bitmap
+  index -- WITH (appendonly=true), orientation, ENCODING, compresstype,
+  pg_appendonly, pg_attribute_encoding, USING bitmap, ao_row: M5.
+
+  External tables, gpfdist, COPY ... LOG ERRORS and the error log functions,
+  FILL MISSING FIELDS, NEWLINE, ESCAPE outside CSV mode: M5, the loading path.
+
+  gp_dist_random(), gp_segment_id, gp_segment_configuration,
+  gp_distribution_policy, gp_configuration_history, and the settings of a
+  cluster that dispatches (gp_enable_direct_dispatch,
+  test_print_direct_dispatch_info, gp_interconnect_queue_depth,
+  gp_motion_cost_per_row, gp_cte_sharing, gp_enable_multiphase_agg,
+  test_print_prefetch_joinqual): M2.
+
+  statement_mem and gp_workfile_compression: M6, resource management.
+
+  Cloudberry's classic partition syntax -- PARTITION BY RANGE (c) (START (1)
+  END (10) EVERY (1)), ALTER TABLE ... DROP DEFAULT PARTITION -- and its table
+  functions, TABLE (...) and anytable: grammar the port's O26 does not have.
+
+  gp_autostats_mode, enable_groupagg and gp_recursive_cte: settings the port
+  has no counterpart of.  Recursive CTEs are always on, as in PostgreSQL.
+
+  PL/Python, which the image does not carry, and what Cloudberry's tests make
+  with it: count_operator() and count_index_scans(), which count the nodes of
+  a plan.
+
+  PostgreSQL 19's own behaviour where Cloudberry changed its parser or
+  PostgreSQL has changed since: OVER (w) of a window with a frame ("cannot
+  copy window"), a frame offset that reads a column ("argument of ROWS must
+  not contain variables"), a chain of UNIONs over NULLs, which PostgreSQL
+  types one UNION at a time ("UNION types text and integer cannot be
+  matched"), IS NOT DISTINCT FROM printed as NOT ... IS DISTINCT FROM,
+  standard_conforming_strings = off and escape_string_warning, which
+  PostgreSQL 19 no longer has, and NOT NULL constraints, which PostgreSQL 18
+  keeps in pg_constraint.
+
+  Cloudberry's own functions and syntax: median(), DECODE (which Cloudberry's
+  parser makes a CASE, even where a function called decode exists), and
+  CASE x WHEN IS NOT DISTINCT FROM y.
+
+The tests
+
+bfv_aggregate  count_operator(), median(), gp_enable_multiphase_agg, an
+  append-optimized table, PL/Python, OVER (w) with a frame, a frame offset
+  that reads a column.
+bfv_catalog  count_operator(), pg_stat_last_operation (Cloudberry's catalog of
+  when an object was last changed), escape_string_warning and
+  standard_conforming_strings = off, PL/Python, and one row more in a query
+  over pg_constraint: the table's NOT NULL constraint.
+bfv_dd, bfv_dd_multicolumn, bfv_dd_types  direct dispatch's test setting,
+  gp_autostats_mode, the classic partition syntax, the bitmap index.
+bfv_index  count_index_scans(), append-optimized tables, the classic
+  partition syntax.
+bfv_olap  gp_motion_cost_per_row, OVER (w) with a frame.
+case_gp  CASE x WHEN IS NOT DISTINCT FROM y, DECODE, and the deparse of IS
+  NOT DISTINCT FROM.
+cluster_gp  an append-optimized table.
+create_table_like_gp  external tables, append-optimized tables and their
+  catalogs, ENCODING, gp_default_storage_options, ao_row.
+gp_gin_index  the complex type, which Cloudberry's own earlier tests make;
+  and the index wowidx and the rows of test_tsvector that PostgreSQL 19's
+  tsearch test, which runs before it here, leaves behind (two counts one and
+  three higher).
+gp_recursive_cte  gp_recursive_cte, whose "off" Cloudberry's test expects to
+  refuse a recursive CTE, and a plan gpdiff.pl does not take for one, which is
+  PostgreSQL 19's planner's.
+gpcopy  COPY's LOG ERRORS, FILL MISSING FIELDS, NEWLINE and ESCAPE outside
+  CSV mode, the error log functions, gp_configuration_history,
+  gp_autostats_mode, and the broken_int4 type of Cloudberry's regress.so.
+indexjoin  an append-optimized table.
+join_gp  gp_dist_random(), the classic partition syntax, statement_mem,
+  gp_workfile_compression, test_print_prefetch_joinqual.
+limit_gp  statement_mem.
+qp_union_intersect  gp_enable_direct_dispatch, set inside a transaction the
+  rest of which is then refused.
+qp_with_clause  gp_cte_sharing, append-optimized and column-oriented tables,
+  the bitmap index, enable_groupagg.
+returning_gp  the classic partition syntax, an append-optimized table.
+singlenode_compatibility_cbdb  the warning Cloudberry's single-node mode
+  gives for DISTRIBUTED BY (the port records the policy, for ORCA and M2),
+  append-optimized tables, TABLE (...) and anytable, and ALTER TABLE ... SET
+  DISTRIBUTED BY, which Cloudberry refuses in single-node mode and the port's
+  grammar does not have.
+subselect_gp  the classic partition syntax, gp_segment_id,
+  gp_distribution_policy, gp_interconnect_queue_depth, append-optimized
+  tables.
+subselect_gp2  an external web table.
+tag  Tag definitions are the database's here, in gp_sql.tag, and Cloudberry's
+  are the cluster's, in the shared catalog pg_tag (cloudberry.md, "Still
+  open"): the test makes its tags in one database and uses them from postgres
+  and other_db, where the port has none.  Its queries of pg_tag and
+  pg_tag_description find no such catalogs.  CREATE TAG, ALTER TAG and DROP
+  TAG are calls of gp_sql's functions, and return the call's row; an error
+  from one is Cloudberry's message, with a CONTEXT naming gp_sql's
+  functions.  A malformed TAG clause (TAG; or TAG ()) is PostgreSQL's syntax
+  error, at the word the rewrite left, where Cloudberry's is at the next.
+union_gp  count_operator(), gp_distribution_policy, an external table, PL/
+  Python, and a chain of UNIONs over NULLs.
+update_gp  gp_segment_id, gp_segment_configuration, append-optimized tables,
+  the classic partition syntax, gp_autostats_mode.

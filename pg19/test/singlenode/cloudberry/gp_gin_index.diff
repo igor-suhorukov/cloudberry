@@ -1,0 +1,44 @@
+@@
++ERROR:  relation "wowidx" already exists
+@@
+-   494
++   495
+@@
+-   508
++   511
+@@
++ERROR:  function complex(integer, integer) does not exist
++LINE 1: INSERT INTO complex_array_table VALUES (ARRAY[COMPLEX(1,3), ...
++                                                      ^
++DETAIL:  There is no function of that name.
+@@
++ERROR:  function complex(integer, integer) does not exist
++LINE 1: INSERT INTO complex_array_table VALUES (ARRAY[COMPLEX(2,4), ...
++                                                      ^
++DETAIL:  There is no function of that name.
+@@
+-QUERY PLAN
+-___________
+-
++ERROR:  function complex(integer, integer) does not exist
++LINE 1: ...OM complex_array_table WHERE complex_arr @> ARRAY[COMPLEX(2,...
++                                                             ^
++DETAIL:  There is no function of that name.
+@@
+-     complex_arr     
+----------------------
+- {"2 + 4i","6 + 8i"}
+-(1 row)
+-
++ERROR:  function complex(integer, integer) does not exist
++LINE 1: ...OM complex_array_table WHERE complex_arr @> ARRAY[COMPLEX(2,...
++                                                             ^
++DETAIL:  There is no function of that name.
+@@
+-QUERY PLAN
+-___________
+-
++ERROR:  function complex(integer, integer) does not exist
++LINE 1: ...OM complex_array_table WHERE complex_arr @> ARRAY[COMPLEX(2,...
++                                                             ^
++DETAIL:  There is no function of that name.

@@ -1,0 +1,310 @@
+@@
+-                                            explain_filter                                             
+--------------------------------------------------------------------------------------------------------
++                                                  explain_filter                                                   
++-------------------------------------------------------------------------------------------------------------------
+@@
+-                                             explain_filter                                              
+----------------------------------------------------------------------------------------------------------
++                                                     explain_filter                                                      
++-------------------------------------------------------------------------------------------------------------------------
+@@
+-                                 explain_filter                                  
+----------------------------------------------------------------------------------
++                                 explain_filter                                 
++--------------------------------------------------------------------------------
+@@
+-                        jsonb_pretty                         
+--------------------------------------------------------------
+- [                                                          +
+-     {                                                      +
+-         "Plan": {                                          +
+-             "Plans": [                                     +
+-                 {                                          +
+-                     "Plans": [                             +
+-                         {                                  +
+-                             "Alias": "tenk1",              +
+-                             "Output": [                    +
+-                                 "unique1",                 +
+-                                 "unique2",                 +
+-                                 "two",                     +
+-                                 "four",                    +
+-                                 "ten",                     +
+-                                 "twenty",                  +
+-                                 "hundred",                 +
+-                                 "thousand",                +
+-                                 "twothousand",             +
+-                                 "fivethous",               +
+-                                 "tenthous",                +
+-                                 "odd",                     +
+-                                 "even",                    +
+-                                 "stringu1",                +
+-                                 "stringu2",                +
+-                                 "string4"                  +
+-                             ],                             +
+-                             "Schema": "public",            +
+-                             "Disabled": false,             +
+-                             "Node Type": "Seq Scan",       +
+-                             "Plan Rows": 0,                +
+-                             "Plan Width": 0,               +
+-                             "Total Cost": 0.0,             +
+-                             "Actual Rows": 0.0,            +
+-                             "Actual Loops": 0,             +
+-                             "Startup Cost": 0.0,           +
+-                             "Async Capable": false,        +
+-                             "Relation Name": "tenk1",      +
+-                             "Parallel Aware": true,        +
+-                             "Local Hit Blocks": 0,         +
+-                             "Temp Read Blocks": 0,         +
+-                             "Actual Total Time": 0.0,      +
+-                             "Local Read Blocks": 0,        +
+-                             "Shared Hit Blocks": 0,        +
+-                             "Shared Read Blocks": 0,       +
+-                             "Actual Startup Time": 0.0,    +
+-                             "Parent Relationship": "Outer",+
+-                             "Temp Written Blocks": 0,      +
+-                             "Local Dirtied Blocks": 0,     +
+-                             "Local Written Blocks": 0,     +
+-                             "Shared Dirtied Blocks": 0,    +
+-                             "Shared Written Blocks": 0     +
+-                         }                                  +
+-                     ],                                     +
+-                     "Output": [                            +
+-                         "unique1",                         +
+-                         "unique2",                         +
+-                         "two",                             +
+-                         "four",                            +
+-                         "ten",                             +
+-                         "twenty",                          +
+-                         "hundred",                         +
+-                         "thousand",                        +
+-                         "twothousand",                     +
+-                         "fivethous",                       +
+-                         "tenthous",                        +
+-                         "odd",                             +
+-                         "even",                            +
+-                         "stringu1",                        +
+-                         "stringu2",                        +
+-                         "string4"                          +
+-                     ],                                     +
+-                     "Disabled": false,                     +
+-                     "Sort Key": [                          +
+-                         "tenk1.tenthous"                   +
+-                     ],                                     +
+-                     "Node Type": "Sort",                   +
+-                     "Plan Rows": 0,                        +
+-                     "Plan Width": 0,                       +
+-                     "Total Cost": 0.0,                     +
+-                     "Actual Rows": 0.0,                    +
+-                     "Actual Loops": 0,                     +
+-                     "Startup Cost": 0.0,                   +
+-                     "Async Capable": false,                +
+-                     "Parallel Aware": false,               +
+-                     "Sort Space Used": 0,                  +
+-                     "Local Hit Blocks": 0,                 +
+-                     "Temp Read Blocks": 0,                 +
+-                     "Actual Total Time": 0.0,              +
+-                     "Local Read Blocks": 0,                +
+-                     "Shared Hit Blocks": 0,                +
+-                     "Shared Read Blocks": 0,               +
+-                     "Actual Startup Time": 0.0,            +
+-                     "Parent Relationship": "Outer",        +
+-                     "Temp Written Blocks": 0,              +
+-                     "Local Dirtied Blocks": 0,             +
+-                     "Local Written Blocks": 0,             +
+-                     "Shared Dirtied Blocks": 0,            +
+-                     "Shared Written Blocks": 0             +
+-                 }                                          +
+-             ],                                             +
+-             "Output": [                                    +
+-                 "unique1",                                 +
+-                 "unique2",                                 +
+-                 "two",                                     +
+-                 "four",                                    +
+-                 "ten",                                     +
+-                 "twenty",                                  +
+-                 "hundred",                                 +
+-                 "thousand",                                +
+-                 "twothousand",                             +
+-                 "fivethous",                               +
+-                 "tenthous",                                +
+-                 "odd",                                     +
+-                 "even",                                    +
+-                 "stringu1",                                +
+-                 "stringu2",                                +
+-                 "string4"                                  +
+-             ],                                             +
+-             "Disabled": false,                             +
+-             "Node Type": "Gather Merge",                   +
+-             "Plan Rows": 0,                                +
+-             "Plan Width": 0,                               +
+-             "Total Cost": 0.0,                             +
+-             "Actual Rows": 0.0,                            +
+-             "Actual Loops": 0,                             +
+-             "Startup Cost": 0.0,                           +
+-             "Async Capable": false,                        +
+-             "Parallel Aware": false,                       +
+-             "Workers Planned": 0,                          +
+-             "Local Hit Blocks": 0,                         +
+-             "Temp Read Blocks": 0,                         +
+-             "Workers Launched": 0,                         +
+-             "Actual Total Time": 0.0,                      +
+-             "Local Read Blocks": 0,                        +
+-             "Shared Hit Blocks": 0,                        +
+-             "Shared Read Blocks": 0,                       +
+-             "Actual Startup Time": 0.0,                    +
+-             "Temp Written Blocks": 0,                      +
+-             "Local Dirtied Blocks": 0,                     +
+-             "Local Written Blocks": 0,                     +
+-             "Shared Dirtied Blocks": 0,                    +
+-             "Shared Written Blocks": 0                     +
+-         },                                                 +
+-         "Planning": {                                      +
+-             "Local Hit Blocks": 0,                         +
+-             "Temp Read Blocks": 0,                         +
+-             "Local Read Blocks": 0,                        +
+-             "Shared Hit Blocks": 0,                        +
+-             "Shared Read Blocks": 0,                       +
+-             "Temp Written Blocks": 0,                      +
+-             "Local Dirtied Blocks": 0,                     +
+-             "Local Written Blocks": 0,                     +
+-             "Shared Dirtied Blocks": 0,                    +
+-             "Shared Written Blocks": 0                     +
+-         },                                                 +
+-         "Triggers": [                                      +
+-         ],                                                 +
+-         "Planning Time": 0.0,                              +
+-         "Execution Time": 0.0                              +
+-     }                                                      +
++                    jsonb_pretty                     
++-----------------------------------------------------
++ [                                                  +
++     {                                              +
++         "Plan": {                                  +
++             "Plans": [                             +
++                 {                                  +
++                     "Alias": "tenk1",              +
++                     "Output": [                    +
++                         "tenk1.unique1",           +
++                         "tenk1.unique2",           +
++                         "tenk1.two",               +
++                         "tenk1.four",              +
++                         "tenk1.ten",               +
++                         "tenk1.twenty",            +
++                         "tenk1.hundred",           +
++                         "tenk1.thousand",          +
++                         "tenk1.twothousand",       +
++                         "tenk1.fivethous",         +
++                         "tenk1.tenthous",          +
++                         "tenk1.odd",               +
++                         "tenk1.even",              +
++                         "tenk1.stringu1",          +
++                         "tenk1.stringu2",          +
++                         "tenk1.string4"            +
++                     ],                             +
++                     "Schema": "public",            +
++                     "Disabled": false,             +
++                     "Node Type": "Seq Scan",       +
++                     "Plan Rows": 0,                +
++                     "Plan Width": 0,               +
++                     "Total Cost": 0.0,             +
++                     "Actual Rows": 0.0,            +
++                     "Actual Loops": 0,             +
++                     "Startup Cost": 0.0,           +
++                     "Async Capable": false,        +
++                     "Relation Name": "tenk1",      +
++                     "Parallel Aware": false,       +
++                     "Local Hit Blocks": 0,         +
++                     "Temp Read Blocks": 0,         +
++                     "Actual Total Time": 0.0,      +
++                     "Local Read Blocks": 0,        +
++                     "Shared Hit Blocks": 0,        +
++                     "Shared Read Blocks": 0,       +
++                     "Actual Startup Time": 0.0,    +
++                     "Parent Relationship": "Outer",+
++                     "Temp Written Blocks": 0,      +
++                     "Local Dirtied Blocks": 0,     +
++                     "Local Written Blocks": 0,     +
++                     "Shared Dirtied Blocks": 0,    +
++                     "Shared Written Blocks": 0     +
++                 }                                  +
++             ],                                     +
++             "Output": [                            +
++                 "tenk1.unique1",                   +
++                 "tenk1.unique2",                   +
++                 "tenk1.two",                       +
++                 "tenk1.four",                      +
++                 "tenk1.ten",                       +
++                 "tenk1.twenty",                    +
++                 "tenk1.hundred",                   +
++                 "tenk1.thousand",                  +
++                 "tenk1.twothousand",               +
++                 "tenk1.fivethous",                 +
++                 "tenk1.tenthous",                  +
++                 "tenk1.odd",                       +
++                 "tenk1.even",                      +
++                 "tenk1.stringu1",                  +
++                 "tenk1.stringu2",                  +
++                 "tenk1.string4"                    +
++             ],                                     +
++             "Disabled": false,                     +
++             "Sort Key": [                          +
++                 "tenk1.tenthous"                   +
++             ],                                     +
++             "Node Type": "Sort",                   +
++             "Plan Rows": 0,                        +
++             "Plan Width": 0,                       +
++             "Total Cost": 0.0,                     +
++             "Actual Rows": 0.0,                    +
++             "Sort Method": "quicksort",            +
++             "Actual Loops": 0,                     +
++             "Startup Cost": 0.0,                   +
++             "Async Capable": false,                +
++             "Parallel Aware": false,               +
++             "Sort Space Type": "Memory",           +
++             "Sort Space Used": 0,                  +
++             "Local Hit Blocks": 0,                 +
++             "Temp Read Blocks": 0,                 +
++             "Actual Total Time": 0.0,              +
++             "Local Read Blocks": 0,                +
++             "Shared Hit Blocks": 0,                +
++             "Shared Read Blocks": 0,               +
++             "Actual Startup Time": 0.0,            +
++             "Temp Written Blocks": 0,              +
++             "Local Dirtied Blocks": 0,             +
++             "Local Written Blocks": 0,             +
++             "Shared Dirtied Blocks": 0,            +
++             "Shared Written Blocks": 0             +
++         },                                         +
++         "Planning": {                              +
++             "Local Hit Blocks": 0,                 +
++             "Temp Read Blocks": 0,                 +
++             "Local Read Blocks": 0,                +
++             "Shared Hit Blocks": 0,                +
++             "Shared Read Blocks": 0,               +
++             "Temp Written Blocks": 0,              +
++             "Local Dirtied Blocks": 0,             +
++             "Local Written Blocks": 0,             +
++             "Shared Dirtied Blocks": 0,            +
++             "Shared Written Blocks": 0             +
++         },                                         +
++         "Triggers": [                              +
++         ],                                         +
++         "Planning Time": 0.0,                      +
++         "Execution Time": 0.0                      +
++     }                                              +
+@@
+-                                  explain_filter                                  
+-----------------------------------------------------------------------------------
++                                 explain_filter                                 
++--------------------------------------------------------------------------------
+@@
+-                                  explain_filter                                  
+-----------------------------------------------------------------------------------
++                                 explain_filter                                 
++--------------------------------------------------------------------------------
+@@
+-                                     explain_filter                                     
+-----------------------------------------------------------------------------------------
++                                              explain_filter                                              
++----------------------------------------------------------------------------------------------------------

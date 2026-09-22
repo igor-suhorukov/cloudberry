@@ -1,0 +1,98 @@
+@@
+-WARNING:  DISTRIBUTED BY clause has no effect in singlenode mode
+@@
+-WARNING:  DISTRIBUTED BY clause has no effect in singlenode mode
+@@
+-ERROR:  SET DISTRIBUTED BY not supported in utility mode
++ERROR:  syntax error at or near ";"
++LINE 1: alter table l set distributed by (j);
++                           ^
+@@
+-WARNING:  DISTRIBUTED BY clause has no effect in singlenode mode
++ERROR:  unrecognized parameter "appendonly"
+@@
+-WARNING:  DISTRIBUTED BY clause has no effect in singlenode mode
++ERROR:  unrecognized parameter "appendonly"
+@@
++ERROR:  relation "ao1" does not exist
++LINE 1: insert into ao1 select i, i from generate_series(1, 1200000)...
++                    ^
+@@
++ERROR:  relation "ao1" does not exist
+@@
++ERROR:  relation "aocs1" does not exist
++LINE 1: insert into aocs1 select i, i from generate_series(1, 120000...
++                    ^
+@@
++ERROR:  relation "aocs1" does not exist
+@@
+-QUERY PLAN
+-___________
+-
++ERROR:  relation "ao1" does not exist
++LINE 1: explain(costs off) select count(*) from ao1;
++                                                ^
+@@
+-  count  
+----------
+- 1200000
+-(1 row)
+-
++ERROR:  relation "ao1" does not exist
++LINE 1: select count(*) from ao1;
++                             ^
+@@
+-QUERY PLAN
+-___________
+-
++ERROR:  relation "aocs1" does not exist
++LINE 1: explain(costs off) select count(*) from aocs1;
++                                                ^
+@@
+-  count  
+----------
+- 1200000
+-(1 row)
+-
++ERROR:  relation "aocs1" does not exist
++LINE 1: select count(*) from aocs1;
++                             ^
+@@
+-WARNING:  DISTRIBUTED BY clause has no effect in singlenode mode
+@@
++ERROR:  type anytable does not exist
++LINE 1: CREATE FUNCTION multiset_func(a anytable) RETURNS SETOF exam...
++                                        ^
+@@
+-WARNING:  SCATTER BY clause has no effect in singlenode mode
+-QUERY PLAN
+-___________
+-
++ERROR:  syntax error at or near "TABLE"
++LINE 1: explain SELECT * FROM multiset_func( TABLE( SELECT * FROM ex...
++                                             ^
+@@
+-WARNING:  SCATTER BY clause has no effect in singlenode mode
+- a |      b      
+----+-------------
+- 1 |  value1.1/4
+- 1 |  value1.2/4
+- 1 |  value1.3/4
+- 1 |  value1.4/4
+- 2 |  value2.1/3
+- 2 |  value2.2/3
+- 2 |  value2.3/3
+- 3 |  value3.1/2
+- 3 |  value3.2/2
+- 4 |  value4.1/1
+-(10 rows)
+-
++ERROR:  syntax error at or near "TABLE"
++LINE 1: SELECT * FROM multiset_func( TABLE( SELECT * FROM example OR...
++                                     ^
+@@
++ERROR:  table "ao1" does not exist
+@@
++ERROR:  table "aocs1" does not exist
+@@
++ERROR:  could not find a function named "multiset_func"

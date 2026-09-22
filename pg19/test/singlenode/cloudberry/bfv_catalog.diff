@@ -1,0 +1,66 @@
+@@
++ERROR:  language "plpython3u" does not exist
+@@
++ERROR:  non-standard string literals are not supported
+@@
++ERROR:  unrecognized configuration parameter "escape_string_warning"
+@@
+- count_operator 
+-----------------
+-              0
+-(1 row)
+-
++ERROR:  function count_operator(unknown, unknown) does not exist
++LINE 1: select count_operator('select substr(''abc'', 2)', 'Motion')...
++               ^
++DETAIL:  There is no function of that name.
+@@
+- count_operator 
+-----------------
+-              0
+-(1 row)
+-
++ERROR:  function count_operator(unknown, unknown) does not exist
++LINE 1: select count_operator('select relname from pg_class where re...
++               ^
++DETAIL:  There is no function of that name.
+@@
+- count_operator 
+-----------------
+-              0
+-(1 row)
+-
++ERROR:  function count_operator(unknown, unknown) does not exist
++LINE 1: select count_operator('select attname from pg_attribute wher...
++               ^
++DETAIL:  There is no function of that name.
+@@
+- count_operator 
+-----------------
+-              0
+-(1 row)
+-
++ERROR:  function count_operator(unknown, unknown) does not exist
++LINE 1: select count_operator('select * from generate_series(1,10)',...
++               ^
++DETAIL:  There is no function of that name.
+@@
++ NOT NULL a
+@@
+-(1 row)
++(2 rows)
+@@
++ERROR:  relation "pg_stat_last_operation" does not exist
++LINE 1: delete from pg_stat_last_operation
++                    ^
+@@
++ERROR:  relation "pg_stat_last_operation" does not exist
+@@
+- classid  |         objid          | staactionname | stasubtype 
+-----------+------------------------+---------------+------------
+- pg_class | pg_stat_last_operation | VACUUM        | FULL
+-(1 row)
+-
++ERROR:  relation "pg_stat_last_operation" does not exist
++LINE 1: ..., objid::regclass, staactionname, stasubtype from pg_stat_la...
++                                                             ^

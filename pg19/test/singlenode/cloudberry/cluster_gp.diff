@@ -1,0 +1,46 @@
+@@
++ERROR:  unrecognized parameter "appendonly"
+@@
++ERROR:  relation "cluster_ao_table" does not exist
++LINE 1: INSERT INTO cluster_ao_table (id, fname, lname, address1, ad...
++                    ^
+@@
++ERROR:  relation "cluster_ao_table" does not exist
+@@
++ERROR:  relation "cluster_ao_table" does not exist
+@@
++ERROR:  relation "cluster_ao_table" does not exist
+@@
+- id | fname  |   lname    |    address1    |   address2   |   city   | state | zip 
+-----+--------+------------+----------------+--------------+----------+-------+-----
+- 10 | Jon_10 | Roberts_10 | 10 Main Street | Apartment 10 | New York | NY    | 10
+-(1 row)
+-
++ERROR:  relation "cluster_ao_table" does not exist
++LINE 1: SELECT * FROM cluster_ao_table WHERE id = 10;
++                      ^
+@@
++ERROR:  table "cluster_ao_table" does not exist
+@@
++ERROR:  unrecognized parameter "appendonly"
+@@
++ERROR:  relation "cluster_ao_table" does not exist
++LINE 1: INSERT INTO cluster_ao_table (id, fname, lname, address1, ad...
++                    ^
+@@
++ERROR:  relation "cluster_ao_table" does not exist
+@@
++ERROR:  relation "cluster_ao_table" does not exist
+@@
++ERROR:  relation "cluster_ao_table" does not exist
+@@
+- id | fname  |   lname    |    address1    |   address2   |   city   | state | zip 
+-----+--------+------------+----------------+--------------+----------+-------+-----
+- 10 | Jon_10 | Roberts_10 | 10 Main Street | Apartment 10 | New York | NY    | 10
+-(1 row)
+-
++ERROR:  relation "cluster_ao_table" does not exist
++LINE 1: SELECT * FROM cluster_ao_table WHERE id = 10;
++                      ^
+@@
++ERROR:  table "cluster_ao_table" does not exist

@@ -65,6 +65,9 @@ services:
       dockerfile: Dockerfile.cbext
       additional_contexts:
         cbsrc: ${CB_SRC:-../..}
+        # PostgreSQL's own regression suite, taken at the commit the server
+        # image was built from; see Dockerfile.cbext.
+        pgsrc: ${PG_SRC:-../../../postgres}
       args:
         PG_IMAGE: cloudberry/pg19-patched:latest
         CB_REF: ${CB_REF:-extension_postgresql_19}

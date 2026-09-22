@@ -1,0 +1,280 @@
+# Cloudberry's singlenode_regress suite, as the port runs it: every test of
+# its two schedules, in their order, with what the port does with it.
+#
+#   run   the test runs here, against every M1 module
+#   pg    one of PostgreSQL's own regression tests, in Cloudberry's copy of
+#         it for PostgreSQL 14; the pgregress suite runs PostgreSQL 19's
+#   skip  it needs what M1 does not have, which the rest of the line says
+#
+# Tests in uao_compaction/, uaocs_compaction/ and uao_dml/ are one line each.
+pg   tablespace
+pg   boolean
+pg   char
+pg   name
+pg   varchar
+pg   text
+pg   int2
+pg   int4
+pg   int8
+pg   oid
+pg   float4
+pg   float8
+pg   bit
+pg   numeric
+pg   txid
+pg   uuid
+pg   enum
+pg   money
+pg   rangetypes
+pg   pg_lsn
+pg   regproc
+pg   strings
+pg   numerology
+pg   point
+pg   lseg
+pg   line
+pg   box
+pg   path
+pg   polygon
+pg   circle
+pg   date
+pg   time
+pg   timetz
+pg   timestamp
+pg   timestamptz
+pg   interval
+pg   inet
+pg   macaddr
+pg   macaddr8
+pg   multirangetypes
+pg   create_function_0
+pg   geometry
+pg   horology
+pg   tstypes
+pg   regex
+pg   type_sanity
+pg   opr_sanity
+pg   misc_sanity
+pg   comments
+pg   expressions
+pg   unicode
+pg   xid
+pg   mvcc
+pg   create_function_1
+pg   create_type
+pg   create_table
+pg   create_function_2
+pg   copy
+pg   copyselect
+pg   copydml
+pg   insert
+pg   insert_conflict
+pg   create_misc
+pg   create_operator
+pg   create_procedure
+pg   create_index
+pg   create_index_spgist
+pg   create_view
+pg   index_including
+pg   index_including_gist
+run  gp_gin_index
+pg   create_aggregate
+pg   create_function_3
+pg   create_cast
+pg   constraints
+pg   triggers
+pg   select
+pg   inherit
+pg   typed_table
+pg   vacuum
+pg   drop_if_exists
+pg   updatable_views
+pg   roleattributes
+pg   create_am
+pg   hash_func
+pg   errors
+pg   infinite_recurse
+skip disable_autovacuum  gp_dist_random() and gp_id, which set a cluster's segments, M2
+skip vacuum_stats  gp_dist_random(), which reads a catalog on every segment, M2
+skip enable_autovacuum  gp_dist_random() and gp_id, which set a cluster's segments, M2
+pg   sanity_check
+pg   random
+pg   select_into
+pg   select_distinct
+pg   select_distinct_on
+pg   select_implicit
+pg   select_having
+pg   subselect
+pg   union
+pg   case
+pg   join
+pg   aggregates
+pg   random
+pg   portals
+pg   arrays
+pg   btree_index
+pg   hash_index
+pg   update
+pg   delete
+pg   namespace
+pg   transactions
+pg   brin
+pg   gin
+pg   gist
+pg   spgist
+pg   privileges
+pg   init_privs
+pg   security_label
+pg   collate
+pg   matview
+pg   lock
+pg   replica_identity
+pg   rowsecurity
+pg   object_address
+pg   tablesample
+pg   groupingsets
+pg   drop_operator
+pg   password
+pg   identity
+pg   generated
+pg   join_hash
+skip appendonly_sample  append-optimized tables, M5
+skip aocs_sample  append-optimized tables, M5
+pg   brin_bloom
+pg   brin_multi
+pg   create_table_like
+pg   alter_generic
+pg   alter_operator
+pg   misc
+pg   async
+pg   dbsize
+pg   misc_functions
+pg   sysviews
+pg   tsrf
+pg   tid
+pg   tidscan
+pg   tidrangescan
+pg   collate.icu.utf8
+pg   incremental_sort
+pg   psql
+pg   psql_crosstab
+pg   amutils
+pg   stats_ext
+pg   collate.linux.utf8
+pg   select_parallel
+pg   write_parallel
+pg   vacuum_parallel
+pg   publication
+pg   subscription
+pg   select_views
+pg   portals_p2
+pg   cluster
+pg   dependency
+pg   guc
+pg   bitmapops
+pg   combocid
+pg   tsearch
+pg   tsdicts
+pg   foreign_data
+pg   window
+pg   xmlmap
+pg   functional_deps
+pg   advisory_lock
+pg   indirect_toast
+pg   equivclass
+pg   json
+pg   jsonb
+pg   json_encoding
+pg   jsonpath
+pg   jsonpath_encoding
+pg   jsonb_jsonpath
+pg   plancache
+pg   limit
+pg   plpgsql
+pg   copy2
+pg   temp
+pg   domain
+pg   rangefuncs
+pg   prepare
+pg   conversion
+pg   truncate
+pg   alter_table
+pg   sequence
+pg   polymorphism
+pg   rowtypes
+pg   returning
+pg   with
+pg   xml
+skip gp_foreign_data  a foreign table's mpp_execute option, which is where an MPP foreign table runs, M2/M5
+pg   partition_join
+pg   partition_prune
+pg   reloptions
+pg   hash_part
+pg   indexing
+pg   partition_aggregate
+pg   partition_info
+pg   tuplesort
+pg   explain
+pg   compression
+pg   memoize
+pg   event_trigger
+pg   oidjoins
+pg   fast_default
+pg   stats
+run  tag
+skip createdb  PL/Python and a cluster's mirrors, whose directories it lists
+run  update_gp
+run  returning_gp
+run  cluster_gp
+run  case_gp
+run  limit_gp
+run  join_gp
+run  union_gp
+run  create_table_like_gp
+skip matview_ao  append-optimized tables, M5
+run  gpcopy
+skip incremental_analyze  Greenplum's PARTITION BY ... START/EVERY syntax, which the port does not carry: its SQL surface is Cloudberry's own statements, and the Greenplum 7 surface is still ahead; and append-optimized tables, M5
+run  indexjoin
+skip workfile/hashagg_spill  the workfile manager and its views, and PL/Python; Track B's spill-file hook is not built
+skip workfile/hashjoin_spill  the workfile manager and its views, and PL/Python; Track B's spill-file hook is not built
+skip query_finish_pending  the fault injector, which is Track E's; the port has none yet
+run  sequence_gp
+run  tidscan_gp
+skip agg_pushdown  gp_enable_agg_pushdown, which the plan replaces with PostgreSQL 19's eager aggregation (Track A 2.7)
+run  subselect_gp
+run  subselect_gp2
+skip partition  Greenplum's PARTITION BY ... START/EVERY syntax, which the port does not carry: its SQL surface is Cloudberry's own statements, and the Greenplum 7 surface is still ahead
+skip partition1  Greenplum's PARTITION BY ... START/EVERY syntax, which the port does not carry: its SQL surface is Cloudberry's own statements, and the Greenplum 7 surface is still ahead
+skip partition_indexing  Greenplum's PARTITION BY ... START/EVERY syntax, which the port does not carry: its SQL surface is Cloudberry's own statements, and the Greenplum 7 surface is still ahead
+skip partition_storage  append-optimized tables, M5; and Greenplum's PARTITION BY ... START/EVERY syntax, which the port does not carry: its SQL surface is Cloudberry's own statements, and the Greenplum 7 surface is still ahead
+skip partition_ddl  Greenplum's PARTITION BY ... START/EVERY syntax, which the port does not carry: its SQL surface is Cloudberry's own statements, and the Greenplum 7 surface is still ahead
+skip partition_with_user_defined_function  Greenplum's PARTITION BY ... START/EVERY syntax, which the port does not carry: its SQL surface is Cloudberry's own statements, and the Greenplum 7 surface is still ahead
+skip partition_unlogged  Greenplum's PARTITION BY ... START/EVERY syntax, which the port does not carry: its SQL surface is Cloudberry's own statements, and the Greenplum 7 surface is still ahead
+skip partition_subquery  Greenplum's PARTITION BY ... START/EVERY syntax, which the port does not carry: its SQL surface is Cloudberry's own statements, and the Greenplum 7 surface is still ahead
+skip partition_with_user_defined_function_that_truncates  Greenplum's PARTITION BY ... START/EVERY syntax, which the port does not carry: its SQL surface is Cloudberry's own statements, and the Greenplum 7 surface is still ahead
+skip brin_ao  append-optimized tables, M5
+skip brin_aocs  append-optimized tables, M5
+skip aoco_privileges  append-optimized tables, M5
+skip aocs  append-optimized tables, M5
+skip resource_queue  resource queues, M6
+skip resource_queue_function  resource queues, M6
+run  bfv_dd
+run  bfv_dd_multicolumn
+run  bfv_dd_types
+run  bfv_catalog
+run  bfv_index
+run  bfv_olap
+run  bfv_aggregate
+skip bfv_partition_plans  Greenplum's PARTITION BY ... START/EVERY syntax, which the port does not carry: its SQL surface is Cloudberry's own statements, and the Greenplum 7 surface is still ahead
+run  gp_recursive_cte
+run  qp_with_clause
+skip qp_query_execution  Greenplum's PARTITION BY ... START/EVERY syntax, which the port does not carry: its SQL surface is Cloudberry's own statements, and the Greenplum 7 surface is still ahead
+run  qp_left_anti_semi_join
+run  qp_union_intersect
+skip uao_compaction/*  append-optimized tables, M5
+skip uaocs_compaction/*  append-optimized tables, M5
+skip uao_dml/*  append-optimized tables, M5
+skip AOCO_Compression  append-optimized tables, M5
+skip AORO_Compression  append-optimized tables, M5
+skip matview_data  AQUMV's bookkeeping in gp_matview_aux, which is not built
+run  singlenode_compatibility_cbdb

@@ -1,0 +1,36 @@
+@@
++ERROR:  unrecognized configuration parameter "gp_recursive_cte"
+@@
+-ERROR:  RECURSIVE clauses in WITH queries are currently disabled
+-HINT:  In order to use recursive CTEs, "gp_recursive_cte" must be turned on.
++ id 
++----
++  1
++  2
++(2 rows)
++
+@@
++ERROR:  unrecognized configuration parameter "gp_recursive_cte"
+@@
+-                                    QUERY PLAN                                    
+-----------------------------------------------------------------------------------
+-               ->  Seq Scan on t_rand_test_rcte  (cost=0.00..1.03 rows=3 width=4)
+-         ->  Hash  (cost=1.03..1.03 rows=3 width=4)
+-         ->  WorkTable Scan on the_cte_here  (cost=0.00..0.20 rows=10 width=4)
+-         Hash Cond: (the_cte_here.n = t_rand_test_rcte.c)
+-   ->  Hash Join  (cost=1.07..1.34 rows=3 width=4)
+-   ->  Seq Scan on t_rep_test_rcte  (cost=0.00..1.01 rows=1 width=4)
+- Recursive Union  (cost=0.00..14.73 rows=34 width=4)
+-(8 rows)
++                                              QUERY PLAN                                              
++------------------------------------------------------------------------------------------------------
++                       ->  Seq Scan on t_rand_test_rcte  (cost=0.00..1.03 rows=3 width=4)
++                 ->  Hash  (cost=1.03..1.03 rows=3 width=4)
++                 ->  WorkTable Scan on the_cte_here the_cte_here_1  (cost=0.00..0.20 rows=10 width=4)
++                 Hash Cond: (the_cte_here_1.n = t_rand_test_rcte.c)
++           ->  Hash Join  (cost=1.07..1.34 rows=3 width=4)
++           ->  Seq Scan on t_rep_test_rcte  (cost=0.00..1.01 rows=1 width=4)
++     ->  Recursive Union  (cost=0.00..14.75 rows=31 width=4)
++   CTE the_cte_here
++ CTE Scan on the_cte_here  (cost=14.75..15.37 rows=31 width=4)
++(10 rows)

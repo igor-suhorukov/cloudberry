@@ -1,0 +1,415 @@
+@@
++ERROR:  COPY ESCAPE requires CSV mode
+@@
++ERROR:  COPY ESCAPE requires CSV mode
+@@
+-ERROR:  missing data for column "b"
+-CONTEXT:  COPY copy_regression_text3, line 2: "and another one\"
+@@
+-                 a                  | b |      c      |      d      |      e       
+-------------------------------------+---+-------------+-------------+--------------
+- the at sign: @                     | 1 | c text data | d text data | e text data 
+- an embedded delimiter | character  | 2 | c text data | d text data | e text data
+- a single backslash \ in col a      | 3 | c text data | d text data | e text data
+- a single backslash \ in col a      | 4 | c text data | d text data | e text data
+- c:\\file\data\neew\path            | 5 | c text data | d text data | e text data
+- the at sign: @                     | 6 | c text data | d text data | e text data
+- an embedded linefeed sequence     +| 7 | c text data | d text data | e text data
+- in column a                        |   |             |             | 
+- a single backslash \ in col a      | 8 | c text data | d text data | e text data
+-(8 rows)
++               a               | b |      c      |      d      |      e      
++-------------------------------+---+-------------+-------------+-------------
++ the at sign: @                | 6 | c text data | d text data | e text data
++ an embedded linefeed         +| 7 | c text data | d text data | e text data
++ and another one              +|   |             |             | 
++  in column a                  |   |             |             | 
++ an embedded linefeed sequence+| 7 | c text data | d text data | e text data
++ in column a                   |   |             |             | 
++ a single backslash \ in col a | 8 | c text data | d text data | e text data
++(4 rows)
+@@
++ERROR:  syntax error at or near "fill"
++LINE 1: ...py_regression_fill1 from stdin with delimiter '|' fill missi...
++                                                             ^
+@@
++ERROR:  syntax error at or near "fill"
++LINE 1: ...gression_fill1(c,b) from stdin with delimiter '|' fill missi...
++                                                             ^
+@@
++ERROR:  syntax error at or near "fill"
++LINE 1: ...gression_fill2(a,c) from stdin with delimiter '|' fill missi...
++                                                             ^
+@@
+- a | b |   c   
+----+---+-------
+- 1 | 1 | one
+- 2 | 2 | 
+- 3 |   | 
+-   | 1 | one
+-   |   | three
+-   |   | two
+-(6 rows)
++ a | b | c 
++---+---+---
++(0 rows)
+@@
+- a | b |   c   
+----+---+-------
+- 1 |   | one
+- 2 |   | 
+- 3 |   | three
+-(3 rows)
++ a | b | c 
++---+---+---
++(0 rows)
+@@
++ERROR:  syntax error at or near "fill"
++LINE 1: ...egression_fill1 from stdin with csv delimiter '|' fill missi...
++                                                             ^
+@@
++ERROR:  syntax error at or near "fill"
++LINE 1: ...sion_fill1(c,b) from stdin with csv delimiter '|' fill missi...
++                                                             ^
+@@
++ERROR:  syntax error at or near "fill"
++LINE 1: ...sion_fill2(a,c) from stdin with csv delimiter '|' fill missi...
++                                                             ^
+@@
+- a | b |   c   
+----+---+-------
+- 1 | 1 | one
+- 2 | 2 | 
+- 3 |   | 
+-   | 1 | one
+-   |   | three
+-   |   | two
+-(6 rows)
++ a | b | c 
++---+---+---
++(0 rows)
+@@
+- a | b |   c   
+----+---+-------
+- 1 |   | one
+- 2 |   | 
+- 3 |   | three
+-(3 rows)
++ a | b | c 
++---+---+---
++(0 rows)
+@@
+-ERROR:  missing data for column "b", found empty data line
+-CONTEXT:  COPY copy_regression_fill1, line 1: ""
++ERROR:  syntax error at or near "fill"
++LINE 1: ...py_regression_fill1 from stdin with delimiter '|' fill missi...
++                                                             ^
+@@
+-ERROR:  missing data for column "b", found empty data line
+-CONTEXT:  COPY copy_regression_fill2, line 1: ""
++ERROR:  syntax error at or near "fill"
++LINE 1: ...py_regression_fill2 from stdin with delimiter '|' fill missi...
++                                                             ^
+@@
+-ERROR:  missing data for column "b", found empty data line
+-CONTEXT:  COPY copy_regression_fill1, line 1: ""
++ERROR:  syntax error at or near "fill"
++LINE 1: ...egression_fill1 from stdin with csv delimiter '|' fill missi...
++                                                             ^
+@@
+-ERROR:  missing data for column "b", found empty data line
+-CONTEXT:  COPY copy_regression_fill2, line 1: ""
++ERROR:  syntax error at or near "fill"
++LINE 1: ...egression_fill2 from stdin with csv delimiter '|' fill missi...
++                                                             ^
+@@
++ERROR:  syntax error at or near "fill"
++LINE 1: COPY copy_regression_fnn from stdin with csv fill missing fi...
++                                                     ^
+@@
+-  a  | b | c 
+------+---+---
+- two |   | 
+-(1 row)
++ a | b | c 
++---+---+---
++(0 rows)
+@@
++ERROR:  syntax error at or near "newline"
++LINE 1: ..._regression_newline from stdin with delimiter '|' newline 'l...
++                                                             ^
+@@
++ERROR:  syntax error at or near "newline"
++LINE 1: ..._regression_newline from stdin with delimiter '|' newline 'l...
++                                                             ^
+@@
+-ERROR:  extra data after last expected column
+-CONTEXT:  COPY copy_regression_newline, line 1: "1|1
+-2|2
+-"
++ERROR:  syntax error at or near "newline"
++LINE 1: ..._regression_newline from stdin with delimiter '|' newline 'c...
++                                                             ^
+@@
+-ERROR:  extra data after last expected column
+-CONTEXT:  COPY copy_regression_newline, line 1: "1|1
+-2|2
+-\.
+-"
++ERROR:  syntax error at or near "newline"
++LINE 1: ..._regression_newline from stdin with delimiter '|' newline 'c...
++                                                             ^
+@@
+-ERROR:  invalid value for NEWLINE "blah"
+-HINT:  Valid options are: 'LF', 'CRLF' and 'CR'.
+--- negative: newline not yet supported for COPY TO
+-COPY copy_regression_newline to stdout with delimiter '|' newline 'blah';
+-ERROR:  newline currently available for data loading only, not unloading
+-DROP TABLE copy_regression_newline;
+--- Test that FORCE QUOTE option works with the fastpath for integers and
+--- numerics
+-COPY (
+-  SELECT 123::integer as intcol, 456::numeric as numcol, 'foo' as textcol
+-) TO stdout CSV FORCE QUOTE intcol, numcol, textcol;
+-"123","456","foo"
+--- Do the same with a real table, to test that the option also works when
+--- doing a "dispatched" COPY, i.e. when the COPY output is produced in
+--- segments
+-CREATE TABLE force_quotes_tbl(intcol integer, numcol numeric, textcol text);
+-INSERT INTO force_quotes_tbl VALUES (123, 456, 'foo');
+-COPY force_quotes_tbl TO stdout CSV FORCE QUOTE intcol, numcol, textcol;
+-"123","456","foo"
+-DROP TABLE force_quotes_tbl;
+--- Tests for error log
+-DROP TABLE IF EXISTS errcopy, errcopy_err, errcopy_temp;
+-CREATE TABLE errcopy(a int, b int, c text);
+-INSERT INTO errcopy select i, i, case when i <> 5 then i end || '_text' from generate_series(1, 10)i;
+-COPY errcopy to '/tmp/errcopy.csv' csv null '';
+--- check if not null constraint not affect error log.
+-TRUNCATE errcopy;
+-ALTER table errcopy ALTER c SET NOT null;
+-COPY errcopy from '/tmp/errcopy.csv' csv null '' log errors segment reject limit 10 rows;
+-DETAIL:  Failing row contains (5, 5, null).
+-ERROR:  null value in column "c" of relation "errcopy" violates not-null constraint
+-CONTEXT:  COPY errcopy, line 7
+-SELECT * FROM errcopy;
+- a | b | c 
+----+---+---
+-(0 rows)
+-
+--- reject rows with invalid format for int 
+-ALTER table errcopy ALTER c DROP NOT null;
+-ALTER table errcopy DROP COLUMN c;
+-ALTER table errcopy ADD COLUMN c int;
+-COPY errcopy from '/tmp/errcopy.csv' csv null '' log errors segment reject limit 10 rows;
+-NOTICE:  found 9 data formatting errors (9 or more input rows), rejected related input data
++ERROR:  syntax error at or near "newline"
++LINE 1: ..._regression_newline from stdin with delimiter '|' newline 'b...
++                                                             ^
+@@
+- a | b | c 
+----+---+---
+- 5 | 5 |  
+-(1 row)
+-
+-SELECT relname, errmsg, rawdata FROM gp_read_error_log('errcopy');
+- relname |                           errmsg                           |    rawdata    
+----------+------------------------------------------------------------+---------------
+- errcopy | invalid input syntax for type integer: "10_text", column c | 10,10,10_text
+- errcopy | invalid input syntax for type integer: "1_text", column c  | 1,1,1_text
+- errcopy | invalid input syntax for type integer: "2_text", column c  | 2,2,2_text
+- errcopy | invalid input syntax for type integer: "3_text", column c  | 3,3,3_text
+- errcopy | invalid input syntax for type integer: "4_text", column c  | 4,4,4_text
+- errcopy | invalid input syntax for type integer: "6_text", column c  | 6,6,6_text
+- errcopy | invalid input syntax for type integer: "7_text", column c  | 7,7,7_text
+- errcopy | invalid input syntax for type integer: "8_text", column c  | 8,8,8_text
+- errcopy | invalid input syntax for type integer: "9_text", column c  | 9,9,9_text
+-(9 rows)
+-
+--- reject one row with extra column, one row with fewer columns
+-TRUNCATE errcopy;
+-SELECT gp_truncate_error_log('errcopy');
+- gp_truncate_error_log 
+------------------------
+- t
+-(1 row)
+-
+-COPY (select i::text || ',' || i::text || case when i = 4 then '' else ',' || i::text || case when i = 5 then ',5' else '' end end from generate_series(1, 10)i) to '/tmp/errcopy.csv';
+-COPY errcopy from '/tmp/errcopy.csv' csv null '' log errors segment reject limit 10 rows;
+-NOTICE:  found 2 data formatting errors (2 or more input rows), rejected related input data
+-SELECT * FROM errcopy ORDER BY a;
+- a  | b  | c  
+-----+----+----
+-  1 |  1 |  1
+-  2 |  2 |  2
+-  3 |  3 |  3
+-  6 |  6 |  6
+-  7 |  7 |  7
+-  8 |  8 |  8
+-  9 |  9 |  9
+- 10 | 10 | 10
+-(8 rows)
+-
+-SELECT relname, errmsg, rawdata FROM gp_read_error_log('errcopy');
+- relname |                errmsg                 | rawdata 
+----------+---------------------------------------+---------
+- errcopy | extra data after last expected column | 5,5,5,5
+- errcopy | missing data for column "c"           | 4,4
+-(2 rows)
+-
+--- metacharacter
+-TRUNCATE errcopy;
+-COPY errcopy from stdin csv newline 'LF' log errors segment reject limit 3 rows;
+-NOTICE:  found 1 data formatting errors (1 or more input rows), rejected related input data
+-SELECT * FROM errcopy;
+- a | b | c 
+----+---+---
+- 1 | 2 | 0
+- 1 | 3 | 3
+-(2 rows)
+-
++ERROR:  relation "errcopy" does not exist
++LINE 1: SELECT * FROM errcopy;
++                      ^
+@@
++ERROR:  relation "errcopy" does not exist
+@@
+- gp_truncate_error_log 
+------------------------
+- t
+-(1 row)
+-
++ERROR:  function gp_truncate_error_log(unknown) does not exist
++LINE 1: SELECT gp_truncate_error_log('errcopy');
++               ^
++DETAIL:  There is no function of that name.
+@@
+-DETAIL:  Last error was: invalid input syntax for type integer: "1       4", column a
+-ERROR:  segment reject limit reached, aborting operation
+-CONTEXT:  COPY errcopy, line 3, column a: "1       4"
++ERROR:  syntax error at or near "log"
++LINE 1: COPY errcopy from stdin delimiter E'\t' log errors segment r...
++                                                ^
+@@
+- a | b | c 
+----+---+---
+-(0 rows)
+-
++ERROR:  relation "errcopy" does not exist
++LINE 1: SELECT * FROM errcopy;
++                      ^
+@@
+- relname | filename | bytenum |                                errmsg                                
+----------+----------+---------+----------------------------------------------------------------------
+- errcopy | <stdin>  |         | invalid input syntax for type integer: "1       2       0", column a
+- errcopy | <stdin>  |         | invalid input syntax for type integer: "1       3       4", column a
+- errcopy | <stdin>  |         | invalid input syntax for type integer: "1       4", column a
+-(3 rows)
+-
++ERROR:  function gp_read_error_log(unknown) does not exist
++LINE 1: SELECT relname, filename, bytenum, errmsg FROM gp_read_error...
++                                                       ^
++DETAIL:  There is no function of that name.
+@@
++ERROR:  relation "errcopy" does not exist
+@@
+- gp_truncate_error_log 
+------------------------
+- t
+-(1 row)
+-
++ERROR:  function gp_truncate_error_log(unknown) does not exist
++LINE 1: SELECT gp_truncate_error_log('errcopy');
++               ^
++DETAIL:  There is no function of that name.
+@@
+-DETAIL:  Last error was: missing data for column "b"
+-ERROR:  segment reject limit reached, aborting operation
+-CONTEXT:  COPY errcopy, line 5: "1"
++ERROR:  syntax error at or near "log"
++LINE 1: COPY errcopy from stdin delimiter '/' log errors segment rej...
++                                              ^
+@@
+- relname | filename | bytenum |                errmsg                 
+----------+----------+---------+---------------------------------------
+- errcopy | <stdin>  |         | extra data after last expected column
+- errcopy | <stdin>  |         | missing data for column "b"
+- errcopy | <stdin>  |         | missing data for column "c"
+-(3 rows)
+-
++ERROR:  function gp_read_error_log(unknown) does not exist
++LINE 1: SELECT relname, filename, bytenum, errmsg FROM gp_read_error...
++                                                       ^
++DETAIL:  There is no function of that name.
+@@
++LINE 1: CREATE FUNCTION broken_int4out(broken_int4)
++                                       ^
++ERROR:  could not find function "broken_int4out" in file "/cb/pgregress/regress.so"
+@@
++ERROR:  function broken_int4out(broken_int4) does not exist
+@@
++ERROR:  unrecognized configuration parameter "gp_autostats_mode"
+@@
++ERROR:  type "broken_int4" is only a shell
++LINE 1: CREATE TABLE broken_type_test (b broken_int4);
++                                         ^
+@@
++ERROR:  relation "broken_type_test" does not exist
++LINE 1: insert into broken_type_test select g::text::broken_int4 fro...
++                    ^
+@@
++ERROR:  relation "broken_type_test" does not exist
++LINE 1: copy (select * from broken_type_test limit 10) to '/tmp/g';
++                            ^
+@@
+-DETAIL:  The trigger value was 1234
+-ERROR:  testing failure in output function
++ERROR:  relation "broken_type_test" does not exist
++LINE 1: copy (select * from broken_type_test) to '/tmp/g';
++                            ^
+@@
+-DETAIL:  The trigger value was 1234
+-ERROR:  testing failure in output function
++ERROR:  relation "broken_type_test" does not exist
+@@
++ERROR:  table "broken_type_test" does not exist
+@@
+-DETAIL:  drop cascades to function broken_int4in(cstring)
+-NOTICE:  drop cascades to 2 other objects
+-drop cascades to function broken_int4out(broken_int4)
++NOTICE:  drop cascades to function broken_int4in(cstring)
+@@
++ERROR:  relation "gp_configuration_history" does not exist
+@@
+-12345
++ERROR:  current transaction is aborted, commands ignored until end of transaction block
+@@
++ERROR:  current transaction is aborted, commands ignored until end of transaction block
+@@
+-ERROR:  permission denied: "gp_configuration_history" is a system catalog
+-HINT:  Make sure the configuration parameter allow_system_table_mods is set.
+-ABORT;
+--- GPDB makes the database name, and many other things, available
+--- as environment variables to the program. Test those.
+---
+--- Perform these tests in a funnily named database, to test
+--- escaping
+-set client_min_messages='warning';
+-DROP DATABASE IF EXISTS "funny_copy""db'with\\quotes";
+-reset client_min_messages;
+-CREATE DATABASE "funny_copy""db'with\\quotes";
+-\c "funny_copy""db'with\\quotes"
+--- echo will behave differently on different platforms, force to use bash with -E option
+-COPY (SELECT 'data1') TO PROGRAM 'cat > /tmp/gpcopyenvtest; /usr/bin/env bash -c ''echo -E database in COPY TO: $GP_DATABASE >> /tmp/gpcopyenvtest '' ' ESCAPE 'OFF';
+-CREATE TABLE foo (t text);
+-COPY foo FROM PROGRAM 'cat /tmp/gpcopyenvtest' ESCAPE 'OFF';
+-COPY foo FROM PROGRAM '/usr/bin/env bash -c ''echo -E database in COPY FROM: $GP_DATABASE''' ESCAPE 'OFF';
+-select * from foo;
+-                         t                         
+----------------------------------------------------
+- data1
+- database in COPY FROM: funny_copy"db'with\\quotes
+- database in COPY TO: funny_copy"db'with\\quotes
+-(3 rows)
+-
++ERROR:  current transaction is aborted, commands ignored until end of transaction block

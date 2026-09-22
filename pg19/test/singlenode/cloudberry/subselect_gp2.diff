@@ -1,0 +1,24 @@
+@@
++ERROR:  syntax error at or near "EXTERNAL"
++LINE 1: CREATE EXTERNAL WEB TABLE echotable (c1 int, c2 int, c3 int)...
++               ^
+@@
+- c2 
+-----
+-  2
+-  5
+-(2 rows)
+-
++ERROR:  relation "echotable" does not exist
++LINE 1: select c2 from echotable group by c2 having count(*) >= 1;
++                       ^
+@@
+- c1 | c2 
+-----+----
+-  2 |  2
+-  5 |  5
+-(2 rows)
+-
++ERROR:  relation "echotable" does not exist
++LINE 2: where (select count(*) from echotable as i where i.c2 = o.c2...
++                                    ^

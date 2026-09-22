@@ -1,0 +1,84 @@
+PostgreSQL 19's regression tests under ORCA: the differences from
+PostgreSQL's expected output that have been reviewed, and are ORCA's plans
+rather than wrong answers.
+
+Each file is one test's difference in the form ../canon.pl gives it -- the
+lines removed and added, hunk by hunk, with no file names, line numbers or
+plan lines -- named for the expected output it differs from.  In the orca
+pass, run.sh counts a test as passing when gpdiff.pl finds no difference, or
+exactly the file's; any other difference fails it, and is left in canon/.
+None of these tests differs in the planner pass, where PostgreSQL's tests are
+compared line for line.
+
+The differences that were wrong answers or crashes were fixed rather than
+kept: see cloudberry.md, "The singlenode suites", for the seven the ORCA pass
+found.
+
+A plan gpdiff.pl does not pass over, and estimates (9)
+
+    explain  incremental_sort  join_hash  memoize  planner_est
+    select_parallel  stats_ext  stats  tsearch
+
+  gpdiff.pl passes over a plan psql prints, and not over one a PL/pgSQL
+  function returns as rows of text -- EXPLAIN ANALYZE wrapped to mask its
+  timings -- nor over the estimated and actual row counts stats_ext and
+  planner_est read out of one; in tsearch it leaves a plan's detail lines
+  (Recheck Cond, Filter) behind.  The plans are ORCA's: no incremental sort,
+  no Memoize, an index scan for a bitmap one, a hash join with another
+  number of batches (join_hash), no alias on a Function Scan, and ORCA's own
+  estimates, which use neither extended statistics nor a function's support
+  for row estimates.  stats also checks that a query counted an index scan in
+  the statistics views, and ORCA's plan did not use the index.
+  (partition_prune and merge differed only by the Optimizer line, which
+  run.sh strips in both passes, and have no file.)
+
+An order the query leaves open (8)
+
+    join  polymorphism  psql_crosstab  select_distinct  select_distinct_on
+    tsrf  window  subselect (one hunk)
+
+  The rows are the same, in an order no ORDER BY fixes, or computed over one:
+  a FULL JOIN over a subquery's ORDER BY; array_agg and string_agg with no
+  ORDER BY of their own (polymorphism, psql_crosstab); DISTINCT over a
+  subquery's ORDER BY; GROUP BY CUBE ordered by its first column only
+  (tsrf); window frames and last_value() over rows no ORDER BY orders, or
+  over ties (window: two employees share an enroll_date, and which one is
+  last is open).  ORCA removes an ORDER BY in a subquery with no LIMIT of its
+  own (CExpressionPreprocessor::PexprRemoveSuperfluousLimit), as the SQL
+  standard lets it and Cloudberry's ORCA does; subselect's
+  SELECT ... FROM (SELECT ... ORDER BY c1, pk) x LIMIT 3 takes three rows of
+  an unordered scan.
+
+A test that inspects its own plan (5)
+
+    brin  brin_bloom  brin_multi  tidscan  gist
+
+  The BRIN tests warn when a query does not get the scan they force with
+  enable_seqscan and enable_bitmapscan, which ORCA does not read; the row
+  counts they compare agree.  tidscan reads the predicate lock a serializable
+  query took: a tuple lock under the planner's TID scan, a relation lock
+  under ORCA's seq scan.  gist expects PostgreSQL's index-only scan to refuse
+  a lossy distance function; ORCA's plan uses no such scan, and answers.
+
+An answer PostgreSQL gives two ways, and a side effect (4)
+
+    create_index  aggregates  updatable_views  rangefuncs
+
+  create_index: a point on the edge of a polygon, which PostgreSQL's seq scan
+  counts (5) and its GiST index-only scan does not (4); the test expects each
+  where it forces each scan, and ORCA used the index where the test asked
+  for a seq scan.  aggregates: balk() is defined with a combine function that
+  returns NULL, to test parallel aggregation; ORCA plans no parallel
+  aggregate, so the combine step never runs and the sum is int4_sum's.
+  updatable_views: a LEAKPROOF function's NOTICE, which the planner may
+  evaluate below a security barrier and so for one row more.  rangefuncs: an
+  error's CONTEXT, "during inlining" under the planner, which inlines the SQL
+  function, and "statement 1" under ORCA, which calls it.
+
+The one query Cloudberry runs with the planner (subselect, one hunk)
+
+  A doubly correlated EXISTS over NOT EXISTS that ORCA cannot decorrelate:
+  Cloudberry's own subselect test runs it with optimizer off, "correct-but-
+  slow plan that takes 45 minutes" (GPDB_92_MERGE_FIXME).  The suite's
+  watchdog cancels it after 60 seconds.  The third hunk of subselect is
+  EXPLAIN through a function.

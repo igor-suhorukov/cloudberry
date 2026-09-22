@@ -1,0 +1,7 @@
+@@
+-ERROR:  lossy distance functions are not supported in index-only scans
++   p   
++-------
++ (0,0)
++(1 row)
++

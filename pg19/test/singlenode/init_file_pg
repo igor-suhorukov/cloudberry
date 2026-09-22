@@ -1,0 +1,20 @@
+-- PostgreSQL 19's tests in the ORCA pass of the singlenode suite, for
+-- Cloudberry's gpdiff.pl.
+--
+-- Plans are not compared in that pass -- gpdiff.pl is given
+-- --gpd_ignore_plans -- so the lines here are the ones that differ under ORCA
+-- outside a plan.  Each is ORCA's own, and none is about a query's answer.
+
+-- start_matchignore
+
+# gp_orca's last line of a text-format EXPLAIN, when a plan is printed some
+# way gpdiff.pl does not recognise as a plan.
+m/^ ?Optimizer: (GPORCA|Postgres query optimizer)$/
+
+# ORCA's report of the columns it was asked about and has no statistics for
+# (gp.optimizer_print_missing_stats, on as in Cloudberry).  PostgreSQL's tests
+# analyze few of their tables, so it follows most queries.
+m/^NOTICE:  One or more columns in the following table\(s\) do not have statistics: /
+m/^HINT:  For non-partitioned tables, run analyze <table_name>\(<column_list>\)\. For partitioned tables, run analyze rootpartition <table_name>\(<column_list>\)\. See log for columns missing statistics\.$/
+
+-- end_matchignore

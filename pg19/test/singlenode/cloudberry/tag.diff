@@ -1,0 +1,1911 @@
+@@
+-                                    Table "pg_catalog.pg_tag"
+-     Column     |  Type  | Collation | Nullable | Default | Storage  | Stats target | Description 
+-----------------+--------+-----------+----------+---------+----------+--------------+-------------
+- allowed_values | text[] | C         |          |         | extended |              | 
+- oid            | oid    |           | not null |         | plain    |              | 
+- tagname        | name   |           | not null |         | plain    |              | 
+- tagowner       | oid    |           | not null |         | plain    |              | 
+-Indexes:
+-    "pg_tag_tagname_index" PRIMARY KEY, btree (tagname), tablespace "pg_global"
+-    "pg_tag_oid_index" UNIQUE CONSTRAINT, btree (oid), tablespace "pg_global"
+-Tablespace: "pg_global"
+-
+@@
+-                            Table "pg_catalog.pg_tag_description"
+-    Column    | Type | Collation | Nullable | Default | Storage  | Stats target | Description 
+---------------+------+-----------+----------+---------+----------+--------------+-------------
+- oid          | oid  |           | not null |         | plain    |              | 
+- tagid        | oid  |           | not null |         | plain    |              | 
+- tagvalue     | text | C         |          |         | extended |              | 
+- tdclassid    | oid  |           | not null |         | plain    |              | 
+- tddatabaseid | oid  |           | not null |         | plain    |              | 
+- tdobjid      | oid  |           | not null |         | plain    |              | 
+-Indexes:
+-    "pg_tag_description_d_c_o_t_index" PRIMARY KEY, btree (tddatabaseid, tdclassid, tdobjid, tagid), tablespace "pg_global"
+-    "pg_tag_description_oid_index" UNIQUE CONSTRAINT, btree (oid), tablespace "pg_global"
+-    "pg_tag_description_tagidvalue_index" btree (tagid, tagvalue), tablespace "pg_global"
+-Tablespace: "pg_global"
+-
+@@
+- oid | tagname | tagowner | allowed_values 
+------+---------+----------+----------------
+-(0 rows)
+-
++ERROR:  relation "pg_tag" does not exist
++LINE 1: SELECT * FROM pg_tag;
++                      ^
+@@
+- oid | tddatabaseid | tdclassid | tdobjid | tagid | tagvalue 
+------+--------------+-----------+---------+-------+----------
+-(0 rows)
+-
++ERROR:  relation "pg_tag_description" does not exist
++LINE 1: SELECT * FROM pg_tag_description;
++                      ^
+@@
++ create_tag 
++------------
++ 
++(1 row)
++
+@@
++ create_tag 
++------------
++ 
++(1 row)
++
+@@
++ create_tag 
++------------
++ 
++(1 row)
++
+@@
++ create_tag 
++------------
++ 
++(1 row)
++
+@@
++ create_tag 
++------------
++ 
++(1 row)
++
+@@
++ create_tag 
++------------
++ 
++(1 row)
++
+@@
++CONTEXT:  PL/pgSQL function gp_sql.add_allowed_values(text[],text[]) line 12 at RAISE
++SQL statement "INSERT INTO gp_sql.tag (tagname, tagowner, allowed_values)
++		 VALUES (tagname,
++				 pg_catalog.to_regrole(CURRENT_USER::text)::oid,
++				 gp_sql.add_allowed_values(NULL, allowed_values))"
++PL/pgSQL function gp_sql.create_tag(name,text[],boolean) line 12 at SQL statement
+@@
++CONTEXT:  PL/pgSQL function gp_sql.add_allowed_values(text[],text[]) line 8 at RAISE
++SQL statement "INSERT INTO gp_sql.tag (tagname, tagowner, allowed_values)
++		 VALUES (tagname,
++				 pg_catalog.to_regrole(CURRENT_USER::text)::oid,
++				 gp_sql.add_allowed_values(NULL, allowed_values))"
++PL/pgSQL function gp_sql.create_tag(name,text[],boolean) line 12 at SQL statement
+@@
++ create_tag 
++------------
++ 
++(1 row)
++
+@@
++CONTEXT:  PL/pgSQL function gp_sql.add_allowed_values(text[],text[]) line 19 at RAISE
++SQL statement "INSERT INTO gp_sql.tag (tagname, tagowner, allowed_values)
++		 VALUES (tagname,
++				 pg_catalog.to_regrole(CURRENT_USER::text)::oid,
++				 gp_sql.add_allowed_values(NULL, allowed_values))"
++PL/pgSQL function gp_sql.create_tag(name,text[],boolean) line 12 at SQL statement
+@@
+- tagname | tagowner |                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                            allowed_values                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                             
+----------+----------+---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+- tag1    |       10 | 
+- tag2    |       10 | 
+- tag3    |       10 | {123}
+- tag4    |       10 | {123,456," "}
+- tag5    |       10 | {123,val1}
+- tag8    |       10 | {1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,20,21,22,23,24,25,26,27,28,29,30,31,32,33,34,35,36,37,38,39,40,41,42,43,44,45,46,47,48,49,50,51,52,53,54,55,56,57,58,59,60,61,62,63,64,65,66,67,68,69,70,71,72,73,74,75,76,77,78,79,80,81,82,83,84,85,86,87,88,89,90,91,92,93,94,95,96,97,98,99,100,101,102,103,104,105,106,107,108,109,110,111,112,113,114,115,116,117,118,119,120,121,122,123,124,125,126,127,128,129,130,131,132,133,134,135,136,137,138,139,140,141,142,143,144,145,146,147,148,149,150,151,152,153,154,155,156,157,158,159,160,161,162,163,164,165,166,167,168,169,170,171,172,173,174,175,176,177,178,179,180,181,182,183,184,185,186,187,188,189,190,191,192,193,194,195,196,197,198,199,200,201,202,203,204,205,206,207,208,209,210,211,212,213,214,215,216,217,218,219,220,221,222,223,224,225,226,227,228,229,230,231,232,233,234,235,236,237,238,239,240,241,242,243,244,245,246,247,248,249,250,251,252,253,254,255,256,257,258,259,260,261,262,263,264,265,266,267,268,269,270,271,272,273,274,275,276,277,278,279,280,281,282,283,284,285,286,287,288,289,290,291,292,293,294,295,296,297,298,299,300}
+-(6 rows)
+-
++ERROR:  relation "pg_tag" does not exist
++LINE 1: SELECT tagname, tagowner, allowed_values FROM pg_tag ORDER B...
++                                                      ^
+@@
+- count 
+--------
+-     0
+-(1 row)
+-
++ERROR:  relation "pg_tag_description" does not exist
++LINE 1: SELECT count(*) FROM pg_tag_description;
++                             ^
+@@
+- tagname | tagowner |                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                            allowed_values                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                             
+----------+----------+---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+- tag1    |       10 | 
+- tag2    |       10 | 
+- tag3    |       10 | {123}
+- tag4    |       10 | {123,456," "}
+- tag5    |       10 | {123,val1}
+- tag8    |       10 | {1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,20,21,22,23,24,25,26,27,28,29,30,31,32,33,34,35,36,37,38,39,40,41,42,43,44,45,46,47,48,49,50,51,52,53,54,55,56,57,58,59,60,61,62,63,64,65,66,67,68,69,70,71,72,73,74,75,76,77,78,79,80,81,82,83,84,85,86,87,88,89,90,91,92,93,94,95,96,97,98,99,100,101,102,103,104,105,106,107,108,109,110,111,112,113,114,115,116,117,118,119,120,121,122,123,124,125,126,127,128,129,130,131,132,133,134,135,136,137,138,139,140,141,142,143,144,145,146,147,148,149,150,151,152,153,154,155,156,157,158,159,160,161,162,163,164,165,166,167,168,169,170,171,172,173,174,175,176,177,178,179,180,181,182,183,184,185,186,187,188,189,190,191,192,193,194,195,196,197,198,199,200,201,202,203,204,205,206,207,208,209,210,211,212,213,214,215,216,217,218,219,220,221,222,223,224,225,226,227,228,229,230,231,232,233,234,235,236,237,238,239,240,241,242,243,244,245,246,247,248,249,250,251,252,253,254,255,256,257,258,259,260,261,262,263,264,265,266,267,268,269,270,271,272,273,274,275,276,277,278,279,280,281,282,283,284,285,286,287,288,289,290,291,292,293,294,295,296,297,298,299,300}
+-(6 rows)
+-
++ERROR:  relation "pg_tag" does not exist
++LINE 1: SELECT tagname, tagowner, allowed_values FROM pg_tag ORDER B...
++                                                      ^
+@@
+- count 
+--------
+-     0
+-(1 row)
+-
++ERROR:  relation "pg_tag_description" does not exist
++LINE 1: SELECT count(*) FROM pg_tag_description;
++                             ^
+@@
++ERROR:  schema "gp_sql" does not exist
++LINE 1: DROP TAG tag5;
++               ^
+@@
++ERROR:  schema "gp_sql" does not exist
++LINE 1: DROP TAG IF EXISTS tag5;
++               ^
+@@
++ERROR:  schema "gp_sql" does not exist
++LINE 1: DROP TAG IF EXISTS tag8;
++               ^
+@@
+- tagname | tagowner | allowed_values 
+----------+----------+----------------
+- tag1    |       10 | 
+- tag2    |       10 | 
+- tag3    |       10 | {123}
+- tag4    |       10 | {123,456," "}
+-(4 rows)
+-
++ERROR:  relation "pg_tag" does not exist
++LINE 1: SELECT tagname, tagowner, allowed_values FROM pg_tag ORDER B...
++                                                      ^
+@@
+- count 
+--------
+-     0
+-(1 row)
+-
++ERROR:  relation "pg_tag_description" does not exist
++LINE 1: SELECT count(*) FROM pg_tag_description;
++                             ^
+@@
+- tagname | tagowner | allowed_values 
+----------+----------+----------------
+- tag1    |       10 | 
+- tag2    |       10 | 
+- tag3    |       10 | {123}
+- tag4    |       10 | {123,456," "}
+-(4 rows)
+-
++ERROR:  relation "pg_tag" does not exist
++LINE 1: SELECT tagname, tagowner, allowed_values FROM pg_tag ORDER B...
++                                                      ^
+@@
+- count 
+--------
+-     0
+-(1 row)
+-
++ERROR:  relation "pg_tag_description" does not exist
++LINE 1: SELECT count(*) FROM pg_tag_description;
++                             ^
+@@
++ERROR:  schema "gp_sql" does not exist
++LINE 1: ALTER TAG tag3 RENAME TO tag3_new;
++               ^
+@@
++ERROR:  schema "gp_sql" does not exist
++LINE 1: ALTER TAG IF EXISTS tag4 RENAME TO tag4_new;
++               ^
+@@
++ERROR:  schema "gp_sql" does not exist
++LINE 1: ALTER TAG tag3_new RENAME TO tag3;
++               ^
+@@
++ERROR:  schema "gp_sql" does not exist
++LINE 1: ALTER TAG tag4_new RENAME TO tag4;
++               ^
+@@
+- tagname | tagowner | allowed_values 
+----------+----------+----------------
+- tag1    |       10 | 
+- tag2    |       10 | 
+- tag3    |       10 | {123}
+- tag4    |       10 | {123,456," "}
+-(4 rows)
+-
++ERROR:  relation "pg_tag" does not exist
++LINE 1: SELECT tagname, tagowner, allowed_values FROM pg_tag ORDER B...
++                                                      ^
+@@
+- count 
+--------
+-     0
+-(1 row)
+-
++ERROR:  relation "pg_tag_description" does not exist
++LINE 1: SELECT count(*) FROM pg_tag_description;
++                             ^
+@@
+- tagname | tagowner | allowed_values 
+----------+----------+----------------
+- tag1    |       10 | 
+- tag2    |       10 | 
+- tag3    |       10 | {123}
+- tag4    |       10 | {123,456," "}
+-(4 rows)
+-
++ERROR:  relation "pg_tag" does not exist
++LINE 1: SELECT tagname, tagowner, allowed_values FROM pg_tag ORDER B...
++                                                      ^
+@@
+- count 
+--------
+-     0
+-(1 row)
+-
++ERROR:  relation "pg_tag_description" does not exist
++LINE 1: SELECT count(*) FROM pg_tag_description;
++                             ^
+@@
+- tagname | tagowner | allowed_values 
+----------+----------+----------------
+- tag1    | tag_user | 
+- tag2    | gpadmin  | 
+- tag3    | gpadmin  | {123}
+- tag4    | gpadmin  | {123,456," "}
+-(4 rows)
+-
++ERROR:  relation "pg_tag" does not exist
++LINE 1: ...tagname, rolname AS tagowner, allowed_values FROM pg_tag, pg...
++                                                             ^
+@@
+- tagname | tagowner | allowed_values 
+----------+----------+----------------
+- tag1    | gpadmin  | 
+- tag2    | gpadmin  | 
+- tag3    | gpadmin  | {123}
+- tag4    | gpadmin  | {123,456," "}
+-(4 rows)
+-
++ERROR:  relation "pg_tag" does not exist
++LINE 1: ...tagname, rolname AS tagowner, allowed_values FROM pg_tag, pg...
++                                                             ^
+@@
+- tagname | tagowner | allowed_values 
+----------+----------+----------------
+- tag1    | gpadmin  | 
+- tag2    | gpadmin  | 
+- tag3    | gpadmin  | {123}
+- tag4    | gpadmin  | {123,456," "}
+-(4 rows)
+-
++ERROR:  relation "pg_tag" does not exist
++LINE 1: ...tagname, rolname AS tagowner, allowed_values FROM pg_tag, pg...
++                                                             ^
+@@
++ERROR:  schema "gp_sql" does not exist
++LINE 1: ALTER TAG tag1 UNSET ALLOWED_VALUES;
++               ^
+@@
++ERROR:  schema "gp_sql" does not exist
++LINE 1: ALTER TAG tag2 UNSET ALLOWED_VALUES;
++               ^
+@@
++ERROR:  schema "gp_sql" does not exist
++LINE 1: ALTER TAG tag3 UNSET ALLOWED_VALUES;
++               ^
+@@
+- tagname | tagowner | allowed_values 
+----------+----------+----------------
+- tag1    |       10 | 
+- tag2    |       10 | 
+- tag3    |       10 | 
+- tag4    |       10 | {123,456," "}
+-(4 rows)
+-
++ERROR:  relation "pg_tag" does not exist
++LINE 1: SELECT tagname, tagowner, allowed_values FROM pg_tag ORDER B...
++                                                      ^
+@@
+- count 
+--------
+-     0
+-(1 row)
+-
++ERROR:  relation "pg_tag_description" does not exist
++LINE 1: SELECT count(*) FROM pg_tag_description;
++                             ^
+@@
+- tagname | tagowner | allowed_values 
+----------+----------+----------------
+- tag1    |       10 | 
+- tag2    |       10 | 
+- tag3    |       10 | 
+- tag4    |       10 | {123,456," "}
+-(4 rows)
+-
++ERROR:  relation "pg_tag" does not exist
++LINE 1: SELECT tagname, tagowner, allowed_values FROM pg_tag ORDER B...
++                                                      ^
+@@
+- count 
+--------
+-     0
+-(1 row)
+-
++ERROR:  relation "pg_tag_description" does not exist
++LINE 1: SELECT count(*) FROM pg_tag_description;
++                             ^
+@@
++ERROR:  schema "gp_sql" does not exist
++LINE 1: ALTER TAG tag1 ADD ALLOWED_VALUES 'val1';
++               ^
+@@
+-ERROR:  allowed value "val1" has been added
++ERROR:  schema "gp_sql" does not exist
++LINE 1: ALTER TAG tag1 ADD ALLOWED_VALUES 'val1';
++               ^
+@@
+-ERROR:  allowed value "val1" has been added
++ERROR:  schema "gp_sql" does not exist
++LINE 1: ALTER TAG IF EXISTS tag1 ADD ALLOWED_VALUES 'val1';
++               ^
+@@
+-ERROR:  allowed value "val2" has been added
++ERROR:  schema "gp_sql" does not exist
++LINE 1: ALTER TAG tag1 ADD ALLOWED_VALUES 'val2', 'val2';
++               ^
+@@
+-ERROR:  allowed value "val2" has been added
++ERROR:  schema "gp_sql" does not exist
++LINE 1: ALTER TAG IF EXISTS tag1 ADD ALLOWED_VALUES 'val2', 'val2';
++               ^
+@@
++ERROR:  schema "gp_sql" does not exist
++LINE 1: ALTER TAG tag1 ADD ALLOWED_VALUES 'val2', 'val3';
++               ^
+@@
++ERROR:  schema "gp_sql" does not exist
++LINE 1: ALTER TAG IF EXISTS tag1 ADD ALLOWED_VALUES 'val4', 'val5';
++               ^
+@@
+-ERROR:  allowed value "" has been added
++ERROR:  schema "gp_sql" does not exist
++LINE 1: ALTER TAG tag1 ADD ALLOWED_VALUES '', '';
++               ^
+@@
+-ERROR:  allowed value "" has been added
++ERROR:  schema "gp_sql" does not exist
++LINE 1: ALTER TAG IF EXISTS tag1 ADD ALLOWED_VALUES '', '';
++               ^
+@@
+-ERROR:  allowed value " " has been added
++ERROR:  schema "gp_sql" does not exist
++LINE 1: ALTER TAG tag1 ADD ALLOWED_VALUES ' ', ' ';
++               ^
+@@
++ERROR:  schema "gp_sql" does not exist
++LINE 1: ALTER TAG IF EXISTS tag1 ADD ALLOWED_VALUES ' ';
++               ^
+@@
+-ERROR:  Allowed_values only allow 300 values.
++ERROR:  schema "gp_sql" does not exist
++LINE 1: ALTER TAG tag1 ADD ALLOWED_VALUES '1', '2', '3', '4', '5', '...
++               ^
+@@
+-ERROR:  Allowed_values only allow 300 values.
++ERROR:  schema "gp_sql" does not exist
++LINE 1: ALTER TAG IF EXISTS tag1 ADD ALLOWED_VALUES '1', '2', '3', '...
++               ^
+@@
+- tagname | tagowner |         allowed_values         
+----------+----------+--------------------------------
+- tag1    |       10 | {val1,val2,val3,val4,val5," "}
+- tag2    |       10 | 
+- tag3    |       10 | 
+- tag4    |       10 | {123,456," "}
+-(4 rows)
+-
++ERROR:  relation "pg_tag" does not exist
++LINE 1: SELECT tagname, tagowner, allowed_values FROM pg_tag ORDER B...
++                                                      ^
+@@
+- count 
+--------
+-     0
+-(1 row)
+-
++ERROR:  relation "pg_tag_description" does not exist
++LINE 1: SELECT count(*) FROM pg_tag_description;
++                             ^
+@@
+- tagname | tagowner |         allowed_values         
+----------+----------+--------------------------------
+- tag1    |       10 | {val1,val2,val3,val4,val5," "}
+- tag2    |       10 | 
+- tag3    |       10 | 
+- tag4    |       10 | {123,456," "}
+-(4 rows)
+-
++ERROR:  relation "pg_tag" does not exist
++LINE 1: SELECT tagname, tagowner, allowed_values FROM pg_tag ORDER B...
++                                                      ^
+@@
+- count 
+--------
+-     0
+-(1 row)
+-
++ERROR:  relation "pg_tag_description" does not exist
++LINE 1: SELECT count(*) FROM pg_tag_description;
++                             ^
+@@
++ERROR:  schema "gp_sql" does not exist
++LINE 1: ALTER TAG tag2 ADD ALLOWED_VALUES '1', '2', '3', '4', '5', '...
++               ^
+@@
+-ERROR:  allowed value "1" has been added
++ERROR:  schema "gp_sql" does not exist
++LINE 1: ALTER TAG IF EXISTS tag2 ADD ALLOWED_VALUES '1', '2', '3', '...
++               ^
+@@
+-ERROR:  added allowed value "nqwenfqpjenpjqnpufnqwpiuenfuiasqwefqfsafqwefnfiunl;jfa;lskdfjqpwefjqpewe234dfqweffjhsudfiueqihfsakdljfqeqfhqoufhoaisuehfqoiuwehfqoifhqoiuwehfoqihfosfqwfeqwfqwefqwefqwfefqefqfqewfqwefweqfsdfqwefqifquhowifhoiuqhfuosdfqjfqkepfqjfpishdfuiqh2139u108wefoiuqwhefoiuqwehfoiuqwhfoiuweqfheiasuohfioquwehfqwoeiufhdasiqeqwejfpqwifjipqwfjqwiefjpiqwehfpiquwehfqwiufhqwpiuefhqwui0fhpiiohfoqiuwehfoquwefoiweqfewoqifqwoiufhho" has exceeded max 256 length
++ERROR:  schema "gp_sql" does not exist
++LINE 1: ALTER TAG tag3 ADD ALLOWED_VALUES 'nqwenfqpjenpjqnpufnqwpiue...
++               ^
+@@
+-ERROR:  added allowed value "nqwenfqpjenpjqnpufnqwpiuenfuiasqwefqfsafqwefnfiunl;jfa;lskdfjqpwefjqpewe234dfqweffjhsudfiueqihfsakdljfqeqfhqoufhoaisuehfqoiuwehfqoifhqoiuwehfoqihfosfqwfeqwfqwefqwefqwfefqefqfqewfqwefweqfsdfqwefqifquhowifhoiuqhfuosdfqjfqkepfqjfpishdfuiqh2139u108wefoiuqwhefoiuqwehfoiuqwhfoiuweqfheiasuohfioquwehfqwoeiufhdasiqeqwejfpqwifjipqwfjqwiefjpiqwehfpiquwehfqwiufhqwpiuefhqwui0fhpiiohfoqiuwehfoquwefoiweqfewoqifqwoiufhho" has exceeded max 256 length
++ERROR:  schema "gp_sql" does not exist
++LINE 1: ALTER TAG IF EXISTS tag3 ADD ALLOWED_VALUES 'nqwenfqpjenpjqn...
++               ^
+@@
++ERROR:  schema "gp_sql" does not exist
++LINE 1: ALTER TAG tag3 ADD ALLOWED_VALUES 'dadkqjefpqfqfqe4l123j9i1s...
++               ^
+@@
+-ERROR:  allowed value " " has been added
++ERROR:  schema "gp_sql" does not exist
++LINE 1: ALTER TAG tag4 ADD ALLOWED_VALUES ' ';
++               ^
+@@
+-ERROR:  allowed value " " has been added
++ERROR:  schema "gp_sql" does not exist
++LINE 1: ALTER TAG IF EXISTS tag4 ADD ALLOWED_VALUES ' ';
++               ^
+@@
++ERROR:  schema "gp_sql" does not exist
++LINE 1: ALTER TAG tag4 ADD ALLOWED_VALUES '';
++               ^
+@@
+-ERROR:  allowed value "" has been added
++ERROR:  schema "gp_sql" does not exist
++LINE 1: ALTER TAG tag4 ADD ALLOWED_VALUES '';
++               ^
+@@
+- tagname | tagowner |                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                            allowed_values                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                             
+----------+----------+---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+- tag1    |       10 | {val1,val2,val3,val4,val5," "}
+- tag2    |       10 | {1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,20,21,22,23,24,25,26,27,28,29,30,31,32,33,34,35,36,37,38,39,40,41,42,43,44,45,46,47,48,49,50,51,52,53,54,55,56,57,58,59,60,61,62,63,64,65,66,67,68,69,70,71,72,73,74,75,76,77,78,79,80,81,82,83,84,85,86,87,88,89,90,91,92,93,94,95,96,97,98,99,100,101,102,103,104,105,106,107,108,109,110,111,112,113,114,115,116,117,118,119,120,121,122,123,124,125,126,127,128,129,130,131,132,133,134,135,136,137,138,139,140,141,142,143,144,145,146,147,148,149,150,151,152,153,154,155,156,157,158,159,160,161,162,163,164,165,166,167,168,169,170,171,172,173,174,175,176,177,178,179,180,181,182,183,184,185,186,187,188,189,190,191,192,193,194,195,196,197,198,199,200,201,202,203,204,205,206,207,208,209,210,211,212,213,214,215,216,217,218,219,220,221,222,223,224,225,226,227,228,229,230,231,232,233,234,235,236,237,238,239,240,241,242,243,244,245,246,247,248,249,250,251,252,253,254,255,256,257,258,259,260,261,262,263,264,265,266,267,268,269,270,271,272,273,274,275,276,277,278,279,280,281,282,283,284,285,286,287,288,289,290,291,292,293,294,295,296,297,298,299,300}
+- tag3    |       10 | {dadkqjefpqfqfqe4l123j9i1snkqenp3412n4jnflqjenfaddpiqepj21304i12;kfnqpqnepfqefqwef}
+- tag4    |       10 | {123,456," ",""}
+-(4 rows)
+-
++ERROR:  relation "pg_tag" does not exist
++LINE 1: SELECT tagname, tagowner, allowed_values FROM pg_tag ORDER B...
++                                                      ^
+@@
+- count 
+--------
+-     0
+-(1 row)
+-
++ERROR:  relation "pg_tag_description" does not exist
++LINE 1: SELECT count(*) FROM pg_tag_description;
++                             ^
+@@
+- tagname | tagowner |                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                            allowed_values                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                             
+----------+----------+---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+- tag1    |       10 | {val1,val2,val3,val4,val5," "}
+- tag2    |       10 | {1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,20,21,22,23,24,25,26,27,28,29,30,31,32,33,34,35,36,37,38,39,40,41,42,43,44,45,46,47,48,49,50,51,52,53,54,55,56,57,58,59,60,61,62,63,64,65,66,67,68,69,70,71,72,73,74,75,76,77,78,79,80,81,82,83,84,85,86,87,88,89,90,91,92,93,94,95,96,97,98,99,100,101,102,103,104,105,106,107,108,109,110,111,112,113,114,115,116,117,118,119,120,121,122,123,124,125,126,127,128,129,130,131,132,133,134,135,136,137,138,139,140,141,142,143,144,145,146,147,148,149,150,151,152,153,154,155,156,157,158,159,160,161,162,163,164,165,166,167,168,169,170,171,172,173,174,175,176,177,178,179,180,181,182,183,184,185,186,187,188,189,190,191,192,193,194,195,196,197,198,199,200,201,202,203,204,205,206,207,208,209,210,211,212,213,214,215,216,217,218,219,220,221,222,223,224,225,226,227,228,229,230,231,232,233,234,235,236,237,238,239,240,241,242,243,244,245,246,247,248,249,250,251,252,253,254,255,256,257,258,259,260,261,262,263,264,265,266,267,268,269,270,271,272,273,274,275,276,277,278,279,280,281,282,283,284,285,286,287,288,289,290,291,292,293,294,295,296,297,298,299,300}
+- tag3    |       10 | {dadkqjefpqfqfqe4l123j9i1snkqenp3412n4jnflqjenfaddpiqepj21304i12;kfnqpqnepfqefqwef}
+- tag4    |       10 | {123,456," ",""}
+-(4 rows)
+-
++ERROR:  relation "pg_tag" does not exist
++LINE 1: SELECT tagname, tagowner, allowed_values FROM pg_tag ORDER B...
++                                                      ^
+@@
+- count 
+--------
+-     0
+-(1 row)
+-
++ERROR:  relation "pg_tag_description" does not exist
++LINE 1: SELECT count(*) FROM pg_tag_description;
++                             ^
+@@
+-ERROR:  allowed value "unknown" not found
++ERROR:  schema "gp_sql" does not exist
++LINE 1: ALTER TAG tag1 DROP ALLOWED_VALUES 'unknown';
++               ^
+@@
+-ERROR:  allowed value "unknown" not found
++ERROR:  schema "gp_sql" does not exist
++LINE 1: ALTER TAG IF EXISTS tag1 DROP ALLOWED_VALUES 'unknown';
++               ^
+@@
+-ERROR:  allowed value "1" not found
++ERROR:  schema "gp_sql" does not exist
++LINE 1: ALTER TAG IF EXISTS tag1 DROP ALLOWED_VALUES '1', '2', '3', ...
++               ^
+@@
+-ERROR:  allowed value "1" not found
++ERROR:  schema "gp_sql" does not exist
++LINE 1: ALTER TAG tag1 DROP ALLOWED_VALUES '1';
++               ^
+@@
+-ERROR:  allowed value "1" not found
++ERROR:  schema "gp_sql" does not exist
++LINE 1: ALTER TAG IF EXISTS tag1 DROP ALLOWED_VALUES '1';
++               ^
+@@
+-ERROR:  allowed value "" not found
++ERROR:  schema "gp_sql" does not exist
++LINE 1: ALTER TAG tag1 DROP ALLOWED_VALUES '';
++               ^
+@@
+-ERROR:  allowed value "" not found
++ERROR:  schema "gp_sql" does not exist
++LINE 1: ALTER TAG IF EXISTS tag1 DROP ALLOWED_VALUES '';
++               ^
+@@
++ERROR:  schema "gp_sql" does not exist
++LINE 1: ALTER TAG tag1 UNSET ALLOWED_VALUES;
++               ^
+@@
+- tagname | tagowner |                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                            allowed_values                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                             
+----------+----------+---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+- tag1    |       10 | 
+- tag2    |       10 | {1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,20,21,22,23,24,25,26,27,28,29,30,31,32,33,34,35,36,37,38,39,40,41,42,43,44,45,46,47,48,49,50,51,52,53,54,55,56,57,58,59,60,61,62,63,64,65,66,67,68,69,70,71,72,73,74,75,76,77,78,79,80,81,82,83,84,85,86,87,88,89,90,91,92,93,94,95,96,97,98,99,100,101,102,103,104,105,106,107,108,109,110,111,112,113,114,115,116,117,118,119,120,121,122,123,124,125,126,127,128,129,130,131,132,133,134,135,136,137,138,139,140,141,142,143,144,145,146,147,148,149,150,151,152,153,154,155,156,157,158,159,160,161,162,163,164,165,166,167,168,169,170,171,172,173,174,175,176,177,178,179,180,181,182,183,184,185,186,187,188,189,190,191,192,193,194,195,196,197,198,199,200,201,202,203,204,205,206,207,208,209,210,211,212,213,214,215,216,217,218,219,220,221,222,223,224,225,226,227,228,229,230,231,232,233,234,235,236,237,238,239,240,241,242,243,244,245,246,247,248,249,250,251,252,253,254,255,256,257,258,259,260,261,262,263,264,265,266,267,268,269,270,271,272,273,274,275,276,277,278,279,280,281,282,283,284,285,286,287,288,289,290,291,292,293,294,295,296,297,298,299,300}
+- tag3    |       10 | {dadkqjefpqfqfqe4l123j9i1snkqenp3412n4jnflqjenfaddpiqepj21304i12;kfnqpqnepfqefqwef}
+- tag4    |       10 | {123,456," ",""}
+-(4 rows)
+-
++ERROR:  relation "pg_tag" does not exist
++LINE 1: SELECT tagname, tagowner, allowed_values FROM pg_tag ORDER B...
++                                                      ^
+@@
++ERROR:  schema "gp_sql" does not exist
++LINE 1: ALTER TAG tag1 ADD ALLOWED_VALUES 'val1', 'val2', 'val3';
++               ^
+@@
+- tagname | tagowner |                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                            allowed_values                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                             
+----------+----------+---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+- tag1    |       10 | {val1,val2,val3}
+- tag2    |       10 | {1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,20,21,22,23,24,25,26,27,28,29,30,31,32,33,34,35,36,37,38,39,40,41,42,43,44,45,46,47,48,49,50,51,52,53,54,55,56,57,58,59,60,61,62,63,64,65,66,67,68,69,70,71,72,73,74,75,76,77,78,79,80,81,82,83,84,85,86,87,88,89,90,91,92,93,94,95,96,97,98,99,100,101,102,103,104,105,106,107,108,109,110,111,112,113,114,115,116,117,118,119,120,121,122,123,124,125,126,127,128,129,130,131,132,133,134,135,136,137,138,139,140,141,142,143,144,145,146,147,148,149,150,151,152,153,154,155,156,157,158,159,160,161,162,163,164,165,166,167,168,169,170,171,172,173,174,175,176,177,178,179,180,181,182,183,184,185,186,187,188,189,190,191,192,193,194,195,196,197,198,199,200,201,202,203,204,205,206,207,208,209,210,211,212,213,214,215,216,217,218,219,220,221,222,223,224,225,226,227,228,229,230,231,232,233,234,235,236,237,238,239,240,241,242,243,244,245,246,247,248,249,250,251,252,253,254,255,256,257,258,259,260,261,262,263,264,265,266,267,268,269,270,271,272,273,274,275,276,277,278,279,280,281,282,283,284,285,286,287,288,289,290,291,292,293,294,295,296,297,298,299,300}
+- tag3    |       10 | {dadkqjefpqfqfqe4l123j9i1snkqenp3412n4jnflqjenfaddpiqepj21304i12;kfnqpqnepfqefqwef}
+- tag4    |       10 | {123,456," ",""}
+-(4 rows)
+-
++ERROR:  relation "pg_tag" does not exist
++LINE 1: SELECT tagname, tagowner, allowed_values FROM pg_tag ORDER B...
++                                                      ^
+@@
+- count 
+--------
+-     0
+-(1 row)
+-
++ERROR:  relation "pg_tag_description" does not exist
++LINE 1: SELECT count(*) FROM pg_tag_description;
++                             ^
+@@
+- tagname | tagowner |                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                            allowed_values                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                             
+----------+----------+---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+- tag1    |       10 | {val1,val2,val3}
+- tag2    |       10 | {1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,20,21,22,23,24,25,26,27,28,29,30,31,32,33,34,35,36,37,38,39,40,41,42,43,44,45,46,47,48,49,50,51,52,53,54,55,56,57,58,59,60,61,62,63,64,65,66,67,68,69,70,71,72,73,74,75,76,77,78,79,80,81,82,83,84,85,86,87,88,89,90,91,92,93,94,95,96,97,98,99,100,101,102,103,104,105,106,107,108,109,110,111,112,113,114,115,116,117,118,119,120,121,122,123,124,125,126,127,128,129,130,131,132,133,134,135,136,137,138,139,140,141,142,143,144,145,146,147,148,149,150,151,152,153,154,155,156,157,158,159,160,161,162,163,164,165,166,167,168,169,170,171,172,173,174,175,176,177,178,179,180,181,182,183,184,185,186,187,188,189,190,191,192,193,194,195,196,197,198,199,200,201,202,203,204,205,206,207,208,209,210,211,212,213,214,215,216,217,218,219,220,221,222,223,224,225,226,227,228,229,230,231,232,233,234,235,236,237,238,239,240,241,242,243,244,245,246,247,248,249,250,251,252,253,254,255,256,257,258,259,260,261,262,263,264,265,266,267,268,269,270,271,272,273,274,275,276,277,278,279,280,281,282,283,284,285,286,287,288,289,290,291,292,293,294,295,296,297,298,299,300}
+- tag3    |       10 | {dadkqjefpqfqfqe4l123j9i1snkqenp3412n4jnflqjenfaddpiqepj21304i12;kfnqpqnepfqefqwef}
+- tag4    |       10 | {123,456," ",""}
+-(4 rows)
+-
++ERROR:  relation "pg_tag" does not exist
++LINE 1: SELECT tagname, tagowner, allowed_values FROM pg_tag ORDER B...
++                                                      ^
+@@
+- count 
+--------
+-     0
+-(1 row)
+-
++ERROR:  relation "pg_tag_description" does not exist
++LINE 1: SELECT count(*) FROM pg_tag_description;
++                             ^
+@@
+-ERROR:  tag value "novalue" is not in tag "tag1" allowed values
++ERROR:  tags need the "gp_sql" extension in this database
++HINT:  Run "CREATE EXTENSION gp_sql".
+@@
++ERROR:  tags need the "gp_sql" extension in this database
++HINT:  Run "CREATE EXTENSION gp_sql".
+@@
+-ERROR:  syntax error at or near ")"
++ERROR:  syntax error at or near "("
+@@
+-                                     ^
++                                    ^
+@@
+-ERROR:  tag value "" is not in tag "tag1" allowed values
++ERROR:  tags need the "gp_sql" extension in this database
++HINT:  Run "CREATE EXTENSION gp_sql".
+@@
++ERROR:  tags need the "gp_sql" extension in this database
++HINT:  Run "CREATE EXTENSION gp_sql".
+@@
+-ERROR:  tag "tag1" value has been added for object "tag_db3".
++ERROR:  tags need the "gp_sql" extension in this database
++HINT:  Run "CREATE EXTENSION gp_sql".
+@@
+-ERROR:  tag value "novalue" is not in tag "tag1" allowed values
++ERROR:  tags need the "gp_sql" extension in this database
++HINT:  Run "CREATE EXTENSION gp_sql".
+@@
++ERROR:  tags need the "gp_sql" extension in this database
++HINT:  Run "CREATE EXTENSION gp_sql".
+@@
++ERROR:  tags need the "gp_sql" extension in this database
++HINT:  Run "CREATE EXTENSION gp_sql".
+@@
++ERROR:  tags need the "gp_sql" extension in this database
++HINT:  Run "CREATE EXTENSION gp_sql".
+@@
+-ERROR:  tag "tag4" value has been added for object "tag_db6".
++ERROR:  tags need the "gp_sql" extension in this database
++HINT:  Run "CREATE EXTENSION gp_sql".
+@@
+-ERROR:  tag "tag4" value has been added for object "tag_db6".
++ERROR:  tags need the "gp_sql" extension in this database
++HINT:  Run "CREATE EXTENSION gp_sql".
+@@
+-ERROR:  tag "tag4" value has been added for object "tag_db6".
++ERROR:  tags need the "gp_sql" extension in this database
++HINT:  Run "CREATE EXTENSION gp_sql".
+@@
++ERROR:  tags need the "gp_sql" extension in this database
++HINT:  Run "CREATE EXTENSION gp_sql".
+@@
++ERROR:  tags need the "gp_sql" extension in this database
++HINT:  Run "CREATE EXTENSION gp_sql".
+@@
+-ERROR:  tag value "" is not in tag "tag3" allowed values
++ERROR:  tags need the "gp_sql" extension in this database
++HINT:  Run "CREATE EXTENSION gp_sql".
+@@
+-ERROR:  tag value "novalue" is not in tag "tag1" allowed values
++ERROR:  tags need the "gp_sql" extension in this database
++HINT:  Run "CREATE EXTENSION gp_sql".
+@@
++ERROR:  tags need the "gp_sql" extension in this database
++HINT:  Run "CREATE EXTENSION gp_sql".
+@@
++ERROR:  tags need the "gp_sql" extension in this database
++HINT:  Run "CREATE EXTENSION gp_sql".
+@@
+- tddatabaseid | datname  | tagname |                                     tagvalue                                      
+---------------+----------+---------+-----------------------------------------------------------------------------------
+-            0 | tag_db1  | tag1    | val1
+-            0 | tag_db10 | tag3    | dadkqjefpqfqfqe4l123j9i1snkqenp3412n4jnflqjenfaddpiqepj21304i12;kfnqpqnepfqefqwef
+-            0 | tag_db2  | tag1    | val1
+-            0 | tag_db2  | tag2    | 10
+-            0 | tag_db3  | tag1    | val1
+-            0 | tag_db3  | tag2    | 1
+-            0 | tag_db4  | tag1    | val1
+-            0 | tag_db4  | tag2    | 3
+-            0 | tag_db4  | tag4    | 
+-            0 | tag_db5  | tag2    | 300
+-            0 | tag_db5  | tag4    |  
+-            0 | tag_db6  | tag4    | 
+-            0 | tag_db7  | tag4    |  
+-            0 | tag_db8  | tag1    | val1
+-(14 rows)
+-
++ERROR:  relation "database_tag_descriptions" does not exist
++LINE 1: SELECT * FROM database_tag_descriptions
++                      ^
+@@
+- datname  | datdba | encoding | datistemplate | datallowconn | datconnlimit 
+-----------+--------+----------+---------------+--------------+--------------
+- tag_db1  |     10 |        6 | f             | t            |           -1
+- tag_db10 |     10 |        6 | f             | t            |           -1
+- tag_db2  |     10 |        6 | f             | t            |           -1
+- tag_db3  |     10 |        6 | f             | t            |           -1
+- tag_db4  |     10 |        6 | f             | t            |           -1
+- tag_db5  |     10 |        6 | f             | t            |           -1
+- tag_db6  |     10 |        6 | f             | t            |           -1
+- tag_db7  |     10 |        6 | f             | t            |           -1
+- tag_db8  |     10 |        6 | f             | t            |           -1
+- tag_db9  |     10 |        6 | f             | t            |           -1
+-(10 rows)
++ datname | datdba | encoding | datistemplate | datallowconn | datconnlimit 
++---------+--------+----------+---------------+--------------+--------------
++ tag_db9 |     10 |        6 | f             | t            |           -1
++(1 row)
+@@
+-DETAIL:  tag of tag description with tag tag1
+-ERROR:  tag "tag1" cannot be dropped because some objects depend on it
+-tag of tag description with tag tag1
+-tag of tag description with tag tag1
+-tag of tag description with tag tag1
+-tag of tag description with tag tag1
++ERROR:  schema "gp_sql" does not exist
++LINE 1: DROP TAG tag1;
++               ^
+@@
+-DETAIL:  tag of tag description with tag tag2
+-ERROR:  tag "tag2" cannot be dropped because some objects depend on it
+-tag of tag description with tag tag2
+-tag of tag description with tag tag2
+-tag of tag description with tag tag2
++ERROR:  schema "gp_sql" does not exist
++LINE 1: DROP TAG tag2;
++               ^
+@@
+-DETAIL:  tag of tag description with tag tag3
+-ERROR:  tag "tag3" cannot be dropped because some objects depend on it
++ERROR:  schema "gp_sql" does not exist
++LINE 1: DROP TAG tag3;
++               ^
+@@
+-DETAIL:  tag of tag description with tag tag4
+-ERROR:  tag "tag4" cannot be dropped because some objects depend on it
+-tag of tag description with tag tag4
+-tag of tag description with tag tag4
+-tag of tag description with tag tag4
++ERROR:  schema "gp_sql" does not exist
++LINE 1: DROP TAG tag4;
++               ^
+@@
+- tagname | tagowner |                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                            allowed_values                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                             
+----------+----------+---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+- tag1    |       10 | {val1,val2,val3}
+- tag2    |       10 | {1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,20,21,22,23,24,25,26,27,28,29,30,31,32,33,34,35,36,37,38,39,40,41,42,43,44,45,46,47,48,49,50,51,52,53,54,55,56,57,58,59,60,61,62,63,64,65,66,67,68,69,70,71,72,73,74,75,76,77,78,79,80,81,82,83,84,85,86,87,88,89,90,91,92,93,94,95,96,97,98,99,100,101,102,103,104,105,106,107,108,109,110,111,112,113,114,115,116,117,118,119,120,121,122,123,124,125,126,127,128,129,130,131,132,133,134,135,136,137,138,139,140,141,142,143,144,145,146,147,148,149,150,151,152,153,154,155,156,157,158,159,160,161,162,163,164,165,166,167,168,169,170,171,172,173,174,175,176,177,178,179,180,181,182,183,184,185,186,187,188,189,190,191,192,193,194,195,196,197,198,199,200,201,202,203,204,205,206,207,208,209,210,211,212,213,214,215,216,217,218,219,220,221,222,223,224,225,226,227,228,229,230,231,232,233,234,235,236,237,238,239,240,241,242,243,244,245,246,247,248,249,250,251,252,253,254,255,256,257,258,259,260,261,262,263,264,265,266,267,268,269,270,271,272,273,274,275,276,277,278,279,280,281,282,283,284,285,286,287,288,289,290,291,292,293,294,295,296,297,298,299,300}
+- tag3    |       10 | {dadkqjefpqfqfqe4l123j9i1snkqenp3412n4jnflqjenfaddpiqepj21304i12;kfnqpqnepfqefqwef}
+- tag4    |       10 | {123,456," ",""}
+-(4 rows)
+-
++ERROR:  relation "pg_tag" does not exist
++LINE 1: SELECT tagname, tagowner, allowed_values FROM pg_tag ORDER B...
++                                                      ^
+@@
++ERROR:  schema "gp_sql" does not exist
++LINE 1: ALTER DATABASE tag_db1 TAG (tag1 = 'val1', tag1 = 'val1');
++               ^
+@@
++ERROR:  schema "gp_sql" does not exist
++LINE 1: ALTER DATABASE tag_db2 TAG (tag2 = '10');
++               ^
+@@
+-ERROR:  tag value "" is not in tag "tag3" allowed values
++ERROR:  schema "gp_sql" does not exist
++LINE 1: ALTER DATABASE tag_db3 TAG (tag3 = '');
++               ^
+@@
++ERROR:  schema "gp_sql" does not exist
++LINE 1: ALTER DATABASE tag_db4 UNSET TAG (tag1, tag2);
++               ^
+@@
+-WARNING:  object "tag_db4" does not have tag "tag1", creating
++ERROR:  schema "gp_sql" does not exist
++LINE 1: ALTER DATABASE tag_db4 TAG (tag1 = 'val3', tag4 = '');
++               ^
+@@
++ERROR:  schema "gp_sql" does not exist
++LINE 1: ALTER DATABASE tag_db5 TAG (tag4 = '', tag4 = ' ');
++               ^
+@@
++ERROR:  schema "gp_sql" does not exist
++LINE 1: ALTER DATABASE tag_db6 TAG (tag4 = ' ');
++               ^
+@@
+-WARNING:  object "tag_db7" does not have tag "tag1", creating
+-WARNING:  object "tag_db7" does not have tag "tag2", creating
++ERROR:  schema "gp_sql" does not exist
++LINE 1: ALTER DATABASE tag_db7 TAG (tag1 = 'val2', tag2 = '3');
++               ^
+@@
++ERROR:  schema "gp_sql" does not exist
++LINE 1: ALTER DATABASE tag_db7 UNSET TAG (tag1);
++               ^
+@@
+-WARNING:  object "tag_db8" does not have tag "tag4", creating
++ERROR:  schema "gp_sql" does not exist
++LINE 1: ALTER DATABASE tag_db8 TAG (tag4 = '123', tag4 = '123');
++               ^
+@@
+-WARNING:  object "tag_db9" does not have tag "tag4", creating
++ERROR:  schema "gp_sql" does not exist
++LINE 1: ALTER DATABASE tag_db9 TAG (tag4 = '', tag4 = '123', tag4 = ...
++               ^
+@@
++ERROR:  schema "gp_sql" does not exist
++LINE 1: ALTER DATABASE tag_db9 TAG (tag4 = '123');
++               ^
+@@
+- tddatabaseid | datname  | tagname |                                     tagvalue                                      
+---------------+----------+---------+-----------------------------------------------------------------------------------
+-            0 | tag_db1  | tag1    | val1
+-            0 | tag_db10 | tag3    | dadkqjefpqfqfqe4l123j9i1snkqenp3412n4jnflqjenfaddpiqepj21304i12;kfnqpqnepfqefqwef
+-            0 | tag_db2  | tag1    | val1
+-            0 | tag_db2  | tag2    | 10
+-            0 | tag_db3  | tag1    | val1
+-            0 | tag_db3  | tag2    | 1
+-            0 | tag_db4  | tag1    | val3
+-            0 | tag_db4  | tag4    | 
+-            0 | tag_db5  | tag2    | 300
+-            0 | tag_db5  | tag4    |  
+-            0 | tag_db6  | tag4    |  
+-            0 | tag_db7  | tag2    | 3
+-            0 | tag_db7  | tag4    |  
+-            0 | tag_db8  | tag1    | val1
+-            0 | tag_db8  | tag4    | 123
+-            0 | tag_db9  | tag4    | 123
+-(16 rows)
+-
++ERROR:  relation "database_tag_descriptions" does not exist
++LINE 1: SELECT * FROM database_tag_descriptions
++                      ^
+@@
+- datname  | datdba | encoding | datistemplate | datallowconn | datconnlimit 
+-----------+--------+----------+---------------+--------------+--------------
+- tag_db1  |     10 |        6 | f             | t            |           -1
+- tag_db10 |     10 |        6 | f             | t            |           -1
+- tag_db2  |     10 |        6 | f             | t            |           -1
+- tag_db3  |     10 |        6 | f             | t            |           -1
+- tag_db4  |     10 |        6 | f             | t            |           -1
+- tag_db5  |     10 |        6 | f             | t            |           -1
+- tag_db6  |     10 |        6 | f             | t            |           -1
+- tag_db7  |     10 |        6 | f             | t            |           -1
+- tag_db8  |     10 |        6 | f             | t            |           -1
+- tag_db9  |     10 |        6 | f             | t            |           -1
+-(10 rows)
++ datname | datdba | encoding | datistemplate | datallowconn | datconnlimit 
++---------+--------+----------+---------------+--------------+--------------
++ tag_db9 |     10 |        6 | f             | t            |           -1
++(1 row)
+@@
++ERROR:  database "tag_db1" does not exist
+@@
++ERROR:  database "tag_db2" does not exist
+@@
++ERROR:  database "tag_db3" does not exist
+@@
++ERROR:  database "tag_db4" does not exist
+@@
++ERROR:  database "tag_db5" does not exist
+@@
++ERROR:  database "tag_db6" does not exist
+@@
++ERROR:  database "tag_db7" does not exist
+@@
++ERROR:  database "tag_db8" does not exist
+@@
++ERROR:  database "tag_db10" does not exist
+@@
+- tddatabaseid | datname | tagname | tagvalue 
+---------------+---------+---------+----------
+-(0 rows)
+-
++ERROR:  relation "database_tag_descriptions" does not exist
++LINE 1: SELECT * FROM database_tag_descriptions
++                      ^
+@@
+-ERROR:  tag value "novalue" is not in tag "tag1" allowed values
++ERROR:  schema "gp_sql" does not exist
++LINE 1: CREATE USER tag_user1 TAG (tag1 = 'novalue');
++                                        ^
+@@
++ERROR:  schema "gp_sql" does not exist
++LINE 1: CREATE USER tag_user1 TAG (tag1 = 'val1');
++                                        ^
+@@
+-ERROR:  syntax error at or near ";"
++ERROR:  unrecognized role option "tag"
+@@
+-                                 ^
++                              ^
+@@
+-ERROR:  syntax error at or near ")"
++ERROR:  unrecognized role option "tag"
+@@
+-                                   ^
++                              ^
+@@
+-ERROR:  tag value "" is not in tag "tag1" allowed values
++ERROR:  schema "gp_sql" does not exist
++LINE 1: CREATE USER tag_user2 TAG (tag1 = '');
++                                        ^
+@@
++ERROR:  schema "gp_sql" does not exist
++LINE 1: CREATE USER tag_user2 TAG (tag1 = 'val1', tag2 = '10');
++                                        ^
+@@
+-ERROR:  tag "tag1" value has been added for object "tag_user3".
++ERROR:  schema "gp_sql" does not exist
++LINE 1: CREATE USER tag_user3 TAG (tag1 = 'val1', tag1 = 'val2', tag...
++                                        ^
+@@
+-ERROR:  tag value "novalue" is not in tag "tag1" allowed values
++ERROR:  schema "gp_sql" does not exist
++LINE 1: CREATE USER tag_user3 TAG (tag1 = 'val1', tag1 = 'novalue');
++                                        ^
+@@
++ERROR:  schema "gp_sql" does not exist
++LINE 1: CREATE USER tag_user3 TAG (tag1 = 'val1', tag2 = '1');
++                                        ^
+@@
++ERROR:  schema "gp_sql" does not exist
++LINE 1: CREATE USER tag_user4 TAG (tag1 = 'val1', tag2 = '3', tag4 =...
++                                        ^
+@@
++ERROR:  schema "gp_sql" does not exist
++LINE 1: CREATE USER tag_user5 TAG (tag2 = '300', tag4 = ' ');
++                                        ^
+@@
+-ERROR:  tag "tag4" value has been added for object "tag_user6".
++ERROR:  schema "gp_sql" does not exist
++LINE 1: CREATE USER tag_user6 TAG (tag4 = '', tag4 = '');
++                                        ^
+@@
+-ERROR:  tag "tag4" value has been added for object "tag_user6".
++ERROR:  schema "gp_sql" does not exist
++LINE 1: CREATE USER tag_user6 TAG (tag4 = ' ', tag4 = ' ');
++                                        ^
+@@
++ERROR:  schema "gp_sql" does not exist
++LINE 1: CREATE USER tag_user6 TAG (tag4 = '');
++                                        ^
+@@
++ERROR:  schema "gp_sql" does not exist
++LINE 1: CREATE USER tag_user7 CONNECTION LIMIT 10 TAG (tag4 = ' ');
++                                                            ^
+@@
+-ERROR:  tag value "" is not in tag "tag3" allowed values
++ERROR:  schema "gp_sql" does not exist
++LINE 1: CREATE USER tag_user8 TAG (tag3 = '');
++                                        ^
+@@
+-ERROR:  tag value "novalue" is not in tag "tag1" allowed values
++ERROR:  schema "gp_sql" does not exist
++LINE 1: CREATE USER tag_user8 superuser TAG (tag1 = 'novalue');
++                                                  ^
+@@
++ERROR:  schema "gp_sql" does not exist
++LINE 1: CREATE USER tag_user8 superuser TAG (tag1 = 'val1');
++                                                  ^
+@@
++ERROR:  schema "gp_sql" does not exist
++LINE 1: CREATE USER tag_user10 superuser TAG (tag3 = 'dadkqjefpqfqfq...
++                                                   ^
+@@
+- tddatabaseid |  rolname   | tagname |                                     tagvalue                                      
+---------------+------------+---------+-----------------------------------------------------------------------------------
+-            0 | tag_user1  | tag1    | val1
+-            0 | tag_user10 | tag3    | dadkqjefpqfqfqe4l123j9i1snkqenp3412n4jnflqjenfaddpiqepj21304i12;kfnqpqnepfqefqwef
+-            0 | tag_user2  | tag1    | val1
+-            0 | tag_user2  | tag2    | 10
+-            0 | tag_user3  | tag1    | val1
+-            0 | tag_user3  | tag2    | 1
+-            0 | tag_user4  | tag1    | val1
+-            0 | tag_user4  | tag2    | 3
+-            0 | tag_user4  | tag4    | 
+-            0 | tag_user5  | tag2    | 300
+-            0 | tag_user5  | tag4    |  
+-            0 | tag_user6  | tag4    | 
+-            0 | tag_user7  | tag4    |  
+-            0 | tag_user8  | tag1    | val1
+-(14 rows)
+-
++ERROR:  relation "user_tag_descriptions" does not exist
++LINE 1: SELECT * FROM user_tag_descriptions
++                      ^
+@@
+-  rolname   | rolsuper | rolconnlimit 
+-------------+----------+--------------
+- tag_user1  | f        |           -1
+- tag_user10 | t        |           -1
+- tag_user2  | f        |           -1
+- tag_user3  | f        |           -1
+- tag_user4  | f        |           -1
+- tag_user5  | f        |           -1
+- tag_user6  | f        |           -1
+- tag_user7  | f        |           10
+- tag_user8  | t        |           -1
+- tag_user9  | t        |           -1
+-(10 rows)
++  rolname  | rolsuper | rolconnlimit 
++-----------+----------+--------------
++ tag_user9 | t        |           -1
++(1 row)
+@@
+-DETAIL:  tag of tag description with tag tag1
+-ERROR:  tag "tag1" cannot be dropped because some objects depend on it
+-tag of tag description with tag tag1
+-tag of tag description with tag tag1
+-tag of tag description with tag tag1
+-tag of tag description with tag tag1
++ERROR:  schema "gp_sql" does not exist
++LINE 1: DROP TAG tag1;
++               ^
+@@
+-DETAIL:  tag of tag description with tag tag2
+-ERROR:  tag "tag2" cannot be dropped because some objects depend on it
+-tag of tag description with tag tag2
+-tag of tag description with tag tag2
+-tag of tag description with tag tag2
++ERROR:  schema "gp_sql" does not exist
++LINE 1: DROP TAG tag2;
++               ^
+@@
+-DETAIL:  tag of tag description with tag tag3
+-ERROR:  tag "tag3" cannot be dropped because some objects depend on it
++ERROR:  schema "gp_sql" does not exist
++LINE 1: DROP TAG tag3;
++               ^
+@@
+-DETAIL:  tag of tag description with tag tag4
+-ERROR:  tag "tag4" cannot be dropped because some objects depend on it
+-tag of tag description with tag tag4
+-tag of tag description with tag tag4
+-tag of tag description with tag tag4
++ERROR:  schema "gp_sql" does not exist
++LINE 1: DROP TAG tag4;
++               ^
+@@
+- tagname | tagowner |                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                            allowed_values                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                             
+----------+----------+---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+- tag1    |       10 | {val1,val2,val3}
+- tag2    |       10 | {1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,20,21,22,23,24,25,26,27,28,29,30,31,32,33,34,35,36,37,38,39,40,41,42,43,44,45,46,47,48,49,50,51,52,53,54,55,56,57,58,59,60,61,62,63,64,65,66,67,68,69,70,71,72,73,74,75,76,77,78,79,80,81,82,83,84,85,86,87,88,89,90,91,92,93,94,95,96,97,98,99,100,101,102,103,104,105,106,107,108,109,110,111,112,113,114,115,116,117,118,119,120,121,122,123,124,125,126,127,128,129,130,131,132,133,134,135,136,137,138,139,140,141,142,143,144,145,146,147,148,149,150,151,152,153,154,155,156,157,158,159,160,161,162,163,164,165,166,167,168,169,170,171,172,173,174,175,176,177,178,179,180,181,182,183,184,185,186,187,188,189,190,191,192,193,194,195,196,197,198,199,200,201,202,203,204,205,206,207,208,209,210,211,212,213,214,215,216,217,218,219,220,221,222,223,224,225,226,227,228,229,230,231,232,233,234,235,236,237,238,239,240,241,242,243,244,245,246,247,248,249,250,251,252,253,254,255,256,257,258,259,260,261,262,263,264,265,266,267,268,269,270,271,272,273,274,275,276,277,278,279,280,281,282,283,284,285,286,287,288,289,290,291,292,293,294,295,296,297,298,299,300}
+- tag3    |       10 | {dadkqjefpqfqfqe4l123j9i1snkqenp3412n4jnflqjenfaddpiqepj21304i12;kfnqpqnepfqefqwef}
+- tag4    |       10 | {123,456," ",""}
+-(4 rows)
+-
++ERROR:  relation "pg_tag" does not exist
++LINE 1: SELECT tagname, tagowner, allowed_values FROM pg_tag ORDER B...
++                                                      ^
+@@
+-ERROR:  syntax error at or near "TAG"
++ERROR:  role "tag_user1" does not exist
+@@
+-                                                ^
++                                   ^
+@@
++ERROR:  role "tag_user1" does not exist
++LINE 1: ALTER USER tag_user1 TAG (tag1 = 'val1', tag1 = 'val1');
++                                   ^
+@@
++ERROR:  role "tag_user2" does not exist
++LINE 1: ALTER USER tag_user2 TAG (tag2 = '10');
++                                   ^
+@@
+-ERROR:  tag value "" is not in tag "tag3" allowed values
++ERROR:  role "tag_user3" does not exist
++LINE 1: ALTER USER tag_user3 TAG (tag3 = '');
++                                   ^
+@@
++ERROR:  role "tag_user4" does not exist
++LINE 1: ALTER USER tag_user4 UNSET TAG (tag1, tag2);
++                                     ^
+@@
+-WARNING:  object "tag_user4" does not have tag "tag1", creating
++ERROR:  role "tag_user4" does not exist
++LINE 1: ALTER USER tag_user4 TAG (tag1 = 'val3', tag4 = '');
++                                   ^
+@@
++ERROR:  role "tag_user5" does not exist
++LINE 1: ALTER USER tag_user5 TAG (tag4 = '', tag4 = ' ');
++                                   ^
+@@
++ERROR:  role "tag_user6" does not exist
++LINE 1: ALTER USER tag_user6 TAG (tag4 = ' ');
++                                   ^
+@@
+-WARNING:  object "tag_user7" does not have tag "tag1", creating
+-WARNING:  object "tag_user7" does not have tag "tag2", creating
++ERROR:  role "tag_user7" does not exist
++LINE 1: ALTER USER tag_user7 TAG (tag1 = 'val2', tag2 = '3');
++                                   ^
+@@
++ERROR:  role "tag_user7" does not exist
++LINE 1: ALTER USER tag_user7 UNSET TAG (tag1);
++                                     ^
+@@
+-WARNING:  object "tag_user8" does not have tag "tag4", creating
++ERROR:  role "tag_user8" does not exist
++LINE 1: ALTER USER tag_user8 TAG (tag4 = '123', tag4 = '123');
++                                   ^
+@@
+-WARNING:  object "tag_user9" does not have tag "tag4", creating
++ERROR:  schema "gp_sql" does not exist
++LINE 1: ALTER USER tag_user9 TAG (tag4 = '', tag4 = '123', tag4 = '4...
++               ^
+@@
++ERROR:  schema "gp_sql" does not exist
++LINE 1: ALTER USER tag_user9 TAG (tag4 = '123');
++               ^
+@@
+- tddatabaseid |  rolname   | tagname |                                     tagvalue                                      
+---------------+------------+---------+-----------------------------------------------------------------------------------
+-            0 | tag_user1  | tag1    | val1
+-            0 | tag_user10 | tag3    | dadkqjefpqfqfqe4l123j9i1snkqenp3412n4jnflqjenfaddpiqepj21304i12;kfnqpqnepfqefqwef
+-            0 | tag_user2  | tag1    | val1
+-            0 | tag_user2  | tag2    | 10
+-            0 | tag_user3  | tag1    | val1
+-            0 | tag_user3  | tag2    | 1
+-            0 | tag_user4  | tag1    | val3
+-            0 | tag_user4  | tag4    | 
+-            0 | tag_user5  | tag2    | 300
+-            0 | tag_user5  | tag4    |  
+-            0 | tag_user6  | tag4    |  
+-            0 | tag_user7  | tag2    | 3
+-            0 | tag_user7  | tag4    |  
+-            0 | tag_user8  | tag1    | val1
+-            0 | tag_user8  | tag4    | 123
+-            0 | tag_user9  | tag4    | 123
+-(16 rows)
+-
++ERROR:  relation "user_tag_descriptions" does not exist
++LINE 1: SELECT * FROM user_tag_descriptions
++                      ^
+@@
+-  rolname   | rolsuper | rolconnlimit 
+-------------+----------+--------------
+- tag_user1  | f        |           -1
+- tag_user10 | t        |           -1
+- tag_user2  | f        |           -1
+- tag_user3  | f        |           -1
+- tag_user4  | f        |           -1
+- tag_user5  | f        |           -1
+- tag_user6  | f        |           -1
+- tag_user7  | f        |           10
+- tag_user8  | t        |           -1
+- tag_user9  | t        |           -1
+-(10 rows)
++  rolname  | rolsuper | rolconnlimit 
++-----------+----------+--------------
++ tag_user9 | t        |           -1
++(1 row)
+@@
++ERROR:  role "tag_user1" does not exist
+@@
++ERROR:  role "tag_user2" does not exist
+@@
++ERROR:  role "tag_user3" does not exist
+@@
++ERROR:  role "tag_user4" does not exist
+@@
++ERROR:  role "tag_user5" does not exist
+@@
++ERROR:  role "tag_user6" does not exist
+@@
++ERROR:  role "tag_user7" does not exist
+@@
++ERROR:  role "tag_user8" does not exist
+@@
++ERROR:  role "tag_user10" does not exist
+@@
+- tddatabaseid | rolname | tagname | tagvalue 
+---------------+---------+---------+----------
+-(0 rows)
+-
++ERROR:  relation "user_tag_descriptions" does not exist
++LINE 1: SELECT * FROM user_tag_descriptions
++                      ^
+@@
+-ERROR:  tag value "test" is not in tag "tag1" allowed values
++ERROR:  tags need the "gp_sql" extension in this database
++HINT:  Run "CREATE EXTENSION gp_sql".
+@@
+-ERROR:  tag value "301" is not in tag "tag2" allowed values
++ERROR:  tags need the "gp_sql" extension in this database
++HINT:  Run "CREATE EXTENSION gp_sql".
+@@
++ERROR:  tags need the "gp_sql" extension in this database
++HINT:  Run "CREATE EXTENSION gp_sql".
+@@
+- tddatabaseid |    spcname     | tagname | tagvalue 
+---------------+----------------+---------+----------
+-            0 | tag_tablespace | tag1    | val1
+-            0 | tag_tablespace | tag2    | 2
+-(2 rows)
+-
++ERROR:  relation "tablespace_tag_descriptions" does not exist
++LINE 1: SELECT * FROM tablespace_tag_descriptions
++                      ^
+@@
+-    spcname     
+-----------------
++  spcname   
++------------
+@@
+- tag_tablespace
+-(3 rows)
++(2 rows)
+@@
+-ERROR:  syntax error at or near "TAG"
+-LINE 1: ...SET (random_page_cost = 1.0, seq_page_cost = 1.1) TAG (tag2 ...
+-                                                             ^
++ERROR:  tablespace "tag_tablespace" does not exist
+@@
+-ERROR:  syntax error at or near "TAG"
+-LINE 1: ...SET (random_page_cost = 1.0, seq_page_cost = 1.1) TAG (tag3 ...
+-                                                             ^
++ERROR:  tablespace "tag_tablespace" does not exist
+@@
+-ERROR:  syntax error at or near "TAG"
+-LINE 1: ...SET (random_page_cost = 1.0, seq_page_cost = 1.1) TAG (tag4 ...
+-                                                             ^
++ERROR:  tablespace "tag_tablespace" does not exist
+@@
+-WARNING:  object "tag_tablespace" does not have tag "tag4", creating
++ERROR:  schema "gp_sql" does not exist
++LINE 1: ALTER TABLESPACE tag_tablespace TAG (tag4 = '', tag1 = 'val1...
++               ^
+@@
++ERROR:  schema "gp_sql" does not exist
++LINE 1: ALTER TABLESPACE tag_tablespace UNSET TAG (tag1, tag2);
++               ^
+@@
+-ERROR:  object "tag_tablespace" does not have tag "tag2"
++ERROR:  schema "gp_sql" does not exist
++LINE 1: ALTER TABLESPACE tag_tablespace UNSET TAG (tag2);
++               ^
+@@
+-WARNING:  object "tag_tablespace" does not have tag "tag2", creating
++ERROR:  schema "gp_sql" does not exist
++LINE 1: ALTER TABLESPACE tag_tablespace TAG (tag2 = '10');
++               ^
+@@
+-WARNING:  object "tag_tablespace" does not have tag "tag1", creating
++ERROR:  schema "gp_sql" does not exist
++LINE 1: ALTER TABLESPACE tag_tablespace TAG (tag1 = 'val2', tag1 = '...
++               ^
+@@
+- tddatabaseid |    spcname     | tagname | tagvalue 
+---------------+----------------+---------+----------
+-            0 | tag_tablespace | tag1    | val3
+-            0 | tag_tablespace | tag2    | 10
+-            0 | tag_tablespace | tag4    | 
+-(3 rows)
+-
++ERROR:  relation "tablespace_tag_descriptions" does not exist
++LINE 1: SELECT * FROM tablespace_tag_descriptions
++                      ^
+@@
+-    spcname     
+-----------------
++  spcname   
++------------
+@@
+- tag_tablespace
+-(3 rows)
++(2 rows)
+@@
+-DETAIL:  tag of tag description with tag tag1
+-ERROR:  tag "tag1" cannot be dropped because some objects depend on it
++ERROR:  schema "gp_sql" does not exist
++LINE 1: DROP TAG tag1;
++               ^
+@@
+-DETAIL:  tag of tag description with tag tag2
+-ERROR:  tag "tag2" cannot be dropped because some objects depend on it
++ERROR:  schema "gp_sql" does not exist
++LINE 1: DROP TAG tag2;
++               ^
+@@
+-DETAIL:  tag of tag description with tag tag4
+-ERROR:  tag "tag4" cannot be dropped because some objects depend on it
++ERROR:  schema "gp_sql" does not exist
++LINE 1: DROP TAG tag4;
++               ^
+@@
+- tagname | tagowner |                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                            allowed_values                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                             
+----------+----------+---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+- tag1    |       10 | {val1,val2,val3}
+- tag2    |       10 | {1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,20,21,22,23,24,25,26,27,28,29,30,31,32,33,34,35,36,37,38,39,40,41,42,43,44,45,46,47,48,49,50,51,52,53,54,55,56,57,58,59,60,61,62,63,64,65,66,67,68,69,70,71,72,73,74,75,76,77,78,79,80,81,82,83,84,85,86,87,88,89,90,91,92,93,94,95,96,97,98,99,100,101,102,103,104,105,106,107,108,109,110,111,112,113,114,115,116,117,118,119,120,121,122,123,124,125,126,127,128,129,130,131,132,133,134,135,136,137,138,139,140,141,142,143,144,145,146,147,148,149,150,151,152,153,154,155,156,157,158,159,160,161,162,163,164,165,166,167,168,169,170,171,172,173,174,175,176,177,178,179,180,181,182,183,184,185,186,187,188,189,190,191,192,193,194,195,196,197,198,199,200,201,202,203,204,205,206,207,208,209,210,211,212,213,214,215,216,217,218,219,220,221,222,223,224,225,226,227,228,229,230,231,232,233,234,235,236,237,238,239,240,241,242,243,244,245,246,247,248,249,250,251,252,253,254,255,256,257,258,259,260,261,262,263,264,265,266,267,268,269,270,271,272,273,274,275,276,277,278,279,280,281,282,283,284,285,286,287,288,289,290,291,292,293,294,295,296,297,298,299,300}
+- tag3    |       10 | {dadkqjefpqfqfqe4l123j9i1snkqenp3412n4jnflqjenfaddpiqepj21304i12;kfnqpqnepfqefqwef}
+- tag4    |       10 | {123,456," ",""}
+-(4 rows)
+-
++ERROR:  relation "pg_tag" does not exist
++LINE 1: SELECT tagname, tagowner, allowed_values FROM pg_tag ORDER B...
++                                                      ^
+@@
++ERROR:  tablespace "tag_tablespace" does not exist
+@@
+- tddatabaseid | spcname | tagname | tagvalue 
+---------------+---------+---------+----------
+-(0 rows)
+-
++ERROR:  relation "tablespace_tag_descriptions" does not exist
++LINE 1: SELECT * FROM tablespace_tag_descriptions
++                      ^
+@@
+-ERROR:  tag value "novalue" is not in tag "tag1" allowed values
++ERROR:  schema "gp_sql" does not exist
++LINE 1: CREATE SCHEMA tag_schema1 WITH TAG (tag1 = 'novalue');
++                                            ^
+@@
++ERROR:  schema "gp_sql" does not exist
++LINE 1: CREATE SCHEMA tag_schema1 WITH TAG (tag1 = 'val1');
++                                            ^
+@@
+-ERROR:  syntax error at or near ";"
++ERROR:  syntax error at or near "WITH"
+@@
+-                                          ^
++                                  ^
+@@
+-ERROR:  syntax error at or near ")"
++ERROR:  syntax error at or near "WITH"
+@@
+-                                            ^
++                                  ^
+@@
+-ERROR:  tag value "" is not in tag "tag1" allowed values
++ERROR:  schema "gp_sql" does not exist
++LINE 1: CREATE SCHEMA tag_schema2 WITH TAG (tag1 = '');
++                                            ^
+@@
++ERROR:  schema "gp_sql" does not exist
++LINE 1: CREATE SCHEMA tag_schema2 WITH TAG (tag1 = 'val1', tag2 = '1...
++                                            ^
+@@
+-ERROR:  tag "tag1" value has been added for object "tag_schema3".
++ERROR:  schema "gp_sql" does not exist
++LINE 1: CREATE SCHEMA tag_schema3 WITH TAG (tag1 = 'val1', tag1 = 'v...
++                                            ^
+@@
+-ERROR:  tag value "novalue" is not in tag "tag1" allowed values
++ERROR:  schema "gp_sql" does not exist
++LINE 1: CREATE SCHEMA tag_schema3 WITH TAG (tag1 = 'val1', tag1 = 'n...
++                                            ^
+@@
++ERROR:  schema "gp_sql" does not exist
++LINE 1: CREATE SCHEMA tag_schema3 WITH TAG (tag1 = 'val1', tag2 = '1...
++                                            ^
+@@
++ERROR:  schema "gp_sql" does not exist
++LINE 1: CREATE SCHEMA tag_schema4 WITH TAG (tag1 = 'val1', tag2 = '3...
++                                            ^
+@@
++ERROR:  schema "gp_sql" does not exist
++LINE 1: CREATE SCHEMA tag_schema5 WITH TAG (tag2 = '300', tag4 = ' '...
++                                            ^
+@@
+-ERROR:  tag "tag4" value has been added for object "tag_schema6".
++ERROR:  schema "gp_sql" does not exist
++LINE 1: CREATE SCHEMA tag_schema6 WITH TAG (tag4 = '', tag4 = '');
++                                            ^
+@@
+-ERROR:  tag "tag4" value has been added for object "tag_schema6".
++ERROR:  schema "gp_sql" does not exist
++LINE 1: CREATE SCHEMA tag_schema6 WITH TAG (tag4 = ' ', tag4 = ' ');
++                                            ^
+@@
++ERROR:  schema "gp_sql" does not exist
++LINE 1: CREATE SCHEMA tag_schema6 WITH TAG (tag4 = '');
++                                            ^
+@@
++ERROR:  schema "gp_sql" does not exist
++LINE 1: CREATE SCHEMA tag_schema7 WITH TAG (tag4 = ' ');
++                                            ^
+@@
+-ERROR:  tag value "" is not in tag "tag3" allowed values
++ERROR:  schema "gp_sql" does not exist
++LINE 1: CREATE SCHEMA tag_schema8 WITH TAG (tag3 = '');
++                                            ^
+@@
+-ERROR:  tag value "novalue" is not in tag "tag1" allowed values
++ERROR:  schema "gp_sql" does not exist
++LINE 1: CREATE SCHEMA tag_schema8 WITH TAG (tag1 = 'novalue');
++                                            ^
+@@
++ERROR:  schema "gp_sql" does not exist
++LINE 1: CREATE SCHEMA tag_schema8 WITH TAG (tag1 = 'val1');
++                                            ^
+@@
++ERROR:  schema "gp_sql" does not exist
++LINE 1: CREATE SCHEMA tag_schema10 WITH TAG (tag3 = 'dadkqjefpqfqfqe...
++                                             ^
+@@
+- datname  |   nspname    | tagname |                                     tagvalue                                      
+-----------+--------------+---------+-----------------------------------------------------------------------------------
+- postgres | tag_schema1  | tag1    | val1
+- postgres | tag_schema10 | tag3    | dadkqjefpqfqfqe4l123j9i1snkqenp3412n4jnflqjenfaddpiqepj21304i12;kfnqpqnepfqefqwef
+- postgres | tag_schema2  | tag1    | val1
+- postgres | tag_schema2  | tag2    | 10
+- postgres | tag_schema3  | tag1    | val1
+- postgres | tag_schema3  | tag2    | 1
+- postgres | tag_schema4  | tag1    | val1
+- postgres | tag_schema4  | tag2    | 3
+- postgres | tag_schema4  | tag4    | 
+- postgres | tag_schema5  | tag2    | 300
+- postgres | tag_schema5  | tag4    |  
+- postgres | tag_schema6  | tag4    | 
+- postgres | tag_schema7  | tag4    |  
+- postgres | tag_schema8  | tag1    | val1
+-(14 rows)
+-
++ERROR:  relation "schema_tag_descriptions" does not exist
++LINE 1: SELECT * FROM schema_tag_descriptions
++                      ^
+@@
+-   nspname    | nspowner 
+---------------+----------
+- tag_schema1  |       10
+- tag_schema10 |       10
+- tag_schema2  |       10
+- tag_schema3  |       10
+- tag_schema4  |       10
+- tag_schema5  |       10
+- tag_schema6  |       10
+- tag_schema7  |       10
+- tag_schema8  |       10
+- tag_schema9  |       10
+-(10 rows)
++   nspname   | nspowner 
++-------------+----------
++ tag_schema9 |       10
++(1 row)
+@@
+-DETAIL:  tag of tag description with tag tag1
+-ERROR:  tag "tag1" cannot be dropped because some objects depend on it
+-tag of tag description with tag tag1
+-tag of tag description with tag tag1
+-tag of tag description with tag tag1
+-tag of tag description with tag tag1
++ERROR:  schema "gp_sql" does not exist
++LINE 1: DROP TAG tag1;
++               ^
+@@
+-DETAIL:  tag of tag description with tag tag2
+-ERROR:  tag "tag2" cannot be dropped because some objects depend on it
+-tag of tag description with tag tag2
+-tag of tag description with tag tag2
+-tag of tag description with tag tag2
++ERROR:  schema "gp_sql" does not exist
++LINE 1: DROP TAG tag2;
++               ^
+@@
+-DETAIL:  tag of tag description with tag tag3
+-ERROR:  tag "tag3" cannot be dropped because some objects depend on it
++ERROR:  schema "gp_sql" does not exist
++LINE 1: DROP TAG tag3;
++               ^
+@@
+-DETAIL:  tag of tag description with tag tag4
+-ERROR:  tag "tag4" cannot be dropped because some objects depend on it
+-tag of tag description with tag tag4
+-tag of tag description with tag tag4
+-tag of tag description with tag tag4
++ERROR:  schema "gp_sql" does not exist
++LINE 1: DROP TAG tag4;
++               ^
+@@
+- tagname | tagowner |                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                            allowed_values                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                             
+----------+----------+---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+- tag1    |       10 | {val1,val2,val3}
+- tag2    |       10 | {1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,20,21,22,23,24,25,26,27,28,29,30,31,32,33,34,35,36,37,38,39,40,41,42,43,44,45,46,47,48,49,50,51,52,53,54,55,56,57,58,59,60,61,62,63,64,65,66,67,68,69,70,71,72,73,74,75,76,77,78,79,80,81,82,83,84,85,86,87,88,89,90,91,92,93,94,95,96,97,98,99,100,101,102,103,104,105,106,107,108,109,110,111,112,113,114,115,116,117,118,119,120,121,122,123,124,125,126,127,128,129,130,131,132,133,134,135,136,137,138,139,140,141,142,143,144,145,146,147,148,149,150,151,152,153,154,155,156,157,158,159,160,161,162,163,164,165,166,167,168,169,170,171,172,173,174,175,176,177,178,179,180,181,182,183,184,185,186,187,188,189,190,191,192,193,194,195,196,197,198,199,200,201,202,203,204,205,206,207,208,209,210,211,212,213,214,215,216,217,218,219,220,221,222,223,224,225,226,227,228,229,230,231,232,233,234,235,236,237,238,239,240,241,242,243,244,245,246,247,248,249,250,251,252,253,254,255,256,257,258,259,260,261,262,263,264,265,266,267,268,269,270,271,272,273,274,275,276,277,278,279,280,281,282,283,284,285,286,287,288,289,290,291,292,293,294,295,296,297,298,299,300}
+- tag3    |       10 | {dadkqjefpqfqfqe4l123j9i1snkqenp3412n4jnflqjenfaddpiqepj21304i12;kfnqpqnepfqefqwef}
+- tag4    |       10 | {123,456," ",""}
+-(4 rows)
+-
++ERROR:  relation "pg_tag" does not exist
++LINE 1: SELECT tagname, tagowner, allowed_values FROM pg_tag ORDER B...
++                                                      ^
+@@
++ERROR:  schema "tag_schema1" does not exist
++LINE 1: ALTER SCHEMA tag_schema1 TAG (tag1 = 'val1', tag1 = 'val1');
++                                     ^
+@@
++ERROR:  schema "tag_schema2" does not exist
++LINE 1: ALTER SCHEMA tag_schema2 TAG (tag2 = '10');
++                                     ^
+@@
+-ERROR:  tag value "" is not in tag "tag3" allowed values
++ERROR:  schema "tag_schema3" does not exist
++LINE 1: ALTER SCHEMA tag_schema3 TAG (tag3 = '');
++                                     ^
+@@
++ERROR:  schema "tag_schema4" does not exist
++LINE 1: ALTER SCHEMA tag_schema4 UNSET TAG (tag1, tag2);
++                                       ^
+@@
+-WARNING:  object "tag_schema4" does not have tag "tag1", creating
++ERROR:  schema "tag_schema4" does not exist
++LINE 1: ALTER SCHEMA tag_schema4 TAG (tag1 = 'val3', tag4 = '');
++                                     ^
+@@
++ERROR:  schema "tag_schema5" does not exist
++LINE 1: ALTER SCHEMA tag_schema5 TAG (tag4 = '', tag4 = ' ');
++                                     ^
+@@
++ERROR:  schema "tag_schema6" does not exist
++LINE 1: ALTER SCHEMA tag_schema6 TAG (tag4 = ' ');
++                                     ^
+@@
+-WARNING:  object "tag_schema7" does not have tag "tag1", creating
+-WARNING:  object "tag_schema7" does not have tag "tag2", creating
++ERROR:  schema "tag_schema7" does not exist
++LINE 1: ALTER SCHEMA tag_schema7 TAG (tag1 = 'val2', tag2 = '3');
++                                     ^
+@@
++ERROR:  schema "tag_schema7" does not exist
++LINE 1: ALTER SCHEMA tag_schema7 UNSET TAG (tag1);
++                                       ^
+@@
+-WARNING:  object "tag_schema8" does not have tag "tag4", creating
++ERROR:  schema "tag_schema8" does not exist
++LINE 1: ALTER SCHEMA tag_schema8 TAG (tag4 = '123', tag4 = '123');
++                                     ^
+@@
+-WARNING:  object "tag_schema9" does not have tag "tag4", creating
++ERROR:  schema "gp_sql" does not exist
++LINE 1: ALTER SCHEMA tag_schema9 TAG (tag4 = '', tag4 = '123', tag4 ...
++               ^
+@@
++ERROR:  schema "gp_sql" does not exist
++LINE 1: ALTER SCHEMA tag_schema9 TAG (tag4 = '123');
++               ^
+@@
+- datname  |   nspname    | tagname |                                     tagvalue                                      
+-----------+--------------+---------+-----------------------------------------------------------------------------------
+- postgres | tag_schema1  | tag1    | val1
+- postgres | tag_schema10 | tag3    | dadkqjefpqfqfqe4l123j9i1snkqenp3412n4jnflqjenfaddpiqepj21304i12;kfnqpqnepfqefqwef
+- postgres | tag_schema2  | tag1    | val1
+- postgres | tag_schema2  | tag2    | 10
+- postgres | tag_schema3  | tag1    | val1
+- postgres | tag_schema3  | tag2    | 1
+- postgres | tag_schema4  | tag1    | val3
+- postgres | tag_schema4  | tag4    | 
+- postgres | tag_schema5  | tag2    | 300
+- postgres | tag_schema5  | tag4    |  
+- postgres | tag_schema6  | tag4    |  
+- postgres | tag_schema7  | tag2    | 3
+- postgres | tag_schema7  | tag4    |  
+- postgres | tag_schema8  | tag1    | val1
+- postgres | tag_schema8  | tag4    | 123
+- postgres | tag_schema9  | tag4    | 123
+-(16 rows)
+-
++ERROR:  relation "schema_tag_descriptions" does not exist
++LINE 1: SELECT * FROM schema_tag_descriptions
++                      ^
+@@
+-   nspname    | nspowner 
+---------------+----------
+- tag_schema1  |       10
+- tag_schema10 |       10
+- tag_schema2  |       10
+- tag_schema3  |       10
+- tag_schema4  |       10
+- tag_schema5  |       10
+- tag_schema6  |       10
+- tag_schema7  |       10
+- tag_schema8  |       10
+- tag_schema9  |       10
+-(10 rows)
++   nspname   | nspowner 
++-------------+----------
++ tag_schema9 |       10
++(1 row)
+@@
++ERROR:  schema "tag_schema1" does not exist
+@@
++ERROR:  schema "tag_schema2" does not exist
+@@
++ERROR:  schema "tag_schema3" does not exist
+@@
++ERROR:  schema "tag_schema4" does not exist
+@@
++ERROR:  schema "tag_schema5" does not exist
+@@
++ERROR:  schema "tag_schema6" does not exist
+@@
++ERROR:  schema "tag_schema7" does not exist
+@@
++ERROR:  schema "tag_schema8" does not exist
+@@
++ERROR:  schema "tag_schema10" does not exist
+@@
+- datname | nspname | tagname | tagvalue 
+----------+---------+---------+----------
+-(0 rows)
+-
++ERROR:  relation "schema_tag_descriptions" does not exist
++LINE 1: SELECT * FROM schema_tag_descriptions
++                      ^
+@@
+-ERROR:  tag value "novalue" is not in tag "tag1" allowed values
++ERROR:  tags need the "gp_sql" extension in this database
++HINT:  Run "CREATE EXTENSION gp_sql".
+@@
++ERROR:  tags need the "gp_sql" extension in this database
++HINT:  Run "CREATE EXTENSION gp_sql".
+@@
+-ERROR:  syntax error at or near ";"
++ERROR:  syntax error at or near "TAG"
+@@
+-                                                          ^
++                                                       ^
+@@
+-ERROR:  syntax error at or near ")"
++ERROR:  syntax error at or near "TAG"
+@@
+-                                                            ^
++                                                       ^
+@@
+-ERROR:  tag value "" is not in tag "tag1" allowed values
++ERROR:  tags need the "gp_sql" extension in this database
++HINT:  Run "CREATE EXTENSION gp_sql".
+@@
++ERROR:  tags need the "gp_sql" extension in this database
++HINT:  Run "CREATE EXTENSION gp_sql".
+@@
+-ERROR:  tag "tag1" value has been added for object "tag_table3".
++ERROR:  tags need the "gp_sql" extension in this database
++HINT:  Run "CREATE EXTENSION gp_sql".
+@@
+-ERROR:  tag value "novalue" is not in tag "tag1" allowed values
++ERROR:  tags need the "gp_sql" extension in this database
++HINT:  Run "CREATE EXTENSION gp_sql".
+@@
++ERROR:  tags need the "gp_sql" extension in this database
++HINT:  Run "CREATE EXTENSION gp_sql".
+@@
++ERROR:  tags need the "gp_sql" extension in this database
++HINT:  Run "CREATE EXTENSION gp_sql".
+@@
++ERROR:  tags need the "gp_sql" extension in this database
++HINT:  Run "CREATE EXTENSION gp_sql".
+@@
+-ERROR:  tag "tag4" value has been added for object "tag_table6".
++ERROR:  tags need the "gp_sql" extension in this database
++HINT:  Run "CREATE EXTENSION gp_sql".
+@@
+-ERROR:  tag "tag4" value has been added for object "tag_table6".
++ERROR:  tags need the "gp_sql" extension in this database
++HINT:  Run "CREATE EXTENSION gp_sql".
+@@
++ERROR:  tags need the "gp_sql" extension in this database
++HINT:  Run "CREATE EXTENSION gp_sql".
+@@
++ERROR:  tags need the "gp_sql" extension in this database
++HINT:  Run "CREATE EXTENSION gp_sql".
+@@
+-ERROR:  tag value "" is not in tag "tag3" allowed values
++ERROR:  tags need the "gp_sql" extension in this database
++HINT:  Run "CREATE EXTENSION gp_sql".
+@@
+-ERROR:  tag value "novalue" is not in tag "tag1" allowed values
++ERROR:  tags need the "gp_sql" extension in this database
++HINT:  Run "CREATE EXTENSION gp_sql".
+@@
++ERROR:  tags need the "gp_sql" extension in this database
++HINT:  Run "CREATE EXTENSION gp_sql".
+@@
++ERROR:  tags need the "gp_sql" extension in this database
++HINT:  Run "CREATE EXTENSION gp_sql".
+@@
+- datname  |   relname   | relnamespace | relkind | tagname |                                     tagvalue                                      
+-----------+-------------+--------------+---------+---------+-----------------------------------------------------------------------------------
+- postgres | tag_table10 | public       | r       | tag3    | dadkqjefpqfqfqe4l123j9i1snkqenp3412n4jnflqjenfaddpiqepj21304i12;kfnqpqnepfqefqwef
+- postgres | tag_table4  | public       | r       | tag1    | val1
+- postgres | tag_table4  | public       | r       | tag2    | 3
+- postgres | tag_table4  | public       | r       | tag4    | 
+- postgres | tag_table5  | public       | r       | tag2    | 300
+- postgres | tag_table5  | public       | r       | tag4    |  
+- postgres | tag_table6  | public       | r       | tag4    | 
+- postgres | tag_table7  | public       | r       | tag4    |  
+- postgres | tag_table8  | public       | r       | tag1    | val1
+-(9 rows)
+-
++ERROR:  relation "relation_tag_descriptions" does not exist
++LINE 1: SELECT * FROM relation_tag_descriptions
++                      ^
+@@
+-   relname   | relpersistence 
+--------------+----------------
+- tag_table1  | t
+- tag_table10 | p
+- tag_table2  | t
+- tag_table3  | t
+- tag_table4  | p
+- tag_table5  | p
+- tag_table6  | p
+- tag_table7  | p
+- tag_table8  | p
+- tag_table9  | p
+-(10 rows)
++  relname   | relpersistence 
++------------+----------------
++ tag_table9 | p
++(1 row)
+@@
+-DETAIL:  tag of tag description with tag tag1
+-ERROR:  tag "tag1" cannot be dropped because some objects depend on it
+-tag of tag description with tag tag1
++ERROR:  schema "gp_sql" does not exist
++LINE 1: DROP TAG tag1;
++               ^
+@@
+-DETAIL:  tag of tag description with tag tag2
+-ERROR:  tag "tag2" cannot be dropped because some objects depend on it
+-tag of tag description with tag tag2
++ERROR:  schema "gp_sql" does not exist
++LINE 1: DROP TAG tag2;
++               ^
+@@
+-DETAIL:  tag of tag description with tag tag3
+-ERROR:  tag "tag3" cannot be dropped because some objects depend on it
++ERROR:  schema "gp_sql" does not exist
++LINE 1: DROP TAG tag3;
++               ^
+@@
+-DETAIL:  tag of tag description with tag tag4
+-ERROR:  tag "tag4" cannot be dropped because some objects depend on it
+-tag of tag description with tag tag4
+-tag of tag description with tag tag4
+-tag of tag description with tag tag4
++ERROR:  schema "gp_sql" does not exist
++LINE 1: DROP TAG tag4;
++               ^
+@@
+- tagname | tagowner |                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                            allowed_values                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                             
+----------+----------+---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+- tag1    |       10 | {val1,val2,val3}
+- tag2    |       10 | {1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,20,21,22,23,24,25,26,27,28,29,30,31,32,33,34,35,36,37,38,39,40,41,42,43,44,45,46,47,48,49,50,51,52,53,54,55,56,57,58,59,60,61,62,63,64,65,66,67,68,69,70,71,72,73,74,75,76,77,78,79,80,81,82,83,84,85,86,87,88,89,90,91,92,93,94,95,96,97,98,99,100,101,102,103,104,105,106,107,108,109,110,111,112,113,114,115,116,117,118,119,120,121,122,123,124,125,126,127,128,129,130,131,132,133,134,135,136,137,138,139,140,141,142,143,144,145,146,147,148,149,150,151,152,153,154,155,156,157,158,159,160,161,162,163,164,165,166,167,168,169,170,171,172,173,174,175,176,177,178,179,180,181,182,183,184,185,186,187,188,189,190,191,192,193,194,195,196,197,198,199,200,201,202,203,204,205,206,207,208,209,210,211,212,213,214,215,216,217,218,219,220,221,222,223,224,225,226,227,228,229,230,231,232,233,234,235,236,237,238,239,240,241,242,243,244,245,246,247,248,249,250,251,252,253,254,255,256,257,258,259,260,261,262,263,264,265,266,267,268,269,270,271,272,273,274,275,276,277,278,279,280,281,282,283,284,285,286,287,288,289,290,291,292,293,294,295,296,297,298,299,300}
+- tag3    |       10 | {dadkqjefpqfqfqe4l123j9i1snkqenp3412n4jnflqjenfaddpiqepj21304i12;kfnqpqnepfqefqwef}
+- tag4    |       10 | {123,456," ",""}
+-(4 rows)
+-
++ERROR:  relation "pg_tag" does not exist
++LINE 1: SELECT tagname, tagowner, allowed_values FROM pg_tag ORDER B...
++                                                      ^
+@@
++ERROR:  tags need the "gp_sql" extension in this database
++HINT:  Run "CREATE EXTENSION gp_sql".
+@@
++ERROR:  tags need the "gp_sql" extension in this database
++HINT:  Run "CREATE EXTENSION gp_sql".
+@@
++ERROR:  tags need the "gp_sql" extension in this database
++HINT:  Run "CREATE EXTENSION gp_sql".
+@@
++ERROR:  tags need the "gp_sql" extension in this database
++HINT:  Run "CREATE EXTENSION gp_sql".
+@@
+-WARNING:  object "tag_table4" does not have tag "tag1", creating
++ERROR:  tags need the "gp_sql" extension in this database
++HINT:  Run "CREATE EXTENSION gp_sql".
+@@
++ERROR:  tags need the "gp_sql" extension in this database
++HINT:  Run "CREATE EXTENSION gp_sql".
+@@
++ERROR:  tags need the "gp_sql" extension in this database
++HINT:  Run "CREATE EXTENSION gp_sql".
+@@
+-WARNING:  object "tag_table7" does not have tag "tag1", creating
+-WARNING:  object "tag_table7" does not have tag "tag2", creating
++ERROR:  tags need the "gp_sql" extension in this database
++HINT:  Run "CREATE EXTENSION gp_sql".
+@@
++ERROR:  tags need the "gp_sql" extension in this database
++HINT:  Run "CREATE EXTENSION gp_sql".
+@@
+-WARNING:  object "tag_table8" does not have tag "tag4", creating
++ERROR:  tags need the "gp_sql" extension in this database
++HINT:  Run "CREATE EXTENSION gp_sql".
+@@
+-WARNING:  object "tag_table9" does not have tag "tag4", creating
++ERROR:  tags need the "gp_sql" extension in this database
++HINT:  Run "CREATE EXTENSION gp_sql".
+@@
++ERROR:  tags need the "gp_sql" extension in this database
++HINT:  Run "CREATE EXTENSION gp_sql".
+@@
+- datname  |   relname   | relnamespace | relkind | tagname |                                     tagvalue                                      
+-----------+-------------+--------------+---------+---------+-----------------------------------------------------------------------------------
+- postgres | tag_table10 | public       | r       | tag3    | dadkqjefpqfqfqe4l123j9i1snkqenp3412n4jnflqjenfaddpiqepj21304i12;kfnqpqnepfqefqwef
+- postgres | tag_table4  | public       | r       | tag1    | val3
+- postgres | tag_table4  | public       | r       | tag4    | 
+- postgres | tag_table5  | public       | r       | tag2    | 300
+- postgres | tag_table5  | public       | r       | tag4    |  
+- postgres | tag_table6  | public       | r       | tag4    |  
+- postgres | tag_table7  | public       | r       | tag2    | 3
+- postgres | tag_table7  | public       | r       | tag4    |  
+- postgres | tag_table8  | public       | r       | tag1    | val1
+- postgres | tag_table8  | public       | r       | tag4    | 123
+- postgres | tag_table9  | public       | r       | tag4    | 123
+-(11 rows)
+-
++ERROR:  relation "relation_tag_descriptions" does not exist
++LINE 1: SELECT * FROM relation_tag_descriptions
++                      ^
+@@
+-   relname   | relpersistence 
+--------------+----------------
+- tag_table1  | t
+- tag_table10 | p
+- tag_table2  | t
+- tag_table3  | t
+- tag_table4  | p
+- tag_table5  | p
+- tag_table6  | p
+- tag_table7  | p
+- tag_table8  | p
+- tag_table9  | p
+-(10 rows)
++  relname   | relpersistence 
++------------+----------------
++ tag_table9 | p
++(1 row)
+@@
++ERROR:  table "tag_table1" does not exist
+@@
++ERROR:  table "tag_table2" does not exist
+@@
++ERROR:  table "tag_table3" does not exist
+@@
++ERROR:  table "tag_table4" does not exist
+@@
++ERROR:  table "tag_table5" does not exist
+@@
++ERROR:  table "tag_table6" does not exist
+@@
++ERROR:  table "tag_table7" does not exist
+@@
++ERROR:  table "tag_table8" does not exist
+@@
++ERROR:  table "tag_table10" does not exist
+@@
+- datname | relname | relnamespace | relkind | tagname | tagvalue 
+----------+---------+--------------+---------+---------+----------
+-(0 rows)
+-
++ERROR:  relation "relation_tag_descriptions" does not exist
++LINE 1: SELECT * FROM relation_tag_descriptions
++                      ^
+@@
++ERROR:  schema "gp_sql" does not exist
++LINE 1: DROP TAG tag1;
++               ^
+@@
++ERROR:  schema "gp_sql" does not exist
++LINE 1: DROP TAG tag2;
++               ^
+@@
++ERROR:  schema "gp_sql" does not exist
++LINE 1: DROP TAG tag3;
++               ^
+@@
++ERROR:  schema "gp_sql" does not exist
++LINE 1: DROP TAG tag4;
++               ^

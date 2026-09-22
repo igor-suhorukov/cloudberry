@@ -1,0 +1,92 @@
+@@
++ERROR:  unrecognized parameter "appendonly"
+@@
++ERROR:  syntax error at or near "ENCODING"
++LINE 1: CREATE TABLE t_ao_enc (a integer, b text ENCODING (compresst...
++                                                 ^
+@@
++ERROR:  relation "t_ao" does not exist
++LINE 1: CREATE TABLE t_ao_a (LIKE t_ao INCLUDING ALL);
++                                  ^
+@@
++ERROR:  relation "t_ao" does not exist
++LINE 1: CREATE TABLE t_ao_b (LIKE t_ao INCLUDING STORAGE);
++                                  ^
+@@
++ERROR:  relation "t_ao" does not exist
++LINE 1: CREATE TABLE t_ao_c (LIKE t_ao);
++                                  ^
+@@
++ERROR:  relation "t_ao_enc" does not exist
++LINE 1: CREATE TABLE t_ao_enc_a (LIKE t_ao_enc INCLUDING STORAGE);
++                                      ^
+@@
++DETAIL:  Table access method "ao_row" does not exist.
++ERROR:  invalid value for parameter "default_table_access_method": "ao_row"
+@@
++ERROR:  relation "t_ao" does not exist
++LINE 1: CREATE TABLE t_ao_d (LIKE t_ao INCLUDING ALL);
++                                  ^
+@@
++ERROR:  unrecognized configuration parameter "gp_default_storage_options"
+@@
+-  relname   |  amname   | columnstore | compresstype | compresslevel 
+-------------+-----------+-------------+--------------+---------------
+- t_ao       | ao_column | t           |              |             0
+- t_ao_a     | heap      |             |              |              
+- t_ao_b     | heap      |             |              |              
+- t_ao_c     | heap      |             |              |              
+- t_ao_d     | ao_row    | f           |              |             0
+- t_ao_enc   | ao_column | t           |              |             0
+- t_ao_enc_a | heap      |             |              |              
+-(7 rows)
+-
++ERROR:  relation "pg_catalog.pg_appendonly" does not exist
++LINE 10:   LEFT OUTER JOIN pg_catalog.pg_appendonly a ON (c.oid = a.r...
++                           ^
+@@
+- relname  | attnum |                     attoptions                      
+-----------+--------+-----------------------------------------------------
+- t_ao_enc |      1 | {compresstype=none,compresslevel=0,blocksize=32768}
+- t_ao_enc |      2 | {compresstype=zlib,compresslevel=1,blocksize=32768}
+-(2 rows)
+-
++ERROR:  relation "pg_catalog.pg_attribute_encoding" does not exist
++LINE 7:   JOIN pg_catalog.pg_attribute_encoding a ON (a.attrelid = c...
++               ^
+@@
++ERROR:  syntax error at or near "EXTERNAL"
++LINE 1: CREATE EXTERNAL TABLE t_ext (a integer) LOCATION ('file://12...
++               ^
+@@
+-ERROR:  LIKE INCLUDING may not be used with this kind of relation
++ERROR:  syntax error at or near "EXTERNAL"
+@@
+-                                            ^
++               ^
+@@
++ERROR:  syntax error at or near "EXTERNAL"
++LINE 1: CREATE EXTERNAL TABLE t_ext_b (LIKE t_ext) LOCATION ('file:/...
++               ^
+@@
++ERROR:  syntax error at or near "EXTERNAL"
++LINE 8: DROP EXTERNAL TABLE IF EXISTS t_ext_r;
++             ^
+@@
+-NOTICE:  foreign table "t_ext_r" does not exist, skipping
++ERROR:  function drop_and_recreate_external_table() does not exist
++LINE 1: SELECT drop_and_recreate_external_table()
++               ^
++DETAIL:  There is no function of that name.
++QUERY:  SELECT drop_and_recreate_external_table()
++CONTEXT:  PL/pgSQL function inline_code_block line 4 at PERFORM
+@@
+- relname | relkind |                                                                                          ftoptions                                                                                           
+----------+---------+----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+- t_ext   | f       | {format=text,"delimiter=        ","null=\\N","escape=\\",format_type=t,location_uris=file://127.0.0.1/tmp/foo,execute_on=COORDINATOR_ONLY,log_errors=f,encoding=6,is_writable=false}
+- t_ext_b | f       | {format=text,"delimiter=        ","null=\\N","escape=\\",format_type=t,location_uris=file://127.0.0.1/tmp/foo,execute_on=COORDINATOR_ONLY,log_errors=f,encoding=6,is_writable=false}
+- t_ext_r | f       | {format=csv,"delimiter= ",null=,"escape=\"","quote=\"",format_type=c,location_uris=gpfdist://127.0.0.1:8080/tmp/dummy,execute_on=COORDINATOR_ONLY,log_errors=f,encoding=6,is_writable=false}
+-(3 rows)
++ relname | relkind | ftoptions 
++---------+---------+-----------
++(0 rows)

@@ -1,0 +1,221 @@
+@@
+-                                       explain_memoize                                        
+-----------------------------------------------------------------------------------------------
++                                      explain_memoize                                       
++--------------------------------------------------------------------------------------------
+@@
+-                                       explain_memoize                                        
+-----------------------------------------------------------------------------------------------
+-               Filter: (t1.x = (t)::numeric)
+-               Heap Fetches: N
+-               Index Cond: (x = (t1.t)::numeric)
+-               Index Searches: N
+-         ->  Index Only Scan using expr_key_idx_x_t on expr_key t2 (actual rows=2.00 loops=N)
+-         Cache Key: t1.x, (t1.t)::numeric
+-         Cache Mode: logical
+-         Hits: 20  Misses: 20  Evictions: Zero  Overflows: 0  Memory Usage: NkB
+-   ->  Memoize (actual rows=2.00 loops=N)
++                                  explain_memoize                                  
++-----------------------------------------------------------------------------------
++         Filter: (t1.x = (t)::numeric)
++         Index Cond: (x = (t1.t)::numeric)
++         Index Searches: N
++   ->  Index Scan using expr_key_idx_x_t on expr_key t2 (actual rows=2.00 loops=N)
+@@
++   Join Filter: true
+@@
+-(11 rows)
++(7 rows)
+@@
+-                                       explain_memoize                                        
+-----------------------------------------------------------------------------------------------
+-                     Heap Fetches: N
+-                     Index Cond: (unique1 = t2.thousand)
++                                      explain_memoize                                       
++--------------------------------------------------------------------------------------------
++                     Index Cond: (unique1 < 1200)
+@@
+-               ->  Index Only Scan using tenk1_unique1 on tenk1 t1 (actual rows=1.00 loops=N)
+-               Cache Key: t2.thousand
+-               Cache Mode: logical
+-               Filter: (unique1 < 1200)
+-               Hits: N  Misses: N  Evictions: N  Overflows: 0  Memory Usage: NkB
+-               Rows Removed by Filter: 8800
+-         ->  Memoize (actual rows=1.00 loops=N)
+-         ->  Seq Scan on tenk1 t2 (actual rows=1200.00 loops=N)
+-   ->  Nested Loop (actual rows=1200.00 loops=N)
++               ->  Index Scan using tenk1_unique1 on tenk1 t2 (actual rows=1200.00 loops=N)
++               Buckets: 2048  Batches: 1  Memory Usage: NkB
++         ->  Hash (actual rows=1200.00 loops=N)
++         ->  Seq Scan on tenk1 t1 (actual rows=10000.00 loops=N)
++         Hash Cond: (t1.unique1 = t2.thousand)
++   ->  Hash Join (actual rows=1200.00 loops=N)
+@@
+-(13 rows)
++(9 rows)
+@@
+-                                 explain_memoize                                  
+-----------------------------------------------------------------------------------
+-               Heap Fetches: N
+-               Index Cond: (f = f1.f)
+-               Index Searches: N
+-         ->  Index Only Scan using flt_f_idx on flt f2 (actual rows=2.00 loops=N)
+-         Cache Key: f1.f
+-         Cache Mode: logical
+-         Heap Fetches: N
+-         Hits: 1  Misses: 1  Evictions: Zero  Overflows: 0  Memory Usage: NkB
++                            explain_memoize                            
++-----------------------------------------------------------------------
++         Index Cond: (f = f1.f)
+@@
+-   ->  Index Only Scan using flt_f_idx on flt f1 (actual rows=2.00 loops=N)
+-   ->  Memoize (actual rows=2.00 loops=N)
++   ->  Index Scan using flt_f_idx on flt f2 (actual rows=2.00 loops=N)
++   ->  Seq Scan on flt f1 (actual rows=2.00 loops=N)
++   Join Filter: true
+@@
+-(12 rows)
++(6 rows)
+@@
+-                                 explain_memoize                                  
+-----------------------------------------------------------------------------------
+-               Heap Fetches: N
+-               Index Cond: (f <= f1.f)
+-               Index Searches: N
+-         ->  Index Only Scan using flt_f_idx on flt f2 (actual rows=2.00 loops=N)
+-         Cache Key: f1.f
+-         Cache Mode: binary
+-         Heap Fetches: N
+-         Hits: 0  Misses: 2  Evictions: Zero  Overflows: 0  Memory Usage: NkB
++                            explain_memoize                            
++-----------------------------------------------------------------------
++         Index Cond: (f <= f1.f)
+@@
+-   ->  Index Only Scan using flt_f_idx on flt f1 (actual rows=2.00 loops=N)
+-   ->  Memoize (actual rows=2.00 loops=N)
++   ->  Index Scan using flt_f_idx on flt f2 (actual rows=2.00 loops=N)
++   ->  Seq Scan on flt f1 (actual rows=2.00 loops=N)
++   Join Filter: true
+@@
+-(12 rows)
++(6 rows)
+@@
+-                                   explain_memoize                                   
+--------------------------------------------------------------------------------------
+-               Index Cond: (n <= s1.n)
+-               Index Searches: N
+-         ->  Index Scan using strtest_n_idx on strtest s2 (actual rows=4.00 loops=N)
+-         Cache Key: s1.n
+-         Cache Mode: binary
+-         Disabled: true
+-         Hits: 3  Misses: 3  Evictions: Zero  Overflows: 0  Memory Usage: NkB
+-   ->  Memoize (actual rows=4.00 loops=N)
++                                explain_memoize                                
++-------------------------------------------------------------------------------
++         Index Cond: (n <= s1.n)
++         Index Searches: N
++   ->  Index Scan using strtest_n_idx on strtest s2 (actual rows=4.00 loops=N)
+@@
++   Join Filter: true
+@@
+-(10 rows)
++(6 rows)
+@@
+-                                   explain_memoize                                   
+--------------------------------------------------------------------------------------
+-               Index Cond: (t <= s1.t)
+-               Index Searches: N
+-         ->  Index Scan using strtest_t_idx on strtest s2 (actual rows=4.00 loops=N)
+-         Cache Key: s1.t
+-         Cache Mode: binary
+-         Disabled: true
+-         Hits: 3  Misses: 3  Evictions: Zero  Overflows: 0  Memory Usage: NkB
+-   ->  Memoize (actual rows=4.00 loops=N)
++                                explain_memoize                                
++-------------------------------------------------------------------------------
++         Index Cond: (t <= s1.t)
++         Index Searches: N
++   ->  Index Scan using strtest_t_idx on strtest s2 (actual rows=4.00 loops=N)
+@@
++   Join Filter: true
+@@
+-(10 rows)
++(6 rows)
+@@
+-                                       explain_memoize                                       
+----------------------------------------------------------------------------------------------
+-                     Heap Fetches: N
+-                     Heap Fetches: N
+-                     Index Cond: (a = t1_1.a)
+-                     Index Cond: (a = t1_2.a)
+-                     Index Searches: N
+-                     Index Searches: N
+-               ->  Index Only Scan using iprt_p1_a on prt_p1 t2_1 (actual rows=4.00 loops=N)
+-               ->  Index Only Scan using iprt_p2_a on prt_p2 t2_2 (actual rows=4.00 loops=N)
+-               Cache Key: t1_1.a
+-               Cache Key: t1_2.a
+-               Cache Mode: logical
+-               Cache Mode: logical
+-               Heap Fetches: N
+-               Heap Fetches: N
+-               Hits: 3  Misses: 1  Evictions: Zero  Overflows: 0  Memory Usage: NkB
+-               Hits: 3  Misses: 1  Evictions: Zero  Overflows: 0  Memory Usage: NkB
+-               Index Searches: N
+-               Index Searches: N
+-         ->  Index Only Scan using iprt_p1_a on prt_p1 t1_1 (actual rows=4.00 loops=N)
+-         ->  Index Only Scan using iprt_p2_a on prt_p2 t1_2 (actual rows=4.00 loops=N)
+-         ->  Memoize (actual rows=4.00 loops=N)
+-         ->  Memoize (actual rows=4.00 loops=N)
+-   ->  Nested Loop (actual rows=16.00 loops=N)
+-   ->  Nested Loop (actual rows=16.00 loops=N)
+- Append (actual rows=32.00 loops=N)
+-(25 rows)
++                               explain_memoize                               
++-----------------------------------------------------------------------------
++                     ->  Seq Scan on prt_p1 t2_1 (actual rows=4.00 loops=N)
++                     ->  Seq Scan on prt_p2 t2_2 (actual rows=4.00 loops=N)
++                     Number of partitions to scan: 2 (out of 2)
++                     Partitions Scanned: 2
++               ->  Dynamic Seq Scan on prt t2 (actual rows=8.00 loops=N)
++         ->  Partition Selector (selector id: $0) (actual rows=8.00 loops=N)
++         ->  Seq Scan on prt_p1 t1_1 (actual rows=4.00 loops=N)
++         ->  Seq Scan on prt_p2 t1_2 (actual rows=4.00 loops=N)
++         Buckets: 1024  Batches: 1  Memory Usage: NkB
++         Number of partitions to scan: 2 (out of 2)
++         Partition Selectors: $0
++         Partitions Scanned: 2
++   ->  Dynamic Seq Scan on prt t1 (actual rows=8.00 loops=N)
++   ->  Hash (actual rows=8.00 loops=N)
++   Hash Cond: (t1.a = t2.a)
++ Hash Join (actual rows=32.00 loops=N)
++(16 rows)
+@@
+-                                    explain_memoize                                     
+-----------------------------------------------------------------------------------------
+-                     Heap Fetches: N
+-                     Heap Fetches: N
+-                     Index Cond: (a = t1.a)
+-                     Index Cond: (a = t1.a)
+-                     Index Searches: N
+-                     Index Searches: N
+-               ->  Index Only Scan using iprt_p1_a on prt_p1 (actual rows=4.00 loops=N)
+-               ->  Index Only Scan using iprt_p2_a on prt_p2 (actual rows=0.00 loops=N)
+-         ->  Append (actual rows=4.00 loops=N)
+-         Cache Key: t1.a
+-         Cache Mode: logical
+-         Heap Fetches: N
+-         Hits: 3  Misses: 1  Evictions: Zero  Overflows: 0  Memory Usage: NkB
++                             explain_memoize                              
++--------------------------------------------------------------------------
++         ->  Seq Scan on prt_p1 (actual rows=4.00 loops=N)
++         ->  Seq Scan on prt_p2 (actual rows=4.00 loops=N)
++         Index Cond: (a = prt_p1.a)
+@@
+-   ->  Index Only Scan using iprt_p1_a on prt_p1 t1 (actual rows=4.00 loops=N)
+-   ->  Memoize (actual rows=4.00 loops=N)
++   ->  Append (actual rows=8.00 loops=N)
++   ->  Index Scan using iprt_p1_a on prt_p1 t1 (actual rows=2.00 loops=N)
++   Join Filter: true
+@@
+-(17 rows)
++(8 rows)

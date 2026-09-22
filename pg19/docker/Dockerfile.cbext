@@ -109,16 +109,37 @@ RUN meson setup /cb/build /cb/pg19 \
  && ninja -C /cb/build \
  && ninja -C /cb/build install
 
+# PostgreSQL's own regression suite, for the suites that run it against the
+# port.  From the commit the server was built from, read out of the server
+# image, so the tests cannot be of another commit than the binaries under
+# them; and its C module built against the installed server, as an extension
+# would be, beside the two contrib modules its tests load from the same
+# directory.
+RUN --mount=type=bind,from=pgsrc,target=/pgsrc,ro \
+    mkdir -p /pgregress \
+ && git -C /pgsrc archive "$(cat /usr/local/pgsql/.pg_ref_commit)" src/test/regress \
+        | tar -x -C /pgregress --strip-components=3 \
+ && cd /pgregress \
+ && printf '%s\n' 'MODULES = regress' 'PG_CONFIG = /usr/local/pgsql/bin/pg_config' \
+        'PGXS := $(shell $(PG_CONFIG) --pgxs)' 'include $(PGXS)' > Makefile.pgxs \
+ && make -f Makefile.pgxs > /dev/null \
+ && cp "$(pg_config --pkglibdir)/autoinc.so" "$(pg_config --pkglibdir)/refint.so" . \
+ && cp /usr/local/pgsql/.pg_ref_commit /pgregress/.pg_ref_commit
+
 ###############################################################################
 FROM ${PG_IMAGE} AS runtime
 ###############################################################################
 USER root
 # gp_orca links against xerces-c, so the runtime image needs the library even
 # though it does not need the headers; the rest are the libraries of the
-# PostGIS stage's -dev packages.
+# PostGIS stage's -dev packages.  perl is the whole of it, not perl-base:
+# Cloudberry's gpdiff.pl, which the suites compare with, wants modules
+# perl-base leaves out.  diffutils for pg_regress, whose diff the suites
+# wrap.
 RUN apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
         libxerces-c3.2 \
         libgeos-c1t64 libproj25 libgdal36 libjson-c5 libprotobuf-c1 \
+        perl diffutils \
     && rm -rf /var/lib/apt/lists/*
 # The whole prefix, rather than lib/ and share/extension/ separately: where
 # PostgreSQL puts its data files depends on the prefix -- $prefix/share when
@@ -129,8 +150,15 @@ RUN apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-ins
 COPY --from=build /usr/local/pgsql /usr/local/pgsql
 COPY --from=postgis /postgis-root/usr/local/pgsql /usr/local/pgsql
 COPY --from=postgis /postgis/.postgis_commit /usr/local/pgsql/.postgis_commit
-# The test harness is run from the image, so it comes along.
+# The test harness is run from the image, so it comes along -- and so do the
+# test suites of Cloudberry's that the port's suites run, with the Perl that
+# compares their output, and PostgreSQL's own regression suite.
 COPY --from=build /cb/pg19/test /cb/pg19/test
+COPY --from=build /cb/src/test/regress/gpdiff.pl /cb/src/test/regress/atmsort.pm \
+                  /cb/src/test/regress/explain.pm /cb/src/test/regress/GPTest.pm.in \
+                  /cb/src/test/regress/
+COPY --from=build /cb/src/test/singlenode_regress /cb/src/test/singlenode_regress
+COPY --from=build /pgregress /cb/pgregress
 RUN chown -R postgres:postgres /cb
 USER postgres
 WORKDIR /cb

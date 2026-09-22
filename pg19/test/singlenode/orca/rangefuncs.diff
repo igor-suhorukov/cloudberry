@@ -1,0 +1,3 @@
+@@
+-CONTEXT:  SQL function "array_to_set" during inlining
++CONTEXT:  SQL function "array_to_set" statement 1

@@ -1,0 +1,16 @@
+@@
+-         Recheck Cond: (a @@ '''wr'' | ''qh'''::tsquery)
+-         ->  Bitmap Index Scan on wowidx2
+-               Index Cond: (a @@ '''wr'' | ''qh'''::tsquery)
+-(5 rows)
++         Index Cond: (a @@ '''wr'' | ''qh'''::tsquery)
++         Filter: (a @@ '''wr'' | ''qh'''::tsquery)
++(4 rows)
+@@
+-         Recheck Cond: (a @@ '''wr'' | ''qh'''::tsquery)
+-         ->  Bitmap Index Scan on wowidx
+-               Index Cond: (a @@ '''wr'' | ''qh'''::tsquery)
+-(5 rows)
++         Index Cond: (a @@ '''wr'' | ''qh'''::tsquery)
++         Filter: (a @@ '''wr'' | ''qh'''::tsquery)
++(4 rows)

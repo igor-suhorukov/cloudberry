@@ -1,0 +1,26 @@
+@@
++ERROR:  unrecognized parameter "appendonly"
+@@
++ERROR:  relation "with_index_table" does not exist
+@@
++ERROR:  relation "with_index_table" does not exist
++LINE 1: insert into with_index_table select i, 1 from generate_serie...
++                    ^
+@@
++ERROR:  relation "with_index_table" does not exist
+@@
+-QUERY PLAN
+-___________
+-
++ERROR:  relation "with_index_table" does not exist
++LINE 2: SELECT * from with_index_table td JOIN no_index_table ro ON ...
++                      ^
+@@
+- x | y | fake_col1 | fake_col2 | fake_col3 | a | b 
+----+---+-----------+-----------+-----------+---+---
+- 1 | 1 |         1 |         1 |         1 | 1 | 1
+-(1 row)
+-
++ERROR:  relation "with_index_table" does not exist
++LINE 1: SELECT * from with_index_table td JOIN no_index_table ro ON ...
++                      ^

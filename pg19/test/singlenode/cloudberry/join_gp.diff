@@ -1,0 +1,63 @@
+@@
+- i | j | i | j 
+----+---+---+---
+-(0 rows)
+-
++ERROR:  function gp_dist_random(unknown) does not exist
++LINE 2: FROM gp_dist_random('alpha') FULL OUTER JOIN gp_dist_random(...
++             ^
++DETAIL:  There is no function of that name.
+@@
++ERROR:  syntax error at or near "("
++LINE 1: ...table part4_tbl (f1 int4) partition by range (f1) (start(-10...
++                                                             ^
+@@
++ERROR:  relation "part4_tbl" does not exist
++LINE 1: insert into part4_tbl values
++                    ^
+@@
+-   f1    |   f1    
+----------+---------
+-       0 |       0
+-  123456 |  123456
+- -123456 | -123456
+-(3 rows)
+-
++ERROR:  relation "part4_tbl" does not exist
++LINE 1: select * from part4_tbl a join part4_tbl b on (a.f1 = (selec...
++                      ^
+@@
++ERROR:  unrecognized configuration parameter "statement_mem"
+@@
++ERROR:  unrecognized configuration parameter "gp_workfile_compression"
+@@
++ERROR:  unrecognized configuration parameter "gp_workfile_compression"
+@@
++ERROR:  unrecognized configuration parameter "statement_mem"
+@@
++ERROR:  syntax error at or near "("
++LINE 3: ( start (0) end (5) every (1),
++        ^
+@@
++ERROR:  relation "t_joinsize_1" does not exist
++LINE 1: insert into t_joinsize_1 select i, i%5 from generate_series(...
++                    ^
+@@
++ERROR:  relation "t_joinsize_1" does not exist
++LINE 1: insert into t_joinsize_1 select 1, null from generate_series...
++                    ^
+@@
++ERROR:  relation "t_joinsize_1" does not exist
+@@
+-QUERY PLAN
+-___________
+-
++ERROR:  relation "t_joinsize_1" does not exist
++LINE 1: explain select * from (t_joinsize_1 join t_joinsize_2 on t_j...
++                               ^
+@@
++ERROR:  table "t_joinsize_1" does not exist
+@@
++ERROR:  unrecognized configuration parameter "test_print_prefetch_joinqual"
+@@
++ERROR:  unrecognized configuration parameter "test_print_prefetch_joinqual"

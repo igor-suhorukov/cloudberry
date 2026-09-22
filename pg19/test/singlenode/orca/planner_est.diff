@@ -1,0 +1,85 @@
+@@
+- Function Scan on generate_series g  (cost=N..N rows=30 width=N) (actual rows=30.00 loops=1)
++ Function Scan on generate_series  (cost=N..N rows=1000 width=N) (actual rows=30.00 loops=1)
+@@
+- Function Scan on generate_series g  (cost=N..N rows=30 width=N) (actual rows=30.00 loops=1)
++ Function Scan on generate_series  (cost=N..N rows=1000 width=N) (actual rows=30.00 loops=1)
+@@
+- Function Scan on generate_series g  (cost=N..N rows=30 width=N) (actual rows=30.00 loops=1)
++ Function Scan on generate_series  (cost=N..N rows=1000 width=N) (actual rows=30.00 loops=1)
+@@
+-                                    explain_mask_costs                                     
+--------------------------------------------------------------------------------------------
+- Function Scan on generate_series g  (cost=N..N rows=5 width=N) (actual rows=5.00 loops=1)
++                                     explain_mask_costs                                     
++--------------------------------------------------------------------------------------------
++ Function Scan on generate_series  (cost=N..N rows=1000 width=N) (actual rows=5.00 loops=1)
+@@
+- Function Scan on generate_series g  (cost=N..N rows=30 width=N) (actual rows=30.00 loops=1)
++ Function Scan on generate_series  (cost=N..N rows=1000 width=N) (actual rows=30.00 loops=1)
+@@
+-                                    explain_mask_costs                                     
+--------------------------------------------------------------------------------------------
+- Function Scan on generate_series g  (cost=N..N rows=1 width=N) (actual rows=0.00 loops=1)
++                                     explain_mask_costs                                     
++--------------------------------------------------------------------------------------------
++ Function Scan on generate_series  (cost=N..N rows=1000 width=N) (actual rows=0.00 loops=1)
+@@
+-                        explain_mask_costs                         
+--------------------------------------------------------------------
+- Function Scan on generate_series g  (cost=N..N rows=1000 width=N)
++                       explain_mask_costs                        
++-----------------------------------------------------------------
++ Function Scan on generate_series  (cost=N..N rows=1000 width=N)
+@@
+- Function Scan on generate_series g  (cost=N..N rows=25 width=N) (actual rows=25.00 loops=1)
++ Function Scan on generate_series  (cost=N..N rows=1000 width=N) (actual rows=25.00 loops=1)
+@@
+- Function Scan on generate_series g  (cost=N..N rows=13 width=N) (actual rows=13.00 loops=1)
++ Function Scan on generate_series  (cost=N..N rows=1000 width=N) (actual rows=13.00 loops=1)
+@@
+- Function Scan on generate_series g  (cost=N..N rows=25 width=N) (actual rows=25.00 loops=1)
++ Function Scan on generate_series  (cost=N..N rows=1000 width=N) (actual rows=25.00 loops=1)
+@@
+-                                    explain_mask_costs                                     
+--------------------------------------------------------------------------------------------
+- Function Scan on generate_series g  (cost=N..N rows=1 width=N) (actual rows=0.00 loops=1)
++                                     explain_mask_costs                                     
++--------------------------------------------------------------------------------------------
++ Function Scan on generate_series  (cost=N..N rows=1000 width=N) (actual rows=0.00 loops=1)
+@@
+-                        explain_mask_costs                         
+--------------------------------------------------------------------
+- Function Scan on generate_series g  (cost=N..N rows=1000 width=N)
++                       explain_mask_costs                        
++-----------------------------------------------------------------
++ Function Scan on generate_series  (cost=N..N rows=1000 width=N)
+@@
+-                        explain_mask_costs                         
+--------------------------------------------------------------------
+- Function Scan on generate_series g  (cost=N..N rows=1000 width=N)
++                       explain_mask_costs                        
++-----------------------------------------------------------------
++ Function Scan on generate_series  (cost=N..N rows=1000 width=N)
+@@
+-                        explain_mask_costs                         
+--------------------------------------------------------------------
+- Function Scan on generate_series g  (cost=N..N rows=1000 width=N)
++                       explain_mask_costs                        
++-----------------------------------------------------------------
++ Function Scan on generate_series  (cost=N..N rows=1000 width=N)
+@@
+- Seq Scan on tenk1  (cost=N..N rows=1 width=N)
++ Seq Scan on tenk1  (cost=N..N rows=9997 width=N)
+@@
+-                                 explain_mask_costs                                  
+--------------------------------------------------------------------------------------
++                                explain_mask_costs                                
++----------------------------------------------------------------------------------
+@@
+-   Filter: (unique1 <> ALL (ARRAY[1, 2, 98, (InitPlan expr_1).col1, NULL::integer]))
+-   InitPlan expr_1
+- Seq Scan on tenk1  (cost=N..N rows=1 width=N)
++   Filter: (unique1 <> ALL (ARRAY[1, 2, 98, (SubPlan SubPlan 1), NULL::integer]))
++   SubPlan SubPlan 1
++ Seq Scan on tenk1  (cost=N..N rows=9997 width=N)

@@ -1,0 +1,4 @@
+@@
++ERROR:  unrecognized configuration parameter "test_print_direct_dispatch_info"
+@@
++ERROR:  unrecognized configuration parameter "gp_autostats_mode"

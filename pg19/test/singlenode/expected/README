@@ -1,0 +1,22 @@
+The port's expected output for the singlenode suite, where it differs from
+the expected output of PostgreSQL 19 or of Cloudberry for a reason of the
+port's own.  Each file is here for the reason below, and cloudberry.md,
+"The singlenode suites", gives the reasons in full.
+
+A file named test_9.out is an alternative for one of PostgreSQL's tests,
+which pg_regress accepts as well as PostgreSQL's own; a file named test.out
+replaces Cloudberry's expected output for one of Cloudberry's, or is the
+expected output of one of the port's own, in ../sql.
+
+gp_setup.out
+    The port's setup, run after PostgreSQL's tests and before Cloudberry's:
+    it creates the extensions of every M1 module, whose SQL objects
+    Cloudberry's tests use and Cloudberry has built in.
+
+security_label_9.out
+    PostgreSQL's test runs its unqualified SECURITY LABEL statements where
+    no label provider is loaded, and expects "no security label providers
+    have been loaded".  The port's modules register three -- gp, gp_tag and
+    gp_profile -- so the same statements are refused with "must specify
+    provider when multiple security label providers have been loaded".
+    Six lines, each that message; nothing else differs.

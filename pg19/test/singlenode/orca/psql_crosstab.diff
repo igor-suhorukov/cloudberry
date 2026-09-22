@@ -1,0 +1,30 @@
+@@
+-    |     |     | quux |     | 
++    |     |     | foo  |     | 
+@@
+- v1 | baz |     | foo +|     | 
++ v1 | baz |     | quux+|     | 
+@@
+-    |     |     | quux |     | 
++    |     |     | foo  |     | 
+@@
+- v1 | baz |     | foo +|     | 
++ v1 | baz |     | quux+|     | 
+@@
+-    |        |    | 7  |    | 
++    |        |    | 3  |    | 
+@@
+- v1 | #null# |    | 3 +|    | 
++ v1 | #null# |    | 7 +|    | 
+@@
+-    | quux |     | 
++    | foo  |     | 
+@@
+- h2 | foo +|     | 
++ h2 | quux+|     | 
+@@
+-    |     |     | quux |     | 
++    |     |     | foo  |     | 
+@@
+- v1 | baz |     | foo +|     | 
++ v1 | baz |     | quux+|     | 
