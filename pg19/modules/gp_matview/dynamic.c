@@ -214,11 +214,11 @@ GpDynAfterCreate(Oid matviewOid, const char *schedule)
 	 */
 	initStringInfo(&buf);
 	appendStringInfo(&buf,
-					 "SELECT gp_task.create_task(%s, %s, %s)",
+					 "CALL gp_task.create_task(%s, %s, %s)",
 					 quote_literal_cstr(dyn_task_name(matviewOid)),
 					 quote_literal_cstr(schedule),
 					 quote_literal_cstr(psprintf("REFRESH MATERIALIZED VIEW %s", viewname)));
-	run(buf.data, SPI_OK_SELECT);
+	run(buf.data, SPI_OK_UTILITY);
 	pfree(buf.data);
 
 	SPI_finish();
@@ -247,9 +247,9 @@ GpDynDropped(Oid matviewOid)
 
 	initStringInfo(&buf);
 	appendStringInfo(&buf,
-					 "SELECT gp_task.drop_task(%s, missing_ok => true)",
+					 "CALL gp_task.drop_task(ARRAY[%s], missing_ok => true)",
 					 quote_literal_cstr(dyn_task_name(matviewOid)));
-	run(buf.data, SPI_OK_SELECT);
+	run(buf.data, SPI_OK_UTILITY);
 	pfree(buf.data);
 
 	SPI_finish();

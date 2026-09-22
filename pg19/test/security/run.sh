@@ -124,23 +124,23 @@ got=$("$PSQL" -X -q -t -A -d postgres -U postgres -c "CREATE DATABASE second_db"
 [ "$got" = "gp_default" ] && ok "and a second database's extension keeps the one it finds" \
 	|| notok "and a second database's extension keeps the one it finds" "got [$got]"
 isl "one can be defined with the limits Cloudberry names" \
-   "SELECT gp_security.create_profile('strict',
+   "CALL gp_security.create_profile('strict',
              failed_login_attempts => 3, password_lock_time => 1,
              password_reuse_max => 2);
     SELECT failed_login_attempts || '/' || password_lock_time || '/' || password_reuse_max
       FROM gp_security.profiles WHERE profile = 'strict';" "3/1/2"
 isl "and changed, leaving what was not given alone" \
-   "SELECT gp_security.alter_profile('strict', failed_login_attempts => 4);
+   "CALL gp_security.alter_profile('strict', failed_login_attempts => 4);
     SELECT failed_login_attempts || '/' || password_reuse_max
       FROM gp_security.profiles WHERE profile = 'strict';" "4/2"
 refused "a limit outside the range Cloudberry accepts is refused" \
-        "SELECT gp_security.alter_profile('strict', password_life_time => 99999);" \
+        "CALL gp_security.alter_profile('strict', password_life_time => 99999);" \
         "must be between"
 refused "and a setting nobody knows" \
         "SECURITY LABEL FOR gp_profile ON ROLE strict IS '{\"nonsense\": 1}';" \
         "unrecognized profile setting"
 refused "a profile cannot take a name a role already has" \
-        "SELECT gp_security.create_profile('postgres');" "already exists"
+        "CALL gp_security.create_profile('postgres');" "already exists"
 
 ###############################################################################
 echo "2. a role is put under one"
@@ -155,7 +155,7 @@ refused "a profile that does not exist is refused" \
         "SELECT gp_security.assign_profile('alice', 'nope');" \
         "profile \"nope\" does not exist"
 refused "a profile with roles under it is not dropped by accident" \
-        "SELECT gp_security.drop_profile('strict');" "role(s) are under it"
+        "CALL gp_security.drop_profile('{strict}');" "role(s) are under it"
 is "a role with no profile has none" \
    "CREATE ROLE bob LOGIN PASSWORD 'bob-pass';
     SELECT gp_security.role_profile('bob') IS NULL;" "t"
@@ -244,12 +244,12 @@ isl "once enough changes have gone by, an old one may be used again" \
 ###############################################################################
 echo "6. an already-hashed password, and a verify function"
 ###############################################################################
-q "SELECT gp_security.alter_profile('strict', password_allow_hashed => false);" > /dev/null
+q "CALL gp_security.alter_profile('strict', password_allow_hashed => false);" > /dev/null
 refused "a hashed password is refused when the profile says so" \
         "ALTER ROLE alice PASSWORD 'md5d1e5cfcf95e5c0e4d6d7a1a1ed1d5f6b';" \
         "must be given in plain text"
 isl "and allowed when it says so" \
-   "SELECT gp_security.alter_profile('strict', password_allow_hashed => true);
+   "CALL gp_security.alter_profile('strict', password_allow_hashed => true);
     ALTER ROLE bob PASSWORD 'md5d1e5cfcf95e5c0e4d6d7a1a1ed1d5f6b';
     SELECT 'accepted';" "accepted"
 q "CREATE FUNCTION public.no_short(username text, password text) RETURNS void
@@ -259,7 +259,7 @@ q "CREATE FUNCTION public.no_short(username text, password text) RETURNS void
        RAISE EXCEPTION 'password for % is too short', username;
      END IF;
    END \$\$;
-   SELECT gp_security.alter_profile('strict',
+   CALL gp_security.alter_profile('strict',
             password_verify_function => 'public.no_short');" > /dev/null
 refused "a verify function is asked, and its answer is final" \
         "ALTER ROLE alice PASSWORD 'short';" "is too short"
@@ -270,7 +270,7 @@ isl "a password it accepts goes through" \
 ###############################################################################
 echo "7. how long a password lasts"
 ###############################################################################
-q "SELECT gp_security.alter_profile('strict', password_life_time => 30,
+q "CALL gp_security.alter_profile('strict', password_life_time => 30,
                                     password_grace_time => 3,
                                     unset => ARRAY['password_verify_function']);" > /dev/null
 q "ALTER ROLE alice PASSWORD 'another-long-password';" > /dev/null

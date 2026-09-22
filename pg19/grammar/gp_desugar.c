@@ -28,6 +28,22 @@
  * see standard statements, and nothing downstream has to know that
  * Cloudberry's syntax exists.
  *
+ * ONE STATEMENT FOR ONE.  A statement of the user's is one statement of
+ * PostgreSQL's, never a statement followed by others: a string of statements
+ * cannot be prepared, runs as one implicit transaction, and answers with a
+ * result nobody asked for.  So what a clause of Cloudberry's becomes is, in
+ * this order of preference:
+ *
+ *   - an option of its own statement, where PostgreSQL's grammar has a list
+ *     for one -- WITH (gp_tag.env = 'prod'), a foreign table's OPTIONS, a
+ *     function's SET gp.execute_on -- which a ProcessUtility hook takes out
+ *     again before PostgreSQL would refuse it;
+ *   - where it has none, a DefElem put on the statement's parse node once the
+ *     grammar has built it (GpAttachCarriers), which the same hooks take out;
+ *   - and a statement PostgreSQL has no counterpart of at all -- CREATE TAG,
+ *     CREATE PROFILE, CREATE TASK -- is a CALL of a procedure, which answers
+ *     with a command tag and no row, as the statement did in Cloudberry.
+ *
  * What this is, and what it is not.  "Porting the Cloudberry code" describes
  * the grammar as a fork of PG19's gram.y with Cloudberry's productions
  * applied, re-generated whenever either changes.  This is not that.  It is a
@@ -70,12 +86,16 @@
 #include "fmgr.h"
 #include "lib/stringinfo.h"
 #include "mb/pg_wchar.h"
+#include "nodes/makefuncs.h"
+#include "nodes/parsenodes.h"
 #include "parser/parser.h"
 #include "parser/scanner.h"
 #include "parser/scansup.h"
 #include "utils/builtins.h"
 #include "utils/elog.h"
+#include "utils/json.h"
 
+#include "cb_module.h"
 #include "gp_grammar.h"
 
 /*
@@ -127,9 +147,9 @@ typedef struct GpTokens
  * one pass over the text rather than a whole lexing.
  */
 static const char *const gp_trigger_words[] = {
-	"tag", "profile", "distributed", "randomly", "replicated", "task",
-	"directory", "storage", "dynamic", "incremental", "unset", "account",
-	"execute", "decode",
+	"tag", "profile", "noprofile", "distributed", "randomly", "replicated",
+	"task", "directory", "storage", "dynamic", "incremental", "unset",
+	"account", "execute", "decode",
 	NULL
 };
 
@@ -593,9 +613,9 @@ GpPosMapCopied(const GpPosMap *map, int offset)
 
 /*
  * One statement is rewritten into a buffer: the parts that are already
- * PostgreSQL's are copied across, the parts that are Cloudberry's are
- * replaced, and anything that has to happen afterwards -- a label, a function
- * call -- is added as a statement of its own.
+ * PostgreSQL's are copied across, and the parts that are Cloudberry's are
+ * replaced, or taken out and carried on the parse node instead.  Nothing is
+ * ever added as a statement of its own (see "one statement for one" above).
  */
 typedef struct GpEdit
 {
@@ -613,19 +633,17 @@ typedef struct GpRewrite
 	int			last;			/* one past its last token */
 	bool		changed;
 	bool		whole;			/* body replaces the statement outright */
-	int			tag_first;		/* first token of a TAG clause, or -1 */
-	int			tag_last;		/* one past the last token of the last one */
 	List	   *edits;			/* GpEdit, in whatever order they were found */
 	StringInfoData body;		/* what the statement becomes, when whole */
 	GpOut		text;			/* the statement with its edits, when not */
-	StringInfoData after;		/* statements to run after it */
 	char		object;			/* what find_subject found: 't' a table, 'f' a
 								 * foreign table, 'v' a view, 'm' a materialized
 								 * view, 'S' a sequence, 'i' an index, or 0 */
 	int			subject_end;	/* the token after the subject's name, or -1 */
 	StringInfoData options;		/* namespaced options for its WITH list */
-	List	   *calls;			/* functions to call, in one SELECT */
-	List	   *call_at;		/* the user's text each stands for */
+	StringInfoData fdw_options; /* a foreign table's, for its OPTIONS list */
+	List	   *carriers;		/* DefElem for its parse node; see
+								 * GpAttachCarriers */
 } GpRewrite;
 
 static void
@@ -636,17 +654,14 @@ rw_init(GpRewrite *rw, const GpTokens *ts, int first, int last)
 	rw->last = last;
 	rw->changed = false;
 	rw->whole = false;
-	rw->tag_first = -1;
-	rw->tag_last = -1;
 	rw->edits = NIL;
 	initStringInfo(&rw->body);
 	out_init(&rw->text, ts->src);
-	initStringInfo(&rw->after);
 	rw->object = 0;
 	rw->subject_end = -1;
 	initStringInfo(&rw->options);
-	rw->calls = NIL;
-	rw->call_at = NIL;
+	initStringInfo(&rw->fdw_options);
+	rw->carriers = NIL;
 }
 
 /* Replace [from, to) with `text`.  Edits may be found in any order. */
@@ -678,14 +693,43 @@ rw_edit_piece(GpRewrite *rw, int from, int to, GpOut *piece)
 }
 
 /*
- * A function to call, in the one SELECT a statement's calls are made in; it
- * stands for the clause of the user's that it was made from, at `at`.
+ * A clause of Cloudberry's that PostgreSQL's grammar has no place for on this
+ * statement -- TAG on CREATE SCHEMA, CREATE USER or CREATE SEQUENCE, PROFILE
+ * on ALTER USER -- carried to the statement's parse node instead, as a
+ * DefElem in the namespace of the module that takes it out again: "gp_tag"
+ * for gp_sql's tags, "gp" for gp_security's profiles.  A value of NULL takes
+ * the thing away, as UNSET TAG and NOPROFILE do.  `at` is the clause, in the
+ * user's text, which is where an error about it is reported.
  */
 static void
-rw_add_call(GpRewrite *rw, char *call, int at)
+rw_add_carrier(GpRewrite *rw, const char *nspace, const char *name,
+			   const char *value, int at)
 {
-	rw->calls = lappend(rw->calls, call);
-	rw->call_at = lappend_int(rw->call_at, at);
+	DefElem    *def;
+
+	def = makeDefElemExtended(pstrdup(nspace), pstrdup(name),
+							  value != NULL ? (Node *) makeString(pstrdup(value)) : NULL,
+							  value != NULL ? DEFELEM_SET : DEFELEM_DROP, at);
+	rw->carriers = lappend(rw->carriers, def);
+	rw->changed = true;
+}
+
+/*
+ * Cloudberry's syntax error at token i, where PostgreSQL's grammar would give
+ * another error, or stop at another token: "syntax error at or near" the
+ * token as the user wrote it, with the caret under it.
+ */
+static void
+rw_syntax_error(const GpRewrite *rw, int i)
+{
+	const GpTokens *ts = rw->ts;
+	int			off = ts->toks[i].off;
+
+	ereport(ERROR,
+			(errcode(ERRCODE_SYNTAX_ERROR),
+			 errmsg("syntax error at or near \"%s\"",
+					pnstrdup(ts->src + off, tok_stop(ts, i) - off)),
+			 errposition(pg_mbstrlen_with_len(ts->src, off) + 1)));
 }
 
 /* This statement becomes something else entirely; body is what it becomes. */
@@ -786,6 +830,61 @@ rw_place_options(GpRewrite *rw)
 }
 
 /*
+ * An option a foreign table is to carry in its OPTIONS list: a TAG or a
+ * DISTRIBUTED BY on CREATE FOREIGN TABLE, which has no WITH list for them.
+ * Its name is quoted, "gp_tag.env" 'prod', because a generic option's name is
+ * one identifier; gp_sql's ProcessUtility hook takes these out before the
+ * wrapper's validator would refuse them.
+ */
+static void
+rw_add_fdw_option(GpRewrite *rw, const char *name, const char *value)
+{
+	if (rw->fdw_options.len > 0)
+		appendStringInfoString(&rw->fdw_options, ", ");
+	appendStringInfo(&rw->fdw_options, "%s %s",
+					 quote_identifier(name), quote_literal_cstr(value));
+}
+
+/*
+ * Put a foreign table's options where PostgreSQL's grammar has them: into the
+ * OPTIONS (...) after SERVER name, or a new one there.  Cloudberry's clauses
+ * come after that list, so it is always before them.
+ */
+static void
+rw_place_fdw_options(GpRewrite *rw)
+{
+	const GpTokens *ts = rw->ts;
+	int			depth = 0;
+
+	if (rw->fdw_options.len == 0 || rw->whole)
+		return;
+
+	for (int j = (rw->subject_end >= 0 ? rw->subject_end : rw->first); j < rw->last; j++)
+	{
+		if (tok_is_char(ts, j, '('))
+			depth++;
+		else if (tok_is_char(ts, j, ')'))
+			depth--;
+		if (depth != 0 || !tok_is_kw(ts, j, "server") || !tok_is_name(ts, j + 1))
+			continue;
+
+		if (tok_is_kw(ts, j + 2, "options") && tok_is_char(ts, j + 3, '('))
+		{
+			int			close = skip_parens(ts, j + 3) - 1;
+
+			rw_edit(rw, ts->toks[close].off, ts->toks[close].off,
+					psprintf(", %s", rw->fdw_options.data));
+		}
+		else
+			rw_edit(rw, tok_stop(ts, j + 1), tok_stop(ts, j + 1),
+					psprintf(" OPTIONS (%s)", rw->fdw_options.data));
+		return;
+	}
+
+	/* No SERVER: not a statement PostgreSQL will take, and it says so. */
+}
+
+/*
  * Put the statement together: the source, with the edits applied in order.
  * Text an edit writes stands for the place it was written at.
  */
@@ -874,33 +973,65 @@ collect_strings(const GpTokens *ts, int i, StringInfo out)
 	return i;
 }
 
-/* A comma-separated list of names; returns the end. */
-static int
+/*
+ * A comma-separated list of names, each an identifier as the scanner gives
+ * it -- downcased, or dequoted -- which is what a tag, a profile or a task is
+ * called.  A qualified name is none of those, and makes the list NIL, so
+ * that the statement is left for PostgreSQL's grammar to refuse.
+ */
+static void
 collect_names(const GpTokens *ts, int i, List **names)
 {
 	for (;;)
 	{
-		int			e = skip_qualified_name(ts, i);
-
-		if (e == i)
+		if (!tok_is_name(ts, i))
 			break;
-		*names = lappend(*names, rw_text(ts, i, e));
-		i = e;
+		if (tok_is_char(ts, i + 1, '.'))
+		{
+			*names = NIL;
+			return;
+		}
+		*names = lappend(*names, tok_name(ts, i));
+		i++;
 		if (!tok_is_char(ts, i, ','))
 			break;
 		i++;
 	}
+}
 
-	return i;
+/* ARRAY['a', 'b']::<type>[] of a list of names. */
+static char *
+name_array(List *names, const char *type)
+{
+	StringInfoData buf;
+	ListCell   *lc;
+
+	initStringInfo(&buf);
+	appendStringInfoString(&buf, "ARRAY[");
+	foreach(lc, names)
+		appendStringInfo(&buf, "%s%s", lc == list_head(names) ? "" : ", ",
+						 quote_literal_cstr((char *) lfirst(lc)));
+	appendStringInfo(&buf, "]::%s[]", type);
+	return buf.data;
 }
 
 /* ------------------------------------------------------------------------- */
-/* Statements that become a function call                                    */
+/* Statements that become a CALL                                             */
 /* ------------------------------------------------------------------------- */
 
 /*
+ * These are statements PostgreSQL has no counterpart of, and each becomes a
+ * CALL of the procedure that does what it did.  A CALL answers as a DDL
+ * statement does -- a command tag and no row -- where the SELECT of a
+ * function they were before answered with a row of its own: psql printed it,
+ * and a driver told to expect no result set, as JDBC's executeUpdate is, was
+ * handed one.  The tag is CALL, because PostgreSQL's list of command tags is
+ * fixed and has no CREATE TAG in it.
+ */
+
+/*
  * CREATE TAG [IF NOT EXISTS] name [ALLOWED_VALUES 'a', 'b']
- *	 -> SELECT gp_sql.create_tag('name', ARRAY[...], if_not_exists)
+ *	 -> CALL gp_sql.create_tag('name', ARRAY[...], if_not_exists)
  */
 static bool
 rw_create_tag(GpRewrite *rw)
@@ -932,7 +1063,7 @@ rw_create_tag(GpRewrite *rw)
 		appendStringInfoString(&values, "NULL");
 
 	rw_whole(rw);
-	appendStringInfo(&rw->body, "SELECT gp_sql.create_tag(%s, %s, %s)",
+	appendStringInfo(&rw->body, "CALL gp_sql.create_tag(%s, %s, %s)",
 					 quote_literal_cstr(tok_name(ts, i)), values.data,
 					 if_not_exists ? "true" : "false");
 	return true;
@@ -940,14 +1071,15 @@ rw_create_tag(GpRewrite *rw)
 
 /*
  * ALTER TAG [IF EXISTS] name { ADD | DROP } ALLOWED_VALUES 'a', ...
- * ALTER TAG name UNSET ALLOWED_VALUES
- * ALTER TAG name RENAME TO newname
+ * ALTER TAG [IF EXISTS] name UNSET ALLOWED_VALUES
+ * ALTER TAG [IF EXISTS] name RENAME TO newname
  */
 static bool
 rw_alter_tag(GpRewrite *rw)
 {
 	const GpTokens *ts = rw->ts;
 	int			i = rw->first;
+	bool		missing_ok = false;
 	char	   *name;
 	StringInfoData values;
 
@@ -956,7 +1088,10 @@ rw_alter_tag(GpRewrite *rw)
 	i += 2;
 
 	if (tok_is(ts, i, "if") && tok_is(ts, i + 1, "exists"))
+	{
+		missing_ok = true;
 		i += 2;
+	}
 
 	if (!tok_is_name(ts, i))
 		return false;
@@ -966,13 +1101,14 @@ rw_alter_tag(GpRewrite *rw)
 	rw_whole(rw);
 
 	if (tok_is(ts, i, "rename") && tok_is(ts, i + 1, "to") && tok_is_name(ts, i + 2))
-		appendStringInfo(&rw->body, "SELECT gp_sql.rename_tag(%s, %s)",
+		appendStringInfo(&rw->body, "CALL gp_sql.rename_tag(%s, %s, missing_ok => %s)",
 						 quote_literal_cstr(name),
-						 quote_literal_cstr(tok_name(ts, i + 2)));
+						 quote_literal_cstr(tok_name(ts, i + 2)),
+						 missing_ok ? "true" : "false");
 	else if (tok_is(ts, i, "unset") && tok_is(ts, i + 1, "allowed_values"))
 		appendStringInfo(&rw->body,
-						 "SELECT gp_sql.alter_tag(%s, unset_values => true)",
-						 quote_literal_cstr(name));
+						 "CALL gp_sql.alter_tag(%s, unset_values => true, missing_ok => %s)",
+						 quote_literal_cstr(name), missing_ok ? "true" : "false");
 	else if ((tok_is(ts, i, "add") || tok_is(ts, i, "drop")) &&
 			 tok_is(ts, i + 1, "allowed_values"))
 	{
@@ -980,9 +1116,10 @@ rw_alter_tag(GpRewrite *rw)
 
 		initStringInfo(&values);
 		(void) collect_strings(ts, i + 2, &values);
-		appendStringInfo(&rw->body, "SELECT gp_sql.alter_tag(%s, %s => %s)",
+		appendStringInfo(&rw->body, "CALL gp_sql.alter_tag(%s, %s => %s, missing_ok => %s)",
 						 quote_literal_cstr(name),
-						 adding ? "add_values" : "drop_values", values.data);
+						 adding ? "add_values" : "drop_values", values.data,
+						 missing_ok ? "true" : "false");
 	}
 	else
 		return false;
@@ -990,7 +1127,7 @@ rw_alter_tag(GpRewrite *rw)
 	return true;
 }
 
-/* DROP TAG [IF EXISTS] a, b -> one call each, in one SELECT */
+/* DROP TAG [IF EXISTS] a, b -> one CALL, over them all */
 static bool
 rw_drop_tag(GpRewrite *rw)
 {
@@ -998,7 +1135,6 @@ rw_drop_tag(GpRewrite *rw)
 	int			i = rw->first;
 	bool		missing_ok = false;
 	List	   *names = NIL;
-	ListCell   *lc;
 
 	if (!tok_is(ts, i, "drop") || !tok_is(ts, i + 1, "tag"))
 		return false;
@@ -1010,16 +1146,13 @@ rw_drop_tag(GpRewrite *rw)
 		i += 2;
 	}
 
-	(void) collect_names(ts, i, &names);
+	collect_names(ts, i, &names);
 	if (names == NIL)
 		return false;
 
 	rw_whole(rw);
-	foreach(lc, names)
-		rw_add_call(rw, psprintf("gp_sql.drop_tag(%s, %s)",
-								 quote_literal_cstr((char *) lfirst(lc)),
-								 missing_ok ? "true" : "false"),
-					ts->toks[rw->first].off);
+	appendStringInfo(&rw->body, "CALL gp_sql.drop_tag(%s, %s)",
+					 name_array(names, "name"), missing_ok ? "true" : "false");
 	return true;
 }
 
@@ -1087,13 +1220,13 @@ rw_profile(GpRewrite *rw)
 	}
 
 	rw_whole(rw);
-	appendStringInfo(&rw->body, "SELECT gp_security.%s_profile(%s%s)",
+	appendStringInfo(&rw->body, "CALL gp_security.%s_profile(%s%s)",
 					 creating ? "create" : "alter",
 					 quote_literal_cstr(name), args.data);
 	return true;
 }
 
-/* DROP PROFILE [IF EXISTS] a, b */
+/* DROP PROFILE [IF EXISTS] a, b -> one CALL, over them all */
 static bool
 rw_drop_profile(GpRewrite *rw)
 {
@@ -1101,7 +1234,6 @@ rw_drop_profile(GpRewrite *rw)
 	int			i = rw->first;
 	bool		missing_ok = false;
 	List	   *names = NIL;
-	ListCell   *lc;
 
 	if (!tok_is(ts, i, "drop") || !tok_is(ts, i + 1, "profile"))
 		return false;
@@ -1113,52 +1245,13 @@ rw_drop_profile(GpRewrite *rw)
 		i += 2;
 	}
 
-	(void) collect_names(ts, i, &names);
+	collect_names(ts, i, &names);
 	if (names == NIL)
 		return false;
 
 	rw_whole(rw);
-	foreach(lc, names)
-		rw_add_call(rw, psprintf("gp_security.drop_profile(%s, %s)",
-								 quote_literal_cstr((char *) lfirst(lc)),
-								 missing_ok ? "true" : "false"),
-					ts->toks[rw->first].off);
-	return true;
-}
-
-/*
- * CREATE DIRECTORY TABLE [IF NOT EXISTS] name [TABLESPACE ts] [TAG (...)]
- *	 -> SELECT gp_sql.create_directory_table('name', 'ts')
- */
-static bool
-rw_create_directory_table(GpRewrite *rw)
-{
-	const GpTokens *ts = rw->ts;
-	int			i = rw->first;
-	int			nameend;
-	char	   *name;
-	char	   *tablespace = NULL;
-
-	if (!tok_is(ts, i, "create") || !tok_is(ts, i + 1, "directory") ||
-		!tok_is(ts, i + 2, "table"))
-		return false;
-	i += 3;
-
-	if (tok_is(ts, i, "if") && tok_is(ts, i + 1, "not") && tok_is(ts, i + 2, "exists"))
-		i += 3;
-
-	nameend = skip_qualified_name(ts, i);
-	if (nameend == i)
-		return false;
-	name = rw_text(ts, i, nameend);
-
-	if (tok_is(ts, nameend, "tablespace") && tok_is_name(ts, nameend + 1))
-		tablespace = tok_name(ts, nameend + 1);
-
-	rw_whole(rw);
-	appendStringInfo(&rw->body, "SELECT gp_sql.create_directory_table(%s, %s)",
-					 quote_literal_cstr(name),
-					 tablespace ? quote_literal_cstr(tablespace) : "NULL");
+	appendStringInfo(&rw->body, "CALL gp_security.drop_profile(%s, %s)",
+					 name_array(names, "name"), missing_ok ? "true" : "false");
 	return true;
 }
 
@@ -1173,6 +1266,7 @@ rw_task(GpRewrite *rw)
 	const GpTokens *ts = rw->ts;
 	int			i = rw->first;
 	bool		creating;
+	bool		if_exists_clause = false;	/* IF NOT EXISTS or IF EXISTS */
 	char	   *name;
 	char	   *schedule = NULL;
 	char	   *database = NULL;
@@ -1193,9 +1287,15 @@ rw_task(GpRewrite *rw)
 
 	if (creating && tok_is(ts, i, "if") && tok_is(ts, i + 1, "not") &&
 		tok_is(ts, i + 2, "exists"))
+	{
+		if_exists_clause = true;
 		i += 3;
+	}
 	else if (!creating && tok_is(ts, i, "if") && tok_is(ts, i + 1, "exists"))
+	{
+		if_exists_clause = true;
 		i += 2;
+	}
 
 	if (!tok_is_name(ts, i))
 		return false;
@@ -1240,7 +1340,7 @@ rw_task(GpRewrite *rw)
 
 	if (creating)
 	{
-		appendStringInfo(&rw->body, "SELECT gp_task.create_task(%s, %s, %s",
+		appendStringInfo(&rw->body, "CALL gp_task.create_task(%s, %s, %s",
 						 quote_literal_cstr(name),
 						 quote_literal_cstr(schedule),
 						 quote_literal_cstr(command));
@@ -1250,11 +1350,13 @@ rw_task(GpRewrite *rw)
 		if (username != NULL)
 			appendStringInfo(&rw->body, ", username => %s",
 							 quote_literal_cstr(username));
+		if (if_exists_clause)
+			appendStringInfoString(&rw->body, ", if_not_exists => true");
 		appendStringInfoChar(&rw->body, ')');
 	}
 	else
 	{
-		appendStringInfo(&rw->body, "SELECT gp_task.alter_task(%s",
+		appendStringInfo(&rw->body, "CALL gp_task.alter_task(%s",
 						 quote_literal_cstr(name));
 		if (schedule != NULL)
 			appendStringInfo(&rw->body, ", schedule => %s",
@@ -1270,13 +1372,15 @@ rw_task(GpRewrite *rw)
 							 quote_literal_cstr(username));
 		if (active != NULL)
 			appendStringInfo(&rw->body, ", active => %s", active);
+		if (if_exists_clause)
+			appendStringInfoString(&rw->body, ", missing_ok => true");
 		appendStringInfoChar(&rw->body, ')');
 	}
 
 	return true;
 }
 
-/* DROP TASK [IF EXISTS] a, b */
+/* DROP TASK [IF EXISTS] a, b -> one CALL, over them all */
 static bool
 rw_drop_task(GpRewrite *rw)
 {
@@ -1284,7 +1388,6 @@ rw_drop_task(GpRewrite *rw)
 	int			i = rw->first;
 	bool		missing_ok = false;
 	List	   *names = NIL;
-	ListCell   *lc;
 
 	if (!tok_is(ts, i, "drop") || !tok_is(ts, i + 1, "task"))
 		return false;
@@ -1296,16 +1399,76 @@ rw_drop_task(GpRewrite *rw)
 		i += 2;
 	}
 
-	(void) collect_names(ts, i, &names);
+	collect_names(ts, i, &names);
 	if (names == NIL)
 		return false;
 
 	rw_whole(rw);
-	foreach(lc, names)
-		rw_add_call(rw, psprintf("gp_task.drop_task(%s, %s)",
-								 quote_literal_cstr((char *) lfirst(lc)),
-								 missing_ok ? "true" : "false"),
-					ts->toks[rw->first].off);
+	appendStringInfo(&rw->body, "CALL gp_task.drop_task(%s, %s)",
+					 name_array(names, "text"), missing_ok ? "true" : "false");
+	return true;
+}
+
+/*
+ * CREATE DIRECTORY TABLE [IF NOT EXISTS] name [USING am] [TABLESPACE ts]
+ *		[TAG (...)]
+ *	 -> CREATE TABLE [IF NOT EXISTS] name (relative_path text PRIMARY KEY, ...)
+ *		[USING am] WITH (gp.directory_table = true[, gp_tag....]) [TABLESPACE ts]
+ *
+ * A directory table here is an ordinary table of Cloudberry's five columns
+ * whose "gp" label says where its files are, so the statement is the CREATE
+ * TABLE that makes one, and gp_sql's ProcessUtility hook takes the option out
+ * and claims the table once it exists.  It used to be a call of
+ * gp_sql.create_directory_table(), which answered with a row and dropped a
+ * TAG clause without a word.  The columns are Cloudberry's
+ * GetDirectoryTableSchema, in its order, which that function also uses.
+ *
+ * WITH LOCATION names where Cloudberry keeps the files; the port chooses that
+ * itself, a directory per table in the database's directory, so the clause is
+ * refused rather than dropped.
+ *
+ * Returns false when this is not a CREATE DIRECTORY TABLE; otherwise the
+ * subject, *name and *after, is the table, as find_subject gives it, so that
+ * the TAG clause is found as it is on any CREATE TABLE.
+ */
+static bool
+rw_create_directory_table(GpRewrite *rw, char **name, int *after)
+{
+	const GpTokens *ts = rw->ts;
+	int			i = rw->first;
+	int			nameend;
+
+	if (!tok_is(ts, i, "create") || !tok_is(ts, i + 1, "directory") ||
+		!tok_is(ts, i + 2, "table"))
+		return false;
+	i += 3;
+
+	if (tok_is(ts, i, "if") && tok_is(ts, i + 1, "not") && tok_is(ts, i + 2, "exists"))
+		i += 3;
+
+	nameend = skip_qualified_name(ts, i);
+	if (nameend == i)
+		return false;
+
+	for (int j = nameend; j < rw->last; j++)
+	{
+		if (tok_is_kw(ts, j, "with") && tok_is(ts, j + 1, "location"))
+			ereport(ERROR,
+					(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+					 errmsg("WITH LOCATION is not supported for a directory table"),
+					 errdetail("A directory table keeps its files in a directory of its own in the database's directory.")));
+	}
+
+	/* DIRECTORY is Cloudberry's; the rest is CREATE TABLE's already. */
+	rw_edit(rw, ts->toks[rw->first + 1].off, ts->toks[rw->first + 2].off, "");
+	rw_edit(rw, tok_stop(ts, nameend - 1), tok_stop(ts, nameend - 1),
+			" (relative_path text PRIMARY KEY, size bigint,"
+			" last_modified timestamptz, md5 text, tag text)");
+	rw_add_option(rw, "gp.directory_table = true");
+
+	rw->object = 't';
+	*name = rw_text(ts, i, nameend);
+	*after = nameend;
 	return true;
 }
 
@@ -1325,12 +1488,12 @@ typedef enum GpSubjKind
 
 /*
  * What a CREATE or ALTER statement is about, so that a TAG clause on it knows
- * which setter to become.  Only the kinds Cloudberry lets one be written on.
- * For a relation, *object says which kind: 't' a table, 'f' a foreign table,
- * 'v' a view, 'm' a materialized view, 'S' a sequence, 'i' an index -- the
- * difference between one whose statement can carry the tag as an option of
- * its own and one that cannot.  An index need not be named; its name is then
- * empty, and *after is where ON begins.
+ * where in the statement to go.  Only the kinds Cloudberry lets one be written
+ * on.  For a relation, *object says which kind: 't' a table, 'f' a foreign
+ * table, 'v' a view, 'm' a materialized view, 'S' a sequence, 'i' an index --
+ * which decides the list its CREATE can carry the tag in: a WITH list, a
+ * foreign table's OPTIONS, or none, when it goes on the parse node.  An index
+ * need not be named; its name is then empty, and *after is where ON begins.
  */
 static GpSubjKind
 find_subject(const GpTokens *ts, int first, int last, char **name, int *after,
@@ -1432,122 +1595,50 @@ find_subject(const GpTokens *ts, int first, int last, char **name, int *after,
 	return kind;
 }
 
-/* The function that puts a tag on this kind of object. */
-static const char *
-subject_setter(GpSubjKind kind, bool unset)
+/* One TAG (...) or UNSET TAG (...) clause, as it was written. */
+typedef struct GpTagClause
 {
-	switch (kind)
-	{
-		case GP_SUBJ_RELATION:
-			return unset ? "gp_sql.unset_relation_tag" : "gp_sql.set_relation_tag";
-		case GP_SUBJ_SCHEMA:
-			return unset ? "gp_sql.unset_schema_tag" : "gp_sql.set_schema_tag";
-		case GP_SUBJ_DATABASE:
-			return unset ? "gp_sql.unset_database_tag" : "gp_sql.set_database_tag";
-		case GP_SUBJ_TABLESPACE:
-			return unset ? "gp_sql.unset_tablespace_tag" : "gp_sql.set_tablespace_tag";
-		case GP_SUBJ_ROLE:
-			return unset ? "gp_sql.unset_role_tag" : "gp_sql.set_role_tag";
-		default:
-			return NULL;
-	}
-}
-
-/* How the object is named in the call: a relation by regclass, else by name. */
-static char *
-subject_argument(GpSubjKind kind, const char *name)
-{
-	switch (kind)
-	{
-		case GP_SUBJ_RELATION:
-			return psprintf("%s::regclass", quote_literal_cstr(name));
-		case GP_SUBJ_SCHEMA:
-			return psprintf("%s::regnamespace", quote_literal_cstr(name));
-		case GP_SUBJ_ROLE:
-			return psprintf("%s::regrole", quote_literal_cstr(name));
-		default:
-			return quote_literal_cstr(name);
-	}
-}
+	int			start;			/* its first token: TAG, UNSET, or WITH */
+	int			after;			/* the token after its closing parenthesis */
+	bool		unset;
+	List	   *keys;			/* char *: the tags it names */
+	List	   *values;			/* char *: their values, NULL for UNSET TAG */
+} GpTagClause;
 
 /*
- * Where the tags of a CREATE DATABASE or CREATE TABLESPACE go: into the
- * statement, as options gp_sql's ProcessUtility hook takes out again and puts
- * on the object once it exists.  A database's options are written one after
- * another, each a name that is a quoted identifier, "gp_tag.env" = 'prod',
- * because CREATE DATABASE has no namespaced option; a tablespace's go into
- * its WITH (...) list as gp_tag.env = 'prod', which is the namespace
- * GP_TAG_OPTION_NS (gp_sql.h) names.
- */
-static void
-tag_option(StringInfo opts, GpSubjKind kind, const char *key, const char *value)
-{
-	if (kind == GP_SUBJ_DATABASE)
-		appendStringInfo(opts, " %s = %s",
-						 quote_identifier(psprintf("gp_tag.%s", key)),
-						 quote_literal_cstr(value));
-	else
-		appendStringInfo(opts, "%sgp_tag.%s = %s",
-						 opts->len > 0 ? ", " : "",
-						 quote_identifier(key), quote_literal_cstr(value));
-}
-
-/*
- * TAG (name = 'value', ...) and UNSET TAG (name, ...), wherever Cloudberry
- * lets them be written, each becoming a statement PostgreSQL has -- one
- * statement for one, and not the statement followed by calls.  A string of
- * statements is not one statement: it cannot be prepared, so a driver on the
- * extended protocol got "cannot insert multiple commands into a prepared
- * statement"; it runs as one implicit transaction, so CREATE DATABASE and
- * CREATE TABLESPACE refused to run in it; and the calls' rows came back as a
- * result nobody asked for.  So:
+ * The TAG and UNSET TAG clauses of a statement, from token `from` on, at the
+ * statement's own level.
  *
- *   - on CREATE TABLE, CREATE TABLE AS, CREATE [MATERIALIZED] VIEW and CREATE
- *     INDEX, the tags are options of the statement, gp_tag.env = 'prod' in its
- *     WITH list (rw_add_option), which gp_sql's ProcessUtility hook takes out
- *     again and puts on the relation once it exists;
- *   - on CREATE DATABASE and CREATE TABLESPACE, the same, as each statement
- *     takes an option (tag_option);
- *   - on ALTER of a table, view, materialized view or index, TAG (...) is SET
- *     (gp_tag....) and UNSET TAG (...) is RESET (gp_tag....), in place, which
- *     the hook takes out of ALTER TABLE the same way;
- *   - and where no statement has a place for them -- a schema, a role, a
- *     sequence, a foreign table, and ALTER of a database or tablespace -- the
- *     tags are calls to gp_sql's setters, made in one SELECT: the statement
- *     itself when an ALTER is all tags, and after it otherwise, which for
- *     CREATE SCHEMA, CREATE USER, CREATE SEQUENCE and CREATE FOREIGN TABLE is
- *     still two statements.
+ * TAG ( ... ) is Cloudberry's clause only when what is in it reads like one,
+ * and all of it does: tag(x) in the query of a CREATE TABLE AS is a function
+ * call, and TAG () or a list with a hole in it is the syntax error it is in
+ * Cloudberry.  Either is left where it is, for PostgreSQL's grammar to refuse
+ * or accept.
  *
  * On CREATE SCHEMA, Cloudberry's grammar has WITH TAG (...) and nothing else,
- * so a bare TAG there is left for PostgreSQL to refuse, as Cloudberry does.
+ * so WITH goes with the clause and a bare TAG there is left for PostgreSQL to
+ * refuse, as Cloudberry does.
  */
-static void
-rw_tag_clauses(GpRewrite *rw, GpSubjKind kind, const char *name, int from)
+static List *
+find_tag_clauses(const GpRewrite *rw, GpSubjKind kind, int from)
 {
 	const GpTokens *ts = rw->ts;
-	int			depth = 0;
-	const char *arg = subject_argument(kind, name);
 	bool		creating = tok_is(ts, rw->first, "create");
-	bool		relopts = (kind == GP_SUBJ_RELATION && rw->object != 0 &&
-						   strchr("tvmi", rw->object) != NULL);
-	bool		as_options = creating &&
-		(relopts || kind == GP_SUBJ_DATABASE || kind == GP_SUBJ_TABLESPACE);
-	bool		in_place = !creating && relopts;
-	int			with_close = -1;	/* a tablespace's WITH list's ')' */
+	List	   *clauses = NIL;
+	int			depth = 0;
 
 	for (int i = from; i < rw->last; i++)
 	{
 		bool		unset;
 		int			open;
+		int			close;
 		int			j;
-		int			start = i;
-		StringInfoData opts;
+		List	   *keys = NIL;
+		List	   *values = NIL;
+		GpTagClause *c;
 
 		if (tok_is_char(ts, i, '('))
 		{
-			if (depth == 0 && as_options && kind == GP_SUBJ_TABLESPACE &&
-				tok_is(ts, i - 1, "with"))
-				with_close = skip_parens(ts, i) - 1;
 			depth++;
 			continue;
 		}
@@ -1566,112 +1657,306 @@ rw_tag_clauses(GpRewrite *rw, GpSubjKind kind, const char *name, int from)
 		open = unset ? i + 2 : i + 1;
 		if (!tok_is_char(ts, open, '('))
 			continue;
+		close = skip_parens(ts, open) - 1;
 
-		if (kind == GP_SUBJ_SCHEMA && creating)
-		{
-			if (unset || i == from || !tok_is(ts, i - 1, "with"))
-				continue;
-			start = i - 1;		/* WITH goes with it */
-		}
-
-		/* Not Cloudberry's grammar either; PostgreSQL refuses it. */
-		if (as_options && unset)
+		if (kind == GP_SUBJ_SCHEMA && creating &&
+			(unset || i == from || !tok_is(ts, i - 1, "with")))
 			continue;
 
-		/*
-		 * Look before cutting.  TAG ( ... ) is Cloudberry's clause only when
-		 * what is in it reads like one; tag(x) in the query of a CREATE TABLE
-		 * AS is a function call, and has to be left where it is.
-		 */
-		if (!unset)
-		{
-			if (!tok_is_name(ts, open + 1) || !tok_is_char(ts, open + 2, '=') ||
-				!tok_is_string(ts, open + 3))
-				continue;
-		}
-		else if (!tok_is_name(ts, open + 1))
-			continue;
-
-		/* Read the pairs. */
-		initStringInfo(&opts);
+		/* The pairs, or for UNSET TAG the names, and nothing else. */
 		j = open + 1;
-		while (j < rw->last && tok_is_name(ts, j))
+		while (j < close && tok_is_name(ts, j))
 		{
-			char	   *key = tok_name(ts, j);
-
+			keys = lappend(keys, tok_name(ts, j));
 			j++;
-			if (unset && in_place)
-				appendStringInfo(&opts, "%sgp_tag.%s", opts.len > 0 ? ", " : "",
-								 quote_identifier(key));
-			else if (unset)
-				rw_add_call(rw, psprintf("%s(%s, %s)", subject_setter(kind, true),
-										 arg, quote_literal_cstr(key)),
-							ts->toks[start].off);
+			if (unset)
+				values = lappend(values, NULL);
 			else
 			{
-				const char *value;
-
 				if (!tok_is_char(ts, j, '=') || !tok_is_string(ts, j + 1))
 					break;
-				value = ts->toks[j + 1].str;
-				if (as_options &&
-					(kind == GP_SUBJ_DATABASE || kind == GP_SUBJ_TABLESPACE))
-					tag_option(&opts, kind, key, value);
-				else if (as_options || in_place)
-				{
-					char	   *option = psprintf("gp_tag.%s = %s", quote_identifier(key),
-												  quote_literal_cstr(value));
-
-					if (in_place)
-						appendStringInfo(&opts, "%s%s", opts.len > 0 ? ", " : "", option);
-					else
-						rw_add_option(rw, option);
-				}
-				else
-					rw_add_call(rw, psprintf("%s(%s, %s, %s)",
-											 subject_setter(kind, false), arg,
-											 quote_literal_cstr(key),
-											 quote_literal_cstr(value)),
-								ts->toks[start].off);
+				values = lappend(values, ts->toks[j + 1].str);
 				j += 2;
 			}
-
-			if (!tok_is_char(ts, j, ','))
+			if (j < close && tok_is_char(ts, j, ','))
+				j++;
+			else
 				break;
-			j++;
 		}
+		if (keys == NIL || j != close)
+			continue;
 
-		/*
-		 * Take the clause out of the statement, or put what it became in its
-		 * place: SET or RESET of an ALTER, a database's options, or a
-		 * tablespace's WITH list, into the one it has if it has one.
-		 */
-		{
-			int			after = skip_parens(ts, open);
-			const char *replacement = " ";
+		c = palloc(sizeof(GpTagClause));
+		c->start = (kind == GP_SUBJ_SCHEMA && creating) ? i - 1 : i;
+		c->after = close + 1;
+		c->unset = unset;
+		c->keys = keys;
+		c->values = values;
+		clauses = lappend(clauses, c);
 
-			if (in_place)
-				replacement = psprintf("%s (%s) ", unset ? "RESET" : "SET", opts.data);
-			else if (as_options && kind == GP_SUBJ_TABLESPACE && with_close >= 0)
-				rw_edit(rw, ts->toks[with_close].off, ts->toks[with_close].off,
-						psprintf(", %s", opts.data));
-			else if (as_options && kind == GP_SUBJ_TABLESPACE)
-				replacement = psprintf(" WITH (%s) ", opts.data);
-			else if (as_options && kind == GP_SUBJ_DATABASE)
-				replacement = psprintf("%s ", opts.data);
+		i = close;
+	}
 
-			rw_edit(rw, ts->toks[start].off,
-					(after < ts->ntoks) ? ts->toks[after].off : ts->srclen,
-					replacement);
-			if (!in_place)
+	return clauses;
+}
+
+/*
+ * A tag as an option of CREATE DATABASE or ALTER DATABASE.  Neither has a
+ * namespaced option, but both take any identifier for an option's name, so a
+ * tag is "gp_tag.env" = 'prod' -- or = DEFAULT, which is UNSET TAG -- written
+ * one after another, as the statement writes its options.  gp_sql's
+ * ProcessUtility hook takes them out again before createdb() or
+ * AlterDatabase() would refuse them.
+ */
+static void
+tag_db_option(StringInfo opts, const char *key, const char *value)
+{
+	appendStringInfo(opts, " %s = %s",
+					 quote_identifier(psprintf("gp_tag.%s", key)),
+					 value != NULL ? quote_literal_cstr(value) : "DEFAULT");
+}
+
+/* gp_tag.env = 'prod', ... for a WITH, SET or RESET list; no values for RESET. */
+static char *
+tag_reloptions(const GpTagClause *c)
+{
+	StringInfoData opts;
+	ListCell   *k;
+	ListCell   *v;
+
+	initStringInfo(&opts);
+	forboth(k, c->keys, v, c->values)
+	{
+		if (opts.len > 0)
+			appendStringInfoString(&opts, ", ");
+		appendStringInfo(&opts, "gp_tag.%s", quote_identifier((char *) lfirst(k)));
+		if (lfirst(v) != NULL)
+			appendStringInfo(&opts, " = %s", quote_literal_cstr((char *) lfirst(v)));
+	}
+	return opts.data;
+}
+
+/*
+ * ALTER SCHEMA s TAG (...), ALTER DATABASE, ALTER TABLESPACE and ALTER USER,
+ * whose TAG and UNSET TAG are each a whole statement of Cloudberry's:
+ *
+ *	 ALTER DATABASE d TAG (env = 'prod')
+ *	   -> ALTER DATABASE d "gp_tag.env" = 'prod'
+ *	 ALTER TABLESPACE t UNSET TAG (env)
+ *	   -> ALTER TABLESPACE t RESET (gp_tag.env)
+ *	 ALTER USER u TAG (env = 'prod')
+ *	   -> ALTER USER u, carrying gp_tag.env = 'prod' (GpAttachCarriers)
+ *	 ALTER SCHEMA s TAG (env = 'prod')
+ *	   -> CALL gp_sql.alter_schema_tags('s'::regnamespace, '{"env": "prod"}')
+ *
+ * Each is the statement PostgreSQL has for altering that kind of object,
+ * which then answers as that statement does, and checks what it checks --
+ * that the database or tablespace is the user's.  ALTER USER with no options
+ * checks next to nothing, so gp_sql checks for the tags what SECURITY LABEL
+ * would.  PostgreSQL has no ALTER SCHEMA that takes an option, or that does
+ * nothing, so there it is a CALL, whose command tag is CALL; the procedure
+ * writes the label with SECURITY LABEL, which checks the schema is the
+ * user's.
+ */
+static void
+rw_alter_tags_whole(GpRewrite *rw, GpSubjKind kind, const char *name,
+					const GpTagClause *c)
+{
+	const GpTokens *ts = rw->ts;
+	int			start = ts->toks[c->start].off;
+	int			end = (c->after < ts->ntoks) ? ts->toks[c->after].off : ts->srclen;
+	ListCell   *k;
+	ListCell   *v;
+	StringInfoData buf;
+
+	initStringInfo(&buf);
+
+	switch (kind)
+	{
+		case GP_SUBJ_DATABASE:
+			forboth(k, c->keys, v, c->values)
+				tag_db_option(&buf, (char *) lfirst(k), (char *) lfirst(v));
+			appendStringInfoChar(&buf, ' ');
+			rw_edit(rw, start, end, buf.data);
+			break;
+
+		case GP_SUBJ_TABLESPACE:
+			rw_edit(rw, start, end,
+					psprintf("%s (%s) ", c->unset ? "RESET" : "SET", tag_reloptions(c)));
+			break;
+
+		case GP_SUBJ_ROLE:
+			forboth(k, c->keys, v, c->values)
+				rw_add_carrier(rw, "gp_tag", (char *) lfirst(k), (char *) lfirst(v),
+							   start);
+			rw_edit(rw, start, end, " ");
+			break;
+
+		case GP_SUBJ_SCHEMA:
+			rw_whole(rw);
+			appendStringInfo(&rw->body, "CALL gp_sql.alter_schema_tags(%s::regnamespace, ",
+							 quote_literal_cstr(name));
+			if (c->unset)
+				appendStringInfo(&rw->body, "unset_tags => %s)",
+								 name_array(c->keys, "name"));
+			else
 			{
-				if (rw->tag_first < 0)
-					rw->tag_first = start;
-				rw->tag_last = after;
+				StringInfoData json;
+
+				/* A JSON literal, not jsonb_build_object: 50 tags is 100 arguments. */
+				initStringInfo(&json);
+				appendStringInfoChar(&json, '{');
+				forboth(k, c->keys, v, c->values)
+				{
+					if (json.len > 1)
+						appendStringInfoString(&json, ", ");
+					escape_json(&json, (char *) lfirst(k));
+					appendStringInfoString(&json, ": ");
+					escape_json(&json, (char *) lfirst(v));
+				}
+				appendStringInfoChar(&json, '}');
+				appendStringInfo(&rw->body, "set_tags => %s::jsonb)",
+								 quote_literal_cstr(json.data));
 			}
-			i = after - 1;
-			depth = 0;
+			break;
+
+		default:
+			break;
+	}
+}
+
+/*
+ * TAG (name = 'value', ...) and UNSET TAG (name, ...), wherever Cloudberry
+ * lets them be written, each becoming part of a statement PostgreSQL has --
+ * one statement for one, never the statement followed by calls:
+ *
+ *   - on CREATE TABLE, CREATE TABLE AS, CREATE [MATERIALIZED] VIEW, CREATE
+ *     INDEX and CREATE DIRECTORY TABLE, options of the statement, gp_tag.env
+ *     = 'prod' in its WITH list (rw_add_option);
+ *   - on CREATE FOREIGN TABLE, which has no WITH list, options in its OPTIONS
+ *     list, "gp_tag.env" 'prod' (rw_add_fdw_option);
+ *   - on CREATE DATABASE and CREATE TABLESPACE, options as each statement
+ *     takes one (tag_db_option, and the tablespace's WITH list);
+ *   - on CREATE SCHEMA, CREATE USER and CREATE SEQUENCE, whose statements
+ *     have no list a namespaced option can go in, DefElems carried to the
+ *     statement's parse node (rw_add_carrier);
+ *   - on ALTER of a table, view, materialized view, index, sequence or
+ *     foreign table, TAG (...) is SET (gp_tag....) and UNSET TAG (...) is
+ *     RESET (gp_tag....), in place, among the statement's other actions;
+ *   - and on ALTER of a schema, database, tablespace or role, see
+ *     rw_alter_tags_whole.
+ *
+ * gp_sql's ProcessUtility hook takes each of them out again, checks the tags
+ * before the statement runs, and puts them on the object once it exists.
+ * Nothing about a tag is decided here but where it goes.
+ */
+static void
+rw_tag_clauses(GpRewrite *rw, GpSubjKind kind, const char *name, int from)
+{
+	const GpTokens *ts = rw->ts;
+	bool		creating = tok_is(ts, rw->first, "create");
+	List	   *clauses = find_tag_clauses(rw, kind, from);
+	int			with_close = -1;	/* a tablespace's WITH list's ')' */
+	ListCell   *lc;
+
+	if (clauses == NIL)
+		return;
+
+	/*
+	 * ALTER of a schema, database, tablespace or role: Cloudberry's grammar
+	 * has ALTER <kind> name TAG (...) and ALTER <kind> name UNSET TAG (...),
+	 * each on its own, and no TAG beside anything else -- its tag test
+	 * expects ALTER USER u CONNECTION LIMIT 3 TAG (...) and ALTER TABLESPACE t
+	 * SET (...) TAG (...) to be syntax errors at TAG.  PostgreSQL's grammar
+	 * would refuse them too, but not all at TAG: a role's option may be any
+	 * word, and it would be "unrecognized role option", and a database's
+	 * any word with a value, so it would be the parenthesis.
+	 */
+	if (!creating && kind != GP_SUBJ_RELATION)
+	{
+		GpTagClause *c = (GpTagClause *) linitial(clauses);
+
+		if (c->start != from)
+			rw_syntax_error(rw, c->start);
+		if (c->after != rw->last)
+			rw_syntax_error(rw, c->after);
+		rw_alter_tags_whole(rw, kind, name, c);
+		return;
+	}
+
+	if (creating && kind == GP_SUBJ_TABLESPACE)
+	{
+		int			depth = 0;
+
+		for (int i = from; i < rw->last; i++)
+		{
+			if (tok_is_char(ts, i, '('))
+			{
+				if (depth == 0 && tok_is(ts, i - 1, "with"))
+					with_close = skip_parens(ts, i) - 1;
+				depth++;
+			}
+			else if (tok_is_char(ts, i, ')'))
+				depth--;
 		}
+	}
+
+	foreach(lc, clauses)
+	{
+		GpTagClause *c = (GpTagClause *) lfirst(lc);
+		int			start = ts->toks[c->start].off;
+		int			end = (c->after < ts->ntoks) ? ts->toks[c->after].off : ts->srclen;
+		const char *replacement = " ";
+		ListCell   *k;
+		ListCell   *v;
+
+		/* Not Cloudberry's grammar either; PostgreSQL refuses it. */
+		if (creating && c->unset)
+			continue;
+
+		if (!creating)
+		{
+			/* ALTER of a relation: SET or RESET, in place */
+			replacement = psprintf("%s (%s) ", c->unset ? "RESET" : "SET",
+								   tag_reloptions(c));
+		}
+		else if (kind == GP_SUBJ_RELATION && strchr("tvmi", rw->object) != NULL)
+		{
+			forboth(k, c->keys, v, c->values)
+				rw_add_option(rw, psprintf("gp_tag.%s = %s",
+										   quote_identifier((char *) lfirst(k)),
+										   quote_literal_cstr((char *) lfirst(v))));
+		}
+		else if (kind == GP_SUBJ_RELATION && rw->object == 'f')
+		{
+			forboth(k, c->keys, v, c->values)
+				rw_add_fdw_option(rw, psprintf("gp_tag.%s", (char *) lfirst(k)),
+								  (char *) lfirst(v));
+		}
+		else if (kind == GP_SUBJ_DATABASE)
+		{
+			StringInfoData opts;
+
+			initStringInfo(&opts);
+			forboth(k, c->keys, v, c->values)
+				tag_db_option(&opts, (char *) lfirst(k), (char *) lfirst(v));
+			appendStringInfoChar(&opts, ' ');
+			replacement = opts.data;
+		}
+		else if (kind == GP_SUBJ_TABLESPACE && with_close >= 0)
+			rw_edit(rw, ts->toks[with_close].off, ts->toks[with_close].off,
+					psprintf(", %s", tag_reloptions(c)));
+		else if (kind == GP_SUBJ_TABLESPACE)
+			replacement = psprintf(" WITH (%s) ", tag_reloptions(c));
+		else
+		{
+			/* a schema, a role or a sequence */
+			forboth(k, c->keys, v, c->values)
+				rw_add_carrier(rw, "gp_tag", (char *) lfirst(k), (char *) lfirst(v),
+							   start);
+		}
+
+		rw_edit(rw, start, end, replacement);
 	}
 }
 
@@ -1681,12 +1966,14 @@ rw_tag_clauses(GpRewrite *rw, GpSubjKind kind, const char *name, int from)
  * The policy is recorded on the table; what reads it is ORCA's relcache
  * translator, which asks every relation what it is distributed by, and the
  * dispatch of M2.  On one node every table is on the one node, so nothing
- * changes for the statement itself.  On CREATE TABLE, CREATE TABLE AS and
- * CREATE MATERIALIZED VIEW the policy is an option of the statement,
- * gp.distributed_by = '(a,b)', which gp_sql's ProcessUtility hook takes out
- * and records once the table exists, so that the statement stays one (see
- * rw_tag_clauses for why that matters); elsewhere -- a foreign table -- it is
- * a call to gp_sql.set_distribution after the statement.
+ * changes for the statement itself.  It is an option of the statement,
+ * which gp_sql's ProcessUtility hook takes out and records once the table
+ * exists, so that the statement stays one (see rw_tag_clauses): on CREATE
+ * TABLE, CREATE TABLE AS and CREATE MATERIALIZED VIEW gp.distributed_by =
+ * '(a,b)' in the WITH list, and on CREATE FOREIGN TABLE "gp.distributed_by"
+ * '(a,b)' in the OPTIONS list.  Anywhere else -- ALTER TABLE ... SET
+ * DISTRIBUTED BY, which Cloudberry refuses in single-node mode -- it is left
+ * for PostgreSQL's grammar to refuse.
  *
  * THE COLUMN LIST KEEPS ITS PARENTHESES, and that is not decoration.  Written
  * bare, a one-column list is indistinguishable from the word that names a
@@ -1702,24 +1989,24 @@ rw_tag_clauses(GpRewrite *rw, GpSubjKind kind, const char *name, int from)
  * is quoted here is the true column name.
  */
 static void
-rw_distribution(GpRewrite *rw, const char *name, const char *policy, int at)
+rw_distribution(GpRewrite *rw, const char *policy)
 {
-	if (tok_is(rw->ts, rw->first, "create") && rw->object != 0 &&
-		strchr("tm", rw->object) != NULL)
+	if (rw->object == 'f')
+		rw_add_fdw_option(rw, "gp.distributed_by", policy);
+	else
 		rw_add_option(rw, psprintf("gp.distributed_by = %s",
 								   quote_literal_cstr(policy)));
-	else
-		rw_add_call(rw, psprintf("gp_sql.set_distribution(%s::regclass, %s)",
-								 quote_literal_cstr(name),
-								 quote_literal_cstr(policy)),
-					at);
 }
 
 static void
-rw_distributed(GpRewrite *rw, const char *name, int from)
+rw_distributed(GpRewrite *rw, int from)
 {
 	const GpTokens *ts = rw->ts;
 	int			depth = 0;
+
+	if (!tok_is(ts, rw->first, "create") || rw->object == 0 ||
+		strchr("tmf", rw->object) == NULL)
+		return;
 
 	for (int i = from; i < rw->last; i++)
 	{
@@ -1738,9 +2025,7 @@ rw_distributed(GpRewrite *rw, const char *name, int from)
 
 		if (tok_is(ts, i + 1, "randomly") || tok_is(ts, i + 1, "replicated"))
 		{
-			rw_distribution(rw, name,
-							tok_is(ts, i + 1, "randomly") ? "random" : "replicated",
-							ts->toks[i].off);
+			rw_distribution(rw, tok_is(ts, i + 1, "randomly") ? "random" : "replicated");
 			rw_edit(rw, ts->toks[i].off,
 					(i + 2 < ts->ntoks) ? ts->toks[i + 2].off : ts->srclen, " ");
 			i++;
@@ -1766,7 +2051,7 @@ rw_distributed(GpRewrite *rw, const char *name, int from)
 			}
 			appendStringInfoChar(&cols, ')');
 
-			rw_distribution(rw, name, cols.data, ts->toks[i].off);
+			rw_distribution(rw, cols.data);
 			rw_edit(rw, ts->toks[i].off,
 					(after < ts->ntoks) ? ts->toks[after].off : ts->srclen, " ");
 			i = after - 1;
@@ -1917,16 +2202,24 @@ rw_matview_options(GpRewrite *rw)
 
 /*
  * ALTER USER u PROFILE p / NOPROFILE / ACCOUNT LOCK / ACCOUNT UNLOCK
+ *	 -> ALTER USER u, carrying gp.profile = 'p' / gp.profile = DEFAULT /
+ *		gp.account = 'lock' / gp.account = 'unlock' (GpAttachCarriers)
  *
- * Only on its own: these are role options in Cloudberry's grammar, and one
- * mixed in with PostgreSQL's own options has no single statement to become.
+ * These are role options in Cloudberry's grammar, which PostgreSQL's does
+ * not have, so the statement is PostgreSQL's ALTER USER with nothing left in
+ * it but what it carries: gp_security's ProcessUtility hook takes that out and
+ * does it, and the statement answers ALTER ROLE, as Cloudberry's does.
+ * NOPROFILE is the port's, for taking a profile away.
+ *
+ * Only on its own, as before: one of these mixed with PostgreSQL's own role
+ * options is not taken here.
  */
 static bool
 rw_role_profile(GpRewrite *rw)
 {
 	const GpTokens *ts = rw->ts;
 	int			i = rw->first;
-	char	   *name;
+	int			at;
 
 	if (!tok_is(ts, i, "alter") ||
 		!(tok_is(ts, i + 1, "user") || tok_is(ts, i + 1, "role")))
@@ -1934,27 +2227,22 @@ rw_role_profile(GpRewrite *rw)
 	if (!tok_is_name(ts, i + 2))
 		return false;
 
-	name = tok_name(ts, i + 2);
 	i += 3;
-
-	rw_whole(rw);
+	at = ts->toks[Min(i, ts->ntoks - 1)].off;
 
 	if (tok_is(ts, i, "profile") && tok_is_name(ts, i + 1) && i + 2 == rw->last)
-		appendStringInfo(&rw->body, "SELECT gp_security.assign_profile(%s, %s)",
-						 quote_literal_cstr(name),
-						 quote_literal_cstr(tok_name(ts, i + 1)));
+		rw_add_carrier(rw, "gp", "profile", tok_name(ts, i + 1), at);
 	else if (tok_is(ts, i, "noprofile") && i + 1 == rw->last)
-		appendStringInfo(&rw->body, "SELECT gp_security.assign_profile(%s, NULL)",
-						 quote_literal_cstr(name));
+		rw_add_carrier(rw, "gp", "profile", NULL, at);
 	else if (tok_is(ts, i, "account") && tok_is(ts, i + 1, "lock") && i + 2 == rw->last)
-		appendStringInfo(&rw->body, "SELECT gp_security.lock_role(%s)",
-						 quote_literal_cstr(name));
+		rw_add_carrier(rw, "gp", "account", "lock", at);
 	else if (tok_is(ts, i, "account") && tok_is(ts, i + 1, "unlock") && i + 2 == rw->last)
-		appendStringInfo(&rw->body, "SELECT gp_security.unlock_role(%s)",
-						 quote_literal_cstr(name));
+		rw_add_carrier(rw, "gp", "account", "unlock", at);
 	else
 		return false;
 
+	/* The option goes; ALTER USER u stays, and PostgreSQL takes it as is. */
+	rw_edit(rw, at, (rw->last < ts->ntoks) ? ts->toks[rw->last].off : ts->srclen, "");
 	return true;
 }
 
@@ -1964,145 +2252,70 @@ rw_role_profile(GpRewrite *rw)
 
 /*
  * The head of CREATE [OR REPLACE] FUNCTION|PROCEDURE, or of ALTER FUNCTION|
- * PROCEDURE: the object type, the signature written the way SECURITY LABEL
- * takes it, and where the option list begins.
- *
- * The signature goes to SECURITY LABEL as text rather than through
- * regprocedure, and that is deliberate.  PostgreSQL resolves a function
- * signature for SECURITY LABEL by the same rules as for ALTER FUNCTION, so
- * "f(a int, OUT b int)" finds f; regprocedure parses a bare type list and
- * rejects both the parameter names and the OUT.  Letting PostgreSQL parse
- * what the user wrote is the only way to accept everything it would.
+ * PROCEDURE: returns where the option list can begin, which is after the
+ * name and the parenthesised parameters, or -1 when this is neither.
  */
-static bool
-rw_function_head(GpRewrite *rw, const char **objtype, StringInfo sig,
-				 int *sig_end, bool *altering)
+static int
+rw_function_head(GpRewrite *rw)
 {
 	const GpTokens *ts = rw->ts;
 	int			i = rw->first;
-	int			sig_first;
+	int			name_first;
 
 	if (tok_is(ts, i, "create"))
 	{
-		*altering = false;
 		i++;
 		if (tok_is(ts, i, "or") && tok_is(ts, i + 1, "replace"))
 			i += 2;
 	}
 	else if (tok_is(ts, i, "alter"))
-	{
-		*altering = true;
 		i++;
-	}
 	else
-		return false;
+		return -1;
 
-	if (tok_is(ts, i, "function"))
-		*objtype = "FUNCTION";
-	else if (tok_is(ts, i, "procedure"))
-		*objtype = "PROCEDURE";
-	else
-		return false;
+	if (!tok_is(ts, i, "function") && !tok_is(ts, i, "procedure"))
+		return -1;
 	i++;
 
-	sig_first = i;
+	name_first = i;
 	i = skip_qualified_name(ts, i);
-	if (i == sig_first)
-		return false;
+	if (i == name_first)
+		return -1;
 
-	initStringInfo(sig);
-	appendStringInfoString(sig, rw_text(ts, sig_first, i));
-
-	/*
-	 * The parameter list, rewritten into the form SECURITY LABEL will take.
-	 * A default belongs to CREATE FUNCTION and not to a signature, so
-	 * "a int DEFAULT 5" has to become "a int"; everything else is copied,
-	 * including OUT parameters, which PostgreSQL ignores when it looks a
-	 * function up.  ALTER FUNCTION is already written this way and passes
-	 * through unchanged.
-	 */
+	/* ALTER FUNCTION f EXECUTE ON ANY: PostgreSQL allows a bare name. */
 	if (tok_is_char(ts, i, '('))
-	{
-		int			close = skip_parens(ts, i);
-		int			inner = 0;
-		bool		skipping = false;
-		bool		first_in_group = true;
+		i = skip_parens(ts, i);
 
-		appendStringInfoChar(sig, '(');
-		for (int j = i + 1; j < close - 1; j++)
-		{
-			if (tok_is_char(ts, j, '('))
-				inner++;
-			else if (tok_is_char(ts, j, ')'))
-				inner--;
-
-			if (inner == 0 && tok_is_char(ts, j, ','))
-			{
-				appendStringInfoString(sig, ", ");
-				skipping = false;
-				first_in_group = true;
-				continue;
-			}
-
-			if (inner == 0 &&
-				(tok_is(ts, j, "default") || tok_is_char(ts, j, '=')))
-				skipping = true;
-
-			if (skipping)
-				continue;
-
-			if (!first_in_group && !tok_is_char(ts, j, ',') &&
-				!tok_is_char(ts, j, '(') && !tok_is_char(ts, j, ')') &&
-				!tok_is_char(ts, j, '[') && !tok_is_char(ts, j, ']'))
-				appendStringInfoChar(sig, ' ');
-			appendStringInfoString(sig, rw_text(ts, j, j + 1));
-			first_in_group = false;
-		}
-		appendStringInfoChar(sig, ')');
-		*sig_end = close;
-	}
-	else
-	{
-		/* ALTER FUNCTION f EXECUTE ON ANY: PostgreSQL allows a bare name. */
-		*sig_end = i;
-	}
-
-	return true;
+	return i;
 }
 
 /*
  * EXECUTE ON ANY | COORDINATOR | MASTER | INITPLAN | ALL SEGMENTS, and the
  * data-access attributes NO SQL | CONTAINS SQL | READS SQL DATA | MODIFIES
  * SQL DATA, on CREATE [OR REPLACE] FUNCTION and PROCEDURE and on ALTER
- * FUNCTION and PROCEDURE.
+ * FUNCTION and PROCEDURE, each becoming an option of the statement, in place:
  *
- *	 CREATE FUNCTION f(int) RETURNS int ... EXECUTE ON ALL SEGMENTS
- *	   -> CREATE FUNCTION f(int) RETURNS int ...
- *	      ; SECURITY LABEL FOR gp ON FUNCTION f(int) IS 'execute_on=all_segments'
+ *	 CREATE FUNCTION f(int) RETURNS SETOF int ... EXECUTE ON ALL SEGMENTS
+ *	   -> CREATE FUNCTION f(int) RETURNS SETOF int ...
+ *			SET gp.execute_on = 'all_segments'
+ *	 ALTER FUNCTION f(int) READS SQL DATA
+ *	   -> ALTER FUNCTION f(int) SET gp.data_access = 'reads'
  *
- * The execute_on label is what func_exec_location() reads, and ORCA asks it of
- * every function it meets.
- *
- * THE TWO FAMILIES ARE READ TOGETHER, in one pass, and write one label.  They
- * have to be: SECURITY LABEL *replaces* a provider's label rather than merging
- * into it, so two statements would leave only the second key.  Writing both in
- * one label is also why the keys come out in a fixed order rather than the
- * order they were written -- two spellings of the same function then produce
- * the same label.
+ * SET is the one option a function takes whose name is anybody's, and
+ * gp_sql's ProcessUtility hook takes these out before PostgreSQL would store
+ * them as settings, and writes them as the keys of the function's "gp" label
+ * -- execute_on, which func_exec_location() reads and ORCA asks of every
+ * function it meets, and data_access -- once the function exists.  They were
+ * a SECURITY LABEL after the statement, which made CREATE FUNCTION two
+ * statements, and which, replacing the whole label, took the other key away
+ * when an ALTER set one.
  *
  * WHAT DATA ACCESS IS FOR.  Nothing reads it, and that is not a gap in the
  * port: Cloudberry writes pg_proc.prodataaccess, dumps it, and reads it
  * nowhere outside the DDL path -- no planner, executor or dispatcher decision
- * turns on it.  Its whole observable behaviour is the three rules below, from
- * validate_sql_data_access() in Cloudberry's functioncmds.c, and they are
- * checked here rather than in the label provider because Cloudberry rejects
- * the statement before the function is created, and a check on the SECURITY
- * LABEL that follows would reject it after.
- *
- * The default is not written down.  Cloudberry fills in CONTAINS SQL for a
- * LANGUAGE SQL function and NO SQL for everything else at DDL time; here the
- * absence of the key means exactly that, so an ordinary function carries no
- * label at all.
+ * turns on it.  Its whole observable behaviour is Cloudberry's rules for it,
+ * which gp_sql checks against the function as the statement leaves it; so
+ * are EXECUTE ON's (see gp_sql's funcattr.c).
  */
 static bool
 rw_function_clauses(GpRewrite *rw)
@@ -2132,20 +2345,11 @@ rw_function_clauses(GpRewrite *rw)
 		{"reads", "sql", "data", "reads"},
 		{"modifies", "sql", "data", "modifies"},
 	};
-	const char *objtype;
-	StringInfoData sig;
-	int			sig_end;
-	bool		altering;
+	int			options_from = rw_function_head(rw);
 	int			depth = 0;
-	const char *exec_on = NULL;
-	const char *data_access = NULL;
-	bool		saw_immutable = false;
-	bool		saw_language_sql = false;
-	int			covered_from = -1;
-	int			covered_to = -1;
-	int			covered_tokens = 0;
+	bool		found = false;
 
-	if (!rw_function_head(rw, &objtype, &sig, &sig_end, &altering))
+	if (options_from < 0)
 		return false;
 
 	/*
@@ -2153,11 +2357,11 @@ rw_function_clauses(GpRewrite *rw)
 	 * other options, which is depth 0; a SQL-standard body is where real SQL
 	 * tokens start and nothing of Cloudberry's follows, so stop there.
 	 */
-	for (int j = sig_end; j < rw->last; j++)
+	for (int j = options_from; j < rw->last; j++)
 	{
 		int			after = -1;
-		const char *key_value = NULL;
-		bool		is_exec = false;
+		const char *setting = NULL;
+		const char *value = NULL;
 
 		if (tok_is_char(ts, j, '('))
 		{
@@ -2174,12 +2378,6 @@ rw_function_clauses(GpRewrite *rw)
 		if (tok_is(ts, j, "begin"))
 			break;
 
-		/* Remembered for the three validation rules below. */
-		if (tok_is(ts, j, "immutable"))
-			saw_immutable = true;
-		if (tok_is(ts, j, "language") && tok_is(ts, j + 1, "sql"))
-			saw_language_sql = true;
-
 		if (tok_is(ts, j, "execute") && tok_is(ts, j + 1, "on"))
 		{
 			for (size_t k = 0; k < lengthof(locations); k++)
@@ -2191,8 +2389,8 @@ rw_function_clauses(GpRewrite *rw)
 					continue;
 
 				after = j + 3 + (locations[k].second != NULL ? 1 : 0);
-				key_value = locations[k].value;
-				is_exec = true;
+				setting = "gp.execute_on";
+				value = locations[k].value;
 				break;
 			}
 		}
@@ -2207,76 +2405,22 @@ rw_function_clauses(GpRewrite *rw)
 					continue;
 
 				after = j + 2 + (accesses[k].w3 != NULL ? 1 : 0);
-				key_value = accesses[k].value;
+				setting = "gp.data_access";
+				value = accesses[k].value;
 				break;
 			}
 		}
 
-		if (key_value == NULL)
+		if (setting == NULL)
 			continue;
 
-		if (is_exec)
-			exec_on = key_value;
-		else
-			data_access = key_value;
-
-		rw_edit(rw, ts->toks[j].off,
-				(after < ts->ntoks) ? ts->toks[after].off : ts->srclen, " ");
-
-		if (covered_from < 0)
-			covered_from = j;
-		covered_to = after;
-		covered_tokens += after - j;
+		rw_edit(rw, ts->toks[j].off, tok_stop(ts, after - 1),
+				psprintf("SET %s = %s", setting, quote_literal_cstr(value)));
+		found = true;
 		j = after - 1;
 	}
 
-	if (exec_on == NULL && data_access == NULL)
-		return false;
-
-	/*
-	 * Cloudberry's three rules, from validate_sql_data_access().  They are
-	 * the whole of what the attribute does.
-	 */
-	if (data_access != NULL && saw_immutable &&
-		(strcmp(data_access, "reads") == 0 ||
-		 strcmp(data_access, "modifies") == 0))
-		ereport(ERROR,
-				(errcode(ERRCODE_SYNTAX_ERROR),
-				 errmsg("conflicting options"),
-				 errhint("IMMUTABLE conflicts with %s SQL DATA.",
-						 strcmp(data_access, "reads") == 0 ? "READS" : "MODIFIES")));
-
-	if (data_access != NULL && saw_language_sql &&
-		strcmp(data_access, "none") == 0)
-		ereport(ERROR,
-				(errcode(ERRCODE_SYNTAX_ERROR),
-				 errmsg("conflicting options"),
-				 errhint("A SQL function cannot specify NO SQL.")));
-
-	appendStringInfo(&rw->after, "; SECURITY LABEL FOR gp ON %s %s IS '",
-					 objtype, sig.data);
-	if (exec_on != NULL)
-		appendStringInfo(&rw->after, "execute_on=%s", exec_on);
-	if (exec_on != NULL && data_access != NULL)
-		appendStringInfoChar(&rw->after, ',');
-	if (data_access != NULL)
-		appendStringInfo(&rw->after, "data_access=%s", data_access);
-	appendStringInfoChar(&rw->after, '\'');
-
-	/*
-	 * ALTER FUNCTION f(int) EXECUTE ON ANY is a whole statement of
-	 * Cloudberry's, not an action on one of PostgreSQL's: take the clause out
-	 * and there is no action left, which ALTER FUNCTION will not accept.  So
-	 * when the clauses are the entire action list, the label replaces the
-	 * statement rather than following it.  Written beside another action --
-	 * ALTER FUNCTION f(int) STRICT EXECUTE ON ANY -- the ALTER stays and does
-	 * the rest.  This is the same shape as ALTER TABLE t TAG (...).
-	 */
-	if (altering && covered_from == sig_end && covered_to == rw->last &&
-		covered_tokens == rw->last - sig_end)
-		rw_whole(rw);
-
-	return true;
+	return found;
 }
 
 /* ------------------------------------------------------------------------- */
@@ -2895,47 +3039,79 @@ rw_statement(GpRewrite *rw)
 	char	   *name = NULL;
 	int			after_name = rw->first;
 
-	/* Statements that become something else entirely. */
+	/* Statements PostgreSQL has no counterpart of: a CALL. */
 	if (rw_create_tag(rw) || rw_alter_tag(rw) || rw_drop_tag(rw) ||
 		rw_profile(rw) || rw_drop_profile(rw) ||
-		rw_create_directory_table(rw) ||
-		rw_task(rw) || rw_drop_task(rw) ||
-		rw_role_profile(rw))
-	{
-		/* A statement of Cloudberry's own may still carry a TAG clause. */
+		rw_task(rw) || rw_drop_task(rw))
 		return;
-	}
+
+	/* ALTER USER ... PROFILE and the rest: ALTER USER, carrying it. */
+	if (rw_role_profile(rw))
+		return;
 
 	(void) rw_storage_and_dynamic(rw);
 	(void) rw_matview_options(rw);
 	(void) rw_function_clauses(rw);
 
-	kind = find_subject(rw->ts, rw->first, rw->last, &name, &after_name,
-						&rw->object);
+	if (rw_create_directory_table(rw, &name, &after_name))
+		kind = GP_SUBJ_RELATION;
+	else
+		kind = find_subject(rw->ts, rw->first, rw->last, &name, &after_name,
+							&rw->object);
 	if (kind != GP_SUBJ_NONE)
 	{
 		rw->subject_end = after_name;
 		rw_tag_clauses(rw, kind, name, after_name);
 		if (kind == GP_SUBJ_RELATION)
-			rw_distributed(rw, name, after_name);
-
-		/*
-		 * ALTER SCHEMA s TAG (...) is a whole statement of Cloudberry's, not a
-		 * clause on one of PostgreSQL's, so with the clause taken out there
-		 * is no ALTER left to run, only the calls.  (ALTER TABLE t TAG (...)
-		 * became ALTER TABLE t SET (...) in place, and is still an ALTER.)
-		 */
-		if (tok_is(rw->ts, rw->first, "alter") &&
-			rw->tag_first == after_name && rw->tag_last == rw->last)
-			rw_whole(rw);
+			rw_distributed(rw, after_name);
 	}
 
 	/* DECODE and CASE ... WHEN IS NOT DISTINCT FROM, wherever they are. */
 	if (!rw->whole)
 		rw_expressions(rw, true);
 
-	/* The options the clauses became, all into one WITH list. */
+	/* The options the clauses became, all into the statement's own list. */
 	rw_place_options(rw);
+	rw_place_fdw_options(rw);
+}
+
+/*
+ * What a statement carries, for its parse node (GpAttachCarriers): the
+ * DefElems, and where the statement starts in the user's text, which is how
+ * its RawStmt is found once the grammar has built one.
+ */
+typedef struct GpCarried
+{
+	int			start;
+	List	   *defs;
+} GpCarried;
+
+/*
+ * The carriers of a statement, shown for gp_sql.desugar() as a comment after
+ * it, since the text handed to the grammar has no place for them either.  It
+ * is written for a person to read and never parsed; a value that holds the
+ * end of a comment is shown with it broken.
+ */
+static void
+out_show_carriers(GpOut *o, List *defs, int at)
+{
+	StringInfoData buf;
+	ListCell   *lc;
+	char	   *p;
+
+	initStringInfo(&buf);
+	foreach(lc, defs)
+	{
+		DefElem    *def = lfirst_node(DefElem, lc);
+
+		appendStringInfo(&buf, "%s%s.%s = %s", buf.len > 0 ? ", " : "",
+						 def->defnamespace, def->defname,
+						 def->arg != NULL ? quote_literal_cstr(strVal(def->arg)) : "DEFAULT");
+	}
+	while ((p = strstr(buf.data, "*/")) != NULL)
+		p[1] = '|';
+
+	out_text(o, psprintf(" /* and on its parse node: %s */", buf.data), at);
 }
 
 /*
@@ -2944,10 +3120,13 @@ rw_statement(GpRewrite *rw)
  * With expr_only, `str` is not a statement but what PL/pgSQL hands the
  * parser for an expression or an assignment, where only an expression of
  * Cloudberry's can be.  With map, *map says where each byte of the result
- * came from.
+ * came from.  With carried, *carried gets what each statement carries to its
+ * parse node, a GpCarried each; with show, gp_sql.desugar()'s, it is shown in
+ * the text instead.
  */
 static char *
-desugar(const char *str, bool expr_only, GpPosMap **map)
+desugar(const char *str, bool expr_only, GpPosMap **map, List **carried,
+		bool show)
 {
 	GpTokens   *ts;
 	GpOut		out;
@@ -2971,6 +3150,7 @@ desugar(const char *str, bool expr_only, GpPosMap **map)
 	{
 		GpRewrite	rw;
 		bool		at_end = (i == ts->ntoks);
+		int			start;
 
 		if (!at_end)
 		{
@@ -2999,53 +3179,30 @@ desugar(const char *str, bool expr_only, GpPosMap **map)
 			rw_statement(&rw);
 		rw_finish_body(&rw);
 
+		/*
+		 * The statement, one for one.  What the rewrite writes in place of a
+		 * whole statement -- a CALL -- stands for the statement's start.
+		 */
+		start = ts->toks[first].off;
+		if (rw.whole)
+			out_text(&out, rw.body.data, start);
+		else
+			out_append(&out, &rw.text);
+
+		if (rw.carriers != NIL)
 		{
-			/*
-			 * What the rewrite writes in place of the statement, and the
-			 * statements it adds after it, stand for the statement's start,
-			 * so that what pg_stat_statements records of an added statement
-			 * is the statement it came from; each call in one stands for the
-			 * clause of the user's it was made from.
-			 */
-			int			start = ts->toks[first].off;
-			const char *body = rw.whole ? rw.body.data : rw.text.buf.data;
-			bool		emitted = false;	/* written anything of it yet? */
-
-			for (int k = 0; body[k] != '\0' && !emitted; k++)
-				emitted = (body[k] != ' ' && body[k] != '\t' &&
-						   body[k] != '\n' && body[k] != '\r');
-			if (rw.whole)
-				out_text(&out, rw.body.data, start);
-			else
-				out_append(&out, &rw.text);
-
-			/* The calls, in one SELECT: the statement, if it is nothing else. */
-			if (rw.calls != NIL)
+			if (show)
+				out_show_carriers(&out, rw.carriers, start);
+			if (carried != NULL)
 			{
-				ListCell   *lc;
-				ListCell   *lc2;
+				GpCarried  *c = palloc(sizeof(GpCarried));
 
-				out_text(&out, emitted ? "; SELECT " : "SELECT ", start);
-				forboth(lc, rw.calls, lc2, rw.call_at)
-				{
-					if (lc != list_head(rw.calls))
-						out_text(&out, ", ", start);
-					out_text(&out, (const char *) lfirst(lc), lfirst_int(lc2));
-				}
-				emitted = true;
-			}
-
-			if (rw.after.len > 0)
-			{
-				const char *a = rw.after.data;
-
-				/* "; SECURITY LABEL ..." after nothing is just that. */
-				if (!emitted && a[0] == ';')
-					a += 2;
-				out_text(&out, a, start);
+				c->start = start;
+				c->defs = rw.carriers;
+				*carried = lappend(*carried, c);
 			}
 		}
-		changed |= rw.changed || rw.after.len > 0 || rw.calls != NIL;
+		changed |= rw.changed;
 
 		/* The separator, and whatever trails the last statement. */
 		if (!at_end)
@@ -3080,13 +3237,115 @@ desugar(const char *str, bool expr_only, GpPosMap **map)
 char *
 GpDesugar(const char *str)
 {
-	return desugar(str, false, NULL);
+	return desugar(str, false, NULL, NULL, true);
 }
 
 char *
-GpDesugarMapped(const char *str, bool expr_only, GpPosMap **map)
+GpDesugarMapped(const char *str, bool expr_only, GpPosMap **map, List **carried)
 {
-	return desugar(str, expr_only, map);
+	return desugar(str, expr_only, map, carried, false);
+}
+
+/*
+ * GpAttachCarriers
+ *		Put on each statement's parse node what its rewrite carried to it.
+ *
+ * A clause PostgreSQL's grammar has no place for on its statement -- TAG on
+ * CREATE SCHEMA, CREATE USER and CREATE SEQUENCE, TAG and PROFILE on ALTER
+ * USER -- is taken out of the text, and the DefElems it became are appended
+ * here to the list the statement's node keeps its options in, once the
+ * grammar has built the node: the statement stays one, and the modules'
+ * ProcessUtility hooks take the DefElems out again before PostgreSQL reads
+ * that list.  They are nodes of a kind every copy, comparison and
+ * serialization of a parse tree handles, so a plan that is cached, or a tree
+ * that is copied because it is read-only, keeps them.
+ *
+ * A statement is found by where it starts in the user's text, which the
+ * RawStmt the grammar built for it spans once the positions are the user's.
+ * A CREATE SCHEMA keeps its options nowhere, having none, so what it carries
+ * goes among its elements, which are the only list it has.
+ */
+void
+GpAttachCarriers(List *parsetree, List *carried)
+{
+	ListCell   *lc;
+
+	foreach(lc, carried)
+	{
+		GpCarried  *c = (GpCarried *) lfirst(lc);
+		RawStmt    *target = NULL;
+		ListCell   *lc2;
+		ListCell   *lc3;
+
+		foreach(lc2, parsetree)
+		{
+			RawStmt    *rs = lfirst_node(RawStmt, lc2);
+
+			if (rs->stmt_location <= c->start &&
+				(rs->stmt_len == 0 || c->start < rs->stmt_location + rs->stmt_len))
+			{
+				target = rs;
+				break;
+			}
+		}
+		if (target == NULL)
+			elog(ERROR, "O26: the statement at %d was not found in its parse tree",
+				 c->start);
+
+		/*
+		 * A profile is gp_security's to put on a role.  Without it nothing
+		 * would take the option out again, and ALTER ROLE would refuse it as
+		 * an option it does not know, which says nothing useful.
+		 */
+		foreach(lc3, c->defs)
+		{
+			DefElem    *def = lfirst_node(DefElem, lc3);
+
+			if (strcmp(def->defnamespace, "gp") == 0 &&
+				*find_rendezvous_variable(CB_SECURITY_RENDEZVOUS) == NULL)
+				ereport(ERROR,
+						(errcode(ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE),
+						 errmsg("%s needs \"gp_security\"",
+								strcmp(def->defname, "profile") == 0 ?
+								"a role's profile" : "locking an account"),
+						 errhint("Add \"gp_security\" to \"shared_preload_libraries\".")));
+		}
+
+		switch (nodeTag(target->stmt))
+		{
+			case T_CreateSchemaStmt:
+				{
+					CreateSchemaStmt *s = (CreateSchemaStmt *) target->stmt;
+
+					s->schemaElts = list_concat(s->schemaElts, c->defs);
+				}
+				break;
+			case T_CreateRoleStmt:
+				{
+					CreateRoleStmt *s = (CreateRoleStmt *) target->stmt;
+
+					s->options = list_concat(s->options, c->defs);
+				}
+				break;
+			case T_AlterRoleStmt:
+				{
+					AlterRoleStmt *s = (AlterRoleStmt *) target->stmt;
+
+					s->options = list_concat(s->options, c->defs);
+				}
+				break;
+			case T_CreateSeqStmt:
+				{
+					CreateSeqStmt *s = (CreateSeqStmt *) target->stmt;
+
+					s->options = list_concat(s->options, c->defs);
+				}
+				break;
+			default:
+				elog(ERROR, "O26: a statement of node type %d cannot carry what the rewrite put on it",
+					 (int) nodeTag(target->stmt));
+		}
+	}
 }
 
 /* ------------------------------------------------------------------------- */
@@ -3134,6 +3393,7 @@ gp_raw_parser(const char *str, RawParseMode mode)
 {
 	char	   *rewritten = NULL;
 	GpPosMap   *map = NULL;
+	List	   *carried = NIL;
 	GpParseErrorArg errarg;
 	ErrorContextCallback errcallback;
 	List	   *result;
@@ -3145,9 +3405,9 @@ gp_raw_parser(const char *str, RawParseMode mode)
 	 * a type name holds nothing.
 	 */
 	if (mode == RAW_PARSE_DEFAULT)
-		rewritten = GpDesugarMapped(str, false, &map);
+		rewritten = GpDesugarMapped(str, false, &map, &carried);
 	else if (mode != RAW_PARSE_TYPE_NAME)
-		rewritten = GpDesugarMapped(str, true, &map);
+		rewritten = GpDesugarMapped(str, true, &map, NULL);
 
 	if (rewritten == NULL)
 	{
@@ -3174,6 +3434,9 @@ gp_raw_parser(const char *str, RawParseMode mode)
 	/* And where parse analysis will report its errors, likewise. */
 	GpRemapParseLocations(result, map);
 
+	/* What has no place in the text goes on the nodes, now in the user's. */
+	GpAttachCarriers(result, carried);
+
 	return result;
 }
 
@@ -3192,7 +3455,9 @@ PG_FUNCTION_INFO_V1(gp_sql_desugar);
  * What the hook would hand to PostgreSQL's parser, or the statement itself
  * when there is nothing of Cloudberry's in it.  It is here so that the tests
  * can ask what a rewrite produced rather than only whether it worked, and so
- * that a person debugging one can see it.
+ * that a person debugging one can see it.  What a statement carries to its
+ * parse node (GpAttachCarriers) is shown in a comment after it, since the
+ * text has no place for it.
  */
 Datum
 gp_sql_desugar(PG_FUNCTION_ARGS)

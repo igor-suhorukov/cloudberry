@@ -48,9 +48,18 @@ typedef struct GpPosMap GpPosMap;
  * GpDesugar, and where each byte of the result came from.  With expr_only,
  * str is what PL/pgSQL hands the parser for an expression or an assignment,
  * not a statement, and only DECODE and CASE ... WHEN IS NOT DISTINCT FROM
- * are looked for.
+ * are looked for.  When carried is not NULL, it gets what each statement
+ * carries to its parse node, for GpAttachCarriers.
  */
-extern char *GpDesugarMapped(const char *str, bool expr_only, GpPosMap **map);
+extern char *GpDesugarMapped(const char *str, bool expr_only, GpPosMap **map,
+							 List **carried);
+
+/*
+ * Put on each statement's parse node the clauses its rewrite had no place for
+ * in the text: DefElems in the namespace of the module that takes them out
+ * again.  The tree's positions must already be the user's.
+ */
+extern void GpAttachCarriers(List *parsetree, List *carried);
 
 /* The offset in the user's text that an offset in the rewrite stands for. */
 extern int	GpPosMapSource(const GpPosMap *map, int offset);

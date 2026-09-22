@@ -57,45 +57,52 @@ COMMENT ON FUNCTION gp_task.validate_schedule(text) IS
 	'raise unless this is a schedule the task scheduler can read';
 
 /*
- * CREATE TASK, ALTER TASK and DROP TASK become these.  Cloudberry's grammar
- * keeps working through O26, whose productions emit calls like them.
+ * CREATE TASK, ALTER TASK and DROP TASK become these: CALL gp_task.create_task
+ * and the rest, which O26's rewrite of Cloudberry's statements writes, and
+ * which answer as a DDL statement does, with a command tag and no row.  They
+ * are procedures for that reason; a job's id is in gp_task.job.
+ *
+ * Cloudberry's messages where it gives one: IF NOT EXISTS of a task that is
+ * there, and IF EXISTS of one that is not, each say so and do nothing.
  */
-CREATE FUNCTION gp_task.create_task(jobname text,
-									schedule text,
-									command text,
-									database text DEFAULT pg_catalog.current_database(),
-									/* a keyword, not a function, so it takes no schema */
-									username text DEFAULT CURRENT_USER)
-RETURNS bigint
+CREATE PROCEDURE gp_task.create_task(jobname text,
+									 schedule text,
+									 command text,
+									 database text DEFAULT pg_catalog.current_database(),
+									 /* a keyword, not a function, so it takes no schema */
+									 username text DEFAULT CURRENT_USER,
+									 if_not_exists boolean DEFAULT false)
 LANGUAGE plpgsql
 AS $$
-DECLARE
-	id bigint;
 BEGIN
 	PERFORM gp_task.validate_schedule(schedule);
 
-	INSERT INTO gp_task.job (jobname, schedule, command, database, username)
-		 VALUES (jobname, schedule, command, database, username)
-	  RETURNING jobid INTO id;
+	IF if_not_exists AND EXISTS (SELECT 1 FROM gp_task.job j
+								  WHERE j.jobname = create_task.jobname
+									AND j.username = create_task.username) THEN
+		RAISE NOTICE 'task "%" already exists, skipping', jobname;
+		RETURN;
+	END IF;
 
-	RETURN id;
+	INSERT INTO gp_task.job (jobname, schedule, command, database, username)
+		 VALUES (jobname, schedule, command, database, username);
 END;
 $$;
 
-COMMENT ON FUNCTION gp_task.create_task(text, text, text, text, text) IS
+COMMENT ON PROCEDURE gp_task.create_task(text, text, text, text, text, boolean) IS
 	'schedule a command; what Cloudberry writes as CREATE TASK';
 
 /*
  * Every argument but the name may be left out, and what is left out is left
  * alone -- which is what ALTER TASK does with the clauses it is not given.
  */
-CREATE FUNCTION gp_task.alter_task(jobname text,
-								   schedule text DEFAULT NULL,
-								   command text DEFAULT NULL,
-								   database text DEFAULT NULL,
-								   username text DEFAULT NULL,
-								   active boolean DEFAULT NULL)
-RETURNS void
+CREATE PROCEDURE gp_task.alter_task(jobname text,
+									schedule text DEFAULT NULL,
+									command text DEFAULT NULL,
+									database text DEFAULT NULL,
+									username text DEFAULT NULL,
+									active boolean DEFAULT NULL,
+									missing_ok boolean DEFAULT false)
 LANGUAGE plpgsql
 AS $$
 DECLARE
@@ -115,40 +122,53 @@ BEGIN
 	RETURNING j.jobid INTO found_id;
 
 	IF found_id IS NULL THEN
-		RAISE EXCEPTION 'task "%" does not exist', jobname
-			USING ERRCODE = 'undefined_object';
-	END IF;
-END;
-$$;
-
-COMMENT ON FUNCTION gp_task.alter_task(text, text, text, text, text, boolean) IS
-	'change a scheduled command; what Cloudberry writes as ALTER TASK';
-
-CREATE FUNCTION gp_task.drop_task(jobname text, missing_ok boolean DEFAULT false)
-RETURNS void
-LANGUAGE plpgsql
-AS $$
-DECLARE
-	found_id bigint;
-BEGIN
-	DELETE FROM gp_task.job j
-		  WHERE j.jobname = drop_task.jobname
-	  RETURNING j.jobid INTO found_id;
-
-	IF found_id IS NULL THEN
 		IF missing_ok THEN
+			RAISE NOTICE 'task "%" does not exist, skipping', jobname;
 			RETURN;
 		END IF;
 		RAISE EXCEPTION 'task "%" does not exist', jobname
 			USING ERRCODE = 'undefined_object';
 	END IF;
-
-	DELETE FROM gp_task.run_history WHERE jobid = found_id;
 END;
 $$;
 
-COMMENT ON FUNCTION gp_task.drop_task(text, boolean) IS
-	'unschedule a command; what Cloudberry writes as DROP TASK';
+COMMENT ON PROCEDURE gp_task.alter_task(text, text, text, text, text, boolean, boolean) IS
+	'change a scheduled command; what Cloudberry writes as ALTER TASK';
+
+/*
+ * DROP TASK a, b is one statement, so it is one CALL, over all of them: one
+ * that is not there takes the others back with it, unless missing_ok says it
+ * may be missing -- which gp_matview asks for of every materialized view it
+ * sees dropped, so it says nothing.
+ */
+CREATE PROCEDURE gp_task.drop_task(jobnames text[], missing_ok boolean DEFAULT false)
+LANGUAGE plpgsql
+AS $$
+DECLARE
+	one text;
+	found_id bigint;
+BEGIN
+	FOREACH one IN ARRAY jobnames LOOP
+		found_id := NULL;
+		DELETE FROM gp_task.job j
+			  WHERE j.jobname = one
+		  RETURNING j.jobid INTO found_id;
+
+		IF found_id IS NULL THEN
+			IF missing_ok THEN
+				CONTINUE;
+			END IF;
+			RAISE EXCEPTION 'task "%" does not exist', one
+				USING ERRCODE = 'undefined_object';
+		END IF;
+
+		DELETE FROM gp_task.run_history WHERE jobid = found_id;
+	END LOOP;
+END;
+$$;
+
+COMMENT ON PROCEDURE gp_task.drop_task(text[], boolean) IS
+	'unschedule commands; what Cloudberry writes as DROP TASK';
 
 /*
  * The tables hold other people's commands, so they are not readable by
@@ -158,6 +178,6 @@ COMMENT ON FUNCTION gp_task.drop_task(text, boolean) IS
 REVOKE ALL ON gp_task.job FROM PUBLIC;
 REVOKE ALL ON gp_task.run_history FROM PUBLIC;
 REVOKE ALL ON FUNCTION gp_task.validate_schedule(text) FROM PUBLIC;
-REVOKE ALL ON FUNCTION gp_task.create_task(text, text, text, text, text) FROM PUBLIC;
-REVOKE ALL ON FUNCTION gp_task.alter_task(text, text, text, text, text, boolean) FROM PUBLIC;
-REVOKE ALL ON FUNCTION gp_task.drop_task(text, boolean) FROM PUBLIC;
+REVOKE ALL ON PROCEDURE gp_task.create_task(text, text, text, text, text, boolean) FROM PUBLIC;
+REVOKE ALL ON PROCEDURE gp_task.alter_task(text, text, text, text, text, boolean, boolean) FROM PUBLIC;
+REVOKE ALL ON PROCEDURE gp_task.drop_task(text[], boolean) FROM PUBLIC;

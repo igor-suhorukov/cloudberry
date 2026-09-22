@@ -421,7 +421,18 @@ dirtable_require_owner(Oid relid)
 Datum
 gp_sql_dirtable_claim(PG_FUNCTION_ARGS)
 {
-	Oid			relid = PG_GETARG_OID(0);
+	PG_RETURN_TEXT_P(cstring_to_text(GpDirTableClaim(PG_GETARG_OID(0))));
+}
+
+/*
+ * Make a table a directory table: its directory, and the "gp" label that says
+ * where it is.  What CREATE DIRECTORY TABLE does once the table it becomes
+ * exists (gp_sql.c), and what gp_sql.claim_directory_table() does for one
+ * made by hand.
+ */
+char *
+GpDirTableClaim(Oid relid)
+{
 	ObjectAddress addr;
 	char	   *location;
 	struct stat st;
@@ -473,7 +484,7 @@ gp_sql_dirtable_claim(PG_FUNCTION_ARGS)
 	ObjectAddressSet(addr, RelationRelationId, relid);
 	GpLabelSet(&addr, GP_LABEL_directory_location, location);
 
-	PG_RETURN_TEXT_P(cstring_to_text(location));
+	return location;
 }
 
 /*

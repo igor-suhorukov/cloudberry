@@ -73,8 +73,9 @@ feature rather than a stub:
   `min`, `max`, TRUNCATE — is recomputed, which is slower and just as correct.
   A dynamic table is `WITH (gp.dynamic_schedule = '…')` and refreshes itself
   through `gp_task`.
-- `gp_task` — the task scheduler.  `gp_task.create_task()` and friends over
-  tables in one database, run on their schedules by a background worker.
+- `gp_task` — the task scheduler.  `CALL gp_task.create_task(…)` and the
+  rest, over tables in one database, run on their schedules by a background
+  worker.
 - `gp_sql` — the Cloudberry-only SQL surface: tags, directory tables and
   storage servers, each built out of something PostgreSQL already has.
 - `gp_security` — password profiles, as shared labels on roles, with the live

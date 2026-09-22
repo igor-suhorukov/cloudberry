@@ -101,7 +101,7 @@ esac
 echo "1. a tag is defined, and then an object carries it"
 ###############################################################################
 isl "a tag can be defined" \
-   "SELECT gp_sql.create_tag('env');
+   "CALL gp_sql.create_tag('env');
     SELECT count(*) FROM gp_sql.tag WHERE tagname = 'env';" "1"
 is "and it belongs to whoever defined it" \
    "SELECT tagowner::regrole::text FROM gp_sql.tag WHERE tagname = 'env';" \
@@ -121,7 +121,7 @@ is "and it is listed the way Cloudberry lists it" \
 echo "2. a second tag joins the first rather than replacing it"
 ###############################################################################
 isl "two tags on one object" \
-   "SELECT gp_sql.create_tag('team');
+   "CALL gp_sql.create_tag('team');
     SELECT gp_sql.set_relation_tag('t'::regclass, 'team', 'data');
     SELECT gp_sql.relation_tags('t'::regclass)::text;" \
    '{"env": "prod", "team": "data"}'
@@ -140,7 +140,7 @@ isl "the label goes when the last tag does" \
 ###############################################################################
 echo "3. allowed values are what the definition says"
 ###############################################################################
-q "SELECT gp_sql.create_tag('tier', ARRAY['gold','silver']);" > /dev/null
+q "CALL gp_sql.create_tag('tier', ARRAY['gold','silver']);" > /dev/null
 isl "a value on the list is accepted" \
    "SELECT gp_sql.set_relation_tag('t'::regclass, 'tier', 'gold');
     SELECT gp_sql.relation_tags('t'::regclass)->>'tier';" "gold"
@@ -151,14 +151,14 @@ refused "and so is a tag nobody defined" \
         "SELECT gp_sql.set_relation_tag('t'::regclass, 'nope', 'x');" \
         "tag \"nope\" does not exist"
 isl "a value can be added to the list" \
-   "SELECT gp_sql.alter_tag('tier', add_values => ARRAY['bronze']);
+   "CALL gp_sql.alter_tag('tier', add_values => ARRAY['bronze']);
     SELECT gp_sql.set_relation_tag('t'::regclass, 'tier', 'bronze');
     SELECT gp_sql.relation_tags('t'::regclass)->>'tier';" "bronze"
 refused "a value in use cannot be dropped from the list" \
-        "SELECT gp_sql.alter_tag('tier', drop_values => ARRAY['bronze']);" \
+        "CALL gp_sql.alter_tag('tier', drop_values => ARRAY['bronze']);" \
         "which is in use"
 isl "unsetting the list lets any value through" \
-   "SELECT gp_sql.alter_tag('tier', unset_values => true);
+   "CALL gp_sql.alter_tag('tier', unset_values => true);
     SELECT gp_sql.set_relation_tag('t'::regclass, 'tier', 'anything');
     SELECT gp_sql.relation_tags('t'::regclass)->>'tier';" "anything"
 
@@ -167,24 +167,24 @@ isl "unsetting the list lets any value through" \
 # no more than 300, and none dropped that is not there.  Adding and dropping
 # were once a union and a difference, and answered where Cloudberry refuses.
 refused "a value already on the list is refused, not added again" \
-        "SELECT gp_sql.alter_tag('tier', add_values => ARRAY['gold']);
-         SELECT gp_sql.alter_tag('tier', add_values => ARRAY['gold']);" \
+        "CALL gp_sql.alter_tag('tier', add_values => ARRAY['gold']);
+         CALL gp_sql.alter_tag('tier', add_values => ARRAY['gold']);" \
         'allowed value "gold" has been added'
 refused "and so is one given twice" \
-        "SELECT gp_sql.create_tag('twice', ARRAY['a', 'a']);" \
+        "CALL gp_sql.create_tag('twice', ARRAY['a', 'a']);" \
         'allowed value "a" has been added'
 refused "or one of more than 256 bytes" \
-        "SELECT gp_sql.create_tag('long', ARRAY[repeat('x', 257)]);" \
+        "CALL gp_sql.create_tag('long', ARRAY[repeat('x', 257)]);" \
         "has exceeded max 256 length"
 refused "or a 301st" \
-        "SELECT gp_sql.create_tag('many', (SELECT array_agg(g::text) FROM generate_series(1, 301) g));" \
+        "CALL gp_sql.create_tag('many', '{$(seq -s, 1 301)}');" \
         "Allowed_values only allow 300 values."
 refused "and dropping one that is not there is refused" \
-        "SELECT gp_sql.alter_tag('tier', drop_values => ARRAY['platinum']);" \
+        "CALL gp_sql.alter_tag('tier', drop_values => ARRAY['platinum']);" \
         'allowed value "platinum" not found'
 isl "a value added goes after the ones there, as Cloudberry keeps them" \
-   "SELECT gp_sql.create_tag('order_kept', ARRAY['z', 'a']);
-    SELECT gp_sql.alter_tag('order_kept', add_values => ARRAY['m']);
+   "CALL gp_sql.create_tag('order_kept', ARRAY['z', 'a']);
+    CALL gp_sql.alter_tag('order_kept', add_values => ARRAY['m']);
     SELECT array_to_string(allowed_values, ',') FROM gp_sql.tag WHERE tagname = 'order_kept';" "z,a,m"
 
 ###############################################################################
@@ -282,17 +282,17 @@ isl "and dropping a role takes its shared label" \
 echo "9. a definition cannot be dropped or renamed out from under an object"
 ###############################################################################
 refused "DROP TAG is refused while something carries it" \
-        "SELECT gp_sql.drop_tag('tier');" "object(s) carry it"
+        "CALL gp_sql.drop_tag('{tier}');" "object(s) carry it"
 refused "and so is a rename" \
-        "SELECT gp_sql.rename_tag('tier', 'level');" "object(s) carry it"
+        "CALL gp_sql.rename_tag('tier', 'level');" "object(s) carry it"
 isl "once nothing does, it can be dropped" \
    "SELECT gp_sql.unset_relation_tag('t'::regclass, 'tier');
-    SELECT gp_sql.drop_tag('tier');
+    CALL gp_sql.drop_tag('{tier}');
     SELECT count(*) FROM gp_sql.tag WHERE tagname = 'tier';" "0"
 refused "dropping one that was never there says so" \
-        "SELECT gp_sql.drop_tag('ghost');" "tag \"ghost\" does not exist"
+        "CALL gp_sql.drop_tag('{ghost}');" "tag \"ghost\" does not exist"
 isl "unless it is asked not to" \
-   "SELECT gp_sql.drop_tag('ghost', missing_ok => true);
+   "CALL gp_sql.drop_tag('{ghost}', missing_ok => true);
     SELECT 'survived';" "survived"
 
 ###############################################################################

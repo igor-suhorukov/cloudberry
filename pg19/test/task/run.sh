@@ -148,40 +148,41 @@ refused "words that are not a schedule" "SELECT gp_task.validate_schedule('every
 echo "3. tasks are written, changed and removed"
 ###############################################################################
 is "creating one gives it an id" \
-   "SELECT gp_task.create_task('t1', '@daily', 'SELECT 1') > 0;" "t"
+   "CALL gp_task.create_task('t1', '@daily', 'SELECT 1');
+    SELECT jobid > 0 FROM gp_task.job WHERE jobname = 't1';" "t"
 is "and a row that says what it is" \
    "SELECT schedule || ' | ' || command || ' | ' || active FROM gp_task.job WHERE jobname = 't1';" \
    "@daily | SELECT 1 | true"
 is "it defaults to this database and this user" \
    "SELECT database = current_database() AND username = current_user FROM gp_task.job WHERE jobname = 't1';" "t"
 refused "a task whose schedule cannot be read is refused when it is written" \
-        "SELECT gp_task.create_task('bad', 'not a schedule', 'SELECT 1');" "is not a schedule"
+        "CALL gp_task.create_task('bad', 'not a schedule', 'SELECT 1');" "is not a schedule"
 is "and leaves nothing behind" \
    "SELECT count(*) FROM gp_task.job WHERE jobname = 'bad';" "0"
 
 accepted "altering one changes what it is given" \
-         "SELECT gp_task.alter_task('t1', schedule => '@hourly');"
+         "CALL gp_task.alter_task('t1', schedule => '@hourly');"
 is "and leaves what it is not" \
    "SELECT schedule || ' | ' || command FROM gp_task.job WHERE jobname = 't1';" \
    "@hourly | SELECT 1"
 accepted "switching one off is an alteration like any other" \
-         "SELECT gp_task.alter_task('t1', active => false);"
+         "CALL gp_task.alter_task('t1', active => false);"
 is "and the row says so" \
    "SELECT active FROM gp_task.job WHERE jobname = 't1';" "f"
 refused "altering one that is not there says so" \
-        "SELECT gp_task.alter_task('nosuch', schedule => '@daily');" "does not exist"
-refused "and so does dropping it" "SELECT gp_task.drop_task('nosuch');" "does not exist"
+        "CALL gp_task.alter_task('nosuch', schedule => '@daily');" "does not exist"
+refused "and so does dropping it" "CALL gp_task.drop_task('{nosuch}');" "does not exist"
 accepted "unless it is allowed to be missing" \
-         "SELECT gp_task.drop_task('nosuch', missing_ok => true);"
+         "CALL gp_task.drop_task('{nosuch}', missing_ok => true);"
 accepted "dropping one removes it" \
-         "SELECT gp_task.drop_task('t1');"
+         "CALL gp_task.drop_task('{t1}');"
 is "and it is gone" "SELECT count(*) FROM gp_task.job WHERE jobname = 't1';" "0"
 
 ###############################################################################
 echo "4. a task runs, and its history says so"
 ###############################################################################
 q "CREATE TABLE ran (at timestamptz DEFAULT now());
-   SELECT gp_task.create_task('every_minute', '* * * * *', 'INSERT INTO ran DEFAULT VALUES');" > /dev/null
+   CALL gp_task.create_task('every_minute', '* * * * *', 'INSERT INTO ran DEFAULT VALUES');" > /dev/null
 
 eventually "the command runs when its minute comes" \
            "SELECT count(*) > 0 FROM ran;" "t"
@@ -200,7 +201,7 @@ eventually "and the process that ran it" \
 ###############################################################################
 echo "5. a task that fails is recorded as failing, with its reason"
 ###############################################################################
-q "SELECT gp_task.create_task('breaks', '* * * * *', 'SELECT 1 / 0');" > /dev/null
+q "CALL gp_task.create_task('breaks', '* * * * *', 'SELECT 1 / 0');" > /dev/null
 eventually "a failing command is recorded" \
            "SELECT status FROM gp_task.run_history h JOIN gp_task.job j USING (jobid)
               WHERE j.jobname = 'breaks' ORDER BY runid DESC LIMIT 1;" "failed"
@@ -216,7 +217,7 @@ echo "6. a task names the database it runs in, which need not be this one"
 ###############################################################################
 q "CREATE DATABASE other_db;" > /dev/null
 qd other_db "CREATE TABLE elsewhere (at timestamptz DEFAULT now());" > /dev/null
-q "SELECT gp_task.create_task('over_there', '* * * * *',
+q "CALL gp_task.create_task('over_there', '* * * * *',
        'INSERT INTO elsewhere DEFAULT VALUES', database => 'other_db');" > /dev/null
 
 deadline=$(( $(date +%s) + 100 )); got=
@@ -234,7 +235,7 @@ eventually "and its history is still in the database the scheduler reads" \
 ###############################################################################
 echo "7. a task that names something that is not there fails cleanly"
 ###############################################################################
-q "SELECT gp_task.create_task('nowhere', '* * * * *', 'SELECT 1', database => 'no_such_db');" > /dev/null
+q "CALL gp_task.create_task('nowhere', '* * * * *', 'SELECT 1', database => 'no_such_db');" > /dev/null
 eventually "a missing database is reported against the job, not the server" \
            "SELECT return_message FROM gp_task.run_history h JOIN gp_task.job j USING (jobid)
               WHERE j.jobname = 'nowhere' ORDER BY runid DESC LIMIT 1;" \
@@ -244,12 +245,12 @@ is "the server is still up" "SELECT 1;" "1"
 ###############################################################################
 echo "8. dropping a task takes its history with it, and stops it running"
 ###############################################################################
-q "SELECT gp_task.drop_task('nowhere'); SELECT gp_task.drop_task('breaks');" > /dev/null
+q "CALL gp_task.drop_task('{nowhere,breaks}');" > /dev/null
 is "the history of a dropped task is gone" \
    "SELECT count(*) FROM gp_task.run_history h
      WHERE NOT EXISTS (SELECT 1 FROM gp_task.job j WHERE j.jobid = h.jobid);" "0"
 
-q "SELECT gp_task.alter_task('every_minute', active => false);
+q "CALL gp_task.alter_task('every_minute', active => false);
    DELETE FROM ran;" > /dev/null
 sleep 70
 is "a task switched off does not run" "SELECT count(*) FROM ran;" "0"

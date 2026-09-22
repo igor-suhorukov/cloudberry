@@ -34,7 +34,11 @@
  * queries, and the utility statements that hold expressions -- a column's
  * default, a CHECK, an index's WHERE, a function's body -- by hand.  A node
  * it does not know keeps the rewrite's locations, which puts an error in it
- * where it was reported before this file existed, and is no worse.
+ * where it was reported before this file existed, and is no worse -- unless
+ * the location is one query jumbling records, which pg_stat_statements cuts
+ * out of the user's text: a constant, a SET's value.  Left the rewrite's, it
+ * cuts the wrong bytes, or bytes past its statement's end, which stops an
+ * assert-enabled server.  So every statement that can hold one is walked.
  *
  *-------------------------------------------------------------------------
  */
@@ -539,6 +543,20 @@ remap_walker(Node *node, void *context)
 				return WALK(f->parameters) || WALK(f->returnType) ||
 					WALK(f->options) || WALK(f->sql_body);
 			}
+
+			/*
+			 * ALTER FUNCTION f(int) EXECUTE ON ANY is SET gp.execute_on =
+			 * 'any' once rewritten, and a SET's value is a constant query
+			 * jumbling records: left the rewrite's, pg_stat_statements
+			 * would cut it out of the user's text at a place past the
+			 * statement's end.
+			 */
+		case T_AlterFunctionStmt:
+			return WALK(((AlterFunctionStmt *) node)->func) ||
+				WALK(((AlterFunctionStmt *) node)->actions);
+		case T_ObjectWithArgs:
+			return WALK(((ObjectWithArgs *) node)->objargs) ||
+				WALK(((ObjectWithArgs *) node)->objfuncargs);
 		case T_ReturnStmt:
 			return WALK(((ReturnStmt *) node)->returnval);
 		case T_CallStmt:
@@ -569,6 +587,19 @@ remap_walker(Node *node, void *context)
 				WALK(((CreateStatsStmt *) node)->relations);
 		case T_VariableSetStmt:
 			return WALK(((VariableSetStmt *) node)->args);
+
+			/*
+			 * and the other statements a SET is in: none is rewritten, but
+			 * one after a statement that was is at the rewrite's positions
+			 * too.
+			 */
+		case T_AlterRoleSetStmt:
+			return WALK(((AlterRoleSetStmt *) node)->role) ||
+				WALK(((AlterRoleSetStmt *) node)->setstmt);
+		case T_AlterDatabaseSetStmt:
+			return WALK(((AlterDatabaseSetStmt *) node)->setstmt);
+		case T_AlterSystemStmt:
+			return WALK(((AlterSystemStmt *) node)->setstmt);
 		case T_TransactionStmt:
 			return WALK(((TransactionStmt *) node)->options);
 

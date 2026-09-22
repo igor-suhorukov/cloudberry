@@ -28,6 +28,7 @@
 #include "postgres.h"
 
 #include "nodes/parsenodes.h"
+#include "tcop/utility.h"
 
 struct QueryDesc;
 
@@ -47,6 +48,43 @@ struct QueryDesc;
 /* The port's own option namespace, which gp_core owns. */
 #define GP_OPTION_NS		"gp"
 
+/* gp_sql.c */
+
+/*
+ * Watching what a statement makes: arm before running it, ask afterwards,
+ * restore whatever the arming saved -- a statement may run inside another.
+ */
+typedef struct GpSqlPending
+{
+	bool		armed;
+	List	   *classes;
+	List	   *objects;
+} GpSqlPending;
+
+extern void GpSqlPendingArm(GpSqlPending *save);
+extern void GpSqlPendingRestore(const GpSqlPending *save);
+
+/* The first object of this class the statement made, or InvalidOid. */
+extern Oid	GpSqlPendingFirst(Oid classId);
+
+/* Run a statement through the ProcessUtility hooks after gp_sql's. */
+extern void GpSqlProcessUtilityNext(PlannedStmt *pstmt, const char *queryString,
+									bool readOnlyTree, ProcessUtilityContext context,
+									ParamListInfo params, QueryEnvironment *queryEnv,
+									DestReceiver *dest, QueryCompletion *qc);
+
+/* funcattr.c */
+
+/*
+ * CREATE [OR REPLACE] FUNCTION and ALTER FUNCTION, with what Cloudberry's
+ * EXECUTE ON and data-access attributes became: SET gp.execute_on and SET
+ * gp.data_access.
+ */
+extern void GpFuncAttrProcessUtility(PlannedStmt *pstmt, const char *queryString,
+									 bool readOnlyTree, ProcessUtilityContext context,
+									 ParamListInfo params, QueryEnvironment *queryEnv,
+									 DestReceiver *dest, QueryCompletion *qc);
+
 /* tag.c */
 
 /*
@@ -64,10 +102,19 @@ extern List *GpTagTakeOptions(List **options);
 extern List *GpTagTakeResetOptions(List **options);
 
 /*
- * The same for CREATE DATABASE, which has no namespaced options: the tags are
- * the options named "gp_tag.<name>".
+ * The same for a statement with no namespaced options -- CREATE and ALTER
+ * DATABASE, and a foreign table's OPTIONS -- where the tags are the options
+ * named "gp_tag.<name>".  One with no value, = DEFAULT, takes the tag away.
  */
-extern List *GpTagTakeDatabaseOptions(List **options);
+extern List *GpTagTakePrefixedOptions(List **options);
+
+/*
+ * The tags a statement's rewrite carried to its parse node, where its grammar
+ * had no place for them (gp_desugar.c, GpAttachCarriers): DefElems in the
+ * "gp_tag" namespace, among whatever else the list holds.
+ */
+extern bool GpTagHasCarried(List *list);
+extern List *GpTagTakeCarried(List **list);
 
 /*
  * Refuse any tag in the list that is not defined, or whose value the
@@ -109,6 +156,12 @@ extern void GpDirTableCheckTruncate(TruncateStmt *stmt);
 
 /* A directory table is being dropped: its files follow it at commit. */
 extern void GpDirTableDropped(Oid relid);
+
+/*
+ * Make a table of the right shape a directory table: its directory, and the
+ * "gp" label that says where it is.  Returns the location.
+ */
+extern char *GpDirTableClaim(Oid relid);
 
 /* Registered during preload; drains the files a transaction leaves behind. */
 extern void GpDirTableRegisterXactCallback(void);

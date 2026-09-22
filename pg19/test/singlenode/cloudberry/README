@@ -115,13 +115,15 @@ tag  Tag definitions are the database's here, in gp_sql.tag, and Cloudberry's
   open"): the test makes its tags in one database and uses them from postgres
   and other_db, where the port has none.  Its queries of pg_tag and
   pg_tag_description find no such catalogs.  CREATE TAG, ALTER TAG and DROP
-  TAG are calls of gp_sql's functions, and return the call's row; an error
-  from one is Cloudberry's message, with a CONTEXT naming gp_sql's
-  functions.  Where gp_sql is not there -- in the two databases the tags are
-  not defined in -- the error is that its schema does not exist, reported at
-  the start of a statement the rewrite replaced, and at the TAG clause a call
-  was made from.  A malformed TAG clause (TAG; or TAG ()) is PostgreSQL's syntax
-  error, at the word the rewrite left, where Cloudberry's is at the next.
+  TAG are CALLs of gp_sql's procedures, and an error from one is Cloudberry's
+  message, with a CONTEXT naming gp_sql's functions.  Where gp_sql is not
+  there -- in the two databases the tags are not defined in -- a TAG clause is
+  refused before its statement runs, "tags need the gp_sql extension in this
+  database", and ALTER SCHEMA ... TAG, which is a CALL, finds no schema
+  gp_sql, reported at the start of the statement.  A malformed TAG clause
+  (TAG; or TAG ()) is PostgreSQL's error at the word the rewrite left -- a
+  syntax error, or "unrecognized role option" of a role's -- where
+  Cloudberry's syntax error is at the next.
 union_gp  count_operator(), gp_distribution_policy, an external table, PL/
   Python, and a chain of UNIONs over NULLs.
 update_gp  gp_segment_id, gp_segment_configuration, append-optimized tables,

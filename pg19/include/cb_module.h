@@ -41,6 +41,15 @@
 #define CB_CORE_RENDEZVOUS	"Cloudberry/gp_core"
 
 /*
+ * Set by gp_security while it is preloaded.  O26 carries a role's PROFILE and
+ * ACCOUNT LOCK to its ALTER USER for gp_security's ProcessUtility hook to take
+ * out, and asks this first, so that without gp_security the statement is
+ * refused with a reason rather than by ALTER ROLE as an option it does not
+ * know.
+ */
+#define CB_SECURITY_RENDEZVOUS	"Cloudberry/gp_security"
+
+/*
  * Refuse to load outside shared_preload_libraries.
  *
  * A module that registers a custom WAL resource manager, requests shared

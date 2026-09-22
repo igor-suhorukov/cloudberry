@@ -22,9 +22,11 @@
  *
  * Cloudberry's DDL keeps working through O26, whose grammar emits only PG19
  * parse nodes: namespaced options, security labels and function calls
- * (decision 11).  This module handles those forms -- it strips the options in
- * ProcessUtility_hook, registers the label provider, and offers the functions
- * that the grammar desugars to.
+ * (decision 11), one statement for each of the user's.  This module handles
+ * those forms -- it takes the options, and what a statement carries on its
+ * parse node, out again in ProcessUtility_hook and applies them once the
+ * statement has run, registers the label provider, and offers the procedures
+ * the grammar desugars a statement to.
  *
  * Cloudberry sources this module is made of:
  *	  src/backend/commands/tag.c, dirtablecmds.c, storagecmds.c,
@@ -37,8 +39,11 @@
 #include "access/xact.h"
 #include "catalog/namespace.h"
 #include "catalog/objectaccess.h"
+#include "catalog/objectaddress.h"
+#include "catalog/pg_authid.h"
 #include "catalog/pg_class.h"
 #include "catalog/pg_database.h"
+#include "catalog/pg_namespace.h"
 #include "catalog/pg_tablespace.h"
 #include "commands/dbcommands.h"
 #include "commands/defrem.h"
@@ -72,15 +77,82 @@ static object_access_hook_type prev_object_access = NULL;
 static ExecutorStart_hook_type prev_ExecutorStart = NULL;
 
 /*
- * The relations a CREATE statement carrying tags or a distribution has made,
- * while it runs, and whether to watch for them; see created_relation.  The
- * list is in TopTransactionContext, since the hook that adds to it runs in
- * whatever context the statement is in at the time.
+ * What a statement the hook is watching has made, while it runs: the class
+ * and OID of each object, in the order they were made (gp_sql_object_access).
+ * A statement can run another inside it -- CREATE SCHEMA runs its elements --
+ * so arming saves what was there and disarming puts it back.  The lists are
+ * in TopTransactionContext, since the hook that adds to them runs in whatever
+ * context the statement is in at the time.
  */
 static bool pending_armed = false;
-static List *pending_created = NIL;
+static List *pending_classes = NIL;
+static List *pending_objects = NIL;
 
 static void check_distribution_policy(const char *policy);
+
+void
+GpSqlPendingArm(GpSqlPending *save)
+{
+	save->armed = pending_armed;
+	save->classes = pending_classes;
+	save->objects = pending_objects;
+	pending_armed = true;
+	pending_classes = NIL;
+	pending_objects = NIL;
+}
+
+void
+GpSqlPendingRestore(const GpSqlPending *save)
+{
+	pending_armed = save->armed;
+	pending_classes = save->classes;
+	pending_objects = save->objects;
+}
+
+/* The first object of this class the statement made, or InvalidOid. */
+Oid
+GpSqlPendingFirst(Oid classId)
+{
+	ListCell   *c;
+	ListCell   *o;
+
+	forboth(c, pending_classes, o, pending_objects)
+	{
+		if (lfirst_oid(c) == classId)
+			return lfirst_oid(o);
+	}
+	return InvalidOid;
+}
+
+/* Did the statement make this object? */
+static bool
+pending_has(Oid classId, Oid objectId)
+{
+	ListCell   *c;
+	ListCell   *o;
+
+	forboth(c, pending_classes, o, pending_objects)
+	{
+		if (lfirst_oid(c) == classId && lfirst_oid(o) == objectId)
+			return true;
+	}
+	return false;
+}
+
+/* The ProcessUtility hook after this one, or PostgreSQL's own. */
+void
+GpSqlProcessUtilityNext(PlannedStmt *pstmt, const char *queryString,
+						bool readOnlyTree, ProcessUtilityContext context,
+						ParamListInfo params, QueryEnvironment *queryEnv,
+						DestReceiver *dest, QueryCompletion *qc)
+{
+	if (prev_ProcessUtility)
+		prev_ProcessUtility(pstmt, queryString, readOnlyTree, context,
+							params, queryEnv, dest, qc);
+	else
+		standard_ProcessUtility(pstmt, queryString, readOnlyTree, context,
+								params, queryEnv, dest, qc);
+}
 
 /* ------------------------------------------------------------------------- */
 /* Where the shorthand may be written                                        */
@@ -90,7 +162,8 @@ static void check_distribution_policy(const char *policy);
  * The option list of a statement that creates a relation, or NULL for a
  * statement that has none.  These are the four statements PG19 lets an
  * unknown namespace through: a namespaced reloption is rejected in
- * transformRelOptions, which runs after this hook.
+ * transformRelOptions, which runs after this hook.  A foreign table's are in
+ * its OPTIONS list instead, which has no namespaces (fdw_options_of).
  */
 static List **
 create_options_of(Node *parsetree)
@@ -114,6 +187,37 @@ create_options_of(Node *parsetree)
 		default:
 			return NULL;
 	}
+}
+
+/*
+ * CREATE FOREIGN TABLE ... OPTIONS ("gp_tag.env" 'prod', "gp.distributed_by"
+ * '(a)'): where the TAG and DISTRIBUTED BY of a foreign table go
+ * (gp_desugar.c, rw_add_fdw_option).  A generic option's name is one
+ * identifier, so they are told by that name's prefix rather than a namespace,
+ * and taken out before the wrapper's validator would refuse them.
+ */
+static List **
+fdw_options_of(Node *parsetree)
+{
+	if (IsA(parsetree, CreateForeignTableStmt))
+		return &((CreateForeignTableStmt *) parsetree)->options;
+	return NULL;
+}
+
+static bool
+has_prefixed_option(List *options, const char *prefix)
+{
+	ListCell   *lc;
+
+	foreach(lc, options)
+	{
+		DefElem    *def = (DefElem *) lfirst(lc);
+
+		if (strncmp(def->defname, prefix, strlen(prefix)) == 0)
+			return true;
+	}
+
+	return false;
 }
 
 /*
@@ -156,55 +260,60 @@ has_gp_options(List *options)
 }
 
 /*
- * WITH (gp.distributed_by = '(a,b)'): what DISTRIBUTED BY on CREATE TABLE,
- * CREATE TABLE AS and CREATE MATERIALIZED VIEW becomes (gp_desugar.c,
- * rw_distribution).  Other options of the port's namespace are other
- * modules' to take.
+ * One of the port's own options that gp_sql takes: WITH (gp.distributed_by
+ * = '(a,b)'), which is what DISTRIBUTED BY becomes, or WITH
+ * (gp.directory_table = true), which is what CREATE DIRECTORY TABLE does.
+ * Other options of the namespace are other modules' to take.
  */
 static bool
-is_distribution_option(DefElem *def)
+is_gp_option(DefElem *def, const char *name)
 {
 	return def->defnamespace != NULL &&
 		strcmp(def->defnamespace, GP_OPTION_NS) == 0 &&
-		strcmp(def->defname, "distributed_by") == 0;
+		strcmp(def->defname, name) == 0;
 }
 
 static bool
-has_distribution_option(List *options)
+has_gp_option(List *options, const char *name)
 {
 	ListCell   *lc;
 
 	foreach(lc, options)
 	{
-		if (is_distribution_option((DefElem *) lfirst(lc)))
+		if (is_gp_option((DefElem *) lfirst(lc), name))
 			return true;
 	}
 
 	return false;
 }
 
-/* Take it out of the option list, before the statement would refuse it. */
-static char *
-take_distribution_option(List **options)
+/*
+ * Take one of them out of the option list, before the statement would refuse
+ * it.  With prefixed, it is a foreign table's "gp.distributed_by".
+ */
+static DefElem *
+take_gp_option(List **options, const char *name, bool prefixed)
 {
-	char	   *policy = NULL;
+	DefElem    *found = NULL;
+	char	   *fullname = psprintf("%s.%s", GP_OPTION_NS, name);
 	ListCell   *lc;
 
 	foreach(lc, *options)
 	{
 		DefElem    *def = (DefElem *) lfirst(lc);
 
-		if (!is_distribution_option(def))
+		if (prefixed ? strcmp(def->defname, fullname) != 0 : !is_gp_option(def, name))
 			continue;
-		if (policy != NULL)
+		if (found != NULL)
 			ereport(ERROR,
 					(errcode(ERRCODE_SYNTAX_ERROR),
-					 errmsg("a table can be given one distribution")));
-		policy = defGetString(def);
+					 errmsg("conflicting or redundant options"),
+					 errdetail("%s is given more than once.", fullname)));
+		found = def;
 		*options = foreach_delete_current(*options, lc);
 	}
 
-	return policy;
+	return found;
 }
 
 /* The same, over the SET/RESET subcommands of an ALTER TABLE. */
@@ -268,9 +377,9 @@ alter_take_tags(AlterTableStmt *stmt)
 /* ------------------------------------------------------------------------- */
 
 /*
- * The relations a CREATE statement carrying tags or a distribution makes.
+ * What a statement the hook is watching makes.
  *
- * Only their OIDs are taken here.  index_create fires this hook before the
+ * Only the OIDs are taken here.  index_create fires this hook before the
  * CommandCounterIncrement that makes the new pg_class row visible, so nothing
  * that reads the catalog for it can run yet -- not even to ask what relkind
  * it is.  Which of them the clauses were written on is worked out once the
@@ -283,20 +392,18 @@ gp_sql_object_access(ObjectAccessType access, Oid classId, Oid objectId,
 	if (prev_object_access)
 		prev_object_access(access, classId, objectId, subId, arg);
 
-	if (classId != RelationRelationId || subId != 0)
+	if (subId != 0)
 		return;
 
-	if (access == OAT_POST_CREATE)
+	if (access == OAT_POST_CREATE && pending_armed)
 	{
-		if (pending_armed)
-		{
-			MemoryContext oldcxt = MemoryContextSwitchTo(TopTransactionContext);
+		MemoryContext oldcxt = MemoryContextSwitchTo(TopTransactionContext);
 
-			pending_created = lappend_oid(pending_created, objectId);
-			MemoryContextSwitchTo(oldcxt);
-		}
+		pending_classes = lappend_oid(pending_classes, classId);
+		pending_objects = lappend_oid(pending_objects, objectId);
+		MemoryContextSwitchTo(oldcxt);
 	}
-	else if (access == OAT_DROP)
+	else if (access == OAT_DROP && classId == RelationRelationId)
 	{
 		char		relkind = get_rel_relkind(objectId);
 
@@ -323,12 +430,19 @@ gp_sql_ExecutorStart(QueryDesc *queryDesc, int eflags)
 }
 
 /*
- * CREATE TABLESPACE ... WITH (gp.server = 's') and ALTER TABLESPACE ... SET.
+ * CREATE TABLESPACE ... WITH (gp.server = 's') and ALTER TABLESPACE ... SET,
+ * and the tags of either.
  *
  * Cloudberry names a library and a function in two pg_tablespace columns;
  * here the tablespace names a storage server and the handler for one
  * registers itself.  The option is taken out before tablespace_reloptions
  * would reject it, and recorded once the tablespace exists.
+ *
+ * CREATE TABLESPACE ... TAG (...) is in the WITH list, gp_tag.env = 'prod',
+ * because the statement may not run in a transaction block and so cannot be
+ * followed by anything that would set them; ALTER TABLESPACE ... TAG (...)
+ * and UNSET TAG (...) are ALTER TABLESPACE ... SET (gp_tag.env = 'prod') and
+ * RESET (gp_tag.env), which is where the shorthand works on any table.
  */
 static void
 gp_sql_tablespace_options(PlannedStmt *pstmt, const char *queryString,
@@ -348,7 +462,7 @@ gp_sql_tablespace_options(PlannedStmt *pstmt, const char *queryString,
 	else
 		options = &((AlterTableSpaceOptionsStmt *) parsetree)->options;
 
-	if (has_gp_options(*options) || (creating && has_tag_options(*options)))
+	if (has_gp_options(*options) || has_tag_options(*options))
 	{
 		if (readOnlyTree)
 		{
@@ -362,24 +476,17 @@ gp_sql_tablespace_options(PlannedStmt *pstmt, const char *queryString,
 		}
 		opts = GpStorageTakeTablespaceOptions(options);
 
-		/*
-		 * CREATE TABLESPACE ... TAG (...), which the desugarer writes into the
-		 * WITH list: the statement may not run in a transaction block, so a
-		 * call after it could not be how its tags are set.
-		 */
-		if (creating)
+		if (!creating && ((AlterTableSpaceOptionsStmt *) parsetree)->isReset)
+			tags = GpTagTakeResetOptions(options);
+		else
 			tags = GpTagTakeOptions(options);
 	}
 
 	/* An undefined tag is refused before the tablespace is made. */
 	GpTagCheckAll(tags);
 
-	if (prev_ProcessUtility)
-		prev_ProcessUtility(pstmt, queryString, readOnlyTree, context,
+	GpSqlProcessUtilityNext(pstmt, queryString, readOnlyTree, context,
 							params, queryEnv, dest, qc);
-	else
-		standard_ProcessUtility(pstmt, queryString, readOnlyTree, context,
-								params, queryEnv, dest, qc);
 
 	if (creating)
 		spcname = ((CreateTableSpaceStmt *) parsetree)->tablespacename;
@@ -398,60 +505,92 @@ gp_sql_tablespace_options(PlannedStmt *pstmt, const char *queryString,
 }
 
 /*
- * CREATE DATABASE ... TAG (...), which the desugarer writes as options named
- * "gp_tag.<name>", because the statement may not run in a transaction block
- * and so cannot be followed by the call that would set them.  They are taken
- * out before createdb() would refuse them, and the database is labelled once
- * it exists, in the statement's own transaction.
+ * CREATE DATABASE ... TAG (...) and ALTER DATABASE ... TAG (...), which the
+ * desugarer writes as options named "gp_tag.<name>" -- = DEFAULT for UNSET
+ * TAG -- because neither statement has a namespaced option, and CREATE
+ * DATABASE may not run in a transaction block, so cannot be followed by the
+ * call that would set them.  They are taken out before createdb() or
+ * AlterDatabase() would refuse them, and the database is labelled once the
+ * statement has run, in its own transaction.  AlterDatabase() with nothing
+ * left to do still checks that the database is the user's.
  */
 static void
-gp_sql_createdb_tags(PlannedStmt *pstmt, const char *queryString,
+gp_sql_database_tags(PlannedStmt *pstmt, const char *queryString,
 					 bool readOnlyTree, ProcessUtilityContext context,
 					 ParamListInfo params, QueryEnvironment *queryEnv,
 					 DestReceiver *dest, QueryCompletion *qc)
 {
-	CreatedbStmt *stmt;
+	Node	   *parsetree;
 	List	   *tags;
+	const char *dbname;
 
 	if (readOnlyTree)
 	{
 		pstmt = copyObject(pstmt);
 		readOnlyTree = false;
 	}
-	stmt = (CreatedbStmt *) pstmt->utilityStmt;
-	tags = GpTagTakeDatabaseOptions(&stmt->options);
+	parsetree = pstmt->utilityStmt;
+
+	if (IsA(parsetree, CreatedbStmt))
+	{
+		tags = GpTagTakePrefixedOptions(&((CreatedbStmt *) parsetree)->options);
+		dbname = ((CreatedbStmt *) parsetree)->dbname;
+	}
+	else
+	{
+		tags = GpTagTakePrefixedOptions(&((AlterDatabaseStmt *) parsetree)->options);
+		dbname = ((AlterDatabaseStmt *) parsetree)->dbname;
+	}
 
 	/* An undefined tag is refused before the database is made. */
 	GpTagCheckAll(tags);
 
-	if (prev_ProcessUtility)
-		prev_ProcessUtility(pstmt, queryString, readOnlyTree, context,
+	GpSqlProcessUtilityNext(pstmt, queryString, readOnlyTree, context,
 							params, queryEnv, dest, qc);
-	else
-		standard_ProcessUtility(pstmt, queryString, readOnlyTree, context,
-								params, queryEnv, dest, qc);
 
 	CommandCounterIncrement();
-	GpTagApplyToObject(DatabaseRelationId, get_database_oid(stmt->dbname, false),
-					   tags);
+	GpTagApplyToObject(DatabaseRelationId, get_database_oid(dbname, false), tags);
 }
 
-/* Does CREATE DATABASE carry the desugarer's tag options? */
+/* Does a CREATE or ALTER DATABASE carry the desugarer's tag options? */
 static bool
-createdb_has_tags(CreatedbStmt *stmt)
+database_has_tags(Node *parsetree)
 {
-	ListCell   *lc;
+	List	   *options;
 
-	foreach(lc, stmt->options)
+	if (IsA(parsetree, CreatedbStmt))
+		options = ((CreatedbStmt *) parsetree)->options;
+	else if (IsA(parsetree, AlterDatabaseStmt))
+		options = ((AlterDatabaseStmt *) parsetree)->options;
+	else
+		return false;
+
+	return has_prefixed_option(options, GP_TAG_OPTION_NS ".");
+}
+
+/*
+ * The list a statement's carried tags are on (gp_desugar.c,
+ * GpAttachCarriers): TAG on CREATE SCHEMA, CREATE USER and CREATE SEQUENCE,
+ * and TAG and UNSET TAG on ALTER USER, whose statements have no list a
+ * namespaced option can be written in.  A schema has no options at all, so
+ * its tags are among its elements.
+ */
+static List **
+carried_list_of(Node *parsetree)
+{
+	switch (nodeTag(parsetree))
 	{
-		DefElem    *def = (DefElem *) lfirst(lc);
-
-		if (strncmp(def->defname, GP_TAG_OPTION_NS ".",
-					strlen(GP_TAG_OPTION_NS ".")) == 0)
-			return true;
+		case T_CreateSchemaStmt:
+			return &((CreateSchemaStmt *) parsetree)->schemaElts;
+		case T_CreateRoleStmt:
+			return &((CreateRoleStmt *) parsetree)->options;
+		case T_AlterRoleStmt:
+			return &((AlterRoleStmt *) parsetree)->options;
+		case T_CreateSeqStmt:
+			return &((CreateSeqStmt *) parsetree)->options;
+		default:
+			return NULL;
 	}
-
-	return false;
 }
 
 /*
@@ -471,7 +610,8 @@ created_relation(Node *parsetree)
 {
 	RangeVar   *rv;
 	Oid			relid;
-	ListCell   *lc;
+	ListCell   *c;
+	ListCell   *o;
 
 	/* what the statement made, visible */
 	CommandCounterIncrement();
@@ -480,6 +620,12 @@ created_relation(Node *parsetree)
 	{
 		case T_CreateStmt:
 			rv = ((CreateStmt *) parsetree)->relation;
+			break;
+		case T_CreateForeignTableStmt:
+			rv = ((CreateForeignTableStmt *) parsetree)->base.relation;
+			break;
+		case T_CreateSeqStmt:
+			rv = ((CreateSeqStmt *) parsetree)->sequence;
 			break;
 		case T_CreateTableAsStmt:
 			rv = ((CreateTableAsStmt *) parsetree)->into->rel;
@@ -490,12 +636,15 @@ created_relation(Node *parsetree)
 				return RangeVarGetRelid(rv, NoLock, true);
 			break;
 		case T_IndexStmt:
-			foreach(lc, pending_created)
+			forboth(c, pending_classes, o, pending_objects)
 			{
-				char		relkind = get_rel_relkind(lfirst_oid(lc));
+				char		relkind;
 
+				if (lfirst_oid(c) != RelationRelationId)
+					continue;
+				relkind = get_rel_relkind(lfirst_oid(o));
 				if (relkind == RELKIND_INDEX || relkind == RELKIND_PARTITIONED_INDEX)
-					return lfirst_oid(lc);
+					return lfirst_oid(o);
 			}
 			return InvalidOid;
 		default:
@@ -503,7 +652,98 @@ created_relation(Node *parsetree)
 	}
 
 	relid = RangeVarGetRelid(rv, NoLock, true);
-	return list_member_oid(pending_created, relid) ? relid : InvalidOid;
+	return pending_has(RelationRelationId, relid) ? relid : InvalidOid;
+}
+
+/*
+ * TAG on CREATE SCHEMA, CREATE USER, CREATE SEQUENCE and ALTER USER, carried
+ * to the statement's parse node because its grammar has no place for them.
+ *
+ * They are taken out before PostgreSQL reads the list -- CREATE ROLE would
+ * refuse an option it does not know, and CREATE SCHEMA an element that is not
+ * a statement -- checked before the statement runs, so that a misspelled tag
+ * does not leave a schema behind, and put on the object once it exists.
+ *
+ * What the tags need is what SECURITY LABEL would need of the object.  An
+ * object the statement made is the user's.  ALTER USER with nothing left in
+ * it checks next to nothing, so the check SECURITY LABEL makes of a role --
+ * CREATEROLE and the ADMIN option on it, or superuser for a superuser -- is
+ * made here, before it runs.
+ */
+static void
+gp_sql_carried_tags(PlannedStmt *pstmt, const char *queryString,
+					bool readOnlyTree, ProcessUtilityContext context,
+					ParamListInfo params, QueryEnvironment *queryEnv,
+					DestReceiver *dest, QueryCompletion *qc)
+{
+	Node	   *parsetree;
+	List	   *tags;
+	Oid			roleid = InvalidOid;
+	GpSqlPending save;
+
+	if (readOnlyTree)
+	{
+		pstmt = copyObject(pstmt);
+		readOnlyTree = false;
+	}
+	parsetree = pstmt->utilityStmt;
+
+	tags = GpTagTakeCarried(carried_list_of(parsetree));
+	GpTagCheckAll(tags);
+
+	if (IsA(parsetree, AlterRoleStmt))
+	{
+		RoleSpec   *role = ((AlterRoleStmt *) parsetree)->role;
+		ObjectAddress addr;
+
+		roleid = get_rolespec_oid(role, false);
+		ObjectAddressSet(addr, AuthIdRelationId, roleid);
+		check_object_ownership(GetUserId(), OBJECT_ROLE, addr,
+							   (Node *) makeString(get_rolespec_name(role)), NULL);
+	}
+
+	GpSqlPendingArm(&save);
+	PG_TRY();
+	{
+		GpSqlProcessUtilityNext(pstmt, queryString, readOnlyTree, context,
+								params, queryEnv, dest, qc);
+
+		CommandCounterIncrement();
+		switch (nodeTag(parsetree))
+		{
+			case T_CreateSchemaStmt:
+				{
+					/* IF NOT EXISTS of one that was there made nothing */
+					Oid			nspid = GpSqlPendingFirst(NamespaceRelationId);
+
+					if (OidIsValid(nspid))
+						GpTagApplyToObject(NamespaceRelationId, nspid, tags);
+				}
+				break;
+			case T_CreateRoleStmt:
+				GpTagApplyToObject(AuthIdRelationId,
+								   GpSqlPendingFirst(AuthIdRelationId), tags);
+				break;
+			case T_AlterRoleStmt:
+				GpTagApplyToObject(AuthIdRelationId, roleid, tags);
+				break;
+			case T_CreateSeqStmt:
+				{
+					Oid			relid = created_relation(parsetree);
+
+					if (OidIsValid(relid))
+						GpTagApplyToRelation(relid, tags);
+				}
+				break;
+			default:
+				break;
+		}
+	}
+	PG_FINALLY();
+	{
+		GpSqlPendingRestore(&save);
+	}
+	PG_END_TRY();
 }
 
 static void
@@ -514,9 +754,13 @@ gp_sql_ProcessUtility(PlannedStmt *pstmt, const char *queryString,
 {
 	Node	   *parsetree = pstmt->utilityStmt;
 	List	  **options;
+	List	  **fdw_options;
 	List	   *tags = NIL;
 	char	   *policy = NULL;
+	bool		directory_table = false;
 	bool		is_alter = false;
+	List	  **carried;
+	GpSqlPending save;
 
 	if (IsA(parsetree, TruncateStmt))
 		GpDirTableCheckTruncate((TruncateStmt *) parsetree);
@@ -529,18 +773,37 @@ gp_sql_ProcessUtility(PlannedStmt *pstmt, const char *queryString,
 		return;
 	}
 
-	if (IsA(parsetree, CreatedbStmt) &&
-		createdb_has_tags((CreatedbStmt *) parsetree))
+	if (database_has_tags(parsetree))
 	{
-		gp_sql_createdb_tags(pstmt, queryString, readOnlyTree, context,
+		gp_sql_database_tags(pstmt, queryString, readOnlyTree, context,
 							 params, queryEnv, dest, qc);
 		return;
 	}
 
+	if (IsA(parsetree, CreateFunctionStmt) || IsA(parsetree, AlterFunctionStmt))
+	{
+		GpFuncAttrProcessUtility(pstmt, queryString, readOnlyTree, context,
+								 params, queryEnv, dest, qc);
+		return;
+	}
+
+	carried = carried_list_of(parsetree);
+	if (carried != NULL && GpTagHasCarried(*carried))
+	{
+		gp_sql_carried_tags(pstmt, queryString, readOnlyTree, context,
+							params, queryEnv, dest, qc);
+		return;
+	}
+
 	options = create_options_of(parsetree);
+	fdw_options = fdw_options_of(parsetree);
 
 	if ((options != NULL &&
-		 (has_tag_options(*options) || has_distribution_option(*options))) ||
+		 (has_tag_options(*options) || has_gp_option(*options, "distributed_by") ||
+		  has_gp_option(*options, "directory_table"))) ||
+		(fdw_options != NULL &&
+		 (has_prefixed_option(*fdw_options, GP_TAG_OPTION_NS ".") ||
+		  has_prefixed_option(*fdw_options, GP_OPTION_NS ".distributed_by"))) ||
 		(IsA(parsetree, AlterTableStmt) &&
 		 alter_has_tag_options((AlterTableStmt *) parsetree)))
 	{
@@ -554,6 +817,7 @@ gp_sql_ProcessUtility(PlannedStmt *pstmt, const char *queryString,
 			parsetree = pstmt->utilityStmt;
 			readOnlyTree = false;
 			options = create_options_of(parsetree);
+			fdw_options = fdw_options_of(parsetree);
 		}
 
 		if (IsA(parsetree, AlterTableStmt))
@@ -561,21 +825,38 @@ gp_sql_ProcessUtility(PlannedStmt *pstmt, const char *queryString,
 			tags = alter_take_tags((AlterTableStmt *) parsetree);
 			is_alter = true;
 		}
+		else if (fdw_options != NULL)
+		{
+			DefElem    *def = take_gp_option(fdw_options, "distributed_by", true);
+
+			tags = GpTagTakePrefixedOptions(fdw_options);
+			if (def != NULL)
+				policy = defGetString(def);
+		}
 		else
 		{
+			DefElem    *def;
+
 			tags = GpTagTakeOptions(options);
-			policy = take_distribution_option(options);
+			def = take_gp_option(options, "distributed_by", false);
+			if (def != NULL)
+				policy = defGetString(def);
+			def = take_gp_option(options, "directory_table", false);
+			if (def != NULL)
+			{
+				if (!IsA(parsetree, CreateStmt))
+					ereport(ERROR,
+							(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+							 errmsg("only CREATE TABLE makes a directory table")));
+				directory_table = (def->arg == NULL || defGetBoolean(def));
+			}
 		}
 	}
 
-	if (tags == NIL && policy == NULL)
+	if (tags == NIL && policy == NULL && !directory_table)
 	{
-		if (prev_ProcessUtility)
-			prev_ProcessUtility(pstmt, queryString, readOnlyTree, context,
+		GpSqlProcessUtilityNext(pstmt, queryString, readOnlyTree, context,
 								params, queryEnv, dest, qc);
-		else
-			standard_ProcessUtility(pstmt, queryString, readOnlyTree, context,
-									params, queryEnv, dest, qc);
 		return;
 	}
 
@@ -588,21 +869,14 @@ gp_sql_ProcessUtility(PlannedStmt *pstmt, const char *queryString,
 		check_distribution_policy(policy);
 
 	if (!is_alter)
-	{
-		pending_armed = true;
-		pending_created = NIL;
-	}
+		GpSqlPendingArm(&save);
 
 	PG_TRY();
 	{
 		Oid			relid;
 
-		if (prev_ProcessUtility)
-			prev_ProcessUtility(pstmt, queryString, readOnlyTree, context,
+		GpSqlProcessUtilityNext(pstmt, queryString, readOnlyTree, context,
 								params, queryEnv, dest, qc);
-		else
-			standard_ProcessUtility(pstmt, queryString, readOnlyTree, context,
-									params, queryEnv, dest, qc);
 
 		if (is_alter)
 		{
@@ -624,12 +898,14 @@ gp_sql_ProcessUtility(PlannedStmt *pstmt, const char *queryString,
 				GpLabelSet(&addr, GP_LABEL_distributed_by, policy);
 			}
 			GpTagApplyToRelation(relid, tags);
+			if (directory_table)
+				GpDirTableClaim(relid);
 		}
 	}
 	PG_FINALLY();
 	{
-		pending_armed = false;
-		pending_created = NIL;
+		if (!is_alter)
+			GpSqlPendingRestore(&save);
 	}
 	PG_END_TRY();
 }

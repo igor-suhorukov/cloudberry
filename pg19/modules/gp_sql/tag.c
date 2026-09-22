@@ -372,12 +372,14 @@ GpTagTakeOptions(List **options)
 }
 
 /*
- * The same for CREATE DATABASE, whose options have no namespace: the
- * desugarer writes each tag there as an option named "gp_tag.<name>"
- * (gp_desugar.c, tag_option).
+ * The same for a statement whose options have no namespace -- CREATE and
+ * ALTER DATABASE, and a foreign table's OPTIONS -- where the desugarer writes
+ * each tag as an option named "gp_tag.<name>" (gp_desugar.c, tag_db_option
+ * and rw_add_fdw_option).  ALTER DATABASE's "gp_tag.<name>" = DEFAULT, which
+ * is UNSET TAG, has no value, and that is what "remove" means below.
  */
 List *
-GpTagTakeDatabaseOptions(List **options)
+GpTagTakePrefixedOptions(List **options)
 {
 	List	   *taken = NIL;
 	const char *prefix = GP_TAG_OPTION_NS ".";
@@ -393,6 +395,53 @@ GpTagTakeDatabaseOptions(List **options)
 		taken = lappend(taken, makeDefElem(pstrdup(def->defname + strlen(prefix)),
 										   def->arg, -1));
 		*options = foreach_delete_current(*options, lc);
+	}
+
+	return taken;
+}
+
+/* Is this one of the tags a rewrite carried to a statement's parse node? */
+static bool
+tag_is_carried(Node *node)
+{
+	return IsA(node, DefElem) &&
+		((DefElem *) node)->defnamespace != NULL &&
+		strcmp(((DefElem *) node)->defnamespace, GP_TAG_OPTION_NS) == 0;
+}
+
+bool
+GpTagHasCarried(List *list)
+{
+	ListCell   *lc;
+
+	foreach(lc, list)
+	{
+		if (tag_is_carried((Node *) lfirst(lc)))
+			return true;
+	}
+
+	return false;
+}
+
+/*
+ * Take them out, so that what is left is the list PostgreSQL wrote.  A tag
+ * with no value is UNSET TAG's, which takes it away.
+ */
+List *
+GpTagTakeCarried(List **list)
+{
+	List	   *taken = NIL;
+	ListCell   *lc;
+
+	foreach(lc, *list)
+	{
+		DefElem    *def = (DefElem *) lfirst(lc);
+
+		if (!tag_is_carried((Node *) def))
+			continue;
+
+		taken = lappend(taken, makeDefElem(pstrdup(def->defname), def->arg, -1));
+		*list = foreach_delete_current(*list, lc);
 	}
 
 	return taken;
@@ -518,12 +567,16 @@ GpTagApplyToRelation(Oid relId, List *tags)
 }
 
 /*
- * The label of an object the statement being run has just made, with the
- * tags added: a relation, a database or a tablespace.
+ * The label of an object the statement being run has just made or altered,
+ * with the tags added, or taken away where one has no value: a relation, a
+ * schema, a role, a database or a tablespace.
  *
- * SetSecurityLabel rather than a SECURITY LABEL statement: the object was
- * created by this statement, so its owner is the user running it, and there
- * is nothing left for the ownership check to find out.
+ * SetSecurityLabel rather than a SECURITY LABEL statement: an object this
+ * statement made is the user's, and one it altered has been checked already
+ * -- ALTER TABLE, ALTER DATABASE and ALTER TABLESPACE check the object is the
+ * user's before they alter it, and for ALTER USER, which checks next to
+ * nothing when all it carries is tags, gp_sql makes SECURITY LABEL's check
+ * itself before it runs.
  */
 void
 GpTagApplyToObject(Oid classId, Oid objectId, List *tags)

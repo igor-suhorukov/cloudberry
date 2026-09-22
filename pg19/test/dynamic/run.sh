@@ -158,8 +158,8 @@ is "REFRESH works as it does on any materialized view" \
     REFRESH MATERIALIZED VIEW dt;
     SELECT n || '/' || total FROM dt;" "2/15"
 isl "the job's schedule can be changed with the scheduler's own function" \
-   "SELECT gp_task.alter_task('gp_dynamic_table_refresh_' || 'dt'::regclass::oid,
-                              schedule => '0 4 * * *');
+   "CALL gp_task.alter_task('gp_dynamic_table_refresh_' || 'dt'::regclass::oid,
+                            schedule => '0 4 * * *');
     SELECT schedule FROM gp_task.job
       WHERE jobname = 'gp_dynamic_table_refresh_' || 'dt'::regclass::oid;" "0 4 * * *"
 

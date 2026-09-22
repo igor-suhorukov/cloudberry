@@ -185,6 +185,17 @@ isl "DROP TAG, more than one at a time" \
 isl "DROP TAG IF EXISTS" \
    "DROP TAG IF EXISTS never_defined;
     SELECT 'survived';" "survived"
+isl "ALTER TAG ... RENAME TO" \
+   "CREATE TAG to_rename; ALTER TAG to_rename RENAME TO renamed;
+    SELECT count(*) FROM gp_sql.tag WHERE tagname = 'renamed';" "1"
+# Cloudberry's tag test writes ALTER TAG IF EXISTS, which the rewrite used to
+# read past, so that a tag that was not there was an error.
+refused "ALTER TAG IF EXISTS of one that is not there says so and does nothing" \
+        "ALTER TAG IF EXISTS never_defined ADD ALLOWED_VALUES 'x';" \
+        'NOTICE:  tag "never_defined" does not exist, skipping'
+refused "and so does its RENAME" \
+        "ALTER TAG IF EXISTS never_defined RENAME TO other;" \
+        'NOTICE:  tag "never_defined" does not exist, skipping'
 
 ###############################################################################
 echo "3. the TAG clause, on each kind of thing Cloudberry lets it be written on"
@@ -225,12 +236,89 @@ is "and on one with a WITH list of its own, which keeps it" \
 isl "on CREATE USER" \
    "CREATE USER tagged_u TAG (env = 'prod');
     SELECT gp_sql.role_tags('tagged_u'::regrole)::text;" '{"env": "prod"}'
+isl "and on CREATE USER with options of PostgreSQL's beside it" \
+   "CREATE USER tagged_u2 LOGIN CONNECTION LIMIT 10 TAG (env = 'prod');
+    SELECT gp_sql.role_tags('tagged_u2'::regrole)::text || ' ' || rolconnlimit || ' ' || rolcanlogin
+      FROM pg_roles WHERE rolname = 'tagged_u2';" '{"env": "prod"} 10 true'
+isl "on CREATE SEQUENCE" \
+   "CREATE SEQUENCE tagged_seq START 5 TAG (env = 'prod');
+    SELECT gp_sql.relation_tags('tagged_seq'::regclass)::text || ' ' || nextval('tagged_seq');" \
+   '{"env": "prod"} 5'
+isl "and CREATE SEQUENCE IF NOT EXISTS of one that is there leaves its tags alone" \
+   "CREATE SEQUENCE IF NOT EXISTS tagged_seq TAG (env = 'dev');
+    SELECT gp_sql.relation_tags('tagged_seq'::regclass) ->> 'env';" "prod"
+isl "and CREATE SCHEMA IF NOT EXISTS the same" \
+   "CREATE SCHEMA IF NOT EXISTS tagged_s WITH TAG (env = 'dev');
+    SELECT gp_sql.schema_tags('tagged_s'::regnamespace) ->> 'env';" "prod"
+q "CREATE FOREIGN DATA WRAPPER tag_fdw; CREATE SERVER tag_srv FOREIGN DATA WRAPPER tag_fdw;" > /dev/null
+isl "on CREATE FOREIGN TABLE, in its OPTIONS, beside the wrapper's own" \
+   "CREATE FOREIGN TABLE tagged_ft (a int) SERVER tag_srv OPTIONS (path 'x') TAG (env = 'prod');
+    SELECT gp_sql.relation_tags('tagged_ft'::regclass)::text || ' ' || array_to_string(ftoptions, ',')
+      FROM pg_foreign_table WHERE ftrelid = 'tagged_ft'::regclass;" '{"env": "prod"} path=x'
 isl "UNSET TAG takes one off" \
    "ALTER TABLE tagged UNSET TAG (tier);
     SELECT gp_sql.relation_tags('tagged'::regclass)::text;" '{"env": "prod"}'
 refused "a tag nobody defined is still refused" \
         "CREATE TABLE never_made (id int) TAG (nope = 'x');" \
         "tag \"nope\" does not exist"
+refused "and before a schema is made" \
+        "CREATE SCHEMA never_s WITH TAG (nope = 'x');" "tag \"nope\" does not exist"
+is "which it is not" "SELECT count(*) FROM pg_namespace WHERE nspname = 'never_s';" "0"
+refused "or a role" \
+        "CREATE USER never_u TAG (nope = 'x');" "tag \"nope\" does not exist"
+is "which it is not either" "SELECT count(*) FROM pg_roles WHERE rolname = 'never_u';" "0"
+
+# ALTER of each kind of object, whose TAG and UNSET TAG are whole statements
+# of Cloudberry's: each the ALTER PostgreSQL has for that kind of object, or,
+# where it has none that takes an option -- a schema -- a CALL.
+isl "ALTER SCHEMA ... TAG" \
+   "ALTER SCHEMA tagged_s TAG (tier = 'gold');
+    SELECT gp_sql.schema_tags('tagged_s'::regnamespace)::text;" '{"env": "prod", "tier": "gold"}'
+isl "and UNSET TAG" \
+   "ALTER SCHEMA tagged_s UNSET TAG (env, tier);
+    SELECT coalesce(gp_sql.schema_tags('tagged_s'::regnamespace)::text, 'none');" "none"
+isl "ALTER USER ... TAG" \
+   "ALTER USER tagged_u TAG (tier = 'gold');
+    SELECT gp_sql.role_tags('tagged_u'::regrole)::text;" '{"env": "prod", "tier": "gold"}'
+isl "and UNSET TAG" \
+   "ALTER USER tagged_u UNSET TAG (env);
+    SELECT gp_sql.role_tags('tagged_u'::regrole)::text;" '{"tier": "gold"}'
+isl "ALTER SEQUENCE ... TAG, which is an action like any of ALTER SEQUENCE's" \
+   "ALTER SEQUENCE tagged_seq TAG (tier = 'gold');
+    SELECT gp_sql.relation_tags('tagged_seq'::regclass)::text;" '{"env": "prod", "tier": "gold"}'
+isl "ALTER FOREIGN TABLE ... UNSET TAG" \
+   "ALTER FOREIGN TABLE tagged_ft UNSET TAG (env);
+    SELECT coalesce(gp_sql.relation_tags('tagged_ft'::regclass)::text, 'none');" "none"
+q "ALTER DATABASE tagged_db TAG (env = 'dev');" > /dev/null
+is "ALTER DATABASE ... TAG" \
+   "SELECT gp_sql.database_tags('tagged_db')::text;" '{"env": "dev", "tier": "gold"}'
+q "ALTER DATABASE tagged_db UNSET TAG (tier);" > /dev/null
+is "and UNSET TAG" "SELECT gp_sql.database_tags('tagged_db')::text;" '{"env": "dev"}'
+q "ALTER TABLESPACE tagged_ts2 TAG (tier = 'gold');" > /dev/null
+is "ALTER TABLESPACE ... TAG, and its own options stay" \
+   "SELECT gp_sql.tablespace_tags('tagged_ts2')::text || ' ' || array_to_string(spcoptions, ',')
+      FROM pg_tablespace WHERE spcname = 'tagged_ts2';" '{"env": "prod", "tier": "gold"} random_page_cost=3.0'
+q "ALTER TABLESPACE tagged_ts2 UNSET TAG (env);" > /dev/null
+is "and UNSET TAG" "SELECT gp_sql.tablespace_tags('tagged_ts2')::text;" '{"tier": "gold"}'
+# Cloudberry's tag test expects these to be syntax errors at TAG: its grammar
+# has TAG on such an ALTER only on its own.  They used to run, as the ALTER
+# followed by a call.  PostgreSQL's grammar would refuse them too, but a
+# role's options may be any word, and it said "unrecognized role option";
+# a database's may be any word with a value, and it stopped at the
+# parenthesis.
+at "a TAG beside another action of ALTER USER is Cloudberry's syntax error" \
+   "ALTER USER tagged_u CONNECTION LIMIT 3 TAG (tier = 'silver')" 'syntax error at or near "TAG"' "TAG"
+at "and of ALTER DATABASE" \
+   "ALTER DATABASE tagged_db CONNECTION LIMIT 3 TAG (tier = 'silver')" 'syntax error at or near "TAG"' "TAG"
+at "and of ALTER TABLESPACE" \
+   "ALTER TABLESPACE tagged_ts2 SET (seq_page_cost = 1.1) TAG (tier = 'silver')" \
+   'syntax error at or near "TAG"' "TAG"
+at "and anything after one is, at what follows it" \
+   "ALTER USER tagged_u TAG (tier = 'silver') CONNECTION LIMIT 3" \
+   'syntax error at or near "CONNECTION"' "CONNECTION"
+is "and nothing of any of them was done" \
+   "SELECT rolconnlimit || ' ' || gp_sql.role_tags('tagged_u'::regrole)::text
+      FROM pg_roles WHERE rolname = 'tagged_u';" '-1 {"tier": "gold"}'
 
 ###############################################################################
 echo "4. DISTRIBUTED BY, which ORCA and M2's dispatch both read"
@@ -254,6 +342,16 @@ isl "both clauses on one statement" \
    "CREATE TABLE combo (a int) DISTRIBUTED BY (a) TAG (env = 'prod');
     SELECT gp_sql.distribution('combo'::regclass) || ' ' ||
            (gp_sql.relation_tags('combo'::regclass) ->> 'env');" "(a) prod"
+isl "on CREATE FOREIGN TABLE, which has only OPTIONS to carry it in" \
+   "CREATE FOREIGN TABLE dist_ft (a int, b int) SERVER tag_srv DISTRIBUTED BY (b);
+    SELECT gp_sql.distribution('dist_ft'::regclass) || ' ' || coalesce(array_to_string(ftoptions, ','), 'none')
+      FROM pg_foreign_table WHERE ftrelid = 'dist_ft'::regclass;" "(b) none"
+# Cloudberry refuses ALTER TABLE ... SET DISTRIBUTED BY in single-node mode;
+# the port has no redistribution to do, and the clause is left for
+# PostgreSQL's grammar to refuse.  It used to become the ALTER, cut short,
+# followed by a call.
+refused "ALTER TABLE ... SET DISTRIBUTED BY is left for PostgreSQL to refuse" \
+        "ALTER TABLE combo SET DISTRIBUTED BY (a);" 'syntax error at or near "DISTRIBUTED"'
 
 # ONE STATEMENT FOR ONE.  These clauses used to become the statement followed
 # by SELECTs of gp_sql's setters: two statements for one, which cannot be
@@ -300,9 +398,15 @@ isl "and runs as one" \
 isl "and UNSET TAG is RESET" \
    "ALTER TABLE one3 UNSET TAG (env);
     SELECT coalesce(gp_sql.relation_tags('one3'::regclass)::text, 'none');" "none"
-is "where no statement has a place for them, the calls are one SELECT" \
-   "SELECT gp_sql.desugar('ALTER SCHEMA s TAG (env = ''prod'', tier = ''gold'')')
-           !~ ';' AND gp_sql.desugar('DROP TAG t1, t2') !~ ';';" "t"
+is "where a statement's grammar has no place for them, they are carried on its parse node" \
+   "SELECT gp_sql.desugar('CREATE SCHEMA s WITH TAG (env = ''prod'', tier = ''gold'')')
+           ~ '^CREATE SCHEMA s +/\* and on its parse node: gp_tag.env = ''prod'', gp_tag.tier = ''gold'' \*/$';" "t"
+is "and where PostgreSQL has no statement for them, they are a CALL" \
+   "SELECT gp_sql.desugar('ALTER SCHEMA s TAG (env = ''prod'')') || ' | ' || gp_sql.desugar('DROP TAG t1, t2');" \
+   "CALL gp_sql.alter_schema_tags('s'::regnamespace, set_tags => '{\"env\": \"prod\"}'::jsonb) | CALL gp_sql.drop_tag(ARRAY['t1', 't2']::name[], false)"
+is "a foreign table's go into its OPTIONS, with its DISTRIBUTED BY" \
+   "SELECT gp_sql.desugar('CREATE FOREIGN TABLE f (a int) SERVER s DISTRIBUTED BY (a) TAG (env = ''prod'')')
+           ~ '^CREATE FOREIGN TABLE f \(a int\) SERVER s OPTIONS \(\"gp_tag.env\" ''prod'', \"gp.distributed_by\" ''\(a\)''\) *$';" "t"
 
 # THE DEFECT THE PARENTHESES FIX, which was found while writing the reader
 # that ORCA's relcache translator needs.  Written bare, a one-column list is
@@ -476,6 +580,19 @@ echo "6. directory tables and storage servers"
 isl "CREATE DIRECTORY TABLE" \
    "CREATE DIRECTORY TABLE docs;
     SELECT gp_sql.directory_table_location('docs'::regclass) IS NOT NULL;" "t"
+is "which is the CREATE TABLE that makes one" \
+   "SELECT gp_sql.desugar('CREATE DIRECTORY TABLE d TABLESPACE t')
+           ~ '^CREATE TABLE d \(relative_path text PRIMARY KEY, size bigint, last_modified timestamptz, md5 text, tag text\) WITH \(gp.directory_table = true\) TABLESPACE t$';" "t"
+isl "with its TAG, which it used to drop" \
+   "CREATE DIRECTORY TABLE docs2 TAG (env = 'prod');
+    SELECT gp_sql.relation_tags('docs2'::regclass)::text || ' ' ||
+           (gp_sql.directory_table_location('docs2'::regclass) IS NOT NULL);" '{"env": "prod"} true'
+isl "and IF NOT EXISTS of one that is there leaves it be" \
+   "CREATE DIRECTORY TABLE IF NOT EXISTS docs2;
+    SELECT count(*) FROM gp_sql.directory_tables WHERE tablename = 'docs2';" "1"
+refused "WITH LOCATION, which it used to drop, is refused" \
+        "CREATE DIRECTORY TABLE docs3 WITH LOCATION 'elsewhere';" \
+        "WITH LOCATION is not supported for a directory table"
 isl "CREATE STORAGE SERVER ... OPTIONS" \
    "CREATE STORAGE SERVER s3 OPTIONS (endpoint 's3.example.com');
     SELECT options::text FROM gp_sql.storage_servers WHERE servername = 's3';" \
@@ -507,6 +624,15 @@ isl "CREATE TASK ... DATABASE ... USER" \
 isl "ALTER TASK" \
    "ALTER TASK nightly SCHEDULE '0 4 * * *';
     SELECT schedule FROM gp_task.job WHERE jobname = 'nightly';" "0 4 * * *"
+# IF NOT EXISTS and IF EXISTS used to be read past, so each was an error where
+# Cloudberry says what it did not do.
+refused "CREATE TASK IF NOT EXISTS of one that is there says so and does nothing" \
+        "CREATE TASK IF NOT EXISTS nightly SCHEDULE '0 5 * * *' AS 'VACUUM';" \
+        'NOTICE:  task "nightly" already exists, skipping'
+is "and it is as it was" "SELECT schedule FROM gp_task.job WHERE jobname = 'nightly';" "0 4 * * *"
+refused "ALTER TASK IF EXISTS of one that is not says so" \
+        "ALTER TASK IF EXISTS never_there SCHEDULE '0 1 * * *';" \
+        'NOTICE:  task "never_there" does not exist, skipping'
 isl "DROP TASK" \
    "DROP TASK nightly, other;
     SELECT count(*) FROM gp_task.job;" "0"
@@ -531,9 +657,17 @@ isl "ALTER USER ... ACCOUNT LOCK" \
 isl "ALTER USER ... ACCOUNT UNLOCK" \
    "ALTER USER carol ACCOUNT UNLOCK;
     SELECT gp_security.role_locked_until('carol') IS NULL;" "t"
+refused "a profile that is not one is refused" \
+        "ALTER USER carol PROFILE nope;" 'profile "nope" does not exist'
+is "and carol is under the one she was" "SELECT gp_security.role_profile('carol');" "strict"
+# NOPROFILE is one word, which no trigger word began, so on its own it was
+# never rewritten; it worked only beside a DROP PROFILE in the same string.
+is "ALTER USER ... NOPROFILE, on its own" \
+   "ALTER USER carol NOPROFILE;" ""
+is "takes the profile away" \
+   "SELECT gp_security.role_profile('carol') IS NULL;" "t"
 isl "DROP PROFILE" \
-   "ALTER USER carol NOPROFILE;
-    DROP PROFILE strict;
+   "DROP PROFILE strict;
     SELECT count(*) FROM gp_security.profiles WHERE profile = 'strict';" "0"
 
 ###############################################################################
@@ -558,95 +692,108 @@ is "a prepared statement is parsed once and still works" \
 echo "10. EXECUTE ON, which says where a function may run"
 ###############################################################################
 # The label this writes is what func_exec_location() reads, and ORCA asks it
-# of every function it meets.  The reader has existed since the compat layer
-# landed; until now the label could only be set by hand, so the syntax was
-# still a syntax error on the port.  The two halves are tested against the
-# same strings: the ORCA suite asserts the reading, this one the writing.
+# of every function it meets.  The two halves are tested against the same
+# strings: the ORCA suite asserts the reading, this one the writing.
+#
+# The clause is SET gp.execute_on = '...' in the statement it is on, which
+# gp_sql takes out again and writes as the label once the function exists:
+# one statement, where it used to be the statement and a SECURITY LABEL.
+#
+# Cloudberry allows EXECUTE ON anything but ANY only on a function that
+# returns a set (validate_sql_exec_location), so the functions here do.
+
+label_of() { echo "SELECT label FROM pg_seclabel WHERE objoid = '$1'::regprocedure
+       AND classoid = 'pg_proc'::regclass AND provider = 'gp';"; }
 
 isl "EXECUTE ON ALL SEGMENTS" \
-   "CREATE FUNCTION xf1(int) RETURNS int LANGUAGE sql AS 'SELECT \$1'
+   "CREATE FUNCTION xf1(int) RETURNS SETOF int LANGUAGE sql AS 'SELECT \$1'
       EXECUTE ON ALL SEGMENTS;
-    SELECT label FROM pg_seclabel WHERE objoid = 'xf1(int)'::regprocedure
-       AND classoid = 'pg_proc'::regclass AND provider = 'gp';" \
+    $(label_of 'xf1(int)')" \
    "execute_on=all_segments"
 
-isl "EXECUTE ON ANY" \
+isl "EXECUTE ON ANY, which any function may say" \
    "CREATE FUNCTION xf2(int) RETURNS int LANGUAGE sql AS 'SELECT \$1'
       EXECUTE ON ANY;
-    SELECT label FROM pg_seclabel WHERE objoid = 'xf2(int)'::regprocedure
-       AND classoid = 'pg_proc'::regclass AND provider = 'gp';" \
+    $(label_of 'xf2(int)')" \
    "execute_on=any"
 
 isl "EXECUTE ON COORDINATOR" \
-   "CREATE FUNCTION xf3(int) RETURNS int LANGUAGE sql AS 'SELECT \$1'
+   "CREATE FUNCTION xf3(int) RETURNS SETOF int LANGUAGE sql AS 'SELECT \$1'
       EXECUTE ON COORDINATOR;
-    SELECT label FROM pg_seclabel WHERE objoid = 'xf3(int)'::regprocedure
-       AND classoid = 'pg_proc'::regclass AND provider = 'gp';" \
+    $(label_of 'xf3(int)')" \
    "execute_on=coordinator"
 
 # Cloudberry's older spelling, which its own grammar still accepts and maps to
 # the same value.  A label a person reads says "coordinator" either way.
 isl "EXECUTE ON MASTER, which means the same thing" \
-   "CREATE FUNCTION xf4(int) RETURNS int LANGUAGE sql AS 'SELECT \$1'
+   "CREATE FUNCTION xf4(int) RETURNS SETOF int LANGUAGE sql AS 'SELECT \$1'
       EXECUTE ON MASTER;
-    SELECT label FROM pg_seclabel WHERE objoid = 'xf4(int)'::regprocedure
-       AND classoid = 'pg_proc'::regclass AND provider = 'gp';" \
+    $(label_of 'xf4(int)')" \
    "execute_on=coordinator"
 
 isl "EXECUTE ON INITPLAN" \
-   "CREATE FUNCTION xf5(int) RETURNS int LANGUAGE sql AS 'SELECT \$1'
+   "CREATE FUNCTION xf5(int) RETURNS SETOF int LANGUAGE sql AS 'SELECT \$1'
       EXECUTE ON INITPLAN;
-    SELECT label FROM pg_seclabel WHERE objoid = 'xf5(int)'::regprocedure
-       AND classoid = 'pg_proc'::regclass AND provider = 'gp';" \
+    $(label_of 'xf5(int)')" \
    "execute_on=initplan"
 
 isl "ALTER FUNCTION changes it" \
    "ALTER FUNCTION xf1(int) EXECUTE ON COORDINATOR;
-    SELECT label FROM pg_seclabel WHERE objoid = 'xf1(int)'::regprocedure
-       AND classoid = 'pg_proc'::regclass AND provider = 'gp';" \
+    $(label_of 'xf1(int)')" \
    "execute_on=coordinator"
 
-# A DEFAULT belongs to CREATE FUNCTION and not to a signature: SECURITY LABEL
-# takes a function_with_argtypes, which the grammar will not let one into.
-isl "a parameter with a DEFAULT still finds its function" \
-   "CREATE FUNCTION xf6(a int, b int DEFAULT 5) RETURNS int LANGUAGE sql
+isl "a parameter with a DEFAULT" \
+   "CREATE FUNCTION xf6(a int, b int DEFAULT 5) RETURNS SETOF int LANGUAGE sql
       AS 'SELECT a + b' EXECUTE ON ALL SEGMENTS;
-    SELECT label FROM pg_seclabel WHERE objoid = 'xf6(int,int)'::regprocedure
-       AND classoid = 'pg_proc'::regclass AND provider = 'gp';" \
+    $(label_of 'xf6(int,int)')" \
    "execute_on=all_segments"
 
-isl "and so does an OUT parameter, which the lookup ignores" \
-   "CREATE FUNCTION xf7(IN a int, OUT b int) LANGUAGE sql AS 'SELECT a'
+isl "an OUT parameter" \
+   "CREATE FUNCTION xf7(IN a int, OUT b int) RETURNS SETOF int LANGUAGE sql AS 'SELECT a'
       EXECUTE ON ALL SEGMENTS;
-    SELECT label FROM pg_seclabel WHERE objoid = 'xf7(int)'::regprocedure
-       AND classoid = 'pg_proc'::regclass AND provider = 'gp';" \
+    $(label_of 'xf7(int)')" \
    "execute_on=all_segments"
 
 isl "a type that is spelled with a comma inside parentheses" \
-   "CREATE FUNCTION xf8(a numeric(10,2)) RETURNS int LANGUAGE sql AS 'SELECT 1'
+   "CREATE FUNCTION xf8(a numeric(10,2)) RETURNS SETOF int LANGUAGE sql AS 'SELECT 1'
       EXECUTE ON ALL SEGMENTS;
-    SELECT label FROM pg_seclabel WHERE objoid = 'xf8(numeric)'::regprocedure
-       AND classoid = 'pg_proc'::regclass AND provider = 'gp';" \
+    $(label_of 'xf8(numeric)')" \
    "execute_on=all_segments"
 
 isl "a schema-qualified name" \
    "CREATE SCHEMA xs;
-    CREATE FUNCTION xs.xf9(int) RETURNS int LANGUAGE sql AS 'SELECT \$1'
+    CREATE FUNCTION xs.xf9(int) RETURNS SETOF int LANGUAGE sql AS 'SELECT \$1'
       EXECUTE ON ALL SEGMENTS;
-    SELECT label FROM pg_seclabel WHERE objoid = 'xs.xf9(int)'::regprocedure
-       AND classoid = 'pg_proc'::regclass AND provider = 'gp';" \
+    $(label_of 'xs.xf9(int)')" \
    "execute_on=all_segments"
 
 isl "a procedure, which shares the clause in Cloudberry's grammar" \
    "CREATE PROCEDURE xp1(int) LANGUAGE sql AS 'SELECT \$1' EXECUTE ON ANY;
-    SELECT label FROM pg_seclabel WHERE objoid = 'xp1(int)'::regprocedure
-       AND classoid = 'pg_proc'::regclass AND provider = 'gp';" \
+    $(label_of 'xp1(int)')" \
    "execute_on=any"
 
 is "a function written without the clause carries no label" \
    "CREATE FUNCTION xf10(int) RETURNS int LANGUAGE sql AS 'SELECT \$1';
     SELECT count(*) FROM pg_seclabel WHERE objoid = 'xf10(int)'::regprocedure
        AND classoid = 'pg_proc'::regclass;" "0"
+
+# Cloudberry's rule, and its message.  The port used to take the clause on any
+# function.
+refused "EXECUTE ON ALL SEGMENTS on a function that returns one row is refused" \
+        "CREATE FUNCTION xbad1(int) RETURNS int LANGUAGE sql AS 'SELECT \$1'
+           EXECUTE ON ALL SEGMENTS;" \
+        "EXECUTE ON ALL SEGMENTS is only supported for set-returning functions"
+refused "and so is EXECUTE ON COORDINATOR" \
+        "CREATE FUNCTION xbad2(int) RETURNS int LANGUAGE sql AS 'SELECT \$1'
+           EXECUTE ON COORDINATOR;" \
+        "EXECUTE ON COORDINATOR is only supported for set-returning functions"
+refused "and by ALTER as well" \
+        "ALTER FUNCTION xf2(int) EXECUTE ON INITPLAN;" \
+        "EXECUTE ON INITPLAN is only supported for set-returning functions"
+is "the refused functions were not made" \
+   "SELECT count(*) FROM pg_proc WHERE proname LIKE 'xbad%';" "0"
+is "and the refused ALTER changed nothing" \
+   "$(label_of 'xf2(int)')" "execute_on=any"
 
 # THE COLLISION WORTH TESTING.  "EXECUTE ON" is also how every GRANT of the
 # execute privilege is written, and the rewriter now looks for the word
@@ -665,26 +812,43 @@ is "the words inside a function body are left where they are" \
       AS \$\$ SELECT 'EXECUTE ON ALL SEGMENTS' \$\$;
     SELECT xf11();" "EXECUTE ON ALL SEGMENTS"
 
-is "and the clause is gone from what the parser is handed" \
-   "SELECT gp_sql.desugar('CREATE FUNCTION g(int) RETURNS int LANGUAGE sql
-      AS ''SELECT 1'' EXECUTE ON ALL SEGMENTS') LIKE '%SECURITY LABEL FOR gp ON FUNCTION g(int) IS ''execute_on=all_segments''%';" \
-   "t"
+is "the clause is an option of the statement, in its place" \
+   "SELECT gp_sql.desugar('CREATE FUNCTION g(int) RETURNS SETOF int LANGUAGE sql
+      AS ''SELECT 1'' EXECUTE ON ALL SEGMENTS')
+         = 'CREATE FUNCTION g(int) RETURNS SETOF int LANGUAGE sql
+      AS ''SELECT 1'' SET gp.execute_on = ''all_segments''';" "t"
 
 is "a statement with no clause is handed back untouched" \
    "SELECT gp_sql.desugar('GRANT EXECUTE ON FUNCTION xf10(int) TO PUBLIC')
          = 'GRANT EXECUTE ON FUNCTION xf10(int) TO PUBLIC';" "t"
 
-# Taking the clause out of an ALTER leaves no action, and ALTER FUNCTION will
-# not accept that -- so the label replaces the statement.  Written beside
-# another action the ALTER stays and does the rest.  Same shape as
-# ALTER TABLE t TAG (...).
+# The option is not stored as a setting of the function, which would send
+# every call through the security-definer path and keep it from being inlined.
+is "and it is not left as a setting of the function" \
+   "SELECT count(*) FROM pg_proc WHERE proconfig IS NOT NULL AND proname LIKE 'xf%';" "0"
+
+# ALTER FUNCTION f(int) EXECUTE ON ANY is a whole statement of Cloudberry's:
+# with the option taken out, ALTER FUNCTION has nothing left to do and does
+# nothing, as it would -- but checks the function is the user's.  Beside
+# another action the ALTER does the rest.
 isl "ALTER FUNCTION with another action keeps the ALTER" \
-   "ALTER FUNCTION xf2(int) STRICT EXECUTE ON ALL SEGMENTS;
+   "ALTER FUNCTION xf1(int) STRICT EXECUTE ON ALL SEGMENTS;
     SELECT proisstrict::text || ' ' ||
            (SELECT label FROM pg_seclabel WHERE objoid = p.oid
               AND classoid = 'pg_proc'::regclass AND provider = 'gp')
-      FROM pg_proc p WHERE p.oid = 'xf2(int)'::regprocedure;" \
+      FROM pg_proc p WHERE p.oid = 'xf1(int)'::regprocedure;" \
    "true execute_on=all_segments"
+
+# The form Track F gives for writing the label by hand is the same option.
+isl "SET gp.execute_on written by hand is the same thing" \
+   "ALTER FUNCTION xf3(int) SET gp.execute_on = 'initplan';
+    $(label_of 'xf3(int)')" "execute_on=initplan"
+isl "and RESET takes it away" \
+   "ALTER FUNCTION xf3(int) RESET gp.execute_on;
+    SELECT count(*) FROM pg_seclabel WHERE objoid = 'xf3(int)'::regprocedure;" "0"
+refused "a value it does not have is refused" \
+        "ALTER FUNCTION xf3(int) SET gp.execute_on = 'segments';" \
+        'invalid value for gp.execute_on: "segments"'
 
 ###############################################################################
 echo
@@ -699,45 +863,39 @@ echo "11. the data-access attributes, and what they compose with"
 isl "NO SQL on a plpgsql function" \
    "CREATE FUNCTION da1() RETURNS int LANGUAGE plpgsql NO SQL
       AS \$\$ BEGIN RETURN 1; END \$\$;
-    SELECT label FROM pg_seclabel WHERE objoid = 'da1()'::regprocedure
-       AND classoid = 'pg_proc'::regclass AND provider = 'gp';" \
+    $(label_of 'da1()')" \
    "data_access=none"
 
 isl "CONTAINS SQL" \
    "CREATE FUNCTION da2(int) RETURNS int LANGUAGE sql CONTAINS SQL
       AS 'SELECT \$1';
-    SELECT label FROM pg_seclabel WHERE objoid = 'da2(int)'::regprocedure
-       AND classoid = 'pg_proc'::regclass AND provider = 'gp';" \
+    $(label_of 'da2(int)')" \
    "data_access=contains"
 
 isl "READS SQL DATA" \
    "CREATE FUNCTION da3(int) RETURNS int LANGUAGE sql READS SQL DATA
       AS 'SELECT \$1';
-    SELECT label FROM pg_seclabel WHERE objoid = 'da3(int)'::regprocedure
-       AND classoid = 'pg_proc'::regclass AND provider = 'gp';" \
+    $(label_of 'da3(int)')" \
    "data_access=reads"
 
 isl "MODIFIES SQL DATA" \
    "CREATE FUNCTION da4(int) RETURNS int LANGUAGE sql MODIFIES SQL DATA
       AS 'SELECT \$1';
-    SELECT label FROM pg_seclabel WHERE objoid = 'da4(int)'::regprocedure
-       AND classoid = 'pg_proc'::regclass AND provider = 'gp';" \
+    $(label_of 'da4(int)')" \
    "data_access=modifies"
 
 # A procedure takes them too.
 isl "a procedure takes them as well" \
    "CREATE PROCEDURE da5(int) LANGUAGE sql READS SQL DATA AS 'SELECT \$1';
-    SELECT label FROM pg_seclabel WHERE objoid = 'da5(int)'::regprocedure
-       AND classoid = 'pg_proc'::regclass AND provider = 'gp';" \
+    $(label_of 'da5(int)')" \
    "data_access=reads"
 
 # --- Cloudberry's three rules ------------------------------------------------
 #
 # They are validate_sql_data_access() in its functioncmds.c, and they are the
-# only thing the attribute does.  They are checked in the rewriter rather than
-# in the label provider, because Cloudberry rejects the statement before the
-# function is created and a check on the SECURITY LABEL that follows would
-# reject it after -- leaving the function behind.
+# only thing the attribute does.  They are checked against the function as the
+# statement leaves it, before the statement is over, so a function that breaks
+# one is not left behind.
 refused "IMMUTABLE conflicts with READS SQL DATA" \
    "CREATE FUNCTION dbad1(int) RETURNS int LANGUAGE sql IMMUTABLE
       READS SQL DATA AS 'SELECT \$1';" \
@@ -753,37 +911,35 @@ refused "a SQL function cannot say NO SQL" \
       AS 'SELECT \$1';" \
    "A SQL function cannot specify NO SQL."
 
-# The rejection has to happen before the function exists, which is the whole
-# reason the check is in the rewriter.
 is "and the rejected function was not created" \
    "SELECT count(*) FROM pg_proc WHERE proname LIKE 'dbad%';" "0"
 
 isl "IMMUTABLE with CONTAINS SQL is allowed" \
    "CREATE FUNCTION da6(int) RETURNS int LANGUAGE sql IMMUTABLE CONTAINS SQL
       AS 'SELECT \$1';
-    SELECT label FROM pg_seclabel WHERE objoid = 'da6(int)'::regprocedure
-       AND classoid = 'pg_proc'::regclass AND provider = 'gp';" \
+    $(label_of 'da6(int)')" \
    "data_access=contains"
 
+# Cloudberry holds every ALTER FUNCTION to them, whatever it changed, so a
+# function that reads can no longer be made IMMUTABLE.
+refused "ALTER FUNCTION ... IMMUTABLE of a function that READS SQL DATA is refused" \
+   "ALTER FUNCTION da3(int) IMMUTABLE;" "IMMUTABLE conflicts with READS SQL DATA."
+is "and the function is as it was" \
+   "SELECT provolatile FROM pg_proc WHERE oid = 'da3(int)'::regprocedure;" "v"
+
 # --- composing with EXECUTE ON -----------------------------------------------
-#
-# This is why the two families are read in one pass.  SECURITY LABEL replaces
-# a provider's label rather than merging into it, so a statement per clause
-# would leave only the second key.
 isl "both clauses on one function write both keys" \
-   "CREATE FUNCTION da7(int) RETURNS int LANGUAGE sql READS SQL DATA
+   "CREATE FUNCTION da7(int) RETURNS SETOF int LANGUAGE sql READS SQL DATA
       EXECUTE ON ALL SEGMENTS AS 'SELECT \$1';
-    SELECT label FROM pg_seclabel WHERE objoid = 'da7(int)'::regprocedure
-       AND classoid = 'pg_proc'::regclass AND provider = 'gp';" \
+    $(label_of 'da7(int)')" \
    "execute_on=all_segments,data_access=reads"
 
 # The keys come out in a fixed order, so two spellings of the same function
 # produce the same label rather than two that compare unequal.
 isl "written the other way round, the label is the same" \
-   "CREATE FUNCTION da8(int) RETURNS int LANGUAGE sql EXECUTE ON ALL SEGMENTS
+   "CREATE FUNCTION da8(int) RETURNS SETOF int LANGUAGE sql EXECUTE ON ALL SEGMENTS
       READS SQL DATA AS 'SELECT \$1';
-    SELECT label FROM pg_seclabel WHERE objoid = 'da8(int)'::regprocedure
-       AND classoid = 'pg_proc'::regclass AND provider = 'gp';" \
+    $(label_of 'da8(int)')" \
    "execute_on=all_segments,data_access=reads"
 
 is "and the two agree" \
@@ -792,11 +948,22 @@ is "and the two agree" \
          = (SELECT label FROM pg_seclabel WHERE objoid = 'da8(int)'::regprocedure
               AND classoid = 'pg_proc'::regclass AND provider = 'gp');" "t"
 
+# THE DEFECT ONE LABEL PER STATEMENT HAD.  The clause of an ALTER was a
+# SECURITY LABEL, which replaces the provider's whole label, so setting one
+# key took the other away.
+isl "ALTER of one key keeps the other" \
+   "ALTER FUNCTION da7(int) EXECUTE ON ANY;
+    $(label_of 'da7(int)')" \
+   "execute_on=any,data_access=reads"
+isl "in the same order, whichever it changed" \
+   "ALTER FUNCTION da8(int) CONTAINS SQL;
+    $(label_of 'da8(int)')" \
+   "execute_on=all_segments,data_access=contains"
+
 # --- ALTER -------------------------------------------------------------------
 isl "ALTER FUNCTION can set it on its own" \
    "ALTER FUNCTION da2(int) MODIFIES SQL DATA;
-    SELECT label FROM pg_seclabel WHERE objoid = 'da2(int)'::regprocedure
-       AND classoid = 'pg_proc'::regclass AND provider = 'gp';" \
+    $(label_of 'da2(int)')" \
    "data_access=modifies"
 
 isl "and beside another action the ALTER still does the rest" \
@@ -806,6 +973,21 @@ isl "and beside another action the ALTER still does the rest" \
               AND classoid = 'pg_proc'::regclass AND provider = 'gp')
       FROM pg_proc p WHERE p.oid = 'da3(int)'::regprocedure;" \
    "true data_access=contains"
+
+# --- CREATE OR REPLACE says what both are ------------------------------------
+#
+# Cloudberry's ProcedureCreate writes both columns whenever a function is
+# made or replaced, so one the statement does not name goes back to its
+# default -- which the label spells by leaving the key out.
+isl "CREATE OR REPLACE with one clause takes the other away" \
+   "CREATE OR REPLACE FUNCTION da7(int) RETURNS SETOF int LANGUAGE sql
+      EXECUTE ON ALL SEGMENTS AS 'SELECT \$1';
+    $(label_of 'da7(int)')" \
+   "execute_on=all_segments"
+is "and with none, both" \
+   "CREATE OR REPLACE FUNCTION da7(int) RETURNS SETOF int LANGUAGE sql AS 'SELECT \$1';
+    SELECT count(*) FROM pg_seclabel WHERE objoid = 'da7(int)'::regprocedure
+       AND classoid = 'pg_proc'::regclass;" "0"
 
 # --- what the trigger pair buys, and what is observable of it ----------------
 #
@@ -829,7 +1011,7 @@ is "a function with only LANGUAGE sql is not rewritten" \
          = 'CREATE FUNCTION z(int) RETURNS int LANGUAGE sql AS ''x''';" "t"
 
 is "but NO SQL is seen" \
-   "SELECT gp_sql.desugar('CREATE FUNCTION z() RETURNS int LANGUAGE plpgsql NO SQL AS ''x''') LIKE '%data_access=none%';" "t"
+   "SELECT gp_sql.desugar('CREATE FUNCTION z() RETURNS int LANGUAGE plpgsql NO SQL AS ''x''') LIKE '%SET gp.data_access = ''none''%';" "t"
 
 # "node_sql" is one word, not "no" followed by "sql", and must not be rewritten.
 is "a word that merely starts with a trigger is left alone" \
@@ -1179,18 +1361,25 @@ at "and after a clause of Cloudberry's that the rewrite moved" \
 # theirs.  Those were the rewrite's: at 364a988298a the SELECT here was
 # recorded as "er_it", and a rewrite longer than what it replaced put a
 # statement past the end of the text, which an assert-enabled server stops on
-# in CleanQuerytext.  The constants the rewrite writes -- the schema's name in
-# the call WITH TAG becomes -- are in no text of the user's, and are left
-# alone: charged to the clause, they stopped such a server too.
+# in CleanQuerytext.  The constants the rewrite writes -- the 'any' of the SET
+# that EXECUTE ON ANY becomes -- are in no text of the user's, and are left
+# alone: charged to the clause, they stopped such a server too, and one left
+# where the rewrite put it would be cut out of the user's text past the end of
+# its statement.  So would the value of a SET in a statement after one the
+# rewrite changed, which is at the rewrite's positions like everything else.
+#
+# Each statement is recorded once.  CREATE SCHEMA ... WITH TAG was two, the
+# schema and the call that tagged it, and was recorded twice.
 q "CREATE EXTENSION pg_stat_statements;
-   CREATE FUNCTION pss_f(int) RETURNS int LANGUAGE sql AS 'SELECT 1';" > /dev/null
+   CREATE FUNCTION pss_f(int) RETURNS int LANGUAGE sql AS 'SELECT 1';
+   CREATE ROLE pss_r;" > /dev/null
 q "SELECT pg_stat_statements_reset();" > /dev/null
 q "ALTER FUNCTION pss_f(int) EXECUTE ON ANY; SELECT decode(7, 7, 'seven', 8, 'eight') AS d, 42 AS after_it;
-   CREATE SCHEMA pss_s WITH TAG (env = 'prod');" > /dev/null
+   CREATE SCHEMA pss_s WITH TAG (env = 'prod'); ALTER ROLE pss_r SET work_mem = '2MB';" > /dev/null
 is "pg_stat_statements has each statement's own text, its constants where they were written" \
    "SELECT string_agg(query, ' | ' ORDER BY query) FROM pg_stat_statements
      WHERE query LIKE '%pss_%' OR query LIKE '%after_it%';" \
-   "ALTER FUNCTION pss_f(int) EXECUTE ON ANY | CREATE SCHEMA pss_s WITH TAG (env = 'prod') | CREATE SCHEMA pss_s WITH TAG (env = 'prod'); | SELECT decode(\$1, \$2, \$3, \$4, \$5) AS d, \$6 AS after_it"
+   "ALTER FUNCTION pss_f(int) EXECUTE ON ANY | ALTER ROLE pss_r SET work_mem = \$1 | CREATE SCHEMA pss_s WITH TAG (env = 'prod') | SELECT decode(\$1, \$2, \$3, \$4, \$5) AS d, \$6 AS after_it"
 
 # Cloudberry's grammar refuses these where the arm stops being IS NOT DISTINCT
 # FROM, and so does this, at the same word.
@@ -1203,6 +1392,132 @@ at "IS DISTINCT FROM is not the form" \
 
 at "nor is IS NOT DISTINCT without FROM" \
    "SELECT CASE 'a' WHEN IS NOT DISTINCT 'b' THEN 'x' END" "syntax error at or near \"'b'\"" "'b'"
+
+echo
+echo "14. one statement for one, answering as the statement does"
+
+# Every statement of Cloudberry's is one of PostgreSQL's once rewritten, so a
+# driver on the extended protocol -- JDBC, and most others -- can prepare it,
+# and psql's \bind sends it as they do.  TAG on CREATE SCHEMA, CREATE USER,
+# CREATE SEQUENCE and CREATE FOREIGN TABLE, a foreign table's DISTRIBUTED BY,
+# and CREATE FUNCTION's EXECUTE ON and data-access attributes were each the
+# statement and a SELECT or a SECURITY LABEL after it, which the extended
+# protocol refuses.
+#
+# And each answers as a statement does, with its command tag and no row.  One
+# PostgreSQL has no counterpart of is a CALL, whose tag is CALL: CREATE TAG,
+# CREATE PROFILE and the rest were a SELECT of a function, which answered with
+# a row of nothing and SELECT 1.
+
+# session <name> <psql input> <what psql prints>: not quiet, so a statement
+# that answers with a command tag prints it.  \parse answers with an empty
+# one, and its blank line is left out.
+session() {
+	local got; got=$(printf '%s\n' "$2" | "$PSQL" -X -t -A -d postgres 2>&1 | grep -v '^$')
+	[ "$got" = "$3" ] && ok "$1" || notok "$1" "want [$3], got [$got]"
+}
+
+# answers <name> <one statement, without its semicolon> <its command tag>
+answers() { session "$1" "$2 \\bind \\g" "$3"; }
+
+session "what \\bind sends is prepared, and two statements cannot be" \
+        'SELECT 1\; SELECT 2 \bind \g' \
+        "ERROR:  cannot insert multiple commands into a prepared statement"
+
+answers "CREATE TAG" "CREATE TAG st_env ALLOWED_VALUES 'prod', 'dev'" "CALL"
+answers "ALTER TAG" "ALTER TAG st_env ADD ALLOWED_VALUES 'test'" "CALL"
+answers "DROP TAG" "CREATE TAG st_gone \\bind \\g
+DROP TAG st_gone" "CALL
+CALL"
+is "and each did what it says" \
+   "SELECT string_agg(tagname || ' ' || array_to_string(allowed_values, ','), ' ')
+      FROM gp_sql.tag WHERE tagname LIKE 'st\_%';" "st_env prod,dev,test"
+
+answers "TAG on CREATE SCHEMA" "CREATE SCHEMA st_s WITH TAG (st_env = 'prod')" "CREATE SCHEMA"
+answers "on CREATE USER" "CREATE USER st_u TAG (st_env = 'prod')" "CREATE ROLE"
+answers "on CREATE SEQUENCE" "CREATE SEQUENCE st_q TAG (st_env = 'prod')" "CREATE SEQUENCE"
+answers "on CREATE FOREIGN TABLE" \
+        "CREATE FOREIGN TABLE st_ft (a int) SERVER tag_srv TAG (st_env = 'prod')" "CREATE FOREIGN TABLE"
+answers "DISTRIBUTED BY on a foreign table" \
+        "CREATE FOREIGN TABLE st_ft2 (a int) SERVER tag_srv DISTRIBUTED BY (a)" "CREATE FOREIGN TABLE"
+is "and the tags and the policy are where they were put" \
+   "SELECT concat_ws(' ', gp_sql.schema_tags('st_s'::regnamespace) ->> 'st_env',
+                          gp_sql.role_tags('st_u'::regrole) ->> 'st_env',
+                          gp_sql.relation_tags('st_q'::regclass) ->> 'st_env',
+                          gp_sql.relation_tags('st_ft'::regclass) ->> 'st_env',
+                          gp_sql.distribution('st_ft2'::regclass));" "prod prod prod prod (a)"
+
+answers "CREATE FUNCTION ... EXECUTE ON, with a data-access attribute" \
+        "CREATE FUNCTION st_f(int) RETURNS SETOF int LANGUAGE sql READS SQL DATA
+           EXECUTE ON ALL SEGMENTS AS 'SELECT \$1'" "CREATE FUNCTION"
+answers "ALTER FUNCTION ... EXECUTE ON, on its own" \
+        "ALTER FUNCTION st_f(int) EXECUTE ON COORDINATOR" "ALTER FUNCTION"
+is "and the function's label says both" "$(label_of 'st_f(int)')" \
+   "execute_on=coordinator,data_access=reads"
+
+answers "CREATE PROFILE" "CREATE PROFILE st_p LIMIT FAILED_LOGIN_ATTEMPTS 3" "CALL"
+answers "ALTER PROFILE" "ALTER PROFILE st_p LIMIT PASSWORD_REUSE_MAX 2" "CALL"
+answers "ALTER USER ... PROFILE, which is ALTER ROLE" "ALTER USER st_u PROFILE st_p" "ALTER ROLE"
+is "and the profile is the user's" "SELECT gp_security.role_profile('st_u');" "st_p"
+answers "ALTER USER ... ACCOUNT LOCK" "ALTER USER st_u ACCOUNT LOCK" "ALTER ROLE"
+is "and the account is locked" \
+   "SELECT gp_security.role_locked_until('st_u') = 'infinity'::timestamptz;" "t"
+answers "ALTER USER ... NOPROFILE" "ALTER USER st_u NOPROFILE" "ALTER ROLE"
+answers "DROP PROFILE" "DROP PROFILE st_p" "CALL"
+is "and the profile is gone, from the user and the catalog" \
+   "SELECT (gp_security.role_profile('st_u') IS NULL) || ' ' ||
+           (SELECT count(*) FROM gp_security.profiles WHERE profile = 'st_p');" "true 0"
+
+answers "ALTER USER ... TAG" "ALTER USER st_u TAG (st_env = 'dev')" "ALTER ROLE"
+answers "ALTER SCHEMA ... TAG, which is a CALL" "ALTER SCHEMA st_s TAG (st_env = 'dev')" "CALL"
+answers "ALTER DATABASE ... TAG" "ALTER DATABASE tagged_db TAG (st_env = 'dev')" "ALTER DATABASE"
+answers "ALTER TABLESPACE ... TAG" "ALTER TABLESPACE tagged_ts TAG (st_env = 'dev')" "ALTER TABLESPACE"
+answers "ALTER SEQUENCE ... TAG" "ALTER SEQUENCE st_q TAG (st_env = 'dev')" "ALTER SEQUENCE"
+answers "ALTER FOREIGN TABLE ... UNSET TAG" \
+        "ALTER FOREIGN TABLE st_ft UNSET TAG (st_env)" "ALTER FOREIGN TABLE"
+is "and each changed its tags" \
+   "SELECT concat_ws(' ', gp_sql.role_tags('st_u'::regrole) ->> 'st_env',
+                          gp_sql.schema_tags('st_s'::regnamespace) ->> 'st_env',
+                          gp_sql.database_tags('tagged_db') ->> 'st_env',
+                          gp_sql.tablespace_tags('tagged_ts') ->> 'st_env',
+                          gp_sql.relation_tags('st_q'::regclass) ->> 'st_env',
+                          coalesce(gp_sql.relation_tags('st_ft'::regclass)::text, 'none'));" \
+   "dev dev dev dev dev none"
+
+answers "CREATE TASK" "CREATE TASK st_t SCHEDULE '0 2 * * *' AS 'VACUUM'" "CALL"
+answers "ALTER TASK" "ALTER TASK st_t SCHEDULE '0 3 * * *'" "CALL"
+is "and the task is as it was altered" \
+   "SELECT schedule FROM gp_task.job WHERE jobname = 'st_t';" "0 3 * * *"
+answers "DROP TASK" "DROP TASK st_t" "CALL"
+
+answers "CREATE DIRECTORY TABLE, which is CREATE TABLE" "CREATE DIRECTORY TABLE st_docs" "CREATE TABLE"
+is "and it is one" \
+   "SELECT gp_sql.directory_table_location('st_docs'::regclass) IS NOT NULL;" "t"
+
+# A prepared statement is parsed once and run as often as it is executed, and
+# what the rewrite put in its parse tree is taken out of a copy, never of the
+# tree the plan cache keeps: run again, the statement does it again.  Between
+# the two runs the object is put back as it was.
+session "a prepared statement that carries tags does it each time it runs" \
+        "ALTER USER st_u TAG (st_env = 'prod') \\parse st_tag_u
+\\bind_named st_tag_u \\g
+ALTER USER st_u UNSET TAG (st_env);
+\\bind_named st_tag_u \\g
+SELECT gp_sql.role_tags('st_u'::regrole) ->> 'st_env';" \
+        "ALTER ROLE
+ALTER ROLE
+ALTER ROLE
+prod"
+session "and so does one with EXECUTE ON" \
+        "ALTER FUNCTION st_f(int) EXECUTE ON ALL SEGMENTS \\parse st_eo
+\\bind_named st_eo \\g
+ALTER FUNCTION st_f(int) EXECUTE ON INITPLAN;
+\\bind_named st_eo \\g
+$(label_of 'st_f(int)')" \
+        "ALTER FUNCTION
+ALTER FUNCTION
+ALTER FUNCTION
+execute_on=all_segments,data_access=reads"
 
 echo
 echo "  $pass passed, $fail failed"

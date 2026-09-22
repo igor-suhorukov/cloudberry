@@ -36,6 +36,10 @@ REVOKE ALL ON gp_security.password_history FROM PUBLIC;
 
 -----------------------------------------------------------------------------
 -- Defining a profile
+--
+-- Procedures, because each is what a statement of Cloudberry's becomes: O26
+-- writes CREATE PROFILE as CALL gp_security.create_profile(...), which
+-- answers as a DDL statement does, with a command tag and no row.
 -----------------------------------------------------------------------------
 
 /*
@@ -43,7 +47,7 @@ REVOKE ALL ON gp_security.password_history FROM PUBLIC;
  * about this", which leaves it to the default profile; -2 is UNLIMITED, as in
  * Cloudberry.
  */
-CREATE FUNCTION gp_security.create_profile(profile name,
+CREATE PROCEDURE gp_security.create_profile(profile name,
 										   failed_login_attempts int DEFAULT NULL,
 										   password_lock_time int DEFAULT NULL,
 										   password_life_time int DEFAULT NULL,
@@ -52,7 +56,6 @@ CREATE FUNCTION gp_security.create_profile(profile name,
 										   password_reuse_max int DEFAULT NULL,
 										   password_allow_hashed boolean DEFAULT NULL,
 										   password_verify_function text DEFAULT NULL)
-RETURNS void
 LANGUAGE plpgsql
 AS $$
 DECLARE
@@ -76,10 +79,10 @@ BEGIN
 END;
 $$;
 
-COMMENT ON FUNCTION gp_security.create_profile(name, int, int, int, int, int, int, boolean, text) IS
+COMMENT ON PROCEDURE gp_security.create_profile(name, int, int, int, int, int, int, boolean, text) IS
 	'define a password profile; what Cloudberry writes as CREATE PROFILE';
 
-CREATE FUNCTION gp_security.alter_profile(profile name,
+CREATE PROCEDURE gp_security.alter_profile(profile name,
 										  failed_login_attempts int DEFAULT NULL,
 										  password_lock_time int DEFAULT NULL,
 										  password_life_time int DEFAULT NULL,
@@ -89,7 +92,6 @@ CREATE FUNCTION gp_security.alter_profile(profile name,
 										  password_allow_hashed boolean DEFAULT NULL,
 										  password_verify_function text DEFAULT NULL,
 										  unset text[] DEFAULT NULL)
-RETURNS void
 LANGUAGE plpgsql
 AS $$
 DECLARE
@@ -128,44 +130,50 @@ BEGIN
 END;
 $$;
 
-COMMENT ON FUNCTION gp_security.alter_profile(name, int, int, int, int, int, int, boolean, text, text[]) IS
+COMMENT ON PROCEDURE gp_security.alter_profile(name, int, int, int, int, int, int, boolean, text, text[]) IS
 	'change a profile''s limits; what Cloudberry writes as ALTER PROFILE. A limit given as NULL is left alone; name it in "unset" to take it away.';
 
-CREATE FUNCTION gp_security.drop_profile(profile name,
-										 missing_ok boolean DEFAULT false)
-RETURNS void
+/*
+ * DROP PROFILE a, b is one statement, so it is one CALL, over all of them:
+ * one refused takes the others back with it, as the statement would.
+ */
+CREATE PROCEDURE gp_security.drop_profile(profiles name[],
+										  missing_ok boolean DEFAULT false)
 LANGUAGE plpgsql
 AS $$
 DECLARE
+	one name;
 	under bigint;
 BEGIN
-	IF NOT EXISTS (SELECT 1 FROM gp_security.profiles p WHERE p.profile = drop_profile.profile) THEN
-		IF missing_ok THEN
-			RAISE NOTICE 'profile "%" does not exist, skipping', profile;
-			RETURN;
+	FOREACH one IN ARRAY profiles LOOP
+		IF NOT EXISTS (SELECT 1 FROM gp_security.profiles p WHERE p.profile = one) THEN
+			IF missing_ok THEN
+				RAISE NOTICE 'profile "%" does not exist, skipping', one;
+				CONTINUE;
+			END IF;
+			RAISE EXCEPTION 'profile "%" does not exist', one
+				USING ERRCODE = 'undefined_object';
 		END IF;
-		RAISE EXCEPTION 'profile "%" does not exist', profile
-			USING ERRCODE = 'undefined_object';
-	END IF;
 
-	/*
-	 * RESTRICT, as in Cloudberry: a role left pointing at a profile that is
-	 * gone would silently fall back to the default.
-	 */
-	SELECT count(*) INTO under FROM gp_security.role_profiles rp
-	 WHERE rp.profile = drop_profile.profile;
-	IF under > 0 THEN
-		RAISE EXCEPTION 'cannot drop profile "%" while % role(s) are under it',
-			profile, under
-			USING ERRCODE = 'dependent_objects_still_exist';
-	END IF;
+		/*
+		 * RESTRICT, as in Cloudberry: a role left pointing at a profile that
+		 * is gone would silently fall back to the default.
+		 */
+		SELECT count(*) INTO under FROM gp_security.role_profiles rp
+		 WHERE rp.profile = one;
+		IF under > 0 THEN
+			RAISE EXCEPTION 'cannot drop profile "%" while % role(s) are under it',
+				one, under
+				USING ERRCODE = 'dependent_objects_still_exist';
+		END IF;
 
-	EXECUTE format('DROP ROLE %I', profile);
+		EXECUTE format('DROP ROLE %I', one);
+	END LOOP;
 END;
 $$;
 
-COMMENT ON FUNCTION gp_security.drop_profile(name, boolean) IS
-	'drop a profile; what Cloudberry writes as DROP PROFILE';
+COMMENT ON PROCEDURE gp_security.drop_profile(name[], boolean) IS
+	'drop profiles; what Cloudberry writes as DROP PROFILE';
 
 /* The limits as a label, with anything not given left out. */
 CREATE FUNCTION gp_security.profile_settings_json(failed_login_attempts int,
@@ -203,7 +211,7 @@ AS 'MODULE_PATHNAME', 'gp_security_assign_profile'
 LANGUAGE C;
 
 COMMENT ON FUNCTION gp_security.assign_profile(name, name) IS
-	'put a role under a profile; what Cloudberry writes as ALTER USER ... PROFILE. A NULL profile takes it away.';
+	'put a role under a profile, as Cloudberry''s ALTER USER ... PROFILE does; a NULL profile takes it away';
 
 CREATE FUNCTION gp_security.lock_role(rolename name) RETURNS void
 AS 'MODULE_PATHNAME', 'gp_security_lock_role' LANGUAGE C STRICT;
@@ -212,9 +220,9 @@ CREATE FUNCTION gp_security.unlock_role(rolename name) RETURNS void
 AS 'MODULE_PATHNAME', 'gp_security_unlock_role' LANGUAGE C STRICT;
 
 COMMENT ON FUNCTION gp_security.lock_role(name) IS
-	'what Cloudberry writes as ALTER USER ... ACCOUNT LOCK';
+	'lock an account, as Cloudberry''s ALTER USER ... ACCOUNT LOCK does';
 COMMENT ON FUNCTION gp_security.unlock_role(name) IS
-	'what Cloudberry writes as ALTER USER ... ACCOUNT UNLOCK';
+	'unlock an account, as Cloudberry''s ALTER USER ... ACCOUNT UNLOCK does';
 
 CREATE FUNCTION gp_security.role_locked_until(rolename name) RETURNS timestamptz
 AS 'MODULE_PATHNAME', 'gp_security_role_locked_until' LANGUAGE C STRICT STABLE;
@@ -287,7 +295,7 @@ BEGIN
 					WHERE r.rolname = 'gp_default'
 					  AND l.classoid = 'pg_catalog.pg_authid'::pg_catalog.regclass
 					  AND l.provider = 'gp_profile') THEN
-		PERFORM gp_security.create_profile('gp_default');
+		CALL gp_security.create_profile('gp_default');
 	END IF;
 END
 $$;

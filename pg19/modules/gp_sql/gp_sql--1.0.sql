@@ -85,6 +85,10 @@ GRANT SELECT, INSERT, UPDATE, DELETE ON gp_sql.index_tag TO PUBLIC;
 
 -----------------------------------------------------------------------------
 -- Defining a tag: CREATE TAG, ALTER TAG, DROP TAG
+--
+-- Procedures, because each is what a statement of Cloudberry's becomes: O26
+-- writes CREATE TAG as CALL gp_sql.create_tag(...), which answers as a DDL
+-- statement does, with a command tag and no row.
 -----------------------------------------------------------------------------
 
 /*
@@ -123,10 +127,9 @@ BEGIN
 END;
 $$;
 
-CREATE FUNCTION gp_sql.create_tag(tagname name,
-								  allowed_values text[] DEFAULT NULL,
-								  if_not_exists boolean DEFAULT false)
-RETURNS void
+CREATE PROCEDURE gp_sql.create_tag(tagname name,
+								   allowed_values text[] DEFAULT NULL,
+								   if_not_exists boolean DEFAULT false)
 LANGUAGE plpgsql
 AS $$
 BEGIN
@@ -146,7 +149,7 @@ BEGIN
 END;
 $$;
 
-COMMENT ON FUNCTION gp_sql.create_tag(name, text[], boolean) IS
+COMMENT ON PROCEDURE gp_sql.create_tag(name, text[], boolean) IS
 	'define a tag; what Cloudberry writes as CREATE TAG';
 
 /*
@@ -160,12 +163,14 @@ COMMENT ON FUNCTION gp_sql.create_tag(name, text[], boolean) IS
  * (checkDropTagValue).  The same is done here, over this database: a value in
  * use in another database cannot be seen from here, which is the price of
  * definitions that are not shared.
+ *
+ * missing_ok is ALTER TAG IF EXISTS, which says so and does nothing.
  */
-CREATE FUNCTION gp_sql.alter_tag(tagname name,
-								 add_values text[] DEFAULT NULL,
-								 drop_values text[] DEFAULT NULL,
-								 unset_values boolean DEFAULT false)
-RETURNS void
+CREATE PROCEDURE gp_sql.alter_tag(tagname name,
+								  add_values text[] DEFAULT NULL,
+								  drop_values text[] DEFAULT NULL,
+								  unset_values boolean DEFAULT false,
+								  missing_ok boolean DEFAULT false)
 LANGUAGE plpgsql
 AS $$
 DECLARE
@@ -176,6 +181,10 @@ BEGIN
 	  FROM gp_sql.tag t WHERE t.tagname = alter_tag.tagname;
 
 	IF NOT FOUND THEN
+		IF missing_ok THEN
+			RAISE NOTICE 'tag "%" does not exist, skipping', tagname;
+			RETURN;
+		END IF;
 		RAISE EXCEPTION 'tag "%" does not exist', tagname
 			USING ERRCODE = 'undefined_object';
 	END IF;
@@ -212,11 +221,11 @@ BEGIN
 END;
 $$;
 
-COMMENT ON FUNCTION gp_sql.alter_tag(name, text[], text[], boolean) IS
+COMMENT ON PROCEDURE gp_sql.alter_tag(name, text[], text[], boolean, boolean) IS
 	'change a tag''s allowed values; what Cloudberry writes as ALTER TAG';
 
-CREATE FUNCTION gp_sql.rename_tag(tagname name, newname name)
-RETURNS void
+CREATE PROCEDURE gp_sql.rename_tag(tagname name, newname name,
+								   missing_ok boolean DEFAULT false)
 LANGUAGE plpgsql
 AS $$
 DECLARE
@@ -224,6 +233,10 @@ DECLARE
 BEGIN
 	UPDATE gp_sql.tag t SET tagname = newname WHERE t.tagname = rename_tag.tagname;
 	IF NOT FOUND THEN
+		IF missing_ok THEN
+			RAISE NOTICE 'tag "%" does not exist, skipping', tagname;
+			RETURN;
+		END IF;
 		RAISE EXCEPTION 'tag "%" does not exist', tagname
 			USING ERRCODE = 'undefined_object';
 	END IF;
@@ -246,44 +259,51 @@ BEGIN
 END;
 $$;
 
-COMMENT ON FUNCTION gp_sql.rename_tag(name, name) IS
+COMMENT ON PROCEDURE gp_sql.rename_tag(name, name, boolean) IS
 	'rename a tag; what Cloudberry writes as ALTER TAG ... RENAME TO';
 
-CREATE FUNCTION gp_sql.drop_tag(tagname name, missing_ok boolean DEFAULT false)
-RETURNS void
+/*
+ * DROP TAG a, b is one statement, so it is one CALL, over all of them: each
+ * is dropped or refused in turn, and one refused takes the others back with
+ * it, as the statement would.
+ */
+CREATE PROCEDURE gp_sql.drop_tag(tagnames name[], missing_ok boolean DEFAULT false)
 LANGUAGE plpgsql
 AS $$
 DECLARE
+	one name;
 	used bigint;
 BEGIN
-	IF NOT EXISTS (SELECT 1 FROM gp_sql.tag t WHERE t.tagname = drop_tag.tagname) THEN
-		IF missing_ok THEN
-			RAISE NOTICE 'tag "%" does not exist, skipping', tagname;
-			RETURN;
+	FOREACH one IN ARRAY tagnames LOOP
+		IF NOT EXISTS (SELECT 1 FROM gp_sql.tag t WHERE t.tagname = one) THEN
+			IF missing_ok THEN
+				RAISE NOTICE 'tag "%" does not exist, skipping', one;
+				CONTINUE;
+			END IF;
+			RAISE EXCEPTION 'tag "%" does not exist', one
+				USING ERRCODE = 'undefined_object';
 		END IF;
-		RAISE EXCEPTION 'tag "%" does not exist', tagname
-			USING ERRCODE = 'undefined_object';
-	END IF;
 
-	/*
-	 * RESTRICT, always, as in Cloudberry: an assignment names the tag, and an
-	 * assignment in another database cannot be reached from here.
-	 */
-	SELECT count(*) INTO used FROM gp_sql.tag_descriptions d
-	 WHERE d.tagname = drop_tag.tagname;
-	IF used > 0 THEN
-		RAISE EXCEPTION 'cannot drop tag "%" while % object(s) carry it',
-			tagname, used
-			USING ERRCODE = 'dependent_objects_still_exist',
-				  HINT = 'Remove the tag from those objects first.';
-	END IF;
+		/*
+		 * RESTRICT, always, as in Cloudberry: an assignment names the tag, and
+		 * an assignment in another database cannot be reached from here.
+		 */
+		SELECT count(*) INTO used FROM gp_sql.tag_descriptions d
+		 WHERE d.tagname = one;
+		IF used > 0 THEN
+			RAISE EXCEPTION 'cannot drop tag "%" while % object(s) carry it',
+				one, used
+				USING ERRCODE = 'dependent_objects_still_exist',
+					  HINT = 'Remove the tag from those objects first.';
+		END IF;
 
-	DELETE FROM gp_sql.tag t WHERE t.tagname = drop_tag.tagname;
+		DELETE FROM gp_sql.tag t WHERE t.tagname = one;
+	END LOOP;
 END;
 $$;
 
-COMMENT ON FUNCTION gp_sql.drop_tag(name, boolean) IS
-	'drop a tag; what Cloudberry writes as DROP TAG';
+COMMENT ON PROCEDURE gp_sql.drop_tag(name[], boolean) IS
+	'drop tags; what Cloudberry writes as DROP TAG';
 
 -----------------------------------------------------------------------------
 -- Reading the tags of an object
@@ -500,6 +520,38 @@ BEGIN
 END;
 $$;
 
+/*
+ * ALTER SCHEMA s TAG (...) and ALTER SCHEMA s UNSET TAG (...), each a whole
+ * statement of Cloudberry's, and one CALL of this: PostgreSQL has no ALTER
+ * SCHEMA that takes an option, as ALTER DATABASE and ALTER TABLESPACE do, so
+ * there is nothing for the tags to be options of.  The label is written with
+ * SECURITY LABEL, so the schema has to be the user's.
+ */
+CREATE PROCEDURE gp_sql.alter_schema_tags(obj regnamespace,
+										  set_tags jsonb DEFAULT NULL,
+										  unset_tags name[] DEFAULT NULL)
+LANGUAGE plpgsql
+AS $$
+DECLARE
+	tags jsonb := coalesce(gp_sql.schema_tags(obj), '{}'::jsonb);
+BEGIN
+	IF set_tags IS NOT NULL THEN
+		tags := tags || set_tags;
+	END IF;
+	IF unset_tags IS NOT NULL THEN
+		tags := tags - unset_tags::text[];
+	END IF;
+
+	EXECUTE format('SECURITY LABEL FOR gp_tag ON SCHEMA %s IS %s',
+				   obj::text,
+				   CASE WHEN tags = '{}'::jsonb THEN 'NULL'
+						ELSE quote_literal(tags::text) END);
+END;
+$$;
+
+COMMENT ON PROCEDURE gp_sql.alter_schema_tags(regnamespace, jsonb, name[]) IS
+	'give a schema tags, or take them away; what Cloudberry writes as ALTER SCHEMA ... TAG and UNSET TAG';
+
 CREATE FUNCTION gp_sql.set_database_tag(dbname name, tagname name, tagvalue text)
 RETURNS void
 LANGUAGE plpgsql
@@ -664,9 +716,10 @@ COMMENT ON FUNCTION gp_sql.claim_directory_table(regclass) IS
 	'make an existing table of the right shape into a directory table';
 
 /*
- * CREATE DIRECTORY TABLE becomes this.  The columns are Cloudberry's
+ * A directory table made by a function.  The columns are Cloudberry's
  * GetDirectoryTableSchema, in its order, because the tag column is found by
- * number when DML is checked.
+ * number when DML is checked; CREATE DIRECTORY TABLE writes the same CREATE
+ * TABLE, with WITH (gp.directory_table = true), which claims it the same way.
  */
 CREATE FUNCTION gp_sql.create_directory_table(dirtable text,
 											  tablespace name DEFAULT NULL)
@@ -977,8 +1030,9 @@ GRANT SELECT ON gp_sql.storage_tablespaces TO PUBLIC;
  * Where DISTRIBUTED BY lands
  *
  * O26's grammar rewrites DISTRIBUTED BY (a, b), DISTRIBUTED RANDOMLY and
- * DISTRIBUTED REPLICATED into a call to this.  What reads the policy is
- * ORCA's relcache translator, which asks every relation what it is
+ * DISTRIBUTED REPLICATED into an option of the statement they are on, which
+ * gp_sql takes out and records as this function does.  What reads the policy
+ * is ORCA's relcache translator, which asks every relation what it is
  * distributed by, and the dispatch of M2; on one node every table is on the
  * one node, so recording it is all there is to do here.
  *
