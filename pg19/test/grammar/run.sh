@@ -72,6 +72,41 @@ refused() {
 	esac
 }
 
+# at <name> <one-line statement> <error> <token>: the statement fails with that
+# error, and psql's caret is under the token -- its first occurrence in the
+# statement, or the one after "@@" if the token is written "@@token" there.
+# psql puts the caret at the position the server reports, counted in the text
+# it sent, which is what the rewrite has to report in.  A line longer than
+# psql shows is cut, with "..." where it was, so where the caret is in the
+# statement is where the shown part is in it plus where the caret is in that.
+at() {
+	local sql="${2//@@/}" got line shown caret pos want
+	local before="${2%%@@*}"
+	[ "$before" = "$2" ] && before="${sql%%"$4"*}"
+	want=${#before}
+	got=$(q "$sql")
+	case "$got" in
+		*"$3"*) ;;
+		*) notok "$1" "expected an error containing [$3], got [$got]"; return ;;
+	esac
+	line=$(printf '%s\n' "$got" | grep -m1 '^LINE 1: ')
+	caret=$(printf '%s\n' "$got" | grep -m1 '^ *\^$')
+	shown=${line#LINE 1: }
+	pos=$(( ${#caret} - 1 - 8 ))
+	if [ "${shown#...}" != "$shown" ]; then
+		shown=${shown#...}
+		pos=$(( pos - 3 ))
+	fi
+	shown=${shown%...}
+	before="${sql%%"$shown"*}"
+	pos=$(( pos + ${#before} ))
+	if [ -z "$line" ] || [ "$pos" != "$want" ]; then
+		notok "$1" "caret at $pos, want $want ($4): $got"
+		return
+	fi
+	ok "$1"
+}
+
 echo "O26: Cloudberry's SQL, rewritten into PostgreSQL 19's"
 echo "  bindir $BINDIR"
 echo
@@ -82,7 +117,9 @@ echo
 	echo "unix_socket_directories = '$SOCK'"
 	echo "listen_addresses = ''"
 	echo "port = $PORT"
-	echo "shared_preload_libraries = 'gp_core,gp_task,gp_matview,gp_sql,gp_security'"
+	# pg_stat_statements for section 13, which reads the statement texts it
+	# cuts out by the offsets the parse tree carries.
+	echo "shared_preload_libraries = 'gp_core,gp_task,gp_matview,gp_sql,gp_security,pg_stat_statements'"
 	echo "gp.enable_password_profile = on"
 	echo "max_worker_processes = 16"
 } >> "$WORK/data/postgresql.conf"
@@ -922,6 +959,38 @@ isl "a view prints it as it was written, and an integer's cast to float8" \
     CREATE VIEW med_v AS SELECT median(f) AS m, median(a) AS n FROM med;
     SELECT regexp_replace(pg_get_viewdef('med_v'::regclass, true), '\\s+', ' ', 'g');" \
    " SELECT median(f) AS m, median(a::double precision) AS n FROM med;"
+
+echo
+echo "13. where a rewritten statement's errors are reported, and what is recorded of it"
+
+# A rewrite is longer than what it replaces, and PostgreSQL reports positions in
+# the text its grammar read.  Each error below is reported where the user wrote
+# what it is about: an error after a rewrite, in what the rewrite copied, and in
+# what it wrote, which stands for the token Cloudberry's grammar would have put
+# the error at.
+
+# A clause that moved into a WITH list moves nothing that comes after it any
+# more.
+at "and after a clause of Cloudberry's that the rewrite moved" \
+   "CREATE TABLE pos_t (a int) DISTRIBUTED BY (a) nonsense" 'syntax error at or near "nonsense"' "nonsense"
+
+# pg_stat_statements cuts each statement of a string out of the user's text by
+# the start and length its parse tree carries, and replaces its constants by
+# theirs.  Those were the rewrite's: at 364a988298a the SELECT here was
+# recorded as "er_it", and a rewrite longer than what it replaced put a
+# statement past the end of the text, which an assert-enabled server stops on
+# in CleanQuerytext.  The constants the rewrite writes -- the schema's name in
+# the call WITH TAG becomes -- are in no text of the user's, and are left
+# alone: charged to the clause, they stopped such a server too.
+q "CREATE EXTENSION pg_stat_statements;
+   CREATE FUNCTION pss_f(int) RETURNS int LANGUAGE sql AS 'SELECT 1';" > /dev/null
+q "SELECT pg_stat_statements_reset();" > /dev/null
+q "ALTER FUNCTION pss_f(int) EXECUTE ON ANY; SELECT 7 AS d, 42 AS after_it;
+   CREATE SCHEMA pss_s WITH TAG (env = 'prod');" > /dev/null
+is "pg_stat_statements has each statement's own text, its constants where they were written" \
+   "SELECT string_agg(query, ' | ' ORDER BY query) FROM pg_stat_statements
+     WHERE query LIKE '%pss_%' OR query LIKE '%after_it%';" \
+   "ALTER FUNCTION pss_f(int) EXECUTE ON ANY | CREATE SCHEMA pss_s WITH TAG (env = 'prod') | CREATE SCHEMA pss_s WITH TAG (env = 'prod'); | SELECT \$1 AS d, \$2 AS after_it"
 
 echo
 echo "  $pass passed, $fail failed"

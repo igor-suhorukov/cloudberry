@@ -27,6 +27,8 @@
 
 #include "postgres.h"
 
+#include "nodes/pg_list.h"
+
 /*
  * Rewrite Cloudberry's spelling of a statement into PostgreSQL 19's.
  *
@@ -35,6 +37,24 @@
  * text.  The result is palloc'd in the current context.
  */
 extern char *GpDesugar(const char *str);
+
+/*
+ * Where each byte of a rewrite came from: a copy of the user's text, or text
+ * the rewrite wrote, which stands for the token it replaced.
+ */
+typedef struct GpPosMap GpPosMap;
+
+/* GpDesugar, and where each byte of the result came from. */
+extern char *GpDesugarMapped(const char *str, GpPosMap **map);
+
+/* The offset in the user's text that an offset in the rewrite stands for. */
+extern int	GpPosMapSource(const GpPosMap *map, int offset);
+
+/* The same, or -1 where the rewrite wrote the text rather than copied it. */
+extern int	GpPosMapCopied(const GpPosMap *map, int offset);
+
+/* Every location in a raw parse tree of a rewrite, put in the user's text. */
+extern void GpRemapParseLocations(List *parsetree, const GpPosMap *map);
 
 /* Installed during preload; O26's raw_parser_hook. */
 extern void GpGrammarInstallHook(void);

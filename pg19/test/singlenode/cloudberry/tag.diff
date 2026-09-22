@@ -155,15 +155,15 @@
 @@
 +ERROR:  schema "gp_sql" does not exist
 +LINE 1: DROP TAG tag5;
-+               ^
++        ^
 @@
 +ERROR:  schema "gp_sql" does not exist
 +LINE 1: DROP TAG IF EXISTS tag5;
-+               ^
++        ^
 @@
 +ERROR:  schema "gp_sql" does not exist
 +LINE 1: DROP TAG IF EXISTS tag8;
-+               ^
++        ^
 @@
 - tagname | tagowner | allowed_values 
 ----------+----------+----------------
@@ -209,19 +209,19 @@
 @@
 +ERROR:  schema "gp_sql" does not exist
 +LINE 1: ALTER TAG tag3 RENAME TO tag3_new;
-+               ^
++        ^
 @@
 +ERROR:  schema "gp_sql" does not exist
 +LINE 1: ALTER TAG IF EXISTS tag4 RENAME TO tag4_new;
-+               ^
++        ^
 @@
 +ERROR:  schema "gp_sql" does not exist
 +LINE 1: ALTER TAG tag3_new RENAME TO tag3;
-+               ^
++        ^
 @@
 +ERROR:  schema "gp_sql" does not exist
 +LINE 1: ALTER TAG tag4_new RENAME TO tag4;
-+               ^
++        ^
 @@
 - tagname | tagowner | allowed_values 
 ----------+----------+----------------
@@ -303,15 +303,15 @@
 @@
 +ERROR:  schema "gp_sql" does not exist
 +LINE 1: ALTER TAG tag1 UNSET ALLOWED_VALUES;
-+               ^
++        ^
 @@
 +ERROR:  schema "gp_sql" does not exist
 +LINE 1: ALTER TAG tag2 UNSET ALLOWED_VALUES;
-+               ^
++        ^
 @@
 +ERROR:  schema "gp_sql" does not exist
 +LINE 1: ALTER TAG tag3 UNSET ALLOWED_VALUES;
-+               ^
++        ^
 @@
 - tagname | tagowner | allowed_values 
 ----------+----------+----------------
@@ -357,64 +357,64 @@
 @@
 +ERROR:  schema "gp_sql" does not exist
 +LINE 1: ALTER TAG tag1 ADD ALLOWED_VALUES 'val1';
-+               ^
++        ^
 @@
 -ERROR:  allowed value "val1" has been added
 +ERROR:  schema "gp_sql" does not exist
 +LINE 1: ALTER TAG tag1 ADD ALLOWED_VALUES 'val1';
-+               ^
++        ^
 @@
 -ERROR:  allowed value "val1" has been added
 +ERROR:  schema "gp_sql" does not exist
 +LINE 1: ALTER TAG IF EXISTS tag1 ADD ALLOWED_VALUES 'val1';
-+               ^
++        ^
 @@
 -ERROR:  allowed value "val2" has been added
 +ERROR:  schema "gp_sql" does not exist
 +LINE 1: ALTER TAG tag1 ADD ALLOWED_VALUES 'val2', 'val2';
-+               ^
++        ^
 @@
 -ERROR:  allowed value "val2" has been added
 +ERROR:  schema "gp_sql" does not exist
 +LINE 1: ALTER TAG IF EXISTS tag1 ADD ALLOWED_VALUES 'val2', 'val2';
-+               ^
++        ^
 @@
 +ERROR:  schema "gp_sql" does not exist
 +LINE 1: ALTER TAG tag1 ADD ALLOWED_VALUES 'val2', 'val3';
-+               ^
++        ^
 @@
 +ERROR:  schema "gp_sql" does not exist
 +LINE 1: ALTER TAG IF EXISTS tag1 ADD ALLOWED_VALUES 'val4', 'val5';
-+               ^
++        ^
 @@
 -ERROR:  allowed value "" has been added
 +ERROR:  schema "gp_sql" does not exist
 +LINE 1: ALTER TAG tag1 ADD ALLOWED_VALUES '', '';
-+               ^
++        ^
 @@
 -ERROR:  allowed value "" has been added
 +ERROR:  schema "gp_sql" does not exist
 +LINE 1: ALTER TAG IF EXISTS tag1 ADD ALLOWED_VALUES '', '';
-+               ^
++        ^
 @@
 -ERROR:  allowed value " " has been added
 +ERROR:  schema "gp_sql" does not exist
 +LINE 1: ALTER TAG tag1 ADD ALLOWED_VALUES ' ', ' ';
-+               ^
++        ^
 @@
 +ERROR:  schema "gp_sql" does not exist
 +LINE 1: ALTER TAG IF EXISTS tag1 ADD ALLOWED_VALUES ' ';
-+               ^
++        ^
 @@
 -ERROR:  Allowed_values only allow 300 values.
 +ERROR:  schema "gp_sql" does not exist
 +LINE 1: ALTER TAG tag1 ADD ALLOWED_VALUES '1', '2', '3', '4', '5', '...
-+               ^
++        ^
 @@
 -ERROR:  Allowed_values only allow 300 values.
 +ERROR:  schema "gp_sql" does not exist
 +LINE 1: ALTER TAG IF EXISTS tag1 ADD ALLOWED_VALUES '1', '2', '3', '...
-+               ^
++        ^
 @@
 - tagname | tagowner |         allowed_values         
 ----------+----------+--------------------------------
@@ -460,45 +460,45 @@
 @@
 +ERROR:  schema "gp_sql" does not exist
 +LINE 1: ALTER TAG tag2 ADD ALLOWED_VALUES '1', '2', '3', '4', '5', '...
-+               ^
++        ^
 @@
 -ERROR:  allowed value "1" has been added
 +ERROR:  schema "gp_sql" does not exist
 +LINE 1: ALTER TAG IF EXISTS tag2 ADD ALLOWED_VALUES '1', '2', '3', '...
-+               ^
++        ^
 @@
 -ERROR:  added allowed value "nqwenfqpjenpjqnpufnqwpiuenfuiasqwefqfsafqwefnfiunl;jfa;lskdfjqpwefjqpewe234dfqweffjhsudfiueqihfsakdljfqeqfhqoufhoaisuehfqoiuwehfqoifhqoiuwehfoqihfosfqwfeqwfqwefqwefqwfefqefqfqewfqwefweqfsdfqwefqifquhowifhoiuqhfuosdfqjfqkepfqjfpishdfuiqh2139u108wefoiuqwhefoiuqwehfoiuqwhfoiuweqfheiasuohfioquwehfqwoeiufhdasiqeqwejfpqwifjipqwfjqwiefjpiqwehfpiquwehfqwiufhqwpiuefhqwui0fhpiiohfoqiuwehfoquwefoiweqfewoqifqwoiufhho" has exceeded max 256 length
 +ERROR:  schema "gp_sql" does not exist
 +LINE 1: ALTER TAG tag3 ADD ALLOWED_VALUES 'nqwenfqpjenpjqnpufnqwpiue...
-+               ^
++        ^
 @@
 -ERROR:  added allowed value "nqwenfqpjenpjqnpufnqwpiuenfuiasqwefqfsafqwefnfiunl;jfa;lskdfjqpwefjqpewe234dfqweffjhsudfiueqihfsakdljfqeqfhqoufhoaisuehfqoiuwehfqoifhqoiuwehfoqihfosfqwfeqwfqwefqwefqwfefqefqfqewfqwefweqfsdfqwefqifquhowifhoiuqhfuosdfqjfqkepfqjfpishdfuiqh2139u108wefoiuqwhefoiuqwehfoiuqwhfoiuweqfheiasuohfioquwehfqwoeiufhdasiqeqwejfpqwifjipqwfjqwiefjpiqwehfpiquwehfqwiufhqwpiuefhqwui0fhpiiohfoqiuwehfoquwefoiweqfewoqifqwoiufhho" has exceeded max 256 length
 +ERROR:  schema "gp_sql" does not exist
 +LINE 1: ALTER TAG IF EXISTS tag3 ADD ALLOWED_VALUES 'nqwenfqpjenpjqn...
-+               ^
++        ^
 @@
 +ERROR:  schema "gp_sql" does not exist
 +LINE 1: ALTER TAG tag3 ADD ALLOWED_VALUES 'dadkqjefpqfqfqe4l123j9i1s...
-+               ^
++        ^
 @@
 -ERROR:  allowed value " " has been added
 +ERROR:  schema "gp_sql" does not exist
 +LINE 1: ALTER TAG tag4 ADD ALLOWED_VALUES ' ';
-+               ^
++        ^
 @@
 -ERROR:  allowed value " " has been added
 +ERROR:  schema "gp_sql" does not exist
 +LINE 1: ALTER TAG IF EXISTS tag4 ADD ALLOWED_VALUES ' ';
-+               ^
++        ^
 @@
 +ERROR:  schema "gp_sql" does not exist
 +LINE 1: ALTER TAG tag4 ADD ALLOWED_VALUES '';
-+               ^
++        ^
 @@
 -ERROR:  allowed value "" has been added
 +ERROR:  schema "gp_sql" does not exist
 +LINE 1: ALTER TAG tag4 ADD ALLOWED_VALUES '';
-+               ^
++        ^
 @@
 - tagname | tagowner |                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                            allowed_values                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                             
 ----------+----------+---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
@@ -545,41 +545,41 @@
 -ERROR:  allowed value "unknown" not found
 +ERROR:  schema "gp_sql" does not exist
 +LINE 1: ALTER TAG tag1 DROP ALLOWED_VALUES 'unknown';
-+               ^
++        ^
 @@
 -ERROR:  allowed value "unknown" not found
 +ERROR:  schema "gp_sql" does not exist
 +LINE 1: ALTER TAG IF EXISTS tag1 DROP ALLOWED_VALUES 'unknown';
-+               ^
++        ^
 @@
 -ERROR:  allowed value "1" not found
 +ERROR:  schema "gp_sql" does not exist
 +LINE 1: ALTER TAG IF EXISTS tag1 DROP ALLOWED_VALUES '1', '2', '3', ...
-+               ^
++        ^
 @@
 -ERROR:  allowed value "1" not found
 +ERROR:  schema "gp_sql" does not exist
 +LINE 1: ALTER TAG tag1 DROP ALLOWED_VALUES '1';
-+               ^
++        ^
 @@
 -ERROR:  allowed value "1" not found
 +ERROR:  schema "gp_sql" does not exist
 +LINE 1: ALTER TAG IF EXISTS tag1 DROP ALLOWED_VALUES '1';
-+               ^
++        ^
 @@
 -ERROR:  allowed value "" not found
 +ERROR:  schema "gp_sql" does not exist
 +LINE 1: ALTER TAG tag1 DROP ALLOWED_VALUES '';
-+               ^
++        ^
 @@
 -ERROR:  allowed value "" not found
 +ERROR:  schema "gp_sql" does not exist
 +LINE 1: ALTER TAG IF EXISTS tag1 DROP ALLOWED_VALUES '';
-+               ^
++        ^
 @@
 +ERROR:  schema "gp_sql" does not exist
 +LINE 1: ALTER TAG tag1 UNSET ALLOWED_VALUES;
-+               ^
++        ^
 @@
 - tagname | tagowner |                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                            allowed_values                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                             
 ----------+----------+---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
@@ -595,7 +595,7 @@
 @@
 +ERROR:  schema "gp_sql" does not exist
 +LINE 1: ALTER TAG tag1 ADD ALLOWED_VALUES 'val1', 'val2', 'val3';
-+               ^
++        ^
 @@
 - tagname | tagowner |                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                            allowed_values                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                             
 ----------+----------+---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
@@ -756,7 +756,7 @@
 -tag of tag description with tag tag1
 +ERROR:  schema "gp_sql" does not exist
 +LINE 1: DROP TAG tag1;
-+               ^
++        ^
 @@
 -DETAIL:  tag of tag description with tag tag2
 -ERROR:  tag "tag2" cannot be dropped because some objects depend on it
@@ -765,13 +765,13 @@
 -tag of tag description with tag tag2
 +ERROR:  schema "gp_sql" does not exist
 +LINE 1: DROP TAG tag2;
-+               ^
++        ^
 @@
 -DETAIL:  tag of tag description with tag tag3
 -ERROR:  tag "tag3" cannot be dropped because some objects depend on it
 +ERROR:  schema "gp_sql" does not exist
 +LINE 1: DROP TAG tag3;
-+               ^
++        ^
 @@
 -DETAIL:  tag of tag description with tag tag4
 -ERROR:  tag "tag4" cannot be dropped because some objects depend on it
@@ -780,7 +780,7 @@
 -tag of tag description with tag tag4
 +ERROR:  schema "gp_sql" does not exist
 +LINE 1: DROP TAG tag4;
-+               ^
++        ^
 @@
 - tagname | tagowner |                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                            allowed_values                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                             
 ----------+----------+---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
@@ -796,57 +796,57 @@
 @@
 +ERROR:  schema "gp_sql" does not exist
 +LINE 1: ALTER DATABASE tag_db1 TAG (tag1 = 'val1', tag1 = 'val1');
-+               ^
++                               ^
 @@
 +ERROR:  schema "gp_sql" does not exist
 +LINE 1: ALTER DATABASE tag_db2 TAG (tag2 = '10');
-+               ^
++                               ^
 @@
 -ERROR:  tag value "" is not in tag "tag3" allowed values
 +ERROR:  schema "gp_sql" does not exist
 +LINE 1: ALTER DATABASE tag_db3 TAG (tag3 = '');
-+               ^
++                               ^
 @@
 +ERROR:  schema "gp_sql" does not exist
 +LINE 1: ALTER DATABASE tag_db4 UNSET TAG (tag1, tag2);
-+               ^
++                               ^
 @@
 -WARNING:  object "tag_db4" does not have tag "tag1", creating
 +ERROR:  schema "gp_sql" does not exist
 +LINE 1: ALTER DATABASE tag_db4 TAG (tag1 = 'val3', tag4 = '');
-+               ^
++                               ^
 @@
 +ERROR:  schema "gp_sql" does not exist
 +LINE 1: ALTER DATABASE tag_db5 TAG (tag4 = '', tag4 = ' ');
-+               ^
++                               ^
 @@
 +ERROR:  schema "gp_sql" does not exist
 +LINE 1: ALTER DATABASE tag_db6 TAG (tag4 = ' ');
-+               ^
++                               ^
 @@
 -WARNING:  object "tag_db7" does not have tag "tag1", creating
 -WARNING:  object "tag_db7" does not have tag "tag2", creating
 +ERROR:  schema "gp_sql" does not exist
 +LINE 1: ALTER DATABASE tag_db7 TAG (tag1 = 'val2', tag2 = '3');
-+               ^
++                               ^
 @@
 +ERROR:  schema "gp_sql" does not exist
 +LINE 1: ALTER DATABASE tag_db7 UNSET TAG (tag1);
-+               ^
++                               ^
 @@
 -WARNING:  object "tag_db8" does not have tag "tag4", creating
 +ERROR:  schema "gp_sql" does not exist
 +LINE 1: ALTER DATABASE tag_db8 TAG (tag4 = '123', tag4 = '123');
-+               ^
++                               ^
 @@
 -WARNING:  object "tag_db9" does not have tag "tag4", creating
 +ERROR:  schema "gp_sql" does not exist
 +LINE 1: ALTER DATABASE tag_db9 TAG (tag4 = '', tag4 = '123', tag4 = ...
-+               ^
++                               ^
 @@
 +ERROR:  schema "gp_sql" does not exist
 +LINE 1: ALTER DATABASE tag_db9 TAG (tag4 = '123');
-+               ^
++                               ^
 @@
 - tddatabaseid | datname  | tagname |                                     tagvalue                                      
 ---------------+----------+---------+-----------------------------------------------------------------------------------
@@ -919,11 +919,11 @@
 -ERROR:  tag value "novalue" is not in tag "tag1" allowed values
 +ERROR:  schema "gp_sql" does not exist
 +LINE 1: CREATE USER tag_user1 TAG (tag1 = 'novalue');
-+                                        ^
++                              ^
 @@
 +ERROR:  schema "gp_sql" does not exist
 +LINE 1: CREATE USER tag_user1 TAG (tag1 = 'val1');
-+                                        ^
++                              ^
 @@
 -ERROR:  syntax error at or near ";"
 +ERROR:  unrecognized role option "tag"
@@ -940,69 +940,69 @@
 -ERROR:  tag value "" is not in tag "tag1" allowed values
 +ERROR:  schema "gp_sql" does not exist
 +LINE 1: CREATE USER tag_user2 TAG (tag1 = '');
-+                                        ^
++                              ^
 @@
 +ERROR:  schema "gp_sql" does not exist
 +LINE 1: CREATE USER tag_user2 TAG (tag1 = 'val1', tag2 = '10');
-+                                        ^
++                              ^
 @@
 -ERROR:  tag "tag1" value has been added for object "tag_user3".
 +ERROR:  schema "gp_sql" does not exist
 +LINE 1: CREATE USER tag_user3 TAG (tag1 = 'val1', tag1 = 'val2', tag...
-+                                        ^
++                              ^
 @@
 -ERROR:  tag value "novalue" is not in tag "tag1" allowed values
 +ERROR:  schema "gp_sql" does not exist
 +LINE 1: CREATE USER tag_user3 TAG (tag1 = 'val1', tag1 = 'novalue');
-+                                        ^
++                              ^
 @@
 +ERROR:  schema "gp_sql" does not exist
 +LINE 1: CREATE USER tag_user3 TAG (tag1 = 'val1', tag2 = '1');
-+                                        ^
++                              ^
 @@
 +ERROR:  schema "gp_sql" does not exist
 +LINE 1: CREATE USER tag_user4 TAG (tag1 = 'val1', tag2 = '3', tag4 =...
-+                                        ^
++                              ^
 @@
 +ERROR:  schema "gp_sql" does not exist
 +LINE 1: CREATE USER tag_user5 TAG (tag2 = '300', tag4 = ' ');
-+                                        ^
++                              ^
 @@
 -ERROR:  tag "tag4" value has been added for object "tag_user6".
 +ERROR:  schema "gp_sql" does not exist
 +LINE 1: CREATE USER tag_user6 TAG (tag4 = '', tag4 = '');
-+                                        ^
++                              ^
 @@
 -ERROR:  tag "tag4" value has been added for object "tag_user6".
 +ERROR:  schema "gp_sql" does not exist
 +LINE 1: CREATE USER tag_user6 TAG (tag4 = ' ', tag4 = ' ');
-+                                        ^
++                              ^
 @@
 +ERROR:  schema "gp_sql" does not exist
 +LINE 1: CREATE USER tag_user6 TAG (tag4 = '');
-+                                        ^
++                              ^
 @@
 +ERROR:  schema "gp_sql" does not exist
 +LINE 1: CREATE USER tag_user7 CONNECTION LIMIT 10 TAG (tag4 = ' ');
-+                                                            ^
++                                                  ^
 @@
 -ERROR:  tag value "" is not in tag "tag3" allowed values
 +ERROR:  schema "gp_sql" does not exist
 +LINE 1: CREATE USER tag_user8 TAG (tag3 = '');
-+                                        ^
++                              ^
 @@
 -ERROR:  tag value "novalue" is not in tag "tag1" allowed values
 +ERROR:  schema "gp_sql" does not exist
 +LINE 1: CREATE USER tag_user8 superuser TAG (tag1 = 'novalue');
-+                                                  ^
++                                        ^
 @@
 +ERROR:  schema "gp_sql" does not exist
 +LINE 1: CREATE USER tag_user8 superuser TAG (tag1 = 'val1');
-+                                                  ^
++                                        ^
 @@
 +ERROR:  schema "gp_sql" does not exist
 +LINE 1: CREATE USER tag_user10 superuser TAG (tag3 = 'dadkqjefpqfqfq...
-+                                                   ^
++                                         ^
 @@
 - tddatabaseid |  rolname   | tagname |                                     tagvalue                                      
 ---------------+------------+---------+-----------------------------------------------------------------------------------
@@ -1052,7 +1052,7 @@
 -tag of tag description with tag tag1
 +ERROR:  schema "gp_sql" does not exist
 +LINE 1: DROP TAG tag1;
-+               ^
++        ^
 @@
 -DETAIL:  tag of tag description with tag tag2
 -ERROR:  tag "tag2" cannot be dropped because some objects depend on it
@@ -1061,13 +1061,13 @@
 -tag of tag description with tag tag2
 +ERROR:  schema "gp_sql" does not exist
 +LINE 1: DROP TAG tag2;
-+               ^
++        ^
 @@
 -DETAIL:  tag of tag description with tag tag3
 -ERROR:  tag "tag3" cannot be dropped because some objects depend on it
 +ERROR:  schema "gp_sql" does not exist
 +LINE 1: DROP TAG tag3;
-+               ^
++        ^
 @@
 -DETAIL:  tag of tag description with tag tag4
 -ERROR:  tag "tag4" cannot be dropped because some objects depend on it
@@ -1076,7 +1076,7 @@
 -tag of tag description with tag tag4
 +ERROR:  schema "gp_sql" does not exist
 +LINE 1: DROP TAG tag4;
-+               ^
++        ^
 @@
 - tagname | tagowner |                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                            allowed_values                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                             
 ----------+----------+---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
@@ -1091,64 +1091,43 @@
 +                                                      ^
 @@
 -ERROR:  syntax error at or near "TAG"
-+ERROR:  role "tag_user1" does not exist
-@@
+-LINE 1: ALTER USER tag_user1 CONNECTION LIMIT 3 TAG (tag1 = 'val1', ...
 -                                                ^
-+                                   ^
++ERROR:  role "tag_user1" does not exist
 @@
 +ERROR:  role "tag_user1" does not exist
-+LINE 1: ALTER USER tag_user1 TAG (tag1 = 'val1', tag1 = 'val1');
-+                                   ^
 @@
 +ERROR:  role "tag_user2" does not exist
-+LINE 1: ALTER USER tag_user2 TAG (tag2 = '10');
-+                                   ^
 @@
 -ERROR:  tag value "" is not in tag "tag3" allowed values
 +ERROR:  role "tag_user3" does not exist
-+LINE 1: ALTER USER tag_user3 TAG (tag3 = '');
-+                                   ^
 @@
 +ERROR:  role "tag_user4" does not exist
-+LINE 1: ALTER USER tag_user4 UNSET TAG (tag1, tag2);
-+                                     ^
 @@
 -WARNING:  object "tag_user4" does not have tag "tag1", creating
 +ERROR:  role "tag_user4" does not exist
-+LINE 1: ALTER USER tag_user4 TAG (tag1 = 'val3', tag4 = '');
-+                                   ^
 @@
 +ERROR:  role "tag_user5" does not exist
-+LINE 1: ALTER USER tag_user5 TAG (tag4 = '', tag4 = ' ');
-+                                   ^
 @@
 +ERROR:  role "tag_user6" does not exist
-+LINE 1: ALTER USER tag_user6 TAG (tag4 = ' ');
-+                                   ^
 @@
 -WARNING:  object "tag_user7" does not have tag "tag1", creating
 -WARNING:  object "tag_user7" does not have tag "tag2", creating
 +ERROR:  role "tag_user7" does not exist
-+LINE 1: ALTER USER tag_user7 TAG (tag1 = 'val2', tag2 = '3');
-+                                   ^
 @@
 +ERROR:  role "tag_user7" does not exist
-+LINE 1: ALTER USER tag_user7 UNSET TAG (tag1);
-+                                     ^
 @@
 -WARNING:  object "tag_user8" does not have tag "tag4", creating
 +ERROR:  role "tag_user8" does not exist
-+LINE 1: ALTER USER tag_user8 TAG (tag4 = '123', tag4 = '123');
-+                                   ^
 @@
 -WARNING:  object "tag_user9" does not have tag "tag4", creating
 +ERROR:  schema "gp_sql" does not exist
 +LINE 1: ALTER USER tag_user9 TAG (tag4 = '', tag4 = '123', tag4 = '4...
-+               ^
++                             ^
 @@
 +ERROR:  schema "gp_sql" does not exist
 +LINE 1: ALTER USER tag_user9 TAG (tag4 = '123');
-+               ^
++                             ^
 @@
 - tddatabaseid |  rolname   | tagname |                                     tagvalue                                      
 ---------------+------------+---------+-----------------------------------------------------------------------------------
@@ -1266,26 +1245,26 @@
 -WARNING:  object "tag_tablespace" does not have tag "tag4", creating
 +ERROR:  schema "gp_sql" does not exist
 +LINE 1: ALTER TABLESPACE tag_tablespace TAG (tag4 = '', tag1 = 'val1...
-+               ^
++                                        ^
 @@
 +ERROR:  schema "gp_sql" does not exist
 +LINE 1: ALTER TABLESPACE tag_tablespace UNSET TAG (tag1, tag2);
-+               ^
++                                        ^
 @@
 -ERROR:  object "tag_tablespace" does not have tag "tag2"
 +ERROR:  schema "gp_sql" does not exist
 +LINE 1: ALTER TABLESPACE tag_tablespace UNSET TAG (tag2);
-+               ^
++                                        ^
 @@
 -WARNING:  object "tag_tablespace" does not have tag "tag2", creating
 +ERROR:  schema "gp_sql" does not exist
 +LINE 1: ALTER TABLESPACE tag_tablespace TAG (tag2 = '10');
-+               ^
++                                        ^
 @@
 -WARNING:  object "tag_tablespace" does not have tag "tag1", creating
 +ERROR:  schema "gp_sql" does not exist
 +LINE 1: ALTER TABLESPACE tag_tablespace TAG (tag1 = 'val2', tag1 = '...
-+               ^
++                                        ^
 @@
 - tddatabaseid |    spcname     | tagname | tagvalue 
 ---------------+----------------+---------+----------
@@ -1311,19 +1290,19 @@
 -ERROR:  tag "tag1" cannot be dropped because some objects depend on it
 +ERROR:  schema "gp_sql" does not exist
 +LINE 1: DROP TAG tag1;
-+               ^
++        ^
 @@
 -DETAIL:  tag of tag description with tag tag2
 -ERROR:  tag "tag2" cannot be dropped because some objects depend on it
 +ERROR:  schema "gp_sql" does not exist
 +LINE 1: DROP TAG tag2;
-+               ^
++        ^
 @@
 -DETAIL:  tag of tag description with tag tag4
 -ERROR:  tag "tag4" cannot be dropped because some objects depend on it
 +ERROR:  schema "gp_sql" does not exist
 +LINE 1: DROP TAG tag4;
-+               ^
++        ^
 @@
 - tagname | tagowner |                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                            allowed_values                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                             
 ----------+----------+---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
@@ -1350,11 +1329,11 @@
 -ERROR:  tag value "novalue" is not in tag "tag1" allowed values
 +ERROR:  schema "gp_sql" does not exist
 +LINE 1: CREATE SCHEMA tag_schema1 WITH TAG (tag1 = 'novalue');
-+                                            ^
++                                  ^
 @@
 +ERROR:  schema "gp_sql" does not exist
 +LINE 1: CREATE SCHEMA tag_schema1 WITH TAG (tag1 = 'val1');
-+                                            ^
++                                  ^
 @@
 -ERROR:  syntax error at or near ";"
 +ERROR:  syntax error at or near "WITH"
@@ -1371,69 +1350,69 @@
 -ERROR:  tag value "" is not in tag "tag1" allowed values
 +ERROR:  schema "gp_sql" does not exist
 +LINE 1: CREATE SCHEMA tag_schema2 WITH TAG (tag1 = '');
-+                                            ^
++                                  ^
 @@
 +ERROR:  schema "gp_sql" does not exist
 +LINE 1: CREATE SCHEMA tag_schema2 WITH TAG (tag1 = 'val1', tag2 = '1...
-+                                            ^
++                                  ^
 @@
 -ERROR:  tag "tag1" value has been added for object "tag_schema3".
 +ERROR:  schema "gp_sql" does not exist
 +LINE 1: CREATE SCHEMA tag_schema3 WITH TAG (tag1 = 'val1', tag1 = 'v...
-+                                            ^
++                                  ^
 @@
 -ERROR:  tag value "novalue" is not in tag "tag1" allowed values
 +ERROR:  schema "gp_sql" does not exist
 +LINE 1: CREATE SCHEMA tag_schema3 WITH TAG (tag1 = 'val1', tag1 = 'n...
-+                                            ^
++                                  ^
 @@
 +ERROR:  schema "gp_sql" does not exist
 +LINE 1: CREATE SCHEMA tag_schema3 WITH TAG (tag1 = 'val1', tag2 = '1...
-+                                            ^
++                                  ^
 @@
 +ERROR:  schema "gp_sql" does not exist
 +LINE 1: CREATE SCHEMA tag_schema4 WITH TAG (tag1 = 'val1', tag2 = '3...
-+                                            ^
++                                  ^
 @@
 +ERROR:  schema "gp_sql" does not exist
 +LINE 1: CREATE SCHEMA tag_schema5 WITH TAG (tag2 = '300', tag4 = ' '...
-+                                            ^
++                                  ^
 @@
 -ERROR:  tag "tag4" value has been added for object "tag_schema6".
 +ERROR:  schema "gp_sql" does not exist
 +LINE 1: CREATE SCHEMA tag_schema6 WITH TAG (tag4 = '', tag4 = '');
-+                                            ^
++                                  ^
 @@
 -ERROR:  tag "tag4" value has been added for object "tag_schema6".
 +ERROR:  schema "gp_sql" does not exist
 +LINE 1: CREATE SCHEMA tag_schema6 WITH TAG (tag4 = ' ', tag4 = ' ');
-+                                            ^
++                                  ^
 @@
 +ERROR:  schema "gp_sql" does not exist
 +LINE 1: CREATE SCHEMA tag_schema6 WITH TAG (tag4 = '');
-+                                            ^
++                                  ^
 @@
 +ERROR:  schema "gp_sql" does not exist
 +LINE 1: CREATE SCHEMA tag_schema7 WITH TAG (tag4 = ' ');
-+                                            ^
++                                  ^
 @@
 -ERROR:  tag value "" is not in tag "tag3" allowed values
 +ERROR:  schema "gp_sql" does not exist
 +LINE 1: CREATE SCHEMA tag_schema8 WITH TAG (tag3 = '');
-+                                            ^
++                                  ^
 @@
 -ERROR:  tag value "novalue" is not in tag "tag1" allowed values
 +ERROR:  schema "gp_sql" does not exist
 +LINE 1: CREATE SCHEMA tag_schema8 WITH TAG (tag1 = 'novalue');
-+                                            ^
++                                  ^
 @@
 +ERROR:  schema "gp_sql" does not exist
 +LINE 1: CREATE SCHEMA tag_schema8 WITH TAG (tag1 = 'val1');
-+                                            ^
++                                  ^
 @@
 +ERROR:  schema "gp_sql" does not exist
 +LINE 1: CREATE SCHEMA tag_schema10 WITH TAG (tag3 = 'dadkqjefpqfqfqe...
-+                                             ^
++                                   ^
 @@
 - datname  |   nspname    | tagname |                                     tagvalue                                      
 -----------+--------------+---------+-----------------------------------------------------------------------------------
@@ -1483,7 +1462,7 @@
 -tag of tag description with tag tag1
 +ERROR:  schema "gp_sql" does not exist
 +LINE 1: DROP TAG tag1;
-+               ^
++        ^
 @@
 -DETAIL:  tag of tag description with tag tag2
 -ERROR:  tag "tag2" cannot be dropped because some objects depend on it
@@ -1492,13 +1471,13 @@
 -tag of tag description with tag tag2
 +ERROR:  schema "gp_sql" does not exist
 +LINE 1: DROP TAG tag2;
-+               ^
++        ^
 @@
 -DETAIL:  tag of tag description with tag tag3
 -ERROR:  tag "tag3" cannot be dropped because some objects depend on it
 +ERROR:  schema "gp_sql" does not exist
 +LINE 1: DROP TAG tag3;
-+               ^
++        ^
 @@
 -DETAIL:  tag of tag description with tag tag4
 -ERROR:  tag "tag4" cannot be dropped because some objects depend on it
@@ -1507,7 +1486,7 @@
 -tag of tag description with tag tag4
 +ERROR:  schema "gp_sql" does not exist
 +LINE 1: DROP TAG tag4;
-+               ^
++        ^
 @@
 - tagname | tagowner |                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                            allowed_values                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                             
 ----------+----------+---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
@@ -1522,58 +1501,38 @@
 +                                                      ^
 @@
 +ERROR:  schema "tag_schema1" does not exist
-+LINE 1: ALTER SCHEMA tag_schema1 TAG (tag1 = 'val1', tag1 = 'val1');
-+                                     ^
 @@
 +ERROR:  schema "tag_schema2" does not exist
-+LINE 1: ALTER SCHEMA tag_schema2 TAG (tag2 = '10');
-+                                     ^
 @@
 -ERROR:  tag value "" is not in tag "tag3" allowed values
 +ERROR:  schema "tag_schema3" does not exist
-+LINE 1: ALTER SCHEMA tag_schema3 TAG (tag3 = '');
-+                                     ^
 @@
 +ERROR:  schema "tag_schema4" does not exist
-+LINE 1: ALTER SCHEMA tag_schema4 UNSET TAG (tag1, tag2);
-+                                       ^
 @@
 -WARNING:  object "tag_schema4" does not have tag "tag1", creating
 +ERROR:  schema "tag_schema4" does not exist
-+LINE 1: ALTER SCHEMA tag_schema4 TAG (tag1 = 'val3', tag4 = '');
-+                                     ^
 @@
 +ERROR:  schema "tag_schema5" does not exist
-+LINE 1: ALTER SCHEMA tag_schema5 TAG (tag4 = '', tag4 = ' ');
-+                                     ^
 @@
 +ERROR:  schema "tag_schema6" does not exist
-+LINE 1: ALTER SCHEMA tag_schema6 TAG (tag4 = ' ');
-+                                     ^
 @@
 -WARNING:  object "tag_schema7" does not have tag "tag1", creating
 -WARNING:  object "tag_schema7" does not have tag "tag2", creating
 +ERROR:  schema "tag_schema7" does not exist
-+LINE 1: ALTER SCHEMA tag_schema7 TAG (tag1 = 'val2', tag2 = '3');
-+                                     ^
 @@
 +ERROR:  schema "tag_schema7" does not exist
-+LINE 1: ALTER SCHEMA tag_schema7 UNSET TAG (tag1);
-+                                       ^
 @@
 -WARNING:  object "tag_schema8" does not have tag "tag4", creating
 +ERROR:  schema "tag_schema8" does not exist
-+LINE 1: ALTER SCHEMA tag_schema8 TAG (tag4 = '123', tag4 = '123');
-+                                     ^
 @@
 -WARNING:  object "tag_schema9" does not have tag "tag4", creating
 +ERROR:  schema "gp_sql" does not exist
 +LINE 1: ALTER SCHEMA tag_schema9 TAG (tag4 = '', tag4 = '123', tag4 ...
-+               ^
++                                 ^
 @@
 +ERROR:  schema "gp_sql" does not exist
 +LINE 1: ALTER SCHEMA tag_schema9 TAG (tag4 = '123');
-+               ^
++                                 ^
 @@
 - datname  |   nspname    | tagname |                                     tagvalue                                      
 -----------+--------------+---------+-----------------------------------------------------------------------------------
@@ -1754,20 +1713,20 @@
 -tag of tag description with tag tag1
 +ERROR:  schema "gp_sql" does not exist
 +LINE 1: DROP TAG tag1;
-+               ^
++        ^
 @@
 -DETAIL:  tag of tag description with tag tag2
 -ERROR:  tag "tag2" cannot be dropped because some objects depend on it
 -tag of tag description with tag tag2
 +ERROR:  schema "gp_sql" does not exist
 +LINE 1: DROP TAG tag2;
-+               ^
++        ^
 @@
 -DETAIL:  tag of tag description with tag tag3
 -ERROR:  tag "tag3" cannot be dropped because some objects depend on it
 +ERROR:  schema "gp_sql" does not exist
 +LINE 1: DROP TAG tag3;
-+               ^
++        ^
 @@
 -DETAIL:  tag of tag description with tag tag4
 -ERROR:  tag "tag4" cannot be dropped because some objects depend on it
@@ -1776,7 +1735,7 @@
 -tag of tag description with tag tag4
 +ERROR:  schema "gp_sql" does not exist
 +LINE 1: DROP TAG tag4;
-+               ^
++        ^
 @@
 - tagname | tagowner |                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                            allowed_values                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                             
 ----------+----------+---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
@@ -1896,16 +1855,16 @@
 @@
 +ERROR:  schema "gp_sql" does not exist
 +LINE 1: DROP TAG tag1;
-+               ^
++        ^
 @@
 +ERROR:  schema "gp_sql" does not exist
 +LINE 1: DROP TAG tag2;
-+               ^
++        ^
 @@
 +ERROR:  schema "gp_sql" does not exist
 +LINE 1: DROP TAG tag3;
-+               ^
++        ^
 @@
 +ERROR:  schema "gp_sql" does not exist
 +LINE 1: DROP TAG tag4;
-+               ^
++        ^

@@ -39,12 +39,15 @@
  *
  * What a fork would give that this does not:
  *
- *   - error positions inside a rewritten clause point at the rewritten text,
- *     not at what the user wrote;
  *   - a comment written inside a clause that is replaced is dropped with it;
  *   - Cloudberry syntax nested inside an expression is not reached, because
  *     this recognises statements and clauses, not expressions.  Nothing in
  *     the surface below is ever nested that way.
+ *
+ * Error positions were a third, and are not now.  The rewritten text records
+ * where each byte of it came from, and the caret under a syntax error, and
+ * every location in the parse tree, is put back where the user wrote it --
+ * text the rewrite wrote standing for the token it replaces.
  *
  * What it gives that a fork would not: nothing to re-base when PostgreSQL
  * changes its grammar, and no second copy of 20,000 lines of it.
@@ -63,6 +66,7 @@
 #include "parser/parser.h"
 #include "parser/scanner.h"
 #include "utils/builtins.h"
+#include "utils/elog.h"
 
 #include "gp_grammar.h"
 
@@ -347,6 +351,194 @@ skip_parens(const GpTokens *ts, int i)
 }
 
 /* ------------------------------------------------------------------------- */
+/* Where the rewritten text came from                                        */
+/* ------------------------------------------------------------------------- */
+
+/*
+ * A rewrite moves things.  Every position PostgreSQL reports -- the caret
+ * under a syntax error, the location a parse node keeps for the errors of
+ * parse analysis -- is an offset into the text the grammar read, and psql
+ * puts its caret at that offset of the text the user sent.  Without this,
+ * everything after a rewritten part of a statement was reported somewhere
+ * else: a clause moved into a WITH list moved the caret of every error after
+ * it.
+ *
+ * So the rewritten text is built as segments, each either a copy of the
+ * user's text or text the rewrite wrote, the latter charged to one place in
+ * the user's text: the token it stands for.  gp_raw_parser maps the position
+ * of a syntax error through them, and gp_parseloc.c every location in the
+ * parse tree, so what is reported is where the user wrote it.
+ */
+typedef struct GpSeg
+{
+	int			out;			/* first byte in the rewritten text */
+	int			len;
+	int			src;			/* where they came from, or what they stand for */
+	bool		copied;			/* a copy of the user's text from src onwards */
+} GpSeg;
+
+typedef struct GpOut
+{
+	StringInfoData buf;
+	const char *src;			/* the user's text */
+	GpSeg	   *segs;
+	int			nsegs;
+	int			maxsegs;
+} GpOut;
+
+struct GpPosMap
+{
+	GpSeg	   *segs;
+	int			nsegs;
+	int			outlen;
+	int			srclen;
+};
+
+static void
+out_init(GpOut *o, const char *src)
+{
+	initStringInfo(&o->buf);
+	o->src = src;
+	o->nsegs = 0;
+	o->maxsegs = 16;
+	o->segs = palloc(o->maxsegs * sizeof(GpSeg));
+}
+
+/* Record where the next `len` bytes, about to be appended, came from. */
+static void
+out_seg(GpOut *o, int len, int src, bool copied)
+{
+	GpSeg	   *last = (o->nsegs > 0) ? &o->segs[o->nsegs - 1] : NULL;
+
+	if (len <= 0)
+		return;
+
+	/* A copy that carries on from the one before is the same segment. */
+	if (last != NULL && copied && last->copied &&
+		last->out + last->len == o->buf.len && last->src + last->len == src)
+	{
+		last->len += len;
+		return;
+	}
+
+	if (o->nsegs == o->maxsegs)
+	{
+		o->maxsegs *= 2;
+		o->segs = repalloc(o->segs, o->maxsegs * sizeof(GpSeg));
+	}
+	o->segs[o->nsegs].out = o->buf.len;
+	o->segs[o->nsegs].len = len;
+	o->segs[o->nsegs].src = src;
+	o->segs[o->nsegs].copied = copied;
+	o->nsegs++;
+}
+
+/* The user's text [from, to), as it is. */
+static void
+out_copy(GpOut *o, int from, int to)
+{
+	if (to <= from)
+		return;
+	out_seg(o, to - from, from, true);
+	appendBinaryStringInfo(&o->buf, o->src + from, to - from);
+}
+
+/* Text of the rewrite's own, standing for the user's text at `at`. */
+static void
+out_text(GpOut *o, const char *text, int at)
+{
+	int			len = strlen(text);
+
+	out_seg(o, len, at, false);
+	appendBinaryStringInfo(&o->buf, text, len);
+}
+
+/* Another piece, built over the same user's text. */
+static void
+out_append(GpOut *o, const GpOut *part)
+{
+	for (int k = 0; k < part->nsegs; k++)
+	{
+		const GpSeg *s = &part->segs[k];
+
+		out_seg(o, s->len, s->src, s->copied);
+		appendBinaryStringInfo(&o->buf, part->buf.data + s->out, s->len);
+	}
+}
+
+/*
+ * GpPosMapSource
+ *		The offset in the user's text that an offset in the rewritten text
+ *		stands for: within a copy, the byte it was copied from; within text
+ *		the rewrite wrote, the token that text stands for; at the end, the
+ *		end.
+ */
+int
+GpPosMapSource(const GpPosMap *map, int offset)
+{
+	int			lo = 0;
+	int			hi = map->nsegs - 1;
+	const GpSeg *s;
+
+	if (offset < 0)
+		return offset;
+	if (offset >= map->outlen || map->nsegs == 0)
+		return map->srclen;
+
+	/* the last segment that starts at or before the offset */
+	while (lo < hi)
+	{
+		int			mid = (lo + hi + 1) / 2;
+
+		if (map->segs[mid].out <= offset)
+			lo = mid;
+		else
+			hi = mid - 1;
+	}
+
+	s = &map->segs[lo];
+	return s->copied ? s->src + (offset - s->out) : s->src;
+}
+
+/*
+ * GpPosMapCopied
+ *		As GpPosMapSource, but -1 -- unknown -- for an offset in text the
+ *		rewrite wrote.
+ *
+ * For what is only in the rewrite: a constant it wrote, such as the name a
+ * call of gp_sql's is given.  pg_stat_statements replaces each constant of a
+ * statement by $n at its location, in the user's text, and requires every
+ * one to be inside the statement; a constant charged to the clause it came
+ * from can be neither, and one of an added statement was before its start,
+ * which stops an assert-enabled server.  Unknown, it is left alone.
+ */
+int
+GpPosMapCopied(const GpPosMap *map, int offset)
+{
+	int			lo = 0;
+	int			hi = map->nsegs - 1;
+	const GpSeg *s;
+
+	if (offset < 0)
+		return offset;
+	if (offset >= map->outlen || map->nsegs == 0)
+		return map->srclen;
+
+	while (lo < hi)
+	{
+		int			mid = (lo + hi + 1) / 2;
+
+		if (map->segs[mid].out <= offset)
+			lo = mid;
+		else
+			hi = mid - 1;
+	}
+
+	s = &map->segs[lo];
+	return s->copied ? s->src + (offset - s->out) : -1;
+}
+
+/* ------------------------------------------------------------------------- */
 /* Rewriting                                                                 */
 /* ------------------------------------------------------------------------- */
 
@@ -373,7 +565,8 @@ typedef struct GpRewrite
 	int			tag_first;		/* first token of a TAG clause, or -1 */
 	int			tag_last;		/* one past the last token of the last one */
 	List	   *edits;			/* GpEdit, in whatever order they were found */
-	StringInfoData body;		/* the statement as it will be run */
+	StringInfoData body;		/* what the statement becomes, when whole */
+	GpOut		text;			/* the statement with its edits, when not */
 	StringInfoData after;		/* statements to run after it */
 	char		object;			/* what find_subject found: 't' a table, 'f' a
 								 * foreign table, 'v' a view, 'm' a materialized
@@ -381,6 +574,7 @@ typedef struct GpRewrite
 	int			subject_end;	/* the token after the subject's name, or -1 */
 	StringInfoData options;		/* namespaced options for its WITH list */
 	List	   *calls;			/* functions to call, in one SELECT */
+	List	   *call_at;		/* the user's text each stands for */
 } GpRewrite;
 
 static void
@@ -395,11 +589,13 @@ rw_init(GpRewrite *rw, const GpTokens *ts, int first, int last)
 	rw->tag_last = -1;
 	rw->edits = NIL;
 	initStringInfo(&rw->body);
+	out_init(&rw->text, ts->src);
 	initStringInfo(&rw->after);
 	rw->object = 0;
 	rw->subject_end = -1;
 	initStringInfo(&rw->options);
 	rw->calls = NIL;
+	rw->call_at = NIL;
 }
 
 /* Replace [from, to) with `text`.  Edits may be found in any order. */
@@ -413,6 +609,17 @@ rw_edit(GpRewrite *rw, int from, int to, const char *text)
 	e->text = text ? pstrdup(text) : pstrdup("");
 	rw->edits = lappend(rw->edits, e);
 	rw->changed = true;
+}
+
+/*
+ * A function to call, in the one SELECT a statement's calls are made in; it
+ * stands for the clause of the user's that it was made from, at `at`.
+ */
+static void
+rw_add_call(GpRewrite *rw, char *call, int at)
+{
+	rw->calls = lappend(rw->calls, call);
+	rw->call_at = lappend_int(rw->call_at, at);
 }
 
 /* This statement becomes something else entirely; body is what it becomes. */
@@ -512,7 +719,10 @@ rw_place_options(GpRewrite *rw)
 	rw_edit(rw, at, at, psprintf(" WITH (%s)", rw->options.data));
 }
 
-/* Put the statement together: the source, with the edits applied in order. */
+/*
+ * Put the statement together: the source, with the edits applied in order.
+ * Text an edit writes stands for the place it was written at.
+ */
 static void
 rw_finish_body(GpRewrite *rw)
 {
@@ -533,14 +743,12 @@ rw_finish_body(GpRewrite *rw)
 
 		if (e->from < copied)	/* two edits over the same text */
 			continue;
-		if (e->from > copied)
-			appendBinaryStringInfo(&rw->body, ts->src + copied, e->from - copied);
-		appendStringInfoString(&rw->body, e->text);
+		out_copy(&rw->text, copied, e->from);
+		out_text(&rw->text, e->text, e->from);
 		copied = e->to;
 	}
 
-	if (end > copied)
-		appendBinaryStringInfo(&rw->body, ts->src + copied, end - copied);
+	out_copy(&rw->text, copied, end);
 }
 
 /* The source text of tokens [from, to). */
@@ -739,10 +947,10 @@ rw_drop_tag(GpRewrite *rw)
 
 	rw_whole(rw);
 	foreach(lc, names)
-		rw->calls = lappend(rw->calls,
-							psprintf("gp_sql.drop_tag(%s, %s)",
-									 quote_literal_cstr((char *) lfirst(lc)),
-									 missing_ok ? "true" : "false"));
+		rw_add_call(rw, psprintf("gp_sql.drop_tag(%s, %s)",
+								 quote_literal_cstr((char *) lfirst(lc)),
+								 missing_ok ? "true" : "false"),
+					ts->toks[rw->first].off);
 	return true;
 }
 
@@ -842,10 +1050,10 @@ rw_drop_profile(GpRewrite *rw)
 
 	rw_whole(rw);
 	foreach(lc, names)
-		rw->calls = lappend(rw->calls,
-							psprintf("gp_security.drop_profile(%s, %s)",
-									 quote_literal_cstr((char *) lfirst(lc)),
-									 missing_ok ? "true" : "false"));
+		rw_add_call(rw, psprintf("gp_security.drop_profile(%s, %s)",
+								 quote_literal_cstr((char *) lfirst(lc)),
+								 missing_ok ? "true" : "false"),
+					ts->toks[rw->first].off);
 	return true;
 }
 
@@ -1025,10 +1233,10 @@ rw_drop_task(GpRewrite *rw)
 
 	rw_whole(rw);
 	foreach(lc, names)
-		rw->calls = lappend(rw->calls,
-							psprintf("gp_task.drop_task(%s, %s)",
-									 quote_literal_cstr((char *) lfirst(lc)),
-									 missing_ok ? "true" : "false"));
+		rw_add_call(rw, psprintf("gp_task.drop_task(%s, %s)",
+								 quote_literal_cstr((char *) lfirst(lc)),
+								 missing_ok ? "true" : "false"),
+					ts->toks[rw->first].off);
 	return true;
 }
 
@@ -1327,9 +1535,9 @@ rw_tag_clauses(GpRewrite *rw, GpSubjKind kind, const char *name, int from)
 				appendStringInfo(&opts, "%sgp_tag.%s", opts.len > 0 ? ", " : "",
 								 quote_identifier(key));
 			else if (unset)
-				rw->calls = lappend(rw->calls,
-									psprintf("%s(%s, %s)", subject_setter(kind, true),
-											 arg, quote_literal_cstr(key)));
+				rw_add_call(rw, psprintf("%s(%s, %s)", subject_setter(kind, true),
+										 arg, quote_literal_cstr(key)),
+							ts->toks[start].off);
 			else
 			{
 				const char *value;
@@ -1351,11 +1559,11 @@ rw_tag_clauses(GpRewrite *rw, GpSubjKind kind, const char *name, int from)
 						rw_add_option(rw, option);
 				}
 				else
-					rw->calls = lappend(rw->calls,
-										psprintf("%s(%s, %s, %s)",
-												 subject_setter(kind, false), arg,
-												 quote_literal_cstr(key),
-												 quote_literal_cstr(value)));
+					rw_add_call(rw, psprintf("%s(%s, %s, %s)",
+											 subject_setter(kind, false), arg,
+											 quote_literal_cstr(key),
+											 quote_literal_cstr(value)),
+								ts->toks[start].off);
 				j += 2;
 			}
 
@@ -1425,17 +1633,17 @@ rw_tag_clauses(GpRewrite *rw, GpSubjKind kind, const char *name, int from)
  * is quoted here is the true column name.
  */
 static void
-rw_distribution(GpRewrite *rw, const char *name, const char *policy)
+rw_distribution(GpRewrite *rw, const char *name, const char *policy, int at)
 {
 	if (tok_is(rw->ts, rw->first, "create") && rw->object != 0 &&
 		strchr("tm", rw->object) != NULL)
 		rw_add_option(rw, psprintf("gp.distributed_by = %s",
 								   quote_literal_cstr(policy)));
 	else
-		rw->calls = lappend(rw->calls,
-							psprintf("gp_sql.set_distribution(%s::regclass, %s)",
-									 quote_literal_cstr(name),
-									 quote_literal_cstr(policy)));
+		rw_add_call(rw, psprintf("gp_sql.set_distribution(%s::regclass, %s)",
+								 quote_literal_cstr(name),
+								 quote_literal_cstr(policy)),
+					at);
 }
 
 static void
@@ -1462,7 +1670,8 @@ rw_distributed(GpRewrite *rw, const char *name, int from)
 		if (tok_is(ts, i + 1, "randomly") || tok_is(ts, i + 1, "replicated"))
 		{
 			rw_distribution(rw, name,
-							tok_is(ts, i + 1, "randomly") ? "random" : "replicated");
+							tok_is(ts, i + 1, "randomly") ? "random" : "replicated",
+							ts->toks[i].off);
 			rw_edit(rw, ts->toks[i].off,
 					(i + 2 < ts->ntoks) ? ts->toks[i + 2].off : ts->srclen, " ");
 			i++;
@@ -1488,7 +1697,7 @@ rw_distributed(GpRewrite *rw, const char *name, int from)
 			}
 			appendStringInfoChar(&cols, ')');
 
-			rw_distribution(rw, name, cols.data);
+			rw_distribution(rw, name, cols.data, ts->toks[i].off);
 			rw_edit(rw, ts->toks[i].off,
 					(after < ts->ntoks) ? ts->toks[after].off : ts->srclen, " ");
 			i = after - 1;
@@ -2051,11 +2260,15 @@ rw_statement(GpRewrite *rw)
 	rw_place_options(rw);
 }
 
-char *
-GpDesugar(const char *str)
+/*
+ * The rewrite of `str`, or NULL when there is nothing of Cloudberry's in it.
+ * With map, *map says where each byte of the result came from.
+ */
+static char *
+desugar(const char *str, GpPosMap **map)
 {
 	GpTokens   *ts;
-	StringInfoData out;
+	GpOut		out;
 	int			depth = 0;
 	int			first = 0;
 	bool		changed = false;
@@ -2067,10 +2280,10 @@ GpDesugar(const char *str)
 	if (ts->ntoks == 0)
 		return NULL;
 
-	initStringInfo(&out);
+	out_init(&out, str);
 
 	/* Anything before the first token: a leading comment. */
-	appendBinaryStringInfo(&out, str, ts->toks[0].off);
+	out_copy(&out, 0, ts->toks[0].off);
 
 	for (int i = 0; i <= ts->ntoks; i++)
 	{
@@ -2091,8 +2304,7 @@ GpDesugar(const char *str)
 		{
 			if (!at_end)
 			{
-				appendBinaryStringInfo(&out, str + ts->toks[i].off,
-									   tok_end(ts, i) - ts->toks[i].off);
+				out_copy(&out, ts->toks[i].off, tok_end(ts, i));
 				first = i + 1;
 			}
 			continue;
@@ -2103,24 +2315,37 @@ GpDesugar(const char *str)
 		rw_finish_body(&rw);
 
 		{
+			/*
+			 * What the rewrite writes in place of the statement, and the
+			 * statements it adds after it, stand for the statement's start,
+			 * so that what pg_stat_statements records of an added statement
+			 * is the statement it came from; each call in one stands for the
+			 * clause of the user's it was made from.
+			 */
+			int			start = ts->toks[first].off;
+			const char *body = rw.whole ? rw.body.data : rw.text.buf.data;
 			bool		emitted = false;	/* written anything of it yet? */
 
-			for (int k = 0; k < rw.body.len && !emitted; k++)
-				emitted = (rw.body.data[k] != ' ' && rw.body.data[k] != '\t' &&
-						   rw.body.data[k] != '\n' && rw.body.data[k] != '\r');
-			appendStringInfoString(&out, rw.body.data);
+			for (int k = 0; body[k] != '\0' && !emitted; k++)
+				emitted = (body[k] != ' ' && body[k] != '\t' &&
+						   body[k] != '\n' && body[k] != '\r');
+			if (rw.whole)
+				out_text(&out, rw.body.data, start);
+			else
+				out_append(&out, &rw.text);
 
 			/* The calls, in one SELECT: the statement, if it is nothing else. */
 			if (rw.calls != NIL)
 			{
 				ListCell   *lc;
+				ListCell   *lc2;
 
-				appendStringInfoString(&out, emitted ? "; SELECT " : "SELECT ");
-				foreach(lc, rw.calls)
+				out_text(&out, emitted ? "; SELECT " : "SELECT ", start);
+				forboth(lc, rw.calls, lc2, rw.call_at)
 				{
 					if (lc != list_head(rw.calls))
-						appendStringInfoString(&out, ", ");
-					appendStringInfoString(&out, (const char *) lfirst(lc));
+						out_text(&out, ", ", start);
+					out_text(&out, (const char *) lfirst(lc), lfirst_int(lc2));
 				}
 				emitted = true;
 			}
@@ -2132,7 +2357,7 @@ GpDesugar(const char *str)
 				/* "; SECURITY LABEL ..." after nothing is just that. */
 				if (!emitted && a[0] == ';')
 					a += 2;
-				appendStringInfoString(&out, a);
+				out_text(&out, a, start);
 			}
 		}
 		changed |= rw.changed || rw.after.len > 0 || rw.calls != NIL;
@@ -2142,19 +2367,41 @@ GpDesugar(const char *str)
 		{
 			int			upto = (i + 1 < ts->ntoks) ? ts->toks[i + 1].off : ts->srclen;
 
-			appendBinaryStringInfo(&out, str + ts->toks[i].off,
-								   upto - ts->toks[i].off);
+			out_copy(&out, ts->toks[i].off, upto);
 			first = i + 1;
 		}
 	}
 
 	if (!changed)
 	{
-		pfree(out.data);
+		pfree(out.buf.data);
 		return NULL;
 	}
 
-	return out.data;
+	if (map != NULL)
+	{
+		GpPosMap   *m = palloc(sizeof(GpPosMap));
+
+		m->segs = out.segs;
+		m->nsegs = out.nsegs;
+		m->outlen = out.buf.len;
+		m->srclen = ts->srclen;
+		*map = m;
+	}
+
+	return out.buf.data;
+}
+
+char *
+GpDesugar(const char *str)
+{
+	return desugar(str, NULL);
+}
+
+char *
+GpDesugarMapped(const char *str, GpPosMap **map)
+{
+	return desugar(str, map);
 }
 
 /* ------------------------------------------------------------------------- */
@@ -2163,22 +2410,82 @@ GpDesugar(const char *str)
 
 static raw_parser_hook_type prev_raw_parser = NULL;
 
+typedef struct GpParseErrorArg
+{
+	const char *original;		/* what the caller asked to parse */
+	const char *rewritten;		/* what the grammar read */
+	const GpPosMap *map;
+} GpParseErrorArg;
+
+/*
+ * A syntax error in a rewritten statement, reported where the user wrote what
+ * the grammar stopped at.  The grammar gives its position as a character
+ * count into the text it read; that becomes a byte offset there, the offset
+ * in the user's text it stands for, and a character count again.
+ *
+ * It runs before the callbacks of whoever called the parser, being pushed
+ * last: PL/pgSQL's moves the position into the function's body, and has to
+ * be given one in the text it handed over.
+ */
+static void
+gp_parse_error_callback(void *arg)
+{
+	GpParseErrorArg *a = (GpParseErrorArg *) arg;
+	int			pos = geterrposition();
+	int			offset = 0;
+
+	if (pos <= 0)
+		return;
+
+	for (int c = 1; c < pos && a->rewritten[offset] != '\0'; c++)
+		offset += pg_mblen_cstr(a->rewritten + offset);
+
+	offset = GpPosMapSource(a->map, offset);
+	errposition(pg_mbstrlen_with_len(a->original, offset) + 1);
+}
+
 static List *
 gp_raw_parser(const char *str, RawParseMode mode)
 {
 	char	   *rewritten = NULL;
+	GpPosMap   *map = NULL;
+	GpParseErrorArg errarg;
+	ErrorContextCallback errcallback;
+	List	   *result;
 
 	/*
 	 * Only whole statements.  The other modes parse an expression, a type
 	 * name or a PL/pgSQL fragment, and Cloudberry adds nothing to those.
 	 */
 	if (mode == RAW_PARSE_DEFAULT)
-		rewritten = GpDesugar(str);
+		rewritten = GpDesugarMapped(str, &map);
+
+	if (rewritten == NULL)
+	{
+		if (prev_raw_parser)
+			return prev_raw_parser(str, mode);
+		return standard_raw_parser(str, mode);
+	}
+
+	errarg.original = str;
+	errarg.rewritten = rewritten;
+	errarg.map = map;
+	errcallback.callback = gp_parse_error_callback;
+	errcallback.arg = &errarg;
+	errcallback.previous = error_context_stack;
+	error_context_stack = &errcallback;
 
 	if (prev_raw_parser)
-		return prev_raw_parser(rewritten != NULL ? rewritten : str, mode);
+		result = prev_raw_parser(rewritten, mode);
+	else
+		result = standard_raw_parser(rewritten, mode);
 
-	return standard_raw_parser(rewritten != NULL ? rewritten : str, mode);
+	error_context_stack = errcallback.previous;
+
+	/* And where parse analysis will report its errors, likewise. */
+	GpRemapParseLocations(result, map);
+
+	return result;
 }
 
 void

@@ -109,7 +109,10 @@ tag  Tag definitions are the database's here, in gp_sql.tag, and Cloudberry's
   pg_tag_description find no such catalogs.  CREATE TAG, ALTER TAG and DROP
   TAG are calls of gp_sql's functions, and return the call's row; an error
   from one is Cloudberry's message, with a CONTEXT naming gp_sql's
-  functions.  A malformed TAG clause (TAG; or TAG ()) is PostgreSQL's syntax
+  functions.  Where gp_sql is not there -- in the two databases the tags are
+  not defined in -- the error is that its schema does not exist, reported at
+  the start of a statement the rewrite replaced, and at the TAG clause a call
+  was made from.  A malformed TAG clause (TAG; or TAG ()) is PostgreSQL's syntax
   error, at the word the rewrite left, where Cloudberry's is at the next.
 union_gp  count_operator(), gp_distribution_policy, an external table, PL/
   Python, and a chain of UNIONs over NULLs.
