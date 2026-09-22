@@ -51,13 +51,13 @@ The reasons, by what brings them, and then each test:
   PostgreSQL 19 no longer has, and NOT NULL constraints, which PostgreSQL 18
   keeps in pg_constraint.
 
-  Cloudberry's own functions and syntax: median(), DECODE (which Cloudberry's
-  parser makes a CASE, even where a function called decode exists), and
-  CASE x WHEN IS NOT DISTINCT FROM y.
+  Cloudberry's own syntax: DECODE (which Cloudberry's parser makes a CASE,
+  even where a function called decode exists), and CASE x WHEN IS NOT
+  DISTINCT FROM y.
 
 The tests
 
-bfv_aggregate  count_operator(), median(), gp_enable_multiphase_agg, an
+bfv_aggregate  count_operator(), gp_enable_multiphase_agg, an
   append-optimized table, PL/Python, OVER (w) with a frame, a frame offset
   that reads a column.
 bfv_catalog  count_operator(), pg_stat_last_operation (Cloudberry's catalog of

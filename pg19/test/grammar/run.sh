@@ -809,5 +809,120 @@ is "a function with no clause carries no label" \
        AND classoid = 'pg_proc'::regclass AND provider = 'gp';" "0"
 
 echo
+echo "12. median()"
+
+# --- median(), gp_core's -------------------------------------------------------
+#
+# A plain aggregate, not the ordered-set one Cloudberry's grammar makes of
+# MEDIAN(x), and the answer percentile_cont(0.5)'s: the middle row, or halfway
+# between the middle two.  Cloudberry has it for float8, interval, timestamp
+# and timestamptz, and so does the port, in pg_catalog where Cloudberry has it.
+
+is "median() is four aggregates in pg_catalog, one per type Cloudberry has" \
+   "SELECT string_agg(a, ', ' ORDER BY a)
+      FROM (SELECT pg_get_function_arguments(oid) AS a FROM pg_proc
+             WHERE proname = 'median' AND prokind = 'a'
+               AND pronamespace = 'pg_catalog'::regnamespace) p;" \
+   "double precision, interval, timestamp with time zone, timestamp without time zone"
+
+is "the middle row of an odd count" \
+   "SELECT median(x) FROM (VALUES (3.0::float8), (1), (2)) v(x);" "2"
+
+is "halfway between the middle two of an even one" \
+   "SELECT median(x) FROM (VALUES (4.0::float8), (1), (3), (2)) v(x);" "2.5"
+
+# bfv_aggregate's own case: median() of an integer column is its float8.
+is "an integer column, which is a float8 to median()" \
+   "SELECT median(i), pg_typeof(median(i)) FROM generate_series(1, 100) i;" \
+   "50.5|double precision"
+
+is "null rows are not counted, and none at all is NULL" \
+   "SELECT median(x), (SELECT median(y) FROM (VALUES (NULL::float8)) n(y)) IS NULL,
+           (SELECT median(z) FROM generate_series(1, 0) z) IS NULL
+      FROM (VALUES (1.0::float8), (NULL), (3)) v(x);" "2|t|t"
+
+is "percentile_cont(0.5)'s answer, over float8" \
+   "SELECT median(x) = percentile_cont(0.5) WITHIN GROUP (ORDER BY x)
+      FROM (SELECT (i * 7919 % 1000) / 7.0 AS x FROM generate_series(1, 1000) i) s;" "t"
+
+is "and over interval" \
+   "SELECT median(x) = percentile_cont(0.5) WITHIN GROUP (ORDER BY x)
+      FROM (SELECT (i * 7919 % 1000) * interval '1 minute' AS x
+              FROM generate_series(1, 1000) i) s;" "t"
+
+is "timestamp, halfway" \
+   "SELECT median(x) FROM (VALUES (timestamp '2020-01-02'), (timestamp '2020-01-01')) v(x);" \
+   "2020-01-01 12:00:00"
+
+# Cloudberry's timestamp_lerp() rounds the scaled difference, as round() does.
+is "and a half microsecond rounded away from zero, as Cloudberry rounds it" \
+   "SELECT median(x) FROM (VALUES (timestamp '2020-01-01 00:00:00'),
+                                  (timestamp '2020-01-01 00:00:00.000001')) v(x);" \
+   "2020-01-01 00:00:00.000001"
+
+is "timestamptz" \
+   "SET TimeZone = 'UTC';
+    SELECT median(x) FROM (VALUES (timestamptz '2020-01-01 00:00+00'),
+                                  (timestamptz '2020-01-01 01:00+00'),
+                                  (timestamptz '2020-01-03 00:00+00')) v(x);" \
+   "2020-01-01 01:00:00+00"
+
+is "halfway to an infinity is that infinity" \
+   "SELECT median(x) FROM (VALUES (timestamp '2020-01-01'), (timestamp 'infinity')) v(x);" \
+   "infinity"
+
+refused "and between the two there is no answer" \
+        "SELECT median(x) FROM (VALUES (timestamp '-infinity'), (timestamp 'infinity')) v(x);" \
+        "timestamp out of range"
+
+is "grouped" \
+   "SELECT string_agg(g || '=' || m, ' ' ORDER BY g) FROM
+      (SELECT i % 3 AS g, median(i) AS m FROM generate_series(1, 10) i GROUP BY 1) s;" \
+   "0=6 1=5.5 2=5"
+
+# Two median(x) in one query share one transition state, and the final
+# function runs on it twice: the sort is read twice.
+is "two calls over the same rows share a state and both answer" \
+   "SELECT median(i), median(i) + 1 FROM generate_series(1, 9) i;" "5|6"
+
+is "past work_mem the rows go to disk, as percentile_cont's do" \
+   "SET work_mem = '64kB';
+    SELECT median(i) FROM generate_series(1, 200000) i;" "100000.5"
+
+# The planner may hash median()'s groups, each with a sort of its own, and
+# spill them to disk past work_mem as it spills any hashed group; ORCA sorts
+# them, having no combine function to merge a spilled group with.
+is "hashed or sorted, grouped past work_mem, the answers are percentile_cont's" \
+   "CREATE TABLE med_g AS SELECT i % 100 AS k, (i * 7919) % 100003 AS v
+      FROM generate_series(1, 20000) i;
+    ANALYZE med_g;
+    CREATE VIEW med_pct AS SELECT md5(string_agg(k || ':' || m, ',' ORDER BY k)) AS h FROM
+      (SELECT k, percentile_cont(0.5) WITHIN GROUP (ORDER BY v) AS m FROM med_g GROUP BY k) s;
+    CREATE VIEW med_med AS SELECT md5(string_agg(k || ':' || m, ',' ORDER BY k)) AS h FROM
+      (SELECT k, median(v) AS m FROM med_g GROUP BY k) s;
+    SET work_mem = '64kB';
+    SET enable_sort = off;
+    SELECT (SELECT h FROM med_med) = (SELECT h FROM med_pct);
+    RESET enable_sort;
+    SET enable_hashagg = off;
+    SELECT (SELECT h FROM med_med) = (SELECT h FROM med_pct);" "t
+t"
+
+# The final function sorts its state, so the aggregate is declared to modify
+# it, and PostgreSQL will not run it over a window.  Cloudberry refuses OVER
+# for every ordered-set aggregate, of which its median is one.
+refused "not over a window, which Cloudberry refuses too" \
+        "SELECT median(i) OVER () FROM generate_series(1, 3) i;" \
+        "does not support use as a window function"
+
+# Cloudberry prints MEDIAN(a) with the cast hidden; PostgreSQL 19 shows an
+# aggregate argument's implicit cast, as it does for any aggregate.
+isl "a view prints it as it was written, and an integer's cast to float8" \
+   "CREATE TABLE med (a int, f float8);
+    CREATE VIEW med_v AS SELECT median(f) AS m, median(a) AS n FROM med;
+    SELECT regexp_replace(pg_get_viewdef('med_v'::regclass, true), '\\s+', ' ', 'g');" \
+   " SELECT median(f) AS m, median(a::double precision) AS n FROM med;"
+
+echo
 echo "  $pass passed, $fail failed"
 [ "$fail" -eq 0 ]

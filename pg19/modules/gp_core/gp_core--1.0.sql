@@ -74,3 +74,103 @@ LANGUAGE C STRICT STABLE;
 
 COMMENT ON FUNCTION gp.policy(regclass) IS
 	'how a relation''s rows are spread over the segments, or NULL for none';
+
+/*
+ * median(x): Cloudberry's, as a plain aggregate rather than the ordered-set
+ * one Cloudberry's grammar makes of it -- gp_median.c says why, and that the
+ * answer is percentile_cont(0.5)'s.  One per type Cloudberry has.
+ *
+ * The aggregates are in pg_catalog, where Cloudberry has median, so that
+ * median(x) finds one whatever the search path is and a view prints it as
+ * median(x); their support functions are gp's.
+ *
+ * The final functions sort the state, so they are SHAREABLE: two median(x)
+ * in one query may share it, and none may be run over a window.  SSPACE is
+ * what a group's sort costs before its first row -- three memory contexts and
+ * an array of 1,024 sort tuples -- so that the planner does not take a
+ * group's state for one pointer when it weighs hashing the groups.
+ */
+CREATE FUNCTION gp.median_transfn(internal, float8)
+RETURNS internal
+AS 'MODULE_PATHNAME', 'gp_median_transfn'
+LANGUAGE C PARALLEL SAFE;
+
+CREATE FUNCTION gp.median_transfn(internal, interval)
+RETURNS internal
+AS 'MODULE_PATHNAME', 'gp_median_transfn'
+LANGUAGE C PARALLEL SAFE;
+
+CREATE FUNCTION gp.median_transfn(internal, timestamp)
+RETURNS internal
+AS 'MODULE_PATHNAME', 'gp_median_transfn'
+LANGUAGE C PARALLEL SAFE;
+
+CREATE FUNCTION gp.median_transfn(internal, timestamptz)
+RETURNS internal
+AS 'MODULE_PATHNAME', 'gp_median_transfn'
+LANGUAGE C PARALLEL SAFE;
+
+CREATE FUNCTION gp.median_float8_final(internal)
+RETURNS float8
+AS 'MODULE_PATHNAME', 'gp_median_finalfn'
+LANGUAGE C PARALLEL SAFE;
+
+CREATE FUNCTION gp.median_interval_final(internal)
+RETURNS interval
+AS 'MODULE_PATHNAME', 'gp_median_finalfn'
+LANGUAGE C PARALLEL SAFE;
+
+CREATE FUNCTION gp.median_timestamp_final(internal)
+RETURNS timestamp
+AS 'MODULE_PATHNAME', 'gp_median_finalfn'
+LANGUAGE C PARALLEL SAFE;
+
+CREATE FUNCTION gp.median_timestamptz_final(internal)
+RETURNS timestamptz
+AS 'MODULE_PATHNAME', 'gp_median_finalfn'
+LANGUAGE C PARALLEL SAFE;
+
+CREATE AGGREGATE pg_catalog.median(float8) (
+	SFUNC = gp.median_transfn,
+	STYPE = internal,
+	SSPACE = 49152,
+	FINALFUNC = gp.median_float8_final,
+	FINALFUNC_MODIFY = SHAREABLE,
+	PARALLEL = SAFE
+);
+
+CREATE AGGREGATE pg_catalog.median(interval) (
+	SFUNC = gp.median_transfn,
+	STYPE = internal,
+	SSPACE = 49152,
+	FINALFUNC = gp.median_interval_final,
+	FINALFUNC_MODIFY = SHAREABLE,
+	PARALLEL = SAFE
+);
+
+CREATE AGGREGATE pg_catalog.median(timestamp) (
+	SFUNC = gp.median_transfn,
+	STYPE = internal,
+	SSPACE = 49152,
+	FINALFUNC = gp.median_timestamp_final,
+	FINALFUNC_MODIFY = SHAREABLE,
+	PARALLEL = SAFE
+);
+
+CREATE AGGREGATE pg_catalog.median(timestamptz) (
+	SFUNC = gp.median_transfn,
+	STYPE = internal,
+	SSPACE = 49152,
+	FINALFUNC = gp.median_timestamptz_final,
+	FINALFUNC_MODIFY = SHAREABLE,
+	PARALLEL = SAFE
+);
+
+COMMENT ON AGGREGATE pg_catalog.median(float8) IS
+	'median, as percentile_cont(0.5) computes it (Apache Cloudberry)';
+COMMENT ON AGGREGATE pg_catalog.median(interval) IS
+	'median, as percentile_cont(0.5) computes it (Apache Cloudberry)';
+COMMENT ON AGGREGATE pg_catalog.median(timestamp) IS
+	'median, as percentile_cont(0.5) computes it (Apache Cloudberry)';
+COMMENT ON AGGREGATE pg_catalog.median(timestamptz) IS
+	'median, as percentile_cont(0.5) computes it (Apache Cloudberry)';

@@ -17,16 +17,6 @@
 +LINE 1: ...ue(d) over(partition by b order by e rows between e precedin...
 +                                                             ^
 @@
-- ?column? | to_char | median 
------------+---------+--------
--        1 | 2014    |   50.5
--(1 row)
--
-+ERROR:  function median(integer) does not exist
-+LINE 1: select 1, to_char(col1, 'YYYY'), median(col2) from d group b...
-+                                         ^
-+DETAIL:  There is no function of that name.
-@@
 - id | val | sum | mysum1 | mysum2 
 -----+-----+-----+--------+--------
 -  1 |   1 |   1 |      1 |      1
@@ -101,21 +91,3 @@
 +                ^
 @@
 +ERROR:  unrecognized configuration parameter "gp_enable_multiphase_agg"
-@@
--QUERY PLAN
--___________
--
-+ERROR:  function median(integer) does not exist
-+LINE 2: select 1, median(col1) from group_by_const group by 1;
-+                  ^
-+DETAIL:  There is no function of that name.
-@@
-- ?column? | median 
------------+--------
--        1 |  500.5
--(1 row)
--
-+ERROR:  function median(integer) does not exist
-+LINE 1: select 1, median(col1) from group_by_const group by 1;
-+                  ^
-+DETAIL:  There is no function of that name.

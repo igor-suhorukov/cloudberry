@@ -3623,5 +3623,28 @@ else
 fi
 
 echo
+echo "26. median(), which ORCA plans as it plans any aggregate"
+
+# Cloudberry's median is an ordered-set aggregate, and ORCA's core turns every
+# ordered-set aggregate over a column into a gp_percentile_* aggregate named by
+# an OID no PostgreSQL 19 catalog has, so a query with it in would go to the
+# planner.  gp_core's median() is a plain aggregate, which ORCA plans itself.
+# Its final function sorts the state, so it may not be split in two; ORCA plans
+# it in one stage, and sorts rather than hashes the groups.
+
+same "median() of an integer column" \
+     "SELECT median(a) FROM t0"
+
+same "grouped, over numeric, which is a float8 to it" \
+     "SELECT b, median(c) FROM t0 GROUP BY b ORDER BY b"
+
+same "over timestamp, timestamptz and interval" \
+     "SELECT median(d::timestamp), median(d::timestamptz),
+             median((d - date '2020-01-01') * interval '1 hour') FROM t0"
+
+same "beside other aggregates, and twice over the same rows" \
+     "SELECT count(*), median(a), median(a) + 1, avg(a) FROM t0 WHERE a % 7 = 0"
+
+echo
 echo "  $pass passed, $fail failed"
 [ "$fail" -eq 0 ]
