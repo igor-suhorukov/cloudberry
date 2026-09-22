@@ -322,6 +322,48 @@ take_gp_option(List **options, const char *name, bool prefixed)
 	return found;
 }
 
+/*
+ * ALTER TABLE ... SET DISTRIBUTED, as the grammar left it: SET
+ * (gp.distributed_by = ..., gp.reorganize = ...).  Taken out of the
+ * statement, with a subcommand that is left with nothing, as tags are.
+ */
+static bool
+alter_take_distribution(AlterTableStmt *stmt, char **policy, int *reorganize,
+						bool take)
+{
+	bool		found = false;
+	ListCell   *lc;
+
+	foreach(lc, stmt->cmds)
+	{
+		AlterTableCmd *cmd = (AlterTableCmd *) lfirst(lc);
+		List	   *opts;
+		DefElem    *def;
+
+		if (cmd->subtype != AT_SetRelOptions)
+			continue;
+		opts = take ? (List *) cmd->def : list_copy((List *) cmd->def);
+		if ((def = take_gp_option(&opts, "distributed_by", false)) != NULL)
+		{
+			found = true;
+			if (take)
+				*policy = defGetString(def);
+		}
+		if ((def = take_gp_option(&opts, "reorganize", false)) != NULL)
+		{
+			found = true;
+			if (take)
+				*reorganize = defGetBoolean(def) ? 1 : 0;
+		}
+		if (!take)
+			continue;
+		cmd->def = (Node *) opts;
+		if (opts == NIL)
+			stmt->cmds = foreach_delete_current(stmt->cmds, lc);
+	}
+	return found;
+}
+
 /* The same, over the SET/RESET subcommands of an ALTER TABLE. */
 static bool
 alter_has_tag_options(AlterTableStmt *stmt)
@@ -965,6 +1007,54 @@ gp_sql_ProcessUtility(PlannedStmt *pstmt, const char *queryString,
 	{
 		pstmt = unenforce_foreign_keys(pstmt, &readOnlyTree);
 		parsetree = pstmt->utilityStmt;
+	}
+
+	/*
+	 * ALTER TABLE ... SET DISTRIBUTED: the rest of the statement, if it has
+	 * a rest, and then the new policy, carried out (distribution.c).
+	 */
+	if (IsA(parsetree, AlterTableStmt) &&
+		alter_take_distribution((AlterTableStmt *) parsetree, NULL, NULL, false))
+	{
+		AlterTableStmt *stmt;
+		char	   *new_policy = NULL;
+		int			reorganize = -1;
+		Oid			relid;
+
+		if (readOnlyTree)
+		{
+			pstmt = copyObject(pstmt);
+			readOnlyTree = false;
+		}
+		stmt = (AlterTableStmt *) pstmt->utilityStmt;
+		(void) alter_take_distribution(stmt, &new_policy, &reorganize, true);
+		if (new_policy != NULL)
+			check_distribution_policy(new_policy);
+
+		/*
+		 * Only the coordinator of a cluster moves rows, as in Cloudberry,
+		 * whose single-node mode and utility sessions refuse it in these
+		 * words.
+		 */
+		if (!on_cluster_coordinator())
+			ereport(ERROR,
+					(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+					 errmsg("SET DISTRIBUTED BY not supported in utility mode")));
+
+		relid = RangeVarGetRelid(stmt->relation, AccessExclusiveLock,
+								 stmt->missing_ok);
+		if (!OidIsValid(relid))
+		{
+			ereport(NOTICE,
+					(errmsg("relation \"%s\" does not exist, skipping",
+							stmt->relation->relname)));
+			return;
+		}
+		if (stmt->cmds != NIL)
+			gp_sql_ProcessUtility(pstmt, queryString, readOnlyTree, context,
+								  params, queryEnv, dest, qc);
+		GpDistributionAlter(relid, new_policy, reorganize);
+		return;
 	}
 
 	/*

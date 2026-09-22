@@ -3,11 +3,6 @@
 @@
 -WARNING:  DISTRIBUTED BY clause has no effect in singlenode mode
 @@
--ERROR:  SET DISTRIBUTED BY not supported in utility mode
-+ERROR:  syntax error at or near "distributed"
-+LINE 1: alter table l set distributed by (j);
-+                          ^
-@@
 -WARNING:  DISTRIBUTED BY clause has no effect in singlenode mode
 +ERROR:  unrecognized parameter "appendonly"
 @@

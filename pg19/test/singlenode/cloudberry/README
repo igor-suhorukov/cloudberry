@@ -152,9 +152,8 @@ qp_with_clause  gp_cte_sharing, append-optimized and column-oriented tables,
 returning_gp  an append-optimized table.
 singlenode_compatibility_cbdb  the warning Cloudberry's single-node mode
   gives for DISTRIBUTED BY (the port records the policy, for ORCA and M2),
-  append-optimized tables, TABLE (...) and anytable, and ALTER TABLE ... SET
-  DISTRIBUTED BY, which Cloudberry refuses in single-node mode and the port's
-  grammar does not have.
+  append-optimized tables, and TABLE (...) and anytable.  ALTER TABLE ... SET
+  DISTRIBUTED BY is refused as Cloudberry refuses it in single-node mode.
 subselect_gp  gp_segment_id,
   gp_distribution_policy, gp_interconnect_queue_depth, append-optimized
   tables.

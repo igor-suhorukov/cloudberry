@@ -594,6 +594,29 @@ mine" ] && ok "a transaction reads its own rows, and a LIMIT leaves the connecti
 		&& ok "... with its DISTRIBUTED BY, and WITH NO DATA" \
 		|| notok "CREATE TABLE AS DISTRIBUTED BY, WITH NO DATA" "$out / $out2"
 
+	# ALTER TABLE ... SET DISTRIBUTED: the policy, and the rows moved with it.
+	q 0 "CREATE TABLE sd (a int, b int) DISTRIBUTED BY (a);" >/dev/null
+	q 0 "INSERT INTO sd SELECT i, i % 7 FROM generate_series(1, 200) i;" >/dev/null
+	q 0 "ALTER TABLE sd SET DISTRIBUTED BY (b);" >/dev/null
+	out=$(q 0 "SELECT gp_sql.distribution('sd'), count(*), sum(a) FROM sd;")
+	w1=$(q 1 "SELECT count(*) FROM sd WHERE expected_seg(b, 2) <> 0;")
+	w2=$(q 2 "SELECT count(*) FROM sd WHERE expected_seg(b, 2) <> 1;")
+	[ "$out|$w1|$w2" = "(b)|200|20100|0|0" ] \
+		&& ok "SET DISTRIBUTED BY: every row moved to where the new key hashes" \
+		|| notok "SET DISTRIBUTED BY" "$out / misplaced $w1 $w2"
+	q 0 "ALTER TABLE sd SET DISTRIBUTED REPLICATED;" >/dev/null
+	n1=$(q 1 "SELECT count(*) FROM sd;")
+	q 0 "ALTER TABLE sd SET DISTRIBUTED RANDOMLY;" >/dev/null
+	out=$(q 0 "SELECT gp_sql.distribution('sd'), count(*), sum(a) FROM sd;")
+	[ "$n1|$out" = "200|random|200|20100" ] \
+		&& ok "... REPLICATED puts every row on every segment, RANDOMLY back from it counts each once" \
+		|| notok "SET DISTRIBUTED REPLICATED, RANDOMLY" "$n1 / $out"
+	out=$(q 1 "ALTER TABLE sd SET DISTRIBUTED BY (a);")
+	case "$out" in
+		*"SET DISTRIBUTED BY not supported in utility mode"*) ok "... and a segment's utility session refuses it, as Cloudberry's does" ;;
+		*) notok "SET DISTRIBUTED BY in a utility session" "$out" ;;
+	esac
+
 	out=$(printf '%s\n' "TRUNCATE d;" "SELECT count(*) FROM d;" | qf 0)
 	n1=$(q 1 "SELECT count(*) FROM d;")
 	[ "$out|$n1" = "0|0" ] && ok "TRUNCATE empties the segments" || notok "TRUNCATE" "$out|$n1"

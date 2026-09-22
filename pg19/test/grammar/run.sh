@@ -346,12 +346,13 @@ isl "on CREATE FOREIGN TABLE, which has only OPTIONS to carry it in" \
    "CREATE FOREIGN TABLE dist_ft (a int, b int) SERVER tag_srv DISTRIBUTED BY (b);
     SELECT gp_sql.distribution('dist_ft'::regclass) || ' ' || coalesce(array_to_string(ftoptions, ','), 'none')
       FROM pg_foreign_table WHERE ftrelid = 'dist_ft'::regclass;" "(b) none"
-# Cloudberry refuses ALTER TABLE ... SET DISTRIBUTED BY in single-node mode;
-# the port has no redistribution to do, and the clause is left for
-# PostgreSQL's grammar to refuse.  It used to become the ALTER, cut short,
-# followed by a call.
-refused "ALTER TABLE ... SET DISTRIBUTED BY is left for PostgreSQL to refuse" \
-        "ALTER TABLE combo SET DISTRIBUTED BY (a);" 'syntax error at or near "DISTRIBUTED"'
+# ALTER TABLE ... SET DISTRIBUTED BY moves a table's rows on a cluster
+# (the cluster suite checks it); on one node, as in Cloudberry's single-node
+# mode, it is refused in Cloudberry's words.  It is an option of the ALTER
+# now, not a syntax error: it once became the ALTER, cut short, followed by a
+# call, and then was left for PostgreSQL's grammar to refuse.
+refused "ALTER TABLE ... SET DISTRIBUTED BY is refused on one node, as Cloudberry refuses it" \
+        "ALTER TABLE combo SET DISTRIBUTED BY (a);" 'SET DISTRIBUTED BY not supported in utility mode'
 
 # ONE STATEMENT FOR ONE.  These clauses used to become the statement followed
 # by SELECTs of gp_sql's setters: two statements for one, which cannot be

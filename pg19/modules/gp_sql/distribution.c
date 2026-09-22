@@ -57,10 +57,12 @@
 #include "access/table.h"
 #include "catalog/index.h"
 #include "catalog/namespace.h"
+#include "catalog/partition.h"
 #include "catalog/pg_class.h"
 #include "catalog/pg_index.h"
 #include "catalog/pg_inherits.h"
 #include "commands/extension.h"
+#include "executor/spi.h"
 #include "lib/stringinfo.h"
 #include "miscadmin.h"
 #include "nodes/parsenodes.h"
@@ -69,6 +71,7 @@
 #include "utils/lsyscache.h"
 #include "utils/rel.h"
 #include "utils/syscache.h"
+#include "utils/varlena.h"
 
 #include "gp_core_api.h"
 #include "gp_label.h"
@@ -388,6 +391,156 @@ columns:
 			(errcode(ERRCODE_UNDEFINED_OBJECT),
 			 errmsg("Table doesn't have 'DISTRIBUTED BY' clause, and no column type is suitable for a distribution key. Creating a NULL policy entry.")));
 	set_policy_label(relid, "random");
+}
+
+/* A relation's name in SQL, pg_temp for a temporary one. */
+static char *
+sql_name(Oid relid)
+{
+	Oid			nsp = get_rel_namespace(relid);
+
+	if (isAnyTempNamespace(nsp))
+		return psprintf("pg_temp.%s", quote_identifier(get_rel_name(relid)));
+	return quote_qualified_identifier(get_namespace_name(nsp), get_rel_name(relid));
+}
+
+static void
+run_sql(const char *sql, int expected)
+{
+	int			rc = SPI_execute(sql, false, 0);
+
+	if (rc != expected)
+		elog(ERROR, "could not redistribute the table: %s gave %d", sql, rc);
+}
+
+/*
+ * ALTER TABLE ... SET DISTRIBUTED, and SET WITH (REORGANIZE = ...).
+ *
+ * Cloudberry's rules for when the rows move: always if REORGANIZE is true,
+ * never if it is false, and otherwise when the policy changes to anything
+ * but random -- rows are where a random policy may leave them -- except
+ * from replicated, where every segment has every row and random would count
+ * each once per segment.  A partition keeps its parent's policy, as
+ * Cloudberry requires; a partitioned table's partitions take the new one
+ * with it.
+ *
+ * The rows move as the statements that would move them: copied out under
+ * the old policy into a temporary table, the table emptied, the policy set,
+ * and the rows put back, each on the segment the new policy names.  In the
+ * statement's transaction, under its AccessExclusiveLock.
+ */
+void
+GpDistributionAlter(Oid relid, const char *policy, int reorganize)
+{
+	const GpCoreApi *core = GpCoreApiLookup();
+	char		relkind = get_rel_relkind(relid);
+	char	   *old = policy_label_of(relid);
+	const char *new = policy != NULL ? policy : old;
+	bool		move;
+	List	   *rels;
+	ListCell   *lc;
+	char	   *tmp = NULL;
+
+	if (relkind != RELKIND_RELATION && relkind != RELKIND_PARTITIONED_TABLE)
+		ereport(ERROR,
+				(errcode(ERRCODE_WRONG_OBJECT_TYPE),
+				 errmsg("\"%s\" is not a table", get_rel_name(relid))));
+	if (new == NULL)
+		new = "random";
+
+	if (get_rel_relispartition(relid))
+	{
+		char	   *parent = policy_label_of(get_partition_parent(relid, true));
+
+		if (parent != NULL && strcmp(parent, new) != 0)
+			ereport(ERROR,
+					(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+					 errmsg("can't set the distribution policy of \"%s\"",
+							get_rel_name(relid)),
+					 errhint("Distribution policy of a partition can only be the same as its parent's.")));
+	}
+
+	/* Every column the policy names, before anything is moved. */
+	if (new[0] == '(')
+	{
+		char	   *list = pnstrdup(new + 1, strlen(new) - 2);
+		List	   *names;
+		ListCell   *ln;
+
+		if (!SplitIdentifierString(list, ',', &names))
+			ereport(ERROR,
+					(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+					 errmsg("unrecognized distribution policy \"%s\"", new)));
+		foreach(ln, names)
+		{
+			AttrNumber	attnum = get_attnum(relid, (char *) lfirst(ln));
+
+			if (attnum == InvalidAttrNumber)
+				ereport(ERROR,
+						(errcode(ERRCODE_UNDEFINED_COLUMN),
+						 errmsg("column \"%s\" of the distribution policy of \"%s\" does not exist",
+								(char *) lfirst(ln), get_rel_name(relid))));
+		}
+	}
+
+	if (reorganize == 1)
+		move = true;
+	else if (reorganize == 0)
+		move = false;
+	else
+		move = old == NULL || strcmp(old, new) != 0 ?
+			(strcmp(new, "random") != 0 ||
+			 (old != NULL && strcmp(old, "replicated") == 0)) : false;
+
+	/* On one node, or on a segment, the policy is only a label. */
+	if (core == NULL || core->is_single_node() ||
+		core->get_role() != GP_ROLE_DISPATCH)
+		move = false;
+
+	if (SPI_connect() != SPI_OK_CONNECT)
+		elog(ERROR, "SPI_connect failed");
+
+	if (move)
+	{
+		tmp = psprintf("gp_redistribute_%u", relid);
+		run_sql(psprintf("CREATE TEMP TABLE %s AS SELECT * FROM %s DISTRIBUTED RANDOMLY",
+						 quote_identifier(tmp), sql_name(relid)),
+				SPI_OK_UTILITY);
+	}
+
+	rels = find_all_inheritors(relid, NoLock, NULL);
+	foreach(lc, rels)
+		set_policy_label(lfirst_oid(lc), new);
+
+	if (move)
+	{
+		Relation	rel = relation_open(relid, NoLock);
+		TupleDesc	tupdesc = RelationGetDescr(rel);
+		StringInfoData cols;
+		bool		first = true;
+
+		initStringInfo(&cols);
+		for (int i = 0; i < tupdesc->natts; i++)
+		{
+			Form_pg_attribute att = TupleDescAttr(tupdesc, i);
+
+			if (att->attisdropped || att->attgenerated != '\0')
+				continue;
+			appendStringInfo(&cols, "%s%s", first ? "" : ", ",
+							 quote_identifier(NameStr(att->attname)));
+			first = false;
+		}
+		relation_close(rel, NoLock);
+
+		run_sql(psprintf("TRUNCATE %s", sql_name(relid)), SPI_OK_UTILITY);
+		run_sql(psprintf("INSERT INTO %s (%s) OVERRIDING SYSTEM VALUE SELECT %s FROM pg_temp.%s",
+						 sql_name(relid), cols.data, cols.data, quote_identifier(tmp)),
+				SPI_OK_INSERT);
+		run_sql(psprintf("DROP TABLE pg_temp.%s", quote_identifier(tmp)),
+				SPI_OK_UTILITY);
+	}
+
+	SPI_finish();
 }
 
 void

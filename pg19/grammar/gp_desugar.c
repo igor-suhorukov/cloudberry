@@ -1886,9 +1886,9 @@ rw_tag_clauses(GpRewrite *rw, GpSubjKind kind, const char *name, int from)
  * exists, so that the statement stays one (see rw_tag_clauses): on CREATE
  * TABLE, CREATE TABLE AS and CREATE MATERIALIZED VIEW gp.distributed_by =
  * '(a,b)' in the WITH list, and on CREATE FOREIGN TABLE "gp.distributed_by"
- * '(a,b)' in the OPTIONS list.  Anywhere else -- ALTER TABLE ... SET
- * DISTRIBUTED BY, which Cloudberry refuses in single-node mode -- it is left
- * for PostgreSQL's grammar to refuse.
+ * '(a,b)' in the OPTIONS list.  ALTER TABLE ... SET DISTRIBUTED BY becomes
+ * an option of the ALTER's SET, in rw_partition_cmds, where the rest of
+ * ALTER TABLE's Cloudberry commands are.
  *
  * THE COLUMN LIST KEEPS ITS PARENTHESES, and that is not decoration.  Written
  * bare, a one-column list is indistinguishable from the word that names a
@@ -1911,6 +1911,44 @@ rw_distribution(GpRewrite *rw, const char *policy, int at)
 	else
 		rw_add_option(rw, psprintf("gp.distributed_by = %s",
 								   quote_literal_cstr(policy)), at);
+}
+
+/*
+ * A DISTRIBUTED clause at token i -- BY (a, b), RANDOMLY or REPLICATED -- as
+ * the policy gp.distributed_by records, with *after set to the token after
+ * it; NULL when there is none.
+ */
+static char *
+distributed_policy(const GpTokens *ts, int i, int *after)
+{
+	if (!tok_is(ts, i, "distributed"))
+		return NULL;
+	if (tok_is(ts, i + 1, "randomly") || tok_is(ts, i + 1, "replicated"))
+	{
+		*after = i + 2;
+		return tok_is(ts, i + 1, "randomly") ? "random" : "replicated";
+	}
+	if (tok_is(ts, i + 1, "by") && tok_is_char(ts, i + 2, '('))
+	{
+		StringInfoData cols;
+		bool		first = true;
+
+		*after = skip_parens(ts, i + 2);
+		initStringInfo(&cols);
+		appendStringInfoChar(&cols, '(');
+		for (int j = i + 3; j < *after - 1; j++)
+		{
+			if (tok_is_char(ts, j, ',') || !tok_is_name(ts, j))
+				continue;
+			if (!first)
+				appendStringInfoChar(&cols, ',');
+			appendStringInfoString(&cols, quote_identifier(tok_name(ts, j)));
+			first = false;
+		}
+		appendStringInfoChar(&cols, ')');
+		return cols.data;
+	}
+	return NULL;
 }
 
 static void
@@ -2432,7 +2470,64 @@ rw_partition_cmds(GpRewrite *rw)
 	/* its commands, comma-separated */
 	while (i < rw->last)
 	{
-		if (GpPartIsCmd(ts, i, rw->last))
+		/*
+		 * SET DISTRIBUTED BY (a) / RANDOMLY / REPLICATED, and SET WITH
+		 * (REORGANIZE = true|false) before one or alone:
+		 *	 -> SET (gp.distributed_by = '(a)', gp.reorganize = 'true')
+		 * which gp_sql's distribution.c takes out and carries out: the policy,
+		 * and on a cluster the rows moved to where it puts them.
+		 */
+		if (tok_is_kw(ts, i, "set") &&
+			(tok_is(ts, i + 1, "distributed") ||
+			 (tok_is_kw(ts, i + 1, "with") && tok_is_char(ts, i + 2, '(') &&
+			  tok_is(ts, i + 3, "reorganize"))))
+		{
+			int			from = ts->toks[i].off;
+			int			j = i + 1;
+			char	   *reorganize = NULL;
+			char	   *policy;
+			StringInfoData opts;
+
+			if (tok_is_kw(ts, j, "with"))
+			{
+				int			close = skip_parens(ts, j + 1);
+
+				/* WITH (REORGANIZE = value) */
+				for (int k = j + 2; k < close - 1; k++)
+				{
+					char	   *v;
+
+					if (tok_is(ts, k, "reorganize") || tok_is_char(ts, k, '='))
+						continue;
+					/* true or 'true', on or 't': a boolean, however spelled */
+					v = rw_text(ts, k, k + 1);
+					if (v[0] == '\'')
+						v = pnstrdup(v + 1, strlen(v) - 2);
+					reorganize = (pg_strcasecmp(v, "true") == 0 ||
+								  pg_strcasecmp(v, "on") == 0 ||
+								  pg_strcasecmp(v, "t") == 0) ? "true" : "false";
+				}
+				j = close;
+			}
+			policy = distributed_policy(ts, j, &e);
+			if (policy == NULL && reorganize == NULL)
+				break;
+			if (policy != NULL)
+				j = e;
+
+			initStringInfo(&opts);
+			if (policy != NULL)
+				appendStringInfo(&opts, "gp.distributed_by = %s",
+								 quote_literal_cstr(policy));
+			if (reorganize != NULL)
+				appendStringInfo(&opts, "%sgp.reorganize = %s",
+								 policy != NULL ? ", " : "",
+								 quote_literal_cstr(reorganize));
+			rw_edit(rw, from, tok_stop(ts, j - 1),
+					psprintf("SET (%s)", opts.data));
+			i = j;
+		}
+		else if (GpPartIsCmd(ts, i, rw->last))
 		{
 			int			from = ts->toks[i].off;
 			int			to;
@@ -3224,8 +3319,39 @@ rw_expressions(GpRewrite *rw, bool statement)
 /* The driver                                                                */
 /* ------------------------------------------------------------------------- */
 
+static void rw_statement_itself(GpRewrite *rw);
+
+/*
+ * A statement, or one EXPLAIN shows: EXPLAIN [ANALYZE] [VERBOSE] and EXPLAIN
+ * (options) are followed by a statement of their own, whose Cloudberry
+ * clauses -- CREATE TABLE AS ... DISTRIBUTED BY, say -- are rewritten as
+ * that statement's would be.
+ */
 static void
 rw_statement(GpRewrite *rw)
+{
+	const GpTokens *ts = rw->ts;
+	int			first = rw->first;
+
+	if (tok_is_kw(ts, first, "explain"))
+	{
+		int			c = first + 1;
+
+		if (tok_is_char(ts, c, '('))
+			c = skip_parens(ts, c);
+		else
+			while (tok_is_kw(ts, c, "analyze") || tok_is_kw(ts, c, "analyse") ||
+				   tok_is_kw(ts, c, "verbose"))
+				c++;
+		if (c < rw->last)
+			rw->first = c;
+	}
+	rw_statement_itself(rw);
+	rw->first = first;
+}
+
+static void
+rw_statement_itself(GpRewrite *rw)
 {
 	GpSubjKind	kind;
 	char	   *name = NULL;

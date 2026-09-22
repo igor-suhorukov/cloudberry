@@ -187,6 +187,13 @@ extern PGDLLIMPORT bool gp_create_table_random_default_distribution;
  * CREATE TABLE that made it, or NULL for one CREATE TABLE AS made.
  */
 extern void GpDistributionApplyDefault(CreateStmt *stmt, Oid relid);
+
+/*
+ * ALTER TABLE ... SET DISTRIBUTED: the new policy ("policy", or NULL for the
+ * one it has), and on a cluster the rows moved to where it puts them --
+ * "reorganize" 1 always, 0 never, -1 as Cloudberry decides.
+ */
+extern void GpDistributionAlter(Oid relid, const char *policy, int reorganize);
 extern void GpDistributionDefineSettings(void);
 
 extern PGDLLIMPORT int gp_max_partition_level;
