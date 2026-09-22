@@ -20,14 +20,15 @@
  * compat/cb_motion.h
  *	  Whether a plan's Motions can be carried out as stage A carries them.
  *
- * Stage A of the distributed layer dispatches each Gather Motion's fragment
- * to the segments as a plan of its own (gp_core's gp_motion.c), and a
- * fragment so dispatched has nothing of the coordinator's with it but the
- * statement it was cut from: no value the coordinator computed, no
- * parameter the client bound, no Motion of its own to receive from.  In
- * Cloudberry the dispatcher sends the values of the parameters a slice uses,
- * and the interconnect joins the slices; neither exists yet, so a plan that
- * needs them is refused, with the reason, and planned by PostgreSQL.
+ * gp_core dispatches each Motion's fragment to the segments as a plan of its
+ * own (gp_motion.c), and a fragment so dispatched has nothing of the
+ * coordinator's with it but the statement it was cut from: no value the
+ * coordinator computed, no parameter the client bound.  In Cloudberry the
+ * dispatcher sends the values of the parameters a slice uses; the port does
+ * not yet, so a plan that needs them is refused, with the reason, and
+ * planned by PostgreSQL.  The walk that checks this also tells each Gather
+ * which Motions between segments below it are carried out first, and in
+ * what order.
  *
  *-------------------------------------------------------------------------
  */
@@ -37,12 +38,15 @@
 #include "nodes/plannodes.h"
 
 #define GP_ORCA_MOTION_OK			0
-#define GP_ORCA_MOTION_NESTED		1	/* a Motion in a slice the segments run */
+#define GP_ORCA_MOTION_NESTED		1	/* a Gather in a slice the segments run */
 #define GP_ORCA_MOTION_PARAM		2	/* a value computed outside a fragment */
 #define GP_ORCA_MOTION_EXTERN		3	/* a statement parameter on a segment */
 #define GP_ORCA_MOTION_WRITE		4	/* a write in a fragment */
 
-/* The first of the reasons above that the plan has; GP_ORCA_MOTION_OK if none. */
+/*
+ * The first of the reasons above that the plan has; GP_ORCA_MOTION_OK if
+ * none, in which case each Gather has been given its Motions to carry out.
+ */
 extern int	gp_orca_check_motions(PlannedStmt *stmt);
 
 #endif							/* CB_MOTION_H */

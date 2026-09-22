@@ -39,7 +39,7 @@
  * here changes meaning or moves.
  */
 #define GP_CORE_API_VERSION_MAJOR	1
-#define GP_CORE_API_VERSION_MINOR	3
+#define GP_CORE_API_VERSION_MINOR	4
 
 /*
  * What the rendezvous variable points at.  It is the first thing a module
@@ -102,6 +102,22 @@ typedef struct GpCoreApi
 											const Oid *types,
 											const Datum *values,
 											const bool *isnull);
+
+	/* The Motions between segments.  Added in API 1.4. */
+	struct Plan *(*motion_make_send) (int type, struct Plan *fragment,
+									  struct List *targetlist,
+									  struct List *qual, int content,
+									  int slice, struct List *hashexprs,
+									  struct List *hashfuncs);
+	int			(*motion_type) (struct Plan *plan);
+	int			(*motion_slice) (struct Plan *plan);
+	void		(*motion_set_prepare) (struct Plan *plan, struct List *slices);
+	struct Plan *(*motion_make_hash_filter) (struct Plan *child,
+											 struct List *targetlist,
+											 struct List *qual, int nkeys,
+											 const AttrNumber *cols,
+											 const Oid *hashfuncs,
+											 int segment);
 } GpCoreApi;
 
 /*

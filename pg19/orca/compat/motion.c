@@ -21,7 +21,7 @@
  *	  Whether a plan's Motions can be carried out as stage A carries them; see
  *	  cb_motion.h.
  *
- * The fragment below a Motion runs on a segment with the statement's
+ * The fragment below each Motion runs on a segment with the statement's
  * parameter slots empty, so every PARAM_EXEC it reads has to be set inside
  * it.  ORCA's translator is the only thing that makes these plans, and what
  * sets a parameter in them is a short list: a NestLoop's nestParams, a
@@ -41,6 +41,7 @@
 
 #include "optimizer/walkers.h"
 
+#include "cb_compat.h"
 #include "cb_dynamicscan.h"
 #include "cb_motion.h"
 #include "gp_motion.h"
@@ -52,6 +53,7 @@ typedef struct motion_check_context
 	Bitmapset  *referenced;
 	Bitmapset  *produced;
 	int			problem;
+	List	  **order;			/* the enclosing Gather's Motions, senders first */
 } motion_check_context;
 
 static bool
@@ -82,19 +84,28 @@ motion_check_walker(Node *node, void *arg)
 	if (is_motion(node))
 	{
 		Plan	   *plan = (Plan *) node;
+		const GpCoreApi *api = cb_core_api();
+		bool		gather = api->motion_type(plan) == GP_MOTION_GATHER;
+		List	   *order = NIL;
 		motion_check_context sub;
 
-		if (ctx->in_fragment)
+		/* A Gather's rows go to the coordinator, from where it runs. */
+		if (gather && ctx->in_fragment)
 		{
 			ctx->problem = GP_ORCA_MOTION_NESTED;
 			return true;
 		}
 
+		/*
+		 * Below any Motion is a fragment of its own, which a segment runs --
+		 * or the coordinator, for a Motion it sends -- apart from the rest.
+		 */
 		sub = *ctx;
 		sub.in_fragment = true;
 		sub.referenced = NULL;
 		sub.produced = NULL;
 		sub.problem = GP_ORCA_MOTION_OK;
+		sub.order = gather ? &order : ctx->order;
 		if (motion_check_walker((Node *) plan->lefttree, &sub))
 		{
 			ctx->problem = sub.problem;
@@ -106,7 +117,16 @@ motion_check_walker(Node *node, void *arg)
 			return true;
 		}
 
-		/* Its own expressions are evaluated here, on the coordinator. */
+		/*
+		 * A Motion between segments is carried out after the ones its own
+		 * fragment receives from, and before the Gather above it sends.
+		 */
+		if (gather)
+			api->motion_set_prepare(plan, order);
+		else if (ctx->order != NULL)
+			*ctx->order = lappend_int(*ctx->order, api->motion_slice(plan));
+
+		/* Its own expressions are evaluated where it receives. */
 		return motion_check_walker((Node *) plan->targetlist, ctx) ||
 			motion_check_walker((Node *) plan->qual, ctx) ||
 			motion_check_walker((Node *) plan->initPlan, ctx);
@@ -196,6 +216,7 @@ gp_orca_check_motions(PlannedStmt *stmt)
 	ctx.referenced = NULL;
 	ctx.produced = NULL;
 	ctx.problem = GP_ORCA_MOTION_OK;
+	ctx.order = NULL;
 
 	(void) motion_check_walker((Node *) stmt->planTree, &ctx);
 	return ctx.problem;

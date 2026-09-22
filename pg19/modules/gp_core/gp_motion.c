@@ -33,9 +33,22 @@
  * behind a binary cursor, as every gather is (gp_dispatch.c); the segment's
  * planner_hook recognises the call, and instead of planning a function call
  * returns the fragment, which the cursor then runs.  The rows come back as
- * any gather's do.  That is stage A of the plan's distributed layer: plans
- * whose Motions all gather to the coordinator.  A Motion between segments
- * needs the interconnect, and is stage B.
+ * any gather's do.
+ *
+ * A Motion between segments -- Redistribute, Broadcast, a random
+ * redistribution -- is carried out before the Gather above it sends its
+ * fragment, by the coordinator: the Motion's own fragment, the slice that
+ * sends, is gathered as any is, and each row goes on to the segment its
+ * hash chooses, to every segment, or to the next in turn, in batches of
+ * rows the receiving segment keeps in a temporary file for the rest of the
+ * transaction (gp_internal.motion_put()).  In the fragment the receiving
+ * slice runs, the Motion reads that file.  The rows cross the coordinator:
+ * this is a relay, not Cloudberry's interconnect, whose senders stream to
+ * their receivers directly and all slices run at once.  It carries out
+ * every plan the interconnect would, a slice at a time, and what it lacks
+ * is the speed; the transport is the part to replace.  Which Motions a
+ * Gather has to carry out first, and in what order, the translator works
+ * out and gives it (GpMotionSetPrepare).
  *
  * A plan is carried out as it stands -- its permission checks are part of it
  * -- so a segment takes one only from the coordinator: a connection that is
@@ -63,18 +76,26 @@
 #include "commands/explain.h"
 #include "commands/explain_format.h"
 #include "executor/executor.h"
+#include "access/xact.h"
+#include "common/pg_prng.h"
 #include "lib/binaryheap.h"
+#include "libpq/pqformat.h"
 #include "miscadmin.h"
 #include "nodes/extensible.h"
 #include "nodes/makefuncs.h"
 #include "nodes/nodeFuncs.h"
+#include "optimizer/optimizer.h"
 #include "optimizer/planner.h"
+#include "port/pg_bswap.h"
+#include "storage/buffile.h"
 #include "parser/parse_func.h"
 #include "parser/parsetree.h"
 #include "storage/lmgr.h"
 #include "utils/builtins.h"
+#include "varatt.h"
 #include "utils/lsyscache.h"
 #include "utils/rel.h"
+#include "utils/resowner.h"
 #include "utils/ruleutils.h"
 #include "utils/sortsupport.h"
 
@@ -96,6 +117,15 @@
 #define MOTION_PRIVATE_SORTOPS		3
 #define MOTION_PRIVATE_COLLATIONS	4
 #define MOTION_PRIVATE_NULLSFIRST	5
+#define MOTION_PRIVATE_TYPE			6	/* GP_MOTION_* */
+#define MOTION_PRIVATE_HASHFUNCS	7	/* a Redistribute: its hash functions */
+#define MOTION_PRIVATE_PREPARE		8	/* a Gather: slices it runs first */
+
+/* The SQL a batch of a Motion's rows travels to its receiving segment in. */
+#define MOTION_PUT_SQL	"SELECT gp_internal.motion_put($1, $2, $3)"
+
+/* How much of a segment's rows the coordinator holds before sending them. */
+#define MOTION_BATCH_BYTES	(256 * 1024)
 
 typedef struct MotionState
 {
@@ -109,6 +139,21 @@ typedef struct MotionState
 
 	GpGatherState *gather;
 	bool		done;
+
+	int			type;			/* GP_MOTION_* */
+
+	/* A Gather: the name its Motions' rows are kept under on the segments. */
+	char	   *key;
+	bool		prepared;
+
+	/* On a segment, a Motion that receives: the rows the coordinator sent. */
+	bool		receiving;
+	BufFile    *file;
+	off_t		offset;			/* where the next row is */
+	int			fileno;
+	bool		binary;
+	FmgrInfo   *inprocs;
+	Oid		   *inparams;
 
 	/* A merge: each segment's next row, and which of them is least. */
 	int			nsegs;
@@ -140,6 +185,8 @@ static const CustomExecMethods motion_exec_methods = {
 	.ReScanCustomScan = motion_rescan,
 	.ExplainCustomScan = motion_explain,
 };
+
+static const CustomExecMethods hash_filter_exec_methods;
 
 static planner_hook_type prev_planner = NULL;
 static explain_node_label_hook_type prev_explain_node_label = NULL;
@@ -175,11 +222,11 @@ outer_to_index_mutator(Node *node, void *context)
 static Oid
 exec_fragment_oid(void)
 {
-	Oid			argtype = TEXTOID;
+	Oid			argtypes[2] = {TEXTOID, TEXTOID};
 
 	return LookupFuncName(list_make2(makeString("gp_internal"),
 									 makeString("exec_fragment")),
-						  1, &argtype, true);
+						  2, argtypes, true);
 }
 
 bool
@@ -190,18 +237,72 @@ GpMotionCanDispatchPlans(void)
 		OidIsValid(exec_fragment_oid());
 }
 
+static CustomScan *motion_make(int type, Plan *fragment, List *targetlist,
+							   List *qual, int content, int slice);
+
 Plan *
 GpMotionMakeGather(Plan *fragment, List *targetlist, List *qual,
 				   int content, int slice, int nkeys,
 				   const AttrNumber *keys, const Oid *sortops,
 				   const Oid *collations, const bool *nullsfirst)
 {
-	CustomScan *cscan = makeNode(CustomScan);
-	List	   *scan_tlist = NIL;
+	CustomScan *cscan = motion_make(GP_MOTION_GATHER, fragment, targetlist,
+									qual, content, slice);
 	List	   *keylist = NIL;
 	List	   *oplist = NIL;
 	List	   *colllist = NIL;
 	List	   *nflist = NIL;
+
+	/*
+	 * A sort key is a column of the Motion's output; the merge compares the
+	 * fragment's rows, so each has to be a column of those, passed through.
+	 */
+	for (int i = 0; i < nkeys; i++)
+	{
+		TargetEntry *tle = get_tle_by_resno(cscan->scan.plan.targetlist,
+											keys[i]);
+
+		if (tle == NULL || !IsA(tle->expr, Var) ||
+			((Var *) tle->expr)->varno != INDEX_VAR)
+			return NULL;
+		keylist = lappend_int(keylist, ((Var *) tle->expr)->varattno);
+		oplist = lappend_oid(oplist, sortops[i]);
+		colllist = lappend_oid(colllist, collations[i]);
+		nflist = lappend_int(nflist, nullsfirst[i] ? 1 : 0);
+	}
+
+	list_nth_cell(cscan->custom_private, MOTION_PRIVATE_KEYS)->ptr_value = keylist;
+	list_nth_cell(cscan->custom_private, MOTION_PRIVATE_SORTOPS)->ptr_value = oplist;
+	list_nth_cell(cscan->custom_private, MOTION_PRIVATE_COLLATIONS)->ptr_value = colllist;
+	list_nth_cell(cscan->custom_private, MOTION_PRIVATE_NULLSFIRST)->ptr_value = nflist;
+	return (Plan *) cscan;
+}
+
+Plan *
+GpMotionMakeSend(int type, Plan *fragment, List *targetlist, List *qual,
+				 int content, int slice, List *hashexprs, List *hashfuncs)
+{
+	CustomScan *cscan;
+
+	Assert(type == GP_MOTION_HASH || type == GP_MOTION_BROADCAST ||
+		   type == GP_MOTION_RANDOM);
+	Assert(list_length(hashexprs) == list_length(hashfuncs));
+
+	cscan = motion_make(type, fragment, targetlist, qual, content, slice);
+
+	/* The hash expressions read the fragment's output, as ORCA made them. */
+	cscan->custom_exprs = hashexprs;
+	list_nth_cell(cscan->custom_private, MOTION_PRIVATE_HASHFUNCS)->ptr_value =
+		hashfuncs;
+	return (Plan *) cscan;
+}
+
+static CustomScan *
+motion_make(int type, Plan *fragment, List *targetlist, List *qual,
+			int content, int slice)
+{
+	CustomScan *cscan = makeNode(CustomScan);
+	List	   *scan_tlist = NIL;
 	List	   *tlist;
 	ListCell   *lc;
 
@@ -221,23 +322,6 @@ GpMotionMakeGather(Plan *fragment, List *targetlist, List *qual,
 
 	tlist = (List *) outer_to_index_mutator((Node *) targetlist, NULL);
 
-	/*
-	 * A sort key is a column of the Motion's output; the merge compares the
-	 * fragment's rows, so each has to be a column of those, passed through.
-	 */
-	for (int i = 0; i < nkeys; i++)
-	{
-		TargetEntry *tle = get_tle_by_resno(tlist, keys[i]);
-
-		if (tle == NULL || !IsA(tle->expr, Var) ||
-			((Var *) tle->expr)->varno != INDEX_VAR)
-			return NULL;
-		keylist = lappend_int(keylist, ((Var *) tle->expr)->varattno);
-		oplist = lappend_oid(oplist, sortops[i]);
-		colllist = lappend_oid(colllist, collations[i]);
-		nflist = lappend_int(nflist, nullsfirst[i] ? 1 : 0);
-	}
-
 	cscan->scan.plan.targetlist = tlist;
 	cscan->scan.plan.qual = (List *) outer_to_index_mutator((Node *) qual, NULL);
 	cscan->scan.plan.lefttree = fragment;
@@ -248,13 +332,39 @@ GpMotionMakeGather(Plan *fragment, List *targetlist, List *qual,
 	cscan->custom_scan_tlist = scan_tlist;
 	cscan->custom_relids = NULL;
 	cscan->custom_private = list_make4(makeInteger(content),
-									   makeInteger(slice),
-									   keylist, oplist);
-	cscan->custom_private = lappend(cscan->custom_private, colllist);
-	cscan->custom_private = lappend(cscan->custom_private, nflist);
+									   makeInteger(slice), NIL, NIL);
+	cscan->custom_private = lappend(cscan->custom_private, NIL);	/* collations */
+	cscan->custom_private = lappend(cscan->custom_private, NIL);	/* nulls first */
+	cscan->custom_private = lappend(cscan->custom_private, makeInteger(type));
+	cscan->custom_private = lappend(cscan->custom_private, NIL);	/* hash functions */
+	cscan->custom_private = lappend(cscan->custom_private, NIL);	/* to prepare */
 	cscan->methods = &motion_scan_methods;
 
-	return (Plan *) cscan;
+	return cscan;
+}
+
+int
+GpMotionType(Plan *plan)
+{
+	Assert(GpMotionIs(plan));
+	return intVal(list_nth(((CustomScan *) plan)->custom_private,
+						   MOTION_PRIVATE_TYPE));
+}
+
+int
+GpMotionSlice(Plan *plan)
+{
+	Assert(GpMotionIs(plan));
+	return intVal(list_nth(((CustomScan *) plan)->custom_private,
+						   MOTION_PRIVATE_SLICE));
+}
+
+void
+GpMotionSetPrepare(Plan *plan, List *slices)
+{
+	Assert(GpMotionIs(plan) && GpMotionType(plan) == GP_MOTION_GATHER);
+	list_nth_cell(((CustomScan *) plan)->custom_private,
+				  MOTION_PRIVATE_PREPARE)->ptr_value = slices;
 }
 
 bool
@@ -340,6 +450,258 @@ motion_create_state(CustomScan *cscan)
 	return (Node *) state;
 }
 
+/* ------------------------------------------------------------------------- */
+/* The rows a segment receives                                               */
+/* ------------------------------------------------------------------------- */
+
+/*
+ * A Motion's rows on the segment that receives them: a temporary file per
+ * statement and slice, for the rest of the transaction, since the slice that
+ * reads them runs later and may run again.  The files belong to the
+ * transaction's resource owner, which removes them if it aborts.
+ */
+typedef struct MotionFile
+{
+	char	   *key;
+	int			slice;
+	BufFile    *file;
+	int			endfile;		/* where the rows end, which BufFileSeek's */
+	off_t		endoffset;		/* SEEK_END does not know while buffered */
+} MotionFile;
+
+static List *motion_files = NIL;	/* in TopTransactionContext */
+static bool motion_xact_callback_registered = false;
+
+static MotionFile *
+motion_file_find(const char *key, int slice)
+{
+	ListCell   *lc;
+
+	foreach(lc, motion_files)
+	{
+		MotionFile *mf = (MotionFile *) lfirst(lc);
+
+		if (mf->slice == slice && strcmp(mf->key, key) == 0)
+			return mf;
+	}
+	return NULL;
+}
+
+static void
+motion_files_close(const char *key)
+{
+	List	   *keep = NIL;
+	ListCell   *lc;
+
+	foreach(lc, motion_files)
+	{
+		MotionFile *mf = (MotionFile *) lfirst(lc);
+
+		if (key == NULL || strcmp(mf->key, key) == 0)
+			BufFileClose(mf->file);
+		else
+			keep = lappend(keep, mf);
+	}
+	motion_files = keep;
+}
+
+static void
+motion_xact_callback(XactEvent event, void *arg)
+{
+	switch (event)
+	{
+		case XACT_EVENT_PRE_COMMIT:
+		case XACT_EVENT_PARALLEL_PRE_COMMIT:
+		case XACT_EVENT_PRE_PREPARE:
+			/* closed here, rather than warned about as leaked at commit */
+			motion_files_close(NULL);
+			break;
+		case XACT_EVENT_COMMIT:
+		case XACT_EVENT_PARALLEL_COMMIT:
+		case XACT_EVENT_ABORT:
+		case XACT_EVENT_PARALLEL_ABORT:
+		case XACT_EVENT_PREPARE:
+			/* an abort's resource owner closes the files */
+			motion_files = NIL;
+			break;
+	}
+}
+
+/* The key a fragment's Motions' rows are kept under, from its PlannedStmt. */
+static char *
+fragment_key(PlannedStmt *stmt)
+{
+	ListCell   *lc;
+
+	foreach(lc, stmt->extension_state)
+	{
+		DefElem    *def = lfirst_node(DefElem, lc);
+
+		if (strcmp(def->defname, GP_FRAGMENT_MARK) == 0 && def->arg != NULL)
+			return strVal(def->arg);
+	}
+	return "";
+}
+
+PG_FUNCTION_INFO_V1(gp_motion_put);
+
+/*
+ * gp_internal.motion_put(key, slice, rows)
+ *
+ * A batch of a Motion's rows, relayed by the coordinator, added to the ones
+ * this segment has for that statement and slice.  Only from the coordinator:
+ * the rows are read as the plan's own.
+ */
+Datum
+gp_motion_put(PG_FUNCTION_ARGS)
+{
+	char	   *key = text_to_cstring(PG_GETARG_TEXT_PP(0));
+	int			slice = PG_GETARG_INT32(1);
+	bytea	   *rows = PG_GETARG_BYTEA_PP(2);
+	MotionFile *mf;
+
+	if (!GpClusterDispatchTrusted())
+		ereport(ERROR,
+				(errcode(ERRCODE_INSUFFICIENT_PRIVILEGE),
+				 errmsg("a Motion's rows are taken only from the coordinator"),
+				 errdetail("The connection does not carry this cluster's secret.")));
+
+	mf = motion_file_find(key, slice);
+	if (mf == NULL)
+	{
+		MemoryContext oldcxt = MemoryContextSwitchTo(TopTransactionContext);
+		ResourceOwner oldowner = CurrentResourceOwner;
+
+		mf = palloc0(sizeof(MotionFile));
+		mf->key = pstrdup(key);
+		mf->slice = slice;
+		CurrentResourceOwner = TopTransactionResourceOwner;
+		mf->file = BufFileCreateTemp(false);
+		CurrentResourceOwner = oldowner;
+		motion_files = lappend(motion_files, mf);
+		MemoryContextSwitchTo(oldcxt);
+	}
+
+	if (BufFileSeek(mf->file, mf->endfile, mf->endoffset, SEEK_SET) != 0)
+		ereport(ERROR,
+				(errcode_for_file_access(),
+				 errmsg("could not seek to the end of a Motion's rows: %m")));
+	BufFileWrite(mf->file, VARDATA_ANY(rows), VARSIZE_ANY_EXHDR(rows));
+	BufFileTell(mf->file, &mf->endfile, &mf->endoffset);
+
+	PG_RETURN_VOID();
+}
+
+PG_FUNCTION_INFO_V1(gp_motion_drop);
+
+/*
+ * gp_internal.motion_drop(key)
+ *
+ * The statement is done with its Motions' rows: the coordinator's word, at
+ * the end of the Gather that had them sent.
+ */
+Datum
+gp_motion_drop(PG_FUNCTION_ARGS)
+{
+	char	   *key = text_to_cstring(PG_GETARG_TEXT_PP(0));
+
+	if (!GpClusterDispatchTrusted())
+		ereport(ERROR,
+				(errcode(ERRCODE_INSUFFICIENT_PRIVILEGE),
+				 errmsg("a Motion's rows are dropped only for the coordinator")));
+	motion_files_close(key);
+	PG_RETURN_VOID();
+}
+
+/* Read exactly len bytes of a received row; false at the end of the rows. */
+static bool
+motion_read(MotionState *state, void *ptr, size_t len, bool eof_ok)
+{
+	size_t		got = BufFileReadMaybeEOF(state->file, ptr, len, eof_ok);
+
+	if (got == 0 && eof_ok)
+		return false;
+	if (got != len)
+		ereport(ERROR,
+				(errcode(ERRCODE_DATA_CORRUPTED),
+				 errmsg("a Motion's rows end in the middle of a row")));
+	return true;
+}
+
+static TupleTableSlot *
+motion_recv_next(MotionState *state)
+{
+	TupleTableSlot *slot = state->css.ss.ss_ScanTupleSlot;
+	TupleDesc	tupdesc = slot->tts_tupleDescriptor;
+	MotionFile *mf;
+	uint16		natts;
+	MemoryContext oldcxt;
+
+	if (state->file == NULL)
+	{
+		mf = motion_file_find(state->key, state->slice);
+		if (mf == NULL)
+			return ExecClearTuple(slot);	/* nothing was sent here */
+		state->file = mf->file;
+		state->fileno = 0;
+		state->offset = 0;
+	}
+
+	/* Another reader of the file may have moved it: back to where we were. */
+	if (BufFileSeek(state->file, state->fileno, state->offset, SEEK_SET) != 0)
+		ereport(ERROR,
+				(errcode_for_file_access(),
+				 errmsg("could not seek in a Motion's rows: %m")));
+
+	if (!motion_read(state, &natts, sizeof(natts), true))
+		return ExecClearTuple(slot);
+	natts = pg_ntoh16(natts);
+	if (natts != tupdesc->natts)
+		ereport(ERROR,
+				(errcode(ERRCODE_DATATYPE_MISMATCH),
+				 errmsg("a Motion's row has %d columns, not %d",
+						natts, tupdesc->natts)));
+
+	ExecClearTuple(slot);
+	oldcxt = MemoryContextSwitchTo(state->css.ss.ps.ps_ExprContext->ecxt_per_tuple_memory);
+	for (int i = 0; i < natts; i++)
+	{
+		int32		len;
+		char	   *data;
+
+		motion_read(state, &len, sizeof(len), false);
+		len = (int32) pg_ntoh32((uint32) len);
+		if (len < 0)
+		{
+			slot->tts_isnull[i] = true;
+			slot->tts_values[i] = (Datum) 0;
+			continue;
+		}
+		data = palloc(len + 1);
+		if (len > 0)
+			motion_read(state, data, len, false);
+		data[len] = '\0';
+		slot->tts_isnull[i] = false;
+		if (state->binary)
+		{
+			StringInfoData buf;
+
+			initReadOnlyStringInfo(&buf, data, len);
+			slot->tts_values[i] = ReceiveFunctionCall(&state->inprocs[i], &buf,
+													  state->inparams[i],
+													  TupleDescAttr(tupdesc, i)->atttypmod);
+		}
+		else
+			slot->tts_values[i] = InputFunctionCall(&state->inprocs[i], data,
+													state->inparams[i],
+													TupleDescAttr(tupdesc, i)->atttypmod);
+	}
+	MemoryContextSwitchTo(oldcxt);
+
+	BufFileTell(state->file, &state->fileno, &state->offset);
+	return ExecStoreVirtualTuple(slot);
+}
+
 static void
 motion_begin(CustomScanState *node, EState *estate, int eflags)
 {
@@ -353,7 +715,39 @@ motion_begin(CustomScanState *node, EState *estate, int eflags)
 
 	state->content = intVal(list_nth(priv, MOTION_PRIVATE_CONTENT));
 	state->slice = intVal(list_nth(priv, MOTION_PRIVATE_SLICE));
+	state->type = intVal(list_nth(priv, MOTION_PRIVATE_TYPE));
 	state->nkeys = list_length(keys);
+
+	/*
+	 * On a segment, a Motion between segments receives: what the coordinator
+	 * relayed to this segment, in the file it keeps under the statement's
+	 * key.  A Gather is never run on a segment.
+	 */
+	if (GpClusterBackendRole() == GP_ROLE_EXECUTE &&
+		state->type != GP_MOTION_GATHER &&
+		!(eflags & EXEC_FLAG_EXPLAIN_ONLY))
+	{
+		TupleDesc	tupdesc = node->ss.ss_ScanTupleSlot->tts_tupleDescriptor;
+
+		state->receiving = true;
+		state->key = fragment_key(estate->es_plannedstmt);
+		state->binary = GpTupleDescHasBinaryIO(tupdesc);
+		state->inprocs = palloc0_array(FmgrInfo, tupdesc->natts);
+		state->inparams = palloc0_array(Oid, tupdesc->natts);
+		for (int i = 0; i < tupdesc->natts; i++)
+		{
+			Oid			proc;
+
+			if (state->binary)
+				getTypeBinaryInputInfo(TupleDescAttr(tupdesc, i)->atttypid,
+									   &proc, &state->inparams[i]);
+			else
+				getTypeInputInfo(TupleDescAttr(tupdesc, i)->atttypid,
+								 &proc, &state->inparams[i]);
+			fmgr_info(proc, &state->inprocs[i]);
+		}
+		return;
+	}
 
 	if (state->nkeys > 0)
 	{
@@ -382,11 +776,13 @@ motion_begin(CustomScanState *node, EState *estate, int eflags)
 											eflags | EXEC_FLAG_EXPLAIN_ONLY);
 }
 
-/* The fragment, as the PlannedStmt a segment is sent. */
+/*
+ * A fragment, as the query a segment is sent: the PlannedStmt it is part of
+ * with it as the tree, and the key its Motions' rows are kept under.
+ */
 static char *
-fragment_statement(MotionState *state)
+fragment_sql(EState *estate, Plan *fragment, const char *key)
 {
-	EState	   *estate = state->css.ss.ps.state;
 	PlannedStmt *whole = estate->es_plannedstmt;
 	PlannedStmt *frag = makeNode(PlannedStmt);
 
@@ -395,14 +791,346 @@ fragment_statement(MotionState *state)
 	frag->hasReturning = false;
 	frag->hasModifyingCTE = false;
 	frag->canSetTag = true;
-	frag->planTree = outerPlan(state->css.ss.ps.plan);
+	frag->planTree = fragment;
 	frag->resultRelationRelids = NULL;
 	frag->rowMarks = NIL;
 	frag->extension_state = NIL;
 	frag->utilityStmt = NULL;
 
-	return psprintf("SELECT gp_internal.exec_fragment(%s)",
-					quote_literal_cstr(nodeToString(frag)));
+	return psprintf("SELECT gp_internal.exec_fragment(%s, %s)",
+					quote_literal_cstr(nodeToString(frag)),
+					quote_literal_cstr(key ? key : ""));
+}
+
+/* Every Motion in a plan tree, the fragments below them included. */
+static void
+collect_motions(Plan *plan, List **motions)
+{
+	ListCell   *lc;
+
+	if (plan == NULL)
+		return;
+	if (GpMotionIs(plan))
+		*motions = lappend(*motions, plan);
+
+	collect_motions(plan->lefttree, motions);
+	collect_motions(plan->righttree, motions);
+	switch (nodeTag(plan))
+	{
+		case T_Append:
+			foreach(lc, ((Append *) plan)->appendplans)
+				collect_motions(lfirst(lc), motions);
+			break;
+		case T_MergeAppend:
+			foreach(lc, ((MergeAppend *) plan)->mergeplans)
+				collect_motions(lfirst(lc), motions);
+			break;
+		case T_BitmapAnd:
+			foreach(lc, ((BitmapAnd *) plan)->bitmapplans)
+				collect_motions(lfirst(lc), motions);
+			break;
+		case T_BitmapOr:
+			foreach(lc, ((BitmapOr *) plan)->bitmapplans)
+				collect_motions(lfirst(lc), motions);
+			break;
+		case T_SubqueryScan:
+			collect_motions(((SubqueryScan *) plan)->subplan, motions);
+			break;
+		case T_CustomScan:
+			foreach(lc, ((CustomScan *) plan)->custom_plans)
+				collect_motions(lfirst(lc), motions);
+			break;
+		default:
+			break;
+	}
+}
+
+/* One row, as a receiving segment reads it: a count, then each value. */
+static void
+append_row_raw(StringInfo buf, int natts, const char **values,
+			   const int *lengths)
+{
+	pq_sendint16(buf, natts);
+	for (int i = 0; i < natts; i++)
+	{
+		pq_sendint32(buf, lengths[i]);
+		if (lengths[i] > 0)
+			appendBinaryStringInfo(buf, values[i], lengths[i]);
+	}
+}
+
+static void
+motion_flush(const char *key, int slice, int content, StringInfo buf)
+{
+	const char *values[3];
+	int			lengths[3];
+	int			formats[3] = {0, 0, 1};
+	char		slicetext[16];
+
+	if (buf->len == 0)
+		return;
+	snprintf(slicetext, sizeof(slicetext), "%d", slice);
+	values[0] = key;
+	values[1] = slicetext;
+	values[2] = buf->data;
+	lengths[0] = lengths[1] = 0;
+	lengths[2] = buf->len;
+	GpDispatchParamsOnContent(content, MOTION_PUT_SQL, 3, values, lengths,
+							  formats);
+	resetStringInfo(buf);
+}
+
+/*
+ * Carry out a Motion between segments: run the slice that sends, and relay
+ * each of its rows to the segments that receive it.  The receiving slice
+ * reads them later, from the file each segment keeps them in.
+ */
+static void
+motion_relay(MotionState *gather, CustomScan *motion)
+{
+	EState	   *estate = gather->css.ss.ps.state;
+	List	   *priv = motion->custom_private;
+	int			type = intVal(list_nth(priv, MOTION_PRIVATE_TYPE));
+	int			content = intVal(list_nth(priv, MOTION_PRIVATE_CONTENT));
+	int			slice = intVal(list_nth(priv, MOTION_PRIVATE_SLICE));
+	List	   *hashfuncs = (List *) list_nth(priv, MOTION_PRIVATE_HASHFUNCS);
+	Plan	   *child = outerPlan(motion);
+	TupleDesc	tupdesc = ExecTypeFromTL(child->targetlist);
+	int			natts = tupdesc->natts;
+	int			nsegs = GpClusterSegmentCount();
+	StringInfoData *bufs = palloc_array(StringInfoData, nsegs);
+	ExprContext *econtext = CreateStandaloneExprContext();
+	TupleTableSlot *keyslot = MakeSingleTupleTableSlot(tupdesc, &TTSOpsVirtual);
+	int			nkeys = list_length(motion->custom_exprs);
+	ExprState **keyexprs = palloc_array(ExprState *, Max(nkeys, 1));
+	Datum	   *keyvalues = palloc_array(Datum, Max(nkeys, 1));
+	bool	   *keynulls = palloc_array(bool, Max(nkeys, 1));
+	Bitmapset  *keycols = NULL;
+	GpHash		hash;
+	int			next = (int) (pg_prng_uint32(&pg_global_prng_state) % nsegs);
+	const char **values = palloc_array(const char *, natts);
+	int		   *lengths = palloc_array(int, natts);
+	StringInfoData row;
+	int			i;
+
+	for (i = 0; i < nsegs; i++)
+		initStringInfo(&bufs[i]);
+	initStringInfo(&row);
+
+	/* A Redistribute hashes its keys as cdbhash hashes a table's. */
+	memset(&hash, 0, sizeof(hash));
+	hash.ptype = POLICYTYPE_PARTITIONED;
+	hash.numsegs = nsegs;
+	hash.nattrs = nkeys;
+	hash.attrs = palloc_array(AttrNumber, Max(nkeys, 1));
+	hash.hashfuncs = palloc_array(FmgrInfo, Max(nkeys, 1));
+	i = 0;
+	{
+		ListCell   *lc,
+				   *lf;
+
+		forboth(lc, motion->custom_exprs, lf, hashfuncs)
+		{
+			keyexprs[i] = ExecInitExpr((Expr *) lfirst(lc), NULL);
+			pull_varattnos((Node *) lfirst(lc), OUTER_VAR, &keycols);
+			hash.attrs[i] = i + 1;
+			fmgr_info(lfirst_oid(lf), &hash.hashfuncs[i]);
+			i++;
+		}
+	}
+
+	if (content == GP_MOTION_FROM_COORDINATOR)
+	{
+		/*
+		 * The slice that sends is the coordinator's own -- a VALUES list, a
+		 * function, a catalog -- and runs here, its rows encoded as a segment
+		 * would have sent them.
+		 */
+		PlanState  *ps = ExecInitNode(child, estate, 0);
+		bool		binary = GpTupleDescHasBinaryIO(tupdesc);
+		FmgrInfo   *outprocs = palloc0_array(FmgrInfo, natts);
+
+		for (i = 0; i < natts; i++)
+		{
+			Oid			proc;
+			bool		isvarlena;
+
+			if (binary)
+				getTypeBinaryOutputInfo(TupleDescAttr(tupdesc, i)->atttypid,
+										&proc, &isvarlena);
+			else
+				getTypeOutputInfo(TupleDescAttr(tupdesc, i)->atttypid,
+								  &proc, &isvarlena);
+			fmgr_info(proc, &outprocs[i]);
+		}
+
+		for (;;)
+		{
+			TupleTableSlot *slot = ExecProcNode(ps);
+			MemoryContext oldcxt;
+			int			target;
+
+			if (TupIsNull(slot))
+				break;
+			slot_getallattrs(slot);
+			oldcxt = MemoryContextSwitchTo(econtext->ecxt_per_tuple_memory);
+			for (i = 0; i < natts; i++)
+			{
+				if (slot->tts_isnull[i])
+				{
+					values[i] = NULL;
+					lengths[i] = -1;
+				}
+				else if (binary)
+				{
+					bytea	   *b = SendFunctionCall(&outprocs[i],
+													 slot->tts_values[i]);
+
+					values[i] = VARDATA(b);
+					lengths[i] = VARSIZE(b) - VARHDRSZ;
+				}
+				else
+				{
+					values[i] = OutputFunctionCall(&outprocs[i],
+												   slot->tts_values[i]);
+					lengths[i] = strlen(values[i]);
+				}
+			}
+			resetStringInfo(&row);
+			append_row_raw(&row, natts, values, lengths);
+
+			econtext->ecxt_outertuple = slot;
+			for (i = 0; i < nkeys; i++)
+				keyvalues[i] = ExecEvalExpr(keyexprs[i], econtext, &keynulls[i]);
+			MemoryContextSwitchTo(oldcxt);
+
+			target = type == GP_MOTION_HASH ?
+				GpHashSegment(&hash, keyvalues, keynulls) : next++ % nsegs;
+			if (type == GP_MOTION_BROADCAST)
+			{
+				for (i = 0; i < nsegs; i++)
+					appendBinaryStringInfo(&bufs[i], row.data, row.len);
+			}
+			else
+				appendBinaryStringInfo(&bufs[target], row.data, row.len);
+			ResetExprContext(econtext);
+
+			for (i = 0; i < nsegs; i++)
+				if (bufs[i].len >= MOTION_BATCH_BYTES)
+					motion_flush(gather->key, slice, i, &bufs[i]);
+		}
+		ExecEndNode(ps);
+	}
+	else
+	{
+		GpGatherState *g;
+		MemoryContext oldcxt = MemoryContextSwitchTo(estate->es_query_cxt);
+
+		g = GpGatherStartOn(fragment_sql(estate, child, gather->key), tupdesc,
+							content);
+		MemoryContextSwitchTo(oldcxt);
+
+		while (GpGatherNextRaw(g, values, lengths))
+		{
+			int			target = 0;
+
+			resetStringInfo(&row);
+			append_row_raw(&row, natts, values, lengths);
+
+			if (type == GP_MOTION_HASH)
+			{
+				/* only the columns the keys read are made Datums again */
+				oldcxt = MemoryContextSwitchTo(econtext->ecxt_per_tuple_memory);
+				ExecClearTuple(keyslot);
+				for (i = 0; i < natts; i++)
+				{
+					keyslot->tts_isnull[i] = true;
+					keyslot->tts_values[i] = (Datum) 0;
+					if (lengths[i] >= 0 &&
+						bms_is_member(i + 1 - FirstLowInvalidHeapAttributeNumber,
+									  keycols))
+					{
+						keyslot->tts_values[i] =
+							GpGatherDecodeValue(g, i, values[i], lengths[i]);
+						keyslot->tts_isnull[i] = false;
+					}
+				}
+				ExecStoreVirtualTuple(keyslot);
+				econtext->ecxt_outertuple = keyslot;
+				for (i = 0; i < nkeys; i++)
+					keyvalues[i] = ExecEvalExpr(keyexprs[i], econtext,
+												&keynulls[i]);
+				target = GpHashSegment(&hash, keyvalues, keynulls);
+				MemoryContextSwitchTo(oldcxt);
+				ResetExprContext(econtext);
+			}
+			else if (type == GP_MOTION_RANDOM)
+				target = next++ % nsegs;
+
+			if (type == GP_MOTION_BROADCAST)
+			{
+				for (i = 0; i < nsegs; i++)
+					appendBinaryStringInfo(&bufs[i], row.data, row.len);
+			}
+			else
+				appendBinaryStringInfo(&bufs[target], row.data, row.len);
+
+			for (i = 0; i < nsegs; i++)
+				if (bufs[i].len >= MOTION_BATCH_BYTES)
+					motion_flush(gather->key, slice, i, &bufs[i]);
+		}
+		GpGatherEnd(g);
+	}
+
+	for (i = 0; i < nsegs; i++)
+		motion_flush(gather->key, slice, i, &bufs[i]);
+
+	ExecDropSingleTupleTableSlot(keyslot);
+	FreeExprContext(econtext, true);
+}
+
+/*
+ * Before a Gather sends its fragment: the Motions below it that move rows
+ * between segments, in the order the translator gave -- a Motion's senders
+ * before its receivers -- each carried out once, however often the Gather
+ * is read again.
+ */
+static void
+motion_prepare(MotionState *state)
+{
+	EState	   *estate = state->css.ss.ps.state;
+	CustomScan *cscan = (CustomScan *) state->css.ss.ps.plan;
+	List	   *order = (List *) list_nth(cscan->custom_private,
+										  MOTION_PRIVATE_PREPARE);
+	List	   *motions = NIL;
+	ListCell   *lc;
+	static uint32 motion_counter = 0;
+
+	state->prepared = true;
+	if (order == NIL)
+		return;
+
+	state->key = MemoryContextStrdup(estate->es_query_cxt,
+									 psprintf("%d_%u", MyProcPid,
+											  ++motion_counter));
+
+	collect_motions(outerPlan(cscan), &motions);
+	foreach(lc, estate->es_plannedstmt->subplans)
+		collect_motions((Plan *) lfirst(lc), &motions);
+
+	foreach(lc, order)
+	{
+		int			slice = lfirst_int(lc);
+		ListCell   *lm;
+		CustomScan *motion = NULL;
+
+		foreach(lm, motions)
+			if (GpMotionSlice((Plan *) lfirst(lm)) == slice)
+				motion = (CustomScan *) lfirst(lm);
+		if (motion == NULL)
+			elog(ERROR, "no Motion sends slice %d", slice);
+		motion_relay(state, motion);
+	}
 }
 
 static void
@@ -411,8 +1139,13 @@ motion_start(MotionState *state)
 	TupleTableSlot *slot = state->css.ss.ss_ScanTupleSlot;
 	MemoryContext oldcxt;
 
+	if (!state->prepared)
+		motion_prepare(state);
+
 	oldcxt = MemoryContextSwitchTo(state->css.ss.ps.state->es_query_cxt);
-	state->gather = GpGatherStartOn(fragment_statement(state),
+	state->gather = GpGatherStartOn(fragment_sql(state->css.ss.ps.state,
+												 outerPlan(state->css.ss.ps.plan),
+												 state->key),
 									slot->tts_tupleDescriptor,
 									state->content);
 	MemoryContextSwitchTo(oldcxt);
@@ -483,9 +1216,15 @@ motion_merge_next(MotionState *state)
 		if (state->segslots == NULL)
 		{
 			state->segslots = palloc_array(TupleTableSlot *, state->nsegs);
+			/*
+			 * Virtual, as the scan slot is: the node above compiled its reads
+			 * of this node's rows for the kind of slot the scan slot is, and
+			 * the row that goes out is one of these.  Copying into a virtual
+			 * slot makes its own copy of the row's values.
+			 */
 			for (int i = 0; i < state->nsegs; i++)
 				state->segslots[i] = MakeSingleTupleTableSlot(tupdesc,
-															  &TTSOpsMinimalTuple);
+															  &TTSOpsVirtual);
 			state->receive = MakeSingleTupleTableSlot(tupdesc, &TTSOpsVirtual);
 			state->heap = binaryheap_allocate(state->nsegs, motion_heap_compare,
 											  state);
@@ -524,6 +1263,9 @@ motion_next(ScanState *ss)
 
 	if (state->done)
 		return ExecClearTuple(slot);
+
+	if (state->receiving)
+		return motion_recv_next(state);
 
 	if (state->gather == NULL)
 		motion_start(state);
@@ -568,6 +1310,11 @@ motion_end(CustomScanState *node)
 	MotionState *state = (MotionState *) node;
 
 	motion_finish(state);
+
+	/* The segments are done with the rows this Gather's Motions sent them. */
+	if (!state->receiving && state->key != NULL)
+		GpDispatchCommand(psprintf("SELECT gp_internal.motion_drop(%s)",
+								   quote_literal_cstr(state->key)));
 	if (state->segslots != NULL)
 	{
 		for (int i = 0; i < state->nsegs; i++)
@@ -591,12 +1338,32 @@ motion_rescan(CustomScanState *node)
 	motion_finish(state);
 	state->done = false;
 	state->merging = false;
+	state->fileno = 0;
+	state->offset = 0;
 }
 
+/* How many send: one segment, the coordinator, or all of them. */
 static int
 motion_segments(MotionState *state)
 {
-	return state->content >= 0 ? 1 : GpClusterSegmentCount();
+	return state->content >= 0 || state->content == GP_MOTION_FROM_COORDINATOR
+		? 1 : GpClusterSegmentCount();
+}
+
+static const char *
+motion_type_name(int type)
+{
+	switch (type)
+	{
+		case GP_MOTION_HASH:
+			return "Redistribute";
+		case GP_MOTION_BROADCAST:
+			return "Broadcast";
+		case GP_MOTION_RANDOM:
+			return "Redistribute";	/* Cloudberry prints a random one so too */
+		default:
+			return "Gather";
+	}
 }
 
 static void
@@ -611,18 +1378,32 @@ motion_explain(CustomScanState *node, List *ancestors, ExplainState *es)
 	/* In text the node's name says what it is; other formats need saying. */
 	if (es->format != EXPLAIN_FORMAT_TEXT)
 	{
-		ExplainPropertyText("Motion Type", "Gather", es);
+		ExplainPropertyText("Motion Type", motion_type_name(state->type), es);
 		ExplainPropertyInteger("Slice", NULL, state->slice, es);
 		ExplainPropertyInteger("Senders", NULL, motion_segments(state), es);
+	}
+
+	context = set_deparse_context_plan(es->deparse_cxt, node->ss.ps.plan,
+									   ancestors);
+	useprefix = list_length(es->rtable) > 1 || es->verbose;
+
+	/* Cloudberry's words for what a Redistribute hashes. */
+	if (state->type == GP_MOTION_HASH)
+	{
+		ListCell   *lc;
+
+		foreach(lc, ((CustomScan *) node->ss.ps.plan)->custom_exprs)
+			result = lappend(result,
+							 deparse_expression((Node *) lfirst(lc), context,
+												useprefix, true));
+		ExplainPropertyList("Hash Key", result, es);
+		result = NIL;
 	}
 
 	if (state->nkeys == 0)
 		return;
 
-	/* Cloudberry's words for a sorted Motion's keys. */
-	context = set_deparse_context_plan(es->deparse_cxt, node->ss.ps.plan,
-									   ancestors);
-	useprefix = list_length(es->rtable) > 1 || es->verbose;
+	/* And for a sorted Motion's keys. */
 	for (int i = 0; i < state->nkeys; i++)
 	{
 		Form_pg_attribute att = TupleDescAttr(tupdesc, state->keys[i] - 1);
@@ -650,14 +1431,239 @@ motion_explain_label(PlanState *planstate, ExplainState *es,
 	{
 		MotionState *state = (MotionState *) planstate;
 		int			nsegs = motion_segments(state);
+		int			receivers = state->type == GP_MOTION_GATHER ? 1
+			: GpClusterSegmentCount();
 
-		*pname = psprintf("Gather Motion %d:1", nsegs);
+		*pname = psprintf("%s Motion %d:%d", motion_type_name(state->type),
+						  nsegs, receivers);
 		*suffix = psprintf("  (slice%d; segments: %d)", state->slice, nsegs);
+		return;
+	}
+
+	/* Cloudberry's Result with hash filters, which this is */
+	if (IsA(planstate, CustomScanState) &&
+		((CustomScanState *) planstate)->methods == &hash_filter_exec_methods)
+	{
+		*pname = "Result";
 		return;
 	}
 
 	if (prev_explain_node_label)
 		prev_explain_node_label(planstate, es, pname, suffix);
+}
+
+/* ------------------------------------------------------------------------- */
+/* A segment's share of rows every segment has                               */
+/* ------------------------------------------------------------------------- */
+
+/*
+ * Where ORCA would redistribute rows that every segment already has -- a
+ * replicated table, a function every segment computes alike -- it keeps on
+ * each segment the rows that hash to it instead: Cloudberry's Result with
+ * hash filters, from which no row moves.  With no key to hash, the rows are
+ * kept on one segment chosen when the plan was made.  The filter reads the
+ * node's own output columns, as Cloudberry's does.
+ */
+typedef struct HashFilterState
+{
+	CustomScanState css;
+	int			nkeys;
+	AttrNumber *cols;
+	GpHash		hash;
+	int			segment;		/* with no keys, the one segment that keeps */
+} HashFilterState;
+
+static Node *hash_filter_create_state(CustomScan *cscan);
+static void hash_filter_begin(CustomScanState *node, EState *estate, int eflags);
+static TupleTableSlot *hash_filter_exec(CustomScanState *node);
+static void hash_filter_end(CustomScanState *node);
+static void hash_filter_rescan(CustomScanState *node);
+static void hash_filter_explain(CustomScanState *node, List *ancestors,
+								ExplainState *es);
+
+static const CustomScanMethods hash_filter_scan_methods = {
+	.CustomName = "GpHashFilter",
+	.CreateCustomScanState = hash_filter_create_state,
+};
+
+static const CustomExecMethods hash_filter_exec_methods = {
+	.CustomName = "GpHashFilter",
+	.BeginCustomScan = hash_filter_begin,
+	.ExecCustomScan = hash_filter_exec,
+	.EndCustomScan = hash_filter_end,
+	.ReScanCustomScan = hash_filter_rescan,
+	.ExplainCustomScan = hash_filter_explain,
+};
+
+Plan *
+GpMotionMakeHashFilter(Plan *child, List *targetlist, List *qual, int nkeys,
+					   const AttrNumber *cols, const Oid *hashfuncs,
+					   int segment)
+{
+	CustomScan *cscan = makeNode(CustomScan);
+	List	   *collist = NIL;
+	List	   *funclist = NIL;
+	List	   *scan_tlist = NIL;
+	ListCell   *lc;
+
+	for (int i = 0; i < nkeys; i++)
+	{
+		collist = lappend_int(collist, cols[i]);
+		funclist = lappend_oid(funclist, hashfuncs[i]);
+	}
+
+	/* the scan tuple: the child's row */
+	foreach(lc, child->targetlist)
+	{
+		TargetEntry *tle = lfirst_node(TargetEntry, lc);
+
+		scan_tlist = lappend(scan_tlist,
+							 makeTargetEntry((Expr *) makeVar(OUTER_VAR, tle->resno,
+															  exprType((Node *) tle->expr),
+															  exprTypmod((Node *) tle->expr),
+															  exprCollation((Node *) tle->expr),
+															  0),
+											 list_length(scan_tlist) + 1,
+											 tle->resname, false));
+	}
+
+	/*
+	 * Its expressions read the child's row as its scan tuple, as a scan
+	 * node's are expected to; custom_scan_tlist says where that comes from.
+	 */
+	cscan->scan.plan.targetlist =
+		(List *) outer_to_index_mutator((Node *) targetlist, NULL);
+	cscan->scan.plan.qual = (List *) outer_to_index_mutator((Node *) qual, NULL);
+	cscan->scan.plan.lefttree = child;
+	cscan->scan.scanrelid = 0;
+	cscan->custom_scan_tlist = scan_tlist;
+	cscan->custom_private = list_make3(collist, funclist, makeInteger(segment));
+	cscan->methods = &hash_filter_scan_methods;
+	return (Plan *) cscan;
+}
+
+static Node *
+hash_filter_create_state(CustomScan *cscan)
+{
+	HashFilterState *state = (HashFilterState *) newNode(sizeof(HashFilterState),
+														 T_CustomScanState);
+
+	state->css.methods = &hash_filter_exec_methods;
+	return (Node *) state;
+}
+
+static void
+hash_filter_begin(CustomScanState *node, EState *estate, int eflags)
+{
+	HashFilterState *state = (HashFilterState *) node;
+	CustomScan *cscan = (CustomScan *) node->ss.ps.plan;
+	List	   *cols = (List *) linitial(cscan->custom_private);
+	List	   *funcs = (List *) lsecond(cscan->custom_private);
+
+	state->nkeys = list_length(cols);
+	state->segment = intVal(lthird(cscan->custom_private));
+	state->cols = palloc_array(AttrNumber, Max(state->nkeys, 1));
+	state->hash.ptype = POLICYTYPE_PARTITIONED;
+	state->hash.numsegs = GpClusterSegmentCount();
+	state->hash.nattrs = state->nkeys;
+	state->hash.attrs = palloc_array(AttrNumber, Max(state->nkeys, 1));
+	state->hash.hashfuncs = palloc_array(FmgrInfo, Max(state->nkeys, 1));
+	for (int i = 0; i < state->nkeys; i++)
+	{
+		state->cols[i] = (AttrNumber) list_nth_int(cols, i);
+		state->hash.attrs[i] = i + 1;
+		fmgr_info(list_nth_oid(funcs, i), &state->hash.hashfuncs[i]);
+	}
+
+	outerPlanState(node) = ExecInitNode(outerPlan(cscan), estate, eflags);
+}
+
+static TupleTableSlot *
+hash_filter_exec(CustomScanState *node)
+{
+	HashFilterState *state = (HashFilterState *) node;
+	ExprContext *econtext = node->ss.ps.ps_ExprContext;
+	int			self = GpClusterContentId();
+
+	for (;;)
+	{
+		TupleTableSlot *child = ExecProcNode(outerPlanState(node));
+		TupleTableSlot *slot;
+
+		if (TupIsNull(child))
+			return NULL;
+
+		ResetExprContext(econtext);
+		econtext->ecxt_scantuple = child;
+		if (node->ss.ps.qual != NULL && !ExecQual(node->ss.ps.qual, econtext))
+			continue;
+
+		/*
+		 * With no projection the child's row goes out as it is, through the
+		 * scan slot: the node above reads this node's rows as the kind of
+		 * slot that is.
+		 */
+		slot = node->ss.ps.ps_ProjInfo != NULL
+			? ExecProject(node->ss.ps.ps_ProjInfo)
+			: ExecCopySlot(node->ss.ss_ScanTupleSlot, child);
+
+		if (state->nkeys == 0)
+		{
+			if (self != state->segment)
+				continue;
+		}
+		else
+		{
+			Datum	   *values = palloc_array(Datum, state->nkeys);
+			bool	   *isnull = palloc_array(bool, state->nkeys);
+
+			for (int i = 0; i < state->nkeys; i++)
+				values[i] = slot_getattr(slot, state->cols[i], &isnull[i]);
+			if (GpHashSegment(&state->hash, values, isnull) != self)
+				continue;
+		}
+		return slot;
+	}
+}
+
+static void
+hash_filter_end(CustomScanState *node)
+{
+	ExecEndNode(outerPlanState(node));
+}
+
+static void
+hash_filter_rescan(CustomScanState *node)
+{
+	if (outerPlanState(node)->chgParam == NULL)
+		ExecReScan(outerPlanState(node));
+}
+
+static void
+hash_filter_explain(CustomScanState *node, List *ancestors, ExplainState *es)
+{
+	HashFilterState *state = (HashFilterState *) node;
+	List	   *context;
+	List	   *result = NIL;
+
+	if (state->nkeys == 0)
+	{
+		ExplainPropertyInteger("Segment", NULL, state->segment, es);
+		return;
+	}
+	context = set_deparse_context_plan(es->deparse_cxt, node->ss.ps.plan,
+									   ancestors);
+	for (int i = 0; i < state->nkeys; i++)
+	{
+		TargetEntry *tle = get_tle_by_resno(node->ss.ps.plan->targetlist,
+											state->cols[i]);
+
+		result = lappend(result,
+						 deparse_expression((Node *) tle->expr, context,
+											list_length(es->rtable) > 1 || es->verbose,
+											true));
+	}
+	ExplainPropertyList("Hash Filter", result, es);
 }
 
 /* ------------------------------------------------------------------------- */
@@ -669,11 +1675,12 @@ motion_explain_label(PlanState *planstate, ExplainState *es,
  * of a string, and nothing else.
  */
 static const char *
-fragment_payload(Query *parse)
+fragment_payload(Query *parse, char **key)
 {
 	TargetEntry *tle;
 	FuncExpr   *func;
 	Const	   *arg;
+	Const	   *keyarg;
 	char	   *name;
 
 	if (parse->commandType != CMD_SELECT || parse->rtable != NIL ||
@@ -686,7 +1693,8 @@ fragment_payload(Query *parse)
 	if (!IsA(tle->expr, FuncExpr))
 		return NULL;
 	func = (FuncExpr *) tle->expr;
-	if (list_length(func->args) != 1 || !IsA(linitial(func->args), Const))
+	if (list_length(func->args) != 2 || !IsA(linitial(func->args), Const) ||
+		!IsA(lsecond(func->args), Const))
 		return NULL;
 
 	/* By name rather than a remembered oid: the extension may be made again. */
@@ -698,11 +1706,15 @@ fragment_payload(Query *parse)
 	arg = (Const *) linitial(func->args);
 	if (arg->constisnull || arg->consttype != TEXTOID)
 		return NULL;
+	keyarg = (Const *) lsecond(func->args);
+	if (keyarg->constisnull || keyarg->consttype != TEXTOID)
+		return NULL;
+	*key = TextDatumGetCString(keyarg->constvalue);
 	return TextDatumGetCString(arg->constvalue);
 }
 
 static PlannedStmt *
-fragment_plan(const char *payload)
+fragment_plan(const char *payload, const char *key)
 {
 	PlannedStmt *stmt;
 	Node	   *node;
@@ -743,7 +1755,8 @@ fragment_plan(const char *payload)
 		lfirst_node(TargetEntry, lc)->resjunk = false;
 
 	stmt->extension_state = list_make1(makeDefElem(pstrdup(GP_FRAGMENT_MARK),
-												   NULL, -1));
+												   (Node *) makeString(pstrdup(key)),
+												   -1));
 	return stmt;
 }
 
@@ -836,10 +1849,11 @@ motion_planner(Query *parse, const char *query_string, int cursorOptions,
 {
 	if (GpClusterIsDispatched())
 	{
-		const char *payload = fragment_payload(parse);
+		char	   *key = NULL;
+		const char *payload = fragment_payload(parse, &key);
 
 		if (payload != NULL)
-			return fragment_plan(payload);
+			return fragment_plan(payload, key);
 		if (fragment_depth > 0)
 			(void) fragment_safe_walker((Node *) parse, NULL);
 	}
@@ -876,6 +1890,7 @@ GpMotionInit(void)
 		return;
 
 	RegisterCustomScanMethods(&motion_scan_methods);
+	RegisterCustomScanMethods(&hash_filter_scan_methods);
 
 	prev_explain_node_label = explain_node_label_hook;
 	explain_node_label_hook = motion_explain_label;
@@ -885,4 +1900,10 @@ GpMotionInit(void)
 
 	prev_executor_run = ExecutorRun_hook;
 	ExecutorRun_hook = motion_executor_run;
+
+	if (!motion_xact_callback_registered)
+	{
+		RegisterXactCallback(motion_xact_callback, NULL);
+		motion_xact_callback_registered = true;
+	}
 }

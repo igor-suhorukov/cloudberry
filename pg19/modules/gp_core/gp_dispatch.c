@@ -1109,6 +1109,46 @@ GpDispatchCommandParams(const char *sql, int nparams, const char *const *values,
 	(void) n;
 }
 
+/*
+ * A statement with parameters, some of them binary, on one segment, waited
+ * for.  What a Motion's batches of rows travel in: bytea sent as it is,
+ * rather than as the hex text of it.
+ */
+void
+GpDispatchParamsOnContent(int content, const char *sql, int nparams,
+						  const char *const *values, const int *lengths,
+						  const int *formats)
+{
+	GpGang	   *g = gang_get();
+	GpSegmentConn *c = NULL;
+
+	gang_prepare(g, true);
+
+	for (int i = 0; i < g->nconns; i++)
+		if (g->conns[i].content == content)
+			c = &g->conns[i];
+	if (c == NULL)
+		ereport(ERROR,
+				(errcode(ERRCODE_UNDEFINED_OBJECT),
+				 errmsg("there is no segment with content id %d", content)));
+
+	if (c->busy && c->fetching != NULL)
+		conn_park(c);
+	if (!PQsendQueryParams(c->conn, sql, nparams, NULL, values, lengths,
+						   formats, 0))
+	{
+		char	   *msg = pstrdup(PQerrorMessage(c->conn));
+
+		gang_close();
+		ereport(ERROR,
+				(errcode(ERRCODE_CONNECTION_FAILURE),
+				 errmsg("could not send a statement to segment %d", content),
+				 errdetail_internal("%s", msg)));
+	}
+	c->busy = true;
+	gang_wait_all(g, NULL, false);
+}
+
 /* ------------------------------------------------------------------------- */
 /* Rows on the way out                                                       */
 /* ------------------------------------------------------------------------- */
@@ -1536,8 +1576,12 @@ gather_fetch(GpGatherSeg *s)
 	s->conn->fetching = s;
 }
 
-bool
-GpGatherNext(GpGatherState *gather, TupleTableSlot *slot, int *content)
+/*
+ * The next row from any segment: the segment's side of the gather, whose
+ * batch holds it at *row; NULL when every segment has finished.
+ */
+static GpGatherSeg *
+gather_next_row(GpGatherState *gather, int *row)
 {
 	if (gather->gang != gang)
 		ereport(ERROR,
@@ -1556,12 +1600,10 @@ GpGatherNext(GpGatherState *gather, TupleTableSlot *slot, int *content)
 
 			if (s->batch != NULL && s->row < PQntuples(s->batch))
 			{
-				gather_store_row(gather, s->batch, s->row++, slot);
-				if (content != NULL)
-					*content = s->conn->content;
+				*row = s->row++;
 				/* The next row from the next segment: they take turns. */
 				gather->next = (i + 1) % gather->nsegs;
-				return true;
+				return s;
 			}
 
 			if (s->batch != NULL)
@@ -1606,10 +1648,78 @@ GpGatherNext(GpGatherState *gather, TupleTableSlot *slot, int *content)
 		}
 
 		if (!unfinished)
-			return false;
+			return NULL;
 		if (!progress)
 			gang_wait(gather->gang);
 	}
+}
+
+bool
+GpGatherNext(GpGatherState *gather, TupleTableSlot *slot, int *content)
+{
+	int			row;
+	GpGatherSeg *s = gather_next_row(gather, &row);
+
+	if (s == NULL)
+		return false;
+	gather_store_row(gather, s->batch, row, slot);
+	if (content != NULL)
+		*content = s->conn->content;
+	return true;
+}
+
+bool
+GpGatherNextRaw(GpGatherState *gather, const char **values, int *lengths)
+{
+	int			row;
+	GpGatherSeg *s = gather_next_row(gather, &row);
+	int			natts = gather->tupdesc->natts;
+
+	if (s == NULL)
+		return false;
+	if (PQnfields(s->batch) != natts)
+		ereport(ERROR,
+				(errcode(ERRCODE_DATATYPE_MISMATCH),
+				 errmsg("a segment answered with %d columns, not %d",
+						PQnfields(s->batch), natts)));
+
+	for (int i = 0; i < natts; i++)
+	{
+		if (PQgetisnull(s->batch, row, i))
+		{
+			values[i] = NULL;
+			lengths[i] = -1;
+		}
+		else
+		{
+			values[i] = PQgetvalue(s->batch, row, i);
+			lengths[i] = PQgetlength(s->batch, row, i);
+		}
+	}
+	return true;
+}
+
+bool
+GpGatherIsBinary(GpGatherState *gather)
+{
+	return gather->binary;
+}
+
+Datum
+GpGatherDecodeValue(GpGatherState *gather, int col, const char *value,
+					int length)
+{
+	GpColumnIn *in = &gather->columns[col];
+
+	if (gather->binary)
+	{
+		StringInfoData buf;
+
+		initReadOnlyStringInfo(&buf, (char *) value, length);
+		return ReceiveFunctionCall(&in->proc, &buf, in->ioparam, in->typmod);
+	}
+	return InputFunctionCall(&in->proc, (char *) value, in->ioparam,
+							 in->typmod);
 }
 
 int

@@ -88,6 +88,11 @@ static const GpCoreApi gp_core_api = {
 	.motion_segment = GpMotionSegment,
 	.motion_set_segment = GpMotionSetSegment,
 	.direct_dispatch_segment = GpMotionDirectDispatchSegment,
+	.motion_make_send = GpMotionMakeSend,
+	.motion_type = GpMotionType,
+	.motion_slice = GpMotionSlice,
+	.motion_set_prepare = GpMotionSetPrepare,
+	.motion_make_hash_filter = GpMotionMakeHashFilter,
 };
 
 /*

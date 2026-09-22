@@ -64,9 +64,10 @@ extern "C" {
 #include "cb_assertop.h"
 // The scans of a partitioned table; see TranslateDXLDynTblScan.
 #include "cb_dynamicscan.h"
-// What stage A of the distributed layer can carry out; see
-// GetPlannedStmtFromDXL.
+// What the distributed layer can carry out; see GetPlannedStmtFromDXL.
 #include "cb_motion.h"
+// The kinds of Motion gp_core carries out.
+#include "gp_motion.h"
 #include "nodes/plannodes.h"
 #include "nodes/primnodes.h"
 #include "partitioning/partdesc.h"
@@ -337,9 +338,19 @@ CTranslatorDXLToPlStmt::GetPlannedStmtFromDXL(const CDXLNode *dxlnode,
 		int segment = TranslateDXLDirectDispatchSegment(
 			dxlnode->GetDXLDirectDispatchInfo(), planned_stmt->rtable);
 
+		// Every Motion a Gather: a Motion between segments is a plan that
+		// reads more than one segment's rows.
+		ListCell *lc_motion = nullptr;
+		ForEach(lc_motion, m_motions)
+		{
+			if (GP_MOTION_GATHER != gpdb::MotionType((Plan *) lfirst(lc_motion)))
+			{
+				segment = -1;
+			}
+		}
+
 		if (0 <= segment)
 		{
-			ListCell *lc_motion = nullptr;
 			ForEach(lc_motion, m_motions)
 			{
 				Plan *motion = (Plan *) lfirst(lc_motion);
@@ -352,13 +363,15 @@ CTranslatorDXLToPlStmt::GetPlannedStmtFromDXL(const CDXLNode *dxlnode,
 	}
 
 	// What a fragment takes with it is the statement it was cut from, and
-	// nothing the coordinator computed; see compat/cb_motion.h.
+	// nothing the coordinator computed; see compat/cb_motion.h.  Each
+	// Gather is told, too, which Motions between segments it carries out
+	// first.
 	if (NIL != m_motions)
 	{
 		switch (gpdb::CheckMotions(planned_stmt))
 		{
 			case GP_ORCA_MOTION_NESTED:
-				GP_UNPORTED("a Motion inside a slice the segments run");
+				GP_UNPORTED("a Gather Motion inside a slice the segments run");
 			case GP_ORCA_MOTION_PARAM:
 				GP_UNPORTED(
 					"a value computed on the coordinator, used on the segments");
@@ -2647,26 +2660,42 @@ CTranslatorDXLToPlStmt::TranslateDXLMotion(
 	const IntPtrArray *input_segids_array = motion_dxlop->GetInputSegIdsArray();
 	PlanSlice *recvslice = m_dxl_to_plstmt_context->GetCurrentSlice();
 
-	// Stage A of the distributed layer: a Gather Motion, whose fragment the
-	// coordinator dispatches as a plan of its own (gp_core's gp_motion.c).
-	// A Motion between segments needs the interconnect, which is stage B.
+	// gp_core carries out a Motion (gp_motion.c): a Gather by dispatching its
+	// fragment as a plan of its own, the Motions between segments by
+	// relaying their rows before the Gather above them runs.  Not an
+	// Explicit Redistribute, which routes each row by a gp_segment_id the
+	// port does not have yet, and which only DML plans.
+	int motion_type = GP_MOTION_GATHER;
 	switch (motion_dxlop->GetDXLOperator())
 	{
 		case EdxlopPhysicalMotionGather:
+			motion_type = GP_MOTION_GATHER;
 			break;
 		case EdxlopPhysicalMotionBroadcast:
-			GP_UNPORTED("Broadcast Motion");
-		case EdxlopPhysicalMotionRoutedDistribute:
-			GP_UNPORTED("Explicit Redistribute Motion");
+			motion_type = GP_MOTION_BROADCAST;
+			break;
+		case EdxlopPhysicalMotionRedistribute:
+			motion_type = GP_MOTION_HASH;
+			break;
+		case EdxlopPhysicalMotionRandom:
+			motion_type = GP_MOTION_RANDOM;
+			break;
 		default:
-			GP_UNPORTED("Redistribute Motion");
+			GP_UNPORTED("Explicit Redistribute Motion");
 	}
 
-	// Two slices on the segments, one sending to the other, is the
-	// interconnect again: the fragment would be dispatched from a segment.
-	if (0 != recvslice->sliceIndex)
+	// The coordinator is where a Gather's rows go, and only there: a Gather
+	// into a slice the segments run would be dispatched from a segment.
+	// And the rows of a Motion between segments go to segments.
+	if (GP_MOTION_GATHER == motion_type && 0 != recvslice->sliceIndex)
 	{
-		GP_UNPORTED("a Motion inside a slice the segments run");
+		GP_UNPORTED("a Gather Motion inside a slice the segments run");
+	}
+	if (GP_MOTION_GATHER != motion_type &&
+		(0 == recvslice->sliceIndex ||
+		 motion_dxlop->GetOutputSegIdsArray()->Size() != m_num_of_segments))
+	{
+		GP_UNPORTED("a Motion to some of the segments");
 	}
 
 	// Without the cluster secret the segments take no plan (gp_cluster.c).
@@ -2701,14 +2730,24 @@ CTranslatorDXLToPlStmt::TranslateDXLMotion(
 
 		if (segindex < 0)
 		{
-			GP_UNPORTED("a Motion from the coordinator");
+			// The coordinator sends: its own slice's rows -- a VALUES list,
+			// a function -- to the segments.  A Gather from it is nothing.
+			if (GP_MOTION_GATHER == motion_type)
+			{
+				GP_UNPORTED("a Gather Motion from the coordinator");
+			}
+			sendslice->gangType = GANGTYPE_ENTRYDB_READER;
+			content = GP_MOTION_FROM_COORDINATOR;
 		}
-		sendslice->gangType = (1 == gpdb::GetGPSegmentCount())
-								  ? GANGTYPE_PRIMARY_READER
-								  : GANGTYPE_SINGLETON_READER;
+		else
+		{
+			sendslice->gangType = (1 == gpdb::GetGPSegmentCount())
+									  ? GANGTYPE_PRIMARY_READER
+									  : GANGTYPE_SINGLETON_READER;
+			content = segindex;
+		}
 		sendslice->numsegments = 1;
 		sendslice->segindex = segindex;
-		content = segindex;
 	}
 	else
 	{
@@ -2763,17 +2802,74 @@ CTranslatorDXLToPlStmt::TranslateDXLMotion(
 						  sort_operators, collations, nulls_first);
 	}
 
+	// what a Redistribute hashes, and with what: Cloudberry's choice of
+	// hash function, which is the one its tables are hashed with
+	List *hash_expr_list = NIL;
+	List *hash_funcs = NIL;
+	if (GP_MOTION_HASH == motion_type)
+	{
+		List *hash_expr_opfamilies = NIL;
+		CDXLNode *hash_expr_list_dxlnode =
+			(*motion_dxlnode)[EdxlrmIndexHashExprList];
+
+		m_dxl_to_plstmt_context->SetCurrentSlice(sendslice);
+		TranslateHashExprList(hash_expr_list_dxlnode, &child_context,
+							  &hash_expr_list, &hash_expr_opfamilies,
+							  output_context);
+
+		ListCell *lc_expr = nullptr;
+		if (GPOS_FTRACE(EopttraceConsiderOpfamiliesForDistribution))
+		{
+			ListCell *lc_opfamily = nullptr;
+			ForBoth(lc_expr, hash_expr_list, lc_opfamily, hash_expr_opfamilies)
+			{
+				Oid typeoid = gpdb::ExprType((Node *) lfirst(lc_expr));
+				hash_funcs = gpdb::LAppendOid(
+					hash_funcs, gpdb::GetHashProcInOpfamily(
+									lfirst_oid(lc_opfamily), typeoid));
+			}
+		}
+		else
+		{
+			ForEach(lc_expr, hash_expr_list)
+			{
+				Oid typeoid = gpdb::ExprType((Node *) lfirst(lc_expr));
+				hash_funcs = gpdb::LAppendOid(
+					hash_funcs,
+					m_dxl_to_plstmt_context->GetDistributionHashFuncForType(
+						typeoid));
+			}
+		}
+	}
+
 	child_contexts->Release();
 
 	m_dxl_to_plstmt_context->SetCurrentSlice(recvslice);
 
-	Plan *plan = gpdb::MakeGatherMotion(
-		child_plan, targetlist, qual, content, sendslice->sliceIndex,
-		(int) num_sort_cols, sort_col_idx, sort_operators, collations,
-		nulls_first);
-	if (nullptr == plan)
+	Plan *plan = nullptr;
+	if (GP_MOTION_GATHER == motion_type)
 	{
-		GP_UNPORTED("a sorted Motion whose key is not a column it receives");
+		plan = gpdb::MakeGatherMotion(
+			child_plan, targetlist, qual, content, sendslice->sliceIndex,
+			(int) num_sort_cols, sort_col_idx, sort_operators, collations,
+			nulls_first);
+		if (nullptr == plan)
+		{
+			GP_UNPORTED(
+				"a sorted Motion whose key is not a column it receives");
+		}
+	}
+	else
+	{
+		// Only a Gather merges: the rows a segment receives from the others
+		// are in no order of theirs.
+		if (0 < num_sort_cols)
+		{
+			GP_UNPORTED("a sorted Motion between segments");
+		}
+		plan = gpdb::MakeSendMotion(motion_type, child_plan, targetlist, qual,
+									content, sendslice->sliceIndex,
+									hash_expr_list, hash_funcs);
 	}
 
 	plan->plan_node_id = plan_node_id;
@@ -2803,12 +2899,135 @@ CTranslatorDXLToPlStmt::TranslateDXLRedistributeMotionToResultHashFilters(
 	const CDXLNode *motion_dxlnode, CDXLTranslateContext *output_context,
 	CDXLTranslationContextArray *ctxt_translation_prev_siblings)
 {
-	// Stage B, with the rest of the Motions between segments: a Result that
-	// keeps, on each segment, the rows that hash there, which needs the
-	// segment to know which it is while it runs a fragment.  Cloudberry's is
-	// in github/cloudberry/src/backend/gpopt/translate/CTranslatorDXLToPlStmt.cpp,
-	// unchanged, for the step that brings it back.
-	GP_UNPORTED("Redistribute Motion");
+	// Cloudberry's body, building gp_core's Result with hash filters
+	// (gp_motion.c) where Cloudberry sets the fields its Result has for it:
+	// every segment has the rows, and keeps the ones that hash to it.
+	CDXLPhysicalMotion *motion_dxlop =
+		CDXLPhysicalMotion::Cast(motion_dxlnode->GetOperator());
+
+	if (!gpdb::CanDispatchPlans())
+	{
+		GP_UNPORTED("a Motion, without gp.cluster_secret");
+	}
+
+	// The filter keeps what hashes to the segment it runs on, and the
+	// coordinator is none of them.
+	if (0 == m_dxl_to_plstmt_context->GetCurrentSlice()->sliceIndex)
+	{
+		GP_UNPORTED("a hash filter in the coordinator's slice");
+	}
+
+	int plan_node_id = m_dxl_to_plstmt_context->GetNextPlanId();
+	Plan costs;
+	TranslatePlanCosts(motion_dxlnode, &costs);
+
+	CDXLNode *project_list_dxlnode = (*motion_dxlnode)[EdxlrmIndexProjList];
+	CDXLNode *filter_dxlnode = (*motion_dxlnode)[EdxlrmIndexFilter];
+	CDXLNode *child_dxlnode =
+		(*motion_dxlnode)[motion_dxlop->GetRelationChildIdx()];
+
+	CDXLTranslateContext child_context(m_mp, false,
+									   output_context->GetColIdToParamIdMap());
+
+	Plan *child_plan = TranslateDXLOperatorToPlan(
+		child_dxlnode, &child_context, ctxt_translation_prev_siblings);
+
+	CDXLTranslationContextArray *child_contexts =
+		GPOS_NEW(m_mp) CDXLTranslationContextArray(m_mp);
+	child_contexts->Append(&child_context);
+
+	// translate proj list and filter
+	List *targetlist = NIL;
+	List *qual = NIL;
+	TranslateProjListAndFilter(project_list_dxlnode, filter_dxlnode,
+							   nullptr,	 // translate context for the base table
+							   child_contexts, &targetlist, &qual,
+							   output_context);
+
+	ULONG length = 0;
+	AttrNumber *cols = nullptr;
+	Oid *funcs = nullptr;
+	int segment = -1;
+
+	// translate hash expr list
+	if (EdxlopPhysicalMotionRedistribute == motion_dxlop->GetDXLOperator())
+	{
+		CDXLNode *hash_expr_list_dxlnode =
+			(*motion_dxlnode)[EdxlrmIndexHashExprList];
+		length = hash_expr_list_dxlnode->Arity();
+		GPOS_ASSERT(0 < length);
+
+		cols = (AttrNumber *) gpdb::GPDBAlloc(length * sizeof(AttrNumber));
+		funcs = (Oid *) gpdb::GPDBAlloc(length * sizeof(Oid));
+
+		for (ULONG ul = 0; ul < length; ul++)
+		{
+			CDXLNode *hash_expr_dxlnode = (*hash_expr_list_dxlnode)[ul];
+			CDXLNode *expr_dxlnode = (*hash_expr_dxlnode)[0];
+			const TargetEntry *target_entry;
+
+			if (EdxlopScalarIdent ==
+				expr_dxlnode->GetOperator()->GetDXLOperator())
+			{
+				ULONG colid = CDXLScalarIdent::Cast(expr_dxlnode->GetOperator())
+								  ->GetDXLColRef()
+								  ->Id();
+				target_entry = output_context->GetTargetEntry(colid);
+			}
+			else
+			{
+				// The expression is not a scalar ident that points to an output column in the child node.
+				// Rather, it is an expresssion that is evaluated by the hash filter such as CAST(a) or a+b.
+				// We therefore, create a corresponding GPDB scalar expression and add it to the project list
+				// of the hash filter
+				CMappingColIdVarPlStmt colid_var_mapping =
+					CMappingColIdVarPlStmt(
+						m_mp,
+						nullptr,  // translate context for the base table
+						child_contexts, output_context,
+						m_dxl_to_plstmt_context);
+
+				Expr *expr = m_translator_dxl_to_scalar->TranslateDXLToScalar(
+					expr_dxlnode, &colid_var_mapping);
+				GPOS_ASSERT(nullptr != expr);
+
+				// create a target entry for the hash filter
+				CWStringConst str_unnamed_col(GPOS_WSZ_LIT("?column?"));
+				target_entry = gpdb::MakeTargetEntry(
+					expr, gpdb::ListLength(targetlist) + 1,
+					CTranslatorUtils::CreateMultiByteCharStringFromWCString(
+						str_unnamed_col.GetBuffer()),
+					false /* resjunk */);
+				targetlist = gpdb::LAppend(targetlist, (void *) target_entry);
+			}
+
+			cols[ul] = target_entry->resno;
+			funcs[ul] = m_dxl_to_plstmt_context->GetDistributionHashFuncForType(
+				gpdb::ExprType((Node *) target_entry->expr));
+		}
+	}
+	else
+	{
+		// A Redistribute Motion without any expressions to hash, means that
+		// the subtree should run on one segment only, and we don't care which
+		// segment it is: Cloudberry's One-Off Filter, on a segment chosen
+		// here as Cloudberry chooses it.
+		segment = (int) (random() % gpdb::GetGPSegmentCount());
+	}
+
+	child_contexts->Release();
+
+	Plan *plan = gpdb::MakeHashFilter(child_plan, targetlist, qual,
+									  (int) length, cols, funcs, segment);
+	plan->plan_node_id = plan_node_id;
+	plan->startup_cost = costs.startup_cost;
+	plan->total_cost = costs.total_cost;
+	plan->plan_rows = costs.plan_rows;
+	plan->plan_width = costs.plan_width;
+
+	SetParamIds(plan);
+
+	return plan;
 }
 
 

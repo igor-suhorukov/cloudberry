@@ -626,11 +626,12 @@ mine" ] && ok "a transaction reads its own rows, and a LIMIT leaves the connecti
 	esac
 
 	###########################################################################
-	echo "10. ORCA's plans gather from the segments, which carry out the rest"
+	echo "10. ORCA's plans run on the segments, with Cloudberry's Motions"
 	###########################################################################
-	# Stage A of ORCA's distributed layer: a Gather Motion's fragment is sent
-	# to the segments as a plan of their own, and only from a coordinator
-	# that has the cluster secret (gp_motion.c).
+	# ORCA's distributed layer: a Gather Motion's fragment is sent to the
+	# segments as a plan of their own, only from a coordinator that has the
+	# cluster secret, and the Motions between segments are relayed through
+	# the coordinator before it (gp_motion.c).
 	SECRET="cluster-secret-$RANDOM$RANDOM$RANDOM"
 	orca_started=1
 	for n in 1 2 0; do
@@ -648,7 +649,11 @@ mine" ] && ok "a transaction reads its own rows, and a LIMIT leaves the connecti
 	q 0 "INSERT INTO o SELECT i, i % 10, 'v' || i FROM generate_series(1, 1000) i;" >/dev/null
 	q 0 "CREATE TABLE ro (b int, name text) DISTRIBUTED REPLICATED;" >/dev/null
 	q 0 "INSERT INTO ro SELECT i, 'name' || i FROM generate_series(0, 9) i;" >/dev/null
-	q 0 "ANALYZE o; ANALYZE ro;" >/dev/null
+	q 0 "CREATE TABLE po (x int, y int) DISTRIBUTED BY (x);" >/dev/null
+	q 0 "INSERT INTO po SELECT i, i % 7 FROM generate_series(1, 500) i;" >/dev/null
+	q 0 "CREATE TABLE bo (k int, s text) DISTRIBUTED BY (k);" >/dev/null
+	q 0 "INSERT INTO bo SELECT i, md5((i % 20000)::text) FROM generate_series(1, 60000) i;" >/dev/null
+	q 0 "ANALYZE o; ANALYZE ro; ANALYZE po; ANALYZE bo;" >/dev/null
 
 	# ORCA planned it, with a Gather Motion, and the rows are the planner's.
 	orca_same() {				# orca_same <what> <sql> [what EXPLAIN must say]
@@ -694,13 +699,27 @@ mine" ] && ok "a transaction reads its own rows, and a LIMIT leaves the connecti
 		*) notok "EXPLAIN ANALYZE of a Motion" "$out" ;;
 	esac
 
-	# What stage A does not carry out goes to the planner, and is right.
-	out=$(q 0 "EXPLAIN (COSTS OFF) SELECT b, count(*) FROM o GROUP BY b;")
-	got=$(q 0 "SELECT b, count(*) FROM o GROUP BY b ORDER BY b;" | tr '\n' ' ')
-	[[ "$out" == *"Postgres query optimizer"* ]] && \
-		[ "$got" = "0|100 1|100 2|100 3|100 4|100 5|100 6|100 7|100 8|100 9|100 " ] \
-		&& ok "a GROUP BY that needs rows moved between segments falls back, and is right" \
-		|| notok "GROUP BY off the key" "$out / $got"
+	# The Motions between segments.
+	orca_same "a GROUP BY off the key: partial aggregates, redistributed by it" \
+		"SELECT b, count(*), avg(a) FROM o GROUP BY b ORDER BY b;" \
+		"Redistribute Motion 2:2  (slice2; segments: 2)"
+	orca_same "a join on columns neither table is distributed by" \
+		"SELECT count(*) FROM o JOIN po ON o.b = po.y;" "Hash Key: po.y"
+	orca_same "a small side broadcast to every segment" \
+		"SELECT count(*) FROM o JOIN (SELECT * FROM po WHERE x < 10) s ON o.b = s.y;" \
+		"Broadcast Motion 2:2"
+	orca_same "rows every segment has, each kept where it hashes" \
+		"SELECT count(*) FROM o JOIN generate_series(1, 100) g ON o.b = g;" \
+		"Hash Filter"
+	orca_same "a join redistributed, then aggregated: two Motions below a Gather" \
+		"SELECT y, count(*) FROM o JOIN po ON o.b = po.y GROUP BY y ORDER BY y;" \
+		"(slice3; segments: 2)"
+	orca_same "sixty thousand rows relayed in many batches" \
+		"SELECT count(*), sum(length(s)) FROM (SELECT s, count(*) FROM bo GROUP BY s) x;" \
+		"Redistribute Motion"
+	orca_same "a window partitioned off the key, merged in order" \
+		"SELECT a, rank() OVER (PARTITION BY b ORDER BY a DESC) FROM o WHERE a > 990 ORDER BY b, a;" \
+		"Merge Key"
 
 	out=$(printf '%s\n' "SET gp.optimizer_trace_fallback = on;" \
 		"DELETE FROM o WHERE a = 5;" "SELECT count(*) FROM o;" | qf 0)
@@ -727,7 +746,7 @@ mine" ] && ok "a transaction reads its own rows, and a LIMIT leaves the connecti
 	esac
 
 	# A segment takes a plan only from a connection with the secret.
-	frag="SELECT gp_internal.exec_fragment('{PLANNEDSTMT :commandType 1}');"
+	frag="SELECT gp_internal.exec_fragment('{PLANNEDSTMT :commandType 1}', '');"
 	for opts in "-c gp.qe_identity=seg0/dbid1/sess1" \
 		"-c gp.qe_identity=seg0/dbid1/sess1 -c gp.qe_secret=not-the-secret-at-all"; do
 		out=$(PGOPTIONS="$opts" q 1 "$frag")
@@ -736,6 +755,12 @@ mine" ] && ok "a transaction reads its own rows, and a LIMIT leaves the connecti
 			*) notok "a plan from a client that says it is the dispatcher" "$out" ;;
 		esac
 	done
+	out=$(PGOPTIONS="-c gp.qe_identity=seg0/dbid1/sess1" \
+		q 1 "SELECT gp_internal.motion_put('k', 2, '\\x00'::bytea);")
+	case "$out" in
+		*"a Motion's rows are taken only from the coordinator"*) ok "a segment takes a Motion's rows only from the coordinator" ;;
+		*) notok "motion_put from a client that says it is the dispatcher" "$out" ;;
+	esac
 	out=$(q 0 "CREATE ROLE secret_reader LOGIN;" >/dev/null; q 0 "SET ROLE secret_reader; SHOW gp.cluster_secret;")
 	case "$out" in
 		*"permission denied"*) ok "the secret cannot be read by an ordinary role" ;;

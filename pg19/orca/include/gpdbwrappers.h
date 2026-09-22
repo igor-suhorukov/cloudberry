@@ -840,6 +840,13 @@ Plan *MakeGatherMotion(Plan *fragment, List *targetlist, List *qual,
 					   int content, int slice, int nkeys,
 					   const AttrNumber *keys, const Oid *sortops,
 					   const Oid *collations, const bool *nullsfirst);
+Plan *MakeSendMotion(int type, Plan *fragment, List *targetlist, List *qual,
+					 int content, int slice, List *hashexprs,
+					 List *hashfuncs);
+Plan *MakeHashFilter(Plan *child, List *targetlist, List *qual, int nkeys,
+					 const AttrNumber *cols, const Oid *hashfuncs,
+					 int segment);
+int MotionType(Plan *motion);
 int MotionSegment(Plan *motion);
 void SetMotionSegment(Plan *motion, int content);
 int DirectDispatchSegment(Oid relid, int nvalues, const Oid *types,

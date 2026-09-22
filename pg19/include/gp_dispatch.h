@@ -87,6 +87,19 @@ extern int	GpGatherSegmentCount(GpGatherState *gather);
 extern bool GpGatherNextFrom(GpGatherState *gather, int seg,
 							 TupleTableSlot *slot);
 
+/*
+ * The next row from any segment as it arrived, for a caller that passes rows
+ * on rather than reading them: each column's value, NULL for a null, and its
+ * length.  Valid until the next call.  GpGatherIsBinary() says how they are
+ * encoded -- a type's send function, or its output function -- and
+ * GpGatherDecodeValue() turns one into a Datum.
+ */
+extern bool GpGatherNextRaw(GpGatherState *gather, const char **values,
+							int *lengths);
+extern bool GpGatherIsBinary(GpGatherState *gather);
+extern Datum GpGatherDecodeValue(GpGatherState *gather, int col,
+								 const char *value, int length);
+
 /* Done with it, whether or not it was read to the end. */
 extern void GpGatherEnd(GpGatherState *gather);
 
@@ -127,6 +140,14 @@ extern bool GpDispatchIsTreeText(const char *str);
 extern void GpDispatchCommandParams(const char *sql, int nparams,
 									const char *const *values, int content,
 									uint64 *counts);
+
+/*
+ * A statement on one segment whose parameters may be binary (formats[i] 1),
+ * waited for.
+ */
+extern void GpDispatchParamsOnContent(int content, const char *sql,
+									  int nparams, const char *const *values,
+									  const int *lengths, const int *formats);
 
 /*
  * COPY ... FROM STDIN on one segment: begin with the COPY statement, send the

@@ -31,13 +31,29 @@ AS 'MODULE_PATHNAME', 'gp_sample_rows'
 LANGUAGE C;
 
 /*
- * What a Gather Motion sends a segment: a plan fragment, which the segment's
- * planner hook carries out in place of this call (gp_motion.c).  Never run
- * itself, and only from a connection that carries the cluster secret.
+ * What a Motion sends a segment: a plan fragment, which the segment's planner
+ * hook carries out in place of this call, and the key its Motions' rows are
+ * kept under (gp_motion.c).  Never run itself, and only from a connection
+ * that carries the cluster secret.
  */
-CREATE FUNCTION gp_internal.exec_fragment(fragment text)
+CREATE FUNCTION gp_internal.exec_fragment(fragment text, motion_key text)
 RETURNS void
 AS 'MODULE_PATHNAME', 'gp_exec_fragment'
+LANGUAGE C STRICT;
+
+/*
+ * A batch of a Motion's rows, relayed to the segment that receives them, and
+ * the statement's word that it is done with them.  Both only from a
+ * connection that carries the cluster secret.
+ */
+CREATE FUNCTION gp_internal.motion_put(motion_key text, slice int, rows bytea)
+RETURNS void
+AS 'MODULE_PATHNAME', 'gp_motion_put'
+LANGUAGE C STRICT;
+
+CREATE FUNCTION gp_internal.motion_drop(motion_key text)
+RETURNS void
+AS 'MODULE_PATHNAME', 'gp_motion_drop'
 LANGUAGE C STRICT;
 
 CREATE FUNCTION gp.version()

@@ -2689,7 +2689,7 @@ gpdb::DynamicScanTlist(Plan *scan)
 }
 
 /*
- * gp_core's Motion, through its API: 1.3 and later.  An older gp_core has
+ * gp_core's Motion, through its API: 1.4 and later.  An older gp_core has
  * none, and ORCA's plans with a Motion go to the planner.
  */
 static const GpCoreApi *
@@ -2698,7 +2698,7 @@ motion_api(void)
 	const GpCoreApi *api = cb_core_api();
 
 	if (api == nullptr || api->version_major != GP_CORE_API_VERSION_MAJOR ||
-		api->version_minor < 3)
+		api->version_minor < 4)
 		return nullptr;
 	return api;
 }
@@ -2731,6 +2731,46 @@ gpdb::MakeGatherMotion(Plan *fragment, List *targetlist, List *qual,
 	}
 	GP_WRAP_END;
 	return nullptr;
+}
+
+Plan *
+gpdb::MakeSendMotion(int type, Plan *fragment, List *targetlist, List *qual,
+					 int content, int slice, List *hashexprs, List *hashfuncs)
+{
+	GP_WRAP_START;
+	{
+		return motion_api()->motion_make_send(type, fragment, targetlist, qual,
+											  content, slice, hashexprs,
+											  hashfuncs);
+	}
+	GP_WRAP_END;
+	return nullptr;
+}
+
+Plan *
+gpdb::MakeHashFilter(Plan *child, List *targetlist, List *qual, int nkeys,
+					 const AttrNumber *cols, const Oid *hashfuncs,
+					 int segment)
+{
+	GP_WRAP_START;
+	{
+		return motion_api()->motion_make_hash_filter(child, targetlist, qual,
+													 nkeys, cols, hashfuncs,
+													 segment);
+	}
+	GP_WRAP_END;
+	return nullptr;
+}
+
+int
+gpdb::MotionType(Plan *motion)
+{
+	GP_WRAP_START;
+	{
+		return motion_api()->motion_type(motion);
+	}
+	GP_WRAP_END;
+	return -1;
 }
 
 int
