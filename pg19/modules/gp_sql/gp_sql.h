@@ -182,6 +182,10 @@ extern char *GpStorageTablespaceServer(Oid spcId);
 /* Cloudberry's gp_max_partition_level: 0, no limit. */
 /* distribution.c */
 extern PGDLLIMPORT bool gp_create_table_random_default_distribution;
+/*
+ * A table nobody distributed, distributed as Cloudberry would: "stmt" is the
+ * CREATE TABLE that made it, or NULL for one CREATE TABLE AS made.
+ */
 extern void GpDistributionApplyDefault(CreateStmt *stmt, Oid relid);
 extern void GpDistributionDefineSettings(void);
 

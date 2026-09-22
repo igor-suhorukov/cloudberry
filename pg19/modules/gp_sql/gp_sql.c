@@ -51,6 +51,7 @@
 #include "commands/defrem.h"
 #include "commands/tablespace.h"
 #include "executor/executor.h"
+#include "executor/spi.h"
 #include "fmgr.h"
 #include "miscadmin.h"
 #include "nodes/makefuncs.h"
@@ -62,6 +63,7 @@
 #include "utils/builtins.h"
 #include "utils/lsyscache.h"
 #include "utils/memutils.h"
+#include "utils/ruleutils.h"
 
 #include "cb_module.h"
 #include "gp_core_api.h"
@@ -759,6 +761,86 @@ gp_sql_carried_tags(PlannedStmt *pstmt, const char *queryString,
 	PG_END_TRY();
 }
 
+/* A CREATE TABLE AS on a cluster is being made, and this is it again. */
+static bool in_cluster_ctas = false;
+
+static void gp_sql_ProcessUtility(PlannedStmt *pstmt, const char *queryString,
+								  bool readOnlyTree, ProcessUtilityContext context,
+								  ParamListInfo params, QueryEnvironment *queryEnv,
+								  DestReceiver *dest, QueryCompletion *qc);
+
+/*
+ * CREATE TABLE AS, and SELECT INTO, on a cluster's coordinator: see where it
+ * is called.  The rows are the query's, deparsed as ruleutils deparses a
+ * view: the query was analyzed here, and the INSERT is analyzed again from
+ * its text, against the same catalogs, in the same transaction.
+ */
+static void
+gp_sql_cluster_ctas(PlannedStmt *pstmt, const char *queryString,
+					bool readOnlyTree, ProcessUtilityContext context,
+					ParamListInfo params, QueryEnvironment *queryEnv,
+					DestReceiver *dest, QueryCompletion *qc)
+{
+	CreateTableAsStmt *ctas;
+	Query	   *query;
+	bool		existed;
+	bool		fill;
+	Oid			relid;
+	char	   *sql;
+	uint64		processed;
+
+	if (readOnlyTree)
+	{
+		pstmt = copyObject(pstmt);
+		readOnlyTree = false;
+	}
+	ctas = (CreateTableAsStmt *) pstmt->utilityStmt;
+	query = (Query *) ctas->query;
+
+	existed = OidIsValid(RangeVarGetRelid(ctas->into->rel, NoLock, true));
+	fill = !ctas->into->skipData;
+	ctas->into->skipData = true;
+
+	in_cluster_ctas = true;
+	PG_TRY();
+	{
+		gp_sql_ProcessUtility(pstmt, queryString, readOnlyTree, context,
+							  params, queryEnv, dest, qc);
+	}
+	PG_FINALLY();
+	{
+		in_cluster_ctas = false;
+	}
+	PG_END_TRY();
+
+	/* IF NOT EXISTS, and it was there: nothing was made, nothing to fill */
+	if (existed)
+		return;
+
+	/* it was not there before, so the one there now is the one it made */
+	CommandCounterIncrement();
+	relid = RangeVarGetRelid(ctas->into->rel, NoLock, false);
+
+	GpDistributionApplyDefault(NULL, relid);
+	if (!fill)
+		return;
+
+	sql = psprintf("INSERT INTO %s %s",
+				   quote_qualified_identifier(get_namespace_name(get_rel_namespace(relid)),
+											  get_rel_name(relid)),
+				   pg_get_querydef(query, false));
+
+	if (SPI_connect() != SPI_OK_CONNECT)
+		elog(ERROR, "SPI_connect failed");
+	if (SPI_execute(sql, false, 0) != SPI_OK_INSERT)
+		elog(ERROR, "could not fill the table CREATE TABLE AS made");
+	processed = SPI_processed;
+	SPI_finish();
+
+	if (qc)
+		SetQueryCompletion(qc, CMDTAG_SELECT, processed);
+}
+
 static void
 gp_sql_ProcessUtility(PlannedStmt *pstmt, const char *queryString,
 					  bool readOnlyTree, ProcessUtilityContext context,
@@ -790,6 +872,22 @@ gp_sql_ProcessUtility(PlannedStmt *pstmt, const char *queryString,
 		else
 			standard_ProcessUtility(pstmt, queryString, readOnlyTree, context,
 									params, queryEnv, dest, qc);
+		return;
+	}
+
+	/*
+	 * CREATE TABLE AS on a cluster: the table first, with no rows, on every
+	 * node -- gp_core dispatches a CREATE TABLE AS WITH NO DATA -- then
+	 * distributed as the statement or the defaults say, and only then
+	 * filled, by an INSERT, which puts each row on the segment its key names.
+	 */
+	if (IsA(parsetree, CreateTableAsStmt) && on_cluster_coordinator() &&
+		((CreateTableAsStmt *) parsetree)->objtype == OBJECT_TABLE &&
+		IsA(((CreateTableAsStmt *) parsetree)->query, Query) && params == NULL &&
+		!in_cluster_ctas)
+	{
+		gp_sql_cluster_ctas(pstmt, queryString, readOnlyTree, context,
+							params, queryEnv, dest, qc);
 		return;
 	}
 

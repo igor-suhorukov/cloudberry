@@ -561,6 +561,23 @@ mine" ] && ok "a transaction reads its own rows, and a LIMIT leaves the connecti
 		&& ok "a classic partitioned table: rows routed into its partitions, on the segments" \
 		|| notok "a partitioned table" "$out / segment 0 partition 2: $out2"
 
+	# CREATE TABLE AS: the table made on every node, distributed, then filled.
+	q 0 "SET client_min_messages = warning; CREATE TABLE cta AS SELECT * FROM d WHERE a <= 50;" >/dev/null
+	out=$(q 0 "SELECT gp_sql.distribution('cta'), count(*), sum(a) FROM cta;")
+	n1=$(q 1 "SELECT count(*) FROM cta WHERE expected_seg(a, 2) <> 0;")
+	n2=$(q 2 "SELECT count(*) FROM cta WHERE expected_seg(a, 2) <> 1;")
+	s1=$(q 1 "SELECT count(*) FROM cta;")
+	[ "$out|$n1|$n2" = "(a)|50|1275|0|0" ] && isnum "$s1" && [ "$s1" -gt 0 ] && [ "$s1" -lt 50 ] \
+		&& ok "CREATE TABLE AS: distributed by its first column, each row where it hashes" \
+		|| notok "CREATE TABLE AS" "$out / misplaced $n1 $n2 / segment 0 has $s1"
+	q 0 "CREATE TABLE ctb (x, y) AS SELECT b, count(*) FROM d GROUP BY b DISTRIBUTED BY (y);" >/dev/null
+	q 0 "SET client_min_messages = warning; CREATE TABLE ctc AS SELECT a FROM d WITH NO DATA;" >/dev/null
+	out=$(q 0 "SELECT gp_sql.distribution('ctb'), count(*) = (SELECT count(DISTINCT b) FROM d) FROM ctb;")
+	out2=$(q 0 "SELECT gp_sql.distribution('ctc'), count(*) FROM ctc;")
+	[ "$out|$out2" = "(y)|t|(a)|0" ] \
+		&& ok "... with its DISTRIBUTED BY, and WITH NO DATA" \
+		|| notok "CREATE TABLE AS DISTRIBUTED BY, WITH NO DATA" "$out / $out2"
+
 	out=$(printf '%s\n' "TRUNCATE d;" "SELECT count(*) FROM d;" | qf 0)
 	n1=$(q 1 "SELECT count(*) FROM d;")
 	[ "$out|$n1" = "0|0" ] && ok "TRUNCATE empties the segments" || notok "TRUNCATE" "$out|$n1"

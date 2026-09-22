@@ -234,7 +234,7 @@ void
 GpDistributionApplyDefault(CreateStmt *stmt, Oid relid)
 {
 	const GpCoreApi *core = GpCoreApiLookup();
-	Relation	rel;
+	Relation	rel = NULL;
 	char	   *policy = NULL;
 	char		relkind;
 
@@ -256,6 +256,13 @@ GpDistributionApplyDefault(CreateStmt *stmt, Oid relid)
 			set_policy_label(relid, "replicated");
 		return;
 	}
+
+	/*
+	 * A table CREATE TABLE AS made has no statement of its own to look at:
+	 * no parent, no LIKE, no constraints.  Its columns decide, from rule 5.
+	 */
+	if (stmt == NULL)
+		goto columns;
 
 	/* 1. A partition is distributed as its parent is. */
 	if (stmt->partbound != NULL)
@@ -333,6 +340,10 @@ GpDistributionApplyDefault(CreateStmt *stmt, Oid relid)
 			return;
 		}
 	}
+
+columns:
+	if (rel == NULL)
+		rel = relation_open(relid, AccessShareLock);
 
 	/* 5. Random, when that is what the user asked for by default. */
 	if (gp_create_table_random_default_distribution)

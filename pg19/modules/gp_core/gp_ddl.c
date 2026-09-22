@@ -63,6 +63,7 @@
  */
 #include "postgres.h"
 
+#include "access/relation.h"
 #include "access/xact.h"
 #include "catalog/catalog.h"
 #include "catalog/namespace.h"
@@ -70,10 +71,12 @@
 #include "commands/defrem.h"
 #include "commands/vacuum.h"
 #include "miscadmin.h"
+#include "nodes/makefuncs.h"
 #include "nodes/parsenodes.h"
 #include "nodes/readfuncs.h"
 #include "parser/parser.h"
 #include "tcop/utility.h"
+#include "utils/lsyscache.h"
 #include "utils/memutils.h"
 #include "utils/rel.h"
 
@@ -331,7 +334,21 @@ dispatch_class(Node *parsetree)
 				return GP_DISPATCH_IN_XACT;
 			}
 
+		/*
+		 * A table made from a query WITH NO DATA is made on every node, as
+		 * the CREATE TABLE PostgreSQL makes of it (ctas_as_create); gp_sql
+		 * turns every CREATE TABLE AS on a cluster into one, and fills the
+		 * table with an INSERT, which puts each row where it belongs.
+		 */
 		case T_CreateTableAsStmt:
+			{
+				CreateTableAsStmt *ctas = (CreateTableAsStmt *) parsetree;
+
+				if (ctas->objtype == OBJECT_TABLE && ctas->into->skipData)
+					return GP_DISPATCH_IN_XACT;
+				return GP_DISPATCH_LOCAL;
+			}
+
 		case T_RefreshMatViewStmt:
 		case T_CreateTableSpaceStmt:
 		case T_DropTableSpaceStmt:
@@ -461,6 +478,58 @@ build_payload(const char *tree)
 	return buf.data;
 }
 
+/*
+ * What a segment is sent for a CREATE TABLE AS: the CREATE TABLE PostgreSQL
+ * made of it here (createas.c, create_ctas_internal), from the table as it
+ * now is.  The statement itself cannot travel: by now its query has been
+ * analyzed, and a segment would analyze it again.  NULL when it made nothing
+ * -- IF NOT EXISTS, and the table was there.
+ */
+static char *
+ctas_as_create(CreateTableAsStmt *ctas)
+{
+	IntoClause *into = ctas->into;
+	CreateStmt *create;
+	RangeVar   *rv;
+	Relation	rel;
+	TupleDesc	tupdesc;
+	Oid			relid;
+
+	if (recorded == NIL)
+		return NULL;
+	relid = RangeVarGetRelid(into->rel, NoLock, false);
+
+	rv = copyObject(into->rel);
+	if (rv->relpersistence != RELPERSISTENCE_TEMP)
+		rv->schemaname = get_namespace_name(get_rel_namespace(relid));
+
+	create = makeNode(CreateStmt);
+	create->relation = rv;
+	create->options = into->options;
+	create->oncommit = into->onCommit;
+	create->tablespacename = into->tableSpaceName;
+	create->accessMethod = into->accessMethod;
+	create->if_not_exists = false;
+
+	rel = relation_open(relid, AccessShareLock);
+	tupdesc = RelationGetDescr(rel);
+	for (int i = 0; i < tupdesc->natts; i++)
+	{
+		Form_pg_attribute att = TupleDescAttr(tupdesc, i);
+
+		if (att->attisdropped)
+			continue;
+		create->tableElts = lappend(create->tableElts,
+									makeColumnDef(NameStr(att->attname),
+												  att->atttypid,
+												  att->atttypmod,
+												  att->attcollation));
+	}
+	relation_close(rel, AccessShareLock);
+
+	return nodeToString(create);
+}
+
 static void
 gp_ddl_ProcessUtility(PlannedStmt *pstmt, const char *queryString,
 					  bool readOnlyTree, ProcessUtilityContext context,
@@ -543,6 +612,17 @@ gp_ddl_ProcessUtility(PlannedStmt *pstmt, const char *queryString,
 	 * transaction, which they share (see gp_dispatch.c), so a failure there
 	 * undoes it here too.
 	 */
+	if (IsA(parsetree, CreateTableAsStmt))
+	{
+		tree = ctas_as_create((CreateTableAsStmt *) parsetree);
+		if (tree == NULL)
+		{
+			recorded = NIL;
+			MemoryContextReset(ddl_cxt);
+			return;
+		}
+	}
+
 	drop_temp_namespaces();
 	GpDispatchUtility(build_payload(tree), class == GP_DISPATCH_OWN_XACT);
 
