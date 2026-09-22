@@ -59,6 +59,7 @@
 #include "access/htup_details.h"
 #include "access/table.h"
 #include "access/xact.h"
+#include "catalog/namespace.h"
 #include "catalog/pg_type.h"
 #include "commands/dbcommands.h"
 #include "fmgr.h"
@@ -1149,6 +1150,23 @@ GpDispatchParamsOnContent(int content, const char *sql, int nparams,
 	gang_wait_all(g, NULL, false);
 }
 
+/*
+ * A relation's name in SQL a segment is sent.  A temporary relation is in
+ * this session's temporary schema, whose name -- pg_temp_N -- is the
+ * coordinator's backend's; the segment backend's own is another number, and
+ * "pg_temp" names whichever is the session's own, on either.
+ */
+char *
+GpDispatchRelationName(Oid relid)
+{
+	Oid			nsp = get_rel_namespace(relid);
+
+	if (isAnyTempNamespace(nsp))
+		return psprintf("pg_temp.%s", quote_identifier(get_rel_name(relid)));
+	return quote_qualified_identifier(get_namespace_name(nsp),
+									  get_rel_name(relid));
+}
+
 /* ------------------------------------------------------------------------- */
 /* Rows on the way out                                                       */
 /* ------------------------------------------------------------------------- */
@@ -1957,8 +1975,7 @@ gp_dist_random(PG_FUNCTION_ARGS)
 
 	initStringInfo(&sql);
 	appendStringInfo(&sql, "SELECT * FROM %s",
-					 quote_qualified_identifier(get_namespace_name(RelationGetNamespace(rel)),
-												RelationGetRelationName(rel)));
+					 GpDispatchRelationName(RelationGetRelid(rel)));
 
 	InitMaterializedSRF(fcinfo, MAT_SRF_USE_EXPECTED_DESC);
 

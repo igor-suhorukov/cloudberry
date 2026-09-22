@@ -463,8 +463,7 @@ gather_plan(PlannerInfo *root, RelOptInfo *rel, CustomPath *best_path,
 			appendStringInfoString(&sql, quote_identifier(NameStr(att->attname)));
 	}
 	appendStringInfo(&sql, " FROM ONLY %s",
-					 quote_qualified_identifier(get_namespace_name(RelationGetNamespace(relation)),
-												RelationGetRelationName(relation)));
+					 GpDispatchRelationName(RelationGetRelid(relation)));
 
 	foreach(lc, pushed)
 	{

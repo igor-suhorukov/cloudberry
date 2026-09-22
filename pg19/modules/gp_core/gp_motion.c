@@ -497,10 +497,13 @@ motion_file_find(const char *key, int slice)
 	return NULL;
 }
 
+/*
+ * In place: the list is the transaction's, and a new one made here would be
+ * in the memory of the function call that asked, gone when it returns.
+ */
 static void
 motion_files_close(const char *key)
 {
-	List	   *keep = NIL;
 	ListCell   *lc;
 
 	foreach(lc, motion_files)
@@ -508,11 +511,11 @@ motion_files_close(const char *key)
 		MotionFile *mf = (MotionFile *) lfirst(lc);
 
 		if (key == NULL || strcmp(mf->key, key) == 0)
+		{
 			BufFileClose(mf->file);
-		else
-			keep = lappend(keep, mf);
+			motion_files = foreach_delete_current(motion_files, lc);
+		}
 	}
-	motion_files = keep;
 }
 
 static void

@@ -145,8 +145,7 @@ router_begin(Relation rel, GpPolicy *policy)
 	 */
 	initStringInfo(&sql);
 	appendStringInfo(&sql, "COPY %s (",
-					 quote_qualified_identifier(get_namespace_name(RelationGetNamespace(rel)),
-												RelationGetRelationName(rel)));
+					 GpDispatchRelationName(RelationGetRelid(rel)));
 	for (int i = 0; i < tupdesc->natts; i++)
 	{
 		Form_pg_attribute att = TupleDescAttr(tupdesc, i);
@@ -994,8 +993,7 @@ gp_modify_ProcessUtility(PlannedStmt *pstmt, const char *queryString,
 			 * table COPY refuses, and its query reads the partitions. */
 			appendStringInfo(&sql, " FROM %s%s",
 							 get_rel_relkind(relid) == RELKIND_RELATION ? "ONLY " : "",
-							 quote_qualified_identifier(get_namespace_name(get_rel_namespace(relid)),
-														get_rel_name(relid)));
+							 GpDispatchRelationName(relid));
 
 			raw = raw_parser(sql.data, RAW_PARSE_DEFAULT);
 			copy->query = linitial_node(RawStmt, raw)->stmt;

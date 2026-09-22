@@ -358,8 +358,7 @@ distributed_sample_rows(Relation rel, int elevel, HeapTuple *rows, int targrows,
 	GpPolicy   *policy = GpScanDistributedPolicy(relid);
 	bool		replicated = GpPolicyIsReplicated(policy);
 	int			content = replicated ? replicated_segment() : -1;
-	char	   *qualified = quote_qualified_identifier(get_namespace_name(RelationGetNamespace(rel)),
-													   RelationGetRelationName(rel));
+	char	   *qualified = GpDispatchRelationName(RelationGetRelid(rel));
 	int			nsegs;
 	SegmentSample *samples;
 	TupleTableSlot *slot;

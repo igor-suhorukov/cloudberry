@@ -165,6 +165,9 @@ extern uint64 GpCopyInEnd(void);
 extern void GpDispatchQueryFirstValues(const char *sql, int content,
 									   char **values);
 
+/* A relation's name in SQL a segment is sent; pg_temp for a temporary one. */
+extern char *GpDispatchRelationName(Oid relid);
+
 /* Close every connection: the session is over, or something went wrong. */
 extern void GpDispatchResetGang(void);
 

@@ -381,6 +381,22 @@ t" ] && ok "temporary tables, two of them, have the coordinator's OIDs" \
 	[ -z "$out" ] && ok "VACUUM, which runs outside a transaction block, reaches the segments too" \
 		|| notok "VACUUM" "$out"
 
+	# A temporary table is in the session's own temporary schema, which on the
+	# coordinator and on each segment is a different pg_temp_N: here another
+	# session holds the coordinator's first backend slot, which no segment
+	# backend has, so the numbers differ, and "pg_temp" is what names both.
+	"$PSQL" -X -q -h "$(sockdir 0)" -p "$(port 0)" -d postgres -c "SELECT pg_sleep(4)" >/dev/null 2>&1 &
+	holder=$!
+	sleep 1
+	out=$(printf '%s\n' "SET client_min_messages = warning;" \
+		"CREATE TEMP TABLE tmp_num (a int, b int);" \
+		"INSERT INTO tmp_num SELECT i, i FROM generate_series(1, 10) i;" \
+		"UPDATE tmp_num SET b = b + 1 WHERE a = 1;" \
+		"SELECT count(*), sum(b), (SELECT nspname FROM pg_namespace WHERE oid = pg_my_temp_schema()) <> (SELECT min(r.result) FROM gp.exec_on_segments('SELECT nspname::text FROM pg_namespace WHERE oid = pg_my_temp_schema()') r) FROM tmp_num;" | qf 0)
+	wait "$holder"
+	[ "$out" = "10|56|t" ] && ok "a temporary table read and written on the segments, whose temporary schemas are named otherwise" \
+		|| notok "temporary schemas named otherwise on the segments" "$out"
+
 	###########################################################################
 	echo "8. a distributed table's rows live on the segments"
 	###########################################################################
@@ -743,6 +759,9 @@ mine" ] && ok "a transaction reads its own rows, and a LIMIT leaves the connecti
 	orca_same "sixty thousand rows relayed in many batches" \
 		"SELECT count(*), sum(length(s)) FROM (SELECT s, count(*) FROM bo GROUP BY s) x;" \
 		"Redistribute Motion"
+	orca_same "two Gathers, each with a Broadcast below it, each dropping its rows after" \
+		"SELECT count(*) FROM (SELECT o.a, o.b FROM o JOIN (SELECT * FROM po WHERE x < 20) s ON o.b = s.y) l JOIN (SELECT o.a, o.b FROM o JOIN (SELECT * FROM po WHERE x < 30) s2 ON o.b = s2.y) r ON l.a = r.b;" \
+		"(slice4; segments: 2)"
 	orca_same "a window partitioned off the key, merged in order" \
 		"SELECT a, rank() OVER (PARTITION BY b ORDER BY a DESC) FROM o WHERE a > 990 ORDER BY b, a;" \
 		"Merge Key"
