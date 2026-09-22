@@ -60,6 +60,11 @@ static char *gp_cluster_config = NULL;
 static int	gp_dbid = 1;
 static int	gp_role_setting = GP_ROLE_UTILITY;
 static char *gp_qe_identity = NULL;
+static char *gp_cluster_secret = NULL;
+static char *gp_qe_secret = NULL;
+
+/* A secret shorter than this is one somebody could guess. */
+#define GP_CLUSTER_SECRET_MIN	16
 
 static const struct config_enum_entry gp_role_options[] = {
 	{"utility", GP_ROLE_UTILITY, false},
@@ -472,6 +477,73 @@ GpClusterBackendRole(void)
 	return gp_role_setting;
 }
 
+/*
+ * Is the connection this backend serves the coordinator's own?
+ *
+ * gp.qe_identity says a connection is a dispatched one, and anybody who can
+ * connect to a segment can say so: it is a startup setting.  For SQL that is
+ * no matter -- a segment parses, analyzes and checks it as it would anyone's
+ * -- but a plan is carried out as it stands, its permission checks included,
+ * so a segment runs one only from a connection that also carries the cluster
+ * secret every node is given.  Compared in constant time.
+ */
+bool
+GpClusterDispatchTrusted(void)
+{
+	size_t		len;
+
+	if (!GpClusterIsDispatched() || !GpClusterHasSecret())
+		return false;
+	if (gp_qe_secret == NULL)
+		return false;
+	len = strlen(gp_cluster_secret);
+	if (strlen(gp_qe_secret) != len)
+		return false;
+	return timingsafe_bcmp(gp_qe_secret, gp_cluster_secret, len) == 0;
+}
+
+bool
+GpClusterHasSecret(void)
+{
+	return gp_cluster_secret != NULL && gp_cluster_secret[0] != '\0';
+}
+
+const char *
+GpClusterSecret(void)
+{
+	return GpClusterHasSecret() ? gp_cluster_secret : NULL;
+}
+
+/*
+ * The secret travels in libpq's "options", which splits on whitespace and
+ * treats a backslash as an escape, so it is kept to characters that need
+ * neither: those of base64 and of a URL-safe token.
+ */
+static bool
+check_cluster_secret(char **newval, void **extra, GucSource source)
+{
+	const char *p;
+
+	if (*newval == NULL || (*newval)[0] == '\0')
+		return true;
+
+	for (p = *newval; *p; p++)
+	{
+		if (!isalnum((unsigned char) *p) && strchr("+/=._~-", *p) == NULL)
+		{
+			GUC_check_errdetail("The secret may hold letters, digits and \"+/=._~-\" only.");
+			return false;
+		}
+	}
+	if (p - *newval < GP_CLUSTER_SECRET_MIN)
+	{
+		GUC_check_errdetail("The secret must be at least %d characters long.",
+							GP_CLUSTER_SECRET_MIN);
+		return false;
+	}
+	return true;
+}
+
 /* ------------------------------------------------------------------------- */
 /* Start-up                                                                  */
 /* ------------------------------------------------------------------------- */
@@ -508,6 +580,32 @@ GpClusterInit(void)
 							   "",
 							   PGC_BACKEND,
 							   0,
+							   NULL, NULL, NULL);
+
+	/*
+	 * Neither can be read by an ordinary user, on any node: a function a
+	 * query runs on a segment runs in the dispatched backend, where
+	 * gp.qe_secret is set.
+	 */
+	DefineCustomStringVariable("gp.cluster_secret",
+							   "Secret the nodes of this cluster share.",
+							   "The coordinator gives it to every segment process "
+							   "it starts, and a segment carries out a plan only "
+							   "from a connection that has it.  The same on every "
+							   "node; empty, and plans are not dispatched.",
+							   &gp_cluster_secret,
+							   "",
+							   PGC_SIGHUP,
+							   GUC_SUPERUSER_ONLY | GUC_NO_SHOW_ALL | GUC_NOT_IN_SAMPLE,
+							   check_cluster_secret, NULL, NULL);
+
+	DefineCustomStringVariable("gp.qe_secret",
+							   "Cluster secret the dispatcher gave this segment process.",
+							   NULL,
+							   &gp_qe_secret,
+							   "",
+							   PGC_BACKEND,
+							   GUC_SUPERUSER_ONLY | GUC_NO_SHOW_ALL | GUC_NOT_IN_SAMPLE,
 							   NULL, NULL, NULL);
 
 	DefineCustomStringVariable("gp.cluster_config",

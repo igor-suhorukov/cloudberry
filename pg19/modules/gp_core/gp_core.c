@@ -47,6 +47,7 @@
 #include "gp_cluster.h"
 #include "gp_core_api.h"
 #include "gp_dispatch.h"
+#include "gp_motion.h"
 #include "gp_label.h"
 #include "gp_policy.h"
 #include "gp_scan.h"
@@ -81,6 +82,12 @@ static const GpCoreApi gp_core_api = {
 	.get_content_id = GpClusterContentId,
 	.is_single_node = GpClusterIsSingleNode,
 	.get_dbid = GpClusterDbid,
+	.motion_can_dispatch = GpMotionCanDispatchPlans,
+	.motion_make_gather = GpMotionMakeGather,
+	.motion_is = GpMotionIs,
+	.motion_segment = GpMotionSegment,
+	.motion_set_segment = GpMotionSetSegment,
+	.direct_dispatch_segment = GpMotionDirectDispatchSegment,
 };
 
 /*
@@ -139,6 +146,13 @@ _PG_init(void)
 
 	/* O3: ANALYZE samples a distributed table on the segments. */
 	GpAnalyzeInit();
+
+	/*
+	 * ORCA's Gather Motion, and on a segment the planner hook that takes the
+	 * fragment it sends.  Last of the planner hooks, so that it is the first
+	 * to see a query.
+	 */
+	GpMotionInit();
 
 	/*
 	 * Deliberately no MarkGUCPrefixReserved("gp") here.  It drops every

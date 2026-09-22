@@ -30,6 +30,16 @@ RETURNS SETOF record
 AS 'MODULE_PATHNAME', 'gp_sample_rows'
 LANGUAGE C;
 
+/*
+ * What a Gather Motion sends a segment: a plan fragment, which the segment's
+ * planner hook carries out in place of this call (gp_motion.c).  Never run
+ * itself, and only from a connection that carries the cluster secret.
+ */
+CREATE FUNCTION gp_internal.exec_fragment(fragment text)
+RETURNS void
+AS 'MODULE_PATHNAME', 'gp_exec_fragment'
+LANGUAGE C STRICT;
+
 CREATE FUNCTION gp.version()
 RETURNS text
 AS 'MODULE_PATHNAME', 'gp_version'

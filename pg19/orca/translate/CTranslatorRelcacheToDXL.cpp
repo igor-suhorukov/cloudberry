@@ -2869,19 +2869,17 @@ CTranslatorRelcacheToDXL::RetrieveRelKeysets(
 	// partitioned table.  gp_segment_id is in Cloudberry's only because a
 	// ctid is unique within one segment's copy of a table, and PostgreSQL 19
 	// has no gp_segment_id to name: it is Cloudberry's system attribute -7.
-	// On one node every row is in one place and ctid is enough, which is the
-	// only case that reaches here at M1.  A distributed table would need the
-	// segment again, and whatever replaces gp_segment_id at M2 -- the
-	// column-reference fallback O10, or a function -- goes here; until it
-	// does, a distributed table refuses rather than be given a key that is
-	// not unique.
+	// On one node every row is in one place and ctid is enough.  A
+	// distributed table would need the segment again, and whatever replaces
+	// gp_segment_id -- the column-reference fallback O10, or a function --
+	// goes here; until it does, a distributed table has no default key.
+	// That is a fact ORCA does not know rather than one it is told wrongly:
+	// Cloudberry gives none to a table without system columns either, and
+	// ORCA plans without it what it would otherwise have deduplicated by it.
 	if (should_add_default_keys &&
-		IMDRelation::EreldistrReplicated != rel_distr_policy)
+		IMDRelation::EreldistrReplicated != rel_distr_policy &&
+		IMDRelation::EreldistrMasterOnly == rel_distr_policy)
 	{
-		if (IMDRelation::EreldistrMasterOnly != rel_distr_policy)
-		{
-			GP_UNPORTED("a default key for a distributed table");
-		}
 
 		ULongPtrArray *key_set = GPOS_NEW(mp) ULongPtrArray(mp);
 		if (is_partitioned)

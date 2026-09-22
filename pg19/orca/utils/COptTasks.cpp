@@ -1017,6 +1017,31 @@ COptTasks::OptimizeTask(void *ptr)
 			CAutoTraceFlag atf2(EopttraceUseLegacyOpfamilies,
 								use_legacy_opfamilies);
 
+			// Stage A of the distributed layer carries out Gather Motions
+			// only (gp_core's gp_motion.c): a Motion from segments to
+			// segments needs the interconnect, which is stage B.  So ORCA is
+			// not offered one, and plans what it can with gathers -- a
+			// partial aggregate on the segments and the rest here, a join of
+			// tables distributed alike where they are -- rather than a plan
+			// the translator would refuse.  gp.optimizer_enable_motion_
+			// redistribute and _broadcast turned off say the same; this only
+			// ever turns the flags on, and goes with stage B.
+			BOOL gathers_only = !is_master_only;
+			CAutoTraceFlag atf3(
+				EopttraceDisableMotionBroadcast,
+				gathers_only || GPOS_FTRACE(EopttraceDisableMotionBroadcast));
+			CAutoTraceFlag atf4(
+				EopttraceDisableMotionHashDistribute,
+				gathers_only ||
+					GPOS_FTRACE(EopttraceDisableMotionHashDistribute));
+			CAutoTraceFlag atf5(
+				EopttraceDisableMotionRandom,
+				gathers_only || GPOS_FTRACE(EopttraceDisableMotionRandom));
+			CAutoTraceFlag atf6(
+				EopttraceDisableMotionRountedDistribute,
+				gathers_only ||
+					GPOS_FTRACE(EopttraceDisableMotionRountedDistribute));
+
 			// The session and command ids name a minidump and nothing else.
 			// Cloudberry's are gp_session_id and gp_command_count, which
 			// PostgreSQL 19 has no counterpart to: the backend's pid names

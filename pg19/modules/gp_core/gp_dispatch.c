@@ -267,8 +267,13 @@ qe_identity_option(int content)
 	 * three numbers are joined with characters no shell or parser will take an
 	 * interest in.
 	 */
-	return psprintf("-c gp.qe_identity=seg%d/dbid%d/sess%d",
-					content, GpClusterDbid(), MyProcPid);
+	char	   *option = psprintf("-c gp.qe_identity=seg%d/dbid%d/sess%d",
+									content, GpClusterDbid(), MyProcPid);
+
+	/* And the secret, which says it is this coordinator; see gp_cluster.c. */
+	if (GpClusterHasSecret())
+		option = psprintf("%s -c gp.qe_secret=%s", option, GpClusterSecret());
+	return option;
 }
 
 /*
@@ -415,6 +420,8 @@ gang_get(void)
  * arrives.  The caller loops over the connections afterwards; this only stops
  * the backend from spinning.
  */
+static bool gather_poll(struct GpGatherSeg *s);
+
 static void
 gang_wait(GpGang *g)
 {
@@ -429,6 +436,20 @@ gang_wait(GpGang *g)
 			ResetLatch(MyLatch);
 			CHECK_FOR_INTERRUPTS();
 		}
+	}
+
+	/*
+	 * Take in whatever has arrived for a gather, whichever gather is waiting:
+	 * the sockets are waited on level-triggered, so a batch nobody reads -- a
+	 * join's other side prefetching, a merge waiting on one segment while the
+	 * others answer -- would make every wait after this one return at once.
+	 */
+	for (int i = 0; i < g->nconns; i++)
+	{
+		GpSegmentConn *c = &g->conns[i];
+
+		if (c->busy && c->fetching != NULL)
+			(void) gather_poll(c->fetching);
 	}
 }
 
@@ -1588,6 +1609,69 @@ GpGatherNext(GpGatherState *gather, TupleTableSlot *slot, int *content)
 			return false;
 		if (!progress)
 			gang_wait(gather->gang);
+	}
+}
+
+int
+GpGatherSegmentCount(GpGatherState *gather)
+{
+	return gather->nsegs;
+}
+
+/*
+ * The next row from one of the gather's segments, waiting for it if it has
+ * not arrived; false when that segment has no more.  What a merge needs: it
+ * takes the least row of the segments' next ones, so it has to be able to ask
+ * for a particular segment's.
+ */
+bool
+GpGatherNextFrom(GpGatherState *gather, int seg, TupleTableSlot *slot)
+{
+	GpGatherSeg *s;
+
+	if (gather->gang != gang)
+		ereport(ERROR,
+				(errcode(ERRCODE_CONNECTION_FAILURE),
+				 errmsg("lost the connections to the segments while reading from them")));
+	Assert(seg >= 0 && seg < gather->nsegs);
+	s = &gather->segs[seg];
+
+	for (;;)
+	{
+		if (s->batch != NULL && s->row < PQntuples(s->batch))
+		{
+			gather_store_row(gather, s->batch, s->row++, slot);
+			return true;
+		}
+
+		if (s->batch != NULL)
+		{
+			PQclear(s->batch);
+			s->batch = NULL;
+		}
+
+		(void) gather_poll(s);
+
+		if (s->arrived != NULL)
+		{
+			s->batch = s->arrived;
+			s->arrived = NULL;
+			s->row = 0;
+			if (!s->done && !s->conn->busy)
+				gather_fetch(s);
+			continue;
+		}
+
+		if (s->done)
+			return false;
+
+		if (s->conn->fetching != s)
+		{
+			gather_fetch(s);
+			continue;
+		}
+
+		gang_wait(gather->gang);
 	}
 }
 

@@ -134,6 +134,7 @@ orca_compat_sources = files(
   'compat/dynamicscan.c',
   'compat/foreign.c',
   'compat/lsyscache.c',
+  'compat/motion.c',
   'compat/nextvalue.c',
   'compat/plancat.c',
   'compat/prepagg.c',

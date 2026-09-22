@@ -96,6 +96,9 @@ extern "C" {
 /* gp_core's, over the "gp" security label */
 #include "gp_policy.h"
 
+/* gp_core's cdbhash: the hash function a distribution key is hashed with */
+#include "gp_hash.h"
+
 /*
  * Eleven operator OIDs that PostgreSQL has and does not name.  Cloudberry
  * names them by adding an oid_symbol to pg_operator.dat, which the port
@@ -112,6 +115,9 @@ extern "C" {
 
 /* The scans of a partitioned table's partitions; see PlanForPartition. */
 #include "cb_dynamicscan.h"
+
+/* ORCA's Gather Motion, and what stage A can carry out; see CheckMotions. */
+#include "cb_motion.h"
 
 /* An identity column's next value, as ORCA carries it; see NextValueCall. */
 #include "cb_nextvalue.h"
@@ -1437,17 +1443,25 @@ gpdb::GetDefaultPartitionOpfamilyForType(Oid typid)
 Oid
 gpdb::GetHashProcInOpfamily(Oid opfamily, Oid typid)
 {
-	// M2.  Cloudberry's cdb_hashproc_in_opfamily() picks the support
-	// procedure cdbhash would use, so it belongs with cdbhash.
-	GP_UNPORTED("the hash function of an operator family");
+	GP_WRAP_START;
+	{
+		// Cloudberry's cdb_hashproc_in_opfamily(), which is gp_core's: the
+		// support procedure a distribution key is hashed with (gp_hash.c).
+		return GpHashProcInOpfamily(opfamily, typid);
+	}
+	GP_WRAP_END;
+	return InvalidOid;
 }
 
 Oid
 gpdb::IsLegacyCdbHashFunction(Oid funcid)
 {
-	// M2: the cluster has one node until then, so nothing is distributed
-	// and nothing hashes a distribution key.
-	GP_UNPORTED("whether a function is a legacy hash function");
+	// None is, for the reason GetCompatibleLegacyHashOpFamily gives: the
+	// legacy hash opclasses are Cloudberry built-ins that neither PostgreSQL
+	// 19 nor any of the port's modules installs, so no distribution key is
+	// hashed with one of their functions.
+	(void) funcid;
+	return false;
 }
 
 Oid
@@ -2672,6 +2686,101 @@ gpdb::DynamicScanTlist(Plan *scan)
 	}
 	GP_WRAP_END;
 	return NIL;
+}
+
+/*
+ * gp_core's Motion, through its API: 1.3 and later.  An older gp_core has
+ * none, and ORCA's plans with a Motion go to the planner.
+ */
+static const GpCoreApi *
+motion_api(void)
+{
+	const GpCoreApi *api = cb_core_api();
+
+	if (api == nullptr || api->version_major != GP_CORE_API_VERSION_MAJOR ||
+		api->version_minor < 3)
+		return nullptr;
+	return api;
+}
+
+bool
+gpdb::CanDispatchPlans(void)
+{
+	GP_WRAP_START;
+	{
+		const GpCoreApi *api = motion_api();
+
+		return api != nullptr && api->motion_can_dispatch();
+	}
+	GP_WRAP_END;
+	return false;
+}
+
+Plan *
+gpdb::MakeGatherMotion(Plan *fragment, List *targetlist, List *qual,
+					   int content, int slice, int nkeys,
+					   const AttrNumber *keys, const Oid *sortops,
+					   const Oid *collations, const bool *nullsfirst)
+{
+	GP_WRAP_START;
+	{
+		return motion_api()->motion_make_gather(fragment, targetlist, qual,
+												content, slice, nkeys, keys,
+												sortops, collations,
+												nullsfirst);
+	}
+	GP_WRAP_END;
+	return nullptr;
+}
+
+int
+gpdb::MotionSegment(Plan *motion)
+{
+	GP_WRAP_START;
+	{
+		return motion_api()->motion_segment(motion);
+	}
+	GP_WRAP_END;
+	return -1;
+}
+
+void
+gpdb::SetMotionSegment(Plan *motion, int content)
+{
+	GP_WRAP_START;
+	{
+		motion_api()->motion_set_segment(motion, content);
+		return;
+	}
+	GP_WRAP_END;
+}
+
+int
+gpdb::DirectDispatchSegment(Oid relid, int nvalues, const Oid *types,
+							const Datum *values, const bool *isnull)
+{
+	GP_WRAP_START;
+	{
+		const GpCoreApi *api = motion_api();
+
+		if (api == nullptr)
+			return -1;
+		return api->direct_dispatch_segment(relid, nvalues, types, values,
+											isnull);
+	}
+	GP_WRAP_END;
+	return -1;
+}
+
+int
+gpdb::CheckMotions(PlannedStmt *stmt)
+{
+	GP_WRAP_START;
+	{
+		return gp_orca_check_motions(stmt);
+	}
+	GP_WRAP_END;
+	return GP_ORCA_MOTION_OK;
 }
 
 FuncExpr *

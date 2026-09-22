@@ -87,6 +87,7 @@ struct Query;
 using ScanKey = struct ScanKeyData *;
 struct Bitmapset;
 struct Plan;
+struct PlannedStmt;
 union ListCell;
 struct TargetEntry;
 struct Expr;
@@ -827,6 +828,23 @@ Plan *PlanForPartition(Plan *scan, Index root_rti, Index part_rti,
 					   Oid root_oid, Oid part_oid, int *failure);
 int TopPartitionIndex(Oid root_oid, Oid leaf_oid);
 List *DynamicScanTlist(Plan *scan);
+
+// ORCA's Gather Motion, which gp_core carries out (gp_motion.h): whether
+// this backend can dispatch a plan at all, the Motion over a fragment, the
+// segment it reads from, direct dispatch's segment for a table's key values,
+// and whether a plan's Motions can be carried out as they stand
+// (compat/cb_motion.h).  Not in Cloudberry's layer, whose executor has a
+// Motion node and whose dispatcher sends a slice's parameters with it.
+bool CanDispatchPlans(void);
+Plan *MakeGatherMotion(Plan *fragment, List *targetlist, List *qual,
+					   int content, int slice, int nkeys,
+					   const AttrNumber *keys, const Oid *sortops,
+					   const Oid *collations, const bool *nullsfirst);
+int MotionSegment(Plan *motion);
+void SetMotionSegment(Plan *motion, int content);
+int DirectDispatchSegment(Oid relid, int nvalues, const Oid *types,
+						  const Datum *values, const bool *isnull);
+int CheckMotions(PlannedStmt *stmt);
 
 // An identity column's next value: the call of gp_orca's function ORCA is
 // handed for a NextValueExpr (NULL where gp_orca's extension is not

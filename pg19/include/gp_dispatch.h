@@ -79,6 +79,14 @@ extern GpGatherState *GpGatherStart(const char *sql, TupleDesc tupdesc);
 extern bool GpGatherNext(GpGatherState *gather, TupleTableSlot *slot,
 						 int *content);
 
+/*
+ * How many segments it reads from, and the next row from one of them, by its
+ * place among them (0 .. count - 1): what a merge of sorted streams needs.
+ */
+extern int	GpGatherSegmentCount(GpGatherState *gather);
+extern bool GpGatherNextFrom(GpGatherState *gather, int seg,
+							 TupleTableSlot *slot);
+
 /* Done with it, whether or not it was read to the end. */
 extern void GpGatherEnd(GpGatherState *gather);
 

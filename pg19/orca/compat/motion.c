@@ -1,0 +1,202 @@
+/*-------------------------------------------------------------------------
+ *
+ * Licensed to the Apache Software Foundation (ASF) under one
+ * or more contributor license agreements.  See the NOTICE file
+ * distributed with this work for additional information
+ * regarding copyright ownership.  The ASF licenses this file
+ * to you under the Apache License, Version 2.0 (the
+ * "License"); you may not use this file except in compliance
+ * with the License.  You may obtain a copy of the License at
+ *
+ *   http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing,
+ * software distributed under the License is distributed on an
+ * "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+ * KIND, either express or implied.  See the License for the
+ * specific language governing permissions and limitations
+ * under the License.
+ *
+ * compat/motion.c
+ *	  Whether a plan's Motions can be carried out as stage A carries them; see
+ *	  cb_motion.h.
+ *
+ * The fragment below a Motion runs on a segment with the statement's
+ * parameter slots empty, so every PARAM_EXEC it reads has to be set inside
+ * it.  ORCA's translator is the only thing that makes these plans, and what
+ * sets a parameter in them is a short list: a NestLoop's nestParams, a
+ * SubPlan -- its setParam as an initplan, its parParam from its arguments,
+ * its paramIds from its own output -- a RecursiveUnion's work table, and a
+ * Partition Selector.  What reads one is a Param, a CteScan's cteParam, a
+ * WorkTableScan's wtParam, and a Dynamic Scan's selectors.
+ *
+ *-------------------------------------------------------------------------
+ */
+#include "postgres.h"
+
+#include "nodes/bitmapset.h"
+#include "nodes/extensible.h"
+#include "nodes/nodeFuncs.h"
+#include "nodes/plannodes.h"
+
+#include "optimizer/walkers.h"
+
+#include "cb_dynamicscan.h"
+#include "cb_motion.h"
+#include "gp_motion.h"
+
+typedef struct motion_check_context
+{
+	plan_tree_base_prefix base;	/* plan_tree_walker's, first */
+	bool		in_fragment;
+	Bitmapset  *referenced;
+	Bitmapset  *produced;
+	int			problem;
+} motion_check_context;
+
+static bool
+is_motion(Node *node)
+{
+	return IsA(node, CustomScan) &&
+		strcmp(((CustomScan *) node)->methods->CustomName, GP_MOTION_NAME) == 0;
+}
+
+static Bitmapset *
+add_int_list(Bitmapset *set, List *ints)
+{
+	ListCell   *lc;
+
+	foreach(lc, ints)
+		set = bms_add_member(set, lfirst_int(lc));
+	return set;
+}
+
+static bool
+motion_check_walker(Node *node, void *arg)
+{
+	motion_check_context *ctx = (motion_check_context *) arg;
+
+	if (node == NULL)
+		return false;
+
+	if (is_motion(node))
+	{
+		Plan	   *plan = (Plan *) node;
+		motion_check_context sub;
+
+		if (ctx->in_fragment)
+		{
+			ctx->problem = GP_ORCA_MOTION_NESTED;
+			return true;
+		}
+
+		sub = *ctx;
+		sub.in_fragment = true;
+		sub.referenced = NULL;
+		sub.produced = NULL;
+		sub.problem = GP_ORCA_MOTION_OK;
+		if (motion_check_walker((Node *) plan->lefttree, &sub))
+		{
+			ctx->problem = sub.problem;
+			return true;
+		}
+		if (!bms_is_subset(sub.referenced, sub.produced))
+		{
+			ctx->problem = GP_ORCA_MOTION_PARAM;
+			return true;
+		}
+
+		/* Its own expressions are evaluated here, on the coordinator. */
+		return motion_check_walker((Node *) plan->targetlist, ctx) ||
+			motion_check_walker((Node *) plan->qual, ctx) ||
+			motion_check_walker((Node *) plan->initPlan, ctx);
+	}
+
+	if (ctx->in_fragment)
+	{
+		switch (nodeTag(node))
+		{
+			case T_Param:
+				{
+					Param	   *param = (Param *) node;
+
+					if (param->paramkind == PARAM_EXTERN)
+					{
+						ctx->problem = GP_ORCA_MOTION_EXTERN;
+						return true;
+					}
+					if (param->paramkind == PARAM_EXEC)
+						ctx->referenced = bms_add_member(ctx->referenced,
+														 param->paramid);
+					break;
+				}
+			case T_NestLoop:
+				{
+					ListCell   *lc;
+
+					foreach(lc, ((NestLoop *) node)->nestParams)
+						ctx->produced =
+							bms_add_member(ctx->produced,
+										   lfirst_node(NestLoopParam, lc)->paramno);
+					break;
+				}
+			case T_SubPlan:
+				{
+					SubPlan    *subplan = (SubPlan *) node;
+
+					ctx->produced = add_int_list(ctx->produced, subplan->setParam);
+					ctx->produced = add_int_list(ctx->produced, subplan->parParam);
+					ctx->produced = add_int_list(ctx->produced, subplan->paramIds);
+					break;
+				}
+			case T_RecursiveUnion:
+				ctx->produced = bms_add_member(ctx->produced,
+											   ((RecursiveUnion *) node)->wtParam);
+				break;
+			case T_CteScan:
+				ctx->referenced = bms_add_member(ctx->referenced,
+												 ((CteScan *) node)->cteParam);
+				break;
+			case T_WorkTableScan:
+				ctx->referenced = bms_add_member(ctx->referenced,
+												 ((WorkTableScan *) node)->wtParam);
+				break;
+			case T_ModifyTable:
+				ctx->problem = GP_ORCA_MOTION_WRITE;
+				return true;
+			case T_CustomScan:
+				{
+					CustomScan *cscan = (CustomScan *) node;
+
+					if (cscan->methods == &gp_orca_partition_selector_methods)
+						ctx->produced =
+							bms_add_member(ctx->produced,
+										   intVal(linitial(cscan->custom_private)));
+					else if (cscan->methods == &gp_orca_dynamic_scan_methods)
+						ctx->referenced =
+							add_int_list(ctx->referenced,
+										 (List *) lsecond(cscan->custom_private));
+					break;
+				}
+			default:
+				break;
+		}
+	}
+
+	return plan_tree_walker(node, motion_check_walker, ctx, true);
+}
+
+int
+gp_orca_check_motions(PlannedStmt *stmt)
+{
+	motion_check_context ctx;
+
+	exec_init_plan_tree_base(&ctx.base, stmt);
+	ctx.in_fragment = false;
+	ctx.referenced = NULL;
+	ctx.produced = NULL;
+	ctx.problem = GP_ORCA_MOTION_OK;
+
+	(void) motion_check_walker((Node *) stmt->planTree, &ctx);
+	return ctx.problem;
+}

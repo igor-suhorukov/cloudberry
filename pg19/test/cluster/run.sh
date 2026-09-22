@@ -626,7 +626,133 @@ mine" ] && ok "a transaction reads its own rows, and a LIMIT leaves the connecti
 	esac
 
 	###########################################################################
-	echo "10. the segments authenticate the coordinator, with SCRAM"
+	echo "10. ORCA's plans gather from the segments, which carry out the rest"
+	###########################################################################
+	# Stage A of ORCA's distributed layer: a Gather Motion's fragment is sent
+	# to the segments as a plan of their own, and only from a coordinator
+	# that has the cluster secret (gp_motion.c).
+	SECRET="cluster-secret-$RANDOM$RANDOM$RANDOM"
+	orca_started=1
+	for n in 1 2 0; do
+		start_node "$n" "shared_preload_libraries = '$PRELOAD,gp_orca'" \
+			"gp.cluster_secret = '$SECRET'" || orca_started=0
+	done
+	out=$(q 0 "CREATE EXTENSION gp_orca;")
+	if [ "$orca_started" -eq 1 ] && [ -z "$out" ]; then
+		ok "the cluster restarts with ORCA and a secret"
+	else
+		notok "the cluster with ORCA" "$out $(tail -3 "$ROOT/node0.log")"
+	fi
+
+	q 0 "CREATE TABLE o (a int, b int, c text) DISTRIBUTED BY (a);" >/dev/null
+	q 0 "INSERT INTO o SELECT i, i % 10, 'v' || i FROM generate_series(1, 1000) i;" >/dev/null
+	q 0 "CREATE TABLE ro (b int, name text) DISTRIBUTED REPLICATED;" >/dev/null
+	q 0 "INSERT INTO ro SELECT i, 'name' || i FROM generate_series(0, 9) i;" >/dev/null
+	q 0 "ANALYZE o; ANALYZE ro;" >/dev/null
+
+	# ORCA planned it, with a Gather Motion, and the rows are the planner's.
+	orca_same() {				# orca_same <what> <sql> [what EXPLAIN must say]
+		local plan want got
+		plan=$(q 0 "EXPLAIN (COSTS OFF) $2")
+		want=$(q 0 "SET gp.optimizer = off; $2")
+		got=$(q 0 "$2")
+		case "$plan" in
+			*"Optimizer: GPORCA"*) ;;
+			*) notok "$1: planned by ORCA" "$plan"; return ;;
+		esac
+		if [ -n "${3:-}" ] && [[ "$plan" != *"$3"* ]]; then
+			notok "$1: EXPLAIN says \"$3\"" "$plan"; return
+		fi
+		[ "$got" = "$want" ] && [ -n "$got" ] && ok "$1" \
+			|| notok "$1: the same rows as the planner's" "ORCA: $got / planner: $want"
+	}
+
+	orca_same "a filtered scan, gathered" \
+		"SELECT count(*), sum(a) FROM o WHERE b = 3;" \
+		"Gather Motion 2:1  (slice1; segments: 2)"
+	orca_same "an aggregate: partial on the segments, finished here" \
+		"SELECT count(*), sum(a), max(c) FROM o;" "Partial Aggregate"
+	orca_same "ORDER BY ... LIMIT: the segments' sorted rows, merged" \
+		"SELECT a, c FROM o ORDER BY a LIMIT 5;" "Merge Key: o.a"
+	orca_same "one key's rows: direct dispatch to its segment" \
+		"SELECT * FROM o WHERE a = 42;" "Gather Motion 1:1  (slice1; segments: 1)"
+	orca_same "a join of tables distributed alike, on the segments" \
+		"SELECT count(*) FROM o o1 JOIN o o2 USING (a) WHERE o2.b = 1;"
+	orca_same "a replicated table, read from one segment" \
+		"SELECT count(*), max(name) FROM ro;" "Gather Motion 1:1"
+	orca_same "a correlated subquery, run on the segments" \
+		"SELECT a, (SELECT name FROM ro WHERE ro.b = o.b) FROM o WHERE a < 4 ORDER BY a;" \
+		"SubPlan"
+	orca_same "two gathers, one slice each" \
+		"SELECT a FROM o WHERE a IN (SELECT b FROM o WHERE a < 20) ORDER BY a;" \
+		"(slice2; segments: 2)"
+
+	out=$(q 0 "EXPLAIN (ANALYZE, COSTS OFF, TIMING OFF, SUMMARY OFF, BUFFERS OFF) SELECT count(*) FROM o;")
+	case "$out" in
+		*"Gather Motion 2:1"*"(actual rows=2"*"Seq Scan on o (never executed)"*)
+			ok "EXPLAIN ANALYZE: the segments' part is theirs, not run here" ;;
+		*) notok "EXPLAIN ANALYZE of a Motion" "$out" ;;
+	esac
+
+	# What stage A does not carry out goes to the planner, and is right.
+	out=$(q 0 "EXPLAIN (COSTS OFF) SELECT b, count(*) FROM o GROUP BY b;")
+	got=$(q 0 "SELECT b, count(*) FROM o GROUP BY b ORDER BY b;" | tr '\n' ' ')
+	[[ "$out" == *"Postgres query optimizer"* ]] && \
+		[ "$got" = "0|100 1|100 2|100 3|100 4|100 5|100 6|100 7|100 8|100 9|100 " ] \
+		&& ok "a GROUP BY that needs rows moved between segments falls back, and is right" \
+		|| notok "GROUP BY off the key" "$out / $got"
+
+	out=$(printf '%s\n' "SET gp.optimizer_trace_fallback = on;" \
+		"DELETE FROM o WHERE a = 5;" "SELECT count(*) FROM o;" | qf 0)
+	case "$out" in
+		*"a distributed table in the coordinator's slice"*999)
+			ok "a DELETE ORCA would run here goes to the planner, which runs it on the segments" ;;
+		*) notok "DELETE with ORCA" "$out" ;;
+	esac
+
+	out=$(printf '%s\n' "SET gp.optimizer_trace_fallback = on;" \
+		"SET plan_cache_mode = force_generic_plan;" \
+		"PREPARE p(int) AS SELECT count(*) FROM o WHERE b = \$1;" "EXECUTE p(3);" | qf 0)
+	case "$out" in
+		*"a statement parameter used on the segments"*100) ok "a generic plan's parameter is not sent, and the planner answers" ;;
+		*) notok "a parameter in a fragment" "$out" ;;
+	esac
+
+	q 0 "CREATE FUNCTION count_o() RETURNS bigint LANGUAGE plpgsql AS \$\$ BEGIN RETURN (SELECT count(*) FROM o); END \$\$;" >/dev/null
+	out=$(q 0 "SELECT a, count_o() FROM o WHERE a < 3;")
+	case "$out" in
+		*"function cannot execute on a QE slice because it accesses relation \"public.o\""*)
+			ok "a function in a fragment may not read a segment's share as the table" ;;
+		*) notok "a function reading a table on a segment" "$out" ;;
+	esac
+
+	# A segment takes a plan only from a connection with the secret.
+	frag="SELECT gp_internal.exec_fragment('{PLANNEDSTMT :commandType 1}');"
+	for opts in "-c gp.qe_identity=seg0/dbid1/sess1" \
+		"-c gp.qe_identity=seg0/dbid1/sess1 -c gp.qe_secret=not-the-secret-at-all"; do
+		out=$(PGOPTIONS="$opts" q 1 "$frag")
+		case "$out" in
+			*"a plan is carried out only for the coordinator"*) ok "a segment refuses a plan: $opts" ;;
+			*) notok "a plan from a client that says it is the dispatcher" "$out" ;;
+		esac
+	done
+	out=$(q 0 "CREATE ROLE secret_reader LOGIN;" >/dev/null; q 0 "SET ROLE secret_reader; SHOW gp.cluster_secret;")
+	case "$out" in
+		*"permission denied"*) ok "the secret cannot be read by an ordinary role" ;;
+		*) notok "SHOW gp.cluster_secret" "$out" ;;
+	esac
+
+	# No secret on the coordinator: ORCA is told, and the planner gathers.
+	start_node 0 "shared_preload_libraries = '$PRELOAD,gp_orca'"
+	out=$(printf '%s\n' "SET gp.optimizer_trace_fallback = on;" \
+		"SELECT count(*), sum(a) FROM o WHERE b = 3;" | qf 0)
+	case "$out" in
+		*"a Motion, without gp.cluster_secret"*"100|49800") ok "without a secret nothing is dispatched as a plan, and the answer is the same" ;;
+		*) notok "ORCA without a secret" "$out" ;;
+	esac
+
+	###########################################################################
+	echo "11. the segments authenticate the coordinator, with SCRAM"
 	###########################################################################
 	# Decision 5 asks for SCRAM on the early milestones.  The dispatcher is an
 	# ordinary client, so this is ordinary authentication: the segment asks,
@@ -668,7 +794,7 @@ mine" ] && ok "a transaction reads its own rows, and a LIMIT leaves the connecti
 fi
 
 ###############################################################################
-echo "11. a cluster described wrongly is a server that does not start"
+echo "12. a cluster described wrongly is a server that does not start"
 ###############################################################################
 # The message has to name the file and the line: this is read in the
 # postmaster while it starts, so it is all the operator is given.
@@ -738,7 +864,7 @@ refuses "a file that is not there is refused" \
 	"gp.cluster_config = '$ROOT/nowhere.conf'"
 
 ###############################################################################
-echo "12. with no cluster configured, this is a single node"
+echo "13. with no cluster configured, this is a single node"
 ###############################################################################
 if start_node 0 "gp.cluster_config = ''" ; then
 	notok "node 0 should not have started: gp.role is dispatch with no cluster"

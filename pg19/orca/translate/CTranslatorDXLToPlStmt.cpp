@@ -64,6 +64,9 @@ extern "C" {
 #include "cb_assertop.h"
 // The scans of a partitioned table; see TranslateDXLDynTblScan.
 #include "cb_dynamicscan.h"
+// What stage A of the distributed layer can carry out; see
+// GetPlannedStmtFromDXL.
+#include "cb_motion.h"
 #include "nodes/plannodes.h"
 #include "nodes/primnodes.h"
 #include "partitioning/partdesc.h"
@@ -176,7 +179,8 @@ CTranslatorDXLToPlStmt::CTranslatorDXLToPlStmt(
 	  m_is_tgt_tbl_distributed(false),
 	  m_result_rel_list(nullptr),
 	  m_num_of_segments(num_of_segments),
-	  m_partition_selector_counter(0)
+	  m_partition_selector_counter(0),
+	  m_motions(nullptr)
 {
 	m_translator_dxl_to_scalar = GPOS_NEW(m_mp)
 		CTranslatorDXLToScalar(m_mp, m_md_accessor, m_num_of_segments);
@@ -316,15 +320,55 @@ CTranslatorDXLToPlStmt::GetPlannedStmtFromDXL(const CDXLNode *dxlnode,
 			planned_stmt->resultRelationRelids, lfirst_int(lc_result));
 	}
 
-	// The slice table stays in the context, where every plan's one slice was
-	// built; at M2 it goes in PlannedStmt.extension_state, which PostgreSQL 19
-	// provides for exactly this.  Direct dispatch is M2's too, and a plan that
-	// asked for it at T0 would be one over a distributed table, which the
-	// relcache translator does not report on one node -- so it is refused,
-	// not ignored, to say so if that ever stops being true.
-	if (nullptr != dxlnode->GetDXLDirectDispatchInfo())
+	// The slice table stays in the context.  Stage A needs no more of it
+	// than each Motion keeps for itself -- the slice it receives, and the
+	// segment it reads from -- and PlannedStmt.extension_state is where it
+	// goes when a slice has to know of the others, with the interconnect.
+
+	// Direct dispatch: every row the query can read is on one segment, so
+	// the Motions that would ask every segment ask that one.  As Cloudberry
+	// does, only when one table is read and the values hash by its key; with
+	// several, Cloudberry hashes by the constants' types instead, which need
+	// not be how any of the tables is hashed, and the port asks every
+	// segment -- the same rows, at the price of the round trips.
+	if (CMD_SELECT == m_cmd_type &&
+		nullptr != dxlnode->GetDXLDirectDispatchInfo() && NIL != m_motions)
 	{
-		GP_UNPORTED("direct dispatch");
+		int segment = TranslateDXLDirectDispatchSegment(
+			dxlnode->GetDXLDirectDispatchInfo(), planned_stmt->rtable);
+
+		if (0 <= segment)
+		{
+			ListCell *lc_motion = nullptr;
+			ForEach(lc_motion, m_motions)
+			{
+				Plan *motion = (Plan *) lfirst(lc_motion);
+				if (0 > gpdb::MotionSegment(motion))
+				{
+					gpdb::SetMotionSegment(motion, segment);
+				}
+			}
+		}
+	}
+
+	// What a fragment takes with it is the statement it was cut from, and
+	// nothing the coordinator computed; see compat/cb_motion.h.
+	if (NIL != m_motions)
+	{
+		switch (gpdb::CheckMotions(planned_stmt))
+		{
+			case GP_ORCA_MOTION_NESTED:
+				GP_UNPORTED("a Motion inside a slice the segments run");
+			case GP_ORCA_MOTION_PARAM:
+				GP_UNPORTED(
+					"a value computed on the coordinator, used on the segments");
+			case GP_ORCA_MOTION_EXTERN:
+				GP_UNPORTED("a statement parameter used on the segments");
+			case GP_ORCA_MOTION_WRITE:
+				GP_UNPORTED("a write on the segments");
+			default:
+				break;
+		}
 	}
 
 	return planned_stmt;
@@ -400,6 +444,14 @@ CTranslatorDXLToPlStmt::TranslateDXLOperatorToPlan(
 		case EdxlopPhysicalDynamicIndexOnlyScan:
 		case EdxlopPhysicalDynamicBitmapTableScan:
 		case EdxlopPhysicalPartitionSelector:
+		// M2, stage A: the Gather Motion, whose fragment is dispatched as a
+		// plan of its own.  The Motions between segments are stage B, and
+		// refuse by name in TranslateDXLMotion.
+		case EdxlopPhysicalMotionGather:
+		case EdxlopPhysicalMotionBroadcast:
+		case EdxlopPhysicalMotionRedistribute:
+		case EdxlopPhysicalMotionRandom:
+		case EdxlopPhysicalMotionRoutedDistribute:
 			break;
 		default:
 			GPOS_RAISE(gpdxl::ExmaDXL, gpdxl::ExmiDXL2PlStmtConversion,
@@ -2590,10 +2642,151 @@ CTranslatorDXLToPlStmt::TranslateDXLMotion(
 	const CDXLNode *motion_dxlnode, CDXLTranslateContext *output_context,
 	CDXLTranslationContextArray *ctxt_translation_prev_siblings)
 {
-	// M2: Motion.  This body refuses until then, and Cloudberry's is
-	// in github/cloudberry/src/backend/gpopt/translate/CTranslatorDXLToPlStmt.cpp,
-	// unchanged, for the step that brings it back.
-	GP_UNPORTED("Motion");
+	CDXLPhysicalMotion *motion_dxlop =
+		CDXLPhysicalMotion::Cast(motion_dxlnode->GetOperator());
+	const IntPtrArray *input_segids_array = motion_dxlop->GetInputSegIdsArray();
+	PlanSlice *recvslice = m_dxl_to_plstmt_context->GetCurrentSlice();
+
+	// Stage A of the distributed layer: a Gather Motion, whose fragment the
+	// coordinator dispatches as a plan of its own (gp_core's gp_motion.c).
+	// A Motion between segments needs the interconnect, which is stage B.
+	switch (motion_dxlop->GetDXLOperator())
+	{
+		case EdxlopPhysicalMotionGather:
+			break;
+		case EdxlopPhysicalMotionBroadcast:
+			GP_UNPORTED("Broadcast Motion");
+		case EdxlopPhysicalMotionRoutedDistribute:
+			GP_UNPORTED("Explicit Redistribute Motion");
+		default:
+			GP_UNPORTED("Redistribute Motion");
+	}
+
+	// Two slices on the segments, one sending to the other, is the
+	// interconnect again: the fragment would be dispatched from a segment.
+	if (0 != recvslice->sliceIndex)
+	{
+		GP_UNPORTED("a Motion inside a slice the segments run");
+	}
+
+	// Without the cluster secret the segments take no plan (gp_cluster.c).
+	if (!gpdb::CanDispatchPlans())
+	{
+		GP_UNPORTED("a Motion, without gp.cluster_secret");
+	}
+
+	// Cloudberry's order: the Motion's id and costs before the slice changes.
+	int plan_node_id = m_dxl_to_plstmt_context->GetNextPlanId();
+	Plan costs;
+	TranslatePlanCosts(motion_dxlnode, &costs);
+
+	CDXLNode *project_list_dxlnode = (*motion_dxlnode)[EdxlgmIndexProjList];
+	CDXLNode *filter_dxlnode = (*motion_dxlnode)[EdxlgmIndexFilter];
+	CDXLNode *sort_col_list_dxl = (*motion_dxlnode)[EdxlgmIndexSortColList];
+
+	PlanSlice *sendslice = (PlanSlice *) gpdb::GPDBAlloc(sizeof(PlanSlice));
+	memset(sendslice, 0, sizeof(PlanSlice));
+
+	sendslice->sliceIndex = m_dxl_to_plstmt_context->AddSlice(sendslice);
+	sendslice->parentIndex = recvslice->sliceIndex;
+	m_dxl_to_plstmt_context->SetCurrentSlice(sendslice);
+
+	// Cloudberry's gang types, which say what the slice will run on.  One
+	// sender is one segment -- a replicated table read once -- and never the
+	// coordinator here, which has no rows of a distributed table to send.
+	int content = -1;
+	if (1 == input_segids_array->Size())
+	{
+		int segindex = *((*input_segids_array)[0]);
+
+		if (segindex < 0)
+		{
+			GP_UNPORTED("a Motion from the coordinator");
+		}
+		sendslice->gangType = (1 == gpdb::GetGPSegmentCount())
+								  ? GANGTYPE_PRIMARY_READER
+								  : GANGTYPE_SINGLETON_READER;
+		sendslice->numsegments = 1;
+		sendslice->segindex = segindex;
+		content = segindex;
+	}
+	else
+	{
+		sendslice->gangType = GANGTYPE_PRIMARY_READER;
+		sendslice->numsegments = m_num_of_segments;
+		sendslice->segindex = 0;
+	}
+	sendslice->directDispatch.isDirectDispatch = false;
+	sendslice->directDispatch.contentIds = NIL;
+	sendslice->directDispatch.haveProcessedAnyCalculations = false;
+
+	// the child, which runs in the sending slice
+	ULONG child_index = motion_dxlop->GetRelationChildIdx();
+	CDXLNode *child_dxlnode = (*motion_dxlnode)[child_index];
+
+	CDXLTranslateContext child_context(m_mp, false,
+									   output_context->GetColIdToParamIdMap());
+
+	Plan *child_plan = TranslateDXLOperatorToPlan(
+		child_dxlnode, &child_context, ctxt_translation_prev_siblings);
+
+	CDXLTranslationContextArray *child_contexts =
+		GPOS_NEW(m_mp) CDXLTranslationContextArray(m_mp);
+	child_contexts->Append(&child_context);
+
+	// the Motion's own target list and filter, over the child's output
+	List *targetlist = NIL;
+	List *qual = NIL;
+	TranslateProjListAndFilter(project_list_dxlnode, filter_dxlnode,
+							   nullptr,	 // translate context for the base table
+							   child_contexts, &targetlist, &qual,
+							   output_context);
+
+	// a sorted Motion: Cloudberry's merge-receive
+	ULONG num_sort_cols = sort_col_list_dxl->Arity();
+	AttrNumber *sort_col_idx = nullptr;
+	Oid *sort_operators = nullptr;
+	Oid *collations = nullptr;
+	bool *nulls_first = nullptr;
+	if (0 < num_sort_cols)
+	{
+		sort_col_idx =
+			(AttrNumber *) gpdb::GPDBAlloc(num_sort_cols * sizeof(AttrNumber));
+		sort_operators = (Oid *) gpdb::GPDBAlloc(num_sort_cols * sizeof(Oid));
+		collations = (Oid *) gpdb::GPDBAlloc(num_sort_cols * sizeof(Oid));
+		nulls_first = (bool *) gpdb::GPDBAlloc(num_sort_cols * sizeof(bool));
+
+		// The keys are columns of the Motion's own output, which is why they
+		// are translated in its context rather than the child's.
+		m_dxl_to_plstmt_context->SetCurrentSlice(recvslice);
+		TranslateSortCols(sort_col_list_dxl, output_context, sort_col_idx,
+						  sort_operators, collations, nulls_first);
+	}
+
+	child_contexts->Release();
+
+	m_dxl_to_plstmt_context->SetCurrentSlice(recvslice);
+
+	Plan *plan = gpdb::MakeGatherMotion(
+		child_plan, targetlist, qual, content, sendslice->sliceIndex,
+		(int) num_sort_cols, sort_col_idx, sort_operators, collations,
+		nulls_first);
+	if (nullptr == plan)
+	{
+		GP_UNPORTED("a sorted Motion whose key is not a column it receives");
+	}
+
+	plan->plan_node_id = plan_node_id;
+	plan->startup_cost = costs.startup_cost;
+	plan->total_cost = costs.total_cost;
+	plan->plan_rows = costs.plan_rows;
+	plan->plan_width = costs.plan_width;
+
+	m_motions = gpdb::LAppend(m_motions, plan);
+
+	SetParamIds(plan);
+
+	return plan;
 }
 
 //---------------------------------------------------------------------------
@@ -2610,10 +2803,12 @@ CTranslatorDXLToPlStmt::TranslateDXLRedistributeMotionToResultHashFilters(
 	const CDXLNode *motion_dxlnode, CDXLTranslateContext *output_context,
 	CDXLTranslationContextArray *ctxt_translation_prev_siblings)
 {
-	// M2: Motion.  This body refuses until then, and Cloudberry's is
+	// Stage B, with the rest of the Motions between segments: a Result that
+	// keeps, on each segment, the rows that hash there, which needs the
+	// segment to know which it is while it runs a fragment.  Cloudberry's is
 	// in github/cloudberry/src/backend/gpopt/translate/CTranslatorDXLToPlStmt.cpp,
 	// unchanged, for the step that brings it back.
-	GP_UNPORTED("Motion");
+	GP_UNPORTED("Redistribute Motion");
 }
 
 
@@ -5678,21 +5873,28 @@ CTranslatorDXLToPlStmt::AddParamToPlanTree(Plan *plan, int paramid)
 
 //---------------------------------------------------------------------------
 //	@function:
-//		CTranslatorDXLToPlStmt::TranslateDXLDirectDispatchInfo
+//		CTranslatorDXLToPlStmt::TranslateDXLDirectDispatchSegment
 //
 //	@doc:
-//		Translate the direct dispatch info
+//		The one segment every row the query reads is on, or -1
+//
+//		Cloudberry's TranslateDXLDirectDispatchInfo and GetDXLDatumGPDBHash,
+//		as one: the values of the distribution key ORCA found fixed, hashed
+//		by gp_core as the table's rows are (gp_hash.c), each set of them to
+//		the same segment.  Only for one table, for the reason given where
+//		this is called.  A raw segment id -- "gp_segment_id = 1" -- is a
+//		column the port does not have yet, so it never arrives.
 //
 //---------------------------------------------------------------------------
-List *
-CTranslatorDXLToPlStmt::TranslateDXLDirectDispatchInfo(
-	CDXLDirectDispatchInfo *dxl_direct_dispatch_info,
-	RangeTblEntry *pRTEHashFuncCal)
+int
+CTranslatorDXLToPlStmt::TranslateDXLDirectDispatchSegment(
+	CDXLDirectDispatchInfo *dxl_direct_dispatch_info, List *rtable)
 {
 	if (!optimizer_enable_direct_dispatch ||
-		nullptr == dxl_direct_dispatch_info)
+		nullptr == dxl_direct_dispatch_info ||
+		dxl_direct_dispatch_info->FContainsRawValues())
 	{
-		return NIL;
+		return -1;
 	}
 
 	CDXLDatum2dArray *dispatch_identifier_datum_arrays =
@@ -5701,83 +5903,62 @@ CTranslatorDXLToPlStmt::TranslateDXLDirectDispatchInfo(
 	if (dispatch_identifier_datum_arrays == nullptr ||
 		0 == dispatch_identifier_datum_arrays->Size())
 	{
-		return NIL;
+		return -1;
 	}
 
-	CDXLDatumArray *dxl_datum_array = (*dispatch_identifier_datum_arrays)[0];
-	GPOS_ASSERT(0 < dxl_datum_array->Size());
-
-	const ULONG length = dispatch_identifier_datum_arrays->Size();
-
-	if (dxl_direct_dispatch_info->FContainsRawValues())
+	Oid relid = InvalidOid;
+	ListCell *lc_rte = nullptr;
+	ForEach(lc_rte, rtable)
 	{
-		List *segids_list = NIL;
-		INT segid;
-		Const *const_expr = nullptr;
+		RangeTblEntry *rte = (RangeTblEntry *) lfirst(lc_rte);
 
-		for (ULONG ul = 0; ul < length; ul++)
+		if (rte->rtekind != RTE_RELATION)
 		{
-			CDXLDatumArray *dispatch_identifier_datum_array =
-				(*dispatch_identifier_datum_arrays)[ul];
-			GPOS_ASSERT(1 == dispatch_identifier_datum_array->Size());
-			const_expr =
-				(Const *) m_translator_dxl_to_scalar->TranslateDXLDatumToScalar(
-					(*dispatch_identifier_datum_array)[0]);
-
-			segid = DatumGetInt32(const_expr->constvalue);
-			if (segid >= -1 && segid < (INT) m_num_of_segments)
-			{
-				segids_list = gpdb::LAppendInt(segids_list, segid);
-			}
+			continue;
 		}
-
-		if (segids_list == NIL && const_expr)
+		if (OidIsValid(relid) && relid != rte->relid)
 		{
-			// If no valid segids were found, and there were items in the
-			// dispatch identifier array, then append the last item to behave
-			// in same manner as Planner for consistency. Currently this will
-			// lead to a FATAL in the backend when we dispatch.
-			segids_list = gpdb::LAppendInt(segids_list, segid);
+			return -1;
 		}
-		return segids_list;
+		relid = rte->relid;
+	}
+	if (!OidIsValid(relid))
+	{
+		return -1;
 	}
 
-	ULONG hash_code = GetDXLDatumGPDBHash(dxl_datum_array, pRTEHashFuncCal);
+	int segment = -1;
+	const ULONG length = dispatch_identifier_datum_arrays->Size();
 	for (ULONG ul = 0; ul < length; ul++)
 	{
-		CDXLDatumArray *dispatch_identifier_datum_array =
-			(*dispatch_identifier_datum_arrays)[ul];
-		GPOS_ASSERT(0 < dispatch_identifier_datum_array->Size());
-		ULONG hash_code_new = GetDXLDatumGPDBHash(
-			dispatch_identifier_datum_array, pRTEHashFuncCal);
+		CDXLDatumArray *datums = (*dispatch_identifier_datum_arrays)[ul];
+		const ULONG nvalues = datums->Size();
+		Oid *types = (Oid *) gpdb::GPDBAlloc(nvalues * sizeof(Oid));
+		Datum *values = (Datum *) gpdb::GPDBAlloc(nvalues * sizeof(Datum));
+		bool *isnull = (bool *) gpdb::GPDBAlloc(nvalues * sizeof(bool));
 
-		if (hash_code != hash_code_new)
+		for (ULONG i = 0; i < nvalues; i++)
 		{
-			// values don't hash to the same segment
-			return NIL;
+			Const *const_expr =
+				(Const *) m_translator_dxl_to_scalar->TranslateDXLDatumToScalar(
+					(*datums)[i]);
+
+			types[i] = const_expr->consttype;
+			values[i] = const_expr->constvalue;
+			isnull[i] = const_expr->constisnull;
 		}
+
+		int this_segment = gpdb::DirectDispatchSegment(relid, (int) nvalues,
+													   types, values, isnull);
+		if (0 > this_segment || (0 < ul && this_segment != segment))
+		{
+			// values that do not hash to one segment
+			return -1;
+		}
+		segment = this_segment;
 	}
 
-	List *segids_list = gpdb::LAppendInt(NIL, hash_code);
-	return segids_list;
-}
-
-//---------------------------------------------------------------------------
-//	@function:
-//		CTranslatorDXLToPlStmt::GetDXLDatumGPDBHash
-//
-//	@doc:
-//		Hash a DXL datum
-//
-//---------------------------------------------------------------------------
-ULONG
-CTranslatorDXLToPlStmt::GetDXLDatumGPDBHash(CDXLDatumArray *dxl_datum_array,
-											RangeTblEntry *pRTEHashFuncCal)
-{
-	// M2: direct dispatch.  This body refuses until then, and Cloudberry's is
-	// in github/cloudberry/src/backend/gpopt/translate/CTranslatorDXLToPlStmt.cpp,
-	// unchanged, for the step that brings it back.
-	GP_UNPORTED("direct dispatch");
+	return segment;
 }
 
 //---------------------------------------------------------------------------
@@ -5942,6 +6123,21 @@ CTranslatorDXLToPlStmt::ProcessDXLTblDescr(
 	const IMDRelation *md_rel = m_md_accessor->RetrieveRel(table_descr->MDId());
 	const ULONG num_of_non_sys_cols =
 		CTranslatorUtils::GetNumNonSystemColumns(md_rel);
+
+	// The first slice is the coordinator's, and a distributed table's rows
+	// are not there: a scan of one in it, or a write to one, is a plan whose
+	// every slice Cloudberry would dispatch -- a DELETE with no Motion in it,
+	// say -- and stage A dispatches only what a Gather Motion receives.  On
+	// one node every relation reads as the coordinator's, and this never
+	// holds.
+	IMDRelation::Ereldistrpolicy distribution = md_rel->GetRelDistribution();
+	if ((IMDRelation::EreldistrHash == distribution ||
+		 IMDRelation::EreldistrRandom == distribution ||
+		 IMDRelation::EreldistrReplicated == distribution) &&
+		0 == m_dxl_to_plstmt_context->GetCurrentSlice()->sliceIndex)
+	{
+		GP_UNPORTED("a distributed table in the coordinator's slice");
+	}
 
 	// get oid for table
 	Oid oid = CMDIdGPDB::CastMdid(table_descr->MDId())->Oid();

@@ -94,6 +94,16 @@ extern int	GpClusterBackendRole(void);
 /* Is this backend serving a dispatched request?  (gp.qe_identity is set.) */
 extern bool GpClusterIsDispatched(void);
 
+/*
+ * Is it the coordinator's own connection: dispatched, and carrying the
+ * cluster secret?  Only such a connection is given plans to carry out.
+ */
+extern bool GpClusterDispatchTrusted(void);
+
+/* Is gp.cluster_secret set -- can plans be dispatched at all?  And its value. */
+extern bool GpClusterHasSecret(void);
+extern const char *GpClusterSecret(void);
+
 /* Defines the settings and reads the file; called from gp_core's _PG_init. */
 extern void GpClusterInit(void);
 

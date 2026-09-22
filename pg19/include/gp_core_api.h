@@ -32,12 +32,14 @@
 
 #include "postgres.h"
 
+#include "access/attnum.h"
+
 /*
  * Bump the minor when something is added, the major when anything already
  * here changes meaning or moves.
  */
 #define GP_CORE_API_VERSION_MAJOR	1
-#define GP_CORE_API_VERSION_MINOR	2
+#define GP_CORE_API_VERSION_MINOR	3
 
 /*
  * What the rendezvous variable points at.  It is the first thing a module
@@ -79,6 +81,27 @@ typedef struct GpCoreApi
 	 * configuration.  The coordinator keeps 1.  Added in API 1.2.
 	 */
 	int			(*get_dbid) (void);
+
+	/*
+	 * ORCA's Motions, carried out by gp_core (gp_motion.h says what each
+	 * does).  Added in API 1.3.
+	 */
+	bool		(*motion_can_dispatch) (void);
+	struct Plan *(*motion_make_gather) (struct Plan *fragment,
+										struct List *targetlist,
+										struct List *qual,
+										int content, int slice, int nkeys,
+										const AttrNumber *keys,
+										const Oid *sortops,
+										const Oid *collations,
+										const bool *nullsfirst);
+	bool		(*motion_is) (struct Plan *plan);
+	int			(*motion_segment) (struct Plan *plan);
+	void		(*motion_set_segment) (struct Plan *plan, int content);
+	int			(*direct_dispatch_segment) (Oid relid, int nvalues,
+											const Oid *types,
+											const Datum *values,
+											const bool *isnull);
 } GpCoreApi;
 
 /*

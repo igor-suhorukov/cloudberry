@@ -173,6 +173,9 @@ private:
 	// partition selector counter
 	ULONG m_partition_selector_counter;
 
+	// the Gather Motions built, which direct dispatch narrows to one segment
+	List *m_motions;
+
 	// private copy ctor
 	CTranslatorDXLToPlStmt(const CTranslatorDXLToPlStmt &);
 
@@ -683,14 +686,9 @@ private:
 		gpdxl::CDXLCtasStorageOptions::CDXLCtasOptionArray
 			*ctas_storage_options);
 
-	// compute directed dispatch segment ids
-	List *TranslateDXLDirectDispatchInfo(
-		CDXLDirectDispatchInfo *dxl_direct_dispatch_info,
-		RangeTblEntry *pRTEHashFuncCal);
-
-	// hash a DXL datum with GPDB's hash function
-	ULONG GetDXLDatumGPDBHash(CDXLDatumArray *dxl_datum_array,
-							  RangeTblEntry *pRTEHashFuncCal);
+	// the one segment a direct dispatch reads, or -1
+	int TranslateDXLDirectDispatchSegment(
+		CDXLDirectDispatchInfo *dxl_direct_dispatch_info, List *rtable);
 
 	// translate nest loop colrefs to GPDB nestparams
 	static List *TranslateNestLoopParamList(
