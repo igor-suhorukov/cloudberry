@@ -82,6 +82,13 @@ extern bool GpGatherNext(GpGatherState *gather, TupleTableSlot *slot,
 /* Done with it, whether or not it was read to the end. */
 extern void GpGatherEnd(GpGatherState *gather);
 
+/* The same, from one segment only: a replicated table's rows, or one key's. */
+extern GpGatherState *GpGatherStartOn(const char *sql, TupleDesc tupdesc,
+									  int content);
+
+/* Can every column of this descriptor travel in binary? */
+extern bool GpTupleDescHasBinaryIO(TupleDesc tupdesc);
+
 /*
  * Send a dispatched statement (gp_ddl.c builds it) to every segment and wait.
  * "own_xact" is for a statement that cannot run inside a transaction block --
@@ -103,6 +110,24 @@ extern bool GpDispatchIsDispatchedStatement(Node *utilityStmt);
 
 /* Is this the text a dispatched statement travels as?  O26 leaves it alone. */
 extern bool GpDispatchIsTreeText(const char *str);
+
+/*
+ * A statement with parameters, in text, on every segment (content -1) or one;
+ * "counts" receives how many rows each segment's statement changed, in
+ * content order.
+ */
+extern void GpDispatchCommandParams(const char *sql, int nparams,
+									const char *const *values, int content,
+									uint64 *counts);
+
+/*
+ * COPY ... FROM STDIN on one segment: begin with the COPY statement, send the
+ * data in pieces, and end, which answers how many rows the segment took.  One
+ * at a time.
+ */
+extern void GpCopyInBegin(int content, const char *sql);
+extern void GpCopyInData(const char *data, int len);
+extern uint64 GpCopyInEnd(void);
 
 /* Close every connection: the session is over, or something went wrong. */
 extern void GpDispatchResetGang(void);

@@ -49,6 +49,7 @@
 #include "gp_dispatch.h"
 #include "gp_label.h"
 #include "gp_policy.h"
+#include "gp_scan.h"
 
 PG_MODULE_MAGIC_EXT(
 					.name = "gp_core",
@@ -127,6 +128,14 @@ _PG_init(void)
 	 * where there is a cluster: a single node installs none of its hooks.
 	 */
 	GpDdlInit();
+
+	/*
+	 * Reading and writing distributed tables when PostgreSQL's planner plans:
+	 * the gather under every scan of one, and the routed INSERT, the
+	 * dispatched UPDATE and DELETE, and COPY.  Only where there is a cluster.
+	 */
+	GpScanInit();
+	GpModifyInit();
 
 	/*
 	 * Deliberately no MarkGUCPrefixReserved("gp") here.  It drops every

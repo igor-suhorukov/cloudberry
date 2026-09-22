@@ -609,6 +609,15 @@ carried_list_of(Node *parsetree)
  * is the view it replaced.  CREATE INDEX makes one index, and child indexes
  * after it on a partitioned table; the first index is the one.
  */
+static bool
+on_cluster_coordinator(void)
+{
+	const GpCoreApi *core = GpCoreApiLookup();
+
+	return core != NULL && !core->is_single_node() &&
+		core->get_role() == GP_ROLE_DISPATCH;
+}
+
 static Oid
 created_relation(Node *parsetree)
 {
@@ -938,8 +947,34 @@ gp_sql_ProcessUtility(PlannedStmt *pstmt, const char *queryString,
 	if (tags == NIL && policy == NULL && !directory_table &&
 		partition_by == NULL && partition_cmds == NIL)
 	{
-		GpSqlProcessUtilityNext(pstmt, queryString, readOnlyTree, context,
-								params, queryEnv, dest, qc);
+		/*
+		 * On a cluster, a table nobody distributed is distributed anyway.
+		 * Which relation the statement made is known only while the pending
+		 * list is armed, so it is armed for this too.
+		 */
+		if (IsA(parsetree, CreateStmt) && on_cluster_coordinator())
+		{
+			GpSqlPendingArm(&save);
+			PG_TRY();
+			{
+				Oid			relid;
+
+				GpSqlProcessUtilityNext(pstmt, queryString, readOnlyTree,
+										context, params, queryEnv, dest, qc);
+				relid = created_relation(parsetree);
+				if (OidIsValid(relid))
+					GpDistributionApplyDefault((CreateStmt *) parsetree, relid);
+			}
+			PG_FINALLY();
+			{
+				GpSqlPendingRestore(&save);
+			}
+			PG_END_TRY();
+		}
+		else
+			GpSqlProcessUtilityNext(pstmt, queryString, readOnlyTree, context,
+									params, queryEnv, dest, qc);
+
 		if (IsA(parsetree, CreateStmt))
 			GpPartitionMade((CreateStmt *) parsetree);
 		return;
@@ -982,6 +1017,9 @@ gp_sql_ProcessUtility(PlannedStmt *pstmt, const char *queryString,
 				ObjectAddressSet(addr, RelationRelationId, relid);
 				GpLabelSet(&addr, GP_LABEL_distributed_by, policy);
 			}
+			else if (!is_alter && IsA(parsetree, CreateStmt) &&
+					 on_cluster_coordinator())
+				GpDistributionApplyDefault((CreateStmt *) parsetree, relid);
 			GpTagApplyToRelation(relid, tags);
 			if (directory_table)
 				GpDirTableClaim(relid);
@@ -1130,6 +1168,8 @@ _PG_init(void)
 							 PGC_SUSET,
 							 0,
 							 NULL, NULL, NULL);
+
+	GpDistributionDefineSettings();
 
 	GpTagRegisterProvider();
 	GpDirTableRegisterXactCallback();

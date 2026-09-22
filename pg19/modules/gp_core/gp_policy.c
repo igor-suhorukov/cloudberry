@@ -68,8 +68,8 @@
  * InvalidOid when the type cannot be a distribution key; the caller reports
  * which column it was.
  */
-static Oid
-distribution_opclass_for_type(Oid typeoid)
+Oid
+GpPolicyDefaultOpclass(Oid typeoid)
 {
 	TypeCacheEntry *tcache;
 
@@ -277,7 +277,7 @@ GpPolicyGet(Oid relid)
 							name, get_rel_name(relid))));
 
 		typeoid = get_atttype(relid, attnum);
-		opclass = distribution_opclass_for_type(typeoid);
+		opclass = GpPolicyDefaultOpclass(typeoid);
 
 		if (!OidIsValid(opclass))
 			ereport(ERROR,

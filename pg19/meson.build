@@ -100,9 +100,7 @@ mod_c_args += cc.get_supported_arguments(
   '-Wimplicit-fallthrough=3',
   '-Wdeclaration-after-statement',
 )
-# As PGXS does, so that a module which links libpq finds it at load time
-# without anyone setting LD_LIBRARY_PATH.
-mod_link_args = ['-Wl,-rpath,' + pg_libdir]
+mod_link_args = []
 if host_machine.system() == 'darwin'
   mod_link_args += ['-bundle', '-undefined', 'dynamic_lookup']
 endif
@@ -216,6 +214,9 @@ modules = [
                      'modules/gp_core/gp_cluster.c',
                      'modules/gp_core/gp_dispatch.c',
                      'modules/gp_core/gp_ddl.c',
+                     'modules/gp_core/gp_hash.c',
+                     'modules/gp_core/gp_scan.c',
+                     'modules/gp_core/gp_modify.c',
                      'modules/gp_core/gp_label.c',
                      'modules/gp_core/gp_median.c',
                      'modules/gp_core/gp_policy.c'),
@@ -307,6 +308,7 @@ modules = [
                      'modules/gp_sql/tag.c',
                      'modules/gp_sql/dirtable.c',
                      'modules/gp_sql/storage.c',
+                     'modules/gp_sql/distribution.c',
                      # O26's desugaring: Cloudberry's spelling of a statement
                      # rewritten into PostgreSQL's, before the grammar sees it,
                      # and the parse tree's positions put back in the user's.
@@ -336,6 +338,13 @@ foreach m : modules
     c_args: mod_c_args,
     cpp_args: m.get('cpp_args', []),
     link_args: mod_link_args,
+    # As PGXS does, so that a module which links libpq finds it at load time
+    # without anyone setting LD_LIBRARY_PATH.  install_rpath and not a linker
+    # flag: meson strips the run path it finds when it installs, and the
+    # server that loaded gp_core from the build directory could not load the
+    # installed copy.
+    build_rpath: pg_libdir,
+    install_rpath: pg_libdir,
     link_with: m.get('link_with', []),
     dependencies: m.get('dependencies', []),
     include_directories: [pg_inc, cb_inc] + m.get('include_directories', []),

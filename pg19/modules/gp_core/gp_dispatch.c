@@ -128,6 +128,14 @@ typedef struct GpSegmentConn
 	const GpSegmentConfig *seg;
 	PGconn	   *conn;
 	bool		busy;			/* a statement was sent and has not finished */
+
+	/*
+	 * When what is in flight is a gather's next batch, whose it is.  Several
+	 * gathers share the connections -- a join reads two tables -- and a batch
+	 * one of them asked for ahead of need is set aside for it before anything
+	 * else is sent; see conn_park().
+	 */
+	struct GpGatherSeg *fetching;
 } GpSegmentConn;
 
 typedef struct GpGang
@@ -142,6 +150,9 @@ typedef struct GpGang
 
 static GpGang *gang = NULL;
 static bool exit_callback_registered = false;
+
+/* The connection a COPY ... FROM STDIN is going through, if any. */
+static GpSegmentConn *copying = NULL;
 
 /*
  * The coordinator's transaction, as the segments know it.  "depth" counts the
@@ -212,6 +223,7 @@ gang_close(void)
 		gang_xact_lost = true;
 	gang_in_xact = false;
 	gang_xact_depth = 0;
+	copying = NULL;
 
 	for (int i = 0; i < gang->nconns; i++)
 	{
@@ -375,8 +387,10 @@ gang_connect(void)
 	 */
 	gang->wes = CreateWaitEventSet(NULL, nsegs + 2);
 	AddWaitEventToSet(gang->wes, WL_LATCH_SET, PGINVALID_SOCKET, MyLatch, NULL);
-	AddWaitEventToSet(gang->wes, WL_EXIT_ON_PM_DEATH, PGINVALID_SOCKET,
-					  NULL, NULL);
+	/* A backend with no postmaster -- single-user mode -- has none to lose. */
+	if (IsUnderPostmaster)
+		AddWaitEventToSet(gang->wes, WL_EXIT_ON_PM_DEATH, PGINVALID_SOCKET,
+						  NULL, NULL);
 	for (int i = 0; i < nsegs; i++)
 		AddWaitEventToSet(gang->wes, WL_SOCKET_READABLE,
 						  PQsocket(gang->conns[i].conn), NULL,
@@ -417,10 +431,20 @@ gang_wait(GpGang *g)
 	}
 }
 
+static void conn_park(GpSegmentConn *c);
+static void gang_wait_all_counting(GpGang *g, uint64 *counts, int content);
+
 /* Send a statement to one segment, as the simple protocol sends it. */
 static void
 conn_send(GpSegmentConn *c, const char *sql)
 {
+	/* A gather's batch asked for ahead of need is set aside for it first. */
+	if (c->busy && c->fetching != NULL)
+		conn_park(c);
+	if (c->busy)
+		elog(ERROR, "segment %d is still busy with an earlier statement",
+			 c->content);
+
 	if (!PQsendQuery(c->conn, sql))
 	{
 		char	   *msg = pstrdup(PQerrorMessage(c->conn));
@@ -524,8 +548,24 @@ raise_segment_errors(List *errors)
  * is ROLLBACK -- and no error -- when the segment's transaction had already
  * failed; that is an error here.
  */
+static void gang_wait_all_ex(GpGang *g, PGresult **keep, bool commit,
+							 bool keep_commands);
+
 static void
 gang_wait_all(GpGang *g, PGresult **keep, bool commit)
+{
+	gang_wait_all_ex(g, keep, commit, false);
+}
+
+/* Keep each segment's last successful result, whatever it was. */
+static void
+gang_wait_all_keeping_commands(GpGang *g, PGresult **keep)
+{
+	gang_wait_all_ex(g, keep, false, true);
+}
+
+static void
+gang_wait_all_ex(GpGang *g, PGresult **keep, bool commit, bool keep_commands)
 {
 	List	   *errors = NIL;
 	bool		broken = false;
@@ -538,7 +578,8 @@ gang_wait_all(GpGang *g, PGresult **keep, bool commit)
 		{
 			GpSegmentConn *c = &g->conns[i];
 
-			if (!c->busy)
+			/* Not ours: a gather's batch, which that gather will read. */
+			if (!c->busy || c->fetching != NULL)
 				continue;
 
 			if (PQconsumeInput(c->conn) == 0)
@@ -571,6 +612,13 @@ gang_wait_all(GpGang *g, PGresult **keep, bool commit)
 				else if (commit && strcmp(PQcmdStatus(res), "ROLLBACK") == 0)
 					collect_error(&errors, c->content, res, c->conn,
 								  "the segment's part of this transaction had already failed");
+				else if (keep != NULL && keep_commands)
+				{
+					if (keep[i] != NULL)
+						PQclear(keep[i]);
+					keep[i] = res;
+					continue;	/* the caller frees it */
+				}
 				else if (keep != NULL && keep[i] == NULL &&
 						 status == PGRES_TUPLES_OK)
 				{
@@ -596,6 +644,29 @@ gang_wait_all(GpGang *g, PGresult **keep, bool commit)
 }
 
 /*
+ * gang_wait_all(), keeping how many rows each statement changed: one count
+ * per segment waited for (all, or the one "content" names), in content order.
+ */
+static void
+gang_wait_all_counting(GpGang *g, uint64 *counts, int content)
+{
+	PGresult  **results = (PGresult **) palloc0_array(PGresult *, g->nconns);
+	int			n = 0;
+
+	gang_wait_all_keeping_commands(g, results);
+
+	for (int i = 0; i < g->nconns; i++)
+	{
+		if (content >= 0 && g->conns[i].content != content)
+			continue;
+		counts[n++] = results[i] ? strtou64(PQcmdTuples(results[i]), NULL, 10) : 0;
+		if (results[i] != NULL)
+			PQclear(results[i]);
+	}
+	pfree(results);
+}
+
+/*
  * Read whatever is in flight and throw it away, without raising: the paths
  * that call this are handling an error already.  A segment that does not
  * answer within a while, or whose connection breaks, costs the gang.
@@ -612,6 +683,7 @@ gang_drain_quietly(void)
 	{
 		GpSegmentConn *c = &g->conns[i];
 
+		c->fetching = NULL;
 		while (c->busy)
 		{
 			if (PQconsumeInput(c->conn) == 0)
@@ -971,6 +1043,157 @@ GpDispatchUtility(const char *payload, bool own_xact)
 	gang_wait_all(g, NULL, false);
 }
 
+/*
+ * A statement with parameters on every segment, or on one, and how many rows
+ * each changed.  The parameters travel as text, as the statement's own were
+ * typed; "counts" gets one entry per segment asked, in content order.
+ */
+void
+GpDispatchCommandParams(const char *sql, int nparams, const char *const *values,
+						int content, uint64 *counts)
+{
+	GpGang	   *g = gang_get();
+	PGresult  **results;
+	int			n = 0;
+
+	gang_prepare(g, true);
+	results = (PGresult **) palloc0_array(PGresult *, g->nconns);
+
+	for (int i = 0; i < g->nconns; i++)
+	{
+		GpSegmentConn *c = &g->conns[i];
+
+		if (content >= 0 && c->content != content)
+			continue;
+		if (c->busy && c->fetching != NULL)
+			conn_park(c);
+		if (!PQsendQueryParams(c->conn, sql, nparams, NULL, values, NULL, NULL, 0))
+		{
+			char	   *msg = pstrdup(PQerrorMessage(c->conn));
+			int			failed = c->content;
+
+			gang_close();
+			ereport(ERROR,
+					(errcode(ERRCODE_CONNECTION_FAILURE),
+					 errmsg("could not send a statement to segment %d", failed),
+					 errdetail_internal("%s", msg)));
+		}
+		c->busy = true;
+	}
+
+	/* The counts come back as command tags, which "keep" does not keep. */
+	gang_wait_all_counting(g, counts, content);
+	pfree(results);
+	(void) n;
+}
+
+/* ------------------------------------------------------------------------- */
+/* Rows on the way out                                                       */
+/* ------------------------------------------------------------------------- */
+
+/*
+ * COPY ... FROM STDIN on one segment: the way rows the coordinator routed
+ * reach it.  One segment at a time, which is what a connection in COPY mode
+ * allows, and why the rows are held on the coordinator until the statement
+ * that produced them has finished with the gang.
+ */
+void
+GpCopyInBegin(int content, const char *sql)
+{
+	GpGang	   *g = gang_get();
+	GpSegmentConn *c = NULL;
+	List	   *errors = NIL;
+
+	gang_prepare(g, true);
+
+	for (int i = 0; i < g->nconns; i++)
+		if (g->conns[i].content == content)
+			c = &g->conns[i];
+	if (c == NULL)
+		elog(ERROR, "there is no segment with content id %d", content);
+
+	conn_send(c, sql);
+
+	for (;;)
+	{
+		PGresult   *res;
+
+		if (PQconsumeInput(c->conn) == 0)
+		{
+			collect_error(&errors, c->content, NULL, c->conn, NULL);
+			gang_close();
+			raise_segment_errors(errors);
+		}
+		if (PQisBusy(c->conn))
+		{
+			gang_wait(g);
+			continue;
+		}
+		res = PQgetResult(c->conn);
+		if (res != NULL && PQresultStatus(res) == PGRES_COPY_IN)
+		{
+			PQclear(res);
+			break;
+		}
+
+		/* The statement failed before it began to read. */
+		collect_error(&errors, c->content, res, c->conn, NULL);
+		if (res != NULL)
+			PQclear(res);
+		while ((res = PQgetResult(c->conn)) != NULL)
+			PQclear(res);
+		c->busy = false;
+		raise_segment_errors(errors);
+	}
+
+	copying = c;
+}
+
+void
+GpCopyInData(const char *data, int len)
+{
+	Assert(copying != NULL);
+
+	if (PQputCopyData(copying->conn, data, len) != 1)
+	{
+		char	   *msg = pstrdup(PQerrorMessage(copying->conn));
+		int			content = copying->content;
+
+		copying = NULL;
+		gang_close();
+		ereport(ERROR,
+				(errcode(ERRCODE_CONNECTION_FAILURE),
+				 errmsg("could not send rows to segment %d", content),
+				 errdetail_internal("%s", msg)));
+	}
+}
+
+uint64
+GpCopyInEnd(void)
+{
+	GpSegmentConn *c = copying;
+	uint64		count = 0;
+
+	Assert(c != NULL);
+	copying = NULL;
+
+	if (PQputCopyEnd(c->conn, NULL) != 1)
+	{
+		char	   *msg = pstrdup(PQerrorMessage(c->conn));
+		int			content = c->content;
+
+		gang_close();
+		ereport(ERROR,
+				(errcode(ERRCODE_CONNECTION_FAILURE),
+				 errmsg("could not finish sending rows to segment %d", content),
+				 errdetail_internal("%s", msg)));
+	}
+
+	/* The COPY's own result: its row count, or why it failed. */
+	gang_wait_all_counting(gang, &count, c->content);
+	return count;
+}
+
 /* ------------------------------------------------------------------------- */
 /* Rows on the way back                                                      */
 /* ------------------------------------------------------------------------- */
@@ -994,19 +1217,30 @@ typedef struct GpColumnIn
 /* One segment's side of a gather. */
 typedef struct GpGatherSeg
 {
+	struct GpGatherState *gather;
 	GpSegmentConn *conn;
 	PGresult   *batch;			/* the rows being handed out */
 	int			row;			/* the next of them */
 	PGresult   *arrived;		/* a batch read but not yet handed out */
+	bool		declared;		/* the cursor exists there */
 	bool		done;			/* the cursor has nothing more */
 } GpGatherSeg;
 
 struct GpGatherState
 {
+	/*
+	 * Where its batches live.  PostgreSQL 19 wraps every PGresult a backend
+	 * receives in a palloc'd object that frees it when its context is reset
+	 * (libpq-be-fe.h), and a scan reads rows from a per-tuple context that is
+	 * reset between them: a batch received there was freed while rows were
+	 * still being taken from it.
+	 */
+	MemoryContext cxt;
 	GpGang	   *gang;
 	TupleDesc	tupdesc;
 	bool		binary;
 	GpColumnIn *columns;
+	int			nsegs;			/* the segments read from: all, or one */
 	GpGatherSeg *segs;
 	char	   *cursor;
 	int			next;			/* which segment to look at first */
@@ -1043,8 +1277,8 @@ type_has_binary_io(Oid typid)
 	return result;
 }
 
-static bool
-gather_can_use_binary(TupleDesc tupdesc)
+bool
+GpTupleDescHasBinaryIO(TupleDesc tupdesc)
 {
 	for (int i = 0; i < tupdesc->natts; i++)
 	{
@@ -1061,23 +1295,30 @@ gather_can_use_binary(TupleDesc tupdesc)
 GpGatherState *
 GpGatherStart(const char *sql, TupleDesc tupdesc)
 {
+	return GpGatherStartOn(sql, tupdesc, -1);
+}
+
+GpGatherState *
+GpGatherStartOn(const char *sql, TupleDesc tupdesc, int content)
+{
 	GpGatherState *gather = (GpGatherState *) palloc0(sizeof(GpGatherState));
 	GpGang	   *g = gang_get();
+	int			n = 0;
 
 	/*
 	 * Through a cursor, inside the coordinator's transaction.  A gather that
 	 * is not read to the end -- a LIMIT above it -- closes the cursor, where
 	 * reading a plain query to the end would cost the rest of the table and
-	 * cancelling it would abort the segment's transaction.  The cursor's first
-	 * batch is asked for with it, and each next one as soon as the one before
-	 * has arrived, so a segment is producing rows while the coordinator hands
-	 * out the ones it already has.
+	 * cancelling it would abort the segment's transaction.  Each next batch
+	 * is asked for as soon as the one before has arrived, so a segment is
+	 * producing rows while the coordinator hands out the ones it already has.
 	 */
 	gang_prepare(g, true);
 
+	gather->cxt = CurrentMemoryContext;
 	gather->gang = g;
 	gather->tupdesc = tupdesc;
-	gather->binary = gather_can_use_binary(tupdesc);
+	gather->binary = GpTupleDescHasBinaryIO(tupdesc);
 	gather->columns = (GpColumnIn *) palloc0_array(GpColumnIn, tupdesc->natts);
 	gather->segs = (GpGatherSeg *) palloc0_array(GpGatherSeg, g->nconns);
 	gather->cursor = psprintf("gp_gather_%u", ++gather_counter);
@@ -1101,12 +1342,26 @@ GpGatherStart(const char *sql, TupleDesc tupdesc)
 
 	for (int i = 0; i < g->nconns; i++)
 	{
-		gather->segs[i].conn = &g->conns[i];
-		conn_send(&g->conns[i],
+		GpGatherSeg *s;
+
+		if (content >= 0 && g->conns[i].content != content)
+			continue;
+
+		s = &gather->segs[n++];
+		s->gather = gather;
+		s->conn = &g->conns[i];
+		conn_send(s->conn,
 				  psprintf("DECLARE %s %sNO SCROLL CURSOR FOR %s; FETCH %d FROM %s",
 						   gather->cursor, gather->binary ? "BINARY " : "",
 						   sql, GATHER_FETCH_ROWS, gather->cursor));
+		s->conn->fetching = s;
+		s->declared = true;
 	}
+	if (n == 0)
+		ereport(ERROR,
+				(errcode(ERRCODE_UNDEFINED_OBJECT),
+				 errmsg("there is no segment with content id %d", content)));
+	gather->nsegs = n;
 
 	return gather;
 }
@@ -1128,7 +1383,7 @@ gather_store_row(GpGatherState *gather, PGresult *res, int row,
 
 	for (int i = 0; i < tupdesc->natts; i++)
 	{
-		if (PQgetisnull(res, row, i))
+		if (PQgetisnull(res, row, i) || TupleDescAttr(tupdesc, i)->attisdropped)
 		{
 			slot->tts_isnull[i] = true;
 			slot->tts_values[i] = (Datum) 0;
@@ -1159,17 +1414,17 @@ gather_store_row(GpGatherState *gather, PGresult *res, int row,
 }
 
 /*
- * Read whatever a segment has sent of the batch in flight, without waiting.
- * When the whole answer is in, the batch becomes the segment's "arrived" one
- * and the next is asked for, if there can be one.
+ * Read whatever has arrived of a gather segment's batch, without waiting.
+ * When the whole answer is in, the batch becomes the segment's "arrived" one.
+ * Returns whether anything was read.
  */
 static bool
-gather_poll(GpGatherState *gather, GpGatherSeg *s)
+gather_poll(GpGatherSeg *s)
 {
 	GpSegmentConn *c = s->conn;
 	bool		progress = false;
 
-	if (!c->busy)
+	if (!c->busy || c->fetching != s)
 		return false;
 
 	if (PQconsumeInput(c->conn) == 0)
@@ -1183,14 +1438,19 @@ gather_poll(GpGatherState *gather, GpGatherSeg *s)
 
 	while (!PQisBusy(c->conn))
 	{
+		MemoryContext oldcxt = MemoryContextSwitchTo(s->gather->cxt);
 		PGresult   *res = PQgetResult(c->conn);
 		ExecStatusType status;
 
+		MemoryContextSwitchTo(oldcxt);
 		progress = true;
 
 		if (res == NULL)
 		{
 			c->busy = false;
+			c->fetching = NULL;
+			if (s->arrived == NULL || PQntuples(s->arrived) < GATHER_FETCH_ROWS)
+				s->done = true;
 			break;
 		}
 
@@ -1218,32 +1478,50 @@ gather_poll(GpGatherState *gather, GpGatherSeg *s)
 		}
 	}
 
-	/* The answer is complete: ask for the next batch while this one is used. */
-	if (!c->busy && s->arrived != NULL && !s->done)
-	{
-		if (PQntuples(s->arrived) < GATHER_FETCH_ROWS)
-			s->done = true;
-		else
-			conn_send(c, psprintf("FETCH %d FROM %s", GATHER_FETCH_ROWS,
-								  gather->cursor));
-	}
-
 	return progress;
+}
+
+/*
+ * Set a gather's batch aside so that the connection can be used for something
+ * else: read it to the end, into the gather segment it was asked for.
+ */
+static void
+conn_park(GpSegmentConn *c)
+{
+	GpGatherSeg *s = c->fetching;
+
+	while (c->busy && c->fetching == s)
+	{
+		if (!gather_poll(s))
+			gang_wait(gang);
+	}
+}
+
+/* Ask for a segment's next batch. */
+static void
+gather_fetch(GpGatherSeg *s)
+{
+	conn_send(s->conn, psprintf("FETCH %d FROM %s", GATHER_FETCH_ROWS,
+								s->gather->cursor));
+	s->conn->fetching = s;
 }
 
 bool
 GpGatherNext(GpGatherState *gather, TupleTableSlot *slot, int *content)
 {
-	int			nsegs = gather->gang->nconns;
+	if (gather->gang != gang)
+		ereport(ERROR,
+				(errcode(ERRCODE_CONNECTION_FAILURE),
+				 errmsg("lost the connections to the segments while reading from them")));
 
 	for (;;)
 	{
 		bool		unfinished = false;
 		bool		progress = false;
 
-		for (int n = 0; n < nsegs; n++)
+		for (int n = 0; n < gather->nsegs; n++)
 		{
-			int			i = (gather->next + n) % nsegs;
+			int			i = (gather->next + n) % gather->nsegs;
 			GpGatherSeg *s = &gather->segs[i];
 
 			if (s->batch != NULL && s->row < PQntuples(s->batch))
@@ -1252,7 +1530,7 @@ GpGatherNext(GpGatherState *gather, TupleTableSlot *slot, int *content)
 				if (content != NULL)
 					*content = s->conn->content;
 				/* The next row from the next segment: they take turns. */
-				gather->next = (i + 1) % nsegs;
+				gather->next = (i + 1) % gather->nsegs;
 				return true;
 			}
 
@@ -1262,7 +1540,7 @@ GpGatherNext(GpGatherState *gather, TupleTableSlot *slot, int *content)
 				s->batch = NULL;
 			}
 
-			if (gather_poll(gather, s))
+			if (gather_poll(s))
 				progress = true;
 
 			if (s->arrived != NULL)
@@ -1271,12 +1549,30 @@ GpGatherNext(GpGatherState *gather, TupleTableSlot *slot, int *content)
 				s->arrived = NULL;
 				s->row = 0;
 				progress = true;
+
+				/*
+				 * Ask for the next batch while this one is handed out, unless
+				 * this was the last, or the connection is busy with somebody
+				 * else's statement.
+				 */
+				if (!s->done && !s->conn->busy)
+					gather_fetch(s);
+
 				n--;			/* look at this segment again */
 				continue;
 			}
 
-			if (s->conn->busy || !s->done)
-				unfinished = true;
+			if (s->done)
+				continue;
+
+			unfinished = true;
+
+			/* Nothing in hand and nothing asked for: ask. */
+			if (s->conn->fetching != s)
+			{
+				gather_fetch(s);
+				progress = true;
+			}
 		}
 
 		if (!unfinished)
@@ -1298,15 +1594,12 @@ GpGatherEnd(GpGatherState *gather)
 	 * Read what is still on its way, which is at most a batch, and close the
 	 * cursors: the segments' transaction goes on, and may gather again.
 	 */
-	for (int i = 0; i < g->nconns; i++)
+	for (int i = 0; i < gather->nsegs; i++)
 	{
 		GpGatherSeg *s = &gather->segs[i];
 
-		while (s->conn->busy)
-		{
-			if (!gather_poll(gather, s))
-				gang_wait(g);
-		}
+		if (s->conn->fetching == s)
+			conn_park(s->conn);
 		if (s->arrived != NULL)
 			PQclear(s->arrived);
 		if (s->batch != NULL)
@@ -1314,7 +1607,8 @@ GpGatherEnd(GpGatherState *gather)
 		s->arrived = s->batch = NULL;
 	}
 
-	gang_send_all(g, psprintf("CLOSE %s", gather->cursor));
+	for (int i = 0; i < gather->nsegs; i++)
+		conn_send(gather->segs[i].conn, psprintf("CLOSE %s", gather->cursor));
 	gang_wait_all(g, NULL, false);
 }
 

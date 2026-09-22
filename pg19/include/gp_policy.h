@@ -106,4 +106,11 @@ extern bool GpPolicyIsRandomPartitioned(const GpPolicy *policy);
 extern bool GpPolicyIsHashPartitioned(const GpPolicy *policy);
 extern bool GpPolicyIsReplicated(const GpPolicy *policy);
 
+/*
+ * The opclass a distribution key of this type is hashed with, as Cloudberry's
+ * cdb_default_distribution_opclass_for_type() chooses it; InvalidOid when the
+ * type cannot be a distribution key.
+ */
+extern Oid	GpPolicyDefaultOpclass(Oid typeoid);
+
 #endif							/* GP_POLICY_H */

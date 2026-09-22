@@ -44,6 +44,7 @@ CONF="$ROOT/gp_cluster.conf"
 PRELOAD='gp_core,gp_sql'
 
 pass=0; fail=0
+isnum() { [[ "$1" =~ ^[0-9]+$ ]]; }
 ok()   { printf '  ok     %s\n' "$1"; pass=$((pass + 1)); }
 notok(){ printf '  NOT OK %s\n' "$1"; [ -n "${2:-}" ] && printf '         %s\n' "$2"; fail=$((fail + 1)); }
 
@@ -248,8 +249,8 @@ if [ "$started" -eq 1 ]; then
 		|| notok "gp.dist_random()" "$out"
 
 	out=$(q 0 "SELECT count(*) FROM t;")
-	[ "$out" = "0" ] && ok "while the coordinator's own copy is empty" \
-		|| notok "the coordinator's copy" "$out"
+	[ "$out" = "6" ] && ok "and a plain SELECT gathers the same rows" \
+		|| notok "SELECT of a distributed table" "$out"
 
 	# The binary path is the one that runs for types with a send function; a
 	# type that has none makes the whole result text, which is why both are
@@ -369,7 +370,7 @@ if [ "$started" -eq 1 ]; then
 
 	# Each backend makes its own temporary namespace, so its OID is the one
 	# thing that differs; the tables in it do not.
-	out=$(printf '%s\n' "CREATE TEMP TABLE tmp1 (a int);" "CREATE TEMP TABLE tmp2 (a int);" \
+	out=$(printf '%s\n' "SET client_min_messages = warning;" "CREATE TEMP TABLE tmp1 (a int);" "CREATE TEMP TABLE tmp2 (a int);" \
 		"SELECT ('tmp1'::regclass::oid = min(result::oid)) AND ('tmp1'::regclass::oid = max(result::oid)) AND count(*) = 2 FROM gp.exec_on_segments('SELECT ''tmp1''::regclass::oid');" \
 		"SELECT ('tmp2'::regclass::oid = min(result::oid)) AND count(*) = 2 FROM gp.exec_on_segments('SELECT ''tmp2''::regclass::oid');" | qf 0)
 	[ "$out" = "t
@@ -381,7 +382,191 @@ t" ] && ok "temporary tables, two of them, have the coordinator's OIDs" \
 		|| notok "VACUUM" "$out"
 
 	###########################################################################
-	echo "8. the segments authenticate the coordinator, with SCRAM"
+	echo "8. a distributed table's rows live on the segments"
+	###########################################################################
+	# Cloudberry's own NOTICE, word for word, 345 of its expected outputs hold it.
+	out=$(q 0 "CREATE TABLE d (a int, b text);" 2>&1)
+	case "$out" in
+		*"Table doesn't have 'DISTRIBUTED BY' clause -- Using column named 'a' as the Apache Cloudberry data distribution key for this table."*"The 'DISTRIBUTED BY' clause determines the distribution of data. Make sure column(s) chosen are the optimal data distribution key to minimize skew."*)
+			ok "a table nobody distributed is distributed by its first column, and says so" ;;
+		*) notok "the default distribution's NOTICE" "$out" ;;
+	esac
+
+	out=$(q 0 "CREATE TABLE pk (x text, y int PRIMARY KEY);" 2>&1)
+	out2=$(q 0 "SELECT kind || ' ' || array_to_string(columns, ',') FROM gp.policy('pk');")
+	[ -z "$out" ] && [ "$out2" = "hash y" ] \
+		&& ok "a table with a primary key is distributed by it, silently" \
+		|| notok "the primary key's distribution" "$out / $out2"
+
+	out=$(q 0 "INSERT INTO d SELECT g, 'row' || g FROM generate_series(1, 100) g;")
+	[ -z "$out" ] && ok "INSERT ... SELECT" || notok "INSERT ... SELECT" "$out"
+
+	n1=$(q 1 "SELECT count(*) FROM d;"); n2=$(q 2 "SELECT count(*) FROM d;")
+	isnum "$n1" && isnum "$n2" && [ "$((n1 + n2))" = "100" ] && [ "$n1" -gt 0 ] && [ "$n2" -gt 0 ] \
+		&& ok "the rows are on the segments, spread over both ($n1 and $n2)" \
+		|| notok "where the rows are" "segment 0: $n1, segment 1: $n2"
+
+	# Where each row went, checked against Cloudberry's arithmetic written out
+	# again, independently: hashint4 of the key, reduced to a segment by jump
+	# consistent hashing.  The function is DDL, so the segments have it too.
+	cat > "$ROOT/expected_seg.sql" <<'EOF'
+CREATE FUNCTION expected_seg(v int, n int) RETURNS int
+LANGUAGE plpgsql IMMUTABLE AS $$
+DECLARE
+	key numeric := hashint4(v)::bigint & 4294967295;
+	b bigint := -1;
+	j bigint := 0;
+BEGIN
+	WHILE j < n LOOP
+		b := j;
+		key := mod(key * 2862933555777941757 + 1, 18446744073709551616);
+		j := trunc((b + 1)::float8 * (2147483648::float8 / (floor(key / 8589934592) + 1)::float8));
+	END LOOP;
+	RETURN b;
+END $$;
+EOF
+	qf 0 < "$ROOT/expected_seg.sql" >/dev/null
+	out=$(q 1 "SELECT count(*) FROM d WHERE expected_seg(a, 2) <> 0;")
+	out2=$(q 2 "SELECT count(*) FROM d WHERE expected_seg(a, 2) <> 1;")
+	[ "$out|$out2" = "0|0" ] \
+		&& ok "and each one is on the segment Cloudberry's hash puts it on" \
+		|| notok "the rows' placement" "misplaced on segment 0: $out, on segment 1: $out2"
+
+	out=$(q 0 "SELECT count(*), sum(a), min(b), max(a) FROM d;")
+	[ "$out" = "100|5050|row1|100" ] && ok "SELECT gathers them back ($out)" \
+		|| notok "SELECT from a distributed table" "$out"
+
+	out=$(q 0 "EXPLAIN (COSTS OFF) SELECT b FROM d WHERE a = 7;")
+	out2=$(q 0 "SELECT b FROM d WHERE a = 7;")
+	case "$out" in
+		*"Gather Motion 1:1 on d"*"(slice1; segments: 1)"*)
+			[ "$out2" = "row7" ] && ok "a key fixed to a constant asks one segment (direct dispatch)" \
+				|| notok "direct dispatch's answer" "$out2" ;;
+		*) notok "direct dispatch" "$out" ;;
+	esac
+
+	out=$(q 0 "EXPLAIN (VERBOSE, COSTS OFF) SELECT count(*) FROM d WHERE a < 10 AND b <> now()::text;")
+	case "$out" in
+		*"Filter: (d.b <> (now())::text)"*"Remote SQL: SELECT NULL, b FROM ONLY public.d WHERE (a < 10)"*)
+			ok "an immutable condition is evaluated on the segments, now() here, and only b is fetched" ;;
+		*) notok "which conditions are sent" "$out" ;;
+	esac
+	out=$(q 0 "SELECT count(*) FROM d WHERE a < 10 AND b <> now()::text;")
+	[ "$out" = "9" ] && ok "and the answer is the same ($out)" || notok "a sent condition's answer" "$out"
+
+	q 0 "CREATE TABLE d2 (k int, v int) DISTRIBUTED BY (v); INSERT INTO d2 SELECT g, g % 7 FROM generate_series(1, 100) g;" >/dev/null 2>&1
+	out=$(q 0 "SELECT count(*) FROM d JOIN d2 ON d.a = d2.k WHERE d2.v = 3;")
+	[ "$out" = "14" ] && ok "a join of two tables distributed differently ($out)" \
+		|| notok "a join of two distributed tables" "$out"
+
+	out=$(q 0 "UPDATE d SET b = 'changed' WHERE a <= 10;")
+	out2=$(q 0 "SELECT count(*) FROM d WHERE b = 'changed';")
+	[ -z "$out" ] && [ "$out2" = "10" ] && ok "UPDATE is sent to the segments, and each changes its own rows" \
+		|| notok "UPDATE" "$out / $out2"
+
+	out=$(printf '%s\n' "UPDATE d SET b = 'x' WHERE a <= 10;" | "$PSQL" -X -h "$(sockdir 0)" -p "$(port 0)" -d postgres 2>&1)
+	[ "$out" = "UPDATE 10" ] && ok "and its command tag counts every segment's rows" \
+		|| notok "UPDATE's command tag" "$out"
+
+	out=$(q 0 "UPDATE d SET a = a + 1000 WHERE a = 1;")
+	case "$out" in
+		*"a column of the distribution key"*) ok "an UPDATE of the key, which would move the row, is refused with the reason" ;;
+		*) notok "an UPDATE of the distribution key" "$out" ;;
+	esac
+
+	out=$(q 0 "UPDATE d SET b = 'j' FROM d2 WHERE d.a = d2.k;")
+	case "$out" in
+		*"another distributed table"*) ok "and so is one that joins another distributed table" ;;
+		*) notok "an UPDATE joining a distributed table" "$out" ;;
+	esac
+
+	out=$(printf '%s\n' "DELETE FROM d WHERE a > 90;" | "$PSQL" -X -h "$(sockdir 0)" -p "$(port 0)" -d postgres 2>&1)
+	out2=$(q 0 "SELECT count(*) FROM d;")
+	[ "$out|$out2" = "DELETE 10|90" ] && ok "DELETE" || notok "DELETE" "$out / $out2"
+
+	printf '%s\n' "BEGIN;" "INSERT INTO d VALUES (500, 'gone');" "ROLLBACK;" | qf 0 >/dev/null
+	out=$(q 0 "SELECT count(*) FROM d WHERE a = 500;")
+	[ "$out" = "0" ] && ok "a rolled-back INSERT leaves nothing on the segments" \
+		|| notok "a rolled-back INSERT" "$out"
+
+	out=$(printf '%s\n' "BEGIN;" "INSERT INTO d VALUES (600, 'mine');" \
+		"SELECT b FROM d WHERE a = 600;" "SELECT count(*) FROM d LIMIT 1;" "SELECT b FROM d WHERE a = 600;" "COMMIT;" | qf 0)
+	[ "$out" = "mine
+91
+mine" ] && ok "a transaction reads its own rows, and a LIMIT leaves the connections usable" \
+		|| notok "reading inside a transaction" "$out"
+
+	# serial: one sequence, the coordinator's, whatever segment the row goes to
+	q 0 "CREATE TABLE ser (id serial, v text); INSERT INTO ser (v) SELECT 'v' || g FROM generate_series(1, 20) g;" >/dev/null 2>&1
+	out=$(q 0 "SELECT count(DISTINCT id), min(id), max(id) FROM ser;")
+	[ "$out" = "20|1|20" ] && ok "a serial column counts once, on the coordinator ($out)" \
+		|| notok "a serial column" "$out"
+
+	q 0 "CREATE TABLE rep (k int, v text) DISTRIBUTED REPLICATED; INSERT INTO rep VALUES (1, 'a'), (2, 'b'), (3, 'c');" >/dev/null 2>&1
+	n1=$(q 1 "SELECT count(*) FROM rep;"); n2=$(q 2 "SELECT count(*) FROM rep;")
+	out=$(q 0 "SELECT count(*) FROM rep;")
+	[ "$n1|$n2|$out" = "3|3|3" ] && ok "a replicated table: every segment holds every row, and it is read once" \
+		|| notok "a replicated table" "$n1|$n2|$out"
+	out=$(q 0 "UPDATE rep SET v = 'z' WHERE k = 2;")
+	n1=$(q 1 "SELECT v FROM rep WHERE k = 2;"); n2=$(q 2 "SELECT v FROM rep WHERE k = 2;")
+	[ "$n1|$n2" = "z|z" ] && ok "and an UPDATE of it reaches every copy" \
+		|| notok "UPDATE of a replicated table" "$out $n1|$n2"
+	out=$(printf '%s\n' "UPDATE rep SET v = 'y';" | "$PSQL" -X -h "$(sockdir 0)" -p "$(port 0)" -d postgres 2>&1)
+	[ "$out" = "UPDATE 3" ] && ok "counted once, not once per segment" || notok "UPDATE count of a replicated table" "$out"
+
+	out=$(q 0 "UPDATE d SET b = r.v FROM rep r WHERE d.a = r.k;")
+	out2=$(q 0 "SELECT count(*) FROM d WHERE b = 'y';")
+	[ -z "$out" ] && [ "$out2" = "3" ] && ok "an UPDATE that joins a replicated table is sent, each segment has it" \
+		|| notok "UPDATE joining a replicated table" "$out / $out2"
+
+	q 0 "CREATE TABLE rnd (a int, b text) DISTRIBUTED RANDOMLY; INSERT INTO rnd SELECT g, 'x' FROM generate_series(1, 200) g;" >/dev/null 2>&1
+	n1=$(q 1 "SELECT count(*) FROM rnd;"); n2=$(q 2 "SELECT count(*) FROM rnd;")
+	isnum "$n1" && isnum "$n2" && [ "$((n1 + n2))" = "200" ] && [ "$n1" -gt 20 ] && [ "$n2" -gt 20 ] \
+		&& ok "a randomly distributed table spreads its rows ($n1 and $n2)" \
+		|| notok "a random distribution" "$n1 and $n2"
+
+	out=$(printf '%s\n' "COPY d FROM STDIN;" "700	copied" "701	copied" "702	copied" '\.' | qf 0)
+	out2=$(q 0 "SELECT count(*) FROM d WHERE b = 'copied';")
+	[ "$out2" = "3" ] && ok "COPY FROM routes its rows as INSERT does" \
+		|| notok "COPY FROM" "$out / $out2"
+	out=$(q 0 "COPY (SELECT a FROM d WHERE b = 'copied' ORDER BY a) TO STDOUT;")
+	out2=$(q 0 "COPY d TO STDOUT;" | wc -l)
+	[ "$out" = "700
+701
+702" ] && [ "$out2" = "94" ] && ok "COPY TO, of a query and of the table, gathers" \
+		|| notok "COPY TO" "$out / $out2 lines"
+
+	out=$(q 0 "SELECT count(*) FROM (SELECT a FROM d WHERE a < 5 FOR UPDATE) s;")
+	[ "$out" = "4" ] && ok "SELECT ... FOR UPDATE locks the table, as Cloudberry does without GDD" \
+		|| notok "SELECT FOR UPDATE" "$out"
+
+	out=$(q 0 "INSERT INTO d VALUES (800, 'r') RETURNING a;")
+	case "$out" in
+		*"RETURNING into distributed table"*"not supported yet"*) ok "INSERT ... RETURNING is refused, for now, with the reason" ;;
+		*) notok "INSERT RETURNING" "$out" ;;
+	esac
+
+	# A column dropped and one added: the positions the segments are told.
+	q 0 "ALTER TABLE d2 DROP COLUMN k; ALTER TABLE d2 ADD COLUMN w text DEFAULT 'w';" >/dev/null
+	q 0 "INSERT INTO d2 (v, w) VALUES (99, 'new');" >/dev/null
+	out=$(q 0 "SELECT v, w FROM d2 WHERE v = 99;")
+	[ "$out" = "99|new" ] && ok "a table with a dropped column writes and reads by name" \
+		|| notok "a dropped column" "$out"
+
+	q 0 "CREATE TABLE sales (id int, d date, amt int) DISTRIBUTED BY (id) PARTITION BY RANGE (d) (START (date '2026-01-01') END (date '2026-04-01') EVERY (interval '1 month'));" >/dev/null 2>&1
+	q 0 "INSERT INTO sales SELECT g, date '2026-01-01' + (g % 90), g FROM generate_series(1, 90) g;" >/dev/null
+	out=$(q 0 "SELECT count(*), sum(amt) FROM sales WHERE d >= date '2026-02-01';")
+	out2=$(q 1 "SELECT count(*) FROM sales_1_prt_2;")
+	[ "$out" = "59|3540" ] && isnum "$out2" && [ "$out2" -gt 0 ] \
+		&& ok "a classic partitioned table: rows routed into its partitions, on the segments" \
+		|| notok "a partitioned table" "$out / segment 0 partition 2: $out2"
+
+	out=$(printf '%s\n' "TRUNCATE d;" "SELECT count(*) FROM d;" | qf 0)
+	n1=$(q 1 "SELECT count(*) FROM d;")
+	[ "$out|$n1" = "0|0" ] && ok "TRUNCATE empties the segments" || notok "TRUNCATE" "$out|$n1"
+
+	###########################################################################
+	echo "9. the segments authenticate the coordinator, with SCRAM"
 	###########################################################################
 	# Decision 5 asks for SCRAM on the early milestones.  The dispatcher is an
 	# ordinary client, so this is ordinary authentication: the segment asks,
@@ -423,7 +608,7 @@ t" ] && ok "temporary tables, two of them, have the coordinator's OIDs" \
 fi
 
 ###############################################################################
-echo "9. a cluster described wrongly is a server that does not start"
+echo "10. a cluster described wrongly is a server that does not start"
 ###############################################################################
 # The message has to name the file and the line: this is read in the
 # postmaster while it starts, so it is all the operator is given.
@@ -493,7 +678,7 @@ refuses "a file that is not there is refused" \
 	"gp.cluster_config = '$ROOT/nowhere.conf'"
 
 ###############################################################################
-echo "10. with no cluster configured, this is a single node"
+echo "11. with no cluster configured, this is a single node"
 ###############################################################################
 if start_node 0 "gp.cluster_config = ''" ; then
 	notok "node 0 should not have started: gp.role is dispatch with no cluster"

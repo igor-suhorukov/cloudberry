@@ -1367,7 +1367,7 @@ gpdb::FreeHeapTuple(HeapTuple htup)
 //	do they need cdbhash: a type can be a distribution key when the type
 //	cache finds a hash family, a hash function and an equality operator for
 //	it, and then the answer is the hash AM's default.  gp_core runs the same
-//	test for DISTRIBUTED BY, as distribution_opclass_for_type() in
+//	test for DISTRIBUTED BY, as GpPolicyDefaultOpclass() in
 //	gp_policy.c.
 //---------------------------------------------------------------------------
 static bool

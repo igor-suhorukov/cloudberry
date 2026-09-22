@@ -180,6 +180,11 @@ extern char *GpStorageTablespaceServer(Oid spcId);
 /* partition.c */
 
 /* Cloudberry's gp_max_partition_level: 0, no limit. */
+/* distribution.c */
+extern PGDLLIMPORT bool gp_create_table_random_default_distribution;
+extern void GpDistributionApplyDefault(CreateStmt *stmt, Oid relid);
+extern void GpDistributionDefineSettings(void);
+
 extern PGDLLIMPORT int gp_max_partition_level;
 
 /*
