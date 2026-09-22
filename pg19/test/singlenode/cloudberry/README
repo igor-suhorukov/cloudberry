@@ -48,12 +48,16 @@ The reasons, by what brings them, and then each test:
   types one UNION at a time ("UNION types text and integer cannot be
   matched"), IS NOT DISTINCT FROM printed as NOT ... IS DISTINCT FROM,
   standard_conforming_strings = off and escape_string_warning, which
-  PostgreSQL 19 no longer has, and NOT NULL constraints, which PostgreSQL 18
-  keeps in pg_constraint.
+  PostgreSQL 19 no longer has, NOT NULL constraints, which PostgreSQL 18
+  keeps in pg_constraint, and "operator does not exist", which PostgreSQL 19
+  explains in a DETAIL and a HINT where PostgreSQL 14 had one HINT.
 
-  Cloudberry's own syntax: DECODE (which Cloudberry's parser makes a CASE,
-  even where a function called decode exists), and CASE x WHEN IS NOT
-  DISTINCT FROM y.
+  DECODE and CASE x WHEN IS NOT DISTINCT FROM y, which Cloudberry's parser
+  makes a CASE with an operand and the port's rewrite a searched CASE with
+  the operand in each arm, because PostgreSQL 19 compares a CASE's operand
+  with = and nothing else: a view prints the searched CASE, and the operand
+  is evaluated in each arm the CASE tries rather than once.  The answers are
+  Cloudberry's, and so are the errors and where they are reported.
 
 The tests
 
@@ -69,8 +73,12 @@ bfv_dd, bfv_dd_multicolumn, bfv_dd_types  direct dispatch's test setting,
 bfv_index  count_index_scans(), append-optimized tables, the classic
   partition syntax.
 bfv_olap  gp_motion_cost_per_row, OVER (w) with a frame.
-case_gp  CASE x WHEN IS NOT DISTINCT FROM y, DECODE, and the deparse of IS
-  NOT DISTINCT FROM.
+case_gp  The deparse of IS NOT DISTINCT FROM, and of the CASE form, which
+  prints as the searched CASE it was rewritten into; blip(1), the operand of
+  a CASE with three arms, called three times where Cloudberry calls it once,
+  so calls_to_blip has seven rows where it has five and the CASE's answer is
+  the same 666; and PostgreSQL 19's DETAIL for "operator does not exist",
+  twice.
 cluster_gp  an append-optimized table.
 create_table_like_gp  external tables, append-optimized tables and their
   catalogs, ENCODING, gp_default_storage_options, ao_row.

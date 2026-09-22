@@ -37,17 +37,18 @@
  * scanner is the real one, so comments, dollar quoting, Unicode escapes and
  * standard_conforming_strings behave exactly as they do everywhere else.
  *
- * What a fork would give that this does not:
+ * What a fork would give that this does not: a comment written inside a
+ * clause that is replaced is dropped with it.  Two more were true until
+ * DECODE made this rewrite inside expressions, and are not now:
  *
- *   - a comment written inside a clause that is replaced is dropped with it;
- *   - Cloudberry syntax nested inside an expression is not reached, because
- *     this recognises statements and clauses, not expressions.  Nothing in
- *     the surface below is ever nested that way.
- *
- * Error positions were a third, and are not now.  The rewritten text records
- * where each byte of it came from, and the caret under a syntax error, and
- * every location in the parse tree, is put back where the user wrote it --
- * text the rewrite wrote standing for the token it replaces.
+ *   - Cloudberry's syntax nested inside an expression is reached: DECODE and
+ *     CASE x WHEN IS NOT DISTINCT FROM y, the only such syntax the port
+ *     takes, are found wherever they are, nested in each other or not.
+ *     (MEDIAN(x) needs no rewrite, being a call in PostgreSQL's grammar.)
+ *   - Positions are the user's.  The rewritten text records where each byte
+ *     of it came from, and the caret under a syntax error, and every
+ *     location in the parse tree, is put back where the user wrote it --
+ *     text the rewrite wrote standing for the token it replaces.
  *
  * What it gives that a fork would not: nothing to re-base when PostgreSQL
  * changes its grammar, and no second copy of 20,000 lines of it.
@@ -65,6 +66,7 @@
 #include "mb/pg_wchar.h"
 #include "parser/parser.h"
 #include "parser/scanner.h"
+#include "parser/scansup.h"
 #include "utils/builtins.h"
 #include "utils/elog.h"
 
@@ -121,7 +123,7 @@ typedef struct GpTokens
 static const char *const gp_trigger_words[] = {
 	"tag", "profile", "distributed", "randomly", "replicated", "task",
 	"directory", "storage", "dynamic", "incremental", "unset", "account",
-	"execute",
+	"execute", "decode",
 	NULL
 };
 
@@ -135,12 +137,17 @@ static const char *const gp_trigger_words[] = {
  * being approximate is allowed in one direction only -- it may say yes to a
  * statement with nothing to rewrite, but a no must be right.  The one thing
  * it would miss is a comment between the two words, which nothing writes.
+ *
+ * WHEN IS is CASE x WHEN IS NOT DISTINCT FROM y.  The second word of a pair
+ * is matched as the start of one, so WHEN is_active fires it too, which
+ * costs a tokenisation and rewrites nothing.
  */
 static const char *const gp_trigger_pairs[][2] = {
 	{"no", "sql"},
 	{"contains", "sql"},
 	{"reads", "sql"},
 	{"modifies", "sql"},
+	{"when", "is"},
 	{NULL, NULL}
 };
 
@@ -350,6 +357,43 @@ skip_parens(const GpTokens *ts, int i)
 	return i;
 }
 
+/*
+ * Where token i's own text ends, which tok_end() does not say: it runs to the
+ * next token, whitespace and comments included.  A single character and a
+ * keyword are as long as they are; anything else ends where the whitespace
+ * before the next token begins, so a comment between the two stays with the
+ * first.
+ */
+static int
+tok_stop(const GpTokens *ts, int i)
+{
+	const GpTok *t = &ts->toks[i];
+	int			end = tok_end(ts, i);
+
+	if (t->code > 0 && t->code < 256)
+		return t->off + 1;
+	if (t->kw != NULL)
+		return t->off + strlen(t->kw);
+
+	switch (t->code)
+	{
+		case GP_TYPECAST:
+		case GP_DOT_DOT:
+		case GP_COLON_EQUALS:
+		case GP_EQUALS_GREATER:
+		case GP_LESS_EQUALS:
+		case GP_GREATER_EQUALS:
+		case GP_NOT_EQUALS:
+			return t->off + 2;
+		case GP_OP:
+			return t->off + strlen(t->str);
+	}
+
+	while (end > t->off && scanner_isspace(ts->src[end - 1]))
+		end--;
+	return end;
+}
+
 /* ------------------------------------------------------------------------- */
 /* Where the rewritten text came from                                        */
 /* ------------------------------------------------------------------------- */
@@ -360,8 +404,7 @@ skip_parens(const GpTokens *ts, int i)
  * parse analysis -- is an offset into the text the grammar read, and psql
  * puts its caret at that offset of the text the user sent.  Without this,
  * everything after a rewritten part of a statement was reported somewhere
- * else: a clause moved into a WITH list moved the caret of every error after
- * it.
+ * else: one DECODE early in a SELECT moved the caret of every error after it.
  *
  * So the rewritten text is built as segments, each either a copy of the
  * user's text or text the rewrite wrote, the latter charged to one place in
@@ -553,6 +596,8 @@ typedef struct GpEdit
 	int			from;			/* byte offset, inclusive */
 	int			to;				/* byte offset, exclusive */
 	char	   *text;			/* what goes there instead */
+	GpOut	   *piece;			/* or this, which keeps where its parts came
+								 * from; for an expression's rewrite */
 } GpEdit;
 
 typedef struct GpRewrite
@@ -607,6 +652,21 @@ rw_edit(GpRewrite *rw, int from, int to, const char *text)
 	e->from = from;
 	e->to = to;
 	e->text = text ? pstrdup(text) : pstrdup("");
+	e->piece = NULL;
+	rw->edits = lappend(rw->edits, e);
+	rw->changed = true;
+}
+
+/* Replace [from, to) with a piece that knows where its parts came from. */
+static void
+rw_edit_piece(GpRewrite *rw, int from, int to, GpOut *piece)
+{
+	GpEdit	   *e = palloc(sizeof(GpEdit));
+
+	e->from = from;
+	e->to = to;
+	e->text = NULL;
+	e->piece = piece;
 	rw->edits = lappend(rw->edits, e);
 	rw->changed = true;
 }
@@ -744,7 +804,10 @@ rw_finish_body(GpRewrite *rw)
 		if (e->from < copied)	/* two edits over the same text */
 			continue;
 		out_copy(&rw->text, copied, e->from);
-		out_text(&rw->text, e->text, e->from);
+		if (e->piece != NULL)
+			out_append(&rw->text, e->piece);
+		else
+			out_text(&rw->text, e->text, e->from);
 		copied = e->to;
 	}
 
@@ -2211,6 +2274,611 @@ rw_function_clauses(GpRewrite *rw)
 }
 
 /* ------------------------------------------------------------------------- */
+/* Expressions: DECODE, and CASE x WHEN IS NOT DISTINCT FROM y               */
+/* ------------------------------------------------------------------------- */
+
+/*
+ * The two expressions of Cloudberry's that PostgreSQL 19's grammar does not
+ * have, and what both become:
+ *
+ *	 DECODE(x, a, r [, b, s ...] [, d])
+ *	 CASE x WHEN IS NOT DISTINCT FROM a THEN r ... [ELSE d] END
+ *	   -> CASE WHEN (x) IS NOT DISTINCT FROM (a) THEN r ... [ELSE d] END
+ *
+ * Cloudberry's parser makes each a CASE with x as its operand, which its
+ * parse analysis compares with IS NOT DISTINCT FROM rather than = (gram.y's
+ * when_operand and decode_expr, parse_expr.c's transformCaseExpr).
+ * PostgreSQL 19 compares a CASE's operand with = and nothing else
+ * (pg19/src/backend/parser/parse_expr.c:1701-1705), so the only CASE that
+ * can say this is a searched one, with x written into each arm.  That is the
+ * one difference that shows: x is evaluated for each arm tried rather than
+ * once, which costs nothing for a column and is visible for a volatile
+ * function.  A fork of the grammar could not do better; the comparison is
+ * made in parse analysis, which no grammar reaches.
+ *
+ * In a CASE with such an arm, every arm is rewritten, the others as
+ * WHEN (x) = (a): the = Cloudberry's parse analysis would have made of them.
+ * A CASE with none is PostgreSQL's own and is left as it is.
+ *
+ * DECODE is reserved in Cloudberry's grammar, and with two arguments it is
+ * PostgreSQL's decode(text, text) there too (gram.y:19481).  With three or
+ * more it is the CASE even where a function called decode takes them, which
+ * Cloudberry's case_gp test checks; "decode"(...) and s.decode(...) call the
+ * function, as they do there.  Where PostgreSQL 19 lets decode be a name that
+ * Cloudberry did not -- a table, an alias, a function being created --
+ * decode_is_call() leaves it one.
+ *
+ * Positions.  What is written here stands for the token Cloudberry's grammar
+ * would have given the node it becomes, so an error in it is reported where
+ * Cloudberry reports it: IS NOT DISTINCT FROM at the arm's NOT, or for DECODE
+ * at the value compared; the = of an ordinary arm at its WHEN.
+ */
+
+typedef struct GpExprScan
+{
+	const GpTokens *ts;
+	int			first;			/* first token of the text being rewritten */
+	int			last;			/* one past its last */
+	bool		create_index;	/* CREATE INDEX, where ON names a table */
+	bool		alter_table;	/* ALTER TABLE, where USING is an expression's */
+} GpExprScan;
+
+static int	construct_at(const GpExprScan *sc, int i, int limit);
+static void emit_construct(GpOut *o, const GpExprScan *sc, int i, int stop);
+
+/*
+ * The token that closes the bracket at `open`, counting ( ) and [ ] together,
+ * or -1 if it is not closed before `limit`.
+ */
+static int
+match_close(const GpTokens *ts, int open, int limit)
+{
+	int			depth = 0;
+
+	for (int j = open; j < limit; j++)
+	{
+		int			c = ts->toks[j].code;
+
+		if (c == '(' || c == '[')
+			depth++;
+		else if (c == ')' || c == ']')
+		{
+			if (--depth == 0)
+				return j;
+			if (depth < 0)
+				return -1;
+		}
+	}
+	return -1;
+}
+
+/*
+ * The user's text from byte `from` to byte `to`, which covers tokens
+ * [tfrom, tto), with every construct among those tokens rewritten.
+ */
+static void
+emit_bytes(GpOut *o, const GpExprScan *sc, int from, int to, int tfrom, int tto)
+{
+	int			copied = from;
+
+	for (int j = tfrom; j < tto; j++)
+	{
+		int			stop = construct_at(sc, j, tto);
+
+		if (stop < 0)
+			continue;
+		out_copy(o, copied, sc->ts->toks[j].off);
+		emit_construct(o, sc, j, stop);
+		copied = tok_stop(sc->ts, stop);
+		j = stop;
+	}
+	out_copy(o, copied, to);
+}
+
+/* Tokens [from, to), from the first one's start to the last one's end. */
+static void
+emit_span(GpOut *o, const GpExprScan *sc, int from, int to)
+{
+	if (from < to)
+		emit_bytes(o, sc, sc->ts->toks[from].off, tok_stop(sc->ts, to - 1),
+				   from, to);
+}
+
+/*
+ * Is the decode( at `i` Cloudberry's DECODE, or is decode a name there?
+ *
+ * In Cloudberry it is always DECODE, a reserved word.  In PostgreSQL 19 it is
+ * a name, and a name followed by a parenthesised list is not always a call:
+ * CREATE TABLE decode (a int, ...), INSERT INTO decode (a, ...), a CTE or an
+ * alias with a column list, CREATE FUNCTION decode(...), a type with
+ * modifiers.  Those follow a name, a literal or a closing bracket, or a
+ * keyword that introduces a name; a call follows an operator, an opening
+ * bracket, a comma, or a keyword that introduces an expression, which is the
+ * list below.  A statement that begins at an expression -- PL/pgSQL hands the
+ * parser the expression alone -- begins with one.
+ *
+ * Two keywords introduce an expression only in one statement or position:
+ * USING in ALTER TABLE ... ALTER COLUMN ... TYPE ... USING, and ON everywhere
+ * but CREATE INDEX, where it names the table.  And one closing bracket is
+ * followed by an expression: SELECT DISTINCT ON (...)'s.
+ */
+static bool
+decode_is_call(const GpExprScan *sc, int i, int close)
+{
+	static const char *const leads[] = {
+		"select", "where", "having", "returning", "return", "by", "on",
+		"and", "or", "not", "case", "when", "then", "else", "distinct", "all",
+		"like", "ilike", "similar", "to", "escape", "between", "symmetric",
+		"asymmetric", "overlaps", "in", "from", "for", "placing", "at",
+		"zone", "default", "limit", "offset", "first", "next", "rows",
+		"range", "groups", "leading", "trailing", "both", "variadic",
+		"lateral", "document", "content", "passing", "ref", "value",
+		NULL
+	};
+	const GpTokens *ts = sc->ts;
+	const GpTok *p;
+
+	if (i == sc->first)
+		return true;
+
+	p = &ts->toks[i - 1];
+
+	if (p->kw != NULL)
+	{
+		/* CREATE INDEX ... ON decode (a, b, c) names the table */
+		if (pg_strcasecmp(p->kw, "on") == 0 && sc->create_index)
+			return false;
+		if (pg_strcasecmp(p->kw, "using") == 0)
+			return sc->alter_table;
+		for (int k = 0; leads[k] != NULL; k++)
+			if (pg_strcasecmp(p->kw, leads[k]) == 0)
+				return true;
+		return false;
+	}
+
+	/* SELECT DISTINCT ON (a) decode(...) */
+	if (p->code == ')')
+	{
+		int			depth = 0;
+
+		for (int j = i - 1; j > sc->first; j--)
+		{
+			if (tok_is_char(ts, j, ')'))
+				depth++;
+			else if (tok_is_char(ts, j, '(') && --depth == 0)
+				return tok_is_kw(ts, j - 1, "on") && tok_is_kw(ts, j - 2, "distinct");
+		}
+		return false;
+	}
+
+	switch (p->code)
+	{
+		case ',':
+			/* WITH a AS (...), decode (x, y, z) AS (...) names a query */
+			if (tok_is_kw(ts, close + 1, "as") &&
+				(tok_is_char(ts, close + 2, '(') ||
+				 tok_is_kw(ts, close + 2, "materialized") ||
+				 tok_is_kw(ts, close + 2, "not")))
+				return false;
+			return true;
+		case '(':
+		case '[':
+		case ':':
+		case '+':
+		case '-':
+		case '*':
+		case '/':
+		case '%':
+		case '^':
+		case '<':
+		case '>':
+		case '=':
+		case GP_OP:
+		case GP_LESS_EQUALS:
+		case GP_GREATER_EQUALS:
+		case GP_NOT_EQUALS:
+		case GP_COLON_EQUALS:
+		case GP_EQUALS_GREATER:
+			return true;
+		default:
+			return false;
+	}
+}
+
+/*
+ * DECODE(...) at `i`: its closing parenthesis, or -1 if it is not DECODE --
+ * decode spelled with quotes or a schema, fewer than three arguments, or a
+ * name rather than a call.
+ */
+static int
+decode_close(const GpExprScan *sc, int i, int limit)
+{
+	const GpTokens *ts = sc->ts;
+	const GpTok *t = &ts->toks[i];
+	int			close;
+	int			nargs = 0;
+	int			depth = 0;
+
+	if (t->code != GP_IDENT || strcmp(t->str, "decode") != 0 ||
+		ts->src[t->off] == '"' || !tok_is_char(ts, i + 1, '('))
+		return -1;
+
+	close = match_close(ts, i + 1, limit);
+	if (close < 0)
+		return -1;
+
+	if (close > i + 2)
+	{
+		nargs = 1;
+		for (int j = i + 2; j < close; j++)
+		{
+			int			c = ts->toks[j].code;
+
+			if (c == '(' || c == '[')
+				depth++;
+			else if (c == ')' || c == ']')
+				depth--;
+			else if (c == ',' && depth == 0)
+				nargs++;
+		}
+	}
+
+	if (nargs < 3 || !decode_is_call(sc, i, close))
+		return -1;
+
+	return close;
+}
+
+/*
+ * DECODE(x, a, r [, b, s ...] [, d]) -> CASE WHEN (x) IS NOT DISTINCT FROM
+ * (a) THEN r ... [ELSE d] END.  An even count of arguments ends in a default.
+ */
+static void
+emit_decode(GpOut *o, const GpExprScan *sc, int i, int close)
+{
+	const GpTokens *ts = sc->ts;
+	int			nargs = 0;
+	int		   *from = palloc((close - i) * sizeof(int));
+	int		   *to = palloc((close - i) * sizeof(int));
+	int			depth = 0;
+
+	/* the arguments, as token ranges */
+	from[0] = i + 2;
+	for (int j = i + 2; j < close; j++)
+	{
+		int			c = ts->toks[j].code;
+
+		if (c == '(' || c == '[')
+			depth++;
+		else if (c == ')' || c == ']')
+			depth--;
+		else if (c == ',' && depth == 0)
+		{
+			to[nargs++] = j;
+			from[nargs] = j + 1;
+		}
+	}
+	to[nargs++] = close;
+
+	out_text(o, "CASE", ts->toks[i].off);
+	for (int k = 1; k + 1 < nargs; k += 2)
+	{
+		/* Cloudberry's IS NOT DISTINCT FROM is at the value compared */
+		int			at = ts->toks[from[k]].off;
+
+		out_text(o, " WHEN (", at);
+		emit_span(o, sc, from[0], to[0]);
+		out_text(o, ") IS NOT DISTINCT FROM (", at);
+		emit_span(o, sc, from[k], to[k]);
+		out_text(o, ") THEN ", ts->toks[from[k + 1]].off);
+		emit_span(o, sc, from[k + 1], to[k + 1]);
+	}
+	if (nargs % 2 == 0)
+	{
+		out_text(o, " ELSE ", ts->toks[from[nargs - 1]].off);
+		emit_span(o, sc, from[nargs - 1], to[nargs - 1]);
+	}
+	out_text(o, " END", ts->toks[close].off);
+}
+
+/* One WHEN of a CASE: the tokens WHEN, THEN, and what follows its result. */
+typedef struct GpCaseArm
+{
+	int			when;
+	int			then;			/* -1 if it has none, which PostgreSQL refuses */
+	int			stop;			/* the next WHEN, the ELSE, or the END */
+} GpCaseArm;
+
+/*
+ * The CASE at `i`: its END, and its arms, at its own level -- inside no
+ * bracket and no CASE of their own.  Returns the number of arms; *else_at is
+ * its ELSE, or -1.  -1 if the CASE does not end before `limit`.
+ */
+static int
+case_arms(const GpExprScan *sc, int i, int limit, int *end, int *else_at,
+		  GpCaseArm **arms)
+{
+	const GpTokens *ts = sc->ts;
+	int			depth = 0;
+	int			cases = 0;
+	int			narms = 0;
+	int			maxarms = 8;
+
+	*end = -1;
+	*else_at = -1;
+	*arms = palloc(maxarms * sizeof(GpCaseArm));
+
+	for (int j = i + 1; j < limit; j++)
+	{
+		int			c = ts->toks[j].code;
+
+		if (c == '(' || c == '[')
+		{
+			depth++;
+			continue;
+		}
+		if (c == ')' || c == ']')
+		{
+			if (--depth < 0)
+				return -1;
+			continue;
+		}
+		if (depth != 0)
+			continue;
+
+		if (tok_is_kw(ts, j, "case"))
+			cases++;
+		else if (tok_is_kw(ts, j, "end"))
+		{
+			if (cases-- > 0)
+				continue;
+			if (narms > 0 && (*arms)[narms - 1].stop < 0)
+				(*arms)[narms - 1].stop = j;
+			*end = j;
+			return narms;
+		}
+		else if (cases > 0)
+			continue;
+		else if (tok_is_kw(ts, j, "when") && *else_at < 0)
+		{
+			if (narms > 0)
+				(*arms)[narms - 1].stop = j;
+			if (narms == maxarms)
+			{
+				maxarms *= 2;
+				*arms = repalloc(*arms, maxarms * sizeof(GpCaseArm));
+			}
+			(*arms)[narms].when = j;
+			(*arms)[narms].then = -1;
+			(*arms)[narms].stop = -1;
+			narms++;
+		}
+		else if (tok_is_kw(ts, j, "then") && narms > 0 &&
+				 (*arms)[narms - 1].then < 0 && *else_at < 0)
+			(*arms)[narms - 1].then = j;
+		else if (tok_is_kw(ts, j, "else") && narms > 0 && *else_at < 0)
+		{
+			(*arms)[narms - 1].stop = j;
+			*else_at = j;
+		}
+	}
+
+	return -1;
+}
+
+/*
+ * Is this arm Cloudberry's WHEN IS ...?  IS where an expression starts can
+ * only begin one, or else be the name of a function or type, is(...) or
+ * is 'literal', which PostgreSQL's grammar takes as it takes any other.
+ */
+static bool
+arm_is_cloudberrys(const GpTokens *ts, const GpCaseArm *arm)
+{
+	int			j = arm->when + 1;
+
+	return tok_is_kw(ts, j, "is") && !tok_is_char(ts, j + 1, '(') &&
+		!tok_is_string(ts, j + 1);
+}
+
+/* CASE x WHEN IS NOT DISTINCT FROM ... at `i`: its END, or -1. */
+static int
+case_close(const GpExprScan *sc, int i, int limit)
+{
+	GpCaseArm  *arms;
+	int			end;
+	int			else_at;
+	int			narms;
+
+	if (!tok_is_kw(sc->ts, i, "case"))
+		return -1;
+
+	narms = case_arms(sc, i, limit, &end, &else_at, &arms);
+
+	/* a searched CASE, or not one PostgreSQL's grammar would finish */
+	if (narms <= 0 || arms[0].when == i + 1)
+		return -1;
+
+	for (int k = 0; k < narms; k++)
+		if (arm_is_cloudberrys(sc->ts, &arms[k]))
+			return end;
+
+	return -1;
+}
+
+/*
+ * CASE x WHEN ... END, with an IS NOT DISTINCT FROM arm, as a searched CASE.
+ *
+ * An arm that is not well formed is written so that PostgreSQL's grammar
+ * stops at the token Cloudberry's does, and with the position map the error
+ * is reported there: after WHEN IS NOT, Cloudberry wants DISTINCT and then
+ * FROM, so the arm becomes (x) IS NOT DISTINCT followed by the rest of it,
+ * and PostgreSQL wants FROM exactly where Cloudberry wanted what was
+ * missing; after WHEN IS with no NOT, the arm stays as it was, and
+ * PostgreSQL stops at the same word Cloudberry does, IS being no expression.
+ */
+static void
+emit_case(GpOut *o, const GpExprScan *sc, int i, int end)
+{
+	const GpTokens *ts = sc->ts;
+	GpCaseArm  *arms;
+	int			else_at;
+	int			narms;
+	int			opfrom = i + 1;
+	int			opto;
+
+	narms = case_arms(sc, i, end + 1, &end, &else_at, &arms);
+	Assert(narms > 0);
+	opto = arms[0].when;
+
+	/* CASE, without its operand */
+	out_text(o, "CASE ", ts->toks[i].off);
+
+	for (int k = 0; k < narms; k++)
+	{
+		const GpCaseArm *arm = &arms[k];
+		int			w = arm->when;
+		int			cond_to = (arm->then >= 0) ? arm->then : arm->stop;
+		int			rest;		/* first token after what was rewritten */
+
+		/* WHEN, and whatever follows it up to the condition */
+		out_copy(o, ts->toks[w].off, ts->toks[w + 1].off);
+
+		if (arm_is_cloudberrys(ts, arm) && !tok_is_kw(ts, w + 2, "not"))
+		{
+			/* WHEN IS <no NOT>: as written, for PostgreSQL to refuse */
+			rest = w + 1;
+		}
+		else if (arm_is_cloudberrys(ts, arm))
+		{
+			int			not_at = ts->toks[w + 2].off;
+			int			j = w + 3;
+			bool		full = false;
+
+			if (tok_is_kw(ts, j, "distinct"))
+			{
+				j++;
+				if (tok_is_kw(ts, j, "from"))
+				{
+					j++;
+					full = (j < cond_to);
+				}
+			}
+
+			out_text(o, "(", not_at);
+			emit_span(o, sc, opfrom, opto);
+			if (full)
+			{
+				out_text(o, ") IS NOT DISTINCT FROM (", not_at);
+				emit_span(o, sc, j, cond_to);
+				out_text(o, ")", not_at);
+				rest = cond_to;
+			}
+			else
+			{
+				/* IS NOT DISTINCT [FROM], less what is missing */
+				out_text(o, tok_is_kw(ts, j - 1, "from") ?
+						 ") IS NOT DISTINCT FROM " : ") IS NOT DISTINCT ",
+						 not_at);
+				rest = j;
+			}
+		}
+		else
+		{
+			int			when_at = ts->toks[w].off;
+
+			/* WHEN a -> WHEN (x) = (a), Cloudberry's = at its WHEN */
+			out_text(o, "(", when_at);
+			emit_span(o, sc, opfrom, opto);
+			out_text(o, ") = (", when_at);
+			emit_span(o, sc, w + 1, cond_to);
+			out_text(o, ")", when_at);
+			rest = cond_to;
+		}
+
+		/* THEN and its result, as written, and the space up to the next arm */
+		if (rest < cond_to || rest == w + 1)
+			emit_bytes(o, sc, ts->toks[rest].off, ts->toks[arm->stop].off,
+					   rest, arm->stop);
+		else
+			emit_bytes(o, sc, tok_stop(ts, rest - 1), ts->toks[arm->stop].off,
+					   rest, arm->stop);
+	}
+
+	/* ELSE, and END */
+	if (else_at >= 0)
+		emit_bytes(o, sc, ts->toks[else_at].off, ts->toks[end].off,
+				   else_at, end);
+	out_copy(o, ts->toks[end].off, tok_stop(ts, end));
+}
+
+/*
+ * A construct of Cloudberry's starting at token i, ending before `limit`:
+ * the index of its last token, or -1.
+ */
+static int
+construct_at(const GpExprScan *sc, int i, int limit)
+{
+	int			stop;
+
+	if ((stop = decode_close(sc, i, limit)) >= 0)
+		return stop;
+	return case_close(sc, i, limit);
+}
+
+static void
+emit_construct(GpOut *o, const GpExprScan *sc, int i, int stop)
+{
+	if (tok_is_kw(sc->ts, i, "case"))
+		emit_case(o, sc, i, stop);
+	else
+		emit_decode(o, sc, i, stop);
+}
+
+/*
+ * Every construct of Cloudberry's in the statement, the outermost of each
+ * nest becoming one edit; what is nested in it is rewritten with it.
+ *
+ * DROP, GRANT and REVOKE name functions in lists, DROP FUNCTION f(int),
+ * decode(int, int, int), and have no expressions for DECODE to be in.
+ */
+static void
+rw_expressions(GpRewrite *rw, bool statement)
+{
+	const GpTokens *ts = rw->ts;
+	GpExprScan	sc;
+	int			i = rw->first;
+
+	if (statement &&
+		(tok_is_kw(ts, i, "drop") || tok_is_kw(ts, i, "grant") ||
+		 tok_is_kw(ts, i, "revoke")))
+		return;
+
+	sc.ts = ts;
+	sc.first = rw->first;
+	sc.last = rw->last;
+	sc.create_index = statement && tok_is_kw(ts, i, "create") &&
+		(tok_is_kw(ts, i + 1, "index") ||
+		 (tok_is_kw(ts, i + 1, "unique") && tok_is_kw(ts, i + 2, "index")));
+	sc.alter_table = statement && tok_is_kw(ts, i, "alter") &&
+		tok_is_kw(ts, i + 1, "table");
+
+	for (int j = rw->first; j < rw->last; j++)
+	{
+		int			stop = construct_at(&sc, j, rw->last);
+		GpOut	   *piece;
+
+		if (stop < 0)
+			continue;
+
+		piece = palloc(sizeof(GpOut));
+		out_init(piece, ts->src);
+		emit_construct(piece, &sc, j, stop);
+		rw_edit_piece(rw, ts->toks[j].off, tok_stop(ts, stop), piece);
+		j = stop;
+	}
+}
+
+/* ------------------------------------------------------------------------- */
 /* The driver                                                                */
 /* ------------------------------------------------------------------------- */
 
@@ -2256,16 +2924,24 @@ rw_statement(GpRewrite *rw)
 			rw_whole(rw);
 	}
 
+	/* DECODE and CASE ... WHEN IS NOT DISTINCT FROM, wherever they are. */
+	if (!rw->whole)
+		rw_expressions(rw, true);
+
 	/* The options the clauses became, all into one WITH list. */
 	rw_place_options(rw);
 }
 
 /*
  * The rewrite of `str`, or NULL when there is nothing of Cloudberry's in it.
- * With map, *map says where each byte of the result came from.
+ *
+ * With expr_only, `str` is not a statement but what PL/pgSQL hands the
+ * parser for an expression or an assignment, where only an expression of
+ * Cloudberry's can be.  With map, *map says where each byte of the result
+ * came from.
  */
 static char *
-desugar(const char *str, GpPosMap **map)
+desugar(const char *str, bool expr_only, GpPosMap **map)
 {
 	GpTokens   *ts;
 	GpOut		out;
@@ -2311,7 +2987,10 @@ desugar(const char *str, GpPosMap **map)
 		}
 
 		rw_init(&rw, ts, first, i);
-		rw_statement(&rw);
+		if (expr_only)
+			rw_expressions(&rw, false);
+		else
+			rw_statement(&rw);
 		rw_finish_body(&rw);
 
 		{
@@ -2395,13 +3074,13 @@ desugar(const char *str, GpPosMap **map)
 char *
 GpDesugar(const char *str)
 {
-	return desugar(str, NULL);
+	return desugar(str, false, NULL);
 }
 
 char *
-GpDesugarMapped(const char *str, GpPosMap **map)
+GpDesugarMapped(const char *str, bool expr_only, GpPosMap **map)
 {
-	return desugar(str, map);
+	return desugar(str, expr_only, map);
 }
 
 /* ------------------------------------------------------------------------- */
@@ -2454,11 +3133,15 @@ gp_raw_parser(const char *str, RawParseMode mode)
 	List	   *result;
 
 	/*
-	 * Only whole statements.  The other modes parse an expression, a type
-	 * name or a PL/pgSQL fragment, and Cloudberry adds nothing to those.
+	 * A whole statement can hold anything of Cloudberry's.  The PL/pgSQL
+	 * modes parse an expression or an assignment, which can hold a DECODE or
+	 * a CASE ... WHEN IS NOT DISTINCT FROM and nothing else of Cloudberry's;
+	 * a type name holds nothing.
 	 */
 	if (mode == RAW_PARSE_DEFAULT)
-		rewritten = GpDesugarMapped(str, &map);
+		rewritten = GpDesugarMapped(str, false, &map);
+	else if (mode != RAW_PARSE_TYPE_NAME)
+		rewritten = GpDesugarMapped(str, true, &map);
 
 	if (rewritten == NULL)
 	{

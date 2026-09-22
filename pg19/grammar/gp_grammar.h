@@ -44,8 +44,13 @@ extern char *GpDesugar(const char *str);
  */
 typedef struct GpPosMap GpPosMap;
 
-/* GpDesugar, and where each byte of the result came from. */
-extern char *GpDesugarMapped(const char *str, GpPosMap **map);
+/*
+ * GpDesugar, and where each byte of the result came from.  With expr_only,
+ * str is what PL/pgSQL hands the parser for an expression or an assignment,
+ * not a statement, and only DECODE and CASE ... WHEN IS NOT DISTINCT FROM
+ * are looked for.
+ */
+extern char *GpDesugarMapped(const char *str, bool expr_only, GpPosMap **map);
 
 /* The offset in the user's text that an offset in the rewrite stands for. */
 extern int	GpPosMapSource(const GpPosMap *map, int offset);

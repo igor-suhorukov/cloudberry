@@ -846,7 +846,7 @@ is "a function with no clause carries no label" \
        AND classoid = 'pg_proc'::regclass AND provider = 'gp';" "0"
 
 echo
-echo "12. median()"
+echo "12. median(), DECODE and CASE x WHEN IS NOT DISTINCT FROM y"
 
 # --- median(), gp_core's -------------------------------------------------------
 #
@@ -960,6 +960,134 @@ isl "a view prints it as it was written, and an integer's cast to float8" \
     SELECT regexp_replace(pg_get_viewdef('med_v'::regclass, true), '\\s+', ' ', 'g');" \
    " SELECT median(f) AS m, median(a::double precision) AS n FROM med;"
 
+# --- DECODE --------------------------------------------------------------------
+#
+# Cloudberry's parser makes DECODE(x, a, r, ...) a CASE that compares x with IS
+# NOT DISTINCT FROM; PostgreSQL 19 compares a CASE's operand with = and nothing
+# else, so the rewrite is a searched CASE with x in each arm.
+
+is "DECODE is a searched CASE, IS NOT DISTINCT FROM in each arm" \
+   "SELECT gp_sql.desugar('SELECT decode(a, 1, ''one'', 2, ''two'', ''other'') FROM t');" \
+   "SELECT CASE WHEN (a) IS NOT DISTINCT FROM (1) THEN 'one' WHEN (a) IS NOT DISTINCT FROM (2) THEN 'two' ELSE 'other' END FROM t"
+
+is "with an even count of arguments, the last is its default" \
+   "SELECT decode(2, 1, 'ABC', 2, 'DEF'), decode(3, 1, 'ABC', 'none'), decode(3, 1, 'ABC') IS NULL;" \
+   "DEF|none|t"
+
+is "and NULL matches NULL, which = never does" \
+   "SELECT decode(null, null, true, false), decode(NULL::int, 1, 100, NULL, 200, 300);" "t|200"
+
+is "PostgreSQL's two-argument decode() is left to be PostgreSQL's" \
+   "SELECT gp_sql.desugar('SELECT decode(''aGk='', ''base64'')') = 'SELECT decode(''aGk='', ''base64'')',
+           convert_from(decode('aGk=', 'base64'), 'UTF8');" "t|hi"
+
+# case_gp's own: DECODE with three arguments is the CASE even where a function
+# called decode takes three, and a quoted or qualified name calls the function.
+is "unquoted it is DECODE whatever functions exist; quoted or qualified, the function" \
+   "CREATE FUNCTION \"decode\"(int, int, int) RETURNS int LANGUAGE sql IMMUTABLE
+      AS 'SELECT \$1 * \$2 - \$3';
+    SELECT decode(11, 8, 11) IS NULL, \"decode\"(11, 8, 11), public.decode(11, 8, 11);
+    DROP FUNCTION \"decode\"(int, int, int);" "t|77|77"
+
+# What PostgreSQL 19 lets decode be that Cloudberry, where it is reserved, did not.
+is "a function may be created with the name, unquoted" \
+   "CREATE FUNCTION decode(a int, b int, c int) RETURNS int LANGUAGE sql AS 'SELECT 0';
+    DROP FUNCTION decode(int, int, int);
+    SELECT 'made';" "made"
+
+is "and a table, with its column list, inserted into by name" \
+   "CREATE TABLE decode (a int, b int, c int);
+    INSERT INTO decode (a, b, c) VALUES (decode(1, 1, 7), 2, 3);
+    SELECT a FROM decode;" "7"
+
+is "and a query's name, with its columns" \
+   "WITH decode (x, y, z) AS (SELECT 1, 2, 3) SELECT x + y + z FROM decode;" "6"
+
+is "and an alias, with its columns" \
+   "SELECT decode.z FROM (VALUES (1, 2, 3)) decode (x, y, z);" "3"
+
+is "none of which is rewritten" \
+   "SELECT gp_sql.desugar('CREATE INDEX ON decode (a, b, c)') = 'CREATE INDEX ON decode (a, b, c)'
+       AND gp_sql.desugar('DROP FUNCTION f(int), decode(int, int, int)')
+         = 'DROP FUNCTION f(int), decode(int, int, int)';" "t"
+
+is "and a call wherever an expression may begin" \
+   "SELECT DISTINCT ON (x) decode(x, 1, 'one', 'other') FROM (VALUES (1), (1), (2)) v(x) ORDER BY x LIMIT 1;
+    CREATE TABLE decode_using (c int);
+    ALTER TABLE decode_using ALTER COLUMN c TYPE text USING decode(c, 1, 'one');
+    SELECT position('e' IN decode(1, 1, 'one')), overlay('xxx' PLACING decode(1, 1, 'y') FROM 2);" \
+   "one
+3|xyx"
+
+is "DECODE inside DECODE" \
+   "SELECT decode(decode(1, 1, 2), 2, 'nested', 'not');" "nested"
+
+is "grouped by, where both spellings are one expression" \
+   "SELECT string_agg(k || ':' || n, ' ' ORDER BY k) FROM
+      (SELECT decode(a % 2, 0, 'even', 'odd') AS k, count(*) AS n FROM generate_series(1, 5) a
+        GROUP BY decode(a % 2, 0, 'even', 'odd')) s;" "even:2 odd:3"
+
+isl "its column is called case, as Cloudberry's is" \
+   "CREATE TABLE decode_col AS SELECT decode(1, 1, 'x');
+    SELECT attname FROM pg_attribute WHERE attrelid = 'decode_col'::regclass AND attnum > 0;" \
+   "case"
+
+# The one difference that shows: Cloudberry's CASE evaluates its operand once,
+# and a searched CASE evaluates x in each arm it tries.  Pinned so that it is
+# known, not fixed: no grammar can make PostgreSQL 19 compare a CASE's operand
+# with anything but =.
+isl "the first argument is evaluated in each arm tried, not once" \
+   "CREATE SEQUENCE decode_seq;
+    SELECT decode(nextval('decode_seq'), 100, 'x', 200, 'y', 'z');
+    SELECT currval('decode_seq');" "2"
+
+# --- CASE x WHEN IS NOT DISTINCT FROM y ------------------------------------------
+
+is "the CASE form, and its other arms compared with =" \
+   "SELECT gp_sql.desugar('SELECT CASE a WHEN IS NOT DISTINCT FROM 1 THEN ''x'' WHEN 2 THEN ''y'' ELSE ''z'' END FROM t');" \
+   "SELECT CASE WHEN (a) IS NOT DISTINCT FROM (1) THEN 'x' WHEN (a) = (2) THEN 'y' ELSE 'z' END FROM t"
+
+is "a CASE without it is PostgreSQL's, and untouched" \
+   "SELECT gp_sql.desugar('SELECT CASE a WHEN 1 THEN 2 END, decode(a, 1) FROM t')
+         = 'SELECT CASE a WHEN 1 THEN 2 END, decode(a, 1) FROM t';" "t"
+
+is "it answers as Cloudberry's does" \
+   "SELECT string_agg(coalesce(g, '-') || '=' || CASE g
+               WHEN IS NOT DISTINCT FROM 'M' THEN 'Male'
+               WHEN IS NOT DISTINCT FROM null THEN 'Not Specified'
+               WHEN 'F' THEN 'Female'
+               ELSE 'Other' END, ' ' ORDER BY n)
+      FROM (VALUES (1, 'F'), (2, 'M'), (3, NULL), (4, 'Z')) v(n, g);" \
+   "F=Female M=Male -=Not Specified Z=Other"
+
+is "nested, in each other and in DECODE" \
+   "SELECT CASE decode(1, 1, 1) WHEN IS NOT DISTINCT FROM 1 THEN
+               CASE NULL::int WHEN IS NOT DISTINCT FROM NULL THEN 'both' END END;" "both"
+
+# --- PL/pgSQL, whose expressions come to the parser alone ------------------------
+#
+# The CASE in the IF is in parentheses because PL/pgSQL ends an IF's condition
+# at the first THEN it meets outside a bracket, a CASE's own included; that is
+# PostgreSQL's rule for any CASE there, not this rewrite's.
+
+is "in a PL/pgSQL expression, an assignment and a condition" \
+   "CREATE FUNCTION pl_decode(x int) RETURNS text LANGUAGE plpgsql AS \$\$
+    DECLARE v text;
+    BEGIN
+      v := decode(x, 1, 'one', 'other');
+      IF (CASE x WHEN IS NOT DISTINCT FROM NULL THEN true ELSE false END) THEN
+        RETURN 'null';
+      END IF;
+      RETURN v || '/' || decode(x, 2, 'two', 'not two');
+    END \$\$;
+    SELECT pl_decode(1) || ' ' || pl_decode(2) || ' ' || pl_decode(NULL);" \
+   "one/not two other/two null"
+
+is "and in the body of a SQL function, standard or quoted" \
+   "CREATE FUNCTION sql_decode1(x int) RETURNS text LANGUAGE sql RETURN decode(x, 1, 'one', 'other');
+    CREATE FUNCTION sql_decode2(x int) RETURNS text LANGUAGE sql AS 'SELECT decode(x, 1, ''one'', ''other'')';
+    SELECT sql_decode1(1) || ' ' || sql_decode2(2);" "one other"
+
 echo
 echo "13. where a rewritten statement's errors are reported, and what is recorded of it"
 
@@ -969,8 +1097,29 @@ echo "13. where a rewritten statement's errors are reported, and what is recorde
 # what it wrote, which stands for the token Cloudberry's grammar would have put
 # the error at.
 
-# A clause that moved into a WITH list moves nothing that comes after it any
-# more.
+at "an error after a DECODE is where the user wrote it" \
+   "SELECT decode(1, 1, 'x'), nosuchcol FROM generate_series(1, 2)" \
+   'column "nosuchcol" does not exist' "nosuchcol"
+
+at "and so is a syntax error after one" \
+   "SELECT decode(1, 1, 'x') FROM @@FROM" 'syntax error at or near "FROM"' "FROM"
+
+at "an error inside one, in what it copied" \
+   "SELECT decode(1, 1, ARRAY[1], 0)" "CASE types integer and integer[] cannot be matched" "ARRAY"
+
+at "IS NOT DISTINCT FROM with no operator, at the value compared, as Cloudberry's" \
+   "SELECT decode('a'::text, 1, 'x')" "operator does not exist: text = integer" "1,"
+
+at "the CASE form's, at the arm's NOT" \
+   "SELECT CASE 'a'::text WHEN IS NOT DISTINCT FROM 1 THEN 'x' END" \
+   "operator does not exist: text = integer" "NOT"
+
+at "and an ordinary arm's =, at its WHEN" \
+   "SELECT CASE current_date WHEN IS NOT DISTINCT FROM current_date THEN 1 @@WHEN 2007 THEN 2 END" \
+   "operator does not exist: date = integer" "WHEN"
+
+# The map is the rewrite's, not DECODE's: a clause that moved into a WITH list
+# moves nothing that comes after it any more.
 at "and after a clause of Cloudberry's that the rewrite moved" \
    "CREATE TABLE pos_t (a int) DISTRIBUTED BY (a) nonsense" 'syntax error at or near "nonsense"' "nonsense"
 
@@ -985,12 +1134,24 @@ at "and after a clause of Cloudberry's that the rewrite moved" \
 q "CREATE EXTENSION pg_stat_statements;
    CREATE FUNCTION pss_f(int) RETURNS int LANGUAGE sql AS 'SELECT 1';" > /dev/null
 q "SELECT pg_stat_statements_reset();" > /dev/null
-q "ALTER FUNCTION pss_f(int) EXECUTE ON ANY; SELECT 7 AS d, 42 AS after_it;
+q "ALTER FUNCTION pss_f(int) EXECUTE ON ANY; SELECT decode(7, 7, 'seven', 8, 'eight') AS d, 42 AS after_it;
    CREATE SCHEMA pss_s WITH TAG (env = 'prod');" > /dev/null
 is "pg_stat_statements has each statement's own text, its constants where they were written" \
    "SELECT string_agg(query, ' | ' ORDER BY query) FROM pg_stat_statements
      WHERE query LIKE '%pss_%' OR query LIKE '%after_it%';" \
-   "ALTER FUNCTION pss_f(int) EXECUTE ON ANY | CREATE SCHEMA pss_s WITH TAG (env = 'prod') | CREATE SCHEMA pss_s WITH TAG (env = 'prod'); | SELECT \$1 AS d, \$2 AS after_it"
+   "ALTER FUNCTION pss_f(int) EXECUTE ON ANY | CREATE SCHEMA pss_s WITH TAG (env = 'prod') | CREATE SCHEMA pss_s WITH TAG (env = 'prod'); | SELECT decode(\$1, \$2, \$3, \$4, \$5) AS d, \$6 AS after_it"
+
+# Cloudberry's grammar refuses these where the arm stops being IS NOT DISTINCT
+# FROM, and so does this, at the same word.
+at "without an operand there is no CASE form, and NOT is the error" \
+   "SELECT CASE WHEN IS NOT DISTINCT FROM 1 THEN 2 END" 'syntax error at or near "NOT"' "NOT"
+
+at "IS DISTINCT FROM is not the form" \
+   "SELECT CASE 1 WHEN IS NOT DISTINCT FROM 2 THEN 'x' WHEN IS @@DISTINCT FROM 2 THEN 'y' END" \
+   'syntax error at or near "DISTINCT"' "DISTINCT"
+
+at "nor is IS NOT DISTINCT without FROM" \
+   "SELECT CASE 'a' WHEN IS NOT DISTINCT 'b' THEN 'x' END" "syntax error at or near \"'b'\"" "'b'"
 
 echo
 echo "  $pass passed, $fail failed"
