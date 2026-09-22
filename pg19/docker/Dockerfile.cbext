@@ -172,6 +172,15 @@ COPY --from=build /cb/src/test/regress/gpdiff.pl /cb/src/test/regress/atmsort.pm
                   /cb/src/test/regress/explain.pm /cb/src/test/regress/GPTest.pm.in \
                   /cb/src/test/regress/init_file \
                   /cb/src/test/regress/
+# Cloudberry's own regression suite, its greenplum_schedule, part of which
+# the greenplum suite runs on a cluster: the tests, their expected output and
+# the data they read.
+COPY --from=build /cb/src/test/regress/greenplum_schedule /cb/src/test/regress/
+COPY --from=build /cb/src/test/regress/sql /cb/src/test/regress/sql
+COPY --from=build /cb/src/test/regress/expected /cb/src/test/regress/expected
+COPY --from=build /cb/src/test/regress/input /cb/src/test/regress/input
+COPY --from=build /cb/src/test/regress/output /cb/src/test/regress/output
+COPY --from=build /cb/src/test/regress/data /cb/src/test/regress/data
 COPY --from=build /cb/src/test/singlenode_regress /cb/src/test/singlenode_regress
 COPY --from=build /cb/src/test/singlenode_isolation2 /cb/src/test/singlenode_isolation2
 COPY --from=build /pgregress /cb/pgregress

@@ -1,0 +1,9 @@
+-- The port's additions to Cloudberry's init_file, read by gpdiff.pl after it.
+
+-- start_matchignore
+
+# ORCA's line, as gp_orca prints it; Cloudberry's init_file masks the planner's
+# and "Pivotal Optimizer (GPORCA)".
+m/^ Optimizer: GPORCA$/
+
+-- end_matchignore

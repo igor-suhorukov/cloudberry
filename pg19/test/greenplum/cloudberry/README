@@ -1,0 +1,16 @@
+Part of Cloudberry's greenplum_schedule on the port's cluster: the
+differences from Cloudberry's expected output that have been reviewed, and
+are the port's for a reason of its own.
+
+Each file is one test's difference in the form ../../singlenode/canon.pl
+gives it, named for the expected output it differs from; a name with a pass
+in it (test.orca.diff) holds for that pass alone.  run.sh counts a test as
+passing when gpdiff.pl, under Cloudberry's init_file and the port's, finds no
+difference or exactly the file's.
+
+correlated_subquery, qp_derived_table, qp_misc (orca)  the lines ORCA's
+  fallback trace prints and nothing else: each test sets
+  optimizer_trace_fallback, and ORCA declines the plans Cloudberry makes with
+  a Gather Motion into a slice the segments run -- one segment gathering
+  another's rows, which the port's Motions do not do yet -- so PostgreSQL's
+  planner plans them, with the same answers, and the trace says so.
