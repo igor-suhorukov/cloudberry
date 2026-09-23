@@ -1075,6 +1075,15 @@ COMMIT;"
 		*) notok "a parameter in a fragment" "$out" ;;
 	esac
 
+	# A sequence is the coordinator's: a plan that would take its next value
+	# on a segment -- a random table's row made there -- is the planner's.
+	q 0 "CREATE TABLE sr (n serial, v int) DISTRIBUTED RANDOMLY;" >/dev/null
+	out=$(printf '%s\n' "SET gp.optimizer_trace_fallback = on;" \
+		"INSERT INTO sr (v) VALUES (1), (2);" "INSERT INTO sr (v) VALUES (3);" \
+		"SELECT count(DISTINCT n), min(n), max(n) FROM sr;" | qf 0 | tail -1)
+	[ "$out" = "3|1|3" ] && ok "a sequence's next value is taken on the coordinator, never a segment" \
+		|| notok "a serial column of a random table under ORCA" "$out"
+
 	q 0 "CREATE FUNCTION count_sql(int) RETURNS bigint LANGUAGE sql AS 'SELECT count(*) FROM o WHERE b = \$1';" >/dev/null
 	out=$(q 0 "SELECT count_sql(3), count_sql(4), count_sql(NULL);")
 	case "$out" in

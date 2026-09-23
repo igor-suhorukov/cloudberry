@@ -44,6 +44,7 @@
 #define GP_ORCA_MOTION_PARAM		2	/* a value another fragment computes */
 #define GP_ORCA_MOTION_EXTERN		3	/* a statement parameter, and an old gp_core */
 #define GP_ORCA_MOTION_WRITE		4	/* a write in a fragment */
+#define GP_ORCA_MOTION_SEQUENCE		5	/* a sequence's value in a fragment */
 
 /*
  * The first of the reasons above that the plan has; GP_ORCA_MOTION_OK if

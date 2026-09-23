@@ -47,6 +47,7 @@
 #include "nodes/makefuncs.h"
 #include "nodes/nodeFuncs.h"
 #include "nodes/plannodes.h"
+#include "utils/fmgroids.h"
 
 #include "optimizer/walkers.h"
 
@@ -271,6 +272,29 @@ motion_check_walker(Node *node, void *arg)
 					return true;
 				}
 				break;
+
+				/*
+				 * A sequence is the coordinator's: a segment's copy of it is
+				 * not the one the statement's values come from, and a reader
+				 * may not advance it.  Cloudberry's segments ask the
+				 * coordinator's sequence server; the port's have none.
+				 */
+			case T_NextValueExpr:
+				ctx->problem = GP_ORCA_MOTION_SEQUENCE;
+				return true;
+			case T_FuncExpr:
+				{
+					Oid			f = ((FuncExpr *) node)->funcid;
+
+					if (f == F_NEXTVAL || f == F_CURRVAL || f == F_LASTVAL ||
+						f == F_SETVAL_REGCLASS_INT8 ||
+						f == F_SETVAL_REGCLASS_INT8_BOOL)
+					{
+						ctx->problem = GP_ORCA_MOTION_SEQUENCE;
+						return true;
+					}
+					break;
+				}
 			case T_CustomScan:
 				{
 					CustomScan *cscan = (CustomScan *) node;

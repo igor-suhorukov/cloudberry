@@ -379,6 +379,8 @@ CTranslatorDXLToPlStmt::GetPlannedStmtFromDXL(const CDXLNode *dxlnode,
 				GP_UNPORTED("a statement parameter used on the segments");
 			case GP_ORCA_MOTION_WRITE:
 				GP_UNPORTED("a write on the segments");
+			case GP_ORCA_MOTION_SEQUENCE:
+				GP_UNPORTED("a sequence's value taken in a slice the segments run");
 			default:
 				break;
 		}
