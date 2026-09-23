@@ -1063,12 +1063,30 @@ COMMIT;"
 		*) notok "a split update with triggers" "$out" ;;
 	esac
 
+	# A slice's parameters travel with it, as Cloudberry's dispatcher sends
+	# them: the statement's own, and the values the coordinator computes.
 	out=$(printf '%s\n' "SET gp.optimizer_trace_fallback = on;" \
 		"SET plan_cache_mode = force_generic_plan;" \
-		"PREPARE p(int) AS SELECT count(*) FROM o WHERE b = \$1;" "EXECUTE p(3);" | qf 0)
+		"PREPARE p(int) AS SELECT count(*) FROM o WHERE b = \$1;" "EXECUTE p(3);" \
+		"EXECUTE p(4);" "EXPLAIN (COSTS OFF) EXECUTE p(3);" | qf 0 | tr '\n' ' ')
 	case "$out" in
-		*"a statement parameter used on the segments"*100) ok "a generic plan's parameter is not sent, and the planner answers" ;;
+		*"fallback"*|*"Feature not supported"*) notok "a generic plan's parameter" "$out" ;;
+		"100 100 "*"Gather Motion"*) ok "a generic plan's parameter is sent with the fragment, and ORCA plans it" ;;
 		*) notok "a parameter in a fragment" "$out" ;;
+	esac
+
+	q 0 "CREATE FUNCTION count_sql(int) RETURNS bigint LANGUAGE sql AS 'SELECT count(*) FROM o WHERE b = \$1';" >/dev/null
+	out=$(q 0 "SELECT count_sql(3), count_sql(4), count_sql(NULL);")
+	case "$out" in
+		"100|100|0") ok "a SQL function's argument is sent as the statement parameter it is" ;;
+		*) notok "a SQL function's argument in a fragment" "$out" ;;
+	esac
+
+	q 0 "CREATE FUNCTION count_b(x int) RETURNS bigint LANGUAGE plpgsql AS \$\$ BEGIN RETURN (SELECT count(*) FROM o WHERE b = x); END \$\$;" >/dev/null
+	out=$(q 0 "SELECT count_b(3), count_b(4), count_b(NULL);")
+	case "$out" in
+		"100|100|0") ok "a PL/pgSQL variable is sent as the statement parameter it is" ;;
+		*) notok "a PL/pgSQL variable in a fragment" "$out" ;;
 	esac
 
 	q 0 "CREATE FUNCTION count_o() RETURNS bigint LANGUAGE plpgsql AS \$\$ BEGIN RETURN (SELECT count(*) FROM o); END \$\$;" >/dev/null

@@ -161,6 +161,10 @@ private:
 	// List of PlanSlices
 	List *m_slices_list;
 
+	// Every Motion of the statement, a SubPlan's among them: a SubPlan is
+	// translated by a translator of its own, with this context shared.
+	List *m_motions;
+
 	PlanSlice *m_current_slice;
 
 	// index of the target relation in the rtable or 0 if not a DML statement
@@ -250,6 +254,19 @@ public:
 	GetSliceList() const
 	{
 		return m_slices_list;
+	}
+
+	// the Motions built so far, in every translator of the statement
+	List *
+	GetMotions() const
+	{
+		return m_motions;
+	}
+
+	void
+	AddMotion(Plan *motion)
+	{
+		m_motions = gpdb::LAppend(m_motions, motion);
 	}
 
 	// add a range table entry

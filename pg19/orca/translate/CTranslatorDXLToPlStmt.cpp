@@ -180,8 +180,7 @@ CTranslatorDXLToPlStmt::CTranslatorDXLToPlStmt(
 	  m_is_tgt_tbl_distributed(false),
 	  m_result_rel_list(nullptr),
 	  m_num_of_segments(num_of_segments),
-	  m_partition_selector_counter(0),
-	  m_motions(nullptr)
+	  m_partition_selector_counter(0)
 {
 	m_translator_dxl_to_scalar = GPOS_NEW(m_mp)
 		CTranslatorDXLToScalar(m_mp, m_md_accessor, m_num_of_segments);
@@ -333,7 +332,8 @@ CTranslatorDXLToPlStmt::GetPlannedStmtFromDXL(const CDXLNode *dxlnode,
 	// not be how any of the tables is hashed, and the port asks every
 	// segment -- the same rows, at the price of the round trips.
 	if (CMD_SELECT == m_cmd_type &&
-		nullptr != dxlnode->GetDXLDirectDispatchInfo() && NIL != m_motions)
+		nullptr != dxlnode->GetDXLDirectDispatchInfo() &&
+		NIL != m_dxl_to_plstmt_context->GetMotions())
 	{
 		int segment = TranslateDXLDirectDispatchSegment(
 			dxlnode->GetDXLDirectDispatchInfo(), planned_stmt->rtable);
@@ -341,7 +341,7 @@ CTranslatorDXLToPlStmt::GetPlannedStmtFromDXL(const CDXLNode *dxlnode,
 		// Every Motion a Gather: a Motion between segments is a plan that
 		// reads more than one segment's rows.
 		ListCell *lc_motion = nullptr;
-		ForEach(lc_motion, m_motions)
+		ForEach(lc_motion, m_dxl_to_plstmt_context->GetMotions())
 		{
 			if (GP_MOTION_GATHER != gpdb::MotionType((Plan *) lfirst(lc_motion)))
 			{
@@ -351,7 +351,7 @@ CTranslatorDXLToPlStmt::GetPlannedStmtFromDXL(const CDXLNode *dxlnode,
 
 		if (0 <= segment)
 		{
-			ForEach(lc_motion, m_motions)
+			ForEach(lc_motion, m_dxl_to_plstmt_context->GetMotions())
 			{
 				Plan *motion = (Plan *) lfirst(lc_motion);
 				if (0 > gpdb::MotionSegment(motion))
@@ -363,10 +363,10 @@ CTranslatorDXLToPlStmt::GetPlannedStmtFromDXL(const CDXLNode *dxlnode,
 	}
 
 	// What a fragment takes with it is the statement it was cut from, and
-	// nothing the coordinator computed; see compat/cb_motion.h.  Each
-	// Gather is told, too, which Motions between segments it carries out
-	// first.
-	if (NIL != m_motions)
+	// the values of the parameters the coordinator sets that it reads; see
+	// compat/cb_motion.h.  Each Gather is told, too, which Motions between
+	// segments it carries out first.
+	if (NIL != m_dxl_to_plstmt_context->GetMotions())
 	{
 		switch (gpdb::CheckMotions(planned_stmt))
 		{
@@ -374,7 +374,7 @@ CTranslatorDXLToPlStmt::GetPlannedStmtFromDXL(const CDXLNode *dxlnode,
 				GP_UNPORTED("a Gather Motion inside a slice the segments run");
 			case GP_ORCA_MOTION_PARAM:
 				GP_UNPORTED(
-					"a value computed on the coordinator, used on the segments");
+					"a value one slice computes, used in another the segments run");
 			case GP_ORCA_MOTION_EXTERN:
 				GP_UNPORTED("a statement parameter used on the segments");
 			case GP_ORCA_MOTION_WRITE:
@@ -389,7 +389,7 @@ CTranslatorDXLToPlStmt::GetPlannedStmtFromDXL(const CDXLNode *dxlnode,
 			gpdb::LAppend(planned_stmt->extension_state,
 						  gpdb::SliceTable(
 							  m_dxl_to_plstmt_context->GetSliceList(),
-							  m_motions));
+							  m_dxl_to_plstmt_context->GetMotions()));
 	}
 
 	return planned_stmt;
@@ -2888,7 +2888,7 @@ CTranslatorDXLToPlStmt::TranslateDXLMotion(
 	plan->plan_rows = costs.plan_rows;
 	plan->plan_width = costs.plan_width;
 
-	m_motions = gpdb::LAppend(m_motions, plan);
+	m_dxl_to_plstmt_context->AddMotion(plan);
 
 	SetParamIds(plan);
 
@@ -6001,7 +6001,7 @@ CTranslatorDXLToPlStmt::TranslateDXLDml(
 		// that segment alone, where the write is the plan's only slice.
 		int content = -1;
 		if ((CMD_INSERT == m_cmd_type || CMD_DELETE == m_cmd_type) &&
-			NIL == m_motions)
+			NIL == m_dxl_to_plstmt_context->GetMotions())
 		{
 			content = TranslateDXLDirectDispatchSegment(
 				phy_dml_dxlop->GetDXLDirectDispatchInfo(),
@@ -6015,7 +6015,7 @@ CTranslatorDXLToPlStmt::TranslateDXLDml(
 		dispatch->total_cost = plan->total_cost;
 		dispatch->plan_rows = 0;
 		dispatch->plan_width = 0;
-		m_motions = gpdb::LAppend(m_motions, dispatch);
+		m_dxl_to_plstmt_context->AddMotion(dispatch);
 		SetParamIds(dispatch);
 		return dispatch;
 	}

@@ -21,14 +21,14 @@
  *	  Whether a plan's Motions can be carried out as stage A carries them.
  *
  * gp_core dispatches each Motion's fragment to the segments as a plan of its
- * own (gp_motion.c), and a fragment so dispatched has nothing of the
- * coordinator's with it but the statement it was cut from: no value the
- * coordinator computed, no parameter the client bound.  In Cloudberry the
- * dispatcher sends the values of the parameters a slice uses; the port does
- * not yet, so a plan that needs them is refused, with the reason, and
- * planned by PostgreSQL.  The walk that checks this also tells each Gather
- * which Motions between segments below it are carried out first, and in
- * what order.
+ * own (gp_motion.c), with the values of the parameters it reads that the
+ * coordinator sets -- an initplan's, a nested loop's outer column, the
+ * statement's own -- as Cloudberry's dispatcher sends a slice its
+ * parameters.  The walk that checks this tells each Motion which those are;
+ * a plan whose fragment reads a value another fragment sets is refused, with
+ * the reason, and planned by PostgreSQL.  It also tells each Gather which
+ * Motions between segments below it are carried out first, and in what
+ * order.
  *
  *-------------------------------------------------------------------------
  */
@@ -41,8 +41,8 @@
 
 #define GP_ORCA_MOTION_OK			0
 #define GP_ORCA_MOTION_NESTED		1	/* a Gather in a slice the segments run */
-#define GP_ORCA_MOTION_PARAM		2	/* a value computed outside a fragment */
-#define GP_ORCA_MOTION_EXTERN		3	/* a statement parameter on a segment */
+#define GP_ORCA_MOTION_PARAM		2	/* a value another fragment computes */
+#define GP_ORCA_MOTION_EXTERN		3	/* a statement parameter, and an old gp_core */
 #define GP_ORCA_MOTION_WRITE		4	/* a write in a fragment */
 
 /*

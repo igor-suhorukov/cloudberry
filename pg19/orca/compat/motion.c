@@ -21,14 +21,22 @@
  *	  Whether a plan's Motions can be carried out as stage A carries them; see
  *	  cb_motion.h.
  *
- * The fragment below each Motion runs on a segment with the statement's
- * parameter slots empty, so every PARAM_EXEC it reads has to be set inside
- * it.  ORCA's translator is the only thing that makes these plans, and what
- * sets a parameter in them is a short list: a NestLoop's nestParams, a
- * SubPlan -- its setParam as an initplan, its parParam from its arguments,
- * its paramIds from its own output -- a RecursiveUnion's work table, and a
- * Partition Selector.  What reads one is a Param, a CteScan's cteParam, a
- * WorkTableScan's wtParam, and a Dynamic Scan's selectors.
+ * The fragment below each Motion runs on a segment, and a parameter it reads
+ * is set there or sent there.  ORCA's translator is the only thing that makes
+ * these plans, and what sets a parameter in them is a short list: a
+ * NestLoop's nestParams, a SubPlan -- its setParam as an initplan, its
+ * parParam from its arguments, its paramIds from its own output -- a
+ * RecursiveUnion's work table, and a Partition Selector.  What reads one is
+ * a Param, a CteScan's cteParam, a WorkTableScan's wtParam, and a Dynamic
+ * Scan's selectors.
+ *
+ * A Param's is a value, and one the coordinator sets -- an initplan's, a
+ * nested loop's outer column above the Gather -- is sent with the fragment,
+ * as Cloudberry's dispatcher sends a slice its parameters; so is a statement
+ * parameter.  The other three hold a pointer into the executor that set
+ * them, and have to be set in the fragment itself.  A value another fragment
+ * sets is on a segment, where the coordinator cannot read it: that plan is
+ * still refused.
  *
  *-------------------------------------------------------------------------
  */
@@ -47,12 +55,25 @@
 #include "cb_motion.h"
 #include "gp_motion.h"
 
+/* A Motion, and what its fragment is sent with. */
+typedef struct motion_params
+{
+	Plan	   *motion;
+	Bitmapset  *exec_params;
+	Bitmapset  *extern_params;
+} motion_params;
+
 typedef struct motion_check_context
 {
 	plan_tree_base_prefix base;	/* plan_tree_walker's, first */
 	bool		in_fragment;
-	Bitmapset  *referenced;
+	Bitmapset  *referenced;		/* values: Params */
+	Bitmapset  *referenced_ptr; /* pointers: CTEs, work tables, selectors */
+	Bitmapset  *externs;		/* statement parameters */
 	Bitmapset  *produced;
+	Bitmapset **fragment_produced;	/* by any fragment of the plan */
+	List	  **params;			/* of motion_params */
+	Plan	   *top;			/* the Motion the coordinator runs it from */
 	int			problem;
 	List	  **order;			/* the enclosing Gather's Motions, senders first */
 	bool		may_write;		/* the fragment a write is dispatched as */
@@ -110,20 +131,47 @@ motion_check_walker(Node *node, void *arg)
 		sub = *ctx;
 		sub.in_fragment = true;
 		sub.referenced = NULL;
+		sub.referenced_ptr = NULL;
+		sub.externs = NULL;
 		sub.produced = NULL;
 		sub.problem = GP_ORCA_MOTION_OK;
 		sub.order = gather ? &order : ctx->order;
 		sub.may_write = type == GP_MOTION_DML;
 		sub.slice = api->motion_slice(plan);
+		if (!ctx->in_fragment)
+			sub.top = plan;
 		if (motion_check_walker((Node *) plan->lefttree, &sub))
 		{
 			ctx->problem = sub.problem;
 			return true;
 		}
-		if (!bms_is_subset(sub.referenced, sub.produced))
+		if (!bms_is_subset(sub.referenced_ptr, sub.produced))
 		{
 			ctx->problem = GP_ORCA_MOTION_PARAM;
 			return true;
+		}
+		*ctx->fragment_produced = bms_add_members(*ctx->fragment_produced,
+												  sub.produced);
+		{
+			Bitmapset  *needed = bms_difference(sub.referenced, sub.produced);
+
+			if (!bms_is_empty(needed) || !bms_is_empty(sub.externs))
+			{
+				motion_params *mp;
+
+				/* a gp_core that cannot send them */
+				if (api->version_minor < 6)
+				{
+					ctx->problem = !bms_is_empty(needed) ?
+						GP_ORCA_MOTION_PARAM : GP_ORCA_MOTION_EXTERN;
+					return true;
+				}
+				mp = palloc(sizeof(motion_params));
+				mp->motion = plan;
+				mp->exec_params = needed;
+				mp->extern_params = sub.externs;
+				*ctx->params = lappend(*ctx->params, mp);
+			}
 		}
 
 		/*
@@ -149,6 +197,26 @@ motion_check_walker(Node *node, void *arg)
 			motion_check_walker((Node *) plan->initPlan, ctx);
 	}
 
+	/*
+	 * An initplan of a node in a fragment is the coordinator's, as
+	 * Cloudberry's are -- its dispatcher runs every one before it dispatches
+	 * (preprocess_initplans(), cdbsubplan.c) -- and its value is sent with
+	 * the fragment.  So it moves to the Motion the coordinator runs the
+	 * fragment from, which walks it after the fragment, where the
+	 * coordinator's Gathers are, and which the executor initialises it on.
+	 * The plan node tags are one run, T_Result to T_Limit, with one tag that
+	 * is not a plan node in the middle of it.
+	 */
+	if (ctx->in_fragment && ctx->top != NULL &&
+		nodeTag(node) >= T_Result && nodeTag(node) <= T_Limit &&
+		!IsA(node, NestLoopParam) &&
+		((Plan *) node)->initPlan != NIL)
+	{
+		ctx->top->initPlan = list_concat(ctx->top->initPlan,
+										 ((Plan *) node)->initPlan);
+		((Plan *) node)->initPlan = NIL;
+	}
+
 	if (ctx->in_fragment)
 	{
 		switch (nodeTag(node))
@@ -158,10 +226,8 @@ motion_check_walker(Node *node, void *arg)
 					Param	   *param = (Param *) node;
 
 					if (param->paramkind == PARAM_EXTERN)
-					{
-						ctx->problem = GP_ORCA_MOTION_EXTERN;
-						return true;
-					}
+						ctx->externs = bms_add_member(ctx->externs,
+													  param->paramid);
 					if (param->paramkind == PARAM_EXEC)
 						ctx->referenced = bms_add_member(ctx->referenced,
 														 param->paramid);
@@ -191,12 +257,12 @@ motion_check_walker(Node *node, void *arg)
 											   ((RecursiveUnion *) node)->wtParam);
 				break;
 			case T_CteScan:
-				ctx->referenced = bms_add_member(ctx->referenced,
-												 ((CteScan *) node)->cteParam);
+				ctx->referenced_ptr = bms_add_member(ctx->referenced_ptr,
+													 ((CteScan *) node)->cteParam);
 				break;
 			case T_WorkTableScan:
-				ctx->referenced = bms_add_member(ctx->referenced,
-												 ((WorkTableScan *) node)->wtParam);
+				ctx->referenced_ptr = bms_add_member(ctx->referenced_ptr,
+													 ((WorkTableScan *) node)->wtParam);
 				break;
 			case T_ModifyTable:
 				if (!ctx->may_write)
@@ -214,8 +280,8 @@ motion_check_walker(Node *node, void *arg)
 							bms_add_member(ctx->produced,
 										   intVal(linitial(cscan->custom_private)));
 					else if (cscan->methods == &gp_orca_dynamic_scan_methods)
-						ctx->referenced =
-							add_int_list(ctx->referenced,
+						ctx->referenced_ptr =
+							add_int_list(ctx->referenced_ptr,
 										 (List *) lsecond(cscan->custom_private));
 					break;
 				}
@@ -227,22 +293,63 @@ motion_check_walker(Node *node, void *arg)
 	return plan_tree_walker(node, motion_check_walker, ctx, true);
 }
 
+static List *
+bms_to_int_list(Bitmapset *set)
+{
+	List	   *result = NIL;
+	int			x = -1;
+
+	while ((x = bms_next_member(set, x)) >= 0)
+		result = lappend_int(result, x);
+	return result;
+}
+
 int
 gp_orca_check_motions(PlannedStmt *stmt)
 {
 	motion_check_context ctx;
+	Bitmapset  *fragment_produced = NULL;
+	List	   *params = NIL;
+	ListCell   *lc;
 
 	exec_init_plan_tree_base(&ctx.base, stmt);
 	ctx.in_fragment = false;
 	ctx.referenced = NULL;
+	ctx.referenced_ptr = NULL;
+	ctx.externs = NULL;
 	ctx.produced = NULL;
+	ctx.fragment_produced = &fragment_produced;
+	ctx.params = &params;
+	ctx.top = NULL;
 	ctx.problem = GP_ORCA_MOTION_OK;
 	ctx.order = NULL;
 	ctx.may_write = false;
 	ctx.slice = -1;
 
 	(void) motion_check_walker((Node *) stmt->planTree, &ctx);
-	return ctx.problem;
+	if (ctx.problem != GP_ORCA_MOTION_OK)
+		return ctx.problem;
+
+	/*
+	 * What a fragment is sent has to be the coordinator's to send: a value
+	 * that some fragment sets is on a segment.
+	 */
+	foreach(lc, params)
+	{
+		motion_params *mp = (motion_params *) lfirst(lc);
+
+		if (bms_overlap(mp->exec_params, fragment_produced))
+			return GP_ORCA_MOTION_PARAM;
+	}
+	foreach(lc, params)
+	{
+		motion_params *mp = (motion_params *) lfirst(lc);
+
+		cb_core_api()->motion_set_params(mp->motion,
+										 bms_to_int_list(mp->exec_params),
+										 bms_to_int_list(mp->extern_params));
+	}
+	return GP_ORCA_MOTION_OK;
 }
 
 Node *

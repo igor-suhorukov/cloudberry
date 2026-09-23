@@ -87,6 +87,9 @@
 #include "commands/explain.h"
 #include "commands/explain_format.h"
 #include "executor/executor.h"
+#include "executor/nodeSubplan.h"
+#include "nodes/params.h"
+#include "utils/datum.h"
 #include "access/xact.h"
 #include "common/pg_prng.h"
 #include "lib/binaryheap.h"
@@ -137,6 +140,8 @@
 #define MOTION_PRIVATE_HASHFUNCS	7	/* a Redistribute: its hash functions */
 #define MOTION_PRIVATE_PREPARE		8	/* a Gather: slices it runs first */
 #define MOTION_PRIVATE_PARENT		9	/* the slice that receives */
+#define MOTION_PRIVATE_EXEC_PARAMS	10	/* values its fragment is sent with */
+#define MOTION_PRIVATE_EXTERN_PARAMS	11	/* and statement parameters */
 
 /* A Motion whose receiving slice the translator did not say. */
 #define MOTION_PARENT_UNKNOWN		(-3)
@@ -168,6 +173,13 @@ static int	gp_interconnect_type = GP_INTERCONNECT_TCP;
 
 /* The slice table ORCA's translator keeps in the plan; see compat/cb_motion.h. */
 #define GP_SLICE_TABLE	"gp_slice_table"
+
+/*
+ * On a fragment's PlannedStmt: the values of the parameters it reads that
+ * nothing in it sets -- (PARAM_EXEC or PARAM_EXTERN, id, Const) each -- as
+ * the coordinator had them when it sent the fragment.
+ */
+#define GP_PARAMS_MARK	"gp_params"
 
 /* One slice that streams, as the coordinator plans it. */
 typedef struct StreamSlice
@@ -427,6 +439,8 @@ motion_make(int type, Plan *fragment, List *targetlist, List *qual,
 	cscan->custom_private = lappend(cscan->custom_private, NIL);	/* to prepare */
 	cscan->custom_private = lappend(cscan->custom_private,
 									makeInteger(MOTION_PARENT_UNKNOWN));
+	cscan->custom_private = lappend(cscan->custom_private, NIL);	/* PARAM_EXEC */
+	cscan->custom_private = lappend(cscan->custom_private, NIL);	/* PARAM_EXTERN */
 	cscan->methods = &motion_scan_methods;
 
 	return cscan;
@@ -472,6 +486,16 @@ GpMotionSetParent(Plan *plan, int parent)
 	Assert(GpMotionIs(plan));
 	intVal(list_nth(((CustomScan *) plan)->custom_private,
 					MOTION_PRIVATE_PARENT)) = parent;
+}
+
+void
+GpMotionSetParams(Plan *plan, List *exec_params, List *extern_params)
+{
+	List	   *priv = ((CustomScan *) plan)->custom_private;
+
+	Assert(GpMotionIs(plan));
+	list_nth_cell(priv, MOTION_PRIVATE_EXEC_PARAMS)->ptr_value = exec_params;
+	list_nth_cell(priv, MOTION_PRIVATE_EXTERN_PARAMS)->ptr_value = extern_params;
 }
 
 int
@@ -1247,10 +1271,162 @@ motion_begin(CustomScanState *node, EState *estate, int eflags)
  * A fragment, as the query a segment is sent: the PlannedStmt it is part of
  * with it as the tree, and the key its Motions' rows are kept under.
  */
+/*
+ * A parameter's value as a Const, whole: a varlena detoasted and an expanded
+ * object flattened, so that nodeToString() writes the value itself.
+ */
+static Const *
+param_const(Oid type, Datum value, bool isnull)
+{
+	int16		typlen;
+	bool		typbyval;
+
+	/*
+	 * A record of no declared type is described by a typmod this backend
+	 * registered, which a segment has never heard of.
+	 */
+	if (type == RECORDOID)
+		ereport(ERROR,
+				(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+				 errmsg("a value of an anonymous record type cannot be sent to the segments")));
+
+	get_typlenbyval(type, &typlen, &typbyval);
+	if (!isnull && typlen == -1)
+		value = PointerGetDatum(PG_DETOAST_DATUM_COPY(value));
+	return makeConst(type, -1, InvalidOid, typlen, value, isnull, typbyval);
+}
+
+/*
+ * The values a Motion's fragment is sent with: Cloudberry's dispatcher sends
+ * a slice the parameters it reads (cdbdisp_query.c), and so does this -- the
+ * statement's parameters the client bound, and the values the coordinator
+ * computed, an initplan's among them, evaluated now if nothing has asked
+ * for them yet.  The translator says which (compat/motion.c): only ones
+ * the coordinator sets, never ones another fragment would.
+ */
+static List *
+fragment_params(EState *estate, CustomScan *motion, ExprContext *econtext)
+{
+	List	   *priv = motion->custom_private;
+	List	   *result = NIL;
+	ListCell   *lc;
+
+	if (list_length(priv) <= MOTION_PRIVATE_EXTERN_PARAMS)
+		return NIL;
+
+	foreach(lc, (List *) list_nth(priv, MOTION_PRIVATE_EXEC_PARAMS))
+	{
+		int			id = lfirst_int(lc);
+		ParamExecData *prm = &estate->es_param_exec_vals[id];
+		Oid			type = list_nth_oid(estate->es_plannedstmt->paramExecTypes, id);
+
+		if (prm->execPlan != NULL)
+			ExecSetParamPlan((SubPlanState *) prm->execPlan, econtext);
+		result = lappend(result,
+						 list_make3(makeInteger(PARAM_EXEC), makeInteger(id),
+									param_const(type, prm->value, prm->isnull)));
+	}
+
+	foreach(lc, (List *) list_nth(priv, MOTION_PRIVATE_EXTERN_PARAMS))
+	{
+		int			id = lfirst_int(lc);
+		ParamListInfo params = estate->es_param_list_info;
+		ParamExternData *prm;
+		ParamExternData prmdata;
+
+		if (params == NULL || id <= 0 || id > params->numParams)
+			elog(ERROR, "there is no value for parameter $%d to send", id);
+		if (params->paramFetch != NULL)
+			prm = params->paramFetch(params, id, false, &prmdata);
+		else
+			prm = &params->params[id - 1];
+		if (!OidIsValid(prm->ptype))
+			elog(ERROR, "parameter $%d has no type to send it as", id);
+		result = lappend(result,
+						 list_make3(makeInteger(PARAM_EXTERN), makeInteger(id),
+									param_const(prm->ptype, prm->value, prm->isnull)));
+	}
+
+	return result;
+}
+
+/*
+ * On a segment, before a fragment starts: the statement's parameters it was
+ * sent, as the query's own; and after, the coordinator's values, in the
+ * slots the fragment reads them from.
+ */
+static void
+fragment_params_before_start(QueryDesc *queryDesc, List *params)
+{
+	ParamListInfo list;
+	int			n = 0;
+	ListCell   *lc;
+
+	foreach(lc, params)
+	{
+		List	   *entry = (List *) lfirst(lc);
+
+		if (intVal(linitial(entry)) == PARAM_EXTERN)
+			n = Max(n, intVal(lsecond(entry)));
+	}
+	if (n == 0)
+		return;
+
+	list = makeParamList(n);
+	for (int i = 0; i < n; i++)
+	{
+		list->params[i].isnull = true;
+		list->params[i].pflags = 0;
+		list->params[i].ptype = InvalidOid;
+	}
+	foreach(lc, params)
+	{
+		List	   *entry = (List *) lfirst(lc);
+		Const	   *c = (Const *) lthird(entry);
+		ParamExternData *prm;
+
+		if (intVal(linitial(entry)) != PARAM_EXTERN)
+			continue;
+		prm = &list->params[intVal(lsecond(entry)) - 1];
+		prm->value = c->constvalue;
+		prm->isnull = c->constisnull;
+		prm->pflags = PARAM_FLAG_CONST;
+		prm->ptype = c->consttype;
+	}
+	queryDesc->params = list;
+}
+
+static void
+fragment_params_after_start(QueryDesc *queryDesc, List *params)
+{
+	EState	   *estate = queryDesc->estate;
+	MemoryContext oldcxt = MemoryContextSwitchTo(estate->es_query_cxt);
+	ListCell   *lc;
+
+	foreach(lc, params)
+	{
+		List	   *entry = (List *) lfirst(lc);
+		Const	   *c = (Const *) lthird(entry);
+		ParamExecData *prm;
+
+		if (intVal(linitial(entry)) != PARAM_EXEC)
+			continue;
+		prm = &estate->es_param_exec_vals[intVal(lsecond(entry))];
+		prm->execPlan = NULL;
+		prm->isnull = c->constisnull;
+		prm->value = c->constisnull ? (Datum) 0
+			: datumCopy(c->constvalue, c->constbyval, c->constlen);
+	}
+	MemoryContextSwitchTo(oldcxt);
+}
+
 static char *
-fragment_sql_ex(EState *estate, Plan *fragment, const char *key, List *marks,
+fragment_sql_ex(EState *estate, Plan *fragment, CustomScan *motion,
+				ExprContext *econtext, const char *key, List *marks,
 				bool reader)
 {
+	List	   *params;
+
 	PlannedStmt *whole = estate->es_plannedstmt;
 	PlannedStmt *frag = makeNode(PlannedStmt);
 	bool		split = GpSplitModifyIs(fragment, NULL);
@@ -1267,8 +1443,14 @@ fragment_sql_ex(EState *estate, Plan *fragment, const char *key, List *marks,
 	if (!write)
 		frag->resultRelationRelids = NULL;
 	frag->rowMarks = NIL;
-	frag->extension_state = marks;
+	frag->extension_state = list_copy(marks);
 	frag->utilityStmt = NULL;
+
+	params = fragment_params(estate, motion, econtext);
+	if (params != NIL)
+		frag->extension_state = lappend(frag->extension_state,
+										makeDefElem(pstrdup(GP_PARAMS_MARK),
+													(Node *) params, -1));
 
 	/*
 	 * A reader only reads, in a transaction that may not write, and a
@@ -1299,11 +1481,7 @@ fragment_sql_ex(EState *estate, Plan *fragment, const char *key, List *marks,
 					quote_literal_cstr(key ? key : ""));
 }
 
-static char *
-fragment_sql(EState *estate, Plan *fragment, const char *key)
-{
-	return fragment_sql_ex(estate, fragment, key, NIL, false);
-}
+
 
 /* Every Motion in a plan tree, the fragments below them included. */
 static void
@@ -1529,8 +1707,10 @@ motion_relay(MotionState *gather, CustomScan *motion)
 		GpGatherState *g;
 		MemoryContext oldcxt = MemoryContextSwitchTo(estate->es_query_cxt);
 
-		g = GpGatherStartOn(fragment_sql(estate, child, gather->key), tupdesc,
-							content);
+		g = GpGatherStartOn(fragment_sql_ex(estate, child, motion,
+											gather->css.ss.ps.ps_ExprContext,
+											gather->key, NIL, false),
+							tupdesc, content);
 		MemoryContextSwitchTo(oldcxt);
 
 		while (GpGatherNextRaw(g, values, lengths))
@@ -1777,6 +1957,8 @@ stream_start(MotionState *state)
 	foreach_ptr(StreamSlice, ss, state->stream_slices)
 	{
 		char	   *fragment = fragment_sql_ex(estate, (Plan *) ss->motion,
+											   ss->motion,
+											   state->css.ss.ps.ps_ExprContext,
 											   state->key,
 											   list_make1(streammark), true);
 
@@ -1901,7 +2083,10 @@ motion_dml_run(MotionState *state)
 	if (!state->prepared)
 		motion_prepare(state);
 
-	GpDispatchCommandParams(fragment_sql_ex(estate, write, state->key,
+	GpDispatchCommandParams(fragment_sql_ex(estate, write,
+											(CustomScan *) state->css.ss.ps.plan,
+											state->css.ss.ps.ps_ExprContext,
+											state->key,
 											state->streaming ? stream_start(state) : NIL,
 											false),
 							0, NULL, state->content, counts);
@@ -1928,6 +2113,8 @@ motion_start(MotionState *state)
 	oldcxt = MemoryContextSwitchTo(state->css.ss.ps.state->es_query_cxt);
 	state->gather = GpGatherStartOn(fragment_sql_ex(state->css.ss.ps.state,
 													outerPlan(state->css.ss.ps.plan),
+													(CustomScan *) state->css.ss.ps.plan,
+													state->css.ss.ps.ps_ExprContext,
 													state->key,
 													state->streaming ? stream_start(state) : NIL,
 													false),
@@ -2708,9 +2895,18 @@ report_slices(PlannedStmt *stmt)
 static void
 motion_executor_start(QueryDesc *queryDesc, int eflags)
 {
+	List	   *params = NIL;
+
 	if (GpClusterBackendRole() == GP_ROLE_DISPATCH &&
 		!(eflags & EXEC_FLAG_EXPLAIN_ONLY))
 		report_slices(queryDesc->plannedstmt);
+
+	if (GpClusterIsDispatched() && is_fragment(queryDesc->plannedstmt))
+	{
+		params = (List *) fragment_mark(queryDesc->plannedstmt, GP_PARAMS_MARK);
+		if (params != NIL)
+			fragment_params_before_start(queryDesc, params);
+	}
 
 	if (GpClusterIsDispatched() && is_fragment(queryDesc->plannedstmt) &&
 		!(eflags & EXEC_FLAG_EXPLAIN_ONLY))
@@ -2725,6 +2921,9 @@ motion_executor_start(QueryDesc *queryDesc, int eflags)
 		prev_executor_start(queryDesc, eflags);
 	else
 		standard_ExecutorStart(queryDesc, eflags);
+
+	if (params != NIL)
+		fragment_params_after_start(queryDesc, params);
 }
 
 /* A statement's connections that nothing here asked for are closed with it. */

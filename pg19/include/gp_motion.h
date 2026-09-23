@@ -124,6 +124,15 @@ extern void GpMotionSetParent(Plan *plan, int parent);
 extern int	GpMotionParent(Plan *plan);
 
 /*
+ * The parameters a Motion's fragment reads that nothing in it sets, by id:
+ * PARAM_EXEC ones the coordinator sets -- an initplan's value, a nested
+ * loop's outer column -- and the statement's own.  Their values travel with
+ * the fragment each time it is sent.
+ */
+extern void GpMotionSetParams(Plan *plan, List *exec_params,
+							  List *extern_params);
+
+/*
  * A Gather's Motions between segments, by the slices that send them, in the
  * order they are to be carried out before the Gather sends its fragment.
  */

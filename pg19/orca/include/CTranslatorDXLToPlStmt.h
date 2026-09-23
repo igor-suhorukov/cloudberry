@@ -173,9 +173,6 @@ private:
 	// partition selector counter
 	ULONG m_partition_selector_counter;
 
-	// the Gather Motions built, which direct dispatch narrows to one segment
-	List *m_motions;
-
 	// private copy ctor
 	CTranslatorDXLToPlStmt(const CTranslatorDXLToPlStmt &);
 

@@ -82,6 +82,7 @@ CContextDXLToPlStmt::CContextDXLToPlStmt(
 	  m_subplan_sliceids_list(nullptr),
 	  m_rewind_plan_ids(nullptr),
 	  m_slices_list(nullptr),
+	  m_motions(nullptr),
 	  m_result_relation_index(0),
 	  m_distribution_policy(nullptr),
 	  m_part_selector_to_param_map(nullptr),

@@ -39,7 +39,7 @@
  * here changes meaning or moves.
  */
 #define GP_CORE_API_VERSION_MAJOR	1
-#define GP_CORE_API_VERSION_MINOR	5
+#define GP_CORE_API_VERSION_MINOR	6
 
 /*
  * What the rendezvous variable points at.  It is the first thing a module
@@ -130,6 +130,13 @@ typedef struct GpCoreApi
 
 	/* Since 1.5: the slice that receives a Motion between segments. */
 	void		(*motion_set_parent) (struct Plan *plan, int parent);
+
+	/*
+	 * Since 1.6: the parameters a Motion's fragment is sent with, as lists of
+	 * ids -- PARAM_EXEC ones the coordinator sets, and PARAM_EXTERN ones.
+	 */
+	void		(*motion_set_params) (struct Plan *plan, struct List *exec_params,
+									  struct List *extern_params);
 } GpCoreApi;
 
 /*
