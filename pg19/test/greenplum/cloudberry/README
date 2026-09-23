@@ -51,6 +51,13 @@ qp_union_intersect  an error from a segment names the segment in its
   Cloudberry's Split refuses it ("multiple updates to a row by the same
   query is not allowed").
 
+sequence_gp  nextval() over gp_dist_random('gp_id'), which Cloudberry
+  calls on each segment, and each segment takes values from a chunk of the
+  sequence of its own, 20 long: 1, 21 and 41, and 61 on the coordinator.
+  The port gathers gp_id's rows and calls it on the coordinator, which
+  takes 1, 2 and 3, then 4.  No value twice in either, which is what the
+  test is for.
+
 with_clause  three recursive queries Cloudberry refuses -- a join of nested
   RECURSIVE clauses, and window functions in a recursive query's target
   list -- which PostgreSQL 19 answers.

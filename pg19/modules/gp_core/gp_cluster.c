@@ -40,9 +40,11 @@
 #include "postgres.h"
 
 #include <ctype.h>
+#include <unistd.h>
 
 #include "funcapi.h"
 #include "miscadmin.h"
+#include "postmaster/postmaster.h"
 #include "storage/fd.h"
 #include "utils/builtins.h"
 #include "utils/guc.h"
@@ -685,6 +687,74 @@ gp_segment_configuration(PG_FUNCTION_ARGS)
 		values[5] = CStringGetTextDatum(node->datadir);
 
 		tuplestore_putvalues(rsinfo->setResult, rsinfo->setDesc, values, nulls);
+	}
+
+	return (Datum) 0;
+}
+
+/* One row of gp_segment_configuration, in Cloudberry's columns. */
+static void
+put_catalog_row(ReturnSetInfo *rsinfo, int dbid, int content, char role,
+				int port, const char *host, const char *datadir)
+{
+	Datum		values[11];
+	bool		nulls[11] = {0};
+
+	values[0] = Int16GetDatum(dbid);
+	values[1] = Int16GetDatum(content);
+	values[2] = CharGetDatum(role);
+	values[3] = CharGetDatum(role);		/* preferred_role */
+	values[4] = CharGetDatum('n');		/* mode: no mirror in sync with it */
+	values[5] = CharGetDatum('u');		/* status: up */
+	values[6] = Int32GetDatum(port);
+	values[7] = CStringGetTextDatum(host);
+	values[8] = CStringGetTextDatum(host);	/* address */
+	values[9] = CStringGetTextDatum(datadir);
+	values[10] = ObjectIdGetDatum(InvalidOid);	/* warehouseid */
+
+	tuplestore_putvalues(rsinfo->setResult, rsinfo->setDesc, values, nulls);
+}
+
+PG_FUNCTION_INFO_V1(gp_catalog_segment_configuration);
+
+/*
+ * gp_internal.segment_configuration()
+ *		The rows of Cloudberry's gp_segment_configuration, which the view of
+ *		that name selects.
+ *
+ * What the file lists, in Cloudberry's columns and types.  Mode and status
+ * are what FTS keeps, and FTS is M4's: until then every node is up ('u') and
+ * has no mirror in sync with it ('n'), which is what Cloudberry says of a
+ * primary without one; each node's preferred role is the role it has.  The
+ * address is the host, as gpinitsystem writes it when it is given no other,
+ * and the warehouse is none.  With no cluster configured, the node itself,
+ * as Cloudberry's single-node mode lists it.
+ */
+Datum
+gp_catalog_segment_configuration(PG_FUNCTION_ARGS)
+{
+	ReturnSetInfo *rsinfo = (ReturnSetInfo *) fcinfo->resultinfo;
+
+	InitMaterializedSRF(fcinfo, 0);
+
+	if (cluster_nnodes == 0)
+	{
+		char		host[256];
+
+		if (gethostname(host, sizeof(host)) != 0)
+			strlcpy(host, "localhost", sizeof(host));
+		host[sizeof(host) - 1] = '\0';
+		put_catalog_row(rsinfo, gp_dbid, -1, 'p', PostPortNumber, host,
+						DataDir);
+		return (Datum) 0;
+	}
+
+	for (int i = 0; i < cluster_nnodes; i++)
+	{
+		const GpSegmentConfig *node = &cluster[i];
+
+		put_catalog_row(rsinfo, node->dbid, node->content, node->role,
+						node->port, node->hostname, node->datadir);
 	}
 
 	return (Datum) 0;

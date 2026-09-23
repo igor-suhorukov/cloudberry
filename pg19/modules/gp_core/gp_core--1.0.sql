@@ -123,6 +123,77 @@ COMMENT ON FUNCTION gp.segment_configuration() IS
 	'the nodes of this cluster, as the cluster configuration file lists them';
 
 /*
+ * Cloudberry's catalogs of the cluster, by Cloudberry's names and in its
+ * columns, where its own are: pg_catalog, so that a query written for
+ * Cloudberry finds them whatever the search path is.  Cloudberry's are
+ * shared catalogs, and an extension can make none, so each database has
+ * them as this script makes them there (gp_catalog.c).  PostgreSQL makes no
+ * relation in pg_catalog unless allow_system_table_mods is on; a script's
+ * setting lasts as long as the script.
+ */
+SET allow_system_table_mods = on;
+
+/*
+ * gp_id: one row on every node, whose contents, Cloudberry's gp_id.dat says,
+ * do not matter.  What it is for is gp_dist_random('gp_id'), which runs a
+ * query once on each segment.
+ */
+CREATE VIEW pg_catalog.gp_id AS
+	SELECT 'Cloudberry'::name AS gpname, (-1)::int2 AS numsegments,
+		   (-1)::int2 AS dbid, (-1)::int2 AS content;
+
+CREATE FUNCTION gp_internal.segment_configuration(
+	OUT dbid int2,
+	OUT content int2,
+	OUT role "char",
+	OUT preferred_role "char",
+	OUT mode "char",
+	OUT status "char",
+	OUT port int4,
+	OUT hostname text,
+	OUT address text,
+	OUT datadir text,
+	OUT warehouseid oid)
+RETURNS SETOF record
+AS 'MODULE_PATHNAME', 'gp_catalog_segment_configuration'
+LANGUAGE C STRICT;
+
+/*
+ * gp_segment_configuration: the nodes the configuration file lists, a view
+ * over a function as Cloudberry's external-FTS builds make it
+ * (external_fts.sql).  Mode and status are FTS's, which is M4's.
+ */
+CREATE VIEW pg_catalog.gp_segment_configuration AS
+	SELECT * FROM gp_internal.segment_configuration();
+
+/*
+ * gp_configuration_history: what FTS records of each change it makes to the
+ * cluster.  Nothing writes it until FTS does, at M4, but a user may, with
+ * allow_system_table_mods on, as a catalog is written: so it is a table, one
+ * in each database where Cloudberry's is one for the node.
+ */
+CREATE TABLE pg_catalog.gp_configuration_history (
+	"time" timestamptz NOT NULL,
+	dbid int2 NOT NULL,
+	"desc" text
+);
+
+CREATE FUNCTION gp_internal.catalog_write_check()
+RETURNS trigger
+AS 'MODULE_PATHNAME', 'gp_catalog_write_check'
+LANGUAGE C;
+
+CREATE TRIGGER gp_catalog_write_check
+	BEFORE INSERT OR UPDATE OR DELETE OR TRUNCATE
+	ON pg_catalog.gp_configuration_history
+	FOR EACH STATEMENT EXECUTE FUNCTION gp_internal.catalog_write_check();
+
+GRANT SELECT ON pg_catalog.gp_id, pg_catalog.gp_segment_configuration,
+	pg_catalog.gp_configuration_history TO PUBLIC;
+
+RESET allow_system_table_mods;
+
+/*
  * Run a statement on every segment, and report what each one said.
  *
  * The answer is the first column of the first row, as text: this is for asking

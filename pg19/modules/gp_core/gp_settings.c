@@ -41,9 +41,10 @@
  * And those it accepts and has nothing to apply to yet, each for a reason
  * that says when it will: the planner's own MPP plans (Route B, decided at
  * M7), memory accounting (M6), the UDP interconnect, intra-segment
- * parallelism (after M7, decision 2).  They are defined so that a script
- * written for Cloudberry runs; their descriptions say what they do here,
- * which is nothing until then.
+ * parallelism (after M7, decision 2) -- or that it will not: the executor's
+ * prefetch of a join's quals, which PostgreSQL's joins do not do.  They are
+ * defined so that a script written for Cloudberry runs; their descriptions
+ * say what they do here, which is nothing until then.
  *
  *-------------------------------------------------------------------------
  */
@@ -118,6 +119,7 @@ static int	gp_segments_for_planner = 0;
 static bool gp_workfile_compression = false;
 static bool gp_enable_multiphase_agg = true;
 static bool gp_cte_sharing = false;
+static bool test_print_prefetch_joinqual = false;
 static bool gp_enable_preunique = true;
 static bool gp_enable_agg_distinct_pruning = true;
 static bool gp_eager_distinct_dedup = false;
@@ -505,6 +507,13 @@ GpSettingsInit(void)
 							 "Accepted for Cloudberry's scripts: temporary files are PostgreSQL's own, which are not compressed.",
 							 &gp_workfile_compression,
 							 false, PGC_USERSET, 0,
+							 NULL, NULL, NULL);
+	DefineCustomBoolVariable("gp.test_print_prefetch_joinqual",
+							 "For testing purposes, print information about if we prefetch join qual.",
+							 "Accepted for Cloudberry's scripts: the joins here are PostgreSQL's, which never prefetch a join's quals, so there is nothing to print.",
+							 &test_print_prefetch_joinqual,
+							 false, PGC_SUSET,
+							 GUC_SUPERUSER_ONLY | GUC_NOT_IN_SAMPLE,
 							 NULL, NULL, NULL);
 	DefineCustomIntVariable("gp.segments_for_planner",
 							"If >0, number of segment dbs for the planner to assume in its cost and size estimates." ROUTE_B,

@@ -230,6 +230,7 @@ modules = [
                      'modules/gp_core/gp_share.c',
                      'modules/gp_core/gp_ic.c',
                      'modules/gp_core/gp_label.c',
+                     'modules/gp_core/gp_catalog.c',
                      'modules/gp_core/gp_median.c',
                      'modules/gp_core/gp_policy.c',
                      'modules/gp_core/gp_settings.c'),

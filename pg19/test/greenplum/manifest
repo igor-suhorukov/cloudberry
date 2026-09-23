@@ -10,8 +10,7 @@
 #
 # The schedule's other tests -- append-optimized and column-oriented tables,
 # external tables, resource queues and groups, fault injection, FTS, the
-# interconnect's settings, the gp_id catalog throughout -- need M3 to M7,
-# or a gp_id, and are not listed.
+# interconnect's settings -- need M3 to M7, and are not listed.
 skip gp_create_table  relation "distrand" already exists; relation "gp_distribution_policy" does not exist
 skip gpdist  gp_segment_id of randomly distributed table "pt" is known only on its segments; relation "distby_with_constraint" already exists
 skip gpdist_opclasses  column "abs_int_hash_ops" of the distribution policy of "abstab_a" does not exist; column "abs_int_hash_ops" of the distribution policy of "abstab_b" does no...
@@ -71,7 +70,7 @@ run  qp_derived_table
 skip qp_targeted_dispatch  cannot specify storage parameters for a partitioned table; relation "mwv_cdetail_table" does not exist
 run  qp_functions
 skip cursor  function gp_inject_fault_infinite(unknown, unknown, integer) does not exist; current transaction is aborted, commands ignored until end of transaction block
-skip sequence_gp  type "gp_id" does not exist
+run  sequence_gp
 run  tidscan_gp
 skip gp_array_agg  function gp_array_agg(integer) does not exist; function gp_array_agg(text) does not exist
 skip agg_pushdown  unrecognized parameter "appendonly"; relation "nation_pd" does not exist
@@ -82,7 +81,7 @@ skip truncate_gp  language "plpython3u" does not exist; syntax error at or near 
 skip gp_rules  relation "gp_distribution_policy" does not exist; unrecognized parameter "appendonly"
 run  as_alias
 skip indexjoin  unrecognized parameter "appendonly"; relation "with_index_table" does not exist
-skip transient_types  could not access file "/tmp/cb-greenplum-Tf6hpw/planner/regress.so": No such file or directory; type "gp_id" does not exist
+skip transient_types  could not access file "regress.so": No such file or directory; function assign_new_record() does not exist
 skip complex  type "complex" does not exist; relation "complex_ttbl" does not exist
 skip matrix  function sum(smallint[]) does not exist; function sum(integer[]) does not exist
 run  sublink

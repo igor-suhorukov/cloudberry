@@ -70,7 +70,3 @@
 +ERROR:  relation "update_aoco_table" does not exist
 +LINE 1: select * from update_aoco_table;
 +                      ^
-@@
-+ERROR:  relation "gp_segment_configuration" does not exist
-+LINE 1: ...entry set c = s.a from (select count(*) as a from gp_segment...
-+                                                             ^

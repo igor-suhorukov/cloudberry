@@ -171,6 +171,33 @@ if [ "$started" -eq 1 ]; then
 	[ "$out" = "3" ] && ok "a segment reads the same file" \
 		|| notok "gp.segment_configuration() on a segment" "$out"
 
+	# Cloudberry's catalogs of the cluster, by their names (gp_catalog.c).
+	out=$(q 0 "SELECT dbid, content, role, preferred_role, mode, status, port FROM gp_segment_configuration ORDER BY dbid;")
+	out2=$(q 1 "SELECT count(*) FROM gp_segment_configuration c JOIN gp.segment_configuration() s ON s.dbid = c.dbid AND s.hostname = c.hostname AND s.hostname = c.address AND s.datadir = c.datadir AND c.warehouseid = 0;")
+	want="1|-1|p|p|n|u|$(port 0)
+2|0|p|p|n|u|$(port 1)
+3|1|p|p|n|u|$(port 2)"
+	[ "$out" = "$want" ] && [ "$out2" = "3" ] \
+		&& ok "gp_segment_configuration is the file, in Cloudberry's columns, every node up" \
+		|| notok "gp_segment_configuration" "$out / $out2"
+
+	out=$(q 0 "SELECT gpname, numsegments, dbid, content FROM gp_id;")
+	out2=$(q 0 "SELECT string_agg(gp_segment_id || ':' || gpname, ' ' ORDER BY gp_segment_id) FROM gp.dist_random(NULL::gp_id) g;")
+	[ "$out|$out2" = "Cloudberry|-1|-1|-1|0:Cloudberry 1:Cloudberry" ] \
+		&& ok "gp_id has its one row on every node, so a query over it runs once on each segment" \
+		|| notok "gp_id" "$out / $out2"
+
+	out=$(q 0 "INSERT INTO gp_configuration_history VALUES (now(), 1, 'x');")
+	out2=$(printf '%s\n' "BEGIN;" "SET LOCAL allow_system_table_mods = on;" \
+		"INSERT INTO gp_configuration_history VALUES ('2026-09-23 10:00+00', 2, 'by hand');" \
+		"SELECT dbid || ' ' || \"desc\" FROM gp_configuration_history;" "ROLLBACK;" \
+		"SELECT count(*) FROM gp_configuration_history;" | qf 0 | tr '\n' '/')
+	case "$out|$out2" in
+		*'permission denied: "gp_configuration_history" is a system catalog'*"|2 by hand/0/")
+			ok "gp_configuration_history is written only with allow_system_table_mods, as a catalog is" ;;
+		*) notok "gp_configuration_history" "$out / $out2" ;;
+	esac
+
 	###########################################################################
 	echo "3. the coordinator reaches the segments"
 	###########################################################################
@@ -1304,7 +1331,8 @@ COMMIT;"
 
 	out=$(printf '%s\n' "SET gp.statement_mem = '2MB';" "SET gp.enable_parallel = on;" \
 		"SET gp.interconnect_queue_depth = 8;" "SET gp.enable_multiphase_agg = off;" \
-		"SET gp.motion_cost_per_row = 0.5;" "SHOW gp.statement_mem;" | qf 0)
+		"SET gp.motion_cost_per_row = 0.5;" "SET gp.test_print_prefetch_joinqual = on;" \
+		"SHOW gp.statement_mem;" | qf 0)
 	[ "$out" = "2MB" ] && ok "Cloudberry's other settings are accepted, and say what they do here" \
 		|| notok "Cloudberry's accepted settings" "$out"
 
@@ -1446,6 +1474,10 @@ if "$BINDIR/pg_ctl" -D "$d" -l "$ROOT/node0.log" -w -t 30 start >/dev/null 2>&1;
 	out=$(q 0 "SELECT count(*) FROM gp.segment_configuration();")
 	[ "$out" = "0" ] && ok "and no rows in gp.segment_configuration()" \
 		|| notok "gp.segment_configuration() with no cluster" "$out"
+
+	out=$(q 0 "SELECT dbid, content, role, mode, status, port, datadir = current_setting('data_directory') FROM gp_segment_configuration;")
+	[ "$out" = "1|-1|p|n|u|$(port 0)|t" ] && ok "gp_segment_configuration lists the one node, as Cloudberry's single node does" \
+		|| notok "gp_segment_configuration with no cluster" "$out"
 
 	out=$(q 0 "CREATE TABLE sn (a int); INSERT INTO sn VALUES (1), (2); SELECT DISTINCT gp_segment_id FROM sn;")
 	[ "$out" = "-1" ] && ok "gp_segment_id is -1, as on Cloudberry's single node" \
