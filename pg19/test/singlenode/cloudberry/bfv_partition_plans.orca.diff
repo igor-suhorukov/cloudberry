@@ -1,0 +1,73 @@
+@@
+- ['false']
++ ['true']
+@@
+-              0
++              2
+@@
+-              0
++              2
+@@
+-              0
++              2
+@@
+-              0
++              4
+@@
+-              0
++              4
+@@
+-              0
++              4
+@@
+-              0
++              6
+@@
+-              0
++              4
+@@
+-              0
++              4
+@@
+-              0
++              6
+@@
+-              0
++              4
+@@
++ERROR:  access method "bitmap" does not exist
+@@
+- ['false']
++ ['true']
+@@
+- ['false']
++ ['true']
+@@
++ERROR:  index "dbs_index" does not exist
+@@
++ERROR:  access method "ao_column" does not exist
+@@
++ERROR:  relation "r_co" does not exist
++LINE 1: insert into r_co values (1,1), (2,2), (3,3);
++                    ^
+@@
++ERROR:  relation "r_co" does not exist
+@@
+-QUERY PLAN
+-___________
+-
++ERROR:  relation "r_co" does not exist
++LINE 1: explain select * from r_co where a=2;
++                              ^
+@@
++ERROR:  relation "r_co" does not exist
++LINE 1: prepare f3(int) as select * from r_co where a = $1 order by ...
++                                         ^
+@@
+-QUERY PLAN
+-___________
+-
++ERROR:  prepared statement "f3" does not exist
+@@
+- t
+-(1 row)

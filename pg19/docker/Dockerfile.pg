@@ -44,8 +44,12 @@ ARG PG_BUILDTYPE=debugoptimized
 # against, and the assertions are what catch a hook that breaks an invariant.
 ARG PG_CASSERT=true
 
+# PL/Python is PostgreSQL's own and is built with the server, so it is here
+# rather than beside the modules: Cloudberry's tests write functions in
+# plpython3u -- count_operator() and the like -- and a test that makes one
+# stops at the language where Cloudberry's does not.
 RUN apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
-        build-essential meson ninja-build pkg-config bison flex perl python3 git \
+        build-essential meson ninja-build pkg-config bison flex perl python3 python3-dev git \
         ca-certificates gettext tzdata \
         libreadline-dev zlib1g-dev libicu-dev libssl-dev liblz4-dev libzstd-dev \
         libxml2-dev libxslt1-dev libipc-run-perl libtest-simple-perl \
@@ -60,6 +64,7 @@ RUN meson setup build --prefix=/usr/local/pgsql \
         --buildtype="$PG_BUILDTYPE" \
         -Dcassert="$PG_CASSERT" -Dinjection_points=true -Dtap_tests=enabled \
         -Dssl=openssl -Dicu=enabled -Dlz4=enabled -Dzstd=enabled \
+        -Dplpython=enabled \
  && ninja -C build \
  && ninja -C build install
 
@@ -70,8 +75,11 @@ ARG PG_REF
 LABEL org.opencontainers.image.title="PostgreSQL 19 for Apache Cloudberry"
 LABEL org.apache.cloudberry.pg_ref="${PG_REF}"
 
+# libpython3.13 is PL/Python's: plpython3.so links against it, and it brings
+# the standard library a function imports from.
 RUN apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
         libreadline8t64 zlib1g libicu76 libssl3t64 liblz4-1 libzstd1 libxml2 libxslt1.1 \
+        libpython3.13 \
         ca-certificates locales tzdata \
     && rm -rf /var/lib/apt/lists/* \
     && useradd -m -u 1000 -s /bin/bash postgres

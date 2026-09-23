@@ -1,0 +1,21 @@
+@@
+-                                     QUERY PLAN                                     
+-               Filter: (b |=| 1)
+-               Filter: (b |=| 1)
+-         ->  Seq Scan on t1_1_prt_p1 t1_2  (cost=0.00..7496.00 rows=14350 width=8)
+-         ->  Seq Scan on t1_1_prt_p2 t1_1  (cost=0.00..7496.00 rows=14350 width=8)
+-   ->  Append  (cost=0.00..15135.50 rows=28700 width=8)
++                                                  QUERY PLAN                                                   
++         Segments: 3
++         Segments: 3
++   ->  Gather Motion 3:1 on t1_1_prt_p1 t1_2  (slice1; segments: 3)  (cost=1000.00..1124.30 rows=1130 width=8)
++   ->  Gather Motion 3:1 on t1_1_prt_p2 t1_1  (slice1; segments: 3)  (cost=1000.00..1124.30 rows=1130 width=8)
+@@
+- Gather Motion 3:1  (slice1; segments: 3)  (cost=0.00..16283.50 rows=86100 width=8)
++ Append  (cost=1000.00..2259.90 rows=2260 width=8)
+@@
+-------------------------------------------------------------------------------------
++---------------------------------------------------------------------------------------------------------------
+@@
+-(7 rows)
++(6 rows)

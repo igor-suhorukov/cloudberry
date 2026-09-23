@@ -1,0 +1,20 @@
+@@
+-                                     QUERY PLAN                                     
++                                  QUERY PLAN                                  
+@@
+-         ->  Seq Scan on t1_1_prt_p1 t1_2  (cost=0.00..7496.00 rows=14350 width=8)
+-         ->  Seq Scan on t1_1_prt_p2 t1_1  (cost=0.00..7496.00 rows=14350 width=8)
+-   ->  Append  (cost=0.00..15135.50 rows=28700 width=8)
++         ->  Seq Scan on t1_1_prt_p1 t1_2  (cost=0.00..431.00 rows=1 width=8)
++         ->  Seq Scan on t1_1_prt_p2 t1_1  (cost=0.00..431.00 rows=1 width=8)
++         Number of partitions to scan: 2 (out of 2)
++   ->  Dynamic Seq Scan on t1  (cost=0.00..431.00 rows=1 width=8)
+@@
+- Gather Motion 3:1  (slice1; segments: 3)  (cost=0.00..16283.50 rows=86100 width=8)
++ Gather Motion 3:1  (slice1; segments: 3)  (cost=0.00..431.00 rows=1 width=8)
+@@
+-------------------------------------------------------------------------------------
++------------------------------------------------------------------------------
+@@
+-(7 rows)
++(8 rows)

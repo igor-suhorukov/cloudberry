@@ -43,6 +43,14 @@ bfv_joins  a join of twenty empty tables, which Cloudberry's demo cluster
   rows, in the time the test allows.  Its tables distributed with the legacy
   cdbhash_float4_ops class are joined as Cloudberry joins them.
 
+bfv_subquery (planner, orca)  the NOTICE and HINT Cloudberry gives for a
+  query that reads a distributed table's ctid without its gp_segment_id
+  (cdbmutate.c), which the port does not give.  Under the planner, too,
+  count_operator() finds no Seq Scan in the plan of a query over
+  distributed tables: the port's planner reads each through a Gather
+  Motion, which scans the table on the segments, and EXPLAIN names the
+  Motion.
+
 case_gp  IS NOT DISTINCT FROM, and the CASE form, printed as the searched
   CASE the port's rewrite makes of them (see the singlenode suite's README).
 
@@ -66,6 +74,20 @@ join_gp  the NOTICE of test_print_prefetch_joinqual: where a join's outer
   PostgreSQL's joins, the port's, never do.  Its table of one segment,
   which gp_debug_numsegments makes, is read there alone, and answers as
   Cloudberry's does.
+
+partition_prune_opfamily (planner, orca)  its first EXPLAIN, which
+  gpdiff.pl compares as rows: a comment line of dashes in the test reads to
+  it as the rule under a result's header, and what follows, to the plan's
+  "(7 rows)", is sorted as one result.  Under the planner the port's plan is
+  an Append of a Gather Motion on each partition, where Cloudberry gathers
+  one Append; under ORCA it is ORCA's Dynamic Seq Scan, as Cloudberry's ORCA
+  plans it (partition_prune_opfamily_optimizer.out), with the partitions'
+  scans, which the port's EXPLAIN prints beneath it.  The rows are
+  Cloudberry's.
+
+partition_pruning  the bitmap index (M5): three indexes are not made, and
+  a DROP FUNCTION ... CASCADE finds none of them to drop.  The rest, its
+  partitions pruned under both planners, is Cloudberry's.
 
 qp_functions (planner, orca)  PostgreSQL 19's words for a call no function
   takes -- a DETAIL where Cloudberry's HINT stood -- and for a SQL function's
@@ -103,6 +125,12 @@ sequence_gp  nextval() over gp_dist_random('gp_id'), which Cloudberry
   The port gathers gp_id's rows and calls it on the coordinator, which
   takes 1, 2 and 3, then 4.  No value twice in either, which is what the
   test is for.
+
+truncate_gp  its append-optimized and column-oriented tables (M5), and what
+  stat_table_segfile_size(), a PL/Python function, finds of them: no row in
+  any segment's pg_class, and "KeyError: 0".  The heap table's files,
+  emptied by a TRUNCATE in the transaction that made the table, are
+  Cloudberry's on every segment.
 
 with_clause  three recursive queries Cloudberry refuses -- a join of nested
   RECURSIVE clauses, and window functions in a recursive query's target

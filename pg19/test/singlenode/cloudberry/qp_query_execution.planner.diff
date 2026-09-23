@@ -1,0 +1,15 @@
+@@
++ERROR:  access method "ao_column" does not exist
+@@
++ERROR:  relation "lossmithe_colstor" does not exist
++LINE 1: insert into lossmithe_colstor
++                    ^
+@@
+- sum  | isinterestonly 
+-------+----------------
+- 1040 | t
+-(1 row)
+-
++ERROR:  relation "lossmithe_colstor" does not exist
++LINE 2:   FROM lossmithe_colstor b 
++               ^

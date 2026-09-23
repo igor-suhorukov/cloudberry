@@ -222,7 +222,7 @@ pg   oidjoins
 pg   fast_default
 pg   stats
 run  tag
-skip createdb  PL/Python and a cluster's mirrors, whose directories it lists
+skip createdb  a cluster's mirrors, whose directories it lists, M4, and the fault injector
 run  update_gp
 run  returning_gp
 run  cluster_gp
@@ -235,8 +235,8 @@ skip matview_ao  append-optimized tables, M5
 run  gpcopy
 skip incremental_analyze  append-optimized tables, M5
 run  indexjoin
-skip workfile/hashagg_spill  the workfile manager and its views, and PL/Python; Track B's spill-file hook is not built
-skip workfile/hashjoin_spill  the workfile manager and its views, and PL/Python; Track B's spill-file hook is not built
+skip workfile/hashagg_spill  the workfile manager and its views; Track B's spill-file hook is not built
+skip workfile/hashjoin_spill  the workfile manager and its views; Track B's spill-file hook is not built
 skip query_finish_pending  the fault injector, which is Track E's; the port has none yet
 run  sequence_gp
 run  tidscan_gp

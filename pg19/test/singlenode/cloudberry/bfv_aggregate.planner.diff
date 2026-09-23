@@ -1,0 +1,47 @@
+@@
+- a | b  | c  
+----+----+----
+- 0 |  3 |  3
+- 0 |  6 |  6
+- 0 |  9 |  9
+- 1 |  1 |  1
+- 1 |  4 |  4
+- 1 |  7 |  7
+- 1 | 10 | 10
+- 2 |  2 |  2
+- 2 |  5 |  5
+- 2 |  8 |  8
+-(10 rows)
+-
++ERROR:  argument of ROWS must not contain variables
++LINE 1: ...ue(d) over(partition by b order by e rows between e precedin...
++                                                             ^
+@@
+- id | val | sum | mysum1 | mysum2 
+-----+-----+-----+--------+--------
+-  1 |   1 |   1 |      1 |      1
+-  2 |   2 |   3 |      3 |      3
+-  3 |   3 |   6 |      6 |      6
+-  4 |   4 |   9 |      9 |      9
+-  5 |   5 |  12 |     12 |     12
+-(5 rows)
+-
++ERROR:  cannot copy window "w" because it has a frame clause
++LINE 3:    sum(val) over (w),
++                         ^
++HINT:  Omit the parentheses in this OVER clause.
+@@
++ERROR:  unrecognized parameter "appendonly"
+@@
++ERROR:  relation "mtup1" does not exist
++LINE 1: insert into mtup1 values
++                    ^
+@@
+- c0  |     c1      | array_length 
+------+-------------+--------------
+- foo | 2015-09-1.1 |         5670
+-(1 row)
+-
++ERROR:  relation "mtup1" does not exist
++LINE 1137: from mtup1 where c0 = 'foo' group by c0, c1 limit 10;
++                ^

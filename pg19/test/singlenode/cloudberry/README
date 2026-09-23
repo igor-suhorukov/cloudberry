@@ -59,9 +59,17 @@ The reasons, by what brings them, and then each test:
   gp_recursive_cte: a setting the port has no counterpart of.  Recursive CTEs
   are always on, as in PostgreSQL.
 
-  PL/Python, which the image does not carry, and what Cloudberry's tests make
-  with it: count_operator() and count_index_scans(), which count the nodes of
-  a plan.
+  What Cloudberry's tests make with PL/Python -- count_operator(),
+  find_operator(), qx_count_operator() -- counts the nodes of a plan, and so
+  makes a plan an answer.  The expected output is Cloudberry's single-node
+  planner's: under the port's planner a count differs where PostgreSQL 19
+  plans otherwise, and under ORCA where ORCA's plan has nodes of its own --
+  Dynamic Seq Scan, Dynamic Index Scan, Partition Selector -- or joins or
+  aggregates otherwise.  Such a test keeps a difference for each pass.
+  qx_count_operator() chooses which node to count by "Pivotal Optimizer
+  (GPORCA)" in the plan, which neither Cloudberry's EXPLAIN nor the port's
+  prints now ("Optimizer: GPORCA"), so under ORCA it counts the planner's
+  node in ORCA's plan.
 
   PostgreSQL 19's own behaviour where Cloudberry changed its parser or
   PostgreSQL has changed since: OVER (w) of a window with a frame ("cannot
@@ -91,20 +99,23 @@ The reasons, by what brings them, and then each test:
 
 The tests
 
-bfv_aggregate  count_operator(), an append-optimized table, PL/Python, OVER (w) with a frame, a frame offset
-  that reads a column.
-bfv_catalog  count_operator(), pg_stat_last_operation (Cloudberry's catalog of
-  when an object was last changed), escape_string_warning and
-  standard_conforming_strings = off, PL/Python, and one row more in a query
-  over pg_constraint: the table's NOT NULL constraint.
+bfv_aggregate (planner, orca)  an append-optimized table, OVER (w) with a
+  frame, a frame offset that reads a column; and under ORCA the
+  GroupAggregate and HashAggregate count_operator() counts, which ORCA
+  chooses otherwise.
+bfv_catalog  pg_stat_last_operation (Cloudberry's catalog of when an object
+  was last changed), escape_string_warning and standard_conforming_strings =
+  off, and one row more in a query over pg_constraint: the table's NOT NULL
+  constraint.
 bfv_dd  the bitmap index.
-bfv_index  count_index_scans(), append-optimized and column-oriented
-  tables, whose compression options a partitioned table is refused for
-  before its access method.
-bfv_partition_plans  count_operator() and find_operator() of PL/Python,
-  append-optimized and column-oriented tables and the bitmap index, and a
-  plan gpdiff.pl does not take for one after the column-oriented table's
-  statements fail.
+bfv_index  append-optimized and column-oriented tables, whose compression
+  options a partitioned table is refused for before its access method.
+bfv_partition_plans (planner, orca)  append-optimized and column-oriented
+  tables and the bitmap index, and a plan gpdiff.pl does not take for one
+  after the column-oriented table's statements fail; and under ORCA the
+  Dynamic Seq Scans, Dynamic Index Scans and Partition Selectors that
+  count_operator() and find_operator() find, where Cloudberry's planner makes
+  none.
 bfv_olap  OVER (w) with a frame.
 case_gp  The deparse of IS NOT DISTINCT FROM, and of the CASE form, which
   prints as the searched CASE it was rewritten into; blip(1), the operand of
@@ -141,8 +152,9 @@ partition_indexing  the bitmap index, and "UNIQUE constraint on partitioned
   table".
 partition_unlogged  an unlogged partitioned table, which PostgreSQL 19 has
   none of.
-qp_query_execution  qx_count_operator() of PL/Python, a column-oriented
-  table.
+qp_query_execution (planner, orca)  a column-oriented table; and under ORCA
+  qx_count_operator() of its hash joins and nested loops, which ORCA plans
+  otherwise, counted by the planner's name for each (see above).
 qp_with_clause  append-optimized and column-oriented tables, the bitmap
   index.
 returning_gp  an append-optimized table.
@@ -166,6 +178,8 @@ tag  Tag definitions are the database's here, in gp_sql.tag, and Cloudberry's
   (TAG; or TAG ()) is PostgreSQL's error at the word the rewrite left -- a
   syntax error, or "unrecognized role option" of a role's -- where
   Cloudberry's syntax error is at the next.
-union_gp  count_operator(), an external table, PL/Python, and a chain of
-  UNIONs over NULLs.
+union_gp (planner, orca)  an external table, and a chain of UNIONs over
+  NULLs; and under the planner count_operator() of an Append, one where
+  Cloudberry's planner has two: PostgreSQL 19 pulls a WITH query's UNION ALL
+  up into the UNION ALL that reads it, and ORCA, like Cloudberry, does not.
 update_gp  append-optimized tables.

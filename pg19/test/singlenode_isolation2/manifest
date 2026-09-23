@@ -11,7 +11,7 @@ skip lockmodes append-optimized tables (M5), and a data directory read from gp_s
 skip ao_partition_lock append-optimized tables (M5)
 run  select_dropped_table
 skip prevent_ao_wal append-optimized tables (M5), with gpconfig and a restart
-skip packcore PL/Python, and Cloudberry's packcore tool
+skip packcore Cloudberry's packcore tool, which it runs from PL/Python
 run  pg_views_concurrent_drop
 run  drop_rename
 skip resource_queue resource queues (M6)
@@ -65,7 +65,7 @@ skip uao/vacuum_self_function_row append-optimized tables (M5)
 skip uao/vacuum_while_insert_row append-optimized tables (M5)
 skip uao/vacuum_while_vacuum_row append-optimized tables (M5)
 skip uao/bitmapindex_rescan_row append-optimized tables (M5)
-skip segwalrep/master_wal_switch a mirror, pg_basebackup through PL/Python, and the fault injector
+skip segwalrep/master_wal_switch a mirror, made by the pg_basebackup() of Cloudberry's setup, and the fault injector
 skip uao/compaction_full_stats_column append-optimized tables (M5)
 skip uao/cursor_before_delete_column append-optimized tables (M5)
 skip uao/cursor_before_deletevacuum_column append-optimized tables (M5)
@@ -107,7 +107,7 @@ skip uao/bitmapindex_rescan_column append-optimized tables (M5)
 skip workfile_mgr_test the workfile manager's C test harness in isolation2_regress.so, run on segments
 skip enable_autovacuum reads gp_id through gp_dist_random (M2)
 skip segwalrep/commit_blocking_on_standby a standby coordinator, and the fault injector
-skip cancel_plpython PL/Python
+skip cancel_plpython pg_cancel_backend(pid, message), and a cancel that stops Python code (cancel_pending_hook), both Cloudberry's
 skip cancel_query append-optimized tables (M5), the fault injector, and a utility-mode connection
 skip create_memory_accounting_tables memory accounting (M6), which it sets up with gpconfig
 skip setup_memory_accounting memory accounting (M6); Cloudberry's schedule ignores it too

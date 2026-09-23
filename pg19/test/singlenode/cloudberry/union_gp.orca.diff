@@ -1,0 +1,47 @@
+@@
+- a | b | c 
+----+---+---
+- 1 |   |  
+- 2 | 3 |  
+- 3 |   | 4
+-(3 rows)
+-
++ERROR:  UNION types text and integer cannot be matched
++LINE 1: ...L b, NULL c UNION SELECT 2, 3, NULL UNION SELECT 3, NULL, 4;
++                                                                     ^
+@@
+- a 
+----
+-  
+- 1
+-(2 rows)
+-
++ERROR:  UNION types text and integer cannot be matched
++LINE 4:      (select 1 union select distinct null::integer)
++                     ^
+@@
++ERROR:  syntax error at or near "EXTERNAL"
++LINE 1: CREATE EXTERNAL WEB TABLE test2 (id int) EXECUTE 'echo 2' ON...
++               ^
+@@
+- branch | id 
+---------+----
+- test1  |  1
+- test2  |  2
+-(2 rows)
+-
++ERROR:  relation "test2" does not exist
++LINE 3: (SELECT 'test2' as branch, id FROM test2);
++                                           ^
+@@
+-QUERY PLAN
+-___________
+-
++ERROR:  relation "test2" does not exist
++LINE 3: (SELECT 'test2' as branch, id FROM test2);
++                                           ^
+@@
+- foo
+- foo
+- xx
+-(3 rows)

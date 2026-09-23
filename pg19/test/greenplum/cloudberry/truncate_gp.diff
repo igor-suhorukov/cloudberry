@@ -1,0 +1,39 @@
+@@
++ERROR:  syntax error at or near "row"
++LINE 1: ... int) with (appendoptimized = true, orientation = row) distr...
++                                                             ^
+@@
++ERROR:  current transaction is aborted, commands ignored until end of transaction block
+@@
++ERROR:  current transaction is aborted, commands ignored until end of transaction block
+@@
+-stat_table_segfile_size
+-(2,segfile###,0)
+-(3,segfile###,0)
+-(4,segfile###,0)
+-(3 rows)
++ERROR:  KeyError: 0
++CONTEXT:  Traceback (most recent call last):
++  PL/Python function "stat_table_segfile_size", line 26, in <module>
++    if relfilenodes[i] != relfilenode_prefix:
++PL/Python function "stat_table_segfile_size"
+@@
++ERROR:  unrecognized parameter "appendoptimized"
+@@
++ERROR:  current transaction is aborted, commands ignored until end of transaction block
+@@
++ERROR:  current transaction is aborted, commands ignored until end of transaction block
+@@
+-stat_table_segfile_size
+-(2,segfile###,0)
+-(2,segfile###.128,0)
+-(3,segfile###,0)
+-(3,segfile###.128,0)
+-(4,segfile###,0)
+-(4,segfile###.128,0)
+-(6 rows)
++ERROR:  KeyError: 0
++CONTEXT:  Traceback (most recent call last):
++  PL/Python function "stat_table_segfile_size", line 26, in <module>
++    if relfilenodes[i] != relfilenode_prefix:
++PL/Python function "stat_table_segfile_size"

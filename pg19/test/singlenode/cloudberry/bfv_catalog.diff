@@ -1,49 +1,7 @@
 @@
-+ERROR:  language "plpython3u" does not exist
-@@
 +ERROR:  non-standard string literals are not supported
 @@
 +ERROR:  unrecognized configuration parameter "escape_string_warning"
-@@
-- count_operator 
------------------
--              0
--(1 row)
--
-+ERROR:  function count_operator(unknown, unknown) does not exist
-+LINE 1: select count_operator('select substr(''abc'', 2)', 'Motion')...
-+               ^
-+DETAIL:  There is no function of that name.
-@@
-- count_operator 
------------------
--              0
--(1 row)
--
-+ERROR:  function count_operator(unknown, unknown) does not exist
-+LINE 1: select count_operator('select relname from pg_class where re...
-+               ^
-+DETAIL:  There is no function of that name.
-@@
-- count_operator 
------------------
--              0
--(1 row)
--
-+ERROR:  function count_operator(unknown, unknown) does not exist
-+LINE 1: select count_operator('select attname from pg_attribute wher...
-+               ^
-+DETAIL:  There is no function of that name.
-@@
-- count_operator 
------------------
--              0
--(1 row)
--
-+ERROR:  function count_operator(unknown, unknown) does not exist
-+LINE 1: select count_operator('select * from generate_series(1,10)',...
-+               ^
-+DETAIL:  There is no function of that name.
 @@
 + NOT NULL a
 @@

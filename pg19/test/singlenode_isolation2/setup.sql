@@ -4,10 +4,11 @@
 --
 -- Cloudberry's makes PL/Python functions that drive a cluster -- pg_ctl on a
 -- segment, pg_basebackup, waiting for a mirror -- and a helper the lock tests
--- use, which reads pg_locks by segment.  The port has one node, no PL/Python
--- in the image, and no gp_segment_id in pg_locks, so this makes only what the
--- tests the port runs use, for one node, and the extensions of every M1
--- module, which Cloudberry has built in.
+-- use, which reads pg_locks by segment.  The port runs these tests on one
+-- node, which has no segment or mirror for the first to drive, and no
+-- gp_segment_id in pg_locks, so this makes only what the tests the port runs
+-- use, for one node, and the extensions of every M1 module, which Cloudberry
+-- has built in.
 --
 CREATE EXTENSION gp_core;
 CREATE EXTENSION gp_orca;

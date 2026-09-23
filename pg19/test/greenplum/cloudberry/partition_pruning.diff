@@ -1,0 +1,8 @@
+@@
++ERROR:  access method "bitmap" does not exist
+@@
++ERROR:  access method "bitmap" does not exist
+@@
++ERROR:  access method "bitmap" does not exist
+@@
+-NOTICE:  drop cascades to index mytable_idx1

@@ -49,14 +49,14 @@ skip olap_window_seq  DISTINCT is not implemented for window functions; cannot c
 skip partition  syntax error at or near "only"; access method "ao_row" does not exist
 skip partition1  access method "ao_row" does not exist; relation "foz" does not exist
 skip partition_ddl  access method "ao_row" does not exist; relation "mpp3045_hhh" does not exist
-skip partition_pruning  access method "bitmap" does not exist; language "plpython3u" does not exist
-skip partition_prune_opfamily  language "plpython3u" does not exist; function abseq4(integer, integer) does not exist
+run  partition_pruning
+run  partition_prune_opfamily
 skip alter_distpol_dropped  unrecognized parameter "appendonly"; current transaction is aborted, commands ignored until end of transaction block
 run  create_table_distpol
 skip alter_distribution_policy  unrecognized parameter "appendonly"; relation "atsdb_ao" does not exist
 skip DML_over_joins  cannot specify storage parameters for a partitioned table; relation "sales_par_co" does not exist
 run  bfv_joins
-skip bfv_subquery  language "plpython3u" does not exist; function count_operator(unknown, unknown) does not exist
+run  bfv_subquery
 skip bfv_olap  cannot copy window "w" because it has a frame clause
 skip bfv_aggregate  argument of ROWS must not contain variables; cannot copy window "w" because it has a frame clause
 skip bfv_cte  count(*) must be used to call a parameterless aggregate function; type "cte" does not exist
@@ -78,7 +78,7 @@ skip agg_pushdown  unrecognized parameter "appendonly"; relation "nation_pd" doe
 run  rpt
 run  rpt_joins
 skip namespace_gp  unrecognized role option "resource"; role "tmp_test_schema_role" does not exist
-skip truncate_gp  language "plpython3u" does not exist; syntax error at or near "row"
+run  truncate_gp
 skip gp_rules  unrecognized parameter "appendonly"; relation "aotable_to_view_test1" does not exist
 run  as_alias
 skip indexjoin  unrecognized parameter "appendonly"; relation "with_index_table" does not exist
