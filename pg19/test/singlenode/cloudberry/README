@@ -21,13 +21,13 @@ The reasons, by what brings them, and then each test:
   External tables, gpfdist, COPY ... LOG ERRORS and the error log functions,
   FILL MISSING FIELDS, NEWLINE, ESCAPE outside CSV mode: M5, the loading path.
 
-  gp_distribution_policy: M2.
-
-  Cloudberry's catalogs of the cluster are the port's since M2, by their
-  names, in pg_catalog: gp_id, gp_segment_configuration, which lists the
-  one node, and gp_configuration_history, written only with
-  allow_system_table_mods (gp_catalog.c).  test_print_prefetch_joinqual is
-  accepted and prints nothing: PostgreSQL's joins never prefetch their quals.
+  Cloudberry's catalogs are the port's since M2, by their names, in
+  pg_catalog: gp_id, gp_segment_configuration, which lists the one node,
+  gp_configuration_history, written only with allow_system_table_mods, and
+  gp_distribution_policy, which on one node has no row, as Cloudberry's
+  single node keeps no policy (gp_catalog.c).  test_print_prefetch_joinqual
+  is accepted and prints nothing: PostgreSQL's joins never prefetch their
+  quals.
 
   Cloudberry's settings of the dispatcher and the planner are the port's
   since M2 (gp_settings.c), respelled gp.* as every one is, and a test that
@@ -128,7 +128,7 @@ gpcopy  COPY's LOG ERRORS, FILL MISSING FIELDS, NEWLINE and ESCAPE outside
 indexjoin  an append-optimized table.
 partition  Every reason above: its templates and gp_partition_template;
   append-optimized and column-oriented tables, column ENCODING, external
-  tables and COPY ... LOG ERRORS; gp_distribution_policy; a role that may not CREATE in schema public;
+  tables and COPY ... LOG ERRORS; a role that may not CREATE in schema public;
   Cloudberry's REVOKE notice; an exclusion constraint PostgreSQL 19 allows;
   the caret of an error in a partition an ALTER TABLE made; psql's \d+.
 partition1  append-optimized tables -- hhh and foz are, and most of its
@@ -150,7 +150,7 @@ singlenode_compatibility_cbdb  the warning Cloudberry's single-node mode
   gives for DISTRIBUTED BY (the port records the policy, for ORCA and M2),
   append-optimized tables, and TABLE (...) and anytable.  ALTER TABLE ... SET
   DISTRIBUTED BY is refused as Cloudberry refuses it in single-node mode.
-subselect_gp  gp_distribution_policy, append-optimized tables.
+subselect_gp  append-optimized tables.
 subselect_gp2  an external web table.
 tag  Tag definitions are the database's here, in gp_sql.tag, and Cloudberry's
   are the cluster's, in the shared catalog pg_tag (cloudberry.md, "Still
@@ -166,6 +166,6 @@ tag  Tag definitions are the database's here, in gp_sql.tag, and Cloudberry's
   (TAG; or TAG ()) is PostgreSQL's error at the word the rewrite left -- a
   syntax error, or "unrecognized role option" of a role's -- where
   Cloudberry's syntax error is at the next.
-union_gp  count_operator(), gp_distribution_policy, an external table, PL/
-  Python, and a chain of UNIONs over NULLs.
+union_gp  count_operator(), an external table, PL/Python, and a chain of
+  UNIONs over NULLs.
 update_gp  append-optimized tables.

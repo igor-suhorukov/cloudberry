@@ -320,6 +320,14 @@ policy_read(Oid relid, bool check)
 		 * column is missing is far better than what ORCA does with an attnum
 		 * it cannot find, which is to assert "Column not found".
 		 */
+		if (attnum == InvalidAttrNumber && !check)
+		{
+			/* as it is recorded: a column that is not there, as 0 */
+			policy->attrs[i] = InvalidAttrNumber;
+			policy->opclasses[i] = InvalidOid;
+			i++;
+			continue;
+		}
 		if (attnum == InvalidAttrNumber)
 			ereport(ERROR,
 					(errcode(ERRCODE_UNDEFINED_COLUMN),
@@ -329,7 +337,7 @@ policy_read(Oid relid, bool check)
 		typeoid = get_atttype(relid, attnum);
 		opclass = GpPolicyDefaultOpclass(typeoid);
 
-		if (!OidIsValid(opclass))
+		if (!OidIsValid(opclass) && check)
 			ereport(ERROR,
 					(errcode(ERRCODE_UNDEFINED_OBJECT),
 					 errmsg("data type %s has no default operator class for access method \"%s\"",

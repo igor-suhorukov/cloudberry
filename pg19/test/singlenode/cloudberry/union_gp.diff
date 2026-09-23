@@ -46,10 +46,6 @@
 - xx
 -(3 rows)
 @@
-+ERROR:  relation "gp_distribution_policy" does not exist
-+LINE 1: update gp_distribution_policy set numsegments = 2
-+               ^
-@@
 +ERROR:  language "plpython3u" does not exist
 @@
 - count_operator 
@@ -351,11 +347,3 @@
 +LINE 1: select count_operator('with T_constant (d1, d2) as(
 +               ^
 +DETAIL:  There is no function of that name.
-@@
-+ERROR:  relation "gp_distribution_policy" does not exist
-+LINE 1: update gp_distribution_policy set numsegments = 1
-+               ^
-@@
-+ERROR:  relation "gp_distribution_policy" does not exist
-+LINE 1: update gp_distribution_policy set numsegments = 2
-+               ^

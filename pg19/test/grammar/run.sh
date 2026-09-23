@@ -512,13 +512,18 @@ is "and a random policy has no families to report" \
 is "the policy carries the segment count, which is never zero" \
    "SELECT numsegments >= 1 FROM gp.policy('dist_r'::regclass);" "t"
 
-# A policy that cannot be read is an error naming the problem, not a shrug.
-# Cloudberry cannot reach the first of these -- its policy is a catalog row
-# with dependencies, and it refuses to drop a distribution key column -- but
-# the port has no such hook yet, so the case is real.
+# A key column dropped leaves the table random, as Cloudberry leaves it: the
+# label names the key's columns, and follows them (gp_sql's distribution.c).
 q "CREATE TABLE dist_drop (a int, b int) DISTRIBUTED BY (a, b);
    ALTER TABLE dist_drop DROP COLUMN b;" > /dev/null
-refused "a key column that was dropped is named, not ignored" \
+is "a key column dropped leaves the table random, as Cloudberry leaves it" \
+   "SELECT kind FROM gp.policy('dist_drop'::regclass);" "random"
+
+# A policy that cannot be read is an error naming the problem, not a shrug.
+# Cloudberry cannot reach the first of these -- its policy is a catalog row --
+# but a label written by hand can name a column the table has not got.
+q "SECURITY LABEL FOR gp ON TABLE dist_drop IS 'distributed_by=\"(a,b)\"';" > /dev/null
+refused "a key column the table has not got is named, not ignored" \
         "SELECT kind FROM gp.policy('dist_drop'::regclass);" \
         "column \"b\" of the distribution policy of \"dist_drop\" does not exist"
 

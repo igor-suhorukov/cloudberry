@@ -627,6 +627,93 @@ GpDistributionAlter(Oid relid, const char *policy, int reorganize)
 }
 
 /* ------------------------------------------------------------------------- */
+/* The key's columns, as the table's change                                  */
+/* ------------------------------------------------------------------------- */
+
+/*
+ * The label records the key by its columns' names, where Cloudberry's
+ * catalog records their numbers: so a column renamed is renamed in the
+ * label, and one dropped from the key leaves the table random, as Cloudberry
+ * leaves it.  On a segment the coordinator's label arrives with the
+ * statement, and nothing is done here.
+ */
+
+/* The key's column names, or NIL for a policy that has none. */
+static List *
+key_names(const char *policy)
+{
+	List	   *names;
+
+	if (policy == NULL || policy[0] != '(')
+		return NIL;
+	if (!SplitIdentifierString(pnstrdup(policy + 1, strlen(policy) - 2), ',',
+							   &names))
+		return NIL;
+	return names;
+}
+
+static bool
+acting_here(void)
+{
+	const GpCoreApi *core = GpCoreApiLookup();
+
+	return core != NULL && core->get_role() != GP_ROLE_EXECUTE;
+}
+
+void
+GpDistributionColumnDropped(Oid relid, AttrNumber attnum)
+{
+	char	   *name;
+	ListCell   *lc;
+
+	if (!acting_here())
+		return;
+	name = get_attname(relid, attnum, true);
+	if (name == NULL)
+		return;
+	foreach(lc, key_names(policy_label_of(relid)))
+	{
+		if (strcmp((char *) lfirst(lc), name) != 0)
+			continue;
+
+		set_policy_label(relid, "random");
+		/* one node has no distribution to speak of, as Cloudberry's has none */
+		if (!GpCoreApiLookup()->is_single_node())
+			ereport(NOTICE,
+					(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+					 errmsg("dropping a column that is part of the distribution policy forces a random distribution policy")));
+		return;
+	}
+}
+
+void
+GpDistributionColumnRenamed(Oid relid, const char *oldname, const char *newname)
+{
+	List	   *rels;
+	ListCell   *lr;
+
+	if (!acting_here())
+		return;
+	rels = find_all_inheritors(relid, NoLock, NULL);
+	foreach(lr, rels)
+	{
+		Oid			rel = lfirst_oid(lr);
+		List	   *names = key_names(policy_label_of(rel));
+		bool		found = false;
+		ListCell   *lc;
+
+		foreach(lc, names)
+			if (strcmp((char *) lfirst(lc), oldname) == 0)
+			{
+				lfirst(lc) = pstrdup(newname);
+				found = true;
+			}
+		if (found)
+			set_policy_label(rel, column_list(names));
+	}
+}
+
+/* ------------------------------------------------------------------------- */
 /* gp_debug_numsegments                                                      */
 /* ------------------------------------------------------------------------- */
 

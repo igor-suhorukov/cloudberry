@@ -97,9 +97,10 @@ typedef struct GpPolicy
 extern GpPolicy *GpPolicyGet(Oid relid);
 
 /*
- * The same, as it is recorded, even where it spreads the rows over more
- * segments than the cluster has, which GpPolicyGet() refuses: what
- * gp_distribution_policy shows.
+ * The same, as it is recorded, even where GpPolicyGet() would refuse it: rows
+ * spread over more segments than the cluster has, or a key column that is
+ * not there (attribute number 0) or cannot be hashed (opclass InvalidOid).
+ * What gp_distribution_policy shows.
  */
 extern GpPolicy *GpPolicyGetRecorded(Oid relid);
 

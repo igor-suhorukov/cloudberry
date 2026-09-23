@@ -1153,30 +1153,6 @@
 +LINE 1: select relid::regclass, level, template from gp_partition_te...
 +                                                     ^
 @@
-- relname | distribution_attributes 
-----------+-------------------------
--(0 rows)
--
-+ERROR:  relation "gp_distribution_policy" does not exist
-+LINE 2: gp_distribution_policy p, pg_class c
-+        ^
-@@
-- relname | distribution_attributes 
-----------+-------------------------
--(0 rows)
--
-+ERROR:  relation "gp_distribution_policy" does not exist
-+LINE 2: gp_distribution_policy p, pg_class c where p.localoid = c.oi...
-+        ^
-@@
-- relname | distribution_attributes 
-----------+-------------------------
--(0 rows)
--
-+ERROR:  relation "gp_distribution_policy" does not exist
-+LINE 2: gp_distribution_policy p, pg_class c where p.localoid = c.oi...
-+        ^
-@@
 +ERROR:  unrecognized parameter "appendonly"
 @@
 -       relname       |   nspname    | relispartition 

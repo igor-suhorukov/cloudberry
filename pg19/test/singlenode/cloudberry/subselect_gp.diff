@@ -1,8 +1,4 @@
 @@
-+ERROR:  relation "gp_distribution_policy" does not exist
-+LINE 1: delete from gp_distribution_policy where localoid='csq_m1'::...
-+                    ^
-@@
 +ERROR:  unrecognized parameter "appendonly"
 @@
 +ERROR:  relation "t3cozlib" does not exist
@@ -22,7 +18,3 @@
 +ERROR:  relation "t3cozlib" does not exist
 +LINE 16: WHERE a.attrelid = 't3cozlib'::regclass AND a.attnum > 0 AND...
 +                            ^
-@@
-+ERROR:  relation "gp_distribution_policy" does not exist
-+LINE 1: delete from gp_distribution_policy where localoid='csq_m1'::...
-+                    ^

@@ -196,6 +196,15 @@ extern void GpDistributionApplyDefault(CreateStmt *stmt, Oid relid);
 extern void GpDistributionSetNew(Oid relid, const char *policy);
 
 /*
+ * A column of a table dropped, or renamed: the key the label records by name
+ * follows it.  A key column dropped leaves the table random, as Cloudberry
+ * leaves it.
+ */
+extern void GpDistributionColumnDropped(Oid relid, AttrNumber attnum);
+extern void GpDistributionColumnRenamed(Oid relid, const char *oldname,
+										const char *newname);
+
+/*
  * ALTER TABLE ... SET DISTRIBUTED: the new policy ("policy", or NULL for the
  * one it has), and on a cluster the rows moved to where it puts them --
  * "reorganize" 1 always, 0 never, -1 as Cloudberry decides.

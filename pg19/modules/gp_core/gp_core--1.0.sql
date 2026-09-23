@@ -123,13 +123,15 @@ COMMENT ON FUNCTION gp.segment_configuration() IS
 	'the nodes of this cluster, as the cluster configuration file lists them';
 
 /*
- * Cloudberry's catalogs of the cluster, by Cloudberry's names and in its
- * columns, where its own are: pg_catalog, so that a query written for
- * Cloudberry finds them whatever the search path is.  Cloudberry's are
- * shared catalogs, and an extension can make none, so each database has
- * them as this script makes them there (gp_catalog.c).  PostgreSQL makes no
- * relation in pg_catalog unless allow_system_table_mods is on; a script's
- * setting lasts as long as the script.
+ * Cloudberry's catalogs, by Cloudberry's names and in its columns, where its
+ * own are: pg_catalog, so that a query written for Cloudberry finds them
+ * whatever the search path is.  The port keeps what they hold elsewhere --
+ * the cluster in a file, a table's distribution in its "gp" label -- and
+ * three of them are shared catalogs in Cloudberry, of which an extension can
+ * make none; so each database has them as this script makes them there
+ * (gp_catalog.c).  PostgreSQL makes no relation in pg_catalog unless
+ * allow_system_table_mods is on; a script's setting lasts as long as the
+ * script.
  */
 SET allow_system_table_mods = on;
 
@@ -188,8 +190,46 @@ CREATE TRIGGER gp_catalog_write_check
 	ON pg_catalog.gp_configuration_history
 	FOR EACH STATEMENT EXECUTE FUNCTION gp_internal.catalog_write_check();
 
+/*
+ * gp_distribution_policy: how each table's rows are spread, as its "gp"
+ * label records it (gp_policy.c), in Cloudberry's columns; on one node,
+ * nothing, as Cloudberry's single node keeps no policy.  A row written to it
+ * -- with allow_system_table_mods on, as Cloudberry's catalog is written --
+ * writes the label and moves no row, as Cloudberry's does not: its tests
+ * make a table of fewer segments so, and one on the coordinator alone by
+ * deleting its row.
+ */
+CREATE FUNCTION gp_internal.distribution_policy(
+	OUT localoid oid,
+	OUT policytype "char",
+	OUT numsegments int4,
+	OUT distkey int2vector,
+	OUT distclass oidvector)
+RETURNS SETOF record
+AS 'MODULE_PATHNAME', 'gp_catalog_distribution_policy'
+LANGUAGE C STRICT STABLE;
+
+CREATE VIEW pg_catalog.gp_distribution_policy AS
+	SELECT * FROM gp_internal.distribution_policy();
+
+CREATE FUNCTION gp_internal.distribution_policy_write()
+RETURNS trigger
+AS 'MODULE_PATHNAME', 'gp_catalog_distribution_policy_write'
+LANGUAGE C;
+
+CREATE TRIGGER gp_catalog_write_check
+	BEFORE INSERT OR UPDATE OR DELETE
+	ON pg_catalog.gp_distribution_policy
+	FOR EACH STATEMENT EXECUTE FUNCTION gp_internal.catalog_write_check();
+
+CREATE TRIGGER gp_distribution_policy_write
+	INSTEAD OF INSERT OR UPDATE OR DELETE
+	ON pg_catalog.gp_distribution_policy
+	FOR EACH ROW EXECUTE FUNCTION gp_internal.distribution_policy_write();
+
 GRANT SELECT ON pg_catalog.gp_id, pg_catalog.gp_segment_configuration,
-	pg_catalog.gp_configuration_history TO PUBLIC;
+	pg_catalog.gp_configuration_history, pg_catalog.gp_distribution_policy
+	TO PUBLIC;
 
 RESET allow_system_table_mods;
 

@@ -823,6 +823,57 @@ mine" ] && ok "a transaction reads its own rows, and a LIMIT leaves the connecti
 		&& ok "ALTER TABLE ... SET DISTRIBUTED keeps it on its segments" \
 		|| notok "a partial table redistributed" "$out / $w1 $w2"
 
+	# gp_distribution_policy: the labels in Cloudberry's catalog's columns,
+	# and written through it, as that is (gp_catalog.c).
+	int4_ops=$(q 0 "SELECT c.oid FROM pg_opclass c JOIN pg_am a ON a.oid = c.opcmethod WHERE a.amname = 'hash' AND c.opcname = 'int4_ops';")
+	out=$(q 0 "SELECT format('%s %s %s %s %s', localoid::regclass, policytype, numsegments, distkey, distclass) FROM gp_distribution_policy WHERE localoid IN ('d'::regclass, 'pt1'::regclass, 'pr1'::regclass, 'pn1'::regclass) ORDER BY 1;" | tr '\n' '/')
+	[ "$out" = "d p 2 1 $int4_ops/pn1 p 1  /pr1 r 1  /pt1 p 1 2 $int4_ops/" ] \
+		&& ok "gp_distribution_policy shows each table's policy as Cloudberry's catalog does" \
+		|| notok "gp_distribution_policy" "$out"
+
+	q 0 "CREATE TABLE dp (a int, b int) DISTRIBUTED BY (a);" >/dev/null
+	out=$(q 0 "DELETE FROM gp_distribution_policy WHERE localoid = 0;")
+	out2=$(printf '%s\n' "SET allow_system_table_mods = on;" \
+		"UPDATE gp_distribution_policy SET numsegments = 1 WHERE localoid = 'dp'::regclass;" \
+		"SELECT numsegments FROM gp.policy('dp');" \
+		"UPDATE gp_distribution_policy SET distkey = '', distclass = '' WHERE localoid = 'dp'::regclass;" \
+		"SELECT kind FROM gp.policy('dp');" \
+		"DELETE FROM gp_distribution_policy WHERE localoid = 'dp'::regclass;" \
+		"SELECT count(*) FROM gp_distribution_policy WHERE localoid = 'dp'::regclass;" \
+		"INSERT INTO dp VALUES (1, 1), (2, 2);" | qf 0 | tr '\n' '/')
+	w0=$(q 0 "SELECT count(*) FROM dp;"); w1=$(q 1 "SELECT count(*) FROM dp;")
+	p1=$(q 1 "SELECT count(*) FROM gp_distribution_policy WHERE localoid = 'dp'::regclass;")
+	case "$out|$out2|$w0 $w1 $p1" in
+		*'permission denied: "gp_distribution_policy" is a system catalog'*"|1/random/0/|2 0 0")
+			ok "a write to it, with allow_system_table_mods, is the policy's, on every node; a deleted one leaves the table to the coordinator" ;;
+		*) notok "writes to gp_distribution_policy" "$out / $out2 / $w0 $w1 $p1" ;;
+	esac
+
+	q 0 "SET allow_system_table_mods = on; INSERT INTO gp_distribution_policy SELECT 'dp'::regclass, 'p', 5, '1', '';" >/dev/null
+	out=$(q 0 "SELECT numsegments FROM gp_distribution_policy WHERE localoid = 'dp'::regclass;")
+	out2=$(q 0 "SELECT count(*) FROM dp;" | tr '\n' '/')
+	out3=$(q 0 "SET allow_system_table_mods = on; UPDATE gp_distribution_policy SET numsegments = 2, distclass = (SELECT c.oid FROM pg_opclass c JOIN pg_am a ON a.oid = c.opcmethod WHERE a.amname = 'hash' AND c.opcname = 'int8_ops')::text::oidvector WHERE localoid = 'dp'::regclass;")
+	case "$out|$out2|$out3" in
+		"5|ERROR:  cannot access table \"dp\" in current transaction/DETAIL:  Its distribution policy spreads it over 5 segments, and the cluster has 2./|"*'column "a" of a distribution key can be hashed only with its type'"'"'s default operator class'*)
+			ok "a policy of more segments than the cluster has is refused where the table is read; another operator class, where it is written" ;;
+		*) notok "gp_distribution_policy's refusals" "$out / $out2 / $out3" ;;
+	esac
+
+	# The label names the key's columns, where Cloudberry's catalog numbers
+	# them: a column renamed is renamed in it, and one dropped from the key
+	# leaves the table random, as Cloudberry leaves it.
+	q 0 "CREATE TABLE kc (a int, b int, c int) DISTRIBUTED BY (a, b) PARTITION BY RANGE (c) (START (1) END (3) EVERY (1));" >/dev/null
+	q 0 "INSERT INTO kc SELECT g, g, 1 + g % 2 FROM generate_series(1, 20) g;" >/dev/null
+	q 0 "ALTER TABLE kc RENAME COLUMN a TO \"A a\";" >/dev/null
+	kc="SELECT string_agg(gp_sql.distribution(c.oid), ' ' ORDER BY c.relname) FROM pg_class c WHERE c.relname LIKE 'kc%' AND c.relkind IN ('r', 'p');"
+	out=$(q 0 "$kc"); out2=$(q 1 "$kc")
+	out3=$(q 0 "ALTER TABLE kc DROP COLUMN b;")
+	out4=$(q 0 "$kc"); out5=$(q 2 "$kc"); out6=$(q 0 "SELECT count(*), sum(\"A a\") FROM kc;")
+	n=$(printf '%s\n' "$out3" | grep -c "dropping a column that is part of the distribution policy forces a random distribution policy")
+	[ "$out|$out2|$n|$out4|$out5|$out6" = '("A a",b) ("A a",b) ("A a",b)|("A a",b) ("A a",b) ("A a",b)|3|random random random|random random random|20|210' ] \
+		&& ok "a key column renamed is renamed in the policy; one dropped leaves the table random, with Cloudberry's NOTICE" \
+		|| notok "the key's columns renamed and dropped" "$out / $out2 / $out3 / $out4 / $out5 / $out6"
+
 	###########################################################################
 	echo "9. ANALYZE samples the segments, and the planner believes it"
 	###########################################################################
@@ -1531,6 +1582,10 @@ if "$BINDIR/pg_ctl" -D "$d" -l "$ROOT/node0.log" -w -t 30 start >/dev/null 2>&1;
 	out=$(q 0 "SELECT dbid, content, role, mode, status, port, datadir = current_setting('data_directory') FROM gp_segment_configuration;")
 	[ "$out" = "1|-1|p|n|u|$(port 0)|t" ] && ok "gp_segment_configuration lists the one node, as Cloudberry's single node does" \
 		|| notok "gp_segment_configuration with no cluster" "$out"
+
+	out=$(q 0 "SELECT count(*) FROM gp_distribution_policy;")
+	[ "$out" = "0" ] && ok "and gp_distribution_policy none, whatever the labels say" \
+		|| notok "gp_distribution_policy with no cluster" "$out"
 
 	out=$(q 0 "CREATE TABLE sn (a int); INSERT INTO sn VALUES (1), (2); SELECT DISTINCT gp_segment_id FROM sn;")
 	[ "$out" = "-1" ] && ok "gp_segment_id is -1, as on Cloudberry's single node" \

@@ -441,6 +441,13 @@ gp_sql_object_access(ObjectAccessType access, Oid classId, Oid objectId,
 	if (prev_object_access)
 		prev_object_access(access, classId, objectId, subId, arg);
 
+	/* a table's column dropped: the distribution key follows it */
+	if (access == OAT_DROP && classId == RelationRelationId && subId > 0)
+	{
+		GpDistributionColumnDropped(objectId, (AttrNumber) subId);
+		return;
+	}
+
 	if (subId != 0)
 		return;
 
@@ -1121,6 +1128,26 @@ gp_sql_ProcessUtility(PlannedStmt *pstmt, const char *queryString,
 			}
 			((GrantStmt *) parsetree)->objects = objects;
 		}
+	}
+
+	/* a table's column renamed: so is the distribution key's */
+	if (IsA(parsetree, RenameStmt) &&
+		((RenameStmt *) parsetree)->renameType == OBJECT_COLUMN &&
+		((RenameStmt *) parsetree)->relation != NULL)
+	{
+		RenameStmt *rs = (RenameStmt *) parsetree;
+		Oid			relid = RangeVarGetRelid(rs->relation, NoLock, true);
+		char	   *oldname = pstrdup(rs->subname);
+		char	   *newname = pstrdup(rs->newname);
+
+		GpSqlProcessUtilityNext(pstmt, queryString, readOnlyTree, context,
+								params, queryEnv, dest, qc);
+		if (OidIsValid(relid))
+		{
+			CommandCounterIncrement();
+			GpDistributionColumnRenamed(relid, oldname, newname);
+		}
+		return;
 	}
 
 	/*

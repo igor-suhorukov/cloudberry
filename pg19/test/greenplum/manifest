@@ -11,7 +11,7 @@
 # The schedule's other tests -- append-optimized and column-oriented tables,
 # external tables, resource queues and groups, fault injection, FTS, the
 # interconnect's settings -- need M3 to M7, and are not listed.
-skip gp_create_table  relation "distrand" already exists; relation "gp_distribution_policy" does not exist
+skip gp_create_table  relation "distrand" already exists; relation "foo" already exists
 skip gpdist  gp_segment_id of randomly distributed table "pt" is known only on its segments; relation "distby_with_constraint" already exists
 skip gpdist_opclasses  column "abs_int_hash_ops" of the distribution policy of "abstab_a" does not exist; column "abs_int_hash_ops" of the distribution policy of "abstab_b" does no...
 skip gpctas  unrecognized parameter "appendonly"; relation "ctas_aocs" does not exist
@@ -38,7 +38,7 @@ skip motion_gp  row is too big: size 10032, maximum size 8160; unrecognized para
 run  gp_pullup_expr
 run  with_clause
 run  gpparams
-skip subselect_gp  relation "gp_distribution_policy" does not exist; unrecognized parameter "appendonly"
+skip subselect_gp  unrecognized parameter "appendonly"; relation "t3cozlib" does not exist
 skip subselect_gp2  syntax error at or near "EXTERNAL"; relation "echotable" does not exist
 skip gp_dqa  access method "ao_row" does not exist; relation "t_issue_659" does not exist
 run  gp_distinct_plans
@@ -48,10 +48,10 @@ skip olap_window_seq  DISTINCT is not implemented for window functions; cannot c
 skip partition  syntax error at or near "only"; access method "ao_row" does not exist
 skip partition1  access method "ao_row" does not exist; relation "foz" does not exist
 skip partition_ddl  access method "ao_row" does not exist; relation "mpp3045_hhh" does not exist
-skip partition_pruning  column "col1" of the distribution policy of "pt_lt_tab_1_prt_part1" does not exist; column "col1" of the distribution policy of "pt_lt_tab_1_prt_part5" does ...
+skip partition_pruning  access method "bitmap" does not exist; language "plpython3u" does not exist
 skip partition_prune_opfamily  language "plpython3u" does not exist; function abseq4(integer, integer) does not exist
 skip alter_distpol_dropped  unrecognized parameter "appendonly"; current transaction is aborted, commands ignored until end of transaction block
-skip create_table_distpol  relation "gp_distribution_policy" does not exist; current transaction is aborted, commands ignored until end of transaction block
+skip create_table_distpol  differs: CREATE TABLE AS takes its key from its first column where Cloudberry takes the query's, and DISTRIBUTED BY a column whose type has no hash operator class is accepted
 skip alter_distribution_policy  unrecognized distribution policy "()"; column "m" of the distribution policy of "atsdb" does not exist
 skip DML_over_joins  cannot specify storage parameters for a partitioned table; relation "sales_par_co" does not exist
 skip bfv_joins  column "cdbhash_float4_ops" of the distribution policy of "gp_float1" does not exist; column "cdbhash_float4_ops" of the distribution policy of "gp_float2" d...
@@ -78,7 +78,7 @@ skip rpt  relation "child" already exists; cannot drop table parent_rep because 
 skip rpt_joins  cannot DELETE FROM distributed table "t3" this way yet; cannot DELETE FROM distributed table "t_17460" this way yet
 skip namespace_gp  syntax error at or near "DISTRIBUTED"; relation "test_schema_1.abc" does not exist
 skip truncate_gp  language "plpython3u" does not exist; syntax error at or near "row"
-skip gp_rules  relation "gp_distribution_policy" does not exist; unrecognized parameter "appendonly"
+skip gp_rules  unrecognized parameter "appendonly"; relation "aotable_to_view_test1" does not exist
 run  as_alias
 skip indexjoin  unrecognized parameter "appendonly"; relation "with_index_table" does not exist
 skip transient_types  could not access file "regress.so": No such file or directory; function assign_new_record() does not exist
