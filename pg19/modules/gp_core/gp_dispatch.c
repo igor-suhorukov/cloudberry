@@ -71,6 +71,9 @@
 #include "access/htup_details.h"
 #include "access/table.h"
 #include "access/xact.h"
+#include "catalog/catalog.h"
+#include "catalog/objectaddress.h"
+#include "commands/seclabel.h"
 #include "catalog/namespace.h"
 #include "catalog/pg_type.h"
 #include "commands/dbcommands.h"
@@ -101,6 +104,7 @@
 #include "gp_cluster.h"
 #include "gp_core_api.h"
 #include "gp_dispatch.h"
+#include "gp_label.h"
 
 /* Where libpq finds the password for the segments; see the file header. */
 static char *gp_internal_passfile = NULL;
@@ -1412,6 +1416,76 @@ isolation_level_name(void)
 }
 
 /*
+ * The objects whose "gp" label this transaction changed and the segments have
+ * not been sent yet.  What is sent is the label as it is when it is sent --
+ * a savepoint rolled back, an object dropped, both come out right -- so an
+ * object is noted once however often it changes.  In the transaction's
+ * memory, and forgotten when it ends.
+ */
+static List *labels_pending = NIL;	/* of ObjectAddress * */
+static bool labels_held = false;	/* a DDL tree is on its way */
+
+void
+GpDispatchNoteLabel(const ObjectAddress *object)
+{
+	ListCell   *lc;
+	ObjectAddress *copy;
+	MemoryContext oldcxt;
+
+	/*
+	 * Only what the coordinator changes, and only where there are segments.
+	 * A shared object's label is not the segments' business: a tablespace,
+	 * for one, is this node's alone.
+	 */
+	if (GpClusterIsSingleNode() || GpClusterBackendRole() != GP_ROLE_DISPATCH ||
+		IsSharedRelation(object->classId))
+		return;
+
+	foreach(lc, labels_pending)
+	{
+		ObjectAddress *o = (ObjectAddress *) lfirst(lc);
+
+		if (o->classId == object->classId && o->objectId == object->objectId &&
+			o->objectSubId == object->objectSubId)
+			return;
+	}
+
+	oldcxt = MemoryContextSwitchTo(TopTransactionContext);
+	copy = palloc_object(ObjectAddress);
+	*copy = *object;
+	labels_pending = lappend(labels_pending, copy);
+	MemoryContextSwitchTo(oldcxt);
+}
+
+/*
+ * Send the segments the labels noted since they were last sent, each as the
+ * SECURITY LABEL that writes it.  Inside the segments' transaction, so that
+ * they commit or roll back with the coordinator's own.
+ */
+static void
+gang_sync_labels(GpGang *g)
+{
+	List	   *pending = labels_pending;
+	ListCell   *lc;
+
+	if (labels_held || pending == NIL)
+		return;
+	labels_pending = NIL;
+
+	foreach(lc, pending)
+	{
+		ObjectAddress *o = (ObjectAddress *) lfirst(lc);
+		char	   *payload = GpDdlLabelPayload(o, GetSecurityLabel(o, GP_LABEL_PROVIDER));
+
+		if (payload == NULL)
+			continue;
+		gang_send_all(g, payload);
+		gang_wait_all(g, NULL, false);
+		pfree(payload);
+	}
+}
+
+/*
  * Get the segments ready for a statement: the settings it depends on, and --
  * unless it is one that runs in a transaction of its own -- the coordinator's
  * transaction, down to the savepoint it is being run in.
@@ -1450,6 +1524,8 @@ gang_prepare(GpGang *g, bool in_xact)
 		gang_wait_all(g, NULL, false);
 		gang_xact_depth++;
 	}
+
+	gang_sync_labels(g);
 }
 
 static void
@@ -1467,6 +1543,13 @@ dispatch_xact_callback(XactEvent event, void *arg)
 						 errmsg("lost the segments' part of this transaction"),
 						 errdetail("A connection to a segment closed while the transaction was open.")));
 			}
+
+			/*
+			 * Labels no statement has carried to the segments yet go now,
+			 * in their transaction -- opening it, if nothing else did.
+			 */
+			if (labels_pending != NIL)
+				gang_prepare(gang_get(), true);
 
 			/*
 			 * Before the coordinator commits: raising here still undoes the
@@ -1515,6 +1598,13 @@ dispatch_xact_callback(XactEvent event, void *arg)
 			gang_xact_lost = false;
 			gang_forget_settings();
 			streams_release();
+			labels_pending = NIL;
+			break;
+
+		case XACT_EVENT_COMMIT:
+		case XACT_EVENT_PARALLEL_COMMIT:
+			/* sent at PRE_COMMIT; the memory goes with the transaction */
+			labels_pending = NIL;
 			break;
 
 		default:
@@ -1602,9 +1692,25 @@ GpDispatchUtility(const char *payload, bool own_xact)
 {
 	GpGang	   *g = gang_get();
 
-	gang_prepare(g, !own_xact);
+	/*
+	 * A label the statement wrote may be of an object the statement makes --
+	 * an extension's script labels its tables -- which the segments have
+	 * only once they have run it.  So the labels follow it.
+	 */
+	labels_held = true;
+	PG_TRY();
+	{
+		gang_prepare(g, !own_xact);
+	}
+	PG_FINALLY();
+	{
+		labels_held = false;
+	}
+	PG_END_TRY();
 	gang_send_all(g, payload);
 	gang_wait_all(g, NULL, false);
+	if (!own_xact)
+		gang_sync_labels(g);
 }
 
 /*

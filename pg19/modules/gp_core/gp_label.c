@@ -32,6 +32,7 @@
 #include "lib/stringinfo.h"
 #include "utils/builtins.h"
 
+#include "gp_dispatch.h"
 #include "gp_label.h"
 
 static const struct
@@ -275,6 +276,9 @@ GpLabelSet(const ObjectAddress *object, GpLabelKey key, const char *value)
 	/* An object with nothing left to say loses its label entirely. */
 	SetSecurityLabel(object, GP_LABEL_PROVIDER, buf.len > 0 ? buf.data : NULL);
 	pfree(buf.data);
+
+	/* The segments are told, as they are of the catalogs a statement changes. */
+	GpDispatchNoteLabel(object);
 
 	/*
 	 * Setting two keys of one object is two writes to the same row, and the

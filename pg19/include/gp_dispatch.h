@@ -205,6 +205,21 @@ extern void GpStreamEnd(GpStream *stream);
 extern void GpDispatchResetGang(void);
 
 /* Defines the settings; called from gp_core's _PG_init. */
+/*
+ * An object whose "gp" label the coordinator changed: the segments are sent
+ * its label before the next statement they run, after the DDL being sent if
+ * one is, and before the transaction commits.
+ */
+struct ObjectAddress;
+extern void GpDispatchNoteLabel(const struct ObjectAddress *object);
+
+/*
+ * The DDL payload that writes an object's "gp" label on a segment, or NULL;
+ * see gp_ddl.c.
+ */
+extern char *GpDdlLabelPayload(const struct ObjectAddress *object,
+							   const char *label);
+
 extern void GpDispatchInit(void);
 
 /* Installs the DDL dispatch hooks, where there is a cluster; see gp_ddl.c. */

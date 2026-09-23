@@ -2103,6 +2103,17 @@ gpdb::GetDistributionPolicy(Relation rel)
 			return nullptr;
 		}
 
+		// On a segment every relation is the segment's share of it, and a
+		// query planned there reads that share: a function in a fragment,
+		// a utility session.  The label says how the rows are spread, and a
+		// segment has it too, but a plan made there has no Motion to
+		// dispatch -- so every relation is the coordinator-only kind there,
+		// as it was when only the coordinator had the label.
+		if (GpIdentity_segindex >= 0)
+		{
+			return nullptr;
+		}
+
 		// Cloudberry reads gp_distribution_policy; the port reads the "gp"
 		// security label, which is what replaces that catalog.  Either way
 		// this is the answer ORCA's relcache translator asks of every

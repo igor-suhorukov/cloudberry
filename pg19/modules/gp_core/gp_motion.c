@@ -2976,11 +2976,19 @@ motion_executor_run(QueryDesc *queryDesc, ScanDirection direction,
  * if it were the table.  Cloudberry refuses such a query on a QE unless it
  * reads only catalogs and replicated tables, and only reads
  * (querytree_safe_for_qe(), executor/functions.c); so does the port, with
- * Cloudberry's words -- and replicated tables refused too, because a
- * segment does not know a table's distribution: the "gp" label that says it
- * is kept on the coordinator.  A statement the coordinator dispatched itself
- * is planned before any fragment runs, and is not affected.
+ * Cloudberry's words.  A segment knows which tables are replicated from the
+ * "gp" label, which the coordinator sends it whenever it changes one
+ * (gp_dispatch.c).  A statement the coordinator dispatched itself is planned
+ * before any fragment runs, and is not affected.
  */
+static bool
+is_replicated(Oid relid)
+{
+	GpPolicy   *policy = GpPolicyGet(relid);
+
+	return policy != NULL && GpPolicyIsReplicated(policy);
+}
+
 static bool
 fragment_safe_walker(Node *node, void *context)
 {
@@ -3005,7 +3013,8 @@ fragment_safe_walker(Node *node, void *context)
 			if (rte->rtekind != RTE_RELATION)
 				continue;
 			nsp = get_rel_namespace(rte->relid);
-			if (!IsCatalogNamespace(nsp) && !IsToastNamespace(nsp))
+			if (!IsCatalogNamespace(nsp) && !IsToastNamespace(nsp) &&
+				!is_replicated(rte->relid))
 				ereport(ERROR,
 						(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
 						 errmsg("function cannot execute on a QE slice because it accesses relation \"%s.%s\"",

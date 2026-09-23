@@ -68,6 +68,8 @@
 #include "catalog/catalog.h"
 #include "catalog/namespace.h"
 #include "catalog/pg_namespace.h"
+#include "parser/parse_type.h"
+#include "catalog/objectaddress.h"
 #include "commands/defrem.h"
 #include "commands/vacuum.h"
 #include "miscadmin.h"
@@ -83,6 +85,7 @@
 #include "gp_cluster.h"
 #include "gp_core_api.h"
 #include "gp_dispatch.h"
+#include "gp_label.h"
 
 /*
  * What a dispatched statement's text starts with.  Only a dispatched backend
@@ -476,6 +479,71 @@ build_payload(const char *tree)
 	appendStringInfoString(&buf, tree);
 
 	return buf.data;
+}
+
+/*
+ * A "gp" label as the coordinator has it, as the SECURITY LABEL statement a
+ * segment is sent to write it -- a parse tree, as every dispatched statement
+ * is, so that it needs nothing installed there and is checked there as
+ * SECURITY LABEL checks one: the provider's keys, and that the user owns
+ * the object.  NULL for an object that is gone, or of a kind no "gp" label is
+ * put on.
+ */
+char *
+GpDdlLabelPayload(const ObjectAddress *object, const char *label)
+{
+	SecLabelStmt *stmt;
+	List	   *objname = NIL;
+	List	   *objargs = NIL;
+	List	   *names = NIL;
+	ListCell   *lc;
+
+	if (getObjectIdentityParts(object, &objname, &objargs, true) == NULL)
+		return NULL;
+	foreach(lc, objname)
+		names = lappend(names, makeString((char *) lfirst(lc)));
+
+	stmt = makeNode(SecLabelStmt);
+	stmt->objtype = object->objectSubId != 0 ? OBJECT_COLUMN
+		: get_object_type(object->classId, object->objectId);
+	switch (stmt->objtype)
+	{
+		case OBJECT_TABLE:
+		case OBJECT_VIEW:
+		case OBJECT_MATVIEW:
+		case OBJECT_FOREIGN_TABLE:
+		case OBJECT_SEQUENCE:
+		case OBJECT_COLUMN:
+			stmt->object = (Node *) names;
+			break;
+		case OBJECT_SCHEMA:
+			stmt->object = (Node *) linitial(names);
+			break;
+		case OBJECT_FUNCTION:
+		case OBJECT_PROCEDURE:
+		case OBJECT_AGGREGATE:
+			{
+				ObjectWithArgs *owa = makeNode(ObjectWithArgs);
+
+				owa->objname = names;
+				foreach(lc, objargs)
+					owa->objargs = lappend(owa->objargs,
+										   typeStringToTypeName((char *) lfirst(lc),
+																NULL));
+				stmt->object = (Node *) owa;
+				break;
+			}
+		case OBJECT_TYPE:
+		case OBJECT_DOMAIN:
+			stmt->object = (Node *) makeTypeNameFromNameList(names);
+			break;
+		default:
+			return NULL;
+	}
+	stmt->provider = pstrdup(GP_LABEL_PROVIDER);
+	stmt->label = label != NULL ? pstrdup(label) : NULL;
+
+	return psprintf("%s" "oids=\n%s", GP_TREE_MARKER, nodeToString(stmt));
 }
 
 /*

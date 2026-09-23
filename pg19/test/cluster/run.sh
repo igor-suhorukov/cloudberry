@@ -1097,6 +1097,38 @@ COMMIT;"
 		*) notok "a function reading a table on a segment" "$out" ;;
 	esac
 
+	# A segment knows each table's distribution: the coordinator sends it
+	# every "gp" label it changes, in the statement's transaction.
+	q 0 "CREATE TABLE lp (a int, b int) DISTRIBUTED BY (b);" >/dev/null
+	q 0 "CREATE TABLE lr (k int, v text) DISTRIBUTED REPLICATED;" >/dev/null
+	q 0 "INSERT INTO lr SELECT i, 'r' || i FROM generate_series(1, 10) i;" >/dev/null
+	out=""
+	for n in 0 1 2; do
+		out="$out$(q "$n" "SELECT gp_sql.distribution('lp') || ' ' || gp_sql.distribution('lr');")/"
+	done
+	[ "$out" = "(b) replicated/(b) replicated/(b) replicated/" ] \
+		&& ok "every segment has the coordinator's policy of a table CREATE TABLE made" \
+		|| notok "a table's policy on the segments" "$out"
+
+	q 0 "ALTER TABLE lp SET DISTRIBUTED BY (a);" >/dev/null
+	out=$(printf '%s\n' "BEGIN;" "ALTER TABLE lp SET DISTRIBUTED RANDOMLY;" "ROLLBACK;" \
+		"BEGIN;" "SAVEPOINT s;" "ALTER TABLE lp SET DISTRIBUTED REPLICATED;" \
+		"ROLLBACK TO SAVEPOINT s;" "COMMIT;" | qf 0 >/dev/null; \
+		for n in 1 2; do q "$n" "SELECT gp_sql.distribution('lp');"; done | tr '\n' ' ')
+	[ "$out" = "(a) (a) " ] \
+		&& ok "ALTER TABLE ... SET DISTRIBUTED reaches the segments, and a rolled-back one does not" \
+		|| notok "a changed policy on the segments" "$out"
+
+	q 0 "CREATE FUNCTION lr_v(int) RETURNS text LANGUAGE sql STABLE AS 'SELECT v FROM lr WHERE k = \$1';" >/dev/null
+	n=$(q 0 "SELECT count(*) FROM o;")
+	out=$(printf '%s\n' "SET gp.optimizer_trace_fallback = on;" \
+		"SELECT count(*), count(lr_v(a % 10 + 1)) FROM o;" | qf 0)
+	case "$out" in
+		*"fallback"*|*"QE slice"*) notok "a function in a fragment reading a replicated table" "$out" ;;
+		"$n|$n") ok "a function in a fragment may read a replicated table, which every segment holds whole" ;;
+		*) notok "a function in a fragment reading a replicated table" "$out" ;;
+	esac
+
 	# A segment takes a plan only from a connection with the secret.
 	frag="SELECT gp_internal.exec_fragment('{PLANNEDSTMT :commandType 1}', '');"
 	for opts in "-c gp.qe_identity=seg0/dbid1/sess1" \
