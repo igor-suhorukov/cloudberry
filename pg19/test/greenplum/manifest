@@ -46,7 +46,7 @@ run  gp_distinct_plans
 run  olap_setup
 skip olap_group  function group_id() does not exist
 skip olap_window_seq  DISTINCT is not implemented for window functions; cannot copy window "win1" because it has a frame clause
-skip partition  cannot accept a value of type pg_node_tree; syntax error at or near "only"
+skip partition  syntax error at or near "only"; access method "ao_row" does not exist
 skip partition1  access method "ao_row" does not exist; relation "foz" does not exist
 skip partition_ddl  access method "ao_row" does not exist; relation "mpp3045_hhh" does not exist
 skip partition_pruning  column "col1" of the distribution policy of "pt_lt_tab_1_prt_part1" does not exist; column "col1" of the distribution policy of "pt_lt_tab_1_prt_part5" does ...

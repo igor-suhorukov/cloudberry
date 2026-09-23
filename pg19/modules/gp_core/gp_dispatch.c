@@ -1867,7 +1867,7 @@ GpDispatchWriteOnContent(int content, const char *sql, int nparams,
 			{
 				Oid			func;
 
-				getTypeInputInfo(TupleDescAttr(tupdesc, j)->atttypid, &func,
+				getTypeInputInfo(GpTransferType(TupleDescAttr(tupdesc, j)->atttypid), &func,
 								 &ioparams[j]);
 				fmgr_info(func, &in[j]);
 			}
@@ -2075,6 +2075,74 @@ struct GpGatherState
  * calls the element's send function, and fails at the first row if there is
  * none, which is too late to fall back to text.
  */
+/*
+ * The type a value of this type travels as between the nodes.  Most travel
+ * as themselves.  A few refuse to be read back, on purpose, by either input
+ * or receive -- a node tree, the extended statistics' values -- because
+ * nothing may make one from outside; each is binary-coercible to text or
+ * bytea (pg_cast), with the same bytes, so it travels as that and is kept
+ * as it arrives.  pg_catalog's pg_class.relpartbound and pg_rewrite.ev_action
+ * are among them, which gp.dist_random() of a catalog reads.
+ */
+Oid
+GpTransferType(Oid type)
+{
+	switch (type)
+	{
+		case PG_NODE_TREEOID:
+			return TEXTOID;
+		case PG_NDISTINCTOID:
+		case PG_DEPENDENCIESOID:
+		case PG_MCV_LISTOID:
+			return BYTEAOID;
+		default:
+			return type;
+	}
+}
+
+/*
+ * A column as a segment's query is to produce it: the cast to what it
+ * travels as, where it needs one.
+ */
+void
+GpAppendTransferColumn(StringInfo buf, const char *column, Oid type)
+{
+	Oid			transfer = GpTransferType(type);
+
+	appendStringInfoString(buf, column);
+	if (transfer != type)
+		appendStringInfo(buf, "::pg_catalog.%s", transfer == TEXTOID ? "text" : "bytea");
+}
+
+/*
+ * "SELECT" and every column of the relation, as "*" would give them, each
+ * cast to what it travels as.
+ */
+char *
+GpTransferSelectList(TupleDesc tupdesc)
+{
+	StringInfoData buf;
+	bool		first = true;
+
+	initStringInfo(&buf);
+	appendStringInfoString(&buf, "SELECT ");
+	for (int i = 0; i < tupdesc->natts; i++)
+	{
+		Form_pg_attribute att = TupleDescAttr(tupdesc, i);
+
+		if (att->attisdropped)
+			continue;
+		if (!first)
+			appendStringInfoString(&buf, ", ");
+		GpAppendTransferColumn(&buf, quote_identifier(NameStr(att->attname)),
+							   att->atttypid);
+		first = false;
+	}
+	if (first)
+		appendStringInfoString(&buf, "*");
+	return buf.data;
+}
+
 static bool
 type_has_binary_io(Oid typid)
 {
@@ -2083,6 +2151,7 @@ type_has_binary_io(Oid typid)
 	bool		result;
 	Oid			inner = InvalidOid;
 
+	typid = GpTransferType(typid);
 	tp = SearchSysCache1(TYPEOID, ObjectIdGetDatum(typid));
 	if (!HeapTupleIsValid(tp))
 		elog(ERROR, "cache lookup failed for type %u", typid);
@@ -2163,9 +2232,9 @@ GpGatherStartOn(const char *sql, TupleDesc tupdesc, int content)
 		if (att->attisdropped)
 			continue;
 		if (gather->binary)
-			getTypeBinaryInputInfo(att->atttypid, &proc, &ioparam);
+			getTypeBinaryInputInfo(GpTransferType(att->atttypid), &proc, &ioparam);
 		else
-			getTypeInputInfo(att->atttypid, &proc, &ioparam);
+			getTypeInputInfo(GpTransferType(att->atttypid), &proc, &ioparam);
 		fmgr_info(proc, &gather->columns[i].proc);
 		gather->columns[i].ioparam = ioparam;
 		gather->columns[i].typmod = att->atttypmod;
@@ -2727,7 +2796,7 @@ gp_dist_random(PG_FUNCTION_ARGS)
 	}
 
 	initStringInfo(&sql);
-	appendStringInfo(&sql, "SELECT * FROM %s",
+	appendStringInfo(&sql, "%s FROM %s", GpTransferSelectList(tupdesc),
 					 GpDispatchRelationName(RelationGetRelid(rel)));
 
 	slot = MakeSingleTupleTableSlot(tupdesc, &TTSOpsVirtual);

@@ -558,7 +558,7 @@ gp_dist_random_segments(PG_FUNCTION_ARGS)
 	}
 
 	initStringInfo(&sql);
-	appendStringInfo(&sql, "SELECT * FROM %s",
+	appendStringInfo(&sql, "%s FROM %s", GpTransferSelectList(tupdesc),
 					 GpDispatchRelationName(RelationGetRelid(rel)));
 
 	values = palloc_array(Datum, natts + 1);

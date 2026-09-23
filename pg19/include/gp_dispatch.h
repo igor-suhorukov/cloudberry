@@ -43,6 +43,7 @@
 #include "postgres.h"
 
 #include "executor/tuptable.h"
+#include "lib/stringinfo.h"
 #include "utils/tuplestore.h"
 
 /*
@@ -107,6 +108,17 @@ extern void GpGatherEnd(GpGatherState *gather);
 /* The same, from one segment only: a replicated table's rows, or one key's. */
 extern GpGatherState *GpGatherStartOn(const char *sql, TupleDesc tupdesc,
 									  int content);
+
+/*
+ * The type a value travels between the nodes as: itself, or text or bytea
+ * for the few types that refuse to be read back (pg_node_tree and the
+ * extended statistics' values), each binary-coercible to it.  A column of
+ * a segment's query cast to it, and a query's select list of a relation's
+ * columns, as "*" gives them, each so cast.
+ */
+extern Oid	GpTransferType(Oid type);
+extern void GpAppendTransferColumn(StringInfo buf, const char *column, Oid type);
+extern char *GpTransferSelectList(TupleDesc tupdesc);
 
 /* Can every column of this descriptor travel in binary? */
 extern bool GpTupleDescHasBinaryIO(TupleDesc tupdesc);

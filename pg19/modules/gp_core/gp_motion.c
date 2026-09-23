@@ -930,10 +930,10 @@ motion_begin_sending(MotionState *state, EState *estate, int eflags,
 		bool		isvarlena;
 
 		if (state->send_binary)
-			getTypeBinaryOutputInfo(TupleDescAttr(tupdesc, i)->atttypid,
+			getTypeBinaryOutputInfo(GpTransferType(TupleDescAttr(tupdesc, i)->atttypid),
 									&proc, &isvarlena);
 		else
-			getTypeOutputInfo(TupleDescAttr(tupdesc, i)->atttypid,
+			getTypeOutputInfo(GpTransferType(TupleDescAttr(tupdesc, i)->atttypid),
 							  &proc, &isvarlena);
 		fmgr_info(proc, &state->outprocs[i]);
 	}
@@ -1269,10 +1269,10 @@ motion_begin(CustomScanState *node, EState *estate, int eflags)
 			Oid			proc;
 
 			if (state->binary)
-				getTypeBinaryInputInfo(TupleDescAttr(tupdesc, i)->atttypid,
+				getTypeBinaryInputInfo(GpTransferType(TupleDescAttr(tupdesc, i)->atttypid),
 									   &proc, &state->inparams[i]);
 			else
-				getTypeInputInfo(TupleDescAttr(tupdesc, i)->atttypid,
+				getTypeInputInfo(GpTransferType(TupleDescAttr(tupdesc, i)->atttypid),
 								 &proc, &state->inparams[i]);
 			fmgr_info(proc, &state->inprocs[i]);
 		}
@@ -1680,10 +1680,10 @@ motion_relay(MotionState *gather, CustomScan *motion)
 			bool		isvarlena;
 
 			if (binary)
-				getTypeBinaryOutputInfo(TupleDescAttr(tupdesc, i)->atttypid,
+				getTypeBinaryOutputInfo(GpTransferType(TupleDescAttr(tupdesc, i)->atttypid),
 										&proc, &isvarlena);
 			else
-				getTypeOutputInfo(TupleDescAttr(tupdesc, i)->atttypid,
+				getTypeOutputInfo(GpTransferType(TupleDescAttr(tupdesc, i)->atttypid),
 								  &proc, &isvarlena);
 			fmgr_info(proc, &outprocs[i]);
 		}

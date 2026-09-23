@@ -521,7 +521,8 @@ gather_plan(PlannerInfo *root, RelOptInfo *rel, CustomPath *best_path,
 							needed)))
 			appendStringInfoString(&sql, "NULL");
 		else
-			appendStringInfoString(&sql, quote_identifier(NameStr(att->attname)));
+			GpAppendTransferColumn(&sql, quote_identifier(NameStr(att->attname)),
+								   att->atttypid);
 	}
 
 	/*

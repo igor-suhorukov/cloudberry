@@ -1140,6 +1140,17 @@ COMMIT;"
 		*) notok "a function reading a table on a segment" "$out" ;;
 	esac
 
+	# A node tree and extended statistics refuse to be read back by input or
+	# receive; they travel as text and bytea, whose bytes they are.
+	q 0 "CREATE TABLE ntp (a int, b int) DISTRIBUTED BY (a) PARTITION BY RANGE (b) (START (1) END (3) EVERY (1));" >/dev/null
+	out=$(q 0 "SELECT count(*), count(DISTINCT relpartbound::text), count(DISTINCT gp_segment_id) FROM gp_dist_random('pg_class') WHERE relname LIKE 'ntp_1_prt%';")
+	q 0 "CREATE TABLE nts (a int, b int) DISTRIBUTED BY (a); INSERT INTO nts SELECT i % 10, i % 10 FROM generate_series(1, 1000) i; CREATE STATISTICS nts_s (ndistinct, mcv) ON a, b FROM nts;" >/dev/null
+	q 1 "ANALYZE nts;" >/dev/null
+	out2=$(q 0 "SELECT s.gp_segment_id, octet_length(stxdndistinct::bytea) > 0, octet_length(stxdmcv::bytea) > 0 FROM gp_dist_random('pg_statistic_ext_data') s JOIN pg_statistic_ext e ON e.oid = s.stxoid WHERE e.stxname = 'nts_s';")
+	[ "$out|$out2" = "4|2|2|0|t|t" ] \
+		&& ok "gp_dist_random() of a catalog reads its node trees and its statistics' values" \
+		|| notok "pg_node_tree and pg_ndistinct through gp_dist_random()" "$out / $out2"
+
 	# A segment knows each table's distribution: the coordinator sends it
 	# every "gp" label it changes, in the statement's transaction.
 	q 0 "CREATE TABLE lp (a int, b int) DISTRIBUTED BY (b);" >/dev/null
