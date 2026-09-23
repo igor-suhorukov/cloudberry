@@ -138,6 +138,9 @@ for pass in ${PASSES:-planner orca}; do
 		[ -s "$res.ini" ] && inits+=(--gpd_init "$res.ini")
 
 		gpdiff -U0 "${inits[@]}" "$exp" "$res" 2> /dev/null | perl "$HERE/../singlenode/canon.pl" > "$R/canon/$t.diff"
+		# A comparison that could not be made is a difference, never an empty one.
+		st=("${PIPESTATUS[@]}")
+		[ "${st[0]}" -le 1 ] && [ "${st[1]}" -eq 0 ] || echo "no comparison was made" >> "$R/canon/$t.diff"
 		name="$(basename "$exp" .out)"
 		dir="$HERE/cloudberry/$(dirname "$t")"
 		if [ ! -s "$R/canon/$t.diff" ] ||

@@ -120,6 +120,9 @@ for pass in ${PASSES:-planner orca}; do
 		canon="$WORK/$pass/canon/$name.diff"
 		mkdir -p "$(dirname "$canon")"
 		( cd "$TREE" && diff -U0 "$exp" "$obt" ) | perl "$HERE/../singlenode/canon.pl" > "$canon"
+		# A comparison that could not be made is a difference, never an empty one.
+		st=("${PIPESTATUS[@]}")
+		[ "${st[0]}" -le 1 ] && [ "${st[1]}" -eq 0 ] || echo "no comparison was made" >> "$canon"
 		if cmp -s "$canon" "$HERE/$pass/$name.diff"; then
 			reviewed=$((reviewed + 1)); rm -f "$canon"
 		else

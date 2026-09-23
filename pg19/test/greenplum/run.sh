@@ -195,6 +195,9 @@ cb=(-I HINT: -I CONTEXT: -I GP_IGNORE: --gpd_ignore_plans
 canon="$WORK/\$CB_DIFF_MODE/canon/\$name.diff"
 env PATH=/usr/bin:/bin perl "$WORK/gpdiff/gpdiff.pl" -U0 "\${cb[@]}" "\$exp" "\$res" 2> /dev/null |
 	perl "$HERE/../singlenode/canon.pl" > "\$canon"
+# A comparison that could not be made is a difference, never an empty one.
+st=("\${PIPESTATUS[@]}")
+[ "\${st[0]}" -le 1 ] && [ "\${st[1]}" -eq 0 ] || echo "no comparison was made" >> "\$canon"
 if [ ! -s "\$canon" ] || cmp -s "\$canon" "$HERE/cloudberry/\$name.\$CB_DIFF_MODE.diff" ||
    cmp -s "\$canon" "$HERE/cloudberry/\$name.diff"; then
 	rm -f "\$canon"

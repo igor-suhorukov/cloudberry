@@ -224,6 +224,9 @@ reviewed() {
 	canon="$WORK/\$CB_DIFF_MODE/canon/\$name.diff"
 	env PATH=/usr/bin:/bin perl "$WORK/gpdiff/gpdiff.pl" -U0 "\$@" "\$exp" "\$res" 2> /dev/null |
 		perl "$HERE/canon.pl" > "\$canon"
+	# A comparison that could not be made is a difference, never an empty one.
+	st=("\${PIPESTATUS[@]}")
+	[ "\${st[0]}" -le 1 ] && [ "\${st[1]}" -eq 0 ] || echo "no comparison was made" >> "\$canon"
 	if [ ! -s "\$canon" ] || cmp -s "\$canon" "\$dir/\$name.\$CB_DIFF_MODE.diff" ||
 	   cmp -s "\$canon" "\$dir/\$name.diff"; then
 		rm -f "\$canon"
