@@ -443,6 +443,9 @@ isl "a table CREATE SCHEMA makes takes its DISTRIBUTED BY" \
     SELECT gp_sql.distribution('dist_s.t'::regclass);" "(b)"
 refused "SET WITH (REORGANIZE = ...) alone is Cloudberry's too, refused on one node" \
         "ALTER TABLE combo SET WITH (REORGANIZE = true);" 'SET DISTRIBUTED BY not supported in utility mode'
+is "and REORGANIZE with no value is true, as a boolean option is" \
+   "SELECT gp_sql.desugar('ALTER TABLE t SET WITH (REORGANIZE) DISTRIBUTED BY (a)');" \
+   "ALTER TABLE t SET (gp.distributed_by = '(a)', gp.reorganize = 'true')"
 refused "Cloudberry reserves gp_ for system schemas" \
         "CREATE SCHEMA gp_mine;" 'unacceptable schema name "gp_mine"'
 

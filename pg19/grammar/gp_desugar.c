@@ -2494,7 +2494,7 @@ rw_partition_cmds(GpRewrite *rw)
 	{
 		/*
 		 * SET DISTRIBUTED BY (a) / RANDOMLY / REPLICATED, and SET WITH
-		 * (REORGANIZE = true|false) before one or alone:
+		 * (REORGANIZE [= true|false]) before one or alone:
 		 *	 -> SET (gp.distributed_by = '(a)', gp.reorganize = 'true')
 		 * which gp_sql's distribution.c takes out and carries out: the policy,
 		 * and on a cluster the rows moved to where it puts them.
@@ -2514,12 +2514,17 @@ rw_partition_cmds(GpRewrite *rw)
 			{
 				int			close = skip_parens(ts, j + 1);
 
-				/* WITH (REORGANIZE = value) */
+				/* WITH (REORGANIZE [= value]): alone, true, as a boolean option is */
 				for (int k = j + 2; k < close - 1; k++)
 				{
 					char	   *v;
 
-					if (tok_is(ts, k, "reorganize") || tok_is_char(ts, k, '='))
+					if (tok_is(ts, k, "reorganize"))
+					{
+						reorganize = "true";
+						continue;
+					}
+					if (tok_is_char(ts, k, '='))
 						continue;
 					/* true or 'true', on or 't': a boolean, however spelled */
 					v = rw_text(ts, k, k + 1);
