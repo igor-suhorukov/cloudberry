@@ -40,6 +40,8 @@ CREATE FUNCTION gp_probe.current_xids() RETURNS xid[]
   AS 'MODULE_PATHNAME', 'gp_probe_current_xids' LANGUAGE C;
 CREATE FUNCTION gp_probe.adopt_xids(xids xid[]) RETURNS void
   AS 'MODULE_PATHNAME', 'gp_probe_adopt_xids' LANGUAGE C STRICT;
+CREATE FUNCTION gp_probe.transaction_state() RETURNS bytea
+  AS 'MODULE_PATHNAME', 'gp_probe_transaction_state' LANGUAGE C;
 
 -- O27 and R3.
 CREATE FUNCTION gp_probe.matview_maintenance(open_it boolean) RETURNS boolean

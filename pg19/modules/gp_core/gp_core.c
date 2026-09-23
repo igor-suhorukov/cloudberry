@@ -52,6 +52,8 @@
 #include "gp_policy.h"
 #include "gp_scan.h"
 #include "gp_segment.h"
+#include "gp_share.h"
+#include "gp_ic.h"
 
 PG_MODULE_MAGIC_EXT(
 					.name = "gp_core",
@@ -97,6 +99,7 @@ static const GpCoreApi gp_core_api = {
 	.motion_make_dml = GpMotionMakeDml,
 	.split_make = GpSplitMake,
 	.split_modify_make = GpSplitModifyMake,
+	.motion_set_parent = GpMotionSetParent,
 };
 
 /*
@@ -162,6 +165,14 @@ _PG_init(void)
 	 * to see a query.
 	 */
 	GpMotionInit();
+
+	/*
+	 * The interconnect, and the shared snapshot its readers read the
+	 * writer's transaction through: several backends of a session on a
+	 * segment, one transaction.
+	 */
+	GpIcInit();
+	GpShareInit();
 
 	/*
 	 * gp_segment_id, through O10: the name, where no column has it, and its

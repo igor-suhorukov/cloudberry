@@ -459,6 +459,12 @@ GpClusterIsDispatched(void)
 	return gp_qe_identity != NULL && gp_qe_identity[0] != '\0';
 }
 
+const char *
+GpClusterQeIdentity(void)
+{
+	return gp_qe_identity != NULL ? gp_qe_identity : "";
+}
+
 int
 GpClusterBackendRole(void)
 {

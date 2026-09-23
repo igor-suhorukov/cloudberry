@@ -47,6 +47,18 @@
  * M3's, with distributed snapshots; until then, this closes every gap that
  * does not need them.
  *
+ * READERS.  A statement whose slices run at once needs more than one
+ * backend on a segment: the writer runs one slice, and each other slice runs
+ * on a reader -- Cloudberry's reader gangs -- which is one more connection of
+ * the session to the segment, with the writer's identity, kept for the
+ * session once opened.  A reader's transaction is its own, begun for each
+ * slice REPEATABLE READ and READ ONLY and read as a part of the writer's
+ * (gp_share.c), so the coordinator's transaction, its savepoints and its
+ * commit remain the writer's alone.  The readers are in the gang's wait set:
+ * a slice that fails on one fails whatever the coordinator is waiting for,
+ * and every reader is stopped and heard first, so that the error raised is
+ * the one that caused the rest.
+ *
  * Cloudberry sources this file stands in for:
  *	  src/backend/cdb/dispatcher/ (cdbdisp.c, cdbdisp_query.c, cdbconn.c,
  *	  cdbgang.c), less the parts that exist because Cloudberry speaks its own
@@ -139,13 +151,33 @@ typedef struct GpSegmentConn
 	 * else is sent; see conn_park().
 	 */
 	struct GpGatherSeg *fetching;
+
+	/* Where its backend receives a Motion's rows; NULL until asked. */
+	char	   *icaddress;
 } GpSegmentConn;
+
+/*
+ * A reader: one more backend on a segment, for a slice of a statement whose
+ * slices run at once.  Its transaction is its own, begun for each slice and
+ * read as a part of the writer's (gp_share.c); the connection is the
+ * session's, kept for the next statement.
+ */
+typedef struct GpReaderConn
+{
+	int			content;
+	PGconn	   *conn;			/* NULL once broken */
+	char	   *icaddress;
+	bool		busy;			/* its slice is running */
+	struct GpStream *stream;	/* the statement it is taken for */
+	char	   *sent[NUM_SYNCED_SETTINGS];
+} GpReaderConn;
 
 typedef struct GpGang
 {
 	int			nconns;
 	GpSegmentConn *conns;
 	WaitEventSet *wes;			/* MyLatch plus every connection's socket */
+	List	   *readers;		/* GpReaderConn, readers included in wes */
 
 	/* What the segments have been told of the settings above; NULL unknown. */
 	char	   *sent[NUM_SYNCED_SETTINGS];
@@ -179,7 +211,25 @@ typedef struct GpSegmentError
 	char	   *hint;
 } GpSegmentError;
 
+/* A statement whose slices run at once: the readers running them. */
+struct GpStream
+{
+	List	   *readers;		/* GpReaderConn, as they were added */
+	List	   *errors;			/* GpSegmentError, what they answered */
+};
+
+/* The ones running; in TopMemoryContext, as the readers point at them. */
+static List *active_streams = NIL;
+
+/* How many readers a segment may have for one session. */
+#define MAX_READERS_PER_SEGMENT	64
+
 static void gang_close(void);
+static void gang_build_wes(GpGang *g);
+static void readers_poll(void);
+static void streams_raise_if_failed(void);
+static void streams_release(void);
+static void readers_cancel_and_drain(List **errors);
 
 /*
  * What pg_stat_activity shows while this backend is waiting for a segment.
@@ -235,6 +285,13 @@ gang_close(void)
 			libpqsrv_disconnect(gang->conns[i].conn);
 			gang->conns[i].conn = NULL;
 		}
+	}
+	streams_release();
+	foreach_ptr(GpReaderConn, r, gang->readers)
+	{
+		if (r->conn != NULL)
+			libpqsrv_disconnect(r->conn);
+		r->conn = NULL;
 	}
 	if (gang->wes != NULL)
 		FreeWaitEventSet(gang->wes);
@@ -387,22 +444,37 @@ gang_connect(void)
 		gang->conns[i].busy = false;
 	}
 
-	/*
-	 * One wait set for the gang, built once: the sockets do not change while
-	 * the connections live, and building an epoll set per row would cost more
-	 * than the rows.  It has no resource owner, because the gang outlives the
-	 * transaction that opened it.
-	 */
-	gang->wes = CreateWaitEventSet(NULL, nsegs + 2);
-	AddWaitEventToSet(gang->wes, WL_LATCH_SET, PGINVALID_SOCKET, MyLatch, NULL);
+	gang_build_wes(gang);
+}
+
+/*
+ * One wait set for the gang, built when its connections change: the sockets
+ * do not change while the connections live, and building an epoll set per
+ * row would cost more than the rows.  It has no resource owner, because the
+ * gang outlives the transaction that opened it.  The readers are in it too,
+ * so that a slice that fails on one is heard of while the coordinator waits
+ * for anything.
+ */
+static void
+gang_build_wes(GpGang *g)
+{
+	if (g->wes != NULL)
+		FreeWaitEventSet(g->wes);
+	g->wes = CreateWaitEventSet(NULL, g->nconns + list_length(g->readers) + 2);
+	AddWaitEventToSet(g->wes, WL_LATCH_SET, PGINVALID_SOCKET, MyLatch, NULL);
 	/* A backend with no postmaster -- single-user mode -- has none to lose. */
 	if (IsUnderPostmaster)
-		AddWaitEventToSet(gang->wes, WL_EXIT_ON_PM_DEATH, PGINVALID_SOCKET,
+		AddWaitEventToSet(g->wes, WL_EXIT_ON_PM_DEATH, PGINVALID_SOCKET,
 						  NULL, NULL);
-	for (int i = 0; i < nsegs; i++)
-		AddWaitEventToSet(gang->wes, WL_SOCKET_READABLE,
-						  PQsocket(gang->conns[i].conn), NULL,
-						  &gang->conns[i]);
+	for (int i = 0; i < g->nconns; i++)
+		AddWaitEventToSet(g->wes, WL_SOCKET_READABLE,
+						  PQsocket(g->conns[i].conn), NULL, &g->conns[i]);
+	foreach_ptr(GpReaderConn, r, g->readers)
+	{
+		if (r->conn != NULL)
+			AddWaitEventToSet(g->wes, WL_SOCKET_READABLE, PQsocket(r->conn),
+							  NULL, NULL);
+	}
 }
 
 static GpGang *
@@ -453,6 +525,10 @@ gang_wait(GpGang *g)
 		if (c->busy && c->fetching != NULL)
 			(void) gather_poll(c->fetching);
 	}
+
+	/* And whatever the readers have said: a slice that failed fails this. */
+	readers_poll();
+	streams_raise_if_failed();
 }
 
 static void conn_park(GpSegmentConn *c);
@@ -537,9 +613,34 @@ collect_error(List **errors, int content, PGresult *res, PGconn *conn,
 static void
 raise_segment_errors(List *errors)
 {
-	GpSegmentError *first = (GpSegmentError *) linitial(errors);
-	const GpSegmentConfig *seg = GpClusterSegmentByContent(first->content);
+	GpSegmentError *first;
+	const GpSegmentConfig *seg;
 	StringInfoData detail;
+
+	/*
+	 * With slices running at once, what fails first is often only where the
+	 * failure arrived: a receiver whose sender stopped, a slice cancelled
+	 * because another failed.  Every reader is stopped and heard, and the
+	 * message is the first that is neither.
+	 */
+	if (active_streams != NIL)
+	{
+		readers_cancel_and_drain(&errors);
+		foreach_ptr(GpSegmentError, err, errors)
+		{
+			if (err->sqlstate == NULL ||
+				(strcmp(err->sqlstate, "58M01") != 0 &&
+				 strcmp(err->sqlstate, "57014") != 0))
+			{
+				errors = list_delete_ptr(errors, err);
+				errors = lcons(err, errors);
+				break;
+			}
+		}
+	}
+
+	first = (GpSegmentError *) linitial(errors);
+	seg = GpClusterSegmentByContent(first->content);
 
 	initStringInfo(&detail);
 	appendStringInfo(&detail, "segment %d (%s:%d)", first->content,
@@ -757,6 +858,8 @@ gang_cancel_and_drain(void)
 	if (gang == NULL)
 		return;
 
+	readers_cancel_and_drain(NULL);
+
 	for (int i = 0; i < gang->nconns; i++)
 	{
 		if (gang->conns[i].busy)
@@ -790,6 +893,441 @@ gang_send_all_quietly(const char *sql)
 		gang->conns[i].busy = true;
 	}
 	gang_drain_quietly();
+}
+
+/* ------------------------------------------------------------------------- */
+/* Readers, for statements whose slices run at once                          */
+/* ------------------------------------------------------------------------- */
+
+/*
+ * Read whatever the busy readers have answered, without waiting; an error is
+ * kept with the stream the reader runs a slice of.  An idle reader is read
+ * too: a connection that broke says so there, and its socket would wake
+ * every wait after this one.
+ */
+static void
+readers_poll(void)
+{
+	bool		broken = false;
+
+	if (gang == NULL)
+		return;
+
+	foreach_ptr(GpReaderConn, r, gang->readers)
+	{
+		if (r->conn == NULL)
+			continue;
+
+		if (PQconsumeInput(r->conn) == 0)
+		{
+			if (r->busy && r->stream != NULL)
+			{
+				MemoryContext oldcxt = MemoryContextSwitchTo(TopMemoryContext);
+
+				collect_error(&r->stream->errors, r->content, NULL, r->conn,
+							  NULL);
+				MemoryContextSwitchTo(oldcxt);
+			}
+			libpqsrv_disconnect(r->conn);
+			r->conn = NULL;
+			r->busy = false;
+			broken = true;
+			continue;
+		}
+
+		while (r->busy && !PQisBusy(r->conn))
+		{
+			PGresult   *res = PQgetResult(r->conn);
+			ExecStatusType status;
+
+			if (res == NULL)
+			{
+				r->busy = false;
+				break;
+			}
+			status = PQresultStatus(res);
+			if (status != PGRES_COMMAND_OK && status != PGRES_TUPLES_OK &&
+				status != PGRES_EMPTY_QUERY && r->stream != NULL)
+			{
+				MemoryContext oldcxt = MemoryContextSwitchTo(TopMemoryContext);
+
+				collect_error(&r->stream->errors, r->content, res, r->conn,
+							  NULL);
+				MemoryContextSwitchTo(oldcxt);
+			}
+			PQclear(res);
+		}
+	}
+
+	if (broken)
+		gang_build_wes(gang);
+}
+
+/* A slice failed on a reader: the statement fails, with the best reason. */
+static void
+streams_raise_if_failed(void)
+{
+	List	   *errors = NIL;
+
+	foreach_ptr(GpStream, stream, active_streams)
+	{
+		errors = list_concat(errors, stream->errors);
+		stream->errors = NIL;
+	}
+	if (errors != NIL)
+		raise_segment_errors(errors);
+}
+
+/*
+ * Stop every reader that is still running a slice and read it to the end,
+ * adding what the readers answered to *errors, when given.  Called with an
+ * error on its way, so it raises nothing; a reader that does not answer
+ * within a while is dropped.
+ */
+static void
+readers_cancel_and_drain(List **errors)
+{
+	TimestampTz deadline = GetCurrentTimestamp() + 30 * USECS_PER_SEC;
+	bool		any;
+
+	if (gang == NULL)
+		return;
+
+	foreach_ptr(GpReaderConn, r, gang->readers)
+	{
+		if (r->conn != NULL && r->busy)
+		{
+			const char *err = libpqsrv_cancel(r->conn, deadline);
+
+			if (err != NULL)
+				elog(DEBUG1, "could not cancel the slice on segment %d: %s",
+					 r->content, err);
+		}
+	}
+
+	do
+	{
+		WaitEvent	occurred[1];
+
+		readers_poll();
+		any = false;
+		foreach_ptr(GpReaderConn, r, gang->readers)
+			if (r->conn != NULL && r->busy)
+				any = true;
+		if (!any)
+			break;
+		if (GetCurrentTimestamp() >= deadline)
+		{
+			foreach_ptr(GpReaderConn, r, gang->readers)
+			{
+				if (r->conn != NULL && r->busy)
+				{
+					libpqsrv_disconnect(r->conn);
+					r->conn = NULL;
+					r->busy = false;
+				}
+			}
+			gang_build_wes(gang);
+			break;
+		}
+		if (WaitEventSetWait(gang->wes, 1000, occurred, 1,
+							 dispatch_wait_event()) > 0 &&
+			(occurred[0].events & WL_LATCH_SET))
+			ResetLatch(MyLatch);
+	} while (any);
+
+	foreach_ptr(GpStream, stream, active_streams)
+	{
+		if (errors != NULL)
+			*errors = list_concat(*errors, stream->errors);
+		stream->errors = NIL;
+	}
+}
+
+/* The readers go back to the session, and the streams are forgotten. */
+static void
+streams_release(void)
+{
+	foreach_ptr(GpStream, stream, active_streams)
+	{
+		foreach_ptr(GpReaderConn, r, stream->readers)
+			r->stream = NULL;
+		list_free(stream->readers);
+		pfree(stream);
+	}
+	list_free(active_streams);
+	active_streams = NIL;
+}
+
+/* Run a statement on a reader and wait for it, raising what it answers. */
+static void
+reader_exec(GpReaderConn *r, const char *sql, char **value)
+{
+	PGresult   *res = libpqsrv_exec(r->conn, sql, dispatch_wait_event());
+	ExecStatusType status = res ? PQresultStatus(res) : PGRES_FATAL_ERROR;
+
+	if (status != PGRES_COMMAND_OK && status != PGRES_TUPLES_OK)
+	{
+		List	   *errors = NIL;
+
+		collect_error(&errors, r->content, res, r->conn, NULL);
+		if (res != NULL)
+			PQclear(res);
+		if (PQstatus(r->conn) == CONNECTION_BAD)
+		{
+			libpqsrv_disconnect(r->conn);
+			r->conn = NULL;
+			gang_build_wes(gang);
+		}
+		raise_segment_errors(errors);
+	}
+	if (value != NULL)
+		*value = PQntuples(res) > 0 && !PQgetisnull(res, 0, 0)
+			? MemoryContextStrdup(TopMemoryContext, PQgetvalue(res, 0, 0))
+			: NULL;
+	PQclear(res);
+}
+
+/* One more reader on a segment, with the writer's identity. */
+static GpReaderConn *
+reader_connect(GpGang *g, int content)
+{
+	const GpSegmentConfig *seg = GpClusterSegmentByContent(content);
+	const char *keywords[10];
+	const char *values[10];
+	char		portbuf[16];
+	int			n = 0;
+	PGconn	   *conn;
+	GpReaderConn *r;
+
+	snprintf(portbuf, sizeof(portbuf), "%d", seg->port);
+	keywords[n] = "host";
+	values[n++] = seg->hostname;
+	keywords[n] = "port";
+	values[n++] = portbuf;
+	keywords[n] = "dbname";
+	values[n++] = get_database_name(MyDatabaseId);
+	keywords[n] = "user";
+	values[n++] = GetUserNameFromId(GetSessionUserId(), false);
+	keywords[n] = "application_name";
+	values[n++] = "cloudberry reader";
+	keywords[n] = "client_encoding";
+	values[n++] = GetDatabaseEncodingName();
+	keywords[n] = "options";
+
+	/*
+	 * A reader is a member of its writer's lock group, and a member cannot
+	 * lead a group of its own: it starts no parallel workers.
+	 */
+	values[n++] = psprintf("%s -c max_parallel_workers_per_gather=0",
+						   qe_identity_option(content));
+	if (gp_internal_passfile != NULL && gp_internal_passfile[0] != '\0')
+	{
+		keywords[n] = "passfile";
+		values[n++] = gp_internal_passfile;
+	}
+	keywords[n] = NULL;
+	values[n] = NULL;
+
+	conn = libpqsrv_connect_params(keywords, values, false,
+								   dispatch_wait_event());
+	if (conn == NULL || PQstatus(conn) != CONNECTION_OK)
+	{
+		char	   *msg = conn ? pstrdup(PQerrorMessage(conn)) : "out of memory";
+
+		if (conn != NULL)
+			libpqsrv_disconnect(conn);
+		ereport(ERROR,
+				(errcode(ERRCODE_CONNECTION_FAILURE),
+				 errmsg("could not connect a reader to segment %d (%s:%d)",
+						content, seg->hostname, seg->port),
+				 errdetail_internal("%s", msg)));
+	}
+
+	r = MemoryContextAllocZero(TopMemoryContext, sizeof(GpReaderConn));
+	r->content = content;
+	r->conn = conn;
+	{
+		MemoryContext oldcxt = MemoryContextSwitchTo(TopMemoryContext);
+
+		g->readers = lappend(g->readers, r);
+		MemoryContextSwitchTo(oldcxt);
+	}
+	gang_build_wes(g);
+
+	reader_exec(r, "SELECT gp_internal.interconnect_address()", &r->icaddress);
+	if (r->icaddress == NULL)
+		elog(ERROR, "segment %d gave its reader no interconnect address",
+			 content);
+	return r;
+}
+
+/* Tell a reader the settings that changed since it was last told. */
+static void
+reader_sync_settings(GpReaderConn *r)
+{
+	StringInfoData sql;
+	const char *values[NUM_SYNCED_SETTINGS];
+	bool		any = false;
+
+	initStringInfo(&sql);
+	appendStringInfoString(&sql, "SELECT ");
+	for (int i = 0; i < NUM_SYNCED_SETTINGS; i++)
+	{
+		values[i] = GetConfigOption(synced_settings[i], true, false);
+		if (values[i] == NULL ||
+			(r->sent[i] != NULL && strcmp(r->sent[i], values[i]) == 0))
+			continue;
+		appendStringInfo(&sql, "%spg_catalog.set_config(%s, %s, false)",
+						 any ? ", " : "",
+						 quote_literal_cstr(synced_settings[i]),
+						 quote_literal_cstr(values[i]));
+		any = true;
+	}
+	if (!any)
+		return;
+
+	reader_exec(r, sql.data, NULL);
+	for (int i = 0; i < NUM_SYNCED_SETTINGS; i++)
+	{
+		if (values[i] == NULL)
+			continue;
+		if (r->sent[i] != NULL)
+			pfree(r->sent[i]);
+		r->sent[i] = MemoryContextStrdup(TopMemoryContext, values[i]);
+	}
+}
+
+GpStream *
+GpStreamBegin(void)
+{
+	MemoryContext oldcxt = MemoryContextSwitchTo(TopMemoryContext);
+	GpStream   *stream = palloc0(sizeof(GpStream));
+
+	(void) gang_get();
+	active_streams = lappend(active_streams, stream);
+	MemoryContextSwitchTo(oldcxt);
+	return stream;
+}
+
+const char *
+GpStreamWriterAddress(int content, int *pid)
+{
+	GpGang	   *g = gang_get();
+	GpSegmentConn *c = NULL;
+
+	for (int i = 0; i < g->nconns; i++)
+		if (g->conns[i].content == content)
+			c = &g->conns[i];
+	if (c == NULL)
+		elog(ERROR, "there is no segment with content id %d", content);
+
+	if (c->icaddress == NULL)
+	{
+		char	  **values = palloc0_array(char *, g->nconns);
+
+		GpDispatchQueryFirstValues("SELECT gp_internal.interconnect_address()",
+								   -1, values);
+		for (int i = 0; i < g->nconns; i++)
+		{
+			if (values[i] == NULL)
+				elog(ERROR, "segment %d gave no interconnect address",
+					 g->conns[i].content);
+			g->conns[i].icaddress = MemoryContextStrdup(TopMemoryContext,
+														values[i]);
+		}
+	}
+	*pid = PQbackendPID(c->conn);
+	return c->icaddress;
+}
+
+int
+GpStreamAddReader(GpStream *stream, int content, const char **address)
+{
+	GpGang	   *g = gang_get();
+	GpReaderConn *found = NULL;
+	int			count = 0;
+	MemoryContext oldcxt;
+
+	readers_poll();				/* a broken one is found broken now */
+	foreach_ptr(GpReaderConn, r, g->readers)
+	{
+		if (r->content != content || r->conn == NULL)
+			continue;
+		count++;
+		if (found == NULL && !r->busy && r->stream == NULL)
+			found = r;
+	}
+	if (found == NULL)
+	{
+		if (count >= MAX_READERS_PER_SEGMENT)
+			ereport(ERROR,
+					(errcode(ERRCODE_TOO_MANY_CONNECTIONS),
+					 errmsg("a statement needs more than %d readers on segment %d",
+							MAX_READERS_PER_SEGMENT, content)));
+		found = reader_connect(g, content);
+	}
+
+	found->stream = stream;
+	oldcxt = MemoryContextSwitchTo(TopMemoryContext);
+	stream->readers = lappend(stream->readers, found);
+	MemoryContextSwitchTo(oldcxt);
+	*address = found->icaddress;
+	return list_length(stream->readers) - 1;
+}
+
+void
+GpStreamStartReader(GpStream *stream, int reader, const char *sql)
+{
+	GpReaderConn *r = (GpReaderConn *) list_nth(stream->readers, reader);
+
+	if (r->conn == NULL)
+		ereport(ERROR,
+				(errcode(ERRCODE_CONNECTION_FAILURE),
+				 errmsg("lost a reader's connection to segment %d", r->content)));
+
+	/* a slice that failed left its transaction open */
+	if (PQtransactionStatus(r->conn) != PQTRANS_IDLE)
+		reader_exec(r, "ROLLBACK", NULL);
+	reader_sync_settings(r);
+
+	if (!PQsendQuery(r->conn, sql))
+	{
+		char	   *msg = pstrdup(PQerrorMessage(r->conn));
+
+		libpqsrv_disconnect(r->conn);
+		r->conn = NULL;
+		gang_build_wes(gang);
+		ereport(ERROR,
+				(errcode(ERRCODE_CONNECTION_FAILURE),
+				 errmsg("could not send a slice to segment %d", r->content),
+				 errdetail_internal("%s", msg)));
+	}
+	r->busy = true;
+}
+
+void
+GpStreamEnd(GpStream *stream)
+{
+	for (;;)
+	{
+		bool		busy = false;
+
+		readers_poll();
+		streams_raise_if_failed();
+		foreach_ptr(GpReaderConn, r, stream->readers)
+			if (r->conn != NULL && r->busy)
+				busy = true;
+		if (!busy || gang == NULL)
+			break;
+		gang_wait(gang);
+	}
+
+	foreach_ptr(GpReaderConn, r, stream->readers)
+		r->stream = NULL;
+	active_streams = list_delete_ptr(active_streams, stream);
+	list_free(stream->readers);
+	pfree(stream);
 }
 
 /* ------------------------------------------------------------------------- */
@@ -976,6 +1514,7 @@ dispatch_xact_callback(XactEvent event, void *arg)
 			gang_xact_depth = 0;
 			gang_xact_lost = false;
 			gang_forget_settings();
+			streams_release();
 			break;
 
 		default:
@@ -1016,6 +1555,7 @@ dispatch_subxact_callback(SubXactEvent event, SubTransactionId mySubid,
 			PG_END_TRY();
 			gang_xact_depth = level - 1;
 			gang_forget_settings();
+			streams_release();
 			break;
 
 		default:

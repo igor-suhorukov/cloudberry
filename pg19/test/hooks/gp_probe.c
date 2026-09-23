@@ -54,6 +54,7 @@
 #include "parser/parser.h"
 #include "replication/syncrep.h"
 #include "storage/md.h"
+#include "tcop/utility.h"
 #include "utils/array.h"
 #include "utils/builtins.h"
 #include "utils/combocid.h"
@@ -479,6 +480,7 @@ PG_FUNCTION_INFO_V1(gp_probe_published_combocids);
 PG_FUNCTION_INFO_V1(gp_probe_load_combocids);
 PG_FUNCTION_INFO_V1(gp_probe_current_xids);
 PG_FUNCTION_INFO_V1(gp_probe_adopt_xids);
+PG_FUNCTION_INFO_V1(gp_probe_transaction_state);
 PG_FUNCTION_INFO_V1(gp_probe_matview_maintenance);
 PG_FUNCTION_INFO_V1(gp_probe_matview_depth);
 PG_FUNCTION_INFO_V1(gp_probe_matview_restore_depth);
@@ -727,6 +729,70 @@ gp_probe_adopt_xids(PG_FUNCTION_ARGS)
 }
 
 /*
+ * R4: this transaction's state as SerializeTransactionState() writes it for a
+ * parallel worker -- its XIDs and its command -- for another backend to read
+ * as a part of it.
+ */
+Datum
+gp_probe_transaction_state(PG_FUNCTION_ARGS)
+{
+	Size		len = EstimateTransactionStateSpace();
+	char	   *state = palloc(len);	/* aligned, as the struct wants */
+	bytea	   *result = palloc(VARHDRSZ + len);
+
+	SerializeTransactionState(len, state);
+	SET_VARSIZE(result, VARHDRSZ + len);
+	memcpy(VARDATA(result), state, len);
+	PG_RETURN_BYTEA_P(result);
+}
+
+/*
+ * SET LOCAL gp_probe.adopt_state = '<the state, in hex>': R4, before the
+ * transaction's first snapshot, which a SET does not take and a function
+ * call would.
+ */
+static ProcessUtility_hook_type prev_process_utility = NULL;
+
+static void
+probe_process_utility(PlannedStmt *pstmt, const char *queryString,
+					  bool readOnlyTree, ProcessUtilityContext context,
+					  ParamListInfo params, QueryEnvironment *queryEnv,
+					  DestReceiver *dest, QueryCompletion *qc)
+{
+	Node	   *parsetree = pstmt->utilityStmt;
+
+	if (IsA(parsetree, VariableSetStmt) &&
+		((VariableSetStmt *) parsetree)->name != NULL &&
+		strcmp(((VariableSetStmt *) parsetree)->name, "gp_probe.adopt_state") == 0)
+	{
+		VariableSetStmt *set = (VariableSetStmt *) parsetree;
+		A_Const    *arg;
+		char	   *hex;
+		char	   *state;
+		int			len;
+
+		if (list_length(set->args) != 1 || !IsA(linitial(set->args), A_Const))
+			elog(ERROR, "gp_probe.adopt_state takes one string");
+		arg = (A_Const *) linitial(set->args);
+		hex = strVal(&arg->val);
+		if (strncmp(hex, "\\x", 2) == 0)
+			hex += 2;
+		len = strlen(hex) / 2;
+		state = palloc(Max(len, 1));
+		hex_decode(hex, len * 2, state);
+		XactAdoptTransactionState(state);
+		return;
+	}
+
+	if (prev_process_utility)
+		prev_process_utility(pstmt, queryString, readOnlyTree, context,
+							 params, queryEnv, dest, qc);
+	else
+		standard_ProcessUtility(pstmt, queryString, readOnlyTree, context,
+								params, queryEnv, dest, qc);
+}
+
+/*
  * O27: maintenance mode, so that an incremental view can be updated with
  * ordinary DML.  Opening and closing are separate calls, because the extension
  * that uses them applies its deltas in between.
@@ -826,6 +892,9 @@ _PG_init(void)
 
 	prev_planner_hook = planner_hook;
 	planner_hook = probe_planner;
+
+	prev_process_utility = ProcessUtility_hook;
+	ProcessUtility_hook = probe_process_utility;
 
 	RegisterCustomScanMethods(&probe_scan_methods);
 }

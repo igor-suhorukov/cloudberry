@@ -147,6 +147,7 @@ cb_probe(void)
 
 	(void) LastNewOidWasPreassigned;					/* R1  */
 	(void) XactAdoptCurrentXids;						/* R2  */
+	(void) XactAdoptTransactionState;					/* R4  */
 	(void) standard_raw_parser;							/* O26 */
 	(void) OpenMatViewIncrementalMaintenanceExternal;	/* O27 */
 	(void) CloseMatViewIncrementalMaintenanceExternal;	/* O27 */
@@ -172,7 +173,7 @@ have_patched_pg = cc.compiles(patch_probe,
 if not have_patched_pg and get_option('require_patched_pg')
   error('''
     @0@
-    compiles, but does not carry the Cloudberry core patch series (R1-R3, O3,
+    compiles, but does not carry the Cloudberry core patch series (R1-R4, O3,
     O4, O10, O22, O26-O28).  Build PostgreSQL from github/postgres, branch
     REL_19_STABLE_CLOUDBERRY, and point -Dpg_config at it.
     Pass -Drequire_patched_pg=false to configure anyway.'''.format(
@@ -225,6 +226,8 @@ modules = [
                      'modules/gp_core/gp_motion.c',
                      'modules/gp_core/gp_split.c',
                      'modules/gp_core/gp_segment.c',
+                     'modules/gp_core/gp_share.c',
+                     'modules/gp_core/gp_ic.c',
                      'modules/gp_core/gp_label.c',
                      'modules/gp_core/gp_median.c',
                      'modules/gp_core/gp_policy.c'),

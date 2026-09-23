@@ -36,19 +36,30 @@
  * any gather's do.
  *
  * A Motion between segments -- Redistribute, Broadcast, a random
- * redistribution -- is carried out before the Gather above it sends its
- * fragment, by the coordinator: the Motion's own fragment, the slice that
- * sends, is gathered as any is, and each row goes on to the segment its
- * hash chooses, to every segment, or to the next in turn, in batches of
- * rows the receiving segment keeps in a temporary file for the rest of the
- * transaction (gp_internal.motion_put()).  In the fragment the receiving
- * slice runs, the Motion reads that file.  The rows cross the coordinator:
- * this is a relay, not Cloudberry's interconnect, whose senders stream to
- * their receivers directly and all slices run at once.  It carries out
- * every plan the interconnect would, a slice at a time, and what it lacks
- * is the speed; the transport is the part to replace.  Which Motions a
- * Gather has to carry out first, and in what order, the translator works
- * out and gives it (GpMotionSetPrepare).
+ * redistribution -- streams, as Cloudberry's interconnect does: every slice
+ * below a Gather runs at the same time as the Gather's, the Gather's on the
+ * writer, the session's backend on each segment, and each of the others on
+ * a reader, one more backend of the session there, which reads as a part of
+ * the writer's transaction (gp_share.c).  A reader's fragment is the Motion
+ * it sends through: it pulls its slice's rows and sends each to the process
+ * that runs the receiving slice on the segment its hash chooses, on every
+ * segment, or on the next in turn, over the interconnect (gp_ic.c), and the
+ * Motion in the receiving fragment takes them as they come.  Which slice
+ * receives each Motion the translator says (GpMotionSetParent).
+ *
+ * Where a slice cannot stream -- the coordinator's own slice, a temporary
+ * table, which only the session's own backend can read -- or with
+ * gp.interconnect_type = relay, the Motion is carried out as it was first
+ * built, before the Gather above it sends its fragment, by the coordinator:
+ * the Motion's own fragment, the slice that sends, is gathered as any is,
+ * and each row goes on to the segment its hash chooses, to every segment,
+ * or to the next in turn, in batches of rows the receiving segment keeps in
+ * a temporary file for the rest of the transaction
+ * (gp_internal.motion_put()).  In the fragment the receiving slice runs, the
+ * Motion reads that file.  That is a relay: the slices run one at a time,
+ * and the rows cross the coordinator.  Which Motions a Gather has to carry
+ * out first, and in what order, the translator works out and gives it
+ * (GpMotionSetPrepare).
  *
  * A plan is carried out as it stands -- its permission checks are part of it
  * -- so a segment takes one only from the coordinator: a connection that is
@@ -92,19 +103,23 @@
 #include "parser/parsetree.h"
 #include "storage/lmgr.h"
 #include "utils/builtins.h"
+#include "utils/guc.h"
 #include "varatt.h"
 #include "utils/lsyscache.h"
 #include "utils/rel.h"
 #include "utils/resowner.h"
 #include "utils/ruleutils.h"
 #include "utils/sortsupport.h"
+#include "utils/tuplestore.h"
 
 #include "gp_cluster.h"
 #include "gp_core_api.h"
 #include "gp_dispatch.h"
 #include "gp_hash.h"
+#include "gp_ic.h"
 #include "gp_motion.h"
 #include "gp_policy.h"
+#include "gp_share.h"
 
 /*
  * custom_private, in order: the segment it reads from (-1 every one), the
@@ -120,6 +135,47 @@
 #define MOTION_PRIVATE_TYPE			6	/* GP_MOTION_* */
 #define MOTION_PRIVATE_HASHFUNCS	7	/* a Redistribute: its hash functions */
 #define MOTION_PRIVATE_PREPARE		8	/* a Gather: slices it runs first */
+#define MOTION_PRIVATE_PARENT		9	/* the slice that receives */
+
+/* A Motion whose receiving slice the translator did not say. */
+#define MOTION_PARENT_UNKNOWN		(-3)
+
+/*
+ * How a Motion between segments is carried out: its slices all at once,
+ * each sender streaming to its receivers (tcp), or a slice at a time, the
+ * rows relayed through the coordinator (relay).
+ */
+#define GP_INTERCONNECT_RELAY	0
+#define GP_INTERCONNECT_TCP		1
+
+static const struct config_enum_entry interconnect_type_options[] = {
+	{"relay", GP_INTERCONNECT_RELAY, false},
+	{"tcp", GP_INTERCONNECT_TCP, false},
+	{NULL, 0, false}
+};
+
+static int	gp_interconnect_type = GP_INTERCONNECT_TCP;
+
+/*
+ * On a fragment's PlannedStmt, where the coordinator runs its slices at
+ * once: the statement's token and, for each slice that streams, how many
+ * send and where its receivers are (GP_STREAM_MARK); and for the writer's
+ * fragment, the key its readers find its snapshot under (GP_SHARE_MARK).
+ */
+#define GP_STREAM_MARK	"gp_stream"
+#define GP_SHARE_MARK	"gp_share"
+
+/* One slice that streams, as the coordinator plans it. */
+typedef struct StreamSlice
+{
+	CustomScan *motion;			/* the Motion it sends to */
+	int			slice;
+	int			parent;			/* the slice that receives */
+	int			ncontents;		/* the segments that send */
+	int		   *contents;
+	int		   *readers;		/* each one's reader in the GpStream */
+	const char **addresses;		/* and where that reader receives */
+} StreamSlice;
 
 /* The SQL a batch of a Motion's rows travels to its receiving segment in. */
 #define MOTION_PUT_SQL	"SELECT gp_internal.motion_put($1, $2, $3)"
@@ -154,6 +210,31 @@ typedef struct MotionState
 	bool		binary;
 	FmgrInfo   *inprocs;
 	Oid		   *inparams;
+
+	/* The coordinator, streaming: the slices below, and their readers. */
+	bool		streaming;
+	List	   *stream_slices;	/* StreamSlice */
+	GpStream   *stream;
+
+	/* On a segment, the Motion a reader's fragment is: it sends. */
+	bool		sending;
+	bool		send_binary;
+	FmgrInfo   *outprocs;
+	ExprState **hashexprs;
+	GpHash		hash;
+	int		   *receiver_of;	/* by content id: a receiver's index, or -1 */
+	int			nreceivers;
+	char	  **receivers;
+	char	   *token;
+
+	/* On a segment, a Motion that receives a streaming slice. */
+	bool		streamed;
+	int			nsenders;
+	GpIcReceiver *icrecv;
+	bool		stream_done;
+	Tuplestorestate *spool;		/* what came, for a rescan */
+	TupleTableSlot *spoolslot;
+	bool		replaying;
 
 	/* A merge: each segment's next row, and which of them is least. */
 	int			nsegs;
@@ -191,6 +272,8 @@ static const CustomExecMethods hash_filter_exec_methods;
 static planner_hook_type prev_planner = NULL;
 static explain_node_label_hook_type prev_explain_node_label = NULL;
 static ExecutorRun_hook_type prev_executor_run = NULL;
+static ExecutorStart_hook_type prev_executor_start = NULL;
+static ExecutorEnd_hook_type prev_executor_end = NULL;
 
 /* How a fragment's PlannedStmt says it is one, on the segment that runs it. */
 #define GP_FRAGMENT_MARK	"gp_fragment"
@@ -338,6 +421,8 @@ motion_make(int type, Plan *fragment, List *targetlist, List *qual,
 	cscan->custom_private = lappend(cscan->custom_private, makeInteger(type));
 	cscan->custom_private = lappend(cscan->custom_private, NIL);	/* hash functions */
 	cscan->custom_private = lappend(cscan->custom_private, NIL);	/* to prepare */
+	cscan->custom_private = lappend(cscan->custom_private,
+									makeInteger(MOTION_PARENT_UNKNOWN));
 	cscan->methods = &motion_scan_methods;
 
 	return cscan;
@@ -375,6 +460,22 @@ GpMotionSetPrepare(Plan *plan, List *slices)
 			GpMotionType(plan) == GP_MOTION_DML));
 	list_nth_cell(((CustomScan *) plan)->custom_private,
 				  MOTION_PRIVATE_PREPARE)->ptr_value = slices;
+}
+
+void
+GpMotionSetParent(Plan *plan, int parent)
+{
+	Assert(GpMotionIs(plan));
+	intVal(list_nth(((CustomScan *) plan)->custom_private,
+					MOTION_PRIVATE_PARENT)) = parent;
+}
+
+int
+GpMotionParent(Plan *plan)
+{
+	Assert(GpMotionIs(plan));
+	return intVal(list_nth(((CustomScan *) plan)->custom_private,
+						   MOTION_PRIVATE_PARENT));
 }
 
 bool
@@ -715,6 +816,332 @@ motion_recv_next(MotionState *state)
 	return ExecStoreVirtualTuple(slot);
 }
 
+/* ------------------------------------------------------------------------- */
+/* Streaming, on a segment                                                   */
+/* ------------------------------------------------------------------------- */
+
+/* A DefElem of a fragment's PlannedStmt, by name. */
+static Node *
+fragment_mark(PlannedStmt *stmt, const char *name)
+{
+	ListCell   *lc;
+
+	foreach(lc, stmt->extension_state)
+	{
+		DefElem    *def = lfirst_node(DefElem, lc);
+
+		if (strcmp(def->defname, name) == 0)
+			return def->arg;
+	}
+	return NULL;
+}
+
+/*
+ * What the coordinator said of a slice that streams: (slice, senders,
+ * receivers' contents, receivers' addresses); NULL if it does not.
+ */
+static List *
+stream_entry(PlannedStmt *stmt, int slice)
+{
+	List	   *info = (List *) fragment_mark(stmt, GP_STREAM_MARK);
+	ListCell   *lc;
+
+	if (info == NULL)
+		return NULL;
+	foreach(lc, (List *) lsecond(info))
+	{
+		List	   *entry = (List *) lfirst(lc);
+
+		if (intVal(linitial(entry)) == slice)
+			return entry;
+	}
+	return NULL;
+}
+
+static char *
+stream_token(PlannedStmt *stmt)
+{
+	return strVal(linitial((List *) fragment_mark(stmt, GP_STREAM_MARK)));
+}
+
+/*
+ * The Motion at the top of a reader's fragment: it pulls the rows of the
+ * slice below it, and sends each where the Motion sends it -- the segment
+ * its keys hash to, every one, the next in turn -- to the process that runs
+ * the receiving slice there.
+ */
+static void
+motion_begin_sending(MotionState *state, EState *estate, int eflags,
+					 List *entry)
+{
+	CustomScan *cscan = (CustomScan *) state->css.ss.ps.plan;
+	List	   *hashfuncs = (List *) list_nth(cscan->custom_private,
+											  MOTION_PRIVATE_HASHFUNCS);
+	List	   *contents = (List *) lthird(entry);
+	List	   *addresses = (List *) lfourth(entry);
+	int			nsegs = GpClusterSegmentCount();
+	TupleDesc	tupdesc;
+	int			nkeys = list_length(cscan->custom_exprs);
+	int			i;
+	ListCell   *lc,
+			   *lf;
+
+	state->sending = true;
+	state->token = stream_token(estate->es_plannedstmt);
+	outerPlanState(state) = ExecInitNode(outerPlan(cscan), estate, eflags);
+	tupdesc = ExecGetResultType(outerPlanState(state));
+
+	state->send_binary = GpTupleDescHasBinaryIO(tupdesc);
+	state->outprocs = palloc0_array(FmgrInfo, tupdesc->natts);
+	for (i = 0; i < tupdesc->natts; i++)
+	{
+		Oid			proc;
+		bool		isvarlena;
+
+		if (state->send_binary)
+			getTypeBinaryOutputInfo(TupleDescAttr(tupdesc, i)->atttypid,
+									&proc, &isvarlena);
+		else
+			getTypeOutputInfo(TupleDescAttr(tupdesc, i)->atttypid,
+							  &proc, &isvarlena);
+		fmgr_info(proc, &state->outprocs[i]);
+	}
+
+	/* A Redistribute hashes its keys as cdbhash hashes a table's. */
+	memset(&state->hash, 0, sizeof(GpHash));
+	state->hash.ptype = POLICYTYPE_PARTITIONED;
+	state->hash.numsegs = nsegs;
+	state->hash.nattrs = nkeys;
+	state->hash.attrs = palloc_array(AttrNumber, Max(nkeys, 1));
+	state->hash.hashfuncs = palloc_array(FmgrInfo, Max(nkeys, 1));
+	state->hashexprs = palloc_array(ExprState *, Max(nkeys, 1));
+	i = 0;
+	forboth(lc, cscan->custom_exprs, lf, hashfuncs)
+	{
+		state->hashexprs[i] = ExecInitExpr((Expr *) lfirst(lc),
+										   &state->css.ss.ps);
+		state->hash.attrs[i] = i + 1;
+		fmgr_info(lfirst_oid(lf), &state->hash.hashfuncs[i]);
+		i++;
+	}
+
+	/* The receivers, and which of them is on each segment. */
+	state->nreceivers = list_length(addresses);
+	state->receivers = palloc_array(char *, Max(state->nreceivers, 1));
+	state->receiver_of = palloc_array(int, nsegs);
+	for (i = 0; i < nsegs; i++)
+		state->receiver_of[i] = -1;
+	i = 0;
+	forboth(lc, contents, lf, addresses)
+	{
+		int			content = intVal(lfirst(lc));
+
+		if (content >= 0 && content < nsegs)
+			state->receiver_of[content] = i;
+		state->receivers[i++] = strVal(lfirst(lf));
+	}
+}
+
+/* One row, as it travels: a count, then each value; see append_row_raw(). */
+static void append_row_raw(StringInfo buf, int natts, const char **values,
+						   const int *lengths);
+
+static void
+motion_send_all(MotionState *state)
+{
+	PlanState  *child = outerPlanState(state);
+	ExprContext *econtext = state->css.ss.ps.ps_ExprContext;
+	TupleDesc	tupdesc = ExecGetResultType(child);
+	int			natts = tupdesc->natts;
+	int			nsegs = GpClusterSegmentCount();
+	int			nkeys = state->hash.nattrs;
+	const char **values = palloc_array(const char *, Max(natts, 1));
+	int		   *lengths = palloc_array(int, Max(natts, 1));
+	Datum	   *keyvalues = palloc_array(Datum, Max(nkeys, 1));
+	bool	   *keynulls = palloc_array(bool, Max(nkeys, 1));
+	int			next = (int) (pg_prng_uint32(&pg_global_prng_state) % nsegs);
+	StringInfoData row;
+	GpIcSender *sender;
+
+	initStringInfo(&row);
+	sender = GpIcSendBegin(state->token, state->slice, GpClusterContentId(),
+						   state->nreceivers, state->receivers);
+
+	/* Until the rows end, or no receiver wants more: a LIMIT above them. */
+	while (GpIcSendWanted(sender))
+	{
+		TupleTableSlot *slot = ExecProcNode(child);
+		MemoryContext oldcxt;
+		int			target = -1;
+
+		if (TupIsNull(slot))
+			break;
+		slot_getallattrs(slot);
+
+		ResetExprContext(econtext);
+		oldcxt = MemoryContextSwitchTo(econtext->ecxt_per_tuple_memory);
+		for (int i = 0; i < natts; i++)
+		{
+			if (slot->tts_isnull[i])
+			{
+				values[i] = NULL;
+				lengths[i] = -1;
+			}
+			else if (state->send_binary)
+			{
+				bytea	   *b = SendFunctionCall(&state->outprocs[i],
+												 slot->tts_values[i]);
+
+				values[i] = VARDATA(b);
+				lengths[i] = VARSIZE(b) - VARHDRSZ;
+			}
+			else
+			{
+				values[i] = OutputFunctionCall(&state->outprocs[i],
+											   slot->tts_values[i]);
+				lengths[i] = strlen(values[i]);
+			}
+		}
+		resetStringInfo(&row);
+		append_row_raw(&row, natts, values, lengths);
+
+		if (state->type == GP_MOTION_HASH)
+		{
+			econtext->ecxt_outertuple = slot;
+			for (int i = 0; i < nkeys; i++)
+				keyvalues[i] = ExecEvalExpr(state->hashexprs[i], econtext,
+											&keynulls[i]);
+			target = GpHashSegment(&state->hash, keyvalues, keynulls);
+		}
+		else if (state->type == GP_MOTION_RANDOM)
+			target = next++ % nsegs;
+		MemoryContextSwitchTo(oldcxt);
+
+		if (state->type == GP_MOTION_BROADCAST)
+			GpIcSend(sender, -1, row.data, row.len);
+		else if (state->receiver_of[target] >= 0)
+			GpIcSend(sender, state->receiver_of[target], row.data, row.len);
+
+		/*
+		 * A row for a segment that runs no receiver is one the plan does not
+		 * read there: direct dispatch sent the receiving slice to one
+		 * segment, as the relay's rows for the others are never read.
+		 */
+	}
+
+	GpIcSendEnd(sender);
+	pfree(row.data);
+}
+
+/* A row as it travels, into the scan slot. */
+static TupleTableSlot *
+motion_decode_row(MotionState *state, const char *data, int len)
+{
+	TupleTableSlot *slot = state->css.ss.ss_ScanTupleSlot;
+	TupleDesc	tupdesc = slot->tts_tupleDescriptor;
+	const char *p = data;
+	const char *end = data + len;
+	uint16		natts;
+	MemoryContext oldcxt;
+
+	if (len < (int) sizeof(uint16))
+		goto corrupt;
+	memcpy(&natts, p, sizeof(natts));
+	p += sizeof(natts);
+	natts = pg_ntoh16(natts);
+	if (natts != tupdesc->natts)
+		ereport(ERROR,
+				(errcode(ERRCODE_DATATYPE_MISMATCH),
+				 errmsg("a Motion's row has %d columns, not %d",
+						natts, tupdesc->natts)));
+
+	ExecClearTuple(slot);
+	oldcxt = MemoryContextSwitchTo(state->css.ss.ps.ps_ExprContext->ecxt_per_tuple_memory);
+	for (int i = 0; i < natts; i++)
+	{
+		int32		vlen;
+		char	   *value;
+
+		if (end - p < (int) sizeof(vlen))
+			goto corrupt;
+		memcpy(&vlen, p, sizeof(vlen));
+		p += sizeof(vlen);
+		vlen = (int32) pg_ntoh32((uint32) vlen);
+		if (vlen < 0)
+		{
+			slot->tts_isnull[i] = true;
+			slot->tts_values[i] = (Datum) 0;
+			continue;
+		}
+		if (end - p < vlen)
+			goto corrupt;
+		value = palloc(vlen + 1);
+		memcpy(value, p, vlen);
+		value[vlen] = '\0';
+		p += vlen;
+		slot->tts_isnull[i] = false;
+		if (state->binary)
+		{
+			StringInfoData buf;
+
+			initReadOnlyStringInfo(&buf, value, vlen);
+			slot->tts_values[i] = ReceiveFunctionCall(&state->inprocs[i], &buf,
+													  state->inparams[i],
+													  TupleDescAttr(tupdesc, i)->atttypmod);
+		}
+		else
+			slot->tts_values[i] = InputFunctionCall(&state->inprocs[i], value,
+													state->inparams[i],
+													TupleDescAttr(tupdesc, i)->atttypmod);
+	}
+	MemoryContextSwitchTo(oldcxt);
+	return ExecStoreVirtualTuple(slot);
+
+corrupt:
+	ereport(ERROR,
+			(errcode(ERRCODE_GP_INTERCONNECTION_ERROR),
+			 errmsg("interconnect: a row of slice %d ends in the middle",
+					state->slice)));
+	return NULL;
+}
+
+/*
+ * The next row a streaming slice sent this process.  What came is kept, so
+ * that the Motion can be read again: Cloudberry's executor refuses to, and
+ * ORCA puts a Materialize above one that would be, but a Materialize with
+ * nothing to rewind asks the node below it again, and the relay answered.
+ */
+static TupleTableSlot *
+motion_stream_next(MotionState *state)
+{
+	TupleTableSlot *slot = state->css.ss.ss_ScanTupleSlot;
+	char	   *data;
+	int			len;
+
+	if (state->replaying)
+	{
+		if (tuplestore_gettupleslot(state->spool, true, false, state->spoolslot))
+			return ExecCopySlot(slot, state->spoolslot);
+		return ExecClearTuple(slot);
+	}
+	if (state->stream_done)
+		return ExecClearTuple(slot);
+
+	if (state->icrecv == NULL)
+		state->icrecv = GpIcRecvBegin(state->token, state->slice,
+									  state->nsenders);
+	if (GpIcRecv(state->icrecv, &data, &len))
+	{
+		motion_decode_row(state, data, len);
+		tuplestore_puttupleslot(state->spool, slot);
+		return slot;
+	}
+	GpIcRecvEnd(state->icrecv);
+	state->icrecv = NULL;
+	state->stream_done = true;
+	return ExecClearTuple(slot);
+}
+
 static void
 motion_begin(CustomScanState *node, EState *estate, int eflags)
 {
@@ -742,6 +1169,26 @@ motion_begin(CustomScanState *node, EState *estate, int eflags)
 		!(eflags & EXEC_FLAG_EXPLAIN_ONLY))
 	{
 		TupleDesc	tupdesc = node->ss.ss_ScanTupleSlot->tts_tupleDescriptor;
+		List	   *entry = stream_entry(estate->es_plannedstmt, state->slice);
+
+		/* A reader's fragment is the Motion it sends through. */
+		if (entry != NULL &&
+			estate->es_plannedstmt->planTree == (Plan *) cscan)
+		{
+			motion_begin_sending(state, estate, eflags, entry);
+			return;
+		}
+
+		/* A slice that streams, received as it comes rather than from a file. */
+		if (entry != NULL)
+		{
+			state->streamed = true;
+			state->token = stream_token(estate->es_plannedstmt);
+			state->nsenders = intVal(lsecond(entry));
+			state->spool = tuplestore_begin_heap(false, false, work_mem);
+			state->spoolslot = MakeSingleTupleTableSlot(tupdesc,
+														&TTSOpsMinimalTuple);
+		}
 
 		state->receiving = true;
 		state->key = fragment_key(estate->es_plannedstmt);
@@ -795,7 +1242,8 @@ motion_begin(CustomScanState *node, EState *estate, int eflags)
  * with it as the tree, and the key its Motions' rows are kept under.
  */
 static char *
-fragment_sql(EState *estate, Plan *fragment, const char *key)
+fragment_sql_ex(EState *estate, Plan *fragment, const char *key, List *marks,
+				bool reader)
 {
 	PlannedStmt *whole = estate->es_plannedstmt;
 	PlannedStmt *frag = makeNode(PlannedStmt);
@@ -813,12 +1261,42 @@ fragment_sql(EState *estate, Plan *fragment, const char *key)
 	if (!write)
 		frag->resultRelationRelids = NULL;
 	frag->rowMarks = NIL;
-	frag->extension_state = NIL;
+	frag->extension_state = marks;
 	frag->utilityStmt = NULL;
+
+	/*
+	 * A reader only reads, in a transaction that may not write, and a
+	 * fragment that carries the statement's INSERT or UPDATE privileges is
+	 * refused there as a write.  Its privileges are not a reader's to check:
+	 * the coordinator checked the statement's before sending any of it, and
+	 * the writer's fragment carries them all again.  So a reader's has none,
+	 * and its range table points at none.
+	 */
+	if (reader)
+	{
+		List	   *rtable = NIL;
+		ListCell   *lc;
+
+		foreach(lc, whole->rtable)
+		{
+			RangeTblEntry *rte = copyObject(lfirst_node(RangeTblEntry, lc));
+
+			rte->perminfoindex = 0;
+			rtable = lappend(rtable, rte);
+		}
+		frag->rtable = rtable;
+		frag->permInfos = NIL;
+	}
 
 	return psprintf("SELECT gp_internal.exec_fragment(%s, %s)",
 					quote_literal_cstr(nodeToString(frag)),
 					quote_literal_cstr(key ? key : ""));
+}
+
+static char *
+fragment_sql(EState *estate, Plan *fragment, const char *key)
+{
+	return fragment_sql_ex(estate, fragment, key, NIL, false);
 }
 
 /* Every Motion in a plan tree, the fragments below them included. */
@@ -1108,11 +1586,231 @@ motion_relay(MotionState *gather, CustomScan *motion)
 	FreeExprContext(econtext, true);
 }
 
+/* The segments a slice runs on: every one, or the one it names. */
+static bool
+content_includes(int content, int segment)
+{
+	return content == -1 || content == segment;
+}
+
+/*
+ * Can the Motions below this Gather stream -- every slice running at once,
+ * a reader on each segment for each slice the writer does not run?  When
+ * they can, the slices that stream, with the one each sends to.
+ *
+ * The relay stays for what streaming cannot do yet: a slice the coordinator
+ * sends to one the writer does not run, whose rows only the writer's files
+ * can take; a temporary table, which only its session's own backend -- the
+ * writer -- can read; a reader on a segment whose writer runs nothing and so
+ * publishes no snapshot, which direct dispatch makes; a slice whose receiver
+ * the translator did not say.
+ */
+static bool
+stream_plan(MotionState *state, List *order, List *motions)
+{
+	EState	   *estate = state->css.ss.ps.state;
+	int			top = GpMotionSlice(state->css.ss.ps.plan);
+	int			nsegs = GpClusterSegmentCount();
+	List	   *slices = NIL;
+	ListCell   *lc;
+
+	if (gp_interconnect_type != GP_INTERCONNECT_TCP)
+		return false;
+
+	foreach(lc, estate->es_range_table)
+	{
+		RangeTblEntry *rte = lfirst_node(RangeTblEntry, lc);
+
+		if (rte->rtekind == RTE_RELATION &&
+			get_rel_persistence(rte->relid) == RELPERSISTENCE_TEMP)
+			return false;
+	}
+
+	foreach(lc, order)
+	{
+		int			slice = lfirst_int(lc);
+		CustomScan *motion = NULL;
+		StreamSlice *ss;
+		int			content;
+		int			parent;
+
+		foreach_ptr(Plan, m, motions)
+			if (GpMotionSlice(m) == slice)
+				motion = (CustomScan *) m;
+		if (motion == NULL)
+			return false;
+		content = GpMotionSegment((Plan *) motion);
+		parent = GpMotionParent((Plan *) motion);
+		if (parent == MOTION_PARENT_UNKNOWN)
+			return false;
+		if (content == GP_MOTION_FROM_COORDINATOR)
+		{
+			if (parent != top)
+				return false;
+			continue;
+		}
+
+		ss = palloc0(sizeof(StreamSlice));
+		ss->motion = motion;
+		ss->slice = slice;
+		ss->parent = parent;
+		ss->contents = palloc_array(int, nsegs);
+		for (int seg = 0; seg < nsegs; seg++)
+		{
+			if (!content_includes(content, seg))
+				continue;
+			if (!content_includes(state->content, seg))
+				return false;	/* no writer there to read as */
+			ss->contents[ss->ncontents++] = seg;
+		}
+		ss->readers = palloc_array(int, Max(ss->ncontents, 1));
+		ss->addresses = palloc_array(const char *, Max(ss->ncontents, 1));
+		slices = lappend(slices, ss);
+	}
+
+	/* every receiving slice is one that runs here */
+	foreach_ptr(StreamSlice, ss, slices)
+	{
+		bool		found = ss->parent == top;
+
+		foreach_ptr(StreamSlice, p, slices)
+			if (p->slice == ss->parent)
+				found = true;
+		if (!found)
+			return false;
+	}
+
+	state->stream_slices = slices;
+	return slices != NIL;
+}
+
+/*
+ * Start the slices that stream, each on a reader of every segment that runs
+ * it, and answer what the writer's own fragment has to carry: where every
+ * slice's receivers are, and the key the readers find its snapshot under.
+ */
+static List *
+stream_start(MotionState *state)
+{
+	EState	   *estate = state->css.ss.ps.state;
+	int			top = GpMotionSlice(state->css.ss.ps.plan);
+	int			nsegs = GpClusterSegmentCount();
+	int		   *writer_pid = palloc0_array(int, nsegs);
+	const char **writer_address = palloc0_array(const char *, nsegs);
+	uint8		random[GP_IC_TOKEN_LEN / 2];
+	char		token[GP_IC_TOKEN_LEN + 1];
+	char	   *sharekey;
+	List	   *entries = NIL;
+	DefElem    *streammark;
+	GpStream   *stream;
+	static uint32 share_counter = 0;
+
+	if (!pg_strong_random(random, sizeof(random)))
+		ereport(ERROR,
+				(errcode(ERRCODE_INTERNAL_ERROR),
+				 errmsg("could not generate a random interconnect token")));
+	for (int i = 0; i < (int) sizeof(random); i++)
+		snprintf(token + 2 * i, 3, "%02x", random[i]);
+	sharekey = psprintf("%d_%u", MyProcPid, ++share_counter);
+
+	for (int seg = 0; seg < nsegs; seg++)
+		if (content_includes(state->content, seg))
+			writer_address[seg] = GpStreamWriterAddress(seg, &writer_pid[seg]);
+
+	stream = GpStreamBegin();
+	state->stream = stream;
+	foreach_ptr(StreamSlice, ss, state->stream_slices)
+		for (int i = 0; i < ss->ncontents; i++)
+			ss->readers[i] = GpStreamAddReader(stream, ss->contents[i],
+											   &ss->addresses[i]);
+
+	/* where each slice's receivers are: the writers, or its parent's readers */
+	foreach_ptr(StreamSlice, ss, state->stream_slices)
+	{
+		List	   *contents = NIL;
+		List	   *addresses = NIL;
+
+		if (ss->parent == top)
+		{
+			for (int seg = 0; seg < nsegs; seg++)
+			{
+				if (!content_includes(state->content, seg))
+					continue;
+				contents = lappend(contents, makeInteger(seg));
+				addresses = lappend(addresses,
+									makeString(pstrdup(writer_address[seg])));
+			}
+		}
+		else
+		{
+			foreach_ptr(StreamSlice, p, state->stream_slices)
+			{
+				if (p->slice != ss->parent)
+					continue;
+				for (int i = 0; i < p->ncontents; i++)
+				{
+					contents = lappend(contents, makeInteger(p->contents[i]));
+					addresses = lappend(addresses,
+										makeString(pstrdup(p->addresses[i])));
+				}
+			}
+		}
+		entries = lappend(entries,
+						  list_make4(makeInteger(ss->slice),
+									 makeInteger(ss->ncontents),
+									 contents, addresses));
+	}
+	streammark = makeDefElem(pstrdup(GP_STREAM_MARK),
+							 (Node *) list_make2(makeString(pstrdup(token)),
+												 entries), -1);
+
+	/*
+	 * Each reader: its own transaction, read as a part of its writer's, and
+	 * the Motion it sends through as its fragment.
+	 */
+	foreach_ptr(StreamSlice, ss, state->stream_slices)
+	{
+		char	   *fragment = fragment_sql_ex(estate, (Plan *) ss->motion,
+											   state->key,
+											   list_make1(streammark), true);
+
+		for (int i = 0; i < ss->ncontents; i++)
+		{
+			int			seg = ss->contents[i];
+			char	   *sql;
+
+			sql = psprintf("BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY; "
+						   "SET LOCAL %s = %s; %s; COMMIT",
+						   GP_SHARE_SETTING,
+						   quote_literal_cstr(psprintf("%d/%s", writer_pid[seg],
+													   sharekey)),
+						   fragment);
+			GpStreamStartReader(stream, ss->readers[i], sql);
+		}
+	}
+
+	return list_make2(streammark,
+					  makeDefElem(pstrdup(GP_SHARE_MARK),
+								  (Node *) makeString(sharekey), -1));
+}
+
+/* The readers are done: they finished their slices, or were not wanted. */
+static void
+stream_end(MotionState *state)
+{
+	GpStream   *stream = state->stream;
+
+	state->stream = NULL;
+	if (stream != NULL)
+		GpStreamEnd(stream);
+}
+
 /*
  * Before a Gather sends its fragment: the Motions below it that move rows
  * between segments, in the order the translator gave -- a Motion's senders
  * before its receivers -- each carried out once, however often the Gather
- * is read again.
+ * is read again.  Where the slices can stream, only the coordinator's own
+ * are carried out first; the rest run with the Gather's, each time it runs.
  */
 static void
 motion_prepare(MotionState *state)
@@ -1137,6 +1835,8 @@ motion_prepare(MotionState *state)
 	foreach(lc, estate->es_plannedstmt->subplans)
 		collect_motions((Plan *) lfirst(lc), &motions);
 
+	state->streaming = stream_plan(state, order, motions);
+
 	foreach(lc, order)
 	{
 		int			slice = lfirst_int(lc);
@@ -1148,6 +1848,11 @@ motion_prepare(MotionState *state)
 				motion = (CustomScan *) lfirst(lm);
 		if (motion == NULL)
 			elog(ERROR, "no Motion sends slice %d", slice);
+
+		/* A streaming slice runs with the Gather's; the coordinator's, first. */
+		if (state->streaming &&
+			GpMotionSegment((Plan *) motion) != GP_MOTION_FROM_COORDINATOR)
+			continue;
 		motion_relay(state, motion);
 	}
 }
@@ -1190,8 +1895,11 @@ motion_dml_run(MotionState *state)
 	if (!state->prepared)
 		motion_prepare(state);
 
-	GpDispatchCommandParams(fragment_sql(estate, write, state->key),
+	GpDispatchCommandParams(fragment_sql_ex(estate, write, state->key,
+											state->streaming ? stream_start(state) : NIL,
+											false),
 							0, NULL, state->content, counts);
+	stream_end(state);
 
 	/* every segment writes a replicated table's rows alike: count them once */
 	if (policy != NULL && GpPolicyIsReplicated(policy))
@@ -1212,9 +1920,11 @@ motion_start(MotionState *state)
 		motion_prepare(state);
 
 	oldcxt = MemoryContextSwitchTo(state->css.ss.ps.state->es_query_cxt);
-	state->gather = GpGatherStartOn(fragment_sql(state->css.ss.ps.state,
-												 outerPlan(state->css.ss.ps.plan),
-												 state->key),
+	state->gather = GpGatherStartOn(fragment_sql_ex(state->css.ss.ps.state,
+													outerPlan(state->css.ss.ps.plan),
+													state->key,
+													state->streaming ? stream_start(state) : NIL,
+													false),
 									slot->tts_tupleDescriptor,
 									state->content);
 	MemoryContextSwitchTo(oldcxt);
@@ -1226,6 +1936,7 @@ motion_finish(MotionState *state)
 	if (state->gather != NULL)
 		GpGatherEnd(state->gather);
 	state->gather = NULL;
+	stream_end(state);
 	state->done = true;
 }
 
@@ -1333,6 +2044,16 @@ motion_next(ScanState *ss)
 	if (state->done)
 		return ExecClearTuple(slot);
 
+	if (state->sending)
+	{
+		motion_send_all(state);
+		state->done = true;
+		return ExecClearTuple(slot);
+	}
+
+	if (state->streamed)
+		return motion_stream_next(state);
+
 	if (state->receiving)
 		return motion_recv_next(state);
 
@@ -1387,6 +2108,17 @@ motion_end(CustomScanState *node)
 
 	motion_finish(state);
 
+	/* A streaming slice's senders stop sending here. */
+	if (state->icrecv != NULL)
+		GpIcRecvEnd(state->icrecv);
+	state->icrecv = NULL;
+	if (state->spool != NULL)
+	{
+		tuplestore_end(state->spool);
+		ExecDropSingleTupleTableSlot(state->spoolslot);
+		state->spool = NULL;
+	}
+
 	/* The segments are done with the rows this Gather's Motions sent them. */
 	if (!state->receiving && state->key != NULL)
 		GpDispatchCommand(psprintf("SELECT gp_internal.motion_drop(%s)",
@@ -1410,6 +2142,22 @@ static void
 motion_rescan(CustomScanState *node)
 {
 	MotionState *state = (MotionState *) node;
+
+	/* What a streaming slice sent is read again from what was kept of it. */
+	if (state->streamed)
+	{
+		while (!state->stream_done && !state->replaying)
+		{
+			TupleTableSlot *slot = motion_stream_next(state);
+
+			if (TupIsNull(slot))
+				break;
+			ResetExprContext(state->css.ss.ps.ps_ExprContext);
+		}
+		state->replaying = true;
+		tuplestore_rescan(state->spool);
+		return;
+	}
 
 	motion_finish(state);
 	state->done = false;
@@ -1843,9 +2591,11 @@ fragment_plan(const char *payload, const char *key)
 		foreach(lc, stmt->planTree->targetlist)
 			lfirst_node(TargetEntry, lc)->resjunk = false;
 
-	stmt->extension_state = list_make1(makeDefElem(pstrdup(GP_FRAGMENT_MARK),
-												   (Node *) makeString(pstrdup(key)),
-												   -1));
+	/* what the coordinator marked it with, and that it is a fragment */
+	stmt->extension_state = lappend(stmt->extension_state,
+									makeDefElem(pstrdup(GP_FRAGMENT_MARK),
+												(Node *) makeString(pstrdup(key)),
+												-1));
 	return stmt;
 }
 
@@ -1858,6 +2608,48 @@ is_fragment(PlannedStmt *stmt)
 		if (strcmp(lfirst_node(DefElem, lc)->defname, GP_FRAGMENT_MARK) == 0)
 			return true;
 	return false;
+}
+
+/*
+ * The writer's fragment of a statement whose slices run at once: its
+ * snapshot and its transaction's state, for its readers, before anything of
+ * it runs -- they wait for it to start.
+ */
+static void
+motion_executor_start(QueryDesc *queryDesc, int eflags)
+{
+	if (GpClusterIsDispatched() && is_fragment(queryDesc->plannedstmt) &&
+		!(eflags & EXEC_FLAG_EXPLAIN_ONLY))
+	{
+		Node	   *key = fragment_mark(queryDesc->plannedstmt, GP_SHARE_MARK);
+
+		if (key != NULL)
+			GpSharePublish(strVal(key), queryDesc->snapshot);
+	}
+
+	if (prev_executor_start)
+		prev_executor_start(queryDesc, eflags);
+	else
+		standard_ExecutorStart(queryDesc, eflags);
+}
+
+/* A statement's connections that nothing here asked for are closed with it. */
+static void
+motion_executor_end(QueryDesc *queryDesc)
+{
+	char	   *token = NULL;
+
+	if (GpClusterIsDispatched() && is_fragment(queryDesc->plannedstmt) &&
+		fragment_mark(queryDesc->plannedstmt, GP_STREAM_MARK) != NULL)
+		token = stream_token(queryDesc->plannedstmt);
+
+	if (prev_executor_end)
+		prev_executor_end(queryDesc);
+	else
+		standard_ExecutorEnd(queryDesc);
+
+	if (token != NULL)
+		GpIcForget(token);
 }
 
 static void
@@ -1972,9 +2764,43 @@ gp_exec_fragment(PG_FUNCTION_ARGS)
 	PG_RETURN_VOID();
 }
 
+PG_FUNCTION_INFO_V1(gp_interconnect_address);
+
+/*
+ * gp_internal.interconnect_address()
+ *
+ * Where this segment process receives a Motion's rows, opening its listener
+ * if it has none yet: what the coordinator hands the senders.  Only for the
+ * coordinator.
+ */
+Datum
+gp_interconnect_address(PG_FUNCTION_ARGS)
+{
+	if (!GpClusterDispatchTrusted())
+		ereport(ERROR,
+				(errcode(ERRCODE_INSUFFICIENT_PRIVILEGE),
+				 errmsg("the interconnect is opened only for the coordinator")));
+	PG_RETURN_TEXT_P(cstring_to_text(GpIcAddress()));
+}
+
 void
 GpMotionInit(void)
 {
+	DefineCustomEnumVariable("gp.interconnect_type",
+							 "How the rows of a Motion between segments travel.",
+							 "\"tcp\": every slice of a query runs at once, each "
+							 "segment process sending its rows straight to the "
+							 "ones that receive them, over a Unix socket beside "
+							 "the node's own or a TCP port.  \"relay\": a slice "
+							 "at a time, its rows relayed through the coordinator "
+							 "to files the receiving segments keep.",
+							 &gp_interconnect_type,
+							 GP_INTERCONNECT_TCP,
+							 interconnect_type_options,
+							 PGC_USERSET,
+							 0,
+							 NULL, NULL, NULL);
+
 	if (GpClusterIsSingleNode())
 		return;
 
@@ -1990,6 +2816,11 @@ GpMotionInit(void)
 
 	prev_executor_run = ExecutorRun_hook;
 	ExecutorRun_hook = motion_executor_run;
+
+	prev_executor_start = ExecutorStart_hook;
+	ExecutorStart_hook = motion_executor_start;
+	prev_executor_end = ExecutorEnd_hook;
+	ExecutorEnd_hook = motion_executor_end;
 
 	if (!motion_xact_callback_registered)
 	{

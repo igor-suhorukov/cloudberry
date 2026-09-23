@@ -56,6 +56,7 @@ typedef struct motion_check_context
 	int			problem;
 	List	  **order;			/* the enclosing Gather's Motions, senders first */
 	bool		may_write;		/* the fragment a write is dispatched as */
+	int			slice;			/* the fragment's slice, where in one */
 } motion_check_context;
 
 static bool
@@ -113,6 +114,7 @@ motion_check_walker(Node *node, void *arg)
 		sub.problem = GP_ORCA_MOTION_OK;
 		sub.order = gather ? &order : ctx->order;
 		sub.may_write = type == GP_MOTION_DML;
+		sub.slice = api->motion_slice(plan);
 		if (motion_check_walker((Node *) plan->lefttree, &sub))
 		{
 			ctx->problem = sub.problem;
@@ -132,6 +134,14 @@ motion_check_walker(Node *node, void *arg)
 			api->motion_set_prepare(plan, order);
 		else if (ctx->order != NULL)
 			*ctx->order = lappend_int(*ctx->order, api->motion_slice(plan));
+
+		/*
+		 * The fragment it is in receives it -- in a SubPlan too, which is
+		 * run where the expression that calls it is -- and its senders
+		 * stream to whichever processes run that fragment.
+		 */
+		if (!gather && ctx->in_fragment && api->version_minor >= 5)
+			api->motion_set_parent(plan, ctx->slice);
 
 		/* Its own expressions are evaluated where it receives. */
 		return motion_check_walker((Node *) plan->targetlist, ctx) ||
@@ -229,6 +239,7 @@ gp_orca_check_motions(PlannedStmt *stmt)
 	ctx.problem = GP_ORCA_MOTION_OK;
 	ctx.order = NULL;
 	ctx.may_write = false;
+	ctx.slice = -1;
 
 	(void) motion_check_walker((Node *) stmt->planTree, &ctx);
 	return ctx.problem;

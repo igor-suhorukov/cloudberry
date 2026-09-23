@@ -94,6 +94,9 @@ extern int	GpClusterBackendRole(void);
 /* Is this backend serving a dispatched request?  (gp.qe_identity is set.) */
 extern bool GpClusterIsDispatched(void);
 
+/* The identity the dispatcher gave it, "" when it has none. */
+extern const char *GpClusterQeIdentity(void);
+
 /*
  * Is it the coordinator's own connection: dispatched, and carrying the
  * cluster secret?  Only such a connection is given plans to carry out.

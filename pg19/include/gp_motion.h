@@ -116,6 +116,14 @@ extern int	GpMotionType(Plan *plan);
 extern int	GpMotionSlice(Plan *plan);
 
 /*
+ * The slice that receives a Motion between segments -- the slice of the
+ * fragment it is in, which the translator knows -- so that its senders can
+ * stream to the processes running that slice.
+ */
+extern void GpMotionSetParent(Plan *plan, int parent);
+extern int	GpMotionParent(Plan *plan);
+
+/*
  * A Gather's Motions between segments, by the slices that send them, in the
  * order they are to be carried out before the Gather sends its fragment.
  */

@@ -480,6 +480,102 @@ send_a "\\q"
 exec 3>&-
 wait $A_PID 2>/dev/null
 
+###############################################################################
+echo "R4  XactAdoptTransactionState: a reader reads as of the writer's command"
+###############################################################################
+# What R2 left open.  A writer makes a table and fills another inside a
+# transaction it keeps open, and hands over its state as
+# SerializeTransactionState() writes it for a parallel worker.  A reader that
+# adopts that state before its first snapshot sees the new table's catalog
+# row and the rows, and not the row the writer writes after handing its state
+# over.  With R2's XIDs alone it sees neither: it reads as of its own command,
+# 0.  (The reader reads the new table's catalog row rather than the table,
+# whose lock the writer holds: sharing locks is the extension's, with PG's
+# lock groups.)
+session r4_setup <<'SQL'
+CREATE TABLE r4_rows (a int);
+SQL
+
+W_IN="$WORK/w.in"
+mkfifo "$W_IN"
+"$PSQL" -X -q -t -A -d postgres < "$W_IN" > "$WORK/r4writer.out" 2>&1 &
+W_PID=$!
+exec 4> "$W_IN"
+send_w() { printf '%s\n' "$1" >&4; sleep 0.4; }
+
+send_w "BEGIN;"
+send_w "CREATE TABLE r4_new (a int);"
+send_w "INSERT INTO r4_rows VALUES (1), (2);"
+send_w "\\o $WORK/w.xids"
+send_w "SELECT gp_probe.current_xids();"
+send_w "\\o $WORK/w.state"
+send_w "SELECT gp_probe.transaction_state();"
+send_w "\\o"
+send_w "INSERT INTO r4_rows VALUES (3);"
+send_w "\\o $WORK/w.state2"
+send_w "SELECT gp_probe.transaction_state();"
+send_w "\\o"
+sleep 0.6
+
+wstate=$(tr -d '\n' < "$WORK/w.state" 2>/dev/null)
+wstate2=$(tr -d '\n' < "$WORK/w.state2" 2>/dev/null)
+wxids=$(tr -d '\n' < "$WORK/w.xids" 2>/dev/null)
+[ -n "$wxids" ] || wxids='{}'
+if [ -n "$wstate" ] && [ -n "$wstate2" ]; then
+	ok "the writer serializes its transaction's state"
+else
+	notok "the writer should serialize its transaction's state" "$(tail -5 "$WORK/r4writer.out")"
+fi
+
+session r4_r2only <<SQL
+BEGIN;
+SELECT gp_probe.adopt_xids('$wxids'::xid[]);
+SELECT 'table=' || count(*) FROM pg_class WHERE relname = 'r4_new';
+SELECT 'rows=' || count(*) FROM r4_rows;
+ROLLBACK;
+SQL
+is "with R2's XIDs alone, the writer's new table is not in the catalog" r4_r2only table 0
+is "nor are its rows seen" r4_r2only rows 0
+
+session r4 <<SQL
+BEGIN ISOLATION LEVEL REPEATABLE READ;
+SET LOCAL gp_probe.adopt_state = '$wstate';
+SELECT 'table=' || count(*) FROM pg_class WHERE relname = 'r4_new';
+SELECT 'rows=' || count(*) FROM r4_rows;
+SELECT 'max=' || max(a) FROM r4_rows;
+COMMIT;
+SELECT 'after=' || count(*) FROM pg_class WHERE relname = 'r4_new';
+SQL
+is "a reader that adopted the state sees the writer's new table in the catalog" r4 table 1
+is "and its uncommitted rows" r4 rows 2
+is "and not the row the writer wrote after handing its state over" r4 max 2
+is "at the end of its transaction it reads as itself again" r4 after 0
+
+session r4_later <<SQL
+BEGIN ISOLATION LEVEL REPEATABLE READ;
+SET LOCAL gp_probe.adopt_state = '$wstate2';
+SELECT 'rows=' || count(*) FROM r4_rows;
+COMMIT;
+SQL
+is "the state handed over later reads that row too" r4_later rows 3
+
+session r4_late <<SQL
+BEGIN;
+SELECT 1;
+SET LOCAL gp_probe.adopt_state = '$wstate';
+ROLLBACK;
+SQL
+if grep -q "cannot adopt a transaction's state after taking a snapshot" "$WORK/r4_late.out"; then
+	ok "adopting after the transaction's first snapshot is refused"
+else
+	notok "adopting after the first snapshot should be refused" "$(cat "$WORK/r4_late.out")"
+fi
+
+send_w "ROLLBACK;"
+send_w "\\q"
+exec 4>&-
+wait $W_PID 2>/dev/null
+
 echo
 echo "  $pass passed, $fail failed"
 [ "$fail" -eq 0 ]

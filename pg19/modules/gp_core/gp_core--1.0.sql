@@ -56,6 +56,16 @@ RETURNS void
 AS 'MODULE_PATHNAME', 'gp_motion_drop'
 LANGUAGE C STRICT;
 
+/*
+ * Where a segment process receives the rows of a Motion whose slices run at
+ * once (gp.interconnect_type = tcp), opening its listener on first use.
+ * Only from a connection that carries the cluster secret.
+ */
+CREATE FUNCTION gp_internal.interconnect_address()
+RETURNS text
+AS 'MODULE_PATHNAME', 'gp_interconnect_address'
+LANGUAGE C STRICT VOLATILE;
+
 CREATE FUNCTION gp.version()
 RETURNS text
 AS 'MODULE_PATHNAME', 'gp_version'

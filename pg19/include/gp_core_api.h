@@ -39,7 +39,7 @@
  * here changes meaning or moves.
  */
 #define GP_CORE_API_VERSION_MAJOR	1
-#define GP_CORE_API_VERSION_MINOR	4
+#define GP_CORE_API_VERSION_MINOR	5
 
 /*
  * What the rendezvous variable points at.  It is the first thing a module
@@ -127,6 +127,9 @@ typedef struct GpCoreApi
 	struct Plan *(*split_modify_make) (struct Plan *child, Index rti,
 									   int natts, AttrNumber actioncol,
 									   AttrNumber ctidcol);
+
+	/* Since 1.5: the slice that receives a Motion between segments. */
+	void		(*motion_set_parent) (struct Plan *plan, int parent);
 } GpCoreApi;
 
 /*

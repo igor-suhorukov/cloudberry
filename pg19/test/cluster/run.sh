@@ -782,8 +782,10 @@ mine" ] && ok "a transaction reads its own rows, and a LIMIT leaves the connecti
 	###########################################################################
 	# ORCA's distributed layer: a Gather Motion's fragment is sent to the
 	# segments as a plan of their own, only from a coordinator that has the
-	# cluster secret, and the Motions between segments are relayed through
-	# the coordinator before it (gp_motion.c).
+	# cluster secret, and the Motions between segments stream from slice to
+	# slice, each slice on a backend of its own (gp_motion.c, gp_ic.c,
+	# gp_share.c) -- or, with gp.interconnect_type = relay, are relayed
+	# through the coordinator before it.
 	SECRET="cluster-secret-$RANDOM$RANDOM$RANDOM"
 	orca_started=1
 	for n in 1 2 0; do
@@ -890,6 +892,114 @@ mine" ] && ok "a transaction reads its own rows, and a LIMIT leaves the connecti
 	orca_same "a window partitioned off the key, merged in order" \
 		"SELECT a, rank() OVER (PARTITION BY b ORDER BY a DESC) FROM o WHERE a > 990 ORDER BY b, a;" \
 		"Merge Key"
+
+	# The slices of a query run at once: the writer on each segment runs the
+	# Gather's, and readers -- more backends of the session there, reading as
+	# a part of the writer's transaction -- run the others, streaming their
+	# rows to the slice above.
+	relay_same() {				# relay_same <what> <sql>: tcp and relay agree
+		local tcp relay
+		tcp=$(q 0 "$2")
+		relay=$(q 0 "SET gp.interconnect_type = relay; $2")
+		[ "$tcp" = "$relay" ] && [ -n "$tcp" ] && ok "$1" \
+			|| notok "$1: streamed and relayed rows agree" "tcp: $tcp / relay: $relay"
+	}
+	relay_same "streamed and relayed, the same rows: two Motions below a Gather" \
+		"SELECT y, count(*), sum(a) FROM o JOIN po ON o.b = po.y GROUP BY y ORDER BY y;"
+	relay_same "streamed and relayed, the same rows: sixty thousand rows between segments" \
+		"SELECT count(*), sum(length(s)) FROM (SELECT s, count(*) FROM bo GROUP BY s) x;"
+
+	# The readers, seen from a segment while the session that used them lives:
+	# as many on each segment as the widest statement had slices below its
+	# Gather, kept for the next statement rather than started again.
+	{
+		for i in 1 2 3 4 5 6 7 8; do
+			echo "SELECT count(*) FROM o JOIN po ON o.b = po.y;"
+		done
+		echo "SELECT pg_sleep(4);"
+	} | qf 0 > "$ROOT/readers.out" 2>&1 &
+	bg=$!
+	sleep 2.5
+	readers=$(q 1 "SELECT count(*) FROM pg_stat_activity WHERE application_name = 'cloudberry reader';")
+	sockets=$(ls -a "$(sockdir 1)" | grep -c '^\.s\.GPIC\.')
+	wait $bg
+	[ "$readers" = "2" ] && [ "$sockets" -ge 3 ] \
+		&& ok "each slice below the Gather ran on a reader of its own, kept for the session ($readers readers, $sockets interconnect sockets on segment 0)" \
+		|| notok "the readers on a segment" "readers $readers, sockets $sockets"
+
+	# A reader sees what the writer's transaction wrote before the statement:
+	# rows, a table made in it (R4: the catalog read as of the writer's
+	# command), a row updated in it (a combo command ID the reader looks up in
+	# what the writer published, R2), and it takes no lock the writer's
+	# TRUNCATE would make it wait for (the writer's lock group).
+	out=$(printf '%s\n' "BEGIN;" \
+		"INSERT INTO po SELECT i, 77 FROM generate_series(1001, 1010) i;" \
+		"SELECT count(*) FROM o JOIN po ON o.b + 70 = po.y;" "ROLLBACK;" | qf 0)
+	[ "$out" = "1000" ] && ok "a reader reads the rows the writer's transaction has not committed" \
+		|| notok "uncommitted rows, read by a reader" "$out"
+	out=$(printf '%s\n' "SET client_min_messages = warning;" "BEGIN;" \
+		"CREATE TABLE sn (x int, y int) DISTRIBUTED BY (x);" \
+		"INSERT INTO sn SELECT i, i % 7 FROM generate_series(1, 70) i;" "ANALYZE sn;" \
+		"SELECT count(*) FROM o JOIN sn ON o.b = sn.y;" \
+		"ALTER TABLE sn ADD COLUMN z int DEFAULT 2;" \
+		"SELECT sum(z) FROM o JOIN sn ON o.b = sn.y;" "ROLLBACK;" | qf 0)
+	[ "$out" = "7000
+14000" ] && ok "and a table made and altered in it, which its catalog shows the reader" \
+		|| notok "a table made in the transaction, read by a reader" "$out"
+	out=$(printf '%s\n' "BEGIN;" \
+		"INSERT INTO po SELECT i, 88 FROM generate_series(2001, 2010) i;" \
+		"UPDATE po SET y = 89 WHERE x > 2005;" \
+		"SELECT po.y, count(*) FROM o JOIN po ON o.b + 80 = po.y GROUP BY po.y ORDER BY 1;" \
+		"ROLLBACK;" | qf 0)
+	[ "$out" = "88|500
+89|500" ] && ok "and rows it inserted and then updated, whose combo command IDs the writer publishes" \
+		|| notok "combo command IDs, resolved by a reader" "$out"
+	q 0 "CREATE TABLE sttr (x int, y int) DISTRIBUTED BY (x);" >/dev/null
+	out=$(printf '%s\n' "SET lock_timeout = '10s';" "BEGIN;" "TRUNCATE sttr;" \
+		"INSERT INTO sttr SELECT i, i % 3 FROM generate_series(1, 30) i;" \
+		"SELECT count(*) FROM sttr JOIN o ON sttr.y = o.b;" "COMMIT;" | qf 0)
+	[ "$out" = "3000" ] && ok "a reader does not wait for the lock of the writer's TRUNCATE" \
+		|| notok "a TRUNCATE in the transaction, and a reader" "$out"
+	out=$(printf '%s\n' "BEGIN;" "INSERT INTO po VALUES (3001, 99);" "SAVEPOINT s;" \
+		"INSERT INTO po VALUES (3002, 99);" \
+		"SELECT count(*) FROM o JOIN po ON o.b + 90 = po.y;" "ROLLBACK TO s;" \
+		"SELECT count(*) FROM o JOIN po ON o.b + 90 = po.y;" "ROLLBACK;" | qf 0)
+	[ "$out" = "200
+100" ] && ok "a savepoint rolled back is rolled back for the readers of the next statement" \
+		|| notok "a savepoint and the readers" "$out"
+
+	# A slice that fails fails the statement with its own error, not with the
+	# interconnect's word for a sender that stopped; a LIMIT stops the
+	# senders; a cursor's slices wait for its next FETCH.
+	out=$(q 0 "SELECT count(*) FROM o JOIN po ON o.b = po.y WHERE 1 / (po.x - 250) > -1;")
+	case "$out" in
+		*"division by zero"*) ok "an error in a sending slice is the statement's error" ;;
+		*) notok "an error in a sending slice" "$out" ;;
+	esac
+	out=$(printf '%s\n' "SELECT count(*) FROM (SELECT bo.k FROM bo JOIN po ON bo.k % 7 = po.y LIMIT 3) l;" \
+		"SELECT count(*) FROM o JOIN po ON o.b = po.y;" | qf 0)
+	want=$(q 0 "SET gp.interconnect_type = relay; SELECT count(*) FROM o JOIN po ON o.b = po.y;")
+	[ "$out" = "3
+$want" ] && ok "a LIMIT stops its senders, and the session goes on" \
+		|| notok "a LIMIT above streaming slices" "$out / $want"
+	cursor="BEGIN;
+DECLARE c CURSOR FOR SELECT po.y, count(*) FROM o JOIN po ON o.b = po.y GROUP BY po.y ORDER BY 1;
+FETCH 2 FROM c;
+SELECT count(*) FROM o JOIN po ON o.b = po.y;
+FETCH 2 FROM c;
+COMMIT;"
+	out=$(echo "$cursor" | qf 0)
+	want=$(printf '%s\n' "SET gp.interconnect_type = relay;" "$cursor" | qf 0)
+	[ "$out" = "$want" ] && [ -n "$out" ] \
+		&& ok "a cursor's slices wait for its next FETCH while another statement streams" \
+		|| notok "a cursor and another statement, streaming" "$out / $want"
+
+	# A temporary table is read only by its session's own backend.
+	out=$(printf '%s\n' "CREATE TEMP TABLE tmpo (x int, y int) DISTRIBUTED BY (x);" \
+		"INSERT INTO tmpo SELECT i, i % 7 FROM generate_series(1, 70) i;" \
+		"SELECT count(*) FROM o JOIN tmpo ON o.b = tmpo.y;" | qf 0)
+	[ "$out" = "7000" ] && ok "a temporary table: its Motions are relayed" \
+		|| notok "a temporary table and streaming" "$out"
 
 	# ORCA's writes, carried out where the rows are.
 	placed() {					# placed <table>: rows on the wrong segment

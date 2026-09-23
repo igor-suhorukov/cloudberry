@@ -178,6 +178,29 @@ extern bool GpDistRandomIsLocal(void);
 extern void GpDistRandomLocal(Oid relid, Tuplestorestate *store,
 							  TupleDesc desc, bool with_content);
 
+/*
+ * A statement whose slices run at once (gp_motion.c): the writer on each
+ * segment runs one of them as it runs any fragment, and readers -- more
+ * backends of the session on the segment, reading as a part of the writer's
+ * transaction (gp_share.c) -- run the others.
+ *
+ * GpStreamBegin() starts one; GpStreamWriterAddress() says where the writer
+ * on a segment receives rows, and its process id; GpStreamAddReader() takes
+ * a reader on a segment for it, answering the reader's place among the
+ * stream's and where it receives; GpStreamStartReader() sends that reader
+ * its slice, the whole of what it runs; GpStreamEnd() waits for every reader
+ * to finish.  A reader that fails fails whatever the coordinator is waiting
+ * for, and the error raised is the one that caused the others.
+ */
+typedef struct GpStream GpStream;
+
+extern GpStream *GpStreamBegin(void);
+extern const char *GpStreamWriterAddress(int content, int *pid);
+extern int	GpStreamAddReader(GpStream *stream, int content,
+							  const char **address);
+extern void GpStreamStartReader(GpStream *stream, int reader, const char *sql);
+extern void GpStreamEnd(GpStream *stream);
+
 /* Close every connection: the session is over, or something went wrong. */
 extern void GpDispatchResetGang(void);
 
