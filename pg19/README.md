@@ -88,8 +88,16 @@ On a cluster (M2), `gp_core` and `gp_orca`:
   hashed by Cloudberry's cdbhash, ANALYZE sampling the segments (O3), CREATE
   TABLE AS and ALTER TABLE ... SET DISTRIBUTED BY;
 - ORCA's distributed plans — the five Motions, Split, direct dispatch, the
-  slice table — carried out by gp_core, and PostgreSQL's own plans gathering
-  from the segments where ORCA does not plan;
+  slice table — carried out by gp_core, each slice sent the values of the
+  parameters it reads; and PostgreSQL's own plans gathering from the
+  segments where ORCA does not plan, writing a distributed table through an
+  Explicit Redistribute Motion — each row changed on its segment by its ctid
+  there, a row whose key changes moved by a Split, RETURNING evaluated on
+  the coordinator;
+- every segment has each table's distribution policy, the `gp` label the
+  coordinator writes;
+- Cloudberry's settings of the dispatcher and the planner, as `gp.*`, among
+  them direct dispatch's INFO lines and autostats;
 - **every slice of a query at once**: the writer, the session's backend on a
   segment, runs one slice, and readers — more backends of the session there,
   reading as a part of the writer's transaction through the shared snapshot
@@ -102,10 +110,9 @@ On a cluster (M2), `gp_core` and `gp_orca`:
 
 What M2 leaves open: a transaction's segments commit one after another and a
 reader sees one segment's snapshot, not the cluster's — two-phase commit and
-distributed snapshots are M3; a segment does not know a table's
-distribution; a slice that reads a parameter or an initplan's value is
-planned by PostgreSQL; an UPDATE or DELETE that reads another distributed
-table is refused; Cloudberry's `gp_id` catalog.
+distributed snapshots are M3; an UPDATE or DELETE of a replicated table
+that reads a distributed one, and an UPDATE of the key of a table with
+triggers, are refused; Cloudberry's `gp_id` catalog.
 
 The storage, resource and transport modules — `gp_ao`, `pax`, `gp_exttable`,
 `gp_resource`, `gp_tde`, `interconnect`, `udp2` — are still stubs: M5 and M6
