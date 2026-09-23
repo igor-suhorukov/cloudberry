@@ -55,9 +55,11 @@ USER root
 
 # GEOS, PROJ, libxml2 and json-c are PostGIS's own; GDAL is raster's;
 # protobuf-c is ST_AsMVT's and ST_AsGeobuf's.  autoconf and libtool are for
-# autogen.sh, because the source is a git tree rather than a release tarball.
+# autogen.sh, and bison and flex for the WKT parser, because the source is a
+# git tree rather than a release tarball, which ships them generated.
 RUN apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
         build-essential pkg-config git ca-certificates autoconf automake libtool \
+        bison flex \
         libxml2-dev libgeos-dev libproj-dev libgdal-dev libjson-c-dev \
         libprotobuf-c-dev protobuf-c-compiler \
     && rm -rf /var/lib/apt/lists/*
