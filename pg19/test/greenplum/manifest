@@ -69,7 +69,7 @@ skip qp_subquery  relation "qp_subquery.v" does not exist; relation "v" does not
 skip qp_correlated_query  differs: answers the queries with a correlation that skips a level, which Cloudberry refuses, in an order that varies from run to run
 run  qp_derived_table
 skip qp_targeted_dispatch  cannot specify storage parameters for a partitioned table; relation "mwv_cdetail_table" does not exist
-skip qp_functions  bind message supplies 5 parameters, but prepared statement "" requires 2; could not determine data type of parameter $1
+run  qp_functions
 skip cursor  function gp_inject_fault_infinite(unknown, unknown, integer) does not exist; current transaction is aborted, commands ignored until end of transaction block
 skip sequence_gp  type "gp_id" does not exist
 run  tidscan_gp

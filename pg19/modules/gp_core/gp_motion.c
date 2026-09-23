@@ -2132,7 +2132,7 @@ motion_dml_run(MotionState *state)
 											state->key,
 											state->streaming ? stream_start(state) : NIL,
 											false),
-							0, NULL, state->content, counts);
+							0, NULL, NULL, state->content, counts);
 	stream_end(state);
 
 	/* every segment writes a replicated table's rows alike: count them once */

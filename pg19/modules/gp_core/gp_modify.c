@@ -66,6 +66,7 @@
 #include "catalog/pg_authid.h"
 #include "catalog/pg_class.h"
 #include "catalog/pg_proc.h"
+#include "catalog/pg_type.h"
 #include "commands/copy.h"
 #include "commands/defrem.h"
 #include "commands/explain.h"
@@ -547,6 +548,7 @@ modify_exec(CustomScanState *node)
 	EState	   *estate = node->ss.ps.state;
 	ParamListInfo params = estate->es_param_list_info;
 	int			nparams = params ? params->numParams : 0;
+	Oid		   *types = NULL;
 	const char **values = NULL;
 	uint64	   *counts;
 	int			nsegs;
@@ -554,9 +556,16 @@ modify_exec(CustomScanState *node)
 	if (state->done)
 		return NULL;
 
-	/* The statement's parameters, as text, as the segments' $n read them. */
+	/*
+	 * The statement's parameters, as text, of the types its $n had here.  A
+	 * segment must be told every $n's type, as it cannot infer one the
+	 * statement does not read: PL/pgSQL passes one parameter for each of the
+	 * function's variables, and those the statement does not read have no
+	 * type, so go as a null text.
+	 */
 	if (nparams > 0)
 	{
+		types = palloc_array(Oid, nparams);
 		values = palloc0_array(const char *, nparams);
 		for (int i = 0; i < nparams; i++)
 		{
@@ -568,6 +577,7 @@ modify_exec(CustomScanState *node)
 			else
 				prm = &params->params[i];
 
+			types[i] = OidIsValid(prm->ptype) ? prm->ptype : TEXTOID;
 			if (!prm->isnull && OidIsValid(prm->ptype))
 			{
 				Oid			typout;
@@ -581,7 +591,8 @@ modify_exec(CustomScanState *node)
 
 	GpClusterSegments(&nsegs);
 	counts = palloc0_array(uint64, nsegs);
-	GpDispatchCommandParams(state->sql, nparams, values, state->content, counts);
+	GpDispatchCommandParams(state->sql, nparams, types, values, state->content,
+							counts);
 
 	/* Every segment changed its own rows; a replicated table's once each. */
 	if (state->replicated)

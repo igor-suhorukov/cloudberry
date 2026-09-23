@@ -1715,12 +1715,12 @@ GpDispatchUtility(const char *payload, bool own_xact)
 
 /*
  * A statement with parameters on every segment, or on one, and how many rows
- * each changed.  The parameters travel as text, as the statement's own were
- * typed; "counts" gets one entry per segment asked, in content order.
+ * each changed.  The parameters travel as text, of the types given; "counts"
+ * gets one entry per segment asked, in content order.
  */
 void
-GpDispatchCommandParams(const char *sql, int nparams, const char *const *values,
-						int content, uint64 *counts)
+GpDispatchCommandParams(const char *sql, int nparams, const Oid *types,
+						const char *const *values, int content, uint64 *counts)
 {
 	GpGang	   *g = gang_get();
 	PGresult  **results;
@@ -1737,7 +1737,7 @@ GpDispatchCommandParams(const char *sql, int nparams, const char *const *values,
 			continue;
 		if (c->busy && c->fetching != NULL)
 			conn_park(c);
-		if (!PQsendQueryParams(c->conn, sql, nparams, NULL, values, NULL, NULL, 0))
+		if (!PQsendQueryParams(c->conn, sql, nparams, types, values, NULL, NULL, 0))
 		{
 			char	   *msg = pstrdup(PQerrorMessage(c->conn));
 			int			failed = c->content;

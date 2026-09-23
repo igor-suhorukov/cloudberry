@@ -484,6 +484,18 @@ EOF
 	[ "$out" = "UPDATE 10" ] && ok "and its command tag counts every segment's rows" \
 		|| notok "UPDATE's command tag" "$out"
 
+	# PL/pgSQL gives a statement one parameter for each of the function's
+	# variables, and those it does not read have no type; the segments are
+	# told every one's, or they could not take the statement (qp_functions).
+	q 0 "CREATE TABLE plu (a int, b text) DISTRIBUTED BY (a); INSERT INTO plu SELECT g, 'p' FROM generate_series(1, 20) g;" >/dev/null
+	q 0 "CREATE FUNCTION plu_key(k int, v text) RETURNS bigint LANGUAGE plpgsql AS \$\$ DECLARE n bigint; BEGIN BEGIN UPDATE plu SET b = v WHERE a = k; GET DIAGNOSTICS n = ROW_COUNT; EXCEPTION WHEN unique_violation THEN n := -1; END; RETURN n; END \$\$;" >/dev/null
+	q 0 "CREATE FUNCTION plu_rec() RETURNS int LANGUAGE plpgsql AS \$\$ DECLARE r record; BEGIN FOR r IN SELECT g AS a FROM generate_series(11, 13) g LOOP UPDATE plu SET b = 'rec' WHERE a <= r.a AND a > 10; END LOOP; RETURN 0; END \$\$;" >/dev/null
+	out=$(printf '%s\n' "SELECT plu_key(5, 'five'), plu_rec();" \
+		"SELECT string_agg(a || b, ' ' ORDER BY a) FROM plu WHERE b <> 'p';" | qf 0 | tr '\n' ' ')
+	[ "$out" = "1|0 5five 11rec 12rec 13rec " ] \
+		&& ok "a PL/pgSQL function's UPDATE is sent with every parameter's type, of the variables it reads and those it does not" \
+		|| notok "PL/pgSQL variables in an UPDATE sent as it stands" "$out"
+
 	# An UPDATE of the key moves each row: deleted where it is, its new
 	# version inserted where it hashes -- Cloudberry's Split Update.
 	q 0 "CREATE TABLE dk (a int, b text) DISTRIBUTED BY (a); INSERT INTO dk SELECT g, 'k' FROM generate_series(1, 100) g;" >/dev/null

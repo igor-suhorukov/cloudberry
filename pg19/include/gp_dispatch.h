@@ -147,10 +147,12 @@ extern bool GpDispatchIsTreeText(const char *str);
 
 /*
  * A statement with parameters, in text, on every segment (content -1) or one;
- * "counts" receives how many rows each segment's statement changed, in
+ * "types" gives each parameter's type, or is NULL for the segment to infer
+ * them; "counts" receives how many rows each segment's statement changed, in
  * content order.
  */
 extern void GpDispatchCommandParams(const char *sql, int nparams,
+									const Oid *types,
 									const char *const *values, int content,
 									uint64 *counts);
 

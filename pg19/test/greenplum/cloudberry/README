@@ -33,6 +33,18 @@ bfv_dd_multicolumn (planner, orca)  the INFO lines of
 case_gp  IS NOT DISTINCT FROM, and the CASE form, printed as the searched
   CASE the port's rewrite makes of them (see the singlenode suite's README).
 
+qp_functions (planner, orca)  PostgreSQL 19's words for a call no function
+  takes -- a DETAIL where Cloudberry's HINT stood -- and for a SQL function's
+  last statement, which may be a MERGE ... RETURNING now.  Cloudberry refuses
+  two queries whose SQL function reads a table in a slice it cannot: under
+  the planner the port gathers fun_tree's rows and calls child_list() on the
+  coordinator, where it reads the table whole, and answers; under ORCA the
+  call is in the segments' slice and refused as Cloudberry refuses it, the
+  segment named in the DETAIL.  is_invalid_name() reads a replicated table,
+  which Cloudberry's slice on the coordinator's entry database has no copy
+  of; the port has no such slice, calls it in the coordinator's own plan,
+  and answers in both passes.
+
 qp_union_intersect  an error from a segment names the segment in its
   DETAIL; and an UPDATE of the distribution key that finds one row twice
   moves it once, as PostgreSQL's UPDATE ... FROM changes it once, where
