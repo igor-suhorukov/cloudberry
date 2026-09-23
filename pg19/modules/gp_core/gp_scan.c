@@ -41,7 +41,8 @@
  * conditions fix every column of its key to a constant has all the rows they
  * can match on one segment, which is the only one asked -- Cloudberry's
  * direct dispatch.  A replicated table's rows are all on every segment, so
- * one is asked, a different one per session.
+ * one is asked, a different one per session.  A partial table's rows are on
+ * the first so many segments its policy names, and only those are asked.
  *
  * Cloudberry sources this file stands in for:
  *	  the Gather Motion over a scan that cdbllize.c and cdbpath.c put above a
@@ -133,8 +134,9 @@ typedef struct GatherScanState
 {
 	CustomScanState css;
 	char	   *sql;
-	int			content;		/* -1 every segment, else just this one */
-	int			nsegments;
+	int			content;		/* -1 the table's segments, else just this one */
+	int			nsegments;		/* the table's: every one, or a partial
+								 * table's first so many */
 	GpGatherState *gather;
 	bool		done;
 	bool		identity;		/* the rows of a table being changed */
@@ -163,13 +165,13 @@ GpScanDistributedPolicy(Oid relid)
 }
 
 int
-GpScanReplicatedContent(void)
+GpScanReplicatedContent(const GpPolicy *policy)
 {
-	int			nsegs;
-
-	/* Every segment has every row; spread the sessions over them. */
-	GpClusterSegments(&nsegs);
-	return MyProcPid % nsegs;
+	/*
+	 * Every segment of the policy has every row; spread the sessions over
+	 * them.  A partial table's are the first numsegments.
+	 */
+	return MyProcPid % policy->numsegments;
 }
 
 /* ------------------------------------------------------------------------- */
@@ -552,7 +554,7 @@ gather_plan(PlannerInfo *root, RelOptInfo *rel, CustomPath *best_path,
 	}
 
 	if (policy != NULL && GpPolicyIsReplicated(policy))
-		content = GpScanReplicatedContent();
+		content = GpScanReplicatedContent(policy);
 	else if (policy != NULL)
 		content = direct_dispatch_segment(policy, relation, pushed, rel->relid);
 
@@ -565,9 +567,10 @@ gather_plan(PlannerInfo *root, RelOptInfo *rel, CustomPath *best_path,
 	cscan->custom_plans = NIL;
 	cscan->custom_exprs = NIL;
 	cscan->custom_scan_tlist = NIL;
-	cscan->custom_private = list_make3(makeString(sql.data),
+	cscan->custom_private = list_make4(makeString(sql.data),
 									   makeInteger(content),
-									   makeBoolean(identity));
+									   makeBoolean(identity),
+									   makeInteger(policy != NULL ? policy->numsegments : 0));
 	cscan->methods = &gather_scan_methods;
 
 	return &cscan->scan.plan;
@@ -588,6 +591,7 @@ gather_create_state(CustomScan *cscan)
 	state->sql = strVal(linitial(cscan->custom_private));
 	state->content = intVal(lsecond(cscan->custom_private));
 	state->identity = boolVal(lthird(cscan->custom_private));
+	state->nsegments = intVal(lfourth(cscan->custom_private));
 	return (Node *) state;
 }
 
@@ -595,8 +599,6 @@ static void
 gather_begin(CustomScanState *node, EState *estate, int eflags)
 {
 	GatherScanState *state = (GatherScanState *) node;
-
-	GpClusterSegments(&state->nsegments);
 
 	if (state->identity)
 	{
@@ -612,7 +614,8 @@ gather_begin(CustomScanState *node, EState *estate, int eflags)
 
 	/* each gather is a slice of its own, numbered as the executor meets it */
 	if (!(eflags & EXEC_FLAG_EXPLAIN_ONLY))
-		GpReportDispatch(GpNextGatherSlice(), state->content >= 0);
+		GpReportDispatch(GpNextGatherSlice(), state->content >= 0,
+						 state->nsegments);
 }
 
 static TupleTableSlot *
@@ -635,12 +638,14 @@ gather_next(ScanState *ss)
 
 	if (state->gather == NULL)
 	{
+		TupleDesc	desc = state->identity ? state->wide->tts_tupleDescriptor
+			: slot->tts_tupleDescriptor;
+
 		MemoryContextSwitchTo(oldcxt);
-		state->gather = GpGatherStartOn(state->sql,
-										state->identity
-										? state->wide->tts_tupleDescriptor
-										: slot->tts_tupleDescriptor,
-										state->content);
+		/* the one segment, or the table's: all, or a partial table's first */
+		state->gather = state->content >= 0
+			? GpGatherStartOn(state->sql, desc, state->content)
+			: GpGatherStartOnSegments(state->sql, desc, state->nsegments);
 		MemoryContextSwitchTo(ss->ps.ps_ExprContext->ecxt_per_tuple_memory);
 	}
 

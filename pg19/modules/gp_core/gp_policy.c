@@ -32,12 +32,19 @@
  * on a column called "random" recorded the same label as a randomly
  * distributed one, which is two different distributions under one spelling.
  *
+ * Beside it, the label's numsegments key: how many segments the rows are
+ * spread over, the first that many, where that is not every segment --
+ * Cloudberry's partial tables, which gp_debug_numsegments makes and a
+ * cluster's expansion leaves behind.  With no key, every segment.
+ *
  * See gp_policy.h for what is kept of Cloudberry's struct and why there is no
  * cache yet.
  *
  *-------------------------------------------------------------------------
  */
 #include "postgres.h"
+
+#include <limits.h>
 
 #include "catalog/namespace.h"
 #include "catalog/pg_am_d.h"
@@ -192,19 +199,58 @@ parse_column_list(const char *value, Oid relid)
 	return names;
 }
 
+/*
+ * How many segments the label spreads the rows over: its numsegments key, or
+ * every segment.  Through the published API rather than gp_core.c's static
+ * function, so that this file reads the same number every other module does;
+ * it is never 0, and a consumer divides by it (see gp_core_api.h).
+ *
+ * More segments than the cluster has cannot be read: the rows on the ones
+ * missing are nowhere to be found.  Cloudberry refuses such a table in a
+ * transaction that cannot see the segments an expansion added, which is how
+ * it comes by one; here a label written so is how, and it is refused the
+ * same, unless "check" is off, for gp_distribution_policy, which reports the
+ * label as it is.
+ */
+static int
+policy_numsegments(const ObjectAddress *addr, bool check)
+{
+	const GpCoreApi *core = GpCoreApiLookup();
+	int			cluster = core->get_segment_count();
+	char	   *value = GpLabelGet(addr, GP_LABEL_numsegments);
+	char	   *end;
+	long		n;
+
+	if (value == NULL)
+		return cluster;
+
+	errno = 0;
+	n = strtol(value, &end, 10);
+	if (errno != 0 || *end != '\0' || end == value || n < 1 || n > INT_MAX)
+		ereport(ERROR,
+				(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+				 errmsg("invalid numsegments \"%s\" in the distribution policy of \"%s\"",
+						value, get_rel_name(addr->objectId)),
+				 errhint("numsegments is a count of segments, from 1 to the size of the cluster.")));
+
+	if (check && n > cluster && !core->is_single_node())
+		ereport(ERROR,
+				(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+				 errmsg("cannot access table \"%s\" in current transaction",
+						get_rel_name(addr->objectId)),
+				 errdetail("Its distribution policy spreads it over %ld segments, and the cluster has %d.",
+						   n, cluster)));
+
+	return (int) n;
+}
+
 static GpPolicy *
-make_policy(GpPolicyType ptype, int nattrs)
+make_policy(GpPolicyType ptype, int nattrs, int numsegments)
 {
 	GpPolicy   *policy = (GpPolicy *) palloc0(sizeof(GpPolicy));
 
 	policy->ptype = ptype;
-
-	/*
-	 * Through the published API rather than gp_core.c's static function, so
-	 * that this file reads the same number every other module does.  It is
-	 * never 0: a consumer divides by it.  See gp_core_api.h.
-	 */
-	policy->numsegments = GpCoreApiLookup()->get_segment_count();
+	policy->numsegments = numsegments;
 	policy->nattrs = nattrs;
 
 	/*
@@ -222,8 +268,8 @@ make_policy(GpPolicyType ptype, int nattrs)
 	return policy;
 }
 
-GpPolicy *
-GpPolicyGet(Oid relid)
+static GpPolicy *
+policy_read(Oid relid, bool check)
 {
 	ObjectAddress addr;
 	char	   *value;
@@ -231,6 +277,7 @@ GpPolicyGet(Oid relid)
 	List	   *names;
 	ListCell   *lc;
 	int			i = 0;
+	int			numsegments;
 
 	ObjectAddressSet(addr, RelationRelationId, relid);
 	value = GpLabelGet(&addr, GP_LABEL_distributed_by);
@@ -238,11 +285,13 @@ GpPolicyGet(Oid relid)
 	if (value == NULL)
 		return NULL;
 
+	numsegments = policy_numsegments(&addr, check);
+
 	if (strcmp(value, "replicated") == 0)
-		return make_policy(POLICYTYPE_REPLICATED, 0);
+		return make_policy(POLICYTYPE_REPLICATED, 0, numsegments);
 
 	if (strcmp(value, "random") == 0)
-		return make_policy(POLICYTYPE_PARTITIONED, 0);
+		return make_policy(POLICYTYPE_PARTITIONED, 0, numsegments);
 
 	if (value[0] != '(')
 		ereport(ERROR,
@@ -253,7 +302,8 @@ GpPolicyGet(Oid relid)
 						 "column list such as \"(a,b)\".")));
 
 	names = parse_column_list(value, relid);
-	policy = make_policy(POLICYTYPE_PARTITIONED, list_length(names));
+	policy = make_policy(POLICYTYPE_PARTITIONED, list_length(names),
+						 numsegments);
 
 	foreach(lc, names)
 	{
@@ -294,6 +344,18 @@ GpPolicyGet(Oid relid)
 	}
 
 	return policy;
+}
+
+GpPolicy *
+GpPolicyGet(Oid relid)
+{
+	return policy_read(relid, true);
+}
+
+GpPolicy *
+GpPolicyGetRecorded(Oid relid)
+{
+	return policy_read(relid, false);
 }
 
 bool

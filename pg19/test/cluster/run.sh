@@ -778,6 +778,51 @@ mine" ] && ok "a transaction reads its own rows, and a LIMIT leaves the connecti
 	[ "$out|$out2" = "0|42" ] && ok "a segment's utility session answers its own id; a column of that name is the column" \
 		|| notok "gp_segment_id on a segment, and a real column" "$out / $out2"
 
+	# A partial table: its rows on the first so many segments, as Cloudberry's
+	# gp_debug_numsegments makes one (gp_sql's distribution.c), and read,
+	# written and counted there alone.
+	q 0 "CREATE EXTENSION gp_debug_numsegments;" >/dev/null
+	out=$(printf '%s\n' "SELECT gp_debug_set_create_table_default_numsegments(1);" \
+		"CREATE TABLE pt1 (a int, b int) DISTRIBUTED BY (a);" \
+		"CREATE TABLE pr1 (a int, b int) DISTRIBUTED REPLICATED;" \
+		"CREATE TABLE pn1 (a int, b int) DISTRIBUTED RANDOMLY;" \
+		"CREATE TABLE pp1 (a int, b int) DISTRIBUTED BY (a) PARTITION BY RANGE (b) (START (1) END (3) EVERY (1));" \
+		"CREATE TABLE pc1 AS SELECT g AS a FROM generate_series(1, 20) g DISTRIBUTED BY (a);" \
+		"SELECT gp_debug_reset_create_table_default_numsegments();" \
+		"CREATE TABLE pf1 (a int, b int) DISTRIBUTED BY (a);" \
+		"SELECT gp_debug_get_create_table_default_numsegments();" \
+		"SELECT string_agg(c.relname || ':' || (gp.policy(c.oid)).numsegments, ' ' ORDER BY c.relname) FROM pg_class c WHERE c.relname IN ('pt1', 'pr1', 'pn1', 'pc1', 'pf1') OR c.relname LIKE 'pp1_1_prt_%';" | qf 0 | tr '\n' '/')
+	[ "$out" = "1//FULL/pc1:1 pf1:2 pn1:1 pp1_1_prt_1:1 pp1_1_prt_2:1 pr1:1 pt1:1/" ] \
+		&& ok "gp_debug_numsegments spreads the tables made after it over one segment, partitions and CREATE TABLE AS too" \
+		|| notok "gp_debug_set_create_table_default_numsegments()" "$out"
+
+	q 0 "INSERT INTO pt1 SELECT g, g FROM generate_series(1, 100) g; INSERT INTO pr1 SELECT g, g FROM generate_series(1, 10) g; INSERT INTO pn1 SELECT g, g FROM generate_series(1, 50) g;" >/dev/null
+	count_p1="SELECT (SELECT count(*) FROM pt1) || ' ' || (SELECT count(*) FROM pr1) || ' ' || (SELECT count(*) FROM pn1) || ' ' || (SELECT count(*) FROM pc1);"
+	w1=$(q 1 "$count_p1"); w2=$(q 2 "$count_p1")
+	out=""
+	for i in 1 2 3 4; do out="$out$(q 0 "$count_p1")/"; done
+	[ "$w1|$w2|$out" = "100 10 50 20|0 0 0 0|100 10 50 20/100 10 50 20/100 10 50 20/100 10 50 20/" ] \
+		&& ok "their rows are on segment 0 alone, and every session reads them there, a replicated one's too" \
+		|| notok "where a partial table's rows are" "segment 0: $w1, segment 1: $w2, coordinator: $out"
+
+	out=$(q 0 "EXPLAIN (COSTS OFF) SELECT * FROM pt1;")
+	out2=$(printf '%s\n' "SET gp.test_print_direct_dispatch_info = on;" "SELECT count(*) FROM pn1;" \
+		"UPDATE pr1 SET b = b + 1;" "SELECT b FROM pt1 WHERE a = 7;" | qf 0)
+	info=$(printf '%s\n' "$out2" | grep -o 'INFO:.*' | tr '\n' '/')
+	rows=$(printf '%s\n' "$out2" | grep -v 'INFO:' | tr '\n' '/')
+	case "$out|$info|$rows" in
+		*"Gather Motion 1:1 on pt1"*"(slice1; segments: 1)"*"|INFO:  (slice 1) Dispatch command to SINGLE content/INFO:  (slice 0) Dispatch command to SINGLE content/INFO:  (slice 1) Dispatch command to SINGLE content/|50/7/")
+			ok "a gather, a write and direct dispatch ask its one segment, and say so" ;;
+		*) notok "dispatch to a partial table's segments" "$out / $info / $rows" ;;
+	esac
+
+	q 0 "ALTER TABLE pt1 SET DISTRIBUTED BY (b);" >/dev/null
+	out=$(q 0 "SELECT numsegments FROM gp.policy('pt1');")
+	w1=$(q 1 "SELECT count(*) FROM pt1;"); w2=$(q 2 "SELECT count(*) FROM pt1;")
+	[ "$out|$w1|$w2" = "1|100|0" ] \
+		&& ok "ALTER TABLE ... SET DISTRIBUTED keeps it on its segments" \
+		|| notok "a partial table redistributed" "$out / $w1 $w2"
+
 	###########################################################################
 	echo "9. ANALYZE samples the segments, and the planner believes it"
 	###########################################################################
@@ -1122,6 +1167,14 @@ COMMIT;"
 	case "$out" in
 		*"on a table with triggers"*) ok "an UPDATE of the key of a table with triggers is refused, and says why" ;;
 		*) notok "a split update with triggers" "$out" ;;
+	esac
+
+	# A partial table is the planner's, as Cloudberry's ORCA leaves one.
+	out=$(printf '%s\n' "SET gp.optimizer_trace_fallback = on;" \
+		"SELECT count(*) FROM pt1;" | qf 0)
+	case "$out" in
+		*"Partially Distributed Data"*"100") ok "ORCA leaves a partial table to the planner, and says why" ;;
+		*) notok "a partial table under ORCA" "$out" ;;
 	esac
 
 	# A slice's parameters travel with it, as Cloudberry's dispatcher sends

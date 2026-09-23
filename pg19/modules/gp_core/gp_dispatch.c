@@ -536,7 +536,21 @@ gang_wait(GpGang *g)
 }
 
 static void conn_park(GpSegmentConn *c);
-static void gang_wait_all_counting(GpGang *g, uint64 *counts, int content);
+static void gang_wait_all_counting(GpGang *g, uint64 *counts, int content,
+								   int nsegments);
+
+/*
+ * Is this connection's segment one a statement is for: the one content
+ * named, or else the first nsegments -- a partial table's -- or every one
+ * where that is 0.
+ */
+static inline bool
+conn_asked(const GpSegmentConn *c, int content, int nsegments)
+{
+	if (content >= 0)
+		return c->content == content;
+	return nsegments <= 0 || c->content < nsegments;
+}
 
 /* Send a statement to one segment, as the simple protocol sends it. */
 static void
@@ -777,7 +791,7 @@ gang_wait_all_ex(GpGang *g, PGresult **keep, bool commit, bool keep_commands)
  * per segment waited for (all, or the one "content" names), in content order.
  */
 static void
-gang_wait_all_counting(GpGang *g, uint64 *counts, int content)
+gang_wait_all_counting(GpGang *g, uint64 *counts, int content, int nsegments)
 {
 	PGresult  **results = (PGresult **) palloc0_array(PGresult *, g->nconns);
 	int			n = 0;
@@ -786,7 +800,7 @@ gang_wait_all_counting(GpGang *g, uint64 *counts, int content)
 
 	for (int i = 0; i < g->nconns; i++)
 	{
-		if (content >= 0 && g->conns[i].content != content)
+		if (!conn_asked(&g->conns[i], content, nsegments))
 			continue;
 		counts[n++] = results[i] ? strtou64(PQcmdTuples(results[i]), NULL, 10) : 0;
 		if (results[i] != NULL)
@@ -1714,13 +1728,15 @@ GpDispatchUtility(const char *payload, bool own_xact)
 }
 
 /*
- * A statement with parameters on every segment, or on one, and how many rows
- * each changed.  The parameters travel as text, of the types given; "counts"
- * gets one entry per segment asked, in content order.
+ * A statement with parameters on every segment, the first nsegments of them,
+ * or one, and how many rows each changed.  The parameters travel as text, of
+ * the types given; "counts" gets one entry per segment asked, in content
+ * order.
  */
 void
 GpDispatchCommandParams(const char *sql, int nparams, const Oid *types,
-						const char *const *values, int content, uint64 *counts)
+						const char *const *values, int content, int nsegments,
+						uint64 *counts)
 {
 	GpGang	   *g = gang_get();
 	PGresult  **results;
@@ -1733,7 +1749,7 @@ GpDispatchCommandParams(const char *sql, int nparams, const Oid *types,
 	{
 		GpSegmentConn *c = &g->conns[i];
 
-		if (content >= 0 && c->content != content)
+		if (!conn_asked(c, content, nsegments))
 			continue;
 		if (c->busy && c->fetching != NULL)
 			conn_park(c);
@@ -1752,7 +1768,7 @@ GpDispatchCommandParams(const char *sql, int nparams, const Oid *types,
 	}
 
 	/* The counts come back as command tags, which "keep" does not keep. */
-	gang_wait_all_counting(g, counts, content);
+	gang_wait_all_counting(g, counts, content, nsegments);
 	pfree(results);
 	(void) n;
 }
@@ -2013,7 +2029,7 @@ GpCopyInEnd(void)
 	}
 
 	/* The COPY's own result: its row count, or why it failed. */
-	gang_wait_all_counting(gang, &count, c->content);
+	gang_wait_all_counting(gang, &count, c->content, 0);
 	return count;
 }
 
@@ -2192,14 +2208,29 @@ GpTupleDescHasBinaryIO(TupleDesc tupdesc)
 	return true;
 }
 
+static GpGatherState *gather_start(const char *sql, TupleDesc tupdesc,
+									int content, int nsegments);
+
 GpGatherState *
 GpGatherStart(const char *sql, TupleDesc tupdesc)
 {
-	return GpGatherStartOn(sql, tupdesc, -1);
+	return gather_start(sql, tupdesc, -1, 0);
 }
 
 GpGatherState *
 GpGatherStartOn(const char *sql, TupleDesc tupdesc, int content)
+{
+	return gather_start(sql, tupdesc, content, 0);
+}
+
+GpGatherState *
+GpGatherStartOnSegments(const char *sql, TupleDesc tupdesc, int nsegments)
+{
+	return gather_start(sql, tupdesc, -1, nsegments);
+}
+
+static GpGatherState *
+gather_start(const char *sql, TupleDesc tupdesc, int content, int nsegments)
 {
 	GpGatherState *gather = (GpGatherState *) palloc0(sizeof(GpGatherState));
 	GpGang	   *g = gang_get();
@@ -2244,7 +2275,7 @@ GpGatherStartOn(const char *sql, TupleDesc tupdesc, int content)
 	{
 		GpGatherSeg *s;
 
-		if (content >= 0 && g->conns[i].content != content)
+		if (!conn_asked(&g->conns[i], content, nsegments))
 			continue;
 
 		s = &gather->segs[n++];

@@ -79,14 +79,21 @@
 
 static analyze_sample_rows_hook_type prev_analyze_sample_rows = NULL;
 
-/* The segment that answers for a replicated table. */
+/* The segment that answers for a replicated table, as a gather of it reads. */
 static int
-replicated_segment(void)
+replicated_segment(const GpPolicy *policy)
 {
-	int			nsegs;
+	return GpScanReplicatedContent(policy);
+}
 
-	GpClusterSegments(&nsegs);
-	return MyProcPid % nsegs;
+/* A gather from that one segment, or else from the table's segments. */
+static GpGatherState *
+start_on_table(const char *sql, TupleDesc tupdesc, int content,
+			   const GpPolicy *policy)
+{
+	if (content >= 0)
+		return GpGatherStartOn(sql, tupdesc, content);
+	return GpGatherStartOnSegments(sql, tupdesc, policy->numsegments);
 }
 
 /* ------------------------------------------------------------------------- */
@@ -357,7 +364,7 @@ distributed_sample_rows(Relation rel, int elevel, HeapTuple *rows, int targrows,
 	Oid			relid = RelationGetRelid(rel);
 	GpPolicy   *policy = GpScanDistributedPolicy(relid);
 	bool		replicated = GpPolicyIsReplicated(policy);
-	int			content = replicated ? replicated_segment() : -1;
+	int			content = replicated ? replicated_segment(policy) : -1;
 	char	   *qualified = GpDispatchRelationName(RelationGetRelid(rel));
 	int			nsegs;
 	SegmentSample *samples;
@@ -379,9 +386,9 @@ distributed_sample_rows(Relation rel, int elevel, HeapTuple *rows, int targrows,
 		TupleDescFinalize(tupdesc);
 
 		slot = MakeSingleTupleTableSlot(tupdesc, &TTSOpsVirtual);
-		gather = GpGatherStartOn(psprintf("SELECT * FROM gp_internal.sample_rows(NULL::%s, %d)",
-										  qualified, targrows),
-								 tupdesc, content);
+		gather = start_on_table(psprintf("SELECT * FROM gp_internal.sample_rows(NULL::%s, %d)",
+										 qualified, targrows),
+								tupdesc, content, policy);
 		while (GpGatherNext(gather, slot, &from))
 		{
 			SegmentSample *s = &samples[from];
@@ -410,8 +417,8 @@ distributed_sample_rows(Relation rel, int elevel, HeapTuple *rows, int targrows,
 
 		reservoir_init_selection_state(&rstate, targrows);
 		slot = MakeSingleTupleTableSlot(RelationGetDescr(rel), &TTSOpsVirtual);
-		gather = GpGatherStartOn(psprintf("SELECT * FROM ONLY %s", qualified),
-								 RelationGetDescr(rel), content);
+		gather = start_on_table(psprintf("SELECT * FROM ONLY %s", qualified),
+								RelationGetDescr(rel), content, policy);
 
 		/* one list for the whole table: it is one sample already */
 		while (GpGatherNext(gather, slot, NULL))
@@ -484,7 +491,7 @@ gp_analyze_sample_rows(Relation relation, AnalyzeSampleRowsFunc *func,
 	sizes = palloc0_array(char *, nsegs);
 	GpDispatchQueryFirstValues(psprintf("SELECT pg_catalog.pg_relation_size(%u)",
 										RelationGetRelid(relation)),
-							   GpPolicyIsReplicated(policy) ? replicated_segment() : -1,
+							   GpPolicyIsReplicated(policy) ? replicated_segment(policy) : -1,
 							   sizes);
 	for (int i = 0; i < (GpPolicyIsReplicated(policy) ? 1 : nsegs); i++)
 		if (sizes[i] != NULL)

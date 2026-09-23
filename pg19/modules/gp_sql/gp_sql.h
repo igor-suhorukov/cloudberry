@@ -189,6 +189,13 @@ extern PGDLLIMPORT bool gp_create_table_random_default_distribution;
 extern void GpDistributionApplyDefault(CreateStmt *stmt, Oid relid);
 
 /*
+ * A policy for a table the statement just made: the one given, over the
+ * segments a new table gets -- every one, unless gp_debug_numsegments says
+ * otherwise.
+ */
+extern void GpDistributionSetNew(Oid relid, const char *policy);
+
+/*
  * ALTER TABLE ... SET DISTRIBUTED: the new policy ("policy", or NULL for the
  * one it has), and on a cluster the rows moved to where it puts them --
  * "reorganize" 1 always, 0 never, -1 as Cloudberry decides.

@@ -1999,6 +1999,7 @@ typedef struct PartParent
 	char		relpersistence;
 	Oid			relowner;
 	char	   *policy;			/* its "gp" label's distributed_by, or NULL */
+	char	   *numsegments;	/* and numsegments, NULL for every segment */
 } PartParent;
 
 static PartParent *
@@ -2014,6 +2015,7 @@ parent_of(Relation rel)
 	pp->relowner = rel->rd_rel->relowner;
 	ObjectAddressSet(addr, RelationRelationId, pp->relid);
 	pp->policy = GpLabelGet(&addr, GP_LABEL_distributed_by);
+	pp->numsegments = GpLabelGet(&addr, GP_LABEL_numsegments);
 	return pp;
 }
 
@@ -2240,6 +2242,9 @@ create_child(const PartParent *parent, PartChild *c, const char *queryString,
 
 		ObjectAddressSet(addr, RelationRelationId, relid);
 		GpLabelSet(&addr, GP_LABEL_distributed_by, parent->policy);
+		/* over the parent's segments, as a partial parent's partitions are */
+		if (parent->numsegments != NULL)
+			GpLabelSet(&addr, GP_LABEL_numsegments, parent->numsegments);
 	}
 
 	/* with the parent's privileges */

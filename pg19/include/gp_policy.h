@@ -68,7 +68,9 @@ typedef enum GpPolicyType
 typedef struct GpPolicy
 {
 	GpPolicyType ptype;
-	int			numsegments;	/* how many segments to spread over */
+	int			numsegments;	/* how many segments to spread over: the
+								 * first so many, all of them but in a
+								 * partial table */
 
 	/* These apply to POLICYTYPE_PARTITIONED, and nattrs may be 0. */
 	int			nattrs;
@@ -93,6 +95,13 @@ typedef struct GpPolicy
  * The result is palloc'd in the current context.
  */
 extern GpPolicy *GpPolicyGet(Oid relid);
+
+/*
+ * The same, as it is recorded, even where it spreads the rows over more
+ * segments than the cluster has, which GpPolicyGet() refuses: what
+ * gp_distribution_policy shows.
+ */
+extern GpPolicy *GpPolicyGetRecorded(Oid relid);
 
 /*
  * What kind of policy this is.  All five accept NULL, which is entry -- the

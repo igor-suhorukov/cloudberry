@@ -307,6 +307,8 @@ typedef struct ExplicitState
 	Tuplestorestate *returned;
 
 	int			nsegs;
+	int			numsegments;	/* the target's: every segment, or a partial
+								 * table's first so many */
 	List	  **batches;		/* per segment, of const char ** */
 	List	   *everywhere;		/* a replicated table's INSERTed rows */
 	MemoryContext rowcxt;
@@ -597,6 +599,7 @@ explicit_begin(CustomScanState *node, EState *estate, int eflags)
 	targetdesc = RelationGetDescr(state->target);
 	policy = GpScanDistributedPolicy(RelationGetRelid(state->target));
 	state->replicated = policy != NULL && GpPolicyIsReplicated(policy);
+	state->numsegments = policy != NULL ? policy->numsegments : 0;
 
 	/* The plan's row: its values first, in order, then its junk. */
 	state->ctidcol = ExecFindJunkAttributeInTlist(subplan->targetlist, "ctid");
@@ -835,7 +838,7 @@ explicit_begin(CustomScanState *node, EState *estate, int eflags)
 	state->rowcxt = AllocSetContextCreate(estate->es_query_cxt,
 										  "gp explicit rows",
 										  ALLOCSET_DEFAULT_SIZES);
-	GpReportDispatch(0, false);
+	GpReportDispatch(0, false, state->numsegments);
 }
 
 /* The result relation a row of this table is written as. */
@@ -1131,9 +1134,12 @@ explicit_send(ExplicitState *state)
 				total += explicit_send_rows(state, seg, state->batches[seg],
 											state->returned);
 
-	/* a replicated table's rows are written on every segment, and once */
+	/*
+	 * a replicated table's rows are written on every segment of it -- a
+	 * partial table's first so many -- and counted once
+	 */
 	if (state->everywhere != NIL)
-		for (int seg = 0; seg < state->nsegs; seg++)
+		for (int seg = 0; seg < Min(state->nsegs, state->numsegments); seg++)
 		{
 			uint64		n = explicit_send_rows(state, seg, state->everywhere,
 											   seg == 0 ? state->returned : NULL);

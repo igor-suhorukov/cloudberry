@@ -58,6 +58,7 @@
 	X(incremental,     false, "this materialized view is maintained incrementally") \
 	X(dynamic_schedule, true, "the schedule a dynamic table refreshes on") \
 	X(distributed_by,  true,  "the distribution key of a table") \
+	X(numsegments,     true,  "how many segments a table's rows are spread over, when not every one") \
 	X(execute_on,      true,  "where a function may run") \
 	X(data_access,     true,  "what a function does with SQL") \
 	X(replicate_safe,  false, "this aggregate may run on a replicated slice") \

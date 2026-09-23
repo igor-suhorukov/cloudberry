@@ -45,8 +45,16 @@
  * modules are the exception: their tables are the coordinator's metadata,
  * as Cloudberry's catalogs are, and stay there.
  *
+ * Every new table is spread over every segment, unless the session has said
+ * otherwise through gp_debug_numsegments, Cloudberry's extension for making
+ * partial tables -- the first so many segments, as a cluster's expansion
+ * leaves its tables until each is expanded.  The label's numsegments key
+ * records it, only where it is not every segment; a partition is spread as
+ * its parent is.
+ *
  * Cloudberry sources this file stands in for:
- *	  transformDistributedBy() in src/backend/parser/parse_utilcmd.c
+ *	  transformDistributedBy() in src/backend/parser/parse_utilcmd.c, and
+ *	  gpcontrib/gp_debug_numsegments
  *
  *-------------------------------------------------------------------------
  */
@@ -62,10 +70,13 @@
 #include "catalog/pg_index.h"
 #include "catalog/pg_inherits.h"
 #include "commands/extension.h"
+#include "common/pg_prng.h"
 #include "executor/spi.h"
+#include "fmgr.h"
 #include "lib/stringinfo.h"
 #include "miscadmin.h"
 #include "nodes/parsenodes.h"
+#include "catalog/pg_type.h"
 #include "utils/builtins.h"
 #include "utils/guc.h"
 #include "utils/lsyscache.h"
@@ -79,6 +90,18 @@
 #include "gp_sql.h"
 
 bool		gp_create_table_random_default_distribution = false;
+
+/*
+ * How many segments a new table is spread over: a count, or one of
+ * Cloudberry's three words for one -- every segment, a random count, one.
+ * gp_debug_numsegments sets it, and resets it to what it last reset it to.
+ */
+#define GP_DEFAULT_NUMSEGMENTS_FULL		(-1)
+#define GP_DEFAULT_NUMSEGMENTS_RANDOM	(-2)
+#define GP_DEFAULT_NUMSEGMENTS_MINIMAL	(-3)
+
+static int	create_table_default_numsegments = GP_DEFAULT_NUMSEGMENTS_FULL;
+static int	reset_numsegments = GP_DEFAULT_NUMSEGMENTS_FULL;
 
 /* The port's own modules, whose scripts make the coordinator's metadata. */
 static const char *const port_extensions[] = {
@@ -119,6 +142,66 @@ set_policy_label(Oid relid, const char *policy)
 
 	ObjectAddressSet(addr, RelationRelationId, relid);
 	GpLabelSet(&addr, GP_LABEL_distributed_by, policy);
+}
+
+/* The segments a new table is spread over, as Cloudberry's GP_POLICY_DEFAULT_NUMSEGMENTS(). */
+static int
+default_numsegments(void)
+{
+	int			cluster = GpCoreApiLookup()->get_segment_count();
+
+	switch (create_table_default_numsegments)
+	{
+		case GP_DEFAULT_NUMSEGMENTS_FULL:
+			return cluster;
+		case GP_DEFAULT_NUMSEGMENTS_RANDOM:
+			return 1 + (int) pg_prng_uint64_range(&pg_global_prng_state, 0,
+												  cluster - 1);
+		case GP_DEFAULT_NUMSEGMENTS_MINIMAL:
+			return 1;
+		default:
+			return Min(create_table_default_numsegments, cluster);
+	}
+}
+
+/* The label's numsegments: none where it is every segment, the default. */
+static void
+set_numsegments_label(Oid relid, int numsegments)
+{
+	ObjectAddress addr;
+
+	ObjectAddressSet(addr, RelationRelationId, relid);
+	if (numsegments >= GpCoreApiLookup()->get_segment_count())
+	{
+		if (GpLabelGet(&addr, GP_LABEL_numsegments) != NULL)
+			GpLabelSet(&addr, GP_LABEL_numsegments, NULL);
+	}
+	else
+		GpLabelSet(&addr, GP_LABEL_numsegments, psprintf("%d", numsegments));
+}
+
+void
+GpDistributionSetNew(Oid relid, const char *policy)
+{
+	set_policy_label(relid, policy);
+	set_numsegments_label(relid, default_numsegments());
+}
+
+/* A partition, distributed and spread as its parent is. */
+static void
+set_policy_as_parent(Oid relid, Oid parent, const char *policy)
+{
+	ObjectAddress addr;
+	char	   *numsegments;
+
+	set_policy_label(relid, policy);
+	ObjectAddressSet(addr, RelationRelationId, parent);
+	numsegments = GpLabelGet(&addr, GP_LABEL_numsegments);
+	if (numsegments != NULL)
+	{
+		ObjectAddressSet(addr, RelationRelationId, relid);
+		GpLabelSet(&addr, GP_LABEL_numsegments, numsegments);
+	}
 }
 
 /* "(a,b)", each name quoted where it needs to be, as the label reads it. */
@@ -256,7 +339,7 @@ GpDistributionApplyDefault(CreateStmt *stmt, Oid relid)
 	if (creating_extension)
 	{
 		if (!creating_port_extension())
-			set_policy_label(relid, "replicated");
+			GpDistributionSetNew(relid, "replicated");
 		return;
 	}
 
@@ -275,7 +358,7 @@ GpDistributionApplyDefault(CreateStmt *stmt, Oid relid)
 
 		policy = policy_label_of(parent);
 		if (policy != NULL)
-			set_policy_label(relid, policy);
+			set_policy_as_parent(relid, parent, policy);
 		return;
 	}
 
@@ -298,7 +381,7 @@ GpDistributionApplyDefault(CreateStmt *stmt, Oid relid)
 			ereport(NOTICE,
 					(errcode(ERRCODE_UNDEFINED_OBJECT),
 					 errmsg("table has parent, setting distribution columns to match parent table")));
-			set_policy_label(relid, policy);
+			GpDistributionSetNew(relid, policy);
 			return;
 		}
 	}
@@ -325,7 +408,7 @@ GpDistributionApplyDefault(CreateStmt *stmt, Oid relid)
 		{
 			ereport(NOTICE,
 					(errmsg("table doesn't have 'DISTRIBUTED BY' clause, defaulting to distribution columns from LIKE table")));
-			set_policy_label(relid, policy);
+			GpDistributionSetNew(relid, policy);
 			return;
 		}
 	}
@@ -339,7 +422,7 @@ GpDistributionApplyDefault(CreateStmt *stmt, Oid relid)
 		if (keys != NIL)
 		{
 			relation_close(rel, AccessShareLock);
-			set_policy_label(relid, column_list(keys));
+			GpDistributionSetNew(relid, column_list(keys));
 			return;
 		}
 	}
@@ -356,7 +439,7 @@ columns:
 				(errcode(ERRCODE_SUCCESSFUL_COMPLETION),
 				 errmsg("using default RANDOM distribution since no distribution was specified"),
 				 errhint("Consider including the 'DISTRIBUTED BY' clause to determine the distribution of rows.")));
-		set_policy_label(relid, "random");
+		GpDistributionSetNew(relid, "random");
 		return;
 	}
 
@@ -380,7 +463,7 @@ columns:
 							"table. ", name),
 					 errhint("The 'DISTRIBUTED BY' clause determines the distribution of data."
 							 " Make sure column(s) chosen are the optimal data distribution key to minimize skew.")));
-			set_policy_label(relid, column_list(list_make1(name)));
+			GpDistributionSetNew(relid, column_list(list_make1(name)));
 			return;
 		}
 	}
@@ -390,7 +473,7 @@ columns:
 	ereport(NOTICE,
 			(errcode(ERRCODE_UNDEFINED_OBJECT),
 			 errmsg("Table doesn't have 'DISTRIBUTED BY' clause, and no column type is suitable for a distribution key. Creating a NULL policy entry.")));
-	set_policy_label(relid, "random");
+	GpDistributionSetNew(relid, "random");
 }
 
 /* A relation's name in SQL, pg_temp for a temporary one. */
@@ -541,6 +624,103 @@ GpDistributionAlter(Oid relid, const char *policy, int reorganize)
 	}
 
 	SPI_finish();
+}
+
+/* ------------------------------------------------------------------------- */
+/* gp_debug_numsegments                                                      */
+/* ------------------------------------------------------------------------- */
+
+PG_FUNCTION_INFO_V1(gp_debug_set_create_table_default_numsegments);
+PG_FUNCTION_INFO_V1(gp_debug_reset_create_table_default_numsegments);
+PG_FUNCTION_INFO_V1(gp_debug_get_create_table_default_numsegments);
+
+/*
+ * gp_debug_set_create_table_default_numsegments(integer | text)
+ *		How many segments the tables this session creates are spread over:
+ *		a count from 1 to the cluster's, or 'full', 'minimal' or 'random';
+ *		answers it as gp_debug_get_create_table_default_numsegments() does.
+ */
+Datum
+gp_debug_set_create_table_default_numsegments(PG_FUNCTION_ARGS)
+{
+	Oid			argtype = get_fn_expr_argtype(fcinfo->flinfo, 0);
+	int			cluster = GpCoreApiLookup()->get_segment_count();
+
+	if (argtype == INT4OID)
+	{
+		int			numsegments = PG_GETARG_INT32(0);
+
+		if (numsegments < 1 || numsegments > cluster)
+			ereport(ERROR,
+					(errcode(ERRCODE_NUMERIC_VALUE_OUT_OF_RANGE),
+					 errmsg("invalid integer value for default numsegments: %d",
+							numsegments),
+					 errhint("Valid range: [1, %d (gp_num_contents_in_cluster)]",
+							 cluster)));
+		create_table_default_numsegments = numsegments;
+	}
+	else
+	{
+		char	   *str = text_to_cstring(PG_GETARG_TEXT_PP(0));
+
+		if (pg_strcasecmp(str, "full") == 0)
+			create_table_default_numsegments = GP_DEFAULT_NUMSEGMENTS_FULL;
+		else if (pg_strcasecmp(str, "random") == 0)
+			create_table_default_numsegments = GP_DEFAULT_NUMSEGMENTS_RANDOM;
+		else if (pg_strcasecmp(str, "minimal") == 0)
+			create_table_default_numsegments = GP_DEFAULT_NUMSEGMENTS_MINIMAL;
+		else
+			ereport(ERROR,
+					(errcode(ERRCODE_NUMERIC_VALUE_OUT_OF_RANGE),
+					 errmsg("invalid text value for default numsegments: '%s'", str),
+					 errhint("Valid values: 'full', 'minimal', 'random'")));
+	}
+
+	return gp_debug_get_create_table_default_numsegments(fcinfo);
+}
+
+/*
+ * gp_debug_reset_create_table_default_numsegments([integer | text])
+ *		With an argument, set it as above, and make it what a reset returns
+ *		to; without, return to that, or to 'full'.
+ */
+Datum
+gp_debug_reset_create_table_default_numsegments(PG_FUNCTION_ARGS)
+{
+	if (PG_NARGS() == 1)
+	{
+		(void) gp_debug_set_create_table_default_numsegments(fcinfo);
+		reset_numsegments = create_table_default_numsegments;
+	}
+	else
+		create_table_default_numsegments = reset_numsegments;
+
+	PG_RETURN_VOID();
+}
+
+/* gp_debug_get_create_table_default_numsegments(): FULL, RANDOM, MINIMAL or the count */
+Datum
+gp_debug_get_create_table_default_numsegments(PG_FUNCTION_ARGS)
+{
+	const char *result;
+
+	switch (create_table_default_numsegments)
+	{
+		case GP_DEFAULT_NUMSEGMENTS_FULL:
+			result = "FULL";
+			break;
+		case GP_DEFAULT_NUMSEGMENTS_RANDOM:
+			result = "RANDOM";
+			break;
+		case GP_DEFAULT_NUMSEGMENTS_MINIMAL:
+			result = "MINIMAL";
+			break;
+		default:
+			result = psprintf("%d", create_table_default_numsegments);
+			break;
+	}
+
+	PG_RETURN_TEXT_P(cstring_to_text(result));
 }
 
 void

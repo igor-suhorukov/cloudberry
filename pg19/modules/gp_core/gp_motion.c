@@ -2132,7 +2132,7 @@ motion_dml_run(MotionState *state)
 											state->key,
 											state->streaming ? stream_start(state) : NIL,
 											false),
-							0, NULL, NULL, state->content, counts);
+							0, NULL, NULL, state->content, 0, counts);
 	stream_end(state);
 
 	/* every segment writes a replicated table's rows alike: count them once */
@@ -2927,7 +2927,7 @@ report_slices(PlannedStmt *stmt)
 
 	qsort(reports, nreports, sizeof(SliceReport), slice_report_cmp);
 	for (int i = 0; i < nreports; i++)
-		GpReportDispatch(reports[i].index, reports[i].single);
+		GpReportDispatch(reports[i].index, reports[i].single, 0);
 }
 
 /*

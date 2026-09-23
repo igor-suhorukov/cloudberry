@@ -41,9 +41,11 @@ extern double gp_motion_cost_per_row;
  * The INFO Cloudberry prints for a slice it dispatches, when
  * gp.test_print_direct_dispatch_info is on: "(slice 1) Dispatch command to
  * ALL contents: 0 1 2", or "SINGLE content" when it goes to one process --
- * a segment, or the coordinator's own for an entry slice.
+ * a segment, or the coordinator's own for an entry slice -- or "PARTIAL
+ * contents: 0 1" when to the first nsegments of a partial table's; 0 is
+ * every segment.
  */
-extern void GpReportDispatch(int slice, bool single);
+extern void GpReportDispatch(int slice, bool single, int nsegments);
 
 /*
  * The planner's gathers have no slice table; each is a slice of its own,

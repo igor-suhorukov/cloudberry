@@ -39,11 +39,11 @@
 extern GpPolicy *GpScanDistributedPolicy(Oid relid);
 
 /*
- * The segment this session reads a replicated table from.  Every segment has
- * every row, so sessions are spread over them; it is also the answer to
- * gp_segment_id of such a row.
+ * The segment this session reads a replicated table from.  Every segment of
+ * its policy has every row, so sessions are spread over them; it is also the
+ * answer to gp_segment_id of such a row.
  */
-extern int	GpScanReplicatedContent(void);
+extern int	GpScanReplicatedContent(const GpPolicy *policy);
 
 /*
  * The one segment that holds every row conditions on a hash-distributed

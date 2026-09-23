@@ -33,6 +33,13 @@ bfv_dd_multicolumn (planner, orca)  the INFO lines of
 case_gp  IS NOT DISTINCT FROM, and the CASE form, printed as the searched
   CASE the port's rewrite makes of them (see the singlenode suite's README).
 
+join_gp  the NOTICE of test_print_prefetch_joinqual: where a join's outer
+  side and its join qual both read through a Motion, Cloudberry reads the
+  qual's rows first, against a deadlock between the two, and says so;
+  PostgreSQL's joins, the port's, never do.  Its table of one segment,
+  which gp_debug_numsegments makes, is read there alone, and answers as
+  Cloudberry's does.
+
 qp_functions (planner, orca)  PostgreSQL 19's words for a call no function
   takes -- a DETAIL where Cloudberry's HINT stood -- and for a SQL function's
   last statement, which may be a MERGE ... RETURNING now.  Cloudberry refuses

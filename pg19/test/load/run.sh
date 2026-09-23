@@ -42,7 +42,7 @@ export PGPORT="$PORT"
 export PGHOST="$PGDATA_ROOT"
 
 PRELOAD_ALL='gp_core,interconnect,gp_orca,gp_ao,pax,gp_matview,gp_task,gp_sql,gp_security'
-EXTENSIONS='gp_core gp_orca gp_ao pax gp_exttable gp_resource gp_security gp_task gp_matview gp_sql'
+EXTENSIONS='gp_core gp_orca gp_ao pax gp_exttable gp_resource gp_security gp_task gp_matview gp_sql gp_debug_numsegments'
 
 pass=0; fail=0
 

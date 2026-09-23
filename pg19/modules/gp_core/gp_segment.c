@@ -455,7 +455,7 @@ segment_of_setup(FunctionCallInfo fcinfo, Oid typid)
 	if (policy == NULL)
 		cache->answer = -1;
 	else if (GpPolicyIsReplicated(policy))
-		cache->answer = GpScanReplicatedContent();
+		cache->answer = GpScanReplicatedContent(policy);
 	else if (GpPolicyIsRandomPartitioned(policy))
 		ereport(ERROR,
 				(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),

@@ -138,7 +138,8 @@ router_begin(Relation rel, GpPolicy *policy)
 
 	r->rel = rel;
 	r->hash = GpHashMake(policy, tupdesc);
-	GpClusterSegments(&r->nsegs);
+	/* the table's segments: every one, or a partial table's first so many */
+	r->nsegs = policy->numsegments;
 	r->replicated = GpPolicyIsReplicated(policy);
 	r->binary = GpTupleDescHasBinaryIO(tupdesc);
 	r->stores = palloc0_array(Tuplestorestate *, r->nsegs);
@@ -435,7 +436,7 @@ insert_begin(CustomScanState *node, EState *estate, int eflags)
 		 * statement is: slice 0.  A replicated table's row goes everywhere.
 		 */
 		GpReportDispatch(0, IsA(source, Result) && outerPlan(source) == NULL &&
-						 !GpPolicyIsReplicated(policy));
+						 !GpPolicyIsReplicated(policy), policy->numsegments);
 	}
 }
 
@@ -517,6 +518,8 @@ typedef struct ModifyState
 	char	   *sql;
 	bool		replicated;
 	int			content;		/* the one segment it is sent to, or -1 */
+	int			nsegments;		/* else the table's: all, or a partial
+								 * table's first so many */
 	bool		done;
 } ModifyState;
 
@@ -531,6 +534,7 @@ modify_create_state(CustomScan *cscan)
 	state->sql = strVal(linitial(cscan->custom_private));
 	state->replicated = boolVal(lsecond(cscan->custom_private));
 	state->content = intVal(lthird(cscan->custom_private));
+	state->nsegments = intVal(lfourth(cscan->custom_private));
 	return (Node *) state;
 }
 
@@ -538,7 +542,8 @@ static void
 modify_begin(CustomScanState *node, EState *estate, int eflags)
 {
 	if (!(eflags & EXEC_FLAG_EXPLAIN_ONLY))
-		GpReportDispatch(0, ((ModifyState *) node)->content >= 0);
+		GpReportDispatch(0, ((ModifyState *) node)->content >= 0,
+						 ((ModifyState *) node)->nsegments);
 }
 
 static TupleTableSlot *
@@ -592,7 +597,7 @@ modify_exec(CustomScanState *node)
 	GpClusterSegments(&nsegs);
 	counts = palloc0_array(uint64, nsegs);
 	GpDispatchCommandParams(state->sql, nparams, types, values, state->content,
-							counts);
+							state->nsegments, counts);
 
 	/* Every segment changed its own rows; a replicated table's once each. */
 	if (state->replicated)
@@ -1016,11 +1021,12 @@ gp_modify_planner_routed(Query *parse, const char *query_string, int cursorOptio
 
 		cscan = make_custom_scan(&mt->plan, &modify_scan_methods);
 		cscan->custom_private =
-			list_make3(makeString(pg_get_querydef(original, false)),
+			list_make4(makeString(pg_get_querydef(original, false)),
 					   makeBoolean(GpPolicyIsReplicated(policy)),
 					   makeInteger(GpScanDirectDispatchSegment(rte->relid,
 															   original->jointree->quals,
-															   original->resultRelation)));
+															   original->resultRelation)),
+					   makeInteger(policy->numsegments));
 		stmt->planTree = &cscan->scan.plan;
 		return stmt;
 	}

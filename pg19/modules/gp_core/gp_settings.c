@@ -148,7 +148,7 @@ static int	gather_slices = 0;
  * contents with their ids.
  */
 void
-GpReportDispatch(int slice, bool single)
+GpReportDispatch(int slice, bool single, int nsegments)
 {
 	StringInfoData buf;
 	int			nsegs;
@@ -158,12 +158,16 @@ GpReportDispatch(int slice, bool single)
 
 	initStringInfo(&buf);
 	GpClusterSegments(&nsegs);
-	if (single || nsegs == 1)
+	if (nsegments <= 0 || nsegments > nsegs)
+		nsegments = nsegs;
+	if (single || nsegments == 1)
 		appendStringInfoString(&buf, "SINGLE content");
 	else
 	{
-		appendStringInfoString(&buf, "ALL contents:");
-		for (int i = 0; i < nsegs; i++)
+		/* Cloudberry's words for a slice of a partial table's segments */
+		appendStringInfoString(&buf, nsegments < nsegs ? "PARTIAL contents:"
+							   : "ALL contents:");
+		for (int i = 0; i < nsegments; i++)
 			appendStringInfo(&buf, " %d", i);
 	}
 	elog(INFO, "(slice %d) Dispatch command to %s", slice, buf.data);

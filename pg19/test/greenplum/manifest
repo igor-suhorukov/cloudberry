@@ -19,7 +19,7 @@ skip direct_dispatch  access method "bitmap" does not exist; current transaction
 skip bfv_dd  access method "bitmap" does not exist
 run  bfv_dd_multicolumn
 skip bfv_dd_types  data type bit has no default operator class for access method "hash"; data type bit varying has no default operator class for access method "hash"
-skip join_gp  function gp_debug_set_create_table_default_numsegments(integer) does not exist; unrecognized configuration parameter "test_print_prefetch_joinqual"
+run  join_gp
 skip union_gp  UNION types text and integer cannot be matched; syntax error at or near "EXTERNAL"
 run  limit_gp
 run  case_gp
@@ -75,7 +75,7 @@ run  tidscan_gp
 skip gp_array_agg  function gp_array_agg(integer) does not exist; function gp_array_agg(text) does not exist
 skip agg_pushdown  unrecognized parameter "appendonly"; relation "nation_pd" does not exist
 skip rpt  relation "child" already exists; cannot drop table parent_rep because other objects depend on it
-skip rpt_joins  cannot DELETE FROM distributed table "t3" this way yet; function gp_debug_set_create_table_default_numsegments(integer) does not exist
+skip rpt_joins  cannot DELETE FROM distributed table "t3" this way yet; cannot DELETE FROM distributed table "t_17460" this way yet
 skip namespace_gp  syntax error at or near "DISTRIBUTED"; relation "test_schema_1.abc" does not exist
 skip truncate_gp  language "plpython3u" does not exist; syntax error at or near "row"
 skip gp_rules  relation "gp_distribution_policy" does not exist; unrecognized parameter "appendonly"

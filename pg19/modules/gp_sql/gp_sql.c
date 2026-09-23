@@ -1294,14 +1294,12 @@ gp_sql_ProcessUtility(PlannedStmt *pstmt, const char *queryString,
 
 		if (OidIsValid(relid))
 		{
+			/*
+			 * the statement made it, so the user running it owns it; over the
+			 * segments a new table gets (gp_debug_numsegments)
+			 */
 			if (policy != NULL)
-			{
-				ObjectAddress addr;
-
-				/* the statement made it, so the user running it owns it */
-				ObjectAddressSet(addr, RelationRelationId, relid);
-				GpLabelSet(&addr, GP_LABEL_distributed_by, policy);
-			}
+				GpDistributionSetNew(relid, policy);
 			else if (!is_alter && IsA(parsetree, CreateStmt) &&
 					 on_cluster_coordinator())
 				GpDistributionApplyDefault((CreateStmt *) parsetree, relid);

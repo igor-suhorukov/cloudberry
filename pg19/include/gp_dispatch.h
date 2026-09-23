@@ -109,6 +109,11 @@ extern void GpGatherEnd(GpGatherState *gather);
 extern GpGatherState *GpGatherStartOn(const char *sql, TupleDesc tupdesc,
 									  int content);
 
+/* The same, from the first nsegments segments: a partial table's. */
+extern GpGatherState *GpGatherStartOnSegments(const char *sql,
+											  TupleDesc tupdesc,
+											  int nsegments);
+
 /*
  * The type a value travels between the nodes as: itself, or text or bytea
  * for the few types that refuse to be read back (pg_node_tree and the
@@ -146,15 +151,15 @@ extern bool GpDispatchIsDispatchedStatement(Node *utilityStmt);
 extern bool GpDispatchIsTreeText(const char *str);
 
 /*
- * A statement with parameters, in text, on every segment (content -1) or one;
- * "types" gives each parameter's type, or is NULL for the segment to infer
- * them; "counts" receives how many rows each segment's statement changed, in
- * content order.
+ * A statement with parameters, in text, on one segment (content >= 0), or
+ * else on the first nsegments -- every one where that is 0; "types" gives
+ * each parameter's type, or is NULL for the segment to infer them; "counts"
+ * receives how many rows each segment's statement changed, in content order.
  */
 extern void GpDispatchCommandParams(const char *sql, int nparams,
 									const Oid *types,
 									const char *const *values, int content,
-									uint64 *counts);
+									int nsegments, uint64 *counts);
 
 /*
  * A statement on one segment whose parameters may be binary (formats[i] 1),

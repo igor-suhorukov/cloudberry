@@ -333,6 +333,10 @@ modules = [
                      # makes the partitions they describe.
                      'grammar/gp_partition.c',
                      'modules/gp_sql/partition.c'),
+    # Cloudberry's gpcontrib extension of that name, whose functions say how
+    # many segments a new table is spread over; gp_sql carries them, since it
+    # is what distributes a new table.
+    'more_extensions': ['gp_debug_numsegments'],
   },
 ]
 
@@ -374,6 +378,15 @@ foreach m : modules
       install_dir: pg_extensiondir,
     )
   endif
+
+  # An extension of another name whose functions the module carries.
+  foreach extra : m.get('more_extensions', [])
+    install_data(
+      'modules' / name / (extra + '.control'),
+      'modules' / name / (extra + '--1.0.sql'),
+      install_dir: pg_extensiondir,
+    )
+  endforeach
 
   built_modules += name
   if m['preload']
