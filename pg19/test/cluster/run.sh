@@ -666,7 +666,8 @@ mine" ] && ok "a transaction reads its own rows, and a LIMIT leaves the connecti
 	q 0 "CREATE TABLE dkt (a int, b int) DISTRIBUTED BY (a); CREATE FUNCTION dkt_f() RETURNS trigger LANGUAGE plpgsql AS \$\$ BEGIN RETURN NEW; END \$\$; CREATE TRIGGER dkt_t BEFORE UPDATE ON dkt FOR EACH ROW EXECUTE FUNCTION dkt_f();" >/dev/null
 	out=$(q 0 "UPDATE dkt SET a = a + 1;")
 	case "$out" in
-		*"a column of the distribution key"*"has triggers"*) ok "the key of a table with triggers is refused, with the reason, as Cloudberry refuses it" ;;
+		*"UPDATE on distributed key column not allowed on relation with update triggers"*)
+			ok "the key of a table with UPDATE triggers is refused, as Cloudberry refuses it" ;;
 		*) notok "an UPDATE of the key of a table with triggers" "$out" ;;
 	esac
 	q 0 "CREATE TABLE sq (a int, v text) DISTRIBUTED BY (a);" >/dev/null
@@ -1521,6 +1522,35 @@ SQL
 		"CREATE TABLE xl (LIKE ds);" "SELECT gp_sql.distribution('xl'::regclass);" | qf 0 | grep -v NOTICE | grep -v HINT | tr '\n' ' ')
 	[ "$out" = "(a) (key) " ] && ok "CREATE TABLE AS keeps its query's key, and LIKE its table's" \
 		|| notok "CTAS and LIKE distributions" "$out"
+
+	# What a segment says -- a trigger's NOTICE -- is the client's, once;
+	# what it says of a DDL statement it was sent is the coordinator's.
+	cat > "$ROOT/notice.sql" <<'SQL'
+CREATE TABLE xn (a int, b int) DISTRIBUTED BY (a);
+CREATE FUNCTION xn_f() RETURNS trigger LANGUAGE plpgsql AS
+	$$ BEGIN RAISE NOTICE 'row % on a segment', NEW.a; RETURN NEW; END $$;
+CREATE TRIGGER xn_t AFTER INSERT ON xn FOR EACH ROW EXECUTE FUNCTION xn_f();
+INSERT INTO xn VALUES (1, 1);
+CREATE TABLE xn2 (a int, b int) INHERITS (xn);
+SQL
+	out=$(qf 0 < "$ROOT/notice.sql" | grep -c 'NOTICE:  row 1 on a segment')
+	out2=$(qf 0 < /dev/null; q 0 "DROP TABLE xn2; CREATE TABLE xn2 (a int, b int) INHERITS (xn);" | grep -c 'merging')
+	[ "$out|$out2" = "1|2" ] && ok "a trigger's NOTICE on a segment reaches the client once; DDL's are the coordinator's" \
+		|| notok "notices from the segments" "$out / $out2"
+	out=$(q 0 "CREATE TRIGGER xn_s AFTER INSERT ON xn FOR EACH STATEMENT EXECUTE FUNCTION xn_f();")
+	out2=$(printf '%s\n' "SET gp.enable_statement_trigger = on;" \
+		"CREATE TRIGGER xn_s AFTER INSERT ON xn FOR EACH STATEMENT EXECUTE FUNCTION xn_f();" | qf 0)
+	case "$out|$out2" in
+		*"Triggers for statements are not yet supported"*"|") ok "a statement trigger only with gp.enable_statement_trigger, as in Cloudberry" ;;
+		*) notok "statement triggers" "$out / $out2" ;;
+	esac
+	q 0 "CREATE TABLE xu (a int, b int) DISTRIBUTED BY (a); CREATE FUNCTION xu_f() RETURNS trigger LANGUAGE plpgsql AS \$\$ BEGIN RETURN NEW; END \$\$; CREATE TRIGGER xu_t BEFORE UPDATE ON xu FOR EACH ROW EXECUTE FUNCTION xu_f(); INSERT INTO xu VALUES (1, 1);" >/dev/null
+	out=$(q 0 "UPDATE xu SET a = a + 1;")
+	case "$out" in
+		*"UPDATE on distributed key column not allowed on relation with update triggers"*)
+			ok "the key of a table with UPDATE triggers is not changed, in Cloudberry's words" ;;
+		*) notok "a key change under UPDATE triggers" "$out" ;;
+	esac
 
 	# Cloudberry reserves gp_ for schemas, and keeps pg_toast where it is.
 	out=$(q 0 "CREATE SCHEMA gp_mine;")

@@ -123,6 +123,7 @@
 #include "gp_sql.h"
 
 bool		gp_create_table_random_default_distribution = false;
+bool		gp_enable_statement_trigger = false;
 
 /*
  * How many segments a new table is spread over: a count, or one of
@@ -1928,9 +1929,37 @@ gp_debug_get_create_table_default_numsegments(PG_FUNCTION_ARGS)
 	PG_RETURN_TEXT_P(cstring_to_text(result));
 }
 
+/*
+ * CREATE TRIGGER ... FOR EACH STATEMENT on a cluster, which Cloudberry's
+ * grammar refuses unless gp_enable_statement_trigger is on: a statement the
+ * coordinator sends to every segment is a statement on each, and a trigger
+ * for it would fire once per segment -- the port's own writes refuse a
+ * table that has one for the same reason (gp_explicit.c).  An extension's
+ * script may make one, as gp_core's does for its catalogs; on one node a
+ * statement is one statement, and nothing is refused.
+ */
+void
+GpDistributionCheckTrigger(CreateTrigStmt *stmt)
+{
+	if (stmt->row || gp_enable_statement_trigger || creating_extension ||
+		!on_cluster_coordinator())
+		return;
+	ereport(ERROR,
+			(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+			 errmsg("Triggers for statements are not yet supported")));
+}
+
 void
 GpDistributionDefineSettings(void)
 {
+	DefineCustomBoolVariable("gp.enable_statement_trigger",
+							 "Enables statement triggers to be created instead of erroring out.",
+							 NULL,
+							 &gp_enable_statement_trigger,
+							 false,
+							 PGC_USERSET,
+							 0,
+							 NULL, NULL, NULL);
 
 	DefineCustomBoolVariable("gp.create_table_random_default_distribution",
 							 "Distribute a table randomly when CREATE TABLE names no distribution.",

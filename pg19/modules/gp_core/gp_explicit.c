@@ -61,8 +61,8 @@
  *
  * Refused, by name (GpExplicitCannot): an UPDATE or DELETE of a replicated
  * table, whose rows are on every segment with a ctid on each; an UPDATE of
- * the key of a table with triggers, which a moved row would not fire as an
- * UPDATE's, as Cloudberry refuses it; check options; RETURNING old or new;
+ * the key of a table with UPDATE triggers, which a moved row would not
+ * fire, in Cloudberry's words; check options; RETURNING old or new;
  * statement-level triggers, which would fire on every segment; ON
  * CONFLICT; and MERGE.
  *
@@ -76,6 +76,7 @@
 
 #include "access/table.h"
 #include "access/tupconvert.h"
+#include "catalog/pg_trigger.h"
 #include "catalog/pg_type.h"
 #include "commands/explain.h"
 #include "commands/explain_format.h"
@@ -347,6 +348,21 @@ returning_qualified_walker(Node *node, void *context)
 	return expression_tree_walker(node, returning_qualified_walker, context);
 }
 
+/* Does the relation have an enabled UPDATE trigger, of a row or a statement? */
+static bool
+has_update_triggers(Oid relid)
+{
+	Relation	rel = table_open(relid, NoLock);
+	TriggerDesc *td = rel->trigdesc;
+	bool		found = false;
+
+	for (int i = 0; td != NULL && i < td->numtriggers && !found; i++)
+		found = td->triggers[i].tgenabled != TRIGGER_DISABLED &&
+			TRIGGER_FOR_UPDATE(td->triggers[i].tgtype);
+	table_close(rel, NoLock);
+	return found;
+}
+
 static bool
 has_statement_triggers(Relation rel, CmdType operation)
 {
@@ -427,9 +443,14 @@ GpExplicitCannot(PlannedStmt *stmt, ModifyTable *mt)
 	/*
 	 * A row whose key changes belongs on another segment, and is moved there:
 	 * deleted where it is and inserted where it hashes, as Cloudberry's Split
-	 * Update moves it.  Its UPDATE triggers would not fire, nor would its
-	 * DELETE and INSERT triggers fire as an UPDATE's; Cloudberry refuses a
-	 * table with triggers, and so does this.
+	 * Update moves it.  Its UPDATE triggers would not fire, and Cloudberry
+	 * refuses an UPDATE of the key of a table that has any, in its words
+	 * (make_splitupdate_path, cdbpath.c) -- asking the plan's first result
+	 * relation, which for a partitioned table is its first partition, as
+	 * Cloudberry's create_modifytable_path() asks it.  The DELETE and INSERT
+	 * a moved row is made of fire their row triggers on the segments, as
+	 * PostgreSQL fires them for a row moved between partitions; Cloudberry's
+	 * Split fires none.
 	 */
 	policy = GpScanDistributedPolicy(rt_fetch(first, stmt->rtable)->relid);
 	if (mt->operation == CMD_UPDATE && GpPolicyIsHashPartitioned(policy))
@@ -440,18 +461,12 @@ GpExplicitCannot(PlannedStmt *stmt, ModifyTable *mt)
 		{
 			for (int k = 0; k < policy->nattrs; k++)
 			{
-				Relation	rel;
-				bool		triggers;
-
 				if (policy->attrs[k] != lfirst_int(lc))
 					continue;
-				rel = table_open(firstid, NoLock);
-				triggers = rel->trigdesc != NULL;
-				table_close(rel, NoLock);
-				if (triggers)
-					return psprintf("It changes \"%s\", a column of the distribution key, which moves the row to another segment, and \"%s\" has triggers, which a row moved that way would not fire as an UPDATE's.",
-									get_attname(firstid, lfirst_int(lc), false),
-									get_rel_name(firstid));
+				if (has_update_triggers(firstid))
+					ereport(ERROR,
+							(errcode(MAKE_SQLSTATE('0', 'A', 'M', '0', '1')),
+							 errmsg("UPDATE on distributed key column not allowed on relation with update triggers")));
 			}
 		}
 	}

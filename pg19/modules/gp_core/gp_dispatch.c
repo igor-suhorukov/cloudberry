@@ -230,6 +230,7 @@ static List *active_streams = NIL;
 
 static void gang_close(void);
 static void gang_build_wes(GpGang *g);
+static void segment_notice_receiver(void *arg, const struct pg_result *res);
 static void readers_poll(void);
 static void streams_raise_if_failed(void);
 static void streams_release(void);
@@ -446,6 +447,7 @@ gang_connect(void)
 		gang->conns[i].seg = &segs[i];
 		gang->conns[i].conn = conn;
 		gang->conns[i].busy = false;
+		PQsetNoticeReceiver(conn, segment_notice_receiver, NULL);
 	}
 
 	gang_build_wes(gang);
@@ -490,6 +492,147 @@ gang_get(void)
 }
 
 /* ------------------------------------------------------------------------- */
+/* What the segments say besides their answers                               */
+/* ------------------------------------------------------------------------- */
+
+/*
+ * A NOTICE, WARNING or INFO a segment sent -- a trigger's RAISE NOTICE on
+ * the rows it inserted, say -- is the client's, as Cloudberry relays a QE's
+ * (MPPnoticeReceiver, cdbconn.c).  libpq hands it to a receiver in the middle
+ * of reading a result, where nothing may be raised, so it is queued there, in
+ * malloc'd memory as Cloudberry's is, and raised here once the dispatcher is
+ * back on its own ground: before a segment's error, since it came first, and
+ * whenever the dispatcher waits.  Without Cloudberry's "(seg0 host:port
+ * pid=...)" after the message, which its tests' init_file masks anyway.
+ *
+ * What the port's own statements to the segments make them say is not the
+ * client's: a DDL statement's NOTICE is the coordinator's to give, once, and
+ * it has; settings, labels and the transaction's BEGIN and COMMIT say nothing
+ * the user asked about.  Those are sent quietly (notices_quiet).
+ */
+typedef struct SegmentNotice
+{
+	struct SegmentNotice *next;
+	int			elevel;
+	int			sqlerrcode;
+	char	   *message;
+	char	   *detail;
+	char	   *hint;
+	char		buf[FLEXIBLE_ARRAY_MEMBER];
+} SegmentNotice;
+
+static SegmentNotice *notices_head = NULL;
+static SegmentNotice **notices_tail = &notices_head;
+static int	notices_quiet = 0;
+
+/*
+ * libpq calls it with its own PGresult, not the wrapper that libpq-be-fe.h's
+ * macros put in the name's place, so they are set aside around it, as
+ * PostgreSQL's own libpqsrv_notice_receiver sets them aside.
+ */
+#undef PGresult
+#undef PQresultErrorField
+static void
+segment_notice_receiver(void *arg, const struct pg_result *res)
+{
+	const char *severity = PQresultErrorField(res, PG_DIAG_SEVERITY_NONLOCALIZED);
+	const char *sqlstate = PQresultErrorField(res, PG_DIAG_SQLSTATE);
+	const char *fields[3];
+	size_t		size = offsetof(SegmentNotice, buf);
+	SegmentNotice *n;
+	char	   *p;
+	int			elevel;
+
+	if (notices_quiet > 0 || severity == NULL)
+		return;
+	if (strcmp(severity, "NOTICE") == 0)
+		elevel = NOTICE;
+	else if (strcmp(severity, "WARNING") == 0)
+		elevel = WARNING;
+	else if (strcmp(severity, "INFO") == 0)
+		elevel = INFO;
+	else
+		return;					/* LOG and DEBUG are the segment's own log's */
+
+	fields[0] = PQresultErrorField(res, PG_DIAG_MESSAGE_PRIMARY);
+	fields[1] = PQresultErrorField(res, PG_DIAG_MESSAGE_DETAIL);
+	fields[2] = PQresultErrorField(res, PG_DIAG_MESSAGE_HINT);
+	if (fields[0] == NULL)
+		return;
+	for (int i = 0; i < 3; i++)
+		if (fields[i] != NULL)
+			size += strlen(fields[i]) + 1;
+
+	/* nothing can be raised here: a notice there is no memory for is lost */
+	n = malloc(size);
+	if (n == NULL)
+		return;
+	n->next = NULL;
+	n->elevel = elevel;
+	n->sqlerrcode = (sqlstate != NULL && strlen(sqlstate) == 5)
+		? MAKE_SQLSTATE(sqlstate[0], sqlstate[1], sqlstate[2], sqlstate[3],
+						sqlstate[4])
+		: ERRCODE_SUCCESSFUL_COMPLETION;
+	p = n->buf;
+	n->message = n->detail = n->hint = NULL;
+	for (int i = 0; i < 3; i++)
+	{
+		char	  **dest = (i == 0) ? &n->message : (i == 1) ? &n->detail : &n->hint;
+
+		if (fields[i] == NULL)
+			continue;
+		strcpy(p, fields[i]);
+		*dest = p;
+		p += strlen(fields[i]) + 1;
+	}
+
+	*notices_tail = n;
+	notices_tail = &n->next;
+}
+#define PGresult libpqsrv_PGresult
+#define PQresultErrorField libpqsrv_PQresultErrorField
+
+/* Raise what the segments said, in the order they said it. */
+static void
+flush_segment_notices(void)
+{
+	while (notices_head != NULL)
+	{
+		SegmentNotice *n = notices_head;
+		SegmentNotice copy = *n;
+		char	   *message = pstrdup(n->message);
+		char	   *detail = n->detail ? pstrdup(n->detail) : NULL;
+		char	   *hint = n->hint ? pstrdup(n->hint) : NULL;
+
+		notices_head = n->next;
+		if (notices_head == NULL)
+			notices_tail = &notices_head;
+		free(n);
+
+		ereport(copy.elevel,
+				(errcode(copy.sqlerrcode),
+				 errmsg_internal("%s", message),
+				 detail ? errdetail_internal("%s", detail) : 0,
+				 hint ? errhint("%s", hint) : 0));
+	}
+}
+
+/* Forget them: the statement failed, and what it said went with it. */
+static void
+drop_segment_notices(void)
+{
+	while (notices_head != NULL)
+	{
+		SegmentNotice *n = notices_head;
+
+		notices_head = n->next;
+		free(n);
+	}
+	notices_tail = &notices_head;
+	notices_quiet = 0;
+}
+
+/* ------------------------------------------------------------------------- */
 /* Sending, and waiting                                                      */
 /* ------------------------------------------------------------------------- */
 
@@ -505,6 +648,7 @@ gang_wait(GpGang *g)
 {
 	WaitEvent	occurred[1];
 
+	flush_segment_notices();
 	CHECK_FOR_INTERRUPTS();
 
 	if (WaitEventSetWait(g->wes, -1, occurred, 1, dispatch_wait_event()) > 0)
@@ -634,6 +778,8 @@ raise_segment_errors(List *errors)
 	GpSegmentError *first;
 	const GpSegmentConfig *seg;
 	StringInfoData detail;
+
+	flush_segment_notices();
 
 	/*
 	 * With slices running at once, what fails first is often only where the
@@ -782,6 +928,7 @@ gang_wait_all_ex(GpGang *g, PGresult **keep, bool commit, bool keep_commands)
 	if (broken)
 		gang_close();
 
+	flush_segment_notices();
 	if (errors != NIL)
 		raise_segment_errors(errors);
 }
@@ -1165,6 +1312,7 @@ reader_connect(GpGang *g, int content)
 	r = MemoryContextAllocZero(TopMemoryContext, sizeof(GpReaderConn));
 	r->content = content;
 	r->conn = conn;
+	PQsetNoticeReceiver(conn, segment_notice_receiver, NULL);
 	{
 		MemoryContext oldcxt = MemoryContextSwitchTo(TopMemoryContext);
 
@@ -1386,8 +1534,10 @@ gang_sync_settings(GpGang *g)
 	if (!any)
 		return;
 
+	notices_quiet++;
 	gang_send_all(g, sql.data);
 	gang_wait_all(g, NULL, false);
+	notices_quiet--;
 
 	for (int i = 0; i < NUM_SYNCED_SETTINGS; i++)
 	{
@@ -1493,8 +1643,10 @@ gang_sync_labels(GpGang *g)
 
 		if (payload == NULL)
 			continue;
+		notices_quiet++;
 		gang_send_all(g, payload);
 		gang_wait_all(g, NULL, false);
+		notices_quiet--;
 		pfree(payload);
 	}
 }
@@ -1522,10 +1674,12 @@ gang_prepare(GpGang *g, bool in_xact)
 
 	if (!gang_in_xact)
 	{
+		notices_quiet++;
 		gang_send_all(g, psprintf("BEGIN ISOLATION LEVEL %s%s",
 								  isolation_level_name(),
 								  XactReadOnly ? " READ ONLY" : ""));
 		gang_wait_all(g, NULL, false);
+		notices_quiet--;
 		gang_in_xact = true;
 		gang_xact_depth = 1;
 		gather_counter = 0;
@@ -1534,8 +1688,10 @@ gang_prepare(GpGang *g, bool in_xact)
 	level = GetCurrentTransactionNestLevel();
 	while (gang_xact_depth < level)
 	{
+		notices_quiet++;
 		gang_send_all(g, psprintf("SAVEPOINT gp_sp_%d", gang_xact_depth + 1));
 		gang_wait_all(g, NULL, false);
+		notices_quiet--;
 		gang_xact_depth++;
 	}
 
@@ -1573,8 +1729,10 @@ dispatch_xact_callback(XactEvent event, void *arg)
 			{
 				gang_in_xact = false;
 				gang_xact_depth = 0;
+				notices_quiet++;
 				gang_send_all(gang, "COMMIT");
 				gang_wait_all(gang, NULL, true);
+				notices_quiet--;
 			}
 			break;
 
@@ -1613,6 +1771,7 @@ dispatch_xact_callback(XactEvent event, void *arg)
 			gang_forget_settings();
 			streams_release();
 			labels_pending = NIL;
+			drop_segment_notices();
 			break;
 
 		case XACT_EVENT_COMMIT:
@@ -1638,8 +1797,10 @@ dispatch_subxact_callback(SubXactEvent event, SubTransactionId mySubid,
 	switch (event)
 	{
 		case SUBXACT_EVENT_PRE_COMMIT_SUB:
+			notices_quiet++;
 			gang_send_all(gang, psprintf("RELEASE SAVEPOINT gp_sp_%d", level));
 			gang_wait_all(gang, NULL, false);
+			notices_quiet--;
 			gang_xact_depth = level - 1;
 			break;
 
@@ -1660,6 +1821,7 @@ dispatch_subxact_callback(SubXactEvent event, SubTransactionId mySubid,
 			gang_xact_depth = level - 1;
 			gang_forget_settings();
 			streams_release();
+			drop_segment_notices();
 			break;
 
 		default:
@@ -1721,8 +1883,11 @@ GpDispatchUtility(const char *payload, bool own_xact)
 		labels_held = false;
 	}
 	PG_END_TRY();
+	/* the coordinator has said what the statement says, once */
+	notices_quiet++;
 	gang_send_all(g, payload);
 	gang_wait_all(g, NULL, false);
+	notices_quiet--;
 	if (!own_xact)
 		gang_sync_labels(g);
 }
@@ -2409,6 +2574,8 @@ gather_poll(GpGatherSeg *s)
 		}
 	}
 
+	if (progress)
+		flush_segment_notices();
 	return progress;
 }
 

@@ -182,6 +182,10 @@ extern char *GpStorageTablespaceServer(Oid spcId);
 /* Cloudberry's gp_max_partition_level: 0, no limit. */
 /* distribution.c */
 extern PGDLLIMPORT bool gp_create_table_random_default_distribution;
+extern PGDLLIMPORT bool gp_enable_statement_trigger;
+
+/* A statement-level trigger, refused on a cluster as Cloudberry refuses one. */
+extern void GpDistributionCheckTrigger(CreateTrigStmt *stmt);
 /*
  * A table nobody distributed, distributed as Cloudberry would: "stmt" is the
  * CREATE TABLE that made it as it was before it ran -- PostgreSQL's analysis

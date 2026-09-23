@@ -1185,6 +1185,9 @@ gp_sql_ProcessUtility(PlannedStmt *pstmt, const char *queryString,
 	if (IsA(parsetree, TruncateStmt))
 		GpDirTableCheckTruncate((TruncateStmt *) parsetree);
 
+	if (IsA(parsetree, CreateTrigStmt))
+		GpDistributionCheckTrigger((CreateTrigStmt *) parsetree);
+
 	if (IsA(parsetree, CreateTableSpaceStmt) ||
 		IsA(parsetree, AlterTableSpaceOptionsStmt))
 	{
