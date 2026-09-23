@@ -43,6 +43,13 @@ extern GpPolicy *GpScanDistributedPolicy(Oid relid);
  */
 extern int	GpScanReplicatedContent(void);
 
+/*
+ * The one segment that holds every row conditions on a hash-distributed
+ * table can match -- they fix every column of its key to a constant -- or
+ * -1.  varno is the table's range table index in the conditions.
+ */
+extern int	GpScanDirectDispatchSegment(Oid relid, Node *quals, Index varno);
+
 /* The scan hooks, where there is a cluster; see gp_scan.c. */
 extern void GpScanInit(void);
 

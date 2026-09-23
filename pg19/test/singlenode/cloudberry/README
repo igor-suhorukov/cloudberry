@@ -22,12 +22,12 @@ The reasons, by what brings them, and then each test:
   FILL MISSING FIELDS, NEWLINE, ESCAPE outside CSV mode: M5, the loading path.
 
   gp_segment_configuration, gp_distribution_policy,
-  gp_configuration_history, and the settings of a cluster that dispatches
-  (gp_enable_direct_dispatch, test_print_direct_dispatch_info,
-  gp_interconnect_queue_depth, gp_motion_cost_per_row, gp_cte_sharing,
-  gp_enable_multiphase_agg, test_print_prefetch_joinqual): M2.
+  gp_configuration_history, and test_print_prefetch_joinqual: M2.
 
-  statement_mem and gp_workfile_compression: M6, resource management.
+  Cloudberry's settings of the dispatcher and the planner are the port's
+  since M2 (gp_settings.c), respelled gp.* as every one is, and a test that
+  sets one runs on; on one node test_print_direct_dispatch_info prints
+  nothing, as Cloudberry's single-node mode does not.
 
   Cloudberry's table functions, TABLE (...) and anytable: grammar the port's
   O26 does not have, and a pseudo-type an extension cannot add.
@@ -51,8 +51,8 @@ The reasons, by what brings them, and then each test:
   Cloudberry's REVOKE says "no privileges could be revoked" when it revokes
   nothing, which PostgreSQL's does not, on any object.
 
-  gp_autostats_mode, enable_groupagg and gp_recursive_cte: settings the port
-  has no counterpart of.  Recursive CTEs are always on, as in PostgreSQL.
+  gp_recursive_cte: a setting the port has no counterpart of.  Recursive CTEs
+  are always on, as in PostgreSQL.
 
   PL/Python, which the image does not carry, and what Cloudberry's tests make
   with it: count_operator() and count_index_scans(), which count the nodes of
@@ -86,15 +86,13 @@ The reasons, by what brings them, and then each test:
 
 The tests
 
-bfv_aggregate  count_operator(), gp_enable_multiphase_agg, an
-  append-optimized table, PL/Python, OVER (w) with a frame, a frame offset
+bfv_aggregate  count_operator(), an append-optimized table, PL/Python, OVER (w) with a frame, a frame offset
   that reads a column.
 bfv_catalog  count_operator(), pg_stat_last_operation (Cloudberry's catalog of
   when an object was last changed), escape_string_warning and
   standard_conforming_strings = off, PL/Python, and one row more in a query
   over pg_constraint: the table's NOT NULL constraint.
-bfv_dd, bfv_dd_multicolumn, bfv_dd_types  direct dispatch's test setting and
-  gp_autostats_mode; bfv_dd's the bitmap index as well.
+bfv_dd  the bitmap index.
 bfv_index  count_index_scans(), append-optimized and column-oriented
   tables, whose compression options a partitioned table is refused for
   before its access method.
@@ -102,7 +100,7 @@ bfv_partition_plans  count_operator() and find_operator() of PL/Python,
   append-optimized and column-oriented tables and the bitmap index, and a
   plan gpdiff.pl does not take for one after the column-oriented table's
   statements fail.
-bfv_olap  gp_motion_cost_per_row, OVER (w) with a frame.
+bfv_olap  OVER (w) with a frame.
 case_gp  The deparse of IS NOT DISTINCT FROM, and of the CASE form, which
   prints as the searched CASE it was rewritten into; blip(1), the operand of
   a CASE with three arms, called three times where Cloudberry calls it once,
@@ -120,16 +118,13 @@ gp_recursive_cte  gp_recursive_cte, whose "off" Cloudberry's test expects to
   refuse a recursive CTE, and a plan gpdiff.pl does not take for one, which is
   PostgreSQL 19's planner's.
 gpcopy  COPY's LOG ERRORS, FILL MISSING FIELDS, NEWLINE and ESCAPE outside
-  CSV mode, the error log functions, gp_configuration_history,
-  gp_autostats_mode, and the broken_int4 type of Cloudberry's regress.so.
+  CSV mode, the error log functions, gp_configuration_history, and the
+  broken_int4 type of Cloudberry's regress.so.
 indexjoin  an append-optimized table.
-join_gp  statement_mem, gp_workfile_compression,
-  test_print_prefetch_joinqual.
-limit_gp  statement_mem.
+join_gp  test_print_prefetch_joinqual.
 partition  Every reason above: its templates and gp_partition_template;
   append-optimized and column-oriented tables, column ENCODING, external
-  tables and COPY ... LOG ERRORS; gp_distribution_policy and
-  gp_segments_for_planner; a role that may not CREATE in schema public;
+  tables and COPY ... LOG ERRORS; gp_distribution_policy; a role that may not CREATE in schema public;
   Cloudberry's REVOKE notice; an exclusion constraint PostgreSQL 19 allows;
   the caret of an error in a partition an ALTER TABLE made; psql's \d+.
 partition1  append-optimized tables -- hhh and foz are, and most of its
@@ -142,19 +137,16 @@ partition_indexing  the bitmap index, and "UNIQUE constraint on partitioned
   table".
 partition_unlogged  an unlogged partitioned table, which PostgreSQL 19 has
   none of.
-qp_query_execution  qx_count_operator() of PL/Python, statement_mem, a
-  column-oriented table.
-qp_union_intersect  gp_enable_direct_dispatch, set inside a transaction the
-  rest of which is then refused.
-qp_with_clause  gp_cte_sharing, append-optimized and column-oriented tables,
-  the bitmap index, enable_groupagg.
+qp_query_execution  qx_count_operator() of PL/Python, a column-oriented
+  table.
+qp_with_clause  append-optimized and column-oriented tables, the bitmap
+  index.
 returning_gp  an append-optimized table.
 singlenode_compatibility_cbdb  the warning Cloudberry's single-node mode
   gives for DISTRIBUTED BY (the port records the policy, for ORCA and M2),
   append-optimized tables, and TABLE (...) and anytable.  ALTER TABLE ... SET
   DISTRIBUTED BY is refused as Cloudberry refuses it in single-node mode.
-subselect_gp  gp_distribution_policy, gp_interconnect_queue_depth,
-  append-optimized tables.
+subselect_gp  gp_distribution_policy, append-optimized tables.
 subselect_gp2  an external web table.
 tag  Tag definitions are the database's here, in gp_sql.tag, and Cloudberry's
   are the cluster's, in the shared catalog pg_tag (cloudberry.md, "Still
@@ -172,5 +164,4 @@ tag  Tag definitions are the database's here, in gp_sql.tag, and Cloudberry's
   Cloudberry's syntax error is at the next.
 union_gp  count_operator(), gp_distribution_policy, an external table, PL/
   Python, and a chain of UNIONs over NULLs.
-update_gp  gp_segment_configuration, append-optimized tables,
-  gp_autostats_mode.
+update_gp  gp_segment_configuration, append-optimized tables.

@@ -1,12 +1,4 @@
 @@
-+ERROR:  unrecognized configuration parameter "statement_mem"
-@@
-+ERROR:  unrecognized configuration parameter "gp_workfile_compression"
-@@
-+ERROR:  unrecognized configuration parameter "gp_workfile_compression"
-@@
-+ERROR:  unrecognized configuration parameter "statement_mem"
-@@
 +ERROR:  unrecognized configuration parameter "test_print_prefetch_joinqual"
 @@
 +ERROR:  unrecognized configuration parameter "test_print_prefetch_joinqual"

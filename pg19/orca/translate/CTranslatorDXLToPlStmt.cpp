@@ -5996,8 +5996,20 @@ CTranslatorDXLToPlStmt::TranslateDXLDml(
 			SetParamIds(write);
 		}
 
+		// Cloudberry sends an INSERT or DELETE whose rows all belong on one
+		// segment -- a row of constants, a DELETE that fixes the key -- to
+		// that segment alone, where the write is the plan's only slice.
+		int content = -1;
+		if ((CMD_INSERT == m_cmd_type || CMD_DELETE == m_cmd_type) &&
+			NIL == m_motions)
+		{
+			content = TranslateDXLDirectDispatchSegment(
+				phy_dml_dxlop->GetDXLDirectDispatchInfo(),
+				m_dxl_to_plstmt_context->GetRTableEntriesList());
+		}
+
 		Plan *dispatch =
-			gpdb::MakeDmlMotion(write, -1, writeslice->sliceIndex);
+			gpdb::MakeDmlMotion(write, content, writeslice->sliceIndex);
 		dispatch->plan_node_id = m_dxl_to_plstmt_context->GetNextPlanId();
 		dispatch->startup_cost = plan->startup_cost;
 		dispatch->total_cost = plan->total_cost;

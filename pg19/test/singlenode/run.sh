@@ -132,13 +132,15 @@ echo
 
 # The settings the port has, as sed that respells Cloudberry's names for
 # them where a statement names one: SET, RESET, SHOW, current_setting() and
-# set_config().  gp.optimizer* was Cloudberry's optimizer*, and every other
-# gp.x was gp_x.
+# set_config().  gp.optimizer* was Cloudberry's optimizer*, and so were the
+# few other names Cloudberry gave no gp_ (gp_settings.c); every other gp.x
+# was gp_x.
 "$PSQL" -X -q -t -A -d postgres -c "SELECT name FROM pg_settings WHERE name LIKE 'gp.%' ORDER BY length(name) DESC" |
 while read -r name; do
 	short="${name#gp.}"
 	case "$short" in
-		optimizer*) cbname="$short" ;;
+		optimizer*|statement_mem|enable_parallel|enable_groupagg|test_print_*)
+			cbname="$short" ;;
 		*) cbname="gp_$short" ;;
 	esac
 	printf 's/\\b(set|reset|show)(\\s+(local|session)\\s+|\\s+)%s\\b/\\1\\2%s/gI\n' "$cbname" "$name"

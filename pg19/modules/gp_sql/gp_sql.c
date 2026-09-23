@@ -70,6 +70,7 @@
 #include "gp_dispatch.h"
 #include "gp_grammar.h"
 #include "gp_label.h"
+#include "gp_settings.h"
 #include "gp_partition.h"
 #include "gp_sql.h"
 
@@ -966,6 +967,10 @@ gp_sql_cluster_ctas(PlannedStmt *pstmt, const char *queryString,
 
 	if (qc)
 		SetQueryCompletion(qc, CMDTAG_SELECT, processed);
+
+	/* Cloudberry's autostats of a CREATE TABLE AS; the INSERT ran through SPI */
+	GpAutoStats(CMD_INSERT, relid, processed,
+				context != PROCESS_UTILITY_TOPLEVEL);
 }
 
 static void

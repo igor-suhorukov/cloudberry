@@ -1111,7 +1111,89 @@ COMMIT;"
 	esac
 
 	###########################################################################
-	echo "11. the segments authenticate the coordinator, with SCRAM"
+	echo "11. Cloudberry's settings of the dispatcher and the planner"
+	###########################################################################
+	# gp_settings.c: the ones the port carries out, and the ones it accepts
+	# for Cloudberry's scripts with nothing to apply them to yet.
+	q 0 "CREATE TABLE ds (key int, v text) DISTRIBUTED BY (key);" >/dev/null
+	out=$(printf '%s\n' "SET gp.test_print_direct_dispatch_info = on;" \
+		"SET gp.optimizer = off;" \
+		"INSERT INTO ds VALUES (100, 'cow');" \
+		"INSERT INTO ds VALUES (1, 'a'), (2, 'b');" \
+		"SELECT count(*) FROM ds;" \
+		"SELECT v FROM ds WHERE key = 100;" \
+		"UPDATE ds SET v = 'horse' WHERE key = 100;" \
+		"DELETE FROM ds WHERE key = 1;" | qf 0 | grep -o 'INFO:.*' | tr '\n' '/')
+	expect="INFO:  (slice 0) Dispatch command to SINGLE content/INFO:  (slice 0) Dispatch command to ALL contents: 0 1/INFO:  (slice 1) Dispatch command to ALL contents: 0 1/INFO:  (slice 1) Dispatch command to SINGLE content/INFO:  (slice 0) Dispatch command to SINGLE content/INFO:  (slice 0) Dispatch command to SINGLE content/"
+	[ "$out" = "$expect" ] \
+		&& ok "the planner's dispatches print Cloudberry's INFO lines, one segment where the key names one" \
+		|| notok "gp.test_print_direct_dispatch_info under the planner" "$out"
+
+	out=$(q 0 "SELECT key, v FROM ds ORDER BY key;" | tr '\n' ' ')
+	[ "$out" = "2|b 100|horse " ] && ok "an UPDATE and a DELETE sent to one segment change the rows the key names" \
+		|| notok "the rows after direct dispatch" "$out"
+
+	out=$(printf '%s\n' "SET gp.test_print_direct_dispatch_info = on;" \
+		"INSERT INTO ds VALUES (7, 'x');" \
+		"SELECT count(*) FROM ds;" \
+		"SELECT v FROM ds WHERE key = 7;" \
+		"DELETE FROM ds WHERE key = 7;" | qf 0 | grep -o 'INFO:.*' | tr '\n' '/')
+	expect="INFO:  (slice 0) Dispatch command to SINGLE content/INFO:  (slice 1) Dispatch command to ALL contents: 0 1/INFO:  (slice 1) Dispatch command to SINGLE content/INFO:  (slice 0) Dispatch command to SINGLE content/"
+	[ "$out" = "$expect" ] \
+		&& ok "ORCA's slices print theirs, a write as slice 0 and one row of constants to its segment" \
+		|| notok "gp.test_print_direct_dispatch_info under ORCA" "$out"
+
+	out=$(printf '%s\n' "SET gp.test_print_direct_dispatch_info = on;" \
+		"SET gp.enable_direct_dispatch = off;" \
+		"SELECT v FROM ds WHERE key = 100;" \
+		"SET gp.optimizer = off;" \
+		"SELECT v FROM ds WHERE key = 100;" | qf 0 | grep -o 'INFO:.*' | tr '\n' '/')
+	expect="INFO:  (slice 1) Dispatch command to ALL contents: 0 1/INFO:  (slice 1) Dispatch command to ALL contents: 0 1/"
+	[ "$out" = "$expect" ] && ok "gp.enable_direct_dispatch = off asks every segment, under either planner" \
+		|| notok "gp.enable_direct_dispatch = off" "$out"
+
+	out=$(printf '%s\n' "SET gp.test_print_direct_dispatch_info = on;" \
+		"EXPLAIN SELECT v FROM ds WHERE key = 100;" | qf 0 | grep -c 'INFO:')
+	[ "$out" = "0" ] && ok "EXPLAIN dispatches nothing, and says so by printing nothing" \
+		|| notok "INFO lines under EXPLAIN" "$out"
+
+	# Autostats, as Cloudberry's auto_stats() decides.  Its default is none.
+	out=$(printf '%s\n' "CREATE TABLE as1 (a int) DISTRIBUTED BY (a);" \
+		"INSERT INTO as1 SELECT generate_series(1, 1000);" \
+		"SELECT reltuples FROM pg_class WHERE relname = 'as1';" \
+		"SET gp.autostats_mode = on_no_stats;" \
+		"CREATE TABLE as2 (a int) DISTRIBUTED BY (a);" \
+		"INSERT INTO as2 SELECT generate_series(1, 1000);" \
+		"SELECT reltuples FROM pg_class WHERE relname = 'as2';" \
+		"INSERT INTO as2 SELECT generate_series(1, 500);" \
+		"SELECT reltuples FROM pg_class WHERE relname = 'as2';" \
+		"CREATE TABLE as3 AS SELECT generate_series(1, 300) a DISTRIBUTED BY (a);" \
+		"SELECT reltuples FROM pg_class WHERE relname = 'as3';" \
+		"SET gp.autostats_mode = on_change;" \
+		"SET gp.autostats_on_change_threshold = 400;" \
+		"INSERT INTO as2 SELECT generate_series(1, 300);" \
+		"SELECT reltuples FROM pg_class WHERE relname = 'as2';" \
+		"DELETE FROM as2 WHERE a <= 450;" \
+		"SELECT reltuples FROM pg_class WHERE relname = 'as2';" | qf 0 | tr '\n' ' ')
+	[ "$out" = "-1 1000 1000 300 1000 600 " ] \
+		&& ok "autostats: none by default; on_no_stats after the first INSERT and a CTAS; on_change past the threshold" \
+		|| notok "gp.autostats_mode" "$out"
+
+	out=$(printf '%s\n' "SET gp.optimizer = off;" "SET enable_hashagg = off;" \
+		"EXPLAIN (COSTS OFF) SELECT v, count(*) FROM ds GROUP BY v;" \
+		"RESET enable_hashagg;" "SET gp.enable_groupagg = off;" \
+		"EXPLAIN (COSTS OFF) SELECT v, count(*) FROM ds GROUP BY v;" | qf 0 | grep -o '^ *[A-Za-z]*Aggregate' | tr -d ' ' | tr '\n' ' ')
+	[ "$out" = "GroupAggregate HashAggregate " ] && ok "gp.enable_groupagg = off turns the planner from sorted grouping to hashed" \
+		|| notok "gp.enable_groupagg" "$out"
+
+	out=$(printf '%s\n' "SET gp.statement_mem = '2MB';" "SET gp.enable_parallel = on;" \
+		"SET gp.interconnect_queue_depth = 8;" "SET gp.enable_multiphase_agg = off;" \
+		"SET gp.motion_cost_per_row = 0.5;" "SHOW gp.statement_mem;" | qf 0)
+	[ "$out" = "2MB" ] && ok "Cloudberry's other settings are accepted, and say what they do here" \
+		|| notok "Cloudberry's accepted settings" "$out"
+
+	###########################################################################
+	echo "12. the segments authenticate the coordinator, with SCRAM"
 	###########################################################################
 	# Decision 5 asks for SCRAM on the early milestones.  The dispatcher is an
 	# ordinary client, so this is ordinary authentication: the segment asks,
@@ -1153,7 +1235,7 @@ COMMIT;"
 fi
 
 ###############################################################################
-echo "12. a cluster described wrongly is a server that does not start"
+echo "13. a cluster described wrongly is a server that does not start"
 ###############################################################################
 # The message has to name the file and the line: this is read in the
 # postmaster while it starts, so it is all the operator is given.
@@ -1223,7 +1305,7 @@ refuses "a file that is not there is refused" \
 	"gp.cluster_config = '$ROOT/nowhere.conf'"
 
 ###############################################################################
-echo "13. with no cluster configured, this is a single node"
+echo "14. with no cluster configured, this is a single node"
 ###############################################################################
 if start_node 0 "gp.cluster_config = ''" ; then
 	notok "node 0 should not have started: gp.role is dispatch with no cluster"

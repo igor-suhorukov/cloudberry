@@ -348,8 +348,6 @@
 @@
 +ERROR:  function broken_int4out(broken_int4) does not exist
 @@
-+ERROR:  unrecognized configuration parameter "gp_autostats_mode"
-@@
 +ERROR:  type "broken_int4" is only a shell
 +LINE 1: CREATE TABLE broken_type_test (b broken_int4);
 +                                         ^

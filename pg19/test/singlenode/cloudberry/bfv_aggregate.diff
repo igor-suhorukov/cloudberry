@@ -79,8 +79,6 @@
 +LINE 1: insert into mtup1 values
 +                    ^
 @@
-+ERROR:  unrecognized configuration parameter "gp_enable_multiphase_agg"
-@@
 - c0  |     c1      | array_length 
 ------+-------------+--------------
 - foo | 2015-09-1.1 |         5670
@@ -89,5 +87,3 @@
 +ERROR:  relation "mtup1" does not exist
 +LINE 1137: from mtup1 where c0 = 'foo' group by c0, c1 limit 10;
 +                ^
-@@
-+ERROR:  unrecognized configuration parameter "gp_enable_multiphase_agg"

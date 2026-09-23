@@ -52,6 +52,7 @@
 #include "gp_policy.h"
 #include "gp_scan.h"
 #include "gp_segment.h"
+#include "gp_settings.h"
 #include "gp_share.h"
 #include "gp_ic.h"
 
@@ -135,6 +136,13 @@ _PG_init(void)
 	 * start, which is why this runs here rather than at the first query.
 	 */
 	GpClusterInit();
+
+	/*
+	 * Cloudberry's settings of the dispatcher and the planner that are not
+	 * ORCA's: some carried out, the rest accepted for Cloudberry's scripts
+	 * (gp_settings.c).  On one node too, where scripts set them as well.
+	 */
+	GpSettingsInit();
 
 	/*
 	 * The dispatcher's settings, and the transaction callback that stops a

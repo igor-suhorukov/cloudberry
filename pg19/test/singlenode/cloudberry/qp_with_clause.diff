@@ -9,8 +9,6 @@
 @@
 +ERROR:  access method "bitmap" does not exist
 @@
-+ERROR:  unrecognized configuration parameter "enable_groupagg"
-@@
 +ERROR:  unrecognized parameter "appendonly"
 @@
 +ERROR:  unrecognized parameter "appendonly"
@@ -1122,37 +1120,3 @@
 +ERROR:  relation "city_co" does not exist
 +LINE 4:   city_co,country_co
 +          ^
-@@
-+ERROR:  unrecognized configuration parameter "gp_cte_sharing"
-@@
-+ERROR:  unrecognized configuration parameter "gp_cte_sharing"
-@@
-+ERROR:  unrecognized configuration parameter "gp_cte_sharing"
-@@
-+ERROR:  unrecognized configuration parameter "gp_cte_sharing"
-@@
-+ERROR:  unrecognized configuration parameter "gp_cte_sharing"
-@@
-+ERROR:  unrecognized configuration parameter "gp_cte_sharing"
-@@
-+ERROR:  unrecognized configuration parameter "gp_cte_sharing"
-@@
-+ERROR:  unrecognized configuration parameter "gp_cte_sharing"
-@@
-+ERROR:  unrecognized configuration parameter "gp_cte_sharing"
-@@
-+ERROR:  unrecognized configuration parameter "gp_cte_sharing"
-@@
-+ERROR:  unrecognized configuration parameter "gp_cte_sharing"
-@@
-+ERROR:  unrecognized configuration parameter "gp_cte_sharing"
-@@
-+ERROR:  unrecognized configuration parameter "gp_cte_sharing"
-@@
-+ERROR:  unrecognized configuration parameter "gp_cte_sharing"
-@@
-+ERROR:  unrecognized configuration parameter "gp_cte_sharing"
-@@
-+ERROR:  unrecognized configuration parameter "gp_cte_sharing"
-@@
-+ERROR:  unrecognized configuration parameter "gp_cte_sharing"

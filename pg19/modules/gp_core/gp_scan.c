@@ -84,11 +84,17 @@
 #include "gp_policy.h"
 #include "gp_scan.h"
 #include "gp_segment.h"
+#include "gp_settings.h"
 
 /* What starting a gather costs before its first row: a round trip per segment. */
 #define GATHER_STARTUP_COST		1000.0
-/* And per row, moving it: a send, a receive, and the conversion between. */
-#define GATHER_ROW_COST			(10.0 * DEFAULT_CPU_TUPLE_COST)
+/*
+ * And per row, moving it: a send, a receive, and the conversion between --
+ * unless gp.motion_cost_per_row says otherwise, as Cloudberry's planner lets
+ * it say of a Motion.
+ */
+#define GATHER_ROW_COST \
+	(gp_motion_cost_per_row > 0 ? gp_motion_cost_per_row : 10.0 * DEFAULT_CPU_TUPLE_COST)
 
 static set_rel_pathlist_hook_type prev_set_rel_pathlist = NULL;
 static build_simple_rel_hook_type prev_build_simple_rel = NULL;
@@ -260,7 +266,7 @@ direct_dispatch_segment(GpPolicy *policy, Relation rel, List *quals,
 	GpHash	   *h;
 	ListCell   *lc;
 
-	if (!GpPolicyIsHashPartitioned(policy))
+	if (!GpPolicyIsHashPartitioned(policy) || !gp_enable_direct_dispatch)
 		return -1;
 
 	values = palloc0_array(Datum, tupdesc->natts);
@@ -330,6 +336,28 @@ direct_dispatch_segment(GpPolicy *policy, Relation rel, List *quals,
 
 	h = GpHashMake(policy, tupdesc);
 	return GpHashSegment(h, values, isnull);
+}
+
+/*
+ * The one segment an UPDATE or DELETE sent as it stands can go to: its WHERE
+ * fixes every column of the target's key.  varno is the target's range table
+ * index in the Query the conditions are from.
+ */
+int
+GpScanDirectDispatchSegment(Oid relid, Node *quals, Index varno)
+{
+	GpPolicy   *policy = GpScanDistributedPolicy(relid);
+	Relation	rel;
+	int			content;
+
+	if (policy == NULL || quals == NULL)
+		return -1;
+
+	rel = table_open(relid, NoLock);
+	content = direct_dispatch_segment(policy, rel,
+									  make_ands_implicit((Expr *) quals), varno);
+	table_close(rel, NoLock);
+	return content;
 }
 
 /* ------------------------------------------------------------------------- */
@@ -551,6 +579,10 @@ gather_begin(CustomScanState *node, EState *estate, int eflags)
 	GatherScanState *state = (GatherScanState *) node;
 
 	GpClusterSegments(&state->nsegments);
+
+	/* each gather is a slice of its own, numbered as the executor meets it */
+	if (!(eflags & EXEC_FLAG_EXPLAIN_ONLY))
+		GpReportDispatch(GpNextGatherSlice(), state->content >= 0);
 }
 
 static TupleTableSlot *

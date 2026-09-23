@@ -128,7 +128,8 @@ done
 while read -r name; do
 	short="${name#gp.}"
 	case "$short" in
-		optimizer*) cbname="$short" ;;
+		optimizer*|statement_mem|enable_parallel|enable_groupagg|test_print_*)
+			cbname="$short" ;;
 		*) cbname="gp_$short" ;;
 	esac
 	printf 's/\\b(set|reset|show)(\\s+(local|session)\\s+|\\s+)%s\\b/\\1\\2%s/gI\n' "$cbname" "$name"

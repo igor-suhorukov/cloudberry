@@ -97,6 +97,7 @@
 #include "gp_hash.h"
 #include "gp_policy.h"
 #include "gp_scan.h"
+#include "gp_settings.h"
 
 /* How much of a COPY's data is sent to libpq at a time. */
 #define ROUTE_CHUNK		65536
@@ -417,8 +418,20 @@ insert_begin(CustomScanState *node, EState *estate, int eflags)
 
 	state->rel = table_open(relid, NoLock);
 	if (!(eflags & EXEC_FLAG_EXPLAIN_ONLY))
-		state->router = router_begin(state->rel,
-									 GpScanDistributedPolicy(relid));
+	{
+		GpPolicy   *policy = GpScanDistributedPolicy(relid);
+		Plan	   *source = linitial(cscan->custom_plans);
+
+		state->router = router_begin(state->rel, policy);
+
+		/*
+		 * Cloudberry sends a single row of constants to the one segment it
+		 * hashes to, and anything else to every segment, as the slice the
+		 * statement is: slice 0.  A replicated table's row goes everywhere.
+		 */
+		GpReportDispatch(0, IsA(source, Result) && outerPlan(source) == NULL &&
+						 !GpPolicyIsReplicated(policy));
+	}
 }
 
 static TupleTableSlot *
@@ -498,6 +511,7 @@ typedef struct ModifyState
 	CustomScanState css;
 	char	   *sql;
 	bool		replicated;
+	int			content;		/* the one segment it is sent to, or -1 */
 	bool		done;
 } ModifyState;
 
@@ -511,12 +525,15 @@ modify_create_state(CustomScan *cscan)
 	state->css.slotOps = &TTSOpsVirtual;
 	state->sql = strVal(linitial(cscan->custom_private));
 	state->replicated = boolVal(lsecond(cscan->custom_private));
+	state->content = intVal(lthird(cscan->custom_private));
 	return (Node *) state;
 }
 
 static void
 modify_begin(CustomScanState *node, EState *estate, int eflags)
 {
+	if (!(eflags & EXEC_FLAG_EXPLAIN_ONLY))
+		GpReportDispatch(0, ((ModifyState *) node)->content >= 0);
 }
 
 static TupleTableSlot *
@@ -560,7 +577,7 @@ modify_exec(CustomScanState *node)
 
 	GpClusterSegments(&nsegs);
 	counts = palloc0_array(uint64, nsegs);
-	GpDispatchCommandParams(state->sql, nparams, values, -1, counts);
+	GpDispatchCommandParams(state->sql, nparams, values, state->content, counts);
 
 	/* Every segment changed its own rows; a replicated table's once each. */
 	if (state->replicated)
@@ -921,8 +938,12 @@ gp_modify_planner_routed(Query *parse, const char *query_string, int cursorOptio
 					 errdetail("%s", why)));
 
 		cscan = make_custom_scan(&mt->plan, &modify_scan_methods);
-		cscan->custom_private = list_make2(makeString(pg_get_querydef(original, false)),
-										   makeBoolean(GpPolicyIsReplicated(policy)));
+		cscan->custom_private =
+			list_make3(makeString(pg_get_querydef(original, false)),
+					   makeBoolean(GpPolicyIsReplicated(policy)),
+					   makeInteger(GpScanDirectDispatchSegment(rte->relid,
+															   original->jointree->quals,
+															   original->resultRelation)));
 		stmt->planTree = &cscan->scan.plan;
 		return stmt;
 	}
@@ -1032,6 +1053,8 @@ gp_modify_ProcessUtility(PlannedStmt *pstmt, const char *queryString,
 
 			if (qc)
 				SetQueryCompletion(qc, CMDTAG_COPY, processed);
+			GpAutoStats(CMD_INSERT, relid, processed,
+						context != PROCESS_UTILITY_TOPLEVEL);
 			return;
 		}
 

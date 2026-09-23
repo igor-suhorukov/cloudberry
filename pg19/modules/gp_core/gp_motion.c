@@ -119,6 +119,7 @@
 #include "gp_ic.h"
 #include "gp_motion.h"
 #include "gp_policy.h"
+#include "gp_settings.h"
 #include "gp_share.h"
 
 /*
@@ -164,6 +165,9 @@ static int	gp_interconnect_type = GP_INTERCONNECT_TCP;
  */
 #define GP_STREAM_MARK	"gp_stream"
 #define GP_SHARE_MARK	"gp_share"
+
+/* The slice table ORCA's translator keeps in the plan; see compat/cb_motion.h. */
+#define GP_SLICE_TABLE	"gp_slice_table"
 
 /* One slice that streams, as the coordinator plans it. */
 typedef struct StreamSlice
@@ -519,6 +523,8 @@ GpMotionDirectDispatchSegment(Oid relid, int nvalues, const Oid *types,
 	bool	   *rownulls;
 	int			segment = -1;
 
+	if (!gp_enable_direct_dispatch)
+		return -1;
 	policy = GpPolicyGet(relid);
 	if (policy == NULL || !GpPolicyIsHashPartitioned(policy) ||
 		policy->nattrs != nvalues)
@@ -2611,6 +2617,90 @@ is_fragment(PlannedStmt *stmt)
 }
 
 /*
+ * The INFO line of each slice the statement dispatches, when
+ * gp.test_print_direct_dispatch_info asks for them: read off the slice
+ * table, in the order Cloudberry's dispatcher sends the slices
+ * (compare_slice_order(), cdb/dispatcher/cdbdisp_query.c) -- the largest
+ * gang first, and of two alike the one with fewer slices below it.
+ */
+typedef struct SliceReport
+{
+	int			index;
+	int			size;
+	int			below;
+	bool		single;
+} SliceReport;
+
+static int
+slice_report_cmp(const void *a, const void *b)
+{
+	const SliceReport *x = (const SliceReport *) a;
+	const SliceReport *y = (const SliceReport *) b;
+
+	if (x->size != y->size)
+		return x->size > y->size ? -1 : 1;
+	if (x->below != y->below)
+		return x->below < y->below ? -1 : 1;
+	return x->index - y->index;
+}
+
+static void
+report_slices(PlannedStmt *stmt)
+{
+	List	   *table = (List *) fragment_mark(stmt, GP_SLICE_TABLE);
+	int			n = list_length(table);
+	int		   *parent;
+	SliceReport *reports;
+	int			nreports = 0;
+	ListCell   *lc;
+
+	if (!gp_test_print_direct_dispatch_info || table == NIL)
+		return;
+
+	parent = palloc_array(int, n);
+	reports = palloc0_array(SliceReport, n);
+	foreach(lc, table)
+	{
+		List	   *slice = (List *) lfirst(lc);
+		int			index = intVal(linitial(slice));
+
+		if (index >= 0 && index < n)
+			parent[index] = intVal(lsecond(slice));
+	}
+
+	foreach(lc, table)
+	{
+		List	   *slice = (List *) lfirst(lc);
+		int			index = intVal(linitial(slice));
+		int			gang = intVal(list_nth(slice, 2));
+		int			nsegs = intVal(list_nth(slice, 3));
+		int			direct = intVal(list_nth(slice, 5));
+		SliceReport *r;
+
+		/* the coordinator's own slice is not dispatched */
+		if (gang == 0)
+			continue;
+		r = &reports[nreports++];
+		/* a write on the segments is Cloudberry's root slice, slice 0 */
+		r->index = gang == 4 ? 0 : index;
+		/* an entry slice, a singleton, and a direct dispatch are one process */
+		r->single = gang == 1 || gang == 2 || direct >= 0 || nsegs == 1;
+		r->size = r->single ? 1 : nsegs;
+		for (int i = 0; i < n; i++)
+			for (int p = parent[i]; p >= 0 && p < n && p != i; p = parent[p])
+				if (p == index)
+				{
+					r->below++;
+					break;
+				}
+	}
+
+	qsort(reports, nreports, sizeof(SliceReport), slice_report_cmp);
+	for (int i = 0; i < nreports; i++)
+		GpReportDispatch(reports[i].index, reports[i].single);
+}
+
+/*
  * The writer's fragment of a statement whose slices run at once: its
  * snapshot and its transaction's state, for its readers, before anything of
  * it runs -- they wait for it to start.
@@ -2618,6 +2708,10 @@ is_fragment(PlannedStmt *stmt)
 static void
 motion_executor_start(QueryDesc *queryDesc, int eflags)
 {
+	if (GpClusterBackendRole() == GP_ROLE_DISPATCH &&
+		!(eflags & EXEC_FLAG_EXPLAIN_ONLY))
+		report_slices(queryDesc->plannedstmt);
+
 	if (GpClusterIsDispatched() && is_fragment(queryDesc->plannedstmt) &&
 		!(eflags & EXEC_FLAG_EXPLAIN_ONLY))
 	{

@@ -8,3 +8,15 @@
 m/^ Optimizer: GPORCA$/
 
 -- end_matchignore
+
+-- start_matchsubs
+
+# Cloudberry's init_file drops "set enable_parallel = off;" and its reset,
+# which its tests carry and its expected files do not; the harness has
+# respelled them as the port spells the setting (gp_settings.c).
+m/set gp\.enable_parallel = off;/
+s/.//gs
+m/reset gp\.enable_parallel;/
+s/.//gs
+
+-- end_matchsubs

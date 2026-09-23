@@ -652,10 +652,6 @@
 @@
 +ERROR:  index "ti_j_idx" does not exist
 @@
-+ERROR:  unrecognized configuration parameter "gp_segments_for_planner"
-@@
-+ERROR:  unrecognized configuration parameter "gp_segments_for_planner"
-@@
 -ERROR:  exclusion constraints are not supported on partitioned tables
 -LINE 4:   CONSTRAINT part_excl EXCLUDE (i WITH =) )
 -          ^

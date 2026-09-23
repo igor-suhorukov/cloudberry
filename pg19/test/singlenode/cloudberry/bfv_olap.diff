@@ -12,5 +12,3 @@
 +LINE 1: select id, val, sum(val) over (w), mysum1(val) over (w), mys...
 +                                      ^
 +HINT:  Omit the parentheses in this OVER clause.
-@@
-+ERROR:  unrecognized configuration parameter "gp_motion_cost_per_row"

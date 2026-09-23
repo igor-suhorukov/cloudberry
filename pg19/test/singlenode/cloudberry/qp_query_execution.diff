@@ -1,6 +1,4 @@
 @@
-+ERROR:  unrecognized configuration parameter "statement_mem"
-@@
 +ERROR:  access method "ao_column" does not exist
 @@
 +ERROR:  relation "lossmithe_colstor" does not exist

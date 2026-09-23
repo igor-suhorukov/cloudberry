@@ -258,14 +258,16 @@ gp_orca_slice_table(List *slices, List *motions)
 		int			direct = -1;
 		ListCell   *lm;
 
-		/* a Gather that direct dispatch sent to one segment says which */
+		/* a Gather or a write that direct dispatch sent to one segment says which */
 		foreach(lm, motions)
 		{
 			Plan	   *motion = (Plan *) lfirst(lm);
 
 			if (api->motion_slice(motion) == slice->sliceIndex &&
-				api->motion_type(motion) == GP_MOTION_GATHER &&
-				slice->gangType == GANGTYPE_PRIMARY_READER &&
+				((api->motion_type(motion) == GP_MOTION_GATHER &&
+				  slice->gangType == GANGTYPE_PRIMARY_READER) ||
+				 (api->motion_type(motion) == GP_MOTION_DML &&
+				  slice->gangType == GANGTYPE_PRIMARY_WRITER)) &&
 				api->motion_segment(motion) >= 0)
 				direct = api->motion_segment(motion);
 		}
