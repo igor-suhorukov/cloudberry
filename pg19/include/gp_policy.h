@@ -132,6 +132,16 @@ extern bool GpPolicyIsReplicated(const GpPolicy *policy);
 extern Oid	GpPolicyDefaultOpclass(Oid typeoid);
 
 /*
+ * The operator class a column DISTRIBUTED BY names is hashed with: the one
+ * named, a list of names, or where it is NIL, one gp.use_legacy_hashops
+ * chooses -- the type's legacy class or its default -- as Cloudberry's
+ * cdb_get_opclass_for_column_def() does.  Raises where there is none.  A
+ * label that names no class means the default whatever the setting is: a
+ * legacy one is written in it.
+ */
+extern Oid	GpPolicyColumnOpclass(List *opclassName, Oid typeoid);
+
+/*
  * One column of a key as the label names it: the column, and the operator
  * class it is hashed with, qualified as the label spells it, or NULL for its
  * type's default.

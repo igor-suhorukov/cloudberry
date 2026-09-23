@@ -27,9 +27,11 @@
  * it to a segment -- so that a row lands where Cloudberry puts it, and a
  * cluster that grows moves as few rows as Cloudberry's does.
  *
- * Not kept: the legacy hash opclasses (FNV-1 and a bitmask or modulo
- * reduction), which Cloudberry has for tables pg_upgraded from Greenplum 5.
- * No module of the port installs them, so no policy can name one.
+ * And the legacy cdbhash, for a key one of whose columns is hashed with a
+ * legacy function (gp_legacyhash.c), as Cloudberry hashes it: from FNV-1's
+ * offset basis, each column's hash going on from the columns' before it, a
+ * NULL hashed as a constant, and a bitmask where the segments are a power of
+ * two, a modulo where they are not.
  *
  * Portions Copyright (c) 2005-2008, Greenplum inc
  * Portions Copyright (c) 2012-Present VMware, Inc. or its affiliates.
@@ -60,8 +62,8 @@
  * type, or one for a type it is binary coercible to -- varchar hashes with
  * text's.
  */
-static Oid
-hash_proc_in_opfamily(Oid opfamily, Oid typeoid, bool missing_ok)
+Oid
+GpHashProcInOpfamily(Oid opfamily, Oid typeoid, bool missing_ok)
 {
 	Oid			hashfunc;
 	CatCList   *catlist;
@@ -93,12 +95,6 @@ hash_proc_in_opfamily(Oid opfamily, Oid typeoid, bool missing_ok)
 			 typeoid, opfamily);
 
 	return hashfunc;
-}
-
-Oid
-GpHashProcInOpfamily(Oid opfamily, Oid typeoid)
-{
-	return hash_proc_in_opfamily(opfamily, typeoid, false);
 }
 
 /*
@@ -141,15 +137,23 @@ GpHashSegmentForKey(const GpPolicy *policy, const Oid *types,
 	h.hashfuncs = palloc_array(FmgrInfo, Max(policy->nattrs, 1));
 	for (int k = 0; k < policy->nattrs; k++)
 	{
-		Oid			proc = hash_proc_in_opfamily(get_opclass_family(policy->opclasses[k]),
-												 types[k], true);
+		Oid			proc = GpHashProcInOpfamily(get_opclass_family(policy->opclasses[k]),
+												types[k], true);
 
 		if (!OidIsValid(proc))
 			return -1;
 		h.attrs[k] = k + 1;
-		fmgr_info(proc, &h.hashfuncs[k]);
+		GpHashSetFunction(&h, k, proc);
 	}
 	return GpHashSegment(&h, values, isnull);
+}
+
+void
+GpHashSetFunction(GpHash *h, int i, Oid funcid)
+{
+	fmgr_info(funcid, &h->hashfuncs[i]);
+	if (GpHashIsLegacyFunction(funcid))
+		h->legacy = true;
 }
 
 GpHash *
@@ -174,10 +178,32 @@ GpHashMake(const GpPolicy *policy, TupleDesc tupdesc)
 		Oid			opfamily = get_opclass_family(policy->opclasses[i]);
 
 		h->attrs[i] = attnum;
-		fmgr_info(GpHashProcInOpfamily(opfamily, typeoid), &h->hashfuncs[i]);
+		GpHashSetFunction(h, i, GpHashProcInOpfamily(opfamily, typeoid, false));
 	}
 
 	return h;
+}
+
+/*
+ * One column's hash.  The default collation, as Cloudberry passes it: a text
+ * key hashes the same whatever the column's collation, so that the segment a
+ * row is on does not depend on it.
+ */
+static uint32
+column_hash(FmgrInfo *flinfo, Datum value)
+{
+	LOCAL_FCINFO(fcinfo, 1);
+	uint32		hkey;
+
+	InitFunctionCallInfoData(*fcinfo, flinfo, 1, DEFAULT_COLLATION_OID,
+							 NULL, NULL);
+	fcinfo->args[0].value = value;
+	fcinfo->args[0].isnull = false;
+
+	hkey = DatumGetUInt32(FunctionCallInvoke(fcinfo));
+	if (fcinfo->isnull)
+		elog(ERROR, "function %u returned NULL", fcinfo->flinfo->fn_oid);
+	return hkey;
 }
 
 int
@@ -196,6 +222,26 @@ GpHashSegment(GpHash *h, const Datum *values, const bool *isnull)
 	if (h->nattrs == 0)
 		return (int) (pg_prng_uint32(&pg_global_prng_state) % (uint32) h->numsegs);
 
+	if (h->legacy)
+	{
+		hash = GP_LEGACY_HASH_INIT;
+		for (int i = 0; i < h->nattrs; i++)
+		{
+			int			att = h->attrs[i] - 1;
+
+			/* each column's hash goes on from the columns' before it */
+			GpLegacyHashStash = hash;
+			hash = isnull[att] ? GpLegacyHashNull() :
+				column_hash(&h->hashfuncs[i], values[att]);
+			GpLegacyHashStash = GP_LEGACY_HASH_INIT;
+		}
+
+		/* a bitmask where the segments are a power of two, else a modulo */
+		if ((h->numsegs & (h->numsegs - 1)) == 0)
+			return (int) (hash & (uint32) (h->numsegs - 1));
+		return (int) (hash % (uint32) h->numsegs);
+	}
+
 	for (int i = 0; i < h->nattrs; i++)
 	{
 		int			att = h->attrs[i] - 1;
@@ -204,26 +250,7 @@ GpHashSegment(GpHash *h, const Datum *values, const bool *isnull)
 		hash = (hash << 1) | ((hash & 0x80000000) ? 1 : 0);
 
 		if (!isnull[att])
-		{
-			LOCAL_FCINFO(fcinfo, 1);
-			uint32		hkey;
-
-			/*
-			 * The default collation, as Cloudberry passes it: a text key hashes
-			 * the same whatever the column's collation, so that the segment a
-			 * row is on does not depend on it.
-			 */
-			InitFunctionCallInfoData(*fcinfo, &h->hashfuncs[i], 1,
-									 DEFAULT_COLLATION_OID, NULL, NULL);
-			fcinfo->args[0].value = values[att];
-			fcinfo->args[0].isnull = false;
-
-			hkey = DatumGetUInt32(FunctionCallInvoke(fcinfo));
-			if (fcinfo->isnull)
-				elog(ERROR, "function %u returned NULL", fcinfo->flinfo->fn_oid);
-
-			hash ^= hkey;
-		}
+			hash ^= column_hash(&h->hashfuncs[i], values[att]);
 	}
 
 	return GpJumpConsistentHash(hash, h->numsegs);

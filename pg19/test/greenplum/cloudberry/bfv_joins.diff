@@ -1,0 +1,8 @@
+@@
+-ERROR:  Canceling query because of high VMEM usage. Used: XXXMB, available XXXMB, red zone: XXXMB (runaway_cleaner.c:XXX)
++ id | id | id | id | id | id | id | id | id | id | id | id | id | id | id | id | id | id | id | id 
++----+----+----+----+----+----+----+----+----+----+----+----+----+----+----+----+----+----+----+----
++
+@@
++ t
++(1 row)

@@ -1890,12 +1890,14 @@ is "an equality operator names the hash family it is equality in" \
          = (SELECT f.oid FROM pg_opfamily f JOIN pg_am a ON a.oid = f.opfmethod
              WHERE f.opfname = 'integer_ops' AND a.amname = 'hash');" "t"
 
-# Cloudberry's legacy cdbhash opclasses are built-ins with fixed OIDs that
-# neither PostgreSQL 19 nor any module of the port installs, so no operator
-# belongs to one.  That is the true answer, not a stand-in for one.
-is "and no legacy hash family, because there are none" \
-   "SELECT position('LegacyHashOpfamily' IN
-                    gp_orca.md_dxl('operator', '=(int4,int4)'::regoperator));" "0"
+# Cloudberry's legacy cdbhash operator classes are gp_core's, which its
+# script makes (gp_legacyhash.c): an equality operator of one of their
+# families names it, as ORCA's plans for a table distributed with one need.
+is "and the legacy hash family it is equality in, gp_core's" \
+   "SELECT substring(gp_orca.md_dxl('operator', '=(int4,int4)'::regoperator)
+                     from 'LegacyHashOpfamily Mdid=\"0\\.([0-9]+)\\.')::oid
+         = (SELECT f.oid FROM pg_opfamily f JOIN pg_am a ON a.oid = f.opfmethod
+             WHERE f.opfname = 'cdbhash_integer_ops' AND a.amname = 'hash');" "t"
 
 has "a function is described" \
     "SELECT gp_orca.md_dxl('function', 'lower(text)'::regprocedure);" 'Name="lower"'

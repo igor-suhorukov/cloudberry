@@ -1405,8 +1405,15 @@ gpdb::GetDefaultDistributionOpclassForType(Oid typid)
 Oid
 gpdb::GetColumnDefOpclassForType(List *opclassName, Oid typid)
 {
-	// M2.  Reached when DISTRIBUTED BY names an opclass explicitly.
-	GP_UNPORTED("the distribution opclass named in a column definition");
+	GP_WRAP_START;
+	{
+		// Cloudberry's cdb_get_opclass_for_column_def(), which is gp_core's:
+		// the class named, or the one gp.use_legacy_hashops chooses
+		// (gp_policy.c).
+		return GpPolicyColumnOpclass(opclassName, typid);
+	}
+	GP_WRAP_END;
+	return InvalidOid;
 }
 
 Oid
@@ -1447,7 +1454,7 @@ gpdb::GetHashProcInOpfamily(Oid opfamily, Oid typid)
 	{
 		// Cloudberry's cdb_hashproc_in_opfamily(), which is gp_core's: the
 		// support procedure a distribution key is hashed with (gp_hash.c).
-		return GpHashProcInOpfamily(opfamily, typid);
+		return GpHashProcInOpfamily(opfamily, typid, false);
 	}
 	GP_WRAP_END;
 	return InvalidOid;
@@ -1456,23 +1463,28 @@ gpdb::GetHashProcInOpfamily(Oid opfamily, Oid typid)
 Oid
 gpdb::IsLegacyCdbHashFunction(Oid funcid)
 {
-	// None is, for the reason GetCompatibleLegacyHashOpFamily gives: the
-	// legacy hash opclasses are Cloudberry built-ins that neither PostgreSQL
-	// 19 nor any of the port's modules installs, so no distribution key is
-	// hashed with one of their functions.
-	(void) funcid;
+	GP_WRAP_START;
+	{
+		// Cloudberry's isLegacyCdbHashFunction(), which is gp_core's: one of
+		// the functions of the cdbhash_*_ops classes gp_core's script makes
+		// (gp_legacyhash.c), known by its C name, as they have no fixed OIDs.
+		return GpHashIsLegacyFunction(funcid);
+	}
+	GP_WRAP_END;
 	return false;
 }
 
 Oid
 gpdb::GetLegacyCdbHashOpclassForBaseType(Oid typid)
 {
-	// No type has a legacy hash opclass on this port, for the reason
-	// GetCompatibleLegacyHashOpFamily gives: the legacy opclasses are
-	// Cloudberry built-ins that neither PostgreSQL 19 nor any of the port's
-	// modules installs.  ORCA's relcache translator asks this of every type
-	// it describes, so raising here would refuse every type.
-	(void) typid;
+	GP_WRAP_START;
+	{
+		// Cloudberry's get_legacy_cdbhash_opclass_for_base_type(), which is
+		// gp_core's (gp_legacyhash.c).  ORCA's relcache translator asks it of
+		// every type it describes.
+		return GpLegacyHashOpclassForType(typid);
+	}
+	GP_WRAP_END;
 	return InvalidOid;
 }
 
@@ -2578,20 +2590,19 @@ gpdb::GetCompatibleHashOpFamily(Oid opno)
 Oid
 gpdb::GetCompatibleLegacyHashOpFamily(Oid opno)
 {
-	// The legacy scheme is the pre-Greenplum-6 hash, kept so that an
-	// upgraded cluster does not have to redistribute every table.  Cloudberry
-	// answers by finding the operator's hash families and keeping the one
-	// whose hash function is one of its cdblegacyhash_* built-ins.
-	//
-	// The port has none of those: they are Cloudberry's pg_proc entries,
-	// with fixed OIDs, and neither PostgreSQL 19's catalog nor any of the
-	// port's modules has them.  So no operator belongs to a legacy family,
-	// and InvalidOid is the true answer rather than a stand-in for one.
-	// ORCA asks it of every operator it describes, and uses it only under
-	// EopttraceUseLegacyOpfamilies, which COptTasks sets for a query over
-	// tables distributed with legacy opclasses -- none, on this port.  If a
-	// module ever installs the legacy opclasses, this has to find them.
-	(void) opno;
+	GP_WRAP_START;
+	{
+		// The legacy scheme is the pre-Greenplum-6 hash, kept so that an
+		// upgraded cluster does not have to redistribute every table.
+		// Cloudberry answers by finding the operator's hash families and
+		// keeping the one whose hash function is one of its cdblegacyhash_*
+		// built-ins; gp_core does the same over the classes its script makes
+		// (gp_legacyhash.c).  ORCA asks it of every operator it describes,
+		// and uses it under EopttraceUseLegacyOpfamilies, which COptTasks
+		// sets for a query over tables distributed with legacy opclasses.
+		return GpLegacyHashOpfamilyOfOperator(opno);
+	}
+	GP_WRAP_END;
 	return InvalidOid;
 }
 

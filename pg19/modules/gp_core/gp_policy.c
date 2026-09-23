@@ -68,8 +68,10 @@
 #include "utils/typcache.h"
 
 #include "gp_core_api.h"
+#include "gp_hash.h"
 #include "gp_label.h"
 #include "gp_policy.h"
+#include "gp_settings.h"
 
 /*
  * The opclass a distribution key of this type is hashed with.
@@ -104,6 +106,34 @@ GpPolicyDefaultOpclass(Oid typeoid)
 		return InvalidOid;
 
 	return GetDefaultOpClass(typeoid, HASH_AM_OID);
+}
+
+/*
+ * The operator class a distribution key's column is hashed with: the one
+ * DISTRIBUTED BY names for it, and where it names none, the type's legacy
+ * class if gp.use_legacy_hashops asks for one and there is one, its default
+ * otherwise -- Cloudberry's cdb_get_opclass_for_column_def(), and its
+ * message where there is none.
+ */
+Oid
+GpPolicyColumnOpclass(List *opclassName, Oid typeoid)
+{
+	Oid			opclass = InvalidOid;
+
+	if (opclassName != NIL)
+		return ResolveOpClass(opclassName, typeoid, "hash", HASH_AM_OID);
+
+	if (gp_use_legacy_hashops)
+		opclass = GpLegacyHashOpclassForType(typeoid);
+	if (!OidIsValid(opclass))
+		opclass = GpPolicyDefaultOpclass(typeoid);
+	if (!OidIsValid(opclass))
+		ereport(ERROR,
+				(errcode(ERRCODE_UNDEFINED_OBJECT),
+				 errmsg("data type %s has no default operator class for access method \"%s\"",
+						format_type_be(typeoid), "hash"),
+				 errhint("You must specify an operator class or define a default operator class for the data type.")));
+	return opclass;
 }
 
 /* The relation a malformed label is on, for the message; "?" for none. */

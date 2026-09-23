@@ -1,0 +1,45 @@
+@@
++ERROR:  type "complex" does not exist
++LINE 31:   complex_col complex
++                       ^
+@@
+- attno |         opcname         
+--------+-------------------------
+-     1 | cdbhash_int2_ops
+-     2 | cdbhash_int4_ops
+-     3 | cdbhash_int8_ops
+-     4 | cdbhash_float4_ops
+-     5 | cdbhash_float8_ops
+-     6 | cdbhash_numeric_ops
+-     7 | cdbhash_char_ops
+-     8 | cdbhash_bpchar_ops
+-     9 | cdbhash_text_ops
+-    10 | cdbhash_text_ops
+-    11 | cdbhash_bytea_ops
+-    12 | cdbhash_name_ops
+-    13 | cdbhash_oid_ops
+-    14 | cdbhash_tid_ops
+-    15 | cdbhash_timestamp_ops
+-    16 | cdbhash_timestamptz_ops
+-    17 | cdbhash_date_ops
+-    18 | cdbhash_time_ops
+-    19 | cdbhash_timetz_ops
+-    20 | cdbhash_interval_ops
+-    21 | cdbhash_inet_ops
+-    22 | cdbhash_inet_ops
+-    23 | cdbhash_macaddr_ops
+-    24 | cdbhash_bit_ops
+-    25 | cdbhash_bit_ops
+-    26 | cdbhash_bool_ops
+-    27 | cdbhash_oidvector_ops
+-    28 | cdbhash_cash_ops
+-    29 | cdbhash_complex_ops
+-(29 rows)
+-
++ERROR:  relation "all_legacy_types" does not exist
++LINE 3:    where localoid='all_legacy_types'::regclass) as d,
++                          ^
+@@
++ERROR:  relation "all_legacy_types" does not exist
++LINE 1: insert into all_legacy_types values (
++                    ^

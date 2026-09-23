@@ -37,6 +37,9 @@ extern bool gp_enable_direct_dispatch;
 /* gp.motion_cost_per_row: the planner's cost of moving a row; 0 is 2 * cpu_tuple_cost */
 extern double gp_motion_cost_per_row;
 
+/* gp.use_legacy_hashops: a new key's legacy operator classes (GpPolicyColumnOpclass) */
+extern bool gp_use_legacy_hashops;
+
 /*
  * The INFO Cloudberry prints for a slice it dispatches, when
  * gp.test_print_direct_dispatch_info is on: "(slice 1) Dispatch command to

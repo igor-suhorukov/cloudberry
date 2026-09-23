@@ -220,6 +220,7 @@ modules = [
                      'modules/gp_core/gp_dispatch.c',
                      'modules/gp_core/gp_ddl.c',
                      'modules/gp_core/gp_hash.c',
+                     'modules/gp_core/gp_legacyhash.c',
                      'modules/gp_core/gp_scan.c',
                      'modules/gp_core/gp_modify.c',
                      'modules/gp_core/gp_explicit.c',

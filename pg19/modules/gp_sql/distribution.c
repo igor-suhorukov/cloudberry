@@ -42,6 +42,12 @@
  * query's own distribution, where it becomes columns of the table, else the
  * first column that can be hashed.
  *
+ * A key rules 2 and 6 choose, or DISTRIBUTED BY names without an operator
+ * class, is hashed with its types' legacy cdbhash_*_ops classes where
+ * gp.use_legacy_hashops asks for them, as Cloudberry's gp_use_legacy_hashops
+ * does, and the label names them; the key CREATE TABLE AS takes from its
+ * query has the types' defaults, as Cloudberry's planner gives it.
+ *
  * And a distribution the statement names is checked as Cloudberry checks it,
  * against the table and its constraints and indexes, in Cloudberry's words:
  * see "What DISTRIBUTED BY may say" below.
@@ -270,6 +276,17 @@ column_list(List *names)
 }
 
 /*
+ * The key a table gets by default on these columns, as DISTRIBUTED BY naming
+ * them would give it, as Cloudberry's is: checked, and each column hashed
+ * with the operator class gp.use_legacy_hashops chooses.
+ */
+static char *
+default_key(Oid relid, List *names)
+{
+	return GpDistributionCheckKey(relid, column_list(names), -1, NULL, false);
+}
+
+/*
  * The columns every PRIMARY KEY and UNIQUE constraint of the new table has in
  * common, the primary key's order first.  NIL when there are none; an error,
  * as Cloudberry's, when two of them share no column, because no distribution
@@ -415,7 +432,7 @@ GpDistributionApplyDefault(CreateStmt *stmt, Oid relid)
 	if (unique_keys != NIL)
 	{
 		relation_close(rel, AccessShareLock);
-		GpDistributionSetNew(relid, column_list(unique_keys));
+		GpDistributionSetNew(relid, default_key(relid, unique_keys));
 		return;
 	}
 
@@ -506,7 +523,7 @@ columns:
 							"table. ", name),
 					 errhint("The 'DISTRIBUTED BY' clause determines the distribution of data."
 							 " Make sure column(s) chosen are the optimal data distribution key to minimize skew.")));
-			GpDistributionSetNew(relid, column_list(list_make1(name)));
+			GpDistributionSetNew(relid, default_key(relid, list_make1(name)));
 			return;
 		}
 	}
@@ -993,9 +1010,10 @@ key_errposition(const char *queryString, int location, int n)
  * getPolicyForDistributedBy): each column the table's own and not one it
  * generates, which is computed after the row's segment is chosen; each
  * hashed with the operator class it names -- a hash class that takes its
- * type -- or with its type's default, which it has to have.  Returns the key
- * as the label records it: an operator class qualified, and left out where it
- * is the type's default anyway.  "alter" says an ALTER TABLE's, whose missing
+ * type -- or with the one gp.use_legacy_hashops chooses, its type's legacy
+ * class or its default, one of which it has to have.  Returns the key as the
+ * label records it: an operator class qualified, and left out where it is
+ * the type's default anyway.  "alter" says an ALTER TABLE's, whose missing
  * column Cloudberry reports in fewer words; "location" is the option's, for
  * the caret (key_location).  A policy with no key is returned as it is.
  */
@@ -1018,6 +1036,7 @@ GpDistributionCheckKey(Oid relid, const char *policy, int location,
 		AttrNumber	attnum = get_attnum(relid, key->column);
 		Form_pg_attribute att;
 		Oid			deflt;
+		Oid			opclass;
 
 		if (attnum <= 0 && alter)
 			ereport(ERROR,
@@ -1038,20 +1057,10 @@ GpDistributionCheckKey(Oid relid, const char *policy, int location,
 					 errdetail("Column \"%s\" is a generated column.", key->column)));
 
 		deflt = GpPolicyDefaultOpclass(att->atttypid);
-		if (key->opclass != NULL)
-		{
-			Oid			opclass;
-
-			opclass = ResolveOpClass(stringToQualifiedNameList(key->opclass, NULL),
-									 att->atttypid, "hash", HASH_AM_OID);
-			key->opclass = (opclass == deflt) ? NULL : GpPolicyOpclassName(opclass);
-		}
-		else if (!OidIsValid(deflt))
-			ereport(ERROR,
-					(errcode(ERRCODE_UNDEFINED_OBJECT),
-					 errmsg("data type %s has no default operator class for access method \"%s\"",
-							format_type_be(att->atttypid), "hash"),
-					 errhint("You must specify an operator class or define a default operator class for the data type.")));
+		opclass = GpPolicyColumnOpclass(key->opclass != NULL ?
+										stringToQualifiedNameList(key->opclass, NULL) : NIL,
+										att->atttypid);
+		key->opclass = (opclass == deflt) ? NULL : GpPolicyOpclassName(opclass);
 		n++;
 	}
 	relation_close(rel, NoLock);

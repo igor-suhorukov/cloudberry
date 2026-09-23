@@ -37,6 +37,8 @@
  *	 of autostats						 decides (postmaster/autostats.c)
  *	 gp.motion_cost_per_row				 the planner's cost of a gathered row
  *	 gp.enable_groupagg					 the planner's sorted grouping
+ *	 gp.use_legacy_hashops				 a new key hashed with the legacy
+ *										 cdbhash (gp_legacyhash.c)
  *
  * And those it accepts and has nothing to apply to yet, each for a reason
  * that says when it will: the planner's own MPP plans (Route B, decided at
@@ -84,6 +86,7 @@
 bool		gp_test_print_direct_dispatch_info = false;
 bool		gp_enable_direct_dispatch = true;
 double		gp_motion_cost_per_row = 0;
+bool		gp_use_legacy_hashops = false;
 
 static bool gp_enable_groupagg = true;
 
@@ -452,6 +455,14 @@ GpSettingsInit(void)
 							 NULL,
 							 &gp_enable_groupagg,
 							 true, PGC_USERSET, GUC_EXPLAIN,
+							 NULL, NULL, NULL);
+
+	/* Cloudberry's is also GUC_NO_SHOW_ALL; as above. */
+	DefineCustomBoolVariable("gp.use_legacy_hashops",
+							 "If set, new tables will use legacy distribution hashops by default",
+							 "A distribution key column that names no operator class is hashed with its type's cdbhash_*_ops class, where it has one.",
+							 &gp_use_legacy_hashops,
+							 false, PGC_USERSET, GUC_NOT_IN_SAMPLE,
 							 NULL, NULL, NULL);
 
 	DefineCustomEnumVariable("gp.autostats_mode",

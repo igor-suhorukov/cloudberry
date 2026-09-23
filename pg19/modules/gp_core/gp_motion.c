@@ -927,7 +927,7 @@ motion_begin_sending(MotionState *state, EState *estate, int eflags,
 		state->hashexprs[i] = ExecInitExpr((Expr *) lfirst(lc),
 										   &state->css.ss.ps);
 		state->hash.attrs[i] = i + 1;
-		fmgr_info(lfirst_oid(lf), &state->hash.hashfuncs[i]);
+		GpHashSetFunction(&state->hash, i, lfirst_oid(lf));
 		i++;
 	}
 
@@ -1633,7 +1633,7 @@ motion_relay(MotionState *gather, CustomScan *motion)
 			keyexprs[i] = ExecInitExpr((Expr *) lfirst(lc), NULL);
 			pull_varattnos((Node *) lfirst(lc), OUTER_VAR, &keycols);
 			hash.attrs[i] = i + 1;
-			fmgr_info(lfirst_oid(lf), &hash.hashfuncs[i]);
+			GpHashSetFunction(&hash, i, lfirst_oid(lf));
 			i++;
 		}
 	}
@@ -2619,7 +2619,7 @@ hash_filter_begin(CustomScanState *node, EState *estate, int eflags)
 	{
 		state->cols[i] = (AttrNumber) list_nth_int(cols, i);
 		state->hash.attrs[i] = i + 1;
-		fmgr_info(list_nth_oid(funcs, i), &state->hash.hashfuncs[i]);
+		GpHashSetFunction(&state->hash, i, list_nth_oid(funcs, i));
 	}
 
 	outerPlanState(node) = ExecInitNode(outerPlan(cscan), estate, eflags);

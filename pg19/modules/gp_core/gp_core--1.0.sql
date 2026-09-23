@@ -360,6 +360,339 @@ CREATE OPERATOR CLASS pg_catalog.varbit_ops
 	FUNCTION 1 gp.bithash(varbit);
 
 /*
+ * Cloudberry's legacy hash operator classes, cdbhash_*_ops: Greenplum 5's
+ * hash, which a table distributed before Greenplum 6 keeps so that it need
+ * not be redistributed, and which gp.use_legacy_hashops gives a new key.
+ * gp_legacyhash.c has the functions, and why several columns of a key are
+ * not hashed by them as by the others.  In pg_catalog under Cloudberry's
+ * names, as its catalog has them, none the default for its type; made after
+ * the classes above, so that where an equality operator is in both, the
+ * planner's hash joins, which take its first hash family, keep the others.
+ */
+CREATE FUNCTION gp.cdblegacyhash_int2(int2)
+RETURNS int4
+AS 'MODULE_PATHNAME', 'gp_cdblegacyhash_int2'
+LANGUAGE C IMMUTABLE STRICT PARALLEL SAFE;
+
+CREATE FUNCTION gp.cdblegacyhash_int4(int4)
+RETURNS int4
+AS 'MODULE_PATHNAME', 'gp_cdblegacyhash_int4'
+LANGUAGE C IMMUTABLE STRICT PARALLEL SAFE;
+
+CREATE FUNCTION gp.cdblegacyhash_int8(int8)
+RETURNS int4
+AS 'MODULE_PATHNAME', 'gp_cdblegacyhash_int8'
+LANGUAGE C IMMUTABLE STRICT PARALLEL SAFE;
+
+CREATE FUNCTION gp.cdblegacyhash_float4(float4)
+RETURNS int4
+AS 'MODULE_PATHNAME', 'gp_cdblegacyhash_float4'
+LANGUAGE C IMMUTABLE STRICT PARALLEL SAFE;
+
+CREATE FUNCTION gp.cdblegacyhash_float8(float8)
+RETURNS int4
+AS 'MODULE_PATHNAME', 'gp_cdblegacyhash_float8'
+LANGUAGE C IMMUTABLE STRICT PARALLEL SAFE;
+
+CREATE FUNCTION gp.cdblegacyhash_numeric(numeric)
+RETURNS int4
+AS 'MODULE_PATHNAME', 'gp_cdblegacyhash_numeric'
+LANGUAGE C IMMUTABLE STRICT PARALLEL SAFE;
+
+CREATE FUNCTION gp.cdblegacyhash_char("char")
+RETURNS int4
+AS 'MODULE_PATHNAME', 'gp_cdblegacyhash_char'
+LANGUAGE C IMMUTABLE STRICT PARALLEL SAFE;
+
+CREATE FUNCTION gp.cdblegacyhash_text(text)
+RETURNS int4
+AS 'MODULE_PATHNAME', 'gp_cdblegacyhash_text'
+LANGUAGE C IMMUTABLE STRICT PARALLEL SAFE;
+
+CREATE FUNCTION gp.cdblegacyhash_bpchar(bpchar)
+RETURNS int4
+AS 'MODULE_PATHNAME', 'gp_cdblegacyhash_text'
+LANGUAGE C IMMUTABLE STRICT PARALLEL SAFE;
+
+CREATE FUNCTION gp.cdblegacyhash_bytea(bytea)
+RETURNS int4
+AS 'MODULE_PATHNAME', 'gp_cdblegacyhash_bytea'
+LANGUAGE C IMMUTABLE STRICT PARALLEL SAFE;
+
+CREATE FUNCTION gp.cdblegacyhash_name(name)
+RETURNS int4
+AS 'MODULE_PATHNAME', 'gp_cdblegacyhash_name'
+LANGUAGE C IMMUTABLE STRICT PARALLEL SAFE;
+
+CREATE FUNCTION gp.cdblegacyhash_oid(oid)
+RETURNS int4
+AS 'MODULE_PATHNAME', 'gp_cdblegacyhash_oid'
+LANGUAGE C IMMUTABLE STRICT PARALLEL SAFE;
+
+CREATE FUNCTION gp.cdblegacyhash_tid(tid)
+RETURNS int4
+AS 'MODULE_PATHNAME', 'gp_cdblegacyhash_tid'
+LANGUAGE C IMMUTABLE STRICT PARALLEL SAFE;
+
+CREATE FUNCTION gp.cdblegacyhash_timestamp(timestamp)
+RETURNS int4
+AS 'MODULE_PATHNAME', 'gp_cdblegacyhash_timestamp'
+LANGUAGE C IMMUTABLE STRICT PARALLEL SAFE;
+
+CREATE FUNCTION gp.cdblegacyhash_timestamptz(timestamptz)
+RETURNS int4
+AS 'MODULE_PATHNAME', 'gp_cdblegacyhash_timestamp'
+LANGUAGE C IMMUTABLE STRICT PARALLEL SAFE;
+
+CREATE FUNCTION gp.cdblegacyhash_date(date)
+RETURNS int4
+AS 'MODULE_PATHNAME', 'gp_cdblegacyhash_date'
+LANGUAGE C IMMUTABLE STRICT PARALLEL SAFE;
+
+CREATE FUNCTION gp.cdblegacyhash_time(time)
+RETURNS int4
+AS 'MODULE_PATHNAME', 'gp_cdblegacyhash_time'
+LANGUAGE C IMMUTABLE STRICT PARALLEL SAFE;
+
+CREATE FUNCTION gp.cdblegacyhash_timetz(timetz)
+RETURNS int4
+AS 'MODULE_PATHNAME', 'gp_cdblegacyhash_timetz'
+LANGUAGE C IMMUTABLE STRICT PARALLEL SAFE;
+
+CREATE FUNCTION gp.cdblegacyhash_interval(interval)
+RETURNS int4
+AS 'MODULE_PATHNAME', 'gp_cdblegacyhash_interval'
+LANGUAGE C IMMUTABLE STRICT PARALLEL SAFE;
+
+CREATE FUNCTION gp.cdblegacyhash_inet(inet)
+RETURNS int4
+AS 'MODULE_PATHNAME', 'gp_cdblegacyhash_inet'
+LANGUAGE C IMMUTABLE STRICT PARALLEL SAFE;
+
+CREATE FUNCTION gp.cdblegacyhash_macaddr(macaddr)
+RETURNS int4
+AS 'MODULE_PATHNAME', 'gp_cdblegacyhash_macaddr'
+LANGUAGE C IMMUTABLE STRICT PARALLEL SAFE;
+
+CREATE FUNCTION gp.cdblegacyhash_bit(bit)
+RETURNS int4
+AS 'MODULE_PATHNAME', 'gp_cdblegacyhash_bit'
+LANGUAGE C IMMUTABLE STRICT PARALLEL SAFE;
+
+CREATE FUNCTION gp.cdblegacyhash_bit(varbit)
+RETURNS int4
+AS 'MODULE_PATHNAME', 'gp_cdblegacyhash_bit'
+LANGUAGE C IMMUTABLE STRICT PARALLEL SAFE;
+
+CREATE FUNCTION gp.cdblegacyhash_bool(bool)
+RETURNS int4
+AS 'MODULE_PATHNAME', 'gp_cdblegacyhash_bool'
+LANGUAGE C IMMUTABLE STRICT PARALLEL SAFE;
+
+CREATE FUNCTION gp.cdblegacyhash_array(anyarray)
+RETURNS int4
+AS 'MODULE_PATHNAME', 'gp_cdblegacyhash_array'
+LANGUAGE C IMMUTABLE STRICT PARALLEL SAFE;
+
+CREATE FUNCTION gp.cdblegacyhash_oidvector(oidvector)
+RETURNS int4
+AS 'MODULE_PATHNAME', 'gp_cdblegacyhash_oidvector'
+LANGUAGE C IMMUTABLE STRICT PARALLEL SAFE;
+
+CREATE FUNCTION gp.cdblegacyhash_cash(money)
+RETURNS int4
+AS 'MODULE_PATHNAME', 'gp_cdblegacyhash_cash'
+LANGUAGE C IMMUTABLE STRICT PARALLEL SAFE;
+
+CREATE FUNCTION gp.cdblegacyhash_uuid(uuid)
+RETURNS int4
+AS 'MODULE_PATHNAME', 'gp_cdblegacyhash_uuid'
+LANGUAGE C IMMUTABLE STRICT PARALLEL SAFE;
+
+CREATE FUNCTION gp.cdblegacyhash_anyenum(anyenum)
+RETURNS int4
+AS 'MODULE_PATHNAME', 'gp_cdblegacyhash_anyenum'
+LANGUAGE C IMMUTABLE STRICT PARALLEL SAFE;
+
+CREATE OPERATOR FAMILY pg_catalog.cdbhash_integer_ops USING hash;
+CREATE OPERATOR CLASS pg_catalog.cdbhash_int2_ops
+	FOR TYPE int2 USING hash FAMILY pg_catalog.cdbhash_integer_ops AS
+	OPERATOR 1 = (int2, int2),
+	FUNCTION 1 gp.cdblegacyhash_int2(int2);
+CREATE OPERATOR CLASS pg_catalog.cdbhash_int4_ops
+	FOR TYPE int4 USING hash FAMILY pg_catalog.cdbhash_integer_ops AS
+	OPERATOR 1 = (int4, int4),
+	FUNCTION 1 gp.cdblegacyhash_int4(int4);
+CREATE OPERATOR CLASS pg_catalog.cdbhash_int8_ops
+	FOR TYPE int8 USING hash FAMILY pg_catalog.cdbhash_integer_ops AS
+	OPERATOR 1 = (int8, int8),
+	FUNCTION 1 gp.cdblegacyhash_int8(int8);
+-- the integers of all three sizes hash alike, so their equalities are the family's
+ALTER OPERATOR FAMILY pg_catalog.cdbhash_integer_ops USING hash ADD
+	OPERATOR 1 = (int2, int4),
+	OPERATOR 1 = (int2, int8),
+	OPERATOR 1 = (int4, int2),
+	OPERATOR 1 = (int4, int8),
+	OPERATOR 1 = (int8, int2),
+	OPERATOR 1 = (int8, int4);
+
+CREATE OPERATOR FAMILY pg_catalog.cdbhash_float4_ops USING hash;
+CREATE OPERATOR CLASS pg_catalog.cdbhash_float4_ops
+	FOR TYPE float4 USING hash FAMILY pg_catalog.cdbhash_float4_ops AS
+	OPERATOR 1 = (float4, float4),
+	FUNCTION 1 gp.cdblegacyhash_float4(float4);
+
+CREATE OPERATOR FAMILY pg_catalog.cdbhash_float8_ops USING hash;
+CREATE OPERATOR CLASS pg_catalog.cdbhash_float8_ops
+	FOR TYPE float8 USING hash FAMILY pg_catalog.cdbhash_float8_ops AS
+	OPERATOR 1 = (float8, float8),
+	FUNCTION 1 gp.cdblegacyhash_float8(float8);
+
+CREATE OPERATOR FAMILY pg_catalog.cdbhash_numeric_ops USING hash;
+CREATE OPERATOR CLASS pg_catalog.cdbhash_numeric_ops
+	FOR TYPE numeric USING hash FAMILY pg_catalog.cdbhash_numeric_ops AS
+	OPERATOR 1 = (numeric, numeric),
+	FUNCTION 1 gp.cdblegacyhash_numeric(numeric);
+
+CREATE OPERATOR FAMILY pg_catalog.cdbhash_char_ops USING hash;
+CREATE OPERATOR CLASS pg_catalog.cdbhash_char_ops
+	FOR TYPE "char" USING hash FAMILY pg_catalog.cdbhash_char_ops AS
+	OPERATOR 1 = ("char", "char"),
+	FUNCTION 1 gp.cdblegacyhash_char("char");
+
+CREATE OPERATOR FAMILY pg_catalog.cdbhash_text_ops USING hash;
+CREATE OPERATOR CLASS pg_catalog.cdbhash_text_ops
+	FOR TYPE text USING hash FAMILY pg_catalog.cdbhash_text_ops AS
+	OPERATOR 1 = (text, text),
+	FUNCTION 1 gp.cdblegacyhash_text(text);
+
+CREATE OPERATOR FAMILY pg_catalog.cdbhash_bpchar_ops USING hash;
+CREATE OPERATOR CLASS pg_catalog.cdbhash_bpchar_ops
+	FOR TYPE bpchar USING hash FAMILY pg_catalog.cdbhash_bpchar_ops AS
+	OPERATOR 1 = (bpchar, bpchar),
+	FUNCTION 1 gp.cdblegacyhash_bpchar(bpchar);
+
+CREATE OPERATOR FAMILY pg_catalog.cdbhash_bytea_ops USING hash;
+CREATE OPERATOR CLASS pg_catalog.cdbhash_bytea_ops
+	FOR TYPE bytea USING hash FAMILY pg_catalog.cdbhash_bytea_ops AS
+	OPERATOR 1 = (bytea, bytea),
+	FUNCTION 1 gp.cdblegacyhash_bytea(bytea);
+
+CREATE OPERATOR FAMILY pg_catalog.cdbhash_name_ops USING hash;
+CREATE OPERATOR CLASS pg_catalog.cdbhash_name_ops
+	FOR TYPE name USING hash FAMILY pg_catalog.cdbhash_name_ops AS
+	OPERATOR 1 = (name, name),
+	FUNCTION 1 gp.cdblegacyhash_name(name);
+
+CREATE OPERATOR FAMILY pg_catalog.cdbhash_oid_ops USING hash;
+CREATE OPERATOR CLASS pg_catalog.cdbhash_oid_ops
+	FOR TYPE oid USING hash FAMILY pg_catalog.cdbhash_oid_ops AS
+	OPERATOR 1 = (oid, oid),
+	FUNCTION 1 gp.cdblegacyhash_oid(oid);
+
+CREATE OPERATOR FAMILY pg_catalog.cdbhash_tid_ops USING hash;
+CREATE OPERATOR CLASS pg_catalog.cdbhash_tid_ops
+	FOR TYPE tid USING hash FAMILY pg_catalog.cdbhash_tid_ops AS
+	OPERATOR 1 = (tid, tid),
+	FUNCTION 1 gp.cdblegacyhash_tid(tid);
+
+CREATE OPERATOR FAMILY pg_catalog.cdbhash_timestamp_ops USING hash;
+CREATE OPERATOR CLASS pg_catalog.cdbhash_timestamp_ops
+	FOR TYPE timestamp USING hash FAMILY pg_catalog.cdbhash_timestamp_ops AS
+	OPERATOR 1 = (timestamp, timestamp),
+	FUNCTION 1 gp.cdblegacyhash_timestamp(timestamp);
+
+CREATE OPERATOR FAMILY pg_catalog.cdbhash_timestamptz_ops USING hash;
+CREATE OPERATOR CLASS pg_catalog.cdbhash_timestamptz_ops
+	FOR TYPE timestamptz USING hash FAMILY pg_catalog.cdbhash_timestamptz_ops AS
+	OPERATOR 1 = (timestamptz, timestamptz),
+	FUNCTION 1 gp.cdblegacyhash_timestamptz(timestamptz);
+
+CREATE OPERATOR FAMILY pg_catalog.cdbhash_date_ops USING hash;
+CREATE OPERATOR CLASS pg_catalog.cdbhash_date_ops
+	FOR TYPE date USING hash FAMILY pg_catalog.cdbhash_date_ops AS
+	OPERATOR 1 = (date, date),
+	FUNCTION 1 gp.cdblegacyhash_date(date);
+
+CREATE OPERATOR FAMILY pg_catalog.cdbhash_time_ops USING hash;
+CREATE OPERATOR CLASS pg_catalog.cdbhash_time_ops
+	FOR TYPE time USING hash FAMILY pg_catalog.cdbhash_time_ops AS
+	OPERATOR 1 = (time, time),
+	FUNCTION 1 gp.cdblegacyhash_time(time);
+
+CREATE OPERATOR FAMILY pg_catalog.cdbhash_timetz_ops USING hash;
+CREATE OPERATOR CLASS pg_catalog.cdbhash_timetz_ops
+	FOR TYPE timetz USING hash FAMILY pg_catalog.cdbhash_timetz_ops AS
+	OPERATOR 1 = (timetz, timetz),
+	FUNCTION 1 gp.cdblegacyhash_timetz(timetz);
+
+CREATE OPERATOR FAMILY pg_catalog.cdbhash_interval_ops USING hash;
+CREATE OPERATOR CLASS pg_catalog.cdbhash_interval_ops
+	FOR TYPE interval USING hash FAMILY pg_catalog.cdbhash_interval_ops AS
+	OPERATOR 1 = (interval, interval),
+	FUNCTION 1 gp.cdblegacyhash_interval(interval);
+
+CREATE OPERATOR FAMILY pg_catalog.cdbhash_inet_ops USING hash;
+CREATE OPERATOR CLASS pg_catalog.cdbhash_inet_ops
+	FOR TYPE inet USING hash FAMILY pg_catalog.cdbhash_inet_ops AS
+	OPERATOR 1 = (inet, inet),
+	FUNCTION 1 gp.cdblegacyhash_inet(inet);
+
+CREATE OPERATOR FAMILY pg_catalog.cdbhash_macaddr_ops USING hash;
+CREATE OPERATOR CLASS pg_catalog.cdbhash_macaddr_ops
+	FOR TYPE macaddr USING hash FAMILY pg_catalog.cdbhash_macaddr_ops AS
+	OPERATOR 1 = (macaddr, macaddr),
+	FUNCTION 1 gp.cdblegacyhash_macaddr(macaddr);
+
+CREATE OPERATOR FAMILY pg_catalog.cdbhash_bit_ops USING hash;
+CREATE OPERATOR CLASS pg_catalog.cdbhash_bit_ops
+	FOR TYPE bit USING hash FAMILY pg_catalog.cdbhash_bit_ops AS
+	OPERATOR 1 = (bit, bit),
+	FUNCTION 1 gp.cdblegacyhash_bit(bit);
+
+CREATE OPERATOR FAMILY pg_catalog.cdbhash_varbit_ops USING hash;
+CREATE OPERATOR CLASS pg_catalog.cdbhash_varbit_ops
+	FOR TYPE varbit USING hash FAMILY pg_catalog.cdbhash_varbit_ops AS
+	OPERATOR 1 = (varbit, varbit),
+	FUNCTION 1 gp.cdblegacyhash_bit(varbit);
+
+CREATE OPERATOR FAMILY pg_catalog.cdbhash_bool_ops USING hash;
+CREATE OPERATOR CLASS pg_catalog.cdbhash_bool_ops
+	FOR TYPE bool USING hash FAMILY pg_catalog.cdbhash_bool_ops AS
+	OPERATOR 1 = (bool, bool),
+	FUNCTION 1 gp.cdblegacyhash_bool(bool);
+
+CREATE OPERATOR FAMILY pg_catalog.cdbhash_array_ops USING hash;
+CREATE OPERATOR CLASS pg_catalog.cdbhash_array_ops
+	FOR TYPE anyarray USING hash FAMILY pg_catalog.cdbhash_array_ops AS
+	OPERATOR 1 = (anyarray, anyarray),
+	FUNCTION 1 gp.cdblegacyhash_array(anyarray);
+
+CREATE OPERATOR FAMILY pg_catalog.cdbhash_oidvector_ops USING hash;
+CREATE OPERATOR CLASS pg_catalog.cdbhash_oidvector_ops
+	FOR TYPE oidvector USING hash FAMILY pg_catalog.cdbhash_oidvector_ops AS
+	OPERATOR 1 = (oidvector, oidvector),
+	FUNCTION 1 gp.cdblegacyhash_oidvector(oidvector);
+
+CREATE OPERATOR FAMILY pg_catalog.cdbhash_cash_ops USING hash;
+CREATE OPERATOR CLASS pg_catalog.cdbhash_cash_ops
+	FOR TYPE money USING hash FAMILY pg_catalog.cdbhash_cash_ops AS
+	OPERATOR 1 = (money, money),
+	FUNCTION 1 gp.cdblegacyhash_cash(money);
+
+CREATE OPERATOR FAMILY pg_catalog.cdbhash_uuid_ops USING hash;
+CREATE OPERATOR CLASS pg_catalog.cdbhash_uuid_ops
+	FOR TYPE uuid USING hash FAMILY pg_catalog.cdbhash_uuid_ops AS
+	OPERATOR 1 = (uuid, uuid),
+	FUNCTION 1 gp.cdblegacyhash_uuid(uuid);
+
+CREATE OPERATOR FAMILY pg_catalog.cdbhash_enum_ops USING hash;
+CREATE OPERATOR CLASS pg_catalog.cdbhash_enum_ops
+	FOR TYPE anyenum USING hash FAMILY pg_catalog.cdbhash_enum_ops AS
+	OPERATOR 1 = (anyenum, anyenum),
+	FUNCTION 1 gp.cdblegacyhash_anyenum(anyenum);
+
+/*
  * median(x): Cloudberry's, as a plain aggregate rather than the ordered-set
  * one Cloudberry's grammar makes of it -- gp_median.c says why, and that the
  * answer is percentile_cont(0.5)'s.  One per type Cloudberry has.

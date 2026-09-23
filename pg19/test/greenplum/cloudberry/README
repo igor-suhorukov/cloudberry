@@ -37,6 +37,12 @@ bfv_dd_types  the lines of its two-phase commit ("Distributed transaction
   of the key's hash family -- id = 1::int8 of an int2 key -- hashed with its
   own type's function.
 
+bfv_joins  a join of twenty empty tables, which Cloudberry's demo cluster
+  cancels for the memory its planner takes -- the runaway cleaner's red
+  zone, M6's memory accounting -- and the port plans and answers, with no
+  rows, in the time the test allows.  Its tables distributed with the legacy
+  cdbhash_float4_ops class are joined as Cloudberry joins them.
+
 case_gp  IS NOT DISTINCT FROM, and the CASE form, printed as the searched
   CASE the port's rewrite makes of them (see the singlenode suite's README).
 
@@ -46,6 +52,13 @@ gp_create_table  the OID of text's hash operator class in
 
 gp_types  PostgreSQL 19's words for an operator no type takes: a DETAIL
   where Cloudberry's HINT stood.
+
+gpdist_legacy_opclasses  the complex type, Cloudberry's own, which
+  PostgreSQL 19 has not got: the table whose key takes every legacy
+  cdbhash_*_ops class has a column of it, and is not made.  The other
+  classes are gp_core's, and a table keyed on all of them -- uuid's in
+  complex's place -- takes them, holds a row and finds it; the rows the test
+  places on the segments are where Cloudberry places them.
 
 join_gp  the NOTICE of test_print_prefetch_joinqual: where a join's outer
   side and its join qual both read through a Motion, Cloudberry reads the

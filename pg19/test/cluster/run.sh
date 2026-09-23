@@ -1053,6 +1053,17 @@ mine" ] && ok "a transaction reads its own rows, and a LIMIT leaves the connecti
 		"SELECT a, rank() OVER (PARTITION BY b ORDER BY a DESC) FROM o WHERE a > 990 ORDER BY b, a;" \
 		"Merge Key"
 
+	# A table hashed with Cloudberry's legacy cdbhash (a cdbhash_*_ops key),
+	# joined off another's key: that one's rows are redistributed by the
+	# legacy hash, or they would miss the rows they join.
+	q 0 "CREATE TABLE lo (a int) DISTRIBUTED BY (a cdbhash_int4_ops);
+	     INSERT INTO lo SELECT generate_series(1, 6);
+	     CREATE TABLE lo2 (k int, a int) DISTRIBUTED BY (k cdbhash_int4_ops);
+	     INSERT INTO lo2 SELECT i, i % 6 + 1 FROM generate_series(1, 60) i;
+	     ANALYZE lo; ANALYZE lo2;" >/dev/null
+	orca_same "a legacy-hashed table's join: the other side redistributed by the legacy hash" \
+		"SELECT count(*), sum(lo2.k) FROM lo JOIN lo2 USING (a);" "Redistribute Motion"
+
 	# The slices of a query run at once: the writer on each segment runs the
 	# Gather's, and readers -- more backends of the session there, reading as
 	# a part of the writer's transaction -- run the others, streaming their
@@ -1068,6 +1079,8 @@ mine" ] && ok "a transaction reads its own rows, and a LIMIT leaves the connecti
 		"SELECT y, count(*), sum(a) FROM o JOIN po ON o.b = po.y GROUP BY y ORDER BY y;"
 	relay_same "streamed and relayed, the same rows: sixty thousand rows between segments" \
 		"SELECT count(*), sum(length(s)) FROM (SELECT s, count(*) FROM bo GROUP BY s) x;"
+	relay_same "streamed and relayed, the same rows: redistributed by the legacy hash" \
+		"SELECT count(*), sum(lo2.k) FROM lo JOIN lo2 USING (a);"
 
 	# The readers, seen from a segment while the session that used them lives:
 	# as many on each segment as the widest statement had slices below its
@@ -1515,6 +1528,25 @@ SQL
 	case "$out" in
 		*"SINGLE content 0101010 "*"SINGLE content 1 ") ok "a bit string is a key, and 1::int8 finds an int2 key's segment" ;;
 		*) notok "bit keys and cross-type direct dispatch" "$out" ;;
+	esac
+
+	# Cloudberry's legacy hash, a cdbhash_*_ops class: FNV-1, reduced on two
+	# segments by a bitmask -- the odd keys on the first, the even on the
+	# second -- and found there directly; and the class gp.use_legacy_hashops
+	# gives a key that names none, which the label then names.  (ORCA's
+	# Motions hash by it in section 10.)
+	out=$(printf '%s\n' "CREATE TABLE xlg (a int) DISTRIBUTED BY (a cdbhash_int4_ops);" \
+		"INSERT INTO xlg SELECT generate_series(1, 6);" \
+		"SELECT string_agg(a::text, ',' ORDER BY a) FROM xlg GROUP BY gp_segment_id ORDER BY gp_segment_id;" \
+		"SET gp.test_print_direct_dispatch_info = on;" \
+		"SELECT * FROM xlg WHERE a = 4;" \
+		"RESET gp.test_print_direct_dispatch_info;" \
+		"SET gp.use_legacy_hashops = on;" \
+		"CREATE TABLE xlg2 (k int, a int) DISTRIBUTED BY (k);" \
+		"SELECT gp_sql.distribution('xlg2'::regclass);" | qf 0 | tr '\n' ' ')
+	case "$out" in
+		"1,3,5 2,4,6 "*"SINGLE content 4 (k pg_catalog.cdbhash_int4_ops) ") ok "a cdbhash_*_ops key hashes as Cloudberry's legacy cdbhash, and gp.use_legacy_hashops gives one" ;;
+		*) notok "the legacy hash" "$out" ;;
 	esac
 
 	# CREATE TABLE AS takes the key of its query's rows where they become
