@@ -38,10 +38,11 @@
  * rows; the counts are added up.  To the one segment its key names, when its
  * WHERE fixes the key.  What that cannot do -- join another distributed
  * table, change a partitioned table's partitions, run in a WITH query,
- * return rows -- the coordinator's plan does, and each row it changes is
- * changed on its segment (gp_explicit.c); so is an INSERT with RETURNING.
- * Moving a row to another segment because its key changed is refused, with
- * the reason.
+ * return rows, change the distribution key -- the coordinator's plan does,
+ * and each row it changes is changed on its segment (gp_explicit.c); so is
+ * an INSERT with RETURNING.  A row whose key changes is moved by a Split:
+ * deleted where it is, inserted where its new key hashes.  WHERE CURRENT OF
+ * is refused, since its cursor read the row on the coordinator.
  *
  * SELECT ... FOR UPDATE.  Cloudberry, without its global deadlock detector,
  * takes an ExclusiveLock on the table rather than locking rows; the port does
