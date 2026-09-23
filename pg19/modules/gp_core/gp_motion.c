@@ -80,6 +80,7 @@
  */
 #include "postgres.h"
 
+#include "access/genam.h"
 #include "access/relation.h"
 #include "catalog/catalog.h"
 #include "catalog/namespace.h"
@@ -1172,6 +1173,44 @@ motion_stream_next(MotionState *state)
 	return ExecClearTuple(slot);
 }
 
+/*
+ * A fragment the coordinator initialised only to describe it, under EXPLAIN
+ * ANALYZE.  PostgreSQL 19's index scans allocate the counter of their index
+ * searches only when they are to run, and EXPLAIN ANALYZE reads it without
+ * asking -- which no plan of PostgreSQL's own meets, since it never mixes
+ * the two.  Here they are given one, at zero, which is what the coordinator
+ * counted: it ran them no times.
+ */
+static bool
+fragment_instrument_walker(PlanState *planstate, void *context)
+{
+	if (planstate == NULL)
+		return false;
+
+	switch (nodeTag(planstate))
+	{
+		case T_IndexScanState:
+			if (((IndexScanState *) planstate)->iss_Instrument == NULL)
+				((IndexScanState *) planstate)->iss_Instrument =
+					palloc0_object(IndexScanInstrumentation);
+			break;
+		case T_IndexOnlyScanState:
+			if (((IndexOnlyScanState *) planstate)->ioss_Instrument == NULL)
+				((IndexOnlyScanState *) planstate)->ioss_Instrument =
+					palloc0_object(IndexScanInstrumentation);
+			break;
+		case T_BitmapIndexScanState:
+			if (((BitmapIndexScanState *) planstate)->biss_Instrument == NULL)
+				((BitmapIndexScanState *) planstate)->biss_Instrument =
+					palloc0_object(IndexScanInstrumentation);
+			break;
+		default:
+			break;
+	}
+
+	return planstate_tree_walker(planstate, fragment_instrument_walker, context);
+}
+
 static void
 motion_begin(CustomScanState *node, EState *estate, int eflags)
 {
@@ -1263,8 +1302,12 @@ motion_begin(CustomScanState *node, EState *estate, int eflags)
 	 * EXPLAIN, and for EXPLAIN ANALYZE, where it shows as never executed.
 	 */
 	if ((eflags & EXEC_FLAG_EXPLAIN_ONLY) || estate->es_instrument)
+	{
 		outerPlanState(node) = ExecInitNode(outerPlan(cscan), estate,
 											eflags | EXEC_FLAG_EXPLAIN_ONLY);
+		if (estate->es_instrument)
+			(void) fragment_instrument_walker(outerPlanState(node), NULL);
+	}
 }
 
 /*

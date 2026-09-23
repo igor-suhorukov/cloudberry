@@ -1097,6 +1097,18 @@ COMMIT;"
 		*) notok "a parameter in a fragment" "$out" ;;
 	esac
 
+	# EXPLAIN ANALYZE describes a fragment the coordinator never runs; an
+	# index scan in it has searched nothing here, and says so, where it once
+	# stopped the coordinator (qp_join_union_all).
+	q 0 "CREATE INDEX o_b ON o (b); ANALYZE o;" >/dev/null
+	out=$(printf '%s\n' "SET enable_seqscan = off;" \
+		"EXPLAIN (ANALYZE, COSTS OFF, TIMING OFF, SUMMARY OFF) SELECT count(*) FROM o WHERE b = 3;" | qf 0)
+	case "$out" in
+		*"Index Scan using o_b on o (never executed)"*"Index Searches: 0"*) ok "EXPLAIN ANALYZE of an index scan in a fragment, which the coordinator never ran" ;;
+		*) notok "EXPLAIN ANALYZE of an index scan in a fragment" "$out" ;;
+	esac
+	q 0 "DROP INDEX o_b;" >/dev/null
+
 	# A sequence is the coordinator's: a plan that would take its next value
 	# on a segment -- a random table's row made there -- is the planner's.
 	q 0 "CREATE TABLE sr (n serial, v int) DISTRIBUTED RANDOMLY;" >/dev/null
