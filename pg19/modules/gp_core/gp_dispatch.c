@@ -62,6 +62,7 @@
 #include "catalog/namespace.h"
 #include "catalog/pg_type.h"
 #include "commands/dbcommands.h"
+#include "executor/spi.h"
 #include "fmgr.h"
 #include "funcapi.h"
 #include "libpq-fe.h"
@@ -1942,7 +1943,8 @@ PG_FUNCTION_INFO_V1(gp_dist_random);
  * constantly, which is why it is here rather than later.
  *
  * It is the scan of a distributed table with nothing planned around it: no
- * qual pushed down, no column left out.
+ * qual pushed down, no column left out.  Where there is nothing to dispatch
+ * to, it reads the relation here, as Cloudberry's does on a single node.
  */
 Datum
 gp_dist_random(PG_FUNCTION_ARGS)
@@ -1973,11 +1975,18 @@ gp_dist_random(PG_FUNCTION_ARGS)
 	rel = table_open(relid, AccessShareLock);
 	tupdesc = CreateTupleDescCopy(RelationGetDescr(rel));
 
+	InitMaterializedSRF(fcinfo, MAT_SRF_USE_EXPECTED_DESC);
+
+	if (GpDistRandomIsLocal())
+	{
+		GpDistRandomLocal(relid, rsinfo->setResult, rsinfo->setDesc, false);
+		table_close(rel, AccessShareLock);
+		return (Datum) 0;
+	}
+
 	initStringInfo(&sql);
 	appendStringInfo(&sql, "SELECT * FROM %s",
 					 GpDispatchRelationName(RelationGetRelid(rel)));
-
-	InitMaterializedSRF(fcinfo, MAT_SRF_USE_EXPECTED_DESC);
 
 	slot = MakeSingleTupleTableSlot(tupdesc, &TTSOpsVirtual);
 	gather = GpGatherStart(sql.data, tupdesc);
@@ -1989,6 +1998,71 @@ gp_dist_random(PG_FUNCTION_ARGS)
 	table_close(rel, AccessShareLock);
 
 	return (Datum) 0;
+}
+
+/*
+ * Is there nothing for gp.dist_random() to dispatch to: one node, or a
+ * session that is not the coordinator's dispatching one?
+ */
+bool
+GpDistRandomIsLocal(void)
+{
+	return GpClusterIsSingleNode() ||
+		GpClusterBackendRole() != GP_ROLE_DISPATCH;
+}
+
+/*
+ * gp.dist_random() where there is nothing to dispatch to: the relation's
+ * rows here, inheritance children included as a gather's are, into `store`
+ * as `desc` says -- the relation's row type, or with gp_segment_id after it,
+ * which is this node's content id.
+ */
+void
+GpDistRandomLocal(Oid relid, Tuplestorestate *store, TupleDesc desc,
+				  bool with_content)
+{
+	Oid			typid = get_rel_type_id(relid);
+	TupleDesc	rowdesc = lookup_rowtype_tupdesc_copy(typid, -1);
+	Datum	   *values = palloc0_array(Datum, desc->natts);
+	bool	   *nulls = palloc0_array(bool, desc->natts);
+	MemoryContext outer = CurrentMemoryContext;
+	char	   *sql;
+
+	if (desc->natts != rowdesc->natts + (with_content ? 1 : 0))
+		elog(ERROR, "gp.dist_random() called with %d columns for a relation of %d",
+			 desc->natts, rowdesc->natts);
+
+	sql = psprintf("SELECT r FROM %s r", GpDispatchRelationName(relid));
+
+	SPI_connect();
+	if (SPI_execute(sql, true, 0) != SPI_OK_SELECT)
+		elog(ERROR, "could not read relation %u", relid);
+
+	for (uint64 r = 0; r < SPI_processed; r++)
+	{
+		bool		isnull;
+		Datum		row = SPI_getbinval(SPI_tuptable->vals[r],
+										SPI_tuptable->tupdesc, 1, &isnull);
+		HeapTupleHeader hdr = DatumGetHeapTupleHeader(row);
+		HeapTupleData tuple;
+		MemoryContext old;
+
+		tuple.t_len = HeapTupleHeaderGetDatumLength(hdr);
+		ItemPointerSetInvalid(&tuple.t_self);
+		tuple.t_tableOid = InvalidOid;
+		tuple.t_data = hdr;
+		heap_deform_tuple(&tuple, rowdesc, values, nulls);
+		if (with_content)
+		{
+			values[desc->natts - 1] = Int32GetDatum(GpClusterContentId());
+			nulls[desc->natts - 1] = false;
+		}
+
+		old = MemoryContextSwitchTo(outer);
+		tuplestore_putvalues(store, desc, values, nulls);
+		MemoryContextSwitchTo(old);
+	}
+	SPI_finish();
 }
 
 /* ------------------------------------------------------------------------- */

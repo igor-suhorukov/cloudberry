@@ -1,13 +1,4 @@
 @@
-- i | j | i | j 
-----+---+---+---
--(0 rows)
--
-+ERROR:  function gp_dist_random(unknown) does not exist
-+LINE 2: FROM gp_dist_random('alpha') FULL OUTER JOIN gp_dist_random(...
-+             ^
-+DETAIL:  There is no function of that name.
-@@
 +ERROR:  unrecognized configuration parameter "statement_mem"
 @@
 +ERROR:  unrecognized configuration parameter "gp_workfile_compression"

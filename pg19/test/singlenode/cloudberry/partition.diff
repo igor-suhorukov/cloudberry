@@ -1,17 +1,4 @@
 @@
-- gp_segment_id |       relname        | relkind 
-----------------+----------------------+---------
--            -1 | region               | p
--            -1 | region_1_prt_region1 | p
--            -1 | region_1_prt_region2 | p
--            -1 | region_1_prt_region3 | p
--(4 rows)
--
-+ERROR:  function gp_dist_random(unknown) does not exist
-+LINE 1: select gp_segment_id, relname, relkind from gp_dist_random('...
-+                                                    ^
-+DETAIL:  There is no function of that name.
-@@
 -                           List of relations
 - Schema |        Name        |       Type        |   Owner   | Storage 
 ---------+--------------------+-------------------+-----------+---------

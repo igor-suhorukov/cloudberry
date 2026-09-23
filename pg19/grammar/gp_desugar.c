@@ -94,6 +94,7 @@
 #include "utils/builtins.h"
 #include "utils/elog.h"
 #include "utils/json.h"
+#include "utils/regproc.h"
 
 #include "cb_module.h"
 #include "gp_dispatch.h"
@@ -109,7 +110,7 @@
 static const char *const gp_trigger_words[] = {
 	"tag", "profile", "noprofile", "distributed", "randomly", "replicated",
 	"task", "directory", "storage", "dynamic", "incremental", "unset",
-	"account", "execute", "decode", "subpartition",
+	"account", "execute", "decode", "subpartition", "gp_dist_random",
 	NULL
 };
 
@@ -3248,6 +3249,133 @@ emit_case(GpOut *o, const GpExprScan *sc, int i, int end)
 	out_copy(o, ts->toks[end].off, tok_stop(ts, end));
 }
 
+/* ------------------------------------------------------------------------- */
+/* gp_dist_random('t')                                                       */
+/* ------------------------------------------------------------------------- */
+
+/*
+ * Cloudberry's gp_dist_random('t'), in FROM, is the relation t read on every
+ * segment, each copy of a replicated table or a catalog once per segment.
+ * Its parser makes it so (parse_clause.c, transformRangeFunction): a call of
+ * that name with one string argument and no decoration is looked up as a
+ * qualified name and becomes t's range table entry, with the alias the call
+ * was given -- so without one it is named t, and t.a reads its column.
+ *
+ * The port's is gp.dist_random(NULL::t), which says which relation through
+ * its argument's type (gp_dispatch.c).  So the call becomes that, with the
+ * name taken apart as Cloudberry takes it (stringToQualifiedNameList, whose
+ * error for a name it cannot read is Cloudberry's too) and each part quoted,
+ * and without an alias it is given AS t.  Elsewhere than in FROM Cloudberry
+ * has no gp_dist_random, and the call is left for PostgreSQL to refuse.
+ */
+
+/* Is token i an item of a FROM list, or of DELETE's USING list? */
+static bool
+in_from_list(const GpExprScan *sc, int i)
+{
+	static const char *const ends[] = {
+		"select", "where", "group", "having", "order", "limit", "offset",
+		"fetch", "returning", "set", "values", "window", "into", "union",
+		"intersect", "except", "for", NULL
+	};
+	const GpTokens *ts = sc->ts;
+	int			depth = 0;
+
+	if (i <= sc->first)
+		return false;
+	if (tok_is_kw(ts, i - 1, "from") || tok_is_kw(ts, i - 1, "join") ||
+		tok_is_kw(ts, i - 1, "lateral") || tok_is_kw(ts, i - 1, "using"))
+		return true;
+	if (!tok_is_char(ts, i - 1, ','))
+		return false;
+
+	/* After a comma: whose list is it, at this level of brackets? */
+	for (int j = i - 2; j >= sc->first; j--)
+	{
+		if (tok_is_char(ts, j, ')'))
+			depth++;
+		else if (tok_is_char(ts, j, '('))
+		{
+			if (--depth < 0)
+				return false;
+		}
+		else if (depth == 0 && ts->toks[j].kw != NULL)
+		{
+			if (tok_is_kw(ts, j, "from") || tok_is_kw(ts, j, "using"))
+				return true;
+			for (int k = 0; ends[k] != NULL; k++)
+				if (tok_is_kw(ts, j, ends[k]))
+					return false;
+		}
+	}
+	return false;
+}
+
+/* gp_dist_random('t') at `i`: its closing parenthesis, or -1. */
+static int
+dist_random_close(const GpExprScan *sc, int i, int limit)
+{
+	const GpTokens *ts = sc->ts;
+	const GpTok *t = &ts->toks[i];
+
+	if (t->code != GP_IDENT || t->str == NULL ||
+		pg_strcasecmp(t->str, "gp_dist_random") != 0)
+		return -1;
+	if (tok_is_char(ts, i - 1, '.') || i + 3 >= limit ||
+		!tok_is_char(ts, i + 1, '(') || !tok_is_string(ts, i + 2) ||
+		!tok_is_char(ts, i + 3, ')'))
+		return -1;
+	/* WITH ORDINALITY is a decoration, and makes it a function again */
+	if (tok_is_kw(ts, i + 4, "with") && tok_is_kw(ts, i + 5, "ordinality"))
+		return -1;
+	if (!in_from_list(sc, i))
+		return -1;
+	return i + 3;
+}
+
+/* Does an alias follow token i: AS, or a name that can be a bare alias? */
+static bool
+alias_follows(const GpTokens *ts, int i)
+{
+	int			kwnum;
+
+	if (i >= ts->ntoks)
+		return false;
+	if (tok_is_kw(ts, i, "as") || ts->toks[i].code == GP_IDENT)
+		return true;
+	if (ts->toks[i].kw == NULL)
+		return false;
+	kwnum = ScanKeywordLookup(ts->toks[i].kw, &ScanKeywords);
+	return kwnum >= 0 &&
+		(ScanKeywordCategories[kwnum] == UNRESERVED_KEYWORD ||
+		 ScanKeywordCategories[kwnum] == COL_NAME_KEYWORD);
+}
+
+static void
+emit_dist_random(GpOut *o, const GpExprScan *sc, int i, int close)
+{
+	const GpTokens *ts = sc->ts;
+	List	   *names = stringToQualifiedNameList(ts->toks[i + 2].str, NULL);
+	StringInfoData name;
+	ListCell   *lc;
+
+	initStringInfo(&name);
+	foreach(lc, names)
+	{
+		if (lc != list_head(names))
+			appendStringInfoChar(&name, '.');
+		appendStringInfoString(&name, quote_identifier(strVal(lfirst(lc))));
+	}
+
+	/* The type's name stands for the string, as Cloudberry's RangeVar does */
+	out_text(o, "gp.dist_random(NULL::", ts->toks[i].off);
+	out_text(o, name.data, ts->toks[i + 2].off);
+	out_text(o, ")", ts->toks[close].off);
+	if (!alias_follows(ts, close + 1))
+		out_text(o, psprintf(" AS %s", quote_identifier(strVal(llast(names)))),
+				 ts->toks[i].off);
+}
+
 /*
  * A construct of Cloudberry's starting at token i, ending before `limit`:
  * the index of its last token, or -1.
@@ -3259,6 +3387,8 @@ construct_at(const GpExprScan *sc, int i, int limit)
 
 	if ((stop = decode_close(sc, i, limit)) >= 0)
 		return stop;
+	if ((stop = dist_random_close(sc, i, limit)) >= 0)
+		return stop;
 	return case_close(sc, i, limit);
 }
 
@@ -3267,6 +3397,9 @@ emit_construct(GpOut *o, const GpExprScan *sc, int i, int stop)
 {
 	if (tok_is_kw(sc->ts, i, "case"))
 		emit_case(o, sc, i, stop);
+	else if (sc->ts->toks[i].code == GP_IDENT &&
+			 pg_strcasecmp(sc->ts->toks[i].str, "gp_dist_random") == 0)
+		emit_dist_random(o, sc, i, stop);
 	else
 		emit_decode(o, sc, i, stop);
 }
@@ -3390,7 +3523,10 @@ rw_statement_itself(GpRewrite *rw)
 	/* ALTER TABLE's partition commands */
 	rw_partition_cmds(rw);
 
-	/* DECODE and CASE ... WHEN IS NOT DISTINCT FROM, wherever they are. */
+	/*
+	 * DECODE, CASE ... WHEN IS NOT DISTINCT FROM and gp_dist_random('t'),
+	 * wherever they are.
+	 */
 	if (!rw->whole)
 		rw_expressions(rw, true);
 

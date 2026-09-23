@@ -21,7 +21,7 @@ The reasons, by what brings them, and then each test:
   External tables, gpfdist, COPY ... LOG ERRORS and the error log functions,
   FILL MISSING FIELDS, NEWLINE, ESCAPE outside CSV mode: M5, the loading path.
 
-  gp_dist_random(), gp_segment_configuration, gp_distribution_policy,
+  gp_segment_configuration, gp_distribution_policy,
   gp_configuration_history, and the settings of a cluster that dispatches
   (gp_enable_direct_dispatch, test_print_direct_dispatch_info,
   gp_interconnect_queue_depth, gp_motion_cost_per_row, gp_cte_sharing,
@@ -123,13 +123,13 @@ gpcopy  COPY's LOG ERRORS, FILL MISSING FIELDS, NEWLINE and ESCAPE outside
   CSV mode, the error log functions, gp_configuration_history,
   gp_autostats_mode, and the broken_int4 type of Cloudberry's regress.so.
 indexjoin  an append-optimized table.
-join_gp  gp_dist_random(), statement_mem,
-  gp_workfile_compression, test_print_prefetch_joinqual.
+join_gp  statement_mem, gp_workfile_compression,
+  test_print_prefetch_joinqual.
 limit_gp  statement_mem.
 partition  Every reason above: its templates and gp_partition_template;
   append-optimized and column-oriented tables, column ENCODING, external
-  tables and COPY ... LOG ERRORS; gp_dist_random(), gp_distribution_policy
-  and gp_segments_for_planner; a role that may not CREATE in schema public;
+  tables and COPY ... LOG ERRORS; gp_distribution_policy and
+  gp_segments_for_planner; a role that may not CREATE in schema public;
   Cloudberry's REVOKE notice; an exclusion constraint PostgreSQL 19 allows;
   the caret of an error in a partition an ALTER TABLE made; psql's \d+.
 partition1  append-optimized tables -- hhh and foz are, and most of its

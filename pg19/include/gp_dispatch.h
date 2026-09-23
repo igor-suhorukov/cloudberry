@@ -43,6 +43,7 @@
 #include "postgres.h"
 
 #include "executor/tuptable.h"
+#include "utils/tuplestore.h"
 
 /*
  * Run a statement on every segment and wait for all of them.
@@ -167,6 +168,15 @@ extern void GpDispatchQueryFirstValues(const char *sql, int content,
 
 /* A relation's name in SQL a segment is sent; pg_temp for a temporary one. */
 extern char *GpDispatchRelationName(Oid relid);
+
+/*
+ * gp.dist_random() where there is nothing to dispatch to -- one node, or a
+ * session that is not the coordinator's -- reads the relation here, into a
+ * tuplestore of its row type or, with_content, of it and gp_segment_id.
+ */
+extern bool GpDistRandomIsLocal(void);
+extern void GpDistRandomLocal(Oid relid, Tuplestorestate *store,
+							  TupleDesc desc, bool with_content);
 
 /* Close every connection: the session is over, or something went wrong. */
 extern void GpDispatchResetGang(void);

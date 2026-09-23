@@ -676,6 +676,11 @@ mine" ] && ok "a transaction reads its own rows, and a LIMIT leaves the connecti
 	[ "$out|$out2" = "0|$(q 0 "SELECT expected_seg(1, 2);")|1|0" ] \
 		&& ok "gp.dist_random() of a hashed table: each row's segment, and \"*\" without it" \
 		|| notok "gp_segment_id of gp.dist_random()" "$out / $out2"
+	out=$(q 0 "SELECT gp_segment_id, count(*), sum(a) FROM gp_dist_random('gre') GROUP BY 1 ORDER BY 1;")
+	out2=$(q 0 "SELECT count(*) FROM gp_dist_random('gs') WHERE gs.gp_segment_id <> expected_seg(gs.a, 2);")
+	[ "$out|$out2" = "0|10|55
+1|10|55|0" ] && ok "gp_dist_random('t'), as Cloudberry spells it, is gp.dist_random(NULL::t) named t" \
+		|| notok "gp_dist_random('t')" "$out / $out2"
 	out=$(q 0 "SELECT DISTINCT gp_segment_id FROM pg_class;")
 	out2=$(q 0 "SELECT DISTINCT gp_segment_id FROM gp.dist_random(NULL::pg_namespace) ORDER BY 1;")
 	[ "$out|$out2" = "-1|0

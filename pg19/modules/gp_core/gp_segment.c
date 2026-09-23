@@ -549,6 +549,14 @@ gp_dist_random_segments(PG_FUNCTION_ARGS)
 		elog(ERROR, "gp_internal.dist_random_segments() called with %d columns for a relation of %d",
 			 rsinfo->setDesc->natts, natts);
 
+	/* One node, or a utility session: this node's rows, and its id */
+	if (GpDistRandomIsLocal())
+	{
+		GpDistRandomLocal(relid, rsinfo->setResult, rsinfo->setDesc, true);
+		table_close(rel, AccessShareLock);
+		return (Datum) 0;
+	}
+
 	initStringInfo(&sql);
 	appendStringInfo(&sql, "SELECT * FROM %s",
 					 GpDispatchRelationName(RelationGetRelid(rel)));

@@ -1795,5 +1795,38 @@ isparts "which did what they say" gpp_b \
    "gpp_b_1_prt_11 FOR VALUES FROM (3) TO (4); gpp_b_1_prt_2 FOR VALUES FROM (2) TO (3)"
 
 echo
+echo "16. gp_dist_random('t'), the port's gp.dist_random(NULL::t)"
+# Cloudberry's parser makes gp_dist_random('t') in FROM the relation t read
+# on every segment, named t unless it has an alias (parse_clause.c).  The
+# rewrite makes it gp.dist_random(NULL::t) AS t.  This is one node, where
+# Cloudberry reads the relation here, and so does the port: gp_segment_id -1.
+
+q "CREATE TABLE gdr (a int, b text); INSERT INTO gdr VALUES (1, 'one'), (2, 'two');
+   CREATE SCHEMA \"Gdr S\"; CREATE TABLE \"Gdr S\".\"T x\" (a int); INSERT INTO \"Gdr S\".\"T x\" VALUES (7);" >/dev/null
+is "gp_dist_random('t') in FROM is gp.dist_random(NULL::t), named t" \
+   "SELECT gp_sql.desugar('SELECT gp_segment_id, * FROM gp_dist_random(''gdr'') WHERE a = 1');" \
+   "SELECT gp_segment_id, * FROM gp.dist_random(NULL::gdr) AS gdr WHERE a = 1"
+is "one node reads it here, and each row's gp_segment_id is -1" \
+   "SELECT gp_segment_id, gdr.a, b FROM gp_dist_random('gdr') ORDER BY a;" "-1|1|one
+-1|2|two"
+is "an alias is the call's, AS or bare, after a comma and a JOIN too" \
+   "SELECT gp_sql.desugar('SELECT 1 FROM gdr, gp_dist_random(''gdr'') AS x JOIN gp_dist_random(''gdr'') y USING (a)');" \
+   "SELECT 1 FROM gdr, gp.dist_random(NULL::gdr) AS x JOIN gp.dist_random(NULL::gdr) y USING (a)"
+is "a qualified name is taken apart as Cloudberry takes it, quoted parts and all" \
+   "SELECT gp_sql.desugar('SELECT * FROM gp_dist_random(''\"Gdr S\".\"T x\"'')'), (SELECT a FROM gp_dist_random('\"Gdr S\".\"T x\"'));" \
+   "SELECT * FROM gp.dist_random(NULL::\"Gdr S\".\"T x\") AS \"T x\"|7"
+is "outside FROM, and with a decoration, it is left for PostgreSQL" \
+   "SELECT gp_sql.desugar('SELECT gp_dist_random(''gdr'')') || ' / ' ||
+           gp_sql.desugar('SELECT * FROM gp_dist_random(''gdr'') WITH ORDINALITY');" \
+   "SELECT gp_dist_random('gdr') / SELECT * FROM gp_dist_random('gdr') WITH ORDINALITY"
+at "a relation that does not exist is reported at the string" \
+   "SELECT * FROM gp_dist_random('gdr_nosuch')" "does not exist" "'gdr_nosuch'"
+refused "and a name that is not one, as Cloudberry reports it" \
+   "SELECT * FROM gp_dist_random('a.b.c.d');" "improper qualified name (too many dotted names)"
+is "a view of it keeps working" \
+   "CREATE VIEW gdr_v AS SELECT gp_segment_id, a FROM gp_dist_random('gdr');
+    SELECT count(*), min(gp_segment_id) FROM gdr_v;" "2|-1"
+
+echo
 echo "  $pass passed, $fail failed"
 [ "$fail" -eq 0 ]

@@ -10,8 +10,8 @@
 #
 # The schedule's other tests -- append-optimized and column-oriented tables,
 # external tables, resource queues and groups, fault injection, FTS, the
-# interconnect's settings, gp_dist_random('t') throughout -- need M3 to M7,
-# or gp_dist_random() as Cloudberry spells it, and are not listed.
+# interconnect's settings, the gp_id catalog throughout -- need M3 to M7,
+# or a gp_id, and are not listed.
 skip gp_create_table  relation "distrand" already exists; relation "gp_distribution_policy" does not exist
 skip gpdist  unrecognized configuration parameter "gp_enable_fast_sri"
 skip gpdist_opclasses  column "abs_int_hash_ops" of the distribution policy of "abstab_a" does not exist; column "abs_int_hash_ops" of the distribution policy of "abstab_...
@@ -71,7 +71,7 @@ run  qp_derived_table
 skip qp_targeted_dispatch  unrecognized configuration parameter "test_print_direct_dispatch_info"; cannot specify storage parameters for a partitioned table
 skip qp_functions  bind message supplies 5 parameters, but prepared statement "" requires 2; could not determine data type of parameter $1
 skip cursor  unrecognized configuration parameter "gp_interconnect_queue_depth"; cannot UPDATE distributed table "cursor_initplan" this way yet
-skip sequence_gp  function gp_dist_random(unknown) does not exist
+skip sequence_gp  type "gp_id" does not exist
 run  tidscan_gp
 skip gp_array_agg  function gp_array_agg(integer) does not exist; function gp_array_agg(text) does not exist
 skip agg_pushdown  unrecognized configuration parameter "gp_enable_agg_pushdown"; unrecognized parameter "appendonly"
