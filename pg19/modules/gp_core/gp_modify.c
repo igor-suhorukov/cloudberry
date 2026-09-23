@@ -1006,6 +1006,17 @@ gp_modify_planner_routed(Query *parse, const char *query_string, int cursorOptio
 		 * CURRENT OF, whose cursor read the row here.
 		 */
 		why = cannot_push_reason(original, rte->relid, policy);
+
+		/*
+		 * A replicated table's row has a ctid on each segment, and the
+		 * cursor read one of them: Cloudberry's words for it
+		 * (isSimplyUpdatableRelation).
+		 */
+		if (why == current_of_reason && GpPolicyIsReplicated(policy))
+			ereport(ERROR,
+					(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+					 errmsg("\"%s\" is not simply updatable",
+							get_rel_name(rte->relid))));
 		if (why == current_of_reason)
 			ereport(ERROR,
 					(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),

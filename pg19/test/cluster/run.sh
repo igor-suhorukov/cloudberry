@@ -728,11 +728,13 @@ mine" ] && ok "a transaction reads its own rows, and a LIMIT leaves the connecti
 			ok "a random table's: in a condition the segments answer, here it is refused" ;;
 		*) notok "gp_segment_id of a random table" "$out (segment 0 holds $r1) / $out2" ;;
 	esac
-	out=$(q 0 "SELECT count(DISTINCT gp_segment_id), min(gp_segment_id) IN (0, 1) FROM gre;")
+	out=$(q 0 "SELECT count(DISTINCT gp_segment_id) FROM gre;")
 	out2=$(q 0 "SELECT gp_segment_id, count(*) FROM gp.dist_random(NULL::gre) GROUP BY 1 ORDER BY 1;")
-	[ "$out|$out2" = "1|t|0|10
-1|10" ] && ok "a replicated table's is the segment it was read from; gp.dist_random() gives each copy's" \
-		|| notok "gp_segment_id of a replicated table" "$out / $out2"
+	case "$out|$out2" in
+		*'column "gp_segment_id" does not exist'*"|0|10
+1|10") ok "a replicated table has none, as Cloudberry's shows none; gp.dist_random() gives each copy's" ;;
+		*) notok "gp_segment_id of a replicated table" "$out / $out2" ;;
+	esac
 	out=$(q 0 "SELECT count(*) FROM gp.dist_random(NULL::gs) d WHERE d.gp_segment_id <> expected_seg(a, 2);")
 	out2=$(q 0 "SELECT gp_segment_id, * FROM gp.dist_random(NULL::gs) WHERE a = 1;")
 	[ "$out|$out2" = "0|$(q 0 "SELECT expected_seg(1, 2);")|1|0" ] \
@@ -748,7 +750,7 @@ mine" ] && ok "a transaction reads its own rows, and a LIMIT leaves the connecti
 	[ "$out|$out2" = "-1|0
 1" ] && ok "a catalog's is -1 here, and each segment's through gp.dist_random()" \
 		|| notok "gp_segment_id of a catalog" "$out / $out2"
-	out=$(q 0 "SELECT gp_segment_id FROM gs, gre;")
+	out=$(q 0 "SELECT gp_segment_id FROM gs, gr;")
 	out2=$(q 0 "SELECT gp_segment_id FROM (SELECT a FROM gs) s;")
 	case "$out|$out2" in
 		*"column reference \"gp_segment_id\" is ambiguous"*"column \"gp_segment_id\" does not exist"*)
@@ -1550,6 +1552,25 @@ SQL
 		*"UPDATE on distributed key column not allowed on relation with update triggers"*)
 			ok "the key of a table with UPDATE triggers is not changed, in Cloudberry's words" ;;
 		*) notok "a key change under UPDATE triggers" "$out" ;;
+	esac
+
+	# A replicated table's row, changed by a statement that reads another
+	# table, is changed on every segment and counted once; its system columns
+	# are none of the user's, and gp_segment_id is another relation's.
+	out=$(printf '%s\n' "CREATE TABLE xr (x int, y int) DISTRIBUTED REPLICATED;" \
+		"CREATE TABLE xrd (a int) DISTRIBUTED BY (a);" \
+		"INSERT INTO xr VALUES (1, 1), (2, 1), (2, 1);" \
+		"INSERT INTO xrd VALUES (1), (2);" \
+		"UPDATE xr SET y = 3 FROM xrd WHERE xrd.a = xr.x;" \
+		"DELETE FROM xr USING xrd WHERE xrd.a = xr.x AND xr.x = 2;" | qf 0 | tr '\n' ' ')
+	out2=$(q 0 "SELECT gp_segment_id, x, y FROM gp.dist_random(NULL::xr) ORDER BY 1;" | tr '\n' ' ')
+	[ "$out|$out2" = "|0|1|3 1|1|3 " ] && ok "UPDATE and DELETE of a replicated table that read another: every copy, counted once" \
+		|| notok "writes to a replicated table" "$out / $out2"
+	out=$(q 0 "SELECT ctid FROM xr;")
+	out2=$(q 0 "SELECT count(*) FROM xrd, xr WHERE xr.x = xrd.a AND gp_segment_id = expected_seg(xrd.a, 2);")
+	case "$out|$out2" in
+		*'column "ctid" does not exist'*"|1") ok "a replicated table has no system column here, and gp_segment_id is the other table's" ;;
+		*) notok "a replicated table's system columns" "$out / $out2" ;;
 	esac
 
 	# Cloudberry reserves gp_ for schemas, and keeps pg_toast where it is.

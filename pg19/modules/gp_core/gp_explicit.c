@@ -59,12 +59,28 @@
  * plan's row that asked, and the list the planner made is evaluated over
  * them and that row.
  *
- * Refused, by name (GpExplicitCannot): an UPDATE or DELETE of a replicated
- * table, whose rows are on every segment with a ctid on each; an UPDATE of
- * the key of a table with UPDATE triggers, which a moved row would not
- * fire, in Cloudberry's words; check options; RETURNING old or new;
- * statement-level triggers, which would fire on every segment; ON
- * CONFLICT; and MERGE.
+ * A replicated table's row is on every segment, and each copy has a ctid of
+ * its own: the plan read one segment's.  So the write finds a row by what
+ * it holds instead -- its text, read on that segment by the ctid the plan
+ * carried, which every segment's copy has too, since every segment was
+ * given the same rows -- and sends every segment its statement, counted
+ * once:
+ *
+ *	   UPDATE t AS gp_t SET a = gp_s.gp_c1, ...
+ *		 FROM (VALUES ($1::text, $2::oid, $3::int8, $4::type, ...), ...)
+ *			  AS gp_s (gp_old, gp_toid, gp_n, gp_c1, ...)
+ *		WHERE gp_t::text = gp_s.gp_old AND gp_t.tableoid = gp_s.gp_toid
+ *
+ * Two copies of one row on a segment are changed together, which is right:
+ * Cloudberry does not show a replicated table's system columns (gp_segment.c),
+ * so no statement can tell them apart, and one that changes one changes the
+ * other.  The new values are computed once, here, so a volatile function
+ * gives every segment the same row, where Cloudberry refuses the plan.
+ *
+ * Refused, by name (GpExplicitCannot): an UPDATE of the key of a table with
+ * UPDATE triggers, which a moved row would not fire, in Cloudberry's words;
+ * check options; RETURNING old or new; statement-level triggers, which
+ * would fire on every segment; ON CONFLICT; and MERGE.
  *
  * Cloudberry sources this file stands in for:
  *	  the Explicit Redistribute Motion cdbpath.c puts below a ModifyTable
@@ -281,6 +297,8 @@ typedef struct ExplicitState
 	Relation	target;			/* what the segments' statements name */
 	bool		only;			/* ONLY: it has no partitions of its own here */
 	bool		replicated;
+	bool		by_content;		/* a replicated table's rows, found by their
+								 * text on every segment */
 	GpHash	   *hash;			/* an INSERT's routing */
 	AttrNumber	ctidcol;		/* the plan's junk ctid, and tableoid */
 	AttrNumber	tableoidcol;
@@ -416,10 +434,6 @@ GpExplicitCannot(PlannedStmt *stmt, ModifyTable *mt)
 		if (policy == NULL)
 			return psprintf("Of the tables it writes, \"%s\" has its rows on the coordinator and others on the segments.",
 							get_rel_name(rte->relid));
-		if (GpPolicyIsReplicated(policy) && mt->operation != CMD_INSERT)
-			return psprintf("\"%s\" is replicated: its rows are on every segment, each with a ctid of its own, and the one the plan read names none of the others.",
-							get_rel_name(rte->relid));
-
 		rel = table_open(rte->relid, NoLock);
 		triggers = has_statement_triggers(rel, mt->operation);
 		table_close(rel, NoLock);
@@ -614,6 +628,7 @@ explicit_begin(CustomScanState *node, EState *estate, int eflags)
 	targetdesc = RelationGetDescr(state->target);
 	policy = GpScanDistributedPolicy(RelationGetRelid(state->target));
 	state->replicated = policy != NULL && GpPolicyIsReplicated(policy);
+	state->by_content = state->replicated && state->operation != CMD_INSERT;
 	state->numsegments = policy != NULL ? policy->numsegments : 0;
 
 	/* The plan's row: its values first, in order, then its junk. */
@@ -626,10 +641,13 @@ explicit_begin(CustomScanState *node, EState *estate, int eflags)
 	initStringInfo(&head);
 	initStringInfo(&tail);
 
-	/* a row's place, its table and the number of the plan's row */
+	/*
+	 * a row's place -- or a replicated table's row's text -- its table and
+	 * the number of the plan's row
+	 */
 	if (state->operation != CMD_INSERT)
-		state->casts = list_make3("pg_catalog.tid", "pg_catalog.oid",
-								  "pg_catalog.int8");
+		state->casts = list_make3(state->by_content ? "pg_catalog.text" : "pg_catalog.tid",
+								  "pg_catalog.oid", "pg_catalog.int8");
 
 	if (state->operation == CMD_UPDATE)
 	{
@@ -655,10 +673,13 @@ explicit_begin(CustomScanState *node, EState *estate, int eflags)
 			i++;
 		}
 		appendStringInfoString(&head, " FROM (VALUES ");
-		appendStringInfoString(&tail, ") AS gp_s (gp_ctid, gp_toid, gp_n");
+		appendStringInfo(&tail, ") AS gp_s (%s, gp_toid, gp_n",
+						 state->by_content ? "gp_old" : "gp_ctid");
 		for (i = 0; i < state->nvals; i++)
 			appendStringInfo(&tail, ", gp_c%d", i + 1);
-		appendStringInfoString(&tail, ") WHERE gp_t.ctid = gp_s.gp_ctid AND gp_t.tableoid = gp_s.gp_toid");
+		appendStringInfo(&tail, ") WHERE %s AND gp_t.tableoid = gp_s.gp_toid",
+						 state->by_content ? "gp_t::pg_catalog.text = gp_s.gp_old"
+						 : "gp_t.ctid = gp_s.gp_ctid");
 	}
 	else if (state->operation == CMD_DELETE)
 	{
@@ -666,7 +687,9 @@ explicit_begin(CustomScanState *node, EState *estate, int eflags)
 		appendStringInfo(&head, "DELETE FROM %s%s AS gp_t USING (VALUES ",
 						 state->only ? "ONLY " : "",
 						 GpDispatchRelationName(RelationGetRelid(state->target)));
-		appendStringInfoString(&tail, ") AS gp_s (gp_ctid, gp_toid, gp_n) WHERE gp_t.ctid = gp_s.gp_ctid AND gp_t.tableoid = gp_s.gp_toid");
+		appendStringInfoString(&tail, state->by_content
+							   ? ") AS gp_s (gp_old, gp_toid, gp_n) WHERE gp_t::pg_catalog.text = gp_s.gp_old AND gp_t.tableoid = gp_s.gp_toid"
+							   : ") AS gp_s (gp_ctid, gp_toid, gp_n) WHERE gp_t.ctid = gp_s.gp_ctid AND gp_t.tableoid = gp_s.gp_toid");
 	}
 	else
 	{
@@ -1132,6 +1155,80 @@ explicit_send_split(ExplicitState *state)
 	return deleted;
 }
 
+typedef struct RowText
+{
+	ItemPointerData tid;		/* the hash key */
+	char	   *text;
+} RowText;
+
+/*
+ * A replicated table's rows, as the segment the plan read them on holds
+ * them: each one's text, by the ctid the plan carried, which a batch's rows
+ * are then written with in place of the ctid.  Every row of one write was
+ * read on one segment, the one the gather of a replicated table asks.
+ */
+static List *
+explicit_rows_by_content(ExplicitState *state, int content, List *rows)
+{
+	StringInfoData tids;
+	StringInfoData sql;
+	TupleDesc	desc = CreateTemplateTupleDesc(2);
+	Tuplestorestate *store = tuplestore_begin_heap(false, false, work_mem);
+	TupleTableSlot *slot;
+	HASHCTL		ctl = {0};
+	HTAB	   *texts;
+	const char *param;
+	ListCell   *lc;
+
+	TupleDescInitEntry(desc, 1, "ctid", TIDOID, -1, 0);
+	TupleDescInitEntry(desc, 2, "text", TEXTOID, -1, 0);
+	TupleDescFinalize(desc);
+
+	initStringInfo(&tids);
+	appendStringInfoChar(&tids, '{');
+	foreach(lc, rows)
+		appendStringInfo(&tids, "%s\"%s\"", foreach_current_index(lc) > 0 ? "," : "",
+						 ((const char **) lfirst(lc))[0]);
+	appendStringInfoChar(&tids, '}');
+	param = tids.data;
+
+	initStringInfo(&sql);
+	appendStringInfo(&sql, "SELECT gp_r.ctid, gp_r::pg_catalog.text FROM %s%s AS gp_r WHERE gp_r.ctid = ANY ($1::pg_catalog.tid[])",
+					 state->only ? "ONLY " : "",
+					 GpDispatchRelationName(RelationGetRelid(state->target)));
+	(void) GpDispatchWriteOnContent(content, sql.data, 1, &param, desc, store);
+
+	ctl.keysize = sizeof(ItemPointerData);
+	ctl.entrysize = sizeof(RowText);
+	ctl.hcxt = CurrentMemoryContext;
+	texts = hash_create("gp explicit row texts", Max(list_length(rows), 16),
+						&ctl, HASH_ELEM | HASH_BLOBS | HASH_CONTEXT);
+	slot = MakeSingleTupleTableSlot(desc, &TTSOpsMinimalTuple);
+	while (tuplestore_gettupleslot(store, true, false, slot))
+	{
+		bool		isnull;
+		ItemPointer tid = (ItemPointer) DatumGetPointer(slot_getattr(slot, 1, &isnull));
+		RowText    *entry = hash_search(texts, tid, HASH_ENTER, NULL);
+
+		entry->text = TextDatumGetCString(slot_getattr(slot, 2, &isnull));
+	}
+	ExecDropSingleTupleTableSlot(slot);
+	tuplestore_end(store);
+
+	foreach(lc, rows)
+	{
+		const char **params = (const char **) lfirst(lc);
+		ItemPointer tid = (ItemPointer) DatumGetPointer(DirectFunctionCall1(tidin,
+																			CStringGetDatum(params[0])));
+		RowText    *entry = hash_search(texts, tid, HASH_FIND, NULL);
+
+		if (entry == NULL)
+			elog(ERROR, "a row to write is no longer on segment %d", content);
+		params[0] = entry->text;
+	}
+	return rows;
+}
+
 static void
 explicit_send(ExplicitState *state)
 {
@@ -1143,6 +1240,29 @@ explicit_send(ExplicitState *state)
 
 	if (state->split)
 		total += explicit_send_split(state);
+	else if (state->by_content)
+	{
+		/*
+		 * a replicated table's rows, found by their text on every segment
+		 * of it -- a partial table's first so many -- and counted once
+		 */
+		for (int from = 0; from < state->nsegs; from++)
+		{
+			List	   *rows;
+
+			if (state->batches[from] == NIL)
+				continue;
+			rows = explicit_rows_by_content(state, from, state->batches[from]);
+			for (int seg = 0; seg < Min(state->nsegs, state->numsegments); seg++)
+			{
+				uint64		n = explicit_send_rows(state, seg, rows,
+												   seg == 0 ? state->returned : NULL);
+
+				if (seg == 0)
+					total += n;
+			}
+		}
+	}
 	else
 		for (int seg = 0; seg < state->nsegs; seg++)
 			if (state->batches[seg] != NIL)

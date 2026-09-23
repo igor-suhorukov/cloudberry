@@ -54,12 +54,22 @@
  * of it turns the call into gp_internal.dist_random_segments(NULL::t), which
  * returns the rows with their segment as one more column, left out of "*".
  *
+ * A replicated table shows no system column on the coordinator, as
+ * Cloudberry's shows none outside utility mode (scanRTEForColumn): each
+ * segment's copy of a row has a ctid, an xmin and a segment of its own, and
+ * which copy a session reads varies.  So gp_segment_id is not the name of
+ * anything of it -- the name falls through to another relation, as in
+ * Cloudberry -- and a system column PostgreSQL gave it is refused after
+ * analysis, as the column that does not exist that it is in Cloudberry.
+ *
  *-------------------------------------------------------------------------
  */
 #include "postgres.h"
 
 #include "access/htup_details.h"
+#include "access/sysattr.h"
 #include "access/table.h"
+#include "catalog/heap.h"
 #include "catalog/pg_type.h"
 #include "executor/tuptable.h"
 #include "funcapi.h"
@@ -68,7 +78,9 @@
 #include "nodes/nodeFuncs.h"
 #include "parser/parse_expr.h"
 #include "parser/parse_func.h"
+#include "parser/analyze.h"
 #include "parser/parse_relation.h"
+#include "parser/parsetree.h"
 #include "utils/builtins.h"
 #include "utils/inval.h"
 #include "utils/lsyscache.h"
@@ -79,14 +91,17 @@
 #include "utils/typcache.h"
 
 #include "gp_cluster.h"
+#include "gp_core_api.h"
 #include "gp_dispatch.h"
 #include "gp_hash.h"
+#include "gp_policy.h"
 #include "gp_scan.h"
 #include "gp_segment.h"
 
 #define GP_SEGMENT_ID	"gp_segment_id"
 
 static columnref_fallback_hook_type prev_columnref_fallback_hook = NULL;
+static post_parse_analyze_hook_type prev_post_parse_analyze_hook = NULL;
 static deparse_function_as_column_hook_type prev_deparse_function_as_column_hook = NULL;
 
 /* ------------------------------------------------------------------------- */
@@ -168,6 +183,66 @@ GpSegmentIsSegmentOf(Node *node, Index varno)
 /* Parsing: the name, where no column has it                                 */
 /* ------------------------------------------------------------------------- */
 
+/* A replicated table, read on the coordinator: it shows no system column. */
+static bool
+hides_system_columns(Oid relid)
+{
+	if (GpClusterBackendRole() != GP_ROLE_DISPATCH)
+		return false;
+	return GpPolicyIsReplicated(GpScanDistributedPolicy(relid));
+}
+
+typedef struct SystemColumnsContext
+{
+	ParseState *pstate;
+	List	   *rtables;		/* each query level's, the innermost first */
+} SystemColumnsContext;
+
+static bool
+system_columns_walker(Node *node, SystemColumnsContext *cxt)
+{
+	if (node == NULL)
+		return false;
+	if (IsA(node, Var))
+	{
+		Var		   *var = (Var *) node;
+		RangeTblEntry *rte;
+
+		if (var->varattno >= 0 || var->varlevelsup >= list_length(cxt->rtables))
+			return false;
+		rte = rt_fetch(var->varno, (List *) list_nth(cxt->rtables, var->varlevelsup));
+		if (rte->rtekind == RTE_RELATION && hides_system_columns(rte->relid))
+			ereport(ERROR,
+					(errcode(ERRCODE_UNDEFINED_COLUMN),
+					 errmsg("column \"%s\" does not exist",
+							NameStr(SystemAttributeDefinition(var->varattno)->attname)),
+					 parser_errposition(cxt->pstate, var->location)));
+		return false;
+	}
+	if (IsA(node, Query))
+	{
+		bool		result;
+
+		cxt->rtables = lcons(((Query *) node)->rtable, cxt->rtables);
+		result = query_tree_walker((Query *) node, system_columns_walker, cxt, 0);
+		cxt->rtables = list_delete_first(cxt->rtables);
+		return result;
+	}
+	return expression_tree_walker(node, system_columns_walker, cxt);
+}
+
+static void
+gp_post_parse_analyze(ParseState *pstate, Query *query,
+					  const JumbleState *jstate)
+{
+	SystemColumnsContext cxt = {.pstate = pstate,.rtables = NIL};
+
+	if (prev_post_parse_analyze_hook)
+		prev_post_parse_analyze_hook(pstate, query, jstate);
+	if (GpClusterBackendRole() == GP_ROLE_DISPATCH)
+		(void) system_columns_walker((Node *) query, &cxt);
+}
+
 /*
  * Does this entry have gp_segment_id?  In Cloudberry every relation that has
  * system columns has it: tables, partitioned tables, materialized views.
@@ -180,9 +255,10 @@ nsitem_has_segment_id(ParseNamespaceItem *nsitem)
 	RangeTblEntry *rte = nsitem->p_rte;
 
 	if (rte->rtekind == RTE_RELATION)
-		return rte->relkind == RELKIND_RELATION ||
-			rte->relkind == RELKIND_PARTITIONED_TABLE ||
-			rte->relkind == RELKIND_MATVIEW;
+		return (rte->relkind == RELKIND_RELATION ||
+				rte->relkind == RELKIND_PARTITIONED_TABLE ||
+				rte->relkind == RELKIND_MATVIEW) &&
+			!hides_system_columns(rte->relid);
 
 	if (rte->rtekind == RTE_FUNCTION && list_length(rte->functions) == 1)
 	{
@@ -598,6 +674,8 @@ GpSegmentInit(void)
 	columnref_fallback_hook = gp_columnref_fallback;
 	prev_deparse_function_as_column_hook = deparse_function_as_column_hook;
 	deparse_function_as_column_hook = gp_deparse_function_as_column;
+	prev_post_parse_analyze_hook = post_parse_analyze_hook;
+	post_parse_analyze_hook = gp_post_parse_analyze;
 
 	CacheRegisterSyscacheCallback(PROCOID, invalidate_func_oids, (Datum) 0);
 }
