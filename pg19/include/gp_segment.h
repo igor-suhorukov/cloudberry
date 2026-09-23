@@ -17,39 +17,25 @@
  * specific language governing permissions and limitations
  * under the License.
  *
- * gp_scan.h
- *	  Reading and writing distributed tables when PostgreSQL's planner plans.
+ * gp_segment.h
+ *	  gp_segment_id, through O10's column-reference fallback.
  *
  *-------------------------------------------------------------------------
  */
-#ifndef GP_SCAN_H
-#define GP_SCAN_H
+#ifndef GP_SEGMENT_H
+#define GP_SEGMENT_H
 
 #include "postgres.h"
 
-#include "gp_policy.h"
+#include "nodes/nodes.h"
 
 /*
- * The policy of a table whose rows are on the segments, or NULL for one whose
- * rows are here: on a single node every table, on a cluster a table with no
- * policy or an entry one.
+ * Is this expression gp_segment_id of range table entry varno's row -- a call
+ * of gp_internal.segment_of() on it, which a segment answers for itself?
  */
-extern GpPolicy *GpScanDistributedPolicy(Oid relid);
+extern bool GpSegmentIsSegmentOf(Node *node, Index varno);
 
-/*
- * The segment this session reads a replicated table from.  Every segment has
- * every row, so sessions are spread over them; it is also the answer to
- * gp_segment_id of such a row.
- */
-extern int	GpScanReplicatedContent(void);
+/* The parser's and ruleutils' hooks, on every node; see gp_segment.c. */
+extern void GpSegmentInit(void);
 
-/* The scan hooks, where there is a cluster; see gp_scan.c. */
-extern void GpScanInit(void);
-
-/* The write path, where there is a cluster; see gp_modify.c. */
-extern void GpModifyInit(void);
-
-/* ANALYZE of a distributed table through O3, where there is a cluster. */
-extern void GpAnalyzeInit(void);
-
-#endif							/* GP_SCAN_H */
+#endif							/* GP_SEGMENT_H */

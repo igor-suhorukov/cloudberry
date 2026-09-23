@@ -185,6 +185,56 @@ else
 fi
 
 ###############################################################################
+echo "O10 columnref_fallback_hook, deparse_function_as_column_hook: a name that is a call"
+###############################################################################
+# The armed name, where no column has it, is a call of the armed function on
+# the row, and prints back as the name: what gp_core does with gp_segment_id.
+# PL/pgSQL, so that the planner keeps the call rather than inlining it.
+session o10 <<'SQL'
+SELECT gp_probe.reset();
+CREATE TABLE o10_t (a int);
+INSERT INTO o10_t VALUES (1), (2);
+CREATE FUNCTION o10_f(o10_t) RETURNS int LANGUAGE plpgsql AS 'BEGIN RETURN $1.a * 10; END';
+SELECT probed FROM o10_t;
+SELECT gp_probe.arm_column('probed', 'o10_f(o10_t)'::regprocedure);
+SELECT 'calls_before=' || gp_probe.calls('columnref') FROM o10_t WHERE a = 1;
+SELECT 'values=' || string_agg(probed::text, '|' ORDER BY probed) FROM o10_t;
+SELECT 'qualified=' || t.probed FROM o10_t t WHERE a = 2;
+SELECT 'calls_columnref=' || gp_probe.calls('columnref');
+SELECT 'detail_columnref=' || gp_probe.detail('columnref');
+CREATE VIEW o10_v AS SELECT probed, a FROM o10_t WHERE probed > 10;
+SELECT 'viewdef=' || regexp_replace(pg_get_viewdef('o10_v'), '\s+', ' ', 'g');
+CREATE FUNCTION o10_explain() RETURNS text LANGUAGE plpgsql AS $$
+DECLARE l text; r text := '';
+BEGIN
+	FOR l IN EXPLAIN (VERBOSE, COSTS OFF) SELECT probed FROM o10_t LOOP
+		r := r || ' ' || l;
+	END LOOP;
+	RETURN r;
+END $$;
+SELECT 'explain=' || btrim(regexp_replace(o10_explain(), '\s+', ' ', 'g'));
+SELECT 'calls_deparse_column=' || gp_probe.calls('deparse_column');
+SELECT 'detail_deparse_column=' || gp_probe.detail('deparse_column');
+SELECT gp_probe.reset();
+SELECT 'view_unarmed=' || string_agg(a::text, '|') FROM o10_v;
+SELECT 'viewdef_unarmed=' || regexp_replace(pg_get_viewdef('o10_v'), '\s+', ' ', 'g');
+SQL
+is "a column that exists never reaches the hook" o10 calls_before 0
+is "the name is the call, unqualified" o10 values '10|20'
+is "and qualified" o10 qualified 20
+fired "columnref_fallback_hook is called for the name no column has" o10 columnref
+is "a view prints the call as the name" o10 viewdef ' SELECT probed, a FROM o10_t WHERE (probed > 10);'
+is "and EXPLAIN does too, as it prints a column of one relation" o10 explain 'Seq Scan on public.o10_t Output: probed'
+fired "deparse_function_as_column_hook is called for the call" o10 deparse_column
+is "unarmed, a stored view still runs" o10 view_unarmed 2
+is "and prints as the call it is" o10 viewdef_unarmed ' SELECT o10_f(o10_t.*) AS probed, a FROM o10_t WHERE (o10_f(o10_t.*) > 10);'
+if grep -q 'column "probed" does not exist' "$WORK/o10.out"; then
+	ok "unarmed, the name is a missing column"
+else
+	notok "unarmed, the name should be a missing column" "$(head -5 "$WORK/o10.out")"
+fi
+
+###############################################################################
 echo "O22 mdunlink_hook: an extension sees the files of a dropped relation go"
 ###############################################################################
 session o22 <<'SQL'

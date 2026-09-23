@@ -55,11 +55,13 @@
 #include "access/htup_details.h"
 #include "catalog/pg_class.h"
 #include "catalog/pg_opfamily.h"
+#include "catalog/pg_type.h"
 #include "commands/explain.h"
 #include "commands/explain_format.h"
 #include "executor/executor.h"
 #include "miscadmin.h"
 #include "nodes/extensible.h"
+#include "nodes/makefuncs.h"
 #include "nodes/nodeFuncs.h"
 #include "optimizer/cost.h"
 #include "optimizer/optimizer.h"
@@ -81,6 +83,7 @@
 #include "gp_hash.h"
 #include "gp_policy.h"
 #include "gp_scan.h"
+#include "gp_segment.h"
 
 /* What starting a gather costs before its first row: a round trip per segment. */
 #define GATHER_STARTUP_COST		1000.0
@@ -151,6 +154,16 @@ GpScanDistributedPolicy(Oid relid)
 	return policy;
 }
 
+int
+GpScanReplicatedContent(void)
+{
+	int			nsegs;
+
+	/* Every segment has every row; spread the sessions over them. */
+	GpClusterSegments(&nsegs);
+	return MyProcPid % nsegs;
+}
+
 /* ------------------------------------------------------------------------- */
 /* What can be sent                                                          */
 /* ------------------------------------------------------------------------- */
@@ -197,16 +210,33 @@ shippable_walker(Node *node, ShippableContext *cxt)
 }
 
 /*
+ * gp_segment_id of this table, taken out of a condition before it is judged:
+ * it differs between nodes, but a segment's answer is the right one -- the
+ * segment that holds the row -- and a random table's is the only one.
+ */
+static Node *
+without_segment_id(Node *node, Index *relid)
+{
+	if (node == NULL)
+		return NULL;
+	if (GpSegmentIsSegmentOf(node, *relid))
+		return (Node *) makeConst(INT4OID, -1, InvalidOid, sizeof(int32),
+								  Int32GetDatum(0), false, true);
+	return expression_tree_mutator(node, without_segment_id, relid);
+}
+
+/*
  * Can this condition be evaluated on a segment and mean the same there?
  * Nothing whose answer could differ between nodes: only this table's columns,
  * no parameter or subquery, and no function that is not immutable -- now()
- * is a different instant on each node.
+ * is a different instant on each node.  gp_segment_id is the exception.
  */
 static bool
 is_shippable(Expr *expr, Index relid)
 {
 	ShippableContext cxt = {.relid = relid};
 
+	expr = (Expr *) without_segment_id((Node *) expr, &relid);
 	if (contain_mutable_functions((Node *) expr))
 		return false;
 	return !shippable_walker((Node *) expr, &cxt);
@@ -478,13 +508,7 @@ gather_plan(PlannerInfo *root, RelOptInfo *rel, CustomPath *best_path,
 	}
 
 	if (policy != NULL && GpPolicyIsReplicated(policy))
-	{
-		int			nsegs;
-
-		/* Every segment has every row; spread the sessions over them. */
-		GpClusterSegments(&nsegs);
-		content = MyProcPid % nsegs;
-	}
+		content = GpScanReplicatedContent();
 	else if (policy != NULL)
 		content = direct_dispatch_segment(policy, relation, pushed, rel->relid);
 

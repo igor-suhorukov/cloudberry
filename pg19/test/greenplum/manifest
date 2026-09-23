@@ -10,8 +10,8 @@
 #
 # The schedule's other tests -- append-optimized and column-oriented tables,
 # external tables, resource queues and groups, fault injection, FTS, the
-# interconnect's settings, gp_segment_id throughout -- need M3 to M7 or a
-# core change, and are not listed.
+# interconnect's settings, gp_dist_random('t') throughout -- need M3 to M7,
+# or gp_dist_random() as Cloudberry spells it, and are not listed.
 skip gp_create_table  relation "distrand" already exists; relation "gp_distribution_policy" does not exist
 skip gpdist  unrecognized configuration parameter "gp_enable_fast_sri"
 skip gpdist_opclasses  column "abs_int_hash_ops" of the distribution policy of "abstab_a" does not exist; column "abs_int_hash_ops" of the distribution policy of "abstab_...
@@ -24,7 +24,7 @@ skip join_gp  unrecognized configuration parameter "statement_mem"; unrecognized
 skip union_gp  UNION types text and integer cannot be matched; syntax error at or near "EXTERNAL"
 skip limit_gp  unrecognized configuration parameter "statement_mem"
 skip case_gp  differs: WHEN NOT 'test'::text IS DISTINCT FROM ''::text THEN 'A'::text+
-skip notin  column "gp_segment_id" does not exist
+run  notin
 skip percentile  unrecognized parameter "appendonly"; column "perct.a" must appear in the GROUP BY clause or be used in an aggregate function
 skip gp_aggregates  unrecognized configuration parameter "gp_motion_cost_per_row"
 skip gp_types  data type bit varying has no default operator class for access method "hash"; cannot UPDATE distributed table "dml_interval" this way yet

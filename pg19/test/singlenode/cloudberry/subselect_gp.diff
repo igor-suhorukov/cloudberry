@@ -27,16 +27,4 @@
 +LINE 1: delete from gp_distribution_policy where localoid='csq_m1'::...
 +                    ^
 @@
-+ERROR:  column "gp_segment_id" does not exist
-+LINE 1: CREATE TABLE t2 AS (SELECT * FROM t1 WHERE gp_segment_id = 0...
-+                                                   ^
-@@
-+ERROR:  column "gp_segment_id" does not exist
-+LINE 1: CREATE TABLE t3 AS (SELECT * FROM t1 WHERE gp_segment_id = 1...
-+                                                   ^
-@@
 +ERROR:  unrecognized configuration parameter "gp_interconnect_queue_depth"
-@@
-+ERROR:  relation "t3" does not exist
-+LINE 4: FROM t1, t3
-+                 ^

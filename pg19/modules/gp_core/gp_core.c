@@ -51,6 +51,7 @@
 #include "gp_label.h"
 #include "gp_policy.h"
 #include "gp_scan.h"
+#include "gp_segment.h"
 
 PG_MODULE_MAGIC_EXT(
 					.name = "gp_core",
@@ -161,6 +162,12 @@ _PG_init(void)
 	 * to see a query.
 	 */
 	GpMotionInit();
+
+	/*
+	 * gp_segment_id, through O10: the name, where no column has it, and its
+	 * call printed back as the name.  On every node, one or many.
+	 */
+	GpSegmentInit();
 
 	/*
 	 * Deliberately no MarkGUCPrefixReserved("gp") here.  It drops every

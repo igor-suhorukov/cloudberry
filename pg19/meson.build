@@ -120,11 +120,13 @@ patch_probe = '''
 #include "commands/explain.h"
 #include "commands/matview.h"
 #include "commands/vacuum.h"
+#include "parser/parse_expr.h"
 #include "parser/parse_relation.h"
 #include "parser/parser.h"
 #include "replication/syncrep.h"
 #include "storage/md.h"
 #include "utils/combocid.h"
+#include "utils/ruleutils.h"
 
 void		cb_probe(void);
 
@@ -137,6 +139,8 @@ cb_probe(void)
 	SyncRepHoldCancelDuringWait = false;	/* R3 */
 	analyze_sample_rows_hook = NULL;		/* O3 */
 	explain_node_label_hook = NULL;			/* O4 */
+	columnref_fallback_hook = NULL;			/* O10 */
+	deparse_function_as_column_hook = NULL;	/* O10 */
 	mdunlink_hook = NULL;					/* O22 */
 	raw_parser_hook = NULL;					/* O26 */
 	star_expansion_filter_hook = NULL;		/* O28 */
@@ -169,7 +173,7 @@ if not have_patched_pg and get_option('require_patched_pg')
   error('''
     @0@
     compiles, but does not carry the Cloudberry core patch series (R1-R3, O3,
-    O4, O22, O26-O28).  Build PostgreSQL from github/postgres, branch
+    O4, O10, O22, O26-O28).  Build PostgreSQL from github/postgres, branch
     REL_19_STABLE_CLOUDBERRY, and point -Dpg_config at it.
     Pass -Drequire_patched_pg=false to configure anyway.'''.format(
     pg_config.full_path()))
@@ -220,6 +224,7 @@ modules = [
                      'modules/gp_core/gp_analyze.c',
                      'modules/gp_core/gp_motion.c',
                      'modules/gp_core/gp_split.c',
+                     'modules/gp_core/gp_segment.c',
                      'modules/gp_core/gp_label.c',
                      'modules/gp_core/gp_median.c',
                      'modules/gp_core/gp_policy.c'),

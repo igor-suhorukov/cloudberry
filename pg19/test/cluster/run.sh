@@ -640,6 +640,78 @@ mine" ] && ok "a transaction reads its own rows, and a LIMIT leaves the connecti
 	n1=$(q 1 "SELECT count(*) FROM d;")
 	[ "$out|$n1" = "0|0" ] && ok "TRUNCATE empties the segments" || notok "TRUNCATE" "$out|$n1"
 
+	# gp_segment_id: Cloudberry's system column, which O10 lets the port give
+	# the name to where no column has it -- a call of the row's segment,
+	# which a segment answers for itself and ruleutils prints as the name.
+	q 0 "CREATE TABLE gs (a int, b int) DISTRIBUTED BY (a); INSERT INTO gs SELECT i, 0 FROM generate_series(1, 100) i;" >/dev/null
+	q 0 "CREATE TABLE gr (a int) DISTRIBUTED RANDOMLY; INSERT INTO gr SELECT generate_series(1, 100);" >/dev/null
+	q 0 "CREATE TABLE gre (a int) DISTRIBUTED REPLICATED; INSERT INTO gre SELECT generate_series(1, 10);" >/dev/null
+	n1=$(q 1 "SELECT count(*) FROM gs;"); n2=$(q 2 "SELECT count(*) FROM gs;")
+	out=$(q 0 "SELECT gp_segment_id, count(*) FROM gs GROUP BY 1 ORDER BY 1;")
+	[ "$out" = "0|$n1
+1|$n2" ] && ok "gp_segment_id of a hashed table's rows is the segment that holds each" \
+		|| notok "gp_segment_id in a target list" "$out (segments hold $n1 and $n2)"
+	out=$(q 0 "SELECT count(*) FROM gs t WHERE t.gp_segment_id <> expected_seg(a, 2);")
+	out2=$(q 0 "EXPLAIN (VERBOSE, COSTS OFF) SELECT a FROM gs WHERE gp_segment_id = 1;")
+	case "$out|$out2" in
+		"0|"*"Remote SQL: SELECT a, NULL FROM ONLY public.gs WHERE (gp_segment_id = 1)"*)
+			ok "t.gp_segment_id in a condition is sent to the segments, each answering for itself" ;;
+		*) notok "gp_segment_id in a sent condition" "$out / $out2" ;;
+	esac
+	r1=$(q 1 "SELECT count(*) FROM gr;")
+	out=$(q 0 "SELECT count(*) FROM gr WHERE gp_segment_id = 0;")
+	out2=$(q 0 "SELECT gp_segment_id FROM gr LIMIT 1;")
+	case "$out|$out2" in
+		"$r1|"*"gp_segment_id of randomly distributed table \"gr\" is known only on its segments"*)
+			ok "a random table's: in a condition the segments answer, here it is refused" ;;
+		*) notok "gp_segment_id of a random table" "$out (segment 0 holds $r1) / $out2" ;;
+	esac
+	out=$(q 0 "SELECT count(DISTINCT gp_segment_id), min(gp_segment_id) IN (0, 1) FROM gre;")
+	out2=$(q 0 "SELECT gp_segment_id, count(*) FROM gp.dist_random(NULL::gre) GROUP BY 1 ORDER BY 1;")
+	[ "$out|$out2" = "1|t|0|10
+1|10" ] && ok "a replicated table's is the segment it was read from; gp.dist_random() gives each copy's" \
+		|| notok "gp_segment_id of a replicated table" "$out / $out2"
+	out=$(q 0 "SELECT count(*) FROM gp.dist_random(NULL::gs) d WHERE d.gp_segment_id <> expected_seg(a, 2);")
+	out2=$(q 0 "SELECT gp_segment_id, * FROM gp.dist_random(NULL::gs) WHERE a = 1;")
+	[ "$out|$out2" = "0|$(q 0 "SELECT expected_seg(1, 2);")|1|0" ] \
+		&& ok "gp.dist_random() of a hashed table: each row's segment, and \"*\" without it" \
+		|| notok "gp_segment_id of gp.dist_random()" "$out / $out2"
+	out=$(q 0 "SELECT DISTINCT gp_segment_id FROM pg_class;")
+	out2=$(q 0 "SELECT DISTINCT gp_segment_id FROM gp.dist_random(NULL::pg_namespace) ORDER BY 1;")
+	[ "$out|$out2" = "-1|0
+1" ] && ok "a catalog's is -1 here, and each segment's through gp.dist_random()" \
+		|| notok "gp_segment_id of a catalog" "$out / $out2"
+	out=$(q 0 "SELECT gp_segment_id FROM gs, gre;")
+	out2=$(q 0 "SELECT gp_segment_id FROM (SELECT a FROM gs) s;")
+	case "$out|$out2" in
+		*"column reference \"gp_segment_id\" is ambiguous"*"column \"gp_segment_id\" does not exist"*)
+			ok "two relations make it ambiguous, and a subquery has none, as in Cloudberry" ;;
+		*) notok "where gp_segment_id is not one relation's" "$out / $out2" ;;
+	esac
+	q 0 "CREATE VIEW gsv AS SELECT gp_segment_id, a FROM gs WHERE gp_segment_id = 1;" >/dev/null
+	out=$(q 0 "SELECT pg_get_viewdef('gsv');" | tr -s ' \n' ' '); out=${out% }
+	v1=$(q 1 "SELECT count(*) FROM gsv;"); v2=$(q 2 "SELECT count(*) FROM gsv;")
+	[ "$out|$v1|$v2" = " SELECT gp_segment_id, a FROM gs WHERE (gp_segment_id = 1);|0|$n2" ] \
+		&& ok "a view prints it as the column, and each segment's copy of the view answers for itself" \
+		|| notok "a view of gp_segment_id" "$out / $v1 $v2"
+	out=$(q 0 "EXPLAIN (VERBOSE, COSTS OFF) SELECT gp_segment_id, count(*) FROM gs GROUP BY 1;")
+	case "$out" in
+		*"segment_of"*) notok "EXPLAIN of gp_segment_id" "$out" ;;
+		*"Output: gp_segment_id, count(*)"*"Group Key: gs.gp_segment_id"*)
+			ok "EXPLAIN prints it as the column" ;;
+		*) notok "EXPLAIN of gp_segment_id" "$out" ;;
+	esac
+	q 0 "DELETE FROM gs WHERE gp_segment_id = 0;" >/dev/null
+	q 0 "UPDATE gs SET b = gp_segment_id;" >/dev/null
+	out=$(q 0 "SELECT count(*), count(*) FILTER (WHERE b <> expected_seg(a, 2)) FROM gs;")
+	[ "$out" = "$n2|0" ] && ok "DELETE ... WHERE gp_segment_id = 0 empties segment 0; UPDATE sets it where each row is" \
+		|| notok "DELETE and UPDATE with gp_segment_id" "$out (segment 1 held $n2)"
+	out=$(q 1 "SELECT DISTINCT gp_segment_id FROM gre;")
+	q 0 "CREATE TABLE gown (gp_segment_id int, a int) DISTRIBUTED BY (a); INSERT INTO gown VALUES (42, 1);" >/dev/null
+	out2=$(q 0 "SELECT gp_segment_id FROM gown;")
+	[ "$out|$out2" = "0|42" ] && ok "a segment's utility session answers its own id; a column of that name is the column" \
+		|| notok "gp_segment_id on a segment, and a real column" "$out / $out2"
+
 	###########################################################################
 	echo "9. ANALYZE samples the segments, and the planner believes it"
 	###########################################################################
@@ -766,6 +838,12 @@ mine" ] && ok "a transaction reads its own rows, and a LIMIT leaves the connecti
 	orca_same "two gathers, one slice each" \
 		"SELECT a FROM o WHERE a IN (SELECT b FROM o WHERE a < 20) ORDER BY a;" \
 		"(slice2; segments: 2)"
+
+	# ORCA takes no whole row, so a query naming gp_segment_id is PostgreSQL's.
+	want=$(q 0 "SET gp.optimizer = off; SELECT gp_segment_id, count(*) FROM o GROUP BY 1 ORDER BY 1;")
+	got=$(q 0 "SELECT gp_segment_id, count(*) FROM o GROUP BY 1 ORDER BY 1;")
+	[ "$got" = "$want" ] && [ -n "$got" ] && ok "gp_segment_id under ORCA: planned by PostgreSQL, the same rows" \
+		|| notok "gp_segment_id under ORCA" "$got / $want"
 
 	# The slice table, in PlannedStmt.extension_state, as Cloudberry's
 	# EXPLAIN (SLICETABLE) would print it.
@@ -1055,6 +1133,10 @@ if "$BINDIR/pg_ctl" -D "$d" -l "$ROOT/node0.log" -w -t 30 start >/dev/null 2>&1;
 	out=$(q 0 "SELECT count(*) FROM gp.segment_configuration();")
 	[ "$out" = "0" ] && ok "and no rows in gp.segment_configuration()" \
 		|| notok "gp.segment_configuration() with no cluster" "$out"
+
+	out=$(q 0 "CREATE TABLE sn (a int); INSERT INTO sn VALUES (1), (2); SELECT DISTINCT gp_segment_id FROM sn;")
+	[ "$out" = "-1" ] && ok "gp_segment_id is -1, as on Cloudberry's single node" \
+		|| notok "gp_segment_id on one node" "$out"
 else
 	notok "a server with no cluster starts" "$(tail -5 "$ROOT/node0.log")"
 fi

@@ -157,6 +157,24 @@ COMMENT ON FUNCTION gp.dist_random(anyelement) IS
 	'the rows of a relation as the segments hold them (Apache Cloudberry: gp_dist_random)';
 
 /*
+ * gp_segment_id, Cloudberry's system column, which the parser makes of the
+ * name where no column has it (O10, gp_segment.c): segment_of(t.*) is the
+ * segment that holds the row, and a segment answers it for itself.  Neither
+ * is called by name.  dist_random_segments() stands in for gp.dist_random()
+ * when a query asks which segment each copy came from, and takes its result
+ * columns from the parser.
+ */
+CREATE FUNCTION gp_internal.segment_of(record)
+RETURNS int
+AS 'MODULE_PATHNAME', 'gp_segment_of'
+LANGUAGE C STABLE STRICT PARALLEL SAFE;
+
+CREATE FUNCTION gp_internal.dist_random_segments(rel anyelement)
+RETURNS SETOF record
+AS 'MODULE_PATHNAME', 'gp_dist_random_segments'
+LANGUAGE C;
+
+/*
  * How a relation's rows are spread over the segments.
  *
  * gp_sql.set_distribution() records what DISTRIBUTED BY said as text on the

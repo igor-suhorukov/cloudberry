@@ -21,12 +21,11 @@ The reasons, by what brings them, and then each test:
   External tables, gpfdist, COPY ... LOG ERRORS and the error log functions,
   FILL MISSING FIELDS, NEWLINE, ESCAPE outside CSV mode: M5, the loading path.
 
-  gp_dist_random(), gp_segment_id, gp_segment_configuration,
-  gp_distribution_policy, gp_configuration_history, and the settings of a
-  cluster that dispatches (gp_enable_direct_dispatch,
-  test_print_direct_dispatch_info, gp_interconnect_queue_depth,
-  gp_motion_cost_per_row, gp_cte_sharing, gp_enable_multiphase_agg,
-  test_print_prefetch_joinqual): M2.
+  gp_dist_random(), gp_segment_configuration, gp_distribution_policy,
+  gp_configuration_history, and the settings of a cluster that dispatches
+  (gp_enable_direct_dispatch, test_print_direct_dispatch_info,
+  gp_interconnect_queue_depth, gp_motion_cost_per_row, gp_cte_sharing,
+  gp_enable_multiphase_agg, test_print_prefetch_joinqual): M2.
 
   statement_mem and gp_workfile_compression: M6, resource management.
 
@@ -100,9 +99,9 @@ bfv_index  count_index_scans(), append-optimized and column-oriented
   tables, whose compression options a partitioned table is refused for
   before its access method.
 bfv_partition_plans  count_operator() and find_operator() of PL/Python,
-  gp_segment_id, append-optimized and column-oriented tables and the bitmap
-  index, and a plan gpdiff.pl does not take for one after the
-  column-oriented table's statements fail.
+  append-optimized and column-oriented tables and the bitmap index, and a
+  plan gpdiff.pl does not take for one after the column-oriented table's
+  statements fail.
 bfv_olap  gp_motion_cost_per_row, OVER (w) with a frame.
 case_gp  The deparse of IS NOT DISTINCT FROM, and of the CASE form, which
   prints as the searched CASE it was rewritten into; blip(1), the operand of
@@ -154,9 +153,8 @@ singlenode_compatibility_cbdb  the warning Cloudberry's single-node mode
   gives for DISTRIBUTED BY (the port records the policy, for ORCA and M2),
   append-optimized tables, and TABLE (...) and anytable.  ALTER TABLE ... SET
   DISTRIBUTED BY is refused as Cloudberry refuses it in single-node mode.
-subselect_gp  gp_segment_id,
-  gp_distribution_policy, gp_interconnect_queue_depth, append-optimized
-  tables.
+subselect_gp  gp_distribution_policy, gp_interconnect_queue_depth,
+  append-optimized tables.
 subselect_gp2  an external web table.
 tag  Tag definitions are the database's here, in gp_sql.tag, and Cloudberry's
   are the cluster's, in the shared catalog pg_tag (cloudberry.md, "Still
@@ -174,5 +172,5 @@ tag  Tag definitions are the database's here, in gp_sql.tag, and Cloudberry's
   Cloudberry's syntax error is at the next.
 union_gp  count_operator(), gp_distribution_policy, an external table, PL/
   Python, and a chain of UNIONs over NULLs.
-update_gp  gp_segment_id, gp_segment_configuration, append-optimized tables,
+update_gp  gp_segment_configuration, append-optimized tables,
   gp_autostats_mode.

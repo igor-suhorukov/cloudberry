@@ -49,6 +49,7 @@
 #include "nodes/extensible.h"
 #include "nodes/makefuncs.h"
 #include "optimizer/planner.h"
+#include "parser/parse_expr.h"
 #include "parser/parse_relation.h"
 #include "parser/parser.h"
 #include "replication/syncrep.h"
@@ -59,6 +60,7 @@
 #include "utils/lsyscache.h"
 #include "utils/memutils.h"
 #include "utils/rel.h"
+#include "utils/ruleutils.h"
 
 PG_MODULE_MAGIC_EXT(
 					.name = "gp_probe",
@@ -78,12 +80,15 @@ typedef enum ProbeEvent
 	EV_MDUNLINK,
 	EV_RAW_PARSER,
 	EV_STAR_FILTER,
+	EV_COLUMNREF,
+	EV_DEPARSE_COLUMN,
 	EV_COUNT
 } ProbeEvent;
 
 static const char *const event_name[EV_COUNT] = {
 	"new_oid", "combocid_create", "combocid_miss", "analyze_sample",
 	"explain_label", "mdunlink", "raw_parser", "star_filter",
+	"columnref", "deparse_column",
 };
 
 static int64 calls[EV_COUNT];
@@ -119,6 +124,9 @@ static double arm_analyze_rows = 0;
 
 static Oid	arm_star_rel = InvalidOid;
 static Bitmapset *arm_star_cols = NULL;
+
+static char *arm_column_name = NULL;	/* O10: this name, where no column */
+static Oid	arm_column_func = InvalidOid;	/* has it, is this function's call */
 
 static bool arm_parser = false;
 static bool arm_explain = false;
@@ -405,6 +413,54 @@ probe_star_filter(Oid relid)
 }
 
 /* ------------------------------------------------------------------------- */
+/* O10: columnref_fallback_hook and deparse_function_as_column_hook          */
+/* ------------------------------------------------------------------------- */
+
+/*
+ * The armed name, where no column has it, is the armed function of the row of
+ * the first relation in the query -- what gp_core does with gp_segment_id.
+ */
+static Node *
+probe_columnref_fallback(ParseState *pstate, ColumnRef *cref)
+{
+	Node	   *last = (Node *) llast(cref->fields);
+	Var		   *var;
+	FuncExpr   *fexpr;
+
+	if (arm_column_name == NULL || !IsA(last, String) ||
+		strcmp(strVal(last), arm_column_name) != 0)
+		return NULL;
+
+	foreach_ptr(ParseNamespaceItem, nsitem, pstate->p_namespace)
+	{
+		if (nsitem->p_rte->rtekind != RTE_RELATION)
+			continue;
+
+		record(EV_COLUMNREF, "\"%s\" of %s", arm_column_name,
+			   nsitem->p_names->aliasname);
+		var = makeWholeRowVar(nsitem->p_rte, nsitem->p_rtindex, 0, true);
+		var->location = cref->location;
+		markVarForSelectPriv(pstate, var);
+		fexpr = makeFuncExpr(arm_column_func, get_func_rettype(arm_column_func),
+							 list_make1(var), InvalidOid, InvalidOid,
+							 COERCE_EXPLICIT_CALL);
+		fexpr->location = cref->location;
+		return (Node *) fexpr;
+	}
+	return NULL;
+}
+
+static const char *
+probe_deparse_as_column(FuncExpr *expr)
+{
+	if (arm_column_name == NULL || expr->funcid != arm_column_func)
+		return NULL;
+	record(EV_DEPARSE_COLUMN, "call of %u printed as \"%s\"",
+		   expr->funcid, arm_column_name);
+	return arm_column_name;
+}
+
+/* ------------------------------------------------------------------------- */
 /* SQL interface                                                             */
 /* ------------------------------------------------------------------------- */
 
@@ -414,6 +470,7 @@ PG_FUNCTION_INFO_V1(gp_probe_detail);
 PG_FUNCTION_INFO_V1(gp_probe_arm_new_oid);
 PG_FUNCTION_INFO_V1(gp_probe_arm_analyze);
 PG_FUNCTION_INFO_V1(gp_probe_arm_star_filter);
+PG_FUNCTION_INFO_V1(gp_probe_arm_column);
 PG_FUNCTION_INFO_V1(gp_probe_arm_parser);
 PG_FUNCTION_INFO_V1(gp_probe_arm_explain);
 PG_FUNCTION_INFO_V1(gp_probe_arm_mdunlink);
@@ -443,6 +500,10 @@ gp_probe_reset(PG_FUNCTION_ARGS)
 	arm_oid_catalog = arm_oid_value = InvalidOid;
 	arm_analyze_rel = InvalidOid;
 	arm_star_rel = InvalidOid;
+	if (arm_column_name)
+		pfree(arm_column_name);
+	arm_column_name = NULL;
+	arm_column_func = InvalidOid;
 	arm_parser = arm_explain = arm_mdunlink = arm_combocid = false;
 	memset(published_combocid, 0, sizeof(published_combocid));
 	PG_RETURN_VOID();
@@ -515,6 +576,17 @@ gp_probe_arm_star_filter(PG_FUNCTION_ARGS)
 	MemoryContextSwitchTo(old);
 
 	arm_star_rel = relid;
+	PG_RETURN_VOID();
+}
+
+Datum
+gp_probe_arm_column(PG_FUNCTION_ARGS)
+{
+	if (arm_column_name)
+		pfree(arm_column_name);
+	arm_column_name = MemoryContextStrdup(TopMemoryContext,
+										  text_to_cstring(PG_GETARG_TEXT_PP(0)));
+	arm_column_func = PG_GETARG_OID(1);
 	PG_RETURN_VOID();
 }
 
@@ -749,6 +821,8 @@ _PG_init(void)
 	mdunlink_hook = probe_mdunlink;
 	raw_parser_hook = probe_raw_parser;
 	star_expansion_filter_hook = probe_star_filter;
+	columnref_fallback_hook = probe_columnref_fallback;
+	deparse_function_as_column_hook = probe_deparse_as_column;
 
 	prev_planner_hook = planner_hook;
 	planner_hook = probe_planner;
