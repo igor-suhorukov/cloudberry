@@ -1,0 +1,5 @@
+@@
+-ERROR:  could not devise a query plan for the given query
++QUERY PLAN
++___________
++

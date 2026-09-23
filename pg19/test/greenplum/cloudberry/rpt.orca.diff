@@ -1,0 +1,64 @@
+@@
++
++-- targetlist
++explain (costs off) select * from t_hashdist cross join (select random () from t_replicate_volatile)x;
++QUERY PLAN
++___________
+@@
+--- targetlist
+-explain (costs off) select * from t_hashdist cross join (select random () from t_replicate_volatile)x;
++explain (costs off) select * from t_hashdist cross join (select a, sum(random()) from t_replicate_volatile group by a) x;
+@@
+-explain (costs off) select * from t_hashdist cross join (select a, sum(random()) from t_replicate_volatile group by a) x;
++explain (costs off) select * from t_hashdist cross join (select random() as k, sum(a) from t_replicate_volatile group by k) x;
+@@
+-explain (costs off) select * from t_hashdist cross join (select random() as k, sum(a) from t_replicate_volatile group by k) x;
++explain (costs off) select * from t_hashdist cross join (select a, sum(b) as s from t_replicate_volatile group by a having sum(b) > random() order by a) x ;
+@@
+-
+-explain (costs off) select * from t_hashdist cross join (select a, sum(b) as s from t_replicate_volatile group by a having sum(b) > random() order by a) x ;
+-QUERY PLAN
+-___________
+@@
++
++explain (costs off) create table rpt_ctas as select a from generate_series(1, 10) a group by a having sum(a) > random() distributed replicated;
++QUERY PLAN
++___________
+@@
+-explain (costs off) create table rpt_ctas as select a from generate_series(1, 10) a group by a having sum(a) > random() distributed replicated;
++-- update & delete
++explain (costs off) update t_replicate_volatile set a = 1 where b > random();
++QUERY PLAN
++___________
++
++explain (costs off) update t_replicate_volatile set a = 1 from t_replicate_volatile x where x.a + random() = t_replicate_volatile.b;
++QUERY PLAN
++___________
++
++explain (costs off) update t_replicate_volatile set a = 1 from t_hashdist x where x.a + random() = t_replicate_volatile.b;
+@@
+--- update & delete
+-explain (costs off) update t_replicate_volatile set a = 1 where b > random();
+-ERROR:  could not devise a plan
+-explain (costs off) update t_replicate_volatile set a = 1 from t_replicate_volatile x where x.a + random() = t_replicate_volatile.b;
+-ERROR:  could not devise a plan
+-explain (costs off) update t_replicate_volatile set a = 1 from t_hashdist x where x.a + random() = t_replicate_volatile.b;
+-ERROR:  could not devise a plan
+@@
+-ERROR:  could not devise a plan
++QUERY PLAN
++___________
++
+@@
+-ERROR:  could not devise a plan
++QUERY PLAN
++___________
++
+@@
+-ERROR:  could not devise a plan
++QUERY PLAN
++___________
++
+@@
++INFO:  GPORCA failed to produce a plan, falling back to Postgres-based planner
++DETAIL:  Falling back to Postgres-based planner because GPORCA does not support the following feature: Use optimizer_enable_replicated_table to enable replicated tables

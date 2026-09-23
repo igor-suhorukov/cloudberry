@@ -6,6 +6,12 @@
 # and "Pivotal Optimizer (GPORCA)".
 m/^ Optimizer: GPORCA$/
 
+# The footer Cloudberry's psql gives \d of a table, which PostgreSQL 19's
+# psql, the one the suite runs, does not: psql asks its own catalogs, and
+# has no hook to be told the port's.  What it says is in
+# gp_distribution_policy, which the tests read too.
+m/^Distributed (by: \(.*\)|randomly|Replicated)$/
+
 -- end_matchignore
 
 -- start_matchsubs
@@ -19,8 +25,12 @@ m/^ Optimizer: GPORCA$/
 # init_file masks its "(seg0 slice1 ...)".
 m/^DETAIL:  segment \d+ \([^)]*\)(; \d+ other segments failed too)?$/
 s/^DETAIL:  segment \d+ \([^)]*\)(; \d+ other segments failed too)?$/DETAIL:  segment/
-m/^DETAIL:  segment \d+ \(.*?\)/
-s/^DETAIL:  segment (\d+) \(.*?\)/DETAIL:  segment $1/
+#
+# Where it has a detail of its own, that detail is Cloudberry's DETAIL, and
+# the segment and the count before and after it go, as the "(seg0 ...)"
+# after Cloudberry's message goes.
+m/^DETAIL:  segment \d+ \([^)]*\): /
+s/^DETAIL:  segment \d+ \([^)]*\): (.*?)(; \d+ other segments failed too)?$/DETAIL:  $1/
 
 # Cloudberry's init_file drops "set enable_parallel = off;" and its reset,
 # which its tests carry and its expected files do not; the harness has

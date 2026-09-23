@@ -11,14 +11,14 @@
 # The schedule's other tests -- append-optimized and column-oriented tables,
 # external tables, resource queues and groups, fault injection, FTS, the
 # interconnect's settings -- need M3 to M7, and are not listed.
-skip gp_create_table  relation "distrand" already exists; relation "foo" already exists
-skip gpdist  gp_segment_id of randomly distributed table "pt" is known only on its segments; relation "distby_with_constraint" already exists
-skip gpdist_opclasses  column "abs_int_hash_ops" of the distribution policy of "abstab_a" does not exist; column "abs_int_hash_ops" of the distribution policy of "abstab_b" does no...
+run  gp_create_table
+run  gpdist
+run  gpdist_opclasses
 skip gpctas  unrecognized parameter "appendonly"; relation "ctas_aocs" does not exist
 skip direct_dispatch  access method "bitmap" does not exist; current transaction is aborted, commands ignored until end of transaction block
 skip bfv_dd  access method "bitmap" does not exist
 run  bfv_dd_multicolumn
-skip bfv_dd_types  data type bit has no default operator class for access method "hash"; data type bit varying has no default operator class for access method "hash"
+run  bfv_dd_types
 run  join_gp
 skip union_gp  UNION types text and integer cannot be matched; syntax error at or near "EXTERNAL"
 run  limit_gp
@@ -26,12 +26,12 @@ run  case_gp
 run  notin
 skip percentile  unrecognized parameter "appendonly"; relation "mpp_22219" does not exist
 skip gp_aggregates  relation "aggtest" does not exist
-skip gp_types  data type bit varying has no default operator class for access method "hash"
+run  gp_types
 skip gp_index  multiple primary keys for table "tbl_create_index" are not allowed
 run  gp_sort
 skip update_gp  unrecognized parameter "appendonly"; relation "update_ao_table" does not exist
 skip returning_gp  unrecognized parameter "appendonly"; relation "returning_aotab" does not exist
-skip triggers_gp  cannot UPDATE distributed table "trigtest" this way yet; cannot UPDATE distributed table "parted_trig" this way yet
+skip triggers_gp  access method "ao_row" does not exist; access method "ao_column" does not exist
 skip foreign_key_gp  access method "ao_row" does not exist; access method "ao_column" does not exist
 skip distributed_transactions  unrecognized configuration parameter "debug_abort_after_distributed_prepared"; unrecognized configuration parameter "debug_dtm_action_segment"
 skip motion_gp  row is too big: size 10032, maximum size 8160; unrecognized parameter "appendonly"
@@ -51,10 +51,10 @@ skip partition_ddl  access method "ao_row" does not exist; relation "mpp3045_hhh
 skip partition_pruning  access method "bitmap" does not exist; language "plpython3u" does not exist
 skip partition_prune_opfamily  language "plpython3u" does not exist; function abseq4(integer, integer) does not exist
 skip alter_distpol_dropped  unrecognized parameter "appendonly"; current transaction is aborted, commands ignored until end of transaction block
-skip create_table_distpol  differs: CREATE TABLE AS takes its key from its first column where Cloudberry takes the query's, and DISTRIBUTED BY a column whose type has no hash operator class is accepted
-skip alter_distribution_policy  unrecognized distribution policy "()"; column "m" of the distribution policy of "atsdb" does not exist
+run  create_table_distpol
+skip alter_distribution_policy  unrecognized parameter "appendonly"; relation "atsdb_ao" does not exist
 skip DML_over_joins  cannot specify storage parameters for a partitioned table; relation "sales_par_co" does not exist
-skip bfv_joins  column "cdbhash_float4_ops" of the distribution policy of "gp_float1" does not exist; column "cdbhash_float4_ops" of the distribution policy of "gp_float2" d...
+skip bfv_joins  operator class "cdbhash_float4_ops" does not exist for access method "hash"; operator class "cdbhash_float4_ops" does not exist for access method "hash"
 skip bfv_subquery  language "plpython3u" does not exist; function count_operator(unknown, unknown) does not exist
 skip bfv_olap  cannot copy window "w" because it has a frame clause
 skip bfv_aggregate  argument of ROWS must not contain variables; cannot copy window "w" because it has a frame clause
@@ -74,9 +74,9 @@ run  sequence_gp
 run  tidscan_gp
 skip gp_array_agg  function gp_array_agg(integer) does not exist; function gp_array_agg(text) does not exist
 skip agg_pushdown  unrecognized parameter "appendonly"; relation "nation_pd" does not exist
-skip rpt  relation "child" already exists; cannot drop table parent_rep because other objects depend on it
-skip rpt_joins  cannot DELETE FROM distributed table "t3" this way yet; cannot DELETE FROM distributed table "t_17460" this way yet
-skip namespace_gp  syntax error at or near "DISTRIBUTED"; relation "test_schema_1.abc" does not exist
+run  rpt
+run  rpt_joins
+skip namespace_gp  unrecognized role option "resource"; role "tmp_test_schema_role" does not exist
 skip truncate_gp  language "plpython3u" does not exist; syntax error at or near "row"
 skip gp_rules  unrecognized parameter "appendonly"; relation "aotable_to_view_test1" does not exist
 run  as_alias
