@@ -10,6 +10,11 @@ m/^ Optimizer: GPORCA$/
 
 -- start_matchsubs
 
+# An error a segment raised names the segment in its DETAIL, and where it
+# listens, which is another socket and port on every run.
+m/^DETAIL:  segment \d+ \(.*?\)/
+s/^DETAIL:  segment (\d+) \(.*?\)/DETAIL:  segment $1/
+
 # Cloudberry's init_file drops "set enable_parallel = off;" and its reset,
 # which its tests carry and its expected files do not; the harness has
 # respelled them as the port spells the setting (gp_settings.c).

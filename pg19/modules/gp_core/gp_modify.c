@@ -35,10 +35,13 @@
  * row it changes is -- it reads the table it changes, and nothing else but
  * replicated tables and values -- is sent to every segment as it stands,
  * deparsed by PostgreSQL's own ruleutils, and each segment changes its own
- * rows; the counts are added up.  What that cannot do -- move a row to another
- * segment because its key changed, join another distributed table -- needs a
- * Motion between segments, which is ORCA's distributed plans, and is refused
- * until then with the reason.
+ * rows; the counts are added up.  To the one segment its key names, when its
+ * WHERE fixes the key.  What that cannot do -- join another distributed
+ * table, change a partitioned table's partitions, run in a WITH query,
+ * return rows -- the coordinator's plan does, and each row it changes is
+ * changed on its segment (gp_explicit.c); so is an INSERT with RETURNING.
+ * Moving a row to another segment because its key changed is refused, with
+ * the reason.
  *
  * SELECT ... FOR UPDATE.  Cloudberry, without its global deadlock detector,
  * takes an ExclusiveLock on the table rather than locking rows; the port does
@@ -613,6 +616,9 @@ modify_explain(CustomScanState *node, List *ancestors, ExplainState *es)
  * changes?  Only if every table it reads is the one it changes or one that
  * every segment holds whole.  Returns NULL if so, or why not.
  */
+static const char current_of_reason[] =
+	"WHERE CURRENT OF names a row by the cursor that read it, which is here.";
+
 typedef struct PushContext
 {
 	Oid			target;
@@ -672,7 +678,7 @@ push_walker(Node *node, PushContext *cxt)
 	}
 	if (IsA(node, CurrentOfExpr))
 	{
-		cxt->why = "WHERE CURRENT OF names a row by the cursor that read it, which is here.";
+		cxt->why = current_of_reason;
 		return true;
 	}
 
@@ -787,18 +793,59 @@ static PlannedStmt *gp_modify_planner_routed(Query *parse,
 											 ParamListInfo boundParams,
 											 ExplainState *es);
 
+/* Does it write a table whose rows are on the segments? */
+static bool
+writes_distributed(PlannedStmt *stmt, ModifyTable *mt)
+{
+	ListCell   *lc;
+
+	foreach(lc, mt->resultRelations)
+		if (GpScanDistributedPolicy(rt_fetch(lfirst_int(lc), stmt->rtable)->relid) != NULL)
+			return true;
+	return false;
+}
+
+static const char *
+operation_words(CmdType operation)
+{
+	return operation == CMD_INSERT ? "INSERT INTO" :
+		operation == CMD_UPDATE ? "UPDATE" :
+		operation == CMD_DELETE ? "DELETE FROM" : "MERGE INTO";
+}
+
 /*
- * A ModifyTable left in a plan that writes a distributed table.
- *
- * What the routing above takes -- an INSERT, an UPDATE or DELETE it can send
- * -- becomes a node of its own; what it does not take would otherwise run on
- * the coordinator, against its empty copy, with rows gathered from the
- * segments whose ctid means nothing here: a data-modifying WITH query, whose
- * ModifyTable is a subplan, and a partitioned table's partitions, which are
- * several result relations.  Refused, by name, rather than run.
+ * The write, by Cloudberry's Explicit Redistribute Motion (gp_explicit.c):
+ * the plan runs here, and each row it writes is written on its segment.
+ * Refused, with the reason, where that cannot be done.
+ */
+static Plan *
+write_explicitly(PlannedStmt *stmt, ModifyTable *mt)
+{
+	const char *why = GpExplicitCannot(stmt, mt);
+
+	if (why != NULL)
+	{
+		Index		rti = mt->rootRelation != 0 ? mt->rootRelation
+			: linitial_int(mt->resultRelations);
+
+		ereport(ERROR,
+				(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+				 errmsg("cannot %s distributed table \"%s\" this way yet",
+						operation_words(mt->operation),
+						get_rel_name(rt_fetch(rti, stmt->rtable)->relid)),
+				 errdetail("%s", why)));
+	}
+	return GpExplicitMake(mt);
+}
+
+/*
+ * A ModifyTable left in a plan that writes a distributed table, where
+ * nothing above took it: it would run on the coordinator, against its empty
+ * copy, with rows gathered from the segments whose ctid means nothing here.
+ * Refused, by name, rather than run.
  */
 static void
-refuse_local_write(Plan *plan, PlannedStmt *stmt, bool in_with)
+refuse_local_write(Plan *plan, PlannedStmt *stmt)
 {
 	ModifyTable *mt;
 	ListCell   *lc;
@@ -816,15 +863,9 @@ refuse_local_write(Plan *plan, PlannedStmt *stmt, bool in_with)
 		ereport(ERROR,
 				(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
 				 errmsg("cannot %s distributed table \"%s\" this way yet",
-						mt->operation == CMD_INSERT ? "INSERT INTO" :
-						mt->operation == CMD_UPDATE ? "UPDATE" :
-						mt->operation == CMD_DELETE ? "DELETE FROM" : "MERGE INTO",
+						operation_words(mt->operation),
 						get_rel_name(rte->relid)),
-				 errdetail("%s", in_with ?
-						   "It is a data-modifying WITH query." :
-						   list_length(mt->resultRelations) > 1 ?
-						   "It changes the partitions of a partitioned table." :
-						   "The coordinator's plan would change the coordinator's copy, which has no rows.")));
+				 errdetail("The coordinator's plan would change the coordinator's copy, which has no rows.")));
 	}
 }
 
@@ -839,9 +880,16 @@ gp_modify_planner(Query *parse, const char *query_string, int cursorOptions,
 	if (GpClusterBackendRole() != GP_ROLE_DISPATCH)
 		return stmt;
 
-	refuse_local_write(stmt->planTree, stmt, false);
+	/* a write in a WITH query is a subplan; it is written explicitly */
 	foreach(lc, stmt->subplans)
-		refuse_local_write((Plan *) lfirst(lc), stmt, true);
+	{
+		Plan	   *sub = (Plan *) lfirst(lc);
+
+		if (sub != NULL && IsA(sub, ModifyTable) &&
+			writes_distributed(stmt, (ModifyTable *) sub))
+			lfirst(lc) = write_explicitly(stmt, (ModifyTable *) sub);
+	}
+	refuse_local_write(stmt->planTree, stmt);
 	return stmt;
 }
 
@@ -873,8 +921,14 @@ gp_modify_planner_routed(Query *parse, const char *query_string, int cursorOptio
 	if (!IsA(stmt->planTree, ModifyTable))
 		return stmt;
 	mt = (ModifyTable *) stmt->planTree;
+
+	/* a partitioned table's partitions, or an inheritance tree */
 	if (list_length(mt->resultRelations) != 1)
+	{
+		if (writes_distributed(stmt, mt))
+			stmt->planTree = write_explicitly(stmt, mt);
 		return stmt;
+	}
 	rte = rt_fetch(linitial_int(mt->resultRelations), stmt->rtable);
 	policy = GpScanDistributedPolicy(rte->relid);
 	if (policy == NULL)
@@ -890,11 +944,12 @@ gp_modify_planner_routed(Query *parse, const char *query_string, int cursorOptio
 					(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
 					 errmsg("INSERT ... ON CONFLICT into distributed table \"%s\" is not supported yet",
 							get_rel_name(rte->relid))));
+		/* what it wrote comes back from the segments */
 		if (mt->returningLists != NIL)
-			ereport(ERROR,
-					(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
-					 errmsg("INSERT ... RETURNING into distributed table \"%s\" is not supported yet",
-							get_rel_name(rte->relid))));
+		{
+			stmt->planTree = write_explicitly(stmt, mt);
+			return stmt;
+		}
 		if (mt->withCheckOptionLists != NIL)
 			ereport(ERROR,
 					(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
@@ -928,14 +983,24 @@ gp_modify_planner_routed(Query *parse, const char *query_string, int cursorOptio
 		CustomScan *cscan;
 		const char *why;
 
+		/*
+		 * What the segments cannot do as it is written, the plan does here,
+		 * and each row it changes is changed where it is -- but for WHERE
+		 * CURRENT OF, whose cursor read the row here.
+		 */
 		why = cannot_push_reason(original, rte->relid, policy);
-		if (why != NULL)
+		if (why == current_of_reason)
 			ereport(ERROR,
 					(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
 					 errmsg("cannot %s distributed table \"%s\" this way yet",
 							mt->operation == CMD_UPDATE ? "UPDATE" : "DELETE FROM",
 							get_rel_name(rte->relid)),
 					 errdetail("%s", why)));
+		if (why != NULL)
+		{
+			stmt->planTree = write_explicitly(stmt, mt);
+			return stmt;
+		}
 
 		cscan = make_custom_scan(&mt->plan, &modify_scan_methods);
 		cscan->custom_private =
@@ -1113,6 +1178,7 @@ GpModifyInit(void)
 
 	RegisterCustomScanMethods(&insert_scan_methods);
 	RegisterCustomScanMethods(&modify_scan_methods);
+	GpExplicitInit();
 
 	prev_planner = planner_hook;
 	planner_hook = gp_modify_planner;

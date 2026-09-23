@@ -1,0 +1,24 @@
+@@
+-DETAIL:  Failing row contains (#####).
++DETAIL:  segment 0: Failing row contains (null, null, text, null).
+@@
+-ERROR:  multiple updates to a row by the same query is not allowed
+@@
+-ERROR:  current transaction is aborted, commands ignored until end of transaction block
++ count 
++-------
++     1
++(1 row)
++
+@@
+-DETAIL:  Partition key of the failing row contains (d) = (null).
++DETAIL:  segment 0: Partition key of the failing row contains (d) = (null).
+@@
+-DETAIL:  Partition key of the failing row contains (d) = (null).
++DETAIL:  segment 0: Partition key of the failing row contains (d) = (null).
+@@
+-DETAIL:  Partition key of the failing row contains (d) = (null).
++DETAIL:  segment 0: Partition key of the failing row contains (d) = (null).
+@@
+-DETAIL:  Failing row contains (#####).
++DETAIL:  segment 0: Failing row contains (1, null, s, 1).

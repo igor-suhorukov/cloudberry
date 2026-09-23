@@ -14,3 +14,31 @@ correlated_subquery, qp_derived_table, qp_misc (orca)  the lines ORCA's
   a Gather Motion into a slice the segments run -- one segment gathering
   another's rows, which the port's Motions do not do yet -- so PostgreSQL's
   planner plans them, with the same answers, and the trace says so.
+
+as_alias  an ORDER BY of text, which puts "XXXX" before "bbbb": the cluster
+  is made with the C locale, and Cloudberry's expected output with one that
+  sorts letters before case.
+
+bfv_dd_multicolumn (planner, orca)  the INFO lines of
+  test_print_direct_dispatch_info.  Cloudberry sends a query whose key is
+  fixed to a few values to those segments ("PARTIAL contents: 1 2"), where
+  the port sends it to one segment or every one; the lines of its two-phase
+  commit ("Distributed transaction command ...") are M3's; its INSERT ...
+  SELECT of generate_series() runs the function in a slice of one segment,
+  and its ANALYZE dispatches a slice, where the port's run the one on the
+  coordinator and sample through O3.  Under ORCA, an INSERT of one row of
+  constants into a table whose key has two columns goes to every segment:
+  ORCA's core gives direct dispatch to a single-column key only.
+
+case_gp  IS NOT DISTINCT FROM, and the CASE form, printed as the searched
+  CASE the port's rewrite makes of them (see the singlenode suite's README).
+
+qp_union_intersect  an error from a segment names the segment in its
+  DETAIL; and an UPDATE of the distribution key that finds one row twice
+  moves it once, as PostgreSQL's UPDATE ... FROM changes it once, where
+  Cloudberry's Split refuses it ("multiple updates to a row by the same
+  query is not allowed").
+
+with_clause  three recursive queries Cloudberry refuses -- a join of nested
+  RECURSIVE clauses, and window functions in a recursive query's target
+  list -- which PostgreSQL 19 answers.

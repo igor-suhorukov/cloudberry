@@ -27,6 +27,8 @@
 
 #include "postgres.h"
 
+#include "storage/itemptr.h"
+
 #include "gp_policy.h"
 
 /*
@@ -58,5 +60,28 @@ extern void GpModifyInit(void);
 
 /* ANALYZE of a distributed table through O3, where there is a cluster. */
 extern void GpAnalyzeInit(void);
+
+/*
+ * The ctid the coordinator's plan knows a segment's row by -- the row at
+ * "tid" on segment "content" -- in the statement "estate" runs: what a
+ * gather of a table an UPDATE or DELETE changes gives each row it reads.
+ * See gp_explicit.c.
+ */
+struct EState;
+extern void GpRowIdentityMake(struct EState *estate, int content,
+							  ItemPointer tid, ItemPointer result);
+
+/*
+ * Cloudberry's Explicit Redistribute Motion, in a ModifyTable's place: why
+ * one that writes a distributed table cannot be written that way, or NULL;
+ * and the node that writes it (gp_explicit.c).
+ */
+struct PlannedStmt;
+struct ModifyTable;
+struct Plan;
+extern const char *GpExplicitCannot(struct PlannedStmt *stmt,
+									struct ModifyTable *mt);
+extern struct Plan *GpExplicitMake(struct ModifyTable *mt);
+extern void GpExplicitInit(void);
 
 #endif							/* GP_SCAN_H */

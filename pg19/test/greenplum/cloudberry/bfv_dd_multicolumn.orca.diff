@@ -1,0 +1,61 @@
+@@
+-INFO:  Distributed transaction command 'Distributed Prepare' to ALL contents: 0 1 2
+-INFO:  Distributed transaction command 'Distributed Commit Prepared' to ALL contents: 0 1 2
+@@
+-INFO:  Distributed transaction command 'Distributed Prepare' to ALL contents: 0 1 2
+-INFO:  Distributed transaction command 'Distributed Commit Prepared' to ALL contents: 0 1 2
+@@
+-INFO:  (slice 1) Dispatch command to SINGLE content
+-INFO:  Distributed transaction command 'Distributed Prepare' to ALL contents: 0 1 2
+-INFO:  Distributed transaction command 'Distributed Commit Prepared' to ALL contents: 0 1 2
+@@
+-INFO:  (slice 0) Dispatch command to SINGLE content
+-INFO:  Distributed transaction command 'Distributed Commit (one-phase)' to SINGLE content
++INFO:  (slice 0) Dispatch command to ALL contents: 0 1 2
+@@
+-INFO:  (slice 0) Dispatch command to SINGLE content
+-INFO:  Distributed transaction command 'Distributed Commit (one-phase)' to SINGLE content
++INFO:  (slice 0) Dispatch command to ALL contents: 0 1 2
+@@
+-INFO:  (slice 0) Dispatch command to SINGLE content
+-INFO:  Distributed transaction command 'Distributed Commit (one-phase)' to SINGLE content
++INFO:  (slice 0) Dispatch command to ALL contents: 0 1 2
+@@
+-INFO:  (slice 1) Dispatch command to ALL contents: 0 1 2
+@@
+-INFO:  (slice 1) Dispatch command to SINGLE content
+-INFO:  Distributed transaction command 'Distributed Prepare' to ALL contents: 0 1 2
+-INFO:  Distributed transaction command 'Distributed Commit Prepared' to ALL contents: 0 1 2
+@@
+-INFO:  (slice 0) Dispatch command to SINGLE content
+-INFO:  Distributed transaction command 'Distributed Commit (one-phase)' to SINGLE content
++INFO:  (slice 0) Dispatch command to ALL contents: 0 1 2
+@@
+-INFO:  (slice 0) Dispatch command to SINGLE content
+-INFO:  Distributed transaction command 'Distributed Commit (one-phase)' to SINGLE content
++INFO:  (slice 0) Dispatch command to ALL contents: 0 1 2
+@@
+-INFO:  (slice 0) Dispatch command to SINGLE content
+-INFO:  Distributed transaction command 'Distributed Commit (one-phase)' to SINGLE content
++INFO:  (slice 0) Dispatch command to ALL contents: 0 1 2
+@@
+-INFO:  (slice 1) Dispatch command to PARTIAL contents: 1 2
++INFO:  (slice 1) Dispatch command to ALL contents: 0 1 2
+@@
+-INFO:  (slice 1) Dispatch command to SINGLE content
++INFO:  (slice 1) Dispatch command to ALL contents: 0 1 2
+@@
+-INFO:  (slice 1) Dispatch command to PARTIAL contents: 1 0
++INFO:  (slice 1) Dispatch command to ALL contents: 0 1 2
+@@
+-INFO:  (slice 1) Dispatch command to PARTIAL contents: 1 2
++INFO:  (slice 1) Dispatch command to ALL contents: 0 1 2
+@@
+-INFO:  (slice 1) Dispatch command to PARTIAL contents: 0 1
++INFO:  (slice 1) Dispatch command to ALL contents: 0 1 2
+@@
+-INFO:  (slice 1) Dispatch command to PARTIAL contents: 1 2
++INFO:  (slice 1) Dispatch command to ALL contents: 0 1 2
+@@
+-INFO:  (slice 1) Dispatch command to PARTIAL contents: 1 2
++INFO:  (slice 1) Dispatch command to ALL contents: 0 1 2

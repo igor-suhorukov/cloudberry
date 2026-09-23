@@ -222,6 +222,7 @@ modules = [
                      'modules/gp_core/gp_hash.c',
                      'modules/gp_core/gp_scan.c',
                      'modules/gp_core/gp_modify.c',
+                     'modules/gp_core/gp_explicit.c',
                      'modules/gp_core/gp_analyze.c',
                      'modules/gp_core/gp_motion.c',
                      'modules/gp_core/gp_split.c',

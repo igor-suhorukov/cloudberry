@@ -1,0 +1,43 @@
+@@
+-ERROR:  joining nested RECURSIVE clauses is not supported
++ a 
++---
++ 1
++(1 row)
++
+@@
+-ERROR:  window functions in the target list of a recursive query is not supported
+-LINE 5:   select (first_value(c) over (partition by b))::int, a+x
+-                  ^
++ x  | y  
++----+----
++  1 |  1
++  2 |  2
++  3 |  3
++  4 |  4
++  5 |  5
++  6 |  6
++  7 |  7
++  8 |  8
++  9 |  9
++ 10 | 10
++(10 rows)
++
+@@
+-ERROR:  window functions in the target list of a recursive query is not supported
+-LINE 5:   select first_value(c) over (partition by b), a+x
+-                 ^
++ x  | y  
++----+----
++  1 |  1
++  2 |  2
++  3 |  3
++  4 |  4
++  5 |  5
++  6 |  6
++  7 |  7
++  8 |  8
++  9 |  9
++ 10 | 10
++(10 rows)
++

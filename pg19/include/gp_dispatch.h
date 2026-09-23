@@ -151,6 +151,16 @@ extern void GpDispatchParamsOnContent(int content, const char *sql,
 									  const int *lengths, const int *formats);
 
 /*
+ * A write with parameters, in text, on one segment: how many rows it changed,
+ * and the rows its RETURNING gave, into "store" in "tupdesc"'s columns when
+ * store is not NULL.
+ */
+extern uint64 GpDispatchWriteOnContent(int content, const char *sql,
+									   int nparams, const char *const *values,
+									   TupleDesc tupdesc,
+									   Tuplestorestate *store);
+
+/*
  * COPY ... FROM STDIN on one segment: begin with the COPY statement, send the
  * data in pieces, and end, which answers how many rows the segment took.  One
  * at a time.

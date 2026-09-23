@@ -1,0 +1,101 @@
+@@
+-             WHEN 'test'::text IS NOT DISTINCT FROM ''::text THEN 'A'::text+
++             WHEN NOT 'test'::text IS DISTINCT FROM ''::text THEN 'A'::text+
+@@
+-             WHEN c::text IS NOT DISTINCT FROM ''::text THEN 'A'::text+
++             WHEN NOT c::text IS DISTINCT FROM ''::text THEN 'A'::text+
+@@
+-                               pg_get_viewdef                                
+------------------------------------------------------------------------------
+-             ELSE to_date((key_value)::text, 'YYYYMM'::text)                +
+-             WHEN IS NOT DISTINCT FROM 'NULL'::text THEN ('now'::text)::date+
+-         CASE key_value                                                     +
+-         END AS t                                                           +
++                                          pg_get_viewdef                                           
++---------------------------------------------------------------------------------------------------
++             ELSE to_date((key_value)::text, 'YYYYMM'::text)                                      +
++             WHEN (NOT ((key_value)::text IS DISTINCT FROM 'NULL'::text)) THEN ('now'::text)::date+
++         CASE                                                                                     +
++         END AS t                                                                                 +
+@@
+-  SELECT                                                                    +
++  SELECT                                                                                          +
+@@
+-                           pg_get_viewdef                            
+----------------------------------------------------------------------
+-             ELSE b::numeric                                        +
+-             WHEN IS NOT DISTINCT FROM b + 1 THEN (b * 100)::numeric+
+-             WHEN IS NOT DISTINCT FROM b THEN (b * 10)::numeric     +
+-             WHEN b * 10 THEN (b * 10000)::numeric                  +
+-             WHEN b - 1 THEN (b * 1000)::numeric                    +
+-             WHEN negate(b) THEN b::numeric * '-1.0'::numeric       +
+-         CASE a                                                     +
+-         END AS newb                                                +
+-     b,                                                             +
++                             pg_get_viewdef                              
++-------------------------------------------------------------------------
++             ELSE b::numeric                                            +
++             WHEN NOT a IS DISTINCT FROM (b + 1) THEN (b * 100)::numeric+
++             WHEN NOT a IS DISTINCT FROM b THEN (b * 10)::numeric       +
++             WHEN a = (b * 10) THEN (b * 10000)::numeric                +
++             WHEN a = (b - 1) THEN (b * 1000)::numeric                  +
++             WHEN a = negate(b) THEN b::numeric * '-1.0'::numeric       +
++         CASE                                                           +
++         END AS newb                                                    +
++     b,                                                                 +
+@@
+-  SELECT a,                                                         +
++  SELECT a,                                                             +
+@@
+- 3 |   3
+- 4 |   4
+- 5 | 666
+-(5 rows)
++ 3 |   1
++ 4 |   3
++ 5 |   1
++ 6 |   4
++ 7 | 666
++(7 rows)
+@@
+-HINT:  No operator matches the given name and argument types. You might need to add explicit type casts.
++DETAIL:  No operator of that name accepts the given argument types.
++HINT:  You might need to add explicit type casts.
+@@
+-                           pg_get_viewdef                           
+---------------------------------------------------------------------
+-             ELSE 'Non domestic'::text                             +
+-             WHEN IS NOT DISTINCT FROM 1 THEN 'Southlake'::text    +
+-             WHEN IS NOT DISTINCT FROM 2 THEN 'San Francisco'::text+
+-             WHEN IS NOT DISTINCT FROM 3 THEN 'New Jersey'::text   +
+-             WHEN IS NOT DISTINCT FROM 4 THEN 'Seattle'::text      +
+-             WHEN IS NOT DISTINCT FROM 5 THEN 'Portland'::text     +
+-             WHEN IS NOT DISTINCT FROM 6 THEN 'San Francisco'::text+
+-             WHEN IS NOT DISTINCT FROM 7 THEN 'Portland'::text     +
+-         CASE id                                                   +
+-         END AS location                                           +
+-     name,                                                         +
+-     price,                                                        +
+-    FROM products                                                  +
++                            pg_get_viewdef                             
++-----------------------------------------------------------------------
++             ELSE 'Non domestic'::text                                +
++             WHEN NOT id IS DISTINCT FROM 1 THEN 'Southlake'::text    +
++             WHEN NOT id IS DISTINCT FROM 2 THEN 'San Francisco'::text+
++             WHEN NOT id IS DISTINCT FROM 3 THEN 'New Jersey'::text   +
++             WHEN NOT id IS DISTINCT FROM 4 THEN 'Seattle'::text      +
++             WHEN NOT id IS DISTINCT FROM 5 THEN 'Portland'::text     +
++             WHEN NOT id IS DISTINCT FROM 6 THEN 'San Francisco'::text+
++             WHEN NOT id IS DISTINCT FROM 7 THEN 'Portland'::text     +
++         CASE                                                         +
++         END AS location                                              +
++     name,                                                            +
++     price,                                                           +
++    FROM products                                                     +
+@@
+-  SELECT id,                                                       +
++  SELECT id,                                                          +
+@@
+-HINT:  No operator matches the given name and argument types. You might need to add explicit type casts.
++DETAIL:  No operator of that name accepts the given argument types.
++HINT:  You might need to add explicit type casts.

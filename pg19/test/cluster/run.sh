@@ -484,17 +484,25 @@ EOF
 	[ "$out" = "UPDATE 10" ] && ok "and its command tag counts every segment's rows" \
 		|| notok "UPDATE's command tag" "$out"
 
-	out=$(q 0 "UPDATE d SET a = a + 1000 WHERE a = 1;")
-	case "$out" in
-		*"a column of the distribution key"*) ok "an UPDATE of the key, which would move the row, is refused with the reason" ;;
-		*) notok "an UPDATE of the distribution key" "$out" ;;
-	esac
+	# An UPDATE of the key moves each row: deleted where it is, its new
+	# version inserted where it hashes -- Cloudberry's Split Update.
+	q 0 "CREATE TABLE dk (a int, b text) DISTRIBUTED BY (a); INSERT INTO dk SELECT g, 'k' FROM generate_series(1, 100) g;" >/dev/null
+	out=$(printf '%s\n' "UPDATE dk SET a = a + 1000 WHERE a > 90;" | "$PSQL" -X -h "$(sockdir 0)" -p "$(port 0)" -d postgres 2>&1)
+	out2=$(q 0 "SELECT count(*), sum(a) FROM dk;")
+	w1=$(q 1 "SELECT count(*) FROM dk WHERE expected_seg(a, 2) <> 0;")
+	w2=$(q 2 "SELECT count(*) FROM dk WHERE expected_seg(a, 2) <> 1;")
+	[ "$out|$out2|$w1|$w2" = "UPDATE 10|100|15050|0|0" ] \
+		&& ok "an UPDATE of the key moves each row to the segment its new key hashes to" \
+		|| notok "an UPDATE of the distribution key" "$out / $out2 / misplaced $w1 $w2"
 
-	out=$(q 0 "UPDATE d SET b = 'j' FROM d2 WHERE d.a = d2.k;")
-	case "$out" in
-		*"another distributed table"*) ok "and so is one that joins another distributed table" ;;
-		*) notok "an UPDATE joining a distributed table" "$out" ;;
-	esac
+	# What the segments cannot do as it is written, the coordinator's plan
+	# does, and each row it changes is changed on its segment, by its ctid
+	# there (gp_explicit.c).
+	want=$(q 0 "SELECT count(*) FROM d WHERE a IN (SELECT k FROM d2 WHERE v = 3);")
+	out=$(printf '%s\n' "UPDATE d SET b = 'j' || d2.v FROM d2 WHERE d.a = d2.k AND d2.v = 3;" | "$PSQL" -X -h "$(sockdir 0)" -p "$(port 0)" -d postgres 2>&1)
+	out2=$(q 0 "SELECT count(*) FROM d WHERE b = 'j3';")
+	[ "$out|$out2" = "UPDATE $want|$want" ] && ok "an UPDATE that joins another distributed table changes each row where it is ($want)" \
+		|| notok "an UPDATE joining a distributed table" "$out / $out2, want $want"
 
 	out=$(printf '%s\n' "DELETE FROM d WHERE a > 90;" | "$PSQL" -X -h "$(sockdir 0)" -p "$(port 0)" -d postgres 2>&1)
 	out2=$(q 0 "SELECT count(*) FROM d;")
@@ -556,11 +564,10 @@ mine" ] && ok "a transaction reads its own rows, and a LIMIT leaves the connecti
 	[ "$out" = "4" ] && ok "SELECT ... FOR UPDATE locks the table, as Cloudberry does without GDD" \
 		|| notok "SELECT FOR UPDATE" "$out"
 
-	out=$(q 0 "INSERT INTO d VALUES (800, 'r') RETURNING a;")
-	case "$out" in
-		*"RETURNING into distributed table"*"not supported yet"*) ok "INSERT ... RETURNING is refused, for now, with the reason" ;;
-		*) notok "INSERT RETURNING" "$out" ;;
-	esac
+	out=$(printf '%s\n' "BEGIN;" "INSERT INTO d VALUES (800, 'r'), (801, 's') RETURNING a, b || '!';" \
+		"SELECT count(*) FROM d WHERE a >= 800;" "ROLLBACK;" | qf 0 | tr '\n' ' ')
+	[ "$out" = "800|r! 801|s! 2 " ] && ok "INSERT ... RETURNING: the rows each segment wrote come back" \
+		|| notok "INSERT RETURNING" "$out"
 
 	# A column dropped and one added: the positions the segments are told.
 	q 0 "ALTER TABLE d2 DROP COLUMN k; ALTER TABLE d2 ADD COLUMN w text DEFAULT 'w';" >/dev/null
@@ -594,19 +601,34 @@ mine" ] && ok "a transaction reads its own rows, and a LIMIT leaves the connecti
 		&& ok "... with its DISTRIBUTED BY, and WITH NO DATA" \
 		|| notok "CREATE TABLE AS DISTRIBUTED BY, WITH NO DATA" "$out / $out2"
 
-	# What the routed writes do not take is refused, never run here against
-	# the coordinator's empty copy -- which crashed on a ctid from a segment.
-	out=$(q 0 "WITH w AS (UPDATE d SET b = b WHERE a < 3 RETURNING *) SELECT count(*) FROM w;")
+	# A write in a WITH query, and one of a partitioned table's partitions:
+	# the plan runs here, and every row goes to its segment.
+	out=$(q 0 "WITH w AS (UPDATE d SET b = b WHERE a < 3 RETURNING a) SELECT count(*), sum(a) FROM w;")
+	[ "$out" = "2|3" ] && ok "an UPDATE in a WITH query, its RETURNING read by the query" \
+		|| notok "a data-modifying WITH query" "$out"
+	out=$(printf '%s\n' "BEGIN;" "DELETE FROM sales WHERE amt <= 3;" \
+		"SELECT count(*) FROM sales;" \
+		"UPDATE sales SET d = date '2026-03-20' WHERE id BETWEEN 10 AND 12 RETURNING id, tableoid::regclass;" \
+		"SELECT count(*) FROM sales_1_prt_3 WHERE id BETWEEN 10 AND 12;" "ROLLBACK;" | qf 0 | tr '\n' ' ')
+	[ "$out" = "87 10|sales_1_prt_3 11|sales_1_prt_3 12|sales_1_prt_3 3 " ] \
+		&& ok "a partitioned table's DELETE, and an UPDATE that moves rows to another partition" \
+		|| notok "writes of a partitioned table" "$out"
+	out=$(printf '%s\n' "BEGIN;" \
+		"DELETE FROM d USING d2 WHERE d.a = d2.v * 10 AND d2.v > 4 RETURNING d.a, d2.v;" "ROLLBACK;" | qf 0 | sort -u | tr '\n' ' ')
+	[ "$out" = "50|5 60|6 " ] && ok "a DELETE that joins another distributed table, its RETURNING reading both" \
+		|| notok "DELETE ... USING ... RETURNING" "$out"
+	out=$(q 0 "UPDATE dk SET a = dk.a + 5000 FROM d2 WHERE dk.a = d2.v RETURNING dk.a;" | sort -n | tr '\n' ' ')
+	out2=$(q 0 "SELECT count(*), sum(a) FROM dk;")
+	w1=$(q 1 "SELECT count(*) FROM dk WHERE expected_seg(a, 2) <> 0;")
+	w2=$(q 2 "SELECT count(*) FROM dk WHERE expected_seg(a, 2) <> 1;")
+	[ "$out|$out2|$w1|$w2" = "5001 5002 5003 5004 5005 5006 |100|45050|0|0" ] \
+		&& ok "and one that joins another distributed table, each row moved once, its RETURNING the new row" \
+		|| notok "an UPDATE of the key joining a distributed table" "$out / $out2 / misplaced $w1 $w2"
+	q 0 "CREATE TABLE dkt (a int, b int) DISTRIBUTED BY (a); CREATE FUNCTION dkt_f() RETURNS trigger LANGUAGE plpgsql AS \$\$ BEGIN RETURN NEW; END \$\$; CREATE TRIGGER dkt_t BEFORE UPDATE ON dkt FOR EACH ROW EXECUTE FUNCTION dkt_f();" >/dev/null
+	out=$(q 0 "UPDATE dkt SET a = a + 1;")
 	case "$out" in
-		*"cannot UPDATE distributed table \"d\" this way yet"*"data-modifying WITH query"*)
-			ok "an UPDATE in a WITH query is refused, not run on the coordinator" ;;
-		*) notok "a data-modifying WITH query" "$out" ;;
-	esac
-	out=$(q 0 "DELETE FROM sales WHERE amt = 1;")
-	case "$out" in
-		*"cannot DELETE FROM distributed table"*"partitions of a partitioned table"*)
-			ok "so is a DELETE of a partitioned table's partitions" ;;
-		*) notok "a DELETE of a partitioned table" "$out" ;;
+		*"a column of the distribution key"*"has triggers"*) ok "the key of a table with triggers is refused, with the reason, as Cloudberry refuses it" ;;
+		*) notok "an UPDATE of the key of a table with triggers" "$out" ;;
 	esac
 	q 0 "CREATE TABLE sq (a int, v text) DISTRIBUTED BY (a);" >/dev/null
 	out=$(q 0 "INSERT INTO sq SELECT 7, (SELECT max(b) FROM d); SELECT count(*), max(v) = (SELECT max(b) FROM d) FROM sq;")

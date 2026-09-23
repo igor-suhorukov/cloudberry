@@ -137,6 +137,8 @@ typedef struct GatherScanState
 	int			nsegments;
 	GpGatherState *gather;
 	bool		done;
+	bool		identity;		/* the rows of a table being changed */
+	TupleTableSlot *wide;		/* a row as it arrives: the table's, and ctid */
 } GatherScanState;
 
 /* ------------------------------------------------------------------------- */
@@ -477,6 +479,7 @@ gather_plan(PlannerInfo *root, RelOptInfo *rel, CustomPath *best_path,
 	ListCell   *lc;
 	int			content = -1;
 	bool		whole_row;
+	bool		identity;
 
 	relation = table_open(rte->relid, NoLock);
 	tupdesc = RelationGetDescr(relation);
@@ -520,6 +523,18 @@ gather_plan(PlannerInfo *root, RelOptInfo *rel, CustomPath *best_path,
 		else
 			appendStringInfoString(&sql, quote_identifier(NameStr(att->attname)));
 	}
+
+	/*
+	 * A table an UPDATE or DELETE changes: each row with its ctid, which with
+	 * the segment it came from is the row's identity to the write that
+	 * changes it on that segment (gp_explicit.c).
+	 */
+	identity = (root->parse->commandType == CMD_UPDATE ||
+				root->parse->commandType == CMD_DELETE) &&
+		bms_is_member(rel->relid, root->all_result_relids);
+	if (identity)
+		appendStringInfoString(&sql, ", ctid");
+
 	appendStringInfo(&sql, " FROM ONLY %s",
 					 GpDispatchRelationName(RelationGetRelid(relation)));
 
@@ -549,8 +564,9 @@ gather_plan(PlannerInfo *root, RelOptInfo *rel, CustomPath *best_path,
 	cscan->custom_plans = NIL;
 	cscan->custom_exprs = NIL;
 	cscan->custom_scan_tlist = NIL;
-	cscan->custom_private = list_make2(makeString(sql.data),
-									   makeInteger(content));
+	cscan->custom_private = list_make3(makeString(sql.data),
+									   makeInteger(content),
+									   makeBoolean(identity));
 	cscan->methods = &gather_scan_methods;
 
 	return &cscan->scan.plan;
@@ -570,6 +586,7 @@ gather_create_state(CustomScan *cscan)
 	state->css.slotOps = &TTSOpsVirtual;
 	state->sql = strVal(linitial(cscan->custom_private));
 	state->content = intVal(lsecond(cscan->custom_private));
+	state->identity = boolVal(lthird(cscan->custom_private));
 	return (Node *) state;
 }
 
@@ -579,6 +596,18 @@ gather_begin(CustomScanState *node, EState *estate, int eflags)
 	GatherScanState *state = (GatherScanState *) node;
 
 	GpClusterSegments(&state->nsegments);
+
+	if (state->identity)
+	{
+		TupleDesc	reldesc = RelationGetDescr(node->ss.ss_currentRelation);
+		TupleDesc	wide = CreateTemplateTupleDesc(reldesc->natts + 1);
+
+		for (int i = 1; i <= reldesc->natts; i++)
+			TupleDescCopyEntry(wide, i, reldesc, i);
+		TupleDescInitEntry(wide, reldesc->natts + 1, "ctid", TIDOID, -1, 0);
+		TupleDescFinalize(wide);
+		state->wide = ExecInitExtraTupleSlot(estate, wide, &TTSOpsVirtual);
+	}
 
 	/* each gather is a slice of its own, numbered as the executor meets it */
 	if (!(eflags & EXEC_FLAG_EXPLAIN_ONLY))
@@ -606,12 +635,34 @@ gather_next(ScanState *ss)
 	if (state->gather == NULL)
 	{
 		MemoryContextSwitchTo(oldcxt);
-		state->gather = GpGatherStartOn(state->sql, slot->tts_tupleDescriptor,
+		state->gather = GpGatherStartOn(state->sql,
+										state->identity
+										? state->wide->tts_tupleDescriptor
+										: slot->tts_tupleDescriptor,
 										state->content);
 		MemoryContextSwitchTo(ss->ps.ps_ExprContext->ecxt_per_tuple_memory);
 	}
 
-	got = GpGatherNext(state->gather, slot, NULL);
+	if (state->identity)
+	{
+		int			natts = slot->tts_tupleDescriptor->natts;
+		int			content;
+
+		got = GpGatherNext(state->gather, state->wide, &content);
+		if (got)
+		{
+			slot_getallattrs(state->wide);
+			ExecClearTuple(slot);
+			memcpy(slot->tts_values, state->wide->tts_values, natts * sizeof(Datum));
+			memcpy(slot->tts_isnull, state->wide->tts_isnull, natts * sizeof(bool));
+			ExecStoreVirtualTuple(slot);
+			GpRowIdentityMake(ss->ps.state, content,
+							  (ItemPointer) DatumGetPointer(state->wide->tts_values[natts]),
+							  &slot->tts_tid);
+		}
+	}
+	else
+		got = GpGatherNext(state->gather, slot, NULL);
 	MemoryContextSwitchTo(oldcxt);
 
 	if (got)

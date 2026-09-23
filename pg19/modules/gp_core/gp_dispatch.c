@@ -1798,6 +1798,102 @@ GpDispatchParamsOnContent(int content, const char *sql, int nparams,
 }
 
 /*
+ * A write with parameters, as text, on one segment, and what it said: how
+ * many rows it changed and, into "store" when it is not NULL, the rows its
+ * RETURNING gave, read by "tupdesc"'s input functions.
+ */
+uint64
+GpDispatchWriteOnContent(int content, const char *sql, int nparams,
+						 const char *const *values, TupleDesc tupdesc,
+						 Tuplestorestate *store)
+{
+	GpGang	   *g = gang_get();
+	GpSegmentConn *c = NULL;
+	PGresult  **results;
+	PGresult   *res;
+	uint64		count = 0;
+	int			idx = -1;
+
+	gang_prepare(g, true);
+
+	for (int i = 0; i < g->nconns; i++)
+		if (g->conns[i].content == content)
+		{
+			c = &g->conns[i];
+			idx = i;
+		}
+	if (c == NULL)
+		ereport(ERROR,
+				(errcode(ERRCODE_UNDEFINED_OBJECT),
+				 errmsg("there is no segment with content id %d", content)));
+
+	if (c->busy && c->fetching != NULL)
+		conn_park(c);
+	if (!PQsendQueryParams(c->conn, sql, nparams, NULL, values, NULL, NULL, 0))
+	{
+		char	   *msg = pstrdup(PQerrorMessage(c->conn));
+
+		gang_close();
+		ereport(ERROR,
+				(errcode(ERRCODE_CONNECTION_FAILURE),
+				 errmsg("could not send a statement to segment %d", content),
+				 errdetail_internal("%s", msg)));
+	}
+	c->busy = true;
+
+	results = (PGresult **) palloc0_array(PGresult *, g->nconns);
+	gang_wait_all_keeping_commands(g, results);
+	res = results[idx];
+
+	if (res != NULL)
+	{
+		const char *tuples = PQcmdTuples(res);
+
+		if (tuples[0] != '\0')
+			count = strtou64(tuples, NULL, 10);
+
+		if (store != NULL && PQresultStatus(res) == PGRES_TUPLES_OK)
+		{
+			int			natts = tupdesc->natts;
+			FmgrInfo   *in = palloc_array(FmgrInfo, natts);
+			Oid		   *ioparams = palloc_array(Oid, natts);
+			Datum	   *datums = palloc_array(Datum, natts);
+			bool	   *nulls = palloc_array(bool, natts);
+
+			if (PQnfields(res) != natts)
+				elog(ERROR, "segment %d returned %d columns, not %d",
+					 content, PQnfields(res), natts);
+			for (int j = 0; j < natts; j++)
+			{
+				Oid			func;
+
+				getTypeInputInfo(TupleDescAttr(tupdesc, j)->atttypid, &func,
+								 &ioparams[j]);
+				fmgr_info(func, &in[j]);
+			}
+			for (int r = 0; r < PQntuples(res); r++)
+			{
+				for (int j = 0; j < natts; j++)
+				{
+					nulls[j] = PQgetisnull(res, r, j);
+					datums[j] = InputFunctionCall(&in[j],
+												  nulls[j] ? NULL : PQgetvalue(res, r, j),
+												  ioparams[j],
+												  TupleDescAttr(tupdesc, j)->atttypmod);
+				}
+				tuplestore_putvalues(store, tupdesc, datums, nulls);
+			}
+		}
+	}
+
+	for (int i = 0; i < g->nconns; i++)
+		if (results[i] != NULL)
+			PQclear(results[i]);
+	pfree(results);
+	return count;
+}
+
+/*
  * A relation's name in SQL a segment is sent.  A temporary relation is in
  * this session's temporary schema, whose name -- pg_temp_N -- is the
  * coordinator's backend's; the segment backend's own is another number, and
