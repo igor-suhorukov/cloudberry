@@ -49,6 +49,7 @@
 #include "gp_dispatch.h"
 #include "gp_dtx.h"
 #include "gp_fault.h"
+#include "gp_gdd.h"
 #include "gp_motion.h"
 #include "gp_label.h"
 #include "gp_policy.h"
@@ -198,6 +199,12 @@ _PG_init(void)
 	 * distributed one before the writer publishes it to its readers.
 	 */
 	GpDtxInit();
+
+	/*
+	 * The global deadlock detector: its settings, and on the coordinator its
+	 * process when it is on.
+	 */
+	GpGddInit();
 
 	/*
 	 * gp_segment_id, through O10: the name, where no column has it, and its

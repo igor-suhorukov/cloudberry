@@ -119,6 +119,7 @@
 #include "gp_cluster.h"
 #include "gp_core_api.h"
 #include "gp_dispatch.h"
+#include "gp_gdd.h"
 #include "gp_hash.h"
 #include "gp_ic.h"
 #include "gp_motion.h"
@@ -2093,9 +2094,10 @@ motion_dml_run(MotionState *state)
 	/*
 	 * Cloudberry without its global deadlock detector: an UPDATE or DELETE
 	 * of a distributed table locks the table, so that two of them never wait
-	 * for each other on different segments.
+	 * for each other on different segments.  With it, rows (gp_gdd.c).
 	 */
-	if (operation == CMD_UPDATE || operation == CMD_DELETE)
+	if ((operation == CMD_UPDATE || operation == CMD_DELETE) &&
+		!gp_enable_global_deadlock_detector)
 		LockRelationOid(rte->relid, ExclusiveLock);
 
 	if (!state->prepared)

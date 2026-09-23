@@ -212,6 +212,20 @@ endif
 # "Extension modules and where their code comes from".
 ###############################################################################
 
+# Cloudberry's global deadlock detector's graph -- its vertices, edges and
+# their reduction -- compiled where it lies, unmodified, as gp_task's cron
+# parser is: gp_gdd.c supplies the vertices and edges and asks it through the
+# include overlay (compat/gdd/).  A vertex is named by Cloudberry's
+# DistributedTransactionId, a uint64 its c.h defines and PostgreSQL 19's does
+# not, and it asserts with Cloudberry's AssertImply, hence the definitions.
+gdd_graph = static_library('gdd_graph',
+  files('../src/backend/utils/gdd/gdddetector.c'),
+  c_args: mod_c_args + ['-DDistributedTransactionId=uint64',
+                        '-DAssertImply(a,b)=Assert(!(a) || (b))'],
+  include_directories: [pg_inc],
+  pic: true,
+)
+
 modules = [
   {
     'name': 'gp_core', 'preload': true, 'extension': true, 'build': true,
@@ -220,6 +234,7 @@ modules = [
                      'modules/gp_core/gp_dispatch.c',
                      'modules/gp_core/gp_dtx.c',
                      'modules/gp_core/gp_fault.c',
+                     'modules/gp_core/gp_gdd.c',
                      'modules/gp_core/gp_ddl.c',
                      'modules/gp_core/gp_hash.c',
                      'modules/gp_core/gp_legacyhash.c',
@@ -242,6 +257,8 @@ modules = [
     'include_directories': [pg_client_inc],
     # Cloudberry's fault injector, for the tests (gp_fault.c).
     'more_extensions': ['gp_inject_fault'],
+    # Cloudberry's global deadlock detector's graph, where it lies.
+    'link_with': [gdd_graph],
   },
   {
     'name': 'interconnect', 'preload': true, 'extension': false, 'build': true,

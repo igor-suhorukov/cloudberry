@@ -116,6 +116,7 @@
 
 #include "gp_cluster.h"
 #include "gp_dispatch.h"
+#include "gp_gdd.h"
 #include "gp_hash.h"
 #include "gp_policy.h"
 #include "gp_scan.h"
@@ -868,7 +869,8 @@ explicit_begin(CustomScanState *node, EState *estate, int eflags)
 	 * wait for each other on different segments -- and here, so that a row
 	 * the plan read does not change before it is written.
 	 */
-	if (state->operation == CMD_UPDATE || state->operation == CMD_DELETE)
+	if ((state->operation == CMD_UPDATE || state->operation == CMD_DELETE) &&
+		!gp_enable_global_deadlock_detector)
 		LockRelationOid(RelationGetRelid(state->target), ExclusiveLock);
 
 	GpClusterSegments(&state->nsegs);

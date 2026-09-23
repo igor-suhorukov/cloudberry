@@ -64,7 +64,8 @@ Or, without installing anything on the host:
 
 Milestones **M0** and **M1** are complete, and **M2 — a cluster — is built**
 (2026-09-23), the interconnect included.  **M3 — distributed transactions —
-is under way** (2026-09-23): two-phase commit and distributed snapshots.
+is under way** (2026-09-23): two-phase commit, distributed snapshots and the
+global deadlock detector.
 
 On one node (M1):
 
@@ -142,6 +143,12 @@ Distributed transactions (M3), in `gp_core`:
   hides one the snapshot says in progress that it has committed, holding
   back with the replication slot `gp_dtx_horizon` what such a transaction
   deleted;
+- **the global deadlock detector** (`gp.enable_global_deadlock_detector`):
+  without it an UPDATE or DELETE of a distributed table locks the table, as
+  Cloudberry's does; with it rows are locked, and a process on the
+  coordinator gathers every node's waits, reduces the graph with
+  Cloudberry's own detector (`src/backend/utils/gdd/gdddetector.c`, compiled
+  where it lies) and cancels the youngest transaction of a cycle;
 - Cloudberry's fault injector, `gp_inject_fault`, for the tests.
 
 The storage, resource and transport modules — `gp_ao`, `pax`, `gp_exttable`,

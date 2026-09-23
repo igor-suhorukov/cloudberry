@@ -79,6 +79,20 @@ RETURNS SETOF record
 AS 'MODULE_PATHNAME', 'gp_dtx_map'
 LANGUAGE C STRICT VOLATILE;
 
+/*
+ * This node's waiting relations, as the global deadlock detector reads them:
+ * each waiting backend and a backend that holds what it waits for, with the
+ * coordinator session each works for (0: none), whether the lock lasts to
+ * the end of the transaction, and its mode and kind.  See gp_gdd.c.
+ */
+CREATE FUNCTION gp_internal.dist_wait_status(
+	OUT segid int, OUT waiter int, OUT holder int, OUT waiter_session int,
+	OUT holder_session int, OUT solid bool, OUT lockmode text,
+	OUT locktype text)
+RETURNS SETOF record
+AS 'MODULE_PATHNAME', 'gp_dist_wait_status'
+LANGUAGE C STRICT VOLATILE;
+
 CREATE FUNCTION gp.version()
 RETURNS text
 AS 'MODULE_PATHNAME', 'gp_version'

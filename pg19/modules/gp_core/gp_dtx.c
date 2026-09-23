@@ -120,6 +120,7 @@
 #include "gp_dispatch.h"
 #include "gp_dtx.h"
 #include "gp_fault.h"
+#include "gp_gdd.h"
 #include "gp_share.h"
 
 /* The replication slot whose xmin holds back what a hidden transaction deleted. */
@@ -823,6 +824,9 @@ dtx_executor_start(QueryDesc *queryDesc, int eflags)
 {
 	GpDtxSnapshot *ds;
 
+	/* who this backend is, for the global deadlock detector */
+	GpGddNoteBackend();
+
 	if (queryDesc->snapshot != NULL &&
 		queryDesc->snapshot->snapshot_type == SNAPSHOT_MVCC &&
 		queryDesc->snapshot == GetActiveSnapshot() &&
@@ -1108,7 +1112,10 @@ dtx_ProcessUtility(PlannedStmt *pstmt, const char *queryString,
 	FullTransactionId gxid = InvalidFullTransactionId;
 
 	if (IsTransactionState())
+	{
 		note_transaction();
+		GpGddNoteBackend();
+	}
 
 	if (IsA(parsetree, TransactionStmt))
 	{

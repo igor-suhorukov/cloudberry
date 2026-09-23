@@ -99,6 +99,7 @@
 #include "gp_cluster.h"
 #include "gp_core_api.h"
 #include "gp_dispatch.h"
+#include "gp_gdd.h"
 #include "gp_hash.h"
 #include "gp_policy.h"
 #include "gp_scan.h"
@@ -520,6 +521,7 @@ typedef struct ModifyState
 	int			content;		/* the one segment it is sent to, or -1 */
 	int			nsegments;		/* else the table's: all, or a partial
 								 * table's first so many */
+	Oid			relid;			/* the table it changes */
 	bool		done;
 } ModifyState;
 
@@ -535,15 +537,25 @@ modify_create_state(CustomScan *cscan)
 	state->replicated = boolVal(lsecond(cscan->custom_private));
 	state->content = intVal(lthird(cscan->custom_private));
 	state->nsegments = intVal(lfourth(cscan->custom_private));
+	state->relid = (Oid) intVal(list_nth(cscan->custom_private, 4));
 	return (Node *) state;
 }
 
 static void
 modify_begin(CustomScanState *node, EState *estate, int eflags)
 {
-	if (!(eflags & EXEC_FLAG_EXPLAIN_ONLY))
-		GpReportDispatch(0, ((ModifyState *) node)->content >= 0,
-						 ((ModifyState *) node)->nsegments);
+	if (eflags & EXEC_FLAG_EXPLAIN_ONLY)
+		return;
+
+	/*
+	 * Cloudberry without its global deadlock detector: an UPDATE or DELETE
+	 * of a distributed table locks the table, so that two never wait for
+	 * each other on different segments.  With it, rows (gp_gdd.c).
+	 */
+	if (!gp_enable_global_deadlock_detector)
+		LockRelationOid(((ModifyState *) node)->relid, ExclusiveLock);
+	GpReportDispatch(0, ((ModifyState *) node)->content >= 0,
+					 ((ModifyState *) node)->nsegments);
 }
 
 static TupleTableSlot *
@@ -1032,12 +1044,13 @@ gp_modify_planner_routed(Query *parse, const char *query_string, int cursorOptio
 
 		cscan = make_custom_scan(&mt->plan, &modify_scan_methods);
 		cscan->custom_private =
-			list_make4(makeString(pg_get_querydef(original, false)),
+			list_make5(makeString(pg_get_querydef(original, false)),
 					   makeBoolean(GpPolicyIsReplicated(policy)),
 					   makeInteger(GpScanDirectDispatchSegment(rte->relid,
 															   original->jointree->quals,
 															   original->resultRelation)),
-					   makeInteger(policy->numsegments));
+					   makeInteger(policy->numsegments),
+					   makeInteger((int) rte->relid));
 		stmt->planTree = &cscan->scan.plan;
 		return stmt;
 	}

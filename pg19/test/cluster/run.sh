@@ -1758,7 +1758,70 @@ SQL
 	esac
 
 	###########################################################################
-	echo "14. the segments authenticate the coordinator, with SCRAM"
+	echo "14. the global deadlock detector"
+	###########################################################################
+	# gp_gdd.c: without it an UPDATE or DELETE of a distributed table locks the
+	# table, so that two never wait for each other on different segments;
+	# with it rows are locked, and a process on the coordinator breaks the
+	# deadlocks that makes, cancelling the younger transaction.
+	q 0 "CREATE TABLE gdd (id int, val int) DISTRIBUTED BY (id); INSERT INTO gdd SELECT i, i FROM generate_series(1, 100) i;" >/dev/null
+	r0=$(q 0 "SELECT min(id) FROM gdd WHERE gp_segment_id = 0;")
+	r1=$(q 0 "SELECT min(id) FROM gdd WHERE gp_segment_id = 1;")
+
+	printf '%s\n' "BEGIN;" "UPDATE gdd SET val = val WHERE id = $r0;" "SELECT pg_sleep(2);" "COMMIT;" |
+		qf 0 >/dev/null 2>&1 &
+	holder=$!
+	sleep 0.5
+	out=$(q 0 "SELECT count(*) FROM pg_stat_activity WHERE wait_event_type = 'Lock' AND wait_event = 'relation';")
+	q 0 "UPDATE gdd SET val = val WHERE id = $r1;" >/dev/null &
+	other=$!
+	sleep 0.5
+	out=$(q 0 "SELECT count(*) FROM pg_stat_activity WHERE wait_event_type = 'Lock' AND wait_event = 'relation';")
+	wait "$holder" "$other"
+	[ "$out" = "1" ] && ok "without the detector an UPDATE of another row waits for the table, as Cloudberry's does" \
+		|| notok "the table lock without the detector" "$out"
+
+	start_node 0 "shared_preload_libraries = '$PRELOAD,gp_orca'" \
+		"gp.enable_global_deadlock_detector = on" \
+		"gp.global_deadlock_detector_period = 5"
+	out=$(q 0 "SELECT count(*) FROM pg_stat_activity WHERE backend_type = 'gp_core global deadlock detector';")
+	[ "$out" = "1" ] && ok "with gp.enable_global_deadlock_detector the coordinator runs the detector" \
+		|| notok "the detector's process" "$out"
+
+	printf '%s\n' "BEGIN;" "UPDATE gdd SET val = val WHERE id = $r0;" "SELECT pg_sleep(2);" "COMMIT;" |
+		qf 0 >/dev/null 2>&1 &
+	holder=$!
+	sleep 0.5
+	start=$(date +%s%N)
+	q 0 "UPDATE gdd SET val = val WHERE id = $r1;" >/dev/null
+	elapsed=$(( ($(date +%s%N) - start) / 1000000 ))
+	wait "$holder"
+	[ "$elapsed" -lt 1000 ] && ok "with it, an UPDATE of another row does not wait ($elapsed ms)" \
+		|| notok "row locks with the detector" "$elapsed ms"
+
+	# Cloudberry's gdd/dist-deadlock-01: each holds a row on one segment and
+	# waits for the other's on the other.
+	printf '%s\n' "BEGIN;" "UPDATE gdd SET val = val WHERE id = $r0;" "SELECT pg_sleep(2);" \
+		"UPDATE gdd SET val = val WHERE id = $r1;" "COMMIT;" | qf 0 > "$ROOT/gdd10.out" 2>&1 &
+	older=$!
+	sleep 0.5
+	printf '%s\n' "BEGIN;" "UPDATE gdd SET val = val WHERE id = $r1;" "SELECT pg_sleep(1);" \
+		"UPDATE gdd SET val = val WHERE id = $r0;" "COMMIT;" | qf 0 > "$ROOT/gdd20.out" 2>&1 &
+	younger=$!
+	wait "$older" "$younger"
+	out=$(grep -c ERROR "$ROOT/gdd10.out")
+	out2=$(grep ERROR "$ROOT/gdd20.out")
+	log=$(grep -c "global deadlock detected" "$ROOT/node0.log")
+	case "$out|$out2|$log" in
+		'0|'*'ERROR:  canceling statement due to user request: "cancelled by global deadlock detector"|'[1-9]*)
+			ok "a deadlock across two segments is broken: the younger transaction is cancelled, in Cloudberry's words" ;;
+		*) notok "a distributed deadlock" "$out / $out2 / $log" ;;
+	esac
+
+	start_node 0 "shared_preload_libraries = '$PRELOAD,gp_orca'"
+
+	###########################################################################
+	echo "15. the segments authenticate the coordinator, with SCRAM"
 	###########################################################################
 	# Decision 5 asks for SCRAM on the early milestones.  The dispatcher is an
 	# ordinary client, so this is ordinary authentication: the segment asks,
@@ -1800,7 +1863,7 @@ SQL
 fi
 
 ###############################################################################
-echo "15. a cluster described wrongly is a server that does not start"
+echo "16. a cluster described wrongly is a server that does not start"
 ###############################################################################
 # The message has to name the file and the line: this is read in the
 # postmaster while it starts, so it is all the operator is given.
@@ -1870,7 +1933,7 @@ refuses "a file that is not there is refused" \
 	"gp.cluster_config = '$ROOT/nowhere.conf'"
 
 ###############################################################################
-echo "16. with no cluster configured, this is a single node"
+echo "17. with no cluster configured, this is a single node"
 ###############################################################################
 if start_node 0 "gp.cluster_config = ''" ; then
 	notok "node 0 should not have started: gp.role is dispatch with no cluster"
