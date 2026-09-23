@@ -27,6 +27,13 @@
  *	   (a,"b,c")		 hashed on those columns, each quoted where it needs
  *						 to be
  *
+ * A column of the key may name the operator class it is hashed with, after
+ * it and qualified -- (a public.abs_int_hash_ops,b) -- where that is not its
+ * type's default, as DISTRIBUTED BY (a abs_int_hash_ops) says; a column
+ * without one is hashed with its type's default, as Cloudberry's is when
+ * DISTRIBUTED BY names none.  The table depends on each class it names, as
+ * Cloudberry's does through its catalog row (gp_label.c records it).
+ *
  * gp_sql.set_distribution() writes it and refuses any other shape; this is
  * the reader.  The parentheses are load-bearing: without them a table hashed
  * on a column called "random" recorded the same label as a randomly
@@ -46,14 +53,18 @@
 
 #include <limits.h>
 
+#include "access/htup_details.h"
 #include "catalog/namespace.h"
 #include "catalog/pg_am_d.h"
 #include "catalog/pg_class.h"
+#include "catalog/pg_opclass.h"
 #include "commands/defrem.h"
 #include "lib/stringinfo.h"
 #include "nodes/pg_list.h"
 #include "utils/builtins.h"
 #include "utils/lsyscache.h"
+#include "utils/regproc.h"
+#include "utils/syscache.h"
 #include "utils/typcache.h"
 
 #include "gp_core_api.h"
@@ -95,82 +106,136 @@ GpPolicyDefaultOpclass(Oid typeoid)
 	return GetDefaultOpClass(typeoid, HASH_AM_OID);
 }
 
+/* The relation a malformed label is on, for the message; "?" for none. */
+static const char *
+label_owner(Oid relid)
+{
+	char	   *name = OidIsValid(relid) ? get_rel_name(relid) : NULL;
+
+	return name != NULL ? name : "?";
+}
+
 /*
- * Split "(a,"" b"",c)" into its column names.
+ * One identifier of a label at *p, bare or double-quoted, into buf; *p is
+ * left after it.  A bare one ends at a space, a comma, a dot or the closing
+ * parenthesis, none of which quote_identifier() leaves unquoted.  "what" it
+ * names, for the message; false, with noerror, where it is malformed.
+ */
+static bool
+parse_identifier(const char **pp, StringInfo buf, const char *value, Oid relid,
+				 const char *what, bool noerror)
+{
+	const char *p = *pp;
+
+	resetStringInfo(buf);
+	if (*p == '"')
+	{
+		p++;
+		for (;;)
+		{
+			if (*p == '\0')
+			{
+				if (noerror)
+					return false;
+				ereport(ERROR,
+						(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+						 errmsg("unterminated quoted %s in distribution policy \"%s\" on \"%s\"",
+								what, value, label_owner(relid))));
+			}
+			if (*p == '"')
+			{
+				if (p[1] == '"')	/* "" is one quote */
+				{
+					appendStringInfoChar(buf, '"');
+					p += 2;
+					continue;
+				}
+				p++;
+				break;
+			}
+			appendStringInfoChar(buf, *p++);
+		}
+	}
+	else
+	{
+		while (*p != '\0' && *p != ',' && *p != ')' && *p != ' ' && *p != '.')
+			appendStringInfoChar(buf, *p++);
+	}
+
+	if (buf->len == 0)
+	{
+		if (noerror)
+			return false;
+		ereport(ERROR,
+				(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+				 errmsg("empty %s in distribution policy \"%s\" on \"%s\"",
+						what, value, label_owner(relid))));
+	}
+	*pp = p;
+	return true;
+}
+
+/*
+ * Split "(a,"" b"" public.abs_ops,c)" into its columns, each with the
+ * operator class it names, if it names one.
  *
  * The names were written by quote_identifier(), so a name is either bare or
  * double-quoted with doubled quotes inside it.  The scanner had already
  * downcased an unquoted identifier and dequoted a quoted one before the label
  * was written, so what comes out here is the true column name and needs no
- * further folding.
+ * further folding.  An operator class is kept as the label spells it, which
+ * stringToQualifiedNameList() reads.
  *
  * Every malformed shape raises.  The writer refuses them, but a label can
  * also be set by hand through SECURITY LABEL, and a policy read wrong is a
- * plan built on the wrong distribution.
+ * plan built on the wrong distribution.  With noerror, one is NIL instead,
+ * for a reader that only wants what a well-formed one says.
  */
 static List *
-parse_column_list(const char *value, Oid relid)
+parse_key(const char *value, Oid relid, bool noerror)
 {
 	const char *p = value;
-	List	   *names = NIL;
+	List	   *keys = NIL;
 	StringInfoData buf;
 
-	Assert(*p == '(');
+	if (value == NULL || value[0] != '(')
+		return NIL;
 	p++;
 
 	initStringInfo(&buf);
 
 	for (;;)
 	{
-		resetStringInfo(&buf);
+		GpPolicyKeyName *key = palloc0(sizeof(GpPolicyKeyName));
+
+		while (*p == ' ')
+			p++;
+		if (!parse_identifier(&p, &buf, value, relid, "column name", noerror))
+			return NIL;
+		key->column = pstrdup(buf.data);
 
 		while (*p == ' ')
 			p++;
 
-		if (*p == '"')
+		/* its operator class: a name, or a schema's name and a dot before it */
+		if (*p != ',' && *p != ')' && *p != '\0')
 		{
-			p++;
-			for (;;)
+			const char *start = p;
+
+			if (!parse_identifier(&p, &buf, value, relid, "operator class name", noerror))
+				return NIL;
+			if (*p == '.')
 			{
-				if (*p == '\0')
-					ereport(ERROR,
-							(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
-							 errmsg("unterminated quoted column name in distribution policy \"%s\" on \"%s\"",
-									value, get_rel_name(relid))));
-				if (*p == '"')
-				{
-					if (p[1] == '"')	/* "" is one quote */
-					{
-						appendStringInfoChar(&buf, '"');
-						p += 2;
-						continue;
-					}
-					p++;
-					break;
-				}
-				appendStringInfoChar(&buf, *p++);
+				p++;
+				if (!parse_identifier(&p, &buf, value, relid, "operator class name", noerror))
+					return NIL;
 			}
-		}
-		else
-		{
-			while (*p != '\0' && *p != ',' && *p != ')')
-				appendStringInfoChar(&buf, *p++);
-
-			/* A bare name cannot end in spaces, so they are separators. */
-			while (buf.len > 0 && buf.data[buf.len - 1] == ' ')
-				buf.data[--buf.len] = '\0';
+			key->opclass = pnstrdup(start, p - start);
+			while (*p == ' ')
+				p++;
 		}
 
-		if (buf.len == 0)
-			ereport(ERROR,
-					(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
-					 errmsg("empty column name in distribution policy \"%s\" on \"%s\"",
-							value, get_rel_name(relid))));
-
-		names = lappend(names, pstrdup(buf.data));
-
-		while (*p == ' ')
-			p++;
+		keys = lappend(keys, key);
 
 		if (*p == ',')
 		{
@@ -183,20 +248,92 @@ parse_column_list(const char *value, Oid relid)
 			break;
 		}
 
+		if (noerror)
+			return NIL;
 		ereport(ERROR,
 				(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
 				 errmsg("malformed distribution policy \"%s\" on \"%s\"",
-						value, get_rel_name(relid)),
-				 errhint("A column list is a parenthesised list of column names, such as \"(a,b)\".")));
+						value, label_owner(relid)),
+				 errhint("A column list is a parenthesised list of column names, each with an operator class if it names one, such as \"(a,b public.b_ops)\".")));
 	}
 
 	if (*p != '\0')
+	{
+		if (noerror)
+			return NIL;
 		ereport(ERROR,
 				(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
 				 errmsg("trailing text after the column list in distribution policy \"%s\" on \"%s\"",
-						value, get_rel_name(relid))));
+						value, label_owner(relid))));
+	}
 
-	return names;
+	return keys;
+}
+
+List *
+GpPolicyParseKey(const char *value, Oid relid)
+{
+	return parse_key(value, relid, false);
+}
+
+List *
+GpPolicyParseKeyQuietly(const char *value)
+{
+	return parse_key(value, InvalidOid, true);
+}
+
+char *
+GpPolicyFormatKey(List *keys)
+{
+	StringInfoData buf;
+	ListCell   *lc;
+
+	initStringInfo(&buf);
+	appendStringInfoChar(&buf, '(');
+	foreach(lc, keys)
+	{
+		GpPolicyKeyName *key = (GpPolicyKeyName *) lfirst(lc);
+
+		if (lc != list_head(keys))
+			appendStringInfoChar(&buf, ',');
+		appendStringInfoString(&buf, quote_identifier(key->column));
+		if (key->opclass != NULL)
+			appendStringInfo(&buf, " %s", key->opclass);
+	}
+	appendStringInfoChar(&buf, ')');
+	return buf.data;
+}
+
+/* The qualified name a label gives an operator class by. */
+char *
+GpPolicyOpclassName(Oid opclass)
+{
+	HeapTuple	tuple = SearchSysCache1(CLAOID, ObjectIdGetDatum(opclass));
+	Form_pg_opclass form;
+	char	   *name;
+
+	if (!HeapTupleIsValid(tuple))
+		elog(ERROR, "cache lookup failed for operator class %u", opclass);
+	form = (Form_pg_opclass) GETSTRUCT(tuple);
+	name = quote_qualified_identifier(get_namespace_name(form->opcnamespace),
+									  NameStr(form->opcname));
+	ReleaseSysCache(tuple);
+	return name;
+}
+
+/*
+ * The hash operator class a label names, or InvalidOid when it names none
+ * that is there: a name that stopped resolving is refused where the policy
+ * is read, since the table depends on the class and so cannot lose it.
+ */
+Oid
+GpPolicyOpclassByName(const char *name)
+{
+	List	   *names = stringToQualifiedNameList(name, NULL);
+
+	if (names == NIL)
+		return InvalidOid;
+	return get_opclass_oid(HASH_AM_OID, names, true);
 }
 
 /*
@@ -268,24 +405,17 @@ make_policy(GpPolicyType ptype, int nattrs, int numsegments)
 	return policy;
 }
 
+/*
+ * The policy a label's distributed_by value describes for this relation, over
+ * numsegments segments.
+ */
 static GpPolicy *
-policy_read(Oid relid, bool check)
+policy_from_text(Oid relid, const char *value, int numsegments, bool check)
 {
-	ObjectAddress addr;
-	char	   *value;
 	GpPolicy   *policy;
-	List	   *names;
+	List	   *keys;
 	ListCell   *lc;
 	int			i = 0;
-	int			numsegments;
-
-	ObjectAddressSet(addr, RelationRelationId, relid);
-	value = GpLabelGet(&addr, GP_LABEL_distributed_by);
-
-	if (value == NULL)
-		return NULL;
-
-	numsegments = policy_numsegments(&addr, check);
 
 	if (strcmp(value, "replicated") == 0)
 		return make_policy(POLICYTYPE_REPLICATED, 0, numsegments);
@@ -301,16 +431,21 @@ policy_read(Oid relid, bool check)
 				 errhint("Use \"random\", \"replicated\", or a parenthesised "
 						 "column list such as \"(a,b)\".")));
 
-	names = parse_column_list(value, relid);
-	policy = make_policy(POLICYTYPE_PARTITIONED, list_length(names),
+	keys = GpPolicyParseKey(value, relid);
+	policy = make_policy(POLICYTYPE_PARTITIONED, list_length(keys),
 						 numsegments);
 
-	foreach(lc, names)
+	foreach(lc, keys)
 	{
-		const char *name = (const char *) lfirst(lc);
+		GpPolicyKeyName *key = (GpPolicyKeyName *) lfirst(lc);
+		const char *name = key->column;
 		AttrNumber	attnum = get_attnum(relid, name);
 		Oid			typeoid;
 		Oid			opclass;
+
+		/* a system column is none of the table's own */
+		if (attnum < 0)
+			attnum = InvalidAttrNumber;
 
 		/*
 		 * The column may have been dropped since the label was written.
@@ -335,7 +470,19 @@ policy_read(Oid relid, bool check)
 							name, get_rel_name(relid))));
 
 		typeoid = get_atttype(relid, attnum);
-		opclass = GpPolicyDefaultOpclass(typeoid);
+		if (key->opclass != NULL)
+		{
+			opclass = GpPolicyOpclassByName(key->opclass);
+			if (!OidIsValid(opclass) && check)
+				ereport(ERROR,
+						(errcode(ERRCODE_UNDEFINED_OBJECT),
+						 errmsg("operator class \"%s\" does not exist for access method \"%s\"",
+								key->opclass, "hash"),
+						 errdetail("The distribution policy of \"%s\" hashes its column \"%s\" with it.",
+								   get_rel_name(relid), name)));
+		}
+		else
+			opclass = GpPolicyDefaultOpclass(typeoid);
 
 		if (!OidIsValid(opclass) && check)
 			ereport(ERROR,
@@ -354,10 +501,42 @@ policy_read(Oid relid, bool check)
 	return policy;
 }
 
+static GpPolicy *
+policy_read(Oid relid, bool check)
+{
+	ObjectAddress addr;
+	char	   *value;
+
+	ObjectAddressSet(addr, RelationRelationId, relid);
+	value = GpLabelGet(&addr, GP_LABEL_distributed_by);
+
+	if (value == NULL)
+		return NULL;
+
+	return policy_from_text(relid, value, policy_numsegments(&addr, check),
+							check);
+}
+
 GpPolicy *
 GpPolicyGet(Oid relid)
 {
 	return policy_read(relid, true);
+}
+
+/*
+ * The policy a distributed_by value would give this relation, which need not
+ * be the one its label records: what a statement is about to set, checked
+ * against the table first.  Over the segments the relation is spread over
+ * now, which setting a policy does not change.
+ */
+GpPolicy *
+GpPolicyMake(Oid relid, const char *value)
+{
+	ObjectAddress addr;
+
+	ObjectAddressSet(addr, RelationRelationId, relid);
+	return policy_from_text(relid, value, policy_numsegments(&addr, false),
+							true);
 }
 
 GpPolicy *

@@ -111,6 +111,7 @@ static const char *const gp_trigger_words[] = {
 	"tag", "profile", "noprofile", "distributed", "randomly", "replicated",
 	"task", "directory", "storage", "dynamic", "incremental", "unset",
 	"account", "execute", "decode", "subpartition", "gp_dist_random",
+	"reorganize",
 	NULL
 };
 
@@ -614,16 +615,28 @@ rw_add_carrier(GpRewrite *rw, const char *nspace, const char *name,
  * token as the user wrote it, with the caret under it.
  */
 static void
-rw_syntax_error(const GpRewrite *rw, int i)
+ts_syntax_error(const GpTokens *ts, int i)
 {
-	const GpTokens *ts = rw->ts;
-	int			off = ts->toks[i].off;
+	int			off;
 
+	if (i >= ts->ntoks)
+		ereport(ERROR,
+				(errcode(ERRCODE_SYNTAX_ERROR),
+				 errmsg("syntax error at end of input"),
+				 errposition(pg_mbstrlen_with_len(ts->src, ts->srclen) + 1)));
+
+	off = ts->toks[i].off;
 	ereport(ERROR,
 			(errcode(ERRCODE_SYNTAX_ERROR),
 			 errmsg("syntax error at or near \"%s\"",
 					pnstrdup(ts->src + off, tok_stop(ts, i) - off)),
 			 errposition(pg_mbstrlen_with_len(ts->src, off) + 1)));
+}
+
+static void
+rw_syntax_error(const GpRewrite *rw, int i)
+{
+	ts_syntax_error(rw->ts, i);
 }
 
 /* This statement becomes something else entirely; body is what it becomes. */
@@ -1915,13 +1928,23 @@ rw_distribution(GpRewrite *rw, const char *policy, int at)
 }
 
 /*
- * A DISTRIBUTED clause at token i -- BY (a, b), RANDOMLY or REPLICATED -- as
- * the policy gp.distributed_by records, with *after set to the token after
- * it; NULL when there is none.
+ * A DISTRIBUTED clause at token i -- BY (a, b opclass), RANDOMLY or
+ * REPLICATED -- as the policy gp.distributed_by records, with *after set to
+ * the token after it; NULL when there is none.
+ *
+ * Each column may name the operator class it is hashed with, qualified or
+ * not, which is kept as it is written for gp_sql to resolve against the
+ * column's type (distribution.c).  Cloudberry's grammar (distributed_by_list)
+ * refuses an empty list, and a column named twice at its second naming: so
+ * does this, in its words.
  */
 static char *
 distributed_policy(const GpTokens *ts, int i, int *after)
 {
+	StringInfoData cols;
+	List	   *seen = NIL;
+	int			j;
+
 	if (!tok_is(ts, i, "distributed"))
 		return NULL;
 	if (tok_is(ts, i + 1, "randomly") || tok_is(ts, i + 1, "replicated"))
@@ -1929,27 +1952,53 @@ distributed_policy(const GpTokens *ts, int i, int *after)
 		*after = i + 2;
 		return tok_is(ts, i + 1, "randomly") ? "random" : "replicated";
 	}
-	if (tok_is(ts, i + 1, "by") && tok_is_char(ts, i + 2, '('))
-	{
-		StringInfoData cols;
-		bool		first = true;
+	if (!tok_is(ts, i + 1, "by") || !tok_is_char(ts, i + 2, '('))
+		return NULL;
 
-		*after = skip_parens(ts, i + 2);
-		initStringInfo(&cols);
-		appendStringInfoChar(&cols, '(');
-		for (int j = i + 3; j < *after - 1; j++)
+	initStringInfo(&cols);
+	appendStringInfoChar(&cols, '(');
+	for (j = i + 3;; j++)
+	{
+		char	   *name;
+		ListCell   *lc;
+
+		if (!tok_is_name(ts, j))
+			ts_syntax_error(ts, j);
+		name = tok_name(ts, j);
+		foreach(lc, seen)
 		{
-			if (tok_is_char(ts, j, ',') || !tok_is_name(ts, j))
-				continue;
-			if (!first)
-				appendStringInfoChar(&cols, ',');
-			appendStringInfoString(&cols, quote_identifier(tok_name(ts, j)));
-			first = false;
+			if (strcmp((char *) lfirst(lc), name) == 0)
+				ereport(ERROR,
+						(errcode(ERRCODE_DUPLICATE_COLUMN),
+						 errmsg("duplicate column in DISTRIBUTED BY clause"),
+						 errposition(pg_mbstrlen_with_len(ts->src, ts->toks[j].off) + 1)));
 		}
-		appendStringInfoChar(&cols, ')');
-		return cols.data;
+		seen = lappend(seen, name);
+		if (cols.len > 1)
+			appendStringInfoChar(&cols, ',');
+		appendStringInfoString(&cols, quote_identifier(name));
+
+		/* the column's operator class */
+		if (tok_is_name(ts, j + 1))
+		{
+			j++;
+			appendStringInfo(&cols, " %s", quote_identifier(tok_name(ts, j)));
+			while (tok_is_char(ts, j + 1, '.') && tok_is_name(ts, j + 2))
+			{
+				appendStringInfo(&cols, ".%s", quote_identifier(tok_name(ts, j + 2)));
+				j += 2;
+			}
+		}
+
+		if (tok_is_char(ts, j + 1, ')'))
+			break;
+		if (!tok_is_char(ts, j + 1, ','))
+			ts_syntax_error(ts, j + 1);
+		j++;
 	}
-	return NULL;
+	appendStringInfoChar(&cols, ')');
+	*after = j + 2;
+	return cols.data;
 }
 
 static void
@@ -1964,6 +2013,9 @@ rw_distributed(GpRewrite *rw, int from)
 
 	for (int i = from; i < rw->last; i++)
 	{
+		char	   *policy;
+		int			after;
+
 		if (tok_is_char(ts, i, '('))
 		{
 			depth++;
@@ -1974,44 +2026,13 @@ rw_distributed(GpRewrite *rw, int from)
 			depth--;
 			continue;
 		}
-		if (depth != 0 || !tok_is(ts, i, "distributed"))
+		if (depth != 0 || (policy = distributed_policy(ts, i, &after)) == NULL)
 			continue;
 
-		if (tok_is(ts, i + 1, "randomly") || tok_is(ts, i + 1, "replicated"))
-		{
-			rw_distribution(rw, tok_is(ts, i + 1, "randomly") ? "random" : "replicated",
-							ts->toks[i].off);
-			rw_edit(rw, ts->toks[i].off,
-					(i + 2 < ts->ntoks) ? ts->toks[i + 2].off : ts->srclen, " ");
-			i++;
-		}
-		else if (tok_is(ts, i + 1, "by") && tok_is_char(ts, i + 2, '('))
-		{
-			int			after = skip_parens(ts, i + 2);
-			StringInfoData cols;
-			bool		first = true;
-
-			initStringInfo(&cols);
-			appendStringInfoChar(&cols, '(');
-			for (int j = i + 3; j < after - 1; j++)
-			{
-				if (tok_is_char(ts, j, ','))
-					continue;
-				if (!tok_is_name(ts, j))
-					continue;
-				if (!first)
-					appendStringInfoChar(&cols, ',');
-				appendStringInfoString(&cols, quote_identifier(tok_name(ts, j)));
-				first = false;
-			}
-			appendStringInfoChar(&cols, ')');
-
-			rw_distribution(rw, cols.data, ts->toks[i].off);
-			rw_edit(rw, ts->toks[i].off,
-					(after < ts->ntoks) ? ts->toks[after].off : ts->srclen, " ");
-			i = after - 1;
-		}
-
+		rw_distribution(rw, policy, ts->toks[i].off);
+		rw_edit(rw, ts->toks[i].off,
+				(after < ts->ntoks) ? ts->toks[after].off : ts->srclen, " ");
+		i = after - 1;
 		depth = 0;
 	}
 }
@@ -3455,6 +3476,63 @@ rw_expressions(GpRewrite *rw, bool statement)
 static void rw_statement_itself(GpRewrite *rw);
 
 /*
+ * CREATE SCHEMA's elements -- CREATE TABLE, CREATE VIEW and the rest, written
+ * after it with nothing between them -- are statements of their own to the
+ * grammar, and a table among them takes a DISTRIBUTED BY as one would: CREATE
+ * SCHEMA s CREATE TABLE t (...) DISTRIBUTED BY (b) gives t its
+ * gp.distributed_by, as Cloudberry's grammar gives it its DISTRIBUTED BY.
+ * The element's edits are the schema statement's.  Only that: an
+ * expression's rewrites are the whole statement's already.
+ */
+static void
+rw_schema_elements(GpRewrite *rw)
+{
+	const GpTokens *ts = rw->ts;
+	List	   *starts = NIL;
+	int			depth = 0;
+	ListCell   *lc;
+
+	if (!tok_is_kw(ts, rw->first, "create") || !tok_is_kw(ts, rw->first + 1, "schema"))
+		return;
+	for (int i = rw->first + 2; i < rw->last; i++)
+	{
+		if (tok_is_char(ts, i, '('))
+			depth++;
+		else if (tok_is_char(ts, i, ')'))
+			depth--;
+		else if (depth == 0 && (tok_is_kw(ts, i, "create") || tok_is_kw(ts, i, "grant")))
+			starts = lappend_int(starts, i);
+	}
+
+	foreach(lc, starts)
+	{
+		int			start = lfirst_int(lc);
+		int			end = lnext(starts, lc) ? lfirst_int(lnext(starts, lc)) : rw->last;
+		GpRewrite	sub;
+		char	   *name = NULL;
+		int			after_name;
+
+		if (!tok_is_kw(ts, start, "create"))
+			continue;
+		rw_init(&sub, ts, start, end);
+		if (find_subject(ts, start, end, &name, &after_name, &sub.object) !=
+			GP_SUBJ_RELATION)
+			continue;
+		sub.subject_end = after_name;
+		rw_distributed(&sub, after_name);
+		rw_place_options(&sub);
+		if (!sub.changed)
+			continue;
+		foreach_ptr(GpEdit, e, sub.edits)
+		{
+			e->seq = rw->nedits++;
+			rw->edits = lappend(rw->edits, e);
+		}
+		rw->changed = true;
+	}
+}
+
+/*
  * A statement, or one EXPLAIN shows: EXPLAIN [ANALYZE] [VERBOSE] and EXPLAIN
  * (options) are followed by a statement of their own, whose Cloudberry
  * clauses -- CREATE TABLE AS ... DISTRIBUTED BY, say -- are rewritten as
@@ -3522,6 +3600,9 @@ rw_statement_itself(GpRewrite *rw)
 
 	/* ALTER TABLE's partition commands */
 	rw_partition_cmds(rw);
+
+	/* CREATE SCHEMA's CREATE TABLE and the rest */
+	rw_schema_elements(rw);
 
 	/*
 	 * DECODE, CASE ... WHEN IS NOT DISTINCT FROM and gp_dist_random('t'),

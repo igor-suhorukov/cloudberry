@@ -48,6 +48,7 @@
 #include "postgres.h"
 
 #include "access/attnum.h"
+#include "nodes/pg_list.h"
 
 /*
  * Where a relation's rows live.
@@ -105,6 +106,13 @@ extern GpPolicy *GpPolicyGet(Oid relid);
 extern GpPolicy *GpPolicyGetRecorded(Oid relid);
 
 /*
+ * The policy a distributed_by value -- "random", "replicated" or a key --
+ * would give this relation, read as GpPolicyGet() reads a label, over the
+ * segments the relation is spread over now.
+ */
+extern GpPolicy *GpPolicyMake(Oid relid, const char *value);
+
+/*
  * What kind of policy this is.  All five accept NULL, which is entry -- the
  * port reaches NULL constantly, where Cloudberry reaches it only for a
  * catalog table, so a predicate that dereferenced it would be wrong far more
@@ -122,5 +130,29 @@ extern bool GpPolicyIsReplicated(const GpPolicy *policy);
  * type cannot be a distribution key.
  */
 extern Oid	GpPolicyDefaultOpclass(Oid typeoid);
+
+/*
+ * One column of a key as the label names it: the column, and the operator
+ * class it is hashed with, qualified as the label spells it, or NULL for its
+ * type's default.
+ */
+typedef struct GpPolicyKeyName
+{
+	char	   *column;
+	char	   *opclass;
+} GpPolicyKeyName;
+
+/*
+ * The key a label's distributed_by value names, as GpPolicyKeyName, or NIL
+ * for "random" and "replicated"; relid is only for the message a malformed
+ * value raises.  GpPolicyFormatKey() writes such a list back.
+ */
+extern List *GpPolicyParseKey(const char *value, Oid relid);
+extern List *GpPolicyParseKeyQuietly(const char *value);	/* NIL if malformed */
+extern char *GpPolicyFormatKey(List *keys);
+
+/* An operator class by the qualified name a label gives it by, and back. */
+extern char *GpPolicyOpclassName(Oid opclass);
+extern Oid	GpPolicyOpclassByName(const char *name);
 
 #endif							/* GP_POLICY_H */

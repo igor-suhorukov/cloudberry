@@ -854,8 +854,8 @@ mine" ] && ok "a transaction reads its own rows, and a LIMIT leaves the connecti
 	out2=$(q 0 "SELECT count(*) FROM dp;" | tr '\n' '/')
 	out3=$(q 0 "SET allow_system_table_mods = on; UPDATE gp_distribution_policy SET numsegments = 2, distclass = (SELECT c.oid FROM pg_opclass c JOIN pg_am a ON a.oid = c.opcmethod WHERE a.amname = 'hash' AND c.opcname = 'int8_ops')::text::oidvector WHERE localoid = 'dp'::regclass;")
 	case "$out|$out2|$out3" in
-		"5|ERROR:  cannot access table \"dp\" in current transaction/DETAIL:  Its distribution policy spreads it over 5 segments, and the cluster has 2./|"*'column "a" of a distribution key can be hashed only with its type'"'"'s default operator class'*)
-			ok "a policy of more segments than the cluster has is refused where the table is read; another operator class, where it is written" ;;
+		"5|ERROR:  cannot access table \"dp\" in current transaction/DETAIL:  Its distribution policy spreads it over 5 segments, and the cluster has 2./|"*'does not hash column "a" of type integer'*)
+			ok "a policy of more segments than the cluster has is refused where the table is read; an operator class not of the column's type, where it is written" ;;
 		*) notok "gp_distribution_policy's refusals" "$out / $out2 / $out3" ;;
 	esac
 
@@ -1441,7 +1441,84 @@ COMMIT;"
 		|| notok "Cloudberry's accepted settings" "$out"
 
 	###########################################################################
-	echo "12. the segments authenticate the coordinator, with SCRAM"
+	echo "12. DISTRIBUTED BY as Cloudberry checks it, and what the segments say"
+	###########################################################################
+	# distribution.c, gp_policy.c and gp_label.c: a key checked against the
+	# table it is for, in Cloudberry's words; a column's operator class, which
+	# the table depends on; and the rules for the rest of a cluster's DDL.
+	out=$(q 0 "CREATE TABLE xk (a int, b int) DISTRIBUTED BY (b, B);")
+	out2=$(q 0 "CREATE TABLE xk (a int, b int) DISTRIBUTED BY (a, c);")
+	case "$out|$out2" in
+		*"duplicate column in DISTRIBUTED BY clause"*"LINE 1:"*'column "c" named in DISTRIBUTED BY clause does not exist'*"LINE 1:"*)
+			ok "a key column named twice, or not the table's, is refused where it is written" ;;
+		*) notok "DISTRIBUTED BY's columns" "$out / $out2" ;;
+	esac
+	out=$(q 0 "CREATE TABLE xk (a int PRIMARY KEY, b int) DISTRIBUTED RANDOMLY;")
+	out2=$(q 0 "CREATE TABLE xk (a int UNIQUE, b int) DISTRIBUTED BY (b);")
+	out3=$(q 0 "CREATE TABLE xk (p point) DISTRIBUTED BY (p);")
+	case "$out|$out2|$out3" in
+		*"PRIMARY KEY and DISTRIBUTED RANDOMLY are incompatible"*"|"*"UNIQUE constraint and DISTRIBUTED BY definitions are incompatible"*"|"*'data type point has no default operator class for access method "hash"'*)
+			ok "and so is a key no unique constraint takes in, or of a type that cannot be hashed" ;;
+		*) notok "DISTRIBUTED BY and constraints" "$out / $out2 / $out3" ;;
+	esac
+	q 0 "CREATE TABLE xk (a int, b int) DISTRIBUTED BY (a);" >/dev/null
+	out=$(q 0 "CREATE UNIQUE INDEX xk_b ON xk (b);")
+	out2=$(q 0 "ALTER TABLE xk SET DISTRIBUTED BY (a);")
+	out3=$(q 0 "ALTER TABLE ONLY pg_class SET DISTRIBUTED RANDOMLY;")
+	case "$out|$out2|$out3" in
+		*"UNIQUE index must contain all columns in the table's distribution key"*'already set to (a)'*'"pg_class" is a system catalog'*)
+			ok "a unique index must take the key in; a policy already set is left, with Cloudberry's WARNING; a catalog has none" ;;
+		*) notok "unique indexes and SET DISTRIBUTED" "$out / $out2 / $out3" ;;
+	esac
+
+	# A column's operator class: its hash decides the segment, and the table
+	# depends on it, on every node.
+	cat > "$ROOT/absops.sql" <<'SQL'
+CREATE FUNCTION abseq(int, int) RETURNS bool AS $$ SELECT abs($1) = abs($2) $$
+	LANGUAGE sql STRICT IMMUTABLE;
+CREATE OPERATOR |=| (PROCEDURE = abseq, LEFTARG = int, RIGHTARG = int,
+	COMMUTATOR = |=|, HASHES);
+CREATE FUNCTION abshash(int) RETURNS int AS $$ SELECT abs($1) $$
+	LANGUAGE sql STRICT IMMUTABLE;
+CREATE OPERATOR CLASS abs_ops FOR TYPE int4 USING hash AS
+	OPERATOR 1 |=|, FUNCTION 1 abshash(int);
+CREATE TABLE xo (a int) DISTRIBUTED BY (a abs_ops);
+INSERT INTO xo SELECT g FROM generate_series(-20, 20) g;
+SQL
+	qf 0 < "$ROOT/absops.sql" >/dev/null
+	out=$(q 0 "SELECT gp_sql.distribution('xo'::regclass);")
+	out2=$(q 0 "SELECT count(*) FROM (SELECT abs(a) FROM gp.dist_random(NULL::xo) GROUP BY 1 HAVING count(DISTINCT gp_segment_id) > 1) s;")
+	out3=$(q 0 "DROP OPERATOR CLASS abs_ops USING hash;")
+	[ "$out|$out2" = "(a public.abs_ops)|0" ] && case "$out3" in
+		*"cannot drop operator class abs_ops"*"table xo depends on operator class abs_ops"*) true ;;
+		*) false ;;
+	esac && ok "DISTRIBUTED BY (a abs_ops): its hash places the rows, and the table depends on the class" \
+		|| notok "an operator class in DISTRIBUTED BY" "$out / $out2 / $out3"
+	q 0 "DROP OPERATOR CLASS abs_ops USING hash CASCADE;" >/dev/null
+	out=$(q 0 "SELECT count(*) FROM pg_class WHERE relname = 'xo';")
+	out2=$(q 1 "SELECT count(*) FROM pg_class WHERE relname = 'xo';")
+	[ "$out|$out2" = "0|0" ] && ok "and CASCADE drops the table, on the segments too" \
+		|| notok "DROP OPERATOR CLASS ... CASCADE" "$out / $out2"
+
+	# CREATE TABLE AS takes the key of its query's rows where they become
+	# its columns, and LIKE the table's it is made like.
+	out=$(printf '%s\n' "CREATE TABLE xq AS SELECT 1 AS c, a FROM (SELECT a FROM d) s;" \
+		"SELECT gp_sql.distribution('xq'::regclass);" \
+		"CREATE TABLE xl (LIKE ds);" "SELECT gp_sql.distribution('xl'::regclass);" | qf 0 | grep -v NOTICE | grep -v HINT | tr '\n' ' ')
+	[ "$out" = "(a) (key) " ] && ok "CREATE TABLE AS keeps its query's key, and LIKE its table's" \
+		|| notok "CTAS and LIKE distributions" "$out"
+
+	# Cloudberry reserves gp_ for schemas, and keeps pg_toast where it is.
+	out=$(q 0 "CREATE SCHEMA gp_mine;")
+	out2=$(q 0 "ALTER SCHEMA pg_toast RENAME TO toast;")
+	case "$out|$out2" in
+		*'unacceptable schema name "gp_mine"'*'permission denied to ALTER SCHEMA "pg_toast"'*)
+			ok "gp_ is reserved for system schemas, and pg_toast is not renamed" ;;
+		*) notok "reserved schema names" "$out / $out2" ;;
+	esac
+
+	###########################################################################
+	echo "13. the segments authenticate the coordinator, with SCRAM"
 	###########################################################################
 	# Decision 5 asks for SCRAM on the early milestones.  The dispatcher is an
 	# ordinary client, so this is ordinary authentication: the segment asks,
@@ -1483,7 +1560,7 @@ COMMIT;"
 fi
 
 ###############################################################################
-echo "13. a cluster described wrongly is a server that does not start"
+echo "14. a cluster described wrongly is a server that does not start"
 ###############################################################################
 # The message has to name the file and the line: this is read in the
 # postmaster while it starts, so it is all the operator is given.
@@ -1553,7 +1630,7 @@ refuses "a file that is not there is refused" \
 	"gp.cluster_config = '$ROOT/nowhere.conf'"
 
 ###############################################################################
-echo "14. with no cluster configured, this is a single node"
+echo "15. with no cluster configured, this is a single node"
 ###############################################################################
 if start_node 0 "gp.cluster_config = ''" ; then
 	notok "node 0 should not have started: gp.role is dispatch with no cluster"

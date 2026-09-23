@@ -49,6 +49,7 @@
 #include "access/genam.h"
 #include "access/htup_details.h"
 #include "access/table.h"
+#include "catalog/pg_am_d.h"
 #include "catalog/pg_attribute.h"
 #include "catalog/pg_class.h"
 #include "catalog/pg_seclabel.h"
@@ -56,6 +57,7 @@
 #include "fmgr.h"
 #include "funcapi.h"
 #include "miscadmin.h"
+#include "parser/parse_coerce.h"
 #include "utils/builtins.h"
 #include "utils/inval.h"
 #include "utils/lsyscache.h"
@@ -173,15 +175,14 @@ gp_catalog_distribution_policy(PG_FUNCTION_ARGS)
 
 /*
  * What a row written to gp_distribution_policy says, as the "gp" label
- * records it: "replicated", "random" or the key's columns by name.  Its
- * operator classes, where it gives them, have to be each type's default,
- * which is the one the port hashes with.
+ * records it: "replicated", "random" or the key's columns by name, each with
+ * the hash operator class it gives where that is not the type's default.
  */
 static char *
 policy_text_of(Oid relid, char policytype, int2vector *distkey,
 			   oidvector *distclass)
 {
-	StringInfoData buf;
+	List	   *keys = NIL;
 
 	if (policytype == 'r')
 	{
@@ -204,14 +205,12 @@ policy_text_of(Oid relid, char policytype, int2vector *distkey,
 				 errmsg("distclass has %d operator classes, and distkey %d columns",
 						distclass->dim1, distkey->dim1)));
 
-	initStringInfo(&buf);
-	appendStringInfoChar(&buf, '(');
 	for (int i = 0; i < distkey->dim1; i++)
 	{
 		AttrNumber	attnum = distkey->values[i];
 		HeapTuple	atttup = attnum > 0 ? SearchSysCacheAttNum(relid, attnum) : NULL;
-		char	   *name;
-		Oid			opclass;
+		GpPolicyKeyName *key = palloc0(sizeof(GpPolicyKeyName));
+		Oid			typeoid;
 
 		/* not there, or dropped */
 		if (!HeapTupleIsValid(atttup))
@@ -219,19 +218,26 @@ policy_text_of(Oid relid, char policytype, int2vector *distkey,
 					(errcode(ERRCODE_UNDEFINED_COLUMN),
 					 errmsg("column %d of relation \"%s\" does not exist",
 							attnum, get_rel_name(relid))));
-		name = pstrdup(NameStr(((Form_pg_attribute) GETSTRUCT(atttup))->attname));
-		opclass = GpPolicyDefaultOpclass(((Form_pg_attribute) GETSTRUCT(atttup))->atttypid);
+		key->column = pstrdup(NameStr(((Form_pg_attribute) GETSTRUCT(atttup))->attname));
+		typeoid = ((Form_pg_attribute) GETSTRUCT(atttup))->atttypid;
 		ReleaseSysCache(atttup);
-		if (distclass->dim1 != 0 && distclass->values[i] != opclass)
-			ereport(ERROR,
-					(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
-					 errmsg("column \"%s\" of a distribution key can be hashed only with its type's default operator class",
-							name),
-					 errdetail("Operator classes in a distribution policy are not supported yet.")));
-		appendStringInfo(&buf, "%s%s", i > 0 ? "," : "", quote_identifier(name));
+
+		if (distclass->dim1 != 0 &&
+			distclass->values[i] != GpPolicyDefaultOpclass(typeoid))
+		{
+			Oid			opclass = distclass->values[i];
+
+			if (get_opclass_method(opclass) != HASH_AM_OID ||
+				!IsBinaryCoercible(typeoid, get_opclass_input_type(opclass)))
+				ereport(ERROR,
+						(errcode(ERRCODE_DATATYPE_MISMATCH),
+						 errmsg("operator class %u does not hash column \"%s\" of type %s",
+								opclass, key->column, format_type_be(typeoid))));
+			key->opclass = GpPolicyOpclassName(opclass);
+		}
+		keys = lappend(keys, key);
 	}
-	appendStringInfoChar(&buf, ')');
-	return buf.data;
+	return GpPolicyFormatKey(keys);
 }
 
 /* Record a relation's policy, or with a NULL one, none: the coordinator's alone. */

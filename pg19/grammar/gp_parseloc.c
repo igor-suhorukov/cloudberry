@@ -356,7 +356,6 @@ raw_walker_knows(Node *node)
 		case T_NullTest:
 		case T_BooleanTest:
 		case T_JoinExpr:
-		case T_IntoClause:
 		case T_List:
 		case T_InsertStmt:
 		case T_DeleteStmt:
@@ -460,6 +459,18 @@ remap_walker(Node *node, void *context)
 			}
 		case T_DefElem:
 			return WALK(((DefElem *) node)->arg);
+		case T_IntoClause:
+			{
+				IntoClause *into = (IntoClause *) node;
+
+				/*
+				 * raw_expression_tree_walker leaves out its options, where
+				 * a CREATE TABLE AS carries its DISTRIBUTED BY: an error in
+				 * one is reported where the user wrote it.
+				 */
+				return WALK(into->rel) || WALK(into->options) ||
+					WALK(into->viewQuery);
+			}
 		case T_TableLikeClause:
 			return WALK(((TableLikeClause *) node)->relation);
 		case T_PartitionSpec:

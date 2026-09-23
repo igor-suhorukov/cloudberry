@@ -425,6 +425,27 @@ is "so the two spellings no longer collide" \
    "SELECT gp_sql.distribution('dist_word'::regclass)
          <> gp_sql.distribution('dist_r'::regclass);" "t"
 
+# Cloudberry's grammar (distributed_by_list): an empty list, and a column
+# named twice -- the second naming -- are its syntax errors, with the caret
+# where they are; a column may name the operator class it is hashed with,
+# which the label keeps, and a cluster qualifies (distribution.c).
+at "a column named twice is refused where it is named again" \
+   "CREATE TABLE dist_dup (a int, b int) DISTRIBUTED BY (a, b, @@A);" \
+   "duplicate column in DISTRIBUTED BY clause" "A"
+at "and an empty list is Cloudberry's syntax error" \
+   "CREATE TABLE dist_empty (a int) DISTRIBUTED BY (@@);" \
+   'syntax error at or near ")"' ")"
+isl "a column's operator class is kept with it" \
+   "CREATE TABLE dist_opc (a int, b int) DISTRIBUTED BY (a int4_ops, b);
+    SELECT gp_sql.distribution('dist_opc'::regclass);" "(a int4_ops,b)"
+isl "a table CREATE SCHEMA makes takes its DISTRIBUTED BY" \
+   "CREATE SCHEMA dist_s CREATE TABLE t (a int, b int) DISTRIBUTED BY (b);
+    SELECT gp_sql.distribution('dist_s.t'::regclass);" "(b)"
+refused "SET WITH (REORGANIZE = ...) alone is Cloudberry's too, refused on one node" \
+        "ALTER TABLE combo SET WITH (REORGANIZE = true);" 'SET DISTRIBUTED BY not supported in utility mode'
+refused "Cloudberry reserves gp_ for system schemas" \
+        "CREATE SCHEMA gp_mine;" 'unacceptable schema name "gp_mine"'
+
 # A column name that needs quoting survives the round trip: the scanner has
 # already downcased an unquoted name and dequoted a quoted one, so what goes
 # into the label is the true column name, quoted again where it needs to be.

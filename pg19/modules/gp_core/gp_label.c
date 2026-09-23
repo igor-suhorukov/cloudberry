@@ -27,13 +27,23 @@
  */
 #include "postgres.h"
 
+#include "access/genam.h"
+#include "access/htup_details.h"
+#include "access/table.h"
 #include "access/xact.h"
+#include "catalog/dependency.h"
+#include "catalog/indexing.h"
+#include "catalog/pg_class.h"
+#include "catalog/pg_depend.h"
+#include "catalog/pg_opclass.h"
 #include "commands/seclabel.h"
 #include "lib/stringinfo.h"
 #include "utils/builtins.h"
+#include "utils/fmgroids.h"
 
 #include "gp_dispatch.h"
 #include "gp_label.h"
+#include "gp_policy.h"
 
 static const struct
 {
@@ -163,16 +173,132 @@ gp_label_item_key(const char *item, const char **value)
 	return -1;
 }
 
+/* One key's value in a whole label, or NULL. */
+static char *
+gp_label_value(const char *label, GpLabelKey key)
+{
+	ListCell   *lc;
+
+	if (label == NULL)
+		return NULL;
+	foreach(lc, gp_label_parse(label))
+	{
+		const char *item = (const char *) lfirst(lc);
+		const char *value = NULL;
+
+		if (gp_label_item_key(item, &value) == (int) key)
+			return gp_label_unquote(value);
+	}
+	return NULL;
+}
+
+/* The operator classes a distribution policy names, each once. */
+static List *
+policy_opclasses(const char *policy)
+{
+	List	   *oids = NIL;
+	ListCell   *lc;
+
+	/* a malformed one names none: the reader refuses it, and says why */
+	foreach(lc, GpPolicyParseKeyQuietly(policy))
+	{
+		GpPolicyKeyName *key = (GpPolicyKeyName *) lfirst(lc);
+		Oid			opclass;
+
+		if (key->opclass == NULL)
+			continue;
+		opclass = GpPolicyOpclassByName(key->opclass);
+		if (OidIsValid(opclass))
+			oids = list_append_unique_oid(oids, opclass);
+	}
+	return oids;
+}
+
+/*
+ * One of a relation's dependencies on an operator class, deleted: the one a
+ * policy recorded.  Only one, because a partition key naming the same class
+ * recorded one of its own, which has to stay.
+ */
+static void
+delete_one_opclass_dependency(Oid relid, Oid opclass)
+{
+	Relation	depRel = table_open(DependRelationId, RowExclusiveLock);
+	ScanKeyData key[2];
+	SysScanDesc scan;
+	HeapTuple	tuple;
+
+	ScanKeyInit(&key[0], Anum_pg_depend_classid, BTEqualStrategyNumber,
+				F_OIDEQ, ObjectIdGetDatum(RelationRelationId));
+	ScanKeyInit(&key[1], Anum_pg_depend_objid, BTEqualStrategyNumber,
+				F_OIDEQ, ObjectIdGetDatum(relid));
+	scan = systable_beginscan(depRel, DependDependerIndexId, true, NULL, 2, key);
+	while (HeapTupleIsValid(tuple = systable_getnext(scan)))
+	{
+		Form_pg_depend dep = (Form_pg_depend) GETSTRUCT(tuple);
+
+		if (dep->objsubid == 0 && dep->refclassid == OperatorClassRelationId &&
+			dep->refobjid == opclass && dep->deptype == DEPENDENCY_NORMAL)
+		{
+			CatalogTupleDelete(depRel, &tuple->t_self);
+			break;
+		}
+	}
+	systable_endscan(scan);
+	table_close(depRel, RowExclusiveLock);
+}
+
+/*
+ * A table depends on the operator classes its distribution key is hashed
+ * with, as Cloudberry's does through its gp_distribution_policy row: DROP
+ * OPERATOR CLASS refuses while a table is hashed with it, and CASCADE drops
+ * the table.  On every node, since a segment's label arrives as a SECURITY
+ * LABEL, which is what reaches the check below, and a DROP ... CASCADE sent
+ * to a segment has to find the same tables to drop.  The label's classes
+ * before and after are compared, and the dependencies follow the difference.
+ */
+static void
+gp_label_follow_policy(const ObjectAddress *object, const char *old_label,
+					   const char *new_label)
+{
+	List	   *before;
+	List	   *after;
+	ListCell   *lc;
+
+	if (object->classId != RelationRelationId || object->objectSubId != 0)
+		return;
+	before = policy_opclasses(gp_label_value(old_label, GP_LABEL_distributed_by));
+	after = policy_opclasses(gp_label_value(new_label, GP_LABEL_distributed_by));
+
+	foreach(lc, before)
+		if (!list_member_oid(after, lfirst_oid(lc)))
+			delete_one_opclass_dependency(object->objectId, lfirst_oid(lc));
+	foreach(lc, after)
+	{
+		ObjectAddress opclass;
+
+		if (list_member_oid(before, lfirst_oid(lc)))
+			continue;
+		ObjectAddressSet(opclass, OperatorClassRelationId, lfirst_oid(lc));
+		recordDependencyOn(object, &opclass, DEPENDENCY_NORMAL);
+	}
+}
+
 /*
  * Refuse a label the port would not understand, when it is set rather than
  * when it is read: a key we do not know is far more likely to be a typo than
- * a message from the future.
+ * a message from the future.  And a label that is set records what it
+ * depends on (gp_label_follow_policy).
  */
 static void
 gp_label_check(const ObjectAddress *object, const char *seclabel)
 {
 	List	   *items;
 	ListCell   *lc;
+
+	if (object->classId == RelationRelationId)
+		gp_label_follow_policy(object,
+							   GetSecurityLabel(object, GP_LABEL_PROVIDER),
+							   seclabel);
 
 	if (seclabel == NULL)		/* removing the label is always fine */
 		return;
@@ -213,22 +339,7 @@ gp_label_check(const ObjectAddress *object, const char *seclabel)
 char *
 GpLabelGet(const ObjectAddress *object, GpLabelKey key)
 {
-	char	   *label = GetSecurityLabel(object, GP_LABEL_PROVIDER);
-	ListCell   *lc;
-
-	if (label == NULL)
-		return NULL;
-
-	foreach(lc, gp_label_parse(label))
-	{
-		const char *item = (const char *) lfirst(lc);
-		const char *value = NULL;
-
-		if (gp_label_item_key(item, &value) == (int) key)
-			return gp_label_unquote(value);
-	}
-
-	return NULL;
+	return gp_label_value(GetSecurityLabel(object, GP_LABEL_PROVIDER), key);
 }
 
 bool
@@ -272,6 +383,9 @@ GpLabelSet(const ObjectAddress *object, GpLabelKey key, const char *value)
 			gp_label_append_value(&buf, value);
 		}
 	}
+
+	if (key == GP_LABEL_distributed_by)
+		gp_label_follow_policy(object, label, buf.len > 0 ? buf.data : NULL);
 
 	/* An object with nothing left to say loses its label entirely. */
 	SetSecurityLabel(object, GP_LABEL_PROVIDER, buf.len > 0 ? buf.data : NULL);

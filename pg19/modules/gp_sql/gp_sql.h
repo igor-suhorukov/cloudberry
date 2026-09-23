@@ -184,9 +184,41 @@ extern char *GpStorageTablespaceServer(Oid spcId);
 extern PGDLLIMPORT bool gp_create_table_random_default_distribution;
 /*
  * A table nobody distributed, distributed as Cloudberry would: "stmt" is the
- * CREATE TABLE that made it, or NULL for one CREATE TABLE AS made.
+ * CREATE TABLE that made it as it was before it ran -- PostgreSQL's analysis
+ * rewrites its list of elements -- or NULL for one CREATE TABLE AS made,
+ * whose query GpDistributionApplyCtasDefault() reads first.  What
+ * Cloudberry says about a table's parents is said before the statement runs,
+ * by GpDistributionNoteDefault(); "quiet" for a partition made for a classic
+ * partition clause.
  */
 extern void GpDistributionApplyDefault(CreateStmt *stmt, Oid relid);
+extern void GpDistributionApplyCtasDefault(Oid relid, Query *query);
+extern void GpDistributionNoteDefault(CreateStmt *stmt, bool quiet);
+
+/*
+ * A distribution a statement names, checked as Cloudberry checks it:
+ * GpDistributionCheckKey() the key's own columns and operator classes,
+ * returning it as the label records it; GpDistributionCheckCreate() the rest
+ * of a CREATE TABLE's rules; and GpDistributionCheckIndexes() each unique
+ * index and exclusion constraint against the policy -- the table's own, or
+ * the one it is about to be given, with for_alter.
+ */
+extern char *GpDistributionCheckKey(Oid relid, const char *policy, int location,
+									const char *queryString, bool alter);
+extern void GpDistributionCheckCreate(CreateStmt *stmt, Oid relid,
+									  const char *policy);
+extern void GpDistributionCheckIndexes(Oid relid, const char *policy,
+									   bool for_alter);
+
+/*
+ * The statements that may make a unique index or exclusion constraint, and
+ * the check of the table's after one ran; and an ALTER TABLE's subcommands
+ * that bear on the distribution, before it runs and after.
+ */
+extern bool GpDistributionMakesUniqueIndex(Node *parsetree);
+extern void GpDistributionCheckNewIndex(Node *parsetree);
+extern List *GpDistributionAlterTableCheck(AlterTableStmt *stmt);
+extern void GpDistributionAlterTableDone(AlterTableStmt *stmt, List *changed);
 
 /*
  * A policy for a table the statement just made: the one given, over the
@@ -207,9 +239,11 @@ extern void GpDistributionColumnRenamed(Oid relid, const char *oldname,
 /*
  * ALTER TABLE ... SET DISTRIBUTED: the new policy ("policy", or NULL for the
  * one it has), and on a cluster the rows moved to where it puts them --
- * "reorganize" 1 always, 0 never, -1 as Cloudberry decides.
+ * "reorganize" 1 always, 0 never, -1 as Cloudberry decides; "recurse" false
+ * for ALTER TABLE ONLY.
  */
-extern void GpDistributionAlter(Oid relid, const char *policy, int reorganize);
+extern void GpDistributionAlter(Oid relid, const char *policy, int reorganize,
+								bool recurse);
 extern void GpDistributionDefineSettings(void);
 
 extern PGDLLIMPORT int gp_max_partition_level;

@@ -39,6 +39,7 @@
 #include <limits.h>
 
 #include "access/xact.h"
+#include "catalog/catalog.h"
 #include "catalog/namespace.h"
 #include "catalog/objectaccess.h"
 #include "catalog/objectaddress.h"
@@ -49,6 +50,7 @@
 #include "catalog/pg_tablespace.h"
 #include "commands/dbcommands.h"
 #include "commands/defrem.h"
+#include "commands/extension.h"
 #include "commands/tablespace.h"
 #include "executor/executor.h"
 #include "executor/spi.h"
@@ -905,6 +907,97 @@ static void gp_sql_ProcessUtility(PlannedStmt *pstmt, const char *queryString,
 								  DestReceiver *dest, QueryCompletion *qc);
 
 /*
+ * Cloudberry reserves the prefix gp_ for schemas and tablespaces, as
+ * PostgreSQL reserves pg_ (IsReservedGpName, catalog.c) -- but for
+ * gp_toolkit, an extension users make -- and a schema of either prefix may
+ * be neither renamed nor given away, which PostgreSQL leaves to a
+ * superuser: pg_toast renamed is a database that has lost its TOAST
+ * tables' schema.  An extension's script may, as the port's own make
+ * gp_internal and gp_sql, and so may anyone with allow_system_table_mods,
+ * as in Cloudberry.  The owner is asked first, so that PostgreSQL's words
+ * come first for anyone else, as Cloudberry's order has them.
+ */
+static bool
+is_reserved_gp_name(const char *name)
+{
+	return strncmp(name, "gp_", 3) == 0 && strcmp(name, "gp_toolkit") != 0;
+}
+
+static void
+refuse_reserved_gp_name(const char *name, const char *kind)
+{
+	if (is_reserved_gp_name(name))
+		ereport(ERROR,
+				(errcode(ERRCODE_RESERVED_NAME),
+				 errmsg("unacceptable %s name \"%s\"", kind, name),
+				 errdetail("The prefix \"gp_\" is reserved for system %ss.", kind)));
+}
+
+static void
+refuse_reserved_schema(const char *name)
+{
+	Oid			nspid = get_namespace_oid(name, true);
+
+	if (!OidIsValid(nspid) ||
+		!object_ownercheck(NamespaceRelationId, nspid, GetUserId()))
+		return;
+	if (IsReservedName(name) || is_reserved_gp_name(name))
+		ereport(ERROR,
+				(errcode(ERRCODE_INSUFFICIENT_PRIVILEGE),
+				 errmsg("permission denied to ALTER SCHEMA \"%s\"", name),
+				 errdetail("Schema %s is reserved for system use.", name)));
+}
+
+static void
+check_reserved_names(Node *parsetree)
+{
+	if (allowSystemTableMods || creating_extension)
+		return;
+
+	switch (nodeTag(parsetree))
+	{
+		case T_CreateSchemaStmt:
+			{
+				CreateSchemaStmt *stmt = (CreateSchemaStmt *) parsetree;
+
+				if (stmt->schemaname != NULL)
+					refuse_reserved_gp_name(stmt->schemaname, "schema");
+				else if (stmt->authrole != NULL)
+					refuse_reserved_gp_name(get_rolespec_name(stmt->authrole),
+											"schema");
+			}
+			break;
+		case T_CreateTableSpaceStmt:
+			refuse_reserved_gp_name(((CreateTableSpaceStmt *) parsetree)->tablespacename,
+									"tablespace");
+			break;
+		case T_RenameStmt:
+			{
+				RenameStmt *stmt = (RenameStmt *) parsetree;
+
+				if (stmt->renameType == OBJECT_SCHEMA)
+				{
+					refuse_reserved_schema(stmt->subname);
+					refuse_reserved_gp_name(stmt->newname, "schema");
+				}
+				else if (stmt->renameType == OBJECT_TABLESPACE)
+					refuse_reserved_gp_name(stmt->newname, "tablespace");
+			}
+			break;
+		case T_AlterOwnerStmt:
+			{
+				AlterOwnerStmt *stmt = (AlterOwnerStmt *) parsetree;
+
+				if (stmt->objectType == OBJECT_SCHEMA)
+					refuse_reserved_schema(strVal(stmt->object));
+			}
+			break;
+		default:
+			break;
+	}
+}
+
+/*
  * CREATE TABLE AS, and SELECT INTO, on a cluster's coordinator: see where it
  * is called.  The rows are the query's, deparsed as ruleutils deparses a
  * view: the query was analyzed here, and the INSERT is analyzed again from
@@ -956,7 +1049,7 @@ gp_sql_cluster_ctas(PlannedStmt *pstmt, const char *queryString,
 	CommandCounterIncrement();
 	relid = RangeVarGetRelid(ctas->into->rel, NoLock, false);
 
-	GpDistributionApplyDefault(NULL, relid);
+	GpDistributionApplyCtasDefault(relid, query);
 	if (!fill)
 		return;
 
@@ -991,6 +1084,8 @@ gp_sql_ProcessUtility(PlannedStmt *pstmt, const char *queryString,
 	List	  **fdw_options;
 	List	   *tags = NIL;
 	char	   *policy = NULL;
+	int			policy_location = -1;
+	CreateStmt *before = NULL;
 	bool		directory_table = false;
 	DefElem    *partition_by = NULL;
 	List	   *partition_cmds = NIL;
@@ -1020,6 +1115,8 @@ gp_sql_ProcessUtility(PlannedStmt *pstmt, const char *queryString,
 		pstmt = unenforce_foreign_keys(pstmt, &readOnlyTree);
 		parsetree = pstmt->utilityStmt;
 	}
+
+	check_reserved_names(parsetree);
 
 	/*
 	 * ALTER TABLE ... SET DISTRIBUTED: the rest of the statement, if it has
@@ -1065,7 +1162,7 @@ gp_sql_ProcessUtility(PlannedStmt *pstmt, const char *queryString,
 		if (stmt->cmds != NIL)
 			gp_sql_ProcessUtility(pstmt, queryString, readOnlyTree, context,
 								  params, queryEnv, dest, qc);
-		GpDistributionAlter(relid, new_policy, reorganize);
+		GpDistributionAlter(relid, new_policy, reorganize, stmt->relation->inh);
 		return;
 	}
 
@@ -1228,7 +1325,10 @@ gp_sql_ProcessUtility(PlannedStmt *pstmt, const char *queryString,
 			tags = GpTagTakeOptions(options);
 			def = take_gp_option(options, "distributed_by", false);
 			if (def != NULL)
+			{
 				policy = defGetString(def);
+				policy_location = def->location;
+			}
 			def = take_gp_option(options, "directory_table", false);
 			if (def != NULL)
 			{
@@ -1262,10 +1362,15 @@ gp_sql_ProcessUtility(PlannedStmt *pstmt, const char *queryString,
 		/*
 		 * On a cluster, a table nobody distributed is distributed anyway.
 		 * Which relation the statement made is known only while the pending
-		 * list is armed, so it is armed for this too.
+		 * list is armed, so it is armed for this too.  The rules read the
+		 * statement as it was written, which PostgreSQL's analysis rewrites
+		 * as it runs it (transformCreateStmt drops its LIKE clauses), so from
+		 * a copy made first.
 		 */
 		if (IsA(parsetree, CreateStmt) && on_cluster_coordinator())
 		{
+			before = copyObject((CreateStmt *) parsetree);
+			GpDistributionNoteDefault(before, context == PROCESS_UTILITY_SUBCOMMAND);
 			GpSqlPendingArm(&save);
 			PG_TRY();
 			{
@@ -1275,13 +1380,42 @@ gp_sql_ProcessUtility(PlannedStmt *pstmt, const char *queryString,
 										context, params, queryEnv, dest, qc);
 				relid = created_relation(parsetree);
 				if (OidIsValid(relid))
-					GpDistributionApplyDefault((CreateStmt *) parsetree, relid);
+				{
+					GpDistributionApplyDefault(before, relid);
+					GpDistributionCheckIndexes(relid, NULL, false);
+				}
 			}
 			PG_FINALLY();
 			{
 				GpSqlPendingRestore(&save);
 			}
 			PG_END_TRY();
+		}
+		else if (IsA(parsetree, AlterTableStmt) && on_cluster_coordinator())
+		{
+			/*
+			 * Cloudberry's rules for the subcommands that bear on the
+			 * distribution (distribution.c), and a unique index or exclusion
+			 * constraint it makes checked against it, as CREATE INDEX's is.
+			 */
+			List	   *changed = GpDistributionAlterTableCheck((AlterTableStmt *) parsetree);
+
+			GpSqlProcessUtilityNext(pstmt, queryString, readOnlyTree, context,
+									params, queryEnv, dest, qc);
+			GpDistributionAlterTableDone((AlterTableStmt *) parsetree, changed);
+			if (GpDistributionMakesUniqueIndex(parsetree))
+				GpDistributionCheckNewIndex(parsetree);
+		}
+		else if (on_cluster_coordinator() && GpDistributionMakesUniqueIndex(parsetree))
+		{
+			/*
+			 * A unique index or an exclusion constraint on a distributed
+			 * table, which each segment can enforce only among its own rows:
+			 * Cloudberry's check of it against the table's distribution.
+			 */
+			GpSqlProcessUtilityNext(pstmt, queryString, readOnlyTree, context,
+									params, queryEnv, dest, qc);
+			GpDistributionCheckNewIndex(parsetree);
 		}
 		else
 			GpSqlProcessUtilityNext(pstmt, queryString, readOnlyTree, context,
@@ -1299,6 +1433,14 @@ gp_sql_ProcessUtility(PlannedStmt *pstmt, const char *queryString,
 	GpTagCheckAll(tags);
 	if (policy != NULL)
 		check_distribution_policy(policy);
+
+	/* the statement as it was written, for the rules of distribution.c */
+	if (IsA(parsetree, CreateStmt) && on_cluster_coordinator())
+	{
+		before = copyObject((CreateStmt *) parsetree);
+		if (policy == NULL)
+			GpDistributionNoteDefault(before, context == PROCESS_UTILITY_SUBCOMMAND);
+	}
 
 	if (!is_alter)
 		GpSqlPendingArm(&save);
@@ -1325,11 +1467,23 @@ gp_sql_ProcessUtility(PlannedStmt *pstmt, const char *queryString,
 			 * the statement made it, so the user running it owns it; over the
 			 * segments a new table gets (gp_debug_numsegments)
 			 */
-			if (policy != NULL)
+			if (policy != NULL && on_cluster_coordinator())
+			{
+				/* checked as Cloudberry checks it, and recorded as checked */
+				policy = GpDistributionCheckKey(relid, policy, policy_location,
+												queryString, false);
+				if (before != NULL)
+					GpDistributionCheckCreate(before, relid, policy);
 				GpDistributionSetNew(relid, policy);
-			else if (!is_alter && IsA(parsetree, CreateStmt) &&
-					 on_cluster_coordinator())
-				GpDistributionApplyDefault((CreateStmt *) parsetree, relid);
+				GpDistributionCheckIndexes(relid, NULL, false);
+			}
+			else if (policy != NULL)
+				GpDistributionSetNew(relid, policy);
+			else if (before != NULL)
+			{
+				GpDistributionApplyDefault(before, relid);
+				GpDistributionCheckIndexes(relid, NULL, false);
+			}
 			GpTagApplyToRelation(relid, tags);
 			if (directory_table)
 				GpDirTableClaim(relid);
