@@ -62,29 +62,64 @@ Or, without installing anything on the host:
 
 ## Status
 
-Milestone **M1**, in progress.  Every module builds and loads, and the ones
-that may only be preloaded refuse to load any other way.  These carry a
-feature rather than a stub:
+Milestones **M0** and **M1** are complete, and **M2 — a cluster — is built**
+(2026-09-23), the interconnect included.
+
+On one node (M1):
 
 - `gp_matview` — incrementally maintained materialized views and dynamic
-  tables, complete as far as one node goes.  A view over one table, over
-  several, or over a table joined to itself is maintained by delta, as are
-  `count`, `sum` and `avg`; what the delta cannot express — an outer join,
-  `min`, `max`, TRUNCATE — is recomputed, which is slower and just as correct.
-  A dynamic table is `WITH (gp.dynamic_schedule = '…')` and refreshes itself
-  through `gp_task`.
-- `gp_task` — the task scheduler.  `CALL gp_task.create_task(…)` and the
-  rest, over tables in one database, run on their schedules by a background
-  worker.
+  tables.  A view over one table, over several, or over a table joined to
+  itself is maintained by delta, as are `count`, `sum` and `avg`; what the
+  delta cannot express — an outer join, `min`, `max`, TRUNCATE — is
+  recomputed.  A dynamic table refreshes itself through `gp_task`.
+- `gp_task` — the task scheduler, run by a background worker.
 - `gp_sql` — the Cloudberry-only SQL surface: tags, directory tables and
-  storage servers, each built out of something PostgreSQL already has.
-- `gp_security` — password profiles, as shared labels on roles, with the live
-  state in shared memory and one background worker.
-- `gp_core` — the `gp` security label provider the others write through, and
-  O26's desugaring, which lets every one of the above be written the way
-  Cloudberry writes it.
-- `gp_orca` — ORCA is linked in and comes up.  Planning through it is next;
-  see `cloudberry.md`, "Next".
+  storage servers, and Cloudberry's spelling of statements through O26 —
+  classic partition clauses, `DISTRIBUTED BY`, `DECODE`, `gp_dist_random('t')`.
+- `gp_security` — password profiles.
+- `gp_orca` — ORCA plans on one node, with the fallback counters.
 
-The rest are stubs.  The milestones that fill them are in `cloudberry.md`,
-"Porting the Cloudberry code in `github/cloudberry`".
+On a cluster (M2), `gp_core` and `gp_orca`:
+
+- the nodes, read from a file (`gp.cluster_config`); the dispatcher, an
+  ordinary libpq client authenticated with SCRAM, whose statements run in the
+  coordinator's transaction, savepoints included;
+- DDL on every node with the coordinator's OIDs (R1), distribution policies
+  hashed by Cloudberry's cdbhash, ANALYZE sampling the segments (O3), CREATE
+  TABLE AS and ALTER TABLE ... SET DISTRIBUTED BY;
+- ORCA's distributed plans — the five Motions, Split, direct dispatch, the
+  slice table — carried out by gp_core, and PostgreSQL's own plans gathering
+  from the segments where ORCA does not plan;
+- **every slice of a query at once**: the writer, the session's backend on a
+  segment, runs one slice, and readers — more backends of the session there,
+  reading as a part of the writer's transaction through the shared snapshot
+  (R2 and R4) — run the others, each sender streaming its rows to its
+  receivers over a Unix socket or a TCP port.  The earlier relay through the
+  coordinator is kept for what cannot stream — a temporary table, the
+  coordinator's own slice feeding a reader's — and on request
+  (`gp.interconnect_type = relay`);
+- `gp_segment_id`, as a call of the row's segment (O10).
+
+What M2 leaves open: a transaction's segments commit one after another and a
+reader sees one segment's snapshot, not the cluster's — two-phase commit and
+distributed snapshots are M3; a segment does not know a table's
+distribution; a slice that reads a parameter or an initplan's value is
+planned by PostgreSQL; an UPDATE or DELETE that reads another distributed
+table is refused; Cloudberry's `gp_id` catalog.
+
+The storage, resource and transport modules — `gp_ao`, `pax`, `gp_exttable`,
+`gp_resource`, `gp_tde`, `interconnect`, `udp2` — are still stubs: M5 and M6
+fill the first five, and the streaming transport lives in `gp_core` for now.
+
+## Tests
+
+`pg19/test/run.sh` runs every suite; `docker compose -f pg19/docker/compose.yml
+run --rm tests` runs them in the image built from the branches, and
+`... run --rm compare` checks that the patched server still behaves as
+vanilla PostgreSQL 19.  The suites: the module suites (among them `cluster`,
+a coordinator and two segments, and `hooks`, which drives every hook of the
+core series through a test module); `greenplum`, part of Cloudberry's
+`greenplum_schedule` on a coordinator and three segments; `singlenode` and
+`singlenode_isolation2`, Cloudberry's single-node suites with PostgreSQL 19's
+own regression tests; and PostGIS's regression suite.  Each is run under the
+planner and under ORCA where it plans.
