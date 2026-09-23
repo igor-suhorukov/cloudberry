@@ -257,27 +257,29 @@ is_shippable(Expr *expr, Index relid)
  *
  * A hash-distributed table whose key columns are each compared by equality
  * to a constant: the constants hash to one segment, and nothing on the others
- * can match.
+ * can match.  The equality has to be one the key's hash family hashes for,
+ * and then a constant of another of its types hashes with its own type's
+ * function as the column's value it equals would -- id = 1::int4 finds an
+ * int2 key's segment, as Cloudberry's direct dispatch finds it
+ * (GpHashSegmentForKey).
  */
 static int
 direct_dispatch_segment(GpPolicy *policy, Relation rel, List *quals,
 						Index relid)
 {
-	TupleDesc	tupdesc = RelationGetDescr(rel);
 	Datum	   *values;
 	bool	   *isnull;
+	Oid		   *types;
 	bool	   *found;
-	GpHash	   *h;
 	ListCell   *lc;
 
 	if (!GpPolicyIsHashPartitioned(policy) || !gp_enable_direct_dispatch)
 		return -1;
 
-	values = palloc0_array(Datum, tupdesc->natts);
-	isnull = palloc_array(bool, tupdesc->natts);
-	found = palloc0_array(bool, tupdesc->natts);
-	for (int i = 0; i < tupdesc->natts; i++)
-		isnull[i] = true;
+	values = palloc0_array(Datum, policy->nattrs);
+	isnull = palloc0_array(bool, policy->nattrs);
+	types = palloc0_array(Oid, policy->nattrs);
+	found = palloc0_array(bool, policy->nattrs);
 
 	foreach(lc, quals)
 	{
@@ -316,30 +318,20 @@ direct_dispatch_segment(GpPolicy *policy, Relation rel, List *quals,
 
 			if (policy->attrs[k] != var->varattno)
 				continue;
-
-			/*
-			 * The comparison has to be the key's own equality, and the
-			 * constant of the column's own type: the hash of a value is a
-			 * property of its type, and 1::int8 and 1::int4 need not hash
-			 * alike.
-			 */
 			if (get_op_opfamily_strategy(op->opno, opfamily) != HTEqualStrategyNumber)
 				continue;
-			if (con->consttype != TupleDescAttr(tupdesc, var->varattno - 1)->atttypid)
-				continue;
 
-			values[var->varattno - 1] = con->constvalue;
-			isnull[var->varattno - 1] = false;
-			found[var->varattno - 1] = true;
+			values[k] = con->constvalue;
+			types[k] = con->consttype;
+			found[k] = true;
 		}
 	}
 
 	for (int k = 0; k < policy->nattrs; k++)
-		if (!found[policy->attrs[k] - 1])
+		if (!found[k])
 			return -1;
 
-	h = GpHashMake(policy, tupdesc);
-	return GpHashSegment(h, values, isnull);
+	return GpHashSegmentForKey(policy, types, values, isnull);
 }
 
 /*

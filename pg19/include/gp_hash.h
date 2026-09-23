@@ -65,6 +65,15 @@ extern int	GpHashSegment(GpHash *h, const Datum *values, const bool *isnull);
 /* The hash function a distribution key of this type is hashed with, in this family. */
 extern Oid	GpHashProcInOpfamily(Oid opfamily, Oid typeoid);
 
+/*
+ * The segment a relation's key holds these values on: values[k] of types[k]
+ * for the k'th column of the key, a type of the column's hash family --
+ * direct dispatch's constants, which need not be of the column's own type.
+ * -1 where the family cannot hash one of them.
+ */
+extern int	GpHashSegmentForKey(const GpPolicy *policy, const Oid *types,
+								const Datum *values, const bool *isnull);
+
 /* Cloudberry's reduction of a 32-bit hash to one of n segments. */
 extern int	GpJumpConsistentHash(uint64 key, int32 num_segments);
 

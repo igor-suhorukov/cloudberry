@@ -534,19 +534,15 @@ GpMotionSegment(Plan *plan)
 /*
  * Direct dispatch, for ORCA: the segment that holds every row whose
  * distribution key is these values, or -1.  The values are the key's, in the
- * key's order, and each has to be of its column's own type -- a hash is a
- * property of the type, and 1::int8 and 1::int4 need not hash alike.
+ * key's order, each of a type its column's hash family hashes, as a
+ * constant compared to the column by the family's equality is: 1::int4 finds
+ * an int2 key's segment (GpHashSegmentForKey).
  */
 int
 GpMotionDirectDispatchSegment(Oid relid, int nvalues, const Oid *types,
 							  const Datum *values, const bool *isnull)
 {
 	GpPolicy   *policy;
-	Relation	rel;
-	TupleDesc	tupdesc;
-	Datum	   *rowvalues;
-	bool	   *rownulls;
-	int			segment = -1;
 
 	if (!gp_enable_direct_dispatch)
 		return -1;
@@ -554,28 +550,7 @@ GpMotionDirectDispatchSegment(Oid relid, int nvalues, const Oid *types,
 	if (policy == NULL || !GpPolicyIsHashPartitioned(policy) ||
 		policy->nattrs != nvalues)
 		return -1;
-
-	rel = relation_open(relid, AccessShareLock);
-	tupdesc = RelationGetDescr(rel);
-	rowvalues = palloc0_array(Datum, tupdesc->natts);
-	rownulls = palloc_array(bool, tupdesc->natts);
-	for (int i = 0; i < tupdesc->natts; i++)
-		rownulls[i] = true;
-
-	for (int k = 0; k < nvalues; k++)
-	{
-		AttrNumber	attno = policy->attrs[k];
-
-		if (TupleDescAttr(tupdesc, attno - 1)->atttypid != types[k])
-			goto done;
-		rowvalues[attno - 1] = values[k];
-		rownulls[attno - 1] = isnull[k];
-	}
-	segment = GpHashSegment(GpHashMake(policy, tupdesc), rowvalues, rownulls);
-
-done:
-	relation_close(rel, AccessShareLock);
-	return segment;
+	return GpHashSegmentForKey(policy, types, values, isnull);
 }
 
 /* ------------------------------------------------------------------------- */

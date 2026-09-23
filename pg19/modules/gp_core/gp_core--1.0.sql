@@ -331,6 +331,35 @@ COMMENT ON FUNCTION gp.policy(regclass) IS
 	'how a relation''s rows are spread over the segments, or NULL for none';
 
 /*
+ * Hash operator classes for bit and bit varying, which Cloudberry's catalog
+ * has and PostgreSQL's does not: without one a column of either type can be
+ * no distribution key.  In pg_catalog under Cloudberry's names, beside the
+ * types' btree classes, so that DISTRIBUTED BY (x bit_ops) finds them on any
+ * search path; the hash function is Cloudberry's bithash (gp_hash.c).
+ */
+CREATE FUNCTION gp.bithash(bit)
+RETURNS int4
+AS 'MODULE_PATHNAME', 'gp_bithash'
+LANGUAGE C IMMUTABLE STRICT PARALLEL SAFE;
+
+CREATE FUNCTION gp.bithash(varbit)
+RETURNS int4
+AS 'MODULE_PATHNAME', 'gp_bithash'
+LANGUAGE C IMMUTABLE STRICT PARALLEL SAFE;
+
+CREATE OPERATOR FAMILY pg_catalog.bit_ops USING hash;
+CREATE OPERATOR CLASS pg_catalog.bit_ops
+	DEFAULT FOR TYPE bit USING hash FAMILY pg_catalog.bit_ops AS
+	OPERATOR 1 = (bit, bit),
+	FUNCTION 1 gp.bithash(bit);
+
+CREATE OPERATOR FAMILY pg_catalog.varbit_ops USING hash;
+CREATE OPERATOR CLASS pg_catalog.varbit_ops
+	DEFAULT FOR TYPE varbit USING hash FAMILY pg_catalog.varbit_ops AS
+	OPERATOR 1 = (varbit, varbit),
+	FUNCTION 1 gp.bithash(varbit);
+
+/*
  * median(x): Cloudberry's, as a plain aggregate rather than the ordered-set
  * one Cloudberry's grammar makes of it -- gp_median.c says why, and that the
  * answer is percentile_cont(0.5)'s.  One per type Cloudberry has.

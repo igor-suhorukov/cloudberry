@@ -1500,6 +1500,20 @@ SQL
 	[ "$out|$out2" = "0|0" ] && ok "and CASCADE drops the table, on the segments too" \
 		|| notok "DROP OPERATOR CLASS ... CASCADE" "$out / $out2"
 
+	# bit and bit varying hash, as Cloudberry's catalog hashes them; a
+	# constant of another type of the key's hash family finds its segment.
+	out=$(printf '%s\n' "CREATE TABLE xbit (x varbit) DISTRIBUTED BY (x);" \
+		"INSERT INTO xbit VALUES ('0101010');" \
+		"CREATE TABLE xi2 (id int2) DISTRIBUTED BY (id);" \
+		"INSERT INTO xi2 VALUES (1);" \
+		"SET gp.test_print_direct_dispatch_info = on;" \
+		"SELECT * FROM xbit WHERE x = '0101010';" \
+		"SELECT * FROM xi2 WHERE id = 1::int8;" | qf 0 | tr '\n' ' ')
+	case "$out" in
+		*"SINGLE content 0101010 "*"SINGLE content 1 ") ok "a bit string is a key, and 1::int8 finds an int2 key's segment" ;;
+		*) notok "bit keys and cross-type direct dispatch" "$out" ;;
+	esac
+
 	# CREATE TABLE AS takes the key of its query's rows where they become
 	# its columns, and LIKE the table's it is made like.
 	out=$(printf '%s\n' "CREATE TABLE xq AS SELECT 1 AS c, a FROM (SELECT a FROM d) s;" \
