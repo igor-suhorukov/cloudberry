@@ -218,6 +218,8 @@ modules = [
     'sources': files('modules/gp_core/gp_core.c',
                      'modules/gp_core/gp_cluster.c',
                      'modules/gp_core/gp_dispatch.c',
+                     'modules/gp_core/gp_dtx.c',
+                     'modules/gp_core/gp_fault.c',
                      'modules/gp_core/gp_ddl.c',
                      'modules/gp_core/gp_hash.c',
                      'modules/gp_core/gp_legacyhash.c',
@@ -238,6 +240,8 @@ modules = [
     # The dispatcher is a libpq client of the segments; see gp_dispatch.c.
     'dependencies': [libpq_dep],
     'include_directories': [pg_client_inc],
+    # Cloudberry's fault injector, for the tests (gp_fault.c).
+    'more_extensions': ['gp_inject_fault'],
   },
   {
     'name': 'interconnect', 'preload': true, 'extension': false, 'build': true,

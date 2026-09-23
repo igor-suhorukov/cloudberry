@@ -68,6 +68,16 @@ extern const GpSegmentConfig *GpClusterSegmentByContent(int content);
 /* This node's own entry, or NULL when no cluster is configured. */
 extern const GpSegmentConfig *GpClusterSelf(void);
 
+/* The node of that dbid, coordinator included, or NULL. */
+extern const GpSegmentConfig *GpClusterNodeByDbid(int dbid);
+
+/*
+ * The session this backend works for: its own process on the coordinator,
+ * and on a segment the coordinator's backend the dispatcher works for --
+ * what Cloudberry calls gp_session_id, which it shares across the nodes.
+ */
+extern int	GpClusterSessionId(void);
+
 /*
  * How many segments to compute with.  Never 0 -- consumers divide by it; see
  * gp_core_api.h -- so a server with no segments answers 1, as Cloudberry's own

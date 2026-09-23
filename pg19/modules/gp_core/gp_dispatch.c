@@ -39,13 +39,12 @@
  * coordinator's transaction: the first statement a transaction dispatches
  * opens one on every segment, a savepoint here is a savepoint there once
  * something is sent inside it, and the segments commit when the coordinator
- * is about to and roll back when it does.  So BEGIN; CREATE TABLE ...;
- * ROLLBACK leaves no table anywhere, and a statement that fails on a segment
- * undoes itself on the coordinator.  What this is not is two-phase commit: a
- * segment that fails to commit after the others have leaves them committed,
- * and a reader on one segment does not see the others' snapshot.  Both are
- * M3's, with distributed snapshots; until then, this closes every gap that
- * does not need them.
+ * does and roll back when it does.  So BEGIN; CREATE TABLE ...; ROLLBACK
+ * leaves no table anywhere, and a statement that fails on a segment undoes
+ * itself on the coordinator.  Each statement is sent with the coordinator's
+ * snapshot of it, which the segments read as a distributed one, and a
+ * transaction that wrote on a segment commits in two phases, decided by the
+ * coordinator's own commit record (gp_dtx.c).
  *
  * READERS.  A statement whose slices run at once needs more than one
  * backend on a segment: the writer runs one slice, and each other slice runs
@@ -95,6 +94,7 @@
 #include "utils/lsyscache.h"
 #include "utils/memutils.h"
 #include "utils/rel.h"
+#include "utils/snapmgr.h"
 #include "utils/syscache.h"
 #include "utils/timestamp.h"
 #include "utils/tuplestore.h"
@@ -104,6 +104,8 @@
 #include "gp_cluster.h"
 #include "gp_core_api.h"
 #include "gp_dispatch.h"
+#include "gp_dtx.h"
+#include "gp_fault.h"
 #include "gp_label.h"
 
 /* Where libpq finds the password for the segments; see the file header. */
@@ -202,6 +204,21 @@ static bool gang_in_xact = false;
 static int	gang_xact_depth = 0;
 static bool gang_xact_lost = false;	/* the gang closed with work in it */
 
+/*
+ * The distributed snapshot the segments were last sent in this transaction,
+ * as the setting carries it; NULL before the first (gp_dtx.c).
+ */
+static char *gang_ds_sent = NULL;
+
+/*
+ * A transaction's parts prepared on the segments, between the two phases:
+ * the gid, and which connections were asked to prepare one.
+ */
+static char dtx_gid[GP_DTX_GIDLEN];
+static bool *dtx_prepared = NULL;	/* by connection, in TopMemoryContext */
+static int	dtx_prepared_size = 0;
+static int	dtx_nprepared = 0;
+
 /* Names the cursors of the gathers of one transaction apart. */
 static uint32 gather_counter = 0;
 
@@ -282,6 +299,9 @@ gang_close(void)
 	gang_in_xact = false;
 	gang_xact_depth = 0;
 	copying = NULL;
+	if (gang_ds_sent != NULL)
+		pfree(gang_ds_sent);
+	gang_ds_sent = NULL;
 
 	for (int i = 0; i < gang->nconns; i++)
 	{
@@ -1651,10 +1671,46 @@ gang_sync_labels(GpGang *g)
 	}
 }
 
+/* Forget the distributed snapshot sent: a rollback may have undone it. */
+static void
+gang_forget_snapshot(void)
+{
+	if (gang_ds_sent != NULL)
+		pfree(gang_ds_sent);
+	gang_ds_sent = NULL;
+}
+
+/*
+ * The statement's snapshot, as a distributed one: sent before the statement,
+ * once per snapshot -- once per transaction when it is REPEATABLE READ, once
+ * per statement when it is READ COMMITTED.  A segment may wait here for a
+ * transaction the snapshot says committed and that it holds only prepared,
+ * before its statement takes a snapshot of its own (gp_dtx.c).
+ */
+static void
+gang_sync_snapshot(GpGang *g)
+{
+	char	   *ds;
+
+	if (!ActiveSnapshotSet())
+		return;
+	ds = GpDtxSnapshotString(GetActiveSnapshot());
+	if (ds == NULL || (gang_ds_sent != NULL && strcmp(ds, gang_ds_sent) == 0))
+		return;
+
+	notices_quiet++;
+	gang_send_all(g, psprintf("SET LOCAL " GP_DTX_SNAPSHOT_SETTING " = '%s'", ds));
+	gang_wait_all(g, NULL, false);
+	notices_quiet--;
+
+	gang_forget_snapshot();
+	gang_ds_sent = MemoryContextStrdup(TopMemoryContext, ds);
+}
+
 /*
  * Get the segments ready for a statement: the settings it depends on, and --
  * unless it is one that runs in a transaction of its own -- the coordinator's
- * transaction, down to the savepoint it is being run in.
+ * transaction, down to the savepoint it is being run in, and its snapshot.
  */
 static void
 gang_prepare(GpGang *g, bool in_xact)
@@ -1695,7 +1751,227 @@ gang_prepare(GpGang *g, bool in_xact)
 		gang_xact_depth++;
 	}
 
+	gang_sync_snapshot(g);
 	gang_sync_labels(g);
+}
+
+/* ------------------------------------------------------------------------- */
+/* Two-phase commit                                                          */
+/* ------------------------------------------------------------------------- */
+
+static void
+dtx_forget(void)
+{
+	dtx_nprepared = 0;
+	dtx_gid[0] = '\0';
+	if (dtx_prepared != NULL)
+		memset(dtx_prepared, 0, dtx_prepared_size * sizeof(bool));
+}
+
+/*
+ * The first phase, at PRE_COMMIT, while raising still undoes the
+ * coordinator's part.  Each segment is asked whether its part wrote.  One
+ * that did not commits now, having nothing to decide; one that did is
+ * prepared under the coordinator's transaction ID, which this gives the
+ * transaction if it had none -- a transaction that wrote on a segment only
+ * has none -- and whose commit record, forced to disk before any segment is
+ * told (ForceSyncCommit), is the decision (gp_dtx.c).  A failure here
+ * raises, and the abort rolls back whatever was prepared.
+ */
+static void
+gang_commit_first_phase(GpGang *g)
+{
+	PGresult  **status = palloc0_array(PGresult *, g->nconns);
+	bool	   *writes = palloc0_array(bool, g->nconns);
+	int			nwriters = 0;
+
+	notices_quiet++;
+	gang_send_all(g, "SELECT pg_catalog.pg_current_xact_id_if_assigned() IS NOT NULL");
+	gang_wait_all(g, status, false);
+	for (int i = 0; i < g->nconns; i++)
+	{
+		writes[i] = status[i] != NULL && PQntuples(status[i]) == 1 &&
+			strcmp(PQgetvalue(status[i], 0, 0), "t") == 0;
+		if (writes[i])
+			nwriters++;
+		if (status[i] != NULL)
+			PQclear(status[i]);
+	}
+
+	/* whatever happens now, no segment is left in the transaction */
+	gang_in_xact = false;
+	gang_xact_depth = 0;
+
+	if (nwriters > 0)
+	{
+		GpDtxFormGid(GetTopFullTransactionId(), dtx_gid);
+		ForceSyncCommit();
+		GP_FAULT("dtm_broadcast_prepare");
+		if (dtx_prepared_size < g->nconns)
+		{
+			if (dtx_prepared != NULL)
+				pfree(dtx_prepared);
+			dtx_prepared = MemoryContextAllocZero(TopMemoryContext,
+												  g->nconns * sizeof(bool));
+			dtx_prepared_size = g->nconns;
+		}
+	}
+
+	for (int i = 0; i < g->nconns; i++)
+	{
+		if (writes[i])
+		{
+			/* the abort rolls it back, whether or not it was prepared */
+			dtx_prepared[i] = true;
+			dtx_nprepared++;
+			conn_send(&g->conns[i], psprintf("PREPARE TRANSACTION '%s'", dtx_gid));
+		}
+		else
+			conn_send(&g->conns[i], "COMMIT");
+	}
+	gang_wait_all(g, NULL, true);
+	notices_quiet--;
+}
+
+/*
+ * COMMIT PREPARED or ROLLBACK PREPARED on the segments asked to prepare, and
+ * how many of them it did not reach -- without raising: the second phase
+ * and the abort are both past it.  An answer that the part does not exist,
+ * or is busy, is no failure: the recovery process finished it or is
+ * finishing it, and so did a PREPARE that failed.  A segment that does not
+ * answer within a while, or whose connection broke, costs the gang.
+ */
+static int
+gang_finish_prepared(bool commit)
+{
+	GpGang	   *g = gang;
+	char	   *sql;
+	int			nfailed = 0;
+	TimestampTz deadline;
+
+	if (dtx_nprepared == 0)
+		return 0;
+	if (g == NULL)
+		return dtx_nprepared;
+
+	sql = psprintf("%s PREPARED '%s'", commit ? "COMMIT" : "ROLLBACK", dtx_gid);
+	for (int i = 0; i < g->nconns && i < dtx_prepared_size; i++)
+	{
+		GpSegmentConn *c = &g->conns[i];
+
+		if (!dtx_prepared[i])
+			continue;
+		c->fetching = NULL;
+		if (c->busy || !PQsendQuery(c->conn, sql))
+		{
+			nfailed++;
+			dtx_prepared[i] = false;
+			continue;
+		}
+		c->busy = true;
+	}
+
+	deadline = GetCurrentTimestamp() + 30 * USECS_PER_SEC;
+	for (;;)
+	{
+		bool		waiting = false;
+		bool		broken = false;
+		WaitEvent	occurred[1];
+
+		for (int i = 0; i < g->nconns && i < dtx_prepared_size; i++)
+		{
+			GpSegmentConn *c = &g->conns[i];
+
+			if (!dtx_prepared[i] || !c->busy)
+				continue;
+			if (PQconsumeInput(c->conn) == 0)
+			{
+				nfailed++;
+				c->busy = false;
+				broken = true;
+				continue;
+			}
+			while (!PQisBusy(c->conn))
+			{
+				PGresult   *res = PQgetResult(c->conn);
+				const char *state;
+
+				if (res == NULL)
+				{
+					c->busy = false;
+					break;
+				}
+				state = PQresultErrorField(res, PG_DIAG_SQLSTATE);
+				if (PQresultStatus(res) != PGRES_COMMAND_OK &&
+					(state == NULL ||
+					 (strcmp(state, "42704") != 0 && strcmp(state, "55000") != 0)))
+				{
+					nfailed++;
+					ereport(LOG,
+							(errmsg("%s on segment %d failed: %s", sql, c->content,
+									PQresultErrorMessage(res))));
+				}
+				PQclear(res);
+			}
+			if (c->busy)
+				waiting = true;
+		}
+		if (broken)
+		{
+			gang_close();
+			break;
+		}
+		if (!waiting)
+			break;
+		if (GetCurrentTimestamp() >= deadline)
+		{
+			for (int i = 0; i < g->nconns && i < dtx_prepared_size; i++)
+				if (dtx_prepared[i] && g->conns[i].busy)
+					nfailed++;
+			gang_close();
+			break;
+		}
+		if (WaitEventSetWait(g->wes, 1000, occurred, 1, dispatch_wait_event()) > 0 &&
+			(occurred[0].events & WL_LATCH_SET))
+			ResetLatch(MyLatch);
+	}
+	return nfailed;
+}
+
+/*
+ * The second phase, at COMMIT: the coordinator's commit record is on disk,
+ * and nothing may be raised.  What a segment was not told, the recovery
+ * process commits by the same record; this says so, and wakes it.
+ */
+static void
+gang_commit_second_phase(void)
+{
+	int			nfailed;
+
+	PG_TRY();
+	{
+		GP_FAULT("dtm_broadcast_commit_prepared");
+		notices_quiet++;
+		nfailed = gang_finish_prepared(true);
+		notices_quiet--;
+	}
+	PG_CATCH();
+	{
+		FlushErrorState();
+		gang_close();
+		nfailed = Max(dtx_nprepared, 1);
+	}
+	PG_END_TRY();
+
+	if (nfailed > 0)
+	{
+		ereport(WARNING,
+				(errmsg("the distributed transaction \"%s\" was committed, but %d of its segments have not been told yet",
+						dtx_gid, nfailed),
+				 errdetail("Distributed transaction recovery commits their parts.")));
+		GpDtxWakeRecovery();
+	}
+	dtx_forget();
 }
 
 static void
@@ -1723,17 +1999,11 @@ dispatch_xact_callback(XactEvent event, void *arg)
 
 			/*
 			 * Before the coordinator commits: raising here still undoes the
-			 * coordinator's part.  After it, nothing could.
+			 * coordinator's part.  After it, nothing could, and the second
+			 * phase follows at COMMIT.
 			 */
 			if (gang != NULL && gang_in_xact)
-			{
-				gang_in_xact = false;
-				gang_xact_depth = 0;
-				notices_quiet++;
-				gang_send_all(gang, "COMMIT");
-				gang_wait_all(gang, NULL, true);
-				notices_quiet--;
-			}
+				gang_commit_first_phase(gang);
 			break;
 
 		case XACT_EVENT_PRE_PREPARE:
@@ -1741,7 +2011,7 @@ dispatch_xact_callback(XactEvent event, void *arg)
 				ereport(ERROR,
 						(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
 						 errmsg("cannot PREPARE a transaction that has used the segments"),
-						 errdetail("Two-phase commit across the segments arrives with distributed transactions.")));
+						 errdetail("A distributed transaction is prepared on the segments by the coordinator, which commits it.")));
 			break;
 
 		case XACT_EVENT_ABORT:
@@ -1757,11 +2027,25 @@ dispatch_xact_callback(XactEvent event, void *arg)
 				gang_cancel_and_drain();
 				if (gang != NULL && gang_in_xact)
 					gang_send_all_quietly("ROLLBACK");
+
+				/*
+				 * The first phase failed: what it prepared is rolled back,
+				 * or left to the recovery process, which rolls it back too
+				 * -- the coordinator's transaction did not commit.
+				 */
+				if (dtx_nprepared > 0)
+				{
+					GP_FAULT("dtm_broadcast_abort_prepared");
+					if (gang_finish_prepared(false) > 0)
+						GpDtxWakeRecovery();
+				}
 			}
 			PG_CATCH();
 			{
 				FlushErrorState();
 				gang_close();
+				if (dtx_nprepared > 0)
+					GpDtxWakeRecovery();
 			}
 			PG_END_TRY();
 
@@ -1769,6 +2053,8 @@ dispatch_xact_callback(XactEvent event, void *arg)
 			gang_xact_depth = 0;
 			gang_xact_lost = false;
 			gang_forget_settings();
+			gang_forget_snapshot();
+			dtx_forget();
 			streams_release();
 			labels_pending = NIL;
 			drop_segment_notices();
@@ -1778,6 +2064,9 @@ dispatch_xact_callback(XactEvent event, void *arg)
 		case XACT_EVENT_PARALLEL_COMMIT:
 			/* sent at PRE_COMMIT; the memory goes with the transaction */
 			labels_pending = NIL;
+			gang_forget_snapshot();
+			if (dtx_nprepared > 0)
+				gang_commit_second_phase();
 			break;
 
 		default:
@@ -1820,6 +2109,7 @@ dispatch_subxact_callback(SubXactEvent event, SubTransactionId mySubid,
 			PG_END_TRY();
 			gang_xact_depth = level - 1;
 			gang_forget_settings();
+			gang_forget_snapshot();
 			streams_release();
 			drop_segment_notices();
 			break;
@@ -3077,6 +3367,12 @@ GpDistRandomLocal(Oid relid, Tuplestorestate *store, TupleDesc desc,
 /* ------------------------------------------------------------------------- */
 /* Start-up                                                                  */
 /* ------------------------------------------------------------------------- */
+
+const char *
+GpDispatchPassfile(void)
+{
+	return gp_internal_passfile;
+}
 
 void
 GpDispatchInit(void)

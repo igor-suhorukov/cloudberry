@@ -47,6 +47,8 @@
 #include "gp_cluster.h"
 #include "gp_core_api.h"
 #include "gp_dispatch.h"
+#include "gp_dtx.h"
+#include "gp_fault.h"
 #include "gp_motion.h"
 #include "gp_label.h"
 #include "gp_policy.h"
@@ -139,6 +141,12 @@ _PG_init(void)
 	GpClusterInit();
 
 	/*
+	 * Cloudberry's fault injector, which the tests set on one node and the
+	 * port's code asks (gp_fault.c): shared memory, requested now.
+	 */
+	GpFaultInit();
+
+	/*
 	 * Cloudberry's settings of the dispatcher and the planner that are not
 	 * ORCA's: some carried out, the rest accepted for Cloudberry's scripts
 	 * (gp_settings.c).  On one node too, where scripts set them as well.
@@ -182,6 +190,14 @@ _PG_init(void)
 	 */
 	GpIcInit();
 	GpShareInit();
+
+	/*
+	 * Distributed transactions: two-phase commit, the segments' distributed
+	 * snapshots, and on the coordinator the recovery process.  After the
+	 * motion layer, so that a fragment's snapshot is made to agree with the
+	 * distributed one before the writer publishes it to its readers.
+	 */
+	GpDtxInit();
 
 	/*
 	 * gp_segment_id, through O10: the name, where no column has it, and its

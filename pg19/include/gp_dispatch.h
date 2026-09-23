@@ -32,8 +32,9 @@
  * and so does this.
  *
  * Whatever is sent is done inside the coordinator's transaction, savepoints
- * included, and committed when the coordinator commits; see gp_dispatch.c.
- * Two-phase commit and distributed snapshots are M3's.
+ * included, with the coordinator's snapshot of it, and committed when the
+ * coordinator commits -- in two phases where a segment wrote; see
+ * gp_dispatch.c and gp_dtx.c.
  *
  *-------------------------------------------------------------------------
  */
@@ -232,6 +233,13 @@ extern void GpStreamEnd(GpStream *stream);
 
 /* Close every connection: the session is over, or something went wrong. */
 extern void GpDispatchResetGang(void);
+
+/*
+ * The password file the dispatcher hands libpq (gp.internal_passfile), for
+ * the other processes of gp_core that connect to the segments: "" or NULL
+ * when there is none.
+ */
+extern const char *GpDispatchPassfile(void);
 
 /* Defines the settings; called from gp_core's _PG_init. */
 /*

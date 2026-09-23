@@ -424,6 +424,27 @@ GpClusterSelf(void)
 	return cluster_self;
 }
 
+const GpSegmentConfig *
+GpClusterNodeByDbid(int dbid)
+{
+	for (int i = 0; i < cluster_nnodes; i++)
+		if (cluster[i].dbid == dbid)
+			return &cluster[i];
+	return NULL;
+}
+
+int
+GpClusterSessionId(void)
+{
+	const char *identity = GpClusterQeIdentity();
+	const char *sess;
+
+	/* a dispatched backend's is its coordinator backend's: "seg0/dbid1/sess42" */
+	if (identity[0] != '\0' && (sess = strstr(identity, "/sess")) != NULL)
+		return atoi(sess + strlen("/sess"));
+	return MyProcPid;
+}
+
 int
 GpClusterSegmentCount(void)
 {

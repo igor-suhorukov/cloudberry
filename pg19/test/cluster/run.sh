@@ -75,6 +75,8 @@ start_node() {				# start_node <n> [extra postgresql.auto.conf lines]
 		echo "port = $(port "$n")"
 		echo "gp.cluster_config = '$CONF'"
 		echo "gp.dbid = $(dbid "$n")"
+		# a transaction that writes on a segment is prepared there (gp_dtx.c)
+		echo "max_prepared_transactions = 16"
 		[ "$n" -eq 0 ] && echo "gp.role = 'dispatch'"
 		for line in "$@"; do echo "$line"; done
 	} > "$d/postgresql.auto.conf"
@@ -1365,7 +1367,12 @@ COMMIT;"
 	esac
 
 	# No secret on the coordinator: ORCA is told, and the planner gathers.
-	start_node 0 "shared_preload_libraries = '$PRELOAD,gp_orca'"
+	# None on the segments either -- a segment that has one takes the
+	# coordinator's word only with it, and a transaction's two-phase commit
+	# too (gp_dtx.c).
+	for n in 1 2 0; do
+		start_node "$n" "shared_preload_libraries = '$PRELOAD,gp_orca'"
+	done
 	out=$(printf '%s\n' "SET gp.optimizer_trace_fallback = on;" \
 		"SELECT count(*), sum(a) FROM o WHERE b = 3;" | qf 0)
 	case "$out" in
@@ -1615,7 +1622,143 @@ SQL
 	esac
 
 	###########################################################################
-	echo "13. the segments authenticate the coordinator, with SCRAM"
+	echo "13. distributed transactions: two-phase commit and distributed snapshots"
+	###########################################################################
+	# gp_dtx.c: a transaction that wrote on a segment is prepared there under
+	# the coordinator's transaction ID, whose commit record decides it, and
+	# each statement is sent the coordinator's snapshot of it, which a
+	# segment's snapshots are made to agree with.  Cloudberry's fault
+	# injector (gp_fault.c) holds a transaction between its phases.
+	out=$(q 0 "CREATE EXTENSION gp_inject_fault;")
+	out2=$(q 0 "CREATE TABLE dtx (a int, b int) DISTRIBUTED BY (a); INSERT INTO dtx SELECT i, i FROM generate_series(1, 20) i;")
+	[ -z "$out$out2" ] && ok "gp_inject_fault, Cloudberry's fault injector, is created" \
+		|| notok "CREATE EXTENSION gp_inject_fault" "$out / $out2"
+
+	out=$(printf '%s\n' "SELECT gp_inject_fault_infinite('dtm_broadcast_prepare', 'skip', 1);" \
+		"SELECT count(*) FROM dtx;" \
+		"SELECT gp_inject_fault('dtm_broadcast_prepare', 'status', 1);" \
+		"INSERT INTO dtx VALUES (21, 21);" \
+		"SELECT gp_inject_fault('dtm_broadcast_prepare', 'status', 1);" \
+		"SELECT gp_inject_fault('dtm_broadcast_prepare', 'reset', 1);" | qf 0 |
+		grep -o "num times hit:'[0-9]*'" | tr '\n' ' ')
+	[ "$out" = "num times hit:'0' num times hit:'1' " ] \
+		&& ok "a transaction that only read commits on the segments in one phase, one that wrote in two" \
+		|| notok "which transactions are prepared" "$out"
+
+	# A commit held between its phases.
+	q 0 "SELECT gp_inject_fault('dtm_broadcast_commit_prepared', 'suspend', 1);" >/dev/null
+	q 0 "INSERT INTO dtx SELECT i, i FROM generate_series(22, 60) i;" >/dev/null 2>&1 &
+	writer=$!
+	q 0 "SELECT gp_wait_until_triggered_fault('dtm_broadcast_commit_prepared', 1, 1);" >/dev/null
+	gid=$(q 1 "SELECT gid FROM pg_prepared_xacts;")
+	gid2=$(q 2 "SELECT gid FROM pg_prepared_xacts;")
+	status=$(q 0 "SELECT pg_xact_status('${gid#gp_dtx_}'::xid8);")
+	case "$gid|$gid2|$status" in
+		"gp_dtx_"[0-9]*"|$gid|committed")
+			ok "its parts are prepared on both segments under the coordinator's transaction ID, which has committed" ;;
+		*) notok "the prepared parts and their decision" "$gid / $gid2 / $status" ;;
+	esac
+	q 0 "SELECT count(*), sum(b) FROM dtx;" > "$ROOT/dtx_reader.out" 2>&1 &
+	reader=$!
+	sleep 1
+	out=$(q 1 "SELECT wait_event FROM pg_stat_activity WHERE backend_type = 'client backend' AND wait_event_type = 'Lock';")
+	q 0 "SELECT gp_inject_fault('dtm_broadcast_commit_prepared', 'resume', 1);" >/dev/null
+	wait "$writer" "$reader"
+	q 0 "SELECT gp_inject_fault('dtm_broadcast_commit_prepared', 'reset', 1);" >/dev/null
+	out2=$(cat "$ROOT/dtx_reader.out")
+	p1=$(q 1 "SELECT count(*) FROM pg_prepared_xacts;")
+	[ "$out|$out2|$p1" = "transactionid|60|1830|0" ] \
+		&& ok "a statement whose snapshot says it committed waits on a segment for its second phase, then sees it" \
+		|| notok "a statement meeting a transaction between its phases" "$out / $out2 / $p1"
+
+	# A segment that cannot prepare.
+	q 0 "SELECT gp_inject_fault('start_prepare', 'error', $(dbid 2));" >/dev/null
+	out=$(q 0 "INSERT INTO dtx SELECT i, i FROM generate_series(61, 70) i;")
+	q 0 "SELECT gp_inject_fault('start_prepare', 'reset', $(dbid 2));" >/dev/null
+	out2=$(q 0 "SELECT count(*) FROM dtx;")
+	p1=$(q 1 "SELECT count(*) FROM pg_prepared_xacts;")
+	p2=$(q 2 "SELECT count(*) FROM pg_prepared_xacts;")
+	case "$out|$out2|$p1|$p2" in
+		*"fault triggered, fault name:'start_prepare'"*"segment 1"*"|60|0|0")
+			ok "a segment that fails to prepare fails the commit, and what the other prepared is rolled back" ;;
+		*) notok "a failure in the first phase" "$out / $out2 / $p1 / $p2" ;;
+	esac
+
+	# The coordinator goes down between the phases.  Its postmaster restarts
+	# it; the statement after waits on the segments until the recovery
+	# process commits the parts by the commit record.
+	q 0 "SELECT gp_inject_fault('dtm_broadcast_commit_prepared', 'panic', 1);" >/dev/null
+	q 0 "INSERT INTO dtx SELECT i, i FROM generate_series(61, 70) i;" >/dev/null 2>&1
+	for i in $(seq 1 60); do
+		out=$(q 0 "SELECT count(*) FROM dtx;" 2>/dev/null)
+		[ "$out" = "70" ] && break
+		sleep 0.5
+	done
+	p1=$(q 1 "SELECT count(*) FROM pg_prepared_xacts;")
+	p2=$(q 2 "SELECT count(*) FROM pg_prepared_xacts;")
+	log=$(grep -c "distributed transaction recovery: COMMIT PREPARED" "$ROOT/node0.log")
+	[ "$out|$p1|$p2" = "70|0|0" ] && [ "$log" -ge 1 ] \
+		&& ok "a coordinator that went down between the phases: its recovery process commits the parts" \
+		|| notok "recovery after the coordinator went down" "$out / $p1 / $p2 / $log"
+
+	# REPEATABLE READ: the snapshot taken on the coordinator before another
+	# transaction committed hides it on every segment, though each segment's
+	# own snapshot, taken after, would see it.
+	printf '%s\n' "BEGIN ISOLATION LEVEL REPEATABLE READ;" "SELECT 'established';" \
+		"SELECT pg_sleep(2);" "SELECT count(*), sum(b) FROM dtx;" "COMMIT;" |
+		qf 0 > "$ROOT/dtx_rr.out" 2>&1 &
+	rr=$!
+	sleep 1
+	q 0 "INSERT INTO dtx SELECT i, i FROM generate_series(71, 80) i;" >/dev/null
+	wait "$rr"
+	out=$(tail -1 "$ROOT/dtx_rr.out")
+	out2=$(q 0 "SELECT count(*), sum(b) FROM dtx;")
+	[ "$out|$out2" = "70|2485|80|3240" ] \
+		&& ok "a snapshot taken before a commit hides it on every segment" \
+		|| notok "a distributed snapshot's view" "$out / $out2"
+
+	# ... and what such a transaction deleted outlives VACUUM on the
+	# segments, while a snapshot that hides it is in use: gp_dtx_horizon.
+	printf '%s\n' "BEGIN ISOLATION LEVEL REPEATABLE READ;" "SELECT 'established';" \
+		"SELECT pg_sleep(3);" "SELECT count(*), sum(b) FROM dtx;" "COMMIT;" |
+		qf 0 > "$ROOT/dtx_rr2.out" 2>&1 &
+	rr=$!
+	sleep 1
+	q 0 "DELETE FROM dtx WHERE a > 70;" >/dev/null
+	q 0 "VACUUM dtx;" >/dev/null
+	wait "$rr"
+	out=$(tail -1 "$ROOT/dtx_rr2.out")
+	out2=$(q 0 "SELECT count(*) FROM dtx;")
+	out3=$(q 1 "SELECT count(*) FROM pg_replication_slots WHERE slot_name = 'gp_dtx_horizon';")
+	[ "$out|$out2|$out3" = "80|3240|70|1" ] \
+		&& ok "VACUUM on a segment keeps the rows a transaction the snapshot hides deleted" \
+		|| notok "the horizon a hidden transaction needs" "$out / $out2 / $out3"
+	out=$(q 0 "SELECT sum(result::int) FROM gp.exec_on_segments('SELECT count(*) FROM gp_internal.dtx_map()');")
+	[ "$out" = "0" ] && ok "and a segment forgets each transaction once no snapshot can hide it" \
+		|| notok "the map of distributed transactions" "$out"
+
+	# Temporary relations: PREPARE is made to take them, and a file dropped
+	# with one is unlinked after its second phase.
+	out=$(printf '%s\n' "SET client_min_messages = warning;" "BEGIN;" \
+		"CREATE TEMP TABLE tdrop (a int) ON COMMIT DROP;" \
+		"INSERT INTO tdrop SELECT generate_series(1, 10);" "COMMIT;" \
+		"CREATE TEMP TABLE tkeep (a int);" "INSERT INTO tkeep SELECT generate_series(1, 10);" \
+		"BEGIN;" "DROP TABLE tkeep;" "COMMIT;" \
+		"SELECT sum(result::int) FROM gp.exec_on_segments(\$\$SELECT count(*) FROM pg_ls_dir('base/' || (SELECT oid FROM pg_database WHERE datname = current_database())) f WHERE f LIKE 't%'\$\$);" | qf 0)
+	[ "$out" = "0" ] \
+		&& ok "temporary tables commit in two phases, and one dropped leaves no file on a segment" \
+		|| notok "temporary tables under two-phase commit" "$out"
+
+	# A gid of the distributed kind is the coordinator's.
+	out=$(printf '%s\n' "BEGIN;" "PREPARE TRANSACTION 'gp_dtx_12345';" | qf 1)
+	case "$out" in
+		*'"gp_dtx_12345" is reserved for distributed transactions'*)
+			ok "a utility session cannot prepare under a distributed transaction's gid" ;;
+		*) notok "a reserved gid" "$out" ;;
+	esac
+
+	###########################################################################
+	echo "14. the segments authenticate the coordinator, with SCRAM"
 	###########################################################################
 	# Decision 5 asks for SCRAM on the early milestones.  The dispatcher is an
 	# ordinary client, so this is ordinary authentication: the segment asks,
@@ -1657,7 +1800,7 @@ SQL
 fi
 
 ###############################################################################
-echo "14. a cluster described wrongly is a server that does not start"
+echo "15. a cluster described wrongly is a server that does not start"
 ###############################################################################
 # The message has to name the file and the line: this is read in the
 # postmaster while it starts, so it is all the operator is given.
@@ -1727,7 +1870,7 @@ refuses "a file that is not there is refused" \
 	"gp.cluster_config = '$ROOT/nowhere.conf'"
 
 ###############################################################################
-echo "15. with no cluster configured, this is a single node"
+echo "16. with no cluster configured, this is a single node"
 ###############################################################################
 if start_node 0 "gp.cluster_config = ''" ; then
 	notok "node 0 should not have started: gp.role is dispatch with no cluster"

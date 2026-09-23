@@ -63,7 +63,8 @@ Or, without installing anything on the host:
 ## Status
 
 Milestones **M0** and **M1** are complete, and **M2 — a cluster — is built**
-(2026-09-23), the interconnect included.
+(2026-09-23), the interconnect included.  **M3 — distributed transactions —
+is under way** (2026-09-23): two-phase commit and distributed snapshots.
 
 On one node (M1):
 
@@ -123,12 +124,25 @@ On a cluster (M2), `gp_core` and `gp_orca`:
   `gp_distribution_policy.numsegments` make, and which ORCA leaves to the
   planner, as Cloudberry's does.
 
-What M2 leaves open: a transaction's segments commit one after another and a
-reader sees one segment's snapshot, not the cluster's — two-phase commit and
-distributed snapshots are M3; a query whose key is fixed to a few values
-goes to one segment or to all of them, not to those few; and an UPDATE that
-moves a row fires the row triggers of a DELETE and an INSERT on the
-segments, where Cloudberry's Split fires none.
+What M2 leaves open: a query whose key is fixed to a few values goes to one
+segment or to all of them, not to those few; and an UPDATE that moves a row
+fires the row triggers of a DELETE and an INSERT on the segments, where
+Cloudberry's Split fires none.
+
+Distributed transactions (M3), in `gp_core`:
+
+- **two-phase commit**: a transaction that wrote on a segment is prepared on
+  each segment that wrote, under the coordinator's own transaction ID, whose
+  commit record decides it; a process on the coordinator finishes, by that
+  record, whatever a failure left prepared.  A segment needs
+  `max_prepared_transactions` above zero;
+- **distributed snapshots**: each statement is sent the coordinator's
+  snapshot of it, and a segment makes its own agree — it waits for a
+  transaction the snapshot says committed and it holds only prepared, and
+  hides one the snapshot says in progress that it has committed, holding
+  back with the replication slot `gp_dtx_horizon` what such a transaction
+  deleted;
+- Cloudberry's fault injector, `gp_inject_fault`, for the tests.
 
 The storage, resource and transport modules — `gp_ao`, `pax`, `gp_exttable`,
 `gp_resource`, `gp_tde`, `interconnect`, `udp2` — are still stubs: M5 and M6

@@ -113,7 +113,9 @@ for n in $(seq 0 $((NODES - 1))); do
 		echo "gp.cluster_config = '$CONF'"
 		echo "gp.dbid = $((n + 1))"
 		echo "gp.cluster_secret = '$SECRET'"
-		echo "max_prepared_transactions = 2"
+		# every transaction that writes on a segment is prepared there, and
+		# pg_regress runs up to 20 sessions at once
+		echo "max_prepared_transactions = 64"
 		[ "$n" -eq 0 ] && echo "gp.role = 'dispatch'"
 	} >> "$WORK/node$n/postgresql.auto.conf"
 done
