@@ -106,13 +106,22 @@ On a cluster (M2), `gp_core` and `gp_orca`:
   coordinator is kept for what cannot stream — a temporary table, the
   coordinator's own slice feeding a reader's — and on request
   (`gp.interconnect_type = relay`);
-- `gp_segment_id`, as a call of the row's segment (O10).
+- `gp_segment_id`, as a call of the row's segment (O10);
+- Cloudberry's catalogs by their names, in `pg_catalog`: `gp_id`,
+  `gp_segment_configuration` over the cluster file, `gp_configuration_history`,
+  and `gp_distribution_policy` over the labels, which a write to it — with
+  `allow_system_table_mods`, as Cloudberry's is written — writes;
+- partial tables, spread over the first so many segments, which
+  `gp_debug_numsegments` (Cloudberry's extension, carried by `gp_sql`) and
+  `gp_distribution_policy.numsegments` make, and which ORCA leaves to the
+  planner, as Cloudberry's does.
 
 What M2 leaves open: a transaction's segments commit one after another and a
 reader sees one segment's snapshot, not the cluster's — two-phase commit and
 distributed snapshots are M3; an UPDATE or DELETE of a replicated table
 that reads a distributed one, and an UPDATE of the key of a table with
-triggers, are refused; Cloudberry's `gp_id` catalog.
+triggers, are refused; what DISTRIBUTED BY does not check at CREATE, and
+the key CREATE TABLE AS takes from its query in Cloudberry.
 
 The storage, resource and transport modules — `gp_ao`, `pax`, `gp_exttable`,
 `gp_resource`, `gp_tde`, `interconnect`, `udp2` — are still stubs: M5 and M6
