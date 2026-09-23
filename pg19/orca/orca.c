@@ -932,9 +932,14 @@ flatten_group_rtes_walker(Node *node, void *context)
  *
  * So PostgreSQL 19's eval_const_expressions() is called on each expression,
  * level by level, and a SubLink's test expression is taken out before and
- * put back after.  They are matched by the subquery each SubLink points to,
- * which eval_const_expressions() never copies: it does not descend into a
- * Query, and returns the one it was given.
+ * put back after.  In its place goes a marker, a Const of no type whose
+ * value says which test expression it stands for, and the two are matched
+ * by it.  Not by the SubLink, nor by its subquery: eval_const_expressions()
+ * copies both when it inlines a SQL function the SubLink is an argument of
+ * -- inline_function() ends with copyObject() -- and `a < ALL (...) || 'g'`
+ * is anytextcat, a SQL function.  A copy keeps the marker.  The inlining
+ * never puts one argument in twice where it holds a SubLink, so each marker
+ * is found at most once.
  *
  * The PlannerInfo follows the level being folded.  eval_const_expressions()
  * binds parameters from root->glob->boundParams, and records the functions
@@ -954,9 +959,26 @@ flatten_group_rtes_walker(Node *node, void *context)
 typedef struct fold_constants_context
 {
 	PlannerInfo *root;
-	List	   *subselects;		/* SubLink subqueries, in step with ... */
-	List	   *testexprs;		/* ... the test expressions taken from them */
+	List	   *testexprs;		/* the test expressions taken out, by marker */
 } fold_constants_context;
+
+/* What stands in a SubLink for the n'th test expression taken out. */
+static Const *
+testexpr_marker(int n)
+{
+	return makeConst(InvalidOid, -1, InvalidOid, sizeof(int32),
+					 Int32GetDatum(n), false, true);
+}
+
+/* Which test expression a SubLink's stands for, or -1 if it is its own. */
+static int
+testexpr_marker_index(Node *testexpr)
+{
+	if (testexpr != NULL && IsA(testexpr, Const) &&
+		!OidIsValid(((Const *) testexpr)->consttype))
+		return DatumGetInt32(((Const *) testexpr)->constvalue);
+	return -1;
+}
 
 static Node *fold_constants_mutator(Node *node, void *context);
 
@@ -976,9 +998,11 @@ detach_testexprs_walker(Node *node, void *context)
 	{
 		SubLink    *sublink = (SubLink *) node;
 
-		fcontext->subselects = lappend(fcontext->subselects, sublink->subselect);
-		fcontext->testexprs = lappend(fcontext->testexprs, sublink->testexpr);
-		sublink->testexpr = NULL;
+		if (sublink->testexpr != NULL)
+		{
+			fcontext->testexprs = lappend(fcontext->testexprs, sublink->testexpr);
+			sublink->testexpr = (Node *) testexpr_marker(list_length(fcontext->testexprs) - 1);
+		}
 
 		return false;
 	}
@@ -998,18 +1022,11 @@ reattach_testexprs_mutator(Node *node, void *context)
 	{
 		SubLink    *sublink = (SubLink *) node;
 		SubLink    *newnode = makeNode(SubLink);
-		ListCell   *lcs;
-		ListCell   *lct;
+		int			which = testexpr_marker_index(sublink->testexpr);
 
 		memcpy(newnode, sublink, sizeof(SubLink));
-		forboth(lcs, fcontext->subselects, lct, fcontext->testexprs)
-		{
-			if (lfirst(lcs) == (void *) sublink->subselect)
-			{
-				newnode->testexpr = (Node *) lfirst(lct);
-				break;
-			}
-		}
+		if (which >= 0)
+			newnode->testexpr = (Node *) list_nth(fcontext->testexprs, which);
 		newnode->subselect = fold_constants_mutator(sublink->subselect,
 													fcontext->root);
 		return (Node *) newnode;
@@ -1046,7 +1063,6 @@ fold_constants_mutator(Node *node, void *context)
 
 	/* An expression of the current level. */
 	fcontext.root = root;
-	fcontext.subselects = NIL;
 	fcontext.testexprs = NIL;
 
 	(void) detach_testexprs_walker(node, &fcontext);

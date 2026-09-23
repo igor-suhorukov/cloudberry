@@ -2135,6 +2135,13 @@ has "and goes under a Subquery Scan, PostgreSQL's node for filtering a plan's ro
 same "ALL, which ORCA turns into a count under a filter" \
      "SELECT a FROM t0 WHERE a > ALL (SELECT a FROM t0 WHERE a < 998) ORDER BY a"
 
+# Folding inlines a SQL function a SubLink is an argument of -- bool || text
+# is anytextcat -- and copies the SubLink as it does; its test expression,
+# taken out while the query is folded, has to find its way back to the copy.
+# It once did not, and the translator read a NULL (qp_subquery).
+same "ALL as an argument of an inlined SQL function, its test expression kept" \
+     "SELECT a, b FROM t0 WHERE b = (a < ALL (SELECT a FROM t0 WHERE a > 990) || 'g') OR a < 3 ORDER BY a"
+
 # --- subqueries as SubPlans ---------------------------------------------------
 #
 # ORCA turns most subqueries into joins, which are T1's; this setting makes it
