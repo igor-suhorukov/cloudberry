@@ -11,7 +11,14 @@ m/^ Optimizer: GPORCA$/
 -- start_matchsubs
 
 # An error a segment raised names the segment in its DETAIL, and where it
-# listens, which is another socket and port on every run.
+# listens, which is another socket and port on every run.  Where the error
+# has no detail of its own, the segment named is the one whose failure the
+# coordinator heard first, which varies from run to run when several can
+# fail -- a function in the segments' slice, called on each one's rows -- and
+# so does how many others failed too: both are masked, as Cloudberry's
+# init_file masks its "(seg0 slice1 ...)".
+m/^DETAIL:  segment \d+ \([^)]*\)(; \d+ other segments failed too)?$/
+s/^DETAIL:  segment \d+ \([^)]*\)(; \d+ other segments failed too)?$/DETAIL:  segment/
 m/^DETAIL:  segment \d+ \(.*?\)/
 s/^DETAIL:  segment (\d+) \(.*?\)/DETAIL:  segment $1/
 

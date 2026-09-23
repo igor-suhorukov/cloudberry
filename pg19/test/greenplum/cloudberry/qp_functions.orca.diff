@@ -8,7 +8,7 @@
 -DETAIL:  Function's final statement must be SELECT or INSERT/UPDATE/DELETE RETURNING.
 +DETAIL:  Function's final statement must be SELECT or INSERT/UPDATE/DELETE/MERGE RETURNING.
 @@
-+DETAIL:  segment 0
++DETAIL:  segment
 @@
 -HINT:  No function matches the given name and argument types. You might need to add explicit type casts.
 +DETAIL:  No function of that name accepts the given argument types.
