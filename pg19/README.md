@@ -87,13 +87,20 @@ On a cluster (M2), `gp_core` and `gp_orca`:
 - DDL on every node with the coordinator's OIDs (R1), distribution policies
   hashed by Cloudberry's cdbhash, ANALYZE sampling the segments (O3), CREATE
   TABLE AS and ALTER TABLE ... SET DISTRIBUTED BY;
+- DISTRIBUTED BY checked as Cloudberry checks it — its columns, a column's
+  operator class, the table's unique constraints and indexes, inheritance —
+  in Cloudberry's words, and Cloudberry's legacy hash, the `cdbhash_*_ops`
+  classes, which `gp.use_legacy_hashops` gives a new key;
+- what a segment says — a trigger's NOTICE — reaching the client, and
+  Cloudberry's rules for triggers and for the names it reserves;
 - ORCA's distributed plans — the five Motions, Split, direct dispatch, the
   slice table — carried out by gp_core, each slice sent the values of the
   parameters it reads; and PostgreSQL's own plans gathering from the
   segments where ORCA does not plan, writing a distributed table through an
   Explicit Redistribute Motion — each row changed on its segment by its ctid
   there, a row whose key changes moved by a Split, RETURNING evaluated on
-  the coordinator;
+  the coordinator, a replicated table's row found on every segment by what
+  it holds;
 - every segment has each table's distribution policy, the `gp` label the
   coordinator writes;
 - Cloudberry's settings of the dispatcher and the planner, as `gp.*`, among
@@ -118,10 +125,10 @@ On a cluster (M2), `gp_core` and `gp_orca`:
 
 What M2 leaves open: a transaction's segments commit one after another and a
 reader sees one segment's snapshot, not the cluster's — two-phase commit and
-distributed snapshots are M3; an UPDATE or DELETE of a replicated table
-that reads a distributed one, and an UPDATE of the key of a table with
-triggers, are refused; what DISTRIBUTED BY does not check at CREATE, and
-the key CREATE TABLE AS takes from its query in Cloudberry.
+distributed snapshots are M3; a query whose key is fixed to a few values
+goes to one segment or to all of them, not to those few; and an UPDATE that
+moves a row fires the row triggers of a DELETE and an INSERT on the
+segments, where Cloudberry's Split fires none.
 
 The storage, resource and transport modules — `gp_ao`, `pax`, `gp_exttable`,
 `gp_resource`, `gp_tde`, `interconnect`, `udp2` — are still stubs: M5 and M6
