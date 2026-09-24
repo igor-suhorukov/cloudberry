@@ -35,7 +35,9 @@
 #include "postgres.h"
 
 #include "access/relation.h"
+#include "access/relscan.h"
 #include "access/reloptions.h"
+#include "access/sysattr.h"
 #include "access/table.h"
 #include "access/tableamext.h"
 #include "access/xact.h"
@@ -48,9 +50,12 @@
 #include "executor/executor.h"
 #include "fmgr.h"
 #include "funcapi.h"
+#include "lib/stringinfo.h"
 #include "miscadmin.h"
 #include "nodes/extensible.h"
 #include "nodes/makefuncs.h"
+#include "nodes/plannodes.h"
+#include "optimizer/optimizer.h"
 #include "optimizer/planner.h"
 #include "parser/parse_expr.h"
 #include "parser/parse_relation.h"
@@ -654,6 +659,46 @@ probe_index_validate_scan(Relation table_rel, Relation index_rel,
 	PG_END_TRY();
 }
 
+/*
+ * O15: each scan of a table of the probe's method that was given its plan
+ * node says what kind of scan it is and which columns the node reads, in
+ * order, until the next reset.
+ */
+static StringInfo scan_log = NULL;
+
+static void
+probe_scan_extractcolumns(TableScanDesc scan, PlanState *ps)
+{
+	Scan	   *plan = (Scan *) ps->plan;
+	Bitmapset  *cols = NULL;
+	const char *kind;
+	int			col = -1;
+	MemoryContext old;
+
+	pull_varattnos((Node *) plan->plan.targetlist, plan->scanrelid, &cols);
+	pull_varattnos((Node *) plan->plan.qual, plan->scanrelid, &cols);
+	if (IsA(plan, BitmapHeapScan))
+	{
+		pull_varattnos((Node *) ((BitmapHeapScan *) plan)->bitmapqualorig,
+					   plan->scanrelid, &cols);
+		kind = "bitmap";
+	}
+	else
+		kind = scan->rs_parallel ? "parallel" : "seq";
+
+	old = MemoryContextSwitchTo(TopMemoryContext);
+	if (scan_log == NULL)
+		scan_log = makeStringInfo();
+	if (scan_log->len > 0)
+		appendStringInfoChar(scan_log, ';');
+	appendStringInfo(scan_log, "%s %s:", kind,
+					 RelationGetRelationName(scan->rs_rd));
+	while ((col = bms_next_member(cols, col)) >= 0)
+		appendStringInfo(scan_log, " %d",
+						 col + FirstLowInvalidHeapAttributeNumber);
+	MemoryContextSwitchTo(old);
+}
+
 /* A table of the probe's method keeps its TOAST in a heap table. */
 static Oid
 probe_relation_toast_am(Relation rel)
@@ -677,6 +722,8 @@ probe_am_init(void)
 	memset(&probe_am_ext, 0, sizeof(probe_am_ext));
 	probe_am_ext.size = sizeof(TableAmExtRoutine);
 	probe_am_ext.reloptions = probe_am_reloptions;
+	probe_am_ext.scan_extractcolumns = probe_scan_extractcolumns;
+	probe_am_ext.scan_by_column = true;
 	RegisterTableAmExtension(&probe_am_routine, &probe_am_ext);
 }
 
@@ -710,6 +757,7 @@ PG_FUNCTION_INFO_V1(gp_probe_syncrep_hold);
 PG_FUNCTION_INFO_V1(gp_probe_am_handler);
 PG_FUNCTION_INFO_V1(gp_probe_am_level);
 PG_FUNCTION_INFO_V1(gp_probe_am_fillfactor);
+PG_FUNCTION_INFO_V1(gp_probe_scan_log);
 
 Datum
 gp_probe_reset(PG_FUNCTION_ARGS)
@@ -725,6 +773,8 @@ gp_probe_reset(PG_FUNCTION_ARGS)
 	}
 	arm_oid_catalog = arm_oid_value = InvalidOid;
 	arm_analyze_rel = InvalidOid;
+	if (scan_log)
+		resetStringInfo(scan_log);
 	arm_star_rel = InvalidOid;
 	if (arm_column_name)
 		pfree(arm_column_name);
@@ -1162,6 +1212,13 @@ gp_probe_am_fillfactor(PG_FUNCTION_ARGS)
 
 	relation_close(rel, AccessShareLock);
 	PG_RETURN_INT32(fillfactor);
+}
+
+/* O15: what the scans given their plan node said, since the last reset */
+Datum
+gp_probe_scan_log(PG_FUNCTION_ARGS)
+{
+	PG_RETURN_TEXT_P(cstring_to_text(scan_log ? scan_log->data : ""));
 }
 
 void

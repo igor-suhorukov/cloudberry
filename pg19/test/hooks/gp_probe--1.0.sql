@@ -71,3 +71,7 @@ CREATE FUNCTION gp_probe.am_level(rel regclass) RETURNS int
   AS 'MODULE_PATHNAME', 'gp_probe_am_level' LANGUAGE C STRICT;
 CREATE FUNCTION gp_probe.am_fillfactor(rel regclass) RETURNS int
   AS 'MODULE_PATHNAME', 'gp_probe_am_fillfactor' LANGUAGE C STRICT;
+-- O15: what each scan of the method's tables that was given its plan node
+-- said: its kind, table and the columns the node reads.
+CREATE FUNCTION gp_probe.scan_log() RETURNS text
+  AS 'MODULE_PATHNAME', 'gp_probe_scan_log' LANGUAGE C;

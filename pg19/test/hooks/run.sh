@@ -734,6 +734,57 @@ SQL
 is "a refused CREATE leaves no table behind" o14_left left 0
 
 ###############################################################################
+echo "O15 a scan of the method's table is given its plan node, which names only the columns it reads"
+###############################################################################
+# Each scan of a gp_probe_am table that the executor gave its plan node logs
+# its kind and the columns the node reads.  A scan under an aggregate or a
+# join would read a physical target list, every column, but for the
+# planner's half of O15.
+session o15 <<'SQL'
+CREATE TABLE o15_t (a int, b int, c text, d int) USING gp_probe_am;
+INSERT INTO o15_t SELECT i, i % 10, repeat('x', 50), i FROM generate_series(1, 20000) i;
+CREATE INDEX o15_b ON o15_t (b);
+CREATE TABLE o15_heap (a int, b int, c text, d int);
+INSERT INTO o15_heap SELECT * FROM o15_t;
+ANALYZE o15_t, o15_heap;
+SET max_parallel_workers_per_gather = 0;
+SELECT gp_probe.reset();
+SELECT count(*) FROM o15_t WHERE d > 5;
+SELECT 'agg=' || gp_probe.scan_log();
+SELECT gp_probe.reset();
+SELECT a, d FROM o15_t WHERE b = 3 LIMIT 1;
+SELECT 'top=' || gp_probe.scan_log();
+SELECT gp_probe.reset();
+SET enable_hashjoin = off; SET enable_mergejoin = off; SET enable_indexscan = off;
+SET enable_bitmapscan = off; SET enable_material = off;
+SELECT count(*) FROM (SELECT x.a FROM o15_t x JOIN o15_t y ON x.a = y.d WHERE x.b = 1 AND y.b = 1 LIMIT 5) s;
+SELECT 'nestloop=' || array_to_string(ARRAY(SELECT e FROM unnest(string_to_array(gp_probe.scan_log(), ';')) e ORDER BY e), ';');
+RESET enable_bitmapscan;
+SELECT gp_probe.reset();
+SET enable_seqscan = off;
+SELECT sum(d) FROM o15_t WHERE b = 3;
+SELECT 'bitmap=' || gp_probe.scan_log();
+RESET enable_seqscan; RESET enable_indexscan;
+SELECT gp_probe.reset();
+SET max_parallel_workers_per_gather = 2; SET parallel_setup_cost = 0;
+SET parallel_tuple_cost = 0; SET min_parallel_table_scan_size = 0;
+SET parallel_leader_participation = on;
+SELECT count(*) FROM o15_t WHERE d > 100;
+SELECT 'parallel=' || (gp_probe.scan_log() LIKE '%parallel o15_t: 4%')::text;
+SELECT 'plan=' || (SELECT count(*) FROM (SELECT 1 FROM o15_t WHERE d > 100) s)::text;
+RESET ALL;
+SELECT gp_probe.reset();
+SELECT count(*) FROM o15_heap WHERE b > 5;
+SELECT 'heap=' || gp_probe.scan_log() || '.';
+SQL
+is "a scan under an aggregate reads its qual's column alone" o15 agg "seq o15_t: 4"
+is "a scan at the top reads what it returns and filters by" o15 top "seq o15_t: 1 2 4"
+is "a nested loop's scans read their own columns, not every one" o15 nestloop "seq o15_t: 1 2;seq o15_t: 2 4"
+is "a bitmap scan reads its qual's and its target list's columns" o15 bitmap "bitmap o15_t: 2 4"
+is "a parallel scan is given its plan node too" o15 parallel true
+is "a heap table's scans are not asked" o15 heap "."
+
+###############################################################################
 echo "O23 extension marks: pg_checksums passes over what an extension marked, pg_upgrade carries it"
 ###############################################################################
 # Last, because it stops the server: pg_checksums reads a stopped cluster.
