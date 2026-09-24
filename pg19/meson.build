@@ -435,8 +435,8 @@ endforeach
 # Test-only modules
 #
 # gp_probe sets every hook of the core patch series so that the hook tests can
-# check it is called.  It is not part of the port: it is built and installed
-# only where those tests run.
+# check it is called, and gp_storage_probe is a storage handler.  Neither is
+# part of the port: they are built and installed only where the tests run.
 ###############################################################################
 
 if get_option('hook_tests')
@@ -454,6 +454,23 @@ if get_option('hook_tests')
     install_dir: pg_extensiondir,
   )
   built_modules += 'gp_probe (test only)'
+
+  # A storage handler for the storage and cluster suites: a directory stands
+  # for the store, and credentials a user mapping gives are asked for.
+  shared_module('gp_storage_probe', files('test/storage/gp_storage_probe.c'),
+    c_args: mod_c_args,
+    link_args: mod_link_args,
+    include_directories: [pg_inc, cb_inc],
+    name_prefix: '',
+    install: true,
+    install_dir: pg_pkglibdir,
+  )
+  install_data(
+    'test/storage/gp_storage_probe.control',
+    'test/storage/gp_storage_probe--1.0.sql',
+    install_dir: pg_extensiondir,
+  )
+  built_modules += 'gp_storage_probe (test only)'
 endif
 
 subdir('test')

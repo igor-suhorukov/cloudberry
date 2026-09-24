@@ -1063,7 +1063,11 @@ GRANT SELECT ON gp_sql.directory_tables TO PUBLIC;
  * pg_user_mappings hides there what it would hide here (gp_core's loopback).
  *
  * The wrapper has no handler on purpose: a storage server is somewhere files
- * live, not something to read foreign tables from.
+ * live, not something to read foreign tables from.  What reaches its files
+ * is a storage handler, a module that registers for the protocol the
+ * server's "protocol" option names, and is given the server's options and
+ * the calling user's mapping -- read there, the coordinator's from a segment
+ * (gp_storage.h).
  *****************************************************************************/
 
 CREATE FOREIGN DATA WRAPPER gp_storage;

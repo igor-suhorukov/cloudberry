@@ -71,6 +71,9 @@ extern const GpSegmentConfig *GpClusterSelf(void);
 /* The node of that dbid, coordinator included, or NULL. */
 extern const GpSegmentConfig *GpClusterNodeByDbid(int dbid);
 
+/* The coordinator, the primary with content id -1; NULL with no cluster. */
+extern const GpSegmentConfig *GpClusterCoordinator(void);
+
 /*
  * The session this backend works for: its own process on the coordinator,
  * and on a segment the coordinator's backend the dispatcher works for --

@@ -64,10 +64,18 @@ extern void GpLoopbackDefer(const char *dbname, const char *sql);
  * read-only transaction of its own there, and put its rows in the tuplestore
  * of a materialised set-returning function, each column read by the input
  * function of rsinfo->setDesc's type.  What this transaction has deferred is
- * not there yet.  Run through SPI when `dbname` is this database.
+ * not there yet.  Run through SPI when `dbname` is this database; on a
+ * segment, in the coordinator's database of that name.
  */
 extern void GpLoopbackQueryInto(const char *dbname, const char *sql,
 								ReturnSetInfo *rsinfo);
+
+/*
+ * The same read, its rows given back: each an array of ncols strings, NULL
+ * for a null.  On a segment, which keeps none of what that database holds,
+ * it is read in the coordinator's database of that name.
+ */
+extern List *GpLoopbackReadRows(const char *dbname, const char *sql, int ncols);
 
 /* The setting and the transaction callbacks; from gp_core's _PG_init. */
 extern void GpLoopbackInit(void);

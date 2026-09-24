@@ -436,6 +436,15 @@ GpClusterNodeByDbid(int dbid)
 	return NULL;
 }
 
+const GpSegmentConfig *
+GpClusterCoordinator(void)
+{
+	for (int i = 0; i < cluster_nnodes; i++)
+		if (cluster[i].content == -1 && cluster[i].role == 'p')
+			return &cluster[i];
+	return NULL;
+}
+
 int
 GpClusterSessionId(void)
 {

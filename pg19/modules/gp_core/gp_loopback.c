@@ -104,6 +104,7 @@ typedef struct LoopbackWrite
 /* A connection of the session's, kept for the next time. */
 typedef struct LoopbackConn
 {
+	int			dbid;			/* the node's; 0: this server */
 	char		dbname[NAMEDATALEN];
 	char		user[NAMEDATALEN];
 	bool		trusted;		/* a dispatched backend's identity and the secret */
@@ -188,15 +189,17 @@ loopback_forget(LoopbackConn *lc)
 
 /*
  * The session's connection to that database, opened if there is none: to
- * this server as the segments reach it on a cluster, and otherwise by its
- * first Unix socket, or TCP on this host.  A trusted one says it is a
- * dispatched backend of this session, as the dispatcher's do.
+ * this server -- as the segments reach it on a cluster, and otherwise by its
+ * first Unix socket, or TCP on this host -- or to another node of the
+ * cluster, "node".  A trusted one says it is a dispatched backend of this
+ * session, as the dispatcher's do.
  */
 static LoopbackConn *
-loopback_conn(const char *dbname, bool trusted)
+loopback_conn(const GpSegmentConfig *node, const char *dbname, bool trusted)
 {
 	const char *user = GetUserNameFromId(GetSessionUserId(), false);
-	const GpSegmentConfig *self = GpClusterSelf();
+	const GpSegmentConfig *self = node != NULL ? node : GpClusterSelf();
+	int			dbid = node != NULL ? node->dbid : 0;
 	const char *passfile = GpDispatchPassfile();
 	const char *keywords[10];
 	const char *values[10];
@@ -209,8 +212,8 @@ loopback_conn(const char *dbname, bool trusted)
 
 	foreach_ptr(LoopbackConn, c, conns)
 	{
-		if (c->trusted != trusted || strcmp(c->dbname, dbname) != 0 ||
-			strcmp(c->user, user) != 0)
+		if (c->dbid != dbid || c->trusted != trusted ||
+			strcmp(c->dbname, dbname) != 0 || strcmp(c->user, user) != 0)
 			continue;
 		if (PQstatus(c->conn) == CONNECTION_OK &&
 			PQtransactionStatus(c->conn) == PQTRANS_IDLE)
@@ -286,6 +289,7 @@ loopback_conn(const char *dbname, bool trusted)
 		exit_registered = true;
 	}
 	lc = MemoryContextAllocZero(TopMemoryContext, sizeof(LoopbackConn));
+	lc->dbid = dbid;
 	strlcpy(lc->dbname, dbname, NAMEDATALEN);
 	strlcpy(lc->user, user, NAMEDATALEN);
 	lc->trusted = trusted;
@@ -420,7 +424,7 @@ loopback_pre_commit(void)
 	foreach_ptr(char, db, dbs)
 	{
 		char	   *context = psprintf("run in database \"%s\" as the transaction commits", db);
-		LoopbackConn *lc = loopback_conn(db, two_phase);
+		LoopbackConn *lc = loopback_conn(NULL, db, two_phase);
 
 		PQclear(loopback_exec(lc, "BEGIN", context));
 		loopback_set_role(lc, context);
@@ -624,6 +628,82 @@ loopback_subxact_callback(SubXactEvent event, SubTransactionId mySubid,
 /* Reads                                                                     */
 /* ------------------------------------------------------------------------- */
 
+/*
+ * A read: the query's rows, each an array of ncols strings, NULL for a null,
+ * in the caller's memory.  From this server's database "dbname" -- by SPI
+ * when that is this backend's own -- or from the coordinator's, on a segment,
+ * which keeps none of what that database holds.
+ */
+static List *
+loopback_read(const char *dbname, const char *sql, int ncols)
+{
+	const GpSegmentConfig *node = NULL;
+	MemoryContext cxt = CurrentMemoryContext;
+	List	   *rows = NIL;
+	char	   *context;
+	LoopbackConn *lc;
+	PGresult   *res;
+
+	if (GpClusterContentId() >= 0 && !GpClusterIsSingleNode())
+	{
+		node = GpClusterCoordinator();
+		if (node == NULL)
+			ereport(ERROR,
+					(errcode(ERRCODE_CONFIG_FILE_ERROR),
+					 errmsg("this segment's cluster has no coordinator to read database \"%s\" of",
+							dbname)));
+	}
+
+	if (node == NULL && GpLoopbackIsHere(dbname))
+	{
+		if (SPI_connect() != SPI_OK_CONNECT)
+			elog(ERROR, "SPI_connect failed");
+		if (SPI_execute(sql, true, 0) != SPI_OK_SELECT)
+			elog(ERROR, "gp_core: %s failed", sql);
+		if (SPI_tuptable->tupdesc->natts != ncols)
+			elog(ERROR, "gp_core: %s gave %d columns, where %d were wanted",
+				 sql, SPI_tuptable->tupdesc->natts, ncols);
+		for (uint64 r = 0; r < SPI_processed; r++)
+		{
+			MemoryContext spicxt = MemoryContextSwitchTo(cxt);
+			char	  **row = palloc_array(char *, ncols);
+
+			for (int i = 0; i < ncols; i++)
+			{
+				char	   *text = SPI_getvalue(SPI_tuptable->vals[r],
+												SPI_tuptable->tupdesc, i + 1);
+
+				row[i] = text != NULL ? pstrdup(text) : NULL;
+			}
+			rows = lappend(rows, row);
+			MemoryContextSwitchTo(spicxt);
+		}
+		SPI_finish();
+		return rows;
+	}
+
+	context = psprintf("read from database \"%s\"%s", dbname,
+					   node != NULL ? " of the coordinator" : "");
+	lc = loopback_conn(node, dbname, false);
+	PQclear(loopback_exec(lc, "BEGIN READ ONLY", context));
+	loopback_set_role(lc, context);
+	res = loopback_exec(lc, sql, context);
+	if (PQnfields(res) != ncols)
+		elog(ERROR, "gp_core: %s gave %d columns, where %d were wanted",
+			 sql, PQnfields(res), ncols);
+	for (int r = 0; r < PQntuples(res); r++)
+	{
+		char	  **row = palloc_array(char *, ncols);
+
+		for (int i = 0; i < ncols; i++)
+			row[i] = PQgetisnull(res, r, i) ? NULL : pstrdup(PQgetvalue(res, r, i));
+		rows = lappend(rows, row);
+	}
+	PQclear(res);
+	PQclear(loopback_exec(lc, "COMMIT", context));
+	return rows;
+}
+
 void
 GpLoopbackQueryInto(const char *dbname, const char *sql, ReturnSetInfo *rsinfo)
 {
@@ -633,9 +713,7 @@ GpLoopbackQueryInto(const char *dbname, const char *sql, ReturnSetInfo *rsinfo)
 	Oid		   *ioparams = palloc_array(Oid, natts);
 	Datum	   *values = palloc_array(Datum, natts);
 	bool	   *nulls = palloc_array(bool, natts);
-	char	   *context;
-	LoopbackConn *lc;
-	PGresult   *res;
+	ListCell   *lc;
 
 	for (int i = 0; i < natts; i++)
 	{
@@ -645,54 +723,24 @@ GpLoopbackQueryInto(const char *dbname, const char *sql, ReturnSetInfo *rsinfo)
 		fmgr_info(infunc, &infuncs[i]);
 	}
 
-	if (GpLoopbackIsHere(dbname))
+	foreach(lc, loopback_read(dbname, sql, natts))
 	{
-		if (SPI_connect() != SPI_OK_CONNECT)
-			elog(ERROR, "SPI_connect failed");
-		if (SPI_execute(sql, true, 0) != SPI_OK_SELECT)
-			elog(ERROR, "gp_core: %s failed", sql);
-		if (SPI_tuptable->tupdesc->natts != natts)
-			elog(ERROR, "gp_core: %s gave %d columns, where %d were wanted",
-				 sql, SPI_tuptable->tupdesc->natts, natts);
-		for (uint64 r = 0; r < SPI_processed; r++)
-		{
-			for (int i = 0; i < natts; i++)
-			{
-				char	   *text = SPI_getvalue(SPI_tuptable->vals[r],
-												SPI_tuptable->tupdesc, i + 1);
+		char	  **row = (char **) lfirst(lc);
 
-				nulls[i] = text == NULL;
-				values[i] = InputFunctionCall(&infuncs[i], text, ioparams[i],
-											  TupleDescAttr(desc, i)->atttypmod);
-			}
-			tuplestore_putvalues(rsinfo->setResult, desc, values, nulls);
-		}
-		SPI_finish();
-		return;
-	}
-
-	context = psprintf("read from database \"%s\"", dbname);
-	lc = loopback_conn(dbname, false);
-	PQclear(loopback_exec(lc, "BEGIN READ ONLY", context));
-	loopback_set_role(lc, context);
-	res = loopback_exec(lc, sql, context);
-	if (PQnfields(res) != natts)
-		elog(ERROR, "gp_core: %s gave %d columns, where %d were wanted",
-			 sql, PQnfields(res), natts);
-	for (int r = 0; r < PQntuples(res); r++)
-	{
 		for (int i = 0; i < natts; i++)
 		{
-			char	   *text = PQgetisnull(res, r, i) ? NULL : PQgetvalue(res, r, i);
-
-			nulls[i] = text == NULL;
-			values[i] = InputFunctionCall(&infuncs[i], text, ioparams[i],
+			nulls[i] = row[i] == NULL;
+			values[i] = InputFunctionCall(&infuncs[i], row[i], ioparams[i],
 										  TupleDescAttr(desc, i)->atttypmod);
 		}
 		tuplestore_putvalues(rsinfo->setResult, desc, values, nulls);
 	}
-	PQclear(res);
-	PQclear(loopback_exec(lc, "COMMIT", context));
+}
+
+List *
+GpLoopbackReadRows(const char *dbname, const char *sql, int ncols)
+{
+	return loopback_read(dbname, sql, ncols);
 }
 
 /* ------------------------------------------------------------------------- */

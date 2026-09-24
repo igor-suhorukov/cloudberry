@@ -80,7 +80,8 @@ echo
 	echo "unix_socket_directories = '$SOCK'"
 	echo "listen_addresses = ''"
 	echo "port = $PORT"
-	echo "shared_preload_libraries = 'gp_core,gp_sql'"
+	# gp_storage_probe, a test module, is a storage handler (section 10)
+	echo "shared_preload_libraries = 'gp_core,gp_sql,gp_storage_probe'"
 	# the loopback prepares its part in the maintenance database (gp_loopback.c)
 	echo "max_prepared_transactions = 8"
 } >> "$WORK/data/postgresql.conf"
@@ -177,12 +178,12 @@ is "and the tablespace's own options still work" \
    "{seq_page_cost=1.5}"
 
 ###############################################################################
-echo "5. what that means for a directory table today"
+echo "5. a directory table where no module serves the server"
 ###############################################################################
 isl "one in an ordinary tablespace is made as usual" \
    "SELECT gp_sql.create_directory_table('here', 'local_space');
     SELECT gp_sql.directory_table_location('here'::regclass) LIKE 'pg_tblspc/%';" "t"
-refused "one that would reach a storage server is refused, not given local files" \
+refused "one that would reach a storage server no module serves is refused, not given local files" \
         "SELECT gp_sql.create_directory_table('there', 'remote_space');" \
         "cannot create a directory table in a tablespace that reaches storage server"
 is "and no table is left behind" \
@@ -308,6 +309,53 @@ log=$(grep -c "distributed transaction recovery: COMMIT PREPARED 'gp_dtx_[0-9]*_
 [ "$out|$left" = "1|0" ] && [ "$log" -ge 1 ] \
 	&& ok "a server that went down between the two commits: the recovery process commits that part" \
 	|| notok "recovery of the loopback's part on one node" "$out / $left / $log"
+
+###############################################################################
+echo "10. a storage handler keeps a directory table's files, with the user's credentials"
+###############################################################################
+# gp_storage_probe, a test module, serves the servers whose protocol is
+# "probe": a directory stands for the store, and a user mapping must give
+# the server's "secret" for a file to be written or read.  gp_sql hands it
+# both, read in the maintenance database as the user.
+mkdir -p "$WORK/probe_root" "$WORK/probe_space"
+q "SELECT gp_sql.create_storage_server('probe_srv', '{\"protocol\": \"probe\", \"root\": \"$WORK/probe_root\", \"secret\": \"sesame\"}');" > /dev/null
+q "CREATE TABLESPACE probe_space LOCATION '$WORK/probe_space' WITH (gp.server = 'probe_srv');" > /dev/null
+dboid=$(q "SELECT oid FROM pg_database WHERE datname = 'postgres';")
+isl "a directory table is made where a module serves the server, its files a path there" \
+   "SELECT gp_sql.create_directory_table('far', 'probe_space');
+    SELECT gp_sql.directory_table_location('far'::regclass) = '$dboid/' || 'far'::regclass::oid || '_dirtable';" "t"
+far="$WORK/probe_root/$(q "SELECT gp_sql.directory_table_location('far'::regclass);")"
+refused "a file is not written without the credentials the server asks for" \
+        "SELECT gp_sql.directory_table_put('far', 'a.txt', 'hello');" "refused the credentials"
+q "SELECT gp_sql.create_storage_user_mapping('probe_srv', CURRENT_USER, '{\"secret\": \"sesame\"}');" > /dev/null
+is "with them it is, through the handler" \
+   "SELECT gp_sql.directory_table_put('far', 'a.txt', 'hello');" "5"
+[ "$(cat "$far/a.txt" 2>/dev/null)" = "hello" ] && ok "where the server keeps its files, not in the tablespace" \
+	|| notok "where the server keeps its files" "$(ls -R "$WORK/probe_root" "$WORK/probe_space" 2>&1 | head -8)"
+is "and it is read back through the handler" \
+   "SELECT convert_from(gp_sql.directory_table_get('far', 'a.txt'), 'UTF8');" "hello"
+out=$("$PSQL" -X -q -t -A -d postgres -U other \
+	  -c "SELECT gp_sql.directory_table_get('far', 'a.txt');" 2>&1)
+case "$out" in
+	*'refused the credentials of role "other"'*) ok "but not by a role whose own mapping gives no secret" ;;
+	*) notok "but not by a role whose own mapping gives no secret" "$out" ;;
+esac
+q "BEGIN; SELECT gp_sql.directory_table_put('far', 'b.txt', 'gone'); ROLLBACK;" > /dev/null
+[ ! -e "$far/b.txt" ] && ok "a file a transaction that rolled back wrote is removed from the server" \
+	|| notok "a rolled-back write on the server" "$(ls "$far")"
+q "SELECT gp_sql.remove_file('far', 'a.txt');" > /dev/null
+[ ! -e "$far/a.txt" ] && ok "and a file removed is gone from it once the transaction commits" \
+	|| notok "a removal on the server" "$(ls "$far")"
+out=$(qd other_db "SELECT gp_sql.create_directory_table('far_there', 'probe_space');
+                   SELECT gp_sql.directory_table_put('far_there', 'c.txt', 'from there');
+                   SELECT convert_from(gp_sql.directory_table_get('far_there', 'c.txt'), 'UTF8');")
+[ "$(printf '%s\n' "$out" | tail -1)" = "from there" ] \
+	&& ok "from another database the credentials are read over the loopback" \
+	|| notok "credentials from another database" "$out"
+q "SELECT gp_sql.directory_table_put('far', 'd.txt', 'x');" > /dev/null
+q "DROP TABLE far;" > /dev/null
+[ ! -e "$far" ] && ok "a directory table dropped takes its directory on the server with it" \
+	|| notok "a dropped directory table's files on the server" "$(ls "$far" 2>&1)"
 
 echo
 echo "  $pass passed, $fail failed"

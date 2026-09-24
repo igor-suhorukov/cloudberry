@@ -64,7 +64,7 @@
 	X(replicate_safe,  false, "this aggregate may run on a replicated slice") \
 	X(directory_location, true, "where a directory table keeps its files") \
 	X(profile,         true,  "the password profile a role is under") \
-	X(storage_server,  true,  "the storage server a tablespace's files go through") \
+	X(storage_server,  true,  "the storage server a tablespace's files, or a directory table's, go through") \
 	X(locked_until,    true,  "when a password profile stops locking a role out") \
 	X(failed_logins,   true,  "how many times in a row a role has failed to log in") \
 	X(partition_templates, true, "a partitioned table's SUBPARTITION TEMPLATEs, per level")

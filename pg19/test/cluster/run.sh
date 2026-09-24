@@ -1915,6 +1915,22 @@ SQL
 		&& ok "a coordinator that went down between them: its recovery process commits that part too" \
 		|| notok "recovery of the loopback's part" "$out / $p0 / $log"
 
+	# A storage handler's credentials on a segment: read in the coordinator's
+	# maintenance database, as the user (gp_sql's storage.c, through gp_core's
+	# loopback).  A server made from another database is the coordinator's
+	# alone -- the loopback's statements are not sent on -- so the segments
+	# have no copy to read.  gp_storage_probe, a test module, says what a
+	# handler would be given.
+	ql "CREATE EXTENSION gp_storage_probe;" >/dev/null
+	ql "SELECT gp_sql.create_storage_server('cred_srv', '{\"protocol\": \"probe\"}');" >/dev/null
+	ql "SELECT gp_sql.create_storage_user_mapping('cred_srv', CURRENT_USER, '{\"secret\": \"sesame\"}');" >/dev/null
+	out=$(ql "SELECT string_agg(coalesce(result, 'none'), ',' ORDER BY content)
+	            FROM gp.exec_on_segments('SELECT gp_storage_probe.credentials(''cred_srv'')');")
+	out2=$(q 1 "SELECT count(*) FROM pg_foreign_server WHERE srvname = 'cred_srv';")
+	[ "$out|$out2" = "secret=sesame,secret=sesame|0" ] \
+		&& ok "a handler on a segment is given the user's credentials, read on the coordinator" \
+		|| notok "credentials on a segment" "$out / $out2"
+
 	###########################################################################
 	echo "14. the global deadlock detector"
 	###########################################################################

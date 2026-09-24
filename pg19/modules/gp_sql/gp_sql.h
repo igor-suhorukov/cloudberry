@@ -203,6 +203,20 @@ extern void GpStorageApplyToTablespace(const char *spcname, List *opts);
 /* Which storage server a tablespace reaches, or NULL for a local one. */
 extern char *GpStorageTablespaceServer(Oid spcId);
 
+/*
+ * The handler registered for a storage server's protocol, or NULL, and the
+ * server's options (gp_storage.h); a file of the server, with the options
+ * and the calling user's mapping that reaching it takes, and its handler --
+ * an error when none serves the server.
+ */
+struct GpStorageHandler;
+struct GpStorageFile;
+extern const struct GpStorageHandler *GpStorageServerHandler(const char *server,
+															  List **options);
+extern const struct GpStorageHandler *GpStorageFileOf(const char *server,
+													   const char *path,
+													   struct GpStorageFile *file);
+
 /* partition.c */
 
 /* Cloudberry's gp_max_partition_level: 0, no limit. */

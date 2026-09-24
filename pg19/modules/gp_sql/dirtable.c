@@ -41,6 +41,12 @@
  * crash between the two leaves a file nothing points at; the queue that
  * removes those is Track D's work, with the rest of the storage side.
  *
+ * A directory table in a tablespace that reaches a storage server keeps its
+ * files there instead, through the handler a module registered for the
+ * server's protocol (gp_storage.h), which is given the server's options and
+ * the calling user's credentials with each file.  Its location is then a
+ * path within what the server reaches, and its label names the server.
+ *
  * Cloudberry sources this file is made of:
  *	  src/backend/commands/dirtablecmds.c, catalog/pg_directory_table.c,
  *	  storage/file/ufile.c (the local file handler)
@@ -78,6 +84,7 @@
 
 #include "gp_label.h"
 #include "gp_sql.h"
+#include "gp_storage.h"
 
 /* Cloudberry's DIRECTORY_TABLE_TAG_COLUMN_ATTNUM: the only column DML may touch. */
 #define GP_DIRTABLE_TAG_ATTNUM	5
@@ -101,6 +108,10 @@ typedef struct DirTableFileAction
 	char	   *path;			/* relative to the data directory */
 	bool		on_commit;		/* remove it if we commit, else if we abort */
 	bool		is_dir;			/* a whole directory, from DROP TABLE */
+
+	/* A storage server's file: its handler, and what reaching it takes. */
+	const GpStorageHandler *handler;
+	GpStorageFile file;
 } DirTableFileAction;
 
 static List *dirtable_actions = NIL;
@@ -110,7 +121,7 @@ static void
 dirtable_remember(const char *path, bool on_commit, bool is_dir)
 {
 	MemoryContext old = MemoryContextSwitchTo(TopTransactionContext);
-	DirTableFileAction *act = palloc(sizeof(DirTableFileAction));
+	DirTableFileAction *act = palloc0(sizeof(DirTableFileAction));
 
 	act->path = pstrdup(path);
 	act->on_commit = on_commit;
@@ -118,6 +129,59 @@ dirtable_remember(const char *path, bool on_commit, bool is_dir)
 	dirtable_actions = lappend(dirtable_actions, act);
 
 	MemoryContextSwitchTo(old);
+}
+
+/*
+ * The same for a storage server's file, with what reaching it takes: read
+ * now, since the transaction's end can read nothing.
+ */
+static void
+dirtable_remember_remote(const GpStorageHandler *handler,
+						 const GpStorageFile *file, bool on_commit, bool is_dir)
+{
+	MemoryContext old = MemoryContextSwitchTo(TopTransactionContext);
+	DirTableFileAction *act = palloc0(sizeof(DirTableFileAction));
+
+	act->path = pstrdup(file->path);
+	act->on_commit = on_commit;
+	act->is_dir = is_dir;
+	act->handler = handler;
+	act->file.server = pstrdup(file->server);
+	act->file.server_options = copyObject(file->server_options);
+	act->file.user_options = copyObject(file->user_options);
+	act->file.path = act->path;
+	dirtable_actions = lappend(dirtable_actions, act);
+
+	MemoryContextSwitchTo(old);
+}
+
+/* A storage server's file removed as a transaction ends: a warning, never an error. */
+static void
+dirtable_remove_remote(DirTableFileAction *act)
+{
+	MemoryContext cxt = CurrentMemoryContext;
+
+	PG_TRY();
+	{
+		if (act->is_dir)
+			act->handler->remove_directory(&act->file);
+		else
+			(void) act->handler->remove_file(&act->file);
+	}
+	PG_CATCH();
+	{
+		ErrorData  *edata;
+
+		MemoryContextSwitchTo(cxt);
+		edata = CopyErrorData();
+		FlushErrorState();
+		ereport(WARNING,
+				(errmsg("could not remove \"%s\" from storage server \"%s\": %s",
+						act->path, act->file.server, edata->message),
+				 errdetail("It is left behind and has to be removed by hand.")));
+		FreeErrorData(edata);
+	}
+	PG_END_TRY();
 }
 
 /* Remove a directory and everything in it, complaining rather than failing. */
@@ -170,7 +234,9 @@ dirtable_xact_callback(XactEvent event, void *arg)
 		if (act->on_commit != committed)
 			continue;
 
-		if (act->is_dir)
+		if (act->handler != NULL)
+			dirtable_remove_remote(act);
+		else if (act->is_dir)
 			dirtable_rmtree(act->path);
 		else if (unlink(act->path) != 0 && errno != ENOENT)
 			ereport(WARNING,
@@ -271,6 +337,25 @@ dirtable_file_path(Oid relid, const char *relative_path, char **location_out)
 		*location_out = location;
 
 	return psprintf("%s/%s", location, relative_path);
+}
+
+/*
+ * The handler that reaches a directory table's files, and the file at this
+ * path with what reaching it takes; NULL for a table whose files are local.
+ * The table's label names the server it was made on, whatever its
+ * tablespace names since.
+ */
+static const GpStorageHandler *
+dirtable_handler(Oid relid, const char *path, GpStorageFile *file)
+{
+	ObjectAddress addr;
+	char	   *server;
+
+	ObjectAddressSet(addr, RelationRelationId, relid);
+	server = GpLabelGet(&addr, GP_LABEL_storage_server);
+	if (server == NULL)
+		return NULL;
+	return GpStorageFileOf(server, path, file);
 }
 
 /* Create the directories a path needs, as Cloudberry's localEnsurePath does. */
@@ -449,20 +534,35 @@ GpDirTableClaim(Oid relid)
 		char	   *server = GpStorageTablespaceServer(OidIsValid(reltablespace)
 													   ? reltablespace
 													   : MyDatabaseTableSpace);
+		List	   *options;
 
 		/*
-		 * The tablespace says its files go through a storage server, and
-		 * nothing has registered a handler for one.  Writing local files
-		 * where the user asked for remote ones would be worse than refusing.
+		 * The tablespace says its files go through a storage server: through
+		 * the handler for the server's protocol, under a path of this
+		 * database's and this table's there, which the handler makes as it
+		 * writes a file.  When no module serves the protocol, writing local
+		 * files where the user asked for remote ones would be worse than
+		 * refusing.
 		 */
 		if (server != NULL)
-			ereport(ERROR,
-					(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
-					 errmsg("cannot create a directory table in a tablespace that reaches storage server \"%s\"",
-							server),
-					 errdetail("No module has registered a handler for a storage server, so its files could only be written locally."),
-					 errhint("Use a tablespace without %s.server, or load a module that provides the handler.",
-							 GP_OPTION_NS)));
+		{
+			if (GpStorageServerHandler(server, &options) == NULL)
+				ereport(ERROR,
+						(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+						 errmsg("cannot create a directory table in a tablespace that reaches storage server \"%s\"",
+								server),
+						 GpStorageOption(options, "protocol") != NULL
+						 ? errdetail("No module has registered a handler for its protocol, \"%s\", so its files could only be written locally.",
+									 GpStorageOption(options, "protocol"))
+						 : errdetail("It has no \"protocol\" option to say which handler reaches it, so its files could only be written locally."),
+						 errhint("Use a tablespace without %s.server, or load a module that provides the handler.",
+								 GP_OPTION_NS)));
+			location = psprintf("%u/%u_dirtable", MyDatabaseId, relid);
+			ObjectAddressSet(addr, RelationRelationId, relid);
+			GpLabelSet(&addr, GP_LABEL_directory_location, location);
+			GpLabelSet(&addr, GP_LABEL_storage_server, server);
+			return location;
+		}
 	}
 
 	location = dirtable_compute_location(relid);
@@ -529,10 +629,20 @@ gp_sql_dirtable_put(PG_FUNCTION_ARGS)
 	char		nulls[5] = {' ', ' ', ' ', ' ', ' '};
 	StringInfoData sql;
 	bool		existed;
+	const GpStorageHandler *handler;
+	GpStorageFile file;
 
 	dirtable_require_owner(relid);
 	path = dirtable_file_path(relid, relative_path, NULL);
 
+	/* A storage server's: written by its handler, which refuses an existing file */
+	if ((handler = dirtable_handler(relid, path, &file)) != NULL)
+	{
+		handler->write_file(&file, data, len);
+		dirtable_remember_remote(handler, &file, false, false);
+	}
+	else
+	{
 	existed = (access(path, F_OK) == 0);
 	if (existed)
 		ereport(ERROR,
@@ -579,6 +689,7 @@ gp_sql_dirtable_put(PG_FUNCTION_ARGS)
 
 	/* If this transaction rolls back, the file it wrote goes with it. */
 	dirtable_remember(path, false, false);
+	}
 
 	values[0] = CStringGetTextDatum(relative_path);
 	values[1] = Int64GetDatum((int64) len);
@@ -630,6 +741,16 @@ gp_sql_dirtable_get(PG_FUNCTION_ARGS)
 	struct stat st;
 	bytea	   *result;
 	int			nbytes;
+	const GpStorageHandler *handler;
+	GpStorageFile file;
+
+	if ((handler = dirtable_handler(relid, path, &file)) != NULL)
+	{
+		result = handler->read_file(&file);
+		if (result == NULL)
+			PG_RETURN_NULL();
+		PG_RETURN_BYTEA_P(result);
+	}
 
 	if (stat(path, &st) != 0)
 	{
@@ -689,6 +810,8 @@ gp_sql_dirtable_remove(PG_FUNCTION_ARGS)
 	Datum		values[1];
 	StringInfoData sql;
 	uint64		removed;
+	const GpStorageHandler *handler;
+	GpStorageFile file;
 
 	dirtable_require_owner(relid);
 	path = dirtable_file_path(relid, relative_path, NULL);
@@ -723,7 +846,9 @@ gp_sql_dirtable_remove(PG_FUNCTION_ARGS)
 	 * Also when there was no row: a crash between writing a file and
 	 * committing its row leaves one behind, and this is what removes it.
 	 */
-	if (removed > 0 || access(path, F_OK) == 0)
+	if ((handler = dirtable_handler(relid, path, &file)) != NULL)
+		dirtable_remember_remote(handler, &file, true, false);
+	else if (removed > 0 || access(path, F_OK) == 0)
 		dirtable_remember(path, true, false);
 
 	PG_RETURN_BOOL(removed > 0);
@@ -737,7 +862,13 @@ void
 GpDirTableDropped(Oid relid)
 {
 	char	   *location = GpDirTableLocation(relid);
+	const GpStorageHandler *handler;
+	GpStorageFile file;
 
-	if (location != NULL)
+	if (location == NULL)
+		return;
+	if ((handler = dirtable_handler(relid, location, &file)) != NULL)
+		dirtable_remember_remote(handler, &file, true, true);
+	else
 		dirtable_remember(location, true, true);
 }
