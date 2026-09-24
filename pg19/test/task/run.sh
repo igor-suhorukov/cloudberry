@@ -335,6 +335,25 @@ case "$out" in
 	*) notok "and a read-only transaction writes nothing there" "$out" ;;
 esac
 
+# This suite leaves max_prepared_transactions at PostgreSQL's zero, where
+# the part there cannot be prepared (the storage suite sets it): it is run
+# at pre-commit, its errors said then, and left open until this transaction
+# has committed.  So a failure after pre-commit -- PostgreSQL runs the ON
+# COMMIT actions after the callbacks -- rolls it back too, where a part
+# committed at pre-commit would have been left written.
+out=$(qd other_db "BEGIN;
+                   CREATE TEMP TABLE parent (k int PRIMARY KEY) ON COMMIT DELETE ROWS;
+                   CREATE TEMP TABLE child (k int REFERENCES parent);
+                   INSERT INTO parent VALUES (1);
+                   CALL gp_task.create_task('after_pre_commit', '@daily', 'SELECT 1');
+                   COMMIT;")
+out2=$(q "SELECT count(*) FROM gp_task.job WHERE jobname = 'after_pre_commit';")
+case "$out|$out2" in
+	*"unsupported ON COMMIT and foreign key combination"*"|0")
+		ok "without prepared transactions, one that fails after its pre-commit writes nothing there either" ;;
+	*) notok "without prepared transactions, one that fails after its pre-commit writes nothing there either" "$out / $out2" ;;
+esac
+
 ###############################################################################
 echo "10. a task of seconds runs as Cloudberry's does: an interval after it is written, one run at a time"
 ###############################################################################

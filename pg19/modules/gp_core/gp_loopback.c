@@ -39,10 +39,16 @@
  * coordinator, where it joins the distributed transaction, and on one node
  * alike.  For that its connection carries a dispatched backend's identity
  * and the cluster secret, without which PREPARE under such a gid is refused.
+ *
  * A server that cannot prepare -- max_prepared_transactions at zero, which is
- * PostgreSQL's default -- commits it at PRE_COMMIT, just before this
- * transaction does: what is lost there is the window between the two
- * commits, which only prepared transactions close.
+ * PostgreSQL's default -- runs the part's statements at PRE_COMMIT all the
+ * same, raising their errors there, and leaves its transaction open: it is
+ * committed once this transaction's commit record is written, or rolled back
+ * with this transaction.  So a failure after PRE_COMMIT -- a SERIALIZABLE
+ * transaction's serialization check, an ON COMMIT action, NOTIFY's queue,
+ * which PostgreSQL runs after the callbacks -- rolls back both.  What is left
+ * is a crash, or a lost connection, between the commit record and the part's
+ * COMMIT: the part is then lost, which only a prepared part survives.
  *
  * READS are run at once, in a read-only transaction of their own, as the
  * session's current user, and see what is committed there: what this
@@ -111,7 +117,10 @@ typedef struct LoopbackConn
 	PGconn	   *conn;
 } LoopbackConn;
 
-/* This transaction's part in another database, prepared at pre-commit. */
+/*
+ * This transaction's part in another database, prepared at pre-commit -- or,
+ * where the server cannot prepare, left open there, its gid empty.
+ */
 typedef struct LoopbackPart
 {
 	LoopbackConn *lc;
@@ -394,8 +403,9 @@ GpLoopbackDefer(const char *dbname, const char *sql)
 
 /*
  * As this transaction commits: each database's statements, in one
- * transaction there, prepared or committed.  Raising here still rolls this
- * one back, and at ABORT what was prepared with it.
+ * transaction there, prepared, or left open where this server cannot
+ * prepare.  Raising here still rolls this one back, and at ABORT what was
+ * prepared or left open with it.
  */
 static void
 loopback_pre_commit(void)
@@ -434,15 +444,18 @@ loopback_pre_commit(void)
 				PQclear(loopback_exec(lc, w->sql, context));
 		}
 
-		if (two_phase)
 		{
 			char		gid[GP_DTX_GIDLEN];
 			LoopbackPart *part;
 			MemoryContext oldcxt;
 
-			GpDtxFormLoopbackGid(gxid, get_database_oid(db, false), gid);
-			PQclear(loopback_exec(lc, psprintf("PREPARE TRANSACTION '%s'", gid),
-								  context));
+			gid[0] = '\0';
+			if (two_phase)
+			{
+				GpDtxFormLoopbackGid(gxid, get_database_oid(db, false), gid);
+				PQclear(loopback_exec(lc, psprintf("PREPARE TRANSACTION '%s'", gid),
+									  context));
+			}
 			oldcxt = MemoryContextSwitchTo(TopMemoryContext);
 			part = palloc0(sizeof(LoopbackPart));
 			part->lc = lc;
@@ -450,20 +463,23 @@ loopback_pre_commit(void)
 			parts = lappend(parts, part);
 			MemoryContextSwitchTo(oldcxt);
 		}
-		else
-			PQclear(loopback_exec(lc, "COMMIT", context));
 	}
 
-	/* the commit record decides them, so it is on disk before they are told */
+	/*
+	 * The commit record decides a prepared part, and comes before an open
+	 * one's COMMIT: on disk before either is told, so that a crash never
+	 * finds the part committed and this transaction not.
+	 */
 	if (parts != NIL)
 		ForceSyncCommit();
 }
 
 /*
- * COMMIT or ROLLBACK PREPARED of one part, without raising: this runs after
- * the commit record, or as the transaction aborts, with interrupts held, so
- * it waits no longer than the dispatcher's second phase does.  A part the
- * recovery process finished first, or is finishing, is done.
+ * COMMIT or ROLLBACK PREPARED of one part, or COMMIT or ROLLBACK of one left
+ * open, without raising: this runs after the commit record, or as the
+ * transaction aborts, with interrupts held, so it waits no longer than the
+ * dispatcher's second phase does.  A prepared part the recovery process
+ * finished first, or is finishing, is done.
  */
 static bool
 loopback_finish(LoopbackPart *part, bool commit)
@@ -471,10 +487,14 @@ loopback_finish(LoopbackPart *part, bool commit)
 	PGconn	   *conn = part->lc->conn;
 	char		sql[GP_DTX_GIDLEN + 32];
 	TimestampTz deadline = GetCurrentTimestamp() + 30 * USECS_PER_SEC;
+	bool		prepared = part->gid[0] != '\0';
 	bool		ok = true;
 
-	snprintf(sql, sizeof(sql), "%s PREPARED '%s'",
-			 commit ? "COMMIT" : "ROLLBACK", part->gid);
+	if (prepared)
+		snprintf(sql, sizeof(sql), "%s PREPARED '%s'",
+				 commit ? "COMMIT" : "ROLLBACK", part->gid);
+	else
+		snprintf(sql, sizeof(sql), "%s", commit ? "COMMIT" : "ROLLBACK");
 	if (conn == NULL || PQstatus(conn) != CONNECTION_OK || !PQsendQuery(conn, sql))
 		return false;
 
@@ -493,7 +513,7 @@ loopback_finish(LoopbackPart *part, bool commit)
 				return ok;
 			state = PQresultErrorField(res, PG_DIAG_SQLSTATE);
 			if (PQresultStatus(res) != PGRES_COMMAND_OK &&
-				(state == NULL ||
+				(!prepared || state == NULL ||
 				 (strcmp(state, "42704") != 0 && strcmp(state, "55000") != 0)))
 			{
 				ok = false;
@@ -501,6 +521,10 @@ loopback_finish(LoopbackPart *part, bool commit)
 						(errmsg("%s in database \"%s\" failed: %s", sql,
 								part->lc->dbname, PQresultErrorMessage(res))));
 			}
+			/* an open part's COMMIT answers ROLLBACK when it had failed */
+			else if (!prepared && commit &&
+					 strcmp(PQcmdStatus(res), "ROLLBACK") == 0)
+				ok = false;
 			PQclear(res);
 		}
 		timeout = TimestampDifferenceMilliseconds(GetCurrentTimestamp(), deadline);
@@ -541,12 +565,27 @@ loopback_second_phase(bool commit)
 				libpqsrv_disconnect(part->lc->conn);
 				part->lc->conn = NULL;
 			}
-			ereport(WARNING,
-					(errmsg("the part of this transaction in database \"%s\" was not %s yet",
-							part->lc->dbname, commit ? "committed" : "rolled back"),
-					 errdetail("Distributed transaction recovery finishes \"%s\".",
-							   part->gid)));
-			GpDtxWakeRecovery();
+			if (part->gid[0] != '\0')
+			{
+				ereport(WARNING,
+						(errmsg("the part of this transaction in database \"%s\" was not %s yet",
+								part->lc->dbname, commit ? "committed" : "rolled back"),
+						 errdetail("Distributed transaction recovery finishes \"%s\".",
+								   part->gid)));
+				GpDtxWakeRecovery();
+			}
+
+			/*
+			 * An open part whose connection is gone is rolled back by its
+			 * backend's exit; one whose COMMIT went unanswered may be
+			 * either, and nothing will finish it.
+			 */
+			else if (commit)
+				ereport(WARNING,
+						(errmsg("the part of this transaction in database \"%s\" may not have been committed",
+								part->lc->dbname),
+						 errdetail("Its COMMIT was not answered, and what this transaction asked for there may not be written."),
+						 errhint("With \"max_prepared_transactions\" above zero such a part is prepared, and finished after a failure.")));
 		}
 	}
 	list_free_deep(parts);

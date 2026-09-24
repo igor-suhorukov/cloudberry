@@ -194,9 +194,11 @@ Distributed transactions (M3), in `gp_core`:
   injection points, among them O29's in PostgreSQL's commit.
 
 What M3 leaves open: a server that cannot prepare
-(`max_prepared_transactions` at zero, PostgreSQL's default) commits the
-loopback's part just before the transaction that asked for it, not with
-it.
+(`max_prepared_transactions` at zero, PostgreSQL's default) leaves the
+loopback's part open until the transaction that asked for it has
+committed, and commits it then, so that any failure before that rolls back
+both; a crash, or a lost connection, in between loses the part, which only
+a prepared part survives.
 
 The storage, resource and transport modules — `gp_ao`, `pax`, `gp_exttable`,
 `gp_resource`, `gp_tde`, `interconnect`, `udp2` — are still stubs: M5 and M6
