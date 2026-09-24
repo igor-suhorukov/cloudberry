@@ -152,7 +152,8 @@ Distributed transactions (M3), in `gp_core`:
 - **the global deadlock detector** (`gp.enable_global_deadlock_detector`):
   without it an UPDATE or DELETE of a distributed table locks the table,
   and a write of a partitioned table its partitions, as Cloudberry's does
-  -- the parser opening the table in that lock, through O30;
+  -- the parser opening the table in that lock, or the rewriter under a
+  view, through O30, so that no lock taken after it is an upgrade;
   with it rows are locked, and a process on the coordinator gathers every
   node's waits, reduces the graph with Cloudberry's own detector
   (`src/backend/utils/gdd/gdddetector.c`, compiled where it lies) and
@@ -167,7 +168,9 @@ Distributed transactions (M3), in `gp_core`:
   the plan on one node, on the segments below the Gather on a cluster with
   the deadlock detector on, for the one-table query Cloudberry's planner
   locks rows for — and otherwise, on a cluster, the table is locked, as
-  Cloudberry locks it;
+  Cloudberry locks it; with the detector on, which of the two is decided as
+  the query is planned, the parser holding AccessShareLock until then, as
+  Cloudberry's does;
 - **the loopback to the maintenance database**: what Cloudberry keeps in a
   shared catalog and cannot be a label — task jobs, storage servers — lives
   in one database, and any other writes it there through a connection of its
@@ -177,14 +180,11 @@ Distributed transactions (M3), in `gp_core`:
   at the port's own places under Cloudberry's names, and at PostgreSQL 19's
   injection points, among them O29's in PostgreSQL's commit.
 
-What M3 leaves open: two table locks are still taken after a weaker one,
-an upgrade two sessions can deadlock on -- a write through an updatable
-view, without the deadlock detector, and with it a locking clause over a
-join or on a replicated table; on one node, the loopback commits just
-before the transaction that asked for it, not with it; the coordinator
-counts none of a distributed table's pages all-visible, so ORCA does not
-choose an index-only scan Cloudberry's would; a role that owns a tag can be
-dropped; and a task's history is read in the task database only.
+What M3 leaves open: on one node, the loopback commits just before the
+transaction that asked for it, not with it; the coordinator counts none of
+a distributed table's pages all-visible, so ORCA does not choose an
+index-only scan Cloudberry's would; a role that owns a tag can be dropped;
+and a task's history is read in the task database only.
 
 The storage, resource and transport modules — `gp_ao`, `pax`, `gp_exttable`,
 `gp_resource`, `gp_tde`, `interconnect`, `udp2` — are still stubs: M5 and M6
