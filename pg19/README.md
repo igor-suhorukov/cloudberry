@@ -200,6 +200,20 @@ committed, and commits it then, so that any failure before that rolls back
 both; a crash, or a lost connection, in between loses the part, which only
 a prepared part survives.
 
+M4 has begun: a segment may have a mirror, a hot standby streaming from its
+primary as `gp_walreceiver`, and FTS, a process of `gp_core`'s on the
+coordinator (`gp_fts.c`), brings each pair in sync, marks a mirror that
+stops down and lets its primary's commits go on without it, and fails over
+from a primary that stops to its mirror.  What it finds is the role, mode
+and status `gp_segment_configuration` shows, kept in `gpsegconfig_dump` in
+the coordinator's data directory, and the dispatcher follows it, ending a
+transaction a failover catches as Cloudberry's does.  A segment's commit
+waits for its mirror whatever cancels it (R3).  A directory table's files
+are WAL-logged, through `gp_sql`'s own resource manager, `gp_dirtable`
+(ID 198), so that a mirror has them; a server that replays them has to
+preload `gp_sql`.  Left open so far: a segment's map of its distributed
+transactions across a promotion, which asks a decision (`cloudberry.md`).
+
 The storage, resource and transport modules — `gp_ao`, `pax`, `gp_exttable`,
 `gp_resource`, `gp_tde`, `interconnect`, `udp2` — are still stubs: M5 and M6
 fill the first five, and the streaming transport lives in `gp_core` for now.
