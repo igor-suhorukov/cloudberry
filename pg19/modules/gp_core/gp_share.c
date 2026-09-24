@@ -150,6 +150,7 @@ static List *writer_snapshots = NIL;	/* registered until the end */
 
 /* The reader's side: the writer's slot, while this transaction reads. */
 static GpShareSlot *reader_slot = NULL;
+static int	reader_writer_pid = 0;
 static uint64 reader_xact = 0;
 static CommandId *reader_combos = NULL; /* cmin, cmax pairs copied so far */
 static int	reader_ncombos = 0;
@@ -399,6 +400,12 @@ GpShareIsReader(void)
 	return reader_slot != NULL;
 }
 
+int
+GpShareWriterPid(void)
+{
+	return reader_slot != NULL ? reader_writer_pid : 0;
+}
+
 /*
  * Read as a part of the writer's transaction: "<writer pid>/<key>", given
  * as this transaction's gp.shared_snapshot before anything else.
@@ -538,6 +545,7 @@ share_attach_reader(const char *value)
 	RestoreTransactionSnapshot(snapshot, proc);
 
 	reader_slot = slot;
+	reader_writer_pid = (int) pid;
 	reader_xact = xact;
 	reader_combos = NULL;
 	reader_ncombos = 0;

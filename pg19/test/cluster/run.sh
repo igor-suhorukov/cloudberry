@@ -1486,12 +1486,32 @@ COMMIT;"
 		&& ok "a cursor's slices wait for its next FETCH while another statement streams" \
 		|| notok "a cursor and another statement, streaming" "$out / $want"
 
-	# A temporary table is read only by its session's own backend.
+	# A temporary table is read only by its session's own backend, the
+	# writer: the slice that scans one is relayed through it first, and the
+	# others stream, on readers -- this session's, which are its writer's
+	# lock group on each segment.
+	readers="SELECT sum(result::int) FROM gp.exec_on_segments('SELECT count(*) FROM pg_stat_activity WHERE leader_pid = pg_backend_pid()');"
 	out=$(printf '%s\n' "CREATE TEMP TABLE tmpo (x int, y int) DISTRIBUTED BY (x);" \
-		"INSERT INTO tmpo SELECT i, i % 7 FROM generate_series(1, 70) i;" \
-		"SELECT count(*) FROM o JOIN tmpo ON o.b = tmpo.y;" | qf 0)
-	[ "$out" = "7000" ] && ok "a temporary table: its Motions are relayed" \
+		"INSERT INTO tmpo SELECT i, i % 7 FROM generate_series(1, 70) i;" "ANALYZE tmpo;" \
+		"SELECT count(*) FROM o JOIN tmpo ON o.b = tmpo.y;" "$readers" | qf 0)
+	[ "$out" = "7000
+2" ] && ok "a temporary table: the slice that scans it relayed through the writer, the other streamed" \
 		|| notok "a temporary table and streaming" "$out"
+
+	# The coordinator's own slice -- a LIMIT over a Gather, broadcast back --
+	# feeding a slice that a reader runs: the writer keeps the rows it is
+	# sent in files the reader opens (gp_motion_put_shared()).
+	sql="SELECT count(*), sum(p2.x) FROM (SELECT o.b FROM o WHERE EXISTS (SELECT 1 FROM po WHERE po.x = 3)) s JOIN po p2 ON s.b = p2.y;"
+	plan=$(q 0 "EXPLAIN (COSTS OFF) $sql")
+	out=$(printf '%s\n' "$sql" "$readers" | qf 0)
+	want=$(q 0 "SET gp.interconnect_type = relay; $sql")
+	case "$plan" in
+		*"Redistribute Motion 2:2"*"Broadcast Motion 1:2"*"Gather Motion 2:1"*)
+			[ "$out" = "$want
+4" ] && ok "the coordinator's slice feeding a reader's: its rows read from the files the writer keeps for it" \
+				|| notok "the coordinator's slice and a reader" "$out / $want" ;;
+		*) notok "the coordinator's slice below a reader's: the plan" "$plan" ;;
+	esac
 
 	# ORCA's writes, carried out where the rows are.
 	placed() {					# placed <table>: rows on the wrong segment

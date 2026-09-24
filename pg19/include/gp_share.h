@@ -56,6 +56,9 @@ extern void GpSharePublish(const char *key, Snapshot snapshot);
 /* Is this backend's transaction a reader's of another backend's? */
 extern bool GpShareIsReader(void);
 
+/* A reader's writer: its process ID, or 0 in a backend that is no reader. */
+extern int	GpShareWriterPid(void);
+
 /* The setting, the hooks and the callbacks; from gp_core's _PG_init. */
 extern void GpShareInit(void);
 

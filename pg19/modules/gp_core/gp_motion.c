@@ -108,6 +108,7 @@
 #include "pgstat.h"
 #include "port/pg_bswap.h"
 #include "storage/buffile.h"
+#include "storage/fileset.h"
 #include "parser/parse_func.h"
 #include "parser/parsetree.h"
 #include "storage/lmgr.h"
@@ -206,8 +207,12 @@ typedef struct StreamSlice
 	const char **addresses;		/* and where that reader receives */
 } StreamSlice;
 
-/* The SQL a batch of a Motion's rows travels to its receiving segment in. */
+/*
+ * The SQL a batch of a Motion's rows travels to its receiving segment in: to
+ * the writer's own files, or to files its reader opens (motion_put_shared).
+ */
 #define MOTION_PUT_SQL	"SELECT gp_internal.motion_put($1, $2, $3)"
+#define MOTION_PUT_SHARED_SQL	"SELECT gp_internal.motion_put_shared($1, $2, $3)"
 
 /* How much of a segment's rows the coordinator holds before sending them. */
 #define MOTION_BATCH_BYTES	(256 * 1024)
@@ -258,6 +263,8 @@ typedef struct MotionState
 	int			nreceivers;
 	char	  **receivers;
 	char	   *token;
+
+	bool		file_own;		/* a reader's, of its writer's files: closed here */
 
 	/* On a segment, a Motion that receives a streaming slice. */
 	bool		streamed;
@@ -644,6 +651,14 @@ typedef struct MotionFile
 static List *motion_files = NIL;	/* in TopTransactionContext */
 static bool motion_xact_callback_registered = false;
 
+/*
+ * The statements whose rows a reader of this writer's transaction receives,
+ * by their keys: files of a FileSet the reader finds by the writer's process
+ * ID and the key (motion_fileset()), removed with the statement's rows, or
+ * as the transaction ends.  In TopMemoryContext.
+ */
+static List *motion_filesets = NIL;
+
 static MotionFile *
 motion_file_find(const char *key, int slice)
 {
@@ -680,6 +695,44 @@ motion_files_close(const char *key)
 	}
 }
 
+/*
+ * The FileSet of a statement's rows that a reader of "writer_pid" receives:
+ * numbered by the key's counter above any number FileSetInit() gives, in the
+ * database's default tablespace, so that writer and reader name it alike.
+ */
+static void
+motion_fileset(FileSet *fileset, int writer_pid, const char *key)
+{
+	const char *counter = strrchr(key, '_');
+
+	memset(fileset, 0, sizeof(FileSet));
+	fileset->creator_pid = writer_pid;
+	fileset->number = 0x80000000U |
+		(uint32) (counter != NULL ? strtoul(counter + 1, NULL, 10) : 0);
+	fileset->ntablespaces = 1;
+	fileset->tablespaces[0] = MyDatabaseTableSpace;
+}
+
+/* A statement's files for readers, or all of them (NULL), removed. */
+static void
+motion_filesets_delete(const char *key)
+{
+	ListCell   *lc;
+
+	foreach(lc, motion_filesets)
+	{
+		char	   *k = (char *) lfirst(lc);
+		FileSet		fileset;
+
+		if (key != NULL && strcmp(k, key) != 0)
+			continue;
+		motion_fileset(&fileset, MyProcPid, k);
+		FileSetDeleteAll(&fileset);
+		motion_filesets = foreach_delete_current(motion_filesets, lc);
+		pfree(k);
+	}
+}
+
 static void
 motion_xact_callback(XactEvent event, void *arg)
 {
@@ -698,6 +751,7 @@ motion_xact_callback(XactEvent event, void *arg)
 		case XACT_EVENT_PREPARE:
 			/* an abort's resource owner closes the files */
 			motion_files = NIL;
+			motion_filesets_delete(NULL);
 			break;
 	}
 }
@@ -767,6 +821,61 @@ gp_motion_put(PG_FUNCTION_ARGS)
 	PG_RETURN_VOID();
 }
 
+PG_FUNCTION_INFO_V1(gp_motion_put_shared);
+
+/*
+ * gp_internal.motion_put_shared(key, slice, rows)
+ *
+ * A batch of a Motion's rows, relayed by the coordinator to this segment for
+ * a reader of its transaction, which cannot open the writer's own temporary
+ * files: added to a file of the statement's FileSet, closed again so that it
+ * is whole on disk when the reader opens it.  Only from the coordinator.
+ */
+Datum
+gp_motion_put_shared(PG_FUNCTION_ARGS)
+{
+	char	   *key = text_to_cstring(PG_GETARG_TEXT_PP(0));
+	int			slice = PG_GETARG_INT32(1);
+	bytea	   *rows = PG_GETARG_BYTEA_PP(2);
+	FileSet		fileset;
+	char		name[32];
+	BufFile    *file;
+
+	if (!GpClusterDispatchTrusted())
+		ereport(ERROR,
+				(errcode(ERRCODE_INSUFFICIENT_PRIVILEGE),
+				 errmsg("a Motion's rows are taken only from the coordinator"),
+				 errdetail("The connection does not carry this cluster's secret.")));
+
+	motion_fileset(&fileset, MyProcPid, key);
+	snprintf(name, sizeof(name), "slice%d", slice);
+	file = BufFileOpenFileSet(&fileset, name, O_RDWR, true);
+	if (file == NULL)
+	{
+		bool		known = false;
+
+		foreach_ptr(char, k, motion_filesets)
+			if (strcmp(k, key) == 0)
+				known = true;
+		if (!known)
+		{
+			MemoryContext oldcxt = MemoryContextSwitchTo(TopMemoryContext);
+
+			motion_filesets = lappend(motion_filesets, pstrdup(key));
+			MemoryContextSwitchTo(oldcxt);
+		}
+		file = BufFileCreateFileSet(&fileset, name);
+	}
+	else if (BufFileSeek(file, 0, 0, SEEK_END) != 0)
+		ereport(ERROR,
+				(errcode_for_file_access(),
+				 errmsg("could not seek to the end of a Motion's rows: %m")));
+	BufFileWrite(file, VARDATA_ANY(rows), VARSIZE_ANY_EXHDR(rows));
+	BufFileClose(file);
+
+	PG_RETURN_VOID();
+}
+
 PG_FUNCTION_INFO_V1(gp_motion_drop);
 
 /*
@@ -785,6 +894,7 @@ gp_motion_drop(PG_FUNCTION_ARGS)
 				(errcode(ERRCODE_INSUFFICIENT_PRIVILEGE),
 				 errmsg("a Motion's rows are dropped only for the coordinator")));
 	motion_files_close(key);
+	motion_filesets_delete(key);
 	PG_RETURN_VOID();
 }
 
@@ -815,9 +925,24 @@ motion_recv_next(MotionState *state)
 	if (state->file == NULL)
 	{
 		mf = motion_file_find(state->key, state->slice);
-		if (mf == NULL)
+		if (mf != NULL)
+			state->file = mf->file;
+		else if (GpShareIsReader())
+		{
+			/* a reader's: the files its writer keeps them in for it */
+			FileSet    *fileset;
+			char		name[32];
+
+			oldcxt = MemoryContextSwitchTo(state->css.ss.ps.state->es_query_cxt);
+			fileset = palloc(sizeof(FileSet));
+			motion_fileset(fileset, GpShareWriterPid(), state->key);
+			snprintf(name, sizeof(name), "slice%d", state->slice);
+			state->file = BufFileOpenFileSet(fileset, name, O_RDONLY, true);
+			MemoryContextSwitchTo(oldcxt);
+			state->file_own = state->file != NULL;
+		}
+		if (state->file == NULL)
 			return ExecClearTuple(slot);	/* nothing was sent here */
-		state->file = mf->file;
 		state->fileno = 0;
 		state->offset = 0;
 	}
@@ -1800,7 +1925,8 @@ append_row_raw(StringInfo buf, int natts, const char **values,
 }
 
 static void
-motion_flush(const char *key, int slice, int content, StringInfo buf)
+motion_flush(const char *key, int slice, int content, StringInfo buf,
+			 bool shared)
 {
 	const char *values[3];
 	int			lengths[3];
@@ -1815,10 +1941,13 @@ motion_flush(const char *key, int slice, int content, StringInfo buf)
 	values[2] = buf->data;
 	lengths[0] = lengths[1] = 0;
 	lengths[2] = buf->len;
-	GpDispatchParamsOnContent(content, MOTION_PUT_SQL, 3, values, lengths,
-							  formats);
+	GpDispatchParamsOnContent(content,
+							  shared ? MOTION_PUT_SHARED_SQL : MOTION_PUT_SQL,
+							  3, values, lengths, formats);
 	resetStringInfo(buf);
 }
+
+static StreamSlice *stream_slice_find(MotionState *state, int slice);
 
 /*
  * Carry out a Motion between segments: run the slice that sends, and relay
@@ -1852,6 +1981,12 @@ motion_relay(MotionState *gather, CustomScan *motion)
 	int		   *lengths = palloc_array(int, natts);
 	StringInfoData row;
 	int			i;
+
+	/* a reader, not the writer, receives the rows of one below a slice that streams */
+	int			parent = GpMotionParent((Plan *) motion);
+	bool		shared = gather->streaming &&
+		parent != GpMotionSlice(gather->css.ss.ps.plan) &&
+		stream_slice_find(gather, parent) != NULL;
 
 	for (i = 0; i < nsegs; i++)
 		initStringInfo(&bufs[i]);
@@ -1961,7 +2096,7 @@ motion_relay(MotionState *gather, CustomScan *motion)
 
 			for (i = 0; i < nsegs; i++)
 				if (bufs[i].len >= MOTION_BATCH_BYTES)
-					motion_flush(gather->key, slice, i, &bufs[i]);
+					motion_flush(gather->key, slice, i, &bufs[i], shared);
 		}
 		ExecEndNode(ps);
 	}
@@ -2025,13 +2160,13 @@ motion_relay(MotionState *gather, CustomScan *motion)
 
 			for (i = 0; i < nsegs; i++)
 				if (bufs[i].len >= MOTION_BATCH_BYTES)
-					motion_flush(gather->key, slice, i, &bufs[i]);
+					motion_flush(gather->key, slice, i, &bufs[i], shared);
 		}
 		GpGatherEnd(g);
 	}
 
 	for (i = 0; i < nsegs; i++)
-		motion_flush(gather->key, slice, i, &bufs[i]);
+		motion_flush(gather->key, slice, i, &bufs[i], shared);
 
 	ExecDropSingleTupleTableSlot(keyslot);
 	FreeExprContext(econtext, true);
@@ -2058,17 +2193,114 @@ state_includes(MotionState *state, int segment)
 	return content_includes(state->content, segment);
 }
 
+/* A slice a subplan's top part runs in: the one that calls it, which its plan does not say. */
+#define SLICE_OF_CALLER		INT_MIN
+
+/*
+ * The slices of "plan", run by slice "slice", that scan a temporary table,
+ * which only its session's own backend -- the writer -- can read: added to
+ * *slices, but for "top", the writer's own.  A scan of one in a subplan's top
+ * part, which runs in whichever slice calls it, sets *unknown.
+ */
+static void
+temp_scan_slices(Plan *plan, int slice, int top, List *rtable, List **slices,
+				 bool *unknown)
+{
+	ListCell   *lc;
+
+	if (plan == NULL)
+		return;
+	if (GpMotionIs(plan))
+	{
+		temp_scan_slices(outerPlan(plan), GpMotionSlice(plan), top, rtable,
+						 slices, unknown);
+		return;
+	}
+
+	switch (nodeTag(plan))
+	{
+		case T_SeqScan:
+		case T_SampleScan:
+		case T_IndexScan:
+		case T_IndexOnlyScan:
+		case T_BitmapIndexScan:
+		case T_BitmapHeapScan:
+		case T_TidScan:
+		case T_TidRangeScan:
+		case T_CustomScan:
+			{
+				Index		scanrelid = ((Scan *) plan)->scanrelid;
+				RangeTblEntry *rte;
+
+				if (scanrelid == 0)
+					break;
+				rte = rt_fetch(scanrelid, rtable);
+				if (rte->rtekind != RTE_RELATION ||
+					get_rel_persistence(rte->relid) != RELPERSISTENCE_TEMP)
+					break;
+				if (slice == SLICE_OF_CALLER)
+					*unknown = true;
+				else if (slice != top)
+					*slices = list_append_unique_int(*slices, slice);
+				break;
+			}
+		default:
+			break;
+	}
+
+	temp_scan_slices(plan->lefttree, slice, top, rtable, slices, unknown);
+	temp_scan_slices(plan->righttree, slice, top, rtable, slices, unknown);
+	switch (nodeTag(plan))
+	{
+		case T_Append:
+			foreach(lc, ((Append *) plan)->appendplans)
+				temp_scan_slices(lfirst(lc), slice, top, rtable, slices, unknown);
+			break;
+		case T_MergeAppend:
+			foreach(lc, ((MergeAppend *) plan)->mergeplans)
+				temp_scan_slices(lfirst(lc), slice, top, rtable, slices, unknown);
+			break;
+		case T_BitmapAnd:
+			foreach(lc, ((BitmapAnd *) plan)->bitmapplans)
+				temp_scan_slices(lfirst(lc), slice, top, rtable, slices, unknown);
+			break;
+		case T_BitmapOr:
+			foreach(lc, ((BitmapOr *) plan)->bitmapplans)
+				temp_scan_slices(lfirst(lc), slice, top, rtable, slices, unknown);
+			break;
+		case T_SubqueryScan:
+			temp_scan_slices(((SubqueryScan *) plan)->subplan, slice, top,
+							 rtable, slices, unknown);
+			break;
+		case T_CustomScan:
+			foreach(lc, ((CustomScan *) plan)->custom_plans)
+				temp_scan_slices(lfirst(lc), slice, top, rtable, slices, unknown);
+			break;
+		default:
+			break;
+	}
+}
+
 /*
  * Can the Motions below this Gather stream -- every slice running at once,
  * a reader on each segment for each slice the writer does not run?  When
  * they can, the slices that stream, with the one each sends to.
  *
- * The relay stays for what streaming cannot do yet: a slice the coordinator
- * sends to one the writer does not run, whose rows only the writer's files
- * can take; a temporary table, which only its session's own backend -- the
- * writer -- can read; a reader on a segment whose writer runs nothing and so
- * publishes no snapshot, which direct dispatch makes; a slice whose receiver
- * the translator did not say.
+ * Some slices are relayed first, as the relay carries every slice, and the
+ * rest stream: the coordinator's own, which runs here; one that scans a
+ * temporary table, which only the writer can read, and so runs there; and
+ * every slice below one of them, whose rows it reads from files.  A reader
+ * that receives a relayed slice reads the files its writer keeps for it
+ * (gp_motion_put_shared()).
+ *
+ * The relay stays for all of it where a temporary table is scanned in a
+ * subplan's part that runs in whichever slice calls it; where the translator
+ * did not say which slice receives one; and where a slice would run on a
+ * reader of a segment whose writer runs none of the Gather's fragment, and
+ * so publishes no snapshot for it.  Direct dispatch would make that last
+ * plan, and makes none: ORCA's translator sends a plan to some segments only
+ * when every Motion in it is a Gather, as Cloudberry sends only a plan of
+ * one slice, and the planner's Motions here are Gathers.
  */
 static bool
 stream_plan(MotionState *state, List *order, List *motions)
@@ -2077,19 +2309,51 @@ stream_plan(MotionState *state, List *order, List *motions)
 	int			top = GpMotionSlice(state->css.ss.ps.plan);
 	int			nsegs = GpClusterSegmentCount();
 	List	   *slices = NIL;
+	List	   *relayed = NIL;
+	bool		unknown = false;
+	bool		more;
 	ListCell   *lc;
 
 	if (gp_interconnect_type == GP_INTERCONNECT_RELAY)
 		return false;
 
-	foreach(lc, estate->es_range_table)
-	{
-		RangeTblEntry *rte = lfirst_node(RangeTblEntry, lc);
+	temp_scan_slices(outerPlan(state->css.ss.ps.plan), top, top,
+					 estate->es_range_table, &relayed, &unknown);
+	foreach(lc, estate->es_plannedstmt->subplans)
+		temp_scan_slices((Plan *) lfirst(lc), SLICE_OF_CALLER, top,
+						 estate->es_range_table, &relayed, &unknown);
+	if (unknown)
+		return false;
 
-		if (rte->rtekind == RTE_RELATION &&
-			get_rel_persistence(rte->relid) == RELPERSISTENCE_TEMP)
+	foreach(lc, order)
+	{
+		int			slice = lfirst_int(lc);
+		CustomScan *motion = NULL;
+
+		foreach_ptr(Plan, m, motions)
+			if (GpMotionSlice(m) == slice)
+				motion = (CustomScan *) m;
+		if (motion == NULL ||
+			GpMotionParent((Plan *) motion) == MOTION_PARENT_UNKNOWN)
 			return false;
+		if (GpMotionSegment((Plan *) motion) == GP_MOTION_FROM_COORDINATOR)
+			relayed = list_append_unique_int(relayed, slice);
 	}
+
+	/* a slice below a relayed one is relayed before it */
+	do
+	{
+		more = false;
+		foreach_ptr(Plan, m, motions)
+		{
+			if (list_member_int(relayed, GpMotionParent(m)) &&
+				!list_member_int(relayed, GpMotionSlice(m)))
+			{
+				relayed = lappend_int(relayed, GpMotionSlice(m));
+				more = true;
+			}
+		}
+	} while (more);
 
 	foreach(lc, order)
 	{
@@ -2097,28 +2361,18 @@ stream_plan(MotionState *state, List *order, List *motions)
 		CustomScan *motion = NULL;
 		StreamSlice *ss;
 		int			content;
-		int			parent;
 
+		if (list_member_int(relayed, slice))
+			continue;
 		foreach_ptr(Plan, m, motions)
 			if (GpMotionSlice(m) == slice)
 				motion = (CustomScan *) m;
-		if (motion == NULL)
-			return false;
 		content = GpMotionSegment((Plan *) motion);
-		parent = GpMotionParent((Plan *) motion);
-		if (parent == MOTION_PARENT_UNKNOWN)
-			return false;
-		if (content == GP_MOTION_FROM_COORDINATOR)
-		{
-			if (parent != top)
-				return false;
-			continue;
-		}
 
 		ss = palloc0(sizeof(StreamSlice));
 		ss->motion = motion;
 		ss->slice = slice;
-		ss->parent = parent;
+		ss->parent = GpMotionParent((Plan *) motion);
 		ss->contents = palloc_array(int, nsegs);
 		for (int seg = 0; seg < nsegs; seg++)
 		{
@@ -2147,6 +2401,16 @@ stream_plan(MotionState *state, List *order, List *motions)
 
 	state->stream_slices = slices;
 	return slices != NIL;
+}
+
+/* The slice that streams, of this Gather's, by its number; NULL if relayed. */
+static StreamSlice *
+stream_slice_find(MotionState *state, int slice)
+{
+	foreach_ptr(StreamSlice, ss, state->stream_slices)
+		if (ss->slice == slice)
+			return ss;
+	return NULL;
 }
 
 /*
@@ -2320,9 +2584,8 @@ motion_prepare(MotionState *state)
 		if (motion == NULL)
 			elog(ERROR, "no Motion sends slice %d", slice);
 
-		/* A streaming slice runs with the Gather's; the coordinator's, first. */
-		if (state->streaming &&
-			GpMotionSegment((Plan *) motion) != GP_MOTION_FROM_COORDINATOR)
+		/* A streaming slice runs with the Gather's; the ones relayed, first. */
+		if (state->streaming && stream_slice_find(state, slice) != NULL)
 			continue;
 		motion_relay(state, motion);
 	}
@@ -2603,6 +2866,10 @@ motion_end(CustomScanState *node)
 
 	motion_finish(state);
 	motion_end_stream(state);
+	if (state->file_own)
+		BufFileClose(state->file);
+	state->file = NULL;
+	state->file_own = false;
 	if (state->spool != NULL)
 	{
 		tuplestore_end(state->spool);

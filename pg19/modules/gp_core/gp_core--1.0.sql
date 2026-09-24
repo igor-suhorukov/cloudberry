@@ -57,6 +57,17 @@ AS 'MODULE_PATHNAME', 'gp_motion_drop'
 LANGUAGE C STRICT;
 
 /*
+ * A batch of a Motion's rows, relayed to a segment whose reader, rather than
+ * its writer, receives them: kept in files the reader can open.  Only from a
+ * connection that carries the cluster secret.
+ */
+CREATE FUNCTION gp_internal.motion_put_shared(motion_key text, slice int,
+											  rows bytea)
+RETURNS void
+AS 'MODULE_PATHNAME', 'gp_motion_put_shared'
+LANGUAGE C STRICT;
+
+/*
  * Where a segment process receives the rows of a Motion whose slices run at
  * once (gp.interconnect_type = tcp or udpifc), opening its listener and its
  * datagram socket on first use.  Only from a connection that carries the
