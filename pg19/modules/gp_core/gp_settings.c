@@ -44,11 +44,11 @@
  *
  * And those it accepts and has nothing to apply to yet, each for a reason
  * that says when it will: the planner's own MPP plans (Route B, decided at
- * M7), memory accounting (M6), the UDP interconnect, intra-segment
- * parallelism (after M7, decision 2) -- or that it will not: the executor's
- * prefetch of a join's quals, which PostgreSQL's joins do not do.  They are
- * defined so that a script written for Cloudberry runs; their descriptions
- * say what they do here, which is nothing until then.
+ * M7), memory accounting (M6), intra-segment parallelism (after M7,
+ * decision 2) -- or that it will not: the executor's prefetch of a join's
+ * quals, which PostgreSQL's joins do not do.  They are defined so that a
+ * script written for Cloudberry runs; their descriptions say what they do
+ * here, which is nothing until then.
  *
  *-------------------------------------------------------------------------
  */
@@ -119,7 +119,6 @@ static bool gp_autostats_allow_nonowner = false;
 
 static int	statement_mem = 128000;
 static bool enable_parallel = false;
-static int	gp_interconnect_queue_depth = 4;
 static int	gp_vmem_idle_resource_timeout = 18000;
 static int	gp_segments_for_planner = 0;
 static bool gp_workfile_compression = false;
@@ -551,12 +550,6 @@ GpSettingsInit(void)
 							 &enable_parallel,
 							 false, PGC_USERSET, GUC_EXPLAIN,
 							 NULL, NULL, NULL);
-	DefineCustomIntVariable("gp.interconnect_queue_depth",
-							"Sets the maximum size of the receive queue for each connection in the UDP interconnect",
-							"Accepted for Cloudberry's scripts: the interconnect here is TCP, which Cloudberry's own TCP interconnect also ignores this for.",
-							&gp_interconnect_queue_depth,
-							4, 1, 4096, PGC_USERSET, 0,
-							NULL, NULL, NULL);
 	DefineCustomIntVariable("gp.vmem_idle_resource_timeout",
 							"Sets the time a session can be idle (in milliseconds) before we release gangs on the segment DBs to free resources.",
 							"Accepted for Cloudberry's scripts: a session keeps its segment connections until it ends.",

@@ -158,15 +158,18 @@
 
 /*
  * How a Motion between segments is carried out: its slices all at once,
- * each sender streaming to its receivers (tcp), or a slice at a time, the
- * rows relayed through the coordinator (relay).
+ * each sender streaming to its receivers over TCP (tcp) or in UDP packets,
+ * acknowledged, as Cloudberry's udpifc sends them (udpifc) -- see gp_ic.c --
+ * or a slice at a time, the rows relayed through the coordinator (relay).
  */
 #define GP_INTERCONNECT_RELAY	0
 #define GP_INTERCONNECT_TCP		1
+#define GP_INTERCONNECT_UDPIFC	2
 
 static const struct config_enum_entry interconnect_type_options[] = {
 	{"relay", GP_INTERCONNECT_RELAY, false},
 	{"tcp", GP_INTERCONNECT_TCP, false},
+	{"udpifc", GP_INTERCONNECT_UDPIFC, false},
 	{NULL, 0, false}
 };
 
@@ -258,6 +261,7 @@ typedef struct MotionState
 
 	/* On a segment, a Motion that receives a streaming slice. */
 	bool		streamed;
+	bool		stream_here;	/* and this process is one of its receivers */
 	bool		recv_tuples;	/* rows as tuples (motion_tuples()) */
 	int			nsenders;
 	GpIcReceiver *icrecv;
@@ -923,6 +927,29 @@ stream_token(PlannedStmt *stmt)
 	return strVal(linitial((List *) fragment_mark(stmt, GP_STREAM_MARK)));
 }
 
+/* Do its slices stream in UDP packets (udpifc)? */
+static bool
+stream_udp(PlannedStmt *stmt)
+{
+	return boolVal(lthird((List *) fragment_mark(stmt, GP_STREAM_MARK)));
+}
+
+/*
+ * Is this process one of a streaming slice's receivers?  A fragment carries
+ * every subplan of the statement, the ones below other slices' Motions too,
+ * whose Motions this process never reads.
+ */
+static bool
+stream_receives(PlannedStmt *stmt, List *entry)
+{
+	const char *self = GpIcAddressOf(GpIcAddress(), stream_udp(stmt));
+
+	foreach_node(String, address, (List *) lfourth(entry))
+		if (strcmp(strVal(address), self) == 0)
+			return true;
+	return false;
+}
+
 /*
  * The Motion at the top of a reader's fragment: it pulls the rows of the
  * slice below it, and sends each where the Motion sends it -- the segment
@@ -1288,7 +1315,8 @@ motion_stream_next(MotionState *state)
 
 	if (state->icrecv == NULL)
 		state->icrecv = GpIcRecvBegin(state->token, state->slice,
-									  state->nsenders);
+									  state->nsenders,
+									  stream_udp(state->css.ss.ps.state->es_plannedstmt));
 	if (GpIcRecv(state->icrecv, &data, &len))
 	{
 		TupleTableSlot *row = motion_decode_row(state, data, len);
@@ -1300,6 +1328,36 @@ motion_stream_next(MotionState *state)
 	state->icrecv = NULL;
 	state->stream_done = true;
 	return ExecClearTuple(slot);
+}
+
+/*
+ * A streaming slice's senders stop sending here -- the ones of a Motion never
+ * read too, whose rows would wait for it, if they send them here.
+ */
+static void
+motion_end_stream(MotionState *state)
+{
+	if (state->streamed && state->stream_here && state->icrecv == NULL &&
+		!state->stream_done)
+		state->icrecv = GpIcRecvBegin(state->token, state->slice,
+									  state->nsenders,
+									  stream_udp(state->css.ss.ps.state->es_plannedstmt));
+	if (state->icrecv != NULL)
+		GpIcRecvEnd(state->icrecv);
+	state->icrecv = NULL;
+	state->stream_done = true;
+}
+
+/* Every streaming slice a plan receives, ended. */
+static bool
+motion_end_streams(PlanState *planstate, void *context)
+{
+	if (planstate == NULL)
+		return false;
+	if (IsA(planstate, CustomScanState) &&
+		((CustomScanState *) planstate)->methods == &motion_exec_methods)
+		motion_end_stream((MotionState *) planstate);
+	return planstate_tree_walker(planstate, motion_end_streams, context);
 }
 
 /*
@@ -1384,6 +1442,7 @@ motion_begin(CustomScanState *node, EState *estate, int eflags)
 		if (entry != NULL)
 		{
 			state->streamed = true;
+			state->stream_here = stream_receives(estate->es_plannedstmt, entry);
 			state->token = stream_token(estate->es_plannedstmt);
 			state->nsenders = intVal(lsecond(entry));
 			state->spool = tuplestore_begin_heap(false, false, work_mem);
@@ -2020,7 +2079,7 @@ stream_plan(MotionState *state, List *order, List *motions)
 	List	   *slices = NIL;
 	ListCell   *lc;
 
-	if (gp_interconnect_type != GP_INTERCONNECT_TCP)
+	if (gp_interconnect_type == GP_INTERCONNECT_RELAY)
 		return false;
 
 	foreach(lc, estate->es_range_table)
@@ -2144,7 +2203,8 @@ stream_start(MotionState *state)
 					continue;
 				contents = lappend(contents, makeInteger(seg));
 				addresses = lappend(addresses,
-									makeString(pstrdup(writer_address[seg])));
+									makeString(pstrdup(GpIcAddressOf(writer_address[seg],
+																	 gp_interconnect_type == GP_INTERCONNECT_UDPIFC))));
 			}
 		}
 		else
@@ -2157,7 +2217,8 @@ stream_start(MotionState *state)
 				{
 					contents = lappend(contents, makeInteger(p->contents[i]));
 					addresses = lappend(addresses,
-										makeString(pstrdup(p->addresses[i])));
+										makeString(pstrdup(GpIcAddressOf(p->addresses[i],
+																		 gp_interconnect_type == GP_INTERCONNECT_UDPIFC))));
 				}
 			}
 		}
@@ -2167,8 +2228,10 @@ stream_start(MotionState *state)
 									 contents, addresses));
 	}
 	streammark = makeDefElem(pstrdup(GP_STREAM_MARK),
-							 (Node *) list_make2(makeString(pstrdup(token)),
-												 entries), -1);
+							 (Node *) list_make3(makeString(pstrdup(token)),
+												 entries,
+												 makeBoolean(gp_interconnect_type == GP_INTERCONNECT_UDPIFC)),
+							 -1);
 
 	/*
 	 * Each reader: its own transaction, read as a part of its writer's, and
@@ -2539,11 +2602,7 @@ motion_end(CustomScanState *node)
 	MotionState *state = (MotionState *) node;
 
 	motion_finish(state);
-
-	/* A streaming slice's senders stop sending here. */
-	if (state->icrecv != NULL)
-		GpIcRecvEnd(state->icrecv);
-	state->icrecv = NULL;
+	motion_end_stream(state);
 	if (state->spool != NULL)
 	{
 		tuplestore_end(state->spool);
@@ -3198,7 +3257,10 @@ motion_executor_start(QueryDesc *queryDesc, int eflags)
 		fragment_params_after_start(queryDesc, params);
 }
 
-/* A statement's connections that nothing here asked for are closed with it. */
+/*
+ * A statement's connections that nothing here asked for are closed with it,
+ * and its UDP senders waited for (GpIcForget()).
+ */
 static void
 motion_executor_end(QueryDesc *queryDesc)
 {
@@ -3238,6 +3300,25 @@ motion_executor_run(QueryDesc *queryDesc, ScanDirection direction,
 			fragment_depth--;
 	}
 	PG_END_TRY();
+
+	/*
+	 * The fragment's plan has run out, and reads no Motion's rows any more.
+	 * Their senders are told so, and waited for, now: the coordinator may
+	 * close the cursor long after, and this process, idle meanwhile, would
+	 * leave a UDP sender waiting for an answer (gp_ic.c).
+	 */
+	if (fragment && ScanDirectionIsForward(direction) &&
+		(count == 0 || queryDesc->estate->es_processed < count) &&
+		GpClusterIsDispatched() &&
+		fragment_mark(queryDesc->plannedstmt, GP_STREAM_MARK) != NULL)
+	{
+		ListCell   *lc;
+
+		(void) motion_end_streams(queryDesc->planstate, NULL);
+		foreach(lc, queryDesc->estate->es_subplanstates)
+			(void) motion_end_streams((PlanState *) lfirst(lc), NULL);
+		GpIcForget(stream_token(queryDesc->plannedstmt));
+	}
 }
 
 /*
@@ -3365,9 +3446,12 @@ GpMotionInit(void)
 							 "\"tcp\": every slice of a query runs at once, each "
 							 "segment process sending its rows straight to the "
 							 "ones that receive them, over a Unix socket beside "
-							 "the node's own or a TCP port.  \"relay\": a slice "
-							 "at a time, its rows relayed through the coordinator "
-							 "to files the receiving segments keep.",
+							 "the node's own or a TCP port.  \"udpifc\": the "
+							 "same, in UDP packets each receiver acknowledges, as "
+							 "Cloudberry's UDP interconnect sends them.  "
+							 "\"relay\": a slice at a time, its rows relayed "
+							 "through the coordinator to files the receiving "
+							 "segments keep.",
 							 &gp_interconnect_type,
 							 GP_INTERCONNECT_TCP,
 							 interconnect_type_options,

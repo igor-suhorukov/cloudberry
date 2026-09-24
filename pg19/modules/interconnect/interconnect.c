@@ -29,7 +29,9 @@
  * Cloudberry sources this module is made of:
  *	  contrib/interconnect/
  *
- * At this milestone the module only loads.
+ * At this milestone the module only loads: the transports built -- tcp and
+ * udpifc -- are gp_core's (gp_ic.c), beside the Motions they carry, until a
+ * third, proxy or udp2, brings the function table.
  *
  *-------------------------------------------------------------------------
  */

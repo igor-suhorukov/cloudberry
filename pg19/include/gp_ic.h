@@ -35,10 +35,15 @@
 #define GP_IC_TOKEN_LEN		32
 
 /*
- * Where this backend receives rows, opening its listener on first use:
- * "unix:<path>" beside the node's socket, or "tcp:<host>:<port>".
+ * Where this backend receives rows, opening its listener and its datagram
+ * socket on first use: "unix:<path>" beside the node's socket, or
+ * "tcp:<host>:<port>"; then a space, and "udpunix:<path>" or
+ * "udp:<host>:<port>".
  */
 extern const char *GpIcAddress(void);
+
+/* The part of such an address for one transport: UDP's, or TCP's. */
+extern const char *GpIcAddressOf(const char *address, bool udp);
 
 /* A slice's rows on their way from this process to its receivers. */
 typedef struct GpIcSender GpIcSender;
@@ -68,7 +73,9 @@ extern void GpIcSendEnd(GpIcSender *sender);
 /* A Motion's rows as they reach this process, from its "nsenders" senders. */
 typedef struct GpIcReceiver GpIcReceiver;
 
-extern GpIcReceiver *GpIcRecvBegin(const char *token, int slice, int nsenders);
+/* "udp": its senders send in UDP packets */
+extern GpIcReceiver *GpIcRecvBegin(const char *token, int slice, int nsenders,
+								   bool udp);
 
 /*
  * The next row from any sender, valid until the next call; false once every
@@ -76,10 +83,18 @@ extern GpIcReceiver *GpIcRecvBegin(const char *token, int slice, int nsenders);
  */
 extern bool GpIcRecv(GpIcReceiver *receiver, char **data, int *len);
 
-/* Done, whether or not every row arrived: the senders stop. */
+/*
+ * Done, whether or not every row arrived: the senders stop.  A UDP receiver
+ * that ends before every row arrived lasts until GpIcForget(), which waits
+ * for its senders.
+ */
 extern void GpIcRecvEnd(GpIcReceiver *receiver);
 
-/* The statement "token" names is over here: close what it left waiting. */
+/*
+ * The statement "token" names reads no more here: its UDP receivers, all
+ * ended, wait until each of their senders has closed; then what it left
+ * waiting is closed.
+ */
 extern void GpIcForget(const char *token);
 
 /* The transaction callback that closes what an error left open. */

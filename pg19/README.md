@@ -121,10 +121,12 @@ On a cluster (M2), `gp_core` and `gp_orca`:
   segment, runs one slice, and readers — more backends of the session there,
   reading as a part of the writer's transaction through the shared snapshot
   (R2 and R4) — run the others, each sender streaming its rows to its
-  receivers over a Unix socket or a TCP port.  The earlier relay through the
-  coordinator is kept for what cannot stream — a temporary table, the
-  coordinator's own slice feeding a reader's — and on request
-  (`gp.interconnect_type = relay`);
+  receivers over a Unix socket or a TCP port, or, with
+  `gp.interconnect_type = udpifc`, in UDP packets each receiver acknowledges,
+  with Cloudberry's flow control, retransmission and deadlock check.  The
+  earlier relay through the coordinator is kept for what cannot stream — a
+  temporary table, the coordinator's own slice feeding a reader's — and on
+  request (`gp.interconnect_type = relay`);
 - `gp_segment_id`, as a call of the row's segment (O10);
 - Cloudberry's catalogs by their names, in `pg_catalog`: `gp_id`,
   `gp_segment_configuration` over the cluster file, `gp_configuration_history`,

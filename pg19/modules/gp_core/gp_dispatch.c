@@ -149,6 +149,14 @@ static const char *const synced_settings[] = {
 	"lc_monetary",
 	"lc_numeric",
 	"lc_time",
+	/* the UDP interconnect's, which the segments' senders and receivers use */
+	"gp.interconnect_queue_depth",
+	"gp.max_packet_size",
+	"gp.interconnect_transmit_timeout",
+	"gp.interconnect_min_rto",
+	"gp.interconnect_default_rtt",
+	"gp.udpic_dropacks_percent",
+	"gp.udpic_dropxmit_percent",
 };
 
 #define NUM_SYNCED_SETTINGS	lengthof(synced_settings)

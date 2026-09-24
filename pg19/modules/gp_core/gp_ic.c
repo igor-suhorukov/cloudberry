@@ -26,11 +26,41 @@
  * and hands the senders; a sender connects to every receiver of its slice,
  * says which statement and slice it is, and streams its rows, each receiver
  * taking them from all its senders as they come; a receiver that needs no
- * more rows closes, and its senders stop sending to it.  What is left out is
- * what Cloudberry's transport modules add around that -- UDP, a proxy, the
- * ack protocol -- and the chunk format: a row travels as the relay sent it
- * (gp_motion.c), each column by its type's send or output function, framed
- * by its length.
+ * more rows closes, and its senders stop sending to it.  A row travels as
+ * gp_motion.c makes it, framed by its length.
+ *
+ * And Cloudberry's UDP interconnect, udpifc, in its essentials
+ * (ic_udpifc.c): each process has a datagram socket too, and the rows a
+ * sender streams to a receiver travel in packets of at most
+ * gp.max_packet_size bytes -- the same bytes, framed the same way, the
+ * stream's offset of each packet's first byte in its header, which says
+ * which statement, slice and sender it is.  The receiver keeps the bytes that
+ * come in order, and acknowledges them, telling the sender the room it has
+ * left: gp.interconnect_queue_depth packets' worth, which the sender does not
+ * send beyond (flow control).  A packet not acknowledged within its time --
+ * the round trip measured, as Cloudberry's RTT and RTO are, and doubled at
+ * each retry -- is sent again (retransmission).  One that comes before its
+ * turn the receiver keeps until the ones ahead of it come, and acknowledges
+ * with the same acknowledgement again, which tells the sender that the one
+ * whose turn it is was lost: sent again at once.  A sender whose receiver's
+ * room stays shut, nothing of its own unacknowledged, asks it every 512 ms
+ * what it has, lest the acknowledgement that opened it again was lost --
+ * Cloudberry's deadlock check (checkDeadlock) -- and one that hears nothing
+ * for gp.interconnect_transmit_timeout gives up, in Cloudberry's words.
+ *
+ * A receiver that needs no more rows says STOP, and the sender CLOSE, as it
+ * does once its last row is acknowledged.  Cloudberry's receiver has a thread
+ * that answers a packet that comes after it has gone; a backend has none, and
+ * is deaf when it is idle -- as a segment's is between the coordinator's
+ * FETCHes, and after its fragment's last row.  So a receiver whose senders
+ * have all sent their last row waits until each has closed; and when a
+ * fragment's plan has run out, every receiver it has is ended, and all of
+ * their senders waited for, before the process idles -- each told STOP, again
+ * and again, until it closes, and one not heard from yet waited for, as every
+ * sender sends at least its end.  A CLOSE lost, the sender is done with once
+ * it has been silent for a few times the longest a packet waits to be sent
+ * again.  Which of the two transports a Motion uses the coordinator decides
+ * (gp.interconnect_type), handing the senders each receiver's address for it.
  *
  * The listener is where the node's own clients reach it: a socket file
  * beside the node's, when the cluster names nodes by the directory of their
@@ -45,7 +75,8 @@
  * ones until its receiver asks for it, or its statement ends here.
  *
  * Cloudberry sources this file stands in for:
- *	  contrib/interconnect/tcp/ic_tcp.c, src/backend/cdb/motion/cdbmotion.c
+ *	  contrib/interconnect/tcp/ic_tcp.c, contrib/interconnect/udp/ic_udpifc.c,
+ *	  src/backend/cdb/motion/cdbmotion.c
  *
  *-------------------------------------------------------------------------
  */
@@ -60,12 +91,15 @@
 #include <unistd.h>
 
 #include "access/xact.h"
+#include "common/pg_prng.h"
 #include "miscadmin.h"
 #include "port/pg_bswap.h"
 #include "storage/ipc.h"
 #include "storage/latch.h"
 #include "storage/waiteventset.h"
+#include "utils/guc.h"
 #include "utils/memutils.h"
+#include "utils/timestamp.h"
 #include "utils/wait_event.h"
 
 #include "gp_cluster.h"
@@ -89,6 +123,77 @@ typedef struct IcHandshake
 /* How much a sender holds for a receiver before it sends. */
 #define IC_FLUSH_BYTES	(64 * 1024)
 
+/*
+ * UDP: a packet's header, in network order -- magic, version, type, payload
+ * length, the statement's token, the slice, the sender's content id, which of
+ * its receivers it is sent to, the stream offset, the room -- and its types.
+ */
+#define IC_UDP_MAGIC		"GPIU"
+#define IC_UDP_VERSION		1
+#define IC_UDP_HEADER		64
+#define IC_UDP_DATA			1	/* bytes of the stream, from a sender */
+#define IC_UDP_STATUS		2	/* a sender asks what its receiver has */
+#define IC_UDP_ACK			3	/* the bytes a receiver has, and its room */
+#define IC_UDP_STOP			4	/* a receiver that needs no more */
+#define IC_UDP_CLOSE		5	/* a sender acknowledged to its end, or stopped */
+
+typedef struct IcUdpPacket
+{
+	uint8		type;
+	uint16		len;
+	char		token[GP_IC_TOKEN_LEN];
+	uint32		slice;
+	int32		sender;
+	uint32		index;
+	uint64		offset;			/* DATA: of its first byte; ACK: had in order */
+	uint32		window;			/* ACK: bytes of room beyond it */
+	const char *payload;
+} IcUdpPacket;
+
+/* A packet a sender keeps until its bytes are acknowledged. */
+typedef struct IcUdpSent
+{
+	uint64		offset;
+	int			len;
+	TimestampTz sent_at;
+	int			tries;
+	char		data[FLEXIBLE_ARRAY_MEMBER];
+} IcUdpSent;
+
+/* Cloudberry's bounds (ic_udpifc.c): MAX_EXPIRATION_PERIOD, DEADLOCK_CHECKING_TIME */
+#define IC_UDP_MAX_RTO_US			(1000 * 1000)
+#define IC_UDP_DEADLOCK_CHECK_US	(512 * 1000)
+
+/* Streams no receiver has asked for yet, at most. */
+#define IC_UDP_MAX_UNCLAIMED	1024
+
+/*
+ * How long a receiver's end waits on a sender whose CLOSE has not come: until
+ * it has been silent a few times longer than one missing an acknowledgement
+ * waits to send again (IC_UDP_MAX_RTO_US) -- telling it STOP this often, if
+ * it was.
+ */
+#define IC_UDP_LINGER_US		(3 * IC_UDP_MAX_RTO_US)
+#define IC_UDP_STOP_AGAIN_US	(50 * 1000)
+
+/* A receiver's motion here that has gone: a sender's packets get a STOP. */
+typedef struct IcUdpEnded
+{
+	char		token[GP_IC_TOKEN_LEN];
+	uint32		slice;
+} IcUdpEnded;
+
+/* udpifc's settings, as Cloudberry names them without its gp_ */
+static int	gp_interconnect_queue_depth = 4;
+static int	gp_max_packet_size = 8192;
+static int	gp_interconnect_transmit_timeout = 3600;
+static int	gp_interconnect_min_rto = 20;
+static int	gp_interconnect_default_rtt = 20;
+
+/* and its tests': packets dropped as they would be sent, as lost ones are */
+static int	gp_udpic_dropacks_percent = 0;
+static int	gp_udpic_dropxmit_percent = 0;
+
 /* One sender's connection, as a receiver has it. */
 typedef struct IcIn
 {
@@ -100,6 +205,19 @@ typedef struct IcIn
 	int			start;			/* the next unread byte */
 	int			end;			/* one past the last byte read */
 	bool		ended;			/* its last row has come */
+
+	/* UDP: the bytes come in packets (udp_poll()), bufsize the room */
+	bool		udp;
+	uint64		udp_recv;		/* bytes had, in order */
+	int			udp_advertised; /* the room the last ACK told of */
+	uint32		udp_index;		/* which of its sender's receivers it is */
+	struct sockaddr_storage udp_peer;	/* the sender, to answer */
+	socklen_t	udp_peerlen;
+	List	   *udp_waiting;	/* IcUdpSent come before their turn, by offset */
+	bool		udp_stopped;	/* told STOP */
+	TimestampTz udp_stop_at;	/* when last */
+	bool		udp_closed;		/* its sender said CLOSE */
+	TimestampTz udp_last;		/* its sender's last packet, or its first STOP */
 } IcIn;
 
 struct GpIcReceiver
@@ -107,6 +225,8 @@ struct GpIcReceiver
 	char		token[GP_IC_TOKEN_LEN + 1];
 	int			slice;
 	int			nsenders;
+	bool		udp;			/* its senders send in UDP packets */
+	bool		done;			/* UDP: ended, its senders not yet all closed */
 	List	   *conns;			/* IcIn */
 	int			nended;
 	int			next;			/* whose row to look at first */
@@ -122,6 +242,22 @@ typedef struct IcOut
 	int			len;
 	int			size;
 	bool		wanted;			/* the receiver has not gone */
+
+	/* UDP */
+	bool		udp;
+	uint32		index;			/* which receiver it is, echoed in its ACKs */
+	struct sockaddr_storage addr;
+	socklen_t	addrlen;
+	const char *address;
+	uint64		sent;			/* bytes put in packets */
+	uint64		acked;			/* bytes the receiver has, in order */
+	int64		window;			/* bytes beyond them it has room for */
+	List	   *unacked;		/* IcUdpSent, in order */
+	int64		srtt;			/* the round trip, in microseconds */
+	int64		rttvar;
+	int64		rto;			/* how long a packet waits to be acknowledged */
+	TimestampTz last_heard;		/* its last word */
+	TimestampTz last_query;		/* the last status query sent it */
 } IcOut;
 
 struct GpIcSender
@@ -129,16 +265,26 @@ struct GpIcSender
 	int			slice;
 	int			nreceivers;
 	IcOut	   *outs;
+	char		token[GP_IC_TOKEN_LEN];
+	int			self;
 };
 
 static pgsocket listen_sock = PGINVALID_SOCKET;
 static char *listen_address = NULL;
 static char *listen_path = NULL;
 
+static pgsocket udp_sock = PGINVALID_SOCKET;
+static char *udp_address = NULL;
+static char *udp_path = NULL;
+static char *both_addresses = NULL;
+static List *udp_ended = NIL;	/* IcUdpEnded, in TopMemoryContext */
+
 /* In TopMemoryContext; what an error leaves here, the transaction's end closes. */
 static List *unclaimed = NIL;	/* IcIn */
 static List *receivers = NIL;	/* GpIcReceiver */
 static List *senders = NIL;		/* GpIcSender */
+
+static bool udp_poll(void);
 
 static uint32
 ic_wait_event(bool send)
@@ -162,6 +308,8 @@ ic_remove_socket_file(int code, Datum arg)
 {
 	if (listen_path != NULL)
 		unlink(listen_path);
+	if (udp_path != NULL)
+		unlink(udp_path);
 }
 
 static void
@@ -247,13 +395,110 @@ ic_listen_tcp(const char *host)
 										 psprintf("tcp:%s:%s", host, port));
 }
 
+/*
+ * UDP's socket: a datagram socket beside the node's own, when the cluster
+ * names nodes by the directory of their socket, and otherwise a UDP port on
+ * the node's host; the room of its buffers made as large as the system lets.
+ */
+static void
+ic_udp_open(const GpSegmentConfig *self)
+{
+	int			bufsize = 2 * 1024 * 1024;
+
+	if (self->hostname[0] == '/')
+	{
+		struct sockaddr_un addr;
+		char	   *path = psprintf("%s/.s.GPICU.%d", self->hostname, MyProcPid);
+
+		if (strlen(path) >= sizeof(addr.sun_path))
+			ereport(ERROR,
+					(errcode(ERRCODE_GP_INTERCONNECTION_ERROR),
+					 errmsg("interconnect socket path \"%s\" is too long", path)));
+		memset(&addr, 0, sizeof(addr));
+		addr.sun_family = AF_UNIX;
+		strlcpy(addr.sun_path, path, sizeof(addr.sun_path));
+		udp_sock = socket(AF_UNIX, SOCK_DGRAM, 0);
+		if (udp_sock != PGINVALID_SOCKET)
+			unlink(path);
+		if (udp_sock == PGINVALID_SOCKET ||
+			bind(udp_sock, (struct sockaddr *) &addr, sizeof(addr)) < 0)
+		{
+			int			save = errno;
+
+			if (udp_sock != PGINVALID_SOCKET)
+				closesocket(udp_sock);
+			udp_sock = PGINVALID_SOCKET;
+			errno = save;
+			ereport(ERROR,
+					(errcode(ERRCODE_GP_INTERCONNECTION_ERROR),
+					 errmsg("could not bind the interconnect's datagram socket \"%s\": %m",
+							path)));
+		}
+		udp_path = MemoryContextStrdup(TopMemoryContext, path);
+		udp_address = MemoryContextStrdup(TopMemoryContext,
+										  psprintf("udpunix:%s", path));
+	}
+	else
+	{
+		struct addrinfo hints;
+		struct addrinfo *res;
+		struct sockaddr_storage addr;
+		socklen_t	addrlen = sizeof(addr);
+		char		port[NI_MAXSERV];
+		int			rc;
+
+		memset(&hints, 0, sizeof(hints));
+		hints.ai_family = AF_UNSPEC;
+		hints.ai_socktype = SOCK_DGRAM;
+		rc = getaddrinfo(self->hostname, "0", &hints, &res);
+		if (rc != 0 || res == NULL)
+			ereport(ERROR,
+					(errcode(ERRCODE_GP_INTERCONNECTION_ERROR),
+					 errmsg("could not resolve \"%s\" for the interconnect: %s",
+							self->hostname, gai_strerror(rc))));
+		udp_sock = socket(res->ai_family, SOCK_DGRAM, 0);
+		if (udp_sock == PGINVALID_SOCKET ||
+			bind(udp_sock, res->ai_addr, res->ai_addrlen) < 0 ||
+			getsockname(udp_sock, (struct sockaddr *) &addr, &addrlen) < 0 ||
+			getnameinfo((struct sockaddr *) &addr, addrlen, NULL, 0, port,
+						sizeof(port), NI_NUMERICSERV) != 0)
+		{
+			int			save = errno;
+
+			if (udp_sock != PGINVALID_SOCKET)
+				closesocket(udp_sock);
+			udp_sock = PGINVALID_SOCKET;
+			freeaddrinfo(res);
+			errno = save;
+			ereport(ERROR,
+					(errcode(ERRCODE_GP_INTERCONNECTION_ERROR),
+					 errmsg("could not open the interconnect's UDP port on \"%s\": %m",
+							self->hostname)));
+		}
+		freeaddrinfo(res);
+		udp_address = MemoryContextStrdup(TopMemoryContext,
+										  psprintf("udp:%s:%s", self->hostname, port));
+	}
+
+	if (!pg_set_noblock(udp_sock))
+		ereport(ERROR,
+				(errcode(ERRCODE_GP_INTERCONNECTION_ERROR),
+				 errmsg("could not make the interconnect's datagram socket nonblocking: %m")));
+	(void) setsockopt(udp_sock, SOL_SOCKET, SO_RCVBUF, &bufsize, sizeof(bufsize));
+	(void) setsockopt(udp_sock, SOL_SOCKET, SO_SNDBUF, &bufsize, sizeof(bufsize));
+}
+
+/*
+ * Where this process receives, both ways: its listener's address and its
+ * datagram socket's, a space between them -- see GpIcAddressOf().
+ */
 const char *
 GpIcAddress(void)
 {
 	const GpSegmentConfig *self = GpClusterSelf();
 
-	if (listen_address != NULL)
-		return listen_address;
+	if (both_addresses != NULL)
+		return both_addresses;
 
 	if (self == NULL)
 		ereport(ERROR,
@@ -269,7 +514,115 @@ GpIcAddress(void)
 		ereport(ERROR,
 				(errcode(ERRCODE_GP_INTERCONNECTION_ERROR),
 				 errmsg("could not listen on the interconnect socket: %m")));
-	return listen_address;
+
+	ic_udp_open(self);
+	both_addresses = MemoryContextStrdup(TopMemoryContext,
+										 psprintf("%s %s", listen_address,
+												  udp_address));
+	return both_addresses;
+}
+
+const char *
+GpIcAddressOf(const char *address, bool udp)
+{
+	const char *space = strchr(address, ' ');
+
+	if (space == NULL)
+		elog(ERROR, "interconnect address \"%s\" has no part for UDP", address);
+	return udp ? pstrdup(space + 1) : pnstrdup(address, space - address);
+}
+
+/* ------------------------------------------------------------------------- */
+/* UDP: packets                                                              */
+/* ------------------------------------------------------------------------- */
+
+/* The room a receiver has for a sender's bytes: its queue's packets. */
+static int
+udp_room(void)
+{
+	return gp_interconnect_queue_depth * (gp_max_packet_size - IC_UDP_HEADER);
+}
+
+static char udp_buffer[65536];
+
+/* One packet, to "to"; one that cannot go now is as good as lost. */
+static void
+udp_put(const struct sockaddr_storage *to, socklen_t tolen, uint8 type,
+		const char *token, uint32 slice, int32 sender, uint32 index,
+		uint64 offset, uint32 window, const char *payload, int len)
+{
+	char	   *p = udp_buffer;
+	uint16		n16;
+	uint32		n32;
+	uint64		n64;
+
+	memcpy(p, IC_UDP_MAGIC, 4);
+	p[4] = IC_UDP_VERSION;
+	p[5] = type;
+	n16 = pg_hton16((uint16) len);
+	memcpy(p + 6, &n16, 2);
+	memcpy(p + 8, token, GP_IC_TOKEN_LEN);
+	n32 = pg_hton32(slice);
+	memcpy(p + 40, &n32, 4);
+	n32 = pg_hton32((uint32) sender);
+	memcpy(p + 44, &n32, 4);
+	n32 = pg_hton32(index);
+	memcpy(p + 48, &n32, 4);
+	n64 = pg_hton64(offset);
+	memcpy(p + 52, &n64, 8);
+	n32 = pg_hton32(window);
+	memcpy(p + 60, &n32, 4);
+	if (len > 0)
+		memcpy(p + IC_UDP_HEADER, payload, len);
+
+	/* a test's lost packet, as Cloudberry's testmode_inject_fault() makes one */
+	if ((type == IC_UDP_ACK && gp_udpic_dropacks_percent > 0 &&
+		 (int) pg_prng_uint64_range(&pg_global_prng_state, 0, 99) < gp_udpic_dropacks_percent) ||
+		(type == IC_UDP_DATA && gp_udpic_dropxmit_percent > 0 &&
+		 (int) pg_prng_uint64_range(&pg_global_prng_state, 0, 99) < gp_udpic_dropxmit_percent))
+		return;
+
+	(void) sendto(udp_sock, udp_buffer, IC_UDP_HEADER + len, 0,
+				  (const struct sockaddr *) to, tolen);
+}
+
+static bool
+udp_parse(const char *buf, int n, IcUdpPacket *pkt)
+{
+	uint16		n16;
+	uint32		n32;
+	uint64		n64;
+
+	if (n < IC_UDP_HEADER || memcmp(buf, IC_UDP_MAGIC, 4) != 0 ||
+		buf[4] != IC_UDP_VERSION)
+		return false;
+	pkt->type = (uint8) buf[5];
+	memcpy(&n16, buf + 6, 2);
+	pkt->len = pg_ntoh16(n16);
+	if (IC_UDP_HEADER + pkt->len != n)
+		return false;
+	memcpy(pkt->token, buf + 8, GP_IC_TOKEN_LEN);
+	memcpy(&n32, buf + 40, 4);
+	pkt->slice = pg_ntoh32(n32);
+	memcpy(&n32, buf + 44, 4);
+	pkt->sender = (int32) pg_ntoh32(n32);
+	memcpy(&n32, buf + 48, 4);
+	pkt->index = pg_ntoh32(n32);
+	memcpy(&n64, buf + 52, 8);
+	pkt->offset = pg_ntoh64(n64);
+	memcpy(&n32, buf + 60, 4);
+	pkt->window = pg_ntoh32(n32);
+	pkt->payload = buf + IC_UDP_HEADER;
+	return true;
+}
+
+static bool
+udp_ended_has(const char *token, uint32 slice)
+{
+	foreach_ptr(IcUdpEnded, e, udp_ended)
+		if (e->slice == slice && memcmp(e->token, token, GP_IC_TOKEN_LEN) == 0)
+			return true;
+	return false;
 }
 
 /* ------------------------------------------------------------------------- */
@@ -284,11 +637,12 @@ in_close(IcIn *in)
 	in->sock = PGINVALID_SOCKET;
 	if (in->buf != NULL)
 		pfree(in->buf);
+	list_free_deep(in->udp_waiting);
 	pfree(in);
 }
 
 /* A connection whose handshake has come: to its receiver, if it has one. */
-static void
+static GpIcReceiver *
 in_route(IcIn *in)
 {
 	ListCell   *lc;
@@ -310,11 +664,12 @@ in_route(IcIn *in)
 						(errcode(ERRCODE_GP_INTERCONNECTION_ERROR),
 						 errmsg("interconnect: slice %d has more senders than the %d it was given",
 								r->slice, r->nsenders)));
-			return;
+			return r;
 		}
 	}
 
 	unclaimed = lappend(unclaimed, in);
+	return NULL;
 }
 
 /*
@@ -354,7 +709,7 @@ ic_accept(void)
 	{
 		IcIn	   *in = (IcIn *) lfirst(lc);
 
-		if (in->hslen < (int) sizeof(IcHandshake))
+		if (!in->udp && in->hslen < (int) sizeof(IcHandshake))
 			waiting = lappend(waiting, in);
 	}
 	foreach(lc, waiting)
@@ -386,14 +741,210 @@ ic_accept(void)
 			in_close(in);		/* not one of ours */
 			continue;
 		}
-		in_route(in);
+		(void) in_route(in);
 	}
 	list_free(waiting);
 	MemoryContextSwitchTo(oldcxt);
 }
 
+/* UDP: a sender's stream here, claimed by its receiver ("owner") or not yet. */
+static IcIn *
+udp_find_in(const IcUdpPacket *pkt, GpIcReceiver **owner)
+{
+	*owner = NULL;
+	foreach_ptr(GpIcReceiver, r, receivers)
+	{
+		if (r->slice != (int) pkt->slice ||
+			memcmp(r->token, pkt->token, GP_IC_TOKEN_LEN) != 0)
+			continue;
+		foreach_ptr(IcIn, in, r->conns)
+		{
+			if (in->udp && in->hs.sender == pkt->sender)
+			{
+				*owner = r;
+				return in;
+			}
+		}
+	}
+	foreach_ptr(IcIn, in, unclaimed)
+		if (in->udp && (int) in->hs.slice == (int) pkt->slice &&
+			in->hs.sender == pkt->sender &&
+			memcmp(in->hs.token, pkt->token, GP_IC_TOKEN_LEN) == 0)
+			return in;
+	return NULL;
+}
+
+/* A sender's next bytes, into its stream here if there is room. */
+static bool
+udp_take(IcIn *in, const char *data, int len)
+{
+	int			unread = in->end - in->start;
+
+	if (unread + len > in->bufsize)
+		return false;
+	if (in->bufsize - in->end < len)
+	{
+		memmove(in->buf, in->buf + in->start, unread);
+		in->start = 0;
+		in->end = unread;
+	}
+	memcpy(in->buf + in->end, data, len);
+	in->end += len;
+	in->udp_recv += len;
+	return true;
+}
+
+/* What a receiver has had of a sender's bytes, and the room it has left. */
+static void
+udp_ack(IcIn *in)
+{
+	int			room = in->bufsize - (in->end - in->start);
+
+	in->udp_advertised = room;
+	udp_put(&in->udp_peer, in->udp_peerlen, IC_UDP_ACK, in->hs.token,
+			in->hs.slice, in->hs.sender, in->udp_index, in->udp_recv,
+			(uint32) room, NULL, 0);
+}
+
+/*
+ * A sender's packet: its bytes kept, if they are the next in order and fit,
+ * and acknowledged -- or a status query answered, or its CLOSE noted.  A
+ * sender whose first packet this is has its stream made, which waits among
+ * the unclaimed connections until its receiver asks; one whose receiver has
+ * ended, before its last row, is told STOP.
+ */
+static void
+udp_on_data(const IcUdpPacket *pkt, const struct sockaddr_storage *from,
+			socklen_t fromlen)
+{
+	GpIcReceiver *r;
+	IcIn	   *in = udp_find_in(pkt, &r);
+
+	if (pkt->type == IC_UDP_CLOSE)
+	{
+		if (in != NULL)
+		{
+			in->udp_closed = true;
+			in->udp_last = GetCurrentTimestamp();
+		}
+		return;
+	}
+
+	if (in == NULL)
+	{
+		MemoryContext oldcxt;
+
+		if (udp_ended_has(pkt->token, pkt->slice))
+		{
+			udp_put(from, fromlen, IC_UDP_STOP, pkt->token, pkt->slice,
+					pkt->sender, pkt->index, 0, 0, NULL, 0);
+			return;
+		}
+		if (list_length(unclaimed) >= IC_UDP_MAX_UNCLAIMED)
+			return;				/* it will come again */
+
+		oldcxt = MemoryContextSwitchTo(TopMemoryContext);
+		in = palloc0(sizeof(IcIn));
+		in->sock = PGINVALID_SOCKET;
+		in->udp = true;
+		memcpy(in->hs.magic, IC_MAGIC, 4);
+		in->hs.version = IC_VERSION;
+		memcpy(in->hs.token, pkt->token, GP_IC_TOKEN_LEN);
+		in->hs.slice = pkt->slice;
+		in->hs.sender = pkt->sender;
+		in->hslen = sizeof(IcHandshake);
+		in->bufsize = udp_room();
+		in->buf = palloc(in->bufsize);
+		MemoryContextSwitchTo(oldcxt);
+		r = in_route(in);
+	}
+	memcpy(&in->udp_peer, from, fromlen);
+	in->udp_peerlen = fromlen;
+	in->udp_index = pkt->index;
+	in->udp_last = GetCurrentTimestamp();
+
+	/* its receiver ended before its last row: told to stop, and again */
+	if (r != NULL && r->done && !in->ended && !in->udp_stopped)
+	{
+		in->udp_stopped = true;
+		in->udp_stop_at = in->udp_last;
+	}
+	if (in->udp_stopped)
+	{
+		udp_put(from, fromlen, IC_UDP_STOP, pkt->token, pkt->slice,
+				pkt->sender, pkt->index, in->udp_recv, 0, NULL, 0);
+		return;
+	}
+
+	if (pkt->type == IC_UDP_DATA && pkt->len > 0)
+	{
+		uint64		room = (uint64) (in->bufsize - (in->end - in->start));
+
+		if (pkt->offset == in->udp_recv)
+		{
+			/* its turn: taken, and the ones that came before theirs after it */
+			if (udp_take(in, pkt->payload, pkt->len))
+			{
+				ListCell   *lc;
+
+				foreach(lc, in->udp_waiting)
+				{
+					IcUdpSent  *w = (IcUdpSent *) lfirst(lc);
+
+					if (w->offset + w->len <= in->udp_recv)
+						;		/* had already */
+					else if (w->offset != in->udp_recv ||
+							 !udp_take(in, w->data, w->len))
+						break;
+					in->udp_waiting = foreach_delete_current(in->udp_waiting, lc);
+					pfree(w);
+				}
+			}
+		}
+		else if (pkt->offset > in->udp_recv &&
+				 pkt->offset + pkt->len <= in->udp_recv + room)
+		{
+			/* before its turn, one lost ahead of it: kept, in order, for it */
+			ListCell   *lc;
+			int			pos = 0;
+			bool		had = false;
+			IcUdpSent  *w;
+			MemoryContext oldcxt;
+
+			foreach(lc, in->udp_waiting)
+			{
+				IcUdpSent  *o = (IcUdpSent *) lfirst(lc);
+
+				if (o->offset == pkt->offset)
+					had = true;
+				if (o->offset >= pkt->offset)
+					break;
+				pos++;
+			}
+			if (!had)
+			{
+				w = MemoryContextAlloc(TopMemoryContext,
+									   offsetof(IcUdpSent, data) + pkt->len);
+				w->offset = pkt->offset;
+				w->len = pkt->len;
+				w->tries = 0;
+				memcpy(w->data, pkt->payload, pkt->len);
+				oldcxt = MemoryContextSwitchTo(TopMemoryContext);
+				in->udp_waiting = list_insert_nth(in->udp_waiting, pos, w);
+				MemoryContextSwitchTo(oldcxt);
+			}
+		}
+	}
+
+	/*
+	 * Acknowledged, each packet: one before its turn repeats the last
+	 * acknowledgement, which tells the sender one is missing.
+	 */
+	udp_ack(in);
+}
+
 GpIcReceiver *
-GpIcRecvBegin(const char *token, int slice, int nsenders)
+GpIcRecvBegin(const char *token, int slice, int nsenders, bool udp)
 {
 	MemoryContext oldcxt = MemoryContextSwitchTo(TopMemoryContext);
 	GpIcReceiver *r = palloc0(sizeof(GpIcReceiver));
@@ -406,6 +957,7 @@ GpIcRecvBegin(const char *token, int slice, int nsenders)
 	memcpy(r->token, token, GP_IC_TOKEN_LEN + 1);
 	r->slice = slice;
 	r->nsenders = nsenders;
+	r->udp = udp;
 	r->wes_stale = true;
 	receivers = lappend(receivers, r);
 
@@ -449,6 +1001,12 @@ in_take(IcIn *in, char **data, int *len)
 	*data = in->buf + in->start + sizeof(uint32);
 	*len = (int) frame;
 	in->start += sizeof(uint32) + frame;
+
+	/* UDP: a packet's worth of room made since the sender was told, told of */
+	if (in->udp &&
+		in->bufsize - (in->end - in->start) - in->udp_advertised >=
+		gp_max_packet_size - IC_UDP_HEADER)
+		udp_ack(in);
 	return 1;
 }
 
@@ -505,7 +1063,7 @@ recv_wait(GpIcReceiver *r)
 
 	if (r->wes_stale || r->wes == NULL)
 	{
-		int			n = 3 + list_length(r->conns) + list_length(unclaimed);
+		int			n = 4 + list_length(r->conns) + list_length(unclaimed);
 
 		if (r->wes != NULL)
 			FreeWaitEventSet(r->wes);
@@ -515,11 +1073,13 @@ recv_wait(GpIcReceiver *r)
 			AddWaitEventToSet(r->wes, WL_EXIT_ON_PM_DEATH, PGINVALID_SOCKET,
 							  NULL, NULL);
 		AddWaitEventToSet(r->wes, WL_SOCKET_READABLE, listen_sock, NULL, NULL);
+		if (udp_sock != PGINVALID_SOCKET)
+			AddWaitEventToSet(r->wes, WL_SOCKET_READABLE, udp_sock, NULL, NULL);
 		foreach(lc, r->conns)
 		{
 			IcIn	   *in = (IcIn *) lfirst(lc);
 
-			if (!in->ended)
+			if (!in->ended && !in->udp)
 				AddWaitEventToSet(r->wes, WL_SOCKET_READABLE, in->sock, NULL, NULL);
 		}
 		/* a handshake still coming could be one of ours */
@@ -527,7 +1087,7 @@ recv_wait(GpIcReceiver *r)
 		{
 			IcIn	   *in = (IcIn *) lfirst(lc);
 
-			if (in->hslen < (int) sizeof(IcHandshake))
+			if (!in->udp && in->hslen < (int) sizeof(IcHandshake))
 				AddWaitEventToSet(r->wes, WL_SOCKET_READABLE, in->sock, NULL, NULL);
 		}
 		r->wes_stale = false;
@@ -581,9 +1141,11 @@ GpIcRecv(GpIcReceiver *r, char **data, int *len)
 
 		foreach_ptr(IcIn, in, r->conns)
 		{
-			if (!in->ended && in_read(r, in))
+			if (!in->ended && !in->udp && in_read(r, in))
 				progress = true;
 		}
+		if (udp_poll())
+			progress = true;
 		if (progress)
 			continue;
 
@@ -591,6 +1153,18 @@ GpIcRecv(GpIcReceiver *r, char **data, int *len)
 		ic_accept();
 		if (list_length(r->conns) != before)
 			continue;
+
+		/*
+		 * UDP: before waiting, each sender is told of the room taking its
+		 * rows made, where its last acknowledgement told of less.  A row the
+		 * next packet ends leaves less than a packet's worth, which
+		 * in_take() waits for, and a sender whose window it shut would wait
+		 * for its next status query.
+		 */
+		foreach_ptr(IcIn, in, r->conns)
+			if (in->udp && !in->ended &&
+				in->bufsize - (in->end - in->start) > in->udp_advertised)
+				udp_ack(in);
 
 		recv_wait(r);
 	}
@@ -607,18 +1181,162 @@ receiver_free(GpIcReceiver *r)
 	pfree(r);
 }
 
+/*
+ * UDP: a receiver ended -- the senders that have not sent their last row told
+ * STOP, what it had of their rows let go.  It stays, to answer the packets
+ * that still come, until udp_wait().
+ */
+static void
+udp_recv_stop(GpIcReceiver *r)
+{
+	TimestampTz now = GetCurrentTimestamp();
+
+	foreach_ptr(IcIn, in, r->conns)
+	{
+		if (!in->ended && !in->udp_stopped)
+		{
+			udp_put(&in->udp_peer, in->udp_peerlen, IC_UDP_STOP, in->hs.token,
+					in->hs.slice, in->hs.sender, in->udp_index, in->udp_recv,
+					0, NULL, 0);
+			in->udp_stopped = true;
+			in->udp_stop_at = in->udp_last = now;
+		}
+		if (in->buf != NULL)
+			pfree(in->buf);
+		in->buf = NULL;
+		in->bufsize = in->start = in->end = 0;
+		list_free_deep(in->udp_waiting);
+		in->udp_waiting = NIL;
+	}
+	r->done = true;
+}
+
+/*
+ * UDP: ended receivers, until every one of their senders has closed -- each
+ * told STOP again while it has not, if it was, and one not heard from waited
+ * for -- or, its CLOSE lost, been silent IC_UDP_LINGER_US.  Their packets
+ * are answered meanwhile.
+ */
+static void
+udp_wait(List *rs)
+{
+	for (;;)
+	{
+		TimestampTz now = GetCurrentTimestamp();
+		bool		open = false;
+
+		foreach_ptr(GpIcReceiver, r, rs)
+		{
+			if (list_length(r->conns) < r->nsenders)
+				open = true;
+			foreach_ptr(IcIn, in, r->conns)
+			{
+				if (in->udp_closed || now - in->udp_last >= IC_UDP_LINGER_US)
+					continue;
+				open = true;
+				if (in->udp_stopped &&
+					now - in->udp_stop_at >= IC_UDP_STOP_AGAIN_US)
+				{
+					udp_put(&in->udp_peer, in->udp_peerlen, IC_UDP_STOP,
+							in->hs.token, in->hs.slice, in->hs.sender,
+							in->udp_index, in->udp_recv, 0, NULL, 0);
+					in->udp_stop_at = now;
+				}
+			}
+		}
+		if (!open)
+			return;
+		if (!udp_poll())
+		{
+			int			ev = WaitLatchOrSocket(MyLatch,
+											   WL_LATCH_SET | WL_SOCKET_READABLE |
+											   WL_TIMEOUT | WL_EXIT_ON_PM_DEATH,
+											   udp_sock,
+											   IC_UDP_STOP_AGAIN_US / 1000,
+											   ic_wait_event(false));
+
+			if (ev & WL_LATCH_SET)
+				ResetLatch(MyLatch);
+			CHECK_FOR_INTERRUPTS();
+		}
+	}
+}
+
+/* UDP: a receiver gone; a packet that comes still, while this process listens, gets a STOP. */
+static void
+udp_recv_free(GpIcReceiver *r)
+{
+	MemoryContext oldcxt = MemoryContextSwitchTo(TopMemoryContext);
+	IcUdpEnded *e = palloc(sizeof(IcUdpEnded));
+
+	memcpy(e->token, r->token, GP_IC_TOKEN_LEN);
+	e->slice = (uint32) r->slice;
+	udp_ended = lappend(udp_ended, e);
+	MemoryContextSwitchTo(oldcxt);
+
+	receivers = list_delete_ptr(receivers, r);
+	receiver_free(r);
+}
+
 void
 GpIcRecvEnd(GpIcReceiver *r)
 {
-	receivers = list_delete_ptr(receivers, r);
-	receiver_free(r);
+	if (!r->udp)
+	{
+		receivers = list_delete_ptr(receivers, r);
+		receiver_free(r);
+		return;
+	}
+
+	/*
+	 * UDP: a receiver that had every sender's last row waits for their CLOSE
+	 * now: a sender waits for the acknowledgement of its last packet, and
+	 * nothing else, before it closes.  One that ended before waits with the
+	 * rest of its statement's here, all stopped first (udp_finish()): a
+	 * receiver here still taking no rows could be what its senders wait on.
+	 */
+	udp_recv_stop(r);
+	if (r->nended == r->nsenders)
+	{
+		udp_wait(list_make1(r));
+		udp_recv_free(r);
+	}
+}
+
+/*
+ * The UDP receivers of statement "token", every one ended, until all of
+ * their senders have closed.
+ */
+static void
+udp_finish(const char *token)
+{
+	List	   *mine = NIL;
+
+	foreach_ptr(GpIcReceiver, r, receivers)
+	{
+		if (!r->udp || memcmp(r->token, token, GP_IC_TOKEN_LEN) != 0)
+			continue;
+		if (!r->done)
+			udp_recv_stop(r);
+		mine = lappend(mine, r);
+	}
+	if (mine == NIL)
+		return;
+	udp_wait(mine);
+	foreach_ptr(GpIcReceiver, r, mine)
+		udp_recv_free(r);
+	list_free(mine);
 }
 
 void
 GpIcForget(const char *token)
 {
 	List	   *keep = NIL;
-	MemoryContext oldcxt = MemoryContextSwitchTo(TopMemoryContext);
+	MemoryContext oldcxt;
+
+	udp_finish(token);
+
+	oldcxt = MemoryContextSwitchTo(TopMemoryContext);
 
 	foreach_ptr(IcIn, in, unclaimed)
 	{
@@ -787,8 +1505,255 @@ out_flush(IcOut *out)
 	out->len = 0;
 }
 
+/* ------------------------------------------------------------------------- */
+/* UDP: sending                                                              */
+/* ------------------------------------------------------------------------- */
+
+/* A packet of a sender's stream, sent -- again, if it was before. */
 static void
-out_append(IcOut *out, uint32 frame, const char *data, int len)
+udp_transmit(GpIcSender *s, IcOut *out, IcUdpSent *p)
+{
+	udp_put(&out->addr, out->addrlen, IC_UDP_DATA, s->token, (uint32) s->slice,
+			s->self, out->index, p->offset, 0, p->data, p->len);
+	p->sent_at = GetCurrentTimestamp();
+	p->tries++;
+}
+
+/* Cloudberry's round trip and RTO: a smoothed mean and deviation, bounded. */
+static void
+udp_rtt_sample(IcOut *out, int64 rtt)
+{
+	int64		err = rtt - out->srtt;
+
+	out->srtt += err / 8;
+	out->rttvar += ((err < 0 ? -err : err) - out->rttvar) / 4;
+	out->rto = Min(Max(out->srtt + 4 * out->rttvar,
+					   (int64) gp_interconnect_min_rto * 1000),
+				   IC_UDP_MAX_RTO_US);
+}
+
+static void
+udp_out_forget(IcOut *out)
+{
+	foreach_ptr(IcUdpSent, p, out->unacked)
+		pfree(p);
+	list_free(out->unacked);
+	out->unacked = NIL;
+	out->len = 0;
+}
+
+/* A receiver's ACK or STOP, to the sender of its slice here. */
+static void
+udp_on_ack(const IcUdpPacket *pkt)
+{
+	foreach_ptr(GpIcSender, s, senders)
+	{
+		IcOut	   *out;
+		TimestampTz now;
+
+		if (s->slice != (int) pkt->slice || s->self != pkt->sender ||
+			memcmp(s->token, pkt->token, GP_IC_TOKEN_LEN) != 0 ||
+			pkt->index >= (uint32) s->nreceivers)
+			continue;
+		out = &s->outs[pkt->index];
+		if (!out->udp)
+			return;
+		now = GetCurrentTimestamp();
+		out->last_heard = now;
+		if (pkt->type == IC_UDP_STOP)
+		{
+			out->wanted = false;
+			udp_out_forget(out);
+			udp_put(&out->addr, out->addrlen, IC_UDP_CLOSE, s->token,
+					(uint32) s->slice, s->self, out->index, out->sent, 0,
+					NULL, 0);
+			return;
+		}
+		if (pkt->offset > out->acked && pkt->offset <= out->sent)
+		{
+			while (out->unacked != NIL)
+			{
+				IcUdpSent  *p = (IcUdpSent *) linitial(out->unacked);
+
+				if (p->offset + p->len > pkt->offset)
+					break;
+				/* a packet sent once times the round trip (Karn's rule) */
+				if (p->tries == 1)
+					udp_rtt_sample(out, now - p->sent_at);
+				out->unacked = list_delete_first(out->unacked);
+				pfree(p);
+			}
+			out->acked = pkt->offset;
+		}
+		else if (pkt->offset == out->acked && out->unacked != NIL)
+		{
+			/*
+			 * The same acknowledgement again: a packet came before its turn,
+			 * the one whose turn it is missing -- sent again now, as
+			 * Cloudberry's disorder handling does, unless it was just now.
+			 */
+			IcUdpSent  *p = (IcUdpSent *) linitial(out->unacked);
+
+			if (p->offset == pkt->offset &&
+				now - p->sent_at > Max(out->srtt, (int64) 1000))
+				udp_transmit(s, out, p);
+		}
+		if (pkt->offset >= out->acked)
+			out->window = pkt->window;
+		return;
+	}
+}
+
+/*
+ * Take every packet that has come, without waiting, for whichever receiver or
+ * sender here it is; true if any came.
+ */
+static bool
+udp_poll(void)
+{
+	static char buf[65536];
+	bool		any = false;
+
+	if (udp_sock == PGINVALID_SOCKET)
+		return false;
+	for (;;)
+	{
+		struct sockaddr_storage from;
+		socklen_t	fromlen = sizeof(from);
+		ssize_t		n = recvfrom(udp_sock, buf, sizeof(buf), 0,
+								 (struct sockaddr *) &from, &fromlen);
+		IcUdpPacket pkt;
+
+		if (n < 0)
+		{
+			if (errno == EINTR)
+				continue;
+			break;				/* EAGAIN: nothing more */
+		}
+		if (!udp_parse(buf, (int) n, &pkt))
+			continue;
+		any = true;
+		if (pkt.type == IC_UDP_DATA || pkt.type == IC_UDP_STATUS ||
+			pkt.type == IC_UDP_CLOSE)
+			udp_on_data(&pkt, &from, fromlen);
+		else if (pkt.type == IC_UDP_ACK || pkt.type == IC_UDP_STOP)
+			udp_on_ack(&pkt);
+	}
+	return any;
+}
+
+/*
+ * A sender waiting on a receiver: what has waited out its RTO sent again, the
+ * RTO doubled; a status query where the receiver's room is shut and nothing
+ * is in flight, every 512 ms (Cloudberry's deadlock check); and, heard
+ * nothing from it for gp.interconnect_transmit_timeout, Cloudberry's error.
+ * Then a wait for a packet, the next of these, or an interrupt.
+ */
+static void
+udp_sender_wait(GpIcSender *s, IcOut *out)
+{
+	TimestampTz now = GetCurrentTimestamp();
+	int64		next = IC_UDP_DEADLOCK_CHECK_US;
+	bool		resent = false;
+	int			ev;
+
+	foreach_ptr(IcUdpSent, p, out->unacked)
+	{
+		int64		waited = now - p->sent_at;
+
+		if (waited >= out->rto)
+		{
+			udp_transmit(s, out, p);
+			resent = true;
+		}
+		else
+			next = Min(next, out->rto - waited);
+	}
+	if (resent)
+	{
+		out->rto = Min(out->rto * 2, IC_UDP_MAX_RTO_US);
+		next = Min(next, out->rto);
+	}
+
+	if (out->unacked == NIL && out->acked + out->window <= out->sent)
+	{
+		if (now - out->last_query >= IC_UDP_DEADLOCK_CHECK_US)
+		{
+			udp_put(&out->addr, out->addrlen, IC_UDP_STATUS, s->token,
+					(uint32) s->slice, s->self, out->index, out->sent, 0,
+					NULL, 0);
+			out->last_query = now;
+		}
+		next = Min(next, IC_UDP_DEADLOCK_CHECK_US - (now - out->last_query));
+	}
+
+	if (now - out->last_heard > (int64) gp_interconnect_transmit_timeout * 1000 * 1000)
+		ereport(ERROR,
+				(errcode(ERRCODE_GP_INTERCONNECTION_ERROR),
+				 errmsg("interconnect encountered a network error, please check your network"),
+				 errdetail("Did not get any response from %s in %d seconds.",
+						   out->address, gp_interconnect_transmit_timeout)));
+
+	ev = WaitLatchOrSocket(MyLatch,
+						   WL_LATCH_SET | WL_SOCKET_READABLE | WL_TIMEOUT |
+						   WL_EXIT_ON_PM_DEATH,
+						   udp_sock, Max(next / 1000, 1), ic_wait_event(true));
+	if (ev & WL_LATCH_SET)
+		ResetLatch(MyLatch);
+	CHECK_FOR_INTERRUPTS();
+	(void) udp_poll();
+}
+
+/*
+ * Send what is held for a UDP receiver: as many packets as its room allows,
+ * waiting for its acknowledgements to open more -- and, with "drain", until
+ * it has every byte.
+ */
+static void
+udp_out_flush(GpIcSender *s, IcOut *out, bool drain)
+{
+	int			payload = gp_max_packet_size - IC_UDP_HEADER;
+	int			off = 0;
+
+	while (out->wanted && (off < out->len || (drain && out->acked < out->sent)))
+	{
+		int64		room = (int64) (out->acked + out->window) - (int64) out->sent;
+
+		if (off < out->len && room > 0)
+		{
+			int			n = (int) Min(Min((int64) (out->len - off), (int64) payload), room);
+			IcUdpSent  *p = MemoryContextAlloc(TopMemoryContext,
+											   offsetof(IcUdpSent, data) + n);
+			MemoryContext oldcxt;
+
+			p->offset = out->sent;
+			p->len = n;
+			p->tries = 0;
+			memcpy(p->data, out->buf + off, n);
+			off += n;
+			out->sent += n;
+			oldcxt = MemoryContextSwitchTo(TopMemoryContext);
+			out->unacked = lappend(out->unacked, p);
+			MemoryContextSwitchTo(oldcxt);
+			udp_transmit(s, out, p);
+			continue;
+		}
+		udp_sender_wait(s, out);
+		/* a packet that came may say what lets the next go */
+		(void) udp_poll();
+	}
+
+	if (!out->wanted)
+		out->len = 0;
+	else if (off > 0)
+	{
+		memmove(out->buf, out->buf + off, out->len - off);
+		out->len -= off;
+	}
+}
+
+static void
+out_append(GpIcSender *s, IcOut *out, uint32 frame, const char *data, int len)
 {
 	uint32		nframe = pg_hton32(frame);
 	int			need = out->len + sizeof(uint32) + Max(len, 0);
@@ -807,7 +1772,50 @@ out_append(IcOut *out, uint32 frame, const char *data, int len)
 		memcpy(out->buf + out->len + sizeof(uint32), data, len);
 	out->len = need;
 	if (out->len >= IC_FLUSH_BYTES)
-		out_flush(out);
+	{
+		if (out->udp)
+			udp_out_flush(s, out, false);
+		else
+			out_flush(out);
+	}
+}
+
+/* A UDP receiver's address, as its process gave it, as a socket's. */
+static void
+udp_resolve(const char *address, struct sockaddr_storage *addr,
+			socklen_t *addrlen)
+{
+	memset(addr, 0, sizeof(*addr));
+	if (strncmp(address, "udpunix:", 8) == 0)
+	{
+		struct sockaddr_un *un = (struct sockaddr_un *) addr;
+
+		un->sun_family = AF_UNIX;
+		strlcpy(un->sun_path, address + 8, sizeof(un->sun_path));
+		*addrlen = sizeof(struct sockaddr_un);
+	}
+	else
+	{
+		char	   *host = pstrdup(address + 4);
+		char	   *colon = strrchr(host, ':');
+		struct addrinfo hints;
+		struct addrinfo *res;
+
+		if (colon == NULL)
+			elog(ERROR, "invalid interconnect address \"%s\"", address);
+		*colon = '\0';
+		memset(&hints, 0, sizeof(hints));
+		hints.ai_family = AF_UNSPEC;
+		hints.ai_socktype = SOCK_DGRAM;
+		if (getaddrinfo(host, colon + 1, &hints, &res) != 0 || res == NULL)
+			ereport(ERROR,
+					(errcode(ERRCODE_GP_INTERCONNECTION_ERROR),
+					 errmsg("could not resolve interconnect address \"%s\"",
+							address)));
+		memcpy(addr, res->ai_addr, res->ai_addrlen);
+		*addrlen = res->ai_addrlen;
+		freeaddrinfo(res);
+	}
 }
 
 GpIcSender *
@@ -821,6 +1829,8 @@ GpIcSendBegin(const char *token, int slice, int self, int nreceivers,
 	Assert(strlen(token) == GP_IC_TOKEN_LEN);
 	s->slice = slice;
 	s->nreceivers = nreceivers;
+	memcpy(s->token, token, GP_IC_TOKEN_LEN);
+	s->self = self;
 	s->outs = palloc0_array(IcOut, Max(nreceivers, 1));
 	for (int i = 0; i < nreceivers; i++)
 	{
@@ -841,6 +1851,26 @@ GpIcSendBegin(const char *token, int slice, int self, int nreceivers,
 	{
 		IcOut	   *out = &s->outs[i];
 
+		/* UDP: nothing to connect; the first packets say who sends */
+		if (strncmp(addresses[i], "udp:", 4) == 0 ||
+			strncmp(addresses[i], "udpunix:", 8) == 0)
+		{
+			(void) GpIcAddress();	/* this process's socket, for the ACKs */
+			udp_resolve(addresses[i], &out->addr, &out->addrlen);
+			out->udp = true;
+			out->index = (uint32) i;
+			out->address = MemoryContextStrdup(TopMemoryContext, addresses[i]);
+			out->window = udp_room();
+			out->srtt = (int64) gp_interconnect_default_rtt * 1000;
+			out->rttvar = out->srtt / 2;
+			out->rto = Min(Max(out->srtt + 4 * out->rttvar,
+							   (int64) gp_interconnect_min_rto * 1000),
+						   IC_UDP_MAX_RTO_US);
+			out->last_heard = out->last_query = GetCurrentTimestamp();
+			out->wanted = true;
+			continue;
+		}
+
 		out->sock = ic_connect(addresses[i]);
 		out->wanted = true;
 		memcpy(out->buf, &hs, sizeof(hs));
@@ -856,11 +1886,11 @@ GpIcSend(GpIcSender *s, int receiver, const char *data, int len)
 	if (receiver >= 0)
 	{
 		Assert(receiver < s->nreceivers);
-		out_append(&s->outs[receiver], (uint32) len, data, len);
+		out_append(s, &s->outs[receiver], (uint32) len, data, len);
 		return;
 	}
 	for (int i = 0; i < s->nreceivers; i++)
-		out_append(&s->outs[i], (uint32) len, data, len);
+		out_append(s, &s->outs[i], (uint32) len, data, len);
 }
 
 bool
@@ -879,6 +1909,8 @@ sender_free(GpIcSender *s)
 	{
 		if (s->outs[i].sock != PGINVALID_SOCKET)
 			closesocket(s->outs[i].sock);
+		if (s->outs[i].udp)
+			udp_out_forget(&s->outs[i]);
 		pfree(s->outs[i].buf);
 	}
 	pfree(s->outs);
@@ -890,8 +1922,21 @@ GpIcSendEnd(GpIcSender *s)
 {
 	for (int i = 0; i < s->nreceivers; i++)
 	{
-		out_append(&s->outs[i], IC_END_OF_ROWS, NULL, 0);
-		out_flush(&s->outs[i]);
+		IcOut	   *out = &s->outs[i];
+
+		out_append(s, out, IC_END_OF_ROWS, NULL, 0);
+		if (!out->udp)
+		{
+			out_flush(out);
+			continue;
+		}
+
+		/* every byte acknowledged, then CLOSE: the receiver may go */
+		udp_out_flush(s, out, true);
+		if (out->wanted)
+			udp_put(&out->addr, out->addrlen, IC_UDP_CLOSE, s->token,
+					(uint32) s->slice, s->self, out->index, out->sent, 0,
+					NULL, 0);
 	}
 	senders = list_delete_ptr(senders, s);
 	sender_free(s);
@@ -927,11 +1972,59 @@ ic_xact_callback(XactEvent event, void *arg)
 		in_close(in);
 	list_free(unclaimed);
 	unclaimed = NIL;
+
+	list_free_deep(udp_ended);
+	udp_ended = NIL;
 }
 
 void
 GpIcInit(void)
 {
+	DefineCustomIntVariable("gp.interconnect_queue_depth",
+							"Sets the maximum size of the receive queue for each connection in the UDP interconnect",
+							"The packets' worth of room a receiver has for each sender's rows, which a sender does not send beyond.",
+							&gp_interconnect_queue_depth,
+							4, 1, 4096, PGC_USERSET, 0,
+							NULL, NULL, NULL);
+	DefineCustomIntVariable("gp.max_packet_size",
+							"Sets the max packet size for the Interconnect.",
+							NULL,
+							&gp_max_packet_size,
+							8192, 512, 65507, PGC_USERSET, 0,
+							NULL, NULL, NULL);
+	DefineCustomIntVariable("gp.interconnect_transmit_timeout",
+							"Timeout (in seconds) on interconnect to transmit a packet.",
+							"A UDP sender that hears nothing from its receiver this long gives up.",
+							&gp_interconnect_transmit_timeout,
+							3600, 1, 7200, PGC_USERSET, GUC_UNIT_S,
+							NULL, NULL, NULL);
+	DefineCustomIntVariable("gp.interconnect_min_rto",
+							"Sets the min RTO (in ms) for UDP interconnect.",
+							NULL,
+							&gp_interconnect_min_rto,
+							20, 1, 1000, PGC_USERSET, GUC_UNIT_MS,
+							NULL, NULL, NULL);
+	DefineCustomIntVariable("gp.interconnect_default_rtt",
+							"Sets the default rtt (in ms) for UDP interconnect.",
+							NULL,
+							&gp_interconnect_default_rtt,
+							20, 1, 1000, PGC_USERSET, GUC_UNIT_MS,
+							NULL, NULL, NULL);
+	DefineCustomIntVariable("gp.udpic_dropacks_percent",
+							"Sets the percentage of correctly-received acknowledgment packets to synthetically drop, for testing.",
+							NULL,
+							&gp_udpic_dropacks_percent,
+							0, 0, 100, PGC_USERSET,
+							GUC_NO_SHOW_ALL | GUC_NOT_IN_SAMPLE,
+							NULL, NULL, NULL);
+	DefineCustomIntVariable("gp.udpic_dropxmit_percent",
+							"Sets the percentage of correctly-received data packets to synthetically drop, for testing.",
+							NULL,
+							&gp_udpic_dropxmit_percent,
+							0, 0, 100, PGC_USERSET,
+							GUC_NO_SHOW_ALL | GUC_NOT_IN_SAMPLE,
+							NULL, NULL, NULL);
+
 	if (GpClusterIsSingleNode())
 		return;
 	RegisterXactCallback(ic_xact_callback, NULL);

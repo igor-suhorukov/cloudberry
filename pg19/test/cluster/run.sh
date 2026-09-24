@@ -1350,6 +1350,44 @@ mine" ] && ok "a transaction reads its own rows, and a LIMIT leaves the connecti
 	relay_same "streamed and relayed, the same rows: redistributed by the legacy hash" \
 		"SELECT count(*), sum(lo2.k) FROM lo JOIN lo2 USING (a);"
 
+	# udpifc: the same rows in UDP packets, each receiver acknowledging them
+	# and saying how much room it has (gp_ic.c) -- through a window of one
+	# small packet, and with packets and acknowledgements lost, as
+	# Cloudberry's gp_udpic_drop* settings lose them: sent again, and the
+	# sender whose receiver's room stays shut asks it what it has.
+	udp_same() {				# udp_same <what> <settings> <sql>: tcp and udpifc agree
+		local tcp udp
+		tcp=$(q 0 "$3")
+		udp=$(q 0 "SET gp.interconnect_type = udpifc; $2 $3")
+		[ "$tcp" = "$udp" ] && [ -n "$tcp" ] && ok "$1" \
+			|| notok "$1: tcp and udpifc rows agree" "tcp: $tcp / udpifc: $udp"
+	}
+	udp_same "udpifc, the same rows: two Motions below a Gather" "" \
+		"SELECT y, count(*), sum(a) FROM o JOIN po ON o.b = po.y GROUP BY y ORDER BY y;"
+	udp_same "udpifc, the same rows: sixty thousand rows between segments, a window of one small packet" \
+		"SET gp.interconnect_queue_depth = 1; SET gp.max_packet_size = 600;" \
+		"SELECT count(*), sum(length(s)) FROM (SELECT s, count(*) FROM bo GROUP BY s) x;"
+	udp_same "udpifc, the same rows: a tenth of the packets lost, and a third of the acknowledgements" \
+		"SET gp.udpic_dropxmit_percent = 10; SET gp.udpic_dropacks_percent = 30;" \
+		"SELECT count(*), sum(length(s)) FROM (SELECT s, count(*) FROM bo GROUP BY s) x;"
+	udp_same "udpifc, the same rows: a LIMIT whose receivers stop their senders" "" \
+		"SELECT count(*) FROM (SELECT o.a FROM o JOIN po ON o.b = po.y LIMIT 7) x;"
+
+	# notin's: a subquery's Broadcast inside another's.  Each slice reads its
+	# Motion only until its ANY is decided, and its plan runs out before some
+	# senders have sent it a packet -- which it waits for, to stop them, as it
+	# would not hear them once idle; the inner Motion, which the fragment on
+	# every segment carries, it leaves to the readers that receive it.
+	q 0 "CREATE TABLE ni1 (c int) DISTRIBUTED BY (c);
+		CREATE TABLE ni2 (c int) DISTRIBUTED BY (c);
+		CREATE TABLE ni3 (c int) DISTRIBUTED BY (c);
+		INSERT INTO ni1 SELECT generate_series(1, 10);
+		INSERT INTO ni2 SELECT generate_series(1, 5);
+		INSERT INTO ni3 VALUES (1), (2), (3);
+		ANALYZE ni1; ANALYZE ni2; ANALYZE ni3;" >/dev/null
+	udp_same "udpifc, the same rows: a subquery's Motion inside another's, each read until its ANY is decided" "" \
+		"SELECT c FROM ni1 WHERE NOT c = ALL (SELECT c FROM ni2 WHERE NOT c > ALL (SELECT c FROM ni3)) ORDER BY c;"
+
 	# The readers, seen from a segment while the session that used them lives:
 	# as many on each segment as the widest statement had slices below its
 	# Gather, kept for the next statement rather than started again.
