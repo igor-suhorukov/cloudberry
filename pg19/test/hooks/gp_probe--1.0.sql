@@ -79,3 +79,6 @@ CREATE FUNCTION gp_probe.scan_log() RETURNS text
 -- probe that went through it would say so.
 CREATE FUNCTION gp_probe.arm_fetch_fails(on_off boolean) RETURNS void
   AS 'MODULE_PATHNAME', 'gp_probe_arm_fetch_fails' LANGUAGE C STRICT;
+-- O19: what the method says a table's main fork takes; -1 for its files.
+CREATE FUNCTION gp_probe.arm_size(bytes bigint) RETURNS void
+  AS 'MODULE_PATHNAME', 'gp_probe_arm_size' LANGUAGE C STRICT;

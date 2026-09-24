@@ -880,6 +880,33 @@ fi
 is "and a heap table is rewritten as before, asking no method" o17 heap_calls 0
 
 ###############################################################################
+echo "O19 the size functions ask the method what its table takes"
+###############################################################################
+session o19 <<'SQL'
+CREATE TABLE o19_t (a int) USING gp_probe_am;
+INSERT INTO o19_t SELECT generate_series(1, 1000);
+CREATE TABLE o19_heap (a int);
+INSERT INTO o19_heap SELECT generate_series(1, 1000);
+VACUUM o19_t, o19_heap;
+SELECT gp_probe.arm_size(123456789);
+SELECT 'rel=' || pg_relation_size('o19_t');
+SELECT 'fsm=' || pg_relation_size('o19_t', 'fsm');
+SELECT 'init=' || pg_relation_size('o19_t', 'init');
+SELECT 'table=' || (pg_table_size('o19_t') - 123456789 = pg_relation_size('o19_t', 'fsm') + pg_relation_size('o19_t', 'vm'))::text;
+SELECT 'total=' || (pg_total_relation_size('o19_t') = pg_table_size('o19_t'))::text;
+SELECT 'heap=' || (pg_relation_size('o19_heap') = 8192 * (SELECT relpages FROM pg_class WHERE relname = 'o19_heap'))::text;
+SELECT gp_probe.arm_size(-1);
+SELECT 'files=' || (pg_relation_size('o19_t') = pg_relation_size('o19_heap'))::text;
+SQL
+is "pg_relation_size reports what the method says of the main fork" o19 rel 123456789
+is "and of a fork it asks for, the method's answer too" o19 fsm 24576
+is "a fork the table does not have takes nothing" o19 init 0
+is "pg_table_size adds up what the method says of all the forks" o19 table true
+is "and pg_total_relation_size builds on it" o19 total true
+is "a heap table's size is its files', as before" o19 heap true
+is "disarmed, the method answers with the files it has" o19 files true
+
+###############################################################################
 echo "O23 extension marks: pg_checksums passes over what an extension marked, pg_upgrade carries it"
 ###############################################################################
 # Last, because it stops the server: pg_checksums reads a stopped cluster.

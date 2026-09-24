@@ -64,6 +64,7 @@
 #include "replication/syncrep.h"
 #include "storage/lock.h"
 #include "storage/md.h"
+#include "storage/smgr.h"
 #include "tcop/utility.h"
 #include "utils/array.h"
 #include "utils/builtins.h"
@@ -824,6 +825,30 @@ probe_relation_add_columns(Relation rel, int ncolumns,
 		   RelationGetRelationName(rel), cols.data, (long long) rows);
 }
 
+/*
+ * O19: what the probe's method says its tables take.  While armed, the main
+ * fork takes arm_size bytes, whatever its files hold; otherwise it answers
+ * as heap's files would, 0 for a fork the table does not have.
+ */
+static int64 arm_size = -1;
+
+static uint64
+probe_relation_size(Relation rel, ForkNumber forknum)
+{
+	uint64		size = 0;
+
+	for (ForkNumber f = 0; f <= MAX_FORKNUM; f++)
+	{
+		if (forknum != InvalidForkNumber && f != forknum)
+			continue;
+		if (f == MAIN_FORKNUM && arm_size >= 0)
+			size += arm_size;
+		else if (smgrexists(RelationGetSmgr(rel), f))
+			size += (uint64) smgrnblocks(RelationGetSmgr(rel), f) * BLCKSZ;
+	}
+	return size;
+}
+
 /* A table of the probe's method keeps its TOAST in a heap table. */
 static Oid
 probe_relation_toast_am(Relation rel)
@@ -844,6 +869,7 @@ probe_am_init(void)
 	probe_am_routine.index_validate_scan = probe_index_validate_scan;
 	probe_am_routine.relation_toast_am = probe_relation_toast_am;
 	probe_am_routine.index_fetch_tuple = probe_index_fetch_tuple;
+	probe_am_routine.relation_size = probe_relation_size;
 
 	memset(&probe_am_ext, 0, sizeof(probe_am_ext));
 	probe_am_ext.size = sizeof(TableAmExtRoutine);
@@ -852,6 +878,7 @@ probe_am_init(void)
 	probe_am_ext.scan_by_column = true;
 	probe_am_ext.index_unique_check = probe_index_unique_check;
 	probe_am_ext.relation_add_columns = probe_relation_add_columns;
+	probe_am_ext.size_from_am = true;
 	RegisterTableAmExtension(&probe_am_routine, &probe_am_ext);
 }
 
@@ -887,6 +914,7 @@ PG_FUNCTION_INFO_V1(gp_probe_am_level);
 PG_FUNCTION_INFO_V1(gp_probe_am_fillfactor);
 PG_FUNCTION_INFO_V1(gp_probe_scan_log);
 PG_FUNCTION_INFO_V1(gp_probe_arm_fetch_fails);
+PG_FUNCTION_INFO_V1(gp_probe_arm_size);
 
 Datum
 gp_probe_reset(PG_FUNCTION_ARGS)
@@ -905,6 +933,7 @@ gp_probe_reset(PG_FUNCTION_ARGS)
 	if (scan_log)
 		resetStringInfo(scan_log);
 	arm_fetch_fails = false;
+	arm_size = -1;
 	arm_star_rel = InvalidOid;
 	if (arm_column_name)
 		pfree(arm_column_name);
@@ -1356,6 +1385,14 @@ Datum
 gp_probe_arm_fetch_fails(PG_FUNCTION_ARGS)
 {
 	arm_fetch_fails = PG_GETARG_BOOL(0);
+	PG_RETURN_VOID();
+}
+
+/* O19: what the method says its tables' main fork takes; -1, its files */
+Datum
+gp_probe_arm_size(PG_FUNCTION_ARGS)
+{
+	arm_size = PG_GETARG_INT64(0);
 	PG_RETURN_VOID();
 }
 
