@@ -785,6 +785,46 @@ is "a parallel scan is given its plan node too" o15 parallel true
 is "a heap table's scans are not asked" o15 heap "."
 
 ###############################################################################
+echo "O16 a unique index's probe of the method's table is the method's to answer"
+###############################################################################
+# While armed, gp_probe_am's own index fetch fails: a duplicate key found
+# through the core's probe would end in that error, not in the unique
+# violation the method's answer gives.
+session o16 <<'SQL'
+CREATE TABLE o16_t (a int PRIMARY KEY, b text) USING gp_probe_am;
+INSERT INTO o16_t VALUES (1, 'x'), (2, 'y');
+DELETE FROM o16_t WHERE a = 2;
+CREATE TABLE o16_heap (a int PRIMARY KEY);
+INSERT INTO o16_heap VALUES (1);
+SELECT gp_probe.reset();
+SELECT gp_probe.arm_fetch_fails(true);
+INSERT INTO o16_t VALUES (1, 'again');
+SELECT 'calls_unique_check=' || gp_probe.calls('unique_check');
+SELECT 'detail_unique_check=' || gp_probe.detail('unique_check');
+INSERT INTO o16_t VALUES (2, 'back');
+SELECT 'reinserted=' || count(*) FROM (SELECT 1 FROM o16_t WHERE b = 'back') s;
+SELECT 'dead=' || gp_probe.detail('unique_check');
+SELECT gp_probe.arm_fetch_fails(false);
+SELECT gp_probe.reset();
+INSERT INTO o16_heap VALUES (1);
+SELECT 'heap_calls=' || gp_probe.calls('unique_check');
+SQL
+fired "a key found in the index is checked by the method" o16 unique_check
+if grep -q 'duplicate key value violates unique constraint "o16_t_pkey"' "$WORK/o16.out" \
+		&& ! grep -q "the method's index fetch was called" "$WORK/o16.out"; then
+	ok "and the duplicate is refused on its answer, never through the fetch"
+else
+	notok "the duplicate should be refused on the method's answer" "$(grep ERROR "$WORK/o16.out")"
+fi
+is "a key whose row was deleted is not live, and its insert goes in" o16 reinserted 1
+if val o16 dead | grep -q "not live"; then
+	ok "the method said the deleted row's key was not live"
+else
+	notok "the method should say the deleted row is not live" "$(val o16 dead)"
+fi
+is "a heap table's probe fetches as before, and asks no method" o16 heap_calls 0
+
+###############################################################################
 echo "O23 extension marks: pg_checksums passes over what an extension marked, pg_upgrade carries it"
 ###############################################################################
 # Last, because it stops the server: pg_checksums reads a stopped cluster.

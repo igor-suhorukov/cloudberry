@@ -75,3 +75,7 @@ CREATE FUNCTION gp_probe.am_fillfactor(rel regclass) RETURNS int
 -- said: its kind, table and the columns the node reads.
 CREATE FUNCTION gp_probe.scan_log() RETURNS text
   AS 'MODULE_PATHNAME', 'gp_probe_scan_log' LANGUAGE C;
+-- O16: make the method's own index fetch fail, so that a unique index's
+-- probe that went through it would say so.
+CREATE FUNCTION gp_probe.arm_fetch_fails(on_off boolean) RETURNS void
+  AS 'MODULE_PATHNAME', 'gp_probe_arm_fetch_fails' LANGUAGE C STRICT;

@@ -94,6 +94,7 @@ typedef enum ProbeEvent
 	EV_DEPARSE_COLUMN,
 	EV_QUERY_LOCKMODE,
 	EV_DEPARSE_RANGE,
+	EV_UNIQUE_CHECK,
 	EV_COUNT
 } ProbeEvent;
 
@@ -101,6 +102,7 @@ static const char *const event_name[EV_COUNT] = {
 	"new_oid", "combocid_create", "combocid_miss", "analyze_sample",
 	"explain_label", "mdunlink", "raw_parser", "star_filter",
 	"columnref", "deparse_column", "query_lockmode", "deparse_range",
+	"unique_check",
 };
 
 static int64 calls[EV_COUNT];
@@ -699,6 +701,52 @@ probe_scan_extractcolumns(TableScanDesc scan, PlanState *ps)
 	MemoryContextSwitchTo(old);
 }
 
+/*
+ * O16: a unique index's probe, answered by the method: heap's fetch, made
+ * here rather than through the core's table_index_fetch_tuple_check().
+ * While armed, the method's own index fetch fails, so a probe that went
+ * through the core would say so.
+ */
+static bool arm_fetch_fails = false;
+
+static bool
+probe_index_fetch_tuple(IndexFetchTableData *scan, ItemPointer tid,
+						Snapshot snapshot, TupleTableSlot *slot,
+						bool *call_again, bool *all_dead)
+{
+	if (arm_fetch_fails)
+		ereport(ERROR,
+				(errmsg("gp_probe: the method's index fetch was called")));
+	return GetHeapamTableAmRoutine()->index_fetch_tuple(scan, tid, snapshot,
+														slot, call_again,
+														all_dead);
+}
+
+static bool
+probe_index_unique_check(Relation rel, ItemPointer tid, Snapshot snapshot,
+						 bool *all_dead)
+{
+	const TableAmRoutine *heap = GetHeapamTableAmRoutine();
+	IndexFetchTableData *scan;
+	TupleTableSlot *slot;
+	bool		call_again = false;
+	bool		found;
+
+	slot = MakeSingleTupleTableSlot(RelationGetDescr(rel),
+									heap->slot_callbacks(rel));
+	scan = heap->index_fetch_begin(rel, SO_NONE);
+	found = heap->index_fetch_tuple(scan, tid, snapshot, slot, &call_again,
+									all_dead);
+	heap->index_fetch_end(scan);
+	ExecDropSingleTupleTableSlot(slot);
+
+	record(EV_UNIQUE_CHECK, "%s (%u,%u): %s",
+		   RelationGetRelationName(rel),
+		   ItemPointerGetBlockNumber(tid), ItemPointerGetOffsetNumber(tid),
+		   found ? "live" : "not live");
+	return found;
+}
+
 /* A table of the probe's method keeps its TOAST in a heap table. */
 static Oid
 probe_relation_toast_am(Relation rel)
@@ -718,12 +766,14 @@ probe_am_init(void)
 	probe_am_routine.index_build_range_scan = probe_index_build_range_scan;
 	probe_am_routine.index_validate_scan = probe_index_validate_scan;
 	probe_am_routine.relation_toast_am = probe_relation_toast_am;
+	probe_am_routine.index_fetch_tuple = probe_index_fetch_tuple;
 
 	memset(&probe_am_ext, 0, sizeof(probe_am_ext));
 	probe_am_ext.size = sizeof(TableAmExtRoutine);
 	probe_am_ext.reloptions = probe_am_reloptions;
 	probe_am_ext.scan_extractcolumns = probe_scan_extractcolumns;
 	probe_am_ext.scan_by_column = true;
+	probe_am_ext.index_unique_check = probe_index_unique_check;
 	RegisterTableAmExtension(&probe_am_routine, &probe_am_ext);
 }
 
@@ -758,6 +808,7 @@ PG_FUNCTION_INFO_V1(gp_probe_am_handler);
 PG_FUNCTION_INFO_V1(gp_probe_am_level);
 PG_FUNCTION_INFO_V1(gp_probe_am_fillfactor);
 PG_FUNCTION_INFO_V1(gp_probe_scan_log);
+PG_FUNCTION_INFO_V1(gp_probe_arm_fetch_fails);
 
 Datum
 gp_probe_reset(PG_FUNCTION_ARGS)
@@ -775,6 +826,7 @@ gp_probe_reset(PG_FUNCTION_ARGS)
 	arm_analyze_rel = InvalidOid;
 	if (scan_log)
 		resetStringInfo(scan_log);
+	arm_fetch_fails = false;
 	arm_star_rel = InvalidOid;
 	if (arm_column_name)
 		pfree(arm_column_name);
@@ -1219,6 +1271,14 @@ Datum
 gp_probe_scan_log(PG_FUNCTION_ARGS)
 {
 	PG_RETURN_TEXT_P(cstring_to_text(scan_log ? scan_log->data : ""));
+}
+
+/* O16: make the method's index fetch fail, or not */
+Datum
+gp_probe_arm_fetch_fails(PG_FUNCTION_ARGS)
+{
+	arm_fetch_fails = PG_GETARG_BOOL(0);
+	PG_RETURN_VOID();
 }
 
 void
