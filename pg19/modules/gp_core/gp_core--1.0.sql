@@ -198,15 +198,31 @@ CREATE VIEW pg_catalog.gp_segment_configuration AS
 
 /*
  * gp_configuration_history: what FTS records of each change it makes to the
- * cluster.  Nothing writes it until FTS does, at M4, but a user may, with
- * allow_system_table_mods on, as a catalog is written: so it is a table, one
- * in each database where Cloudberry's is one for the node.
+ * cluster, and what a user writes, with allow_system_table_mods on, as a
+ * catalog is written.  FTS's rows are a file in the coordinator's data
+ * directory (gp_fts.c), which every database reads, as every database reads
+ * Cloudberry's shared catalog; a user's are kept in the database they were
+ * written in, in gp_internal.configuration_history, which a row written to
+ * the view goes to.
  */
-CREATE TABLE pg_catalog.gp_configuration_history (
+CREATE FUNCTION gp_internal.fts_history(
+	OUT "time" timestamptz,
+	OUT dbid int2,
+	OUT "desc" text)
+RETURNS SETOF record
+AS 'MODULE_PATHNAME', 'gp_fts_history'
+LANGUAGE C STRICT VOLATILE;
+
+CREATE TABLE gp_internal.configuration_history (
 	"time" timestamptz NOT NULL,
 	dbid int2 NOT NULL,
 	"desc" text
 );
+
+CREATE VIEW pg_catalog.gp_configuration_history AS
+	SELECT * FROM gp_internal.fts_history()
+	UNION ALL
+	SELECT * FROM gp_internal.configuration_history;
 
 CREATE FUNCTION gp_internal.catalog_write_check()
 RETURNS trigger
@@ -214,9 +230,19 @@ AS 'MODULE_PATHNAME', 'gp_catalog_write_check'
 LANGUAGE C;
 
 CREATE TRIGGER gp_catalog_write_check
-	BEFORE INSERT OR UPDATE OR DELETE OR TRUNCATE
+	BEFORE INSERT OR UPDATE OR DELETE
 	ON pg_catalog.gp_configuration_history
 	FOR EACH STATEMENT EXECUTE FUNCTION gp_internal.catalog_write_check();
+
+CREATE FUNCTION gp_internal.configuration_history_write()
+RETURNS trigger
+AS 'MODULE_PATHNAME', 'gp_catalog_configuration_history_write'
+LANGUAGE C;
+
+CREATE TRIGGER gp_configuration_history_write
+	INSTEAD OF INSERT OR UPDATE OR DELETE
+	ON pg_catalog.gp_configuration_history
+	FOR EACH ROW EXECUTE FUNCTION gp_internal.configuration_history_write();
 
 /*
  * gp_distribution_policy: how each table's rows are spread, as its "gp"
@@ -942,3 +968,14 @@ COMMENT ON AGGREGATE pg_catalog.median(timestamp) IS
 	'median, as percentile_cont(0.5) computes it (Apache Cloudberry)';
 COMMENT ON AGGREGATE pg_catalog.median(timestamptz) IS
 	'median, as percentile_cont(0.5) computes it (Apache Cloudberry)';
+
+/*
+ * FTS (gp_fts.c).  gp_request_fts_probe_scan(): probe the segments now, and
+ * return once a probe that began after the call has ended, as Cloudberry's
+ * does -- at once where no prober runs, as on a coordinator whose segments
+ * have no mirrors.  On the coordinator only.
+ */
+CREATE FUNCTION pg_catalog.gp_request_fts_probe_scan()
+RETURNS bool
+AS 'MODULE_PATHNAME', 'gp_request_fts_probe_scan'
+LANGUAGE C VOLATILE;

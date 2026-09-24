@@ -31,6 +31,16 @@
  * server that does not start, with the line number in the message -- rather
  * than a query, much later, that dispatches somewhere unexpected.
  *
+ * The file gives each node the role it prefers.  Which one of a content's
+ * two nodes is its primary now, and whether they are in sync and up, is
+ * FTS's to say (gp_fts.c), and changes while the cluster runs: on the
+ * coordinator it is kept in shared memory, and in gpsegconfig_dump, the
+ * file Cloudberry's FTS writes of gp_segment_configuration for readers
+ * outside a transaction, which is read back when the server starts.  A
+ * backend works from its own copy, which it brings up to date when it is
+ * about to connect to the segments (GpClusterRefresh), so that the node a
+ * content id stands for does not change under a gang that is in use.
+ *
  * Cloudberry sources this file stands in for:
  *	  src/backend/cdb/cdbutil.c (the readGpSegConfig half), and
  *	  src/include/catalog/gp_segment_configuration.h
@@ -46,6 +56,10 @@
 #include "miscadmin.h"
 #include "postmaster/postmaster.h"
 #include "storage/fd.h"
+#include "storage/ipc.h"
+#include "storage/lwlock.h"
+#include "storage/shmem.h"
+#include "storage/spin.h"
 #include "utils/builtins.h"
 #include "utils/guc.h"
 #include "utils/memutils.h"
@@ -93,7 +107,30 @@ static int	cluster_nsegments = 0;
 /* This node's entry in it. */
 static const GpSegmentConfig *cluster_self = NULL;
 
+/*
+ * What FTS last published of each node, as cluster[] orders them, and the
+ * number it bumps at each change; in shared memory, on every node that has a
+ * cluster, though only the coordinator's changes.
+ */
+typedef struct GpClusterShared
+{
+	slock_t		mutex;
+	uint64		version;
+	int			nnodes;
+	GpClusterNodeState nodes[FLEXIBLE_ARRAY_MEMBER];
+} GpClusterShared;
+
+static GpClusterShared *cluster_shared = NULL;
+
+/* The version of it this backend's copy is, 0 before the first. */
+static uint64 cluster_version = 0;
+
+static shmem_request_hook_type prev_shmem_request = NULL;
+static shmem_startup_hook_type prev_shmem_startup = NULL;
+
 static void gp_cluster_read_file(const char *path);
+static bool cluster_read_dump(int elevel);
+static void cluster_build_segments(const char *path);
 
 /* ------------------------------------------------------------------------- */
 /* Reading the file                                                          */
@@ -261,6 +298,15 @@ gp_cluster_read_file(const char *path)
 					 errdetail("The role is \"p\" for a primary or \"m\" for a mirror.")));
 		node->role = field[0];
 
+		/*
+		 * The role the file gives is the node's preferred one, and the one it
+		 * has until FTS says otherwise; a primary and its mirror are not
+		 * known to be in sync until FTS has asked.
+		 */
+		node->preferred_role = node->role;
+		node->mode = 'n';
+		node->status = 'u';
+
 		field = next_field(&p);
 		if (field == NULL)
 			ereport(ERROR,
@@ -334,34 +380,6 @@ gp_cluster_read_file(const char *path)
 						path, ncoordinators),
 				 errdetail("The coordinator is the node with content id -1 and role \"p\".")));
 
-	/*
-	 * Collect the primaries.  The content ids have to run 0..n-1 without a
-	 * hole, because everything downstream -- the hash that picks a segment,
-	 * the gang that connects to them all -- indexes by content id.
-	 */
-	cluster_nsegments = 0;
-	for (int i = 0; i < nnodes; i++)
-		if (nodes[i].content >= 0 && nodes[i].role == 'p')
-			cluster_nsegments++;
-
-	cluster_segments = cluster_nsegments > 0
-		? (GpSegmentConfig *) palloc0_array(GpSegmentConfig, cluster_nsegments)
-		: NULL;
-
-	for (int i = 0; i < nnodes; i++)
-	{
-		if (nodes[i].content >= 0 && nodes[i].role == 'p')
-		{
-			if (nodes[i].content >= cluster_nsegments)
-				ereport(ERROR,
-						(errcode(ERRCODE_CONFIG_FILE_ERROR),
-						 errmsg("cluster configuration file \"%s\" has %d segments, so content id %d is out of range",
-								path, cluster_nsegments, nodes[i].content),
-						 errdetail("The content ids of the primaries run from 0 to one less than their number.")));
-			cluster_segments[nodes[i].content] = nodes[i];
-		}
-	}
-
 	cluster = nodes;
 	cluster_nnodes = nnodes;
 	MemoryContextSwitchTo(oldcxt);
@@ -400,6 +418,392 @@ gp_cluster_read_file(const char *path)
 							path, gp_dbid, cluster_self->content),
 					 errdetail("Content id -1 is the coordinator, which dispatches; every other node executes.")));
 	}
+
+	/*
+	 * On the coordinator, what FTS last found of the nodes, if it has found
+	 * anything: a primary it failed over from is a mirror now, and down, and
+	 * must not be dispatched to because the file prefers it.  A dump that
+	 * cannot be read is a server that does not start, as a file that cannot
+	 * be is.
+	 */
+	if (cluster_self->content == -1 && cluster_self->preferred_role == 'p')
+		(void) cluster_read_dump(ERROR);
+
+	cluster_build_segments(path);
+}
+
+/*
+ * Collect the primaries into cluster_segments, by content id.  The content ids
+ * have to run 0..n-1 without a hole, because everything downstream -- the
+ * hash that picks a segment, the gang that connects to them all -- indexes by
+ * content id; and each has one primary, which is the node whose role is 'p'
+ * now, not the one the file prefers.
+ */
+static void
+cluster_build_segments(const char *path)
+{
+	int			nsegments = 0;
+	MemoryContext oldcxt;
+
+	for (int i = 0; i < cluster_nnodes; i++)
+		if (cluster[i].content >= 0 && cluster[i].preferred_role == 'p')
+			nsegments++;
+
+	oldcxt = MemoryContextSwitchTo(TopMemoryContext);
+	cluster_segments = nsegments > 0
+		? (GpSegmentConfig *) palloc0_array(GpSegmentConfig, nsegments)
+		: NULL;
+	MemoryContextSwitchTo(oldcxt);
+	cluster_nsegments = nsegments;
+
+	for (int i = 0; i < cluster_nnodes; i++)
+	{
+		if (cluster[i].content >= 0 && cluster[i].preferred_role == 'p' &&
+			cluster[i].content >= nsegments)
+			ereport(ERROR,
+					(errcode(ERRCODE_CONFIG_FILE_ERROR),
+					 errmsg("cluster configuration file \"%s\" has %d segments, so content id %d is out of range",
+							path, nsegments, cluster[i].content),
+					 errdetail("The content ids of the primaries run from 0 to one less than their number.")));
+		if (cluster[i].content >= 0 && cluster[i].preferred_role == 'm' &&
+			cluster[i].content >= nsegments)
+			ereport(ERROR,
+					(errcode(ERRCODE_CONFIG_FILE_ERROR),
+					 errmsg("cluster configuration file \"%s\" has a mirror of content id %d, which has no primary",
+							path, cluster[i].content)));
+	}
+
+	for (int i = 0; i < cluster_nnodes; i++)
+		if (cluster[i].content >= 0 && cluster[i].role == 'p')
+			cluster_segments[cluster[i].content] = cluster[i];
+}
+
+/*
+ * Read gpsegconfig_dump, what FTS last wrote of the nodes: a line per node,
+ * "dbid content role preferred_role mode status port host address", as
+ * Cloudberry's FTS writes it.  Of each line the role, mode and status are
+ * taken, by dbid; the file this reads with the rest says which nodes there
+ * are and where, so a line for a node it does not list, or with another
+ * content id, is passed over with a warning -- the cluster was changed since
+ * FTS last wrote -- and a node with no line keeps what the file gives it.
+ * Nothing is taken unless every content id is left with one primary.
+ *
+ * No file is no change: FTS has not written one yet.  Anything else wrong is
+ * reported at elevel, and false returned with nothing changed.
+ */
+static bool
+cluster_read_dump(int elevel)
+{
+	FILE	   *fp;
+	char		buf[GP_CLUSTER_LINE_MAX];
+	int			lineno = 0;
+	GpClusterNodeState *states;
+
+	fp = AllocateFile(GP_CLUSTER_DUMP_FILE, "r");
+	if (fp == NULL)
+	{
+		if (errno == ENOENT)
+			return true;
+		ereport(elevel,
+				(errcode_for_file_access(),
+				 errmsg("could not open file \"%s\": %m", GP_CLUSTER_DUMP_FILE)));
+		return false;
+	}
+
+	states = palloc_array(GpClusterNodeState, cluster_nnodes);
+	for (int i = 0; i < cluster_nnodes; i++)
+	{
+		states[i].role = cluster[i].role;
+		states[i].mode = cluster[i].mode;
+		states[i].status = cluster[i].status;
+	}
+
+	while (fgets(buf, sizeof(buf), fp) != NULL)
+	{
+		int			dbid;
+		int			content;
+		char		role;
+		char		preferred;
+		char		mode;
+		char		status;
+		int			i;
+
+		lineno++;
+		if (sscanf(buf, "%d %d %c %c %c %c", &dbid, &content, &role,
+				   &preferred, &mode, &status) != 6 ||
+			(role != 'p' && role != 'm') || (mode != 's' && mode != 'n') ||
+			(status != 'u' && status != 'd'))
+		{
+			FreeFile(fp);
+			ereport(elevel,
+					(errcode(ERRCODE_DATA_CORRUPTED),
+					 errmsg("invalid line %d in file \"%s\"",
+							lineno, GP_CLUSTER_DUMP_FILE),
+					 errdetail("A line is \"dbid content role preferred_role mode status port host address\".")));
+			return false;
+		}
+
+		for (i = 0; i < cluster_nnodes; i++)
+			if (cluster[i].dbid == dbid)
+				break;
+		if (i == cluster_nnodes || cluster[i].content != content)
+		{
+			ereport(WARNING,
+					(errmsg("file \"%s\" has dbid %d with content id %d, which the cluster configuration file does not list; ignored",
+							GP_CLUSTER_DUMP_FILE, dbid, content)));
+			continue;
+		}
+		states[i].role = role;
+		states[i].mode = mode;
+		states[i].status = status;
+	}
+	if (ferror(fp))
+	{
+		FreeFile(fp);
+		ereport(elevel,
+				(errcode_for_file_access(),
+				 errmsg("could not read file \"%s\": %m", GP_CLUSTER_DUMP_FILE)));
+		return false;
+	}
+	FreeFile(fp);
+
+	/* One primary for each content id, the coordinator's included. */
+	for (int i = 0; i < cluster_nnodes; i++)
+	{
+		int			nprimaries = 0;
+
+		for (int j = 0; j < cluster_nnodes; j++)
+			if (cluster[j].content == cluster[i].content && states[j].role == 'p')
+				nprimaries++;
+		if (nprimaries != 1)
+		{
+			ereport(elevel,
+					(errcode(ERRCODE_DATA_CORRUPTED),
+					 errmsg("file \"%s\" gives content id %d %d primaries",
+							GP_CLUSTER_DUMP_FILE, cluster[i].content, nprimaries)));
+			return false;
+		}
+	}
+
+	for (int i = 0; i < cluster_nnodes; i++)
+	{
+		cluster[i].role = states[i].role;
+		cluster[i].mode = states[i].mode;
+		cluster[i].status = states[i].status;
+	}
+	pfree(states);
+	return true;
+}
+
+/*
+ * Write the states to gpsegconfig_dump, durably: a whole new file, synced,
+ * and renamed over the old one, the directory synced too.  In Cloudberry's
+ * form, so that its tools could read it; the host is the address.
+ */
+static void
+cluster_write_dump(const GpClusterNodeState *states)
+{
+	FILE	   *fp;
+
+	fp = AllocateFile(GP_CLUSTER_DUMP_FILE_TMP, "w");
+	if (fp == NULL)
+		ereport(ERROR,
+				(errcode_for_file_access(),
+				 errmsg("could not create file \"%s\": %m", GP_CLUSTER_DUMP_FILE_TMP)));
+
+	for (int i = 0; i < cluster_nnodes; i++)
+	{
+		const GpSegmentConfig *node = &cluster[i];
+
+		if (fprintf(fp, "%d %d %c %c %c %c %d %s %s\n", node->dbid,
+					node->content, states[i].role, node->preferred_role,
+					states[i].mode, states[i].status, node->port,
+					node->hostname, node->hostname) < 0)
+		{
+			FreeFile(fp);
+			ereport(ERROR,
+					(errcode_for_file_access(),
+					 errmsg("could not write file \"%s\": %m", GP_CLUSTER_DUMP_FILE_TMP)));
+		}
+	}
+	if (fflush(fp) != 0 || pg_fsync(fileno(fp)) != 0)
+	{
+		FreeFile(fp);
+		ereport(ERROR,
+				(errcode_for_file_access(),
+				 errmsg("could not fsync file \"%s\": %m", GP_CLUSTER_DUMP_FILE_TMP)));
+	}
+	if (FreeFile(fp) != 0)
+		ereport(ERROR,
+				(errcode_for_file_access(),
+				 errmsg("could not close file \"%s\": %m", GP_CLUSTER_DUMP_FILE_TMP)));
+
+	(void) durable_rename(GP_CLUSTER_DUMP_FILE_TMP, GP_CLUSTER_DUMP_FILE, ERROR);
+}
+
+/* ------------------------------------------------------------------------- */
+/* The live copy                                                             */
+/* ------------------------------------------------------------------------- */
+
+static Size
+cluster_shared_size(void)
+{
+	return add_size(offsetof(GpClusterShared, nodes),
+					mul_size(cluster_nnodes, sizeof(GpClusterNodeState)));
+}
+
+static void
+cluster_shmem_request(void)
+{
+	if (prev_shmem_request)
+		prev_shmem_request();
+	RequestAddinShmemSpace(MAXALIGN(cluster_shared_size()));
+}
+
+/*
+ * Runs in the postmaster, when the server starts and again after a crash --
+ * when FTS may have changed the cluster since the files were first read,
+ * which is why the coordinator reads its dump again here.
+ */
+static void
+cluster_shmem_startup(void)
+{
+	bool		found;
+
+	if (prev_shmem_startup)
+		prev_shmem_startup();
+
+	LWLockAcquire(AddinShmemInitLock, LW_EXCLUSIVE);
+	cluster_shared = ShmemInitStruct("gp_core cluster", cluster_shared_size(),
+									 &found);
+	if (!found)
+	{
+		if (!IsUnderPostmaster && cluster_self != NULL &&
+			cluster_self->content == -1 && cluster_self->preferred_role == 'p')
+			(void) cluster_read_dump(LOG);
+
+		SpinLockInit(&cluster_shared->mutex);
+		cluster_shared->version = 1;
+		cluster_shared->nnodes = cluster_nnodes;
+		for (int i = 0; i < cluster_nnodes; i++)
+		{
+			cluster_shared->nodes[i].role = cluster[i].role;
+			cluster_shared->nodes[i].mode = cluster[i].mode;
+			cluster_shared->nodes[i].status = cluster[i].status;
+		}
+	}
+	LWLockRelease(AddinShmemInitLock);
+}
+
+bool
+GpClusterRefresh(void)
+{
+	uint64		version;
+	bool		changed = false;
+
+	if (cluster_shared == NULL)
+		return false;
+
+	SpinLockAcquire(&cluster_shared->mutex);
+	version = cluster_shared->version;
+	if (version != cluster_version)
+	{
+		for (int i = 0; i < cluster_nnodes; i++)
+		{
+			cluster[i].role = cluster_shared->nodes[i].role;
+			cluster[i].mode = cluster_shared->nodes[i].mode;
+			cluster[i].status = cluster_shared->nodes[i].status;
+		}
+	}
+	SpinLockRelease(&cluster_shared->mutex);
+
+	if (version == cluster_version)
+		return false;
+	cluster_version = version;
+
+	for (int i = 0; i < cluster_nnodes; i++)
+	{
+		int			content = cluster[i].content;
+
+		if (content < 0 || content >= cluster_nsegments || cluster[i].role != 'p')
+			continue;
+		if (cluster_segments[content].dbid != cluster[i].dbid)
+			changed = true;
+		cluster_segments[content] = cluster[i];
+	}
+	return changed;
+}
+
+bool
+GpClusterStale(void)
+{
+	uint64		version;
+
+	if (cluster_shared == NULL)
+		return false;
+	SpinLockAcquire(&cluster_shared->mutex);
+	version = cluster_shared->version;
+	SpinLockRelease(&cluster_shared->mutex);
+	return version != cluster_version;
+}
+
+bool
+GpClusterIsPrimaryNow(int dbid)
+{
+	bool		primary = true;
+
+	if (cluster_shared == NULL)
+		return true;
+	for (int i = 0; i < cluster_nnodes; i++)
+	{
+		if (cluster[i].dbid != dbid)
+			continue;
+		SpinLockAcquire(&cluster_shared->mutex);
+		primary = cluster_shared->nodes[i].role == 'p' &&
+			cluster_shared->nodes[i].status == 'u';
+		SpinLockRelease(&cluster_shared->mutex);
+		break;
+	}
+	return primary;
+}
+
+uint64
+GpClusterLiveStates(GpClusterNodeState *states)
+{
+	uint64		version = 0;
+
+	if (cluster_shared == NULL)
+	{
+		for (int i = 0; i < cluster_nnodes; i++)
+		{
+			states[i].role = cluster[i].role;
+			states[i].mode = cluster[i].mode;
+			states[i].status = cluster[i].status;
+		}
+		return version;
+	}
+
+	SpinLockAcquire(&cluster_shared->mutex);
+	version = cluster_shared->version;
+	for (int i = 0; i < cluster_nnodes; i++)
+		states[i] = cluster_shared->nodes[i];
+	SpinLockRelease(&cluster_shared->mutex);
+	return version;
+}
+
+void
+GpClusterPublish(const GpClusterNodeState *states)
+{
+	Assert(cluster_shared != NULL);
+
+	/* Durable first: FTS promotes a mirror only once this has returned. */
+	cluster_write_dump(states);
+
+	SpinLockAcquire(&cluster_shared->mutex);
+	for (int i = 0; i < cluster_nnodes; i++)
+		cluster_shared->nodes[i] = states[i];
+	cluster_shared->version++;
+	SpinLockRelease(&cluster_shared->mutex);
 }
 
 /* ------------------------------------------------------------------------- */
@@ -425,6 +829,22 @@ const GpSegmentConfig *
 GpClusterSelf(void)
 {
 	return cluster_self;
+}
+
+int
+GpClusterNodes(const GpSegmentConfig **nodes)
+{
+	*nodes = cluster;
+	return cluster_nnodes;
+}
+
+bool
+GpClusterHasMirrors(void)
+{
+	for (int i = 0; i < cluster_nnodes; i++)
+		if (cluster[i].content >= 0 && cluster[i].preferred_role == 'm')
+			return true;
+	return false;
 }
 
 const GpSegmentConfig *
@@ -703,7 +1123,15 @@ GpClusterInit(void)
 							NULL, NULL, NULL);
 
 	if (gp_cluster_config != NULL && gp_cluster_config[0] != '\0')
+	{
 		gp_cluster_read_file(gp_cluster_config);
+
+		/* The live copy of what FTS finds; see cluster_shmem_startup(). */
+		prev_shmem_request = shmem_request_hook;
+		shmem_request_hook = cluster_shmem_request;
+		prev_shmem_startup = shmem_startup_hook;
+		shmem_startup_hook = cluster_shmem_startup;
+	}
 	else if (gp_role_setting == GP_ROLE_DISPATCH)
 		ereport(ERROR,
 				(errcode(ERRCODE_CONFIG_FILE_ERROR),
@@ -722,9 +1150,9 @@ PG_FUNCTION_INFO_V1(gp_segment_configuration);
  *		The cluster, as this node knows it.
  *
  * Cloudberry's is a shared catalog anyone can select from, and its own tools
- * read it constantly.  This is the same rows from the file; the columns are
- * the ones that exist yet, and mode and status join them with FTS, which is
- * what would maintain them.
+ * read it constantly.  This is the file's rows, with the role the file gives
+ * each node; gp_segment_configuration has the one it has now, with FTS's
+ * mode and status.
  */
 Datum
 gp_segment_configuration(PG_FUNCTION_ARGS)
@@ -740,7 +1168,7 @@ gp_segment_configuration(PG_FUNCTION_ARGS)
 		bool		nulls[6] = {false, false, false, false, false, false};
 		char		role[2];
 
-		role[0] = node->role;
+		role[0] = node->preferred_role;
 		role[1] = '\0';
 
 		values[0] = Int32GetDatum(node->dbid);
@@ -759,6 +1187,7 @@ gp_segment_configuration(PG_FUNCTION_ARGS)
 /* One row of gp_segment_configuration, in Cloudberry's columns. */
 static void
 put_catalog_row(ReturnSetInfo *rsinfo, int dbid, int content, char role,
+				char preferred_role, char mode, char status,
 				int port, const char *host, const char *datadir)
 {
 	Datum		values[11];
@@ -767,9 +1196,9 @@ put_catalog_row(ReturnSetInfo *rsinfo, int dbid, int content, char role,
 	values[0] = Int16GetDatum(dbid);
 	values[1] = Int16GetDatum(content);
 	values[2] = CharGetDatum(role);
-	values[3] = CharGetDatum(role);		/* preferred_role */
-	values[4] = CharGetDatum('n');		/* mode: no mirror in sync with it */
-	values[5] = CharGetDatum('u');		/* status: up */
+	values[3] = CharGetDatum(preferred_role);
+	values[4] = CharGetDatum(mode);
+	values[5] = CharGetDatum(status);
 	values[6] = Int32GetDatum(port);
 	values[7] = CStringGetTextDatum(host);
 	values[8] = CStringGetTextDatum(host);	/* address */
@@ -786,18 +1215,21 @@ PG_FUNCTION_INFO_V1(gp_catalog_segment_configuration);
  *		The rows of Cloudberry's gp_segment_configuration, which the view of
  *		that name selects.
  *
- * What the file lists, in Cloudberry's columns and types.  Mode and status
- * are what FTS keeps, and FTS is M4's: until then every node is up ('u') and
- * has no mirror in sync with it ('n'), which is what Cloudberry says of a
- * primary without one; each node's preferred role is the role it has.  The
- * address is the host, as gpinitsystem writes it when it is given no other,
- * and the warehouse is none.  With no cluster configured, the node itself,
- * as Cloudberry's single-node mode lists it.
+ * What the file lists, in Cloudberry's columns and types, with what FTS last
+ * published of each node (gp_fts.c): the role it has now -- a mirror FTS
+ * promoted is a primary, and the primary it failed over from a mirror, down
+ * -- and whether a primary and its mirror are in sync.  Until FTS says
+ * otherwise each node has the role the file prefers, is up ('u'), and is not
+ * known to be in sync ('n'), which is what Cloudberry says of a primary
+ * without a mirror.  The address is the host, as gpinitsystem writes it when
+ * it is given no other, and the warehouse is none.  With no cluster
+ * configured, the node itself, as Cloudberry's single-node mode lists it.
  */
 Datum
 gp_catalog_segment_configuration(PG_FUNCTION_ARGS)
 {
 	ReturnSetInfo *rsinfo = (ReturnSetInfo *) fcinfo->resultinfo;
+	GpClusterNodeState *states;
 
 	InitMaterializedSRF(fcinfo, 0);
 
@@ -808,16 +1240,19 @@ gp_catalog_segment_configuration(PG_FUNCTION_ARGS)
 		if (gethostname(host, sizeof(host)) != 0)
 			strlcpy(host, "localhost", sizeof(host));
 		host[sizeof(host) - 1] = '\0';
-		put_catalog_row(rsinfo, gp_dbid, -1, 'p', PostPortNumber, host,
-						DataDir);
+		put_catalog_row(rsinfo, gp_dbid, -1, 'p', 'p', 'n', 'u',
+						PostPortNumber, host, DataDir);
 		return (Datum) 0;
 	}
 
+	states = palloc_array(GpClusterNodeState, cluster_nnodes);
+	(void) GpClusterLiveStates(states);
 	for (int i = 0; i < cluster_nnodes; i++)
 	{
 		const GpSegmentConfig *node = &cluster[i];
 
-		put_catalog_row(rsinfo, node->dbid, node->content, node->role,
+		put_catalog_row(rsinfo, node->dbid, node->content, states[i].role,
+						node->preferred_role, states[i].mode, states[i].status,
 						node->port, node->hostname, node->datadir);
 	}
 

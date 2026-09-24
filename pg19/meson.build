@@ -248,6 +248,7 @@ modules = [
                      'modules/gp_core/gp_dispatch.c',
                      'modules/gp_core/gp_dtx.c',
                      'modules/gp_core/gp_fault.c',
+                     'modules/gp_core/gp_fts.c',
                      'modules/gp_core/gp_gdd.c',
                      'modules/gp_core/gp_loopback.c',
                      'modules/gp_core/gp_ddl.c',

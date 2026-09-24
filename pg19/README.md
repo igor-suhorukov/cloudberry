@@ -216,7 +216,9 @@ core series through a test module); `greenplum`, part of Cloudberry's
 tests of Cloudberry's `isolation2_schedule` that bear on M3 — distributed
 transactions and snapshots, locks and the global deadlock detector — run by
 Cloudberry's own driver on the same cluster, with a standby coordinator for
-the test that asks for one; `singlenode` and
+the test that asks for one; `fts`, M4's, a coordinator and three primaries
+each with a mirror, and what FTS does when a mirror or a primary stops;
+`singlenode` and
 `singlenode_isolation2`, Cloudberry's single-node suites with PostgreSQL 19's
 own regression tests; and PostGIS's regression suite.  Each is run under the
 planner and under ORCA where it plans.

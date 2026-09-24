@@ -88,6 +88,7 @@
 #include "storage/ipc.h"
 #include "storage/latch.h"
 #include "storage/lmgr.h"
+#include "storage/proc.h"
 #include "storage/procarray.h"
 #include "storage/waiteventset.h"
 #include "utils/acl.h"
@@ -385,6 +386,8 @@ gang_connect(void)
 
 	Assert(gang == NULL);
 
+	/* The primaries FTS last published: a gang is made to them. */
+	(void) GpClusterRefresh();
 	segs = GpClusterSegments(&nsegs);
 	if (nsegs == 0)
 		ereport(ERROR,
@@ -510,9 +513,56 @@ gang_build_wes(GpGang *g)
 	}
 }
 
+/*
+ * Is a node the gang is connected to no longer its content's primary?  FTS
+ * failed over from it: whatever it answers is no part of the cluster now.
+ */
+static bool
+gang_lost_primary(GpGang *g)
+{
+	if (!GpClusterStale())
+		return false;
+	for (int i = 0; i < g->nconns; i++)
+		if (!GpClusterIsPrimaryNow(g->conns[i].seg->dbid))
+			return true;
+	return false;
+}
+
+/*
+ * The session's gang, connected first if it is not.  A gang whose primaries
+ * FTS has since moved is let go as a transaction first asks for it, before
+ * the transaction has sent the segments anything, and the next one is made
+ * to the new primaries: only then, so that a caller holding the gang it was
+ * given earlier in the transaction does not find it gone.  A transaction
+ * that has sent them something has its part on the old ones, and cannot go
+ * on, even where an old primary still answers (Cloudberry's
+ * cdbcomponent_updateCdbComponents() and its gang check, and the isolation2
+ * test fts_session_reset).
+ */
 static GpGang *
 gang_get(void)
 {
+	static LocalTransactionId checked = InvalidLocalTransactionId;
+
+	if (gang != NULL && GpClusterStale())
+	{
+		if (gang_in_xact)
+		{
+			if (gang_lost_primary(gang))
+			{
+				gang_close();
+				ereport(ERROR,
+						(errcode(ERRCODE_CONNECTION_FAILURE),
+						 errmsg("gang was lost due to cluster reconfiguration")));
+			}
+		}
+		else if (checked != MyProc->vxid.lxid)
+		{
+			checked = MyProc->vxid.lxid;
+			if (GpClusterRefresh())
+				gang_close();
+		}
+	}
 	if (gang == NULL)
 		gang_connect();
 	return gang;
@@ -2142,6 +2192,20 @@ dispatch_xact_callback(XactEvent event, void *arg)
 			 */
 			if (labels_pending != NIL)
 				gang_prepare(gang_get(), true);
+
+			/*
+			 * A part on a primary FTS has failed over from is not to be
+			 * prepared there: the node is no part of the cluster now, and
+			 * its commits wait for a mirror that has left it.
+			 */
+			if (gang != NULL && gang_in_xact && gang_lost_primary(gang))
+			{
+				gang_close();
+				gang_xact_lost = false;
+				ereport(ERROR,
+						(errcode(ERRCODE_CONNECTION_FAILURE),
+						 errmsg("gang was lost due to cluster reconfiguration")));
+			}
 
 			/*
 			 * Before the coordinator commits: raising here still undoes the

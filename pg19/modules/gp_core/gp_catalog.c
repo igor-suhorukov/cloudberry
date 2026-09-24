@@ -29,13 +29,14 @@
  *
  *	 gp_id						a view of one fixed row
  *	 gp_segment_configuration	a view over the cluster file (gp_cluster.c)
- *	 gp_configuration_history	a table, until FTS writes it at M4
+ *	 gp_configuration_history	a view over FTS's history (gp_fts.c) and a
+ *								table of this database's, which a write to
+ *								it writes
  *	 gp_distribution_policy		a view over the "gp" labels, which a write
  *								to it writes (gp_policy.c reads them)
  *
- * A catalog is written only with allow_system_table_mods on.  The table and
- * the view here are ordinary ones, so a trigger refuses the rest in
- * Cloudberry's words.
+ * A catalog is written only with allow_system_table_mods on.  The views here
+ * are ordinary ones, so a trigger refuses the rest in Cloudberry's words.
  *
  * Cloudberry sources this file stands in for:
  *	  src/include/catalog/gp_id.h, gp_segment_configuration.h,
@@ -53,7 +54,9 @@
 #include "catalog/pg_attribute.h"
 #include "catalog/pg_class.h"
 #include "catalog/pg_seclabel.h"
+#include "catalog/pg_type.h"
 #include "commands/trigger.h"
+#include "executor/spi.h"
 #include "fmgr.h"
 #include "funcapi.h"
 #include "miscadmin.h"
@@ -95,6 +98,78 @@ gp_catalog_write_check(PG_FUNCTION_ARGS)
 				 errhint("Make sure the configuration parameter allow_system_table_mods is set.")));
 
 	return PointerGetDatum(NULL);
+}
+
+/* ------------------------------------------------------------------------- */
+/* gp_configuration_history                                                  */
+/* ------------------------------------------------------------------------- */
+
+PG_FUNCTION_INFO_V1(gp_catalog_configuration_history_write);
+
+/*
+ * gp_internal.configuration_history_write(), INSTEAD OF each row written to
+ * gp_configuration_history -- by a user with allow_system_table_mods on,
+ * which gp_catalog_write_check() checks first.  A row inserted goes to this
+ * database's table of them; one updated or deleted is found there, the
+ * first of that time, dbid and description, and one that is FTS's is not
+ * there, and is left alone, as its file is FTS's to write.
+ */
+Datum
+gp_catalog_configuration_history_write(PG_FUNCTION_ARGS)
+{
+	TriggerData *trigdata = (TriggerData *) fcinfo->context;
+	TupleDesc	tupdesc;
+	Oid			argtypes[6] = {TIMESTAMPTZOID, INT2OID, TEXTOID,
+		TIMESTAMPTZOID, INT2OID, TEXTOID};
+	Datum		values[6];
+	char		nulls[6];
+	HeapTuple	result;
+	const char *match = "ctid = (SELECT ctid FROM gp_internal.configuration_history"
+		" WHERE \"time\" = $1 AND dbid = $2 AND \"desc\" IS NOT DISTINCT FROM $3 LIMIT 1)";
+
+	if (!CALLED_AS_TRIGGER(fcinfo))
+		elog(ERROR, "gp_catalog_configuration_history_write: not called by the trigger manager");
+	tupdesc = RelationGetDescr(trigdata->tg_relation);
+
+	for (int i = 0; i < 3; i++)
+	{
+		bool		isnull;
+
+		values[i] = heap_getattr(trigdata->tg_trigtuple, i + 1, tupdesc, &isnull);
+		nulls[i] = isnull ? 'n' : ' ';
+		if (TRIGGER_FIRED_BY_UPDATE(trigdata->tg_event))
+		{
+			values[i + 3] = heap_getattr(trigdata->tg_newtuple, i + 1, tupdesc,
+										 &isnull);
+			nulls[i + 3] = isnull ? 'n' : ' ';
+		}
+	}
+
+	SPI_connect();
+	if (TRIGGER_FIRED_BY_INSERT(trigdata->tg_event))
+	{
+		SPI_execute_with_args("INSERT INTO gp_internal.configuration_history VALUES ($1, $2, $3)",
+							  3, argtypes, values, nulls, false, 0);
+		result = trigdata->tg_trigtuple;
+	}
+	else if (TRIGGER_FIRED_BY_UPDATE(trigdata->tg_event))
+	{
+		SPI_execute_with_args(psprintf("UPDATE gp_internal.configuration_history"
+									   " SET \"time\" = $4, dbid = $5, \"desc\" = $6 WHERE %s",
+									   match),
+							  6, argtypes, values, nulls, false, 0);
+		result = SPI_processed > 0 ? trigdata->tg_newtuple : NULL;
+	}
+	else
+	{
+		SPI_execute_with_args(psprintf("DELETE FROM gp_internal.configuration_history WHERE %s",
+									   match),
+							  3, argtypes, values, nulls, false, 0);
+		result = SPI_processed > 0 ? trigdata->tg_trigtuple : NULL;
+	}
+	SPI_finish();
+
+	return PointerGetDatum(result);
 }
 
 /* ------------------------------------------------------------------------- */

@@ -27,11 +27,16 @@
  * builds already do in spirit -- there the rows come from etcd behind a view,
  * and gp_segment_configuration stops being a catalog at all.
  *
- * The file is read once per backend, in _PG_init, and never again: a cluster
- * does not change shape at M2, because nothing yet moves a segment.  When FTS
- * arrives (M4) the live copy becomes shared memory that the FTS worker owns
- * and this file becomes its durable form; the readers below do not change,
- * only where they read from.
+ * The file says which nodes there are and where, and is read once, in
+ * _PG_init.  What FTS finds of them -- which node of a content is its primary
+ * now, whether a primary and its mirror are in sync, whether a node is up --
+ * changes while the cluster runs (gp_fts.c).  On the coordinator that is
+ * kept in shared memory, whose durable form is gpsegconfig_dump in its data
+ * directory, the file Cloudberry's FTS writes for readers outside a
+ * transaction: FTS writes the file, then shared memory, and a backend adopts
+ * what it finds there when it next connects to the segments
+ * (GpClusterRefresh), so that the primaries a gang reaches do not change
+ * under it.
  *
  *-------------------------------------------------------------------------
  */
@@ -41,29 +46,82 @@
 #include "postgres.h"
 
 /*
- * One node of the cluster.  The fields are the ones of Cloudberry's
- * gp_segment_configuration that anything needs yet; mode and status arrive
- * with FTS, which is what maintains them.
+ * One node of the cluster, in the columns of Cloudberry's
+ * gp_segment_configuration.  The file gives each node its preferred role;
+ * the role it has now, its mode and its status are FTS's.
  */
 typedef struct GpSegmentConfig
 {
 	int			dbid;			/* unique over the cluster, 1 is the coordinator */
 	int			content;		/* -1 the coordinator, 0..n-1 a segment */
-	char		role;			/* 'p' primary, 'm' mirror */
+	char		role;			/* 'p' primary, 'm' mirror: what it is now */
+	char		preferred_role; /* what the file says it is */
+	char		mode;			/* 's' in sync with its peer, 'n' not */
+	char		status;			/* 'u' up, 'd' down */
 	char	   *hostname;		/* a host name, or a directory for a socket */
 	int			port;
 	char	   *datadir;
 } GpSegmentConfig;
 
+/* What FTS keeps of a node, in the order of GpClusterNodes(). */
+typedef struct GpClusterNodeState
+{
+	char		role;
+	char		mode;
+	char		status;
+} GpClusterNodeState;
+
+/* FTS's durable form of them, in the coordinator's data directory. */
+#define GP_CLUSTER_DUMP_FILE		"gpsegconfig_dump"
+#define GP_CLUSTER_DUMP_FILE_TMP	"gpsegconfig_dump.tmp"
+
 /*
- * The primaries with a content id of 0 or more, in content order.  Returns
- * NULL and sets *nsegments to 0 on a node with no cluster configured, which is
- * what every single-node server is.
+ * The primaries with a content id of 0 or more, in content order, as this
+ * backend last adopted them (GpClusterRefresh).  Returns NULL and sets
+ * *nsegments to 0 on a node with no cluster configured, which is what every
+ * single-node server is.
  */
 extern const GpSegmentConfig *GpClusterSegments(int *nsegments);
 
 /* The primary that holds this content id, or NULL. */
 extern const GpSegmentConfig *GpClusterSegmentByContent(int content);
+
+/* Every node the file lists, mirrors too, as this backend last adopted them. */
+extern int	GpClusterNodes(const GpSegmentConfig **nodes);
+
+/* Does any segment have a mirror? */
+extern bool GpClusterHasMirrors(void);
+
+/*
+ * Adopt what FTS last published: the role, mode and status of every node,
+ * and so which node is each content's primary.  True when a content's
+ * primary is another node than before.  A dispatcher calls it before it
+ * connects to the segments, never while its connections are in use.
+ */
+extern bool GpClusterRefresh(void);
+
+/* Has FTS published anything since this backend last adopted it? */
+extern bool GpClusterStale(void);
+
+/*
+ * Is the node of that dbid its content's primary, and up, as FTS last
+ * published -- whatever this backend adopted?  What a dispatcher asks of the
+ * nodes its connections are to, when it cannot adopt anything yet.
+ */
+extern bool GpClusterIsPrimaryNow(int dbid);
+
+/*
+ * What FTS last published, whatever this backend adopted: each node's state,
+ * in the order of GpClusterNodes(), and the number FTS bumps at each change.
+ */
+extern uint64 GpClusterLiveStates(GpClusterNodeState *states);
+
+/*
+ * FTS only: make these the cluster's states -- written to
+ * gpsegconfig_dump durably first, and then to shared memory, so that what a
+ * backend adopts has been written.
+ */
+extern void GpClusterPublish(const GpClusterNodeState *states);
 
 /* This node's own entry, or NULL when no cluster is configured. */
 extern const GpSegmentConfig *GpClusterSelf(void);

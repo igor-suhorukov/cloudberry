@@ -49,6 +49,7 @@
 #include "gp_dispatch.h"
 #include "gp_dtx.h"
 #include "gp_fault.h"
+#include "gp_fts.h"
 #include "gp_gdd.h"
 #include "gp_motion.h"
 #include "gp_label.h"
@@ -141,6 +142,14 @@ _PG_init(void)
 	 * start, which is why this runs here rather than at the first query.
 	 */
 	GpClusterInit();
+
+	/*
+	 * FTS: on the coordinator the prober, which keeps what the file's nodes
+	 * are now -- which of a content's two is its primary, whether they are in
+	 * sync, whether each is up -- and on a segment what it answers a probe,
+	 * and the hold on a cancel while a commit waits for the mirror (R3).
+	 */
+	GpFtsInit();
 
 	/*
 	 * Cloudberry's fault injector, which the tests set on one node and the

@@ -622,6 +622,18 @@ gdd_round(void)
 	List	   *victims;
 
 	segs = GpClusterSegments(&nsegs);
+
+	/* A primary FTS failed over from is asked nothing more. */
+	if (GpClusterRefresh())
+	{
+		for (int s = 0; s < nsegs; s++)
+		{
+			if (gdd_conns[s] != NULL)
+				libpqsrv_disconnect(gdd_conns[s]);
+			gdd_conns[s] = NULL;
+		}
+	}
+
 	for (int s = 0; s < nsegs; s++)
 	{
 		PGconn	   *conn = gdd_conn(&segs[s]);

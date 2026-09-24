@@ -1689,6 +1689,11 @@ recovery_round(int min_age)
 	int			nsegs;
 	bool		complete = true;
 
+	/*
+	 * The primaries FTS last published: a part prepared on a primary it
+	 * failed over from is on the mirror it promoted, from PREPARE's WAL.
+	 */
+	(void) GpClusterRefresh();
 	segs = GpClusterSegments(&nsegs);
 	for (int s = 0; s <= nsegs; s++)
 	{

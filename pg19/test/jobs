@@ -36,6 +36,7 @@ postgis_regress        orca     105   PASSES=orca
 orca                   -         65
 task                   -         62
 cluster                -         52
+fts                    -         45
 greenplum              planner   47   PASSES=planner
 isolation2             orca      45   PASSES=orca
 singlenode             planner   36   PASSES=planner
