@@ -834,6 +834,9 @@ gp_build_simple_rel(PlannerInfo *root, RelOptInfo *rel, RangeTblEntry *rte)
 
 static Node *find_segment_of(Node *tree, Index relid);
 
+/* The relations a NOT IN's subquery was noticed of, in this planning. */
+static List *noticed_relids = NIL;
+
 /* What a condition reads of the table: its ctid, and its gp_segment_id. */
 typedef struct CtidInventory
 {
@@ -898,7 +901,8 @@ warn_ctid_without_segment_id(PlannerInfo *root, RelOptInfo *rel,
 			if (find_segment_of((Node *) em->em_expr, rel->relid) != NULL)
 				inv.uses_segid = true;
 
-	if (!inv.uses_ctid || inv.uses_segid)
+	if (!inv.uses_ctid || inv.uses_segid ||
+		list_member_oid(noticed_relids, rte->relid))
 		return;
 
 	switch (root->parse->commandType)
@@ -923,6 +927,108 @@ warn_ctid_without_segment_id(PlannerInfo *root, RelOptInfo *rel,
 			(errmsg("%s uses system-defined column \"%s.ctid\" without the necessary companion column \"%s.gp_segment_id\"",
 					cmd, rte->eref->aliasname, rte->eref->aliasname),
 			 errhint("To uniquely identify a row within a distributed table, use the \"gp_segment_id\" column together with the \"ctid\" column.")));
+}
+
+/*
+ * NOT IN (SELECT ctid FROM t), and <> ALL: Cloudberry makes it an anti-join
+ * whose condition compares t's ctid, and notices it there; PostgreSQL's
+ * planner keeps it a subplan, whose ctid is only what the subquery returns.
+ * So such a subquery is noticed as it stands, once for its relation, before
+ * the statement is planned.
+ */
+typedef struct SublinkNoticeContext
+{
+	CmdType		cmd;			/* of the query the SubLink is in */
+	bool		under_not;
+} SublinkNoticeContext;
+
+static bool
+sublink_notice_walker(Node *node, SublinkNoticeContext *cxt)
+{
+	if (node == NULL)
+		return false;
+
+	if (IsA(node, BoolExpr) && ((BoolExpr *) node)->boolop == NOT_EXPR)
+	{
+		bool		save = cxt->under_not;
+		bool		result;
+
+		cxt->under_not = true;
+		result = expression_tree_walker(node, sublink_notice_walker, cxt);
+		cxt->under_not = save;
+		return result;
+	}
+
+	if (IsA(node, SubLink))
+	{
+		SubLink    *sublink = (SubLink *) node;
+		Query	   *sub = (Query *) sublink->subselect;
+		bool		save = cxt->under_not;
+
+		if ((sublink->subLinkType == ALL_SUBLINK ||
+			 (sublink->subLinkType == ANY_SUBLINK && cxt->under_not)) &&
+			sub->commandType == CMD_SELECT)
+		{
+			foreach_node(TargetEntry, tle, sub->targetList)
+			{
+				Var		   *var = (Var *) tle->expr;
+				RangeTblEntry *rte;
+				const char *cmd;
+
+				if (tle->resjunk || !IsA(var, Var) || var->varlevelsup != 0 ||
+					var->varattno != SelfItemPointerAttributeNumber)
+					continue;
+				rte = rt_fetch(var->varno, sub->rtable);
+				if (rte->rtekind != RTE_RELATION ||
+					GpScanDistributedPolicy(rte->relid) == NULL ||
+					find_segment_of((Node *) sub->targetList, var->varno) != NULL ||
+					list_member_oid(noticed_relids, rte->relid))
+					continue;
+				cmd = cxt->cmd == CMD_UPDATE ? "UPDATE" :
+					cxt->cmd == CMD_DELETE ? "DELETE" :
+					cxt->cmd == CMD_MERGE ? "MERGE" : "SELECT";
+				ereport(cxt->cmd == CMD_UPDATE || cxt->cmd == CMD_DELETE ||
+						cxt->cmd == CMD_MERGE ? ERROR : NOTICE,
+						(errmsg("%s uses system-defined column \"%s.ctid\" without the necessary companion column \"%s.gp_segment_id\"",
+								cmd, rte->eref->aliasname, rte->eref->aliasname),
+						 errhint("To uniquely identify a row within a distributed table, use the \"gp_segment_id\" column together with the \"ctid\" column.")));
+				noticed_relids = lappend_oid(noticed_relids, rte->relid);
+			}
+		}
+
+		/* the test expression, and the subquery's own */
+		cxt->under_not = false;
+		(void) sublink_notice_walker(sublink->testexpr, cxt);
+		(void) query_tree_walker(sub, sublink_notice_walker, cxt, 0);
+		cxt->under_not = save;
+		return false;
+	}
+
+	if (IsA(node, Query))
+	{
+		CmdType		save = cxt->cmd;
+		bool		result;
+
+		cxt->cmd = ((Query *) node)->commandType;
+		result = query_tree_walker((Query *) node, sublink_notice_walker, cxt, 0);
+		cxt->cmd = save;
+		return result;
+	}
+
+	cxt->under_not = false;
+	return expression_tree_walker(node, sublink_notice_walker, cxt);
+}
+
+void
+GpScanNoticeSublinkCtid(Query *parse)
+{
+	SublinkNoticeContext cxt = {.cmd = parse->commandType,.under_not = false};
+
+	/* the last planning's list went with its memory */
+	noticed_relids = NIL;
+	if (GpClusterBackendRole() != GP_ROLE_DISPATCH)
+		return;
+	(void) query_tree_walker(parse, sublink_notice_walker, &cxt, 0);
 }
 
 static void

@@ -39,13 +39,10 @@ bfv_joins  a join of twenty empty tables, which Cloudberry's demo cluster
   rows, in the time the test allows.  Its tables distributed with the legacy
   cdbhash_float4_ops class are joined as Cloudberry joins them.
 
-bfv_subquery (planner, orca)  the NOTICE and HINT Cloudberry gives for a
-  query that reads a distributed table's ctid without its gp_segment_id
-  (cdbmutate.c), which the port does not give.  Under the planner, too,
-  count_operator() finds no Seq Scan in the plan of a query over
-  distributed tables: the port's planner reads each through a Gather
-  Motion, which scans the table on the segments, and EXPLAIN names the
-  Motion.
+bfv_subquery (planner)  count_operator() finds no Seq Scan in the plan of
+  a query over distributed tables: the port's planner reads each through a
+  Gather Motion, which scans the table on the segments, and EXPLAIN names
+  the Motion.
 
 case_gp  IS NOT DISTINCT FROM, and the CASE form, printed as the searched
   CASE the port's rewrite makes of them (see the singlenode suite's README).

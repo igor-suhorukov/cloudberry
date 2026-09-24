@@ -69,6 +69,14 @@ extern void GpScanClearLocking(void);
  */
 extern bool GpScanSetCursor(bool cursor);
 
+/*
+ * Before a statement is planned: Cloudberry's NOTICE for a NOT IN whose
+ * subquery reads a distributed table's ctid without its gp_segment_id,
+ * which its planner finds in an anti-join and PostgreSQL's keeps a subplan.
+ */
+struct Query;
+extern void GpScanNoticeSublinkCtid(struct Query *parse);
+
 /* The scan hooks, where there is a cluster; see gp_scan.c. */
 extern void GpScanInit(void);
 

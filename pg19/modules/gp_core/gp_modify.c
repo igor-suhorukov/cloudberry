@@ -1038,6 +1038,9 @@ gp_modify_planner_routed(Query *parse, const char *query_string, int cursorOptio
 	if (!segments_lock_rows(parse))
 		(void) lock_instead_of_row_marks((Node *) parse, NULL);
 
+	/* a NOT IN's subquery that reads a ctid alone, as Cloudberry notices it */
+	GpScanNoticeSublinkCtid(parse);
+
 	/* The planner changes the Query; an UPDATE or DELETE may be sent as it was. */
 	if (parse->commandType == CMD_UPDATE || parse->commandType == CMD_DELETE)
 		original = copyObject(parse);
