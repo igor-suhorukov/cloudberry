@@ -22,8 +22,10 @@
 
 The rule the series is written to is that an unused hook leaves the code path
 exactly as it was.  This asks, of each statement added to a function that
-already existed, whether reaching it depends on a name the series introduces.
-What it cannot account for is printed, and that is what needs reading by hand.
+already existed, whether reaching it depends on a name the series introduces,
+or whether it is an injection point, which PostgreSQL's own design keeps
+dormant until a test attaches to it.  What it cannot account for is printed,
+and that is what needs reading by hand.
 
 It is a reading aid rather than a proof: it understands C well enough to tell a
 guarded block from a rewrapped line, and no better.
@@ -125,6 +127,10 @@ CONTROL = re.compile(r"^\s*(?:\}\s*)?(?:else\s+)?(?:if|while|for)\b")
 COMMENT = re.compile(r"^(/\*|\*|//)")
 DECL = re.compile(r"^(?:const |static |unsigned |struct )*[\w][\w \t\*]*\s\*?\w+"
                   r"(\s*\[[^\]]*\])?\s*(=\s*[^;]*)?;$")
+# PostgreSQL's own dormant statement: empty in a server built without
+# injection points, and in one built with them a point nothing has attached
+# runs nothing -- which is how each of PostgreSQL's own points is dormant.
+INJECTION = re.compile(r"^INJECTION_POINT(?:_LOAD|_CACHED)?\(\s*\"[\w-]+\"")
 
 
 def complete(stmt):
@@ -184,6 +190,8 @@ def classify(hunk, guard_re, counts, unexplained, sha):
 
         if all(NORM(l) in removed or NORM(UNELSE(l)) in removed for l in span):
             counts["rewrapped existing code"] += n
+        elif INJECTION.match(stripped) and stmt.rstrip().endswith(";"):
+            counts["injection point"] += n
         elif guard_re and guard_re.search(stmt):
             counts["guarded"] += n
             if CONTROL.match(stripped) and not stmt.rstrip().endswith(";"):
@@ -202,8 +210,9 @@ def main():
                           + r")\b") if names else None
 
     counts = dict.fromkeys(
-        ["guarded", "inside a guarded block", "new function", "comment or blank",
-         "declaration or structure", "rewrapped existing code", "unexplained"], 0)
+        ["guarded", "inside a guarded block", "injection point", "new function",
+         "comment or blank", "declaration or structure",
+         "rewrapped existing code", "unexplained"], 0)
     unexplained = []
 
     commits = git("log", "--format=%H %s", "--reverse",
