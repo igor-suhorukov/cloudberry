@@ -1538,6 +1538,21 @@ COMMIT;"
 		&& ok "MERGE's Split fires no trigger; its DELETE and INSERT fire theirs; each row where it hashes" \
 		|| notok "MERGE's Split and triggers" "$n / $out2 / misplaced $(placed wtn) / $out"
 
+	# EXPLAIN ANALYZE CREATE TABLE AS: the table made on every node and
+	# filled by an INSERT, the one explained -- ORCA's plan of it -- where
+	# PostgreSQL's would fill a table on the coordinator alone (gp_sql.c).
+	want=$(q 0 "SELECT count(*) FROM o WHERE a <= 100;")
+	out=$(q 0 "EXPLAIN (ANALYZE, COSTS OFF, TIMING OFF, SUMMARY OFF) CREATE TABLE xct AS SELECT * FROM o WHERE a <= 100 DISTRIBUTED BY (b);")
+	out2=$(q 0 "SELECT count(*), (gp.policy('xct')).columns FROM xct;")
+	n1=$(q 1 "SELECT count(*) FROM xct;"); n2=$(q 2 "SELECT count(*) FROM xct;")
+	case "$out|$out2" in
+		*"Insert on xct"*"Optimizer: GPORCA"*"|$want|{b}")
+			isnum "$n1" && isnum "$n2" && [ "$((n1 + n2))" = "$want" ] \
+				&& ok "EXPLAIN ANALYZE CREATE TABLE AS: the table on every node, filled by the INSERT ORCA plans and EXPLAIN shows" \
+				|| notok "EXPLAIN ANALYZE CREATE TABLE AS: the segments' rows" "$n1 $n2" ;;
+		*) notok "EXPLAIN ANALYZE CREATE TABLE AS" "$out / $out2" ;;
+	esac
+
 	# A partial table is the planner's, as Cloudberry's ORCA leaves one.
 	out=$(printf '%s\n' "SET gp.optimizer_trace_fallback = on;" \
 		"SELECT count(*) FROM pt1;" | qf 0)

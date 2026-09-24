@@ -1086,12 +1086,15 @@ CTranslatorQueryToDXL::CreateDXLProjElemForOmittedColumn(
 CDXLNode *
 CTranslatorQueryToDXL::TranslateCTASToDXL()
 {
-	// M2: ORCA's CTAS operator, which plans a CREATE TABLE AS together with
-	// the distribution of the table it creates, read from Cloudberry's
-	// Query.intoPolicy.  On one node a CTAS is planned as the SELECT it is
-	// (see CheckSupportedCmdType), and nothing calls this.  Cloudberry's body
-	// is in github/cloudberry/src/backend/gpopt/translate/CTranslatorQueryToDXL.cpp,
-	// unchanged, for the step that brings it back.
+	// ORCA's CTAS operator, which plans a CREATE TABLE AS together with the
+	// distribution of the table it creates, read from Cloudberry's
+	// Query.intoPolicy -- which PostgreSQL 19's Query has no place for.  On
+	// one node a CTAS is planned as the SELECT it is (see
+	// CheckSupportedCmdType); on a cluster gp_sql carries one out as a CREATE
+	// TABLE ... WITH NO DATA, distributed, and an INSERT that ORCA plans as
+	// any INSERT, and EXPLAIN ANALYZE of one explains that INSERT (gp_sql.c).
+	// Nothing calls this.  Cloudberry's body is in
+	// github/cloudberry/src/backend/gpopt/translate/CTranslatorQueryToDXL.cpp.
 	GP_UNPORTED("CREATE TABLE AS with a distribution");
 }
 

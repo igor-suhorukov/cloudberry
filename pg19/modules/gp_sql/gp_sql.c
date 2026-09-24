@@ -50,6 +50,7 @@
 #include "catalog/pg_tablespace.h"
 #include "commands/dbcommands.h"
 #include "commands/defrem.h"
+#include "commands/explain.h"
 #include "commands/extension.h"
 #include "commands/tablespace.h"
 #include "executor/executor.h"
@@ -59,6 +60,8 @@
 #include "nodes/makefuncs.h"
 #include "nodes/nodeFuncs.h"
 #include "nodes/parsenodes.h"
+#include "parser/analyze.h"
+#include "parser/parser.h"
 #include "tcop/utility.h"
 #include "utils/guc.h"
 #include "utils/acl.h"
@@ -1170,6 +1173,62 @@ gp_sql_cluster_ctas(PlannedStmt *pstmt, const char *queryString,
 				context != PROCESS_UTILITY_TOPLEVEL);
 }
 
+/*
+ * EXPLAIN ANALYZE CREATE TABLE AS on a cluster: carried out as the statement
+ * is (gp_sql_cluster_ctas()) -- the table made on every node and
+ * distributed -- and the INSERT that fills it explained, with its rows, as
+ * Cloudberry's EXPLAIN shows the plan that fills its new table.  PostgreSQL's
+ * would make the table on the coordinator alone, and fill it there.
+ */
+static bool
+explain_analyzes(List *options)
+{
+	foreach_node(DefElem, opt, options)
+		if (strcmp(opt->defname, "analyze") == 0)
+			return defGetBoolean(opt);
+	return false;
+}
+
+static void
+gp_sql_explain_cluster_ctas(PlannedStmt *pstmt, ExplainStmt *explain,
+							const char *queryString, ProcessUtilityContext context,
+							QueryEnvironment *queryEnv, DestReceiver *dest)
+{
+	Query	   *outer = copyObject(castNode(Query, explain->query));
+	CreateTableAsStmt *ctas = castNode(CreateTableAsStmt, outer->utilityStmt);
+	Query	   *query = castNode(Query, ctas->query);
+	PlannedStmt *create = makeNode(PlannedStmt);
+	ExplainStmt *insert = makeNode(ExplainStmt);
+	ParseState *pstate = make_parsestate(NULL);
+	RawStmt    *raw;
+	Oid			relid;
+	char	   *sql;
+
+	/* the table, with no rows yet */
+	ctas->into->skipData = true;
+	create->commandType = CMD_UTILITY;
+	create->canSetTag = true;
+	create->utilityStmt = (Node *) ctas;
+	create->stmt_location = pstmt->stmt_location;
+	create->stmt_len = pstmt->stmt_len;
+	gp_sql_cluster_ctas(create, queryString, false, context, NULL, queryEnv,
+						None_Receiver, NULL);
+	CommandCounterIncrement();
+	relid = RangeVarGetRelid(ctas->into->rel, NoLock, false);
+
+	/* and the INSERT that fills it */
+	sql = psprintf("INSERT INTO %s %s",
+				   quote_qualified_identifier(get_namespace_name(get_rel_namespace(relid)),
+											  get_rel_name(relid)),
+				   pg_get_querydef(query, false));
+	raw = linitial_node(RawStmt, raw_parser(sql, RAW_PARSE_DEFAULT));
+	insert->query = (Node *) parse_analyze_fixedparams(raw, sql, NULL, 0, queryEnv);
+	insert->options = explain->options;
+	pstate->p_sourcetext = sql;
+	pstate->p_queryEnv = queryEnv;
+	ExplainQuery(pstate, insert, NULL, dest);
+}
+
 static void
 gp_sql_ProcessUtility(PlannedStmt *pstmt, const char *queryString,
 					  bool readOnlyTree, ProcessUtilityContext context,
@@ -1312,6 +1371,23 @@ gp_sql_ProcessUtility(PlannedStmt *pstmt, const char *queryString,
 	 * distributed as the statement or the defaults say, and only then
 	 * filled, by an INSERT, which puts each row on the segment its key names.
 	 */
+	if (IsA(parsetree, ExplainStmt) && on_cluster_coordinator() &&
+		params == NULL && !in_cluster_ctas &&
+		IsA(((ExplainStmt *) parsetree)->query, Query) &&
+		explain_analyzes(((ExplainStmt *) parsetree)->options))
+	{
+		Query	   *q = (Query *) ((ExplainStmt *) parsetree)->query;
+
+		if (q->commandType == CMD_UTILITY && IsA(q->utilityStmt, CreateTableAsStmt) &&
+			((CreateTableAsStmt *) q->utilityStmt)->objtype == OBJECT_TABLE &&
+			IsA(((CreateTableAsStmt *) q->utilityStmt)->query, Query))
+		{
+			gp_sql_explain_cluster_ctas(pstmt, (ExplainStmt *) parsetree,
+										queryString, context, queryEnv, dest);
+			return;
+		}
+	}
+
 	if (IsA(parsetree, CreateTableAsStmt) && on_cluster_coordinator() &&
 		((CreateTableAsStmt *) parsetree)->objtype == OBJECT_TABLE &&
 		IsA(((CreateTableAsStmt *) parsetree)->query, Query) && params == NULL &&
