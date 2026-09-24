@@ -81,6 +81,8 @@ echo
 	echo "listen_addresses = ''"
 	echo "port = $PORT"
 	echo "shared_preload_libraries = 'gp_core,gp_sql'"
+	# the loopback prepares its part in the maintenance database (gp_loopback.c)
+	echo "max_prepared_transactions = 8"
 } >> "$WORK/data/postgresql.conf"
 mkdir -p "$WORK/local_space" "$WORK/remote_space"
 "$BINDIR/pg_ctl" -D "$WORK/data" -l "$WORK/log" -w -t 60 start > /dev/null 2>&1 \
@@ -259,6 +261,53 @@ esac
 qd other_db "SELECT gp_sql.drop_storage_server('from_other');" > /dev/null
 is "and one is dropped from there too" \
    "SELECT count(*) FROM pg_foreign_server WHERE srvname = 'from_other';" "0"
+
+###############################################################################
+echo "9. on one node too, that part is prepared, and committed with the transaction"
+###############################################################################
+# Two-phase, as on a cluster's coordinator: prepared under this server's
+# transaction ID and the maintenance database's OID, committed after the
+# commit record, and finished by the recovery process if the server fails
+# between the two -- which leaves no window between two commits.
+q "CREATE EXTENSION gp_inject_fault;" > /dev/null
+is "one node runs the recovery process too, since it may prepare" \
+   "SELECT count(*) FROM pg_stat_activity WHERE backend_type = 'gp_core dtx recovery';" "1"
+q "SELECT gp_inject_fault('loopback_commit_prepared', 'suspend', 1);" > /dev/null
+qd other_db "SELECT gp_sql.create_storage_server('two_phase');" > /dev/null 2>&1 &
+writer=$!
+q "SELECT gp_wait_until_triggered_fault('loopback_commit_prepared', 1, 1);" > /dev/null
+gid=$(q "SELECT gid FROM pg_prepared_xacts;")
+dbo=$(q "SELECT oid FROM pg_database WHERE datname = 'postgres';")
+x=${gid#gp_dtx_}; x=${x%_*}
+status=$(q "SELECT pg_xact_status('$x'::xid8);")
+seen=$(q "SELECT count(*) FROM pg_foreign_server WHERE srvname = 'two_phase';")
+q "SELECT gp_inject_fault('loopback_commit_prepared', 'resume', 1);" > /dev/null
+wait "$writer"
+q "SELECT gp_inject_fault('loopback_commit_prepared', 'reset', 1);" > /dev/null
+after=$(q "SELECT count(*) FROM pg_foreign_server WHERE srvname = 'two_phase';")
+left=$(q "SELECT count(*) FROM pg_prepared_xacts;")
+case "$gid|$status|$seen|$after|$left" in
+	"gp_dtx_"[0-9]*"_$dbo|committed|0|1|0")
+		ok "its part is prepared under the asking transaction's ID, and committed after that commits" ;;
+	*) notok "the loopback's two phases on one node" "$gid / $dbo / $status / $seen / $after / $left" ;;
+esac
+out=$(q "BEGIN; PREPARE TRANSACTION 'gp_dtx_$x';")
+case "$out" in
+	*'is reserved for distributed transactions'*) ok "and nobody else prepares under such a gid" ;;
+	*) notok "and nobody else prepares under such a gid" "$out" ;;
+esac
+q "SELECT gp_inject_fault('loopback_commit_prepared', 'panic', 1);" > /dev/null
+qd other_db "SELECT gp_sql.create_storage_server('recovered');" > /dev/null 2>&1
+for i in $(seq 1 60); do
+	out=$(q "SELECT count(*) FROM pg_foreign_server WHERE srvname = 'recovered';" 2>/dev/null)
+	[ "$out" = "1" ] && break
+	sleep 0.5
+done
+left=$(q "SELECT count(*) FROM pg_prepared_xacts;")
+log=$(grep -c "distributed transaction recovery: COMMIT PREPARED 'gp_dtx_[0-9]*_$dbo' on this server" "$WORK/log")
+[ "$out|$left" = "1|0" ] && [ "$log" -ge 1 ] \
+	&& ok "a server that went down between the two commits: the recovery process commits that part" \
+	|| notok "recovery of the loopback's part on one node" "$out / $left / $log"
 
 echo
 echo "  $pass passed, $fail failed"

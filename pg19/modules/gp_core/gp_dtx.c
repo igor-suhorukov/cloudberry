@@ -80,6 +80,7 @@
 #include <ctype.h>
 
 #include "access/transam.h"
+#include "access/twophase.h"
 #include "access/xact.h"
 #include "catalog/namespace.h"
 #include "catalog/objectaccess.h"
@@ -95,6 +96,7 @@
 #include "port/pg_lfind.h"
 #include "postmaster/bgworker.h"
 #include "postmaster/interrupt.h"
+#include "postmaster/postmaster.h"
 #include "replication/slot.h"
 #include "storage/dsm_registry.h"
 #include "storage/ipc.h"
@@ -113,6 +115,7 @@
 #include "utils/rel.h"
 #include "utils/snapmgr.h"
 #include "utils/timestamp.h"
+#include "utils/varlena.h"
 #include "utils/wait_event.h"
 #include "utils/xid8.h"
 
@@ -1143,6 +1146,28 @@ dtx_finished(FullTransactionId gxid, bool commit)
 	}
 }
 
+/*
+ * PREPARE TRANSACTION under a distributed transaction's gid: the
+ * coordinator's to use.  The recovery process commits or rolls back a part by
+ * the coordinator's clog, so one prepared under such a gid by anybody else
+ * would be decided by a transaction that has nothing to do with it, and a
+ * snapshot would wait for it.  The secret says which connection is the
+ * coordinator's where there is one; where there is none, any dispatched one
+ * is.  On one node the loopback's connection is that (gp_loopback.c).
+ */
+static void
+dtx_check_gid_reserved(const char *gid)
+{
+	if (GpClusterHasSecret() ? !GpClusterDispatchTrusted()
+		: !GpClusterIsDispatched())
+		ereport(ERROR,
+				(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+				 errmsg("transaction identifier \"%s\" is reserved for distributed transactions",
+						gid),
+				 errhint("Choose a transaction identifier that does not begin with \"%s\".",
+						 GP_DTX_GID_PREFIX)));
+}
+
 static void
 dtx_ProcessUtility(PlannedStmt *pstmt, const char *queryString,
 				   bool readOnlyTree, ProcessUtilityContext context,
@@ -1170,24 +1195,7 @@ dtx_ProcessUtility(PlannedStmt *pstmt, const char *queryString,
 			switch (ts->kind)
 			{
 				case TRANS_STMT_PREPARE:
-
-					/*
-					 * The coordinator's to use: the recovery process commits
-					 * or rolls back a part by the coordinator's clog, so one
-					 * prepared under such a gid by anybody else would be
-					 * decided by a transaction that has nothing to do with
-					 * it, and a snapshot would wait for it.  The secret says
-					 * which connection is the coordinator's where there is
-					 * one; where there is none, any dispatched one is.
-					 */
-					if (GpClusterHasSecret() ? !GpClusterDispatchTrusted()
-						: !GpClusterIsDispatched())
-						ereport(ERROR,
-								(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
-								 errmsg("transaction identifier \"%s\" is reserved for distributed transactions",
-										ts->gid),
-								 errhint("Choose a transaction identifier that does not begin with \"%s\".",
-										 GP_DTX_GID_PREFIX)));
+					dtx_check_gid_reserved(ts->gid);
 					dtx_preparing = gxid;
 					break;
 				case TRANS_STMT_COMMIT_PREPARED:
@@ -1223,6 +1231,33 @@ dtx_ProcessUtility(PlannedStmt *pstmt, const char *queryString,
 		dtx_finished(gxid, commit);
 	else if (snapshot_set && GpClusterIsDispatched() && !GpShareIsReader())
 		dtx_snapshot_arrived();
+}
+
+/*
+ * One node: no segment and no distributed snapshot, but the parts the
+ * loopback prepares in its other databases (gp_loopback.c), decided by this
+ * server's clog as a coordinator's are.  Their gid is reserved as there.
+ */
+static void
+dtx_single_ProcessUtility(PlannedStmt *pstmt, const char *queryString,
+						  bool readOnlyTree, ProcessUtilityContext context,
+						  ParamListInfo params, QueryEnvironment *queryEnv,
+						  DestReceiver *dest, QueryCompletion *qc)
+{
+	Node	   *parsetree = pstmt->utilityStmt;
+	FullTransactionId gxid;
+
+	if (IsA(parsetree, TransactionStmt) &&
+		((TransactionStmt *) parsetree)->kind == TRANS_STMT_PREPARE &&
+		GpDtxParseGid(((TransactionStmt *) parsetree)->gid, &gxid))
+		dtx_check_gid_reserved(((TransactionStmt *) parsetree)->gid);
+
+	if (prev_ProcessUtility)
+		prev_ProcessUtility(pstmt, queryString, readOnlyTree, context, params,
+							queryEnv, dest, qc);
+	else
+		standard_ProcessUtility(pstmt, queryString, readOnlyTree, context,
+								params, queryEnv, dest, qc);
 }
 
 static void
@@ -1331,12 +1366,43 @@ recovery_wait_event(void)
 	return event;
 }
 
-/* "segment 0", or "the coordinator", for the messages. */
+/* "segment 0", "the coordinator" or, on one node, "this server". */
 static char *
 node_name(const GpSegmentConfig *node)
 {
-	return node->content < 0 ? pstrdup("the coordinator")
-		: psprintf("segment %d", node->content);
+	if (node->content >= 0)
+		return psprintf("segment %d", node->content);
+	return pstrdup(GpClusterIsSingleNode() ? "this server" : "the coordinator");
+}
+
+/*
+ * The node the recovery process runs on: the coordinator the cluster file
+ * names, or one node, which no file names, reached as the loopback reaches it
+ * -- by its first Unix socket, or TCP on this host.
+ */
+static const GpSegmentConfig *
+recovery_self(void)
+{
+	static GpSegmentConfig single = {0};
+	const GpSegmentConfig *self = GpClusterSelf();
+
+	if (self != NULL)
+		return self;
+	if (single.hostname == NULL)
+	{
+		char	   *dirs = pstrdup(Unix_socket_directories ? Unix_socket_directories : "");
+		List	   *list;
+
+		single.dbid = GpClusterDbid();
+		single.content = -1;
+		single.role = 'p';
+		single.port = PostPortNumber;
+		single.hostname = MemoryContextStrdup(TopMemoryContext,
+											  SplitDirectoriesString(dirs, ',', &list) &&
+											  list != NIL
+											  ? (char *) linitial(list) : "localhost");
+	}
+	return &single;
 }
 
 /* A connection to one database of a node, or NULL, logged. */
@@ -1388,7 +1454,8 @@ recovery_connect(const GpSegmentConfig *seg, const char *dbname)
  * One round: every part a node holds prepared under a distributed gid,
  * committed or rolled back by what the coordinator's clog says of its
  * transaction -- each segment's, and the coordinator's own, which the
- * loopback prepared in another of its databases (gp_loopback.c).  One still
+ * loopback prepared in another of its databases (gp_loopback.c); on one node
+ * those alone.  One still
  * in progress here is its backend's.  "min_age" leaves alone what was
  * prepared less than that many seconds ago, whose second phase is on its way
  * from the backend that prepared it; the round after a restart, and one a
@@ -1405,7 +1472,7 @@ recovery_round(int min_age)
 	segs = GpClusterSegments(&nsegs);
 	for (int s = 0; s <= nsegs; s++)
 	{
-		const GpSegmentConfig *node = s < nsegs ? &segs[s] : GpClusterSelf();
+		const GpSegmentConfig *node = s < nsegs ? &segs[s] : recovery_self();
 		PGconn	   *conn = recovery_connect(node, "postgres");
 		PGresult   *res;
 
@@ -1583,6 +1650,23 @@ gp_dtx_map(PG_FUNCTION_ARGS)
 /* Start-up                                                                  */
 /* ------------------------------------------------------------------------- */
 
+static void
+dtx_register_recovery(void)
+{
+	BackgroundWorker worker;
+
+	memset(&worker, 0, sizeof(worker));
+	worker.bgw_flags = BGWORKER_SHMEM_ACCESS |
+		BGWORKER_BACKEND_DATABASE_CONNECTION;
+	worker.bgw_start_time = BgWorkerStart_RecoveryFinished;
+	worker.bgw_restart_time = 5;
+	snprintf(worker.bgw_library_name, BGW_MAXLEN, "gp_core");
+	snprintf(worker.bgw_function_name, BGW_MAXLEN, "GpDtxRecoveryMain");
+	snprintf(worker.bgw_name, BGW_MAXLEN, "gp_core distributed transaction recovery");
+	snprintf(worker.bgw_type, BGW_MAXLEN, "gp_core dtx recovery");
+	RegisterBackgroundWorker(&worker);
+}
+
 void
 GpDtxInit(void)
 {
@@ -1618,8 +1702,21 @@ GpDtxInit(void)
 							GUC_UNIT_S,
 							NULL, NULL, NULL);
 
+	/*
+	 * One node prepares only the loopback's parts, when it may prepare at
+	 * all: the gid is reserved, and the recovery process finishes what a
+	 * failure left.
+	 */
 	if (GpClusterIsSingleNode())
+	{
+		if (max_prepared_xacts > 0)
+		{
+			prev_ProcessUtility = ProcessUtility_hook;
+			ProcessUtility_hook = dtx_single_ProcessUtility;
+			dtx_register_recovery();
+		}
 		return;
+	}
 
 	prev_executor_start = ExecutorStart_hook;
 	ExecutorStart_hook = dtx_executor_start;
@@ -1633,18 +1730,5 @@ GpDtxInit(void)
 	/* The coordinator finishes what a failure left prepared. */
 	self = GpClusterSelf();
 	if (self != NULL && self->content == -1)
-	{
-		BackgroundWorker worker;
-
-		memset(&worker, 0, sizeof(worker));
-		worker.bgw_flags = BGWORKER_SHMEM_ACCESS |
-			BGWORKER_BACKEND_DATABASE_CONNECTION;
-		worker.bgw_start_time = BgWorkerStart_RecoveryFinished;
-		worker.bgw_restart_time = 5;
-		snprintf(worker.bgw_library_name, BGW_MAXLEN, "gp_core");
-		snprintf(worker.bgw_function_name, BGW_MAXLEN, "GpDtxRecoveryMain");
-		snprintf(worker.bgw_name, BGW_MAXLEN, "gp_core distributed transaction recovery");
-		snprintf(worker.bgw_type, BGW_MAXLEN, "gp_core dtx recovery");
-		RegisterBackgroundWorker(&worker);
-	}
+		dtx_register_recovery();
 }

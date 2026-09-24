@@ -31,17 +31,18 @@
  * WRITES are deferred.  A module asks for a statement to be run there, and
  * it is run as this transaction commits, at PRE_COMMIT, in the order asked,
  * in one transaction there -- so a statement, subtransaction or transaction
- * that rolls back never writes.  On a cluster's coordinator that transaction
- * then joins the distributed one: it is prepared under the coordinator's
- * transaction ID, gp_dtx_<xid>_<database OID>, as the segments' parts are
- * under gp_dtx_<xid>, committed after the coordinator's commit record,
- * rolled back if the transaction is, and finished by the DTX recovery process
- * if the coordinator fails between the two (gp_dtx.c).  For that its
- * connection carries a dispatched backend's identity and the cluster secret,
- * without which PREPARE under such a gid is refused.  Elsewhere -- one node,
- * or a coordinator with max_prepared_transactions at zero -- it commits at
- * PRE_COMMIT, just before this transaction does: what is lost there is only
- * the window between the two commits.
+ * that rolls back never writes.  That transaction is then a part of this
+ * one: it is prepared under this server's transaction ID, gp_dtx_<xid>_<database
+ * OID>, as a segment's part is under gp_dtx_<xid>, committed after the commit
+ * record, rolled back if the transaction is, and finished by the DTX recovery
+ * process if the server fails between the two (gp_dtx.c) -- on a cluster's
+ * coordinator, where it joins the distributed transaction, and on one node
+ * alike.  For that its connection carries a dispatched backend's identity
+ * and the cluster secret, without which PREPARE under such a gid is refused.
+ * A server that cannot prepare -- max_prepared_transactions at zero, which is
+ * PostgreSQL's default -- commits it at PRE_COMMIT, just before this
+ * transaction does: what is lost there is the window between the two
+ * commits, which only prepared transactions close.
  *
  * READS are run at once, in a read-only transaction of their own, as the
  * session's current user, and see what is committed there: what this
@@ -145,15 +146,14 @@ GpLoopbackIsHere(const char *dbname)
 }
 
 /*
- * Two-phase on a cluster's coordinator, whose recovery process finishes a
- * part the coordinator did not.
+ * Two-phase wherever this server may prepare: a cluster's coordinator, or one
+ * node, each with a recovery process that finishes a part it did not.  A
+ * segment writes nothing here.
  */
 static bool
 loopback_two_phase(void)
 {
-	const GpSegmentConfig *self = GpClusterSelf();
-
-	return self != NULL && self->content == -1 && max_prepared_xacts > 0;
+	return GpClusterContentId() < 0 && max_prepared_xacts > 0;
 }
 
 /* ------------------------------------------------------------------------- */
