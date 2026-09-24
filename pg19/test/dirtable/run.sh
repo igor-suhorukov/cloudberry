@@ -319,6 +319,37 @@ out=$(grep -o 'FATAL:  resource manager with ID 198 not registered' "$WORK/log-n
 is "with it, recovery replays the record, and the file is back" \
    "SELECT convert_from(gp_sql.directory_table_get('replicated'::regclass, 'late.txt'), 'UTF8');" "late"
 
+###############################################################################
+echo "11. the offline tools leave a directory table's files alone (O23)"
+###############################################################################
+# PostgreSQL 19's pg_checksums walks every file under a database directory as
+# a relation's pages: it stops at a file whose name is no segment number, and
+# with --enable writes a checksum into every 8K of one that is whole blocks.
+# gp_sql marks <relid>_dirtable as its own while the postmaster loads it.
+if grep -qx '_dirtable' "$WORK/data/extension_marks" 2>/dev/null; then
+	ok "the postmaster that loaded gp_sql marked its directories"
+else
+	notok "extension_marks should hold _dirtable" "$(cat "$WORK/data/extension_marks" 2>&1)"
+fi
+q "SELECT gp_sql.create_directory_table('offline');" > /dev/null
+OLOC=$(q "SELECT gp_sql.directory_table_location('offline'::regclass);")
+q "SELECT gp_sql.directory_table_put('offline'::regclass, 'block.bin', decode(repeat('ab', 8192), 'hex'));" > /dev/null
+q "SELECT gp_sql.directory_table_put('offline'::regclass, 'notes.v2.txt', 'a name with dots'::bytea);" > /dev/null
+q "CHECKPOINT;" > /dev/null
+blocksum=$(md5sum < "$WORK/data/$OLOC/block.bin")
+"$BINDIR/pg_ctl" -D "$WORK/data" -m fast -w stop > /dev/null 2>&1
+"$BINDIR/pg_checksums" --check -D "$WORK/data" > "$WORK/checksums.log" 2>&1 \
+	&& ok "pg_checksums --check passes over a directory table's files" \
+	|| notok "pg_checksums --check with a directory table" "$(tail -3 "$WORK/checksums.log")"
+"$BINDIR/pg_checksums" --disable -D "$WORK/data" > /dev/null 2>&1
+"$BINDIR/pg_checksums" --enable -D "$WORK/data" > "$WORK/checksums-enable.log" 2>&1 \
+	&& [ "$(md5sum < "$WORK/data/$OLOC/block.bin")" = "$blocksum" ] \
+	&& ok "and --enable writes nothing into a file of whole blocks" \
+	|| notok "pg_checksums --enable with a directory table" "$(tail -3 "$WORK/checksums-enable.log")"
+"$BINDIR/pg_ctl" -D "$WORK/data" -l "$WORK/log" -w -t 60 start > /dev/null 2>&1
+is "the file reads back as it was written" \
+   "SELECT length(gp_sql.directory_table_get('offline'::regclass, 'block.bin'));" "8192"
+
 echo
 echo "  $pass passed, $fail failed"
 [ "$fail" -eq 0 ]

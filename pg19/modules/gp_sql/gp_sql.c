@@ -1877,6 +1877,12 @@ _PG_init(void)
 	GpDirTableRegisterRmgr();
 
 	/*
+	 * O23: a directory table's directory in its database's is no relation's
+	 * pages, which pg_checksums and pg_upgrade are told here.
+	 */
+	GpDirTableMarkFiles();
+
+	/*
 	 * O26: Cloudberry's own spelling of a statement is rewritten into
 	 * PostgreSQL's before the grammar sees it.  See pg19/grammar/.
 	 */

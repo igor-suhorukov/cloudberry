@@ -193,6 +193,12 @@ extern char *GpDirTableClaim(Oid relid);
 extern void GpDirTableRegisterXactCallback(void);
 extern void GpDirTableRegisterRmgr(void);
 
+/*
+ * During preload too: mark a directory table's directory, <relid>_dirtable,
+ * as no relation's pages, for pg_checksums and pg_upgrade (O23).
+ */
+extern void GpDirTableMarkFiles(void);
+
 /* storage.c */
 
 /* Take WITH (gp.server = '...') out of a tablespace's option list. */

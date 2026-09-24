@@ -82,6 +82,7 @@
 #include "catalog/objectaddress.h"
 #include "catalog/pg_class.h"
 #include "catalog/pg_type.h"
+#include "common/extmarkfile.h"
 #include "common/file_perm.h"
 #include "common/file_utils.h"
 #include "common/relpath.h"
@@ -145,6 +146,13 @@ static bool dirtable_xact_callback_set = false;
  * Cloudberry's PAX uses.
  */
 #define GP_DIRTABLE_RMGR_ID		198
+
+/*
+ * What a directory table's directory is called after its relation's OID,
+ * in its database's directory, and what O23's mark names (see
+ * GpDirTableMarkFiles()).
+ */
+#define GP_DIRTABLE_SUFFIX		"_dirtable"
 
 #define XLOG_GP_DIRTABLE_MKDIR	0x00	/* a table's directory, made */
 #define XLOG_GP_DIRTABLE_WRITE	0x10	/* bytes of a file, at an offset */
@@ -367,6 +375,21 @@ GpDirTableRegisterRmgr(void)
 }
 
 /*
+ * A directory table's files are no relation's pages, but they live in a
+ * database directory, in <relid>_dirtable (dirtable_compute_location()), and
+ * pg_checksums would read each of them as one: stop at the first whose name
+ * is no segment number, or, with --enable, write a checksum into every 8K of
+ * one that is whole blocks.  And pg_upgrade would leave them behind.  O23's
+ * mark names the directory for both, from the postmaster of every node, so a
+ * mirror's data directory and a standby's say so too.
+ */
+void
+GpDirTableMarkFiles(void)
+{
+	ExtensionMarkAdd(GP_DIRTABLE_SUFFIX);
+}
+
+/*
  * A replica has what its primary logs of these files, and nothing may be
  * written on it: what one wrote would not be on the primary it follows.
  */
@@ -540,7 +563,7 @@ dirtable_compute_location(Oid relid)
 										 OidIsValid(reltablespace)
 										 ? reltablespace : MyDatabaseTableSpace);
 
-	return psprintf("%s/%u_dirtable", dbpath, relid);
+	return psprintf("%s/%u%s", dbpath, relid, GP_DIRTABLE_SUFFIX);
 }
 
 /*
@@ -824,7 +847,8 @@ GpDirTableClaim(Oid relid)
 						 : errdetail("It has no \"protocol\" option to say which handler reaches it, so its files could only be written locally."),
 						 errhint("Use a tablespace without %s.server, or load a module that provides the handler.",
 								 GP_OPTION_NS)));
-			location = psprintf("%u/%u_dirtable", MyDatabaseId, relid);
+			location = psprintf("%u/%u%s", MyDatabaseId, relid,
+								GP_DIRTABLE_SUFFIX);
 			ObjectAddressSet(addr, RelationRelationId, relid);
 			GpLabelSet(&addr, GP_LABEL_directory_location, location);
 			GpLabelSet(&addr, GP_LABEL_storage_server, server);

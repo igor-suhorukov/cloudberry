@@ -673,6 +673,102 @@ send_w "\\q"
 exec 4>&-
 wait $W_PID 2>/dev/null
 
+###############################################################################
+echo "O23 extension marks: pg_checksums passes over what an extension marked, pg_upgrade carries it"
+###############################################################################
+# Last, because it stops the server: pg_checksums reads a stopped cluster.
+# gp_probe marks "_probe" while the postmaster loads it, as gp_sql marks a
+# directory table's "_dirtable"; a directory by that name in a database
+# directory holds files that are no relation's pages.
+if grep -qx '_probe' "$WORK/data/extension_marks" 2>/dev/null; then
+	ok "the postmaster that loaded gp_probe wrote its mark"
+else
+	notok "extension_marks should hold _probe" "$(cat "$WORK/data/extension_marks" 2>&1)"
+fi
+
+"$BINDIR/pg_ctl" -D "$WORK/data" -m fast -w stop > /dev/null 2>&1
+
+o23_marked() {							# o23_marked <datadir>: make one
+	local d="$1/base/5/424242_probe"
+	mkdir -p "$d/sub"
+	# Not a whole block, which pg_checksums would stop at, and a whole
+	# block of what is no page, which --enable would write a checksum into.
+	printf 'no relation keeps this\n' > "$d/0"
+	head -c 8192 /dev/urandom > "$d/1"
+	printf 'nested\n' > "$d/sub/2"
+}
+o23_sum() { (cd "$1/base/5/424242_probe" && cat 0 1 sub/2 | md5sum | cut -c1-32); }
+
+o23_marked "$WORK/data"
+before=$(o23_sum "$WORK/data")
+
+if "$BINDIR/pg_checksums" --check -D "$WORK/data" > "$WORK/o23_check.log" 2>&1; then
+	ok "pg_checksums --check passes over a marked directory"
+else
+	notok "pg_checksums --check should pass over a marked directory" "$(tail -3 "$WORK/o23_check.log")"
+fi
+"$BINDIR/pg_checksums" --disable -D "$WORK/data" > "$WORK/o23_disable.log" 2>&1
+if "$BINDIR/pg_checksums" --enable -D "$WORK/data" > "$WORK/o23_enable.log" 2>&1 \
+		&& [ "$(o23_sum "$WORK/data")" = "$before" ]; then
+	ok "pg_checksums --enable passes over it and leaves its files as they were"
+else
+	notok "pg_checksums --enable should leave the marked files alone" "$(tail -3 "$WORK/o23_enable.log")"
+fi
+
+# Without the list, PostgreSQL 19's pg_checksums, unchanged: it reads the
+# directory's files as a relation's, and stops.
+mv "$WORK/data/extension_marks" "$WORK/extension_marks.aside"
+if "$BINDIR/pg_checksums" --check -D "$WORK/data" > "$WORK/o23_nomarks.log" 2>&1; then
+	notok "without the list, pg_checksums should fail on the directory's files" "$(tail -3 "$WORK/o23_nomarks.log")"
+elif grep -q "424242_probe" "$WORK/o23_nomarks.log"; then
+	ok "without the list, pg_checksums fails on them, as PostgreSQL 19's does"
+else
+	notok "pg_checksums failed, but not on the marked directory" "$(tail -3 "$WORK/o23_nomarks.log")"
+fi
+mv "$WORK/extension_marks.aside" "$WORK/data/extension_marks"
+
+# pg_upgrade, in copy and link modes, from a small cluster of its own whose
+# postgres database has a table, and so a map, and a marked directory.
+o23_cluster() {							# o23_cluster <datadir> <port>
+	"$BINDIR/initdb" -D "$1" -N --locale=C --encoding=UTF8 > "$1.initdb.log" 2>&1 || return 1
+	{
+		echo "unix_socket_directories = '$SOCK'"
+		echo "listen_addresses = ''"
+		echo "port = $2"
+		echo "shared_preload_libraries = 'gp_probe'"
+	} >> "$1/postgresql.conf"
+}
+o23_upgrade() {							# o23_upgrade <mode> <new datadir>
+	o23_cluster "$2" $((PORT + 3)) || return 1
+	(cd "$WORK" && "$BINDIR/pg_upgrade" -b "$BINDIR" -B "$BINDIR" \
+		-d "$WORK/o23old" -D "$2" -p $((PORT + 2)) -P $((PORT + 3)) -s "$SOCK" \
+		--"$1" > "$2.upgrade.log" 2>&1)
+}
+
+if o23_cluster "$WORK/o23old" $((PORT + 2)) \
+		&& "$BINDIR/pg_ctl" -D "$WORK/o23old" -l "$WORK/o23old.log" -w -t 60 start > /dev/null 2>&1; then
+	"$PSQL" -X -q -p $((PORT + 2)) -d postgres \
+		-c "CREATE TABLE o23_t (a int)" \
+		-c "INSERT INTO o23_t VALUES (1)" > "$WORK/o23old.sql.log" 2>&1
+	"$BINDIR/pg_ctl" -D "$WORK/o23old" -m fast -w stop > /dev/null 2>&1
+	o23_marked "$WORK/o23old"
+	old_sum=$(o23_sum "$WORK/o23old")
+
+	if o23_upgrade copy "$WORK/o23copy" && [ "$(o23_sum "$WORK/o23copy" 2>/dev/null)" = "$old_sum" ]; then
+		ok "pg_upgrade --copy carries a marked directory, what is under it too"
+	else
+		notok "pg_upgrade --copy should carry the marked directory" "$(tail -5 "$WORK/o23copy.upgrade.log")"
+	fi
+	if o23_upgrade link "$WORK/o23link" && [ "$(o23_sum "$WORK/o23link" 2>/dev/null)" = "$old_sum" ] \
+			&& [ "$WORK/o23link/base/5/424242_probe/1" -ef "$WORK/o23old/base/5/424242_probe/1" ]; then
+		ok "pg_upgrade --link carries it, as links"
+	else
+		notok "pg_upgrade --link should carry the marked directory" "$(tail -5 "$WORK/o23link.upgrade.log")"
+	fi
+else
+	notok "the cluster to upgrade from should start" "$(tail -5 "$WORK/o23old.log" 2>/dev/null)"
+fi
+
 echo
 echo "  $pass passed, $fail failed"
 [ "$fail" -eq 0 ]

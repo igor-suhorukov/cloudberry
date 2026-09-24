@@ -987,6 +987,13 @@ _PG_init(void)
 	query_lockmode_hook = probe_query_lockmode;
 	deparse_range_function_hook = probe_deparse_range;
 
+	/*
+	 * O23: entries of a database directory named by a number and "_probe"
+	 * are this module's, for pg_checksums to pass over and pg_upgrade to
+	 * carry.  The hook tests make one by hand.
+	 */
+	ExtensionMarkAdd("_probe");
+
 	prev_planner_hook = planner_hook;
 	planner_hook = probe_planner;
 

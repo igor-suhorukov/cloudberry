@@ -134,6 +134,7 @@ patch_probe = '''
 #include "commands/explain.h"
 #include "commands/matview.h"
 #include "commands/vacuum.h"
+#include "miscadmin.h"
 #include "parser/parse_expr.h"
 #include "parser/parse_relation.h"
 #include "parser/parser.h"
@@ -165,6 +166,7 @@ cb_probe(void)
 	(void) standard_raw_parser;							/* O26 */
 	(void) OpenMatViewIncrementalMaintenanceExternal;	/* O27 */
 	(void) CloseMatViewIncrementalMaintenanceExternal;	/* O27 */
+	(void) ExtensionMarkAdd;							/* O23 */
 }
 '''
 
@@ -188,7 +190,7 @@ if not have_patched_pg and get_option('require_patched_pg')
   error('''
     @0@
     compiles, but does not carry the Cloudberry core patch series (R1-R4, O3,
-    O4, O10, O22, O26-O28).  Build PostgreSQL from github/postgres, branch
+    O4, O10, O22, O23, O26-O28).  Build PostgreSQL from github/postgres, branch
     REL_19_STABLE_CLOUDBERRY, and point -Dpg_config at it.
     Pass -Drequire_patched_pg=false to configure anyway.'''.format(
     pg_config.full_path()))
