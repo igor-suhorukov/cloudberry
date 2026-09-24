@@ -19,19 +19,16 @@ as_alias  an ORDER BY of text, which puts "XXXX" before "bbbb": the cluster
   is made with the C locale, and Cloudberry's expected output with one that
   sorts letters before case.
 
-bfv_dd_multicolumn (planner, orca)  the INFO lines of
-  test_print_direct_dispatch_info that say where a statement goes.  Its
-  INSERT ... SELECT of generate_series() runs the function in a slice of
-  one segment, and its ANALYZE dispatches a slice, where the port's run the
-  one on the coordinator and sample through O3.  The planner's gathers send
-  a query whose key is fixed to a few values to those segments, "PARTIAL
-  contents: 1 2", as Cloudberry's direct dispatch does; ORCA's Motions send
-  it to one segment or every one.  Under ORCA, an INSERT of one row of
-  constants into a table whose key has two columns goes to every segment --
-  ORCA's core gives direct dispatch to a single-column key only.  How each
-  commits is Cloudberry's: an INSERT of one row commits in one phase on the
-  segment it wrote on, also under ORCA, where the other segments wrote
-  nothing.
+bfv_dd_multicolumn  the INFO lines of test_print_direct_dispatch_info that
+  say where a statement goes.  Its INSERT ... SELECT of generate_series()
+  runs the function in a slice of one segment, and its ANALYZE dispatches a
+  slice, where the port's run the one on the coordinator and sample through
+  O3.  The rest is Cloudberry's, under both planners: a key two columns of
+  which an IN list or an OR fix is sent to the segments they hash to,
+  "PARTIAL contents: 1 2", by the planner's gathers and by ORCA's Motions
+  alike; an INSERT of one row of constants to the one segment it hashes to;
+  and how each commits, in one phase on the segment an INSERT of one row
+  wrote on.
 
 bfv_joins  a join of twenty empty tables, which Cloudberry's demo cluster
   cancels for the memory its planner takes -- the runaway cleaner's red

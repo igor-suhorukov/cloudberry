@@ -325,18 +325,30 @@ CTranslatorDXLToPlStmt::GetPlannedStmtFromDXL(const CDXLNode *dxlnode,
 	// segment it reads from -- and PlannedStmt.extension_state is where it
 	// goes when a slice has to know of the others, with the interconnect.
 
-	// Direct dispatch: every row the query can read is on one segment, so
-	// the Motions that would ask every segment ask that one.  As Cloudberry
-	// does, only when one table is read and the values hash by its key; with
-	// several, Cloudberry hashes by the constants' types instead, which need
-	// not be how any of the tables is hashed, and the port asks every
-	// segment -- the same rows, at the price of the round trips.
+	// Direct dispatch: every row the query can read is on these segments,
+	// so the Motions that would ask every segment ask them -- one, or a few,
+	// "PARTIAL contents".  As Cloudberry does, only when one table is read
+	// and the values hash by its key; with several, Cloudberry hashes by the
+	// constants' types instead, which need not be how any of the tables is
+	// hashed, and the port asks every segment -- the same rows, at the price
+	// of the round trips.  What ORCA's core finds, a single column's values
+	// or gp_segment_id's; and where it finds none -- a key of two columns,
+	// which its core gives none -- the Query's own conditions, as the
+	// planner's direct dispatch reads them (gp_scan.c).
 	if (CMD_SELECT == m_cmd_type &&
-		nullptr != dxlnode->GetDXLDirectDispatchInfo() &&
 		NIL != m_dxl_to_plstmt_context->GetMotions())
 	{
-		int segment = TranslateDXLDirectDispatchSegment(
-			dxlnode->GetDXLDirectDispatchInfo(), planned_stmt->rtable);
+		List *contents = NIL;
+
+		if (nullptr != dxlnode->GetDXLDirectDispatchInfo())
+		{
+			contents = TranslateDXLDirectDispatchContents(
+				dxlnode->GetDXLDirectDispatchInfo(), planned_stmt->rtable);
+		}
+		if (NIL == contents)
+		{
+			contents = QueryDirectDispatchContents();
+		}
 
 		// Every Motion a Gather: a Motion between segments is a plan that
 		// reads more than one segment's rows.
@@ -345,18 +357,18 @@ CTranslatorDXLToPlStmt::GetPlannedStmtFromDXL(const CDXLNode *dxlnode,
 		{
 			if (GP_MOTION_GATHER != gpdb::MotionType((Plan *) lfirst(lc_motion)))
 			{
-				segment = -1;
+				contents = NIL;
 			}
 		}
 
-		if (0 <= segment)
+		if (NIL != contents)
 		{
 			ForEach(lc_motion, m_dxl_to_plstmt_context->GetMotions())
 			{
 				Plan *motion = (Plan *) lfirst(lc_motion);
 				if (0 > gpdb::MotionSegment(motion))
 				{
-					gpdb::SetMotionSegment(motion, segment);
+					gpdb::SetMotionSegments(motion, contents);
 				}
 			}
 		}
@@ -6000,18 +6012,37 @@ CTranslatorDXLToPlStmt::TranslateDXLDml(
 
 		// Cloudberry sends an INSERT or DELETE whose rows all belong on one
 		// segment -- a row of constants, a DELETE that fixes the key -- to
-		// that segment alone, where the write is the plan's only slice.
-		int content = -1;
+		// that segment alone, where the write is the plan's only slice; a
+		// DELETE whose key a few values fix, to their segments.  ORCA's core
+		// finds a single column's values; a key of two columns it does not
+		// look at, and the port finds them: an INSERT's in its one row of
+		// constants, a DELETE's in the Query's conditions.
+		List *contents = NIL;
 		if ((CMD_INSERT == m_cmd_type || CMD_DELETE == m_cmd_type) &&
 			NIL == m_dxl_to_plstmt_context->GetMotions())
 		{
-			content = TranslateDXLDirectDispatchSegment(
+			contents = TranslateDXLDirectDispatchContents(
 				phy_dml_dxlop->GetDXLDirectDispatchInfo(),
 				m_dxl_to_plstmt_context->GetRTableEntriesList());
+			if (NIL == contents && CMD_INSERT == m_cmd_type)
+			{
+				contents = InsertDirectDispatchContents(
+					CMDIdGPDB::CastMdid(mdid_target_table)->Oid(), md_rel,
+					result_plan);
+			}
+			if (NIL == contents && CMD_DELETE == m_cmd_type)
+			{
+				contents = QueryDirectDispatchContents();
+			}
 		}
 
-		Plan *dispatch =
-			gpdb::MakeDmlMotion(write, content, writeslice->sliceIndex);
+		Plan *dispatch = gpdb::MakeDmlMotion(
+			write, 1 == gpdb::ListLength(contents) ? linitial_int(contents) : -1,
+			writeslice->sliceIndex);
+		if (1 < gpdb::ListLength(contents))
+		{
+			gpdb::SetMotionSegments(dispatch, contents);
+		}
 		dispatch->plan_node_id = m_dxl_to_plstmt_context->GetNextPlanId();
 		dispatch->startup_cost = plan->startup_cost;
 		dispatch->total_cost = plan->total_cost;
@@ -6207,28 +6238,27 @@ CTranslatorDXLToPlStmt::AddParamToPlanTree(Plan *plan, int paramid)
 
 //---------------------------------------------------------------------------
 //	@function:
-//		CTranslatorDXLToPlStmt::TranslateDXLDirectDispatchSegment
+//		CTranslatorDXLToPlStmt::TranslateDXLDirectDispatchContents
 //
 //	@doc:
-//		The one segment every row the query reads is on, or -1
+//		The segments every row the query reads is on, or NIL
 //
 //		Cloudberry's TranslateDXLDirectDispatchInfo and GetDXLDatumGPDBHash,
 //		as one: the values of the distribution key ORCA found fixed, hashed
 //		by gp_core as the table's rows are (gp_hash.c), each set of them to
-//		the same segment.  Only for one table, for the reason given where
-//		this is called.  A raw segment id -- "gp_segment_id = 1" -- is a
-//		column the port does not have yet, so it never arrives.
+//		its segment, which Cloudberry's gave up on unless they were one; or
+//		the segments "gp_segment_id = 1" names, raw.  Only for one table, for
+//		the reason given where this is called.
 //
 //---------------------------------------------------------------------------
-int
-CTranslatorDXLToPlStmt::TranslateDXLDirectDispatchSegment(
+List *
+CTranslatorDXLToPlStmt::TranslateDXLDirectDispatchContents(
 	CDXLDirectDispatchInfo *dxl_direct_dispatch_info, List *rtable)
 {
 	if (!optimizer_enable_direct_dispatch ||
-		nullptr == dxl_direct_dispatch_info ||
-		dxl_direct_dispatch_info->FContainsRawValues())
+		nullptr == dxl_direct_dispatch_info)
 	{
-		return -1;
+		return NIL;
 	}
 
 	CDXLDatum2dArray *dispatch_identifier_datum_arrays =
@@ -6237,7 +6267,31 @@ CTranslatorDXLToPlStmt::TranslateDXLDirectDispatchSegment(
 	if (dispatch_identifier_datum_arrays == nullptr ||
 		0 == dispatch_identifier_datum_arrays->Size())
 	{
-		return -1;
+		return NIL;
+	}
+
+	const ULONG length = dispatch_identifier_datum_arrays->Size();
+
+	// gp_segment_id's own values, as they are: those of this cluster's
+	// segments, as Cloudberry keeps them
+	if (dxl_direct_dispatch_info->FContainsRawValues())
+	{
+		List *segids = NIL;
+		for (ULONG ul = 0; ul < length; ul++)
+		{
+			CDXLDatumArray *datums = (*dispatch_identifier_datum_arrays)[ul];
+			Const *const_expr =
+				(Const *) m_translator_dxl_to_scalar->TranslateDXLDatumToScalar(
+					(*datums)[0]);
+			INT segid = DatumGetInt32(const_expr->constvalue);
+
+			if (!const_expr->constisnull && segid >= 0 &&
+				segid < (INT) m_num_of_segments)
+			{
+				segids = gpdb::LAppendInt(segids, segid);
+			}
+		}
+		return segids;
 	}
 
 	Oid relid = InvalidOid;
@@ -6252,17 +6306,16 @@ CTranslatorDXLToPlStmt::TranslateDXLDirectDispatchSegment(
 		}
 		if (OidIsValid(relid) && relid != rte->relid)
 		{
-			return -1;
+			return NIL;
 		}
 		relid = rte->relid;
 	}
 	if (!OidIsValid(relid))
 	{
-		return -1;
+		return NIL;
 	}
 
-	int segment = -1;
-	const ULONG length = dispatch_identifier_datum_arrays->Size();
+	List *contents = NIL;
 	for (ULONG ul = 0; ul < length; ul++)
 	{
 		CDXLDatumArray *datums = (*dispatch_identifier_datum_arrays)[ul];
@@ -6282,17 +6335,164 @@ CTranslatorDXLToPlStmt::TranslateDXLDirectDispatchSegment(
 			isnull[i] = const_expr->constisnull;
 		}
 
-		int this_segment = gpdb::DirectDispatchSegment(relid, (int) nvalues,
-													   types, values, isnull);
-		if (0 > this_segment || (0 < ul && this_segment != segment))
+		int segment = gpdb::DirectDispatchSegment(relid, (int) nvalues, types,
+												  values, isnull);
+		if (0 > segment)
 		{
-			// values that do not hash to one segment
-			return -1;
+			// values the key's hash family does not hash
+			return NIL;
 		}
-		segment = this_segment;
+		if (!list_member_int(contents, segment))
+		{
+			contents = gpdb::LAppendInt(contents, segment);
+		}
 	}
 
-	return segment;
+	return contents;
+}
+
+//---------------------------------------------------------------------------
+//	@function:
+//		CTranslatorDXLToPlStmt::QueryDirectDispatchContents
+//
+//	@doc:
+//		The segments the conditions of the Query ORCA was given confine the
+//		rows of the one table it reads to, as the planner's direct dispatch
+//		finds them (gp_core's gp_scan.c, Cloudberry's cdbtargeteddispatch.c):
+//		a key of two columns, an IN list or an OR of them, which ORCA's core
+//		gives no direct dispatch.  NIL where the Query reads anything else.
+//
+//---------------------------------------------------------------------------
+List *
+CTranslatorDXLToPlStmt::QueryDirectDispatchContents()
+{
+	Query *query = m_dxl_to_plstmt_context->m_orig_query;
+
+	if (!optimizer_enable_direct_dispatch || nullptr == query ||
+		1 != gpdb::ListLength(query->rtable) || query->hasSubLinks ||
+		nullptr == query->jointree || nullptr == query->jointree->quals ||
+		1 != gpdb::ListLength(query->jointree->fromlist) ||
+		!IsA(linitial(query->jointree->fromlist), RangeTblRef))
+	{
+		return NIL;
+	}
+
+	RangeTblEntry *rte = (RangeTblEntry *) linitial(query->rtable);
+	if (RTE_RELATION != rte->rtekind ||
+		1 != ((RangeTblRef *) linitial(query->jointree->fromlist))->rtindex)
+	{
+		return NIL;
+	}
+
+	return gpdb::DirectDispatchContents(rte->relid, query->jointree->quals, 1);
+}
+
+//---------------------------------------------------------------------------
+//	@function:
+//		CTranslatorDXLToPlStmt::InsertDirectDispatchContents
+//
+//	@doc:
+//		The segment an INSERT of one row of constants writes to, where the
+//		table's key has more columns than one, which ORCA's core gives no
+//		direct dispatch (GetDXLDirectDispatchInfo): the key's values, read
+//		off the Result that makes the row -- through the Results and the hash
+//		filter ORCA puts above it, which keeps the row on the segment it
+//		hashes to -- hashed as the table's rows are.  NIL where the row is not
+//		constants.
+//
+//---------------------------------------------------------------------------
+static Expr *
+RowConstant(Plan *plan, AttrNumber attno)
+{
+	while (nullptr != plan && 0 < attno &&
+		   attno <= (AttrNumber) list_length(plan->targetlist))
+	{
+		Expr *expr = ((TargetEntry *) list_nth(plan->targetlist, attno - 1))->expr;
+
+		while (IsA(expr, RelabelType))
+		{
+			expr = ((RelabelType *) expr)->arg;
+		}
+		if (IsA(expr, Const))
+		{
+			return nullptr == plan->lefttree || IsA(plan, Result) ? expr : nullptr;
+		}
+		if (!IsA(expr, Var))
+		{
+			return nullptr;
+		}
+
+		// a Result reads its child as OUTER_VAR; a CustomScan -- the hash
+		// filter -- its scan tuple, whose columns are its child's
+		Var *var = (Var *) expr;
+		if (IsA(plan, Result) && OUTER_VAR == var->varno)
+		{
+			attno = var->varattno;
+		}
+		else if (IsA(plan, CustomScan) && INDEX_VAR == var->varno &&
+				 var->varattno <=
+					 (AttrNumber) list_length(((CustomScan *) plan)->custom_scan_tlist))
+		{
+			Expr *scan = ((TargetEntry *) list_nth(
+							  ((CustomScan *) plan)->custom_scan_tlist,
+							  var->varattno - 1))
+							 ->expr;
+			if (!IsA(scan, Var) || OUTER_VAR != ((Var *) scan)->varno)
+			{
+				return nullptr;
+			}
+			attno = ((Var *) scan)->varattno;
+		}
+		else
+		{
+			return nullptr;
+		}
+		plan = plan->lefttree;
+	}
+	return nullptr;
+}
+
+List *
+CTranslatorDXLToPlStmt::InsertDirectDispatchContents(Oid relid,
+													 const IMDRelation *md_rel,
+													 Plan *result_plan)
+{
+	if (!optimizer_enable_direct_dispatch ||
+		IMDRelation::EreldistrHash != md_rel->GetRelDistribution())
+	{
+		return NIL;
+	}
+
+	ULONG nkeys = md_rel->DistrColumnCount();
+	if (0 == nkeys)
+	{
+		return NIL;
+	}
+	Oid *types = (Oid *) gpdb::GPDBAlloc(nkeys * sizeof(Oid));
+	Datum *values = (Datum *) gpdb::GPDBAlloc(nkeys * sizeof(Datum));
+	bool *isnull = (bool *) gpdb::GPDBAlloc(nkeys * sizeof(bool));
+
+	for (ULONG k = 0; k < nkeys; k++)
+	{
+		const IMDColumn *col = md_rel->GetDistrColAt(k);
+		Expr *expr = RowConstant(result_plan, (AttrNumber) col->AttrNum());
+
+		if (nullptr == expr)
+		{
+			return NIL;
+		}
+		types[k] = ((Const *) expr)->consttype;
+		values[k] = ((Const *) expr)->constvalue;
+		isnull[k] = ((Const *) expr)->constisnull;
+	}
+
+	int segment =
+		gpdb::DirectDispatchSegment(relid, (int) nkeys, types, values, isnull);
+	if (0 > segment)
+	{
+		return NIL;
+	}
+	return gpdb::LAppendInt(NIL, segment);
 }
 
 //---------------------------------------------------------------------------

@@ -39,7 +39,11 @@
  * here changes meaning or moves.
  */
 #define GP_CORE_API_VERSION_MAJOR	1
-#define GP_CORE_API_VERSION_MINOR	6
+#define GP_CORE_API_VERSION_MINOR	7
+
+struct Node;
+struct List;
+struct Plan;
 
 /*
  * What the rendezvous variable points at.  It is the first thing a module
@@ -137,6 +141,19 @@ typedef struct GpCoreApi
 	 */
 	void		(*motion_set_params) (struct Plan *plan, struct List *exec_params,
 									  struct List *extern_params);
+
+	/*
+	 * Since 1.7: direct dispatch to several segments.  The segments a
+	 * Gather or a write is sent to, as a list of content ids in the order
+	 * Cloudberry names them (NIL: as motion_segment() says); and the
+	 * segments conditions on relation "relid", range table entry "varno" of
+	 * them, confine its rows to, as the planner's direct dispatch works them
+	 * out (gp_scan.c) -- NIL where that is every segment.
+	 */
+	void		(*motion_set_segments) (struct Plan *plan, struct List *contents);
+	struct List *(*motion_segments) (struct Plan *plan);
+	struct List *(*direct_dispatch_contents) (Oid relid, struct Node *quals,
+											  Index varno);
 } GpCoreApi;
 
 /*

@@ -144,6 +144,13 @@ extern int	GpMotionSegment(Plan *plan);
 extern void GpMotionSetSegment(Plan *plan, int content);
 
 /*
+ * A Gather's or a write's segments, where direct dispatch sends it to
+ * several: their content ids, in the order its INFO line names them.
+ */
+extern void GpMotionSetSegments(Plan *plan, List *contents);
+extern List *GpMotionSegments(Plan *plan);
+
+/*
  * The segment holding every row of relation "relid" whose distribution key
  * is these values, in the key's order; -1 when that is not one segment or
  * cannot be said.

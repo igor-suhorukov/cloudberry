@@ -1082,6 +1082,18 @@ mine" ] && ok "a transaction reads its own rows, and a LIMIT leaves the connecti
 		"SELECT a, c FROM o ORDER BY a LIMIT 5;" "Merge Key: o.a"
 	orca_same "one key's rows: direct dispatch to its segment" \
 		"SELECT * FROM o WHERE a = 42;" "Gather Motion 1:1  (slice1; segments: 1)"
+
+	# A key of two columns: ORCA's core gives it no direct dispatch, and the
+	# Query's own conditions do, as the planner's; a row of constants is
+	# written on its segment alone.
+	q 0 "CREATE TABLE mo (a int, b int) DISTRIBUTED BY (a, b); INSERT INTO mo SELECT i, i % 3 FROM generate_series(1, 300) i; ANALYZE mo;" >/dev/null
+	orca_same "a key of two columns fixed: direct dispatch, from the query's conditions" \
+		"SELECT count(*) FROM mo WHERE a = 7 AND b = 1;" "Gather Motion 1:1  (slice1; segments: 1)"
+	out=$(printf '%s\n' "SET gp.test_print_direct_dispatch_info = on;" "INSERT INTO mo VALUES (1000, 1);" \
+		"SELECT count(*) FROM mo WHERE a = 1000 AND b = 1;" | qf 0 | grep -o 'INFO:  (slice.*\|^[0-9]*$' | tr '\n' '/')
+	[ "$out" = "INFO:  (slice 0) Dispatch command to SINGLE content/INFO:  (slice 1) Dispatch command to SINGLE content/1/" ] \
+		&& ok "... and ORCA's INSERT of a row of constants into it is sent to that row's segment, where it is then found" \
+		|| notok "ORCA's direct dispatch of a two-column key" "$out"
 	orca_same "a join of tables distributed alike, on the segments" \
 		"SELECT count(*) FROM o o1 JOIN o o2 USING (a) WHERE o2.b = 1;"
 	orca_same "a replicated table, read from one segment" \

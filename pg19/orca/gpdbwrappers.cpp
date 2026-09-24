@@ -2430,16 +2430,18 @@ gpdb::ResolvePolymorphicArgType(int numargs, Oid *argtypes, char *argmodes,
 int32
 gpdb::CdbHashConstList(List *constants, int num_segments, Oid *hashfuncs)
 {
-	// M2: the cluster has one node until then, so nothing is distributed
-	// and nothing hashes a distribution key.
+	// Not reached: direct dispatch hashes a key's values in gp_core, by the
+	// table's own policy (DirectDispatchSegment, gp_hash.c), which is what
+	// Cloudberry's translator called this for.
 	GP_UNPORTED("hashing a list of constants to a segment");
 }
 
 unsigned int
 gpdb::CdbHashRandomSeg(int num_segments)
 {
-	// M2: the cluster has one node until then, so nothing is distributed
-	// and nothing hashes a distribution key.
+	// Not reached: a random Motion chooses each row's segment in gp_core
+	// (gp_motion.c).  Kept unported, as the ORCA suite's example of a
+	// refusal by name.
 	GP_UNPORTED("choosing a segment at random");
 }
 
@@ -2885,6 +2887,38 @@ gpdb::DirectDispatchSegment(Oid relid, int nvalues, const Oid *types,
 	}
 	GP_WRAP_END;
 	return -1;
+}
+
+void
+gpdb::SetMotionSegments(Plan *motion, List *contents)
+{
+	GP_WRAP_START;
+	{
+		const GpCoreApi *api = motion_api();
+
+		if (list_length(contents) == 1 || api->version_minor < 7)
+			api->motion_set_segment(motion, list_length(contents) == 1
+									? linitial_int(contents) : -1);
+		else
+			api->motion_set_segments(motion, contents);
+		return;
+	}
+	GP_WRAP_END;
+}
+
+List *
+gpdb::DirectDispatchContents(Oid relid, Node *quals, Index varno)
+{
+	GP_WRAP_START;
+	{
+		const GpCoreApi *api = motion_api();
+
+		if (api == nullptr || api->version_minor < 7)
+			return NIL;
+		return api->direct_dispatch_contents(relid, quals, varno);
+	}
+	GP_WRAP_END;
+	return NIL;
 }
 
 Node *

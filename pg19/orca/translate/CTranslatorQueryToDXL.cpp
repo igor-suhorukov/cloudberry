@@ -908,8 +908,9 @@ CTranslatorQueryToDXL::TranslateInsertQueryToDXL()
 	}
 
 	// Cloudberry refuses here while gp_random_insert_segments limits how
-	// many segments a randomly distributed insert writes to.  That setting
-	// is M2's, with the segments it counts.
+	// many segments a randomly distributed insert writes to.  The port has
+	// no such setting: a random table's INSERT writes to every segment of
+	// it, under either planner.
 
 	CDXLNode *query_dxlnode = TranslateSelectQueryToDXL();
 	const RangeTblEntry *rte = (RangeTblEntry *) gpdb::ListNth(

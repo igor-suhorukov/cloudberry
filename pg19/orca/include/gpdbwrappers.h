@@ -857,6 +857,13 @@ int MotionSegment(Plan *motion);
 void SetMotionSegment(Plan *motion, int content);
 int DirectDispatchSegment(Oid relid, int nvalues, const Oid *types,
 						  const Datum *values, const bool *isnull);
+
+// Direct dispatch to several segments, through gp_core 1.7: a Gather's or a
+// write's segments, and the segments conditions on a relation confine its
+// rows to, as the planner's direct dispatch finds them (NIL for every one,
+// and where gp_core is older).
+void SetMotionSegments(Plan *motion, List *contents);
+List *DirectDispatchContents(Oid relid, Node *quals, Index varno);
 int CheckMotions(PlannedStmt *stmt);
 Node *SliceTable(List *slices, List *motions);
 

@@ -683,9 +683,19 @@ private:
 		gpdxl::CDXLCtasStorageOptions::CDXLCtasOptionArray
 			*ctas_storage_options);
 
-	// the one segment a direct dispatch reads, or -1
-	int TranslateDXLDirectDispatchSegment(
+	// the segments a direct dispatch reads, in Cloudberry's order, or NIL
+	List *TranslateDXLDirectDispatchContents(
 		CDXLDirectDispatchInfo *dxl_direct_dispatch_info, List *rtable);
+
+	// the same, from the conditions of the Query ORCA was given, where it
+	// reads one table: what ORCA's own direct dispatch does not find
+	List *QueryDirectDispatchContents();
+
+	// the segment an INSERT of one row of constants into a table whose key
+	// has two columns or more writes to, as a list of one, or NIL
+	static List *InsertDirectDispatchContents(Oid relid,
+											  const IMDRelation *md_rel,
+											  Plan *result_plan);
 
 	// translate nest loop colrefs to GPDB nestparams
 	static List *TranslateNestLoopParamList(

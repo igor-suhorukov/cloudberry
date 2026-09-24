@@ -387,20 +387,27 @@ gp_orca_slice_table(List *slices, List *motions)
 	{
 		PlanSlice  *slice = (PlanSlice *) lfirst(lc);
 		int			direct = -1;
+		List	   *several = NIL;
 		ListCell   *lm;
 
-		/* a Gather or a write that direct dispatch sent to one segment says which */
+		/*
+		 * a Gather or a write that direct dispatch sent to one segment says
+		 * which, and to several, which those are
+		 */
 		foreach(lm, motions)
 		{
 			Plan	   *motion = (Plan *) lfirst(lm);
 
-			if (api->motion_slice(motion) == slice->sliceIndex &&
-				((api->motion_type(motion) == GP_MOTION_GATHER &&
-				  slice->gangType == GANGTYPE_PRIMARY_READER) ||
-				 (api->motion_type(motion) == GP_MOTION_DML &&
-				  slice->gangType == GANGTYPE_PRIMARY_WRITER)) &&
-				api->motion_segment(motion) >= 0)
+			if (api->motion_slice(motion) != slice->sliceIndex ||
+				!((api->motion_type(motion) == GP_MOTION_GATHER &&
+				   slice->gangType == GANGTYPE_PRIMARY_READER) ||
+				  (api->motion_type(motion) == GP_MOTION_DML &&
+				   slice->gangType == GANGTYPE_PRIMARY_WRITER)))
+				continue;
+			if (api->motion_segment(motion) >= 0)
 				direct = api->motion_segment(motion);
+			else if (api->version_minor >= 7)
+				several = api->motion_segments(motion);
 		}
 
 		table = lappend(table,
@@ -410,6 +417,7 @@ gp_orca_slice_table(List *slices, List *motions)
 								   makeInteger(slice->numsegments),
 								   makeInteger(slice->segindex)));
 		llast(table) = lappend((List *) llast(table), makeInteger(direct));
+		llast(table) = lappend((List *) llast(table), list_copy(several));
 	}
 
 	return (Node *) makeDefElem(pstrdup(GP_SLICE_TABLE), (Node *) table, -1);

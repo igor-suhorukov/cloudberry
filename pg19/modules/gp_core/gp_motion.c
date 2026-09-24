@@ -147,6 +147,8 @@
 #define MOTION_PRIVATE_PARENT		9	/* the slice that receives */
 #define MOTION_PRIVATE_EXEC_PARAMS	10	/* values its fragment is sent with */
 #define MOTION_PRIVATE_EXTERN_PARAMS	11	/* and statement parameters */
+#define MOTION_PRIVATE_CONTENTS		12	/* direct dispatch's segments, if
+										 * several */
 
 /* A Motion whose receiving slice the translator did not say. */
 #define MOTION_PARENT_UNKNOWN		(-3)
@@ -208,7 +210,9 @@ typedef struct MotionState
 {
 	CustomScanState css;
 
-	int			content;		/* -1: every segment */
+	int			content;		/* -1: every segment, or these: */
+	int			ncontents;		/* direct dispatch's, when several */
+	int		   *contents;
 	int			slice;
 	int			nkeys;			/* 0: not sorted */
 	AttrNumber *keys;
@@ -454,6 +458,7 @@ motion_make(int type, Plan *fragment, List *targetlist, List *qual,
 									makeInteger(MOTION_PARENT_UNKNOWN));
 	cscan->custom_private = lappend(cscan->custom_private, NIL);	/* PARAM_EXEC */
 	cscan->custom_private = lappend(cscan->custom_private, NIL);	/* PARAM_EXTERN */
+	cscan->custom_private = lappend(cscan->custom_private, NIL);	/* segments */
 	cscan->methods = &motion_scan_methods;
 
 	return cscan;
@@ -541,6 +546,35 @@ GpMotionSegment(Plan *plan)
 	Assert(GpMotionIs(plan));
 	return intVal(list_nth(((CustomScan *) plan)->custom_private,
 						   MOTION_PRIVATE_CONTENT));
+}
+
+/*
+ * Direct dispatch to several segments: a Gather or a write sent to these,
+ * in the order Cloudberry's INFO line names them.  One is its segment.
+ */
+void
+GpMotionSetSegments(Plan *plan, List *contents)
+{
+	List	   *priv = ((CustomScan *) plan)->custom_private;
+
+	Assert(GpMotionIs(plan));
+	if (list_length(contents) == 1)
+	{
+		GpMotionSetSegment(plan, linitial_int(contents));
+		return;
+	}
+	list_nth_cell(priv, MOTION_PRIVATE_CONTENTS)->ptr_value = list_copy(contents);
+}
+
+List *
+GpMotionSegments(Plan *plan)
+{
+	List	   *priv = ((CustomScan *) plan)->custom_private;
+
+	Assert(GpMotionIs(plan));
+	if (list_length(priv) <= MOTION_PRIVATE_CONTENTS)
+		return NIL;
+	return (List *) list_nth(priv, MOTION_PRIVATE_CONTENTS);
 }
 
 /*
@@ -1210,6 +1244,9 @@ motion_begin(CustomScanState *node, EState *estate, int eflags)
 	List	   *nfs = (List *) list_nth(priv, MOTION_PRIVATE_NULLSFIRST);
 
 	state->content = intVal(list_nth(priv, MOTION_PRIVATE_CONTENT));
+	state->contents = palloc_array(int, Max(list_length(GpMotionSegments((Plan *) cscan)), 1));
+	foreach_int(c, GpMotionSegments((Plan *) cscan))
+		state->contents[state->ncontents++] = c;
 	state->slice = intVal(list_nth(priv, MOTION_PRIVATE_SLICE));
 	state->type = intVal(list_nth(priv, MOTION_PRIVATE_TYPE));
 	state->nkeys = list_length(keys);
@@ -1833,6 +1870,20 @@ content_includes(int content, int segment)
 	return content == -1 || content == segment;
 }
 
+/* The segments the Gather runs on: those, where direct dispatch named some. */
+static bool
+state_includes(MotionState *state, int segment)
+{
+	if (state->ncontents > 0)
+	{
+		for (int i = 0; i < state->ncontents; i++)
+			if (state->contents[i] == segment)
+				return true;
+		return false;
+	}
+	return content_includes(state->content, segment);
+}
+
 /*
  * Can the Motions below this Gather stream -- every slice running at once,
  * a reader on each segment for each slice the writer does not run?  When
@@ -1899,7 +1950,7 @@ stream_plan(MotionState *state, List *order, List *motions)
 		{
 			if (!content_includes(content, seg))
 				continue;
-			if (!content_includes(state->content, seg))
+			if (!state_includes(state, seg))
 				return false;	/* no writer there to read as */
 			ss->contents[ss->ncontents++] = seg;
 		}
@@ -1954,7 +2005,7 @@ stream_start(MotionState *state)
 	sharekey = psprintf("%d_%u", MyProcPid, ++share_counter);
 
 	for (int seg = 0; seg < nsegs; seg++)
-		if (content_includes(state->content, seg))
+		if (state_includes(state, seg))
 			writer_address[seg] = GpStreamWriterAddress(seg, &writer_pid[seg]);
 
 	stream = GpStreamBegin();
@@ -1974,7 +2025,7 @@ stream_start(MotionState *state)
 		{
 			for (int seg = 0; seg < nsegs; seg++)
 			{
-				if (!content_includes(state->content, seg))
+				if (!state_includes(state, seg))
 					continue;
 				contents = lappend(contents, makeInteger(seg));
 				addresses = lappend(addresses,
@@ -2141,20 +2192,30 @@ motion_dml_run(MotionState *state)
 	if (!state->prepared)
 		motion_prepare(state);
 
-	GpDispatchCommandParams(fragment_sql_ex(estate, write,
-											(CustomScan *) state->css.ss.ps.plan,
-											state->css.ss.ps.ps_ExprContext,
-											state->key,
-											state->streaming ? stream_start(state) : NIL,
-											false),
-							0, NULL, NULL, state->content, 0, counts);
+	if (state->ncontents > 0)
+		GpDispatchCommandParamsOnContents(fragment_sql_ex(estate, write,
+														  (CustomScan *) state->css.ss.ps.plan,
+														  state->css.ss.ps.ps_ExprContext,
+														  state->key,
+														  state->streaming ? stream_start(state) : NIL,
+														  false),
+										  0, NULL, NULL, state->contents,
+										  state->ncontents, counts);
+	else
+		GpDispatchCommandParams(fragment_sql_ex(estate, write,
+												(CustomScan *) state->css.ss.ps.plan,
+												state->css.ss.ps.ps_ExprContext,
+												state->key,
+												state->streaming ? stream_start(state) : NIL,
+												false),
+								0, NULL, NULL, state->content, 0, counts);
 	stream_end(state);
 
 	/* every segment writes a replicated table's rows alike: count them once */
 	if (policy != NULL && GpPolicyIsReplicated(policy))
 		total = counts[0];
 	else
-		for (int i = 0; i < nsegs; i++)
+		for (int i = 0; i < (state->ncontents > 0 ? state->ncontents : nsegs); i++)
 			total += counts[i];
 	estate->es_processed += total;
 }
@@ -2169,15 +2230,20 @@ motion_start(MotionState *state)
 		motion_prepare(state);
 
 	oldcxt = MemoryContextSwitchTo(state->css.ss.ps.state->es_query_cxt);
-	state->gather = GpGatherStartOn(fragment_sql_ex(state->css.ss.ps.state,
-													outerPlan(state->css.ss.ps.plan),
-													(CustomScan *) state->css.ss.ps.plan,
-													state->css.ss.ps.ps_ExprContext,
-													state->key,
-													state->streaming ? stream_start(state) : NIL,
-													false),
-									slot->tts_tupleDescriptor,
-									state->content);
+	{
+		char	   *sql = fragment_sql_ex(state->css.ss.ps.state,
+										  outerPlan(state->css.ss.ps.plan),
+										  (CustomScan *) state->css.ss.ps.plan,
+										  state->css.ss.ps.ps_ExprContext,
+										  state->key,
+										  state->streaming ? stream_start(state) : NIL,
+										  false);
+
+		state->gather = state->ncontents > 0
+			? GpGatherStartOnContents(sql, slot->tts_tupleDescriptor,
+									  state->contents, state->ncontents)
+			: GpGatherStartOn(sql, slot->tts_tupleDescriptor, state->content);
+	}
 	MemoryContextSwitchTo(oldcxt);
 }
 
@@ -2417,10 +2483,12 @@ motion_rescan(CustomScanState *node)
 	state->offset = 0;
 }
 
-/* How many send: one segment, the coordinator, or all of them. */
+/* How many send: one segment, the coordinator, direct dispatch's, or all. */
 static int
 motion_segments(MotionState *state)
 {
+	if (state->ncontents > 0)
+		return state->ncontents;
 	return state->content >= 0 || state->content == GP_MOTION_FROM_COORDINATOR
 		? 1 : GpClusterSegmentCount();
 }
@@ -2860,6 +2928,7 @@ typedef struct SliceReport
 	int			size;
 	int			below;
 	bool		single;
+	List	   *contents;		/* direct dispatch's segments, if several */
 } SliceReport;
 
 static int
@@ -2906,6 +2975,7 @@ report_slices(PlannedStmt *stmt)
 		int			gang = intVal(list_nth(slice, 2));
 		int			nsegs = intVal(list_nth(slice, 3));
 		int			direct = intVal(list_nth(slice, 5));
+		List	   *several = list_length(slice) > 6 ? (List *) list_nth(slice, 6) : NIL;
 		SliceReport *r;
 
 		/* the coordinator's own slice is not dispatched */
@@ -2916,7 +2986,8 @@ report_slices(PlannedStmt *stmt)
 		r->index = gang == 4 ? 0 : index;
 		/* an entry slice, a singleton, and a direct dispatch are one process */
 		r->single = gang == 1 || gang == 2 || direct >= 0 || nsegs == 1;
-		r->size = r->single ? 1 : nsegs;
+		r->size = r->single ? 1 : several != NIL ? list_length(several) : nsegs;
+		r->contents = several;
 		for (int i = 0; i < n; i++)
 			for (int p = parent[i]; p >= 0 && p < n && p != i; p = parent[p])
 				if (p == index)
@@ -2928,7 +2999,19 @@ report_slices(PlannedStmt *stmt)
 
 	qsort(reports, nreports, sizeof(SliceReport), slice_report_cmp);
 	for (int i = 0; i < nreports; i++)
-		GpReportDispatch(reports[i].index, reports[i].single, 0);
+	{
+		if (!reports[i].single && reports[i].contents != NIL)
+		{
+			int			ncontents = 0;
+			int		   *contents = palloc_array(int, list_length(reports[i].contents));
+
+			foreach_int(c, reports[i].contents)
+				contents[ncontents++] = c;
+			GpReportDispatchContents(reports[i].index, contents, ncontents);
+		}
+		else
+			GpReportDispatch(reports[i].index, reports[i].single, 0);
+	}
 }
 
 /*

@@ -107,6 +107,9 @@ static const GpCoreApi gp_core_api = {
 	.split_modify_make = GpSplitModifyMake,
 	.motion_set_parent = GpMotionSetParent,
 	.motion_set_params = GpMotionSetParams,
+	.motion_set_segments = GpMotionSetSegments,
+	.motion_segments = GpMotionSegments,
+	.direct_dispatch_contents = GpScanDirectDispatchContents,
 };
 
 /*
