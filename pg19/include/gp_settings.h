@@ -28,7 +28,10 @@
 
 #include "postgres.h"
 
-/* gp.test_print_direct_dispatch_info: an INFO line per slice dispatched */
+/*
+ * gp.test_print_direct_dispatch_info: an INFO line per slice dispatched, and
+ * per command of a two-phase commit
+ */
 extern bool gp_test_print_direct_dispatch_info;
 
 /* gp.enable_direct_dispatch: send to the one segment that holds the rows */
@@ -49,6 +52,15 @@ extern bool gp_use_legacy_hashops;
  * every segment.
  */
 extern void GpReportDispatch(int slice, bool single, int nsegments);
+
+/*
+ * The INFO Cloudberry prints for a command of its two-phase commit, when
+ * gp.test_print_direct_dispatch_info is on: "Distributed transaction
+ * command 'Distributed Prepare' to ALL contents: 0 1 2", or to a SINGLE
+ * content, or to PARTIAL contents -- the n segments whose content ids
+ * contents holds, in order.
+ */
+extern void GpReportDtxCommand(const char *command, const int *contents, int n);
 
 /*
  * The planner's gathers have no slice table; each is a slice of its own,

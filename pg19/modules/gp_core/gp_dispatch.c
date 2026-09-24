@@ -107,6 +107,7 @@
 #include "gp_dtx.h"
 #include "gp_fault.h"
 #include "gp_label.h"
+#include "gp_settings.h"
 
 /* Where libpq finds the password for the segments; see the file header. */
 static char *gp_internal_passfile = NULL;
@@ -212,12 +213,14 @@ static char *gang_ds_sent = NULL;
 
 /*
  * A transaction's parts prepared on the segments, between the two phases:
- * the gid, and which connections were asked to prepare one.
+ * the gid, which connections were asked to prepare one, and whether every
+ * one of them has.
  */
 static char dtx_gid[GP_DTX_GIDLEN];
 static bool *dtx_prepared = NULL;	/* by connection, in TopMemoryContext */
 static int	dtx_prepared_size = 0;
 static int	dtx_nprepared = 0;
+static bool dtx_all_prepared = false;
 
 /* Names the cursors of the gathers of one transaction apart. */
 static uint32 gather_counter = 0;
@@ -1775,6 +1778,7 @@ static void
 dtx_forget(void)
 {
 	dtx_nprepared = 0;
+	dtx_all_prepared = false;
 	dtx_gid[0] = '\0';
 	if (dtx_prepared != NULL)
 		memset(dtx_prepared, 0, dtx_prepared_size * sizeof(bool));
@@ -1789,12 +1793,19 @@ dtx_forget(void)
  * has none -- and whose commit record, forced to disk before any segment is
  * told (ForceSyncCommit), is the decision (gp_dtx.c).  A failure here
  * raises, and the abort rolls back whatever was prepared.
+ *
+ * A part that wrote alone is prepared too, where Cloudberry commits it in
+ * one phase when the coordinator wrote nothing (prepareDtxTransaction(),
+ * cdb/cdbtm.c): a segment of the port commits only after the coordinator's
+ * commit record, and that is what orders commits for the distributed
+ * snapshots.
  */
 static void
 gang_commit_first_phase(GpGang *g)
 {
 	PGresult  **status = palloc0_array(PGresult *, g->nconns);
 	bool	   *writes = palloc0_array(bool, g->nconns);
+	int		   *writers = palloc_array(int, g->nconns);
 	int			nwriters = 0;
 
 	notices_quiet++;
@@ -1805,7 +1816,7 @@ gang_commit_first_phase(GpGang *g)
 		writes[i] = status[i] != NULL && PQntuples(status[i]) == 1 &&
 			strcmp(PQgetvalue(status[i], 0, 0), "t") == 0;
 		if (writes[i])
-			nwriters++;
+			writers[nwriters++] = g->conns[i].content;
 		if (status[i] != NULL)
 			PQclear(status[i]);
 	}
@@ -1818,7 +1829,6 @@ gang_commit_first_phase(GpGang *g)
 	{
 		GpDtxFormGid(GetTopFullTransactionId(), dtx_gid);
 		ForceSyncCommit();
-		GP_FAULT("dtm_broadcast_prepare");
 		if (dtx_prepared_size < g->nconns)
 		{
 			if (dtx_prepared != NULL)
@@ -1827,6 +1837,7 @@ gang_commit_first_phase(GpGang *g)
 												  g->nconns * sizeof(bool));
 			dtx_prepared_size = g->nconns;
 		}
+		GpReportDtxCommand("Distributed Prepare", writers, nwriters);
 	}
 
 	for (int i = 0; i < g->nconns; i++)
@@ -1843,6 +1854,17 @@ gang_commit_first_phase(GpGang *g)
 	}
 	gang_wait_all(g, NULL, true);
 	notices_quiet--;
+
+	/*
+	 * Every part that wrote is prepared, and an abort from here on rolls back
+	 * a transaction prepared wherever it wrote.  Cloudberry's fault is here,
+	 * after its broadcast (doPrepareTransaction()).
+	 */
+	if (nwriters > 0)
+	{
+		dtx_all_prepared = true;
+		GP_FAULT("dtm_broadcast_prepare");
+	}
 }
 
 /*
@@ -1865,6 +1887,25 @@ gang_finish_prepared(bool commit)
 		return 0;
 	if (g == NULL)
 		return dtx_nprepared;
+
+	/*
+	 * A rollback is named, as Cloudberry names it, by how far the first phase
+	 * got (rollbackDtxTransaction(), cdb/cdbtm.c).
+	 */
+	if (gp_test_print_direct_dispatch_info)
+	{
+		int		   *contents = palloc_array(int, g->nconns);
+		int			n = 0;
+
+		for (int i = 0; i < g->nconns && i < dtx_prepared_size; i++)
+			if (dtx_prepared[i])
+				contents[n++] = g->conns[i].content;
+		GpReportDtxCommand(commit ? "Distributed Commit Prepared" :
+						   dtx_all_prepared ? "Distributed Abort Prepared" :
+						   "Distributed Abort (Some Prepared)",
+						   contents, n);
+		pfree(contents);
+	}
 
 	sql = psprintf("%s PREPARED '%s'", commit ? "COMMIT" : "ROLLBACK", dtx_gid);
 	for (int i = 0; i < g->nconns && i < dtx_prepared_size; i++)

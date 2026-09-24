@@ -30,7 +30,9 @@
  *
  * Two kinds.  Those the port carries out:
  *
- *	 gp.test_print_direct_dispatch_info  the INFO line per dispatched slice
+ *	 gp.test_print_direct_dispatch_info  the INFO line per dispatched slice,
+ *										 and per command of a two-phase
+ *										 commit (gp_dispatch.c)
  *	 gp.enable_direct_dispatch			 asking one segment when one holds
  *										 every row a query can touch
  *	 gp.autostats_mode, and the rest	 ANALYZE after a write, as auto_stats()
@@ -142,14 +144,32 @@ static ProcessUtility_hook_type prev_ProcessUtility = NULL;
 static int	gather_slices = 0;
 
 /* ------------------------------------------------------------------------- */
-/* The INFO line of a dispatched slice                                       */
+/* The INFO lines of a dispatch                                              */
 /* ------------------------------------------------------------------------- */
 
 /*
- * What Cloudberry's segmentsToContentStr() says of a slice's segments
- * (cdb/dispatcher/cdbdisp.c): one is a SINGLE content, and every one is ALL
- * contents with their ids.
+ * What Cloudberry's segmentsToContentStr() says of a list of segments
+ * (cdb/dispatcher/cdbdisp.c): one is a SINGLE content, and more are ALL
+ * contents with their ids -- PARTIAL contents when the cluster has others.
+ * contents NULL is the first n segments.
  */
+static void
+append_contents(StringInfo buf, const int *contents, int n)
+{
+	int			nsegs;
+
+	GpClusterSegments(&nsegs);
+	if (n == 1)
+	{
+		appendStringInfoString(buf, "SINGLE content");
+		return;
+	}
+	appendStringInfoString(buf, n < nsegs ? "PARTIAL contents:" : "ALL contents:");
+	for (int i = 0; i < n; i++)
+		appendStringInfo(buf, " %d", contents != NULL ? contents[i] : i);
+}
+
+/* A slice's: one process, or a partial table's segments, or every one. */
 void
 GpReportDispatch(int slice, bool single, int nsegments)
 {
@@ -163,17 +183,26 @@ GpReportDispatch(int slice, bool single, int nsegments)
 	GpClusterSegments(&nsegs);
 	if (nsegments <= 0 || nsegments > nsegs)
 		nsegments = nsegs;
-	if (single || nsegments == 1)
-		appendStringInfoString(&buf, "SINGLE content");
-	else
-	{
-		/* Cloudberry's words for a slice of a partial table's segments */
-		appendStringInfoString(&buf, nsegments < nsegs ? "PARTIAL contents:"
-							   : "ALL contents:");
-		for (int i = 0; i < nsegments; i++)
-			appendStringInfo(&buf, " %d", i);
-	}
+	append_contents(&buf, NULL, single ? 1 : nsegments);
 	elog(INFO, "(slice %d) Dispatch command to %s", slice, buf.data);
+	pfree(buf.data);
+}
+
+/*
+ * A command of the two-phase commit, as doDispatchDtxProtocolCommand()
+ * prints one (cdb/cdbtm.c), before it is sent.
+ */
+void
+GpReportDtxCommand(const char *command, const int *contents, int n)
+{
+	StringInfoData buf;
+
+	if (!gp_test_print_direct_dispatch_info || n <= 0)
+		return;
+
+	initStringInfo(&buf);
+	append_contents(&buf, contents, n);
+	elog(INFO, "Distributed transaction command '%s' to %s", command, buf.data);
 	pfree(buf.data);
 }
 
@@ -430,7 +459,7 @@ GpSettingsInit(void)
 	 */
 	DefineCustomBoolVariable("gp.test_print_direct_dispatch_info",
 							 "For testing purposes, print information about direct dispatch decisions.",
-							 "An INFO line for each slice a statement dispatches, and the segments it goes to.",
+							 "An INFO line for each slice a statement dispatches, and for each command of a two-phase commit, with the segments it goes to.",
 							 &gp_test_print_direct_dispatch_info,
 							 false, PGC_SUSET,
 							 GUC_SUPERUSER_ONLY | GUC_NOT_IN_SAMPLE,

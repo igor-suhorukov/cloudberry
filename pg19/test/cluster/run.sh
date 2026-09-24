@@ -813,7 +813,7 @@ mine" ] && ok "a transaction reads its own rows, and a LIMIT leaves the connecti
 	out=$(q 0 "EXPLAIN (COSTS OFF) SELECT * FROM pt1;")
 	out2=$(printf '%s\n' "SET gp.test_print_direct_dispatch_info = on;" "SELECT count(*) FROM pn1;" \
 		"UPDATE pr1 SET b = b + 1;" "SELECT b FROM pt1 WHERE a = 7;" | qf 0)
-	info=$(printf '%s\n' "$out2" | grep -o 'INFO:.*' | tr '\n' '/')
+	info=$(printf '%s\n' "$out2" | grep -o 'INFO:  (slice.*' | tr '\n' '/')
 	rows=$(printf '%s\n' "$out2" | grep -v 'INFO:' | tr '\n' '/')
 	case "$out|$info|$rows" in
 		*"Gather Motion 1:1 on pt1"*"(slice1; segments: 1)"*"|INFO:  (slice 1) Dispatch command to SINGLE content/INFO:  (slice 0) Dispatch command to SINGLE content/INFO:  (slice 1) Dispatch command to SINGLE content/|50/7/")
@@ -1393,7 +1393,7 @@ COMMIT;"
 		"SELECT count(*) FROM ds;" \
 		"SELECT v FROM ds WHERE key = 100;" \
 		"UPDATE ds SET v = 'horse' WHERE key = 100;" \
-		"DELETE FROM ds WHERE key = 1;" | qf 0 | grep -o 'INFO:.*' | tr '\n' '/')
+		"DELETE FROM ds WHERE key = 1;" | qf 0 | grep -o 'INFO:  (slice.*' | tr '\n' '/')
 	expect="INFO:  (slice 0) Dispatch command to SINGLE content/INFO:  (slice 0) Dispatch command to ALL contents: 0 1/INFO:  (slice 1) Dispatch command to ALL contents: 0 1/INFO:  (slice 1) Dispatch command to SINGLE content/INFO:  (slice 0) Dispatch command to SINGLE content/INFO:  (slice 0) Dispatch command to SINGLE content/"
 	[ "$out" = "$expect" ] \
 		&& ok "the planner's dispatches print Cloudberry's INFO lines, one segment where the key names one" \
@@ -1407,7 +1407,7 @@ COMMIT;"
 		"INSERT INTO ds VALUES (7, 'x');" \
 		"SELECT count(*) FROM ds;" \
 		"SELECT v FROM ds WHERE key = 7;" \
-		"DELETE FROM ds WHERE key = 7;" | qf 0 | grep -o 'INFO:.*' | tr '\n' '/')
+		"DELETE FROM ds WHERE key = 7;" | qf 0 | grep -o 'INFO:  (slice.*' | tr '\n' '/')
 	expect="INFO:  (slice 0) Dispatch command to SINGLE content/INFO:  (slice 1) Dispatch command to ALL contents: 0 1/INFO:  (slice 1) Dispatch command to SINGLE content/INFO:  (slice 0) Dispatch command to SINGLE content/"
 	[ "$out" = "$expect" ] \
 		&& ok "ORCA's slices print theirs, a write as slice 0 and one row of constants to its segment" \
@@ -1682,6 +1682,42 @@ SQL
 		*"fault triggered, fault name:'start_prepare'"*"segment 1"*"|60|0|0")
 			ok "a segment that fails to prepare fails the commit, and what the other prepared is rolled back" ;;
 		*) notok "a failure in the first phase" "$out / $out2 / $p1 / $p2" ;;
+	esac
+
+	# What gp.test_print_direct_dispatch_info says of the two phases, in
+	# Cloudberry's words (doDispatchDtxProtocolCommand(), cdbtm.c): each
+	# command, before it is sent, and the segments it goes to -- those whose
+	# parts wrote.  A part that wrote alone is prepared, where Cloudberry
+	# commits it in one phase; a transaction that only read says nothing; and
+	# a rollback is named by how far the first phase got -- a fault once every
+	# part is prepared, where Cloudberry's is, and a segment that fails to.
+	out=$(printf '%s\n' "SET gp.test_print_direct_dispatch_info = on;" \
+		"CREATE TABLE dtxi (a int) DISTRIBUTED BY (a);" \
+		"INSERT INTO dtxi VALUES (1);" \
+		"SELECT count(*) FROM dtxi;" \
+		"INSERT INTO dtxi SELECT generate_series(2, 10);" \
+		"SELECT gp_inject_fault('dtm_broadcast_prepare', 'error', 1);" \
+		"INSERT INTO dtxi SELECT generate_series(11, 20);" \
+		"SELECT gp_inject_fault('start_prepare', 'error', $(dbid 2));" \
+		"INSERT INTO dtxi SELECT generate_series(11, 20);" \
+		"RESET gp.test_print_direct_dispatch_info;" \
+		"SELECT gp_inject_fault('dtm_broadcast_prepare', 'reset', 1);" \
+		"SELECT gp_inject_fault('start_prepare', 'reset', $(dbid 2));" | qf 0)
+	info=$(printf '%s\n' "$out" | grep -o 'INFO:  Distributed.*' | tr '\n' '/')
+	out2=$(q 0 "SELECT count(*) FROM dtxi;")
+	p1=$(q 1 "SELECT count(*) FROM pg_prepared_xacts;")
+	p2=$(q 2 "SELECT count(*) FROM pg_prepared_xacts;")
+	q 0 "DROP TABLE dtxi;" >/dev/null
+	dtxc="INFO:  Distributed transaction command"
+	expect="$dtxc 'Distributed Prepare' to ALL contents: 0 1/$dtxc 'Distributed Commit Prepared' to ALL contents: 0 1/"
+	expect="$expect$dtxc 'Distributed Prepare' to SINGLE content/$dtxc 'Distributed Commit Prepared' to SINGLE content/"
+	expect="$expect$dtxc 'Distributed Prepare' to ALL contents: 0 1/$dtxc 'Distributed Commit Prepared' to ALL contents: 0 1/"
+	expect="$expect$dtxc 'Distributed Prepare' to ALL contents: 0 1/$dtxc 'Distributed Abort Prepared' to ALL contents: 0 1/"
+	expect="$expect$dtxc 'Distributed Prepare' to ALL contents: 0 1/$dtxc 'Distributed Abort (Some Prepared)' to ALL contents: 0 1/"
+	case "$out|$info|$out2|$p1|$p2" in
+		*"fault name:'dtm_broadcast_prepare'"*"fault name:'start_prepare'"*"|$expect|10|0|0")
+			ok "gp.test_print_direct_dispatch_info names each command of the two phases, and the segments it goes to" ;;
+		*) notok "the two phases' INFO lines" "$info / $out2 / $p1 / $p2" ;;
 	esac
 
 	# The coordinator goes down between the phases.  Its postmaster restarts

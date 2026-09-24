@@ -22,20 +22,26 @@ as_alias  an ORDER BY of text, which puts "XXXX" before "bbbb": the cluster
 bfv_dd_multicolumn (planner, orca)  the INFO lines of
   test_print_direct_dispatch_info.  Cloudberry sends a query whose key is
   fixed to a few values to those segments ("PARTIAL contents: 1 2"), where
-  the port sends it to one segment or every one; the lines of its two-phase
-  commit ("Distributed transaction command ...") are M3's; its INSERT ...
-  SELECT of generate_series() runs the function in a slice of one segment,
-  and its ANALYZE dispatches a slice, where the port's run the one on the
-  coordinator and sample through O3.  Under ORCA, an INSERT of one row of
-  constants into a table whose key has two columns goes to every segment:
-  ORCA's core gives direct dispatch to a single-column key only.
+  the port sends it to one segment or every one; an INSERT of one row
+  commits in two phases, where Cloudberry's commits in one, as
+  bfv_dd_types' do; its INSERT ... SELECT of generate_series() runs the
+  function in a slice of one segment, and its ANALYZE dispatches a slice,
+  where the port's run the one on the coordinator and sample through O3.
+  Under ORCA, an INSERT of one row of constants into a table whose key has
+  two columns goes to every segment -- ORCA's core gives direct dispatch to
+  a single-column key only -- and is prepared on the one it wrote on.
 
-bfv_dd_types  the lines of its two-phase commit ("Distributed transaction
-  command ..."), which are M3's, as bfv_dd_multicolumn's are.  Its direct
-  dispatch is Cloudberry's to the last line: a bit or bit varying key,
-  hashed as Cloudberry's catalog hashes them, and a constant of another type
-  of the key's hash family -- id = 1::int8 of an int2 key -- hashed with its
-  own type's function.
+bfv_dd_types  the two-phase commit of an INSERT of one row: "Distributed
+  Prepare" and "Distributed Commit Prepared" to the segment it wrote on,
+  where Cloudberry's "Distributed Commit (one-phase)" commits it there in
+  one, the coordinator having written nothing (prepareDtxTransaction(),
+  cdbtm.c).  A segment of the port commits only after the coordinator's
+  commit record, which is what orders commits for its distributed snapshots
+  (gp_dtx.c), so a part that wrote alone is prepared too.  The DDL's two
+  phases are Cloudberry's to the last line, and so is the test's direct
+  dispatch: a bit or bit varying key, hashed as Cloudberry's catalog hashes
+  them, and a constant of another type of the key's hash family -- id =
+  1::int8 of an int2 key -- hashed with its own type's function.
 
 bfv_joins  a join of twenty empty tables, which Cloudberry's demo cluster
   cancels for the memory its planner takes -- the runaway cleaner's red
