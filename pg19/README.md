@@ -166,6 +166,12 @@ Distributed transactions (M3), in `gp_core`:
   segments' parts and finished by the same recovery;
 - Cloudberry's fault injector, `gp_inject_fault`, for the tests.
 
+What M3 leaves open: on one node, the loopback commits just before the
+transaction that asked for it, not with it; the coordinator counts none of
+a distributed table's pages all-visible, so ORCA does not choose an
+index-only scan Cloudberry's would; a role that owns a tag can be dropped;
+and a task's history is read in the task database only.
+
 The storage, resource and transport modules — `gp_ao`, `pax`, `gp_exttable`,
 `gp_resource`, `gp_tde`, `interconnect`, `udp2` — are still stubs: M5 and M6
 fill the first five, and the streaming transport lives in `gp_core` for now.
