@@ -97,6 +97,11 @@ orca_debug = get_option('orca_debug').enabled() or \
 pg_client_inc = include_directories(pg_includedir)
 libpq_dep = cc.find_library('pq', dirs: [pg_libdir], required: true)
 
+# gp_ao's compression: zlib, which PostgreSQL itself needs, and zstd where it
+# is installed.
+zlib_dep = dependency('zlib', required: true)
+zstd_dep = dependency('libzstd', required: false)
+
 # PostgreSQL leaves extension symbols to be resolved at load time, and opens
 # libraries with RTLD_GLOBAL, which is how the modules listed after gp_core
 # reach into it.
@@ -129,6 +134,8 @@ endif
 
 patch_probe = '''
 #include "postgres.h"
+#include "access/reloptions.h"
+#include "access/tableamext.h"
 #include "access/xact.h"
 #include "catalog/catalog.h"
 #include "commands/explain.h"
@@ -140,6 +147,7 @@ patch_probe = '''
 #include "parser/parser.h"
 #include "replication/syncrep.h"
 #include "storage/md.h"
+#include "storage/smgr.h"
 #include "utils/combocid.h"
 #include "utils/ruleutils.h"
 
@@ -148,6 +156,8 @@ void		cb_probe(void);
 void
 cb_probe(void)
 {
+	TableAmExtRoutine ext = {0};
+
 	new_oid_hook = NULL;					/* R1 */
 	combocid_create_hook = NULL;			/* R2 */
 	combocid_miss_hook = NULL;				/* R2 */
@@ -157,6 +167,7 @@ cb_probe(void)
 	columnref_fallback_hook = NULL;			/* O10 */
 	deparse_function_as_column_hook = NULL;	/* O10 */
 	mdunlink_hook = NULL;					/* O22 */
+	smgr_file_event_hook = NULL;			/* O21 */
 	raw_parser_hook = NULL;					/* O26 */
 	star_expansion_filter_hook = NULL;		/* O28 */
 
@@ -167,6 +178,15 @@ cb_probe(void)
 	(void) OpenMatViewIncrementalMaintenanceExternal;	/* O27 */
 	(void) CloseMatViewIncrementalMaintenanceExternal;	/* O27 */
 	(void) ExtensionMarkAdd;							/* O23 */
+	(void) RegisterTableAmExtension;					/* O13 */
+	(void) table_am_reloptions;							/* O14 */
+	(void) table_scan_extractcolumns;					/* O15 */
+	ext.index_unique_check = NULL;						/* O16 */
+	ext.relation_add_columns = NULL;					/* O17 */
+	ext.relation_get_block_sequences = NULL;			/* O18 */
+	ext.size_from_am = false;							/* O19 */
+	ext.old_row_from_plan = false;						/* O20 */
+	(void) ext;
 }
 '''
 
@@ -190,7 +210,7 @@ if not have_patched_pg and get_option('require_patched_pg')
   error('''
     @0@
     compiles, but does not carry the Cloudberry core patch series (R1-R4, O3,
-    O4, O10, O22, O23, O26-O28).  Build PostgreSQL from github/postgres, branch
+    O4, O10, O13-O23, O26-O28).  Build PostgreSQL from github/postgres, branch
     REL_19_STABLE_CLOUDBERRY, and point -Dpg_config at it.
     Pass -Drequire_patched_pg=false to configure anyway.'''.format(
     pg_config.full_path()))
@@ -300,8 +320,20 @@ modules = [
     'include_directories': orca_inc,
   },
   {
+    # Append-optimized tables.  zlib is PostgreSQL's own requirement; zstd,
+    # Cloudberry's other compresstype, is used where it is found.
     'name': 'gp_ao', 'preload': true, 'extension': true, 'build': true,
-    'sources': files('modules/gp_ao/gp_ao.c'),
+    'sources': files('modules/gp_ao/gp_ao.c',
+                     'modules/gp_ao/ao_am.c',
+                     'modules/gp_ao/ao_block.c',
+                     'modules/gp_ao/ao_dml.c',
+                     'modules/gp_ao/ao_meta.c',
+                     'modules/gp_ao/ao_options.c',
+                     'modules/gp_ao/ao_storage.c',
+                     'modules/gp_ao/ao_toolkit.c',
+                     'modules/gp_ao/ao_vacuum.c'),
+    'dependencies': [zlib_dep, zstd_dep],
+    'c_args': zstd_dep.found() ? ['-DGP_AO_HAVE_ZSTD'] : [],
   },
   {
     'name': 'pax', 'preload': true, 'extension': true, 'build': true,
@@ -393,7 +425,7 @@ foreach m : modules
   name = m['name']
 
   shared_module(name, m['sources'],
-    c_args: mod_c_args,
+    c_args: mod_c_args + m.get('c_args', []),
     cpp_args: m.get('cpp_args', []),
     link_args: mod_link_args,
     # As PGXS does, so that a module which links libpq finds it at load time

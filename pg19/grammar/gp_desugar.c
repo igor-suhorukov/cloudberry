@@ -111,6 +111,7 @@ static const char *const gp_trigger_words[] = {
 	"tag", "profile", "noprofile", "distributed", "randomly", "replicated",
 	"task", "directory", "storage", "dynamic", "incremental", "unset",
 	"account", "execute", "decode", "subpartition", "gp_dist_random",
+	"orientation",
 	"reorganize",
 	NULL
 };
@@ -2124,6 +2125,32 @@ rw_storage_and_dynamic(GpRewrite *rw)
 }
 
 /*
+ * orientation=row, in any option list: WITH (appendonly=true, orientation=row)
+ *	 -> orientation='row'
+ *
+ * ROW is a keyword PostgreSQL's grammar takes as an option's value nowhere,
+ * where COLUMN, being reserved, it takes; Cloudberry's grammar took both.
+ * Quoted, it is the string gp_ao reads either way.
+ */
+static bool
+rw_orientation_row(GpRewrite *rw)
+{
+	const GpTokens *ts = rw->ts;
+	bool		did = false;
+
+	for (int j = rw->first; j + 2 < rw->last; j++)
+	{
+		if (tok_is(ts, j, "orientation") && tok_is_char(ts, j + 1, '=') &&
+			tok_is_kw(ts, j + 2, "row"))
+		{
+			rw_edit(rw, ts->toks[j + 2].off, tok_end(ts, j + 2), "'row' ");
+			did = true;
+		}
+	}
+	return did;
+}
+
+/*
  * CREATE INCREMENTAL MATERIALIZED VIEW ... AS
  * CREATE DYNAMIC TABLE ... SCHEDULE 's' ... AS
  *
@@ -3644,6 +3671,7 @@ rw_statement_itself(GpRewrite *rw)
 		return;
 
 	(void) rw_storage_and_dynamic(rw);
+	(void) rw_orientation_row(rw);
 	(void) rw_matview_options(rw);
 	(void) rw_function_clauses(rw);
 

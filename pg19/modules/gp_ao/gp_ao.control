@@ -24,5 +24,6 @@ comment = 'Append-optimized row and column tables, and the bitmap index'
 default_version = '1.0'
 module_pathname = '$libdir/gp_ao'
 relocatable = false
+schema = gp_ao
 requires = 'gp_core'
 superuser = true
