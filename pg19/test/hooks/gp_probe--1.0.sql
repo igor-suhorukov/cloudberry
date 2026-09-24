@@ -22,6 +22,8 @@ CREATE FUNCTION gp_probe.arm_star_filter(rel regclass, attnums smallint[])
   AS 'MODULE_PATHNAME', 'gp_probe_arm_star_filter' LANGUAGE C STRICT;
 CREATE FUNCTION gp_probe.arm_column(name text, func regprocedure) RETURNS void
   AS 'MODULE_PATHNAME', 'gp_probe_arm_column' LANGUAGE C STRICT;
+CREATE FUNCTION gp_probe.arm_lockmode(rel regclass, mode text) RETURNS void
+  AS 'MODULE_PATHNAME', 'gp_probe_arm_lockmode' LANGUAGE C STRICT;
 CREATE FUNCTION gp_probe.arm_parser(on_off boolean) RETURNS void
   AS 'MODULE_PATHNAME', 'gp_probe_arm_parser' LANGUAGE C STRICT;
 CREATE FUNCTION gp_probe.arm_explain(on_off boolean) RETURNS void

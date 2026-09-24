@@ -38,6 +38,7 @@
 #include "access/table.h"
 #include "access/xact.h"
 #include "catalog/catalog.h"
+#include "catalog/namespace.h"
 #include "catalog/pg_type.h"
 #include "commands/explain.h"
 #include "commands/matview.h"
@@ -53,6 +54,7 @@
 #include "parser/parse_relation.h"
 #include "parser/parser.h"
 #include "replication/syncrep.h"
+#include "storage/lock.h"
 #include "storage/md.h"
 #include "tcop/utility.h"
 #include "utils/array.h"
@@ -83,13 +85,14 @@ typedef enum ProbeEvent
 	EV_STAR_FILTER,
 	EV_COLUMNREF,
 	EV_DEPARSE_COLUMN,
+	EV_PARSER_LOCKMODE,
 	EV_COUNT
 } ProbeEvent;
 
 static const char *const event_name[EV_COUNT] = {
 	"new_oid", "combocid_create", "combocid_miss", "analyze_sample",
 	"explain_label", "mdunlink", "raw_parser", "star_filter",
-	"columnref", "deparse_column",
+	"columnref", "deparse_column", "parser_lockmode",
 };
 
 static int64 calls[EV_COUNT];
@@ -128,6 +131,10 @@ static Bitmapset *arm_star_cols = NULL;
 
 static char *arm_column_name = NULL;	/* O10: this name, where no column */
 static Oid	arm_column_func = InvalidOid;	/* has it, is this function's call */
+
+/* O30: this relation, when it is written or FOR UPDATE, in this mode */
+static Oid	arm_lockmode_rel = InvalidOid;
+static LOCKMODE arm_lockmode = NoLock;
 
 static bool arm_parser = false;
 static bool arm_explain = false;
@@ -414,6 +421,36 @@ probe_star_filter(Oid relid)
 }
 
 /* ------------------------------------------------------------------------- */
+/* O30: parser_lockmode_hook                                                 */
+/* ------------------------------------------------------------------------- */
+
+/*
+ * The armed relation, as the target of an UPDATE or a DELETE, or with a
+ * locking clause on it, in the armed mode: what gp_core does with a
+ * distributed table when the global deadlock detector is off.  An INSERT and
+ * a plain read keep the parser's mode.
+ */
+static LOCKMODE
+probe_parser_lockmode(ParseState *pstate, const RangeVar *relation,
+					  LOCKMODE lockmode, AclMode requiredPerms)
+{
+	Oid			relid;
+
+	if (!OidIsValid(arm_lockmode_rel) ||
+		!((requiredPerms & (ACL_UPDATE | ACL_DELETE)) != 0 ||
+		  lockmode == RowShareLock))
+		return lockmode;
+	relid = RangeVarGetRelid(relation, NoLock, true);
+	if (relid != arm_lockmode_rel)
+		return lockmode;
+
+	record(EV_PARSER_LOCKMODE, "%s of %s asked for %s",
+		   GetLockmodeName(DEFAULT_LOCKMETHOD, lockmode), relation->relname,
+		   GetLockmodeName(DEFAULT_LOCKMETHOD, arm_lockmode));
+	return arm_lockmode;
+}
+
+/* ------------------------------------------------------------------------- */
 /* O10: columnref_fallback_hook and deparse_function_as_column_hook          */
 /* ------------------------------------------------------------------------- */
 
@@ -472,6 +509,7 @@ PG_FUNCTION_INFO_V1(gp_probe_arm_new_oid);
 PG_FUNCTION_INFO_V1(gp_probe_arm_analyze);
 PG_FUNCTION_INFO_V1(gp_probe_arm_star_filter);
 PG_FUNCTION_INFO_V1(gp_probe_arm_column);
+PG_FUNCTION_INFO_V1(gp_probe_arm_lockmode);
 PG_FUNCTION_INFO_V1(gp_probe_arm_parser);
 PG_FUNCTION_INFO_V1(gp_probe_arm_explain);
 PG_FUNCTION_INFO_V1(gp_probe_arm_mdunlink);
@@ -579,6 +617,27 @@ gp_probe_arm_star_filter(PG_FUNCTION_ARGS)
 
 	arm_star_rel = relid;
 	PG_RETURN_VOID();
+}
+
+/* O30: the relation, and the mode by its name in pg_locks */
+Datum
+gp_probe_arm_lockmode(PG_FUNCTION_ARGS)
+{
+	char	   *name = text_to_cstring(PG_GETARG_TEXT_PP(1));
+
+	for (LOCKMODE mode = 1; mode <= MaxLockMode; mode++)
+	{
+		if (strcmp(GetLockmodeName(DEFAULT_LOCKMETHOD, mode), name) == 0)
+		{
+			arm_lockmode_rel = PG_GETARG_OID(0);
+			arm_lockmode = mode;
+			PG_RETURN_VOID();
+		}
+	}
+	ereport(ERROR,
+			(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+			 errmsg("gp_probe: no lock mode is called \"%s\"", name)));
+	PG_RETURN_VOID();			/* keep the compiler quiet */
 }
 
 Datum
@@ -889,6 +948,7 @@ _PG_init(void)
 	star_expansion_filter_hook = probe_star_filter;
 	columnref_fallback_hook = probe_columnref_fallback;
 	deparse_function_as_column_hook = probe_deparse_as_column;
+	parser_lockmode_hook = probe_parser_lockmode;
 
 	prev_planner_hook = planner_hook;
 	planner_hook = probe_planner;
