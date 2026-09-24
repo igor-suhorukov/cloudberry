@@ -120,9 +120,10 @@ static const char *const gp_trigger_words[] = {
  * PARTITION BY and PostgreSQL's own partitioning, which are far commoner.
  * Every one of Cloudberry's is in a CREATE or an ALTER, so the word counts
  * only in a text that has one of those too: a query with OVER (PARTITION BY
- * ...) is not tokenised for it.
+ * ...) is not tokenised for it.  So do ALTER TABLE's EXPAND and SHRINK,
+ * words a query may use for anything.
  */
-static const char *const gp_trigger_ddl_words[] = {"partition", NULL};
+static const char *const gp_trigger_ddl_words[] = {"partition", "expand", "shrink", NULL};
 static const char *const gp_ddl_words[] = {"create", "alter", NULL};
 
 /* Does one of `words` start at str[i]? */
@@ -2578,6 +2579,40 @@ rw_partition_cmds(GpRewrite *rw)
 			rw_edit(rw, from, tok_stop(ts, j - 1),
 					psprintf("SET (%s)", opts.data));
 			i = j;
+		}
+		/*
+		 * EXPAND TABLE, EXPAND PARTITION PREPARE, SHRINK TABLE TO n:
+		 *	 -> SET (gp.expand = 'table' | 'partition prepare'),
+		 *		SET (gp.shrink = 'n')
+		 * which gp_sql's distribution.c carries out: the table spread over
+		 * every segment, or over the first n, its rows moved with it.
+		 */
+		else if (tok_is_word(ts, i, "expand") &&
+				 (tok_is_kw(ts, i + 1, "table") ||
+				  (tok_is_kw(ts, i + 1, "partition") && tok_is(ts, i + 2, "prepare"))))
+		{
+			bool		table = tok_is_kw(ts, i + 1, "table");
+			int			last = table ? i + 1 : i + 2;
+
+			rw_edit(rw, ts->toks[i].off, tok_stop(ts, last),
+					psprintf("SET (gp.expand = '%s')",
+							 table ? "table" : "partition prepare"));
+			i = last + 1;
+		}
+		else if (tok_is_word(ts, i, "shrink") && tok_is_kw(ts, i + 1, "table") &&
+				 tok_is_kw(ts, i + 2, "to"))
+		{
+			int			j = i + 3;
+			bool		negative = false;
+
+			if (tok_is_char(ts, j, '-') || tok_is_char(ts, j, '+'))
+				negative = tok_is_char(ts, j++, '-');
+			if (j >= rw->last || ts->toks[j].code != GP_ICONST)
+				break;
+			rw_edit(rw, ts->toks[i].off, tok_stop(ts, j),
+					psprintf("SET (gp.shrink = '%s%d')", negative ? "-" : "",
+							 ts->toks[j].ival));
+			i = j + 1;
 		}
 		else if (GpPartIsCmd(ts, i, rw->last))
 		{

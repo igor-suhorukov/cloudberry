@@ -446,6 +446,17 @@ refused "SET WITH (REORGANIZE = ...) alone is Cloudberry's too, refused on one n
 is "and REORGANIZE with no value is true, as a boolean option is" \
    "SELECT gp_sql.desugar('ALTER TABLE t SET WITH (REORGANIZE) DISTRIBUTED BY (a)');" \
    "ALTER TABLE t SET (gp.distributed_by = '(a)', gp.reorganize = 'true')"
+# EXPAND TABLE, EXPAND PARTITION PREPARE and SHRINK TABLE TO n: options of
+# the ALTER too, carried out on a cluster (the cluster and greenplum suites
+# check it), refused on one node in Cloudberry's words.
+is "EXPAND TABLE, EXPAND PARTITION PREPARE and SHRINK TABLE TO n become options of the ALTER" \
+   "SELECT gp_sql.desugar('ALTER TABLE t EXPAND TABLE') || ' / ' || gp_sql.desugar('ALTER TABLE ONLY t EXPAND PARTITION PREPARE') || ' / ' || gp_sql.desugar('alter table t shrink table to 2, add column z int');" \
+   "ALTER TABLE t SET (gp.expand = 'table') / ALTER TABLE ONLY t SET (gp.expand = 'partition prepare') / alter table t SET (gp.shrink = '2'), add column z int"
+is "and a query that says expand or shrink is not rewritten" \
+   "SELECT gp_sql.desugar('SELECT 1 AS expand, 2 AS shrink');" \
+   "SELECT 1 AS expand, 2 AS shrink"
+refused "EXPAND TABLE is refused on one node, as Cloudberry refuses it" \
+        "ALTER TABLE combo EXPAND TABLE;" 'EXPAND not supported in utility mode'
 refused "Cloudberry reserves gp_ for system schemas" \
         "CREATE SCHEMA gp_mine;" 'unacceptable schema name "gp_mine"'
 

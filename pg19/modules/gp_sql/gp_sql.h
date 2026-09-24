@@ -282,6 +282,13 @@ extern void GpDistributionColumnRenamed(Oid relid, const char *oldname,
 										const char *newname);
 
 /*
+ * ALTER TABLE ... EXPAND TABLE ('e'), EXPAND PARTITION PREPARE ('p') and
+ * SHRINK TABLE TO n ('s'): the table spread over every segment, or the
+ * first n, its rows moved with it -- but by PREPARE.
+ */
+extern void GpDistributionExpand(Oid relid, char mode, int shrink, bool recurse);
+
+/*
  * ALTER TABLE ... SET DISTRIBUTED: the new policy ("policy", or NULL for the
  * one it has), and on a cluster the rows moved to where it puts them --
  * "reorganize" 1 always, 0 never, -1 as Cloudberry decides; "recurse" false

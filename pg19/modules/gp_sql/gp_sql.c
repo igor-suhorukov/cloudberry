@@ -403,6 +403,51 @@ alter_take_distribution(AlterTableStmt *stmt, char **policy, int *reorganize,
 	return found;
 }
 
+/*
+ * ALTER TABLE ... EXPAND TABLE, EXPAND PARTITION PREPARE and SHRINK TABLE TO
+ * n, as the grammar left them: SET (gp.expand = 'table' | 'partition
+ * prepare') and SET (gp.shrink = 'n').  Taken out of the statement as a
+ * distribution is: *mode 'e', 'p' or 's', and *shrink the n.
+ */
+static bool
+alter_take_expand(AlterTableStmt *stmt, char *mode, int *shrink, bool take)
+{
+	bool		found = false;
+	ListCell   *lc;
+
+	foreach(lc, stmt->cmds)
+	{
+		AlterTableCmd *cmd = (AlterTableCmd *) lfirst(lc);
+		List	   *opts;
+		DefElem    *def;
+
+		if (cmd->subtype != AT_SetRelOptions)
+			continue;
+		opts = take ? (List *) cmd->def : list_copy((List *) cmd->def);
+		if ((def = take_gp_option(&opts, "expand", false)) != NULL)
+		{
+			found = true;
+			if (take)
+				*mode = strcmp(defGetString(def), "table") == 0 ? 'e' : 'p';
+		}
+		if ((def = take_gp_option(&opts, "shrink", false)) != NULL)
+		{
+			found = true;
+			if (take)
+			{
+				*mode = 's';
+				*shrink = pg_strtoint32(defGetString(def));
+			}
+		}
+		if (!take)
+			continue;
+		cmd->def = (Node *) opts;
+		if (opts == NIL)
+			stmt->cmds = foreach_delete_current(stmt->cmds, lc);
+	}
+	return found;
+}
+
 /* The same, over the SET/RESET subcommands of an ALTER TABLE. */
 static bool
 alter_has_tag_options(AlterTableStmt *stmt)
@@ -1215,6 +1260,49 @@ gp_sql_ProcessUtility(PlannedStmt *pstmt, const char *queryString,
 			gp_sql_ProcessUtility(pstmt, queryString, readOnlyTree, context,
 								  params, queryEnv, dest, qc);
 		GpDistributionAlter(relid, new_policy, reorganize, stmt->relation->inh);
+		return;
+	}
+
+	/*
+	 * ALTER TABLE ... EXPAND TABLE, EXPAND PARTITION PREPARE, SHRINK TABLE
+	 * TO n: the rest of the statement, if it has a rest, and then the table
+	 * spread over every segment, or fewer (distribution.c).
+	 */
+	if (IsA(parsetree, AlterTableStmt) &&
+		alter_take_expand((AlterTableStmt *) parsetree, NULL, NULL, false))
+	{
+		AlterTableStmt *stmt;
+		char		mode = 'e';
+		int			shrink = 0;
+		Oid			relid;
+
+		if (readOnlyTree)
+		{
+			pstmt = copyObject(pstmt);
+			readOnlyTree = false;
+		}
+		stmt = (AlterTableStmt *) pstmt->utilityStmt;
+		(void) alter_take_expand(stmt, &mode, &shrink, true);
+
+		/* Cloudberry's words, for its single node and utility sessions */
+		if (!on_cluster_coordinator())
+			ereport(ERROR,
+					(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+					 errmsg("EXPAND not supported in utility mode")));
+
+		relid = RangeVarGetRelid(stmt->relation, AccessExclusiveLock,
+								 stmt->missing_ok);
+		if (!OidIsValid(relid))
+		{
+			ereport(NOTICE,
+					(errmsg("relation \"%s\" does not exist, skipping",
+							stmt->relation->relname)));
+			return;
+		}
+		if (stmt->cmds != NIL)
+			gp_sql_ProcessUtility(pstmt, queryString, readOnlyTree, context,
+								  params, queryEnv, dest, qc);
+		GpDistributionExpand(relid, mode, shrink, stmt->relation->inh);
 		return;
 	}
 

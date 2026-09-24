@@ -1012,6 +1012,30 @@ mine" ] && ok "a transaction reads its own rows, and a LIMIT leaves the connecti
 		&& ok "ALTER TABLE ... SET DISTRIBUTED keeps it on its segments" \
 		|| notok "a partial table redistributed" "$out / $w1 $w2"
 
+	# ALTER TABLE ... EXPAND TABLE, Cloudberry's way out of a partial table:
+	# spread over every segment, its rows moved, no trigger fired -- this
+	# one would drop every row; SHRINK TABLE TO n back (distribution.c).
+	out=$(printf '%s\n' "SELECT gp_debug_set_create_table_default_numsegments(1);" \
+		"CREATE TABLE px (a int, b int) DISTRIBUTED BY (a);" \
+		"SELECT gp_debug_reset_create_table_default_numsegments();" \
+		"INSERT INTO px SELECT i, i FROM generate_series(1, 100) i;" \
+		"CREATE FUNCTION px_drop() RETURNS trigger LANGUAGE plpgsql AS \$\$ BEGIN RETURN NULL; END \$\$;" \
+		"CREATE TRIGGER px_bi BEFORE INSERT ON px FOR EACH ROW EXECUTE FUNCTION px_drop();" \
+		"ALTER TABLE px EXPAND TABLE;" \
+		"SELECT (gp.policy('px')).numsegments || ':' || count(*) FROM px;" | qf 0 | tail -1)
+	w1=$(q 1 "SELECT count(*) FROM px WHERE expected_seg(a, 2) <> 0;"); w2=$(q 2 "SELECT count(*) FROM px WHERE expected_seg(a, 2) <> 1;")
+	s2=$(q 2 "SELECT count(*) FROM px;")
+	out2=$(q 0 "ALTER TABLE px EXPAND TABLE;")
+	out3=$(q 0 "ALTER TABLE px SHRINK TABLE TO 1; SELECT (gp.policy('px')).numsegments || ':' || count(*) FROM px; SELECT tgenabled FROM pg_trigger WHERE tgname = 'px_bi';" | tr '\n' ' ')
+	s2b=$(q 2 "SELECT count(*) FROM px;")
+	case "$out|$w1|$w2|$out2|$out3|$s2b" in
+		"2:100|0|0|"*'cannot expand table "px"'*"table has already been expanded"*"|1:100 O |0")
+			isnum "$s2" && [ "$s2" -gt 0 ] \
+				&& ok "EXPAND TABLE spreads a partial table over every segment, no trigger fired; again, refused; SHRINK TABLE TO n back" \
+				|| notok "EXPAND TABLE: segment 1's rows" "$s2" ;;
+		*) notok "EXPAND TABLE and SHRINK TABLE" "$out / misplaced $w1 $w2 / $out2 / $out3 / $s2b" ;;
+	esac
+
 	# gp_distribution_policy: the labels in Cloudberry's catalog's columns,
 	# and written through it, as that is (gp_catalog.c).
 	int4_ops=$(q 0 "SELECT c.oid FROM pg_opclass c JOIN pg_am a ON a.oid = c.opcmethod WHERE a.amname = 'hash' AND c.opcname = 'int4_ops';")

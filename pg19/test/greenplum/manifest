@@ -50,6 +50,9 @@ skip partition  syntax error at or near "only"; access method "ao_row" does not 
 skip partition1  access method "ao_row" does not exist; relation "foz" does not exist
 skip partition_ddl  access method "ao_row" does not exist; relation "mpp3045_hhh" does not exist
 run  partition_pruning
+run  expand_table
+run  expand_table_regression
+run  shrink_table
 run  partition_prune_opfamily
 skip alter_distpol_dropped  unrecognized parameter "appendonly"; current transaction is aborted, commands ignored until end of transaction block
 run  create_table_distpol

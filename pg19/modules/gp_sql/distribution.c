@@ -90,6 +90,7 @@
 #include "catalog/pg_am_d.h"
 #include "catalog/pg_amop.h"
 #include "catalog/pg_class.h"
+#include "catalog/pg_trigger.h"
 #include "catalog/pg_depend.h"
 #include "catalog/pg_index.h"
 #include "catalog/pg_inherits.h"
@@ -660,6 +661,117 @@ has_unique_index(Oid relid)
 }
 
 /*
+ * A table's rows, copied out under the policy it has into a temporary table
+ * of the session's, whose name is returned -- the first half of moving them
+ * (rows_back()).  "only" leaves its children's rows where they are.
+ */
+static char *
+rows_out(Oid relid, bool only)
+{
+	char	   *tmp = psprintf("gp_redistribute_%u", relid);
+
+	run_sql(psprintf("CREATE TEMP TABLE %s AS SELECT * FROM %s%s DISTRIBUTED RANDOMLY",
+					 quote_identifier(tmp), only ? "ONLY " : "", sql_name(relid)),
+			SPI_OK_UTILITY);
+	return tmp;
+}
+
+/* A trigger turned off while a table's rows move, and how it was on. */
+typedef struct TriggerOff
+{
+	Oid			relid;
+	char	   *name;
+	char		enabled;		/* pg_trigger.tgenabled */
+} TriggerOff;
+
+/*
+ * The user's triggers of a table, and of its partitions, that would fire:
+ * turned off while its rows move -- Cloudberry swaps the table's files, and
+ * fires none -- and each turned on again, as it was, by triggers_on().
+ */
+static List *
+triggers_off(Oid relid, bool only)
+{
+	List	   *off = NIL;
+
+	foreach_oid(rel, only ? list_make1_oid(relid) : find_all_inheritors(relid, NoLock, NULL))
+	{
+		Relation	r = relation_open(rel, NoLock);
+		TriggerDesc *td = r->trigdesc;
+
+		for (int i = 0; td != NULL && i < td->numtriggers; i++)
+		{
+			Trigger    *trig = &td->triggers[i];
+			TriggerOff *t;
+
+			if (trig->tgisinternal || trig->tgenabled == TRIGGER_DISABLED)
+				continue;
+			t = palloc_object(TriggerOff);
+			t->relid = rel;
+			t->name = pstrdup(trig->tgname);
+			t->enabled = trig->tgenabled;
+			off = lappend(off, t);
+		}
+		relation_close(r, NoLock);
+	}
+	foreach_ptr(TriggerOff, t, off)
+		run_sql(psprintf("ALTER TABLE ONLY %s DISABLE TRIGGER %s",
+						 sql_name(t->relid), quote_identifier(t->name)),
+				SPI_OK_UTILITY);
+	return off;
+}
+
+static void
+triggers_on(List *off)
+{
+	foreach_ptr(TriggerOff, t, off)
+		run_sql(psprintf("ALTER TABLE ONLY %s ENABLE %sTRIGGER %s",
+						 sql_name(t->relid),
+						 t->enabled == TRIGGER_FIRES_ON_REPLICA ? "REPLICA "
+						 : t->enabled == TRIGGER_FIRES_ALWAYS ? "ALWAYS " : "",
+						 quote_identifier(t->name)),
+				SPI_OK_UTILITY);
+}
+
+/*
+ * ... and put back, the table emptied first, each where the policy it has
+ * now names: as an INSERT puts them, the coordinator's values of an identity
+ * column kept, a generated one computed again, but no trigger fired.
+ */
+static void
+rows_back(Oid relid, bool only, const char *tmp)
+{
+	Relation	rel = relation_open(relid, NoLock);
+	TupleDesc	tupdesc = RelationGetDescr(rel);
+	StringInfoData cols;
+	bool		first = true;
+	List	   *off;
+
+	initStringInfo(&cols);
+	for (int i = 0; i < tupdesc->natts; i++)
+	{
+		Form_pg_attribute att = TupleDescAttr(tupdesc, i);
+
+		if (att->attisdropped || att->attgenerated != '\0')
+			continue;
+		appendStringInfo(&cols, "%s%s", first ? "" : ", ",
+						 quote_identifier(NameStr(att->attname)));
+		first = false;
+	}
+	relation_close(rel, NoLock);
+
+	off = triggers_off(relid, only);
+	run_sql(psprintf("TRUNCATE %s%s", only ? "ONLY " : "", sql_name(relid)),
+			SPI_OK_UTILITY);
+	run_sql(psprintf("INSERT INTO %s (%s) OVERRIDING SYSTEM VALUE SELECT %s FROM pg_temp.%s",
+					 sql_name(relid), cols.data, cols.data, quote_identifier(tmp)),
+			SPI_OK_INSERT);
+	triggers_on(off);
+	run_sql(psprintf("DROP TABLE pg_temp.%s", quote_identifier(tmp)),
+			SPI_OK_UTILITY);
+}
+
+/*
  * ALTER TABLE ... SET DISTRIBUTED, and SET WITH (REORGANIZE = ...).
  *
  * Checked first as Cloudberry checks it -- PostgreSQL's ALTER TABLE never
@@ -827,45 +939,157 @@ GpDistributionAlter(Oid relid, const char *policy, int reorganize, bool recurse)
 		elog(ERROR, "SPI_connect failed");
 
 	if (move)
-	{
-		tmp = psprintf("gp_redistribute_%u", relid);
-		run_sql(psprintf("CREATE TEMP TABLE %s AS SELECT * FROM %s DISTRIBUTED RANDOMLY",
-						 quote_identifier(tmp), sql_name(relid)),
-				SPI_OK_UTILITY);
-	}
+		tmp = rows_out(relid, false);
 
 	rels = find_all_inheritors(relid, NoLock, NULL);
 	foreach(lc, rels)
 		set_policy_label(lfirst_oid(lc), new);
 
 	if (move)
+		rows_back(relid, false, tmp);
+
+	SPI_finish();
+}
+
+/* The segments a table is spread over, as its label says. */
+static int
+table_numsegments(Oid relid)
+{
+	ObjectAddress addr;
+	char	   *value;
+
+	ObjectAddressSet(addr, RelationRelationId, relid);
+	value = GpLabelGet(&addr, GP_LABEL_numsegments);
+	return value != NULL ? pg_strtoint32(value)
+		: GpCoreApiLookup()->get_segment_count();
+}
+
+/*
+ * ALTER TABLE ... EXPAND TABLE and SHRINK TABLE TO n: a table spread over
+ * the first so many segments -- a partial table, as a cluster's expansion
+ * leaves one until gpexpand expands it -- spread over every segment, or over
+ * the first n, its rows moved as SET DISTRIBUTED moves them, a partitioned
+ * table's partitions with it; in Cloudberry's words where it refuses
+ * (ATPrepCmd, ATExecExpandTable in tablecmds.c).
+ *
+ * EXPAND PARTITION PREPARE moves no rows: a partitioned table and its
+ * interior partitions take every segment with the key they have, and its
+ * leaves every segment too, a hashed one becoming random -- its rows, left
+ * where they are, are where a random table's may be -- and gpexpand then
+ * expands each leaf (ATExecExpandPartitionTablePrepare).
+ */
+void
+GpDistributionExpand(Oid relid, char mode, int shrink, bool recurse)
+{
+	int			cluster = GpCoreApiLookup()->get_segment_count();
+	int			current = table_numsegments(relid);
+	int			numsegments = mode == 's' ? shrink : cluster;
+	char		relkind = get_rel_relkind(relid);
+	const char *name = get_rel_name(relid);
+	char	   *policy = policy_label_of(relid);
+	Relation	target = relation_open(relid, NoLock);
+	bool		catalog = IsSystemRelation(target);
+	List	   *rels;
+	char	   *tmp;
+
+	relation_close(target, NoLock);
+
+	/* what ALTER TABLE takes it for, in Cloudberry's words (ATSimplePermissions) */
+	if (relkind != RELKIND_RELATION && relkind != RELKIND_PARTITIONED_TABLE &&
+		relkind != RELKIND_FOREIGN_TABLE && relkind != RELKIND_MATVIEW)
+		ereport(ERROR,
+				(errcode(ERRCODE_WRONG_OBJECT_TYPE),
+				 errmsg("ALTER action %s cannot be performed on relation \"%s\"",
+						mode == 's' ? "ALTER COLUMN ... SHRINK TABLE"
+						: "ALTER COLUMN ... EXPAND TABLE", name),
+				 errdetail_relkind_not_supported(relkind)));
+	if (catalog)
+		ereport(ERROR,
+				(errcode(ERRCODE_INSUFFICIENT_PRIVILEGE),
+				 errmsg("permission denied: \"%s\" is a system catalog", name)));
+	if (!object_ownercheck(RelationRelationId, relid, GetUserId()))
+		aclcheck_error(ACLCHECK_NOT_OWNER, get_relkind_objtype(relkind), name);
+
+	if (mode == 'e')
 	{
-		Relation	rel = relation_open(relid, NoLock);
-		TupleDesc	tupdesc = RelationGetDescr(rel);
-		StringInfoData cols;
-		bool		first = true;
-
-		initStringInfo(&cols);
-		for (int i = 0; i < tupdesc->natts; i++)
+		if (current == cluster)
+			ereport(ERROR,
+					(errcode(ERRCODE_WRONG_OBJECT_TYPE),
+					 errmsg("cannot expand table \"%s\"", name),
+					 errdetail("table has already been expanded")));
+		if (get_rel_relispartition(relid))
+			ereport(ERROR,
+					(errcode(ERRCODE_WRONG_OBJECT_TYPE),
+					 errmsg("cannot expand leaf or interior partition \"%s\"", name),
+					 errdetail("Root/leaf/interior partitions need to have same numsegments"),
+					 errhint("Call ALTER TABLE EXPAND TABLE on the root table instead")));
+	}
+	else if (mode == 's')
+	{
+		if (current <= shrink || shrink < 1)
+			ereport(ERROR,
+					(errcode(ERRCODE_WRONG_OBJECT_TYPE),
+					 errmsg("cannot shrink table \"%s\"", name),
+					 errdetail("table numsegments \"%d\", shrink size \"%d\" ",
+							   current, shrink)));
+		if (get_rel_relispartition(relid))
+			ereport(ERROR,
+					(errcode(ERRCODE_WRONG_OBJECT_TYPE),
+					 errmsg("cannot shrink leaf or interior partition \"%s\"", name),
+					 errdetail("Root/leaf/interior partitions need to have same numsegments"),
+					 errhint("Call ALTER TABLE SHRINK TABLE on the root table instead")));
+	}
+	else
+	{
+		if (current == cluster)
 		{
-			Form_pg_attribute att = TupleDescAttr(tupdesc, i);
-
-			if (att->attisdropped || att->attgenerated != '\0')
-				continue;
-			appendStringInfo(&cols, "%s%s", first ? "" : ", ",
-							 quote_identifier(NameStr(att->attname)));
-			first = false;
+			ereport(NOTICE,
+					(errcode(ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE),
+					 errmsg("skipped, table \"%s\" has already been expanded partition prepare",
+							name)));
+			return;
 		}
-		relation_close(rel, NoLock);
-
-		run_sql(psprintf("TRUNCATE %s", sql_name(relid)), SPI_OK_UTILITY);
-		run_sql(psprintf("INSERT INTO %s (%s) OVERRIDING SYSTEM VALUE SELECT %s FROM pg_temp.%s",
-						 sql_name(relid), cols.data, cols.data, quote_identifier(tmp)),
-				SPI_OK_INSERT);
-		run_sql(psprintf("DROP TABLE pg_temp.%s", quote_identifier(tmp)),
-				SPI_OK_UTILITY);
+		if (relkind != RELKIND_PARTITIONED_TABLE || get_rel_relispartition(relid))
+			ereport(ERROR,
+					(errcode(ERRCODE_WRONG_OBJECT_TYPE),
+					 errmsg("cannot expand partition table prepare \"%s\"", name),
+					 errdetail("only root partition can be expanded partition prepare")));
+		if (policy != NULL && strcmp(policy, "replicated") == 0)
+			ereport(ERROR,
+					(errcode(ERRCODE_WRONG_OBJECT_TYPE),
+					 errmsg("cannot expand partition table prepare \"%s\"", name),
+					 errdetail("only hash/randomly table can be expanded partition prepare")));
 	}
 
+	rels = recurse ? find_all_inheritors(relid, NoLock, NULL) : list_make1_oid(relid);
+	if (mode == 'p')
+	{
+		foreach_oid(rel, rels)
+		{
+			char	   *own = policy_label_of(rel);
+
+			if (get_rel_relkind(rel) == RELKIND_RELATION &&
+				own != NULL && strcmp(own, "random") != 0)
+				set_policy_label(rel, "random");
+			set_numsegments_label(rel, cluster);
+		}
+		return;
+	}
+
+	/* a foreign table's rows, or a materialized view's, are not the segments' */
+	if (relkind == RELKIND_FOREIGN_TABLE || relkind == RELKIND_MATVIEW)
+	{
+		foreach_oid(rel, rels)
+			set_numsegments_label(rel, numsegments);
+		return;
+	}
+
+	if (SPI_connect() != SPI_OK_CONNECT)
+		elog(ERROR, "SPI_connect failed");
+	tmp = rows_out(relid, !recurse);
+	foreach_oid(rel, rels)
+		set_numsegments_label(rel, numsegments);
+	rows_back(relid, !recurse, tmp);
 	SPI_finish();
 }
 

@@ -1315,7 +1315,10 @@ gather_plan(PlannerInfo *root, RelOptInfo *rel, CustomPath *best_path,
 	 */
 	if (policy != NULL && !GpPolicyIsReplicated(policy))
 	{
-		segment_of = find_segment_of((Node *) root->processed_tlist, rel->relid);
+		/* a partition's, in its own target, of its row as its parent's */
+		segment_of = find_segment_of((Node *) rel->reltarget->exprs, rel->relid);
+		if (segment_of == NULL)
+			segment_of = find_segment_of((Node *) root->processed_tlist, rel->relid);
 		if (segment_of == NULL)
 			segment_of = find_segment_of((Node *) extract_actual_clauses(local, false),
 										 rel->relid);
