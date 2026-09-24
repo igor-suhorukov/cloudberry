@@ -110,9 +110,14 @@ On a cluster (M2), `gp_core` and `gp_orca`:
   parameters it reads; and PostgreSQL's own plans gathering from the
   segments where ORCA does not plan, writing a distributed table through an
   Explicit Redistribute Motion — each row changed on its segment by its ctid
-  there, a row whose key changes moved by a Split, RETURNING evaluated on
-  the coordinator, a replicated table's row found on every segment by what
-  it holds;
+  there, a row whose key changes moved by a Split that fires no trigger,
+  RETURNING (old and new too) and a view's WITH CHECK OPTION and a table's
+  policies evaluated on the coordinator, MERGE, WHERE CURRENT OF and ON
+  CONFLICT in a WITH query, a replicated table's row found on every segment
+  by what it holds;
+- ALTER TABLE ... EXPAND TABLE and SHRINK TABLE TO n, as Cloudberry's
+  gpexpand runs them, and direct dispatch to the segments a few key values
+  are on;
 - every segment has each table's distribution policy, the `gp` label the
   coordinator writes;
 - Cloudberry's settings of the dispatcher and the planner, as `gp.*`, among
@@ -123,11 +128,14 @@ On a cluster (M2), `gp_core` and `gp_orca`:
   (R2 and R4) — run the others, each sender streaming its rows to its
   receivers over a Unix socket or a TCP port, or, with
   `gp.interconnect_type = udpifc`, in UDP packets each receiver acknowledges,
-  with Cloudberry's flow control, retransmission and deadlock check.  The
-  earlier relay through the coordinator is kept for what cannot stream — a
-  temporary table, the coordinator's own slice feeding a reader's — and on
-  request (`gp.interconnect_type = relay`);
-- `gp_segment_id`, as a call of the row's segment (O10);
+  with Cloudberry's flow control, retransmission and deadlock check, a row
+  as a tuple.  The earlier relay through the coordinator carries the slices
+  that run on the coordinator or have to run in the writer — the
+  coordinator's own, one that scans a temporary table — first, and the rest
+  stream; it carries all of them on request (`gp.interconnect_type =
+  relay`);
+- `gp_segment_id`, as a call of the row's segment (O10), and
+  `gp_dist_random('t')`, which a view prints back as it was written (O31);
 - Cloudberry's catalogs by their names, in `pg_catalog`: `gp_id`,
   `gp_segment_configuration` over the cluster file, `gp_configuration_history`,
   and `gp_distribution_policy` over the labels, which a write to it — with
@@ -137,10 +145,10 @@ On a cluster (M2), `gp_core` and `gp_orca`:
   `gp_distribution_policy.numsegments` make, and which ORCA leaves to the
   planner, as Cloudberry's does.
 
-What M2 leaves open: a query whose key is fixed to a few values goes to one
-segment or to all of them, not to those few; and an UPDATE that moves a row
-fires the row triggers of a DELETE and an INSERT on the segments, where
-Cloudberry's Split fires none.
+What M2 leaves open: ORCA's Gather into a slice that runs on one segment,
+which most of its uses merge in order, falls back to the planner (10
+statements in the greenplum suite); and a query that scans a temporary
+table in a subplan's own part is relayed whole.
 
 Distributed transactions (M3), in `gp_core`:
 
@@ -218,7 +226,8 @@ transactions across a promotion, which asks a decision (`cloudberry.md`).
 
 The storage, resource and transport modules — `gp_ao`, `pax`, `gp_exttable`,
 `gp_resource`, `gp_tde`, `interconnect`, `udp2` — are still stubs: M5 and M6
-fill the first five, and the streaming transport lives in `gp_core` for now.
+fill the first five, and the streaming transports, tcp and udpifc, live in
+`gp_core` for now.
 
 ## Tests
 
