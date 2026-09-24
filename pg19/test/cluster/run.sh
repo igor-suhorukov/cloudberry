@@ -1553,6 +1553,22 @@ COMMIT;"
 		*) notok "EXPLAIN ANALYZE CREATE TABLE AS" "$out / $out2" ;;
 	esac
 
+	# A streaming slice's rows travel as tuples, as Cloudberry's do: a value
+	# TOAST keeps out of line brought in, a composite, jsonb, an array
+	# (gp_motion.c).  The same rows as the planner's, which gathers them.
+	q 0 "CREATE TYPE tpair AS (x int, y text); CREATE TABLE tup1 (a int, b int, big text, j jsonb, arr int[], p tpair) DISTRIBUTED BY (a); ALTER TABLE tup1 ALTER COLUMN big SET STORAGE EXTERNAL;" >/dev/null
+	q 0 "INSERT INTO tup1 SELECT g, g % 13, CASE WHEN g % 10 = 0 THEN repeat(md5(g::text), 400) END, jsonb_build_object('k', g), ARRAY[g, g + 1], ROW(g, 'p' || g)::tpair FROM generate_series(1, 3000) g; ANALYZE tup1;" >/dev/null
+	sel="SELECT x.a, y.a AS ya, x.big, x.j, x.arr, x.p, y.big AS ybig, y.p AS yp FROM tup1 x JOIN tup1 y ON x.a = y.b"
+	plan=$(q 0 "EXPLAIN (COSTS OFF) $sel;")
+	out=$(printf '%s\n' "SET gp.optimizer = on;" "CREATE TEMP TABLE tup_o AS $sel;" "SET gp.optimizer = off;" \
+		"CREATE TEMP TABLE tup_p AS $sel;" \
+		"SELECT (SELECT count(*) FROM tup_o), (SELECT count(*) FROM (SELECT a, ya, md5(big), j::text, arr, p::text, md5(ybig), yp::text FROM tup_o EXCEPT ALL SELECT a, ya, md5(big), j::text, arr, p::text, md5(ybig), yp::text FROM tup_p) d), (SELECT count(*) FROM (SELECT a, ya, md5(big), j::text, arr, p::text, md5(ybig), yp::text FROM tup_p EXCEPT ALL SELECT a, ya, md5(big), j::text, arr, p::text, md5(ybig), yp::text FROM tup_o) d);" | qf 0 | tail -1)
+	case "$plan|$out" in
+		*"Motion 2:2"*"Optimizer: GPORCA"*"|2770|0|0")
+			ok "a streaming slice's rows as tuples: TOAST's values, a composite, jsonb, an array; the planner's rows" ;;
+		*) notok "rows as tuples" "$out / $plan" ;;
+	esac
+
 	# A partial table is the planner's, as Cloudberry's ORCA leaves one.
 	out=$(printf '%s\n' "SET gp.optimizer_trace_fallback = on;" \
 		"SELECT count(*) FROM pt1;" | qf 0)

@@ -44,8 +44,9 @@
  * it sends through: it pulls its slice's rows and sends each to the process
  * that runs the receiving slice on the segment its hash chooses, on every
  * segment, or on the next in turn, over the interconnect (gp_ic.c), and the
- * Motion in the receiving fragment takes them as they come.  Which slice
- * receives each Motion the translator says (GpMotionSetParent).
+ * Motion in the receiving fragment takes them as they come -- each row a
+ * tuple, as Cloudberry's interconnect sends it (motion_tuples()).  Which
+ * slice receives each Motion the translator says (GpMotionSetParent).
  *
  * Where a slice cannot stream -- the coordinator's own slice, a temporary
  * table, which only the session's own backend can read -- or with
@@ -80,7 +81,9 @@
  */
 #include "postgres.h"
 
+#include "access/detoast.h"
 #include "access/genam.h"
+#include "access/htup_details.h"
 #include "access/relation.h"
 #include "catalog/catalog.h"
 #include "catalog/namespace.h"
@@ -243,6 +246,7 @@ typedef struct MotionState
 
 	/* On a segment, the Motion a reader's fragment is: it sends. */
 	bool		sending;
+	bool		send_tuples;	/* rows as tuples (motion_tuples()) */
 	bool		send_binary;
 	FmgrInfo   *outprocs;
 	ExprState **hashexprs;
@@ -254,6 +258,7 @@ typedef struct MotionState
 
 	/* On a segment, a Motion that receives a streaming slice. */
 	bool		streamed;
+	bool		recv_tuples;	/* rows as tuples (motion_tuples()) */
 	int			nsenders;
 	GpIcReceiver *icrecv;
 	bool		stream_done;
@@ -872,6 +877,8 @@ motion_recv_next(MotionState *state)
 /* Streaming, on a segment                                                   */
 /* ------------------------------------------------------------------------- */
 
+static bool motion_tuples(TupleDesc tupdesc);
+
 /* A DefElem of a fragment's PlannedStmt, by name. */
 static Node *
 fragment_mark(PlannedStmt *stmt, const char *name)
@@ -943,6 +950,7 @@ motion_begin_sending(MotionState *state, EState *estate, int eflags,
 	outerPlanState(state) = ExecInitNode(outerPlan(cscan), estate, eflags);
 	tupdesc = ExecGetResultType(outerPlanState(state));
 
+	state->send_tuples = motion_tuples(tupdesc);
 	state->send_binary = GpTupleDescHasBinaryIO(tupdesc);
 	state->outprocs = palloc0_array(FmgrInfo, tupdesc->natts);
 	for (i = 0; i < tupdesc->natts; i++)
@@ -1000,6 +1008,51 @@ static void append_row_raw(StringInfo buf, int natts, const char **values,
 						   const int *lengths);
 
 /*
+ * Does a streaming slice send its rows as tuples, as Cloudberry's
+ * interconnect does (tupser.c): each row a MinimalTuple, its bytes as they
+ * are, every value that lives outside it -- in the table's TOAST relation, or
+ * expanded -- brought in first, since the receiver can read neither.  Every
+ * process of the cluster is the same build, so a value's bytes mean the same
+ * in any of them -- but an anonymous record's, which carries a type the
+ * sending process made up (its typmod), where Cloudberry remaps it
+ * (tupleremap.c): a row with one travels as each value's own text or binary
+ * form, as the relay's do.  Sender and receiver ask this of the same row
+ * type, and agree.
+ */
+static bool
+motion_tuples(TupleDesc tupdesc)
+{
+	for (int i = 0; i < tupdesc->natts; i++)
+	{
+		Oid			type = getBaseType(TupleDescAttr(tupdesc, i)->atttypid);
+
+		if (type == RECORDOID || type == RECORDARRAYOID)
+			return false;
+	}
+	return true;
+}
+
+/* A row as a tuple, into "buf": its values brought in, then formed. */
+static void
+motion_tuple(TupleTableSlot *slot, StringInfo buf)
+{
+	TupleDesc	tupdesc = slot->tts_tupleDescriptor;
+	Datum	   *values = palloc_array(Datum, Max(tupdesc->natts, 1));
+	MinimalTuple tuple;
+
+	slot_getallattrs(slot);
+	for (int i = 0; i < tupdesc->natts; i++)
+	{
+		values[i] = slot->tts_values[i];
+		if (!slot->tts_isnull[i] && TupleDescAttr(tupdesc, i)->attlen == -1 &&
+			VARATT_IS_EXTERNAL(DatumGetPointer(values[i])))
+			values[i] = PointerGetDatum(detoast_external_attr((struct varlena *) DatumGetPointer(values[i])));
+	}
+	tuple = heap_form_minimal_tuple(tupdesc, values, slot->tts_isnull, 0);
+	appendBinaryStringInfo(buf, (char *) tuple, tuple->t_len);
+}
+
+/*
  * An Explicit Redistribute's segment for a row: the gp_segment_id it
  * carries, which is the segment it was read on, and is to be written on.
  */
@@ -1050,30 +1103,35 @@ motion_send_all(MotionState *state)
 
 		ResetExprContext(econtext);
 		oldcxt = MemoryContextSwitchTo(econtext->ecxt_per_tuple_memory);
-		for (int i = 0; i < natts; i++)
-		{
-			if (slot->tts_isnull[i])
-			{
-				values[i] = NULL;
-				lengths[i] = -1;
-			}
-			else if (state->send_binary)
-			{
-				bytea	   *b = SendFunctionCall(&state->outprocs[i],
-												 slot->tts_values[i]);
-
-				values[i] = VARDATA(b);
-				lengths[i] = VARSIZE(b) - VARHDRSZ;
-			}
-			else
-			{
-				values[i] = OutputFunctionCall(&state->outprocs[i],
-											   slot->tts_values[i]);
-				lengths[i] = strlen(values[i]);
-			}
-		}
 		resetStringInfo(&row);
-		append_row_raw(&row, natts, values, lengths);
+		if (state->send_tuples)
+			motion_tuple(slot, &row);
+		else
+		{
+			for (int i = 0; i < natts; i++)
+			{
+				if (slot->tts_isnull[i])
+				{
+					values[i] = NULL;
+					lengths[i] = -1;
+				}
+				else if (state->send_binary)
+				{
+					bytea	   *b = SendFunctionCall(&state->outprocs[i],
+													 slot->tts_values[i]);
+
+					values[i] = VARDATA(b);
+					lengths[i] = VARSIZE(b) - VARHDRSZ;
+				}
+				else
+				{
+					values[i] = OutputFunctionCall(&state->outprocs[i],
+												   slot->tts_values[i]);
+					lengths[i] = strlen(values[i]);
+				}
+			}
+			append_row_raw(&row, natts, values, lengths);
+		}
 
 		if (state->type == GP_MOTION_HASH)
 		{
@@ -1110,7 +1168,11 @@ motion_send_all(MotionState *state)
 	pfree(row.data);
 }
 
-/* A row as it travels, into the scan slot. */
+/*
+ * A row as it travels, into the scan slot -- a tuple taken apart into it, its
+ * values in the row's memory, as the others' are.  The slot stays the
+ * virtual one the Motion's parents compiled their expressions for.
+ */
 static TupleTableSlot *
 motion_decode_row(MotionState *state, const char *data, int len)
 {
@@ -1120,6 +1182,26 @@ motion_decode_row(MotionState *state, const char *data, int len)
 	const char *end = data + len;
 	uint16		natts;
 	MemoryContext oldcxt;
+
+	if (state->recv_tuples)
+	{
+		MinimalTuple tuple;
+		HeapTupleData htup;
+
+		if (len < (int) SizeofMinimalTupleHeader)
+			goto corrupt;
+		tuple = (MinimalTuple) MemoryContextAlloc(state->css.ss.ps.ps_ExprContext->ecxt_per_tuple_memory,
+												  len);
+		memcpy(tuple, data, len);
+		if (tuple->t_len != (uint32) len ||
+			(tuple->t_infomask2 & HEAP_NATTS_MASK) > tupdesc->natts)
+			goto corrupt;
+		htup.t_len = tuple->t_len + MINIMAL_TUPLE_OFFSET;
+		htup.t_data = (HeapTupleHeader) ((char *) tuple - MINIMAL_TUPLE_OFFSET);
+		ExecClearTuple(slot);
+		heap_deform_tuple(&htup, tupdesc, slot->tts_values, slot->tts_isnull);
+		return ExecStoreVirtualTuple(slot);
+	}
 
 	if (len < (int) sizeof(uint16))
 		goto corrupt;
@@ -1209,9 +1291,10 @@ motion_stream_next(MotionState *state)
 									  state->nsenders);
 	if (GpIcRecv(state->icrecv, &data, &len))
 	{
-		motion_decode_row(state, data, len);
-		tuplestore_puttupleslot(state->spool, slot);
-		return slot;
+		TupleTableSlot *row = motion_decode_row(state, data, len);
+
+		tuplestore_puttupleslot(state->spool, row);
+		return row;
 	}
 	GpIcRecvEnd(state->icrecv);
 	state->icrecv = NULL;
@@ -1306,6 +1389,7 @@ motion_begin(CustomScanState *node, EState *estate, int eflags)
 			state->spool = tuplestore_begin_heap(false, false, work_mem);
 			state->spoolslot = MakeSingleTupleTableSlot(tupdesc,
 														&TTSOpsMinimalTuple);
+			state->recv_tuples = motion_tuples(tupdesc);
 		}
 
 		state->receiving = true;
@@ -2466,6 +2550,7 @@ motion_end(CustomScanState *node)
 		ExecDropSingleTupleTableSlot(state->spoolslot);
 		state->spool = NULL;
 	}
+
 
 	/* The segments are done with the rows this Gather's Motions sent them. */
 	if (!state->receiving && state->key != NULL)
