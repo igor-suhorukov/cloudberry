@@ -221,8 +221,14 @@ transaction a failover catches as Cloudberry's does.  A segment's commit
 waits for its mirror whatever cancels it (R3).  A directory table's files
 are WAL-logged, through `gp_sql`'s own resource manager, `gp_dirtable`
 (ID 198), so that a mirror has them; a server that replays them has to
-preload `gp_sql`.  Left open so far: a segment's map of its distributed
-transactions across a promotion, which asks a decision (`cloudberry.md`).
+preload `gp_sql`.  A segment's map of its distributed transactions is
+logged, in `gp_internal.distributed_log`, so that it outlives a restart
+and a promotion, and a background worker of each segment's, a mirror's
+too, keeps the slot that holds back what those transactions deleted.  The
+injection points Cloudberry's FTS tests hold are a patch the tests' build
+applies (`pg19/docker/patches`), not a patch of the core series.  Left
+open: six of Cloudberry's FTS tests, each for what the port does not have
+(`cloudberry.md`).
 
 The storage, resource and transport modules — `gp_ao`, `pax`, `gp_exttable`,
 `gp_resource`, `gp_tde`, `interconnect`, `udp2` — are still stubs: M5 and M6
@@ -234,7 +240,7 @@ fill the first five, and the streaming transports, tcp and udpifc, live in
 `pg19/test/run.sh` runs every suite; `docker compose -f pg19/docker/compose.yml
 run --rm tests` runs them in the image built from the branches, and
 `... run --rm compare` checks that the patched server still behaves as
-vanilla PostgreSQL 19.  The suites: the module suites (among them `cluster`,
+vanilla PostgreSQL 19, both built with the tests' patches.  The suites: the module suites (among them `cluster`,
 a coordinator and two segments, and `hooks`, which drives every hook of the
 core series through a test module); `greenplum`, part of Cloudberry's
 `greenplum_schedule` on a coordinator and three segments; `isolation2`, the

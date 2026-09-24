@@ -31,14 +31,14 @@
 
 singlenode             orca     180   PASSES=orca
 greenplum              orca     165   PASSES=orca
-isolation2             planner  134   PASSES=planner
+isolation2             planner  135   PASSES=planner
+isolation2             orca     108   PASSES=orca
 postgis_regress        orca     105   PASSES=orca
-isolation2             orca     101   PASSES=orca
 orca                   -         65
 task                   -         62
 cluster                -         52
 greenplum              planner   47   PASSES=planner
-fts                    -         42
+fts                    -         48
 singlenode             planner   36   PASSES=planner
 postgis_regress        planner   17   PASSES=planner
 security               -         17
