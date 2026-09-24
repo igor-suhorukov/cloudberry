@@ -38,7 +38,6 @@
 #include "access/table.h"
 #include "access/xact.h"
 #include "catalog/catalog.h"
-#include "catalog/namespace.h"
 #include "catalog/pg_type.h"
 #include "commands/explain.h"
 #include "commands/matview.h"
@@ -85,14 +84,14 @@ typedef enum ProbeEvent
 	EV_STAR_FILTER,
 	EV_COLUMNREF,
 	EV_DEPARSE_COLUMN,
-	EV_PARSER_LOCKMODE,
+	EV_QUERY_LOCKMODE,
 	EV_COUNT
 } ProbeEvent;
 
 static const char *const event_name[EV_COUNT] = {
 	"new_oid", "combocid_create", "combocid_miss", "analyze_sample",
 	"explain_label", "mdunlink", "raw_parser", "star_filter",
-	"columnref", "deparse_column", "parser_lockmode",
+	"columnref", "deparse_column", "query_lockmode",
 };
 
 static int64 calls[EV_COUNT];
@@ -132,7 +131,7 @@ static Bitmapset *arm_star_cols = NULL;
 static char *arm_column_name = NULL;	/* O10: this name, where no column */
 static Oid	arm_column_func = InvalidOid;	/* has it, is this function's call */
 
-/* O30: this relation, when it is written or FOR UPDATE, in this mode */
+/* O30: this relation, when it is written or locked by a clause, in this mode */
 static Oid	arm_lockmode_rel = InvalidOid;
 static LOCKMODE arm_lockmode = NoLock;
 
@@ -421,31 +420,25 @@ probe_star_filter(Oid relid)
 }
 
 /* ------------------------------------------------------------------------- */
-/* O30: parser_lockmode_hook                                                 */
+/* O30: query_lockmode_hook                                                  */
 /* ------------------------------------------------------------------------- */
 
 /*
- * The armed relation, as the target of an UPDATE or a DELETE, or with a
- * locking clause on it, in the armed mode: what gp_core does with a
- * distributed table when the global deadlock detector is off.  An INSERT and
- * a plain read keep the parser's mode.
+ * The armed relation, as the target of an UPDATE or a DELETE, or under a
+ * locking clause -- named by the query, or brought in by a view -- in the
+ * armed mode: what gp_core does with a distributed table.  An INSERT and a
+ * plain read keep PostgreSQL's mode.
  */
 static LOCKMODE
-probe_parser_lockmode(ParseState *pstate, const RangeVar *relation,
-					  LOCKMODE lockmode, AclMode requiredPerms)
+probe_query_lockmode(Oid relid, LOCKMODE lockmode, AclMode requiredPerms)
 {
-	Oid			relid;
-
-	if (!OidIsValid(arm_lockmode_rel) ||
+	if (relid != arm_lockmode_rel ||
 		!((requiredPerms & (ACL_UPDATE | ACL_DELETE)) != 0 ||
 		  lockmode == RowShareLock))
 		return lockmode;
-	relid = RangeVarGetRelid(relation, NoLock, true);
-	if (relid != arm_lockmode_rel)
-		return lockmode;
 
-	record(EV_PARSER_LOCKMODE, "%s of %s asked for %s",
-		   GetLockmodeName(DEFAULT_LOCKMETHOD, lockmode), relation->relname,
+	record(EV_QUERY_LOCKMODE, "%s of %s asked for %s",
+		   GetLockmodeName(DEFAULT_LOCKMETHOD, lockmode), get_rel_name(relid),
 		   GetLockmodeName(DEFAULT_LOCKMETHOD, arm_lockmode));
 	return arm_lockmode;
 }
@@ -948,7 +941,7 @@ _PG_init(void)
 	star_expansion_filter_hook = probe_star_filter;
 	columnref_fallback_hook = probe_columnref_fallback;
 	deparse_function_as_column_hook = probe_deparse_as_column;
-	parser_lockmode_hook = probe_parser_lockmode;
+	query_lockmode_hook = probe_query_lockmode;
 
 	prev_planner_hook = planner_hook;
 	planner_hook = probe_planner;

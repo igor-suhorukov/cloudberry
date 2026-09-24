@@ -378,57 +378,74 @@ is "the column is still there by name" o28 by_name 7
 is "and a whole-row reference still has it" o28 whole_row '(1,7,x)'
 
 ###############################################################################
-echo "O30 parser_lockmode_hook: the parser takes the hook's lock, and first"
+echo "O30 query_lockmode_hook: the query takes the hook's lock, and first"
 ###############################################################################
-# The table an UPDATE or DELETE writes, or FOR UPDATE locks, is armed for
-# ExclusiveLock, as gp_core arms a distributed table without the deadlock
-# detector: held from the parser's first open of it, not after a weaker lock
-# of the parser's own -- the upgrade two sessions deadlock on -- and recorded
-# in its range table entry, so that a cached plan takes it again, first.
+# The table an UPDATE or DELETE writes, or a locking clause locks, is armed
+# for ExclusiveLock, as gp_core arms a distributed table without the deadlock
+# detector: held from the parser's first open of it -- or the rewriter's, for
+# the table under a view -- not after a weaker lock of PostgreSQL's own, the
+# upgrade two sessions deadlock on; and recorded in its range table entry, so
+# that a cached plan takes it again, first.
 session o30 <<'SQL'
 SELECT gp_probe.reset();
 CREATE TABLE o30_t (a int);
 INSERT INTO o30_t VALUES (1);
-CREATE FUNCTION o30_modes() RETURNS text LANGUAGE sql AS $$
+CREATE VIEW o30_v AS SELECT a FROM o30_t;
+CREATE FUNCTION o30_modes(rel regclass) RETURNS text LANGUAGE sql AS $$
   SELECT coalesce(string_agg(mode, ',' ORDER BY mode), 'none') FROM pg_locks
-   WHERE locktype = 'relation' AND relation = 'o30_t'::regclass
+   WHERE locktype = 'relation' AND relation = rel
      AND pid = pg_backend_pid() $$;
 SELECT gp_probe.arm_lockmode('o30_t'::regclass, 'ExclusiveLock');
 BEGIN;
 UPDATE o30_t SET a = a + 1;
-SELECT 'update=' || o30_modes();
+SELECT 'update=' || o30_modes('o30_t');
 ROLLBACK;
 BEGIN;
 SELECT a FROM o30_t FOR UPDATE;
-SELECT 'for_update=' || o30_modes();
+SELECT 'for_update=' || o30_modes('o30_t');
 ROLLBACK;
 BEGIN;
 INSERT INTO o30_t VALUES (2);
-SELECT 'insert=' || o30_modes();
+SELECT 'insert=' || o30_modes('o30_t');
+ROLLBACK;
+BEGIN;
+UPDATE o30_v SET a = a + 1;
+SELECT 'view_update=' || o30_modes('o30_t') || ' view ' || o30_modes('o30_v');
+ROLLBACK;
+BEGIN;
+SELECT a FROM o30_v FOR UPDATE;
+SELECT 'view_for_update=' || o30_modes('o30_t');
 ROLLBACK;
 PREPARE o30_delete AS DELETE FROM o30_t WHERE a < 0;
 EXECUTE o30_delete;
 SELECT gp_probe.reset();
 BEGIN;
 EXECUTE o30_delete;
-SELECT 'cached=' || o30_modes();
-SELECT 'cached_calls=' || gp_probe.calls('parser_lockmode');
+SELECT 'cached=' || o30_modes('o30_t');
+SELECT 'cached_calls=' || gp_probe.calls('query_lockmode');
 ROLLBACK;
 SELECT gp_probe.arm_lockmode('o30_t'::regclass, 'AccessShareLock');
 BEGIN;
-DELETE FROM o30_t WHERE a < 0;
-SELECT 'weaker=' || o30_modes();
+SELECT a FROM o30_t FOR UPDATE;
+SELECT 'weaker_read=' || o30_modes('o30_t');
 ROLLBACK;
-SELECT 'calls_parser_lockmode=' || gp_probe.calls('parser_lockmode');
-SELECT 'detail_parser_lockmode=' || gp_probe.detail('parser_lockmode');
+BEGIN;
+DELETE FROM o30_t WHERE a < 0;
+SELECT 'weaker_write=' || o30_modes('o30_t');
+ROLLBACK;
+SELECT 'calls_query_lockmode=' || gp_probe.calls('query_lockmode');
+SELECT 'detail_query_lockmode=' || gp_probe.detail('query_lockmode');
 SQL
 is "an UPDATE's target is locked in the hook's mode alone" o30 update ExclusiveLock
 is "and so is a table FOR UPDATE locks" o30 for_update ExclusiveLock
-is "an INSERT keeps the parser's mode" o30 insert RowExclusiveLock
-is "a cached plan takes the recorded mode, without parsing again" o30 cached ExclusiveLock
+is "an INSERT keeps PostgreSQL's mode" o30 insert RowExclusiveLock
+is "an UPDATE through a view: the rewriter locks the table in the hook's mode" o30 view_update "ExclusiveLock view RowExclusiveLock"
+is "a locking clause through a view: so does the rewriter" o30 view_for_update ExclusiveLock
+is "a cached plan takes the recorded mode, without asking again" o30 cached ExclusiveLock
 is "(the hook was not asked again)" o30 cached_calls 0
-is "a weaker mode than the parser's is not taken" o30 weaker RowExclusiveLock
-fired "parser_lockmode_hook is called" o30 parser_lockmode
+is "a weaker mode is taken for a table the query only reads" o30 weaker_read AccessShareLock
+is "and not for one it writes" o30 weaker_write RowExclusiveLock
+fired "query_lockmode_hook is called" o30 query_lockmode
 
 ###############################################################################
 echo "R3  SyncRepHoldCancelDuringWait: the flag is an extension's to set"
