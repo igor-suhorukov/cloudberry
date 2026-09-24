@@ -1461,7 +1461,19 @@ fragment_sql_ex(EState *estate, Plan *fragment, CustomScan *motion,
 	frag->planTree = fragment;
 	if (!write)
 		frag->resultRelationRelids = NULL;
+
+	/*
+	 * The rows a SELECT ... FOR UPDATE locks on the segments are locked by
+	 * the LockRows at the top of its fragment -- or under a LIMIT -- which
+	 * finds the tables it locks in the statement's row marks (ORCA's
+	 * lockrows.c).  The writer runs it: a reader's transaction reads only.
+	 */
 	frag->rowMarks = NIL;
+	if (!write && whole->rowMarks != NIL &&
+		(IsA(fragment, LockRows) ||
+		 (IsA(fragment, Limit) && fragment->lefttree != NULL &&
+		  IsA(fragment->lefttree, LockRows))))
+		frag->rowMarks = whole->rowMarks;
 	frag->extension_state = list_copy(marks);
 	frag->utilityStmt = NULL;
 

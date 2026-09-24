@@ -52,6 +52,15 @@ extern int	GpScanReplicatedContent(const GpPolicy *policy);
  */
 extern int	GpScanDirectDispatchSegment(Oid relid, Node *quals, Index varno);
 
+/*
+ * SELECT ... FOR UPDATE whose rows the segments lock, with the global
+ * deadlock detector on: the locking clause the gather of that relation
+ * sends them, for the one planning it is set for (gp_modify.c).
+ */
+extern void GpScanSetLocking(Oid relid, LockClauseStrength strength,
+							 LockWaitPolicy waitPolicy);
+extern void GpScanClearLocking(void);
+
 /* The scan hooks, where there is a cluster; see gp_scan.c. */
 extern void GpScanInit(void);
 

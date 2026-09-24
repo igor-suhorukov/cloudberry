@@ -1818,7 +1818,61 @@ SQL
 		*) notok "a distributed deadlock" "$out / $out2 / $log" ;;
 	esac
 
-	start_node 0 "shared_preload_libraries = '$PRELOAD,gp_orca'"
+	# SELECT ... FOR UPDATE (lockrows.c, gp_modify.c): without the detector
+	# Cloudberry's table lock, with it the rows, locked on the segments --
+	# by the planner's gather and by ORCA's LockRows in the Gather's
+	# fragment -- for the query Cloudberry's planner locks the rows of.  With
+	# the cluster secret, so that ORCA's plans are dispatched.
+	SECRET="cluster-secret-$RANDOM$RANDOM$RANDOM"
+	for n in 1 2 0; do
+		start_node "$n" "shared_preload_libraries = '$PRELOAD,gp_orca'" \
+			"gp.cluster_secret = '$SECRET'" \
+			"gp.enable_global_deadlock_detector = on"
+	done
+	out=$(q 0 "SET gp.optimizer = on; EXPLAIN (COSTS OFF) SELECT * FROM gdd WHERE val < 5 ORDER BY id FOR UPDATE;" | tr '\n' '|')
+	case "$out" in
+		*"Gather Motion"*"Merge Key"*"LockRows"*"Sort"*"Seq Scan on gdd"*)
+			ok "ORCA locks the rows below the Gather, above the sort its merge keeps" ;;
+		*) notok "ORCA's plan for FOR UPDATE" "$out" ;;
+	esac
+	for opt in off on; do
+		printf '%s\n' "SET gp.optimizer = $opt;" "BEGIN;" "SELECT id FROM gdd WHERE id = $r0 FOR UPDATE;" \
+			"SELECT string_agg(mode, ',' ORDER BY mode) FROM pg_locks WHERE relation = 'gdd'::regclass;" \
+			"SELECT pg_sleep(2);" "COMMIT;" | qf 0 > "$ROOT/gddfu.out" 2>&1 &
+		holder=$!
+		sleep 0.5
+		out=$(q 0 "SET gp.optimizer = $opt; SELECT id FROM gdd WHERE id = $r0 FOR UPDATE NOWAIT;")
+		start=$(date +%s%N)
+		q 0 "UPDATE gdd SET val = val WHERE id = $r1;" >/dev/null
+		other=$(( ($(date +%s%N) - start) / 1000000 ))
+		start=$(date +%s%N)
+		q 0 "UPDATE gdd SET val = val WHERE id = $r0;" >/dev/null
+		locked=$(( ($(date +%s%N) - start) / 1000000 ))
+		wait "$holder"
+		out2=$(grep -m1 "Lock" "$ROOT/gddfu.out")
+		case "$out|$out2" in
+			*"could not obtain lock on row"*"|RowShareLock")
+				[ "$other" -lt 1000 ] && [ "$locked" -ge 1000 ] \
+					&& ok "with it, FOR UPDATE under gp.optimizer = $opt locks one row on its segment: NOWAIT fails there, another row's UPDATE passes, its own waits" \
+					|| notok "row locks under gp.optimizer = $opt" "$other ms / $locked ms" ;;
+			*) notok "row locks under gp.optimizer = $opt" "$out / $out2" ;;
+		esac
+	done
+
+	for n in 1 2 0; do
+		start_node "$n" "shared_preload_libraries = '$PRELOAD,gp_orca'" \
+			"gp.cluster_secret = '$SECRET'"
+	done
+	out=$(printf '%s\n' "SET gp.optimizer = on;" "BEGIN;" "SELECT id FROM gdd WHERE id = $r0 FOR UPDATE;" \
+		"SELECT string_agg(mode, ',' ORDER BY mode) FROM pg_locks WHERE relation = 'gdd'::regclass;" \
+		"COMMIT;" | qf 0 | tail -1)
+	[ "$out" = "ExclusiveLock,RowShareLock" ] \
+		&& ok "without it, ORCA's FOR UPDATE takes Cloudberry's table lock, ExclusiveLock" \
+		|| notok "the table lock for FOR UPDATE without the detector" "$out"
+
+	for n in 1 2 0; do
+		start_node "$n" "shared_preload_libraries = '$PRELOAD,gp_orca'"
+	done
 
 	###########################################################################
 	echo "15. the segments authenticate the coordinator, with SCRAM"

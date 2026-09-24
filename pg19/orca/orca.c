@@ -90,6 +90,7 @@
 #include "cb_dynamicscan.h"
 #include "gp_orca_api.h"
 #include "gp_orca_guc.h"
+#include "gp_orca_lockrows.h"
 #include "gp_orca_postgis.h"
 #include "optimizer/orca.h"
 #include "optimizer/walkers.h"
@@ -1229,6 +1230,7 @@ optimize_query(Query *parse, int cursorOptions, ParamListInfo boundParams,
 	List	   *invalItems;
 	bool		hasRowSecurity;
 	ListCell   *lp;
+	List	   *row_marks = NIL;
 
 	failure->unexpected = false;
 	failure->from_postgres = false;
@@ -1237,9 +1239,9 @@ optimize_query(Query *parse, int cursorOptions, ParamListInfo boundParams,
 	/*
 	 * Not Cloudberry's "fall back for updatable cursor": CURSOR_OPT_UPDATABLE
 	 * is Cloudberry's bit, and PostgreSQL 19 has no such option.  A cursor
-	 * declared FOR UPDATE carries row marks, which the translator refuses;
-	 * one that is only used by WHERE CURRENT OF finds the scan under its plan
-	 * the way it would under the planner's.
+	 * declared FOR UPDATE carries row marks, which lockrows.c takes as a
+	 * query's; one that is only used by WHERE CURRENT OF finds the scan under
+	 * its plan the way it would under the planner's.
 	 */
 
 	if (orca_state_unknown)
@@ -1378,6 +1380,23 @@ optimize_query(Query *parse, int cursorOptions, ParamListInfo boundParams,
 	pqueryCopy = (Query *) transformGroupedWindows((Node *) pqueryCopy, NULL);
 
 	/*
+	 * FOR UPDATE and the rest: each locked table's ctid made an output
+	 * column, or on a cluster that locks tables the table locked; the plan
+	 * gets its LockRows below (lockrows.c).
+	 */
+	{
+		const char *why;
+
+		if (!GpOrcaPrepareRowMarks(pqueryCopy, &row_marks, &why))
+		{
+			failure->message = psprintf("Falling back to Postgres-based planner because "
+										"GPORCA does not support the following feature: %s",
+										why);
+			return NULL;
+		}
+	}
+
+	/*
 	 * Ok, invoke ORCA.
 	 *
 	 * An error that reaches here by longjmp went through ORCA without
@@ -1438,6 +1457,19 @@ optimize_query(Query *parse, int cursorOptions, ParamListInfo boundParams,
 	result->planTree = remove_redundant_results(result->planTree);
 	foreach(lp, result->subplans)
 		lfirst(lp) = remove_redundant_results((Plan *) lfirst(lp));
+
+	/* the rows the query locks, locked where they are (lockrows.c) */
+	{
+		const char *why;
+
+		if (!GpOrcaAddLockRows(result, row_marks, &why))
+		{
+			failure->message = psprintf("Falling back to Postgres-based planner because "
+										"GPORCA does not support the following feature: %s",
+										why);
+			return NULL;
+		}
+	}
 
 	/*
 	 * For plan cache invalidation purposes, extract the OIDs of all

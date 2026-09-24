@@ -65,6 +65,7 @@
 #include "catalog/objectaddress.h"
 #include "catalog/pg_authid.h"
 #include "catalog/pg_class.h"
+#include "catalog/pg_inherits.h"
 #include "catalog/pg_proc.h"
 #include "catalog/pg_type.h"
 #include "commands/copy.h"
@@ -90,6 +91,7 @@
 #include "utils/acl.h"
 #include "utils/builtins.h"
 #include "utils/fmgroids.h"
+#include "utils/guc.h"
 #include "utils/lsyscache.h"
 #include "utils/memutils.h"
 #include "utils/rel.h"
@@ -766,7 +768,46 @@ cannot_push_reason(Query *query, Oid target, GpPolicy *policy)
  * that are not there -- a gathered row has no place in its empty copy.  Every
  * level of the query, because FOR UPDATE may be written in a subquery or a
  * WITH query, and each keeps its own.
+ *
+ * With the global deadlock detector on, Cloudberry's planner locks rows
+ * instead for the query it can (checkCanOptSelectLockingClause, analyze.c):
+ * one table in FROM, no subquery, no set operation -- a table whose rows
+ * are each on one segment.  The segments lock them, the gather sending its
+ * locking clause with its query (gp_scan.c).
  */
+static bool
+segments_lock_rows(Query *q)
+{
+	RowMarkClause *rc;
+	RangeTblEntry *rte;
+	GpPolicy   *policy;
+	const char *gdd = GetConfigOption("gp.enable_global_deadlock_detector",
+									  true, false);
+
+	if (gdd == NULL || strcmp(gdd, "on") != 0 ||
+		list_length(q->rowMarks) != 1 || q->setOperations != NULL ||
+		q->hasSubLinks || q->jointree == NULL ||
+		list_length(q->jointree->fromlist) != 1 ||
+		!IsA(linitial(q->jointree->fromlist), RangeTblRef))
+		return false;
+	rc = linitial_node(RowMarkClause, q->rowMarks);
+	if (rc->pushedDown ||
+		((RangeTblRef *) linitial(q->jointree->fromlist))->rtindex != (int) rc->rti)
+		return false;
+	rte = rt_fetch(rc->rti, q->rtable);
+	if (rte->rtekind != RTE_RELATION || rte->relkind != RELKIND_RELATION ||
+		has_subclass(rte->relid))
+		return false;
+	policy = GpScanDistributedPolicy(rte->relid);
+	if (policy == NULL ||
+		!(GpPolicyIsHashPartitioned(policy) || GpPolicyIsRandomPartitioned(policy)))
+		return false;
+
+	GpScanSetLocking(rte->relid, rc->strength, rc->waitPolicy);
+	q->rowMarks = NIL;
+	return true;
+}
+
 static bool
 lock_instead_of_row_marks(Node *node, void *context)
 {
@@ -937,15 +978,24 @@ gp_modify_planner_routed(Query *parse, const char *query_string, int cursorOptio
 										   boundParams, es)
 			: standard_planner(parse, query_string, cursorOptions, boundParams, es);
 
-	(void) lock_instead_of_row_marks((Node *) parse, NULL);
+	if (!segments_lock_rows(parse))
+		(void) lock_instead_of_row_marks((Node *) parse, NULL);
 
 	/* The planner changes the Query; an UPDATE or DELETE may be sent as it was. */
 	if (parse->commandType == CMD_UPDATE || parse->commandType == CMD_DELETE)
 		original = copyObject(parse);
 
-	stmt = prev_planner ? prev_planner(parse, query_string, cursorOptions,
-									   boundParams, es)
-		: standard_planner(parse, query_string, cursorOptions, boundParams, es);
+	PG_TRY();
+	{
+		stmt = prev_planner ? prev_planner(parse, query_string, cursorOptions,
+										   boundParams, es)
+			: standard_planner(parse, query_string, cursorOptions, boundParams, es);
+	}
+	PG_FINALLY();
+	{
+		GpScanClearLocking();
+	}
+	PG_END_TRY();
 
 	if (!IsA(stmt->planTree, ModifyTable))
 		return stmt;

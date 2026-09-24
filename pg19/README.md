@@ -149,6 +149,12 @@ Distributed transactions (M3), in `gp_core`:
   coordinator gathers every node's waits, reduces the graph with
   Cloudberry's own detector (`src/backend/utils/gdd/gdddetector.c`, compiled
   where it lies) and cancels the youngest transaction of a cycle;
+- **`SELECT ... FOR UPDATE`** and the other locking clauses: under ORCA as
+  under the planner, the rows are locked by a LockRows node — at the top of
+  the plan on one node, on the segments below the Gather on a cluster with
+  the deadlock detector on, for the one-table query Cloudberry's planner
+  locks rows for — and otherwise, on a cluster, the table is locked, as
+  Cloudberry locks it;
 - Cloudberry's fault injector, `gp_inject_fault`, for the tests.
 
 The storage, resource and transport modules — `gp_ao`, `pax`, `gp_exttable`,

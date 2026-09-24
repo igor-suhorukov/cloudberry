@@ -2288,14 +2288,45 @@ same "and ORCA plans the next statement in that backend" \
 
 # --- what ORCA declines, and says so ---------------------------------------------
 
+q "CREATE TABLE t0_lk (a int, c int); INSERT INTO t0_lk SELECT i, i FROM generate_series(1, 10) i; ANALYZE t0_lk;" > /dev/null
+
 has "the trace is Cloudberry's, word for word" \
-    "SET gp.optimizer_trace_fallback = on; SELECT a FROM t0 WHERE a = 1 FOR UPDATE;" \
+    "SET gp.optimizer_trace_fallback = on; SELECT t0.a FROM t0 JOIN t0_lk USING (a) WHERE t0.a = 1 FOR UPDATE OF t0;" \
     "GPORCA failed to produce a plan, falling back to Postgres-based planner"
 
-# ORCA ignores row marks, because Cloudberry locks the whole table for them;
-# PostgreSQL locks the rows, in a node the plan must have.
-declined "FOR UPDATE, which would lock nothing" \
-         "SELECT a FROM t0 WHERE a = 1 FOR UPDATE" "FOR UPDATE and FOR SHARE"
+# Row locks (lockrows.c).  Cloudberry's ORCA ignores row marks, because
+# Cloudberry locks the whole table for them; PostgreSQL locks the rows, in
+# a LockRows node the plan must have, which ORCA's plan has now: at the top,
+# below a LIMIT as the planner puts it, the rows of every table the query
+# locks.
+same "FOR UPDATE of one table's rows" \
+     "SELECT a, b FROM t0 WHERE a < 4 ORDER BY a FOR UPDATE"
+has "with LockRows in ORCA's plan" \
+    "EXPLAIN (COSTS OFF) SELECT a FROM t0 WHERE a < 4 FOR UPDATE" "LockRows"
+out=$(q "EXPLAIN (COSTS OFF) SELECT a FROM t0 ORDER BY a LIMIT 2 FOR SHARE" | tr '\n' '|')
+case "$out" in
+	Limit*LockRows*) ok "below a LIMIT, which counts the rows it locks" ;;
+	*) notok "below a LIMIT, which counts the rows it locks" "$out" ;;
+esac
+same "FOR UPDATE of both tables of a join" \
+     "SELECT t0.a, t0_lk.c FROM t0 JOIN t0_lk USING (a) WHERE t0.a < 4 ORDER BY 1 FOR UPDATE"
+declined "FOR UPDATE OF one table of a join, which would copy the other's rows" \
+         "SELECT t0.a FROM t0 JOIN t0_lk USING (a) WHERE t0.a = 1 FOR UPDATE OF t0" \
+         "a locking clause on some of the tables a query reads"
+
+# The rows are PostgreSQL's to lock: NOWAIT fails at one another
+# transaction holds, and SKIP LOCKED passes it by.
+printf '%s\n' "BEGIN;" "SELECT a FROM t0 WHERE a = 1 FOR UPDATE;" "SELECT pg_sleep(2);" "COMMIT;" |
+	"$PSQL" -X -q -t -A -d postgres > /dev/null 2>&1 &
+holder=$!
+sleep 0.5
+refused "FOR UPDATE NOWAIT under ORCA fails at a row another transaction locked" \
+        "SELECT a FROM t0 WHERE a = 1 FOR UPDATE NOWAIT" \
+        "could not obtain lock on row in relation \"t0\""
+is "and SKIP LOCKED passes it by" \
+   "SELECT string_agg(a::text, ',' ORDER BY a) FROM (SELECT a FROM t0 WHERE a <= 3 FOR UPDATE SKIP LOCKED) s" \
+   "2,3"
+wait "$holder"
 
 # On one node every relation is coordinator-only, and Cloudberry's refusal of
 # a coordinator-only table is kept for what it was for, the catalogs.

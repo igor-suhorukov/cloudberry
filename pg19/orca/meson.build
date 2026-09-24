@@ -183,6 +183,7 @@ orca_transl_sources = files(
   'config/CConfigParamMapping.cpp',
   'config/gp_orca_guc.c',
   'gpdbwrappers.cpp',
+  'lockrows.c',
   'orca.c',
   'orca_api.cpp',
   'orca_probe.cpp',

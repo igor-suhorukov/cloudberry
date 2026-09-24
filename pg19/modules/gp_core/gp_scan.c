@@ -456,6 +456,26 @@ gp_set_rel_pathlist(PlannerInfo *root, RelOptInfo *rel, Index rti,
 	add_path(rel, &cp->path);
 }
 
+/* The locking clause a gather sends the segments; see GpScanSetLocking(). */
+static Oid	locking_relid = InvalidOid;
+static LockClauseStrength locking_strength;
+static LockWaitPolicy locking_wait;
+
+void
+GpScanSetLocking(Oid relid, LockClauseStrength strength,
+				 LockWaitPolicy waitPolicy)
+{
+	locking_relid = relid;
+	locking_strength = strength;
+	locking_wait = waitPolicy;
+}
+
+void
+GpScanClearLocking(void)
+{
+	locking_relid = InvalidOid;
+}
+
 static Plan *
 gather_plan(PlannerInfo *root, RelOptInfo *rel, CustomPath *best_path,
 			List *tlist, List *clauses, List *custom_plans)
@@ -544,6 +564,16 @@ gather_plan(PlannerInfo *root, RelOptInfo *rel, CustomPath *best_path,
 						 lc == list_head(pushed) ? " WHERE " : " AND ",
 						 deparse_expression(qual, dpcontext, false, true));
 	}
+
+	/* the rows a SELECT ... FOR UPDATE locks, locked where they are */
+	if (OidIsValid(locking_relid) && locking_relid == rte->relid)
+		appendStringInfo(&sql, " FOR %s%s",
+						 locking_strength == LCS_FORKEYSHARE ? "KEY SHARE" :
+						 locking_strength == LCS_FORSHARE ? "SHARE" :
+						 locking_strength == LCS_FORNOKEYUPDATE ? "NO KEY UPDATE" :
+						 "UPDATE",
+						 locking_wait == LockWaitSkip ? " SKIP LOCKED" :
+						 locking_wait == LockWaitError ? " NOWAIT" : "");
 
 	if (policy != NULL && GpPolicyIsReplicated(policy))
 		content = GpScanReplicatedContent(policy);
