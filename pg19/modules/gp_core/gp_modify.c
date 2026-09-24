@@ -998,21 +998,55 @@ static PlannedStmt *
 gp_modify_planner(Query *parse, const char *query_string, int cursorOptions,
 				  ParamListInfo boundParams, ExplainState *es)
 {
-	PlannedStmt *stmt = gp_modify_planner_routed(parse, query_string,
-												 cursorOptions, boundParams, es);
+	PlannedStmt *stmt;
+	List	   *conflicts = NIL;
+	ListCell   *conflict;
 	ListCell   *lc;
 
 	if (GpClusterBackendRole() != GP_ROLE_DISPATCH)
-		return stmt;
+		return gp_modify_planner_routed(parse, query_string, cursorOptions,
+										boundParams, es);
+
+	/*
+	 * An INSERT ... ON CONFLICT in a WITH query: its clause printed as the
+	 * statement's own is, before the planner changes it -- one for each, in
+	 * the WITH's order, which is the order the planner makes their subplans
+	 * in (SS_process_ctes()); none for a table on the coordinator.  A write
+	 * in a WITH query is at the statement's top level, as PostgreSQL's
+	 * parser requires.
+	 */
+	foreach(lc, parse->cteList)
+	{
+		Query	   *q = castNode(Query, lfirst_node(CommonTableExpr, lc)->ctequery);
+		GpPolicy   *target;
+
+		if (q->commandType != CMD_INSERT || q->onConflict == NULL)
+			continue;
+		target = GpScanDistributedPolicy(rt_fetch(q->resultRelation, q->rtable)->relid);
+		conflicts = lappend(conflicts,
+							target != NULL ? GpExplicitOnConflict(q, target) : NULL);
+	}
+
+	stmt = gp_modify_planner_routed(parse, query_string, cursorOptions,
+									boundParams, es);
 
 	/* a write in a WITH query is a subplan; it is written explicitly */
+	conflict = list_head(conflicts);
 	foreach(lc, stmt->subplans)
 	{
 		Plan	   *sub = (Plan *) lfirst(lc);
+		const char *on_conflict = NULL;
 
-		if (sub != NULL && IsA(sub, ModifyTable) &&
-			writes_distributed(stmt, (ModifyTable *) sub))
-			lfirst(lc) = write_explicitly(stmt, (ModifyTable *) sub, NULL);
+		if (sub == NULL || !IsA(sub, ModifyTable))
+			continue;
+		if (((ModifyTable *) sub)->onConflictAction != ONCONFLICT_NONE &&
+			conflict != NULL)
+		{
+			on_conflict = (const char *) lfirst(conflict);
+			conflict = lnext(conflicts, conflict);
+		}
+		if (writes_distributed(stmt, (ModifyTable *) sub))
+			lfirst(lc) = write_explicitly(stmt, (ModifyTable *) sub, on_conflict);
 	}
 	refuse_local_write(stmt->planTree, stmt);
 	return stmt;

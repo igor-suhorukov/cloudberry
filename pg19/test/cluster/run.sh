@@ -677,6 +677,17 @@ mine" ] && ok "a transaction reads its own rows, and a LIMIT leaves the connecti
 	out=$(q 0 "WITH w AS (UPDATE d SET b = b WHERE a < 3 RETURNING a) SELECT count(*), sum(a) FROM w;")
 	[ "$out" = "2|3" ] && ok "an UPDATE in a WITH query, its RETURNING read by the query" \
 		|| notok "a data-modifying WITH query" "$out"
+	# INSERT ... ON CONFLICT in a WITH query: each one's clause, printed with
+	# the statement, goes with its own subplan's rows -- swapped, upw would
+	# keep 'one' and upw2 take 'eins'.
+	q 0 "CREATE TABLE upw (a int PRIMARY KEY, b text) DISTRIBUTED BY (a); INSERT INTO upw VALUES (1, 'one'), (2, 'two');" >/dev/null
+	q 0 "CREATE TABLE upw2 (a int PRIMARY KEY, b text) DISTRIBUTED BY (a); INSERT INTO upw2 VALUES (1, 'x');" >/dev/null
+	out=$(q 0 "WITH w AS (INSERT INTO upw VALUES (2, 'deux'), (3, 'trois') ON CONFLICT (a) DO UPDATE SET b = excluded.b || '!' RETURNING a, b) SELECT string_agg(a || b, ' ' ORDER BY a) FROM w;")
+	out2=$(q 0 "WITH x AS (INSERT INTO upw VALUES (1, 'uno') ON CONFLICT (a) DO UPDATE SET b = excluded.b RETURNING b), u AS (UPDATE upw SET b = b WHERE a = 3 RETURNING a), y AS (INSERT INTO upw2 VALUES (1, 'eins'), (2, 'zwei') ON CONFLICT DO NOTHING RETURNING b) SELECT (SELECT string_agg(b, ',') FROM x), (SELECT count(*) FROM u), (SELECT string_agg(b, ',') FROM y);")
+	out3=$(q 0 "SELECT (SELECT string_agg(a || b, ' ' ORDER BY a) FROM upw), (SELECT string_agg(a || b, ' ' ORDER BY a) FROM upw2);")
+	[ "$out|$out2|$out3" = "2deux! 3trois|uno|1|zwei|1uno 2deux! 3trois|1x 2zwei" ] \
+		&& ok "INSERT ... ON CONFLICT in a WITH query, two of them, each with its own clause" \
+		|| notok "ON CONFLICT in a WITH query" "$out / $out2 / $out3"
 	out=$(printf '%s\n' "BEGIN;" "DELETE FROM sales WHERE amt <= 3;" \
 		"SELECT count(*) FROM sales;" \
 		"UPDATE sales SET d = date '2026-03-20' WHERE id BETWEEN 10 AND 12 RETURNING id, tableoid::regclass;" \

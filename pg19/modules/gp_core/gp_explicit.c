@@ -81,7 +81,8 @@
  * VALUES: each row to the segment its key hashes to, where a row it
  * conflicts with is, since every unique index of a distributed table holds
  * its key; the clause is PostgreSQL's own ruleutils' text of it, printed
- * before the planner changes the statement (GpExplicitOnConflict).  As
+ * before the planner changes the statement (GpExplicitOnConflict) -- one in
+ * a WITH query with the statement it is in (gp_modify.c).  As
  * Cloudberry's analyze.c refuses them, in its words, DO UPDATE refuses a
  * column of the key and, of a replicated table, a volatile function; and a
  * subquery in SET or WHERE is refused, which a segment would answer from
@@ -94,8 +95,7 @@
  * Refused, by name (GpExplicitCannot): an UPDATE of the key of a table with
  * UPDATE triggers, which a moved row would not fire, in Cloudberry's words;
  * check options; RETURNING old or new; statement-level triggers, which
- * would fire on every segment; ON CONFLICT whose clause was not printed
- * when the statement was planned -- one in a WITH query; and MERGE.
+ * would fire on every segment; and MERGE.
  *
  * Cloudberry sources this file stands in for:
  *	  the Explicit Redistribute Motion cdbpath.c puts below a ModifyTable
@@ -439,7 +439,7 @@ GpExplicitCannot(PlannedStmt *stmt, ModifyTable *mt, const char *on_conflict)
 	if (mt->operation == CMD_MERGE)
 		return "MERGE into a distributed table is not supported yet.";
 	if (mt->onConflictAction != ONCONFLICT_NONE && on_conflict == NULL)
-		return "ON CONFLICT into a distributed table is written from the statement's own text, which one in a WITH query does not have yet.";
+		return "ON CONFLICT into a distributed table is written from the statement's own text, which was not printed for this one.";
 	if (mt->withCheckOptionLists != NIL)
 		return "It is written through a view WITH CHECK OPTION or under row-level security, whose checks of the rows written would not travel with them.";
 	if (returning_qualified_walker((Node *) mt->returningLists, NULL))
