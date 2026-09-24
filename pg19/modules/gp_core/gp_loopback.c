@@ -139,6 +139,12 @@ GpLoopbackMaintenanceDatabase(void)
 }
 
 bool
+GpLoopbackHasWrites(void)
+{
+	return writes != NIL;
+}
+
+bool
 GpLoopbackIsHere(const char *dbname)
 {
 	return OidIsValid(MyDatabaseId) &&

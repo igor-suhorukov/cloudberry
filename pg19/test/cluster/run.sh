@@ -1672,11 +1672,30 @@ SQL
 		"SELECT gp_inject_fault('dtm_broadcast_prepare', 'status', 1);" \
 		"INSERT INTO dtx VALUES (21, 21);" \
 		"SELECT gp_inject_fault('dtm_broadcast_prepare', 'status', 1);" \
+		"UPDATE dtx SET b = b;" \
+		"SELECT gp_inject_fault('dtm_broadcast_prepare', 'status', 1);" \
 		"SELECT gp_inject_fault('dtm_broadcast_prepare', 'reset', 1);" | qf 0 |
 		grep -o "num times hit:'[0-9]*'" | tr '\n' ' ')
-	[ "$out" = "num times hit:'0' num times hit:'1' " ] \
-		&& ok "a transaction that only read commits on the segments in one phase, one that wrote in two" \
+	[ "$out" = "num times hit:'0' num times hit:'0' num times hit:'1' " ] \
+		&& ok "a transaction that read, or wrote on one segment alone, commits in one phase, one that wrote on both in two" \
 		|| notok "which transactions are prepared" "$out"
+	# The coordinator asks nobody which wrote: each segment says so with every
+	# answer, as its part's transaction ID (gp_dtx.c) -- a write the
+	# coordinator did not send as one, a function a query runs on the
+	# segments, included: those parts are prepared, not committed as a
+	# reader's would be.
+	q 0 "CREATE TABLE dtxw (a int) DISTRIBUTED RANDOMLY;" >/dev/null
+	q 0 "CREATE FUNCTION dtx_write() RETURNS int AS 'INSERT INTO dtxw VALUES (1) RETURNING 1' LANGUAGE sql VOLATILE;" >/dev/null
+	out=$(printf '%s\n' "SELECT gp_inject_fault_infinite('dtm_broadcast_prepare', 'skip', 1);" \
+		"SELECT count(*) FROM gp.exec_on_segments('SELECT dtx_write()');" \
+		"SELECT gp_inject_fault('dtm_broadcast_prepare', 'status', 1);" \
+		"SELECT gp_inject_fault('dtm_broadcast_prepare', 'reset', 1);" | qf 0 |
+		grep -o "num times hit:'[0-9]*'")
+	out2=$(q 0 "SELECT count(*) FROM dtxw;")
+	q 0 "DROP FUNCTION dtx_write(); DROP TABLE dtxw;" >/dev/null
+	[ "$out|$out2" = "num times hit:'1'|2" ] \
+		&& ok "a segment says with its answer that it wrote, even where a function it ran wrote, and its part is prepared" \
+		|| notok "the transaction ID a segment reports" "$out / $out2"
 
 	# A commit held between its phases.
 	q 0 "SELECT gp_inject_fault('dtm_broadcast_commit_prepared', 'suspend', 1);" >/dev/null
@@ -1720,9 +1739,9 @@ SQL
 	# What gp.test_print_direct_dispatch_info says of the two phases, in
 	# Cloudberry's words (doDispatchDtxProtocolCommand(), cdbtm.c): each
 	# command, before it is sent, and the segments it goes to -- those whose
-	# parts wrote.  A part that wrote alone is prepared, where Cloudberry
-	# commits it in one phase; a transaction that only read says nothing; and
-	# a rollback is named by how far the first phase got -- a fault once every
+	# parts wrote.  A part that wrote alone commits in one phase, as
+	# Cloudberry's does; a transaction that only read says nothing; and a
+	# rollback is named by how far the first phase got -- a fault once every
 	# part is prepared, where Cloudberry's is, and a segment that fails to.
 	out=$(printf '%s\n' "SET gp.test_print_direct_dispatch_info = on;" \
 		"CREATE TABLE dtxi (a int) DISTRIBUTED BY (a);" \
@@ -1743,7 +1762,7 @@ SQL
 	q 0 "DROP TABLE dtxi;" >/dev/null
 	dtxc="INFO:  Distributed transaction command"
 	expect="$dtxc 'Distributed Prepare' to ALL contents: 0 1/$dtxc 'Distributed Commit Prepared' to ALL contents: 0 1/"
-	expect="$expect$dtxc 'Distributed Prepare' to SINGLE content/$dtxc 'Distributed Commit Prepared' to SINGLE content/"
+	expect="$expect$dtxc 'Distributed Commit (one-phase)' to SINGLE content/"
 	expect="$expect$dtxc 'Distributed Prepare' to ALL contents: 0 1/$dtxc 'Distributed Commit Prepared' to ALL contents: 0 1/"
 	expect="$expect$dtxc 'Distributed Prepare' to ALL contents: 0 1/$dtxc 'Distributed Abort Prepared' to ALL contents: 0 1/"
 	expect="$expect$dtxc 'Distributed Prepare' to ALL contents: 0 1/$dtxc 'Distributed Abort (Some Prepared)' to ALL contents: 0 1/"
@@ -1953,6 +1972,30 @@ SQL
 			ok "a deadlock across two segments is broken: the younger transaction is cancelled, in Cloudberry's words" ;;
 		*) notok "a distributed deadlock" "$out / $out2 / $log" ;;
 	esac
+
+	# Commit ordering (gp_dtx.c): with rows locked, an UPDATE may update the
+	# row a one-phase part has committed on its segment before that part's
+	# coordinator transaction has ended.  It ends only after that one -- a
+	# snapshot that saw it committed and the other in progress would show
+	# both the row it replaced and its own.  The first is held after its
+	# segment committed, as its commit record is written here.
+	val=$(q 0 "SELECT val FROM gdd WHERE id = $r0;")
+	q 0 "SELECT gp_inject_fault('onephase_transaction_commit', 'suspend', 1);" >/dev/null
+	q 0 "UPDATE gdd SET val = val + 1 WHERE id = $r0;" >/dev/null 2>&1 &
+	first=$!
+	q 0 "SELECT gp_wait_until_triggered_fault('onephase_transaction_commit', 1, 1);" >/dev/null
+	q 0 "UPDATE gdd SET val = val + 10 WHERE id = $r0;" >/dev/null 2>&1 &
+	second=$!
+	sleep 1
+	waits=$(q 0 "SELECT wait_event FROM pg_stat_activity WHERE query LIKE 'UPDATE gdd SET val = val + 10 %';")
+	seen=$(q 0 "SELECT string_agg(val::text, ',') FROM gdd WHERE id = $r0;")
+	q 0 "SELECT gp_inject_fault('onephase_transaction_commit', 'resume', 1);" >/dev/null
+	wait "$first" "$second"
+	q 0 "SELECT gp_inject_fault('onephase_transaction_commit', 'reset', 1);" >/dev/null
+	after=$(q 0 "SELECT string_agg(val::text, ',') FROM gdd WHERE id = $r0;")
+	[ "$waits|$seen|$after" = "transactionid|$val|$((val + 11))" ] \
+		&& ok "an UPDATE of a row a one-phase commit wrote ends after it, and no snapshot sees the row twice" \
+		|| notok "commit ordering after a one-phase commit" "$waits / $seen / $after (was $val)"
 
 	# SELECT ... FOR UPDATE (lockrows.c, gp_modify.c): without the detector
 	# Cloudberry's table lock, with it the rows, locked on the segments --

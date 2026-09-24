@@ -69,6 +69,7 @@
 
 #include "access/htup_details.h"
 #include "access/table.h"
+#include "access/transam.h"
 #include "access/xact.h"
 #include "catalog/catalog.h"
 #include "catalog/objectaddress.h"
@@ -86,6 +87,8 @@
 #include "nodes/pg_list.h"
 #include "storage/ipc.h"
 #include "storage/latch.h"
+#include "storage/lmgr.h"
+#include "storage/procarray.h"
 #include "storage/waiteventset.h"
 #include "utils/acl.h"
 #include "utils/builtins.h"
@@ -107,6 +110,7 @@
 #include "gp_dtx.h"
 #include "gp_fault.h"
 #include "gp_label.h"
+#include "gp_loopback.h"
 #include "gp_settings.h"
 
 /* Where libpq finds the password for the segments; see the file header. */
@@ -1785,46 +1789,124 @@ dtx_forget(void)
 }
 
 /*
+ * Has this segment's part written?  It says so with the answer to every
+ * statement it is sent, as the transaction ID its part has (gp_dtx.c): empty
+ * while it has none.  A segment that has never said is taken to have
+ * written, which costs it no more than being prepared.
+ */
+static bool
+conn_wrote(const GpSegmentConn *c)
+{
+	const char *xid = PQparameterStatus(c->conn, GP_DTX_XID_SETTING);
+
+	return xid == NULL || xid[0] != '\0';
+}
+
+/*
+ * Commit ordering (gp_dtx.c): the coordinator transactions whose one-phase
+ * parts a segment's part may have seen committed before they ended, as it
+ * reported them committing or preparing.  This transaction ends after each
+ * of theirs, so that no distributed snapshot sees it committed and one of
+ * them in progress.  Waited for here, before this one's commit record: the
+ * transactions waited for are past their own first phase, and wait for
+ * nothing of this one's.
+ */
+static void
+dtx_wait_for_depends(const GpSegmentConn *c)
+{
+	const char *list = PQparameterStatus(c->conn, GP_DTX_DEPENDS_SETTING);
+	FullTransactionId next = ReadNextFullTransactionId();
+	TransactionId self = GetTopTransactionIdIfAny();
+	char	   *copy;
+	char	   *save = NULL;
+
+	if (list == NULL || list[0] == '\0')
+		return;
+	copy = pstrdup(list);
+	for (char *tok = strtok_r(copy, ",", &save); tok != NULL;
+		 tok = strtok_r(NULL, ",", &save))
+	{
+		FullTransactionId gxid = FullTransactionIdFromU64(strtou64(tok, NULL, 10));
+		TransactionId xid = XidFromFullTransactionId(gxid);
+
+		if (!FullTransactionIdPrecedes(gxid, next) ||
+			!TransactionIdIsNormal(xid) || TransactionIdEquals(xid, self))
+			continue;
+		if (TransactionIdIsInProgress(xid))
+			XactLockTableWait(xid, NULL, NULL, XLTW_None);
+	}
+	pfree(copy);
+}
+
+/*
  * The first phase, at PRE_COMMIT, while raising still undoes the
- * coordinator's part.  Each segment is asked whether its part wrote.  One
- * that did not commits now, having nothing to decide; one that did is
- * prepared under the coordinator's transaction ID, which this gives the
- * transaction if it had none -- a transaction that wrote on a segment only
- * has none -- and whose commit record, forced to disk before any segment is
- * told (ForceSyncCommit), is the decision (gp_dtx.c).  A failure here
- * raises, and the abort rolls back whatever was prepared.
- *
- * A part that wrote alone is prepared too, where Cloudberry commits it in
- * one phase when the coordinator wrote nothing (prepareDtxTransaction(),
- * cdb/cdbtm.c): a segment of the port commits only after the coordinator's
- * commit record, and that is what orders commits for the distributed
- * snapshots.
+ * coordinator's part.  Which segments' parts wrote each has said with its
+ * answers (conn_wrote()).  One that did not commits now, having nothing to
+ * decide.  One that wrote alone, the coordinator having written nothing and
+ * written nothing to another of its databases, commits in one phase, as
+ * Cloudberry's does (prepareDtxTransaction(), cdb/cdbtm.c): told the
+ * coordinator's transaction ID it commits under, which this gives the
+ * transaction and which the coordinator's snapshots see in progress until
+ * this transaction ends.  Its commit is the decision, so nothing waits for a
+ * commit record here: one round trip, one flush.  Parts that wrote beside
+ * another, or beside the coordinator, are prepared under that ID, whose
+ * commit record, forced to disk before any segment is told (ForceSyncCommit),
+ * is the decision (gp_dtx.c).  A failure here raises, and the abort rolls
+ * back whatever was prepared.  Either way, what a part that wrote reports it
+ * may have seen of others' one-phase commits is waited for before this
+ * transaction ends.
  */
 static void
 gang_commit_first_phase(GpGang *g)
 {
-	PGresult  **status = palloc0_array(PGresult *, g->nconns);
 	bool	   *writes = palloc0_array(bool, g->nconns);
 	int		   *writers = palloc_array(int, g->nconns);
 	int			nwriters = 0;
+	int			lone = -1;
 
-	notices_quiet++;
-	gang_send_all(g, GP_DTX_STATUS_QUERY);
-	gang_wait_all(g, status, false);
+	/*
+	 * A batch a gather asked for ahead of need is read first: its FETCH may
+	 * have written, and the answer says so.
+	 */
 	for (int i = 0; i < g->nconns; i++)
 	{
-		writes[i] = status[i] != NULL && PQntuples(status[i]) == 1 &&
-			strcmp(PQgetvalue(status[i], 0, 0), "t") == 0;
+		if (g->conns[i].busy && g->conns[i].fetching != NULL)
+			conn_park(&g->conns[i]);
+	}
+	for (int i = 0; i < g->nconns; i++)
+	{
+		writes[i] = conn_wrote(&g->conns[i]);
 		if (writes[i])
+		{
 			writers[nwriters++] = g->conns[i].content;
-		if (status[i] != NULL)
-			PQclear(status[i]);
+			lone = i;
+		}
 	}
 
 	/* whatever happens now, no segment is left in the transaction */
 	gang_in_xact = false;
 	gang_xact_depth = 0;
 
+	if (nwriters == 1 && !TransactionIdIsValid(GetTopTransactionIdIfAny()) &&
+		!GpLoopbackHasWrites())
+	{
+		FullTransactionId gxid = GetTopFullTransactionId();
+
+		GpReportDtxCommand("Distributed Commit (one-phase)", writers, 1);
+		notices_quiet++;
+		for (int i = 0; i < g->nconns; i++)
+			conn_send(&g->conns[i],
+					  i == lone
+					  ? psprintf("SET LOCAL " GP_DTX_ONE_PHASE_SETTING " = '" UINT64_FORMAT "'; COMMIT",
+								 U64FromFullTransactionId(gxid))
+					  : "COMMIT");
+		gang_wait_all(g, NULL, true);
+		notices_quiet--;
+		dtx_wait_for_depends(&g->conns[lone]);
+		return;
+	}
+
+	notices_quiet++;
 	if (nwriters > 0)
 	{
 		GpDtxFormGid(GetTopFullTransactionId(), dtx_gid);
@@ -1864,6 +1946,11 @@ gang_commit_first_phase(GpGang *g)
 	{
 		dtx_all_prepared = true;
 		GP_FAULT("dtm_broadcast_prepare");
+		for (int i = 0; i < g->nconns; i++)
+		{
+			if (writes[i])
+				dtx_wait_for_depends(&g->conns[i]);
+		}
 	}
 }
 

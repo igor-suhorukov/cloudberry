@@ -33,6 +33,16 @@
  * a coordinator that went down between the phases, a segment that did not
  * answer the second.
  *
+ * Which segments wrote, each says with the answer to every statement it is
+ * sent: its part's transaction ID, a setting reported to the coordinator
+ * (gp.dtx_xid), empty while it has none.  So the coordinator asks nobody as it
+ * commits.  A part that wrote alone, the coordinator having written nothing,
+ * commits in ONE PHASE, as Cloudberry's does: under the coordinator's
+ * transaction ID, which the coordinator's snapshots see in progress until its
+ * transaction ends.  The segment's commit is the decision, so the
+ * coordinator's commit record needs no flush, and nothing is prepared: one
+ * round trip, one flush.
+ *
  * DISTRIBUTED SNAPSHOTS.  With every statement a transaction dispatches, the
  * segments are sent the coordinator's snapshot of it, as the setting
  * gp.distributed_snapshot: its xmin, its xmax and the transactions it saw in
@@ -50,16 +60,26 @@
  *   progress (dtx_craft).
  *
  * For both a segment needs the coordinator ID of each local transaction a
- * distributed one prepared here: a map, in shared memory, filled as each is
- * prepared, and emptied of those every snapshot now in use says committed.
- * Because a segment commits its part only after the coordinator committed,
- * the order of commits the coordinator's snapshots see is the order in which
- * anything on a segment could have seen them: a transaction that waited here
- * for another's row, or read it, committed after it there too.  That is why
- * the port needs neither Cloudberry's commit-ordering locks nor its
- * distributed "committing" array: Cloudberry's distributed snapshot keeps a
- * transaction in progress until its second phase is done everywhere, and so
- * has to order what depends on it; this one does not.
+ * distributed one prepared here, or committed in one phase: a map, in shared
+ * memory, filled as each is prepared or commits so, and emptied of those
+ * every snapshot now in use says committed.  Because a segment commits a
+ * prepared part only after the coordinator committed, the order of commits
+ * the coordinator's snapshots see is the order in which anything on a
+ * segment could have seen them: a transaction that waited here for another's
+ * row, or read it, committed after it there too.
+ *
+ * COMMIT ORDERING.  A one-phase part is the exception: it commits here before
+ * the coordinator's transaction ends.  For that moment a transaction here may
+ * see it committed -- wait for its row lock, then update the row it wrote --
+ * while a distributed snapshot still sees it in progress, and if that
+ * transaction ended on the coordinator first, a snapshot would see its row
+ * and not the row it replaced, nor the one-phase part's.  So a part that
+ * commits in one phase or prepares reports the one-phase parts that have
+ * committed here and are still in the map (gp.dtx_depends), and the
+ * coordinator ends its transaction only after each of theirs.  That is
+ * Cloudberry's commit ordering (lmgr.c, cdbtm.c), which records the
+ * transactions a backend waited for; this reports a superset, which also
+ * covers an update that reached a newer row version without waiting.
  *
  * A hidden transaction's old row versions must outlive it: vacuum, and the
  * pruning any scan does, would remove what a transaction that committed here
@@ -139,6 +159,11 @@ static char *dtx_snapshot_setting = NULL;
 /* How often the recovery process looks, and how old a prepared part it takes. */
 static int	dtx_recovery_interval = 60;
 static int	dtx_recovery_prepared_period = 300;
+
+/* What a segment's part says of itself, and one-phase commit; see gp_dtx.h. */
+static char *dtx_xid_setting = NULL;
+static char *dtx_depends_setting = NULL;
+static char *dtx_one_phase_setting = NULL;
 
 /* ------------------------------------------------------------------------- */
 /* Gids                                                                      */
@@ -422,6 +447,7 @@ typedef struct GpDtxEntry
 	TransactionId xid;
 	bool		done;			/* committed or rolled back here */
 	bool		committed;
+	bool		one_phase;		/* committed here in one phase, not prepared */
 	int			nchildren;		/* -1: not known */
 	dsa_pointer children;		/* TransactionId[nchildren] */
 } GpDtxEntry;
@@ -507,7 +533,7 @@ map_free_entry(GpDtxEntry *e)
 /* Add a part, or replace the one of that gxid; the lock is held exclusively. */
 static void
 map_put(FullTransactionId gxid, TransactionId xid,
-		const TransactionId *children, int nchildren)
+		const TransactionId *children, int nchildren, bool one_phase)
 {
 	GpDtxEntry *e;
 	int			pos;
@@ -529,6 +555,7 @@ map_put(FullTransactionId gxid, TransactionId xid,
 		e[pos].xid = xid;
 		e[pos].done = false;
 		e[pos].committed = false;
+		e[pos].one_phase = one_phase;
 		e[pos].nchildren = nchildren;
 		e[pos].children = cp;
 		return;
@@ -554,6 +581,7 @@ map_put(FullTransactionId gxid, TransactionId xid,
 	e[pos].xid = xid;
 	e[pos].done = false;
 	e[pos].committed = false;
+	e[pos].one_phase = one_phase;
 	e[pos].nchildren = nchildren;
 	e[pos].children = cp;
 	dtx_shared->n++;
@@ -680,7 +708,8 @@ map_load(void)
 			if (e != NULL && pos < dtx_shared->n &&
 				FullTransactionIdEquals(e[pos].gxid, gxid))
 				continue;
-			map_put(gxid, (TransactionId) strtoul(xidstr, NULL, 10), NULL, -1);
+			map_put(gxid, (TransactionId) strtoul(xidstr, NULL, 10), NULL, -1,
+					false);
 		}
 		map_hold();
 		dtx_shared->loaded = true;
@@ -825,6 +854,8 @@ dtx_lower_xmin(TransactionId xmin)
 }
 
 static ExecutorStart_hook_type prev_executor_start = NULL;
+static ExecutorRun_hook_type prev_executor_run = NULL;
+static ExecutorEnd_hook_type prev_executor_end = NULL;
 
 /*
  * Every statement a segment's dispatched backend runs -- a fragment, a
@@ -849,14 +880,10 @@ dtx_executor_start(QueryDesc *queryDesc, int eflags)
 
 	/*
 	 * Where Cloudberry's segment starts a statement it was dispatched
-	 * (exec_mpp_query): each the coordinator sends the writer, but for the
-	 * one that asks, as the transaction commits, whether it wrote.
+	 * (exec_mpp_query): each the coordinator sends the writer.
 	 */
 	if (gp_fault_active != NULL && *gp_fault_active > 0 &&
-		GpClusterIsDispatched() && !GpShareIsReader() &&
-		queryDesc->sourceText != NULL &&
-		strncmp(queryDesc->sourceText, GP_DTX_STATUS_QUERY,
-				strlen(GP_DTX_STATUS_QUERY)) != 0)
+		GpClusterIsDispatched() && !GpShareIsReader())
 		GP_FAULT("exec_mpp_query_start");
 
 	if (queryDesc->snapshot != NULL &&
@@ -884,6 +911,29 @@ dtx_executor_start(QueryDesc *queryDesc, int eflags)
 		prev_executor_start(queryDesc, eflags);
 	else
 		standard_ExecutorStart(queryDesc, eflags);
+}
+
+/* A writer's transaction ID, reported as each executor run ends (above). */
+static void dtx_report_xid(void);
+
+static void
+dtx_executor_run(QueryDesc *queryDesc, ScanDirection direction, uint64 count)
+{
+	if (prev_executor_run)
+		prev_executor_run(queryDesc, direction, count);
+	else
+		standard_ExecutorRun(queryDesc, direction, count);
+	dtx_report_xid();
+}
+
+static void
+dtx_executor_end(QueryDesc *queryDesc)
+{
+	if (prev_executor_end)
+		prev_executor_end(queryDesc);
+	else
+		standard_ExecutorEnd(queryDesc);
+	dtx_report_xid();
 }
 
 /*
@@ -938,6 +988,158 @@ dtx_snapshot_arrived(void)
 	for (int i = 0; i < nwait; i++)
 		if (TransactionIdIsInProgress(wait[i]))
 			XactLockTableWait(wait[i], NULL, NULL, XLTW_None);
+}
+
+/* ------------------------------------------------------------------------- */
+/* What a segment's part says of itself, and one-phase commit               */
+/* ------------------------------------------------------------------------- */
+
+/* The transaction ID gp.dtx_xid says now. */
+static TransactionId dtx_reported_xid = InvalidTransactionId;
+
+/* The part committing in one phase, from PRE_COMMIT to its end. */
+static FullTransactionId dtx_one_phase_gxid = {0};
+
+/*
+ * A dispatched writer's part of a distributed transaction: what the
+ * coordinator commits.  A reader's transaction is its own and writes
+ * nothing, and the loopback's part, on the coordinator, is the coordinator's
+ * to decide.
+ */
+static bool
+dtx_is_writer_part(void)
+{
+	return GpClusterIsDispatched() && !GpShareIsReader() &&
+		GpClusterContentId() >= 0;
+}
+
+/*
+ * gp.dtx_xid, after each statement a writer runs: this part's transaction ID,
+ * or empty, so that the answer the coordinator reads carries it and the
+ * coordinator knows as it commits which parts wrote, without asking.  After
+ * a statement -- and after each executor run, for a portal the extended
+ * protocol keeps open -- rather than as the ID is given, which no hook sees;
+ * a transaction's first statement, its BEGIN, empties it again.  Set as the
+ * server sets in_hot_standby, outside any transaction's undo: it says what is
+ * so, not what a statement asked for.
+ */
+static void
+dtx_report_xid(void)
+{
+	TransactionId xid;
+	char		buf[16];
+
+	if (!dtx_is_writer_part())
+		return;
+	xid = IsTransactionState() ? GetTopTransactionIdIfAny() : InvalidTransactionId;
+	if (TransactionIdEquals(xid, dtx_reported_xid))
+		return;
+	dtx_reported_xid = xid;
+	if (TransactionIdIsValid(xid))
+		snprintf(buf, sizeof(buf), "%u", xid);
+	else
+		buf[0] = '\0';
+	SetConfigOption(GP_DTX_XID_SETTING, buf, PGC_INTERNAL, PGC_S_OVERRIDE);
+}
+
+/*
+ * gp.dtx_depends, as this part commits in one phase or prepares: the
+ * coordinator transactions whose one-phase parts have committed here and are
+ * still in the map, which a transaction here may have seen committed while a
+ * distributed snapshot saw them in progress.  The coordinator ends this
+ * transaction after each of theirs (COMMIT ORDERING, above).  An entry
+ * leaves the map once every distributed snapshot says it committed, so the
+ * list is short: the parts that committed a moment ago.  "self" is this
+ * part's own coordinator transaction.
+ */
+static void
+dtx_report_depends(FullTransactionId self)
+{
+	StringInfoData buf;
+	GpDtxEntry *e;
+
+	initStringInfo(&buf);
+	dtx_attach();
+	LWLockAcquire(&dtx_shared->lock, LW_SHARED);
+	e = map_entries();
+	for (int i = 0; i < dtx_shared->n; i++)
+	{
+		if (!e[i].one_phase || FullTransactionIdEquals(e[i].gxid, self) ||
+			!(e[i].done ? e[i].committed : TransactionIdDidCommit(e[i].xid)))
+			continue;
+		appendStringInfo(&buf, "%s" UINT64_FORMAT, buf.len > 0 ? "," : "",
+						 U64FromFullTransactionId(e[i].gxid));
+	}
+	LWLockRelease(&dtx_shared->lock);
+	SetConfigOption(GP_DTX_DEPENDS_SETTING, buf.data, PGC_INTERNAL,
+					PGC_S_OVERRIDE);
+	pfree(buf.data);
+}
+
+static bool
+dtx_one_phase_check(char **newval, void **extra, GucSource source)
+{
+	char	   *end;
+
+	if (*newval == NULL || (*newval)[0] == '\0')
+		return true;
+	errno = 0;
+	if (!isdigit((unsigned char) (*newval)[0]) ||
+		strtou64(*newval, &end, 10) < FirstNormalTransactionId ||
+		errno != 0 || *end != '\0')
+	{
+		GUC_check_errdetail("A coordinator transaction ID, in decimal, was expected.");
+		return false;
+	}
+	return true;
+}
+
+/*
+ * A writer's part commits.  In one phase when the coordinator says so, with
+ * gp.dtx_one_phase set to the coordinator transaction it commits under: into
+ * the map first, so that from the moment it is committed a snapshot here
+ * hides it from a distributed snapshot that sees that transaction in
+ * progress, and with what it may have seen committed of other one-phase
+ * parts.  Otherwise the coordinator read that it wrote nothing, and a part
+ * that did write -- which the coordinator would have prepared -- is refused
+ * rather than committed on its own, apart from the parts that were prepared.
+ */
+static void
+dtx_pre_commit(void)
+{
+	TransactionId xid = GetTopTransactionIdIfAny();
+
+	if (dtx_one_phase_setting != NULL && dtx_one_phase_setting[0] != '\0')
+	{
+		FullTransactionId gxid = FullTransactionIdFromU64(strtou64(dtx_one_phase_setting,
+																   NULL, 10));
+
+		if (GpClusterHasSecret() && !GpClusterDispatchTrusted())
+			ereport(ERROR,
+					(errcode(ERRCODE_INSUFFICIENT_PRIVILEGE),
+					 errmsg("only the coordinator commits a distributed transaction's part in one phase")));
+		dtx_one_phase_gxid = gxid;
+		if (TransactionIdIsValid(xid))
+		{
+			TransactionId *children;
+			int			nchildren = xactGetCommittedChildren(&children);
+
+			GP_FAULT("start_performDtxProtocolCommitOnePhase");
+			dtx_attach();
+			LWLockAcquire(&dtx_shared->lock, LW_EXCLUSIVE);
+			map_put(gxid, xid, children, nchildren, true);
+			map_hold();
+			LWLockRelease(&dtx_shared->lock);
+		}
+		dtx_report_depends(gxid);
+		return;
+	}
+
+	if (TransactionIdIsValid(xid))
+		ereport(ERROR,
+				(errcode(ERRCODE_INVALID_TRANSACTION_STATE),
+				 errmsg("a distributed transaction's part that wrote is committed by the coordinator's two phases, or by its one-phase commit"),
+				 errdetail("The coordinator did not know this part wrote.")));
 }
 
 /* ------------------------------------------------------------------------- */
@@ -1097,23 +1299,18 @@ dtx_pre_prepare(void)
 
 	dtx_attach();
 	LWLockAcquire(&dtx_shared->lock, LW_EXCLUSIVE);
-	map_put(dtx_preparing, xid, children, nchildren);
+	map_put(dtx_preparing, xid, children, nchildren, false);
 	map_hold();
 	LWLockRelease(&dtx_shared->lock);
+	dtx_report_depends(dtx_preparing);
 }
 
-/*
- * COMMIT PREPARED or ROLLBACK PREPARED of a distributed transaction: done
- * with here.  A part a restart left, which the map does not have yet, is
- * read in first by the statement that commits it: a snapshot that says it
- * in progress must still hide it.
- */
+/* A part's end here: committed, or rolled back. */
 static void
-dtx_finished(FullTransactionId gxid, bool commit)
+map_mark_done(FullTransactionId gxid, bool commit)
 {
 	GpDtxEntry *e;
 	int			pos;
-	ListCell   *lc;
 
 	dtx_attach();
 	LWLockAcquire(&dtx_shared->lock, LW_EXCLUSIVE);
@@ -1126,6 +1323,20 @@ dtx_finished(FullTransactionId gxid, bool commit)
 		e[pos].committed = commit;
 	}
 	LWLockRelease(&dtx_shared->lock);
+}
+
+/*
+ * COMMIT PREPARED or ROLLBACK PREPARED of a distributed transaction: done
+ * with here.  A part a restart left, which the map does not have yet, is
+ * read in first by the statement that commits it: a snapshot that says it
+ * in progress must still hide it.
+ */
+static void
+dtx_finished(FullTransactionId gxid, bool commit)
+{
+	ListCell   *lc;
+
+	map_mark_done(gxid, commit);
 
 	foreach(lc, prepared_temp)
 	{
@@ -1231,6 +1442,7 @@ dtx_ProcessUtility(PlannedStmt *pstmt, const char *queryString,
 		dtx_finished(gxid, commit);
 	else if (snapshot_set && GpClusterIsDispatched() && !GpShareIsReader())
 		dtx_snapshot_arrived();
+	dtx_report_xid();
 }
 
 /*
@@ -1265,13 +1477,21 @@ dtx_xact_callback(XactEvent event, void *arg)
 {
 	switch (event)
 	{
+		case XACT_EVENT_PRE_COMMIT:
+			if (dtx_is_writer_part() && IsTransactionBlock())
+				dtx_pre_commit();
+			break;
 		case XACT_EVENT_PRE_PREPARE:
 			if (FullTransactionIdIsValid(dtx_preparing))
 				dtx_pre_prepare();
 			break;
-		case XACT_EVENT_PREPARE:
 		case XACT_EVENT_COMMIT:
 		case XACT_EVENT_ABORT:
+			if (FullTransactionIdIsValid(dtx_one_phase_gxid))
+				map_mark_done(dtx_one_phase_gxid, event == XACT_EVENT_COMMIT);
+			dtx_one_phase_gxid = InvalidFullTransactionId;
+			/* FALLTHROUGH */
+		case XACT_EVENT_PREPARE:
 			dtx_preparing = InvalidFullTransactionId;
 			dropped_temp = NIL;
 			break;
@@ -1628,14 +1848,15 @@ gp_dtx_map(PG_FUNCTION_ARGS)
 	e = map_entries();
 	for (int i = 0; i < dtx_shared->n; i++)
 	{
-		Datum		values[5];
-		bool		nulls[5] = {false, false, false, false, false};
+		Datum		values[6];
+		bool		nulls[6] = {false, false, false, false, false, false};
 
 		values[0] = FullTransactionIdGetDatum(e[i].gxid);
 		values[1] = TransactionIdGetDatum(e[i].xid);
 		values[2] = BoolGetDatum(e[i].done);
 		values[3] = BoolGetDatum(e[i].committed);
 		values[4] = Int32GetDatum(e[i].nchildren);
+		values[5] = BoolGetDatum(e[i].one_phase);
 		if (!e[i].done)
 			nulls[3] = true;
 		if (e[i].nchildren < 0)
@@ -1718,8 +1939,49 @@ GpDtxInit(void)
 		return;
 	}
 
+	/*
+	 * Reported, so that the coordinator reads them with each answer; a
+	 * cluster's, so that one node sends its clients nothing more.
+	 */
+	DefineCustomStringVariable(GP_DTX_XID_SETTING,
+							   "Transaction ID of this segment's part of a distributed transaction.",
+							   "Reported to the coordinator with the answer to each "
+							   "statement; empty while the part has written nothing.",
+							   &dtx_xid_setting,
+							   "",
+							   PGC_INTERNAL,
+							   GUC_REPORT | GUC_NO_SHOW_ALL | GUC_NOT_IN_SAMPLE |
+							   GUC_DISALLOW_IN_FILE,
+							   NULL, NULL, NULL);
+
+	DefineCustomStringVariable(GP_DTX_DEPENDS_SETTING,
+							   "Coordinator transactions a segment's part waits for before its transaction ends.",
+							   "Their parts committed here in one phase, and this part "
+							   "may have seen them committed; reported as it commits or "
+							   "prepares.",
+							   &dtx_depends_setting,
+							   "",
+							   PGC_INTERNAL,
+							   GUC_REPORT | GUC_NO_SHOW_ALL | GUC_NOT_IN_SAMPLE |
+							   GUC_DISALLOW_IN_FILE,
+							   NULL, NULL, NULL);
+
+	DefineCustomStringVariable(GP_DTX_ONE_PHASE_SETTING,
+							   "Coordinator transaction a segment's part commits under, in one phase.",
+							   "Set by the coordinator as it commits a part that wrote "
+							   "alone.",
+							   &dtx_one_phase_setting,
+							   "",
+							   PGC_USERSET,
+							   GUC_NO_SHOW_ALL | GUC_NOT_IN_SAMPLE | GUC_DISALLOW_IN_FILE,
+							   dtx_one_phase_check, NULL, NULL);
+
 	prev_executor_start = ExecutorStart_hook;
 	ExecutorStart_hook = dtx_executor_start;
+	prev_executor_run = ExecutorRun_hook;
+	ExecutorRun_hook = dtx_executor_run;
+	prev_executor_end = ExecutorEnd_hook;
+	ExecutorEnd_hook = dtx_executor_end;
 	prev_ProcessUtility = ProcessUtility_hook;
 	ProcessUtility_hook = dtx_ProcessUtility;
 	prev_object_access = object_access_hook;

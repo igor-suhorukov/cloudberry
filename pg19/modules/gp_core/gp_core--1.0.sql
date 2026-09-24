@@ -67,14 +67,15 @@ AS 'MODULE_PATHNAME', 'gp_interconnect_address'
 LANGUAGE C STRICT VOLATILE;
 
 /*
- * A segment's map of the distributed transactions prepared on it: each one's
- * coordinator transaction ID, its local one, whether its second phase has
- * come and what it was, and how many subtransactions it committed (NULL when
- * a restart left it prepared and they are not known).  See gp_dtx.c.
+ * A segment's map of the distributed transactions prepared on it, or
+ * committed there in one phase: each one's coordinator transaction ID, its
+ * local one, whether its second phase has come and what it was, how many
+ * subtransactions it committed (NULL when a restart left it prepared and
+ * they are not known), and whether it committed in one phase.  See gp_dtx.c.
  */
 CREATE FUNCTION gp_internal.dtx_map(
 	OUT gxid xid8, OUT xid xid, OUT done bool, OUT committed bool,
-	OUT subtransactions int)
+	OUT subtransactions int, OUT one_phase bool)
 RETURNS SETOF record
 AS 'MODULE_PATHNAME', 'gp_dtx_map'
 LANGUAGE C STRICT VOLATILE;

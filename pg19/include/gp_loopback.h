@@ -43,6 +43,13 @@ extern const char *GpLoopbackMaintenanceDatabase(void);
 extern bool GpLoopbackIsHere(const char *dbname);
 
 /*
+ * Has this transaction asked for a write in another database?  Its part
+ * there is prepared under this server's transaction ID and decided by its
+ * commit record, so the segments' parts are prepared with it.
+ */
+extern bool GpLoopbackHasWrites(void);
+
+/*
  * Run `sql` in database `dbname` as a part of this transaction: at its
  * pre-commit, in the order asked for, in one transaction there that commits
  * or rolls back with this one.  What a subtransaction asked for is forgotten

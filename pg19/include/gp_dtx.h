@@ -23,9 +23,10 @@
  * A transaction that wrote on the segments is prepared on each of them, and
  * the coordinator's own commit record decides it: its transaction ID is the
  * distributed one, and a prepared part is committed when that ID committed
- * here.  A distributed snapshot says a transaction committed exactly when the
- * coordinator's snapshot does, and a segment makes its local snapshots agree:
- * see gp_dtx.c.
+ * here -- or, when one segment wrote and the coordinator nothing, that part
+ * commits in one phase under that ID.  A distributed snapshot says a
+ * transaction committed exactly when the coordinator's snapshot does, and a
+ * segment makes its local snapshots agree: see gp_dtx.c.
  *
  *-------------------------------------------------------------------------
  */
@@ -47,9 +48,22 @@
 /* The setting a segment's transaction carries its distributed snapshot in. */
 #define GP_DTX_SNAPSHOT_SETTING	"gp.distributed_snapshot"
 
-/* What the coordinator asks each segment as a transaction commits: did it write? */
-#define GP_DTX_STATUS_QUERY \
-	"SELECT pg_catalog.pg_current_xact_id_if_assigned() IS NOT NULL"
+/*
+ * What a segment's part of a transaction says of itself, reported to the
+ * coordinator with the answer to each statement (ParameterStatus): the
+ * transaction ID it has, empty while it has written nothing; and, as it
+ * commits in one phase or prepares, the coordinator transactions whose
+ * one-phase parts it may have seen committed before they ended, which the
+ * coordinator waits for (gp_dtx.c).
+ */
+#define GP_DTX_XID_SETTING		"gp.dtx_xid"
+#define GP_DTX_DEPENDS_SETTING	"gp.dtx_depends"
+
+/*
+ * The setting the coordinator sets as it commits a part that wrote alone in
+ * one phase: the coordinator transaction ID it commits under.
+ */
+#define GP_DTX_ONE_PHASE_SETTING	"gp.dtx_one_phase"
 
 /* The gid a transaction's parts are prepared under, into gid[GP_DTX_GIDLEN]. */
 extern void GpDtxFormGid(FullTransactionId gxid, char *gid);
