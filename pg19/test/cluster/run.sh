@@ -1321,6 +1321,19 @@ mine" ] && ok "a transaction reads its own rows, and a LIMIT leaves the connecti
 		"SELECT a, rank() OVER (PARTITION BY b ORDER BY a DESC) FROM o WHERE a > 990 ORDER BY b, a;" \
 		"Merge Key"
 
+	# A Gather in the coordinator's own slice -- Cloudberry's entry DB --
+	# below a Motion the coordinator sends from: the coordinator runs it as
+	# it runs one above every fragment, and sends what it makes of the rows.
+	orca_same "EXISTS as a LIMIT over a Gather, which the coordinator broadcasts back" \
+		"SELECT count(*), sum(a) FROM o WHERE EXISTS (SELECT 1 FROM po WHERE po.x = 3);" \
+		"Broadcast Motion 1:2"
+	orca_same "and one whose Gather finds nothing" \
+		"SELECT count(*) FROM o WHERE EXISTS (SELECT 1 FROM po WHERE po.x < 0);" \
+		"Broadcast Motion 1:2"
+	orca_same "an aggregate finished on the coordinator, broadcast back to a join" \
+		"SELECT count(*), sum(o.a) FROM o, (SELECT max(y) AS m FROM po) s WHERE o.b < s.m;" \
+		"Broadcast Motion 1:2"
+
 	# A table hashed with Cloudberry's legacy cdbhash (a cdbhash_*_ops key),
 	# joined off another's key: that one's rows are redistributed by the
 	# legacy hash, or they would miss the rows they join.

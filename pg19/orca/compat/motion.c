@@ -79,6 +79,7 @@ typedef struct motion_check_context
 	List	  **order;			/* the enclosing Gather's Motions, senders first */
 	bool		may_write;		/* the fragment a write is dispatched as */
 	int			slice;			/* the fragment's slice, where in one */
+	bool		on_coordinator; /* a fragment the coordinator sends from */
 } motion_check_context;
 
 static bool
@@ -117,9 +118,13 @@ motion_check_walker(Node *node, void *arg)
 
 		/*
 		 * A Gather's rows go to the coordinator, from where it runs; so do a
-		 * dispatched write's counts.
+		 * dispatched write's counts.  The fragment a Motion from the
+		 * coordinator sends is the coordinator's own, which runs a Gather in
+		 * it as it runs one above every fragment -- Cloudberry's entry DB
+		 * slice, a LIMIT or an aggregate over a Gather broadcast back.
 		 */
-		if (gather && ctx->in_fragment)
+		if (gather && ctx->in_fragment &&
+			!(ctx->on_coordinator && type == GP_MOTION_GATHER))
 		{
 			ctx->problem = GP_ORCA_MOTION_NESTED;
 			return true;
@@ -139,7 +144,9 @@ motion_check_walker(Node *node, void *arg)
 		sub.order = gather ? &order : ctx->order;
 		sub.may_write = type == GP_MOTION_DML;
 		sub.slice = api->motion_slice(plan);
-		if (!ctx->in_fragment)
+		sub.on_coordinator = !gather &&
+			api->motion_segment(plan) == GP_MOTION_FROM_COORDINATOR;
+		if (!ctx->in_fragment || gather)
 			sub.top = plan;
 		if (motion_check_walker((Node *) plan->lefttree, &sub))
 		{
@@ -151,8 +158,11 @@ motion_check_walker(Node *node, void *arg)
 			ctx->problem = GP_ORCA_MOTION_PARAM;
 			return true;
 		}
-		*ctx->fragment_produced = bms_add_members(*ctx->fragment_produced,
-												  sub.produced);
+
+		/* a value the coordinator's own fragment sets is the coordinator's */
+		if (!sub.on_coordinator)
+			*ctx->fragment_produced = bms_add_members(*ctx->fragment_produced,
+													  sub.produced);
 		{
 			Bitmapset  *needed = bms_difference(sub.referenced, sub.produced);
 
@@ -349,6 +359,7 @@ gp_orca_check_motions(PlannedStmt *stmt)
 	ctx.order = NULL;
 	ctx.may_write = false;
 	ctx.slice = -1;
+	ctx.on_coordinator = false;
 
 	(void) motion_check_walker((Node *) stmt->planTree, &ctx);
 	if (ctx.problem != GP_ORCA_MOTION_OK)

@@ -2712,9 +2712,12 @@ CTranslatorDXLToPlStmt::TranslateDXLMotion(
 	}
 
 	// The coordinator is where a Gather's rows go, and only there: a Gather
-	// into a slice the segments run would be dispatched from a segment.
-	// And the rows of a Motion between segments go to segments.
-	if (GP_MOTION_GATHER == motion_type && 0 != recvslice->sliceIndex)
+	// into a slice the segments run would be dispatched from a segment.  The
+	// coordinator's own slice below a Motion it sends from -- Cloudberry's
+	// entry DB -- runs here, and a Gather in it as one above the rest.  And
+	// the rows of a Motion between segments go to segments.
+	if (GP_MOTION_GATHER == motion_type && 0 != recvslice->sliceIndex &&
+		GANGTYPE_ENTRYDB_READER != recvslice->gangType)
 	{
 		GP_UNPORTED("a Gather Motion inside a slice the segments run");
 	}
