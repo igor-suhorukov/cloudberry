@@ -98,6 +98,7 @@ typedef enum ProbeEvent
 	EV_DEPARSE_RANGE,
 	EV_UNIQUE_CHECK,
 	EV_ADD_COLUMNS,
+	EV_BLOCK_SEQUENCES,
 	EV_COUNT
 } ProbeEvent;
 
@@ -105,7 +106,7 @@ static const char *const event_name[EV_COUNT] = {
 	"new_oid", "combocid_create", "combocid_miss", "analyze_sample",
 	"explain_label", "mdunlink", "raw_parser", "star_filter",
 	"columnref", "deparse_column", "query_lockmode", "deparse_range",
-	"unique_check", "add_columns",
+	"unique_check", "add_columns", "block_sequences",
 };
 
 static int64 calls[EV_COUNT];
@@ -869,6 +870,37 @@ probe_tuple_fetch_row_version(Relation rel, ItemPointer tid,
 															  snapshot, slot);
 }
 
+/*
+ * O18: the runs of block numbers of a table of the probe's method.  Armed
+ * for one table, they are what it was told; otherwise one run of every
+ * block the table has, which is what BRIN walks for any table.
+ */
+static Oid	arm_seq_rel = InvalidOid;
+static TableAmBlockSequence *arm_seqs = NULL;
+static int	arm_nseqs = 0;
+
+static TableAmBlockSequence *
+probe_relation_get_block_sequences(Relation rel, int *nseqs)
+{
+	TableAmBlockSequence *seqs;
+
+	if (RelationGetRelid(rel) == arm_seq_rel)
+	{
+		seqs = palloc_array(TableAmBlockSequence, Max(arm_nseqs, 1));
+		memcpy(seqs, arm_seqs, sizeof(TableAmBlockSequence) * arm_nseqs);
+		*nseqs = arm_nseqs;
+		record(EV_BLOCK_SEQUENCES, "%s: %d runs",
+			   RelationGetRelationName(rel), arm_nseqs);
+		return seqs;
+	}
+
+	seqs = palloc_object(TableAmBlockSequence);
+	seqs[0].startblknum = 0;
+	seqs[0].nblocks = RelationGetNumberOfBlocks(rel);
+	*nseqs = 1;
+	return seqs;
+}
+
 /* A table of the probe's method keeps its TOAST in a heap table. */
 static Oid
 probe_relation_toast_am(Relation rel)
@@ -901,6 +933,7 @@ probe_am_init(void)
 	probe_am_ext.relation_add_columns = probe_relation_add_columns;
 	probe_am_ext.size_from_am = true;
 	probe_am_ext.old_row_from_plan = true;
+	probe_am_ext.relation_get_block_sequences = probe_relation_get_block_sequences;
 	RegisterTableAmExtension(&probe_am_routine, &probe_am_ext);
 }
 
@@ -938,6 +971,7 @@ PG_FUNCTION_INFO_V1(gp_probe_scan_log);
 PG_FUNCTION_INFO_V1(gp_probe_arm_fetch_fails);
 PG_FUNCTION_INFO_V1(gp_probe_arm_size);
 PG_FUNCTION_INFO_V1(gp_probe_arm_rowfetch_fails);
+PG_FUNCTION_INFO_V1(gp_probe_arm_block_sequences);
 
 Datum
 gp_probe_reset(PG_FUNCTION_ARGS)
@@ -1425,6 +1459,34 @@ Datum
 gp_probe_arm_rowfetch_fails(PG_FUNCTION_ARGS)
 {
 	arm_rowfetch_fails = PG_GETARG_BOOL(0);
+	PG_RETURN_VOID();
+}
+
+/*
+ * O18: the runs of block numbers the probe's table rel has, as start and
+ * length pairs, {start1, length1, start2, length2, ...}.
+ */
+Datum
+gp_probe_arm_block_sequences(PG_FUNCTION_ARGS)
+{
+	ArrayType  *array = PG_GETARG_ARRAYTYPE_P(1);
+	Datum	   *elems;
+	int			nelems;
+
+	deconstruct_array(array, INT8OID, sizeof(int64), true, TYPALIGN_DOUBLE,
+					  &elems, NULL, &nelems);
+	if (nelems % 2 != 0)
+		elog(ERROR, "block sequences come in start and length pairs");
+
+	arm_seq_rel = PG_GETARG_OID(0);
+	arm_nseqs = nelems / 2;
+	arm_seqs = MemoryContextAlloc(TopMemoryContext,
+								  sizeof(TableAmBlockSequence) * Max(arm_nseqs, 1));
+	for (int i = 0; i < arm_nseqs; i++)
+	{
+		arm_seqs[i].startblknum = (BlockNumber) DatumGetInt64(elems[2 * i]);
+		arm_seqs[i].nblocks = (BlockNumber) DatumGetInt64(elems[2 * i + 1]);
+	}
 	PG_RETURN_VOID();
 }
 

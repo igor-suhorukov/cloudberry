@@ -956,6 +956,78 @@ fi
 is "a heap table's UPDATE fetches its rows as before" o20 heap 5
 
 ###############################################################################
+echo "O18 BRIN walks the ranges of the method's runs of block numbers, not the gaps between"
+###############################################################################
+# Ten rows of gp_probe_am, one a page; the middle four removed, so that the
+# rows are in two runs, blocks 0-2 and 7-9, which the probe is told.  Each
+# BRIN range is one page, and the revmap (pageinspect) says which have a
+# summary: the six of the runs, and none between, where PostgreSQL 19 gives
+# every range of the table one, empty or not.
+session o18 <<'SQL'
+CREATE EXTENSION IF NOT EXISTS pageinspect;
+CREATE TABLE o18_t (a int, pad text) USING gp_probe_am WITH (fillfactor = 10, autovacuum_enabled = off);
+INSERT INTO o18_t SELECT i, repeat('x', 1000) FROM generate_series(1, 10) i;
+DELETE FROM o18_t WHERE a BETWEEN 4 AND 7;
+VACUUM o18_t;
+CREATE TABLE o18_h (LIKE o18_t) WITH (fillfactor = 10, autovacuum_enabled = off);
+INSERT INTO o18_h SELECT i, repeat('x', 1000) FROM generate_series(1, 10) i;
+DELETE FROM o18_h WHERE a BETWEEN 4 AND 7;
+VACUUM o18_h;
+SELECT 'pages=' || pg_relation_size('o18_t') / 8192;
+SELECT gp_probe.arm_block_sequences('o18_t', '{0,3,7,3}');
+SELECT gp_probe.reset();
+CREATE INDEX o18_i ON o18_t USING brin (a) WITH (pages_per_range = 1);
+SELECT 'calls_block_sequences=' || gp_probe.calls('block_sequences');
+SELECT 'detail_block_sequences=' || gp_probe.detail('block_sequences');
+SELECT 'serial=' || string_agg(i::text, ',' ORDER BY i)
+  FROM (SELECT row_number() OVER () - 1 AS i, pages FROM brin_revmap_data(get_raw_page('o18_i', 1))) r
+ WHERE pages <> '(0,0)';
+SET enable_seqscan = off;
+SELECT 'found=' || count(*) FROM o18_t WHERE a > 0;
+RESET enable_seqscan;
+SET max_parallel_maintenance_workers = 2; SET min_parallel_table_scan_size = 0;
+CREATE INDEX o18_p ON o18_t USING brin (a) WITH (pages_per_range = 1);
+SELECT 'parallel=' || string_agg(i::text, ',' ORDER BY i)
+  FROM (SELECT row_number() OVER () - 1 AS i, pages FROM brin_revmap_data(get_raw_page('o18_p', 1))) r
+ WHERE pages <> '(0,0)';
+RESET max_parallel_maintenance_workers; RESET min_parallel_table_scan_size;
+CREATE TABLE o18_u (a int, pad text) USING gp_probe_am WITH (fillfactor = 10, autovacuum_enabled = off);
+INSERT INTO o18_u SELECT i, repeat('x', 1000) FROM generate_series(1, 3) i;
+SELECT gp_probe.arm_block_sequences('o18_u', '{0,3}');
+CREATE INDEX o18_s ON o18_u USING brin (a) WITH (pages_per_range = 1, autosummarize = off);
+SELECT 'before=' || count(*) FROM brin_revmap_data(get_raw_page('o18_s', 1)) WHERE pages <> '(0,0)';
+INSERT INTO o18_u SELECT i, repeat('x', 1000) FROM generate_series(4, 10) i;
+DELETE FROM o18_u WHERE a BETWEEN 4 AND 7;
+VACUUM o18_u;
+SELECT gp_probe.arm_block_sequences('o18_u', '{0,3,7,3}');
+SET enable_seqscan = off;
+SELECT 'unsummarized=' || count(*) FROM o18_u WHERE a > 0;
+EXPLAIN (ANALYZE, COSTS OFF, TIMING OFF, SUMMARY OFF, BUFFERS OFF) SELECT * FROM o18_u WHERE a > 0;
+RESET enable_seqscan;
+SELECT 'summarized=' || brin_summarize_new_values('o18_s');
+SELECT 'after=' || string_agg(i::text, ',' ORDER BY i)
+  FROM (SELECT row_number() OVER () - 1 AS i, pages FROM brin_revmap_data(get_raw_page('o18_s', 1))) r
+ WHERE pages <> '(0,0)';
+CREATE INDEX o18_hi ON o18_h USING brin (a) WITH (pages_per_range = 1);
+SELECT 'heap=' || count(*) FROM brin_revmap_data(get_raw_page('o18_hi', 1)) WHERE pages <> '(0,0)';
+SQL
+is "the table has ten pages, four of them empty" o18 pages 10
+fired "a BRIN build asks the method for its runs" o18 block_sequences
+is "a serial build summarizes the ranges of the two runs, and none between" o18 serial "0,1,2,7,8,9"
+is "a scan finds the rows of both runs" o18 found 6
+is "a parallel build summarizes the same ranges" o18 parallel "0,1,2,7,8,9"
+is "an index built while the table has one run has its three ranges" o18 before 3
+is "once rows are in a second run, a scan finds them in its ranges with no summary" o18 unsummarized 6
+if grep -q "lossy=6" "$WORK/o18.out"; then
+	ok "and visits the six ranges of the runs, not the four between with no summary either"
+else
+	notok "the scan should visit six ranges" "$(grep -i "heap blocks" "$WORK/o18.out")"
+fi
+is "brin_summarize_new_values() summarizes the second run's, and nothing between" o18 summarized 3
+is "which leaves the same ranges as a build" o18 after "0,1,2,7,8,9"
+is "a heap table's index is built as before, with a summary for every range" o18 heap 10
+
+###############################################################################
 echo "O23 extension marks: pg_checksums passes over what an extension marked, pg_upgrade carries it"
 ###############################################################################
 # Last, because it stops the server: pg_checksums reads a stopped cluster.

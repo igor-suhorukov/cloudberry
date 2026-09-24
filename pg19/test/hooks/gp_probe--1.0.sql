@@ -85,3 +85,8 @@ CREATE FUNCTION gp_probe.arm_size(bytes bigint) RETURNS void
 -- O20: make the method's fetch of a row by its TID fail.
 CREATE FUNCTION gp_probe.arm_rowfetch_fails(on_off boolean) RETURNS void
   AS 'MODULE_PATHNAME', 'gp_probe_arm_rowfetch_fails' LANGUAGE C STRICT;
+-- O18: the runs of block numbers a table of the method has, as start and
+-- length pairs.
+CREATE FUNCTION gp_probe.arm_block_sequences(rel regclass, seqs bigint[])
+  RETURNS void
+  AS 'MODULE_PATHNAME', 'gp_probe_arm_block_sequences' LANGUAGE C STRICT;
