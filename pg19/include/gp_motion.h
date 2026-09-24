@@ -41,6 +41,8 @@
 #define GP_MOTION_BROADCAST		2	/* each to every segment */
 #define GP_MOTION_RANDOM		3	/* each to the next segment in turn */
 #define GP_MOTION_DML			4	/* a write the segments carry out */
+#define GP_MOTION_EXPLICIT		5	/* each to the segment a column of it names:
+									 * Cloudberry's Explicit Redistribute */
 
 /* A Motion whose sender is the coordinator, where "content" names a segment. */
 #define GP_MOTION_FROM_COORDINATOR	(-2)
@@ -67,8 +69,10 @@ extern Plan *GpMotionMakeGather(Plan *fragment, List *targetlist, List *qual,
 /*
  * A Motion between segments over a plan fragment: GP_MOTION_HASH, whose
  * "hashexprs" read the fragment's output as OUTER_VAR and are hashed with
- * "hashfuncs" as cdbhash hashes a table's key; GP_MOTION_BROADCAST or
- * GP_MOTION_RANDOM, with neither.  "content" is the one segment that sends,
+ * "hashfuncs" as cdbhash hashes a table's key; GP_MOTION_EXPLICIT, whose one
+ * "hashexprs" is the segment each row goes to -- its gp_segment_id -- and
+ * "hashfuncs" one InvalidOid; GP_MOTION_BROADCAST or GP_MOTION_RANDOM, with
+ * neither.  "content" is the one segment that sends,
  * -1 for every one, or GP_MOTION_FROM_COORDINATOR.  Every segment receives.
  */
 extern Plan *GpMotionMakeSend(int type, Plan *fragment, List *targetlist,

@@ -41,6 +41,9 @@
 extern "C" {
 #include "postgres.h"
 
+// GP_SEGMENT_ID_ATTNO: gp_segment_id's number in ORCA's metadata
+#include "gp_core_api.h"
+
 #include "catalog/pg_collation.h"
 #include "nodes/makefuncs.h"
 #include "nodes/nodes.h"
@@ -2092,6 +2095,22 @@ CTranslatorDXLToScalar::TranslateDXLScalarIdentToScalar(
 	{
 		GPOS_RAISE(gpdxl::ExmaDXL, gpdxl::ExmiDXL2PlStmtAttributeNotFound,
 				   dxlop->GetDXLColRef()->Id());
+	}
+
+	// gp_segment_id of the relation a scan reads: gp_core's segment_of() of
+	// its row, which a segment answers for itself and the coordinator for
+	// what it holds -- ORCA's system column is no attribute of the table's
+	if (IsA(result_expr, Var) &&
+		GP_SEGMENT_ID_ATTNO == ((Var *) result_expr)->varattno &&
+		nullptr != colid_var_plstmt_map)
+	{
+		Var *var = (Var *) result_expr;
+		RangeTblEntry *rte =
+			colid_var_plstmt_map->GetDXLToPlStmtContext()->GetRTEByIndex(
+				var->varno);
+
+		GPOS_ASSERT(nullptr != rte && RTE_RELATION == rte->rtekind);
+		result_expr = gpdb::MakeSegmentOfCall(var->varno, rte->relid);
 	}
 	return result_expr;
 }

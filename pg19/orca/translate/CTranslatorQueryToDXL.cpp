@@ -43,6 +43,9 @@
 extern "C" {
 #include "postgres.h"
 
+// GP_SEGMENT_ID_ATTNO: gp_segment_id's number in ORCA's metadata
+#include "gp_core_api.h"
+
 #include "access/sysattr.h"
 #include "catalog/heap.h"
 #include "catalog/pg_class.h"
@@ -1184,16 +1187,15 @@ CTranslatorQueryToDXL::CheckDMLReadsOnlyTarget() const
 //		table of a DML query
 //
 //		The two columns an UPDATE or DELETE plan carries to find the row it
-//		changes: ctid, and in Cloudberry gp_segment_id, the system column
-//		that says which segment has the row.  PostgreSQL 19 has no such
-//		column -- its system columns stop at tableoid -- and on one node
-//		every row is on the one segment there is.  ORCA still wants a
-//		column: its DML operator asserts one, and asks for it from the plan
-//		below.  tableoid stands in, the nearest thing PostgreSQL has to
-//		"where the row is" and a column of every table; ORCA reads it only
-//		to route a row of a randomly distributed table, which no relation
-//		is on one node, and DXL to PlannedStmt finds the row by ctid alone.
-//		M2 decides what a cluster's plan carries.
+//		changes: ctid, and gp_segment_id, Cloudberry's system column that
+//		says which segment has the row -- in ORCA's metadata wherever
+//		gp_core's extension is (CTranslatorRelcacheToDXL::AddSystemColumns),
+//		and an Explicit Redistribute Motion routes a row back to its segment
+//		by it.  Where the extension is not, the relation has no such column,
+//		and tableoid stands in, the nearest thing PostgreSQL has to "where
+//		the row is" and a column of every table: ORCA reads it only to route
+//		a row of a randomly distributed table, which no relation is there,
+//		and DXL to PlannedStmt finds the row by ctid alone.
 //
 //---------------------------------------------------------------------------
 void
@@ -1212,7 +1214,16 @@ CTranslatorQueryToDXL::GetCtidAndSegmentId(ULONG *ctid, ULONG *segment_id)
 									   m_var_to_colid_map);
 	mdid->Release();
 
-	// tableoid, in the segment id's place
+	// gp_segment_id, or tableoid in its place
+	if (InvalidOid != gpdb::SegmentOfFunction())
+	{
+		mdid = GPOS_NEW(m_mp) CMDIdGPDB(IMDId::EmdidGeneral, INT4OID);
+		*segment_id = CTranslatorUtils::GetColId(
+			m_query_level, m_query->resultRelation, GP_SEGMENT_ID_ATTNO, mdid,
+			m_var_to_colid_map);
+		mdid->Release();
+		return;
+	}
 	mdid = GPOS_NEW(m_mp)
 		CMDIdGPDB(IMDId::EmdidGeneral, att_tup_tableoid->atttypid);
 	*segment_id = CTranslatorUtils::GetColId(

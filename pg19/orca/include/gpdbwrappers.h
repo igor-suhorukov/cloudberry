@@ -864,6 +864,15 @@ int DirectDispatchSegment(Oid relid, int nvalues, const Oid *types,
 // and where gp_core is older).
 void SetMotionSegments(Plan *motion, List *contents);
 List *DirectDispatchContents(Oid relid, Node *quals, Index varno);
+
+// gp_segment_id, through gp_core 1.7: gp_core's function that is it, of a
+// row -- InvalidOid where gp_core's extension is not in the database, and
+// ORCA's metadata then has no such column; whether a call is one, and of
+// which range table entry's row, at which query level; and a call of it,
+// of the row of range table entry "varno", relation "relid".
+Oid SegmentOfFunction(void);
+bool IsSegmentOfCall(const FuncExpr *call, Index *varno, Index *levelsup);
+Expr *MakeSegmentOfCall(Index varno, Oid relid);
 int CheckMotions(PlannedStmt *stmt);
 Node *SliceTable(List *slices, List *motions);
 

@@ -42,6 +42,9 @@
 extern "C" {
 #include "postgres.h"
 
+// GP_SEGMENT_ID_ATTNO: gp_segment_id's number in ORCA's metadata
+#include "gp_core_api.h"
+
 #include "nodes/parsenodes.h"
 #include "nodes/plannodes.h"
 #include "nodes/primnodes.h"
@@ -428,6 +431,18 @@ CTranslatorScalarToDXL::TranslateScalarToDXL(
 			{
 				GP_UNPORTED(
 					"a call of gp_orca's function for an identity column's next value");
+			}
+
+			// gp_segment_id: the parser's call of gp_core's segment_of() of
+			// a relation's row, which is ORCA's system column of that name
+			Index varno = 0;
+			Index levelsup = 0;
+			if (gpdb::IsSegmentOfCall((FuncExpr *) expr, &varno, &levelsup))
+			{
+				Var *var = gpdb::MakeVar(varno, GP_SEGMENT_ID_ATTNO, INT4OID,
+										 -1, levelsup);
+				return CTranslatorScalarToDXL::TranslateVarToDXL(
+					(Expr *) var, var_colid_mapping);
 			}
 			return CTranslatorScalarToDXL::TranslateFuncExprToDXL(
 				expr, var_colid_mapping);

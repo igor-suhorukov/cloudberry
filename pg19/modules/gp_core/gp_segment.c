@@ -92,7 +92,9 @@
 #include "catalog/objectaccess.h"
 #include "catalog/pg_attribute.h"
 #include "catalog/pg_class.h"
+#include "catalog/namespace.h"
 #include "catalog/pg_namespace.h"
+#include "catalog/pg_proc.h"
 #include "catalog/pg_type.h"
 #include "executor/tuptable.h"
 #include "funcapi.h"
@@ -157,12 +159,22 @@ invalidate_func_oids(Datum arg, SysCacheIdentifier cacheid, uint32 hashvalue)
 	func_oids_valid = false;
 }
 
+/*
+ * By the catalog, not by LookupFuncName(): that checks the caller's USAGE on
+ * the schema, and gp_core asks for these on behalf of whoever is planning --
+ * ORCA's metadata asks for segment_of() for every relation it reads.
+ */
 static Oid
 lookup_func(const char *schema, const char *name, Oid argtype)
 {
-	return LookupFuncName(list_make2(makeString(unconstify(char *, schema)),
-									 makeString(unconstify(char *, name))),
-						  1, &argtype, true);
+	Oid			nsp = get_namespace_oid(schema, true);
+
+	if (!OidIsValid(nsp))
+		return InvalidOid;
+	return GetSysCacheOid3(PROCNAMEARGSNSP, Anum_pg_proc_oid,
+						   CStringGetDatum(name),
+						   PointerGetDatum(buildoidvector(&argtype, 1)),
+						   ObjectIdGetDatum(nsp));
 }
 
 static void
@@ -185,6 +197,13 @@ lookup_func_oids(void)
 		lock_writer_oid = lookup_func("gp_internal", "lock_writer", rowtype);
 	}
 	func_oids_valid = true;
+}
+
+Oid
+GpSegmentOfFunction(void)
+{
+	lookup_func_oids();
+	return segment_of_oid;
 }
 
 /*

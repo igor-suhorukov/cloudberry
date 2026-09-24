@@ -35,6 +35,9 @@
  */
 extern bool GpSegmentIsSegmentOf(Node *node, Index varno);
 
+/* gp_internal.segment_of(record), or InvalidOid where it is not installed. */
+extern Oid	GpSegmentOfFunction(void);
+
 /* The parser's and ruleutils' hooks, on every node; see gp_segment.c. */
 extern void GpSegmentInit(void);
 

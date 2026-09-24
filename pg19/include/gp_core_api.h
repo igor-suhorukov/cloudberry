@@ -154,7 +154,23 @@ typedef struct GpCoreApi
 	struct List *(*motion_segments) (struct Plan *plan);
 	struct List *(*direct_dispatch_contents) (Oid relid, struct Node *quals,
 											  Index varno);
+
+	/*
+	 * Since 1.7: gp_segment_id, which ORCA's metadata has as the system
+	 * column GP_SEGMENT_ID_ATTNO, and a plan as a call of this function, of
+	 * the row of the relation it is read from (gp_segment.c); InvalidOid
+	 * where gp_core's extension is not in the database.
+	 */
+	Oid			(*segment_of_function) (void);
 } GpCoreApi;
+
+/*
+ * gp_segment_id's attribute number in ORCA's metadata: Cloudberry's
+ * GpSegmentIdAttributeNumber, below PostgreSQL 19's system attributes.  It
+ * never reaches a plan -- ORCA's translator makes it a call of
+ * segment_of_function() -- nor a catalog.
+ */
+#define GP_SEGMENT_ID_ATTNO		(-7)
 
 /*
  * The values get_role() returns.  They are the port's spelling of Cloudberry's

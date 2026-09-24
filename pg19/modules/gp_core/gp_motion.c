@@ -401,7 +401,7 @@ GpMotionMakeSend(int type, Plan *fragment, List *targetlist, List *qual,
 	CustomScan *cscan;
 
 	Assert(type == GP_MOTION_HASH || type == GP_MOTION_BROADCAST ||
-		   type == GP_MOTION_RANDOM);
+		   type == GP_MOTION_RANDOM || type == GP_MOTION_EXPLICIT);
 	Assert(list_length(hashexprs) == list_length(hashfuncs));
 
 	cscan = motion_make(type, fragment, targetlist, qual, content, slice);
@@ -973,7 +973,8 @@ motion_begin_sending(MotionState *state, EState *estate, int eflags,
 		state->hashexprs[i] = ExecInitExpr((Expr *) lfirst(lc),
 										   &state->css.ss.ps);
 		state->hash.attrs[i] = i + 1;
-		GpHashSetFunction(&state->hash, i, lfirst_oid(lf));
+		if (OidIsValid(lfirst_oid(lf)))
+			GpHashSetFunction(&state->hash, i, lfirst_oid(lf));
 		i++;
 	}
 
@@ -997,6 +998,23 @@ motion_begin_sending(MotionState *state, EState *estate, int eflags,
 /* One row, as it travels: a count, then each value; see append_row_raw(). */
 static void append_row_raw(StringInfo buf, int natts, const char **values,
 						   const int *lengths);
+
+/*
+ * An Explicit Redistribute's segment for a row: the gp_segment_id it
+ * carries, which is the segment it was read on, and is to be written on.
+ */
+static int
+explicit_target(Datum value, bool isnull, int nsegs)
+{
+	int			target = isnull ? -1 : DatumGetInt32(value);
+
+	if (target < 0 || target >= nsegs)
+		ereport(ERROR,
+				(errcode(ERRCODE_GP_INTERCONNECTION_ERROR),
+				 errmsg("an Explicit Redistribute Motion's row names segment %d, which the cluster does not have",
+						target)));
+	return target;
+}
 
 static void
 motion_send_all(MotionState *state)
@@ -1064,6 +1082,13 @@ motion_send_all(MotionState *state)
 				keyvalues[i] = ExecEvalExpr(state->hashexprs[i], econtext,
 											&keynulls[i]);
 			target = GpHashSegment(&state->hash, keyvalues, keynulls);
+		}
+		else if (state->type == GP_MOTION_EXPLICIT)
+		{
+			econtext->ecxt_outertuple = slot;
+			keyvalues[0] = ExecEvalExpr(state->hashexprs[0], econtext,
+										&keynulls[0]);
+			target = explicit_target(keyvalues[0], keynulls[0], nsegs);
 		}
 		else if (state->type == GP_MOTION_RANDOM)
 			target = next++ % nsegs;
@@ -1258,7 +1283,7 @@ motion_begin(CustomScanState *node, EState *estate, int eflags)
 	 */
 	if (GpClusterBackendRole() == GP_ROLE_EXECUTE &&
 		(state->type == GP_MOTION_HASH || state->type == GP_MOTION_BROADCAST ||
-		 state->type == GP_MOTION_RANDOM) &&
+		 state->type == GP_MOTION_RANDOM || state->type == GP_MOTION_EXPLICIT) &&
 		!(eflags & EXEC_FLAG_EXPLAIN_ONLY))
 	{
 		TupleDesc	tupdesc = node->ss.ss_ScanTupleSlot->tts_tupleDescriptor;
@@ -1706,7 +1731,8 @@ motion_relay(MotionState *gather, CustomScan *motion)
 			keyexprs[i] = ExecInitExpr((Expr *) lfirst(lc), NULL);
 			pull_varattnos((Node *) lfirst(lc), OUTER_VAR, &keycols);
 			hash.attrs[i] = i + 1;
-			GpHashSetFunction(&hash, i, lfirst_oid(lf));
+			if (OidIsValid(lfirst_oid(lf)))
+				GpHashSetFunction(&hash, i, lfirst_oid(lf));
 			i++;
 		}
 	}
@@ -1777,7 +1803,10 @@ motion_relay(MotionState *gather, CustomScan *motion)
 			MemoryContextSwitchTo(oldcxt);
 
 			target = type == GP_MOTION_HASH ?
-				GpHashSegment(&hash, keyvalues, keynulls) : next++ % nsegs;
+				GpHashSegment(&hash, keyvalues, keynulls) :
+				type == GP_MOTION_EXPLICIT ?
+				explicit_target(keyvalues[0], keynulls[0], nsegs) :
+				next++ % nsegs;
 			if (type == GP_MOTION_BROADCAST)
 			{
 				for (i = 0; i < nsegs; i++)
@@ -1811,7 +1840,7 @@ motion_relay(MotionState *gather, CustomScan *motion)
 			resetStringInfo(&row);
 			append_row_raw(&row, natts, values, lengths);
 
-			if (type == GP_MOTION_HASH)
+			if (type == GP_MOTION_HASH || type == GP_MOTION_EXPLICIT)
 			{
 				/* only the columns the keys read are made Datums again */
 				oldcxt = MemoryContextSwitchTo(econtext->ecxt_per_tuple_memory);
@@ -1834,7 +1863,9 @@ motion_relay(MotionState *gather, CustomScan *motion)
 				for (i = 0; i < nkeys; i++)
 					keyvalues[i] = ExecEvalExpr(keyexprs[i], econtext,
 												&keynulls[i]);
-				target = GpHashSegment(&hash, keyvalues, keynulls);
+				target = type == GP_MOTION_EXPLICIT
+					? explicit_target(keyvalues[0], keynulls[0], nsegs)
+					: GpHashSegment(&hash, keyvalues, keynulls);
 				MemoryContextSwitchTo(oldcxt);
 				ResetExprContext(econtext);
 			}
@@ -2504,6 +2535,8 @@ motion_type_name(int type)
 			return "Broadcast";
 		case GP_MOTION_RANDOM:
 			return "Redistribute";	/* Cloudberry prints a random one so too */
+		case GP_MOTION_EXPLICIT:
+			return "Explicit Redistribute";
 		case GP_MOTION_DML:
 			return "Dispatch";
 		default:

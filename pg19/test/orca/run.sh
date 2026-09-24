@@ -1817,16 +1817,17 @@ is "so is a replicated one, and a random one" \
       FROM unnest(ARRAY['dist_repl', 'dist_rand']) t;" \
    'DistributionPolicy="MasterOnly" DistributionPolicy="MasterOnly"'
 
-# --- no gp_segment_id ---------------------------------------------------------
+# --- gp_segment_id ------------------------------------------------------------
 #
 # Cloudberry's system attributes run to -8, and gp_segment_id is -7; PostgreSQL
-# 19's stop at tableoid, -6.  AddSystemColumns loops down to
-# FirstLowInvalidHeapAttributeNumber, so it is right as written; the key sets
-# were not.
-is "the system columns stop at tableoid" \
+# 19's stop at tableoid, -6.  gp_segment_id is gp_core's segment_of() of the
+# row (O10), and ORCA's metadata has it as -7 wherever gp_core's extension is,
+# which its own code finds by name; the plan's translator makes the call of
+# it again, so no plan has attribute -7.
+is "the system columns are PostgreSQL's six and gp_segment_id" \
    "SELECT string_agg(m[1], ',' ORDER BY m[1]::int DESC)
       FROM regexp_matches(gp_orca.md_dxl('relation', 'md_plain'::regclass),
-                          'Attno=\"(-[0-9]+)\"', 'g') m;" "-1,-2,-3,-4,-5,-6"
+                          'Attno=\"(-[0-9]+)\"', 'g') m;" "-1,-2,-3,-4,-5,-6,-7"
 
 # The default key is {ctid}: Cloudberry's is {gp_segment_id, ctid}, because a
 # ctid is unique only within one segment's copy of a table.  On one node every
@@ -2043,6 +2044,11 @@ declined() {
 }
 
 # --- the operators ------------------------------------------------------------
+
+# gp_segment_id, ORCA's system column, planned by ORCA: -1 on one node, as on
+# Cloudberry's single node.
+same "gp_segment_id: planned by ORCA, -1 on one node" \
+     "SELECT gp_segment_id, count(*) FROM t0 GROUP BY 1;"
 
 same "a scan with a filter" \
      "SELECT * FROM t0 WHERE a < 3 ORDER BY a"

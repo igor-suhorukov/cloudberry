@@ -1105,11 +1105,26 @@ mine" ] && ok "a transaction reads its own rows, and a LIMIT leaves the connecti
 		"SELECT a FROM o WHERE a IN (SELECT b FROM o WHERE a < 20) ORDER BY a;" \
 		"(slice2; segments: 2)"
 
-	# ORCA takes no whole row, so a query naming gp_segment_id is PostgreSQL's.
-	want=$(q 0 "SET gp.optimizer = off; SELECT gp_segment_id, count(*) FROM o GROUP BY 1 ORDER BY 1;")
-	got=$(q 0 "SELECT gp_segment_id, count(*) FROM o GROUP BY 1 ORDER BY 1;")
-	[ "$got" = "$want" ] && [ -n "$got" ] && ok "gp_segment_id under ORCA: planned by PostgreSQL, the same rows" \
-		|| notok "gp_segment_id under ORCA" "$got / $want"
+	# gp_segment_id is ORCA's system column, which its plan computes where
+	# the row is read: a query naming it is ORCA's, a random table's
+	# included, in a join too, where PostgreSQL's gather cannot give it; a
+	# condition on it is direct dispatch; and a random table's UPDATE and
+	# DELETE are ORCA's, which route by it.
+	orca_same "gp_segment_id under ORCA: the segment that holds each row" \
+		"SELECT gp_segment_id, count(*) FROM o GROUP BY 1 ORDER BY 1;"
+	q 0 "CREATE TABLE orr (a int, b int) DISTRIBUTED RANDOMLY; INSERT INTO orr SELECT i, i FROM generate_series(1, 100) i; ANALYZE orr;" >/dev/null
+	orca_same "a random table's gp_segment_id, and a condition on it asked of that segment alone" \
+		"SELECT count(*) FROM orr WHERE gp_segment_id = 1;" "Gather Motion 1:1  (slice1; segments: 1)"
+	plan=$(q 0 "EXPLAIN (COSTS OFF) SELECT count(*) FROM orr r JOIN orr s USING (a) WHERE r.gp_segment_id = s.gp_segment_id;")
+	got=$(q 0 "SELECT count(*) FROM orr r JOIN orr s USING (a) WHERE r.gp_segment_id = s.gp_segment_id;")
+	out=$(printf '%s\n' "EXPLAIN (COSTS OFF) UPDATE orr SET b = b + 1 WHERE a <= 10;" \
+		"UPDATE orr SET b = b + 1 WHERE a <= 10;" "DELETE FROM orr WHERE a > 90;" \
+		"SELECT count(*), sum(b) FROM orr;" | qf 0 | tr '\n' ' ')
+	case "$plan|$got|$out" in
+		*"Optimizer: GPORCA"*"|100|"*"Update on orr"*"Optimizer: GPORCA"*"90|4105 ")
+			ok "a random table's gp_segment_id above a join, and its UPDATE and DELETE, are ORCA's" ;;
+		*) notok "a random table's gp_segment_id and writes under ORCA" "$plan / $got / $out" ;;
+	esac
 
 	# The slice table, in PlannedStmt.extension_state, as Cloudberry's
 	# EXPLAIN (SLICETABLE) would print it.

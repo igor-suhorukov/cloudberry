@@ -42,6 +42,9 @@
 extern "C" {
 #include "postgres.h"
 
+// GP_SEGMENT_ID_ATTNO: gp_segment_id's number in ORCA's metadata
+#include "gp_core_api.h"
+
 #include "access/heapam.h"
 #include "catalog/heap.h"
 #include "catalog/namespace.h"
@@ -982,6 +985,30 @@ CTranslatorRelcacheToDXL::AddSystemColumns(CMemoryPool *mp,
 			att_tup->attlen);
 
 		mdcol_array->Append(md_col);
+	}
+
+	// gp_segment_id, Cloudberry's system column: the segment that holds the
+	// row, which the port's parser makes a call of gp_core's segment_of()
+	// of the row (O10), and ORCA's own code finds by this name -- a random
+	// table's distribution is by it, direct dispatch reads it, and the
+	// default key has it.  Attribute GP_SEGMENT_ID_ATTNO, below PostgreSQL
+	// 19's system attributes, which no plan is given: the plan's translator
+	// makes the call of it again.  Only where gp_core's extension is.
+	if (InvalidOid != gpdb::SegmentOfFunction())
+	{
+		const CWStringConst *sys_colname = GPOS_NEW(mp)
+			CWStringConst(CDXLUtils::CreateDynamicStringFromCharArray(
+							  mp, "gp_segment_id")
+							  ->GetBuffer());
+		CMDName *md_colname = GPOS_NEW(mp) CMDName(mp, sys_colname);
+
+		mdcol_array->Append(GPOS_NEW(mp) CMDColumn(
+			md_colname, GP_SEGMENT_ID_ATTNO,
+			GPOS_NEW(mp) CMDIdGPDB(IMDId::EmdidGeneral, INT4OID),
+			default_type_modifier,
+			false,	// is_nullable
+			false,	// is_dropped
+			sizeof(int32)));
 	}
 }
 
@@ -2218,9 +2245,15 @@ CTranslatorRelcacheToDXL::GenerateStatsForSystemCols(
 	{
 		switch (attno)
 		{
-			// No gp_segment_id: it is Cloudberry's system attribute -7, and
-			// PostgreSQL 19's system attributes stop at tableoid, -6.
-			// AddSystemColumns gives no relation one, so nothing asks.
+			// gp_segment_id: as many values as the table has segments,
+			// as Cloudberry says of its system column
+			case GP_SEGMENT_ID_ATTNO:
+			{
+				is_col_stats_missing = false;
+				freq_remaining = CDouble(1.0);
+				distinct_remaining = CDouble(gpdb::GetGPSegmentCount());
+				break;
+			}
 			case TableOidAttributeNumber:  // tableoid
 			{
 				is_col_stats_missing = false;
@@ -2865,20 +2898,16 @@ CTranslatorRelcacheToDXL::RetrieveRelKeysets(
 	// as same data is present across segments thus seg_id,
 	// will not help in defining a unique tuple.
 	//
-	// The port's default key is {ctid}, with tableoid before it for a
-	// partitioned table.  gp_segment_id is in Cloudberry's only because a
-	// ctid is unique within one segment's copy of a table, and PostgreSQL 19
-	// has no gp_segment_id to name: it is Cloudberry's system attribute -7.
-	// On one node every row is in one place and ctid is enough.  A
-	// distributed table would need the segment again, and whatever replaces
-	// gp_segment_id -- the column-reference fallback O10, or a function --
-	// goes here; until it does, a distributed table has no default key.
-	// That is a fact ORCA does not know rather than one it is told wrongly:
-	// Cloudberry gives none to a table without system columns either, and
-	// ORCA plans without it what it would otherwise have deduplicated by it.
+	// Cloudberry's default key, {gp_segment_id, ctid}, with tableoid before
+	// them for a partitioned table: a ctid is unique within one segment's
+	// copy of a table.  gp_segment_id is gp_core's segment_of() of the row
+	// (AddSystemColumns); where gp_core's extension is not in the database
+	// ORCA's metadata has no such column, and a table on the coordinator is
+	// still keyed by its ctid alone, which on one node is every table.
 	if (should_add_default_keys &&
 		IMDRelation::EreldistrReplicated != rel_distr_policy &&
-		IMDRelation::EreldistrMasterOnly == rel_distr_policy)
+		(IMDRelation::EreldistrMasterOnly == rel_distr_policy ||
+		 InvalidOid != gpdb::SegmentOfFunction()))
 	{
 
 		ULongPtrArray *key_set = GPOS_NEW(mp) ULongPtrArray(mp);
@@ -2888,6 +2917,12 @@ CTranslatorRelcacheToDXL::RetrieveRelKeysets(
 			ULONG table_oid_pos =
 				GetAttributePosition(TableOidAttributeNumber, attno_mapping);
 			key_set->Append(GPOS_NEW(mp) ULONG(table_oid_pos));
+		}
+		if (IMDRelation::EreldistrMasterOnly != rel_distr_policy)
+		{
+			ULONG seg_id_pos =
+				GetAttributePosition(GP_SEGMENT_ID_ATTNO, attno_mapping);
+			key_set->Append(GPOS_NEW(mp) ULONG(seg_id_pos));
 		}
 		ULONG ctid_pos =
 			GetAttributePosition(SelfItemPointerAttributeNumber, attno_mapping);

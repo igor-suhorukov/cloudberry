@@ -2921,6 +2921,63 @@ gpdb::DirectDispatchContents(Oid relid, Node *quals, Index varno)
 	return NIL;
 }
 
+Oid
+gpdb::SegmentOfFunction(void)
+{
+	GP_WRAP_START;
+	{
+		const GpCoreApi *api = motion_api();
+
+		if (api == nullptr || api->version_minor < 7)
+			return InvalidOid;
+		/* catalog tables: pg_proc, pg_namespace */
+		return api->segment_of_function();
+	}
+	GP_WRAP_END;
+	return InvalidOid;
+}
+
+bool
+gpdb::IsSegmentOfCall(const FuncExpr *call, Index *varno, Index *levelsup)
+{
+	GP_WRAP_START;
+	{
+		Oid			funcid = SegmentOfFunction();
+		Node	   *arg;
+
+		if (!OidIsValid(funcid) || call->funcid != funcid ||
+			list_length(call->args) != 1)
+			return false;
+		arg = (Node *) linitial(call->args);
+		while (IsA(arg, ConvertRowtypeExpr))
+			arg = (Node *) ((ConvertRowtypeExpr *) arg)->arg;
+		if (!IsA(arg, Var) || ((Var *) arg)->varattno != InvalidAttrNumber)
+			return false;
+		*varno = ((Var *) arg)->varno;
+		*levelsup = ((Var *) arg)->varlevelsup;
+		return true;
+	}
+	GP_WRAP_END;
+	return false;
+}
+
+Expr *
+gpdb::MakeSegmentOfCall(Index varno, Oid relid)
+{
+	GP_WRAP_START;
+	{
+		/* catalog tables: pg_class, pg_proc */
+		Var		   *row = makeVar(varno, InvalidAttrNumber, get_rel_type_id(relid),
+								  -1, InvalidOid, 0);
+
+		return (Expr *) makeFuncExpr(SegmentOfFunction(), INT4OID,
+									 list_make1(row), InvalidOid, InvalidOid,
+									 COERCE_EXPLICIT_CALL);
+	}
+	GP_WRAP_END;
+	return nullptr;
+}
+
 Node *
 gpdb::SliceTable(List *slices, List *motions)
 {

@@ -2686,9 +2686,9 @@ CTranslatorDXLToPlStmt::TranslateDXLMotion(
 
 	// gp_core carries out a Motion (gp_motion.c): a Gather by dispatching its
 	// fragment as a plan of its own, the Motions between segments by
-	// relaying their rows before the Gather above them runs.  Not an
-	// Explicit Redistribute, which routes each row by a gp_segment_id the
-	// port does not have yet, and which only DML plans.
+	// streaming their rows to the processes that run the receiving slice.
+	// An Explicit Redistribute routes each row by the gp_segment_id it
+	// carries, back to the segment it was read on, which only DML plans.
 	int motion_type = GP_MOTION_GATHER;
 	switch (motion_dxlop->GetDXLOperator())
 	{
@@ -2704,8 +2704,11 @@ CTranslatorDXLToPlStmt::TranslateDXLMotion(
 		case EdxlopPhysicalMotionRandom:
 			motion_type = GP_MOTION_RANDOM;
 			break;
+		case EdxlopPhysicalMotionRoutedDistribute:
+			motion_type = GP_MOTION_EXPLICIT;
+			break;
 		default:
-			GP_UNPORTED("Explicit Redistribute Motion");
+			GP_UNPORTED("a Motion of an unknown kind");
 	}
 
 	// The coordinator is where a Gather's rows go, and only there: a Gather
@@ -2864,6 +2867,25 @@ CTranslatorDXLToPlStmt::TranslateDXLMotion(
 						typeoid));
 			}
 		}
+	}
+
+	// what an Explicit Redistribute routes by: the row's gp_segment_id, a
+	// column of the child's output, as Cloudberry's segidColIdx
+	if (GP_MOTION_EXPLICIT == motion_type)
+	{
+		ULONG segid_col = CDXLPhysicalRoutedDistributeMotion::Cast(motion_dxlop)
+							  ->SegmentIdCol();
+		const TargetEntry *te_segid = child_context.GetTargetEntry(segid_col);
+
+		if (nullptr == te_segid)
+		{
+			GPOS_RAISE(gpdxl::ExmaDXL, gpdxl::ExmiDXL2PlStmtAttributeNotFound,
+					   segid_col);
+		}
+		hash_expr_list = gpdb::LAppend(
+			NIL, gpdb::MakeVar(OUTER_VAR, te_segid->resno,
+							   gpdb::ExprType((Node *) te_segid->expr), -1, 0));
+		hash_funcs = gpdb::LAppendOid(NIL, InvalidOid);
 	}
 
 	child_contexts->Release();
