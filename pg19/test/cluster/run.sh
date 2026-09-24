@@ -778,10 +778,16 @@ mine" ] && ok "a transaction reads its own rows, and a LIMIT leaves the connecti
 	[ "$out" = "$n2|0" ] && ok "DELETE ... WHERE gp_segment_id = 0 empties segment 0; UPDATE sets it where each row is" \
 		|| notok "DELETE and UPDATE with gp_segment_id" "$out (segment 1 held $n2)"
 	out=$(q 1 "SELECT DISTINCT gp_segment_id FROM gre;")
-	q 0 "CREATE TABLE gown (gp_segment_id int, a int) DISTRIBUTED BY (a); INSERT INTO gown VALUES (42, 1);" >/dev/null
-	out2=$(q 0 "SELECT gp_segment_id FROM gown;")
-	[ "$out|$out2" = "0|42" ] && ok "a segment's utility session answers its own id; a column of that name is the column" \
-		|| notok "gp_segment_id on a segment, and a real column" "$out / $out2"
+	out2=$(printf '%s\n' "CREATE TABLE gown (gp_segment_id int, a int) DISTRIBUTED BY (a);" \
+		"CREATE TABLE gown2 (a int) DISTRIBUTED BY (a);" \
+		"ALTER TABLE gown2 ADD COLUMN gp_segment_id int;" \
+		"ALTER TABLE gown2 RENAME COLUMN a TO gp_segment_id;" \
+		"CREATE VIEW gownv AS SELECT 7 AS gp_segment_id;" \
+		"SELECT gp_segment_id FROM gownv;" | qf 0 | grep -c 'column name "gp_segment_id" conflicts with a system column name')
+	out3=$(q 0 "SELECT gp_segment_id FROM gownv;")
+	[ "$out|$out2|$out3" = "0|3|7" ] \
+		&& ok "a segment's utility session answers its own id; a table's column may not be called so, as Cloudberry refuses a system column's name, and a view's may" \
+		|| notok "gp_segment_id on a segment, and a column of that name" "$out / $out2 / $out3"
 
 	# A partial table: its rows on the first so many segments, as Cloudberry's
 	# gp_debug_numsegments makes one (gp_sql's distribution.c), and read,

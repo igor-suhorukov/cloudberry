@@ -72,14 +72,26 @@
  * Cloudberry -- and a system column PostgreSQL gave it is refused after
  * analysis, as the column that does not exist that it is in Cloudberry.
  *
+ * And no column may be called gp_segment_id, of a relation that has system
+ * columns -- a table, a partitioned or foreign table, a materialized view --
+ * as none may be called ctid: CREATE TABLE, ALTER TABLE ... ADD COLUMN and
+ * RENAME are refused in PostgreSQL's words for a system column's name
+ * (CheckAttributeNamesTypes(), heap.c), which are Cloudberry's for this one.
+ * A view and a composite type may have one, as they may have a ctid.
+ *
  *-------------------------------------------------------------------------
  */
 #include "postgres.h"
 
+#include "access/genam.h"
 #include "access/htup_details.h"
 #include "access/sysattr.h"
 #include "access/table.h"
 #include "catalog/heap.h"
+#include "catalog/indexing.h"
+#include "catalog/objectaccess.h"
+#include "catalog/pg_attribute.h"
+#include "catalog/pg_class.h"
 #include "catalog/pg_namespace.h"
 #include "catalog/pg_type.h"
 #include "executor/tuptable.h"
@@ -93,10 +105,12 @@
 #include "parser/parse_relation.h"
 #include "parser/parsetree.h"
 #include "utils/builtins.h"
+#include "utils/fmgroids.h"
 #include "utils/inval.h"
 #include "utils/lsyscache.h"
 #include "utils/rel.h"
 #include "utils/ruleutils.h"
+#include "utils/snapmgr.h"
 #include "utils/syscache.h"
 #include "utils/tuplestore.h"
 #include "utils/typcache.h"
@@ -117,6 +131,7 @@
 static columnref_fallback_hook_type prev_columnref_fallback_hook = NULL;
 static post_parse_analyze_hook_type prev_post_parse_analyze_hook = NULL;
 static deparse_function_as_column_hook_type prev_deparse_function_as_column_hook = NULL;
+static object_access_hook_type prev_object_access_hook = NULL;
 
 /* ------------------------------------------------------------------------- */
 /* The functions' OIDs                                                       */
@@ -782,6 +797,82 @@ gp_dist_random_segments(PG_FUNCTION_ARGS)
 }
 
 /* ------------------------------------------------------------------------- */
+/* No column of that name                                                    */
+/* ------------------------------------------------------------------------- */
+
+/*
+ * Refuse a column called gp_segment_id of this relation, as a system
+ * column's name is refused: read with SnapshotSelf, since the statement that
+ * made or renamed it has not made its rows visible yet -- sepgsql reads a new
+ * relation's columns so (relation.c).  A view, a composite type and an index
+ * have no system columns, and may.
+ */
+static void
+check_segment_id_column(Oid relid)
+{
+	Relation	rel;
+	ScanKeyData key[2];
+	SysScanDesc scan;
+	HeapTuple	tuple;
+	bool		found = false;
+	char		relkind = '\0';
+
+	ScanKeyInit(&key[0], Anum_pg_attribute_attrelid, BTEqualStrategyNumber,
+				F_OIDEQ, ObjectIdGetDatum(relid));
+	ScanKeyInit(&key[1], Anum_pg_attribute_attname, BTEqualStrategyNumber,
+				F_NAMEEQ, CStringGetDatum(GP_SEGMENT_ID));
+	rel = table_open(AttributeRelationId, AccessShareLock);
+	scan = systable_beginscan(rel, AttributeRelidNameIndexId, true,
+							  SnapshotSelf, 2, key);
+	while (HeapTupleIsValid(tuple = systable_getnext(scan)))
+	{
+		Form_pg_attribute att = (Form_pg_attribute) GETSTRUCT(tuple);
+
+		if (att->attnum > 0 && !att->attisdropped)
+			found = true;
+	}
+	systable_endscan(scan);
+	table_close(rel, AccessShareLock);
+	if (!found)
+		return;
+
+	/* what kind of relation, from pg_class as the statement has it */
+	ScanKeyInit(&key[0], Anum_pg_class_oid, BTEqualStrategyNumber,
+				F_OIDEQ, ObjectIdGetDatum(relid));
+	rel = table_open(RelationRelationId, AccessShareLock);
+	scan = systable_beginscan(rel, ClassOidIndexId, true, SnapshotSelf, 1, key);
+	if (HeapTupleIsValid(tuple = systable_getnext(scan)))
+		relkind = ((Form_pg_class) GETSTRUCT(tuple))->relkind;
+	systable_endscan(scan);
+	table_close(rel, AccessShareLock);
+
+	if (relkind == RELKIND_VIEW || relkind == RELKIND_COMPOSITE_TYPE ||
+		relkind == RELKIND_INDEX || relkind == RELKIND_PARTITIONED_INDEX)
+		return;
+	ereport(ERROR,
+			(errcode(ERRCODE_DUPLICATE_COLUMN),
+			 errmsg("column name \"%s\" conflicts with a system column name",
+					GP_SEGMENT_ID)));
+}
+
+static void
+gp_segment_object_access(ObjectAccessType access, Oid classId, Oid objectId,
+						 int subId, void *arg)
+{
+	if (prev_object_access_hook)
+		prev_object_access_hook(access, classId, objectId, subId, arg);
+
+	/*
+	 * A relation made, a column added (subId its number), or a column
+	 * altered -- renamed among it -- and not by gp_core's own script, whose
+	 * catalogs name no such column anyway.
+	 */
+	if (classId == RelationRelationId &&
+		(access == OAT_POST_CREATE || (access == OAT_POST_ALTER && subId > 0)))
+		check_segment_id_column(objectId);
+}
+
+/* ------------------------------------------------------------------------- */
 /* Start-up                                                                  */
 /* ------------------------------------------------------------------------- */
 
@@ -798,6 +889,8 @@ GpSegmentInit(void)
 	deparse_function_as_column_hook = gp_deparse_function_as_column;
 	prev_post_parse_analyze_hook = post_parse_analyze_hook;
 	post_parse_analyze_hook = gp_post_parse_analyze;
+	prev_object_access_hook = object_access_hook;
+	object_access_hook = gp_segment_object_access;
 
 	CacheRegisterSyscacheCallback(PROCOID, invalidate_func_oids, (Datum) 0);
 }
