@@ -93,6 +93,24 @@ AS 'MODULE_PATHNAME', 'gp_dtx_map'
 LANGUAGE C STRICT VOLATILE;
 
 /*
+ * The map as it is logged, in each database of a segment: a row for each
+ * part of a distributed transaction that prepared here, or committed here in
+ * one phase, written by the part itself -- so that it commits with it, and a
+ * restart and a mirror have it from the WAL -- and deleted by a later one
+ * once no distributed snapshot can see it in progress.  Cloudberry's
+ * distributed log (distributedlog.c).  A table of each node's, as the
+ * extension's own are, and a heap whatever default_table_access_method says,
+ * which gp_dtx.c alone writes, with the heap's own functions.  See gp_dtx.c.
+ */
+CREATE TABLE gp_internal.distributed_log (
+	gxid		xid8 NOT NULL,		-- the coordinator's transaction
+	xid			xid8 NOT NULL,		-- the part's own, here
+	one_phase	bool NOT NULL,
+	children	xid[]				-- the subtransactions it committed
+) USING heap;
+CREATE INDEX distributed_log_gxid ON gp_internal.distributed_log (gxid);
+
+/*
  * This node's waiting relations, as the global deadlock detector reads them:
  * each waiting backend and a backend that holds what it waits for, with the
  * coordinator session each works for (0: none), whether the lock lasts to

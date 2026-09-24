@@ -68,6 +68,15 @@
  * segment could have seen them: a transaction that waited here for another's
  * row, or read it, committed after it there too.
  *
+ * THE DISTRIBUTED LOG.  The map is logged too, as Cloudberry's distributed
+ * log is, in a table of each database, gp_internal.distributed_log: a part
+ * writes its row as it prepares or commits in one phase, so that the row
+ * commits with it, and a restart and a mirror have it from the WAL; a later
+ * part deletes rows no snapshot can need.  After a restart or a promotion,
+ * whose map starts empty, a backend reads its database's rows into the map
+ * the first time it needs the map, and the keeper, a background worker of
+ * each segment's, reads every database's.
+ *
  * COMMIT ORDERING.  A one-phase part is the exception: it commits here before
  * the coordinator's transaction ends.  For that moment a transaction here may
  * see it committed -- wait for its row lock, then update the row it wrote --
@@ -86,7 +95,15 @@
  * deleted, once no local snapshot needs it -- while a distributed one still
  * does.  Cloudberry holds them back with the distributed xmin in its
  * procarray; the port holds them back with a replication slot of its own,
- * gp_dtx_horizon, whose xmin is the oldest transaction in the map.
+ * gp_dtx_horizon, whose xmin is the oldest transaction in the map.  The
+ * slot's xmin on disk is the oldest of the map's and of the transactions
+ * running, which only moves forward, so that a restart holds from its first
+ * moment, before the map is read again.  A mirror has no slot of its
+ * primary's: the keeper makes one there, holding back whatever the oldest
+ * transaction a table may still have unfrozen deleted, so that a promotion
+ * holds from its first moment too.  Until the keeper has read every
+ * database's rows, the hold a restart or a promotion came with is lowered
+ * but not raised.
  *
  * Cloudberry sources this file stands in for:
  *	  src/backend/cdb/cdbtm.c (the segment's half), cdbdtxrecovery.c,
@@ -99,13 +116,21 @@
 
 #include <ctype.h>
 
+#include "access/genam.h"
+#include "access/heapam.h"
+#include "access/table.h"
+#include "access/tableam.h"
 #include "access/transam.h"
 #include "access/twophase.h"
 #include "access/xact.h"
+#include "access/xlog.h"
+#include "catalog/indexing.h"
 #include "catalog/namespace.h"
 #include "catalog/objectaccess.h"
 #include "catalog/pg_class.h"
 #include "catalog/pg_authid.h"
+#include "catalog/pg_database.h"
+#include "catalog/pg_type.h"
 #include "commands/tablecmds.h"
 #include "executor/executor.h"
 #include "executor/spi.h"
@@ -126,9 +151,12 @@
 #include "storage/proc.h"
 #include "storage/procarray.h"
 #include "storage/smgr.h"
+#include "tcop/pquery.h"
 #include "tcop/utility.h"
+#include "utils/array.h"
 #include "utils/builtins.h"
 #include "utils/dsa.h"
+#include "utils/fmgroids.h"
 #include "utils/guc.h"
 #include "utils/lsyscache.h"
 #include "utils/memutils.h"
@@ -461,6 +489,12 @@ typedef struct GpDtxShared
 	bool		loaded;			/* the parts a restart left have been read */
 	TransactionId held;			/* the slot's xmin, as set here */
 
+	/* The databases whose logged parts have been read into the map. */
+	int			ndbs;
+	int			maxdbs;
+	dsa_pointer dbs;			/* Oid[maxdbs] */
+	bool		complete;		/* every database's: the keeper read them all */
+
 	/* The coordinator's recovery process, to be woken. */
 	ProcNumber	recovery_proc;
 	int			recovery_pid;
@@ -478,6 +512,7 @@ dtx_init_shared(void *ptr, void *arg)
 	LWLockInitialize(&s->lock, LWLockNewTrancheId("gp_core distributed transactions"));
 	s->entries = InvalidDsaPointer;
 	s->held = InvalidTransactionId;
+	s->dbs = InvalidDsaPointer;
 	s->recovery_proc = INVALID_PROC_NUMBER;
 }
 
@@ -623,27 +658,88 @@ map_prune(FullTransactionId prune)
 	dtx_shared->n = keep;
 }
 
+/* The older of two transaction IDs, either of which may be invalid. */
+static TransactionId
+xid_older(TransactionId a, TransactionId b)
+{
+	if (!TransactionIdIsValid(a))
+		return b;
+	if (!TransactionIdIsValid(b) || TransactionIdPrecedes(a, b))
+		return a;
+	return b;
+}
+
+/* The oldest transaction in the map; the lock is held. */
+static TransactionId
+map_oldest(void)
+{
+	GpDtxEntry *e = map_entries();
+	TransactionId xmin = InvalidTransactionId;
+
+	for (int i = 0; i < dtx_shared->n; i++)
+		xmin = xid_older(xmin, e[i].xid);
+	return xmin;
+}
+
+/*
+ * The slot, made where there is none, holding "xmin" in memory and "ondisk"
+ * on disk from the moment it is made, so that a server that stops at once
+ * holds as it starts again.  The lock is held exclusively.
+ */
+static ReplicationSlot *
+slot_make(TransactionId xmin, TransactionId ondisk)
+{
+	ReplicationSlot *slot = SearchNamedReplicationSlot(GP_DTX_SLOT, true);
+
+	if (slot != NULL)
+		return slot;
+
+	CheckSlotRequirements(false);
+	ReplicationSlotCreate(GP_DTX_SLOT, false, RS_PERSISTENT, false, false,
+						  false, false);
+	slot = MyReplicationSlot;
+	SpinLockAcquire(&slot->mutex);
+	slot->data.xmin = ondisk;
+	slot->effective_xmin = xmin;
+	SpinLockRelease(&slot->mutex);
+	ReplicationSlotMarkDirty();
+	ReplicationSlotSave();
+	ReplicationSlotRelease();
+	ReplicationSlotsComputeRequiredXmin(false);
+
+	slot = SearchNamedReplicationSlot(GP_DTX_SLOT, true);
+	if (slot == NULL)
+		elog(ERROR, "replication slot \"%s\" vanished as it was made",
+			 GP_DTX_SLOT);
+	return slot;
+}
+
 /*
  * Hold back, with the slot, what the oldest part in the map deleted: the
- * xmin of gp_dtx_horizon.  Made on first need.  The slot's xmin on disk
- * stays unset -- only the one in memory holds -- so that a restart, which
- * empties the map, lets go of it too.  The lock is held exclusively.
+ * xmin of gp_dtx_horizon, in memory.  Until the keeper has read every
+ * database's logged parts, the map may lack some, and the hold the slot came
+ * with -- from disk after a restart, from the keeper on a mirror before a
+ * promotion -- is lowered but not raised.  The lock is held exclusively.
  */
 static void
 map_hold(void)
 {
-	GpDtxEntry *e = map_entries();
-	TransactionId xmin = InvalidTransactionId;
-	ReplicationSlot *slot;
+	TransactionId xmin = map_oldest();
+	ReplicationSlot *slot = SearchNamedReplicationSlot(GP_DTX_SLOT, true);
 
-	for (int i = 0; i < dtx_shared->n; i++)
-		if (!TransactionIdIsValid(xmin) || TransactionIdPrecedes(e[i].xid, xmin))
-			xmin = e[i].xid;
+	if (!dtx_shared->complete && slot != NULL)
+	{
+		TransactionId came;
+
+		SpinLockAcquire(&slot->mutex);
+		came = slot->effective_xmin;
+		SpinLockRelease(&slot->mutex);
+		xmin = xid_older(xmin, came);
+	}
 
 	if (TransactionIdEquals(xmin, dtx_shared->held))
 		return;
 
-	slot = SearchNamedReplicationSlot(GP_DTX_SLOT, true);
 	if (slot == NULL)
 	{
 		if (!TransactionIdIsValid(xmin))
@@ -651,14 +747,9 @@ map_hold(void)
 			dtx_shared->held = xmin;
 			return;
 		}
-		CheckSlotRequirements(false);
-		ReplicationSlotCreate(GP_DTX_SLOT, false, RS_PERSISTENT, false, false,
-							  false, false);
-		ReplicationSlotRelease();
-		slot = SearchNamedReplicationSlot(GP_DTX_SLOT, true);
-		if (slot == NULL)
-			elog(ERROR, "replication slot \"%s\" vanished as it was made",
-				 GP_DTX_SLOT);
+		/* on disk, a hold no later part can precede; see keeper_persist() */
+		slot = slot_make(xmin,
+						 xid_older(xmin, GetOldestActiveTransactionId(false, true)));
 	}
 
 	SpinLockAcquire(&slot->mutex);
@@ -668,10 +759,249 @@ map_hold(void)
 	dtx_shared->held = xmin;
 }
 
+/* ------------------------------------------------------------------------- */
+/* The distributed log                                                       */
+/* ------------------------------------------------------------------------- */
+
+/* How many rows no snapshot needs a part deletes as it writes its own. */
+#define LOG_PRUNE_PER_PART	2
+
+/* gp_internal.distributed_log of this database; invalid where gp_core is not. */
+static Oid
+log_relid(void)
+{
+	Oid			nsp = get_namespace_oid("gp_internal", true);
+
+	return OidIsValid(nsp) ? get_relname_relid("distributed_log", nsp) : InvalidOid;
+}
+
 /*
- * After a restart: the parts it left prepared, which the map, being memory,
- * lost.  Read once per postmaster, by the first statement that needs the map,
- * from pg_prepared_xacts; their subtransactions are not known.
+ * A few rows of parts no distributed snapshot can see in progress any more,
+ * their coordinator transaction older than "prune", deleted in this
+ * transaction, oldest first.  A row another part is deleting is left to it
+ * rather than waited for, so that two commits never wait for each other
+ * here.
+ */
+static void
+log_prune(Relation rel, FullTransactionId prune)
+{
+	List	   *indexes = RelationGetIndexList(rel);
+	Relation	index;
+	ScanKeyData key;
+	SysScanDesc scan;
+	Snapshot	snapshot;
+	HeapTuple	tup;
+	int			deleted = 0;
+
+	if (indexes == NIL)
+		return;
+	index = index_open(linitial_oid(indexes), AccessShareLock);
+	ScanKeyInit(&key, 1, BTLessStrategyNumber, F_XID8LT,
+				FullTransactionIdGetDatum(prune));
+	snapshot = RegisterSnapshot(GetLatestSnapshot());
+	scan = systable_beginscan_ordered(rel, index, snapshot, 1, &key);
+	while (deleted < LOG_PRUNE_PER_PART &&
+		   (tup = systable_getnext_ordered(scan, ForwardScanDirection)) != NULL)
+	{
+		TM_FailureData tmfd;
+
+		if (heap_delete(rel, &tup->t_self, GetCurrentCommandId(true), 0,
+						InvalidSnapshot, false, &tmfd) == TM_Ok)
+			deleted++;
+	}
+	systable_endscan_ordered(scan);
+	UnregisterSnapshot(snapshot);
+	index_close(index, AccessShareLock);
+	list_free(indexes);
+}
+
+/*
+ * A part's row, as it prepares or commits in one phase: written in its own
+ * transaction, so that it commits or rolls back with the part, and with it a
+ * few rows no snapshot needs deleted.  Where gp_core's extension is not, the
+ * part is in the map alone, which a restart empties.
+ */
+static void
+log_part(FullTransactionId gxid, const TransactionId *children, int nchildren,
+		 bool one_phase)
+{
+	Oid			relid = log_relid();
+	Relation	rel;
+	Datum		values[4];
+	bool		nulls[4] = {false, false, false, false};
+	HeapTuple	tup;
+	GpDtxSnapshot *ds;
+
+	if (!OidIsValid(relid))
+		return;
+
+	/* as it prepares or commits, the statement's snapshot is gone */
+	PushActiveSnapshot(GetLatestSnapshot());
+	rel = table_open(relid, RowExclusiveLock);
+	values[0] = FullTransactionIdGetDatum(gxid);
+	values[1] = FullTransactionIdGetDatum(GetTopFullTransactionId());
+	values[2] = BoolGetDatum(one_phase);
+	if (nchildren > 0)
+	{
+		Datum	   *elems = palloc_array(Datum, nchildren);
+
+		for (int i = 0; i < nchildren; i++)
+			elems[i] = TransactionIdGetDatum(children[i]);
+		values[3] = PointerGetDatum(construct_array_builtin(elems, nchildren,
+															XIDOID));
+	}
+	else
+		nulls[3] = true;
+	tup = heap_form_tuple(RelationGetDescr(rel), values, nulls);
+	CatalogTupleInsert(rel, tup);
+	heap_freetuple(tup);
+
+	/*
+	 * Not in a SERIALIZABLE transaction, whose scan would take predicate
+	 * locks every other such part's row would conflict with; a later part
+	 * deletes them.
+	 */
+	if ((ds = dtx_current()) != NULL && !IsolationIsSerializable())
+		log_prune(rel, ds->prune);
+	table_close(rel, NoLock);
+	PopActiveSnapshot();
+}
+
+/* A part the log has, read back. */
+typedef struct LoggedPart
+{
+	FullTransactionId gxid;
+	TransactionId xid;
+	bool		one_phase;
+	int			nchildren;
+	TransactionId *children;
+} LoggedPart;
+
+static Oid *
+map_dbs(void)
+{
+	return DsaPointerIsValid(dtx_shared->dbs)
+		? (Oid *) dsa_get_address(dtx_area, dtx_shared->dbs)
+		: NULL;
+}
+
+/* Have this database's logged parts been read?  The lock is held. */
+static bool
+map_db_read(Oid dboid)
+{
+	Oid		   *dbs = map_dbs();
+
+	for (int i = 0; i < dtx_shared->ndbs; i++)
+		if (dbs[i] == dboid)
+			return true;
+	return false;
+}
+
+/* They have; the lock is held exclusively. */
+static void
+map_db_add(Oid dboid)
+{
+	if (dtx_shared->ndbs == dtx_shared->maxdbs)
+	{
+		int			newmax = Max(16, dtx_shared->maxdbs * 2);
+		dsa_pointer np = dsa_allocate(dtx_area, newmax * sizeof(Oid));
+
+		if (dtx_shared->ndbs > 0)
+			memcpy(dsa_get_address(dtx_area, np), map_dbs(),
+				   dtx_shared->ndbs * sizeof(Oid));
+		if (DsaPointerIsValid(dtx_shared->dbs))
+			dsa_free(dtx_area, dtx_shared->dbs);
+		dtx_shared->dbs = np;
+		dtx_shared->maxdbs = newmax;
+	}
+	map_dbs()[dtx_shared->ndbs++] = dboid;
+}
+
+/*
+ * This database's logged parts, into the map: after a restart or a
+ * promotion, whose map starts empty.  Each row is a part that committed --
+ * a prepared one's row is not seen until it is -- and one the map has
+ * already is left as it is.  By the first statement of the database that
+ * needs the map, and by the keeper's readers.
+ */
+static void
+map_load_database(void)
+{
+	Oid			relid;
+	List	   *parts = NIL;
+	bool		read;
+
+	LWLockAcquire(&dtx_shared->lock, LW_SHARED);
+	read = dtx_shared->complete || map_db_read(MyDatabaseId);
+	LWLockRelease(&dtx_shared->lock);
+	if (read)
+		return;
+
+	relid = log_relid();
+	if (OidIsValid(relid))
+	{
+		Relation	rel = table_open(relid, AccessShareLock);
+		Snapshot	snapshot = RegisterSnapshot(GetLatestSnapshot());
+		TableScanDesc scan = table_beginscan(rel, snapshot, 0, NULL, SO_NONE);
+		TupleTableSlot *tslot = table_slot_create(rel, NULL);
+
+		while (table_scan_getnextslot(scan, ForwardScanDirection, tslot))
+		{
+			LoggedPart *p = palloc0(sizeof(LoggedPart));
+			bool		isnull;
+			Datum		children;
+
+			p->gxid = DatumGetFullTransactionId(slot_getattr(tslot, 1, &isnull));
+			p->xid = XidFromFullTransactionId(DatumGetFullTransactionId(slot_getattr(tslot, 2, &isnull)));
+			p->one_phase = DatumGetBool(slot_getattr(tslot, 3, &isnull));
+			children = slot_getattr(tslot, 4, &isnull);
+			if (!isnull)
+			{
+				Datum	   *elems;
+				int			n;
+
+				deconstruct_array_builtin(DatumGetArrayTypeP(children), XIDOID,
+										  &elems, NULL, &n);
+				p->children = palloc_array(TransactionId, Max(n, 1));
+				for (int i = 0; i < n; i++)
+					p->children[i] = DatumGetTransactionId(elems[i]);
+				p->nchildren = n;
+			}
+			parts = lappend(parts, p);
+		}
+		ExecDropSingleTupleTableSlot(tslot);
+		table_endscan(scan);
+		UnregisterSnapshot(snapshot);
+		table_close(rel, AccessShareLock);
+	}
+
+	LWLockAcquire(&dtx_shared->lock, LW_EXCLUSIVE);
+	if (!dtx_shared->complete && !map_db_read(MyDatabaseId))
+	{
+		foreach_ptr(LoggedPart, p, parts)
+		{
+			int			pos = map_lower_bound(p->gxid);
+			GpDtxEntry *e = map_entries();
+
+			if (e != NULL && pos < dtx_shared->n &&
+				FullTransactionIdEquals(e[pos].gxid, p->gxid))
+				continue;
+			map_put(p->gxid, p->xid, p->children, p->nchildren, p->one_phase);
+			e = map_entries();
+			e[pos].done = true;
+			e[pos].committed = true;
+		}
+		map_db_add(MyDatabaseId);
+		map_hold();
+	}
+	LWLockRelease(&dtx_shared->lock);
+}
+
+/*
+ * After a restart or a promotion: the parts it left prepared, which the map,
+ * being memory, lost -- read once per postmaster, by the first statement that
+ * needs the map, from pg_prepared_xacts; their subtransactions are not
+ * known -- and this database's logged parts, which committed.
  */
 static void
 map_load(void)
@@ -679,7 +1009,10 @@ map_load(void)
 	int			ret;
 
 	if (dtx_shared->loaded)
+	{
+		map_load_database();
 		return;
+	}
 
 	if (SPI_connect() != SPI_OK_CONNECT)
 		elog(ERROR, "SPI_connect failed");
@@ -716,6 +1049,8 @@ map_load(void)
 	}
 	LWLockRelease(&dtx_shared->lock);
 	SPI_finish();
+
+	map_load_database();
 }
 
 /* ------------------------------------------------------------------------- */
@@ -899,8 +1234,21 @@ dtx_executor_start(QueryDesc *queryDesc, int eflags)
 			Snapshot	old = queryDesc->snapshot;
 			Snapshot	made = RegisterSnapshot(crafted);
 
+			/*
+			 * The active one may be a utility statement's portal's, which a
+			 * read-only query of SPI's runs under -- as the map's own read of
+			 * pg_prepared_xacts does, in the SET that brings a snapshot --
+			 * and which the portal checks and pops as the statement ends
+			 * (pquery.c): the made one takes its place there too.
+			 */
 			PopActiveSnapshot();
-			PushActiveSnapshot(made);
+			if (ActivePortal != NULL && ActivePortal->portalSnapshot == old)
+			{
+				PushActiveSnapshotWithLevel(made, ActivePortal->createLevel);
+				ActivePortal->portalSnapshot = GetActiveSnapshot();
+			}
+			else
+				PushActiveSnapshot(made);
 			queryDesc->snapshot = made;
 			UnregisterSnapshot(old);
 			dtx_lower_xmin(made->xmin);
@@ -1125,6 +1473,7 @@ dtx_pre_commit(void)
 			int			nchildren = xactGetCommittedChildren(&children);
 
 			GP_FAULT("start_performDtxProtocolCommitOnePhase");
+			log_part(gxid, children, nchildren, true);
 			dtx_attach();
 			LWLockAcquire(&dtx_shared->lock, LW_EXCLUSIVE);
 			map_put(gxid, xid, children, nchildren, true);
@@ -1296,6 +1645,7 @@ dtx_pre_prepare(void)
 	if (!TransactionIdIsValid(xid) || GpClusterContentId() < 0)
 		return;
 	nchildren = xactGetCommittedChildren(&children);
+	log_part(dtx_preparing, children, nchildren, false);
 
 	dtx_attach();
 	LWLockAcquire(&dtx_shared->lock, LW_EXCLUSIVE);
@@ -1836,6 +2186,251 @@ GpDtxRecoveryMain(Datum main_arg)
 }
 
 /* ------------------------------------------------------------------------- */
+/* The keeper, on a segment                                                  */
+/* ------------------------------------------------------------------------- */
+
+/*
+ * A background worker of each segment's, a mirror's too, that keeps the slot
+ * and the map through a restart and a promotion (THE DISTRIBUTED LOG, above):
+ *
+ *   on a mirror, it holds back what any transaction a table may still have
+ *   unfrozen deleted -- the oldest transaction ID the WAL says is not frozen
+ *   everywhere, which no part in its primary's map can precede, since the
+ *   primary's slot held its tables back from freezing past any -- so that
+ *   the moment a promotion ends, the slot holds;
+ *
+ *   on a primary, until the map has every database's logged parts, it reads
+ *   them, a database at a time, with a worker connected to each;
+ *
+ *   and then it writes the slot's xmin on disk: the oldest of the map's and
+ *   of the transactions running, which no part the map may yet gain can
+ *   precede, so that a restart holds from its first moment.  Marked dirty,
+ *   it reaches the disk at the next checkpoint, and an older one there holds
+ *   back more, never too little.
+ */
+
+static uint32
+keeper_wait_event(void)
+{
+	static uint32 event = 0;
+
+	if (event == 0)
+		event = WaitEventExtensionNew("CloudberryDtxKeeper");
+	return event;
+}
+
+/* A mirror's hold: see above. */
+static void
+keeper_hold_all(void)
+{
+	TransactionId oldest;
+	ReplicationSlot *slot;
+
+	LWLockAcquire(XidGenLock, LW_SHARED);
+	oldest = TransamVariables->oldestXid;
+	LWLockRelease(XidGenLock);
+	if (!TransactionIdIsNormal(oldest))
+		return;
+
+	LWLockAcquire(&dtx_shared->lock, LW_EXCLUSIVE);
+	slot = slot_make(oldest, oldest);
+	SpinLockAcquire(&slot->mutex);
+	if (!TransactionIdEquals(slot->effective_xmin, oldest) ||
+		!TransactionIdEquals(slot->data.xmin, oldest))
+	{
+		slot->effective_xmin = oldest;
+		slot->data.xmin = oldest;
+		slot->just_dirtied = true;
+		slot->dirty = true;
+	}
+	SpinLockRelease(&slot->mutex);
+	ReplicationSlotsComputeRequiredXmin(false);
+	dtx_shared->held = oldest;
+	LWLockRelease(&dtx_shared->lock);
+}
+
+/* The databases a worker can connect to, in "cxt". */
+static List *
+keeper_databases(MemoryContext cxt)
+{
+	List	   *dbs = NIL;
+	Relation	rel;
+	TableScanDesc scan;
+	HeapTuple	tup;
+
+	StartTransactionCommand();
+	(void) GetTransactionSnapshot();
+	rel = table_open(DatabaseRelationId, AccessShareLock);
+	scan = table_beginscan_catalog(rel, 0, NULL);
+	while (HeapTupleIsValid(tup = heap_getnext(scan, ForwardScanDirection)))
+	{
+		Form_pg_database db = (Form_pg_database) GETSTRUCT(tup);
+		MemoryContext old;
+
+		if (!db->datallowconn || database_is_invalid_form(db))
+			continue;
+		old = MemoryContextSwitchTo(cxt);
+		dbs = lappend_oid(dbs, db->oid);
+		MemoryContextSwitchTo(old);
+	}
+	table_endscan(scan);
+	table_close(rel, AccessShareLock);
+	CommitTransactionCommand();
+	return dbs;
+}
+
+/* One database's logged parts, read by a worker connected to it. */
+static bool
+keeper_read_database(Oid dboid)
+{
+	BackgroundWorker worker;
+	BackgroundWorkerHandle *handle;
+	pid_t		pid;
+
+	memset(&worker, 0, sizeof(worker));
+	worker.bgw_flags = BGWORKER_SHMEM_ACCESS |
+		BGWORKER_BACKEND_DATABASE_CONNECTION;
+	worker.bgw_start_time = BgWorkerStart_RecoveryFinished;
+	worker.bgw_restart_time = BGW_NEVER_RESTART;
+	snprintf(worker.bgw_library_name, BGW_MAXLEN, "gp_core");
+	snprintf(worker.bgw_function_name, BGW_MAXLEN, "GpDtxLogReaderMain");
+	snprintf(worker.bgw_name, BGW_MAXLEN, "gp_core distributed log reader");
+	snprintf(worker.bgw_type, BGW_MAXLEN, "gp_core distributed log reader");
+	worker.bgw_main_arg = ObjectIdGetDatum(dboid);
+	worker.bgw_notify_pid = MyProcPid;
+
+	if (!RegisterDynamicBackgroundWorker(&worker, &handle))
+		return false;
+	if (WaitForBackgroundWorkerStartup(handle, &pid) == BGWH_STARTED)
+		(void) WaitForBackgroundWorkerShutdown(handle);
+	pfree(handle);
+	return true;
+}
+
+/*
+ * A primary's map, completed: every database's logged parts read, but those
+ * of a database that went away meanwhile.  False when it has to be tried
+ * again: a worker could not be started, or one did not read its database.
+ */
+static bool
+keeper_complete(MemoryContext cxt)
+{
+	List	   *dbs = keeper_databases(cxt);
+	List	   *after;
+	bool		complete = true;
+
+	foreach_oid(dboid, dbs)
+	{
+		bool		read;
+
+		LWLockAcquire(&dtx_shared->lock, LW_SHARED);
+		read = map_db_read(dboid);
+		LWLockRelease(&dtx_shared->lock);
+		if (!read && !keeper_read_database(dboid))
+			return false;
+	}
+
+	/* Each still there has been read: the map has everything. */
+	after = keeper_databases(cxt);
+	LWLockAcquire(&dtx_shared->lock, LW_EXCLUSIVE);
+	foreach_oid(dboid, dbs)
+		if (list_member_oid(after, dboid) && !map_db_read(dboid))
+			complete = false;
+	if (complete)
+	{
+		dtx_shared->complete = true;
+		map_hold();
+	}
+	LWLockRelease(&dtx_shared->lock);
+	return complete;
+}
+
+/* A primary's hold on disk: see above. */
+static void
+keeper_persist(void)
+{
+	/* first, so that no part the map gains after can precede it */
+	TransactionId xmin = GetOldestActiveTransactionId(false, true);
+	ReplicationSlot *slot;
+
+	LWLockAcquire(&dtx_shared->lock, LW_EXCLUSIVE);
+	xmin = xid_older(xmin, map_oldest());
+	slot = slot_make(dtx_shared->held, xmin);
+	SpinLockAcquire(&slot->mutex);
+	if (!TransactionIdEquals(slot->data.xmin, xmin))
+	{
+		slot->data.xmin = xmin;
+		slot->just_dirtied = true;
+		slot->dirty = true;
+	}
+	SpinLockRelease(&slot->mutex);
+	LWLockRelease(&dtx_shared->lock);
+}
+
+PGDLLEXPORT void GpDtxKeeperMain(Datum main_arg);
+
+void
+GpDtxKeeperMain(Datum main_arg)
+{
+	MemoryContext cxt;
+
+	pqsignal(SIGHUP, SignalHandlerForConfigReload);
+	pqsignal(SIGTERM, die);
+	BackgroundWorkerUnblockSignals();
+
+	/* No database: only the shared catalogs, for the list of databases. */
+	BackgroundWorkerInitializeConnection(NULL, NULL, 0);
+	dtx_attach();
+	cxt = AllocSetContextCreate(TopMemoryContext, "gp_core dtx keeper",
+								ALLOCSET_DEFAULT_SIZES);
+
+	for (;;)
+	{
+		bool		complete;
+
+		CHECK_FOR_INTERRUPTS();
+		if (ConfigReloadPending)
+		{
+			ConfigReloadPending = false;
+			ProcessConfigFile(PGC_SIGHUP);
+		}
+
+		LWLockAcquire(&dtx_shared->lock, LW_SHARED);
+		complete = dtx_shared->complete;
+		LWLockRelease(&dtx_shared->lock);
+
+		if (RecoveryInProgress())
+			keeper_hold_all();
+		else if (complete || keeper_complete(cxt))
+			keeper_persist();
+		MemoryContextReset(cxt);
+
+		(void) WaitLatch(MyLatch, WL_LATCH_SET | WL_TIMEOUT | WL_EXIT_ON_PM_DEATH,
+						 1000L, keeper_wait_event());
+		ResetLatch(MyLatch);
+	}
+}
+
+PGDLLEXPORT void GpDtxLogReaderMain(Datum main_arg);
+
+/* One database's logged parts, into the map; the keeper waits for it. */
+void
+GpDtxLogReaderMain(Datum main_arg)
+{
+	pqsignal(SIGTERM, die);
+	BackgroundWorkerUnblockSignals();
+	BackgroundWorkerInitializeConnectionByOid(DatumGetObjectId(main_arg),
+											  InvalidOid, 0);
+	dtx_attach();
+	StartTransactionCommand();
+	PushActiveSnapshot(GetTransactionSnapshot());
+	map_load_database();
+	PopActiveSnapshot();
+	CommitTransactionCommand();
+	proc_exit(0);
+}
+
+/* ------------------------------------------------------------------------- */
 /* Seeing it                                                                 */
 /* ------------------------------------------------------------------------- */
 
@@ -1894,6 +2489,28 @@ dtx_register_recovery(void)
 	snprintf(worker.bgw_function_name, BGW_MAXLEN, "GpDtxRecoveryMain");
 	snprintf(worker.bgw_name, BGW_MAXLEN, "gp_core distributed transaction recovery");
 	snprintf(worker.bgw_type, BGW_MAXLEN, "gp_core dtx recovery");
+	RegisterBackgroundWorker(&worker);
+}
+
+/*
+ * A segment's keeper, from the moment a mirror takes read-only connections
+ * or a primary has recovered; it never exits of itself, since one that did
+ * would not be started again after a crash.
+ */
+static void
+dtx_register_keeper(void)
+{
+	BackgroundWorker worker;
+
+	memset(&worker, 0, sizeof(worker));
+	worker.bgw_flags = BGWORKER_SHMEM_ACCESS |
+		BGWORKER_BACKEND_DATABASE_CONNECTION;
+	worker.bgw_start_time = BgWorkerStart_ConsistentState;
+	worker.bgw_restart_time = 5;
+	snprintf(worker.bgw_library_name, BGW_MAXLEN, "gp_core");
+	snprintf(worker.bgw_function_name, BGW_MAXLEN, "GpDtxKeeperMain");
+	snprintf(worker.bgw_name, BGW_MAXLEN, "gp_core distributed transaction keeper");
+	snprintf(worker.bgw_type, BGW_MAXLEN, "gp_core dtx keeper");
 	RegisterBackgroundWorker(&worker);
 }
 
@@ -1998,8 +2615,13 @@ GpDtxInit(void)
 	RegisterXactCallback(dtx_xact_callback, NULL);
 	RegisterSubXactCallback(dtx_subxact_callback, NULL);
 
-	/* The coordinator finishes what a failure left prepared. */
+	/*
+	 * The coordinator finishes what a failure left prepared; a segment keeps
+	 * its map and its slot through a restart and a promotion.
+	 */
 	self = GpClusterSelf();
 	if (self != NULL && self->content == -1)
 		dtx_register_recovery();
+	else if (self != NULL && self->content >= 0)
+		dtx_register_keeper();
 }

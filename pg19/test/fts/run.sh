@@ -30,8 +30,10 @@
 # failed over from, the dispatcher following, and a transaction that was open
 # across it failing; that the coordinator keeps what FTS found across a
 # restart; that the failed primary comes back as its mirror's mirror, and the
-# roles go back to the preferred ones; and that a pair whose mirror is not in
-# sync is not failed over.
+# roles go back to the preferred ones; that a snapshot older than a segment's
+# restart or failover still sees what it saw, the segment's map read back from
+# gp_internal.distributed_log and its slot holding from the first moment
+# (gp_dtx.c); and that a pair whose mirror is not in sync is not failed over.
 #
 #     PG_BINDIR=/path/to/pg19/bin pg19/test/fts/run.sh
 #
@@ -92,8 +94,10 @@ wait_for() {				# wait_for <n> <sql> <want> [seconds]
 	return 1
 }
 
+# Without the open session's fifo (session_open), which a server started
+# while it is open would keep open, so that the session never sees its end.
 start_node() {
-	"$BINDIR/pg_ctl" -D "$(datadir "$1")" -l "$(logfile "$1")" -w -t 60 start >/dev/null 2>&1
+	"$BINDIR/pg_ctl" -D "$(datadir "$1")" -l "$(logfile "$1")" -w -t 60 start >/dev/null 2>&1 7>&-
 }
 stop_node() {				# stop_node <n> [mode]
 	"$BINDIR/pg_ctl" -D "$(datadir "$1")" -m "${2:-fast}" -w -t 60 stop >/dev/null 2>&1
@@ -414,7 +418,86 @@ out2=$(q 0 "SELECT count(*) FROM t")
 	|| notok "rebalancing" "$out / $out2"
 
 ###############################################################################
-echo "9. a primary whose mirror is not in sync is not failed over from: a double fault"
+echo "9. a snapshot older than a segment's restart, or its failover, still sees what it saw"
+###############################################################################
+# A REPEATABLE READ transaction whose snapshot the coordinator took before a
+# write committed, and which reaches the segments only after one restarted
+# or failed over: that segment's map, which hides the write from the
+# snapshot, comes back from gp_internal.distributed_log, and the slot holds
+# back the row versions the write replaced, VACUUM or not.
+# rr_open: a session of its own, its snapshot taken on the coordinator alone.
+rr_open() {
+	session_open
+	session_send "BEGIN ISOLATION LEVEL REPEATABLE READ;"
+	session_send "SELECT 'snapshot' FROM pg_class LIMIT 1;"
+	wait_for 0 "SELECT count(*) FROM pg_stat_activity WHERE state = 'idle in transaction' AND backend_type = 'client backend'" 1 30 >/dev/null
+}
+# The two newest logged parts of a node: their coordinator transactions and
+# whether each committed in one phase.
+logged() { q "$1" "SELECT string_agg(gxid || ':' || one_phase::text, ' ' ORDER BY gxid) FROM (SELECT * FROM gp_internal.distributed_log ORDER BY gxid DESC LIMIT 2) s"; }
+
+q 0 "CREATE TABLE m (a int, b text) DISTRIBUTED BY (a);
+     INSERT INTO m SELECT i, 'old' FROM generate_series(1, 30) i;" > /dev/null
+one=$(q 0 "SELECT min(a) FROM m WHERE gp_segment_id = 0")
+rr_open
+q 0 "UPDATE m SET b = 'two-phase'" > /dev/null
+q 0 "UPDATE m SET b = 'one-phase' WHERE a = $one" > /dev/null
+out=$(logged 1)
+g2=${out%%:*}
+[[ "$out" == *":false "*":true" ]] \
+	&& ok "each part is logged where it wrote, in its own transaction: prepared, then committed in one phase ($out)" \
+	|| notok "gp_internal.distributed_log" "$out"
+
+# content 0's primary restarts, without a probe in between to fail it over
+q 0 "SELECT gp_inject_fault_infinite('fts_probe', 'skip', 1)" > /dev/null
+stop_node 1 immediate
+start_node 1
+out=$(q 1 "SELECT (SELECT xmin FROM pg_replication_slots WHERE slot_name = 'gp_dtx_horizon')::text::bigint
+                  <= (SELECT min(xid)::text::bigint FROM gp_internal.distributed_log WHERE gxid >= '$g2')")
+out2=$(wait_for 1 "SELECT count(*) FROM gp_internal.dtx_map() WHERE gxid >= '$g2' AND done AND committed" 2 30) \
+	&& out2=read
+[ "$out" = "t" ] && [ "$out2" = read ] \
+	&& ok "restarted, the slot holds from the first moment, and the keeper reads the log back into the map" \
+	|| notok "the map and the slot across a restart" "$out / $out2"
+q 0 "SELECT gp_inject_fault('fts_probe', 'reset', 1)" > /dev/null
+
+q 1 "VACUUM m" > /dev/null
+session_send "SELECT count(*) FILTER (WHERE b = 'old') || ':' || count(*) FROM m;"
+session_send "COMMIT;"
+session_close
+out=$(tail -1 "$ROOT/s.out")
+out2=$(q 0 "SELECT count(*) FILTER (WHERE b = 'two-phase') || ':' || count(*) FILTER (WHERE b = 'one-phase') FROM m")
+[ "$out" = "30:30" ] && [ "$out2" = "29:1" ] \
+	&& ok "the older snapshot reads every row as it was, VACUUM on the restarted segment notwithstanding ($out; now $out2)" \
+	|| notok "a snapshot older than a segment's restart" "$out / $out2 / $(cat "$ROOT/s.out")"
+
+# content 0 fails over: its mirror has the log from the WAL, and its keeper
+# held the slot while it was one
+rr_open
+q 0 "UPDATE m SET b = 'failed over'" > /dev/null
+g3=$(q 1 "SELECT max(gxid) FROM gp_internal.distributed_log")
+x3=$(q 1 "SELECT xid::text::bigint FROM gp_internal.distributed_log WHERE gxid = '$g3'")
+out=$(q 4 "SELECT xmin::text::bigint <= $x3 FROM pg_replication_slots WHERE slot_name = 'gp_dtx_horizon'")
+stop_node 1 immediate
+q 0 "SELECT gp_request_fts_probe_scan()" > /dev/null
+wait_for 4 "SELECT pg_is_in_recovery()" f 30 >/dev/null
+out2=$(wait_for 4 "SELECT count(*) FROM gp_internal.dtx_map() WHERE gxid = '$g3' AND done AND committed" 1 30) \
+	&& out2=read
+[ "$out" = "t" ] && [ "$out2" = read ] \
+	&& ok "a mirror's keeper holds its slot, and once promoted reads the log into the map ($(config 0))" \
+	|| notok "the map and the slot across a failover" "$out / $out2"
+q 4 "VACUUM m" > /dev/null
+session_send "SELECT count(*) FILTER (WHERE b = 'two-phase') || ':' || count(*) FROM m;"
+session_send "COMMIT;"
+session_close
+out=$(tail -1 "$ROOT/s.out")
+[ "$out" = "29:30" ] \
+	&& ok "the older snapshot reads every row as it was on the promoted mirror, VACUUM notwithstanding ($out)" \
+	|| notok "a snapshot older than a failover" "$out / $(cat "$ROOT/s.out")"
+recover 1 4
+
+###############################################################################
+echo "10. a primary whose mirror is not in sync is not failed over from: a double fault"
 ###############################################################################
 q 3 "ALTER SYSTEM SET gp.fts_mark_mirror_down_grace_period = 0" > /dev/null
 q 3 "SELECT pg_reload_conf()" > /dev/null
