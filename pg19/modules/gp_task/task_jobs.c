@@ -29,7 +29,9 @@
  * still lost is the history, which is not visible from the database the job
  * ran in.
  *
- * The schedules are Cloudberry's own parser, called where it lies.
+ * The schedules are Cloudberry's: cron's five fields, read by Cloudberry's
+ * own parser, called where it lies, or an interval of 1 to 59 seconds, read
+ * as Cloudberry's scheduler reads it.
  *
  *-------------------------------------------------------------------------
  */
@@ -42,6 +44,7 @@
 #include "pgtime.h"
 #include "utils/builtins.h"
 #include "utils/datetime.h"
+#include "utils/formatting.h"
 #include "utils/memutils.h"
 #include "utils/timestamp.h"
 
@@ -68,18 +71,68 @@ parse_schedule(const char *schedule)
 	return parsed;
 }
 
+/*
+ * Cloudberry's other kind of schedule: "<n> second" or "<n> seconds", n from
+ * 1 to 59, in any case and with spaces around it -- TryParseInterval in
+ * src/backend/task/job_metadata.c, which is the scheduler's file rather than
+ * the parser's and so is not compiled here.  This is it as it reads there,
+ * sscanf and all, so that what one accepts the other does: "5 secondc" and
+ * "50 seconds c" are refused, and so is "-1 seconds", which %u reads as a
+ * number far past 59.  The answer is the interval, or 0 when the schedule is
+ * no interval.
+ */
+static int
+parse_interval(const char *schedule)
+{
+	unsigned int seconds = 0;
+	char		lastChar = '\0';
+	char		plural = '\0';
+	char		extra = '\0';
+	char	   *lower = asc_tolower(schedule, strlen(schedule));
+	int			numParts;
+
+	numParts = sscanf(lower, " %u secon%c%c %c", &seconds,
+					  &lastChar, &plural, &extra);
+	pfree(lower);
+
+	/* no "second" at the end */
+	if (lastChar != 'd')
+		return 0;
+
+	/* "<n> second", and "<n> seconds" */
+	if (numParts == 2 || (numParts == 3 && plural == 's'))
+		return (0 < seconds && seconds < 60) ? (int) seconds : 0;
+
+	return 0;
+}
+
+/*
+ * A schedule is one Cloudberry's ParseSchedule reads: cron's, or else an
+ * interval.  Refused in Cloudberry's words.
+ */
 void
 GpTaskCheckSchedule(const char *schedule)
 {
 	entry	   *parsed = parse_schedule(schedule);
 
-	if (parsed == NULL)
+	if (parsed == NULL && parse_interval(schedule) == 0)
 		ereport(ERROR,
 				(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
-				 errmsg("\"%s\" is not a schedule", schedule),
-				 errhint("Use five cron fields, as in \"0 3 * * *\", or a macro such as \"@daily\".")));
+				 errmsg("invalid schedule: %s", schedule),
+				 errhint("Use cron format (e.g. 5 4 * * *), or interval "
+						 "format '[1-59] seconds'")));
 
-	free_entry(parsed);
+	if (parsed != NULL)
+		free_entry(parsed);
+}
+
+/*
+ * The interval of a schedule that is one, in seconds; 0 for cron's.
+ */
+int
+GpTaskScheduleSeconds(const char *schedule)
+{
+	return parse_interval(schedule);
 }
 
 /*
@@ -88,7 +141,8 @@ GpTaskCheckSchedule(const char *schedule)
  * This is Cloudberry's ShouldRunTask without its wild/non-wild split, which
  * exists there to stagger jobs whose minute and hour are both "*" across a
  * catch-up window.  The launcher here looks at one minute at a time and does
- * not catch up, so every due job is due in the same way.
+ * not catch up, so every due job is due in the same way.  An interval is
+ * never due by the minute: it runs by its own clock (task_worker.c).
  */
 bool
 GpTaskScheduleDue(const char *schedule, TimestampTz when)
@@ -105,7 +159,7 @@ GpTaskScheduleDue(const char *schedule, TimestampTz when)
 				dow;
 
 	if (parsed == NULL)
-		return false;			/* refused when it was written; ignore it now */
+		return false;			/* an interval, or refused when it was written */
 
 	tz = pg_tzset(gp_task_timezone);
 	if (tz == NULL)

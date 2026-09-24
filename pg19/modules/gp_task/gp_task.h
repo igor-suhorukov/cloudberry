@@ -82,8 +82,9 @@ extern void GpTaskRunPid(int64 runid, int pid);
 extern void GpTaskRunFinished(int64 runid, bool failed, const char *message);
 extern void GpTaskMarkRunningAsFailed(void);
 
-/* task_jobs.c: the schedule, through Cloudberry's cron parser */
+/* task_jobs.c: the schedule, cron's through Cloudberry's parser, or seconds */
 extern void GpTaskCheckSchedule(const char *schedule);
+extern int	GpTaskScheduleSeconds(const char *schedule);
 extern bool GpTaskScheduleDue(const char *schedule, TimestampTz when);
 
 /* task_worker.c */

@@ -24,7 +24,8 @@
 # materialized view with an option, a label and a gp_task job -- which is what
 # Cloudberry's own code makes it, underneath.
 #
-# This suite waits for real time to pass: a schedule is in minutes.
+# This suite waits for real time to pass, for seconds: a schedule of seconds
+# is Cloudberry's as well as cron's.
 #
 #   PG_BINDIR=/path/to/patched/pg19/bin pg19/test/dynamic/run.sh
 #
@@ -81,7 +82,7 @@ eventually() {
 	while [ "$(date +%s)" -lt "$deadline" ]; do
 		got=$(q "$2")
 		[ "$got" = "$3" ] && { ok "$1"; return; }
-		sleep 2
+		sleep 0.5
 	done
 	notok "$1" "want [$3], last saw [$got] after ${4:-100}s"
 }
@@ -144,7 +145,7 @@ is "left out, it is the same default Cloudberry uses" \
    "SELECT gp_matview.dynamic_schedule('dt_default'::regclass);" "*/5 * * * *"
 refused "a schedule nothing can run is refused" \
         "CREATE MATERIALIZED VIEW dt_bad WITH (gp.dynamic_schedule = 'every friday') AS SELECT 1;" \
-        "is not a schedule"
+        "invalid schedule"
 is "and the view it would have made is not there either" \
    "SELECT count(*) FROM pg_class WHERE relname = 'dt_bad';" "0"
 is "nor is a job for it" \
@@ -177,7 +178,7 @@ echo "5. it refreshes itself"
 ###############################################################################
 q "CREATE TABLE ticker (n int);
    INSERT INTO ticker VALUES (1);
-   CREATE MATERIALIZED VIEW dt_live WITH (gp.dynamic_schedule = '* * * * *') AS
+   CREATE MATERIALIZED VIEW dt_live WITH (gp.dynamic_schedule = '5 seconds') AS
      SELECT count(*) AS rows FROM ticker;" > /dev/null
 is "it starts out with what the base table then held" \
    "SELECT rows FROM dt_live;" "1"
@@ -185,10 +186,12 @@ q "INSERT INTO ticker VALUES (2), (3);" > /dev/null
 is "which does not follow the base table on its own" \
    "SELECT rows FROM dt_live;" "1"
 eventually "until its schedule comes round" "SELECT rows FROM dt_live;" "3"
-is "and the scheduler recorded the refresh" \
+# The view has its rows as the refresh commits, and the history says so once
+# the scheduler has seen the job end.
+eventually "and the scheduler recorded the refresh" \
    "SELECT status FROM gp_task.run_history h JOIN gp_task.job j USING (jobid)
      WHERE j.jobname = 'gp_dynamic_table_refresh_' || 'dt_live'::regclass::oid
-     ORDER BY runid DESC LIMIT 1;" "succeeded"
+     ORDER BY runid DESC LIMIT 1;" "succeeded" 15
 
 ###############################################################################
 echo "6. a dynamic table in another database: its job is the scheduler's"
@@ -200,7 +203,7 @@ echo "6. a dynamic table in another database: its job is the scheduler's"
 q "CREATE DATABASE elsewhere;" > /dev/null
 out=$(qd elsewhere "CREATE EXTENSION gp_matview CASCADE; CREATE EXTENSION gp_task;
                     CREATE TABLE src_there (a int); INSERT INTO src_there VALUES (1);
-                    CREATE MATERIALIZED VIEW dt_there WITH (gp.dynamic_schedule = '* * * * *')
+                    CREATE MATERIALIZED VIEW dt_there WITH (gp.dynamic_schedule = '1 second')
                         AS SELECT count(*) AS rows FROM src_there;
                     SELECT 'made';")
 [ "$(printf '%s\n' "$out" | tail -1)" = "made" ] \
@@ -219,7 +222,7 @@ deadline=$(( $(date +%s) + 100 )); got=
 while [ "$(date +%s)" -lt "$deadline" ]; do
 	got=$(qd elsewhere "SELECT rows FROM dt_there;")
 	[ "$got" = "2" ] && break
-	sleep 2
+	sleep 0.5
 done
 [ "$got" = "2" ] && ok "the scheduler refreshes it where it is" \
 	|| notok "the scheduler refreshes it where it is" "last saw [$got]"

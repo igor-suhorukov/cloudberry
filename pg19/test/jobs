@@ -25,24 +25,24 @@
 #   suite   job ("-" when the suite is one)   seconds   environment
 #
 # A suite that runs its tests under the planner and under ORCA is one job a
-# pass.  The seconds are a run's, on the 32-core machine the port is built
-# on, with every job at once; they order the jobs and nothing else, and
-# run.sh's summary gives each run's own.
+# pass.  The seconds are a run's, on the machine the port is built on (16
+# cores, 32 threads), with every job at once; they order the jobs and
+# nothing else, and run.sh's summary gives each run's own.
 
-task                   -        265
-dynamic                -        103
-singlenode             orca     150   PASSES=orca
-greenplum              orca     120   PASSES=orca
-isolation2             orca      40   PASSES=orca
-isolation2             planner   40   PASSES=planner
-cluster                -         38
-postgis_regress        orca      35   PASSES=orca
-orca                   -         35
-singlenode             planner   20   PASSES=planner
-security               -         16
-postgis_regress        planner   15   PASSES=planner
-greenplum              planner   15   PASSES=planner
-hooks                  -         12
+singlenode             orca     180   PASSES=orca
+greenplum              orca     165   PASSES=orca
+postgis_regress        orca     105   PASSES=orca
+orca                   -         65
+task                   -         62
+cluster                -         52
+greenplum              planner   47   PASSES=planner
+isolation2             orca      38   PASSES=orca
+isolation2             planner   38   PASSES=planner
+singlenode             planner   36   PASSES=planner
+postgis_regress        planner   17   PASSES=planner
+security               -         17
+hooks                  -         13
+postgis                -         13
+dynamic                -          9
 singlenode_isolation2  orca       5   PASSES=orca
 singlenode_isolation2  planner    4   PASSES=planner
-postgis                -          5

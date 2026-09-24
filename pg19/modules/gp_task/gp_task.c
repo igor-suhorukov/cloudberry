@@ -39,7 +39,9 @@
  * The cron expression parser is Cloudberry's own file, compiled where it
  * lies: src/backend/task/entry.c and misc.c, which are Paul Vixie's cron.
  * pg19/compat/task/ is how the build reaches them.  Nothing of the parser is
- * copied or rewritten here.
+ * copied or rewritten here.  A schedule of seconds, "30 seconds", is read as
+ * Cloudberry's scheduler reads it (job_metadata.c, TryParseInterval, in
+ * task_jobs.c) and run as it runs one (task_worker.c).
  *
  * What is not ported is pg_cron's libpq machinery -- its connection state
  * machine is for reaching another node, which is Track B's dispatch rather
@@ -51,12 +53,15 @@
 #include "postgres.h"
 
 #include "catalog/pg_type.h"
+#include "commands/trigger.h"
 #include "fmgr.h"
 #include "lib/stringinfo.h"
 #include "miscadmin.h"
 #include "utils/array.h"
 #include "utils/builtins.h"
 #include "utils/guc.h"
+#include "utils/inval.h"
+#include "utils/rel.h"
 
 #include "cb_module.h"
 #include "gp_core_api.h"
@@ -76,6 +81,7 @@ int			gp_task_max_running = 5;
 
 PG_FUNCTION_INFO_V1(gp_task_validate_schedule);
 PG_FUNCTION_INFO_V1(gp_task_forward);
+PG_FUNCTION_INFO_V1(gp_task_job_changed);
 
 /*
  * gp_task.validate_schedule(text) -- raise if this is not a schedule.
@@ -129,6 +135,31 @@ gp_task_forward(PG_FUNCTION_ARGS)
 
 	GpLoopbackDefer(gp_task_database, sql.data);
 	PG_RETURN_VOID();
+}
+
+/*
+ * gp_task.job_changed(), the trigger on gp_task.job.
+ *
+ * Whatever writes a job -- the procedures, or a statement of anybody allowed
+ * to write the table -- says so to the scheduler, as pg_cron's
+ * cron.job_cache_invalidate() does: an invalidation of the table, sent as
+ * the transaction commits and not before, which the launcher looks for
+ * every second and answers by reading the jobs again.  A job that runs by
+ * the second would otherwise wait for the next minute's reading to begin.
+ */
+Datum
+gp_task_job_changed(PG_FUNCTION_ARGS)
+{
+	TriggerData *trigdata = (TriggerData *) fcinfo->context;
+
+	if (!CALLED_AS_TRIGGER(fcinfo))
+		ereport(ERROR,
+				(errcode(ERRCODE_E_R_I_E_TRIGGER_PROTOCOL_VIOLATED),
+				 errmsg("gp_task.job_changed() is a trigger function")));
+
+	CacheInvalidateRelcacheByRelid(RelationGetRelid(trigdata->tg_relation));
+
+	return PointerGetDatum(NULL);
 }
 
 void

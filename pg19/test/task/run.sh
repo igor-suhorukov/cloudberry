@@ -23,8 +23,9 @@
 # they are functions over tables in one database, which is pg_cron's shape and
 # the one "Cluster metadata without shared catalogs" leaves available.
 #
-# This suite waits for real time to pass: a schedule is in minutes, so a task
-# that runs cannot be observed any faster than a minute.
+# This suite waits for real time to pass: once for a minute, to see a
+# schedule of cron's run when its minute comes, and otherwise for seconds,
+# with schedules of seconds, which Cloudberry's scheduler takes as well.
 #
 #   PG_BINDIR=/path/to/patched/pg19/bin pg19/test/task/run.sh
 #
@@ -89,7 +90,7 @@ eventually() {
 	while [ "$(date +%s)" -lt "$deadline" ]; do
 		got=$(q "$2")
 		[ "$got" = "$3" ] && { ok "$1"; return; }
-		sleep 2
+		sleep 0.5
 	done
 	notok "$1" "want [$3], last saw [$got] after ${4:-100}s"
 }
@@ -135,14 +136,29 @@ is "neither is readable by everybody, because they hold other people's commands"
       AND pg_catalog.has_table_privilege('public', schemaname || '.' || tablename, 'SELECT');" "0"
 
 ###############################################################################
-echo "2. a schedule is read by Cloudberry's own cron parser"
+echo "2. a schedule is cron's, read by Cloudberry's own parser, or seconds"
 ###############################################################################
 accepted "five fields" "SELECT gp_task.validate_schedule('*/5 * * * *');"
 accepted "names, not just numbers" "SELECT gp_task.validate_schedule('0 3 * * mon');"
 accepted "a macro" "SELECT gp_task.validate_schedule('@daily');"
-refused "a field too few" "SELECT gp_task.validate_schedule('* * * *');" "is not a schedule"
-refused "a minute that does not exist" "SELECT gp_task.validate_schedule('99 * * * *');" "is not a schedule"
-refused "words that are not a schedule" "SELECT gp_task.validate_schedule('every tuesday');" "is not a schedule"
+refused "a field too few" "SELECT gp_task.validate_schedule('* * * *');" "invalid schedule: * * * *"
+refused "a minute that does not exist" "SELECT gp_task.validate_schedule('99 * * * *');" "invalid schedule"
+refused "words that are not a schedule" "SELECT gp_task.validate_schedule('every tuesday');" "invalid schedule"
+refused "refused in Cloudberry's words" "SELECT gp_task.validate_schedule('every tuesday');" \
+        "HINT:  Use cron format (e.g. 5 4 * * *), or interval format '[1-59] seconds'"
+# Cloudberry's own test's (src/test/regress/sql/task.sql), each way.
+accepted "a number of seconds" "SELECT gp_task.validate_schedule('30 seconds');"
+accepted "one second, in the singular" "SELECT gp_task.validate_schedule('1 second');"
+accepted "in any case, with spaces around" "SELECT gp_task.validate_schedule(' 30 sEcOnDs ');"
+accepted "and between" "SELECT gp_task.validate_schedule('17  seconds ');"
+accepted "up to 59" "SELECT gp_task.validate_schedule('59 seconds');"
+refused "not none" "SELECT gp_task.validate_schedule('0 seconds');" "invalid schedule: 0 seconds"
+refused "nor a minute's worth" "SELECT gp_task.validate_schedule('60 seconds');" "invalid schedule: 60 seconds"
+refused "nor fewer than none" "SELECT gp_task.validate_schedule('-1 seconds');" "invalid schedule: -1 seconds"
+refused "nor more than a number holds" "SELECT gp_task.validate_schedule('1000000000000 seconds');" \
+        "invalid schedule: 1000000000000 seconds"
+refused "nor a word that is not seconds" "SELECT gp_task.validate_schedule('5 secondc');" "invalid schedule: 5 secondc"
+refused "nor anything after it" "SELECT gp_task.validate_schedule('50 seconds c');" "invalid schedule: 50 seconds c"
 
 ###############################################################################
 echo "3. tasks are written, changed and removed"
@@ -156,7 +172,7 @@ is "and a row that says what it is" \
 is "it defaults to this database and this user" \
    "SELECT database = current_database() AND username = current_user FROM gp_task.job WHERE jobname = 't1';" "t"
 refused "a task whose schedule cannot be read is refused when it is written" \
-        "CALL gp_task.create_task('bad', 'not a schedule', 'SELECT 1');" "is not a schedule"
+        "CALL gp_task.create_task('bad', 'not a schedule', 'SELECT 1');" "invalid schedule"
 is "and leaves nothing behind" \
    "SELECT count(*) FROM gp_task.job WHERE jobname = 'bad';" "0"
 
@@ -201,7 +217,7 @@ eventually "and the process that ran it" \
 ###############################################################################
 echo "5. a task that fails is recorded as failing, with its reason"
 ###############################################################################
-q "CALL gp_task.create_task('breaks', '* * * * *', 'SELECT 1 / 0');" > /dev/null
+q "CALL gp_task.create_task('breaks', '1 second', 'SELECT 1 / 0');" > /dev/null
 eventually "a failing command is recorded" \
            "SELECT status FROM gp_task.run_history h JOIN gp_task.job j USING (jobid)
               WHERE j.jobname = 'breaks' ORDER BY runid DESC LIMIT 1;" "failed"
@@ -217,14 +233,14 @@ echo "6. a task names the database it runs in, which need not be this one"
 ###############################################################################
 q "CREATE DATABASE other_db;" > /dev/null
 qd other_db "CREATE TABLE elsewhere (at timestamptz DEFAULT now());" > /dev/null
-q "CALL gp_task.create_task('over_there', '* * * * *',
+q "CALL gp_task.create_task('over_there', '1 second',
        'INSERT INTO elsewhere DEFAULT VALUES', database => 'other_db');" > /dev/null
 
 deadline=$(( $(date +%s) + 100 )); got=
 while [ "$(date +%s)" -lt "$deadline" ]; do
 	got=$(qd other_db "SELECT count(*) > 0 FROM elsewhere;")
 	[ "$got" = "t" ] && break
-	sleep 2
+	sleep 0.5
 done
 [ "$got" = "t" ] && ok "the command runs in the database it names" \
                  || notok "the command runs in the database it names" "last saw [$got]"
@@ -235,7 +251,7 @@ eventually "and its history is still in the database the scheduler reads" \
 ###############################################################################
 echo "7. a task that names something that is not there fails cleanly"
 ###############################################################################
-q "CALL gp_task.create_task('nowhere', '* * * * *', 'SELECT 1', database => 'no_such_db');" > /dev/null
+q "CALL gp_task.create_task('nowhere', '1 second', 'SELECT 1', database => 'no_such_db');" > /dev/null
 eventually "a missing database is reported against the job, not the server" \
            "SELECT return_message FROM gp_task.run_history h JOIN gp_task.job j USING (jobid)
               WHERE j.jobname = 'nowhere' ORDER BY runid DESC LIMIT 1;" \
@@ -251,11 +267,18 @@ is "the history of a dropped task is gone" \
      WHERE NOT EXISTS (SELECT 1 FROM gp_task.job j WHERE j.jobid = h.jobid);" "0"
 
 q "CALL gp_task.alter_task('every_minute', active => false);
-   DELETE FROM ran;" > /dev/null
-sleep 70
-is "a task switched off does not run" "SELECT count(*) FROM ran;" "0"
+   CREATE TABLE ticks (at timestamptz DEFAULT now());
+   CALL gp_task.create_task('every_second', '1 second', 'INSERT INTO ticks DEFAULT VALUES');" > /dev/null
+eventually "a task of one second runs" "SELECT count(*) >= 2 FROM ticks;" "t" 30
+q "CALL gp_task.alter_task('every_second', active => false);" > /dev/null
+# A run it began before it was switched off may end after; then its seconds
+# pass three times over.
+sleep 2
+q "DELETE FROM ticks;" > /dev/null
+sleep 3
+is "a task switched off does not run" "SELECT count(*) FROM ticks;" "0"
 is "though it is still there" \
-   "SELECT active FROM gp_task.job WHERE jobname = 'every_minute';" "f"
+   "SELECT active FROM gp_task.job WHERE jobname = 'every_second';" "f"
 
 ###############################################################################
 echo "9. a task written in another database is written in the scheduler's"
@@ -299,7 +322,7 @@ case "$out" in
 esac
 out=$(qd other_db "CALL gp_task.create_task('bad_there', 'not a schedule', 'SELECT 1');")
 case "$out" in
-	*"is not a schedule"*) ok "a schedule nothing can run is refused there at once" ;;
+	*"invalid schedule"*) ok "a schedule nothing can run is refused there at once" ;;
 	*) notok "a schedule nothing can run is refused there at once" "$out" ;;
 esac
 out=$(qd other_db "BEGIN READ ONLY;
@@ -309,6 +332,33 @@ case "$out" in
 	*"read-only transaction"*) ok "and a read-only transaction writes nothing there" ;;
 	*) notok "and a read-only transaction writes nothing there" "$out" ;;
 esac
+
+###############################################################################
+echo "10. a task of seconds runs as Cloudberry's does: an interval after it is written, one run at a time"
+###############################################################################
+# The first run comes one interval after the scheduler reads the job, which
+# is after it was written; a run that outlasts its interval is owed one more,
+# never run beside it.
+q "CREATE TABLE made (at timestamptz);
+   INSERT INTO made VALUES (clock_timestamp());
+   CALL gp_task.create_task('five_seconds', '5 seconds', 'SELECT 1');
+   CALL gp_task.create_task('slow', '1 second', 'SELECT pg_sleep(2)');" > /dev/null
+eventually "a task of five seconds runs" \
+   "SELECT count(*) > 0 FROM gp_task.run_history h JOIN gp_task.job j USING (jobid)
+     WHERE j.jobname = 'five_seconds';" "t" 30
+is "and not before five seconds had passed since it was written" \
+   "SELECT bool_and(h.start_time >= m.at + interval '5 seconds')
+      FROM gp_task.run_history h JOIN gp_task.job j USING (jobid), made m
+     WHERE j.jobname = 'five_seconds';" "t"
+eventually "a task whose runs outlast its second runs again and again" \
+   "SELECT count(*) >= 3 FROM gp_task.run_history h JOIN gp_task.job j USING (jobid)
+     WHERE j.jobname = 'slow' AND h.status = 'succeeded';" "t" 30
+is "but never beside itself" \
+   "SELECT count(*) FROM gp_task.run_history a JOIN gp_task.run_history b USING (jobid)
+                        JOIN gp_task.job j USING (jobid)
+     WHERE j.jobname = 'slow' AND a.runid < b.runid
+       AND b.start_time < coalesce(a.end_time, 'infinity');" "0"
+q "CALL gp_task.drop_task('{five_seconds,slow,every_second}');" > /dev/null
 
 echo
 echo "  $pass passed, $fail failed"

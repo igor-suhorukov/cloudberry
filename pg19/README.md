@@ -76,7 +76,9 @@ On one node (M1):
   delta cannot express — an outer join, `min`, `max`, TRUNCATE — is
   recomputed.  A dynamic table refreshes itself through `gp_task`.
 - `gp_task` — the task scheduler, run by a background worker, its jobs in
-  one database (`gp.task_database`) and written there from any other.
+  one database (`gp.task_database`) and written there from any other; a
+  schedule is cron's five fields or, as Cloudberry's may be, an interval of
+  1 to 59 seconds.
 - `gp_sql` — the Cloudberry-only SQL surface: tags, defined once for the
   cluster as Cloudberry's are, directory tables and storage servers, kept in
   one database (`gp.maintenance_database`) for the cluster, and Cloudberry's

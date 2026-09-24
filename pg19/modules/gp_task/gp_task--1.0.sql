@@ -45,9 +45,25 @@ SELECT pg_catalog.pg_extension_config_dump('gp_task.job_jobid_seq', '');
 SELECT pg_catalog.pg_extension_config_dump('gp_task.run_history_runid_seq', '');
 
 /*
- * The schedules are read by Cloudberry's own cron parser.  A schedule it
- * cannot read is refused here, when the task is written, rather than logged
- * once a minute afterwards.
+ * A job's schedule, and anything else of it, is read by the scheduler once a
+ * minute, and at once when it is written: this trigger tells it, as pg_cron's
+ * cron.job_cache_invalidate does, so that a job that runs by the second
+ * begins within one.
+ */
+CREATE FUNCTION gp_task.job_changed()
+RETURNS trigger
+AS 'MODULE_PATHNAME', 'gp_task_job_changed'
+LANGUAGE C;
+
+CREATE TRIGGER job_changed
+	AFTER INSERT OR UPDATE OR DELETE OR TRUNCATE ON gp_task.job
+	FOR EACH STATEMENT EXECUTE FUNCTION gp_task.job_changed();
+
+/*
+ * The schedules are Cloudberry's: cron's five fields, read by Cloudberry's
+ * own cron parser, or an interval of 1 to 59 seconds, as in "30 seconds".  A
+ * schedule that is neither is refused here, when the task is written, rather
+ * than logged once a minute afterwards.
  */
 CREATE FUNCTION gp_task.validate_schedule(schedule text)
 RETURNS void
@@ -210,6 +226,7 @@ COMMENT ON PROCEDURE gp_task.drop_task(text[], boolean) IS
 REVOKE ALL ON gp_task.job FROM PUBLIC;
 REVOKE ALL ON gp_task.run_history FROM PUBLIC;
 REVOKE ALL ON FUNCTION gp_task.validate_schedule(text) FROM PUBLIC;
+REVOKE ALL ON FUNCTION gp_task.job_changed() FROM PUBLIC;
 REVOKE ALL ON FUNCTION gp_task.forward(text, text[]) FROM PUBLIC;
 REVOKE ALL ON PROCEDURE gp_task.create_task(text, text, text, text, text, boolean) FROM PUBLIC;
 REVOKE ALL ON PROCEDURE gp_task.alter_task(text, text, text, text, text, boolean, boolean) FROM PUBLIC;
