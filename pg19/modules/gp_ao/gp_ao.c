@@ -50,6 +50,10 @@
 #include "catalog/namespace.h"
 #include "catalog/pg_class.h"
 #include "catalog/pg_trigger.h"
+#include "catalog/pg_type.h"
+#include "commands/seclabel.h"
+#include "parser/parse_type.h"
+#include "parser/scansup.h"
 #include "commands/defrem.h"
 #include "commands/tablecmds.h"
 #include "commands/vacuum.h"
@@ -389,12 +393,14 @@ gp_ao_ProcessUtility(PlannedStmt *pstmt, const char *queryString,
 	Node	   *parsetree = pstmt->utilityStmt;
 	CreatePending *create = NULL;
 	AlterPending *alter = NULL;
+	List	   *type_encoding = NIL;
 	IntoClause *ctas_into = NULL;
 	List	   *ctas_opts = NIL;
 
 	if (readOnlyTree &&
 		(IsA(parsetree, CreateStmt) || IsA(parsetree, CreateTableAsStmt) ||
-		 IsA(parsetree, AlterTableStmt) || IsA(parsetree, SecLabelStmt)))
+		 IsA(parsetree, AlterTableStmt) || IsA(parsetree, SecLabelStmt) ||
+		 IsA(parsetree, DefineStmt)))
 	{
 		pstmt = copyObject(pstmt);
 		parsetree = pstmt->utilityStmt;
@@ -445,6 +451,37 @@ gp_ao_ProcessUtility(PlannedStmt *pstmt, const char *queryString,
 					stmt->label = ao_encoding_type_label(stmt->label);
 				break;
 			}
+		case T_DefineStmt:
+			{
+				DefineStmt *stmt = (DefineStmt *) parsetree;
+				ListCell   *lc;
+
+				/*
+				 * CREATE TYPE ... (..., compresstype=..., blocksize=...):
+				 * Cloudberry's default encoding of the type's columns, which
+				 * gp_ao keeps as the type's label once it is made.
+				 */
+				if (stmt->kind != OBJECT_TYPE)
+					break;
+				foreach(lc, stmt->definition)
+				{
+					DefElem    *def = lfirst(lc);
+
+					if (pg_strcasecmp(def->defname, "compresstype") == 0 ||
+						pg_strcasecmp(def->defname, "compresslevel") == 0 ||
+						pg_strcasecmp(def->defname, "blocksize") == 0)
+					{
+						type_encoding = lappend(type_encoding,
+												makeDefElem(downcase_identifier(def->defname,
+																				strlen(def->defname),
+																				false, false),
+															(Node *) makeString(defGetString(def)),
+															-1));
+						stmt->definition = foreach_delete_current(stmt->definition, lc);
+					}
+				}
+				break;
+			}
 		case T_CreateTrigStmt:
 			check_trigger((CreateTrigStmt *) parsetree);
 			break;
@@ -465,6 +502,17 @@ gp_ao_ProcessUtility(PlannedStmt *pstmt, const char *queryString,
 
 	if (create != NULL)
 		finish_create(create);
+	if (type_encoding != NIL)
+	{
+		DefineStmt *stmt = (DefineStmt *) parsetree;
+		ObjectAddress addr;
+
+		addr.classId = TypeRelationId;
+		addr.objectId = typenameTypeId(NULL, makeTypeNameFromNameList(stmt->defnames));
+		addr.objectSubId = 0;
+		SetSecurityLabel(&addr, "gp_ao",
+						 ao_encoding_type_label(ao_enc_format(type_encoding)));
+	}
 	if (ctas_into != NULL)
 	{
 		Oid			relid = RangeVarGetRelid(ctas_into->rel, NoLock, true);
@@ -811,6 +859,7 @@ _PG_init(void)
 	ao_register_rmgr();
 	ao_register_table_ams();
 	ao_dml_init();
+	bm_init();
 
 	prev_ProcessUtility = ProcessUtility_hook;
 	ProcessUtility_hook = gp_ao_ProcessUtility;

@@ -271,3 +271,106 @@ AS $$
 $$ LANGUAGE sql STRICT STABLE;
 
 GRANT EXECUTE ON ALL FUNCTIONS IN SCHEMA gp_toolkit TO PUBLIC;
+
+/* ------------------------------------------------------------------------- */
+/* The bitmap index                                                          */
+/* ------------------------------------------------------------------------- */
+
+/*
+ * Cloudberry's on-disk bitmap index, an index access method of its own
+ * name.  Each index keeps its list of values in a heap and a B-tree of their
+ * own, which go in pg_bitmapindex, as Cloudberry's do: a schema whose name,
+ * starting pg_, keeps pg_dump from dumping them.
+ */
+SET allow_system_table_mods = on;
+CREATE SCHEMA pg_bitmapindex;
+RESET allow_system_table_mods;
+
+CREATE FUNCTION gp_ao.bitmap_handler(internal)
+RETURNS index_am_handler
+AS 'MODULE_PATHNAME', 'bmhandler'
+LANGUAGE C STRICT;
+
+CREATE ACCESS METHOD bitmap TYPE INDEX HANDLER gp_ao.bitmap_handler;
+COMMENT ON ACCESS METHOD bitmap IS 'bitmap index access method';
+
+/*
+ * Its operator classes are B-tree's, as Cloudberry's are: the list of values
+ * is a real B-tree.  Each B-tree operator family of pg_catalog is made a
+ * bitmap one of the same name, its classes with their own type's members,
+ * and the family its members across types.  A second class of a family for
+ * the same type -- cidr_ops beside inet_ops -- has no members of its own to
+ * give, and is not made: the first serves the type.
+ */
+DO $$
+DECLARE
+	f record;
+	c record;
+	m record;
+	items text[];
+BEGIN
+	FOR f IN SELECT opf.oid, opf.opfname
+			   FROM pg_catalog.pg_opfamily opf
+			   JOIN pg_catalog.pg_am am ON am.oid = opf.opfmethod
+			  WHERE am.amname = 'btree'
+				AND opf.opfnamespace = 'pg_catalog'::pg_catalog.regnamespace
+			  ORDER BY opf.opfname
+	LOOP
+		EXECUTE format('CREATE OPERATOR FAMILY pg_catalog.%I USING bitmap', f.opfname);
+
+		FOR c IN SELECT DISTINCT ON (opc.opcintype) opc.opcname, opc.opcintype, opc.opcdefault
+				   FROM pg_catalog.pg_opclass opc
+				  WHERE opc.opcfamily = f.oid
+				  ORDER BY opc.opcintype, opc.opcdefault DESC, opc.opcname
+		LOOP
+			items := ARRAY(
+				SELECT format('OPERATOR %s %s', amopstrategy, amopopr::pg_catalog.regoperator)
+				  FROM pg_catalog.pg_amop
+				 WHERE amopfamily = f.oid AND amoplefttype = c.opcintype
+				   AND amoprighttype = c.opcintype AND amoppurpose = 's'
+				 ORDER BY amopstrategy)
+				|| ARRAY(
+				SELECT format('FUNCTION %s (%s, %s) %s', amprocnum,
+							  amproclefttype::pg_catalog.regtype,
+							  amprocrighttype::pg_catalog.regtype,
+							  amproc::pg_catalog.regprocedure)
+				  FROM pg_catalog.pg_amproc
+				 WHERE amprocfamily = f.oid AND amproclefttype = c.opcintype
+				   AND amprocrighttype = c.opcintype
+				 ORDER BY amprocnum);
+			IF pg_catalog.array_length(items, 1) IS NULL THEN
+				CONTINUE;
+			END IF;
+			EXECUTE format('CREATE OPERATOR CLASS pg_catalog.%I %s FOR TYPE %s USING bitmap FAMILY pg_catalog.%I AS %s',
+						   c.opcname, CASE WHEN c.opcdefault THEN 'DEFAULT' ELSE '' END,
+						   c.opcintype::pg_catalog.regtype, f.opfname,
+						   pg_catalog.array_to_string(items, ', '));
+		END LOOP;
+
+		/* what the classes did not take: the members across types */
+		items := ARRAY(
+			SELECT format('OPERATOR %s %s', amopstrategy, amopopr::pg_catalog.regoperator)
+			  FROM pg_catalog.pg_amop a
+			 WHERE amopfamily = f.oid AND amoppurpose = 's'
+			   AND NOT (amoplefttype = amoprighttype AND EXISTS
+						(SELECT 1 FROM pg_catalog.pg_opclass
+						  WHERE opcfamily = f.oid AND opcintype = a.amoplefttype))
+			 ORDER BY amoplefttype, amoprighttype, amopstrategy)
+			|| ARRAY(
+			SELECT format('FUNCTION %s (%s, %s) %s', amprocnum,
+						  amproclefttype::pg_catalog.regtype,
+						  amprocrighttype::pg_catalog.regtype,
+						  amproc::pg_catalog.regprocedure)
+			  FROM pg_catalog.pg_amproc p
+			 WHERE amprocfamily = f.oid
+			   AND NOT (amproclefttype = amprocrighttype AND EXISTS
+						(SELECT 1 FROM pg_catalog.pg_opclass
+						  WHERE opcfamily = f.oid AND opcintype = p.amproclefttype))
+			 ORDER BY amproclefttype, amprocrighttype, amprocnum);
+		IF pg_catalog.array_length(items, 1) IS NOT NULL THEN
+			EXECUTE format('ALTER OPERATOR FAMILY pg_catalog.%I USING bitmap ADD %s',
+						   f.opfname, pg_catalog.array_to_string(items, ', '));
+		END IF;
+	END LOOP;
+END
+$$;

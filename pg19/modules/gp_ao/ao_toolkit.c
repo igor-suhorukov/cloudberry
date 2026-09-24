@@ -417,8 +417,9 @@ gp_ao_aoblkdir(PG_FUNCTION_ARGS)
 /*
  * The table's bytes uncompressed over its bytes stored, to two decimals, over
  * every segment -- which gp_toolkit's functions, running on each, give it --
- * as Cloudberry's does: 1 for a table with no segment file yet, -1 for one
- * whose files are empty or a partitioned table.
+ * as Cloudberry's does: for a table by row with no segment file yet 1, and
+ * -1 for one whose files are empty, a table by column with none, or a
+ * partitioned table.
  */
 Datum
 gp_ao_compression_ratio(PG_FUNCTION_ARGS)
@@ -464,8 +465,9 @@ gp_ao_compression_ratio(PG_FUNCTION_ARGS)
 		eof_uncompressed = DatumGetInt64(SPI_getbinval(SPI_tuptable->vals[0],
 													   SPI_tuptable->tupdesc, 2,
 													   &isnull2));
+		/* No segment file yet: 1 by row, -1 by column, as in Cloudberry. */
 		if (isnull1 || isnull2)
-			ratio = 1;
+			ratio = columnar ? -1 : 1;
 		else if (eof > 0)
 			ratio = round((float8) eof_uncompressed / (float8) eof * 100.0) / 100.0;
 	}

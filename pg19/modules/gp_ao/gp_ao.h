@@ -387,6 +387,9 @@ extern PGDLLIMPORT int gp_appendonly_compaction_threshold;
 extern PGDLLIMPORT bool gp_appendonly_compaction;
 extern PGDLLIMPORT bool gp_select_invisible;
 
+/* The bitmap index (bitmap/), which gp_ao carries, as Cloudberry's is built in. */
+extern void bm_init(void);
+
 extern bool ao_is_ao_table(Relation rel);
 extern void ao_register_table_ams(void);
 extern void ao_scan_set_segno(TableScanDesc scan, int segno);

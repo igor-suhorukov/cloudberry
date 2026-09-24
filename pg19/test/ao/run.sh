@@ -480,7 +480,36 @@ got=$(qr "SELECT label FROM pg_seclabel WHERE objoid = 'ptab'::regclass AND prov
 	|| notok "pg_dump carries a partitioned table's options" "got [$got]"
 
 ###############################################################################
-echo "11. a standby replays gp_ao's records, and has the same rows"
+echo "11. the bitmap index, Cloudberry's, which gp_ao carries"
+###############################################################################
+is "an index access method, with a class for each of B-tree's in pg_catalog" \
+   "SELECT count(*) > 30 FROM pg_opclass c JOIN pg_am a ON a.oid = c.opcmethod WHERE a.amname = 'bitmap';" "t"
+q "CREATE TABLE bmh (a int, b text, c int);
+   INSERT INTO bmh SELECT i, 'v' || (i % 10), i % 3 FROM generate_series(1, 50000) i;
+   CREATE INDEX bmh_b ON bmh USING bitmap (b);
+   CREATE INDEX bmh_c ON bmh USING bitmap (c);
+   CREATE TABLE bma (a int, b int) USING ao_column;
+   INSERT INTO bma SELECT i, i % 5 FROM generate_series(1, 50000) i;
+   CREATE INDEX bma_b ON bma USING bitmap (b);" > /dev/null
+is "its list of values is a heap and a B-tree of each index's, in pg_bitmapindex" \
+   "SELECT count(*) FROM pg_class WHERE relnamespace = 'pg_bitmapindex'::regnamespace;" "6"
+isl "a bitmap scan of a heap table" \
+   "SET enable_seqscan = off; SELECT count(*) FROM bmh WHERE b = 'v3' AND c = 1;" "1667"
+isl "an index scan" \
+   "SET enable_seqscan = off; SET enable_bitmapscan = off; SELECT count(*) FROM bmh WHERE c = 2;" "16667"
+isl "and of an append-optimized table, whose TIDs are the port's" \
+   "SET enable_seqscan = off; SELECT count(*) FROM bma WHERE b = 2;" "10000"
+q "INSERT INTO bmh SELECT i, 'new', 7 FROM generate_series(1, 100) i;
+   DELETE FROM bma WHERE a <= 10000;" > /dev/null
+q "VACUUM bmh;" > /dev/null
+q "VACUUM bma;" > /dev/null
+isl "rows inserted after the build are found, and VACUUM builds it again" \
+   "SET enable_seqscan = off; SELECT (SELECT count(*) FROM bmh WHERE c = 7) || ' ' || (SELECT count(*) FROM bma WHERE b = 2);" "100 8000"
+is "DROP INDEX drops its list of values" \
+   "DROP INDEX bmh_b; SELECT count(*) FROM pg_class WHERE relnamespace = 'pg_bitmapindex'::regnamespace;" "4"
+
+###############################################################################
+echo "12. a standby replays gp_ao's records, and has the same rows"
 ###############################################################################
 SB="$WORK/standby"
 SBPORT=$((PORT + 1))
@@ -503,20 +532,27 @@ q "CREATE TABLE rep (a int, b text) WITH (appendonly=true, orientation=column, c
    INSERT INTO rep SELECT i, md5(i::text) FROM generate_series(1, 50000) i;
    DELETE FROM rep WHERE a % 3 = 0;
    UPDATE rep SET b = 'u' WHERE a % 7 = 0;" > /dev/null
+q "CREATE INDEX rep_b ON rep USING bitmap (b);
+   INSERT INTO rep SELECT i, 'u' FROM generate_series(60001, 60100) i;" > /dev/null
 caught_up || notok "the standby catches up"
 want=$(q "SELECT count(*) || ' ' || md5(string_agg(a || b, ',' ORDER BY a)) FROM rep;")
 is "the standby reads the rows the primary has" \
    "SELECT '$(qs "SELECT count(*) || ' ' || md5(string_agg(a || b, ',' ORDER BY a)) FROM rep;")';" "$want"
 out=$(qs "INSERT INTO rep VALUES (1, 'x');")
 case "$out" in *"read-only transaction"*) ok "and refuses to write any" ;; *) notok "the standby refuses to write" "$out" ;; esac
+want=$(q "SET enable_seqscan = off; SELECT count(*) FROM rep WHERE b = 'u';" | tail -1)
+got=$("$PSQL" -X -q -t -A -p "$SBPORT" -d postgres -c "SET enable_seqscan = off" -c "SELECT count(*) FROM rep WHERE b = 'u';" 2>&1 | tail -1)
+[ -n "$want" ] && [ "$want" = "$got" ] && ok "its bitmap index, replayed through resource manager 201, answers as the primary's" \
+	|| notok "the standby's bitmap index" "want [$want] got [$got]"
 "$BINDIR/pg_ctl" -D "$SB" -m fast -w stop > /dev/null 2>&1
 
 ###############################################################################
-echo "12. a crash: recovery replays the pages; without gp_ao it stops (check 12)"
+echo "13. a crash: recovery replays the pages; without gp_ao it stops (check 12)"
 ###############################################################################
 q "CHECKPOINT;
    INSERT INTO rep SELECT i, 'late' FROM generate_series(1, 1000) i;" > /dev/null
 want=$(q "SELECT count(*) FROM rep;")
+wantbm=$(q "SET enable_seqscan = off; SELECT count(*) FROM rep WHERE b = 'late';" | tail -1)
 "$BINDIR/pg_ctl" -D "$WORK/data" -m immediate -w stop > /dev/null 2>&1
 "$BINDIR/pg_ctl" -D "$WORK/data" -l "$WORK/log-nogpao" -o "-c shared_preload_libraries=gp_core,gp_sql" \
 	-w -t 60 start > /dev/null 2>&1
@@ -527,6 +563,8 @@ out=$(grep -o 'FATAL:  resource manager with ID 200 not registered' "$WORK/log-n
 	|| notok "recovery without gp_ao" "started=$started $(grep -E 'FATAL|PANIC' "$WORK/log-nogpao" | head -3)"
 "$BINDIR/pg_ctl" -D "$WORK/data" -l "$WORK/log" -w -t 60 start > /dev/null 2>&1
 is "with it, the rows written after the checkpoint are back" "SELECT count(*) FROM rep;" "$want"
+isl "and the bitmap index finds them" \
+   "SET enable_seqscan = off; SELECT count(*) FROM rep WHERE b = 'late';" "$wantbm"
 # pg_waldump loads no extension, so it knows gp_ao's records by their ID.
 if "$BINDIR/pg_waldump" -p "$WORK/data/pg_wal" -r custom200 \
 	"$(ls "$WORK/data/pg_wal" | grep -E '^[0-9A-F]{24}$' | head -1)" 2>/dev/null | grep -q "custom200"; then
@@ -536,7 +574,7 @@ else
 fi
 
 ###############################################################################
-echo "13. pg_checksums verifies every page of an append-optimized table"
+echo "14. pg_checksums verifies every page of an append-optimized table"
 ###############################################################################
 q "CHECKPOINT;" > /dev/null
 "$BINDIR/pg_ctl" -D "$WORK/data" -m fast -w stop > /dev/null 2>&1
