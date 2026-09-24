@@ -148,6 +148,13 @@ GpDtxFormGid(FullTransactionId gxid, char *gid)
 			 U64FromFullTransactionId(gxid));
 }
 
+void
+GpDtxFormLoopbackGid(FullTransactionId gxid, Oid dboid, char *gid)
+{
+	snprintf(gid, GP_DTX_GIDLEN, GP_DTX_GID_PREFIX UINT64_FORMAT "_%u",
+			 U64FromFullTransactionId(gxid), dboid);
+}
+
 bool
 GpDtxParseGid(const char *gid, FullTransactionId *gxid)
 {
@@ -160,7 +167,17 @@ GpDtxParseGid(const char *gid, FullTransactionId *gxid)
 		return false;
 	errno = 0;
 	value = strtou64(gid + prefix, &end, 10);
-	if (errno != 0 || *end != '\0' || value < FirstNormalTransactionId)
+	if (errno != 0 || value < FirstNormalTransactionId)
+		return false;
+
+	/* a part in a database of the coordinator's own: "_<database OID>" */
+	if (*end == '_' && isdigit((unsigned char) end[1]))
+	{
+		end++;
+		while (isdigit((unsigned char) *end))
+			end++;
+	}
+	if (*end != '\0')
 		return false;
 	*gxid = FullTransactionIdFromU64(value);
 	return true;
@@ -1065,7 +1082,13 @@ dtx_pre_prepare(void)
 	}
 	dropped_temp = NIL;
 
-	if (!TransactionIdIsValid(xid))
+	/*
+	 * The map is a segment's, for its distributed snapshots.  A part prepared
+	 * on the coordinator itself -- the loopback's, in another of its
+	 * databases -- is read by the coordinator's own snapshots, and no
+	 * distributed snapshot would ever prune it.
+	 */
+	if (!TransactionIdIsValid(xid) || GpClusterContentId() < 0)
 		return;
 	nchildren = xactGetCommittedChildren(&children);
 
@@ -1308,7 +1331,15 @@ recovery_wait_event(void)
 	return event;
 }
 
-/* A connection to one database of a segment, or NULL, logged. */
+/* "segment 0", or "the coordinator", for the messages. */
+static char *
+node_name(const GpSegmentConfig *node)
+{
+	return node->content < 0 ? pstrdup("the coordinator")
+		: psprintf("segment %d", node->content);
+}
+
+/* A connection to one database of a node, or NULL, logged. */
 static PGconn *
 recovery_connect(const GpSegmentConfig *seg, const char *dbname)
 {
@@ -1343,8 +1374,8 @@ recovery_connect(const GpSegmentConfig *seg, const char *dbname)
 	if (conn == NULL || PQstatus(conn) != CONNECTION_OK)
 	{
 		ereport(LOG,
-				(errmsg("distributed transaction recovery could not connect to segment %d (%s:%d), database \"%s\"",
-						seg->content, seg->hostname, seg->port, dbname),
+				(errmsg("distributed transaction recovery could not connect to %s (%s:%d), database \"%s\"",
+						node_name(seg), seg->hostname, seg->port, dbname),
 				 conn ? errdetail_internal("%s", PQerrorMessage(conn)) : 0));
 		if (conn != NULL)
 			libpqsrv_disconnect(conn);
@@ -1354,13 +1385,15 @@ recovery_connect(const GpSegmentConfig *seg, const char *dbname)
 }
 
 /*
- * One round: every part a segment holds prepared under a distributed gid,
+ * One round: every part a node holds prepared under a distributed gid,
  * committed or rolled back by what the coordinator's clog says of its
- * transaction.  One still in progress here is its backend's.  "min_age"
- * leaves alone what was prepared less than that many seconds ago, whose
- * second phase is on its way from the backend that prepared it; the round
- * after a restart, and one a backend asked for, take everything.
- * Returns whether every segment was reached.
+ * transaction -- each segment's, and the coordinator's own, which the
+ * loopback prepared in another of its databases (gp_loopback.c).  One still
+ * in progress here is its backend's.  "min_age" leaves alone what was
+ * prepared less than that many seconds ago, whose second phase is on its way
+ * from the backend that prepared it; the round after a restart, and one a
+ * backend asked for, take everything.  Returns whether every node was
+ * reached.
  */
 static bool
 recovery_round(int min_age)
@@ -1370,13 +1403,14 @@ recovery_round(int min_age)
 	bool		complete = true;
 
 	segs = GpClusterSegments(&nsegs);
-	for (int s = 0; s < nsegs; s++)
+	for (int s = 0; s <= nsegs; s++)
 	{
-		PGconn	   *conn = recovery_connect(&segs[s], "postgres");
+		const GpSegmentConfig *node = s < nsegs ? &segs[s] : GpClusterSelf();
+		PGconn	   *conn = recovery_connect(node, "postgres");
 		PGresult   *res;
 
 		if (conn == NULL)
-			conn = recovery_connect(&segs[s], "template1");
+			conn = recovery_connect(node, "template1");
 		if (conn == NULL)
 		{
 			complete = false;
@@ -1392,8 +1426,8 @@ recovery_round(int min_age)
 		if (PQresultStatus(res) != PGRES_TUPLES_OK)
 		{
 			ereport(LOG,
-					(errmsg("distributed transaction recovery could not read the prepared transactions of segment %d",
-							segs[s].content),
+					(errmsg("distributed transaction recovery could not read the prepared transactions of %s",
+							node_name(node)),
 					 errdetail_internal("%s", PQerrorMessage(conn))));
 			PQclear(res);
 			libpqsrv_disconnect(conn);
@@ -1420,15 +1454,15 @@ recovery_round(int min_age)
 			if (outcome == DTX_UNKNOWN)
 			{
 				ereport(WARNING,
-						(errmsg("segment %d holds prepared transaction \"%s\", which the coordinator has no record of",
-								segs[s].content, gid),
-						 errhint("Commit or roll it back by hand, in database \"%s\" of that segment.",
+						(errmsg("%s holds prepared transaction \"%s\", which the coordinator has no record of",
+								node_name(node), gid),
+						 errhint("Commit or roll it back by hand, in database \"%s\" there.",
 								 dbname)));
 				continue;
 			}
 
 			/* COMMIT PREPARED runs in the database it was prepared in */
-			dbconn = recovery_connect(&segs[s], dbname);
+			dbconn = recovery_connect(node, dbname);
 			if (dbconn == NULL)
 			{
 				complete = false;
@@ -1439,13 +1473,13 @@ recovery_round(int min_age)
 			done = libpqsrv_exec(dbconn, sql, recovery_wait_event());
 			if (PQresultStatus(done) != PGRES_COMMAND_OK)
 				ereport(LOG,
-						(errmsg("distributed transaction recovery could not finish \"%s\" on segment %d",
-								gid, segs[s].content),
+						(errmsg("distributed transaction recovery could not finish \"%s\" on %s",
+								gid, node_name(node)),
 						 errdetail_internal("%s", PQerrorMessage(dbconn))));
 			else
 				ereport(LOG,
-						(errmsg("distributed transaction recovery: %s on segment %d",
-								sql, segs[s].content)));
+						(errmsg("distributed transaction recovery: %s on %s",
+								sql, node_name(node))));
 			PQclear(done);
 			libpqsrv_disconnect(dbconn);
 		}

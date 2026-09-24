@@ -40,14 +40,11 @@
  * table rather than a catalog object, so the dependency is an
  * object_access_hook instead.
  *
- * The one thing this cannot do yet is a dynamic table outside the database
- * gp.task_database names.  Cloudberry's pg_task is a shared catalog and is
- * the same from everywhere; these jobs live in one database, so a row written
- * anywhere else would be one the scheduler never reads.  That is refused
- * rather than written, and what removes the restriction is the loopback
- * connection "Catalogs: where the data lives" describes -- which is the
- * general answer for every piece of cluster metadata, not something this
- * module should invent for itself.
+ * Cloudberry's pg_task is a shared catalog, the same from everywhere; these
+ * jobs live in the database gp.task_database names.  A dynamic table in any
+ * other database has its job written there by gp_task's procedures, through
+ * gp_core's loopback, as the statement that made it commits -- in two phases
+ * with it on a cluster -- and the job refreshes it where it is.
  *
  *-------------------------------------------------------------------------
  */
@@ -66,6 +63,7 @@
 #include "utils/lsyscache.h"
 #include "utils/syscache.h"
 
+#include "gp_core_api.h"
 #include "gp_label.h"
 #include "gp_matview.h"
 
@@ -138,30 +136,37 @@ task_extension_present(void)
 	return OidIsValid(get_namespace_oid("gp_task", true));
 }
 
-/*
- * Where the scheduler reads its jobs.  A job written anywhere else is one it
- * never sees.
- */
-static void
-check_this_is_the_task_database(void)
+/* Is this the database the scheduler reads its jobs from? */
+static bool
+is_task_database(void)
 {
 	const char *task_database = GetConfigOption("gp.task_database", true, false);
-	char	   *here = get_database_name(MyDatabaseId);
 
-	if (task_database == NULL)
+	return task_database != NULL &&
+		strcmp(get_database_name(MyDatabaseId), task_database) == 0;
+}
+
+/* The scheduler, which the view's task needs, is loaded. */
+static void
+check_the_scheduler_is_loaded(void)
+{
+	if (GetConfigOption("gp.task_database", true, false) == NULL)
 		ereport(ERROR,
 				(errcode(ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE),
 				 errmsg("a dynamic table needs the task scheduler"),
 				 errhint("Add \"gp_task\" to \"shared_preload_libraries\".")));
+}
 
-	if (strcmp(here, task_database) != 0)
-		ereport(ERROR,
-				(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
-				 errmsg("a dynamic table cannot be made in database \"%s\"", here),
-				 errdetail("The scheduler reads its jobs from database \"%s\", which is what \"gp.task_database\" names, and a job written here would not be read.",
-						   task_database),
-				 errhint("Make it in \"%s\", or point \"gp.task_database\" at this database.",
-						 task_database)));
+/*
+ * A segment's backend makes the view the coordinator dispatched, and marks
+ * it; the task is the coordinator's, which the coordinator has written.
+ */
+static bool
+task_is_elsewhere(void)
+{
+	const GpCoreApi *core = GpCoreApiLookup();
+
+	return core != NULL && core->get_role() == GP_ROLE_EXECUTE;
 }
 
 static void
@@ -181,23 +186,28 @@ GpDynAfterCreate(Oid matviewOid, const char *schedule)
 	StringInfoData buf;
 	char	   *viewname;
 
-	/*
-	 * Which database, before whether the extension is here.  Creating gp_task
-	 * in the wrong database would not make a dynamic table work, so saying so
-	 * first would send the reader the wrong way.
-	 */
-	check_this_is_the_task_database();
+	check_the_scheduler_is_loaded();
 
+	/*
+	 * Cloudberry sets pg_class.relisdynamic and keeps the schedule in the
+	 * task.  One label says both things, and it is dropped with the view.
+	 */
+	if (task_is_elsewhere())
+	{
+		GpLabelSet(&addr, GP_LABEL_dynamic_schedule, schedule);
+		return;
+	}
+
+	/*
+	 * gp_task's procedures write the job, here or in gp.task_database, so
+	 * they are what this database needs.
+	 */
 	if (!task_extension_present())
 		ereport(ERROR,
 				(errcode(ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE),
 				 errmsg("a dynamic table needs the task scheduler"),
 				 errhint("Run \"CREATE EXTENSION gp_task\" first.")));
 
-	/*
-	 * Cloudberry sets pg_class.relisdynamic and keeps the schedule in the
-	 * task.  One label says both things, and it is dropped with the view.
-	 */
 	GpLabelSet(&addr, GP_LABEL_dynamic_schedule, schedule);
 	CommandCounterIncrement();
 
@@ -229,18 +239,26 @@ GpDynAfterCreate(Oid matviewOid, const char *schedule)
  * internal dependency of the view; here the view's row in another extension's
  * table has to be removed by hand.
  *
- * Asked of every materialized view rather than only of the dynamic ones: the
- * label may already be gone by the time this runs, and a job left behind
- * would refresh a view that is not there.  Dropping a task that was never
- * there is what missing_ok is for.
+ * In the task database, asked of every materialized view rather than only of
+ * the dynamic ones, since a job left behind would refresh a view that is not
+ * there, and dropping a task that was never there is what missing_ok is for.
+ * In any other, of a dynamic one only -- the view's label is still there as
+ * it goes -- rather than a write to the task database at every DROP.
  */
 void
 GpDynDropped(Oid matviewOid)
 {
 	StringInfoData buf;
 
-	if (!task_extension_present())
+	if (!task_extension_present() || task_is_elsewhere())
 		return;
+	if (!is_task_database())
+	{
+		ObjectAddress addr = matview_address(matviewOid);
+
+		if (GpLabelGet(&addr, GP_LABEL_dynamic_schedule) == NULL)
+			return;
+	}
 
 	if (SPI_connect() != SPI_OK_CONNECT)
 		elog(ERROR, "SPI_connect failed");

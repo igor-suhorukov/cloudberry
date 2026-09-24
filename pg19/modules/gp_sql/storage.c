@@ -30,8 +30,13 @@
  * rules, pg_dump and the pg_user_mappings view that hides another user's
  * options all come with them.
  *
- * What is lost is that they are per database, where Cloudberry's are shared.
- * That is the same loss tags take, and it has the same answer.
+ * Cloudberry's are shared; these live in one database, gp.maintenance_database
+ * -- their mappings hold credentials, so they cannot be labels, which is what
+ * the port's shared metadata otherwise is.  From any other database the SQL
+ * functions that make and change them are called there, as the transaction
+ * commits, through gp_core's loopback, and the views read them there, as the
+ * calling user, so that pg_user_mappings applies its own rule.  A tablespace
+ * is the cluster's, and so, now, is the server its label names.
  *
  * A tablespace reaches a storage server through a "gp" label rather than
  * through the two pg_tablespace columns Cloudberry adds, and it names the
@@ -49,15 +54,20 @@
 #include "postgres.h"
 
 #include "catalog/objectaddress.h"
+#include "catalog/pg_type.h"
 #include "fmgr.h"
+#include "funcapi.h"
 #include "catalog/pg_tablespace.h"
 #include "commands/defrem.h"
 #include "commands/tablespace.h"
+#include "lib/stringinfo.h"
 #include "nodes/makefuncs.h"
+#include "utils/array.h"
 #include "utils/builtins.h"
 #include "utils/lsyscache.h"
 
 #include "gp_label.h"
+#include "gp_loopback.h"
 #include "gp_sql.h"
 
 /*
@@ -162,4 +172,83 @@ gp_sql_tablespace_storage_server(PG_FUNCTION_ARGS)
 		PG_RETURN_NULL();
 
 	PG_RETURN_TEXT_P(cstring_to_text(server));
+}
+
+PG_FUNCTION_INFO_V1(gp_sql_forward_storage);
+PG_FUNCTION_INFO_V1(gp_sql_storage_server_rows);
+PG_FUNCTION_INFO_V1(gp_sql_storage_user_mapping_rows);
+
+/*
+ * gp_sql.forward_storage(function text, args text[])
+ *
+ * One of the functions that make and change storage servers and their
+ * mappings, called in gp.maintenance_database with the same arguments, as
+ * this transaction commits.  Only those five, each argument quoted here, so
+ * that what reaches the other database is one of them and nothing else.
+ */
+Datum
+gp_sql_forward_storage(PG_FUNCTION_ARGS)
+{
+	static const char *const functions[] = {
+		"create_storage_server", "alter_storage_server", "drop_storage_server",
+		"create_storage_user_mapping", "drop_storage_user_mapping",
+	};
+	char	   *function = text_to_cstring(PG_GETARG_TEXT_PP(0));
+	Datum	   *elems;
+	bool	   *nulls;
+	int			n;
+	bool		known = false;
+	StringInfoData sql;
+
+	for (int i = 0; i < lengthof(functions); i++)
+		known |= strcmp(function, functions[i]) == 0;
+	if (!known)
+		ereport(ERROR,
+				(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+				 errmsg("\"%s\" is not a storage server function of gp_sql's", function)));
+
+	deconstruct_array_builtin(PG_GETARG_ARRAYTYPE_P(1), TEXTOID, &elems, &nulls, &n);
+	initStringInfo(&sql);
+	appendStringInfo(&sql, "SELECT " GP_SQL_SCHEMA ".%s(", function);
+	for (int i = 0; i < n; i++)
+		appendStringInfo(&sql, "%s%s", i > 0 ? ", " : "",
+						 nulls[i] ? "NULL"
+						 : quote_literal_cstr(TextDatumGetCString(elems[i])));
+	appendStringInfoChar(&sql, ')');
+
+	GpLoopbackDefer(GpLoopbackMaintenanceDatabase(), sql.data);
+	PG_RETURN_VOID();
+}
+
+/* gp_sql.storage_server_rows(): the servers, from the maintenance database. */
+Datum
+gp_sql_storage_server_rows(PG_FUNCTION_ARGS)
+{
+	InitMaterializedSRF(fcinfo, 0);
+	GpLoopbackQueryInto(GpLoopbackMaintenanceDatabase(),
+						"SELECT s.srvname, pg_catalog.pg_get_userbyid(s.srvowner),"
+						"       s.srvoptions"
+						"  FROM pg_catalog.pg_foreign_server s"
+						"  JOIN pg_catalog.pg_foreign_data_wrapper w ON w.oid = s.srvfdw"
+						" WHERE w.fdwname = 'gp_storage'",
+						(ReturnSetInfo *) fcinfo->resultinfo);
+	return (Datum) 0;
+}
+
+/*
+ * gp_sql.storage_user_mapping_rows(): the mappings, with their options as
+ * pg_user_mappings shows them there to this user.
+ */
+Datum
+gp_sql_storage_user_mapping_rows(PG_FUNCTION_ARGS)
+{
+	InitMaterializedSRF(fcinfo, 0);
+	GpLoopbackQueryInto(GpLoopbackMaintenanceDatabase(),
+						"SELECT m.srvname, m.usename, m.umoptions"
+						"  FROM pg_catalog.pg_user_mappings m"
+						"  JOIN pg_catalog.pg_foreign_server s ON s.srvname = m.srvname"
+						"  JOIN pg_catalog.pg_foreign_data_wrapper w ON w.oid = s.srvfdw"
+						" WHERE w.fdwname = 'gp_storage'",
+						(ReturnSetInfo *) fcinfo->resultinfo);
+	return (Datum) 0;
 }

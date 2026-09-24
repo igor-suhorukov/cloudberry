@@ -28,8 +28,9 @@
  *	- the launcher is a background worker registered during preload;
  *	- the job tables live in one database, named by gp.task_database, the way
  *	  pg_cron keeps them in cron.database_name.  Shared catalogs are what
- *	  Cloudberry uses to make them readable from every database, which is the
- *	  affordance "Cluster metadata without shared catalogs" gives up;
+ *	  Cloudberry uses to make them the same from every database; here a task
+ *	  written in another database is written in that one, through gp_core's
+ *	  loopback, as the writing transaction commits;
  *	- a job runs in a background worker of its own.
  *
  * Cloudberry sources this module is made of:
@@ -49,13 +50,17 @@
  */
 #include "postgres.h"
 
+#include "catalog/pg_type.h"
 #include "fmgr.h"
+#include "lib/stringinfo.h"
 #include "miscadmin.h"
+#include "utils/array.h"
 #include "utils/builtins.h"
 #include "utils/guc.h"
 
 #include "cb_module.h"
 #include "gp_core_api.h"
+#include "gp_loopback.h"
 #include "gp_task.h"
 
 PG_MODULE_MAGIC_EXT(
@@ -70,6 +75,7 @@ bool		gp_task_log_run = false;
 int			gp_task_max_running = 5;
 
 PG_FUNCTION_INFO_V1(gp_task_validate_schedule);
+PG_FUNCTION_INFO_V1(gp_task_forward);
 
 /*
  * gp_task.validate_schedule(text) -- raise if this is not a schedule.
@@ -82,6 +88,46 @@ Datum
 gp_task_validate_schedule(PG_FUNCTION_ARGS)
 {
 	GpTaskCheckSchedule(text_to_cstring(PG_GETARG_TEXT_PP(0)));
+	PG_RETURN_VOID();
+}
+
+/*
+ * gp_task.forward(procedure text, args text[])
+ *
+ * CREATE, ALTER or DROP TASK in a database other than gp.task_database: the
+ * same procedure, with the same arguments, called there as this transaction
+ * commits, through gp_core's loopback -- in two phases with it on a cluster.
+ * Only gp_task's own three, each argument quoted here, so that what reaches
+ * the other database is one of them and nothing else.
+ */
+Datum
+gp_task_forward(PG_FUNCTION_ARGS)
+{
+	static const char *const procedures[] = {"create_task", "alter_task", "drop_task"};
+	char	   *procedure = text_to_cstring(PG_GETARG_TEXT_PP(0));
+	Datum	   *elems;
+	bool	   *nulls;
+	int			n;
+	bool		known = false;
+	StringInfoData sql;
+
+	for (int i = 0; i < lengthof(procedures); i++)
+		known |= strcmp(procedure, procedures[i]) == 0;
+	if (!known)
+		ereport(ERROR,
+				(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+				 errmsg("\"%s\" is not a procedure of gp_task's", procedure)));
+
+	deconstruct_array_builtin(PG_GETARG_ARRAYTYPE_P(1), TEXTOID, &elems, &nulls, &n);
+	initStringInfo(&sql);
+	appendStringInfo(&sql, "CALL gp_task.%s(", procedure);
+	for (int i = 0; i < n; i++)
+		appendStringInfo(&sql, "%s%s", i > 0 ? ", " : "",
+						 nulls[i] ? "NULL"
+						 : quote_literal_cstr(TextDatumGetCString(elems[i])));
+	appendStringInfoChar(&sql, ')');
+
+	GpLoopbackDefer(gp_task_database, sql.data);
 	PG_RETURN_VOID();
 }
 
@@ -155,8 +201,10 @@ _PG_init(void)
 	/*
 	 * The scheduler belongs to the node that dispatches, or to a node running
 	 * on its own.  A segment has one of its own coordinator's jobs to do, not
-	 * jobs of its own, so it registers nothing.
+	 * jobs of its own, so it registers nothing.  By its content id: a
+	 * segment's postmaster is no dispatched backend, and its role here would
+	 * be a utility session's.
 	 */
-	if (GpCoreApiLookup()->get_role() != GP_ROLE_EXECUTE)
+	if (GpCoreApiLookup()->get_content_id() < 0)
 		GpTaskRegisterLauncher();
 }

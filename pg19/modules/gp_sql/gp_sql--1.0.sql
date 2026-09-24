@@ -1056,11 +1056,25 @@ GRANT SELECT ON gp_sql.directory_tables TO PUBLIC;
  * bookkeeping, the ownership rules, pg_dump and the pg_user_mappings view
  * that hides another user's options all come with them.
  *
+ * Cloudberry's two catalogs are shared; these objects live in one database,
+ * gp.maintenance_database.  From any other the functions below are called
+ * there instead, with the same arguments, as the transaction commits, and
+ * the views read what is there -- as the calling user, so that
+ * pg_user_mappings hides there what it would hide here (gp_core's loopback).
+ *
  * The wrapper has no handler on purpose: a storage server is somewhere files
  * live, not something to read foreign tables from.
  *****************************************************************************/
 
 CREATE FOREIGN DATA WRAPPER gp_storage;
+
+CREATE FUNCTION gp_sql.forward_storage(function text, args text[])
+RETURNS void
+AS 'MODULE_PATHNAME', 'gp_sql_forward_storage'
+LANGUAGE C STRICT;
+
+COMMENT ON FUNCTION gp_sql.forward_storage(text, text[]) IS
+	'call one of the storage server functions in gp.maintenance_database, as this transaction commits';
 
 COMMENT ON FOREIGN DATA WRAPPER gp_storage IS
 	'the wrapper Cloudberry''s storage servers become; it reads nothing itself';
@@ -1073,6 +1087,12 @@ AS $$
 DECLARE
 	opts text;
 BEGIN
+	IF pg_catalog.current_database() <> pg_catalog.current_setting('gp.maintenance_database') THEN
+		PERFORM gp_sql.forward_storage('create_storage_server',
+									   ARRAY[servername::text, options::text]);
+		RETURN;
+	END IF;
+
 	/* jsonb keeps no insertion order, so write them in a stable one. */
 	SELECT string_agg(format('%I %L', key, value), ', ' ORDER BY key)
 	  INTO opts FROM jsonb_each_text(coalesce(options, '{}'::jsonb));
@@ -1097,6 +1117,13 @@ DECLARE
 	parts text[] := '{}';
 	k	 text;
 BEGIN
+	IF pg_catalog.current_database() <> pg_catalog.current_setting('gp.maintenance_database') THEN
+		PERFORM gp_sql.forward_storage('alter_storage_server',
+									   ARRAY[servername::text, set_options::text,
+											 drop_options::text]);
+		RETURN;
+	END IF;
+
 	SELECT coalesce(jsonb_object_agg(o.k, o.v), '{}'::jsonb) INTO have
 	  FROM gp_sql.storage_server_options(servername) AS o(k, v);
 
@@ -1130,6 +1157,12 @@ RETURNS void
 LANGUAGE plpgsql
 AS $$
 BEGIN
+	IF pg_catalog.current_database() <> pg_catalog.current_setting('gp.maintenance_database') THEN
+		PERFORM gp_sql.forward_storage('drop_storage_server',
+									   ARRAY[servername::text, missing_ok::text]);
+		RETURN;
+	END IF;
+
 	EXECUTE format('DROP SERVER %s %I',
 				   CASE WHEN missing_ok THEN 'IF EXISTS' ELSE '' END, servername);
 END;
@@ -1144,6 +1177,13 @@ AS $$
 DECLARE
 	opts text;
 BEGIN
+	IF pg_catalog.current_database() <> pg_catalog.current_setting('gp.maintenance_database') THEN
+		PERFORM gp_sql.forward_storage('create_storage_user_mapping',
+									   ARRAY[servername::text, username::text,
+											 options::text]);
+		RETURN;
+	END IF;
+
 	SELECT string_agg(format('%I %L', key, value), ', ' ORDER BY key)
 	  INTO opts FROM jsonb_each_text(coalesce(options, '{}'::jsonb));
 
@@ -1163,6 +1203,13 @@ RETURNS void
 LANGUAGE plpgsql
 AS $$
 BEGIN
+	IF pg_catalog.current_database() <> pg_catalog.current_setting('gp.maintenance_database') THEN
+		PERFORM gp_sql.forward_storage('drop_storage_user_mapping',
+									   ARRAY[servername::text, username::text,
+											 missing_ok::text]);
+		RETURN;
+	END IF;
+
 	EXECUTE format('DROP USER MAPPING %s FOR %I SERVER %I',
 				   CASE WHEN missing_ok THEN 'IF EXISTS' ELSE '' END,
 				   username, servername);
@@ -1181,16 +1228,27 @@ BEGIN ATOMIC
 	 WHERE s.srvname = servername;
 END;
 
+/* The servers and mappings, from the maintenance database, as storage.c reads them. */
+CREATE FUNCTION gp_sql.storage_server_rows(OUT servername name,
+										   OUT serverowner name,
+										   OUT options text[])
+RETURNS SETOF record
+AS 'MODULE_PATHNAME', 'gp_sql_storage_server_rows'
+LANGUAGE C STABLE;
+
+CREATE FUNCTION gp_sql.storage_user_mapping_rows(OUT servername name,
+												 OUT username name,
+												 OUT options text[])
+RETURNS SETOF record
+AS 'MODULE_PATHNAME', 'gp_sql_storage_user_mapping_rows'
+LANGUAGE C STABLE;
+
 CREATE VIEW gp_sql.storage_servers AS
-	SELECT s.srvname AS servername,
-		   pg_catalog.pg_get_userbyid(s.srvowner) AS serverowner,
-		   s.srvoptions AS options
-	  FROM pg_catalog.pg_foreign_server s
-	  JOIN pg_catalog.pg_foreign_data_wrapper w ON w.oid = s.srvfdw
-	 WHERE w.fdwname = 'gp_storage';
+	SELECT s.servername, s.serverowner, s.options
+	  FROM gp_sql.storage_server_rows() s;
 
 COMMENT ON VIEW gp_sql.storage_servers IS
-	'the storage servers of this database; Cloudberry keeps these in the shared catalog gp_storage_server';
+	'the storage servers of the cluster, from gp.maintenance_database; Cloudberry keeps these in the shared catalog gp_storage_server';
 
 GRANT SELECT ON gp_sql.storage_servers TO PUBLIC;
 
@@ -1199,16 +1257,11 @@ GRANT SELECT ON gp_sql.storage_servers TO PUBLIC;
  * not see another user's credentials gets NULL, which is what protects them.
  */
 CREATE VIEW gp_sql.storage_user_mappings AS
-	SELECT m.srvname AS servername,
-		   m.usename AS username,
-		   m.umoptions AS options
-	  FROM pg_catalog.pg_user_mappings m
-	  JOIN pg_catalog.pg_foreign_server s ON s.srvname = m.srvname
-	  JOIN pg_catalog.pg_foreign_data_wrapper w ON w.oid = s.srvfdw
-	 WHERE w.fdwname = 'gp_storage';
+	SELECT m.servername, m.username, m.options
+	  FROM gp_sql.storage_user_mapping_rows() m;
 
 COMMENT ON VIEW gp_sql.storage_user_mappings IS
-	'the storage user mappings of this database; Cloudberry keeps these in gp_storage_user_mapping';
+	'the storage user mappings of the cluster, from gp.maintenance_database; Cloudberry keeps these in gp_storage_user_mapping';
 
 GRANT SELECT ON gp_sql.storage_user_mappings TO PUBLIC;
 

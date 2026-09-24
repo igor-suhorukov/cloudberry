@@ -52,6 +52,7 @@
 #include "gp_gdd.h"
 #include "gp_motion.h"
 #include "gp_label.h"
+#include "gp_loopback.h"
 #include "gp_policy.h"
 #include "gp_scan.h"
 #include "gp_segment.h"
@@ -205,6 +206,13 @@ _PG_init(void)
 	 * process when it is on.
 	 */
 	GpGddInit();
+
+	/*
+	 * The loopback to another database of this server, where the task jobs
+	 * and storage servers are kept: written as a transaction commits, and on
+	 * a cluster's coordinator in two phases with the distributed transaction.
+	 */
+	GpLoopbackInit();
 
 	/*
 	 * gp_segment_id, through O10: the name, where no column has it, and its

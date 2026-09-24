@@ -7,7 +7,8 @@
  * pg_task_run_history, so they are the same from every database.  An
  * extension cannot create a shared catalog, so these are ordinary tables and
  * they live in one database -- the one gp.task_database names, which is where
- * the scheduler looks.  That is how pg_cron keeps them too.
+ * the scheduler looks.  That is how pg_cron keeps them too.  A task written
+ * in any other database is written here, by the procedures below.
  */
 
 CREATE SEQUENCE gp_task.job_jobid_seq;
@@ -64,7 +65,19 @@ COMMENT ON FUNCTION gp_task.validate_schedule(text) IS
  *
  * Cloudberry's messages where it gives one: IF NOT EXISTS of a task that is
  * there, and IF EXISTS of one that is not, each say so and do nothing.
+ *
+ * Called in a database other than gp.task_database, where the scheduler
+ * reads its jobs, each is called there instead, with the same arguments, as
+ * the transaction commits (gp_task.forward): what it says, it says then.
  */
+CREATE FUNCTION gp_task.forward(procedure text, args text[])
+RETURNS void
+AS 'MODULE_PATHNAME', 'gp_task_forward'
+LANGUAGE C STRICT;
+
+COMMENT ON FUNCTION gp_task.forward(text, text[]) IS
+	'call one of gp_task''s procedures in gp.task_database, as this transaction commits';
+
 CREATE PROCEDURE gp_task.create_task(jobname text,
 									 schedule text,
 									 command text,
@@ -76,6 +89,13 @@ LANGUAGE plpgsql
 AS $$
 BEGIN
 	PERFORM gp_task.validate_schedule(schedule);
+
+	IF pg_catalog.current_database() <> pg_catalog.current_setting('gp.task_database') THEN
+		PERFORM gp_task.forward('create_task',
+								ARRAY[jobname, schedule, command, database, username,
+									  if_not_exists::text]);
+		RETURN;
+	END IF;
 
 	IF if_not_exists AND EXISTS (SELECT 1 FROM gp_task.job j
 								  WHERE j.jobname = create_task.jobname
@@ -110,6 +130,13 @@ DECLARE
 BEGIN
 	IF schedule IS NOT NULL THEN
 		PERFORM gp_task.validate_schedule(schedule);
+	END IF;
+
+	IF pg_catalog.current_database() <> pg_catalog.current_setting('gp.task_database') THEN
+		PERFORM gp_task.forward('alter_task',
+								ARRAY[jobname, schedule, command, database, username,
+									  active::text, missing_ok::text]);
+		RETURN;
 	END IF;
 
 	UPDATE gp_task.job j
@@ -148,6 +175,11 @@ DECLARE
 	one text;
 	found_id bigint;
 BEGIN
+	IF pg_catalog.current_database() <> pg_catalog.current_setting('gp.task_database') THEN
+		PERFORM gp_task.forward('drop_task', ARRAY[jobnames::text, missing_ok::text]);
+		RETURN;
+	END IF;
+
 	FOREACH one IN ARRAY jobnames LOOP
 		found_id := NULL;
 		DELETE FROM gp_task.job j
@@ -178,6 +210,7 @@ COMMENT ON PROCEDURE gp_task.drop_task(text[], boolean) IS
 REVOKE ALL ON gp_task.job FROM PUBLIC;
 REVOKE ALL ON gp_task.run_history FROM PUBLIC;
 REVOKE ALL ON FUNCTION gp_task.validate_schedule(text) FROM PUBLIC;
+REVOKE ALL ON FUNCTION gp_task.forward(text, text[]) FROM PUBLIC;
 REVOKE ALL ON PROCEDURE gp_task.create_task(text, text, text, text, text, boolean) FROM PUBLIC;
 REVOKE ALL ON PROCEDURE gp_task.alter_task(text, text, text, text, text, boolean, boolean) FROM PUBLIC;
 REVOKE ALL ON PROCEDURE gp_task.drop_task(text[], boolean) FROM PUBLIC;

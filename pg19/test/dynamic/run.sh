@@ -191,28 +191,55 @@ is "and the scheduler recorded the refresh" \
      ORDER BY runid DESC LIMIT 1;" "succeeded"
 
 ###############################################################################
-echo "6. what cannot work yet is refused, not written"
+echo "6. a dynamic table in another database: its job is the scheduler's"
 ###############################################################################
 # The jobs live in one database, because an extension cannot make a shared
-# catalog.  A job written anywhere else is one the scheduler never reads.
+# catalog.  One made in any other is written in that one, through gp_core's
+# loopback, as the statement that made it commits, and refreshes the view
+# where it is.
 q "CREATE DATABASE elsewhere;" > /dev/null
-out=$(qd elsewhere "CREATE EXTENSION gp_matview CASCADE;
-                    CREATE MATERIALIZED VIEW dt_there WITH (gp.dynamic_schedule) AS SELECT 1;")
-case "$out" in
-	*"cannot be made in database"*) ok "a dynamic table outside the task database is refused" ;;
-	*) notok "a dynamic table outside the task database is refused" "$out" ;;
-esac
-case "$out" in
-	*"gp.task_database"*) ok "and the message names the setting that decides where" ;;
-	*) notok "and the message names the setting that decides where" "$out" ;;
-esac
-is "an ordinary materialized view there is unaffected" \
-   "SELECT 1;" "1"
+out=$(qd elsewhere "CREATE EXTENSION gp_matview CASCADE; CREATE EXTENSION gp_task;
+                    CREATE TABLE src_there (a int); INSERT INTO src_there VALUES (1);
+                    CREATE MATERIALIZED VIEW dt_there WITH (gp.dynamic_schedule = '* * * * *')
+                        AS SELECT count(*) AS rows FROM src_there;
+                    SELECT 'made';")
+[ "$(printf '%s\n' "$out" | tail -1)" = "made" ] \
+	&& ok "a dynamic table is made in a database other than the task database" \
+	|| notok "a dynamic table is made in a database other than the task database" "$out"
+there=$(qd elsewhere "SELECT 'dt_there'::regclass::oid;")
+is "its job is written in the task database, naming the database it refreshes in" \
+   "SELECT database || ' ' || command FROM gp_task.job
+     WHERE jobname = 'gp_dynamic_table_refresh_$there';" \
+   "elsewhere REFRESH MATERIALIZED VIEW public.dt_there"
+out=$(qd elsewhere "SELECT count(*) FROM gp_task.job;")
+[ "$out" = "0" ] && ok "and nothing in the database it was made in" \
+	|| notok "and nothing in the database it was made in" "$out"
+qd elsewhere "INSERT INTO src_there VALUES (2);" > /dev/null
+deadline=$(( $(date +%s) + 100 )); got=
+while [ "$(date +%s)" -lt "$deadline" ]; do
+	got=$(qd elsewhere "SELECT rows FROM dt_there;")
+	[ "$got" = "2" ] && break
+	sleep 2
+done
+[ "$got" = "2" ] && ok "the scheduler refreshes it where it is" \
+	|| notok "the scheduler refreshes it where it is" "last saw [$got]"
+qd elsewhere "BEGIN;
+              CREATE MATERIALIZED VIEW dt_gone WITH (gp.dynamic_schedule) AS SELECT 1;
+              ROLLBACK;" > /dev/null
+is "one whose statement rolled back leaves no job" \
+   "SELECT count(*) FROM gp_task.job WHERE database = 'elsewhere';" "1"
+qd elsewhere "DROP MATERIALIZED VIEW dt_there;" > /dev/null
+is "and dropping it there drops its job here" \
+   "SELECT count(*) FROM gp_task.job WHERE database = 'elsewhere';" "0"
 out=$(qd elsewhere "CREATE MATERIALIZED VIEW plain_there AS SELECT 1 AS x;
-                    SELECT count(*) FROM pg_class WHERE relname = 'plain_there';")
-[ "$(printf '%s' "$out" | tail -1)" = "1" ] \
-	&& ok "and so is one made without the option" \
-	|| notok "and so is one made without the option" "$out"
+                    DROP MATERIALIZED VIEW plain_there;
+                    SELECT count(*) FROM pg_stat_activity
+                     WHERE application_name = 'cloudberry loopback'
+                       AND backend_start > (SELECT backend_start FROM pg_stat_activity
+                                             WHERE pid = pg_backend_pid());")
+[ "$(printf '%s\n' "$out" | tail -1)" = "0" ] \
+	&& ok "an ordinary materialized view there reaches for nothing" \
+	|| notok "an ordinary materialized view there reaches for nothing" "$out"
 
 echo
 echo "  $pass passed, $fail failed"

@@ -257,6 +257,59 @@ is "a task switched off does not run" "SELECT count(*) FROM ran;" "0"
 is "though it is still there" \
    "SELECT active FROM gp_task.job WHERE jobname = 'every_minute';" "f"
 
+###############################################################################
+echo "9. a task written in another database is written in the scheduler's"
+###############################################################################
+# Through gp_core's loopback, as the writing transaction commits: what a
+# rolled-back statement or savepoint asked for is never written, and what
+# the task database says of it -- its errors, its notices -- is said then.
+qd other_db "CREATE EXTENSION gp_task CASCADE;" > /dev/null
+out=$(qd other_db "CALL gp_task.create_task('from_other', '@daily', 'SELECT 1');")
+is "a task created in another database is a job here" \
+   "SELECT database || ' ' || username = 'other_db ' || current_user
+      FROM gp_task.job WHERE jobname = 'from_other';" "t"
+out=$(qd other_db "SELECT count(*) FROM gp_task.job;")
+[ "$out" = "0" ] && ok "and not a row in that database's own table" \
+	|| notok "and not a row in that database's own table" "$out"
+qd other_db "BEGIN; CALL gp_task.create_task('rolled_back', '@daily', 'SELECT 1'); ROLLBACK;" > /dev/null
+is "one whose transaction rolled back is not written" \
+   "SELECT count(*) FROM gp_task.job WHERE jobname = 'rolled_back';" "0"
+qd other_db "BEGIN;
+             SAVEPOINT s; CALL gp_task.create_task('undone', '@daily', 'SELECT 1'); ROLLBACK TO s;
+             CALL gp_task.create_task('done', '@daily', 'SELECT 1');
+             COMMIT;" > /dev/null
+is "nor is one whose savepoint rolled back, beside one that did not" \
+   "SELECT string_agg(jobname, ',' ORDER BY jobname) FROM gp_task.job
+     WHERE jobname IN ('undone', 'done');" "done"
+out=$(qd other_db "CALL gp_task.alter_task('from_other', schedule => '@hourly');
+                   CALL gp_task.drop_task('{done}');")
+is "it is altered and dropped from there too" \
+   "SELECT string_agg(jobname || ' ' || schedule, ',') FROM gp_task.job
+     WHERE jobname IN ('from_other', 'done');" "from_other @hourly"
+out=$(qd other_db "CALL gp_task.drop_task('{nosuch}');")
+case "$out" in
+	*'task "nosuch" does not exist'*'run in database "postgres" as the transaction commits'*)
+		ok "the task database's refusal comes back as the transaction commits, and says so" ;;
+	*) notok "the task database's refusal comes back as the transaction commits, and says so" "$out" ;;
+esac
+out=$(qd other_db "CALL gp_task.create_task('from_other', '@daily', 'SELECT 1', if_not_exists => true);")
+case "$out" in
+	*'task "from_other" already exists, skipping'*) ok "and so does its notice" ;;
+	*) notok "and so does its notice" "$out" ;;
+esac
+out=$(qd other_db "CALL gp_task.create_task('bad_there', 'not a schedule', 'SELECT 1');")
+case "$out" in
+	*"is not a schedule"*) ok "a schedule nothing can run is refused there at once" ;;
+	*) notok "a schedule nothing can run is refused there at once" "$out" ;;
+esac
+out=$(qd other_db "BEGIN READ ONLY;
+                   CALL gp_task.create_task('read_only', '@daily', 'SELECT 1');
+                   COMMIT;")
+case "$out" in
+	*"read-only transaction"*) ok "and a read-only transaction writes nothing there" ;;
+	*) notok "and a read-only transaction writes nothing there" "$out" ;;
+esac
+
 echo
 echo "  $pass passed, $fail failed"
 [ "$fail" -eq 0 ]

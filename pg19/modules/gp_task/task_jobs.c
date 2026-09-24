@@ -23,10 +23,11 @@
  * Cloudberry keeps jobs and their history in two shared catalogs, pg_task and
  * pg_task_run_history, reached through syscaches.  An extension cannot create
  * a shared catalog, so these are ordinary tables in one database and they are
- * read through SPI.  What that costs is stated in "Cluster metadata without
- * shared catalogs": a job defined from another database is not written in the
- * same transaction as the statement that defined it, and the history is not
- * visible from the database the job ran in.
+ * read through SPI.  A job defined from another database is written here
+ * through gp_core's loopback as the statement that defined it commits -- in
+ * two phases with it, on a cluster's coordinator (gp_task.forward); what is
+ * still lost is the history, which is not visible from the database the job
+ * ran in.
  *
  * The schedules are Cloudberry's own parser, called where it lies.
  *

@@ -222,6 +222,44 @@ isl "unless it is asked not to" \
    "SELECT gp_sql.drop_storage_server('ghost', missing_ok => true);
     SELECT 'survived';" "survived"
 
+###############################################################################
+echo "8. they are the cluster's, kept in gp.maintenance_database"
+###############################################################################
+# Cloudberry's catalogs are shared.  These live in one database, postgres
+# here, and any other reaches them through gp_core's loopback: written as the
+# transaction commits, read as the user reading them.
+qd() { "$PSQL" -X -q -t -A -d "$1" -c "$2" 2>&1; }
+q "CREATE DATABASE other_db;" > /dev/null
+qd other_db "CREATE EXTENSION gp_sql CASCADE;" > /dev/null
+out=$(qd other_db "SELECT gp_sql.create_storage_server('from_other', '{\"endpoint\": \"e\"}');
+                   SELECT count(*) FROM pg_foreign_server;")
+is "a server made in another database is made in the maintenance database" \
+   "SELECT array_to_string(srvoptions, ',') FROM pg_foreign_server WHERE srvname = 'from_other';" \
+   "endpoint=e"
+[ "$(printf '%s\n' "$out" | tail -1)" = "0" ] && ok "and not in that database" \
+	|| notok "and not in that database" "$out"
+out=$(qd other_db "SELECT string_agg(servername, ',' ORDER BY servername) FROM gp_sql.storage_servers;")
+[ "$out" = "from_other,s3" ] && ok "whose views read them from there" \
+	|| notok "whose views read them from there" "$out"
+out=$("$PSQL" -X -q -t -A -d other_db -U other \
+	  -c "SELECT count(*) FILTER (WHERE options IS NULL) || ' ' ||
+	             count(*) FILTER (WHERE options::text = '{secret=theirs}')
+	        FROM gp_sql.storage_user_mappings WHERE servername = 's3';" 2>&1)
+[ "$out" = "1 1" ] && ok "as the user reading them: someone else's credentials hidden, their own not" \
+	|| notok "as the user reading them" "$out"
+qd other_db "BEGIN; SELECT gp_sql.create_storage_server('rolled_back'); ROLLBACK;" > /dev/null
+is "one whose transaction rolled back is not made" \
+   "SELECT count(*) FROM pg_foreign_server WHERE srvname = 'rolled_back';" "0"
+out=$(qd other_db "SELECT gp_sql.drop_storage_server('s3');")
+case "$out" in
+	*"depend"*'run in database "postgres" as the transaction commits'*)
+		ok "the maintenance database's refusal comes back as the transaction commits" ;;
+	*) notok "the maintenance database's refusal comes back as the transaction commits" "$out" ;;
+esac
+qd other_db "SELECT gp_sql.drop_storage_server('from_other');" > /dev/null
+is "and one is dropped from there too" \
+   "SELECT count(*) FROM pg_foreign_server WHERE srvname = 'from_other';" "0"
+
 echo
 echo "  $pass passed, $fail failed"
 [ "$fail" -eq 0 ]

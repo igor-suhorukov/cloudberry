@@ -1757,6 +1757,73 @@ SQL
 		*) notok "a reserved gid" "$out" ;;
 	esac
 
+	# The loopback (gp_loopback.c): a storage server made in another database
+	# is made in gp.maintenance_database, postgres, by a part of the
+	# transaction there that is prepared with it and committed after its
+	# commit record, as a segment's part is.
+	q 0 "CREATE DATABASE lbdb;" >/dev/null
+	ql() { "$PSQL" -X -q -t -A -h "$(sockdir 0)" -p "$(port 0)" -d lbdb -c "$1" 2>&1; }
+	qfl() { "$PSQL" -X -q -t -A -h "$(sockdir 0)" -p "$(port 0)" -d lbdb -f - 2>&1; }
+	ql "CREATE EXTENSION gp_sql CASCADE;" >/dev/null
+	out=$(ql "SELECT gp_sql.create_storage_server('lb_s1', '{\"endpoint\": \"e1\"}');")
+	out2=$(q 0 "SELECT srvname || ' ' || array_to_string(srvoptions, ',') FROM pg_foreign_server WHERE srvname = 'lb_s1';")
+	out3=$(ql "SELECT count(*) FROM pg_foreign_server;")
+	out4=$(ql "SELECT servername FROM gp_sql.storage_servers;")
+	[ "$out|$out2|$out3|$out4" = "|lb_s1 endpoint=e1|0|lb_s1" ] \
+		&& ok "a storage server made in another database is made in the maintenance database, and read from there" \
+		|| notok "a storage server through the loopback" "$out / $out2 / $out3 / $out4"
+
+	q 0 "SELECT gp_inject_fault('loopback_commit_prepared', 'suspend', 1);" >/dev/null
+	ql "SELECT gp_sql.create_storage_server('lb_s2');" >/dev/null 2>&1 &
+	writer=$!
+	q 0 "SELECT gp_wait_until_triggered_fault('loopback_commit_prepared', 1, 1);" >/dev/null
+	gid=$(q 0 "SELECT gid FROM pg_prepared_xacts;")
+	dbo=$(q 0 "SELECT oid FROM pg_database WHERE datname = 'postgres';")
+	x=${gid#gp_dtx_}; x=${x%_*}
+	status=$(q 0 "SELECT pg_xact_status('$x'::xid8);" 2>&1)
+	seen=$(q 0 "SELECT count(*) FROM pg_foreign_server WHERE srvname = 'lb_s2';")
+	q 0 "SELECT gp_inject_fault('loopback_commit_prepared', 'resume', 1);" >/dev/null
+	wait "$writer"
+	q 0 "SELECT gp_inject_fault('loopback_commit_prepared', 'reset', 1);" >/dev/null
+	after=$(q 0 "SELECT count(*) FROM pg_foreign_server WHERE srvname = 'lb_s2';")
+	p0=$(q 0 "SELECT count(*) FROM pg_prepared_xacts;")
+	case "$gid|$status|$seen|$after|$p0" in
+		"gp_dtx_"[0-9]*"_$dbo|committed|0|1|0")
+			ok "its part there is prepared under the coordinator's transaction ID, and committed after that commits" ;;
+		*) notok "the loopback's two phases" "$gid / $dbo / $status / $seen / $after / $p0" ;;
+	esac
+	out=$(q 0 "SELECT (SELECT count(*) FROM gp_internal.dtx_map()) || ' ' ||
+	                  (SELECT count(*) FROM pg_replication_slots WHERE slot_name = 'gp_dtx_horizon');")
+	[ "$out" = "0 0" ] \
+		&& ok "the coordinator keeps no map of such parts, nor a slot holding back what they deleted" \
+		|| notok "the coordinator's map and slot" "$out"
+
+	ql "CREATE TABLE lbt (a int) DISTRIBUTED BY (a);" >/dev/null
+	q 0 "SELECT gp_inject_fault('start_prepare', 'error', $(dbid 2));" >/dev/null
+	out=$(printf '%s\n' "BEGIN;" "INSERT INTO lbt SELECT generate_series(1, 10);" \
+		"SELECT gp_sql.create_storage_server('lb_s4');" "COMMIT;" | qfl)
+	q 0 "SELECT gp_inject_fault('start_prepare', 'reset', $(dbid 2));" >/dev/null
+	out2=$(q 0 "SELECT count(*) FROM pg_foreign_server WHERE srvname = 'lb_s4';")
+	p0=$(q 0 "SELECT count(*) FROM pg_prepared_xacts;")
+	case "$out|$out2|$p0" in
+		*"fault triggered, fault name:'start_prepare'"*"|0|0")
+			ok "a transaction a segment fails to prepare rolls back its prepared part in the maintenance database" ;;
+		*) notok "a failed first phase and the loopback's part" "$out / $out2 / $p0" ;;
+	esac
+
+	q 0 "SELECT gp_inject_fault('loopback_commit_prepared', 'panic', 1);" >/dev/null
+	ql "SELECT gp_sql.create_storage_server('lb_s3');" >/dev/null 2>&1
+	for i in $(seq 1 60); do
+		out=$(q 0 "SELECT count(*) FROM pg_foreign_server WHERE srvname = 'lb_s3';" 2>/dev/null)
+		[ "$out" = "1" ] && break
+		sleep 0.5
+	done
+	p0=$(q 0 "SELECT count(*) FROM pg_prepared_xacts;")
+	log=$(grep -c "distributed transaction recovery: COMMIT PREPARED 'gp_dtx_[0-9]*_[0-9]*' on the coordinator" "$ROOT/node0.log")
+	[ "$out|$p0" = "1|0" ] && [ "$log" -ge 1 ] \
+		&& ok "a coordinator that went down between them: its recovery process commits that part too" \
+		|| notok "recovery of the loopback's part" "$out / $p0 / $log"
+
 	###########################################################################
 	echo "14. the global deadlock detector"
 	###########################################################################

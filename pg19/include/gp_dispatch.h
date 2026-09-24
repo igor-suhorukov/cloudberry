@@ -241,6 +241,16 @@ extern void GpDispatchResetGang(void);
  */
 extern const char *GpDispatchPassfile(void);
 
+/*
+ * What another server says besides its answers -- a NOTICE, WARNING or INFO
+ * -- relayed to the client as a segment's is, for gp_core's other
+ * connections: the receiver set on a connection holds them, and the flush
+ * raises them, once the caller is back from libpq.
+ */
+struct pg_conn;
+extern void GpDispatchRelayNotices(struct pg_conn *conn);
+extern void GpDispatchFlushNotices(void);
+
 /* Defines the settings; called from gp_core's _PG_init. */
 /*
  * An object whose "gp" label the coordinator changed: the segments are sent

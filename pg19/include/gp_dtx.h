@@ -54,6 +54,13 @@
 /* The gid a transaction's parts are prepared under, into gid[GP_DTX_GIDLEN]. */
 extern void GpDtxFormGid(FullTransactionId gxid, char *gid);
 
+/*
+ * The gid of its part in another database of the coordinator itself,
+ * gp_dtx_<xid>_<database OID>: a gid is the server's, and one transaction
+ * may have a part in more than one database there (gp_loopback.c).
+ */
+extern void GpDtxFormLoopbackGid(FullTransactionId gxid, Oid dboid, char *gid);
+
 /* The coordinator's transaction a gid names; false when it is not ours. */
 extern bool GpDtxParseGid(const char *gid, FullTransactionId *gxid);
 

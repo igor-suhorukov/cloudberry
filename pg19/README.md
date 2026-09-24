@@ -64,8 +64,9 @@ Or, without installing anything on the host:
 
 Milestones **M0** and **M1** are complete, and **M2 — a cluster — is built**
 (2026-09-23), the interconnect included.  **M3 — distributed transactions —
-is under way** (2026-09-23): two-phase commit, distributed snapshots and the
-global deadlock detector.
+is built** (2026-09-24): two-phase commit, distributed snapshots, the global
+deadlock detector, row locks under ORCA, and the loopback to the
+maintenance database, which joins the distributed transaction.
 
 On one node (M1):
 
@@ -74,10 +75,13 @@ On one node (M1):
   itself is maintained by delta, as are `count`, `sum` and `avg`; what the
   delta cannot express — an outer join, `min`, `max`, TRUNCATE — is
   recomputed.  A dynamic table refreshes itself through `gp_task`.
-- `gp_task` — the task scheduler, run by a background worker.
-- `gp_sql` — the Cloudberry-only SQL surface: tags, directory tables and
-  storage servers, and Cloudberry's spelling of statements through O26 —
-  classic partition clauses, `DISTRIBUTED BY`, `DECODE`, `gp_dist_random('t')`.
+- `gp_task` — the task scheduler, run by a background worker, its jobs in
+  one database (`gp.task_database`) and written there from any other.
+- `gp_sql` — the Cloudberry-only SQL surface: tags, defined once for the
+  cluster as Cloudberry's are, directory tables and storage servers, kept in
+  one database (`gp.maintenance_database`) for the cluster, and Cloudberry's
+  spelling of statements through O26 — classic partition clauses,
+  `DISTRIBUTED BY`, `DECODE`, `gp_dist_random('t')`.
 - `gp_security` — password profiles.
 - `gp_orca` — ORCA plans on one node, with the fallback counters.
 
@@ -155,6 +159,11 @@ Distributed transactions (M3), in `gp_core`:
   the deadlock detector on, for the one-table query Cloudberry's planner
   locks rows for — and otherwise, on a cluster, the table is locked, as
   Cloudberry locks it;
+- **the loopback to the maintenance database**: what Cloudberry keeps in a
+  shared catalog and cannot be a label — task jobs, storage servers — lives
+  in one database, and any other writes it there through a connection of its
+  own, as its transaction commits, in a transaction that is prepared with the
+  segments' parts and finished by the same recovery;
 - Cloudberry's fault injector, `gp_inject_fault`, for the tests.
 
 The storage, resource and transport modules — `gp_ao`, `pax`, `gp_exttable`,

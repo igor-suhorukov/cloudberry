@@ -235,6 +235,7 @@ modules = [
                      'modules/gp_core/gp_dtx.c',
                      'modules/gp_core/gp_fault.c',
                      'modules/gp_core/gp_gdd.c',
+                     'modules/gp_core/gp_loopback.c',
                      'modules/gp_core/gp_ddl.c',
                      'modules/gp_core/gp_hash.c',
                      'modules/gp_core/gp_legacyhash.c',

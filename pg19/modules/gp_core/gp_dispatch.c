@@ -637,6 +637,18 @@ flush_segment_notices(void)
 	}
 }
 
+void
+GpDispatchRelayNotices(PGconn *conn)
+{
+	PQsetNoticeReceiver(conn, segment_notice_receiver, NULL);
+}
+
+void
+GpDispatchFlushNotices(void)
+{
+	flush_segment_notices();
+}
+
 /* Forget them: the statement failed, and what it said went with it. */
 static void
 drop_segment_notices(void)
