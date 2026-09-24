@@ -849,6 +849,26 @@ probe_relation_size(Relation rel, ForkNumber forknum)
 	return size;
 }
 
+/*
+ * O20: while armed, the method cannot fetch a row by its TID, as a method
+ * that stores no row where its TID says cannot: UPDATE, DELETE ...
+ * RETURNING and MERGE have to take the old row from the plan.
+ */
+static bool arm_rowfetch_fails = false;
+
+static bool
+probe_tuple_fetch_row_version(Relation rel, ItemPointer tid,
+							  Snapshot snapshot, TupleTableSlot *slot)
+{
+	if (arm_rowfetch_fails)
+		ereport(ERROR,
+				(errmsg("gp_probe: the method was asked to fetch (%u,%u) by its TID",
+						ItemPointerGetBlockNumber(tid),
+						ItemPointerGetOffsetNumber(tid))));
+	return GetHeapamTableAmRoutine()->tuple_fetch_row_version(rel, tid,
+															  snapshot, slot);
+}
+
 /* A table of the probe's method keeps its TOAST in a heap table. */
 static Oid
 probe_relation_toast_am(Relation rel)
@@ -870,6 +890,7 @@ probe_am_init(void)
 	probe_am_routine.relation_toast_am = probe_relation_toast_am;
 	probe_am_routine.index_fetch_tuple = probe_index_fetch_tuple;
 	probe_am_routine.relation_size = probe_relation_size;
+	probe_am_routine.tuple_fetch_row_version = probe_tuple_fetch_row_version;
 
 	memset(&probe_am_ext, 0, sizeof(probe_am_ext));
 	probe_am_ext.size = sizeof(TableAmExtRoutine);
@@ -879,6 +900,7 @@ probe_am_init(void)
 	probe_am_ext.index_unique_check = probe_index_unique_check;
 	probe_am_ext.relation_add_columns = probe_relation_add_columns;
 	probe_am_ext.size_from_am = true;
+	probe_am_ext.old_row_from_plan = true;
 	RegisterTableAmExtension(&probe_am_routine, &probe_am_ext);
 }
 
@@ -915,6 +937,7 @@ PG_FUNCTION_INFO_V1(gp_probe_am_fillfactor);
 PG_FUNCTION_INFO_V1(gp_probe_scan_log);
 PG_FUNCTION_INFO_V1(gp_probe_arm_fetch_fails);
 PG_FUNCTION_INFO_V1(gp_probe_arm_size);
+PG_FUNCTION_INFO_V1(gp_probe_arm_rowfetch_fails);
 
 Datum
 gp_probe_reset(PG_FUNCTION_ARGS)
@@ -934,6 +957,7 @@ gp_probe_reset(PG_FUNCTION_ARGS)
 		resetStringInfo(scan_log);
 	arm_fetch_fails = false;
 	arm_size = -1;
+	arm_rowfetch_fails = false;
 	arm_star_rel = InvalidOid;
 	if (arm_column_name)
 		pfree(arm_column_name);
@@ -1393,6 +1417,14 @@ Datum
 gp_probe_arm_size(PG_FUNCTION_ARGS)
 {
 	arm_size = PG_GETARG_INT64(0);
+	PG_RETURN_VOID();
+}
+
+/* O20: make the method's fetch by TID fail, or not */
+Datum
+gp_probe_arm_rowfetch_fails(PG_FUNCTION_ARGS)
+{
+	arm_rowfetch_fails = PG_GETARG_BOOL(0);
 	PG_RETURN_VOID();
 }
 

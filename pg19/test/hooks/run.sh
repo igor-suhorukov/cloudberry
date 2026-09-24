@@ -907,6 +907,55 @@ is "a heap table's size is its files', as before" o19 heap true
 is "disarmed, the method answers with the files it has" o19 files true
 
 ###############################################################################
+echo "O20 UPDATE, DELETE ... RETURNING and MERGE take the method's old row from the plan"
+###############################################################################
+# While armed, gp_probe_am cannot fetch a row by its TID: each statement has
+# to take the old row from the whole-row column the planner adds beside the
+# ctid, which stays the row's identity for the update and the delete.
+session o20 <<'SQL'
+CREATE TABLE o20_t (a int, b text, c int) USING gp_probe_am;
+INSERT INTO o20_t SELECT i, 'r' || i, i FROM generate_series(1, 10) i;
+CREATE TABLE o20_heap (a int, b text, c int);
+INSERT INTO o20_heap SELECT * FROM o20_t;
+SELECT gp_probe.arm_rowfetch_fails(true);
+UPDATE o20_t SET c = c + 100 WHERE a <= 5;
+SELECT 'updated=' || count(*) FROM o20_t WHERE c > 100 AND b = 'r' || a;
+SELECT 'versions=' || count(*) FROM o20_t;
+WITH u AS (UPDATE o20_t SET c = -c WHERE a IN (6, 7) RETURNING a, old.b AS ob, old.c AS oc, new.c AS nc)
+SELECT 'returning=' || string_agg(format('%s:%s>%s', ob, oc, nc), ',' ORDER BY a) FROM u;
+WITH d AS (DELETE FROM o20_t WHERE a = 10 RETURNING b)
+SELECT 'deleted=' || string_agg(b, ',') FROM d;
+MERGE INTO o20_t t USING (VALUES (1, 7), (42, 9)) s(a, c) ON t.a = s.a
+  WHEN MATCHED THEN UPDATE SET c = s.c
+  WHEN NOT MATCHED THEN INSERT VALUES (s.a, 'new', s.c);
+SELECT 'merged=' || string_agg(format('%s:%s:%s', a, b, c), ',' ORDER BY a) FROM o20_t WHERE a IN (1, 42);
+DELETE FROM o20_t WHERE a = 9;
+SELECT 'after=' || count(*) FROM o20_t;
+SELECT gp_probe.arm_rowfetch_fails(false);
+EXPLAIN (VERBOSE, COSTS OFF) UPDATE o20_t SET c = 0;
+EXPLAIN (VERBOSE, COSTS OFF) UPDATE o20_heap SET c = 0;
+UPDATE o20_heap SET c = c + 100 WHERE a <= 5;
+SELECT 'heap=' || count(*) FROM o20_heap WHERE c > 100;
+SQL
+if grep -q "asked to fetch" "$WORK/o20.out"; then
+	notok "no statement should fetch the method's row by its TID" "$(grep "asked to fetch" "$WORK/o20.out" | head -3)"
+else
+	ok "no statement fetched the method's row by its TID"
+fi
+is "UPDATE builds each new row from the whole row: the columns it does not set are kept" o20 updated 5
+is "and the old versions are gone, the ctid having said which" o20 versions 10
+is "RETURNING old and new reads the old row from the plan" o20 returning "r6:6>-6,r7:7>-7"
+is "DELETE ... RETURNING returns the deleted row from it" o20 deleted r10
+is "MERGE updates a matched row from it, and inserts the others" o20 merged "1:r1:7,42:new:9"
+is "a DELETE without RETURNING needs no old row" o20 after 9
+if grep -q "o20_t\.\*" "$WORK/o20.out" && ! grep -q "o20_heap\.\*" "$WORK/o20.out"; then
+	ok "the plan carries the method's table's whole row beside the ctid, and not a heap table's"
+else
+	notok "the whole-row column belongs to the method's table's plan alone" "$(grep -E 'Output' "$WORK/o20.out" | head -6)"
+fi
+is "a heap table's UPDATE fetches its rows as before" o20 heap 5
+
+###############################################################################
 echo "O23 extension marks: pg_checksums passes over what an extension marked, pg_upgrade carries it"
 ###############################################################################
 # Last, because it stops the server: pg_checksums reads a stopped cluster.

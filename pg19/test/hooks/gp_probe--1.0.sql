@@ -82,3 +82,6 @@ CREATE FUNCTION gp_probe.arm_fetch_fails(on_off boolean) RETURNS void
 -- O19: what the method says a table's main fork takes; -1 for its files.
 CREATE FUNCTION gp_probe.arm_size(bytes bigint) RETURNS void
   AS 'MODULE_PATHNAME', 'gp_probe_arm_size' LANGUAGE C STRICT;
+-- O20: make the method's fetch of a row by its TID fail.
+CREATE FUNCTION gp_probe.arm_rowfetch_fails(on_off boolean) RETURNS void
+  AS 'MODULE_PATHNAME', 'gp_probe_arm_rowfetch_fails' LANGUAGE C STRICT;
