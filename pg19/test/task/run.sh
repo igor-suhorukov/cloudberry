@@ -131,9 +131,11 @@ is "the job table is there" \
    "SELECT count(*) FROM pg_tables WHERE schemaname = 'gp_task' AND tablename = 'job';" "1"
 is "and so is the history" \
    "SELECT count(*) FROM pg_tables WHERE schemaname = 'gp_task' AND tablename = 'run_history';" "1"
-is "neither is readable by everybody, because they hold other people's commands" \
-   "SELECT count(*) FROM pg_tables WHERE schemaname = 'gp_task'
-      AND pg_catalog.has_table_privilege('public', schemaname || '.' || tablename, 'SELECT');" "0"
+is "each is read a user's own rows at a time, because they hold other people's commands" \
+   "SELECT count(*) FROM pg_tables t WHERE schemaname = 'gp_task' AND rowsecurity
+      AND EXISTS (SELECT 1 FROM pg_policies p
+                   WHERE (p.schemaname, p.tablename) = (t.schemaname, t.tablename)
+                     AND p.qual = '(username = CURRENT_USER)');" "2"
 
 ###############################################################################
 echo "2. a schedule is cron's, read by Cloudberry's own parser, or seconds"
@@ -359,6 +361,54 @@ is "but never beside itself" \
      WHERE j.jobname = 'slow' AND a.runid < b.runid
        AND b.start_time < coalesce(a.end_time, 'infinity');" "0"
 q "CALL gp_task.drop_task('{five_seconds,slow,every_second}');" > /dev/null
+
+###############################################################################
+echo "11. the jobs and their runs, by Cloudberry's names, from any database"
+###############################################################################
+# Cloudberry's pg_task and pg_task_run_history are shared catalogs.  Here
+# they are views, in each database with the extension, of the tables in the
+# scheduler's database, read there over gp_core's loopback.
+is "pg_task has Cloudberry's columns" \
+   "SELECT string_agg(attname, ',' ORDER BY attnum) FROM pg_attribute
+     WHERE attrelid = 'pg_catalog.pg_task'::regclass AND attnum > 0;" \
+   "jobid,nodeport,active,schedule,command,nodename,database,username,jobname"
+is "and pg_task_run_history has its" \
+   "SELECT string_agg(attname, ',' ORDER BY attnum) FROM pg_attribute
+     WHERE attrelid = 'pg_catalog.pg_task_run_history'::regclass AND attnum > 0;" \
+   "runid,jobid,job_pid,start_time,end_time,database,username,command,status,return_message"
+out=$(qd other_db "SELECT schedule || ' ' || nodeport FROM pg_task WHERE jobname = 'from_other';")
+[ "$out" = "@hourly $PORT" ] && ok "another database reads the scheduler's jobs" \
+	|| notok "another database reads the scheduler's jobs" "$out"
+out=$(qd other_db "SELECT count(*) > 0 FROM pg_task_run_history h JOIN pg_task j USING (jobid)
+                    WHERE j.jobname = 'over_there' AND h.status = 'succeeded';")
+[ "$out" = "t" ] && ok "and their history, which was the task database's alone" \
+	|| notok "and their history, which was the task database's alone" "$out"
+# every_minute was switched off in 8, so its runs no longer change.
+runs="SET datestyle = 'SQL, DMY';
+      SELECT count(*) || ' ' || max(h.start_time) || ' ' || max(h.end_time)
+        FROM pg_task_run_history h JOIN pg_task j USING (jobid)
+       WHERE j.jobname = 'every_minute';"
+here=$(q "$runs"); there=$(qd other_db "$runs")
+[ -n "$here" ] && [ "$here" = "$there" ] \
+	&& ok "the same runs, their times the same whatever each side's DateStyle" \
+	|| notok "the same runs, their times the same whatever each side's DateStyle" "here [$here], there [$there]"
+q "CREATE ROLE task_user LOGIN;
+   CALL gp_task.create_task('theirs', '@daily', 'SELECT 1', username => 'task_user');" > /dev/null
+out=$("$PSQL" -X -q -t -A -d other_db -U task_user \
+	  -c "SELECT string_agg(jobname, ',') FROM pg_task;" 2>&1)
+[ "$out" = "theirs" ] && ok "a user sees their own jobs, and nobody else's" \
+	|| notok "a user sees their own jobs, and nobody else's" "$out"
+out=$("$PSQL" -X -q -t -A -d postgres -U task_user \
+	  -c "SELECT string_agg(jobname, ',') FROM gp_task.job;" 2>&1)
+[ "$out" = "theirs" ] && ok "in the scheduler's database's own table too" \
+	|| notok "in the scheduler's database's own table too" "$out"
+out=$("$PSQL" -X -q -t -A -d postgres -U task_user \
+	  -c "CALL gp_task.create_task('mine', '@daily', 'SELECT 1');" 2>&1)
+case "$out" in
+	*"permission denied"*) ok "where they still write nothing but through a superuser" ;;
+	*) notok "where they still write nothing but through a superuser" "$out" ;;
+esac
+q "CALL gp_task.drop_task('{theirs}'); DROP ROLE task_user;" > /dev/null
 
 echo
 echo "  $pass passed, $fail failed"

@@ -219,15 +219,73 @@ COMMENT ON PROCEDURE gp_task.drop_task(text[], boolean) IS
 	'unschedule commands; what Cloudberry writes as DROP TASK';
 
 /*
- * The tables hold other people's commands, so they are not readable by
- * everybody.  Cloudberry's own catalogs are readable by everybody, which its
+ * The tables hold other people's commands, so a user reads only the jobs and
+ * runs of their own -- a superuser every one -- as pg_cron's policy on its
+ * job table has it; only the scheduler and the procedures above write them.
+ * Cloudberry's own catalogs are readable by everybody, which its
  * pg_task_run_history shares with them.
  */
+ALTER TABLE gp_task.job ENABLE ROW LEVEL SECURITY;
+ALTER TABLE gp_task.run_history ENABLE ROW LEVEL SECURITY;
+CREATE POLICY job_owner ON gp_task.job FOR SELECT
+	USING (username = CURRENT_USER);
+CREATE POLICY run_owner ON gp_task.run_history FOR SELECT
+	USING (username = CURRENT_USER);
+
+GRANT USAGE ON SCHEMA gp_task TO PUBLIC;
 REVOKE ALL ON gp_task.job FROM PUBLIC;
 REVOKE ALL ON gp_task.run_history FROM PUBLIC;
+GRANT SELECT ON gp_task.job, gp_task.run_history TO PUBLIC;
 REVOKE ALL ON FUNCTION gp_task.validate_schedule(text) FROM PUBLIC;
 REVOKE ALL ON FUNCTION gp_task.job_changed() FROM PUBLIC;
 REVOKE ALL ON FUNCTION gp_task.forward(text, text[]) FROM PUBLIC;
 REVOKE ALL ON PROCEDURE gp_task.create_task(text, text, text, text, text, boolean) FROM PUBLIC;
 REVOKE ALL ON PROCEDURE gp_task.alter_task(text, text, text, text, text, boolean, boolean) FROM PUBLIC;
 REVOKE ALL ON PROCEDURE gp_task.drop_task(text[], boolean) FROM PUBLIC;
+
+/*
+ * Cloudberry's pg_task and pg_task_run_history are shared catalogs, the same
+ * from every database.  Here they are views by their names and columns, in
+ * pg_catalog as Cloudberry's are, of the tables in gp.task_database, which
+ * are read there from whichever database asks: through gp_core's loopback,
+ * as the current user, so that the policies above apply to them, or by SPI
+ * in that database itself.  A job has no node of its own: it runs in a
+ * background worker of this server, the node Cloudberry's nodename and
+ * nodeport name, whose nodename is task_host_addr, 127.0.0.1 by default.
+ */
+CREATE FUNCTION gp_task.job_rows(OUT jobid bigint, OUT schedule text,
+								 OUT command text, OUT database text,
+								 OUT username text, OUT active boolean,
+								 OUT jobname text)
+RETURNS SETOF record
+AS 'MODULE_PATHNAME', 'gp_task_job_rows'
+LANGUAGE C;
+
+CREATE FUNCTION gp_task.run_rows(OUT runid bigint, OUT jobid bigint,
+								 OUT job_pid integer, OUT database text,
+								 OUT username text, OUT command text,
+								 OUT status text, OUT return_message text,
+								 OUT start_time timestamptz,
+								 OUT end_time timestamptz)
+RETURNS SETOF record
+AS 'MODULE_PATHNAME', 'gp_task_run_rows'
+LANGUAGE C;
+
+SET allow_system_table_mods = on;
+
+CREATE VIEW pg_catalog.pg_task AS
+	SELECT j.jobid,
+		   pg_catalog.current_setting('port')::integer AS nodeport,
+		   j.active, j.schedule, j.command,
+		   '127.0.0.1'::text AS nodename,
+		   j.database, j.username, j.jobname
+	  FROM gp_task.job_rows() j;
+
+CREATE VIEW pg_catalog.pg_task_run_history AS
+	SELECT r.runid, r.jobid, r.job_pid, r.start_time, r.end_time,
+		   r.database, r.username, r.command, r.status, r.return_message
+	  FROM gp_task.run_rows() r;
+
+RESET allow_system_table_mods;
+
+GRANT SELECT ON pg_catalog.pg_task, pg_catalog.pg_task_run_history TO PUBLIC;

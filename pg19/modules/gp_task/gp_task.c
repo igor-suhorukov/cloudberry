@@ -55,6 +55,7 @@
 #include "catalog/pg_type.h"
 #include "commands/trigger.h"
 #include "fmgr.h"
+#include "funcapi.h"
 #include "lib/stringinfo.h"
 #include "miscadmin.h"
 #include "utils/array.h"
@@ -82,6 +83,8 @@ int			gp_task_max_running = 5;
 PG_FUNCTION_INFO_V1(gp_task_validate_schedule);
 PG_FUNCTION_INFO_V1(gp_task_forward);
 PG_FUNCTION_INFO_V1(gp_task_job_changed);
+PG_FUNCTION_INFO_V1(gp_task_job_rows);
+PG_FUNCTION_INFO_V1(gp_task_run_rows);
 
 /*
  * gp_task.validate_schedule(text) -- raise if this is not a schedule.
@@ -160,6 +163,40 @@ gp_task_job_changed(PG_FUNCTION_ARGS)
 	CacheInvalidateRelcacheByRelid(RelationGetRelid(trigdata->tg_relation));
 
 	return PointerGetDatum(NULL);
+}
+
+/*
+ * gp_task.job_rows() and gp_task.run_rows(), which pg_task and
+ * pg_task_run_history are views of: the jobs and their runs, read in
+ * gp.task_database from whichever database asks, as the current user --
+ * through gp_core's loopback, or by SPI when this is that database.  A time
+ * crosses as JSON writes it, ISO 8601 with its offset, which reads back the
+ * same whatever DateStyle either session has.
+ */
+Datum
+gp_task_job_rows(PG_FUNCTION_ARGS)
+{
+	InitMaterializedSRF(fcinfo, 0);
+	GpLoopbackQueryInto(gp_task_database,
+						"SELECT jobid, schedule, command, database, username,"
+						"       active, jobname"
+						"  FROM gp_task.job",
+						(ReturnSetInfo *) fcinfo->resultinfo);
+	return (Datum) 0;
+}
+
+Datum
+gp_task_run_rows(PG_FUNCTION_ARGS)
+{
+	InitMaterializedSRF(fcinfo, 0);
+	GpLoopbackQueryInto(gp_task_database,
+						"SELECT runid, jobid, job_pid, database, username, command,"
+						"       status, return_message,"
+						"       pg_catalog.to_json(start_time) #>> '{}',"
+						"       pg_catalog.to_json(end_time) #>> '{}'"
+						"  FROM gp_task.run_history",
+						(ReturnSetInfo *) fcinfo->resultinfo);
+	return (Datum) 0;
 }
 
 void
