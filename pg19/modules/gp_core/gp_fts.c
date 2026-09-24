@@ -149,6 +149,7 @@ static int	gp_fts_probe_interval = 60;
 static int	gp_fts_probe_timeout = 20;
 static int	gp_fts_probe_retries = 5;
 static int	gp_fts_mark_mirror_down_grace_period = 30;
+static int	gp_fts_replication_attempt_count = 10;
 
 /* gp.log_fts: Cloudberry's gp_log_fts, how much the prober says. */
 typedef enum FtsLogLevel
@@ -194,9 +195,13 @@ typedef struct GpFtsShared
 	uint32		done_count;		/* the start_count of the last one ended */
 	ConditionVariable cv;		/* broadcast as a cycle begins and as it ends */
 
-	/* A primary's: its mirror's WAL sender, and when the last one ended. */
+	/*
+	 * A primary's: its mirror's WAL sender, when the last one ended, and how
+	 * many have ended since the mirror last streamed.
+	 */
 	int			walsender_pid;
 	pg_time_t	walsender_ended;
+	int			walsender_attempts;
 } GpFtsShared;
 
 static GpFtsShared *fts_shared = NULL;
@@ -252,14 +257,31 @@ fts_wait_event(void)
 /* What a primary knows of its mirror                                        */
 /* ------------------------------------------------------------------------- */
 
+/*
+ * The mirror's WAL sender ends: one more attempt, counted from the last one
+ * that streamed, as Cloudberry's replication status counts them
+ * (FTSReplicationStatusMarkDisconnect(), gp_replication.c).
+ */
 static void
 fts_walsender_exit(int code, Datum arg)
 {
+	bool		streamed = false;
+
+	if (MyWalSnd != NULL)
+	{
+		SpinLockAcquire(&MyWalSnd->mutex);
+		streamed = MyWalSnd->state == WALSNDSTATE_STREAMING;
+		SpinLockRelease(&MyWalSnd->mutex);
+	}
+
 	SpinLockAcquire(&fts_shared->mutex);
 	if (fts_shared->walsender_pid == MyProcPid)
 	{
 		fts_shared->walsender_pid = 0;
 		fts_shared->walsender_ended = (pg_time_t) time(NULL);
+		if (streamed)
+			fts_shared->walsender_attempts = 0;
+		fts_shared->walsender_attempts++;
 	}
 	SpinLockRelease(&fts_shared->mutex);
 }
@@ -308,12 +330,14 @@ fts_mirror_status(bool *mirror_up, bool *in_sync, bool *ready,
 {
 	int			pid;
 	pg_time_t	ended;
+	int			attempts;
 
 	*mirror_up = *in_sync = *ready = *retry = false;
 
 	SpinLockAcquire(&fts_shared->mutex);
 	pid = fts_shared->walsender_pid;
 	ended = fts_shared->walsender_ended;
+	attempts = fts_shared->walsender_attempts;
 	SpinLockRelease(&fts_shared->mutex);
 
 	LWLockAcquire(SyncRepLock, LW_SHARED);
@@ -347,15 +371,36 @@ fts_mirror_status(bool *mirror_up, bool *in_sync, bool *ready,
 	*syncrep_on = (WalSndCtl->sync_standbys_status & SYNC_STANDBY_DEFINED) != 0;
 	LWLockRelease(SyncRepLock);
 
+	if (*in_sync)
+	{
+		SpinLockAcquire(&fts_shared->mutex);
+		fts_shared->walsender_attempts = 0;
+		SpinLockRelease(&fts_shared->mutex);
+	}
+
 	/*
 	 * A mirror that has not connected yet, while the primary has only just
 	 * started or has only just lost it, may be on its way: FTS is asked to
 	 * come back rather than mark it down (Cloudberry's is_probe_retry_needed()).
+	 * But not one whose WAL senders have ended more than
+	 * gp.fts_replication_attempt_count times since it last streamed, whose
+	 * attempts could go on for ever while a commit waits for it: only the
+	 * primary's start counts then (FTSGetReplicationDisconnectTime()).
 	 */
 	if (!*mirror_up)
 	{
-		pg_time_t	since = Max(ended, timestamptz_to_time_t(PgStartTime));
-		pg_time_t	delta = (pg_time_t) time(NULL) - since;
+		pg_time_t	since;
+		pg_time_t	delta;
+
+		if (attempts > gp_fts_replication_attempt_count)
+		{
+			ereport(LOG,
+					(errmsg("Primary-mirror replication streaming already attempted %d times exceed limit gp_fts_replication_attempt_count %d",
+							attempts, gp_fts_replication_attempt_count)));
+			ended = 0;
+		}
+		since = Max(ended, timestamptz_to_time_t(PgStartTime));
+		delta = (pg_time_t) time(NULL) - since;
 
 		if (delta >= 0 && delta < gp_fts_mark_mirror_down_grace_period)
 		{
@@ -1700,6 +1745,16 @@ GpFtsInit(void)
 							30, 0, 3600,
 							PGC_SIGHUP,
 							GUC_UNIT_S,
+							NULL, NULL, NULL);
+
+	DefineCustomIntVariable("gp.fts_replication_attempt_count",
+							"How many times a mirror's WAL sender may end, since it last streamed, before FTS marks the mirror down.",
+							"Past it, the grace period counts from the primary's "
+							"start alone.",
+							&gp_fts_replication_attempt_count,
+							10, 0, 100,
+							PGC_SIGHUP,
+							0,
 							NULL, NULL, NULL);
 
 	DefineCustomEnumVariable("gp.log_fts",
