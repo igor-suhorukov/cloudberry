@@ -353,6 +353,29 @@ case "$out|$out2" in
 		ok "without prepared transactions, one that fails after its pre-commit writes nothing there either" ;;
 	*) notok "without prepared transactions, one that fails after its pre-commit writes nothing there either" "$out / $out2" ;;
 esac
+# Held between this transaction's commit and the part's -- by Cloudberry's
+# fault injector, which is gp_core's and needs no gp_sql -- the part is
+# open there, not prepared, and what it wrote is not seen.
+out=$(q "CREATE EXTENSION gp_inject_fault;")
+[ -z "$out" ] && ok "gp_inject_fault is made where gp_sql is not loaded" \
+	|| notok "gp_inject_fault is made where gp_sql is not loaded" "$out"
+q "SELECT gp_inject_fault('loopback_commit_prepared', 'suspend', 1);" > /dev/null
+qd other_db "CALL gp_task.create_task('held_open', '@daily', 'SELECT 1');" > /dev/null 2>&1 &
+writer=$!
+q "SELECT gp_wait_until_triggered_fault('loopback_commit_prepared', 1, 1);" > /dev/null
+seen=$(q "SELECT count(*) FROM gp_task.job WHERE jobname = 'held_open';")
+open=$(q "SELECT count(*) FROM pg_stat_activity
+           WHERE application_name = 'cloudberry loopback' AND state = 'idle in transaction';")
+prepared=$(q "SELECT count(*) FROM pg_prepared_xacts;")
+q "SELECT gp_inject_fault('loopback_commit_prepared', 'resume', 1);" > /dev/null
+wait "$writer"
+q "SELECT gp_inject_fault('loopback_commit_prepared', 'reset', 1);" > /dev/null
+after=$(q "SELECT count(*) FROM gp_task.job WHERE jobname = 'held_open';")
+[ "$seen|$open|$prepared|$after" = "0|1|0|1" ] \
+	&& ok "its part is left open there, not prepared, and committed once this transaction has" \
+	|| notok "its part is left open there, not prepared, and committed once this transaction has" \
+	         "$seen / $open / $prepared / $after"
+q "CALL gp_task.drop_task('{held_open}');" > /dev/null
 
 ###############################################################################
 echo "10. a task of seconds runs as Cloudberry's does: an interval after it is written, one run at a time"

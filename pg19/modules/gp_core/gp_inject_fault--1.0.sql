@@ -8,6 +8,12 @@
  * arguments, as its tests call them: set, reset or ask about a fault on the
  * node of db_id.  gp_core carries it (gp_fault.c); the places that ask for a
  * fault are the port's own, and PostgreSQL 19's injection points.
+ *
+ * Cloudberry's script says NO SQL of the C function.  That is its default
+ * for a function in any language but SQL, and a clause only gp_sql's rewrite
+ * reads (funcattr.c), so it is left out: the extension is then made on a
+ * server that loads gp_core without gp_sql, as the fault injector is
+ * gp_core's.
  */
 CREATE FUNCTION gp_inject_fault(
   faultname text,
@@ -22,7 +28,7 @@ CREATE FUNCTION gp_inject_fault(
   gp_session_id int4)
 RETURNS text
 AS 'MODULE_PATHNAME', 'gp_inject_fault'
-LANGUAGE C VOLATILE STRICT NO SQL;
+LANGUAGE C VOLATILE STRICT;
 
 CREATE FUNCTION gp_inject_fault(
   faultname text,
