@@ -825,6 +825,61 @@ fi
 is "a heap table's probe fetches as before, and asks no method" o16 heap_calls 0
 
 ###############################################################################
+echo "O17 new columns of the method's table are written by the method, not by a rewrite"
+###############################################################################
+# A default PostgreSQL cannot keep as a missing value -- random(), or a
+# stored generated column -- makes ALTER TABLE rewrite the table.  gp_probe_am
+# writes the new columns' values itself, updating each row where it is.
+session o17 <<'SQL'
+CREATE FUNCTION o17_rewritten() RETURNS event_trigger LANGUAGE plpgsql AS $$
+BEGIN RAISE NOTICE 'table_rewrite of %', pg_event_trigger_table_rewrite_oid()::regclass; END $$;
+CREATE EVENT TRIGGER o17_rewrite ON table_rewrite EXECUTE FUNCTION o17_rewritten();
+CREATE TABLE o17_t (a int, b int) USING gp_probe_am;
+INSERT INTO o17_t SELECT i, i FROM generate_series(1, 10) i;
+CREATE TABLE o17_file AS SELECT relfilenode AS before FROM pg_class WHERE relname = 'o17_t';
+SELECT gp_probe.reset();
+ALTER TABLE o17_t ADD COLUMN c float8 DEFAULT random();
+SELECT 'calls_add_columns=' || gp_probe.calls('add_columns');
+SELECT 'detail_add_columns=' || gp_probe.detail('add_columns');
+SELECT 'same_file=' || (c.relfilenode = f.before)::text FROM pg_class c, o17_file f WHERE c.relname = 'o17_t';
+SELECT 'filled=' || count(*) FROM o17_t WHERE c IS NOT NULL AND c >= 0 AND c < 1;
+SELECT 'distinct=' || (count(DISTINCT c) > 1)::text FROM o17_t;
+ALTER TABLE o17_t ADD COLUMN d int GENERATED ALWAYS AS (a * 2 + b) STORED;
+SELECT 'generated=' || count(*) FROM o17_t WHERE d = a * 3;
+SELECT 'gen_detail=' || gp_probe.detail('add_columns');
+ALTER TABLE o17_t ADD COLUMN e int DEFAULT (random() * 0 - 1)::int CHECK (e >= 0);
+SELECT 'no_e=' || count(*) FROM pg_attribute WHERE attrelid = 'o17_t'::regclass AND attname = 'e';
+SELECT gp_probe.reset();
+CREATE TABLE o17_heap (a int);
+INSERT INTO o17_heap VALUES (1);
+ALTER TABLE o17_heap ADD COLUMN c float8 DEFAULT random();
+SELECT 'heap_calls=' || gp_probe.calls('add_columns');
+DROP EVENT TRIGGER o17_rewrite;
+SQL
+fired "ADD COLUMN ... DEFAULT random() asks the method" o17 add_columns
+is "the table keeps its relfilenumber" o17 same_file true
+is "every row has its new value, each its own" o17 filled 10
+is "which are random, not one value for all" o17 distinct true
+is "a stored generated column is computed from the row, the new values first" o17 generated 10
+if val o17 gen_detail | grep -q "columns 4g,"; then
+	ok "and the method is told the column is generated"
+else
+	notok "the method should be told the column is generated" "$(val o17 gen_detail)"
+fi
+if grep -q 'check constraint "o17_t_e_check" of relation "o17_t" is violated by some row' "$WORK/o17.out"; then
+	ok "a CHECK on a new column that a written value fails ends the statement"
+else
+	notok "the CHECK on the new column should fail" "$(grep ERROR "$WORK/o17.out")"
+fi
+is "and the column is not added" o17 no_e 0
+if grep -q "table_rewrite of o17_heap" "$WORK/o17.out" && ! grep -q "table_rewrite of o17_t" "$WORK/o17.out"; then
+	ok "no table_rewrite event fires for the method's table; a heap table's fires"
+else
+	notok "table_rewrite should fire for the heap table alone" "$(grep table_rewrite "$WORK/o17.out")"
+fi
+is "and a heap table is rewritten as before, asking no method" o17 heap_calls 0
+
+###############################################################################
 echo "O23 extension marks: pg_checksums passes over what an extension marked, pg_upgrade carries it"
 ###############################################################################
 # Last, because it stops the server: pg_checksums reads a stopped cluster.

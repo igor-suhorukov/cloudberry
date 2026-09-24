@@ -34,6 +34,7 @@
  */
 #include "postgres.h"
 
+#include "access/heapam.h"
 #include "access/relation.h"
 #include "access/relscan.h"
 #include "access/reloptions.h"
@@ -95,6 +96,7 @@ typedef enum ProbeEvent
 	EV_QUERY_LOCKMODE,
 	EV_DEPARSE_RANGE,
 	EV_UNIQUE_CHECK,
+	EV_ADD_COLUMNS,
 	EV_COUNT
 } ProbeEvent;
 
@@ -102,7 +104,7 @@ static const char *const event_name[EV_COUNT] = {
 	"new_oid", "combocid_create", "combocid_miss", "analyze_sample",
 	"explain_label", "mdunlink", "raw_parser", "star_filter",
 	"columnref", "deparse_column", "query_lockmode", "deparse_range",
-	"unique_check",
+	"unique_check", "add_columns",
 };
 
 static int64 calls[EV_COUNT];
@@ -747,6 +749,81 @@ probe_index_unique_check(Relation rel, ItemPointer tid, Snapshot snapshot,
 	return found;
 }
 
+/*
+ * O17: the values of new columns, written without a rewrite.  The probe's
+ * tables are heap underneath, which has no place for a column of its own,
+ * so each row is updated in place, in the same relfilenumber, with its new
+ * values: the defaults first, then the stored generated columns, which may
+ * read them, as ATRewriteTable() computes them.  The ALTER holds the table
+ * in AccessExclusiveLock, and the rows written here are this command's own,
+ * which its snapshot does not see.
+ */
+static void
+probe_relation_add_columns(Relation rel, int ncolumns,
+						   const AttrNumber *attnums, Expr *const *exprs,
+						   const bool *generated)
+{
+	TupleDesc	desc = RelationGetDescr(rel);
+	EState	   *estate = CreateExecutorState();
+	ExprContext *econtext = GetPerTupleExprContext(estate);
+	ExprState **states = palloc_array(ExprState *, ncolumns);
+	TupleTableSlot *oldslot = table_slot_create(rel, NULL);
+	TupleTableSlot *newslot = MakeSingleTupleTableSlot(desc, &TTSOpsVirtual);
+	Snapshot	snapshot = RegisterSnapshot(GetLatestSnapshot());
+	TableScanDesc scan;
+	int64		rows = 0;
+	StringInfoData cols;
+
+	initStringInfo(&cols);
+	for (int i = 0; i < ncolumns; i++)
+	{
+		states[i] = ExecPrepareExpr(exprs[i], estate);
+		appendStringInfo(&cols, "%s%d%s", i ? "," : "", attnums[i],
+						 generated[i] ? "g" : "");
+	}
+
+	scan = table_beginscan(rel, snapshot, 0, NULL, SO_NONE);
+	while (table_scan_getnextslot(scan, ForwardScanDirection, oldslot))
+	{
+		HeapTuple	tuple;
+		TU_UpdateIndexes update_indexes;
+
+		ResetExprContext(econtext);
+		slot_getallattrs(oldslot);
+		ExecClearTuple(newslot);
+		memcpy(newslot->tts_values, oldslot->tts_values,
+			   sizeof(Datum) * desc->natts);
+		memcpy(newslot->tts_isnull, oldslot->tts_isnull,
+			   sizeof(bool) * desc->natts);
+		ExecStoreVirtualTuple(newslot);
+
+		econtext->ecxt_scantuple = newslot;
+		for (int pass = 0; pass < 2; pass++)
+			for (int i = 0; i < ncolumns; i++)
+			{
+				if (generated[i] != (pass == 1))
+					continue;
+				newslot->tts_values[attnums[i] - 1] =
+					ExecEvalExpr(states[i], econtext,
+								 &newslot->tts_isnull[attnums[i] - 1]);
+			}
+
+		tuple = heap_form_tuple(desc, newslot->tts_values, newslot->tts_isnull);
+		simple_heap_update(rel, &oldslot->tts_tid, tuple, &update_indexes);
+		heap_freetuple(tuple);
+		rows++;
+	}
+	table_endscan(scan);
+	UnregisterSnapshot(snapshot);
+
+	ExecDropSingleTupleTableSlot(oldslot);
+	ExecDropSingleTupleTableSlot(newslot);
+	FreeExecutorState(estate);
+
+	record(EV_ADD_COLUMNS, "%s: columns %s, %lld rows",
+		   RelationGetRelationName(rel), cols.data, (long long) rows);
+}
+
 /* A table of the probe's method keeps its TOAST in a heap table. */
 static Oid
 probe_relation_toast_am(Relation rel)
@@ -774,6 +851,7 @@ probe_am_init(void)
 	probe_am_ext.scan_extractcolumns = probe_scan_extractcolumns;
 	probe_am_ext.scan_by_column = true;
 	probe_am_ext.index_unique_check = probe_index_unique_check;
+	probe_am_ext.relation_add_columns = probe_relation_add_columns;
 	RegisterTableAmExtension(&probe_am_routine, &probe_am_ext);
 }
 
