@@ -67,6 +67,20 @@ lockmodes, and its _optimizer output, which the orca pass is compared with
   the drop, with a correlation -- in PostgreSQL 19's pg_stats, whose tableid
   the port's init_file masks.
 
+segwalrep/die_commit_pending_replication
+  Its one-phase half alone: the port commits in one phase only a segment's
+  part that wrote, as it prepares only one that wrote (gp_dtx.c), where
+  Cloudberry commits in one phase, on every segment it reached, a
+  transaction whose segments wrote nothing (prepareDtxTransaction(),
+  cdbtm.c).  So the test's transaction, whose segments only read, reaches
+  no segment's one-phase commit, nor the fault the test puts there,
+  start_performDtxProtocolCommitOnePhase, and its END commits.  The half the
+  test is named for is as Cloudberry's: a segment's backend terminated as
+  its COMMIT PREPARED waits for the mirror, the coordinator tells the
+  segment again over a new connection, whose COMMIT PREPARED finds the part
+  committed and waits for the mirror to have it, as Cloudberry's does
+  (gp_dispatch.c, dtx_finish_again()), and the INSERT commits.
+
 segwalrep/fts_unblock_primary
   Where Cloudberry's fault initialize_wal_sender holds the mirror's WAL
   sender: in PostgreSQL 19 no hook runs in a WAL sender after it has

@@ -1,0 +1,3 @@
+@@
+-ERROR:  fault triggered, fault name:'start_performDtxProtocolCommitOnePhase' fault type:'error'
++BEGIN;

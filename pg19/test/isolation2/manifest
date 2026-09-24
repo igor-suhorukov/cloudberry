@@ -21,8 +21,8 @@
 # The schedule's other tests -- append-optimized tables, bitmap indexes,
 # resource queues and groups, the rest of the fault injector's places in
 # PostgreSQL's own code -- need M5 to M7, and are not listed.  Its FTS tests
-# are M4's, and are: the ones that run are in the groups mirrors1 and
-# mirrors2, whose clusters have a mirror for each segment -- two, so that
+# are M4's, and are: the ones that run are in the groups mirrors1 to
+# mirrors3, whose clusters have a mirror for each segment -- three, so that
 # they run side by side.
 run  lockmodes                                     lockmodes
 run  select_dropped_table
@@ -52,19 +52,19 @@ run  reader_waits_for_lock                         readers
 run  vacuum_recently_dead_tuple_due_to_distributed_snapshot
 run  distributedlog-bug
 run  distributed_snapshot
-skip segwalrep/die_commit_pending_replication      faults inside PostgreSQL's commit wait and WAL sender (sync_rep_query_die, wal_sender_loop), which have no injection point
+run  segwalrep/die_commit_pending_replication      mirrors3
 skip fts_errors                                    Cloudberry's DNS cache of segment addresses (get_dns_cached_address), which the port's dispatcher has none of
-skip segwalrep/replication_keeps_crash             a fault inside PostgreSQL's WAL sender (wal_sender_loop), which has no injection point
+run  segwalrep/replication_keeps_crash             mirrors3
 run  segwalrep/commit_blocking                     mirrors1
 run  segwalrep/fts_unblock_primary                 mirrors1
 skip segwalrep/recoverseg_from_file                gprecoverseg -i, which moves a mirror to another data directory, where the cluster file the port reads as a server starts says where a node is
 run  segwalrep/mirror_promotion                    mirrors1
-skip segwalrep/cancel_commit_pending_replication   faults inside PostgreSQL's commit wait and WAL sender (sync_rep_query_cancel, wal_sender_loop); what it checks, a cancel that does not end a commit's wait for the mirror (R3), the fts suite checks
+run  segwalrep/cancel_commit_pending_replication   mirrors3
 run  segwalrep/twophase_tolerance_with_mirror_promotion  mirrors1
 skip segwalrep/dtm_recovery_on_standby             the standby coordinator activated, which is M7's (gpactivatestandby)
-skip segwalrep/commit_blocking_on_standby          faults inside PostgreSQL's WAL receiver and sender (walrecv_skip_flush, wal_sender_loop)
-skip segwalrep/dtx_recovery_wait_lsn               a fault inside PostgreSQL's WAL receiver (walrecv_skip_flush)
-skip segwalrep/select_throttle                     a fault inside PostgreSQL's WAL sender (wal_sender_loop)
+skip segwalrep/commit_blocking_on_standby          a standby coordinator whose commits wait for it, as gpinitstandby makes one, which is M7's; and Cloudberry's WAL sender, which lets commits go on while a standby catches up, where PostgreSQL's holds them
+skip segwalrep/dtx_recovery_wait_lsn               gp_stat_progress_dtx_recovery, Cloudberry's view of its recovery process reading the coordinator's WAL for committed distributed transactions, and a fault that fails the coordinator with a PANIC (exec_simple_query_start), neither of which the port has
+skip segwalrep/select_throttle                     wait_for_replication_threshold, Cloudberry's throttling of a backend's WAL until the mirror has it, and gp_disable_tuple_hints, which PostgreSQL does not have
 run  segwalrep/startup_rename_prepared_xlog        mirrors2
 run  fts_manual_probe                              mirrors1
 run  fts_session_reset                             mirrors2
