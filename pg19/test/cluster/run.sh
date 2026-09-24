@@ -711,6 +711,40 @@ mine" ] && ok "a transaction reads its own rows, and a LIMIT leaves the connecti
 	[ "$out" = "v2|v2! 10|t t|110 ->dos one>uno 4|104|40|1040 sales_1_prt_1|sales_1_prt_3 " ] \
 		&& ok "RETURNING old and new: an UPDATE's, a DELETE's, an INSERT's, an upsert's, a moved row's, a row moved between partitions" \
 		|| notok "RETURNING old and new" "$out"
+	# Check options.  A view's WITH CHECK OPTION is the coordinator's: the
+	# rows the segments wrote come back and are checked here -- an INSERT's,
+	# an UPDATE's, a moved row's, an upsert's -- LOCAL and CASCADED as
+	# PostgreSQL has them.
+	q 0 "CREATE TABLE wco (a int, b int) DISTRIBUTED BY (a); INSERT INTO wco SELECT g, g FROM generate_series(1, 10) g;" >/dev/null
+	q 0 "CREATE VIEW wcov AS SELECT * FROM wco WHERE b < 100 WITH CHECK OPTION; CREATE VIEW wcov2 AS SELECT * FROM wcov WHERE b > 0 WITH LOCAL CHECK OPTION;" >/dev/null
+	q 0 "CREATE TABLE wcu (a int PRIMARY KEY, b int) DISTRIBUTED BY (a); INSERT INTO wcu VALUES (1, 1), (2, 2); CREATE VIEW wcuv AS SELECT * FROM wcu WHERE b < 100 WITH CHECK OPTION;" >/dev/null
+	out=$(printf '%s\n' "INSERT INTO wcov VALUES (11, 11);" "INSERT INTO wcov VALUES (12, 200);" \
+		"UPDATE wcov SET b = b + 5 WHERE a = 1;" "UPDATE wcov SET b = 500 WHERE a = 2;" \
+		"UPDATE wcov SET a = a + 100 WHERE a = 3;" "UPDATE wcov SET a = a + 100, b = 300 WHERE a = 4;" \
+		"INSERT INTO wcov2 VALUES (13, -1);" "INSERT INTO wcov2 VALUES (14, 150);" \
+		"INSERT INTO wcuv VALUES (1, 500) ON CONFLICT (a) DO UPDATE SET b = excluded.b;" \
+		"INSERT INTO wcuv VALUES (3, 300) ON CONFLICT (a) DO UPDATE SET b = excluded.b;" \
+		"INSERT INTO wcuv VALUES (2, 20), (4, 40) ON CONFLICT (a) DO UPDATE SET b = excluded.b;" | qf 0)
+	n1=$(printf '%s\n' "$out" | grep -c 'ERROR:  new row violates check option for view "wcov"')
+	n2=$(printf '%s\n' "$out" | grep -c 'ERROR:  new row violates check option for view "wcov2"')
+	n3=$(printf '%s\n' "$out" | grep -c 'ERROR:  new row violates check option for view "wcuv"')
+	n4=$(printf '%s\n' "$out" | grep -c 'DETAIL:  Failing row contains (104, 300).')
+	out2=$(q 0 "SELECT (SELECT string_agg(a || ':' || b, ' ' ORDER BY a) FROM wco), (SELECT string_agg(a || ':' || b, ' ' ORDER BY a) FROM wcu);")
+	[ "$n1|$n2|$n3|$n4|$out2" = "4|1|2|1|1:6 2:2 4:4 5:5 6:6 7:7 8:8 9:9 10:10 11:11 103:3|1:1 2:20 4:40" ] \
+		&& ok "a view's WITH CHECK OPTION, checked over the rows the segments wrote: inserted, updated, moved, upserted" \
+		|| notok "WITH CHECK OPTION" "$n1 $n2 $n3 $n4 / $out2 / $out"
+	# A table's policies: a segment's statement runs as the session's role,
+	# and applies them as its own; the Split's new row is checked here.
+	q 0 "CREATE ROLE rls_w LOGIN; CREATE TABLE rlt (a int, b int, owner text) DISTRIBUTED BY (a); INSERT INTO rlt VALUES (1, 1, 'rls_w'), (2, 2, 'other'), (3, 3, 'rls_w'); GRANT SELECT, INSERT, UPDATE, DELETE ON rlt TO rls_w;" >/dev/null
+	q 0 "ALTER TABLE rlt ENABLE ROW LEVEL SECURITY; CREATE POLICY rlt_s ON rlt FOR SELECT USING (true); CREATE POLICY rlt_i ON rlt FOR INSERT WITH CHECK (owner = current_user); CREATE POLICY rlt_u ON rlt FOR UPDATE USING (owner = current_user) WITH CHECK (b < 50); CREATE POLICY rlt_d ON rlt FOR DELETE USING (owner = current_user);" >/dev/null
+	out=$(printf '%s\n' "SET ROLE rls_w;" "INSERT INTO rlt VALUES (4, 4, 'rls_w');" "INSERT INTO rlt VALUES (5, 5, 'other');" \
+		"UPDATE rlt SET b = b + 10;" "UPDATE rlt SET b = 99 WHERE a = 1;" "UPDATE rlt SET a = a + 100 WHERE a = 3;" \
+		"UPDATE rlt SET a = a + 200, b = 60 WHERE a = 4;" "DELETE FROM rlt WHERE a = 2;" | qf 0)
+	n1=$(printf '%s\n' "$out" | grep -c 'ERROR:  new row violates row-level security policy for table "rlt"')
+	out2=$(q 0 "SELECT string_agg(a || ':' || b, ' ' ORDER BY a) FROM rlt;")
+	[ "$n1|$out2" = "3|1:11 2:2 4:14 103:13" ] \
+		&& ok "a table's policies under a role not its owner: INSERT, UPDATE, a moved row, DELETE" \
+		|| notok "row-level security" "$n1 / $out2 / $out"
 	out=$(printf '%s\n' "BEGIN;" \
 		"DELETE FROM d USING d2 WHERE d.a = d2.v * 10 AND d2.v > 4 RETURNING d.a, d2.v;" "ROLLBACK;" | qf 0 | sort -u | tr '\n' ' ')
 	[ "$out" = "50|5 60|6 " ] && ok "a DELETE that joins another distributed table, its RETURNING reading both" \

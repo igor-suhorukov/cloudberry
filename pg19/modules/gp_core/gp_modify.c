@@ -778,6 +778,10 @@ cannot_push_reason(Query *query, Oid target, GpPolicy *policy)
 	if (query->returningList != NIL)
 		return "RETURNING from a distributed table waits for the rows to come back through a Motion.";
 
+	/* a view's WITH CHECK OPTION, which the statement sent would not carry */
+	if (query->withCheckOptions != NIL)
+		return "It is written through a view WITH CHECK OPTION or under row-level security, whose checks are the coordinator's.";
+
 	/* A row whose key changes belongs on another segment. */
 	if (query->commandType == CMD_UPDATE && GpPolicyIsHashPartitioned(policy))
 	{
@@ -1126,20 +1130,17 @@ gp_modify_planner_routed(Query *parse, const char *query_string, int cursorOptio
 		Relation	rel;
 
 		/*
-		 * What it wrote comes back from the segments; and ON CONFLICT is
-		 * each segment's, after its rows' VALUES, which COPY has no place
-		 * for.
+		 * What it wrote comes back from the segments, for RETURNING and for
+		 * a view's check options; ON CONFLICT is each segment's, after its
+		 * rows' VALUES, which COPY has no place for; and a table's policies
+		 * a segment's COPY refuses to apply.
 		 */
-		if (mt->returningLists != NIL || mt->onConflictAction != ONCONFLICT_NONE)
+		if (mt->returningLists != NIL || mt->onConflictAction != ONCONFLICT_NONE ||
+			mt->withCheckOptionLists != NIL)
 		{
 			stmt->planTree = write_explicitly(stmt, mt, on_conflict);
 			return stmt;
 		}
-		if (mt->withCheckOptionLists != NIL)
-			ereport(ERROR,
-					(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
-					 errmsg("INSERT through a view WITH CHECK OPTION or row-level security into distributed table \"%s\" is not supported yet",
-							get_rel_name(rte->relid))));
 
 		/*
 		 * The segments fire the row triggers, each for its own rows, as

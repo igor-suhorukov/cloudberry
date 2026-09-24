@@ -95,10 +95,18 @@
  * to EXPLICIT_BATCH_ROWS, so two rows of one key in different batches are
  * the second updating the first, where one statement would refuse them.
  *
+ * Check options.  A view's WITH CHECK OPTION is the coordinator's: the
+ * segments' statements name the table.  A table's row-level security is
+ * each segment's too, its statements running as the session's role; its
+ * USING conditions chose the plan's rows here.  The rows written come back
+ * for a view's checks, and every check the plan has is evaluated here over
+ * them, as ExecInsert() and ExecUpdate() evaluate it (explicit_check); for
+ * a policy alone they do not, as a statement that returned rows would
+ * apply the table's SELECT policies too.
+ *
  * Refused, by name (GpExplicitCannot): an UPDATE of the key of a table with
  * UPDATE triggers, which a moved row would not fire, in Cloudberry's words;
- * check options; statement-level triggers, which would fire on every
- * segment; and MERGE.
+ * statement-level triggers, which would fire on every segment; and MERGE.
  *
  * Cloudberry sources this file stands in for:
  *	  the Explicit Redistribute Motion cdbpath.c puts below a ModifyTable
@@ -309,6 +317,7 @@ static const CustomExecMethods explicit_exec_methods = {
 #define EXPLICIT_CAN_SET_TAG	5
 #define EXPLICIT_ON_CONFLICT	6	/* the clause's text, or "" */
 #define EXPLICIT_CONFLICT_ACTION 7	/* OnConflictAction */
+#define EXPLICIT_CHECKS			8	/* withCheckOptionLists */
 
 typedef struct ExplicitState
 {
@@ -335,12 +344,15 @@ typedef struct ExplicitState
 	List	   *casts;			/* each parameter's type, as VALUES casts it */
 	bool		target_opened;	/* the root, opened besides the result relations */
 
-	/* RETURNING */
+	/* RETURNING, and the check options */
 	bool		returning;
+	bool		checks;			/* a result relation has check options */
+	bool		back;			/* the rows written come back */
 	bool		other;			/* each row comes back with its other
 								 * version: an UPDATE's old row, an upsert's
 								 * existing one */
-	ResultRelInfo *rris;		/* the result relations', for all-null rows */
+	ResultRelInfo *rris;		/* the result relations', with their checks */
+	ResultRelInfo *rootrri;		/* the root's, where there is one */
 	ProjectionInfo **projs;
 	TupleTableSlot **relslots;
 	TupleTableSlot **orelslots; /* the other version, as each has it */
@@ -449,8 +461,6 @@ GpExplicitCannot(PlannedStmt *stmt, ModifyTable *mt, const char *on_conflict)
 		return "MERGE into a distributed table is not supported yet.";
 	if (mt->onConflictAction != ONCONFLICT_NONE && on_conflict == NULL)
 		return "ON CONFLICT into a distributed table is written from the statement's own text, which was not printed for this one.";
-	if (mt->withCheckOptionLists != NIL)
-		return "It is written through a view WITH CHECK OPTION or under row-level security, whose checks of the rows written would not travel with them.";
 
 	foreach(lc, mt->resultRelations)
 	{
@@ -581,6 +591,7 @@ GpExplicitOnConflict(Query *parse, GpPolicy *policy)
 	foreach(lc, q->rtable)
 	{
 		RangeTblEntry *rte = lfirst_node(RangeTblEntry, lc);
+		int			rti = foreach_current_index(lc) + 1;
 
 		if (rte->rtekind == RTE_SUBQUERY || rte->rtekind == RTE_VALUES)
 		{
@@ -588,6 +599,15 @@ GpExplicitOnConflict(Query *parse, GpPolicy *policy)
 			rte->subquery = NULL;
 			rte->values_lists = NIL;
 		}
+
+		/*
+		 * Every other entry a name of its own, so that EXCLUDED is printed
+		 * as it is written: an INSERT through a view has the view's too,
+		 * which ruleutils would otherwise leave "excluded" and call the
+		 * table's "excluded_1".
+		 */
+		if (rti != q->resultRelation && rti != oc->exclRelIndex)
+			rte->alias = makeAlias(psprintf("gp_r%d", rti), NIL);
 	}
 	foreach(lc, q->targetList)
 	{
@@ -662,6 +682,8 @@ GpExplicitMake(ModifyTable *mt, const char *on_conflict)
 									makeString(pstrdup(on_conflict ? on_conflict : "")));
 	cscan->custom_private = lappend(cscan->custom_private,
 									makeInteger(mt->onConflictAction));
+	cscan->custom_private = lappend(cscan->custom_private,
+									copyObject(mt->withCheckOptionLists));
 	cscan->methods = &explicit_scan_methods;
 	return &cscan->scan.plan;
 }
@@ -731,11 +753,13 @@ explicit_begin(CustomScanState *node, EState *estate, int eflags)
 	Index		rootrti = intVal(list_nth(priv, EXPLICIT_ROOT_REL));
 	List	   *setcols = (List *) list_nth(priv, EXPLICIT_UPDATE_COLNOS);
 	List	   *returning = (List *) list_nth(priv, EXPLICIT_RETURNING);
+	List	   *checks = (List *) list_nth(priv, EXPLICIT_CHECKS);
 	Plan	   *subplan = outerPlan(cscan);
 	TupleDesc	targetdesc;
 	GpPolicy   *policy;
 	StringInfoData head;
 	StringInfoData tail;
+	bool		view_checks = false;
 	int			i;
 
 	outerPlanState(node) = ExecInitNode(subplan, estate, eflags);
@@ -869,77 +893,8 @@ explicit_begin(CustomScanState *node, EState *estate, int eflags)
 	}
 
 	/*
-	 * RETURNING: each segment returns what it wrote as the root's row, with
-	 * the table it is in and, but for an INSERT, the number of the plan's
-	 * row that asked; a partition's own list is evaluated over the row as
-	 * that partition has it.
-	 */
-	state->returning = returning != NIL;
-	if (state->returning)
-	{
-		ExprContext *econtext = node->ss.ps.ps_ExprContext;
-
-		/*
-		 * old and new by name: an UPDATE's old row and an upsert's existing
-		 * one come back too.  A DELETE has no new row, and an INSERT that
-		 * updates nothing no old one.
-		 */
-		state->other = returning_qualified_walker((Node *) returning, NULL) &&
-			(state->operation == CMD_UPDATE ||
-			 state->on_conflict == ONCONFLICT_UPDATE);
-
-		appendStringInfo(&tail, " RETURNING %sgp_t.tableoid, gp_t.*%s",
-						 state->operation != CMD_INSERT ? "gp_s.gp_n, " : "",
-						 state->other ? ", old.tableoid, old.*" : "");
-		state->retdesc = returned_desc(targetdesc,
-									   state->operation != CMD_INSERT,
-									   state->other);
-		state->retslot = MakeSingleTupleTableSlot(state->retdesc,
-												  &TTSOpsMinimalTuple);
-		state->rootslot = MakeSingleTupleTableSlot(targetdesc, &TTSOpsVirtual);
-		if (state->other)
-			state->otherslot = MakeSingleTupleTableSlot(targetdesc,
-														&TTSOpsVirtual);
-		state->outerslot = MakeSingleTupleTableSlot(ExecGetResultType(outerPlanState(node)),
-													&TTSOpsMinimalTuple);
-
-		state->rris = palloc0_array(ResultRelInfo, state->nrels);
-		state->projs = palloc0_array(ProjectionInfo *, state->nrels);
-		state->relslots = palloc0_array(TupleTableSlot *, state->nrels);
-		state->orelslots = palloc0_array(TupleTableSlot *, state->nrels);
-		state->maps = palloc0_array(TupleConversionMap *, state->nrels);
-		i = 0;
-		foreach_int(rti, resultrels)
-		{
-			TupleDesc	reldesc = RelationGetDescr(state->rels[i]);
-
-			InitResultRelInfo(&state->rris[i], state->rels[i], rti, NULL,
-							  estate->es_instrument);
-			state->projs[i] = ExecBuildProjectionInfo((List *) list_nth(returning, i),
-													  econtext,
-													  node->ss.ps.ps_ResultTupleSlot,
-													  &node->ss.ps, reldesc);
-			if (state->rels[i] != state->target)
-			{
-				state->maps[i] = convert_tuples_by_name(targetdesc, reldesc);
-				state->relslots[i] = MakeSingleTupleTableSlot(reldesc,
-															  &TTSOpsVirtual);
-				if (state->other)
-					state->orelslots[i] = MakeSingleTupleTableSlot(reldesc,
-																   &TTSOpsVirtual);
-			}
-			i++;
-		}
-		state->maxsaved = 64;
-		state->saved = palloc_array(MinimalTuple, state->maxsaved);
-	}
-
-	state->sql_head = head.data;
-	state->sql_tail = tail.data;
-
-	/*
-	 * A Split, where the UPDATE sets a column of the key: its statements, and
-	 * the plan's rows kept, whose SET values the new versions take.
+	 * A Split, where the UPDATE sets a column of the key: the plan's rows are
+	 * kept, whose SET values the new versions take.
 	 */
 	if (state->operation == CMD_UPDATE && policy != NULL &&
 		GpPolicyIsHashPartitioned(policy))
@@ -960,6 +915,120 @@ explicit_begin(CustomScanState *node, EState *estate, int eflags)
 					state->split = true;
 		}
 	}
+
+	/*
+	 * The result relations, as ModifyTable has them -- each a partition's
+	 * or a child's of the root, where there is one -- and their check
+	 * options: a view's WITH CHECK OPTION, which the segments' statements,
+	 * naming the table, do not see, and row-level security's, which they
+	 * apply as their own, running as the session's role.  Both are checked
+	 * here over the rows the segments wrote, which come back for it.
+	 */
+	if (rootrti != 0)
+	{
+		state->rootrri = makeNode(ResultRelInfo);
+		InitResultRelInfo(state->rootrri, state->target, rootrti, NULL,
+						  estate->es_instrument);
+	}
+	state->rris = palloc0_array(ResultRelInfo, state->nrels);
+	i = 0;
+	foreach_int(rti, resultrels)
+	{
+		ResultRelInfo *rri = &state->rris[i];
+		List	   *wcos = checks != NIL ? (List *) list_nth(checks, i) : NIL;
+
+		InitResultRelInfo(rri, state->rels[i], rti, state->rootrri,
+						  estate->es_instrument);
+		rri->ri_WithCheckOptions = wcos;
+		foreach_node(WithCheckOption, wco, wcos)
+		{
+			rri->ri_WithCheckOptionExprs =
+				lappend(rri->ri_WithCheckOptionExprs,
+						ExecInitQual((List *) wco->qual, &node->ss.ps));
+			if (wco->kind == WCO_VIEW_CHECK)
+				view_checks = true;
+			state->checks = true;
+		}
+		i++;
+	}
+
+	/*
+	 * What the segments wrote comes back, for RETURNING and for a view's
+	 * check options; and a moved row's new version for its policies, which
+	 * the Split's DELETE and INSERT would not check as an UPDATE's.  Not
+	 * for a policy alone: a segment's statement checks it, and one that
+	 * returned rows would check the table's SELECT policies too, which
+	 * the statement written may not have asked for.
+	 *
+	 * Each segment returns what it wrote as the root's row, with the table
+	 * it is in and, but for an INSERT, the number of the plan's row that
+	 * asked; a partition's own list is evaluated over the row as that
+	 * partition has it.
+	 */
+	state->returning = returning != NIL;
+	state->back = state->returning || view_checks ||
+		(state->split && state->checks);
+	if (state->back)
+	{
+		ExprContext *econtext = node->ss.ps.ps_ExprContext;
+
+		/*
+		 * old and new by name: an UPDATE's old row and an upsert's existing
+		 * one come back too -- and the existing one where an upsert is
+		 * checked, whose policies check it, and tell a row it updated from
+		 * one it inserted.  A DELETE has no new row, and an INSERT that
+		 * updates nothing no old one.
+		 */
+		state->other = (returning_qualified_walker((Node *) returning, NULL) &&
+						(state->operation == CMD_UPDATE ||
+						 state->on_conflict == ONCONFLICT_UPDATE)) ||
+			(state->checks && state->on_conflict == ONCONFLICT_UPDATE);
+
+		appendStringInfo(&tail, " RETURNING %sgp_t.tableoid, gp_t.*%s",
+						 state->operation != CMD_INSERT ? "gp_s.gp_n, " : "",
+						 state->other ? ", old.tableoid, old.*" : "");
+		state->retdesc = returned_desc(targetdesc,
+									   state->operation != CMD_INSERT,
+									   state->other);
+		state->retslot = MakeSingleTupleTableSlot(state->retdesc,
+												  &TTSOpsMinimalTuple);
+		state->rootslot = MakeSingleTupleTableSlot(targetdesc, &TTSOpsVirtual);
+		if (state->other)
+			state->otherslot = MakeSingleTupleTableSlot(targetdesc,
+														&TTSOpsVirtual);
+		state->outerslot = MakeSingleTupleTableSlot(ExecGetResultType(outerPlanState(node)),
+													&TTSOpsMinimalTuple);
+
+		state->projs = palloc0_array(ProjectionInfo *, state->nrels);
+		state->relslots = palloc0_array(TupleTableSlot *, state->nrels);
+		state->orelslots = palloc0_array(TupleTableSlot *, state->nrels);
+		state->maps = palloc0_array(TupleConversionMap *, state->nrels);
+		for (i = 0; i < state->nrels; i++)
+		{
+			TupleDesc	reldesc = RelationGetDescr(state->rels[i]);
+
+			if (state->returning)
+				state->projs[i] = ExecBuildProjectionInfo((List *) list_nth(returning, i),
+														  econtext,
+														  node->ss.ps.ps_ResultTupleSlot,
+														  &node->ss.ps, reldesc);
+			if (state->rels[i] != state->target)
+			{
+				state->maps[i] = convert_tuples_by_name(targetdesc, reldesc);
+				state->relslots[i] = MakeSingleTupleTableSlot(reldesc,
+															  &TTSOpsVirtual);
+				if (state->other)
+					state->orelslots[i] = MakeSingleTupleTableSlot(reldesc,
+																   &TTSOpsVirtual);
+			}
+		}
+		state->maxsaved = 64;
+		state->saved = palloc_array(MinimalTuple, state->maxsaved);
+	}
+
+	state->sql_head = head.data;
+	state->sql_tail = tail.data;
+
 	if (state->split)
 	{
 		StringInfoData dh;
@@ -1000,7 +1069,7 @@ explicit_begin(CustomScanState *node, EState *estate, int eflags)
 		appendStringInfo(&ih, ")%s VALUES ",
 						 identity ? " OVERRIDING SYSTEM VALUE" : "");
 		state->insert_head = ih.data;
-		state->insert_tail = state->returning ? " RETURNING gp_t.tableoid, gp_t.*" : "";
+		state->insert_tail = state->back ? " RETURNING gp_t.tableoid, gp_t.*" : "";
 		state->newdesc = returned_desc(targetdesc, false, false);
 		state->hash = GpHashMake(policy, targetdesc);
 		if (state->outerslot == NULL)
@@ -1130,7 +1199,7 @@ explicit_collect(ExplicitState *state)
 			state->batches[content] = lappend(state->batches[content], params);
 		MemoryContextSwitchTo(oldcxt);
 
-		if (state->returning || state->split)
+		if (state->back || state->split)
 		{
 			if (state->nsaved == state->maxsaved)
 			{
@@ -1289,7 +1358,7 @@ explicit_send_split(ExplicitState *state)
 
 		if (inserts[seg] == NIL)
 			continue;
-		if (!state->returning)
+		if (!state->back)
 		{
 			(void) explicit_send_statements(seg, inserts[seg], state->ninsert,
 											state->insert_head,
@@ -1418,7 +1487,7 @@ explicit_send(ExplicitState *state)
 	EState	   *estate = state->css.ss.ps.state;
 	uint64		total = 0;
 
-	if (state->returning)
+	if (state->back)
 		state->returned = tuplestore_begin_heap(false, false, work_mem);
 
 	if (state->split)
@@ -1611,6 +1680,46 @@ explicit_next_returning(ExplicitState *state)
 	return ExecProject(proj);
 }
 
+/*
+ * The check options, over every row the segments wrote, before RETURNING
+ * gives one: as ExecInsert() and ExecUpdate() check a row, a policy's
+ * WITH CHECK first and a view's WITH CHECK OPTION after -- an upsert's
+ * row that updated one it conflicted with as an UPDATE, the row it
+ * conflicted with checked against the UPDATE's USING, as
+ * ExecOnConflictUpdate() checks it; and a moved row as an UPDATE, as
+ * ExecInsert() checks a row an UPDATE moves between partitions.
+ */
+static void
+explicit_check(ExplicitState *state)
+{
+	EState	   *estate = state->css.ss.ps.state;
+	TupleTableSlot *scan;
+	TupleTableSlot *other;
+	int			relidx;
+
+	while (explicit_returned_row(state, &relidx, &scan, &other))
+	{
+		ResultRelInfo *rri = &state->rris[relidx];
+
+		if (rri->ri_WithCheckOptions != NIL && scan != NULL)
+		{
+			if (state->operation == CMD_INSERT && other == NULL)
+				ExecWithCheckOptions(WCO_RLS_INSERT_CHECK, rri, scan, estate);
+			else
+			{
+				if (other != NULL && state->operation == CMD_INSERT)
+					ExecWithCheckOptions(WCO_RLS_CONFLICT_CHECK, rri, other,
+										 estate);
+				ExecWithCheckOptions(WCO_RLS_UPDATE_CHECK, rri, scan, estate);
+			}
+			ExecWithCheckOptions(WCO_VIEW_CHECK, rri, scan, estate);
+		}
+		ResetPerTupleExprContext(estate);
+		ResetExprContext(state->css.ss.ps.ps_ExprContext);
+	}
+	tuplestore_rescan(state->returned);
+}
+
 static TupleTableSlot *
 explicit_exec(CustomScanState *node)
 {
@@ -1620,6 +1729,15 @@ explicit_exec(CustomScanState *node)
 	{
 		explicit_collect(state);
 		explicit_send(state);
+		if (state->checks && state->returned != NULL)
+			explicit_check(state);
+
+		/* back only to be checked */
+		if (!state->returning && state->returned != NULL)
+		{
+			tuplestore_end(state->returned);
+			state->returned = NULL;
+		}
 		state->done = true;
 	}
 
@@ -1638,7 +1756,7 @@ explicit_end(CustomScanState *node)
 		tuplestore_end(state->returned);
 
 	/* a slot on a relation's descriptor holds a reference to it */
-	if (state->returning)
+	if (state->back)
 	{
 		ExecDropSingleTupleTableSlot(state->retslot);
 		ExecDropSingleTupleTableSlot(state->rootslot);
