@@ -35,9 +35,12 @@
 #include "postgres.h"
 
 #include "access/relation.h"
+#include "access/reloptions.h"
 #include "access/table.h"
+#include "access/tableamext.h"
 #include "access/xact.h"
 #include "catalog/catalog.h"
+#include "catalog/pg_am.h"
 #include "catalog/pg_type.h"
 #include "commands/explain.h"
 #include "commands/matview.h"
@@ -517,6 +520,167 @@ probe_deparse_range(RangeTblEntry *rte, const char *refname, bool *print_alias)
 }
 
 /* ------------------------------------------------------------------------- */
+/* O13: a table access method of the probe's own, and what it registers      */
+/* ------------------------------------------------------------------------- */
+
+/*
+ * heap's routine, copied: a table of it is a heap table underneath, but its
+ * rd_tableam is not heap's, so the registry tells the two apart.
+ */
+static TableAmRoutine probe_am_routine;
+static TableAmExtRoutine probe_am_ext;
+
+/* O14: the method's own option, probe_level, beside heap's */
+static relopt_kind probe_relopt_kind;
+
+typedef struct ProbeOwnOptions
+{
+	int32		vl_len_;
+	int			probe_level;
+} ProbeOwnOptions;
+
+typedef struct ProbeAmOptions
+{
+	StdRdOptions std;			/* heap's, first: the core reads them */
+	int			probe_level;
+} ProbeAmOptions;
+
+/*
+ * O14: the options of a table of the probe's method.  Its own go to its own
+ * parser and the rest to heap's, each validating when asked, so a name
+ * neither knows is refused as heap refuses one.
+ */
+static bytea *
+probe_am_reloptions(Datum reloptions, char relkind, bool validate)
+{
+	ArrayBuildState *own = NULL;
+	ArrayBuildState *heaps = NULL;
+	Datum		own_datum = (Datum) 0;
+	Datum		heap_datum = (Datum) 0;
+	StdRdOptions *std;
+	ProbeOwnOptions *mine;
+	ProbeAmOptions *result;
+	static const relopt_parse_elt tab[] = {
+		{"probe_level", RELOPT_TYPE_INT, offsetof(ProbeOwnOptions, probe_level)},
+	};
+
+	if (reloptions != (Datum) 0)
+	{
+		ArrayType  *array = DatumGetArrayTypeP(reloptions);
+		Datum	   *elems;
+		int			nelems;
+
+		deconstruct_array_builtin(array, TEXTOID, &elems, NULL, &nelems);
+		for (int i = 0; i < nelems; i++)
+		{
+			char	   *opt = TextDatumGetCString(elems[i]);
+
+			if (strncmp(opt, "probe_level=", strlen("probe_level=")) == 0)
+				own = accumArrayResult(own, elems[i], false, TEXTOID,
+									   CurrentMemoryContext);
+			else
+				heaps = accumArrayResult(heaps, elems[i], false, TEXTOID,
+										 CurrentMemoryContext);
+		}
+		if (own)
+			own_datum = makeArrayResult(own, CurrentMemoryContext);
+		if (heaps)
+			heap_datum = makeArrayResult(heaps, CurrentMemoryContext);
+	}
+
+	std = (StdRdOptions *) heap_reloptions(relkind, heap_datum, validate);
+	mine = (ProbeOwnOptions *) build_reloptions(own_datum, validate,
+												probe_relopt_kind,
+												sizeof(ProbeOwnOptions),
+												tab, lengthof(tab));
+
+	result = palloc0(sizeof(ProbeAmOptions));
+	if (std)
+		memcpy(&result->std, std, sizeof(StdRdOptions));
+	result->probe_level = mine ? mine->probe_level : 0;
+	SET_VARSIZE(result, sizeof(ProbeAmOptions));
+	return (bytea *) result;
+}
+
+/*
+ * heap's own functions, where they scan a table with heap_getnext(), refuse
+ * one whose rd_tableam is not heap's: an index build is heap's scan with the
+ * relation called heap for its length.
+ */
+static double
+probe_index_build_range_scan(Relation table_rel, Relation index_rel,
+							 IndexInfo *index_info, bool allow_sync,
+							 bool anyvisible, bool progress,
+							 BlockNumber start_blockno, BlockNumber numblocks,
+							 IndexBuildCallback callback, void *callback_state,
+							 TableScanDesc scan)
+{
+	const TableAmRoutine *heap = GetHeapamTableAmRoutine();
+	double		result;
+
+	table_rel->rd_tableam = heap;
+	PG_TRY();
+	{
+		result = heap->index_build_range_scan(table_rel, index_rel, index_info,
+											  allow_sync, anyvisible, progress,
+											  start_blockno, numblocks,
+											  callback, callback_state, scan);
+	}
+	PG_FINALLY();
+	{
+		table_rel->rd_tableam = &probe_am_routine;
+	}
+	PG_END_TRY();
+	return result;
+}
+
+static void
+probe_index_validate_scan(Relation table_rel, Relation index_rel,
+						  IndexInfo *index_info, Snapshot snapshot,
+						  ValidateIndexState *state)
+{
+	const TableAmRoutine *heap = GetHeapamTableAmRoutine();
+
+	table_rel->rd_tableam = heap;
+	PG_TRY();
+	{
+		heap->index_validate_scan(table_rel, index_rel, index_info, snapshot,
+								  state);
+	}
+	PG_FINALLY();
+	{
+		table_rel->rd_tableam = &probe_am_routine;
+	}
+	PG_END_TRY();
+}
+
+/* A table of the probe's method keeps its TOAST in a heap table. */
+static Oid
+probe_relation_toast_am(Relation rel)
+{
+	return HEAP_TABLE_AM_OID;
+}
+
+static void
+probe_am_init(void)
+{
+	probe_relopt_kind = add_reloption_kind();
+	add_int_reloption(probe_relopt_kind, "probe_level",
+					  "The probe's own table option (O14).",
+					  0, 0, 10, AccessExclusiveLock);
+
+	probe_am_routine = *GetHeapamTableAmRoutine();
+	probe_am_routine.index_build_range_scan = probe_index_build_range_scan;
+	probe_am_routine.index_validate_scan = probe_index_validate_scan;
+	probe_am_routine.relation_toast_am = probe_relation_toast_am;
+
+	memset(&probe_am_ext, 0, sizeof(probe_am_ext));
+	probe_am_ext.size = sizeof(TableAmExtRoutine);
+	probe_am_ext.reloptions = probe_am_reloptions;
+	RegisterTableAmExtension(&probe_am_routine, &probe_am_ext);
+}
+
+/* ------------------------------------------------------------------------- */
 /* SQL interface                                                             */
 /* ------------------------------------------------------------------------- */
 
@@ -543,6 +707,9 @@ PG_FUNCTION_INFO_V1(gp_probe_matview_depth);
 PG_FUNCTION_INFO_V1(gp_probe_matview_restore_depth);
 PG_FUNCTION_INFO_V1(gp_probe_matview_apply_failing);
 PG_FUNCTION_INFO_V1(gp_probe_syncrep_hold);
+PG_FUNCTION_INFO_V1(gp_probe_am_handler);
+PG_FUNCTION_INFO_V1(gp_probe_am_level);
+PG_FUNCTION_INFO_V1(gp_probe_am_fillfactor);
 
 Datum
 gp_probe_reset(PG_FUNCTION_ARGS)
@@ -966,6 +1133,37 @@ gp_probe_syncrep_hold(PG_FUNCTION_ARGS)
 
 /* ------------------------------------------------------------------------- */
 
+/* O13: the handler of the probe's table access method */
+Datum
+gp_probe_am_handler(PG_FUNCTION_ARGS)
+{
+	PG_RETURN_POINTER(&probe_am_routine);
+}
+
+/* O14: the probe's own option, as the relcache parsed it for a table */
+Datum
+gp_probe_am_level(PG_FUNCTION_ARGS)
+{
+	Relation	rel = relation_open(PG_GETARG_OID(0), AccessShareLock);
+	int			level = -1;
+
+	if (rel->rd_tableam == &probe_am_routine && rel->rd_options != NULL)
+		level = ((ProbeAmOptions *) rel->rd_options)->probe_level;
+	relation_close(rel, AccessShareLock);
+	PG_RETURN_INT32(level);
+}
+
+/* O14: heap's fillfactor, as the core reads it from any table's options */
+Datum
+gp_probe_am_fillfactor(PG_FUNCTION_ARGS)
+{
+	Relation	rel = relation_open(PG_GETARG_OID(0), AccessShareLock);
+	int			fillfactor = RelationGetFillFactor(rel, HEAP_DEFAULT_FILLFACTOR);
+
+	relation_close(rel, AccessShareLock);
+	PG_RETURN_INT32(fillfactor);
+}
+
 void
 _PG_init(void)
 {
@@ -993,6 +1191,9 @@ _PG_init(void)
 	 * carry.  The hook tests make one by hand.
 	 */
 	ExtensionMarkAdd("_probe");
+
+	/* O13 and the registry's members: the probe's table access method. */
+	probe_am_init();
 
 	prev_planner_hook = planner_hook;
 	planner_hook = probe_planner;

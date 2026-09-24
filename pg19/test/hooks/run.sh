@@ -674,6 +674,66 @@ exec 4>&-
 wait $W_PID 2>/dev/null
 
 ###############################################################################
+echo "O13 a table access method's extension routine, registered while gp_probe loads"
+###############################################################################
+# gp_probe_am is heap underneath, with a TableAmExtRoutine of its own; each
+# member the registry has is tested where the core asks it, below.
+session o13 <<'SQL'
+CREATE TABLE o13_t (a int, b text) USING gp_probe_am;
+INSERT INTO o13_t SELECT i, 'row ' || i FROM generate_series(1, 100) i;
+SELECT 'rows=' || count(*) FROM o13_t;
+SELECT 'am=' || amname FROM pg_class c JOIN pg_am a ON a.oid = c.relam WHERE relname = 'o13_t';
+SQL
+is "a table of the probe's method is made, and works" o13 rows 100
+is "and is of that method" o13 am gp_probe_am
+
+###############################################################################
+echo "O14 the method parses its tables' options, which are kept in pg_class"
+###############################################################################
+session o14 <<'SQL'
+CREATE TABLE o14_t (a int) USING gp_probe_am WITH (probe_level = 7, fillfactor = 70);
+SELECT 'stored=' || array_to_string(reloptions, ',') FROM pg_class WHERE relname = 'o14_t';
+SELECT 'level=' || gp_probe.am_level('o14_t');
+SELECT 'fillfactor=' || gp_probe.am_fillfactor('o14_t');
+ALTER TABLE o14_t SET (probe_level = 3);
+SELECT 'altered=' || array_to_string(reloptions, ',') FROM pg_class WHERE relname = 'o14_t';
+SELECT 'level_after=' || gp_probe.am_level('o14_t');
+CREATE MATERIALIZED VIEW o14_mv USING gp_probe_am WITH (probe_level = 5) AS SELECT 1 AS x;
+SELECT 'mv=' || gp_probe.am_level('o14_mv');
+SQL
+is "CREATE TABLE keeps the method's option, which heap refuses, in pg_class" o14 stored "probe_level=7,fillfactor=70"
+is "the relcache gives the method's parser's result" o14 level 7
+is "which begins with heap's options, as the core reads them" o14 fillfactor 70
+is "ALTER TABLE ... SET is checked by the method's parser, and kept" o14 altered "fillfactor=70,probe_level=3"
+is "and the relcache reads the new value" o14 level_after 3
+is "a materialized view of the method keeps its option too" o14 mv 5
+
+for stmt in \
+	"CREATE TABLE o14_bad (a int) USING gp_probe_am WITH (probe_level = 99)" \
+	"ALTER TABLE o14_t SET (probe_level = 99)" ; do
+	out=$("$PSQL" -X -q -t -A -d postgres -c "$stmt" 2>&1)
+	case "$out" in
+		*'value 99 out of bounds for option "probe_level"'*)
+			ok "the method's parser refuses what it refuses: ${stmt%% (*}" ;;
+		*) notok "the method's parser should refuse probe_level = 99: ${stmt%% (*}" "$out" ;;
+	esac
+done
+out=$("$PSQL" -X -q -t -A -d postgres -c "CREATE TABLE o14_bad2 (a int) USING gp_probe_am WITH (nonsense = 1)" 2>&1)
+case "$out" in
+	*'unrecognized parameter "nonsense"'*) ok "a name neither heap nor the method knows is refused, as heap refuses it" ;;
+	*) notok "an unknown option of the probe's table should be refused" "$out" ;;
+esac
+out=$("$PSQL" -X -q -t -A -d postgres -c "CREATE TABLE o14_heap (a int) WITH (probe_level = 1)" 2>&1)
+case "$out" in
+	*'unrecognized parameter "probe_level"'*) ok "a heap table refuses the method's option, as PostgreSQL 19 does" ;;
+	*) notok "a heap table should refuse probe_level" "$out" ;;
+esac
+session o14_left <<'SQL'
+SELECT 'left=' || count(*) FROM pg_class WHERE relname IN ('o14_bad', 'o14_bad2', 'o14_heap');
+SQL
+is "a refused CREATE leaves no table behind" o14_left left 0
+
+###############################################################################
 echo "O23 extension marks: pg_checksums passes over what an extension marked, pg_upgrade carries it"
 ###############################################################################
 # Last, because it stops the server: pg_checksums reads a stopped cluster.

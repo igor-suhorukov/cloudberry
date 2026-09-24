@@ -60,3 +60,14 @@ CREATE FUNCTION gp_probe.matview_apply_failing() RETURNS void
   AS 'MODULE_PATHNAME', 'gp_probe_matview_apply_failing' LANGUAGE C;
 CREATE FUNCTION gp_probe.syncrep_hold(on_off boolean) RETURNS boolean
   AS 'MODULE_PATHNAME', 'gp_probe_syncrep_hold' LANGUAGE C STRICT;
+
+-- O13 and the registry's members: a table access method of the probe's own,
+-- heap underneath, with a TableAmExtRoutine registered for it.
+CREATE FUNCTION gp_probe.am_handler(internal) RETURNS table_am_handler
+  AS 'MODULE_PATHNAME', 'gp_probe_am_handler' LANGUAGE C STRICT;
+CREATE ACCESS METHOD gp_probe_am TYPE TABLE HANDLER gp_probe.am_handler;
+-- O14: the method's own option, and heap's fillfactor, as the relcache has them.
+CREATE FUNCTION gp_probe.am_level(rel regclass) RETURNS int
+  AS 'MODULE_PATHNAME', 'gp_probe_am_level' LANGUAGE C STRICT;
+CREATE FUNCTION gp_probe.am_fillfactor(rel regclass) RETURNS int
+  AS 'MODULE_PATHNAME', 'gp_probe_am_fillfactor' LANGUAGE C STRICT;

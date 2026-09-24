@@ -218,7 +218,13 @@ def classify(hunk, guard_re, counts, unexplained, sha, fresh=None,
         span = lines[i:j + 1]
         n = len(span)
 
-        if all(NORM(l) in removed or NORM(UNELSE(l)) in removed for l in span):
+        # A bare "else" on a line of its own opens the branch of a guarded
+        # "if" that runs when the guard is false, which is the path an unused
+        # series leaves: the statement under it must be one that was there.
+        # (The "if" itself is classified on its own, and is guarded or not.)
+        if all(NORM(l) in removed or NORM(UNELSE(l)) in removed
+               or NORM(l) == "else" for l in span) \
+                and any(NORM(l) != "else" for l in span):
             counts["rewrapped existing code"] += n
         elif fresh and all(NORM(with_first_values(l, fresh)) in removed
                            for l in span):
