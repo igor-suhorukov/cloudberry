@@ -67,6 +67,23 @@ lockmodes, and its _optimizer output, which the orca pass is compared with
   the drop, with a correlation -- in PostgreSQL 19's pg_stats, whose tableid
   the port's init_file masks.
 
+segwalrep/fts_unblock_primary
+  Where Cloudberry's fault initialize_wal_sender holds the mirror's WAL
+  sender: in PostgreSQL 19 no hook runs in a WAL sender after it has
+  registered, so the port holds it where the connection is authenticated
+  (gp_fts.c), before it is one, and gp_stat_replication shows no state for
+  it where Cloudberry's shows startup.  What the test is for holds: FTS
+  reports the mirror down while its WAL sender is held, and up and in sync
+  once it goes on.
+
+segwalrep/mirror_promotion
+  Its tablespace, not its failovers: the port does not dispatch CREATE
+  TABLESPACE -- a tablespace is a directory, and the segments of one host
+  would share it -- so the table the test puts in one is refused on the
+  segments, and its DROP finds nothing.  Both failovers, the one from a
+  primary stopped and the one from a primary that does not answer FTS in
+  time, and both full recoveries, are as Cloudberry's.
+
 reader_waits_for_lock, in the planner pass alone
   No reader waits, because the port's planner has none: it reads each
   distributed table of the join through a gather of its own, on the

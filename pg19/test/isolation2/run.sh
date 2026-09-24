@@ -19,7 +19,7 @@
 #
 # Part of Cloudberry's isolation2_schedule, on a cluster: M3's tests --
 # distributed transactions, snapshots, locks and the global deadlock
-# detector.
+# detector -- and M4's, FTS and mirrors.
 #
 # src/test/isolation2 is Cloudberry's suite of tests that need more than one
 # session at a time, written in its isolation2 syntax (1: ..., 2&: ..., 2<:,
@@ -47,7 +47,10 @@
 # by side; a test the manifest puts in several groups passes when it passes
 # in each.  What a pass reports is in the schedule's order, whichever group
 # finished first.  The group named standby has a standby coordinator, as
-# Cloudberry's demo cluster has, made with pg_basebackup.  Shell commands of
+# Cloudberry's demo cluster has, made with pg_basebackup; and a group whose
+# name begins "mirrors" has that cluster whole, as Cloudberry's FTS tests
+# assume it: a mirror for each segment too, a hot standby streaming from its
+# primary, and FTS on the coordinator (M4).  Shell commands of
 # the tests find gpconfig and gpstop in bin/ here, which do what the tests
 # ask of Cloudberry's (gpMgmt's, M7's) on this cluster, and
 # COORDINATOR_DATA_DIRECTORY; and "-c gp_role=utility" goes from them as it
@@ -106,12 +109,23 @@ node_dir()  { echo "$WORK/$1/node$2"; }
 node_port() { echo $((BASEPORT + $1 * NODES + $2)); }
 node_sock() { echo "$SOCK/$1/n$2"; }
 standby_port() { echo $((BASEPORT + 100 + $1)); }
-has_standby() { [ "$1" = standby ]; }
+has_mirrors() { [[ "$1" == mirrors* ]]; }
+has_standby() { [ "$1" = standby ] || has_mirrors "$1"; }
+# Content c's mirror in the gi-th group, and the standby's dbid: Cloudberry's
+# demo cluster's, the mirrors 5..7 and the standby 8, where there are mirrors.
+mirror_dir()  { echo "$WORK/$1/mirror$2"; }
+mirror_port() { echo $((BASEPORT + 300 + $1 * NODES + $2)); }
+mirror_sock() { echo "$SOCK/$1/m$2"; }
+standby_dbid() { if has_mirrors "$1"; then echo $((2 * NODES)); else echo $((NODES + 1)); fi; }
 
 cleanup() {
 	for g in "${groups[@]}"; do
-		for n in $(seq 0 $((NODES - 1))) standby; do
-			if [ "$n" = standby ]; then d="$WORK/$g/standby"; else d="$(node_dir "$g" "$n")"; fi
+		for n in $(seq 0 $((NODES - 1))) standby $(seq -f 'mirror%g' 0 $((NODES - 2))); do
+			case "$n" in
+				standby) d="$WORK/$g/standby" ;;
+				mirror*) d="$WORK/$g/$n" ;;
+				*) d="$(node_dir "$g" "$n")" ;;
+			esac
 			[ -d "$d" ] || continue
 			[ -n "${RESULTS_DIR:-}" ] &&
 				cp "$d.log" "$RESULTS_DIR/isolation2-$g-node$n.log" 2> /dev/null
@@ -142,8 +156,13 @@ make_cluster() {
 		for n in $(seq 0 $((NODES - 1))); do
 			echo "$((n + 1)) $((n - 1)) p $(node_sock "$g" "$n") $(node_port "$gi" "$n") $(node_dir "$g" "$n")"
 		done
+		if has_mirrors "$g"; then
+			for n in $(seq 0 $((NODES - 2))); do
+				echo "$((NODES + 1 + n)) $n m $(mirror_sock "$g" "$n") $(mirror_port "$gi" "$n") $(mirror_dir "$g" "$n")"
+			done
+		fi
 		has_standby "$g" &&
-			echo "$((NODES + 1)) -1 m $SOCK/$g/standby $(standby_port "$gi") $WORK/$g/standby"
+			echo "$(standby_dbid "$g") -1 m $SOCK/$g/standby $(standby_port "$gi") $WORK/$g/standby"
 	} > "$conf"
 	for n in $(seq 0 $((NODES - 1))); do
 		mkdir -p "$(node_sock "$g" "$n")"
@@ -165,6 +184,9 @@ make_cluster() {
 		} >> "$(node_dir "$g" "$n")/postgresql.auto.conf"
 	done
 	for n in $(seq 1 $((NODES - 1))) 0; do
+		# The mirrors before the coordinator, as gpinitsystem makes them, so
+		# that FTS's first probe finds them there.
+		[ "$n" -eq 0 ] && has_mirrors "$g" && { make_mirrors "$g" "$gi" || return 1; }
 		"$BINDIR/pg_ctl" -D "$(node_dir "$g" "$n")" -l "$(node_dir "$g" "$n").log" -w -t 60 start \
 			> /dev/null 2>&1 \
 			|| { echo "node $n of group $g did not start"; tail -20 "$(node_dir "$g" "$n").log"; return 1; }
@@ -187,14 +209,57 @@ make_cluster() {
 		{
 			echo "unix_socket_directories = '$SOCK/$g/standby'"
 			echo "port = $(standby_port "$gi")"
-			echo "gp.dbid = $((NODES + 1))"
+			echo "gp.dbid = $(standby_dbid "$g")"
 			echo "hot_standby = off"
 		} >> "$WORK/$g/standby/postgresql.auto.conf"
 		"$BINDIR/pg_ctl" -D "$WORK/$g/standby" -l "$WORK/$g/standby.log" -w -t 60 start \
 			> /dev/null 2>&1 \
 			|| { echo "the standby of group $g did not start"; tail -20 "$WORK/$g/standby.log"; return 1; }
 	fi
+
+	# The pairs in sync, and synchronous replication on, as the tests begin.
+	if has_mirrors "$g"; then
+		local synced=
+		for _ in $(seq 300); do
+			synced=$(PGHOST="$(node_sock "$g" 0)" PGPORT="$(node_port "$gi" 0)" "$PSQL" -X -q -t -A -d postgres \
+				-c "SELECT gp_request_fts_probe_scan(); SELECT count(*) FROM gp_segment_configuration WHERE content >= 0 AND mode <> 's'" \
+				2> /dev/null | tail -1)
+			[ "$synced" = 0 ] && break
+			sleep 0.2
+		done
+		[ "$synced" = 0 ] || { echo "the mirrors of group $g did not come in sync"; return 1; }
+	fi
 	return 0
+}
+
+# Each segment's mirror: a copy of its primary made with pg_basebackup, and a
+# hot standby streaming from it as gp_walreceiver from its slot, as
+# Cloudberry's mirrors are named; its log beside its data directory, as every
+# node's is.
+make_mirrors() {
+	local g="$1" gi="$2" c d
+	for c in $(seq 0 $((NODES - 2))); do
+		d="$(mirror_dir "$g" "$c")"
+		mkdir -p "$(mirror_sock "$g" "$c")"
+		"$BINDIR/pg_basebackup" -D "$d" -h "$(node_sock "$g" $((c + 1)))" -p "$(node_port "$gi" $((c + 1)))" \
+			-X stream -c fast -C -S internal_wal_replication_slot > "$WORK/$g/basebackup-m$c.log" 2>&1 \
+			|| { echo "the mirror of content $c of group $g could not be copied"; tail -5 "$WORK/$g/basebackup-m$c.log"; return 1; }
+		grep -v -E '^(port|unix_socket_directories|gp\.dbid|primary_conninfo|primary_slot_name|hot_standby) ' \
+			"$d/postgresql.auto.conf" > "$d.auto"
+		{
+			cat "$d.auto"
+			echo "port = $(mirror_port "$gi" "$c")"
+			echo "unix_socket_directories = '$(mirror_sock "$g" "$c")'"
+			echo "gp.dbid = $((NODES + 1 + c))"
+			echo "hot_standby = on"
+			echo "primary_conninfo = 'host=$(node_sock "$g" $((c + 1))) port=$(node_port "$gi" $((c + 1))) application_name=gp_walreceiver'"
+			echo "primary_slot_name = 'internal_wal_replication_slot'"
+		} > "$d/postgresql.auto.conf"
+		rm -f "$d.auto"
+		touch "$d/standby.signal"
+		"$BINDIR/pg_ctl" -D "$d" -l "$d.log" -w -t 60 start > /dev/null 2>&1 \
+			|| { echo "the mirror of content $c of group $g did not start"; tail -20 "$d.log"; return 1; }
+	done
 }
 for gi in "${!groups[@]}"; do
 	make_cluster "${groups[$gi]}" "$gi" &

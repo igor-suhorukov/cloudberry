@@ -1,0 +1,6 @@
+@@
+-CREATE
++ERROR:  tablespace "mirror_promotion_tablespace" does not exist
+@@
+-DROP
++ERROR:  table "mirror_promotion_tblspc_heap_table" does not exist

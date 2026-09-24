@@ -1601,6 +1601,61 @@ gp_fts_history(PG_FUNCTION_ARGS)
 	return (Datum) 0;
 }
 
+PG_FUNCTION_INFO_V1(gp_segment_replication);
+
+/*
+ * gp_internal.segment_replication()
+ *		On the coordinator, each content that has a mirror, and its
+ *		primary's WAL sender to it as that primary's pg_stat_replication
+ *		shows it, as a json object -- NULL where it has none, the mirror
+ *		being gone -- for gp_stat_replication's rows of the segments, which
+ *		Cloudberry gathers so (gp_stat_get_segment_replication()).  Nothing
+ *		on any other node, which has only its own.
+ */
+Datum
+gp_segment_replication(PG_FUNCTION_ARGS)
+{
+	ReturnSetInfo *rsinfo = (ReturnSetInfo *) fcinfo->resultinfo;
+	const GpSegmentConfig *nodes;
+	int			nnodes;
+	int			nsegs;
+	char	  **values;
+
+	InitMaterializedSRF(fcinfo, 0);
+	if (GpClusterBackendRole() != GP_ROLE_DISPATCH || !GpClusterHasMirrors())
+		return (Datum) 0;
+
+	(void) GpClusterSegments(&nsegs);
+	values = palloc0_array(char *, nsegs);
+	GpDispatchQueryFirstValues("SELECT pg_catalog.row_to_json(r)::text"
+							   " FROM pg_catalog.pg_stat_replication r"
+							   " WHERE r.application_name = '" GP_WALRECEIVER_APPNAME "'"
+							   " LIMIT 1", -1, values);
+
+	nnodes = GpClusterNodes(&nodes);
+	for (int content = 0; content < nsegs; content++)
+	{
+		Datum		v[2];
+		bool		nulls[2] = {false, false};
+		bool		mirrored = false;
+
+		for (int i = 0; i < nnodes; i++)
+			if (nodes[i].content == content && nodes[i].preferred_role == 'm')
+				mirrored = true;
+		if (!mirrored)
+			continue;
+
+		v[0] = Int32GetDatum(content);
+		if (values[content] != NULL)
+			v[1] = CStringGetTextDatum(values[content]);
+		else
+			nulls[1] = true;
+		tuplestore_putvalues(rsinfo->setResult, rsinfo->setDesc, v, nulls);
+	}
+
+	return (Datum) 0;
+}
+
 /* ------------------------------------------------------------------------- */
 /* Start-up                                                                  */
 /* ------------------------------------------------------------------------- */

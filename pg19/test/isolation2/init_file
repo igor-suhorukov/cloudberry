@@ -26,6 +26,18 @@ m/^DETAIL:  segment \d+ \([^)]*\)(; \d+ other segments failed too)?$/
 m/^DETAIL:  segment \d+ \([^)]*\): /
 s/^DETAIL:  segment \d+ \([^)]*\): (.*?)(; \d+ other segments failed too)?$/DETAIL:  $1/
 
+# A segment named with where it listens, as Cloudberry's init_file masks it
+# for an address -- "seg0 127.0.0.1:7002 pid=5106" -- where the port's
+# harness has a directory for a socket.
+m/seg\d+ \/\S+:\d+ pid=\d+/
+s/seg\d+ \/\S+:\d+ pid=\d+/SEG IP:PORT pid=PID/
+
+# Where Cloudberry's error comes from, which it adds to an internal one --
+# "gang was lost due to cluster reconfiguration (cdbgang_async.c:98)" -- and
+# the port does not.
+m/ \(cdbgang_async\.c:(\d+|LINE_NUM)\)$/
+s/ \(cdbgang_async\.c:(\d+|LINE_NUM)\)$//
+
 # PostgreSQL 19's pg_stats has the table's OID, tableid, as its third
 # column, and which OID a table gets depends on what ran before it: a row of
 # "SELECT * FROM pg_stats" (lockmodes) has it masked.

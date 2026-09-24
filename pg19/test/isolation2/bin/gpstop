@@ -18,27 +18,41 @@
 # under the License.
 #
 # gpstop as far as the isolation2 tests the port runs ask it, on the
-# harness's cluster: -a asks nothing, -f stops fast, -r starts again.  Every
-# node gp_segment_configuration lists, the coordinator stopped first and
-# started last, as Cloudberry's gpstop orders them; each node's log is the
+# harness's cluster: -a asks nothing, -f stops fast, -i at once, -r starts
+# again, and -u has every node read its configuration files again.  Every
+# node gp_segment_configuration lists as up, mirrors too, the coordinator
+# stopped first and started last, as Cloudberry's gpstop orders them; each node's log is the
 # file beside its data directory, as the harness keeps it.  Cloudberry's own
 # gpstop is gpMgmt's, which is M7's.
 set -u
 
-mode=smart; restart=0
-while getopts "arfM:" opt; do
+mode=smart; restart=0; reload=0
+while getopts "arfiuM:" opt; do
 	case "$opt" in
 		a) ;;
 		r) restart=1 ;;
 		f) mode=fast ;;
+		i) mode=immediate ;;
+		u) reload=1 ;;
 		M) mode="$OPTARG" ;;
-		*) echo "usage: gpstop [-a] [-r] [-f] [-M mode]" >&2; exit 2 ;;
+		*) echo "usage: gpstop [-a] [-r] [-f] [-i] [-u] [-M mode]" >&2; exit 2 ;;
 	esac
 done
 
+# A node FTS marked down is not running, or is no part of the cluster now.
 nodes=$("$PG_BINDIR/psql" -X -q -t -A -F ' ' -d postgres \
-	-c "SELECT content, role, datadir FROM gp_segment_configuration ORDER BY content, role DESC") ||
+	-c "SELECT content, role, datadir FROM gp_segment_configuration WHERE status = 'u' ORDER BY content, role DESC") ||
 	{ echo "gpstop: could not ask the coordinator which nodes there are" >&2; exit 1; }
+
+# -u: every node reads its configuration files again.
+if [ "$reload" -eq 1 ]; then
+	printf '%s\n' "$nodes" | while read -r content role datadir; do
+		[ -n "$datadir" ] || continue
+		"$PG_BINDIR/pg_ctl" -D "$datadir" reload > /dev/null 2>&1 ||
+			{ echo "gpstop: node $content ($role) did not reload" >&2; exit 1; }
+	done
+	exit
+fi
 
 # the coordinator first, then its standby, then the segments
 stop_order=$(printf '%s\n' "$nodes" | awk '$1 == -1 && $2 == "p"'

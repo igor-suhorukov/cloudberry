@@ -92,3 +92,87 @@ BEGIN
 	END LOOP;
 END;
 $$ LANGUAGE plpgsql;
+
+--
+-- M4's: what Cloudberry's FTS tests ask of a cluster with mirrors.
+--
+
+--
+-- pg_ctl_start(datadir, port): start the node whose data directory that
+-- is, as Cloudberry's does, and answer what pg_ctl said, less its dots.
+-- The node's configuration has its port already; the harness's pg_ctl
+-- writes pg_ctl's words beside the data directory, where this reads them.
+--
+CREATE FUNCTION pg_ctl_start(datadir text, port bigint)
+RETURNS text AS $$
+BEGIN
+	EXECUTE format('COPY (SELECT 1) TO PROGRAM %L',
+				   format('@BINDIR@/pg_ctl -l %s.log -D %s -o "-p %s" -w -t 600 start > %s.start 2>&1',
+						  datadir, datadir, port, datadir));
+	RETURN replace(pg_read_file(datadir || '.start'), '.', '');
+END;
+$$ LANGUAGE plpgsql;
+
+-- Cloudberry's, as they are.
+CREATE FUNCTION get_data_directory_for(segment_number int, segment_role text DEFAULT 'p')
+RETURNS text AS $$
+BEGIN
+	RETURN (SELECT datadir FROM gp_segment_configuration
+			 WHERE role = segment_role AND content = segment_number);
+END;
+$$ LANGUAGE plpgsql;
+
+CREATE FUNCTION master() RETURNS SETOF gp_segment_configuration AS $$
+	SELECT * FROM gp_segment_configuration WHERE role = 'p' AND content = -1;
+$$ LANGUAGE sql;
+
+CREATE FUNCTION wait_until_segment_synchronized(segment_number int)
+RETURNS text AS $$
+BEGIN
+	FOR i IN 1..6000 LOOP
+		IF (SELECT count(*) = 0 FROM gp_segment_configuration
+			 WHERE content = segment_number AND mode != 's') THEN
+			RETURN 'OK';
+		END IF;
+		PERFORM pg_sleep(0.1);
+		PERFORM gp_request_fts_probe_scan();
+	END LOOP;
+	RETURN 'Fail';
+END;
+$$ LANGUAGE plpgsql;
+
+CREATE FUNCTION wait_until_all_segments_synchronized()
+RETURNS text AS $$
+BEGIN
+	FOR i IN 1..6000 LOOP
+		IF (SELECT count(*) = 0 FROM gp_segment_configuration
+			 WHERE content != -1 AND mode != 's') THEN
+			RETURN 'OK';
+		END IF;
+		PERFORM pg_sleep(0.1);
+		PERFORM gp_request_fts_probe_scan();
+	END LOOP;
+	RETURN 'Fail';
+END;
+$$ LANGUAGE plpgsql;
+
+CREATE FUNCTION wait_for_mirror_down(contentid smallint, timeout_sec integer)
+RETURNS bool AS $$
+DECLARE
+	i int;
+BEGIN
+	i := 0;
+	LOOP
+		PERFORM gp_request_fts_probe_scan();
+		IF (SELECT count(1) FROM gp_segment_configuration
+			 WHERE role = 'm' AND content = $1 AND status = 'd') = 1 THEN
+			RETURN true;
+		END IF;
+		IF i >= 2 * $2 THEN
+			RETURN false;
+		END IF;
+		PERFORM pg_sleep(0.5);
+		i := i + 1;
+	END LOOP;
+END;
+$$ LANGUAGE plpgsql;

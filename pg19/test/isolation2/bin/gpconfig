@@ -20,22 +20,27 @@
 # gpconfig as far as the isolation2 tests the port runs ask it, on the
 # harness's cluster: gpconfig -c <name> -v <value> [--skipvalidation] sets a
 # setting on every node the coordinator's gp_segment_configuration lists,
-# standby included, for the next start -- where the harness writes its own,
-# postgresql.auto.conf, whose last word is the one taken.  Cloudberry's name
+# standby and mirrors included -- on the coordinator alone with
+# --masteronly -- for the next start or reload, where the harness writes its
+# own, postgresql.auto.conf, whose last word is the one taken; and
+# gpconfig -r <name> takes it out again.  Cloudberry's name
 # is the port's (GP_SETTINGS_MAP, from the harness: gp_autostats_mode is
 # gp.autostats_mode).  Cloudberry's own gpconfig is gpMgmt's, which is M7's.
 set -u
 
-name=; value=
+name=; value=; remove=0; where=
 while [ "$#" -gt 0 ]; do
 	case "$1" in
 		-c) name="$2"; shift 2 ;;
+		-r) name="$2"; remove=1; shift 2 ;;
 		-v) value="$2"; shift 2 ;;
 		--skipvalidation) shift ;;
+		--masteronly|--coordinatoronly) where="WHERE content = -1 AND role = 'p'"; shift ;;
 		*) echo "gpconfig: this harness's gpconfig does not take $1" >&2; exit 2 ;;
 	esac
 done
-[ -n "$name" ] && [ -n "$value" ] || { echo "usage: gpconfig -c name -v value [--skipvalidation]" >&2; exit 2; }
+[ -n "$name" ] && { [ -n "$value" ] || [ "$remove" -eq 1 ]; } ||
+	{ echo "usage: gpconfig -c name -v value | -r name [--skipvalidation] [--masteronly]" >&2; exit 2; }
 
 if [ -n "${GP_SETTINGS_MAP:-}" ]; then
 	mapped=$(awk -v n="$name" '$1 == n { print $2; exit }' "$GP_SETTINGS_MAP")
@@ -44,7 +49,14 @@ fi
 value="${value#\'}"; value="${value%\'}"
 
 "$PG_BINDIR/psql" -X -q -t -A -F ' ' -d postgres \
-	-c "SELECT datadir FROM gp_segment_configuration ORDER BY dbid" |
+	-c "SELECT datadir FROM gp_segment_configuration $where ORDER BY dbid" |
 while read -r datadir; do
-	[ -n "$datadir" ] && printf "%s = '%s'\n" "$name" "$value" >> "$datadir/postgresql.auto.conf"
+	[ -n "$datadir" ] || continue
+	if [ "$remove" -eq 1 ]; then
+		# -r: the setting's lines go, and the node's default is the one taken
+		grep -v -E "^[[:space:]]*$name[[:space:]]*=" "$datadir/postgresql.auto.conf" > "$datadir/postgresql.auto.conf.gpconfig"
+		mv "$datadir/postgresql.auto.conf.gpconfig" "$datadir/postgresql.auto.conf"
+	else
+		printf "%s = '%s'\n" "$name" "$value" >> "$datadir/postgresql.auto.conf"
+	fi
 done

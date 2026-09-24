@@ -1,0 +1,137 @@
+#!/bin/bash
+#
+# Licensed to the Apache Software Foundation (ASF) under one
+# or more contributor license agreements.  See the NOTICE file
+# distributed with this work for additional information
+# regarding copyright ownership.  The ASF licenses this file
+# to you under the Apache License, Version 2.0 (the
+# "License"); you may not use this file except in compliance
+# with the License.  You may obtain a copy of the License at
+#
+#   http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing,
+# software distributed under the License is distributed on an
+# "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+# KIND, either express or implied.  See the License for the
+# specific language governing permissions and limitations
+# under the License.
+#
+# gprecoverseg as far as the isolation2 tests the port runs ask it, on the
+# harness's cluster: every node FTS marked down comes back as its content's
+# mirror -- rewound from the primary with pg_rewind, or, with -F or where the
+# rewind fails, a new copy of it made with pg_basebackup -- a hot standby
+# streaming from the primary as gp_walreceiver from its slot, as the harness
+# makes a mirror; and -r puts every node back in its preferred role: a
+# primary that is a preferred mirror is stopped, FTS fails over to its
+# mirror, and it comes back as the mirror.  FTS is asked to probe after, and
+# marks a mirror up once its primary says it streams.  -a, -F, -r and
+# --no-progress; not -i, which moves a node, where the port's cluster file
+# says where a node is, read as a server starts.  Cloudberry's own
+# gprecoverseg is gpMgmt's, which is M7's.
+set -u
+
+SLOT=internal_wal_replication_slot
+full=0; rebalance=0
+for arg in "$@"; do
+	case "$arg" in
+		--no-progress) ;;
+		-*[!aFr]*) echo "gprecoverseg: this harness's gprecoverseg does not take $arg" >&2; exit 2 ;;
+		-*)
+			[[ "$arg" == *F* ]] && full=1
+			[[ "$arg" == *r* ]] && rebalance=1 ;;
+		*) echo "gprecoverseg: this harness's gprecoverseg does not take $arg" >&2; exit 2 ;;
+	esac
+done
+
+q() {						# on the coordinator
+	"$PG_BINDIR/psql" -X -q -t -A -F '|' -d postgres -c "$1"
+}
+qn() {						# qn <host> <port> <sql>
+	"$PG_BINDIR/psql" -X -q -t -A -F '|' -h "$1" -p "$2" -d postgres -c "$3"
+}
+
+# A node recovered as the mirror of its content's primary.
+recover() {					# recover <dbid>
+	local dbid="$1" content host port dir phost pport rewound=0
+
+	IFS='|' read -r content host port dir <<< \
+		"$(q "SELECT content, hostname, port, datadir FROM gp_segment_configuration WHERE dbid = $dbid")"
+	IFS='|' read -r phost pport <<< \
+		"$(q "SELECT hostname, port FROM gp_segment_configuration WHERE content = $content AND role = 'p'")"
+	[ -n "$dir" ] && [ -n "$pport" ] ||
+		{ echo "gprecoverseg: dbid $dbid, or its primary, is not in gp_segment_configuration" >&2; return 1; }
+
+	"$PG_BINDIR/pg_ctl" -D "$dir" -m immediate -w stop > /dev/null 2>&1
+
+	# A mirror FTS has promoted is a primary once PostgreSQL's startup process
+	# acts on it, up to wal_retrieve_retry_interval later; a copy begun before
+	# that is aborted as the promotion takes ("the standby was promoted during
+	# online backup").  Cloudberry's mirrors take no connection until then.
+	for _ in $(seq 300); do
+		[ "$(qn "$phost" "$pport" "SELECT pg_is_in_recovery()" 2> /dev/null)" = f ] && break
+		sleep 0.2
+	done
+
+	# FTS makes it on a mirror it promotes; a primary that never was one has
+	# it from the harness.
+	qn "$phost" "$pport" "SELECT pg_catalog.pg_create_physical_replication_slot('$SLOT', true)
+	                      WHERE NOT EXISTS (SELECT FROM pg_catalog.pg_replication_slots WHERE slot_name = '$SLOT')" > /dev/null
+
+	if [ "$full" -eq 0 ] && [ -d "$dir" ]; then
+		"$PG_BINDIR/pg_rewind" -D "$dir" --source-server="host=$phost port=$pport dbname=postgres" \
+			> "$dir.rewind.log" 2>&1 && rewound=1
+	fi
+	if [ "$rewound" -eq 0 ]; then
+		rm -rf "$dir"
+		"$PG_BINDIR/pg_basebackup" -D "$dir" -h "$phost" -p "$pport" -X stream -c fast -S "$SLOT" \
+			> "$dir.basebackup.log" 2>&1 ||
+			{ echo "gprecoverseg: could not copy the primary of content $content" >&2; return 1; }
+	fi
+
+	grep -v -E '^(port|unix_socket_directories|gp\.dbid|primary_conninfo|primary_slot_name|hot_standby) ' \
+		"$dir/postgresql.auto.conf" > "$dir.auto"
+	{
+		cat "$dir.auto"
+		echo "port = $port"
+		echo "unix_socket_directories = '$host'"
+		echo "gp.dbid = $dbid"
+		echo "hot_standby = on"
+		echo "primary_conninfo = 'host=$phost port=$pport application_name=gp_walreceiver'"
+		echo "primary_slot_name = '$SLOT'"
+	} > "$dir/postgresql.auto.conf"
+	rm -f "$dir.auto"
+	touch "$dir/standby.signal"
+	"$PG_BINDIR/pg_ctl" -D "$dir" -l "$dir.log" -w -t 120 start > /dev/null 2>&1 ||
+		{ echo "gprecoverseg: dbid $dbid did not start" >&2; return 1; }
+}
+
+failed=0
+if [ "$rebalance" -eq 1 ]; then
+	moved=$(q "SELECT dbid FROM gp_segment_configuration WHERE content >= 0 AND role = 'p' AND preferred_role = 'm'")
+	for dbid in $moved; do
+		"$PG_BINDIR/pg_ctl" -D "$(q "SELECT datadir FROM gp_segment_configuration WHERE dbid = $dbid")" \
+			-m fast -w -t 120 stop > /dev/null 2>&1
+	done
+	[ -n "$moved" ] && q "SELECT gp_request_fts_probe_scan()" > /dev/null
+	# PostgreSQL's startup process takes up to wal_retrieve_retry_interval to
+	# act on a promotion.
+	for dbid in $moved; do
+		IFS='|' read -r host port <<< "$(q "SELECT p.hostname, p.port FROM gp_segment_configuration p
+		                                     JOIN gp_segment_configuration m USING (content)
+		                                     WHERE m.dbid = $dbid AND p.dbid <> $dbid")"
+		for _ in $(seq 150); do
+			[ "$(qn "$host" "$port" "SELECT pg_is_in_recovery()" 2> /dev/null)" = f ] && break
+			sleep 0.2
+		done
+	done
+	for dbid in $moved; do
+		recover "$dbid" || failed=1
+	done
+else
+	for dbid in $(q "SELECT dbid FROM gp_segment_configuration WHERE content >= 0 AND status = 'd'"); do
+		recover "$dbid" || failed=1
+	done
+fi
+q "SELECT gp_request_fts_probe_scan()" > /dev/null
+exit "$failed"
