@@ -76,14 +76,18 @@ On one node (M1):
   delta cannot express — an outer join, `min`, `max`, TRUNCATE — is
   recomputed.  A dynamic table refreshes itself through `gp_task`.
 - `gp_task` — the task scheduler, run by a background worker, its jobs in
-  one database (`gp.task_database`) and written there from any other; a
-  schedule is cron's five fields or, as Cloudberry's may be, an interval of
-  1 to 59 seconds.
+  one database (`gp.task_database`), written there from any other and read
+  from any other as Cloudberry's `pg_task` and `pg_task_run_history`, a
+  user's own and a superuser's all; a schedule is cron's five fields or, as
+  Cloudberry's may be, an interval of 1 to 59 seconds.
 - `gp_sql` — the Cloudberry-only SQL surface: tags, defined once for the
-  cluster as Cloudberry's are, directory tables and storage servers, kept in
-  one database (`gp.maintenance_database`) for the cluster, and Cloudberry's
-  spelling of statements through O26 — classic partition clauses,
-  `DISTRIBUTED BY`, `DECODE`, `gp_dist_random('t')`.
+  cluster as Cloudberry's are, whose owner is not dropped while it owns
+  one; directory tables and storage servers, kept in one database
+  (`gp.maintenance_database`) for the cluster, a directory table's files
+  kept on a storage server through the handler a module registers for the
+  server's protocol, given the user's credentials (`include/gp_storage.h`);
+  and Cloudberry's spelling of statements through O26 — classic partition
+  clauses, `DISTRIBUTED BY`, `DECODE`, `gp_dist_random('t')`.
 - `gp_security` — password profiles.
 - `gp_orca` — ORCA plans on one node, with the fallback counters.
 
@@ -142,7 +146,11 @@ Distributed transactions (M3), in `gp_core`:
   each segment that wrote, under the coordinator's own transaction ID, whose
   commit record decides it; a process on the coordinator finishes, by that
   record, whatever a failure left prepared.  A segment needs
-  `max_prepared_transactions` above zero;
+  `max_prepared_transactions` above zero.  Each segment says with every
+  answer whether its part wrote, so nobody is asked as the transaction
+  commits, and a part that wrote alone, the coordinator writing nothing,
+  commits in one phase, as Cloudberry's does -- ordered after the one-phase
+  commits it may have seen, as Cloudberry orders them;
 - **distributed snapshots**: each statement is sent the coordinator's
   snapshot of it, and a segment makes its own agree — it waits for a
   transaction the snapshot says committed and it holds only prepared, and
@@ -175,16 +183,20 @@ Distributed transactions (M3), in `gp_core`:
   shared catalog and cannot be a label — task jobs, storage servers — lives
   in one database, and any other writes it there through a connection of its
   own, as its transaction commits, in a transaction that is prepared with the
-  segments' parts and finished by the same recovery;
+  segments' parts and finished by the same recovery -- on one node too,
+  which runs that recovery where it may prepare -- and reads it there, the
+  coordinator's from a segment;
+- the coordinator's `pg_class` counts a distributed table's pages, rows and
+  all-visible pages as the segments do, after VACUUM and ANALYZE, as
+  Cloudberry's brings them back;
 - Cloudberry's fault injector, `gp_inject_fault`, for the tests: its faults
   at the port's own places under Cloudberry's names, and at PostgreSQL 19's
   injection points, among them O29's in PostgreSQL's commit.
 
-What M3 leaves open: on one node, the loopback commits just before the
-transaction that asked for it, not with it; the coordinator counts none of
-a distributed table's pages all-visible, so ORCA does not choose an
-index-only scan Cloudberry's would; a role that owns a tag can be dropped;
-and a task's history is read in the task database only.
+What M3 leaves open: a server that cannot prepare
+(`max_prepared_transactions` at zero, PostgreSQL's default) commits the
+loopback's part just before the transaction that asked for it, not with
+it.
 
 The storage, resource and transport modules — `gp_ao`, `pax`, `gp_exttable`,
 `gp_resource`, `gp_tde`, `interconnect`, `udp2` — are still stubs: M5 and M6
