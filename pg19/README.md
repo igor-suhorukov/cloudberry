@@ -163,7 +163,10 @@ run --rm tests` runs them in the image built from the branches, and
 vanilla PostgreSQL 19.  The suites: the module suites (among them `cluster`,
 a coordinator and two segments, and `hooks`, which drives every hook of the
 core series through a test module); `greenplum`, part of Cloudberry's
-`greenplum_schedule` on a coordinator and three segments; `singlenode` and
+`greenplum_schedule` on a coordinator and three segments; `isolation2`, the
+tests of Cloudberry's `isolation2_schedule` that bear on M3 — distributed
+transactions and snapshots, locks and the global deadlock detector — run by
+Cloudberry's own driver on the same cluster; `singlenode` and
 `singlenode_isolation2`, Cloudberry's single-node suites with PostgreSQL 19's
 own regression tests; and PostGIS's regression suite.  Each is run under the
 planner and under ORCA where it plans.

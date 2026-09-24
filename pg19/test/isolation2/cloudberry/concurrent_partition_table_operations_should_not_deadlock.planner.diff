@@ -1,0 +1,36 @@
+@@
+- Gather Motion 3:1  (slice1; segments: 3) 
+-   ->  Append                             
+-         ->  Seq Scan on pt_1_prt_1 pt_1  
+-               Filter: (a < 4)            
+-         ->  Seq Scan on pt_1_prt_2 pt_2  
+-               Filter: (a < 4)            
++ Append                                                            
++   ->  Gather Motion 3:1 on pt_1_prt_1 pt_1  (slice1; segments: 3) 
++         Segments: 3                                               
++   ->  Gather Motion 3:1 on pt_1_prt_2 pt_2  (slice1; segments: 3) 
++         Segments: 3                                               
+@@
+- Gather Motion 3:1  (slice1; segments: 3) 
+-   ->  Append                             
+-         ->  Seq Scan on pt_1_prt_1 pt_1  
+-               Filter: (a < 4)            
+-         ->  Seq Scan on pt_1_prt_2 pt_2  
+-               Filter: (a < 4)            
++ Append                                                            
++   ->  Gather Motion 3:1 on pt_1_prt_1 pt_1  (slice1; segments: 3) 
++         Segments: 3                                               
++   ->  Gather Motion 3:1 on pt_1_prt_2 pt_2  (slice1; segments: 3) 
++         Segments: 3                                               
+@@
+- Gather Motion 3:1  (slice1; segments: 3) 
+-   ->  Append                             
+-         ->  Seq Scan on pt_1_prt_1 pt_1  
+-               Filter: (a < 4)            
+-         ->  Seq Scan on pt_1_prt_2 pt_2  
+-               Filter: (a < 4)            
++ Append                                                            
++   ->  Gather Motion 3:1 on pt_1_prt_1 pt_1  (slice1; segments: 3) 
++         Segments: 3                                               
++   ->  Gather Motion 3:1 on pt_1_prt_2 pt_2  (slice1; segments: 3) 
++         Segments: 3                                               

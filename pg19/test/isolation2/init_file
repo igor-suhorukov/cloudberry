@@ -1,0 +1,29 @@
+-- The port's additions to Cloudberry's init files, read by gpdiff.pl after
+-- them.
+
+-- start_matchignore
+
+# ORCA's line, as gp_orca prints it.
+m/^ Optimizer: GPORCA$/
+
+# The second line of the context PostgreSQL 19 gives a lock wait inside an
+# index insertion -- a cancel that arrives there, as the global deadlock
+# detector's does; gpdiff.pl's -I CONTEXT: ignores the first.
+m/^while inserting index tuple \(\d+,\d+\) in relation /
+
+# The segment an error without a detail of its own came from, which the port
+# gives as its DETAIL and Cloudberry after its message, where its init_file
+# masks it.
+m/^DETAIL:  segment \d+ \([^)]*\)(; \d+ other segments failed too)?$/
+
+-- end_matchignore
+
+-- start_matchsubs
+
+# An error a segment raised with a detail of its own names the segment
+# before it, and where it listens: that goes, as the greenplum suite takes
+# it (see its init_file).
+m/^DETAIL:  segment \d+ \([^)]*\): /
+s/^DETAIL:  segment \d+ \([^)]*\): (.*?)(; \d+ other segments failed too)?$/DETAIL:  $1/
+
+-- end_matchsubs

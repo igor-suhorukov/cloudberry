@@ -1,0 +1,30 @@
+@@
+-         Filter: (a < 4)                            
++         ->  Seq Scan on pt_1_prt_1 pt_1            
++               Filter: (a < 4)                      
++         ->  Seq Scan on pt_1_prt_2 pt_2            
++               Filter: (a < 4)                      
+@@
+- Gather Motion 3:1  (slice1; segments: 3)           
+-   ->  Dynamic Index Scan on idx on pt              
+-         Index Cond: (a < 4)                        
+-         Number of partitions to scan: 2 (out of 5) 
++ Gather Motion 3:1  (slice1; segments: 3)                         
++   ->  Dynamic Index Scan on idx on pt                            
++         Number of partitions to scan: 2 (out of 5)               
++         ->  Index Scan using pt_1_prt_1_a_idx on pt_1_prt_1 pt_1 
++               Index Cond: (a < 4)                                
++         ->  Index Scan using pt_1_prt_2_a_idx on pt_1_prt_2 pt_2 
++               Index Cond: (a < 4)                                
+@@
+- Gather Motion 3:1  (slice1; segments: 3)           
+-   ->  Dynamic Index Only Scan on idx on pt         
+-         Index Cond: (a < 4)                        
+-         Number of partitions to scan: 2 (out of 5) 
++ Gather Motion 3:1  (slice1; segments: 3)                         
++   ->  Dynamic Index Scan on idx on pt                            
++         Number of partitions to scan: 2 (out of 5)               
++         ->  Index Scan using pt_1_prt_1_a_idx on pt_1_prt_1 pt_1 
++               Index Cond: (a < 4)                                
++         ->  Index Scan using pt_1_prt_2_a_idx on pt_1_prt_2 pt_2 
++               Index Cond: (a < 4)                                

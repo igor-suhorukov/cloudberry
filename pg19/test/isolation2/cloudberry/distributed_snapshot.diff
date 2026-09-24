@@ -1,0 +1,44 @@
+@@
+-CREATE
++ERROR:  could not access file "/cb/src/test/isolation2/../regress/regress.so": No such file or directory
+@@
++FAILED:  Forked command is not blocking; got output: ERROR:  syntax error at or near "expand"
++LINE 1: alter table t_alter_snapshot_test expand table;
++                                          ^
+@@
+-ALTER
++FAILED:  Execution failed
+@@
++ 0             | 10 | 10 
+@@
++ 0             | 6  | 6  
+@@
++ 0             | 9  | 9  
+@@
+- 2             | 10 | 10 
+- 2             | 5  | 5  
+- 2             | 6  | 6  
+- 2             | 9  | 9  
++ 1             | 5  | 5  
+@@
+- test_consume_xids 
+--------------------
+-                   
+-(1 row)
++ERROR:  function test_consume_xids(integer) does not exist
++LINE 1: select test_consume_xids((131070 - (cur % 131072))::int) fro...
++               ^
++DETAIL:  There is no function of that name.
+@@
+- count 
+--------
+- 0     
+-(1 row)
++ERROR:  relation "gp_distributed_log" does not exist
++LINE 1: select count(*) from gp_distributed_log;
++                             ^
+@@
+-LOG:  Got distributed snapshot from CreateDistributedSnapshot
+@@
+-LOG:  Got distributed snapshot from CreateDistributedSnapshot
+-LOG:  Got distributed snapshot from CreateDistributedSnapshot

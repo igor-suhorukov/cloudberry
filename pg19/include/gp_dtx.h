@@ -47,6 +47,10 @@
 /* The setting a segment's transaction carries its distributed snapshot in. */
 #define GP_DTX_SNAPSHOT_SETTING	"gp.distributed_snapshot"
 
+/* What the coordinator asks each segment as a transaction commits: did it write? */
+#define GP_DTX_STATUS_QUERY \
+	"SELECT pg_catalog.pg_current_xact_id_if_assigned() IS NOT NULL"
+
 /* The gid a transaction's parts are prepared under, into gid[GP_DTX_GIDLEN]. */
 extern void GpDtxFormGid(FullTransactionId gxid, char *gid);
 

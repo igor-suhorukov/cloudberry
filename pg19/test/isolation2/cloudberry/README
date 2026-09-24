@@ -1,0 +1,33 @@
+Part of Cloudberry's isolation2_schedule on the port's cluster: the
+differences from Cloudberry's expected output that have been reviewed, and
+are the port's for a reason of its own.
+
+Each file is one test's difference in the form ../../singlenode/canon.pl
+gives it, named for the expected output it differs from; a name with a pass
+in it (test.orca.diff) holds for that pass alone.  run.sh counts a test as
+passing when gpdiff.pl, under Cloudberry's init_file and the port's, finds no
+difference or exactly the file's.
+
+concurrent_partition_table_operations_should_not_deadlock (planner, orca)
+  EXPLAIN's plans and nothing else: the operations the test runs side by
+  side do not deadlock.  The planner reads each partition through a Gather
+  Motion of its own under an Append, where Cloudberry gathers one Append
+  from the segments; ORCA's Dynamic Scan is shown with the scan it runs on
+  each partition beneath it.  For the query the index covers, ORCA picks an
+  index scan where Cloudberry's picks an index-only one: the coordinator's
+  pg_class holds its own count of all-visible pages, none, where Cloudberry's
+  VACUUM brings back the sum of the segments' (vacuum.c), so ORCA costs the
+  heap fetches an index-only scan would have saved.
+
+distributed_snapshot  four things of Cloudberry's that the port does not
+  have, and nothing of the distributed snapshots the test is for.
+  test_consume_xids is a function of Cloudberry's regress.so, which is not
+  built for the port, so the scenario that burns transaction IDs up to a
+  segment of the distributed log burns none.  gp_distributed_log is the view
+  of that log; the port keeps what it needs of it -- which prepared part
+  stands for which distributed transaction -- in shared memory, pruned as
+  distributed snapshots advance (gp_internal.dtx_map()), and has no files to
+  truncate.  ALTER TABLE ... EXPAND TABLE is M7's, so the rows of a table on
+  two of the three segments stay where they are, and the SELECT after it
+  shows them there.  And Debug_print_full_dtm is a setting of Cloudberry's,
+  whose LOG lines the port does not print.

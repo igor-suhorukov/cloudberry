@@ -185,6 +185,7 @@ COPY --from=build /cb/src/test/regress/output /cb/src/test/regress/output
 COPY --from=build /cb/src/test/regress/data /cb/src/test/regress/data
 COPY --from=build /cb/src/test/singlenode_regress /cb/src/test/singlenode_regress
 COPY --from=build /cb/src/test/singlenode_isolation2 /cb/src/test/singlenode_isolation2
+COPY --from=build /cb/src/test/isolation2 /cb/src/test/isolation2
 COPY --from=build /pgregress /cb/pgregress
 COPY --from=postgis /postgis /postgis
 RUN chown -R postgres:postgres /cb /postgis

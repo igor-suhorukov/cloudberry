@@ -827,6 +827,18 @@ dtx_executor_start(QueryDesc *queryDesc, int eflags)
 	/* who this backend is, for the global deadlock detector */
 	GpGddNoteBackend();
 
+	/*
+	 * Where Cloudberry's segment starts a statement it was dispatched
+	 * (exec_mpp_query): each the coordinator sends the writer, but for the
+	 * one that asks, as the transaction commits, whether it wrote.
+	 */
+	if (gp_fault_active != NULL && *gp_fault_active > 0 &&
+		GpClusterIsDispatched() && !GpShareIsReader() &&
+		queryDesc->sourceText != NULL &&
+		strncmp(queryDesc->sourceText, GP_DTX_STATUS_QUERY,
+				strlen(GP_DTX_STATUS_QUERY)) != 0)
+		GP_FAULT("exec_mpp_query_start");
+
 	if (queryDesc->snapshot != NULL &&
 		queryDesc->snapshot->snapshot_type == SNAPSHOT_MVCC &&
 		queryDesc->snapshot == GetActiveSnapshot() &&
@@ -873,6 +885,15 @@ dtx_snapshot_arrived(void)
 		return;
 	dtx_attach();
 	map_load();
+
+	/*
+	 * Where Cloudberry's segment advances its distributed log's oldest xmin
+	 * from a distributed snapshot, which its tests hold a statement at, in
+	 * one database.
+	 */
+	if (gp_fault_active != NULL && *gp_fault_active > 0)
+		(void) GpFaultTrigger("distributedlog_advance_oldest_xmin",
+							  get_database_name(MyDatabaseId), "");
 
 	LWLockAcquire(&dtx_shared->lock, LW_SHARED);
 	e = map_entries();

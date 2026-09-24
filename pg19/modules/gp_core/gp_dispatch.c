@@ -1786,7 +1786,7 @@ gang_commit_first_phase(GpGang *g)
 	int			nwriters = 0;
 
 	notices_quiet++;
-	gang_send_all(g, "SELECT pg_catalog.pg_current_xact_id_if_assigned() IS NOT NULL");
+	gang_send_all(g, GP_DTX_STATUS_QUERY);
 	gang_wait_all(g, status, false);
 	for (int i = 0; i < g->nconns; i++)
 	{
