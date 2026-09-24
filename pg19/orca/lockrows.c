@@ -43,6 +43,11 @@
  *   the plan's range table, so that a cached plan takes it too -- and no
  *   LockRows.
  *
+ * gp_core has the parser take the table lock, where it can be decided then,
+ * and AccessShareLock where only the plan decides it: with the detector on,
+ * the table's lock is taken here, RowShareLock for rows the segments lock
+ * and ExclusiveLock otherwise, and recorded in the plan's range table.
+ *
  * What ORCA plans cannot take: a table whose rows it does not lock in a
  * query that locks some -- PostgreSQL copies such a table's whole row
  * (ROW_MARK_COPY) -- a table with inheritance children, the same table
@@ -241,6 +246,17 @@ GpOrcaPrepareRowMarks(Query *query, List **marks, const char **why)
 		OrcaRowMark *mark = palloc0(sizeof(OrcaRowMark));
 		Var		   *ctid = makeVar(rc->rti, SelfItemPointerAttributeNumber,
 								   TIDOID, -1, InvalidOid, 0);
+
+		/*
+		 * The table's own lock, RowShareLock, which gp_core leaves to
+		 * planning on a cluster with the deadlock detector on: in the range
+		 * table, for a cached plan to take too.
+		 */
+		if (rte->rellockmode < RowShareLock)
+		{
+			LockRelationOid(rte->relid, RowShareLock);
+			rte->rellockmode = RowShareLock;
+		}
 
 		mark->rti = rc->rti;
 		mark->relid = rte->relid;

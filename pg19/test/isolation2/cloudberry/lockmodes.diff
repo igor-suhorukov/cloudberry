@@ -1130,15 +1130,20 @@
 -    }
 -  ],
 @@
-- locktype | mode            | granted | relation   
------------+-----------------+---------+------------
-- relation | AccessShareLock | t       | t_lockmods 
-- relation | RowShareLock    | t       | t_lockmods 
--(2 rows)
-+ locktype | mode         | granted | relation   
-+----------+--------------+---------+------------
-+ relation | RowShareLock | t       | t_lockmods 
-+(1 row)
+-  'child' => [
+-    {
+-      'child' => [
+-        {
+-          'id' => 3,
+-          'parent' => 2,
+-          'short' => 'Seq Scan on t_lockmods'
+-        }
+-      ],
+-      'id' => 2,
+-      'parent' => 1,
+-      'short' => 'LockRows'
+-    }
+-  ],
 @@
 -  'child' => [
 -    {
@@ -1155,16 +1160,6 @@
 -    }
 -  ],
 @@
-- locktype | mode            | granted | relation   
------------+-----------------+---------+------------
-- relation | AccessShareLock | t       | t_lockmods 
-- relation | RowShareLock    | t       | t_lockmods 
--(2 rows)
-+ locktype | mode         | granted | relation   
-+----------+--------------+---------+------------
-+ relation | RowShareLock | t       | t_lockmods 
-+(1 row)
-@@
 -  'child' => [
 -    {
 -      'child' => [
@@ -1180,40 +1175,55 @@
 -    }
 -  ],
 @@
-- locktype | mode            | granted | relation   
------------+-----------------+---------+------------
-- relation | AccessShareLock | t       | t_lockmods 
-- relation | RowShareLock    | t       | t_lockmods 
--(2 rows)
-+ locktype | mode         | granted | relation   
-+----------+--------------+---------+------------
-+ relation | RowShareLock | t       | t_lockmods 
-+(1 row)
++      'id' => 2,
++      'parent' => 1,
++      'recvsize' => 1,
++      'segments' => 3,
++      'sendsize' => 3,
++      'short' => 'Gather Motion'
++    },
++    {
 @@
--  'child' => [
--    {
--      'child' => [
--        {
+-          'child' => [
+-            {
+-              'id' => 4,
+-              'parent' => 3,
+-              'short' => 'Seq Scan on t_lockmods'
+-            }
+-          ],
 -          'id' => 3,
 -          'parent' => 2,
--          'short' => 'Seq Scan on t_lockmods'
--        }
--      ],
--      'id' => 2,
--      'parent' => 1,
--      'short' => 'LockRows'
--    }
--  ],
+-          'recvsize' => 3,
++          'id' => 4,
++          'parent' => 3,
++          'recvsize' => 1,
 @@
-- locktype | mode            | granted | relation   
------------+-----------------+---------+------------
-- relation | AccessShareLock | t       | t_lockmods 
-- relation | RowShareLock    | t       | t_lockmods 
--(2 rows)
-+ locktype | mode         | granted | relation   
-+----------+--------------+---------+------------
-+ relation | RowShareLock | t       | t_lockmods 
-+(1 row)
+-          'short' => 'Broadcast Motion'
+-        },
+-        {
+-          'child' => [
+-            {
+-              'id' => 6,
+-              'parent' => 5,
+-              'short' => 'Seq Scan on t_lockmods1'
+-            }
+-          ],
+-          'id' => 5,
+-          'parent' => 2,
+-          'short' => 'Materialize'
++          'short' => 'Gather Motion'
+@@
+-      'id' => 2,
++      'id' => 3,
+@@
+-      'short' => 'Nested Loop'
++      'short' => 'Materialize'
+@@
+-  'recvsize' => 1,
+-  'segments' => 3,
+-  'sendsize' => 3,
+-  'short' => 'Gather Motion'
++  'short' => 'Nested Loop'
 @@
 +      'id' => 2,
 +      'parent' => 1,
@@ -1265,19 +1275,6 @@
 -  'short' => 'Gather Motion'
 +  'short' => 'Nested Loop'
 @@
-- locktype | mode            | granted | relation    
------------+-----------------+---------+-------------
-- relation | AccessShareLock | t       | t_lockmods  
-- relation | AccessShareLock | t       | t_lockmods1 
-- relation | ExclusiveLock   | t       | t_lockmods  
-- relation | ExclusiveLock   | t       | t_lockmods1 
-+ locktype | mode          | granted | relation    
-+----------+---------------+---------+-------------
-+ relation | ExclusiveLock | t       | t_lockmods  
-+ relation | ExclusiveLock | t       | t_lockmods1 
-+ relation | RowShareLock  | t       | t_lockmods  
-+ relation | RowShareLock  | t       | t_lockmods1 
-@@
 +      'id' => 2,
 +      'parent' => 1,
 +      'recvsize' => 1,
@@ -1328,19 +1325,6 @@
 -  'short' => 'Gather Motion'
 +  'short' => 'Nested Loop'
 @@
-- locktype | mode            | granted | relation    
------------+-----------------+---------+-------------
-- relation | AccessShareLock | t       | t_lockmods  
-- relation | AccessShareLock | t       | t_lockmods1 
-- relation | ExclusiveLock   | t       | t_lockmods  
-- relation | ExclusiveLock   | t       | t_lockmods1 
-+ locktype | mode          | granted | relation    
-+----------+---------------+---------+-------------
-+ relation | ExclusiveLock | t       | t_lockmods  
-+ relation | ExclusiveLock | t       | t_lockmods1 
-+ relation | RowShareLock  | t       | t_lockmods  
-+ relation | RowShareLock  | t       | t_lockmods1 
-@@
 +      'id' => 2,
 +      'parent' => 1,
 +      'recvsize' => 1,
@@ -1390,82 +1374,6 @@
 -  'sendsize' => 3,
 -  'short' => 'Gather Motion'
 +  'short' => 'Nested Loop'
-@@
-- locktype | mode            | granted | relation    
------------+-----------------+---------+-------------
-- relation | AccessShareLock | t       | t_lockmods  
-- relation | AccessShareLock | t       | t_lockmods1 
-- relation | ExclusiveLock   | t       | t_lockmods  
-- relation | ExclusiveLock   | t       | t_lockmods1 
-+ locktype | mode          | granted | relation    
-+----------+---------------+---------+-------------
-+ relation | ExclusiveLock | t       | t_lockmods  
-+ relation | ExclusiveLock | t       | t_lockmods1 
-+ relation | RowShareLock  | t       | t_lockmods  
-+ relation | RowShareLock  | t       | t_lockmods1 
-@@
-+      'id' => 2,
-+      'parent' => 1,
-+      'recvsize' => 1,
-+      'segments' => 3,
-+      'sendsize' => 3,
-+      'short' => 'Gather Motion'
-+    },
-+    {
-@@
--          'child' => [
--            {
--              'id' => 4,
--              'parent' => 3,
--              'short' => 'Seq Scan on t_lockmods'
--            }
--          ],
--          'id' => 3,
--          'parent' => 2,
--          'recvsize' => 3,
-+          'id' => 4,
-+          'parent' => 3,
-+          'recvsize' => 1,
-@@
--          'short' => 'Broadcast Motion'
--        },
--        {
--          'child' => [
--            {
--              'id' => 6,
--              'parent' => 5,
--              'short' => 'Seq Scan on t_lockmods1'
--            }
--          ],
--          'id' => 5,
--          'parent' => 2,
--          'short' => 'Materialize'
-+          'short' => 'Gather Motion'
-@@
--      'id' => 2,
-+      'id' => 3,
-@@
--      'short' => 'Nested Loop'
-+      'short' => 'Materialize'
-@@
--  'recvsize' => 1,
--  'segments' => 3,
--  'sendsize' => 3,
--  'short' => 'Gather Motion'
-+  'short' => 'Nested Loop'
-@@
-- locktype | mode            | granted | relation    
------------+-----------------+---------+-------------
-- relation | AccessShareLock | t       | t_lockmods  
-- relation | AccessShareLock | t       | t_lockmods1 
-- relation | ExclusiveLock   | t       | t_lockmods  
-- relation | ExclusiveLock   | t       | t_lockmods1 
-+ locktype | mode          | granted | relation    
-+----------+---------------+---------+-------------
-+ relation | ExclusiveLock | t       | t_lockmods  
-+ relation | ExclusiveLock | t       | t_lockmods1 
-+ relation | RowShareLock  | t       | t_lockmods  
-+ relation | RowShareLock  | t       | t_lockmods1 
 @@
 + relation | AccessShareLock  | t       | t_lockmods 
 @@
@@ -1480,6 +1388,46 @@
 + relation | AccessShareLock  | t       | t_lockmods_upsert 
 @@
 -(1 row)
++(2 rows)
+@@
+- locktype | mode         | granted | relation   
+-----------+--------------+---------+------------
+- relation | RowShareLock | t       | t_lockmods 
+-(1 row)
++ locktype | mode            | granted | relation   
++----------+-----------------+---------+------------
++ relation | AccessShareLock | t       | t_lockmods 
++ relation | RowShareLock    | t       | t_lockmods 
++(2 rows)
+@@
+- locktype | mode         | granted | relation   
+-----------+--------------+---------+------------
+- relation | RowShareLock | t       | t_lockmods 
+-(1 row)
++ locktype | mode            | granted | relation   
++----------+-----------------+---------+------------
++ relation | AccessShareLock | t       | t_lockmods 
++ relation | RowShareLock    | t       | t_lockmods 
++(2 rows)
+@@
+- locktype | mode         | granted | relation   
+-----------+--------------+---------+------------
+- relation | RowShareLock | t       | t_lockmods 
+-(1 row)
++ locktype | mode            | granted | relation   
++----------+-----------------+---------+------------
++ relation | AccessShareLock | t       | t_lockmods 
++ relation | RowShareLock    | t       | t_lockmods 
++(2 rows)
+@@
+- locktype | mode         | granted | relation   
+-----------+--------------+---------+------------
+- relation | RowShareLock | t       | t_lockmods 
+-(1 row)
++ locktype | mode            | granted | relation   
++----------+-----------------+---------+------------
++ relation | AccessShareLock | t       | t_lockmods 
++ relation | RowShareLock    | t       | t_lockmods 
 +(2 rows)
 @@
 + relation | AccessShareLock  | t       | t_lockmods 
@@ -2146,16 +2094,6 @@
 -      'short' => 'Gather Motion'
 +      'short' => 'Sort'
 @@
-- locktype | mode            | granted | relation   
------------+-----------------+---------+------------
-- relation | AccessShareLock | t       | t_lockmods 
-- relation | RowShareLock    | t       | t_lockmods 
--(2 rows)
-+ locktype | mode         | granted | relation   
-+----------+--------------+---------+------------
-+ relation | RowShareLock | t       | t_lockmods 
-+(1 row)
-@@
 -  'child' => [
 -    {
 -      'id' => 2,
@@ -2168,10 +2106,11 @@
 -----------+-----------------+---------+----------------
 - relation | AccessShareLock | t       | t_lockmods_rep 
 - relation | ExclusiveLock   | t       | t_lockmods_rep 
+-(2 rows)
 + locktype | mode          | granted | relation       
 +----------+---------------+---------+----------------
 + relation | ExclusiveLock | t       | t_lockmods_rep 
-+ relation | RowShareLock  | t       | t_lockmods_rep 
++(1 row)
 @@
 -      'child' => [
 -        {
@@ -2199,16 +2138,6 @@
 -  'sendsize' => 3,
 -  'short' => 'Gather Motion'
 +  'short' => 'Sort'
-@@
-- locktype | mode            | granted | relation   
------------+-----------------+---------+------------
-- relation | AccessShareLock | t       | t_lockmods 
-- relation | RowShareLock    | t       | t_lockmods 
--(2 rows)
-+ locktype | mode         | granted | relation   
-+----------+--------------+---------+------------
-+ relation | RowShareLock | t       | t_lockmods 
-+(1 row)
 @@
 + relation | AccessShareLock  | t       | t_lockmods_part_tbl_dml_1_prt_1 
 @@

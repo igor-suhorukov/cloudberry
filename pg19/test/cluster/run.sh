@@ -1953,13 +1953,40 @@ SQL
 		locked=$(( ($(date +%s%N) - start) / 1000000 ))
 		wait "$holder"
 		out2=$(grep -m1 "Lock" "$ROOT/gddfu.out")
+		# The table's own lock is AccessShareLock from the parser, which
+		# cannot tell yet whether the rows can be locked on the segments,
+		# and RowShareLock from planning, which can (O30), as Cloudberry's
+		# parser holds the two.
 		case "$out|$out2" in
-			*"could not obtain lock on row"*"|RowShareLock")
+			*"could not obtain lock on row"*"|AccessShareLock,RowShareLock")
 				[ "$other" -lt 1000 ] && [ "$locked" -ge 1000 ] \
 					&& ok "with it, FOR UPDATE under gp.optimizer = $opt locks one row on its segment: NOWAIT fails there, another row's UPDATE passes, its own waits" \
 					|| notok "row locks under gp.optimizer = $opt" "$other ms / $locked ms" ;;
 			*) notok "row locks under gp.optimizer = $opt" "$out / $out2" ;;
 		esac
+	done
+
+	# A join's rows cannot be locked on the segments: the tables' lock,
+	# ExclusiveLock, taken as the query is planned -- after AccessShareLock,
+	# not RowShareLock, so not an upgrade two sessions deadlock on -- and
+	# recorded in the plan, so that a cached plan takes it too.
+	q 0 "CREATE TABLE gdd2 (id int, val int) DISTRIBUTED BY (id); INSERT INTO gdd2 SELECT i, i FROM generate_series(1, 100) i;" >/dev/null
+	for opt in off on; do
+		out=$(printf '%s\n' "SET gp.optimizer = $opt;" "BEGIN;" \
+			"SELECT g.id FROM gdd g JOIN gdd2 h USING (id) WHERE g.id = $r0 FOR UPDATE;" \
+			"SELECT string_agg(mode, ',' ORDER BY mode) FROM pg_locks WHERE relation = 'gdd'::regclass;" \
+			"COMMIT;" | qf 0 | tail -1)
+		[ "$out" = "AccessShareLock,ExclusiveLock" ] \
+			&& ok "with it, a join FOR UPDATE under gp.optimizer = $opt locks the tables as it is planned, after AccessShareLock" \
+			|| notok "a join's FOR UPDATE under gp.optimizer = $opt" "$out"
+		out=$(printf '%s\n' "SET gp.optimizer = $opt;" \
+			"PREPARE gddj AS SELECT g.id FROM gdd g JOIN gdd2 h USING (id) WHERE g.id = $r0 FOR UPDATE;" \
+			"EXECUTE gddj;" "BEGIN;" "EXECUTE gddj;" \
+			"SELECT string_agg(mode, ',' ORDER BY mode) FROM pg_locks WHERE relation = 'gdd'::regclass;" \
+			"COMMIT;" | qf 0 | tail -1)
+		[ "$out" = "AccessShareLock,ExclusiveLock" ] \
+			&& ok "and a cached plan of it takes the ExclusiveLock again, under gp.optimizer = $opt" \
+			|| notok "a cached plan's lock for a join's FOR UPDATE under gp.optimizer = $opt" "$out"
 	done
 
 	for n in 1 2 0; do
@@ -1974,6 +2001,19 @@ SQL
 	[ "$out" = "ExclusiveLock" ] \
 		&& ok "without it, ORCA's FOR UPDATE takes Cloudberry's table lock, ExclusiveLock, as the parser opens the table" \
 		|| notok "the table lock for FOR UPDATE without the detector" "$out"
+
+	# A write through a view: the rewriter brings the table in, and locks it
+	# in ExclusiveLock (O30), not in RowExclusiveLock that the executor's
+	# ExclusiveLock would then upgrade.
+	q 0 "CREATE VIEW gddv AS SELECT id, val FROM gdd;" >/dev/null
+	out=$(printf '%s\n' "BEGIN;" "UPDATE gddv SET val = val WHERE id = $r0;" \
+		"SELECT string_agg(mode, ',' ORDER BY mode) FROM pg_locks WHERE relation = 'gdd'::regclass;" \
+		"COMMIT;" | qf 0 | tail -1)
+	case ",$out," in
+		*,ExclusiveLock,*,RowExclusiveLock,*|*,RowExclusiveLock,*) notok "the table under a view without the detector" "$out" ;;
+		*,ExclusiveLock,*) ok "without it, an UPDATE through a view locks the table in ExclusiveLock, as the rewriter brings it in" ;;
+		*) notok "the table under a view without the detector" "$out" ;;
+	esac
 
 	for n in 1 2 0; do
 		start_node "$n" "shared_preload_libraries = '$PRELOAD,gp_orca'"

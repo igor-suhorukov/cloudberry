@@ -49,11 +49,15 @@
  * the same, which the rows it gathers, having no place on the coordinator,
  * could not be locked by anyway.
  *
- * That ExclusiveLock, and an UPDATE's or DELETE's, is the parser's: O30 lets
- * the parser open the table in it, as Cloudberry's parser opens it
- * (CdbTryOpenTable), rather than in PostgreSQL's weaker mode, which the
- * ExclusiveLock taken after it would upgrade -- and two sessions upgrading
- * deadlock.
+ * That ExclusiveLock, and an UPDATE's or DELETE's, is taken where PostgreSQL
+ * takes its own lock on the table -- as the parser opens it, or the rewriter
+ * brings it in under a view -- rather than after PostgreSQL's weaker mode,
+ * which it would upgrade, and two sessions upgrading deadlock (O30,
+ * gp_modify_query_lockmode()).  With the deadlock detector on, whether a
+ * locking clause locks rows on the segments or the table is decided as the
+ * query is planned, so the parser takes AccessShareLock, as Cloudberry's
+ * parser does before it decides, and planning the lock it decides on; no
+ * lock taken after AccessShareLock is an upgrade that deadlocks.
  *
  * Cloudberry sources this file stands in for:
  *	  the Redistribute Motion under an INSERT (cdbpath.c,
@@ -118,7 +122,7 @@
 
 static planner_hook_type prev_planner = NULL;
 static ProcessUtility_hook_type prev_ProcessUtility = NULL;
-static parser_lockmode_hook_type prev_parser_lockmode = NULL;
+static query_lockmode_hook_type prev_query_lockmode = NULL;
 
 /* ------------------------------------------------------------------------- */
 /* The router: rows to the segments their keys name                          */
@@ -829,6 +833,17 @@ segments_lock_rows(Query *q)
 
 	GpScanSetLocking(rte->relid, rc->strength, rc->waitPolicy);
 	q->rowMarks = NIL;
+
+	/*
+	 * The table's own lock, RowShareLock, which the parser left to planning
+	 * (gp_modify_query_lockmode()): in the range table, for a cached plan to
+	 * take too.
+	 */
+	if (rte->rellockmode < RowShareLock)
+	{
+		LockRelationOid(rte->relid, RowShareLock);
+		rte->rellockmode = RowShareLock;
+	}
 	return true;
 }
 
@@ -848,10 +863,12 @@ lock_instead_of_row_marks(Node *node, void *context)
 			RowMarkClause *rc = lfirst_node(RowMarkClause, lc);
 			RangeTblEntry *rte = rt_fetch(rc->rti, q->rtable);
 
+			/* in the range table too, for a cached plan to take */
 			if (rte->rtekind == RTE_RELATION &&
 				GpScanDistributedPolicy(rte->relid) != NULL)
 			{
 				LockRelationOid(rte->relid, ExclusiveLock);
+				rte->rellockmode = ExclusiveLock;
 				q->rowMarks = foreach_delete_current(q->rowMarks, lc);
 			}
 		}
@@ -1297,35 +1314,48 @@ gp_modify_ProcessUtility(PlannedStmt *pstmt, const char *queryString,
 }
 
 /*
- * O30: without the global deadlock detector, a distributed table an UPDATE,
- * a DELETE or an INSERT ... ON CONFLICT DO UPDATE writes, or a locking
- * clause locks, is opened by the parser in ExclusiveLock, the lock the port
- * takes on it as it plans and runs the statement (here, gp_explicit.c and
- * gp_motion.c) -- first, so that those find it held.  A table the parser
- * does not open by name, under a view, is still locked only as they take it.
+ * O30: the lock a query takes on a distributed table, where PostgreSQL takes
+ * its own -- as the parser opens the table, or the rewriter brings it in
+ * under a view or a rule -- and first, so that none taken on it later is an
+ * upgrade two sessions deadlock on.  The planner and the executor ask for
+ * theirs again (here, gp_explicit.c, gp_motion.c, lockrows.c), and find it
+ * held.
+ *
+ * Without the global deadlock detector, Cloudberry's ExclusiveLock, as its
+ * parser takes it (CdbTryOpenTable, addRangeTableEntry): on a table an
+ * UPDATE, a DELETE or an INSERT ... ON CONFLICT DO UPDATE writes, and on one
+ * a locking clause locks.  With it, a write keeps PostgreSQL's mode and
+ * locks rows; a locking clause locks the rows on the segments for a query of
+ * that one table, and the table otherwise -- which is known only once the
+ * query is planned, so until then AccessShareLock, as Cloudberry's parser
+ * holds before it decides.  A replicated table's rows are on every segment,
+ * and a partitioned table's in its partitions, neither locked row by row:
+ * their ExclusiveLock now.
  */
 static LOCKMODE
-gp_modify_parser_lockmode(ParseState *pstate, const RangeVar *relation,
-						  LOCKMODE lockmode, AclMode requiredPerms)
+gp_modify_query_lockmode(Oid relid, LOCKMODE lockmode, AclMode requiredPerms)
 {
-	Oid			relid;
+	GpPolicy   *policy;
+	bool		writes;
 
-	if (prev_parser_lockmode)
-		lockmode = prev_parser_lockmode(pstate, relation, lockmode,
-										requiredPerms);
+	if (prev_query_lockmode)
+		lockmode = prev_query_lockmode(relid, lockmode, requiredPerms);
 
-	if (gp_enable_global_deadlock_detector ||
-		GpClusterBackendRole() != GP_ROLE_DISPATCH ||
-		lockmode >= ExclusiveLock ||
-		!((requiredPerms & (ACL_UPDATE | ACL_DELETE)) != 0 ||
-		  lockmode == RowShareLock))
+	writes = lockmode == RowExclusiveLock &&
+		(requiredPerms & (ACL_UPDATE | ACL_DELETE)) != 0;
+	if (GpClusterBackendRole() != GP_ROLE_DISPATCH ||
+		!(writes || lockmode == RowShareLock) ||
+		(policy = GpScanDistributedPolicy(relid)) == NULL)
 		return lockmode;
 
-	/* found without a lock, as Cloudberry's parser finds it */
-	relid = RangeVarGetRelid(relation, NoLock, true);
-	if (!OidIsValid(relid) || GpScanDistributedPolicy(relid) == NULL)
+	if (!gp_enable_global_deadlock_detector)
+		return ExclusiveLock;
+	if (writes)
 		return lockmode;
-	return ExclusiveLock;
+	if (GpPolicyIsReplicated(policy) ||
+		get_rel_relkind(relid) != RELKIND_RELATION || has_subclass(relid))
+		return ExclusiveLock;
+	return AccessShareLock;
 }
 
 void
@@ -1344,6 +1374,6 @@ GpModifyInit(void)
 	prev_ProcessUtility = ProcessUtility_hook;
 	ProcessUtility_hook = gp_modify_ProcessUtility;
 
-	prev_parser_lockmode = parser_lockmode_hook;
-	parser_lockmode_hook = gp_modify_parser_lockmode;
+	prev_query_lockmode = query_lockmode_hook;
+	query_lockmode_hook = gp_modify_query_lockmode;
 }
