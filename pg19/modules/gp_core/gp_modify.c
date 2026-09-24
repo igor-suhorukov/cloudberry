@@ -42,7 +42,7 @@
  * and each row it changes is changed on its segment (gp_explicit.c); so is
  * an INSERT with RETURNING.  A row whose key changes is moved by a Split:
  * deleted where it is, inserted where its new key hashes.  WHERE CURRENT OF
- * is refused, since its cursor read the row on the coordinator.
+ * is written so too: the cursor's gather says where its row is (gp_scan.c).
  *
  * SELECT ... FOR UPDATE.  Cloudberry, without its global deadlock detector,
  * takes an ExclusiveLock on the table rather than locking rows; the port does
@@ -533,7 +533,8 @@ typedef struct ModifyState
 	CustomScanState css;
 	char	   *sql;
 	bool		replicated;
-	int			content;		/* the one segment it is sent to, or -1 */
+	int			ncontents;		/* the segments direct dispatch sends it to */
+	int		   *contents;
 	int			nsegments;		/* else the table's: all, or a partial
 								 * table's first so many */
 	Oid			relid;			/* the table it changes */
@@ -550,9 +551,11 @@ modify_create_state(CustomScan *cscan)
 	state->css.slotOps = &TTSOpsVirtual;
 	state->sql = strVal(linitial(cscan->custom_private));
 	state->replicated = boolVal(lsecond(cscan->custom_private));
-	state->content = intVal(lthird(cscan->custom_private));
 	state->nsegments = intVal(lfourth(cscan->custom_private));
 	state->relid = (Oid) intVal(list_nth(cscan->custom_private, 4));
+	state->contents = palloc_array(int, Max(list_length((List *) lthird(cscan->custom_private)), 1));
+	foreach_int(content, (List *) lthird(cscan->custom_private))
+		state->contents[state->ncontents++] = content;
 	return (Node *) state;
 }
 
@@ -584,8 +587,11 @@ modify_begin(CustomScanState *node, EState *estate, int eflags)
 	 */
 	if (!gp_enable_global_deadlock_detector)
 		LockRelationOid(((ModifyState *) node)->relid, ExclusiveLock);
-	GpReportDispatch(0, ((ModifyState *) node)->content >= 0,
-					 ((ModifyState *) node)->nsegments);
+	if (((ModifyState *) node)->ncontents > 0)
+		GpReportDispatchContents(0, ((ModifyState *) node)->contents,
+								 ((ModifyState *) node)->ncontents);
+	else
+		GpReportDispatch(0, false, ((ModifyState *) node)->nsegments);
 }
 
 static TupleTableSlot *
@@ -638,8 +644,16 @@ modify_exec(CustomScanState *node)
 
 	GpClusterSegments(&nsegs);
 	counts = palloc0_array(uint64, nsegs);
-	GpDispatchCommandParams(state->sql, nparams, types, values, state->content,
-							state->nsegments, counts);
+	if (state->ncontents > 0)
+	{
+		GpDispatchCommandParamsOnContents(state->sql, nparams, types, values,
+										  state->contents, state->ncontents,
+										  counts);
+		nsegs = state->ncontents;
+	}
+	else
+		GpDispatchCommandParams(state->sql, nparams, types, values, -1,
+								state->nsegments, counts);
 
 	/* Every segment changed its own rows; a replicated table's once each. */
 	if (state->replicated)
@@ -1014,6 +1028,7 @@ gp_modify_planner_routed(Query *parse, const char *query_string, int cursorOptio
 	ModifyTable *mt;
 	RangeTblEntry *rte;
 	GpPolicy   *policy;
+	bool		was_cursor;
 
 	if (GpClusterBackendRole() != GP_ROLE_DISPATCH)
 		return prev_planner ? prev_planner(parse, query_string, cursorOptions,
@@ -1037,6 +1052,8 @@ gp_modify_planner_routed(Query *parse, const char *query_string, int cursorOptio
 			on_conflict = GpExplicitOnConflict(parse, target);
 	}
 
+	/* A cursor's gathers bring each row's ctid, for WHERE CURRENT OF. */
+	was_cursor = GpScanSetCursor((cursorOptions & CURSOR_OPT_FAST_PLAN) != 0);
 	PG_TRY();
 	{
 		stmt = prev_planner ? prev_planner(parse, query_string, cursorOptions,
@@ -1046,6 +1063,7 @@ gp_modify_planner_routed(Query *parse, const char *query_string, int cursorOptio
 	PG_FINALLY();
 	{
 		GpScanClearLocking();
+		(void) GpScanSetCursor(was_cursor);
 	}
 	PG_END_TRY();
 
@@ -1115,8 +1133,8 @@ gp_modify_planner_routed(Query *parse, const char *query_string, int cursorOptio
 
 		/*
 		 * What the segments cannot do as it is written, the plan does here,
-		 * and each row it changes is changed where it is -- but for WHERE
-		 * CURRENT OF, whose cursor read the row here.
+		 * and each row it changes is changed where it is -- WHERE CURRENT OF
+		 * among it, whose cursor's gather says where its row is (gp_scan.c).
 		 */
 		why = cannot_push_reason(original, rte->relid, policy);
 
@@ -1130,13 +1148,6 @@ gp_modify_planner_routed(Query *parse, const char *query_string, int cursorOptio
 					(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
 					 errmsg("\"%s\" is not simply updatable",
 							get_rel_name(rte->relid))));
-		if (why == current_of_reason)
-			ereport(ERROR,
-					(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
-					 errmsg("cannot %s distributed table \"%s\" this way yet",
-							mt->operation == CMD_UPDATE ? "UPDATE" : "DELETE FROM",
-							get_rel_name(rte->relid)),
-					 errdetail("%s", why)));
 		if (why != NULL)
 		{
 			stmt->planTree = write_explicitly(stmt, mt, NULL);
@@ -1147,9 +1158,9 @@ gp_modify_planner_routed(Query *parse, const char *query_string, int cursorOptio
 		cscan->custom_private =
 			list_make5(makeString(pg_get_querydef(original, false)),
 					   makeBoolean(GpPolicyIsReplicated(policy)),
-					   makeInteger(GpScanDirectDispatchSegment(rte->relid,
-															   original->jointree->quals,
-															   original->resultRelation)),
+					   GpScanDirectDispatchContents(rte->relid,
+													original->jointree->quals,
+													original->resultRelation),
 					   makeInteger(policy->numsegments),
 					   makeInteger((int) rte->relid));
 		stmt->planTree = &cscan->scan.plan;

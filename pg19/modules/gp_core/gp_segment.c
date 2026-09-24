@@ -625,8 +625,8 @@ segment_of_setup(FunctionCallInfo fcinfo, Oid typid)
 				(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
 				 errmsg("gp_segment_id of randomly distributed table \"%s\" is known only on its segments",
 						get_rel_name(relid)),
-				 errdetail("Its rows were read here, and nothing in a row says which segment held it."),
-				 errhint("Compare gp_segment_id in a condition on that table alone, which the segments evaluate, or read it through gp.dist_random().")));
+				 errdetail("The query computes it above the gather that read the table, and nothing in a row says which segment held it."),
+				 errhint("Name it in a query of that table alone, whose gather gives it, or in a condition on that table, which the segments evaluate.")));
 	else
 	{
 		TupleDesc	tupdesc = lookup_rowtype_tupdesc(typid, -1);

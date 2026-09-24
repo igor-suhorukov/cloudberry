@@ -54,6 +54,13 @@ extern bool gp_use_legacy_hashops;
 extern void GpReportDispatch(int slice, bool single, int nsegments);
 
 /*
+ * The same, for a slice direct dispatch sends to the n segments "contents"
+ * lists, in the order it computed them: "SINGLE content" for one, "PARTIAL
+ * contents: 2 0" for a few, "ALL contents: ..." for every one.
+ */
+extern void GpReportDispatchContents(int slice, const int *contents, int n);
+
+/*
  * The INFO Cloudberry prints for a command of its two-phase commit, when
  * gp.test_print_direct_dispatch_info is on: "Distributed transaction
  * command 'Distributed Prepare' to ALL contents: 0 1 2", or to a SINGLE

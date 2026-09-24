@@ -47,11 +47,12 @@ extern GpPolicy *GpScanDistributedPolicy(Oid relid);
 extern int	GpScanReplicatedContent(const GpPolicy *policy);
 
 /*
- * The one segment that holds every row conditions on a hash-distributed
- * table can match -- they fix every column of its key to a constant -- or
- * -1.  varno is the table's range table index in the conditions.
+ * The segments that hold every row conditions on a distributed table can
+ * match -- they fix its key, or its gp_segment_id, to constants -- in the
+ * order Cloudberry's direct dispatch names them; NIL for every segment of
+ * the table.  varno is the table's range table index in the conditions.
  */
-extern int	GpScanDirectDispatchSegment(Oid relid, Node *quals, Index varno);
+extern List *GpScanDirectDispatchContents(Oid relid, Node *quals, Index varno);
 
 /*
  * SELECT ... FOR UPDATE whose rows the segments lock, with the global
@@ -61,6 +62,12 @@ extern int	GpScanDirectDispatchSegment(Oid relid, Node *quals, Index varno);
 extern void GpScanSetLocking(Oid relid, LockClauseStrength strength,
 							 LockWaitPolicy waitPolicy);
 extern void GpScanClearLocking(void);
+
+/*
+ * The planning in progress is a cursor's: its gathers bring each row's ctid,
+ * which WHERE CURRENT OF finds the row by.  Answers what it was.
+ */
+extern bool GpScanSetCursor(bool cursor);
 
 /* The scan hooks, where there is a cluster; see gp_scan.c. */
 extern void GpScanInit(void);

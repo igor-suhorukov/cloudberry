@@ -886,6 +886,16 @@ conn_asked(const GpSegmentConn *c, int content, int nsegments)
 	return nsegments <= 0 || c->content < nsegments;
 }
 
+/* Is this connection's segment one of the ncontents "contents" lists? */
+static bool
+conn_listed(const GpSegmentConn *c, const int *contents, int ncontents)
+{
+	for (int i = 0; i < ncontents; i++)
+		if (contents[i] == c->content)
+			return true;
+	return false;
+}
+
 /* Send a statement to one segment, as the simple protocol sends it. */
 static void
 conn_send(GpSegmentConn *c, const char *sql)
@@ -2686,6 +2696,59 @@ GpDispatchCommandParams(const char *sql, int nparams, const Oid *types,
 }
 
 /*
+ * The same, on the segments "contents" lists -- direct dispatch's -- and how
+ * many rows each changed, in the list's order.
+ */
+void
+GpDispatchCommandParamsOnContents(const char *sql, int nparams,
+								  const Oid *types, const char *const *values,
+								  const int *contents, int ncontents,
+								  uint64 *counts)
+{
+	GpGang	   *g = gang_get();
+	PGresult  **results;
+
+	gang_prepare(g, true);
+
+	for (int i = 0; i < g->nconns; i++)
+	{
+		GpSegmentConn *c = &g->conns[i];
+
+		if (!conn_listed(c, contents, ncontents))
+			continue;
+		if (c->busy && c->fetching != NULL)
+			conn_park(c);
+		if (!PQsendQueryParams(c->conn, sql, nparams, types, values, NULL, NULL, 0))
+		{
+			char	   *msg = pstrdup(PQerrorMessage(c->conn));
+			int			failed = c->content;
+
+			gang_close();
+			ereport(ERROR,
+					(errcode(ERRCODE_CONNECTION_FAILURE),
+					 errmsg("could not send a statement to segment %d", failed),
+					 errdetail_internal("%s", msg)));
+		}
+		c->busy = true;
+	}
+
+	/* The counts come back as command tags, which "keep" does not keep. */
+	results = (PGresult **) palloc0_array(PGresult *, g->nconns);
+	gang_wait_all_keeping_commands(g, results);
+	for (int k = 0; k < ncontents; k++)
+	{
+		counts[k] = 0;
+		for (int i = 0; i < g->nconns; i++)
+			if (g->conns[i].content == contents[k] && results[i] != NULL)
+				counts[k] = strtou64(PQcmdTuples(results[i]), NULL, 10);
+	}
+	for (int i = 0; i < g->nconns; i++)
+		if (results[i] != NULL)
+			PQclear(results[i]);
+	pfree(results);
+}
+
+/*
  * A statement with parameters, some of them binary, on one segment, waited
  * for.  What a Motion's batches of rows travel in: bytea sent as it is,
  * rather than as the hex text of it.
@@ -3121,28 +3184,37 @@ GpTupleDescHasBinaryIO(TupleDesc tupdesc)
 }
 
 static GpGatherState *gather_start(const char *sql, TupleDesc tupdesc,
-									int content, int nsegments);
+									int content, int nsegments,
+									const int *contents, int ncontents);
 
 GpGatherState *
 GpGatherStart(const char *sql, TupleDesc tupdesc)
 {
-	return gather_start(sql, tupdesc, -1, 0);
+	return gather_start(sql, tupdesc, -1, 0, NULL, 0);
 }
 
 GpGatherState *
 GpGatherStartOn(const char *sql, TupleDesc tupdesc, int content)
 {
-	return gather_start(sql, tupdesc, content, 0);
+	return gather_start(sql, tupdesc, content, 0, NULL, 0);
 }
 
 GpGatherState *
 GpGatherStartOnSegments(const char *sql, TupleDesc tupdesc, int nsegments)
 {
-	return gather_start(sql, tupdesc, -1, nsegments);
+	return gather_start(sql, tupdesc, -1, nsegments, NULL, 0);
+}
+
+GpGatherState *
+GpGatherStartOnContents(const char *sql, TupleDesc tupdesc,
+						const int *contents, int ncontents)
+{
+	return gather_start(sql, tupdesc, -1, 0, contents, ncontents);
 }
 
 static GpGatherState *
-gather_start(const char *sql, TupleDesc tupdesc, int content, int nsegments)
+gather_start(const char *sql, TupleDesc tupdesc, int content, int nsegments,
+			 const int *contents, int ncontents)
 {
 	GpGatherState *gather = (GpGatherState *) palloc0(sizeof(GpGatherState));
 	GpGang	   *g = gang_get();
@@ -3187,7 +3259,8 @@ gather_start(const char *sql, TupleDesc tupdesc, int content, int nsegments)
 	{
 		GpGatherSeg *s;
 
-		if (!conn_asked(&g->conns[i], content, nsegments))
+		if (contents != NULL ? !conn_listed(&g->conns[i], contents, ncontents)
+			: !conn_asked(&g->conns[i], content, nsegments))
 			continue;
 
 		s = &gather->segs[n++];

@@ -189,6 +189,21 @@ GpReportDispatch(int slice, bool single, int nsegments)
 	pfree(buf.data);
 }
 
+/* A slice's, sent to the segments direct dispatch named, in its order. */
+void
+GpReportDispatchContents(int slice, const int *contents, int n)
+{
+	StringInfoData buf;
+
+	if (!gp_test_print_direct_dispatch_info)
+		return;
+
+	initStringInfo(&buf);
+	append_contents(&buf, contents, n);
+	elog(INFO, "(slice %d) Dispatch command to %s", slice, buf.data);
+	pfree(buf.data);
+}
+
 /*
  * A command of the two-phase commit, as doDispatchDtxProtocolCommand()
  * prints one (cdb/cdbtm.c), before it is sent.

@@ -115,6 +115,12 @@ extern GpGatherState *GpGatherStartOnSegments(const char *sql,
 											  TupleDesc tupdesc,
 											  int nsegments);
 
+/* The same, from the ncontents segments "contents" lists: direct dispatch. */
+extern GpGatherState *GpGatherStartOnContents(const char *sql,
+											  TupleDesc tupdesc,
+											  const int *contents,
+											  int ncontents);
+
 /*
  * The type a value travels between the nodes as: itself, or text or bytea
  * for the few types that refuse to be read back (pg_node_tree and the
@@ -161,6 +167,13 @@ extern void GpDispatchCommandParams(const char *sql, int nparams,
 									const Oid *types,
 									const char *const *values, int content,
 									int nsegments, uint64 *counts);
+
+/* The same, on the ncontents segments "contents" lists; counts in their order. */
+extern void GpDispatchCommandParamsOnContents(const char *sql, int nparams,
+											  const Oid *types,
+											  const char *const *values,
+											  const int *contents,
+											  int ncontents, uint64 *counts);
 
 /*
  * A statement on one segment whose parameters may be binary (formats[i] 1),

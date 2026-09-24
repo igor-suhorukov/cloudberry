@@ -2051,6 +2051,8 @@
 +----------+------+---------+----------
 +(0 rows)
 @@
+-          'child' => [
+-            {
 -              'child' => [
 -                {
 -                  'child' => [
@@ -2065,15 +2067,17 @@
 -                  'short' => 'Sort'
 -                }
 -              ],
-@@
+-              'id' => 4,
+-              'parent' => 3,
 -              'short' => 'LockRows'
-+              'recvsize' => 1,
-+              'segments' => 3,
-+              'sendsize' => 3,
-+              'short' => 'Gather Motion'
+-            }
+-          ],
 @@
 -          'short' => 'Limit'
-+          'short' => 'Result'
++          'recvsize' => 1,
++          'segments' => 3,
++          'sendsize' => 3,
++          'short' => 'Gather Motion'
 @@
 -      'recvsize' => 1,
 -      'segments' => 3,

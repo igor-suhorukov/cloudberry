@@ -492,12 +492,42 @@ EOF
 
 	out=$(q 0 "EXPLAIN (VERBOSE, COSTS OFF) SELECT count(*) FROM d WHERE a < 10 AND b <> now()::text;")
 	case "$out" in
-		*"Filter: (d.b <> (now())::text)"*"Remote SQL: SELECT NULL, b FROM ONLY public.d WHERE (a < 10)"*)
+		*"Filter: (d.b <> (now())::text)"*"Remote SQL: SELECT b FROM ONLY public.d WHERE (a < 10)"*)
 			ok "an immutable condition is evaluated on the segments, now() here, and only b is fetched" ;;
 		*) notok "which conditions are sent" "$out" ;;
 	esac
 	out=$(q 0 "SELECT count(*) FROM d WHERE a < 10 AND b <> now()::text;")
 	[ "$out" = "9" ] && ok "and the answer is the same ($out)" || notok "a sent condition's answer" "$out"
+
+	# The rows' system columns, as the segment that holds each has them, and
+	# Cloudberry's word for a ctid read without its gp_segment_id.
+	out=$(q 0 "SELECT count(*) FROM d WHERE gp_segment_id = 0 AND ctid = '(0,1)';")
+	out2=$(q 0 "SELECT count(*) FROM d WHERE ctid = '(0,1)';")
+	out3=$(q 0 "SELECT count(DISTINCT (gp_segment_id, ctid)) = count(*), bool_and(xmin::text::bigint > 2), bool_and(cmin::text::int >= 0), bool_and(tableoid = 'd'::regclass) FROM d;")
+	case "$out|$out2|$out3" in
+		"1|"*'NOTICE:  SELECT uses system-defined column "d.ctid" without the necessary companion column "d.gp_segment_id"'*"HINT:"*"2|t|t|t|t")
+			ok "ctid, xmin, cmin and tableoid are the segment's, and a ctid without gp_segment_id is noticed, in Cloudberry's words" ;;
+		*) notok "system columns of a distributed table" "$out / $out2 / $out3" ;;
+	esac
+	out=$(q 0 "DELETE FROM d WHERE ctid = '(0,1)';")
+	out2=$(q 0 "SELECT x.a FROM d x JOIN d y ON x.ctid = y.ctid AND x.gp_segment_id = y.gp_segment_id WHERE x.a <> y.a;")
+	case "$out|$out2" in
+		*'ERROR:  DELETE uses system-defined column "d.ctid" without the necessary companion column "d.gp_segment_id"'*"|")
+			ok "a DELETE by ctid alone is refused; a join on both is not noticed" ;;
+		*) notok "a write by ctid alone" "$out / $out2" ;;
+	esac
+
+	# Direct dispatch to the segments some keys hash to: an IN list, an OR.
+	k1=$(q 0 "SELECT string_agg(g::text, ',') FROM (SELECT g FROM generate_series(1, 30) g WHERE expected_seg(g, 2) = 1 ORDER BY g LIMIT 2) s;")
+	k0=$(q 0 "SELECT min(g) FROM generate_series(1, 30) g WHERE expected_seg(g, 2) = 0;")
+	out=$(q 0 "SET gp.test_print_direct_dispatch_info = on; SELECT count(*) FROM d WHERE a IN ($k1);")
+	out2=$(q 0 "EXPLAIN (COSTS OFF) SELECT count(*) FROM d WHERE a = ${k1%,*} OR a = ${k1#*,};")
+	out3=$(q 0 "SET gp.test_print_direct_dispatch_info = on; SELECT count(*) FROM d WHERE a IN ($k1, $k0);")
+	case "$out|$out2|$out3" in
+		*"INFO:  (slice 1) Dispatch command to SINGLE content"*"2|"*"Gather Motion 1:1 on d"*"Segment: 1"*"|"*"INFO:  (slice 1) Dispatch command to ALL contents:"*"3")
+			ok "keys an IN list or an OR fixes are asked of the segments they hash to" ;;
+		*) notok "direct dispatch to some segments" "$out / $out2 / $out3" ;;
+	esac
 
 	q 0 "CREATE TABLE d2 (k int, v int) DISTRIBUTED BY (v); INSERT INTO d2 SELECT g, g % 7 FROM generate_series(1, 100) g;" >/dev/null 2>&1
 	out=$(q 0 "SELECT count(*) FROM d JOIN d2 ON d.a = d2.k WHERE d2.v = 3;")
@@ -718,17 +748,18 @@ mine" ] && ok "a transaction reads its own rows, and a LIMIT leaves the connecti
 	out=$(q 0 "SELECT count(*) FROM gs t WHERE t.gp_segment_id <> expected_seg(a, 2);")
 	out2=$(q 0 "EXPLAIN (VERBOSE, COSTS OFF) SELECT a FROM gs WHERE gp_segment_id = 1;")
 	case "$out|$out2" in
-		"0|"*"Remote SQL: SELECT a, NULL FROM ONLY public.gs WHERE (gp_segment_id = 1)"*)
-			ok "t.gp_segment_id in a condition is sent to the segments, each answering for itself" ;;
+		"0|"*"Gather Motion 1:1 on public.gs"*"Segment: 1"*"Remote SQL: SELECT a FROM ONLY public.gs WHERE (gp_segment_id = 1)"*)
+			ok "t.gp_segment_id in a condition is sent to the one segment it names, which answers for itself" ;;
 		*) notok "gp_segment_id in a sent condition" "$out / $out2" ;;
 	esac
-	r1=$(q 1 "SELECT count(*) FROM gr;")
+	r1=$(q 1 "SELECT count(*) FROM gr;"); r2=$(q 2 "SELECT count(*) FROM gr;")
 	out=$(q 0 "SELECT count(*) FROM gr WHERE gp_segment_id = 0;")
-	out2=$(q 0 "SELECT gp_segment_id FROM gr LIMIT 1;")
-	case "$out|$out2" in
-		"$r1|"*"gp_segment_id of randomly distributed table \"gr\" is known only on its segments"*)
-			ok "a random table's: in a condition the segments answer, here it is refused" ;;
-		*) notok "gp_segment_id of a random table" "$out (segment 0 holds $r1) / $out2" ;;
+	out2=$(q 0 "SELECT gp_segment_id, count(*) FROM gr GROUP BY 1 ORDER BY 1;" | tr '\n' ' ')
+	out3=$(q 0 "SELECT gr.gp_segment_id FROM gr JOIN gs USING (a) LIMIT 1;")
+	case "$out|$out2|$out3" in
+		"$r1|0|$r1 1|$r2 |"*"gp_segment_id of randomly distributed table \"gr\" is known only on its segments"*)
+			ok "a random table's: the segments answer a condition, the gather a query of it alone; above a join it is refused" ;;
+		*) notok "gp_segment_id of a random table" "$out / $out2 (segments hold $r1 and $r2) / $out3" ;;
 	esac
 	out=$(q 0 "SELECT count(DISTINCT gp_segment_id) FROM gre;")
 	out2=$(q 0 "SELECT gp_segment_id, count(*) FROM gp.dist_random(NULL::gre) GROUP BY 1 ORDER BY 1;")
@@ -788,6 +819,23 @@ mine" ] && ok "a transaction reads its own rows, and a LIMIT leaves the connecti
 	[ "$out|$out2|$out3" = "0|3|7" ] \
 		&& ok "a segment's utility session answers its own id; a table's column may not be called so, as Cloudberry refuses a system column's name, and a view's may" \
 		|| notok "gp_segment_id on a segment, and a column of that name" "$out / $out2 / $out3"
+
+	# WHERE CURRENT OF a cursor of a distributed table: its gather says which
+	# segment the current row came from, and its ctid there.
+	q 0 "CREATE TABLE cur (a int, b text) DISTRIBUTED BY (a); INSERT INTO cur SELECT g, 'c' FROM generate_series(1, 20) g;" >/dev/null
+	out=$(printf '%s\n' "BEGIN;" "DECLARE c1 CURSOR FOR SELECT a FROM cur WHERE a IN (4, 5);" \
+		"FETCH 1 FROM c1;" "UPDATE cur SET b = 'updated' WHERE CURRENT OF c1;" \
+		"FETCH 1 FROM c1;" "DELETE FROM cur WHERE CURRENT OF c1;" "COMMIT;" \
+		"SELECT count(*), count(*) FILTER (WHERE b = 'updated') FROM cur;" | qf 0 | tr '\n' ' ')
+	out2=$(printf '%s\n' "BEGIN;" "DECLARE c2 CURSOR FOR SELECT a FROM cur ORDER BY a;" "FETCH 1 FROM c2;" \
+		"UPDATE cur SET b = 'x' WHERE CURRENT OF c2;" "ROLLBACK;" | qf 0 2>&1)
+	out3=$(printf '%s\n' "BEGIN;" "DECLARE c3 CURSOR FOR SELECT k FROM rep;" "FETCH 1 FROM c3;" \
+		"UPDATE rep SET v = 'x' WHERE CURRENT OF c3;" "ROLLBACK;" | qf 0 2>&1)
+	case "$out|$out2|$out3" in
+		*"19|1 |"*'cursor "c2" is not a simply updatable scan of table "cur"'*"|"*'"rep" is not simply updatable'*)
+			ok "UPDATE and DELETE WHERE CURRENT OF change the cursor's row where it is; a sorted cursor and a replicated table are refused, as in Cloudberry" ;;
+		*) notok "WHERE CURRENT OF" "$out / $out2 / $out3" ;;
+	esac
 
 	# A partial table: its rows on the first so many segments, as Cloudberry's
 	# gp_debug_numsegments makes one (gp_sql's distribution.c), and read,
