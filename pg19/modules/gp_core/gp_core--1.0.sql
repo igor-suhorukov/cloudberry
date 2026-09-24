@@ -390,6 +390,28 @@ AS 'MODULE_PATHNAME', 'gp_dist_random_segments'
 LANGUAGE C;
 
 /*
+ * The planner's Split on a segment (gp_split.c): rows deleted by their table
+ * and ctid, returned as t's rows, and their new versions inserted, routed
+ * into t's partitions -- firing no trigger and applying no policy, as
+ * Cloudberry's Split does neither.  Not STRICT, because NULL::t is how they
+ * are told which table; only for a connection that carries the cluster
+ * secret.
+ */
+CREATE FUNCTION gp_internal.split_delete(rel anyelement, ctids tid[],
+	tables oid[], numbers int8[],
+	OUT gp_n int8, OUT gp_toid oid, OUT gp_row anyelement)
+RETURNS SETOF record
+AS 'MODULE_PATHNAME', 'gp_split_delete'
+LANGUAGE C;
+
+CREATE FUNCTION gp_internal.split_insert(rel anyelement, rows anyarray,
+	tables oid[], numbers int8[],
+	OUT gp_n int8, OUT gp_toid oid, OUT gp_row anyelement)
+RETURNS SETOF record
+AS 'MODULE_PATHNAME', 'gp_split_insert'
+LANGUAGE C;
+
+/*
  * pg_locks' mppsessionid and mppiswriter, which Cloudberry's pg_locks has as
  * columns and the parser makes of the names the same way (gp_segment.c):
  * the coordinator session the locking process works for, and whether it is

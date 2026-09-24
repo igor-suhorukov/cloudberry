@@ -1411,6 +1411,30 @@ COMMIT;"
 		*) notok "a split update with triggers" "$out" ;;
 	esac
 
+	# The planner's Split, where the cluster has its secret: the segments'
+	# split functions move each row, firing no INSERT or DELETE trigger, as
+	# Cloudberry's Split fires none; a row's own INSERT and DELETE fire them
+	# (gp_split.c).
+	q 0 "CREATE TABLE wtn (a int, b text, c int GENERATED ALWAYS AS (a * 2) STORED) DISTRIBUTED BY (a); CREATE INDEX ON wtn (b);" >/dev/null
+	q 0 "CREATE FUNCTION wtn_say() RETURNS trigger LANGUAGE plpgsql AS \$\$ BEGIN RAISE NOTICE 'fired % %', TG_WHEN, TG_OP; IF TG_OP = 'DELETE' THEN RETURN OLD; END IF; RETURN NEW; END \$\$;" >/dev/null
+	q 0 "CREATE TRIGGER wtn_bi BEFORE INSERT ON wtn FOR EACH ROW EXECUTE FUNCTION wtn_say(); CREATE TRIGGER wtn_ad AFTER DELETE ON wtn FOR EACH ROW EXECUTE FUNCTION wtn_say();" >/dev/null
+	out=$(printf '%s\n' "SET gp.optimizer = off;" "INSERT INTO wtn SELECT g, 'v' || g FROM generate_series(1, 20) g;" \
+		"UPDATE wtn SET a = a + 100 WHERE a <= 10 RETURNING old.a, new.a, new.c;" \
+		"DELETE FROM wtn WHERE a = 101;" | qf 0)
+	n=$(printf '%s\n' "$out" | grep -c 'NOTICE:  fired')
+	n2=$(printf '%s\n' "$out" | grep -c '^[0-9]*|1[0-9][0-9]|2[0-9][0-9]$')
+	out2=$(q 0 "SELECT count(*), sum(a), sum(c) FROM wtn;")
+	i1=$(q 1 "SET enable_seqscan = off; SELECT count(*) - (SELECT count(*) FROM wtn) FROM wtn WHERE b > '';")
+	i2=$(q 2 "SET enable_seqscan = off; SELECT count(*) - (SELECT count(*) FROM wtn) FROM wtn WHERE b > '';")
+	[ "$n|$n2|$out2|$(placed wtn)|$i1|$i2" = "21|10|19|1109|2218|0|0|0|0" ] \
+		&& ok "the planner's Split fires no INSERT or DELETE trigger, as Cloudberry's fires none; each row where it hashes, its index entry and generated column made" \
+		|| notok "the planner's Split and triggers" "$n $n2 / $out2 / misplaced $(placed wtn) / index $i1 $i2 / $out"
+	out=$(q 1 "SELECT * FROM gp_internal.split_delete(NULL::wtn, ARRAY[]::tid[], ARRAY[]::oid[], ARRAY[]::int8[]);")
+	case "$out" in
+		*"gp_internal.split_delete() moves rows only for the coordinator"*) ok "... and a segment moves rows so only for the coordinator" ;;
+		*) notok "split_delete() called directly" "$out" ;;
+	esac
+
 	# A partial table is the planner's, as Cloudberry's ORCA leaves one.
 	out=$(printf '%s\n' "SET gp.optimizer_trace_fallback = on;" \
 		"SELECT count(*) FROM pt1;" | qf 0)

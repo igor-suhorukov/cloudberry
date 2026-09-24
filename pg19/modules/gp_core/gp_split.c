@@ -37,24 +37,49 @@
  * for Cloudberry's split update; the translator refuses a table that has any,
  * foreign keys included, since their checks are triggers.
  *
+ * The planner's Split is the coordinator's (gp_explicit.c), and applies its
+ * rows the same way through two functions each segment runs:
+ * gp_internal.split_delete() deletes rows by their ctid and returns them,
+ * and gp_internal.split_insert() inserts their new versions, routed into
+ * the table's partitions as COPY routes them.  Neither fires a trigger or
+ * applies a policy, as Cloudberry's Split does neither; the coordinator
+ * checked the rows.  So each runs only for a connection that carries the
+ * cluster secret, the coordinator's own.
+ *
  *-------------------------------------------------------------------------
  */
 #include "postgres.h"
 
+#include "access/htup_details.h"
+#include "access/table.h"
 #include "access/tableam.h"
+#include "access/tupconvert.h"
 #include "access/xact.h"
+#include "catalog/objectaddress.h"
+#include "catalog/pg_inherits.h"
+#include "catalog/pg_type.h"
 #include "commands/explain.h"
 #include "commands/explain_format.h"
+#include "executor/execPartition.h"
 #include "executor/executor.h"
 #include "executor/nodeModifyTable.h"
+#include "funcapi.h"
+#include "miscadmin.h"
 #include "nodes/extensible.h"
 #include "nodes/makefuncs.h"
 #include "nodes/nodeFuncs.h"
+#include "parser/parse_relation.h"
+#include "parser/parse_type.h"
 #include "parser/parsetree.h"
+#include "utils/acl.h"
+#include "utils/array.h"
 #include "utils/builtins.h"
 #include "utils/lsyscache.h"
 #include "utils/rel.h"
+#include "utils/snapmgr.h"
+#include "utils/tuplestore.h"
 
+#include "gp_cluster.h"
 #include "gp_motion.h"
 
 /* ------------------------------------------------------------------------- */
@@ -524,6 +549,378 @@ GpSplitExplainLabel(PlanState *planstate, ExplainState *es,
 		return true;
 	}
 	return false;
+}
+
+/* ------------------------------------------------------------------------- */
+/* The planner's Split, on a segment                                         */
+/* ------------------------------------------------------------------------- */
+
+/*
+ * The table a split function is called for -- NULL::t says which -- once it
+ * is known that the coordinator called it, for a user who may update the
+ * table.
+ */
+static Oid
+split_target(FunctionCallInfo fcinfo, const char *name)
+{
+	Oid			rowtype = get_fn_expr_argtype(fcinfo->flinfo, 0);
+	Oid			relid = OidIsValid(rowtype) ? typeidTypeRelid(rowtype) : InvalidOid;
+
+	if (!GpClusterDispatchTrusted())
+		ereport(ERROR,
+				(errcode(ERRCODE_INSUFFICIENT_PRIVILEGE),
+				 errmsg("%s() moves rows only for the coordinator", name),
+				 errdetail("The connection does not carry this cluster's secret."),
+				 errhint("Set \"gp.cluster_secret\" to the same value on every node.")));
+	if (!OidIsValid(relid))
+		elog(ERROR, "%s() is not given a table's row type", name);
+	if (pg_class_aclcheck(relid, GetUserId(), ACL_UPDATE) != ACLCHECK_OK)
+		aclcheck_error(ACLCHECK_NO_PRIV, get_relkind_objtype(get_rel_relkind(relid)),
+					   get_rel_name(relid));
+	return relid;
+}
+
+/* The arrays a split function is given, each as long as the first. */
+static void
+split_array(ArrayType *array, Oid elemtype, Datum **elems, int *n)
+{
+	int16		typlen;
+	bool		typbyval;
+	char		typalign;
+	bool	   *nulls;
+	int			count;
+
+	get_typlenbyvalalign(elemtype, &typlen, &typbyval, &typalign);
+	deconstruct_array(array, elemtype, typlen, typbyval, typalign,
+					  elems, &nulls, &count);
+	for (int i = 0; i < count; i++)
+		if (nulls[i])
+			elog(ERROR, "a split's array holds a null");
+	if (*n >= 0 && count != *n)
+		elog(ERROR, "a split's arrays differ in length");
+	*n = count;
+}
+
+/* A table of the tree a split writes, opened once, and its row's shape. */
+typedef struct SplitTable
+{
+	Oid			relid;
+	Relation	rel;
+	TupleTableSlot *slot;		/* the table's own */
+	TupleConversionMap *toroot; /* its row to the root's, or NULL */
+	ResultRelInfo *rri;			/* an INSERT's */
+	TupleConversionMap *fromroot;	/* the root's row to its, or NULL */
+	TupleTableSlot *inslot;		/* and a slot for that */
+} SplitTable;
+
+static SplitTable *
+split_table(List **parts, Relation root, Oid relid, List *tree)
+{
+	SplitTable *part;
+
+	foreach_ptr(SplitTable, p, *parts)
+		if (p->relid == relid)
+			return p;
+	if (!list_member_oid(tree, relid))
+		elog(ERROR, "relation %u is not \"%s\" or one of its partitions",
+			 relid, RelationGetRelationName(root));
+
+	part = palloc0_object(SplitTable);
+	part->relid = relid;
+	part->rel = relid == RelationGetRelid(root) ? root
+		: table_open(relid, RowExclusiveLock);
+	part->slot = table_slot_create(part->rel, NULL);
+	part->toroot = convert_tuples_by_name(RelationGetDescr(part->rel),
+										  RelationGetDescr(root));
+	*parts = lappend(*parts, part);
+	return part;
+}
+
+static void
+split_tables_close(List *parts, Relation root)
+{
+	foreach_ptr(SplitTable, p, parts)
+	{
+		ExecDropSingleTupleTableSlot(p->slot);
+		if (p->inslot != NULL)
+			ExecDropSingleTupleTableSlot(p->inslot);
+		if (p->rel != root)
+			table_close(p->rel, NoLock);
+	}
+}
+
+/* A row of the root's, as the composite value a split function returns. */
+static Datum
+split_root_row(TupleTableSlot *slot, TupleConversionMap *toroot,
+			   TupleTableSlot *rootslot)
+{
+	TupleDesc	rootdesc = rootslot->tts_tupleDescriptor;
+	HeapTuple	tuple;
+
+	slot_getallattrs(slot);
+	if (toroot != NULL)
+		slot = execute_attr_map_slot(toroot->attrMap, slot, rootslot);
+	tuple = heap_form_tuple(rootdesc, slot->tts_values, slot->tts_isnull);
+	return heap_copy_tuple_as_datum(tuple, rootdesc);
+}
+
+PG_FUNCTION_INFO_V1(gp_split_delete);
+
+/*
+ * gp_internal.split_delete(NULL::t, ctids, tables, numbers)
+ *		A Split's DELETE half on this segment: each row the coordinator names,
+ *		by its table and ctid, deleted as ORCA's Split deletes it, and returned
+ *		with its number as t's row.  A row this statement deleted already is
+ *		passed over, as ExecDelete() passes it over.
+ */
+Datum
+gp_split_delete(PG_FUNCTION_ARGS)
+{
+	ReturnSetInfo *rsinfo = (ReturnSetInfo *) fcinfo->resultinfo;
+	Oid			relid = split_target(fcinfo, "gp_internal.split_delete");
+	Datum	   *tids;
+	Datum	   *toids;
+	Datum	   *numbers;
+	int			n = -1;
+	Relation	root;
+	List	   *tree;
+	List	   *parts = NIL;
+	TupleTableSlot *rootslot;
+	Snapshot	snapshot = GetActiveSnapshot();
+	CommandId	cid = GetCurrentCommandId(true);
+
+	split_array(PG_GETARG_ARRAYTYPE_P(1), TIDOID, &tids, &n);
+	split_array(PG_GETARG_ARRAYTYPE_P(2), OIDOID, &toids, &n);
+	split_array(PG_GETARG_ARRAYTYPE_P(3), INT8OID, &numbers, &n);
+	InitMaterializedSRF(fcinfo, 0);
+
+	root = table_open(relid, RowExclusiveLock);
+	tree = find_all_inheritors(relid, NoLock, NULL);
+	rootslot = MakeSingleTupleTableSlot(RelationGetDescr(root), &TTSOpsVirtual);
+
+	for (int i = 0; i < n; i++)
+	{
+		SplitTable *part = split_table(&parts, root, DatumGetObjectId(toids[i]), tree);
+		ItemPointer tid = DatumGetItemPointer(tids[i]);
+		TM_FailureData tmfd;
+		TM_Result	result;
+		Datum		values[3];
+		bool		nulls[3] = {false, false, false};
+
+		CHECK_FOR_INTERRUPTS();
+		if (!table_tuple_fetch_row_version(part->rel, tid, snapshot, part->slot))
+			continue;
+		result = table_tuple_delete(part->rel, tid, cid, 0, snapshot,
+									InvalidSnapshot, true, &tmfd);
+		switch (result)
+		{
+			case TM_Ok:
+				break;
+			case TM_SelfModified:
+				if (tmfd.cmax != cid)
+					ereport(ERROR,
+							(errcode(ERRCODE_TRIGGERED_DATA_CHANGE_VIOLATION),
+							 errmsg("tuple to be updated was already modified by an operation triggered by the current command")));
+				continue;
+			case TM_Updated:
+			case TM_Deleted:
+				ereport(ERROR,
+						(errcode(ERRCODE_T_R_SERIALIZATION_FAILURE),
+						 errmsg("could not serialize access due to concurrent update")));
+				break;
+			default:
+				elog(ERROR, "unexpected table_tuple_delete status: %u", result);
+		}
+
+		values[0] = numbers[i];
+		values[1] = toids[i];
+		values[2] = split_root_row(part->slot, part->toroot, rootslot);
+		tuplestore_putvalues(rsinfo->setResult, rsinfo->setDesc, values, nulls);
+	}
+
+	split_tables_close(parts, root);
+	ExecDropSingleTupleTableSlot(rootslot);
+	table_close(root, NoLock);
+	return (Datum) 0;
+}
+
+PG_FUNCTION_INFO_V1(gp_split_insert);
+
+/*
+ * gp_internal.split_insert(NULL::t, rows, tables, numbers)
+ *		A Split's INSERT half on this segment: each new version, t's row,
+ *		inserted as ORCA's Split inserts it -- its generated columns computed,
+ *		its constraints checked, its index entries made -- into the partition
+ *		t's routing gives it, or where the old version was, for a table of an
+ *		inheritance tree; and returned with its number and its table, as t's
+ *		row.
+ */
+Datum
+gp_split_insert(PG_FUNCTION_ARGS)
+{
+	ReturnSetInfo *rsinfo = (ReturnSetInfo *) fcinfo->resultinfo;
+	Oid			relid = split_target(fcinfo, "gp_internal.split_insert");
+	ArrayType  *rowarray = PG_GETARG_ARRAYTYPE_P(1);
+	Datum	   *rows;
+	Datum	   *toids;
+	Datum	   *numbers;
+	int			n = -1;
+	EState	   *estate;
+	ParseState *pstate;
+	ParseNamespaceItem *nsitem;
+	ResultRelInfo *rootrri;
+	ModifyTableState *mtstate;
+	PartitionTupleRouting *proute = NULL;
+	Relation	root;
+	TupleDesc	rootdesc;
+	TupleTableSlot *rootslot;
+	TupleTableSlot *outslot;
+	List	   *tree;
+	List	   *parts = NIL;
+
+	split_array(rowarray, ARR_ELEMTYPE(rowarray), &rows, &n);
+	split_array(PG_GETARG_ARRAYTYPE_P(2), OIDOID, &toids, &n);
+	split_array(PG_GETARG_ARRAYTYPE_P(3), INT8OID, &numbers, &n);
+	InitMaterializedSRF(fcinfo, 0);
+
+	/* the table as COPY FROM sets it up: a range table of it, its indexes */
+	root = table_open(relid, RowExclusiveLock);
+	rootdesc = RelationGetDescr(root);
+	if (ARR_ELEMTYPE(rowarray) != rootdesc->tdtypeid)
+		elog(ERROR, "gp_internal.split_insert() is given rows of another type");
+	estate = CreateExecutorState();
+	estate->es_output_cid = GetCurrentCommandId(true);
+	pstate = make_parsestate(NULL);
+	nsitem = addRangeTableEntryForRelation(pstate, root, RowExclusiveLock,
+										   NULL, false, false);
+	nsitem->p_perminfo->requiredPerms = ACL_INSERT;
+	ExecInitRangeTable(estate, pstate->p_rtable, pstate->p_rteperminfos,
+					   bms_make_singleton(1));
+	rootrri = makeNode(ResultRelInfo);
+	ExecInitResultRelation(estate, rootrri, 1);
+	ExecOpenIndices(rootrri, false);
+
+	mtstate = makeNode(ModifyTableState);
+	mtstate->ps.plan = NULL;
+	mtstate->ps.state = estate;
+	mtstate->operation = CMD_INSERT;
+	mtstate->mt_nrels = 1;
+	mtstate->resultRelInfo = rootrri;
+	mtstate->rootResultRelInfo = rootrri;
+	if (root->rd_rel->relkind == RELKIND_PARTITIONED_TABLE)
+		proute = ExecSetupPartitionTupleRouting(estate, root);
+	tree = find_all_inheritors(relid, NoLock, NULL);
+
+	rootslot = ExecInitExtraTupleSlot(estate, rootdesc, &TTSOpsVirtual);
+	outslot = MakeSingleTupleTableSlot(rootdesc, &TTSOpsVirtual);
+
+	for (int i = 0; i < n; i++)
+	{
+		HeapTupleHeader td = DatumGetHeapTupleHeader(rows[i]);
+		HeapTupleData tuple;
+		ResultRelInfo *rri = rootrri;
+		TupleConversionMap *map = NULL;
+		TupleTableSlot *slot = rootslot;
+		SplitTable *part = NULL;
+		Datum		values[3];
+		bool		nulls[3] = {false, false, false};
+
+		CHECK_FOR_INTERRUPTS();
+		ResetPerTupleExprContext(estate);
+
+		/* the new version, as the root has it, a virtual column null */
+		tuple.t_len = HeapTupleHeaderGetDatumLength(td);
+		ItemPointerSetInvalid(&tuple.t_self);
+		tuple.t_tableOid = InvalidOid;
+		tuple.t_data = td;
+		ExecClearTuple(rootslot);
+		heap_deform_tuple(&tuple, rootdesc, rootslot->tts_values,
+						  rootslot->tts_isnull);
+		for (int k = 0; k < rootdesc->natts; k++)
+			if (TupleDescAttr(rootdesc, k)->attgenerated == ATTRIBUTE_GENERATED_VIRTUAL)
+			{
+				rootslot->tts_values[k] = (Datum) 0;
+				rootslot->tts_isnull[k] = true;
+			}
+		ExecStoreVirtualTuple(rootslot);
+
+		/* where it goes: the partition routing gives it, or the old one's table */
+		if (proute != NULL)
+		{
+			rri = ExecFindPartition(mtstate, rootrri, proute, rootslot, estate);
+			map = ExecGetRootToChildMap(rri, estate);
+			if (map != NULL)
+				slot = execute_attr_map_slot(map->attrMap, rootslot,
+											 rri->ri_PartitionTupleSlot);
+		}
+		else if (DatumGetObjectId(toids[i]) != relid)
+		{
+			part = split_table(&parts, root, DatumGetObjectId(toids[i]), tree);
+			if (part->rri == NULL)
+			{
+				part->rri = makeNode(ResultRelInfo);
+				InitResultRelInfo(part->rri, part->rel, 0, rootrri, 0);
+				ExecOpenIndices(part->rri, false);
+				part->fromroot = convert_tuples_by_name(rootdesc,
+														RelationGetDescr(part->rel));
+				part->inslot = MakeSingleTupleTableSlot(RelationGetDescr(part->rel),
+														&TTSOpsVirtual);
+			}
+			rri = part->rri;
+			if (part->fromroot != NULL)
+				slot = execute_attr_map_slot(part->fromroot->attrMap, rootslot,
+											 part->inslot);
+			else
+				slot = ExecCopySlot(part->inslot, rootslot);
+		}
+		ExecMaterializeSlot(slot);
+		slot->tts_tableOid = RelationGetRelid(rri->ri_RelationDesc);
+
+		/* a new row: every generated column computed, every index given it */
+		if (RelationGetDescr(rri->ri_RelationDesc)->constr != NULL)
+		{
+			TupleConstr *constr = RelationGetDescr(rri->ri_RelationDesc)->constr;
+
+			if (constr->has_generated_stored)
+				ExecComputeStoredGenerated(rri, estate, slot, CMD_INSERT);
+			ExecConstraints(rri, slot, estate);
+		}
+		if (proute == NULL && rri->ri_RelationDesc->rd_rel->relispartition)
+			ExecPartitionCheck(rri, slot, estate, true);
+		table_tuple_insert(rri->ri_RelationDesc, slot, estate->es_output_cid,
+						   0, NULL);
+		if (rri->ri_NumIndices > 0)
+			(void) ExecInsertIndexTuples(rri, estate, 0, slot, NIL, NULL);
+
+		/* the row as it was written, as the root has it */
+		values[0] = numbers[i];
+		values[1] = ObjectIdGetDatum(RelationGetRelid(rri->ri_RelationDesc));
+		if (slot == rootslot)
+			values[2] = split_root_row(slot, NULL, outslot);
+		else if (part != NULL)
+			values[2] = split_root_row(slot, part->toroot, outslot);
+		else
+		{
+			TupleConversionMap *toroot = ExecGetChildToRootMap(rri);
+
+			values[2] = split_root_row(slot, toroot, outslot);
+		}
+		tuplestore_putvalues(rsinfo->setResult, rsinfo->setDesc, values, nulls);
+	}
+
+	ExecDropSingleTupleTableSlot(outslot);
+	foreach_ptr(SplitTable, p, parts)
+		if (p->rri != NULL)
+			ExecCloseIndices(p->rri);
+	split_tables_close(parts, root);
+	if (proute != NULL)
+		ExecCleanupTupleRouting(mtstate, proute);
+	ExecResetTupleTable(estate->es_tupleTable, false);
+	ExecCloseResultRelations(estate);
+	ExecCloseRangeTableRelations(estate);
+	FreeExecutorState(estate);
+	table_close(root, NoLock);
+	return (Datum) 0;
 }
 
 void

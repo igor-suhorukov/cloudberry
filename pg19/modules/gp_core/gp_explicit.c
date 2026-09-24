@@ -54,7 +54,11 @@
  * An INSERT's rows go to the segment their key hashes to, every segment for
  * a replicated table.  An UPDATE that sets a column of the key moves each
  * row, as Cloudberry's Split Update does: deleted where it is, returning it,
- * and its new version inserted where it hashes.  RETURNING is evaluated
+ * and its new version inserted where it hashes -- by the segments' split
+ * functions, which fire no trigger, as Cloudberry's Split fires none, where
+ * the cluster has the secret a segment trusts the coordinator by
+ * (gp_split.c), and by a DELETE and an INSERT, which fire them, where it
+ * does not (explicit_send_split).  RETURNING is evaluated
  * here: each segment returns the rows it wrote, with the number of the
  * plan's row that asked, and the list the planner made is evaluated over
  * them and that row.  Where it reads old or new by name, each row comes
@@ -116,6 +120,7 @@
  */
 #include "postgres.h"
 
+#include "access/htup_details.h"
 #include "access/table.h"
 #include "access/tupconvert.h"
 #include "optimizer/optimizer.h"
@@ -134,7 +139,9 @@
 #include "parser/parsetree.h"
 #include "storage/itemptr.h"
 #include "storage/lmgr.h"
+#include "utils/array.h"
 #include "utils/builtins.h"
+#include "utils/fmgroids.h"
 #include "utils/hsearch.h"
 #include "utils/lsyscache.h"
 #include "utils/memutils.h"
@@ -153,6 +160,9 @@
 /* Rows a statement carries, at most, and parameters, at most. */
 #define EXPLICIT_BATCH_ROWS		1000
 #define EXPLICIT_MAX_PARAMS		30000
+
+/* Rows a call of a Split's function on a segment is given, at most. */
+#define EXPLICIT_SPLIT_ROWS		10000
 
 /* ------------------------------------------------------------------------- */
 /* Row identity: a ctid for a segment's row                                  */
@@ -381,6 +391,7 @@ typedef struct ExplicitState
 	 * columns' new values -- inserted where it hashes.
 	 */
 	bool		split;
+	bool		split_calls;	/* moved by the segments' split functions */
 	AttrNumber *setattnos;		/* each SET column, in the target */
 	char	   *delete_head;
 	char	   *delete_tail;
@@ -499,10 +510,11 @@ GpExplicitCannot(PlannedStmt *stmt, ModifyTable *mt, const char *on_conflict)
 	 * refuses an UPDATE of the key of a table that has any, in its words
 	 * (make_splitupdate_path, cdbpath.c) -- asking the plan's first result
 	 * relation, which for a partitioned table is its first partition, as
-	 * Cloudberry's create_modifytable_path() asks it.  The DELETE and INSERT
-	 * a moved row is made of fire their row triggers on the segments, as
-	 * PostgreSQL fires them for a row moved between partitions; Cloudberry's
-	 * Split fires none.
+	 * Cloudberry's create_modifytable_path() asks it.  Its INSERT and DELETE
+	 * triggers do not fire either, as Cloudberry's Split fires none -- but
+	 * on a cluster without the secret, whose segments cannot tell the
+	 * coordinator's split functions from anyone's call, and move the row by
+	 * a DELETE and an INSERT, which fire them (explicit_send_split()).
 	 */
 	policy = GpScanDistributedPolicy(rt_fetch(first, stmt->rtable)->relid);
 	if (mt->operation == CMD_UPDATE && GpPolicyIsHashPartitioned(policy))
@@ -1035,6 +1047,9 @@ explicit_begin(CustomScanState *node, EState *estate, int eflags)
 		StringInfoData ih;
 		bool		identity = false;
 
+		/* a segment trusts only the coordinator to move rows (gp_split.c) */
+		state->split_calls = GpClusterHasSecret();
+
 		initStringInfo(&dh);
 		appendStringInfo(&dh, "DELETE FROM %s%s AS gp_t USING (VALUES ",
 						 state->only ? "ONLY " : "",
@@ -1274,10 +1289,111 @@ explicit_send_rows(ExplicitState *state, int content, List *rows,
 }
 
 /*
+ * One half of a Split on one segment, by gp_internal.split_delete() or
+ * split_insert() (gp_split.c): the rows -- the ctids of those to delete, or
+ * the new versions, as the root's rows -- their tables and their numbers,
+ * each an array, EXPLICIT_SPLIT_ROWS at a time.  What the call returns --
+ * each row's number, its table, and it as the root has it -- goes to
+ * "store".
+ */
+static uint64
+explicit_split_call(ExplicitState *state, int content, bool insert,
+					List *rows, List *tables, List *numbers,
+					Tuplestorestate *store)
+{
+	Oid			rowtype = RelationGetDescr(state->target)->tdtypeid;
+	const char *name = GpDispatchRelationName(RelationGetRelid(state->target));
+	char	   *sql;
+	uint64		total = 0;
+	int			first = 0;
+	int16		typlen;
+	bool		typbyval;
+	char		typalign;
+
+	get_typlenbyvalalign(rowtype, &typlen, &typbyval, &typalign);
+	sql = insert
+		? psprintf("SELECT gp_n, gp_toid, (gp_row).* FROM gp_internal.split_insert(NULL::%s, $1::%s[], $2::pg_catalog.oid[], $3::pg_catalog.int8[])",
+				   name, name)
+		: psprintf("SELECT gp_n, gp_toid, (gp_row).* FROM gp_internal.split_delete(NULL::%s, $1::pg_catalog.tid[], $2::pg_catalog.oid[], $3::pg_catalog.int8[])",
+				   name);
+
+	while (first < list_length(rows))
+	{
+		int			count = Min(EXPLICIT_SPLIT_ROWS, list_length(rows) - first);
+		StringInfoData items;
+		StringInfoData oids;
+		StringInfoData ns;
+		const char *values[3];
+
+		initStringInfo(&items);
+		initStringInfo(&oids);
+		initStringInfo(&ns);
+		appendStringInfoChar(&oids, '{');
+		appendStringInfoChar(&ns, '{');
+		if (!insert)
+			appendStringInfoChar(&items, '{');
+		for (int i = first; i < first + count; i++)
+		{
+			const char *sep = i > first ? "," : "";
+
+			if (insert)
+			{
+				appendStringInfo(&oids, "%s%u", sep, list_nth_oid(tables, i));
+				appendStringInfo(&ns, "%s%d", sep, intVal(list_nth(numbers, i)));
+			}
+			else
+			{
+				/* a row to delete: its ctid, its table and its number */
+				const char **params = (const char **) list_nth(rows, i);
+
+				appendStringInfo(&items, "%s\"%s\"", sep, params[0]);
+				appendStringInfo(&oids, "%s%s", sep, params[1]);
+				appendStringInfo(&ns, "%s%s", sep, params[2]);
+			}
+		}
+		appendStringInfoChar(&oids, '}');
+		appendStringInfoChar(&ns, '}');
+		if (insert)
+		{
+			/* the new versions, an array of the root's rows */
+			Datum	   *elems = palloc_array(Datum, count);
+			ArrayType  *array;
+
+			for (int i = 0; i < count; i++)
+				elems[i] = PointerGetDatum(list_nth(rows, first + i));
+			array = construct_array(elems, count, rowtype, typlen, typbyval,
+									typalign);
+			appendStringInfoString(&items,
+								   OidOutputFunctionCall(F_ARRAY_OUT,
+														 PointerGetDatum(array)));
+		}
+		else
+			appendStringInfoChar(&items, '}');
+
+		values[0] = items.data;
+		values[1] = oids.data;
+		values[2] = ns.data;
+		total += GpDispatchWriteOnContent(content, sql, 3, values,
+										  state->olddesc, store);
+		first += count;
+	}
+	return total;
+}
+
+/*
  * A Split: every row deleted where it is, returning it; its new version, the
  * old with the SET columns' new values, hashed by its key and inserted
  * where that says; and what the INSERTs return, each with the number of the
- * plan's row, for RETURNING.  The rows it moved are the rows it deleted.
+ * plan's row, for RETURNING and the check options.  The rows it moved are
+ * the rows it deleted.
+ *
+ * Where the cluster has its secret, gp_internal.split_delete() and
+ * split_insert() move them on the segments, firing no trigger, as
+ * Cloudberry's Split fires none, and applying no policy, the coordinator
+ * checking the new rows as an UPDATE's.  Without it a segment cannot tell
+ * the coordinator's call from anyone's, and they are moved by a DELETE and
+ * an INSERT, which fire the table's row triggers and apply its policies,
+ * as their own.
  */
 static uint64
 explicit_send_split(ExplicitState *state)
@@ -1290,17 +1406,29 @@ explicit_send_split(ExplicitState *state)
 	bool	   *nulls = palloc_array(bool, targetdesc->natts);
 	List	  **inserts = palloc0_array(List *, state->nsegs);
 	List	  **numbers = palloc0_array(List *, state->nsegs);
-	List	  **olders = palloc0_array(List *, state->nsegs);
+	List	  **tables = palloc0_array(List *, state->nsegs);
+	MinimalTuple *olders = NULL;
 	uint64		deleted = 0;
 	MemoryContext oldcxt;
 
 	for (int seg = 0; seg < state->nsegs; seg++)
-		if (state->batches[seg] != NIL)
+	{
+		if (state->batches[seg] == NIL)
+			continue;
+		if (state->split_calls)
+			deleted += explicit_split_call(state, seg, false, state->batches[seg],
+										   NIL, NIL, olds);
+		else
 			deleted += explicit_send_statements(seg, state->batches[seg], 3,
 												state->delete_head,
 												state->delete_tail,
 												list_copy_head(state->casts, 3),
 												state->olddesc, olds);
+	}
+
+	/* the deleted rows by number, RETURNING's old ones */
+	if (state->other)
+		olders = palloc0_array(MinimalTuple, Max(state->nsaved, 1));
 
 	oldcxt = MemoryContextSwitchTo(state->rowcxt);
 	while (tuplestore_gettupleslot(olds, true, false, oldslot))
@@ -1308,7 +1436,6 @@ explicit_send_split(ExplicitState *state)
 		int64		n;
 		int			col = 2;
 		int			seg;
-		const char **params;
 
 		slot_getallattrs(oldslot);
 		n = DatumGetInt64(oldslot->tts_values[0]);
@@ -1333,71 +1460,97 @@ explicit_send_split(ExplicitState *state)
 							 &nulls[state->setattnos[k] - 1]);
 
 		seg = GpHashSegment(state->hash, values, nulls);
-		params = palloc_array(const char *, Max(state->ninsert, 1));
-		for (int i = 0; i < state->ninsert; i++)
+		if (state->split_calls)
 		{
-			AttrNumber	a = state->insattnos[i] - 1;
+			HeapTuple	tuple = heap_form_tuple(targetdesc, values, nulls);
 
-			params[i] = nulls[a] ? NULL
-				: OutputFunctionCall(&state->insout[i], values[a]);
+			inserts[seg] = lappend(inserts[seg],
+								   DatumGetPointer(heap_copy_tuple_as_datum(tuple, targetdesc)));
+			tables[seg] = lappend_oid(tables[seg],
+									  DatumGetObjectId(oldslot->tts_values[1]));
 		}
-		inserts[seg] = lappend(inserts[seg], params);
+		else
+		{
+			const char **params = palloc_array(const char *, Max(state->ninsert, 1));
+
+			for (int i = 0; i < state->ninsert; i++)
+			{
+				AttrNumber	a = state->insattnos[i] - 1;
+
+				params[i] = nulls[a] ? NULL
+					: OutputFunctionCall(&state->insout[i], values[a]);
+			}
+			inserts[seg] = lappend(inserts[seg], params);
+		}
 		numbers[seg] = lappend(numbers[seg], makeInteger((int) n));
-		/* the deleted row, RETURNING's old one */
 		if (state->other)
-			olders[seg] = lappend(olders[seg], ExecCopySlotMinimalTuple(oldslot));
+			olders[n] = ExecCopySlotMinimalTuple(oldslot);
 	}
 	MemoryContextSwitchTo(oldcxt);
 	tuplestore_end(olds);
 
 	for (int seg = 0; seg < state->nsegs; seg++)
 	{
-		Tuplestorestate *news;
+		Tuplestorestate *news = NULL;
 		TupleTableSlot *newslot;
 		ListCell   *ln;
 
 		if (inserts[seg] == NIL)
 			continue;
-		if (!state->back)
-		{
+		if (state->back)
+			news = tuplestore_begin_heap(false, false, work_mem);
+		if (state->split_calls)
+			(void) explicit_split_call(state, seg, true, inserts[seg],
+									   tables[seg], numbers[seg], news);
+		else
 			(void) explicit_send_statements(seg, inserts[seg], state->ninsert,
 											state->insert_head,
 											state->insert_tail,
-											state->insert_casts, NULL, NULL);
+											state->insert_casts,
+											state->back ? state->newdesc : NULL,
+											news);
+		if (news == NULL)
 			continue;
-		}
 
-		/* an INSERT returns its rows in the order it was given them */
-		news = tuplestore_begin_heap(false, false, work_mem);
-		(void) explicit_send_statements(seg, inserts[seg], state->ninsert,
-										state->insert_head, state->insert_tail,
-										state->insert_casts, state->newdesc,
-										news);
-		newslot = MakeSingleTupleTableSlot(state->newdesc, &TTSOpsMinimalTuple);
+		/*
+		 * What came back, with the number of the plan's row: the call gives
+		 * it; an INSERT returns its rows in the order it was given them.
+		 */
+		newslot = MakeSingleTupleTableSlot(state->split_calls ? state->olddesc
+										   : state->newdesc,
+										   &TTSOpsMinimalTuple);
 		ln = list_head(numbers[seg]);
-		while (ln != NULL && tuplestore_gettupleslot(news, true, false, newslot))
+		while (tuplestore_gettupleslot(news, true, false, newslot))
 		{
 			Datum	   *rv = palloc_array(Datum, state->retdesc->natts);
 			bool	   *rn = palloc_array(bool, state->retdesc->natts);
-			int			width = newslot->tts_tupleDescriptor->natts;
+			int			from = state->split_calls ? 1 : 0;
+			int			width = newslot->tts_tupleDescriptor->natts - from;
+			int64		n;
 
 			slot_getallattrs(newslot);
-			rv[0] = Int64GetDatum((int64) intVal(lfirst(ln)));
+			if (state->split_calls)
+				n = DatumGetInt64(newslot->tts_values[0]);
+			else
+			{
+				if (ln == NULL)
+					elog(ERROR, "segment %d returned more rows than it was given", seg);
+				n = intVal(lfirst(ln));
+				ln = lnext(numbers[seg], ln);
+			}
+			rv[0] = Int64GetDatum(n);
 			rn[0] = false;
-			memcpy(&rv[1], newslot->tts_values, width * sizeof(Datum));
-			memcpy(&rn[1], newslot->tts_isnull, width * sizeof(bool));
+			memcpy(&rv[1], &newslot->tts_values[from], width * sizeof(Datum));
+			memcpy(&rn[1], &newslot->tts_isnull[from], width * sizeof(bool));
 			if (state->other)
 			{
 				/* the old row after the new: its table and columns */
-				ExecStoreMinimalTuple((MinimalTuple) list_nth(olders[seg],
-															  list_cell_number(numbers[seg], ln)),
-									  oldslot, false);
+				ExecStoreMinimalTuple(olders[n], oldslot, false);
 				slot_getallattrs(oldslot);
 				memcpy(&rv[1 + width], &oldslot->tts_values[1], width * sizeof(Datum));
 				memcpy(&rn[1 + width], &oldslot->tts_isnull[1], width * sizeof(bool));
 			}
 			tuplestore_putvalues(state->returned, state->retdesc, rv, rn);
-			ln = lnext(numbers[seg], ln);
 		}
 		ExecDropSingleTupleTableSlot(newslot);
 		tuplestore_end(news);
