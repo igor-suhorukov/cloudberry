@@ -151,7 +151,8 @@ Distributed transactions (M3), in `gp_core`:
   deleted;
 - **the global deadlock detector** (`gp.enable_global_deadlock_detector`):
   without it an UPDATE or DELETE of a distributed table locks the table,
-  and a write of a partitioned table its partitions, as Cloudberry's does;
+  and a write of a partitioned table its partitions, as Cloudberry's does
+  -- the parser opening the table in that lock, through O30;
   with it rows are locked, and a process on the coordinator gathers every
   node's waits, reduces the graph with Cloudberry's own detector
   (`src/backend/utils/gdd/gdddetector.c`, compiled where it lies) and
@@ -176,15 +177,14 @@ Distributed transactions (M3), in `gp_core`:
   at the port's own places under Cloudberry's names, and at PostgreSQL 19's
   injection points, among them O29's in PostgreSQL's commit.
 
-What M3 leaves open: without the deadlock detector, the table lock of an
-UPDATE, a DELETE or a locking clause is taken after PostgreSQL's parser has
-taken a weaker one, so concurrent UPDATEs of one table deadlock on the
-coordinator and most of them fail, where Cloudberry's wait their turn; on
-one node, the loopback commits just before the transaction that asked for
-it, not with it; the coordinator counts none of
-a distributed table's pages all-visible, so ORCA does not choose an
-index-only scan Cloudberry's would; a role that owns a tag can be dropped;
-and a task's history is read in the task database only.
+What M3 leaves open: two table locks are still taken after a weaker one,
+an upgrade two sessions can deadlock on -- a write through an updatable
+view, without the deadlock detector, and with it a locking clause over a
+join or on a replicated table; on one node, the loopback commits just
+before the transaction that asked for it, not with it; the coordinator
+counts none of a distributed table's pages all-visible, so ORCA does not
+choose an index-only scan Cloudberry's would; a role that owns a tag can be
+dropped; and a task's history is read in the task database only.
 
 The storage, resource and transport modules — `gp_ao`, `pax`, `gp_exttable`,
 `gp_resource`, `gp_tde`, `interconnect`, `udp2` — are still stubs: M5 and M6
