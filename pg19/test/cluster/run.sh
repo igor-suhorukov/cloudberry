@@ -1741,11 +1741,13 @@ SQL
 	# command, before it is sent, and the segments it goes to -- those whose
 	# parts wrote.  A part that wrote alone commits in one phase, as
 	# Cloudberry's does; a transaction that only read says nothing; and a
-	# rollback is named by how far the first phase got -- a fault once every
-	# part is prepared, where Cloudberry's is, and a segment that fails to.
+	# rollback is named by how far the first phase got -- none of the parts
+	# that wrote prepared, a fault once every part is prepared, where
+	# Cloudberry's is, and a segment that fails to.
 	out=$(printf '%s\n' "SET gp.test_print_direct_dispatch_info = on;" \
 		"CREATE TABLE dtxi (a int) DISTRIBUTED BY (a);" \
 		"INSERT INTO dtxi VALUES (1);" \
+		"BEGIN;" "INSERT INTO dtxi VALUES (100);" "ROLLBACK;" \
 		"SELECT count(*) FROM dtxi;" \
 		"INSERT INTO dtxi SELECT generate_series(2, 10);" \
 		"SELECT gp_inject_fault('dtm_broadcast_prepare', 'error', 1);" \
@@ -1763,6 +1765,7 @@ SQL
 	dtxc="INFO:  Distributed transaction command"
 	expect="$dtxc 'Distributed Prepare' to ALL contents: 0 1/$dtxc 'Distributed Commit Prepared' to ALL contents: 0 1/"
 	expect="$expect$dtxc 'Distributed Commit (one-phase)' to SINGLE content/"
+	expect="$expect$dtxc 'Distributed Abort (No Prepared)' to SINGLE content/"
 	expect="$expect$dtxc 'Distributed Prepare' to ALL contents: 0 1/$dtxc 'Distributed Commit Prepared' to ALL contents: 0 1/"
 	expect="$expect$dtxc 'Distributed Prepare' to ALL contents: 0 1/$dtxc 'Distributed Abort Prepared' to ALL contents: 0 1/"
 	expect="$expect$dtxc 'Distributed Prepare' to ALL contents: 0 1/$dtxc 'Distributed Abort (Some Prepared)' to ALL contents: 0 1/"

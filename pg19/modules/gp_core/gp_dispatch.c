@@ -2172,7 +2172,27 @@ dispatch_xact_callback(XactEvent event, void *arg)
 			{
 				gang_cancel_and_drain();
 				if (gang != NULL && gang_in_xact)
+				{
+					/*
+					 * Parts that wrote and were never prepared, named as
+					 * Cloudberry names their rollback
+					 * (rollbackDtxTransaction(), cdbtm.c) -- the parts its
+					 * answers said wrote, where Cloudberry names those it sent
+					 * a write to.
+					 */
+					if (gp_test_print_direct_dispatch_info)
+					{
+						int		   *contents = palloc_array(int, gang->nconns);
+						int			n = 0;
+
+						for (int i = 0; i < gang->nconns; i++)
+							if (conn_wrote(&gang->conns[i]))
+								contents[n++] = gang->conns[i].content;
+						GpReportDtxCommand("Distributed Abort (No Prepared)",
+										   contents, n);
+					}
 					gang_send_all_quietly("ROLLBACK");
+				}
 
 				/*
 				 * The first phase failed: what it prepared is rolled back,
