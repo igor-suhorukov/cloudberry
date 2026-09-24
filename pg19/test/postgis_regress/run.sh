@@ -39,6 +39,11 @@
 #             statistics for is off (gp.optimizer_print_missing_stats):
 #             PostGIS's tests analyze few of their tables, and run_test.pl
 #             compares with diff, so it would be in every answer.
+#
+# Each pass is spread over SHARDS servers (8 unless said), one run_test.pl
+# each, side by side, and every server makes its database, installs the
+# extensions and checks their uninstall itself, as the whole suite does on
+# one.  Which tests each runs is below.
 
 set -u
 
@@ -55,14 +60,17 @@ if [ ! -f "$TREE/regress/run_test.pl" ] || [ ! -f "$TREE/regress/port-regress.tx
 	exit 77
 fi
 
+SHARDS="${SHARDS:-8}"
 WORK="$(mktemp -d "${TMPDIR:-/tmp}/cb-postgis-regress-XXXXXX")"
 SOCK="$(mktemp -d /tmp/cbp-XXXXXX)"
 PORT="${PGPORT:-$((7300 + RANDOM % 200))}"
-export PGPORT="$PORT" PGHOST="$SOCK"
 
 cleanup() {
-	[ -n "${RESULTS_DIR:-}" ] && cp "$WORK/log" "$RESULTS_DIR/postgis-regress-server.log" 2> /dev/null
-	"$BINDIR/pg_ctl" -D "$WORK/data" -m immediate stop > /dev/null 2>&1
+	for k in $(seq 1 "$SHARDS"); do
+		[ -n "${RESULTS_DIR:-}" ] &&
+			cp "$WORK/s$k/log" "$RESULTS_DIR/postgis-regress-server-$k.log" 2> /dev/null
+		"$BINDIR/pg_ctl" -D "$WORK/s$k/data" -m immediate stop > /dev/null 2>&1
+	done
 	[ -n "${KEEP:-}" ] && echo "kept: $WORK" || rm -rf "$WORK"
 	rm -rf "$SOCK"
 }
@@ -70,22 +78,88 @@ trap cleanup EXIT
 
 { read -r FLAGS; read -r HOOKS; read -r TESTS; } < "$TREE/regress/port-regress.txt"
 
+# The tests each server runs.  Dealt out by how long each takes (durations),
+# the longest first, each to the server with the least so far; then each
+# server's in PostGIS's order.  Three are every server's, where it needs
+# them: addtosearchpath undoes what the topology hook made before the
+# extension was installed, and must, for the extension to uninstall, so it
+# comes before the server's first topology test, or last; load_outdb and
+# raster's clean come before and after its raster tests.
+ADDTOSEARCHPATH=./topology/test/regress/addtosearchpath.sql
+FIRST=./raster/test/regress/loader/load_outdb
+LAST=./raster/test/regress/clean
+declare -A weight=()
+while read -r ms t; do
+	weight[$t]="$ms"
+done < <(grep -v '^#' "$HERE/durations")
+order=()
+i=0
+for t in $TESTS; do
+	case "$t" in "$ADDTOSEARCHPATH"|"$FIRST"|"$LAST") i=$((i + 1)); continue ;; esac
+	key="${t#./}"; key="${key%.sql}"
+	order+=("${weight[$key]:-50} $i $t")
+	i=$((i + 1))
+done
+load=(); picked=()
+for k in $(seq 1 "$SHARDS"); do load[k]=0; done
+while read -r ms i t; do
+	best=1
+	for k in $(seq 2 "$SHARDS"); do
+		[ "${load[k]}" -lt "${load[best]}" ] && best=$k
+	done
+	load[best]=$((load[best] + ms))
+	picked+=("$best $i $t")
+done < <(printf '%s\n' "${order[@]}" | sort -k1,1nr -k2,2n)
+for k in $(seq 1 "$SHARDS"); do
+	list=""; raster=0; topology=0
+	while read -r _ _ t; do
+		if [[ "$t" == ./topology/test/regress/* ]] && [ "$topology" -eq 0 ]; then
+			list="$list $ADDTOSEARCHPATH"; topology=1
+		fi
+		if [[ "$t" == ./raster/test/regress/* ]] && [ "$raster" -eq 0 ]; then
+			list="$list $FIRST"; raster=1
+		fi
+		list="$list $t"
+	done < <(printf '%s\n' "${picked[@]}" | awk -v k="$k" '$1 == k' | sort -k2,2n)
+	[ "$topology" -eq 0 ] && list="$list $ADDTOSEARCHPATH"
+	[ "$raster" -eq 1 ] && list="$list $LAST"
+	shard_tests[k]="$list"
+done
+
+# What a server's report counts that another's counts too: its uninstall
+# check, two tests of run_test.pl's, addtosearchpath, and load_outdb and
+# clean.  The totals below count each once, as the suite on one server does.
+raster_servers=$(for k in $(seq 1 "$SHARDS"); do echo "${shard_tests[k]}"; done | grep -c -- "$FIRST")
+repeated=$(( 3 * (SHARDS - 1) ))
+[ "$raster_servers" -gt 1 ] && repeated=$(( repeated + 2 * (raster_servers - 1) ))
+
 echo "postgis_regress: PostGIS's own regression suite, with every M1 module loaded"
-echo "  PostGIS $(cat "$TREE/.postgis_commit" 2>/dev/null || echo '?'), $(echo "$TESTS" | wc -w) tests, run_test.pl $FLAGS"
+echo "  PostGIS $(cat "$TREE/.postgis_commit" 2>/dev/null || echo '?'), $(echo "$TESTS" | wc -w) tests, run_test.pl $FLAGS, over $SHARDS servers"
 echo
 
-"$BINDIR/initdb" -D "$WORK/data" -N --locale=C --encoding=UTF8 > "$WORK/initdb.log" 2>&1 \
-	|| { echo "initdb failed"; tail -20 "$WORK/initdb.log"; exit 1; }
-{
-	echo "unix_socket_directories = '$SOCK'"
-	echo "listen_addresses = ''"
-	echo "port = $PORT"
-	echo "fsync = off"
-	echo "shared_preload_libraries = 'gp_core,gp_orca,gp_task,gp_matview,gp_sql,gp_security'"
-} >> "$WORK/data/postgresql.conf"
+# The servers, made and started side by side.
+start_server() {
+	local k="$1" dir="$WORK/s$1"
 
-"$BINDIR/pg_ctl" -D "$WORK/data" -l "$WORK/log" -w -t 60 start > /dev/null 2>&1 \
-	|| { echo "server did not start"; tail -20 "$WORK/log"; exit 1; }
+	mkdir -p "$dir" "$SOCK/$k"
+	"$BINDIR/initdb" -D "$dir/data" -N --locale=C --encoding=UTF8 > "$dir/initdb.log" 2>&1 \
+		|| { echo "initdb failed for server $k"; tail -20 "$dir/initdb.log"; return 1; }
+	{
+		echo "unix_socket_directories = '$SOCK/$k'"
+		echo "listen_addresses = ''"
+		echo "port = $PORT"
+		echo "fsync = off"
+		echo "shared_preload_libraries = 'gp_core,gp_orca,gp_task,gp_matview,gp_sql,gp_security'"
+	} >> "$dir/data/postgresql.conf"
+	"$BINDIR/pg_ctl" -D "$dir/data" -l "$dir/log" -w -t 60 start > /dev/null 2>&1 \
+		|| { echo "server $k did not start"; tail -20 "$dir/log"; return 1; }
+}
+for k in $(seq 1 "$SHARDS"); do
+	start_server "$k" &
+done
+for k in $(seq 1 "$SHARDS"); do
+	wait -n || exit 1
+done
 
 failed=0
 for pass in ${PASSES:-planner orca}; do
@@ -97,16 +171,32 @@ for pass in ${PASSES:-planner orca}; do
 	esac
 	# From the top of the tree, as PostGIS's installcheck runs it
 	# (regress/runtest.mk): the tests and the hook scripts are named from
-	# there.
-	# shellcheck disable=SC2086 -- the flags, hooks and tests are lists
-	( cd "$TREE" &&
-	  PGOPTIONS="$options" POSTGIS_TOP_BUILD_DIR="$TREE" PGIS_REG_TMPDIR="$WORK/$pass/tmp" \
-	  POSTGIS_REGRESS_DB="postgis_reg" \
-		perl regress/run_test.pl $FLAGS $HOOKS $TESTS ) > "$WORK/$pass/run_test.out" 2>&1
-	rc=$?
+	# there.  Each server's own run, side by side, then their reports as one.
+	for k in $(seq 1 "$SHARDS"); do
+		# shellcheck disable=SC2086 -- the flags, hooks and tests are lists
+		( cd "$TREE" &&
+		  PGHOST="$SOCK/$k" PGPORT="$PORT" PGOPTIONS="$options" \
+		  POSTGIS_TOP_BUILD_DIR="$TREE" PGIS_REG_TMPDIR="$WORK/$pass/tmp/$k" \
+		  POSTGIS_REGRESS_DB="postgis_reg" \
+			perl regress/run_test.pl $FLAGS $HOOKS ${shard_tests[k]} ) \
+			> "$WORK/$pass/run_test.$k.out" 2>&1 &
+	done
+	wait
+	cat "$WORK/$pass"/run_test.*.out > "$WORK/$pass/run_test.out"
 
-	run=$(sed -n 's/^Run tests: //p' "$WORK/$pass/run_test.out")
-	bad=$(sed -n 's/^Failed: //p' "$WORK/$pass/run_test.out")
+	run=0; bad=0
+	for k in $(seq 1 "$SHARDS"); do
+		r=$(sed -n 's/^Run tests: //p' "$WORK/$pass/run_test.$k.out")
+		b=$(sed -n 's/^Failed: //p' "$WORK/$pass/run_test.$k.out")
+		# A server whose run did not get as far as its report fails the pass.
+		if [ -z "$r" ] || [ -z "$b" ]; then
+			echo "  server $k made no report:"
+			tail -5 "$WORK/$pass/run_test.$k.out" | sed 's/^/    /'
+			run=""; break
+		fi
+		run=$((run + r)); bad=$((bad + b))
+	done
+	[ -n "$run" ] && run=$((run - repeated))
 
 	# A test whose output differs from PostGIS's expected output by exactly a
 	# difference reviewed and kept in <pass>/ -- in the form

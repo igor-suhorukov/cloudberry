@@ -33,6 +33,10 @@
 #   * Cloudberry's tests are Cloudberry's files, after all of PostgreSQL's,
 #     in their own order.  manifest says of each of the 290 tests the two
 #     schedules name whether it runs, is PostgreSQL's, or is skipped and why.
+#     It also puts each in a group: the first group runs on the server
+#     PostgreSQL's tests ran on, and each other on a copy of it made when
+#     they finished, all of them side by side -- each group still reading
+#     the tables PostgreSQL's tests leave, and in its own order.
 #
 # Two changes are made to Cloudberry's files, mechanically, to the test and
 # its expected output alike: input/ and output/ .source files are converted
@@ -96,17 +100,26 @@ PORT="${PGPORT:-$((7100 + RANDOM % 200))}"
 # test's owners); PostgreSQL's own tests name none.
 export PGPORT="$PORT" PGHOST="$SOCK" PGUSER=gpadmin
 
-WATCHDOG=
+WATCHDOGS=()
 cleanup() {
-	[ -n "$WATCHDOG" ] && kill "$WATCHDOG" 2> /dev/null
+	[ "${#WATCHDOGS[@]}" -gt 0 ] && kill "${WATCHDOGS[@]}" 2> /dev/null
 	[ -n "${RESULTS_DIR:-}" ] && cp "$WORK/log" "$RESULTS_DIR/singlenode-server.log" 2> /dev/null
 	"$BINDIR/pg_ctl" -D "$WORK/data" -m immediate stop > /dev/null 2>&1
+	for c in "$WORK"/copy*; do
+		[ -d "$c/data" ] || continue
+		[ -n "${RESULTS_DIR:-}" ] && cp "$c/log" "$RESULTS_DIR/singlenode-server-$(basename "$c").log" 2> /dev/null
+		"$BINDIR/pg_ctl" -D "$c/data" -m immediate stop > /dev/null 2>&1
+	done
 	[ -n "${KEEP:-}" ] && echo "kept: $WORK" || rm -rf "$WORK"
 	rm -rf "$SOCK" "$EXEC"
 }
 trap cleanup EXIT
 
 run_tests=$(awk '$1 == "run" { print $2 }' "$HERE/manifest")
+# The groups Cloudberry's tests run in, in the order they first appear; a
+# test the manifest gives none is in the first.
+groups=($(awk '$1 == "run" && $3 != "" && !seen[$3]++ { print $3 }' "$HERE/manifest"))
+[ "${#groups[@]}" -gt 0 ] || groups=(1)
 
 echo "singlenode: Cloudberry's singlenode suite, with every M1 module loaded"
 echo "  PostgreSQL's tests from $(cat "$PGSUITE/.pg_ref_commit" 2>/dev/null || echo '?'), the server from $(cat "$("$BINDIR/pg_config" --bindir)/../.pg_ref_commit" 2>/dev/null || echo '?')"
@@ -188,7 +201,8 @@ for t in $run_tests; do
 			[ -f "$f" ] && sed -E -f "$WORK/respell.sed" "$f" > "$SN/expected/$(basename "$f")"
 		done
 	fi
-	echo "test: $t" >> "$SN/schedule"
+	g=$(awk -v t="$t" '$1 == "run" && $2 == t { print $3 }' "$HERE/manifest")
+	echo "test: $t" >> "$SN/schedule.${g:-${groups[0]}}"
 	echo "$t" >> "$SN/cloudberry_tests"
 done
 # The port's: an alternative for a test of PostgreSQL's, or the whole
@@ -287,6 +301,55 @@ watchdog() {
 	done
 }
 
+# A server for each group of Cloudberry's tests but the first, which runs on
+# this one: a copy of its data directory, made while it is down, as
+# PostgreSQL's tests and the port's setup left it, on a socket of its own.
+# A tablespace outside the data directory would be the copies' to share, so
+# there must be none; PostgreSQL 19's tests make theirs inside it.
+copy_data() {
+	local c="$WORK/copy$1"
+
+	rm -rf "$c"
+	mkdir -p "$c" "$SOCK/copy$1"
+	cp -a "$WORK/data" "$c/data" || return 1
+	{
+		echo "unix_socket_directories = '$SOCK/copy$1'"
+		echo "port = $PORT"
+	} >> "$c/data/postgresql.conf"
+}
+start_copy() {
+	"$BINDIR/pg_ctl" -D "$WORK/copy$1/data" -l "$WORK/copy$1/log" -w -t 60 start > /dev/null 2>&1 \
+		|| { echo "  a copy of the server did not start"; tail -20 "$WORK/copy$1/log"; return 1; }
+}
+
+# One pg_regress: its schedule, its output directory, its server.  What it
+# says goes to <outputdir>/pg_regress.out.
+regress() {
+	local schedule="$1" out="$2" host="$3"
+	shift 3
+
+	mkdir -p "$out"
+	# From Cloudberry's suite's directory, as its Makefile runs it: one of its
+	# tests, partition_indexing, reads data/onek.data there by a relative
+	# path.  PostgreSQL 19's tests name their files by absolute path.  The
+	# expected outputs are named, because pg_regress looks for them in
+	# expected/ of the directory it runs in before the one --inputdir names,
+	# and Cloudberry's directory has its copies of PostgreSQL 14's.
+	( cd "$CB" &&
+	  PATH="$EXEC/bin:$PATH" CB_DIFF_MODE="$pass" PGOPTIONS="-c gp.optimizer=$optimizer" \
+		"$PG_REGRESS" \
+			--bindir="$BINDIR" \
+			--inputdir="$SN" \
+			--expecteddir="$SN" \
+			--outputdir="$out" \
+			--dlpath="$PGSUITE" \
+			--schedule="$schedule" \
+			--max-connections=20 \
+			--host="$host" --port="$PORT" \
+			"$@" \
+		> "$out/pg_regress.out" 2>&1 )
+}
+
 failed=0
 for pass in ${PASSES:-planner orca}; do
 	echo "== pass: $pass"
@@ -295,28 +358,70 @@ for pass in ${PASSES:-planner orca}; do
 		planner) optimizer=off ;;
 		orca)    optimizer=on ;;
 	esac
+
+	# PostgreSQL's tests and the port's setup, in the database pg_regress
+	# makes afresh.
 	watchdog "$WORK/$pass/cancelled" &
-	WATCHDOG=$!
-	# From Cloudberry's suite's directory, as its Makefile runs it: one of its
-	# tests, partition_indexing, reads data/onek.data there by a relative
-	# path.  PostgreSQL 19's tests name their files by absolute path.  The
-	# expected outputs are named, because pg_regress looks for them in
-	# expected/ of the directory it runs in before the one --inputdir names,
-	# and Cloudberry's directory has its copies of PostgreSQL 14's.
-	cd "$CB"
-	PATH="$EXEC/bin:$PATH" CB_DIFF_MODE="$pass" PGOPTIONS="-c gp.optimizer=$optimizer" \
-		"$PG_REGRESS" \
-			--bindir="$BINDIR" \
-			--inputdir="$SN" \
-			--expecteddir="$SN" \
-			--outputdir="$WORK/$pass" \
-			--dlpath="$PGSUITE" \
-			--schedule="$SN/schedule" \
-			--max-connections=20 \
-			--host="$SOCK" --port="$PORT" \
-		> "$WORK/$pass/pg_regress.out" 2>&1
+	WATCHDOGS=($!)
+	regress "$SN/schedule" "$WORK/$pass/pg" "$SOCK"
 	rc=$?
-	kill "$WATCHDOG" 2> /dev/null; wait "$WATCHDOG" 2> /dev/null; WATCHDOG=
+	kill "${WATCHDOGS[@]}" 2> /dev/null; wait "${WATCHDOGS[@]}" 2> /dev/null; WATCHDOGS=()
+
+	# Then Cloudberry's, a group a server, side by side, each in the database
+	# PostgreSQL's tests left.
+	outs=("$WORK/$pass/pg")
+	"$BINDIR/pg_ctl" -D "$WORK/data" -m fast -w stop > /dev/null 2>&1 \
+		|| { echo "  the server did not stop to be copied"; exit 1; }
+	if [ -n "$(find "$WORK/data/pg_tblspc" -mindepth 1 -type l 2> /dev/null)" ]; then
+		echo "  the server has a tablespace outside its data directory, which its copies would share"
+		exit 1
+	fi
+	copies=()
+	for i in $(seq 1 $((${#groups[@]} - 1))); do
+		copy_data "$i" &
+		copies+=($!)
+	done
+	for p in "${copies[@]}"; do
+		wait "$p" || { echo "  the server could not be copied"; exit 1; }
+	done
+	copies=()
+	for i in $(seq 1 $((${#groups[@]} - 1))); do
+		start_copy "$i" &
+		copies+=($!)
+	done
+	"$BINDIR/pg_ctl" -D "$WORK/data" -l "$WORK/log" -w -t 60 start > /dev/null 2>&1 \
+		|| { echo "  the server did not start again"; tail -20 "$WORK/log"; exit 1; }
+	for p in "${copies[@]}"; do
+		wait "$p" || exit 1
+	done
+	pids=()
+	for i in "${!groups[@]}"; do
+		if [ "$i" -eq 0 ]; then host="$SOCK"; else host="$SOCK/copy$i"; fi
+		PGHOST="$host" watchdog "$WORK/$pass/cancelled" &
+		WATCHDOGS+=($!)
+		regress "$SN/schedule.${groups[$i]}" "$WORK/$pass/${groups[$i]}" "$host" --use-existing &
+		pids+=($!)
+		outs+=("$WORK/$pass/${groups[$i]}")
+	done
+	for p in "${pids[@]}"; do
+		wait "$p" || rc=1
+	done
+	kill "${WATCHDOGS[@]}" 2> /dev/null; wait "${WATCHDOGS[@]}" 2> /dev/null; WATCHDOGS=()
+	for i in $(seq 1 $((${#groups[@]} - 1))); do
+		"$BINDIR/pg_ctl" -D "$WORK/copy$i/data" -m immediate stop > /dev/null 2>&1
+	done
+
+	# What they said, as one run's: in order, and numbered as one.
+	mkdir -p "$WORK/$pass/results"
+	: > "$WORK/$pass/pg_regress.out"
+	for o in "${outs[@]}"; do
+		cat "$o/pg_regress.out" >> "$WORK/$pass/pg_regress.out"
+		cat "$o/regression.diffs" >> "$WORK/$pass/regression.diffs" 2> /dev/null
+		cp "$o"/results/*.out "$WORK/$pass/results/" 2> /dev/null
+	done
+	awk '/^(not )?ok / { n++; sub(/^(not )?ok +[0-9]+ +/, sprintf("%s %-9d ", ($1 == "not" ? "not ok" : "ok"), n)) } { print }' \
+		"$WORK/$pass/pg_regress.out" > "$WORK/$pass/pg_regress.out.n" &&
+		mv "$WORK/$pass/pg_regress.out.n" "$WORK/$pass/pg_regress.out"
 
 	grep -E "^(not )?ok " "$WORK/$pass/pg_regress.out" | sed 's/^/  /'
 	for whose in PostgreSQL Cloudberry port; do

@@ -1,7 +1,12 @@
 # Cloudberry's singlenode_regress suite, as the port runs it: every test of
 # its two schedules, in their order, with what the port does with it.
 #
-#   run   the test runs here, against every M1 module
+#   run   the test runs here, against every M1 module.  A third word names
+#         the group it runs in, which is its first group when there is none:
+#         PostgreSQL's tests run first, and then each group of Cloudberry's
+#         on a copy of the server they leave, the groups side by side, each
+#         in this order.  The groups are cut by ORCA's time, in the order of
+#         the tests, so that a test still follows the ones it followed.
 #   pg    one of PostgreSQL's own regression tests, in Cloudberry's copy of
 #         it for PostgreSQL 14; the pgregress suite runs PostgreSQL 19's
 #   skip  it needs what M1 does not have, which the rest of the line says
@@ -77,7 +82,7 @@ pg   create_index_spgist
 pg   create_view
 pg   index_including
 pg   index_including_gist
-run  gp_gin_index
+run  gp_gin_index                                         cb1
 pg   create_aggregate
 pg   create_function_3
 pg   create_cast
@@ -221,60 +226,60 @@ pg   event_trigger
 pg   oidjoins
 pg   fast_default
 pg   stats
-run  tag
+run  tag                                                  cb1
 skip createdb  a cluster's mirrors, whose directories it lists, M4, and the fault injector
-run  update_gp
-run  returning_gp
-run  cluster_gp
-run  case_gp
-run  limit_gp
-run  join_gp
-run  union_gp
-run  create_table_like_gp
+run  update_gp                                            cb1
+run  returning_gp                                         cb1
+run  cluster_gp                                           cb1
+run  case_gp                                              cb1
+run  limit_gp                                             cb1
+run  join_gp                                              cb1
+run  union_gp                                             cb1
+run  create_table_like_gp                                 cb1
 skip matview_ao  append-optimized tables, M5
-run  gpcopy
+run  gpcopy                                               cb1
 skip incremental_analyze  append-optimized tables, M5
-run  indexjoin
+run  indexjoin                                            cb1
 skip workfile/hashagg_spill  the workfile manager and its views; Track B's spill-file hook is not built
 skip workfile/hashjoin_spill  the workfile manager and its views; Track B's spill-file hook is not built
 skip query_finish_pending  the fault injector, which is Track E's; the port has none yet
-run  sequence_gp
-run  tidscan_gp
+run  sequence_gp                                          cb1
+run  tidscan_gp                                           cb1
 skip agg_pushdown  gp_enable_agg_pushdown, which the plan replaces with PostgreSQL 19's eager aggregation (Track A 2.7)
-run  subselect_gp
-run  subselect_gp2
-run  partition
-run  partition1
-run  partition_indexing
+run  subselect_gp                                         cb1
+run  subselect_gp2                                        cb1
+run  partition                                            cb2
+run  partition1                                           cb2
+run  partition_indexing                                   cb2
 skip partition_storage  append-optimized tables, M5
-run  partition_ddl
-run  partition_with_user_defined_function
-run  partition_unlogged
-run  partition_subquery
-run  partition_with_user_defined_function_that_truncates
+run  partition_ddl                                        cb2
+run  partition_with_user_defined_function                 cb2
+run  partition_unlogged                                   cb2
+run  partition_subquery                                   cb2
+run  partition_with_user_defined_function_that_truncates  cb2
 skip brin_ao  append-optimized tables, M5
 skip brin_aocs  append-optimized tables, M5
 skip aoco_privileges  append-optimized tables, M5
 skip aocs  append-optimized tables, M5
 skip resource_queue  resource queues, M6
 skip resource_queue_function  resource queues, M6
-run  bfv_dd
-run  bfv_dd_multicolumn
-run  bfv_dd_types
-run  bfv_catalog
-run  bfv_index
-run  bfv_olap
-run  bfv_aggregate
-run  bfv_partition_plans
-run  gp_recursive_cte
-run  qp_with_clause
-run  qp_query_execution
-run  qp_left_anti_semi_join
-run  qp_union_intersect
+run  bfv_dd                                               cb2
+run  bfv_dd_multicolumn                                   cb2
+run  bfv_dd_types                                         cb2
+run  bfv_catalog                                          cb2
+run  bfv_index                                            cb2
+run  bfv_olap                                             cb2
+run  bfv_aggregate                                        cb2
+run  bfv_partition_plans                                  cb2
+run  gp_recursive_cte                                     cb2
+run  qp_with_clause                                       cb3
+run  qp_query_execution                                   cb3
+run  qp_left_anti_semi_join                               cb3
+run  qp_union_intersect                                   cb3
 skip uao_compaction/*  append-optimized tables, M5
 skip uaocs_compaction/*  append-optimized tables, M5
 skip uao_dml/*  append-optimized tables, M5
 skip AOCO_Compression  append-optimized tables, M5
 skip AORO_Compression  append-optimized tables, M5
 skip matview_data  AQUMV's bookkeeping in gp_matview_aux, which is not built
-run  singlenode_compatibility_cbdb
+run  singlenode_compatibility_cbdb                        cb3

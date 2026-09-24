@@ -1,0 +1,48 @@
+#-------------------------------------------------------------------------
+#
+# Licensed to the Apache Software Foundation (ASF) under one
+# or more contributor license agreements.  See the NOTICE file
+# distributed with this work for additional information
+# regarding copyright ownership.  The ASF licenses this file
+# to you under the Apache License, Version 2.0 (the
+# "License"); you may not use this file except in compliance
+# with the License.  You may obtain a copy of the License at
+#
+#   http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing,
+# software distributed under the License is distributed on an
+# "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+# KIND, either express or implied.  See the License for the
+# specific language governing permissions and limitations
+# under the License.
+#
+#-------------------------------------------------------------------------
+#
+# The jobs run.sh makes of the suites, and how long each takes: run.sh starts
+# the longest first.  A suite not listed is one job, started last.
+#
+#   suite   job ("-" when the suite is one)   seconds   environment
+#
+# A suite that runs its tests under the planner and under ORCA is one job a
+# pass.  The seconds are a run's, on the 32-core machine the port is built
+# on, with every job at once; they order the jobs and nothing else, and
+# run.sh's summary gives each run's own.
+
+task                   -        265
+dynamic                -        103
+singlenode             orca     150   PASSES=orca
+greenplum              orca     120   PASSES=orca
+isolation2             orca      40   PASSES=orca
+isolation2             planner   40   PASSES=planner
+cluster                -         38
+postgis_regress        orca      35   PASSES=orca
+orca                   -         35
+singlenode             planner   20   PASSES=planner
+security               -         16
+postgis_regress        planner   15   PASSES=planner
+greenplum              planner   15   PASSES=planner
+hooks                  -         12
+singlenode_isolation2  orca       5   PASSES=orca
+singlenode_isolation2  planner    4   PASSES=planner
+postgis                -          5

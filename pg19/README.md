@@ -191,3 +191,12 @@ Cloudberry's own driver on the same cluster; `singlenode` and
 `singlenode_isolation2`, Cloudberry's single-node suites with PostgreSQL 19's
 own regression tests; and PostGIS's regression suite.  Each is run under the
 planner and under ORCA where it plans.
+
+The suites run side by side, as jobs: a suite with two passes is a job a
+pass, `pg19/test/jobs` lists how long each job takes so that the longest
+start first, and each job's output is printed whole as it finishes, with a
+summary of the jobs at the end.  The long suites split themselves further:
+PostGIS's tests over eight servers, `isolation2`'s over a cluster a group of
+tests, and `singlenode`'s Cloudberry half over copies of the server
+PostgreSQL's tests ran on.  `JOBS=1` runs one job at a time, `PASSES=planner`
+only the planner passes, and `RESULTS_DIR` gets a directory for each job.

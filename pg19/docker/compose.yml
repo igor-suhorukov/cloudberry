@@ -72,13 +72,19 @@ services:
         PG_IMAGE: cloudberry/pg19-patched:latest
         CB_REF: ${CB_REF:-extension_postgresql_19}
 
-  # The port's test suites.  With no argument it runs them all.
+  # The port's test suites.  With no argument it runs them all, as jobs side
+  # by side (pg19/test/run.sh says how).
   #
   #   docker compose -f pg19/docker/compose.yml run --rm tests load
+  #
+  # The jobs start some sixty servers at once, and each puts its dynamic
+  # shared memory in /dev/shm, which is 64 MB unless the container is given
+  # more.
   tests:
     image: cloudberry/cb-ext:latest
     depends_on: [cb-ext]
     entrypoint: ["/cb/pg19/test/run.sh"]
+    shm_size: 4gb
     tmpfs:
       - /tmp
 

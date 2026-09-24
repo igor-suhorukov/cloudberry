@@ -4,7 +4,14 @@
 # and the global deadlock detector -- in the schedule's order.
 #
 #   run   the test runs here, in both passes; cloudberry/ holds a difference
-#         reviewed and kept, where one pass has one
+#         reviewed and kept, where one pass has one.  A third word names the
+#         group it runs in, "main" when there is none: each group has a
+#         cluster of its own, and the groups of a pass run side by side, each
+#         in the schedule's order.  A group name ending in "*" is every group
+#         that name begins, so gdd/prepare, which turns the global deadlock
+#         detector on, and gdd/end, which turns it off, run first and last in
+#         each group of GDD tests.  The groups are cut by time: each GDD test
+#         waits out the detector's five-second period at least once.
 #   skip  it needs what the port does not have yet: the rest of the line says
 #         what
 #
@@ -19,22 +26,22 @@ skip starve_case  pg_locks.gp_segment_id and mppsessionid, Cloudberry's columns 
 skip create_index_deadlock  a lock on pg_index Cloudberry's CREATE INDEX keeps to the end of its transaction, and PostgreSQL 19's lets go of
 skip commit_transaction_block_checkpoint  faults inside PostgreSQL's commit, before_xlog_xact_commit_prepared and onephase_transaction_commit
 skip prepare_limit  gpconfig and gpstop, the tools of M7, and a standby coordinator
-run  gdd/prepare
-run  gdd/dist-deadlock-01
-run  gdd/dist-deadlock-04
-run  gdd/dist-deadlock-05
-run  gdd/dist-deadlock-06
-run  gdd/dist-deadlock-07
-run  gdd/dist-deadlock-102
-run  gdd/dist-deadlock-103
-run  gdd/dist-deadlock-104
-run  gdd/dist-deadlock-106
-run  gdd/non-lock-105
+run  gdd/prepare                                   gdd*
+run  gdd/dist-deadlock-01                          gdd1
+run  gdd/dist-deadlock-04                          gdd1
+run  gdd/dist-deadlock-05                          gdd1
+run  gdd/dist-deadlock-06                          gdd1
+run  gdd/dist-deadlock-07                          gdd1
+run  gdd/dist-deadlock-102                         gdd1
+run  gdd/dist-deadlock-103                         gdd2
+run  gdd/dist-deadlock-104                         gdd2
+run  gdd/dist-deadlock-106                         gdd2
+run  gdd/non-lock-105                              gdd3
 skip gdd/dist-deadlock-upsert  INSERT ... ON CONFLICT into a distributed table, which neither planner plans yet
-run  gdd/delete-deadlock-root-leaf-concurrent-op
-run  gdd/update-deadlock-root-leaf-concurrent-op
-run  gdd/local-deadlock-03
-run  gdd/end
+run  gdd/delete-deadlock-root-leaf-concurrent-op   gdd2
+run  gdd/update-deadlock-root-leaf-concurrent-op   gdd2
+run  gdd/local-deadlock-03                         gdd2
+run  gdd/end                                       gdd*
 run  alter_blocks_for_update_and_viceversa
 skip reader_waits_for_lock  pg_locks.mppiswriter and gp_session_id, Cloudberry's columns of a system view and its session's id
 run  vacuum_recently_dead_tuple_due_to_distributed_snapshot
