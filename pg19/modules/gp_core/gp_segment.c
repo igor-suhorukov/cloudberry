@@ -64,7 +64,9 @@
  * and whether it is a query's writer rather than a segment's reader, false
  * for a process no query started (gp_gdd.c keeps both).  "*" gives
  * PostgreSQL's sixteen columns, and a node's pg_locks lists its own locks:
- * the coordinator's does not gather the segments'.
+ * the coordinator's does not gather the segments'.  And pg_stat_activity has
+ * Cloudberry's sess_id the same way, activity_session() of its row, the
+ * coordinator session the backend works for, as lock_session() gives it.
  *
  * A replicated table shows no system column on the coordinator, as
  * Cloudberry's shows none outside utility mode (scanRTEForColumn): each
@@ -131,6 +133,7 @@
 #define GP_SEGMENT_ID	"gp_segment_id"
 #define GP_MPPSESSIONID	"mppsessionid"
 #define GP_MPPISWRITER	"mppiswriter"
+#define GP_SESS_ID		"sess_id"
 
 static columnref_fallback_hook_type prev_columnref_fallback_hook = NULL;
 static post_parse_analyze_hook_type prev_post_parse_analyze_hook = NULL;
@@ -155,6 +158,8 @@ static Oid	dist_random_segments_oid = InvalidOid;
 static Oid	pg_locks_oid = InvalidOid;
 static Oid	lock_session_oid = InvalidOid;
 static Oid	lock_writer_oid = InvalidOid;
+static Oid	pg_stat_activity_oid = InvalidOid;
+static Oid	activity_session_oid = InvalidOid;
 
 static void
 invalidate_func_oids(Datum arg, SysCacheIdentifier cacheid, uint32 hashvalue)
@@ -199,6 +204,12 @@ lookup_func_oids(void)
 		lock_session_oid = lookup_func("gp_internal", "lock_session", rowtype);
 		lock_writer_oid = lookup_func("gp_internal", "lock_writer", rowtype);
 	}
+	pg_stat_activity_oid = get_relname_relid("pg_stat_activity",
+											 PG_CATALOG_NAMESPACE);
+	activity_session_oid = InvalidOid;
+	if (OidIsValid(pg_stat_activity_oid))
+		activity_session_oid = lookup_func("gp_internal", "activity_session",
+										   get_rel_type_id(pg_stat_activity_oid));
 	func_oids_valid = true;
 }
 
@@ -321,6 +332,17 @@ nsitem_is_pg_locks(ParseNamespaceItem *nsitem)
 	lookup_func_oids();
 	return rte->rtekind == RTE_RELATION && OidIsValid(pg_locks_oid) &&
 		rte->relid == pg_locks_oid;
+}
+
+/* Is this entry pg_catalog.pg_stat_activity, which has Cloudberry's sess_id? */
+static bool
+nsitem_is_pg_stat_activity(ParseNamespaceItem *nsitem)
+{
+	RangeTblEntry *rte = nsitem->p_rte;
+
+	lookup_func_oids();
+	return rte->rtekind == RTE_RELATION && OidIsValid(pg_stat_activity_oid) &&
+		rte->relid == pg_stat_activity_oid;
 }
 
 static bool
@@ -592,6 +614,12 @@ gp_columnref_fallback(ParseState *pstate, ColumnRef *cref)
 		funcid = lock_writer_oid;
 		rettype = BOOLOID;
 	}
+	else if (strcmp(name, GP_SESS_ID) == 0 && OidIsValid(activity_session_oid))
+	{
+		has = nsitem_is_pg_stat_activity;
+		funcid = activity_session_oid;
+		rettype = INT4OID;
+	}
 	else
 		return NULL;
 
@@ -634,6 +662,8 @@ gp_deparse_function_as_column(FuncExpr *expr)
 		return GP_MPPSESSIONID;
 	if (OidIsValid(lock_writer_oid) && expr->funcid == lock_writer_oid)
 		return GP_MPPISWRITER;
+	if (OidIsValid(activity_session_oid) && expr->funcid == activity_session_oid)
+		return GP_SESS_ID;
 	if (prev_deparse_function_as_column_hook)
 		return prev_deparse_function_as_column_hook(expr);
 	return NULL;
@@ -776,7 +806,7 @@ gp_segment_of(PG_FUNCTION_ARGS)
 	PG_RETURN_INT32(GpHashSegment(cache->hash, cache->values, cache->isnull));
 }
 
-/* The process id of a pg_locks row, 0 for a prepared transaction's. */
+/* The process id of a pg_locks or pg_stat_activity row, 0 where it has none. */
 static int
 lock_row_pid(HeapTupleHeader row)
 {
@@ -823,6 +853,25 @@ gp_lock_writer(PG_FUNCTION_ARGS)
 							  &session, &reader))
 		PG_RETURN_BOOL(false);
 	PG_RETURN_BOOL(!reader);
+}
+
+PG_FUNCTION_INFO_V1(gp_activity_session);
+
+/*
+ * gp_internal.activity_session(pg_stat_activity): sess_id, the coordinator
+ * session the backend works for, as Cloudberry's pg_stat_activity gives it;
+ * -1 for one that works for none.
+ */
+Datum
+gp_activity_session(PG_FUNCTION_ARGS)
+{
+	int			session;
+	bool		reader;
+
+	if (!GpGddBackendIdentity(lock_row_pid(PG_GETARG_HEAPTUPLEHEADER(0)),
+							  &session, &reader))
+		PG_RETURN_INT32(-1);
+	PG_RETURN_INT32(session);
 }
 
 PG_FUNCTION_INFO_V1(gp_dist_random_segments);

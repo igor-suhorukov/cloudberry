@@ -469,6 +469,16 @@ AS 'MODULE_PATHNAME', 'gp_lock_writer'
 LANGUAGE C VOLATILE STRICT;
 
 /*
+ * pg_stat_activity's sess_id, which Cloudberry's pg_stat_activity has as a
+ * column and the parser makes of the name the same way (gp_segment.c): the
+ * coordinator session the backend works for, -1 for none.
+ */
+CREATE FUNCTION gp_internal.activity_session(pg_catalog.pg_stat_activity)
+RETURNS int4
+AS 'MODULE_PATHNAME', 'gp_activity_session'
+LANGUAGE C VOLATILE STRICT;
+
+/*
  * How a relation's rows are spread over the segments.
  *
  * gp_sql.set_distribution() records what DISTRIBUTED BY said as text on the
