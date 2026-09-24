@@ -93,7 +93,11 @@ orca_cpp_args = [
   '-fvisibility=hidden',
   '-fvisibility-inlines-hidden',
 ]
-if get_option('buildtype').startswith('debug')
+# ORCA's own debug checks -- its assertions, and the accounting of its memory
+# pools -- are on where the server checks its assertions, as Cloudberry's
+# configure turns them on with --enable-cassert ("Build ORCA in debug if
+# enable-cassert"), whatever the optimization.
+if pg_cassert
   orca_cpp_args += '-DGPOS_DEBUG'
 endif
 

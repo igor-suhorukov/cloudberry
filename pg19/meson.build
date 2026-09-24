@@ -32,8 +32,13 @@ project('cloudberry-pg19', 'c',
   # gnu11, not c11: PostgreSQL's headers use POSIX declarations such as
   # sigjmp_buf and clock_gettime, which strict ISO mode hides.
   # c++17 is what ORCA is written against.
+  # debugoptimized, -O2 -g, is PostgreSQL's own default build type and the
+  # one the server is built with (docker/Dockerfile.pg).  Meson's is debug,
+  # -O0, which left the modules unoptimized: every ORCA pass of the suites
+  # took five to twelve times its planner pass.  Cloudberry builds with -O3
+  # (configure.ac, "If the compiler is GCC, then we use -O3").
   default_options: ['c_std=gnu11', 'cpp_std=c++17', 'warning_level=1',
-                    'b_ndebug=if-release'],
+                    'b_ndebug=if-release', 'buildtype=debugoptimized'],
 )
 
 cc = meson.get_compiler('c')
@@ -74,6 +79,12 @@ if pg_major.to_int() < 19
 endif
 
 pg_inc = include_directories(pg_includedir_server)
+
+# Whether the server checks its assertions (-Dcassert=true), as its
+# pg_config.h says: ORCA's own debug checks follow it (orca/meson.build).
+pg_cassert = cc.get_define('USE_ASSERT_CHECKING',
+                           prefix: '#include "pg_config.h"',
+                           include_directories: pg_inc) == '1'
 
 # libpq, for the dispatcher.  A backend may not link libpq in code built into
 # the server, but an extension may and must: PostgreSQL 19 says so in
@@ -448,6 +459,7 @@ summary({
   'pg_config':    pg_config.full_path(),
   'PostgreSQL':   pg['version'],
   'core patches': have_patched_pg,
+  'assertions':   pg_cassert,
   'pkglibdir':    pg_pkglibdir,
   'extensiondir': pg_extensiondir,
 }, section: 'PostgreSQL')
@@ -455,4 +467,6 @@ summary({
 summary({
   'built':   ', '.join(built_modules),
   'preload': ', '.join(preload_modules),
+  'build type': get_option('buildtype'),
+  'ORCA debug checks (GPOS_DEBUG)': get_option('orca') and pg_cassert,
 }, section: 'Modules')
