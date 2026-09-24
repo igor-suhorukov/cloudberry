@@ -695,6 +695,22 @@ mine" ] && ok "a transaction reads its own rows, and a LIMIT leaves the connecti
 	[ "$out" = "87 10|sales_1_prt_3 11|sales_1_prt_3 12|sales_1_prt_3 3 " ] \
 		&& ok "a partitioned table's DELETE, and an UPDATE that moves rows to another partition" \
 		|| notok "writes of a partitioned table" "$out"
+	# RETURNING old and new by name: each row comes back with its other
+	# version -- an UPDATE's old row, an upsert's existing one, a moved row's
+	# deleted one -- and one that is not there is null.
+	q 0 "CREATE TABLE ron (a int, b text, c int GENERATED ALWAYS AS (a * 10) STORED) DISTRIBUTED BY (a); INSERT INTO ron SELECT g, 'v' || g FROM generate_series(1, 10) g;" >/dev/null
+	q 0 "CREATE TABLE ronu (a int PRIMARY KEY, b text) DISTRIBUTED BY (a); INSERT INTO ronu VALUES (1, 'one');" >/dev/null
+	out=$(printf '%s\n' "BEGIN;" \
+		"UPDATE ron SET b = b || '!' WHERE a = 2 RETURNING old.b, new.b;" \
+		"WITH w AS (DELETE FROM ron WHERE a = 10 RETURNING old.a AS o, new.a AS n) SELECT o, n IS NULL FROM w;" \
+		"INSERT INTO ron VALUES (11, 'x') RETURNING old.a IS NULL, new.c;" \
+		"WITH w AS (INSERT INTO ronu VALUES (1, 'uno'), (2, 'dos') ON CONFLICT (a) DO UPDATE SET b = excluded.b RETURNING old.b AS o, new.b AS n) SELECT string_agg(coalesce(o, '-') || '>' || n, ' ' ORDER BY n) FROM w;" \
+		"UPDATE ron SET a = a + 100 WHERE a = 4 RETURNING old.a, new.a, old.c, new.c;" \
+		"UPDATE sales SET d = date '2026-03-20' WHERE id = 10 RETURNING old.tableoid::regclass, new.tableoid::regclass;" \
+		"ROLLBACK;" | qf 0 | tr '\n' ' ')
+	[ "$out" = "v2|v2! 10|t t|110 ->dos one>uno 4|104|40|1040 sales_1_prt_1|sales_1_prt_3 " ] \
+		&& ok "RETURNING old and new: an UPDATE's, a DELETE's, an INSERT's, an upsert's, a moved row's, a row moved between partitions" \
+		|| notok "RETURNING old and new" "$out"
 	out=$(printf '%s\n' "BEGIN;" \
 		"DELETE FROM d USING d2 WHERE d.a = d2.v * 10 AND d2.v > 4 RETURNING d.a, d2.v;" "ROLLBACK;" | qf 0 | sort -u | tr '\n' ' ')
 	[ "$out" = "50|5 60|6 " ] && ok "a DELETE that joins another distributed table, its RETURNING reading both" \

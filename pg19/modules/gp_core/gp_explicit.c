@@ -57,7 +57,10 @@
  * and its new version inserted where it hashes.  RETURNING is evaluated
  * here: each segment returns the rows it wrote, with the number of the
  * plan's row that asked, and the list the planner made is evaluated over
- * them and that row.
+ * them and that row.  Where it reads old or new by name, each row comes
+ * back with its other version too -- an UPDATE's old row, an upsert's
+ * existing one, a moved row's deleted one -- and one that is not there
+ * is null, as ExecProcessReturning() has it.
  *
  * A replicated table's row is on every segment, and each copy has a ctid of
  * its own: the plan read one segment's.  So the write finds a row by what
@@ -94,8 +97,8 @@
  *
  * Refused, by name (GpExplicitCannot): an UPDATE of the key of a table with
  * UPDATE triggers, which a moved row would not fire, in Cloudberry's words;
- * check options; RETURNING old or new; statement-level triggers, which
- * would fire on every segment; and MERGE.
+ * check options; statement-level triggers, which would fire on every
+ * segment; and MERGE.
  *
  * Cloudberry sources this file stands in for:
  *	  the Explicit Redistribute Motion cdbpath.c puts below a ModifyTable
@@ -334,12 +337,18 @@ typedef struct ExplicitState
 
 	/* RETURNING */
 	bool		returning;
+	bool		other;			/* each row comes back with its other
+								 * version: an UPDATE's old row, an upsert's
+								 * existing one */
+	ResultRelInfo *rris;		/* the result relations', for all-null rows */
 	ProjectionInfo **projs;
 	TupleTableSlot **relslots;
+	TupleTableSlot **orelslots; /* the other version, as each has it */
 	TupleConversionMap **maps;
 	TupleDesc	retdesc;
 	TupleTableSlot *retslot;
 	TupleTableSlot *rootslot;
+	TupleTableSlot *otherslot;	/* the other version, as the root has it */
 	TupleTableSlot *outerslot;
 	MinimalTuple *saved;		/* the plan's rows, by number */
 	uint64		nsaved;
@@ -442,8 +451,6 @@ GpExplicitCannot(PlannedStmt *stmt, ModifyTable *mt, const char *on_conflict)
 		return "ON CONFLICT into a distributed table is written from the statement's own text, which was not printed for this one.";
 	if (mt->withCheckOptionLists != NIL)
 		return "It is written through a view WITH CHECK OPTION or under row-level security, whose checks of the rows written would not travel with them.";
-	if (returning_qualified_walker((Node *) mt->returningLists, NULL))
-		return "Its RETURNING reads old or new values by name, which are not sent back.";
 
 	foreach(lc, mt->resultRelations)
 	{
@@ -673,10 +680,11 @@ explicit_create_state(CustomScan *cscan)
 /*
  * What a segment's RETURNING gives back: the number of the plan's row that
  * asked (with_n), the table the row is in, and the target's columns but the
- * dropped ones.
+ * dropped ones -- and, with_other, the table and the columns of the row's
+ * other version, all null where it has none.
  */
 static TupleDesc
-returned_desc(TupleDesc targetdesc, bool with_n)
+returned_desc(TupleDesc targetdesc, bool with_n, bool with_other)
 {
 	int			ncols = 0;
 	int			col = 1;
@@ -685,18 +693,22 @@ returned_desc(TupleDesc targetdesc, bool with_n)
 	for (int i = 0; i < targetdesc->natts; i++)
 		if (!TupleDescAttr(targetdesc, i)->attisdropped)
 			ncols++;
-	desc = CreateTemplateTupleDesc(ncols + 1 + (with_n ? 1 : 0));
+	desc = CreateTemplateTupleDesc((ncols + 1) * (with_other ? 2 : 1) +
+								   (with_n ? 1 : 0));
 	if (with_n)
 		TupleDescInitEntry(desc, col++, "gp_n", INT8OID, -1, 0);
-	TupleDescInitEntry(desc, col++, "gp_toid", OIDOID, -1, 0);
-	for (int i = 0; i < targetdesc->natts; i++)
+	for (int image = 0; image < (with_other ? 2 : 1); image++)
 	{
-		Form_pg_attribute att = TupleDescAttr(targetdesc, i);
+		TupleDescInitEntry(desc, col++, "gp_toid", OIDOID, -1, 0);
+		for (int i = 0; i < targetdesc->natts; i++)
+		{
+			Form_pg_attribute att = TupleDescAttr(targetdesc, i);
 
-		if (att->attisdropped)
-			continue;
-		TupleDescInitEntry(desc, col++, NameStr(att->attname), att->atttypid,
-						   att->atttypmod, 0);
+			if (att->attisdropped)
+				continue;
+			TupleDescInitEntry(desc, col++, NameStr(att->attname), att->atttypid,
+							   att->atttypmod, 0);
+		}
 	}
 	TupleDescFinalize(desc);
 	return desc;
@@ -867,23 +879,42 @@ explicit_begin(CustomScanState *node, EState *estate, int eflags)
 	{
 		ExprContext *econtext = node->ss.ps.ps_ExprContext;
 
-		appendStringInfo(&tail, " RETURNING %sgp_t.tableoid, gp_t.*",
-						 state->operation != CMD_INSERT ? "gp_s.gp_n, " : "");
+		/*
+		 * old and new by name: an UPDATE's old row and an upsert's existing
+		 * one come back too.  A DELETE has no new row, and an INSERT that
+		 * updates nothing no old one.
+		 */
+		state->other = returning_qualified_walker((Node *) returning, NULL) &&
+			(state->operation == CMD_UPDATE ||
+			 state->on_conflict == ONCONFLICT_UPDATE);
+
+		appendStringInfo(&tail, " RETURNING %sgp_t.tableoid, gp_t.*%s",
+						 state->operation != CMD_INSERT ? "gp_s.gp_n, " : "",
+						 state->other ? ", old.tableoid, old.*" : "");
 		state->retdesc = returned_desc(targetdesc,
-									   state->operation != CMD_INSERT);
+									   state->operation != CMD_INSERT,
+									   state->other);
 		state->retslot = MakeSingleTupleTableSlot(state->retdesc,
 												  &TTSOpsMinimalTuple);
 		state->rootslot = MakeSingleTupleTableSlot(targetdesc, &TTSOpsVirtual);
+		if (state->other)
+			state->otherslot = MakeSingleTupleTableSlot(targetdesc,
+														&TTSOpsVirtual);
 		state->outerslot = MakeSingleTupleTableSlot(ExecGetResultType(outerPlanState(node)),
 													&TTSOpsMinimalTuple);
 
+		state->rris = palloc0_array(ResultRelInfo, state->nrels);
 		state->projs = palloc0_array(ProjectionInfo *, state->nrels);
 		state->relslots = palloc0_array(TupleTableSlot *, state->nrels);
+		state->orelslots = palloc0_array(TupleTableSlot *, state->nrels);
 		state->maps = palloc0_array(TupleConversionMap *, state->nrels);
-		for (i = 0; i < state->nrels; i++)
+		i = 0;
+		foreach_int(rti, resultrels)
 		{
 			TupleDesc	reldesc = RelationGetDescr(state->rels[i]);
 
+			InitResultRelInfo(&state->rris[i], state->rels[i], rti, NULL,
+							  estate->es_instrument);
 			state->projs[i] = ExecBuildProjectionInfo((List *) list_nth(returning, i),
 													  econtext,
 													  node->ss.ps.ps_ResultTupleSlot,
@@ -893,7 +924,11 @@ explicit_begin(CustomScanState *node, EState *estate, int eflags)
 				state->maps[i] = convert_tuples_by_name(targetdesc, reldesc);
 				state->relslots[i] = MakeSingleTupleTableSlot(reldesc,
 															  &TTSOpsVirtual);
+				if (state->other)
+					state->orelslots[i] = MakeSingleTupleTableSlot(reldesc,
+																   &TTSOpsVirtual);
 			}
+			i++;
 		}
 		state->maxsaved = 64;
 		state->saved = palloc_array(MinimalTuple, state->maxsaved);
@@ -937,7 +972,7 @@ explicit_begin(CustomScanState *node, EState *estate, int eflags)
 						 GpDispatchRelationName(RelationGetRelid(state->target)));
 		state->delete_head = dh.data;
 		state->delete_tail = ") AS gp_s (gp_ctid, gp_toid, gp_n) WHERE gp_t.ctid = gp_s.gp_ctid AND gp_t.tableoid = gp_s.gp_toid RETURNING gp_s.gp_n, gp_t.tableoid, gp_t.*";
-		state->olddesc = returned_desc(targetdesc, true);
+		state->olddesc = returned_desc(targetdesc, true, false);
 
 		initStringInfo(&ih);
 		appendStringInfo(&ih, "INSERT INTO %s AS gp_t (",
@@ -966,7 +1001,7 @@ explicit_begin(CustomScanState *node, EState *estate, int eflags)
 						 identity ? " OVERRIDING SYSTEM VALUE" : "");
 		state->insert_head = ih.data;
 		state->insert_tail = state->returning ? " RETURNING gp_t.tableoid, gp_t.*" : "";
-		state->newdesc = returned_desc(targetdesc, false);
+		state->newdesc = returned_desc(targetdesc, false, false);
 		state->hash = GpHashMake(policy, targetdesc);
 		if (state->outerslot == NULL)
 			state->outerslot = MakeSingleTupleTableSlot(ExecGetResultType(outerPlanState(node)),
@@ -1186,6 +1221,7 @@ explicit_send_split(ExplicitState *state)
 	bool	   *nulls = palloc_array(bool, targetdesc->natts);
 	List	  **inserts = palloc0_array(List *, state->nsegs);
 	List	  **numbers = palloc0_array(List *, state->nsegs);
+	List	  **olders = palloc0_array(List *, state->nsegs);
 	uint64		deleted = 0;
 	MemoryContext oldcxt;
 
@@ -1238,9 +1274,11 @@ explicit_send_split(ExplicitState *state)
 		}
 		inserts[seg] = lappend(inserts[seg], params);
 		numbers[seg] = lappend(numbers[seg], makeInteger((int) n));
+		/* the deleted row, RETURNING's old one */
+		if (state->other)
+			olders[seg] = lappend(olders[seg], ExecCopySlotMinimalTuple(oldslot));
 	}
 	MemoryContextSwitchTo(oldcxt);
-	ExecDropSingleTupleTableSlot(oldslot);
 	tuplestore_end(olds);
 
 	for (int seg = 0; seg < state->nsegs; seg++)
@@ -1272,18 +1310,30 @@ explicit_send_split(ExplicitState *state)
 		{
 			Datum	   *rv = palloc_array(Datum, state->retdesc->natts);
 			bool	   *rn = palloc_array(bool, state->retdesc->natts);
+			int			width = newslot->tts_tupleDescriptor->natts;
 
 			slot_getallattrs(newslot);
 			rv[0] = Int64GetDatum((int64) intVal(lfirst(ln)));
 			rn[0] = false;
-			memcpy(&rv[1], newslot->tts_values, newslot->tts_tupleDescriptor->natts * sizeof(Datum));
-			memcpy(&rn[1], newslot->tts_isnull, newslot->tts_tupleDescriptor->natts * sizeof(bool));
+			memcpy(&rv[1], newslot->tts_values, width * sizeof(Datum));
+			memcpy(&rn[1], newslot->tts_isnull, width * sizeof(bool));
+			if (state->other)
+			{
+				/* the old row after the new: its table and columns */
+				ExecStoreMinimalTuple((MinimalTuple) list_nth(olders[seg],
+															  list_cell_number(numbers[seg], ln)),
+									  oldslot, false);
+				slot_getallattrs(oldslot);
+				memcpy(&rv[1 + width], &oldslot->tts_values[1], width * sizeof(Datum));
+				memcpy(&rn[1 + width], &oldslot->tts_isnull[1], width * sizeof(bool));
+			}
 			tuplestore_putvalues(state->returned, state->retdesc, rv, rn);
 			ln = lnext(numbers[seg], ln);
 		}
 		ExecDropSingleTupleTableSlot(newslot);
 		tuplestore_end(news);
 	}
+	ExecDropSingleTupleTableSlot(oldslot);
 
 	return deleted;
 }
@@ -1420,22 +1470,73 @@ explicit_send(ExplicitState *state)
 		estate->es_processed += total;
 }
 
-/* The next row RETURNING gives, from what the segments sent back. */
+/*
+ * A version of a row the segments sent back, from column *col of it on: its
+ * table, then its columns, as the root has them, in "rootslot"; and as the
+ * result relation relidx has them, where that is not the root.  NULL where
+ * the row has no such version, its table null.
+ */
 static TupleTableSlot *
-explicit_next_returning(ExplicitState *state)
+explicit_returned_version(ExplicitState *state, int *col,
+						  TupleTableSlot *rootslot, TupleTableSlot *relslot,
+						  int relidx)
+{
+	TupleDesc	rootdesc = RelationGetDescr(state->target);
+	TupleTableSlot *slot;
+	bool		exists = !state->retslot->tts_isnull[*col];
+	Oid			relid = DatumGetObjectId(state->retslot->tts_values[(*col)++]);
+
+	/* the root's row, a dropped column null */
+	ExecClearTuple(rootslot);
+	for (int i = 0; i < rootdesc->natts; i++)
+	{
+		if (TupleDescAttr(rootdesc, i)->attisdropped)
+		{
+			rootslot->tts_values[i] = (Datum) 0;
+			rootslot->tts_isnull[i] = true;
+			continue;
+		}
+		rootslot->tts_values[i] = state->retslot->tts_values[*col];
+		rootslot->tts_isnull[i] = state->retslot->tts_isnull[*col];
+		(*col)++;
+	}
+	ExecStoreVirtualTuple(rootslot);
+	if (!exists)
+		return NULL;
+
+	slot = rootslot;
+	if (relslot != NULL)
+	{
+		if (state->maps[relidx] != NULL)
+			slot = execute_attr_map_slot(state->maps[relidx]->attrMap,
+										 rootslot, relslot);
+		else
+			slot = ExecCopySlot(relslot, rootslot);
+	}
+	slot->tts_tableOid = relid;
+	return slot;
+}
+
+/*
+ * The next row the segments sent back, into state->retslot: the result
+ * relation the plan wrote it as, whose RETURNING it is -- the one it was
+ * read from, where an UPDATE may have moved it to another partition -- and
+ * the row as that relation has it (*scan), with its other version (*other)
+ * where it came back with one.  The plan's row that asked is the outer
+ * tuple.  False when there are no more.
+ */
+static bool
+explicit_returned_row(ExplicitState *state, int *relidx,
+					  TupleTableSlot **scan, TupleTableSlot **other)
 {
 	ExprContext *econtext = state->css.ss.ps.ps_ExprContext;
-	TupleDesc	rootdesc = RelationGetDescr(state->target);
-	TupleTableSlot *scan;
 	int			col = 0;
-	int			relidx = 0;
-	Oid			relid;
 
 	if (!tuplestore_gettupleslot(state->returned, true, false, state->retslot))
-		return NULL;
+		return false;
 	slot_getallattrs(state->retslot);
 
-	ResetExprContext(econtext);
+	*relidx = 0;
 	econtext->ecxt_outertuple = NULL;
 	if (state->operation != CMD_INSERT)
 	{
@@ -1446,53 +1547,68 @@ explicit_next_returning(ExplicitState *state)
 		slot_getallattrs(state->outerslot);
 		econtext->ecxt_outertuple = state->outerslot;
 
-		/*
-		 * The result relation the plan wrote the row as, whose RETURNING it
-		 * is: the one it was read from, where an UPDATE may have moved it
-		 * to another partition.
-		 */
 		if (state->nrels > 1)
 		{
 			bool		isnull;
 
-			relidx = result_rel_of(state,
-								   DatumGetObjectId(slot_getattr(state->outerslot,
-																 state->tableoidcol,
-																 &isnull)));
+			*relidx = result_rel_of(state,
+									DatumGetObjectId(slot_getattr(state->outerslot,
+																  state->tableoidcol,
+																  &isnull)));
 		}
 	}
-	relid = DatumGetObjectId(state->retslot->tts_values[col++]);
 
-	/* the root's row, a dropped column null */
-	ExecClearTuple(state->rootslot);
-	for (int i = 0; i < rootdesc->natts; i++)
-	{
-		if (TupleDescAttr(rootdesc, i)->attisdropped)
-		{
-			state->rootslot->tts_values[i] = (Datum) 0;
-			state->rootslot->tts_isnull[i] = true;
-			continue;
-		}
-		state->rootslot->tts_values[i] = state->retslot->tts_values[col];
-		state->rootslot->tts_isnull[i] = state->retslot->tts_isnull[col];
-		col++;
-	}
-	ExecStoreVirtualTuple(state->rootslot);
+	*scan = explicit_returned_version(state, &col, state->rootslot,
+									  state->relslots[*relidx], *relidx);
+	*other = state->other
+		? explicit_returned_version(state, &col, state->otherslot,
+									state->orelslots[*relidx], *relidx)
+		: NULL;
+	return true;
+}
 
-	scan = state->rootslot;
-	if (state->relslots[relidx] != NULL)
-	{
-		if (state->maps[relidx] != NULL)
-			scan = execute_attr_map_slot(state->maps[relidx]->attrMap,
-										 state->rootslot,
-										 state->relslots[relidx]);
-		else
-			scan = ExecCopySlot(state->relslots[relidx], state->rootslot);
-	}
-	scan->tts_tableOid = relid;
+/*
+ * The next row RETURNING gives, from what the segments sent back: old and
+ * new, where it reads them by name, as ExecProcessReturning() sets them --
+ * a DELETE's row is its old one, an INSERT's or UPDATE's its new one, and
+ * one that is not there is a row of nulls.
+ */
+static TupleTableSlot *
+explicit_next_returning(ExplicitState *state)
+{
+	ExprContext *econtext = state->css.ss.ps.ps_ExprContext;
+	EState	   *estate = state->css.ss.ps.state;
+	TupleTableSlot *scan;
+	TupleTableSlot *other;
+	TupleTableSlot *oldslot;
+	TupleTableSlot *newslot;
+	ProjectionInfo *proj;
+	int			relidx;
+
+	ResetExprContext(econtext);
+	if (!explicit_returned_row(state, &relidx, &scan, &other))
+		return NULL;
+	proj = state->projs[relidx];
+
+	oldslot = state->operation == CMD_DELETE ? scan : other;
+	newslot = state->operation == CMD_DELETE ? NULL : scan;
 	econtext->ecxt_scantuple = scan;
+	econtext->ecxt_oldtuple = oldslot != NULL ? oldslot
+		: (proj->pi_state.flags & EEO_FLAG_HAS_OLD)
+		? ExecGetAllNullSlot(estate, &state->rris[relidx]) : NULL;
+	econtext->ecxt_newtuple = newslot != NULL ? newslot
+		: (proj->pi_state.flags & EEO_FLAG_HAS_NEW)
+		? ExecGetAllNullSlot(estate, &state->rris[relidx]) : NULL;
+	if (oldslot == NULL)
+		proj->pi_state.flags |= EEO_FLAG_OLD_IS_NULL;
+	else
+		proj->pi_state.flags &= ~EEO_FLAG_OLD_IS_NULL;
+	if (newslot == NULL)
+		proj->pi_state.flags |= EEO_FLAG_NEW_IS_NULL;
+	else
+		proj->pi_state.flags &= ~EEO_FLAG_NEW_IS_NULL;
 
-	return ExecProject(state->projs[relidx]);
+	return ExecProject(proj);
 }
 
 static TupleTableSlot *
@@ -1526,9 +1642,15 @@ explicit_end(CustomScanState *node)
 	{
 		ExecDropSingleTupleTableSlot(state->retslot);
 		ExecDropSingleTupleTableSlot(state->rootslot);
+		if (state->otherslot != NULL)
+			ExecDropSingleTupleTableSlot(state->otherslot);
 		for (int i = 0; i < state->nrels; i++)
+		{
 			if (state->relslots[i] != NULL)
 				ExecDropSingleTupleTableSlot(state->relslots[i]);
+			if (state->orelslots[i] != NULL)
+				ExecDropSingleTupleTableSlot(state->orelslots[i]);
+		}
 	}
 	if (state->outerslot != NULL)
 		ExecDropSingleTupleTableSlot(state->outerslot);
