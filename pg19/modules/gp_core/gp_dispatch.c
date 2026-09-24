@@ -110,12 +110,20 @@
 #include "gp_dispatch.h"
 #include "gp_dtx.h"
 #include "gp_fault.h"
+#include "gp_fts.h"
 #include "gp_label.h"
 #include "gp_loopback.h"
 #include "gp_settings.h"
 
 /* Where libpq finds the password for the segments; see the file header. */
 static char *gp_internal_passfile = NULL;
+
+/*
+ * How often, and how far apart, a gang is tried again while a segment is in
+ * recovery: Cloudberry's settings (cdbgang_async.c).
+ */
+static int	gp_gang_creation_retry_count = 5;
+static int	gp_gang_creation_retry_timer = 2000;
 
 /*
  * The settings a segment has to share with the coordinator for a statement to
@@ -197,6 +205,14 @@ typedef struct GpGang
 
 static GpGang *gang = NULL;
 static bool exit_callback_registered = false;
+
+/*
+ * The database and the user the gang last connected as: who prepared a part,
+ * and who may finish it, which is asked after the commit, where no catalog
+ * can be read (dtx_finish_moved()).
+ */
+static char *gang_dbname = NULL;
+static char *gang_username = NULL;
 
 /* The connection a COPY ... FROM STDIN is going through, if any. */
 static GpSegmentConn *copying = NULL;
@@ -410,6 +426,12 @@ gang_connect(void)
 
 	dbname = get_database_name(MyDatabaseId);
 	username = GetUserNameFromId(GetSessionUserId(), false);
+	if (gang_dbname != NULL)
+		pfree(gang_dbname);
+	if (gang_username != NULL)
+		pfree(gang_username);
+	gang_dbname = MemoryContextStrdup(TopMemoryContext, dbname);
+	gang_username = MemoryContextStrdup(TopMemoryContext, username);
 
 	if (!exit_callback_registered)
 	{
@@ -455,17 +477,67 @@ gang_connect(void)
 		keywords[n] = NULL;
 		values[n] = NULL;
 
-		conn = libpqsrv_connect_params(keywords, values, false,
-									   dispatch_wait_event());
-
-		if (conn == NULL || PQstatus(conn) != CONNECTION_OK)
+		/*
+		 * A segment in recovery is tried again, gp.gang_creation_retry_count
+		 * times, gp.gang_creation_retry_timer apart, as Cloudberry's dispatcher
+		 * tries one in reset or recovery: one restarting refuses the
+		 * connection, and a mirror FTS promoted, a hot standby until the
+		 * promotion takes, takes it and says so (in_hot_standby), and could
+		 * not write.
+		 */
+		for (int attempt = 0;; attempt++)
 		{
-			char	   *msg = conn ? pstrdup(PQerrorMessage(conn)) : "out of memory";
+			const char *hot_standby;
+			char	   *msg;
+			bool		in_recovery;
+
+			conn = libpqsrv_connect_params(keywords, values, false,
+										   dispatch_wait_event());
+			hot_standby = conn != NULL && PQstatus(conn) == CONNECTION_OK
+				? PQparameterStatus(conn, "in_hot_standby") : NULL;
+			if (conn != NULL && PQstatus(conn) == CONNECTION_OK &&
+				(hot_standby == NULL || strcmp(hot_standby, "on") != 0))
+				break;
+
+			msg = conn == NULL ? "out of memory"
+				: PQstatus(conn) == CONNECTION_OK ? "the segment is in recovery"
+				: pstrdup(PQerrorMessage(conn));
+			in_recovery = PQstatus(conn) == CONNECTION_OK ||
+				strstr(msg, "the database system is starting up") != NULL ||
+				strstr(msg, "the database system is in recovery mode") != NULL ||
+				strstr(msg, "the database system is not yet accepting connections") != NULL;
+			if (conn != NULL)
+				libpqsrv_disconnect(conn);
+			conn = NULL;
+
+			if (in_recovery && attempt < gp_gang_creation_retry_count)
+			{
+				(void) WaitLatch(MyLatch, WL_LATCH_SET | WL_TIMEOUT | WL_EXIT_ON_PM_DEATH,
+								 gp_gang_creation_retry_timer, dispatch_wait_event());
+				ResetLatch(MyLatch);
+				CHECK_FOR_INTERRUPTS();
+				continue;
+			}
 
 			/* Take the whole gang down: a partial one answers with part of a table. */
-			gang->conns[i].conn = conn;
 			gang_close();
+			if (in_recovery)
+				ereport(ERROR,
+						(errcode(ERRCODE_CONNECTION_FAILURE),
+						 errmsg("failed to acquire resources on one or more segments"),
+						 errdetail("Segments are in reset/recovery mode.")));
 
+			/*
+			 * FTS is asked to probe, as Cloudberry's dispatcher asks it; one
+			 * that finds the segment down fails it over, and the next
+			 * transaction connects to its mirror.
+			 */
+			GpFtsNotifyProber();
+			if (!GpClusterIsPrimaryNow(segs[i].dbid))
+				ereport(ERROR,
+						(errcode(ERRCODE_CONNECTION_FAILURE),
+						 errmsg("failed to acquire resources on one or more segments"),
+						 errdetail("FTS detected one or more segments are down")));
 			ereport(ERROR,
 					(errcode(ERRCODE_CONNECTION_FAILURE),
 					 errmsg("could not connect to segment %d (%s:%d)",
@@ -726,9 +798,37 @@ drop_segment_notices(void)
 /* ------------------------------------------------------------------------- */
 
 /*
+ * A segment waited for whose primary FTS has failed over from since: it will
+ * not answer, or answers as a node that is no part of the cluster now, and
+ * the gang gives up on it, as Cloudberry's dispatcher does
+ * (checkSegmentAlive(), cdbdisp_async.c), in its words.
+ */
+static void
+gang_check_moved(GpGang *g)
+{
+	if (!GpClusterStale())
+		return;
+	for (int i = 0; i < g->nconns; i++)
+	{
+		GpSegmentConn *c = &g->conns[i];
+		char	   *who;
+
+		if (!c->busy || GpClusterIsPrimaryNow(c->seg->dbid))
+			continue;
+		who = psprintf("seg%d %s:%d pid=%d", c->content, c->seg->hostname,
+					   c->seg->port, PQbackendPID(c->conn));
+		gang_close();
+		ereport(ERROR,
+				(errcode(ERRCODE_CONNECTION_FAILURE),
+				 errmsg("FTS detected connection lost during dispatch to %s:", who)));
+	}
+}
+
+/*
  * Wait until at least one connection has something to say, or an interrupt
- * arrives.  The caller loops over the connections afterwards; this only stops
- * the backend from spinning.
+ * arrives, or a second passes, after which FTS is asked whether a segment
+ * waited for has been failed over from.  The caller loops over the
+ * connections afterwards; this only stops the backend from spinning.
  */
 static bool gather_poll(struct GpGatherSeg *s);
 
@@ -739,8 +839,9 @@ gang_wait(GpGang *g)
 
 	flush_segment_notices();
 	CHECK_FOR_INTERRUPTS();
+	gang_check_moved(g);
 
-	if (WaitEventSetWait(g->wes, -1, occurred, 1, dispatch_wait_event()) > 0)
+	if (WaitEventSetWait(g->wes, 1000, occurred, 1, dispatch_wait_event()) > 0)
 	{
 		if (occurred[0].events & WL_LATCH_SET)
 		{
@@ -2001,7 +2102,104 @@ gang_commit_first_phase(GpGang *g)
 			if (writes[i])
 				dtx_wait_for_depends(&g->conns[i]);
 		}
+
+		/* and this one after prepareDtxTransaction() (xact.c) */
+		GP_FAULT("transaction_abort_after_distributed_prepared");
 	}
+}
+
+/*
+ * A part prepared on a primary FTS has failed over from since, finished on
+ * the new primary -- the mirror it promoted, which has the part from
+ * PREPARE's WAL -- over a connection of its own, once the promotion has
+ * taken: it may still be in recovery, which PostgreSQL's startup process
+ * leaves up to wal_retrieve_retry_interval after a promotion is asked for.
+ * The old primary is not told: it is no part of the cluster now, and a
+ * commit there would wait for ever for a mirror that has left it.  False
+ * when it could not be done in a while, and the recovery process is left to
+ * do it.  Nothing is raised.
+ */
+static bool
+dtx_finish_moved(int content, const char *sql)
+{
+	const GpSegmentConfig *nodes;
+	int			nnodes = GpClusterNodes(&nodes);
+	GpClusterNodeState *states = palloc_array(GpClusterNodeState, Max(nnodes, 1));
+	const GpSegmentConfig *node = NULL;
+	TimestampTz deadline = GetCurrentTimestamp() + 30 * USECS_PER_SEC;
+	bool		done = false;
+
+	(void) GpClusterLiveStates(states);
+	for (int i = 0; i < nnodes; i++)
+		if (nodes[i].content == content && states[i].role == 'p')
+			node = &nodes[i];
+	pfree(states);
+	if (node == NULL || gang_dbname == NULL || gang_username == NULL)
+		return false;
+
+	PG_TRY();
+	{
+		while (!done && GetCurrentTimestamp() < deadline)
+		{
+			const char *keywords[8];
+			const char *values[8];
+			char		portbuf[16];
+			int			n = 0;
+			PGconn	   *conn;
+
+			snprintf(portbuf, sizeof(portbuf), "%d", node->port);
+			keywords[n] = "host";
+			values[n++] = node->hostname;
+			keywords[n] = "port";
+			values[n++] = portbuf;
+			keywords[n] = "dbname";
+			values[n++] = gang_dbname;
+			keywords[n] = "user";
+			values[n++] = gang_username;
+			keywords[n] = "application_name";
+			values[n++] = "cloudberry dispatcher";
+			if (gp_internal_passfile != NULL && gp_internal_passfile[0] != '\0')
+			{
+				keywords[n] = "passfile";
+				values[n++] = gp_internal_passfile;
+			}
+			keywords[n] = NULL;
+			values[n] = NULL;
+
+			conn = libpqsrv_connect_params(keywords, values, false,
+										   dispatch_wait_event());
+			if (conn != NULL && PQstatus(conn) == CONNECTION_OK)
+			{
+				PGresult   *res = libpqsrv_exec(conn, sql, dispatch_wait_event());
+				const char *state = PQresultErrorField(res, PG_DIAG_SQLSTATE);
+
+				/* done, or the recovery process has done it */
+				done = PQresultStatus(res) == PGRES_COMMAND_OK ||
+					(state != NULL && strcmp(state, "42704") == 0);
+				PQclear(res);
+			}
+			if (conn != NULL)
+				libpqsrv_disconnect(conn);
+			if (!done)
+			{
+				(void) WaitLatch(MyLatch, WL_LATCH_SET | WL_TIMEOUT | WL_EXIT_ON_PM_DEATH,
+								 500, dispatch_wait_event());
+				ResetLatch(MyLatch);
+			}
+		}
+	}
+	PG_CATCH();
+	{
+		FlushErrorState();
+		done = false;
+	}
+	PG_END_TRY();
+
+	ereport(done ? LOG : WARNING,
+			(errmsg("%s on segment %d, on its new primary (%s:%d): %s", sql,
+					content, node->hostname, node->port,
+					done ? "done" : "not done in time")));
+	return done;
 }
 
 /*
@@ -2019,11 +2217,20 @@ gang_finish_prepared(bool commit)
 	char	   *sql;
 	int			nfailed = 0;
 	TimestampTz deadline;
+	bool	   *moved;
+	int		   *conn_content;
+	int			nconns;
 
 	if (dtx_nprepared == 0)
 		return 0;
 	if (g == NULL)
 		return dtx_nprepared;
+
+	/* kept apart from the gang, which a broken connection closes */
+	nconns = g->nconns;
+	conn_content = palloc_array(int, nconns);
+	for (int i = 0; i < nconns; i++)
+		conn_content[i] = g->conns[i].content;
 
 	/*
 	 * A rollback is named, as Cloudberry names it, by how far the first phase
@@ -2045,6 +2252,7 @@ gang_finish_prepared(bool commit)
 	}
 
 	sql = psprintf("%s PREPARED '%s'", commit ? "COMMIT" : "ROLLBACK", dtx_gid);
+	moved = palloc0_array(bool, g->nconns);
 	for (int i = 0; i < g->nconns && i < dtx_prepared_size; i++)
 	{
 		GpSegmentConn *c = &g->conns[i];
@@ -2052,6 +2260,14 @@ gang_finish_prepared(bool commit)
 		if (!dtx_prepared[i])
 			continue;
 		c->fetching = NULL;
+
+		/* on a primary FTS failed over from: see dtx_finish_moved() */
+		if (!GpClusterIsPrimaryNow(c->seg->dbid))
+		{
+			moved[i] = true;
+			dtx_prepared[i] = false;
+			continue;
+		}
 		if (c->busy || !PQsendQuery(c->conn, sql))
 		{
 			nfailed++;
@@ -2103,6 +2319,13 @@ gang_finish_prepared(bool commit)
 				}
 				PQclear(res);
 			}
+			/* failed over from while it was being told */
+			if (c->busy && !GpClusterIsPrimaryNow(c->seg->dbid))
+			{
+				moved[i] = true;
+				c->busy = false;
+				broken = true;
+			}
 			if (c->busy)
 				waiting = true;
 		}
@@ -2125,6 +2348,10 @@ gang_finish_prepared(bool commit)
 			(occurred[0].events & WL_LATCH_SET))
 			ResetLatch(MyLatch);
 	}
+
+	for (int i = 0; i < nconns; i++)
+		if (moved[i] && !dtx_finish_moved(conn_content[i], sql))
+			nfailed++;
 	return nfailed;
 }
 
@@ -3607,6 +3834,24 @@ GpDispatchPassfile(void)
 void
 GpDispatchInit(void)
 {
+	DefineCustomIntVariable("gp.gang_creation_retry_count",
+							"How many times a gang is tried again while a segment is in recovery.",
+							NULL,
+							&gp_gang_creation_retry_count,
+							5, 0, INT_MAX,
+							PGC_USERSET,
+							0,
+							NULL, NULL, NULL);
+
+	DefineCustomIntVariable("gp.gang_creation_retry_timer",
+							"How long to wait before a gang is tried again.",
+							NULL,
+							&gp_gang_creation_retry_timer,
+							2000, 1, INT_MAX,
+							PGC_USERSET,
+							GUC_UNIT_MS,
+							NULL, NULL, NULL);
+
 	DefineCustomStringVariable("gp.internal_passfile",
 							   "Password file the dispatcher hands libpq.",
 							   "The dispatcher authenticates like any other "

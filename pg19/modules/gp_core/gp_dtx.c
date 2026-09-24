@@ -1431,6 +1431,10 @@ dtx_ProcessUtility(PlannedStmt *pstmt, const char *queryString,
 			 ((VariableSetStmt *) parsetree)->kind == VAR_SET_VALUE)
 		snapshot_set = true;
 
+	/* Cloudberry's, at the start of FinishPreparedTransaction() (twophase.c) */
+	if (finishing)
+		GP_FAULT("finish_prepared_start_of_function");
+
 	if (prev_ProcessUtility)
 		prev_ProcessUtility(pstmt, queryString, readOnlyTree, context, params,
 							queryEnv, dest, qc);

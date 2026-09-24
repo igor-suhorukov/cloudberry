@@ -323,21 +323,25 @@ out=$(config 0)
 	&& ok "content 0's mirror is its primary, not in sync; the primary a mirror, down ($out)" \
 	|| notok "the configuration after a failover" "$out"
 
+# At once, while PostgreSQL's startup process has yet to act on the
+# promotion: the gang to the new primary, a hot standby for a few seconds
+# more, is tried again until it is not, as Cloudberry's is while a segment
+# is in recovery (gp.gang_creation_retry_count).
+out=$(q 0 "INSERT INTO t SELECT i, 'after' FROM generate_series(301, 400) i; SELECT count(*) FROM t")
+[ "$out" = "400" ] && ok "a write at once, to every content, waits for the promotion to take rather than fail read-only" \
+	|| notok "writing right after a failover" "$out"
+
 out=$(wait_for 4 "SELECT pg_is_in_recovery()" f 30)
 [ $? -eq 0 ] && ok "the mirror FTS promoted has left recovery" || notok "the promotion" "$out"
 
-out=$(q 4 "SHOW synchronous_standby_names; SELECT slot_name FROM pg_replication_slots")
+out=$(q 4 "SHOW synchronous_standby_names; SELECT slot_name FROM pg_replication_slots WHERE slot_name = '$SLOT'")
 [ "$(echo "$out" | tr '\n' ' ')" = " $SLOT " ] \
 	&& ok "it waits for no mirror, and keeps a slot for the one it will have" \
 	|| notok "the new primary's replication" "$out"
 
 out=$(q 0 "SELECT count(*), count(*) FILTER (WHERE b = 'alone') FROM t")
-[ "$out" = "300|100" ] && ok "a new session reads every row, content 0's from its new primary ($out)" \
+[ "$out" = "400|100" ] && ok "a new session reads every row, content 0's from its new primary ($out)" \
 	|| notok "reading after a failover" "$out"
-
-out=$(q 0 "INSERT INTO t SELECT i, 'after' FROM generate_series(301, 400) i; SELECT count(*) FROM t")
-[ "$out" = "400" ] && ok "and writes to every content, content 0's new primary included" \
-	|| notok "writing after a failover" "$out"
 
 ###############################################################################
 echo "6. a transaction open across a failover fails, even where the old primary still answers"
