@@ -2387,8 +2387,12 @@ SQL
 	q 0 "SELECT gp_wait_until_triggered_fault('onephase_transaction_commit', 1, 1);" >/dev/null
 	q 0 "UPDATE gdd SET val = val + 10 WHERE id = $r0;" >/dev/null 2>&1 &
 	second=$!
-	sleep 1
-	waits=$(q 0 "SELECT wait_event FROM pg_stat_activity WHERE query LIKE 'UPDATE gdd SET val = val + 10 %';")
+	waits=
+	for _ in $(seq 150); do
+		waits=$(q 0 "SELECT wait_event FROM pg_stat_activity WHERE query LIKE 'UPDATE gdd SET val = val + 10 %';")
+		[ "$waits" = transactionid ] && break
+		sleep 0.2
+	done
 	seen=$(q 0 "SELECT string_agg(val::text, ',') FROM gdd WHERE id = $r0;")
 	q 0 "SELECT gp_inject_fault('onephase_transaction_commit', 'resume', 1);" >/dev/null
 	wait "$first" "$second"
