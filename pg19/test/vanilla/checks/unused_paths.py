@@ -24,8 +24,9 @@ The rule the series is written to is that an unused hook leaves the code path
 exactly as it was.  This asks, of each statement added to a function that
 already existed, whether reaching it depends on a name the series introduces,
 or whether it is an injection point, which PostgreSQL's own design keeps
-dormant until a test attaches to it.  What it cannot account for is printed,
-and that is what needs reading by hand.
+dormant until a test attaches to it, or a statement that reads a variable the
+series added where it had the value that variable starts with.  What it
+cannot account for is printed, and that is what needs reading by hand.
 
 It is a reading aid rather than a proof: it understands C well enough to tell a
 guarded block from a rewrapped line, and no better.
@@ -131,6 +132,34 @@ DECL = re.compile(r"^(?:const |static |unsigned |struct )*[\w][\w \t\*]*\s\*?\w+
 # injection points, and in one built with them a point nothing has attached
 # runs nothing -- which is how each of PostgreSQL's own points is dormant.
 INJECTION = re.compile(r"^INJECTION_POINT(?:_LOAD|_CACHED)?\(\s*\"[\w-]+\"")
+# A variable declared with a first value of one token, a name or a literal:
+# "LOCKMODE lockmode = RowExclusiveLock;".
+FRESH = re.compile(r"^(?:const |static |unsigned |struct )*[A-Za-z_][\w \t\*]*?"
+                   r"[\s\*](\w+)\s*=\s*([A-Za-z_]\w*|-?\d+|'[^']*'|\"[^\"]*\")\s*;$")
+
+
+def fresh_variables(hunks):
+    """The variables each function gains, with the value each starts with.
+
+    An existing statement the series rewrote to read one of them, where it had
+    that value, does what it did: every other assignment to a new variable is
+    an added statement too, and is classified on its own.  That the value
+    itself -- a name -- does not change in between is for the reader: each
+    such statement is printed, with what it reads.
+    """
+    fresh = {}
+    for hunk in hunks:
+        for line in hunk["add"]:
+            m = FRESH.match(line.strip())
+            if m:
+                fresh.setdefault((hunk["path"], hunk["fn"]), {})[m.group(1)] = m.group(2)
+    return fresh
+
+
+def with_first_values(text, variables):
+    """The text with each new variable replaced by the value it starts with."""
+    return re.sub(r"\b(" + "|".join(map(re.escape, variables)) + r")\b",
+                  lambda m: variables[m.group(1)], text)
 
 
 def complete(stmt):
@@ -139,7 +168,8 @@ def complete(stmt):
             and stmt.rstrip().endswith((";", "{", "}")))
 
 
-def classify(hunk, guard_re, counts, unexplained, sha):
+def classify(hunk, guard_re, counts, unexplained, sha, fresh=None,
+             same_value=None):
     lines = hunk["add"]
     removed = {NORM(d) for d in hunk["del"]}
     removed |= {NORM(UNELSE(d)) for d in hunk["del"]}
@@ -190,6 +220,12 @@ def classify(hunk, guard_re, counts, unexplained, sha):
 
         if all(NORM(l) in removed or NORM(UNELSE(l)) in removed for l in span):
             counts["rewrapped existing code"] += n
+        elif fresh and all(NORM(with_first_values(l, fresh)) in removed
+                           for l in span):
+            counts["same value, new variable"] += n
+            same_value.append((sha[:11], hunk["path"], hunk["fn"], span,
+                               {v: fresh[v] for v in fresh
+                                if re.search(r"\b%s\b" % re.escape(v), stmt)}))
         elif INJECTION.match(stripped) and stmt.rstrip().endswith(";"):
             counts["injection point"] += n
         elif guard_re and guard_re.search(stmt):
@@ -212,16 +248,21 @@ def main():
     counts = dict.fromkeys(
         ["guarded", "inside a guarded block", "injection point", "new function",
          "comment or blank", "declaration or structure",
-         "rewrapped existing code", "unexplained"], 0)
+         "rewrapped existing code", "same value, new variable",
+         "unexplained"], 0)
     unexplained = []
+    same_value = []
 
     commits = git("log", "--format=%H %s", "--reverse",
                   f"{BASE}..{HEAD}").splitlines()
     for entry in commits:
         sha = entry.split(" ", 1)[0]
-        for hunk in hunks_of(sha):
+        hunks = hunks_of(sha)
+        fresh = fresh_variables(hunks)
+        for hunk in hunks:
             if hunk["path"] and hunk["path"].endswith(".c"):
-                classify(hunk, guard_re, counts, unexplained, sha)
+                classify(hunk, guard_re, counts, unexplained, sha,
+                         fresh.get((hunk["path"], hunk["fn"])), same_value)
 
     print(f"series {BASE}..{HEAD}: {len(commits)} commits, "
           f"{len(names)} names introduced")
@@ -229,6 +270,17 @@ def main():
     for k, v in counts.items():
         print(f"    {k:26} {v}")
     print()
+
+    # Printed every run, as the allow-list is.
+    if same_value:
+        print("rewritten to read a new variable, where they had its first value:")
+        for sha, path, fn, span, reads in same_value:
+            print(f"  {sha}  {path}  {fn}")
+            for line in span:
+                print(f"      {line.strip()}")
+            for var, value in reads.items():
+                print(f"      ({var} starts as {value})")
+        print()
 
     allowed = read_allowlist()
 

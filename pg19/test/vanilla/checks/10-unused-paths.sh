@@ -54,10 +54,12 @@ PG_REPO="$repo" PG_BASE="$base" PG_HEAD="$head" \
 	python3 "$(dirname "${BASH_SOURCE[0]}")/unused_paths.py" > "$out" 2>&1
 rc=$?
 
-head -12 "$out" | sed 's/^/         /'
+# Everything it accounted for, and how -- all but what it could not, which a
+# failure prints below.
+sed '/^added statements/,$d' "$out" | sed 's/^/         /'
 
 if [ $rc -eq 0 ]; then
-	ok "every added statement in an existing function is gated by the series"
+	ok "every statement the series adds to an existing function is accounted for"
 else
 	notok "added statements that need reading by hand" \
 		"$(sed -n '/^added statements/,$p' "$out" | head -24)"
