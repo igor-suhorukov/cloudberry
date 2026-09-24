@@ -150,11 +150,17 @@ Distributed transactions (M3), in `gp_core`:
   back with the replication slot `gp_dtx_horizon` what such a transaction
   deleted;
 - **the global deadlock detector** (`gp.enable_global_deadlock_detector`):
-  without it an UPDATE or DELETE of a distributed table locks the table, as
-  Cloudberry's does; with it rows are locked, and a process on the
-  coordinator gathers every node's waits, reduces the graph with
-  Cloudberry's own detector (`src/backend/utils/gdd/gdddetector.c`, compiled
-  where it lies) and cancels the youngest transaction of a cycle;
+  without it an UPDATE or DELETE of a distributed table locks the table,
+  and a write of a partitioned table its partitions, as Cloudberry's does;
+  with it rows are locked, and a process on the coordinator gathers every
+  node's waits, reduces the graph with Cloudberry's own detector
+  (`src/backend/utils/gdd/gdddetector.c`, compiled where it lies) and
+  cancels the youngest transaction of a cycle;
+- Cloudberry's columns of `pg_locks` by their names -- `gp_segment_id`,
+  `mppsessionid`, `mppiswriter` -- as calls on the row, as `gp_segment_id`
+  is (O10), and `gp.session_id`;
+- `INSERT ... ON CONFLICT` into a distributed table, the clause each
+  segment's;
 - **`SELECT ... FOR UPDATE`** and the other locking clauses: under ORCA as
   under the planner, the rows are locked by a LockRows node — at the top of
   the plan on one node, on the segments below the Gather on a cluster with
@@ -166,10 +172,16 @@ Distributed transactions (M3), in `gp_core`:
   in one database, and any other writes it there through a connection of its
   own, as its transaction commits, in a transaction that is prepared with the
   segments' parts and finished by the same recovery;
-- Cloudberry's fault injector, `gp_inject_fault`, for the tests.
+- Cloudberry's fault injector, `gp_inject_fault`, for the tests: its faults
+  at the port's own places under Cloudberry's names, and at PostgreSQL 19's
+  injection points, among them O29's in PostgreSQL's commit.
 
-What M3 leaves open: on one node, the loopback commits just before the
-transaction that asked for it, not with it; the coordinator counts none of
+What M3 leaves open: without the deadlock detector, the table lock of an
+UPDATE, a DELETE or a locking clause is taken after PostgreSQL's parser has
+taken a weaker one, so concurrent UPDATEs of one table deadlock on the
+coordinator and most of them fail, where Cloudberry's wait their turn; on
+one node, the loopback commits just before the transaction that asked for
+it, not with it; the coordinator counts none of
 a distributed table's pages all-visible, so ORCA does not choose an
 index-only scan Cloudberry's would; a role that owns a tag can be dropped;
 and a task's history is read in the task database only.
@@ -189,7 +201,8 @@ core series through a test module); `greenplum`, part of Cloudberry's
 `greenplum_schedule` on a coordinator and three segments; `isolation2`, the
 tests of Cloudberry's `isolation2_schedule` that bear on M3 — distributed
 transactions and snapshots, locks and the global deadlock detector — run by
-Cloudberry's own driver on the same cluster; `singlenode` and
+Cloudberry's own driver on the same cluster, with a standby coordinator for
+the test that asks for one; `singlenode` and
 `singlenode_isolation2`, Cloudberry's single-node suites with PostgreSQL 19's
 own regression tests; and PostGIS's regression suite.  Each is run under the
 planner and under ORCA where it plans.
