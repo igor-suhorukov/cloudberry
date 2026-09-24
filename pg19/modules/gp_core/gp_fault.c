@@ -28,7 +28,9 @@
  * The port has the places in its own code, under Cloudberry's names where
  * they stand for the same moment, and asks with GP_FAULT(); and a name that
  * is not one of them is attached as a PostgreSQL 19 injection point too, so
- * that the ones PostgreSQL's code has fire the same way.  The types and the
+ * that the ones PostgreSQL's code has fire the same way.  A few of
+ * Cloudberry's names are for moments PostgreSQL has a point at under a name
+ * of its own, and are attached there (fault_points).  The types and the
  * words of the answers are Cloudberry's, which its expected outputs hold.
  *
  * The faults of a node are in its shared memory, and gp_inject_fault() of
@@ -68,6 +70,35 @@ static const char *const fault_type_names[] = {
 	"resume", "skip", "reset", "status", "segv", "interrupt",
 	"finish_pending", "wait_until_triggered"
 };
+
+#ifdef USE_INJECTION_POINTS
+/*
+ * Cloudberry's faults inside PostgreSQL's own code whose moment has an
+ * injection point of PostgreSQL's, under another name: a commit inside the
+ * critical section that makes a checkpoint wait, its commit record not yet
+ * written -- a prepared transaction's second phase
+ * (RecordTransactionCommitPrepared, PostgreSQL 19's own point), and any
+ * other commit (RecordTransactionCommit, the core series' O29).
+ */
+static const struct
+{
+	const char *fault;
+	const char *point;
+}			fault_points[] = {
+	{"before_xlog_xact_commit_prepared", "commit-after-delay-checkpoint"},
+	{"onephase_transaction_commit", "transaction-commit-after-delay-checkpoint"},
+};
+
+/* The injection point a fault is attached to: its own name, or PostgreSQL's. */
+static const char *
+fault_point_name(const char *fault)
+{
+	for (int i = 0; i < lengthof(fault_points); i++)
+		if (strcmp(fault_points[i].fault, fault) == 0)
+			return fault_points[i].point;
+	return fault;
+}
+#endif
 
 static const char *const fault_ddl_names[] = {
 	"", "create_database", "drop_database", "create_table", "drop_table",
@@ -307,8 +338,10 @@ GpFaultTrigger(const char *name, const char *database, const char *table)
 
 /*
  * What an injection point runs, when one of PostgreSQL's own is set by the
- * name of a fault.  A point that is skipped cannot say so to its caller:
- * PostgreSQL's points have no answer.
+ * name of a fault: the fault its private data names.  A point that is
+ * skipped cannot say so to its caller: PostgreSQL's points have no answer.
+ * It may run in a critical section, as the two of fault_points do, where it
+ * allocates nothing but its log line, which the error context may.
  */
 PGDLLEXPORT void gp_fault_injection_point(const char *name,
 										  const void *private_data, void *arg);
@@ -317,7 +350,8 @@ void
 gp_fault_injection_point(const char *name, const void *private_data,
 						 void *arg)
 {
-	(void) GpFaultTrigger(name, "", "");
+	(void) GpFaultTrigger(private_data != NULL ? (const char *) private_data : name,
+						  "", "");
 }
 
 /* ------------------------------------------------------------------------- */
@@ -353,7 +387,7 @@ fault_detach_point(GpFaultEntry *e)
 {
 #ifdef USE_INJECTION_POINTS
 	if (e->point)
-		(void) InjectionPointDetach(e->name);
+		(void) InjectionPointDetach(fault_point_name(e->name));
 #endif
 	e->point = false;
 }
@@ -507,11 +541,16 @@ fault_inject_here(const char *name, const char *typename, const char *ddl,
 				LWLockRelease(fault_shared->lock);
 
 #ifdef USE_INJECTION_POINTS
-				/* PostgreSQL's own point of that name, if there is one */
+				/*
+				 * PostgreSQL's own point of that name, if there is one, or
+				 * the one of its own name for that moment; the callback is
+				 * given the fault's.
+				 */
 				PG_TRY();
 				{
-					InjectionPointAttach(name, "gp_core", "gp_fault_injection_point",
-										 NULL, 0);
+					InjectionPointAttach(fault_point_name(name), "gp_core",
+										 "gp_fault_injection_point",
+										 name, strlen(name) + 1);
 					LWLockAcquire(fault_shared->lock, LW_EXCLUSIVE);
 					e = fault_lookup(name);
 					if (e != NULL)

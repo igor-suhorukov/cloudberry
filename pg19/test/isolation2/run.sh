@@ -46,7 +46,12 @@
 # cluster of its own and in the schedule's order, the groups of a pass side
 # by side; a test the manifest puts in several groups passes when it passes
 # in each.  What a pass reports is in the schedule's order, whichever group
-# finished first.
+# finished first.  The group named standby has a standby coordinator, as
+# Cloudberry's demo cluster has, made with pg_basebackup.  Shell commands of
+# the tests find gpconfig and gpstop in bin/ here, which do what the tests
+# ask of Cloudberry's (gpMgmt's, M7's) on this cluster, and
+# COORDINATOR_DATA_DIRECTORY; and "-c gp_role=utility" goes from them as it
+# goes from the driver's sessions of a node's own.
 
 set -u
 
@@ -96,17 +101,21 @@ for i in "${!run_tests[@]}"; do
 	[ "$found" -eq 1 ] || { echo "manifest: ${run_tests[$i]} is in no group (${run_group[$i]})"; exit 1; }
 done
 
-# Node n of the cluster of the gi-th group.
+# Node n of the cluster of the gi-th group, and a group's standby.
 node_dir()  { echo "$WORK/$1/node$2"; }
 node_port() { echo $((BASEPORT + $1 * NODES + $2)); }
 node_sock() { echo "$SOCK/$1/n$2"; }
+standby_port() { echo $((BASEPORT + 100 + $1)); }
+has_standby() { [ "$1" = standby ]; }
 
 cleanup() {
 	for g in "${groups[@]}"; do
-		for n in $(seq 0 $((NODES - 1))); do
+		for n in $(seq 0 $((NODES - 1))) standby; do
+			if [ "$n" = standby ]; then d="$WORK/$g/standby"; else d="$(node_dir "$g" "$n")"; fi
+			[ -d "$d" ] || continue
 			[ -n "${RESULTS_DIR:-}" ] &&
-				cp "$(node_dir "$g" "$n").log" "$RESULTS_DIR/isolation2-$g-node$n.log" 2> /dev/null
-			"$BINDIR/pg_ctl" -D "$(node_dir "$g" "$n")" -m immediate stop > /dev/null 2>&1
+				cp "$d.log" "$RESULTS_DIR/isolation2-$g-node$n.log" 2> /dev/null
+			"$BINDIR/pg_ctl" -D "$d" -m immediate stop > /dev/null 2>&1
 		done
 	done
 	[ -n "${KEEP:-}" ] && echo "kept: $WORK" || rm -rf "$WORK"
@@ -133,6 +142,8 @@ make_cluster() {
 		for n in $(seq 0 $((NODES - 1))); do
 			echo "$((n + 1)) $((n - 1)) p $(node_sock "$g" "$n") $(node_port "$gi" "$n") $(node_dir "$g" "$n")"
 		done
+		has_standby "$g" &&
+			echo "$((NODES + 1)) -1 m $SOCK/$g/standby $(standby_port "$gi") $WORK/$g/standby"
 	} > "$conf"
 	for n in $(seq 0 $((NODES - 1))); do
 		mkdir -p "$(node_sock "$g" "$n")"
@@ -148,7 +159,8 @@ make_cluster() {
 			echo "gp.cluster_config = '$conf'"
 			echo "gp.dbid = $((n + 1))"
 			echo "gp.cluster_secret = '$SECRET'"
-			echo "max_prepared_transactions = 64"
+			# as Cloudberry's demo cluster, which prepare_limit says first
+			echo "max_prepared_transactions = 250"
 			[ "$n" -eq 0 ] && echo "gp.role = 'dispatch'"
 		} >> "$(node_dir "$g" "$n")/postgresql.auto.conf"
 	done
@@ -162,6 +174,26 @@ make_cluster() {
 	# has gp_core too, and so its gp_segment_configuration.
 	PGHOST="$(node_sock "$g" 0)" PGPORT="$(node_port "$gi" 0)" \
 		"$PSQL" -X -q -d postgres -c "CREATE EXTENSION gp_core" > /dev/null 2>&1
+
+	# A standby coordinator: the coordinator's copy, streaming from it, and
+	# no hot standby, as Cloudberry's hot_standby is off by default -- which
+	# lets a test lower max_prepared_transactions on every node, as
+	# prepare_limit does, where a hot standby refuses one below its primary's.
+	if has_standby "$g"; then
+		mkdir -p "$SOCK/$g/standby"
+		"$BINDIR/pg_basebackup" -D "$WORK/$g/standby" -h "$(node_sock "$g" 0)" \
+			-p "$(node_port "$gi" 0)" -R -X stream -c fast > "$WORK/$g/basebackup.log" 2>&1 \
+			|| { echo "the standby of group $g could not be copied"; tail -5 "$WORK/$g/basebackup.log"; return 1; }
+		{
+			echo "unix_socket_directories = '$SOCK/$g/standby'"
+			echo "port = $(standby_port "$gi")"
+			echo "gp.dbid = $((NODES + 1))"
+			echo "hot_standby = off"
+		} >> "$WORK/$g/standby/postgresql.auto.conf"
+		"$BINDIR/pg_ctl" -D "$WORK/$g/standby" -l "$WORK/$g/standby.log" -w -t 60 start \
+			> /dev/null 2>&1 \
+			|| { echo "the standby of group $g did not start"; tail -20 "$WORK/$g/standby.log"; return 1; }
+	fi
 	return 0
 }
 for gi in "${!groups[@]}"; do
@@ -186,15 +218,23 @@ while read -r name; do
 	printf 's/\\b(set|reset|show)(\\s+(local|session|system)\\s+|\\s+)%s\\b/\\1\\2%s/gI\n' "$cbname" "$name"
 	printf 's/\\b(alter\\s+system\\s+(set|reset)\\s+)%s\\b/\\1%s/gI\n' "$cbname" "$name"
 	printf "s/\\\\b(current_setting|set_config)\\\\('%s'/\\\\1('%s'/gI\n" "$cbname" "$name"
+	# ... FROM pg_settings WHERE name = 'gp_session_id'
+	printf "s/\\\\b(name\\\\s*=\\\\s*)'%s'/\\\\1'%s'/gI\n" "$cbname" "$name"
 	case "$cbname" in
 		gp_*) printf 's/^( *)%s( *)$/\\1%s\\2/\n' "$cbname" "$name" ;;
 	esac
+	echo "$cbname $name" >> "$WORK/settings.map"
 done > "$WORK/respell.sed"
+# ... and no utility mode but a node's own connection, in a shell command too
+echo "s/-c gp_role=utility//g" >> "$WORK/respell.sed"
 
 # The driver, less "-c gp_role=utility"; run from Cloudberry's directory, as
 # it sources global_sh_executor.sh from there.
 sed 's/given_opt="-c gp_role=utility"/given_opt=None/' "$CB/sql_isolation_testcase.py" \
 	> "$EXEC/sql_isolation_testcase.py"
+mkdir -p "$EXEC/bin"
+cp "$HERE"/bin/* "$EXEC/bin/"
+chmod +x "$EXEC"/bin/*
 
 mkdir -p "$WORK/gpdiff"
 cp "$GPDIFF"/gpdiff.pl "$GPDIFF"/atmsort.pm "$GPDIFF"/explain.pm "$WORK/gpdiff/"
@@ -220,6 +260,8 @@ run_group() {
 	local g="$1" gi="$2" pass="$3" optimizer="$4"
 	local R="$WORK/$g/$pass" t res exp name dir out i
 	export PGHOST="$(node_sock "$g" 0)" PGPORT="$(node_port "$gi" 0)"
+	export PATH="$EXEC/bin:$PATH" PG_BINDIR="$BINDIR" GP_SETTINGS_MAP="$WORK/settings.map"
+	export COORDINATOR_DATA_DIRECTORY="$(node_dir "$g" 0)"
 
 	mkdir -p "$R/results" "$R/canon" "$R/sql" "$R/expected"
 	: > "$R/status"

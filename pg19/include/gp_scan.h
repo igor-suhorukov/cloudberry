@@ -28,6 +28,7 @@
 #include "postgres.h"
 
 #include "storage/itemptr.h"
+#include "storage/lockdefs.h"
 
 #include "gp_policy.h"
 
@@ -67,6 +68,12 @@ extern void GpScanInit(void);
 /* The write path, where there is a cluster; see gp_modify.c. */
 extern void GpModifyInit(void);
 
+/*
+ * Without the global deadlock detector, a write of a partitioned table
+ * locks every partition in that mode, as Cloudberry's does (gp_modify.c).
+ */
+extern void GpModifyLockPartitions(Oid relid, LOCKMODE lockmode);
+
 /* ANALYZE of a distributed table through O3, where there is a cluster. */
 extern void GpAnalyzeInit(void);
 
@@ -88,9 +95,18 @@ extern void GpRowIdentityMake(struct EState *estate, int content,
 struct PlannedStmt;
 struct ModifyTable;
 struct Plan;
+struct Query;
 extern const char *GpExplicitCannot(struct PlannedStmt *stmt,
-									struct ModifyTable *mt);
-extern struct Plan *GpExplicitMake(struct ModifyTable *mt);
+									struct ModifyTable *mt,
+									const char *on_conflict);
+extern struct Plan *GpExplicitMake(struct ModifyTable *mt,
+								   const char *on_conflict);
+
+/*
+ * An INSERT's ON CONFLICT clause as text for the segments, printed before
+ * the statement is planned; refuses what Cloudberry refuses of it.
+ */
+extern char *GpExplicitOnConflict(struct Query *parse, GpPolicy *policy);
 extern void GpExplicitInit(void);
 
 #endif							/* GP_SCAN_H */

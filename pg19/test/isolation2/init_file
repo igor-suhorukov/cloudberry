@@ -26,4 +26,10 @@ m/^DETAIL:  segment \d+ \([^)]*\)(; \d+ other segments failed too)?$/
 m/^DETAIL:  segment \d+ \([^)]*\): /
 s/^DETAIL:  segment \d+ \([^)]*\): (.*?)(; \d+ other segments failed too)?$/DETAIL:  $1/
 
+# PostgreSQL 19's pg_stats has the table's OID, tableid, as its third
+# column, and which OID a table gets depends on what ran before it: a row of
+# "SELECT * FROM pg_stats" (lockmodes) has it masked.
+m/^ \w+ +\| \w+ +\| \d+ +\| \w+ +\| \d+ +\| [tf] +\| /
+s/^( \w+ +\| \w+ +\| )\d+( +\| \w+ +\| \d+ +\| [tf] +\| )/$1######$2/
+
 -- end_matchsubs

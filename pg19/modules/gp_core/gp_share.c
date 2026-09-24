@@ -88,6 +88,7 @@
 #include "utils/wait_event.h"
 
 #include "gp_cluster.h"
+#include "gp_gdd.h"
 #include "gp_share.h"
 
 /* How many statements' publications a writer keeps at once. */
@@ -540,6 +541,12 @@ share_attach_reader(const char *value)
 	reader_xact = xact;
 	reader_combos = NULL;
 	reader_ncombos = 0;
+
+	/*
+	 * A reader now, before its slice locks anything: pg_locks says so of the
+	 * locks it waits for (mppiswriter), as Cloudberry's does.
+	 */
+	GpGddNoteBackend();
 }
 
 static bool

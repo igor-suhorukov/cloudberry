@@ -86,6 +86,7 @@
 #include "gp_dispatch.h"
 #include "gp_fault.h"
 #include "gp_gdd.h"
+#include "gp_share.h"
 
 /* ------------------------------------------------------------------------- */
 /* Settings                                                                  */
@@ -110,6 +111,7 @@ typedef struct GpGddBackend
 	LocalTransactionId lxid;	/* the coordinator: whose number "seq" is */
 	uint64		seq;			/* the coordinator: its transaction's number */
 	bool		victim;			/* the detector cancelled it */
+	bool		reader;			/* a segment's reader, not the writer */
 } GpGddBackend;
 
 typedef struct GpGddShared
@@ -164,9 +166,16 @@ GpGddNoteBackend(void)
 			b->session = GpClusterSessionId();
 			b->seq = 0;
 			b->victim = false;
+			b->reader = false;
 			pg_write_barrier();
 			b->pid = MyProcPid;
 		}
+
+		/*
+		 * A reader is one once it has attached to its writer's transaction,
+		 * which a slice does before it runs; pg_locks says so of its locks.
+		 */
+		b->reader = GpShareIsReader();
 	}
 	else if (GpClusterBackendRole() == GP_ROLE_DISPATCH)
 	{
@@ -178,10 +187,39 @@ GpGddNoteBackend(void)
 			b->lxid = MyProc->vxid.lxid;
 			b->seq = pg_atomic_add_fetch_u64(&gdd_shared->next_seq, 1);
 			b->victim = false;
+			b->reader = false;
 			pg_write_barrier();
 			b->pid = MyProcPid;
 		}
 	}
+}
+
+/*
+ * The session a backend of this node works for, and whether it is a
+ * segment's reader: false when it has said neither -- a utility session, a
+ * process of the server's own, or one that has run no statement yet.  What
+ * pg_locks' mppsessionid and mppiswriter are (gp_segment.c).
+ */
+bool
+GpGddBackendIdentity(int pid, int *session, bool *reader)
+{
+	PGPROC	   *proc = BackendPidGetProc(pid);
+	ProcNumber	n;
+	GpGddBackend *b;
+
+	if (proc == NULL)
+		return false;
+	gdd_attach();
+	n = GetNumberFromPGProc(proc);
+	if (n < 0 || n >= gdd_shared->nbackends)
+		return false;
+	b = &gdd_shared->backends[n];
+	if (b->pid != pid)
+		return false;
+	pg_read_barrier();
+	*session = b->session;
+	*reader = b->reader;
+	return b->pid == pid;
 }
 
 /* The session of a backend of this node, or 0 when it is none's. */

@@ -77,10 +77,25 @@
  * other.  The new values are computed once, here, so a volatile function
  * gives every segment the same row, where Cloudberry refuses the plan.
  *
+ * INSERT ... ON CONFLICT goes the same way, the clause after each segment's
+ * VALUES: each row to the segment its key hashes to, where a row it
+ * conflicts with is, since every unique index of a distributed table holds
+ * its key; the clause is PostgreSQL's own ruleutils' text of it, printed
+ * before the planner changes the statement (GpExplicitOnConflict).  As
+ * Cloudberry's analyze.c refuses them, in its words, DO UPDATE refuses a
+ * column of the key and, of a replicated table, a volatile function; and a
+ * subquery in SET or WHERE is refused, which a segment would answer from
+ * its own rows alone.  An upsert that updates locks the table as an UPDATE
+ * does, without the global deadlock detector, as Cloudberry's parser locks
+ * it (parse_clause.c).  A statement's rows reach a segment in batches of up
+ * to EXPLICIT_BATCH_ROWS, so two rows of one key in different batches are
+ * the second updating the first, where one statement would refuse them.
+ *
  * Refused, by name (GpExplicitCannot): an UPDATE of the key of a table with
  * UPDATE triggers, which a moved row would not fire, in Cloudberry's words;
  * check options; RETURNING old or new; statement-level triggers, which
- * would fire on every segment; ON CONFLICT; and MERGE.
+ * would fire on every segment; ON CONFLICT whose clause was not printed
+ * when the statement was planned -- one in a WITH query; and MERGE.
  *
  * Cloudberry sources this file stands in for:
  *	  the Explicit Redistribute Motion cdbpath.c puts below a ModifyTable
@@ -92,6 +107,7 @@
 
 #include "access/table.h"
 #include "access/tupconvert.h"
+#include "optimizer/optimizer.h"
 #include "catalog/pg_trigger.h"
 #include "catalog/pg_type.h"
 #include "commands/explain.h"
@@ -112,6 +128,7 @@
 #include "utils/lsyscache.h"
 #include "utils/memutils.h"
 #include "utils/rel.h"
+#include "utils/ruleutils.h"
 #include "utils/tuplestore.h"
 
 #include "gp_cluster.h"
@@ -287,6 +304,8 @@ static const CustomExecMethods explicit_exec_methods = {
 #define EXPLICIT_UPDATE_COLNOS	3	/* the first result relation's */
 #define EXPLICIT_RETURNING		4	/* returningLists */
 #define EXPLICIT_CAN_SET_TAG	5
+#define EXPLICIT_ON_CONFLICT	6	/* the clause's text, or "" */
+#define EXPLICIT_CONFLICT_ACTION 7	/* OnConflictAction */
 
 typedef struct ExplicitState
 {
@@ -309,6 +328,7 @@ typedef struct ExplicitState
 	FmgrInfo   *valout;
 	char	   *sql_head;		/* before VALUES */
 	char	   *sql_tail;		/* after */
+	OnConflictAction on_conflict;
 	List	   *casts;			/* each parameter's type, as VALUES casts it */
 	bool		target_opened;	/* the root, opened besides the result relations */
 
@@ -410,7 +430,7 @@ has_statement_triggers(Relation rel, CmdType operation)
  * NULL if it can.
  */
 const char *
-GpExplicitCannot(PlannedStmt *stmt, ModifyTable *mt)
+GpExplicitCannot(PlannedStmt *stmt, ModifyTable *mt, const char *on_conflict)
 {
 	ListCell   *lc;
 	Index		first = linitial_int(mt->resultRelations);
@@ -418,8 +438,8 @@ GpExplicitCannot(PlannedStmt *stmt, ModifyTable *mt)
 
 	if (mt->operation == CMD_MERGE)
 		return "MERGE into a distributed table is not supported yet.";
-	if (mt->onConflictAction != ONCONFLICT_NONE)
-		return "ON CONFLICT into a distributed table is not supported yet.";
+	if (mt->onConflictAction != ONCONFLICT_NONE && on_conflict == NULL)
+		return "ON CONFLICT into a distributed table is written from the statement's own text, which one in a WITH query does not have yet.";
 	if (mt->withCheckOptionLists != NIL)
 		return "It is written through a view WITH CHECK OPTION or under row-level security, whose checks of the rows written would not travel with them.";
 	if (returning_qualified_walker((Node *) mt->returningLists, NULL))
@@ -489,12 +509,102 @@ GpExplicitCannot(PlannedStmt *stmt, ModifyTable *mt)
 	return NULL;
 }
 
+/* Does this expression hold a subquery, which a segment would answer alone? */
+static bool
+has_sublink(Node *node, void *context)
+{
+	if (node == NULL)
+		return false;
+	if (IsA(node, SubLink))
+		return true;
+	return expression_tree_walker(node, has_sublink, context);
+}
+
+/*
+ * GpExplicitOnConflict
+ *		The ON CONFLICT clause of an INSERT into a distributed table, as text a
+ *		segment runs after the VALUES of its rows: PostgreSQL's own ruleutils
+ *		prints the statement, before the planner changes it, with its target
+ *		called gp_t, as the rows' statements call it, and its source reduced
+ *		to NULLs, so that the first " ON CONFLICT" of the text is where the
+ *		clause begins.  Refuses what Cloudberry's analyze.c refuses of a DO
+ *		UPDATE, in its words, and a subquery in its SET or WHERE.
+ */
+char *
+GpExplicitOnConflict(Query *parse, GpPolicy *policy)
+{
+	Query	   *q;
+	RangeTblEntry *target;
+	OnConflictExpr *oc = parse->onConflict;
+	ListCell   *lc;
+	char	   *sql;
+	char	   *clause;
+
+	if (oc->action == ONCONFLICT_UPDATE)
+	{
+		if (GpPolicyIsHashPartitioned(policy))
+			foreach(lc, oc->onConflictSet)
+			{
+				TargetEntry *tle = lfirst_node(TargetEntry, lc);
+
+				for (int k = 0; k < policy->nattrs; k++)
+					if (policy->attrs[k] == tle->resno)
+						ereport(ERROR,
+								(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+								 errmsg("modification of distribution columns in OnConflictUpdate is not supported")));
+			}
+		if (GpPolicyIsReplicated(policy) &&
+			(contain_volatile_functions((Node *) oc->onConflictSet) ||
+			 contain_volatile_functions(oc->onConflictWhere)))
+			ereport(ERROR,
+					(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+					 errmsg("modification of replicated tables containing volatile functions in OnConflictUpdate is not supported")));
+		if (has_sublink((Node *) oc->onConflictSet, NULL) ||
+			has_sublink(oc->onConflictWhere, NULL))
+			ereport(ERROR,
+					(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+					 errmsg("a subquery in ON CONFLICT DO UPDATE of a distributed table is not supported yet"),
+					 errdetail("Each segment would answer it from its own rows alone.")));
+	}
+
+	q = copyObject(parse);
+	target = rt_fetch(q->resultRelation, q->rtable);
+	target->alias = makeAlias("gp_t", NIL);
+	q->returningList = NIL;
+	foreach(lc, q->rtable)
+	{
+		RangeTblEntry *rte = lfirst_node(RangeTblEntry, lc);
+
+		if (rte->rtekind == RTE_SUBQUERY || rte->rtekind == RTE_VALUES)
+		{
+			rte->rtekind = RTE_RESULT;
+			rte->subquery = NULL;
+			rte->values_lists = NIL;
+		}
+	}
+	foreach(lc, q->targetList)
+	{
+		TargetEntry *tle = lfirst_node(TargetEntry, lc);
+
+		if (!tle->resjunk)
+			tle->expr = (Expr *) makeNullConst(exprType((Node *) tle->expr),
+											   exprTypmod((Node *) tle->expr),
+											   exprCollation((Node *) tle->expr));
+	}
+
+	sql = pg_get_querydef(q, false);
+	clause = strstr(sql, " ON CONFLICT");
+	if (clause == NULL)
+		elog(ERROR, "could not print the ON CONFLICT clause of an INSERT");
+	return pstrdup(clause);
+}
+
 /*
  * The node that writes in "mt"'s place: its plan below, its RETURNING as the
  * node's output.
  */
 Plan *
-GpExplicitMake(ModifyTable *mt)
+GpExplicitMake(ModifyTable *mt, const char *on_conflict)
 {
 	CustomScan *cscan = makeNode(CustomScan);
 	List	   *tlist = NIL;
@@ -541,6 +651,10 @@ GpExplicitMake(ModifyTable *mt)
 				   copyObject(mt->returningLists));
 	cscan->custom_private = lappend(cscan->custom_private,
 									makeBoolean(mt->canSetTag));
+	cscan->custom_private = lappend(cscan->custom_private,
+									makeString(pstrdup(on_conflict ? on_conflict : "")));
+	cscan->custom_private = lappend(cscan->custom_private,
+									makeInteger(mt->onConflictAction));
 	cscan->methods = &explicit_scan_methods;
 	return &cscan->scan.plan;
 }
@@ -616,6 +730,7 @@ explicit_begin(CustomScanState *node, EState *estate, int eflags)
 
 	state->operation = (CmdType) intVal(list_nth(priv, EXPLICIT_OPERATION));
 	state->canSetTag = boolVal(list_nth(priv, EXPLICIT_CAN_SET_TAG));
+	state->on_conflict = (OnConflictAction) intVal(list_nth(priv, EXPLICIT_CONFLICT_ACTION));
 	state->nrels = list_length(resultrels);
 	state->rels = palloc_array(Relation, state->nrels);
 	i = 0;
@@ -726,6 +841,9 @@ explicit_begin(CustomScanState *node, EState *estate, int eflags)
 						 identity ? " OVERRIDING SYSTEM VALUE" : "");
 		if (policy != NULL)
 			state->hash = GpHashMake(policy, targetdesc);
+
+		/* ON CONFLICT, after the rows, as its text was printed */
+		appendStringInfoString(&tail, strVal(list_nth(priv, EXPLICIT_ON_CONFLICT)));
 	}
 
 	state->valout = palloc_array(FmgrInfo, Max(state->nvals, 1));
@@ -867,11 +985,24 @@ explicit_begin(CustomScanState *node, EState *estate, int eflags)
 	 * Cloudberry without its global deadlock detector: an UPDATE or DELETE
 	 * of a distributed table locks the table, so that two of them never
 	 * wait for each other on different segments -- and here, so that a row
-	 * the plan read does not change before it is written.
+	 * the plan read does not change before it is written.  A partitioned
+	 * table's partitions it writes are locked as it is, as Cloudberry's
+	 * planner locks them in the table's mode; an INSERT into one locks every
+	 * partition.
 	 */
-	if ((state->operation == CMD_UPDATE || state->operation == CMD_DELETE) &&
+	if ((state->operation == CMD_UPDATE || state->operation == CMD_DELETE ||
+		 state->on_conflict == ONCONFLICT_UPDATE) &&
 		!gp_enable_global_deadlock_detector)
+	{
 		LockRelationOid(RelationGetRelid(state->target), ExclusiveLock);
+		for (i = 0; i < state->nrels; i++)
+			if (state->rels[i] != state->target)
+				LockRelationOid(RelationGetRelid(state->rels[i]), ExclusiveLock);
+	}
+	if (state->operation == CMD_INSERT)
+		GpModifyLockPartitions(RelationGetRelid(state->target),
+							   state->on_conflict == ONCONFLICT_UPDATE
+							   ? ExclusiveLock : RowExclusiveLock);
 
 	GpClusterSegments(&state->nsegs);
 	state->batches = palloc0_array(List *, state->nsegs);

@@ -62,6 +62,9 @@ static char *gp_cluster_config = NULL;
 static int	gp_dbid = 1;
 static int	gp_role_setting = GP_ROLE_UTILITY;
 static char *gp_qe_identity = NULL;
+
+/* gp.session_id, which is shown and never set; see show_session_id(). */
+static int	gp_session_id_shown = -1;
 static char *gp_cluster_secret = NULL;
 static char *gp_qe_secret = NULL;
 
@@ -573,6 +576,26 @@ check_cluster_secret(char **newval, void **extra, GucSource source)
 	return true;
 }
 
+/*
+ * gp.session_id: Cloudberry's gp_session_id, read-only.  The session a
+ * backend works for, which every process of one coordinator session shares
+ * -- the coordinator backend's process id (GpClusterSessionId), for it and
+ * for each segment process it dispatched to -- and -1 in a session of a
+ * segment's own and on a node with no cluster, as Cloudberry's utility mode
+ * says: what such a session holds is no dispatched query's.
+ */
+static const char *
+show_session_id(void)
+{
+	static char buf[16];
+	int			id = -1;
+
+	if (GpClusterIsDispatched() || GpClusterBackendRole() == GP_ROLE_DISPATCH)
+		id = GpClusterSessionId();
+	snprintf(buf, sizeof(buf), "%d", id);
+	return buf;
+}
+
 /* ------------------------------------------------------------------------- */
 /* Start-up                                                                  */
 /* ------------------------------------------------------------------------- */
@@ -600,6 +623,17 @@ GpClusterInit(void)
 							 PGC_POSTMASTER,
 							 0,
 							 NULL, NULL, NULL);
+
+	DefineCustomIntVariable("gp.session_id",
+							"Session this backend works for, as Cloudberry's gp_session_id.",
+							"The coordinator backend's process id, on it and on every "
+							"segment process it dispatched to; -1 in a session of a "
+							"segment's own.",
+							&gp_session_id_shown,
+							-1, -1, INT_MAX,
+							PGC_INTERNAL,
+							GUC_NOT_IN_SAMPLE | GUC_DISALLOW_IN_FILE,
+							NULL, NULL, show_session_id);
 
 	DefineCustomStringVariable("gp.qe_identity",
 							   "Identity the dispatcher gave this segment process.",

@@ -63,13 +63,17 @@
  */
 #include "postgres.h"
 
+#include "access/htup_details.h"
 #include "access/relation.h"
+#include "access/table.h"
 #include "access/xact.h"
 #include "catalog/catalog.h"
 #include "catalog/namespace.h"
 #include "catalog/pg_namespace.h"
 #include "parser/parse_type.h"
 #include "catalog/objectaddress.h"
+#include "catalog/indexing.h"
+#include "catalog/pg_index.h"
 #include "commands/defrem.h"
 #include "commands/vacuum.h"
 #include "miscadmin.h"
@@ -77,10 +81,12 @@
 #include "nodes/parsenodes.h"
 #include "nodes/readfuncs.h"
 #include "parser/parser.h"
+#include "storage/lmgr.h"
 #include "tcop/utility.h"
 #include "utils/lsyscache.h"
 #include "utils/memutils.h"
 #include "utils/rel.h"
+#include "utils/syscache.h"
 
 #include "gp_cluster.h"
 #include "gp_core_api.h"
@@ -598,6 +604,87 @@ ctas_as_create(CreateTableAsStmt *ctas)
 	return nodeToString(create);
 }
 
+/*
+ * After CREATE INDEX: indcheckxmin here where a segment set it, as
+ * Cloudberry's cdb_sync_indcheckxmin_with_segments() sets it (indexcmds.c).
+ * An index built over a heap with HOT chains the build found broken is not
+ * for snapshots older than its own transaction, and says so in indcheckxmin;
+ * the coordinator plans for the segments, and holds none of a distributed
+ * table's rows to find such a chain in.  So each index the statement made
+ * whose indcheckxmin is off here is asked about, all in one query to each
+ * segment.  That query reads pg_index there under a lock the segment keeps
+ * to the end of the transaction, so the coordinator takes the same lock
+ * first and keeps it too, as Cloudberry's does: a VACUUM FULL of pg_index
+ * then waits for this transaction here, rather than deadlocking with it
+ * between here and a segment.
+ */
+static void
+sync_indcheckxmin(List *assigned)
+{
+	StringInfoData oids;
+	ListCell   *lc;
+	char	  **values;
+	int			nsegs;
+
+	initStringInfo(&oids);
+	foreach(lc, assigned)
+	{
+		GpOidAssignment *a = (GpOidAssignment *) lfirst(lc);
+		HeapTuple	tup;
+
+		if (a->catalog != RelationRelationId ||
+			get_rel_relkind(a->oid) != RELKIND_INDEX)
+			continue;
+		tup = SearchSysCache1(INDEXRELID, ObjectIdGetDatum(a->oid));
+		if (!HeapTupleIsValid(tup))
+			continue;
+		if (!((Form_pg_index) GETSTRUCT(tup))->indcheckxmin)
+			appendStringInfo(&oids, "%s%u", oids.len > 0 ? "," : "", a->oid);
+		ReleaseSysCache(tup);
+	}
+	if (oids.len == 0)
+		return;
+
+	LockRelationOid(IndexRelationId, AccessShareLock);
+
+	(void) GpClusterSegments(&nsegs);
+	values = palloc0_array(char *, Max(nsegs, 1));
+	GpDispatchQueryFirstValues(psprintf("SELECT pg_catalog.string_agg(indexrelid::pg_catalog.text, ',')"
+										"  FROM pg_catalog.pg_index"
+										" WHERE indcheckxmin AND indexrelid IN (%s)",
+										oids.data),
+							   -1, values);
+
+	for (int i = 0; i < nsegs; i++)
+	{
+		char	   *list = values[i];
+		char	   *tok;
+		char	   *save = NULL;
+
+		if (list == NULL)
+			continue;
+		for (tok = strtok_r(list, ",", &save); tok != NULL;
+			 tok = strtok_r(NULL, ",", &save))
+		{
+			Oid			indexoid = (Oid) strtoul(tok, NULL, 10);
+			Relation	pg_index = table_open(IndexRelationId, RowExclusiveLock);
+			HeapTuple	tup = SearchSysCacheCopy1(INDEXRELID,
+												  ObjectIdGetDatum(indexoid));
+
+			if (HeapTupleIsValid(tup) &&
+				!((Form_pg_index) GETSTRUCT(tup))->indcheckxmin)
+			{
+				((Form_pg_index) GETSTRUCT(tup))->indcheckxmin = true;
+				CatalogTupleUpdate(pg_index, &tup->t_self, tup);
+				CommandCounterIncrement();
+			}
+			if (HeapTupleIsValid(tup))
+				heap_freetuple(tup);
+			table_close(pg_index, RowExclusiveLock);
+		}
+	}
+}
+
 static void
 gp_ddl_ProcessUtility(PlannedStmt *pstmt, const char *queryString,
 					  bool readOnlyTree, ProcessUtilityContext context,
@@ -693,6 +780,9 @@ gp_ddl_ProcessUtility(PlannedStmt *pstmt, const char *queryString,
 
 	drop_temp_namespaces();
 	GpDispatchUtility(build_payload(tree), class == GP_DISPATCH_OWN_XACT);
+
+	if (IsA(parsetree, IndexStmt) && !((IndexStmt *) parsetree)->concurrent)
+		sync_indcheckxmin(recorded);
 
 	recorded = NIL;
 	MemoryContextReset(ddl_cxt);

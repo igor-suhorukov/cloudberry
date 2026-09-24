@@ -54,6 +54,16 @@
  * of it turns the call into gp_internal.dist_random_segments(NULL::t), which
  * returns the rows with their segment as one more column, left out of "*".
  *
+ * pg_catalog.pg_locks has Cloudberry's three columns the same way, where
+ * PostgreSQL 19's view has none of them: gp_segment_id, segment_of() of its
+ * row, which is this node's content id, the node whose locks it lists; and
+ * mppsessionid and mppiswriter, lock_session() and lock_writer() of its row
+ * -- the coordinator session the locking process works for, -1 for none,
+ * and whether it is a query's writer rather than a segment's reader, false
+ * for a process no query started (gp_gdd.c keeps both).  "*" gives
+ * PostgreSQL's sixteen columns, and a node's pg_locks lists its own locks:
+ * the coordinator's does not gather the segments'.
+ *
  * A replicated table shows no system column on the coordinator, as
  * Cloudberry's shows none outside utility mode (scanRTEForColumn): each
  * segment's copy of a row has a ctid, an xmin and a segment of its own, and
@@ -70,6 +80,7 @@
 #include "access/sysattr.h"
 #include "access/table.h"
 #include "catalog/heap.h"
+#include "catalog/pg_namespace.h"
 #include "catalog/pg_type.h"
 #include "executor/tuptable.h"
 #include "funcapi.h"
@@ -93,12 +104,15 @@
 #include "gp_cluster.h"
 #include "gp_core_api.h"
 #include "gp_dispatch.h"
+#include "gp_gdd.h"
 #include "gp_hash.h"
 #include "gp_policy.h"
 #include "gp_scan.h"
 #include "gp_segment.h"
 
 #define GP_SEGMENT_ID	"gp_segment_id"
+#define GP_MPPSESSIONID	"mppsessionid"
+#define GP_MPPISWRITER	"mppiswriter"
 
 static columnref_fallback_hook_type prev_columnref_fallback_hook = NULL;
 static post_parse_analyze_hook_type prev_post_parse_analyze_hook = NULL;
@@ -118,6 +132,9 @@ static bool func_oids_valid = false;
 static Oid	segment_of_oid = InvalidOid;
 static Oid	dist_random_oid = InvalidOid;
 static Oid	dist_random_segments_oid = InvalidOid;
+static Oid	pg_locks_oid = InvalidOid;
+static Oid	lock_session_oid = InvalidOid;
+static Oid	lock_writer_oid = InvalidOid;
 
 static void
 invalidate_func_oids(Datum arg, SysCacheIdentifier cacheid, uint32 hashvalue)
@@ -143,6 +160,15 @@ lookup_func_oids(void)
 	dist_random_segments_oid = lookup_func("gp_internal",
 										   "dist_random_segments",
 										   ANYELEMENTOID);
+	pg_locks_oid = get_relname_relid("pg_locks", PG_CATALOG_NAMESPACE);
+	lock_session_oid = lock_writer_oid = InvalidOid;
+	if (OidIsValid(pg_locks_oid))
+	{
+		Oid			rowtype = get_rel_type_id(pg_locks_oid);
+
+		lock_session_oid = lookup_func("gp_internal", "lock_session", rowtype);
+		lock_writer_oid = lookup_func("gp_internal", "lock_writer", rowtype);
+	}
 	func_oids_valid = true;
 }
 
@@ -249,16 +275,28 @@ gp_post_parse_analyze(ParseState *pstate, Query *query,
  * Views and subqueries do not, and nor do functions -- but for
  * gp.dist_random(), whose rows are the segments'.
  */
+/* Is this entry pg_catalog.pg_locks, which has Cloudberry's three columns? */
+static bool
+nsitem_is_pg_locks(ParseNamespaceItem *nsitem)
+{
+	RangeTblEntry *rte = nsitem->p_rte;
+
+	lookup_func_oids();
+	return rte->rtekind == RTE_RELATION && OidIsValid(pg_locks_oid) &&
+		rte->relid == pg_locks_oid;
+}
+
 static bool
 nsitem_has_segment_id(ParseNamespaceItem *nsitem)
 {
 	RangeTblEntry *rte = nsitem->p_rte;
 
 	if (rte->rtekind == RTE_RELATION)
-		return (rte->relkind == RELKIND_RELATION ||
-				rte->relkind == RELKIND_PARTITIONED_TABLE ||
-				rte->relkind == RELKIND_MATVIEW) &&
-			!hides_system_columns(rte->relid);
+		return ((rte->relkind == RELKIND_RELATION ||
+				 rte->relkind == RELKIND_PARTITIONED_TABLE ||
+				 rte->relkind == RELKIND_MATVIEW) &&
+				!hides_system_columns(rte->relid)) ||
+			nsitem_is_pg_locks(nsitem);
 
 	if (rte->rtekind == RTE_FUNCTION && list_length(rte->functions) == 1)
 	{
@@ -365,20 +403,13 @@ add_dist_random_segment_column(ParseState *pstate, ParseNamespaceItem *nsitem,
 	nscol->p_dontexpand = true;
 }
 
-/* gp_segment_id of this entry's row. */
+/* A call of this function of this entry's row. */
 static Node *
-make_segment_id(ParseState *pstate, ParseNamespaceItem *nsitem,
-				int sublevels_up, int location)
+make_row_call(ParseState *pstate, ParseNamespaceItem *nsitem,
+			  int sublevels_up, int location, Oid funcid, Oid rettype)
 {
 	Var		   *var;
 	FuncExpr   *fexpr;
-
-	if (nsitem->p_rte->rtekind == RTE_FUNCTION)
-	{
-		add_dist_random_segment_column(pstate, nsitem, location);
-		return scanNSItemForColumn(pstate, nsitem, sublevels_up,
-								   GP_SEGMENT_ID, location);
-	}
 
 	/* The row, as transformWholeRowRef() makes it for "t.*" */
 	var = makeWholeRowVar(nsitem->p_rte, nsitem->p_rtindex, sublevels_up, true);
@@ -386,19 +417,36 @@ make_segment_id(ParseState *pstate, ParseNamespaceItem *nsitem,
 	markNullableIfNeeded(pstate, var);
 	markVarForSelectPriv(pstate, var);
 
-	fexpr = makeFuncExpr(segment_of_oid, INT4OID, list_make1(var),
+	fexpr = makeFuncExpr(funcid, rettype, list_make1(var),
 						 InvalidOid, InvalidOid, COERCE_EXPLICIT_CALL);
 	fexpr->location = location;
 	return (Node *) fexpr;
 }
 
+/* gp_segment_id of this entry's row. */
+static Node *
+make_segment_id(ParseState *pstate, ParseNamespaceItem *nsitem,
+				int sublevels_up, int location)
+{
+	if (nsitem->p_rte->rtekind == RTE_FUNCTION)
+	{
+		add_dist_random_segment_column(pstate, nsitem, location);
+		return scanNSItemForColumn(pstate, nsitem, sublevels_up,
+								   GP_SEGMENT_ID, location);
+	}
+	return make_row_call(pstate, nsitem, sublevels_up, location,
+						 segment_of_oid, INT4OID);
+}
+
 /*
- * The one entry an unqualified gp_segment_id means: the nearest query level
- * with a relation that has it, where it is an error for there to be two, as
- * it is for any column two relations have.
+ * The one entry an unqualified name means: the nearest query level with a
+ * relation that has it, where it is an error for there to be two, as it is
+ * for any column two relations have.
  */
 static ParseNamespaceItem *
-find_unqualified(ParseState *pstate, int location, int *sublevels_up)
+find_unqualified(ParseState *pstate, const char *name,
+				 bool (*has) (ParseNamespaceItem *),
+				 int location, int *sublevels_up)
 {
 	int			levels_up = 0;
 
@@ -412,13 +460,12 @@ find_unqualified(ParseState *pstate, int location, int *sublevels_up)
 				continue;
 			if (nsitem->p_lateral_only && !nsitem->p_lateral_ok)
 				continue;
-			if (!nsitem_has_segment_id(nsitem))
+			if (!has(nsitem))
 				continue;
 			if (found != NULL)
 				ereport(ERROR,
 						(errcode(ERRCODE_AMBIGUOUS_COLUMN),
-						 errmsg("column reference \"%s\" is ambiguous",
-								GP_SEGMENT_ID),
+						 errmsg("column reference \"%s\" is ambiguous", name),
 						 parser_errposition(pstate, location)));
 			found = nsitem;
 		}
@@ -439,6 +486,10 @@ gp_columnref_fallback(ParseState *pstate, ColumnRef *cref)
 	Node	   *last = (Node *) llast(cref->fields);
 	ParseNamespaceItem *nsitem = NULL;
 	int			sublevels_up = 0;
+	const char *name;
+	bool		(*has) (ParseNamespaceItem *);
+	Oid			funcid = InvalidOid;
+	Oid			rettype = InvalidOid;
 
 	if (prev_columnref_fallback_hook)
 	{
@@ -448,17 +499,32 @@ gp_columnref_fallback(ParseState *pstate, ColumnRef *cref)
 			return node;
 	}
 
-	if (nfields > 3 || !IsA(last, String) ||
-		strcmp(strVal(last), GP_SEGMENT_ID) != 0)
+	if (nfields > 3 || !IsA(last, String))
 		return NULL;
+	name = strVal(last);
 
-	/* Without the extension in this database the name means nothing. */
+	/* Without the extension in this database the names mean nothing. */
 	lookup_func_oids();
-	if (!OidIsValid(segment_of_oid))
+	if (strcmp(name, GP_SEGMENT_ID) == 0 && OidIsValid(segment_of_oid))
+		has = nsitem_has_segment_id;
+	else if (strcmp(name, GP_MPPSESSIONID) == 0 && OidIsValid(lock_session_oid))
+	{
+		has = nsitem_is_pg_locks;
+		funcid = lock_session_oid;
+		rettype = INT4OID;
+	}
+	else if (strcmp(name, GP_MPPISWRITER) == 0 && OidIsValid(lock_writer_oid))
+	{
+		has = nsitem_is_pg_locks;
+		funcid = lock_writer_oid;
+		rettype = BOOLOID;
+	}
+	else
 		return NULL;
 
 	if (nfields == 1)
-		nsitem = find_unqualified(pstate, cref->location, &sublevels_up);
+		nsitem = find_unqualified(pstate, name, has, cref->location,
+								  &sublevels_up);
 	else
 	{
 		char	   *nspname = NULL;
@@ -469,13 +535,16 @@ gp_columnref_fallback(ParseState *pstate, ColumnRef *cref)
 		relname = strVal(list_nth(cref->fields, nfields - 2));
 		nsitem = refnameNamespaceItem(pstate, nspname, relname,
 									  cref->location, &sublevels_up);
-		if (nsitem != NULL && !nsitem_has_segment_id(nsitem))
+		if (nsitem != NULL && !has(nsitem))
 			nsitem = NULL;
 	}
 
 	if (nsitem == NULL)
 		return NULL;
-	return make_segment_id(pstate, nsitem, sublevels_up, cref->location);
+	if (has == nsitem_has_segment_id)
+		return make_segment_id(pstate, nsitem, sublevels_up, cref->location);
+	return make_row_call(pstate, nsitem, sublevels_up, cref->location,
+						 funcid, rettype);
 }
 
 /* ------------------------------------------------------------------------- */
@@ -488,6 +557,10 @@ gp_deparse_function_as_column(FuncExpr *expr)
 	lookup_func_oids();
 	if (OidIsValid(segment_of_oid) && expr->funcid == segment_of_oid)
 		return GP_SEGMENT_ID;
+	if (OidIsValid(lock_session_oid) && expr->funcid == lock_session_oid)
+		return GP_MPPSESSIONID;
+	if (OidIsValid(lock_writer_oid) && expr->funcid == lock_writer_oid)
+		return GP_MPPISWRITER;
 	if (prev_deparse_function_as_column_hook)
 		return prev_deparse_function_as_column_hook(expr);
 	return NULL;
@@ -585,6 +658,55 @@ gp_segment_of(PG_FUNCTION_ARGS)
 	heap_deform_tuple(&tuple, cache->tupdesc, cache->values, cache->isnull);
 
 	PG_RETURN_INT32(GpHashSegment(cache->hash, cache->values, cache->isnull));
+}
+
+/* The process id of a pg_locks row, 0 for a prepared transaction's. */
+static int
+lock_row_pid(HeapTupleHeader row)
+{
+	bool		isnull;
+	Datum		pid = GetAttributeByName(row, "pid", &isnull);
+
+	return isnull ? 0 : DatumGetInt32(pid);
+}
+
+PG_FUNCTION_INFO_V1(gp_lock_session);
+
+/*
+ * gp_internal.lock_session(pg_locks): mppsessionid, the coordinator session
+ * the process holding or awaiting the lock works for, as Cloudberry's
+ * pg_locks gives it; -1 for one that works for none.
+ */
+Datum
+gp_lock_session(PG_FUNCTION_ARGS)
+{
+	int			session;
+	bool		reader;
+
+	if (!GpGddBackendIdentity(lock_row_pid(PG_GETARG_HEAPTUPLEHEADER(0)),
+							  &session, &reader))
+		PG_RETURN_INT32(-1);
+	PG_RETURN_INT32(session);
+}
+
+PG_FUNCTION_INFO_V1(gp_lock_writer);
+
+/*
+ * gp_internal.lock_writer(pg_locks): mppiswriter.  True for a coordinator's
+ * backend and a segment's writer, false for a segment's reader, and false
+ * for a process no query started -- a session of a segment's own, a process
+ * of the server's -- as Cloudberry's InitProcess sets it.
+ */
+Datum
+gp_lock_writer(PG_FUNCTION_ARGS)
+{
+	int			session;
+	bool		reader;
+
+	if (!GpGddBackendIdentity(lock_row_pid(PG_GETARG_HEAPTUPLEHEADER(0)),
+							  &session, &reader))
+		PG_RETURN_BOOL(false);
+	PG_RETURN_BOOL(!reader);
 }
 
 PG_FUNCTION_INFO_V1(gp_dist_random_segments);

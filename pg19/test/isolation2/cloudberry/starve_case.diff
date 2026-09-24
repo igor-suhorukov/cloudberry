@@ -1,0 +1,6 @@
+@@
+-CONTEXT:  PL/pgSQL function "function_starve_volatile" line 5 at SQL statement
++LINE 1: SELECT count(c)        FROM starve
++                     ^
++QUERY:  SELECT count(c)        FROM starve
++CONTEXT:  PL/pgSQL function function_starve_volatile(integer) line 5 at SQL statement

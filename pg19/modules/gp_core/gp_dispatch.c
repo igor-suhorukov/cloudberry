@@ -1966,6 +1966,12 @@ gang_commit_second_phase(void)
 		notices_quiet++;
 		nfailed = gang_finish_prepared(true);
 		notices_quiet--;
+
+		/*
+		 * The segments are told; what is left is to forget the transaction,
+		 * where Cloudberry writes its FORGET record (cdbtm.c).
+		 */
+		GP_FAULT("dtm_before_insert_forget_comitted");
 	}
 	PG_CATCH();
 	{

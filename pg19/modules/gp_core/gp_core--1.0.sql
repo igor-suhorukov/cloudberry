@@ -254,8 +254,28 @@ CREATE TRIGGER gp_distribution_policy_write
 	ON pg_catalog.gp_distribution_policy
 	FOR EACH ROW EXECUTE FUNCTION gp_internal.distribution_policy_write();
 
+/*
+ * gp_stat_replication: the WAL senders of this node, in Cloudberry's columns,
+ * which name the node: the coordinator's to its standby as -1.  Cloudberry's
+ * adds each segment's to its mirror, from FTS, which is M4's; until then the
+ * segments have none.  spill_* are what Cloudberry reads of a logical
+ * sender's decoding, which a physical sender has none of, and sync_error
+ * what FTS says of a mirror, "none" as Cloudberry says it without one.
+ */
+CREATE VIEW pg_catalog.gp_stat_replication AS
+	SELECT (SELECT n.content_id FROM gp.node() n) AS gp_segment_id,
+		   r.pid, r.usesysid, r.usename, r.application_name, r.client_addr,
+		   r.client_hostname, r.client_port, r.backend_start, r.backend_xmin,
+		   r.state, r.sent_lsn, r.write_lsn, r.flush_lsn, r.replay_lsn,
+		   r.write_lag, r.flush_lag, r.replay_lag, r.sync_priority,
+		   r.sync_state, r.reply_time,
+		   NULL::int8 AS spill_txns, NULL::int8 AS spill_count,
+		   NULL::int8 AS spill_bytes, 'none'::text AS sync_error
+	  FROM pg_catalog.pg_stat_replication r;
+
 GRANT SELECT ON pg_catalog.gp_id, pg_catalog.gp_segment_configuration,
-	pg_catalog.gp_configuration_history, pg_catalog.gp_distribution_policy
+	pg_catalog.gp_configuration_history, pg_catalog.gp_distribution_policy,
+	pg_catalog.gp_stat_replication
 	TO PUBLIC;
 
 RESET allow_system_table_mods;
@@ -321,6 +341,23 @@ CREATE FUNCTION gp_internal.dist_random_segments(rel anyelement)
 RETURNS SETOF record
 AS 'MODULE_PATHNAME', 'gp_dist_random_segments'
 LANGUAGE C;
+
+/*
+ * pg_locks' mppsessionid and mppiswriter, which Cloudberry's pg_locks has as
+ * columns and the parser makes of the names the same way (gp_segment.c):
+ * the coordinator session the locking process works for, and whether it is
+ * a query's writer rather than a segment's reader.  gp_segment_id of a
+ * pg_locks row is segment_of()'s, this node's.
+ */
+CREATE FUNCTION gp_internal.lock_session(pg_catalog.pg_locks)
+RETURNS int4
+AS 'MODULE_PATHNAME', 'gp_lock_session'
+LANGUAGE C VOLATILE STRICT;
+
+CREATE FUNCTION gp_internal.lock_writer(pg_catalog.pg_locks)
+RETURNS bool
+AS 'MODULE_PATHNAME', 'gp_lock_writer'
+LANGUAGE C VOLATILE STRICT;
 
 /*
  * How a relation's rows are spread over the segments.

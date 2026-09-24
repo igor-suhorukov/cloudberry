@@ -1,0 +1,50 @@
+#!/bin/bash
+#
+# Licensed to the Apache Software Foundation (ASF) under one
+# or more contributor license agreements.  See the NOTICE file
+# distributed with this work for additional information
+# regarding copyright ownership.  The ASF licenses this file
+# to you under the Apache License, Version 2.0 (the
+# "License"); you may not use this file except in compliance
+# with the License.  You may obtain a copy of the License at
+#
+#   http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing,
+# software distributed under the License is distributed on an
+# "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+# KIND, either express or implied.  See the License for the
+# specific language governing permissions and limitations
+# under the License.
+#
+# gpconfig as far as the isolation2 tests the port runs ask it, on the
+# harness's cluster: gpconfig -c <name> -v <value> [--skipvalidation] sets a
+# setting on every node the coordinator's gp_segment_configuration lists,
+# standby included, for the next start -- where the harness writes its own,
+# postgresql.auto.conf, whose last word is the one taken.  Cloudberry's name
+# is the port's (GP_SETTINGS_MAP, from the harness: gp_autostats_mode is
+# gp.autostats_mode).  Cloudberry's own gpconfig is gpMgmt's, which is M7's.
+set -u
+
+name=; value=
+while [ "$#" -gt 0 ]; do
+	case "$1" in
+		-c) name="$2"; shift 2 ;;
+		-v) value="$2"; shift 2 ;;
+		--skipvalidation) shift ;;
+		*) echo "gpconfig: this harness's gpconfig does not take $1" >&2; exit 2 ;;
+	esac
+done
+[ -n "$name" ] && [ -n "$value" ] || { echo "usage: gpconfig -c name -v value [--skipvalidation]" >&2; exit 2; }
+
+if [ -n "${GP_SETTINGS_MAP:-}" ]; then
+	mapped=$(awk -v n="$name" '$1 == n { print $2; exit }' "$GP_SETTINGS_MAP")
+	[ -n "$mapped" ] && name="$mapped"
+fi
+value="${value#\'}"; value="${value%\'}"
+
+"$PG_BINDIR/psql" -X -q -t -A -F ' ' -d postgres \
+	-c "SELECT datadir FROM gp_segment_configuration ORDER BY dbid" |
+while read -r datadir; do
+	[ -n "$datadir" ] && printf "%s = '%s'\n" "$name" "$value" >> "$datadir/postgresql.auto.conf"
+done

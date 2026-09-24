@@ -1,0 +1,7 @@
+@@
+-ERROR:  invalid snapshot data in file "pg_snapshots/#######-########-#"
++SET
+@@
+-ERROR:  cannot import distributed snapshot in utility mode
+-HINT:  export the snapshot in utility mode
++SET

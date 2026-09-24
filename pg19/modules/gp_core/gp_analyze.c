@@ -38,6 +38,11 @@
  * are not installed, the coordinator samples the gathered rows itself -- the
  * same answer, at the cost of reading every row.
  *
+ * A partitioned table's statistics are PostgreSQL's, from a sample of its
+ * leaves, where Cloudberry's merge the leaves' own; the fault Cloudberry's
+ * merge has once it has found the leaves is where PostgreSQL's has found
+ * them.
+ *
  * Cloudberry sources this file stands in for:
  *	  acquire_sample_rows_dispatcher() and gp_acquire_sample_rows() in
  *	  src/backend/commands/analyze.c
@@ -52,6 +57,7 @@
 #include "access/table.h"
 #include "access/tableam.h"
 #include "catalog/namespace.h"
+#include "catalog/pg_class.h"
 #include "catalog/pg_type.h"
 #include "commands/vacuum.h"
 #include "common/pg_prng.h"
@@ -62,6 +68,7 @@
 #include "parser/parse_func.h"
 #include "postmaster/autovacuum.h"
 #include "storage/bufmgr.h"
+#include "storage/proc.h"
 #include "storage/read_stream.h"
 #include "utils/acl.h"
 #include "utils/builtins.h"
@@ -74,10 +81,15 @@
 #include "gp_cluster.h"
 #include "gp_core_api.h"
 #include "gp_dispatch.h"
+#include "gp_fault.h"
 #include "gp_policy.h"
 #include "gp_scan.h"
 
 static analyze_sample_rows_hook_type prev_analyze_sample_rows = NULL;
+
+/* The partitioned table this transaction's ANALYZE asked of, first */
+static Oid	asked_parent = InvalidOid;
+static LocalTransactionId asked_parent_lxid = InvalidLocalTransactionId;
 
 /* The segment that answers for a replicated table, as a gather of it reads. */
 static int
@@ -479,6 +491,28 @@ gp_analyze_sample_rows(Relation relation, AnalyzeSampleRowsFunc *func,
 	int			nsegs;
 	char	  **sizes;
 	double		bytes = 0;
+
+	/*
+	 * A partitioned table is asked of twice: by analyze_rel(), and then by
+	 * acquire_inherited_sample_rows() as the first of the tree
+	 * find_all_inheritors() has found and locked.  The second is where
+	 * Cloudberry's merge_leaf_stats() has found the leaves.
+	 */
+	if (GpClusterBackendRole() == GP_ROLE_DISPATCH &&
+		relation->rd_rel->relkind == RELKIND_PARTITIONED_TABLE)
+	{
+		if (RelationGetRelid(relation) == asked_parent &&
+			MyProc->vxid.lxid == asked_parent_lxid)
+		{
+			asked_parent = InvalidOid;
+			GP_FAULT("merge_leaf_stats_after_find_children");
+		}
+		else
+		{
+			asked_parent = RelationGetRelid(relation);
+			asked_parent_lxid = MyProc->vxid.lxid;
+		}
+	}
 
 	if (GpClusterBackendRole() != GP_ROLE_DISPATCH ||
 		relation->rd_rel->relkind != RELKIND_RELATION ||

@@ -11,7 +11,8 @@
 #         that name begins, so gdd/prepare, which turns the global deadlock
 #         detector on, and gdd/end, which turns it off, run first and last in
 #         each group of GDD tests.  The groups are cut by time: each GDD test
-#         waits out the detector's five-second period at least once.
+#         waits out the detector's five-second period at least once.  The
+#         group named standby has a standby coordinator too.
 #   skip  it needs what the port does not have yet: the rest of the line says
 #         what
 #
@@ -19,13 +20,13 @@
 # resource queues and groups, FTS and mirrors, the rest of the fault
 # injector's places in PostgreSQL's own code -- need M4 to M7, and are not
 # listed.
-skip lockmodes  pg_locks.gp_segment_id, Cloudberry's column of a system view
+run  lockmodes                                     lockmodes
 run  select_dropped_table
 run  concurrent_partition_table_operations_should_not_deadlock
-skip starve_case  pg_locks.gp_segment_id and mppsessionid, Cloudberry's columns of a system view
-skip create_index_deadlock  a lock on pg_index Cloudberry's CREATE INDEX keeps to the end of its transaction, and PostgreSQL 19's lets go of
-skip commit_transaction_block_checkpoint  faults inside PostgreSQL's commit, before_xlog_xact_commit_prepared and onephase_transaction_commit
-skip prepare_limit  gpconfig and gpstop, the tools of M7, and a standby coordinator
+run  starve_case
+run  create_index_deadlock
+run  commit_transaction_block_checkpoint
+run  prepare_limit                                 standby
 run  gdd/prepare                                   gdd*
 run  gdd/dist-deadlock-01                          gdd1
 run  gdd/dist-deadlock-04                          gdd1
@@ -37,15 +38,15 @@ run  gdd/dist-deadlock-103                         gdd2
 run  gdd/dist-deadlock-104                         gdd2
 run  gdd/dist-deadlock-106                         gdd2
 run  gdd/non-lock-105                              gdd3
-skip gdd/dist-deadlock-upsert  INSERT ... ON CONFLICT into a distributed table, which neither planner plans yet
+run  gdd/dist-deadlock-upsert                      gdd1
 run  gdd/delete-deadlock-root-leaf-concurrent-op   gdd2
 run  gdd/update-deadlock-root-leaf-concurrent-op   gdd2
 run  gdd/local-deadlock-03                         gdd2
 run  gdd/end                                       gdd*
 run  alter_blocks_for_update_and_viceversa
-skip reader_waits_for_lock  pg_locks.mppiswriter and gp_session_id, Cloudberry's columns of a system view and its session's id
+run  reader_waits_for_lock                         readers
 run  vacuum_recently_dead_tuple_due_to_distributed_snapshot
 run  distributedlog-bug
 run  distributed_snapshot
 run  sharedsnapshot
-skip export_distributed_snapshot  the distributed fields of Cloudberry's pg_export_snapshot() file, which the port's has no need of: the coordinator's snapshot is the distributed one
+run  export_distributed_snapshot

@@ -95,12 +95,14 @@
 #include "common/pg_prng.h"
 #include "lib/binaryheap.h"
 #include "libpq/pqformat.h"
+#include "mb/pg_wchar.h"
 #include "miscadmin.h"
 #include "nodes/extensible.h"
 #include "nodes/makefuncs.h"
 #include "nodes/nodeFuncs.h"
 #include "optimizer/optimizer.h"
 #include "optimizer/planner.h"
+#include "pgstat.h"
 #include "port/pg_bswap.h"
 #include "storage/buffile.h"
 #include "parser/parse_func.h"
@@ -124,6 +126,7 @@
 #include "gp_ic.h"
 #include "gp_motion.h"
 #include "gp_policy.h"
+#include "gp_scan.h"
 #include "gp_settings.h"
 #include "gp_share.h"
 
@@ -295,6 +298,14 @@ static ExecutorEnd_hook_type prev_executor_end = NULL;
 
 /* How a fragment's PlannedStmt says it is one, on the segment that runs it. */
 #define GP_FRAGMENT_MARK	"gp_fragment"
+
+/*
+ * The coordinator's text of the statement a fragment is part of, which the
+ * segment process shows as its query while it runs the fragment, as
+ * Cloudberry's shows the dispatcher's (pg_stat_activity); at most what
+ * track_activity_query_size keeps of it.
+ */
+#define GP_SOURCE_MARK	"gp_source"
 
 /* How many fragments this segment process is running, one inside another. */
 static int	fragment_depth = 0;
@@ -1477,6 +1488,18 @@ fragment_sql_ex(EState *estate, Plan *fragment, CustomScan *motion,
 	frag->extension_state = list_copy(marks);
 	frag->utilityStmt = NULL;
 
+	if (estate->es_sourceText != NULL)
+	{
+		const char *text = estate->es_sourceText;
+		int			len = pg_mbcliplen(text, strlen(text),
+									   pgstat_track_activity_query_size - 1);
+
+		frag->extension_state = lappend(frag->extension_state,
+										makeDefElem(pstrdup(GP_SOURCE_MARK),
+													(Node *) makeString(pnstrdup(text, len)),
+													-1));
+	}
+
 	params = fragment_params(estate, motion, econtext);
 	if (params != NIL)
 		frag->extension_state = lappend(frag->extension_state,
@@ -2106,11 +2129,14 @@ motion_dml_run(MotionState *state)
 	/*
 	 * Cloudberry without its global deadlock detector: an UPDATE or DELETE
 	 * of a distributed table locks the table, so that two of them never wait
-	 * for each other on different segments.  With it, rows (gp_gdd.c).
+	 * for each other on different segments.  With it, rows (gp_gdd.c).  An
+	 * INSERT into a partitioned table locks every partition (gp_modify.c).
 	 */
 	if ((operation == CMD_UPDATE || operation == CMD_DELETE) &&
 		!gp_enable_global_deadlock_detector)
 		LockRelationOid(rte->relid, ExclusiveLock);
+	if (operation == CMD_INSERT)
+		GpModifyLockPartitions(rte->relid, RowExclusiveLock);
 
 	if (!state->prepared)
 		motion_prepare(state);
@@ -2794,20 +2820,6 @@ fragment_plan(const char *payload, const char *key)
 	stmt = (PlannedStmt *) node;
 
 	/*
-	 * The coordinator's parser locked the relations the statement reads; here
-	 * nothing has parsed them, and the executor expects them locked.
-	 */
-	foreach(lc, stmt->rtable)
-	{
-		RangeTblEntry *rte = lfirst_node(RangeTblEntry, lc);
-
-		if (rte->rtekind == RTE_RELATION)
-			LockRelationOid(rte->relid,
-							rte->rellockmode != NoLock ? rte->rellockmode
-							: AccessShareLock);
-	}
-
-	/*
 	 * Every column the fragment produces is one the Motion receives: a
 	 * resjunk column would be dropped by the portal's junk filter, and the
 	 * rows would arrive a column short.
@@ -2940,13 +2952,40 @@ motion_executor_start(QueryDesc *queryDesc, int eflags)
 			fragment_params_before_start(queryDesc, params);
 	}
 
-	if (GpClusterIsDispatched() && is_fragment(queryDesc->plannedstmt) &&
-		!(eflags & EXEC_FLAG_EXPLAIN_ONLY))
+	if (GpClusterIsDispatched() && is_fragment(queryDesc->plannedstmt))
 	{
-		Node	   *key = fragment_mark(queryDesc->plannedstmt, GP_SHARE_MARK);
+		Node	   *source = fragment_mark(queryDesc->plannedstmt, GP_SOURCE_MARK);
+		ListCell   *lc;
 
-		if (key != NULL)
-			GpSharePublish(strVal(key), queryDesc->snapshot);
+		if (source != NULL)
+			pgstat_report_activity(STATE_RUNNING, strVal(source));
+
+		if (!(eflags & EXEC_FLAG_EXPLAIN_ONLY))
+		{
+			Node	   *key = fragment_mark(queryDesc->plannedstmt, GP_SHARE_MARK);
+
+			if (key != NULL)
+				GpSharePublish(strVal(key), queryDesc->snapshot);
+		}
+
+		/*
+		 * The relations the fragment reads, locked as the coordinator's parser
+		 * locked them there: here nothing has parsed them, and the executor
+		 * expects them locked.  After the writer has published what its
+		 * readers wait for, as Cloudberry's writer publishes its snapshot
+		 * before its executor locks anything -- so that a lock another
+		 * session holds keeps them all waiting for it, each as itself, and
+		 * not the readers waiting for a writer that waits for the lock.
+		 */
+		foreach(lc, queryDesc->plannedstmt->rtable)
+		{
+			RangeTblEntry *rte = lfirst_node(RangeTblEntry, lc);
+
+			if (rte->rtekind == RTE_RELATION)
+				LockRelationOid(rte->relid,
+								rte->rellockmode != NoLock ? rte->rellockmode
+								: AccessShareLock);
+		}
 	}
 
 	if (prev_executor_start)

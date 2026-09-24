@@ -1,0 +1,11 @@
+@@
+- t                         
++ f                         
+@@
+- relation                    | mode            | query                                                                                                     
+------------------------------+-----------------+-----------------------------------------------------------------------------------------------------------
+- reader_waits_for_lock_table | AccessShareLock | SELECT t1.* FROM reader_waits_for_lock_table t1 INNER JOIN reader_waits_for_lock_table t2 ON t1.b = t2.b; 
+-(1 row)
++ relation | mode | query 
++----------+------+-------
++(0 rows)

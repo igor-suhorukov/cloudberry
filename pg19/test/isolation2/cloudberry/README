@@ -32,3 +32,53 @@ distributed_snapshot  four things of Cloudberry's that the port does not
   two of the three segments stay where they are, and the SELECT after it
   shows them there.  And Debug_print_full_dtm is a setting of Cloudberry's,
   whose LOG lines the port does not print.
+
+export_distributed_snapshot
+  The distributed fields of an exported snapshot, which the port's file has
+  none of: the coordinator's snapshot is the distributed one, sent with each
+  statement, so a transaction that imports it reads what its exporter reads
+  on every segment, as the test's cases of INSERT, DELETE, UPDATE and DROP
+  show.  So the case that corrupts dsxmin corrupts nothing, and SET
+  TRANSACTION SNAPSHOT takes the file, where Cloudberry's finds it invalid;
+  and a session of the coordinator's own (-1U), an ordinary one here, imports
+  the snapshot a distributed session exported, which Cloudberry's utility
+  mode refuses.
+
+lockmodes, and its _optimizer output, which the orca pass is compared with
+  Four things, none of them a lock of Cloudberry's the port does not take.
+  Half the test is append-optimized tables, which are M5's: their CREATE
+  fails, and the cases after it with it.  Every lock Cloudberry holds on the
+  coordinator is held, and beside it the weaker ones PostgreSQL's parser and
+  executor take first, since the port takes Cloudberry's after them rather
+  than in their place: a locking clause's RowShareLock where Cloudberry
+  shows AccessShareLock, and an UPDATE's or DELETE's RowExclusiveLock, and
+  AccessShareLock for the rows it reads, beside its ExclusiveLock.  The
+  planner's plans are the port's: each table gathered from the segments and
+  joined on the coordinator, and with the global deadlock detector on the
+  rows of a locking clause locked on the segments by the gather's query,
+  where Cloudberry's plan has a LockRows.  And ANALYZE of a partitioned
+  table is PostgreSQL's, from a sample of its leaves, where Cloudberry's
+  merges their statistics: the test's fault is where PostgreSQL's has found
+  the leaves, so the DROPs wait for ANALYZE as they do in Cloudberry, but the
+  statistics are PostgreSQL's -- taken before the drop, with a correlation --
+  in PostgreSQL 19's pg_stats, whose tableid the port's init_file masks.
+
+reader_waits_for_lock, in the planner pass alone
+  No reader waits, because the port's planner has none: it reads each
+  distributed table of the join through a gather of its own, on the
+  segments' writers, and joins on the coordinator, where Cloudberry's
+  planner makes a slice for each table, run by readers.  So the writer waits
+  for the lock the utility session holds, check_readers_are_blocked() finds
+  no reader among the waiters after its two minutes, and the query of them
+  finds no row.  Under ORCA the reader and the writer each wait, and the
+  test passes.
+
+starve_case
+  PostgreSQL's words for the error of function_starve_volatile(): it runs in
+  the coordinator's own backend, where Cloudberry runs it in an entry-db
+  reader, so the error says where in the function's query it failed -- LINE
+  and QUERY -- and names the function with its argument types.  That the
+  reader's lock waits behind the waiting AccessExclusiveLock, which is what
+  the test is for, holds, each session found waiting by its gp_session_id
+  in pg_locks.mppsessionid.
+

@@ -6,7 +6,8 @@
 -- node, and as extensions, created here and by DDL dispatch on the segments.
 -- Cloudberry's helpers are PL/Python; the ones the tests the manifest runs
 -- call are here, in SQL: a node restarted with COPY ... TO PROGRAM, and a
--- lock waited for through each segment's own pg_locks.
+-- lock waited for through each segment's own pg_locks; and Cloudberry's own
+-- that are SQL already.
 --
 CREATE EXTENSION gp_core;
 CREATE EXTENSION gp_orca;
@@ -59,6 +60,35 @@ BEGIN
 		END IF;
 		PERFORM pg_sleep(0.1);
 		retries := retries - 1;
+	END LOOP;
+END;
+$$ LANGUAGE plpgsql;
+
+--
+-- wait_for_replication_replay(segid, retries): Cloudberry's, as it is.  The
+-- port's gp_stat_replication is the node's own pg_stat_replication, which
+-- on the coordinator is its standby's, content -1.
+--
+CREATE FUNCTION wait_for_replication_replay(segid int, retries int)
+RETURNS bool AS $$
+DECLARE
+	i int;
+	result bool;
+BEGIN
+	i := 0;
+	-- Wait until the mirror/standby has replayed up to flush location
+	LOOP
+		SELECT flush_lsn = replay_lsn INTO result FROM gp_stat_replication WHERE gp_segment_id = segid;
+		IF result THEN
+			RETURN true;
+		END IF;
+
+		IF i >= retries THEN
+			RETURN false;
+		END IF;
+		PERFORM pg_sleep(0.1);
+		PERFORM pg_stat_clear_snapshot();
+		i := i + 1;
 	END LOOP;
 END;
 $$ LANGUAGE plpgsql;

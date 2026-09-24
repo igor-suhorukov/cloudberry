@@ -422,6 +422,8 @@ insert_begin(CustomScanState *node, EState *estate, int eflags)
 	CustomScan *cscan = (CustomScan *) node->ss.ps.plan;
 	Oid			relid = exec_rt_fetch(state->rti, estate)->relid;
 
+	if (!(eflags & EXEC_FLAG_EXPLAIN_ONLY))
+		GpModifyLockPartitions(relid, RowExclusiveLock);
 	outerPlanState(node) = ExecInitNode(linitial(cscan->custom_plans),
 										estate, eflags);
 
@@ -541,6 +543,21 @@ modify_create_state(CustomScan *cscan)
 	state->nsegments = intVal(lfourth(cscan->custom_private));
 	state->relid = (Oid) intVal(list_nth(cscan->custom_private, 4));
 	return (Node *) state;
+}
+
+/*
+ * Cloudberry without its global deadlock detector: an INSERT into a
+ * partitioned table locks every partition, since which of them its rows go
+ * to is not known until they do -- so that it never waits on one segment for
+ * a writer of a partition that waits for it on another (transformTargetTable()
+ * in parse_clause.c, Cloudberry's issue 13652).
+ */
+void
+GpModifyLockPartitions(Oid relid, LOCKMODE lockmode)
+{
+	if (!gp_enable_global_deadlock_detector &&
+		get_rel_relkind(relid) == RELKIND_PARTITIONED_TABLE)
+		(void) find_all_inheritors(relid, lockmode, NULL);
 }
 
 static void
@@ -889,9 +906,9 @@ operation_words(CmdType operation)
  * Refused, with the reason, where that cannot be done.
  */
 static Plan *
-write_explicitly(PlannedStmt *stmt, ModifyTable *mt)
+write_explicitly(PlannedStmt *stmt, ModifyTable *mt, const char *on_conflict)
 {
-	const char *why = GpExplicitCannot(stmt, mt);
+	const char *why = GpExplicitCannot(stmt, mt, on_conflict);
 
 	if (why != NULL)
 	{
@@ -905,7 +922,7 @@ write_explicitly(PlannedStmt *stmt, ModifyTable *mt)
 						get_rel_name(rt_fetch(rti, stmt->rtable)->relid)),
 				 errdetail("%s", why)));
 	}
-	return GpExplicitMake(mt);
+	return GpExplicitMake(mt, on_conflict);
 }
 
 /*
@@ -957,7 +974,7 @@ gp_modify_planner(Query *parse, const char *query_string, int cursorOptions,
 
 		if (sub != NULL && IsA(sub, ModifyTable) &&
 			writes_distributed(stmt, (ModifyTable *) sub))
-			lfirst(lc) = write_explicitly(stmt, (ModifyTable *) sub);
+			lfirst(lc) = write_explicitly(stmt, (ModifyTable *) sub, NULL);
 	}
 	refuse_local_write(stmt->planTree, stmt);
 	return stmt;
@@ -969,6 +986,7 @@ gp_modify_planner_routed(Query *parse, const char *query_string, int cursorOptio
 {
 	PlannedStmt *stmt;
 	Query	   *original = NULL;
+	char	   *on_conflict = NULL;
 	ModifyTable *mt;
 	RangeTblEntry *rte;
 	GpPolicy   *policy;
@@ -984,6 +1002,16 @@ gp_modify_planner_routed(Query *parse, const char *query_string, int cursorOptio
 	/* The planner changes the Query; an UPDATE or DELETE may be sent as it was. */
 	if (parse->commandType == CMD_UPDATE || parse->commandType == CMD_DELETE)
 		original = copyObject(parse);
+
+	/* and an INSERT's ON CONFLICT is sent as it was written */
+	if (parse->commandType == CMD_INSERT && parse->onConflict != NULL)
+	{
+		GpPolicy   *target = GpScanDistributedPolicy(rt_fetch(parse->resultRelation,
+															  parse->rtable)->relid);
+
+		if (target != NULL)
+			on_conflict = GpExplicitOnConflict(parse, target);
+	}
 
 	PG_TRY();
 	{
@@ -1005,7 +1033,7 @@ gp_modify_planner_routed(Query *parse, const char *query_string, int cursorOptio
 	if (list_length(mt->resultRelations) != 1)
 	{
 		if (writes_distributed(stmt, mt))
-			stmt->planTree = write_explicitly(stmt, mt);
+			stmt->planTree = write_explicitly(stmt, mt, NULL);
 		return stmt;
 	}
 	rte = rt_fetch(linitial_int(mt->resultRelations), stmt->rtable);
@@ -1018,15 +1046,14 @@ gp_modify_planner_routed(Query *parse, const char *query_string, int cursorOptio
 		CustomScan *cscan;
 		Relation	rel;
 
-		if (mt->onConflictAction != ONCONFLICT_NONE)
-			ereport(ERROR,
-					(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
-					 errmsg("INSERT ... ON CONFLICT into distributed table \"%s\" is not supported yet",
-							get_rel_name(rte->relid))));
-		/* what it wrote comes back from the segments */
-		if (mt->returningLists != NIL)
+		/*
+		 * What it wrote comes back from the segments; and ON CONFLICT is
+		 * each segment's, after its rows' VALUES, which COPY has no place
+		 * for.
+		 */
+		if (mt->returningLists != NIL || mt->onConflictAction != ONCONFLICT_NONE)
 		{
-			stmt->planTree = write_explicitly(stmt, mt);
+			stmt->planTree = write_explicitly(stmt, mt, on_conflict);
 			return stmt;
 		}
 		if (mt->withCheckOptionLists != NIL)
@@ -1088,7 +1115,7 @@ gp_modify_planner_routed(Query *parse, const char *query_string, int cursorOptio
 					 errdetail("%s", why)));
 		if (why != NULL)
 		{
-			stmt->planTree = write_explicitly(stmt, mt);
+			stmt->planTree = write_explicitly(stmt, mt, NULL);
 			return stmt;
 		}
 
