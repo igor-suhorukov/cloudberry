@@ -1933,8 +1933,10 @@ SQL
 	out=$(printf '%s\n' "SET gp.optimizer = on;" "BEGIN;" "SELECT id FROM gdd WHERE id = $r0 FOR UPDATE;" \
 		"SELECT string_agg(mode, ',' ORDER BY mode) FROM pg_locks WHERE relation = 'gdd'::regclass;" \
 		"COMMIT;" | qf 0 | tail -1)
-	[ "$out" = "ExclusiveLock,RowShareLock" ] \
-		&& ok "without it, ORCA's FOR UPDATE takes Cloudberry's table lock, ExclusiveLock" \
+	# ExclusiveLock alone: the parser opened the table in it (O30), as
+	# Cloudberry's parser does, not in RowShareLock that it then upgraded.
+	[ "$out" = "ExclusiveLock" ] \
+		&& ok "without it, ORCA's FOR UPDATE takes Cloudberry's table lock, ExclusiveLock, as the parser opens the table" \
 		|| notok "the table lock for FOR UPDATE without the detector" "$out"
 
 	for n in 1 2 0; do
