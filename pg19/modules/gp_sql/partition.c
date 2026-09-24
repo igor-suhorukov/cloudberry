@@ -88,6 +88,7 @@
 #include "parser/parse_node.h"
 #include "parser/parse_oper.h"
 #include "parser/parse_utilcmd.h"
+#include "parser/parser.h"
 #include "partitioning/partbounds.h"
 #include "partitioning/partdesc.h"
 #include "storage/lmgr.h"
@@ -3130,6 +3131,47 @@ cmd_set_template(Oid origid, Oid relid, GpPartParser *p, GpPartCmd *cmd,
 }
 
 /*
+ * Is this command after ALTER PARTITION one of ALTER TABLE's that set a
+ * distribution policy -- SET DISTRIBUTED BY, RANDOMLY or REPLICATED, SET
+ * WITH (REORGANIZE = ...) with or without one?  Cloudberry allows those of
+ * a leaf, as it allows SET TABLESPACE (ATExecGPPartCmds, tablecmds_gp.c).
+ */
+static bool
+is_set_distributed(const char *text)
+{
+	const char *p = text;
+
+	while (isspace((unsigned char) *p))
+		p++;
+	if (pg_strncasecmp(p, "set", 3) != 0 || !isspace((unsigned char) p[3]))
+		return false;
+	p += 3;
+	while (isspace((unsigned char) *p))
+		p++;
+	return (pg_strncasecmp(p, "distributed", 11) == 0 &&
+			!isalnum((unsigned char) p[11]) && p[11] != '_') ||
+		(pg_strncasecmp(p, "with", 4) == 0 &&
+		 (isspace((unsigned char) p[4]) || p[4] == '('));
+}
+
+/*
+ * The command after ALTER PARTITION as an ALTER TABLE of the partition,
+ * parsed as the user's own text is -- Cloudberry's syntax desugared on the
+ * way (O26) -- and run as a subcommand, so that every hook sees it.
+ */
+static void
+run_on_partition(Oid relid, const char *text, QueryEnvironment *queryEnv)
+{
+	char	   *sql = psprintf("ALTER TABLE %s %s",
+							   quote_qualified_identifier(get_namespace_name(get_rel_namespace(relid)),
+														  get_rel_name(relid)),
+							   text);
+
+	foreach_node(RawStmt, raw, raw_parser(sql, RAW_PARSE_DEFAULT))
+		run_utility(raw->stmt, sql, queryEnv);
+}
+
+/*
  * One of ALTER TABLE's partition commands, on the table the statement names:
  * Cloudberry's ATExecGPPartCmds.  ALTER PARTITION goes down the hierarchy to
  * the partition its command is for.
@@ -3168,10 +3210,12 @@ run_cmd(Oid relid, GpPartParser *p, GpPartCmd *cmd, const char *queryString,
 
 	/*
 	 * A partition that is not partitioned itself can only be moved to
-	 * another tablespace.
+	 * another tablespace, or given a distribution policy.
 	 */
 	rel = table_open(relid, AccessShareLock);
-	if (cmd->kind != GP_PART_CMD_SET_TABLESPACE)
+	if (cmd->kind != GP_PART_CMD_SET_TABLESPACE &&
+		!(cmd->kind == GP_PART_CMD_OTHER &&
+		  is_set_distributed(GpPartSpanText(p, cmd->other))))
 		check_partitioned(rel);
 	table_close(rel, NoLock);
 
@@ -3212,6 +3256,11 @@ run_cmd(Oid relid, GpPartParser *p, GpPartCmd *cmd, const char *queryString,
 			}
 			break;
 		case GP_PART_CMD_OTHER:
+			if (is_set_distributed(GpPartSpanText(p, cmd->other)))
+			{
+				run_on_partition(relid, GpPartSpanText(p, cmd->other), queryEnv);
+				break;
+			}
 			/* Cloudberry's grammar takes any command here; nothing does it */
 			elog(ERROR, "Not implemented");
 			break;

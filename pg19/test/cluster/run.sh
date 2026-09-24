@@ -1527,6 +1527,17 @@ COMMIT;"
 		*) notok "unique indexes and SET DISTRIBUTED" "$out / $out2 / $out3" ;;
 	esac
 
+	# SET DISTRIBUTED after ALTER PARTITION: the leaf's ALTER TABLE, as
+	# Cloudberry allows of a leaf; any other command of a leaf is refused.
+	q 0 "CREATE TABLE xpd (i int, k int) DISTRIBUTED BY (i) PARTITION BY RANGE (i) (START (1) END (10) EVERY (1));" >/dev/null
+	out=$(q 0 "ALTER TABLE xpd ALTER PARTITION FOR (5) SET DISTRIBUTED BY (i);")
+	out2=$(q 0 "ALTER TABLE xpd ALTER PARTITION FOR (5) ADD COLUMN z int;")
+	case "$out|$out2" in
+		*'WARNING:  distribution policy of relation "xpd_1_prt_5" already set to (i)'*'HINT:  Use ALTER TABLE "xpd_1_prt_5" SET WITH (REORGANIZE=TRUE) DISTRIBUTED BY (i) to force redistribution'*"|"*'table "xpd_1_prt_5" is not partitioned'*)
+			ok "ALTER PARTITION FOR (5) SET DISTRIBUTED BY is the leaf's, with Cloudberry's WARNING" ;;
+		*) notok "SET DISTRIBUTED BY after ALTER PARTITION" "$out / $out2" ;;
+	esac
+
 	# A column's operator class: its hash decides the segment, and the table
 	# depends on it, on every node.
 	cat > "$ROOT/absops.sql" <<'SQL'
