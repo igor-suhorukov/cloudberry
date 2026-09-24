@@ -41,6 +41,20 @@
  * crash between the two leaves a file nothing points at; the queue that
  * removes those is Track D's work, with the rest of the storage side.
  *
+ * WAL.  Cloudberry logs nothing of a directory table's files, so a mirror
+ * has none of them.  The port logs them (M4, as the plan decided for Track
+ * D, section 6, question 4), through a WAL resource manager of this
+ * module's own, gp_dirtable: a directory as it is made, a file's bytes as it
+ * is written, a record to each megabyte, and a file or a directory as it is
+ * removed -- for a removal the transaction callback makes, after the commit
+ * or abort record.  A mirror or a standby replays them, and has every local
+ * file its primary has.  A server that replays them must preload gp_sql, as
+ * a server that reads the rest of what the port writes must: without it,
+ * recovery stops at the first such record, with PostgreSQL's FATAL.  A file
+ * a storage server keeps is not on the node, and nothing is logged of it.
+ * A database's directory tables are in its directory, so the replay of DROP
+ * DATABASE takes their files with it.
+ *
  * A directory table in a tablespace that reaches a storage server keeps its
  * files there instead, through the handler a module registered for the
  * server's protocol (gp_storage.h), which is given the server's options and
@@ -60,6 +74,10 @@
 #include <unistd.h>
 
 #include "access/xact.h"
+#include "access/xlog.h"
+#include "access/xlog_internal.h"
+#include "access/xloginsert.h"
+#include "access/xlogreader.h"
 #include "catalog/namespace.h"
 #include "catalog/objectaddress.h"
 #include "catalog/pg_class.h"
@@ -116,6 +134,250 @@ typedef struct DirTableFileAction
 
 static List *dirtable_actions = NIL;
 static bool dirtable_xact_callback_set = false;
+
+/* ------------------------------------------------------------------------- */
+/* WAL                                                                       */
+/* ------------------------------------------------------------------------- */
+
+/*
+ * gp_dirtable's ID, among the custom ones (128-255): not one PostgreSQL's
+ * wiki lists as taken (CustomWALResourceManagers), and not the 199
+ * Cloudberry's PAX uses.
+ */
+#define GP_DIRTABLE_RMGR_ID		198
+
+#define XLOG_GP_DIRTABLE_MKDIR	0x00	/* a table's directory, made */
+#define XLOG_GP_DIRTABLE_WRITE	0x10	/* bytes of a file, at an offset */
+#define XLOG_GP_DIRTABLE_UNLINK 0x20	/* a file, removed */
+#define XLOG_GP_DIRTABLE_RMTREE 0x30	/* a directory and all in it, removed */
+
+/*
+ * A record: the path, relative to the data directory and with its NUL,
+ * follows this, and a WRITE's bytes follow the path.
+ */
+typedef struct xl_gp_dirtable
+{
+	uint64		offset;			/* WRITE: where in the file its bytes go */
+	uint32		pathlen;		/* strlen(path) + 1 */
+} xl_gp_dirtable;
+
+#define SizeOfGpDirtable	(offsetof(xl_gp_dirtable, pathlen) + sizeof(uint32))
+
+/* The most of a file one WRITE record carries. */
+#define GP_DIRTABLE_WAL_CHUNK	(1024 * 1024)
+
+static void dirtable_ensure_dir(const char *path);
+
+/*
+ * Log what was done to a file or directory here, for a replica to do too --
+ * only where there may be one, as PostgreSQL logs a relation's contents
+ * where wal_level is above minimal.
+ */
+static void
+dirtable_wal(uint8 info, const char *path, uint64 offset,
+			 const char *data, uint32 len)
+{
+	xl_gp_dirtable rec;
+
+	rec.offset = offset;
+	rec.pathlen = strlen(path) + 1;
+	XLogBeginInsert();
+	XLogRegisterData(&rec, SizeOfGpDirtable);
+	XLogRegisterData(path, rec.pathlen);
+	if (len > 0)
+		XLogRegisterData(data, len);
+	(void) XLogInsert(GP_DIRTABLE_RMGR_ID, info);
+}
+
+static void
+dirtable_wal_write(const char *path, const char *data, int len)
+{
+	int			offset = 0;
+
+	if (!XLogIsNeeded())
+		return;
+	do
+	{
+		uint32		n = Min(len - offset, GP_DIRTABLE_WAL_CHUNK);
+
+		dirtable_wal(XLOG_GP_DIRTABLE_WRITE, path, offset, data + offset, n);
+		offset += n;
+	} while (offset < len);
+}
+
+/*
+ * A removal, after the transaction's commit or abort record, where nothing
+ * may be raised: a record that could not be written leaves a file on the
+ * replicas, as a crash between the record and the removal would, and says
+ * so.
+ */
+static void
+dirtable_wal_remove(const char *path, bool is_dir)
+{
+	MemoryContext cxt = CurrentMemoryContext;
+
+	if (!XLogIsNeeded() || RecoveryInProgress())
+		return;
+	PG_TRY();
+	{
+		dirtable_wal(is_dir ? XLOG_GP_DIRTABLE_RMTREE : XLOG_GP_DIRTABLE_UNLINK,
+					 path, 0, NULL, 0);
+	}
+	PG_CATCH();
+	{
+		ErrorData  *edata;
+
+		MemoryContextSwitchTo(cxt);
+		edata = CopyErrorData();
+		FlushErrorState();
+		ereport(WARNING,
+				(errmsg("could not log the removal of \"%s\": %s", path,
+						edata->message),
+				 errdetail("A mirror or a standby keeps it.")));
+		FreeErrorData(edata);
+	}
+	PG_END_TRY();
+}
+
+/* The replay, on a mirror, a standby, or this server after a crash. */
+static void
+dirtable_redo(XLogReaderState *record)
+{
+	uint8		info = XLogRecGetInfo(record) & ~XLR_INFO_MASK;
+	char	   *data = XLogRecGetData(record);
+	xl_gp_dirtable rec;
+	const char *path;
+
+	memcpy(&rec, data, SizeOfGpDirtable);
+	path = data + SizeOfGpDirtable;
+
+	switch (info)
+	{
+		case XLOG_GP_DIRTABLE_MKDIR:
+			{
+				char	   *dir = pstrdup(path);	/* pg_mkdir_p() writes on it */
+
+				if (pg_mkdir_p(dir, pg_dir_create_mode) != 0 && errno != EEXIST)
+					ereport(ERROR,
+							(errcode_for_file_access(),
+							 errmsg("could not create directory \"%s\": %m", path)));
+				pfree(dir);
+				break;
+			}
+
+		case XLOG_GP_DIRTABLE_WRITE:
+			{
+				const char *bytes = path + rec.pathlen;
+				uint32		len = XLogRecGetDataLen(record) - SizeOfGpDirtable -
+					rec.pathlen;
+				int			fd;
+
+				dirtable_ensure_dir(path);
+				fd = BasicOpenFile(path, O_WRONLY | O_CREAT | PG_BINARY |
+								   (rec.offset == 0 ? O_TRUNC : 0));
+				if (fd < 0)
+					ereport(ERROR,
+							(errcode_for_file_access(),
+							 errmsg("could not open file \"%s\": %m", path)));
+				if (len > 0 &&
+					pg_pwrite(fd, bytes, len, (off_t) rec.offset) != (ssize_t) len)
+				{
+					int			save_errno = errno;
+
+					close(fd);
+					errno = save_errno ? save_errno : ENOSPC;
+					ereport(ERROR,
+							(errcode_for_file_access(),
+							 errmsg("could not write file \"%s\": %m", path)));
+				}
+				if (pg_fsync(fd) != 0)
+				{
+					int			save_errno = errno;
+
+					close(fd);
+					errno = save_errno;
+					ereport(ERROR,
+							(errcode_for_file_access(),
+							 errmsg("could not fsync file \"%s\": %m", path)));
+				}
+				close(fd);
+				break;
+			}
+
+		case XLOG_GP_DIRTABLE_UNLINK:
+			if (unlink(path) != 0 && errno != ENOENT)
+				ereport(WARNING,
+						(errcode_for_file_access(),
+						 errmsg("could not remove file \"%s\": %m", path)));
+			break;
+
+		case XLOG_GP_DIRTABLE_RMTREE:
+			(void) rmtree(path, true);
+			break;
+
+		default:
+			elog(PANIC, "gp_dirtable_redo: unknown op code %u", info);
+	}
+}
+
+static void
+dirtable_desc(StringInfo buf, XLogReaderState *record)
+{
+	uint8		info = XLogRecGetInfo(record) & ~XLR_INFO_MASK;
+	char	   *data = XLogRecGetData(record);
+	xl_gp_dirtable rec;
+
+	memcpy(&rec, data, SizeOfGpDirtable);
+	appendStringInfoString(buf, data + SizeOfGpDirtable);
+	if (info == XLOG_GP_DIRTABLE_WRITE)
+		appendStringInfo(buf, "; offset " UINT64_FORMAT ", %u bytes", rec.offset,
+						 (uint32) (XLogRecGetDataLen(record) - SizeOfGpDirtable -
+								   rec.pathlen));
+}
+
+static const char *
+dirtable_identify(uint8 info)
+{
+	switch (info & ~XLR_INFO_MASK)
+	{
+		case XLOG_GP_DIRTABLE_MKDIR:
+			return "MKDIR";
+		case XLOG_GP_DIRTABLE_WRITE:
+			return "WRITE";
+		case XLOG_GP_DIRTABLE_UNLINK:
+			return "UNLINK";
+		case XLOG_GP_DIRTABLE_RMTREE:
+			return "RMTREE";
+	}
+	return NULL;
+}
+
+static const RmgrData dirtable_rmgr = {
+	.rm_name = "gp_dirtable",
+	.rm_redo = dirtable_redo,
+	.rm_desc = dirtable_desc,
+	.rm_identify = dirtable_identify,
+};
+
+/* From gp_sql's _PG_init, which only preload runs. */
+void
+GpDirTableRegisterRmgr(void)
+{
+	RegisterCustomRmgr(GP_DIRTABLE_RMGR_ID, &dirtable_rmgr);
+}
+
+/*
+ * A replica has what its primary logs of these files, and nothing may be
+ * written on it: what one wrote would not be on the primary it follows.
+ */
+static void
+dirtable_refuse_in_recovery(const char *what)
+{
+	if (RecoveryInProgress())
+		ereport(ERROR,
+				(errcode(ERRCODE_READ_ONLY_SQL_TRANSACTION),
+				 errmsg("cannot %s during recovery", what)));
+}
 
 static void
 dirtable_remember(const char *path, bool on_commit, bool is_dir)
@@ -236,12 +498,16 @@ dirtable_xact_callback(XactEvent event, void *arg)
 
 		if (act->handler != NULL)
 			dirtable_remove_remote(act);
-		else if (act->is_dir)
-			dirtable_rmtree(act->path);
-		else if (unlink(act->path) != 0 && errno != ENOENT)
-			ereport(WARNING,
-					(errcode_for_file_access(),
-					 errmsg("could not remove file \"%s\": %m", act->path)));
+		else
+		{
+			if (act->is_dir)
+				dirtable_rmtree(act->path);
+			else if (unlink(act->path) != 0 && errno != ENOENT)
+				ereport(WARNING,
+						(errcode_for_file_access(),
+						 errmsg("could not remove file \"%s\": %m", act->path)));
+			dirtable_wal_remove(act->path, act->is_dir);
+		}
 	}
 
 	dirtable_actions = NIL;
@@ -523,6 +789,7 @@ GpDirTableClaim(Oid relid)
 	struct stat st;
 
 	dirtable_require_owner(relid);
+	dirtable_refuse_in_recovery("make a directory table");
 
 	if (GpDirTableLocation(relid) != NULL)
 		ereport(ERROR,
@@ -580,6 +847,8 @@ GpDirTableClaim(Oid relid)
 
 	/* If this transaction rolls back, the directory goes with it. */
 	dirtable_remember(location, false, true);
+	if (XLogIsNeeded())
+		dirtable_wal(XLOG_GP_DIRTABLE_MKDIR, location, 0, NULL, 0);
 
 	ObjectAddressSet(addr, RelationRelationId, relid);
 	GpLabelSet(&addr, GP_LABEL_directory_location, location);
@@ -633,6 +902,7 @@ gp_sql_dirtable_put(PG_FUNCTION_ARGS)
 	GpStorageFile file;
 
 	dirtable_require_owner(relid);
+	dirtable_refuse_in_recovery("write a file of a directory table");
 	path = dirtable_file_path(relid, relative_path, NULL);
 
 	/* A storage server's: written by its handler, which refuses an existing file */
@@ -689,6 +959,7 @@ gp_sql_dirtable_put(PG_FUNCTION_ARGS)
 
 	/* If this transaction rolls back, the file it wrote goes with it. */
 	dirtable_remember(path, false, false);
+	dirtable_wal_write(path, data, len);
 	}
 
 	values[0] = CStringGetTextDatum(relative_path);
@@ -814,6 +1085,7 @@ gp_sql_dirtable_remove(PG_FUNCTION_ARGS)
 	GpStorageFile file;
 
 	dirtable_require_owner(relid);
+	dirtable_refuse_in_recovery("remove a file of a directory table");
 	path = dirtable_file_path(relid, relative_path, NULL);
 
 	initStringInfo(&sql);

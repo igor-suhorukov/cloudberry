@@ -1706,6 +1706,13 @@ _PG_init(void)
 	GpDirTableRegisterXactCallback();
 
 	/*
+	 * The WAL a directory table's files are logged in (dirtable.c), which only
+	 * preload may register, and which a replica replays only with this module
+	 * preloaded too.
+	 */
+	GpDirTableRegisterRmgr();
+
+	/*
 	 * O26: Cloudberry's own spelling of a statement is rewritten into
 	 * PostgreSQL's before the grammar sees it.  See pg19/grammar/.
 	 */

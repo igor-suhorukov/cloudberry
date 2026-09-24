@@ -46,6 +46,7 @@ notok() { printf '  NOT OK %s\n' "$1"
 
 cleanup() {
 	"$BINDIR/pg_ctl" -D "$WORK/data" -m immediate stop > /dev/null 2>&1
+	"$BINDIR/pg_ctl" -D "$WORK/standby" -m immediate stop > /dev/null 2>&1
 	[ -n "${KEEP:-}" ] && echo "kept: $WORK" || rm -rf "$WORK"
 	rm -rf "$SOCK"
 }
@@ -236,6 +237,87 @@ q "DROP TABLE docs;" > /dev/null
 	|| notok "the directory is gone" "$(ls -R "$WORK/data/$LOC" 2>&1 | head -3)"
 is "nothing is listed any more" \
    "SELECT count(*) FROM gp_sql.directory_tables;" "0"
+
+###############################################################################
+echo "9. a standby has every file the node has: they are logged, and it replays them (M4)"
+###############################################################################
+# A hot standby of this node, streaming from it, with gp_sql preloaded as the
+# node has it, which replaying the records takes.
+SB="$WORK/standby"
+SBPORT=$((PORT + 1))
+qs() { "$PSQL" -X -q -t -A -p "$SBPORT" -d postgres -c "$1" 2>&1; }
+caught_up() {				# until the standby has replayed what the node wrote
+	local lsn
+	lsn=$(q "SELECT pg_current_wal_insert_lsn();")
+	for _ in $(seq 150); do
+		[ "$(qs "SELECT pg_last_wal_replay_lsn() >= '$lsn';")" = t ] && return 0
+		sleep 0.2
+	done
+	return 1
+}
+BIG="decode(repeat('ab', 1500000), 'hex')"
+
+"$BINDIR/pg_basebackup" -D "$SB" -X stream -c fast -R > "$WORK/basebackup.log" 2>&1 &&
+	echo "port = $SBPORT" >> "$SB/postgresql.conf" &&
+	"$BINDIR/pg_ctl" -D "$SB" -l "$WORK/standby.log" -w -t 60 start > /dev/null 2>&1
+[ "$(qs "SELECT pg_is_in_recovery();")" = t ] && ok "a hot standby of the node, streaming from it" \
+	|| notok "a hot standby of the node" "$(tail -3 "$WORK/basebackup.log" "$WORK/standby.log")"
+
+q "SELECT gp_sql.create_directory_table('replicated');
+   SELECT gp_sql.directory_table_put('replicated'::regclass, 'dir/one.txt', 'one'::bytea);
+   SELECT gp_sql.directory_table_put('replicated'::regclass, 'big.bin', $BIG);
+   SELECT gp_sql.directory_table_put('replicated'::regclass, 'empty', ''::bytea);
+   SELECT gp_sql.directory_table_put('replicated'::regclass, 'gone.txt', 'gone'::bytea);
+   SELECT gp_sql.remove_file('replicated'::regclass, 'gone.txt');" > /dev/null
+q "BEGIN; SELECT gp_sql.directory_table_put('replicated'::regclass, 'rolled.txt', 'x'::bytea); ROLLBACK;" > /dev/null
+q "SELECT gp_sql.create_directory_table('dropped');
+   SELECT gp_sql.directory_table_put('dropped'::regclass, 'f', 'f'::bytea);" > /dev/null
+RLOC=$(q "SELECT gp_sql.directory_table_location('replicated'::regclass);")
+DLOC=$(q "SELECT gp_sql.directory_table_location('dropped'::regclass);")
+q "DROP TABLE dropped;" > /dev/null
+caught_up || notok "the standby catches up"
+
+for f in dir/one.txt big.bin empty; do
+	cmp -s "$WORK/data/$RLOC/$f" "$SB/$RLOC/$f" || { notok "the standby has $f, byte for byte" "$(ls -l "$SB/$RLOC/$f" 2>&1)"; f=; break; }
+done
+[ -n "$f" ] && ok "the standby has each file written, byte for byte, 1.5 MB of one in two records and nothing of another"
+[ ! -e "$SB/$RLOC/gone.txt" ] && [ ! -e "$SB/$RLOC/rolled.txt" ] \
+	&& ok "and not the one removed, nor the one whose put rolled back" \
+	|| notok "the standby has what was removed or rolled back" "$(ls "$SB/$RLOC")"
+[ -n "$DLOC" ] && [ ! -e "$SB/$DLOC" ] && ok "nor the directory of a table dropped" \
+	|| notok "the standby has a dropped table's directory" "$DLOC"
+is "the standby reads a file as the node does" \
+   "SELECT convert_from(gp_sql.directory_table_get('replicated'::regclass, 'dir/one.txt'), 'UTF8');" "one"
+out=$(qs "SELECT md5(gp_sql.directory_table_get('replicated'::regclass, 'big.bin')) = md5($BIG);")
+[ "$out" = t ] && ok "and on the standby, too" || notok "reading a file on the standby" "$out"
+out=$(qs "SELECT gp_sql.directory_table_put('replicated'::regclass, 'no.txt', 'no'::bytea);")
+case "$out" in
+	*"cannot write a file of a directory table during recovery"*) ok "the standby refuses to write one of its own" ;;
+	*) notok "the standby refuses to write a file" "$out" ;;
+esac
+"$BINDIR/pg_ctl" -D "$SB" -m fast -w stop > /dev/null 2>&1
+
+###############################################################################
+echo "10. a server replaying the records without gp_sql stops, and with it recovers (check 12)"
+###############################################################################
+# A record the next recovery has to replay: written after the checkpoint it
+# starts from, the node then stopped without a checkpoint of its own.
+q "CHECKPOINT;
+   SELECT gp_sql.directory_table_put('replicated'::regclass, 'late.txt', 'late'::bytea);" > /dev/null
+"$BINDIR/pg_ctl" -D "$WORK/data" -m immediate -w stop > /dev/null 2>&1
+rm -f "$WORK/data/$RLOC/late.txt"
+
+"$BINDIR/pg_ctl" -D "$WORK/data" -l "$WORK/log-nogpsql" -o "-c shared_preload_libraries=gp_core" \
+	-w -t 60 start > /dev/null 2>&1
+started=$?
+out=$(grep -o 'FATAL:  resource manager with ID 198 not registered' "$WORK/log-nogpsql" | head -1)
+[ "$started" -ne 0 ] && [ -n "$out" ] \
+	&& ok "without gp_sql preloaded, recovery stops at its record, with PostgreSQL's FATAL" \
+	|| notok "recovery without gp_sql" "started=$started $(grep -E 'FATAL|PANIC' "$WORK/log-nogpsql" | head -3)"
+
+"$BINDIR/pg_ctl" -D "$WORK/data" -l "$WORK/log" -w -t 60 start > /dev/null 2>&1
+is "with it, recovery replays the record, and the file is back" \
+   "SELECT convert_from(gp_sql.directory_table_get('replicated'::regclass, 'late.txt'), 'UTF8');" "late"
 
 echo
 echo "  $pass passed, $fail failed"

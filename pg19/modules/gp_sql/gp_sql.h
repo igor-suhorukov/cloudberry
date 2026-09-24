@@ -191,6 +191,7 @@ extern char *GpDirTableClaim(Oid relid);
 
 /* Registered during preload; drains the files a transaction leaves behind. */
 extern void GpDirTableRegisterXactCallback(void);
+extern void GpDirTableRegisterRmgr(void);
 
 /* storage.c */
 
