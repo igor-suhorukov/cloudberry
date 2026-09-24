@@ -157,6 +157,9 @@ RUN apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-ins
         perl diffutils \
         python3 python3-pygresql \
     && rm -rf /var/lib/apt/lists/*
+# One locale beyond C: a function of Cloudberry's AOCO_Compression sets
+# lc_monetary to en_US.utf8, which its test machines have.
+RUN sed -i 's/^# *\(en_US.UTF-8 UTF-8\)/\1/' /etc/locale.gen && locale-gen
 # The whole prefix, rather than lib/ and share/extension/ separately: where
 # PostgreSQL puts its data files depends on the prefix -- $prefix/share when
 # the prefix ends in "pgsql" or "postgres", $prefix/share/postgresql when it

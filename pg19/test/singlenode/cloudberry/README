@@ -14,9 +14,29 @@ names, and what comes of it: the rows a query over a table that was never
 made would have returned, a later statement in the same transaction refused.
 The reasons, by what brings them, and then each test:
 
-  Append-optimized and column-oriented tables, their catalogs and the bitmap
-  index -- WITH (appendonly=true), orientation, ENCODING, compresstype,
-  pg_appendonly, pg_attribute_encoding, USING bitmap, ao_row: M5.
+  Append-optimized tables, by row and by column, are gp_ao's since M5, with
+  their options, ENCODING, the bitmap index and the catalogs Cloudberry's
+  tests read.  Where they still differ from Cloudberry's it is by the port's
+  design of them (cloudberry.md, "gp_ao"):
+    - a table's rows are in 8K pages of its own relation, after a page of
+      its own, so an empty table is 8192 bytes where Cloudberry's is 0, and
+      a table's size is its pages';
+    - a row's TID is its segment file and its row number there, (33554432,2)
+      in segment file 1 where Cloudberry's is (0,2);
+    - a table by row keeps its rows as MinimalTuples, whose headers compress
+      away, so get_ao_compression_ratio() differs from Cloudberry's for the
+      same rows, and so does a table by column's;
+    - what Cloudberry keeps in relations of each table's -- pg_aoseg's,
+      pg_aovisimap_<oid> and pg_aoblkdir_<oid> and their indexes -- is in
+      gp_ao's own tables, so pg_appendonly's segrelid and the rest are 0 and
+      a query of such a relation finds none;
+    - DELETE ... RETURNING returns the rows it deletes, where Cloudberry
+      refuses it ("feature not supported on appendoptimized relations"): the
+      port fetches a row through its block directory.
+  And PostgreSQL 19's psql, whose \d+ of such a table has no "Compression
+  Type", "Compression Level" and "Block Size" columns, and no footer, which
+  Cloudberry's psql adds: the options are in pg_attribute_encoding, where the
+  tests read them too.
 
   External tables, gpfdist, COPY ... LOG ERRORS and the error log functions,
   FILL MISSING FIELDS, NEWLINE, ESCAPE outside CSV mode: M5, the loading path.
@@ -88,7 +108,14 @@ The reasons, by what brings them, and then each test:
   "cannot alter column ... because it is part of the partition key" has a
   caret; PUBLIC may no longer CREATE in schema public (PostgreSQL 15), so a
   table a role of the test's makes there is refused; and psql's \d+ lists
-  each partition on a line of its own, under "Partitions:".
+  each partition on a line of its own, under "Partitions:", its \dt is
+  headed "List of tables" and has no Storage column, and its \dm is headed
+  "List of materialized views".  A NOTICE that CREATE FUNCTION has made a
+  shell type names the line and column of the type it made.  And cursors:
+  one PostgreSQL can scroll -- one whose plan sorts -- is scrollable, where
+  Cloudberry makes none so, and FETCH BACKWARD in one that is not says
+  "cursor can only scan forward", where Cloudberry's says "backward scan is
+  not supported in this version of Apache Cloudberry".
 
   DECODE and CASE x WHEN IS NOT DISTINCT FROM y, which Cloudberry's parser
   makes a CASE with an operand and the port's rewrite a searched CASE with
@@ -99,33 +126,32 @@ The reasons, by what brings them, and then each test:
 
 The tests
 
-bfv_aggregate (planner, orca)  an append-optimized table, OVER (w) with a
-  frame, a frame offset that reads a column; and under ORCA the
-  GroupAggregate and HashAggregate count_operator() counts, which ORCA
-  chooses otherwise.
+AOCO_Compression  psql's \d+ of its tables by column (above), which is most
+  of it; a NOTICE's position; and the sizes and compression ratios of
+  append-optimized tables.
+AORO_Compression  The size and compression ratio of an append-optimized
+  table.
+aocs  aototal(), which reads pg_aoseg's relation of a table, and the indexes
+  of pg_aovisimap_<oid> and pg_aoblkdir_<oid>; a TID; a compression ratio;
+  psql's \d+; and a cursor's scrolling.
+bfv_aggregate (planner, orca)  OVER (w) with a frame, a frame offset that
+  reads a column; and under ORCA the GroupAggregate and HashAggregate
+  count_operator() counts, which ORCA chooses otherwise.
 bfv_catalog  pg_stat_last_operation (Cloudberry's catalog of when an object
   was last changed), escape_string_warning and standard_conforming_strings =
   off, and one row more in a query over pg_constraint: the table's NOT NULL
   constraint.
-bfv_dd  the bitmap index.
-bfv_index  append-optimized and column-oriented tables, whose compression
-  options a partitioned table is refused for before its access method.
-bfv_partition_plans (planner, orca)  append-optimized and column-oriented
-  tables and the bitmap index, and a plan gpdiff.pl does not take for one
-  after the column-oriented table's statements fail; and under ORCA the
-  Dynamic Seq Scans, Dynamic Index Scans and Partition Selectors that
-  count_operator() and find_operator() find, where Cloudberry's planner makes
-  none.
 bfv_olap  OVER (w) with a frame.
+bfv_partition_plans (orca)  The Dynamic Seq Scans, Dynamic Index Scans and
+  Partition Selectors that count_operator() and find_operator() find under
+  ORCA, where Cloudberry's planner makes none.
 case_gp  The deparse of IS NOT DISTINCT FROM, and of the CASE form, which
   prints as the searched CASE it was rewritten into; blip(1), the operand of
   a CASE with three arms, called three times where Cloudberry calls it once,
   so calls_to_blip has seven rows where it has five and the CASE's answer is
   the same 666; and PostgreSQL 19's DETAIL for "operator does not exist",
   twice.
-cluster_gp  an append-optimized table.
-create_table_like_gp  external tables, append-optimized tables and their
-  catalogs, ENCODING, gp_default_storage_options, ao_row.
+create_table_like_gp  external tables.
 gp_gin_index  the complex type, which Cloudberry's own earlier tests make;
   and the index wowidx and the rows of test_tsvector that PostgreSQL 19's
   tsearch test, which runs before it here, leaves behind (two counts one and
@@ -136,33 +162,29 @@ gp_recursive_cte  gp_recursive_cte, whose "off" Cloudberry's test expects to
 gpcopy  COPY's LOG ERRORS, FILL MISSING FIELDS, NEWLINE and ESCAPE outside
   CSV mode, the error log functions, and the broken_int4 type of
   Cloudberry's regress.so.
-indexjoin  an append-optimized table.
-partition  Every reason above: its templates and gp_partition_template;
-  append-optimized and column-oriented tables, column ENCODING, external
-  tables and COPY ... LOG ERRORS; a role that may not CREATE in schema public;
-  Cloudberry's REVOKE notice; an exclusion constraint PostgreSQL 19 allows;
-  the caret of an error in a partition an ALTER TABLE made; psql's \d+.
-partition1  append-optimized tables -- hhh and foz are, and most of its
-  ALTER TABLE cases are about hhh; PostgreSQL's reading of ALTER TABLE ...
-  DROP partition; the wording and caret of PostgreSQL 19's partition key
-  errors; the bitmap index; psql's \d+.
-partition_ddl  append-optimized tables and their options; "operator does
-  not exist" explained in a DETAIL.
-partition_indexing  the bitmap index, and "UNIQUE constraint on partitioned
-  table".
+matview_ao  psql's \dm.
+partition  Most reasons above: its templates and gp_partition_template;
+  external tables and COPY ... LOG ERRORS; Cloudberry's REVOKE notice; an
+  exclusion constraint PostgreSQL 19 allows; "PRIMARY KEY constraint on
+  partitioned table"; the caret of an error in a partition an ALTER TABLE
+  made; psql's \d+ and \dt.
+partition1  PostgreSQL's reading of ALTER TABLE ... ADD partition and DROP
+  partition; the wording and caret of PostgreSQL 19's partition key errors;
+  psql's \d+.
+partition_ddl  "operator does not exist" explained in a DETAIL, and
+  PostgreSQL's reading of ALTER TABLE ... ADD partition.
+partition_indexing  "UNIQUE constraint on partitioned table".
+partition_storage  psql's \d+ of append-optimized tables.
 partition_unlogged  an unlogged partitioned table, which PostgreSQL 19 has
   none of.
-qp_query_execution (planner, orca)  a column-oriented table; and under ORCA
-  qx_count_operator() of its hash joins and nested loops, which ORCA plans
-  otherwise, counted by the planner's name for each (see above).
-qp_with_clause  append-optimized and column-oriented tables, the bitmap
-  index.
-returning_gp  an append-optimized table.
+qp_query_execution (orca)  qx_count_operator() of its hash joins and nested
+  loops, which ORCA plans otherwise, counted by the planner's name for each
+  (see above).
+returning_gp  DELETE ... RETURNING of an append-optimized table.
 singlenode_compatibility_cbdb  the warning Cloudberry's single-node mode
   gives for DISTRIBUTED BY (the port records the policy, for ORCA and M2),
-  append-optimized tables, and TABLE (...) and anytable.  ALTER TABLE ... SET
-  DISTRIBUTED BY is refused as Cloudberry refuses it in single-node mode.
-subselect_gp  append-optimized tables.
+  and TABLE (...) and anytable.  ALTER TABLE ... SET DISTRIBUTED BY is
+  refused as Cloudberry refuses it in single-node mode.
 subselect_gp2  an external web table.
 tag  Its catalogs are views here, of the port's labels (gp_sql's script
   makes pg_tag, pg_tag_description and Cloudberry's five *_tag_descriptions
@@ -179,4 +201,3 @@ union_gp (planner, orca)  an external table, and a chain of UNIONs over
   NULLs; and under the planner count_operator() of an Append, one where
   Cloudberry's planner has two: PostgreSQL 19 pulls a WITH query's UNION ALL
   up into the UNION ALL that reads it, and ORCA, like Cloudberry, does not.
-update_gp  append-optimized tables.

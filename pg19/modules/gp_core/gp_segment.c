@@ -67,6 +67,10 @@
  * the coordinator's does not gather the segments'.  And pg_stat_activity has
  * Cloudberry's sess_id the same way, activity_session() of its row, the
  * coordinator session the backend works for, as lock_session() gives it.
+ * A view its module labels a catalog ("gp" label key catalog) has
+ * gp_segment_id too: it stands for a catalog table of Cloudberry's --
+ * gp_ao's pg_appendonly and pg_attribute_encoding -- which has it, as every
+ * table of Cloudberry's has, and its rows are the node's that reads them.
  *
  * A replicated table shows no system column on the coordinator, as
  * Cloudberry's shows none outside utility mode (scanRTEForColumn): each
@@ -126,6 +130,7 @@
 #include "gp_dispatch.h"
 #include "gp_gdd.h"
 #include "gp_hash.h"
+#include "gp_label.h"
 #include "gp_policy.h"
 #include "gp_scan.h"
 #include "gp_segment.h"
@@ -345,6 +350,23 @@ nsitem_is_pg_stat_activity(ParseNamespaceItem *nsitem)
 		rte->relid == pg_stat_activity_oid;
 }
 
+/*
+ * Is this entry a view that stands for a catalog table of Cloudberry's --
+ * pg_appendonly, pg_attribute_encoding -- which its module labelled so?
+ * Cloudberry's has gp_segment_id, as every table of its has.
+ */
+static bool
+nsitem_is_catalog_view(ParseNamespaceItem *nsitem)
+{
+	RangeTblEntry *rte = nsitem->p_rte;
+	ObjectAddress view;
+
+	if (rte->rtekind != RTE_RELATION || rte->relkind != RELKIND_VIEW)
+		return false;
+	ObjectAddressSet(view, RelationRelationId, rte->relid);
+	return GpLabelHas(&view, GP_LABEL_catalog);
+}
+
 static bool
 nsitem_has_segment_id(ParseNamespaceItem *nsitem)
 {
@@ -355,7 +377,7 @@ nsitem_has_segment_id(ParseNamespaceItem *nsitem)
 				 rte->relkind == RELKIND_PARTITIONED_TABLE ||
 				 rte->relkind == RELKIND_MATVIEW) &&
 				!hides_system_columns(rte->relid)) ||
-			nsitem_is_pg_locks(nsitem);
+			nsitem_is_pg_locks(nsitem) || nsitem_is_catalog_view(nsitem);
 
 	if (rte->rtekind == RTE_FUNCTION && list_length(rte->functions) == 1)
 	{

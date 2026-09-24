@@ -200,6 +200,16 @@ GRANT SELECT ON pg_catalog.pg_appendonly, pg_catalog.pg_attribute_encoding,
 	pg_catalog.pg_type_encoding, pg_catalog.pg_compression TO PUBLIC;
 
 /*
+ * Each stands for a catalog table of Cloudberry's, which has gp_segment_id,
+ * as every table of Cloudberry's has; gp_core gives a view so labelled the
+ * column too, the node's own content id (gp_segment.c).
+ */
+SECURITY LABEL FOR gp ON VIEW pg_catalog.pg_appendonly IS 'catalog';
+SECURITY LABEL FOR gp ON VIEW pg_catalog.pg_attribute_encoding IS 'catalog';
+SECURITY LABEL FOR gp ON VIEW pg_catalog.pg_type_encoding IS 'catalog';
+SECURITY LABEL FOR gp ON VIEW pg_catalog.pg_compression IS 'catalog';
+
+/*
  * get_ao_compression_ratio(), which Cloudberry has built in, and
  * get_ao_distribution(): how many rows each segment's segment files hold.
  */

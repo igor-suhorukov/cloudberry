@@ -18,7 +18,7 @@
 # under the License.
 #
 # Cloudberry's singlenode regression suite, as the port runs it, against
-# every M1 module.
+# every M1 module and gp_ao, M5's.
 #
 # src/test/singlenode_regress is what Cloudberry runs in its single-node
 # mode: PostgreSQL's regression tests, its parallel_schedule, and then
@@ -42,9 +42,9 @@
 # its expected output alike: input/ and output/ .source files are converted
 # as Cloudberry's pg_regress converts them, which PostgreSQL 19's no longer
 # does; and a setting the port has is spelled as the port spells it --
-# optimizer is gp.optimizer -- because PostgreSQL 19 defines no custom setting
-# without a dot.  A setting the port lacks is left alone, to fail where it
-# would.  Where the port's output still differs for a reason of its own,
+# optimizer is gp.optimizer, and so is the column SHOW names for it --
+# because PostgreSQL 19 defines no custom setting without a dot.  A setting
+# the port lacks is left alone, to fail where it would.  Where the port's output still differs for a reason of its own,
 # expected/ holds the port's -- an alternative for one of PostgreSQL's tests,
 # and the output of the port's own setup, sql/gp_setup.sql, which runs
 # between the two halves -- or orca/ and cloudberry/ a difference reviewed
@@ -121,7 +121,7 @@ run_tests=$(awk '$1 == "run" { print $2 }' "$HERE/manifest")
 groups=($(awk '$1 == "run" && $3 != "" && !seen[$3]++ { print $3 }' "$HERE/manifest"))
 [ "${#groups[@]}" -gt 0 ] || groups=(1)
 
-echo "singlenode: Cloudberry's singlenode suite, with every M1 module loaded"
+echo "singlenode: Cloudberry's singlenode suite, with every M1 module and gp_ao loaded"
 echo "  PostgreSQL's tests from $(cat "$PGSUITE/.pg_ref_commit" 2>/dev/null || echo '?'), the server from $(cat "$("$BINDIR/pg_config" --bindir)/../.pg_ref_commit" 2>/dev/null || echo '?')"
 printf '  of the 290 tests Cloudberry schedules: %d of Cloudberry'"'"'s run here, %d are PostgreSQL'"'"'s, %d lines skip\n' \
 	"$(echo "$run_tests" | wc -w)" \
@@ -137,8 +137,9 @@ echo
 	echo "listen_addresses = ''"
 	echo "port = $PORT"
 	echo "fsync = off"
-	# Every module M1 has, in the order cloudberry.md gives.
-	echo "shared_preload_libraries = 'gp_core,gp_orca,gp_task,gp_matview,gp_sql,gp_security'"
+	# Every module there is to load here, in the order cloudberry.md gives:
+	# M1's, and gp_ao, M5's.
+	echo "shared_preload_libraries = 'gp_core,gp_orca,gp_task,gp_matview,gp_sql,gp_security,gp_ao'"
 	# What pg_regress's own temporary instance sets that a test depends on.
 	echo "max_prepared_transactions = 2"
 } >> "$WORK/data/postgresql.conf"
@@ -159,6 +160,11 @@ while read -r name; do
 			cbname="$short" ;;
 		*) cbname="gp_$short" ;;
 	esac
+	# SHOW's column is named for the setting, so a field of a row read from
+	# it -- FOR r IN EXECUTE 'show optimizer' ... r.optimizer -- is too,
+	# quoted for its dot.  First, so that the gp.optimizer SHOW becomes is
+	# not taken for a field.
+	printf 's/\\b([a-z_][a-z0-9_]*)\\.%s\\b/\\1."%s"/gI\n' "$cbname" "$name"
 	printf 's/\\b(set|reset|show)(\\s+(local|session)\\s+|\\s+)%s\\b/\\1\\2%s/gI\n' "$cbname" "$name"
 	printf "s/\\\\b(current_setting|set_config)\\\\('%s'/\\\\1('%s'/gI\n" "$cbname" "$name"
 done > "$WORK/respell.sed"
@@ -172,9 +178,11 @@ cp -r "$PGSUITE" "$SN"
 # @abs_builddir@ are one directory, and its files use them interchangeably:
 # singlenode_compatibility_cbdb's input loads @abs_builddir@/regress.so where
 # its output says @abs_srcdir@/regress.so.  Here both are the one directory
-# regress.so is in; no test the port runs reads a data file through either.
+# regress.so is in, but for a data file, which is Cloudberry's suite's own:
+# uao_dml_select's COPY FROM @abs_srcdir@/data/city.data.
 convert() {
-	sed -e "s#@abs_srcdir@#$PGSUITE#g" \
+	sed -e "s#@abs_srcdir@/data/#$CB/data/#g" \
+	    -e "s#@abs_srcdir@#$PGSUITE#g" \
 	    -e "s#@abs_builddir@#$PGSUITE#g" \
 	    -e "s#@testtablespace@#$WORK/testtablespace#g" \
 	    -e "s#@libdir@#$PGSUITE#g" \
@@ -188,22 +196,44 @@ cp "$SN/parallel_schedule" "$SN/schedule"
 cp "$HERE"/sql/*.sql "$SN/sql/"
 echo "test: gp_setup" >> "$SN/schedule"
 echo "gp_setup" > "$SN/port_tests"
-for t in $run_tests; do
-	if [ -f "$CB/input/$t.source" ]; then
-		convert "$CB/input/$t.source" | sed -E -f "$WORK/respell.sed" > "$SN/sql/$t.sql"
+# A test in a directory of Cloudberry's -- uao_compaction/basic -- runs as
+# uao_compaction_basic, its files so named: PostgreSQL 19's pg_regress makes
+# no directory under results/ for it.  One whose .source is in a directory
+# with GENERATE_ROW_AND_COLUMN_FILES -- input/uao_dml/uao_dml_select -- is
+# made twice, as Cloudberry's pg_regress makes it: uao_dml/uao_dml_select_row
+# and _column, @amname@ and @aoseg@ filled in for the one or the other.
+amsub() {
+	if [ -n "$am" ]; then
+		sed -e "s/@amname@/$am/g" -e "s/@aoseg@/$aoseg/g"
 	else
-		sed -E -f "$WORK/respell.sed" "$CB/sql/$t.sql" > "$SN/sql/$t.sql"
+		cat
 	fi
-	if [ -f "$CB/output/$t.source" ]; then
-		convert "$CB/output/$t.source" | sed -E -f "$WORK/respell.sed" > "$SN/expected/$t.out"
+}
+for t in $run_tests; do
+	f=$(echo "$t" | tr / _)
+	src=$t am=
+	for v in row:ao_row:aoseg column:ao_column:aocsseg; do
+		IFS=: read -r suffix a s <<< "$v"
+		if [ "${t%_$suffix}" != "$t" ] && [ -f "$CB/input/$(dirname "$t")/GENERATE_ROW_AND_COLUMN_FILES" ]; then
+			src=${t%_$suffix} am=$a aoseg=$s
+		fi
+	done
+	if [ -f "$CB/input/$src.source" ]; then
+		convert "$CB/input/$src.source" | amsub | sed -E -f "$WORK/respell.sed" > "$SN/sql/$f.sql"
 	else
-		for f in "$CB/expected/$t.out" "$CB"/expected/"$t"_[0-9].out; do
-			[ -f "$f" ] && sed -E -f "$WORK/respell.sed" "$f" > "$SN/expected/$(basename "$f")"
+		sed -E -f "$WORK/respell.sed" "$CB/sql/$t.sql" > "$SN/sql/$f.sql"
+	fi
+	if [ -f "$CB/output/$src.source" ]; then
+		convert "$CB/output/$src.source" | amsub | sed -E -f "$WORK/respell.sed" > "$SN/expected/$f.out"
+	else
+		for e in "$CB/expected/$t.out" "$CB"/expected/"$t"_[0-9].out; do
+			[ -f "$e" ] || continue
+			sed -E -f "$WORK/respell.sed" "$e" > "$SN/expected/$(echo "${e#"$CB"/expected/}" | tr / _)"
 		done
 	fi
 	g=$(awk -v t="$t" '$1 == "run" && $2 == t { print $3 }' "$HERE/manifest")
-	echo "test: $t" >> "$SN/schedule.${g:-${groups[0]}}"
-	echo "$t" >> "$SN/cloudberry_tests"
+	echo "test: $f" >> "$SN/schedule.${g:-${groups[0]}}"
+	echo "$f" >> "$SN/cloudberry_tests"
 done
 # The port's: an alternative for a test of PostgreSQL's, or the whole
 # expected output of one of Cloudberry's.

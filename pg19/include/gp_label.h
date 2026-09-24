@@ -67,7 +67,8 @@
 	X(storage_server,  true,  "the storage server a tablespace's files, or a directory table's, go through") \
 	X(locked_until,    true,  "when a password profile stops locking a role out") \
 	X(failed_logins,   true,  "how many times in a row a role has failed to log in") \
-	X(partition_templates, true, "a partitioned table's SUBPARTITION TEMPLATEs, per level")
+	X(partition_templates, true, "a partitioned table's SUBPARTITION TEMPLATEs, per level") \
+	X(catalog,         false, "this view stands for a catalog table of Cloudberry's, whose rows have gp_segment_id")
 
 typedef enum GpLabelKey
 {

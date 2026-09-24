@@ -11,6 +11,13 @@ m/^ Optimizer: GPORCA$/
 
 -- start_matchsubs
 
+# An access method's OID, where a test prints one: partition's rows of
+# mpp5992 and its relam.  Cloudberry's ao_column is 7166 in its catalog; the
+# port's is whatever gp_ao's CREATE EXTENSION was given, which differs from
+# run to run.  Masked on both sides.
+m/^ mpp5992\w* +\| +\d+ \| *(FOR VALUES .*)?$/
+s/\| +\d+ \|/| relam |/
+
 # Cloudberry's init_file drops "set enable_parallel = off;" and its reset,
 # which its tests carry and its expected files do not; the harness has
 # respelled them as the port spells the setting (gp_settings.c).

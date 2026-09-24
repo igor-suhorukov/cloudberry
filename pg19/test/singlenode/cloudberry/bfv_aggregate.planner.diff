@@ -30,18 +30,3 @@
 +LINE 3:    sum(val) over (w),
 +                         ^
 +HINT:  Omit the parentheses in this OVER clause.
-@@
-+ERROR:  unrecognized parameter "appendonly"
-@@
-+ERROR:  relation "mtup1" does not exist
-+LINE 1: insert into mtup1 values
-+                    ^
-@@
-- c0  |     c1      | array_length 
-------+-------------+--------------
-- foo | 2015-09-1.1 |         5670
--(1 row)
--
-+ERROR:  relation "mtup1" does not exist
-+LINE 1137: from mtup1 where c0 = 'foo' group by c0, c1 limit 10;
-+                ^

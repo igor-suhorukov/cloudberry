@@ -1,17 +1,22 @@
 # Cloudberry's singlenode_regress suite, as the port runs it: every test of
 # its two schedules, in their order, with what the port does with it.
 #
-#   run   the test runs here, against every M1 module.  A third word names
-#         the group it runs in, which is its first group when there is none:
-#         PostgreSQL's tests run first, and then each group of Cloudberry's
-#         on a copy of the server they leave, the groups side by side, each
-#         in this order.  The groups are cut by ORCA's time, in the order of
-#         the tests, so that a test still follows the ones it followed.
+#   run   the test runs here, against every M1 module and gp_ao, M5's.  A
+#         third word names the group it runs in, which is its first group
+#         when there is none: PostgreSQL's tests run first, and then each
+#         group of Cloudberry's on a copy of the server they leave, the
+#         groups side by side, each in this order.  The groups are cut by
+#         ORCA's time, in the order of the tests, so that a test still
+#         follows the ones it followed.
 #   pg    one of PostgreSQL's own regression tests, in Cloudberry's copy of
 #         it for PostgreSQL 14; the pgregress suite runs PostgreSQL 19's
-#   skip  it needs what M1 does not have, which the rest of the line says
+#   skip  it needs what the port does not have, which the rest of the line
+#         says
 #
-# Tests in uao_compaction/, uaocs_compaction/ and uao_dml/ are one line each.
+# A test in a directory is named with it, uao_compaction/basic; one that
+# Cloudberry's pg_regress makes twice from one file, for a row-oriented and a
+# column-oriented table, is named as it names the two, uao_dml/..._row and
+# uao_dml/..._column.
 pg   tablespace
 pg   boolean
 pg   char
@@ -143,8 +148,8 @@ pg   password
 pg   identity
 pg   generated
 pg   join_hash
-skip appendonly_sample  append-optimized tables, M5
-skip aocs_sample  append-optimized tables, M5
+run  appendonly_sample                                    cb1
+run  aocs_sample                                          cb1
 pg   brin_bloom
 pg   brin_multi
 pg   create_table_like
@@ -236,9 +241,9 @@ run  limit_gp                                             cb1
 run  join_gp                                              cb1
 run  union_gp                                             cb1
 run  create_table_like_gp                                 cb1
-skip matview_ao  append-optimized tables, M5
+run  matview_ao                                           cb1
 run  gpcopy                                               cb1
-skip incremental_analyze  append-optimized tables, M5
+skip incremental_analyze  a partitioned table's statistics merged from its leaves' with HyperLogLog, and ANALYZE ROOTPARTITION (Track A 2.12)
 run  indexjoin                                            cb1
 skip workfile/hashagg_spill  the workfile manager and its views; Track B's spill-file hook is not built
 skip workfile/hashjoin_spill  the workfile manager and its views; Track B's spill-file hook is not built
@@ -251,16 +256,16 @@ run  subselect_gp2                                        cb1
 run  partition                                            cb2
 run  partition1                                           cb2
 run  partition_indexing                                   cb2
-skip partition_storage  append-optimized tables, M5
+run  partition_storage                                    cb2
 run  partition_ddl                                        cb2
 run  partition_with_user_defined_function                 cb2
 run  partition_unlogged                                   cb2
 run  partition_subquery                                   cb2
 run  partition_with_user_defined_function_that_truncates  cb2
-skip brin_ao  append-optimized tables, M5
-skip brin_aocs  append-optimized tables, M5
-skip aoco_privileges  append-optimized tables, M5
-skip aocs  append-optimized tables, M5
+run  brin_ao                                              cb2
+run  brin_aocs                                            cb2
+run  aoco_privileges                                      cb2
+run  aocs                                                 cb2
 skip resource_queue  resource queues, M6
 skip resource_queue_function  resource queues, M6
 run  bfv_dd                                               cb2
@@ -276,10 +281,33 @@ run  qp_with_clause                                       cb3
 run  qp_query_execution                                   cb3
 run  qp_left_anti_semi_join                               cb3
 run  qp_union_intersect                                   cb3
-skip uao_compaction/*  append-optimized tables, M5
-skip uaocs_compaction/*  append-optimized tables, M5
-skip uao_dml/*  append-optimized tables, M5
-skip AOCO_Compression  append-optimized tables, M5
-skip AORO_Compression  append-optimized tables, M5
+run  uao_compaction/full                                  cb3
+run  uao_compaction/outdated_partialindex                 cb3
+run  uao_compaction/drop_column_update                    cb3
+run  uao_compaction/eof_truncate                          cb3
+run  uao_compaction/basic                                 cb3
+run  uao_compaction/outdatedindex                         cb3
+run  uao_compaction/update_toast                          cb3
+run  uao_compaction/outdatedindex_abort                   cb3
+run  uao_compaction/delete_toast                          cb3
+run  uao_compaction/alter_table_analyze                   cb3
+run  uao_compaction/full_eof_truncate                     cb3
+run  uao_compaction/full_threshold                        cb3
+run  uaocs_compaction/alter_table_analyze                 cb3
+run  uaocs_compaction/basic                               cb3
+run  uaocs_compaction/drop_column_update                  cb3
+run  uaocs_compaction/eof_truncate                        cb3
+run  uaocs_compaction/full                                cb3
+run  uaocs_compaction/full_eof_truncate                   cb3
+run  uaocs_compaction/full_threshold                      cb3
+run  uaocs_compaction/outdated_partialindex               cb3
+run  uaocs_compaction/outdatedindex                       cb3
+run  uaocs_compaction/outdatedindex_abort                 cb3
+run  uao_dml/uao_dml_cursor_row                           cb3
+run  uao_dml/uao_dml_select_row                           cb3
+run  uao_dml/uao_dml_cursor_column                        cb3
+run  uao_dml/uao_dml_select_column                        cb3
+run  AOCO_Compression                                     cb3
+run  AORO_Compression                                     cb3
 skip matview_data  AQUMV's bookkeeping in gp_matview_aux, which is not built
 run  singlenode_compatibility_cbdb                        cb3

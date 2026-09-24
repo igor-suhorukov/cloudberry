@@ -1,11 +1,7 @@
 @@
-+ERROR:  unrecognized parameter "appendonly"
-@@
-+ERROR:  relation "returning_aotab" does not exist
-+LINE 1: INSERT INTO returning_aotab VALUES (1);
-+                    ^
-@@
 -ERROR:  feature not supported on appendoptimized relations
-+ERROR:  relation "returning_aotab" does not exist
-+LINE 1: DELETE FROM returning_aotab RETURNING *;
-+                    ^
++ id 
++----
++  1
++(1 row)
++

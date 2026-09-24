@@ -10,13 +10,13 @@ expected output of one of the port's own, in ../sql.
 
 gp_setup.out
     The port's setup, run after PostgreSQL's tests and before Cloudberry's:
-    it creates the extensions of every M1 module, whose SQL objects
-    Cloudberry's tests use and Cloudberry has built in.
+    it creates the extensions of every M1 module and of gp_ao, whose SQL
+    objects Cloudberry's tests use and Cloudberry has built in.
 
 security_label_9.out
     PostgreSQL's test runs its unqualified SECURITY LABEL statements where
     no label provider is loaded, and expects "no security label providers
-    have been loaded".  The port's modules register three -- gp, gp_tag and
-    gp_profile -- so the same statements are refused with "must specify
-    provider when multiple security label providers have been loaded".
-    Six lines, each that message; nothing else differs.
+    have been loaded".  The port's modules register four -- gp, gp_tag,
+    gp_profile and gp_ao -- so the same statements are refused with "must
+    specify provider when multiple security label providers have been
+    loaded".  Six lines, each that message; nothing else differs.
