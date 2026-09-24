@@ -92,6 +92,7 @@
 #include "gp_core_api.h"
 #include "gp_dispatch.h"
 #include "gp_label.h"
+#include "gp_scan.h"
 
 /*
  * What a dispatched statement's text starts with.  Only a dispatched backend
@@ -740,6 +741,10 @@ gp_ddl_ProcessUtility(PlannedStmt *pstmt, const char *queryString,
 	{
 		next_ProcessUtility(pstmt, queryString, readOnlyTree, context,
 							params, queryEnv, dest, qc);
+
+		/* ANALYZE: the all-visible pages are the segments' (gp_analyze.c) */
+		if (IsA(parsetree, VacuumStmt))
+			GpAnalyzeSegmentCounts((VacuumStmt *) parsetree);
 		return;
 	}
 
@@ -783,6 +788,10 @@ gp_ddl_ProcessUtility(PlannedStmt *pstmt, const char *queryString,
 
 	if (IsA(parsetree, IndexStmt) && !((IndexStmt *) parsetree)->concurrent)
 		sync_indcheckxmin(recorded);
+
+	/* VACUUM: what it counted is the segments' (gp_analyze.c) */
+	if (IsA(parsetree, VacuumStmt))
+		GpAnalyzeSegmentCounts((VacuumStmt *) parsetree);
 
 	recorded = NIL;
 	MemoryContextReset(ddl_cxt);

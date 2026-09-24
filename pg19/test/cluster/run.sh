@@ -925,6 +925,37 @@ mine" ] && ok "a transaction reads its own rows, and a LIMIT leaves the connecti
 		&& ok "a partitioned table is analyzed through its partitions" \
 		|| notok "ANALYZE of a partitioned table" "$out / inherited stats: $out2"
 
+	# The coordinator's own VACUUM of its empty copy counts nothing, and its
+	# own ANALYZE nothing all-visible; Cloudberry's bring back the segments'
+	# counts, and so do these.
+	q 0 "CREATE INDEX st_a ON st (a);" >/dev/null
+	q 0 "VACUUM st;" >/dev/null
+	out=$(q 0 "SELECT relpages || ' ' || reltuples || ' ' || relallvisible
+	             FROM pg_class WHERE relname = 'st';")
+	out2=$(q 0 "SELECT sum(relpages) || ' ' || sum(reltuples) || ' ' || sum(relallvisible)
+	              FROM gp_dist_random('pg_class') WHERE relname = 'st';")
+	[ "$out" = "$out2" ] && [ "${out%% *}" != "0" ] \
+		&& ok "VACUUM brings back the segments' pages, rows and all-visible pages" \
+		|| notok "VACUUM of a distributed table's counts" "$out, segments: $out2"
+	out=$(q 0 "SELECT relpages || ' ' || reltuples FROM pg_class WHERE relname = 'st_a';")
+	out2=$(q 0 "SELECT sum(relpages) || ' ' || sum(reltuples)
+	              FROM gp_dist_random('pg_class') WHERE relname = 'st_a';")
+	[ "$out" = "$out2" ] && [ "${out%% *}" != "0" ] \
+		&& ok "and its indexes' pages and rows" \
+		|| notok "VACUUM of an index's counts" "$out, segments: $out2"
+	q 0 "ANALYZE st;" >/dev/null
+	out=$(q 0 "SELECT relallvisible FROM pg_class WHERE relname = 'st';")
+	out2=$(q 0 "SELECT sum(relallvisible) FROM gp_dist_random('pg_class') WHERE relname = 'st';")
+	[ "$out" = "$out2" ] && [ "$out" != "0" ] \
+		&& ok "ANALYZE keeps the segments' all-visible pages, where its own count is none" \
+		|| notok "ANALYZE of the all-visible pages" "$out, segments: $out2"
+	q 0 "VACUUM rst;" >/dev/null
+	out=$(q 0 "SELECT relpages || ' ' || reltuples FROM pg_class WHERE relname = 'rst';")
+	out2=$(q 1 "SELECT relpages || ' ' || reltuples FROM pg_class WHERE relname = 'rst';")
+	[ "$out" = "$out2" ] && [ "$out" != "0 0" ] \
+		&& ok "a replicated table's are one segment's worth" \
+		|| notok "VACUUM of a replicated table" "$out, one segment: $out2"
+
 	# On a segment, a utility session analyzes the rows it has, as vanilla does.
 	own=$(q 1 "SELECT count(*) FROM st;")
 	q 1 "ANALYZE st;" >/dev/null
@@ -1260,10 +1291,12 @@ COMMIT;"
 
 	# EXPLAIN ANALYZE describes a fragment the coordinator never runs; an
 	# index scan in it has searched nothing here, and says so, where it once
-	# stopped the coordinator (qp_join_union_all).
+	# stopped the coordinator (qp_join_union_all).  A column the index does
+	# not hold, so that the scan is not an index-only one, which ORCA chooses
+	# now that it knows the segments' all-visible pages.
 	q 0 "CREATE INDEX o_b ON o (b); ANALYZE o;" >/dev/null
 	out=$(printf '%s\n' "SET enable_seqscan = off;" \
-		"EXPLAIN (ANALYZE, COSTS OFF, TIMING OFF, SUMMARY OFF) SELECT count(*) FROM o WHERE b = 3;" | qf 0)
+		"EXPLAIN (ANALYZE, COSTS OFF, TIMING OFF, SUMMARY OFF) SELECT count(c) FROM o WHERE b = 3;" | qf 0)
 	case "$out" in
 		*"Index Scan using o_b on o (never executed)"*"Index Searches: 0"*) ok "EXPLAIN ANALYZE of an index scan in a fragment, which the coordinator never ran" ;;
 		*) notok "EXPLAIN ANALYZE of an index scan in a fragment" "$out" ;;

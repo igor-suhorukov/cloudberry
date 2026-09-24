@@ -14,11 +14,9 @@ _optimizer output, which the orca pass is compared with
   side do not deadlock.  The planner reads each partition through a Gather
   Motion of its own under an Append, where Cloudberry gathers one Append
   from the segments; ORCA's Dynamic Scan is shown with the scan it runs on
-  each partition beneath it.  For the query the index covers, ORCA picks an
-  index scan where Cloudberry's picks an index-only one: the coordinator's
-  pg_class holds its own count of all-visible pages, none, where Cloudberry's
-  VACUUM brings back the sum of the segments' (vacuum.c), so ORCA costs the
-  heap fetches an index-only scan would have saved.
+  each partition beneath it.  For the query the index covers, ORCA picks the
+  index-only scan Cloudberry's picks, since VACUUM brings back the segments'
+  all-visible pages to the coordinator, as Cloudberry's does (vacuum.c).
 
 distributed_snapshot  four things of Cloudberry's that the port does not
   have, and nothing of the distributed snapshots the test is for.

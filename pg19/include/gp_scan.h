@@ -78,6 +78,14 @@ extern void GpModifyLockPartitions(Oid relid, LOCKMODE lockmode);
 extern void GpAnalyzeInit(void);
 
 /*
+ * After a VACUUM or ANALYZE of distributed tables on the coordinator: the
+ * pages, rows and all-visible pages the segments count of them, in the
+ * coordinator's pg_class (gp_analyze.c).
+ */
+struct VacuumStmt;
+extern void GpAnalyzeSegmentCounts(struct VacuumStmt *stmt);
+
+/*
  * The ctid the coordinator's plan knows a segment's row by -- the row at
  * "tid" on segment "content" -- in the statement "estate" runs: what a
  * gather of a table an UPDATE or DELETE changes gives each row it reads.

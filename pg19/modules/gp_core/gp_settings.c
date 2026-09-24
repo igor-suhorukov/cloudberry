@@ -79,6 +79,7 @@
 
 #include "gp_cluster.h"
 #include "gp_core_api.h"
+#include "gp_scan.h"
 #include "gp_settings.h"
 
 /* ------------------------------------------------------------------------- */
@@ -278,6 +279,7 @@ issue_analyze(Oid relid)
 		pushed = true;
 	}
 	ExecVacuum(pstate, stmt, false);
+	GpAnalyzeSegmentCounts(stmt);
 	if (pushed)
 		PopActiveSnapshot();
 	free_parsestate(pstate);

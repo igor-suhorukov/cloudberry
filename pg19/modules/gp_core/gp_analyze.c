@@ -53,12 +53,19 @@
 
 #include <math.h>
 
+#include "access/genam.h"
+#include "access/heapam.h"
 #include "access/htup_details.h"
+#include "access/multixact.h"
+#include "access/stratnum.h"
 #include "access/table.h"
 #include "access/tableam.h"
+#include "catalog/indexing.h"
 #include "catalog/namespace.h"
 #include "catalog/pg_class.h"
+#include "catalog/pg_inherits.h"
 #include "catalog/pg_type.h"
+#include "commands/defrem.h"
 #include "commands/vacuum.h"
 #include "common/pg_prng.h"
 #include "executor/tuptable.h"
@@ -68,12 +75,16 @@
 #include "parser/parse_func.h"
 #include "postmaster/autovacuum.h"
 #include "storage/bufmgr.h"
+#include "storage/lmgr.h"
 #include "storage/proc.h"
 #include "storage/read_stream.h"
 #include "utils/acl.h"
 #include "utils/builtins.h"
+#include "utils/fmgroids.h"
+#include "utils/hsearch.h"
 #include "utils/lsyscache.h"
 #include "utils/rel.h"
+#include "utils/relcache.h"
 #include "utils/sampling.h"
 #include "utils/sortsupport.h"
 #include "utils/tuplestore.h"
@@ -534,6 +545,258 @@ gp_analyze_sample_rows(Relation relation, AnalyzeSampleRowsFunc *func,
 	*totalpages = (BlockNumber) Min(bytes / BLCKSZ, (double) MaxBlockNumber);
 	*func = distributed_sample_rows;
 	return true;
+}
+
+/* ------------------------------------------------------------------------- */
+/* What the segments count, brought back                                     */
+/* ------------------------------------------------------------------------- */
+
+/* One relation's counts, summed over the segments that reported it. */
+typedef struct SegmentCounts
+{
+	Oid			relid;			/* the hash key */
+	Oid			table;			/* the table it is, or whose index */
+	double		pages;
+	double		tuples;
+	double		allvisible;
+	double		allfrozen;
+	int			nsegs;
+} SegmentCounts;
+
+/*
+ * The relations a VACUUM or ANALYZE statement took whose rows are on the
+ * segments: each one it named, a partitioned table's leaves for it, or,
+ * when it named none, every table of the database, as get_all_vacuum_rels()
+ * takes them -- those the user may maintain, the others having been passed
+ * over with a warning.
+ */
+static List *
+distributed_relids(VacuumStmt *stmt)
+{
+	List	   *candidates = NIL;
+	List	   *result = NIL;
+
+	if (stmt->rels == NIL)
+	{
+		Relation	pgclass = table_open(RelationRelationId, AccessShareLock);
+		TableScanDesc scan = table_beginscan_catalog(pgclass, 0, NULL);
+		HeapTuple	tuple;
+
+		while ((tuple = heap_getnext(scan, ForwardScanDirection)) != NULL)
+		{
+			Form_pg_class form = (Form_pg_class) GETSTRUCT(tuple);
+
+			if (form->relkind == RELKIND_RELATION)
+				candidates = lappend_oid(candidates, form->oid);
+		}
+		table_endscan(scan);
+		table_close(pgclass, AccessShareLock);
+	}
+	else
+	{
+		foreach_node(VacuumRelation, vrel, stmt->rels)
+		{
+			Oid			relid = OidIsValid(vrel->oid) ? vrel->oid
+				: RangeVarGetRelid(vrel->relation, NoLock, true);
+
+			if (!OidIsValid(relid))
+				continue;
+			if (get_rel_relkind(relid) == RELKIND_PARTITIONED_TABLE)
+				candidates = list_concat(candidates,
+										 find_all_inheritors(relid, NoLock, NULL));
+			else
+				candidates = lappend_oid(candidates, relid);
+		}
+	}
+
+	foreach_oid(relid, candidates)
+	{
+		if (get_rel_relkind(relid) == RELKIND_RELATION &&
+			pg_class_aclcheck(relid, GetUserId(), ACL_MAINTAIN) == ACLCHECK_OK &&
+			GpScanDistributedPolicy(relid) != NULL)
+			result = list_append_unique_oid(result, relid);
+	}
+	return result;
+}
+
+static void
+note_relation(HTAB *counts, List **order, Oid relid, Oid table, StringInfo oids)
+{
+	bool		found;
+	SegmentCounts *c = hash_search(counts, &relid, HASH_ENTER, &found);
+
+	if (found)
+		return;
+	memset(c, 0, sizeof(SegmentCounts));
+	c->relid = relid;
+	c->table = table;
+	*order = lappend_oid(*order, relid);
+	appendStringInfo(oids, "%s%u", oids->len > 0 ? "," : "", relid);
+}
+
+/*
+ * The pages and rows pg_class has for a relation now.  Read from the catalog
+ * rather than the caches: ANALYZE has just updated them in place.
+ */
+static void
+current_counts(Oid relid, BlockNumber *pages, double *tuples)
+{
+	Relation	pgclass = table_open(RelationRelationId, AccessShareLock);
+	ScanKeyData key;
+	SysScanDesc scan;
+	HeapTuple	tuple;
+
+	*pages = 0;
+	*tuples = -1;
+	ScanKeyInit(&key, Anum_pg_class_oid, BTEqualStrategyNumber, F_OIDEQ,
+				ObjectIdGetDatum(relid));
+	scan = systable_beginscan(pgclass, ClassOidIndexId, true, NULL, 1, &key);
+	if ((tuple = systable_getnext(scan)) != NULL)
+	{
+		*pages = (BlockNumber) Max(((Form_pg_class) GETSTRUCT(tuple))->relpages, 0);
+		*tuples = ((Form_pg_class) GETSTRUCT(tuple))->reltuples;
+	}
+	systable_endscan(scan);
+	table_close(pgclass, AccessShareLock);
+}
+
+/*
+ * After a VACUUM or ANALYZE of distributed tables on the coordinator: what
+ * the segments count of them, brought back to its pg_class, as Cloudberry's
+ * vac_update_relstats_from_list() and AcquireNumberOfAllVisibleBlocks() bring
+ * it back (vacuum.c, analyze.c).  The coordinator's copy of such a table is
+ * empty, so its own VACUUM counts no pages, no rows and nothing all-visible,
+ * and its own ANALYZE nothing all-visible -- the pages and rows ANALYZE
+ * writes are the segments', through O3.  ORCA then costs an index-only scan
+ * as though every row had to be fetched, and after a plain VACUUM both
+ * planners read a table of rows as an empty one until the next ANALYZE.
+ *
+ * After a VACUUM: the pages, rows, all-visible and all-frozen pages of each
+ * table, and the pages and rows of its indexes.  After an ANALYZE: the
+ * all-visible and all-frozen pages alone.  Summed over the segments -- a
+ * replicated table's over one segment's worth -- and written only when every
+ * segment answered, as Cloudberry's are.  A pg_class row is written in place,
+ * which PostgreSQL 19 allows under ShareUpdateExclusiveLock on the table, as
+ * VACUUM and ANALYZE hold it: taken table by table in OID order, so that two
+ * of these never wait for each other.
+ */
+void
+GpAnalyzeSegmentCounts(VacuumStmt *stmt)
+{
+	bool		vacuumed = stmt->is_vacuumcmd;
+	List	   *tables;
+	List	   *order = NIL;
+	HASHCTL		ctl;
+	HTAB	   *counts;
+	SegmentCounts *c;
+	StringInfoData oids;
+	char	  **values;
+	int			nsegs;
+
+	if (GpClusterBackendRole() != GP_ROLE_DISPATCH)
+		return;
+	foreach_node(DefElem, opt, stmt->options)
+	{
+		/* VACUUM (ONLY_DATABASE_STATS) takes no relation */
+		if (strcmp(opt->defname, "only_database_stats") == 0 && defGetBoolean(opt))
+			return;
+	}
+	tables = distributed_relids(stmt);
+	if (tables == NIL)
+		return;
+
+	ctl.keysize = sizeof(Oid);
+	ctl.entrysize = sizeof(SegmentCounts);
+	ctl.hcxt = CurrentMemoryContext;
+	counts = hash_create("gp_core segment counts", list_length(tables) * 2,
+						 &ctl, HASH_ELEM | HASH_BLOBS | HASH_CONTEXT);
+	initStringInfo(&oids);
+	list_sort(tables, list_oid_cmp);
+	foreach_oid(table, tables)
+	{
+		note_relation(counts, &order, table, table, &oids);
+		if (vacuumed)
+		{
+			Relation	rel = try_relation_open(table, AccessShareLock);
+
+			if (rel == NULL)
+				continue;
+			foreach_oid(index, RelationGetIndexList(rel))
+				note_relation(counts, &order, index, table, &oids);
+			relation_close(rel, AccessShareLock);
+		}
+	}
+
+	GpClusterSegments(&nsegs);
+	values = palloc0_array(char *, Max(nsegs, 1));
+	GpDispatchQueryFirstValues(psprintf("SELECT pg_catalog.string_agg(oid || ' ' || relpages || ' ' ||"
+										" reltuples || ' ' || relallvisible || ' ' || relallfrozen, ',')"
+										"  FROM pg_catalog.pg_class WHERE oid IN (%s)",
+										oids.data),
+							   -1, values);
+	for (int i = 0; i < nsegs; i++)
+	{
+		char	   *save = NULL;
+
+		if (values[i] == NULL)
+			continue;
+		for (char *tok = strtok_r(values[i], ",", &save); tok != NULL;
+			 tok = strtok_r(NULL, ",", &save))
+		{
+			Oid			relid;
+			double		pages,
+						tuples,
+						allvisible,
+						allfrozen;
+
+			if (sscanf(tok, "%u %lf %lf %lf %lf", &relid, &pages, &tuples,
+					   &allvisible, &allfrozen) != 5 ||
+				(c = hash_search(counts, &relid, HASH_FIND, NULL)) == NULL)
+				continue;
+			c->pages += pages;
+			c->tuples += Max(tuples, 0);
+			c->allvisible += allvisible;
+			c->allfrozen += allfrozen;
+			c->nsegs++;
+		}
+	}
+
+	foreach_oid(relid, order)
+	{
+		GpPolicy   *policy;
+		double		share;
+		Relation	rel;
+		BlockNumber pages;
+		double		tuples;
+		BlockNumber allvisible;
+		BlockNumber allfrozen;
+
+		c = hash_search(counts, &relid, HASH_FIND, NULL);
+		if (c->relid == c->table)
+			LockRelationOid(c->table, ShareUpdateExclusiveLock);
+		if (c->nsegs < nsegs ||
+			(policy = GpScanDistributedPolicy(c->table)) == NULL ||
+			(rel = try_relation_open(c->relid, AccessShareLock)) == NULL)
+			continue;
+		share = GpPolicyIsReplicated(policy) ? Max(policy->numsegments, 1) : 1;
+
+		if (vacuumed)
+		{
+			pages = (BlockNumber) (c->pages / share);
+			tuples = c->tuples / share;
+		}
+		else
+			current_counts(c->relid, &pages, &tuples);
+		allvisible = (BlockNumber) Min(c->allvisible / share, (double) pages);
+		allfrozen = (BlockNumber) Min(c->allfrozen / share, (double) allvisible);
+
+		vac_update_relstats(rel, pages, tuples, allvisible, allfrozen,
+							rel->rd_rel->relhasindex,
+							InvalidTransactionId, InvalidMultiXactId,
+							NULL, NULL, true);
+		relation_close(rel, AccessShareLock);
+	}
+	hash_destroy(counts);
 }
 
 void
