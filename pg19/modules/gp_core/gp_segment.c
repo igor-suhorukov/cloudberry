@@ -383,13 +383,23 @@ add_dist_random_segment_column(ParseState *pstate, ParseNamespaceItem *nsitem,
 	{
 		Form_pg_attribute att = TupleDescAttr(tupdesc, i);
 
-		/* A column definition list has no place for a dropped column. */
+		/*
+		 * A dropped column keeps its place, so that no Var already made
+		 * moves: an integer, always null, under the name PostgreSQL gives a
+		 * dropped column -- which ruleutils prints, and which neither "*" nor
+		 * a reference reaches, the entry's own name for it staying empty.
+		 */
 		if (att->attisdropped)
-			ereport(ERROR,
-					(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
-					 errmsg("gp_segment_id of gp.dist_random() is not available for \"%s\", which has dropped columns",
-							RelationGetRelationName(rel)),
-					 parser_errposition(pstate, location)));
+		{
+			rtfunc->funccolnames = lappend(rtfunc->funccolnames,
+										   makeString(psprintf("........pg.dropped.%d........",
+															   att->attnum)));
+			rtfunc->funccoltypes = lappend_oid(rtfunc->funccoltypes, INT4OID);
+			rtfunc->funccoltypmods = lappend_int(rtfunc->funccoltypmods, -1);
+			rtfunc->funccolcollations = lappend_oid(rtfunc->funccolcollations,
+													InvalidOid);
+			continue;
+		}
 
 		rtfunc->funccolnames = lappend(rtfunc->funccolnames,
 									   makeString(pstrdup(NameStr(att->attname))));
@@ -405,6 +415,32 @@ add_dist_random_segment_column(ParseState *pstate, ParseNamespaceItem *nsitem,
 	if (rtfunc->funccolcount != ncols - 1 ||
 		list_length(rte->eref->colnames) != ncols - 1)
 		elog(ERROR, "gp.dist_random() entry does not match its relation");
+
+	/*
+	 * A column definition list's names are the entry's too, which ruleutils
+	 * prints from: a dropped column's is the placeholder's, its namespace
+	 * column the placeholder, which "*" does not expand.
+	 */
+	foreach_node(String, name, rte->eref->colnames)
+	{
+		int			i = foreach_current_index(name);
+
+		if (strVal(name)[0] != '\0')
+			continue;
+		lfirst(list_nth_cell(rte->eref->colnames, i)) =
+			makeString(pstrdup(strVal(list_nth(rtfunc->funccolnames, i))));
+		nscol = &nsitem->p_nscolumns[i];
+		memset(nscol, 0, sizeof(*nscol));
+		nscol->p_varno = nsitem->p_rtindex;
+		nscol->p_varattno = i + 1;
+		nscol->p_vartype = INT4OID;
+		nscol->p_vartypmod = -1;
+		nscol->p_varcollid = InvalidOid;
+		nscol->p_varreturningtype = nsitem->p_returning_type;
+		nscol->p_varnosyn = nsitem->p_rtindex;
+		nscol->p_varattnosyn = i + 1;
+		nscol->p_dontexpand = true;
+	}
 
 	rtfunc->funccolnames = lappend(rtfunc->funccolnames,
 								   makeString(pstrdup(GP_SEGMENT_ID)));
@@ -762,8 +798,6 @@ gp_dist_random_segments(PG_FUNCTION_ARGS)
 	TupleTableSlot *slot;
 	GpGatherState *gather;
 	StringInfoData sql;
-	Datum	   *values;
-	bool	   *nulls;
 	int			natts;
 	int			content;
 
@@ -793,20 +827,10 @@ gp_dist_random_segments(PG_FUNCTION_ARGS)
 	appendStringInfo(&sql, "%s FROM %s", GpTransferSelectList(tupdesc),
 					 GpDispatchRelationName(RelationGetRelid(rel)));
 
-	values = palloc_array(Datum, natts + 1);
-	nulls = palloc_array(bool, natts + 1);
-
-	slot = MakeSingleTupleTableSlot(tupdesc, &TTSOpsVirtual);
-	gather = GpGatherStart(sql.data, tupdesc);
+	slot = MakeSingleTupleTableSlot(GpTransferDesc(tupdesc), &TTSOpsVirtual);
+	gather = GpGatherStart(sql.data, slot->tts_tupleDescriptor);
 	while (GpGatherNext(gather, slot, &content))
-	{
-		slot_getallattrs(slot);
-		memcpy(values, slot->tts_values, natts * sizeof(Datum));
-		memcpy(nulls, slot->tts_isnull, natts * sizeof(bool));
-		values[natts] = Int32GetDatum(content);
-		nulls[natts] = false;
-		tuplestore_putvalues(rsinfo->setResult, rsinfo->setDesc, values, nulls);
-	}
+		GpTransferPut(tupdesc, slot, rsinfo->setResult, rsinfo->setDesc, content);
 	GpGatherEnd(gather);
 
 	ExecDropSingleTupleTableSlot(slot);

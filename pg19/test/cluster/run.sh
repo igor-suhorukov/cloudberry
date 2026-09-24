@@ -897,6 +897,17 @@ mine" ] && ok "a transaction reads its own rows, and a LIMIT leaves the connecti
 	[ "$out|$out2" = "0|10|55
 1|10|55|0" ] && ok "gp_dist_random('t'), as Cloudberry spells it, is gp.dist_random(NULL::t) named t" \
 		|| notok "gp_dist_random('t')" "$out / $out2"
+	# A table with a dropped column: its rows, and gp_segment_id of them,
+	# the dropped column's place kept -- in a view too, which reloads.
+	q 0 "CREATE TABLE gdc (a int, b text, c int) DISTRIBUTED BY (a); INSERT INTO gdc SELECT i, 'b', i * 10 FROM generate_series(1, 20) i; ALTER TABLE gdc DROP COLUMN b;" >/dev/null
+	out=$(q 0 "SELECT count(*), sum(c) FROM gp.dist_random(NULL::gdc);")
+	out2=$(q 0 "SELECT count(*) FROM gp_dist_random('gdc') g WHERE g.gp_segment_id <> expected_seg(g.a, 2);")
+	out3=$(q 0 "CREATE VIEW gdcv AS SELECT gp_segment_id AS seg, a, c FROM gp_dist_random('gdc'); SELECT count(*), sum(c) FROM gdcv WHERE seg = expected_seg(a, 2);")
+	out4=$(q 0 "SELECT pg_get_viewdef('gdcv');" | tr '\n' ' ' | sed 's/  */ /g')
+	out5=$(q 0 "CREATE VIEW gdcv2 AS $(q 0 "SELECT pg_get_viewdef('gdcv');" | tr '\n' ' ' | sed 's/;[[:space:]]*$//'); SELECT count(*) FROM gdcv2;")
+	[ "$out|$out2|$out3|$out5" = "20|2100|0|20|2100|20" ] \
+		&& ok "gp.dist_random() and gp_segment_id of a table with a dropped column; a view of it prints and reloads" \
+		|| notok "gp.dist_random() of a table with a dropped column" "$out / $out2 / $out3 / $out4 / $out5"
 	out=$(q 0 "SELECT DISTINCT gp_segment_id FROM pg_class;")
 	out2=$(q 0 "SELECT DISTINCT gp_segment_id FROM gp.dist_random(NULL::pg_namespace) ORDER BY 1;")
 	[ "$out|$out2" = "-1|0

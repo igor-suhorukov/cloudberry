@@ -3817,16 +3817,74 @@ gp_dist_random(PG_FUNCTION_ARGS)
 	appendStringInfo(&sql, "%s FROM %s", GpTransferSelectList(tupdesc),
 					 GpDispatchRelationName(RelationGetRelid(rel)));
 
-	slot = MakeSingleTupleTableSlot(tupdesc, &TTSOpsVirtual);
-	gather = GpGatherStart(sql.data, tupdesc);
+	slot = MakeSingleTupleTableSlot(GpTransferDesc(tupdesc), &TTSOpsVirtual);
+	gather = GpGatherStart(sql.data, slot->tts_tupleDescriptor);
 	while (GpGatherNext(gather, slot, NULL))
-		tuplestore_puttupleslot(rsinfo->setResult, slot);
+		GpTransferPut(tupdesc, slot, rsinfo->setResult, rsinfo->setDesc, -1);
 	GpGatherEnd(gather);
 
 	ExecDropSingleTupleTableSlot(slot);
 	table_close(rel, AccessShareLock);
 
 	return (Datum) 0;
+}
+
+/*
+ * A relation's row as a gather reads it: its columns but the dropped ones,
+ * which GpTransferSelectList() leaves out.
+ */
+TupleDesc
+GpTransferDesc(TupleDesc tupdesc)
+{
+	TupleDesc	desc;
+	int			n = 0;
+
+	for (int i = 0; i < tupdesc->natts; i++)
+		if (!TupleDescAttr(tupdesc, i)->attisdropped)
+			n++;
+	desc = CreateTemplateTupleDesc(n);
+	n = 0;
+	for (int i = 0; i < tupdesc->natts; i++)
+		if (!TupleDescAttr(tupdesc, i)->attisdropped)
+			TupleDescCopyEntry(desc, ++n, tupdesc, i + 1);
+	TupleDescFinalize(desc);
+	return desc;
+}
+
+/*
+ * One row a gather read by GpTransferDesc(tupdesc), into "store" as the
+ * relation's row -- a dropped column null -- followed by "content", when it
+ * is not -1, as "desc" has it.
+ */
+void
+GpTransferPut(TupleDesc tupdesc, TupleTableSlot *slot, Tuplestorestate *store,
+			  TupleDesc desc, int content)
+{
+	Datum	   *values = palloc_array(Datum, desc->natts);
+	bool	   *nulls = palloc_array(bool, desc->natts);
+	int			j = 0;
+
+	slot_getallattrs(slot);
+	for (int i = 0; i < tupdesc->natts; i++)
+	{
+		if (TupleDescAttr(tupdesc, i)->attisdropped)
+		{
+			values[i] = (Datum) 0;
+			nulls[i] = true;
+			continue;
+		}
+		values[i] = slot->tts_values[j];
+		nulls[i] = slot->tts_isnull[j];
+		j++;
+	}
+	if (content != -1)
+	{
+		values[tupdesc->natts] = Int32GetDatum(content);
+		nulls[tupdesc->natts] = false;
+	}
+	tuplestore_putvalues(store, desc, values, nulls);
+	pfree(values);
+	pfree(nulls);
 }
 
 /*

@@ -79,6 +79,15 @@ extern GpGatherState *GpGatherStart(const char *sql, TupleDesc tupdesc);
  * The next row from any segment, into the slot; false when every segment has
  * finished.  *content, when not NULL, is told which segment the row came from.
  */
+/*
+ * A relation's row as a gather reads it -- its columns but the dropped ones,
+ * as GpTransferSelectList() selects them -- and one such row put into a
+ * tuplestore as the relation's, with its segment after it unless -1.
+ */
+extern TupleDesc GpTransferDesc(TupleDesc tupdesc);
+extern void GpTransferPut(TupleDesc tupdesc, TupleTableSlot *slot,
+						  Tuplestorestate *store, TupleDesc desc, int content);
+
 extern bool GpGatherNext(GpGatherState *gather, TupleTableSlot *slot,
 						 int *content);
 
