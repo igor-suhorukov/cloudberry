@@ -305,13 +305,23 @@ GpFaultTrigger(const char *name, const char *database, const char *table)
 			{
 				GpFaultType now;
 
+				/*
+				 * Held until the fault is resumed or reset, looked at once a
+				 * second, as Cloudberry's suspend looks at it
+				 * (FaultInjector_InjectFaultIfSet(), pg_usleep(1000000L)) --
+				 * and no more often, since a test may reset a fault and at once
+				 * suspend at it again for another session, and a look that
+				 * falls between the two lets this one go on
+				 * (startup_rename_prepared_xlog).  An interrupt is taken at
+				 * once, as the latch wakes the wait.
+				 */
 				fault_log(local.name, type);
 				while ((now = fault_current_type(local.name)) != GP_FAULT_NONE &&
 					   now != GP_FAULT_RESUME)
 				{
 					CHECK_FOR_INTERRUPTS();
 					(void) WaitLatch(MyLatch, WL_LATCH_SET | WL_TIMEOUT | WL_EXIT_ON_PM_DEATH,
-									 100L, fault_wait_event());
+									 1000L, fault_wait_event());
 					ResetLatch(MyLatch);
 				}
 				if (now == GP_FAULT_RESUME)
