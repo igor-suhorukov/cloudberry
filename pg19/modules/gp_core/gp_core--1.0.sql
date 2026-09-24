@@ -111,6 +111,16 @@ CREATE TABLE gp_internal.distributed_log (
 CREATE INDEX distributed_log_gxid ON gp_internal.distributed_log (gxid);
 
 /*
+ * Wait until this node's mirror has what the node has flushed: Cloudberry's
+ * wait_for_mirror(), which the coordinator runs on a segment when a COMMIT
+ * PREPARED it sends again finds the part committed already.  See gp_dtx.c.
+ */
+CREATE FUNCTION gp_internal.dtx_wait_mirror()
+RETURNS void
+AS 'MODULE_PATHNAME', 'gp_dtx_wait_mirror'
+LANGUAGE C STRICT VOLATILE;
+
+/*
  * This node's waiting relations, as the global deadlock detector reads them:
  * each waiting backend and a backend that holds what it waits for, with the
  * coordinator session each works for (0: none), whether the lock lasts to

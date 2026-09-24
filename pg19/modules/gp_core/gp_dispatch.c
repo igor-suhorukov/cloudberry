@@ -217,7 +217,7 @@ static bool exit_callback_registered = false;
 /*
  * The database and the user the gang last connected as: who prepared a part,
  * and who may finish it, which is asked after the commit, where no catalog
- * can be read (dtx_finish_moved()).
+ * can be read (dtx_finish_again()).
  */
 static char *gang_dbname = NULL;
 static char *gang_username = NULL;
@@ -2127,18 +2127,29 @@ gang_commit_first_phase(GpGang *g)
 }
 
 /*
- * A part prepared on a primary FTS has failed over from since, finished on
- * the new primary -- the mirror it promoted, which has the part from
- * PREPARE's WAL -- over a connection of its own, once the promotion has
- * taken: it may still be in recovery, which PostgreSQL's startup process
- * leaves up to wal_retrieve_retry_interval after a promotion is asked for.
- * The old primary is not told: it is no part of the cluster now, and a
- * commit there would wait for ever for a mirror that has left it.  False
- * when it could not be done in a while, and the recovery process is left to
- * do it.  Nothing is raised.
+ * A part's second phase, done again over a connection of its own to its
+ * content's primary now -- Cloudberry's retried COMMIT PREPARED
+ * (doNotifyingCommitPrepared(), cdbtm.c):
+ *
+ *   on a primary FTS has failed over from since, it is finished on the new
+ *   primary -- the mirror it promoted, which has the part from PREPARE's
+ *   WAL -- once the promotion has taken: it may still be in recovery, which
+ *   PostgreSQL's startup process leaves up to wal_retrieve_retry_interval
+ *   after a promotion is asked for.  The old primary is not told: it is no
+ *   part of the cluster now, and a commit there would wait for ever for a
+ *   mirror that has left it;
+ *
+ *   on one whose connection broke as it was told -- its backend ended, a
+ *   commit's perhaps while waiting for the mirror -- it is told again.  A
+ *   commit whose part is gone, committed by that backend, waits for the
+ *   mirror to have its commit, as Cloudberry's does (FinishPreparedTransaction(),
+ *   twophase.c), so that what the client is told committed is on the mirror.
+ *
+ * False when it could not be done in a while, and the recovery process is
+ * left to do it.  Nothing is raised.
  */
 static bool
-dtx_finish_moved(int content, const char *sql)
+dtx_finish_again(int content, const char *sql, bool commit)
 {
 	const GpSegmentConfig *nodes;
 	int			nnodes = GpClusterNodes(&nodes);
@@ -2190,11 +2201,14 @@ dtx_finish_moved(int content, const char *sql)
 			{
 				PGresult   *res = libpqsrv_exec(conn, sql, dispatch_wait_event());
 				const char *state = PQresultErrorField(res, PG_DIAG_SQLSTATE);
+				bool		gone = state != NULL && strcmp(state, "42704") == 0;
 
-				/* done, or the recovery process has done it */
-				done = PQresultStatus(res) == PGRES_COMMAND_OK ||
-					(state != NULL && strcmp(state, "42704") == 0);
+				/* done, or done already: by its backend, or the recovery process */
+				done = PQresultStatus(res) == PGRES_COMMAND_OK || gone;
 				PQclear(res);
+				if (gone && commit)
+					PQclear(libpqsrv_exec(conn, "SELECT gp_internal.dtx_wait_mirror()",
+										  dispatch_wait_event()));
 			}
 			if (conn != NULL)
 				libpqsrv_disconnect(conn);
@@ -2214,7 +2228,7 @@ dtx_finish_moved(int content, const char *sql)
 	PG_END_TRY();
 
 	ereport(done ? LOG : WARNING,
-			(errmsg("%s on segment %d, on its new primary (%s:%d): %s", sql,
+			(errmsg("%s on segment %d, again, on its primary (%s:%d): %s", sql,
 					content, node->hostname, node->port,
 					done ? "done" : "not done in time")));
 	return done;
@@ -2226,7 +2240,9 @@ dtx_finish_moved(int content, const char *sql)
  * and the abort are both past it.  An answer that the part does not exist,
  * or is busy, is no failure: the recovery process finished it or is
  * finishing it, and so did a PREPARE that failed.  A segment that does not
- * answer within a while, or whose connection broke, costs the gang.
+ * answer within a while costs the gang; one whose connection broke, or whose
+ * primary FTS failed over from, is told again over a connection of its own
+ * (dtx_finish_again()).
  */
 static int
 gang_finish_prepared(bool commit)
@@ -2235,7 +2251,7 @@ gang_finish_prepared(bool commit)
 	char	   *sql;
 	int			nfailed = 0;
 	TimestampTz deadline;
-	bool	   *moved;
+	bool	   *again;
 	int		   *conn_content;
 	int			nconns;
 
@@ -2270,7 +2286,7 @@ gang_finish_prepared(bool commit)
 	}
 
 	sql = psprintf("%s PREPARED '%s'", commit ? "COMMIT" : "ROLLBACK", dtx_gid);
-	moved = palloc0_array(bool, g->nconns);
+	again = palloc0_array(bool, g->nconns);
 	for (int i = 0; i < g->nconns && i < dtx_prepared_size; i++)
 	{
 		GpSegmentConn *c = &g->conns[i];
@@ -2279,16 +2295,11 @@ gang_finish_prepared(bool commit)
 			continue;
 		c->fetching = NULL;
 
-		/* on a primary FTS failed over from: see dtx_finish_moved() */
-		if (!GpClusterIsPrimaryNow(c->seg->dbid))
+		/* on a primary FTS failed over from, or not to be sent to */
+		if (!GpClusterIsPrimaryNow(c->seg->dbid) ||
+			c->busy || !PQsendQuery(c->conn, sql))
 		{
-			moved[i] = true;
-			dtx_prepared[i] = false;
-			continue;
-		}
-		if (c->busy || !PQsendQuery(c->conn, sql))
-		{
-			nfailed++;
+			again[i] = true;
 			dtx_prepared[i] = false;
 			continue;
 		}
@@ -2308,9 +2319,10 @@ gang_finish_prepared(bool commit)
 
 			if (!dtx_prepared[i] || !c->busy)
 				continue;
+			/* its backend ended, perhaps as a commit waited for the mirror */
 			if (PQconsumeInput(c->conn) == 0)
 			{
-				nfailed++;
+				again[i] = true;
 				c->busy = false;
 				broken = true;
 				continue;
@@ -2340,7 +2352,7 @@ gang_finish_prepared(bool commit)
 			/* failed over from while it was being told */
 			if (c->busy && !GpClusterIsPrimaryNow(c->seg->dbid))
 			{
-				moved[i] = true;
+				again[i] = true;
 				c->busy = false;
 				broken = true;
 			}
@@ -2368,7 +2380,7 @@ gang_finish_prepared(bool commit)
 	}
 
 	for (int i = 0; i < nconns; i++)
-		if (moved[i] && !dtx_finish_moved(conn_content[i], sql))
+		if (again[i] && !dtx_finish_again(conn_content[i], sql, commit))
 			nfailed++;
 	return nfailed;
 }

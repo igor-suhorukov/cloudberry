@@ -143,6 +143,7 @@
 #include "postmaster/interrupt.h"
 #include "postmaster/postmaster.h"
 #include "replication/slot.h"
+#include "replication/syncrep.h"
 #include "storage/dsm_registry.h"
 #include "storage/ipc.h"
 #include "storage/latch.h"
@@ -2428,6 +2429,29 @@ GpDtxLogReaderMain(Datum main_arg)
 	PopActiveSnapshot();
 	CommitTransactionCommand();
 	proc_exit(0);
+}
+
+PG_FUNCTION_INFO_V1(gp_dtx_wait_mirror);
+
+/*
+ * gp_internal.dtx_wait_mirror()
+ *		Wait until this node's mirror has what the node has flushed:
+ *		Cloudberry's wait_for_mirror() (xlog.c), which the coordinator runs
+ *		when a COMMIT PREPARED it sends again finds the part gone -- committed
+ *		by a backend that ended as it waited for the mirror, whose commit the
+ *		mirror may not have yet (gp_dispatch.c, dtx_finish_again()).  With
+ *		interrupts held, as Cloudberry's are, which SyncRepWaitForLSN()
+ *		expects of its caller.
+ */
+Datum
+gp_dtx_wait_mirror(PG_FUNCTION_ARGS)
+{
+	XLogRecPtr	flushed = GetFlushRecPtr(NULL);
+
+	HOLD_INTERRUPTS();
+	SyncRepWaitForLSN(flushed, false);
+	RESUME_INTERRUPTS();
+	PG_RETURN_VOID();
 }
 
 /* ------------------------------------------------------------------------- */
