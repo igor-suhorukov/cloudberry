@@ -6,48 +6,85 @@
  * Tags
  *
  * Cloudberry keeps definitions in the shared catalog pg_tag and assignments in
- * pg_tag_description.  Here the definitions are an ordinary table and the
- * assignments are "gp_tag" security labels -- see tag.c for why.
- *
- * Two things follow from an ordinary table.  Definitions are per database
- * rather than cluster-wide, so a tag has to be defined in each database it is
- * used in; a tag used where it is not defined is refused when it is set, not
- * silently ignored.  And who may change a definition is settled by row-level
- * security rather than by C code: a row belongs to its owner, and only its
- * owner may change it, which is the rule Cloudberry's pg_tag_ownercheck
- * applies.
+ * pg_tag_description.  Here both are security labels -- see tag.c for why:
+ * an assignment is a "gp_tag" label on the object, and the definitions are
+ * one shared "gp_tag_definitions" label on the NOLOGIN role of that name.  A
+ * role's label is the cluster's, as pg_tag is, so a tag defined in one
+ * database is defined in every other.  Who may change a definition is its
+ * owner, which the functions that write the label check, as Cloudberry's
+ * pg_tag_ownercheck does.
  *****************************************************************************/
 
 /* Everyone may reach the module's own objects; what they may do with them is
- * settled below, by row-level security and by who owns the object a tag is
- * being put on. */
+ * settled below, by the functions and by who owns the object a tag is being
+ * put on. */
 GRANT USAGE ON SCHEMA gp_sql TO PUBLIC;
 
-CREATE TABLE gp_sql.tag (
-	tagname			name PRIMARY KEY,
-	tagowner		oid NOT NULL,
-	allowed_values	text[]
-		CONSTRAINT tag_allowed_values_not_empty
-		CHECK (allowed_values IS NULL OR
-			   (array_ndims(allowed_values) = 1 AND
-				array_length(allowed_values, 1) > 0 AND
-				array_position(allowed_values, NULL) IS NULL))
-);
+/*
+ * The role the definitions are a label of.  A role is the cluster's and this
+ * script runs once in each database, so the second database to create the
+ * extension finds it made.
+ */
+DO $$
+BEGIN
+	IF NOT EXISTS (SELECT 1 FROM pg_catalog.pg_roles
+					WHERE rolname = 'gp_tag_definitions') THEN
+		CREATE ROLE gp_tag_definitions NOLOGIN;
+	END IF;
+END
+$$;
 
-COMMENT ON TABLE gp_sql.tag IS
-	'the tags this database knows; Cloudberry keeps these in the shared catalog pg_tag';
+COMMENT ON ROLE gp_tag_definitions IS
+	'carries the tag definitions, as its shared "gp_tag_definitions" security label; Cloudberry keeps these in the shared catalog pg_tag';
 
-SELECT pg_catalog.pg_extension_config_dump('gp_sql.tag', '');
+CREATE FUNCTION gp_sql.tag_definitions(OUT oid oid, OUT tagname name,
+									   OUT tagowner oid, OUT allowed_values text[])
+RETURNS SETOF record
+AS 'MODULE_PATHNAME', 'gp_sql_tag_definitions'
+LANGUAGE C STABLE;
 
-ALTER TABLE gp_sql.tag ENABLE ROW LEVEL SECURITY;
+COMMENT ON FUNCTION gp_sql.tag_definitions() IS
+	'every tag, from the label of role gp_tag_definitions';
 
-CREATE POLICY tag_read ON gp_sql.tag FOR SELECT USING (true);
+CREATE VIEW gp_sql.tag AS
+	SELECT d.tagname, d.tagowner, d.allowed_values
+	  FROM gp_sql.tag_definitions() d;
 
-CREATE POLICY tag_write ON gp_sql.tag FOR ALL
-	USING (pg_catalog.pg_has_role(tagowner, 'USAGE'))
-	WITH CHECK (pg_catalog.pg_has_role(tagowner, 'USAGE'));
+COMMENT ON VIEW gp_sql.tag IS
+	'the tags of the cluster; Cloudberry keeps these in the shared catalog pg_tag';
 
-GRANT SELECT, INSERT, UPDATE, DELETE ON gp_sql.tag TO PUBLIC;
+GRANT SELECT ON gp_sql.tag TO PUBLIC;
+
+/* What writes the label: see tag.c. */
+CREATE FUNCTION gp_sql.lock_tag_definitions(tagname name DEFAULT NULL)
+RETURNS void
+AS 'MODULE_PATHNAME', 'gp_sql_lock_tag_definitions'
+LANGUAGE C;
+
+CREATE FUNCTION gp_sql.define_tag(tagname name, allowed_values text[])
+RETURNS void
+AS 'MODULE_PATHNAME', 'gp_sql_define_tag'
+LANGUAGE C;
+
+CREATE FUNCTION gp_sql.redefine_tag(tagname name, allowed_values text[])
+RETURNS void
+AS 'MODULE_PATHNAME', 'gp_sql_redefine_tag'
+LANGUAGE C;
+
+CREATE FUNCTION gp_sql.rename_tag_definition(tagname name, newname name)
+RETURNS void
+AS 'MODULE_PATHNAME', 'gp_sql_rename_tag_definition'
+LANGUAGE C STRICT;
+
+CREATE FUNCTION gp_sql.undefine_tag(tagname name)
+RETURNS void
+AS 'MODULE_PATHNAME', 'gp_sql_undefine_tag'
+LANGUAGE C STRICT;
+
+CREATE FUNCTION gp_sql.change_tag_owner(tagname name, newowner name)
+RETURNS void
+AS 'MODULE_PATHNAME', 'gp_sql_change_tag_owner'
+LANGUAGE C STRICT;
 
 /*
  * A security label cannot be put on an index, so the tags of one live here.
@@ -133,6 +170,8 @@ CREATE PROCEDURE gp_sql.create_tag(tagname name,
 LANGUAGE plpgsql
 AS $$
 BEGIN
+	PERFORM gp_sql.lock_tag_definitions();
+
 	IF EXISTS (SELECT 1 FROM gp_sql.tag t WHERE t.tagname = create_tag.tagname) THEN
 		IF if_not_exists THEN
 			RAISE NOTICE 'tag "%" already exists, skipping', tagname;
@@ -142,10 +181,8 @@ BEGIN
 			USING ERRCODE = 'duplicate_object';
 	END IF;
 
-	INSERT INTO gp_sql.tag (tagname, tagowner, allowed_values)
-		 VALUES (tagname,
-				 pg_catalog.to_regrole(CURRENT_USER::text)::oid,
-				 gp_sql.add_allowed_values(NULL, allowed_values));
+	PERFORM gp_sql.define_tag(tagname,
+							  gp_sql.add_allowed_values(NULL, allowed_values));
 END;
 $$;
 
@@ -160,9 +197,9 @@ COMMENT ON PROCEDURE gp_sql.create_tag(name, text[], boolean) IS
  * Cloudberry's tag test found the port answering where Cloudberry refuses.
  *
  * Cloudberry refuses to drop a value that some object is tagged with
- * (checkDropTagValue).  The same is done here, over this database: a value in
- * use in another database cannot be seen from here, which is the price of
- * definitions that are not shared.
+ * (checkDropTagValue).  The same is done here, over this database: the
+ * assignments are each database's own labels, and another database's cannot
+ * be seen from here.
  *
  * missing_ok is ALTER TAG IF EXISTS, which says so and does nothing.
  */
@@ -177,6 +214,8 @@ DECLARE
 	cur text[];
 	v	text;
 BEGIN
+	PERFORM gp_sql.lock_tag_definitions(tagname);
+
 	SELECT t.allowed_values INTO cur
 	  FROM gp_sql.tag t WHERE t.tagname = alter_tag.tagname;
 
@@ -216,8 +255,7 @@ BEGIN
 		cur := gp_sql.add_allowed_values(cur, add_values);
 	END IF;
 
-	UPDATE gp_sql.tag t SET allowed_values = cur
-	 WHERE t.tagname = alter_tag.tagname;
+	PERFORM gp_sql.redefine_tag(tagname, cur);
 END;
 $$;
 
@@ -231,8 +269,9 @@ AS $$
 DECLARE
 	moved bigint;
 BEGIN
-	UPDATE gp_sql.tag t SET tagname = newname WHERE t.tagname = rename_tag.tagname;
-	IF NOT FOUND THEN
+	PERFORM gp_sql.lock_tag_definitions(tagname);
+
+	IF NOT EXISTS (SELECT 1 FROM gp_sql.tag t WHERE t.tagname = rename_tag.tagname) THEN
 		IF missing_ok THEN
 			RAISE NOTICE 'tag "%" does not exist, skipping', tagname;
 			RETURN;
@@ -242,8 +281,9 @@ BEGIN
 	END IF;
 
 	/*
-	 * The assignments name the tag rather than pointing at a row, so they
-	 * have to be rewritten.  Only this database's are reachable.
+	 * The assignments name the tag rather than pointing at a definition, so
+	 * they would have to be rewritten, and only this database's are
+	 * reachable.
 	 */
 	SELECT count(*) INTO moved FROM gp_sql.tag_descriptions d
 	 WHERE d.tagname = rename_tag.tagname;
@@ -254,13 +294,41 @@ BEGIN
 				  HINT = 'Remove the tag from those objects first.';
 	END IF;
 
-	UPDATE gp_sql.index_tag i SET tagname = newname
-	 WHERE i.tagname = rename_tag.tagname;
+	PERFORM gp_sql.rename_tag_definition(tagname, newname);
 END;
 $$;
 
 COMMENT ON PROCEDURE gp_sql.rename_tag(name, name, boolean) IS
 	'rename a tag; what Cloudberry writes as ALTER TAG ... RENAME TO';
+
+/*
+ * ALTER TAG ... OWNER TO, by the rules of PostgreSQL's ALTER ... OWNER TO,
+ * which Cloudberry's follows: the tag's owner may give it to a role they may
+ * become.
+ */
+CREATE PROCEDURE gp_sql.alter_tag_owner(tagname name, newowner name,
+										missing_ok boolean DEFAULT false)
+LANGUAGE plpgsql
+AS $$
+BEGIN
+	PERFORM gp_sql.lock_tag_definitions();
+
+	IF NOT EXISTS (SELECT 1 FROM gp_sql.tag t
+					WHERE t.tagname = alter_tag_owner.tagname) THEN
+		IF missing_ok THEN
+			RAISE NOTICE 'tag "%" does not exist, skipping', tagname;
+			RETURN;
+		END IF;
+		RAISE EXCEPTION 'tag "%" does not exist', tagname
+			USING ERRCODE = 'undefined_object';
+	END IF;
+
+	PERFORM gp_sql.change_tag_owner(tagname, newowner);
+END;
+$$;
+
+COMMENT ON PROCEDURE gp_sql.alter_tag_owner(name, name, boolean) IS
+	'give a tag another owner; what Cloudberry writes as ALTER TAG ... OWNER TO';
 
 /*
  * DROP TAG a, b is one statement, so it is one CALL, over all of them: each
@@ -274,6 +342,8 @@ DECLARE
 	one name;
 	used bigint;
 BEGIN
+	PERFORM gp_sql.lock_tag_definitions();
+
 	FOREACH one IN ARRAY tagnames LOOP
 		IF NOT EXISTS (SELECT 1 FROM gp_sql.tag t WHERE t.tagname = one) THEN
 			IF missing_ok THEN
@@ -283,21 +353,24 @@ BEGIN
 			RAISE EXCEPTION 'tag "%" does not exist', one
 				USING ERRCODE = 'undefined_object';
 		END IF;
+		PERFORM gp_sql.lock_tag_definitions(one);
 
 		/*
-		 * RESTRICT, always, as in Cloudberry: an assignment names the tag, and
-		 * an assignment in another database cannot be reached from here.
+		 * RESTRICT, always, as in Cloudberry -- over this database's
+		 * assignments, which are all that can be seen from here.  Another
+		 * database's that name the tag are passed over from now on.
 		 */
 		SELECT count(*) INTO used FROM gp_sql.tag_descriptions d
 		 WHERE d.tagname = one;
 		IF used > 0 THEN
-			RAISE EXCEPTION 'cannot drop tag "%" while % object(s) carry it',
-				one, used
+			/* Cloudberry's words: a line of DETAIL for each dependent object */
+			RAISE EXCEPTION 'tag "%" cannot be dropped because some objects depend on it', one
 				USING ERRCODE = 'dependent_objects_still_exist',
-					  HINT = 'Remove the tag from those objects first.';
+					  DETAIL = rtrim(repeat('tag of tag description with tag ' || one || E'\n',
+											used::int), E'\n');
 		END IF;
 
-		DELETE FROM gp_sql.tag t WHERE t.tagname = one;
+		PERFORM gp_sql.undefine_tag(one);
 	END LOOP;
 END;
 $$;
@@ -534,12 +607,28 @@ LANGUAGE plpgsql
 AS $$
 DECLARE
 	tags jsonb := coalesce(gp_sql.schema_tags(obj), '{}'::jsonb);
+	nspname name := (SELECT n.nspname FROM pg_catalog.pg_namespace n
+					  WHERE n.oid = obj);
+	k text;
 BEGIN
+	/* Cloudberry's words, as GpTagCheckClause gives them for the rest */
 	IF set_tags IS NOT NULL THEN
+		FOR k IN SELECT jsonb_object_keys(set_tags) LOOP
+			PERFORM gp_sql.validate_tag(k, set_tags ->> k);
+			IF NOT tags ? k THEN
+				RAISE WARNING 'object "%" does not have tag "%", creating', nspname, k;
+			END IF;
+		END LOOP;
 		tags := tags || set_tags;
 	END IF;
 	IF unset_tags IS NOT NULL THEN
-		tags := tags - unset_tags::text[];
+		FOREACH k IN ARRAY unset_tags::text[] LOOP
+			IF NOT tags ? k THEN
+				RAISE EXCEPTION 'object "%" does not have tag "%"', nspname, k
+					USING ERRCODE = 'undefined_object';
+			END IF;
+			tags := tags - k;
+		END LOOP;
 	END IF;
 
 	EXECUTE format('SECURITY LABEL FOR gp_tag ON SCHEMA %s IS %s',
@@ -629,24 +718,27 @@ COMMENT ON FUNCTION gp_sql.validate_tag(name, text) IS
  * that are spelled the same.
  */
 CREATE VIEW gp_sql.tag_descriptions AS
-	SELECT l.classoid::regclass::text AS objclass,
-		   l.objoid,
-		   d.key::name AS tagname,
-		   d.value #>> '{}' AS tagvalue
-	  FROM pg_catalog.pg_seclabel l
-	  CROSS JOIN LATERAL jsonb_each(l.label::jsonb) AS d(key, value)
-	 WHERE l.provider = 'gp_tag' AND l.objsubid = 0
-	UNION ALL
-	SELECT l.classoid::regclass::text,
-		   l.objoid,
-		   d.key::name,
-		   d.value #>> '{}'
-	  FROM pg_catalog.pg_shseclabel l
-	  CROSS JOIN LATERAL jsonb_each(l.label::jsonb) AS d(key, value)
-	 WHERE l.provider = 'gp_tag'
-	UNION ALL
-	SELECT 'pg_class', i.indexrelid, i.tagname, i.tagvalue
-	  FROM gp_sql.index_tag i;
+	SELECT a.objclass, a.objoid, a.tagname, a.tagvalue
+	  FROM (SELECT l.classoid::regclass::text AS objclass,
+				   l.objoid,
+				   d.key::name AS tagname,
+				   d.value #>> '{}' AS tagvalue
+			  FROM pg_catalog.pg_seclabel l
+			  CROSS JOIN LATERAL jsonb_each(l.label::jsonb) AS d(key, value)
+			 WHERE l.provider = 'gp_tag' AND l.objsubid = 0
+			UNION ALL
+			SELECT l.classoid::regclass::text,
+				   l.objoid,
+				   d.key::name,
+				   d.value #>> '{}'
+			  FROM pg_catalog.pg_shseclabel l
+			  CROSS JOIN LATERAL jsonb_each(l.label::jsonb) AS d(key, value)
+			 WHERE l.provider = 'gp_tag'
+			UNION ALL
+			SELECT 'pg_class', i.indexrelid, i.tagname, i.tagvalue
+			  FROM gp_sql.index_tag i) a
+	 /* one whose tag a DROP TAG elsewhere took away is passed over */
+	 WHERE a.tagname IN (SELECT t.tagname FROM gp_sql.tag_definitions() t);
 
 COMMENT ON VIEW gp_sql.tag_descriptions IS
 	'every tag assignment this database can see; Cloudberry keeps these in pg_tag_description';
@@ -689,6 +781,121 @@ GRANT SELECT ON gp_sql.database_tag_descriptions,
 				gp_sql.tablespace_tag_descriptions,
 				gp_sql.schema_tag_descriptions,
 				gp_sql.relation_tag_descriptions TO PUBLIC;
+
+/*
+ * Cloudberry's two catalogs by their names, as gp_core gives its others: views
+ * of the labels, made with allow_system_table_mods on, as a catalog is.
+ * pg_tag is the cluster's, as Cloudberry's is.  pg_tag_description is what
+ * this database can see -- its own objects' assignments, and the shared
+ * objects', which Cloudberry records under database 0 -- and an assignment
+ * has no OID of its own.
+ */
+SET allow_system_table_mods = on;
+
+CREATE VIEW pg_catalog.pg_tag AS
+	SELECT d.oid, d.tagname, d.tagowner, d.allowed_values
+	  FROM gp_sql.tag_definitions() d;
+
+CREATE VIEW pg_catalog.pg_tag_description AS
+	SELECT NULL::oid AS oid,
+		   (SELECT db.oid FROM pg_catalog.pg_database db
+			 WHERE db.datname = pg_catalog.current_database()) AS tddatabaseid,
+		   l.classoid AS tdclassid,
+		   l.objoid AS tdobjid,
+		   t.oid AS tagid,
+		   d.value #>> '{}' AS tagvalue
+	  FROM pg_catalog.pg_seclabel l
+	  CROSS JOIN LATERAL jsonb_each(l.label::jsonb) AS d(key, value)
+	  JOIN gp_sql.tag_definitions() t ON t.tagname = d.key
+	 WHERE l.provider = 'gp_tag' AND l.objsubid = 0
+	UNION ALL
+	SELECT NULL::oid, 0::oid, l.classoid, l.objoid, t.oid, d.value #>> '{}'
+	  FROM pg_catalog.pg_shseclabel l
+	  CROSS JOIN LATERAL jsonb_each(l.label::jsonb) AS d(key, value)
+	  JOIN gp_sql.tag_definitions() t ON t.tagname = d.key
+	 WHERE l.provider = 'gp_tag'
+	UNION ALL
+	SELECT NULL::oid,
+		   (SELECT db.oid FROM pg_catalog.pg_database db
+			 WHERE db.datname = pg_catalog.current_database()),
+		   'pg_catalog.pg_class'::regclass::oid, i.indexrelid, t.oid, i.tagvalue
+	  FROM gp_sql.index_tag i
+	  JOIN gp_sql.tag_definitions() t ON t.tagname = i.tagname;
+
+/*
+ * And Cloudberry's five views of them, as its system_views.sql defines them,
+ * word for word.  Beside the port's own in gp_sql, which name no database
+ * and keep an index's tags too.
+ */
+CREATE VIEW pg_catalog.database_tag_descriptions AS
+    SELECT
+        tddatabaseid,
+        datname,
+        tagname,
+        tagvalue
+    FROM pg_tag_description AS td,
+         pg_database AS d,
+         pg_tag AS t
+    WHERE td.tagid = t.oid and td.tdobjid = d.oid;
+
+CREATE VIEW pg_catalog.user_tag_descriptions AS
+    SELECT
+        tddatabaseid,
+        rolname,
+        tagname,
+        tagvalue
+    FROM pg_tag_description AS td,
+         pg_authid AS a,
+         pg_tag AS t
+    WHERE td.tagid = t.oid and td.tdobjid = a.oid;
+
+CREATE VIEW pg_catalog.tablespace_tag_descriptions AS
+    SELECT
+        tddatabaseid,
+        spcname,
+        tagname,
+        tagvalue
+    FROM pg_tag_description AS td,
+         pg_tablespace AS ts,
+         pg_tag AS t
+    WHERE td.tagid = t.oid and td.tdobjid = ts.oid;
+
+CREATE VIEW pg_catalog.schema_tag_descriptions AS
+    SELECT
+        datname,
+        nspname,
+        tagname,
+        tagvalue
+    FROM pg_tag_description AS td,
+         pg_namespace AS ns,
+         pg_database AS d,
+         pg_tag AS t
+    WHERE td.tagid = t.oid AND td.tdobjid = ns.oid AND td.tddatabaseid = d.oid;
+
+CREATE VIEW pg_catalog.relation_tag_descriptions AS
+    SELECT
+        datname,
+        relname,
+        ns.nspname AS relnamespace,
+        relkind,
+        tagname,
+        tagvalue
+    FROM pg_tag_description AS td,
+         pg_class AS c,
+         pg_database AS d,
+         pg_tag AS t,
+         pg_namespace AS ns
+    WHERE td.tagid = t.oid AND td.tdobjid = c.oid
+          AND td.tddatabaseid = d.oid AND ns.oid = c.relnamespace;
+
+RESET allow_system_table_mods;
+
+GRANT SELECT ON pg_catalog.pg_tag, pg_catalog.pg_tag_description,
+				pg_catalog.database_tag_descriptions,
+				pg_catalog.user_tag_descriptions,
+				pg_catalog.tablespace_tag_descriptions,
+				pg_catalog.schema_tag_descriptions,
+				pg_catalog.relation_tag_descriptions TO PUBLIC;
 
 /******************************************************************************
  * Directory tables

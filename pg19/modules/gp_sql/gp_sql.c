@@ -199,6 +199,42 @@ create_options_of(Node *parsetree)
 }
 
 /*
+ * Is the relation a statement makes, or alters, a temporary one?  Cloudberry
+ * gives a temporary table no tags, and checks none of those it is given
+ * (tablecmds.c, DefineRelation and ATSetTags); nor does the port.
+ */
+static bool
+statement_relation_is_temp(Node *parsetree)
+{
+	RangeVar   *rv;
+
+	switch (nodeTag(parsetree))
+	{
+		case T_CreateStmt:
+			rv = ((CreateStmt *) parsetree)->relation;
+			break;
+		case T_CreateTableAsStmt:
+			rv = ((CreateTableAsStmt *) parsetree)->into->rel;
+			break;
+		case T_ViewStmt:
+			rv = ((ViewStmt *) parsetree)->view;
+			break;
+		case T_AlterTableStmt:
+			{
+				Oid			relid = RangeVarGetRelid(((AlterTableStmt *) parsetree)->relation,
+													 NoLock, true);
+
+				return OidIsValid(relid) &&
+					get_rel_persistence(relid) == RELPERSISTENCE_TEMP;
+			}
+		default:
+			return false;
+	}
+	return rv->relpersistence == RELPERSISTENCE_TEMP ||
+		(rv->schemaname != NULL && strcmp(rv->schemaname, "pg_temp") == 0);
+}
+
+/*
  * CREATE FOREIGN TABLE ... OPTIONS ("gp_tag.env" 'prod', "gp.distributed_by"
  * '(a)'): where the TAG and DISTRIBUTED BY of a foreign table go
  * (gp_desugar.c, rw_add_fdw_option).  A generic option's name is one
@@ -556,9 +592,11 @@ gp_sql_tablespace_options(PlannedStmt *pstmt, const char *queryString,
 
 	if (tags != NIL)
 	{
+		Oid			spcid = get_tablespace_oid(spcname, false);
+
 		CommandCounterIncrement();
-		GpTagApplyToObject(TableSpaceRelationId,
-						   get_tablespace_oid(spcname, false), tags);
+		GpTagCheckClause(TableSpaceRelationId, spcid, tags, creating);
+		GpTagApplyToObject(TableSpaceRelationId, spcid, tags);
 	}
 }
 
@@ -607,6 +645,8 @@ gp_sql_database_tags(PlannedStmt *pstmt, const char *queryString,
 							params, queryEnv, dest, qc);
 
 	CommandCounterIncrement();
+	GpTagCheckClause(DatabaseRelationId, get_database_oid(dbname, false), tags,
+					 IsA(parsetree, CreatedbStmt));
 	GpTagApplyToObject(DatabaseRelationId, get_database_oid(dbname, false), tags);
 }
 
@@ -784,14 +824,20 @@ gp_sql_carried_tags(PlannedStmt *pstmt, const char *queryString,
 					Oid			nspid = GpSqlPendingFirst(NamespaceRelationId);
 
 					if (OidIsValid(nspid))
+					{
+						GpTagCheckClause(NamespaceRelationId, nspid, tags, true);
 						GpTagApplyToObject(NamespaceRelationId, nspid, tags);
+					}
 				}
 				break;
 			case T_CreateRoleStmt:
+				GpTagCheckClause(AuthIdRelationId,
+								 GpSqlPendingFirst(AuthIdRelationId), tags, true);
 				GpTagApplyToObject(AuthIdRelationId,
 								   GpSqlPendingFirst(AuthIdRelationId), tags);
 				break;
 			case T_AlterRoleStmt:
+				GpTagCheckClause(AuthIdRelationId, roleid, tags, false);
 				GpTagApplyToObject(AuthIdRelationId, roleid, tags);
 				break;
 			case T_CreateSeqStmt:
@@ -799,7 +845,10 @@ gp_sql_carried_tags(PlannedStmt *pstmt, const char *queryString,
 					Oid			relid = created_relation(parsetree);
 
 					if (OidIsValid(relid))
+					{
+						GpTagCheckClause(RelationRelationId, relid, tags, true);
 						GpTagApplyToRelation(relid, tags);
+					}
 				}
 				break;
 			default:
@@ -1433,6 +1482,8 @@ gp_sql_ProcessUtility(PlannedStmt *pstmt, const char *queryString,
 	 * An undefined tag, or a policy that is not one, is refused before the
 	 * statement runs, so that a misspelled one does not leave a table behind.
 	 */
+	if (tags != NIL && statement_relation_is_temp(parsetree))
+		tags = NIL;
 	GpTagCheckAll(tags);
 	if (policy != NULL)
 		check_distribution_policy(policy);
@@ -1487,6 +1538,7 @@ gp_sql_ProcessUtility(PlannedStmt *pstmt, const char *queryString,
 				GpDistributionApplyDefault(before, relid);
 				GpDistributionCheckIndexes(relid, NULL, false);
 			}
+			GpTagCheckClause(RelationRelationId, relid, tags, !is_alter);
 			GpTagApplyToRelation(relid, tags);
 			if (directory_table)
 				GpDirTableClaim(relid);

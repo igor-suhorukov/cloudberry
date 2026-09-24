@@ -1500,8 +1500,13 @@ is "and the profile is gone, from the user and the catalog" \
 
 answers "ALTER USER ... TAG" "ALTER USER st_u TAG (st_env = 'dev')" "ALTER ROLE"
 answers "ALTER SCHEMA ... TAG, which is a CALL" "ALTER SCHEMA st_s TAG (st_env = 'dev')" "CALL"
-answers "ALTER DATABASE ... TAG" "ALTER DATABASE tagged_db TAG (st_env = 'dev')" "ALTER DATABASE"
-answers "ALTER TABLESPACE ... TAG" "ALTER TABLESPACE tagged_ts TAG (st_env = 'dev')" "ALTER TABLESPACE"
+# A tag new to the object says so, as Cloudberry's ALTER ... TAG does.
+answers "ALTER DATABASE ... TAG" "ALTER DATABASE tagged_db TAG (st_env = 'dev')" \
+        'WARNING:  object "tagged_db" does not have tag "st_env", creating
+ALTER DATABASE'
+answers "ALTER TABLESPACE ... TAG" "ALTER TABLESPACE tagged_ts TAG (st_env = 'dev')" \
+        'WARNING:  object "tagged_ts" does not have tag "st_env", creating
+ALTER TABLESPACE'
 answers "ALTER SEQUENCE ... TAG" "ALTER SEQUENCE st_q TAG (st_env = 'dev')" "ALTER SEQUENCE"
 answers "ALTER FOREIGN TABLE ... UNSET TAG" \
         "ALTER FOREIGN TABLE st_ft UNSET TAG (st_env)" "ALTER FOREIGN TABLE"
@@ -1534,10 +1539,11 @@ session "a prepared statement that carries tags does it each time it runs" \
 ALTER USER st_u UNSET TAG (st_env);
 \\bind_named st_tag_u \\g
 SELECT gp_sql.role_tags('st_u'::regrole) ->> 'st_env';" \
-        "ALTER ROLE
+        'ALTER ROLE
 ALTER ROLE
+WARNING:  object "st_u" does not have tag "st_env", creating
 ALTER ROLE
-prod"
+prod'
 session "and so does one with EXECUTE ON" \
         "ALTER FUNCTION st_f(int) EXECUTE ON ALL SEGMENTS \\parse st_eo
 \\bind_named st_eo \\g

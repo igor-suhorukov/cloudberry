@@ -22,8 +22,8 @@
  *
  * Cloudberry keeps tag definitions in the shared catalog pg_tag and the
  * assignments in pg_tag_description, keyed by (database, class, object).  An
- * extension can create neither, so definitions become an ordinary table and
- * assignments become a security label:
+ * extension can create neither, so both become security labels.  An
+ * assignment is the object's own:
  *
  *	  SECURITY LABEL FOR gp_tag ON TABLE t IS '{"env": "prod"}'
  *
@@ -32,13 +32,29 @@
  * and pg_dump writes it -- so assignments survive a dump and restore, which
  * they do not in Cloudberry, whose own tools never dumped them.
  *
- * Why a second provider, beside gp_core's "gp".  The keys of a "gp" label are
- * fixed, and checked against a list when the label is set, because they are
- * the port's own and a key that is not on the list is a typo.  Tag names are
- * the user's, and what constrains them is the definitions table rather than a
- * list in a header, so they need a check of their own.  The label is a JSON
- * object rather than the "gp" provider's key=value text, because a tag value
- * is user data and may hold a comma.
+ * The definitions are one shared label, "gp_tag_definitions", on the NOLOGIN
+ * role of that name, which the extension's script makes or finds made:
+ *
+ *	  {"env": {"oid": 16390, "owner": 10, "allowed_values": ["prod", "dev"]}}
+ *
+ * A role's label is the cluster's, as pg_tag is, so a tag defined in one
+ * database is one in every other -- the extension need not even be there, but
+ * for an index's tags, which are rows of its own (see below) -- and pg_dumpall
+ * writes it with the roles.  A definition is no secret, so a label anybody can
+ * read costs nothing.  What it does cost: every CREATE, ALTER and DROP TAG
+ * rewrites the one label, so two of them in flight take turns; and DROP TAG
+ * sees only its own database's assignments, where Cloudberry's shared
+ * pg_tag_description holds every database's, so an assignment whose tag is
+ * gone is passed over rather than failed on.
+ *
+ * Why providers of their own, beside gp_core's "gp".  The keys of a "gp"
+ * label are fixed, and checked against a list when the label is set, because
+ * they are the port's own and a key that is not on the list is a typo.  Tag
+ * names are the user's, and what constrains them is the definitions rather
+ * than a list in a header, so they need a check of their own.  The label is
+ * a JSON object rather than the "gp" provider's key=value text, because a tag
+ * value is user data and may hold a comma.  And the definitions are not the
+ * carrier role's tags, which a "gp_tag" label on it would say they were.
  *
  * Cloudberry source this file is made of:
  *	  src/backend/commands/tag.c
@@ -47,22 +63,35 @@
  */
 #include "postgres.h"
 
+#include "access/transam.h"
 #include "catalog/namespace.h"
 #include "catalog/objectaddress.h"
+#include "catalog/pg_authid.h"
 #include "catalog/pg_class.h"
+#include "catalog/pg_database.h"
+#include "catalog/pg_namespace.h"
+#include "catalog/pg_tablespace.h"
+#include "commands/tablespace.h"
 #include "commands/defrem.h"
 #include "catalog/pg_type.h"
 #include "commands/seclabel.h"
 #include "fmgr.h"
+#include "funcapi.h"
 #include "executor/spi.h"
 #include "lib/stringinfo.h"
 #include "miscadmin.h"
 #include "nodes/makefuncs.h"
+#include "storage/lmgr.h"
+#include "utils/acl.h"
+#include "utils/array.h"
 #include "utils/builtins.h"
 #include "utils/fmgrprotos.h"
 #include "utils/jsonb.h"
 #include "utils/lsyscache.h"
+#include "utils/numeric.h"
+#include "utils/tuplestore.h"
 
+#include "gp_core_api.h"
 #include "gp_sql.h"
 
 /*
@@ -72,7 +101,7 @@
 #define GP_TAG_MAX_PER_OBJECT	50
 
 /* ------------------------------------------------------------------------- */
-/* The definitions table                                                     */
+/* The definitions                                                           */
 /* ------------------------------------------------------------------------- */
 
 /*
@@ -94,19 +123,253 @@ tag_table_oid(const char *relname)
 }
 
 /*
- * Tags are defined in gp_sql.tag, so this module needs its own extension
- * installed in the database whose objects are being tagged.  Say that, rather
- * than let a query fail with "relation does not exist".
+ * An index's tags are rows in gp_sql.index_tag, so tagging one needs the
+ * extension in the index's database.  Say that, rather than let a query fail
+ * with "relation does not exist".
  */
 static void
 tag_require_extension(void)
 {
-	if (!OidIsValid(tag_table_oid("tag")))
+	if (!OidIsValid(tag_table_oid("index_tag")))
 		ereport(ERROR,
 				(errcode(ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE),
-				 errmsg("tags need the \"%s\" extension in this database",
+				 errmsg("tags of an index need the \"%s\" extension in this database",
 						GP_SQL_SCHEMA),
 				 errhint("Run \"CREATE EXTENSION gp_sql\".")));
+}
+
+/*
+ * A tag as its definition says it: what Cloudberry's pg_tag row holds.  The
+ * OID is one GetNewObjectId() gave it, for pg_tag.oid and
+ * pg_tag_description.tagid to name it by; nothing else is numbered by it.
+ */
+typedef struct TagDef
+{
+	char	   *name;
+	Oid			oid;
+	Oid			owner;
+	bool		listed;			/* false: any value is allowed */
+	List	   *values;			/* of char *, in the order they were added */
+} TagDef;
+
+/* The carrier role, or InvalidOid: no database has made the extension yet. */
+static Oid
+tagdef_role(void)
+{
+	return get_role_oid(GP_TAGDEF_ROLE, true);
+}
+
+static Oid
+json_oid(JsonbContainer *obj, const char *key)
+{
+	JsonbValue	buf;
+	JsonbValue *v = getKeyJsonValueFromContainer(obj, key, strlen(key), &buf);
+
+	if (v == NULL || v->type != jbvNumeric)
+		return InvalidOid;
+	return (Oid) DatumGetInt64(DirectFunctionCall1(numeric_int8,
+												   NumericGetDatum(v->val.numeric)));
+}
+
+/*
+ * Every definition, from the label, or NIL.  The label is read as the
+ * catalog says it now, which a writer has locked first (tagdef_lock).
+ */
+static List *
+tagdef_load(void)
+{
+	Oid			role = tagdef_role();
+	ObjectAddress addr;
+	char	   *label;
+	Jsonb	   *jb;
+	JsonbIterator *it;
+	JsonbIteratorToken tok;
+	JsonbValue	v;
+	TagDef	   *cur = NULL;
+	List	   *defs = NIL;
+
+	if (!OidIsValid(role))
+		return NIL;
+	ObjectAddressSet(addr, AuthIdRelationId, role);
+	label = GetSecurityLabel(&addr, GP_TAGDEF_PROVIDER);
+	if (label == NULL)
+		return NIL;
+
+	jb = DatumGetJsonbP(DirectFunctionCall1(jsonb_in, CStringGetDatum(label)));
+	it = JsonbIteratorInit(&jb->root);
+	while ((tok = JsonbIteratorNext(&it, &v, true)) != WJB_DONE)
+	{
+		if (tok == WJB_KEY)
+		{
+			cur = palloc0(sizeof(TagDef));
+			cur->name = pnstrdup(v.val.string.val, v.val.string.len);
+		}
+		else if (tok == WJB_VALUE && cur != NULL && v.type == jbvBinary)
+		{
+			JsonbContainer *obj = v.val.binary.data;
+			JsonbValue	buf;
+			JsonbValue *list;
+
+			cur->oid = json_oid(obj, "oid");
+			cur->owner = json_oid(obj, "owner");
+			list = getKeyJsonValueFromContainer(obj, "allowed_values",
+												strlen("allowed_values"), &buf);
+			if (list != NULL && list->type == jbvBinary)
+			{
+				JsonbIterator *lit = JsonbIteratorInit(list->val.binary.data);
+				JsonbValue	e;
+
+				cur->listed = true;
+				while ((tok = JsonbIteratorNext(&lit, &e, true)) != WJB_DONE)
+				{
+					if (tok == WJB_ELEM && e.type == jbvString)
+						cur->values = lappend(cur->values,
+											  pnstrdup(e.val.string.val,
+													   e.val.string.len));
+				}
+			}
+			defs = lappend(defs, cur);
+			cur = NULL;
+		}
+	}
+	return defs;
+}
+
+static TagDef *
+tagdef_find(List *defs, const char *name)
+{
+	foreach_ptr(TagDef, d, defs)
+	{
+		if (strcmp(d->name, name) == 0)
+			return d;
+	}
+	return NULL;
+}
+
+static void
+push_string(JsonbInState *state, JsonbIteratorToken tok, const char *s)
+{
+	JsonbValue	v;
+
+	v.type = jbvString;
+	v.val.string.len = strlen(s);
+	v.val.string.val = unconstify(char *, s);
+	pushJsonbValue(state, tok, &v);
+}
+
+static void
+push_oid(JsonbInState *state, const char *key, Oid value)
+{
+	JsonbValue	v;
+
+	push_string(state, WJB_KEY, key);
+	v.type = jbvNumeric;
+	v.val.numeric = int64_to_numeric((int64) value);
+	pushJsonbValue(state, WJB_VALUE, &v);
+}
+
+/*
+ * The one statement that may change the definitions: whoever gets here
+ * first rewrites the label, and the next waits for it and reads what it
+ * wrote.  A lock on the carrier role, as SECURITY LABEL on it takes, whose
+ * acquisition brings the catalog snapshot up to date.
+ */
+static Oid
+tagdef_lock(void)
+{
+	Oid			role = tagdef_role();
+
+	if (!OidIsValid(role))
+		ereport(ERROR,
+				(errcode(ERRCODE_UNDEFINED_OBJECT),
+				 errmsg("role \"%s\", which carries the tag definitions, does not exist",
+						GP_TAGDEF_ROLE),
+				 errhint("The \"%s\" extension makes it: drop and create the extension again.",
+						 GP_SQL_SCHEMA)));
+	LockSharedObject(AuthIdRelationId, role, 0, ShareUpdateExclusiveLock);
+	return role;
+}
+
+static void
+tagdef_store(Oid role, List *defs)
+{
+	JsonbInState state = {0};
+	ObjectAddress addr;
+	Jsonb	   *jb;
+
+	pushJsonbValue(&state, WJB_BEGIN_OBJECT, NULL);
+	foreach_ptr(TagDef, d, defs)
+	{
+		push_string(&state, WJB_KEY, d->name);
+		pushJsonbValue(&state, WJB_BEGIN_OBJECT, NULL);
+		push_oid(&state, "oid", d->oid);
+		push_oid(&state, "owner", d->owner);
+		if (d->listed)
+		{
+			push_string(&state, WJB_KEY, "allowed_values");
+			pushJsonbValue(&state, WJB_BEGIN_ARRAY, NULL);
+			foreach_ptr(char, value, d->values)
+				push_string(&state, WJB_ELEM, value);
+			pushJsonbValue(&state, WJB_END_ARRAY, NULL);
+		}
+		pushJsonbValue(&state, WJB_END_OBJECT, NULL);
+	}
+	pushJsonbValue(&state, WJB_END_OBJECT, NULL);
+
+	jb = JsonbValueToJsonb(state.result);
+	ObjectAddressSet(addr, AuthIdRelationId, role);
+	SetSecurityLabel(&addr, GP_TAGDEF_PROVIDER,
+					 defs == NIL ? NULL
+					 : JsonbToCString(NULL, &jb->root, VARSIZE(jb)));
+}
+
+/* Only its owner changes a tag, as Cloudberry's pg_tag_ownercheck says. */
+static void
+tagdef_check_owner(const TagDef *d)
+{
+	if (!has_privs_of_role(GetUserId(), d->owner))
+		ereport(ERROR,
+				(errcode(ERRCODE_INSUFFICIENT_PRIVILEGE),
+				 errmsg("must be owner of tag %s", d->name)));
+}
+
+static TagDef *
+tagdef_existing(List *defs, const char *name)
+{
+	TagDef	   *d = tagdef_find(defs, name);
+
+	if (d == NULL)
+		ereport(ERROR,
+				(errcode(ERRCODE_UNDEFINED_OBJECT),
+				 errmsg("tag \"%s\" does not exist", name)));
+	return d;
+}
+
+static List *
+text_array_list(ArrayType *arr)
+{
+	Datum	   *elems;
+	bool	   *nulls;
+	int			n;
+	List	   *values = NIL;
+
+	deconstruct_array_builtin(arr, TEXTOID, &elems, &nulls, &n);
+	for (int i = 0; i < n; i++)
+	{
+		if (!nulls[i])
+			values = lappend(values, TextDatumGetCString(elems[i]));
+	}
+	return values;
+}
+
+/*
+ * A segment is told a tag was set by the coordinator, which checked it: the
+ * definitions are the coordinator's label, and a segment has none.
+ */
+static bool
+tag_checked_elsewhere(void)
+{
+	return GpCoreApiLookup()->get_role() == GP_ROLE_EXECUTE;
 }
 
 /*
@@ -118,49 +381,60 @@ tag_require_extension(void)
 void
 GpTagValidate(const char *tagname, const char *tagvalue)
 {
-	Oid			argtypes[2] = {NAMEOID, TEXTOID};
-	Datum		values[2];
-	bool		defined;
-	bool		allowed = false;
-	bool		isnull = true;
+	TagDef	   *d;
 
-	tag_require_extension();
+	if (tag_checked_elsewhere())
+		return;
 
-	/*
-	 * SPI nests, so this works whether or not the caller is already running
-	 * SQL.  Nothing is finished on the error paths: a transaction that is
-	 * unwinding closes the stack itself.
-	 */
-	if (SPI_connect() != SPI_OK_CONNECT)
-		elog(ERROR, "SPI_connect failed");
-
-	values[0] = CStringGetDatum(tagname);
-	values[1] = CStringGetTextDatum(tagvalue);
-
-	if (SPI_execute_with_args("SELECT t.allowed_values IS NULL"
-							  "       OR $2 = ANY (t.allowed_values)"
-							  "  FROM " GP_SQL_SCHEMA ".tag t"
-							  " WHERE t.tagname = $1",
-							  2, argtypes, values, NULL, true, 1) != SPI_OK_SELECT)
-		elog(ERROR, "gp_sql: could not read " GP_SQL_SCHEMA ".tag");
-
-	defined = (SPI_processed > 0);
-	if (defined)
-		allowed = DatumGetBool(SPI_getbinval(SPI_tuptable->vals[0],
-											 SPI_tuptable->tupdesc, 1, &isnull));
-
-	SPI_finish();
-
-	if (!defined)
+	d = tagdef_find(tagdef_load(), tagname);
+	if (d == NULL)
 		ereport(ERROR,
 				(errcode(ERRCODE_UNDEFINED_OBJECT),
 				 errmsg("tag \"%s\" does not exist", tagname)));
 
-	if (isnull || !allowed)
+	if (d->listed)
+	{
+		foreach_ptr(char, value, d->values)
+		{
+			if (strcmp(value, tagvalue) == 0)
+				return;
+		}
 		ereport(ERROR,
 				(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
 				 errmsg("tag value \"%s\" is not in tag \"%s\" allowed values",
 						tagvalue, tagname)));
+	}
+}
+
+/*
+ * The definitions' own label, written by SECURITY LABEL rather than by the
+ * functions below: a restore of pg_dumpall's output, which a superuser runs.
+ * Nothing else may write it, and only on the carrier role.
+ */
+static void
+gp_tagdef_check(const ObjectAddress *object, const char *seclabel)
+{
+	Jsonb	   *jb;
+
+	if (object->classId != AuthIdRelationId ||
+		strcmp(GetUserNameFromId(object->objectId, false), GP_TAGDEF_ROLE) != 0)
+		ereport(ERROR,
+				(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+				 errmsg("a \"%s\" security label goes on role \"%s\" only",
+						GP_TAGDEF_PROVIDER, GP_TAGDEF_ROLE)));
+	if (!superuser())
+		ereport(ERROR,
+				(errcode(ERRCODE_INSUFFICIENT_PRIVILEGE),
+				 errmsg("only a superuser may write the tag definitions directly"),
+				 errhint("Use CREATE TAG, ALTER TAG and DROP TAG.")));
+	if (seclabel == NULL)
+		return;
+	jb = DatumGetJsonbP(DirectFunctionCall1(jsonb_in, CStringGetDatum(seclabel)));
+	if (!JB_ROOT_IS_OBJECT(jb))
+		ereport(ERROR,
+				(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+				 errmsg("a \"%s\" security label must be a JSON object",
+						GP_TAGDEF_PROVIDER)));
 }
 
 /* ------------------------------------------------------------------------- */
@@ -279,12 +553,16 @@ tag_merge(const char *existing, List *tags)
  * The relabel check hook: what SECURITY LABEL FOR gp_tag accepts.
  *
  * PostgreSQL has already checked that the user owns the object, so what is
- * left is the shape of the label and the tags it names.
+ * left is the shape of the label and the tags it names -- those it adds or
+ * changes: one the object already carries stays, even when a DROP TAG in
+ * another database, which could not see it, has taken its definition away.
  */
 static void
 gp_tag_check(const ObjectAddress *object, const char *seclabel)
 {
 	Jsonb	   *jb;
+	Jsonb	   *had = NULL;
+	char	   *existing;
 	JsonbIterator *it;
 	JsonbIteratorToken tok;
 	JsonbValue	v;
@@ -294,9 +572,10 @@ gp_tag_check(const ObjectAddress *object, const char *seclabel)
 	if (seclabel == NULL)		/* removing every tag is always fine */
 		return;
 
-	tag_require_extension();
-
 	jb = DatumGetJsonbP(DirectFunctionCall1(jsonb_in, CStringGetDatum(seclabel)));
+	existing = GetSecurityLabel(object, GP_TAG_PROVIDER);
+	if (existing != NULL)
+		had = DatumGetJsonbP(DirectFunctionCall1(jsonb_in, CStringGetDatum(existing)));
 
 	if (!JB_ROOT_IS_OBJECT(jb))
 		ereport(ERROR,
@@ -315,12 +594,22 @@ gp_tag_check(const ObjectAddress *object, const char *seclabel)
 		}
 		else if (tok == WJB_VALUE && key != NULL)
 		{
+			JsonbValue	buf;
+			JsonbValue *before = NULL;
+
 			if (v.type != jbvString)
 				ereport(ERROR,
 						(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
 						 errmsg("tag \"%s\" must be given a string value", key)));
 
-			GpTagValidate(key, pnstrdup(v.val.string.val, v.val.string.len));
+			if (had != NULL && JB_ROOT_IS_OBJECT(had))
+				before = getKeyJsonValueFromContainer(&had->root, key,
+													  strlen(key), &buf);
+			if (before == NULL || before->type != jbvString ||
+				before->val.string.len != v.val.string.len ||
+				memcmp(before->val.string.val, v.val.string.val,
+					   v.val.string.len) != 0)
+				GpTagValidate(key, pnstrdup(v.val.string.val, v.val.string.len));
 			count++;
 			key = NULL;
 		}
@@ -337,6 +626,7 @@ void
 GpTagRegisterProvider(void)
 {
 	register_label_provider(GP_TAG_PROVIDER, gp_tag_check);
+	register_label_provider(GP_TAGDEF_PROVIDER, gp_tagdef_check);
 }
 
 /* ------------------------------------------------------------------------- */
@@ -488,14 +778,101 @@ GpTagCheckAll(List *tags)
 	if (tags == NIL)
 		return;
 
-	tag_require_extension();
-
 	foreach(lc, tags)
 	{
 		DefElem    *def = (DefElem *) lfirst(lc);
 
 		if (def->arg != NULL)
 			GpTagValidate(def->defname, defGetString(def));
+	}
+}
+
+/* The name Cloudberry's messages give the object a TAG clause is on. */
+static char *
+tag_object_name(Oid classId, Oid objectId)
+{
+	switch (classId)
+	{
+		case RelationRelationId:
+			return get_rel_name(objectId);
+		case NamespaceRelationId:
+			return get_namespace_name(objectId);
+		case AuthIdRelationId:
+			return GetUserNameFromId(objectId, false);
+		case DatabaseRelationId:
+			return get_database_name(objectId);
+		case TableSpaceRelationId:
+			return get_tablespace_name(objectId);
+		default:
+			return psprintf("%u", objectId);
+	}
+}
+
+/*
+ * What Cloudberry says of a TAG clause as it applies one (tag.c,
+ * AddTagDescriptions, AlterTagDescriptions and UnsetTagDescriptions): with the
+ * object it makes, a tag named twice is refused; on an ALTER, a tag the object
+ * does not carry yet is added with a WARNING, and one taken away that it does
+ * not carry is refused.  An index's tags are rows, and are not asked about.
+ */
+void
+GpTagCheckClause(Oid classId, Oid objectId, List *tags, bool creating)
+{
+	ObjectAddress addr;
+	char	   *label;
+	Jsonb	   *had = NULL;
+	List	   *seen = NIL;
+	char	   *objname;
+
+	if (tags == NIL || tag_checked_elsewhere())
+		return;
+	if (classId == RelationRelationId)
+	{
+		char		relkind = get_rel_relkind(objectId);
+
+		if (relkind == RELKIND_INDEX || relkind == RELKIND_PARTITIONED_INDEX ||
+			get_rel_persistence(objectId) == RELPERSISTENCE_TEMP)
+			return;
+	}
+
+	objname = tag_object_name(classId, objectId);
+	ObjectAddressSet(addr, classId, objectId);
+	label = GetSecurityLabel(&addr, GP_TAG_PROVIDER);
+	if (label != NULL)
+		had = DatumGetJsonbP(DirectFunctionCall1(jsonb_in, CStringGetDatum(label)));
+
+	foreach_node(DefElem, def, tags)
+	{
+		JsonbValue	buf;
+		bool		carried;
+
+		carried = list_member(seen, makeString(def->defname)) ||
+			(had != NULL && JB_ROOT_IS_OBJECT(had) &&
+			 getKeyJsonValueFromContainer(&had->root, def->defname,
+										  strlen(def->defname), &buf) != NULL);
+		if (creating)
+		{
+			if (carried)
+				ereport(ERROR,
+						(errcode(ERRCODE_DUPLICATE_OBJECT),
+						 errmsg("tag \"%s\" value has been added for object \"%s\".",
+								def->defname, objname)));
+		}
+		else if (def->arg == NULL)
+		{
+			if (!carried)
+				ereport(ERROR,
+						(errcode(ERRCODE_UNDEFINED_OBJECT),
+						 errmsg("object \"%s\" does not have tag \"%s\"",
+								objname, def->defname)));
+			seen = list_delete(seen, makeString(def->defname));
+			continue;
+		}
+		else if (!carried)
+			ereport(WARNING,
+					(errmsg("object \"%s\" does not have tag \"%s\", creating",
+							objname, def->defname)));
+		seen = lappend(seen, makeString(def->defname));
 	}
 }
 
@@ -509,6 +886,8 @@ static void
 tag_apply_to_index(Oid indexRelId, List *tags)
 {
 	ListCell   *lc;
+
+	tag_require_extension();
 
 	if (SPI_connect() != SPI_OK_CONNECT)
 		elog(ERROR, "SPI_connect failed");
@@ -555,6 +934,10 @@ GpTagApplyToRelation(Oid relId, List *tags)
 		return;
 
 	GpTagCheckAll(tags);
+
+	/* Cloudberry's temporary table carries no tags, whatever it was given */
+	if (get_rel_persistence(relId) == RELPERSISTENCE_TEMP)
+		return;
 
 	relkind = get_rel_relkind(relId);
 	if (relkind == RELKIND_INDEX || relkind == RELKIND_PARTITIONED_INDEX)
@@ -640,5 +1023,196 @@ gp_sql_validate_tag(PG_FUNCTION_ARGS)
 
 	GpTagValidate(NameStr(*tagname), text_to_cstring(tagvalue));
 
+	PG_RETURN_VOID();
+}
+
+/* The two that take a NULL list take no NULL name. */
+static void
+tagdef_require_name(FunctionCallInfo fcinfo)
+{
+	if (PG_ARGISNULL(0))
+		ereport(ERROR,
+				(errcode(ERRCODE_NULL_VALUE_NOT_ALLOWED),
+				 errmsg("a tag must have a name")));
+}
+
+PG_FUNCTION_INFO_V1(gp_sql_tag_definitions);
+PG_FUNCTION_INFO_V1(gp_sql_lock_tag_definitions);
+PG_FUNCTION_INFO_V1(gp_sql_define_tag);
+PG_FUNCTION_INFO_V1(gp_sql_redefine_tag);
+PG_FUNCTION_INFO_V1(gp_sql_rename_tag_definition);
+PG_FUNCTION_INFO_V1(gp_sql_undefine_tag);
+PG_FUNCTION_INFO_V1(gp_sql_change_tag_owner);
+
+/*
+ * gp_sql.tag_definitions() -> SETOF (oid, tagname, tagowner, allowed_values)
+ *
+ * The definitions as Cloudberry's pg_tag has them.
+ */
+Datum
+gp_sql_tag_definitions(PG_FUNCTION_ARGS)
+{
+	ReturnSetInfo *rsinfo = (ReturnSetInfo *) fcinfo->resultinfo;
+
+	InitMaterializedSRF(fcinfo, 0);
+	foreach_ptr(TagDef, d, tagdef_load())
+	{
+		Datum		values[4];
+		bool		nulls[4] = {false, false, false, false};
+		NameData   *name = palloc0(sizeof(NameData));
+
+		namestrcpy(name, d->name);
+		values[0] = ObjectIdGetDatum(d->oid);
+		values[1] = NameGetDatum(name);
+		values[2] = ObjectIdGetDatum(d->owner);
+		if (d->listed)
+		{
+			int			n = list_length(d->values);
+			Datum	   *elems = palloc_array(Datum, Max(n, 1));
+			int			i = 0;
+
+			foreach_ptr(char, value, d->values)
+				elems[i++] = CStringGetTextDatum(value);
+			values[3] = PointerGetDatum(construct_array_builtin(elems, n, TEXTOID));
+		}
+		else
+			nulls[3] = true;
+		tuplestore_putvalues(rsinfo->setResult, rsinfo->setDesc, values, nulls);
+	}
+	return (Datum) 0;
+}
+
+/*
+ * gp_sql.lock_tag_definitions(tagname name DEFAULT NULL)
+ *
+ * What CREATE, ALTER and DROP TAG begin with, so that what they read of the
+ * definitions is still so when they write them: the definitions locked until
+ * the transaction ends, and a tag named, if it exists, its caller's.
+ */
+Datum
+gp_sql_lock_tag_definitions(PG_FUNCTION_ARGS)
+{
+	TagDef	   *d;
+
+	(void) tagdef_lock();
+	if (!PG_ARGISNULL(0) &&
+		(d = tagdef_find(tagdef_load(), NameStr(*PG_GETARG_NAME(0)))) != NULL)
+		tagdef_check_owner(d);
+	PG_RETURN_VOID();
+}
+
+/*
+ * gp_sql.define_tag(tagname name, allowed_values text[])
+ *
+ * A new tag, the caller's.  The list is taken as given: create_tag has
+ * checked it by Cloudberry's rules.  NULL, for any value.
+ */
+Datum
+gp_sql_define_tag(PG_FUNCTION_ARGS)
+{
+	const char *name;
+	Oid			role;
+	List	   *defs;
+	TagDef	   *d;
+
+	tagdef_require_name(fcinfo);
+	name = NameStr(*PG_GETARG_NAME(0));
+	role = tagdef_lock();
+	defs = tagdef_load();
+
+	if (tagdef_find(defs, name) != NULL)
+		ereport(ERROR,
+				(errcode(ERRCODE_DUPLICATE_OBJECT),
+				 errmsg("tag \"%s\" already exists", name)));
+
+	d = palloc0(sizeof(TagDef));
+	d->name = pstrdup(name);
+	d->oid = GetNewObjectId();
+	d->owner = GetUserId();
+	if (!PG_ARGISNULL(1))
+	{
+		d->listed = true;
+		d->values = text_array_list(PG_GETARG_ARRAYTYPE_P(1));
+	}
+	tagdef_store(role, lappend(defs, d));
+	PG_RETURN_VOID();
+}
+
+/*
+ * gp_sql.redefine_tag(tagname name, allowed_values text[])
+ *
+ * A tag's list replaced, by its owner; NULL takes the list away.
+ */
+Datum
+gp_sql_redefine_tag(PG_FUNCTION_ARGS)
+{
+	Oid			role;
+	List	   *defs;
+	TagDef	   *d;
+
+	tagdef_require_name(fcinfo);
+	role = tagdef_lock();
+	defs = tagdef_load();
+	d = tagdef_existing(defs, NameStr(*PG_GETARG_NAME(0)));
+
+	tagdef_check_owner(d);
+	d->listed = !PG_ARGISNULL(1);
+	d->values = d->listed ? text_array_list(PG_GETARG_ARRAYTYPE_P(1)) : NIL;
+	tagdef_store(role, defs);
+	PG_RETURN_VOID();
+}
+
+/* gp_sql.rename_tag_definition(tagname name, newname name) */
+Datum
+gp_sql_rename_tag_definition(PG_FUNCTION_ARGS)
+{
+	const char *newname = NameStr(*PG_GETARG_NAME(1));
+	Oid			role = tagdef_lock();
+	List	   *defs = tagdef_load();
+	TagDef	   *d = tagdef_existing(defs, NameStr(*PG_GETARG_NAME(0)));
+
+	tagdef_check_owner(d);
+	if (tagdef_find(defs, newname) != NULL)
+		ereport(ERROR,
+				(errcode(ERRCODE_DUPLICATE_OBJECT),
+				 errmsg("tag \"%s\" already exists", newname)));
+	d->name = pstrdup(newname);
+	tagdef_store(role, defs);
+	PG_RETURN_VOID();
+}
+
+/* gp_sql.undefine_tag(tagname name) */
+Datum
+gp_sql_undefine_tag(PG_FUNCTION_ARGS)
+{
+	Oid			role = tagdef_lock();
+	List	   *defs = tagdef_load();
+	TagDef	   *d = tagdef_existing(defs, NameStr(*PG_GETARG_NAME(0)));
+
+	tagdef_check_owner(d);
+	tagdef_store(role, list_delete_ptr(defs, d));
+	PG_RETURN_VOID();
+}
+
+/*
+ * gp_sql.change_tag_owner(tagname name, newowner name)
+ *
+ * By AlterObjectOwner_internal's rules, which Cloudberry's ALTER TAG ...
+ * OWNER TO goes through: the owner, or a superuser, and a new owner the
+ * caller may become.
+ */
+Datum
+gp_sql_change_tag_owner(PG_FUNCTION_ARGS)
+{
+	Oid			role = tagdef_lock();
+	List	   *defs = tagdef_load();
+	TagDef	   *d = tagdef_existing(defs, NameStr(*PG_GETARG_NAME(0)));
+	Oid			newowner = get_role_oid(NameStr(*PG_GETARG_NAME(1)), false);
+
+	tagdef_check_owner(d);
+	if (!superuser())
+		check_can_set_role(GetUserId(), newowner);
+	d->owner = newowner;
+	tagdef_store(role, defs);
 	PG_RETURN_VOID();
 }

@@ -91,7 +91,10 @@ SOCK="$(mktemp -d /tmp/cbs-XXXXXX)"
 # home directory, and the tests load regress.so from the image.
 EXEC="$(mktemp -d "${HOME:-/var/lib/postgresql}/cb-singlenode-XXXXXX")"
 PORT="${PGPORT:-$((7100 + RANDOM % 200))}"
-export PGPORT="$PORT" PGHOST="$SOCK"
+# The superuser the cluster is made with is Cloudberry's demo cluster's,
+# gpadmin, which Cloudberry's expected output names and numbers 10 (the tag
+# test's owners); PostgreSQL's own tests name none.
+export PGPORT="$PORT" PGHOST="$SOCK" PGUSER=gpadmin
 
 WATCHDOG=
 cleanup() {
@@ -114,7 +117,7 @@ printf '  of the 290 tests Cloudberry schedules: %d of Cloudberry'"'"'s run here
 awk '$1 == "skip" { $1 = ""; sub(/^ /, ""); print "  skip " $0 }' "$HERE/manifest" | cut -c1-150
 echo
 
-"$BINDIR/initdb" -D "$WORK/data" -N --locale=C --encoding=UTF8 > "$WORK/initdb.log" 2>&1 \
+"$BINDIR/initdb" -D "$WORK/data" -N -U gpadmin --locale=C --encoding=UTF8 > "$WORK/initdb.log" 2>&1 \
 	|| { echo "initdb failed"; tail -20 "$WORK/initdb.log"; exit 1; }
 {
 	echo "unix_socket_directories = '$SOCK'"

@@ -73,7 +73,7 @@ refused() {
 	esac
 }
 
-echo "tags: definitions in a table, assignments in a security label"
+echo "tags: definitions in a shared label, assignments in the objects' labels"
 echo "  bindir $BINDIR"
 echo
 
@@ -282,7 +282,7 @@ isl "and dropping a role takes its shared label" \
 echo "9. a definition cannot be dropped or renamed out from under an object"
 ###############################################################################
 refused "DROP TAG is refused while something carries it" \
-        "CALL gp_sql.drop_tag('{tier}');" "object(s) carry it"
+        "CALL gp_sql.drop_tag('{tier}');" "cannot be dropped because some objects depend on it"
 refused "and so is a rename" \
         "CALL gp_sql.rename_tag('tier', 'level');" "object(s) carry it"
 isl "once nothing does, it can be dropped" \
@@ -323,10 +323,42 @@ case "$out" in
 	*) notok "someone else cannot tag your table" "$out" ;;
 esac
 out=$("$PSQL" -X -q -t -A -d postgres -U other \
-	  -c "UPDATE gp_sql.tag SET allowed_values = ARRAY['x'] WHERE tagname = 'env';
-	      SELECT count(*) FROM gp_sql.tag WHERE tagname = 'env' AND allowed_values IS NOT NULL;" 2>&1 | tail -1)
-[ "$out" = "0" ] && ok "nor change a definition they do not own" \
-	|| notok "nor change a definition they do not own" "$out"
+	  -c "CALL gp_sql.alter_tag('env', add_values => ARRAY['x']);" 2>&1)
+case "$out" in
+	*"must be owner of tag env"*) ok "nor change a definition they do not own" ;;
+	*) notok "nor change a definition they do not own" "$out" ;;
+esac
+out=$("$PSQL" -X -q -t -A -d postgres -U other \
+	  -c "CALL gp_sql.drop_tag('{env}');" 2>&1)
+case "$out" in
+	*"must be owner of tag env"*) ok "or drop it" ;;
+	*) notok "or drop it" "$out" ;;
+esac
+out=$("$PSQL" -X -q -t -A -d postgres -U other \
+	  -c "SECURITY LABEL FOR gp_tag_definitions ON ROLE gp_tag_definitions IS '{}';" 2>&1)
+case "$out" in
+	*ERROR*) ok "or write the definitions' label by hand" ;;
+	*) notok "or write the definitions' label by hand" "$out" ;;
+esac
+isl "while a tag of their own is theirs to change" \
+   "SET ROLE other;
+    CALL gp_sql.create_tag('theirs', ARRAY['a']);
+    CALL gp_sql.alter_tag('theirs', add_values => ARRAY['b']);
+    RESET ROLE;
+    SELECT tagowner::regrole::text || ' ' || array_to_string(allowed_values, ',')
+      FROM gp_sql.tag WHERE tagname = 'theirs';" "other a,b"
+isl "ALTER TAG ... OWNER TO gives one to another role" \
+   "CREATE ROLE new_owner;
+    ALTER TAG theirs OWNER TO new_owner;
+    SELECT tagowner::regrole::text FROM gp_sql.tag WHERE tagname = 'theirs';" "new_owner"
+out=$("$PSQL" -X -q -t -A -d postgres -U other \
+	  -c "ALTER TAG theirs OWNER TO other;" 2>&1)
+case "$out" in
+	*"must be owner of tag theirs"*) ok "after which its old owner may not take it back" ;;
+	*) notok "after which its old owner may not take it back" "$out" ;;
+esac
+refused "a form ALTER TAG does not have is refused, not rewritten into nothing" \
+        "ALTER TAG theirs SET SCHEMA public;" "syntax error"
 
 ###############################################################################
 echo "12. a dump carries the tags, which Cloudberry's own tools never did"
@@ -338,11 +370,68 @@ else
 	notok "pg_dump writes the assignment beside its table" \
 	      "$(grep -i 'security label' "$WORK/dump.sql" | head -3)$(head -3 "$WORK/dump.err")"
 fi
-if grep -q "COPY gp_sql.tag " "$WORK/dump.sql"; then
-	ok "and the definitions, which are extension configuration tables"
+"$BINDIR/pg_dumpall" -g > "$WORK/globals.sql" 2>"$WORK/globals.err"
+if grep -q "SECURITY LABEL FOR gp_tag_definitions ON ROLE gp_tag_definitions IS '.*\"tier\"" "$WORK/globals.sql" ||
+   grep -q "SECURITY LABEL FOR gp_tag_definitions ON ROLE gp_tag_definitions IS '.*\"env\"" "$WORK/globals.sql"; then
+	ok "and pg_dumpall the definitions, with the roles"
 else
-	notok "and the definitions" "$(grep -n 'gp_sql' "$WORK/dump.sql" | head -5)"
+	notok "and pg_dumpall the definitions, with the roles" \
+	      "$(grep -i 'gp_tag_definitions' "$WORK/globals.sql" | head -3)$(head -3 "$WORK/globals.err")"
 fi
+
+###############################################################################
+echo "13. a tag is the cluster's: defined in one database, it is in every other"
+###############################################################################
+q "CREATE DATABASE other_db;" > /dev/null
+qd() { "$PSQL" -X -q -t -A -d "$1" -c "$2" 2>&1; }
+out=$(qd other_db "CREATE TABLE x (id int) WITH (gp_tag.env = 'prod', gp_tag.team = 'data');
+                   SELECT label FROM pg_seclabel WHERE objoid = 'x'::regclass AND provider = 'gp_tag';")
+[ "$out" = '{"env": "prod", "team": "data"}' ] \
+	&& ok "a database without the extension tags with the tags defined in another" \
+	|| notok "a database without the extension tags with the tags defined in another" "$out"
+out=$(qd other_db "CREATE TABLE y (id int) WITH (gp_tag.nope = 'x');")
+case "$out" in
+	*'tag "nope" does not exist'*) ok "and refuses one nobody defined, as there" ;;
+	*) notok "and refuses one nobody defined, as there" "$out" ;;
+esac
+out=$(qd other_db "CREATE EXTENSION gp_sql CASCADE;
+                   SELECT count(*) FROM gp_sql.tag WHERE tagname IN ('env', 'team', 'order_kept');")
+[ "$(printf '%s\n' "$out" | tail -1)" = "3" ] \
+	&& ok "the extension made there finds the definitions, and its carrier role, made" \
+	|| notok "the extension made there finds the definitions, and its carrier role, made" "$out"
+out=$(qd other_db "CALL gp_sql.create_tag('from_other', ARRAY['x']);")
+is "a tag defined there is defined here" \
+   "SELECT array_to_string(allowed_values, ',') FROM gp_sql.tag WHERE tagname = 'from_other';" "x"
+is "and Cloudberry's pg_tag says so, by the name Cloudberry gives it" \
+   "SELECT tagname || ' ' || tagowner || ' ' || (oid <> 0) FROM pg_tag WHERE tagname = 'from_other';" \
+   "from_other $(q "SELECT oid FROM pg_roles WHERE rolname = CURRENT_USER;") true"
+is "pg_tag_description has this database's assignments, and the shared objects' under database 0" \
+   "SELECT string_agg(DISTINCT CASE WHEN tddatabaseid = 0 THEN 'shared' ELSE 'here' END, ',')
+      FROM pg_tag_description;" "here,shared"
+is "each naming its tag by the tag's OID" \
+   "SELECT count(*) FROM pg_tag_description d LEFT JOIN pg_tag t ON t.oid = d.tagid
+     WHERE t.oid IS NULL;" "0"
+out=$(qd other_db "CALL gp_sql.drop_tag('{team}');")
+case "$out" in
+	*"some objects depend on it"*) ok "a tag an object carries there cannot be dropped there" ;;
+	*) notok "a tag an object carries there cannot be dropped there" "$out" ;;
+esac
+q "CALL gp_sql.create_tag('passing', ARRAY['a']);" > /dev/null
+qd other_db "SECURITY LABEL FOR gp_tag ON TABLE x IS '{\"env\": \"prod\", \"team\": \"data\", \"passing\": \"a\"}';" > /dev/null
+out=$(q "CALL gp_sql.drop_tag('{passing}'); SELECT 'dropped';")
+[ "$out" = "dropped" ] \
+	&& ok "but from another database, which cannot see that, it can" \
+	|| notok "but from another database, which cannot see that, it can" "$out"
+out=$(qd other_db "SELECT gp_sql.set_relation_tag('x'::regclass, 'env', 'staging');
+                   SELECT gp_sql.relation_tags('x'::regclass)->>'env';")
+[ "$(printf '%s\n' "$out" | grep -v '^$' | tail -1)" = "staging" ] \
+	&& ok "and the object that carries it is still tagged, the tag that is gone kept as it was" \
+	|| notok "and the object that carries it is still tagged, the tag that is gone kept as it was" "$out"
+out=$(qd other_db "SELECT string_agg(tagname, ',' ORDER BY tagname) FROM gp_sql.relation_tag_descriptions
+                    WHERE relname = 'x';")
+[ "$out" = "env,team" ] \
+	&& ok "but passed over where the assignments are listed" \
+	|| notok "but passed over where the assignments are listed" "$out"
 
 echo
 echo "  $pass passed, $fail failed"

@@ -1001,6 +1001,11 @@ rw_create_tag(GpRewrite *rw)
  * ALTER TAG [IF EXISTS] name { ADD | DROP } ALLOWED_VALUES 'a', ...
  * ALTER TAG [IF EXISTS] name UNSET ALLOWED_VALUES
  * ALTER TAG [IF EXISTS] name RENAME TO newname
+ * ALTER TAG name OWNER TO role
+ *
+ * The form is matched before the statement is taken over: one that is none
+ * of these is left to the grammar, which refuses it, rather than rewritten
+ * into nothing.
  */
 static bool
 rw_alter_tag(GpRewrite *rw)
@@ -1026,27 +1031,47 @@ rw_alter_tag(GpRewrite *rw)
 	name = tok_name(ts, i);
 	i++;
 
-	rw_whole(rw);
-
 	if (tok_is(ts, i, "rename") && tok_is(ts, i + 1, "to") && tok_is_name(ts, i + 2))
+	{
+		rw_whole(rw);
 		appendStringInfo(&rw->body, "CALL gp_sql.rename_tag(%s, %s, missing_ok => %s)",
 						 quote_literal_cstr(name),
 						 quote_literal_cstr(tok_name(ts, i + 2)),
 						 missing_ok ? "true" : "false");
+	}
 	else if (tok_is(ts, i, "unset") && tok_is(ts, i + 1, "allowed_values"))
+	{
+		rw_whole(rw);
 		appendStringInfo(&rw->body,
 						 "CALL gp_sql.alter_tag(%s, unset_values => true, missing_ok => %s)",
 						 quote_literal_cstr(name), missing_ok ? "true" : "false");
+	}
 	else if ((tok_is(ts, i, "add") || tok_is(ts, i, "drop")) &&
 			 tok_is(ts, i + 1, "allowed_values"))
 	{
 		bool		adding = tok_is(ts, i, "add");
 
+		rw_whole(rw);
 		initStringInfo(&values);
 		(void) collect_strings(ts, i + 2, &values);
 		appendStringInfo(&rw->body, "CALL gp_sql.alter_tag(%s, %s => %s, missing_ok => %s)",
 						 quote_literal_cstr(name),
 						 adding ? "add_values" : "drop_values", values.data,
+						 missing_ok ? "true" : "false");
+	}
+	else if (tok_is(ts, i, "owner") && tok_is(ts, i + 1, "to") && tok_is_name(ts, i + 2))
+	{
+		/* CURRENT_USER and its kind are PostgreSQL's to evaluate */
+		const char *owner =
+			(tok_is_kw(ts, i + 2, "current_user") ||
+			 tok_is_kw(ts, i + 2, "current_role") ||
+			 tok_is_kw(ts, i + 2, "session_user"))
+			? tok_name(ts, i + 2)
+			: quote_literal_cstr(tok_name(ts, i + 2));
+
+		rw_whole(rw);
+		appendStringInfo(&rw->body, "CALL gp_sql.alter_tag_owner(%s, %s, missing_ok => %s)",
+						 quote_literal_cstr(name), owner,
 						 missing_ok ? "true" : "false");
 	}
 	else

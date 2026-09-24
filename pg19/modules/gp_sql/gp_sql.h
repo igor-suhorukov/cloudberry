@@ -37,6 +37,14 @@ struct QueryDesc;
 #define GP_TAG_PROVIDER		"gp_tag"
 
 /*
+ * Where the definitions are: the shared label of this provider on the
+ * NOLOGIN role of the same name, which the extension's script makes, or
+ * finds made by another database's.  See tag.c.
+ */
+#define GP_TAGDEF_PROVIDER	"gp_tag_definitions"
+#define GP_TAGDEF_ROLE		"gp_tag_definitions"
+
+/*
  * The namespace of the shorthand:
  *
  *	  CREATE TABLE t (...) WITH (gp_tag.env = 'prod')
@@ -133,6 +141,15 @@ extern void GpTagApplyToRelation(Oid relId, List *tags);
  * tablespace -- the tags, as its gp_tag label.  The tags are not checked here.
  */
 extern void GpTagApplyToObject(Oid classId, Oid objectId, List *tags);
+
+/*
+ * Cloudberry's rules for a TAG clause as it is applied: a tag twice in one
+ * clause of the statement that makes the object is refused; on an ALTER, a
+ * tag new to the object is added with a WARNING, and UNSET TAG of one it
+ * does not carry is refused.  Call before GpTagApplyToObject.
+ */
+extern void GpTagCheckClause(Oid classId, Oid objectId, List *tags,
+							 bool creating);
 
 /* An index is being dropped: forget the tags kept for it. */
 extern void GpTagIndexDropped(Oid indexRelId);
@@ -288,9 +305,8 @@ extern List *GpPartitionGrantObjects(GrantStmt *stmt);
 extern void GpPartitionRenamed(Oid relid, const char *oldname, const char *newname);
 
 /*
- * Refuse a tag name or value the definitions in gp_sql.tag do not allow.
- * Shared by the label check hook and the shorthand, so that both answer the
- * same.  Called with the extension's tables reachable.
+ * Refuse a tag name or value the definitions do not allow.  Shared by the
+ * label check hook and the shorthand, so that both answer the same.
  */
 extern void GpTagValidate(const char *tagname, const char *tagvalue);
 
