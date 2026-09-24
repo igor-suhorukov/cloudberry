@@ -27,11 +27,11 @@
  * Cloudberry keeps in pg_aoseg, pg_aovisimap and pg_aoblkdir in gp_ao's
  * tables (ao_meta.c).  What the core does not ask a table access method,
  * the registry asks (O13): the options (O14), the columns a scan reads
- * (O15), a unique index's probe (O16), BRIN's runs of blocks (O18) and
- * UPDATE's old row (O20).  The columns ALTER TABLE adds (O17) are not asked
- * yet: an ADD COLUMN that needs values written rewrites the table.  What
- * Cloudberry shows of such a table -- pg_appendonly, gp_toolkit's functions
- * of it -- is in ao_toolkit.c, and VACUUM in ao_vacuum.c.
+ * (O15), a unique index's probe (O16), the columns ALTER TABLE adds to a
+ * table by column (O17), BRIN's runs of blocks (O18) and UPDATE's old row
+ * (O20).  What Cloudberry shows of such a table -- pg_appendonly, gp_toolkit's
+ * functions of it -- is in ao_toolkit.c, a column's own options in
+ * ao_encoding.c, and VACUUM in ao_vacuum.c.
  *
  * This file is what the module hooks: Cloudberry's spelling of the storage
  * options, the triggers Cloudberry refuses, the last phase of VACUUM, a

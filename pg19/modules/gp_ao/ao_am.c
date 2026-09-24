@@ -1651,6 +1651,184 @@ ao_relation_get_block_sequences(Relation rel, int *nseqs)
 	return seqs;
 }
 
+/*
+ * O17: the columns an ALTER TABLE adds to a table by column, written alone,
+ * as Cloudberry's AOCO writes them (aocs_addcol): each block of each segment
+ * file given the new columns' values for its rows, computed from the rest
+ * of the row, in files of their own, and its directory row the offsets of
+ * them.  A row deleted is given NULLs, and nothing it holds is evaluated.
+ * A segment file awaiting drop gets none: no snapshot that sees the new
+ * columns reads it, and the old ones read it as they did.  The core checks
+ * the new columns' constraints against what was written.
+ */
+static void
+ao_relation_add_columns(Relation rel, int ncolumns, const AttrNumber *attnums,
+						Expr *const *exprs, const bool *generated)
+{
+	TupleDesc	desc = RelationGetDescr(rel);
+	int			natts = desc->natts;
+	int64		storage_id = ao_storage_id(rel);
+	Snapshot	snapshot = RegisterSnapshot(GetLatestSnapshot());
+	EState	   *estate = CreateExecutorState();
+	ExprContext *econtext = GetPerTupleExprContext(estate);
+	ExprState **states = palloc_array(ExprState *, ncolumns);
+	TupleTableSlot *slot = MakeSingleTupleTableSlot(desc, &TTSOpsVirtual);
+	AoOptions  *colopts = palloc_array(AoOptions, natts);
+	AoColumnBuilder *builders = palloc_array(AoColumnBuilder, ncolumns);
+	AoBlockReader *readers = palloc_array(AoBlockReader, natts);
+	StringInfoData raw;
+	StringInfoData out;
+	AoSegfile  *segfiles;
+	int			nsegfiles;
+
+	ao_column_options(rel, colopts);
+	for (int k = 0; k < ncolumns; k++)
+	{
+		states[k] = ExecPrepareExpr(exprs[k], estate);
+		ao_column_builder_init(&builders[k]);
+	}
+	for (int a = 0; a < natts; a++)
+		ao_reader_init(&readers[a], CurrentMemoryContext);
+	initStringInfo(&raw);
+	initStringInfo(&out);
+
+	segfiles = ao_segfiles_read(storage_id, snapshot, &nsegfiles);
+	for (int s = 0; s < nsegfiles; s++)
+	{
+		AoSegfile  *sf;
+		AoVisimap  *vm;
+		AoBlkdirScan *bs;
+		AoBlkdirEntry entry;
+		List	   *entries = NIL;
+		int64	   *eof;
+		int64	   *eof_unc;
+		ListCell   *lc;
+
+		if (segfiles[s].state != AO_SEGFILE_DEFAULT)
+			continue;
+		sf = ao_segfile_read(storage_id, segfiles[s].segno, SnapshotSelf);
+		if (sf == NULL)
+			continue;
+		vm = ao_visimap_load(storage_id, sf->segno, snapshot);
+		eof = palloc0_array(int64, natts);
+		eof_unc = palloc0_array(int64, natts);
+		for (int g = 0; g < sf->ngroups && g < natts; g++)
+		{
+			eof[g] = sf->eof[g];
+			eof_unc[g] = sf->eof_uncompressed[g];
+		}
+
+		/* The segment file's blocks, read before any directory row changes. */
+		bs = ao_blkdir_scan_begin(storage_id, sf->segno, snapshot);
+		while (ao_blkdir_scan_next(bs, &entry))
+		{
+			AoBlkdirEntry *e = palloc_object(AoBlkdirEntry);
+
+			*e = entry;
+			entries = lappend(entries, e);
+		}
+		ao_blkdir_scan_end(bs);
+
+		foreach(lc, entries)
+		{
+			AoBlkdirEntry *e = lfirst(lc);
+			int64	   *offsets = palloc_array(int64, natts);
+
+			for (int a = 0; a < natts; a++)
+			{
+				Form_pg_attribute att = TupleDescAttr(desc, a);
+
+				offsets[a] = a < e->noffsets ? e->offsets[a] : -1;
+				if (att->attisdropped || offsets[a] < 0)
+					continue;
+				readers[a].filenum = AoFileNum(sf->segno, a + 1);
+				ao_reader_load(rel, &readers[a], offsets[a], att, NULL);
+			}
+
+			for (int i = 0; i < e->nrows; i++)
+			{
+				bool		deleted = ao_visimap_is_deleted(vm, e->first_row + i);
+
+				ExecClearTuple(slot);
+				for (int a = 0; a < natts; a++)
+				{
+					if (TupleDescAttr(desc, a)->attisdropped)
+					{
+						slot->tts_values[a] = (Datum) 0;
+						slot->tts_isnull[a] = true;
+					}
+					else if (offsets[a] >= 0)
+					{
+						slot->tts_values[a] = readers[a].values[i];
+						slot->tts_isnull[a] = readers[a].isnull[i];
+					}
+					else
+						slot->tts_values[a] = getmissingattr(desc, a + 1,
+															 &slot->tts_isnull[a]);
+				}
+				for (int k = 0; k < ncolumns; k++)
+				{
+					slot->tts_values[attnums[k] - 1] = (Datum) 0;
+					slot->tts_isnull[attnums[k] - 1] = true;
+				}
+				ExecStoreVirtualTuple(slot);
+
+				/* Plain expressions of the old row first, then the generated. */
+				for (int pass = 0; pass < 2 && !deleted; pass++)
+				{
+					for (int k = 0; k < ncolumns; k++)
+					{
+						AttrNumber	attno = attnums[k];
+
+						if (generated[k] != (pass == 1))
+							continue;
+						econtext->ecxt_scantuple = slot;
+						slot->tts_values[attno - 1] =
+							ExecEvalExpr(states[k], econtext, &slot->tts_isnull[attno - 1]);
+					}
+				}
+				for (int k = 0; k < ncolumns; k++)
+				{
+					Form_pg_attribute att = TupleDescAttr(desc, attnums[k] - 1);
+					Datum		v = slot->tts_values[attnums[k] - 1];
+					bool		isnull = slot->tts_isnull[attnums[k] - 1];
+
+					if (!isnull)
+						v = ao_detoast_value(att, v);
+					ao_column_append(&builders[k], att, v, isnull);
+				}
+				ResetExprContext(econtext);
+			}
+
+			for (int k = 0; k < ncolumns; k++)
+			{
+				int			g = attnums[k] - 1;
+				Size		len;
+
+				ao_column_finish(&builders[k], &raw);
+				ao_column_builder_reset(&builders[k]);
+				len = ao_block_encode(&raw, &colopts[g], e->first_row, e->nrows, &out);
+				offsets[g] = eof[g];
+				ao_file_write(rel, AoFileNum(sf->segno, g + 1), eof[g], out.data, len);
+				eof[g] += len;
+				eof_unc[g] += AO_BLOCK_HEADER_SIZE + raw.len;
+			}
+			ao_blkdir_replace(&e->tid, storage_id, sf->segno, e->first_row,
+							  e->nrows, offsets, natts);
+		}
+
+		sf->eof = eof;
+		sf->eof_uncompressed = eof_unc;
+		sf->ngroups = natts;
+		sf->modcount++;
+		ao_segfile_update(storage_id, sf);
+	}
+
+	ExecDropSingleTupleTableSlot(slot);
+	FreeExecutorState(estate);
+	UnregisterSnapshot(snapshot);
+}
+
 static TableAmExtRoutine ao_row_ext;
 static TableAmExtRoutine ao_column_ext;
 
@@ -1668,6 +1846,7 @@ ao_register_table_ams(void)
 	ao_column_ext.reloptions = ao_column_reloptions;
 	ao_column_ext.scan_extractcolumns = ao_scan_extractcolumns;
 	ao_column_ext.scan_by_column = true;
+	ao_column_ext.relation_add_columns = ao_relation_add_columns;
 
 	RegisterTableAmExtension(&ao_row_methods, &ao_row_ext);
 	RegisterTableAmExtension(&ao_column_methods, &ao_column_ext);

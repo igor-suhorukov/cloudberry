@@ -389,6 +389,14 @@ isl "TRUNCATE takes a new storage ID, and the old one's rows go" \
 q "INSERT INTO dd SELECT i, 'x' FROM generate_series(1, 100) i;" > /dev/null
 is "ADD COLUMN with a constant reads the old rows as having it" \
    "ALTER TABLE dd ADD COLUMN c int DEFAULT 7; SELECT sum(c) FROM dd;" "700"
+RFN=$(q "SELECT relfilenode FROM pg_class WHERE relname = 'dd';")
+is "ADD COLUMN with a volatile default writes the new column alone (O17)" \
+   "ALTER TABLE dd ADD COLUMN v float8 DEFAULT random(), ADD COLUMN g int GENERATED ALWAYS AS (a * 2) STORED;
+    SELECT count(v) || ' ' || (sum(g) = sum(a) * 2) || ' ' ||
+           ((SELECT relfilenode FROM pg_class WHERE relname = 'dd') = $RFN) FROM dd;" "100 true true"
+refused "and a constraint of it is checked against what was written" \
+        "ALTER TABLE dd ADD COLUMN w int DEFAULT (random() * 0)::int CHECK (w > 0);" "is violated by some row"
+q "ALTER TABLE dd DROP COLUMN v; ALTER TABLE dd DROP COLUMN g;" > /dev/null
 is "ALTER COLUMN TYPE rewrites the table, reading the old values as their old type" \
    "ALTER TABLE dd ALTER COLUMN c TYPE numeric; ALTER TABLE dd ALTER COLUMN c TYPE int4;
     SELECT sum(c) || ' ' || pg_typeof(sum(c)) FROM dd;" "700 bigint"
