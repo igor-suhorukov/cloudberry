@@ -90,3 +90,11 @@ CREATE FUNCTION gp_probe.arm_rowfetch_fails(on_off boolean) RETURNS void
 CREATE FUNCTION gp_probe.arm_block_sequences(rel regclass, seqs bigint[])
   RETURNS void
   AS 'MODULE_PATHNAME', 'gp_probe_arm_block_sequences' LANGUAGE C STRICT;
+-- O21: count each relfilenumber's file events, refuse to let one grow, and
+-- read the counts: create, extend, truncate or unlink.
+CREATE FUNCTION gp_probe.arm_file_events(on_off boolean) RETURNS void
+  AS 'MODULE_PATHNAME', 'gp_probe_arm_file_events' LANGUAGE C STRICT;
+CREATE FUNCTION gp_probe.arm_extend_fails(relfilenode oid) RETURNS void
+  AS 'MODULE_PATHNAME', 'gp_probe_arm_extend_fails' LANGUAGE C STRICT;
+CREATE FUNCTION gp_probe.file_events(kind text, relfilenode oid) RETURNS bigint
+  AS 'MODULE_PATHNAME', 'gp_probe_file_events' LANGUAGE C STRICT;

@@ -1028,6 +1028,50 @@ is "which leaves the same ranges as a build" o18 after "0,1,2,7,8,9"
 is "a heap table's index is built as before, with a summary for every range" o18 heap 10
 
 ###############################################################################
+echo "O21 smgr_file_event_hook: a relation's files are followed as they change"
+###############################################################################
+session o21 <<'SQL'
+SELECT gp_probe.arm_file_events(true);
+CREATE TABLE o21_t (a int) WITH (autovacuum_enabled = off);
+SELECT 'create=' || gp_probe.file_events('create', pg_relation_filenode('o21_t'));
+INSERT INTO o21_t SELECT generate_series(1, 20000);
+CREATE INDEX o21_i ON o21_t (a);
+CREATE TABLE o21_f AS SELECT pg_relation_filenode('o21_t') AS t, pg_relation_filenode('o21_i') AS i;
+DELETE FROM o21_t WHERE a > 100;
+VACUUM o21_t;
+SELECT 'extend=' || (gp_probe.file_events('extend', t) > 0)::text FROM o21_f;
+SELECT 'index_extend=' || (gp_probe.file_events('extend', i) > 0)::text FROM o21_f;
+SELECT 'truncate=' || (gp_probe.file_events('truncate', t) > 0)::text FROM o21_f;
+DROP TABLE o21_t;
+SELECT 'unlink=' || gp_probe.file_events('unlink', t) FROM o21_f;
+SELECT 'index_unlink=' || gp_probe.file_events('unlink', i) FROM o21_f;
+SELECT gp_probe.arm_file_events(false);
+CREATE TABLE o21_q (a int);
+INSERT INTO o21_q VALUES (1);
+SELECT gp_probe.arm_file_events(true);
+SELECT gp_probe.arm_extend_fails(pg_relation_filenode('o21_q'));
+INSERT INTO o21_q SELECT generate_series(1, 100000);
+SELECT gp_probe.arm_extend_fails(0);
+SELECT 'readable=' || count(*) FROM o21_q;
+INSERT INTO o21_q SELECT generate_series(1, 1000);
+SELECT 'grows=' || count(*) FROM o21_q;
+SELECT gp_probe.arm_file_events(false);
+SQL
+is "creating a table reports its main fork's creation" o21 create 1
+is "filling it reports its extensions" o21 extend true
+is "building an index reports the index's" o21 index_extend true
+is "VACUUM's truncation of its empty end is reported" o21 truncate true
+is "dropping it reports its unlink, once, at commit" o21 unlink 1
+is "and its index's" o21 index_unlink 1
+if grep -q "gp_probe: relation file [0-9]* may not grow" "$WORK/o21.out"; then
+	ok "a hook that raises at an extension ends the statement with its error"
+else
+	notok "the INSERT should end with the hook's error" "$(grep ERROR "$WORK/o21.out")"
+fi
+is "and leaves the table readable, with what it had" o21 readable 1
+is "and able to grow once the hook lets it" o21 grows 1001
+
+###############################################################################
 echo "O23 extension marks: pg_checksums passes over what an extension marked, pg_upgrade carries it"
 ###############################################################################
 # Last, because it stops the server: pg_checksums reads a stopped cluster.

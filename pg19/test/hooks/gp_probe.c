@@ -42,6 +42,7 @@
 #include "access/table.h"
 #include "access/tableamext.h"
 #include "access/xact.h"
+#include "access/xlogutils.h"
 #include "catalog/catalog.h"
 #include "catalog/pg_am.h"
 #include "catalog/pg_type.h"
@@ -901,6 +902,60 @@ probe_relation_get_block_sequences(Relation rel, int *nseqs)
 	return seqs;
 }
 
+/* ------------------------------------------------------------------------- */
+/* O21: smgr_file_event_hook                                                 */
+/* ------------------------------------------------------------------------- */
+
+/*
+ * How many events of each kind each relfilenumber had, while armed.  Kept
+ * in a fixed array: a truncation is reported inside a critical section,
+ * where nothing may be allocated.
+ */
+#define PROBE_FILE_EVENTS 1024
+static struct
+{
+	RelFileNumber relnumber;
+	SmgrFileEvent event;
+	int64		count;
+}			file_events[PROBE_FILE_EVENTS];
+static int	nfile_events = 0;
+static bool arm_file_events = false;
+static RelFileNumber arm_extend_fails = InvalidRelFileNumber;
+
+static void
+probe_smgr_file_event(RelFileLocatorBackend rlocator, ForkNumber forknum,
+					  SmgrFileEvent event)
+{
+	int			i;
+
+	if (!arm_file_events)
+		return;
+
+	for (i = 0; i < nfile_events; i++)
+	{
+		if (file_events[i].relnumber == rlocator.locator.relNumber &&
+			file_events[i].event == event)
+			break;
+	}
+	if (i == nfile_events && nfile_events < PROBE_FILE_EVENTS)
+	{
+		file_events[i].relnumber = rlocator.locator.relNumber;
+		file_events[i].event = event;
+		file_events[i].count = 0;
+		nfile_events++;
+	}
+	if (i < PROBE_FILE_EVENTS)
+		file_events[i].count++;
+
+	/* As a quota would, where the storage manager itself may raise. */
+	if (event == SMGR_FILE_EXTEND && !InRecovery &&
+		rlocator.locator.relNumber == arm_extend_fails)
+		ereport(ERROR,
+				(errcode(ERRCODE_DISK_FULL),
+				 errmsg("gp_probe: relation file %u may not grow",
+						rlocator.locator.relNumber)));
+}
+
 /* A table of the probe's method keeps its TOAST in a heap table. */
 static Oid
 probe_relation_toast_am(Relation rel)
@@ -972,6 +1027,9 @@ PG_FUNCTION_INFO_V1(gp_probe_arm_fetch_fails);
 PG_FUNCTION_INFO_V1(gp_probe_arm_size);
 PG_FUNCTION_INFO_V1(gp_probe_arm_rowfetch_fails);
 PG_FUNCTION_INFO_V1(gp_probe_arm_block_sequences);
+PG_FUNCTION_INFO_V1(gp_probe_arm_file_events);
+PG_FUNCTION_INFO_V1(gp_probe_arm_extend_fails);
+PG_FUNCTION_INFO_V1(gp_probe_file_events);
 
 Datum
 gp_probe_reset(PG_FUNCTION_ARGS)
@@ -1490,6 +1548,52 @@ gp_probe_arm_block_sequences(PG_FUNCTION_ARGS)
 	PG_RETURN_VOID();
 }
 
+/* O21: count relations' file events, or stop counting and forget them */
+Datum
+gp_probe_arm_file_events(PG_FUNCTION_ARGS)
+{
+	arm_file_events = PG_GETARG_BOOL(0);
+	if (!arm_file_events)
+		nfile_events = 0;
+	PG_RETURN_VOID();
+}
+
+/* O21: refuse to let this relfilenumber grow; 0 to let every one */
+Datum
+gp_probe_arm_extend_fails(PG_FUNCTION_ARGS)
+{
+	arm_extend_fails = PG_GETARG_OID(0);
+	PG_RETURN_VOID();
+}
+
+/* O21: how many events of a kind a relfilenumber had while counted */
+Datum
+gp_probe_file_events(PG_FUNCTION_ARGS)
+{
+	char	   *kind = text_to_cstring(PG_GETARG_TEXT_PP(0));
+	RelFileNumber relnumber = PG_GETARG_OID(1);
+	SmgrFileEvent event;
+
+	if (strcmp(kind, "create") == 0)
+		event = SMGR_FILE_CREATE;
+	else if (strcmp(kind, "extend") == 0)
+		event = SMGR_FILE_EXTEND;
+	else if (strcmp(kind, "truncate") == 0)
+		event = SMGR_FILE_TRUNCATE;
+	else if (strcmp(kind, "unlink") == 0)
+		event = SMGR_FILE_UNLINK;
+	else
+		elog(ERROR, "unknown file event \"%s\"", kind);
+
+	for (int i = 0; i < nfile_events; i++)
+	{
+		if (file_events[i].relnumber == relnumber &&
+			file_events[i].event == event)
+			PG_RETURN_INT64(file_events[i].count);
+	}
+	PG_RETURN_INT64(0);
+}
+
 void
 _PG_init(void)
 {
@@ -1510,6 +1614,7 @@ _PG_init(void)
 	deparse_function_as_column_hook = probe_deparse_as_column;
 	query_lockmode_hook = probe_query_lockmode;
 	deparse_range_function_hook = probe_deparse_range;
+	smgr_file_event_hook = probe_smgr_file_event;
 
 	/*
 	 * O23: entries of a database directory named by a number and "_probe"
