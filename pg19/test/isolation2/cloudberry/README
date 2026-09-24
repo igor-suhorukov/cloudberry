@@ -48,20 +48,25 @@ lockmodes, and its _optimizer output, which the orca pass is compared with
   Four things, none of them a lock of Cloudberry's the port does not take.
   Half the test is append-optimized tables, which are M5's: their CREATE
   fails, and the cases after it with it.  Every lock Cloudberry holds on the
-  coordinator is held, and beside it the weaker ones PostgreSQL's parser and
-  executor take first, since the port takes Cloudberry's after them rather
-  than in their place: a locking clause's RowShareLock where Cloudberry
-  shows AccessShareLock, and an UPDATE's or DELETE's RowExclusiveLock, and
-  AccessShareLock for the rows it reads, beside its ExclusiveLock.  The
+  coordinator is held, the ExclusiveLock taken as the parser opens the
+  table, as Cloudberry's is (O30); what differs beside it is incidental.
+  Cloudberry's parser looks a table a locking clause names up under
+  AccessShareLock first; the port prints an UPDATE or DELETE for the
+  segments, and PostgreSQL's ruleutils takes AccessShareLock on what it
+  prints; and a cached upsert's EXCLUDED entry asks for RowExclusiveLock,
+  after the target's ExclusiveLock.  With the global deadlock detector on,
+  a locking clause over a join, or on a replicated table, still takes
+  PostgreSQL's RowShareLock and then the ExclusiveLock: the parser cannot
+  tell yet that the query's rows cannot be locked on the segments.  The
   planner's plans are the port's: each table gathered from the segments and
-  joined on the coordinator, and with the global deadlock detector on the
-  rows of a locking clause locked on the segments by the gather's query,
-  where Cloudberry's plan has a LockRows.  And ANALYZE of a partitioned
-  table is PostgreSQL's, from a sample of its leaves, where Cloudberry's
-  merges their statistics: the test's fault is where PostgreSQL's has found
-  the leaves, so the DROPs wait for ANALYZE as they do in Cloudberry, but the
-  statistics are PostgreSQL's -- taken before the drop, with a correlation --
-  in PostgreSQL 19's pg_stats, whose tableid the port's init_file masks.
+  joined on the coordinator, and with the detector on the rows of a locking
+  clause locked on the segments by the gather's query, where Cloudberry's
+  plan has a LockRows.  And ANALYZE of a partitioned table is PostgreSQL's,
+  from a sample of its leaves, where Cloudberry's merges their statistics:
+  the test's fault is where PostgreSQL's has found the leaves, so the DROPs
+  wait for ANALYZE as they do in Cloudberry, but the statistics are
+  PostgreSQL's -- taken before the drop, with a correlation -- in PostgreSQL
+  19's pg_stats, whose tableid the port's init_file masks.
 
 reader_waits_for_lock, in the planner pass alone
   No reader waits, because the port's planner has none: it reads each

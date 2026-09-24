@@ -11,10 +11,11 @@
 -----------+-----------------+---------+------------
 - relation | AccessShareLock | t       | t_lockmods 
 - relation | ExclusiveLock   | t       | t_lockmods 
+-(2 rows)
 + locktype | mode          | granted | relation   
 +----------+---------------+---------+------------
 + relation | ExclusiveLock | t       | t_lockmods 
-+ relation | RowShareLock  | t       | t_lockmods 
++(1 row)
 @@
 -  'child' => [
 -    {
@@ -28,10 +29,11 @@
 -----------+-----------------+---------+------------
 - relation | AccessShareLock | t       | t_lockmods 
 - relation | ExclusiveLock   | t       | t_lockmods 
+-(2 rows)
 + locktype | mode          | granted | relation   
 +----------+---------------+---------+------------
 + relation | ExclusiveLock | t       | t_lockmods 
-+ relation | RowShareLock  | t       | t_lockmods 
++(1 row)
 @@
 -  'child' => [
 -    {
@@ -45,10 +47,11 @@
 -----------+-----------------+---------+------------
 - relation | AccessShareLock | t       | t_lockmods 
 - relation | ExclusiveLock   | t       | t_lockmods 
+-(2 rows)
 + locktype | mode          | granted | relation   
 +----------+---------------+---------+------------
 + relation | ExclusiveLock | t       | t_lockmods 
-+ relation | RowShareLock  | t       | t_lockmods 
++(1 row)
 @@
 -  'child' => [
 -    {
@@ -62,10 +65,11 @@
 -----------+-----------------+---------+------------
 - relation | AccessShareLock | t       | t_lockmods 
 - relation | ExclusiveLock   | t       | t_lockmods 
+-(2 rows)
 + locktype | mode          | granted | relation   
 +----------+---------------+---------+------------
 + relation | ExclusiveLock | t       | t_lockmods 
-+ relation | RowShareLock  | t       | t_lockmods 
++(1 row)
 @@
 +      'id' => 2,
 +      'parent' => 1,
@@ -123,12 +127,12 @@
 - relation | AccessShareLock | t       | t_lockmods1 
 - relation | ExclusiveLock   | t       | t_lockmods  
 - relation | ExclusiveLock   | t       | t_lockmods1 
+-(4 rows)
 + locktype | mode          | granted | relation    
 +----------+---------------+---------+-------------
 + relation | ExclusiveLock | t       | t_lockmods  
 + relation | ExclusiveLock | t       | t_lockmods1 
-+ relation | RowShareLock  | t       | t_lockmods  
-+ relation | RowShareLock  | t       | t_lockmods1 
++(2 rows)
 @@
 +      'id' => 2,
 +      'parent' => 1,
@@ -186,12 +190,12 @@
 - relation | AccessShareLock | t       | t_lockmods1 
 - relation | ExclusiveLock   | t       | t_lockmods  
 - relation | ExclusiveLock   | t       | t_lockmods1 
+-(4 rows)
 + locktype | mode          | granted | relation    
 +----------+---------------+---------+-------------
 + relation | ExclusiveLock | t       | t_lockmods  
 + relation | ExclusiveLock | t       | t_lockmods1 
-+ relation | RowShareLock  | t       | t_lockmods  
-+ relation | RowShareLock  | t       | t_lockmods1 
++(2 rows)
 @@
 +      'id' => 2,
 +      'parent' => 1,
@@ -249,12 +253,12 @@
 - relation | AccessShareLock | t       | t_lockmods1 
 - relation | ExclusiveLock   | t       | t_lockmods  
 - relation | ExclusiveLock   | t       | t_lockmods1 
+-(4 rows)
 + locktype | mode          | granted | relation    
 +----------+---------------+---------+-------------
 + relation | ExclusiveLock | t       | t_lockmods  
 + relation | ExclusiveLock | t       | t_lockmods1 
-+ relation | RowShareLock  | t       | t_lockmods  
-+ relation | RowShareLock  | t       | t_lockmods1 
++(2 rows)
 @@
 +      'id' => 2,
 +      'parent' => 1,
@@ -312,83 +316,62 @@
 - relation | AccessShareLock | t       | t_lockmods1 
 - relation | ExclusiveLock   | t       | t_lockmods  
 - relation | ExclusiveLock   | t       | t_lockmods1 
+-(4 rows)
 + locktype | mode          | granted | relation    
 +----------+---------------+---------+-------------
 + relation | ExclusiveLock | t       | t_lockmods  
 + relation | ExclusiveLock | t       | t_lockmods1 
-+ relation | RowShareLock  | t       | t_lockmods  
-+ relation | RowShareLock  | t       | t_lockmods1 
++(2 rows)
 @@
 - locktype | mode          | granted | relation   
 -----------+---------------+---------+------------
 - relation | ExclusiveLock | t       | t_lockmods 
 -(1 row)
-+ locktype | mode             | granted | relation   
-+----------+------------------+---------+------------
-+ relation | AccessShareLock  | t       | t_lockmods 
-+ relation | ExclusiveLock    | t       | t_lockmods 
-+ relation | RowExclusiveLock | t       | t_lockmods 
-+(3 rows)
++ locktype | mode            | granted | relation   
++----------+-----------------+---------+------------
++ relation | AccessShareLock | t       | t_lockmods 
++ relation | ExclusiveLock   | t       | t_lockmods 
++(2 rows)
 @@
 - locktype | mode          | granted | relation   
 -----------+---------------+---------+------------
 - relation | ExclusiveLock | t       | t_lockmods 
 -(1 row)
-+ locktype | mode             | granted | relation   
-+----------+------------------+---------+------------
-+ relation | AccessShareLock  | t       | t_lockmods 
-+ relation | ExclusiveLock    | t       | t_lockmods 
-+ relation | RowExclusiveLock | t       | t_lockmods 
-+(3 rows)
++ locktype | mode            | granted | relation   
++----------+-----------------+---------+------------
++ relation | AccessShareLock | t       | t_lockmods 
++ relation | ExclusiveLock   | t       | t_lockmods 
++(2 rows)
 @@
 - locktype | mode          | granted | relation          
 -----------+---------------+---------+-------------------
 - relation | ExclusiveLock | t       | t_lockmods_upsert 
 -(1 row)
-+ locktype | mode             | granted | relation          
-+----------+------------------+---------+-------------------
-+ relation | AccessShareLock  | t       | t_lockmods_upsert 
-+ relation | ExclusiveLock    | t       | t_lockmods_upsert 
-+ relation | RowExclusiveLock | t       | t_lockmods_upsert 
-+(3 rows)
-@@
--(1 row)
-+ relation | RowShareLock  | t       | t_lockmods 
-+(2 rows)
-@@
--(1 row)
-+ relation | RowShareLock  | t       | t_lockmods 
-+(2 rows)
-@@
--(1 row)
-+ relation | RowShareLock  | t       | t_lockmods 
-+(2 rows)
-@@
--(1 row)
-+ relation | RowShareLock  | t       | t_lockmods 
++ locktype | mode            | granted | relation          
++----------+-----------------+---------+-------------------
++ relation | AccessShareLock | t       | t_lockmods_upsert 
++ relation | ExclusiveLock   | t       | t_lockmods_upsert 
 +(2 rows)
 @@
 - locktype | mode          | granted | relation   
 -----------+---------------+---------+------------
 - relation | ExclusiveLock | t       | t_lockmods 
 -(1 row)
-+ locktype | mode             | granted | relation   
-+----------+------------------+---------+------------
-+ relation | AccessShareLock  | t       | t_lockmods 
-+ relation | ExclusiveLock    | t       | t_lockmods 
-+ relation | RowExclusiveLock | t       | t_lockmods 
-+(3 rows)
++ locktype | mode            | granted | relation   
++----------+-----------------+---------+------------
++ relation | AccessShareLock | t       | t_lockmods 
++ relation | ExclusiveLock   | t       | t_lockmods 
++(2 rows)
 @@
 - locktype | mode          | granted | relation   
 -----------+---------------+---------+------------
 - relation | ExclusiveLock | t       | t_lockmods 
 -(1 row)
-+ locktype | mode             | granted | relation   
-+----------+------------------+---------+------------
-+ relation | AccessShareLock  | t       | t_lockmods 
-+ relation | ExclusiveLock    | t       | t_lockmods 
-+ relation | RowExclusiveLock | t       | t_lockmods 
-+(3 rows)
++ locktype | mode            | granted | relation   
++----------+-----------------+---------+------------
++ relation | AccessShareLock | t       | t_lockmods 
++ relation | ExclusiveLock   | t       | t_lockmods 
++(2 rows)
 @@
 - locktype | mode          | granted | relation          
 -----------+---------------+---------+-------------------
@@ -1065,10 +1048,11 @@
 -----------+-----------------+---------+------------
 - relation | AccessShareLock | t       | t_lockmods 
 - relation | ExclusiveLock   | t       | t_lockmods 
+-(2 rows)
 + locktype | mode          | granted | relation   
 +----------+---------------+---------+------------
 + relation | ExclusiveLock | t       | t_lockmods 
-+ relation | RowShareLock  | t       | t_lockmods 
++(1 row)
 @@
 -  'child' => [
 -    {
@@ -1082,10 +1066,11 @@
 -----------+-----------------+---------+----------------
 - relation | AccessShareLock | t       | t_lockmods_rep 
 - relation | ExclusiveLock   | t       | t_lockmods_rep 
+-(2 rows)
 + locktype | mode          | granted | relation       
 +----------+---------------+---------+----------------
 + relation | ExclusiveLock | t       | t_lockmods_rep 
-+ relation | RowShareLock  | t       | t_lockmods_rep 
++(1 row)
 @@
 -      'child' => [
 -        {
@@ -1111,65 +1096,24 @@
 -----------+-----------------+---------+------------
 - relation | AccessShareLock | t       | t_lockmods 
 - relation | ExclusiveLock   | t       | t_lockmods 
+-(2 rows)
 + locktype | mode          | granted | relation   
 +----------+---------------+---------+------------
 + relation | ExclusiveLock | t       | t_lockmods 
-+ relation | RowShareLock  | t       | t_lockmods 
-@@
-- locktype | mode          | granted | relation                        
------------+---------------+---------+---------------------------------
-- relation | ExclusiveLock | t       | t_lockmods_part_tbl_dml         
-- relation | ExclusiveLock | t       | t_lockmods_part_tbl_dml_1_prt_1 
-- relation | ExclusiveLock | t       | t_lockmods_part_tbl_dml_1_prt_2 
--(3 rows)
-+ locktype | mode             | granted | relation                        
-+----------+------------------+---------+---------------------------------
-+ relation | ExclusiveLock    | t       | t_lockmods_part_tbl_dml         
-+ relation | ExclusiveLock    | t       | t_lockmods_part_tbl_dml_1_prt_1 
-+ relation | ExclusiveLock    | t       | t_lockmods_part_tbl_dml_1_prt_2 
-+ relation | RowExclusiveLock | t       | t_lockmods_part_tbl_dml         
-+ relation | RowExclusiveLock | t       | t_lockmods_part_tbl_dml_1_prt_1 
-+ relation | RowExclusiveLock | t       | t_lockmods_part_tbl_dml_1_prt_2 
-+(6 rows)
-@@
-- locktype | mode          | granted | relation                        
------------+---------------+---------+---------------------------------
-- relation | ExclusiveLock | t       | t_lockmods_part_tbl_dml         
-- relation | ExclusiveLock | t       | t_lockmods_part_tbl_dml_1_prt_1 
-- relation | ExclusiveLock | t       | t_lockmods_part_tbl_dml_1_prt_2 
--(3 rows)
-+ locktype | mode             | granted | relation                        
-+----------+------------------+---------+---------------------------------
-+ relation | ExclusiveLock    | t       | t_lockmods_part_tbl_dml         
-+ relation | ExclusiveLock    | t       | t_lockmods_part_tbl_dml_1_prt_1 
-+ relation | ExclusiveLock    | t       | t_lockmods_part_tbl_dml_1_prt_2 
-+ relation | RowExclusiveLock | t       | t_lockmods_part_tbl_dml         
-+ relation | RowExclusiveLock | t       | t_lockmods_part_tbl_dml_1_prt_1 
-+ relation | RowExclusiveLock | t       | t_lockmods_part_tbl_dml_1_prt_2 
-+(6 rows)
++(1 row)
 @@
 - locktype | mode          | granted | relation                        
 -----------+---------------+---------+---------------------------------
 - relation | ExclusiveLock | t       | t_lockmods_part_tbl_dml_1_prt_1 
 -(1 row)
-+ locktype | mode             | granted | relation                        
-+----------+------------------+---------+---------------------------------
-+ relation | AccessShareLock  | t       | t_lockmods_part_tbl_dml_1_prt_1 
-+ relation | ExclusiveLock    | t       | t_lockmods_part_tbl_dml_1_prt_1 
-+ relation | RowExclusiveLock | t       | t_lockmods_part_tbl_dml_1_prt_1 
-+(3 rows)
++ locktype | mode            | granted | relation                        
++----------+-----------------+---------+---------------------------------
++ relation | AccessShareLock | t       | t_lockmods_part_tbl_dml_1_prt_1 
++ relation | ExclusiveLock   | t       | t_lockmods_part_tbl_dml_1_prt_1 
++(2 rows)
 @@
-- locktype | mode            | granted | relation                        
------------+-----------------+---------+---------------------------------
 - relation | AccessShareLock | t       | t_lockmods_part_tbl_dml         
-- relation | ExclusiveLock   | t       | t_lockmods_part_tbl_dml_1_prt_1 
--(2 rows)
-+ locktype | mode             | granted | relation                        
-+----------+------------------+---------+---------------------------------
-+ relation | AccessShareLock  | t       | t_lockmods_part_tbl_dml_1_prt_1 
-+ relation | ExclusiveLock    | t       | t_lockmods_part_tbl_dml_1_prt_1 
-+ relation | RowExclusiveLock | t       | t_lockmods_part_tbl_dml_1_prt_1 
-+(3 rows)
++ relation | AccessShareLock | t       | t_lockmods_part_tbl_dml_1_prt_1 
 @@
 -  'child' => [
 -    {

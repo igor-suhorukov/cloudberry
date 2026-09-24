@@ -49,6 +49,12 @@
  * the same, which the rows it gathers, having no place on the coordinator,
  * could not be locked by anyway.
  *
+ * That ExclusiveLock, and an UPDATE's or DELETE's, is the parser's: O30 lets
+ * the parser open the table in it, as Cloudberry's parser opens it
+ * (CdbTryOpenTable), rather than in PostgreSQL's weaker mode, which the
+ * ExclusiveLock taken after it would upgrade -- and two sessions upgrading
+ * deadlock.
+ *
  * Cloudberry sources this file stands in for:
  *	  the Redistribute Motion under an INSERT (cdbpath.c,
  *	  cdbpath_motion_for_insert), cdbcopy.c's COPY dispatch, and the UPDATE
@@ -112,6 +118,7 @@
 
 static planner_hook_type prev_planner = NULL;
 static ProcessUtility_hook_type prev_ProcessUtility = NULL;
+static parser_lockmode_hook_type prev_parser_lockmode = NULL;
 
 /* ------------------------------------------------------------------------- */
 /* The router: rows to the segments their keys name                          */
@@ -1289,6 +1296,38 @@ gp_modify_ProcessUtility(PlannedStmt *pstmt, const char *queryString,
 								params, queryEnv, dest, qc);
 }
 
+/*
+ * O30: without the global deadlock detector, a distributed table an UPDATE,
+ * a DELETE or an INSERT ... ON CONFLICT DO UPDATE writes, or a locking
+ * clause locks, is opened by the parser in ExclusiveLock, the lock the port
+ * takes on it as it plans and runs the statement (here, gp_explicit.c and
+ * gp_motion.c) -- first, so that those find it held.  A table the parser
+ * does not open by name, under a view, is still locked only as they take it.
+ */
+static LOCKMODE
+gp_modify_parser_lockmode(ParseState *pstate, const RangeVar *relation,
+						  LOCKMODE lockmode, AclMode requiredPerms)
+{
+	Oid			relid;
+
+	if (prev_parser_lockmode)
+		lockmode = prev_parser_lockmode(pstate, relation, lockmode,
+										requiredPerms);
+
+	if (gp_enable_global_deadlock_detector ||
+		GpClusterBackendRole() != GP_ROLE_DISPATCH ||
+		lockmode >= ExclusiveLock ||
+		!((requiredPerms & (ACL_UPDATE | ACL_DELETE)) != 0 ||
+		  lockmode == RowShareLock))
+		return lockmode;
+
+	/* found without a lock, as Cloudberry's parser finds it */
+	relid = RangeVarGetRelid(relation, NoLock, true);
+	if (!OidIsValid(relid) || GpScanDistributedPolicy(relid) == NULL)
+		return lockmode;
+	return ExclusiveLock;
+}
+
 void
 GpModifyInit(void)
 {
@@ -1304,4 +1343,7 @@ GpModifyInit(void)
 
 	prev_ProcessUtility = ProcessUtility_hook;
 	ProcessUtility_hook = gp_modify_ProcessUtility;
+
+	prev_parser_lockmode = parser_lockmode_hook;
+	parser_lockmode_hook = gp_modify_parser_lockmode;
 }
