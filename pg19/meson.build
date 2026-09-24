@@ -81,10 +81,13 @@ endif
 pg_inc = include_directories(pg_includedir_server)
 
 # Whether the server checks its assertions (-Dcassert=true), as its
-# pg_config.h says: ORCA's own debug checks follow it (orca/meson.build).
+# pg_config.h says: ORCA's own debug checks follow it, unless orca_debug
+# says otherwise (orca/meson.build).
 pg_cassert = cc.get_define('USE_ASSERT_CHECKING',
                            prefix: '#include "pg_config.h"',
                            include_directories: pg_inc) == '1'
+orca_debug = get_option('orca_debug').enabled() or \
+             (get_option('orca_debug').auto() and pg_cassert)
 
 # libpq, for the dispatcher.  A backend may not link libpq in code built into
 # the server, but an extension may and must: PostgreSQL 19 says so in
@@ -468,5 +471,5 @@ summary({
   'built':   ', '.join(built_modules),
   'preload': ', '.join(preload_modules),
   'build type': get_option('buildtype'),
-  'ORCA debug checks (GPOS_DEBUG)': get_option('orca') and pg_cassert,
+  'ORCA debug checks (GPOS_DEBUG)': get_option('orca') and orca_debug,
 }, section: 'Modules')

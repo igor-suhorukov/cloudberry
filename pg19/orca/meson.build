@@ -96,8 +96,8 @@ orca_cpp_args = [
 # ORCA's own debug checks -- its assertions, and the accounting of its memory
 # pools -- are on where the server checks its assertions, as Cloudberry's
 # configure turns them on with --enable-cassert ("Build ORCA in debug if
-# enable-cassert"), whatever the optimization.
-if pg_cassert
+# enable-cassert"), whatever the optimization; -Dorca_debug says otherwise.
+if orca_debug
   orca_cpp_args += '-DGPOS_DEBUG'
 endif
 

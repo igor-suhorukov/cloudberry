@@ -24,6 +24,8 @@ option('pg_config', type: 'string', value: 'pg_config',
 
 option('orca', type: 'boolean', value: true,
        description: 'Build gp_orca (the ORCA optimizer module)')
+option('orca_debug', type: 'feature', value: 'auto',
+       description: 'ORCA\'s own debug checks, GPOS_DEBUG; auto: where the server checks its assertions, as Cloudberry\'s --enable-cassert')
 
 option('udp2', type: 'boolean', value: false,
        description: 'Build the udp2 interconnect transport (decision 6: after it stabilises)')
