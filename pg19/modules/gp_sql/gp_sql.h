@@ -154,6 +154,15 @@ extern void GpTagCheckClause(Oid classId, Oid objectId, List *tags,
 /* An index is being dropped: forget the tags kept for it. */
 extern void GpTagIndexDropped(Oid indexRelId);
 
+/*
+ * DROP ROLE, from its drop hook: a role that owns a tag is refused, as
+ * Cloudberry's shared dependency on a tag's owner refuses it.
+ */
+extern void GpTagRoleDropped(Oid roleid);
+
+/* REASSIGN OWNED, once it has run: the roles' tags go to the new owner. */
+extern void GpTagReassignOwned(ReassignOwnedStmt *stmt);
+
 /* Registered during preload. */
 extern void GpTagRegisterProvider(void);
 

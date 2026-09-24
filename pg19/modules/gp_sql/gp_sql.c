@@ -506,6 +506,9 @@ gp_sql_object_access(ObjectAccessType access, Oid classId, Oid objectId,
 		else if (relkind == RELKIND_RELATION)
 			GpDirTableDropped(objectId);
 	}
+	/* a role that owns a tag is not dropped (tag.c) */
+	else if (access == OAT_DROP && classId == AuthIdRelationId)
+		GpTagRoleDropped(objectId);
 }
 
 /*
@@ -1228,6 +1231,15 @@ gp_sql_ProcessUtility(PlannedStmt *pstmt, const char *queryString,
 	{
 		gp_sql_cluster_ctas(pstmt, queryString, readOnlyTree, context,
 							params, queryEnv, dest, qc);
+		return;
+	}
+
+	/* REASSIGN OWNED gives the tags away with the rest (tag.c) */
+	if (IsA(parsetree, ReassignOwnedStmt))
+	{
+		GpSqlProcessUtilityNext(pstmt, queryString, readOnlyTree, context,
+								params, queryEnv, dest, qc);
+		GpTagReassignOwned((ReassignOwnedStmt *) parsetree);
 		return;
 	}
 

@@ -64,6 +64,7 @@
 #include "postgres.h"
 
 #include "access/transam.h"
+#include "catalog/dependency.h"
 #include "catalog/namespace.h"
 #include "catalog/objectaddress.h"
 #include "catalog/pg_authid.h"
@@ -75,6 +76,7 @@
 #include "commands/defrem.h"
 #include "catalog/pg_type.h"
 #include "commands/seclabel.h"
+#include "common/int.h"
 #include "fmgr.h"
 #include "funcapi.h"
 #include "executor/spi.h"
@@ -89,6 +91,7 @@
 #include "utils/jsonb.h"
 #include "utils/lsyscache.h"
 #include "utils/numeric.h"
+#include "utils/syscache.h"
 #include "utils/tuplestore.h"
 
 #include "gp_core_api.h"
@@ -331,6 +334,31 @@ tagdef_check_owner(const TagDef *d)
 		ereport(ERROR,
 				(errcode(ERRCODE_INSUFFICIENT_PRIVILEGE),
 				 errmsg("must be owner of tag %s", d->name)));
+}
+
+/*
+ * A role about to own a tag, with the definitions locked: still there.  A
+ * DROP ROLE that committed while this waited for the lock checked the
+ * definitions before this one wrote them (GpTagRoleDropped), so the role is
+ * looked for again, as recordDependencyOnOwner() looks for a new owner.
+ */
+static void
+tagdef_check_role_exists(Oid roleid)
+{
+	if (!SearchSysCacheExists1(AUTHOID, ObjectIdGetDatum(roleid)))
+		ereport(ERROR,
+				(errcode(ERRCODE_UNDEFINED_OBJECT),
+				 errmsg("role %u was concurrently dropped", roleid)));
+}
+
+/* By OID, which is the order the tags were made in. */
+static int
+tagdef_cmp_oid(const ListCell *a, const ListCell *b)
+{
+	Oid			x = ((const TagDef *) lfirst(a))->oid;
+	Oid			y = ((const TagDef *) lfirst(b))->oid;
+
+	return pg_cmp_u32(x, y);
 }
 
 static TagDef *
@@ -1129,6 +1157,7 @@ gp_sql_define_tag(PG_FUNCTION_ARGS)
 	d->name = pstrdup(name);
 	d->oid = GetNewObjectId();
 	d->owner = GetUserId();
+	tagdef_check_role_exists(d->owner);
 	if (!PG_ARGISNULL(1))
 	{
 		d->listed = true;
@@ -1215,4 +1244,97 @@ gp_sql_change_tag_owner(PG_FUNCTION_ARGS)
 	d->owner = newowner;
 	tagdef_store(role, defs);
 	PG_RETURN_VOID();
+}
+
+/* ------------------------------------------------------------------------- */
+/* Roles                                                                     */
+/* ------------------------------------------------------------------------- */
+
+/*
+ * DROP ROLE of a role that owns a tag.  Cloudberry's pg_tag has a shared
+ * dependency on the owner -- recorded when ALTER TAG ... OWNER TO gives a tag
+ * away, which goes through AlterObjectOwner_internal(), though CREATE TAG
+ * records none -- and DROP ROLE refuses a role something depends on, in
+ * these words.  The owner here is a number in the definitions' label, which
+ * nothing in PostgreSQL knows of, so the drop hook asks: it fires after DROP
+ * ROLE has checked that the caller may drop the role, as PostgreSQL's own
+ * dependency check comes after those.  Every owner is kept, whoever set it.
+ *
+ * The definitions are locked first, as a change to them is: a tag given to
+ * the role by a transaction that has not committed is waited for, and one
+ * given after the role is gone finds it gone (tagdef_check_role_exists).
+ * What else depends on the role follows the tags in the detail, as
+ * PostgreSQL would have listed it.  On a segment the coordinator has asked.
+ */
+void
+GpTagRoleDropped(Oid roleid)
+{
+	List	   *defs;
+	StringInfoData detail;
+	char	   *more;
+	char	   *more_log;
+
+	if (tag_checked_elsewhere() || !OidIsValid(tagdef_role()))
+		return;
+
+	(void) tagdef_lock();
+	defs = tagdef_load();
+	list_sort(defs, tagdef_cmp_oid);
+
+	initStringInfo(&detail);
+	foreach_ptr(TagDef, d, defs)
+	{
+		if (d->owner == roleid)
+			appendStringInfo(&detail, "%sowner of tag %s",
+							 detail.len > 0 ? "\n" : "", d->name);
+	}
+	if (detail.len == 0)
+		return;
+
+	if (checkSharedDependencies(AuthIdRelationId, roleid, &more, &more_log))
+		appendStringInfo(&detail, "\n%s", more);
+	ereport(ERROR,
+			(errcode(ERRCODE_DEPENDENT_OBJECTS_STILL_EXIST),
+			 errmsg("role \"%s\" cannot be dropped because some objects depend on it",
+					GetUserNameFromId(roleid, false)),
+			 errdetail_internal("%s", detail.data)));
+}
+
+/*
+ * REASSIGN OWNED BY ... TO ..., once PostgreSQL has checked the roles and
+ * given their objects away: their tags too, as shdepReassignOwned() gives
+ * away the shared objects the roles own -- databases, tablespaces and, in
+ * Cloudberry, tags.  DROP OWNED leaves a shared object as it is, and so a
+ * tag.
+ */
+void
+GpTagReassignOwned(ReassignOwnedStmt *stmt)
+{
+	Oid			carrier;
+	Oid			newrole;
+	List	   *old = NIL;
+	List	   *defs;
+	bool		changed = false;
+
+	if (tag_checked_elsewhere() || !OidIsValid(tagdef_role()))
+		return;
+
+	newrole = get_rolespec_oid(stmt->newrole, false);
+	foreach_node(RoleSpec, spec, stmt->roles)
+		old = lappend_oid(old, get_rolespec_oid(spec, false));
+
+	carrier = tagdef_lock();
+	defs = tagdef_load();
+	foreach_ptr(TagDef, d, defs)
+	{
+		if (list_member_oid(old, d->owner))
+		{
+			d->owner = newrole;
+			changed = true;
+		}
+	}
+	if (!changed)
+		return;
+	tagdef_check_role_exists(newrole);
+	tagdef_store(carrier, defs);
 }

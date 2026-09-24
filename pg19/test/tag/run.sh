@@ -357,6 +357,31 @@ case "$out" in
 	*"must be owner of tag theirs"*) ok "after which its old owner may not take it back" ;;
 	*) notok "after which its old owner may not take it back" "$out" ;;
 esac
+out=$(q "DROP ROLE new_owner;")
+case "$out" in
+	*'role "new_owner" cannot be dropped because some objects depend on it'*"DETAIL:  owner of tag theirs")
+		ok "a role that owns a tag is not dropped, in Cloudberry's words" ;;
+	*) notok "a role that owns a tag is not dropped, in Cloudberry's words" "$out" ;;
+esac
+q "CREATE TABLE owned_t (id int); ALTER TABLE owned_t OWNER TO new_owner;" > /dev/null
+out=$(q "DROP ROLE new_owner;")
+case "$out" in
+	*"DETAIL:  owner of tag theirs"*"owner of table owned_t"*)
+		ok "what else it owns is said after the tag, as PostgreSQL says it" ;;
+	*) notok "what else it owns is said after the tag, as PostgreSQL says it" "$out" ;;
+esac
+isl "REASSIGN OWNED gives its tags away with the rest" \
+   "REASSIGN OWNED BY new_owner TO other;
+    SELECT tagowner::regrole::text || ' ' || (SELECT tableowner FROM pg_tables WHERE tablename = 'owned_t')
+      FROM gp_sql.tag WHERE tagname = 'theirs';" "other other"
+isl "and then the role is dropped" \
+   "DROP TABLE owned_t; DROP ROLE new_owner;
+    SELECT count(*) FROM pg_roles WHERE rolname = 'new_owner';" "0"
+out=$(q "DROP ROLE other;")
+case "$out" in
+	*"DETAIL:  owner of tag theirs") ok "a tag's maker owns it as well, which CREATE TAG records here and not in Cloudberry" ;;
+	*) notok "a tag's maker owns it as well, which CREATE TAG records here and not in Cloudberry" "$out" ;;
+esac
 refused "a form ALTER TAG does not have is refused, not rewritten into nothing" \
         "ALTER TAG theirs SET SCHEMA public;" "syntax error"
 
