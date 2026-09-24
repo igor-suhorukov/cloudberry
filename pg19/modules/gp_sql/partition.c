@@ -110,6 +110,7 @@
 
 #include "gp_grammar_int.h"
 #include "gp_label.h"
+#include "gp_grammar.h"
 #include "gp_partition.h"
 #include "gp_sql.h"
 
@@ -1439,6 +1440,37 @@ elem_options(GpPartParser *p, GpPartElem *elem, char **tablename, char **am)
 	return options;
 }
 
+/*
+ * A partition's column encodings -- its own element's first, then those
+ * written among its siblings, which are each of them's -- as the option
+ * gp_ao takes out of its CREATE TABLE and gives its columns (ao_encoding.c).
+ * gp_ao says where the partition is no table by column.
+ */
+static List *
+encoding_option(GpPartParser *p, List *options, List *own, List *shared)
+{
+	StringInfoData spec;
+	List	   *spans = list_concat_copy(own, shared);
+	ListCell   *lc;
+
+	if (spans == NIL)
+		return options;
+	initStringInfo(&spec);
+	foreach(lc, spans)
+	{
+		char	   *item = GpEncodingSpecItem(GpPartSpanText(p, *(GpPartSpan *) lfirst(lc)));
+
+		if (item == NULL)
+			continue;
+		if (spec.len > 0)
+			appendStringInfoChar(&spec, ';');
+		appendStringInfoString(&spec, item);
+	}
+	return lappend(options, makeDefElemExtended("gp_ao", "encoding",
+												(Node *) makeString(spec.data),
+												DEFELEM_UNSPEC, -1));
+}
+
 static PartChild *
 new_child(Relation parentrel, const char *partname, GpPartElem *elem,
 		  GpPartParser *p, int *partnum, const char *tablename, int level)
@@ -1860,15 +1892,6 @@ make_children(Relation parentrel, GpPartParser *p, GpPartDef *def,
 						gp_max_partition_level)));
 
 	/*
-	 * An append-optimized, column-oriented table's column encodings are M5's;
-	 * on the heap they mean nothing, as Cloudberry says.
-	 */
-	if (def->encodings != NIL)
-		ereport(ERROR,
-				(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
-				 errmsg("ENCODING clause only supported with column oriented tables")));
-
-	/*
 	 * The default partition first, as Greenplum 6 numbered it, so that the
 	 * others are numbered as they always were.
 	 */
@@ -1935,12 +1958,9 @@ make_children(Relation parentrel, GpPartParser *p, GpPartDef *def,
 					(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
 					 errmsg("partition specific ENCODING clause not supported in SUBPARTITION TEMPLATE"),
 					 parser_errposition(pstate, GpPartLocation(p, elem->location))));
-		if (elem->encodings != NIL)
-			ereport(ERROR,
-					(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
-					 errmsg("ENCODING clause only supported with column oriented tables")));
 
 		options = elem_options(p, elem, &tablename, &am);
+		options = encoding_option(p, options, elem->encodings, def->encodings);
 
 		if (elem->is_default)
 		{

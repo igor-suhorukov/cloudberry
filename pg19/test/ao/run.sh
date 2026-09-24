@@ -114,7 +114,7 @@ echo
 	echo "unix_socket_directories = '$SOCK'"
 	echo "listen_addresses = ''"
 	echo "port = $PORT"
-	echo "shared_preload_libraries = 'gp_core,gp_ao'"
+	echo "shared_preload_libraries = 'gp_core,gp_sql,gp_ao'"
 	echo "wal_level = replica"
 	echo "max_wal_senders = 4"
 } >> "$WORK/data/postgresql.conf"
@@ -122,7 +122,7 @@ echo "local replication all trust" >> "$WORK/data/pg_hba.conf"
 "$BINDIR/pg_ctl" -D "$WORK/data" -l "$WORK/log" -w -t 60 start > /dev/null 2>&1 \
 	|| { echo "server did not start"; tail -20 "$WORK/log"; exit 1; }
 
-out=$(q "CREATE EXTENSION gp_ao CASCADE;")
+out=$(q "CREATE EXTENSION gp_ao CASCADE; CREATE EXTENSION gp_sql;")
 case "$out" in
 	*ERROR*) echo "the extension could not be created:"
 	         printf '%s\n' "$out" | sed 's/^/  /'; exit 1 ;;
@@ -144,9 +144,9 @@ is "appendonly and orientation choose the method, and are not kept" \
 refused "orientation without appendonly is Cloudberry's error" \
         "CREATE TABLE bad1 (a int) WITH (orientation=column);" \
         "invalid option \"orientation\" for base relation"
-refused "and USING that the options contradict" \
-        "CREATE TABLE bad2 (a int) USING heap WITH (appendonly=true);" \
-        "ACCESS METHOD is specified as \"heap\" but the WITH option indicates it to be \"ao_row\""
+is "USING, where a statement has both, before the options, as in Cloudberry" \
+   "CREATE TABLE both1 (a int) USING heap WITH (appendonly=true);
+    SELECT amname FROM pg_class c JOIN pg_am a ON a.oid = c.relam WHERE relname = 'both1';" "heap"
 q "CREATE TABLE opts (a int) WITH (appendonly=true, compresstype=zlib, compresslevel=5, blocksize=65536, checksum=false);" > /dev/null
 is "the method's options are kept in reloptions, and read back resolved" \
    "SELECT array_to_string(reloptions, ' ') || ' / ' ||
@@ -419,7 +419,60 @@ is "a scan by column reads the columns the plan names" \
    "SELECT count(*) FROM c1 WHERE a > 10;" "4991"
 
 ###############################################################################
-echo "10. a standby replays gp_ao's records, and has the same rows"
+echo "10. ENCODING, a partitioned table's options: labels, which pg_dump carries"
+###############################################################################
+q "CREATE TABLE enc (a int ENCODING (compresstype=zlib, compresslevel=5), b text,
+                     COLUMN b ENCODING (blocksize=8192), c int,
+                     DEFAULT COLUMN ENCODING (compresstype=zstd))
+     WITH (appendonly=true, orientation=column);" > /dev/null
+is "each column has its options, filled in as Cloudberry fills them" \
+   "SELECT string_agg(attnum || ':' || array_to_string(attoptions, ' '), ', ' ORDER BY attnum)
+      FROM pg_attribute_encoding WHERE attrelid = 'enc'::regclass;" \
+   "1:compresstype=zlib compresslevel=5 blocksize=32768, 2:blocksize=8192 compresstype=none compresslevel=0, 3:compresstype=zstd compresslevel=1 blocksize=32768"
+is "which are gp_ao's security labels of the columns" \
+   "SELECT count(*) FROM pg_seclabel WHERE provider = 'gp_ao' AND objoid = 'enc'::regclass;" "3"
+q "INSERT INTO enc SELECT i, repeat('x', 100), i % 7 FROM generate_series(1, 5000) i;" > /dev/null
+is "and each column's blocks are compressed as its options say" \
+   "SELECT string_agg(column_num || ':' || (eof < eof_uncompressed), ' ' ORDER BY column_num)
+      FROM gp_toolkit.__gp_aocsseg('enc');" "0:true 1:false 2:true"
+is "ALTER COLUMN SET ENCODING and ADD COLUMN ... ENCODING" \
+   "ALTER TABLE enc ALTER COLUMN b SET ENCODING (compresstype=zlib),
+                    ADD COLUMN d int ENCODING (compresstype=rle_type);
+    SELECT string_agg(attnum || ':' || attoptions[1], ' ' ORDER BY attnum)
+      FROM pg_attribute_encoding WHERE attrelid = 'enc'::regclass;" \
+   "1:compresstype=zlib 2:compresstype=zlib 3:compresstype=zstd 4:compresstype=rle_type"
+refused "ENCODING of a table by row is Cloudberry's error" \
+        "CREATE TABLE enc_row (a int ENCODING (compresstype=zlib)) WITH (appendonly=true);" \
+        "ENCODING clause only supported with column oriented tables"
+q "CREATE TABLE ptab (a int, b text) PARTITION BY RANGE (a) WITH (appendonly=true, compresstype=zlib, compresslevel=2);
+   CREATE TABLE ptab_1 PARTITION OF ptab FOR VALUES FROM (0) TO (10);
+   CREATE TABLE ptab_2 PARTITION OF ptab FOR VALUES FROM (10) TO (20) WITH (compresslevel=7);
+   CREATE TABLE ptab_3 PARTITION OF ptab FOR VALUES FROM (20) TO (30) WITH (appendonly=true, orientation=column);" > /dev/null
+is "a partitioned table keeps its storage options for its partitions of its method" \
+   "SELECT string_agg(relname || ':' || coalesce(array_to_string(reloptions, ' '), '-'), ', ' ORDER BY relname)
+      FROM pg_class WHERE relname LIKE 'ptab%';" \
+   "ptab:-, ptab_1:compresstype=zlib compresslevel=2, ptab_2:compresslevel=7 compresstype=zlib, ptab_3:-"
+is "gp.default_storage_options fills in what a statement does not say" \
+   "SET gp.default_storage_options = 'compresstype=zstd,blocksize=65536';
+    CREATE TABLE dso (a int) USING ao_row;
+    SELECT array_to_string(reloptions, ' ') FROM pg_class WHERE relname = 'dso';" \
+   "compresstype=zstd blocksize=65536"
+q "CREATE DATABASE restored;" > /dev/null
+"$BINDIR/pg_dump" -d postgres -t enc -t 'ptab*' > "$WORK/enc.sql" 2> "$WORK/enc.err"
+"$PSQL" -X -q -d restored -c "CREATE EXTENSION gp_ao CASCADE" > /dev/null 2>&1
+"$PSQL" -X -q -d restored -f "$WORK/enc.sql" > "$WORK/enc.restore" 2>&1
+qr() { "$PSQL" -X -q -t -A -d restored -c "$1" 2>&1; }
+want=$(q "SELECT string_agg(attnum || ':' || array_to_string(attoptions, ' '), ', ' ORDER BY attnum) FROM pg_attribute_encoding WHERE attrelid = 'enc'::regclass;")
+got=$(qr "SELECT string_agg(attnum || ':' || array_to_string(attoptions, ' '), ', ' ORDER BY attnum) FROM pg_attribute_encoding WHERE attrelid = 'enc'::regclass;")
+[ -n "$want" ] && [ "$want" = "$got" ] && ok "pg_dump and a restore carry each column's options" \
+	|| notok "pg_dump carries column options" "want [$want] got [$got] $(grep -i error "$WORK/enc.restore" | head -3)"
+is "and the rows" "SELECT '$(qr "SELECT count(*) || ' ' || sum(d IS NULL::int) FROM enc;")';" "5000 5000"
+got=$(qr "SELECT label FROM pg_seclabel WHERE objoid = 'ptab'::regclass AND provider = 'gp_ao';")
+[ "$got" = "compresstype=zlib,compresslevel=2" ] && ok "and a partitioned table's options" \
+	|| notok "pg_dump carries a partitioned table's options" "got [$got]"
+
+###############################################################################
+echo "11. a standby replays gp_ao's records, and has the same rows"
 ###############################################################################
 SB="$WORK/standby"
 SBPORT=$((PORT + 1))
@@ -451,13 +504,13 @@ case "$out" in *"read-only transaction"*) ok "and refuses to write any" ;; *) no
 "$BINDIR/pg_ctl" -D "$SB" -m fast -w stop > /dev/null 2>&1
 
 ###############################################################################
-echo "11. a crash: recovery replays the pages; without gp_ao it stops (check 12)"
+echo "12. a crash: recovery replays the pages; without gp_ao it stops (check 12)"
 ###############################################################################
 q "CHECKPOINT;
    INSERT INTO rep SELECT i, 'late' FROM generate_series(1, 1000) i;" > /dev/null
 want=$(q "SELECT count(*) FROM rep;")
 "$BINDIR/pg_ctl" -D "$WORK/data" -m immediate -w stop > /dev/null 2>&1
-"$BINDIR/pg_ctl" -D "$WORK/data" -l "$WORK/log-nogpao" -o "-c shared_preload_libraries=gp_core" \
+"$BINDIR/pg_ctl" -D "$WORK/data" -l "$WORK/log-nogpao" -o "-c shared_preload_libraries=gp_core,gp_sql" \
 	-w -t 60 start > /dev/null 2>&1
 started=$?
 out=$(grep -o 'FATAL:  resource manager with ID 200 not registered' "$WORK/log-nogpao" | head -1)
@@ -475,7 +528,7 @@ else
 fi
 
 ###############################################################################
-echo "12. pg_checksums verifies every page of an append-optimized table"
+echo "13. pg_checksums verifies every page of an append-optimized table"
 ###############################################################################
 q "CHECKPOINT;" > /dev/null
 "$BINDIR/pg_ctl" -D "$WORK/data" -m fast -w stop > /dev/null 2>&1

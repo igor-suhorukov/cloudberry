@@ -327,6 +327,7 @@ modules = [
                      'modules/gp_ao/ao_am.c',
                      'modules/gp_ao/ao_block.c',
                      'modules/gp_ao/ao_dml.c',
+                     'modules/gp_ao/ao_encoding.c',
                      'modules/gp_ao/ao_meta.c',
                      'modules/gp_ao/ao_options.c',
                      'modules/gp_ao/ao_storage.c',

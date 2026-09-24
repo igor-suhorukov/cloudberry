@@ -61,6 +61,9 @@ extern char *GpDesugarMapped(const char *str, bool expr_only, GpPosMap **map,
  */
 extern void GpAttachCarriers(List *parsetree, List *carried);
 
+/* A classic partition clause's column encoding, as gp_ao.encoding's item. */
+extern char *GpEncodingSpecItem(const char *clause);
+
 /* The offset in the user's text that an offset in the rewrite stands for. */
 extern int	GpPosMapSource(const GpPosMap *map, int offset);
 

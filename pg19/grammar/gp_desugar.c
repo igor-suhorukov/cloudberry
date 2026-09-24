@@ -111,7 +111,7 @@ static const char *const gp_trigger_words[] = {
 	"tag", "profile", "noprofile", "distributed", "randomly", "replicated",
 	"task", "directory", "storage", "dynamic", "incremental", "unset",
 	"account", "execute", "decode", "subpartition", "gp_dist_random",
-	"orientation",
+	"orientation", "encoding",
 	"reorganize",
 	NULL
 };
@@ -2150,6 +2150,336 @@ rw_orientation_row(GpRewrite *rw)
 	return did;
 }
 
+/* ------------------------------------------------------------------------- */
+/* ENCODING clauses                                                          */
+/* ------------------------------------------------------------------------- */
+
+/*
+ * The options of an ENCODING ( ... ) whose '(' is token `open`, as name=value
+ * pairs joined by commas, each name after `prefix` and each value quoted
+ * where `quote` says; *close is the ')'.  NULL where what is in the
+ * parentheses is no such list: the clause is then left where it is, for
+ * PostgreSQL's grammar to refuse, as Cloudberry's refuses it.
+ */
+static char *
+encoding_opts(const GpTokens *ts, int open, int *close, const char *prefix,
+			  bool quote)
+{
+	int			end = skip_parens(ts, open) - 1;
+	StringInfoData buf;
+	int			j = open + 1;
+
+	initStringInfo(&buf);
+	while (j < end)
+	{
+		char	   *name;
+		char	   *value;
+
+		if (!tok_is_name(ts, j) || !tok_is_char(ts, j + 1, '=') || j + 2 >= end)
+			return NULL;
+		name = tok_name(ts, j);
+		j += 2;
+		if (tok_is_string(ts, j))
+			value = ts->toks[j].str;
+		else if (tok_is_name(ts, j))
+			value = tok_name(ts, j);
+		else if (ts->toks[j].code == GP_ICONST || ts->toks[j].code == GP_FCONST)
+			value = pnstrdup(ts->src + ts->toks[j].off,
+							 tok_stop(ts, j) - ts->toks[j].off);
+		else
+			return NULL;
+		j++;
+		if (buf.len > 0)
+			appendStringInfoChar(&buf, ',');
+		appendStringInfo(&buf, "%s%s=%s", prefix, name,
+						 quote ? quote_literal_cstr(value) : value);
+		if (j < end)
+		{
+			if (!tok_is_char(ts, j, ','))
+				return NULL;
+			j++;
+		}
+	}
+	if (buf.len == 0)
+		return NULL;
+	*close = end;
+	return buf.data;
+}
+
+/*
+ * One of Cloudberry's column encoding clauses, COLUMN c ENCODING (...) or
+ * DEFAULT COLUMN ENCODING (...), as the item of gp_ao.encoding it is (see
+ * rw_encoding_create): the classic partition clause's, which gp_sql's
+ * partition.c gives each partition it makes.  NULL for a clause that is not
+ * one, which the partition clause's own parser has refused already.
+ */
+char *
+GpEncodingSpecItem(const char *clause)
+{
+	GpTokens   *ts = GpTokenize(clause);
+	int			c;
+	char	   *opts;
+
+	if (tok_is_kw(ts, 0, "default") && tok_is_kw(ts, 1, "column") &&
+		tok_is(ts, 2, "encoding") && tok_is_char(ts, 3, '(') &&
+		(opts = encoding_opts(ts, 3, &c, "", false)) != NULL)
+		return psprintf("DEFAULT(%s)", opts);
+	if (tok_is_kw(ts, 0, "column") && tok_is_name(ts, 1) &&
+		tok_is(ts, 2, "encoding") && tok_is_char(ts, 3, '(') &&
+		(opts = encoding_opts(ts, 3, &c, "", false)) != NULL)
+		return psprintf("COLUMN %s(%s)", quote_identifier(tok_name(ts, 1)), opts);
+	return NULL;
+}
+
+/* Words that begin a table element that is no column. */
+static bool
+table_constraint_word(const GpTokens *ts, int i)
+{
+	return tok_is_kw(ts, i, "constraint") || tok_is_kw(ts, i, "primary") ||
+		tok_is_kw(ts, i, "unique") || tok_is_kw(ts, i, "check") ||
+		tok_is_kw(ts, i, "foreign") || tok_is_kw(ts, i, "exclude") ||
+		tok_is_kw(ts, i, "like") || tok_is_kw(ts, i, "not");
+}
+
+/*
+ * CREATE TABLE's ENCODING clauses, in its list of columns:
+ *
+ *	 a int ENCODING (compresstype=zlib), COLUMN b ENCODING (blocksize=8192),
+ *	 DEFAULT COLUMN ENCODING (compresstype=zstd)
+ *	   -> a int, with gp_ao.encoding = 'a(compresstype=zlib);
+ *			COLUMN b(blocksize=8192);DEFAULT(compresstype=zstd)' in its WITH list
+ *
+ * The option is gp_ao's, which takes it out again, and gives each column its
+ * options once the table is made (ao_encoding.c); a column's name is as
+ * quote_identifier() writes it, so that DEFAULT alone is the default.  The
+ * clauses are Cloudberry's for a table by column, and gp_ao says so where
+ * the table is none.
+ */
+static void
+rw_encoding_create(GpRewrite *rw, int after_name)
+{
+	const GpTokens *ts = rw->ts;
+	int			open = after_name;
+	int			close;
+	int			start;
+	int			nelems = 0;
+	int		   *starts;
+	int		   *ends;
+	bool	   *drop;
+	int			lastkept = -1;
+	StringInfoData spec;
+
+	if (tok_is_kw(ts, open, "partition") && tok_is_kw(ts, open + 1, "of"))
+		open = skip_qualified_name(ts, open + 2);
+	if (!tok_is_char(ts, open, '('))
+		return;
+	close = skip_parens(ts, open) - 1;
+	if (close >= rw->last)
+		return;
+
+	starts = palloc_array(int, close - open + 1);
+	ends = palloc_array(int, close - open + 1);
+	drop = palloc0_array(bool, close - open + 1);
+	initStringInfo(&spec);
+
+	for (start = open + 1; start < close;)
+	{
+		int			end = start;
+		int			depth = 0;
+		int			c;
+		char	   *opts;
+		int			n = nelems++;
+
+		while (end < close && !(depth == 0 && tok_is_char(ts, end, ',')))
+		{
+			if (tok_is_char(ts, end, '('))
+				depth++;
+			else if (tok_is_char(ts, end, ')'))
+				depth--;
+			end++;
+		}
+		starts[n] = start;
+		ends[n] = end;
+
+		if (tok_is_kw(ts, start, "default") && tok_is_kw(ts, start + 1, "column") &&
+			tok_is(ts, start + 2, "encoding") && tok_is_char(ts, start + 3, '(') &&
+			(opts = encoding_opts(ts, start + 3, &c, "", false)) != NULL &&
+			c == end - 1)
+		{
+			appendStringInfo(&spec, "%sDEFAULT(%s)", spec.len > 0 ? ";" : "", opts);
+			drop[n] = true;
+		}
+		else if (tok_is_kw(ts, start, "column") && tok_is_name(ts, start + 1) &&
+				 tok_is(ts, start + 2, "encoding") && tok_is_char(ts, start + 3, '(') &&
+				 (opts = encoding_opts(ts, start + 3, &c, "", false)) != NULL &&
+				 c == end - 1)
+		{
+			appendStringInfo(&spec, "%sCOLUMN %s(%s)", spec.len > 0 ? ";" : "",
+							 quote_identifier(tok_name(ts, start + 1)), opts);
+			drop[n] = true;
+		}
+		else if (tok_is_name(ts, start) && !table_constraint_word(ts, start))
+		{
+			depth = 0;
+			for (int k = start + 1; k < end; k++)
+			{
+				if (tok_is_char(ts, k, '('))
+					depth++;
+				else if (tok_is_char(ts, k, ')'))
+					depth--;
+				else if (depth == 0 && tok_is(ts, k, "encoding") &&
+						 tok_is_char(ts, k + 1, '(') &&
+						 (opts = encoding_opts(ts, k + 1, &c, "", false)) != NULL)
+				{
+					appendStringInfo(&spec, "%s%s(%s)", spec.len > 0 ? ";" : "",
+									 quote_identifier(tok_name(ts, start)), opts);
+					rw_edit(rw, ts->toks[k].off, tok_end(ts, c), " ");
+					break;
+				}
+			}
+		}
+		if (!drop[n])
+			lastkept = n;
+		start = end + 1;
+	}
+
+	/*
+	 * The clauses that were elements of their own go, with a comma each: the
+	 * one after them where a kept element follows, else the one before.
+	 */
+	for (int n = 0; n < nelems; n++)
+	{
+		if (!drop[n])
+			continue;
+		if (n < lastkept)
+			rw_edit(rw, ts->toks[starts[n]].off, ts->toks[starts[n + 1]].off, "");
+		else
+		{
+			/* the rest, from the comma after the last kept, or all of it */
+			rw_edit(rw, lastkept >= 0 ? ts->toks[ends[lastkept]].off :
+					ts->toks[open + 1].off, ts->toks[close].off, "");
+			break;
+		}
+	}
+
+	if (spec.len > 0)
+		rw_add_option(rw, psprintf("gp_ao.encoding = %s", quote_literal_cstr(spec.data)),
+					  ts->toks[open].off);
+}
+
+/*
+ * ALTER TABLE's:
+ *
+ *	 ADD [COLUMN] c int ENCODING (compresstype=zlib)
+ *	   -> ADD [COLUMN] c int, ALTER COLUMN c SET (gp_ao.compresstype='zlib')
+ *	 ALTER [COLUMN] c SET ENCODING (compresstype=zlib)
+ *	   -> ALTER [COLUMN] c SET (gp_ao.compresstype='zlib')
+ *
+ * A column's options are PostgreSQL's syntax for what the clause says, and
+ * gp_ao's ProcessUtility hook takes its own namespace's out of the command
+ * before PostgreSQL would refuse them.
+ */
+static void
+rw_encoding_alter(GpRewrite *rw, int after_name)
+{
+	const GpTokens *ts = rw->ts;
+	int			start = after_name;
+
+	while (start < rw->last)
+	{
+		int			end = start;
+		int			depth = 0;
+		int			k;
+		int			c;
+		char	   *opts;
+
+		while (end < rw->last && !(depth == 0 && tok_is_char(ts, end, ',')))
+		{
+			if (tok_is_char(ts, end, '('))
+				depth++;
+			else if (tok_is_char(ts, end, ')'))
+				depth--;
+			end++;
+		}
+
+		if (tok_is_kw(ts, start, "add"))
+		{
+			k = start + 1;
+			if (tok_is_kw(ts, k, "column"))
+				k++;
+			if (tok_is(ts, k, "if") && tok_is(ts, k + 1, "not") && tok_is(ts, k + 2, "exists"))
+				k += 3;
+			if (tok_is_name(ts, k) && !table_constraint_word(ts, k))
+			{
+				int			col = k;
+
+				depth = 0;
+				for (k = col + 1; k < end; k++)
+				{
+					if (tok_is_char(ts, k, '('))
+						depth++;
+					else if (tok_is_char(ts, k, ')'))
+						depth--;
+					else if (depth == 0 && tok_is(ts, k, "encoding") &&
+							 tok_is_char(ts, k + 1, '(') &&
+							 (opts = encoding_opts(ts, k + 1, &c, "gp_ao.", true)) != NULL)
+					{
+						rw_edit(rw, ts->toks[k].off, tok_end(ts, c), " ");
+						rw_edit(rw, tok_end(ts, end - 1), tok_end(ts, end - 1),
+								psprintf(", ALTER COLUMN %s SET (%s) ",
+										 pnstrdup(ts->src + ts->toks[col].off,
+												  tok_stop(ts, col) - ts->toks[col].off),
+										 opts));
+						break;
+					}
+				}
+			}
+		}
+		else if (tok_is_kw(ts, start, "alter"))
+		{
+			k = start + 1;
+			if (tok_is_kw(ts, k, "column"))
+				k++;
+			if (tok_is_name(ts, k) && tok_is_kw(ts, k + 1, "set") &&
+				tok_is(ts, k + 2, "encoding") && tok_is_char(ts, k + 3, '(') &&
+				(opts = encoding_opts(ts, k + 3, &c, "gp_ao.", true)) != NULL &&
+				c == end - 1)
+				rw_edit(rw, ts->toks[k + 2].off, tok_stop(ts, c),
+						psprintf("(%s)", opts));
+		}
+		start = end + 1;
+	}
+}
+
+/*
+ * ALTER TYPE t SET DEFAULT ENCODING (compresstype=rle_type)
+ *	 -> SECURITY LABEL FOR gp_ao ON TYPE t IS 'compresstype=rle_type'
+ *
+ * gp_ao keeps a type's default for the columns of it as its label.
+ */
+static bool
+rw_alter_type_encoding(GpRewrite *rw)
+{
+	const GpTokens *ts = rw->ts;
+	int			i = rw->first;
+	int			e;
+	int			c;
+	char	   *opts;
+
+	if (!tok_is(ts, i, "alter") || !tok_is(ts, i + 1, "type"))
+		return false;
+	e = skip_qualified_name(ts, i + 2);
+	if (e == i + 2 || !tok_is_kw(ts, e, "set") || !tok_is_kw(ts, e + 1, "default") ||
+		!tok_is(ts, e + 2, "encoding") || !tok_is_char(ts, e + 3, '(') ||
+		(opts = encoding_opts(ts, e + 3, &c, "", false)) == NULL ||
+		c != rw->last - 1)
+		return false;
+	rw_whole(rw);
+	appendStringInfo(&rw->body, "SECURITY LABEL FOR gp_ao ON TYPE %s IS %s",
+					 rw_text(ts, i + 2, e), quote_literal_cstr(opts));
+	return true;
+}
+
 /*
  * CREATE INCREMENTAL MATERIALIZED VIEW ... AS
  * CREATE DYNAMIC TABLE ... SCHEDULE 's' ... AS
@@ -3670,6 +4000,10 @@ rw_statement_itself(GpRewrite *rw)
 	if (rw_role_profile(rw))
 		return;
 
+	/* ALTER TYPE ... SET DEFAULT ENCODING: a label of gp_ao's. */
+	if (rw_alter_type_encoding(rw))
+		return;
+
 	(void) rw_storage_and_dynamic(rw);
 	(void) rw_orientation_row(rw);
 	(void) rw_matview_options(rw);
@@ -3688,6 +4022,10 @@ rw_statement_itself(GpRewrite *rw)
 		{
 			rw_distributed(rw, after_name);
 			rw_partition_by(rw, after_name);
+			if (rw->object == 't' && tok_is(rw->ts, rw->first, "create"))
+				rw_encoding_create(rw, after_name);
+			else if (rw->object == 't' && tok_is(rw->ts, rw->first, "alter"))
+				rw_encoding_alter(rw, after_name);
 		}
 	}
 

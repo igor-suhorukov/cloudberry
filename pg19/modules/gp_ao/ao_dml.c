@@ -74,6 +74,7 @@ struct AoInsertState
 	int			natts;
 	int			ngroups;
 	AoOptions	opts;
+	AoOptions  *colopts;		/* a table by column: each column's own */
 	int			segno;
 	AoSegfile  *sf;
 	int64		next_rownum;
@@ -339,6 +340,8 @@ ao_insert_state(Relation rel)
 		st->cols = palloc_array(AoColumnBuilder, st->natts);
 		for (int i = 0; i < st->natts; i++)
 			ao_column_builder_init(&st->cols[i]);
+		st->colopts = palloc_array(AoOptions, st->natts);
+		ao_column_options(rel, st->colopts);
 	}
 	ao_choose_segfile(st, rel);
 	st->has_unique = ao_has_unique_index(rel);
@@ -390,8 +393,8 @@ ao_flush_block(AoInsertState *st, Relation rel)
 		else
 			raw = &st->rows;
 
-		len = ao_block_encode(raw, &st->opts, st->block_first,
-							  st->block_nrows, &st->out);
+		len = ao_block_encode(raw, st->columnar ? &st->colopts[g] : &st->opts,
+							  st->block_first, st->block_nrows, &st->out);
 		st->offsets[g] = st->sf->eof[g];
 		ao_file_write(rel, AoFileNum(st->segno, st->columnar ? g + 1 : 0),
 					  st->sf->eof[g], st->out.data, len);
@@ -451,7 +454,9 @@ ao_insert_slot(AoInsertState *st, Relation rel, TupleTableSlot *slot)
 
 	if (st->columnar)
 	{
-		blocksize = 0;
+		/* A block ends where any column's reaches that column's size. */
+		bool		full = false;
+
 		for (int i = 0; i < desc->natts; i++)
 		{
 			Form_pg_attribute att = TupleDescAttr(desc, i);
@@ -463,8 +468,10 @@ ao_insert_slot(AoInsertState *st, Relation rel, TupleTableSlot *slot)
 			else if (!isnull)
 				value = ao_detoast_value(att, value);
 			ao_column_append(&st->cols[i], att, value, isnull);
-			blocksize = Max(blocksize, (Size) st->cols[i].values.len);
+			if (st->cols[i].values.len >= st->colopts[i].blocksize)
+				full = true;
 		}
+		blocksize = full ? (Size) st->opts.blocksize : 0;
 	}
 	else
 	{
@@ -684,16 +691,31 @@ int64_cmp(const void *a, const void *b)
 	return (x > y) - (x < y);
 }
 
+/*
+ * Write a statement's deletions to the visibility map, and count each
+ * segment file they touched as modified, as Cloudberry's modcount counts a
+ * DELETE for an incremental backup to find: after the writers' own updates
+ * of the rows, which the same statement's UPDATE may have made.
+ */
 static void
 ao_finish_delete(AoDeleteState *ds)
 {
+	CommandCounterIncrement();
 	for (int segno = 1; segno <= AO_MAX_SEGNO; segno++)
 	{
+		AoSegfile  *sf;
+
 		if (ds->n[segno] == 0)
 			continue;
 		qsort(ds->rownums[segno], ds->n[segno], sizeof(int64), int64_cmp);
 		ao_visimap_delete_rows(ds->storage_id, segno, ds->rownums[segno],
 							   ds->n[segno]);
+		sf = ao_segfile_read(ds->storage_id, segno, SnapshotSelf);
+		if (sf != NULL)
+		{
+			sf->modcount++;
+			ao_segfile_update(ds->storage_id, sf);
+		}
 	}
 }
 

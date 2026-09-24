@@ -31,6 +31,7 @@
 #include "lib/stringinfo.h"
 #include "storage/bufpage.h"
 #include "storage/smgr.h"
+#include "utils/guc.h"
 #include "utils/rel.h"
 #include "utils/snapshot.h"
 
@@ -343,6 +344,40 @@ extern void ao_dml_finish_query(void *query);
 extern void ao_dml_init(void);
 extern int	ao_segfile_lock_classid(void);
 extern bool ao_segfile_try_lock(Oid relid, int segno);
+
+/* ------------------------------------------------------------------------- */
+/* A column's own options, a partitioned table's (ao_encoding.c)             */
+/* ------------------------------------------------------------------------- */
+
+/* An ENCODING clause: a column's, or DEFAULT COLUMN ENCODING. */
+typedef struct AoColumnEncoding
+{
+	char	   *colname;		/* NULL for the default */
+	bool		is_default;
+	bool		directive;		/* COLUMN c ENCODING, not in c's definition */
+	List	   *opts;			/* DefElem, of String */
+} AoColumnEncoding;
+
+extern PGDLLIMPORT char *gp_default_storage_options;
+
+extern void ao_encoding_init(void);
+extern List *ao_enc_parse(const char *text);
+extern char *ao_enc_format(List *opts);
+extern void ao_enc_validate(List *opts, bool table);
+extern List *ao_enc_fillin(List *given, const AoOptions *dflt);
+extern void ao_column_options(Relation rel, AoOptions *colopts);
+extern void ao_encoding_take(List **options, List **encodings);
+extern List *ao_storage_opts_of(List *options);
+extern List *ao_partitioned_take(List **options);
+extern void ao_partitioned_set(Oid relid, List *opts);
+extern void ao_partition_inherit(Oid parentid, List **options);
+extern void ao_encoding_apply(Oid relid, List *encodings, List *withopts,
+							  List *only, bool replace);
+extern void ao_encoding_set_column(Oid relid, const char *colname, List *opts);
+extern char *ao_encoding_type_label(const char *label);
+extern bool ao_default_storage_options_check(char **newval, void **extra,
+											 GucSource source);
+extern void ao_default_storage_options_add(List **options);
 
 /* ------------------------------------------------------------------------- */
 /* The access methods (ao_am.c), VACUUM (ao_vacuum.c)                        */

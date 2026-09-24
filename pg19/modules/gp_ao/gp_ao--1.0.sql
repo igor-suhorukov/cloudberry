@@ -137,7 +137,7 @@ SELECT c.oid AS relid,
 	   o.blocksize,
 	   o.compresslevel::int2 AS compresslevel,
 	   o.checksum,
-	   o.compresstype::name AS compresstype,
+	   (CASE o.compresstype WHEN 'none' THEN '' ELSE o.compresstype END)::name AS compresstype,
 	   o.columnstore,
 	   0::oid AS segrelid,
 	   gp_ao.segfile_count(c.oid)::int2 AS segfilecount,
@@ -151,8 +151,53 @@ SELECT c.oid AS relid,
  WHERE c.relkind IN ('r', 'm')
    AND c.relam IN (SELECT oid FROM pg_catalog.pg_am
 					WHERE amname IN ('ao_row', 'ao_column'));
+
+/*
+ * pg_attribute_encoding and pg_type_encoding: what a column of a table by
+ * column is stored with, and what a type gives a column by default, which
+ * the port keeps as security labels of gp_ao's (ao_encoding.c).
+ */
+CREATE VIEW pg_catalog.pg_attribute_encoding AS
+SELECT a.attrelid,
+	   a.attnum,
+	   a.attnum AS filenum,
+	   pg_catalog.string_to_array(s.label, ',') AS attoptions
+  FROM pg_catalog.pg_attribute a
+  JOIN pg_catalog.pg_seclabel s
+	ON s.objoid = a.attrelid
+   AND s.classoid = 'pg_catalog.pg_class'::pg_catalog.regclass
+   AND s.objsubid = a.attnum
+   AND s.provider = 'gp_ao'
+ WHERE a.attnum > 0 AND NOT a.attisdropped;
+
+CREATE VIEW pg_catalog.pg_type_encoding AS
+SELECT s.objoid AS typid,
+	   pg_catalog.string_to_array(s.label, ',') AS typoptions
+  FROM pg_catalog.pg_seclabel s
+ WHERE s.classoid = 'pg_catalog.pg_type'::pg_catalog.regclass
+   AND s.provider = 'gp_ao';
+
+/*
+ * pg_compression: the compression types a table's options may name, with
+ * the names of Cloudberry's functions for each, which the port's blocks
+ * call no function of this catalog's to reach.
+ */
+CREATE VIEW pg_catalog.pg_compression (compname, compconstructor, compdestructor,
+	compcompressor, compdecompressor, compvalidator, compowner) AS
+VALUES ('none'::name, 'gp_dummy_compression_constructor'::text,
+		'gp_dummy_compression_destructor'::text, 'gp_dummy_compression_compress'::text,
+		'gp_dummy_compression_decompress'::text, 'gp_dummy_compression_validator'::text,
+		10::oid),
+	   ('zlib', 'gp_zlib_constructor', 'gp_zlib_destructor', 'gp_zlib_compress',
+		'gp_zlib_decompress', 'gp_zlib_validator', 10),
+	   ('rle_type', 'gp_rle_type_constructor', 'gp_rle_type_destructor',
+		'gp_rle_type_compress', 'gp_rle_type_decompress', 'gp_rle_type_validator', 10),
+	   ('zstd', 'zstd_constructor', 'zstd_destructor', 'zstd_compress',
+		'zstd_decompress', 'zstd_validator', 10);
+
 RESET allow_system_table_mods;
-GRANT SELECT ON pg_catalog.pg_appendonly TO PUBLIC;
+GRANT SELECT ON pg_catalog.pg_appendonly, pg_catalog.pg_attribute_encoding,
+	pg_catalog.pg_type_encoding, pg_catalog.pg_compression TO PUBLIC;
 
 /*
  * get_ao_compression_ratio(), which Cloudberry has built in, and

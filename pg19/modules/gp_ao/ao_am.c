@@ -217,7 +217,16 @@ ao_meta_snapshot(Snapshot snapshot)
 {
 	if (snapshot == NULL || snapshot == SnapshotAny ||
 		snapshot->snapshot_type == SNAPSHOT_NON_VACUUMABLE)
+	{
+		/*
+		 * A parallel index build's participants may take no snapshot of
+		 * their own: the one the leader shared, which each has as its
+		 * active snapshot, sees what the build does.
+		 */
+		if (IsInParallelMode())
+			return ActiveSnapshotSet() ? GetActiveSnapshot() : GetTransactionSnapshot();
 		return GetLatestSnapshot();
+	}
 	return snapshot;
 }
 
@@ -541,8 +550,7 @@ ao_scan_begin(Relation rel, Snapshot snapshot, int nkeys, ScanKeyData *key,
 		}
 	}
 	scan->sample_total = -1;
-	if (flags & SO_TEMP_SNAPSHOT)
-		RegisterSnapshot(snapshot);
+	/* A snapshot SO_TEMP_SNAPSHOT names, its caller registered for us. */
 	MemoryContextSwitchTo(old);
 	return (TableScanDesc) scan;
 }
@@ -1060,12 +1068,22 @@ ao_tuple_satisfies_snapshot(Relation rel, TupleTableSlot *slot,
 	return visible;
 }
 
+/*
+ * An index's bottom-up deletion asks which of its entries are of rows no
+ * snapshot sees: none, as far as this method can say without reading them,
+ * and VACUUM removes an append-optimized table's index entries when it
+ * recycles their segment file.  The entries the index knows dead already
+ * are its to delete; there are none, since no fetch reports a row dead.
+ */
 static TransactionId
 ao_index_delete_tuples(Relation rel, TM_IndexDeleteOp *delstate)
 {
-	/* None is known dead: VACUUM removes an index's dead entries. */
+	int			n = 0;
+
 	for (int i = 0; i < delstate->ndeltids; i++)
-		delstate->status[delstate->deltids[i].id].knowndeletable = false;
+		if (delstate->status[delstate->deltids[i].id].knowndeletable)
+			delstate->deltids[n++] = delstate->deltids[i];
+	delstate->ndeltids = n;
 	return InvalidTransactionId;
 }
 
@@ -1364,11 +1382,10 @@ ao_index_build_range_scan(Relation table_rel, Relation index_rel,
 				 callback_state);
 	}
 
+	/* A scan given, a parallel build's, is ours to end too, as heap's is. */
+	table_endscan(scan);
 	if (own_scan)
-	{
-		table_endscan(scan);
 		UnregisterSnapshot(snapshot);
-	}
 	ExecDropSingleTupleTableSlot(slot);
 	FreeExecutorState(estate);
 

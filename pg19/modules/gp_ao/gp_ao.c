@@ -46,15 +46,18 @@
 #include "access/table.h"
 #include "access/tableam.h"
 #include "catalog/objectaccess.h"
+#include "catalog/pg_inherits.h"
 #include "catalog/namespace.h"
 #include "catalog/pg_class.h"
 #include "catalog/pg_trigger.h"
 #include "commands/defrem.h"
+#include "commands/tablecmds.h"
 #include "commands/vacuum.h"
 #include "executor/executor.h"
 #include "fmgr.h"
 #include "funcapi.h"
 #include "miscadmin.h"
+#include "nodes/makefuncs.h"
 #include "nodes/nodeFuncs.h"
 #include "nodes/parsenodes.h"
 #include "parser/analyze.h"
@@ -123,17 +126,21 @@ relid_is_ao(Oid relid)
 
 /*
  * Take appendonly, appendoptimized and orientation out of a statement's
- * options and say which access method they choose, or NULL for none.
- * Cloudberry keeps neither in the table's options: they choose its access
- * method, as they do here.
+ * options and say which access method they choose, or NULL for none, as
+ * Cloudberry's grammar does (greenplumLegacyAOoptions): each once, an
+ * orientation of column or row only where the table is append-optimized,
+ * and appendonly=false heap, which is not the same as saying nothing -- a
+ * partition that says nothing has its parent's method.  Neither is kept in
+ * the table's options: they choose its access method, as they do here.
  */
 static char *
 take_storage_options(List **options)
 {
 	ListCell   *lc;
-	int			appendonly = -1;
+	bool		appendonly = false;
+	bool		appendonly_found = false;
 	bool		column = false;
-	bool		orientation_given = false;
+	bool		orientation_found = false;
 
 	foreach(lc, *options)
 	{
@@ -144,51 +151,53 @@ take_storage_options(List **options)
 		if (strcmp(def->defname, "appendonly") == 0 ||
 			strcmp(def->defname, "appendoptimized") == 0)
 		{
-			appendonly = defGetBoolean(def) ? 1 : 0;
+			if (appendonly_found)
+				ereport(ERROR,
+						(errcode(ERRCODE_DUPLICATE_OBJECT),
+						 errmsg("parameter \"appendonly\" specified more than once")));
+			appendonly = defGetBoolean(def);
+			appendonly_found = true;
 			*options = foreach_delete_current(*options, lc);
 		}
 		else if (strcmp(def->defname, "orientation") == 0)
 		{
 			char	   *value = defGetString(def);
 
-			if (pg_strcasecmp(value, "column") == 0)
-				column = true;
-			else if (pg_strcasecmp(value, "row") != 0)
+			if (orientation_found)
+				ereport(ERROR,
+						(errcode(ERRCODE_DUPLICATE_OBJECT),
+						 errmsg("parameter \"orientation\" specified more than once")));
+			if (strcmp(value, "column") != 0 && strcmp(value, "row") != 0)
 				ereport(ERROR,
 						(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
 						 errmsg("invalid parameter value for \"orientation\": \"%s\"",
 								value)));
-			orientation_given = true;
+			column = (strcmp(value, "column") == 0);
+			orientation_found = true;
 			*options = foreach_delete_current(*options, lc);
 		}
 	}
 
-	if (appendonly == 1)
-		return column ? "ao_column" : "ao_row";
-	if (orientation_given && appendonly != 0)
+	if (!appendonly && orientation_found)
 		ereport(ERROR,
-				(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+				(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
 				 errmsg("invalid option \"orientation\" for base relation"),
 				 errhint("Table orientation only valid for Append Optimized relations, create an AO relation to use table orientation.")));
-	if (appendonly == 0)
+	if (appendonly)
+		return column ? "ao_column" : "ao_row";
+	if (appendonly_found)
 		return "heap";
 	return NULL;
 }
 
+/* USING, where the statement has one, before what the options choose. */
 static void
 choose_access_method(char **accessMethod, List **options)
 {
 	char	   *am = take_storage_options(options);
 
-	if (am == NULL)
-		return;
-	if (*accessMethod != NULL && strcmp(*accessMethod, am) != 0)
-		ereport(ERROR,
-				(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
-				 errmsg("ACCESS METHOD is specified as \"%s\" but the WITH option indicates it to be \"%s\"",
-						*accessMethod, am),
-				 errhint("Specify only one of USING and WITH (appendoptimized=...).")));
-	*accessMethod = pstrdup(am);
+	if (am != NULL && *accessMethod == NULL)
+		*accessMethod = pstrdup(am);
 }
 
 /*
@@ -216,6 +225,161 @@ check_trigger(CreateTrigStmt *stmt)
 			 errmsg("ON DELETE triggers are not supported on append-only tables")));
 }
 
+/* The method a CREATE TABLE's table will have. */
+static char *
+effective_am(CreateStmt *stmt, Oid *parentid)
+{
+	*parentid = InvalidOid;
+	if (stmt->partbound != NULL && list_length(stmt->inhRelations) == 1)
+		*parentid = RangeVarGetRelid(linitial(stmt->inhRelations), NoLock, true);
+	if (stmt->accessMethod != NULL)
+		return stmt->accessMethod;
+	if (OidIsValid(*parentid) && OidIsValid(get_rel_relam(*parentid)))
+		return get_am_name(get_rel_relam(*parentid));
+	return default_table_access_method;
+}
+
+static bool
+am_name_is_ao(const char *am)
+{
+	return am != NULL && (strcmp(am, "ao_row") == 0 || strcmp(am, "ao_column") == 0);
+}
+
+/*
+ * What CREATE TABLE's ENCODING clauses and storage options become, taken
+ * from the statement before PostgreSQL sees it and put on the table once
+ * it is made.
+ */
+typedef struct CreatePending
+{
+	RangeVar   *relation;
+	List	   *encodings;		/* AoColumnEncoding */
+	List	   *own_opts;		/* the storage options its WITH list gave */
+	List	   *parent_opts;	/* a partitioned table's, for its label */
+	bool		partitioned;
+} CreatePending;
+
+static CreatePending *
+prepare_create(CreateStmt *stmt)
+{
+	CreatePending *cp = palloc0_object(CreatePending);
+	Oid			parentid;
+	char	   *am;
+
+	choose_access_method(&stmt->accessMethod, &stmt->options);
+	ao_encoding_take(&stmt->options, &cp->encodings);
+	am = effective_am(stmt, &parentid);
+	cp->relation = stmt->relation;
+	cp->partitioned = (stmt->partspec != NULL);
+
+	if (cp->encodings != NIL && (am == NULL || strcmp(am, "ao_column") != 0))
+		ereport(ERROR,
+				(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+				 errmsg("ENCODING clause only supported with column oriented tables")));
+	if (!am_name_is_ao(am))
+		return cp;
+
+	cp->own_opts = ao_storage_opts_of(stmt->options);
+	if (OidIsValid(parentid) && get_rel_relam(parentid) == get_table_am_oid(am, true))
+		ao_partition_inherit(parentid, &stmt->options);
+	ao_default_storage_options_add(&stmt->options);
+	if (cp->partitioned)
+		cp->parent_opts = ao_partitioned_take(&stmt->options);
+	return cp;
+}
+
+static void
+finish_create(CreatePending *cp)
+{
+	Oid			relid = RangeVarGetRelid(cp->relation, NoLock, true);
+
+	if (!OidIsValid(relid) || !relid_is_ao(relid))
+		return;
+	if (cp->partitioned)
+		ao_partitioned_set(relid, cp->parent_opts);
+	if (get_rel_relam(relid) == get_table_am_oid("ao_column", true))
+		ao_encoding_apply(relid, cp->encodings, cp->own_opts, NIL, false);
+}
+
+/*
+ * ALTER TABLE ... ALTER COLUMN c SET ENCODING (...), which the grammar makes
+ * SET (gp_ao.compresstype = ..., ...), and ADD COLUMN c ... ENCODING (...),
+ * which it makes ADD COLUMN c ..., ALTER COLUMN c SET (gp_ao....): the
+ * options taken out of their commands, and a command left with none taken
+ * away.  What is left of the statement may be no command at all.
+ */
+typedef struct AlterPending
+{
+	List	   *colnames;		/* String */
+	List	   *opts;			/* a List of DefElem each */
+} AlterPending;
+
+static AlterPending *
+prepare_alter(AlterTableStmt *stmt)
+{
+	AlterPending *ap = palloc0_object(AlterPending);
+	ListCell   *lc;
+
+	foreach(lc, stmt->cmds)
+	{
+		AlterTableCmd *cmd = lfirst(lc);
+		List	   *mine = NIL;
+		ListCell   *lc2;
+
+		if (cmd->subtype != AT_SetOptions || cmd->def == NULL)
+			continue;
+		foreach(lc2, (List *) cmd->def)
+		{
+			DefElem    *def = lfirst(lc2);
+
+			if (def->defnamespace == NULL || strcmp(def->defnamespace, "gp_ao") != 0)
+				continue;
+			mine = lappend(mine, makeDefElem(def->defname,
+											 (Node *) makeString(defGetString(def)), -1));
+			cmd->def = (Node *) foreach_delete_current((List *) cmd->def, lc2);
+		}
+		if (mine == NIL)
+			continue;
+		ap->colnames = lappend(ap->colnames, makeString(pstrdup(cmd->name)));
+		ap->opts = lappend(ap->opts, mine);
+		if (cmd->def == NULL || list_length((List *) cmd->def) == 0)
+			stmt->cmds = foreach_delete_current(stmt->cmds, lc);
+	}
+	return ap;
+}
+
+static void
+finish_alter(Oid relid, AlterPending *ap)
+{
+	List	   *relids;
+	Oid			aocol = get_table_am_oid("ao_column", true);
+
+	if (!OidIsValid(relid) || !OidIsValid(aocol))
+		return;
+	relids = list_make1_oid(relid);
+	if (get_rel_relkind(relid) == RELKIND_PARTITIONED_TABLE)
+		relids = find_all_inheritors(relid, NoLock, NULL);
+
+	if (ap->colnames != NIL && get_rel_relam(relid) != aocol)
+		ereport(ERROR,
+				(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+				 errmsg("ENCODING clause only supported with column oriented tables")));
+
+	foreach_oid(r, relids)
+	{
+		ListCell   *lc1;
+		ListCell   *lc2;
+
+		if (get_rel_relam(r) != aocol)
+			continue;
+		forboth(lc1, ap->colnames, lc2, ap->opts)
+			ao_encoding_set_column(r, strVal(lfirst(lc1)), lfirst(lc2));
+		/* and the columns it has no options for, added or all of them */
+		if (get_rel_relkind(r) != RELKIND_PARTITIONED_TABLE)
+			ao_encoding_apply(r, NIL, NIL, NIL, false);
+	}
+}
+
 static void
 gp_ao_ProcessUtility(PlannedStmt *pstmt, const char *queryString,
 					 bool readOnlyTree, ProcessUtilityContext context,
@@ -223,30 +387,62 @@ gp_ao_ProcessUtility(PlannedStmt *pstmt, const char *queryString,
 					 DestReceiver *dest, QueryCompletion *qc)
 {
 	Node	   *parsetree = pstmt->utilityStmt;
+	CreatePending *create = NULL;
+	AlterPending *alter = NULL;
+	IntoClause *ctas_into = NULL;
+	List	   *ctas_opts = NIL;
+
+	if (readOnlyTree &&
+		(IsA(parsetree, CreateStmt) || IsA(parsetree, CreateTableAsStmt) ||
+		 IsA(parsetree, AlterTableStmt) || IsA(parsetree, SecLabelStmt)))
+	{
+		pstmt = copyObject(pstmt);
+		parsetree = pstmt->utilityStmt;
+		readOnlyTree = false;
+	}
 
 	switch (nodeTag(parsetree))
 	{
 		case T_CreateStmt:
+			create = prepare_create((CreateStmt *) parsetree);
+			break;
 		case T_CreateTableAsStmt:
 			{
-				if (readOnlyTree)
-				{
-					pstmt = copyObject(pstmt);
-					parsetree = pstmt->utilityStmt;
-					readOnlyTree = false;
-				}
-				if (IsA(parsetree, CreateStmt))
-				{
-					CreateStmt *stmt = (CreateStmt *) parsetree;
+				IntoClause *into = ((CreateTableAsStmt *) parsetree)->into;
 
-					choose_access_method(&stmt->accessMethod, &stmt->options);
-				}
-				else
+				choose_access_method(&into->accessMethod, &into->options);
+				if (am_name_is_ao(into->accessMethod ? into->accessMethod :
+								  default_table_access_method))
 				{
-					IntoClause *into = ((CreateTableAsStmt *) parsetree)->into;
-
-					choose_access_method(&into->accessMethod, &into->options);
+					ctas_opts = ao_storage_opts_of(into->options);
+					ao_default_storage_options_add(&into->options);
+					ctas_into = into;
 				}
+				break;
+			}
+		case T_AlterTableStmt:
+			{
+				AlterTableStmt *stmt = (AlterTableStmt *) parsetree;
+
+				alter = prepare_alter(stmt);
+				if (stmt->cmds == NIL)
+				{
+					/* Nothing left for PostgreSQL: the table, as it would. */
+					Oid			relid = AlterTableLookupRelation(stmt, AccessExclusiveLock);
+
+					finish_alter(relid, alter);
+					return;
+				}
+				break;
+			}
+		case T_SecLabelStmt:
+			{
+				SecLabelStmt *stmt = (SecLabelStmt *) parsetree;
+
+				/* ALTER TYPE ... SET DEFAULT ENCODING, filled in */
+				if (stmt->provider != NULL && strcmp(stmt->provider, "gp_ao") == 0 &&
+					stmt->objtype == OBJECT_TYPE && stmt->label != NULL)
+					stmt->label = ao_encoding_type_label(stmt->label);
 				break;
 			}
 		case T_CreateTrigStmt:
@@ -266,6 +462,20 @@ gp_ao_ProcessUtility(PlannedStmt *pstmt, const char *queryString,
 	else
 		standard_ProcessUtility(pstmt, queryString, readOnlyTree, context,
 								params, queryEnv, dest, qc);
+
+	if (create != NULL)
+		finish_create(create);
+	if (ctas_into != NULL)
+	{
+		Oid			relid = RangeVarGetRelid(ctas_into->rel, NoLock, true);
+
+		if (OidIsValid(relid) &&
+			get_rel_relam(relid) == get_table_am_oid("ao_column", true))
+			ao_encoding_apply(relid, NIL, ctas_opts, NIL, false);
+	}
+	if (alter != NULL)
+		finish_alter(RangeVarGetRelid(((AlterTableStmt *) parsetree)->relation,
+									  NoLock, true), alter);
 
 	/*
 	 * VACUUM's last phase, as Cloudberry's post-cleanup: the segment files
@@ -572,6 +782,14 @@ _PG_init(void)
 							10, 0, 100,
 							PGC_USERSET, 0,
 							NULL, NULL, NULL);
+	DefineCustomStringVariable("gp.default_storage_options",
+							   "Storage options a new append-optimized table has where its statement gives none.",
+							   "Cloudberry calls this gp_default_storage_options; it takes blocksize, "
+							   "compresstype, compresslevel and checksum, as Cloudberry 7's does.",
+							   &gp_default_storage_options,
+							   "",
+							   PGC_USERSET, 0,
+							   ao_default_storage_options_check, NULL, NULL);
 	DefineCustomBoolVariable("gp.appendonly_compaction",
 							 "Enables compacting segment files during VACUUM commands.",
 							 "Cloudberry calls this gp_appendonly_compaction.",
@@ -589,6 +807,7 @@ _PG_init(void)
 	MarkGUCPrefixReserved("gp_ao");
 
 	ao_options_init();
+	ao_encoding_init();
 	ao_register_rmgr();
 	ao_register_table_ams();
 	ao_dml_init();

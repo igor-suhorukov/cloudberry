@@ -144,6 +144,27 @@ is_own_option(const char *opt)
 	return false;
 }
 
+/* Did the options name this one? */
+static bool
+own_given(Datum own, const char *name)
+{
+	Datum	   *elems;
+	int			nelems;
+	size_t		len = strlen(name);
+
+	if (own == (Datum) 0)
+		return false;
+	deconstruct_array_builtin(DatumGetArrayTypeP(own), TEXTOID, &elems, NULL, &nelems);
+	for (int i = 0; i < nelems; i++)
+	{
+		char	   *opt = TextDatumGetCString(elems[i]);
+
+		if (pg_strncasecmp(opt, name, len) == 0 && opt[len] == '=')
+			return true;
+	}
+	return false;
+}
+
 static bytea *
 ao_parse_options(Datum reloptions, char relkind, bool validate, bool columnar)
 {
@@ -212,6 +233,12 @@ ao_parse_options(Datum reloptions, char relkind, bool validate, bool columnar)
 			ereport(ERROR,
 					(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
 					 errmsg("rle_type cannot be used with Append Only relations row orientation")));
+		if (type != AO_COMPRESS_NONE && result->compresslevel == 0 &&
+			own_given(own_datum, "compresslevel"))
+			ereport(ERROR,
+					(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+					 errmsg("compresstype \"%s\" can't be used with compresslevel 0",
+							ao_compresstype_name(type))));
 		if (type == AO_COMPRESS_NONE && result->compresslevel > 0 &&
 			mine && mine->compresstype)
 			ereport(ERROR,
