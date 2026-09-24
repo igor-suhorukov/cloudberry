@@ -8,7 +8,8 @@ in it (test.orca.diff) holds for that pass alone.  run.sh counts a test as
 passing when gpdiff.pl, under Cloudberry's init_file and the port's, finds no
 difference or exactly the file's.
 
-concurrent_partition_table_operations_should_not_deadlock (planner, orca)
+concurrent_partition_table_operations_should_not_deadlock, and its
+_optimizer output, which the orca pass is compared with
   EXPLAIN's plans and nothing else: the operations the test runs side by
   side do not deadlock.  The planner reads each partition through a Gather
   Motion of its own under an Append, where Cloudberry gathers one Append
