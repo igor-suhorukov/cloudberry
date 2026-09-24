@@ -60,6 +60,20 @@ RUN --mount=type=bind,from=pgsrc,target=/pgsrc,ro \
     git -C /pgsrc archive "$PG_REF" | tar -x -C /src \
  && git -C /pgsrc rev-parse "$PG_REF" > /src/.pg_ref_commit
 
+# Injection points only the port's tests use, which are no part of the core
+# series: the patches in patches/, applied to the tree of either ref, so that
+# the two images still differ only in PG_REF.  Each is recorded, as the ref
+# is, in .pg_test_patches.  PG_TEST_PATCHES=false builds the tree as it is.
+ARG PG_TEST_PATCHES=true
+COPY patches/ /patches/
+RUN : > /src/.pg_test_patches \
+ && if [ "$PG_TEST_PATCHES" = true ]; then \
+        for p in /patches/*.patch; do \
+            patch -p1 -d /src --forward --no-backup-if-mismatch < "$p" || exit 1; \
+            echo "$(basename "$p") $(sha256sum < "$p" | cut -c1-16)" >> /src/.pg_test_patches; \
+        done; \
+    fi
+
 RUN meson setup build --prefix=/usr/local/pgsql \
         --buildtype="$PG_BUILDTYPE" \
         -Dcassert="$PG_CASSERT" -Dinjection_points=true -Dtap_tests=enabled \
@@ -86,6 +100,7 @@ RUN apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-ins
 
 COPY --from=build /usr/local/pgsql /usr/local/pgsql
 COPY --from=build /src/.pg_ref_commit /usr/local/pgsql/.pg_ref_commit
+COPY --from=build /src/.pg_test_patches /usr/local/pgsql/.pg_test_patches
 
 ENV PATH=/usr/local/pgsql/bin:$PATH \
     LD_LIBRARY_PATH=/usr/local/pgsql/lib:/usr/local/pgsql/lib/x86_64-linux-gnu \

@@ -1,0 +1,114 @@
+Licensed to the Apache Software Foundation (ASF) under one
+or more contributor license agreements.  See the NOTICE file
+distributed with this work for additional information
+regarding copyright ownership.  The ASF licenses this file
+to you under the Apache License, Version 2.0 (the
+"License"); you may not use this file except in compliance
+with the License.  You may obtain a copy of the License at
+
+  http://www.apache.org/licenses/LICENSE-2.0
+
+Unless required by applicable law or agreed to in writing,
+software distributed under the License is distributed on an
+"AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+KIND, either express or implied.  See the License for the
+specific language governing permissions and limitations
+under the License.
+
+Injection points for the port's tests, at four of Apache Cloudberry's
+faults inside PostgreSQL's own replication code, which its FTS tests in
+isolation2 hold or count (src/test/isolation2/sql/segwalrep):
+
+  wal-sender-loop        walsender.c, WalSndLoop()        wal_sender_loop
+  walrecv-skip-flush     walreceiver.c, XLogWalRcvFlush() walrecv_skip_flush
+  sync-rep-query-die     syncrep.c, SyncRepWaitForLSN()   sync_rep_query_die
+  sync-rep-query-cancel  syncrep.c, SyncRepWaitForLSN()   sync_rep_query_cancel
+
+gp_core's fault injector attaches a fault of Cloudberry's name to the point
+(gp_fault.c); walrecv-skip-flush is given a bool its callback sets to skip
+the flush.  They serve tests alone, so they are not in the core series:
+Dockerfile.pg applies this to the tree of either ref, vanilla or patched,
+so that the two images still differ only in the ref.  Dormant, as any
+point is: without injection points the macro is empty, and with them a
+point nothing attached to runs no callback.
+
+
+--- a/src/backend/replication/syncrep.c
++++ b/src/backend/replication/syncrep.c
+@@ -84,6 +84,7 @@
+ #include "storage/proc.h"
+ #include "tcop/tcopprot.h"
+ #include "utils/guc_hooks.h"
++#include "utils/injection_point.h"
+ #include "utils/ps_status.h"
+ #include "utils/wait_event.h"
+ 
+@@ -289,6 +290,9 @@
+ 		if (MyProc->syncRepState == SYNC_REP_WAIT_COMPLETE)
+ 			break;
+ 
++		/* A test may see that the wait goes on, before a signal ends it. */
++		INJECTION_POINT("sync-rep-query-die", NULL);
++
+ 		/*
+ 		 * If a wait for synchronous replication is pending, we can neither
+ 		 * acknowledge the commit nor raise ERROR or FATAL.  The latter would
+@@ -321,6 +325,10 @@
+ 			break;
+ 		}
+ 
++		/* A test may see that a cancel came while the commit waits. */
++		if (QueryCancelPending)
++			INJECTION_POINT("sync-rep-query-cancel", NULL);
++
+ 		/*
+ 		 * It's unclear what to do if a query cancel interrupt arrives.  We
+ 		 * can't actually abort at this point, but ignoring the interrupt
+
+--- a/src/backend/replication/walreceiver.c
++++ b/src/backend/replication/walreceiver.c
+@@ -77,6 +77,7 @@
+ #include "utils/acl.h"
+ #include "utils/builtins.h"
+ #include "utils/guc.h"
++#include "utils/injection_point.h"
+ #include "utils/pg_lsn.h"
+ #include "utils/ps_status.h"
+ #include "utils/timestamp.h"
+@@ -1097,6 +1098,15 @@
+ 	if (LogstreamResult.Flush < LogstreamResult.Write)
+ 	{
+ 		WalRcvData *walrcv = WalRcv;
++		bool		skip = false;
++
++		/*
++		 * A test may have the flush skipped, as of a standby that lags
++		 * behind: the point's callback sets "skip".
++		 */
++		INJECTION_POINT("walrecv-skip-flush", &skip);
++		if (skip)
++			return;
+ 
+ 		issue_xlog_fsync(recvFile, recvSegNo, tli);
+ 
+
+--- a/src/backend/replication/walsender.c
++++ b/src/backend/replication/walsender.c
+@@ -94,6 +94,7 @@
+ #include "utils/acl.h"
+ #include "utils/builtins.h"
+ #include "utils/guc.h"
++#include "utils/injection_point.h"
+ #include "utils/lsyscache.h"
+ #include "utils/memutils.h"
+ #include "utils/pg_lsn.h"
+@@ -3069,6 +3070,9 @@
+ 	 */
+ 	for (;;)
+ 	{
++		/* A test may hold the WAL sender here, or fail it. */
++		INJECTION_POINT("wal-sender-loop", NULL);
++
+ 		/* Clear any already-pending wakeups */
+ 		ResetLatch(MyLatch);
+ 

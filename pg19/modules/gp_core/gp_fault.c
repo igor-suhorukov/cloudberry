@@ -78,15 +78,25 @@ static const char *const fault_type_names[] = {
  * critical section that makes a checkpoint wait, its commit record not yet
  * written -- a prepared transaction's second phase
  * (RecordTransactionCommitPrepared, PostgreSQL 19's own point), and any
- * other commit (RecordTransactionCommit, the core series' O29).
+ * other commit (RecordTransactionCommit, the core series' O29).  And the
+ * four in its replication code that its FTS tests hold or count, whose
+ * points only the tests' build has (pg19/docker/patches): the WAL sender's
+ * loop, a standby's flush -- which a "skip" fault skips, the point giving
+ * its callback a bool to set -- and a commit's wait for its standby, as it
+ * goes on and as a cancel comes.
  */
 static const struct
 {
 	const char *fault;
 	const char *point;
+	bool		skips;			/* the point's argument is a bool *: skip */
 }			fault_points[] = {
-	{"before_xlog_xact_commit_prepared", "commit-after-delay-checkpoint"},
-	{"onephase_transaction_commit", "transaction-commit-after-delay-checkpoint"},
+	{"before_xlog_xact_commit_prepared", "commit-after-delay-checkpoint", false},
+	{"onephase_transaction_commit", "transaction-commit-after-delay-checkpoint", false},
+	{"wal_sender_loop", "wal-sender-loop", false},
+	{"walrecv_skip_flush", "walrecv-skip-flush", true},
+	{"sync_rep_query_die", "sync-rep-query-die", false},
+	{"sync_rep_query_cancel", "sync-rep-query-cancel", false},
 };
 
 /* The injection point a fault is attached to: its own name, or PostgreSQL's. */
@@ -97,6 +107,16 @@ fault_point_name(const char *fault)
 		if (strcmp(fault_points[i].fault, fault) == 0)
 			return fault_points[i].point;
 	return fault;
+}
+
+/* Does the fault's point take a skip? */
+static bool
+fault_point_skips(const char *fault)
+{
+	for (int i = 0; i < lengthof(fault_points); i++)
+		if (strcmp(fault_points[i].fault, fault) == 0)
+			return fault_points[i].skips;
+	return false;
 }
 #endif
 
@@ -349,9 +369,10 @@ GpFaultTrigger(const char *name, const char *database, const char *table)
 /*
  * What an injection point runs, when one of PostgreSQL's own is set by the
  * name of a fault: the fault its private data names.  A point that is
- * skipped cannot say so to its caller: PostgreSQL's points have no answer.
- * It may run in a critical section, as the two of fault_points do, where it
- * allocates nothing but its log line, which the error context may.
+ * skipped cannot say so to its caller, PostgreSQL's points having no answer,
+ * but for one that gives its callback a bool to set (fault_points).  It may
+ * run in a critical section, as the two commits' of fault_points do, where
+ * it allocates nothing but its log line, which the error context may.
  */
 PGDLLEXPORT void gp_fault_injection_point(const char *name,
 										  const void *private_data, void *arg);
@@ -360,8 +381,14 @@ void
 gp_fault_injection_point(const char *name, const void *private_data,
 						 void *arg)
 {
-	(void) GpFaultTrigger(private_data != NULL ? (const char *) private_data : name,
-						  "", "");
+	const char *fault = private_data != NULL ? (const char *) private_data : name;
+
+	if (GpFaultTrigger(fault, "", "") == GP_FAULT_SKIP && arg != NULL
+#ifdef USE_INJECTION_POINTS
+		&& fault_point_skips(fault)
+#endif
+		)
+		*(bool *) arg = true;
 }
 
 /* ------------------------------------------------------------------------- */
