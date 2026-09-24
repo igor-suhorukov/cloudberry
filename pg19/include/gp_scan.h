@@ -126,6 +126,12 @@ extern struct Plan *GpExplicitMake(struct ModifyTable *mt,
 								   const char *on_conflict);
 
 /*
+ * The junk column a MERGE into a distributed table carries the target's row
+ * in, for the explicit write's actions to read (gp_modify.c).
+ */
+#define GP_MERGE_TARGET_JUNK	"gp_target"
+
+/*
  * An INSERT's ON CONFLICT clause as text for the segments, printed before
  * the statement is planned; refuses what Cloudberry refuses of it.
  */

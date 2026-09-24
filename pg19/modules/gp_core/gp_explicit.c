@@ -108,13 +108,32 @@
  * a policy alone they do not, as a statement that returned rows would
  * apply the table's SELECT policies too.
  *
+ * MERGE.  The plan joins source and target here, and carries the target's
+ * row up with each row it joins, as a junk column gp_modify.c asks the
+ * planner for; this node does for each what ExecMerge() does -- the first
+ * action whose WHEN condition holds, of those its match allows, over the
+ * target's row as the scan tuple and the plan's as the inner one -- and
+ * sends each action's rows by a statement of its kind: an UPDATE of that
+ * action's SET columns, a DELETE, an INSERT.  An UPDATE action that sets a
+ * column of the key moves its rows, a Split, as Cloudberry's SplitMerge
+ * moves them.  The checks a MERGE's rows are put to are made here, on the
+ * rows it computed: the target's row against the policies' USING, the new
+ * one against their WITH CHECK and a view's.  A row changed twice is
+ * refused, in PostgreSQL's words.  The DELETEs go first, then the UPDATEs,
+ * the Split, the INSERTs.
+ *
+ * A write in a WITH query runs to its end whether or not the query reads
+ * it, as PostgreSQL's ModifyTable does (ExecPostprocessPlan()).
+ *
  * Refused, by name (GpExplicitCannot): an UPDATE of the key of a table with
  * UPDATE triggers, which a moved row would not fire, in Cloudberry's words;
- * statement-level triggers, which would fire on every segment; and MERGE.
+ * statement-level triggers, which would fire on every segment; and a
+ * MERGE's RETURNING, whose merge_action() only a MERGE's own node answers.
  *
  * Cloudberry sources this file stands in for:
  *	  the Explicit Redistribute Motion cdbpath.c puts below a ModifyTable
- *	  whose rows came from elsewhere, and the segments' ModifyTable above it
+ *	  whose rows came from elsewhere, and the segments' ModifyTable above it;
+ *	  the SplitMerge node (nodeSplitMerge.c) of a MERGE that moves rows
  *
  *-------------------------------------------------------------------------
  */
@@ -130,6 +149,7 @@
 #include "commands/explain_format.h"
 #include "commands/trigger.h"
 #include "executor/executor.h"
+#include "executor/nodeModifyTable.h"
 #include "executor/tuptable.h"
 #include "miscadmin.h"
 #include "nodes/extensible.h"
@@ -328,6 +348,37 @@ static const CustomExecMethods explicit_exec_methods = {
 #define EXPLICIT_ON_CONFLICT	6	/* the clause's text, or "" */
 #define EXPLICIT_CONFLICT_ACTION 7	/* OnConflictAction */
 #define EXPLICIT_CHECKS			8	/* withCheckOptionLists */
+#define EXPLICIT_MERGE_ACTIONS	9	/* mergeActionLists */
+#define EXPLICIT_MERGE_JOINS	10	/* mergeJoinConditions */
+
+/*
+ * MERGE: the statement each kind of action's rows are written by -- an
+ * UPDATE's, of its SET columns, a DELETE's, an INSERT's -- and the rows,
+ * each segment's.
+ */
+typedef struct MergeShape
+{
+	CmdType		cmd;			/* UPDATE, DELETE or INSERT */
+	char	   *head;			/* before VALUES */
+	char	   *tail;			/* after */
+	List	   *casts;			/* each parameter's type */
+	List	  **batches;		/* per segment, of const char ** */
+	List	   *everywhere;		/* every segment's: a replicated table's */
+	int			nvals;			/* an INSERT's values, the root's columns */
+	AttrNumber *attnos;
+	FmgrInfo   *out;
+} MergeShape;
+
+/* MERGE: an action, as a result relation takes it (ExecInitMerge()) */
+typedef struct MergeExec
+{
+	MergeAction *action;
+	ExprState  *when;			/* its WHEN condition */
+	ProjectionInfo *proj;		/* an UPDATE's or an INSERT's new row */
+	MergeShape *shape;			/* the statement its rows are written by */
+	bool		moves;			/* an UPDATE of a column of the key: a Split */
+	FmgrInfo   *out;			/* an UPDATE's SET values' output functions */
+} MergeExec;
 
 typedef struct ExplicitState
 {
@@ -403,6 +454,25 @@ typedef struct ExplicitState
 	FmgrInfo   *insout;
 	TupleDesc	olddesc;		/* a deleted row: gp_n, its table, its columns */
 	TupleDesc	newdesc;		/* an inserted one: its table, its columns */
+
+	/* MERGE (explicit_begin_merge) */
+	bool		merge;
+	AttrNumber	targetcol;		/* the target's row, junk the plan carries */
+	List	  **mactions;		/* per result relation and match kind:
+								 * MergeExec */
+	ExprState **mjoins;			/* per result relation: the join condition */
+	TupleTableSlot **moldslots;	/* per result relation: the target's row */
+	TupleTableSlot **mnewslots;	/* and an UPDATE's new one */
+	TupleConversionMap **mmaps;	/* the root's row to the relation's */
+	TupleTableSlot *mrootslot;	/* the target's row, as the root has it */
+	TupleTableSlot *minsslot;	/* an INSERT's new row, as the root has it */
+	List	   *mshapes;		/* MergeShape, in the order they are sent */
+	MergeShape *mdelete;
+	MergeShape *minsert;
+	HTAB	   *mtouched;		/* rows an action changed, by the plan's ctid */
+	HeapTuple  *mnew;			/* a Split's new rows, by the plan's row */
+	TupleConversionMap **mtoroot;	/* the relation's row to the root's */
+	FmgrInfo	mtextout;		/* a replicated table's row, as its text */
 } ExplicitState;
 
 /* Does an expression read RETURNING's old or new explicitly? */
@@ -435,7 +505,7 @@ has_update_triggers(Oid relid)
 }
 
 static bool
-has_statement_triggers(Relation rel, CmdType operation)
+has_statement_triggers(Relation rel, CmdType operation, List *merge_actions)
 {
 	TriggerDesc *td = rel->trigdesc;
 
@@ -443,6 +513,13 @@ has_statement_triggers(Relation rel, CmdType operation)
 		return false;
 	switch (operation)
 	{
+		case CMD_MERGE:
+			/* a MERGE fires those of each kind of action it has */
+			foreach_node(MergeAction, action, merge_actions)
+				if (action->commandType != CMD_NOTHING &&
+					has_statement_triggers(rel, action->commandType, NIL))
+					return true;
+			return false;
 		case CMD_INSERT:
 			return td->trig_insert_before_statement ||
 				td->trig_insert_after_statement;
@@ -468,8 +545,8 @@ GpExplicitCannot(PlannedStmt *stmt, ModifyTable *mt, const char *on_conflict)
 	Index		first = linitial_int(mt->resultRelations);
 	GpPolicy   *policy;
 
-	if (mt->operation == CMD_MERGE)
-		return "MERGE into a distributed table is not supported yet.";
+	if (mt->operation == CMD_MERGE && mt->returningLists != NIL)
+		return "Its RETURNING would say which action wrote each row, which only a MERGE's own node can.";
 	if (mt->onConflictAction != ONCONFLICT_NONE && on_conflict == NULL)
 		return "ON CONFLICT into a distributed table is written from the statement's own text, which was not printed for this one.";
 
@@ -484,7 +561,9 @@ GpExplicitCannot(PlannedStmt *stmt, ModifyTable *mt, const char *on_conflict)
 			return psprintf("Of the tables it writes, \"%s\" has its rows on the coordinator and others on the segments.",
 							get_rel_name(rte->relid));
 		rel = table_open(rte->relid, NoLock);
-		triggers = has_statement_triggers(rel, mt->operation);
+		triggers = has_statement_triggers(rel, mt->operation,
+										  mt->mergeActionLists != NIL
+										  ? linitial(mt->mergeActionLists) : NIL);
 		table_close(rel, NoLock);
 		if (triggers)
 			return psprintf("\"%s\" has statement-level triggers, which would fire on every segment.",
@@ -495,7 +574,9 @@ GpExplicitCannot(PlannedStmt *stmt, ModifyTable *mt, const char *on_conflict)
 	{
 		Oid			rootid = rt_fetch(mt->rootRelation, stmt->rtable)->relid;
 		Relation	rel = table_open(rootid, NoLock);
-		bool		triggers = has_statement_triggers(rel, mt->operation);
+		bool		triggers = has_statement_triggers(rel, mt->operation,
+													  mt->mergeActionLists != NIL
+													  ? linitial(mt->mergeActionLists) : NIL);
 
 		table_close(rel, NoLock);
 		if (triggers)
@@ -517,11 +598,21 @@ GpExplicitCannot(PlannedStmt *stmt, ModifyTable *mt, const char *on_conflict)
 	 * a DELETE and an INSERT, which fire them (explicit_send_split()).
 	 */
 	policy = GpScanDistributedPolicy(rt_fetch(first, stmt->rtable)->relid);
-	if (mt->operation == CMD_UPDATE && GpPolicyIsHashPartitioned(policy))
+	if ((mt->operation == CMD_UPDATE || mt->operation == CMD_MERGE) &&
+		GpPolicyIsHashPartitioned(policy))
 	{
 		Oid			firstid = rt_fetch(first, stmt->rtable)->relid;
+		List	   *setcols = NIL;
 
-		foreach(lc, (List *) linitial(mt->updateColnosLists))
+		/* an UPDATE's SET columns, or a MERGE's UPDATE actions' */
+		if (mt->operation == CMD_UPDATE)
+			setcols = (List *) linitial(mt->updateColnosLists);
+		else
+			foreach_node(MergeAction, action, (List *) linitial(mt->mergeActionLists))
+				if (action->commandType == CMD_UPDATE)
+					setcols = list_concat(setcols, action->updateColnos);
+
+		foreach(lc, setcols)
 		{
 			for (int k = 0; k < policy->nattrs; k++)
 			{
@@ -696,6 +787,10 @@ GpExplicitMake(ModifyTable *mt, const char *on_conflict)
 									makeInteger(mt->onConflictAction));
 	cscan->custom_private = lappend(cscan->custom_private,
 									copyObject(mt->withCheckOptionLists));
+	cscan->custom_private = lappend(cscan->custom_private,
+									copyObject(mt->mergeActionLists));
+	cscan->custom_private = lappend(cscan->custom_private,
+									copyObject(mt->mergeJoinConditions));
 	cscan->methods = &explicit_scan_methods;
 	return &cscan->scan.plan;
 }
@@ -753,6 +848,225 @@ static char *
 cast_to(Oid type, int32 typmod)
 {
 	return format_type_with_typemod(type, typmod);
+}
+
+
+/* ------------------------------------------------------------------------- */
+/* MERGE                                                                     */
+/* ------------------------------------------------------------------------- */
+
+/*
+ * The statement one kind of MERGE action's rows are written by: an UPDATE of
+ * its SET columns by each row's place, as "desc" numbers them, a DELETE by
+ * its place, or an INSERT of every column but the dropped and generated
+ * ones -- the same as an UPDATE's, a DELETE's and an INSERT's (explicit_begin).
+ */
+static MergeShape *
+merge_shape(ExplicitState *state, CmdType cmd, List *setcols, TupleDesc desc)
+{
+	MergeShape *shape = palloc0_object(MergeShape);
+	const char *name = GpDispatchRelationName(RelationGetRelid(state->target));
+	const char *only = state->only ? "ONLY " : "";
+	StringInfoData head;
+	StringInfoData tail;
+	int			i = 0;
+
+	shape->cmd = cmd;
+	initStringInfo(&head);
+	initStringInfo(&tail);
+	if (cmd != CMD_INSERT)
+		shape->casts = list_make3(state->by_content ? "pg_catalog.text" : "pg_catalog.tid",
+								  "pg_catalog.oid", "pg_catalog.int8");
+	if (cmd == CMD_UPDATE)
+	{
+		appendStringInfo(&head, "UPDATE %s%s AS gp_t SET ", only, name);
+		foreach_int(attno, setcols)
+		{
+			Form_pg_attribute att = TupleDescAttr(desc, attno - 1);
+
+			appendStringInfo(&head, "%s%s = gp_s.gp_c%d", i > 0 ? ", " : "",
+							 quote_identifier(NameStr(att->attname)), i + 1);
+			shape->casts = lappend(shape->casts,
+								   cast_to(att->atttypid, att->atttypmod));
+			i++;
+		}
+		appendStringInfoString(&head, " FROM (VALUES ");
+		appendStringInfo(&tail, ") AS gp_s (%s, gp_toid, gp_n",
+						 state->by_content ? "gp_old" : "gp_ctid");
+		for (int k = 0; k < i; k++)
+			appendStringInfo(&tail, ", gp_c%d", k + 1);
+		appendStringInfo(&tail, ") WHERE %s AND gp_t.tableoid = gp_s.gp_toid",
+						 state->by_content ? "gp_t::pg_catalog.text = gp_s.gp_old"
+						 : "gp_t.ctid = gp_s.gp_ctid");
+	}
+	else if (cmd == CMD_DELETE)
+	{
+		appendStringInfo(&head, "DELETE FROM %s%s AS gp_t USING (VALUES ", only, name);
+		appendStringInfoString(&tail, state->by_content
+							   ? ") AS gp_s (gp_old, gp_toid, gp_n) WHERE gp_t::pg_catalog.text = gp_s.gp_old AND gp_t.tableoid = gp_s.gp_toid"
+							   : ") AS gp_s (gp_ctid, gp_toid, gp_n) WHERE gp_t.ctid = gp_s.gp_ctid AND gp_t.tableoid = gp_s.gp_toid");
+	}
+	else
+	{
+		bool		identity = false;
+
+		shape->attnos = palloc_array(AttrNumber, desc->natts);
+		shape->out = palloc_array(FmgrInfo, desc->natts);
+		appendStringInfo(&head, "INSERT INTO %s AS gp_t (", name);
+		for (int k = 0; k < desc->natts; k++)
+		{
+			Form_pg_attribute att = TupleDescAttr(desc, k);
+			Oid			func;
+			bool		isvarlena;
+
+			if (att->attisdropped || att->attgenerated != '\0')
+				continue;
+			if (att->attidentity == ATTRIBUTE_IDENTITY_ALWAYS)
+				identity = true;
+			appendStringInfo(&head, "%s%s", shape->nvals > 0 ? ", " : "",
+							 quote_identifier(NameStr(att->attname)));
+			shape->casts = lappend(shape->casts,
+								   cast_to(att->atttypid, att->atttypmod));
+			getTypeOutputInfo(att->atttypid, &func, &isvarlena);
+			fmgr_info(func, &shape->out[shape->nvals]);
+			shape->attnos[shape->nvals++] = att->attnum;
+		}
+		appendStringInfo(&head, ")%s VALUES ",
+						 identity ? " OVERRIDING SYSTEM VALUE" : "");
+	}
+	shape->head = head.data;
+	shape->tail = tail.data;
+	return shape;
+}
+
+/*
+ * MERGE: each result relation's actions, as ExecInitMerge() makes them --
+ * their WHEN conditions, and their new rows' projections over the target's
+ * row as the scan tuple and the plan's as the inner one -- and the
+ * statements their rows are written by.  An UPDATE that sets a column of
+ * the key moves its rows, a Split, as Cloudberry's SplitMerge does.
+ */
+static void
+explicit_begin_merge(ExplicitState *state, GpPolicy *policy)
+{
+	CustomScanState *node = &state->css;
+	List	   *priv = ((CustomScan *) node->ss.ps.plan)->custom_private;
+	List	   *actlists = (List *) list_nth(priv, EXPLICIT_MERGE_ACTIONS);
+	List	   *joins = (List *) list_nth(priv, EXPLICIT_MERGE_JOINS);
+	List	   *first = (List *) linitial(actlists);
+	ExprContext *econtext = node->ss.ps.ps_ExprContext;
+	TupleDesc	rootdesc = RelationGetDescr(state->target);
+	TupleDesc	desc0 = RelationGetDescr(state->rels[0]);
+	int			nactions = list_length(first);
+	MergeShape **shapes = palloc0_array(MergeShape *, Max(nactions, 1));
+	bool	   *moves = palloc0_array(bool, Max(nactions, 1));
+	Oid			func;
+	bool		isvarlena;
+
+	state->merge = true;
+	state->targetcol = ExecFindJunkAttributeInTlist(outerPlan(node->ss.ps.plan)->targetlist,
+													GP_MERGE_TARGET_JUNK);
+	getTypeOutputInfo(rootdesc->tdtypeid, &func, &isvarlena);
+	fmgr_info(func, &state->mtextout);
+	if (policy != NULL)
+		state->hash = GpHashMake(policy, rootdesc);
+
+	/* one statement for each UPDATE action, one for DELETEs, one for INSERTs */
+	foreach_node(MergeAction, action, first)
+	{
+		int			k = foreach_current_index(action);
+
+		switch (action->commandType)
+		{
+			case CMD_UPDATE:
+				shapes[k] = merge_shape(state, CMD_UPDATE, action->updateColnos, desc0);
+				if (policy != NULL && GpPolicyIsHashPartitioned(policy))
+					foreach_int(attno, action->updateColnos)
+					{
+						AttrNumber	t = attnameAttNum(state->target,
+													  NameStr(TupleDescAttr(desc0, attno - 1)->attname),
+													  false);
+
+						for (int j = 0; j < policy->nattrs; j++)
+							if (policy->attrs[j] == t)
+								moves[k] = true;
+					}
+				if (moves[k])
+					state->split = true;
+				else
+					state->mshapes = lappend(state->mshapes, shapes[k]);
+				break;
+			case CMD_DELETE:
+				if (state->mdelete == NULL)
+					state->mdelete = merge_shape(state, CMD_DELETE, NIL, desc0);
+				shapes[k] = state->mdelete;
+				break;
+			case CMD_INSERT:
+				if (state->minsert == NULL)
+					state->minsert = merge_shape(state, CMD_INSERT, NIL, rootdesc);
+				shapes[k] = state->minsert;
+				break;
+			default:
+				break;
+		}
+	}
+
+	/* each result relation's actions, by what the row's match allows */
+	state->mactions = palloc0_array(List *, state->nrels * NUM_MERGE_MATCH_KINDS);
+	state->mjoins = palloc0_array(ExprState *, state->nrels);
+	state->moldslots = palloc0_array(TupleTableSlot *, state->nrels);
+	state->mnewslots = palloc0_array(TupleTableSlot *, state->nrels);
+	state->mmaps = palloc0_array(TupleConversionMap *, state->nrels);
+	state->mtoroot = palloc0_array(TupleConversionMap *, state->nrels);
+	state->mrootslot = MakeSingleTupleTableSlot(rootdesc, &TTSOpsVirtual);
+	state->minsslot = MakeSingleTupleTableSlot(rootdesc, &TTSOpsVirtual);
+	for (int i = 0; i < state->nrels; i++)
+	{
+		TupleDesc	reldesc = RelationGetDescr(state->rels[i]);
+
+		state->moldslots[i] = MakeSingleTupleTableSlot(reldesc, &TTSOpsVirtual);
+		state->mnewslots[i] = MakeSingleTupleTableSlot(reldesc, &TTSOpsVirtual);
+		if (state->rels[i] != state->target)
+		{
+			state->mmaps[i] = convert_tuples_by_name(rootdesc, reldesc);
+			state->mtoroot[i] = convert_tuples_by_name(reldesc, rootdesc);
+		}
+		state->mjoins[i] = ExecInitQual((List *) (joins != NIL ? list_nth(joins, i) : NULL),
+										&node->ss.ps);
+		foreach_node(MergeAction, action, (List *) list_nth(actlists, i))
+		{
+			int			k = foreach_current_index(action);
+			MergeExec  *e = palloc0_object(MergeExec);
+
+			e->action = action;
+			e->when = ExecInitQual((List *) action->qual, &node->ss.ps);
+			e->shape = shapes[k];
+			e->moves = moves[k];
+			if (action->commandType == CMD_UPDATE)
+			{
+				int			j = 0;
+
+				e->proj = ExecBuildUpdateProjection(action->targetList, true,
+													action->updateColnos,
+													reldesc, econtext,
+													state->mnewslots[i],
+													&node->ss.ps);
+				e->out = palloc_array(FmgrInfo, Max(list_length(action->updateColnos), 1));
+				foreach_int(attno, action->updateColnos)
+				{
+					getTypeOutputInfo(TupleDescAttr(reldesc, attno - 1)->atttypid,
+									  &func, &isvarlena);
+					fmgr_info(func, &e->out[j++]);
+				}
+			}
+			else if (action->commandType == CMD_INSERT)
+				e->proj = ExecBuildProjectionInfo(action->targetList, econtext,
+												  state->minsslot, &node->ss.ps,
+												  rootdesc);
+			state->mactions[i * NUM_MERGE_MATCH_KINDS + action->matchKind] =
+				lappend(state->mactions[i * NUM_MERGE_MATCH_KINDS + action->matchKind], e);
+		}
+	}
 }
 
 static void
@@ -855,6 +1169,8 @@ explicit_begin(CustomScanState *node, EState *estate, int eflags)
 							   ? ") AS gp_s (gp_old, gp_toid, gp_n) WHERE gp_t::pg_catalog.text = gp_s.gp_old AND gp_t.tableoid = gp_s.gp_toid"
 							   : ") AS gp_s (gp_ctid, gp_toid, gp_n) WHERE gp_t.ctid = gp_s.gp_ctid AND gp_t.tableoid = gp_s.gp_toid");
 	}
+	else if (state->operation == CMD_MERGE)
+		explicit_begin_merge(state, policy);
 	else
 	{
 		bool		identity = false;
@@ -978,8 +1294,8 @@ explicit_begin(CustomScanState *node, EState *estate, int eflags)
 	 * partition has it.
 	 */
 	state->returning = returning != NIL;
-	state->back = state->returning || view_checks ||
-		(state->split && state->checks);
+	state->back = state->operation != CMD_MERGE &&
+		(state->returning || view_checks || (state->split && state->checks));
 	if (state->back)
 	{
 		ExprContext *econtext = node->ss.ps.ps_ExprContext;
@@ -1101,6 +1417,14 @@ explicit_begin(CustomScanState *node, EState *estate, int eflags)
 		return;
 
 	/*
+	 * A write in a WITH query runs to its end whether or not the query reads
+	 * what it returns, as ExecPostprocessPlan() runs a ModifyTable that does
+	 * not set the command's tag (ExecInitModifyTable()).
+	 */
+	if (!state->canSetTag)
+		estate->es_auxmodifytables = lcons(node, estate->es_auxmodifytables);
+
+	/*
 	 * Cloudberry without its global deadlock detector: an UPDATE or DELETE
 	 * of a distributed table locks the table, so that two of them never
 	 * wait for each other on different segments -- and here, so that a row
@@ -1110,6 +1434,7 @@ explicit_begin(CustomScanState *node, EState *estate, int eflags)
 	 * partition.
 	 */
 	if ((state->operation == CMD_UPDATE || state->operation == CMD_DELETE ||
+		 state->operation == CMD_MERGE ||
 		 state->on_conflict == ONCONFLICT_UPDATE) &&
 		!gp_enable_global_deadlock_detector)
 	{
@@ -1122,9 +1447,17 @@ explicit_begin(CustomScanState *node, EState *estate, int eflags)
 		GpModifyLockPartitions(RelationGetRelid(state->target),
 							   state->on_conflict == ONCONFLICT_UPDATE
 							   ? ExclusiveLock : RowExclusiveLock);
+	if (state->operation == CMD_MERGE)
+		GpModifyLockPartitions(RelationGetRelid(state->target), ExclusiveLock);
 
 	GpClusterSegments(&state->nsegs);
 	state->batches = palloc0_array(List *, state->nsegs);
+	foreach_ptr(MergeShape, shape, state->mshapes)
+		shape->batches = palloc0_array(List *, state->nsegs);
+	if (state->mdelete != NULL)
+		state->mdelete->batches = palloc0_array(List *, state->nsegs);
+	if (state->minsert != NULL)
+		state->minsert->batches = palloc0_array(List *, state->nsegs);
 	state->rowcxt = AllocSetContextCreate(estate->es_query_cxt,
 										  "gp explicit rows",
 										  ALLOCSET_DEFAULT_SIZES);
@@ -1229,6 +1562,401 @@ explicit_collect(ExplicitState *state)
 		state->nsaved++;
 		ResetPerTupleExprContext(estate);
 	}
+}
+
+
+static uint64 explicit_send_statements(int content, List *rows, int nparams,
+									   const char *head, const char *tail,
+									   List *casts, TupleDesc desc,
+									   Tuplestorestate *store);
+static uint64 explicit_send_split(ExplicitState *state);
+
+/* A row an action of a MERGE changed: its table, and its ctid in the plan. */
+typedef struct MergeTouched
+{
+	Oid			relid;
+	ItemPointerData tid;		/* zeroed before it is filled: it has padding */
+} MergeTouched;
+
+/*
+ * A row an action of this MERGE changes, by its table and the ctid the plan
+ * knows it by -- two partitions' rows may share a segment and a ctid: a
+ * second is refused, as the SQL standard has it and PostgreSQL refuses it
+ * (ExecMergeMatched()).
+ */
+static void
+merge_touch(ExplicitState *state, ItemPointer synthetic, Oid relid)
+{
+	MergeTouched key;
+	bool		found;
+
+	if (state->mtouched == NULL)
+	{
+		HASHCTL		ctl = {0};
+
+		ctl.keysize = sizeof(MergeTouched);
+		ctl.entrysize = sizeof(MergeTouched);
+		ctl.hcxt = state->css.ss.ps.state->es_query_cxt;
+		state->mtouched = hash_create("gp merge rows", 256, &ctl,
+									  HASH_ELEM | HASH_BLOBS | HASH_CONTEXT);
+	}
+	memset(&key, 0, sizeof(key));
+	key.relid = relid;
+	ItemPointerCopy(synthetic, &key.tid);
+	(void) hash_search(state->mtouched, &key, HASH_ENTER, &found);
+	if (found)
+		ereport(ERROR,
+				(errcode(ERRCODE_CARDINALITY_VIOLATION),
+		/* translator: %s is a SQL command name */
+				 errmsg("%s command cannot affect row a second time",
+						"MERGE"),
+				 errhint("Ensure that not more than one source row matches any one target row.")));
+}
+
+/*
+ * A new row's checks, as ExecUpdateAct() and ExecInsert() make them: its
+ * generated columns computed, a policy's WITH CHECK, then a view's.  The
+ * segment's own statement computes the row again, and checks its policies.
+ */
+static void
+merge_check_new(ExplicitState *state, ResultRelInfo *rri,
+				TupleTableSlot *slot, CmdType cmd)
+{
+	EState	   *estate = state->css.ss.ps.state;
+	TupleConstr *constr = RelationGetDescr(rri->ri_RelationDesc)->constr;
+
+	if (rri->ri_WithCheckOptions == NIL)
+		return;
+	if (constr != NULL && constr->has_generated_stored)
+		ExecComputeStoredGenerated(rri, estate, slot, cmd);
+	ExecWithCheckOptions(cmd == CMD_UPDATE ? WCO_RLS_UPDATE_CHECK : WCO_RLS_INSERT_CHECK,
+						 rri, slot, estate);
+	ExecWithCheckOptions(WCO_VIEW_CHECK, rri, slot, estate);
+}
+
+/* A row's place, for an UPDATE's or a DELETE's statement: its params' first */
+static const char **
+merge_row_params(ExplicitState *state, int nparams, ItemPointer synthetic,
+				 Datum target, Oid relid, int *content)
+{
+	const char **params = palloc0_array(const char *, Max(nparams, 1));
+
+	if (state->by_content)
+	{
+		/* a replicated table's row, by its text, on every segment */
+		params[0] = OutputFunctionCall(&state->mtextout, target);
+		*content = GP_HASH_ALL_SEGMENTS;
+	}
+	else
+	{
+		ItemPointerData tid;
+
+		if (!row_identity_find(state->css.ss.ps.state, synthetic, content, &tid))
+			elog(ERROR, "a row to write was not read from a segment");
+		params[0] = DatumGetCString(DirectFunctionCall1(tidout,
+														ItemPointerGetDatum(&tid)));
+	}
+	params[1] = psprintf("%u", relid);
+	params[2] = psprintf(UINT64_FORMAT, state->nsaved);
+	return params;
+}
+
+static void
+merge_add(MergeShape *shape, int content, const char **params)
+{
+	if (content == GP_HASH_ALL_SEGMENTS)
+		shape->everywhere = lappend(shape->everywhere, params);
+	else
+		shape->batches[content] = lappend(shape->batches[content], params);
+}
+
+/*
+ * A row the plan joined to a row of the target: the first MATCHED action
+ * whose WHEN condition holds -- or NOT MATCHED BY SOURCE, where the join
+ * condition fails -- over the target's row, as ExecMergeMatched() does it.
+ */
+static void
+merge_matched(ExplicitState *state, TupleTableSlot *slot, ItemPointer synthetic)
+{
+	EState	   *estate = state->css.ss.ps.state;
+	ExprContext *econtext = state->css.ss.ps.ps_ExprContext;
+	TupleDesc	rootdesc = RelationGetDescr(state->target);
+	int			relidx = 0;
+	ResultRelInfo *rri;
+	TupleTableSlot *oldslot;
+	HeapTupleHeader td;
+	HeapTupleData tuple;
+	List	   *actions;
+	Datum		target;
+	bool		isnull;
+	Oid			relid;
+
+	if (!AttributeNumberIsValid(state->targetcol))
+		return;					/* no action reads a matched row */
+	if (state->nrels > 1)
+		relidx = result_rel_of(state,
+							   DatumGetObjectId(slot_getattr(slot, state->tableoidcol,
+															 &isnull)));
+	rri = &state->rris[relidx];
+	relid = RelationGetRelid(state->rels[relidx]);
+
+	/* the target's row, as the root has it and as its relation does */
+	target = slot_getattr(slot, state->targetcol, &isnull);
+	if (isnull)
+		elog(ERROR, "a row MERGE matched came without the target's row");
+	td = DatumGetHeapTupleHeader(target);
+	tuple.t_len = HeapTupleHeaderGetDatumLength(td);
+	ItemPointerSetInvalid(&tuple.t_self);
+	tuple.t_tableOid = relid;
+	tuple.t_data = td;
+	ExecClearTuple(state->mrootslot);
+	heap_deform_tuple(&tuple, rootdesc, state->mrootslot->tts_values,
+					  state->mrootslot->tts_isnull);
+	ExecStoreVirtualTuple(state->mrootslot);
+	oldslot = state->mrootslot;
+	if (state->rels[relidx] != state->target)
+		oldslot = state->mmaps[relidx] != NULL
+			? execute_attr_map_slot(state->mmaps[relidx]->attrMap,
+									state->mrootslot, state->moldslots[relidx])
+			: ExecCopySlot(state->moldslots[relidx], state->mrootslot);
+	oldslot->tts_tableOid = relid;
+	econtext->ecxt_scantuple = oldslot;
+
+	actions = state->mactions[relidx * NUM_MERGE_MATCH_KINDS +
+							  (ExecQual(state->mjoins[relidx], econtext)
+							   ? MERGE_WHEN_MATCHED
+							   : MERGE_WHEN_NOT_MATCHED_BY_SOURCE)];
+	foreach_ptr(MergeExec, e, actions)
+	{
+		CmdType		cmd = e->action->commandType;
+		MemoryContext oldcxt;
+
+		if (!ExecQual(e->when, econtext))
+			continue;
+		if (cmd == CMD_NOTHING)
+			break;
+
+		/* the target's row, against the policies' USING of what it does */
+		merge_touch(state, synthetic, relid);
+		if (rri->ri_WithCheckOptions != NIL)
+			ExecWithCheckOptions(cmd == CMD_UPDATE ? WCO_RLS_MERGE_UPDATE_CHECK
+								 : WCO_RLS_MERGE_DELETE_CHECK,
+								 rri, oldslot, estate);
+
+		if (cmd == CMD_DELETE)
+		{
+			int			content;
+			const char **params;
+
+			oldcxt = MemoryContextSwitchTo(state->rowcxt);
+			params = merge_row_params(state, 3, synthetic, target, relid, &content);
+			merge_add(e->shape, content, params);
+			MemoryContextSwitchTo(oldcxt);
+		}
+		else if (cmd == CMD_UPDATE)
+		{
+			TupleTableSlot *newslot = ExecProject(e->proj);
+
+			merge_check_new(state, rri, newslot, CMD_UPDATE);
+			slot_getallattrs(newslot);
+			oldcxt = MemoryContextSwitchTo(state->rowcxt);
+			if (e->moves)
+			{
+				/*
+				 * A Split: the row deleted where it is, and its new version,
+				 * as the root has it, inserted where it hashes.
+				 */
+				TupleTableSlot *rootnew = newslot;
+				ItemPointerData tid;
+				int			content;
+				const char **params = palloc_array(const char *, 3);
+
+				if (!row_identity_find(estate, synthetic, &content, &tid))
+					elog(ERROR, "a row to write was not read from a segment");
+				params[0] = DatumGetCString(DirectFunctionCall1(tidout,
+																ItemPointerGetDatum(&tid)));
+				params[1] = psprintf("%u", relid);
+				params[2] = psprintf(UINT64_FORMAT, state->nsaved);
+				state->batches[content] = lappend(state->batches[content], params);
+				if (state->mtoroot[relidx] != NULL)
+					rootnew = execute_attr_map_slot(state->mtoroot[relidx]->attrMap,
+													newslot, state->minsslot);
+				slot_getallattrs(rootnew);
+				state->mnew[state->nsaved] = heap_form_tuple(rootdesc,
+															 rootnew->tts_values,
+															 rootnew->tts_isnull);
+			}
+			else
+			{
+				int			nset = list_length(e->action->updateColnos);
+				int			content;
+				const char **params = merge_row_params(state, 3 + nset, synthetic,
+													   target, relid, &content);
+				int			j = 0;
+
+				foreach_int(attno, e->action->updateColnos)
+				{
+					params[3 + j] = newslot->tts_isnull[attno - 1] ? NULL
+						: OutputFunctionCall(&e->out[j], newslot->tts_values[attno - 1]);
+					j++;
+				}
+				merge_add(e->shape, content, params);
+			}
+			MemoryContextSwitchTo(oldcxt);
+		}
+		break;
+	}
+}
+
+/*
+ * A row of the source the plan joined to no row of the target: the first
+ * NOT MATCHED action whose WHEN condition holds, as ExecMergeNotMatched()
+ * does it -- the first result relation's, whose INSERT is the root's.
+ */
+static void
+merge_not_matched(ExplicitState *state)
+{
+	ExprContext *econtext = state->css.ss.ps.ps_ExprContext;
+
+	econtext->ecxt_scantuple = NULL;
+	foreach_ptr(MergeExec, e, state->mactions[MERGE_WHEN_NOT_MATCHED_BY_TARGET])
+	{
+		TupleTableSlot *newslot;
+		TupleTableSlot *checked;
+		MemoryContext oldcxt;
+		const char **params;
+		MergeShape *shape = e->shape;
+		int			content;
+
+		if (!ExecQual(e->when, econtext))
+			continue;
+		if (e->action->commandType != CMD_INSERT)
+			break;
+
+		/* checked as the first result relation checks it, its columns its own */
+		newslot = ExecProject(e->proj);
+		slot_getallattrs(newslot);
+		checked = newslot;
+		if (state->mmaps[0] != NULL)
+			checked = execute_attr_map_slot(state->mmaps[0]->attrMap, newslot,
+											state->mnewslots[0]);
+		else if (state->rels[0] != state->target)
+			checked = ExecCopySlot(state->mnewslots[0], newslot);
+		merge_check_new(state, &state->rris[0], checked, CMD_INSERT);
+
+		content = state->hash != NULL
+			? GpHashSegment(state->hash, newslot->tts_values, newslot->tts_isnull)
+			: 0;
+		oldcxt = MemoryContextSwitchTo(state->rowcxt);
+		params = palloc_array(const char *, Max(shape->nvals, 1));
+		for (int i = 0; i < shape->nvals; i++)
+		{
+			AttrNumber	a = shape->attnos[i] - 1;
+
+			params[i] = newslot->tts_isnull[a] ? NULL
+				: OutputFunctionCall(&shape->out[i], newslot->tts_values[a]);
+		}
+		merge_add(shape, content, params);
+		MemoryContextSwitchTo(oldcxt);
+		break;
+	}
+}
+
+/*
+ * MERGE: run the plan to its end, and do for each row what ExecMerge() does,
+ * each action's row to its statement's batch.
+ */
+static void
+explicit_collect_merge(ExplicitState *state)
+{
+	EState	   *estate = state->css.ss.ps.state;
+	ExprContext *econtext = state->css.ss.ps.ps_ExprContext;
+	PlanState  *child = outerPlanState(state);
+
+	for (;;)
+	{
+		TupleTableSlot *slot = ExecProcNode(child);
+		bool		isnull;
+		Datum		ctid;
+
+		if (TupIsNull(slot))
+			break;
+		CHECK_FOR_INTERRUPTS();
+		ResetExprContext(econtext);
+
+		/* a Split's new rows, by the plan's row */
+		if (state->split && state->mnew == NULL)
+		{
+			state->maxsaved = 64;
+			state->mnew = MemoryContextAllocZero(estate->es_query_cxt,
+												 state->maxsaved * sizeof(HeapTuple));
+		}
+		else if (state->split && state->nsaved == state->maxsaved)
+		{
+			state->mnew = repalloc0_array(state->mnew, HeapTuple,
+										  state->maxsaved, state->maxsaved * 2);
+			state->maxsaved *= 2;
+		}
+
+		/* the source's row, as the inner tuple, as MERGE's executor has it */
+		econtext->ecxt_innertuple = slot;
+		econtext->ecxt_outertuple = NULL;
+		ctid = slot_getattr(slot, state->ctidcol, &isnull);
+		if (isnull)
+			merge_not_matched(state);
+		else
+			merge_matched(state, slot, (ItemPointer) DatumGetPointer(ctid));
+		state->nsaved++;
+		ResetPerTupleExprContext(estate);
+	}
+}
+
+/* One statement's rows, each segment's, and a replicated table's once. */
+static uint64
+merge_send_shape(ExplicitState *state, MergeShape *shape)
+{
+	int			nparams = list_length(shape->casts);
+	uint64		total = 0;
+
+	for (int seg = 0; seg < state->nsegs; seg++)
+		if (shape->batches[seg] != NIL)
+			total += explicit_send_statements(seg, shape->batches[seg], nparams,
+											  shape->head, shape->tail,
+											  shape->casts, NULL, NULL);
+	if (shape->everywhere != NIL)
+		for (int seg = 0; seg < Min(state->nsegs, state->numsegments); seg++)
+		{
+			uint64		n = explicit_send_statements(seg, shape->everywhere, nparams,
+													 shape->head, shape->tail,
+													 shape->casts, NULL, NULL);
+
+			if (seg == 0)
+				total += n;
+		}
+	return total;
+}
+
+/*
+ * MERGE's rows: the DELETEs', then each UPDATE's, then the Split's, then the
+ * INSERTs' -- so that a row an INSERT brings does not meet one this MERGE
+ * deletes or moves.  A MERGE's count is of the rows its actions wrote.
+ */
+static void
+explicit_send_merge(ExplicitState *state)
+{
+	EState	   *estate = state->css.ss.ps.state;
+	uint64		total = 0;
+
+	if (state->mdelete != NULL)
+		total += merge_send_shape(state, state->mdelete);
+	foreach_ptr(MergeShape, shape, state->mshapes)
+		total += merge_send_shape(state, shape);
+	if (state->split)
+		total += explicit_send_split(state);
+	if (state->minsert != NULL)
+		total += merge_send_shape(state, state->minsert);
+	if (state->canSetTag)
+		estate->es_processed += total;
 }
 
 /*
@@ -1452,12 +2180,20 @@ explicit_send_split(ExplicitState *state)
 			col++;
 		}
 
-		/* the SET columns' new values, from the plan's row that asked */
-		ExecStoreMinimalTuple(state->saved[n], state->outerslot, false);
-		for (int k = 0; k < state->nvals; k++)
-			values[state->setattnos[k] - 1] =
-				slot_getattr(state->outerslot, state->valcols[k],
-							 &nulls[state->setattnos[k] - 1]);
+		if (state->merge)
+		{
+			/* a MERGE's new row, which its UPDATE action made */
+			heap_deform_tuple(state->mnew[n], targetdesc, values, nulls);
+		}
+		else
+		{
+			/* the SET columns' new values, from the plan's row that asked */
+			ExecStoreMinimalTuple(state->saved[n], state->outerslot, false);
+			for (int k = 0; k < state->nvals; k++)
+				values[state->setattnos[k] - 1] =
+					slot_getattr(state->outerslot, state->valcols[k],
+								 &nulls[state->setattnos[k] - 1]);
+		}
 
 		seg = GpHashSegment(state->hash, values, nulls);
 		if (state->split_calls)
@@ -1878,6 +2614,12 @@ explicit_exec(CustomScanState *node)
 {
 	ExplicitState *state = (ExplicitState *) node;
 
+	if (!state->done && state->merge)
+	{
+		explicit_collect_merge(state);
+		explicit_send_merge(state);
+		state->done = true;
+	}
 	if (!state->done)
 	{
 		explicit_collect(state);
@@ -1925,6 +2667,16 @@ explicit_end(CustomScanState *node)
 	}
 	if (state->outerslot != NULL)
 		ExecDropSingleTupleTableSlot(state->outerslot);
+	if (state->merge)
+	{
+		ExecDropSingleTupleTableSlot(state->mrootslot);
+		ExecDropSingleTupleTableSlot(state->minsslot);
+		for (int i = 0; i < state->nrels; i++)
+		{
+			ExecDropSingleTupleTableSlot(state->moldslots[i]);
+			ExecDropSingleTupleTableSlot(state->mnewslots[i]);
+		}
+	}
 	if (state->target_opened)
 		table_close(state->target, NoLock);
 	for (int i = 0; i < state->nrels; i++)
@@ -1946,6 +2698,36 @@ explicit_explain(CustomScanState *node, List *ancestors, ExplainState *es)
 
 	if (!es->verbose)
 		return;
+
+	/* a MERGE's: each kind of action's statement, in the order they are sent */
+	if (state->merge)
+	{
+		List	   *shapes = list_copy(state->mshapes);
+		int			nupdate = 0;
+
+		if (state->mdelete != NULL)
+			shapes = lcons(state->mdelete, shapes);
+		if (state->minsert != NULL)
+			shapes = lappend(shapes, state->minsert);
+		foreach_ptr(MergeShape, shape, shapes)
+		{
+			initStringInfo(&sql);
+			appendStringInfo(&sql, "%s(", shape->head);
+			foreach(lc, shape->casts)
+				appendStringInfo(&sql, "%s$%d::%s", foreach_current_index(lc) > 0 ? ", " : "",
+								 foreach_current_index(lc) + 1, (char *) lfirst(lc));
+			appendStringInfo(&sql, ")%s", shape->tail);
+			ExplainPropertyText(shape->cmd == CMD_DELETE ? "Remote SQL (DELETE)"
+								: shape->cmd == CMD_INSERT ? "Remote SQL (INSERT)"
+								: psprintf("Remote SQL (UPDATE %d)", ++nupdate),
+								sql.data, es);
+		}
+		if (state->split)
+			ExplainPropertyText("Split", state->split_calls
+								? "gp_internal.split_delete(), gp_internal.split_insert()"
+								: "DELETE and INSERT", es);
+		return;
+	}
 
 	/* the statement a segment is sent, with one row of VALUES */
 	initStringInfo(&sql);

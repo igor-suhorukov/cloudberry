@@ -40,7 +40,7 @@
  * table, change a partitioned table's partitions, run in a WITH query,
  * return rows, change the distribution key -- the coordinator's plan does,
  * and each row it changes is changed on its segment (gp_explicit.c); so is
- * an INSERT with RETURNING.  A row whose key changes is moved by a Split:
+ * an INSERT with RETURNING, ON CONFLICT or check options, and a MERGE.  A row whose key changes is moved by a Split:
  * deleted where it is, inserted where its new key hashes.  WHERE CURRENT OF
  * is written so too: the cursor's gather says where its row is (gp_scan.c).
  *
@@ -998,6 +998,38 @@ refuse_local_write(Plan *plan, PlannedStmt *stmt)
 	}
 }
 
+/*
+ * A MERGE into a distributed table: the target's row, as a junk column the
+ * plan carries up with each row it joins, where an action may read it.
+ * PostgreSQL's MERGE fetches the row by its ctid as it acts; the explicit
+ * write, on the coordinator, has only what the gathers brought
+ * (gp_explicit.c).  A whole-row Var of the target, which for a partition
+ * is its row as the root's.
+ */
+static void
+merge_target_junk(Query *q)
+{
+	RangeTblEntry *rte;
+	bool		reads = false;
+
+	if (q->commandType != CMD_MERGE)
+		return;
+	rte = rt_fetch(q->resultRelation, q->rtable);
+	if (GpScanDistributedPolicy(rte->relid) == NULL)
+		return;
+	foreach_node(MergeAction, action, q->mergeActionList)
+		if (action->matchKind != MERGE_WHEN_NOT_MATCHED_BY_TARGET)
+			reads = true;
+	if (!reads)
+		return;
+
+	q->targetList = lappend(q->targetList,
+							makeTargetEntry((Expr *) makeWholeRowVar(rte, q->resultRelation,
+																	 0, false),
+											list_length(q->targetList) + 1,
+											pstrdup(GP_MERGE_TARGET_JUNK), true));
+}
+
 static PlannedStmt *
 gp_modify_planner(Query *parse, const char *query_string, int cursorOptions,
 				  ParamListInfo boundParams, ExplainState *es)
@@ -1024,6 +1056,7 @@ gp_modify_planner(Query *parse, const char *query_string, int cursorOptions,
 		Query	   *q = castNode(Query, lfirst_node(CommonTableExpr, lc)->ctequery);
 		GpPolicy   *target;
 
+		merge_target_junk(q);
 		if (q->commandType != CMD_INSERT || q->onConflict == NULL)
 			continue;
 		target = GpScanDistributedPolicy(rt_fetch(q->resultRelation, q->rtable)->relid);
@@ -1031,6 +1064,7 @@ gp_modify_planner(Query *parse, const char *query_string, int cursorOptions,
 							target != NULL ? GpExplicitOnConflict(q, target) : NULL);
 	}
 
+	merge_target_junk(parse);
 	stmt = gp_modify_planner_routed(parse, query_string, cursorOptions,
 									boundParams, es);
 
@@ -1205,11 +1239,12 @@ gp_modify_planner_routed(Query *parse, const char *query_string, int cursorOptio
 		return stmt;
 	}
 
+	/*
+	 * MERGE: the plan joins source and target here, and each action is
+	 * written where its row is -- an UPDATE's, a DELETE's, an INSERT's.
+	 */
 	if (mt->operation == CMD_MERGE)
-		ereport(ERROR,
-				(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
-				 errmsg("MERGE into distributed table \"%s\" is not supported yet",
-						get_rel_name(rte->relid))));
+		stmt->planTree = write_explicitly(stmt, mt, NULL);
 
 	return stmt;
 }

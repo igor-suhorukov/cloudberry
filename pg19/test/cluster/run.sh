@@ -745,6 +745,64 @@ mine" ] && ok "a transaction reads its own rows, and a LIMIT leaves the connecti
 	[ "$n1|$out2" = "3|1:11 2:2 4:14 103:13" ] \
 		&& ok "a table's policies under a role not its owner: INSERT, UPDATE, a moved row, DELETE" \
 		|| notok "row-level security" "$n1 / $out2 / $out"
+
+	# MERGE: the plan joins source and target here, the target's row with
+	# it, and each action's row is written where it is (gp_explicit.c).
+	q 0 "CREATE TABLE mt (k int, v int, note text) DISTRIBUTED BY (k); INSERT INTO mt SELECT g, g * 10, 'n' || g FROM generate_series(1, 10) g;" >/dev/null
+	q 0 "CREATE TABLE ms (k int, v int) DISTRIBUTED BY (k); INSERT INTO ms VALUES (1, 1), (2, 2), (3, 3), (11, 11), (12, 12);" >/dev/null
+	out=$(q 0 "MERGE INTO mt t USING ms s ON t.k = s.k WHEN MATCHED AND t.v > 25 THEN DELETE WHEN MATCHED AND s.v = 1 THEN DO NOTHING WHEN MATCHED THEN UPDATE SET v = t.v + s.v, note = t.note || '+' WHEN NOT MATCHED AND s.k = 12 THEN DO NOTHING WHEN NOT MATCHED THEN INSERT (k, v, note) VALUES (s.k, s.v, 'new') WHEN NOT MATCHED BY SOURCE AND t.k > 8 THEN UPDATE SET note = 'orphan' WHEN NOT MATCHED BY SOURCE AND t.k = 4 THEN DELETE;")
+	out2=$(q 0 "SELECT string_agg(k || ':' || v || ':' || note, ' ' ORDER BY k) FROM mt;")
+	[ "$out|$out2" = "|1:10:n1 2:22:n2+ 5:50:n5 6:60:n6 7:70:n7 8:80:n8 9:90:orphan 10:100:orphan 11:11:new" ] \
+		&& ok "MERGE: MATCHED, NOT MATCHED and NOT MATCHED BY SOURCE, each action where its row is, its WHEN over the target's row" \
+		|| notok "MERGE" "$out / $out2"
+	q 0 "INSERT INTO ms VALUES (2, 20);" >/dev/null
+	out=$(q 0 "MERGE INTO mt t USING ms s ON t.k = s.k WHEN MATCHED THEN UPDATE SET v = s.v;")
+	out2=$(q 0 "MERGE INTO mt t USING ms s ON t.k = s.k WHEN MATCHED AND s.v = 20 THEN DO NOTHING WHEN MATCHED THEN UPDATE SET v = s.v; SELECT string_agg(k || ':' || v, ' ' ORDER BY k) FROM mt WHERE k <= 3;")
+	out3=$(q 0 "MERGE INTO mt t USING ms s ON t.k = s.k WHEN MATCHED THEN UPDATE SET v = 0 RETURNING merge_action();")
+	case "$out|$out2|$out3" in
+		*"MERGE command cannot affect row a second time"*"|1:1 2:2|"*"cannot MERGE INTO distributed table \"mt\" this way yet"*)
+			ok "a row an action changes twice is refused, one it passes over is not; RETURNING is refused" ;;
+		*) notok "MERGE's refusals" "$out / $out2 / $out3" ;;
+	esac
+	q 0 "CREATE TABLE mr (k int, v text) DISTRIBUTED REPLICATED; INSERT INTO mr VALUES (1, 'a'), (2, 'b'), (3, 'c'); CREATE VIEW mtv AS SELECT * FROM mt WHERE v < 1000 WITH CHECK OPTION;" >/dev/null
+	out=$(q 0 "MERGE INTO mr t USING (VALUES (1, 'x'), (2, NULL), (4, 'd')) AS s(k, v) ON t.k = s.k WHEN MATCHED AND s.v IS NULL THEN DELETE WHEN MATCHED THEN UPDATE SET v = s.v WHEN NOT MATCHED THEN INSERT VALUES (s.k, s.v);")
+	n1=$(q 1 "SELECT string_agg(k || v, ' ' ORDER BY k) FROM mr;"); n2=$(q 2 "SELECT string_agg(k || v, ' ' ORDER BY k) FROM mr;")
+	out2=$(printf '%s\n' "MERGE INTO mtv t USING (VALUES (5, 5000)) s(k, v) ON t.k = s.k WHEN MATCHED THEN UPDATE SET v = s.v;" \
+		"MERGE INTO mtv t USING (VALUES (50, 5000)) s(k, v) ON t.k = s.k WHEN NOT MATCHED THEN INSERT (k, v) VALUES (s.k, s.v);" | qf 0 | grep -c 'ERROR:  new row violates check option for view "mtv"')
+	[ "$out|$n1|$n2|$out2" = "|1x 3c 4d|1x 3c 4d|2" ] \
+		&& ok "MERGE into a replicated table, every copy alike; through a view WITH CHECK OPTION, its UPDATE and INSERT checked" \
+		|| notok "MERGE into a replicated table, through a view" "$out / $n1 / $n2 / $out2"
+	q 0 "CREATE TABLE mpa (id int, d int, v text) DISTRIBUTED BY (id) PARTITION BY RANGE (d) (START (0) END (30) EVERY (10)); INSERT INTO mpa SELECT g, g, 'v' || g FROM generate_series(1, 25) g;" >/dev/null
+	out=$(q 0 "MERGE INTO mpa t USING (VALUES (5, 'five'), (15, 'fifteen'), (27, 'new')) s(id, v) ON t.id = s.id WHEN MATCHED AND t.id = 5 THEN UPDATE SET d = 22, v = s.v WHEN MATCHED THEN UPDATE SET id = t.id + 100, v = s.v WHEN NOT MATCHED THEN INSERT VALUES (s.id, 27, s.v);")
+	out2=$(q 0 "SELECT string_agg(id || ':' || d || ':' || v || ':' || tableoid::regclass, ' ' ORDER BY id) FROM mpa WHERE id IN (5, 15, 27, 115);")
+	w1=$(q 1 "SELECT count(*) FROM mpa WHERE expected_seg(id, 2) <> 0;"); w2=$(q 2 "SELECT count(*) FROM mpa WHERE expected_seg(id, 2) <> 1;")
+	[ "$out|$out2|$w1|$w2" = "|5:22:five:mpa_1_prt_3 27:27:new:mpa_1_prt_3 115:15:fifteen:mpa_1_prt_2|0|0" ] \
+		&& ok "MERGE into a partitioned table: a row moved between partitions, one between segments, one routed" \
+		|| notok "MERGE into a partitioned table" "$out / $out2 / misplaced $w1 $w2"
+	q 0 "CREATE TABLE mpol (k int, v int, owner text) DISTRIBUTED BY (k); INSERT INTO mpol VALUES (1, 1, 'rls_w'), (2, 2, 'other'); GRANT SELECT, INSERT, UPDATE ON mpol TO rls_w; ALTER TABLE mpol ENABLE ROW LEVEL SECURITY; CREATE POLICY mpol_s ON mpol FOR SELECT USING (true); CREATE POLICY mpol_u ON mpol FOR UPDATE USING (owner = current_user) WITH CHECK (v < 100); CREATE POLICY mpol_i ON mpol FOR INSERT WITH CHECK (owner = current_user);" >/dev/null
+	out=$(printf '%s\n' "SET ROLE rls_w;" \
+		"MERGE INTO mpol t USING (VALUES (1, 10)) s(k, v) ON t.k = s.k WHEN MATCHED THEN UPDATE SET v = s.v;" \
+		"MERGE INTO mpol t USING (VALUES (2, 20)) s(k, v) ON t.k = s.k WHEN MATCHED THEN UPDATE SET v = s.v;" \
+		"MERGE INTO mpol t USING (VALUES (1, 500)) s(k, v) ON t.k = s.k WHEN MATCHED THEN UPDATE SET v = s.v;" \
+		"MERGE INTO mpol t USING (VALUES (3, 3)) s(k, v) ON t.k = s.k WHEN NOT MATCHED THEN INSERT VALUES (s.k, s.v, 'other');" \
+		"MERGE INTO mpol t USING (VALUES (3, 3)) s(k, v) ON t.k = s.k WHEN NOT MATCHED THEN INSERT VALUES (s.k, s.v, 'rls_w');" | qf 0)
+	n1=$(printf '%s\n' "$out" | grep -c 'ERROR:  target row violates row-level security policy (USING expression) for table "mpol"')
+	n2=$(printf '%s\n' "$out" | grep -c 'ERROR:  new row violates row-level security policy for table "mpol"')
+	out2=$(q 0 "SELECT string_agg(k || ':' || v || ':' || owner, ' ' ORDER BY k) FROM mpol;")
+	[ "$n1|$n2|$out2" = "1|2|1:10:rls_w 2:2:other 3:3:rls_w" ] \
+		&& ok "MERGE under a table's policies: the target's row against the UPDATE's USING, the new rows against WITH CHECK" \
+		|| notok "MERGE and row-level security" "$n1 $n2 / $out2 / $out"
+	# A write in a WITH query runs to its end, whether or not the query reads
+	# what it returns, as PostgreSQL runs one.
+	q 0 "CREATE TABLE cw (k int, v int) DISTRIBUTED BY (k); INSERT INTO cw SELECT g, g FROM generate_series(1, 6) g;" >/dev/null
+	out=$(printf '%s\n' "WITH u AS (UPDATE cw SET v = -v WHERE k <= 2) SELECT 1;" \
+		"WITH d AS (DELETE FROM cw WHERE k = 3) SELECT 2;" "WITH i AS (INSERT INTO cw VALUES (11, 11)) SELECT 3;" \
+		"WITH m AS (MERGE INTO cw t USING (VALUES (4, 44), (12, 12)) s(k, v) ON t.k = s.k WHEN MATCHED THEN UPDATE SET v = s.v WHEN NOT MATCHED THEN INSERT VALUES (s.k, s.v)) SELECT 4;" \
+		"WITH u AS (UPDATE cw SET v = v + 1000 WHERE k = 5 RETURNING k) SELECT 5 FROM u LIMIT 0;" \
+		"SELECT string_agg(k || ':' || v, ' ' ORDER BY k) FROM cw;" | qf 0 | tr '\n' ' ')
+	[ "$out" = "1 2 3 4 1:-1 2:-2 4:44 5:1005 6:6 11:11 12:12 " ] \
+		&& ok "a write in a WITH query the query does not read runs to its end: UPDATE, DELETE, INSERT, MERGE" \
+		|| notok "unread writes in WITH queries" "$out"
 	out=$(printf '%s\n' "BEGIN;" \
 		"DELETE FROM d USING d2 WHERE d.a = d2.v * 10 AND d2.v > 4 RETURNING d.a, d2.v;" "ROLLBACK;" | qf 0 | sort -u | tr '\n' ' ')
 	[ "$out" = "50|5 60|6 " ] && ok "a DELETE that joins another distributed table, its RETURNING reading both" \
@@ -1434,6 +1492,16 @@ COMMIT;"
 		*"gp_internal.split_delete() moves rows only for the coordinator"*) ok "... and a segment moves rows so only for the coordinator" ;;
 		*) notok "split_delete() called directly" "$out" ;;
 	esac
+	# ... and MERGE's, as Cloudberry's SplitMerge: a row an UPDATE action
+	# moves fires nothing, a MATCHED DELETE and a NOT MATCHED INSERT fire
+	# their triggers.
+	out=$(printf '%s\n' "SET gp.optimizer = off;" \
+		"MERGE INTO wtn t USING (VALUES (11, 'x'), (12, NULL), (300, 'y')) s(a, b) ON t.a = s.a WHEN MATCHED AND s.b IS NULL THEN DELETE WHEN MATCHED THEN UPDATE SET a = t.a + 1000, b = s.b WHEN NOT MATCHED THEN INSERT VALUES (s.a, s.b);" | qf 0)
+	n=$(printf '%s\n' "$out" | grep -c 'NOTICE:  fired')
+	out2=$(q 0 "SELECT count(*), sum(a), sum(c) FROM wtn;")
+	[ "$n|$out2|$(placed wtn)" = "2|19|2397|4794|0|0" ] \
+		&& ok "MERGE's Split fires no trigger; its DELETE and INSERT fire theirs; each row where it hashes" \
+		|| notok "MERGE's Split and triggers" "$n / $out2 / misplaced $(placed wtn) / $out"
 
 	# A partial table is the planner's, as Cloudberry's ORCA leaves one.
 	out=$(printf '%s\n' "SET gp.optimizer_trace_fallback = on;" \
