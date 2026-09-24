@@ -1873,6 +1873,20 @@ is "a view of it keeps working" \
    "CREATE VIEW gdr_v AS SELECT gp_segment_id, a FROM gp_dist_random('gdr');
     SELECT count(*), min(gp_segment_id) FROM gdr_v;" "2|-1"
 
+# A view prints it as Cloudberry's does (O31): the call as it was written,
+# the name qualified where the search path does not find it, and an alias
+# only where one was written.
+is "a view prints it back as gp_dist_random('t')" \
+   "SELECT regexp_replace(pg_get_viewdef('gdr_v'), '\\s+', ' ', 'g');" \
+   " SELECT gp_segment_id, a FROM gp_dist_random('gdr');"
+is "with its alias, and a qualified name" \
+   "CREATE VIEW gdr_v2 AS SELECT x.a, y.a AS b FROM gp_dist_random('gdr') x, gp_dist_random('\"Gdr S\".\"T x\"') y;
+    SELECT regexp_replace(pg_get_viewdef('gdr_v2'), '\\s+', ' ', 'g');" \
+   " SELECT x.a, y.a AS b FROM gp_dist_random('gdr') x, gp_dist_random('\"Gdr S\".\"T x\"') y;"
+def=$(q "SELECT pg_get_viewdef('gdr_v2');" | tr '\n' ' ' | sed 's/;[[:space:]]*$//')
+is "and what it prints makes the view again" \
+   "CREATE VIEW gdr_v3 AS $def; SELECT count(*), sum(b) FROM gdr_v3;" "2|14"
+
 echo
 echo "  $pass passed, $fail failed"
 [ "$fail" -eq 0 ]

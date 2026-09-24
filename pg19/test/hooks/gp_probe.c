@@ -85,13 +85,14 @@ typedef enum ProbeEvent
 	EV_COLUMNREF,
 	EV_DEPARSE_COLUMN,
 	EV_QUERY_LOCKMODE,
+	EV_DEPARSE_RANGE,
 	EV_COUNT
 } ProbeEvent;
 
 static const char *const event_name[EV_COUNT] = {
 	"new_oid", "combocid_create", "combocid_miss", "analyze_sample",
 	"explain_label", "mdunlink", "raw_parser", "star_filter",
-	"columnref", "deparse_column", "query_lockmode",
+	"columnref", "deparse_column", "query_lockmode", "deparse_range",
 };
 
 static int64 calls[EV_COUNT];
@@ -130,6 +131,10 @@ static Bitmapset *arm_star_cols = NULL;
 
 static char *arm_column_name = NULL;	/* O10: this name, where no column */
 static Oid	arm_column_func = InvalidOid;	/* has it, is this function's call */
+
+static Oid	arm_range_func = InvalidOid;	/* O31: this function in FROM */
+static char *arm_range_text = NULL;	/* prints as this */
+static bool arm_range_alias = false;	/* and its alias after it */
 
 /* O30: this relation, when it is written or locked by a clause, in this mode */
 static Oid	arm_lockmode_rel = InvalidOid;
@@ -492,6 +497,26 @@ probe_deparse_as_column(FuncExpr *expr)
 }
 
 /* ------------------------------------------------------------------------- */
+/* O31: deparse_range_function_hook                                          */
+/* ------------------------------------------------------------------------- */
+
+/* The armed function in FROM prints as the armed text. */
+static const char *
+probe_deparse_range(RangeTblEntry *rte, const char *refname, bool *print_alias)
+{
+	RangeTblFunction *rtfunc = linitial_node(RangeTblFunction, rte->functions);
+
+	if (!OidIsValid(arm_range_func) || !IsA(rtfunc->funcexpr, FuncExpr) ||
+		((FuncExpr *) rtfunc->funcexpr)->funcid != arm_range_func)
+		return NULL;
+	record(EV_DEPARSE_RANGE, "call of %u as \"%s\", %d function, refname %s",
+		   arm_range_func, arm_range_text, list_length(rte->functions),
+		   refname);
+	*print_alias = arm_range_alias;
+	return arm_range_text;
+}
+
+/* ------------------------------------------------------------------------- */
 /* SQL interface                                                             */
 /* ------------------------------------------------------------------------- */
 
@@ -502,6 +527,7 @@ PG_FUNCTION_INFO_V1(gp_probe_arm_new_oid);
 PG_FUNCTION_INFO_V1(gp_probe_arm_analyze);
 PG_FUNCTION_INFO_V1(gp_probe_arm_star_filter);
 PG_FUNCTION_INFO_V1(gp_probe_arm_column);
+PG_FUNCTION_INFO_V1(gp_probe_arm_range);
 PG_FUNCTION_INFO_V1(gp_probe_arm_lockmode);
 PG_FUNCTION_INFO_V1(gp_probe_arm_parser);
 PG_FUNCTION_INFO_V1(gp_probe_arm_explain);
@@ -537,6 +563,11 @@ gp_probe_reset(PG_FUNCTION_ARGS)
 		pfree(arm_column_name);
 	arm_column_name = NULL;
 	arm_column_func = InvalidOid;
+	if (arm_range_text)
+		pfree(arm_range_text);
+	arm_range_text = NULL;
+	arm_range_func = InvalidOid;
+	arm_range_alias = false;
 	arm_parser = arm_explain = arm_mdunlink = arm_combocid = false;
 	memset(published_combocid, 0, sizeof(published_combocid));
 	PG_RETURN_VOID();
@@ -641,6 +672,18 @@ gp_probe_arm_column(PG_FUNCTION_ARGS)
 	arm_column_name = MemoryContextStrdup(TopMemoryContext,
 										  text_to_cstring(PG_GETARG_TEXT_PP(0)));
 	arm_column_func = PG_GETARG_OID(1);
+	PG_RETURN_VOID();
+}
+
+Datum
+gp_probe_arm_range(PG_FUNCTION_ARGS)
+{
+	arm_range_func = PG_GETARG_OID(0);
+	if (arm_range_text)
+		pfree(arm_range_text);
+	arm_range_text = MemoryContextStrdup(TopMemoryContext,
+										 text_to_cstring(PG_GETARG_TEXT_PP(1)));
+	arm_range_alias = PG_GETARG_BOOL(2);
 	PG_RETURN_VOID();
 }
 
@@ -942,6 +985,7 @@ _PG_init(void)
 	columnref_fallback_hook = probe_columnref_fallback;
 	deparse_function_as_column_hook = probe_deparse_as_column;
 	query_lockmode_hook = probe_query_lockmode;
+	deparse_range_function_hook = probe_deparse_range;
 
 	prev_planner_hook = planner_hook;
 	planner_hook = probe_planner;

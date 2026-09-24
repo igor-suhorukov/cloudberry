@@ -448,6 +448,33 @@ is "and not for one it writes" o30 weaker_write RowExclusiveLock
 fired "query_lockmode_hook is called" o30 query_lockmode
 
 ###############################################################################
+echo "O31 deparse_range_function_hook: a function in FROM printed as what made it"
+###############################################################################
+# The armed function in FROM prints as the armed text, with no column
+# definition list, and its alias only where the hook asks for it: what
+# gp_core does with gp.dist_random(NULL::t), made of gp_dist_random('t').
+session o31 <<'SQL'
+SELECT gp_probe.reset();
+CREATE FUNCTION o31_f(int) RETURNS SETOF record LANGUAGE sql AS 'SELECT $1, $1 * 2';
+CREATE VIEW o31_v AS SELECT * FROM o31_f(3) AS s(a int, b int);
+CREATE VIEW o31_other AS SELECT * FROM generate_series(1, 3) g;
+SELECT gp_probe.arm_range('o31_f(int)'::regprocedure, 'PROBED(3)', false);
+SELECT 'viewdef=' || regexp_replace(pg_get_viewdef('o31_v'), '\s+', ' ', 'g');
+SELECT 'calls_deparse_range=' || gp_probe.calls('deparse_range');
+SELECT 'detail_deparse_range=' || gp_probe.detail('deparse_range');
+SELECT gp_probe.arm_range('o31_f(int)'::regprocedure, 'PROBED(3)', true);
+SELECT 'viewdef_alias=' || regexp_replace(pg_get_viewdef('o31_v'), '\s+', ' ', 'g');
+SELECT 'other=' || regexp_replace(pg_get_viewdef('o31_other'), '\s+', ' ', 'g');
+SELECT gp_probe.reset();
+SELECT 'viewdef_unarmed=' || regexp_replace(pg_get_viewdef('o31_v'), '\s+', ' ', 'g');
+SQL
+is "a view prints the call as the hook's text, with no column definitions" o31 viewdef ' SELECT a, b FROM PROBED(3);'
+fired "deparse_range_function_hook is called for the call" o31 deparse_range
+is "and its alias after it where the hook asks for it" o31 viewdef_alias ' SELECT a, b FROM PROBED(3) s;'
+is "another function prints as it did" o31 other ' SELECT g FROM generate_series(1, 3) g(g);'
+is "unarmed, the call and its column definitions print as they did" o31 viewdef_unarmed ' SELECT a, b FROM o31_f(3) s(a integer, b integer);'
+
+###############################################################################
 echo "R3  SyncRepHoldCancelDuringWait: the flag is an extension's to set"
 ###############################################################################
 session r3 <<'SQL'

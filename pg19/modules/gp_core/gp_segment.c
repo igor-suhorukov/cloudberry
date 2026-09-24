@@ -53,6 +53,8 @@
  * every segment, each copy with its segment: a reference to gp_segment_id
  * of it turns the call into gp_internal.dist_random_segments(NULL::t), which
  * returns the rows with their segment as one more column, left out of "*".
+ * Either is printed back as gp_dist_random('t'), the call it was made of and
+ * Cloudberry's, through deparse_range_function_hook (O31).
  *
  * pg_catalog.pg_locks has Cloudberry's three columns the same way, where
  * PostgreSQL 19's view has none of them: gp_segment_id, segment_of() of its
@@ -133,6 +135,7 @@
 static columnref_fallback_hook_type prev_columnref_fallback_hook = NULL;
 static post_parse_analyze_hook_type prev_post_parse_analyze_hook = NULL;
 static deparse_function_as_column_hook_type prev_deparse_function_as_column_hook = NULL;
+static deparse_range_function_hook_type prev_deparse_range_function_hook = NULL;
 static object_access_hook_type prev_object_access_hook = NULL;
 
 /* ------------------------------------------------------------------------- */
@@ -636,6 +639,49 @@ gp_deparse_function_as_column(FuncExpr *expr)
 	return NULL;
 }
 
+/*
+ * gp.dist_random(NULL::t), or dist_random_segments() in its place, printed as
+ * the gp_dist_random('t') O26 makes it of (gp_sql's gp_desugar.c), which
+ * Cloudberry prints: the relation's name qualified where the search path
+ * does not find it, and no column definition list, which the parser makes
+ * again.  Its alias is printed where it is not the relation's name, which
+ * O26 gives it where none was written.  (O31)
+ */
+static const char *
+gp_deparse_range_function(RangeTblEntry *rte, const char *refname,
+						  bool *print_alias)
+{
+	RangeTblFunction *rtfunc = linitial_node(RangeTblFunction, rte->functions);
+	FuncExpr   *fexpr = (FuncExpr *) rtfunc->funcexpr;
+	Oid			relid = InvalidOid;
+	char	   *relname = NULL;
+
+	lookup_func_oids();
+	if (IsA(fexpr, FuncExpr) && list_length(fexpr->args) == 1 &&
+		((OidIsValid(dist_random_oid) && fexpr->funcid == dist_random_oid) ||
+		 (OidIsValid(dist_random_segments_oid) &&
+		  fexpr->funcid == dist_random_segments_oid)) &&
+		IsA(linitial(fexpr->args), Const) &&
+		((Const *) linitial(fexpr->args))->constisnull)
+	{
+		relid = get_typ_typrelid(((Const *) linitial(fexpr->args))->consttype);
+		relname = OidIsValid(relid) ? get_rel_name(relid) : NULL;
+	}
+
+	if (relname != NULL)
+	{
+		const char *name = RelationIsVisible(relid) ? quote_identifier(relname)
+			: quote_qualified_identifier(get_namespace_name(get_rel_namespace(relid)),
+										 relname);
+
+		*print_alias = strcmp(refname, relname) != 0;
+		return psprintf("gp_dist_random(%s)", quote_literal_cstr(name));
+	}
+	if (prev_deparse_range_function_hook)
+		return prev_deparse_range_function_hook(rte, refname, print_alias);
+	return NULL;
+}
+
 /* ------------------------------------------------------------------------- */
 /* The value                                                                 */
 /* ------------------------------------------------------------------------- */
@@ -930,6 +976,8 @@ GpSegmentInit(void)
 	columnref_fallback_hook = gp_columnref_fallback;
 	prev_deparse_function_as_column_hook = deparse_function_as_column_hook;
 	deparse_function_as_column_hook = gp_deparse_function_as_column;
+	prev_deparse_range_function_hook = deparse_range_function_hook;
+	deparse_range_function_hook = gp_deparse_range_function;
 	prev_post_parse_analyze_hook = post_parse_analyze_hook;
 	post_parse_analyze_hook = gp_post_parse_analyze;
 	prev_object_access_hook = object_access_hook;
