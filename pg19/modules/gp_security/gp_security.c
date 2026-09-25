@@ -20,18 +20,20 @@
  * gp_security.c
  *	  Password profiles, account locking and login windows.
  *
- * Cloudberry has two shared catalogs and seven pg_authid columns for this,
+ * Cloudberry has three shared catalogs and seven pg_authid columns for this,
  * and a pair of postmaster children to write them.  Here a profile is a
  * NOLOGIN role carrying a shared "gp_profile" label (profile.c), the state of
  * an account is shared memory with a "gp" label as its durable copy
- * (login.c), and what a new password must satisfy is checked in
- * check_password_hook (password.c).  A background worker stands in for the
- * login monitor, for the reason Cloudberry has one: a backend whose login
- * just failed cannot commit anything.
+ * (login.c), what a new password must satisfy is checked in
+ * check_password_hook (password.c), and when a role may not log in -- its
+ * DENY windows, Cloudberry's pg_auth_time_constraint -- is a key of its "gp"
+ * label (deny.c).  A background worker stands in for the login monitor, for
+ * the reason Cloudberry has one: a backend whose login just failed cannot
+ * commit anything.
  *
  * Cloudberry sources this module is made of:
  *	  src/backend/commands/pg_profile.c, postmaster/loginmonitor.c,
- *	  and the profile code of user.c, auth.c and postinit.c
+ *	  and the profile and DENY code of user.c, auth.c and postinit.c
  *
  *-------------------------------------------------------------------------
  */
@@ -41,11 +43,13 @@
 #include "catalog/objectaddress.h"
 #include "catalog/pg_authid.h"
 #include "fmgr.h"
+#include "nodes/miscnodes.h"
 #include "nodes/value.h"
 #include "miscadmin.h"
 #include "tcop/utility.h"
 #include "utils/acl.h"
 #include "utils/builtins.h"
+#include "utils/fmgrprotos.h"
 #include "utils/guc.h"
 #include "utils/lsyscache.h"
 #include "utils/timestamp.h"
@@ -63,6 +67,7 @@ PG_MODULE_MAGIC_EXT(
 
 bool		gp_enable_password_profile = false;
 char	   *gp_security_database = NULL;
+char	   *gp_auth_time_override = NULL;
 
 static ProcessUtility_hook_type prev_ProcessUtility = NULL;
 
@@ -140,11 +145,13 @@ security_lock_role(Oid roleid, bool lock)
 }
 
 /*
- * What O26 carried to an ALTER USER for this module (gp_desugar.c,
+ * What O26 carried to a CREATE or ALTER ROLE for this module (gp_desugar.c,
  * GpAttachCarriers): Cloudberry's role options PROFILE p and ACCOUNT LOCK and
- * UNLOCK, and the port's NOPROFILE, as DefElems in the "gp" namespace --
- * gp.profile = 'p' or DEFAULT, gp.account = 'lock' or 'unlock'.  PostgreSQL's
- * grammar never puts a namespace on a role option, so these are all ours.
+ * UNLOCK, the port's NOPROFILE, and DENY and DROP DENY, as DefElems in the
+ * "gp" namespace -- gp.profile = 'p' or DEFAULT, gp.account = 'lock' or
+ * 'unlock', gp.deny and gp.drop_deny = a clause's points (deny.c).
+ * PostgreSQL's grammar never puts a namespace on a role option, so these are
+ * all ours.
  */
 static bool
 is_role_carrier(DefElem *def)
@@ -204,6 +211,9 @@ apply_role_carriers(Oid roleid, List *carried)
 			security_assign_profile(roleid, value);
 		else if (strcmp(def->defname, "account") == 0)
 			security_lock_role(roleid, value != NULL && strcmp(value, "lock") == 0);
+		else if (strcmp(def->defname, "deny") == 0 ||
+				 strcmp(def->defname, "drop_deny") == 0)
+			continue;			/* GpDenyApply()'s */
 		else
 			elog(ERROR, "gp_security: unrecognized role option \"%s\"", def->defname);
 	}
@@ -212,6 +222,9 @@ apply_role_carriers(Oid roleid, List *carried)
 /*
  * A password is checked before the statement runs and remembered after it, so
  * that what goes into the history is the verifier that was really stored.
+ * What a CREATE or ALTER ROLE carries is checked before it runs, too, and
+ * done after it, when the role is there to do it to; and after every ALTER
+ * ROLE, a superuser's DENY windows go (GpDenyApply).
  */
 static void
 gp_security_ProcessUtility(PlannedStmt *pstmt, const char *queryString,
@@ -219,8 +232,11 @@ gp_security_ProcessUtility(PlannedStmt *pstmt, const char *queryString,
 						   ParamListInfo params, QueryEnvironment *queryEnv,
 						   DestReceiver *dest, QueryCompletion *qc)
 {
+	Node	   *parsetree = pstmt->utilityStmt;
 	char	   *rolename = NULL;
 	List	   *carried = NIL;
+	List	   *deny_add = NIL;
+	List	   *deny_drop = NIL;
 	Oid			roleid = InvalidOid;
 
 	/*
@@ -239,10 +255,11 @@ gp_security_ProcessUtility(PlannedStmt *pstmt, const char *queryString,
 		return;
 	}
 
-	if (IsA(pstmt->utilityStmt, AlterRoleStmt) &&
-		has_role_carriers(((AlterRoleStmt *) pstmt->utilityStmt)->options))
+	if ((IsA(parsetree, AlterRoleStmt) &&
+		 has_role_carriers(((AlterRoleStmt *) parsetree)->options)) ||
+		(IsA(parsetree, CreateRoleStmt) &&
+		 has_role_carriers(((CreateRoleStmt *) parsetree)->options)))
 	{
-		AlterRoleStmt *stmt;
 		ListCell   *lc;
 
 		/* A read-only tree belongs to a cached plan that may be run again. */
@@ -250,12 +267,18 @@ gp_security_ProcessUtility(PlannedStmt *pstmt, const char *queryString,
 		{
 			pstmt = copyObject(pstmt);
 			readOnlyTree = false;
+			parsetree = pstmt->utilityStmt;
 		}
-		stmt = (AlterRoleStmt *) pstmt->utilityStmt;
-		carried = take_role_carriers(&stmt->options);
+		if (IsA(parsetree, AlterRoleStmt))
+		{
+			AlterRoleStmt *stmt = (AlterRoleStmt *) parsetree;
 
-		roleid = get_rolespec_oid(stmt->role, false);
-		security_check_role(roleid);
+			carried = take_role_carriers(&stmt->options);
+			roleid = get_rolespec_oid(stmt->role, false);
+			security_check_role(roleid);
+		}
+		else
+			carried = take_role_carriers(&((CreateRoleStmt *) parsetree)->options);
 
 		/* a profile that is not one is refused before anything is done */
 		foreach(lc, carried)
@@ -272,10 +295,13 @@ gp_security_ProcessUtility(PlannedStmt *pstmt, const char *queryString,
 							 errmsg("profile \"%s\" does not exist", strVal(def->arg))));
 			}
 		}
+
+		/* and DENY and DROP DENY, as Cloudberry reads the clauses */
+		GpDenyCheck(parsetree, roleid, carried, &deny_add, &deny_drop);
 	}
 
 	if (gp_enable_password_profile)
-		rolename = GpPasswordRoleOfStmt(pstmt->utilityStmt);
+		rolename = GpPasswordRoleOfStmt(parsetree);
 
 	if (prev_ProcessUtility)
 		prev_ProcessUtility(pstmt, queryString, readOnlyTree, context,
@@ -284,10 +310,26 @@ gp_security_ProcessUtility(PlannedStmt *pstmt, const char *queryString,
 		standard_ProcessUtility(pstmt, queryString, readOnlyTree, context,
 								params, queryEnv, dest, qc);
 
-	if (carried != NIL)
+	if (IsA(parsetree, CreateRoleStmt) && carried != NIL)
+	{
+		const char *created = ((CreateRoleStmt *) parsetree)->role;
+
+		CommandCounterIncrement();
+		roleid = get_role_oid(created, false);
+		apply_role_carriers(roleid, carried);
+		if (deny_add != NIL)
+			GpDenyApply(roleid, created, true, deny_add, NIL);
+	}
+	else if (IsA(parsetree, AlterRoleStmt))
 	{
 		CommandCounterIncrement();
-		apply_role_carriers(roleid, carried);
+		if (!OidIsValid(roleid))
+			roleid = get_rolespec_oid(((AlterRoleStmt *) parsetree)->role, true);
+		if (carried != NIL)
+			apply_role_carriers(roleid, carried);
+		if (OidIsValid(roleid))
+			GpDenyApply(roleid, GetUserNameFromId(roleid, false), false,
+						deny_add, deny_drop);
 	}
 
 	if (rolename != NULL)
@@ -393,6 +435,24 @@ gp_security_role_failed_logins(PG_FUNCTION_ARGS)
 	PG_RETURN_INT32(st.failed_logins);
 }
 
+/* gp.auth_time_override: a time, or empty */
+static bool
+check_auth_time_override(char **newval, void **extra, GucSource source)
+{
+	ErrorSaveContext escontext = {T_ErrorSaveContext};
+	Datum		result;
+
+	if (*newval == NULL || (*newval)[0] == '\0')
+		return true;
+	if (!DirectInputFunctionCallSafe(timestamptz_in, *newval, InvalidOid, -1,
+									 (Node *) &escontext, &result))
+	{
+		GUC_check_errdetail("It is not a timestamp with time zone.");
+		return false;
+	}
+	return true;
+}
+
 /* ------------------------------------------------------------------------- */
 
 void
@@ -428,6 +488,16 @@ _PG_init(void)
 							   PGC_POSTMASTER,
 							   0,
 							   NULL, NULL, NULL);
+
+	DefineCustomStringVariable("gp.auth_time_override",
+							   "The time a login's DENY windows are checked against, in place of the clock's.",
+							   "For testing; empty, the clock's.  Cloudberry calls this "
+							   "gp_auth_time_override.",
+							   &gp_auth_time_override,
+							   "",
+							   PGC_SIGHUP,
+							   GUC_NOT_IN_SAMPLE,
+							   check_auth_time_override, NULL, NULL);
 
 	GpProfileRegisterProvider();
 	GpLoginInstallHook();

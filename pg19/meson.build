@@ -429,7 +429,8 @@ modules = [
     'sources': files('modules/gp_security/gp_security.c',
                      'modules/gp_security/profile.c',
                      'modules/gp_security/login.c',
-                     'modules/gp_security/password.c'),
+                     'modules/gp_security/password.c',
+                     'modules/gp_security/deny.c'),
   },
   {
     # Preloaded: a background worker can only be registered while libraries
@@ -641,6 +642,19 @@ if get_option('hook_tests')
     install_dir: pg_extensiondir,
   )
   built_modules += 'gp_probe (test only)'
+
+  # The functions of Cloudberry's regress.so that its tests load and the
+  # port serves: the greenplum suite links it into the directory the tests
+  # load regress.so from.
+  shared_module('cb_regress', files('test/greenplum/cb_regress.c'),
+    c_args: mod_c_args,
+    link_args: mod_link_args,
+    include_directories: [pg_inc, cb_inc],
+    name_prefix: '',
+    install: true,
+    install_dir: pg_pkglibdir,
+  )
+  built_modules += 'cb_regress (test only)'
 
   # A storage handler for the storage and cluster suites: a directory stands
   # for the store, and credentials a user mapping gives are asked for.

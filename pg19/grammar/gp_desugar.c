@@ -114,7 +114,7 @@ static const char *const gp_trigger_words[] = {
 	"account", "execute", "decode", "subpartition", "gp_dist_random",
 	"orientation", "encoding",
 	"reorganize", "external", "reject", "protocol",
-	"createexttable", "nocreateexttable", "newline", "resource",
+	"createexttable", "nocreateexttable", "newline", "resource", "deny",
 	NULL
 };
 
@@ -3938,6 +3938,118 @@ rw_role_resource(GpRewrite *rw)
 	return did;
 }
 
+/*
+ * One point of a DENY clause at token k, DAY d [TIME 't'], appended to buf as
+ * JSON: {"day": 2} or {"day": "Tuesday"}, and "time" when one was given.
+ * Which of the two a day was written as matters -- DAY 2 is Tuesday, DAY '2'
+ * no weekday -- so it is kept.  Returns the token after the point.
+ */
+static int
+rw_deny_point(GpRewrite *rw, int k, StringInfo buf)
+{
+	const GpTokens *ts = rw->ts;
+
+	if (!tok_is(ts, k, "day"))
+		rw_syntax_error(rw, k);
+	k++;
+	appendStringInfoString(buf, "{\"day\": ");
+	if (tok_is_string(ts, k))
+		escape_json(buf, ts->toks[k].str);
+	else if (k < rw->last && ts->toks[k].code == GP_ICONST)
+		appendStringInfo(buf, "%d", ts->toks[k].ival);
+	else
+		rw_syntax_error(rw, k);
+	k++;
+	if (tok_is(ts, k, "time"))
+	{
+		if (!tok_is_string(ts, k + 1))
+			rw_syntax_error(rw, k + 1);
+		appendStringInfoString(buf, ", \"time\": ");
+		escape_json(buf, ts->toks[k + 1].str);
+		k += 2;
+	}
+	appendStringInfoChar(buf, '}');
+	return k;
+}
+
+/*
+ * CREATE ROLE ... DENY BETWEEN DAY d [TIME 't'] AND DAY d [TIME 't']
+ * CREATE ROLE ... DENY DAY d [TIME 't']
+ * ALTER ROLE ... DROP DENY FOR DAY d [TIME 't'], and USER and GROUP alike
+ *	 -> the statement, carrying gp.deny = '[point, point]' or '[point]', or
+ *		gp.drop_deny = '[point]'
+ *
+ * The times a role may not log in, which Cloudberry's pg_auth_time_constraint
+ * keeps and gp_security keeps in the role's label (deny.c).  The clauses come
+ * among the statement's other options, as many as it has, each going to the
+ * parse node in the order it was written, where gp_security's hook takes them
+ * out again.  DROP DENY is ALTER's only, as in Cloudberry's grammar.  A DENY
+ * not followed by DAY or BETWEEN is not one of these -- a role may be called
+ * deny -- and is left to PostgreSQL's grammar.
+ */
+static bool
+rw_role_deny(GpRewrite *rw)
+{
+	const GpTokens *ts = rw->ts;
+	int			i = rw->first;
+	bool		altering;
+	bool		did = false;
+
+	if (tok_is(ts, i, "create"))
+		altering = false;
+	else if (tok_is(ts, i, "alter"))
+		altering = true;
+	else
+		return false;
+	if (!(tok_is(ts, i + 1, "role") || tok_is(ts, i + 1, "user") ||
+		  tok_is(ts, i + 1, "group")) ||
+		!tok_is_name(ts, i + 2))
+		return false;
+
+	for (int j = i + 3; j < rw->last; j++)
+	{
+		StringInfoData value;
+		bool		drop;
+		int			k;
+
+		if (altering && tok_is(ts, j, "drop") && tok_is(ts, j + 1, "deny") &&
+			tok_is(ts, j + 2, "for") && tok_is(ts, j + 3, "day"))
+		{
+			drop = true;
+			k = j + 3;
+		}
+		else if (tok_is(ts, j, "deny") &&
+				 (tok_is(ts, j + 1, "day") || tok_is(ts, j + 1, "between")))
+		{
+			drop = false;
+			k = j + 1;
+		}
+		else
+			continue;
+
+		initStringInfo(&value);
+		appendStringInfoChar(&value, '[');
+		if (!drop && tok_is(ts, k, "between"))
+		{
+			k = rw_deny_point(rw, k + 1, &value);
+			if (!tok_is(ts, k, "and"))
+				rw_syntax_error(rw, k);
+			appendStringInfoString(&value, ", ");
+			k = rw_deny_point(rw, k + 1, &value);
+		}
+		else
+			k = rw_deny_point(rw, k, &value);
+		appendStringInfoChar(&value, ']');
+
+		rw_add_carrier(rw, "gp", drop ? "drop_deny" : "deny", value.data,
+					   ts->toks[j].off);
+		rw_edit(rw, ts->toks[j].off, tok_stop(ts, k - 1), "");
+		j = k - 1;
+		did = true;
+	}
+	return did;
+}
+
 /* ------------------------------------------------------------------------- */
 /* The classic partition clauses                                             */
 /* ------------------------------------------------------------------------- */
@@ -5496,6 +5608,9 @@ rw_statement_itself(GpRewrite *rw)
 	/* RESOURCE QUEUE and RESOURCE GROUP, carried for gp_resource */
 	(void) rw_role_resource(rw);
 
+	/* and DENY and DROP DENY, for gp_security */
+	(void) rw_role_deny(rw);
+
 	/* ALTER TYPE ... SET DEFAULT ENCODING: a label of gp_ao's. */
 	if (rw_alter_type_encoding(rw))
 		return;
@@ -5764,9 +5879,11 @@ GpAttachCarriers(List *parsetree, List *carried)
 				 c->start);
 
 		/*
-		 * A profile is gp_security's to put on a role.  Without it nothing
-		 * would take the option out again, and ALTER ROLE would refuse it as
-		 * an option it does not know, which says nothing useful.
+		 * A profile, a lock and a DENY clause are gp_security's to put on a
+		 * role, and a queue and a group gp_resource's.  Without the module
+		 * nothing would take the option out again, and CREATE or ALTER ROLE
+		 * would refuse it as an option it does not know, which says nothing
+		 * useful.
 		 */
 		foreach(lc3, c->defs)
 		{
@@ -5778,7 +5895,9 @@ GpAttachCarriers(List *parsetree, List *carried)
 						(errcode(ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE),
 						 errmsg("%s needs \"gp_security\"",
 								strcmp(def->defname, "profile") == 0 ?
-								"a role's profile" : "locking an account"),
+								"a role's profile" :
+								strcmp(def->defname, "account") == 0 ?
+								"locking an account" : "a DENY clause"),
 						 errhint("Add \"gp_security\" to \"shared_preload_libraries\".")));
 			/* and a queue or a group is gp_resource's */
 			if (strcmp(def->defnamespace, "gp_resource") == 0 &&

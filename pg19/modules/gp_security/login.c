@@ -18,7 +18,8 @@
  * under the License.
  *
  * login.c
- *	  Counting failed logins, and locking an account that has too many.
+ *	  Counting failed logins, locking an account that has too many, and
+ *	  refusing a login at a time its role's DENY windows forbid.
  *
  * Cloudberry keeps the count and the lock date in pg_authid, and updates them
  * from a "login monitor": a pair of postmaster children, because the backend
@@ -41,8 +42,8 @@
  * and login restrictions" expected to lose.
  *
  * Cloudberry sources this file is made of:
- *	  src/backend/postmaster/loginmonitor.c, and the profile code of auth.c
- *	  and postinit.c
+ *	  src/backend/postmaster/loginmonitor.c, and the profile and DENY code of
+ *	  auth.c and postinit.c
  *
  *-------------------------------------------------------------------------
  */
@@ -245,6 +246,113 @@ login_is_locked(const GpLoginState *st, TimestampTz now)
 		(st->locked_until != 0 && st->locked_until > now);
 }
 
+/* One setting of a list of name=value options, or NULL. */
+static const char *
+login_option(const char *const *names, const char *const *values, int n,
+			 const char *name)
+{
+	const char *found = NULL;
+
+	for (int i = 0; i < n; i++)
+	{
+		if (strcmp(names[i], name) == 0)
+			found = values[i];	/* the last one given, as for any setting */
+	}
+	return found;
+}
+
+/*
+ * Is this the dispatcher's own connection to a segment?  Cloudberry asks no
+ * DENY window of its dispatcher's connections, whose user logged in on the
+ * coordinator already; nor does this, but only of one that proves it is one:
+ * gp.qe_identity among its startup settings and the cluster's secret beside
+ * it, as gp_core checks them once they are set (GpClusterDispatchTrusted()),
+ * which is after this.  gp.qe_identity alone anybody may send.
+ */
+static bool
+login_is_dispatcher(Port *port)
+{
+	int			max = 2 * list_length(port->guc_options) + 2;
+	const char **names;
+	const char **values;
+	int			n = 0;
+	const char *identity;
+	const char *secret;
+	const char *cluster;
+	ListCell   *lc;
+
+	/* libpq's "options", as -c name=value, --name=value or -cname=value */
+	if (port->cmdline_options != NULL)
+		max += strlen(port->cmdline_options);
+	names = palloc(max * sizeof(char *));
+	values = palloc(max * sizeof(char *));
+	if (port->cmdline_options != NULL)
+	{
+		char	  **av = palloc((2 + (strlen(port->cmdline_options) + 1) / 2) *
+								sizeof(char *));
+		int			ac = 0;
+
+		av[ac++] = "postgres";
+		pg_split_opts(av, &ac, port->cmdline_options);
+		for (int i = 1; i < ac; i++)
+		{
+			char	   *opt;
+			char	   *eq;
+
+			if (strcmp(av[i], "-c") == 0 && i + 1 < ac)
+				opt = pstrdup(av[++i]);
+			else if (strncmp(av[i], "-c", 2) == 0 || strncmp(av[i], "--", 2) == 0)
+				opt = pstrdup(av[i] + 2);
+			else
+				continue;
+			eq = strchr(opt, '=');
+			if (eq == NULL)
+				continue;
+			*eq = '\0';
+			names[n] = opt;
+			values[n++] = eq + 1;
+		}
+	}
+	/* and the startup packet's own settings */
+	foreach(lc, port->guc_options)
+	{
+		names[n] = lfirst(lc);
+		lc = lnext(port->guc_options, lc);
+		if (lc == NULL)
+			break;
+		values[n++] = lfirst(lc);
+	}
+
+	identity = login_option(names, values, n, "gp.qe_identity");
+	secret = login_option(names, values, n, "gp.qe_secret");
+	cluster = GetConfigOption("gp.cluster_secret", true, false);
+	if (identity == NULL || identity[0] == '\0' || secret == NULL ||
+		cluster == NULL || cluster[0] == '\0' ||
+		strlen(secret) != strlen(cluster))
+		return false;
+	return timingsafe_bcmp(secret, cluster, strlen(cluster)) == 0;
+}
+
+/*
+ * A login that authenticated, refused if it comes at a time its role's DENY
+ * windows forbid (deny.c), as Cloudberry's ClientAuthentication() refuses it
+ * -- before the profile's lock is looked at, and never counted as a failed
+ * login.
+ */
+static void
+login_check_deny(Port *port)
+{
+	Oid			roleid = get_role_oid(port->user_name, true);
+
+	if (!OidIsValid(roleid) || login_is_dispatcher(port))
+		return;
+	if (!GpDenyAllows(roleid, GpDenyNow()))
+		ereport(FATAL,
+				(errcode(ERRCODE_INVALID_AUTHORIZATION_SPECIFICATION),
+				 errmsg("authentication failed for user \"%s\": login not permitted at this time",
+						port->user_name)));
+}
+
 /*
  * Every authentication comes through here, successful or not.
  */
@@ -259,7 +367,13 @@ gp_security_ClientAuthentication(Port *port, int status)
 	if (prev_ClientAuthentication)
 		prev_ClientAuthentication(port, status);
 
-	if (!gp_enable_password_profile || port->user_name == NULL)
+	if (port->user_name == NULL)
+		return;
+
+	if (status == STATUS_OK)
+		login_check_deny(port);
+
+	if (!gp_enable_password_profile)
 		return;
 
 	roleid = get_role_oid(port->user_name, true);

@@ -86,6 +86,7 @@ run  aoco_privileges
 run  alter_table_ao
 run  alter_table_set_am
 run  aocs
+run  auth_constraint
 run  partition_pruning
 run  expand_table
 run  expand_table_ao

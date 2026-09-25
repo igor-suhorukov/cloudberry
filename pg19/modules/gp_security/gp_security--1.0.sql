@@ -299,3 +299,62 @@ BEGIN
 	END IF;
 END
 $$;
+
+-----------------------------------------------------------------------------
+-- When a role may not log in: Cloudberry's DENY clauses
+-----------------------------------------------------------------------------
+
+/*
+ * A role's DENY windows are a key of its "gp" label (deny.c), which CREATE
+ * and ALTER ROLE ... DENY and DROP DENY write, and a login is refused while
+ * the time falls in one of them.
+ */
+CREATE FUNCTION gp_security.check_auth_time_constraints(rolename name, at timestamptz)
+RETURNS boolean
+AS 'MODULE_PATHNAME', 'gp_security_check_auth_time_constraints'
+LANGUAGE C STRICT STABLE;
+
+COMMENT ON FUNCTION gp_security.check_auth_time_constraints(name, timestamptz) IS
+	'whether the role may log in at that time, by its DENY windows; what Cloudberry''s tests ask through their regress.so';
+
+CREATE FUNCTION gp_security.auth_time_constraints(
+	OUT authid oid,
+	OUT start_day int2,
+	OUT start_time time,
+	OUT end_day int2,
+	OUT end_time time)
+RETURNS SETOF record
+AS 'MODULE_PATHNAME', 'gp_security_auth_time_constraints'
+LANGUAGE C STRICT STABLE;
+
+CREATE FUNCTION gp_security.auth_time_constraint_write()
+RETURNS trigger
+AS 'MODULE_PATHNAME', 'gp_security_auth_time_constraint_write'
+LANGUAGE C;
+
+/*
+ * pg_auth_time_constraint, Cloudberry's shared catalog of the windows, by
+ * its name and in its columns, where its own is: pg_catalog, as gp_core
+ * makes its catalogs (gp_core--1.0.sql), in each database that has the
+ * extension.  A write to it, with allow_system_table_mods on, writes the
+ * labels, as a write to Cloudberry's catalog writes its rows; without it, it
+ * is refused in Cloudberry's words.
+ */
+SET allow_system_table_mods = on;
+
+CREATE VIEW pg_catalog.pg_auth_time_constraint AS
+	SELECT * FROM gp_security.auth_time_constraints();
+
+CREATE TRIGGER gp_catalog_write_check
+	BEFORE INSERT OR UPDATE OR DELETE
+	ON pg_catalog.pg_auth_time_constraint
+	FOR EACH STATEMENT EXECUTE FUNCTION gp_internal.catalog_write_check();
+
+CREATE TRIGGER gp_auth_time_constraint_write
+	INSTEAD OF INSERT OR UPDATE OR DELETE
+	ON pg_catalog.pg_auth_time_constraint
+	FOR EACH ROW EXECUTE FUNCTION gp_security.auth_time_constraint_write();
+
+GRANT SELECT ON pg_catalog.pg_auth_time_constraint TO PUBLIC;
+
+RESET allow_system_table_mods;

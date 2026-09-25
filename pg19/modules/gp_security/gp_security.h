@@ -29,6 +29,7 @@
 
 #include "datatype/timestamp.h"
 #include "nodes/parsenodes.h"
+#include "utils/date.h"
 
 #define GP_SECURITY_SCHEMA		"gp_security"
 #define GP_PROFILE_PROVIDER		"gp_profile"
@@ -65,6 +66,7 @@ typedef struct GpProfile
 /* GUCs, all named gp.* so that a leftover one in a file is a placeholder. */
 extern PGDLLIMPORT bool gp_enable_password_profile;
 extern PGDLLIMPORT char *gp_security_database;
+extern PGDLLIMPORT char *gp_auth_time_override;
 
 /* profile.c */
 
@@ -122,5 +124,45 @@ extern void GpPasswordRecorded(const char *rolename);
 
 /* Which roles a CREATE/ALTER ROLE statement gave a password to. */
 extern char *GpPasswordRoleOfStmt(Node *parsetree);
+
+/* deny.c */
+
+/* A moment of the week: a day, Sunday being 0, and a time of that day. */
+typedef struct GpDenyPoint
+{
+	int16		day;
+	TimeADT		time;
+} GpDenyPoint;
+
+/* When a role may not log in: from one moment to another, both in it. */
+typedef struct GpDenyWindow
+{
+	GpDenyPoint start;
+	GpDenyPoint end;
+} GpDenyWindow;
+
+/* A role's windows, oldest first, and all of them written back. */
+extern List *GpDenyRead(Oid roleid);
+extern void GpDenyWrite(Oid roleid, List *windows);
+
+/* The window a DENY or DROP DENY clause the rewrite carried says. */
+extern void GpDenyWindowFromClause(const char *carried, GpDenyWindow *out);
+
+/*
+ * What a CREATE or ALTER ROLE carried of DENY and DROP DENY, checked before
+ * it runs -- the windows it adds, and those it drops -- and applied after it,
+ * every ALTER ROLE's, carrying any or not.
+ */
+extern void GpDenyCheck(Node *stmt, Oid roleid, List *carried,
+						List **add, List **drop);
+extern void GpDenyApply(Oid roleid, const char *rolename, bool creating,
+						List *add, List *drop);
+
+/* May this role log in at this time?  And the time a login is checked at. */
+extern bool GpDenyAllows(Oid roleid, TimestampTz when);
+extern TimestampTz GpDenyNow(void);
+
+/* The same by name, for the regress.so of Cloudberry's tests (cb_regress.c). */
+extern PGDLLEXPORT bool GpDenyRoleAllowed(const char *rolename, TimestampTz when);
 
 #endif							/* GP_SECURITY_H */

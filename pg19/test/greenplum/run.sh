@@ -65,7 +65,7 @@ SOCK="$(mktemp -d /tmp/cbg-XXXXXX)"
 EXEC="$(mktemp -d "${HOME:-/var/lib/postgresql}/cb-greenplum-XXXXXX")"
 BASEPORT="${PGPORT:-$((7300 + RANDOM % 200))}"
 NODES=4					# a coordinator and Cloudberry's three segments
-PRELOAD='gp_core,gp_orca,gp_sql,gp_ao,gp_exttable'
+PRELOAD='gp_core,gp_orca,gp_sql,gp_ao,gp_exttable,gp_security'
 SECRET="greenplum-schedule-$RANDOM$RANDOM$RANDOM"
 
 port() { echo $((BASEPORT + $1)); }
@@ -272,6 +272,10 @@ failed=0
 for pass in ${PASSES:-planner orca}; do
 	echo "== pass: $pass"
 	mkdir -p "$WORK/$pass/canon"
+	# Cloudberry's tests make functions from the regress.so of the directory
+	# they run from, whose test functions of Cloudberry's own the port's
+	# cb_regress.so serves (auth_constraint's check_auth_time_constraints)
+	ln -sf "$("$BINDIR/pg_config" --pkglibdir)/cb_regress.so" "$WORK/$pass/regress.so"
 	case "$pass" in
 		planner) optimizer=off ;;
 		orca)    optimizer=on ;;

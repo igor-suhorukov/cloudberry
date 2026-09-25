@@ -1963,6 +1963,33 @@ is "and a table or a column named so is left alone, as is the option list in bra
    "SELECT gp_sql.desugar('COPY newline (fill, newline) FROM STDIN (NEWLINE ''lf'')');" \
    "COPY newline (fill, newline) FROM STDIN (NEWLINE 'lf')"
 
+###############################################################################
+echo "18. DENY and DROP DENY: when a role may not log in"
+###############################################################################
+# Carried on the statement's parse node, each clause as it was written --
+# a day as a number or a name, which Cloudberry tells apart -- for
+# gp_security, which keeps the windows in the role's label.
+is "a role's DENY clauses are carried, among its other options" \
+   "SELECT gp_sql.desugar('CREATE ROLE r LOGIN DENY DAY 2 DENY BETWEEN DAY ''Monday'' TIME ''01:00'' AND DAY 3 CREATEDB');" \
+   "CREATE ROLE r LOGIN   CREATEDB /* and on its parse node: gp.deny = '[{\"day\": 2}]', gp.deny = '[{\"day\": \"Monday\", \"time\": \"01:00\"}, {\"day\": 3}]' */"
+is "and ALTER's DROP DENY" \
+   "SELECT gp_sql.desugar('ALTER USER r DROP DENY FOR DAY ''Tuesday'' TIME ''12:00''');" \
+   "ALTER USER r  /* and on its parse node: gp.drop_deny = '[{\"day\": \"Tuesday\", \"time\": \"12:00\"}]' */"
+isl "CREATE ROLE ... DENY gives the role the window" \
+   "CREATE ROLE dennis DENY DAY 2 TIME '13:15:34';
+    SELECT start_day || ' ' || start_time || ' ' || end_day || ' ' || end_time
+      FROM pg_auth_time_constraint WHERE authid = 'dennis'::regrole;" "2 13:15:34 2 13:15:34"
+isl "ALTER ROLE ... DROP DENY takes it away" \
+   "ALTER ROLE dennis DROP DENY FOR DAY 2;
+    SELECT count(*) FROM pg_auth_time_constraint WHERE authid = 'dennis'::regrole;" "0"
+refused "DROP DENY is ALTER's alone, as in Cloudberry's grammar" \
+        "CREATE ROLE dennis2 DROP DENY FOR DAY 2;" "syntax error"
+at "a clause's error is where it is" \
+   "ALTER ROLE dennis DENY DAY @@-1;" "syntax error" "-"
+is "a role called deny is a role called deny" \
+   "CREATE ROLE deny; CREATE ROLE denied IN ROLE deny;
+    SELECT count(*) FROM pg_auth_members WHERE roleid = 'deny'::regrole;" "1"
+
 echo
 echo "  $pass passed, $fail failed"
 [ "$fail" -eq 0 ]
