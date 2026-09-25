@@ -148,6 +148,7 @@
 #include "gp_policy.h"
 #include "gp_scan.h"
 #include "gp_segment.h"
+#include "gp_size.h"
 
 #define GP_SEGMENT_ID	"gp_segment_id"
 #define GP_MPPSESSIONID	"mppsessionid"
@@ -1264,12 +1265,15 @@ GpSegmentPushDistRandom(Query *parse)
  * GpPrepareQuery
  *		A statement as gp_core has it planned, by whichever planner: a query
  *		of gp_dist_random() alone that calls a function which is not
- *		immutable made one the segments run.
+ *		immutable made one the segments run, and the size functions made the
+ *		cluster's (gp_size.c), in that order -- a size function the segments
+ *		run is each segment's own.
  */
 void
 GpPrepareQuery(Query *parse)
 {
 	GpSegmentPushDistRandom(parse);
+	GpSizeRewrite(parse);
 }
 
 /* ------------------------------------------------------------------------- */

@@ -466,6 +466,31 @@ AS 'MODULE_PATHNAME', 'gp_segment_query'
 LANGUAGE C STRICT;
 
 /*
+ * The size functions, the cluster's (gp_size.c): each of PostgreSQL's here
+ * and every segment's added, as Cloudberry's add them.  A call of
+ * PostgreSQL's is made a call of the one here of its name and arguments
+ * before a statement on the coordinator is planned.
+ */
+CREATE FUNCTION gp_internal.relation_size(regclass)
+RETURNS bigint AS 'MODULE_PATHNAME', 'gp_relation_size' LANGUAGE C STRICT;
+CREATE FUNCTION gp_internal.relation_size(regclass, text)
+RETURNS bigint AS 'MODULE_PATHNAME', 'gp_relation_size' LANGUAGE C STRICT;
+CREATE FUNCTION gp_internal.table_size(regclass)
+RETURNS bigint AS 'MODULE_PATHNAME', 'gp_table_size' LANGUAGE C STRICT;
+CREATE FUNCTION gp_internal.indexes_size(regclass)
+RETURNS bigint AS 'MODULE_PATHNAME', 'gp_indexes_size' LANGUAGE C STRICT;
+CREATE FUNCTION gp_internal.total_relation_size(regclass)
+RETURNS bigint AS 'MODULE_PATHNAME', 'gp_total_relation_size' LANGUAGE C STRICT;
+CREATE FUNCTION gp_internal.database_size(name)
+RETURNS bigint AS 'MODULE_PATHNAME', 'gp_database_size_name' LANGUAGE C STRICT;
+CREATE FUNCTION gp_internal.database_size(oid)
+RETURNS bigint AS 'MODULE_PATHNAME', 'gp_database_size_oid' LANGUAGE C STRICT;
+CREATE FUNCTION gp_internal.tablespace_size(name)
+RETURNS bigint AS 'MODULE_PATHNAME', 'gp_tablespace_size_name' LANGUAGE C STRICT;
+CREATE FUNCTION gp_internal.tablespace_size(oid)
+RETURNS bigint AS 'MODULE_PATHNAME', 'gp_tablespace_size_oid' LANGUAGE C STRICT;
+
+/*
  * The planner's Split on a segment (gp_split.c): rows deleted by their table
  * and ctid, returned as t's rows, and their new versions inserted, routed
  * into t's partitions -- firing no trigger and applying no policy, as

@@ -286,6 +286,7 @@ modules = [
                      'modules/gp_core/gp_motion.c',
                      'modules/gp_core/gp_split.c',
                      'modules/gp_core/gp_segment.c',
+                     'modules/gp_core/gp_size.c',
                      'modules/gp_core/gp_share.c',
                      'modules/gp_core/gp_ic.c',
                      'modules/gp_core/gp_label.c',

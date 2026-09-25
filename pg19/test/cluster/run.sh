@@ -418,6 +418,20 @@ if [ "$started" -eq 1 ]; then
 		&& ok "DROP TABLESPACE follows, and takes the directories away" \
 		|| notok "DROP TABLESPACE" "$out / $(ls "$ROOT/tblspc")"
 
+	# The size functions are the cluster's: the coordinator's size and every
+	# segment's, as Cloudberry adds them (gp_size.c); a view still says
+	# pg_relation_size, and a query each segment runs has each one's own.
+	q 0 "CREATE TABLE sized (a int, b text); INSERT INTO sized SELECT i, repeat('x', 100) FROM generate_series(1, 5000) i;" >/dev/null
+	s1=$(q 1 "SELECT pg_relation_size('sized');"); s2=$(q 2 "SELECT pg_relation_size('sized');")
+	out=$(q 0 "SELECT pg_relation_size('sized'), pg_table_size('sized') > pg_relation_size('sized'), pg_total_relation_size('sized') = pg_table_size('sized');")
+	out2=$(q 0 "CREATE VIEW sizedv AS SELECT pg_relation_size('sized') AS s; SELECT pg_get_viewdef('sizedv');" | tr -s ' \n' ' ')
+	c0=$(q 0 "SELECT pg_relation_size('sized') FROM gp_dist_random('gp_id') WHERE gp_segment_id = 0;")
+	case "$out|$out2|$c0" in
+		"$((s1 + s2))|t|t|"*"pg_relation_size('sized'::regclass)"*"|$s1")
+			ok "the size functions add every segment's size to the coordinator's, as Cloudberry's do" ;;
+		*) notok "the size functions on the coordinator" "$out / $out2 / $c0 (segments: $s1, $s2)" ;;
+	esac
+
 	# Each backend makes its own temporary namespace, so its OID is the one
 	# thing that differs; the tables in it do not.
 	out=$(printf '%s\n' "SET client_min_messages = warning;" "CREATE TEMP TABLE tmp1 (a int);" "CREATE TEMP TABLE tmp2 (a int);" \

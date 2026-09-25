@@ -47,7 +47,7 @@ extern void GpSegmentPushDistRandom(struct Query *parse);
 
 /*
  * The statement as gp_core has it planned, whichever planner plans it:
- * GpSegmentPushDistRandom().
+ * GpSegmentPushDistRandom(), and the size functions (gp_size.c).
  */
 extern void GpPrepareQuery(struct Query *parse);
 
