@@ -31,7 +31,9 @@ set -u
 
 id tester > /dev/null 2>&1 || useradd -m tester
 chown -R tester /src
-su tester -c "cd /src && meson test -C build --no-rebuild \
+# meson test builds what the tests need first -- ecpg's test programs, which
+# the image's build does not make -- so the tree is the tester's.
+su tester -c "cd /src && meson test -C build \
 	--num-processes ${MESON_JOBS:-$(nproc)} --print-errorlogs" > /tmp/meson.out 2>&1
 rc=$?
 

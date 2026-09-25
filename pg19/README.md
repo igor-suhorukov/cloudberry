@@ -264,11 +264,18 @@ of the core series, O13 to O21, O23 and O32:
   one of its dbid under the location, as Cloudberry's is, which PostgreSQL
   asks `gp_core` for through O32 -- as a node runs CREATE TABLESPACE, and as
   a mirror or a standby replays it, making a directory of its own on a
-  machine it shares with its primary -- and every node's
-  `pg_tablespace_location()` says the location, which `pg_dump` writes.
+  machine it shares with its primary, and removing it again as it runs or
+  replays DROP TABLESPACE -- and every node's `pg_tablespace_location()`
+  says the location, which `pg_dump` writes;
+- `COPY`: Cloudberry's options of `COPY FROM` -- `FILL MISSING FIELDS`,
+  `NEWLINE`, and in text an `ESCAPE` of the user's or `OFF` -- through
+  `gp_exttable`'s filter, which reads `SEGMENT REJECT LIMIT`'s lines too and
+  rejects a row no partition takes; `COPY TO` with such an `ESCAPE`; and an
+  error a segment raises in the rows `INSERT`, `CREATE TABLE AS` and `COPY`
+  route to it names no `COPY` of the segment's, a `COPY`'s the line of the
+  user's data.
 
-Left of M5: `pax`, and `COPY`'s `FILL MISSING FIELDS`, `NEWLINE` and
-`ESCAPE` outside CSV, which external tables take (`cloudberry.md`).  The resource and transport modules — `pax`,
+Left of M5: `pax` (`cloudberry.md`).  The resource and transport modules — `pax`,
 `gp_resource`, `gp_tde`, `interconnect`, `udp2` — are still stubs: M5 and M6
 fill the first three, and the streaming transports, tcp and udpifc, live in
 `gp_core` for now.
@@ -278,7 +285,10 @@ fill the first three, and the streaming transports, tcp and udpifc, live in
 `pg19/test/run.sh` runs every suite; `docker compose -f pg19/docker/compose.yml
 run --rm tests` runs them in the image built from the branches, and
 `... run --rm compare` checks that the patched server still behaves as
-vanilla PostgreSQL 19, both built with the tests' patches.  The suites: the module suites (among them `cluster`,
+vanilla PostgreSQL 19, both built with the tests' patches -- among the
+checks, the instructions six workloads take on the two built without
+assertions (check 9) -- and `... run --rm meson-vanilla` and
+`meson-patched` run PostgreSQL's own tests in each build's tree (check 1).  The suites: the module suites (among them `cluster`,
 a coordinator and two segments, and `hooks`, which drives every hook of the
 core series through a test module); `greenplum`, part of Cloudberry's
 `greenplum_schedule` on a coordinator and three segments; `isolation2`, the
