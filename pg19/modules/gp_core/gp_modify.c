@@ -1638,6 +1638,15 @@ gp_modify_query_lockmode(Oid relid, LOCKMODE lockmode, AclMode requiredPerms)
 void
 GpModifyInit(void)
 {
+	/*
+	 * COPY's single-row error handling, which one node carries out too
+	 * (copy_from_local_sreh()): the grammar carries it on the statement for
+	 * this hook to take off, cluster or none.  On one node no table has a
+	 * policy, and the hook does nothing else.
+	 */
+	prev_ProcessUtility = ProcessUtility_hook;
+	ProcessUtility_hook = gp_modify_ProcessUtility;
+
 	if (GpClusterIsSingleNode())
 		return;
 
@@ -1647,9 +1656,6 @@ GpModifyInit(void)
 
 	prev_planner = planner_hook;
 	planner_hook = gp_modify_planner;
-
-	prev_ProcessUtility = ProcessUtility_hook;
-	ProcessUtility_hook = gp_modify_ProcessUtility;
 
 	prev_query_lockmode = query_lockmode_hook;
 	query_lockmode_hook = gp_modify_query_lockmode;

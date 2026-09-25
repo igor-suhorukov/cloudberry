@@ -412,10 +412,11 @@ transformFormatOpts(char formattype, List *formatOpts, int numcols, bool iswrita
 /*
  * CREATE EXTERNAL TABLE ... (LIKE t): PostgreSQL refuses LIKE in a foreign
  * table, so its columns are written in here -- names, types and collations,
- * all an external table's column has (transformCreateExternalStmt()).
+ * all an external table's column has (transformCreateExternalStmt()).  LIKE
+ * INCLUDING is refused, as Cloudberry refuses it (transformTableLikeClause()).
  */
 void
-ExtTableExpandLike(CreateStmt *stmt)
+ExtTableExpandLike(CreateStmt *stmt, const char *queryString)
 {
 	List	   *elts = NIL;
 
@@ -431,6 +432,16 @@ ExtTableExpandLike(CreateStmt *stmt)
 			continue;
 		}
 		like = (TableLikeClause *) elt;
+		if (like->options != 0)
+		{
+			ParseState *pstate = make_parsestate(NULL);
+
+			pstate->p_sourcetext = queryString;
+			ereport(ERROR,
+					(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+					 errmsg("LIKE INCLUDING may not be used with this kind of relation"),
+					 parser_errposition(pstate, like->relation->location)));
+		}
 		rel = relation_openrv(like->relation, AccessShareLock);
 		desc = RelationGetDescr(rel);
 		for (int i = 0; i < desc->natts; i++)
@@ -509,7 +520,7 @@ ExtTableTransformCreate(CreateForeignTableStmt *stmt, const char *queryString)
 				 errmsg("external tables need the gp_exttable extension"),
 				 errhint("Run CREATE EXTENSION gp_exttable in this database.")));
 
-	ExtTableExpandLike(&stmt->base);
+	ExtTableExpandLike(&stmt->base, queryString);
 	ncols = list_length(stmt->base.tableElts);
 
 	if ((d = spec_get(spec, "command")) != NULL)

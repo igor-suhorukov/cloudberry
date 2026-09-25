@@ -533,6 +533,15 @@ remap_walker(Node *node, void *context)
 					WALK(c->partspec) || WALK(c->ofTypename) ||
 					WALK(c->constraints) || WALK(c->options);
 			}
+		case T_CreateForeignTableStmt:
+			{
+				/* a CREATE EXTERNAL TABLE's too, once rewritten */
+				CreateForeignTableStmt *f = (CreateForeignTableStmt *) node;
+
+				return WALK(f->base.relation) || WALK(f->base.tableElts) ||
+					WALK(f->base.inhRelations) || WALK(f->base.partbound) ||
+					WALK(f->base.constraints) || WALK(f->options);
+			}
 		case T_AlterTableStmt:
 			return WALK(((AlterTableStmt *) node)->relation) ||
 				WALK(((AlterTableStmt *) node)->cmds);

@@ -439,7 +439,7 @@ extern List *appendCopyEncodingOption(List *copyFmtOpts, int encoding);
 extern void ExtTableTransformCreate(CreateForeignTableStmt *stmt,
 									const char *queryString);
 extern bool ExtTableIsCreate(CreateForeignTableStmt *stmt);
-extern void ExtTableExpandLike(CreateStmt *stmt);
+extern void ExtTableExpandLike(CreateStmt *stmt, const char *queryString);
 extern void ExtTableDropped(Oid relid);
 
 /* option.c */
