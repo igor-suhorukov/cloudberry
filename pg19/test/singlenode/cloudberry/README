@@ -161,18 +161,17 @@ gp_gin_index  the complex type, which Cloudberry's own earlier tests make;
 gp_recursive_cte  gp_recursive_cte, whose "off" Cloudberry's test expects to
   refuse a recursive CTE, and a plan gpdiff.pl does not take for one, which is
   PostgreSQL 19's planner's.
-gpcopy  COPY's FILL MISSING FIELDS, NEWLINE and ESCAPE outside CSV mode,
-  which the port's external tables take and its COPY does not -- so the
-  table errcopy, whose CREATE follows a COPY with NEWLINE, is not made, and
-  its LOG ERRORS tests find none -- and the broken_int4 type of Cloudberry's
-  regress.so.
+gpcopy  A backslash before a line's end, which Cloudberry's COPY ends the
+  line at and PostgreSQL's reads as an escaped newline; a newline of another
+  kind than NEWLINE names, which Cloudberry's COPY reads as data and
+  PostgreSQL's refuses ("literal newline found in data"); the broken_int4
+  type of Cloudberry's regress.so; and GP_DATABASE, one of the variables
+  Cloudberry gives a COPY's PROGRAM, which the port's does not.
 matview_ao  psql's \dm.
 partition  Most reasons above: its templates and gp_partition_template;
-  a row COPY ... LOG ERRORS finds no partition for, which Cloudberry rejects
-  as a data error and the port's COPY fails at; Cloudberry's REVOKE notice; an
-  exclusion constraint PostgreSQL 19 allows; "PRIMARY KEY constraint on
-  partitioned table"; the caret of an error in a partition an ALTER TABLE
-  made; psql's \d+ and \dt.
+  Cloudberry's REVOKE notice; an exclusion constraint PostgreSQL 19 allows;
+  "PRIMARY KEY constraint on partitioned table"; the caret of an error in a
+  partition an ALTER TABLE made; psql's \d+ and \dt.
 partition1  PostgreSQL's reading of ALTER TABLE ... ADD partition and DROP
   partition; the wording and caret of PostgreSQL 19's partition key errors;
   psql's \d+.

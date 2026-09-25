@@ -1953,6 +1953,15 @@ is "the words are names too" \
 is "and a COPY without the clauses is left alone" \
    "SELECT gp_sql.desugar('COPY external (protocol, reject) FROM STDIN');" \
    "COPY external (protocol, reject) FROM STDIN"
+is "COPY's FILL MISSING FIELDS and NEWLINE are carried, each wherever it is among the options" \
+   "SELECT gp_sql.desugar('COPY plain FROM STDIN WITH FILL MISSING FIELDS DELIMITER ''|'' NEWLINE AS ''crlf'' CSV');" \
+   "COPY plain FROM STDIN WITH  DELIMITER '|'  CSV /* and on its parse node: gp_exttable.fill_missing_fields = 'true', gp_exttable.newline = 'crlf' */"
+is "and with a reject limit, each clause is carried" \
+   "SELECT gp_sql.desugar('COPY plain FROM STDIN NEWLINE ''lf'' SEGMENT REJECT LIMIT 5 PERCENT FILL MISSING FIELDS');" \
+   "COPY plain FROM STDIN    /* and on its parse node: gp_exttable.newline = 'lf', gp_exttable.reject_limit = '5', gp_exttable.reject_limit_type = 'p', gp_exttable.log_errors = 'f', gp_exttable.fill_missing_fields = 'true' */"
+is "and a table or a column named so is left alone, as is the option list in brackets" \
+   "SELECT gp_sql.desugar('COPY newline (fill, newline) FROM STDIN (NEWLINE ''lf'')');" \
+   "COPY newline (fill, newline) FROM STDIN (NEWLINE 'lf')"
 
 echo
 echo "  $pass passed, $fail failed"

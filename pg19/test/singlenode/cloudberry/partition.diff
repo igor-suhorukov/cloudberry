@@ -124,16 +124,6 @@
 +    k_1_prt_foo FOR VALUES FROM (15) TO (20)
 +    k_1_prt_mydef DEFAULT
 @@
--NOTICE:  found 2 data formatting errors (2 or more input rows), rejected related input data
-+DETAIL:  Partition key of the failing row contains (i) = (10000).
-+ERROR:  no partition of relation "ao_p" found for row
-+CONTEXT:  COPY ao_p, line 3: "10000"
-@@
-- 2
-- 3
--(2 rows)
-+(0 rows)
-@@
 -Partitions: k_1_prt_1 FOR VALUES FROM (1) TO (26),
 -            k_1_prt_2 FOR VALUES FROM (26) TO (51),
 -            k_1_prt_3 FOR VALUES FROM (51) TO (76),

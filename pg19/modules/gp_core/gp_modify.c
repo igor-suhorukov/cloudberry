@@ -1375,17 +1375,22 @@ gp_modify_planner_routed(Query *parse, const char *query_string, int cursorOptio
 /* ------------------------------------------------------------------------- */
 
 /*
- * COPY ... [LOG ERRORS] SEGMENT REJECT LIMIT n [ROWS | PERCENT], as the
- * grammar carried it on the statement's options (gp_desugar.c,
- * rw_copy_sreh()): the data read through gp_exttable's filter, which logs
- * and leaves out each line that would not load (copysreh.c), and the rest
- * loaded by PostgreSQL's COPY, from it.
+ * Cloudberry's options of COPY that PostgreSQL's COPY has not: [LOG ERRORS]
+ * SEGMENT REJECT LIMIT n [ROWS | PERCENT] and FILL MISSING FIELDS and
+ * NEWLINE, which the grammar carries on the statement's options
+ * (gp_desugar.c, rw_copy_options()) or its option list names, and in text
+ * an ESCAPE, which PostgreSQL's COPY takes in CSV alone.  A COPY FROM with
+ * any reads its data through gp_exttable's filter, which takes them, and
+ * logs and leaves out each line that would not load under SEGMENT REJECT
+ * LIMIT (copysreh.c); the rest is loaded by PostgreSQL's COPY, from it.  A
+ * COPY TO takes an ESCAPE alone (copy_to_escaped()).
  */
 typedef struct CopySreh
 {
-	int			limit;
+	int			limit;			/* SEGMENT REJECT LIMIT, or -1 */
 	bool		rows;
 	char		log_errors;
+	const char *name;			/* the first of the options, as said */
 	void	   *state;			/* gp_exttable's, while the data is read */
 } CopySreh;
 
@@ -1393,27 +1398,61 @@ typedef void *(*SrehCopyBegin_fn) (ParseState *pstate, Relation rel,
 								   const char *filename, bool is_program,
 								   List *attlist, List *options,
 								   int reject_limit, bool limit_in_rows,
-								   char log_errors, List **load_options);
+								   char log_errors, CopyFromState *loader);
 typedef uint64 (*SrehCopyEnd_fn) (void *state);
+typedef uint64 (*CopyToEscaped_fn) (ParseState *pstate, Relation rel,
+									RawStmt *query, List *attlist,
+									const char *filename, bool is_program,
+									List *options, bool escape_off,
+									char escape_char);
 
-static bool
-copy_has_sreh(CopyStmt *stmt)
+/* A COPY's format, as its options give it: "text", "csv" or "binary". */
+static const char *
+copy_format(CopyStmt *stmt)
 {
 	foreach_node(DefElem, def, stmt->options)
-		if (def->defnamespace != NULL && strcmp(def->defnamespace, "gp_exttable") == 0)
-			return true;
-	return false;
+		if (def->defnamespace == NULL && strcmp(def->defname, "format") == 0)
+			return defGetString(def);
+	return "text";
 }
 
-/* The carried options, taken out before PostgreSQL's COPY reads the rest. */
+/* The name of the first of Cloudberry's options the COPY has, or NULL. */
+static const char *
+copy_cloudberry_option(CopyStmt *stmt)
+{
+	bool		text = strcmp(copy_format(stmt), "text") == 0;
+
+	foreach_node(DefElem, def, stmt->options)
+	{
+		if (def->defnamespace != NULL &&
+			strcmp(def->defnamespace, "gp_exttable") == 0 &&
+			strcmp(def->defname, "reject_limit") == 0)
+			return "SEGMENT REJECT LIMIT";
+		if (strcmp(def->defname, "fill_missing_fields") == 0)
+			return "FILL MISSING FIELDS";
+		if (strcmp(def->defname, "newline") == 0)
+			return "NEWLINE";
+		if (text && def->defnamespace == NULL &&
+			strcmp(def->defname, "escape") == 0)
+			return "ESCAPE";
+	}
+	return NULL;
+}
+
+/*
+ * The carried options, taken out before PostgreSQL's COPY reads the rest:
+ * SEGMENT REJECT LIMIT's into sreh, and FILL MISSING FIELDS and NEWLINE left
+ * as options of their own names, which gp_exttable's filter reads.
+ */
 static void
 copy_take_sreh(CopyStmt *stmt, CopySreh *sreh)
 {
 	ListCell   *lc;
 
-	sreh->limit = 0;
+	sreh->limit = -1;
 	sreh->rows = true;
 	sreh->log_errors = 'f';
+	sreh->name = copy_cloudberry_option(stmt);
 	sreh->state = NULL;
 	foreach(lc, stmt->options)
 	{
@@ -1427,31 +1466,41 @@ copy_take_sreh(CopyStmt *stmt, CopySreh *sreh)
 			sreh->rows = (defGetString(def)[0] == 'r');
 		else if (strcmp(def->defname, "log_errors") == 0)
 			sreh->log_errors = defGetString(def)[0];
+		else
+		{
+			lfirst(lc) = makeDefElem(def->defname, def->arg, def->location);
+			continue;
+		}
 		stmt->options = foreach_delete_current(stmt->options, lc);
 	}
 }
 
+static bool
+copy_has_option(CopyStmt *stmt, const char *name)
+{
+	foreach_node(DefElem, def, stmt->options)
+		if (strcmp(def->defname, name) == 0)
+			return true;
+	return false;
+}
+
 /*
- * The COPY's data, through the filter: a COPY FROM state that reads the
- * lines it passes, with the options it gave for them.
+ * The COPY's data, through the filter: the COPY FROM that loads the lines
+ * it passes, which gp_exttable makes.
  */
 static CopyFromState
 copy_begin_sreh(ParseState *pstate, CopyStmt *stmt, Relation rel,
 				CopySreh *sreh)
 {
 	SrehCopyBegin_fn begin;
-	copy_data_source_cb read;
-	List	   *load_options;
+	CopyFromState loader;
 
 	begin = (SrehCopyBegin_fn)
 		load_external_function("$libdir/gp_exttable", "GpSrehCopyBegin", true, NULL);
-	read = (copy_data_source_cb)
-		load_external_function("$libdir/gp_exttable", "GpSrehCopyRead", true, NULL);
 	sreh->state = begin(pstate, rel, stmt->filename, stmt->is_program,
 						stmt->attlist, stmt->options, sreh->limit, sreh->rows,
-						sreh->log_errors, &load_options);
-	return BeginCopyFrom(pstate, rel, NULL, NULL, false, read, stmt->attlist,
-						 load_options);
+						sreh->log_errors, &loader);
+	return loader;
 }
 
 static void
@@ -1487,7 +1536,7 @@ copy_from_check_permissions(ParseState *pstate, CopyStmt *stmt, Relation rel)
 
 /*
  * COPY t FROM, into a table whose rows are here -- one node's, or one the
- * coordinator keeps -- under SEGMENT REJECT LIMIT: DoCopy()'s checks, and
+ * coordinator keeps -- with Cloudberry's options: DoCopy()'s checks, and
  * PostgreSQL's COPY, reading through the filter.
  */
 static uint64
@@ -1516,11 +1565,10 @@ copy_from_local_sreh(ParseState *pstate, CopyStmt *stmt, Relation rel,
 /*
  * COPY t FROM: parsed by PostgreSQL's own COPY, as it would be into a local
  * table, and routed.  The coordinator evaluates the defaults, as for INSERT,
- * so that a serial column has one sequence.  Under SEGMENT REJECT LIMIT,
- * read through gp_exttable's filter (above).  An error in the data says
- * where, as COPY's own does, and so does one a segment raises in a row
- * routed there (router_error_context()): the line of the data the row came
- * from.
+ * so that a serial column has one sequence.  With Cloudberry's options, read
+ * through gp_exttable's filter (above).  An error in the data says where, as
+ * COPY's own does, and so does one a segment raises in a row routed there
+ * (router_error_context()): the line of the data the row came from.
  */
 static uint64
 copy_from_distributed(ParseState *pstate, CopyStmt *stmt, Relation rel,
@@ -1584,6 +1632,147 @@ copy_from_distributed(ParseState *pstate, CopyStmt *stmt, Relation rel,
 	return processed;
 }
 
+/*
+ * COPY t TO as the query that reads t: SELECT its columns FROM ONLY t, as
+ * COPY of a table reads no child of it; a partitioned table's query reads
+ * the partitions.  A distributed table's COPY TO, whose rows the query
+ * gathers like any other, and, with Cloudberry's ESCAPE, a table's with row
+ * security, as DoCopy() reads it.
+ */
+static Node *
+copy_to_query(CopyStmt *stmt, Oid relid)
+{
+	StringInfoData sql;
+	List	   *raw;
+
+	initStringInfo(&sql);
+	appendStringInfoString(&sql, "SELECT ");
+	if (stmt->attlist == NIL)
+		appendStringInfoString(&sql, "*");
+	else
+	{
+		ListCell   *lc;
+
+		foreach(lc, stmt->attlist)
+			appendStringInfo(&sql, "%s%s", lc == list_head(stmt->attlist) ? "" : ", ",
+							 quote_identifier(strVal(lfirst(lc))));
+	}
+	appendStringInfo(&sql, " FROM %s%s",
+					 get_rel_relkind(relid) == RELKIND_RELATION ? "ONLY " : "",
+					 GpDispatchRelationName(relid));
+	raw = raw_parser(sql.data, RAW_PARSE_DEFAULT);
+	return linitial_node(RawStmt, raw)->stmt;
+}
+
+/*
+ * COPY ... TO in text with an ESCAPE of Cloudberry's -- 'OFF', or one byte
+ * of its own -- which PostgreSQL's COPY TO refuses outside CSV: gp_exttable
+ * writes it (copyout.c, GpCopyToEscaped()), after DoCopy()'s checks, of a
+ * file's or a program's privileges and of the table's.  An ESCAPE of the
+ * backslash, text's own, is only left out.
+ */
+static uint64
+copy_to_escaped(ParseState *pstate, CopyStmt *stmt, int stmt_location,
+				int stmt_len, bool *done)
+{
+	char	   *esc = NULL;
+	List	   *options = NIL;
+	Relation	rel = NULL;
+	RawStmt    *query = NULL;
+	CopyToEscaped_fn copy_to;
+	uint64		processed;
+
+	foreach_node(DefElem, def, stmt->options)
+	{
+		if (def->defnamespace == NULL && strcmp(def->defname, "escape") == 0)
+		{
+			if (esc != NULL)
+				errorConflictingDefElem(def, pstate);
+			esc = defGetString(def);
+		}
+		else
+			options = lappend(options, def);
+	}
+	stmt->options = options;
+	*done = false;
+	if (esc == NULL || strcmp(esc, "\\") == 0)
+		return 0;
+	if (pg_strcasecmp(esc, "off") != 0 && (strlen(esc) != 1 || IS_HIGHBIT_SET(esc[0])))
+		ereport(ERROR,
+				(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+				 errmsg("COPY escape must be a single one-byte character")));
+
+	if (stmt->filename != NULL)
+	{
+		if (stmt->is_program &&
+			!has_privs_of_role(GetUserId(), ROLE_PG_EXECUTE_SERVER_PROGRAM))
+			ereport(ERROR,
+					(errcode(ERRCODE_INSUFFICIENT_PRIVILEGE),
+					 errmsg("permission denied to COPY to or from an external program"),
+					 errdetail("Only roles with privileges of the \"%s\" role may COPY to or from an external program.",
+							   "pg_execute_server_program"),
+					 errhint("Anyone can COPY to stdout or from stdin. "
+							 "psql's \\copy command also works for anyone.")));
+		if (!stmt->is_program &&
+			!has_privs_of_role(GetUserId(), ROLE_PG_WRITE_SERVER_FILES))
+			ereport(ERROR,
+					(errcode(ERRCODE_INSUFFICIENT_PRIVILEGE),
+					 errmsg("permission denied to COPY to a file"),
+					 errdetail("Only roles with privileges of the \"%s\" role may COPY to a file.",
+							   "pg_write_server_files"),
+					 errhint("Anyone can COPY to stdout or from stdin. "
+							 "psql's \\copy command also works for anyone.")));
+	}
+
+	if (stmt->relation != NULL)
+	{
+		Oid			relid = RangeVarGetRelid(stmt->relation, AccessShareLock, false);
+		GpPolicy   *policy = GpClusterBackendRole() == GP_ROLE_DISPATCH ?
+			GpScanDistributedPolicy(relid) : NULL;
+
+		if (policy != NULL ||
+			check_enable_rls(relid, InvalidOid, false) == RLS_ENABLED)
+		{
+			query = makeNode(RawStmt);
+			query->stmt = copy_to_query(stmt, relid);
+		}
+		else
+		{
+			ParseNamespaceItem *nsitem;
+			RTEPermissionInfo *perminfo;
+
+			/* SELECT on the table or its columns, as DoCopy() checks it */
+			rel = table_open(relid, NoLock);
+			nsitem = addRangeTableEntryForRelation(pstate, rel, AccessShareLock,
+												   NULL, false, false);
+			perminfo = nsitem->p_perminfo;
+			perminfo->requiredPerms = ACL_SELECT;
+			foreach_int(attnum, CopyGetAttnums(RelationGetDescr(rel), rel, stmt->attlist))
+				perminfo->selectedCols = bms_add_member(perminfo->selectedCols,
+														attnum - FirstLowInvalidHeapAttributeNumber);
+			ExecCheckPermissions(pstate->p_rtable, list_make1(perminfo), true);
+		}
+	}
+	else
+	{
+		query = makeNode(RawStmt);
+		query->stmt = stmt->query;
+		query->stmt_location = stmt_location;
+		query->stmt_len = stmt_len;
+	}
+
+	copy_to = (CopyToEscaped_fn)
+		load_external_function("$libdir/gp_exttable", "GpCopyToEscaped", true, NULL);
+	processed = copy_to(pstate, rel, query, rel ? stmt->attlist : NIL,
+						stmt->filename, stmt->is_program, options,
+						pg_strcasecmp(esc, "off") == 0,
+						pg_strcasecmp(esc, "off") == 0 ? '\0' : esc[0]);
+	if (rel != NULL)
+		table_close(rel, NoLock);
+	*done = true;
+	return processed;
+}
+
 static void
 gp_modify_ProcessUtility(PlannedStmt *pstmt, const char *queryString,
 						 bool readOnlyTree, ProcessUtilityContext context,
@@ -1594,8 +1783,9 @@ gp_modify_ProcessUtility(PlannedStmt *pstmt, const char *queryString,
 	CopySreh	sreh_data;
 	CopySreh   *sreh = NULL;
 
-	/* SEGMENT REJECT LIMIT, carried by the grammar: see copy_take_sreh() */
-	if (IsA(parsetree, CopyStmt) && copy_has_sreh((CopyStmt *) parsetree))
+	/* Cloudberry's options, carried by the grammar or named: copy_take_sreh() */
+	if (IsA(parsetree, CopyStmt) &&
+		copy_cloudberry_option((CopyStmt *) parsetree) != NULL)
 	{
 		CopyStmt   *stmt;
 
@@ -1608,18 +1798,45 @@ gp_modify_ProcessUtility(PlannedStmt *pstmt, const char *queryString,
 		stmt = (CopyStmt *) parsetree;
 		copy_take_sreh(stmt, &sreh_data);
 		sreh = &sreh_data;
-		if (!stmt->is_from)
+		if (!stmt->is_from && sreh->limit >= 0)
 			ereport(ERROR,
 					(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
 					 errmsg("COPY single row error handling only available using COPY FROM")));
-		if (stmt->relation == NULL)
+		if (!stmt->is_from && copy_has_option(stmt, "fill_missing_fields"))
+			ereport(ERROR,
+					(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+					 errmsg("fill missing fields only available for data loading, not unloading")));
+		if (!stmt->is_from && copy_has_option(stmt, "newline"))
+			ereport(ERROR,
+					(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+					 errmsg("newline currently available for data loading only, not unloading")));
+		if (!stmt->is_from)
+		{
+			ParseState *pstate = make_parsestate(NULL);
+			bool		done;
+			uint64		processed;
+
+			pstate->p_sourcetext = queryString;
+			pstate->p_queryEnv = queryEnv;
+			processed = copy_to_escaped(pstate, stmt, pstmt->stmt_location,
+										pstmt->stmt_len, &done);
+			if (done)
+			{
+				if (qc)
+					SetQueryCompletion(qc, CMDTAG_COPY, processed);
+				return;
+			}
+			/* an ESCAPE of the backslash, left out: PostgreSQL's COPY TO */
+			sreh = NULL;
+		}
+		else if (stmt->relation == NULL)
 			ereport(ERROR,
 					(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
 					 errmsg("COPY single row error handling only available for distributed user tables")));
-		if (stmt->whereClause != NULL)
+		else if (stmt->whereClause != NULL)
 			ereport(ERROR,
 					(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
-					 errmsg("COPY FROM ... WHERE is not supported with SEGMENT REJECT LIMIT")));
+					 errmsg("COPY FROM ... WHERE is not supported with %s", sreh->name)));
 	}
 
 	if (IsA(parsetree, CopyStmt) && ((CopyStmt *) parsetree)->relation != NULL &&
@@ -1695,29 +1912,8 @@ gp_modify_ProcessUtility(PlannedStmt *pstmt, const char *queryString,
 			 * the rows like any other.
 			 */
 			CopyStmt   *copy = copyObject(stmt);
-			StringInfoData sql;
-			List	   *raw;
 
-			initStringInfo(&sql);
-			appendStringInfoString(&sql, "SELECT ");
-			if (copy->attlist == NIL)
-				appendStringInfoString(&sql, "*");
-			else
-			{
-				ListCell   *lc;
-
-				foreach(lc, copy->attlist)
-					appendStringInfo(&sql, "%s%s", lc == list_head(copy->attlist) ? "" : ", ",
-									 quote_identifier(strVal(lfirst(lc))));
-			}
-			/* ONLY, as COPY of a table reads no child of it; a partitioned
-			 * table COPY refuses, and its query reads the partitions. */
-			appendStringInfo(&sql, " FROM %s%s",
-							 get_rel_relkind(relid) == RELKIND_RELATION ? "ONLY " : "",
-							 GpDispatchRelationName(relid));
-
-			raw = raw_parser(sql.data, RAW_PARSE_DEFAULT);
-			copy->query = linitial_node(RawStmt, raw)->stmt;
+			copy->query = copy_to_query(stmt, relid);
 			copy->relation = NULL;
 			copy->attlist = NIL;
 

@@ -215,6 +215,21 @@ amsub() {
 		cat
 	fi
 }
+# psql 19 skips the in-line data of a COPY ... FROM STDIN that fails, up to
+# the next \. (PostgreSQL's d6ab88d374a), where psql 16, which Cloudberry's
+# tests were written for, went on with the next line.  A COPY FROM STDIN a
+# test expects to fail, with no data after it -- the next line a comment or
+# a statement -- is given data that ends at once, which psql reads and does
+# not echo, so that what the test runs next is run.
+copy_data_end() {
+	awk '{
+		l = tolower($0)
+		if (pending && (l ~ /^--/ || l ~ /^[ \t]*(abort|begin|commit|copy|create|drop|end|insert|reset|rollback|select|set)([ \t;]|$)/))
+			print "\\."
+		pending = (l ~ /^[ \t]*copy[ \t].*[ \t]from[ \t]+stdin([ \t].*)?;[ \t]*$/)
+		print
+	}'
+}
 for t in $run_tests; do
 	f=$(echo "$t" | tr / _)
 	src=$t am=
@@ -225,9 +240,10 @@ for t in $run_tests; do
 		fi
 	done
 	if [ -f "$CB/input/$src.source" ]; then
-		convert "$CB/input/$src.source" | amsub | sed -E -f "$WORK/respell.sed" > "$SN/sql/$f.sql"
+		convert "$CB/input/$src.source" | amsub | sed -E -f "$WORK/respell.sed" |
+			copy_data_end > "$SN/sql/$f.sql"
 	else
-		sed -E -f "$WORK/respell.sed" "$CB/sql/$t.sql" > "$SN/sql/$f.sql"
+		sed -E -f "$WORK/respell.sed" "$CB/sql/$t.sql" | copy_data_end > "$SN/sql/$f.sql"
 	fi
 	if [ -f "$CB/output/$src.source" ]; then
 		convert "$CB/output/$src.source" | amsub | sed -E -f "$WORK/respell.sed" > "$SN/expected/$f.out"

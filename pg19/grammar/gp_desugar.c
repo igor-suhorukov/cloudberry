@@ -114,7 +114,7 @@ static const char *const gp_trigger_words[] = {
 	"account", "execute", "decode", "subpartition", "gp_dist_random",
 	"orientation", "encoding",
 	"reorganize", "external", "reject", "protocol",
-	"createexttable", "nocreateexttable",
+	"createexttable", "nocreateexttable", "newline",
 	NULL
 };
 
@@ -156,9 +156,10 @@ word_at(const char *str, int len, int i, const char *const *words)
  * statement with nothing to rewrite, but a no must be right.  The one thing
  * it would miss is a comment between the two words, which nothing writes.
  *
- * WHEN IS is CASE x WHEN IS NOT DISTINCT FROM y.  The second word of a pair
- * is matched as the start of one, so WHEN is_active fires it too, which
- * costs a tokenisation and rewrites nothing.
+ * WHEN IS is CASE x WHEN IS NOT DISTINCT FROM y, and MISSING FIELDS COPY's
+ * FILL MISSING FIELDS.  The second word of a pair is matched as the start of
+ * one, so WHEN is_active fires it too, which costs a tokenisation and
+ * rewrites nothing.
  */
 static const char *const gp_trigger_pairs[][2] = {
 	{"no", "sql"},
@@ -166,6 +167,7 @@ static const char *const gp_trigger_pairs[][2] = {
 	{"reads", "sql"},
 	{"modifies", "sql"},
 	{"when", "is"},
+	{"missing", "fields"},
 	{NULL, NULL}
 };
 
@@ -1984,16 +1986,24 @@ rw_create_external_table(GpRewrite *rw, char **name, int *after)
  * COPY ... [LOG ERRORS [INTO t]] SEGMENT REJECT LIMIT n [ROWS | PERCENT]
  *	 -> COPY ..., carrying gp_exttable.reject_limit, reject_limit_type and
  *		log_errors to its parse node
+ * COPY ... FILL MISSING FIELDS
+ *	 -> COPY ..., carrying gp_exttable.fill_missing_fields
+ * COPY ... NEWLINE [AS] 'lf'
+ *	 -> COPY ..., carrying gp_exttable.newline
  *
- * Cloudberry's single-row error handling of COPY FROM, which PostgreSQL's
- * COPY has no option for: gp_core's COPY takes the three out again and
- * reads the data through gp_exttable's (gp_modify.c, copysreh.c).
+ * Cloudberry's options of COPY FROM that PostgreSQL's COPY has not: gp_core's
+ * COPY takes them out again and reads the data through gp_exttable's filter
+ * (gp_modify.c, copysreh.c), which takes the last two as options of their
+ * own names too, as a COPY's option list in brackets gives them to
+ * PostgreSQL's grammar.  Each clause wherever it is among the options, and
+ * each of them in one statement.
  */
 static bool
-rw_copy_sreh(GpRewrite *rw)
+rw_copy_options(GpRewrite *rw)
 {
 	const GpTokens *ts = rw->ts;
 	int			depth = 0;
+	bool		found = false;
 
 	if (!tok_is_kw(ts, rw->first, "copy"))
 		return false;
@@ -2003,26 +2013,47 @@ rw_copy_sreh(GpRewrite *rw)
 		int			limit;
 		bool		rows;
 		const char *log_errors;
-		int			at;
+		int			at = ts->toks[j].off;
 
 		if (tok_is_char(ts, j, '('))
 			depth++;
 		else if (tok_is_char(ts, j, ')'))
 			depth--;
-		if (depth != 0 ||
-			!((tok_is(ts, j, "log") && tok_is(ts, j + 1, "errors")) ||
-			  (tok_is(ts, j, "segment") && tok_is(ts, j + 1, "reject"))))
+		if (depth != 0)
 			continue;
-		if (!sreh_clause(rw, j, false, &after, &limit, &rows, &log_errors))
-			continue;
-		at = ts->toks[j].off;
-		rw_edit(rw, at, tok_stop(ts, after - 1), "");
-		rw_add_carrier(rw, "gp_exttable", "reject_limit", psprintf("%d", limit), at);
-		rw_add_carrier(rw, "gp_exttable", "reject_limit_type", rows ? "r" : "p", at);
-		rw_add_carrier(rw, "gp_exttable", "log_errors", log_errors, at);
-		return true;
+
+		if (tok_is(ts, j, "fill") && tok_is(ts, j + 1, "missing") &&
+			tok_is(ts, j + 2, "fields"))
+		{
+			rw_edit(rw, at, tok_stop(ts, j + 2), "");
+			rw_add_carrier(rw, "gp_exttable", "fill_missing_fields", "true", at);
+			j += 2;
+			found = true;
+		}
+		else if (tok_is(ts, j, "newline") &&
+				 (tok_is_string(ts, j + 1) ||
+				  (tok_is_kw(ts, j + 1, "as") && tok_is_string(ts, j + 2))))
+		{
+			int			str = tok_is_kw(ts, j + 1, "as") ? j + 2 : j + 1;
+
+			rw_edit(rw, at, tok_stop(ts, str), "");
+			rw_add_carrier(rw, "gp_exttable", "newline", ts->toks[str].str, at);
+			j = str;
+			found = true;
+		}
+		else if (((tok_is(ts, j, "log") && tok_is(ts, j + 1, "errors")) ||
+				  (tok_is(ts, j, "segment") && tok_is(ts, j + 1, "reject"))) &&
+				 sreh_clause(rw, j, false, &after, &limit, &rows, &log_errors))
+		{
+			rw_edit(rw, at, tok_stop(ts, after - 1), "");
+			rw_add_carrier(rw, "gp_exttable", "reject_limit", psprintf("%d", limit), at);
+			rw_add_carrier(rw, "gp_exttable", "reject_limit_type", rows ? "r" : "p", at);
+			rw_add_carrier(rw, "gp_exttable", "log_errors", log_errors, at);
+			j = after - 1;
+			found = true;
+		}
 	}
-	return false;
+	return found;
 }
 
 /*
@@ -5083,7 +5114,7 @@ rw_statement_itself(GpRewrite *rw)
 	(void) rw_matview_options(rw);
 	(void) rw_function_clauses(rw);
 	(void) rw_external_spelling(rw);
-	(void) rw_copy_sreh(rw);
+	(void) rw_copy_options(rw);
 
 	if (rw_create_directory_table(rw, &name, &after_name) ||
 		rw_create_external_table(rw, &name, &after_name))

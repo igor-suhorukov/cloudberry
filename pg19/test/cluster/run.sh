@@ -707,6 +707,63 @@ mine" ] && ok "a transaction reads its own rows, and a LIMIT leaves the connecti
 		&& ok "a COPY's error, on a segment or here, names the line of its data" \
 		|| notok "a COPY's error context" "$out / $out2"
 
+	# Cloudberry's options of COPY, which PostgreSQL's has not, through
+	# gp_exttable's filter: FILL MISSING FIELDS, NEWLINE, and text's ESCAPE,
+	# from the client, a file and a program; and a row no partition takes,
+	# a data error under SEGMENT REJECT LIMIT.
+	q 0 "CREATE EXTENSION IF NOT EXISTS gp_exttable;
+	     CREATE TABLE cf (a int, b int, c text) DISTRIBUTED BY (a);
+	     CREATE TABLE ce (a text, b int) DISTRIBUTED RANDOMLY;" >/dev/null
+	out=$(printf '%s\n' "COPY cf FROM STDIN WITH DELIMITER '|' FILL MISSING FIELDS;" "1|1|one" "2|2" "3" '\.' \
+		"COPY cf (c, b) FROM STDIN (DELIMITER '|', FILL_MISSING_FIELDS true);" "four|4" "five" '\.' \
+		"COPY cf FROM STDIN WITH FILL MISSING FIELDS;" "" '\.' | qf 0 | sed 's/^psql:<stdin>:[0-9]*: //')
+	out2=$(q 0 "SELECT coalesce(a::text, '-') || ',' || coalesce(b::text, '-') || ',' || coalesce(c, '-') FROM cf ORDER BY a, b, c;" | tr '\n' ' ')
+	[ "$out2" = "1,1,one 2,2,- 3,-,- -,4,four -,-,five " ] &&
+	[ "$out" = 'ERROR:  missing data for column "b", found empty data line
+CONTEXT:  COPY cf, line 1: ""' ] \
+		&& ok "FILL MISSING FIELDS fills a short line with NULLs, and not an empty one" \
+		|| notok "FILL MISSING FIELDS" "$out / $out2"
+	out=$(q 0 "COPY cf FROM PROGRAM 'printf \"6|6|six\\\\r\\\\n7|7|seven\\\\r\\\\n\"' WITH DELIMITER '|' NEWLINE 'crlf';
+	           COPY cf FROM PROGRAM 'printf \"8|8|eight\\\\r9|9|nine\\\\r\"' WITH DELIMITER '|' NEWLINE 'cr';
+	           SELECT string_agg(c, ',' ORDER BY a) FROM cf WHERE a > 5;")
+	out2=$(q 0 "COPY cf FROM STDIN WITH NEWLINE 'lf2';")
+	out3=$(q 0 "COPY cf TO STDOUT WITH NEWLINE 'lf';")
+	[ "$out" = "six,seven,eight,nine" ] &&
+	[ "$out2" = 'ERROR:  invalid value for NEWLINE "lf2"
+HINT:  Valid options are: '"'LF', 'CRLF' and 'CR'." ] &&
+	[ "$out3" = "ERROR:  newline currently available for data loading only, not unloading" ] \
+		&& ok "NEWLINE ends a line where it says, and only a COPY FROM takes it" \
+		|| notok "NEWLINE" "$out / $out2 / $out3"
+	out=$(printf '%s\n' "COPY ce FROM STDIN WITH DELIMITER '|' ESCAPE '#';" "at #100 and #|bar|1" 'one \ back|2' '\.' \
+		"COPY ce FROM STDIN WITH DELIMITER '|' ESCAPE 'off';" 'c:\\dir\new|3' '\.' | qf 0)
+	q 0 "COPY ce FROM PROGRAM 'printf \"x\\\\\\\\y|4\\\\n\"' WITH DELIMITER '|' ESCAPE 'off';" >/dev/null
+	out2=$(q 0 "SELECT string_agg(a, ' / ' ORDER BY b) FROM ce;")
+	[ -z "$out" ] && [ "$out2" = 'at @ and |bar / one \ back / c:\\dir\new / x\y' ] \
+		&& ok "text's ESCAPE, a character of its own or OFF, from the client and a program" \
+		|| notok "text's ESCAPE" "$out / $out2"
+	out=$(q 0 "COPY (SELECT * FROM ce WHERE b > 1) TO '$ROOT/ce.txt' WITH DELIMITER '|' ESCAPE 'off';
+	           DELETE FROM ce WHERE b > 1;
+	           COPY ce FROM '$ROOT/ce.txt' WITH DELIMITER '|' ESCAPE 'off';")
+	out2=$(q 0 "SELECT string_agg(a, ' / ' ORDER BY b) FROM ce WHERE b > 1;")
+	out3=$(q 0 "COPY (SELECT E'a\\\\b', E'c\\nd|e', NULL::text) TO STDOUT WITH DELIMITER '|' ESCAPE '#';
+	            COPY (SELECT E'a\\\\b', NULL::text) TO STDOUT WITH DELIMITER '|' ESCAPE 'off';")
+	q 0 "COPY (SELECT 'to a program') TO PROGRAM 'cat > $ROOT/ce_prog.txt' ESCAPE 'OFF';" >/dev/null
+	[ -z "$out" ] && [ "$out2" = 'one \ back / c:\\dir\new / x\y' ] &&
+	[ "$out3" = 'a#\b|c#nd#|e|\N
+a\b|\N' ] && [ "$(cat "$ROOT/ce_prog.txt" 2>&1)" = "to a program" ] \
+		&& ok "and COPY TO writes with it, to a file, the client and a program" \
+		|| notok "COPY TO with text's ESCAPE" "$out / $out2 / $out3 / $(cat "$ROOT/ce_prog.txt" 2>&1)"
+	q 0 "CREATE TABLE cp (i int) DISTRIBUTED BY (i) PARTITION BY RANGE (i) (START (1) END (5) EVERY (1));" >/dev/null
+	out=$(printf '%s\n' "COPY cp FROM STDIN LOG ERRORS SEGMENT REJECT LIMIT 10;" "2" "10000" "f" "3" '\.' |
+		qf 0 | sed 's/^psql:<stdin>:[0-9]*: //')
+	out2=$(q 0 "SELECT string_agg(i::text, ',' ORDER BY i) FROM cp;
+	            SELECT string_agg(linenum || ':' || errmsg, ' / ' ORDER BY linenum) FROM gp_read_error_log('cp');")
+	[ "$out" = "NOTICE:  found 2 data formatting errors (2 or more input rows), rejected related input data" ] &&
+	[ "$out2" = '2,3
+2:no partition of relation "cp" found for row / 3:invalid input syntax for type integer: "f", column i' ] \
+		&& ok "a row no partition takes is a data error under SEGMENT REJECT LIMIT, logged with its line" \
+		|| notok "SEGMENT REJECT LIMIT and a row no partition takes" "$out / $out2"
+
 	out=$(q 0 "SELECT count(*) FROM (SELECT a FROM d WHERE a < 5 FOR UPDATE) s;")
 	[ "$out" = "4" ] && ok "SELECT ... FOR UPDATE locks the table, as Cloudberry does without GDD" \
 		|| notok "SELECT FOR UPDATE" "$out"
