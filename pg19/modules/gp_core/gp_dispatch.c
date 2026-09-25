@@ -127,6 +127,35 @@ static int	gp_gang_creation_retry_count = 5;
 static int	gp_gang_creation_retry_timer = 2000;
 
 /*
+ * gp.log_gang: Cloudberry's gp_log_gang, how much the dispatcher says of its
+ * gang in the server log -- the gang made and let go, each connection, each
+ * statement sent.
+ */
+typedef enum GangLogLevel
+{
+	GANG_LOG_OFF,
+	GANG_LOG_TERSE,
+	GANG_LOG_VERBOSE,
+	GANG_LOG_DEBUG,
+} GangLogLevel;
+
+static int	gp_log_gang = GANG_LOG_OFF;
+
+static const struct config_enum_entry gp_log_gang_options[] = {
+	{"off", GANG_LOG_OFF, false},
+	{"terse", GANG_LOG_TERSE, false},
+	{"verbose", GANG_LOG_VERBOSE, false},
+	{"debug", GANG_LOG_DEBUG, false},
+	{NULL, 0, false}
+};
+
+#define GANG_LOG(level, ...) \
+	do { \
+		if (gp_log_gang >= (level)) \
+			ereport(LOG, errmsg_internal(__VA_ARGS__)); \
+	} while (0)
+
+/*
  * The settings a segment has to share with the coordinator for a statement to
  * mean the same thing there: which schema a name is looked up in, which role
  * is doing it, how a date is read and written, where a table goes.
@@ -350,6 +379,8 @@ gang_close(void)
 	if (gang == NULL)
 		return;
 
+	GANG_LOG(GANG_LOG_TERSE, "gang of %d segments closed%s", gang->nconns,
+			 gang_in_xact ? ", with a transaction open on it" : "");
 	if (gang_in_xact)
 		gang_xact_lost = true;
 	gang_in_xact = false;
@@ -582,9 +613,14 @@ gang_connect(void)
 		gang->conns[i].conn = conn;
 		gang->conns[i].busy = false;
 		PQsetNoticeReceiver(conn, segment_notice_receiver, NULL);
+		GANG_LOG(GANG_LOG_VERBOSE, "connected to segment %d (%s:%d), backend %d",
+				 segs[i].content, segs[i].hostname, segs[i].port,
+				 PQbackendPID(conn));
 	}
 
 	gang_build_wes(gang);
+	GANG_LOG(GANG_LOG_TERSE, "gang of %d segments made for database \"%s\", user \"%s\"",
+			 nsegs, dbname, username);
 }
 
 /*
@@ -966,6 +1002,7 @@ conn_send(GpSegmentConn *c, const char *sql)
 		elog(ERROR, "segment %d is still busy with an earlier statement",
 			 c->content);
 
+	GANG_LOG(GANG_LOG_DEBUG, "to segment %d: %s", c->content, sql);
 	if (!PQsendQuery(c->conn, sql))
 	{
 		char	   *msg = pstrdup(PQerrorMessage(c->conn));
@@ -4148,6 +4185,16 @@ GpDispatchInit(void)
 							PGC_USERSET,
 							GUC_UNIT_MS,
 							NULL, NULL, NULL);
+
+	DefineCustomEnumVariable("gp.log_gang",
+							 "How much the dispatcher logs of its gang.",
+							 "Valid values are \"off\", \"terse\", \"verbose\" and \"debug\".",
+							 &gp_log_gang,
+							 GANG_LOG_OFF,
+							 gp_log_gang_options,
+							 PGC_USERSET,
+							 GUC_NOT_IN_SAMPLE,
+							 NULL, NULL, NULL);
 
 	DefineCustomStringVariable("gp.internal_passfile",
 							   "Password file the dispatcher hands libpq.",
