@@ -1,6 +1,7 @@
 @@
 -ERROR:  row is too big: size 33256, maximum size 32736
 +ERROR:  row is too big: size 41216, maximum size 8160
++CONTEXT:  COPY oversize_test, line 1
 @@
 -ERROR:  row is too big: size 33256, maximum size 32736
 +ERROR:  row is too big: size 41216, maximum size 8160

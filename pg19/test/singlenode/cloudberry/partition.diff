@@ -16,17 +16,6 @@
 @@
 -NOTICE:  no privileges could be revoked
 @@
-+ERROR:  syntax error at or near "readable"
-+LINE 1: create readable external table bar_p(i int, j int) location ...
-+               ^
-@@
--NOTICE:  partition constraints are not validated when attaching a readable external table
-+ERROR:  relation "bar_p" does not exist
-@@
--ERROR:  cannot truncate foreign table "foo_p_1_prt_2"
-@@
-+ERROR:  table "bar_p" does not exist
-@@
 -Partitions: foo_p_1_prt_1 FOR VALUES FROM (1) TO (2),
 -            foo_p_1_prt_2 FOR VALUES FROM (2) TO (3)
 +Partitions:
@@ -136,9 +125,9 @@
 +    k_1_prt_mydef DEFAULT
 @@
 -NOTICE:  found 2 data formatting errors (2 or more input rows), rejected related input data
-+ERROR:  syntax error at or near "log"
-+LINE 1: copy ao_p from stdin log errors segment reject limit 100;
-+                             ^
++DETAIL:  Partition key of the failing row contains (i) = (10000).
++ERROR:  no partition of relation "ao_p" found for row
++CONTEXT:  COPY ao_p, line 3: "10000"
 @@
 - 2
 - 3

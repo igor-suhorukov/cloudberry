@@ -5,8 +5,9 @@
 -- extensions, whose SQL objects a database has once it creates them: the
 -- functions DISTRIBUTED BY and CREATE TAG become, among others.  PostgreSQL's
 -- tests ran before this in a database with none of them, as PostgreSQL's own
--- suite expects to; Cloudberry's run with every M1 module's, and gp_ao's,
--- M5's: the append-optimized tables' access methods and their catalogs.
+-- suite expects to; Cloudberry's run with every M1 module's, and gp_ao's
+-- and gp_exttable's, M5's: the append-optimized tables' access methods and
+-- their catalogs, and external tables, which one node reads itself.
 --
 CREATE EXTENSION gp_core;
 CREATE EXTENSION gp_orca;
@@ -15,6 +16,7 @@ CREATE EXTENSION gp_matview;
 CREATE EXTENSION gp_sql;
 CREATE EXTENSION gp_security;
 CREATE EXTENSION gp_ao;
+CREATE EXTENSION gp_exttable;
 SELECT extname FROM pg_extension WHERE extname LIKE 'gp\_%' ORDER BY 1;
 --
 -- Cloudberry's tag test defines its tags here and goes on in database

@@ -18,7 +18,7 @@
 # under the License.
 #
 # Cloudberry's singlenode regression suite, as the port runs it, against
-# every M1 module and gp_ao, M5's.
+# every M1 module, and gp_ao and gp_exttable, M5's.
 #
 # src/test/singlenode_regress is what Cloudberry runs in its single-node
 # mode: PostgreSQL's regression tests, its parallel_schedule, and then
@@ -121,7 +121,7 @@ run_tests=$(awk '$1 == "run" { print $2 }' "$HERE/manifest")
 groups=($(awk '$1 == "run" && $3 != "" && !seen[$3]++ { print $3 }' "$HERE/manifest"))
 [ "${#groups[@]}" -gt 0 ] || groups=(1)
 
-echo "singlenode: Cloudberry's singlenode suite, with every M1 module and gp_ao loaded"
+echo "singlenode: Cloudberry's singlenode suite, with every M1 module, gp_ao and gp_exttable loaded"
 echo "  PostgreSQL's tests from $(cat "$PGSUITE/.pg_ref_commit" 2>/dev/null || echo '?'), the server from $(cat "$("$BINDIR/pg_config" --bindir)/../.pg_ref_commit" 2>/dev/null || echo '?')"
 printf '  of the 290 tests Cloudberry schedules: %d of Cloudberry'"'"'s run here, %d are PostgreSQL'"'"'s, %d lines skip\n' \
 	"$(echo "$run_tests" | wc -w)" \
@@ -138,8 +138,8 @@ echo
 	echo "port = $PORT"
 	echo "fsync = off"
 	# Every module there is to load here, in the order cloudberry.md gives:
-	# M1's, and gp_ao, M5's.
-	echo "shared_preload_libraries = 'gp_core,gp_orca,gp_task,gp_matview,gp_sql,gp_security,gp_ao'"
+	# M1's, and gp_ao and gp_exttable, M5's.
+	echo "shared_preload_libraries = 'gp_core,gp_orca,gp_task,gp_matview,gp_sql,gp_security,gp_ao,gp_exttable'"
 	# What pg_regress's own temporary instance sets that a test depends on.
 	echo "max_prepared_transactions = 2"
 } >> "$WORK/data/postgresql.conf"

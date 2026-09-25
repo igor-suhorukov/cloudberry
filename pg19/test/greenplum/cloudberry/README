@@ -96,7 +96,8 @@ bfv_subquery (planner)  count_operator() finds no Seq Scan in the plan of
   the Motion.
 
 bitmap_index  PostgreSQL 19's limit on an index row, a third of an 8K page,
-  where Cloudberry's 32K pages take a larger one; and the HINT and the
+  where Cloudberry's 32K pages take a larger one, refused on the segment the
+  row goes to, whose CONTEXT names the COPY's line; and the HINT and the
   WARNING Cloudberry's fault injector gives with a PANIC, which name its FTS
   probe's fault, which the port's has not.
 

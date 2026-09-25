@@ -203,10 +203,7 @@
 -ALTER table errcopy ADD COLUMN c int;
 -COPY errcopy from '/tmp/errcopy.csv' csv null '' log errors segment reject limit 10 rows;
 -NOTICE:  found 9 data formatting errors (9 or more input rows), rejected related input data
-+ERROR:  syntax error at or near "newline"
-+LINE 1: ..._regression_newline from stdin with delimiter '|' newline 'b...
-+                                                             ^
-@@
+-SELECT * FROM errcopy;
 - a | b | c 
 ----+---+---
 - 5 | 5 |  
@@ -261,7 +258,10 @@
 -TRUNCATE errcopy;
 -COPY errcopy from stdin csv newline 'LF' log errors segment reject limit 3 rows;
 -NOTICE:  found 1 data formatting errors (1 or more input rows), rejected related input data
--SELECT * FROM errcopy;
++ERROR:  syntax error at or near "newline"
++LINE 1: ..._regression_newline from stdin with delimiter '|' newline 'b...
++                                                             ^
+@@
 - a | b | c 
 ----+---+---
 - 1 | 2 | 0
@@ -274,22 +274,13 @@
 @@
 +ERROR:  relation "errcopy" does not exist
 @@
-- gp_truncate_error_log 
-------------------------
 - t
--(1 row)
--
-+ERROR:  function gp_truncate_error_log(unknown) does not exist
-+LINE 1: SELECT gp_truncate_error_log('errcopy');
-+               ^
-+DETAIL:  There is no function of that name.
++ f
 @@
 -DETAIL:  Last error was: invalid input syntax for type integer: "1       4", column a
 -ERROR:  segment reject limit reached, aborting operation
 -CONTEXT:  COPY errcopy, line 3, column a: "1       4"
-+ERROR:  syntax error at or near "log"
-+LINE 1: COPY errcopy from stdin delimiter E'\t' log errors segment r...
-+                                                ^
++ERROR:  relation "errcopy" does not exist
 @@
 - a | b | c 
 ----+---+---
@@ -305,30 +296,19 @@
 - errcopy | <stdin>  |         | invalid input syntax for type integer: "1       3       4", column a
 - errcopy | <stdin>  |         | invalid input syntax for type integer: "1       4", column a
 -(3 rows)
--
-+ERROR:  function gp_read_error_log(unknown) does not exist
-+LINE 1: SELECT relname, filename, bytenum, errmsg FROM gp_read_error...
-+                                                       ^
-+DETAIL:  There is no function of that name.
++ relname | filename | bytenum | errmsg 
++---------+----------+---------+--------
++(0 rows)
 @@
 +ERROR:  relation "errcopy" does not exist
 @@
-- gp_truncate_error_log 
-------------------------
 - t
--(1 row)
--
-+ERROR:  function gp_truncate_error_log(unknown) does not exist
-+LINE 1: SELECT gp_truncate_error_log('errcopy');
-+               ^
-+DETAIL:  There is no function of that name.
++ f
 @@
 -DETAIL:  Last error was: missing data for column "b"
 -ERROR:  segment reject limit reached, aborting operation
 -CONTEXT:  COPY errcopy, line 5: "1"
-+ERROR:  syntax error at or near "log"
-+LINE 1: COPY errcopy from stdin delimiter '/' log errors segment rej...
-+                                              ^
++ERROR:  relation "errcopy" does not exist
 @@
 - relname | filename | bytenum |                errmsg                 
 ----------+----------+---------+---------------------------------------
@@ -336,11 +316,9 @@
 - errcopy | <stdin>  |         | missing data for column "b"
 - errcopy | <stdin>  |         | missing data for column "c"
 -(3 rows)
--
-+ERROR:  function gp_read_error_log(unknown) does not exist
-+LINE 1: SELECT relname, filename, bytenum, errmsg FROM gp_read_error...
-+                                                       ^
-+DETAIL:  There is no function of that name.
++ relname | filename | bytenum | errmsg 
++---------+----------+---------+--------
++(0 rows)
 @@
 +ERROR:  could not find function "broken_int4out" in file "/cb/pgregress/regress.so"
 @@
