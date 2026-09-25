@@ -502,6 +502,43 @@ foreach m : modules
 endforeach
 
 ###############################################################################
+# gpfdist
+#
+# Cloudberry's file server of external tables (src/bin/gpfdist), a program
+# of its own that gp_exttable's gpfdist:// locations read from and write to.
+# It is built as Cloudberry builds it: against the server's headers, whose
+# pg_config.h says whether it speaks SSL and zstd, with the frontend's port
+# and common libraries, and with the file streams gp_exttable shares
+# (common/fstream), gfile.c as a frontend's.  Its transforms need libyaml.
+###############################################################################
+
+apr_dep = dependency('apr-1', required: get_option('gpfdist'))
+event_dep = dependency('libevent', required: get_option('gpfdist'))
+if apr_dep.found() and event_dep.found()
+  yaml_dep = dependency('yaml-0.1', required: false)
+  ssl_dep = dependency('openssl', required: false)
+  gpfdist_c_args = ['-DFRONTEND', '-DGP_VERSION="' + meson.project_version() + '"']
+  gpfdist_sources = files('bin/gpfdist/gpfdist.c',
+                          'bin/gpfdist/gpfdist_helper.c',
+                          'common/fstream/fstream.c',
+                          'common/fstream/gfile.c')
+  if yaml_dep.found()
+    gpfdist_sources += files('bin/gpfdist/transform.c')
+    gpfdist_c_args += '-DGPFXDIST'
+  endif
+  executable('gpfdist', gpfdist_sources,
+    c_args: gpfdist_c_args,
+    include_directories: [pg_inc, include_directories('common', 'bin/gpfdist')],
+    dependencies: [apr_dep, event_dep, yaml_dep, ssl_dep, zlib_dep, zstd_dep,
+                   dependency('threads')],
+    link_args: [pg_libdir / 'libpgcommon.a', pg_libdir / 'libpgport.a', '-lm'],
+    install: true,
+    install_dir: pg['bindir'],
+  )
+  built_modules += 'gpfdist (program)'
+endif
+
+###############################################################################
 # Test-only modules
 #
 # gp_probe sets every hook of the core patch series so that the hook tests can
