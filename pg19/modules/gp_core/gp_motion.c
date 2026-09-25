@@ -112,10 +112,12 @@
 #include "parser/parse_func.h"
 #include "parser/parsetree.h"
 #include "storage/lmgr.h"
+#include "tcop/pquery.h"
 #include "utils/builtins.h"
 #include "utils/guc.h"
 #include "varatt.h"
 #include "utils/lsyscache.h"
+#include "utils/portal.h"
 #include "utils/rel.h"
 #include "utils/resowner.h"
 #include "utils/ruleutils.h"
@@ -3459,6 +3461,66 @@ report_slices(PlannedStmt *stmt)
 }
 
 /*
+ * A cursor's plan, its gathers started as it is declared.
+ *
+ * A gather opens its segments' cursors when it is first read, which for a
+ * cursor is its first FETCH: the segments' cursors took their snapshots
+ * then, and a statement of the transaction's between the DECLARE and the
+ * FETCH -- a DELETE of rows the cursor was to read -- was already in what
+ * they read, where on the coordinator a cursor reads as of its DECLARE.
+ * Cloudberry's dispatches a cursor's slices as it is declared
+ * (ExecutorStart(), CdbDispatchPlan()), and so does this: each gather and
+ * Gather Motion of the plan, as the executor has made it, opens its
+ * segments' cursors now, which take their snapshots before any later
+ * statement of the transaction runs there.
+ *
+ * Not a Motion whose fragment is sent values the coordinator computes as it
+ * runs -- a parameter of a NestLoop's above it, or an initplan's -- nor a
+ * gather for WHERE CURRENT OF: those are read as they were.
+ */
+static bool
+motion_start_early(MotionState *state)
+{
+	List	   *priv = ((CustomScan *) state->css.ss.ps.plan)->custom_private;
+
+	if (state->sending || state->receiving || state->streamed ||
+		state->type != GP_MOTION_GATHER || state->gather != NULL || state->done)
+		return false;
+	if (list_length(priv) > MOTION_PRIVATE_EXTERN_PARAMS &&
+		(List *) list_nth(priv, MOTION_PRIVATE_EXEC_PARAMS) != NIL)
+		return false;
+	motion_start(state);
+	return true;
+}
+
+static bool
+start_early_walker(PlanState *ps, void *context)
+{
+	if (ps == NULL)
+		return false;
+	/* what is below one is the segments' */
+	if (GpGatherScanStartEarly(ps))
+		return false;
+	if (IsA(ps, CustomScanState) &&
+		((CustomScanState *) ps)->methods == &motion_exec_methods)
+	{
+		(void) motion_start_early((MotionState *) ps);
+		return false;
+	}
+	return planstate_tree_walker(ps, start_early_walker, context);
+}
+
+/* Is this the start of a cursor's portal, which other statements may interleave? */
+static bool
+starting_cursor(void)
+{
+	return ActivePortal != NULL && ActivePortal->name != NULL &&
+		ActivePortal->name[0] != '\0' &&
+		ActivePortal->status == PORTAL_DEFINED &&
+		ActivePortal->queryDesc == NULL;
+}
+
+/*
  * The writer's fragment of a statement whose slices run at once: its
  * snapshot and its transaction's state, for its readers, before anything of
  * it runs -- they wait for it to start.
@@ -3522,6 +3584,15 @@ motion_executor_start(QueryDesc *queryDesc, int eflags)
 
 	if (params != NIL)
 		fragment_params_after_start(queryDesc, params);
+
+	if (GpClusterBackendRole() == GP_ROLE_DISPATCH &&
+		!(eflags & EXEC_FLAG_EXPLAIN_ONLY) && starting_cursor())
+	{
+		MemoryContext oldcxt = MemoryContextSwitchTo(queryDesc->estate->es_query_cxt);
+
+		(void) start_early_walker(queryDesc->planstate, NULL);
+		MemoryContextSwitchTo(oldcxt);
+	}
 }
 
 /*

@@ -70,6 +70,13 @@ extern void GpScanClearLocking(void);
 extern bool GpScanSetCursor(bool cursor);
 
 /*
+ * A cursor's gather, its segments' cursors opened as the cursor is declared
+ * (gp_motion.c, start_early_walker()): false if ps is not a gather of
+ * gp_scan.c's.
+ */
+extern bool GpGatherScanStartEarly(struct PlanState *ps);
+
+/*
  * Before a statement is planned: Cloudberry's NOTICE for a NOT IN whose
  * subquery reads a distributed table's ctid without its gp_segment_id,
  * which its planner finds in an anti-join and PostgreSQL's keeps a subplan.

@@ -1791,6 +1791,21 @@ gather_exec(CustomScanState *node)
 	return ExecScan(&node->ss, gather_next, gather_recheck);
 }
 
+bool
+GpGatherScanStartEarly(PlanState *ps)
+{
+	GatherScanState *state = (GatherScanState *) ps;
+
+	if (!IsA(ps, CustomScanState) ||
+		((CustomScanState *) ps)->methods != &gather_exec_methods)
+		return false;
+
+	/* WHERE CURRENT OF reads the row its cursor is on when it runs */
+	if (!gather_is_current_of(state) && state->gather == NULL && !state->done)
+		(void) gather_start(state);
+	return true;
+}
+
 static void
 gather_end(CustomScanState *node)
 {
