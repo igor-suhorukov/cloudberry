@@ -1,0 +1,50 @@
+Part of Cloudberry's pax_schedule on the port's cluster: the differences
+from Cloudberry's expected output that have been reviewed, and are the
+port's for a reason of its own.
+
+Each file is one test's difference in the form ../../singlenode/canon.pl
+gives it, named for the expected output it differs from, a test in a
+directory with its / as _ (statistics_min_max_time_types.diff).  run.sh
+counts a test as passing when gpdiff.pl, under Cloudberry's init_file,
+PAX's and the port's, finds no difference or exactly the file's.
+
+alter_distributed  ALTER TABLE ... SET DISTRIBUTED BY, which Cloudberry
+  carries out by writing the rows into a new table and swapping the two
+  tables' files, and PAX's fast sequences with them; the port by copying
+  the rows out to a temporary table, emptying the table and putting them
+  back (gp_sql's distribution.c).  There is no swap, so the fault the test
+  injects into it, pax_finish_swap_fast_fastsequence, never fires: the
+  ALTER commits where Cloudberry's is rolled back by the segments' panic,
+  and the fast sequences read after it are the ones the redistributed rows
+  gave the table, as after the test's first ALTER, where both agree.
+
+ddl  psql's \d+ of a table with NOT NULL columns, which PostgreSQL 19's
+  psql lists under "Not-null constraints:", as PostgreSQL 18 keeps them in
+  pg_constraint.  And gp_toolkit.gp_size_of_schema_disk: the port's
+  gp_toolkit has gp_ao's functions alone, and not yet Cloudberry's
+  gp_toolkit extension, whose view it is.
+
+types  a pg_lsn, which PostgreSQL 19 prints with the low half in eight
+  digits, 16/00000000, where Cloudberry's printed 16/0.
+
+filter_tree  PAX's LOG of the filter it makes of a scan's conditions, on a
+  segment.  Cloudberry sends a segment its plan whole; the port's planner
+  sends a scan's conditions only where they mean the same on a segment
+  (gp_core's gp_scan.c), so none that calls intrc(), the test's volatile
+  function: the coordinator evaluates it on the rows the segments send, so
+  an OR with it sends no condition and an AND the others alone.  And a
+  join whose condition on one table's column Cloudberry's planner copies
+  to the column of the other that it is joined to
+  (gp_enable_predicate_propagation, generate_implied_quals() in its
+  pathkeys.c) and PostgreSQL 19's planner does not: t1's scan is sent
+  v1 > 1 without v1 < 10, which would have skipped its second file.  The
+  counts are the same.
+
+statistics/min_max_time_types, statistics/min_max_other_types  the same
+  LOG, of the files and groups PAX's statistics skip, for conditions whose
+  functions are stable: a date or a timestamp compared with a timestamptz
+  and the other way round, and a time with a timetz and the other way
+  round, whose answers depend on TimeZone, and a money constant
+  cast from an integer, which depends on lc_monetary.  The coordinator
+  evaluates them, and no file or group is skipped on a segment.  The
+  counts are the same.

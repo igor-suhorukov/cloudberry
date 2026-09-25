@@ -1,0 +1,42 @@
+# Cloudberry's PAX tests (contrib/pax_storage/pax_schedule), as the port runs
+# them on a coordinator and three segments, in the schedule's order and
+# groups.
+#
+#   run   the test runs here; cloudberry/ holds a difference reviewed and
+#         kept, where it has one
+#   skip  it needs what the port does not have: the rest of the line says
+#         what
+run  setup
+run  pax_inject_fault
+skip cbdb_parallel  intra-segment parallelism, which the port has not before M7 (decision 2): gp.enable_parallel is accepted and a segment runs a slice in one process
+run  alter_distributed
+run  toast
+run  toast_failed
+run  detoast
+run  ddl
+run  numeric
+run  types
+run  filter
+run  update
+run  statistics_bloom_filter
+run  delete_bloom_stats
+run  filter_tree
+run  filter_tree_arithmetic
+run  filter_tree_root_quals
+run  statistics/statistics
+run  delete_sum_stats
+run  statistics/min_max_time_types
+run  statistics/min_max_text_types
+run  statistics/min_max_other_types
+run  statistics/min_max_net_types
+run  statistics/min_max_int_types
+run  statistics/min_max_geo_types
+run  statistics/min_max_float_types
+run  statistics/min_max_bit_byte_types
+run  visimap_vec_compact
+run  visimap_vec_storage
+run  default_value
+run  dictionary_encoding
+run  cluster
+run  db_size_functions
+run  teardown

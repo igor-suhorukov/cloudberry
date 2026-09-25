@@ -1,0 +1,27 @@
+-- The port's additions to Cloudberry's and PAX's init_files, read by gpdiff.pl
+-- after them.
+
+-- start_matchignore
+
+# ORCA's line, as gp_orca prints it; Cloudberry's init_file masks the planner's
+# and "Pivotal Optimizer (GPORCA)".
+m/^ Optimizer: GPORCA$/
+
+# The footer Cloudberry's psql gives \d of a table, which PostgreSQL 19's
+# psql, the one the suite runs, does not (see the greenplum suite).
+m/^Distributed (by: \(.*\)|randomly|Replicated)$/
+
+# An error a segment raised names the segment in a DETAIL of its own where
+# the error has none (see the greenplum suite).
+m/^DETAIL:  segment \d+ \([^)]*\)(; \d+ other segments failed too)?$/
+
+-- end_matchignore
+
+-- start_matchsubs
+
+# Where an error a segment raised has a detail of its own, that detail is
+# Cloudberry's DETAIL, and the segment and the count before and after it go.
+m/^DETAIL:  segment \d+ \([^)]*\): /
+s/^DETAIL:  segment \d+ \([^)]*\): (.*?)(; \d+ other segments failed too)?$/DETAIL:  $1/
+
+-- end_matchsubs

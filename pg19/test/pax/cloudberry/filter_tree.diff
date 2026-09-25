@@ -1,0 +1,107 @@
+@@
+-LOG:  Origin filter tree: 
+-OrNode
+-  ├── OpNode(opno=521, strategy=5, collation=0, ltypid=23, rtypid=23)
+-  │  ├── VarNode(attrno=2)
+-  │  └── ConstNode(const_type=23, flags=0)
+-  └── OpNode(opno=97, strategy=1, collation=0, ltypid=23, rtypid=23)
+-    ├── UnsupportedNode(reason=Not support funcformat in FuncExpr, [funcformat=0])
+-    └── ConstNode(const_type=23, flags=0)
+-
+-Final filter tree: 
+-UnsupportedNode(reason=Not support funcformat in FuncExpr, [funcformat=0])
+-LOG:  Origin filter tree: 
+-OrNode
+-  ├── OpNode(opno=521, strategy=5, collation=0, ltypid=23, rtypid=23)
+-  │  ├── VarNode(attrno=2)
+-  │  └── ConstNode(const_type=23, flags=0)
+-  └── OpNode(opno=97, strategy=1, collation=0, ltypid=23, rtypid=23)
+-    ├── UnsupportedNode(reason=Not support funcformat in FuncExpr, [funcformat=0])
+-    └── ConstNode(const_type=23, flags=0)
+-
+-Final filter tree: 
+-UnsupportedNode(reason=Not support funcformat in FuncExpr, [funcformat=0])
+-LOG:  Origin filter tree: 
+-OrNode
+-  ├── OpNode(opno=521, strategy=5, collation=0, ltypid=23, rtypid=23)
+-  │  ├── VarNode(attrno=2)
+-  │  └── ConstNode(const_type=23, flags=0)
+-  └── OpNode(opno=97, strategy=1, collation=0, ltypid=23, rtypid=23)
+-    ├── UnsupportedNode(reason=Not support funcformat in FuncExpr, [funcformat=0])
+-    └── ConstNode(const_type=23, flags=0)
+-
+-Final filter tree: 
+-UnsupportedNode(reason=Not support funcformat in FuncExpr, [funcformat=0])
+@@
+-AndNode
+-  ├── OpNode(opno=521, strategy=5, collation=0, ltypid=23, rtypid=23)
+-  │  ├── VarNode(attrno=2)
+-  │  └── ConstNode(const_type=23, flags=0)
+-  └── OpNode(opno=97, strategy=1, collation=0, ltypid=23, rtypid=23)
+-    ├── UnsupportedNode(reason=Not support funcformat in FuncExpr, [funcformat=0])
+-    └── ConstNode(const_type=23, flags=0)
+-
+-Final filter tree: 
+-AndNode
+-  ├── OpNode(opno=521, strategy=5, collation=0, ltypid=23, rtypid=23)
+-  │  ├── VarNode(attrno=2)
+-  │  └── ConstNode(const_type=23, flags=0)
+-  └── UnsupportedNode(reason=Not support funcformat in FuncExpr, [funcformat=0])
+-LOG:  Origin filter tree: 
+-AndNode
+-  ├── OpNode(opno=521, strategy=5, collation=0, ltypid=23, rtypid=23)
+-  │  ├── VarNode(attrno=2)
+-  │  └── ConstNode(const_type=23, flags=0)
+-  └── OpNode(opno=97, strategy=1, collation=0, ltypid=23, rtypid=23)
+-    ├── UnsupportedNode(reason=Not support funcformat in FuncExpr, [funcformat=0])
+-    └── ConstNode(const_type=23, flags=0)
+-
+-Final filter tree: 
+-AndNode
+-  ├── OpNode(opno=521, strategy=5, collation=0, ltypid=23, rtypid=23)
+-  │  ├── VarNode(attrno=2)
+-  │  └── ConstNode(const_type=23, flags=0)
+-  └── UnsupportedNode(reason=Not support funcformat in FuncExpr, [funcformat=0])
+-LOG:  Origin filter tree: 
+-AndNode
+-  ├── OpNode(opno=521, strategy=5, collation=0, ltypid=23, rtypid=23)
+-  │  ├── VarNode(attrno=2)
+-  │  └── ConstNode(const_type=23, flags=0)
+-  └── OpNode(opno=97, strategy=1, collation=0, ltypid=23, rtypid=23)
+-    ├── UnsupportedNode(reason=Not support funcformat in FuncExpr, [funcformat=0])
+-    └── ConstNode(const_type=23, flags=0)
+-
+-Final filter tree: 
+-AndNode
+-  ├── OpNode(opno=521, strategy=5, collation=0, ltypid=23, rtypid=23)
+-  │  ├── VarNode(attrno=2)
+-  │  └── ConstNode(const_type=23, flags=0)
+-  └── UnsupportedNode(reason=Not support funcformat in FuncExpr, [funcformat=0])
++OpNode(opno=521, strategy=5, collation=0, ltypid=23, rtypid=23)
++  ├── VarNode(attrno=2)
++  └── ConstNode(const_type=23, flags=0)
++
++Final filter tree: 
++OpNode(opno=521, strategy=5, collation=0, ltypid=23, rtypid=23)
++  ├── VarNode(attrno=2)
++  └── ConstNode(const_type=23, flags=0)
++LOG:  Origin filter tree: 
++OpNode(opno=521, strategy=5, collation=0, ltypid=23, rtypid=23)
++  ├── VarNode(attrno=2)
++  └── ConstNode(const_type=23, flags=0)
++
++Final filter tree: 
++OpNode(opno=521, strategy=5, collation=0, ltypid=23, rtypid=23)
++  ├── VarNode(attrno=2)
++  └── ConstNode(const_type=23, flags=0)
++LOG:  Origin filter tree: 
++OpNode(opno=521, strategy=5, collation=0, ltypid=23, rtypid=23)
++  ├── VarNode(attrno=2)
++  └── ConstNode(const_type=23, flags=0)
++
++Final filter tree: 
++OpNode(opno=521, strategy=5, collation=0, ltypid=23, rtypid=23)
++  ├── VarNode(attrno=2)
++  └── ConstNode(const_type=23, flags=0)
+@@
+-LOG:  kind file, filter rate: 1 / 2

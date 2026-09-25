@@ -1,0 +1,8 @@
+@@
+-ERROR:  fault triggered, fault name:'pax_finish_swap_fast_fastsequence' fault type:'panic'
+@@
+-             0 |   0
++             0 |   1
+@@
+-             2 |   1
++             2 |   0

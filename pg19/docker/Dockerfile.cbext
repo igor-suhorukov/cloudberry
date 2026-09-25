@@ -203,6 +203,12 @@ COPY --from=build /cb/src/test/isolation2 /cb/src/test/isolation2
 # Cloudberry's diskquota tests, which the diskquota suite runs: its two
 # schedules, their tests and expected output, and its init file.
 COPY --from=build /cb/gpcontrib/diskquota/tests /cb/gpcontrib/diskquota/tests
+# Cloudberry's PAX tests, which the pax suite runs: pax_schedule, its tests
+# and expected output, and PAX's init file.
+COPY --from=build /cb/contrib/pax_storage/pax_schedule /cb/contrib/pax_storage/init_file \
+                  /cb/contrib/pax_storage/
+COPY --from=build /cb/contrib/pax_storage/sql /cb/contrib/pax_storage/sql
+COPY --from=build /cb/contrib/pax_storage/expected /cb/contrib/pax_storage/expected
 COPY --from=build /pgregress /cb/pgregress
 COPY --from=postgis /postgis /postgis
 RUN chown -R postgres:postgres /cb /postgis

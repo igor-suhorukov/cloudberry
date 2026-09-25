@@ -42,6 +42,7 @@ singlenode             planner   74   PASSES=planner
 cluster                -         73
 orca                   -         72
 fts                    -         56
+pax                    -         40
 postgis_regress        planner   22   PASSES=planner
 hooks                  -         22
 security               -         18

@@ -1,0 +1,23 @@
+@@
++Not-null constraints:
++    "t1_name_not_null" NOT NULL "name"
++    "t1_height_not_null" NOT NULL "height"
++    "t1_decimal_col_not_null" NOT NULL "decimal_col"
++    "t1_created_at_not_null" NOT NULL "created_at"
++    "t1_updated_at_not_null" NOT NULL "updated_at"
+@@
++Not-null constraints:
++    "t2_name_not_null" NOT NULL "name"
++    "t2_height_not_null" NOT NULL "height"
++    "t2_decimal_col_not_null" NOT NULL "decimal_col"
++    "t2_created_at_not_null" NOT NULL "created_at"
++    "t2_updated_at_not_null" NOT NULL "updated_at"
+@@
+- ?column? 
+-----------
+-        1
+-(1 row)
+-
++ERROR:  relation "gp_toolkit.gp_size_of_schema_disk" does not exist
++LINE 1: select 1 from (select count(*) from gp_toolkit.gp_size_of_sc...
++                                            ^

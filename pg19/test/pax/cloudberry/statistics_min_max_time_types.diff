@@ -1,0 +1,223 @@
+@@
+-kind group, filter rate: 1 / 4
+@@
+-LOG:  kind file, filter rate: 1 / 2
+@@
+-LOG:  kind file, filter rate: 1 / 2
+-kind group, filter rate: 1 / 2
+@@
+-LOG:  kind file, filter rate: 2 / 2
+@@
+-LOG:  kind file, filter rate: 1 / 2
+-kind group, filter rate: 1 / 2
+@@
+-LOG:  kind file, filter rate: 1 / 2
+@@
+-kind group, filter rate: 1 / 4
+@@
+-LOG:  kind file, filter rate: 2 / 2
+@@
+-LOG:  kind file, filter rate: 1 / 2
+-kind group, filter rate: 1 / 2
+@@
+-LOG:  kind file, filter rate: 1 / 2
+-kind group, filter rate: 1 / 2
+@@
+-LOG:  kind file, filter rate: 2 / 2
+@@
+-LOG:  kind file, filter rate: 1 / 2
+-kind group, filter rate: 1 / 2
+@@
+-LOG:  kind file, filter rate: 2 / 2
+@@
+-kind group, filter rate: 1 / 4
+@@
+-LOG:  kind file, filter rate: 1 / 2
+@@
+-LOG:  kind file, filter rate: 1 / 2
+-kind group, filter rate: 1 / 2
+@@
+-LOG:  kind file, filter rate: 2 / 2
+@@
+-LOG:  kind file, filter rate: 2 / 2
+@@
+-LOG:  kind file, filter rate: 1 / 2
+-kind group, filter rate: 1 / 2
+@@
+-LOG:  kind file, filter rate: 1 / 2
+@@
+-kind group, filter rate: 1 / 4
+@@
+-LOG:  kind file, filter rate: 2 / 2
+@@
+-LOG:  kind file, filter rate: 2 / 2
+@@
+-LOG:  kind file, filter rate: 2 / 2
+@@
+-LOG:  kind file, filter rate: 2 / 2
+@@
+-LOG:  kind file, filter rate: 2 / 2
+@@
+-LOG:  kind file, filter rate: 2 / 2
+@@
+-LOG:  kind file, filter rate: 2 / 2
+@@
+-LOG:  kind file, filter rate: 2 / 2
+@@
+-LOG:  kind file, filter rate: 2 / 2
+@@
+-LOG:  kind file, filter rate: 2 / 2
+@@
+-LOG:  kind file, filter rate: 2 / 2
+@@
+-LOG:  kind file, filter rate: 2 / 2
+@@
+-LOG:  kind file, filter rate: 2 / 2
+@@
+-LOG:  kind file, filter rate: 2 / 2
+@@
+-LOG:  kind file, filter rate: 2 / 2
+@@
+-LOG:  kind file, filter rate: 2 / 2
+@@
+-LOG:  kind file, filter rate: 2 / 2
+@@
+-LOG:  kind file, filter rate: 2 / 2
+@@
+-LOG:  kind file, filter rate: 2 / 2
+@@
+-kind group, filter rate: 1 / 4
+@@
+-LOG:  kind file, filter rate: 1 / 2
+@@
+-LOG:  kind file, filter rate: 1 / 2
+-kind group, filter rate: 1 / 2
+@@
+-LOG:  kind file, filter rate: 2 / 2
+@@
+-LOG:  kind file, filter rate: 2 / 2
+@@
+-LOG:  kind file, filter rate: 1 / 2
+-kind group, filter rate: 1 / 2
+@@
+-LOG:  kind file, filter rate: 1 / 2
+@@
+-kind group, filter rate: 1 / 4
+@@
+-LOG:  kind file, filter rate: 2 / 2
+@@
+-LOG:  kind file, filter rate: 1 / 2
+-kind group, filter rate: 1 / 2
+@@
+-LOG:  kind file, filter rate: 1 / 2
+-kind group, filter rate: 1 / 2
+@@
+-LOG:  kind file, filter rate: 1 / 2
+-kind group, filter rate: 1 / 2
+@@
+-LOG:  kind file, filter rate: 1 / 2
+-kind group, filter rate: 1 / 2
+@@
+-LOG:  kind file, filter rate: 2 / 2
+@@
+-kind group, filter rate: 1 / 4
+@@
+-LOG:  kind file, filter rate: 1 / 2
+@@
+-LOG:  kind file, filter rate: 1 / 2
+-kind group, filter rate: 1 / 2
+@@
+-LOG:  kind file, filter rate: 2 / 2
+@@
+-LOG:  kind file, filter rate: 2 / 2
+@@
+-LOG:  kind file, filter rate: 1 / 2
+-kind group, filter rate: 1 / 2
+@@
+-LOG:  kind file, filter rate: 1 / 2
+@@
+-kind group, filter rate: 1 / 4
+@@
+-LOG:  kind file, filter rate: 2 / 2
+@@
+-LOG:  kind file, filter rate: 2 / 2
+@@
+-LOG:  kind file, filter rate: 2 / 2
+@@
+-LOG:  kind file, filter rate: 2 / 2
+@@
+-LOG:  kind file, filter rate: 2 / 2
+@@
+-LOG:  kind file, filter rate: 2 / 2
+@@
+-LOG:  kind file, filter rate: 2 / 2
+@@
+-LOG:  kind file, filter rate: 2 / 2
+@@
+-LOG:  kind file, filter rate: 2 / 2
+@@
+-LOG:  kind file, filter rate: 2 / 2
+@@
+-LOG:  kind file, filter rate: 2 / 2
+@@
+-LOG:  kind file, filter rate: 2 / 2
+@@
+-LOG:  kind file, filter rate: 2 / 2
+@@
+-LOG:  kind file, filter rate: 2 / 2
+@@
+-LOG:  kind file, filter rate: 2 / 2
+@@
+-LOG:  kind file, filter rate: 2 / 2
+@@
+-kind group, filter rate: 1 / 4
+@@
+-LOG:  kind file, filter rate: 1 / 2
+@@
+-LOG:  kind file, filter rate: 1 / 2
+-kind group, filter rate: 1 / 2
+@@
+-LOG:  kind file, filter rate: 2 / 2
+@@
+-LOG:  kind file, filter rate: 2 / 2
+@@
+-LOG:  kind file, filter rate: 1 / 2
+-kind group, filter rate: 1 / 2
+@@
+-LOG:  kind file, filter rate: 1 / 2
+@@
+-kind group, filter rate: 1 / 4
+@@
+-LOG:  kind file, filter rate: 2 / 2
+@@
+-LOG:  kind file, filter rate: 1 / 2
+-kind group, filter rate: 1 / 2
+@@
+-LOG:  kind file, filter rate: 1 / 2
+-kind group, filter rate: 1 / 2
+@@
+-LOG:  kind file, filter rate: 1 / 2
+-kind group, filter rate: 1 / 2
+@@
+-LOG:  kind file, filter rate: 1 / 2
+-kind group, filter rate: 1 / 2
+@@
+-LOG:  kind file, filter rate: 2 / 2
+@@
+-kind group, filter rate: 1 / 4
+@@
+-LOG:  kind file, filter rate: 1 / 2
+@@
+-LOG:  kind file, filter rate: 1 / 2
+-kind group, filter rate: 1 / 2
+@@
+-LOG:  kind file, filter rate: 2 / 2
+@@
+-LOG:  kind file, filter rate: 2 / 2
+@@
+-LOG:  kind file, filter rate: 1 / 2
+-kind group, filter rate: 1 / 2
+@@
+-LOG:  kind file, filter rate: 1 / 2
+@@
+-kind group, filter rate: 1 / 4
