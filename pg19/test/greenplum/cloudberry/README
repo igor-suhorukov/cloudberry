@@ -95,9 +95,8 @@ bfv_subquery (planner)  count_operator() finds no Seq Scan in the plan of
 
 bitmap_index  PostgreSQL 19's limit on an index row, a third of an 8K page,
   where Cloudberry's 32K pages take a larger one, refused on the segment the
-  row goes to, whose CONTEXT names the COPY's line; and the HINT and the
-  WARNING Cloudberry's fault injector gives with a PANIC, which name its FTS
-  probe's fault, which the port's has not.
+  row goes to; and the HINT and the WARNING Cloudberry's fault injector gives
+  with a PANIC, which name its FTS probe's fault, which the port's has not.
 
 brin_ao, brin_aocs (planner, orca)  under the planner, the plans the test
   looks in for a Bitmap Heap Scan or a Seq Scan, which the segments make:

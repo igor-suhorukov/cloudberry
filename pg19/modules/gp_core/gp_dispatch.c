@@ -284,6 +284,14 @@ static char *gang_username = NULL;
 static GpSegmentConn *copying = NULL;
 
 /*
+ * What becomes of the context of an error the segment raises in a COPY's
+ * data, while its end is being waited for: GpCopyInBegin()'s "context".
+ */
+static GpCopyInContext copy_context = NULL;
+static void *copy_context_arg = NULL;
+static bool copy_ending = false;
+
+/*
  * The coordinator's transaction, as the segments know it.  "depth" counts the
  * transaction levels they have been given: 1 for the BEGIN, one more for each
  * savepoint, named after the level it stands for.
@@ -1111,6 +1119,11 @@ raise_segment_errors(List *errors)
 
 	first = (GpSegmentError *) linitial(errors);
 	seg = GpClusterSegmentByContent(first->content);
+
+	/* where a COPY's data failed there, as its caller has it said here */
+	if (copy_ending && copy_context != NULL && first->context != NULL)
+		first->context = copy_context(first->content, first->context,
+									  copy_context_arg);
 
 	initStringInfo(&detail);
 	appendStringInfo(&detail, "segment %d (%s:%d)", first->content,
@@ -3049,7 +3062,7 @@ GpDispatchRelationName(Oid relid)
  * that produced them has finished with the gang.
  */
 void
-GpCopyInBegin(int content, const char *sql)
+GpCopyInBegin(int content, const char *sql, GpCopyInContext context, void *arg)
 {
 	GpGang	   *g = gang_get();
 	GpSegmentConn *c = NULL;
@@ -3098,6 +3111,8 @@ GpCopyInBegin(int content, const char *sql)
 	}
 
 	copying = c;
+	copy_context = context;
+	copy_context_arg = arg;
 }
 
 void
@@ -3117,6 +3132,24 @@ GpCopyInData(const char *data, int len)
 				 errmsg("could not send rows to segment %d", content),
 				 errdetail_internal("%s", msg)));
 	}
+}
+
+/* Wait for the COPY's result, its error's context given to its caller's. */
+static void
+copy_in_wait(int content, uint64 *count)
+{
+	copy_ending = true;
+	PG_TRY();
+	{
+		gang_wait_all_counting(gang, count, content, 0);
+	}
+	PG_FINALLY();
+	{
+		copy_ending = false;
+		copy_context = NULL;
+		copy_context_arg = NULL;
+	}
+	PG_END_TRY();
 }
 
 uint64
@@ -3141,7 +3174,7 @@ GpCopyInEnd(void)
 	}
 
 	/* The COPY's own result: its row count, or why it failed. */
-	gang_wait_all_counting(gang, &count, c->content, 0);
+	copy_in_wait(c->content, &count);
 	return count;
 }
 

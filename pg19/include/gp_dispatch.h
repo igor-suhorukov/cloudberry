@@ -206,9 +206,14 @@ extern uint64 GpDispatchWriteOnContent(int content, const char *sql,
 /*
  * COPY ... FROM STDIN on one segment: begin with the COPY statement, send the
  * data in pieces, and end, which answers how many rows the segment took.  One
- * at a time.
+ * at a time.  An error the segment raises in the data has its context given
+ * to "context", when given, with the segment's content and "arg": what it
+ * answers is the error's context here, or NULL for none.
  */
-extern void GpCopyInBegin(int content, const char *sql);
+typedef char *(*GpCopyInContext) (int content, const char *context, void *arg);
+
+extern void GpCopyInBegin(int content, const char *sql,
+						  GpCopyInContext context, void *arg);
 extern void GpCopyInData(const char *data, int len);
 extern uint64 GpCopyInEnd(void);
 

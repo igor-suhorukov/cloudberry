@@ -15,13 +15,6 @@ m/^Distributed (by: \(.*\)|randomly|Replicated)$/
 # init_file masks (see the greenplum suite's).
 m/^DETAIL:  segment \d+ \([^)]*\)(; \d+ other segments failed too)?$/
 
-# The context of an error a segment raised in a load: the rows an INSERT or
-# CREATE TABLE AS makes reach each segment by a COPY (gp_core's
-# gp_modify.c), which names the line the error came at; Cloudberry's INSERT
-# gives none.  diskquota's init_file makes a CONTEXT a DETAIL, which the
-# suite's comparison, as Cloudberry's, then shows.
-m/^(CONTEXT|DETAIL):  COPY \S+, line \d+$/
-
 # The warning diskquota's init_file means to pass over, which a test gets
 # when it waits for the worker before the launcher has one for its database,
 # as a loaded machine can have it: that pattern asks for more after the

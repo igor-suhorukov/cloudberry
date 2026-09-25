@@ -685,6 +685,28 @@ mine" ] && ok "a transaction reads its own rows, and a LIMIT leaves the connecti
 702" ] && [ "$out2" = "94" ] && ok "COPY TO, of a query and of the table, gathers" \
 		|| notok "COPY TO" "$out / $out2 lines"
 
+	# An error a segment raises in rows routed to it names no COPY of the
+	# segment's -- the rows travel by COPY -- but where the statement was: an
+	# INSERT's none, as Cloudberry's has none, a function's its own lines,
+	# and a COPY's the line of its data the row came from.  A COPY's error
+	# in the data on the coordinator says so as PostgreSQL's COPY does.
+	q 0 "CREATE TABLE cx (a int PRIMARY KEY, b text) DISTRIBUTED BY (a);
+	     INSERT INTO cx SELECT g, 'x' FROM generate_series(1, 20) g;" >/dev/null
+	out=$(q 0 "INSERT INTO cx SELECT 7, 'dup';")
+	out2=$(q 0 "DO \$\$ BEGIN INSERT INTO cx SELECT 8, 'dup'; END \$\$;")
+	case "$out|$out2" in
+		*COPY*) notok "an INSERT's error on a segment names no COPY" "$out / $out2" ;;
+		"ERROR:  duplicate key value violates unique constraint \"cx_pkey\""*"|"*"CONTEXT:  SQL statement \"INSERT INTO cx SELECT 8, 'dup'\""*"PL/pgSQL function inline_code_block line 1 at SQL statement")
+			ok "an INSERT's error on a segment names no COPY, a function's its own lines" ;;
+		*) notok "an INSERT's error on a segment" "$out / $out2" ;;
+	esac
+	out=$(printf '%s\n' "COPY cx FROM STDIN;" "30	a" "31	b" "9	dup" "32	c" '\.' | qf 0 | grep CONTEXT)
+	out2=$(printf '%s\n' "COPY cx FROM STDIN;" "33	a" "x34	b" '\.' | qf 0 | grep CONTEXT)
+	[ "$out" = "CONTEXT:  COPY cx, line 3" ] &&
+	[ "$out2" = 'CONTEXT:  COPY cx, line 2, column a: "x34"' ] \
+		&& ok "a COPY's error, on a segment or here, names the line of its data" \
+		|| notok "a COPY's error context" "$out / $out2"
+
 	out=$(q 0 "SELECT count(*) FROM (SELECT a FROM d WHERE a < 5 FOR UPDATE) s;")
 	[ "$out" = "4" ] && ok "SELECT ... FOR UPDATE locks the table, as Cloudberry does without GDD" \
 		|| notok "SELECT FOR UPDATE" "$out"

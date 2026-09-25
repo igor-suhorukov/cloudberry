@@ -79,6 +79,7 @@
 #include "catalog/pg_proc.h"
 #include "catalog/pg_type.h"
 #include "commands/copy.h"
+#include "commands/copyfrom_internal.h"
 #include "commands/defrem.h"
 #include "commands/explain.h"
 #include "commands/explain_format.h"
@@ -138,14 +139,29 @@ typedef struct GpRouter
 	bool		replicated;
 	bool		binary;
 	Tuplestorestate **stores;	/* one per segment; one only when replicated */
+	TupleDesc	storedesc;		/* theirs: the table's columns, and a line */
 	TupleTableSlot *slot;
 	FmgrInfo   *out;			/* each column's send or output function */
 	char	   *copy_sql;
 	uint64		nrows;
+
+	/*
+	 * A COPY's: each row's line in the data, kept after its columns, and
+	 * the line of the one a segment failed at (router_error_context()).
+	 */
+	bool		lines;
+	Datum	   *linevalues;
+	bool	   *linenulls;
+	CopyFromState cstate;
+	uint64		error_lineno;
 } GpRouter;
 
+/*
+ * lines: the rows are a COPY's, each put with its line in the data, which
+ * an error a segment raises in it says.
+ */
 static GpRouter *
-router_begin(Relation rel, GpPolicy *policy)
+router_begin(Relation rel, GpPolicy *policy, bool lines)
 {
 	GpRouter   *r = (GpRouter *) palloc0(sizeof(GpRouter));
 	TupleDesc	tupdesc = RelationGetDescr(rel);
@@ -159,7 +175,20 @@ router_begin(Relation rel, GpPolicy *policy)
 	r->replicated = GpPolicyIsReplicated(policy);
 	r->binary = GpTupleDescHasBinaryIO(tupdesc);
 	r->stores = palloc0_array(Tuplestorestate *, r->nsegs);
-	r->slot = MakeSingleTupleTableSlot(tupdesc, &TTSOpsMinimalTuple);
+	r->lines = lines;
+	r->storedesc = tupdesc;
+	if (lines)
+	{
+		r->storedesc = CreateTemplateTupleDesc(tupdesc->natts + 1);
+		for (int i = 1; i <= tupdesc->natts; i++)
+			TupleDescCopyEntry(r->storedesc, i, tupdesc, i);
+		TupleDescInitEntry(r->storedesc, tupdesc->natts + 1, "line",
+						   INT8OID, -1, 0);
+		TupleDescFinalize(r->storedesc);
+		r->linevalues = palloc0_array(Datum, tupdesc->natts + 1);
+		r->linenulls = palloc0_array(bool, tupdesc->natts + 1);
+	}
+	r->slot = MakeSingleTupleTableSlot(r->storedesc, &TTSOpsMinimalTuple);
 	r->out = palloc0_array(FmgrInfo, tupdesc->natts);
 
 	/*
@@ -193,11 +222,12 @@ router_begin(Relation rel, GpPolicy *policy)
 	return r;
 }
 
-/* One row, whose values are the relation's columns in order. */
+/* One row, whose values are the relation's columns in order; a COPY's line. */
 static void
-router_put(GpRouter *r, TupleTableSlot *slot)
+router_put(GpRouter *r, TupleTableSlot *slot, uint64 lineno)
 {
 	int			seg;
+	int			natts = RelationGetDescr(r->rel)->natts;
 
 	slot_getallattrs(slot);
 	seg = GpHashSegment(r->hash, slot->tts_values, slot->tts_isnull);
@@ -211,9 +241,90 @@ router_put(GpRouter *r, TupleTableSlot *slot)
 		r->stores[seg] = tuplestore_begin_heap(false, false, work_mem);
 		MemoryContextSwitchTo(oldcxt);
 	}
-	tuplestore_putvalues(r->stores[seg], RelationGetDescr(r->rel),
-						 slot->tts_values, slot->tts_isnull);
+	if (r->lines)
+	{
+		memcpy(r->linevalues, slot->tts_values, natts * sizeof(Datum));
+		memcpy(r->linenulls, slot->tts_isnull, natts * sizeof(bool));
+		r->linevalues[natts] = Int64GetDatum((int64) lineno);
+		r->linenulls[natts] = false;
+		tuplestore_putvalues(r->stores[seg], r->storedesc,
+							 r->linevalues, r->linenulls);
+	}
+	else
+		tuplestore_putvalues(r->stores[seg], r->storedesc,
+							 slot->tts_values, slot->tts_isnull);
 	r->nrows++;
+}
+
+/* The line in the data of the n-th row sent to a segment, or 0. */
+static uint64
+router_line(GpRouter *r, int content, uint64 n)
+{
+	Tuplestorestate *store;
+	bool		isnull;
+	Datum		d;
+
+	if (!r->lines || n < 1 || content < 0 || content >= r->nsegs)
+		return 0;
+	store = r->stores[r->replicated ? 0 : content];
+	if (store == NULL)
+		return 0;
+	tuplestore_rescan(store);
+	if ((n > 1 && !tuplestore_skiptuples(store, n - 1, true)) ||
+		!tuplestore_gettupleslot(store, true, false, r->slot))
+		return 0;
+	d = slot_getattr(r->slot, RelationGetDescr(r->rel)->natts + 1, &isnull);
+	return isnull ? 0 : (uint64) DatumGetInt64(d);
+}
+
+/*
+ * The context of an error a segment raised in the rows routed to it.  Its
+ * last line is the segment's COPY's -- "COPY t, line n", the segment's
+ * count of the rows it was sent -- which is no line of the statement's: an
+ * INSERT's error says none, as Cloudberry's does, whose segments insert the
+ * rows themselves, and a COPY's the line of its data the row came from
+ * (router_copy_context()).  The rest -- a trigger's, a function's -- stays.
+ * The segment's words are PostgreSQL's untranslated; a line in another
+ * language is left as it is.
+ */
+static char *
+router_error_context(int content, const char *context, void *arg)
+{
+	GpRouter   *r = (GpRouter *) arg;
+	const char *relname = RelationGetRelationName(r->rel);
+	size_t		rlen = strlen(relname);
+	const char *last = strrchr(context, '\n');
+	const char *after;
+
+	last = last ? last + 1 : context;
+	after = last + 5 + rlen;
+	if (strncmp(last, "COPY ", 5) != 0 || strncmp(last + 5, relname, rlen) != 0 ||
+		(*after != '\0' && *after != ',' && *after != ':'))
+		return pstrdup(context);
+	if (strncmp(after, ", line ", 7) == 0)
+		r->error_lineno = router_line(r, content,
+									  strtou64(after + 7, NULL, 10));
+	return last == context ? NULL : pnstrdup(context, last - context - 1);
+}
+
+/*
+ * The COPY's own context, for an error a segment raised in a row routed
+ * there: the line of the data the row came from, as COPY says where it
+ * failed (CopyFromErrorCallback()).
+ */
+static void
+router_copy_context(void *arg)
+{
+	GpRouter   *r = (GpRouter *) arg;
+	CopyFromState cstate = r->cstate;
+
+	if (r->error_lineno == 0 || cstate == NULL)
+		return;
+	cstate->cur_lineno = r->error_lineno;
+	cstate->line_buf_valid = false;
+	cstate->cur_attname = NULL;
+	cstate->relname_only = false;
+	CopyFromErrorCallback(cstate);
 }
 
 /* COPY's text format for one value: backslash and the separators escaped. */
@@ -308,7 +419,7 @@ router_send(GpRouter *r, Tuplestorestate *store, int content)
 												 ALLOCSET_DEFAULT_SIZES);
 	MemoryContext oldcxt;
 
-	GpCopyInBegin(content, r->copy_sql);
+	GpCopyInBegin(content, r->copy_sql, router_error_context, r);
 
 	initStringInfo(&buf);
 	if (r->binary)
@@ -446,7 +557,7 @@ insert_begin(CustomScanState *node, EState *estate, int eflags)
 		GpPolicy   *policy = GpScanDistributedPolicy(relid);
 		Plan	   *source = linitial(cscan->custom_plans);
 
-		state->router = router_begin(state->rel, policy);
+		state->router = router_begin(state->rel, policy, false);
 
 		/*
 		 * Cloudberry sends a single row of constants to the one segment it
@@ -474,7 +585,7 @@ insert_exec(CustomScanState *node)
 
 		if (TupIsNull(slot))
 			break;
-		router_put(state->router, slot);
+		router_put(state->router, slot, 0);
 		ResetPerTupleExprContext(estate);
 	}
 
@@ -1406,7 +1517,10 @@ copy_from_local_sreh(ParseState *pstate, CopyStmt *stmt, Relation rel,
  * COPY t FROM: parsed by PostgreSQL's own COPY, as it would be into a local
  * table, and routed.  The coordinator evaluates the defaults, as for INSERT,
  * so that a serial column has one sequence.  Under SEGMENT REJECT LIMIT,
- * read through gp_exttable's filter (above).
+ * read through gp_exttable's filter (above).  An error in the data says
+ * where, as COPY's own does, and so does one a segment raises in a row
+ * routed there (router_error_context()): the line of the data the row came
+ * from.
  */
 static uint64
 copy_from_distributed(ParseState *pstate, CopyStmt *stmt, Relation rel,
@@ -1417,6 +1531,7 @@ copy_from_distributed(ParseState *pstate, CopyStmt *stmt, Relation rel,
 	TupleTableSlot *slot;
 	ExprContext *econtext;
 	EState	   *estate = CreateExecutorState();
+	ErrorContextCallback errcallback;
 	uint64		processed;
 
 	if (sreh != NULL)
@@ -1424,10 +1539,15 @@ copy_from_distributed(ParseState *pstate, CopyStmt *stmt, Relation rel,
 	else
 		cstate = BeginCopyFrom(pstate, rel, NULL, stmt->filename, stmt->is_program,
 							   NULL, stmt->attlist, stmt->options);
-	router = router_begin(rel, policy);
+	router = router_begin(rel, policy, true);
+	router->cstate = cstate;
 	slot = MakeSingleTupleTableSlot(RelationGetDescr(rel), &TTSOpsVirtual);
 	econtext = GetPerTupleExprContext(estate);
 
+	errcallback.callback = CopyFromErrorCallback;
+	errcallback.arg = cstate;
+	errcallback.previous = error_context_stack;
+	error_context_stack = &errcallback;
 	for (;;)
 	{
 		CHECK_FOR_INTERRUPTS();
@@ -1437,11 +1557,18 @@ copy_from_distributed(ParseState *pstate, CopyStmt *stmt, Relation rel,
 		if (!NextCopyFrom(cstate, econtext, slot->tts_values, slot->tts_isnull))
 			break;
 		ExecStoreVirtualTuple(slot);
-		router_put(router, slot);
+		router_put(router, slot, cstate->cur_lineno);
 	}
+	error_context_stack = errcallback.previous;
+
+	errcallback.callback = router_copy_context;
+	errcallback.arg = router;
+	errcallback.previous = error_context_stack;
+	error_context_stack = &errcallback;
+	processed = router_finish(router);
+	error_context_stack = errcallback.previous;
 
 	EndCopyFrom(cstate);
-	processed = router_finish(router);
 	router_end(router);
 
 	/*
