@@ -1350,11 +1350,12 @@ GpSegmentPushDistRandom(Query *parse)
 
 /*
  * GpPrepareQuery
- *		A statement as gp_core has it planned, by whichever planner: a query
- *		of gp_dist_random() alone that calls a function which is not
- *		immutable made one the segments run, and the size functions made the
- *		cluster's (gp_size.c), in that order -- a size function the segments
- *		run is each segment's own.
+ *		A statement as gp_core has it planned, by whichever planner: on a
+ *		cluster's coordinator a query of gp_dist_random() alone that calls a
+ *		function which is not immutable made one the segments run, and the
+ *		size functions made the cluster's (gp_size.c), in that order -- a
+ *		size function the segments run is each segment's own; and on every
+ *		node pg_tablespace_location() made the location's.
  */
 void
 GpPrepareQuery(Query *parse)

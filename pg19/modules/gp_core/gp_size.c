@@ -34,6 +34,13 @@
  * not what it was made of, so a view or a rule still says pg_relation_size.
  * On a segment, and on one node, the calls are PostgreSQL's.
  *
+ * And pg_tablespace_location(), which is no size, but is answered the same
+ * way, on every node of a cluster: a node's directory of a tablespace is
+ * the directory of its dbid under the location CREATE TABLESPACE was given
+ * (gp_ddl.c), and Cloudberry's pg_tablespace_location() says the location,
+ * which is what pg_dump has to write for a restore to put each node's
+ * directory under it again.
+ *
  *-------------------------------------------------------------------------
  */
 #include "postgres.h"
@@ -55,13 +62,18 @@
 #include "gp_dispatch.h"
 #include "gp_size.h"
 
-/* Each of PostgreSQL's size functions, and gp_internal's of its name. */
+/*
+ * Each of PostgreSQL's size functions, and gp_internal's of its name; and
+ * pg_tablespace_location(), the one called on every node of a cluster, not
+ * on its coordinator alone.
+ */
 static const struct
 {
 	Oid			builtin;
 	const char *name;
 	int			nargs;
 	Oid			argtypes[2];
+	bool		every_node;
 }			size_functions[] = {
 	{F_PG_RELATION_SIZE_REGCLASS, "relation_size", 1, {REGCLASSOID}},
 	{F_PG_RELATION_SIZE_REGCLASS_TEXT, "relation_size", 2, {REGCLASSOID, TEXTOID}},
@@ -72,6 +84,7 @@ static const struct
 	{F_PG_DATABASE_SIZE_OID, "database_size", 1, {OIDOID}},
 	{F_PG_TABLESPACE_SIZE_NAME, "tablespace_size", 1, {NAMEOID}},
 	{F_PG_TABLESPACE_SIZE_OID, "tablespace_size", 1, {OIDOID}},
+	{F_PG_TABLESPACE_LOCATION, "tablespace_location", 1, {OIDOID}, true},
 };
 
 /* Looked up on first use and again whenever pg_proc changes. */
@@ -108,6 +121,7 @@ lookup_wrappers(void)
 	wrappers_valid = true;
 }
 
+/* context: whether this is the coordinator, whose sizes are the cluster's */
 static bool
 size_walker(Node *node, void *context)
 {
@@ -121,7 +135,8 @@ size_walker(Node *node, void *context)
 
 		for (int i = 0; i < lengthof(size_functions); i++)
 			if (fexpr->funcid == size_functions[i].builtin &&
-				OidIsValid(wrappers[i]))
+				OidIsValid(wrappers[i]) &&
+				(size_functions[i].every_node || *(bool *) context))
 				fexpr->funcid = wrappers[i];
 	}
 	return expression_tree_walker(node, size_walker, context);
@@ -129,15 +144,20 @@ size_walker(Node *node, void *context)
 
 /*
  * GpSizeRewrite
- *		The statement's calls of the size functions, made the cluster's.
+ *		The statement's calls of the size functions, made the cluster's on
+ *		its coordinator, and of pg_tablespace_location(), made the
+ *		location's on each of its nodes.
  */
 void
 GpSizeRewrite(Query *parse)
 {
-	if (GpClusterIsSingleNode() || GpClusterBackendRole() != GP_ROLE_DISPATCH)
+	bool		coordinator;
+
+	if (GpClusterIsSingleNode())
 		return;
+	coordinator = GpClusterBackendRole() == GP_ROLE_DISPATCH;
 	lookup_wrappers();
-	(void) size_walker((Node *) parse, NULL);
+	(void) size_walker((Node *) parse, &coordinator);
 }
 
 /* ------------------------------------------------------------------------- */
@@ -279,4 +299,32 @@ gp_tablespace_size_oid(PG_FUNCTION_ARGS)
 	return cluster_size(fcinfo, pg_tablespace_size_oid, SAME_ARGS,
 						psprintf("SELECT pg_catalog.pg_tablespace_size(%u::pg_catalog.oid)",
 								 PG_GETARG_OID(0)));
+}
+
+PG_FUNCTION_INFO_V1(gp_tablespace_location);
+
+/*
+ * gp_internal.tablespace_location(oid): pg_tablespace_location(), which says
+ * where pg_tblspc links, less the directory of this node's dbid that
+ * gp_ddl.c's node_tablespace_location() made under the location: the
+ * location CREATE TABLESPACE was given, as Cloudberry's says it.  An
+ * in-place tablespace, or one of another making, is PostgreSQL's answer.
+ */
+Datum
+gp_tablespace_location(PG_FUNCTION_ARGS)
+{
+	Datum		answer = DirectFunctionCall1(pg_tablespace_location,
+											 PG_GETARG_DATUM(0));
+	char	   *path = TextDatumGetCString(answer);
+	char	   *suffix = psprintf("/%d", GpClusterDbid());
+	size_t		len = strlen(path);
+	size_t		slen = strlen(suffix);
+
+	if (is_absolute_path(path) && len > slen &&
+		strcmp(path + len - slen, suffix) == 0)
+	{
+		path[len - slen] = '\0';
+		PG_RETURN_TEXT_P(cstring_to_text(path));
+	}
+	PG_RETURN_DATUM(answer);
 }

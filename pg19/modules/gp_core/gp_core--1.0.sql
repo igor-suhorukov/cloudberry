@@ -500,6 +500,15 @@ CREATE FUNCTION gp_internal.tablespace_size(oid)
 RETURNS bigint AS 'MODULE_PATHNAME', 'gp_tablespace_size_oid' LANGUAGE C STRICT;
 
 /*
+ * pg_tablespace_location(), each node's: the location CREATE TABLESPACE was
+ * given, where PostgreSQL's says the directory of the node's dbid under it
+ * (gp_ddl.c).  A call of PostgreSQL's is made a call of this on every node
+ * of a cluster, as the size functions' are on its coordinator.
+ */
+CREATE FUNCTION gp_internal.tablespace_location(oid)
+RETURNS text AS 'MODULE_PATHNAME', 'gp_tablespace_location' LANGUAGE C STRICT;
+
+/*
  * The planner's Split on a segment (gp_split.c): rows deleted by their table
  * and ctid, returned as t's rows, and their new versions inserted, routed
  * into t's partitions -- firing no trigger and applying no policy, as

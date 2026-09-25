@@ -86,13 +86,14 @@ recover() {					# recover <dbid>
 	if [ "$rewound" -eq 0 ]; then
 		rm -rf "$dir"
 		# A tablespace is each node's directory of its dbid under the
-		# location (gp_core's gp_ddl.c): the copy's is this node's, emptied
-		# first, as Cloudberry's pg_basebackup --target-gp-dbid makes it.
+		# location, which pg_tablespace_location() says (gp_core's gp_ddl.c
+		# and gp_size.c): the copy's is this node's, emptied first, as
+		# Cloudberry's pg_basebackup --target-gp-dbid makes it.
 		while IFS= read -r loc; do
 			case "$loc" in
-				*/"$pdbid")
-					rm -rf "${loc%/*}/$dbid"
-					maps+=(-T "$loc=${loc%/*}/$dbid") ;;
+				/*)
+					rm -rf "$loc/$dbid"
+					maps+=(-T "$loc/$pdbid=$loc/$dbid") ;;
 			esac
 		done < <(qn "$phost" "$pport" "SELECT pg_catalog.pg_tablespace_location(oid) FROM pg_catalog.pg_tablespace")
 		"$PG_BINDIR/pg_basebackup" -D "$dir" -h "$phost" -p "$pport" -X stream -c fast -S "$SLOT" \

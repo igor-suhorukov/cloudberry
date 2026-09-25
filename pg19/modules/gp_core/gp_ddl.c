@@ -80,6 +80,7 @@
 #include "commands/defrem.h"
 #include "commands/tablespace.h"
 #include "commands/vacuum.h"
+#include "common/relpath.h"
 #include "miscadmin.h"
 #include "nodes/makefuncs.h"
 #include "nodes/parsenodes.h"
@@ -121,6 +122,7 @@ typedef enum GpDispatchClass
 static ProcessUtility_hook_type prev_ProcessUtility = NULL;
 static raw_parser_hook_type prev_raw_parser = NULL;
 static new_oid_hook_type prev_new_oid_hook = NULL;
+static tablespace_location_hook_type prev_tablespace_location_hook = NULL;
 
 /*
  * Where the OIDs are kept, on either side.  Not a transaction's context: VACUUM
@@ -349,7 +351,7 @@ dispatch_class(Node *parsetree)
 
 		/*
 		 * A tablespace is a directory on each machine, and each node's is the
-		 * directory of its dbid under it (tablespace_location()).
+		 * directory of its dbid under it (node_tablespace_location()).
 		 */
 		case T_CreateTableSpaceStmt:
 		case T_DropTableSpaceStmt:
@@ -464,43 +466,60 @@ static void next_ProcessUtility(PlannedStmt *pstmt, const char *queryString,
 								ParamListInfo params, QueryEnvironment *queryEnv,
 								DestReceiver *dest, QueryCompletion *qc);
 
+/* The widest a node's dbid, gp.dbid, is printed: INT_MAX's ten digits. */
+#define DBID_CHARS	10
+
 /*
  * A tablespace is a directory, and the nodes of a cluster may share a
  * machine: each node's is the directory named for its dbid under the one
- * the statement gives, made where it is not there yet, as Cloudberry makes
- * it (create_tablespace_directories() in its tablespace.c), and
- * pg_tablespace_location() says so, as Cloudberry's does.  The statement is
- * run with that location, on the coordinator and on each segment, and sent
- * with the one it was given.  An in-place tablespace is each node's own
- * already.
+ * CREATE TABLESPACE gives, made where it is not there yet, as Cloudberry's
+ * create_tablespace_directories() makes it.  PostgreSQL asks for it through
+ * O32 wherever it links pg_tblspc to a tablespace: as a node runs the
+ * statement, which each node is sent with the location it was given, and
+ * as a mirror or a standby replays the statement's WAL record, which
+ * carries that location too -- so each node makes a directory of its own,
+ * whichever node wrote the record.  A location that is not there is left
+ * for PostgreSQL to report, in its words; an in-place tablespace, each
+ * node's own already, is not asked about.
  */
-static PlannedStmt *
-tablespace_location(PlannedStmt *pstmt)
+static const char *
+node_tablespace_location(const char *location, Oid tablespaceoid)
 {
-	CreateTableSpaceStmt *stmt = (CreateTableSpaceStmt *) pstmt->utilityStmt;
-	char	   *location;
-	PlannedStmt *copy;
+	struct stat st;
+	char	   *dir;
 
-	if (GpClusterIsSingleNode() || stmt->location == NULL ||
-		!is_absolute_path(stmt->location))
-		return pstmt;
+	if (prev_tablespace_location_hook)
+		location = prev_tablespace_location_hook(location, tablespaceoid);
+	if (stat(location, &st) < 0 || !S_ISDIR(st.st_mode))
+		return location;
 
-	location = psprintf("%s/%d", stmt->location, GpClusterDbid());
-	if (mkdir(location, S_IRWXU) < 0 && errno != EEXIST)
+	/*
+	 * CREATE TABLESPACE checked the location's length for the files under
+	 * it, and this is longer by a dbid: the widest one's, so that a node the
+	 * record reaches later finds it no longer than its writer did.
+	 */
+	if (strlen(location) + 1 + DBID_CHARS + 1 +
+		strlen(TABLESPACE_VERSION_DIRECTORY) + 1 + OIDCHARS + 1 + OIDCHARS +
+		1 + FORKNAMECHARS + 1 + OIDCHARS > MAXPGPATH)
+		ereport(ERROR,
+				(errcode(ERRCODE_INVALID_OBJECT_DEFINITION),
+				 errmsg("tablespace location \"%s\" is too long", location)));
+
+	dir = psprintf("%s/%d", location, GpClusterDbid());
+	if (mkdir(dir, S_IRWXU) < 0 && errno != EEXIST)
 		ereport(ERROR,
 				(errcode_for_file_access(),
-				 errmsg("could not create directory \"%s\": %m", location)));
-
-	copy = copyObject(pstmt);
-	((CreateTableSpaceStmt *) copy->utilityStmt)->location = location;
-	return copy;
+				 errmsg("could not create directory \"%s\": %m", dir)));
+	return dir;
 }
 
 /*
  * The directory a tablespace of that name has here, if it is one
- * tablespace_location() made -- the one named for this node's dbid -- for
- * DROP TABLESPACE to remove once it has emptied it, as Cloudberry's removes
- * it (destroy_tablespace_directories()).
+ * node_tablespace_location() made -- the one named for this node's dbid --
+ * for DROP TABLESPACE to remove once it has emptied it, as Cloudberry's
+ * removes it (destroy_tablespace_directories()).  A node that replays the
+ * DROP, a mirror or a standby, runs no statement, and keeps its directory,
+ * emptied, where Cloudberry's redo removes it too.
  */
 static char *
 tablespace_dbid_directory(DropTableSpaceStmt *stmt)
@@ -550,8 +569,8 @@ run_tablespace_statement(PlannedStmt *pstmt, const char *queryString,
 									 PGC_SUSET, PGC_S_SESSION,
 									 GUC_ACTION_SAVE, true, 0, false);
 		}
-		next_ProcessUtility(tablespace_location(pstmt), queryString,
-							readOnlyTree, context, params, queryEnv, dest, qc);
+		next_ProcessUtility(pstmt, queryString, readOnlyTree, context, params,
+							queryEnv, dest, qc);
 		if (nestlevel >= 0)
 			AtEOXact_GUC(true, nestlevel);
 	}
@@ -1054,6 +1073,9 @@ GpDdlInit(void)
 
 	prev_new_oid_hook = new_oid_hook;
 	new_oid_hook = new_oid;
+
+	prev_tablespace_location_hook = tablespace_location_hook;
+	tablespace_location_hook = node_tablespace_location;
 
 	RegisterXactCallback(gp_ddl_xact_callback, NULL);
 }

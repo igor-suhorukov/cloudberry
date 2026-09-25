@@ -398,20 +398,31 @@ if [ "$started" -eq 1 ]; then
 		"SELECT 'r1'::regrole::oid || ' ' || pg_get_userbyid(relowner) FROM pg_class WHERE relname = 'owned'"
 
 	# A tablespace is each node's directory of its dbid under the location,
-	# as Cloudberry's is; a table in it has its rows on the segments, and
-	# DROP TABLESPACE takes the directories away.
+	# as Cloudberry's is, linked by the node itself (O32); a table in it has
+	# its rows on the segments; every node says the location, and pg_dumpall
+	# writes it; and DROP TABLESPACE takes the directories away.
 	mkdir -p "$ROOT/tblspc"
 	out=$(q 0 "CREATE TABLESPACE ts1 LOCATION '$ROOT/tblspc';")
 	[ -z "$out" ] && ok "CREATE TABLESPACE runs" || notok "CREATE TABLESPACE" "$out"
 	same_everywhere "and the tablespace has one OID everywhere" \
 		"SELECT oid::text FROM pg_tablespace WHERE spcname = 'ts1'"
-	out=$(q 0 "SELECT pg_tablespace_location(oid) FROM pg_tablespace WHERE spcname = 'ts1';")
-	out2=$(q 1 "SELECT pg_tablespace_location(oid) FROM pg_tablespace WHERE spcname = 'ts1';")
+	ts=$(q 0 "SELECT oid FROM pg_tablespace WHERE spcname = 'ts1';")
+	links=$(for n in 0 1 2; do readlink "$(datadir "$n")/pg_tblspc/$ts"; done |
+			sed "s#^$ROOT/tblspc/##" | tr '\n' ' ')
 	q 0 "CREATE TABLE tsp (a int) TABLESPACE ts1; INSERT INTO tsp SELECT generate_series(1, 100);" >/dev/null
 	n1=$(q 1 "SELECT count(*) FROM tsp;"); n2=$(q 2 "SELECT count(*) FROM tsp;")
-	[ "$out|$out2|$((n1 + n2))|$(ls "$ROOT/tblspc" | tr '\n' ' ')" = "$ROOT/tblspc/1|$ROOT/tblspc/2|100|1 2 3 " ] \
+	[ "$links|$((n1 + n2))|$(ls "$ROOT/tblspc" | tr '\n' ' ')" = "1 2 3 |100|1 2 3 " ] \
 		&& ok "each node's is the directory of its dbid under the location, and a table's rows are in it" \
-		|| notok "a tablespace's directories" "$out / $out2 / $n1 + $n2 / $(ls "$ROOT/tblspc")"
+		|| notok "a tablespace's directories" "$links / $n1 + $n2 / $(ls "$ROOT/tblspc")"
+	out=$(q 0 "SELECT pg_tablespace_location(oid) FROM pg_tablespace WHERE spcname = 'ts1';")
+	out2=$(q 1 "SELECT pg_tablespace_location(oid) FROM pg_tablespace WHERE spcname = 'ts1';")
+	out3=$("$BINDIR/pg_dumpall" -h "$(sockdir 0)" -p "$(port 0)" --tablespaces-only 2>&1 |
+		   grep "^CREATE TABLESPACE ts1 ")
+	case "$out|$out2|$out3" in
+		"$ROOT/tblspc|$ROOT/tblspc|CREATE TABLESPACE ts1 "*"LOCATION '$ROOT/tblspc';")
+			ok "every node says the location, as Cloudberry's does, and pg_dumpall writes it" ;;
+		*) notok "pg_tablespace_location(), and pg_dumpall's CREATE TABLESPACE" "$out / $out2 / $out3" ;;
+	esac
 	# default_tablespace goes to the segments with a statement, as Cloudberry
 	# sends it: a table made under it is in the tablespace on every node.
 	qf 0 > /dev/null <<'EOF'

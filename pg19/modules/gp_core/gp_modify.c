@@ -1041,11 +1041,16 @@ gp_modify_planner(Query *parse, const char *query_string, int cursorOptions,
 	ListCell   *conflict;
 	ListCell   *lc;
 
+	/*
+	 * On every node: what of it needs the coordinator -- the segments to
+	 * send a query to, the cluster's sizes -- asks for the coordinator
+	 * itself (gp_segment.c, gp_size.c).
+	 */
+	GpPrepareQuery(parse);
+
 	if (GpClusterBackendRole() != GP_ROLE_DISPATCH)
 		return gp_modify_planner_routed(parse, query_string, cursorOptions,
 										boundParams, es);
-
-	GpPrepareQuery(parse);
 
 	/*
 	 * An INSERT ... ON CONFLICT in a WITH query: its clause printed as the

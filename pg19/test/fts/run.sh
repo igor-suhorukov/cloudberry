@@ -256,6 +256,40 @@ out=$(q 4 "SELECT count(*) FROM t")
 	&& ok "a mirror has its primary's rows, readable on the hot standby ($out of 100)" \
 	|| notok "a mirror's rows" "$out"
 
+# A tablespace on a machine the nodes share: each node's directory is the
+# one of its dbid under the location, a mirror's too, made as the mirror
+# replays its primary's record, which carries the location as the statement
+# gave it (O32; gp_ddl.c).  Every node says the location.  DROP TABLESPACE
+# leaves no link and no file on any node.
+mkdir -p "$ROOT/tblspc"
+out=$(q 0 "CREATE TABLESPACE fts_ts LOCATION '$ROOT/tblspc'")
+out2=$(q 0 "CREATE TABLE tt (a int) TABLESPACE fts_ts DISTRIBUTED BY (a);
+            INSERT INTO tt SELECT generate_series(1, 100);
+            SELECT count(*) FROM tt;")
+ts=$(q 0 "SELECT oid FROM pg_tablespace WHERE spcname = 'fts_ts'")
+for n in 4 5 6; do wait_for "$n" "SELECT count(*) > 0 FROM tt" t >/dev/null; done
+links=$(for n in $(seq 0 $((2 * NSEG))); do readlink "$(datadir "$n")/pg_tblspc/$ts"; done |
+		sed "s#^$ROOT/tblspc/##" | tr '\n' ' ')
+[ -z "$out" ] && [ "$out2" = "100" ] && [ "$links" = "1 2 3 4 5 6 7 " ] \
+	&& ok "a tablespace is each node's directory of its dbid, a mirror's made as it replays the record ($links)" \
+	|| notok "each node's directory of a tablespace, a mirror's too" "$out / $out2 / $links"
+out=$(for n in 0 1 4; do q "$n" "SELECT pg_tablespace_location($ts)"; done | sort -u)
+out2=$(q 4 "SELECT count(*) FROM tt")
+[ "$out" = "$ROOT/tblspc" ] && [ "$out2" -gt 0 ] 2>/dev/null \
+	&& ok "every node says the location, and a mirror reads its rows from its own directory" \
+	|| notok "pg_tablespace_location(), and a mirror's rows in the tablespace" "$out / $out2"
+out=$(q 0 "DROP TABLE tt")$(q 0 "DROP TABLESPACE fts_ts")
+gone=0
+for _ in $(seq 150); do
+	left=$(for n in $(seq 0 $((2 * NSEG))); do [ -e "$(datadir "$n")/pg_tblspc/$ts" ] && echo "$n"; done)
+	[ -z "$left" ] && { gone=1; break; }
+	sleep 0.2
+done
+files=$(find "$ROOT/tblspc" -mindepth 2 | head -3)
+[ -z "$out" ] && [ "$gone" -eq 1 ] && [ -z "$files" ] \
+	&& ok "DROP TABLESPACE, and its redo on the mirrors, leave no link and no file" \
+	|| notok "DROP TABLESPACE on every node, a mirror's too" "$out / links left on: $left / $files"
+
 ###############################################################################
 echo "3. a mirror that stops: its primary's commits wait for it, cancelled or not, until FTS marks it down"
 ###############################################################################
