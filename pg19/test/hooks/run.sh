@@ -1072,7 +1072,7 @@ is "and leaves the table readable, with what it had" o21 readable 1
 is "and able to grow once the hook lets it" o21 grows 1001
 
 ###############################################################################
-echo "O32 tablespace_location_hook: this server's directory of a tablespace, in redo too"
+echo "O32 tablespace_location_hook and its drop hook: this server's directory of a tablespace, in redo too"
 ###############################################################################
 # gp_probe.tablespace_subdir names the directory under the location that
 # this server links to, as a node of a cluster names one by its dbid.  A
@@ -1128,19 +1128,84 @@ else
 	notok "the server should come back from the crash" "$(tail -5 "$WORK/log")"
 fi
 
-# A hook that chooses nothing: the location as given, as PostgreSQL 19 links it.
+# DROP TABLESPACE asks the drop hook as it removes the link, which still
+# links the directory the hook chose, and gp_probe removes it, as a node of
+# a cluster removes the directory of its dbid; the location stays.
+session o32_drop <<'SQL'
+DROP TABLE o32_t;
+DROP TABLESPACE o32_ts;
+SQL
+if grep -qF "gp_probe: tablespace $o32_oid: pg_tblspc/$o32_oid dropped, linking $WORK/o32loc/second, redo false" \
+	"$WORK/log" && [ ! -e "$WORK/o32loc/second" ] && [ -d "$WORK/o32loc" ] &&
+   [ ! -e "$WORK/data/pg_tblspc/$o32_oid" ]; then
+	ok "DROP TABLESPACE asks the drop hook with the link, which removes the directory it chose"
+else
+	notok "the drop hook should have removed $WORK/o32loc/second" \
+		"$(ls "$WORK/o32loc" 2>&1) $(grep 'gp_probe: tablespace' "$WORK/log" | tail -2) $(grep -i error "$WORK/o32_drop.out" | head -3)"
+fi
+
+# The redo of DROP TABLESPACE asks it too: a crash after a CREATE and a DROP
+# replays both, the CREATE making the hook's directory again and the DROP
+# removing it, where without the hook it would stay, emptied.
+sed -i "s/^gp_probe.tablespace_subdir = 'second'$/gp_probe.tablespace_subdir = 'third'/" \
+	"$WORK/data/postgresql.conf"
+session o32_redo_drop <<SQL
+SELECT pg_reload_conf();
+SELECT pg_sleep(0.5);
+SELECT 'subdir=' || current_setting('gp_probe.tablespace_subdir');
+CHECKPOINT;
+CREATE TABLESPACE o32_gone LOCATION '$WORK/o32loc';
+SELECT 'oid=' || oid FROM pg_tablespace WHERE spcname = 'o32_gone';
+DROP TABLESPACE o32_gone;
+SQL
+o32_gone=$(val o32_redo_drop oid)
+"$BINDIR/pg_ctl" -D "$WORK/data" -m immediate stop > /dev/null 2>&1
+if [ "$(val o32_redo_drop subdir)" = "third" ] && [ -n "$o32_gone" ] &&
+   "$BINDIR/pg_ctl" -D "$WORK/data" -l "$WORK/log" -w -t 60 start > /dev/null 2>&1; then
+	if grep -qF "gp_probe: tablespace $o32_gone: pg_tblspc/$o32_gone dropped, linking $WORK/o32loc/third, redo true" \
+		"$WORK/log" && [ ! -e "$WORK/o32loc/third" ] &&
+	   [ ! -e "$WORK/data/pg_tblspc/$o32_gone" ]; then
+		ok "its redo asks the drop hook, with redo true, and the directory the redo of CREATE made goes"
+	else
+		notok "the redo of DROP TABLESPACE should have removed $WORK/o32loc/third" \
+			"$(ls "$WORK/o32loc" 2>&1) $(grep 'gp_probe: tablespace' "$WORK/log" | tail -3)"
+	fi
+else
+	notok "the server should come back from the crash after DROP TABLESPACE" \
+		"$(tail -5 "$WORK/log") $(grep -i error "$WORK/o32_redo_drop.out" | head -3)"
+fi
+
+# Neither hook is asked for an in-place tablespace, whose directory is the
+# link itself.
+session o32_inplace <<'SQL'
+SET allow_in_place_tablespaces = on;
+CREATE TABLESPACE o32_here LOCATION '';
+SELECT 'oid=' || oid FROM pg_tablespace WHERE spcname = 'o32_here';
+DROP TABLESPACE o32_here;
+SELECT 'dropped=' || count(*) FROM pg_tablespace WHERE spcname = 'o32_here';
+SQL
+o32_here=$(val o32_inplace oid)
+if [ -n "$o32_here" ] && [ "$(val o32_inplace dropped)" = "0" ] &&
+   ! grep -qF "gp_probe: tablespace $o32_here:" "$WORK/log"; then
+	ok "an in-place tablespace is dropped without the drop hook"
+else
+	notok "an in-place tablespace should not reach the drop hook" \
+		"$(grep "gp_probe: tablespace ${o32_here:-?}:" "$WORK/log" | head -2) $(grep -i error "$WORK/o32_inplace.out" | head -3)"
+fi
+
+# A hook that chooses nothing: the location as given, as PostgreSQL 19 links
+# it -- and its drop hook, asked as the link goes, leaves the location.
 sed -i "/^gp_probe.tablespace_subdir = /d" "$WORK/data/postgresql.conf"
 session o32_plain <<SQL
 SELECT pg_reload_conf();
 SELECT pg_sleep(0.5);
 SELECT 'subdir=[' || current_setting('gp_probe.tablespace_subdir') || ']';
-DROP TABLE o32_t;
-DROP TABLESPACE o32_ts;
 CREATE TABLESPACE o32_plain LOCATION '$WORK/o32plain';
 SELECT 'oid=' || oid FROM pg_tablespace WHERE spcname = 'o32_plain';
 SQL
+o32_plain=$(val o32_plain oid)
 if [ "$(val o32_plain subdir)" = "[]" ] &&
-   [ "$(readlink "$WORK/data/pg_tblspc/$(val o32_plain oid)")" = "$WORK/o32plain" ]; then
+   [ "$(readlink "$WORK/data/pg_tblspc/$o32_plain")" = "$WORK/o32plain" ]; then
 	ok "a hook that chooses nothing leaves the location as the statement gave it"
 else
 	notok "pg_tblspc should link $WORK/o32plain" "$(grep -i error "$WORK/o32_plain.out" | head -3)"
@@ -1148,6 +1213,13 @@ fi
 session o32_end <<'SQL'
 DROP TABLESPACE o32_plain;
 SQL
+if grep -qF "gp_probe: tablespace $o32_plain: pg_tblspc/$o32_plain dropped, linking $WORK/o32plain, redo false" \
+	"$WORK/log" && [ -d "$WORK/o32plain" ] && [ ! -e "$WORK/data/pg_tblspc/$o32_plain" ]; then
+	ok "and DROP TABLESPACE removes the link alone, the location staying"
+else
+	notok "$WORK/o32plain should stay after DROP TABLESPACE" \
+		"$(grep "gp_probe: tablespace ${o32_plain:-?}:" "$WORK/log" | head -2) $(grep -i error "$WORK/o32_end.out" | head -3)"
+fi
 
 ###############################################################################
 echo "O23 extension marks: pg_checksums passes over what an extension marked, pg_upgrade carries it"

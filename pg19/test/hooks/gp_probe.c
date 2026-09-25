@@ -988,6 +988,34 @@ probe_tablespace_location(const char *location, Oid tablespaceoid)
 	return dir;
 }
 
+/*
+ * As the link goes: the directory it points to removed if it is one of the
+ * probe's, named by gp_probe.tablespace_subdir, and never the location
+ * itself; each call logged, with the link and whether it is redo's.
+ */
+static void
+probe_tablespace_location_drop(const char *linkloc, Oid tablespaceoid, bool redo)
+{
+	char		target[MAXPGPATH];
+	ssize_t		len = readlink(linkloc, target, sizeof(target) - 1);
+	const char *base;
+
+	if (len < 0)
+		return;
+	target[len] = '\0';
+	base = strrchr(target, '/');
+	ereport(LOG,
+			(errmsg("gp_probe: tablespace %u: %s dropped, linking %s, redo %s",
+					tablespaceoid, linkloc, target, redo ? "true" : "false")));
+	if (base != NULL && probe_tablespace_subdir != NULL &&
+		probe_tablespace_subdir[0] != '\0' &&
+		strcmp(base + 1, probe_tablespace_subdir) == 0 &&
+		rmdir(target) < 0)
+		ereport(redo ? LOG : ERROR,
+				(errcode_for_file_access(),
+				 errmsg("could not remove directory \"%s\": %m", target)));
+}
+
 /* A table of the probe's method keeps its TOAST in a heap table. */
 static Oid
 probe_relation_toast_am(Relation rel)
@@ -1657,6 +1685,7 @@ _PG_init(void)
 							   0,
 							   NULL, NULL, NULL);
 	tablespace_location_hook = probe_tablespace_location;
+	tablespace_location_drop_hook = probe_tablespace_location_drop;
 
 	/*
 	 * O23: entries of a database directory named by a number and "_probe"

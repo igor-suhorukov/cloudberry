@@ -175,6 +175,7 @@ cb_probe(void)
 	raw_parser_hook = NULL;					/* O26 */
 	star_expansion_filter_hook = NULL;		/* O28 */
 	tablespace_location_hook = NULL;		/* O32 */
+	tablespace_location_drop_hook = NULL;	/* O32 */
 
 	(void) LastNewOidWasPreassigned;					/* R1  */
 	(void) XactAdoptCurrentXids;						/* R2  */
