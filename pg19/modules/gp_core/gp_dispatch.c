@@ -86,6 +86,7 @@
 #include "mb/pg_wchar.h"
 #include "miscadmin.h"
 #include "nodes/pg_list.h"
+#include "parser/parser.h"
 #include "storage/ipc.h"
 #include "storage/latch.h"
 #include "storage/lmgr.h"
@@ -4028,6 +4029,82 @@ gp_dist_random(PG_FUNCTION_ARGS)
 
 	ExecDropSingleTupleTableSlot(slot);
 	table_close(rel, AccessShareLock);
+
+	return (Datum) 0;
+}
+
+/*
+ * Is "sql" a query gp_segment.c makes the planner run on the segments: one
+ * SELECT, of one gp_dist_random() and nothing else, as ruleutils prints it
+ * and O26 reads it -- gp.dist_random(NULL::t), or gp_dist_random('t') where
+ * gp_sql does not desugar it?  Nothing more is taken by name.
+ */
+static bool
+is_segment_query(const char *sql)
+{
+	List	   *stmts = raw_parser(sql, RAW_PARSE_DEFAULT);
+	SelectStmt *select;
+	RangeFunction *range;
+	List	   *call;
+	FuncCall   *fcall;
+	char	   *name;
+
+	if (list_length(stmts) != 1)
+		return false;
+	select = (SelectStmt *) linitial_node(RawStmt, stmts)->stmt;
+	if (!IsA(select, SelectStmt) || select->op != SETOP_NONE ||
+		select->withClause != NULL || select->intoClause != NULL ||
+		select->lockingClause != NIL || select->valuesLists != NIL ||
+		list_length(select->fromClause) != 1 ||
+		!IsA(linitial(select->fromClause), RangeFunction))
+		return false;
+	range = linitial_node(RangeFunction, select->fromClause);
+	if (range->lateral || range->ordinality || range->is_rowsfrom ||
+		list_length(range->functions) != 1)
+		return false;
+	call = linitial_node(List, range->functions);
+	if (!IsA(linitial(call), FuncCall))
+		return false;
+	fcall = linitial_node(FuncCall, call);
+	name = strVal(llast(fcall->funcname));
+	if (list_length(fcall->funcname) == 2)
+		return strcmp(strVal(linitial(fcall->funcname)), "gp") == 0 &&
+			strcmp(name, "dist_random") == 0;
+	return list_length(fcall->funcname) == 1 &&
+		strcmp(name, "gp_dist_random") == 0;
+}
+
+PG_FUNCTION_INFO_V1(gp_segment_query);
+
+/*
+ * gp_internal.segment_query(sql text)
+ *		A query of gp_dist_random() alone, run on every segment: the rows
+ *		each answers, in the column definition list's types.
+ */
+Datum
+gp_segment_query(PG_FUNCTION_ARGS)
+{
+	ReturnSetInfo *rsinfo = (ReturnSetInfo *) fcinfo->resultinfo;
+	char	   *sql = text_to_cstring(PG_GETARG_TEXT_PP(0));
+	TupleTableSlot *slot;
+	GpGatherState *gather;
+
+	if (!is_segment_query(sql))
+		ereport(ERROR,
+				(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+				 errmsg("gp_internal.segment_query() runs only a query of one gp_dist_random()")));
+	if (GpDistRandomIsLocal())
+		ereport(ERROR,
+				(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+				 errmsg("gp_internal.segment_query() runs only on a cluster's coordinator")));
+
+	InitMaterializedSRF(fcinfo, MAT_SRF_USE_EXPECTED_DESC);
+	slot = MakeSingleTupleTableSlot(rsinfo->setDesc, &TTSOpsVirtual);
+	gather = GpGatherStart(sql, rsinfo->setDesc);
+	while (GpGatherNext(gather, slot, NULL))
+		tuplestore_puttupleslot(rsinfo->setResult, slot);
+	GpGatherEnd(gather);
+	ExecDropSingleTupleTableSlot(slot);
 
 	return (Datum) 0;
 }

@@ -38,6 +38,19 @@ extern bool GpSegmentIsSegmentOf(Node *node, Index varno);
 /* gp_internal.segment_of(record), or InvalidOid where it is not installed. */
 extern Oid	GpSegmentOfFunction(void);
 
+/*
+ * The statement's queries of gp_dist_random() alone that call a function that
+ * is not immutable, made queries the segments run, before it is planned.
+ */
+struct Query;
+extern void GpSegmentPushDistRandom(struct Query *parse);
+
+/*
+ * The statement as gp_core has it planned, whichever planner plans it:
+ * GpSegmentPushDistRandom().
+ */
+extern void GpPrepareQuery(struct Query *parse);
+
 /* The parser's and ruleutils' hooks, on every node; see gp_segment.c. */
 extern void GpSegmentInit(void);
 

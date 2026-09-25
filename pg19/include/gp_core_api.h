@@ -39,11 +39,12 @@
  * here changes meaning or moves.
  */
 #define GP_CORE_API_VERSION_MAJOR	1
-#define GP_CORE_API_VERSION_MINOR	7
+#define GP_CORE_API_VERSION_MINOR	8
 
 struct Node;
 struct List;
 struct Plan;
+struct Query;
 
 /*
  * What the rendezvous variable points at.  It is the first thing a module
@@ -162,6 +163,13 @@ typedef struct GpCoreApi
 	 * where gp_core's extension is not in the database.
 	 */
 	Oid			(*segment_of_function) (void);
+
+	/*
+	 * Since 1.8: a statement as gp_core has it planned, whichever planner
+	 * plans it (GpPrepareQuery(), gp_segment.c), for ORCA to plan as
+	 * PostgreSQL's planner does.
+	 */
+	void		(*prepare_query) (struct Query *parse);
 } GpCoreApi;
 
 /*

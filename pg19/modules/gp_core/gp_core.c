@@ -111,6 +111,7 @@ static const GpCoreApi gp_core_api = {
 	.motion_segments = GpMotionSegments,
 	.direct_dispatch_contents = GpScanDirectDispatchContents,
 	.segment_of_function = GpSegmentOfFunction,
+	.prepare_query = GpPrepareQuery,
 };
 
 /*

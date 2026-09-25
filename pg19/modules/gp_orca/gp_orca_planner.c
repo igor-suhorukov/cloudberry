@@ -274,6 +274,11 @@ gp_orca_planner(Query *parse, const char *query_string, int cursorOptions,
 	PlannedStmt *result = NULL;
 	GpFallbackReason reason = GP_FALLBACK_declined;
 	GpOrcaFailure failure = {false, false, NULL};
+	const GpCoreApi *core = cb_core_api();
+
+	/* The statement as gp_core has PostgreSQL's planner plan it. */
+	if (core != NULL && core->version_minor >= 8 && core->prepare_query != NULL)
+		core->prepare_query(parse);
 
 	if (orca_should_try(parse, cursorOptions, &reason))
 	{

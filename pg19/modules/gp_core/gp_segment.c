@@ -56,6 +56,18 @@
  * Either is printed back as gp_dist_random('t'), the call it was made of and
  * Cloudberry's, through deparse_range_function_hook (O31).
  *
+ * A query that reads such a call alone and calls a function that is not
+ * immutable -- gp_dist_random('gp_id'), which is how Cloudberry runs a query
+ * once on each segment -- runs on every segment, as Cloudberry runs it: the
+ * planner, PostgreSQL's or ORCA, is given the query as a call of
+ * gp_internal.segment_query() with the query's text, printed as ruleutils
+ * prints it, and each segment reads its own rows of the relation; what the
+ * query does with the rows -- ORDER BY, DISTINCT, LIMIT -- is done here, as
+ * Cloudberry does it above its Gather Motion.  A query that uses a sequence
+ * stays on the coordinator, where the port's sequences are; so does one that
+ * needs something only the coordinator has: an outer query's column, a
+ * parameter, a subquery; and one that aggregates.
+ *
  * pg_catalog.pg_locks has Cloudberry's three columns the same way, where
  * PostgreSQL 19's view has none of them: gp_segment_id, segment_of() of its
  * row, which is this node's content id, the node whose locks it lists; and
@@ -100,6 +112,7 @@
 #include "catalog/objectaccess.h"
 #include "catalog/pg_attribute.h"
 #include "catalog/pg_class.h"
+#include "catalog/pg_collation.h"
 #include "catalog/namespace.h"
 #include "catalog/pg_namespace.h"
 #include "catalog/pg_proc.h"
@@ -109,6 +122,7 @@
 #include "miscadmin.h"
 #include "nodes/makefuncs.h"
 #include "nodes/nodeFuncs.h"
+#include "optimizer/optimizer.h"
 #include "parser/parse_expr.h"
 #include "parser/parse_func.h"
 #include "parser/analyze.h"
@@ -165,6 +179,7 @@ static Oid	lock_session_oid = InvalidOid;
 static Oid	lock_writer_oid = InvalidOid;
 static Oid	pg_stat_activity_oid = InvalidOid;
 static Oid	activity_session_oid = InvalidOid;
+static Oid	segment_query_oid = InvalidOid;
 
 static void
 invalidate_func_oids(Datum arg, SysCacheIdentifier cacheid, uint32 hashvalue)
@@ -200,6 +215,7 @@ lookup_func_oids(void)
 	dist_random_segments_oid = lookup_func("gp_internal",
 										   "dist_random_segments",
 										   ANYELEMENTOID);
+	segment_query_oid = lookup_func("gp_internal", "segment_query", TEXTOID);
 	pg_locks_oid = get_relname_relid("pg_locks", PG_CATALOG_NAMESPACE);
 	lock_session_oid = lock_writer_oid = InvalidOid;
 	if (OidIsValid(pg_locks_oid))
@@ -1032,6 +1048,228 @@ gp_segment_object_access(ObjectAccessType access, Oid classId, Oid objectId,
 	if (classId == RelationRelationId &&
 		(access == OAT_POST_CREATE || (access == OAT_POST_ALTER && subId > 0)))
 		check_segment_id_column(objectId);
+}
+
+/* ------------------------------------------------------------------------- */
+/* A query of gp_dist_random() alone, run on every segment                   */
+/* ------------------------------------------------------------------------- */
+
+/*
+ * Is there something in the expression that only the coordinator can
+ * answer: a sequence, which the port keeps there; a column of an outer
+ * query, or a parameter; or a subquery or an aggregate, which a query of
+ * this shape does not have anyway?
+ */
+static bool
+coordinator_only_walker(Node *node, void *context)
+{
+	if (node == NULL)
+		return false;
+	if (IsA(node, Var))
+		return ((Var *) node)->varlevelsup > 0;
+	if (IsA(node, Param) || IsA(node, SubLink) || IsA(node, Aggref) ||
+		IsA(node, GroupingFunc) || IsA(node, WindowFunc) ||
+		IsA(node, NextValueExpr))
+		return true;
+	if (IsA(node, FuncExpr))
+	{
+		switch (((FuncExpr *) node)->funcid)
+		{
+			case F_NEXTVAL:
+			case F_CURRVAL:
+			case F_SETVAL_REGCLASS_INT8:
+			case F_SETVAL_REGCLASS_INT8_BOOL:
+			case F_LASTVAL:
+				return true;
+			default:
+				break;
+		}
+	}
+	return expression_tree_walker(node, coordinator_only_walker, context);
+}
+
+/*
+ * Is q a SELECT of one gp.dist_random() call, with no aggregate, whose
+ * target list or condition calls a function that is not immutable, and
+ * whose every column a segment can send?
+ */
+static bool
+dist_random_pushable(Query *q)
+{
+	RangeTblEntry *rte;
+	RangeTblFunction *rtfunc;
+	Oid			funcid;
+
+	if (q->commandType != CMD_SELECT || q->utilityStmt != NULL ||
+		q->setOperations != NULL || q->cteList != NIL || q->hasRecursive ||
+		q->hasModifyingCTE || q->hasAggs || q->hasWindowFuncs ||
+		q->hasSubLinks || q->hasForUpdate || q->rowMarks != NIL ||
+		q->groupClause != NIL || q->groupingSets != NIL ||
+		q->havingQual != NULL || q->windowClause != NIL ||
+		q->limitOption == LIMIT_OPTION_WITH_TIES)
+		return false;
+	if (list_length(q->rtable) != 1 || q->jointree == NULL ||
+		list_length(q->jointree->fromlist) != 1 ||
+		!IsA(linitial(q->jointree->fromlist), RangeTblRef))
+		return false;
+	rte = linitial_node(RangeTblEntry, q->rtable);
+	if (rte->rtekind != RTE_FUNCTION || rte->funcordinality ||
+		rte->lateral || list_length(rte->functions) != 1)
+		return false;
+	rtfunc = linitial_node(RangeTblFunction, rte->functions);
+	if (!IsA(rtfunc->funcexpr, FuncExpr))
+		return false;
+	funcid = ((FuncExpr *) rtfunc->funcexpr)->funcid;
+	if (funcid != dist_random_oid && funcid != dist_random_segments_oid)
+		return false;
+
+	if (!contain_mutable_functions((Node *) q->targetList) &&
+		!contain_mutable_functions(q->jointree->quals))
+		return false;
+	if (coordinator_only_walker((Node *) q->targetList, NULL) ||
+		coordinator_only_walker(q->jointree->quals, NULL))
+		return false;
+
+	foreach_node(TargetEntry, tle, q->targetList)
+	{
+		Oid			type = exprType((Node *) tle->expr);
+
+		if (type == RECORDOID || get_typtype(type) == TYPTYPE_PSEUDO ||
+			GpTransferType(type) != type)
+			return false;
+	}
+	return true;
+}
+
+/*
+ * Make q, which dist_random_pushable() took, a query of the rows its text
+ * gives on every segment: gp_internal.segment_query(text) with a column
+ * definition list of q's target list, and the same target list over it,
+ * ordered, made distinct and limited here.  What the segments are sent is
+ * the target list whole -- what ORDER BY alone names too -- and the
+ * condition.
+ */
+static void
+dist_random_push(Query *q)
+{
+	RangeTblEntry *old = linitial_node(RangeTblEntry, q->rtable);
+	Query	   *sent = copyObject(q);
+	char	   *sql;
+	RangeTblFunction *rtfunc = makeNode(RangeTblFunction);
+	RangeTblEntry *rte = makeNode(RangeTblEntry);
+	RangeTblRef *rtr = makeNode(RangeTblRef);
+	FuncExpr   *call;
+	List	   *names = NIL;
+	List	   *tlist = NIL;
+	int			n = 0;
+
+	sent->sortClause = NIL;
+	sent->distinctClause = NIL;
+	sent->hasDistinctOn = false;
+	sent->limitCount = NULL;
+	sent->limitOffset = NULL;
+	sent->limitOption = LIMIT_OPTION_COUNT;
+	foreach_node(TargetEntry, tle, sent->targetList)
+	{
+		tle->resjunk = false;
+		tle->ressortgroupref = 0;
+		if (tle->resname == NULL)
+			tle->resname = psprintf("gp_c%d", tle->resno);
+	}
+	sql = pg_get_querydef(sent, false);
+
+	foreach_node(TargetEntry, tle, q->targetList)
+	{
+		Node	   *expr = (Node *) tle->expr;
+		Var		   *var;
+		TargetEntry *copy;
+
+		n++;
+		names = lappend(names, makeString(pstrdup(tle->resname != NULL
+												  ? tle->resname
+												  : "?column?")));
+		rtfunc->funccoltypes = lappend_oid(rtfunc->funccoltypes, exprType(expr));
+		rtfunc->funccoltypmods = lappend_int(rtfunc->funccoltypmods, exprTypmod(expr));
+		rtfunc->funccolcollations = lappend_oid(rtfunc->funccolcollations,
+												exprCollation(expr));
+		var = makeVar(1, n, exprType(expr), exprTypmod(expr),
+					  exprCollation(expr), 0);
+		copy = flatCopyTargetEntry(tle);
+		copy->expr = (Expr *) var;
+		tlist = lappend(tlist, copy);
+	}
+
+	call = makeFuncExpr(segment_query_oid, RECORDOID,
+						list_make1(makeConst(TEXTOID, -1, DEFAULT_COLLATION_OID,
+											 -1, CStringGetTextDatum(sql),
+											 false, false)),
+						InvalidOid, InvalidOid, COERCE_EXPLICIT_CALL);
+	call->funcretset = true;
+	rtfunc->funcexpr = (Node *) call;
+	rtfunc->funccolcount = n;
+	rtfunc->funccolnames = names;
+
+	rte->rtekind = RTE_FUNCTION;
+	rte->functions = list_make1(rtfunc);
+	rte->eref = makeAlias(old->eref->aliasname, copyObject(names));
+	rte->inFromCl = true;
+
+	q->rtable = list_make1(rte);
+	q->rteperminfos = NIL;
+	rtr->rtindex = 1;
+	q->jointree = makeFromExpr(list_make1(rtr), NULL);
+	q->targetList = tlist;
+	q->hasTargetSRFs = false;
+}
+
+static bool
+push_dist_random_walker(Node *node, void *context)
+{
+	if (node == NULL)
+		return false;
+	if (IsA(node, Query))
+	{
+		Query	   *q = (Query *) node;
+
+		(void) query_tree_walker(q, push_dist_random_walker, context, 0);
+		if (dist_random_pushable(q))
+			dist_random_push(q);
+		return false;
+	}
+	return expression_tree_walker(node, push_dist_random_walker, context);
+}
+
+/*
+ * GpSegmentPushDistRandom
+ *		Each query of the statement that reads gp_dist_random() alone and
+ *		calls a function that is not immutable, made one the segments run.
+ *
+ * Before the planner, PostgreSQL's (gp_modify.c) or ORCA (through gp_core's
+ * API), by GpPrepareQuery(): on the coordinator of a cluster, which has
+ * segments to run it on.
+ */
+void
+GpSegmentPushDistRandom(Query *parse)
+{
+	if (GpDistRandomIsLocal())
+		return;
+	lookup_func_oids();
+	if (!OidIsValid(segment_query_oid) ||
+		(!OidIsValid(dist_random_oid) && !OidIsValid(dist_random_segments_oid)))
+		return;
+	(void) push_dist_random_walker((Node *) parse, NULL);
+}
+
+/*
+ * GpPrepareQuery
+ *		A statement as gp_core has it planned, by whichever planner: a query
+ *		of gp_dist_random() alone that calls a function which is not
+ *		immutable made one the segments run.
+ */
+void
+GpPrepareQuery(Query *parse)
+{
+	GpSegmentPushDistRandom(parse);
 }
 
 /* ------------------------------------------------------------------------- */

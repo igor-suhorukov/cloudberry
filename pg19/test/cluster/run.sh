@@ -934,6 +934,30 @@ mine" ] && ok "a transaction reads its own rows, and a LIMIT leaves the connecti
 	[ "$out|$out2" = "-1|0
 1" ] && ok "a catalog's is -1 here, and each segment's through gp.dist_random()" \
 		|| notok "gp_segment_id of a catalog" "$out / $out2"
+	# A query of gp_dist_random() alone that calls a function which is not
+	# immutable runs on every segment, as Cloudberry runs a query over
+	# gp_dist_random('gp_id') (gp_segment.c): each segment's own port, only
+	# segment 1's where the condition names it, and in a subquery too.  A
+	# sequence stays on the coordinator, which serves the port's; a query of
+	# columns alone is the gather it was; and segment_query(), called by
+	# name, runs no other kind of query.
+	out=$(q 0 "SELECT gp_segment_id, current_setting('port') FROM gp_dist_random('gp_id') ORDER BY 1;")
+	out2=$(q 0 "SELECT current_setting('port') FROM gp_dist_random('gp_id') WHERE gp_segment_id = 1;")
+	out3=$(q 0 "SELECT count(*) FROM (SELECT current_setting('port') AS p FROM gp_dist_random('gp_id')) s WHERE p <> '$(port 0)';")
+	[ "$out|$out2|$out3" = "0|$(port 1)
+1|$(port 2)|$(port 2)|2" ] \
+		&& ok "a query of gp_dist_random('gp_id') and a function runs on every segment, as Cloudberry runs it" \
+		|| notok "a query of gp_dist_random() on the segments" "$out / $out2 / $out3"
+	q 0 "CREATE SEQUENCE gdsq;" >/dev/null
+	out=$(q 0 "SELECT nextval('gdsq') FROM gp_dist_random('gp_id') ORDER BY 1;" | tr '\n' ' ')
+	out2=$(q 0 "EXPLAIN (COSTS OFF) SELECT * FROM gp_dist_random('gs');")
+	out3=$(q 0 "EXPLAIN (COSTS OFF) SELECT pg_backend_pid() FROM gp_dist_random('gp_id');")
+	out4=$(q 0 "SELECT * FROM gp_internal.segment_query('DELETE FROM gs') AS t(a int);")
+	case "$out|$out2|$out3|$out4" in
+		"1 2 |"*"Function Scan on dist_random"*"|"*"Function Scan on segment_query"*"|"*"runs only a query of one gp_dist_random()"*)
+			ok "a sequence stays here, columns alone are gathered, and segment_query() runs nothing else" ;;
+		*) notok "what stays on the coordinator" "$out / $out2 / $out3 / $out4" ;;
+	esac
 	out=$(q 0 "SELECT gp_segment_id FROM gs, gr;")
 	out2=$(q 0 "SELECT gp_segment_id FROM (SELECT a FROM gs) s;")
 	case "$out|$out2" in
@@ -1287,6 +1311,9 @@ mine" ] && ok "a transaction reads its own rows, and a LIMIT leaves the connecti
 	# DELETE are ORCA's, which route by it.
 	orca_same "gp_segment_id under ORCA: the segment that holds each row" \
 		"SELECT gp_segment_id, count(*) FROM o GROUP BY 1 ORDER BY 1;"
+	orca_same "a query of gp_dist_random('gp_id') and a function, on every segment" \
+		"SELECT gp_segment_id, current_setting('port') FROM gp_dist_random('gp_id') ORDER BY 1;" \
+		"Function Scan on segment_query"
 	q 0 "CREATE TABLE orr (a int, b int) DISTRIBUTED RANDOMLY; INSERT INTO orr SELECT i, i FROM generate_series(1, 100) i; ANALYZE orr;" >/dev/null
 	orca_same "a random table's gp_segment_id, and a condition on it asked of that segment alone" \
 		"SELECT count(*) FROM orr WHERE gp_segment_id = 1;" "Gather Motion 1:1  (slice1; segments: 1)"

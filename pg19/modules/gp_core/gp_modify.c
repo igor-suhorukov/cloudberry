@@ -116,6 +116,7 @@
 #include "gp_hash.h"
 #include "gp_policy.h"
 #include "gp_scan.h"
+#include "gp_segment.h"
 #include "gp_settings.h"
 
 /* How much of a COPY's data is sent to libpq at a time. */
@@ -1043,6 +1044,8 @@ gp_modify_planner(Query *parse, const char *query_string, int cursorOptions,
 	if (GpClusterBackendRole() != GP_ROLE_DISPATCH)
 		return gp_modify_planner_routed(parse, query_string, cursorOptions,
 										boundParams, es);
+
+	GpPrepareQuery(parse);
 
 	/*
 	 * An INSERT ... ON CONFLICT in a WITH query: its clause printed as the

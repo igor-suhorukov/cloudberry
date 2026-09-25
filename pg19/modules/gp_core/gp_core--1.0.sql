@@ -454,6 +454,18 @@ AS 'MODULE_PATHNAME', 'gp_dist_random_segments'
 LANGUAGE C;
 
 /*
+ * A query of gp_dist_random() alone that calls a function which is not
+ * immutable, run on every segment, as Cloudberry runs a query over
+ * gp_dist_random('gp_id') (gp_segment.c): the planner makes the call, with
+ * the query's text, and the result columns are the query's.  Called by name,
+ * it runs only such a query, as whoever calls it.
+ */
+CREATE FUNCTION gp_internal.segment_query(sql text)
+RETURNS SETOF record
+AS 'MODULE_PATHNAME', 'gp_segment_query'
+LANGUAGE C STRICT;
+
+/*
  * The planner's Split on a segment (gp_split.c): rows deleted by their table
  * and ctid, returned as t's rows, and their new versions inserted, routed
  * into t's partitions -- firing no trigger and applying no policy, as
