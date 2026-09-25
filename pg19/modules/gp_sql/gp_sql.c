@@ -50,6 +50,7 @@
 #include "catalog/pg_tablespace.h"
 #include "commands/dbcommands.h"
 #include "commands/defrem.h"
+#include "foreign/foreign.h"
 #include "commands/explain.h"
 #include "commands/extension.h"
 #include "commands/prepare.h"
@@ -79,6 +80,7 @@
 #include "cb_module.h"
 #include "gp_core_api.h"
 #include "gp_dispatch.h"
+#include "gp_policy.h"
 #include "gp_grammar.h"
 #include "gp_label.h"
 #include "gp_settings.h"
@@ -1312,6 +1314,107 @@ gp_sql_explain_cluster_ctas(PlannedStmt *pstmt, ExplainStmt *explain,
 	ExplainQuery(pstate, insert, NULL, dest);
 }
 
+/* LOG ERRORS INTO's error table, ignored where Cloudberry refuses it */
+static bool gp_ignore_error_table = false;
+
+/* gp_exttable's, exttable_ddl.c */
+typedef void (*GpExtTableTransformCreate_fn) (CreateForeignTableStmt *stmt,
+											  const char *queryString);
+
+/*
+ * ATTACH PARTITION of an external table, and so EXCHANGE PARTITION, which
+ * is one: a writable one is refused, and a readable one's rows are not
+ * checked against the partition's bound, as Cloudberry says of it
+ * (tablecmds.c, ATExecAttachPartition()).
+ */
+static void
+check_attach_external(AlterTableStmt *stmt)
+{
+	Oid			self = stmt->relation ? RangeVarGetRelid(stmt->relation, NoLock, true) : InvalidOid;
+
+	foreach_node(AlterTableCmd, cmd, stmt->cmds)
+	{
+		PartitionCmd *pc;
+		Oid			relid;
+
+		/* its better words for what PostgreSQL says "is not a table" */
+		if (cmd->subtype == AT_AlterColumnType && OidIsValid(self) &&
+			((ColumnDef *) cmd->def)->raw_default != NULL &&
+			GpPolicyIsExternalTable(self))
+			ereport(ERROR,
+					(errcode(ERRCODE_DATATYPE_MISMATCH),
+					 errmsg("cannot specify a USING expression when altering an external table")));
+		if (cmd->subtype != AT_AttachPartition)
+			continue;
+		pc = (PartitionCmd *) cmd->def;
+		relid = RangeVarGetRelid(pc->name, NoLock, true);
+		if (!OidIsValid(relid) || !GpPolicyIsExternalTable(relid))
+			continue;
+		foreach_node(DefElem, def, GetForeignTable(relid)->options)
+			if (strcmp(def->defname, "is_writable") == 0 && defGetBoolean(def))
+				ereport(ERROR,
+						(errcode(ERRCODE_WRONG_OBJECT_TYPE),
+						 errmsg("cannot attach a WRITABLE external table")));
+		ereport(NOTICE,
+				(errmsg("partition constraints are not validated when attaching a readable external table")));
+	}
+}
+
+/*
+ * CREATE and ALTER ROLE's [NO]CREATEEXTTABLE, which the grammar carries on
+ * the statement's options (gp_desugar.c, rw_role_exttable()): taken out,
+ * for gp_exttable to keep in the role's label once the statement has run.
+ */
+typedef void (*GpExtTableSetRoleAuth_fn) (Oid roleid, List *auth, bool is_create);
+
+static List *
+take_role_exttable(Node *parsetree)
+{
+	List	  **options = IsA(parsetree, CreateRoleStmt) ?
+		&((CreateRoleStmt *) parsetree)->options :
+		&((AlterRoleStmt *) parsetree)->options;
+	List	   *auth = NIL;
+	ListCell   *lc;
+
+	foreach(lc, *options)
+	{
+		DefElem    *def = lfirst_node(DefElem, lc);
+
+		if (def->defnamespace == NULL || strcmp(def->defnamespace, "gp_exttable") != 0)
+			continue;
+		auth = lappend(auth, def);
+		*options = foreach_delete_current(*options, lc);
+	}
+	return auth;
+}
+
+static bool
+has_role_exttable(Node *parsetree)
+{
+	List	   *options;
+
+	if (IsA(parsetree, CreateRoleStmt))
+		options = ((CreateRoleStmt *) parsetree)->options;
+	else if (IsA(parsetree, AlterRoleStmt))
+		options = ((AlterRoleStmt *) parsetree)->options;
+	else
+		return false;
+	foreach_node(DefElem, def, options)
+		if (def->defnamespace != NULL && strcmp(def->defnamespace, "gp_exttable") == 0)
+			return true;
+	return false;
+}
+
+/* Is this the CREATE FOREIGN TABLE the grammar made of CREATE EXTERNAL TABLE? */
+static bool
+is_external_table_create(CreateForeignTableStmt *stmt)
+{
+	foreach_node(DefElem, def, stmt->options)
+		if (strcmp(def->defname, "gp_exttable.spec") == 0)
+			return true;
+	return false;
+}
+
 static void
 gp_sql_ProcessUtility(PlannedStmt *pstmt, const char *queryString,
 					  bool readOnlyTree, ProcessUtilityContext context,
@@ -1375,7 +1478,59 @@ gp_sql_ProcessUtility(PlannedStmt *pstmt, const char *queryString,
 		parsetree = pstmt->utilityStmt;
 	}
 
+	/*
+	 * CREATE EXTERNAL TABLE, as the grammar made it: a CREATE FOREIGN TABLE
+	 * whose clauses gp_exttable makes the table's options (exttable_ddl.c),
+	 * loaded for it, since nothing preloads it.  Before the options are read
+	 * below, since gp.distributed_by is among the ones it adds.
+	 */
+	if (IsA(parsetree, CreateForeignTableStmt) &&
+		is_external_table_create((CreateForeignTableStmt *) parsetree))
+	{
+		GpExtTableTransformCreate_fn transform;
+
+		if (readOnlyTree)
+		{
+			pstmt = copyObject(pstmt);
+			parsetree = pstmt->utilityStmt;
+			readOnlyTree = false;
+		}
+		transform = (GpExtTableTransformCreate_fn)
+			load_external_function("$libdir/gp_exttable", "GpExtTableTransformCreate",
+								   true, NULL);
+		transform((CreateForeignTableStmt *) parsetree, queryString);
+	}
+
 	check_reserved_names(parsetree);
+
+	if (IsA(parsetree, AlterTableStmt))
+		check_attach_external((AlterTableStmt *) parsetree);
+
+	if (has_role_exttable(parsetree))
+	{
+		List	   *auth;
+		Oid			roleid;
+		GpExtTableSetRoleAuth_fn set_auth;
+
+		if (readOnlyTree)
+		{
+			pstmt = copyObject(pstmt);
+			parsetree = pstmt->utilityStmt;
+			readOnlyTree = false;
+		}
+		auth = take_role_exttable(parsetree);
+		gp_sql_ProcessUtility(pstmt, queryString, readOnlyTree, context,
+							  params, queryEnv, dest, qc);
+		CommandCounterIncrement();
+		roleid = IsA(parsetree, CreateRoleStmt) ?
+			get_role_oid(((CreateRoleStmt *) parsetree)->role, false) :
+			get_rolespec_oid(((AlterRoleStmt *) parsetree)->role, false);
+		set_auth = (GpExtTableSetRoleAuth_fn)
+			load_external_function("$libdir/gp_exttable", "GpExtTableSetRoleAuth",
+								   true, NULL);
+		set_auth(roleid, auth, IsA(parsetree, CreateRoleStmt));
+		return;
+	}
 
 	/*
 	 * ALTER TABLE ... SET DISTRIBUTED: the new policy, carried out
@@ -1970,6 +2125,21 @@ _PG_init(void)
 							 &gp_allow_dml_directory_table,
 							 false,
 							 PGC_SUSET,
+							 0,
+							 NULL, NULL, NULL);
+
+	/*
+	 * Read by the grammar (gp_desugar.c, sreh_clause()), as an external
+	 * table's or a COPY's LOG ERRORS INTO is rewritten, which is before
+	 * gp_exttable, whose clause it is, need be loaded.
+	 */
+	DefineCustomBoolVariable("gp.ignore_error_table",
+							 "Ignore the INTO error-table clause of LOG ERRORS, for backward compatibility.",
+							 "The rows are logged where gp_read_error_log() reads them.  "
+							 "Cloudberry calls this gp_ignore_error_table.",
+							 &gp_ignore_error_table,
+							 false,
+							 PGC_USERSET,
 							 0,
 							 NULL, NULL, NULL);
 

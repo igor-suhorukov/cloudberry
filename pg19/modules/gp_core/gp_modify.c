@@ -105,6 +105,7 @@
 #include "utils/lsyscache.h"
 #include "utils/memutils.h"
 #include "utils/rel.h"
+#include "utils/rls.h"
 #include "utils/ruleutils.h"
 #include "utils/tuplestore.h"
 
@@ -1254,13 +1255,141 @@ gp_modify_planner_routed(Query *parse, const char *query_string, int cursorOptio
 /* ------------------------------------------------------------------------- */
 
 /*
+ * COPY ... [LOG ERRORS] SEGMENT REJECT LIMIT n [ROWS | PERCENT], as the
+ * grammar carried it on the statement's options (gp_desugar.c,
+ * rw_copy_sreh()): the data read through gp_exttable's filter, which logs
+ * and leaves out each line that would not load (copysreh.c), and the rest
+ * loaded by PostgreSQL's COPY, from it.
+ */
+typedef struct CopySreh
+{
+	int			limit;
+	bool		rows;
+	char		log_errors;
+	void	   *state;			/* gp_exttable's, while the data is read */
+} CopySreh;
+
+typedef void *(*SrehCopyBegin_fn) (ParseState *pstate, Relation rel,
+								   const char *filename, bool is_program,
+								   List *attlist, List *options,
+								   int reject_limit, bool limit_in_rows,
+								   char log_errors, List **load_options);
+typedef uint64 (*SrehCopyEnd_fn) (void *state);
+
+static bool
+copy_has_sreh(CopyStmt *stmt)
+{
+	foreach_node(DefElem, def, stmt->options)
+		if (def->defnamespace != NULL && strcmp(def->defnamespace, "gp_exttable") == 0)
+			return true;
+	return false;
+}
+
+/* The carried options, taken out before PostgreSQL's COPY reads the rest. */
+static void
+copy_take_sreh(CopyStmt *stmt, CopySreh *sreh)
+{
+	ListCell   *lc;
+
+	sreh->limit = 0;
+	sreh->rows = true;
+	sreh->log_errors = 'f';
+	sreh->state = NULL;
+	foreach(lc, stmt->options)
+	{
+		DefElem    *def = lfirst_node(DefElem, lc);
+
+		if (def->defnamespace == NULL || strcmp(def->defnamespace, "gp_exttable") != 0)
+			continue;
+		if (strcmp(def->defname, "reject_limit") == 0)
+			sreh->limit = atoi(defGetString(def));
+		else if (strcmp(def->defname, "reject_limit_type") == 0)
+			sreh->rows = (defGetString(def)[0] == 'r');
+		else if (strcmp(def->defname, "log_errors") == 0)
+			sreh->log_errors = defGetString(def)[0];
+		stmt->options = foreach_delete_current(stmt->options, lc);
+	}
+}
+
+/*
+ * The COPY's data, through the filter: a COPY FROM state that reads the
+ * lines it passes, with the options it gave for them.
+ */
+static CopyFromState
+copy_begin_sreh(ParseState *pstate, CopyStmt *stmt, Relation rel,
+				CopySreh *sreh)
+{
+	SrehCopyBegin_fn begin;
+	copy_data_source_cb read;
+	List	   *load_options;
+
+	begin = (SrehCopyBegin_fn)
+		load_external_function("$libdir/gp_exttable", "GpSrehCopyBegin", true, NULL);
+	read = (copy_data_source_cb)
+		load_external_function("$libdir/gp_exttable", "GpSrehCopyRead", true, NULL);
+	sreh->state = begin(pstate, rel, stmt->filename, stmt->is_program,
+						stmt->attlist, stmt->options, sreh->limit, sreh->rows,
+						sreh->log_errors, &load_options);
+	return BeginCopyFrom(pstate, rel, NULL, NULL, false, read, stmt->attlist,
+						 load_options);
+}
+
+static void
+copy_end_sreh(CopySreh *sreh)
+{
+	SrehCopyEnd_fn end = (SrehCopyEnd_fn)
+		load_external_function("$libdir/gp_exttable", "GpSrehCopyEnd", true, NULL);
+
+	(void) end(sreh->state);
+	sreh->state = NULL;
+}
+
+/*
+ * COPY t FROM, into a table whose rows are here -- one node's, or one the
+ * coordinator keeps -- under SEGMENT REJECT LIMIT: DoCopy()'s checks, and
+ * PostgreSQL's COPY, reading through the filter.
+ */
+static uint64
+copy_from_local_sreh(ParseState *pstate, CopyStmt *stmt, Relation rel,
+					 CopySreh *sreh)
+{
+	ParseNamespaceItem *nsitem;
+	RTEPermissionInfo *perminfo;
+	CopyFromState cstate;
+	uint64		processed;
+
+	nsitem = addRangeTableEntryForRelation(pstate, rel, RowExclusiveLock,
+										   NULL, false, false);
+	perminfo = nsitem->p_perminfo;
+	perminfo->requiredPerms = ACL_INSERT;
+	foreach_int(attnum, CopyGetAttnums(RelationGetDescr(rel), rel, stmt->attlist))
+		perminfo->insertedCols = bms_add_member(perminfo->insertedCols,
+												attnum - FirstLowInvalidHeapAttributeNumber);
+	ExecCheckPermissions(pstate->p_rtable, list_make1(perminfo), true);
+	if (check_enable_rls(RelationGetRelid(rel), InvalidOid, false) == RLS_ENABLED)
+		ereport(ERROR,
+				(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+				 errmsg("COPY FROM not supported with row-level security"),
+				 errhint("Use INSERT statements instead.")));
+	if (XactReadOnly && !rel->rd_islocaltemp)
+		PreventCommandIfReadOnly("COPY FROM");
+
+	cstate = copy_begin_sreh(pstate, stmt, rel, sreh);
+	processed = CopyFrom(cstate);
+	EndCopyFrom(cstate);
+	copy_end_sreh(sreh);
+	return processed;
+}
+
+/*
  * COPY t FROM: parsed by PostgreSQL's own COPY, as it would be into a local
  * table, and routed.  The coordinator evaluates the defaults, as for INSERT,
- * so that a serial column has one sequence.
+ * so that a serial column has one sequence.  Under SEGMENT REJECT LIMIT,
+ * read through gp_exttable's filter (above).
  */
 static uint64
 copy_from_distributed(ParseState *pstate, CopyStmt *stmt, Relation rel,
-					  GpPolicy *policy)
+					  GpPolicy *policy, CopySreh *sreh)
 {
 	CopyFromState cstate;
 	GpRouter   *router;
@@ -1269,8 +1398,11 @@ copy_from_distributed(ParseState *pstate, CopyStmt *stmt, Relation rel,
 	EState	   *estate = CreateExecutorState();
 	uint64		processed;
 
-	cstate = BeginCopyFrom(pstate, rel, NULL, stmt->filename, stmt->is_program,
-						   NULL, stmt->attlist, stmt->options);
+	if (sreh != NULL)
+		cstate = copy_begin_sreh(pstate, stmt, rel, sreh);
+	else
+		cstate = BeginCopyFrom(pstate, rel, NULL, stmt->filename, stmt->is_program,
+							   NULL, stmt->attlist, stmt->options);
 	router = router_begin(rel, policy);
 	slot = MakeSingleTupleTableSlot(RelationGetDescr(rel), &TTSOpsVirtual);
 	econtext = GetPerTupleExprContext(estate);
@@ -1290,6 +1422,14 @@ copy_from_distributed(ParseState *pstate, CopyStmt *stmt, Relation rel,
 	EndCopyFrom(cstate);
 	processed = router_finish(router);
 	router_end(router);
+
+	/*
+	 * What the filter refused is said once the rows are where they go: an
+	 * error a segment raises of them fails the COPY first, as Cloudberry's
+	 * says nothing of its rejects then.
+	 */
+	if (sreh != NULL)
+		copy_end_sreh(sreh);
 	ExecDropSingleTupleTableSlot(slot);
 	FreeExecutorState(estate);
 
@@ -1303,13 +1443,65 @@ gp_modify_ProcessUtility(PlannedStmt *pstmt, const char *queryString,
 						 DestReceiver *dest, QueryCompletion *qc)
 {
 	Node	   *parsetree = pstmt->utilityStmt;
+	CopySreh	sreh_data;
+	CopySreh   *sreh = NULL;
+
+	/* SEGMENT REJECT LIMIT, carried by the grammar: see copy_take_sreh() */
+	if (IsA(parsetree, CopyStmt) && copy_has_sreh((CopyStmt *) parsetree))
+	{
+		CopyStmt   *stmt;
+
+		if (readOnlyTree)
+		{
+			pstmt = copyObject(pstmt);
+			parsetree = pstmt->utilityStmt;
+			readOnlyTree = false;
+		}
+		stmt = (CopyStmt *) parsetree;
+		copy_take_sreh(stmt, &sreh_data);
+		sreh = &sreh_data;
+		if (!stmt->is_from)
+			ereport(ERROR,
+					(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+					 errmsg("COPY single row error handling only available using COPY FROM")));
+		if (stmt->relation == NULL)
+			ereport(ERROR,
+					(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+					 errmsg("COPY single row error handling only available for distributed user tables")));
+		if (stmt->whereClause != NULL)
+			ereport(ERROR,
+					(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+					 errmsg("COPY FROM ... WHERE is not supported with SEGMENT REJECT LIMIT")));
+	}
 
 	if (IsA(parsetree, CopyStmt) && ((CopyStmt *) parsetree)->relation != NULL &&
-		GpClusterBackendRole() == GP_ROLE_DISPATCH)
+		(GpClusterBackendRole() == GP_ROLE_DISPATCH || sreh != NULL))
 	{
 		CopyStmt   *stmt = (CopyStmt *) parsetree;
 		Oid			relid = RangeVarGetRelid(stmt->relation, NoLock, true);
-		GpPolicy   *policy = OidIsValid(relid) ? GpScanDistributedPolicy(relid) : NULL;
+		GpPolicy   *policy = OidIsValid(relid) && GpClusterBackendRole() == GP_ROLE_DISPATCH ?
+			GpScanDistributedPolicy(relid) : NULL;
+
+		if (sreh != NULL && policy == NULL)
+		{
+			ParseState *pstate = make_parsestate(NULL);
+			Relation	rel;
+			uint64		processed;
+
+			pstate->p_sourcetext = queryString;
+			pstate->p_queryEnv = queryEnv;
+			rel = table_openrv(stmt->relation, RowExclusiveLock);
+			if (stmt->filename != NULL && !has_privs_of_role(GetUserId(),
+															 stmt->is_program ? ROLE_PG_EXECUTE_SERVER_PROGRAM : ROLE_PG_READ_SERVER_FILES))
+				ereport(ERROR,
+						(errcode(ERRCODE_INSUFFICIENT_PRIVILEGE),
+						 errmsg("permission denied to COPY from a file or program")));
+			processed = copy_from_local_sreh(pstate, stmt, rel, sreh);
+			table_close(rel, NoLock);
+			if (qc)
+				SetQueryCompletion(qc, CMDTAG_COPY, processed);
+			return;
+		}
 
 		if (policy != NULL && stmt->is_from)
 		{
@@ -1340,7 +1532,7 @@ gp_modify_ProcessUtility(PlannedStmt *pstmt, const char *queryString,
 						(errcode(ERRCODE_INSUFFICIENT_PRIVILEGE),
 						 errmsg("permission denied to COPY from a file or program")));
 
-			processed = copy_from_distributed(pstate, stmt, rel, policy);
+			processed = copy_from_distributed(pstate, stmt, rel, policy, sreh);
 			table_close(rel, NoLock);
 
 			if (qc)

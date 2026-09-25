@@ -44,6 +44,7 @@
 #include "utils/syscache.h"
 
 #include "cb_plancat.h"
+#include "gp_policy.h"
 
 /*
  * See cb_plancat.h.  Off by default, as in Cloudberry
@@ -348,6 +349,11 @@ cdb_estimate_partitioned_numtuples(Relation rel)
 			estimate_rel_size(childrel, NULL, &numpages, &childtuples,
 							  &allvisfrac);
 		}
+
+		/* an external table, never analyzed: Cloudberry's size of one */
+		if (childtuples < 0 && childrel->rd_rel->relkind == RELKIND_FOREIGN_TABLE &&
+			GpPolicyIsExternalTable(childid))
+			childtuples = GP_EXTERNAL_TABLE_DEFAULT_TUPLES;
 
 		if (childtuples > 0)
 			totaltuples += childtuples;

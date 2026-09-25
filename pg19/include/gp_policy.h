@@ -106,6 +106,23 @@ extern GpPolicy *GpPolicyGet(Oid relid);
 extern GpPolicy *GpPolicyGetRecorded(Oid relid);
 
 /*
+ * Is this relation an external table -- a foreign table of gp_exttable's
+ * server, gp_exttable_server -- whose policy says where its rows are read
+ * or written, as Cloudberry's gp_distribution_policy says it for one?  Any
+ * other foreign table is read where PostgreSQL reads it, on the coordinator,
+ * whatever label it has.
+ */
+extern bool GpPolicyIsExternalTable(Oid relid);
+
+/*
+ * The size an external table is taken to be, never analyzed as it is: 1000
+ * pages of 1000 rows, as Cloudberry's planner and ORCA take it
+ * (DEFAULT_EXTERNAL_TABLE_PAGES and _TUPLES, optimizer/plancat.h).
+ */
+#define GP_EXTERNAL_TABLE_DEFAULT_PAGES		1000
+#define GP_EXTERNAL_TABLE_DEFAULT_TUPLES	1000000.0
+
+/*
  * The policy a distributed_by value -- "random", "replicated" or a key --
  * would give this relation, read as GpPolicyGet() reads a label, over the
  * segments the relation is spread over now.

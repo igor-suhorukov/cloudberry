@@ -280,6 +280,10 @@ extern const char *GpDispatchPassfile(void);
  */
 struct pg_conn;
 extern void GpDispatchRelayNotices(struct pg_conn *conn);
+
+/* A filter of a segment's NOTICE: true when it takes it (gp_dispatch.c). */
+typedef bool (*GpNoticeFilter) (const char *sqlstate, const char *message);
+extern void GpDispatchAddNoticeFilter(GpNoticeFilter filter);
 extern void GpDispatchFlushNotices(void);
 
 /*

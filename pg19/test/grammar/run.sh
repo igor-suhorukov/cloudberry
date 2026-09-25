@@ -1905,6 +1905,55 @@ def=$(q "SELECT pg_get_viewdef('gdr_v2');" | tr '\n' ' ' | sed 's/;[[:space:]]*$
 is "and what it prints makes the view again" \
    "CREATE VIEW gdr_v3 AS $def; SELECT count(*), sum(b) FROM gdr_v3;" "2|14"
 
+###############################################################################
+echo "17. external tables, protocols, and COPY's single-row error handling"
+###############################################################################
+# gp_exttable carries them out (M5), and is not loaded here: the statements
+# are checked as text, as the rewrite leaves them.  An external table is a
+# foreign table of gp_exttable's server, its clauses in one option; a
+# protocol's statements, calls of gp_exttable's procedures.
+is "an external table is a foreign table of gp_exttable's server" \
+   "SELECT gp_sql.desugar('CREATE EXTERNAL TABLE e (a int) LOCATION (''gpfdist://h:8080/f'') FORMAT ''TEXT''')
+      LIKE 'CREATE FOREIGN TABLE e (a int) SERVER gp_exttable_server OPTIONS (\"gp_exttable.spec\" %:defname location :arg (\"gpfdist://h:8080/f\")%';" "t"
+is "a writable one's DISTRIBUTED BY is its policy, as a table's is" \
+   "SELECT position('\"gp.distributed_by\" ''(a)''' IN
+      gp_sql.desugar('CREATE WRITABLE EXTERNAL WEB TABLE w (a int) EXECUTE ''cat > /dev/null'' FORMAT ''CSV'' DISTRIBUTED BY (a)')) > 0;" "t"
+is "and the reject limit and the error log are among its clauses" \
+   "SELECT gp_sql.desugar('CREATE EXTERNAL TABLE e (a int) LOCATION (''file://h/f'') FORMAT ''TEXT'' LOG ERRORS SEGMENT REJECT LIMIT 10 ROWS')
+      LIKE '%:defname reject_limit :arg 10 %:defname log_errors :arg \"t\" %';" "t"
+is "DROP and ALTER EXTERNAL TABLE are the foreign table's" \
+   "SELECT gp_sql.desugar('DROP EXTERNAL WEB TABLE IF EXISTS e') || ' / ' ||
+           gp_sql.desugar('ALTER EXTERNAL TABLE e OWNER TO r');" \
+   "DROP FOREIGN TABLE IF EXISTS e / ALTER FOREIGN TABLE e OWNER TO r"
+is "and an external table is expanded as a table is" \
+   "SELECT gp_sql.desugar('ALTER EXTERNAL TABLE e EXPAND TABLE');" \
+   "ALTER FOREIGN TABLE e SET (gp.expand = 'table')"
+is "CREATE PROTOCOL is a call" \
+   "SELECT gp_sql.desugar('CREATE TRUSTED PROTOCOL p (readfunc = ''rf'', writefunc = ''wf'')');" \
+   "CALL gp_exttable.create_protocol('p', true, ARRAY['readfunc', 'rf', 'writefunc', 'wf']::text[])"
+is "and so are DROP PROTOCOL and GRANT on one" \
+   "SELECT gp_sql.desugar('DROP PROTOCOL IF EXISTS p') || ' / ' ||
+           gp_sql.desugar('GRANT SELECT ON PROTOCOL p TO r');" \
+   "CALL gp_exttable.drop_protocol(ARRAY['p']::text[], true, false) / CALL gp_exttable.grant_protocol(true, ARRAY['select']::text[], ARRAY['p']::text[], ARRAY['r']::text[], false, false)"
+
+# COPY's clauses, and a role's CREATEEXTTABLE, are carried on the statement's
+# parse node, which desugar() shows in a comment.
+is "COPY's reject limit is carried on the statement" \
+   "SELECT gp_sql.desugar('COPY plain FROM STDIN LOG ERRORS SEGMENT REJECT LIMIT 10');" \
+   "COPY plain FROM STDIN  /* and on its parse node: gp_exttable.reject_limit = '10', gp_exttable.reject_limit_type = 'r', gp_exttable.log_errors = 't' */"
+is "and a role's CREATEEXTTABLE" \
+   "SELECT gp_sql.desugar('ALTER ROLE r CREATEEXTTABLE (type = ''readable'', protocol = ''gpfdist'')');" \
+   "ALTER ROLE r  /* and on its parse node: gp_exttable.exttabauth = 'type=readable,protocol=gpfdist' */"
+at "an error table is refused at INTO, as Cloudberry refuses it" \
+   "COPY plain FROM STDIN LOG ERRORS INTO errtab SEGMENT REJECT LIMIT 10" \
+   "error table is not supported" "INTO"
+is "the words are names too" \
+   "CREATE TABLE external (protocol int, reject text, web int, segment int, errors int, log int);
+    SELECT count(*) FROM external WHERE protocol = 1 OR reject = 'x' OR web = 2;" "0"
+is "and a COPY without the clauses is left alone" \
+   "SELECT gp_sql.desugar('COPY external (protocol, reject) FROM STDIN');" \
+   "COPY external (protocol, reject) FROM STDIN"
+
 echo
 echo "  $pass passed, $fail failed"
 [ "$fail" -eq 0 ]

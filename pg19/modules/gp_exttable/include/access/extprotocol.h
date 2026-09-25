@@ -1,0 +1,106 @@
+/*-------------------------------------------------------------------------
+ *
+ * extprotocol.h
+ *	  Cloudberry's API of external table protocols, which gp_exttable carries
+ *
+ * Cloudberry's own header, src/include/access/extprotocol.h, as a protocol or a
+ * formatter of the user's is written against it: gp_exttable calls theirs
+ * as Cloudberry's server calls them (url_custom.c, extaccess.c), and a
+ * module of theirs builds against this copy.
+ *
+ * Portions Copyright (c) 2010, EMC corporation
+ * Portions Copyright (c) 2012-Present VMware, Inc. or its affiliates.
+ *
+ *-------------------------------------------------------------------------
+ */
+#ifndef EXTPROTOCOL_H
+#define EXTPROTOCOL_H
+
+#include "nodes/nodes.h"
+#include "nodes/pg_list.h"
+#include "nodes/value.h"
+#include "utils/rel.h"
+
+/*
+ * The node tags a protocol's function is called with as fcinfo->context.
+ * Cloudberry's are its server's; PostgreSQL 19 has none to give an
+ * extension, so each is a number no node of PostgreSQL's has, which IsA()
+ * below compares (gp_exttable, which calls the functions, sets them).
+ */
+#define T_ExtProtocolData		((NodeTag) 0x7E02)
+#define T_ExtProtocolValidatorData ((NodeTag) 0x7E03)
+
+
+/* ------------------------- I/O function API -----------------------------*/
+
+struct ExternalSelectDescData;
+typedef struct ExternalSelectDescData *ExternalSelectDesc;
+
+/*
+ * ExtProtocolData is the node type that is passed as fmgr "context" info
+ * when a function is called by the External Table protocol manager.
+ */
+typedef struct ExtProtocolData
+{
+	NodeTag            type;                  /* see T_ExtProtocolData */
+	Relation           prot_relation;
+	char               *prot_url;
+	char               *prot_databuf;
+	int                prot_maxbytes;
+	void               *prot_user_ctx;
+	bool               prot_last_call;
+	ExternalSelectDesc desc;
+} ExtProtocolData;
+
+typedef ExtProtocolData *ExtProtocol;
+
+#define CALLED_AS_EXTPROTOCOL(fcinfo) \
+	((fcinfo->context != NULL && IsA((fcinfo)->context, ExtProtocolData)))
+
+#define EXTPROTOCOL_GET_URL(fcinfo)		   (((ExtProtocolData*) fcinfo->context)->prot_url)
+#define EXTPROTOCOL_GET_RELATION(fcinfo)   (((ExtProtocolData*) fcinfo->context)->prot_relation)
+#define EXTPROTOCOL_GET_DATABUF(fcinfo)    (((ExtProtocolData*) fcinfo->context)->prot_databuf)
+#define EXTPROTOCOL_GET_DATALEN(fcinfo)    (((ExtProtocolData*) fcinfo->context)->prot_maxbytes)
+#define EXTPROTOCOL_GET_USER_CTX(fcinfo)   (((ExtProtocolData*) fcinfo->context)->prot_user_ctx)
+#define EXTPROTOCOL_GET_EXTERNAL_SELECT_DESC(fcinfo) (((ExtProtocolData*) fcinfo->context)->desc)
+#define EXTPROTOCOL_IS_LAST_CALL(fcinfo)   (((ExtProtocolData*) fcinfo->context)->prot_last_call)
+
+#define EXTPROTOCOL_SET_LAST_CALL(fcinfo)  (((ExtProtocolData*) fcinfo->context)->prot_last_call = true)
+#define EXTPROTOCOL_SET_USER_CTX(fcinfo, p) \
+	(((ExtProtocolData*) fcinfo->context)->prot_user_ctx = p)
+
+
+/* ------------------------- Validator function API -----------------------------*/
+
+typedef enum ValidatorDirection
+{
+	EXT_VALIDATE_READ,
+	EXT_VALIDATE_WRITE
+} ValidatorDirection;
+
+/*
+ * ExtProtocolValidatorData is the node type that is passed as fmgr "context" info
+ * when a function is called by the External Table protocol manager.
+ */
+typedef struct ExtProtocolValidatorData
+{
+	NodeTag				 type;			  /* see T_ExtProtocolValidatorData */
+	List				*url_list;
+	ValidatorDirection	 direction;  /* validating read or write? */
+	char				*errmsg;		  /* the validation error upon return, if any */
+
+} ExtProtocolValidatorData;
+
+typedef ExtProtocolValidatorData *ExtProtocolValidator;
+
+#define CALLED_AS_EXTPROTOCOL_VALIDATOR(fcinfo) \
+	((fcinfo->context != NULL && IsA((fcinfo)->context, ExtProtocolValidatorData)))
+
+#define EXTPROTOCOL_VALIDATOR_GET_URL_LIST(fcinfo)	(((ExtProtocolValidatorData*) fcinfo->context)->url_list)
+#define EXTPROTOCOL_VALIDATOR_GET_NUM_URLS(fcinfo)	(list_length(((ExtProtocolValidatorData*) fcinfo->context)->url_list))
+
+#define EXTPROTOCOL_VALIDATOR_GET_NTH_URL(fcinfo, n) (((String *)(list_nth(EXTPROTOCOL_VALIDATOR_GET_URL_LIST(fcinfo),(n - 1))))->sval)
+#define EXTPROTOCOL_VALIDATOR_GET_DIRECTION(fcinfo) (((ExtProtocolValidatorData*) fcinfo->context)->direction)
+
+
+#endif   /* EXTPROTOCOL_H */

@@ -98,6 +98,7 @@
 #include "catalog/pg_rewrite.h"
 #include "catalog/pg_type.h"
 #include "commands/defrem.h"
+#include "foreign/foreign.h"
 #include "commands/extension.h"
 #include "common/pg_prng.h"
 #include "executor/spi.h"
@@ -800,6 +801,24 @@ rows_back(Oid relid, bool only, const char *tmp)
  * statement's transaction, under its AccessExclusiveLock.  "recurse" is
  * false for ALTER TABLE ONLY.
  */
+/* Is this foreign table an external table, and is it one rows are written to? */
+static bool
+external_table(Oid relid)
+{
+	ForeignTable *ft = GetForeignTable(relid);
+
+	return strcmp(GetForeignServer(ft->serverid)->servername, "gp_exttable_server") == 0;
+}
+
+static bool
+external_writable(Oid relid)
+{
+	foreach_node(DefElem, def, GetForeignTable(relid)->options)
+		if (strcmp(def->defname, "is_writable") == 0)
+			return defGetBoolean(def);
+	return false;
+}
+
 void
 GpDistributionAlter(Oid relid, const char *policy, int reorganize, bool recurse)
 {
@@ -823,6 +842,34 @@ GpDistributionAlter(Oid relid, const char *policy, int reorganize, bool recurse)
 	if (!object_ownercheck(RelationRelationId, relid, GetUserId()))
 		aclcheck_error(ACLCHECK_NOT_OWNER, get_relkind_objtype(relkind),
 					   get_rel_name(relid));
+
+	/*
+	 * An external table's policy says where a writable one's rows are
+	 * written: it changes, and no row moves, for none is here.  Cloudberry's
+	 * words for what it refuses (ATExecSetDistributedBy()).
+	 */
+	if (relkind == RELKIND_FOREIGN_TABLE && GpCoreApiLookup() != NULL &&
+		external_table(relid))
+	{
+		if (!external_writable(relid))
+			ereport(ERROR,
+					(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+					 errmsg("cannot set distribution policy of readable external table \"%s\"",
+							get_rel_name(relid))));
+		if (policy != NULL && strcmp(policy, "replicated") == 0)
+			ereport(ERROR,
+					(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+					 errmsg("SET DISTRIBUTED REPLICATED is not supported for external table")));
+		if (reorganize == 1)
+			ereport(ERROR,
+					(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+					 errmsg("cannot reorganize external table \"%s\"",
+							get_rel_name(relid))));
+		if (policy != NULL)
+			set_policy_label(relid, GpDistributionCheckKey(relid, policy, -1, NULL, true));
+		return;
+	}
+
 	if (relkind != RELKIND_RELATION && relkind != RELKIND_PARTITIONED_TABLE)
 		ereport(ERROR,
 				(errcode(ERRCODE_WRONG_OBJECT_TYPE),

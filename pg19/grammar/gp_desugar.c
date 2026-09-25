@@ -93,6 +93,7 @@
 #include "parser/scansup.h"
 #include "utils/builtins.h"
 #include "utils/elog.h"
+#include "utils/guc.h"
 #include "utils/json.h"
 #include "utils/regproc.h"
 
@@ -112,7 +113,8 @@ static const char *const gp_trigger_words[] = {
 	"task", "directory", "storage", "dynamic", "incremental", "unset",
 	"account", "execute", "decode", "subpartition", "gp_dist_random",
 	"orientation", "encoding",
-	"reorganize",
+	"reorganize", "external", "reject", "protocol",
+	"createexttable", "nocreateexttable",
 	NULL
 };
 
@@ -555,6 +557,8 @@ typedef struct GpRewrite
 	GpOut		options;		/* namespaced options for its WITH list, each
 								 * standing for the clause it came from */
 	StringInfoData fdw_options; /* a foreign table's, for its OPTIONS list */
+	int			fdw_options_at; /* where that list goes when the SERVER
+								 * clause is the rewrite's own, or -1 */
 	List	   *carriers;		/* DefElem for its parse node; see
 								 * GpAttachCarriers */
 } GpRewrite;
@@ -575,6 +579,7 @@ rw_init(GpRewrite *rw, const GpTokens *ts, int first, int last)
 	rw->subject_end = -1;
 	out_init(&rw->options, ts->src);
 	initStringInfo(&rw->fdw_options);
+	rw->fdw_options_at = -1;
 	rw->carriers = NIL;
 }
 
@@ -807,6 +812,14 @@ rw_place_fdw_options(GpRewrite *rw)
 
 	if (rw->fdw_options.len == 0 || rw->whole)
 		return;
+
+	/* after the SERVER clause the rewrite wrote itself */
+	if (rw->fdw_options_at >= 0)
+	{
+		rw_edit(rw, rw->fdw_options_at, rw->fdw_options_at,
+				psprintf(" OPTIONS (%s)", rw->fdw_options.data));
+		return;
+	}
 
 	for (int j = (rw->subject_end >= 0 ? rw->subject_end : rw->first); j < rw->last; j++)
 	{
@@ -1444,6 +1457,826 @@ rw_create_directory_table(GpRewrite *rw, char **name, int *after)
 	*name = rw_text(ts, i, nameend);
 	*after = nameend;
 	return true;
+}
+
+/* ------------------------------------------------------------------------- */
+/* External tables                                                           */
+/* ------------------------------------------------------------------------- */
+
+/*
+ * A list of names, comma-separated, from token i -- a FORMAT option's
+ * columns -- as String nodes; *after is the token after it.
+ */
+static List *
+ext_name_list(const GpTokens *ts, int i, int *after)
+{
+	List	   *names = NIL;
+
+	for (;;)
+	{
+		if (!tok_is_name(ts, i))
+			ts_syntax_error(ts, i);
+		names = lappend(names, makeString(tok_name(ts, i)));
+		i++;
+		if (!tok_is_char(ts, i, ','))
+			break;
+		i++;
+	}
+	*after = i;
+	return names;
+}
+
+/* A string after an optional AS, from token i, for a FORMAT option. */
+static Node *
+ext_as_string(const GpTokens *ts, int *i)
+{
+	if (tok_is_kw(ts, *i, "as"))
+		(*i)++;
+	if (!tok_is_string(ts, *i))
+		ts_syntax_error(ts, *i);
+	return (Node *) makeString(pstrdup(ts->toks[(*i)++].str));
+}
+
+/*
+ * FORMAT '...' (...), the options between the brackets at i and close:
+ * Cloudberry's words for COPY's options, DELIMITER 'x' NULL 'y' CSV HEADER
+ * and the rest (gram.y, format_opt_item), or name = value, comma-separated,
+ * which a custom format's formatter takes (format_def_item), each as the
+ * DefElem its grammar makes.
+ */
+static List *
+ext_format_options(const GpTokens *ts, int i, int close)
+{
+	List	   *opts = NIL;
+
+	if (i == close)
+		return NIL;
+
+	if (tok_is_name(ts, i) && tok_is_char(ts, i + 1, '='))
+	{
+		for (;;)
+		{
+			char	   *label;
+			Node	   *arg;
+
+			if (!tok_is_name(ts, i) || !tok_is_char(ts, i + 1, '='))
+				ts_syntax_error(ts, i);
+			label = tok_name(ts, i);
+			i += 2;
+			if (tok_is_char(ts, i, '('))
+			{
+				arg = (Node *) ext_name_list(ts, i + 1, &i);
+				if (!tok_is_char(ts, i, ')'))
+					ts_syntax_error(ts, i);
+				i++;
+			}
+			else if (tok_is_string(ts, i) || ts->toks[i].code == GP_FCONST)
+				arg = (Node *) makeString(pstrdup(ts->toks[i++].str));
+			else if (ts->toks[i].code == GP_ICONST)
+				arg = (Node *) makeString(psprintf("%d", ts->toks[i++].ival));
+			else if (tok_is_name(ts, i))
+			{
+				StringInfoData name;
+
+				/* a function's name, qualified or not, or a word */
+				initStringInfo(&name);
+				appendStringInfoString(&name, tok_name(ts, i++));
+				while (tok_is_char(ts, i, '.') && tok_is_name(ts, i + 1))
+				{
+					appendStringInfo(&name, ".%s", tok_name(ts, i + 1));
+					i += 2;
+				}
+				arg = (Node *) makeString(name.data);
+			}
+			else
+				ts_syntax_error(ts, i);
+			opts = lappend(opts, makeDefElem(label, arg, -1));
+			if (i == close)
+				break;
+			if (!tok_is_char(ts, i, ','))
+				ts_syntax_error(ts, i);
+			i++;
+		}
+		return opts;
+	}
+
+	while (i < close)
+	{
+		DefElem    *d;
+
+		if (tok_is(ts, i, "delimiter"))
+		{
+			i++;
+			d = makeDefElem("delimiter", ext_as_string(ts, &i), -1);
+		}
+		else if (tok_is_kw(ts, i, "null"))
+		{
+			i++;
+			d = makeDefElem("null", ext_as_string(ts, &i), -1);
+		}
+		else if (tok_is(ts, i, "csv"))
+		{
+			i++;
+			d = makeDefElem("csv", (Node *) makeInteger(true), -1);
+		}
+		else if (tok_is(ts, i, "header"))
+		{
+			i++;
+			d = makeDefElem("header", (Node *) makeInteger(true), -1);
+		}
+		else if (tok_is(ts, i, "quote"))
+		{
+			i++;
+			d = makeDefElem("quote", ext_as_string(ts, &i), -1);
+		}
+		else if (tok_is(ts, i, "escape"))
+		{
+			i++;
+			d = makeDefElem("escape", ext_as_string(ts, &i), -1);
+		}
+		else if (tok_is(ts, i, "force") && tok_is_kw(ts, i + 1, "not") &&
+				 tok_is_kw(ts, i + 2, "null"))
+			d = makeDefElem("force_not_null",
+							(Node *) ext_name_list(ts, i + 3, &i), -1);
+		else if (tok_is(ts, i, "force") && tok_is(ts, i + 1, "quote") &&
+				 tok_is_char(ts, i + 2, '*'))
+		{
+			i += 3;
+			d = makeDefElem("force_quote", (Node *) makeNode(A_Star), -1);
+		}
+		else if (tok_is(ts, i, "force") && tok_is(ts, i + 1, "quote"))
+			d = makeDefElem("force_quote",
+							(Node *) ext_name_list(ts, i + 2, &i), -1);
+		else if (tok_is(ts, i, "fill") && tok_is(ts, i + 1, "missing") &&
+				 tok_is(ts, i + 2, "fields"))
+		{
+			i += 3;
+			d = makeDefElem("fill_missing_fields", (Node *) makeInteger(true), -1);
+		}
+		else if (tok_is(ts, i, "newline"))
+		{
+			i++;
+			d = makeDefElem("newline", ext_as_string(ts, &i), -1);
+		}
+		else
+			ts_syntax_error(ts, i);
+		opts = lappend(opts, d);
+	}
+	if (i != close)
+		ts_syntax_error(ts, i);
+	return opts;
+}
+
+/*
+ * [LOG ERRORS [INTO t | PERSISTENTLY]] SEGMENT REJECT LIMIT n [ROWS | PERCENT]
+ * at token i, as Cloudberry's grammar reads it for an external table
+ * (ExtSingleRowErrorHandling) and, without PERSISTENTLY, for COPY
+ * (OptSingleRowErrorHandling), with its errors: false where there is none.
+ * *after is the token after it; *log_errors "t", "p" or "f".
+ *
+ * LOG ERRORS INTO t is refused, as Cloudberry refuses an error table,
+ * unless gp.ignore_error_table (gp_exttable's) says to ignore the INTO.
+ */
+static bool
+sreh_clause(GpRewrite *rw, int i, bool persistently_ok, int *after, int *limit,
+			bool *rows, const char **log_errors)
+{
+	const GpTokens *ts = rw->ts;
+	int			j = i;
+
+	*log_errors = "f";
+	*rows = true;
+	if (tok_is(ts, j, "log") && tok_is(ts, j + 1, "errors"))
+	{
+		*log_errors = "t";
+		j += 2;
+		if (persistently_ok && tok_is(ts, j, "persistently"))
+		{
+			*log_errors = "p";
+			j++;
+		}
+		else if (tok_is_kw(ts, j, "into"))
+		{
+			int			e = skip_qualified_name(ts, j + 1);
+			const char *ignore = GetConfigOption("gp.ignore_error_table", true, false);
+			bool		ignored = false;
+
+			if (e == j + 1)
+				rw_syntax_error(rw, j + 1);
+			if (ignore == NULL || !parse_bool(ignore, &ignored) || !ignored)
+				ereport(ERROR,
+						(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+						 errmsg("error table is not supported"),
+						 errhint("Set gp.ignore_error_table to ignore the [INTO error-table] clause for backward compatibility."),
+						 errposition(pg_mbstrlen_with_len(ts->src, ts->toks[j].off) + 1)));
+			ereport(WARNING,
+					(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+					 errmsg("error table is not supported"),
+					 errhint("Use gp_read_error_log() and gp_truncate_error_log() to view and manage the internal error log associated with your table.")));
+			j = e;
+		}
+		if (!tok_is(ts, j, "segment"))
+			rw_syntax_error(rw, j);
+	}
+	if (!tok_is(ts, j, "segment") || !tok_is(ts, j + 1, "reject") ||
+		!tok_is_kw(ts, j + 2, "limit"))
+		return false;
+	if (j + 3 >= ts->ntoks || ts->toks[j + 3].code != GP_ICONST)
+		rw_syntax_error(rw, j + 3);
+	*limit = ts->toks[j + 3].ival;
+	j += 4;
+	if (tok_is(ts, j, "rows"))
+		j++;
+	else if (tok_is(ts, j, "percent"))
+	{
+		*rows = false;
+		j++;
+	}
+	if (!*rows && (*limit < 1 || *limit > 100))
+		ereport(ERROR,
+				(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+				 errmsg("invalid PERCENT value. Should be (1 - 100)")));
+	if (*rows && *limit < 2)
+		ereport(ERROR,
+				(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+				 errmsg("invalid (ROWS) reject limit. Should be 2 or larger")));
+	*after = j;
+	return true;
+}
+
+/*
+ * CREATE [READABLE | WRITABLE] EXTERNAL [WEB] TABLE t (...)
+ *	   LOCATION ('...', ...) [ON ...] | EXECUTE '...' [ON ...]
+ *	   FORMAT '...' [(...)] [OPTIONS (...)] [ENCODING ...]
+ *	   [[LOG ERRORS [PERSISTENTLY]] SEGMENT REJECT LIMIT n [ROWS | PERCENT]]
+ *	   [DISTRIBUTED ...] [TAG (...)]
+ *	 -> CREATE FOREIGN TABLE t (...) SERVER gp_exttable_server
+ *		OPTIONS ("gp_exttable.spec" '...')
+ *
+ * Cloudberry's external table is a foreign table of gp_exttable_fdw's server,
+ * as its own CREATE EXTERNAL TABLE makes it (exttablecmds.c).  What the
+ * clauses say is checked and made the table's options by gp_exttable
+ * (exttable_ddl.c), which needs the catalogs -- the columns LIKE names, the
+ * database's encoding -- so here they are only read, as Cloudberry's grammar
+ * reads them (gram.y, CreateExternalStmt), with its errors, and carried in
+ * one option: the DefElem nodes its grammar makes, written out as nodes are.
+ * DISTRIBUTED and TAG are left to the rewrites every foreign table has,
+ * which put what they become in the same list.
+ *
+ * Returns false when this is not a CREATE EXTERNAL TABLE; otherwise the
+ * subject, *name and *after, is the table, and *after the token after its
+ * clauses, where DISTRIBUTED or TAG may follow.
+ */
+static bool
+rw_create_external_table(GpRewrite *rw, char **name, int *after)
+{
+	const GpTokens *ts = rw->ts;
+	int			i = rw->first + 1;
+	int			nameend;
+	int			close;
+	int			start;
+	int			j;
+	int			stop;
+	bool		writable = false;
+	bool		web = false;
+	bool		command = false;
+	List	   *spec = NIL;
+	List	   *on = NIL;
+
+	if (!tok_is(ts, rw->first, "create"))
+		return false;
+	if (tok_is(ts, i, "readable") || tok_is(ts, i, "writable"))
+		writable = tok_is(ts, i++, "writable");
+	if (!tok_is(ts, i, "external"))
+		return false;
+	i++;
+	if (tok_is(ts, i, "web"))
+	{
+		web = true;
+		i++;
+	}
+	if (tok_is(ts, i, "temp") || tok_is(ts, i, "temporary"))
+		ereport(ERROR,
+				(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+				 errmsg("a temporary external table is not supported"),
+				 errdetail("An external table is a foreign table, which PostgreSQL makes in no temporary schema."),
+				 errposition(pg_mbstrlen_with_len(ts->src, ts->toks[i].off) + 1)));
+	if (!tok_is(ts, i, "table"))
+		return false;
+	i++;
+
+	nameend = skip_qualified_name(ts, i);
+	if (nameend == i)
+		rw_syntax_error(rw, i);
+	if (!tok_is_char(ts, nameend, '('))
+		rw_syntax_error(rw, nameend);
+	close = match_close(ts, nameend, rw->last);
+	if (close < 0)
+		rw_syntax_error(rw, rw->last);
+	start = j = close + 1;
+
+	spec = lappend(spec, makeDefElem("writable", (Node *) makeBoolean(writable), -1));
+	spec = lappend(spec, makeDefElem("web", (Node *) makeBoolean(web), -1));
+
+	/* LOCATION ('uri', ...) or EXECUTE 'command' */
+	if (tok_is(ts, j, "location"))
+	{
+		List	   *locs = NIL;
+
+		if (!tok_is_char(ts, j + 1, '('))
+			rw_syntax_error(rw, j + 1);
+		j += 2;
+		for (;;)
+		{
+			if (!tok_is_string(ts, j))
+				rw_syntax_error(rw, j);
+			/* Cloudberry's grammar refuses one twice (cdb_string_list) */
+			foreach_node(String, loc, locs)
+				if (strcmp(strVal(loc), ts->toks[j].str) == 0)
+					ereport(ERROR,
+							(errcode(ERRCODE_INVALID_TABLE_DEFINITION),
+							 errmsg("duplicate location uri"),
+							 errposition(pg_mbstrlen_with_len(ts->src, ts->toks[j].off) + 1)));
+			locs = lappend(locs, makeString(pstrdup(ts->toks[j++].str)));
+			if (tok_is_char(ts, j, ')'))
+				break;
+			if (!tok_is_char(ts, j, ','))
+				rw_syntax_error(rw, j);
+			j++;
+		}
+		j++;
+		spec = lappend(spec, makeDefElem("location", (Node *) locs, -1));
+	}
+	else if (tok_is_kw(ts, j, "execute"))
+	{
+		if (!tok_is_string(ts, j + 1))
+			rw_syntax_error(rw, j + 1);
+		spec = lappend(spec, makeDefElem("command",
+										 (Node *) makeString(pstrdup(ts->toks[j + 1].str)),
+										 -1));
+		command = true;
+		j += 2;
+	}
+	else
+		rw_syntax_error(rw, j);
+
+	/* ON ALL | HOST ['h'] | MASTER | COORDINATOR | SEGMENT n | n, each */
+	while (tok_is_kw(ts, j, "on"))
+	{
+		DefElem    *d;
+
+		if (tok_is_kw(ts, j + 1, "all"))
+		{
+			d = makeDefElem("all", (Node *) makeInteger(true), -1);
+			j += 2;
+		}
+		else if (tok_is(ts, j + 1, "host") && tok_is_string(ts, j + 2))
+		{
+			d = makeDefElem("hostname",
+							(Node *) makeString(pstrdup(ts->toks[j + 2].str)), -1);
+			j += 3;
+		}
+		else if (tok_is(ts, j + 1, "host"))
+		{
+			d = makeDefElem("eachhost", (Node *) makeInteger(true), -1);
+			j += 2;
+		}
+		else if (tok_is(ts, j + 1, "master") || tok_is(ts, j + 1, "coordinator"))
+		{
+			d = makeDefElem("coordinator", (Node *) makeInteger(true), -1);
+			j += 2;
+		}
+		else if (tok_is(ts, j + 1, "segment") && j + 2 < ts->ntoks &&
+				 ts->toks[j + 2].code == GP_ICONST)
+		{
+			d = makeDefElem("segment", (Node *) makeInteger(ts->toks[j + 2].ival), -1);
+			j += 3;
+		}
+		else if (j + 1 < ts->ntoks && ts->toks[j + 1].code == GP_ICONST)
+		{
+			d = makeDefElem("random", (Node *) makeInteger(ts->toks[j + 1].ival), -1);
+			j += 2;
+		}
+		else
+			rw_syntax_error(rw, j + 1);
+		on = lappend(on, d);
+	}
+
+	/* Cloudberry's grammar's own checks of EXECUTE */
+	if (command)
+	{
+		if (!web)
+			ereport(ERROR,
+					(errcode(ERRCODE_SYNTAX_ERROR),
+					 errmsg("EXECUTE may not be used with a regular external table"),
+					 errhint("Use CREATE EXTERNAL WEB TABLE instead.")));
+		if (on != NIL && writable)
+			ereport(ERROR,
+					(errcode(ERRCODE_SYNTAX_ERROR),
+					 errmsg("ON clause may not be used with a writable external table")));
+		/* ON ALL, as the grammar gives it, where a readable one has none */
+		if (on == NIL && !writable)
+			on = list_make1(makeDefElem("all", (Node *) makeInteger(true), -1));
+	}
+	spec = lappend(spec, makeDefElem("on", (Node *) on, -1));
+
+	/* FORMAT 'name' [(...)] */
+	if (!tok_is(ts, j, "format"))
+		rw_syntax_error(rw, j);
+	if (!tok_is_string(ts, j + 1))
+		rw_syntax_error(rw, j + 1);
+	spec = lappend(spec, makeDefElem("format",
+									 (Node *) makeString(pstrdup(ts->toks[j + 1].str)),
+									 -1));
+	j += 2;
+	if (tok_is_char(ts, j, '('))
+	{
+		int			fclose = match_close(ts, j, rw->last);
+
+		if (fclose < 0)
+			rw_syntax_error(rw, rw->last);
+		spec = lappend(spec, makeDefElem("format_opts",
+										 (Node *) ext_format_options(ts, j + 1, fclose),
+										 -1));
+		j = fclose + 1;
+	}
+
+	/* OPTIONS (name 'value', ...) */
+	if (tok_is(ts, j, "options") && tok_is_char(ts, j + 1, '('))
+	{
+		List	   *opts = NIL;
+
+		j += 2;
+		while (!tok_is_char(ts, j, ')'))
+		{
+			if (!tok_is_name(ts, j))
+				rw_syntax_error(rw, j);
+			if (!tok_is_string(ts, j + 1))
+				rw_syntax_error(rw, j + 1);
+			opts = lappend(opts, makeDefElem(tok_name(ts, j),
+											 (Node *) makeString(pstrdup(ts->toks[j + 1].str)),
+											 -1));
+			j += 2;
+			if (tok_is_char(ts, j, ','))
+				j++;
+			else if (!tok_is_char(ts, j, ')'))
+				rw_syntax_error(rw, j);
+		}
+		j++;
+		spec = lappend(spec, makeDefElem("options", (Node *) opts, -1));
+	}
+
+	/* ENCODING [=] 'name' | number, the last of them */
+	while (tok_is_kw(ts, j, "encoding"))
+	{
+		Node	   *enc;
+
+		j++;
+		if (tok_is_char(ts, j, '='))
+			j++;
+		if (tok_is_string(ts, j))
+			enc = (Node *) makeString(pstrdup(ts->toks[j].str));
+		else if (j < ts->ntoks && ts->toks[j].code == GP_ICONST)
+			enc = (Node *) makeInteger(ts->toks[j].ival);
+		else
+			rw_syntax_error(rw, j);
+		j++;
+		spec = lappend(spec, makeDefElem("encoding", enc, -1));
+	}
+
+	/* [LOG ERRORS [INTO t | PERSISTENTLY]] SEGMENT REJECT LIMIT n [ROWS | PERCENT] */
+	{
+		const char *log_errors;
+		int			limit;
+		bool		rows;
+
+		if (sreh_clause(rw, j, true, &j, &limit, &rows, &log_errors))
+		{
+			if (writable)
+				ereport(ERROR,
+						(errcode(ERRCODE_SYNTAX_ERROR),
+						 errmsg("single row error handling may not be used with a writable external table")));
+			spec = lappend(spec, makeDefElem("reject_limit", (Node *) makeInteger(limit), -1));
+			spec = lappend(spec, makeDefElem("reject_rows", (Node *) makeBoolean(rows), -1));
+			spec = lappend(spec, makeDefElem("log_errors",
+											 (Node *) makeString(pstrdup(log_errors)), -1));
+		}
+	}
+
+	/* what may follow: DISTRIBUTED, TAG, or nothing */
+	if (j < rw->last && !tok_is(ts, j, "distributed") && !tok_is(ts, j, "tag"))
+		rw_syntax_error(rw, j);
+
+	/* CREATE FOREIGN TABLE t (...) SERVER gp_exttable_server OPTIONS (...) */
+	stop = tok_stop(ts, j - 1);
+	rw_edit(rw, ts->toks[rw->first].off, ts->toks[i].off, "CREATE FOREIGN TABLE ");
+	rw_edit(rw, ts->toks[start].off, stop, "SERVER gp_exttable_server");
+	rw_add_fdw_option(rw, "gp_exttable.spec", nodeToString(spec));
+	rw->fdw_options_at = stop;
+
+	rw->object = 'f';
+	*name = rw_text(ts, i, nameend);
+	*after = j;
+	return true;
+}
+
+/*
+ * COPY ... [LOG ERRORS [INTO t]] SEGMENT REJECT LIMIT n [ROWS | PERCENT]
+ *	 -> COPY ..., carrying gp_exttable.reject_limit, reject_limit_type and
+ *		log_errors to its parse node
+ *
+ * Cloudberry's single-row error handling of COPY FROM, which PostgreSQL's
+ * COPY has no option for: gp_core's COPY takes the three out again and
+ * reads the data through gp_exttable's (gp_modify.c, copysreh.c).
+ */
+static bool
+rw_copy_sreh(GpRewrite *rw)
+{
+	const GpTokens *ts = rw->ts;
+	int			depth = 0;
+
+	if (!tok_is_kw(ts, rw->first, "copy"))
+		return false;
+	for (int j = rw->first + 1; j < rw->last; j++)
+	{
+		int			after;
+		int			limit;
+		bool		rows;
+		const char *log_errors;
+		int			at;
+
+		if (tok_is_char(ts, j, '('))
+			depth++;
+		else if (tok_is_char(ts, j, ')'))
+			depth--;
+		if (depth != 0 ||
+			!((tok_is(ts, j, "log") && tok_is(ts, j + 1, "errors")) ||
+			  (tok_is(ts, j, "segment") && tok_is(ts, j + 1, "reject"))))
+			continue;
+		if (!sreh_clause(rw, j, false, &after, &limit, &rows, &log_errors))
+			continue;
+		at = ts->toks[j].off;
+		rw_edit(rw, at, tok_stop(ts, after - 1), "");
+		rw_add_carrier(rw, "gp_exttable", "reject_limit", psprintf("%d", limit), at);
+		rw_add_carrier(rw, "gp_exttable", "reject_limit_type", rows ? "r" : "p", at);
+		rw_add_carrier(rw, "gp_exttable", "log_errors", log_errors, at);
+		return true;
+	}
+	return false;
+}
+
+/*
+ * DROP EXTERNAL [WEB] TABLE	-> DROP FOREIGN TABLE
+ * ALTER EXTERNAL TABLE			-> ALTER FOREIGN TABLE
+ */
+static bool
+rw_external_spelling(GpRewrite *rw)
+{
+	const GpTokens *ts = rw->ts;
+	int			i = rw->first;
+
+	if (tok_is(ts, i, "drop") && tok_is(ts, i + 1, "external") &&
+		tok_is(ts, i + 2, "web") && tok_is(ts, i + 3, "table"))
+	{
+		rw_edit(rw, ts->toks[i + 1].off, ts->toks[i + 3].off, "FOREIGN ");
+		return true;
+	}
+	if ((tok_is(ts, i, "drop") || tok_is(ts, i, "alter")) &&
+		tok_is(ts, i + 1, "external") && tok_is(ts, i + 2, "table"))
+	{
+		rw_edit(rw, ts->toks[i + 1].off, ts->toks[i + 2].off, "FOREIGN ");
+		return true;
+	}
+	return false;
+}
+
+/*
+ * The statements of Cloudberry's protocols, each a CALL of gp_exttable's
+ * procedure (protocol.c):
+ *
+ *	 CREATE [TRUSTED] PROTOCOL name (readfunc = 'f', writefunc = 'g',
+ *									 validatorfunc = 'h')
+ *	   -> CALL gp_exttable.create_protocol('name', trusted,
+ *										   ARRAY['readfunc', 'f', ...])
+ *	 DROP PROTOCOL [IF EXISTS] name, ... [CASCADE | RESTRICT]
+ *	   -> CALL gp_exttable.drop_protocol(ARRAY[...], if_exists, cascade)
+ *	 ALTER PROTOCOL name RENAME TO newname
+ *	   -> CALL gp_exttable.rename_protocol('name', 'newname')
+ *	 ALTER PROTOCOL name OWNER TO role
+ *	   -> CALL gp_exttable.alter_protocol_owner('name', 'role')
+ *	 GRANT privileges ON PROTOCOL name, ... TO role, ... [WITH GRANT OPTION]
+ *	 REVOKE [GRANT OPTION FOR] privileges ON PROTOCOL name, ... FROM role, ...
+ *		[CASCADE | RESTRICT]
+ *	   -> CALL gp_exttable.grant_protocol(is_grant, ARRAY[privileges],
+ *										  ARRAY[names], ARRAY[roles],
+ *										  grant_option, cascade)
+ *
+ * A form none of these is left to the grammar, which refuses it.
+ */
+
+/* A role as GRANT names it -- PUBLIC, CURRENT_USER, a name -- at i. */
+static char *
+protocol_role(const GpTokens *ts, int *i)
+{
+	if (tok_is(ts, *i, "group") && tok_is_name(ts, *i + 1))
+		(*i)++;
+	if (!tok_is_name(ts, *i))
+		return NULL;
+	return tok_name(ts, (*i)++);
+}
+
+/* A comma-separated list of names from i, into *names; the token after it. */
+static int
+protocol_names(const GpTokens *ts, int i, List **names)
+{
+	for (;;)
+	{
+		if (!tok_is_name(ts, i))
+			return -1;
+		*names = lappend(*names, tok_name(ts, i++));
+		if (!tok_is_char(ts, i, ','))
+			return i;
+		i++;
+	}
+}
+
+static bool
+rw_protocol(GpRewrite *rw)
+{
+	const GpTokens *ts = rw->ts;
+	int			i = rw->first;
+	List	   *names = NIL;
+
+	/* CREATE [TRUSTED] PROTOCOL name (...) */
+	if (tok_is(ts, i, "create") &&
+		(tok_is(ts, i + 1, "protocol") ||
+		 (tok_is(ts, i + 1, "trusted") && tok_is(ts, i + 2, "protocol"))))
+	{
+		bool		trusted = tok_is(ts, i + 1, "trusted");
+		char	   *name;
+		List	   *defs = NIL;
+
+		i += trusted ? 3 : 2;
+		if (!tok_is_name(ts, i) || !tok_is_char(ts, i + 1, '('))
+			return false;
+		name = tok_name(ts, i);
+		i += 2;
+		while (!tok_is_char(ts, i, ')'))
+		{
+			StringInfoData value;
+
+			if (!tok_is_name(ts, i))
+				return false;
+			defs = lappend(defs, tok_name(ts, i++));
+			initStringInfo(&value);
+			if (tok_is_char(ts, i, '='))
+			{
+				i++;
+				if (tok_is_string(ts, i))
+					appendStringInfoString(&value, ts->toks[i++].str);
+				else if (tok_is_name(ts, i))
+				{
+					appendStringInfoString(&value, quote_identifier(tok_name(ts, i++)));
+					while (tok_is_char(ts, i, '.') && tok_is_name(ts, i + 1))
+					{
+						appendStringInfo(&value, ".%s", quote_identifier(tok_name(ts, i + 1)));
+						i += 2;
+					}
+				}
+				else
+					return false;
+			}
+			defs = lappend(defs, value.data);
+			if (tok_is_char(ts, i, ','))
+				i++;
+			else if (!tok_is_char(ts, i, ')'))
+				return false;
+		}
+		if (i + 1 != rw->last)
+			return false;
+		rw_whole(rw);
+		appendStringInfo(&rw->body, "CALL gp_exttable.create_protocol(%s, %s, %s)",
+						 quote_literal_cstr(name), trusted ? "true" : "false",
+						 name_array(defs, "text"));
+		return true;
+	}
+
+	/* DROP PROTOCOL [IF EXISTS] name, ... [CASCADE | RESTRICT] */
+	if (tok_is(ts, i, "drop") && tok_is(ts, i + 1, "protocol"))
+	{
+		bool		if_exists = false;
+		bool		cascade = false;
+
+		i += 2;
+		if (tok_is(ts, i, "if") && tok_is(ts, i + 1, "exists"))
+		{
+			if_exists = true;
+			i += 2;
+		}
+		if ((i = protocol_names(ts, i, &names)) < 0)
+			return false;
+		if (tok_is(ts, i, "cascade") || tok_is(ts, i, "restrict"))
+			cascade = tok_is(ts, i++, "cascade");
+		if (i != rw->last)
+			return false;
+		rw_whole(rw);
+		appendStringInfo(&rw->body, "CALL gp_exttable.drop_protocol(%s, %s, %s)",
+						 name_array(names, "text"), if_exists ? "true" : "false",
+						 cascade ? "true" : "false");
+		return true;
+	}
+
+	/* ALTER PROTOCOL name RENAME TO newname | OWNER TO role */
+	if (tok_is(ts, i, "alter") && tok_is(ts, i + 1, "protocol") &&
+		tok_is_name(ts, i + 2))
+	{
+		char	   *name = tok_name(ts, i + 2);
+
+		i += 3;
+		if (tok_is(ts, i, "rename") && tok_is(ts, i + 1, "to") &&
+			tok_is_name(ts, i + 2) && i + 3 == rw->last)
+		{
+			rw_whole(rw);
+			appendStringInfo(&rw->body, "CALL gp_exttable.rename_protocol(%s, %s)",
+							 quote_literal_cstr(name),
+							 quote_literal_cstr(tok_name(ts, i + 2)));
+			return true;
+		}
+		if (tok_is(ts, i, "owner") && tok_is(ts, i + 1, "to") &&
+			tok_is_name(ts, i + 2) && i + 3 == rw->last)
+		{
+			rw_whole(rw);
+			appendStringInfo(&rw->body, "CALL gp_exttable.alter_protocol_owner(%s, %s)",
+							 quote_literal_cstr(name),
+							 quote_literal_cstr(tok_name(ts, i + 2)));
+			return true;
+		}
+		return false;
+	}
+
+	/* GRANT ... ON PROTOCOL ... TO ..., REVOKE ... ON PROTOCOL ... FROM ... */
+	if (tok_is(ts, i, "grant") || tok_is(ts, i, "revoke"))
+	{
+		bool		is_grant = tok_is(ts, i, "grant");
+		bool		grant_option = false;
+		bool		cascade = false;
+		List	   *privs = NIL;
+		List	   *roles = NIL;
+
+		i++;
+		if (!is_grant && tok_is(ts, i, "grant") && tok_is(ts, i + 1, "option") &&
+			tok_is(ts, i + 2, "for"))
+		{
+			grant_option = true;
+			i += 3;
+		}
+		if (tok_is(ts, i, "all"))
+		{
+			privs = lappend(privs, "all");
+			i++;
+			if (tok_is(ts, i, "privileges"))
+				i++;
+		}
+		else if ((i = protocol_names(ts, i, &privs)) < 0)
+			return false;
+		if (!tok_is(ts, i, "on") || !tok_is(ts, i + 1, "protocol"))
+			return false;
+		if ((i = protocol_names(ts, i + 2, &names)) < 0)
+			return false;
+		if (!tok_is(ts, i, is_grant ? "to" : "from"))
+			return false;
+		i++;
+		for (;;)
+		{
+			char	   *role = protocol_role(ts, &i);
+
+			if (role == NULL)
+				return false;
+			roles = lappend(roles, role);
+			if (!tok_is_char(ts, i, ','))
+				break;
+			i++;
+		}
+		if (is_grant && tok_is(ts, i, "with") && tok_is(ts, i + 1, "grant") &&
+			tok_is(ts, i + 2, "option"))
+		{
+			grant_option = true;
+			i += 3;
+		}
+		if (!is_grant && (tok_is(ts, i, "cascade") || tok_is(ts, i, "restrict")))
+			cascade = tok_is(ts, i++, "cascade");
+		if (i != rw->last)
+			return false;
+		rw_whole(rw);
+		appendStringInfo(&rw->body,
+						 "CALL gp_exttable.grant_protocol(%s, %s, %s, %s, %s, %s)",
+						 is_grant ? "true" : "false", name_array(privs, "text"),
+						 name_array(names, "text"), name_array(roles, "text"),
+						 grant_option ? "true" : "false", cascade ? "true" : "false");
+		return true;
+	}
+
+	return false;
 }
 
 /* ------------------------------------------------------------------------- */
@@ -2627,6 +3460,67 @@ rw_role_profile(GpRewrite *rw)
 	return true;
 }
 
+/*
+ * CREATE ROLE ... [NO]CREATEEXTTABLE [(type = '...', protocol = '...')]
+ * ALTER ROLE ... [NO]CREATEEXTTABLE [(...)], and USER and GROUP alike
+ *	 -> the statement, carrying gp_exttable.exttabauth or exttabnoauth
+ *
+ * Cloudberry's right to make an external table of gpfdist or http, which
+ * its pg_authid keeps in columns of its own (rolcreaterextgpfd and the
+ * rest).  The option goes to the statement's parse node, whose options
+ * gp_sql's hook takes it out of, and gp_exttable keeps it in the role's
+ * label (option.c).  The value is the key-value list as written, "type=
+ * readable,protocol=gpfdist", or empty.
+ */
+static bool
+rw_role_exttable(GpRewrite *rw)
+{
+	const GpTokens *ts = rw->ts;
+	int			i = rw->first;
+	bool		did = false;
+
+	if (!(tok_is(ts, i, "create") || tok_is(ts, i, "alter")) ||
+		!(tok_is(ts, i + 1, "role") || tok_is(ts, i + 1, "user") ||
+		  tok_is(ts, i + 1, "group")) ||
+		!tok_is_name(ts, i + 2))
+		return false;
+
+	for (int j = i + 3; j < rw->last; j++)
+	{
+		bool		allow = tok_is(ts, j, "createexttable");
+		StringInfoData value;
+		int			end = j + 1;
+
+		if (!allow && !tok_is(ts, j, "nocreateexttable"))
+			continue;
+		initStringInfo(&value);
+		if (tok_is_char(ts, end, '('))
+		{
+			int			close = match_close(ts, end, rw->last);
+
+			if (close < 0)
+				rw_syntax_error(rw, rw->last);
+			for (int k = end + 1; k < close; k += 4)
+			{
+				if (!tok_is_name(ts, k) || !tok_is_char(ts, k + 1, '=') ||
+					!tok_is_string(ts, k + 2))
+					rw_syntax_error(rw, k);
+				appendStringInfo(&value, "%s%s=%s", value.len > 0 ? "," : "",
+								 tok_name(ts, k), ts->toks[k + 2].str);
+				if (k + 3 != close && !tok_is_char(ts, k + 3, ','))
+					rw_syntax_error(rw, k + 3);
+			}
+			end = close + 1;
+		}
+		rw_add_carrier(rw, "gp_exttable", allow ? "exttabauth" : "exttabnoauth",
+					   value.data, ts->toks[j].off);
+		rw_edit(rw, ts->toks[j].off, tok_stop(ts, end - 1), "");
+		j = end - 1;
+		did = true;
+	}
+	return did;
+}
+
 /* ------------------------------------------------------------------------- */
 /* The classic partition clauses                                             */
 /* ------------------------------------------------------------------------- */
@@ -2919,7 +3813,12 @@ rw_partition_cmds(GpRewrite *rw)
 	int			i = rw->first;
 	int			e;
 
-	if (!tok_is_kw(ts, i, "alter") || !tok_is_kw(ts, i + 1, "table"))
+	if (!tok_is_kw(ts, i, "alter"))
+		return;
+	/* ALTER EXTERNAL TABLE and ALTER FOREIGN TABLE take the same commands */
+	if (tok_is(ts, i + 1, "external") || tok_is_kw(ts, i + 1, "foreign"))
+		i++;
+	if (!tok_is_kw(ts, i + 1, "table"))
 		return;
 	i += 2;
 	if (tok_is_kw(ts, i, "if") && tok_is_kw(ts, i + 1, "exists"))
@@ -4165,12 +5064,15 @@ rw_statement_itself(GpRewrite *rw)
 	/* Statements PostgreSQL has no counterpart of: a CALL. */
 	if (rw_create_tag(rw) || rw_alter_tag(rw) || rw_drop_tag(rw) ||
 		rw_profile(rw) || rw_drop_profile(rw) ||
-		rw_task(rw) || rw_drop_task(rw))
+		rw_task(rw) || rw_drop_task(rw) || rw_protocol(rw))
 		return;
 
 	/* ALTER USER ... PROFILE and the rest: ALTER USER, carrying it. */
 	if (rw_role_profile(rw))
 		return;
+
+	/* [NO]CREATEEXTTABLE, carried the same way */
+	(void) rw_role_exttable(rw);
 
 	/* ALTER TYPE ... SET DEFAULT ENCODING: a label of gp_ao's. */
 	if (rw_alter_type_encoding(rw))
@@ -4180,8 +5082,11 @@ rw_statement_itself(GpRewrite *rw)
 	(void) rw_orientation_row(rw);
 	(void) rw_matview_options(rw);
 	(void) rw_function_clauses(rw);
+	(void) rw_external_spelling(rw);
+	(void) rw_copy_sreh(rw);
 
-	if (rw_create_directory_table(rw, &name, &after_name))
+	if (rw_create_directory_table(rw, &name, &after_name) ||
+		rw_create_external_table(rw, &name, &after_name))
 		kind = GP_SUBJ_RELATION;
 	else
 		kind = find_subject(rw->ts, rw->first, rw->last, &name, &after_name,
@@ -4481,6 +5386,13 @@ GpAttachCarriers(List *parsetree, List *carried)
 			case T_CreateSeqStmt:
 				{
 					CreateSeqStmt *s = (CreateSeqStmt *) target->stmt;
+
+					s->options = list_concat(s->options, c->defs);
+				}
+				break;
+			case T_CopyStmt:
+				{
+					CopyStmt   *s = (CopyStmt *) target->stmt;
 
 					s->options = list_concat(s->options, c->defs);
 				}

@@ -324,9 +324,10 @@ gp_post_parse_analyze(ParseState *pstate, Query *query,
 
 /*
  * Does this entry have gp_segment_id?  In Cloudberry every relation that has
- * system columns has it: tables, partitioned tables, materialized views.
- * Views and subqueries do not, and nor do functions -- but for
- * gp.dist_random(), whose rows are the segments'.
+ * system columns has it: tables, partitioned tables, materialized views,
+ * foreign tables -- an external table's row the segment's that read it, or
+ * -1, the coordinator's.  Views and subqueries do not, and nor do functions
+ * -- but for gp.dist_random(), whose rows are the segments'.
  */
 /* Is this entry pg_catalog.pg_locks, which has Cloudberry's three columns? */
 static bool
@@ -375,7 +376,8 @@ nsitem_has_segment_id(ParseNamespaceItem *nsitem)
 	if (rte->rtekind == RTE_RELATION)
 		return ((rte->relkind == RELKIND_RELATION ||
 				 rte->relkind == RELKIND_PARTITIONED_TABLE ||
-				 rte->relkind == RELKIND_MATVIEW) &&
+				 rte->relkind == RELKIND_MATVIEW ||
+				 rte->relkind == RELKIND_FOREIGN_TABLE) &&
 				!hides_system_columns(rte->relid)) ||
 			nsitem_is_pg_locks(nsitem) || nsitem_is_catalog_view(nsitem);
 

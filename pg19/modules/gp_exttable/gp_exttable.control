@@ -24,5 +24,6 @@ comment = 'External tables, gpfdist and the loading path'
 default_version = '1.0'
 module_pathname = '$libdir/gp_exttable'
 relocatable = false
+schema = gp_exttable
 requires = 'gp_core'
 superuser = true

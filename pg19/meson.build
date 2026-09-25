@@ -102,6 +102,9 @@ libpq_dep = cc.find_library('pq', dirs: [pg_libdir], required: true)
 zlib_dep = dependency('zlib', required: true)
 zstd_dep = dependency('libzstd', required: false)
 
+# gp_exttable's gpfdist:// and http:// locations.
+curl_dep = dependency('libcurl', required: false)
+
 # PostgreSQL leaves extension symbols to be resolved at load time, and opens
 # libraries with RTLD_GLOBAL, which is how the modules listed after gp_core
 # reach into it.
@@ -353,8 +356,31 @@ modules = [
     'sources': files('modules/gp_tde/gp_tde.c'),
   },
   {
+    # External tables.  fstream reads a file:// location, as it reads
+    # gpfdist's (common/fstream/); libcurl, where it is installed, reads and
+    # writes gpfdist:// and http:// ones (url_curl.c).
     'name': 'gp_exttable', 'preload': false, 'extension': true, 'build': true,
-    'sources': files('modules/gp_exttable/gp_exttable.c'),
+    'sources': files('modules/gp_exttable/gp_exttable.c',
+                     'modules/gp_exttable/copyout.c',
+                     'modules/gp_exttable/copysreh.c',
+                     'modules/gp_exttable/extaccess.c',
+                     'modules/gp_exttable/external.c',
+                     'modules/gp_exttable/exttable_ddl.c',
+                     'modules/gp_exttable/exttable_fdw.c',
+                     'modules/gp_exttable/option.c',
+                     'modules/gp_exttable/protocol.c',
+                     'modules/gp_exttable/sreh.c',
+                     'modules/gp_exttable/uri.c',
+                     'modules/gp_exttable/url.c',
+                     'modules/gp_exttable/url_curl.c',
+                     'modules/gp_exttable/url_custom.c',
+                     'modules/gp_exttable/url_execute.c',
+                     'modules/gp_exttable/url_file.c',
+                     'common/fstream/fstream.c',
+                     'common/fstream/gfile.c'),
+    'include_directories': include_directories('common', 'modules/gp_exttable/include'),
+    'dependencies': [zlib_dep, zstd_dep, curl_dep],
+    'c_args': curl_dep.found() ? ['-DUSE_CURL'] : [],
   },
   {
     'name': 'gp_resource', 'preload': false, 'extension': true, 'build': true,
@@ -515,6 +541,32 @@ if get_option('hook_tests')
     install_dir: pg_extensiondir,
   )
   built_modules += 'gp_storage_probe (test only)'
+
+  # Cloudberry's demonstration protocol, which its external table tests
+  # make a protocol of (contrib/extprotocol), against gp_exttable's API.
+  shared_module('gpextprotocol', files('test/exttable/gpextprotocol.c'),
+    c_args: mod_c_args,
+    link_args: mod_link_args,
+    include_directories: [pg_inc, cb_inc,
+                          include_directories('modules/gp_exttable/include')],
+    name_prefix: '',
+    install: true,
+    install_dir: pg_pkglibdir,
+  )
+  built_modules += 'gpextprotocol (test only)'
+
+  # And its demonstration formatter (contrib/formatter), which the custom
+  # format's test reads a table with.
+  shared_module('gpformatter', files('test/exttable/gpformatter.c'),
+    c_args: mod_c_args,
+    link_args: mod_link_args,
+    include_directories: [pg_inc, cb_inc,
+                          include_directories('modules/gp_exttable/include')],
+    name_prefix: '',
+    install: true,
+    install_dir: pg_pkglibdir,
+  )
+  built_modules += 'gpformatter (test only)'
 endif
 
 subdir('test')

@@ -57,8 +57,10 @@
 #include "catalog/namespace.h"
 #include "catalog/pg_am_d.h"
 #include "catalog/pg_class.h"
+#include "catalog/pg_foreign_table.h"
 #include "catalog/pg_opclass.h"
 #include "commands/defrem.h"
+#include "foreign/foreign.h"
 #include "lib/stringinfo.h"
 #include "nodes/pg_list.h"
 #include "utils/builtins.h"
@@ -567,6 +569,24 @@ GpPolicyMake(Oid relid, const char *value)
 	ObjectAddressSet(addr, RelationRelationId, relid);
 	return policy_from_text(relid, value, policy_numsegments(&addr, false),
 							true);
+}
+
+bool
+GpPolicyIsExternalTable(Oid relid)
+{
+	HeapTuple	tuple;
+	Oid			serverid;
+	ForeignServer *server;
+
+	if (get_rel_relkind(relid) != RELKIND_FOREIGN_TABLE)
+		return false;
+	tuple = SearchSysCache1(FOREIGNTABLEREL, ObjectIdGetDatum(relid));
+	if (!HeapTupleIsValid(tuple))
+		return false;
+	serverid = ((Form_pg_foreign_table) GETSTRUCT(tuple))->ftserver;
+	ReleaseSysCache(tuple);
+	server = GetForeignServerExtended(serverid, FSV_MISSING_OK);
+	return server != NULL && strcmp(server->servername, "gp_exttable_server") == 0;
 }
 
 GpPolicy *

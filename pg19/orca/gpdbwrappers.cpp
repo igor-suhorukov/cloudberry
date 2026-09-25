@@ -2105,10 +2105,16 @@ gpdb::GetDistributionPolicy(Relation rel)
 {
 	GP_WRAP_START;
 	{
-		// Cloudberry asks rel_is_external_table() first, and builds the
-		// policy of an external table by hand from its location list.  The
-		// port has no external tables until M5, so that branch is not here;
-		// when it arrives it goes above this one.
+		// Cloudberry asks rel_is_external_table() first, and answers the
+		// policy it keeps for an external table: random over the segments
+		// for one read or written there.  The port's external table is a
+		// foreign table of gp_exttable's server, whose label records that
+		// policy -- on the coordinator; a segment plans nothing of it.
+		if (rel->rd_rel->relkind == RELKIND_FOREIGN_TABLE &&
+			GpPolicyIsExternalTable(rel->rd_id))
+		{
+			return GpIdentity_segindex >= 0 ? nullptr : GpPolicyGet(rel->rd_id);
+		}
 
 		// A foreign table's distribution is decided later, as in Cloudberry.
 		if (rel->rd_rel->relkind == RELKIND_FOREIGN_TABLE)

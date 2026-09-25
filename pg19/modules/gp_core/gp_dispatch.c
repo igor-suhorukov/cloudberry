@@ -157,6 +157,21 @@ static const char *const synced_settings[] = {
 	"gp.select_invisible",
 	"gp.appendonly_compaction",
 	"gp.appendonly_compaction_threshold",
+	/*
+	 * gp_exttable's, which a segment's scan of an external table reads: the
+	 * statement's name and text, for gpfdist and a command's environment, and
+	 * how rows are rejected and read.  Not gp.external_enable_exec, which
+	 * only a superuser sets, and the coordinator checks as it plans.
+	 */
+	"gp_exttable.statement_id",
+	"gp_exttable.query_string",
+	"gp.external_max_segs",
+	"gp.initial_bad_row_limit",
+	"gp.reject_percent_threshold",
+	"gp.readable_external_table_timeout",
+	"gp.gpfdist_retry_timeout",
+	"gp.writable_external_table_bufsize",
+	"gp.verify_gpfdists_cert",
 	/* the UDP interconnect's, which the segments' senders and receivers use */
 	"gp.interconnect_queue_depth",
 	"gp.max_packet_size",
@@ -691,6 +706,28 @@ static SegmentNotice **notices_tail = &notices_head;
 static int	notices_quiet = 0;
 
 /*
+ * A module's filters of what the segments say: a NOTICE it raises there to
+ * tell the coordinator something -- gp_exttable's count of the rows a scan
+ * rejected -- which the filter takes, and the client never sees.  Called in
+ * libpq's notice callback: a filter raises nothing, and allocates nothing
+ * it keeps.
+ */
+#define MAX_NOTICE_FILTERS	8
+static GpNoticeFilter notice_filters[MAX_NOTICE_FILTERS];
+static int	n_notice_filters = 0;
+
+void
+GpDispatchAddNoticeFilter(GpNoticeFilter filter)
+{
+	for (int i = 0; i < n_notice_filters; i++)
+		if (notice_filters[i] == filter)
+			return;
+	if (n_notice_filters >= MAX_NOTICE_FILTERS)
+		elog(ERROR, "too many notice filters");
+	notice_filters[n_notice_filters++] = filter;
+}
+
+/*
  * libpq calls it with its own PGresult, not the wrapper that libpq-be-fe.h's
  * macros put in the name's place, so they are set aside around it, as
  * PostgreSQL's own libpqsrv_notice_receiver sets them aside.
@@ -724,6 +761,11 @@ segment_notice_receiver(void *arg, const struct pg_result *res)
 	fields[2] = PQresultErrorField(res, PG_DIAG_MESSAGE_HINT);
 	if (fields[0] == NULL)
 		return;
+
+	/* a module's own message to the coordinator, which it takes */
+	for (int i = 0; i < n_notice_filters; i++)
+		if (notice_filters[i] (sqlstate, fields[0]))
+			return;
 	for (int i = 0; i < 3; i++)
 		if (fields[i] != NULL)
 			size += strlen(fields[i]) + 1;

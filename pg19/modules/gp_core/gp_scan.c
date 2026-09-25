@@ -225,7 +225,8 @@ GpScanDistributedPolicy(Oid relid)
 	if (GpClusterIsSingleNode())
 		return NULL;
 	if (get_rel_relkind(relid) != RELKIND_RELATION &&
-		get_rel_relkind(relid) != RELKIND_PARTITIONED_TABLE)
+		get_rel_relkind(relid) != RELKIND_PARTITIONED_TABLE &&
+		!GpPolicyIsExternalTable(relid))
 		return NULL;
 
 	policy = GpPolicyGet(relid);
@@ -1053,7 +1054,9 @@ gp_set_rel_pathlist(PlannerInfo *root, RelOptInfo *rel, Index rti,
 		return;
 	if (IS_DUMMY_REL(rel))
 		return;
-	if (get_rel_relkind(rte->relid) != RELKIND_RELATION)
+	/* a table's, or an external table's, which the segments read */
+	if (get_rel_relkind(rte->relid) != RELKIND_RELATION &&
+		get_rel_relkind(rte->relid) != RELKIND_FOREIGN_TABLE)
 		return;
 
 	policy = GpScanDistributedPolicy(rte->relid);
