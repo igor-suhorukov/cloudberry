@@ -1142,6 +1142,7 @@ gp_modify_planner_routed(Query *parse, const char *query_string, int cursorOptio
 		(void) GpScanSetCursor(was_cursor);
 	}
 	PG_END_TRY();
+	GpScanBoundGathers(stmt);
 
 	if (!IsA(stmt->planTree, ModifyTable))
 		return stmt;

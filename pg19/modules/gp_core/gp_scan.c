@@ -104,6 +104,7 @@
 #include "utils/rel.h"
 #include "utils/ruleutils.h"
 #include "utils/syscache.h"
+#include "utils/tuplestore.h"
 
 #include "gp_cluster.h"
 #include "gp_core_api.h"
@@ -146,6 +147,8 @@
 #define GATHER_PRIVATE_CTID			9	/* the column sent that is ctid, or -1 */
 #define GATHER_PRIVATE_CURSOR		10	/* WHERE CURRENT OF: its cursor, or "" */
 #define GATHER_PRIVATE_CURSOR_PARAM 11	/* or the parameter naming it, or 0 */
+#define GATHER_PRIVATE_IDENTITY		12	/* the rows of a table being changed */
+#define GATHER_PRIVATE_LIMIT		13	/* " LIMIT n" a LIMIT above sends, or "" */
 
 static set_rel_pathlist_hook_type prev_set_rel_pathlist = NULL;
 static build_simple_rel_hook_type prev_build_simple_rel = NULL;
@@ -202,9 +205,13 @@ typedef struct GatherScanState
 	bool		identity;		/* the rows of a table being changed */
 	Datum	   *rowvalues;		/* the whole row's values, being built */
 	bool	   *rownulls;
+	char	   *limit;			/* " LIMIT n", or "" */
 	GpGatherState *gather;
 	bool		done;
 	int			current_content;	/* the segment of the scan tuple's row */
+	bool		external;		/* an external table's */
+	Tuplestorestate *spool;		/* what it read, when it may be read again */
+	TupleTableSlot *spooled;	/* a row of it, read back */
 } GatherScanState;
 
 /*
@@ -1444,6 +1451,7 @@ gather_plan(PlannerInfo *root, RelOptInfo *rel, CustomPath *best_path,
 	cscan->custom_private = lappend(cscan->custom_private,
 									makeInteger(current_of != NULL ? current_of->cursor_param : 0));
 	cscan->custom_private = lappend(cscan->custom_private, makeBoolean(identity));
+	cscan->custom_private = lappend(cscan->custom_private, makeString(""));
 	cscan->methods = &gather_scan_methods;
 
 	return &cscan->scan.plan;
@@ -1490,7 +1498,8 @@ gather_create_state(CustomScan *cscan)
 	if (state->cursor_name[0] == '\0')
 		state->cursor_name = NULL;
 	state->cursor_param = intVal(list_nth(priv, GATHER_PRIVATE_CURSOR_PARAM));
-	state->identity = boolVal(llast(priv));
+	state->identity = boolVal(list_nth(priv, GATHER_PRIVATE_IDENTITY));
+	state->limit = strVal(list_nth(priv, GATHER_PRIVATE_LIMIT));
 	return (Node *) state;
 }
 
@@ -1522,6 +1531,8 @@ gather_begin(CustomScanState *node, EState *estate, int eflags)
 	state->rowvalues = palloc_array(Datum, Max(state->natts, 1));
 	state->rownulls = palloc_array(bool, Max(state->natts, 1));
 	state->current_content = -1;
+	state->external = !gather_is_current_of(state) &&
+		GpPolicyIsExternalTable(RelationGetRelid(node->ss.ss_currentRelation));
 
 	/* each gather is a slice of its own, numbered as the executor meets it */
 	if (!(eflags & EXEC_FLAG_EXPLAIN_ONLY))
@@ -1712,6 +1723,7 @@ gather_start(GatherScanState *state)
 
 	if (state->where[0] != '\0')
 		appendStringInfo(&sql, " WHERE %s", state->where);
+	appendStringInfoString(&sql, state->limit);
 	appendStringInfoString(&sql, state->locking);
 
 	/* the segments direct dispatch named, or the table's: all, or the first */
@@ -1790,23 +1802,23 @@ gather_store(GatherScanState *state, TupleTableSlot *slot, int content)
 	state->current_content = content;
 }
 
-static TupleTableSlot *
-gather_next(ScanState *ss)
+/* The segments' next row, into the scan slot; false when they have no more. */
+static bool
+gather_fetch(GatherScanState *state, TupleTableSlot *slot)
 {
-	GatherScanState *state = (GatherScanState *) ss;
-	TupleTableSlot *slot = ss->ss_ScanTupleSlot;
+	ScanState  *ss = &state->css.ss;
 	MemoryContext oldcxt;
 	int			content;
 	bool		got;
 
 	if (state->done)
-		return ExecClearTuple(slot);
+		return false;
 
 	if (state->gather == NULL && !gather_start(state))
 	{
 		state->done = true;
 		state->current_content = -1;
-		return ExecClearTuple(slot);
+		return false;
 	}
 
 	/*
@@ -1820,16 +1832,41 @@ gather_next(ScanState *ss)
 	{
 		slot_getallattrs(state->remote);
 		gather_store(state, slot, content);
+		if (state->spool != NULL)
+			tuplestore_puttupleslot(state->spool, slot);
 	}
 	MemoryContextSwitchTo(oldcxt);
 
 	if (got)
-		return slot;
+		return true;
 
 	GpGatherEnd(state->gather);
 	state->gather = NULL;
 	state->done = true;
 	state->current_content = -1;
+	return false;
+}
+
+static TupleTableSlot *
+gather_next(ScanState *ss)
+{
+	GatherScanState *state = (GatherScanState *) ss;
+	TupleTableSlot *slot = ss->ss_ScanTupleSlot;
+
+	/*
+	 * Read again, what was kept is read first; the segments are read further
+	 * only past its end, as a Materialize reads its child.
+	 */
+	if (state->spool != NULL && !tuplestore_ateof(state->spool) &&
+		tuplestore_gettupleslot(state->spool, true, false, state->spooled))
+	{
+		ExecCopySlot(slot, state->spooled);
+		slot->tts_tableOid = RelationGetRelid(ss->ss_currentRelation);
+		return slot;
+	}
+
+	if (gather_fetch(state, slot))
+		return slot;
 	return ExecClearTuple(slot);
 }
 
@@ -1868,18 +1905,233 @@ gather_end(CustomScanState *node)
 	if (state->gather != NULL)
 		GpGatherEnd(state->gather);
 	state->gather = NULL;
+	if (state->spool != NULL)
+		tuplestore_end(state->spool);
+	state->spool = NULL;
 }
 
+/*
+ * Read again: the segments run the query again -- or, for an external table
+ * that keeps what it read, that is read again (GpGatherScanMarkRescans()).
+ * The query the segments run has no parameter in it, which is what makes
+ * what it read the answer whatever the parameters now are.
+ */
 static void
 gather_rescan(CustomScanState *node)
 {
 	GatherScanState *state = (GatherScanState *) node;
+
+	if (state->spool != NULL)
+	{
+		tuplestore_rescan(state->spool);
+		return;
+	}
 
 	if (state->gather != NULL)
 		GpGatherEnd(state->gather);
 	state->gather = NULL;
 	state->done = false;
 	state->current_content = -1;
+}
+
+/*
+ * An external table's gather that the plan may read more than once -- the
+ * inner side of a nested loop, a subquery run for each row, the recursive
+ * part of WITH RECURSIVE -- keeps the rows it read and reads them again: its
+ * source is read once, as Cloudberry's planner makes sure of by putting a
+ * Materialize above an external scan it would rescan (the path is not
+ * "rescannable").  A command runs once, a file's rejected rows are counted
+ * once, and gpfdist serves a scan once.  A Materialize that already keeps
+ * the rows, above a subtree with no parameter to change, reads them once.
+ */
+static void mark_rescans(PlanState *ps, bool again);
+
+static void
+mark_rescans_list(List *subplans, bool again)
+{
+	foreach_node(SubPlanState, sps, subplans)
+		mark_rescans(sps->planstate, again);
+}
+
+static void
+mark_rescans_array(PlanState **planstates, int n, bool again)
+{
+	for (int i = 0; i < n; i++)
+		mark_rescans(planstates[i], again);
+}
+
+static void
+mark_rescans(PlanState *ps, bool again)
+{
+	if (ps == NULL)
+		return;
+	check_stack_depth();
+
+	if (again && IsA(ps, CustomScanState) &&
+		((CustomScanState *) ps)->methods == &gather_exec_methods)
+	{
+		GatherScanState *state = (GatherScanState *) ps;
+
+		if (state->external && state->spool == NULL)
+		{
+			EState	   *estate = ps->state;
+			MemoryContext oldcxt = MemoryContextSwitchTo(estate->es_query_cxt);
+
+			state->spool = tuplestore_begin_heap(false, false, work_mem);
+			state->spooled =
+				ExecInitExtraTupleSlot(estate,
+									   state->css.ss.ss_ScanTupleSlot->tts_tupleDescriptor,
+									   &TTSOpsMinimalTuple);
+			MemoryContextSwitchTo(oldcxt);
+		}
+	}
+
+	/* an initplan runs again as what it belongs to does; a subplan per row */
+	mark_rescans_list(ps->initPlan, again);
+	mark_rescans_list(ps->subPlan, true);
+
+	switch (nodeTag(ps))
+	{
+		case T_NestLoopState:
+		case T_RecursiveUnionState:
+			mark_rescans(outerPlanState(ps), again);
+			mark_rescans(innerPlanState(ps), true);
+			return;
+		case T_MaterialState:
+			if ((((MaterialState *) ps)->eflags & EXEC_FLAG_REWIND) &&
+				bms_is_empty(outerPlanState(ps)->plan->allParam))
+				again = false;
+			break;
+		case T_AppendState:
+			mark_rescans_array(((AppendState *) ps)->appendplans,
+							   ((AppendState *) ps)->as_nplans, again);
+			break;
+		case T_MergeAppendState:
+			mark_rescans_array(((MergeAppendState *) ps)->mergeplans,
+							   ((MergeAppendState *) ps)->ms_nplans, again);
+			break;
+		case T_SubqueryScanState:
+			mark_rescans(((SubqueryScanState *) ps)->subplan, again);
+			break;
+		case T_CustomScanState:
+			foreach_ptr(PlanState, child, ((CustomScanState *) ps)->custom_ps)
+				mark_rescans(child, again);
+			break;
+		default:
+			break;
+	}
+	mark_rescans(outerPlanState(ps), again);
+	mark_rescans(innerPlanState(ps), again);
+}
+
+void
+GpGatherScanMarkRescans(PlanState *root)
+{
+	mark_rescans(root, false);
+}
+
+/*
+ * A LIMIT above a gather, with nothing between them that drops a row: the
+ * segments need send no more than its rows and its OFFSET's, and the query
+ * sent them says so, as Cloudberry's planner puts a Limit below its Gather
+ * Motion.  A segment's scan stops where the query does -- an external
+ * table's, before the rows further on it would have rejected.
+ */
+static bool
+limit_value(Node *expr, int64 *value)
+{
+	if (expr == NULL)
+	{
+		*value = 0;
+		return true;
+	}
+	if (!IsA(expr, Const) || ((Const *) expr)->constisnull ||
+		((Const *) expr)->consttype != INT8OID)
+		return false;
+	*value = DatumGetInt64(((Const *) expr)->constvalue);
+	return *value >= 0;
+}
+
+static void
+bound_gathers(Plan *plan, int64 bound)
+{
+	if (plan == NULL)
+		return;
+	check_stack_depth();
+
+	switch (nodeTag(plan))
+	{
+		case T_Limit:
+			{
+				Limit	   *limit = (Limit *) plan;
+				int64		count;
+				int64		offset;
+
+				if (limit->limitCount != NULL &&
+					limit->limitOption == LIMIT_OPTION_COUNT &&
+					limit_value(limit->limitCount, &count) &&
+					limit_value(limit->limitOffset, &offset) &&
+					count <= PG_INT64_MAX - offset)
+					bound_gathers(plan->lefttree, count + offset);
+				else
+					bound_gathers(plan->lefttree, -1);
+				return;
+			}
+		case T_Result:
+			/* a projection, or a condition on no row in particular */
+			bound_gathers(plan->lefttree, plan->qual == NIL ? bound : -1);
+			return;
+		case T_SubqueryScan:
+			bound_gathers(((SubqueryScan *) plan)->subplan,
+						  plan->qual == NIL ? bound : -1);
+			return;
+		case T_Append:
+			/* UNION ALL: no branch needs to give more than the whole */
+			foreach_ptr(Plan, child, ((Append *) plan)->appendplans)
+				bound_gathers(child, plan->qual == NIL ? bound : -1);
+			return;
+		case T_CustomScan:
+			{
+				CustomScan *cscan = (CustomScan *) plan;
+
+				if (cscan->methods == &gather_scan_methods)
+				{
+					if (bound >= 0 && plan->qual == NIL &&
+						list_length(cscan->custom_private) > GATHER_PRIVATE_LIMIT)
+						list_nth_cell(cscan->custom_private,
+									  GATHER_PRIVATE_LIMIT)->ptr_value =
+							makeString(psprintf(" LIMIT " INT64_FORMAT, bound));
+					return;
+				}
+				foreach_ptr(Plan, child, cscan->custom_plans)
+					bound_gathers(child, -1);
+				break;
+			}
+		case T_MergeAppend:
+			foreach_ptr(Plan, child, ((MergeAppend *) plan)->mergeplans)
+				bound_gathers(child, -1);
+			break;
+		case T_BitmapAnd:
+			foreach_ptr(Plan, child, ((BitmapAnd *) plan)->bitmapplans)
+				bound_gathers(child, -1);
+			break;
+		case T_BitmapOr:
+			foreach_ptr(Plan, child, ((BitmapOr *) plan)->bitmapplans)
+				bound_gathers(child, -1);
+			break;
+		default:
+			break;
+	}
+	bound_gathers(plan->lefttree, -1);
+	bound_gathers(plan->righttree, -1);
+}
+
+void
+GpScanBoundGathers(PlannedStmt *stmt)
+{
+	bound_gathers(stmt->planTree, -1);
+	foreach_ptr(Plan, sub, stmt->subplans)
+		bound_gathers(sub, -1);
 }
 
 static void
@@ -1916,6 +2168,8 @@ gather_explain(CustomScanState *node, List *ancestors, ExplainState *es)
 							 state->where);
 		else if (state->where[0] != '\0')
 			appendStringInfo(&sql, " WHERE %s", state->where);
+		if (!gather_is_current_of(state))
+			appendStringInfoString(&sql, state->limit);
 		appendStringInfoString(&sql, state->locking);
 		ExplainPropertyText("Remote SQL", sql.data, es);
 	}

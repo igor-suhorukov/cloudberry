@@ -77,6 +77,19 @@ extern bool GpScanSetCursor(bool cursor);
 extern bool GpGatherScanStartEarly(struct PlanState *ps);
 
 /*
+ * As a statement starts: an external table's gathers that the plan may read
+ * again keep what they read, and read that again (gp_motion.c).
+ */
+extern void GpGatherScanMarkRescans(struct PlanState *root);
+
+/*
+ * After planning: a gather a LIMIT reads sends the segments the LIMIT
+ * (gp_modify.c).
+ */
+struct PlannedStmt;
+extern void GpScanBoundGathers(struct PlannedStmt *stmt);
+
+/*
  * Before a statement is planned: Cloudberry's NOTICE for a NOT IN whose
  * subquery reads a distributed table's ctid without its gp_segment_id,
  * which its planner finds in an anti-join and PostgreSQL's keeps a subplan.

@@ -3586,6 +3586,10 @@ motion_executor_start(QueryDesc *queryDesc, int eflags)
 		fragment_params_after_start(queryDesc, params);
 
 	if (GpClusterBackendRole() == GP_ROLE_DISPATCH &&
+		!(eflags & EXEC_FLAG_EXPLAIN_ONLY))
+		GpGatherScanMarkRescans(queryDesc->planstate);
+
+	if (GpClusterBackendRole() == GP_ROLE_DISPATCH &&
 		!(eflags & EXEC_FLAG_EXPLAIN_ONLY) && starting_cursor())
 	{
 		MemoryContext oldcxt = MemoryContextSwitchTo(queryDesc->estate->es_query_cxt);
