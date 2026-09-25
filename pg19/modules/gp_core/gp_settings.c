@@ -79,6 +79,7 @@
 
 #include "gp_cluster.h"
 #include "gp_core_api.h"
+#include "gp_fault.h"
 #include "gp_scan.h"
 #include "gp_settings.h"
 
@@ -112,6 +113,7 @@ static int	gp_autostats_mode = GP_AUTOSTATS_NONE;
 static int	gp_autostats_mode_in_functions = GP_AUTOSTATS_NONE;
 static int	gp_autostats_on_change_threshold = INT_MAX;
 static bool gp_autostats_allow_nonowner = false;
+static bool gp_autostats_lock_wait = false;
 
 /* ------------------------------------------------------------------------- */
 /* The settings it accepts, with nothing to apply them to yet                */
@@ -286,7 +288,10 @@ has_no_stats(Oid relid)
 /*
  * ANALYZE the table, as Cloudberry's autostats_issue_analyze() does, and as
  * the owner of the table or the database could.  A distributed table is
- * sampled on the segments (O3, gp_analyze.c).
+ * sampled on the segments (O3, gp_analyze.c).  A table another transaction
+ * holds a lock on that ANALYZE's conflicts with is passed over, unless
+ * gp.autostats_lock_wait says to wait for it, as Cloudberry's ExecVacuum()
+ * skips it; the relation is given by OID alone, so VACUUM says nothing of it.
  */
 static void
 issue_analyze(Oid relid)
@@ -301,7 +306,8 @@ issue_analyze(Oid relid)
 		return;
 
 	stmt = makeNode(VacuumStmt);
-	stmt->options = NIL;
+	stmt->options = gp_autostats_lock_wait ? NIL :
+		list_make1(makeDefElem("skip_locked", (Node *) makeBoolean(true), -1));
 	stmt->rels = list_make1(makeVacuumRelation(NULL, relid, NIL));
 	stmt->is_vacuumcmd = false;
 
@@ -342,6 +348,8 @@ GpAutoStats(CmdType cmd, Oid relid, uint64 ntuples, bool in_function)
 	relkind = get_rel_relkind(relid);
 	if (relkind != RELKIND_RELATION && relkind != RELKIND_MATVIEW)
 		return;
+
+	GP_FAULT("before_auto_stats");
 
 	switch (mode)
 	{
@@ -556,6 +564,12 @@ GpSettingsInit(void)
 							 "If disabled, table statistics will be updated only when tables are modified by the owners of the relations.",
 							 &gp_autostats_allow_nonowner,
 							 false, PGC_SUSET, 0,
+							 NULL, NULL, NULL);
+	DefineCustomBoolVariable("gp.autostats_lock_wait",
+							 "autostats generated ANALYZE statements to wait for lock acquisition.",
+							 NULL,
+							 &gp_autostats_lock_wait,
+							 false, PGC_USERSET, 0,
 							 NULL, NULL, NULL);
 
 	/* gp_resource's, which budgets a query by it; gp_core's, for the scripts */
