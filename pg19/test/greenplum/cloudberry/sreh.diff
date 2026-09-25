@@ -1,0 +1,3 @@
+@@
+-DETAIL:  Last error was: invalid input syntax for type integer: "eleven", column a
++DETAIL:  Last error was: invalid input syntax for type integer: "", column b

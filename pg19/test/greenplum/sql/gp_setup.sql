@@ -10,6 +10,7 @@ CREATE EXTENSION gp_core;
 CREATE EXTENSION gp_orca;
 CREATE EXTENSION gp_sql;
 CREATE EXTENSION gp_ao;
+CREATE EXTENSION gp_exttable;
 SELECT extname FROM pg_extension WHERE extname LIKE 'gp\_%' ORDER BY 1;
 SELECT count(*) AS segments FROM gp.segment_configuration() WHERE content >= 0;
 --
@@ -22,5 +23,6 @@ CREATE EXTENSION IF NOT EXISTS gp_core;
 CREATE EXTENSION IF NOT EXISTS gp_orca;
 CREATE EXTENSION IF NOT EXISTS gp_sql;
 CREATE EXTENSION IF NOT EXISTS gp_ao;
+CREATE EXTENSION IF NOT EXISTS gp_exttable;
 RESET client_min_messages;
 \c regression

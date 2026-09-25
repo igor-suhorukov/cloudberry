@@ -126,6 +126,34 @@ expand_table_ao  pg_appendonly's compresstype of a table made with
   name, where Cloudberry records "none"; and the OID of text's hash operator
   class (see gp_create_table).
 
+external_table (planner, orca)  an external table's dependency on its
+  custom protocol, which DROP PROTOCOL finds from the tables' locations
+  (gp_exttable's protocol.c), where Cloudberry records it in pg_depend
+  against pg_extprotocol, a catalog of its own; and psql's \d of an
+  external table, which PostgreSQL 19's psql prints with the "Server:" line
+  of any foreign table's, gp_exttable_server's.  The rows a query's scans
+  rejected, as the NOTICE counts them: an initplan's counted with the rest,
+  where Cloudberry, which runs it as a dispatch of its own before the query,
+  leaves them out; and under the planner a merge join whose outer side is
+  empty never reads its inner side, a third scan of the table, where
+  Cloudberry's slices all run and read their tables (ORCA's plan reads all
+  three, as Cloudberry's does).  And a PL/pgSQL function's INSERT that fails
+  on a segment: the context says where in the function, as the
+  coordinator's context callbacks say it for any error, where Cloudberry,
+  which rethrows the segment's error as the INSERT finishes, leaves them out.
+
+external_table_create_privs  the rights CREATEEXTTABLE gives a role, which
+  gp_exttable keeps in the role's gp_exttable security label
+  ("gpfdist:r,gpfdist:w,http:r"): pg_authid has no rolcreaterextgpfd,
+  rolcreaterexthttp or rolcreatewextgpfd column to read them from.  What
+  the role may then make, and what is refused, are Cloudberry's.
+
+external_table_persistent_error_log (orca)  the lines ORCA's fallback trace
+  prints for gp_truncate_error_log() and gp_truncate_persistent_error_log()
+  called without a FROM, functions that change what they read, which ORCA
+  declines there ("SIRV functions") as Cloudberry's ORCA does -- its own
+  expected output for ORCA has them.
+
 gp_create_table  the OID of text's hash operator class in
   gp_distribution_policy.distclass: the same class, which Cloudberry's
   catalog numbers 10039 and PostgreSQL 19's 10037.
@@ -157,6 +185,12 @@ join_gp  the NOTICE of test_print_prefetch_joinqual: where a join's outer
   PostgreSQL's joins, the port's, never do.  Its table of one segment,
   which gp_debug_numsegments makes, is read there alone, and answers as
   Cloudberry's does.
+
+part_external_table (orca)  the lines ORCA's fallback trace prints for a
+  partitioned table with external partitions: the dynamic foreign scan ORCA
+  plans for it the port's ORCA does not translate
+  (TranslateDXLDynForeignScan), and the planner plans the query; and an
+  INSERT into one, which Cloudberry's ORCA declines too.
 
 partition_prune_opfamily (planner, orca)  its first EXPLAIN, which
   gpdiff.pl compares as rows: a comment line of dashes in the test reads to
@@ -225,6 +259,12 @@ sequence_gp  nextval() over gp_dist_random('gp_id'), which Cloudberry
   The port gathers gp_id's rows and calls it on the coordinator, which
   takes 1, 2 and 3, then 4.  No value twice in either, which is what the
   test is for.
+
+sreh  COPY's SEGMENT REJECT LIMIT, reached: the port's COPY parses each row
+  on the coordinator, where the rows it rejects are counted, and reaches the
+  limit at the second bad row, line 3; Cloudberry's coordinator parses a
+  row's distribution key alone, and reached it at the second bad key, line
+  11, before the segments, which parse the rest, reached theirs.
 
 truncate_gp  the files stat_table_segfile_size(), a PL/Python function,
   finds of an append-optimized and a column-oriented table emptied by a

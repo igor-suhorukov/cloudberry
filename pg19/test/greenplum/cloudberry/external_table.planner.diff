@@ -1,0 +1,34 @@
+@@
+-     1
++     0
+@@
+-     1
++     0
+@@
++Server: gp_exttable_server
+@@
+-NOTICE:  found 4 data formatting errors (4 or more input rows), rejected related input data
++NOTICE:  found 6 data formatting errors (6 or more input rows), rejected related input data
+@@
+-NOTICE:  found 6 data formatting errors (6 or more input rows), rejected related input data
++NOTICE:  found 4 data formatting errors (4 or more input rows), rejected related input data
+@@
++SQL statement "INSERT INTO exttab_udfs_insert_2
++  SELECT i, j from exttab_udfs_2"
++PL/pgSQL function exttab_udfs_func2() line 25 at SQL statement
+@@
++SQL statement "INSERT INTO exttab_udfs_insert_2
++  SELECT i, j from exttab_udfs_2"
++PL/pgSQL function exttab_udfs_func2() line 25 at SQL statement
+@@
++SQL statement "INSERT INTO exttab_udfs_insert_2
++  SELECT i, j from exttab_udfs_2"
++PL/pgSQL function exttab_udfs_func2() line 25 at SQL statement
+@@
++SQL statement "INSERT INTO exttab_udfs_insert_2
++  SELECT i, j from exttab_udfs_2"
++PL/pgSQL function exttab_udfs_func2() line 25 at SQL statement
+@@
++Server: gp_exttable_server
+@@
++Server: gp_exttable_server

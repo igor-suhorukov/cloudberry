@@ -2,16 +2,16 @@
 # runs it on a coordinator and three segments: the tests of the schedule
 # that bear on M2 -- dispatch, distribution, Motions, joins, aggregates,
 # subqueries, partitions, DML -- and on M5's append-optimized and
-# column-oriented tables, in the schedule's order.
+# column-oriented tables and external tables, in the schedule's order.
 #
 #   run   the test runs here, in both passes; cloudberry/ holds a difference
 #         reviewed and kept, where one pass has one
 #   skip  it needs what the port does not have yet: the rest of the line is
 #         the first of Cloudberry's statements it refuses, as the port says
 #
-# The schedule's other tests -- external tables, resource queues and
-# groups, fault injection, FTS, the interconnect's settings -- need M5 to
-# M7, and are not listed.
+# The schedule's other tests -- resource queues and groups, fault
+# injection, FTS, the interconnect's settings -- need M6 and M7, and are not
+# listed.
 skip gp_aggregates  relation "aggtest" does not exist
 run  update_gp
 run  triggers_gp
@@ -27,7 +27,7 @@ run  limit_gp
 run  notin
 skip percentile  function percentile_cont(numeric, timestamp without time zone) does not exist
 run  join_gp
-skip union_gp  UNION types text and integer cannot be matched; syntax error at or near "EXTERNAL"
+skip union_gp  UNION types text and integer cannot be matched
 run  gp_create_table
 skip matview_ao  relation "public.m_heap" does not exist; relation "m_heap" does not exist
 skip filter  cannot copy window "w" because it has a frame clause
@@ -59,7 +59,7 @@ run  agg_pushdown
 skip gp_array_agg  function gp_array_agg(integer) does not exist; function gp_array_agg(text) does not exist
 run  gp_dqa
 skip subselect_gp  unrecognized EXPLAIN option "locus"
-skip subselect_gp2  syntax error at or near "EXTERNAL"; relation "echotable" does not exist
+run  subselect_gp2
 run  gp_transactions
 skip olap_group  function group_id() does not exist
 skip olap_window_seq  DISTINCT is not implemented for window functions; cannot copy window "win1" because it has a frame clause
@@ -73,6 +73,11 @@ run  partition_storage
 skip partition_ddl  type "aa" does not exist; cannot specify storage parameters for a partitioned table
 run  brin_ao
 run  brin_aocs
+run  sreh
+run  external_table
+run  external_table_union_all
+run  external_table_create_privs
+run  external_table_persistent_error_log
 skip column_compression  relation "gp_partition_template" does not exist
 skip alter_table_aocs  type "gp_fastsequence" does not exist
 skip alter_table_aocs2  unrecognized configuration parameter "gp_recursive_cte"; function descendants_of(unknown) does not exist
@@ -94,6 +99,7 @@ run  bfv_dd_types
 skip bfv_olap  cannot copy window "w" because it has a frame clause
 skip bfv_aggregate  argument of ROWS must not contain variables; cannot copy window "w" because it has a frame clause
 run  DML_over_joins
+run  part_external_table
 run  rpt
 run  rpt_joins
 skip bfv_cte  count(*) must be used to call a parameterless aggregate function; type "cte" does not exist

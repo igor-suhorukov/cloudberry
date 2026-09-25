@@ -65,11 +65,13 @@ SOCK="$(mktemp -d /tmp/cbg-XXXXXX)"
 EXEC="$(mktemp -d "${HOME:-/var/lib/postgresql}/cb-greenplum-XXXXXX")"
 BASEPORT="${PGPORT:-$((7300 + RANDOM % 200))}"
 NODES=4					# a coordinator and Cloudberry's three segments
-PRELOAD='gp_core,gp_orca,gp_sql,gp_ao'
+PRELOAD='gp_core,gp_orca,gp_sql,gp_ao,gp_exttable'
 SECRET="greenplum-schedule-$RANDOM$RANDOM$RANDOM"
 
 port() { echo $((BASEPORT + $1)); }
-export PGPORT="$(port 0)" PGHOST="$SOCK/n0"
+# The superuser is Cloudberry's demo cluster's, gpadmin, as the singlenode
+# suite's is: Cloudberry's expected output names it.
+export PGPORT="$(port 0)" PGHOST="$SOCK/n0" PGUSER=gpadmin
 
 WATCHDOG=
 cleanup() {
@@ -102,7 +104,7 @@ CONF="$WORK/gp_cluster.conf"
 } > "$CONF"
 for n in $(seq 0 $((NODES - 1))); do
 	mkdir -p "$SOCK/n$n"
-	"$BINDIR/initdb" -D "$WORK/node$n" -N --locale=C --encoding=UTF8 > "$WORK/initdb$n.log" 2>&1 \
+	"$BINDIR/initdb" -D "$WORK/node$n" -N -U gpadmin --locale=C --encoding=UTF8 > "$WORK/initdb$n.log" 2>&1 \
 		|| { echo "initdb failed for node $n"; tail -20 "$WORK/initdb$n.log"; exit 1; }
 	{
 		echo "shared_preload_libraries = '$PRELOAD'"
@@ -154,12 +156,18 @@ convert() {
 }
 
 # The suite: PostgreSQL 19's test_setup, the port's setup, then Cloudberry's.
-SN="$WORK/suite"
+# Named as Cloudberry's own suite directory is: its tests print the paths of
+# their data, which their matchsubs make /ABSPATH/src/test/regress/... of
+# whatever comes before.
+SN="$WORK/src/test/regress"
 mkdir -p "$SN/sql" "$SN/expected"
 cp "$PGSUITE/sql/test_setup.sql" "$SN/sql/"
 cp "$PGSUITE/expected/test_setup.out" "$SN/expected/"
 # test_setup reads its data from the directory it runs from, --inputdir
 cp -r "$PGSUITE/data" "$SN/data"
+# and Cloudberry's tests read theirs from abs_srcdir too, which pg_regress
+# sets to --inputdir: its data files, where PostgreSQL's has none of the name
+cp -rn "$CB/data/." "$SN/data/"
 cp "$HERE"/sql/*.sql "$SN/sql/"
 cp "$HERE"/expected/*.out "$SN/expected/" 2> /dev/null
 { echo "test: test_setup"; echo "test: gp_setup"; } > "$SN/schedule"
@@ -273,7 +281,12 @@ for pass in ${PASSES:-planner orca}; do
 	# From Cloudberry's suite's directory, as its Makefile runs it: its tests
 	# read data/ by relative paths.
 	cd "$CB"
+	# PG_HOSTNAME and PG_BINDDIR are what Cloudberry's pg_regress sets for
+	# its tests: the host of segment 0, for their file:// and gpfdist://
+	# locations -- here every node's is this one -- and the directory of
+	# the programs, where they start gpfdist from.
 	PATH="$EXEC/bin:$PATH" CB_DIFF_MODE="$pass" PGOPTIONS="-c gp.optimizer=$optimizer" \
+	PG_HOSTNAME=localhost PG_BINDDIR="$BINDIR" \
 		"$PG_REGRESS" \
 			--bindir="$BINDIR" \
 			--inputdir="$SN" \

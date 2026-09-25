@@ -1,0 +1,389 @@
+@@
+- rolname | rolcreaterextgpfd | rolcreaterexthttp | rolcreatewextgpfd 
+----------+-------------------+-------------------+-------------------
+- ext_u3  | f                 | t                 | f
+-(1 row)
+-
++ERROR:  column "rolcreaterextgpfd" does not exist
++LINE 1: select rolname, rolcreaterextgpfd,rolcreaterexthttp,rolcreat...
++                        ^
+@@
+- rolname | rolcreaterextgpfd | rolcreaterexthttp | rolcreatewextgpfd 
+----------+-------------------+-------------------+-------------------
+- ext_u19 | t                 | f                 | f
+-(1 row)
+-
++ERROR:  column "rolcreaterextgpfd" does not exist
++LINE 1: select rolname, rolcreaterextgpfd,rolcreaterexthttp,rolcreat...
++                        ^
+@@
+- rolname | rolcreaterextgpfd | rolcreaterexthttp | rolcreatewextgpfd 
+----------+-------------------+-------------------+-------------------
+- ext_u22 | t                 | f                 | f
+-(1 row)
+-
++ERROR:  column "rolcreaterextgpfd" does not exist
++LINE 1: select rolname, rolcreaterextgpfd,rolcreaterexthttp,rolcreat...
++                        ^
+@@
+- rolname | rolcreaterextgpfd | rolcreaterexthttp | rolcreatewextgpfd 
+----------+-------------------+-------------------+-------------------
+- ext_u25 | t                 | f                 | f
+-(1 row)
+-
++ERROR:  column "rolcreaterextgpfd" does not exist
++LINE 1: select rolname, rolcreaterextgpfd,rolcreaterexthttp,rolcreat...
++                        ^
+@@
+- rolname | rolcreaterextgpfd | rolcreaterexthttp | rolcreatewextgpfd 
+----------+-------------------+-------------------+-------------------
+- ext_u23 | t                 | t                 | f
+-(1 row)
+-
++ERROR:  column "rolcreaterextgpfd" does not exist
++LINE 1: select rolname, rolcreaterextgpfd,rolcreaterexthttp,rolcreat...
++                        ^
+@@
+- rolname | rolcreaterextgpfd | rolcreaterexthttp | rolcreatewextgpfd 
+----------+-------------------+-------------------+-------------------
+- ext_u29 | t                 | t                 | f
+-(1 row)
+-
++ERROR:  column "rolcreaterextgpfd" does not exist
++LINE 1: select rolname, rolcreaterextgpfd,rolcreaterexthttp,rolcreat...
++                        ^
+@@
+- rolname | rolcreaterextgpfd | rolcreaterexthttp | rolcreatewextgpfd 
+----------+-------------------+-------------------+-------------------
+- ext_u32 | t                 | t                 | f
+-(1 row)
+-
++ERROR:  column "rolcreaterextgpfd" does not exist
++LINE 1: select rolname, rolcreaterextgpfd,rolcreaterexthttp,rolcreat...
++                        ^
+@@
+- rolname | rolcreaterextgpfd | rolcreaterexthttp | rolcreatewextgpfd 
+----------+-------------------+-------------------+-------------------
+- ext_u21 | t                 | f                 | t
+-(1 row)
+-
++ERROR:  column "rolcreaterextgpfd" does not exist
++LINE 1: select rolname, rolcreaterextgpfd,rolcreaterexthttp,rolcreat...
++                        ^
+@@
+- rolname | rolcreaterextgpfd | rolcreaterexthttp | rolcreatewextgpfd 
+----------+-------------------+-------------------+-------------------
+- ext_u28 | t                 | f                 | t
+-(1 row)
+-
++ERROR:  column "rolcreaterextgpfd" does not exist
++LINE 1: select rolname, rolcreaterextgpfd,rolcreaterexthttp,rolcreat...
++                        ^
+@@
+- rolname | rolcreaterextgpfd | rolcreaterexthttp | rolcreatewextgpfd 
+----------+-------------------+-------------------+-------------------
+- ext_u30 | t                 | f                 | t
+-(1 row)
+-
++ERROR:  column "rolcreaterextgpfd" does not exist
++LINE 1: select rolname, rolcreaterextgpfd,rolcreaterexthttp,rolcreat...
++                        ^
+@@
+- rolname | rolcreaterextgpfd | rolcreaterexthttp | rolcreatewextgpfd 
+----------+-------------------+-------------------+-------------------
+-(0 rows)
+-
++ERROR:  column "rolcreaterextgpfd" does not exist
++LINE 1: select rolname, rolcreaterextgpfd,rolcreaterexthttp,rolcreat...
++                        ^
+@@
+- rolname | rolcreaterextgpfd | rolcreaterexthttp | rolcreatewextgpfd 
+----------+-------------------+-------------------+-------------------
+-(0 rows)
+-
++ERROR:  column "rolcreaterextgpfd" does not exist
++LINE 1: select rolname, rolcreaterextgpfd,rolcreaterexthttp,rolcreat...
++                        ^
+@@
+- rolname | rolcreaterextgpfd | rolcreaterexthttp | rolcreatewextgpfd 
+----------+-------------------+-------------------+-------------------
+-(0 rows)
+-
++ERROR:  column "rolcreaterextgpfd" does not exist
++LINE 1: select rolname, rolcreaterextgpfd,rolcreaterexthttp,rolcreat...
++                        ^
+@@
+- rolname | rolcreaterextgpfd | rolcreaterexthttp | rolcreatewextgpfd 
+----------+-------------------+-------------------+-------------------
+- ext_u8  | t                 | f                 | f
+-(1 row)
+-
++ERROR:  column "rolcreaterextgpfd" does not exist
++LINE 1: select rolname, rolcreaterextgpfd,rolcreaterexthttp,rolcreat...
++                        ^
+@@
+- rolname | rolcreaterextgpfd | rolcreaterexthttp | rolcreatewextgpfd 
+----------+-------------------+-------------------+-------------------
+- ext_u14 | t                 | f                 | f
+-(1 row)
+-
++ERROR:  column "rolcreaterextgpfd" does not exist
++LINE 1: select rolname, rolcreaterextgpfd,rolcreaterexthttp,rolcreat...
++                        ^
+@@
+- rolname | rolcreaterextgpfd | rolcreaterexthttp | rolcreatewextgpfd 
+----------+-------------------+-------------------+-------------------
+- ext_u6  | t                 | f                 | f
+-(1 row)
+-
++ERROR:  column "rolcreaterextgpfd" does not exist
++LINE 1: select rolname, rolcreaterextgpfd,rolcreaterexthttp,rolcreat...
++                        ^
+@@
+- rolname | rolcreaterextgpfd | rolcreaterexthttp | rolcreatewextgpfd 
+----------+-------------------+-------------------+-------------------
+- ext_u13 | t                 | f                 | f
+-(1 row)
+-
++ERROR:  column "rolcreaterextgpfd" does not exist
++LINE 1: select rolname, rolcreaterextgpfd,rolcreaterexthttp,rolcreat...
++                        ^
+@@
+- rolname | rolcreaterextgpfd | rolcreaterexthttp | rolcreatewextgpfd 
+----------+-------------------+-------------------+-------------------
+- ext_u20 | f                 | t                 | f
+-(1 row)
+-
++ERROR:  column "rolcreaterextgpfd" does not exist
++LINE 1: select rolname, rolcreaterextgpfd,rolcreaterexthttp,rolcreat...
++                        ^
+@@
+- rolname | rolcreaterextgpfd | rolcreaterexthttp | rolcreatewextgpfd 
+----------+-------------------+-------------------+-------------------
+- ext_u27 | f                 | t                 | f
+-(1 row)
+-
++ERROR:  column "rolcreaterextgpfd" does not exist
++LINE 1: select rolname, rolcreaterextgpfd,rolcreaterexthttp,rolcreat...
++                        ^
+@@
+- rolname | rolcreaterextgpfd | rolcreaterexthttp | rolcreatewextgpfd 
+----------+-------------------+-------------------+-------------------
+- ext_u17 | f                 | t                 | f
+-(1 row)
+-
++ERROR:  column "rolcreaterextgpfd" does not exist
++LINE 1: select rolname, rolcreaterextgpfd,rolcreaterexthttp,rolcreat...
++                        ^
+@@
+- rolname | rolcreaterextgpfd | rolcreaterexthttp | rolcreatewextgpfd 
+----------+-------------------+-------------------+-------------------
+-(0 rows)
+-
++ERROR:  column "rolcreaterextgpfd" does not exist
++LINE 1: select rolname, rolcreaterextgpfd,rolcreaterexthttp,rolcreat...
++                        ^
+@@
+- rolname | rolcreaterextgpfd | rolcreaterexthttp | rolcreatewextgpfd 
+----------+-------------------+-------------------+-------------------
+-(0 rows)
+-
++ERROR:  column "rolcreaterextgpfd" does not exist
++LINE 1: select rolname, rolcreaterextgpfd,rolcreaterexthttp,rolcreat...
++                        ^
+@@
+- rolname | rolcreaterextgpfd | rolcreaterexthttp | rolcreatewextgpfd 
+----------+-------------------+-------------------+-------------------
+- ext_u18 | f                 | t                 | f
+-(1 row)
+-
++ERROR:  column "rolcreaterextgpfd" does not exist
++LINE 1: select rolname, rolcreaterextgpfd,rolcreaterexthttp,rolcreat...
++                        ^
+@@
+- rolname | rolcreaterextgpfd | rolcreaterexthttp | rolcreatewextgpfd 
+----------+-------------------+-------------------+-------------------
+- ext_u31 | f                 | t                 | t
+-(1 row)
+-
++ERROR:  column "rolcreaterextgpfd" does not exist
++LINE 1: select rolname, rolcreaterextgpfd,rolcreaterexthttp,rolcreat...
++                        ^
+@@
+- rolname | rolcreaterextgpfd | rolcreaterexthttp | rolcreatewextgpfd 
+----------+-------------------+-------------------+-------------------
+- ext_u33 | f                 | t                 | t
+-(1 row)
+-
++ERROR:  column "rolcreaterextgpfd" does not exist
++LINE 1: select rolname, rolcreaterextgpfd,rolcreaterexthttp,rolcreat...
++                        ^
+@@
+- rolname | rolcreaterextgpfd | rolcreaterexthttp | rolcreatewextgpfd 
+----------+-------------------+-------------------+-------------------
+- ext_u24 | f                 | f                 | t
+-(1 row)
+-
++ERROR:  column "rolcreaterextgpfd" does not exist
++LINE 1: select rolname, rolcreaterextgpfd,rolcreaterexthttp,rolcreat...
++                        ^
+@@
+- rolname | rolcreaterextgpfd | rolcreaterexthttp | rolcreatewextgpfd 
+----------+-------------------+-------------------+-------------------
+- ext_u26 | f                 | f                 | t
+-(1 row)
+-
++ERROR:  column "rolcreaterextgpfd" does not exist
++LINE 1: select rolname, rolcreaterextgpfd,rolcreaterexthttp,rolcreat...
++                        ^
+@@
+- rolname | rolcreaterextgpfd | rolcreaterexthttp | rolcreatewextgpfd 
+----------+-------------------+-------------------+-------------------
+- ext_u15 | f                 | f                 | t
+-(1 row)
+-
++ERROR:  column "rolcreaterextgpfd" does not exist
++LINE 1: select rolname, rolcreaterextgpfd,rolcreaterexthttp,rolcreat...
++                        ^
+@@
+- rolname | rolcreaterextgpfd | rolcreaterexthttp | rolcreatewextgpfd 
+----------+-------------------+-------------------+-------------------
+- ext_u16 | f                 | f                 | t
+-(1 row)
+-
++ERROR:  column "rolcreaterextgpfd" does not exist
++LINE 1: select rolname, rolcreaterextgpfd,rolcreaterexthttp,rolcreat...
++                        ^
+@@
+- rolname | rolcreaterextgpfd | rolcreaterexthttp | rolcreatewextgpfd 
+----------+-------------------+-------------------+-------------------
+-(0 rows)
+-
++ERROR:  column "rolcreaterextgpfd" does not exist
++LINE 1: select rolname, rolcreaterextgpfd,rolcreaterexthttp,rolcreat...
++                        ^
+@@
+- rolname | rolcreaterextgpfd | rolcreaterexthttp | rolcreatewextgpfd 
+----------+-------------------+-------------------+-------------------
+-(0 rows)
+-
++ERROR:  column "rolcreaterextgpfd" does not exist
++LINE 1: select rolname, rolcreaterextgpfd,rolcreaterexthttp,rolcreat...
++                        ^
+@@
+- rolname | rolcreaterextgpfd | rolcreaterexthttp | rolcreatewextgpfd 
+----------+-------------------+-------------------+-------------------
+- ext_u34 | f                 | f                 | f
+-(1 row)
+-
++ERROR:  column "rolcreaterextgpfd" does not exist
++LINE 1: select rolname, rolcreaterextgpfd,rolcreaterexthttp,rolcreat...
++                        ^
+@@
+- rolname | rolcreaterextgpfd | rolcreaterexthttp | rolcreatewextgpfd 
+----------+-------------------+-------------------+-------------------
+- ext_u40 | f                 | f                 | f
+-(1 row)
+-
++ERROR:  column "rolcreaterextgpfd" does not exist
++LINE 1: select rolname, rolcreaterextgpfd,rolcreaterexthttp,rolcreat...
++                        ^
+@@
+- rolname | rolcreaterextgpfd | rolcreaterexthttp | rolcreatewextgpfd 
+----------+-------------------+-------------------+-------------------
+- ext_u37 | f                 | f                 | f
+-(1 row)
+-
++ERROR:  column "rolcreaterextgpfd" does not exist
++LINE 1: select rolname, rolcreaterextgpfd,rolcreaterexthttp,rolcreat...
++                        ^
+@@
+- rolname | rolcreaterextgpfd | rolcreaterexthttp | rolcreatewextgpfd 
+----------+-------------------+-------------------+-------------------
+- ext_u38 | f                 | f                 | f
+-(1 row)
+-
++ERROR:  column "rolcreaterextgpfd" does not exist
++LINE 1: select rolname, rolcreaterextgpfd,rolcreaterexthttp,rolcreat...
++                        ^
+@@
+- rolname | rolcreaterextgpfd | rolcreaterexthttp | rolcreatewextgpfd 
+----------+-------------------+-------------------+-------------------
+- ext_u44 | f                 | f                 | f
+-(1 row)
+-
++ERROR:  column "rolcreaterextgpfd" does not exist
++LINE 1: select rolname, rolcreaterextgpfd,rolcreaterexthttp,rolcreat...
++                        ^
+@@
+- rolname | rolcreaterextgpfd | rolcreaterexthttp | rolcreatewextgpfd 
+----------+-------------------+-------------------+-------------------
+- ext_u36 | f                 | f                 | f
+-(1 row)
+-
++ERROR:  column "rolcreaterextgpfd" does not exist
++LINE 1: select rolname, rolcreaterextgpfd,rolcreaterexthttp,rolcreat...
++                        ^
+@@
+- rolname | rolcreaterextgpfd | rolcreaterexthttp | rolcreatewextgpfd 
+----------+-------------------+-------------------+-------------------
+- ext_u41 | f                 | f                 | f
+-(1 row)
+-
++ERROR:  column "rolcreaterextgpfd" does not exist
++LINE 1: select rolname, rolcreaterextgpfd,rolcreaterexthttp,rolcreat...
++                        ^
+@@
+- rolname | rolcreaterextgpfd | rolcreaterexthttp | rolcreatewextgpfd 
+----------+-------------------+-------------------+-------------------
+- ext_u43 | f                 | f                 | f
+-(1 row)
+-
++ERROR:  column "rolcreaterextgpfd" does not exist
++LINE 1: select rolname, rolcreaterextgpfd,rolcreaterexthttp,rolcreat...
++                        ^
+@@
+- rolname | rolcreaterextgpfd | rolcreaterexthttp | rolcreatewextgpfd 
+----------+-------------------+-------------------+-------------------
+- ext_u45 | f                 | f                 | f
+-(1 row)
+-
++ERROR:  column "rolcreaterextgpfd" does not exist
++LINE 1: select rolname, rolcreaterextgpfd,rolcreaterexthttp,rolcreat...
++                        ^
+@@
+- rolname | rolcreaterextgpfd | rolcreaterexthttp | rolcreatewextgpfd 
+----------+-------------------+-------------------+-------------------
+- ext_u35 | f                 | f                 | f
+-(1 row)
+-
++ERROR:  column "rolcreaterextgpfd" does not exist
++LINE 1: select rolname, rolcreaterextgpfd,rolcreaterexthttp,rolcreat...
++                        ^
+@@
+- rolname | rolcreaterextgpfd | rolcreaterexthttp | rolcreatewextgpfd 
+----------+-------------------+-------------------+-------------------
+- ext_u42 | f                 | f                 | f
+-(1 row)
+-
++ERROR:  column "rolcreaterextgpfd" does not exist
++LINE 1: select rolname, rolcreaterextgpfd,rolcreaterexthttp,rolcreat...
++                        ^
+@@
+- rolname | rolcreaterextgpfd | rolcreaterexthttp | rolcreatewextgpfd 
+----------+-------------------+-------------------+-------------------
+- ext_u46 | f                 | f                 | f
+-(1 row)
+-
++ERROR:  column "rolcreaterextgpfd" does not exist
++LINE 1: select rolname, rolcreaterextgpfd,rolcreaterexthttp,rolcreat...
++                        ^
+@@
+- rolname | rolcreaterextgpfd | rolcreaterexthttp | rolcreatewextgpfd 
+----------+-------------------+-------------------+-------------------
+- ext_u39 | f                 | f                 | f
+-(1 row)
+-
++ERROR:  column "rolcreaterextgpfd" does not exist
++LINE 1: select rolname, rolcreaterextgpfd,rolcreaterexthttp,rolcreat...
++                        ^
