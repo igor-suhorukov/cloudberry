@@ -929,6 +929,7 @@ _PG_init(void)
 
 	define_settings();
 	MarkGUCPrefixReserved("gp_resource");
+	MemProtInit();
 
 	ResDefsRegisterProvider();
 	ResQueueInit();

@@ -287,6 +287,26 @@ gdd_graph = static_library('gdd_graph',
   pic: true,
 )
 
+# Cloudberry's memory protection -- its vmem tracker, red zone handler,
+# runaway cleaner, idle tracker, event versions and session states --
+# compiled where it lies, unmodified: gp_resource counts the memory contexts'
+# blocks through O25 (memprot.c) and asks these through the include overlay
+# (compat/memprot/), which answers what they ask of Cloudberry's globals in
+# the port's terms.  Their C is Cloudberry's style: declarations among
+# statements, and functions declared in the files that call them.
+gp_memprot = static_library('gp_memprot',
+  files('../src/backend/utils/mmgr/vmem_tracker.c',
+        '../src/backend/utils/mmgr/redzone_handler.c',
+        '../src/backend/utils/mmgr/runaway_cleaner.c',
+        '../src/backend/utils/mmgr/idle_tracker.c',
+        '../src/backend/utils/mmgr/event_version.c',
+        '../src/backend/utils/session_state.c'),
+  c_args: mod_c_args + ['-Wno-declaration-after-statement',
+                        '-Wno-missing-prototypes'],
+  include_directories: [include_directories('compat/memprot', 'include'), pg_inc],
+  pic: true,
+)
+
 modules = [
   {
     'name': 'gp_core', 'preload': true, 'extension': true, 'build': true,
@@ -420,7 +440,9 @@ modules = [
     'sources': files('modules/gp_resource/gp_resource.c',
                      'modules/gp_resource/resdefs.c',
                      'modules/gp_resource/resqueue.c',
-                     'modules/gp_resource/resgroup.c'),
+                     'modules/gp_resource/resgroup.c',
+                     'modules/gp_resource/memprot.c'),
+    'link_with': [gp_memprot],
   },
   {
     # Preloaded: it registers a background worker and the authentication hook,

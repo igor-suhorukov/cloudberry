@@ -271,4 +271,7 @@ extern void ResourceManagerUtilityStart(struct PlannedStmt *pstmt,
 										const char *queryString,
 										int context);
 
+/* memprot.c: memory protection, Cloudberry's vmem tracker on O25 */
+extern void MemProtInit(void);
+
 #endif							/* GP_RESOURCE_H */

@@ -428,3 +428,37 @@ GRANT SELECT ON gp_toolkit.gp_resq_activity, gp_toolkit.gp_resq_activity_by_queu
 	gp_toolkit.gp_resq_role, gp_toolkit.gp_resq_priority_backend,
 	gp_toolkit.gp_resq_priority_statement, gp_toolkit.gp_locks_on_resqueue,
 	gp_toolkit.gp_resqueue_status TO PUBLIC;
+
+/******************************************************************************
+ * Memory protection (memprot.c): each session's memory on a node, as
+ * Cloudberry's gp_internal_tools gives it, and gp_toolkit's two functions of
+ * it -- the coordinator's, and every segment's.
+ *****************************************************************************/
+
+CREATE FUNCTION gp_resource.session_state_memory_entries(
+	OUT segid int, OUT sessionid int, OUT vmem_mb int, OUT runaway_status int,
+	OUT qe_count int, OUT active_qe_count int, OUT dirty_qe_count int,
+	OUT runaway_vmem_mb int, OUT runaway_command_cnt int,
+	OUT idle_start timestamptz)
+RETURNS SETOF record
+AS 'MODULE_PATHNAME', 'gp_resource_session_state_memory_entries'
+LANGUAGE C VOLATILE;
+
+CREATE FUNCTION gp_toolkit.session_state_memory_entries_f_on_master()
+RETURNS SETOF record
+AS 'MODULE_PATHNAME', 'gp_resource_session_state_memory_entries'
+LANGUAGE C VOLATILE;
+
+/* PL/pgSQL, whose statements are planned as they run: where gp_sql rewrites gp_dist_random() */
+CREATE FUNCTION gp_toolkit.session_state_memory_entries_f_on_segments()
+RETURNS SETOF record
+LANGUAGE plpgsql VOLATILE
+AS $$
+BEGIN
+	RETURN QUERY SELECT (gp_resource.session_state_memory_entries()).*
+				   FROM gp_dist_random('gp_id');
+END
+$$;
+
+GRANT EXECUTE ON FUNCTION gp_toolkit.session_state_memory_entries_f_on_master(),
+	gp_toolkit.session_state_memory_entries_f_on_segments() TO PUBLIC;

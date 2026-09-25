@@ -49,7 +49,8 @@ security               -         17
 postgis                -         16
 dirtable               -         16
 grammar                -         11
+memprot                -         10
 dynamic                -          9
 ao                     -          9
-singlenode_isolation2  orca       6   PASSES=orca
-singlenode_isolation2  planner    6   PASSES=planner
+singlenode_isolation2  orca       9   PASSES=orca
+singlenode_isolation2  planner    7   PASSES=planner
