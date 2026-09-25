@@ -260,7 +260,8 @@ out=$(q 4 "SELECT count(*) FROM t")
 # one of its dbid under the location, a mirror's too, made as the mirror
 # replays its primary's record, which carries the location as the statement
 # gave it (O32; gp_ddl.c).  Every node says the location.  DROP TABLESPACE
-# leaves no link and no file on any node.
+# leaves no link, no file and no directory of a dbid on any node: a mirror
+# removes its own as it replays the DROP, through O32's drop hook.
 mkdir -p "$ROOT/tblspc"
 out=$(q 0 "CREATE TABLESPACE fts_ts LOCATION '$ROOT/tblspc'")
 out2=$(q 0 "CREATE TABLE tt (a int) TABLESPACE fts_ts DISTRIBUTED BY (a);
@@ -285,10 +286,10 @@ for _ in $(seq 150); do
 	[ -z "$left" ] && { gone=1; break; }
 	sleep 0.2
 done
-files=$(find "$ROOT/tblspc" -mindepth 2 | head -3)
+files=$(find "$ROOT/tblspc" -mindepth 1 | sed "s#^$ROOT/tblspc/##" | head -7 | tr '\n' ' ')
 [ -z "$out" ] && [ "$gone" -eq 1 ] && [ -z "$files" ] \
-	&& ok "DROP TABLESPACE, and its redo on the mirrors, leave no link and no file" \
-	|| notok "DROP TABLESPACE on every node, a mirror's too" "$out / links left on: $left / $files"
+	&& ok "DROP TABLESPACE, and its redo on the mirrors, leave no link, no file and no node's directory" \
+	|| notok "DROP TABLESPACE on every node, a mirror's too" "$out / links left on: $left / left under the location: $files"
 
 ###############################################################################
 echo "3. a mirror that stops: its primary's commits wait for it, cancelled or not, until FTS marks it down"

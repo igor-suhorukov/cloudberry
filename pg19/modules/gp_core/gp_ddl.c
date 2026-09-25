@@ -123,6 +123,7 @@ static ProcessUtility_hook_type prev_ProcessUtility = NULL;
 static raw_parser_hook_type prev_raw_parser = NULL;
 static new_oid_hook_type prev_new_oid_hook = NULL;
 static tablespace_location_hook_type prev_tablespace_location_hook = NULL;
+static tablespace_location_drop_hook_type prev_tablespace_location_drop_hook = NULL;
 
 /*
  * Where the OIDs are kept, on either side.  Not a transaction's context: VACUUM
@@ -514,39 +515,45 @@ node_tablespace_location(const char *location, Oid tablespaceoid)
 }
 
 /*
- * The directory a tablespace of that name has here, if it is one
- * node_tablespace_location() made -- the one named for this node's dbid --
- * for DROP TABLESPACE to remove once it has emptied it, as Cloudberry's
- * removes it (destroy_tablespace_directories()).  A node that replays the
- * DROP, a mirror or a standby, runs no statement, and keeps its directory,
- * emptied, where Cloudberry's redo removes it too.
+ * The other half of it: as DROP TABLESPACE removes this node's link to a
+ * tablespace, the directory node_tablespace_location() made -- the one
+ * named for this node's dbid -- goes too, emptied, as Cloudberry's
+ * destroy_tablespace_directories() removes it.  PostgreSQL calls it through
+ * O32 wherever it removes the link: as a node runs the statement, and as a
+ * mirror or a standby replays its record -- so no node keeps its directory.
+ * A link to anything else, a tablespace made before gp_core was loaded, is
+ * PostgreSQL's alone, and a directory with anything else in it is left;
+ * one that cannot be removed is said in a WARNING, or in redo a LOG, where
+ * Cloudberry fails the DROP: the tablespace is gone either way.
  */
-static char *
-tablespace_dbid_directory(DropTableSpaceStmt *stmt)
+static void
+node_tablespace_location_drop(const char *linkloc, Oid tablespaceoid, bool redo)
 {
-	char		link[MAXPGPATH];
 	char		target[MAXPGPATH];
 	char		suffix[32];
 	ssize_t		len;
-	Oid			spcoid = get_tablespace_oid(stmt->tablespacename, true);
 
-	if (!OidIsValid(spcoid) || GpClusterIsSingleNode())
-		return NULL;
-	snprintf(link, sizeof(link), "pg_tblspc/%u", spcoid);
-	len = readlink(link, target, sizeof(target) - 1);
+	if (prev_tablespace_location_drop_hook)
+		prev_tablespace_location_drop_hook(linkloc, tablespaceoid, redo);
+
+	len = readlink(linkloc, target, sizeof(target) - 1);
 	if (len < 0)
-		return NULL;
+		return;					/* the link's own trouble is PostgreSQL's */
 	target[len] = '\0';
 	snprintf(suffix, sizeof(suffix), "/%d", GpClusterDbid());
 	if (len <= strlen(suffix) || strcmp(target + len - strlen(suffix), suffix) != 0)
-		return NULL;
-	return pstrdup(target);
+		return;
+	if (rmdir(target) < 0 && errno != ENOENT && errno != ENOTEMPTY &&
+		errno != EEXIST)
+		ereport(redo ? LOG : WARNING,
+				(errcode_for_file_access(),
+				 errmsg("could not remove directory \"%s\": %m", target)));
 }
 
 /*
  * Run a tablespace's statement here: CREATE TABLESPACE in this node's
  * directory, and, on a segment, an in-place one as the coordinator allowed
- * it; DROP TABLESPACE, and then the directory of this node's.
+ * it.
  */
 static void
 run_tablespace_statement(PlannedStmt *pstmt, const char *queryString,
@@ -573,15 +580,6 @@ run_tablespace_statement(PlannedStmt *pstmt, const char *queryString,
 							queryEnv, dest, qc);
 		if (nestlevel >= 0)
 			AtEOXact_GUC(true, nestlevel);
-	}
-	else if (IsA(parsetree, DropTableSpaceStmt))
-	{
-		char	   *dir = tablespace_dbid_directory((DropTableSpaceStmt *) parsetree);
-
-		next_ProcessUtility(pstmt, queryString, readOnlyTree, context,
-							params, queryEnv, dest, qc);
-		if (dir != NULL)
-			(void) rmdir(dir);
 	}
 	else
 		next_ProcessUtility(pstmt, queryString, readOnlyTree, context,
@@ -1076,6 +1074,8 @@ GpDdlInit(void)
 
 	prev_tablespace_location_hook = tablespace_location_hook;
 	tablespace_location_hook = node_tablespace_location;
+	prev_tablespace_location_drop_hook = tablespace_location_drop_hook;
+	tablespace_location_drop_hook = node_tablespace_location_drop;
 
 	RegisterXactCallback(gp_ddl_xact_callback, NULL);
 }
