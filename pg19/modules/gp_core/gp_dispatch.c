@@ -67,6 +67,8 @@
  */
 #include "postgres.h"
 
+#include <ctype.h>
+
 #include "access/htup_details.h"
 #include "access/table.h"
 #include "access/transam.h"
@@ -186,6 +188,11 @@ static const char *const synced_settings[] = {
 	"lc_numeric",
 	"lc_time",
 	/*
+	 * which messages a segment sends: a LOG one too where the client asks
+	 * for it, as Cloudberry's segments send it (segment_notice_receiver())
+	 */
+	"client_min_messages",
+	/*
 	 * gp_ao's, which a segment's scans and VACUUM read -- a module's setting
 	 * is sent where the module is loaded, and passed over where it is not
 	 */
@@ -215,6 +222,21 @@ static const char *const synced_settings[] = {
 	"gp.interconnect_default_rtt",
 	"gp.udpic_dropacks_percent",
 	"gp.udpic_dropxmit_percent",
+	/* PAX's, which a segment's scans and writers read */
+	"gp.enable_predicate_pushdown",
+	"pax.enable_debug",
+	"pax.enable_sparse_filter",
+	"pax.enable_row_filter",
+	"pax.scan_reuse_buffer_size",
+	"pax.max_tuples_per_group",
+	"pax.max_tuples_per_file",
+	"pax.max_size_per_file",
+	"pax.enable_toast",
+	"pax.min_size_of_compress_toast",
+	"pax.min_size_of_external_toast",
+	"pax.default_storage_format",
+	"pax.bloom_filter_work_memory_bytes",
+	"pax.log_filter_tree",
 };
 
 #define NUM_SYNCED_SETTINGS	lengthof(synced_settings)
@@ -558,7 +580,8 @@ gang_connect(void)
 		 * A segment in recovery is tried again, gp.gang_creation_retry_count
 		 * times, gp.gang_creation_retry_timer apart, as Cloudberry's dispatcher
 		 * tries one in reset or recovery: one restarting refuses the
-		 * connection, and a mirror FTS promoted, a hot standby until the
+		 * connection, or closes it as its postmaster ends the backend it had
+		 * started for it, and a mirror FTS promoted, a hot standby until the
 		 * promotion takes, takes it and says so (in_hot_standby), and could
 		 * not write.
 		 */
@@ -582,7 +605,8 @@ gang_connect(void)
 			in_recovery = PQstatus(conn) == CONNECTION_OK ||
 				strstr(msg, "the database system is starting up") != NULL ||
 				strstr(msg, "the database system is in recovery mode") != NULL ||
-				strstr(msg, "the database system is not yet accepting connections") != NULL;
+				strstr(msg, "the database system is not yet accepting connections") != NULL ||
+				strstr(msg, "server closed the connection unexpectedly") != NULL;
 			if (conn != NULL)
 				libpqsrv_disconnect(conn);
 			conn = NULL;
@@ -778,6 +802,17 @@ GpDispatchAddNoticeFilter(GpNoticeFilter filter)
 	notice_filters[n_notice_filters++] = filter;
 }
 
+/* s less its trailing whitespace, in place; s. */
+static char *
+strip_trailing_space(char *s)
+{
+	size_t		len = strlen(s);
+
+	while (len > 0 && isspace((unsigned char) s[len - 1]))
+		s[--len] = '\0';
+	return s;
+}
+
 /*
  * libpq calls it with its own PGresult, not the wrapper that libpq-be-fe.h's
  * macros put in the name's place, so they are set aside around it, as
@@ -804,8 +839,19 @@ segment_notice_receiver(void *arg, const struct pg_result *res)
 		elevel = WARNING;
 	else if (strcmp(severity, "INFO") == 0)
 		elevel = INFO;
+	else if (strcmp(severity, "LOG") == 0)
+	{
+		/*
+		 * A LOG the segment sent its client, as it does where the client's
+		 * client_min_messages, which it is sent, asks for LOG: the client's,
+		 * as Cloudberry's coordinator passes it on -- a table access method's
+		 * account of its scan, as PAX's.  The coordinator's own log keeps a
+		 * copy, as it keeps the coordinator's own LOG messages.
+		 */
+		elevel = LOG;
+	}
 	else
-		return;					/* LOG and DEBUG are the segment's own log's */
+		return;					/* DEBUG is the segment's own log's */
 
 	fields[0] = PQresultErrorField(res, PG_DIAG_MESSAGE_PRIMARY);
 	fields[1] = PQresultErrorField(res, PG_DIAG_MESSAGE_DETAIL);
@@ -836,12 +882,21 @@ segment_notice_receiver(void *arg, const struct pg_result *res)
 	for (int i = 0; i < 3; i++)
 	{
 		char	  **dest = (i == 0) ? &n->message : (i == 1) ? &n->detail : &n->hint;
+		size_t		len;
 
 		if (fields[i] == NULL)
 			continue;
 		strcpy(p, fields[i]);
 		*dest = p;
-		p += strlen(fields[i]) + 1;
+		len = strlen(fields[i]);
+		p += len + 1;
+
+		/*
+		 * Less its trailing whitespace, as Cloudberry's segment sends a message
+		 * (cdb_tidy_message()): a message of several lines, which ends in a
+		 * newline, ends at its last.
+		 */
+		strip_trailing_space(*dest);
 	}
 
 	*notices_tail = n;
@@ -1059,16 +1114,17 @@ collect_error(List **errors, int content, PGresult *res, PGconn *conn,
 		if (field == NULL)
 			field = PQerrorMessage(conn);
 	}
-	err->message = pstrdup(field ? field : "unknown error");
-	/* libpq's connection-level message ends in a newline; a message does not. */
-	if (err->message[0] != '\0' &&
-		err->message[strlen(err->message) - 1] == '\n')
-		err->message[strlen(err->message) - 1] = '\0';
+	/*
+	 * Less its trailing whitespace, as Cloudberry's segment sends an error
+	 * (cdb_tidy_message()), and as libpq's connection-level message ends in
+	 * a newline, which a message does not.
+	 */
+	err->message = strip_trailing_space(pstrdup(field ? field : "unknown error"));
 
 	field = res ? PQresultErrorField(res, PG_DIAG_MESSAGE_DETAIL) : NULL;
-	err->detail = field ? pstrdup(field) : NULL;
+	err->detail = field ? strip_trailing_space(pstrdup(field)) : NULL;
 	field = res ? PQresultErrorField(res, PG_DIAG_MESSAGE_HINT) : NULL;
-	err->hint = field ? pstrdup(field) : NULL;
+	err->hint = field ? strip_trailing_space(pstrdup(field)) : NULL;
 	field = res ? PQresultErrorField(res, PG_DIAG_CONTEXT) : NULL;
 	err->context = field ? pstrdup(field) : NULL;
 
