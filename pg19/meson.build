@@ -43,9 +43,9 @@ project('cloudberry-pg19', 'c',
 
 cc = meson.get_compiler('c')
 
-# ORCA is C++.  Ask for the language only when it is being built, so that a
-# build with -Dorca=false needs no C++ compiler at all.
-if get_option('orca')
+# ORCA and PAX are C++.  Ask for the language only when one of them is being
+# built, so that a build without both needs no C++ compiler at all.
+if get_option('orca') or get_option('pax')
   add_languages('cpp', native: false, required: true)
   cpp = meson.get_compiler('cpp')
 endif
@@ -242,6 +242,23 @@ if get_option('orca')
 endif
 
 ###############################################################################
+# PAX
+#
+# Built before the module table too: the pax module's entry is what comes out
+# of it -- Cloudberry's contrib/pax_storage, compiled where it is but for the
+# port's copies of the files that had to change.  See pax/meson.build.
+###############################################################################
+
+pax_sources = []
+pax_cpp_args = []
+pax_deps = []
+pax_inc = []
+
+if get_option('pax')
+  subdir('pax')
+endif
+
+###############################################################################
 # The modules
 #
 #   preload   this module may only be loaded through shared_preload_libraries
@@ -352,8 +369,15 @@ modules = [
     'c_args': zstd_dep.found() ? ['-DGP_AO_HAVE_ZSTD'] : [],
   },
   {
-    'name': 'pax', 'preload': true, 'extension': true, 'build': true,
-    'sources': files('modules/pax/pax.c'),
+    # PAX, which is C++: Cloudberry's contrib/pax_storage and the port's
+    # copies of the files of it that had to change (pax/meson.build).
+    'name': 'pax', 'preload': true, 'extension': true, 'build': get_option('pax'),
+    'sources': files('modules/pax/pax.c', 'modules/pax/pax_catalog.c',
+                     'modules/pax/pax_cbcore.c',
+                     'modules/pax/pax_numeric.c') + pax_sources,
+    'cpp_args': pax_cpp_args,
+    'dependencies': pax_deps,
+    'include_directories': pax_inc,
   },
   {
     'name': 'gp_tde', 'preload': true, 'extension': true, 'build': get_option('tde'),

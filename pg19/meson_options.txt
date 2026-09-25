@@ -27,6 +27,9 @@ option('orca', type: 'boolean', value: true,
 option('orca_debug', type: 'feature', value: 'auto',
        description: 'ORCA\'s own debug checks, GPOS_DEBUG; auto: where the server checks its assertions, as Cloudberry\'s --enable-cassert')
 
+option('pax', type: 'boolean', value: true,
+       description: 'Build pax, Cloudberry\'s PAX table access method (C++; needs protobuf and liburing)')
+
 option('udp2', type: 'boolean', value: false,
        description: 'Build the udp2 interconnect transport (decision 6: after it stabilises)')
 

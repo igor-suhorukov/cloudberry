@@ -1,0 +1,101 @@
+# The sources of Cloudberry's PAX (contrib/pax_storage/src/cpp) that make up
+# the module, as its cmake/pax.cmake lists them for pax.so with the PAX
+# catalog and without the manifest API and the vectorization engine's
+# parallel scan.  A path compiles from the port's copy under pg19/pax/src
+# where there is one, and from Cloudberry's tree otherwise (meson.build).
+#
+# Left out: storage/orc/orc_dump_reader.cpp and storage/micro_partition_udf.cc,
+# the dump_pax_file_* functions, which no script of PAX's creates, and which
+# print through tabulate, a git submodule of Cloudberry's that its tree, and
+# so the image, does not carry.
+access/pax_access_handle.cc
+access/pax_access_method_internal.cc
+access/paxc_rel_options.cc
+access/pax_deleter.cc
+access/pax_dml_state.cc
+access/pax_inserter.cc
+access/pax_scanner.cc
+access/pax_table_cluster.cc
+access/pax_updater.cc
+access/pax_visimap.cc
+catalog/pax_aux_table.cc
+catalog/pax_fastsequence.cc
+catalog/pax_manifest.cc
+catalog/pg_pax_tables.cc
+clustering/clustering.cc
+clustering/index_clustering.cc
+clustering/lexical_clustering.cc
+clustering/pax_clustering_reader.cc
+clustering/pax_clustering_writer.cc
+clustering/sorter_index.cc
+clustering/sorter_tuple.cc
+clustering/zorder_clustering.cc
+clustering/zorder_utils.cc
+comm/bitmap.cc
+comm/bloomfilter.cc
+comm/byte_buffer.cc
+comm/cbdb_wrappers.cc
+comm/fast_io.cc
+comm/guc.cc
+comm/paxc_wrappers.cc
+comm/pax_memory.cc
+comm/pax_resource.cc
+comm/vec_numeric.cc
+exceptions/CException.cc
+storage/columns/pax_column.cc
+storage/columns/pax_columns.cc
+storage/columns/pax_column_traits.cc
+storage/columns/pax_compress.cc
+storage/columns/pax_decoding.cc
+storage/columns/pax_delta_encoding.cc
+storage/columns/pax_dict_encoding.cc
+storage/columns/pax_encoding.cc
+storage/columns/pax_encoding_column.cc
+storage/columns/pax_encoding_non_fixed_column.cc
+storage/columns/pax_encoding_utils.cc
+storage/columns/pax_rlev2_decoding.cc
+storage/columns/pax_rlev2_encoding.cc
+storage/columns/pax_vec_bitpacked_column.cc
+storage/columns/pax_vec_bpchar_column.cc
+storage/columns/pax_vec_column.cc
+storage/columns/pax_vec_encoding_column.cc
+storage/columns/pax_vec_numeric_column.cc
+storage/file_system.cc
+storage/filter/pax_filter.cc
+storage/filter/pax_row_filter.cc
+storage/filter/pax_sparse_filter.cc
+storage/filter/pax_sparse_pg_path.cc
+storage/filter/pax_sparse_vec_path.cc
+storage/local_file_system.cc
+storage/micro_partition.cc
+storage/micro_partition_file_factory.cc
+storage/micro_partition_iterator.cc
+storage/micro_partition_metadata.cc
+storage/micro_partition_row_filter_reader.cc
+storage/micro_partition_stats.cc
+storage/micro_partition_stats_updater.cc
+storage/oper/pax_oper.cc
+storage/oper/pax_oper_udf.cc
+storage/oper/pax_stats.cc
+storage/orc/orc_format_reader.cc
+storage/orc/orc_group.cc
+storage/orc/orc_reader.cc
+storage/orc/orc_type.cc
+storage/orc/orc_vec_group.cc
+storage/orc/orc_writer.cc
+storage/pax_buffer.cc
+storage/pax.cc
+storage/paxc_smgr.cc
+storage/pax_itemptr.cc
+storage/proto/protobuf_stream.cc
+storage/strategy.cc
+storage/toast/pax_toast.cc
+storage/vec/arrow_wrapper.cc
+storage/vec/pax_porc_adpater.cc
+storage/vec/pax_porc_vec_adpater.cc
+storage/vec/pax_vec_adapter.cc
+storage/vec/pax_vec_comm.cc
+storage/vec/pax_vec_reader.cc
+storage/wal/paxc_desc.c
+storage/wal/paxc_wal.cc
+storage/wal/pax_wal.cc
