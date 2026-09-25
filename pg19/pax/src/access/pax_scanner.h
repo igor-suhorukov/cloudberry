@@ -33,7 +33,9 @@
  *     table's layout translated to PAX's (pax_tid.h);
  *   - gp_enable_predicate_pushdown is the port's gp.enable_predicate_pushdown;
  *   - the catalog snapshot a scan of SnapshotAny reads the aux table with is
- *     registered while the scan runs, as PostgreSQL 19 checks.
+ *     registered while the scan runs, as PostgreSQL 19 checks;
+ *   - an index fetch's descriptor may be kept between the fetches of one
+ *     query, a row fetched by its TID (Rebind()).
  *-------------------------------------------------------------------------
  */
 
@@ -65,6 +67,9 @@ class PaxIndexScanDesc final {
 
   // release internal reader
   void Release();
+  // the table's relation as the caller has it open now, for a descriptor
+  // kept between its fetches
+  inline void Rebind(Relation rel) { base_.rel = rel; }
   inline IndexFetchTableData *ToBase() { return &base_; }
   inline Relation GetRelation() { return base_.rel; }
   static inline PaxIndexScanDesc *FromBase(IndexFetchTableData *base) {

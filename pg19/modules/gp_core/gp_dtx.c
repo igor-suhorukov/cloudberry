@@ -1393,6 +1393,17 @@ dtx_report_xid(void)
 }
 
 /*
+ * The same, for a module whose ProcessUtility hook runs a statement itself,
+ * rather than passing it on down to gp_core's (PAX's CLUSTER by its
+ * cluster_columns): the coordinator learns from it whether this part wrote.
+ */
+void
+GpDtxReportXid(void)
+{
+	dtx_report_xid();
+}
+
+/*
  * gp.dtx_depends, as this part commits in one phase or prepares: the
  * coordinator transactions whose one-phase parts have committed here and are
  * still in the map, which a transaction here may have seen committed while a

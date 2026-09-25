@@ -36,9 +36,27 @@ RETURNS cstring
 AS 'MODULE_PATHNAME', 'MicroPartitionStatsOutput'
 LANGUAGE C STRICT IMMUTABLE;
 
+/*
+ * In binary, the value's bytes, as bytea's are sent: its text is a summary
+ * PAX does not read back, and the rows a segment sends the coordinator,
+ * pax_get_catalog_rows()'s, travel in binary where every column can.
+ * Cloudberry's type has neither.
+ */
+CREATE FUNCTION pax.paxauxstats_recv(internal)
+RETURNS pax.paxauxstats
+AS 'bytearecv'
+LANGUAGE internal STRICT IMMUTABLE;
+
+CREATE FUNCTION pax.paxauxstats_send(pax.paxauxstats)
+RETURNS bytea
+AS 'byteasend'
+LANGUAGE internal STRICT IMMUTABLE;
+
 CREATE TYPE pax.paxauxstats (
     INPUT = pax.paxauxstats_in,
     OUTPUT = pax.paxauxstats_out,
+    RECEIVE = pax.paxauxstats_recv,
+    SEND = pax.paxauxstats_send,
     INTERNALLENGTH = VARIABLE,
     ALIGNMENT = int4,
     STORAGE = extended

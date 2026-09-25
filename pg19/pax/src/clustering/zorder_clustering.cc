@@ -25,7 +25,7 @@
  *
  * Ported to PostgreSQL 19: a tuple descriptor's attributes are reached
  * through TupleDescAttr(), PostgreSQL 19's TupleDescData having no attrs[]
- * array.
+ * array, and one made here is finalized before it is used.
  *-------------------------------------------------------------------------
  */
 
@@ -78,6 +78,7 @@ void ZOrderClustering::Clustering(ClusteringDataReader *reader,
     }
     TupleDescInitEntry(tup_desc, (AttrNumber)zorder_nattrs, "zorder_value",
                        BYTEAOID, -1, 0);
+    TupleDescFinalize(tup_desc);
   }
   CBDB_WRAP_END;
 

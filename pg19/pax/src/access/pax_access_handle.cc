@@ -28,7 +28,9 @@
  *     TableAmExtRoutine the module registers (O13) -- its options (O14), the
  *     columns a scan reads (O15, where Cloudberry began the scan with the
  *     plan node), a unique index's probe (O16), its size (O19) and UPDATE's
- *     old row from the plan (O20), PAX fetching no row by TID;
+ *     old row from the plan (O20);
+ *   - a row is fetched by its TID, as gp_core's split update fetches the old
+ *     row, where Cloudberry's Split took it from the plan;
  *   - a TID crosses the method's boundary translated between PAX's layout,
  *     which its own code keeps, and the table's (pax_tid.h);
  *   - Cloudberry's executor called dml_init and dml_fini, and PostgreSQL 19's
@@ -76,6 +78,7 @@
 
 extern "C" {
 #include "gp_dispatch.h"
+#include "gp_dtx.h"
 }
 
 #define NOT_IMPLEMENTED_YET                        \
@@ -187,7 +190,7 @@ void CCPaxAccessMethod::IndexFetchEnd(IndexFetchTableData *scan) {
 
     pax::common::ForgetResourceCallback(pax::ReleaseTopObject<PaxIndexScanDesc>,
                                         PointerGetDatum(desc));
-    PAX_DELETE(desc);
+    pax::PAX_DELETE(desc);
   }
   CBDB_CATCH_DEFAULT();
   CBDB_FINALLY({});
@@ -526,11 +529,56 @@ TM_Result PaxAccessMethod::TupleLock(Relation /*relation*/, ItemPointer /*tid*/,
   return TM_Ok;
 }
 
-bool PaxAccessMethod::TupleFetchRowVersion(Relation /*relation*/,
-                                           ItemPointer /*tid*/,
-                                           Snapshot /*snapshot*/,
-                                           TupleTableSlot * /*slot*/) {
-  NOT_IMPLEMENTED_YET;
+// A row by its TID, as the DELETE of a split update fetches the old row it
+// sends back to the coordinator (gp_core's gp_split_delete()), where
+// Cloudberry's Split took it from the plan: through the index fetch's path,
+// its descriptor kept while one query fetches from one table with one
+// snapshot, so that a file is opened once for the rows it has.
+struct PaxFetchCache {
+  Oid relid = InvalidOid;
+  Snapshot snapshot = nullptr;
+  pax::PaxIndexScanDesc *desc = nullptr;
+};
+static PaxFetchCache fetch_cache;
+
+void PaxFetchCacheReset() {
+  auto desc = fetch_cache.desc;
+
+  fetch_cache = PaxFetchCache();
+  if (desc) {
+    desc->Release();
+    pax::PAX_DELETE(desc);
+  }
+}
+
+bool PaxAccessMethod::TupleFetchRowVersion(Relation relation, ItemPointer tid,
+                                           Snapshot snapshot,
+                                           TupleTableSlot *slot) {
+  CBDB_TRY();
+  {
+    ItemPointerData internal =
+        PaxTidFromTable(*tid, cbdb::PaxTableFileBits(relation));
+
+    if (fetch_cache.desc == nullptr ||
+        fetch_cache.relid != RelationGetRelid(relation) ||
+        fetch_cache.snapshot != snapshot) {
+      PaxFetchCacheReset();
+      fetch_cache.desc = pax::PAX_NEW<pax::PaxIndexScanDesc>(relation);
+      fetch_cache.relid = RelationGetRelid(relation);
+      fetch_cache.snapshot = snapshot;
+    }
+    fetch_cache.desc->Rebind(relation);
+    if (fetch_cache.desc->FetchTuple(&internal, snapshot, slot, nullptr,
+                                     nullptr)) {
+      slot->tts_tid = *tid;
+      slot->tts_tableOid = RelationGetRelid(relation);
+      return true;
+    }
+    return false;
+  }
+  CBDB_CATCH_DEFAULT();
+  CBDB_FINALLY({});
+  CBDB_END_TRY();
   return false;
 }
 
@@ -880,6 +928,10 @@ static void cluster_pax_rel_on_nodes(Relation rel) {
   if (pushed) PushActiveSnapshot(GetTransactionSnapshot());
   cluster_pax_rel(rel, GetActiveSnapshot());
   if (pushed) PopActiveSnapshot();
+
+  // gp_core's hook, which this statement does not reach, tells the
+  // coordinator whether this segment's part wrote
+  GpDtxReportXid();
 }
 
 static void paxProcessUtility(PlannedStmt *pstmt, const char *queryString,
@@ -916,9 +968,11 @@ static void paxProcessUtility(PlannedStmt *pstmt, const char *queryString,
           // cluster table using indexname,we should check if
           // relation_has_zorder_clusted
           if (stmt->indexname && has_cluster_columns) {
+            // without the space Cloudberry's elog took off the message's
+            // end as it sent it (cdb_tidy_message())
             elog(ERROR,
                  "cannot using index to cluster table which has "
-                 "cluster-columns ");
+                 "cluster-columns");
           }
 
           if (has_cluster_columns) {
@@ -990,7 +1044,10 @@ static void paxProcessUtility(PlannedStmt *pstmt, const char *queryString,
   PG_END_TRY();
 
   CBDB_TRY();
-  { pax::CPaxDmlStateLocal::Instance()->FinishOwned(pstmt); }
+  {
+    paxc::PaxFetchCacheReset();
+    pax::CPaxDmlStateLocal::Instance()->FinishOwned(pstmt);
+  }
   CBDB_CATCH_DEFAULT();
   CBDB_FINALLY({});
   CBDB_END_TRY();
@@ -1015,7 +1072,10 @@ static void PaxExecutorRun(QueryDesc *queryDesc, ScanDirection direction,
 
 static void PaxExecutorFinish(QueryDesc *queryDesc) {
   CBDB_TRY();
-  { pax::CPaxDmlStateLocal::Instance()->FinishOwned(queryDesc); }
+  {
+    paxc::PaxFetchCacheReset();
+    pax::CPaxDmlStateLocal::Instance()->FinishOwned(queryDesc);
+  }
   CBDB_CATCH_DEFAULT();
   CBDB_FINALLY({});
   CBDB_END_TRY();
@@ -1052,6 +1112,7 @@ static void PaxXactCallback(XactEvent event, void * /*arg*/) {
     case XACT_EVENT_PARALLEL_ABORT:
     case XACT_EVENT_PREPARE:
       try {
+        paxc::PaxFetchCacheReset();
         pax::CPaxDmlStateLocal::Instance()->Forget(InvalidSubTransactionId);
       } catch (...) {
       }
@@ -1064,8 +1125,10 @@ static void PaxXactCallback(XactEvent event, void * /*arg*/) {
 static void PaxSubXactCallback(SubXactEvent event, SubTransactionId mySubid,
                                SubTransactionId parentSubid, void * /*arg*/) {
   try {
-    if (event == SUBXACT_EVENT_ABORT_SUB)
+    if (event == SUBXACT_EVENT_ABORT_SUB) {
+      paxc::PaxFetchCacheReset();
       pax::CPaxDmlStateLocal::Instance()->Forget(mySubid);
+    }
     else if (event == SUBXACT_EVENT_COMMIT_SUB)
       pax::CPaxDmlStateLocal::Instance()->Reparent(mySubid, parentSubid);
   } catch (...) {

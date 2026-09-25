@@ -25,11 +25,20 @@
  *
  * Ported to PostgreSQL 19: without CPaxAuxSwapRelationFiles(), Cloudberry's
  * swap_relation_files callback, which PostgreSQL 19 has not; a table's
- * catalog follows its storage instead (catalog/pg_pax_tables.cc).
+ * catalog follows its storage instead (catalog/pg_pax_tables.cc).  A tuple
+ * descriptor made here is finalized, as PostgreSQL 19 asks of one before it
+ * is used.  pax_get_catalog_rows(), whose rows are each segment's, asks
+ * gp_core to run it on them where it is called on a cluster's coordinator,
+ * as Cloudberry's planner moved a call of an EXECUTE ON ALL SEGMENTS
+ * function (GpDispatchFunctionToSegments()).
  *-------------------------------------------------------------------------
  */
 
 #include "catalog/pax_catalog.h"
+
+extern "C" {
+#include "gp_dispatch.h"
+}
 
 #include "access/pax_visimap.h"
 #include "comm/cbdb_wrappers.h"
@@ -222,6 +231,7 @@ Datum pax_get_catalog_rows(PG_FUNCTION_ARGS) {
                       PAX_AUX_PTEXISTEXTTOAST, BOOLOID, -1, 0);
     TupleDescInitEntry(tupdesc, (AttrNumber)8,
                       PAX_AUX_PTISCLUSTERED, BOOLOID, -1, 0);
+    TupleDescFinalize(tupdesc);
 
     ctx = (struct fetch_catalog_rows_context *)palloc(sizeof(*ctx));
     ctx->relation = table_open(relid, AccessShareLock);
@@ -625,7 +635,11 @@ Datum pax_get_catalog_rows(PG_FUNCTION_ARGS) {
   FuncCallContext *fctx;
   paxc::ScanAuxContext *sctx;
   HeapTuple tuple;
- 
+
+  // on a cluster's coordinator: each segment's rows
+  if (SRF_IS_FIRSTCALL() && GpDispatchFunctionToSegments(fcinfo))
+    return (Datum)0;
+
   if (SRF_IS_FIRSTCALL()) {
     MemoryContext oldctx;
     TupleDesc tupdesc;
@@ -657,6 +671,7 @@ Datum pax_get_catalog_rows(PG_FUNCTION_ARGS) {
                       PAX_AUX_PTEXISTEXTTOAST, BOOLOID, -1, 0);
     TupleDescInitEntry(tupdesc, (AttrNumber)8,
                       PAX_AUX_PTISCLUSTERED, BOOLOID, -1, 0);
+    TupleDescFinalize(tupdesc);
 
     sctx = (paxc::ScanAuxContext *)palloc(sizeof(*sctx));
     *sctx = scan_context;

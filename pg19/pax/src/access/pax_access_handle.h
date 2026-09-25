@@ -93,6 +93,10 @@ class PaxAccessMethod final {
   static bytea *AmOptions(Datum reloptions, char relkind, bool validate);
 };
 
+// The descriptor TupleFetchRowVersion keeps, let go where a statement or a
+// (sub)transaction ends.
+void PaxFetchCacheReset();
+
 }  // namespace paxc
 
 namespace pax {

@@ -91,6 +91,13 @@ extern char *GpDtxSnapshotString(Snapshot snapshot);
 extern void GpDtxWakeRecovery(void);
 
 /*
+ * A segment: report its part's transaction ID to the coordinator, as
+ * gp_core's hooks do after each statement -- for a module's ProcessUtility
+ * hook that runs a statement itself rather than passing it on to gp_core's.
+ */
+extern void GpDtxReportXid(void);
+
+/*
  * The settings, the segment's hooks and shared memory, and on the
  * coordinator the recovery process; from gp_core's _PG_init.  After
  * GpMotionInit(): a fragment's snapshot is made distributed before the

@@ -480,6 +480,8 @@ void PaxTablesFollowStorage(Oid relid) {
     SetRowStorage(rel, &row.tid, owner.spc, owner.filenode, owner.filebits);
     SetRowStorage(rel, &owner.tid, row.spc, row.filenode, row.filebits);
     MoveFastSequence(owner.relid, relid, true);
+    // where Cloudberry's swap has swapped the fast sequences
+    SIMPLE_FAULT_INJECTOR("pax_finish_swap_fast_fastsequence");
   } else {
     // The relation became a PAX table with the other's storage, which is not
     // one any more: the other's catalog becomes the relation's.
