@@ -222,6 +222,11 @@ static const char *const synced_settings[] = {
 	"gp.interconnect_default_rtt",
 	"gp.udpic_dropacks_percent",
 	"gp.udpic_dropxmit_percent",
+	/*
+	 * gp_resource's, what the coordinator's resource manager says of the
+	 * statement: the weight its queue's priority gives it
+	 */
+	"gp_resource.statement",
 	/* PAX's, which a segment's scans and writers read */
 	"gp.enable_predicate_pushdown",
 	"pax.enable_debug",

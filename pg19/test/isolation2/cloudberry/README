@@ -108,6 +108,17 @@ reader_waits_for_lock, in the planner pass alone
   finds no row.  Under ORCA the reader and the writer each wait, and the
   test passes.
 
+resource_queue  what pg_stat_activity and pg_locks say of a backend that
+  waits for a resource queue's slot: its wait event, which gp_resource
+  names ResourceQueue, is an extension's, of type Extension, where
+  Cloudberry's has a type of its own; and pg_locks lists no queue.
+  Cloudberry's queue is a lock of a lock method of its own, and PostgreSQL
+  19's lock methods are fixed, so a slot is held and waited for in
+  gp_resource's shared memory (resqueue.c), which
+  gp_toolkit.gp_locks_on_resqueue reads.  The waits themselves -- two
+  EXECUTEs held until the cursor's transaction ends, then each let through
+  -- are Cloudberry's.
+
 starve_case
   PostgreSQL's words for the error of function_starve_volatile(): it runs in
   the coordinator's own backend, where Cloudberry runs it in an entry-db

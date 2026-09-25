@@ -1,0 +1,27 @@
+@@
+- resource_scheduler 
+---------------------
++ gp.resource_scheduler 
++-----------------------
+@@
+- gp_inject_fault 
+------------------
+- Success:
+-(1 row)
+-
++ERROR:  must be superuser to inject a fault
+@@
+-ERROR:  out of shared memory adding portal increments
+-HINT:  You may need to increase max_resource_portals_per_transaction.
+-SELECT gp_inject_fault('res_increment_add_oosm', 'reset', 1);
+- gp_inject_fault 
+------------------
+- Success:
++ i 
++---
++ 1
+@@
++SELECT gp_inject_fault('res_increment_add_oosm', 'reset', 1);
++ERROR:  must be superuser to inject a fault
+@@
+-NOTICE:  SPI memory reservation 

@@ -1,21 +1,22 @@
 # Part of Cloudberry's greenplum_schedule (src/test/regress), as the port
 # runs it on a coordinator and three segments: the tests of the schedule
 # that bear on M2 -- dispatch, distribution, Motions, joins, aggregates,
-# subqueries, partitions, DML -- and on M5's append-optimized and
-# column-oriented tables and external tables, in the schedule's order.
+# subqueries, partitions, DML -- on M5's append-optimized and
+# column-oriented tables and external tables, and on M6's resource queues
+# and groups, in the schedule's order.
 #
 #   run   the test runs here, in both passes; cloudberry/ holds a difference
 #         reviewed and kept, where one pass has one
 #   skip  it needs what the port does not have yet: the rest of the line is
 #         the first of Cloudberry's statements it refuses, as the port says
 #
-# The schedule's other tests -- resource queues and groups, fault
-# injection, FTS, the interconnect's settings -- need M6 and M7, and are not
-# listed.
+# The schedule's other tests -- fault injection, FTS, the interconnect's
+# settings -- need M7, and are not listed.
 skip gp_aggregates  relation "aggtest" does not exist
 run  update_gp
 run  triggers_gp
 run  returning_gp
+run  resource_queue_with_rule
 run  gp_types
 skip gp_index  multiple primary keys for table "tbl_create_index" are not allowed
 run  gp_sort
@@ -40,7 +41,8 @@ run  sublink
 run  olap_setup
 skip complex  type "complex" does not exist; relation "complex_ttbl" does not exist
 skip distributed_transactions  unrecognized configuration parameter "debug_abort_after_distributed_prepared"; unrecognized configuration parameter "debug_dtm_action_segment"
-skip namespace_gp  unrecognized role option "resource"; role "tmp_test_schema_role" does not exist
+skip statement_mem_for_windowagg  function gp_inject_fault(unknown, unknown, smallint) does not exist; DISTINCT is not implemented for window functions
+skip namespace_gp  differs: its comparison of pg_namespace across the nodes finds the pg_temp_N schemas the tests before it leave, which each node makes with an OID of its own
 run  bitmap_index
 run  truncate_gp
 run  indexjoin
@@ -86,6 +88,11 @@ run  aoco_privileges
 run  alter_table_ao
 run  alter_table_set_am
 run  aocs
+run  resource_queue
+run  resource_queue_function
+run  resource_group
+run  resource_group_cpuset
+run  resource_group_gucs
 run  auth_constraint
 run  partition_pruning
 run  expand_table
@@ -101,6 +108,7 @@ skip bfv_olap  cannot copy window "w" because it has a frame clause
 skip bfv_aggregate  argument of ROWS must not contain variables; cannot copy window "w" because it has a frame clause
 run  DML_over_joins
 run  part_external_table
+skip bb_memory_quota  memory quota (M6)
 run  rpt
 run  rpt_joins
 skip bfv_cte  count(*) must be used to call a parameterless aggregate function; type "cte" does not exist
@@ -122,6 +130,7 @@ skip qp_subquery  relation "qp_subquery.v" does not exist; relation "v" does not
 run  qp_left_anti_semi_join
 run  qp_union_intersect
 run  qp_functions
+run  qp_resource_queue
 run  uao_compaction/full
 run  uao_compaction/outdated_partialindex
 run  uao_compaction/drop_column_update

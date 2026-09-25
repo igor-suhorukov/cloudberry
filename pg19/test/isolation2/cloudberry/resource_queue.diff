@@ -1,0 +1,26 @@
+@@
+- ResourceQueue   | ResourceQueue 
++ Extension       | ResourceQueue 
+@@
+- ResourceQueue   | ResourceQueue 
+- ResourceQueue   | ResourceQueue 
++ Extension       | ResourceQueue 
++ Extension       | ResourceQueue 
+@@
+- granted | locktype       | mode          
+----------+----------------+---------------
+- f       | resource queue | ExclusiveLock 
+- f       | resource queue | ExclusiveLock 
+- t       | resource queue | ExclusiveLock 
+-(3 rows)
++ granted | locktype | mode 
++---------+----------+------
++(0 rows)
+@@
+- granted | locktype       | mode          
+----------+----------------+---------------
+- t       | resource queue | ExclusiveLock 
+-(1 row)
++ granted | locktype | mode 
++---------+----------+------
++(0 rows)

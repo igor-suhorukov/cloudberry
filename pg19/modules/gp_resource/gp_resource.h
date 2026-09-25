@@ -168,6 +168,7 @@ extern PGDLLIMPORT int gp_resgroup_memory_policy_auto_fixed_mem;
 extern PGDLLIMPORT bool gp_log_resgroup_memory;
 extern PGDLLIMPORT bool gp_resgroup_debug_wait_queue;
 extern PGDLLIMPORT bool gp_debug_resource_group;
+extern PGDLLIMPORT char *gp_resource_statement;
 
 
 /* Which manager is on */
@@ -239,6 +240,11 @@ extern void ResQueueRoleChanged(Oid roleid);
 extern void ResQueueExecutorStart(struct QueryDesc *queryDesc);
 extern void ResQueueUtilityStart(struct PlannedStmt *pstmt);
 extern int	ResQueueQueryBudgetKB(void);
+extern PGDLLEXPORT bool GpResQueueMemoryLimitInSync(const char *queuename);
+extern int	ResQueuePriorityLookup(const char *priority);
+extern void ResQueuePriorityStart(void);
+extern void ResQueuePriorityDispatch(void);
+extern void ResQueuePriorityEnd(void);
 
 /* resgroup.c: the groups at run time */
 extern PGDLLIMPORT bool gp_resource_group_enable_cgroup_cpuset;

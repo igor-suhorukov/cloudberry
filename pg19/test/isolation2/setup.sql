@@ -12,6 +12,7 @@
 CREATE EXTENSION gp_core;
 CREATE EXTENSION gp_orca;
 CREATE EXTENSION gp_sql;
+CREATE EXTENSION gp_resource;
 CREATE EXTENSION gp_inject_fault;
 
 --

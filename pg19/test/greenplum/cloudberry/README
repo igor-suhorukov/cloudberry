@@ -231,6 +231,18 @@ qp_functions (planner, orca)  PostgreSQL 19's words for a call no function
   a row for tstab among the relations named tst%, a table
   alter_distribution_policy leaves behind, which runs earlier.
 
+resource_queue  SHOW resource_scheduler, whose header is the port's name
+  of it, gp.resource_scheduler, three letters wider.  gp_inject_fault(),
+  which the port's gp_core lets only a superuser call, and the test calls as
+  a role that is not one: so its fault res_increment_add_oosm is not set,
+  and the SELECT that was to fail "out of shared memory adding portal
+  increments" answers -- which it does, fault set, as a superuser sets it.
+  And the NOTICE of the SPI memory reservation of the Result node that
+  calls pg_sleep() in the extended-protocol client's query: Cloudberry
+  reserves an operator's share of the statement's memory for the queries it
+  runs through SPI, and the port's statement runs with its budget as its
+  work_mem, and gives no operator a share of its own.
+
 returning_gp, triggers_gp, update_gp  what Cloudberry refuses on an
   append-optimized table, or on a table another inherits from, and the port
   carries out: DELETE ... RETURNING of an append-optimized table, a row

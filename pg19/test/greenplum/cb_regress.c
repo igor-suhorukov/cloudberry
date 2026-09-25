@@ -46,6 +46,7 @@ PG_MODULE_MAGIC_EXT(
 );
 
 typedef bool (*deny_allows_fn) (const char *rolename, TimestampTz when);
+typedef bool (*queue_in_sync_fn) (const char *queuename);
 
 PG_FUNCTION_INFO_V1(check_auth_time_constraints);
 
@@ -64,4 +65,24 @@ check_auth_time_constraints(PG_FUNCTION_ARGS)
 								   true, NULL);
 
 	PG_RETURN_BOOL(allows(PG_GETARG_CSTRING(0), PG_GETARG_TIMESTAMPTZ(1)));
+}
+
+PG_FUNCTION_INFO_V1(checkResourceQueueMemoryLimits);
+
+/*
+ * checkResourceQueueMemoryLimits(cstring) -> bool: whether a resource queue's
+ * memory limit in shared memory is the one it is defined with, which are
+ * gp_resource's.
+ */
+Datum
+checkResourceQueueMemoryLimits(PG_FUNCTION_ARGS)
+{
+	static queue_in_sync_fn in_sync = NULL;
+
+	if (in_sync == NULL)
+		in_sync = (queue_in_sync_fn)
+			load_external_function("$libdir/gp_resource",
+								   "GpResQueueMemoryLimitInSync", true, NULL);
+
+	PG_RETURN_BOOL(in_sync(PG_GETARG_CSTRING(0)));
 }

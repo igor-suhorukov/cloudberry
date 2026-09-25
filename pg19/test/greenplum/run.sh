@@ -31,7 +31,8 @@
 #
 # Cloudberry's files are changed as the singlenode suite changes them:
 # input/ and output/ .source files converted as Cloudberry's pg_regress
-# converts them, and a setting the port has spelled as the port spells it.
+# converts them, and a setting the port has spelled as the port spells it;
+# and a program of Cloudberry's suite is run from where the port installs it.
 # Each test is compared as Cloudberry's pg_regress compares it: gpdiff.pl,
 # under Cloudberry's init_file and the port's, plans not compared -- the
 # port's plans are ORCA's or the planner's with the port's Motions, and what
@@ -65,7 +66,7 @@ SOCK="$(mktemp -d /tmp/cbg-XXXXXX)"
 EXEC="$(mktemp -d "${HOME:-/var/lib/postgresql}/cb-greenplum-XXXXXX")"
 BASEPORT="${PGPORT:-$((7300 + RANDOM % 200))}"
 NODES=4					# a coordinator and Cloudberry's three segments
-PRELOAD='gp_core,gp_orca,gp_sql,gp_ao,gp_exttable,gp_security'
+PRELOAD='gp_core,gp_orca,gp_sql,gp_ao,gp_exttable,gp_security,gp_resource'
 SECRET="greenplum-schedule-$RANDOM$RANDOM$RANDOM"
 
 port() { echo $((BASEPORT + $1)); }
@@ -118,6 +119,9 @@ for n in $(seq 0 $((NODES - 1))); do
 		# every transaction that writes on a segment is prepared there, and
 		# pg_regress runs up to 20 sessions at once
 		echo "max_prepared_transactions = 64"
+		# what Cloudberry's postgresql.conf.sample sets, and its demo
+		# cluster runs with: a statement's memory is its queue's to give
+		echo "gp.resqueue_memory_policy = 'eager_free'"
 		[ "$n" -eq 0 ] && echo "gp.role = 'dispatch'"
 	} >> "$WORK/node$n/postgresql.auto.conf"
 done
@@ -132,7 +136,11 @@ done
 while read -r name; do
 	short="${name#gp.}"
 	case "$short" in
-		optimizer*|statement_mem|enable_parallel|enable_groupagg|test_print_*)
+		optimizer*|statement_mem|enable_parallel|enable_groupagg|test_print_*|\
+		resource_scheduler|resource_select_only|resource_cleanup_gangs_on_wait|\
+		max_resource_queues|max_resource_portals_per_transaction|max_statement_mem|\
+		debug_resource_group|runaway_detector_activation_percent|\
+		vmem_process_interrupt|explain_memory_verbosity|coredump_on_memerror)
 			cbname="$short" ;;
 		*) cbname="gp_$short" ;;
 	esac
@@ -145,7 +153,13 @@ while read -r name; do
 	case "$cbname" in gp_*)
 		printf 's/^( +)%s( +)$/\\1%s\\2/\n' "$cbname" "$name" ;;
 	esac
+	# and the name for gpconfig, which a test runs by Cloudberry's
+	echo "$cbname $name" >> "$WORK/settings.map"
 done > "$WORK/respell.sed"
+# And a program of Cloudberry's suite that a test runs from the suite's
+# directory, ./extended_protocol_resqueue, is the one the port builds and
+# installs (meson's hook_tests), run from PATH as the diff is.
+echo 's#^[\\]! \./(extended_protocol_resqueue) #\\! \1 #' >> "$WORK/respell.sed"
 
 convert() {
 	sed -e "s#@abs_srcdir@#$CB#g" \
@@ -219,6 +233,18 @@ sed 's/##Version: ##/Apache Cloudberry (the PostgreSQL 19 port)/' \
 # tables are distributed here and say so; with a difference reviewed and
 # kept counted as none (canon.pl, cloudberry/, as the singlenode suite does).
 mkdir -p "$EXEC/bin"
+# gpconfig, as the isolation2 suite's shows a setting (resource_group_gucs)
+cp "$HERE/../isolation2/bin/gpconfig" "$EXEC/bin/"
+# Cloudberry's client, through this: it sets gp_log_resqueue_memory by
+# Cloudberry's name, which a compiled program keeps and respell.sed cannot
+# reach, so the setting is given it by the port's as it connects.
+if [ -x "$BINDIR/extended_protocol_resqueue" ]; then
+	cat > "$EXEC/bin/extended_protocol_resqueue" <<EOF
+#!/bin/bash
+PGOPTIONS="\${PGOPTIONS:-} -c gp.log_resqueue_memory=on" exec "$BINDIR/extended_protocol_resqueue" "\$@"
+EOF
+	chmod +x "$EXEC/bin/extended_protocol_resqueue"
+fi
 cat > "$EXEC/bin/diff" <<EOF
 #!/bin/bash
 n=\$#
@@ -291,6 +317,7 @@ for pass in ${PASSES:-planner orca}; do
 	# the programs, where they start gpfdist from.
 	PATH="$EXEC/bin:$PATH" CB_DIFF_MODE="$pass" PGOPTIONS="-c gp.optimizer=$optimizer" \
 	PG_HOSTNAME=localhost PG_BINDDIR="$BINDIR" \
+	PG_BINDIR="$BINDIR" GP_SETTINGS_MAP="$WORK/settings.map" \
 		"$PG_REGRESS" \
 			--bindir="$BINDIR" \
 			--inputdir="$SN" \

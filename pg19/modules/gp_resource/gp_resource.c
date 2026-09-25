@@ -114,6 +114,12 @@ int			gp_resgroup_memory_policy = RESMANAGER_MEMORY_POLICY_EAGER_FREE;
 int			gp_resgroup_memory_query_fixed_mem = 0;
 int			gp_resgroup_memory_policy_auto_fixed_mem = 100;
 bool		gp_log_resgroup_memory = false;
+
+/*
+ * What the coordinator's resource manager tells a segment of the statement
+ * it dispatches, which gp_core sends with it: "weight=N", its priority's.
+ */
+char	   *gp_resource_statement = NULL;
 bool		gp_resgroup_debug_wait_queue = true;
 bool		gp_debug_resource_group = false;
 
@@ -154,6 +160,17 @@ static bool
 check_max_statement_mem(int *newval, void **extra, GucSource source)
 {
 	return true;
+}
+
+/* gpvars_check_gp_resqueue_priority_default_value(): one of the priorities */
+static bool
+check_priority_default(char **newval, void **extra, GucSource source)
+{
+	if (*newval != NULL && ResQueuePriorityLookup(*newval) > 0)
+		return true;
+	GUC_check_errmsg("invalid value for gp_resqueue_priority_default_value: \"%s\"",
+					 *newval != NULL ? *newval : "");
+	return false;
 }
 
 /*
@@ -243,7 +260,8 @@ define_settings(void)
 	DefineCustomStringVariable("gp.resqueue_priority_default_value",
 							   "Default weight when one cannot be associated with a statement.",
 							   NULL, &gp_resqueue_priority_default_value, "MEDIUM",
-							   PGC_POSTMASTER, 0, NULL, NULL, NULL);
+							   PGC_POSTMASTER, 0, check_priority_default,
+							   NULL, NULL);
 
 	DefineCustomStringVariable("gp.resource_group_cgroup_parent",
 							   "The root of gpdb cgroup hierarchy.",
@@ -305,6 +323,11 @@ define_settings(void)
 							 "Prints resource groups debug logs.",
 							 NULL, &gp_debug_resource_group, false,
 							 PGC_USERSET, 0, NULL, NULL, NULL);
+	DefineCustomStringVariable("gp_resource.statement",
+							   "What the coordinator's resource manager tells a segment of the statement it dispatches.",
+							   NULL, &gp_resource_statement, "",
+							   PGC_USERSET, GUC_NO_SHOW_ALL | GUC_NOT_IN_SAMPLE,
+							   NULL, NULL, NULL);
 }
 
 /* ------------------------------------------------------------------------- */
@@ -412,6 +435,29 @@ forget_budget(QueryDesc *queryDesc)
 }
 
 /*
+ * How deep in statements the backend is: the one a client sent, or the
+ * coordinator dispatched, is the outermost, and one it runs through SPI or
+ * a portal of its own is inside it.  The outermost is the one a queue's
+ * priority is recorded for (ResQueuePriorityStart()), as Cloudberry's
+ * backoff entry is the statement's the backend runs.
+ */
+static int	statement_depth = 0;
+
+static void
+statement_begin(void)
+{
+	if (statement_depth++ == 0)
+		ResQueuePriorityStart();
+}
+
+static void
+statement_end(void)
+{
+	if (--statement_depth == 0)
+		ResQueuePriorityEnd();
+}
+
+/*
  * A query about to run: its queue's slot, where queues are on.  The memory
  * that gives it is its budget, which it runs with as its work_mem.
  */
@@ -425,6 +471,12 @@ gp_resource_ExecutorStart(QueryDesc *queryDesc, int eflags)
 
 		ResQueueExecutorStart(queryDesc);
 		kb = ResQueueQueryBudgetKB();
+		/* what standard_ExecutorStart() logs of it on the coordinator */
+		if (gp_log_resqueue_memory && IsResQueueEnabled() &&
+			gp_resqueue_memory_policy != RESMANAGER_MEMORY_POLICY_NONE &&
+			GpResourceIsDispatcher())
+			ereport(NOTICE,
+					(errmsg("query requested %.0fKB of memory", (double) kb)));
 		if (kb > 0)
 		{
 			MemoryContext oldcxt = MemoryContextSwitchTo(TopMemoryContext);
@@ -436,6 +488,10 @@ gp_resource_ExecutorStart(QueryDesc *queryDesc, int eflags)
 			MemoryContextSwitchTo(oldcxt);
 		}
 	}
+
+	/* before gp_core's hook dispatches it: what the segments are told */
+	if (statement_depth == 0)
+		ResQueuePriorityDispatch();
 
 	if (prev_ExecutorStart)
 		prev_ExecutorStart(queryDesc, eflags);
@@ -469,6 +525,7 @@ gp_resource_ExecutorRun(QueryDesc *queryDesc, ScanDirection direction,
 		work_mem = budget;
 	PG_TRY();
 	{
+		statement_begin();
 		if (prev_ExecutorRun)
 			prev_ExecutorRun(queryDesc, direction, count);
 		else
@@ -477,6 +534,7 @@ gp_resource_ExecutorRun(QueryDesc *queryDesc, ScanDirection direction,
 	PG_FINALLY();
 	{
 		work_mem = saved;
+		statement_end();
 	}
 	PG_END_TRY();
 }
@@ -599,10 +657,10 @@ role_altered(Oid roleid, List *carried)
 }
 
 static void
-gp_resource_ProcessUtility(PlannedStmt *pstmt, const char *queryString,
-						   bool readOnlyTree, ProcessUtilityContext context,
-						   ParamListInfo params, QueryEnvironment *queryEnv,
-						   DestReceiver *dest, QueryCompletion *qc)
+resource_process_utility(PlannedStmt *pstmt, const char *queryString,
+						 bool readOnlyTree, ProcessUtilityContext context,
+						 ParamListInfo params, QueryEnvironment *queryEnv,
+						 DestReceiver *dest, QueryCompletion *qc)
 {
 	Node	   *parsetree = pstmt->utilityStmt;
 	List	   *carried = NIL;
@@ -666,6 +724,25 @@ gp_resource_ProcessUtility(PlannedStmt *pstmt, const char *queryString,
 		CommandCounterIncrement();
 		role_altered(roleid, carried);
 	}
+}
+
+static void
+gp_resource_ProcessUtility(PlannedStmt *pstmt, const char *queryString,
+						   bool readOnlyTree, ProcessUtilityContext context,
+						   ParamListInfo params, QueryEnvironment *queryEnv,
+						   DestReceiver *dest, QueryCompletion *qc)
+{
+	PG_TRY();
+	{
+		statement_begin();
+		resource_process_utility(pstmt, queryString, readOnlyTree, context,
+								 params, queryEnv, dest, qc);
+	}
+	PG_FINALLY();
+	{
+		statement_end();
+	}
+	PG_END_TRY();
 }
 
 /* ------------------------------------------------------------------------- */

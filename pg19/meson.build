@@ -677,6 +677,21 @@ if get_option('hook_tests')
   )
   built_modules += 'gp_oauth_probe and gp_oauth_client (test only)'
 
+  # The client Cloudberry's resource_queue test runs, a libpq program of its
+  # suite's, compiled where it lies, unmodified (it declares a variable it
+  # does not use): the greenplum suite runs it from where it is installed.
+  executable('extended_protocol_resqueue',
+    files('../src/test/regress/extended_protocol_resqueue.c'),
+    c_args: ['-Wno-unused-variable'],
+    include_directories: [pg_client_inc],
+    dependencies: [libpq_dep],
+    build_rpath: pg_libdir,
+    install_rpath: pg_libdir,
+    install: true,
+    install_dir: pg['bindir'],
+  )
+  built_modules += 'extended_protocol_resqueue (test only)'
+
   # A storage handler for the storage and cluster suites: a directory stands
   # for the store, and credentials a user mapping gives are asked for.
   shared_module('gp_storage_probe', files('test/storage/gp_storage_probe.c'),

@@ -17,36 +17,61 @@
 # specific language governing permissions and limitations
 # under the License.
 #
-# gpconfig as far as the isolation2 tests the port runs ask it, on the
-# harness's cluster: gpconfig -c <name> -v <value> [--skipvalidation] sets a
-# setting on every node the coordinator's gp_segment_configuration lists,
-# standby and mirrors included -- on the coordinator alone with
-# --masteronly -- for the next start or reload, where the harness writes its
-# own, postgresql.auto.conf, whose last word is the one taken; and
-# gpconfig -r <name> takes it out again.  Cloudberry's name
-# is the port's (GP_SETTINGS_MAP, from the harness: gp_autostats_mode is
-# gp.autostats_mode).  Cloudberry's own gpconfig is gpMgmt's, which is M7's.
+# gpconfig as far as the tests the port runs ask it, on the harness's
+# cluster: gpconfig -c <name> -v <value> [--skipvalidation] sets a setting on
+# every node the coordinator's gp_segment_configuration lists, standby and
+# mirrors included -- on the coordinator alone with --masteronly -- for the
+# next start or reload, where the harness writes its own,
+# postgresql.auto.conf, whose last word is the one taken; gpconfig -r <name>
+# takes it out again; and gpconfig -s <name> shows it, the coordinator's and
+# the segments', as Cloudberry's does, failing for a setting there is none
+# of.  Cloudberry's name is the port's (GP_SETTINGS_MAP, from the harness:
+# gp_autostats_mode is gp.autostats_mode).  Cloudberry's own gpconfig is
+# gpMgmt's, which is M7's.  The greenplum suite runs it too.
 set -u
 
-name=; value=; remove=0; where=
+name=; value=; remove=0; show=0; where=
 while [ "$#" -gt 0 ]; do
 	case "$1" in
 		-c) name="$2"; shift 2 ;;
 		-r) name="$2"; remove=1; shift 2 ;;
+		-s) name="$2"; show=1; shift 2 ;;
 		-v) value="$2"; shift 2 ;;
 		--skipvalidation) shift ;;
 		--masteronly|--coordinatoronly) where="WHERE content = -1 AND role = 'p'"; shift ;;
 		*) echo "gpconfig: this harness's gpconfig does not take $1" >&2; exit 2 ;;
 	esac
 done
-[ -n "$name" ] && { [ -n "$value" ] || [ "$remove" -eq 1 ]; } ||
-	{ echo "usage: gpconfig -c name -v value | -r name [--skipvalidation] [--masteronly]" >&2; exit 2; }
+[ -n "$name" ] && { [ -n "$value" ] || [ "$remove" -eq 1 ] || [ "$show" -eq 1 ]; } ||
+	{ echo "usage: gpconfig -c name -v value | -r name | -s name [--skipvalidation] [--masteronly]" >&2; exit 2; }
 
+cbname="$name"
 if [ -n "${GP_SETTINGS_MAP:-}" ]; then
 	mapped=$(awk -v n="$name" '$1 == n { print $2; exit }' "$GP_SETTINGS_MAP")
 	[ -n "$mapped" ] && name="$mapped"
 fi
 value="${value#\'}"; value="${value%\'}"
+
+# -s: the coordinator's value and the segments', in Cloudberry's words
+if [ "$show" -eq 1 ]; then
+	coord=$("$PG_BINDIR/psql" -X -q -t -A -d postgres \
+			-c "SELECT setting FROM pg_settings WHERE name = '$name'" 2> /dev/null)
+	[ -n "$coord" ] || { echo "[CRITICAL]:-not a valid GUC: $cbname"; exit 1; }
+	segs=$("$PG_BINDIR/psql" -X -q -t -A -d postgres \
+		   -c "SELECT DISTINCT result FROM gp.exec_on_segments('SELECT setting FROM pg_settings WHERE name = ''$name''')" 2> /dev/null)
+	if [ "$(echo "$segs" | wc -l)" -eq 1 ] && [ "$segs" = "$coord" ]; then
+		echo "Values on all segments are consistent"
+		echo "GUC              : $cbname"
+		echo "Coordinator value: $coord"
+		echo "Segment     value: $segs"
+	else
+		echo "WARNING: GUCS ARE OUT OF SYNC: "
+		echo "GUC              : $cbname"
+		echo "Coordinator value: $coord"
+		echo "$segs" | sed 's/^/Segment     value: /'
+	fi
+	exit 0
+fi
 
 "$PG_BINDIR/psql" -X -q -t -A -F ' ' -d postgres \
 	-c "SELECT datadir FROM gp_segment_configuration $where ORDER BY dbid" |

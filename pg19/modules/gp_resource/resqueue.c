@@ -52,8 +52,8 @@
  *
  * Cloudberry sources this file is made of:
  *	  src/backend/utils/resscheduler/resscheduler.c, resqueue.c,
- *	  utils/activity/pgstat_resqueue.c, and the queue code of pquery.c,
- *	  portalmem.c and proc.c
+ *	  utils/activity/pgstat_resqueue.c, postmaster/backoff.c's entries and
+ *	  their weights, and the queue code of pquery.c, portalmem.c and proc.c
  *
  *-------------------------------------------------------------------------
  */
@@ -91,6 +91,7 @@
 #include "utils/tuplestore.h"
 #include "utils/wait_event.h"
 
+#include "gp_cluster.h"
 #include "gp_core_api.h"
 #include "gp_fault.h"
 #include "gp_resource.h"
@@ -134,13 +135,21 @@ typedef struct ResPortalInc
 	bool		ishold;
 } ResPortalInc;
 
-/* A backend's increments, and where it waits */
+/*
+ * A backend's increments, and where it waits; and the statement it runs, as
+ * backoff.c's entry of it says, which only the backend writes -- its
+ * session last, and -1 first, so that a reader that sees a session sees
+ * the rest of that statement's.
+ */
 typedef struct ResQueueProc
 {
 	int			pid;
 	int			next;			/* the next waiter of its queue, -1: none */
 	int			waitinc;		/* the increment it waits for, -1: none */
 	TimestampTz waitstart;
+	int			stmt_session;	/* -1: it runs none */
+	int			stmt_command;
+	int			stmt_weight;
 	ResPortalInc incs[FLEXIBLE_ARRAY_MEMBER];
 } ResQueueProc;
 
@@ -156,6 +165,8 @@ static LWLock *rq_lock = NULL;
 static uint32 rq_wait_event = 0;
 
 #define RQ_TRANCHE		"gp_resource queues"
+
+static Oid	current_queue(void);
 
 static Size
 proc_stride(void)
@@ -214,6 +225,7 @@ ResQueueShmemInit(void)
 
 			p->next = -1;
 			p->waitinc = -1;
+			p->stmt_session = -1;
 		}
 	}
 	LWLockRelease(AddinShmemInitLock);
@@ -400,6 +412,232 @@ ResQueueGetMemoryKB(Oid queueid)
 	return def != NULL ? ResQueueDefMemoryLimitKB(def) : -1;
 }
 
+/*
+ * Is a queue's memory limit in shared memory its definition's?  What
+ * Cloudberry's checkResourceQueueMemoryLimits() asks (regress_gp.c), which
+ * cb_regress.c serves: false when queues are off or there is no such queue.
+ */
+bool
+GpResQueueMemoryLimitInSync(const char *queuename)
+{
+	List	   *defs;
+	ResQueueDef *def;
+	ResQueueEntry *q;
+	double		shared = 0;
+	int64		kb;
+
+	if (!IsResQueueEnabled() || queuename == NULL)
+		return false;
+	defs = ResQueueDefsLoad();
+	def = ResQueueDefFind(defs, queuename);
+	if (def == NULL)
+		return false;
+
+	ensure_loaded();
+	LWLockAcquire(rq_lock, LW_SHARED);
+	q = find_queue(def->oid);
+	if (q != NULL)
+		shared = q->threshold[RES_MEMORY_LIMIT];
+	LWLockRelease(rq_lock);
+	if (q == NULL)
+		return false;
+
+	/* ResourceQueueGetMemoryLimitInCatalog(): bytes, -1 for none */
+	kb = ResQueueDefMemoryLimitKB(def);
+	return ceil(shared) == ceil(kb < 0 ? -1.0 : (double) kb * 1024.0);
+}
+
+/* ------------------------------------------------------------------------- */
+/* Priorities: what backoff.c's entries say of the statements running        */
+/* ------------------------------------------------------------------------- */
+
+/* Cloudberry's priority_map: a queue's PRIORITY, and the weight it gives */
+static const struct
+{
+	const char *name;
+	int			weight;
+}			priority_map[] = {
+	{"MAX", 1000000},
+	{"HIGH", 1000},
+	{"MEDIUM", 500},
+	{"LOW", 200},
+	{"MIN", 100},
+};
+
+/* The weight of a priority, 0 for a word that is none */
+int
+ResQueuePriorityLookup(const char *priority)
+{
+	for (int i = 0; i < lengthof(priority_map); i++)
+	{
+		if (pg_strcasecmp(priority, priority_map[i].name) == 0)
+			return priority_map[i].weight;
+	}
+	return 0;
+}
+
+/* BackoffPriorityValueToInt() */
+static int
+priority_weight(const char *priority)
+{
+	int			weight = ResQueuePriorityLookup(priority);
+
+	if (weight == 0)
+		elog(ERROR, "Invalid priority value.");
+	return weight;
+}
+
+/* BackoffPriorityIntToValue() */
+static const char *
+priority_name(int weight)
+{
+	for (int i = 0; i < lengthof(priority_map); i++)
+	{
+		if (priority_map[i].weight == weight)
+			return priority_map[i].name;
+	}
+	return "NON-STANDARD";
+}
+
+/* The weight found last, for this transaction and user */
+static LocalTransactionId weight_lxid = InvalidLocalTransactionId;
+static Oid	weight_user = InvalidOid;
+static int	weight_found = 0;
+
+/*
+ * ResourceQueueGetPriorityWeight(): a superuser's statement weighs the most,
+ * anyone else's what the role's queue's PRIORITY says, and where the
+ * catalogs cannot be read -- a statement of a failed transaction -- the
+ * default.  A segment has no copy of the queues or of a role's -- a role's
+ * labels are the coordinator's (gp_dispatch.c) -- so there a statement
+ * weighs what the coordinator says it does, in the setting the dispatch
+ * carries, gp_resource.statement, where Cloudberry's segment reads its own
+ * copy of the catalogs.
+ */
+static int
+statement_weight(void)
+{
+	ResQueueDef *def;
+	const char *w;
+
+	if (GpResourceIsSegment())
+	{
+		w = gp_resource_statement != NULL ?
+			strstr(gp_resource_statement, "weight=") : NULL;
+		if (w != NULL && atoi(w + strlen("weight=")) > 0)
+			return atoi(w + strlen("weight="));
+	}
+	else if (IsTransactionState())
+	{
+		if (MyProc->vxid.lxid == weight_lxid && GetUserId() == weight_user)
+			return weight_found;
+		if (superuser())
+			weight_found = priority_weight("MAX");
+		else
+		{
+			def = ResQueueDefByOid(ResQueueDefsLoad(), current_queue());
+			weight_found = def != NULL && def->priority != NULL ?
+				priority_weight(def->priority) :
+				priority_weight(gp_resqueue_priority_default_value);
+		}
+		weight_lxid = MyProc->vxid.lxid;
+		weight_user = GetUserId();
+		return weight_found;
+	}
+	return priority_weight(gp_resqueue_priority_default_value);
+}
+
+/*
+ * On the coordinator, before a statement is dispatched: what the segments
+ * are told of it, which gp_core sends them as it sends the statement when
+ * it has changed -- the weight, which changes as the role or its queue does.
+ */
+void
+ResQueuePriorityDispatch(void)
+{
+	char		value[32];
+
+	if (!IsResQueueEnabled() || !gp_resqueue_priority ||
+		!GpResourceIsCoordinator() || !IsTransactionState())
+		return;
+	snprintf(value, sizeof(value), "weight=%d", statement_weight());
+	if (gp_resource_statement == NULL || strcmp(gp_resource_statement, value) != 0)
+		(void) set_config_option("gp_resource.statement", value, PGC_USERSET,
+								 PGC_S_SESSION, GUC_ACTION_SET, true, 0, false);
+}
+
+/* The statements this backend has begun, its own count of them */
+static int	command_count = 0;
+
+/*
+ * A statement begins, not one inside another: BackoffBackendEntryInit(),
+ * which PortalStart() calls on every node.  Where queues or priorities are
+ * off, the backend runs none that says so.
+ */
+void
+ResQueuePriorityStart(void)
+{
+	ResQueueProc *me;
+	int			weight;
+
+	if (!IsResQueueEnabled() || !gp_resqueue_priority || rq_procs == NULL ||
+		MyProcNumber < 0 || MyProcNumber >= MaxBackends)
+		return;
+	ResQueueBackendStart();		/* which forgets the statement at exit */
+	ResQueuePriorityDispatch();
+	weight = statement_weight();
+	me = my_proc();
+	me->stmt_session = -1;
+	pg_write_barrier();
+	me->stmt_command = ++command_count;
+	me->stmt_weight = weight;
+	pg_write_barrier();
+	me->stmt_session = GpClusterSessionId();
+}
+
+/* ... and ends: BackoffBackendEntryExit() */
+void
+ResQueuePriorityEnd(void)
+{
+	if (rq_procs != NULL && MyProcNumber >= 0 && MyProcNumber < MaxBackends)
+		my_proc()->stmt_session = -1;
+}
+
+PG_FUNCTION_INFO_V1(gp_resource_backend_priorities);
+
+/*
+ * gp_list_backend_priorities(): the statements this node's backends run, as
+ * (session_id, command_count, priority, weight), which gp_toolkit's
+ * gp_resq_priority_backend lists; none where queues or priorities are off.
+ */
+Datum
+gp_resource_backend_priorities(PG_FUNCTION_ARGS)
+{
+	ReturnSetInfo *rsinfo = (ReturnSetInfo *) fcinfo->resultinfo;
+
+	InitMaterializedSRF(fcinfo, 0);
+	if (!IsResQueueEnabled() || !gp_resqueue_priority || rq_procs == NULL)
+		return (Datum) 0;
+
+	for (int i = 0; i < MaxBackends; i++)
+	{
+		volatile ResQueueProc *p = proc_at(i);
+		Datum		values[4];
+		bool		nulls[4] = {false, false, false, false};
+		int			session = p->stmt_session;
+
+		if (session < 0)
+			continue;
+		pg_read_barrier();
+		values[0] = Int32GetDatum(session);
+		values[1] = Int32GetDatum(p->stmt_command);
+		values[2] = CStringGetTextDatum(priority_name(p->stmt_weight));
+		values[3] = Int32GetDatum(p->stmt_weight);
+		tuplestore_putvalues(rsinfo->setResult, rsinfo->setDesc, values, nulls);
+	}
+	return (Datum) 0;
+}
+
 /* ------------------------------------------------------------------------- */
 /* Statistics: Cloudberry's pgstat_resqueue.c, as a kind of an extension's   */
 /* ------------------------------------------------------------------------- */
@@ -581,6 +819,7 @@ ResQueueRoleChanged(Oid roleid)
 {
 	if (roleid == cached_user)
 		cached_user = InvalidOid;
+	weight_lxid = InvalidLocalTransactionId;
 }
 
 /*
@@ -1487,6 +1726,16 @@ resqueue_exit(int code, Datum arg)
 	if (rq_ctl == NULL || MyProcNumber < 0 || MyProcNumber >= MaxBackends)
 		return;
 	me = my_proc();
+	me->stmt_session = -1;
+
+	/*
+	 * A backend terminated while it waited is still in its queue's list
+	 * until here, where a slot given back meanwhile may be granted it, and
+	 * is given back with the rest: ResLockWaitCancel()'s fault, where the
+	 * test holds it to have that happen.
+	 */
+	if (me->waitinc >= 0)
+		(void) GP_FAULT("res_lock_wait_cancel_before_partition_lock");
 	LWLockAcquire(rq_lock, LW_EXCLUSIVE);
 	for (int k = 0; k < gp_max_resource_portals_per_transaction; k++)
 	{

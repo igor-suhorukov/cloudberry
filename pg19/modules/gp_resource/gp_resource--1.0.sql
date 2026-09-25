@@ -321,6 +321,46 @@ AS
 	LEFT JOIN pg_catalog.pg_resqueue pgrq
 	ON (gp_resource.rolresqueue(pgr) = pgrq.oid);
 
+/*
+ * The statements this node's backends run, and what their queues' PRIORITY
+ * makes them weigh: Cloudberry's backoff entries (resqueue.c), recorded and
+ * reported, and slowing nobody.  A backend's command count is its own
+ * count of the statements it has begun, a segment's too, where Cloudberry's
+ * is the coordinator's, which the dispatch carries; so Cloudberry's
+ * gp_adjust_priority(), which finds a statement by the two, is not here.
+ */
+CREATE FUNCTION pg_catalog.gp_list_backend_priorities() RETURNS SETOF record
+AS 'MODULE_PATHNAME', 'gp_resource_backend_priorities'
+LANGUAGE C VOLATILE ROWS 1000;
+COMMENT ON FUNCTION pg_catalog.gp_list_backend_priorities() IS
+	'list priorities of backends';
+
+CREATE VIEW gp_toolkit.gp_resq_priority_backend
+AS
+	SELECT
+		session_id as rqpsession,
+		command_count as rqpcommand,
+		priority as rqppriority,
+		weight as rqpweight
+	FROM
+		gp_list_backend_priorities()
+			AS L(session_id int, command_count int, priority text, weight int);
+
+CREATE VIEW gp_toolkit.gp_resq_priority_statement
+AS
+	SELECT
+		psa.datname AS rqpdatname,
+		psa.usename AS rqpusename,
+		rpb.rqpsession,
+		rpb.rqpcommand,
+		rpb.rqppriority,
+		rpb.rqpweight,
+		psa.query AS rqpquery
+	FROM
+		gp_toolkit.gp_resq_priority_backend rpb
+		JOIN pg_stat_activity psa ON (rpb.rqpsession = psa.sess_id)
+	WHERE psa.query != '<IDLE>';
+
 CREATE VIEW gp_toolkit.gp_locks_on_resqueue
 AS
 	SELECT
@@ -385,5 +425,6 @@ AS
 	;
 
 GRANT SELECT ON gp_toolkit.gp_resq_activity, gp_toolkit.gp_resq_activity_by_queue,
-	gp_toolkit.gp_resq_role, gp_toolkit.gp_locks_on_resqueue,
+	gp_toolkit.gp_resq_role, gp_toolkit.gp_resq_priority_backend,
+	gp_toolkit.gp_resq_priority_statement, gp_toolkit.gp_locks_on_resqueue,
 	gp_toolkit.gp_resqueue_status TO PUBLIC;

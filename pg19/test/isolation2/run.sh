@@ -19,7 +19,7 @@
 #
 # Part of Cloudberry's isolation2_schedule, on a cluster: M3's tests --
 # distributed transactions, snapshots, locks and the global deadlock
-# detector -- and M4's, FTS and mirrors.
+# detector -- M4's, FTS and mirrors, and M6's resource queues.
 #
 # src/test/isolation2 is Cloudberry's suite of tests that need more than one
 # session at a time, written in its isolation2 syntax (1: ..., 2&: ..., 2<:,
@@ -78,7 +78,7 @@ SOCK="$(mktemp -d /tmp/cbi2-XXXXXX)"
 EXEC="$(mktemp -d "${HOME:-/var/lib/postgresql}/cb-isolation2c-XXXXXX")"
 BASEPORT="${PGPORT:-$((7500 + RANDOM % 200))}"
 NODES=4					# a coordinator and Cloudberry's three segments
-PRELOAD='gp_core,gp_orca,gp_sql'
+PRELOAD='gp_core,gp_orca,gp_sql,gp_resource'
 SECRET="isolation2-schedule-$RANDOM$RANDOM$RANDOM"
 
 # The tests the manifest runs, in its order, and the group each is in; the
@@ -180,6 +180,9 @@ make_cluster() {
 			echo "gp.cluster_secret = '$SECRET'"
 			# as Cloudberry's demo cluster, which prepare_limit says first
 			echo "max_prepared_transactions = 250"
+			# and its postgresql.conf.sample: a statement's memory is its
+			# resource queue's to give
+			echo "gp.resqueue_memory_policy = 'eager_free'"
 			[ "$n" -eq 0 ] && echo "gp.role = 'dispatch'"
 		} >> "$(node_dir "$g" "$n")/postgresql.auto.conf"
 	done
@@ -276,7 +279,11 @@ PGHOST="$(node_sock "${groups[0]}" 0)" PGPORT="$(node_port 0 0)" \
 while read -r name; do
 	short="${name#gp.}"
 	case "$short" in
-		optimizer*|statement_mem|enable_parallel|enable_groupagg|test_print_*)
+		optimizer*|statement_mem|enable_parallel|enable_groupagg|test_print_*|\
+		resource_scheduler|resource_select_only|resource_cleanup_gangs_on_wait|\
+		max_resource_queues|max_resource_portals_per_transaction|max_statement_mem|\
+		debug_resource_group|runaway_detector_activation_percent|\
+		vmem_process_interrupt|explain_memory_verbosity|coredump_on_memerror)
 			cbname="$short" ;;
 		*) cbname="gp_$short" ;;
 	esac

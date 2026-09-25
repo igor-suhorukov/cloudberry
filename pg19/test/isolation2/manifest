@@ -1,8 +1,8 @@
 # Part of Cloudberry's isolation2_schedule (src/test/isolation2), as the port
 # runs it on a coordinator and three segments: the tests of the schedule
 # that bear on M3 -- distributed transactions, distributed snapshots, locks
-# and the global deadlock detector -- and on M4, FTS and mirrors, in the
-# schedule's order.
+# and the global deadlock detector -- on M4, FTS and mirrors, and on M6's
+# resource queues, in the schedule's order.
 #
 #   run   the test runs here, in both passes; cloudberry/ holds a difference
 #         reviewed and kept, where one pass has one.  A third word names the
@@ -19,13 +19,15 @@
 #         what
 #
 # The schedule's other tests -- append-optimized tables, bitmap indexes,
-# resource queues and groups, the rest of the fault injector's places in
+# memory accounting, the rest of the fault injector's places in
 # PostgreSQL's own code -- need M5 to M7, and are not listed.  Its FTS tests
 # are M4's, and are: the ones that run are in the groups mirrors1 to
 # mirrors3, whose clusters have a mirror for each segment -- three, so that
 # they run side by side.
 run  lockmodes                                     lockmodes
 run  select_dropped_table
+run  resource_queue_self_deadlock                  queues
+run  resource_queue_terminate                      queues
 run  concurrent_partition_table_operations_should_not_deadlock
 run  starve_case
 run  create_index_deadlock
@@ -49,6 +51,10 @@ run  gdd/local-deadlock-03                         gdd2
 run  gdd/end                                       gdd*
 run  alter_blocks_for_update_and_viceversa
 run  reader_waits_for_lock                         readers
+run  resource_queue                                queues
+run  resource_queue_deadlock                       queues
+run  resource_queue_cancel                         queues
+run  resource_queue_multi_portal                   queues
 run  vacuum_recently_dead_tuple_due_to_distributed_snapshot
 run  distributedlog-bug
 run  distributed_snapshot
