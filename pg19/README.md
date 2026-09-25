@@ -273,12 +273,30 @@ of the core series, O13 to O21, O23 and O32:
   rejects a row no partition takes; `COPY TO` with such an `ESCAPE`; and an
   error a segment raises in the rows `INSERT`, `CREATE TABLE AS` and `COPY`
   route to it names no `COPY` of the segment's, a `COPY`'s the line of the
-  user's data.
+  user's data;
+- `pax`: Cloudberry's PAX, its store by column, as the table access method
+  `pax` of the extension of the same name, which makes in the schema `pax`
+  what Cloudberry's initdb made in `pg_ext_aux`.  Its C++ is compiled where
+  it stands in `contrib/pax_storage`, as ORCA's is, with the port's copies
+  of the files that had to change under `pg19/pax/src`.  A table's files,
+  its rows in groups by column, are in a directory beside its relation's,
+  removed with it (O22) and marked as PAX's for `pg_checksums` and
+  `pg_upgrade` (O23), logged by PAX's resource manager (ID 199), and
+  described by the rows of an aux table of its own.  PostgreSQL 19 asks it
+  for its options (O14), the columns a scan reads (O15), a unique index's
+  probe (O16), its size (O19) and UPDATE's old row (O20), through the
+  registry (O13).  A row's number, 24 bits of file and 23 of row, is mapped
+  onto TIDs laid out for the table, 20 bits of file by default; statistics
+  of each file and group, min/max and bloom filters, skip those a scan's
+  conditions rule out; `CLUSTER` orders a table by its cluster columns,
+  Z-order or lexical, on every segment; ANALYZE samples it; and the
+  coordinator's planner sizes it, and an append-optimized table, as it
+  sizes a heap table.
 
-Left of M5: `pax` (`cloudberry.md`).  The resource and transport modules — `pax`,
-`gp_resource`, `gp_tde`, `interconnect`, `udp2` — are still stubs: M5 and M6
-fill the first three, and the streaming transports, tcp and udpifc, live in
-`gp_core` for now.
+M5's modules are built; what they leave open is in `cloudberry.md`.  The
+resource and transport modules — `gp_resource`, `gp_tde`, `interconnect`,
+`udp2` — are still stubs: M6 fills the first two, and the streaming
+transports, tcp and udpifc, live in `gp_core` for now.
 
 ## Tests
 
@@ -301,6 +319,9 @@ each with a mirror, and what FTS does when a mirror or a primary stops;
 `ao`, M5's, append-optimized tables on one node, a standby and recovery;
 `diskquota`, M5's too, Cloudberry's diskquota tests on a coordinator and
 three segments, its regression and isolation2 schedules as two jobs;
+`pax`, M5's too, Cloudberry's PAX tests, its `pax_schedule` on a
+coordinator and three segments under the planner, as Cloudberry's expected
+output has them;
 `singlenode` and
 `singlenode_isolation2`, Cloudberry's single-node suites with PostgreSQL 19's
 own regression tests; and PostGIS's regression suite.  Each is run under the

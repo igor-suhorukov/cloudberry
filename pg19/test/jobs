@@ -29,27 +29,27 @@
 # cores, 32 threads), with every job at once; they order the jobs and
 # nothing else, and run.sh's summary gives each run's own.
 
-greenplum              orca     336   PASSES=orca
-diskquota              regress  290   DQ_PARTS=regress
-greenplum              planner  257   PASSES=planner
-singlenode             orca     220   PASSES=orca
+greenplum              orca     347   PASSES=orca
+diskquota              regress  295   DQ_PARTS=regress
+greenplum              planner  249   PASSES=planner
+singlenode             orca     230   PASSES=orca
 isolation2             planner  136   PASSES=planner
+pax                    -        135
+postgis_regress        orca     116   PASSES=orca
 isolation2             orca     115   PASSES=orca
-diskquota              isolation2 106   DQ_PARTS=isolation2
-postgis_regress        orca     101   PASSES=orca
-task                   -         81
-singlenode             planner   74   PASSES=planner
-cluster                -         73
-orca                   -         72
-fts                    -         56
-pax                    -         40
+diskquota              isolation2 109   DQ_PARTS=isolation2
+singlenode             planner   80   PASSES=planner
+task                   -         79
+orca                   -         79
+cluster                -         76
+fts                    -         50
 postgis_regress        planner   22   PASSES=planner
 hooks                  -         22
-security               -         18
+security               -         17
 postgis                -         16
 dirtable               -         16
 grammar                -         11
 dynamic                -          9
-ao                     -          8
+ao                     -          9
 singlenode_isolation2  orca       6   PASSES=orca
-singlenode_isolation2  planner    5   PASSES=planner
+singlenode_isolation2  planner    6   PASSES=planner
