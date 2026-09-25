@@ -1373,10 +1373,39 @@ typedef void (*GpExtTableTransformCreate_fn) (CreateForeignTableStmt *stmt,
 											  const char *queryString);
 
 /*
- * ATTACH PARTITION of an external table, and so EXCHANGE PARTITION, which
- * is one: a writable one is refused, and a readable one's rows are not
- * checked against the partition's bound, as Cloudberry says of it
- * (tablecmds.c, ATExecAttachPartition()).
+ * Are two tables distributed alike, their keys' columns compared by name, as
+ * Cloudberry's GpPolicyEqualByName() compares them: a partition's columns
+ * may be in another order than its parent's.
+ */
+static bool
+policies_equal_by_name(Oid relid1, Oid relid2)
+{
+	GpPolicy   *p1 = GpPolicyGet(relid1);
+	GpPolicy   *p2 = GpPolicyGet(relid2);
+
+	if (p1 == NULL || p2 == NULL)
+		return p1 == p2 || GpPolicyIsEntry(p1) == GpPolicyIsEntry(p2);
+	if (p1->ptype != p2->ptype || p1->numsegments != p2->numsegments ||
+		p1->nattrs != p2->nattrs)
+		return false;
+	for (int i = 0; i < p1->nattrs; i++)
+	{
+		char	   *a1 = get_attname(relid1, p1->attrs[i], false);
+		char	   *a2 = get_attname(relid2, p2->attrs[i], false);
+
+		if (strcmp(a1, a2) != 0 || p1->opclasses[i] != p2->opclasses[i])
+			return false;
+	}
+	return true;
+}
+
+/*
+ * ATTACH PARTITION, and so EXCHANGE PARTITION, which is one: of a table
+ * distributed otherwise than its new parent, refused, as Cloudberry refuses
+ * it -- its rows would be where the parent's distribution does not look for
+ * them; and of an external table: a writable one is refused, and a readable
+ * one's rows are not checked against the partition's bound, as Cloudberry
+ * says of it (tablecmds.c, ATExecAttachPartition()).
  */
 static void
 check_attach_external(AlterTableStmt *stmt)
@@ -1399,6 +1428,14 @@ check_attach_external(AlterTableStmt *stmt)
 			continue;
 		pc = (PartitionCmd *) cmd->def;
 		relid = RangeVarGetRelid(pc->name, NoLock, true);
+		if (OidIsValid(relid) && OidIsValid(self) &&
+			get_rel_relkind(relid) != RELKIND_FOREIGN_TABLE &&
+			!GpPolicyIsExternalTable(relid) &&
+			!policies_equal_by_name(self, relid))
+			ereport(ERROR,
+					(errcode(ERRCODE_SYNTAX_ERROR),
+					 errmsg("distribution policy for \"%s\" must be the same as that for \"%s\"",
+							get_rel_name(relid), get_rel_name(self))));
 		if (!OidIsValid(relid) || !GpPolicyIsExternalTable(relid))
 			continue;
 		foreach_node(DefElem, def, GetForeignTable(relid)->options)
