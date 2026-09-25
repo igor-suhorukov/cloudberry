@@ -343,7 +343,7 @@ modules = [
                      'modules/gp_ao/bitmap/bitmapsearch.c',
                      'modules/gp_ao/bitmap/bitmaputil.c',
                      'modules/gp_ao/bitmap/bitmapxlog.c'),
-    'include_directories': include_directories('modules/gp_ao/bitmap'),
+    'include_directories': [include_directories('modules/gp_ao/bitmap')],
     'dependencies': [zlib_dep, zstd_dep],
     'c_args': zstd_dep.found() ? ['-DGP_AO_HAVE_ZSTD'] : [],
   },
@@ -378,7 +378,7 @@ modules = [
                      'modules/gp_exttable/url_file.c',
                      'common/fstream/fstream.c',
                      'common/fstream/gfile.c'),
-    'include_directories': include_directories('common', 'modules/gp_exttable/include'),
+    'include_directories': [include_directories('common', 'modules/gp_exttable/include')],
     'dependencies': [zlib_dep, zstd_dep, curl_dep],
     'c_args': curl_dep.found() ? ['-DUSE_CURL'] : [],
   },
@@ -524,7 +524,7 @@ if apr_dep.found() and event_dep.found()
                           'common/fstream/gfile.c')
   if yaml_dep.found()
     gpfdist_sources += files('bin/gpfdist/transform.c')
-    gpfdist_c_args += '-DGPFXDIST'
+    gpfdist_c_args += ['-DGPFXDIST']
   endif
   executable('gpfdist', gpfdist_sources,
     c_args: gpfdist_c_args,

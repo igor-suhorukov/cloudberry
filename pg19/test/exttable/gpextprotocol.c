@@ -295,6 +295,7 @@ DemoUri *ParseDemoUri(const char *uri_str)
 {
 	DemoUri	   *uri = (DemoUri *) palloc0(sizeof(DemoUri));
 	int			protocol_len;
+	const char *post_protocol;
 
  	uri->path = NULL;
  	uri->protocol = NULL;
@@ -302,7 +303,7 @@ DemoUri *ParseDemoUri(const char *uri_str)
 	/*
 	 * parse protocol
 	 */
-	const char *post_protocol = strstr(uri_str, "://");
+	post_protocol = strstr(uri_str, "://");
 		
 	if(!post_protocol)
 	{

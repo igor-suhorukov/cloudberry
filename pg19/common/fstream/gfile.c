@@ -1175,7 +1175,9 @@ int gfile_open(gfile_t* fd, const char* fpath, int flags, int* response_code, co
 #ifdef FRONTEND
 			fd->fd.filefd = open(fpath, openFlags, openMode);
 #else
+			/* a backend's file has the server's mode for its files */
 			fd->fd.filefd = OpenTransientFile((char *) fpath, openFlags);
+			(void) openMode;
 #endif
 		}
 		while (fd->fd.filefd < 0 && errno == EINTR);

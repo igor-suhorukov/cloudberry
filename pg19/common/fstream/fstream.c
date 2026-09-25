@@ -729,6 +729,7 @@ static int nextFile(fstream_t*fs)
 char* format_error(char* c1, char* c2)
 {
 	int len1, len2;
+	char *targ;
 	
 	static char err_msg[FILE_ERROR_SZ];
 	memset(err_msg, 0, FILE_ERROR_SZ);
@@ -741,7 +742,7 @@ char* format_error(char* c1, char* c2)
 		return "cannot read file";
 	}
 	
-	char* targ = err_msg;
+	targ = err_msg;
 	memcpy(targ, c1, len1);
 	targ += len1;
 	memcpy(targ, c2, len2);
