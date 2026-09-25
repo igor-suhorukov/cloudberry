@@ -489,15 +489,22 @@ build_payload(const char *tree)
 }
 
 /*
- * A "gp" label as the coordinator has it, as the SECURITY LABEL statement a
+ * A label as the coordinator has it, as the SECURITY LABEL statement a
  * segment is sent to write it -- a parse tree, as every dispatched statement
  * is, so that it needs nothing installed there and is checked there as
- * SECURITY LABEL checks one: the provider's keys, and that the user owns
- * the object.  NULL for an object that is gone, or of a kind no "gp" label is
- * put on.
+ * SECURITY LABEL checks one: the provider's own check, and that the user
+ * owns the object.  NULL for an object that is gone, or of a kind no label
+ * is sent for.  "gp"'s, or another provider's.
  */
 char *
 GpDdlLabelPayload(const ObjectAddress *object, const char *label)
+{
+	return GpDdlLabelPayloadOf(object, GP_LABEL_PROVIDER, label);
+}
+
+char *
+GpDdlLabelPayloadOf(const ObjectAddress *object, const char *provider,
+					const char *label)
 {
 	SecLabelStmt *stmt;
 	List	   *objname = NIL;
@@ -542,12 +549,14 @@ GpDdlLabelPayload(const ObjectAddress *object, const char *label)
 			}
 		case OBJECT_TYPE:
 		case OBJECT_DOMAIN:
-			stmt->object = (Node *) makeTypeNameFromNameList(names);
+			/* a type's identity is one string, its name as SQL writes it */
+			stmt->object = (Node *) typeStringToTypeName((char *) linitial(objname),
+														 NULL);
 			break;
 		default:
 			return NULL;
 	}
-	stmt->provider = pstrdup(GP_LABEL_PROVIDER);
+	stmt->provider = pstrdup(provider);
 	stmt->label = label != NULL ? pstrdup(label) : NULL;
 
 	return psprintf("%s" "oids=\n%s", GP_TREE_MARKER, nodeToString(stmt));

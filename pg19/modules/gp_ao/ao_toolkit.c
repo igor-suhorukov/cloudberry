@@ -48,11 +48,13 @@
 #include "port/pg_bitutils.h"
 #include "utils/builtins.h"
 #include "utils/lsyscache.h"
+#include "utils/numeric.h"
 #include "utils/rel.h"
 #include "utils/snapmgr.h"
 #include "utils/tuplestore.h"
 
 #include "gp_core_api.h"
+#include "gp_dispatch.h"
 #include "gp_ao.h"
 
 PG_FUNCTION_INFO_V1(gp_ao_reloption_values);
@@ -62,6 +64,7 @@ PG_FUNCTION_INFO_V1(gp_ao_aocsseg);
 PG_FUNCTION_INFO_V1(gp_ao_aovisimap);
 PG_FUNCTION_INFO_V1(gp_ao_aovisimap_hidden_info);
 PG_FUNCTION_INFO_V1(gp_ao_aovisimap_entry);
+PG_FUNCTION_INFO_V1(gp_ao_aovisimap_compaction_info);
 PG_FUNCTION_INFO_V1(gp_ao_aoblkdir);
 PG_FUNCTION_INFO_V1(gp_ao_compression_ratio);
 
@@ -75,30 +78,56 @@ content_id(void)
 }
 
 /*
- * The table named, opened for reading, if it is one of the methods -- a
- * table by row where row, by column where column, either where neither --
- * and Cloudberry's error where it is not.
+ * What each function of Cloudberry's says of a table that is not one it
+ * reads, in its words: __gp_aoseg and __gp_aocsseg of the other method's
+ * (aosegfiles.c, aocssegfiles.c), the visibility map's and the block
+ * directory's of a table that is neither (appendonly_visimap_udf.c,
+ * appendonly_blkdir_udf.c).
  */
+typedef enum AoWanted
+{
+	AO_WANT_ROW,
+	AO_WANT_COLUMN,
+	AO_WANT_VISIMAP,
+	AO_WANT_BLKDIR,
+} AoWanted;
+
+/* The table named, opened for reading, if it is one the function reads. */
 static Relation
-open_ao(Oid relid, bool row, bool column)
+open_ao(Oid relid, AoWanted wanted)
 {
 	Relation	rel = relation_open(relid, AccessShareLock);
+	bool		ao = ao_is_ao_table(rel) && RELKIND_HAS_STORAGE(rel->rd_rel->relkind);
 
-	if (!ao_is_ao_table(rel) || !RELKIND_HAS_STORAGE(rel->rd_rel->relkind))
-		ereport(ERROR,
-				(errcode(ERRCODE_WRONG_OBJECT_TYPE),
-				 errmsg("'%s' is not an append-only relation",
-						RelationGetRelationName(rel))));
-	if (row && !column && ao_storage_is_columnar(rel))
-		ereport(ERROR,
-				(errcode(ERRCODE_WRONG_OBJECT_TYPE),
-				 errmsg("'%s' is not an append-only row relation",
-						RelationGetRelationName(rel))));
-	if (column && !row && !ao_storage_is_columnar(rel))
-		ereport(ERROR,
-				(errcode(ERRCODE_WRONG_OBJECT_TYPE),
-				 errmsg("'%s' is not an append-only columnar relation",
-						RelationGetRelationName(rel))));
+	switch (wanted)
+	{
+		case AO_WANT_ROW:
+			if (!ao || ao_storage_is_columnar(rel))
+				ereport(ERROR,
+						(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+						 errmsg("Relation '%s' does not have appendoptimized row-oriented storage",
+								RelationGetRelationName(rel))));
+			break;
+		case AO_WANT_COLUMN:
+			if (!ao || !ao_storage_is_columnar(rel))
+				ereport(ERROR,
+						(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+						 errmsg("Relation '%s' does not have append-optimized column-oriented storage",
+								RelationGetRelationName(rel))));
+			break;
+		case AO_WANT_VISIMAP:
+			if (!ao)
+				ereport(ERROR,
+						(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+						 errmsg("function not supported on relation")));
+			break;
+		case AO_WANT_BLKDIR:
+			if (!ao)
+				ereport(ERROR,
+						(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+						 errmsg("function not supported on non append-optimized relation")));
+			break;
+	}
 	return rel;
 }
 
@@ -162,8 +191,11 @@ gp_ao_aoseg(PG_FUNCTION_ARGS)
 	AoSegfile  *segfiles;
 	int			n;
 
+	if (GpDispatchFunctionToSegments(fcinfo))
+		return (Datum) 0;
+
 	InitMaterializedSRF(fcinfo, 0);
-	rel = open_ao(PG_GETARG_OID(0), true, false);
+	rel = open_ao(PG_GETARG_OID(0), AO_WANT_ROW);
 	segfiles = ao_segfiles_read(ao_storage_id(rel), GetLatestSnapshot(), &n);
 	for (int i = 0; i < n; i++)
 	{
@@ -200,8 +232,11 @@ gp_ao_aocsseg(PG_FUNCTION_ARGS)
 	int			n;
 	int			natts;
 
+	if (GpDispatchFunctionToSegments(fcinfo))
+		return (Datum) 0;
+
 	InitMaterializedSRF(fcinfo, 0);
-	rel = open_ao(PG_GETARG_OID(0), false, true);
+	rel = open_ao(PG_GETARG_OID(0), AO_WANT_COLUMN);
 	natts = RelationGetDescr(rel)->natts;
 	segfiles = ao_segfiles_read(ao_storage_id(rel), GetLatestSnapshot(), &n);
 	for (int i = 0; i < n; i++)
@@ -242,7 +277,7 @@ gp_ao_aovisimap(PG_FUNCTION_ARGS)
 	int			n;
 
 	InitMaterializedSRF(fcinfo, 0);
-	rel = open_ao(PG_GETARG_OID(0), true, true);
+	rel = open_ao(PG_GETARG_OID(0), AO_WANT_VISIMAP);
 	storage_id = ao_storage_id(rel);
 	segfiles = ao_segfiles_read(storage_id, GetLatestSnapshot(), &n);
 	for (int i = 0; i < n; i++)
@@ -287,8 +322,11 @@ gp_ao_aovisimap_hidden_info(PG_FUNCTION_ARGS)
 	AoSegfile  *segfiles;
 	int			n;
 
+	if (GpDispatchFunctionToSegments(fcinfo))
+		return (Datum) 0;
+
 	InitMaterializedSRF(fcinfo, 0);
-	rel = open_ao(PG_GETARG_OID(0), true, true);
+	rel = open_ao(PG_GETARG_OID(0), AO_WANT_VISIMAP);
 	storage_id = ao_storage_id(rel);
 	segfiles = ao_segfiles_read(storage_id, GetLatestSnapshot(), &n);
 	for (int i = 0; i < n; i++)
@@ -308,6 +346,72 @@ gp_ao_aovisimap_hidden_info(PG_FUNCTION_ARGS)
 }
 
 /*
+ * __gp_aovisimap_compaction_info(oid): each segment file of each segment,
+ * with how many of its rows are deleted and whether VACUUM would compact it
+ * at gp.appendonly_compaction_threshold -- Cloudberry's PL/pgSQL function,
+ * which reads the segments' hidden rows through gp_dist_random('gp_id'),
+ * here asking each segment for its own.
+ */
+Datum
+gp_ao_aovisimap_compaction_info(PG_FUNCTION_ARGS)
+{
+	ReturnSetInfo *rsinfo = (ReturnSetInfo *) fcinfo->resultinfo;
+	const GpCoreApi *core = GpCoreApiLookup();
+	Relation	rel;
+	int64		storage_id;
+	AoSegfile  *segfiles;
+	int			n;
+	Datum		threshold = DirectFunctionCall1(int4_numeric,
+												Int32GetDatum(gp_appendonly_compaction_threshold));
+
+	if (!GpDispatchFunctionToSegments(fcinfo))
+	{
+		InitMaterializedSRF(fcinfo, 0);
+		rel = open_ao(PG_GETARG_OID(0), AO_WANT_VISIMAP);
+		storage_id = ao_storage_id(rel);
+		segfiles = ao_segfiles_read(storage_id, GetLatestSnapshot(), &n);
+		for (int i = 0; i < n; i++)
+		{
+			Datum		values[6];
+			bool		nulls[6] = {0};
+			int64		hidden = ao_visimap_count(ao_visimap_load(storage_id,
+																  segfiles[i].segno,
+																  GetLatestSnapshot()));
+			int64		total = segfiles[i].tupcount;
+			Datum		percent;
+
+			if (total > 0)
+				percent = DirectFunctionCall2(numeric_round,
+											  DirectFunctionCall2(numeric_div,
+																  NumericGetDatum(int64_to_numeric(100 * hidden)),
+																  NumericGetDatum(int64_to_numeric(total))),
+											  Int32GetDatum(2));
+			else
+				percent = DirectFunctionCall2(numeric_round,
+											  NumericGetDatum(int64_to_numeric(0)),
+											  Int32GetDatum(2));
+			values[0] = Int32GetDatum(content_id());
+			values[1] = Int32GetDatum(segfiles[i].segno);
+			values[2] = BoolGetDatum(DatumGetBool(DirectFunctionCall2(numeric_gt,
+																	  percent,
+																	  threshold)));
+			values[3] = Int64GetDatum(hidden);
+			values[4] = Int64GetDatum(total);
+			values[5] = percent;
+			tuplestore_putvalues(rsinfo->setResult, rsinfo->setDesc, values, nulls);
+		}
+		relation_close(rel, AccessShareLock);
+	}
+
+	/* once, where the caller is, as Cloudberry's RAISE NOTICE says it */
+	if (core == NULL || core->get_role() != GP_ROLE_EXECUTE)
+		ereport(NOTICE,
+				(errmsg("gp_appendonly_compaction_threshold = %d",
+						gp_appendonly_compaction_threshold)));
+	return (Datum) 0;
+}
+
+/*
  * __gp_aovisimap_entry(regclass): each entry of the visibility map, its
  * bitmap as Cloudberry prints one, a digit a row, first row first.
  */
@@ -321,7 +425,7 @@ gp_ao_aovisimap_entry(PG_FUNCTION_ARGS)
 	int			n;
 
 	InitMaterializedSRF(fcinfo, 0);
-	rel = open_ao(PG_GETARG_OID(0), true, true);
+	rel = open_ao(PG_GETARG_OID(0), AO_WANT_VISIMAP);
 	storage_id = ao_storage_id(rel);
 	segfiles = ao_segfiles_read(storage_id, GetLatestSnapshot(), &n);
 	for (int i = 0; i < n; i++)
@@ -375,7 +479,7 @@ gp_ao_aoblkdir(PG_FUNCTION_ARGS)
 	int			n;
 
 	InitMaterializedSRF(fcinfo, 0);
-	rel = open_ao(PG_GETARG_OID(0), true, true);
+	rel = open_ao(PG_GETARG_OID(0), AO_WANT_BLKDIR);
 	storage_id = ao_storage_id(rel);
 	segfiles = ao_segfiles_read(storage_id, GetLatestSnapshot(), &n);
 	for (int i = 0; i < n; i++)

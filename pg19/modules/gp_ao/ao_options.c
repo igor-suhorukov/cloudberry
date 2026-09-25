@@ -33,15 +33,23 @@
  */
 #include "postgres.h"
 
+#include "access/htup_details.h"
 #include "access/reloptions.h"
+#include "access/table.h"
+#include "access/tableam.h"
+#include "access/xact.h"
+#include "catalog/indexing.h"
+#include "catalog/objectaccess.h"
+#include "catalog/pg_am.h"
+#include "catalog/pg_class.h"
 #include "catalog/pg_type.h"
 #include "utils/array.h"
 #include "utils/builtins.h"
 #include "utils/rel.h"
+#include "utils/syscache.h"
 
 #include "gp_ao.h"
 
-#define AO_DEFAULT_BLOCKSIZE	32768
 #define AO_MIN_BLOCKSIZE		8192
 #define AO_MAX_BLOCKSIZE		(2 * 1024 * 1024)
 
@@ -239,12 +247,6 @@ ao_parse_options(Datum reloptions, char relkind, bool validate, bool columnar)
 					(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
 					 errmsg("compresstype \"%s\" can't be used with compresslevel 0",
 							ao_compresstype_name(type))));
-		if (type == AO_COMPRESS_NONE && result->compresslevel > 0 &&
-			mine && mine->compresstype)
-			ereport(ERROR,
-					(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
-					 errmsg("compresstype \"none\" can't be used with compresslevel %d",
-							result->compresslevel)));
 		if (type == AO_COMPRESS_ZLIB && result->compresslevel > 9)
 			ereport(ERROR,
 					(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
@@ -323,4 +325,52 @@ ao_options_from_reloptions(Datum reloptions, char relkind, bool columnar,
 	ro = (AoRelOptions *) ao_parse_options(reloptions, relkind, false, columnar);
 	resolve_options(ro, opts);
 	pfree(ro);
+}
+
+/*
+ * Give a table whose access method is about to change the options opts and
+ * no others, checked as the new method checks them: SET ACCESS METHOD, as
+ * Cloudberry clears a table's options when its method changes (gp_ao.c).
+ */
+void
+ao_replace_reloptions(Relation rel, Oid newam, List *opts)
+{
+	static const char *const validnsps[] = HEAP_RELOPT_NAMESPACES;
+	Datum		newOptions;
+	HeapTuple	amtup;
+	Oid			amhandler;
+	Relation	pgclass;
+	HeapTuple	tuple;
+	HeapTuple	newtuple;
+	Datum		repl_val[Natts_pg_class] = {0};
+	bool		repl_null[Natts_pg_class] = {0};
+	bool		repl_repl[Natts_pg_class] = {0};
+
+	newOptions = transformRelOptions((Datum) 0, opts, NULL, validnsps,
+									 false, false);
+	amtup = SearchSysCache1(AMOID, ObjectIdGetDatum(newam));
+	if (!HeapTupleIsValid(amtup))
+		elog(ERROR, "cache lookup failed for access method %u", newam);
+	amhandler = ((Form_pg_am) GETSTRUCT(amtup))->amhandler;
+	ReleaseSysCache(amtup);
+	(void) table_am_reloptions(GetTableAmRoutine(amhandler),
+							   rel->rd_rel->relkind, newOptions, true);
+
+	pgclass = table_open(RelationRelationId, RowExclusiveLock);
+	tuple = SearchSysCacheCopy1(RELOID, ObjectIdGetDatum(RelationGetRelid(rel)));
+	if (!HeapTupleIsValid(tuple))
+		elog(ERROR, "cache lookup failed for relation %u", RelationGetRelid(rel));
+	if (newOptions != (Datum) 0)
+		repl_val[Anum_pg_class_reloptions - 1] = newOptions;
+	else
+		repl_null[Anum_pg_class_reloptions - 1] = true;
+	repl_repl[Anum_pg_class_reloptions - 1] = true;
+	newtuple = heap_modify_tuple(tuple, RelationGetDescr(pgclass),
+								 repl_val, repl_null, repl_repl);
+	CatalogTupleUpdate(pgclass, &newtuple->t_self, newtuple);
+	InvokeObjectPostAlterHook(RelationRelationId, RelationGetRelid(rel), 0);
+	heap_freetuple(newtuple);
+	heap_freetuple(tuple);
+	table_close(pgclass, RowExclusiveLock);
+	CommandCounterIncrement();
 }

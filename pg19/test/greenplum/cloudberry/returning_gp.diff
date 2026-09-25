@@ -1,0 +1,7 @@
+@@
+-ERROR:  feature not supported on appendoptimized relations
++ id 
++----
++  1
++(1 row)
++

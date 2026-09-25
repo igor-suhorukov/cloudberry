@@ -1,0 +1,6 @@
+@@
+-ERROR:  feature not supported on appendoptimized relations
++NOTICE:  insert trigger fired on trigtest_ao for INSERT
+@@
+-ERROR:  feature not supported on appendoptimized relations
++NOTICE:  insert trigger fired on trigtest_co for INSERT

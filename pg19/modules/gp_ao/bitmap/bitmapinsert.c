@@ -887,6 +887,14 @@ updatesetbit_inpage(Relation rel, uint64 tidnum,
 		free_words = BM_NUM_OF_HRL_WORDS_PER_PAGE;
 	}
 
+	/*
+	 * The words that do not fit on this page any more: allocated here, and
+	 * not in the critical section below, where Cloudberry allocated them and
+	 * PostgreSQL 19 asserts nothing is.
+	 */
+	MemSet(&words_left, 0, sizeof(words_left));
+	buf_extend(&words_left);
+
 	START_CRIT_SECTION();
 
 	MarkBufferDirty(bitmapBuffer);
@@ -953,9 +961,6 @@ updatesetbit_inpage(Relation rel, uint64 tidnum,
 		   BM_CALC_H_WORDS(bitmapOpaque->bm_hrl_words_used) * sizeof(BM_HRL_WORD));
 	words.num_cwords = BM_NUM_OF_HRL_WORDS_PER_PAGE;
 	words.curword = bitmapOpaque->bm_hrl_words_used;
-
-	MemSet(&words_left, 0, sizeof(words_left));
-	buf_extend(&words_left);
 
 	insert_newwords(&words, wordNo + 1, &new_words, &words_left);
 

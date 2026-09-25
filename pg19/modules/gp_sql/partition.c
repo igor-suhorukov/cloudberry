@@ -251,6 +251,20 @@ run_utility(Node *stmt, const char *queryString, QueryEnvironment *queryEnv)
 	CommandCounterIncrement();
 }
 
+/*
+ * A schema's name, as a statement this makes names it: a temporary table's
+ * is this backend's pg_temp_N, which the statement dispatched to a segment
+ * would find no schema of there -- the segment's backend has its own -- and
+ * "pg_temp" is each backend's own.
+ */
+static char *
+statement_nspname(Oid nspid)
+{
+	if (isTempNamespace(nspid))
+		return pstrdup("pg_temp");
+	return get_namespace_name(nspid);
+}
+
 static RenameStmt *
 rename_stmt(RangeVar *rv, const char *newname)
 {
@@ -1187,7 +1201,7 @@ find_target(Relation parent, GpPartParser *p, GpPartId *id, bool missing_ok,
 				{
 					snprintf(levelstr, NAMEDATALEN, "%d", partition_level(RelationGetRelid(parent)));
 					snprintf(partsubstring, NAMEDATALEN, "prt_%s", id->name);
-					rv = makeRangeVar(get_namespace_name(RelationGetNamespace(parent)),
+					rv = makeRangeVar(statement_nspname(RelationGetNamespace(parent)),
 									  makeObjectName(RelationGetRelationName(parent), levelstr,
 													 partsubstring),
 									  -1);
@@ -2031,7 +2045,7 @@ parent_of(Relation rel)
 
 	pp->relid = RelationGetRelid(rel);
 	pp->relname = pstrdup(RelationGetRelationName(rel));
-	pp->nspname = get_namespace_name(RelationGetNamespace(rel));
+	pp->nspname = statement_nspname(RelationGetNamespace(rel));
 	pp->relpersistence = rel->rd_rel->relpersistence;
 	pp->relowner = rel->rd_rel->relowner;
 	ObjectAddressSet(addr, RelationRelationId, pp->relid);
@@ -2053,7 +2067,7 @@ parent_rv(const PartParent *pp)
 static RangeVar *
 rv_of(Oid relid)
 {
-	RangeVar   *rv = makeRangeVar(get_namespace_name(get_rel_namespace(relid)),
+	RangeVar   *rv = makeRangeVar(statement_nspname(get_rel_namespace(relid)),
 								  get_rel_name(relid), -1);
 
 	rv->relpersistence = get_rel_persistence(relid);
@@ -2499,7 +2513,7 @@ cmd_drop(Oid relid, GpPartParser *p, GpPartCmd *cmd, const char *queryString,
 	table_close(rel, NoLock);
 
 	drop = makeNode(DropStmt);
-	drop->objects = list_make1(list_make2(makeString(get_namespace_name(get_rel_namespace(partrelid))),
+	drop->objects = list_make1(list_make2(makeString(statement_nspname(get_rel_namespace(partrelid))),
 										  makeString(get_rel_name(partrelid))));
 	drop->removeType = OBJECT_TABLE;
 	drop->behavior = cmd->behavior;
@@ -3183,7 +3197,7 @@ static void
 run_on_partition(Oid relid, const char *text, QueryEnvironment *queryEnv)
 {
 	char	   *sql = psprintf("ALTER TABLE %s %s",
-							   quote_qualified_identifier(get_namespace_name(get_rel_namespace(relid)),
+							   quote_qualified_identifier(statement_nspname(get_rel_namespace(relid)),
 														  get_rel_name(relid)),
 							   text);
 

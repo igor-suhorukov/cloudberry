@@ -52,6 +52,7 @@
 #include "commands/defrem.h"
 #include "commands/explain.h"
 #include "commands/extension.h"
+#include "commands/prepare.h"
 #include "commands/tablespace.h"
 #include "executor/executor.h"
 #include "executor/spi.h"
@@ -60,8 +61,13 @@
 #include "nodes/makefuncs.h"
 #include "nodes/nodeFuncs.h"
 #include "nodes/parsenodes.h"
+#include "optimizer/optimizer.h"
 #include "parser/analyze.h"
+#include "parser/parse_coerce.h"
+#include "parser/parse_collate.h"
+#include "parser/parse_expr.h"
 #include "parser/parser.h"
+#include "tcop/tcopprot.h"
 #include "tcop/utility.h"
 #include "utils/guc.h"
 #include "utils/acl.h"
@@ -1098,6 +1104,78 @@ check_reserved_names(Node *parsetree)
 }
 
 /*
+ * CREATE TABLE AS EXECUTE: the prepared statement's query, with the values
+ * of the EXECUTE's parameters in it, made as PostgreSQL's EvaluateParams()
+ * makes them (prepare.c) -- each evaluated once -- so that the INSERT that
+ * fills the table can be written out as a query's is.  The statement made
+ * the table by now, through ExecuteQuery(), which checked the parameters and
+ * brought the plan source's queries up to date.
+ */
+static Node *
+execute_params_mutator(Node *node, void *context)
+{
+	List	   *values = (List *) context;
+
+	if (node == NULL)
+		return NULL;
+	if (IsA(node, Param) && ((Param *) node)->paramkind == PARAM_EXTERN &&
+		((Param *) node)->paramid >= 1 &&
+		((Param *) node)->paramid <= list_length(values))
+		return copyObject(list_nth(values, ((Param *) node)->paramid - 1));
+	if (IsA(node, Query))
+		return (Node *) query_tree_mutator((Query *) node,
+										   execute_params_mutator, context, 0);
+	return expression_tree_mutator(node, execute_params_mutator, context);
+}
+
+static Query *
+execute_as_query(ExecuteStmt *stmt, const char *queryString)
+{
+	PreparedStatement *entry = FetchPreparedStatement(stmt->name, true);
+	CachedPlanSource *ps = entry->plansource;
+	List	   *queries;
+	Query	   *query;
+	ParseState *pstate;
+	List	   *values = NIL;
+	int			i = 0;
+
+	if (ps->is_valid && ps->query_list != NIL)
+		queries = copyObject(ps->query_list);
+	else
+		queries = pg_analyze_and_rewrite_fixedparams(copyObject(ps->raw_parse_tree),
+													 ps->query_string,
+													 ps->param_types,
+													 ps->num_params, NULL);
+	query = linitial_node(Query, queries);
+	if (list_length(queries) != 1 || query->commandType != CMD_SELECT)
+		ereport(ERROR,
+				(errcode(ERRCODE_WRONG_OBJECT_TYPE),
+				 errmsg("prepared statement is not a SELECT")));
+
+	pstate = make_parsestate(NULL);
+	pstate->p_sourcetext = queryString;
+	foreach_ptr(Node, param, stmt->params)
+	{
+		Oid			expected = ps->param_types[i++];
+		Node	   *expr = transformExpr(pstate, copyObject(param),
+										 EXPR_KIND_EXECUTE_PARAMETER);
+
+		expr = coerce_to_target_type(pstate, expr, exprType(expr), expected,
+									 -1, COERCION_ASSIGNMENT,
+									 COERCE_IMPLICIT_CAST, -1);
+		if (expr == NULL)
+			elog(ERROR, "could not coerce parameter %d of prepared statement \"%s\"",
+				 i, stmt->name);
+		assign_expr_collations(pstate, expr);
+		values = lappend(values, evaluate_expr((Expr *) expr, expected, -1,
+											   exprCollation(expr)));
+	}
+	free_parsestate(pstate);
+
+	return (Query *) execute_params_mutator((Node *) query, values);
+}
+
+/*
  * CREATE TABLE AS, and SELECT INTO, on a cluster's coordinator: see where it
  * is called.  The rows are the query's, deparsed as ruleutils deparses a
  * view: the query was analyzed here, and the INSERT is analyzed again from
@@ -1111,6 +1189,7 @@ gp_sql_cluster_ctas(PlannedStmt *pstmt, const char *queryString,
 {
 	CreateTableAsStmt *ctas;
 	Query	   *query;
+	ExecuteStmt *execute = NULL;
 	bool		existed;
 	bool		fill;
 	Oid			relid;
@@ -1124,6 +1203,8 @@ gp_sql_cluster_ctas(PlannedStmt *pstmt, const char *queryString,
 	}
 	ctas = (CreateTableAsStmt *) pstmt->utilityStmt;
 	query = (Query *) ctas->query;
+	if (query->commandType == CMD_UTILITY)
+		execute = castNode(ExecuteStmt, query->utilityStmt);
 
 	existed = OidIsValid(RangeVarGetRelid(ctas->into->rel, NoLock, true));
 	fill = !ctas->into->skipData;
@@ -1149,6 +1230,8 @@ gp_sql_cluster_ctas(PlannedStmt *pstmt, const char *queryString,
 	CommandCounterIncrement();
 	relid = RangeVarGetRelid(ctas->into->rel, NoLock, false);
 
+	if (execute != NULL)
+		query = execute_as_query(execute, queryString);
 	GpDistributionApplyCtasDefault(relid, query);
 	if (!fill)
 		return;
@@ -1256,12 +1339,32 @@ gp_sql_ProcessUtility(PlannedStmt *pstmt, const char *queryString,
 	 */
 	if (GpDispatchIsDispatchedStatement(pstmt->utilityStmt))
 	{
+		RenameStmt *rs = IsA(parsetree, RenameStmt) ? (RenameStmt *) parsetree : NULL;
+		Oid			relid = InvalidOid;
+		char	   *oldname = NULL;
+
+		/*
+		 * But the partitions a table's rename renames, which the coordinator
+		 * renames as PostgreSQL's catalog code does, with no statement to
+		 * send (GpPartitionRenamed): the same here, where the catalogs are
+		 * the same.
+		 */
+		if (rs != NULL && rs->renameType == OBJECT_TABLE && rs->relation != NULL)
+		{
+			relid = RangeVarGetRelid(rs->relation, NoLock, true);
+			oldname = OidIsValid(relid) ? get_rel_name(relid) : NULL;
+		}
 		if (prev_ProcessUtility)
 			prev_ProcessUtility(pstmt, queryString, readOnlyTree, context,
 								params, queryEnv, dest, qc);
 		else
 			standard_ProcessUtility(pstmt, queryString, readOnlyTree, context,
 									params, queryEnv, dest, qc);
+		if (oldname != NULL)
+		{
+			CommandCounterIncrement();
+			GpPartitionRenamed(relid, oldname, rs->newname);
+		}
 		return;
 	}
 
@@ -1275,8 +1378,8 @@ gp_sql_ProcessUtility(PlannedStmt *pstmt, const char *queryString,
 	check_reserved_names(parsetree);
 
 	/*
-	 * ALTER TABLE ... SET DISTRIBUTED: the rest of the statement, if it has
-	 * a rest, and then the new policy, carried out (distribution.c).
+	 * ALTER TABLE ... SET DISTRIBUTED: the new policy, carried out
+	 * (distribution.c).
 	 */
 	if (IsA(parsetree, AlterTableStmt) &&
 		alter_take_distribution((AlterTableStmt *) parsetree, NULL, NULL, false))
@@ -1295,6 +1398,14 @@ gp_sql_ProcessUtility(PlannedStmt *pstmt, const char *queryString,
 		(void) alter_take_distribution(stmt, &new_policy, &reorganize, true);
 		if (new_policy != NULL)
 			check_distribution_policy(new_policy);
+
+		/* a statement of its own, as Cloudberry's ATExecSetDistributedBy() wants it */
+		if (stmt->cmds != NIL)
+			ereport(ERROR,
+					(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+					 errmsg("cannot alter distribution with other subcommands for relation \"%s\"",
+							stmt->relation->relname),
+					 errhint("consider separating into multiple statements")));
 
 		/*
 		 * Only the coordinator of a cluster moves rows, as in Cloudberry,
@@ -1315,9 +1426,6 @@ gp_sql_ProcessUtility(PlannedStmt *pstmt, const char *queryString,
 							stmt->relation->relname)));
 			return;
 		}
-		if (stmt->cmds != NIL)
-			gp_sql_ProcessUtility(pstmt, queryString, readOnlyTree, context,
-								  params, queryEnv, dest, qc);
 		GpDistributionAlter(relid, new_policy, reorganize, stmt->relation->inh);
 		return;
 	}
@@ -1380,7 +1488,8 @@ gp_sql_ProcessUtility(PlannedStmt *pstmt, const char *queryString,
 
 		if (q->commandType == CMD_UTILITY && IsA(q->utilityStmt, CreateTableAsStmt) &&
 			((CreateTableAsStmt *) q->utilityStmt)->objtype == OBJECT_TABLE &&
-			IsA(((CreateTableAsStmt *) q->utilityStmt)->query, Query))
+			IsA(((CreateTableAsStmt *) q->utilityStmt)->query, Query) &&
+			castNode(Query, ((CreateTableAsStmt *) q->utilityStmt)->query)->commandType != CMD_UTILITY)
 		{
 			gp_sql_explain_cluster_ctas(pstmt, (ExplainStmt *) parsetree,
 										queryString, context, queryEnv, dest);

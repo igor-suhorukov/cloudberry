@@ -8,16 +8,70 @@ in it (test.orca.diff) holds for that pass alone.  run.sh counts a test as
 passing when gpdiff.pl, under Cloudberry's init_file and the port's, finds no
 difference or exactly the file's.
 
-correlated_subquery, qp_derived_table, qp_misc (orca)  the lines ORCA's
-  fallback trace prints and nothing else: each test sets
-  optimizer_trace_fallback, and ORCA declines the plans Cloudberry makes with
-  a Gather Motion into a slice the segments run -- one segment gathering
-  another's rows, which the port's Motions do not do yet -- so PostgreSQL's
-  planner plans them, with the same answers, and the trace says so.
+alter_distribution_policy  pg_appendonly's segrelid, which is 0: gp_ao keeps
+  every table's segment files in gp_ao.segfile, and makes no relation of
+  them for each table.  ALTER TABLE ... ALTER PARTITION FOR (1) SET WITH
+  (appendonly = true) changes that partition's access method, which
+  Cloudberry refuses, saying the partition is not partitioned.  And an
+  INSERT ... SELECT into a randomly distributed table deals the rows round
+  the segments: the port accepts gp.force_random_redistribution and
+  redistributes as if it were on, where Cloudberry's planner, with it off,
+  leaves each row on the segment it was read on.
+
+alter_table_set_am  psql's \d+ footers of an append-optimized table, which
+  are Cloudberry's psql's and not PostgreSQL 19's.  The segment files of a
+  table ALTER TABLE ... SET ACCESS METHOD rewrites into gp_ao: numbered from
+  1, where Cloudberry's rewrite writes segment 0, in gp_ao's own format,
+  version 1, with the lengths of its 8K blocks.  And
+  gp_toolkit.__gp_aoblkdir() over gp_dist_random('gp_id'), which the port
+  calls on the coordinator (see sequence_gp), where the table has no rows
+  and so no block directory.
+
+am_encoding  psql's \d+ of a table by column, which PostgreSQL 19's psql
+  prints without Cloudberry's columns for a column's compression and block
+  size.  And a heap table with a column's ENCODING clause and compresstype
+  in its WITH list, which both refuse: gp_ao refuses the ENCODING first,
+  Cloudberry the option.
+
+ao_locks (planner, orca)  the relations an append-optimized table's DELETE
+  and UPDATE lock on a segment: Cloudberry's visibility map is a relation of
+  each table's, with an index, and the port's is gp_ao.visimap, so only the
+  table is locked there.  Under the planner the coordinator reads the rows
+  through a gather, and holds AccessShareLock on the table beside the
+  ExclusiveLock it writes under.
+
+aocs (planner, orca)  aototal(), which sums the tuples of each table's
+  pg_aoseg relation: gp_ao keeps segment files in gp_ao.segfile, so there is
+  none to read, and the totals are 0; nor are there the indexes of each
+  table's visibility map and block directory the test looks for.  PostgreSQL
+  19's words for FETCH BACKWARD in a cursor that cannot scan backward, and
+  psql's \d+ footer.  zlib's ratio over gp_ao's 8K blocks, 1.23 where
+  Cloudberry's 32K ones give 1.26.  And pg_relation_size() on the
+  coordinator, which measures the coordinator's own file of a table, where
+  Cloudberry's adds up the segments': the sizes before and after the
+  TRUNCATE are one.  Under the planner a cursor's plan is a Sort of the
+  gathered rows, which can scan backward, and pg_cursors says it is
+  scrollable.
+
+AORO_Compression  pg_relation_size() on the coordinator, which measures the
+  coordinator's own file of a table -- a page of gp_ao's format, 8192 bytes
+  -- where Cloudberry's adds up the segments'; and zlib's ratio over gp_ao's
+  8K blocks.
 
 as_alias  an ORDER BY of text, which puts "XXXX" before "bbbb": the cluster
   is made with the C locale, and Cloudberry's expected output with one that
   sorts letters before case.
+
+bfv_dd, direct_dispatch, qp_targeted_dispatch (planner, orca)  the INFO
+  lines of test_print_direct_dispatch_info and of its two-phase commit,
+  which say where each statement and each command of a commit goes (see
+  bfv_dd_multicolumn).  The port's planner reads each partition of a
+  partitioned table through a gather of its own, a slice each, where
+  Cloudberry reads the partitions in one; its INSERT and COPY send rows only
+  to the segments their keys hash to; and a transaction that wrote on one
+  segment commits there in one phase, where Cloudberry prepares it on every
+  segment the transaction's statements went to.  The rows the statements
+  return and change are Cloudberry's.
 
 bfv_dd_multicolumn  the INFO lines of test_print_direct_dispatch_info that
   say where a statement goes.  Its INSERT ... SELECT of generate_series()
@@ -41,15 +95,54 @@ bfv_subquery (planner)  count_operator() finds no Seq Scan in the plan of
   Gather Motion, which scans the table on the segments, and EXPLAIN names
   the Motion.
 
+bitmap_index  PostgreSQL 19's limit on an index row, a third of an 8K page,
+  where Cloudberry's 32K pages take a larger one; and the HINT and the
+  WARNING Cloudberry's fault injector gives with a PANIC, which name its FTS
+  probe's fault, which the port's has not.
+
+brin_ao, brin_aocs (planner, orca)  under the planner, the plans the test
+  looks in for a Bitmap Heap Scan or a Seq Scan, which the segments make:
+  the coordinator's plan is a gather of the table, and names neither.  Under
+  ORCA, the comparisons of an inet or a cidr column and pg_lsn's IS NULL,
+  which it plans without the BRIN index.  The rows are Cloudberry's.
+
 case_gp  IS NOT DISTINCT FROM, and the CASE form, printed as the searched
   CASE the port's rewrite makes of them (see the singlenode suite's README).
+
+correlated_subquery, qp_derived_table, qp_misc (orca)  the lines ORCA's
+  fallback trace prints and nothing else: each test sets
+  optimizer_trace_fallback, and ORCA declines the plans Cloudberry makes with
+  a Gather Motion into a slice the segments run -- one segment gathering
+  another's rows, which the port's Motions do not do yet -- so PostgreSQL's
+  planner plans them, with the same answers, and the trace says so.
+
+DML_over_joins (orca)  the lines ORCA's fallback trace prints and nothing
+  else: ORCA declines an UPDATE or DELETE that reads another relation, which
+  the port's Motions do not carry out yet, and the planner's answers are the
+  same.
+
+expand_table_ao  pg_appendonly's compresstype of a table made with
+  compresstype=none, which gp_ao records as no compression at all, an empty
+  name, where Cloudberry records "none"; and the OID of text's hash operator
+  class (see gp_create_table).
 
 gp_create_table  the OID of text's hash operator class in
   gp_distribution_policy.distclass: the same class, which Cloudberry's
   catalog numbers 10039 and PostgreSQL 19's 10037.
 
+gp_dqa (orca)  the fallback trace of two queries of count(DISTINCT) over a
+  table with a primary key of two columns, grouped by it, which ORCA's
+  translator declines -- "No attribute entry found due to incorrect
+  normalization of query" -- and the planner answers the same.
+
 gp_types  PostgreSQL 19's words for an operator no type takes: a DETAIL
   where Cloudberry's HINT stood.
+
+gpctas (planner, orca)  the rows gp_distribution_policy has for a
+  materialized view made by CREATE ... AS, and for its table: the port keeps
+  a materialized view on the coordinator alone, with no policy (see
+  matview_ao in the manifest), so what is counted is the table's row on each
+  of the four nodes.  Under ORCA the fallback trace too.
 
 gpdist_legacy_opclasses  the complex type, Cloudberry's own, which
   PostgreSQL 19 has not got: the table whose key takes every legacy
@@ -79,22 +172,46 @@ partition_pruning  the bitmap index (M5): three indexes are not made, and
   a DROP FUNCTION ... CASCADE finds none of them to drop.  The rest, its
   partitions pruned under both planners, is Cloudberry's.
 
+partition_storage, uao_ddl_gp_partition_tables_column,
+  uao_ddl_gp_partition_tables_row  psql's \d+ of append-optimized and
+  column-oriented tables and partitions, which PostgreSQL 19's psql prints
+  without Cloudberry's columns and footers of their storage, and with their
+  NOT NULL constraints, which PostgreSQL 19 makes constraints.  A
+  partitioned table's storage options, which PostgreSQL 19 refuses in
+  pg_class.reloptions and gp_ao keeps in a label of its own: its reloptions
+  and psql's Options: footer are empty.
+
+qp_dml_joins (planner, orca)  an UPDATE of the distribution key that finds
+  one row twice moves it once (see qp_union_intersect).  And the WARNING of
+  an ALTER TABLE ... SET DISTRIBUTED BY (b) of a table CREATE TABLE AS made
+  distributed by b already: the port gives a table made from a query its
+  first column as its key, where Cloudberry's planner gives it the key its
+  rows arrive by.
+
 qp_functions (planner, orca)  PostgreSQL 19's words for a call no function
   takes -- a DETAIL where Cloudberry's HINT stood -- and for a SQL function's
   last statement, which may be a MERGE ... RETURNING now.  Cloudberry refuses
   two queries whose SQL function reads a table in a slice it cannot: under
   the planner the port gathers fun_tree's rows and calls child_list() on the
   coordinator, where it reads the table whole, and answers; under ORCA the
-  call is in the segments' slice and refused as Cloudberry refuses it, the
-  segment named in the DETAIL.  is_invalid_name() reads a replicated table,
-  which Cloudberry's slice on the coordinator's entry database has no copy
-  of; the port has no such slice, calls it in the coordinator's own plan,
-  and answers in both passes.
+  call is in the segments' slice and refused as Cloudberry refuses it.
+  is_invalid_name() reads a replicated table, which Cloudberry's slice on the
+  coordinator's entry database has no copy of; the port has no such slice,
+  calls it in the coordinator's own plan, and answers in both passes -- with
+  a row for tstab among the relations named tst%, a table
+  alter_distribution_policy leaves behind, which runs earlier.
 
 qp_union_intersect  an UPDATE of the distribution key that finds one row
   twice moves it once, as PostgreSQL's UPDATE ... FROM changes it once,
   where Cloudberry's Split refuses it ("multiple updates to a row by the
   same query is not allowed").
+
+returning_gp, triggers_gp, update_gp  what Cloudberry refuses on an
+  append-optimized table, or on a table another inherits from, and the port
+  carries out: DELETE ... RETURNING of an append-optimized table, a row
+  trigger on one ("feature not supported on appendoptimized relations"), and
+  an UPDATE of the distribution key of an inherited table ("can't split
+  update for inherit table"), whose plan the port prints.
 
 rpt (planner, orca)  the plans of writes to a replicated table that compute
   a volatile function -- random() in a condition, in a CREATE TABLE AS's
@@ -116,11 +233,42 @@ sequence_gp  nextval() over gp_dist_random('gp_id'), which Cloudberry
   takes 1, 2 and 3, then 4.  No value twice in either, which is what the
   test is for.
 
-truncate_gp  its append-optimized and column-oriented tables (M5), and what
-  stat_table_segfile_size(), a PL/Python function, finds of them: no row in
-  any segment's pg_class, and "KeyError: 0".  The heap table's files,
-  emptied by a TRUNCATE in the transaction that made the table, are
-  Cloudberry's on every segment.
+truncate_gp  the files stat_table_segfile_size(), a PL/Python function,
+  finds of an append-optimized and a column-oriented table emptied by a
+  TRUNCATE in the transaction that made them: gp_ao keeps a table's segment
+  files as extents of pages in its relation, whose block 0 is its metapage,
+  so the table is one file of one page, 8192 bytes, where Cloudberry's files
+  are empty; and a table by column keeps its columns there too, where
+  Cloudberry's has a file of each, numbered from 128.  The heap table's
+  files are Cloudberry's on every segment.
+
+uao_ddl_alter_ao_part_exch_column, uao_ddl_alter_ao_part_exch_row
+  gp.select_invisible, which is gp_ao's and shows the rows an
+  append-optimized table's visibility map hides; Cloudberry's
+  gp_select_invisible shows a heap table's dead rows too, and counts the
+  three the test's UPDATE of its heap partition left.
+
+uao_ddl_create_ao_tables_column, uao_ddl_create_ao_tables_row  the relations
+  pg_appendonly names for a table's segment files, visibility map and block
+  directory, and their indexes, which gp_ao keeps in its own tables,
+  gp_ao.segfile, visimap and blkdir: pg_appendonly names none.
+
+uao_ddl_temp_on_commit_delete_rows_column,
+  uao_ddl_temp_on_commit_delete_rows_row  the segment file rows are written
+  to in the transaction that made the table: 1, as gp_ao numbers them from
+  1, where Cloudberry writes segment 0, which it keeps for a table made in
+  the same transaction and for utility mode.
+
+uaocs_catalog_tables  what gp_toolkit.__gp_aovisimap_hidden_info() finds
+  after VACUUM FULL, which gp_ao carries out as CLUSTER rewrites a table,
+  into a new segment file 1 on each segment; Cloudberry's compacts a segment
+  file with deleted rows into a new one, 2, and lists the files it emptied
+  as well.
+
+vacuum_full_ao, vacuum_full_heap_bitmapindex  pg_relation_size() over
+  gp_dist_random('gp_id'), which the port calls on the coordinator (see
+  sequence_gp), where the tables have no rows: of a table's own files, 0,
+  and of pg_appendonly's segrelid, which is 0, nothing.
 
 with_clause  three recursive queries Cloudberry refuses -- a join of nested
   RECURSIVE clauses, and window functions in a recursive query's target

@@ -1149,6 +1149,44 @@ find_segment_of(Node *tree, Index relid)
 	return (Node *) cxt[1];
 }
 
+/*
+ * The whole-row Var of varno's row the plan reads, first in the target the
+ * rel gives the plan above it: of the table's row type, or of RECORD, as the
+ * planner makes the one a foreign table's UPDATE reads, and O20's for a
+ * table whose access method takes its old row from the plan.  The scan
+ * tuple's column has the type the plan's Var expects, or the executor
+ * refuses it; and one column serves every whole-row Var of the rel, which
+ * setrefs.c matches by column number alone.  So RECORD's, where the plan
+ * has one: the other is gp_segment_id's argument, segment_of(t.*), whose
+ * call is a column of the scan tuple of its own and reads no whole row.
+ */
+static bool
+find_whole_row_walker(Node *node, void *context)
+{
+	void	  **cxt = (void **) context;
+
+	if (node == NULL)
+		return false;
+	if (IsA(node, Var) && ((Var *) node)->varno == *(Index *) cxt[0] &&
+		((Var *) node)->varattno == InvalidAttrNumber &&
+		((Var *) node)->varlevelsup == 0)
+	{
+		if (cxt[1] == NULL || ((Var *) node)->vartype == RECORDOID)
+			cxt[1] = node;
+		return ((Var *) node)->vartype == RECORDOID;
+	}
+	return expression_tree_walker(node, find_whole_row_walker, context);
+}
+
+static Var *
+find_whole_row(Node *tree, Index relid)
+{
+	void	   *cxt[2] = {&relid, NULL};
+
+	(void) find_whole_row_walker(tree, cxt);
+	return (Var *) cxt[1];
+}
+
 /* One more column of what the segments send. */
 static int
 remote_column(StringInfo sql, List **types, List **typmods,
@@ -1302,8 +1340,21 @@ gather_plan(PlannerInfo *root, RelOptInfo *rel, CustomPath *best_path,
 							InvalidOid, 0),
 					"tableoid", GATHER_SRC_TABLEOID);
 	if (whole_row)
-		SCAN_COLUMN(makeWholeRowVar(rte, rel->relid, 0, false),
+	{
+		Var		   *wholerow = find_whole_row((Node *) rel->reltarget->exprs,
+											  rel->relid);
+
+		if (wholerow == NULL || wholerow->vartype != RECORDOID)
+		{
+			Var		   *other = find_whole_row((Node *) tlist, rel->relid);
+
+			if (other != NULL && (wholerow == NULL || other->vartype == RECORDOID))
+				wholerow = other;
+		}
+		SCAN_COLUMN(wholerow != NULL ? copyObject(wholerow)
+					: makeWholeRowVar(rte, rel->relid, 0, false),
 					RelationGetRelationName(relation), GATHER_SRC_WHOLEROW);
+	}
 
 	/*
 	 * gp_segment_id of a hashed or random table, where the query names it:

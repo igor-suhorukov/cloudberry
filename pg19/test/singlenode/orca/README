@@ -47,7 +47,8 @@ An order the query leaves open (8)
   own (CExpressionPreprocessor::PexprRemoveSuperfluousLimit), as the SQL
   standard lets it and Cloudberry's ORCA does; subselect's
   SELECT ... FROM (SELECT ... ORDER BY c1, pk) x LIMIT 3 takes three rows of
-  an unordered scan.
+  an unordered scan.  window has the planner pass's hunk as well, count()
+  answered as count(*) (see ../postgres/README).
 
 A test that inspects its own plan (5)
 

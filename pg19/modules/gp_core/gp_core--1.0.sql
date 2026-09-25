@@ -14,6 +14,15 @@ CREATE SCHEMA IF NOT EXISTS gp_internal;
 GRANT USAGE ON SCHEMA gp_internal TO PUBLIC;
 
 /*
+ * And "gp" is anyone's to reach as well, as Cloudberry's gp_dist_random() and
+ * catalog views are: gp.dist_random() reads a relation through a query run
+ * as the caller, here and on the segments, so it reads only what the caller
+ * may, and the one function in it that runs any statement,
+ * exec_on_segments(), has EXECUTE revoked from PUBLIC below.
+ */
+GRANT USAGE ON SCHEMA gp TO PUBLIC;
+
+/*
  * A segment's sample of a table, for ANALYZE on the coordinator (O3).  The
  * first row is the segment's live and dead row counts; every other row is a
  * sampled row of the table's own type.  It checks that the caller may read or
@@ -366,6 +375,21 @@ GRANT SELECT ON pg_catalog.gp_id, pg_catalog.gp_segment_configuration,
 	TO PUBLIC;
 
 RESET allow_system_table_mods;
+
+CREATE FUNCTION pg_catalog.gp_stat_force_next_flush()
+RETURNS void
+AS 'MODULE_PATHNAME', 'gp_stat_force_next_flush'
+LANGUAGE C;
+
+/*
+ * Each of these stands for a catalog table of Cloudberry's, which has
+ * gp_segment_id, as every table of Cloudberry's has: a view so labelled
+ * has the column too, the node's own content id (gp_segment.c).
+ */
+SECURITY LABEL FOR gp ON VIEW pg_catalog.gp_id IS 'catalog';
+SECURITY LABEL FOR gp ON VIEW pg_catalog.gp_segment_configuration IS 'catalog';
+SECURITY LABEL FOR gp ON VIEW pg_catalog.gp_configuration_history IS 'catalog';
+SECURITY LABEL FOR gp ON VIEW pg_catalog.gp_distribution_policy IS 'catalog';
 
 /*
  * Run a statement on every segment, and report what each one said.

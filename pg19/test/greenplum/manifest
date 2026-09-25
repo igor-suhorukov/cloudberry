@@ -1,98 +1,222 @@
 # Part of Cloudberry's greenplum_schedule (src/test/regress), as the port
 # runs it on a coordinator and three segments: the tests of the schedule
 # that bear on M2 -- dispatch, distribution, Motions, joins, aggregates,
-# subqueries, partitions, DML -- in the schedule's order.
+# subqueries, partitions, DML -- and on M5's append-optimized and
+# column-oriented tables, in the schedule's order.
 #
 #   run   the test runs here, in both passes; cloudberry/ holds a difference
 #         reviewed and kept, where one pass has one
 #   skip  it needs what the port does not have yet: the rest of the line is
 #         the first of Cloudberry's statements it refuses, as the port says
 #
-# The schedule's other tests -- append-optimized and column-oriented tables,
-# external tables, resource queues and groups, fault injection, FTS, the
-# interconnect's settings -- need M3 to M7, and are not listed.
-run  gp_create_table
-run  gpdist
-run  gpdist_opclasses
-run  gpdist_legacy_opclasses
-skip gpctas  unrecognized parameter "appendonly"; relation "ctas_aocs" does not exist
-skip direct_dispatch  access method "bitmap" does not exist; current transaction is aborted, commands ignored until end of transaction block
-skip bfv_dd  access method "bitmap" does not exist
-run  bfv_dd_multicolumn
-run  bfv_dd_types
-run  join_gp
-skip union_gp  UNION types text and integer cannot be matched; syntax error at or near "EXTERNAL"
-run  limit_gp
-run  case_gp
-run  notin
-skip percentile  unrecognized parameter "appendonly"; relation "mpp_22219" does not exist
+# The schedule's other tests -- external tables, resource queues and
+# groups, fault injection, FTS, the interconnect's settings -- need M5 to
+# M7, and are not listed.
 skip gp_aggregates  relation "aggtest" does not exist
+run  update_gp
+run  triggers_gp
+run  returning_gp
 run  gp_types
 skip gp_index  multiple primary keys for table "tbl_create_index" are not allowed
 run  gp_sort
-skip update_gp  unrecognized parameter "appendonly"; relation "update_ao_table" does not exist
-skip returning_gp  unrecognized parameter "appendonly"; relation "returning_aotab" does not exist
-skip triggers_gp  access method "ao_row" does not exist; access method "ao_column" does not exist
-skip foreign_key_gp  access method "ao_row" does not exist; access method "ao_column" does not exist
-skip distributed_transactions  unrecognized configuration parameter "debug_abort_after_distributed_prepared"; unrecognized configuration parameter "debug_dtm_action_segment"
-skip motion_gp  row is too big: size 10032, maximum size 8160; unrecognized parameter "appendonly"
-run  gp_pullup_expr
-run  with_clause
-run  gpparams
-skip subselect_gp  unrecognized parameter "appendonly"; relation "t3cozlib" does not exist
-skip subselect_gp2  syntax error at or near "EXTERNAL"; relation "echotable" does not exist
-skip gp_dqa  access method "ao_row" does not exist; relation "t_issue_659" does not exist
-run  gp_distinct_plans
-run  olap_setup
-skip olap_group  function group_id() does not exist
-skip olap_window_seq  DISTINCT is not implemented for window functions; cannot copy window "win1" because it has a frame clause
-skip partition  syntax error at or near "only"; access method "ao_row" does not exist
-skip partition1  access method "ao_row" does not exist; relation "foz" does not exist
-skip partition_ddl  access method "ao_row" does not exist; relation "mpp3045_hhh" does not exist
-run  partition_pruning
-run  expand_table
-run  expand_table_regression
-run  shrink_table
-run  partition_prune_opfamily
-skip alter_distpol_dropped  unrecognized parameter "appendonly"; current transaction is aborted, commands ignored until end of transaction block
-run  create_table_distpol
-skip alter_distribution_policy  unrecognized parameter "appendonly"; relation "atsdb_ao" does not exist
-skip DML_over_joins  cannot specify storage parameters for a partitioned table; relation "sales_par_co" does not exist
-run  bfv_joins
-run  bfv_subquery
-skip bfv_olap  cannot copy window "w" because it has a frame clause
-skip bfv_aggregate  argument of ROWS must not contain variables; cannot copy window "w" because it has a frame clause
-skip bfv_cte  count(*) must be used to call a parameterless aggregate function; type "cte" does not exist
-skip qp_join_union_all  unrecognized parameter "appendonly"; relation "dist_large_ao" does not exist
-skip qp_with_clause  access method "bitmap" does not exist; unrecognized parameter "appendonly"
-skip qp_dml_joins  access method "ao_row" does not exist; relation "dml_ao_pt_r" does not exist
-run  qp_misc
-run  qp_select
-skip qp_subquery  relation "qp_subquery.v" does not exist; relation "v" does not exist
-skip qp_correlated_query  differs: answers the queries with a correlation that skips a level, which Cloudberry refuses, in an order that varies from run to run
-run  qp_derived_table
-skip qp_targeted_dispatch  cannot specify storage parameters for a partitioned table; relation "mwv_cdetail_table" does not exist
-run  qp_functions
-skip cursor  function gp_inject_fault_infinite(unknown, unknown, integer) does not exist; current transaction is aborted, commands ignored until end of transaction block
-run  sequence_gp
-run  tidscan_gp
-skip gp_array_agg  function gp_array_agg(integer) does not exist; function gp_array_agg(text) does not exist
-skip agg_pushdown  unrecognized parameter "appendonly"; relation "nation_pd" does not exist
-run  rpt
-run  rpt_joins
-skip namespace_gp  unrecognized role option "resource"; role "tmp_test_schema_role" does not exist
-run  truncate_gp
-skip gp_rules  unrecognized parameter "appendonly"; relation "aotable_to_view_test1" does not exist
-run  as_alias
-skip indexjoin  unrecognized parameter "appendonly"; relation "with_index_table" does not exist
-skip transient_types  could not access file "regress.so": No such file or directory; function assign_new_record() does not exist
-skip complex  type "complex" does not exist; relation "complex_ttbl" does not exist
+run  foreign_key_gp
+run  bitmapscan
+run  bitmapscan_ao
+run  case_gp
+run  limit_gp
+run  notin
+skip percentile  function percentile_cont(numeric, timestamp without time zone) does not exist
+run  join_gp
+skip union_gp  UNION types text and integer cannot be matched; syntax error at or near "EXTERNAL"
+run  gp_create_table
+skip matview_ao  relation "public.m_heap" does not exist; relation "m_heap" does not exist
+skip filter  cannot copy window "w" because it has a frame clause
+run  gpctas
+run  gpdist
+run  gpdist_opclasses
+run  gpdist_legacy_opclasses
 skip matrix  function sum(smallint[]) does not exist; function sum(integer[]) does not exist
 run  sublink
-skip filter  cannot copy window "w" because it has a frame clause
-skip gp_hashagg  access method "bitmap" does not exist
+run  olap_setup
+skip complex  type "complex" does not exist; relation "complex_ttbl" does not exist
+skip distributed_transactions  unrecognized configuration parameter "debug_abort_after_distributed_prepared"; unrecognized configuration parameter "debug_dtm_action_segment"
+skip namespace_gp  unrecognized role option "resource"; role "tmp_test_schema_role" does not exist
+run  bitmap_index
+run  truncate_gp
+run  indexjoin
+run  as_alias
+run  gpparams
+run  with_clause
+skip transient_types  could not access file "regress.so": No such file or directory; function assign_new_record() does not exist
+run  gp_rules
+skip motion_gp  row is too big: size 10032, maximum size 8160; syntax error at or near ")"
+run  gp_pullup_expr
+skip cursor  function gp_inject_fault_infinite(unknown, unknown, integer) does not exist; current transaction is aborted, commands ignored until end of transaction block
+run  gp_hashagg
+run  sequence_gp
+run  tidscan_gp
+run  agg_pushdown
+skip gp_array_agg  function gp_array_agg(integer) does not exist; function gp_array_agg(text) does not exist
+run  gp_dqa
+skip subselect_gp  unrecognized EXPLAIN option "locus"
+skip subselect_gp2  syntax error at or near "EXTERNAL"; relation "echotable" does not exist
 run  gp_transactions
+skip olap_group  function group_id() does not exist
+skip olap_window_seq  DISTINCT is not implemented for window functions; cannot copy window "win1" because it has a frame clause
+skip appendonly  type "gp_fastsequence" does not exist
+run  create_table_distpol
+run  alter_distpol_dropped
+run  gp_distinct_plans
+skip partition  syntax error at or near "only"
+skip partition1  type "cc" does not exist; column "partition" of relation "hhh_l1" does not exist
+run  partition_storage
+skip partition_ddl  type "aa" does not exist; cannot specify storage parameters for a partitioned table
+run  brin_ao
+run  brin_aocs
+skip column_compression  relation "gp_partition_template" does not exist
+skip alter_table_aocs  type "gp_fastsequence" does not exist
+skip alter_table_aocs2  unrecognized configuration parameter "gp_recursive_cte"; function descendants_of(unknown) does not exist
+run  alter_distribution_policy
+run  aoco_privileges
+run  alter_table_ao
+run  alter_table_set_am
+run  aocs
+run  partition_pruning
+run  expand_table
+run  expand_table_ao
+run  expand_table_aoco
+run  expand_table_regression
+run  shrink_table
+run  direct_dispatch
+run  bfv_dd
+run  bfv_dd_multicolumn
+run  bfv_dd_types
+skip bfv_olap  cannot copy window "w" because it has a frame clause
+skip bfv_aggregate  argument of ROWS must not contain variables; cannot copy window "w" because it has a frame clause
+run  DML_over_joins
+run  rpt
+run  rpt_joins
+skip bfv_cte  count(*) must be used to call a parameterless aggregate function; type "cte" does not exist
+run  bfv_joins
+run  bfv_subquery
+run  qp_misc
+run  qp_dml_joins
+run  qp_select
+run  partition_prune_opfamily
+run  qp_join_union_all
+skip qp_full_join  function disable_xform(unknown) does not exist; function enable_xform(unknown) does not exist
+skip qp_with_clause  canceling statement due to user request: under ORCA, query 3 of its nested CTEs is still running at the harness's 60 seconds
+run  qp_derived_table
+run  qp_bitmapscan
+skip qp_correlated_query  differs: answers the queries with a correlation that skips a level, which Cloudberry refuses, in an order that varies from run to run
+run  qp_targeted_dispatch
+run  correlated_subquery
+skip qp_subquery  relation "qp_subquery.v" does not exist; relation "v" does not exist
 run  qp_left_anti_semi_join
 run  qp_union_intersect
-skip qp_full_join  function disable_xform(unknown) does not exist; function enable_xform(unknown) does not exist
-run  correlated_subquery
+run  qp_functions
+run  uao_compaction/full
+run  uao_compaction/outdated_partialindex
+run  uao_compaction/drop_column_update
+run  uao_compaction/eof_truncate
+run  uao_compaction/basic
+run  uao_compaction/outdatedindex
+run  uao_compaction/update_toast
+run  uao_compaction/outdatedindex_abort
+run  uao_compaction/delete_toast
+run  uao_compaction/alter_table_analyze
+run  uao_compaction/full_eof_truncate
+run  uao_compaction/full_threshold
+run  uao_compaction/index
+run  uao_compaction/index2
+run  uaocs_compaction/index
+run  uaocs_compaction/alter_table_analyze
+run  uaocs_compaction/basic
+run  uaocs_compaction/drop_column_update
+run  uaocs_compaction/eof_truncate
+run  uaocs_compaction/full
+run  uaocs_compaction/full_eof_truncate
+run  uaocs_compaction/full_threshold
+run  uaocs_compaction/outdated_partialindex
+run  uaocs_compaction/outdatedindex
+run  uaocs_compaction/outdatedindex_abort
+run  uao_ddl/cursor_row
+run  uao_ddl/cursor_column
+run  uao_ddl/alter_ao_table_statistics_row
+run  uao_ddl/alter_ao_table_statistics_column
+run  uao_ddl/alter_ao_table_setdefault_row
+run  uao_ddl/alter_ao_table_index_row
+run  uao_ddl/alter_ao_table_owner_column
+run  uao_ddl/spgist_over_ao_table_row
+run  uao_ddl/alter_ao_table_owner_row
+run  uao_ddl/alter_ao_table_setstorage_row
+run  uao_ddl/alter_ao_table_constraint_row
+run  uao_ddl/alter_ao_table_constraint_column
+run  uao_ddl/alter_ao_table_index_column
+run  uao_ddl/blocksize_row
+run  uao_ddl/compresstype_column
+run  uao_ddl/alter_ao_table_setdefault_column
+run  uao_ddl/blocksize_column
+run  uao_ddl/temp_on_commit_delete_rows_row
+run  uao_ddl/temp_on_commit_delete_rows_column
+run  uao_ddl/spgist_over_ao_table_column
+run  uao_ddl/alter_ao_table_setstorage_column
+run  uao_ddl/alter_ao_table_col_ddl_row
+run  uao_ddl/compresstype_row
+run  uao_ddl/alter_ao_table_col_ddl_column
+run  uao_ddl/alter_ao_part_tables_splitpartition_row
+run  uao_ddl/alter_ao_part_tables_splitpartition_column
+run  uao_ddl/create_ao_tables_row
+run  uao_ddl/create_ao_table_500cols_row
+run  uao_ddl/create_ao_tables_column
+run  uao_ddl/alter_ao_part_exch_row
+run  uao_ddl/alter_ao_part_exch_column
+run  uao_ddl/alter_ao_part_tables_row
+run  uao_ddl/create_ao_table_500cols_column
+run  uao_ddl/alter_ao_part_tables_column
+run  uao_ddl/alter_drop_allcol_row
+run  uao_ddl/alter_drop_allcol_column
+run  uao_ddl/alter_rollback_row
+run  uao_ddl/alter_rollback_column
+run  uao_ddl/uao_allalter_row
+run  uao_ddl/uao_allalter_column
+run  uao_ddl/alter_table_reloptions_row
+run  uao_ddl/alter_table_reloptions_column
+run  uao_ddl/gp_partition_tables_column
+run  uao_ddl/gp_partition_tables_row
+run  uao_dml/uao_dml_cursor_row
+run  uao_dml/uao_dml_select_row
+run  uao_dml/uao_dml_cursor_column
+run  uao_dml/uao_dml_select_column
+run  ao_unique_index_partition
+run  uao_compaction/full_stats
+run  uao_compaction/stats
+run  uao_compaction/index_stats
+run  uao_compaction/drop_column
+run  uaocs_compaction/full_stats
+run  uaocs_compaction/stats
+run  uaocs_compaction/index_stats
+run  uaocs_compaction/drop_column
+skip uao_catalog_tables  schema "pg_aoseg" does not exist
+run  uaocs_catalog_tables
+run  uao_compaction/threshold
+run  uaocs_compaction/threshold
+run  uao_ddl/analyze_ao_table_every_dml_row
+run  uao_ddl/analyze_ao_table_every_dml_column
+run  uao_dml/uao_dml_row
+run  uao_dml/uao_dml_column
+run  ao_locks
+run  vacuum_full_ao
+run  vacuum_full_heap_bitmapindex
+skip vacuum_ao_aux_only  relation "ao_aux_only" does not exist; failed to inject fault: ERROR:  fault not set, fault name:'vacuum_rel_finished_one_relation'
+skip ao_checksum_corruption  unrecognized configuration parameter "gp_appendonly_verify_block_checksums"
+skip AOCO_Compression  relation "gp_partition_template" does not exist
+run  AORO_Compression
+run  am_encoding
+skip ao_segfile  unrecognized configuration parameter "gp_appendonly_insert_files"; unrecognized configuration parameter "gp_appendonly_insert_files_tuples_range"
+run  uao_dml/ao_unique_index_build_row
+run  uao_dml/ao_unique_index_build_column
+run  uao_dml/uao_dml_unique_index_delete_row
+run  uao_dml/uao_dml_unique_index_delete_column
+run  uao_dml/uao_dml_unique_index_update_row
+run  uao_dml/uao_dml_unique_index_update_column

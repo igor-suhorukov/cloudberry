@@ -1,0 +1,14 @@
+@@
+- atsdb   | t        | 
++ atsdb   | f        | 
+@@
+- atsdb   | t        | {compresslevel=3}
++ atsdb   | f        | {compresslevel=3}
+@@
+- atsdb   | t        | {compresslevel=3}
++ atsdb   | f        | {compresslevel=3}
+@@
+-ERROR:  table "mpp5738_1_prt_1" is not partitioned
+@@
+- f
++ t

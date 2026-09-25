@@ -307,6 +307,7 @@ _bitmap_create_lov_heapTupleDesc(Relation rel)
 
 	/* the offset number */
 	TupleDescInitEntry(tupDesc, attno, "offsetNumber", INT4OID, -1, 0);
+	TupleDescFinalize(tupDesc);
 
 	return tupDesc;
 }

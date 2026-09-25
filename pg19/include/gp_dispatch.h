@@ -44,6 +44,7 @@
 #include "postgres.h"
 
 #include "executor/tuptable.h"
+#include "fmgr.h"
 #include "lib/stringinfo.h"
 #include "utils/tuplestore.h"
 
@@ -218,6 +219,14 @@ extern uint64 GpCopyInEnd(void);
 extern void GpDispatchQueryFirstValues(const char *sql, int content,
 									   char **values);
 
+/*
+ * A set-returning function whose rows are the segments' (EXECUTE ON ALL
+ * SEGMENTS), called on a cluster's coordinator: the same call run on every
+ * segment, its rows materialized as the function's result.  False where
+ * there are no segments to ask, and the function answers for itself.
+ */
+extern bool GpDispatchFunctionToSegments(FunctionCallInfo fcinfo);
+
 /* A relation's name in SQL a segment is sent; pg_temp for a temporary one. */
 extern char *GpDispatchRelationName(Oid relid);
 
@@ -273,22 +282,28 @@ struct pg_conn;
 extern void GpDispatchRelayNotices(struct pg_conn *conn);
 extern void GpDispatchFlushNotices(void);
 
-/* Defines the settings; called from gp_core's _PG_init. */
 /*
  * An object whose "gp" label the coordinator changed: the segments are sent
  * its label before the next statement they run, after the DDL being sent if
- * one is, and before the transaction commits.
+ * one is, and before the transaction commits.  GpDispatchNoteLabelOf() is
+ * the same for another provider's label, which a module writes with
+ * SetSecurityLabel() and its segments need too: gp_ao's encodings.
  */
 struct ObjectAddress;
 extern void GpDispatchNoteLabel(const struct ObjectAddress *object);
+extern void GpDispatchNoteLabelOf(const struct ObjectAddress *object,
+								  const char *provider);
 
 /*
- * The DDL payload that writes an object's "gp" label on a segment, or NULL;
- * see gp_ddl.c.
+ * The DDL payload that writes an object's "gp" label, or another provider's,
+ * on a segment, or NULL; see gp_ddl.c.
  */
 extern char *GpDdlLabelPayload(const struct ObjectAddress *object,
 							   const char *label);
+extern char *GpDdlLabelPayloadOf(const struct ObjectAddress *object,
+								 const char *provider, const char *label);
 
+/* Defines the settings; called from gp_core's _PG_init. */
 extern void GpDispatchInit(void);
 
 /* Installs the DDL dispatch hooks, where there is a cluster; see gp_ddl.c. */

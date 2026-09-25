@@ -184,7 +184,10 @@ returning_gp  DELETE ... RETURNING of an append-optimized table.
 singlenode_compatibility_cbdb  the warning Cloudberry's single-node mode
   gives for DISTRIBUTED BY (the port records the policy, for ORCA and M2),
   and TABLE (...) and anytable.  ALTER TABLE ... SET DISTRIBUTED BY is
-  refused as Cloudberry refuses it in single-node mode.
+  refused as Cloudberry refuses it in single-node mode.  Under ORCA the same
+  differences, which gpdiff.pl places elsewhere -- it pairs the count of
+  the append-optimized table aocs1 with Cloudberry's there -- so that pass
+  has a file of its own (singlenode_compatibility_cbdb.orca.diff).
 subselect_gp2  an external web table.
 tag  Its catalogs are views here, of the port's labels (gp_sql's script
   makes pg_tag, pg_tag_description and Cloudberry's five *_tag_descriptions

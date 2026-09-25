@@ -40,6 +40,7 @@
 #include "lib/stringinfo.h"
 #include "utils/builtins.h"
 #include "utils/fmgroids.h"
+#include "utils/inval.h"
 
 #include "gp_dispatch.h"
 #include "gp_label.h"
@@ -266,6 +267,16 @@ gp_label_follow_policy(const ObjectAddress *object, const char *old_label,
 
 	if (object->classId != RelationRelationId || object->objectSubId != 0)
 		return;
+
+	/*
+	 * What is cached of the relation -- ORCA's metadata, a plan cached for
+	 * it -- was made under the label it had, and pg_seclabel is no catalog a
+	 * relcache entry is rebuilt for.  A table's files replaced would say so,
+	 * but a TRUNCATE in the transaction that made the table replaces none.
+	 */
+	if ((old_label == NULL) != (new_label == NULL) ||
+		(old_label != NULL && strcmp(old_label, new_label) != 0))
+		CacheInvalidateRelcacheByRelid(object->objectId);
 	before = policy_opclasses(gp_label_value(old_label, GP_LABEL_distributed_by));
 	after = policy_opclasses(gp_label_value(new_label, GP_LABEL_distributed_by));
 
@@ -386,6 +397,10 @@ GpLabelSet(const ObjectAddress *object, GpLabelKey key, const char *value)
 
 	if (key == GP_LABEL_distributed_by)
 		gp_label_follow_policy(object, label, buf.len > 0 ? buf.data : NULL);
+	else if (object->classId == RelationRelationId && object->objectSubId == 0 &&
+			 ((label == NULL) != (buf.len == 0) ||
+			  (label != NULL && strcmp(label, buf.data) != 0)))
+		CacheInvalidateRelcacheByRelid(object->objectId);	/* as above */
 
 	/* An object with nothing left to say loses its label entirely. */
 	SetSecurityLabel(object, GP_LABEL_PROVIDER, buf.len > 0 ? buf.data : NULL);

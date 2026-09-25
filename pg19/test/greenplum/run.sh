@@ -65,7 +65,7 @@ SOCK="$(mktemp -d /tmp/cbg-XXXXXX)"
 EXEC="$(mktemp -d "${HOME:-/var/lib/postgresql}/cb-greenplum-XXXXXX")"
 BASEPORT="${PGPORT:-$((7300 + RANDOM % 200))}"
 NODES=4					# a coordinator and Cloudberry's three segments
-PRELOAD='gp_core,gp_orca,gp_sql'
+PRELOAD='gp_core,gp_orca,gp_sql,gp_ao'
 SECRET="greenplum-schedule-$RANDOM$RANDOM$RANDOM"
 
 port() { echo $((BASEPORT + $1)); }
@@ -134,8 +134,15 @@ while read -r name; do
 			cbname="$short" ;;
 		*) cbname="gp_$short" ;;
 	esac
+	# the column SHOW names, read as a row's field; see the singlenode suite
+	printf 's/\\b([a-z_][a-z0-9_]*)\\.%s\\b/\\1."%s"/gI\n' "$cbname" "$name"
 	printf 's/\\b(set|reset|show)(\\s+(local|session)\\s+|\\s+)%s\\b/\\1\\2%s/gI\n' "$cbname" "$name"
 	printf "s/\\\\b(current_setting|set_config)\\\\('%s'/\\\\1('%s'/gI\n" "$cbname" "$name"
+	# SHOW's header of it, the same width spelled either way; see the
+	# singlenode suite
+	case "$cbname" in gp_*)
+		printf 's/^( +)%s( +)$/\\1%s\\2/\n' "$cbname" "$name" ;;
+	esac
 done > "$WORK/respell.sed"
 
 convert() {
@@ -158,22 +165,40 @@ cp "$HERE"/expected/*.out "$SN/expected/" 2> /dev/null
 { echo "test: test_setup"; echo "test: gp_setup"; } > "$SN/schedule"
 echo "gp_setup" > "$SN/port_tests"
 : > "$SN/cloudberry_tests"
-for t in $run_tests; do
-	mkdir -p "$SN/sql/$(dirname "$t")" "$SN/expected/$(dirname "$t")"
-	if [ -f "$CB/input/$t.source" ]; then
-		convert "$CB/input/$t.source" | sed -E -f "$WORK/respell.sed" > "$SN/sql/$t.sql"
+# A test in a directory, and one Cloudberry's pg_regress makes twice, _row
+# and _column, from one file, are made as the singlenode suite makes them:
+# uao_dml/uao_dml_select_row runs as uao_dml_uao_dml_select_row.
+amsub() {
+	if [ -n "$am" ]; then
+		sed -e "s/@amname@/$am/g" -e "s/@aoseg@/$aoseg/g"
 	else
-		sed -E -f "$WORK/respell.sed" "$CB/sql/$t.sql" > "$SN/sql/$t.sql"
+		cat
 	fi
-	if [ -f "$CB/output/$t.source" ]; then
-		convert "$CB/output/$t.source" | sed -E -f "$WORK/respell.sed" > "$SN/expected/$t.out"
+}
+for t in $run_tests; do
+	f=$(echo "$t" | tr / _)
+	src=$t am=
+	for v in row:ao_row:aoseg column:ao_column:aocsseg; do
+		IFS=: read -r suffix a s <<< "$v"
+		if [ "${t%_$suffix}" != "$t" ] && [ -f "$CB/input/$(dirname "$t")/GENERATE_ROW_AND_COLUMN_FILES" ]; then
+			src=${t%_$suffix} am=$a aoseg=$s
+		fi
+	done
+	if [ -f "$CB/input/$src.source" ]; then
+		convert "$CB/input/$src.source" | amsub | sed -E -f "$WORK/respell.sed" > "$SN/sql/$f.sql"
 	else
-		for f in "$CB/expected/$t.out" "$CB"/expected/"$t"_[0-9].out; do
-			[ -f "$f" ] && sed -E -f "$WORK/respell.sed" "$f" > "$SN/expected/$(dirname "$t")/$(basename "$f")"
+		sed -E -f "$WORK/respell.sed" "$CB/sql/$t.sql" > "$SN/sql/$f.sql"
+	fi
+	if [ -f "$CB/output/$src.source" ]; then
+		convert "$CB/output/$src.source" | amsub | sed -E -f "$WORK/respell.sed" > "$SN/expected/$f.out"
+	else
+		for e in "$CB/expected/$t.out" "$CB"/expected/"$t"_[0-9].out; do
+			[ -f "$e" ] || continue
+			sed -E -f "$WORK/respell.sed" "$e" > "$SN/expected/$(echo "${e#"$CB"/expected/}" | tr / _)"
 		done
 	fi
-	echo "test: $t" >> "$SN/schedule"
-	echo "$t" >> "$SN/cloudberry_tests"
+	echo "test: $f" >> "$SN/schedule"
+	echo "$f" >> "$SN/cloudberry_tests"
 done
 mkdir -p "$WORK/testtablespace"
 
@@ -196,6 +221,10 @@ name=\$(basename "\$exp" .out)
 cb=(-I HINT: -I CONTEXT: -I GP_IGNORE: --gpd_ignore_plans
     --gpd_init "$CB/init_file" --gpd_init "$HERE/init_file")
 canon="$WORK/\$CB_DIFF_MODE/canon/\$name.diff"
+# the results less the place PostgreSQL 19 gives a shell type (shellpos.pl)
+mkdir -p "$WORK/\$CB_DIFF_MODE/shellpos"
+perl "$HERE/../singlenode/shellpos.pl" < "\$res" > "$WORK/\$CB_DIFF_MODE/shellpos/\$(basename "\$res")"
+res="$WORK/\$CB_DIFF_MODE/shellpos/\$(basename "\$res")"
 env PATH=/usr/bin:/bin perl "$WORK/gpdiff/gpdiff.pl" -U0 "\${cb[@]}" "\$exp" "\$res" 2> /dev/null |
 	perl "$HERE/../singlenode/canon.pl" > "\$canon"
 # A comparison that could not be made is a difference, never an empty one.

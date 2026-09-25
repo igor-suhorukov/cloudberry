@@ -772,6 +772,7 @@ ao_file_write(Relation rel, uint32 filenum, uint64 offset,
 			PageSetLSN(page, recptr);
 		}
 		END_CRIT_SECTION();
+		(void) AO_FAULT("xlog_ao_insert", rel);
 
 		UnlockReleaseBuffer(buf);
 

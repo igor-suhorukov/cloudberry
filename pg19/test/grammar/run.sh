@@ -1362,6 +1362,24 @@ is "and in the body of a SQL function, standard or quoted" \
     CREATE FUNCTION sql_decode2(x int) RETURNS text LANGUAGE sql AS 'SELECT decode(x, 1, ''one'', ''other'')';
     SELECT sql_decode1(1) || ' ' || sql_decode2(2);" "one other"
 
+# --- count() ------------------------------------------------------------------
+#
+# Cloudberry's parse analysis lets an aggregate be called with neither
+# arguments nor a star (parse_func.c), and its tests call count so.
+
+is "count() is count(*), as an aggregate and as a window function" \
+   "SELECT gp_sql.desugar('SELECT count(), count ( ) OVER () FROM t');" \
+   "SELECT count(*), count(*) OVER () FROM t"
+
+is "and answers as count(*) does" \
+   "SELECT count(), (SELECT count() FROM generate_series(1, 3)) FROM generate_series(1, 5);" "5|3"
+
+is "a function made with the name, quoted or qualified, is left as it is" \
+   "SELECT gp_sql.desugar('CREATE FUNCTION count() RETURNS int LANGUAGE sql AS ''SELECT 1''')
+         = 'CREATE FUNCTION count() RETURNS int LANGUAGE sql AS ''SELECT 1''',
+           gp_sql.desugar('SELECT \"count\"(), public.count() FROM t')
+         = 'SELECT \"count\"(), public.count() FROM t';" "t|t"
+
 echo
 echo "13. where a rewritten statement's errors are reported, and what is recorded of it"
 

@@ -112,6 +112,28 @@ ao_vacuum_indexes(Relation rel, IndexBulkDeleteCallback callback, void *state,
 }
 
 /*
+ * Might a snapshot still see the compacting transaction xid running?  What
+ * one that did would read is the file's rows, through their old index
+ * entries; one that sees it committed passes the file by.  So what counts is
+ * the snapshots running -- a backend whose xmin is xid or older -- and not
+ * the horizon that also holds back what committed transactions deleted, for
+ * snapshots to come: on a segment gp_core holds that one back to the oldest
+ * part of a distributed transaction a distributed snapshot may not see yet
+ * (gp_dtx.c), and a VACUUM's compaction is never such a part.  A backend
+ * that takes its snapshot later sees xid committed.
+ */
+static bool
+compaction_may_be_seen_running(TransactionId xid)
+{
+	int			n;
+
+	if (TransactionIdIsInProgress(xid))
+		return true;
+	pfree(GetCurrentVirtualXIDs(xid, true, false, 0, &n));
+	return n > 0;
+}
+
+/*
  * Recycle the segment files of rel a VACUUM compacted, whose compacting
  * transaction every snapshot now sees committed.  Returns how many.
  */
@@ -121,7 +143,6 @@ ao_recycle(Relation rel, int64 storage_id, BufferAccessStrategy bstrategy)
 	AoSegfile  *segfiles;
 	int			nsegfiles;
 	AoRecycleState rs = {0};
-	TransactionId oldest = GetOldestNonRemovableTransactionId(rel);
 	int			n = 0;
 
 	segfiles = ao_segfiles_read(storage_id, GetLatestSnapshot(), &nsegfiles);
@@ -131,7 +152,7 @@ ao_recycle(Relation rel, int64 storage_id, BufferAccessStrategy bstrategy)
 
 		if (sf->state != AO_SEGFILE_AWAITING_DROP ||
 			!TransactionIdIsValid(sf->compacted_by) ||
-			!TransactionIdPrecedes(sf->compacted_by, oldest) ||
+			compaction_may_be_seen_running(sf->compacted_by) ||
 			!ao_segfile_try_lock(RelationGetRelid(rel), sf->segno))
 			continue;
 		rs.recycle[sf->segno] = true;
@@ -142,6 +163,7 @@ ao_recycle(Relation rel, int64 storage_id, BufferAccessStrategy bstrategy)
 		return 0;
 
 	ao_vacuum_indexes(rel, ao_recycle_callback, &rs, 0, bstrategy, false);
+	(void) AO_FAULT("vacuum_ao_after_index_delete", rel);
 
 	for (int i = 0; i < nsegfiles; i++)
 	{
@@ -162,6 +184,7 @@ ao_recycle(Relation rel, int64 storage_id, BufferAccessStrategy bstrategy)
 		sf->state = AO_SEGFILE_DEFAULT;
 		sf->compacted_by = InvalidTransactionId;
 		ao_segfile_update(storage_id, sf);
+		(void) AO_FAULT("appendonly_after_truncate_segment_file", rel);
 	}
 	CommandCounterIncrement();
 	return n;
@@ -238,7 +261,18 @@ ao_compact(Relation rel, int64 storage_id, AoSegfile *sf)
 		CHECK_FOR_INTERRUPTS();
 		ExecCopySlot(dst, src);
 		if (st == NULL)
-			st = ao_insert_state(rel);
+		{
+			ao_dml_set_compaction_writer(true);
+			PG_TRY();
+			{
+				st = ao_insert_state(rel);
+			}
+			PG_FINALLY();
+			{
+				ao_dml_set_compaction_writer(false);
+			}
+			PG_END_TRY();
+		}
 		ao_insert_slot(st, rel, dst);
 		ao_index_moved_row(indrels, indinfos, preds, nindexes, rel, dst,
 						   estate);
@@ -255,6 +289,7 @@ ao_compact(Relation rel, int64 storage_id, AoSegfile *sf)
 	UnregisterSnapshot(snapshot);
 
 	ao_dml_flush(RelationGetRelid(rel));
+	(void) AO_FAULT("vacuum_ao_after_compact", rel);
 	elog(DEBUG1, "compacted segment file %d of \"%s\": " INT64_FORMAT " rows moved",
 		 sf->segno, RelationGetRelationName(rel), moved);
 
@@ -373,7 +408,10 @@ ao_vacuum_recycle_rel(Oid relid)
 	if (rel != NULL)
 	{
 		if (ao_is_ao_table(rel))
+		{
 			(void) ao_recycle(rel, ao_storage_id(rel), NULL);
+			(void) AO_FAULT("vacuum_ao_post_cleanup_end", rel);
+		}
 		relation_close(rel, ShareUpdateExclusiveLock);
 	}
 	PopActiveSnapshot();

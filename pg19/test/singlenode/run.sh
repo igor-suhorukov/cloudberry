@@ -167,6 +167,12 @@ while read -r name; do
 	printf 's/\\b([a-z_][a-z0-9_]*)\\.%s\\b/\\1."%s"/gI\n' "$cbname" "$name"
 	printf 's/\\b(set|reset|show)(\\s+(local|session)\\s+|\\s+)%s\\b/\\1\\2%s/gI\n' "$cbname" "$name"
 	printf "s/\\\\b(current_setting|set_config)\\\\('%s'/\\\\1('%s'/gI\n" "$cbname" "$name"
+	# And the header SHOW prints for it, in the expected output: gp_x and
+	# gp.x are as wide, so the column is.  optimizer and gp.optimizer are
+	# not, and a SHOW of one differs, header and rule.
+	case "$cbname" in gp_*)
+		printf 's/^( +)%s( +)$/\\1%s\\2/\n' "$cbname" "$name" ;;
+	esac
 done > "$WORK/respell.sed"
 
 # The suite the tests run from: PostgreSQL 19's, with Cloudberry's tests
@@ -255,7 +261,8 @@ sed 's/##Version: ##/Apache Cloudberry (the PostgreSQL 19 port)/' \
 # difference already reviewed and kept, in the form canon.pl gives it: orca/
 # for PostgreSQL's tests under ORCA, cloudberry/ for Cloudberry's tests, a
 # file named for the expected output it differs from, with the pass in the
-# name if it is one pass's alone.  Each directory's README says why each is
+# name if it is one pass's alone; and postgres/ for PostgreSQL's tests in
+# the planner pass, where a statement of theirs is Cloudberry's SQL too.  Each directory's README says why each is
 # there.  Any other difference fails, and is left in canon/ for review.
 mkdir -p "$EXEC/bin"
 cat > "$EXEC/bin/diff" <<EOF
@@ -285,6 +292,10 @@ reviewed() {
 if grep -qxF "\$(basename "\$res" .out)" "$SN/cloudberry_tests"; then
 	cb=(-I HINT: -I CONTEXT: -I GP_IGNORE: --gpd_ignore_plans
 	    --gpd_init "$CB/init_file" --gpd_init "$HERE/init_file")
+	# less the place PostgreSQL 19 gives a shell type (shellpos.pl)
+	mkdir -p "$WORK/\$CB_DIFF_MODE/shellpos"
+	perl "$HERE/shellpos.pl" < "\$res" > "$WORK/\$CB_DIFF_MODE/shellpos/\$(basename "\$res")"
+	res="$WORK/\$CB_DIFF_MODE/shellpos/\$(basename "\$res")"
 	reviewed "$HERE/cloudberry" "\${cb[@]}"
 	gpdiff "\${opts[@]}" "\${cb[@]}" "\$exp" "\$res"
 fi
@@ -300,6 +311,10 @@ if [ "\$CB_DIFF_MODE" = orca ]; then
 	reviewed "$HERE/orca" "\${pg[@]}"
 	gpdiff "\${opts[@]}" "\${pg[@]}" "\$exp" "\$res"
 fi
+# In the planner pass, line for line -- but for a test of PostgreSQL's that
+# meets Cloudberry's SQL, which the port speaks, where postgres/ holds the
+# difference, reviewed and kept.
+[ -f "$HERE/postgres/\$(basename "\$exp" .out).diff" ] && reviewed "$HERE/postgres"
 exec /usr/bin/diff "\${opts[@]}" "\$exp" "\$res"
 EOF
 chmod +x "$EXEC/bin/diff"

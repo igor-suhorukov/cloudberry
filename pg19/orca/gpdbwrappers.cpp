@@ -84,6 +84,7 @@ extern "C" {
 #include "optimizer/prep.h"
 #include "optimizer/subselect.h"
 #include "parser/parse_agg.h"
+#include "parser/parse_func.h"
 #include "partitioning/partdesc.h"
 #include "storage/lmgr.h"
 #include "utils/fmgroids.h"
@@ -3489,9 +3490,25 @@ gpdb::GetForeignServerId(Oid reloid)
 int16
 gpdb::GetAppendOnlySegmentFilesCount(Relation rel)
 {
-	// M5, with gp_ao.  Cloudberry reads pg_appendonly, which the port
-	// replaces; until then no relation here is append-only.
-	GP_UNPORTED("the segment file count of an append-only table");
+	// Cloudberry reads pg_appendonly.segfilecount.  The port's is gp_ao's
+	// view, whose column is gp_ao.segfile_count(), called here by name:
+	// gp_ao is a module loaded after this one, and a database need not have
+	// it.  ORCA keeps the number in the table's metadata and plans nothing
+	// by it.
+	GP_WRAP_START;
+	{
+		Oid			argtypes[1] = {OIDOID};
+		Oid			fn = LookupFuncName(list_make2(makeString((char *) "gp_ao"),
+												   makeString((char *) "segfile_count")),
+										1, argtypes, true);
+
+		if (!OidIsValid(fn))
+			return -1;
+		return DatumGetInt32(OidFunctionCall1(fn,
+											  ObjectIdGetDatum(RelationGetRelid(rel))));
+	}
+	GP_WRAP_END;
+	return -1;
 }
 
 // Locks on partition leafs and indexes are held during optimizer (after

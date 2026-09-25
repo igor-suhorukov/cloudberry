@@ -35,6 +35,17 @@
 #include "utils/rel.h"
 #include "utils/snapshot.h"
 
+#include "gp_fault.h"
+
+/*
+ * A fault of Cloudberry's fault injector, set for this table or for any, at
+ * the place in gp_ao that is Cloudberry's for it: what the tests set with
+ * gp_inject_fault('appendonly_insert', ..., table) fires here.
+ */
+#define AO_FAULT(name, rel) \
+	((gp_fault_active == NULL || *gp_fault_active == 0) ? GP_FAULT_NONE \
+	 : GpFaultTrigger((name), "", RelationGetRelationName(rel)))
+
 /* ------------------------------------------------------------------------- */
 /* Segment files, row numbers and TIDs                                       */
 /* ------------------------------------------------------------------------- */
@@ -246,6 +257,9 @@ typedef struct AoBlkdirEntry
 
 /* The rows of one segment file a snapshot sees deleted. */
 #define AO_VISIMAP_ROWS		32768
+
+/* A table's block size where its options give none: Cloudberry's. */
+#define AO_DEFAULT_BLOCKSIZE	32768
 #define AO_VISIMAP_BYTES	(AO_VISIMAP_ROWS / 8)
 
 typedef struct AoVisimap
@@ -329,10 +343,12 @@ typedef struct AoInsertState AoInsertState;
 
 extern bool ao_has_unique_index(Relation rel);
 extern AoInsertState *ao_insert_state(Relation rel);
+extern void ao_dml_set_compaction_writer(bool on);
 extern void ao_insert_slot(AoInsertState *st, Relation rel,
 						   TupleTableSlot *slot);
 extern bool ao_pending_fetch(Relation rel, ItemPointer tid,
 							 TupleTableSlot *slot);
+extern bool ao_pending_flush(Relation rel, ItemPointer tid);
 extern bool ao_delete_row(Relation rel, ItemPointer tid);
 extern bool ao_deleted_by_this_command(Relation rel, ItemPointer tid);
 extern bool ao_deleted_pending(Relation rel, ItemPointer tid);
@@ -370,7 +386,9 @@ extern void ao_encoding_take(List **options, List **encodings);
 extern List *ao_storage_opts_of(List *options);
 extern List *ao_partitioned_take(List **options);
 extern void ao_partitioned_set(Oid relid, List *opts);
-extern void ao_partition_inherit(Oid parentid, List **options);
+extern void ao_partition_inherit(Oid parentid, List *pending, List **options);
+extern void ao_encoding_clear(Oid relid);
+extern void ao_replace_reloptions(Relation rel, Oid newam, List *opts);
 extern void ao_encoding_apply(Oid relid, List *encodings, List *withopts,
 							  List *only, bool replace);
 extern void ao_encoding_set_column(Oid relid, const char *colname, List *opts);

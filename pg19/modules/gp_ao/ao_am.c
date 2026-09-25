@@ -1029,8 +1029,12 @@ static bool
 ao_tuple_fetch_row_version(Relation rel, ItemPointer tid, Snapshot snapshot,
 						   TupleTableSlot *slot)
 {
-	AoFetchDesc fd = ao_fetch_begin(rel);
-	bool		found = ao_fetch_row(fd, tid, snapshot, slot);
+	AoFetchDesc fd;
+	bool		found;
+
+	(void) ao_pending_flush(rel, tid);
+	fd = ao_fetch_begin(rel);
+	found = ao_fetch_row(fd, tid, snapshot, slot);
 
 	/* The slot's values point into the fetch's memory: keep a copy. */
 	if (found)
@@ -1171,6 +1175,7 @@ ao_tuple_update(Relation rel, ItemPointer otid, TupleTableSlot *slot,
 	ItemPointerData old = *otid;
 
 	ao_lock_for_write(rel);
+	(void) AO_FAULT("appendonly_update", rel);
 	*lockmode = LockTupleExclusive;
 	if (!ao_delete_row(rel, &old))
 	{
@@ -1312,7 +1317,12 @@ ao_relation_copy_for_cluster(Relation OldTable, Relation NewTable,
 	ExecDropSingleTupleTableSlot(src);
 	ExecDropSingleTupleTableSlot(dst);
 	if (ao_dest)
+	{
 		ao_dml_flush(RelationGetRelid(NewTable));
+		/* No transaction IDs in its rows, so none to freeze: see gp_ao.c. */
+		*xid_cutoff = InvalidTransactionId;
+		*multi_cutoff = InvalidMultiXactId;
+	}
 }
 
 static bool

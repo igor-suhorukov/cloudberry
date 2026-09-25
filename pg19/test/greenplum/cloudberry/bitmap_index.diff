@@ -1,0 +1,9 @@
+@@
+-ERROR:  row is too big: size 33256, maximum size 32736
++ERROR:  row is too big: size 41216, maximum size 8160
+@@
+-ERROR:  row is too big: size 33256, maximum size 32736
++ERROR:  row is too big: size 41216, maximum size 8160
+@@
+-HINT:  Inject an infinite 'skip' into the 'fts_probe' fault to disable FTS probing.
+-WARNING:  consider disabling FTS probes while injecting a panic.

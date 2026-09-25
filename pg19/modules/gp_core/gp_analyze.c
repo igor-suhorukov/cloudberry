@@ -241,6 +241,8 @@ gp_sample_rows(PG_FUNCTION_ARGS)
 	int			numrows;
 	double		totalrows;
 	double		totaldeadrows;
+	AnalyzeSampleRowsFunc func = NULL;
+	BlockNumber totalpages;
 	Datum		values[3];
 	bool		nulls[3];
 
@@ -263,7 +265,22 @@ gp_sample_rows(PG_FUNCTION_ARGS)
 
 	rel = table_open(relid, AccessShareLock);
 	rows = (HeapTuple *) palloc(targrows * sizeof(HeapTuple));
-	numrows = segment_sample_rows(rel, rows, targrows, &totalrows, &totaldeadrows);
+
+	/*
+	 * A table access method that samples its tables itself -- gp_ao's,
+	 * whose rows are not where the block sampler would look -- says so
+	 * through O3's hook, as it says so to an ANALYZE on this node; the
+	 * others' rows are sampled as acquire_sample_rows() samples a heap's.
+	 * On the coordinator the hook is gp_core's own, which would ask the
+	 * segments again.
+	 */
+	if (GpClusterBackendRole() != GP_ROLE_DISPATCH &&
+		analyze_sample_rows_hook != NULL &&
+		analyze_sample_rows_hook(rel, &func, &totalpages) && func != NULL)
+		numrows = func(rel, DEBUG1, rows, targrows, &totalrows, &totaldeadrows);
+	else
+		numrows = segment_sample_rows(rel, rows, targrows, &totalrows,
+									  &totaldeadrows);
 
 	values[0] = Float8GetDatum(totalrows);
 	values[1] = Float8GetDatum(totaldeadrows);

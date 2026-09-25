@@ -1,0 +1,38 @@
+@@
+-   10000 |   10000 |   10000 |   10000
++       0 |       0 |       0 |       0
+@@
+-   40000 |   40000 |   60000 |   80000
++       0 |       0 |       0 |       0
+@@
+-   40000 |   40000 |   60000 |   80000
++       0 |       0 |       0 |       0
+@@
+-   40000
++       0
+@@
+-   50000
++       0
+@@
+-ERROR:  backward scan is not supported in this version of Apache Cloudberry
++ERROR:  cursor can only scan forward
++HINT:  Declare it with SCROLL option to enable backward scan.
+@@
+- foo4 | DECLARE foo4 CURSOR WITH HOLD FOR SELECT * FROM tenk_aocs1 ORDER BY 1,2,3,4; | t           | f         | f
++ foo4 | DECLARE foo4 CURSOR WITH HOLD FOR SELECT * FROM tenk_aocs1 ORDER BY 1,2,3,4; | t           | f         | t
+@@
+- t           | t
+-(1 row)
++(0 rows)
+@@
+- t           | t
+-(1 row)
++(0 rows)
+@@
+-Checksum: t
+@@
+-                     1.26
++                     1.23
+@@
+-     2
++     1

@@ -69,10 +69,27 @@
 #include "utils/tuplestore.h"
 
 #include "gp_cluster.h"
+#include "gp_core_api.h"
+#include "gp_dispatch.h"
 #include "gp_label.h"
 #include "gp_policy.h"
 
 PG_FUNCTION_INFO_V1(gp_catalog_write_check);
+PG_FUNCTION_INFO_V1(gp_stat_force_next_flush);
+
+/*
+ * gp_stat_force_next_flush(): pg_stat_force_next_flush() here and on every
+ * segment, as Cloudberry's system_views.sql makes it, so that a test reads
+ * the counters of what it just did from every node.
+ */
+Datum
+gp_stat_force_next_flush(PG_FUNCTION_ARGS)
+{
+	(void) DirectFunctionCall1(pg_stat_force_next_flush, (Datum) 0);
+	if (!GpClusterIsSingleNode() && GpClusterBackendRole() == GP_ROLE_DISPATCH)
+		GpDispatchCommand("SELECT pg_catalog.pg_stat_force_next_flush()");
+	PG_RETURN_VOID();
+}
 
 /*
  * gp_internal.catalog_write_check(), a statement trigger: a write to one of

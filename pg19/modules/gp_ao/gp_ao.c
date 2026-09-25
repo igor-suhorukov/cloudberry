@@ -42,15 +42,20 @@
  */
 #include "postgres.h"
 
+#include "access/htup_details.h"
+#include "access/multixact.h"
 #include "access/relation.h"
 #include "access/table.h"
 #include "access/tableam.h"
+#include "access/xact.h"
+#include "catalog/indexing.h"
 #include "catalog/objectaccess.h"
 #include "catalog/pg_inherits.h"
 #include "catalog/namespace.h"
 #include "catalog/pg_class.h"
 #include "catalog/pg_trigger.h"
 #include "catalog/pg_type.h"
+#include "commands/repack.h"
 #include "commands/seclabel.h"
 #include "parser/parse_type.h"
 #include "parser/scansup.h"
@@ -65,19 +70,24 @@
 #include "nodes/nodeFuncs.h"
 #include "nodes/parsenodes.h"
 #include "parser/analyze.h"
+#include "parser/parser.h"
 #include "parser/parse_relation.h"
 #include "parser/parsetree.h"
+#include "storage/procarray.h"
 #include "tcop/utility.h"
 #include "utils/builtins.h"
+#include "utils/fmgroids.h"
 #include "utils/guc.h"
 #include "utils/lsyscache.h"
 #include "utils/rel.h"
 #include "utils/sampling.h"
 #include "utils/snapmgr.h"
 #include "utils/sortsupport.h"
+#include "utils/syscache.h"
 
 #include "cb_module.h"
 #include "gp_core_api.h"
+#include "gp_dispatch.h"
 #include "gp_ao.h"
 
 PG_MODULE_MAGIC_EXT(
@@ -98,8 +108,12 @@ bool		gp_appendonly_compaction = true;
  */
 bool		gp_select_invisible = false;
 
+/* Cloudberry's gp_predicate_pushdown_sample_rows: accepted, and unused. */
+static int	gp_predicate_pushdown_sample_rows = 10000;
+
 static ProcessUtility_hook_type prev_ProcessUtility = NULL;
 static object_access_hook_type prev_object_access = NULL;
+static ExecutorStart_hook_type prev_ExecutorStart = NULL;
 static ExecutorRun_hook_type prev_ExecutorRun = NULL;
 static ExecutorFinish_hook_type prev_ExecutorFinish = NULL;
 static analyze_sample_rows_hook_type prev_analyze_sample_rows = NULL;
@@ -263,6 +277,150 @@ typedef struct CreatePending
 	bool		partitioned;
 } CreatePending;
 
+/*
+ * The partitioned tables of this module's methods a statement is making, with
+ * the options their labels will hold, until finish_create() labels them:
+ * Cloudberry's classic partition clauses make the partitions inside their
+ * parent's CREATE (gp_sql's partition.c), before this hook is back to label
+ * the parent, and each partition takes its parent's options.  In the
+ * transaction's memory, and gone with it.
+ */
+typedef struct PendingParent
+{
+	RangeVar   *relation;
+	List	   *opts;
+	List	   *encodings;		/* its columns', which its partitions take */
+	List	   *own_opts;
+	bool		labelled;		/* its columns labelled, for its partitions */
+	SubTransactionId subid;		/* a CREATE that failed leaves it */
+} PendingParent;
+
+static List *pending_parents = NIL;
+
+static void
+pending_parent_push(RangeVar *relation, List *opts, List *encodings,
+					List *own_opts)
+{
+	MemoryContext old = MemoryContextSwitchTo(TopTransactionContext);
+	PendingParent *pp = palloc_object(PendingParent);
+
+	pp->relation = copyObject(relation);
+	pp->opts = copyObject(opts);
+	/* the parent's statement's, which is done before finish_create() pops it */
+	pp->encodings = encodings;
+	pp->own_opts = own_opts;
+	pp->labelled = false;
+	pp->subid = GetCurrentSubTransactionId();
+	pending_parents = lcons(pp, pending_parents);
+	MemoryContextSwitchTo(old);
+}
+
+/*
+ * The relations whose pg_class rows the transaction altered, for their
+ * relfrozenxid: see reset_frozen_xids().
+ */
+static List *altered_rels = NIL;
+
+static void
+pending_parents_xact(XactEvent event, void *arg)
+{
+	if (event == XACT_EVENT_COMMIT || event == XACT_EVENT_ABORT ||
+		event == XACT_EVENT_PREPARE || event == XACT_EVENT_PARALLEL_COMMIT ||
+		event == XACT_EVENT_PARALLEL_ABORT)
+	{
+		pending_parents = NIL;
+		altered_rels = NIL;
+	}
+}
+
+static void
+pending_parents_subxact(SubXactEvent event, SubTransactionId mySubid,
+						SubTransactionId parentSubid, void *arg)
+{
+	ListCell   *lc;
+
+	if (event != SUBXACT_EVENT_ABORT_SUB)
+		return;
+	foreach(lc, pending_parents)
+		if (((PendingParent *) lfirst(lc))->subid >= mySubid)
+			pending_parents = foreach_delete_current(pending_parents, lc);
+}
+
+static void
+pending_parent_pop(RangeVar *relation)
+{
+	ListCell   *lc;
+
+	foreach(lc, pending_parents)
+	{
+		if (equal(((PendingParent *) lfirst(lc))->relation, relation))
+		{
+			pending_parents = foreach_delete_current(pending_parents, lc);
+			return;
+		}
+	}
+}
+
+static PendingParent *
+pending_parent_find(Oid parentid)
+{
+	foreach_ptr(PendingParent, pp, pending_parents)
+		if (RangeVarGetRelid(pp->relation, NoLock, true) == parentid)
+			return pp;
+	return NULL;
+}
+
+/* The options a parent being made will have, or NIL. */
+static List *
+pending_parent_opts(Oid parentid)
+{
+	PendingParent *pp = pending_parent_find(parentid);
+
+	return pp != NULL ? pp->opts : NIL;
+}
+
+/*
+ * A parent being made, its columns labelled now, before its first partition
+ * is made: each takes the encodings of the parent's columns (see
+ * ao_encoding_apply()), which finish_create() would give them only once
+ * every partition is made.  finish_create() leaves a labelled column be.
+ */
+static void
+pending_parent_label(Oid parentid)
+{
+	PendingParent *pp = pending_parent_find(parentid);
+
+	if (pp == NULL || pp->labelled)
+		return;
+	pp->labelled = true;
+	if (get_rel_relam(parentid) == get_table_am_oid("ao_column", true))
+	{
+		ao_encoding_apply(parentid, pp->encodings, pp->own_opts, NIL, false);
+		CommandCounterIncrement();
+	}
+}
+
+/*
+ * A DEFAULT COLUMN ENCODING that names an option the WITH list gives as
+ * well, which Cloudberry refuses (transformColumnEncoding()'s
+ * encodings_overlap()).
+ */
+static void
+check_default_encoding(List *encodings, List *withopts)
+{
+	foreach_ptr(AoColumnEncoding, ce, encodings)
+	{
+		if (!ce->is_default)
+			continue;
+		foreach_node(DefElem, d, ce->opts)
+			foreach_node(DefElem, w, withopts)
+				if (pg_strcasecmp(d->defname, w->defname) == 0)
+					ereport(ERROR,
+							(errcode(ERRCODE_INVALID_TABLE_DEFINITION),
+							 errmsg("DEFAULT COLUMN ENCODING clause cannot override values set in WITH clause")));
+	}
+}
+
 static CreatePending *
 prepare_create(CreateStmt *stmt)
 {
@@ -284,11 +442,19 @@ prepare_create(CreateStmt *stmt)
 		return cp;
 
 	cp->own_opts = ao_storage_opts_of(stmt->options);
+	check_default_encoding(cp->encodings, cp->own_opts);
+	if (OidIsValid(parentid))
+		pending_parent_label(parentid);
 	if (OidIsValid(parentid) && get_rel_relam(parentid) == get_table_am_oid(am, true))
-		ao_partition_inherit(parentid, &stmt->options);
+		ao_partition_inherit(parentid, pending_parent_opts(parentid),
+							 &stmt->options);
 	ao_default_storage_options_add(&stmt->options);
 	if (cp->partitioned)
+	{
 		cp->parent_opts = ao_partitioned_take(&stmt->options);
+		pending_parent_push(stmt->relation, cp->parent_opts, cp->encodings,
+							cp->own_opts);
+	}
 	return cp;
 }
 
@@ -297,12 +463,205 @@ finish_create(CreatePending *cp)
 {
 	Oid			relid = RangeVarGetRelid(cp->relation, NoLock, true);
 
+	if (cp->partitioned)
+		pending_parent_pop(cp->relation);
 	if (!OidIsValid(relid) || !relid_is_ao(relid))
 		return;
 	if (cp->partitioned)
 		ao_partitioned_set(relid, cp->parent_opts);
 	if (get_rel_relam(relid) == get_table_am_oid("ao_column", true))
 		ao_encoding_apply(relid, cp->encodings, cp->own_opts, NIL, false);
+}
+
+/* ------------------------------------------------------------------------- */
+/* SET ACCESS METHOD, and the options a table takes with its new method      */
+/* ------------------------------------------------------------------------- */
+
+/*
+ * The WITH list the grammar rewriter carried as text (gp_desugar.c), as a
+ * CREATE TABLE's WITH list would be parsed: through the rewriter again, which
+ * quotes orientation=row's keyword.
+ */
+static List *
+parse_with_text(const char *text)
+{
+	List	   *raw = raw_parser(psprintf("CREATE TABLE gp_ao_with () WITH (%s)", text),
+								 RAW_PARSE_DEFAULT);
+
+	return castNode(CreateStmt, linitial_node(RawStmt, raw)->stmt)->options;
+}
+
+/*
+ * SET WITH (appendonly=..., orientation=..., ...), Cloudberry's legacy
+ * spelling of a change of access method, and SET ACCESS METHOD m WITH
+ * (...), its own: the rewriter hands each over as an option of gp_ao's in a
+ * SET (...) of its own.  Each becomes PostgreSQL's SET ACCESS METHOD, with
+ * the options the table is to have in its new method in the command's def,
+ * where Cloudberry's grammar puts them and PostgreSQL's executor reads
+ * nothing (set_access_method_options()).  As Cloudberry's grammar says
+ * (greenplumLegacyAOoptions()), the method the options name has to be the
+ * one SET ACCESS METHOD names.
+ */
+static void
+prepare_set_access_method(AlterTableStmt *stmt)
+{
+	ListCell   *lc;
+	AlterTableCmd *setam = NULL;
+
+	foreach(lc, stmt->cmds)
+	{
+		AlterTableCmd *cmd = lfirst(lc);
+		DefElem    *def;
+		List	   *opts;
+		char	   *am;
+
+		if (cmd->subtype == AT_SetAccessMethod)
+			setam = cmd;
+		if (cmd->subtype != AT_SetRelOptions || list_length((List *) cmd->def) != 1)
+			continue;
+		def = linitial((List *) cmd->def);
+		if (def->defnamespace == NULL || strcmp(def->defnamespace, "gp_ao") != 0 ||
+			(strcmp(def->defname, "set_with") != 0 &&
+			 strcmp(def->defname, "am_with") != 0))
+			continue;
+
+		opts = parse_with_text(defGetString(def));
+		am = take_storage_options(&opts);
+		if (strcmp(def->defname, "set_with") == 0)
+		{
+			Oid			relid = RangeVarGetRelid(stmt->relation, NoLock, true);
+
+			if (OidIsValid(relid) &&
+				get_rel_relkind(relid) == RELKIND_PARTITIONED_TABLE)
+				ereport(ERROR,
+						(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+						 errmsg("cannot change access method of a partitioned table")));
+			cmd->subtype = AT_SetAccessMethod;
+			cmd->name = pstrdup(am);
+			cmd->def = (Node *) opts;
+			continue;
+		}
+
+		/* SET ACCESS METHOD m WITH (...): the command before */
+		if (setam == NULL)
+			elog(ERROR, "gp_ao.am_with without SET ACCESS METHOD");
+		if (am != NULL && strcmp(am, setam->name ? setam->name :
+								 default_table_access_method) != 0)
+			ereport(ERROR,
+					(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+					 errmsg("ACCESS METHOD is specified as \"%s\" but the WITH option indicates it to be \"%s\"",
+							setam->name ? setam->name : default_table_access_method,
+							am)));
+		if (am != NULL)
+			ereport(NOTICE,
+					(errcode(ERRCODE_SYNTAX_ERROR),
+					 errmsg("Redundant clauses are used to indicate the access method."),
+					 errhint("Only one of these is needed to indicate access method: the SET ACCESS METHOD clause or the options in the WITH clause.")));
+		setam->def = (Node *) opts;
+		stmt->cmds = foreach_delete_current(stmt->cmds, lc);
+	}
+}
+
+/*
+ * What SET ACCESS METHOD does to a table's options, which PostgreSQL 19
+ * leaves as they were, checked against nothing: a table whose method changes
+ * has the options the command gives it and no others, checked against its
+ * new method, as Cloudberry's ATExecSetRelOptions() clears the old ones --
+ * and a heap table made append-optimized has what gp.default_storage_options
+ * says of what they do not, as CREATE TABLE's would, while one that was
+ * append-optimized already, given none, keeps its own (Cloudberry's
+ * make_new_heap_with_colname()).  They are in pg_class before PostgreSQL's
+ * rewrite makes the new table, which takes its options from there
+ * (make_new_heap()), so its rows are written as they say.  A table that
+ * keeps its method takes the options as SET (...) does, merged with its own,
+ * and is rewritten under them if they changed, as SET (...) rewrites one
+ * (rewrite_if_options_changed()).
+ *
+ * On the coordinator, and on a segment, whose dispatched statement carries
+ * the options in the command's def.  Returns the table whose method the
+ * statement changes, its method before and the options the command gave, or
+ * InvalidOid.
+ */
+static Oid
+set_access_method_options(AlterTableStmt *stmt, Oid *oldam, List **withopts)
+{
+	ListCell   *lc;
+	Oid			relid = InvalidOid;
+	Oid			changed = InvalidOid;
+
+	foreach(lc, stmt->cmds)
+	{
+		AlterTableCmd *cmd = lfirst(lc);
+		Relation	rel;
+		Oid			newam;
+		List	   *opts;
+
+		if (cmd->subtype != AT_SetAccessMethod)
+			continue;
+		/* The table, locked and checked as PostgreSQL's ALTER TABLE will. */
+		if (!OidIsValid(relid))
+		{
+			relid = AlterTableLookupRelation(stmt, AccessExclusiveLock);
+			if (!OidIsValid(relid))
+				return InvalidOid;
+		}
+		newam = get_table_am_oid(cmd->name ? cmd->name : default_table_access_method,
+								 false);
+		opts = (List *) cmd->def;
+
+		rel = relation_open(relid, NoLock);
+		if ((rel->rd_rel->relkind != RELKIND_RELATION &&
+			 rel->rd_rel->relkind != RELKIND_MATVIEW) ||
+			rel->rd_rel->relam == newam)
+		{
+			relation_close(rel, NoLock);
+			/* the table's own method, or no options of a table's: SET (...) */
+			cmd->def = NULL;
+			if (opts != NIL)
+			{
+				AlterTableCmd *set = makeNode(AlterTableCmd);
+
+				set->subtype = AT_SetRelOptions;
+				set->def = (Node *) opts;
+				stmt->cmds = lappend(stmt->cmds, set);
+			}
+			continue;
+		}
+		*oldam = rel->rd_rel->relam;
+		*withopts = opts;
+		changed = relid;
+		if (am_is_ao(newam) && !am_is_ao(rel->rd_rel->relam))
+		{
+			opts = list_copy(opts);
+			ao_default_storage_options_add(&opts);
+			/* what a segment is to give the table, the defaults with them */
+			cmd->def = (Node *) opts;
+		}
+		if (opts != NIL || !am_is_ao(newam) || !am_is_ao(rel->rd_rel->relam))
+			ao_replace_reloptions(rel, newam, opts);
+		relation_close(rel, NoLock);
+	}
+	return changed;
+}
+
+/*
+ * A table whose method a statement changed: its columns' encodings, which a
+ * table by column has each of and no other has any of -- the options the
+ * command gave, as a table's WITH gives its columns theirs, filled in from
+ * the table's own.
+ */
+static void
+finish_set_access_method(Oid relid, Oid oldam, List *withopts)
+{
+	Oid			aocol = get_table_am_oid("ao_column", true);
+	Oid			newam = get_rel_relam(relid);
+
+	if (newam == oldam || !OidIsValid(aocol))
+		return;
+	if (newam == aocol)
+		ao_encoding_apply(relid, NIL, withopts, NIL, true);
+	else if (oldam == aocol)
+		ao_encoding_clear(relid);
 }
 
 /*
@@ -384,6 +743,160 @@ finish_alter(Oid relid, AlterPending *ap)
 	}
 }
 
+/*
+ * VACUUM's last phase, as Cloudberry's post-cleanup: the segment files it
+ * compacted, recycled in the transaction VACUUM leaves for its caller to
+ * commit, if no snapshot still sees them -- which, when no older transaction
+ * runs beside it, none does.
+ */
+static void
+recycle_compacted(void)
+{
+	List	   *compacted = ao_vacuum_take_compacted();
+
+	foreach_oid(relid, compacted)
+		ao_vacuum_recycle_rel(relid);
+	list_free(compacted);
+}
+
+/*
+ * An append-optimized table keeps no transaction IDs in its rows, so it has
+ * no relfrozenxid or relminmxid -- Cloudberry's are 0 -- and PostgreSQL
+ * leaves such a table out as it advances datfrozenxid.  A rewrite that swaps
+ * a table's files, ALTER TABLE's or REFRESH MATERIALIZED VIEW's, sets them
+ * to RecentXmin whatever the table's access method, and no VACUUM of the
+ * table would advance them after.  The tables whose pg_class rows the
+ * statement altered, once it is done, have them back at 0.
+ */
+static void
+reset_frozen_xids(void)
+{
+	List	   *rels = altered_rels;
+	Relation	pg_class = NULL;
+
+	altered_rels = NIL;
+	foreach_oid(relid, rels)
+	{
+		HeapTuple	tup = SearchSysCacheCopy1(RELOID, ObjectIdGetDatum(relid));
+		Form_pg_class form;
+
+		if (!HeapTupleIsValid(tup))
+			continue;			/* a rewrite's transient table, dropped */
+		form = (Form_pg_class) GETSTRUCT(tup);
+		if (am_is_ao(form->relam) &&
+			(TransactionIdIsValid(form->relfrozenxid) ||
+			 MultiXactIdIsValid(form->relminmxid)))
+		{
+			if (pg_class == NULL)
+				pg_class = table_open(RelationRelationId, RowExclusiveLock);
+			form->relfrozenxid = InvalidTransactionId;
+			form->relminmxid = InvalidMultiXactId;
+			CatalogTupleUpdate(pg_class, &tup->t_self, tup);
+		}
+		heap_freetuple(tup);
+	}
+	list_free(rels);
+	if (pg_class != NULL)
+	{
+		table_close(pg_class, RowExclusiveLock);
+		CommandCounterIncrement();
+	}
+}
+
+/*
+ * ALTER TABLE ... SET (...) and RESET (...) of an append-optimized table's
+ * options: Cloudberry rewrites the table when they change what its rows are
+ * stored with, so that the rows it has are stored as the new options say
+ * too, and not only those written after (ATExecSetRelOptions()'s
+ * aoopt_changed, relOptionsEquals()).  The same values in another order, or
+ * a value that is the default already, change nothing: what is compared is
+ * the options resolved, before the statement and after.
+ */
+typedef struct OptionsWatch
+{
+	Oid			relid;
+	AoOptions	before;
+} OptionsWatch;
+
+static OptionsWatch *
+watch_options(AlterTableStmt *stmt)
+{
+	OptionsWatch *w;
+	bool		found = false;
+	Oid			relid;
+	char		relkind;
+	Relation	rel;
+
+	foreach_node(AlterTableCmd, cmd, stmt->cmds)
+		if (cmd->subtype == AT_SetRelOptions || cmd->subtype == AT_ResetRelOptions ||
+			cmd->subtype == AT_ReplaceRelOptions)
+			found = true;
+	if (!found || stmt->objtype != OBJECT_TABLE)
+		return NULL;
+	/* The table, locked and checked as PostgreSQL's ALTER TABLE will. */
+	relid = AlterTableLookupRelation(stmt, AlterTableGetLockLevel(stmt->cmds));
+	if (!OidIsValid(relid) || !relid_is_ao(relid))
+		return NULL;
+	relkind = get_rel_relkind(relid);
+	if (relkind != RELKIND_RELATION && relkind != RELKIND_MATVIEW)
+		return NULL;
+
+	w = palloc(sizeof(OptionsWatch));
+	w->relid = relid;
+	rel = relation_open(relid, NoLock);
+	ao_get_options(rel, &w->before);
+	relation_close(rel, NoLock);
+	return w;
+}
+
+/*
+ * The table rewritten if its options changed: its rows copied into new files
+ * under them, as CLUSTER copies a table (table_relation_copy_for_cluster(),
+ * gp_ao's), and the files swapped, its indexes rebuilt.
+ */
+static void
+rewrite_if_options_changed(OptionsWatch *w)
+{
+	Relation	rel;
+	Relation	newrel;
+	Oid			newrelid;
+	char		persistence;
+	AoOptions	after;
+	TransactionId xid_cutoff = InvalidTransactionId;
+	MultiXactId multi_cutoff = InvalidMultiXactId;
+	double		num_tuples;
+	double		tups_vacuumed;
+	double		tups_recently_dead;
+
+	if (w == NULL || !relid_is_ao(w->relid))
+		return;
+
+	rel = table_open(w->relid, AccessExclusiveLock);
+	ao_get_options(rel, &after);
+	if (after.blocksize == w->before.blocksize &&
+		after.compresstype == w->before.compresstype &&
+		after.compresslevel == w->before.compresslevel &&
+		after.checksum == w->before.checksum)
+	{
+		table_close(rel, NoLock);
+		return;
+	}
+
+	persistence = rel->rd_rel->relpersistence;
+	newrelid = make_new_heap(w->relid, rel->rd_rel->reltablespace,
+							 rel->rd_rel->relam, persistence, AccessExclusiveLock);
+	newrel = table_open(newrelid, AccessExclusiveLock);
+	table_relation_copy_for_cluster(rel, newrel, NULL, false,
+									GetOldestNonRemovableTransactionId(rel),
+									GetActiveSnapshot(),
+									&xid_cutoff, &multi_cutoff, &num_tuples,
+									&tups_vacuumed, &tups_recently_dead);
+	table_close(newrel, NoLock);
+	table_close(rel, NoLock);
+	finish_heap_swap(w->relid, newrelid, false, false, false, true, true,
+					 InvalidTransactionId, InvalidMultiXactId, persistence);
+}
+
 static void
 gp_ao_ProcessUtility(PlannedStmt *pstmt, const char *queryString,
 					 bool readOnlyTree, ProcessUtilityContext context,
@@ -396,6 +909,48 @@ gp_ao_ProcessUtility(PlannedStmt *pstmt, const char *queryString,
 	List	   *type_encoding = NIL;
 	IntoClause *ctas_into = NULL;
 	List	   *ctas_opts = NIL;
+	Oid			am_changed = InvalidOid;
+	Oid			am_before = InvalidOid;
+	List	   *am_withopts = NIL;
+	OptionsWatch *watch = NULL;
+
+	/*
+	 * On a segment, the statement the coordinator dispatched: what this hook
+	 * made of it there -- the access method, the options -- it carries, and
+	 * the labels it wrote there follow it (GpDispatchNoteLabelOf()).  What
+	 * is left is VACUUM's, whose segment files are here.
+	 */
+	if (GpDispatchIsDispatchedStatement(parsetree))
+	{
+		if (IsA(parsetree, VacuumStmt))
+			list_free(ao_vacuum_take_compacted());
+		if (IsA(parsetree, AlterTableStmt))
+		{
+			Oid			oldam;
+			List	   *withopts;
+
+			if (readOnlyTree)
+			{
+				pstmt = copyObject(pstmt);
+				parsetree = pstmt->utilityStmt;
+				readOnlyTree = false;
+			}
+			if (!OidIsValid(set_access_method_options((AlterTableStmt *) parsetree,
+													  &oldam, &withopts)))
+				watch = watch_options((AlterTableStmt *) parsetree);
+		}
+		if (prev_ProcessUtility)
+			prev_ProcessUtility(pstmt, queryString, readOnlyTree, context,
+								params, queryEnv, dest, qc);
+		else
+			standard_ProcessUtility(pstmt, queryString, readOnlyTree, context,
+									params, queryEnv, dest, qc);
+		rewrite_if_options_changed(watch);
+		if (IsA(parsetree, VacuumStmt))
+			recycle_compacted();
+		reset_frozen_xids();
+		return;
+	}
 
 	if (readOnlyTree &&
 		(IsA(parsetree, CreateStmt) || IsA(parsetree, CreateTableAsStmt) ||
@@ -430,6 +985,7 @@ gp_ao_ProcessUtility(PlannedStmt *pstmt, const char *queryString,
 			{
 				AlterTableStmt *stmt = (AlterTableStmt *) parsetree;
 
+				prepare_set_access_method(stmt);
 				alter = prepare_alter(stmt);
 				if (stmt->cmds == NIL)
 				{
@@ -439,6 +995,10 @@ gp_ao_ProcessUtility(PlannedStmt *pstmt, const char *queryString,
 					finish_alter(relid, alter);
 					return;
 				}
+				am_changed = set_access_method_options(stmt, &am_before,
+													   &am_withopts);
+				if (!OidIsValid(am_changed))
+					watch = watch_options(stmt);
 				break;
 			}
 		case T_SecLabelStmt:
@@ -512,6 +1072,7 @@ gp_ao_ProcessUtility(PlannedStmt *pstmt, const char *queryString,
 		addr.objectSubId = 0;
 		SetSecurityLabel(&addr, "gp_ao",
 						 ao_encoding_type_label(ao_enc_format(type_encoding)));
+		GpDispatchNoteLabelOf(&addr, "gp_ao");
 	}
 	if (ctas_into != NULL)
 	{
@@ -521,24 +1082,16 @@ gp_ao_ProcessUtility(PlannedStmt *pstmt, const char *queryString,
 			get_rel_relam(relid) == get_table_am_oid("ao_column", true))
 			ao_encoding_apply(relid, NIL, ctas_opts, NIL, false);
 	}
+	if (OidIsValid(am_changed))
+		finish_set_access_method(am_changed, am_before, am_withopts);
+	rewrite_if_options_changed(watch);
 	if (alter != NULL)
 		finish_alter(RangeVarGetRelid(((AlterTableStmt *) parsetree)->relation,
 									  NoLock, true), alter);
 
-	/*
-	 * VACUUM's last phase, as Cloudberry's post-cleanup: the segment files
-	 * it compacted, recycled in the transaction VACUUM leaves for its caller
-	 * to commit, if no snapshot still sees them -- which, when no older
-	 * transaction runs beside it, none does.
-	 */
 	if (IsA(parsetree, VacuumStmt))
-	{
-		List	   *compacted = ao_vacuum_take_compacted();
-
-		foreach_oid(relid, compacted)
-			ao_vacuum_recycle_rel(relid);
-		list_free(compacted);
-	}
+		recycle_compacted();
+	reset_frozen_xids();
 }
 
 /* ------------------------------------------------------------------------- */
@@ -556,6 +1109,15 @@ gp_ao_object_access(ObjectAccessType access, Oid classId, Oid objectId,
 {
 	if (prev_object_access)
 		prev_object_access(access, classId, objectId, subId, arg);
+
+	/* A rewrite's swap among them, which the hook comes before it shows */
+	if (access == OAT_POST_ALTER && classId == RelationRelationId && subId == 0)
+	{
+		MemoryContext old = MemoryContextSwitchTo(TopTransactionContext);
+
+		altered_rels = list_append_unique_oid(altered_rels, objectId);
+		MemoryContextSwitchTo(old);
+	}
 
 	if (access == OAT_DROP && classId == RelationRelationId && subId == 0 &&
 		relid_is_ao(objectId) &&
@@ -575,6 +1137,45 @@ gp_ao_object_access(ObjectAccessType access, Oid classId, Oid objectId,
 /* ------------------------------------------------------------------------- */
 /* Where statements end                                                      */
 /* ------------------------------------------------------------------------- */
+
+/*
+ * UPDATE and DELETE of an append-optimized table under a transaction
+ * snapshot, which Cloudberry refuses as it starts them
+ * (ExecInitModifyTable()): a row has no xmax to say that a transaction the
+ * snapshot does not see deleted it, and it would be deleted, or updated,
+ * again.
+ */
+static void
+gp_ao_ExecutorStart(QueryDesc *queryDesc, int eflags)
+{
+	PlannedStmt *pstmt = queryDesc->plannedstmt;
+
+	if ((pstmt->commandType == CMD_UPDATE || pstmt->commandType == CMD_DELETE) &&
+		IsolationUsesXactSnapshot())
+	{
+		int			rti = -1;
+
+		while ((rti = bms_next_member(pstmt->resultRelationRelids, rti)) >= 0)
+		{
+			RangeTblEntry *rte = rt_fetch(rti, pstmt->rtable);
+
+			if (rte->rtekind != RTE_RELATION || !relid_is_ao(rte->relid))
+				continue;
+			if (pstmt->commandType == CMD_UPDATE)
+				ereport(ERROR,
+						(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+						 errmsg("updates on append-only tables are not supported in serializable transactions")));
+			ereport(ERROR,
+					(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+					 errmsg("deletes on append-only tables are not supported in serializable transactions")));
+		}
+	}
+
+	if (prev_ExecutorStart)
+		prev_ExecutorStart(queryDesc, eflags);
+	else
+		standard_ExecutorStart(queryDesc, eflags);
+}
 
 static void
 gp_ao_ExecutorRun(QueryDesc *queryDesc, ScanDirection direction, uint64 count)
@@ -645,6 +1246,14 @@ gp_ao_post_parse_analyze(ParseState *pstate, Query *query, const JumbleState *js
 {
 	if (prev_post_parse_analyze)
 		prev_post_parse_analyze(pstate, query, jstate);
+
+	/* as Cloudberry's transformInsertStmt() refuses it */
+	if (query->commandType == CMD_INSERT && query->onConflict != NULL &&
+		query->resultRelation > 0 &&
+		relid_is_ao(rt_fetch(query->resultRelation, query->rtable)->relid))
+		ereport(ERROR,
+				(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+				 errmsg("INSERT ON CONFLICT is not supported for appendoptimized relations")));
 
 	if ((query->commandType == CMD_UPDATE || query->commandType == CMD_DELETE) &&
 		query->resultRelation > 0 && query->jointree != NULL &&
@@ -845,6 +1454,17 @@ _PG_init(void)
 							 true,
 							 PGC_USERSET, 0,
 							 NULL, NULL, NULL);
+	DefineCustomIntVariable("gp.predicate_pushdown_sample_rows",
+							"Max sample rows during predicate pushdown.",
+							"Cloudberry calls this gp_predicate_pushdown_sample_rows: its column "
+							"scan tries a scan's quals column by column on a sample of rows, to "
+							"order the columns it reads.  Accepted for Cloudberry's scripts: "
+							"gp_ao's reads the columns the quals name and leaves them to the "
+							"executor, so it samples nothing.",
+							&gp_predicate_pushdown_sample_rows,
+							10000, 0, INT_MAX,
+							PGC_USERSET, 0,
+							NULL, NULL, NULL);
 	DefineCustomBoolVariable("gp.select_invisible",
 							 "Lets a scan of an append-optimized table return the rows deleted from it.",
 							 "Cloudberry calls this gp_select_invisible.  It is for debugging.",
@@ -860,11 +1480,15 @@ _PG_init(void)
 	ao_register_table_ams();
 	ao_dml_init();
 	bm_init();
+	RegisterXactCallback(pending_parents_xact, NULL);
+	RegisterSubXactCallback(pending_parents_subxact, NULL);
 
 	prev_ProcessUtility = ProcessUtility_hook;
 	ProcessUtility_hook = gp_ao_ProcessUtility;
 	prev_object_access = object_access_hook;
 	object_access_hook = gp_ao_object_access;
+	prev_ExecutorStart = ExecutorStart_hook;
+	ExecutorStart_hook = gp_ao_ExecutorStart;
 	prev_ExecutorRun = ExecutorRun_hook;
 	ExecutorRun_hook = gp_ao_ExecutorRun;
 	prev_ExecutorFinish = ExecutorFinish_hook;

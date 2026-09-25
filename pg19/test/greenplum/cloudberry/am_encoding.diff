@@ -1,0 +1,229 @@
+@@
+-                                                          Table "public.t1_encoding_aoco"
+- Column |     Type     | Collation | Nullable | Default | Storage  | Stats target | Compression Type | Compression Level | Block Size | Description 
+---------+--------------+-----------+----------+---------+----------+--------------+------------------+-------------------+------------+-------------
+- c1     | integer      |           |          |         | plain    |              | zstd             | 1                 | 32768      | 
+- c2     | character(1) |           |          |         | extended |              | zlib             | 1                 | 32768      | 
+- c3     | character(1) |           |          |         | extended |              | none             | 0                 | 32768      | 
+-Checksum: t
++                                Table "public.t1_encoding_aoco"
++ Column |     Type     | Collation | Nullable | Default | Storage  | Stats target | Description 
++--------+--------------+-----------+----------+---------+----------+--------------+-------------
++ c1     | integer      |           |          |         | plain    |              | 
++ c2     | character(1) |           |          |         | extended |              | 
++ c3     | character(1) |           |          |         | extended |              | 
+@@
+-                                                          Table "public.t2_encoding_aoco"
+- Column |     Type     | Collation | Nullable | Default | Storage  | Stats target | Compression Type | Compression Level | Block Size | Description 
+---------+--------------+-----------+----------+---------+----------+--------------+------------------+-------------------+------------+-------------
+- c1     | integer      |           |          |         | plain    |              | zlib             | 1                 | 32768      | 
+- c2     | character(1) |           |          |         | extended |              | zstd             | 1                 | 32768      | 
+- c3     | character(1) |           |          |         | extended |              | rle_type         | 1                 | 32768      | 
+-Checksum: t
++                                Table "public.t2_encoding_aoco"
++ Column |     Type     | Collation | Nullable | Default | Storage  | Stats target | Description 
++--------+--------------+-----------+----------+---------+----------+--------------+-------------
++ c1     | integer      |           |          |         | plain    |              | 
++ c2     | character(1) |           |          |         | extended |              | 
++ c3     | character(1) |           |          |         | extended |              | 
+@@
+-                                                          Table "public.t3_encoding_aoco"
+- Column |     Type     | Collation | Nullable | Default | Storage  | Stats target | Compression Type | Compression Level | Block Size | Description 
+---------+--------------+-----------+----------+---------+----------+--------------+------------------+-------------------+------------+-------------
+- c1     | integer      |           |          |         | plain    |              | zlib             | 1                 | 32768      | 
+- c2     | character(1) |           |          |         | extended |              | zstd             | 1                 | 32768      | 
+- c3     | text         |           |          |         | extended |              | rle_type         | 1                 | 32768      | 
+- c4     | smallint     |           |          |         | plain    |              | none             | 0                 | 32768      | 
+-Checksum: t
++                                Table "public.t3_encoding_aoco"
++ Column |     Type     | Collation | Nullable | Default | Storage  | Stats target | Description 
++--------+--------------+-----------+----------+---------+----------+--------------+-------------
++ c1     | integer      |           |          |         | plain    |              | 
++ c2     | character(1) |           |          |         | extended |              | 
++ c3     | text         |           |          |         | extended |              | 
++ c4     | smallint     |           |          |         | plain    |              | 
+@@
+-ERROR:  unrecognized parameter "compresstype"
++ERROR:  ENCODING clause only supported with column oriented tables
+@@
+-                                                          Table "public.t4_encoding_aoco"
+- Column |     Type     | Collation | Nullable | Default | Storage  | Stats target | Compression Type | Compression Level | Block Size | Description 
+---------+--------------+-----------+----------+---------+----------+--------------+------------------+-------------------+------------+-------------
+- c1     | integer      |           |          |         | plain    |              | zstd             | 5                 | 32768      | 
+- c2     | character(1) |           |          |         | extended |              | rle_type         | 1                 | 32768      | 
+- c3     | character(1) |           |          |         | extended |              | rle_type         | 1                 | 32768      | 
+-Checksum: t
++                                Table "public.t4_encoding_aoco"
++ Column |     Type     | Collation | Nullable | Default | Storage  | Stats target | Description 
++--------+--------------+-----------+----------+---------+----------+--------------+-------------
++ c1     | integer      |           |          |         | plain    |              | 
++ c2     | character(1) |           |          |         | extended |              | 
++ c3     | character(1) |           |          |         | extended |              | 
+@@
+-ERROR:  unrecognized parameter "compresstype"
++ERROR:  ENCODING clause only supported with column oriented tables
+@@
+-                                                          Table "public.t5_encoding_aoco"
+- Column |     Type     | Collation | Nullable | Default | Storage  | Stats target | Compression Type | Compression Level | Block Size | Description 
+---------+--------------+-----------+----------+---------+----------+--------------+------------------+-------------------+------------+-------------
+- c1     | integer      |           |          |         | plain    |              | zstd             | 5                 | 32768      | 
+- c2     | character(1) |           |          |         | extended |              | rle_type         | 1                 | 32768      | 
+- c3     | character(1) |           |          |         | extended |              | rle_type         | 1                 | 32768      | 
+-Checksum: t
++                                Table "public.t5_encoding_aoco"
++ Column |     Type     | Collation | Nullable | Default | Storage  | Stats target | Description 
++--------+--------------+-----------+----------+---------+----------+--------------+-------------
++ c1     | integer      |           |          |         | plain    |              | 
++ c2     | character(1) |           |          |         | extended |              | 
++ c3     | character(1) |           |          |         | extended |              | 
+@@
+-                                                          Table "public.t6_encoding_aoco"
+- Column |     Type     | Collation | Nullable | Default | Storage  | Stats target | Compression Type | Compression Level | Block Size | Description 
+---------+--------------+-----------+----------+---------+----------+--------------+------------------+-------------------+------------+-------------
+- c1     | integer      |           |          |         | plain    |              | zstd             | 5                 | 32768      | 
+- c2     | character(1) |           |          |         | extended |              | zstd             | 5                 | 32768      | 
+- c3     | character(1) |           |          |         | extended |              | zstd             | 5                 | 32768      | 
+-Checksum: t
++                                Table "public.t6_encoding_aoco"
++ Column |     Type     | Collation | Nullable | Default | Storage  | Stats target | Description 
++--------+--------------+-----------+----------+---------+----------+--------------+-------------
++ c1     | integer      |           |          |         | plain    |              | 
++ c2     | character(1) |           |          |         | extended |              | 
++ c3     | character(1) |           |          |         | extended |              | 
+@@
+-                                                          Table "public.t7_encoding_aoco"
+- Column |     Type     | Collation | Nullable | Default | Storage  | Stats target | Compression Type | Compression Level | Block Size | Description 
+---------+--------------+-----------+----------+---------+----------+--------------+------------------+-------------------+------------+-------------
+- c1     | integer      |           |          |         | plain    |              | none             | 0                 | 32768      | 
+- c2     | character(1) |           |          |         | extended |              | none             | 0                 | 32768      | 
+- c3     | character(1) |           |          |         | extended |              | none             | 0                 | 32768      | 
+-Checksum: t
++                                Table "public.t7_encoding_aoco"
++ Column |     Type     | Collation | Nullable | Default | Storage  | Stats target | Description 
++--------+--------------+-----------+----------+---------+----------+--------------+-------------
++ c1     | integer      |           |          |         | plain    |              | 
++ c2     | character(1) |           |          |         | extended |              | 
++ c3     | character(1) |           |          |         | extended |              | 
+@@
+-                                                    Table "public.t1_part_encoding_aoco_1_prt_1"
+- Column |     Type     | Collation | Nullable | Default | Storage  | Stats target | Compression Type | Compression Level | Block Size | Description 
+---------+--------------+-----------+----------+---------+----------+--------------+------------------+-------------------+------------+-------------
+- c1     | integer      |           |          |         | plain    |              | zlib             | 1                 | 32768      | 
+- c2     | character(1) |           |          |         | extended |              | zstd             | 1                 | 65536      | 
+- c3     | text         |           |          |         | extended |              | zlib             | 1                 | 32768      | 
++                          Table "public.t1_part_encoding_aoco_1_prt_1"
++ Column |     Type     | Collation | Nullable | Default | Storage  | Stats target | Description 
++--------+--------------+-----------+----------+---------+----------+--------------+-------------
++ c1     | integer      |           |          |         | plain    |              | 
++ c2     | character(1) |           |          |         | extended |              | 
++ c3     | text         |           |          |         | extended |              | 
+@@
+-Checksum: t
+@@
+-                                                    Table "public.t2_part_encoding_aoco_1_prt_1"
+- Column |     Type     | Collation | Nullable | Default | Storage  | Stats target | Compression Type | Compression Level | Block Size | Description 
+---------+--------------+-----------+----------+---------+----------+--------------+------------------+-------------------+------------+-------------
+- c1     | integer      |           |          |         | plain    |              | zlib             | 1                 | 32768      | 
+- c2     | character(1) |           |          |         | extended |              | zstd             | 1                 | 65536      | 
+- c3     | text         |           |          |         | extended |              | zstd             | 1                 | 32768      | 
++                          Table "public.t2_part_encoding_aoco_1_prt_1"
++ Column |     Type     | Collation | Nullable | Default | Storage  | Stats target | Description 
++--------+--------------+-----------+----------+---------+----------+--------------+-------------
++ c1     | integer      |           |          |         | plain    |              | 
++ c2     | character(1) |           |          |         | extended |              | 
++ c3     | text         |           |          |         | extended |              | 
+@@
+-Checksum: t
+@@
+-                                                    Table "public.t3_part_encoding_aoco_1_prt_1"
+- Column |     Type     | Collation | Nullable | Default | Storage  | Stats target | Compression Type | Compression Level | Block Size | Description 
+---------+--------------+-----------+----------+---------+----------+--------------+------------------+-------------------+------------+-------------
+- c1     | integer      |           |          |         | plain    |              | none             | 0                 | 32768      | 
+- c2     | character(1) |           |          |         | extended |              | none             | 0                 | 32768      | 
+- c3     | text         |           |          |         | extended |              | zlib             | 1                 | 32768      | 
++                          Table "public.t3_part_encoding_aoco_1_prt_1"
++ Column |     Type     | Collation | Nullable | Default | Storage  | Stats target | Description 
++--------+--------------+-----------+----------+---------+----------+--------------+-------------
++ c1     | integer      |           |          |         | plain    |              | 
++ c2     | character(1) |           |          |         | extended |              | 
++ c3     | text         |           |          |         | extended |              | 
+@@
+-Checksum: t
+@@
+-                                           Table "public.t4_part_encoding_aoco_1_prt_p1_2_prt_sp1"
+- Column |  Type   | Collation | Nullable | Default | Storage | Stats target | Compression Type | Compression Level | Block Size | Description 
+---------+---------+-----------+----------+---------+---------+--------------+------------------+-------------------+------------+-------------
+- i      | integer |           |          |         | plain   |              | zlib             | 1                 | 32768      | 
+- j      | integer |           |          |         | plain   |              | none             | 0                 | 32768      | 
+- k      | integer |           |          |         | plain   |              | none             | 0                 | 32768      | 
+- l      | integer |           |          |         | plain   |              | none             | 0                 | 32768      | 
++                 Table "public.t4_part_encoding_aoco_1_prt_p1_2_prt_sp1"
++ Column |  Type   | Collation | Nullable | Default | Storage | Stats target | Description 
++--------+---------+-----------+----------+---------+---------+--------------+-------------
++ i      | integer |           |          |         | plain   |              | 
++ j      | integer |           |          |         | plain   |              | 
++ k      | integer |           |          |         | plain   |              | 
++ l      | integer |           |          |         | plain   |              | 
+@@
+-Checksum: t
+@@
+-                                           Table "public.t4_part_encoding_aoco_1_prt_p2_2_prt_sp1"
+- Column |  Type   | Collation | Nullable | Default | Storage | Stats target | Compression Type | Compression Level | Block Size | Description 
+---------+---------+-----------+----------+---------+---------+--------------+------------------+-------------------+------------+-------------
+- i      | integer |           |          |         | plain   |              | zlib             | 1                 | 32768      | 
+- j      | integer |           |          |         | plain   |              | none             | 0                 | 32768      | 
+- k      | integer |           |          |         | plain   |              | zstd             | 1                 | 32768      | 
+- l      | integer |           |          |         | plain   |              | none             | 0                 | 32768      | 
++                 Table "public.t4_part_encoding_aoco_1_prt_p2_2_prt_sp1"
++ Column |  Type   | Collation | Nullable | Default | Storage | Stats target | Description 
++--------+---------+-----------+----------+---------+---------+--------------+-------------
++ i      | integer |           |          |         | plain   |              | 
++ j      | integer |           |          |         | plain   |              | 
++ k      | integer |           |          |         | plain   |              | 
++ l      | integer |           |          |         | plain   |              | 
+@@
+-Checksum: t
+@@
+-                                           Table "public.t5_part_encoding_aoco_1_prt_p1_2_prt_sp1"
+- Column |  Type   | Collation | Nullable | Default | Storage | Stats target | Compression Type | Compression Level | Block Size | Description 
+---------+---------+-----------+----------+---------+---------+--------------+------------------+-------------------+------------+-------------
+- i      | integer |           |          |         | plain   |              | zlib             | 1                 | 32768      | 
+- j      | integer |           |          |         | plain   |              | none             | 0                 | 32768      | 
+- k      | integer |           |          |         | plain   |              | none             | 0                 | 32768      | 
+- l      | integer |           |          |         | plain   |              | zstd             | 1                 | 32768      | 
++                 Table "public.t5_part_encoding_aoco_1_prt_p1_2_prt_sp1"
++ Column |  Type   | Collation | Nullable | Default | Storage | Stats target | Description 
++--------+---------+-----------+----------+---------+---------+--------------+-------------
++ i      | integer |           |          |         | plain   |              | 
++ j      | integer |           |          |         | plain   |              | 
++ k      | integer |           |          |         | plain   |              | 
++ l      | integer |           |          |         | plain   |              | 
+@@
+-Checksum: t
+@@
+-                                           Table "public.t5_part_encoding_aoco_1_prt_p2_2_prt_sp1"
+- Column |  Type   | Collation | Nullable | Default | Storage | Stats target | Compression Type | Compression Level | Block Size | Description 
+---------+---------+-----------+----------+---------+---------+--------------+------------------+-------------------+------------+-------------
+- i      | integer |           |          |         | plain   |              | rle_type         | 1                 | 32768      | 
+- j      | integer |           |          |         | plain   |              | zlib             | 1                 | 32768      | 
+- k      | integer |           |          |         | plain   |              | zstd             | 1                 | 32768      | 
+- l      | integer |           |          |         | plain   |              | zstd             | 1                 | 32768      | 
++                 Table "public.t5_part_encoding_aoco_1_prt_p2_2_prt_sp1"
++ Column |  Type   | Collation | Nullable | Default | Storage | Stats target | Description 
++--------+---------+-----------+----------+---------+---------+--------------+-------------
++ i      | integer |           |          |         | plain   |              | 
++ j      | integer |           |          |         | plain   |              | 
++ k      | integer |           |          |         | plain   |              | 
++ l      | integer |           |          |         | plain   |              | 
+@@
+-Checksum: t
+@@
+-                                                     Table "public.t1_type_int33_aoco"
+- Column | Type  | Collation | Nullable | Default | Storage | Stats target | Compression Type | Compression Level | Block Size | Description 
+---------+-------+-----------+----------+---------+---------+--------------+------------------+-------------------+------------+-------------
+- c1     | int33 |           |          |         | plain   |              | zlib             | 1                 | 65536      | 
+-Checksum: t
++                           Table "public.t1_type_int33_aoco"
++ Column | Type  | Collation | Nullable | Default | Storage | Stats target | Description 
++--------+-------+-----------+----------+---------+---------+--------------+-------------
++ c1     | int33 |           |          |         | plain   |              | 

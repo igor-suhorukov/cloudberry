@@ -47,6 +47,7 @@
 #include "access/detoast.h"
 #include "access/tupmacs.h"
 #include "catalog/pg_attribute.h"
+#include "catalog/pg_type.h"
 #include "port/pg_crc32c.h"
 #include "utils/memutils.h"
 #include "varatt.h"
@@ -302,7 +303,13 @@ ao_column_append(AoColumnBuilder *cb, Form_pg_attribute att, Datum value,
 		Assert(!VARATT_IS_EXTERNAL(v));
 		if (VARATT_IS_SHORT(v))
 			appendBinaryStringInfo(&cb->values, (char *) v, VARSIZE_SHORT(v));
-		else if (VARATT_CAN_MAKE_SHORT(v))
+
+		/*
+		 * A short header only where heap_fill_tuple() gives one: a value of
+		 * a type stored plain is read as it was written, with its 4-byte
+		 * header, by code that never looks for another (tsquery's).
+		 */
+		else if (att->attstorage != TYPSTORAGE_PLAIN && VARATT_CAN_MAKE_SHORT(v))
 		{
 			Size		len = VARATT_CONVERTED_SHORT_SIZE(v);
 			char		hdr;

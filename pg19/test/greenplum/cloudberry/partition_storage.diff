@@ -1,0 +1,150 @@
+@@
+-                                                            Table "public.heap_can"
+- Column  |  Type   | Collation | Nullable | Default | Storage  | Stats target | Compression Type | Compression Level | Block Size | Description 
+----------+---------+-----------+----------+---------+----------+--------------+------------------+-------------------+------------+-------------
+- a       | integer |           |          |         | plain    |              | zlib             | 5                 | 32768      | 
+- b       | text    |           |          |         | extended |              | zlib             | 5                 | 32768      | 
+- c       | integer |           |          |         | plain    |              | zlib             | 5                 | 32768      | 
+- d       | integer |           |          |         | plain    |              | zlib             | 5                 | 32768      | 
+- e       | numeric |           |          |         | main     |              | zlib             | 5                 | 32768      | 
+- success | boolean |           |          |         | plain    |              | zlib             | 5                 | 32768      | 
+-Checksum: t
++                                  Table "public.heap_can"
++ Column  |  Type   | Collation | Nullable | Default | Storage  | Stats target | Description 
++---------+---------+-----------+----------+---------+----------+--------------+-------------
++ a       | integer |           |          |         | plain    |              | 
++ b       | text    |           |          |         | extended |              | 
++ c       | integer |           |          |         | plain    |              | 
++ d       | integer |           |          |         | plain    |              | 
++ e       | numeric |           |          |         | main     |              | 
++ success | boolean |           |          |         | plain    |              | 
+@@
+-Compression Type: zlib
+-Compression Level: 1
+-Block Size: 32768
+-Checksum: t
+@@
+-                                                            Table "public.heap_can"
+- Column  |  Type   | Collation | Nullable | Default | Storage  | Stats target | Compression Type | Compression Level | Block Size | Description 
+----------+---------+-----------+----------+---------+----------+--------------+------------------+-------------------+------------+-------------
+- a       | integer |           |          |         | plain    |              | zlib             | 5                 | 32768      | 
+- b       | text    |           |          |         | extended |              | zlib             | 5                 | 32768      | 
+- c       | integer |           |          |         | plain    |              | zlib             | 5                 | 32768      | 
+- d       | integer |           |          |         | plain    |              | zlib             | 5                 | 32768      | 
+- e       | numeric |           |          |         | main     |              | zlib             | 5                 | 32768      | 
+- success | boolean |           |          |         | plain    |              | zlib             | 5                 | 32768      | 
+-Checksum: t
++                                  Table "public.heap_can"
++ Column  |  Type   | Collation | Nullable | Default | Storage  | Stats target | Description 
++---------+---------+-----------+----------+---------+----------+--------------+-------------
++ a       | integer |           |          |         | plain    |              | 
++ b       | text    |           |          |         | extended |              | 
++ c       | integer |           |          |         | plain    |              | 
++ d       | integer |           |          |         | plain    |              | 
++ e       | numeric |           |          |         | main     |              | 
++ success | boolean |           |          |         | plain    |              | 
+@@
+-Compression Type: zlib
+-Compression Level: 1
+-Block Size: 32768
+-Checksum: t
+@@
+-                                                            Table "public.heap_can"
+- Column  |  Type   | Collation | Nullable | Default | Storage  | Stats target | Compression Type | Compression Level | Block Size | Description 
+----------+---------+-----------+----------+---------+----------+--------------+------------------+-------------------+------------+-------------
+- a       | integer |           |          |         | plain    |              | zlib             | 5                 | 32768      | 
+- b       | text    |           |          |         | extended |              | zlib             | 5                 | 32768      | 
+- c       | integer |           |          |         | plain    |              | zlib             | 5                 | 32768      | 
+- d       | integer |           |          |         | plain    |              | zlib             | 5                 | 32768      | 
+- e       | numeric |           |          |         | main     |              | zlib             | 5                 | 32768      | 
+- success | boolean |           |          |         | plain    |              | zlib             | 5                 | 32768      | 
+-Checksum: t
++                                  Table "public.heap_can"
++ Column  |  Type   | Collation | Nullable | Default | Storage  | Stats target | Description 
++---------+---------+-----------+----------+---------+----------+--------------+-------------
++ a       | integer |           |          |         | plain    |              | 
++ b       | text    |           |          |         | extended |              | 
++ c       | integer |           |          |         | plain    |              | 
++ d       | integer |           |          |         | plain    |              | 
++ e       | numeric |           |          |         | main     |              | 
++ success | boolean |           |          |         | plain    |              | 
+@@
+-Compression Type: zlib
+-Compression Level: 5
+-Block Size: 32768
+-Checksum: t
+@@
+-Compression Type: None
+-Compression Level: 0
+-Block Size: 32768
+-Checksum: t
+@@
+-                                                            Table "public.heap_can"
+- Column  |  Type   | Collation | Nullable | Default | Storage  | Stats target | Compression Type | Compression Level | Block Size | Description 
+----------+---------+-----------+----------+---------+----------+--------------+------------------+-------------------+------------+-------------
+- a       | integer |           |          |         | plain    |              | none             | 0                 | 32768      | 
+- b       | text    |           |          |         | extended |              | none             | 0                 | 32768      | 
+- c       | integer |           |          |         | plain    |              | none             | 0                 | 32768      | 
+- d       | integer |           |          |         | plain    |              | none             | 0                 | 32768      | 
+- e       | numeric |           |          |         | main     |              | none             | 0                 | 32768      | 
+- success | boolean |           |          |         | plain    |              | none             | 0                 | 32768      | 
+-Checksum: t
++                                  Table "public.heap_can"
++ Column  |  Type   | Collation | Nullable | Default | Storage  | Stats target | Description 
++---------+---------+-----------+----------+---------+----------+--------------+-------------
++ a       | integer |           |          |         | plain    |              | 
++ b       | text    |           |          |         | extended |              | 
++ c       | integer |           |          |         | plain    |              | 
++ d       | integer |           |          |         | plain    |              | 
++ e       | numeric |           |          |         | main     |              | 
++ success | boolean |           |          |         | plain    |              | 
+@@
+-Compression Type: zlib
+-Compression Level: 1
+-Block Size: 32768
+-Checksum: t
+@@
+-                                                            Table "public.heap_can"
+- Column  |  Type   | Collation | Nullable | Default | Storage  | Stats target | Compression Type | Compression Level | Block Size | Description 
+----------+---------+-----------+----------+---------+----------+--------------+------------------+-------------------+------------+-------------
+- a       | integer |           |          |         | plain    |              | none             | 0                 | 32768      | 
+- b       | text    |           |          |         | extended |              | none             | 0                 | 32768      | 
+- c       | integer |           |          |         | plain    |              | none             | 0                 | 32768      | 
+- d       | integer |           |          |         | plain    |              | none             | 0                 | 32768      | 
+- e       | numeric |           |          |         | main     |              | none             | 0                 | 32768      | 
+- success | boolean |           |          |         | plain    |              | none             | 0                 | 32768      | 
+-Checksum: t
++                                  Table "public.heap_can"
++ Column  |  Type   | Collation | Nullable | Default | Storage  | Stats target | Description 
++---------+---------+-----------+----------+---------+----------+--------------+-------------
++ a       | integer |           |          |         | plain    |              | 
++ b       | text    |           |          |         | extended |              | 
++ c       | integer |           |          |         | plain    |              | 
++ d       | integer |           |          |         | plain    |              | 
++ e       | numeric |           |          |         | main     |              | 
++ success | boolean |           |          |         | plain    |              | 
+@@
+-Compression Type: None
+-Compression Level: 0
+-Block Size: 32768
+-Checksum: t
+@@
+-                                                            Table "public.heap_can"
+- Column  |  Type   | Collation | Nullable | Default | Storage  | Stats target | Compression Type | Compression Level | Block Size | Description 
+----------+---------+-----------+----------+---------+----------+--------------+------------------+-------------------+------------+-------------
+- a       | integer |           |          |         | plain    |              | zlib             | 1                 | 32768      | 
+- b       | text    |           |          |         | extended |              | zlib             | 1                 | 32768      | 
+- c       | integer |           |          |         | plain    |              | zlib             | 1                 | 32768      | 
+- d       | integer |           |          |         | plain    |              | zlib             | 1                 | 32768      | 
+- e       | numeric |           |          |         | main     |              | zlib             | 1                 | 32768      | 
+- success | boolean |           |          |         | plain    |              | zlib             | 1                 | 32768      | 
+-Checksum: t
++                                  Table "public.heap_can"
++ Column  |  Type   | Collation | Nullable | Default | Storage  | Stats target | Description 
++---------+---------+-----------+----------+---------+----------+--------------+-------------
++ a       | integer |           |          |         | plain    |              | 
++ b       | text    |           |          |         | extended |              | 
++ c       | integer |           |          |         | plain    |              | 
++ d       | integer |           |          |         | plain    |              | 
++ e       | numeric |           |          |         | main     |              | 
++ success | boolean |           |          |         | plain    |              | 

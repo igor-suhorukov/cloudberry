@@ -1,0 +1,14 @@
+PostgreSQL 19's regression tests in the planner pass: the differences from
+PostgreSQL's expected output that come of a statement of theirs being
+Cloudberry's SQL too, which the port speaks.  Each file is one test's
+difference in the form ../canon.pl gives it, named for the expected output
+it differs from.  run.sh compares every other test of PostgreSQL's line for
+line in this pass; under ORCA, orca/ holds a test's whole difference, this
+one among it.
+
+window  count() with no argument and no star, which PostgreSQL refuses
+  ("count(*) must be used to call a parameterless aggregate function") and
+  Cloudberry's parse analysis takes for count(*), as the port's grammar does
+  (gp_desugar.c, count_close()): the test's SELECT count() OVER () FROM tenk1
+  answers ten thousand rows, as Cloudberry's own copy of the test answers
+  (with a LIMIT 5 it added, src/test/regress/expected/window.out).

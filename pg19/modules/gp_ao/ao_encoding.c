@@ -70,6 +70,7 @@
 #include "utils/syscache.h"
 #include "utils/varlena.h"
 
+#include "gp_dispatch.h"
 #include "gp_ao.h"
 
 #define AO_LABEL_PROVIDER	"gp_ao"
@@ -316,6 +317,8 @@ label_set(Oid classid, Oid objid, int subid, const char *label)
 	SetSecurityLabel(&addr, AO_LABEL_PROVIDER, label);
 	/* SetSecurityLabel() finds a label to replace with the catalog snapshot. */
 	CommandCounterIncrement();
+	/* A cluster's segments write the rows, so they are sent the label too. */
+	GpDispatchNoteLabelOf(&addr, AO_LABEL_PROVIDER);
 }
 
 /* Every column label of a relation, by attnum; NULL where there is none. */
@@ -546,17 +549,26 @@ ao_partitioned_set(Oid relid, List *opts)
 
 /*
  * A partition of a partitioned table of the same method is made with the
- * parent's storage options, where its own statement does not give them.
+ * parent's storage options, where its own statement does not give them: its
+ * label's, or "pending", those of a parent its statement is still making.
+ * The parent's come first, as Cloudberry lists them in the partition's
+ * reloptions.
  */
 void
-ao_partition_inherit(Oid parentid, List **options)
+ao_partition_inherit(Oid parentid, List *pending, List **options)
 {
 	char	   *label = label_get(RelationRelationId, parentid, 0);
+	List	   *parent;
+	List	   *inherited = NIL;
 	ListCell   *lc;
 
-	if (label == NULL)
+	if (label != NULL)
+		parent = ao_enc_parse(label);
+	else if (pending != NIL)
+		parent = pending;
+	else
 		return;
-	foreach(lc, ao_enc_parse(label))
+	foreach(lc, parent)
 	{
 		DefElem    *def = lfirst(lc);
 		ListCell   *lc2;
@@ -570,8 +582,9 @@ ao_partition_inherit(Oid parentid, List **options)
 				given = true;
 		}
 		if (!given)
-			*options = lappend(*options, def);
+			inherited = lappend(inherited, def);
 	}
+	*options = list_concat(inherited, *options);
 }
 
 /* ------------------------------------------------------------------------- */
@@ -698,6 +711,22 @@ ao_encoding_apply(Oid relid, List *encodings, List *withopts, List *only,
 	relation_close(rel, AccessShareLock);
 }
 
+/* A table that is no longer by column: its columns' encodings, gone. */
+void
+ao_encoding_clear(Oid relid)
+{
+	int			natts;
+	char	  **labels;
+	Relation	rel = relation_open(relid, AccessShareLock);
+
+	natts = RelationGetDescr(rel)->natts;
+	relation_close(rel, AccessShareLock);
+	labels = column_labels(relid, natts);
+	for (int attnum = 1; attnum <= natts; attnum++)
+		if (labels[attnum] != NULL)
+			label_set(RelationRelationId, relid, attnum, NULL);
+}
+
 /* Replace a column's options: ALTER COLUMN ... SET ENCODING. */
 void
 ao_encoding_set_column(Oid relid, const char *colname, List *opts)
@@ -735,18 +764,113 @@ ao_encoding_type_label(const char *label)
 
 /* ------------------------------------------------------------------------- */
 /* gp.default_storage_options                                                */
-/* ------------------------------------------------------------------------- */
+/*
+ * gp.default_storage_options, Cloudberry's gp_default_storage_options: the
+ * storage options a new append-optimized table takes where its statement
+ * gives none, as blocksize=..., compresstype=..., compresslevel=...,
+ * checksum=...  Checked as Cloudberry checks it (accumAOStorageOpt(), in its
+ * words), and held as it holds it (storageOptToString()), every option
+ * filled in, which is what SHOW prints.
+ */
+typedef struct DsoOptions
+{
+	int			blocksize;
+	char		compresstype[NAMEDATALEN];
+	int			compresslevel;
+	bool		checksum;
+} DsoOptions;
+
+static bool
+dso_read(const char *value, DsoOptions *dso, List **given)
+{
+	List	   *opts;
+	ListCell   *lc;
+	bool		level_given = false;
+	bool		type_given = false;
+
+	dso->blocksize = AO_DEFAULT_BLOCKSIZE;
+	strlcpy(dso->compresstype, "none", NAMEDATALEN);
+	dso->compresslevel = 0;
+	dso->checksum = true;
+	if (given)
+		*given = NIL;
+	if (value == NULL || value[0] == '\0')
+		return true;
+
+	opts = ao_enc_parse(value);
+	foreach(lc, opts)
+	{
+		DefElem    *def = lfirst(lc);
+		char	   *v = defGetString(def);
+		int			ival;
+		bool		bval;
+
+		if (strcmp(def->defname, "blocksize") == 0 ||
+			strcmp(def->defname, "compresslevel") == 0)
+		{
+			if (!parse_int(v, &ival, 0, NULL))
+			{
+				GUC_check_errmsg("invalid integer value \"%s\" for storage option \"%s\"",
+								 v, def->defname);
+				return false;
+			}
+			if (strcmp(def->defname, "blocksize") == 0)
+				dso->blocksize = ival;
+			else
+			{
+				dso->compresslevel = ival;
+				level_given = true;
+			}
+		}
+		else if (strcmp(def->defname, "compresstype") == 0)
+		{
+			strlcpy(dso->compresstype, v, NAMEDATALEN);
+			for (char *c = dso->compresstype; *c; c++)
+				*c = pg_tolower((unsigned char) *c);
+			type_given = true;
+		}
+		else if (strcmp(def->defname, "checksum") == 0)
+		{
+			if (!parse_bool(v, &bval))
+			{
+				GUC_check_errmsg("invalid bool value \"%s\" for storage option \"%s\"",
+								 v, def->defname);
+				return false;
+			}
+			dso->checksum = bval;
+		}
+		else
+		{
+			GUC_check_errmsg("invalid storage option \"%s\"", def->defname);
+			if (strcmp(def->defname, "appendonly") == 0 ||
+				strcmp(def->defname, "appendoptimized") == 0 ||
+				strcmp(def->defname, "orientation") == 0)
+				GUC_check_errhint("For table access methods use \"default_table_access_method\" instead.");
+			return false;
+		}
+	}
+
+	/* a level with no type is zlib's, a type with no level its first */
+	if (!type_given && dso->compresslevel > 0)
+		strlcpy(dso->compresstype, "zlib", NAMEDATALEN);
+	else if (type_given && !level_given && strcmp(dso->compresstype, "none") != 0)
+		dso->compresslevel = 1;
+	if (given)
+		*given = opts;
+	return true;
+}
 
 bool
 ao_default_storage_options_check(char **newval, void **extra, GucSource source)
 {
+	DsoOptions	dso;
 	List	   *opts;
+	char	   *normal;
 
-	if (*newval == NULL || (*newval)[0] == '\0')
-		return true;
+	if (!dso_read(*newval, &dso, &opts))
+		return false;
 	PG_TRY();
 	{
-		opts = ao_enc_parse(*newval);
 		ao_enc_validate(opts, true);
 	}
 	PG_CATCH();
@@ -761,34 +885,98 @@ ao_default_storage_options_check(char **newval, void **extra, GucSource source)
 		return false;
 	}
 	PG_END_TRY();
+
+	normal = psprintf("blocksize=%d,compresstype=%s,%schecksum=%s",
+					  dso.blocksize, dso.compresstype,
+					  dso.compresslevel > 0 ?
+					  psprintf("compresslevel=%d,", dso.compresslevel) : "",
+					  dso.checksum ? "true" : "false");
+	guc_free(*newval);
+	*newval = guc_strdup(ERROR, normal);
 	return true;
 }
 
 /*
  * A new append-optimized table's statement is given what
- * gp.default_storage_options says of what the statement does not.
+ * gp.default_storage_options says of what the statement does not, where it
+ * is not the default, as Cloudberry records it in the table's options
+ * (transformAOStdRdOptions()): its block size, its compression -- the type
+ * unless a level alone says it is zlib, the level unless it is 1 -- and a
+ * checksum of false.
  */
 void
 ao_default_storage_options_add(List **options)
 {
+	DsoOptions	dso;
+	DefElem    *type = NULL;
+	DefElem    *level = NULL;
+	bool		blocksize_given = false;
+	bool		checksum_given = false;
+	char		ctype[NAMEDATALEN];
+	int			clevel;
 	ListCell   *lc;
 
 	if (gp_default_storage_options == NULL || gp_default_storage_options[0] == '\0')
 		return;
-	foreach(lc, ao_enc_parse(gp_default_storage_options))
+	if (!dso_read(gp_default_storage_options, &dso, NULL))
+		return;
+
+	foreach(lc, *options)
 	{
 		DefElem    *def = lfirst(lc);
-		ListCell   *lc2;
-		bool		given = false;
 
-		foreach(lc2, *options)
-		{
-			DefElem    *mine = lfirst(lc2);
-
-			if (mine->defnamespace == NULL && strcmp(mine->defname, def->defname) == 0)
-				given = true;
-		}
-		if (!given)
-			*options = lappend(*options, def);
+		if (def->defnamespace != NULL)
+			continue;
+		if (strcmp(def->defname, "blocksize") == 0)
+			blocksize_given = true;
+		else if (strcmp(def->defname, "checksum") == 0)
+			checksum_given = true;
+		else if (strcmp(def->defname, "compresstype") == 0)
+			type = def;
+		else if (strcmp(def->defname, "compresslevel") == 0)
+			level = def;
 	}
+
+	/* the table's compression: the statement's over the setting's */
+	strlcpy(ctype, dso.compresstype, NAMEDATALEN);
+	clevel = dso.compresslevel;
+	if (type != NULL)
+	{
+		strlcpy(ctype, defGetString(type), NAMEDATALEN);
+		for (char *c = ctype; *c; c++)
+			*c = pg_tolower((unsigned char) *c);
+		if (level != NULL)
+			clevel = atoi(defGetString(level));
+		else if (strcmp(ctype, "none") == 0)
+			clevel = 0;
+		else if (strcmp(ctype, dso.compresstype) != 0 || dso.compresslevel == 0)
+			clevel = 1;
+	}
+	else if (level != NULL)
+	{
+		clevel = atoi(defGetString(level));
+		if (strcmp(ctype, "none") == 0 && clevel > 0)
+			strlcpy(ctype, "zlib", NAMEDATALEN);
+	}
+
+	if (dso.blocksize != AO_DEFAULT_BLOCKSIZE && !blocksize_given)
+		*options = lappend(*options,
+						   makeDefElem("blocksize",
+									   (Node *) makeString(psprintf("%d", dso.blocksize)), -1));
+	if (clevel > 0 && strcmp(ctype, "none") != 0)
+	{
+		if (type == NULL &&
+			((strcmp(ctype, "zlib") == 0 && clevel == 1 && level == NULL) ||
+			 strcmp(ctype, "zlib") != 0))
+			*options = lappend(*options,
+							   makeDefElem("compresstype",
+										   (Node *) makeString(pstrdup(ctype)), -1));
+		if (clevel != 1 && level == NULL)
+			*options = lappend(*options,
+							   makeDefElem("compresslevel",
+										   (Node *) makeString(psprintf("%d", clevel)), -1));
+	}
+	if (!dso.checksum && !checksum_given)
+		*options = lappend(*options,
+						   makeDefElem("checksum", (Node *) makeString("false"), -1));
 }

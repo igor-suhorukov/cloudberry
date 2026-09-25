@@ -9,5 +9,18 @@
 CREATE EXTENSION gp_core;
 CREATE EXTENSION gp_orca;
 CREATE EXTENSION gp_sql;
+CREATE EXTENSION gp_ao;
 SELECT extname FROM pg_extension WHERE extname LIKE 'gp\_%' ORDER BY 1;
 SELECT count(*) AS segments FROM gp.segment_configuration() WHERE content >= 0;
+--
+-- A database a test makes is template1's copy, which has the extensions too:
+-- every database of Cloudberry's has what they give.
+--
+\c template1
+SET client_min_messages = warning;
+CREATE EXTENSION IF NOT EXISTS gp_core;
+CREATE EXTENSION IF NOT EXISTS gp_orca;
+CREATE EXTENSION IF NOT EXISTS gp_sql;
+CREATE EXTENSION IF NOT EXISTS gp_ao;
+RESET client_min_messages;
+\c regression

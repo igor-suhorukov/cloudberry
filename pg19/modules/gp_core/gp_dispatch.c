@@ -78,6 +78,7 @@
 #include "catalog/pg_type.h"
 #include "commands/dbcommands.h"
 #include "executor/spi.h"
+#include "executor/tuptable.h"
 #include "fmgr.h"
 #include "funcapi.h"
 #include "libpq-fe.h"
@@ -149,6 +150,13 @@ static const char *const synced_settings[] = {
 	"lc_monetary",
 	"lc_numeric",
 	"lc_time",
+	/*
+	 * gp_ao's, which a segment's scans and VACUUM read -- a module's setting
+	 * is sent where the module is loaded, and passed over where it is not
+	 */
+	"gp.select_invisible",
+	"gp.appendonly_compaction",
+	"gp.appendonly_compaction_threshold",
 	/* the UDP interconnect's, which the segments' senders and receivers use */
 	"gp.interconnect_queue_depth",
 	"gp.max_packet_size",
@@ -1788,20 +1796,33 @@ isolation_level_name(void)
 }
 
 /*
- * The objects whose "gp" label this transaction changed and the segments have
- * not been sent yet.  What is sent is the label as it is when it is sent --
- * a savepoint rolled back, an object dropped, both come out right -- so an
- * object is noted once however often it changes.  In the transaction's
- * memory, and forgotten when it ends.
+ * The objects whose label -- "gp", or another module's provider -- this
+ * transaction changed and the segments have not been sent yet.  What is sent
+ * is the label as it is when it is sent -- a savepoint rolled back, an object
+ * dropped, both come out right -- so an object is noted once per provider
+ * however often it changes.  In the transaction's memory, and forgotten when
+ * it ends.
  */
-static List *labels_pending = NIL;	/* of ObjectAddress * */
+typedef struct PendingLabel
+{
+	ObjectAddress object;
+	char		provider[NAMEDATALEN];
+} PendingLabel;
+
+static List *labels_pending = NIL;	/* of PendingLabel * */
 static bool labels_held = false;	/* a DDL tree is on its way */
 
 void
 GpDispatchNoteLabel(const ObjectAddress *object)
 {
+	GpDispatchNoteLabelOf(object, GP_LABEL_PROVIDER);
+}
+
+void
+GpDispatchNoteLabelOf(const ObjectAddress *object, const char *provider)
+{
 	ListCell   *lc;
-	ObjectAddress *copy;
+	PendingLabel *copy;
 	MemoryContext oldcxt;
 
 	/*
@@ -1815,16 +1836,19 @@ GpDispatchNoteLabel(const ObjectAddress *object)
 
 	foreach(lc, labels_pending)
 	{
-		ObjectAddress *o = (ObjectAddress *) lfirst(lc);
+		PendingLabel *p = (PendingLabel *) lfirst(lc);
 
-		if (o->classId == object->classId && o->objectId == object->objectId &&
-			o->objectSubId == object->objectSubId)
+		if (p->object.classId == object->classId &&
+			p->object.objectId == object->objectId &&
+			p->object.objectSubId == object->objectSubId &&
+			strcmp(p->provider, provider) == 0)
 			return;
 	}
 
 	oldcxt = MemoryContextSwitchTo(TopTransactionContext);
-	copy = palloc_object(ObjectAddress);
-	*copy = *object;
+	copy = palloc_object(PendingLabel);
+	copy->object = *object;
+	strlcpy(copy->provider, provider, NAMEDATALEN);
 	labels_pending = lappend(labels_pending, copy);
 	MemoryContextSwitchTo(oldcxt);
 }
@@ -1846,8 +1870,10 @@ gang_sync_labels(GpGang *g)
 
 	foreach(lc, pending)
 	{
-		ObjectAddress *o = (ObjectAddress *) lfirst(lc);
-		char	   *payload = GpDdlLabelPayload(o, GetSecurityLabel(o, GP_LABEL_PROVIDER));
+		PendingLabel *p = (PendingLabel *) lfirst(lc);
+		char	   *payload = GpDdlLabelPayloadOf(&p->object, p->provider,
+												  GetSecurityLabel(&p->object,
+																   p->provider));
 
 		if (payload == NULL)
 			continue;
@@ -3163,6 +3189,16 @@ type_has_binary_io(Oid typid)
 	Oid			inner = InvalidOid;
 
 	typid = GpTransferType(typid);
+
+	/*
+	 * int2vector's and oidvector's receive functions refuse what their send
+	 * functions make of an empty vector -- array_recv() makes it no
+	 * dimensions, and they want one -- which gp_distribution_policy's
+	 * distkey of a randomly distributed table is.  Their text reads back.
+	 */
+	if (typid == INT2VECTOROID || typid == OIDVECTOROID)
+		return false;
+
 	tp = SearchSysCache1(TYPEOID, ObjectIdGetDatum(typid));
 	if (!HeapTupleIsValid(tp))
 		elog(ERROR, "cache lookup failed for type %u", typid);
@@ -3206,6 +3242,68 @@ GpTupleDescHasBinaryIO(TupleDesc tupdesc)
 static GpGatherState *gather_start(const char *sql, TupleDesc tupdesc,
 									int content, int nsegments,
 									const int *contents, int ncontents);
+
+/*
+ * A set-returning function Cloudberry runs on every segment (EXECUTE ON ALL
+ * SEGMENTS: its rows are the segments' own), called on a cluster's
+ * coordinator: the same call, with the same arguments, run on every segment,
+ * and their rows its result, materialized.  The port's planner does not
+ * move such a call; a function whose rows are the segments' calls this
+ * first, and returns what it gives where it answers true.  False on a
+ * segment, on one node, and in a session of the coordinator's own.
+ */
+bool
+GpDispatchFunctionToSegments(FunctionCallInfo fcinfo)
+{
+	ReturnSetInfo *rsinfo = (ReturnSetInfo *) fcinfo->resultinfo;
+	Oid			fn = fcinfo->flinfo->fn_oid;
+	StringInfoData sql;
+	GpGatherState *gather;
+	TupleTableSlot *slot;
+
+	if (GpClusterIsSingleNode() || GpClusterBackendRole() != GP_ROLE_DISPATCH)
+		return false;
+
+	initStringInfo(&sql);
+	appendStringInfo(&sql, "SELECT * FROM %s(",
+					 quote_qualified_identifier(get_namespace_name(get_func_namespace(fn)),
+												get_func_name(fn)));
+	for (int i = 0; i < PG_NARGS(); i++)
+	{
+		Oid			type = get_fn_expr_argtype(fcinfo->flinfo, i);
+		Oid			out;
+		bool		varlena;
+
+		if (i > 0)
+			appendStringInfoString(&sql, ", ");
+		if (PG_ARGISNULL(i))
+		{
+			appendStringInfo(&sql, "NULL::%s", format_type_be_qualified(type));
+			continue;
+		}
+		/* a relation by its OID, which is the same on every node (R1) */
+		if (type == REGCLASSOID)
+		{
+			appendStringInfo(&sql, "%u::pg_catalog.oid::pg_catalog.regclass",
+							 DatumGetObjectId(PG_GETARG_DATUM(i)));
+			continue;
+		}
+		getTypeOutputInfo(type, &out, &varlena);
+		appendStringInfo(&sql, "%s::%s",
+						 quote_literal_cstr(OidOutputFunctionCall(out, PG_GETARG_DATUM(i))),
+						 format_type_be_qualified(type));
+	}
+	appendStringInfoChar(&sql, ')');
+
+	InitMaterializedSRF(fcinfo, 0);
+	gather = GpGatherStart(sql.data, rsinfo->setDesc);
+	slot = MakeSingleTupleTableSlot(rsinfo->setDesc, &TTSOpsVirtual);
+	while (GpGatherNext(gather, slot, NULL))
+		tuplestore_puttupleslot(rsinfo->setResult, slot);
+	GpGatherEnd(gather);
+	ExecDropSingleTupleTableSlot(slot);
+	return true;
+}
 
 GpGatherState *
 GpGatherStart(const char *sql, TupleDesc tupdesc)

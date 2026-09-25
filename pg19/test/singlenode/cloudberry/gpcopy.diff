@@ -342,8 +342,6 @@
 +                                                       ^
 +DETAIL:  There is no function of that name.
 @@
-+LINE 1: CREATE FUNCTION broken_int4out(broken_int4)
-+                                       ^
 +ERROR:  could not find function "broken_int4out" in file "/cb/pgregress/regress.so"
 @@
 +ERROR:  function broken_int4out(broken_int4) does not exist

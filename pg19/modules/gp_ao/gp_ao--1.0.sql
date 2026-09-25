@@ -254,6 +254,14 @@ AS 'MODULE_PATHNAME', 'gp_ao_aovisimap_hidden_info'
 LANGUAGE C STRICT;
 SECURITY LABEL FOR gp ON FUNCTION gp_toolkit.__gp_aovisimap_hidden_info(regclass) IS 'execute_on=all_segments';
 
+CREATE FUNCTION gp_toolkit.__gp_aovisimap_compaction_info(ao_oid oid,
+	OUT content int, OUT datafile int, OUT compaction_possible boolean,
+	OUT hidden_tupcount bigint, OUT total_tupcount bigint,
+	OUT percent_hidden numeric)
+RETURNS SETOF record
+AS 'MODULE_PATHNAME', 'gp_ao_aovisimap_compaction_info'
+LANGUAGE C STRICT;
+
 CREATE FUNCTION gp_toolkit.__gp_aovisimap_entry(regclass)
 RETURNS TABLE (segno integer, first_row_num bigint, hidden_tupcount integer,
 	bitmap text)

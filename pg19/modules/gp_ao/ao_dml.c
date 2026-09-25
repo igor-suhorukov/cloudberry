@@ -185,17 +185,65 @@ ao_segno_in_use(Oid relid, int segno)
 	return false;
 }
 
+/* Fewer rows first, as Cloudberry's compare_candidates() puts them. */
+static int
+segfile_fewer_rows(const void *a, const void *b)
+{
+	const AoSegfile *x = *(const AoSegfile *const *) a;
+	const AoSegfile *y = *(const AoSegfile *const *) b;
+
+	if (x->tupcount != y->tupcount)
+		return (x->tupcount > y->tupcount) - (x->tupcount < y->tupcount);
+	return (x->segno > y->segno) - (x->segno < y->segno);
+}
+
+/* Is the writer being made VACUUM's, compacting into it? */
+static bool ao_compaction_writer = false;
+
+void
+ao_dml_set_compaction_writer(bool on)
+{
+	ao_compaction_writer = on;
+}
+
+/* A new segment file for st, whose number no one else is taking. */
+static bool
+ao_new_segfile(AoInsertState *st, const bool *taken)
+{
+	for (int segno = 1; segno <= AO_MAX_SEGNO; segno++)
+	{
+		if (taken[segno] || ao_segno_in_use(st->relid, segno) ||
+			!ao_segfile_try_lock(st->relid, segno))
+			continue;
+		st->sf = ao_segfile_read(st->storage_id, segno, SnapshotSelf);
+		if (st->sf != NULL)
+			continue;			/* committed while we looked */
+		ao_segfile_insert(st->storage_id, segno, st->ngroups);
+		CommandCounterIncrement();
+		st->sf = ao_segfile_read(st->storage_id, segno, SnapshotSelf);
+		st->segno = segno;
+		return true;
+	}
+	return false;
+}
+
 /*
  * Choose the segment file this writer appends to: one this transaction
- * already holds and no other writer of it uses, or the first in use no one
- * else holds, or a new one.
+ * already holds and no other writer of it uses, or of those in use no one
+ * else holds the one with the fewest rows, as Cloudberry's
+ * choose_segno_internal() prefers, or a new one.  VACUUM's writer, which
+ * compacts, takes a new one before one with rows, as Cloudberry's
+ * CHOOSE_MODE_COMPACTION_WRITE does: rows moved into a file that has rows
+ * already would be moved again when that file is compacted.
  */
 static void
 ao_choose_segfile(AoInsertState *st, Relation rel)
 {
 	AoSegfile  *segfiles;
+	AoSegfile **byrows;
 	int			nsegfiles;
 	bool		taken[AO_MAX_SEGNO + 1] = {0};
+	bool		tried_new = false;
 	ListCell   *lc;
 
 	foreach(lc, ao_held_segnos)
@@ -212,14 +260,26 @@ ao_choose_segfile(AoInsertState *st, Relation rel)
 	}
 
 	segfiles = ao_segfiles_read(st->storage_id, SnapshotSelf, &nsegfiles);
+	byrows = palloc_array(AoSegfile *, Max(nsegfiles, 1));
 	for (int i = 0; i < nsegfiles; i++)
 	{
-		AoSegfile  *sf = &segfiles[i];
+		taken[segfiles[i].segno] = true;
+		byrows[i] = &segfiles[i];
+	}
+	qsort(byrows, nsegfiles, sizeof(AoSegfile *), segfile_fewer_rows);
+	for (int i = 0; i < nsegfiles; i++)
+	{
+		AoSegfile  *sf = byrows[i];
 
-		taken[sf->segno] = true;
 		if (sf->state != AO_SEGFILE_DEFAULT ||
 			ao_segno_in_use(st->relid, sf->segno))
 			continue;
+		if (ao_compaction_writer && sf->tupcount > 0 && !tried_new)
+		{
+			tried_new = true;
+			if (ao_new_segfile(st, taken))
+				goto chosen;
+		}
 		if (!ao_segfile_try_lock(st->relid, sf->segno))
 			continue;
 		/* Read again now it is ours: a writer may have just let it go. */
@@ -230,21 +290,8 @@ ao_choose_segfile(AoInsertState *st, Relation rel)
 		goto chosen;
 	}
 
-	/* A new one, whose number no one else is taking. */
-	for (int segno = 1; segno <= AO_MAX_SEGNO; segno++)
-	{
-		if (taken[segno] || ao_segno_in_use(st->relid, segno) ||
-			!ao_segfile_try_lock(st->relid, segno))
-			continue;
-		st->sf = ao_segfile_read(st->storage_id, segno, SnapshotSelf);
-		if (st->sf != NULL)
-			continue;			/* committed while we looked */
-		ao_segfile_insert(st->storage_id, segno, st->ngroups);
-		CommandCounterIncrement();
-		st->sf = ao_segfile_read(st->storage_id, segno, SnapshotSelf);
-		st->segno = segno;
+	if (!tried_new && ao_new_segfile(st, taken))
 		goto chosen;
-	}
 
 	ereport(ERROR,
 			(errcode(ERRCODE_INSUFFICIENT_RESOURCES),
@@ -393,8 +440,15 @@ ao_flush_block(AoInsertState *st, Relation rel)
 		else
 			raw = &st->rows;
 
-		len = ao_block_encode(raw, st->columnar ? &st->colopts[g] : &st->opts,
-							  st->block_first, st->block_nrows, &st->out);
+		{
+			AoOptions	o = st->columnar ? st->colopts[g] : st->opts;
+
+			/* Cloudberry's test of a block too big compressed to be so */
+			if (AO_FAULT("appendonly_skip_compression", rel) == GP_FAULT_SKIP)
+				o.compresstype = AO_COMPRESS_NONE;
+			len = ao_block_encode(raw, &o, st->block_first, st->block_nrows,
+								  &st->out);
+		}
 		st->offsets[g] = st->sf->eof[g];
 		ao_file_write(rel, AoFileNum(st->segno, st->columnar ? g + 1 : 0),
 					  st->sf->eof[g], st->out.data, len);
@@ -426,6 +480,7 @@ ao_insert_slot(AoInsertState *st, Relation rel, TupleTableSlot *slot)
 	MemoryContext old = MemoryContextSwitchTo(ao_dml_context());
 	Size		blocksize;
 
+	(void) AO_FAULT("appendonly_insert", rel);
 	slot_getallattrs(slot);
 
 	if (st->next_rownum == st->reserved_end)
@@ -542,6 +597,42 @@ ao_pending_fetch(Relation rel, ItemPointer tid, TupleTableSlot *slot)
 			rownum >= st->block_first &&
 			rownum < st->block_first + st->block_nrows)
 			return true;
+	}
+	return false;
+}
+
+/*
+ * A fetch of a row this backend's writer has not written yet: its block
+ * written now, so that the fetch finds the row.  COPY fires its AFTER
+ * triggers, which fetch the rows it inserted, before it says the insert is
+ * over (finish_bulk_insert), where ExecutorFinish writes a statement's
+ * blocks before its triggers fire.  Only a writer of this subtransaction's:
+ * what it writes goes with the subtransaction if it aborts, as the writer
+ * does.
+ */
+bool
+ao_pending_flush(Relation rel, ItemPointer tid)
+{
+	int64		rownum = AoTidRownum(tid);
+	SubTransactionId subid = GetCurrentSubTransactionId();
+	ListCell   *lc;
+
+	foreach(lc, ao_inserts)
+	{
+		AoInsertState *st = lfirst(lc);
+
+		if (st->relid == RelationGetRelid(rel) && st->subid == subid &&
+			AoTidSegno(tid) == st->segno && st->block_nrows > 0 &&
+			rownum >= st->block_first &&
+			rownum < st->block_first + st->block_nrows)
+		{
+			MemoryContext old = MemoryContextSwitchTo(ao_dml_context());
+
+			ao_flush_block(st, rel);
+			MemoryContextSwitchTo(old);
+			CommandCounterIncrement();
+			return true;
+		}
 	}
 	return false;
 }
@@ -663,8 +754,26 @@ ao_delete_row(Relation rel, ItemPointer tid)
 				 errmsg("TID (%u,%u) names no row of an append-optimized table",
 						ItemPointerGetBlockNumberNoCheck(tid),
 						ItemPointerGetOffsetNumberNoCheck(tid))));
+	(void) AO_FAULT("appendonly_delete", rel);
 	if (ao_deleted_by_this_command(rel, tid))
 		return false;
+
+	/*
+	 * gp.select_invisible shows a scan the rows deleted too, and an UPDATE
+	 * or DELETE under it reaches them: a row deleted already is left as it
+	 * is, and is given no new version, as Cloudberry's visibility map leaves
+	 * it (uao_dml's "we should not re-activate the deleted tuples").
+	 */
+	if (gp_select_invisible)
+	{
+		Snapshot	snapshot = RegisterSnapshot(GetLatestSnapshot());
+		AoVisimap  *vm = ao_visimap_load(ao_storage_id(rel), segno, snapshot);
+		bool		deleted = ao_visimap_is_deleted(vm, AoTidRownum(tid));
+
+		UnregisterSnapshot(snapshot);
+		if (deleted)
+			return false;
+	}
 
 	ds = ao_find_delete(RelationGetRelid(rel), true);
 	if (ds->storage_id == 0)
@@ -830,8 +939,17 @@ ao_xact_callback(XactEvent event, void *arg)
 		case XACT_EVENT_PRE_COMMIT:
 		case XACT_EVENT_PARALLEL_PRE_COMMIT:
 		case XACT_EVENT_PRE_PREPARE:
+			/*
+			 * What no statement's end finished: its catalog rows need a
+			 * snapshot, which a transaction ending has none of -- gp_ao's
+			 * tables have TOAST tables, and heap_insert() asserts one.
+			 */
 			if (ao_inserts != NIL || ao_deletes != NIL)
+			{
+				PushActiveSnapshot(GetTransactionSnapshot());
 				ao_dml_flush(InvalidOid);
+				PopActiveSnapshot();
+			}
 			break;
 		case XACT_EVENT_COMMIT:
 		case XACT_EVENT_PARALLEL_COMMIT:

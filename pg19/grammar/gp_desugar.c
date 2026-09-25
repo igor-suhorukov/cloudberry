@@ -122,9 +122,10 @@ static const char *const gp_trigger_words[] = {
  * Every one of Cloudberry's is in a CREATE or an ALTER, so the word counts
  * only in a text that has one of those too: a query with OVER (PARTITION BY
  * ...) is not tokenised for it.  So do ALTER TABLE's EXPAND and SHRINK,
- * words a query may use for anything.
+ * words a query may use for anything, and its SET WITH (...) and SET ACCESS
+ * METHOD ... WITH (...), whose options may be any.
  */
-static const char *const gp_trigger_ddl_words[] = {"partition", "expand", "shrink", NULL};
+static const char *const gp_trigger_ddl_words[] = {"partition", "expand", "shrink", "with", NULL};
 static const char *const gp_ddl_words[] = {"create", "alter", NULL};
 
 /* Does one of `words` start at str[i]? */
@@ -206,6 +207,24 @@ looks_interesting(const char *str)
 			if (i + wl <= len &&
 				pg_strncasecmp(str + i, gp_trigger_words[w], wl) == 0)
 				return true;
+		}
+
+		/* count(), which Cloudberry takes for count(*): see count_close() */
+		if (pg_tolower((unsigned char) str[i]) == 'c' && i + 5 <= len &&
+			pg_strncasecmp(str + i, "count", 5) == 0)
+		{
+			int			j = i + 5;
+
+			while (j < len && scanner_isspace(str[j]))
+				j++;
+			if (j < len && str[j] == '(')
+			{
+				j++;
+				while (j < len && scanner_isspace(str[j]))
+					j++;
+				if (j < len && str[j] == ')')
+					return true;
+			}
 		}
 
 		for (int w = 0; gp_trigger_pairs[w][0] != NULL; w++)
@@ -2633,6 +2652,52 @@ dollar_quote(const char *text)
 }
 
 /*
+ * The access method a WITH list's legacy options name -- appendonly or
+ * appendoptimized, and orientation -- as Cloudberry's grammar reads them
+ * (greenplumLegacyAOoptions()): ao_row, ao_column, heap for appendonly
+ * false, or NULL where they name none, or name it in a way this cannot
+ * read, which gp_ao's hook reads again.  `open` is the list's parenthesis,
+ * `close` the token after its end.
+ */
+static const char *
+legacy_access_method(const GpTokens *ts, int open, int close)
+{
+	int			appendonly = -1;
+	bool		column = false;
+
+	for (int k = open + 1; k + 2 < close; k++)
+	{
+		char	   *v;
+
+		if ((!tok_is_char(ts, k - 1, '(') && !tok_is_char(ts, k - 1, ',')) ||
+			!tok_is_char(ts, k + 1, '='))
+			continue;
+		v = tok_is_string(ts, k + 2) ? ts->toks[k + 2].str :
+			tok_is_name(ts, k + 2) ? tok_name(ts, k + 2) : NULL;
+		if (v == NULL)
+			continue;
+		if (tok_is(ts, k, "appendonly") || tok_is(ts, k, "appendoptimized"))
+		{
+			if (pg_strcasecmp(v, "true") == 0 || pg_strcasecmp(v, "on") == 0 ||
+				pg_strcasecmp(v, "t") == 0 || pg_strcasecmp(v, "yes") == 0)
+				appendonly = 1;
+			else if (pg_strcasecmp(v, "false") == 0 || pg_strcasecmp(v, "off") == 0 ||
+					 pg_strcasecmp(v, "f") == 0 || pg_strcasecmp(v, "no") == 0)
+				appendonly = 0;
+			else
+				return NULL;
+		}
+		else if (tok_is(ts, k, "orientation"))
+			column = (pg_strcasecmp(v, "column") == 0);
+	}
+	if (appendonly == 1)
+		return column ? "ao_column" : "ao_row";
+	if (appendonly == 0)
+		return "heap";
+	return NULL;
+}
+
+/*
  * Where PostgreSQL's PARTITION BY goes in CREATE TABLE, the token at `i`
  * being the one after the table's name: after the column list, OF type and
  * its list, or PARTITION OF parent, its list and its bound, and INHERITS
@@ -2897,17 +2962,29 @@ rw_partition_cmds(GpRewrite *rw)
 			{
 				int			close = skip_parens(ts, j + 1);
 
-				/* WITH (REORGANIZE [= value]): alone, true, as a boolean option is */
+				/*
+				 * WITH (REORGANIZE [= value]): alone, true, as a boolean
+				 * option is; and alone in the list, as Cloudberry's
+				 * ATExecSetDistributedBy() says.
+				 */
 				for (int k = j + 2; k < close - 1; k++)
 				{
 					char	   *v;
 
-					if (tok_is(ts, k, "reorganize"))
+					if (tok_is_char(ts, k - 1, '(') || tok_is_char(ts, k - 1, ','))
 					{
+						if (!tok_is(ts, k, "reorganize"))
+							ereport(ERROR,
+									(errcode(ERRCODE_SYNTAX_ERROR),
+									 errmsg("reorganize isn't supported with other options in SET WITH")));
+						if (reorganize != NULL)
+							ereport(ERROR,
+									(errcode(ERRCODE_SYNTAX_ERROR),
+									 errmsg("cannot specify more than one option in WITH clause")));
 						reorganize = "true";
 						continue;
 					}
-					if (tok_is_char(ts, k, '='))
+					if (tok_is_char(ts, k, '=') || tok_is_char(ts, k, ','))
 						continue;
 					/* true or 'true', on or 't': a boolean, however spelled */
 					v = rw_text(ts, k, k + 1);
@@ -2970,6 +3047,71 @@ rw_partition_cmds(GpRewrite *rw)
 					psprintf("SET (gp.shrink = '%s%d')", negative ? "-" : "",
 							 ts->toks[j].ival));
 			i = j + 1;
+		}
+		/*
+		 * SET WITH (appendonly=true, orientation=column, compresslevel=5):
+		 * a change of access method in Cloudberry's legacy spelling, with the
+		 * options the table takes in its new one; and SET ACCESS METHOD m
+		 * WITH (...), Cloudberry's own, the same with the method named:
+		 *	 -> SET (gp_ao.set_with = $gp$...$gp$)
+		 *	 -> SET ACCESS METHOD m, SET (gp_ao.am_with = $gp$...$gp$)
+		 * which gp_ao's ProcessUtility hook takes out and carries out.  WITH
+		 * (REORGANIZE) is the distribution's, above.
+		 */
+		else if (tok_is_kw(ts, i, "set") && tok_is_kw(ts, i + 1, "with") &&
+				 tok_is_char(ts, i + 2, '(') &&
+				 !tok_is_word(ts, skip_parens(ts, i + 2), "distributed"))
+		{
+			int			close = skip_parens(ts, i + 2);
+			bool		am = false;
+
+			for (int k = i + 3; k < close - 1; k++)
+			{
+				if (!tok_is_char(ts, k - 1, '(') && !tok_is_char(ts, k - 1, ','))
+					continue;
+				if (tok_is(ts, k, "reorganize"))
+					ereport(ERROR,
+							(errcode(ERRCODE_SYNTAX_ERROR),
+							 errmsg("reorganize isn't supported with other options in SET WITH")));
+				if (tok_is(ts, k, "appendonly") || tok_is(ts, k, "appendoptimized"))
+					am = true;
+			}
+			if (!am)
+				ereport(ERROR,
+						(errcode(ERRCODE_SYNTAX_ERROR),
+						 errmsg("invalid storage type"),
+						 errposition(pg_mbstrlen_with_len(ts->src,
+														  ts->toks[i + 2].off) + 1)));
+			rw_edit(rw, ts->toks[i].off, tok_stop(ts, close - 1),
+					psprintf("SET (gp_ao.set_with = %s)",
+							 dollar_quote(pnstrdup(ts->src + ts->toks[i + 3].off,
+												   ts->toks[close - 1].off -
+												   ts->toks[i + 3].off))));
+			i = close;
+		}
+		else if (tok_is_kw(ts, i, "set") && tok_is_kw(ts, i + 1, "access") &&
+				 tok_is_kw(ts, i + 2, "method") && tok_is_name(ts, i + 3) &&
+				 tok_is_kw(ts, i + 4, "with") && tok_is_char(ts, i + 5, '('))
+		{
+			int			close = skip_parens(ts, i + 5);
+			const char *witham = legacy_access_method(ts, i + 5, close);
+			char	   *am = tok_name(ts, i + 3);
+
+			/* Cloudberry's grammar: the options name the method named */
+			if (witham != NULL && strcmp(witham, am) != 0)
+				ereport(ERROR,
+						(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+						 errmsg("ACCESS METHOD is specified as \"%s\" but the WITH option indicates it to be \"%s\"",
+								am, witham),
+						 errposition(pg_mbstrlen_with_len(ts->src,
+														  ts->toks[i + 4].off) + 1)));
+
+			rw_edit(rw, ts->toks[i + 4].off, tok_stop(ts, close - 1),
+					psprintf(", SET (gp_ao.am_with = %s)",
+							 dollar_quote(pnstrdup(ts->src + ts->toks[i + 6].off,
+												   ts->toks[close - 1].off -
+												   ts->toks[i + 6].off))));
+			i = close;
 		}
 		else if (GpPartIsCmd(ts, i, rw->last))
 		{
@@ -3820,6 +3962,27 @@ emit_dist_random(GpOut *o, const GpExprScan *sc, int i, int close)
 }
 
 /*
+ * count() at `i`, which Cloudberry's parse analysis takes for count(*) -- it
+ * lets any aggregate be called with no arguments and no star
+ * (parse_func.c), and count is the one its tests call so, as an aggregate
+ * and as a window function: its closing parenthesis, or -1.  Spelled with
+ * quotes or a schema, or where a name rather than a call stands, it is left.
+ */
+static int
+count_close(const GpExprScan *sc, int i, int limit)
+{
+	const GpTokens *ts = sc->ts;
+	const GpTok *t = &ts->toks[i];
+
+	if (t->code != GP_IDENT || strcmp(t->str, "count") != 0 ||
+		ts->src[t->off] == '"' || i + 2 >= limit ||
+		!tok_is_char(ts, i + 1, '(') || !tok_is_char(ts, i + 2, ')') ||
+		!decode_is_call(sc, i, i + 2))
+		return -1;
+	return i + 2;
+}
+
+/*
  * A construct of Cloudberry's starting at token i, ending before `limit`:
  * the index of its last token, or -1.
  */
@@ -3832,6 +3995,8 @@ construct_at(const GpExprScan *sc, int i, int limit)
 		return stop;
 	if ((stop = dist_random_close(sc, i, limit)) >= 0)
 		return stop;
+	if ((stop = count_close(sc, i, limit)) >= 0)
+		return stop;
 	return case_close(sc, i, limit);
 }
 
@@ -3843,6 +4008,13 @@ emit_construct(GpOut *o, const GpExprScan *sc, int i, int stop)
 	else if (sc->ts->toks[i].code == GP_IDENT &&
 			 pg_strcasecmp(sc->ts->toks[i].str, "gp_dist_random") == 0)
 		emit_dist_random(o, sc, i, stop);
+	else if (sc->ts->toks[i].code == GP_IDENT &&
+			 strcmp(sc->ts->toks[i].str, "count") == 0)
+	{
+		out_text(o, "count(", sc->ts->toks[i].off);
+		out_text(o, "*", sc->ts->toks[i + 1].off);
+		out_text(o, ")", sc->ts->toks[stop].off);
+	}
 	else
 		emit_decode(o, sc, i, stop);
 }

@@ -270,6 +270,13 @@ is "MERGE updates, deletes and inserts" \
       WHEN MATCHED THEN UPDATE SET b = s.b
       WHEN NOT MATCHED THEN INSERT VALUES (s.a, s.b);
     SELECT string_agg(a || b, ',' ORDER BY a) FROM c1 WHERE a IN (4, 5, 9999);" "4u,9999i"
+is "an AFTER INSERT row trigger finds its rows, which COPY fires before it ends the insert" \
+   "CREATE TABLE trg_t (a int) USING ao_row; CREATE TABLE trg_log (a int);
+    CREATE FUNCTION trg_ins() RETURNS trigger LANGUAGE plpgsql AS
+      'BEGIN INSERT INTO trg_log VALUES (NEW.a); RETURN NEW; END';
+    CREATE TRIGGER ti AFTER INSERT ON trg_t FOR EACH ROW EXECUTE FUNCTION trg_ins();
+    COPY trg_t FROM PROGRAM 'seq 1 3'; INSERT INTO trg_t VALUES (4);
+    SELECT string_agg(a::text, ',' ORDER BY a) FROM trg_log;" "1,2,3,4"
 refused "row triggers on UPDATE are Cloudberry's error" \
         "CREATE FUNCTION trg() RETURNS trigger LANGUAGE plpgsql AS 'BEGIN RETURN NEW; END';
          CREATE TRIGGER t BEFORE UPDATE ON r1 FOR EACH ROW EXECUTE FUNCTION trg();" \
@@ -278,7 +285,7 @@ refused "and WHERE CURRENT OF" \
         "BEGIN; DECLARE cur CURSOR FOR SELECT * FROM r1; FETCH 1 FROM cur;
          UPDATE r1 SET b = 'x' WHERE CURRENT OF cur;" "\"r1\" is not simply updatable"
 refused "ON CONFLICT is refused" \
-        "INSERT INTO u VALUES (1, 'x') ON CONFLICT DO NOTHING;" "INSERT ... ON CONFLICT is not supported"
+        "INSERT INTO u VALUES (1, 'x') ON CONFLICT DO NOTHING;" "INSERT ON CONFLICT is not supported for appendoptimized relations"
 is "gp.select_invisible shows the rows deleted, as gp_select_invisible does" \
    "SET gp.select_invisible = on; SELECT count(*) FROM r1;" "5019"
 
@@ -415,6 +422,31 @@ is "DROP TABLE takes the rows of gp_ao's tables with it" \
    "DROP TABLE dd; SELECT count(*) FROM gp_ao.segfile WHERE storage_id = $SID;" "0"
 # A tablespace outside the data directory would be the standby's to share.
 q "DROP TABLESPACE ao_ts;" > /dev/null
+q "CREATE TABLE am (a int, b text) WITH (fillfactor = 70);
+   INSERT INTO am SELECT i, 'x' FROM generate_series(1, 100) i;" > /dev/null
+is "SET WITH (appendonly=true, ...), Cloudberry's spelling, changes the method and the options" \
+   "ALTER TABLE am SET WITH (appendonly = true, compresslevel = 3);
+    SELECT amname || ' ' || array_to_string(reloptions, ' ') || ' ' || (SELECT count(*) FROM am)
+      FROM pg_class c JOIN pg_am m ON m.oid = relam WHERE relname = 'am';" "ao_row compresslevel=3 100"
+refused "and names a method, or is refused as Cloudberry's grammar refuses it" \
+        "ALTER TABLE am SET WITH (compresslevel = 3);" "invalid storage type"
+refused "SET ACCESS METHOD m WITH (...) with options naming another method" \
+        "ALTER TABLE am SET ACCESS METHOD ao_row WITH (appendonly = true, orientation = column);" \
+        "ACCESS METHOD is specified as \"ao_row\" but the WITH option indicates it to be \"ao_column\""
+is "SET ACCESS METHOD ao_column WITH (...) gives every column its encoding" \
+   "ALTER TABLE am SET ACCESS METHOD ao_column WITH (compresstype = zlib);
+    SELECT array_to_string(reloptions, ' ') || ' ' ||
+           (SELECT count(*) FROM pg_attribute_encoding WHERE attrelid = 'am'::regclass) || ' ' ||
+           (SELECT count(*) FROM am)
+      FROM pg_class WHERE relname = 'am';" "compresstype=zlib 2 100"
+refused "an option heap does not take, for heap" \
+        "ALTER TABLE am SET ACCESS METHOD heap WITH (blocksize = 65536);" "unrecognized parameter \"blocksize\""
+is "and back to heap: the encodings and the options go" \
+   "ALTER TABLE am SET ACCESS METHOD heap WITH (fillfactor = 50);
+    SELECT array_to_string(reloptions, ' ') || ' ' ||
+           (SELECT count(*) FROM pg_attribute_encoding WHERE attrelid = 'am'::regclass) || ' ' ||
+           (SELECT count(*) FROM am)
+      FROM pg_class WHERE relname = 'am';" "fillfactor=50 0 100"
 
 ###############################################################################
 echo "9. ANALYZE, TABLESAMPLE and a scan of the columns a plan reads (O15)"
@@ -459,12 +491,24 @@ q "CREATE TABLE ptab (a int, b text) PARTITION BY RANGE (a) WITH (appendonly=tru
 is "a partitioned table keeps its storage options for its partitions of its method" \
    "SELECT string_agg(relname || ':' || coalesce(array_to_string(reloptions, ' '), '-'), ', ' ORDER BY relname)
       FROM pg_class WHERE relname LIKE 'ptab%';" \
-   "ptab:-, ptab_1:compresstype=zlib compresslevel=2, ptab_2:compresslevel=7 compresstype=zlib, ptab_3:-"
+   "ptab:-, ptab_1:compresstype=zlib compresslevel=2, ptab_2:compresstype=zlib compresslevel=7, ptab_3:-"
+is "a partition Cloudberry's partition clause makes takes its parent's options first" \
+   "CREATE TABLE pc (a int, b int) WITH (appendonly=true, compresstype=zlib, compresslevel=5)
+      PARTITION BY RANGE (b) (PARTITION p1 START (0) END (10) WITH (compresslevel=3),
+                              DEFAULT PARTITION def);
+    SELECT string_agg(relname || ':' || array_to_string(reloptions, ' '), ', ' ORDER BY relname)
+      FROM pg_class WHERE relname LIKE 'pc_1_prt_%';" \
+   "pc_1_prt_def:compresstype=zlib compresslevel=5, pc_1_prt_p1:compresstype=zlib compresslevel=3"
 is "gp.default_storage_options fills in what a statement does not say" \
    "SET gp.default_storage_options = 'compresstype=zstd,blocksize=65536';
     CREATE TABLE dso (a int) USING ao_row;
     SELECT array_to_string(reloptions, ' ') FROM pg_class WHERE relname = 'dso';" \
-   "compresstype=zstd blocksize=65536"
+   "blocksize=65536 compresstype=zstd"
+is "and holds every option filled in, as SHOW prints Cloudberry's" \
+   "SET gp.default_storage_options = 'compresslevel=3'; SHOW gp.default_storage_options;" \
+   "blocksize=32768,compresstype=zlib,compresslevel=3,checksum=true"
+refused "and refuses a method's option in Cloudberry's words" \
+        "SET gp.default_storage_options = 'orientation=row';" "invalid storage option \"orientation\""
 q "CREATE DATABASE restored;" > /dev/null
 "$BINDIR/pg_dump" -d postgres -t enc -t 'ptab*' > "$WORK/enc.sql" 2> "$WORK/enc.err"
 "$PSQL" -X -q -d restored -c "CREATE EXTENSION gp_ao CASCADE" > /dev/null 2>&1
@@ -507,6 +551,14 @@ isl "rows inserted after the build are found, and VACUUM builds it again" \
    "SET enable_seqscan = off; SELECT (SELECT count(*) FROM bmh WHERE c = 7) || ' ' || (SELECT count(*) FROM bma WHERE b = 2);" "100 8000"
 is "DROP INDEX drops its list of values" \
    "DROP INDEX bmh_b; SELECT count(*) FROM pg_class WHERE relnamespace = 'pg_bitmapindex'::regnamespace;" "4"
+is "an UPDATE that breaks a bitmap's compressed words, and a page of them" \
+   "CREATE TABLE bmw (i int, j int);
+    CREATE INDEX bmw_i ON bmw USING bitmap (i);
+    INSERT INTO bmw SELECT 1, CASE WHEN g % 264 = 0 THEN 2 ELSE 1 END FROM generate_series(1, 4096) g;
+    UPDATE bmw SET i = 2 WHERE j = 2; UPDATE bmw SET i = 3 WHERE i = 1;
+    SET enable_seqscan = off;
+    SELECT (SELECT count(*) FROM bmw WHERE i = 1) || ' ' || (SELECT count(*) FROM bmw WHERE i = 2) || ' ' ||
+           (SELECT count(*) FROM bmw WHERE i = 3);" "0 15 4081"
 
 ###############################################################################
 echo "12. a standby replays gp_ao's records, and has the same rows"

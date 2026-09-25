@@ -1,0 +1,95 @@
+@@
+-  relname  | relkind | amname |             reloptions              
+------------+---------+--------+-------------------------------------
+- pt_ao_row | p       | ao_row | {compresstype=zlib,compresslevel=6}
++  relname  | relkind | amname | reloptions 
++-----------+---------+--------+------------
++ pt_ao_row | p       | ao_row | 
+@@
+-Partitions: pt_ao_row_1_prt_1 FOR VALUES FROM ('01-01-2020') TO ('01-01-2021'),
+-            pt_ao_row_1_prt_2 FOR VALUES FROM ('01-01-2021') TO ('01-01-2022'),
+-            pt_ao_row_1_prt_3 FOR VALUES FROM ('01-01-2022') TO ('01-01-2023'),
+-            pt_ao_row_1_prt_4 FOR VALUES FROM ('01-01-2023') TO ('01-01-2024')
+-Options: compresstype=zlib, compresslevel=6
++Not-null constraints:
++    "pt_ao_row_a_not_null" NOT NULL "a"
++    "pt_ao_row_b_not_null" NOT NULL "b"
++    "pt_ao_row_bi_not_null" NOT NULL "bi"
++    "pt_ao_row_ts_not_null" NOT NULL "ts"
++Partitions:
++    pt_ao_row_1_prt_1 FOR VALUES FROM ('01-01-2020') TO ('01-01-2021')
++    pt_ao_row_1_prt_2 FOR VALUES FROM ('01-01-2021') TO ('01-01-2022')
++    pt_ao_row_1_prt_3 FOR VALUES FROM ('01-01-2022') TO ('01-01-2023')
++    pt_ao_row_1_prt_4 FOR VALUES FROM ('01-01-2023') TO ('01-01-2024')
+@@
+-Compression Type: zlib
+-Compression Level: 6
+-Block Size: 32768
+-Checksum: t
++Not-null constraints:
++    "pt_ao_row_a_not_null" NOT NULL "a" (inherited)
++    "pt_ao_row_b_not_null" NOT NULL "b" (inherited)
++    "pt_ao_row_bi_not_null" NOT NULL "bi" (inherited)
++    "pt_ao_row_ts_not_null" NOT NULL "ts" (inherited)
+@@
+-Compression Type: zlib
+-Compression Level: 6
+-Block Size: 32768
+-Checksum: t
++Not-null constraints:
++    "pt_ao_row_a_not_null" NOT NULL "a" (inherited)
++    "pt_ao_row_b_not_null" NOT NULL "b" (inherited)
++    "pt_ao_row_bi_not_null" NOT NULL "bi" (inherited)
++    "pt_ao_row_ts_not_null" NOT NULL "ts" (inherited)
+@@
+-Partitions: pt2_ao_row_1_prt_1 FOR VALUES FROM ('01-01-2020') TO ('01-01-2021'),
+-            pt2_ao_row_1_prt_2 FOR VALUES FROM ('01-01-2021') TO ('01-01-2022'),
+-            pt2_ao_row_1_prt_3 FOR VALUES FROM ('01-01-2022') TO ('01-01-2023'),
+-            pt2_ao_row_1_prt_4 FOR VALUES FROM ('01-01-2023') TO ('01-01-2024')
++Not-null constraints:
++    "pt2_ao_row_a_not_null" NOT NULL "a"
++    "pt2_ao_row_b_not_null" NOT NULL "b"
++    "pt2_ao_row_bi_not_null" NOT NULL "bi"
++    "pt2_ao_row_ts_not_null" NOT NULL "ts"
++Partitions:
++    pt2_ao_row_1_prt_1 FOR VALUES FROM ('01-01-2020') TO ('01-01-2021')
++    pt2_ao_row_1_prt_2 FOR VALUES FROM ('01-01-2021') TO ('01-01-2022')
++    pt2_ao_row_1_prt_3 FOR VALUES FROM ('01-01-2022') TO ('01-01-2023')
++    pt2_ao_row_1_prt_4 FOR VALUES FROM ('01-01-2023') TO ('01-01-2024')
+@@
+-Compression Type: None
+-Compression Level: 0
+-Block Size: 32768
+-Checksum: t
++Not-null constraints:
++    "pt2_ao_row_a_not_null" NOT NULL "a" (inherited)
++    "pt2_ao_row_b_not_null" NOT NULL "b" (inherited)
++    "pt2_ao_row_bi_not_null" NOT NULL "bi" (inherited)
++    "pt2_ao_row_ts_not_null" NOT NULL "ts" (inherited)
+@@
+-Partitions: pt2_ao_row_1_prt_1 FOR VALUES FROM ('01-01-2020') TO ('01-01-2021'),
+-            pt2_ao_row_1_prt_11 FOR VALUES FROM ('01-01-2027') TO ('01-01-2028'),
+-            pt2_ao_row_1_prt_2 FOR VALUES FROM ('01-01-2021') TO ('01-01-2022'),
+-            pt2_ao_row_1_prt_3 FOR VALUES FROM ('01-01-2022') TO ('01-01-2023'),
+-            pt2_ao_row_1_prt_4 FOR VALUES FROM ('01-01-2023') TO ('01-01-2024')
++Not-null constraints:
++    "pt2_ao_row_a_not_null" NOT NULL "a"
++    "pt2_ao_row_b_not_null" NOT NULL "b"
++    "pt2_ao_row_bi_not_null" NOT NULL "bi"
++    "pt2_ao_row_ts_not_null" NOT NULL "ts"
++Partitions:
++    pt2_ao_row_1_prt_1 FOR VALUES FROM ('01-01-2020') TO ('01-01-2021')
++    pt2_ao_row_1_prt_11 FOR VALUES FROM ('01-01-2027') TO ('01-01-2028')
++    pt2_ao_row_1_prt_2 FOR VALUES FROM ('01-01-2021') TO ('01-01-2022')
++    pt2_ao_row_1_prt_3 FOR VALUES FROM ('01-01-2022') TO ('01-01-2023')
++    pt2_ao_row_1_prt_4 FOR VALUES FROM ('01-01-2023') TO ('01-01-2024')
+@@
+-Compression Type: None
+-Compression Level: 0
+-Block Size: 32768
+-Checksum: t
++Not-null constraints:
++    "pt2_ao_row_a_not_null" NOT NULL "a" (inherited)
++    "pt2_ao_row_b_not_null" NOT NULL "b" (inherited)
++    "pt2_ao_row_bi_not_null" NOT NULL "bi" (inherited)
++    "pt2_ao_row_ts_not_null" NOT NULL "ts" (inherited)
