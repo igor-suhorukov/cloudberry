@@ -117,7 +117,7 @@ static bool gp_autostats_allow_nonowner = false;
 /* The settings it accepts, with nothing to apply them to yet                */
 /* ------------------------------------------------------------------------- */
 
-static int	statement_mem = 128000;
+int			gp_statement_mem = 128000;
 static bool enable_parallel = false;
 static int	gp_vmem_idle_resource_timeout = 18000;
 static int	gp_segments_for_planner = 0;
@@ -131,6 +131,27 @@ static bool gp_eager_distinct_dedup = false;
 static bool gp_enable_agg_pushdown = false;
 static bool gp_enable_fast_sri = true;
 static bool gp_force_random_redistribution = false;
+
+/*
+ * Cloudberry's gpvars_check_statement_mem(): statement_mem is less than
+ * max_statement_mem, which is gp_resource's, where gp_resource is loaded.
+ */
+static bool
+check_statement_mem(int *newval, void **extra, GucSource source)
+{
+	const char *max = GetConfigOption("gp.max_statement_mem", true, false);
+	int			maxkb;
+
+	if (max == NULL || !parse_int(max, &maxkb, GUC_UNIT_KB, NULL))
+		return true;
+	if (*newval >= maxkb)
+	{
+		GUC_check_errmsg("Invalid input for statement_mem, must be less than max_statement_mem (%d kB)",
+						 maxkb);
+		return false;
+	}
+	return true;
+}
 
 /* The planner's MPP knobs: Cloudberry's planner makes plans the port's does not. */
 #define ROUTE_B		" Accepted for Cloudberry's scripts: the planner here makes none of Cloudberry's multi-phase or motion plans, so it has nothing to apply this to until Route B (M7)."
@@ -537,13 +558,15 @@ GpSettingsInit(void)
 							 false, PGC_SUSET, 0,
 							 NULL, NULL, NULL);
 
-	/* Accepted, with nothing to apply them to yet; see the file header. */
+	/* gp_resource's, which budgets a query by it; gp_core's, for the scripts */
 	DefineCustomIntVariable("gp.statement_mem",
 							"Sets the memory to be reserved for a statement.",
-							"Accepted for Cloudberry's scripts: memory is not accounted per statement until M6's resource management.",
-							&statement_mem,
+							"gp_resource gives a query this, or its queue's or group's share, as the work_mem it runs with; without gp_resource it is only accepted.",
+							&gp_statement_mem,
 							128000, 50, INT_MAX, PGC_USERSET, GUC_UNIT_KB,
-							NULL, NULL, NULL);
+							check_statement_mem, NULL, NULL);
+
+	/* Accepted, with nothing to apply them to yet; see the file header. */
 	DefineCustomBoolVariable("gp.enable_parallel",
 							 "allow to use of parallel query facilities or not.",
 							 "Accepted for Cloudberry's scripts: a segment runs each slice in one process until intra-segment parallelism (after M7, decision 2).",

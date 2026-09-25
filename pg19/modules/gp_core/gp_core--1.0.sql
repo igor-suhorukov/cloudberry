@@ -14,6 +14,16 @@ CREATE SCHEMA IF NOT EXISTS gp_internal;
 GRANT USAGE ON SCHEMA gp_internal TO PUBLIC;
 
 /*
+ * gp_toolkit: Cloudberry's schema of views and functions of the cluster.
+ * The port's modules each make their own objects in it -- gp_ao's of its
+ * tables, gp_resource's of the queues and the groups -- so it is made here,
+ * where every one of them finds it, rather than by the first of them, which
+ * would own it.
+ */
+CREATE SCHEMA IF NOT EXISTS gp_toolkit;
+GRANT USAGE ON SCHEMA gp_toolkit TO PUBLIC;
+
+/*
  * And "gp" is anyone's to reach as well, as Cloudberry's gp_dist_random() and
  * catalog views are: gp.dist_random() reads a relation through a query run
  * as the caller, here and on the segments, so it reads only what the caller

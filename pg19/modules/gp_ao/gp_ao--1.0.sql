@@ -220,12 +220,11 @@ LANGUAGE C STRICT;
 
 /*
  * gp_toolkit's functions of append-optimized tables, under Cloudberry's
- * names and in its shapes.  gp_toolkit itself is not a module of the port
- * yet; its schema is made here if there is none.  The ones Cloudberry runs
- * on every segment are labelled to, as EXECUTE ON ALL SEGMENTS is.
+ * names and in its shapes.  gp_toolkit itself is not a module of the port;
+ * its schema is gp_core's, which gp_resource puts views of its own in too.
+ * The ones Cloudberry runs on every segment are labelled to, as EXECUTE ON
+ * ALL SEGMENTS is.
  */
-CREATE SCHEMA IF NOT EXISTS gp_toolkit;
-GRANT USAGE ON SCHEMA gp_toolkit TO PUBLIC;
 
 CREATE FUNCTION gp_toolkit.__gp_aoseg(regclass)
 RETURNS TABLE (segment_id integer, segno integer, eof bigint, tupcount bigint,

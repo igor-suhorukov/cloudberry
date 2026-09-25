@@ -43,6 +43,9 @@ extern double gp_motion_cost_per_row;
 /* gp.use_legacy_hashops: a new key's legacy operator classes (GpPolicyColumnOpclass) */
 extern bool gp_use_legacy_hashops;
 
+/* gp.statement_mem, in kB: what gp_resource budgets a query by */
+extern PGDLLIMPORT int gp_statement_mem;
+
 /*
  * The INFO Cloudberry prints for a slice it dispatches, when
  * gp.test_print_direct_dispatch_info is on: "(slice 1) Dispatch command to
