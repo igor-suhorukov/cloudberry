@@ -7,8 +7,8 @@
 -- use, which reads pg_locks by segment.  The port runs these tests on one
 -- node, which has no segment or mirror for the first to drive, and no
 -- gp_segment_id in pg_locks, so this makes only what the tests the port runs
--- use, for one node, and the extensions of every M1 module, which Cloudberry
--- has built in.
+-- use, for one node, and the extensions of every M1 module and of M6's
+-- gp_resource, which Cloudberry has built in.
 --
 CREATE EXTENSION gp_core;
 CREATE EXTENSION gp_orca;
@@ -16,6 +16,7 @@ CREATE EXTENSION gp_task;
 CREATE EXTENSION gp_matview;
 CREATE EXTENSION gp_sql;
 CREATE EXTENSION gp_security;
+CREATE EXTENSION gp_resource;
 
 -- Cloudberry's, less the segment: -1, the coordinator, is the one node there
 -- is, and any other segment has no locks to wait for.

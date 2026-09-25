@@ -19,7 +19,8 @@
 #
 # Part of Cloudberry's isolation2_schedule, on a cluster: M3's tests --
 # distributed transactions, snapshots, locks and the global deadlock
-# detector -- M4's, FTS and mirrors, and M6's resource queues.
+# detector -- M4's, FTS and mirrors, and M6's resource queues and memory
+# accounting.
 #
 # src/test/isolation2 is Cloudberry's suite of tests that need more than one
 # session at a time, written in its isolation2 syntax (1: ..., 2&: ..., 2<:,

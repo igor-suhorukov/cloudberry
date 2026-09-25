@@ -98,6 +98,23 @@ segwalrep/mirror_promotion
   primary stopped and the one from a primary that does not answer FTS in
   time, and both full recoveries, are as Cloudberry's.
 
+oom_startup_memory  what the memory a process starts with -- 12 MB, which
+  each process of a session on a segment takes from the session's and the
+  node's limits as it connects (memprot.c) -- does to the test's two
+  scenarios, which are the port's dispatch's rather than Cloudberry's.  Its
+  join of four gp_dist_random('gp_id') runs on the coordinator, which reads
+  each through the session's one connection to each segment, so that no
+  segment starts a second process for the session and the session stays
+  within the per-query limit, 20 MB, where Cloudberry's four slices start
+  four and the second is refused; the 81 rows are three segments' to the
+  fourth power.  And the eight sessions' SET of a setting: the port sends a
+  setting to the segments with the next statement that goes to them, and a
+  SET goes to none, so no session starts a process on a segment and none
+  runs past the node's limit, 60 MB, where Cloudberry's SET opens each
+  session's processes on the segments and the sixth is refused.  The
+  refusals themselves are Cloudberry's, in its words, and the memory
+  protection suite makes them happen (../memprot/run.sh).
+
 reader_waits_for_lock, in the planner pass alone
   No reader waits, because the port's planner has none: it reads each
   distributed table of the join through a gather of its own, on the
@@ -118,6 +135,14 @@ resource_queue  what pg_stat_activity and pg_locks say of a backend that
   gp_toolkit.gp_locks_on_resqueue reads.  The waits themselves -- two
   EXECUTEs held until the cursor's transaction ends, then each let through
   -- are Cloudberry's.
+
+runaway_query, in the planner pass alone  EXPLAIN's plan of the query ORCA
+  fails on, which the planner makes: the port's planner sends a query whose
+  distribution key its condition fixes to the one segment that holds the
+  key, and EXPLAIN prints the Gather Motion that reads it there, with the
+  relation and the segment, where Cloudberry's shows a Seq Scan and its
+  Filter under the Motion.  Under ORCA the fault fails the query, as
+  Cloudberry's does.
 
 starve_case
   PostgreSQL's words for the error of function_starve_volatile(): it runs in

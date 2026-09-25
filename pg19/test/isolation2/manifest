@@ -2,7 +2,7 @@
 # runs it on a coordinator and three segments: the tests of the schedule
 # that bear on M3 -- distributed transactions, distributed snapshots, locks
 # and the global deadlock detector -- on M4, FTS and mirrors, and on M6's
-# resource queues, in the schedule's order.
+# resource queues and memory accounting, in the schedule's order.
 #
 #   run   the test runs here, in both passes; cloudberry/ holds a difference
 #         reviewed and kept, where one pass has one.  A third word names the
@@ -19,8 +19,8 @@
 #         what
 #
 # The schedule's other tests -- append-optimized tables, bitmap indexes,
-# memory accounting, the rest of the fault injector's places in
-# PostgreSQL's own code -- need M5 to M7, and are not listed.  Its FTS tests
+# the rest of the fault injector's places in PostgreSQL's own code -- need
+# M5 to M7, and are not listed.  Its FTS tests
 # are M4's, and are: the ones that run are in the groups mirrors1 to
 # mirrors3, whose clusters have a mirror for each segment -- three, so that
 # they run side by side.
@@ -74,5 +74,10 @@ skip segwalrep/select_throttle                     wait_for_replication_threshol
 run  segwalrep/startup_rename_prepared_xlog        mirrors2
 run  fts_manual_probe                              mirrors1
 run  fts_session_reset                             mirrors2
+run  create_memory_accounting_tables               memory
+run  setup_startup_memory_accounting               memory
+run  oom_startup_memory                            memory
+run  restore_memory_accounting_default             memory
+run  runaway_query                                 memory
 run  sharedsnapshot
 run  export_distributed_snapshot

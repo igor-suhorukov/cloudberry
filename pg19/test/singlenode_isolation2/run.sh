@@ -18,7 +18,7 @@
 # under the License.
 #
 # Cloudberry's singlenode isolation2 suite, as the port runs it, against every
-# M1 module.
+# M1 module, and M6's gp_resource.
 #
 # src/test/singlenode_isolation2 is the tests Cloudberry runs in its
 # single-node mode that need more than one session at a time, written in its
@@ -28,6 +28,10 @@
 # the result on its standard output -- and compares the result with gpdiff.pl
 # under Cloudberry's init files, as Cloudberry's pg_regress does.  The one
 # change is the setup: setup.sql here, in place of Cloudberry's, says why.
+# The other is the isolation2 suite's: a setting the port has is spelled as
+# the port spells it, in the tests and in their expected output alike, and a
+# shell command of a test finds gpconfig and gpstop in ../isolation2/bin,
+# which do on this node what the tests ask of Cloudberry's.
 #
 # manifest says of each test the schedule names whether it runs, and why not.
 # A test passes if its result is Cloudberry's expected output, or differs from
@@ -70,7 +74,7 @@ trap cleanup EXIT
 
 run_tests=$(awk '$1 == "run" { print $2 }' "$HERE/manifest")
 
-echo "singlenode_isolation2: Cloudberry's singlenode isolation2 suite, with every M1 module loaded"
+echo "singlenode_isolation2: Cloudberry's singlenode isolation2 suite, with every M1 module and gp_resource loaded"
 printf '  of the %d tests Cloudberry schedules: %d run here, %d are skipped\n' \
 	"$(grep -cE '^(run|skip) ' "$HERE/manifest")" \
 	"$(echo "$run_tests" | wc -w)" \
@@ -85,11 +89,39 @@ echo
 	echo "listen_addresses = ''"
 	echo "port = $PORT"
 	echo "fsync = off"
-	echo "shared_preload_libraries = 'gp_core,gp_orca,gp_task,gp_matview,gp_sql,gp_security'"
+	echo "shared_preload_libraries = 'gp_core,gp_orca,gp_task,gp_matview,gp_sql,gp_security,gp_resource'"
+	# as Cloudberry's postgresql.conf.sample: a statement's memory is its
+	# resource queue's to give
+	echo "gp.resqueue_memory_policy = 'eager_free'"
 } >> "$WORK/data/postgresql.conf"
 
 "$BINDIR/pg_ctl" -D "$WORK/data" -l "$WORK/log" -w -t 60 start > /dev/null 2>&1 \
 	|| { echo "server did not start"; tail -20 "$WORK/log"; exit 1; }
+
+# The settings the port has, respelled as the isolation2 suite respells them
+# (see there), and their names for gpconfig.
+"$PSQL" -X -q -t -A -d postgres -c "SELECT name FROM pg_settings WHERE name LIKE 'gp.%' ORDER BY length(name) DESC" |
+while read -r name; do
+	short="${name#gp.}"
+	case "$short" in
+		optimizer*|statement_mem|enable_parallel|enable_groupagg|test_print_*|\
+		resource_scheduler|resource_select_only|resource_cleanup_gangs_on_wait|\
+		max_resource_queues|max_resource_portals_per_transaction|max_statement_mem|\
+		debug_resource_group|runaway_detector_activation_percent|\
+		vmem_process_interrupt|explain_memory_verbosity|coredump_on_memerror)
+			cbname="$short" ;;
+		*) cbname="gp_$short" ;;
+	esac
+	printf 's/\\b(set|reset|show)(\\s+(local|session|system)\\s+|\\s+)%s\\b/\\1\\2%s/gI\n' "$cbname" "$name"
+	printf 's/\\b(alter\\s+system\\s+(set|reset)\\s+)%s\\b/\\1%s/gI\n' "$cbname" "$name"
+	printf "s/\\\\b(current_setting|set_config)\\\\('%s'/\\\\1('%s'/gI\n" "$cbname" "$name"
+	printf "s/\\\\b(name\\\\s*=\\\\s*)'%s'/\\\\1'%s'/gI\n" "$cbname" "$name"
+	case "$cbname" in
+		gp_*) printf 's/^( *)%s( *)$/\\1%s\\2/\n' "$cbname" "$name" ;;
+	esac
+	echo "$cbname $name" >> "$WORK/settings.map"
+done > "$WORK/respell.sed"
+export PATH="$HERE/../isolation2/bin:$PATH" PG_BINDIR="$BINDIR" GP_SETTINGS_MAP="$WORK/settings.map"
 
 mkdir -p "$WORK/gpdiff"
 cp "$GPDIFF"/gpdiff.pl "$GPDIFF"/atmsort.pm "$GPDIFF"/explain.pm "$WORK/gpdiff/"
@@ -106,7 +138,7 @@ failed=0
 for pass in ${PASSES:-planner orca}; do
 	echo "== pass: $pass"
 	R="$WORK/$pass"
-	mkdir -p "$R/results" "$R/canon"
+	mkdir -p "$R/results" "$R/canon" "$R/sql" "$R/expected"
 	case "$pass" in
 		planner) optimizer=off ;;
 		orca)    optimizer=on ;;
@@ -123,16 +155,21 @@ for pass in ${PASSES:-planner orca}; do
 	for t in $run_tests; do
 		total=$((total + 1))
 		res="$R/results/$t.out"
-		mkdir -p "$(dirname "$res")" "$(dirname "$R/canon/$t")"
+		mkdir -p "$(dirname "$res")" "$(dirname "$R/canon/$t")" \
+			"$(dirname "$R/sql/$t")" "$(dirname "$R/expected/$t")"
+		sed -E -f "$WORK/respell.sed" "$CB/sql/$t.sql" > "$R/sql/$t.sql"
 
 		# As pg_isolation2_regress runs it, from the suite's directory.
 		( cd "$CB" && PGOPTIONS="-c gp.optimizer=$optimizer" \
 			timeout 300 python3 ./sql_isolation_testcase.py \
 				--dbname=isolation2test --initfile_prefix="$res" \
-				< "sql/$t.sql" > "$res" 2>&1 )
+				< "$R/sql/$t.sql" > "$res" 2>&1 )
 
-		exp="$CB/expected/$t.out"
-		[ "$pass" = orca ] && [ -f "$CB/expected/${t}_optimizer.out" ] && exp="$CB/expected/${t}_optimizer.out"
+		cbexp="$CB/expected/$t.out"
+		[ "$pass" = orca ] && [ -f "$CB/expected/${t}_optimizer.out" ] && cbexp="$CB/expected/${t}_optimizer.out"
+		exp="$R/expected/${cbexp#"$CB"/expected/}"
+		mkdir -p "$(dirname "$exp")"
+		sed -E -f "$WORK/respell.sed" "$cbexp" > "$exp"
 		inits=(--gpd_init "$GPDIFF/init_file" --gpd_init "$CB/init_file_isolation2"
 		       --gpd_init "$HERE/init_file")
 		[ -s "$res.ini" ] && inits+=(--gpd_init "$res.ini")

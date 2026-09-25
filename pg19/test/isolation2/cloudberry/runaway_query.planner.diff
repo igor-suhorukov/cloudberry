@@ -1,0 +1,6 @@
+@@
+- Gather Motion 1:1  (slice1; segments: 1)      
+-   ->  Seq Scan on runaway_query_test_table    
+-         Filter: (a = ANY ('{42}'::integer[])) 
++ Gather Motion 1:1 on runaway_query_test_table  (slice1; segments: 1) 
++   Segment: 0                                                         

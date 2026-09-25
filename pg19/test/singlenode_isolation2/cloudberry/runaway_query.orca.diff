@@ -1,0 +1,8 @@
+@@
+-QUERY PLAN
+-___________
+- Seq Scan on runaway_query_test_table    
+-   Filter: (a = ANY ('{42}'::integer[])) 
++ERROR:  fault triggered, fault name:'gpdbwrappers_get_comparison_operator' fault type:'error'
+@@
+-(1 row)

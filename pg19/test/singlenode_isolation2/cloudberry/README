@@ -6,8 +6,8 @@ Each file is a test's difference in the form ../../singlenode/canon.pl gives
 it -- the lines removed and added, hunk by hunk, with no file names or line
 numbers -- named for the expected output it differs from; a name with a pass
 in it (test.orca.diff) holds for that pass alone.  run.sh counts a test as
-passing when its difference is exactly the file's.  Both differences below
-are the same in both passes.
+passing when its difference is exactly the file's.  The differences below
+are the same in both passes, but for runaway_query's.
 
 drop_rename.diff
     Its last statement reads pg_class on every segment through
@@ -23,3 +23,19 @@ pg_views_concurrent_drop.diff
     says.  The port runs PostgreSQL 19's ruleutils.c, which no extension can
     change, so the second session gets PostgreSQL's error.  The OID is
     masked by ../init_file.
+
+resource_queue.diff
+    What pg_stat_activity and pg_locks say of a backend that waits for a
+    resource queue's slot: its wait event, which gp_resource names
+    ResourceQueue, is an extension's, of type Extension, where Cloudberry's
+    has a type of its own; and pg_locks lists no queue, whose slots are
+    held and waited for in gp_resource's shared memory, since PostgreSQL
+    19's lock methods are fixed.  The waits themselves are Cloudberry's (see
+    the isolation2 suite's resource_queue).
+
+runaway_query.orca.diff
+    Its EXPLAIN, with the fault set that fails ORCA: under ORCA, the port's
+    second pass, the query fails with the fault's error, as Cloudberry's
+    isolation2 output under ORCA has it (runaway_query_optimizer.out); this
+    suite's expected output is Cloudberry's single node's, which plans with
+    the planner, and shows its plan.

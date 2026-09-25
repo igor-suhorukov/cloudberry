@@ -4,8 +4,9 @@
 #   skip <test> <why>    does not, for the reason given
 #
 # Every test isolation2_schedule names, in its order -- the ones its "ignore:"
-# lines name as well -- and no other; the lines it has commented out Cloudberry
-# does not run either.  A test is skipped only for what it needs that M1 does
+# lines name as well, where the schedule names a test twice at its "test:"
+# line -- and no other; the lines it has commented out Cloudberry does not
+# run either.  A test is skipped only for what it needs that M1 does
 # not have, and the milestone that brings it is named where there is one.
 skip lockmodes append-optimized tables (M5), and a data directory read from gp_segment_configuration
 skip ao_partition_lock append-optimized tables (M5)
@@ -14,7 +15,7 @@ skip prevent_ao_wal append-optimized tables (M5), with gpconfig and a restart
 skip packcore Cloudberry's packcore tool, which it runs from PL/Python
 run  pg_views_concurrent_drop
 run  drop_rename
-skip resource_queue resource queues (M6)
+run  resource_queue
 skip bitmap_index_ao_sparse append-optimized tables and the bitmap index (M5)
 skip pg_terminate_backend the fault injector, and utility-mode connections to segments
 skip reindex the fault injector
@@ -109,12 +110,12 @@ skip enable_autovacuum reads gp_id through gp_dist_random (M2)
 skip segwalrep/commit_blocking_on_standby a standby coordinator, and the fault injector
 skip cancel_plpython pg_cancel_backend(pid, message), and a cancel that stops Python code (cancel_pending_hook), both Cloudberry's
 skip cancel_query append-optimized tables (M5), the fault injector, and a utility-mode connection
-skip create_memory_accounting_tables memory accounting (M6), which it sets up with gpconfig
-skip setup_memory_accounting memory accounting (M6); Cloudberry's schedule ignores it too
-skip oom_mixed_1 gp_vmem_protect_limit, memory accounting (M6); Cloudberry's schedule ignores it too
-skip oom_mixed_2 memory accounting (M6); Cloudberry's schedule ignores it too
-skip oom_simple memory accounting (M6); Cloudberry's schedule ignores it too
-skip restore_memory_accounting_default memory accounting (M6), with gpconfig
-skip setup_startup_memory_accounting memory accounting (M6), with gpconfig
-skip oom_startup_memory memory accounting (M6)
-skip runaway_query the fault injector
+run  create_memory_accounting_tables
+skip setup_memory_accounting Cloudberry's schedule ignores it
+skip oom_mixed_1 Cloudberry's schedule ignores it
+skip oom_mixed_2 Cloudberry's schedule ignores it
+skip oom_simple Cloudberry's schedule ignores it
+run  setup_startup_memory_accounting
+run  oom_startup_memory
+run  restore_memory_accounting_default
+run  runaway_query
