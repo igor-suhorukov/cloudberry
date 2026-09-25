@@ -1,0 +1,9 @@
+@@
+- t_before_set_quota | 1212416 |     0
+- t_before_set_quota | 1212416 |     1
+- t_before_set_quota | 1212416 |     2
+- t_before_set_quota | 3637248 |    -1
++ t_before_set_quota | 1228800 |     2
++ t_before_set_quota | 1236992 |     1
++ t_before_set_quota | 1245184 |     0
++ t_before_set_quota | 3710976 |    -1

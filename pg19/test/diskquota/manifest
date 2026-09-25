@@ -1,0 +1,87 @@
+# Cloudberry's diskquota tests (gpcontrib/diskquota/tests), as the port
+# runs them on a coordinator and three segments: the regression schedule's,
+# then the isolation2 schedule's, each in its schedule's order.
+#
+#   run   the test runs here; cloudberry/ holds a difference reviewed and
+#         kept, where it has one (cloudberry/isolation2/ an isolation2
+#         test's)
+#   skip  it needs what the port does not have yet: the rest of the line
+#         says what
+#
+# A regression test in the schedule twice is listed once, and runs where
+# the schedule has it.
+
+run  config
+run  test_create_extension
+run  test_max_monitored_databases
+skip test_readiness_logged    reads the coordinator's log through gp_toolkit's __gp_log_master_ext, an external web table of Cloudberry's the port has not
+run  test_init_table_size_table
+run  test_relation_size
+run  test_relation_cache
+run  test_uncommitted_table_size
+run  test_pause_and_resume
+run  test_pause_and_resume_multiple_db
+run  test_drop_after_pause
+run  test_show_status
+run  test_quota_view_no_table
+run  test_fast_disk_check
+run  test_worker_not_ready
+run  test_role
+run  test_schema
+run  test_drop_table
+run  test_column
+run  test_copy
+run  test_update
+run  test_toast
+run  test_truncate
+run  test_reschema
+run  test_temp_role
+run  test_rename
+run  test_delete_quota
+run  test_mistake
+run  test_tablespace_role
+run  test_tablespace_schema
+run  test_tablespace_role_perseg
+run  test_tablespace_schema_perseg
+run  test_index
+run  test_recreate
+run  test_ctas_no_preload_lib
+run  test_ctas_before_set_quota
+run  test_partition
+run  test_vacuum
+skip test_primary_failure     stops a primary and runs gprecoverseg: the suite's cluster has no mirrors (the isolation2 suite's mirrors groups have)
+run  test_extension
+run  test_activetable_limit
+run  test_many_active_tables
+run  test_fetch_table_stat
+run  test_appendonly
+run  test_rejectmap
+run  test_clean_rejectmap_after_drop
+run  test_rejectmap_mul_db
+run  test_ctas_pause
+run  test_ctas_role
+run  test_ctas_schema
+run  test_ctas_tablespace_role
+run  test_ctas_tablespace_schema
+run  test_default_tablespace
+run  test_tablespace_diff_schema
+run  test_dbname_encoding
+run  test_drop_any_extension
+run  test_drop_extension
+run  reset_config
+run  isolation2/config
+run  isolation2/test_create_extension
+run  isolation2/test_fast_quota_view
+run  isolation2/test_relation_size
+run  isolation2/test_rejectmap
+run  isolation2/test_vacuum
+run  isolation2/test_truncate
+run  isolation2/test_temporary_table
+run  isolation2/test_dropped_table
+run  isolation2/test_postmaster_restart
+run  isolation2/test_worker_timeout
+run  isolation2/test_per_segment_config
+run  isolation2/test_relation_cache
+run  isolation2/test_ereport_from_seg
+run  isolation2/test_drop_extension
+run  isolation2/reset_config

@@ -1,0 +1,24 @@
+@@
+- segid | relnamespace | reltablespace | relowner | relname                       | target_type     | target_oid 
+--------+--------------+---------------+----------+-------------------------------+-----------------+------------
+- 0     | 7134         | 0             | 10       | pg_aovisimap_blocked_t7_index | NAMESPACE_QUOTA | 2200       
+- 0     | 7134         | 0             | 10       | pg_aovisimap_blocked_t7       | NAMESPACE_QUOTA | 2200       
+- 0     | 7134         | 0             | 10       | pg_aoseg_blocked_t7           | NAMESPACE_QUOTA | 2200       
+- 0     | 2200         | 0             | 10       | blocked_t7                    | NAMESPACE_QUOTA | 2200       
+-(4 rows)
++ segid | relnamespace | reltablespace | relowner | relname    | target_type     | target_oid 
++-------+--------------+---------------+----------+------------+-----------------+------------
++ 0     | 2200         | 0             | 10       | blocked_t7 | NAMESPACE_QUOTA | 2200       
++(1 row)
+@@
+- segid | relnamespace | reltablespace | relowner | relname                       | target_type     | target_oid 
+--------+--------------+---------------+----------+-------------------------------+-----------------+------------
+- 0     | 7134         | 0             | 10       | pg_aovisimap_blocked_t7_index | NAMESPACE_QUOTA | 2200       
+- 0     | 7134         | 0             | 10       | pg_aovisimap_blocked_t7       | NAMESPACE_QUOTA | 2200       
+- 0     | 7134         | 0             | 10       | pg_aocsseg_blocked_t7         | NAMESPACE_QUOTA | 2200       
+- 0     | 2200         | 0             | 10       | blocked_t7                    | NAMESPACE_QUOTA | 2200       
+-(4 rows)
++ segid | relnamespace | reltablespace | relowner | relname    | target_type     | target_oid 
++-------+--------------+---------------+----------+------------+-----------------+------------
++ 0     | 2200         | 0             | 10       | blocked_t7 | NAMESPACE_QUOTA | 2200       
++(1 row)

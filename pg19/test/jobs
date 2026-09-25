@@ -32,8 +32,10 @@
 greenplum              orca     280   PASSES=orca
 greenplum              planner  207   PASSES=planner
 singlenode             orca     186   PASSES=orca
+diskquota              regress  232   DQ_PARTS=regress
 isolation2             planner  133   PASSES=planner
 isolation2             orca     117   PASSES=orca
+diskquota              isolation2  92   DQ_PARTS=isolation2
 postgis_regress        orca      78   PASSES=orca
 task                   -         71
 cluster                -         58

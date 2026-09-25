@@ -1,0 +1,9 @@
+@@
+- t_without_diskquota | 1212416 |     0
+- t_without_diskquota | 1212416 |     1
+- t_without_diskquota | 1212416 |     2
+- t_without_diskquota | 3637248 |    -1
++ t_without_diskquota | 1228800 |     2
++ t_without_diskquota | 1236992 |     1
++ t_without_diskquota | 1245184 |     0
++ t_without_diskquota | 3710976 |    -1

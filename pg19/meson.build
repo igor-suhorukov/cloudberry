@@ -503,6 +503,50 @@ foreach m : modules
 endforeach
 
 ###############################################################################
+# diskquota
+#
+# Cloudberry's gpcontrib/diskquota, whose library is named for its version,
+# diskquota-2.3, as Cloudberry names it: that is the name its extension's
+# script and shared_preload_libraries give.  Only 2.3 is built, so its
+# extension has only 2.3's script: 2.2's names a library of its own.
+###############################################################################
+
+diskquota_version = '2.3.0'
+diskquota_binary = 'diskquota-2.3'
+shared_module(diskquota_binary,
+  files('modules/diskquota/diskquota.c',
+        'modules/diskquota/diskquota_port.c',
+        'modules/diskquota/diskquota_utility.c',
+        'modules/diskquota/enforcement.c',
+        'modules/diskquota/gp_activetable.c',
+        'modules/diskquota/monitored_db.c',
+        'modules/diskquota/quotamodel.c',
+        'modules/diskquota/relation_cache.c'),
+  # Cloudberry's sources as they are, whose declarations follow statements
+  # throughout; and built as Cloudberry's tree builds them, CMake's Debug
+  # build, whose DISKQUOTA_DEBUG lets diskquota.naptime be 0, as the tests
+  # set it.
+  c_args: mod_c_args + ['-Wno-declaration-after-statement',
+                        '-DDISKQUOTA_DEBUG=1',
+                        '-DDISKQUOTA_VERSION="' + diskquota_version + '"',
+                        '-DDISKQUOTA_MAJOR_VERSION=2',
+                        '-DDISKQUOTA_MINOR_VERSION=3',
+                        '-DDISKQUOTA_PATCH_VERSION=0',
+                        '-DDISKQUOTA_BINARY_NAME="' + diskquota_binary + '"'],
+  link_args: mod_link_args,
+  include_directories: [pg_inc, cb_inc],
+  name_prefix: '',
+  install: true,
+  install_dir: pg_pkglibdir,
+)
+install_data(
+  'modules/diskquota/diskquota.control',
+  'modules/diskquota/diskquota--2.3.sql',
+  install_dir: pg_extensiondir,
+)
+built_modules += diskquota_binary
+
+###############################################################################
 # gpfdist
 #
 # Cloudberry's file server of external tables (src/bin/gpfdist), a program
@@ -605,6 +649,14 @@ if get_option('hook_tests')
     install_dir: pg_pkglibdir,
   )
   built_modules += 'gpformatter (test only)'
+
+  # Cloudberry's extension for diskquota's tests (control/test), whose
+  # functions are diskquota's library's.
+  install_data(
+    'test/diskquota/diskquota_test.control',
+    'test/diskquota/diskquota_test--1.0.sql',
+    install_dir: pg_extensiondir,
+  )
 endif
 
 subdir('test')

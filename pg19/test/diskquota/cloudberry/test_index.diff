@@ -1,0 +1,51 @@
+@@
+- indexschema1 | indexspc        |           2 |                     1081344
++ indexschema1 | indexspc        |           2 |                      819200
+@@
+-   tableid    |  size   | segid 
+---------------+---------+-------
+- test_index_a |  360448 |     0
+- test_index_a |  360448 |     1
+- test_index_a |  360448 |     2
+- test_index_a | 1081344 |    -1
++   tableid    |  size  | segid 
++--------------+--------+-------
++ test_index_a | 270336 |     0
++ test_index_a | 270336 |     2
++ test_index_a | 278528 |     1
++ test_index_a | 819200 |    -1
+@@
+- indexschema1 | indexspc        |           2 |                     1441792
++ indexschema1 | indexspc        |           2 |                     1171456
+@@
+- test_index_a |  458752 |     2
+- test_index_a |  491520 |     0
+- test_index_a |  491520 |     1
+- test_index_a | 1441792 |    -1
++ test_index_a |  385024 |     2
++ test_index_a |  393216 |     0
++ test_index_a |  393216 |     1
++ test_index_a | 1171456 |    -1
+@@
+- tableid |  size   | segid 
+----------+---------+-------
+- a_index |  327680 |     0
+- a_index |  327680 |     1
+- a_index |  327680 |     2
+- a_index | 1015808 |    -1
++ tableid |  size  | segid 
++---------+--------+-------
++ a_index | 237568 |     2
++ a_index | 253952 |     0
++ a_index | 253952 |     1
++ a_index | 753664 |    -1
+@@
+- indexschema1 | indexspc        |           2 |                     2457600
++ indexschema1 | indexspc        |           2 |                     1933312
+@@
+- 1015808 |    -1
+- 1441792 |    -1
++  753664 |    -1
++ 1179648 |    -1
+@@
+-ERROR:  tablespace: indexspc, schema: indexschema1 diskquota exceeded

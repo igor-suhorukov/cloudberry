@@ -1,0 +1,42 @@
+@@
+-   replace_oid_with_relname    | relkind |   target_type   | namespace_matched 
+--------------------------------+---------+-----------------+-------------------
+- blocked_t3                    | r       | NAMESPACE_QUOTA | t
+- pg_aoblkdir_blocked_t3        | b       | NAMESPACE_QUOTA | f
+- pg_aoblkdir_blocked_t3_index  | i       | NAMESPACE_QUOTA | f
+- pg_aoseg_blocked_t3           | o       | NAMESPACE_QUOTA | f
+- pg_aovisimap_blocked_t3       | M       | NAMESPACE_QUOTA | f
+- pg_aovisimap_blocked_t3_index | i       | NAMESPACE_QUOTA | f
+-(6 rows)
++ replace_oid_with_relname | relkind |   target_type   | namespace_matched 
++--------------------------+---------+-----------------+-------------------
++ blocked_t3               | r       | NAMESPACE_QUOTA | t
++(1 row)
+@@
+-   replace_oid_with_relname    | relkind |   target_type   | namespace_matched 
+--------------------------------+---------+-----------------+-------------------
+- blocked_t4                    | r       | NAMESPACE_QUOTA | t
+- pg_aoblkdir_blocked_t4        | b       | NAMESPACE_QUOTA | f
+- pg_aoblkdir_blocked_t4_index  | i       | NAMESPACE_QUOTA | f
+- pg_aocsseg_blocked_t4         | o       | NAMESPACE_QUOTA | f
+- pg_aovisimap_blocked_t4       | M       | NAMESPACE_QUOTA | f
+- pg_aovisimap_blocked_t4_index | i       | NAMESPACE_QUOTA | f
+-(6 rows)
++ replace_oid_with_relname | relkind |   target_type   | namespace_matched 
++--------------------------+---------+-----------------+-------------------
++ blocked_t4               | r       | NAMESPACE_QUOTA | t
++(1 row)
+@@
+-   replace_oid_with_relname    | relkind |   target_type   | namespace_matched 
+--------------------------------+---------+-----------------+-------------------
+- blocked_t5                    | r       | NAMESPACE_QUOTA | t
+- pg_aoblkdir_blocked_t5        | b       | NAMESPACE_QUOTA | f
+- pg_aoblkdir_blocked_t5_index  | i       | NAMESPACE_QUOTA | f
+- pg_aocsseg_blocked_t5         | o       | NAMESPACE_QUOTA | f
+- pg_aovisimap_blocked_t5       | M       | NAMESPACE_QUOTA | f
+- pg_aovisimap_blocked_t5_index | i       | NAMESPACE_QUOTA | f
+-(6 rows)
++ replace_oid_with_relname | relkind |   target_type   | namespace_matched 
++--------------------------+---------+-----------------+-------------------
++ blocked_t5               | r       | NAMESPACE_QUOTA | t
++(1 row)

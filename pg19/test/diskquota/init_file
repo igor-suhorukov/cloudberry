@@ -1,0 +1,76 @@
+-- The port's additions to Cloudberry's init files, read by gpdiff.pl after
+-- them.
+
+-- start_matchignore
+
+# ORCA's line, as gp_orca prints it.
+m/^ Optimizer: GPORCA$/
+
+# The footer Cloudberry's psql gives \d of a table, which PostgreSQL 19's
+# psql does not (see the greenplum suite's init_file).
+m/^Distributed (by: \(.*\)|randomly|Replicated)$/
+
+# An error a segment raised names the segment in a DETAIL of its own where
+# the error has none, as Cloudberry names it after its message, which its
+# init_file masks (see the greenplum suite's).
+m/^DETAIL:  segment \d+ \([^)]*\)(; \d+ other segments failed too)?$/
+
+# The context of an error a segment raised in a load: the rows an INSERT or
+# CREATE TABLE AS makes reach each segment by a COPY (gp_core's
+# gp_modify.c), which names the line the error came at; Cloudberry's INSERT
+# gives none.  diskquota's init_file makes a CONTEXT a DETAIL, which the
+# suite's comparison, as Cloudberry's, then shows.
+m/^(CONTEXT|DETAIL):  COPY \S+, line \d+$/
+
+# The warning diskquota's init_file means to pass over, which a test gets
+# when it waits for the worker before the launcher has one for its database,
+# as a loaded machine can have it: that pattern asks for more after the
+# message than the message has.
+m/^WARNING:  \[diskquota\] database ".*" not found for getting epoch$/
+
+# The context PostgreSQL 16 and later give an error in an extension's
+# script, which Cloudberry's expected output, made before, has not.
+m/^extension script file ".*", near line \d+$/
+m/^DETAIL:  SQL statement "SELECT diskquota\.diskquota_start_worker\(\)"$/
+
+-- end_matchignore
+
+-- start_matchsubs
+
+# Where an error a segment raised has a detail of its own, the segment before
+# it goes, as the greenplum suite's init_file takes it.
+m/^DETAIL:  segment \d+ \([^)]*\): /
+s/^DETAIL:  segment \d+ \([^)]*\): (.*?)(; \d+ other segments failed too)?$/DETAIL:  $1/
+
+# Cloudberry names where in its source an internal error was raised, which
+# diskquota's init_file makes "(diskquota_utility.c:xxx"; PostgreSQL does
+# not.
+m/ \((diskquota|diskquota_utility)\.c:xxx$/
+s/ \((diskquota|diskquota_utility)\.c:xxx$//
+
+# A size read right after an INSERT of 100 rows, with no wait for the worker:
+# on 8K pages the rows take a new page on a segment, which the worker has
+# measured by then or not, where Cloudberry's 32K page holds them.  The size
+# is the one before them, as Cloudberry's expected output has it
+# (cloudberry/README).
+m/^ rolespc_persegu1 \| rolespc_perseg  \|          10 \|                     3751936$/
+s/3751936$/3743744/
+m/^ indexschema1 \| indexspc        \|           2 \|                     1179648$/
+s/1179648$/1171456/
+m/^ test_index_a \|  401408 \|     1$/
+s/401408/393216/
+m/^ test_index_a \| 1179648 \|    -1$/
+s/1179648/1171456/
+
+# isolation2's test_vacuum measures a table its DELETE emptied: where the
+# DELETE's scan found a page all-visible -- as the snapshots the worker holds
+# at the time let it -- the segment's table has a visibility map, a page more
+# (cloudberry/README).  The size is the one without it.
+m/^ 147456 +$/
+s/147456/122880/
+m/^ dummy_t1 \| 147456 \| -1 +$/
+s/147456/122880/
+m/^ dummy_t1 \| 49152  \| [012] +$/
+s/49152 /40960 /
+
+-- end_matchsubs

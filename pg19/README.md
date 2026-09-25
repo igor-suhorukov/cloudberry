@@ -249,11 +249,20 @@ of the core series, O13 to O21 and O23:
   writable tables, single-row error handling and its error logs -- read on
   the segments, or on the one node; Cloudberry's protocols and
   `CREATEEXTTABLE`; and `COPY ... LOG ERRORS SEGMENT REJECT LIMIT`;
-- `gpfdist`, Cloudberry's file server, built as a program of the port's.
+- `gpfdist`, Cloudberry's file server, built as a program of the port's;
+- `diskquota`: Cloudberry's diskquota 2.3, as its library `diskquota-2.3`
+  -- a launcher, and a worker for each database that has the extension,
+  measure every table on the segments and hold a schema's, a role's and a
+  tablespace's quota: the soft limit refuses a statement before it writes,
+  and the hard limit stops a load on the segment where it grows past its
+  quota, through O21's file events.  For it and for Cloudberry's tests,
+  `gp_core` runs a query of `gp_dist_random()` alone that calls a function
+  which is not immutable on the segments, with the values its parameters
+  and subqueries have on the coordinator, and makes the size functions the
+  cluster's, as Cloudberry's are.
 
-Left of M5: `pax` and `diskquota`, and `COPY`'s `FILL MISSING FIELDS`,
-`NEWLINE` and `ESCAPE` outside CSV, which external tables take
-(`cloudberry.md`).  The resource and transport modules — `pax`,
+Left of M5: `pax`, and `COPY`'s `FILL MISSING FIELDS`, `NEWLINE` and
+`ESCAPE` outside CSV, which external tables take (`cloudberry.md`).  The resource and transport modules — `pax`,
 `gp_resource`, `gp_tde`, `interconnect`, `udp2` — are still stubs: M5 and M6
 fill the first three, and the streaming transports, tcp and udpifc, live in
 `gp_core` for now.
@@ -274,6 +283,8 @@ a standby coordinator for the test that asks for one, and mirrors for the
 FTS tests; `fts`, M4's, a coordinator and three primaries
 each with a mirror, and what FTS does when a mirror or a primary stops;
 `ao`, M5's, append-optimized tables on one node, a standby and recovery;
+`diskquota`, M5's too, Cloudberry's diskquota tests on a coordinator and
+three segments, its regression and isolation2 schedules as two jobs;
 `singlenode` and
 `singlenode_isolation2`, Cloudberry's single-node suites with PostgreSQL 19's
 own regression tests; and PostGIS's regression suite.  Each is run under the

@@ -1,0 +1,69 @@
+Cloudberry's diskquota tests on the port's cluster: the differences from
+Cloudberry's expected output that have been reviewed, and are the port's
+for a reason of its own.
+
+Each file is one test's difference in the form ../../singlenode/canon.pl
+gives it, named for the expected output it differs from; isolation2/ holds
+the isolation2 schedule's.  run.sh counts a test as passing when gpdiff.pl,
+under Cloudberry's init files and the port's, finds no difference or exactly
+the file's.
+
+Most are sizes.  PostgreSQL's page is 8K, where Cloudberry's is 32K, and the
+same rows take a number of 8K pages that is not a quarter of the 32K ones':
+each page has a header and line pointers of its own, and a row does not
+straddle two.  A heap of more than a page has a free space map, which
+PostgreSQL 19 makes as it extends a table's file by several pages at once,
+and a visibility map, which a scan's pruning makes; a table of one 32K page
+has neither.  An append-optimized table is gp_ao's: its segment files are
+of 8K pages, and it has no auxiliary relations -- its segment files' list,
+its visibility map and its block directory are rows of gp_ao's tables --
+where Cloudberry's size of it adds its pg_aoseg, pg_aovisimap and
+pg_aoblkdir relations and their indexes.  These differ in sizes alone:
+
+  test_init_table_size_table  test_relation_size  test_uncommitted_table_size
+  test_pause_and_resume  test_pause_and_resume_multiple_db  test_role
+  test_schema  test_tablespace_role  test_tablespace_schema
+  test_tablespace_role_perseg  test_tablespace_schema_perseg
+  test_ctas_no_preload_lib  test_ctas_before_set_quota  test_vacuum
+  test_appendonly
+  isolation2/test_ereport_from_seg  isolation2/test_fast_quota_view
+  isolation2/test_relation_size  isolation2/test_truncate
+  isolation2/test_vacuum
+
+Two tests read a size right after an INSERT of 100 rows, with no wait for
+the worker: test_index a table's, and test_tablespace_role_perseg its
+role's in a tablespace, the first time.  On 8K pages the rows take a new
+page on a segment, which the worker has measured by then or not; a 32K page
+of Cloudberry's holds them.  The port's init_file takes the size after them
+for the size before, which is what the files here have.
+
+isolation2/test_vacuum measures a table its DELETE emptied, before VACUUM
+FULL: where the DELETE's scan found a page all-visible -- as the snapshots
+the worker holds at the time let it -- PostgreSQL 19 gives the segment's
+table a visibility map, a page more.  The port's init_file takes the size
+with it for the size without, which is what the file here has.
+
+test_index  a table and its index in a tablespace, 1.9 MB here, under the
+  2 MB quota their schema has there, where Cloudberry's 32K pages make them
+  2.4 MB: the INSERT Cloudberry refuses goes through.  Its other
+  differences are sizes, as above.
+
+test_relation_cache, test_rejectmap, isolation2/test_rejectmap  an
+  append-optimized table's auxiliary relations, of which gp_ao's has none:
+  the relation cache holds the table alone on each segment, and a segment's
+  reject map blocks the table alone.
+
+test_fast_disk_check  (pg_database_size() - dbsize) / dbsize, of
+  show_fast_database_size_view, is 0.104 here, over the test's 0.1.  The
+  view adds up the catalogs' main forks and the tables diskquota measures;
+  of a database's files it leaves out, on each node, the free space and
+  visibility maps initdb's VACUUM FREEZE made for 37 catalogs (1.21 MB) and
+  the relcache's init file (0.16 MB), and it counts the shared catalogs,
+  which are no database's (0.39 MB): 1 MB a node, of the 43 MB the four
+  nodes' copies of the database hold.
+
+test_dbname_encoding  whether the worker's log names the database, which
+  the test reads through gp_toolkit's __gp_log_master_ext, an external web
+  table of Cloudberry's the port does not have (the manifest skips
+  test_readiness_logged, which reads nothing else).  The worker of the
+  database 数据库1 starts, and the log is not read.
