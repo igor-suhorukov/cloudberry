@@ -1222,6 +1222,92 @@ else
 fi
 
 ###############################################################################
+echo "O25 memory_block_alloc_hook: every block a memory context takes and gives back"
+###############################################################################
+# Each kind of context made, filled, emptied and deleted: the hook is told
+# of each block it takes, the allocation that makes it among them, and of
+# each it gives back, by the same sizes -- so that what a process holds adds
+# up to nothing once the context is gone.
+session o25 <<'SQL'
+SELECT gp_probe.arm_blocks(true);
+SELECT 'aset=' || gp_probe.exercise_context('aset', 20000, 50);
+SELECT 'aset_small=' || gp_probe.exercise_context('aset', 100, 5000);
+SELECT 'aset_large=' || gp_probe.exercise_context('aset', 3000000, 2);
+SELECT 'generation=' || gp_probe.exercise_context('generation', 1000, 2000);
+SELECT 'slab=' || gp_probe.exercise_context('slab', 1000, 2000);
+SELECT 'bump=' || gp_probe.exercise_context('bump', 1000, 2000);
+SELECT 'n_aset=' || (gp_probe.blocks('aset') > 0);
+SELECT 'n_generation=' || (gp_probe.blocks('generation') > 0);
+SELECT 'n_slab=' || (gp_probe.blocks('slab') > 0);
+SELECT 'n_bump=' || (gp_probe.blocks('bump') > 0);
+SELECT 'made=' || (gp_probe.blocks('made') >= 6);
+SELECT 'resized=' || (gp_probe.blocks('resized') >= 52);
+SELECT 'largest=' || (gp_probe.blocks('largest') >= 6000000);
+-- PostgreSQL's own: a sort's tuples, in a Bump context (a sort of one
+-- column of a type passed by value keeps no tuples), a window's tuplestore,
+-- in a Generation one, and a value of 3 MB, a block of its own
+SELECT gp_probe.arm_blocks(true);
+SELECT count(*) FROM (SELECT g, g::text AS t FROM generate_series(1, 100000) g ORDER BY t DESC) s;
+SELECT 'sort=' || (gp_probe.blocks('bump') > 0);
+SELECT count(*) FROM (SELECT sum(g) OVER (ORDER BY g ROWS BETWEEN UNBOUNDED PRECEDING
+                                          AND UNBOUNDED FOLLOWING) FROM generate_series(1, 100000) g) s;
+SELECT 'window=' || (gp_probe.blocks('generation') > 0);
+SELECT gp_probe.arm_blocks(true);
+SELECT length(repeat('x', 3000000));
+SELECT 'value=' || (gp_probe.blocks('largest') >= 3000000);
+SELECT 'value_freed=' || (gp_probe.blocks('freed') >= 1);
+SQL
+is "a context's blocks, each given back as taken: AllocSet's, large chunks realloc()ed" o25 aset 0
+is "AllocSet's small chunks, from blocks it grows" o25 aset_small 0
+is "AllocSet's chunks of a block of their own" o25 aset_large 0
+is "Generation's" o25 generation 0
+is "Slab's" o25 slab 0
+is "Bump's" o25 bump 0
+is "the hook is told each block's context: AllocSet" o25 n_aset true
+is "Generation" o25 n_generation true
+is "Slab" o25 n_slab true
+is "Bump" o25 n_bump true
+is "and of the allocation that makes a context, of each kind" o25 made true
+is "a realloc() of a block, with its sizes before and after" o25 resized true
+is "and the size a block grows to" o25 largest true
+is "PostgreSQL's own blocks: a sort's tuples" o25 sort true
+is "a window's tuplestore" o25 window true
+is "a large value, whose chunk is a block of its own" o25 value true
+is "given back when the statement is done with it" o25 value_freed true
+
+# A block refused fails as malloc() failing does, where it is asked for: a
+# value, a chunk grown, a context made -- and the backend goes on.
+session o25_refuse <<'SQL'
+SELECT gp_probe.arm_blocks(true, 1000000);
+SELECT length(repeat('x', 3000000));
+SELECT 'grow=' || gp_probe.exercise_context('aset', 600000, 1);
+SELECT 'make=' || gp_probe.exercise_context('generation', 1000, 1, 2000000);
+SELECT 'refused=' || (gp_probe.blocks('refused') >= 3);
+SELECT 'small=' || length(repeat('x', 100000));
+SELECT gp_probe.arm_blocks(false);
+SELECT 'after=' || length(repeat('x', 3000000));
+SQL
+# repeat() asks for its value's header too: 3000000 bytes and four
+if grep -q "Failed on request of size 3000004 in memory context" "$WORK/o25_refuse.out"; then
+	ok "a block the hook refuses fails the palloc() that asked for it, as out of memory"
+else
+	notok "repeat('x', 3000000) should fail as out of memory" "$(grep -A1 ERROR "$WORK/o25_refuse.out" | head -4)"
+fi
+if grep -q "Failed on request of size 1200000 in memory context \"gp_probe aset\"" "$WORK/o25_refuse.out"; then
+	ok "so does a larger block a realloc() asks for"
+else
+	notok "the repalloc() to 1200000 bytes should fail as out of memory" "$(grep -A1 ERROR "$WORK/o25_refuse.out" | head -6)"
+fi
+if grep -q "Failed while creating memory context \"gp_probe generation\"" "$WORK/o25_refuse.out"; then
+	ok "and the allocation that would make a context"
+else
+	notok "a context whose first block is 2000000 bytes should not be made" "$(grep -A1 ERROR "$WORK/o25_refuse.out" | head -6)"
+fi
+is "the hook saw each one it refused" o25_refuse refused true
+is "a block under the limit is taken meanwhile" o25_refuse small 100000
+is "and the backend goes on, the hook unset" o25_refuse after 3000000
+
+###############################################################################
 echo "O23 extension marks: pg_checksums passes over what an extension marked, pg_upgrade carries it"
 ###############################################################################
 # Last, because it stops the server: pg_checksums reads a stopped cluster.

@@ -98,3 +98,17 @@ CREATE FUNCTION gp_probe.arm_extend_fails(relfilenode oid) RETURNS void
   AS 'MODULE_PATHNAME', 'gp_probe_arm_extend_fails' LANGUAGE C STRICT;
 CREATE FUNCTION gp_probe.file_events(kind text, relfilenode oid) RETURNS bigint
   AS 'MODULE_PATHNAME', 'gp_probe_file_events' LANGUAGE C STRICT;
+-- O25: count every memory context's blocks, refusing a new or larger one
+-- over "refuse_over" bytes (0: none); read a count -- taken, freed, resized,
+-- made, refused, net, aset, generation, slab, bump or largest; and make,
+-- fill, empty and delete a context of a kind, answering the bytes the hook
+-- was told of over it all.
+CREATE FUNCTION gp_probe.arm_blocks(on_off boolean, refuse_over bigint DEFAULT 0)
+  RETURNS void
+  AS 'MODULE_PATHNAME', 'gp_probe_arm_blocks' LANGUAGE C STRICT;
+CREATE FUNCTION gp_probe.blocks(kind text) RETURNS bigint
+  AS 'MODULE_PATHNAME', 'gp_probe_blocks' LANGUAGE C STRICT;
+CREATE FUNCTION gp_probe.exercise_context(kind text, chunk_size int, nchunks int,
+                                          first_block int DEFAULT 0)
+  RETURNS bigint
+  AS 'MODULE_PATHNAME', 'gp_probe_exercise_context' LANGUAGE C STRICT;

@@ -1016,6 +1016,70 @@ probe_tablespace_location_drop(const char *linkloc, Oid tablespaceoid, bool redo
 				 errmsg("could not remove directory \"%s\": %m", target)));
 }
 
+/* ------------------------------------------------------------------------- */
+/* O25: memory_block_alloc_hook                                              */
+/* ------------------------------------------------------------------------- */
+
+/*
+ * What the blocks of every memory context did while armed, in plain
+ * variables: the hook runs inside the allocator, and whatever it allocated
+ * would come back to it.  A block over arm_block_limit is refused, as a
+ * process over its limit would have one refused.
+ */
+static bool arm_blocks = false;
+static Size arm_block_limit = 0;
+static struct
+{
+	int64		taken;			/* new blocks, a context's own first one among them */
+	int64		freed;
+	int64		resized;		/* realloc()s */
+	int64		made;			/* allocations that make a context */
+	int64		refused;
+	int64		net;			/* bytes taken, less bytes given back */
+	int64		aset;			/* new blocks by the type of their context */
+	int64		generation;
+	int64		slab;
+	int64		bump;
+	int64		largest;		/* the largest block taken, or grown to */
+}			blocks;
+
+static bool
+probe_memory_block(MemoryContext context, Size oldsize, Size newsize)
+{
+	if (!arm_blocks)
+		return true;
+
+	if (newsize > oldsize && arm_block_limit > 0 && newsize > arm_block_limit)
+	{
+		blocks.refused++;
+		return false;
+	}
+
+	if (oldsize == 0)
+	{
+		blocks.taken++;
+		if (context == NULL)
+			blocks.made++;
+		else if (IsA(context, AllocSetContext))
+			blocks.aset++;
+		else if (IsA(context, GenerationContext))
+			blocks.generation++;
+		else if (IsA(context, SlabContext))
+			blocks.slab++;
+		else if (IsA(context, BumpContext))
+			blocks.bump++;
+	}
+	else if (newsize == 0)
+		blocks.freed++;
+	else
+		blocks.resized++;
+
+	blocks.net += (int64) newsize - (int64) oldsize;
+	if ((int64) newsize > blocks.largest)
+		blocks.largest = newsize;
+	return true;
+}
+
 /* A table of the probe's method keeps its TOAST in a heap table. */
 static Oid
 probe_relation_toast_am(Relation rel)
@@ -1087,6 +1151,9 @@ PG_FUNCTION_INFO_V1(gp_probe_arm_fetch_fails);
 PG_FUNCTION_INFO_V1(gp_probe_arm_size);
 PG_FUNCTION_INFO_V1(gp_probe_arm_rowfetch_fails);
 PG_FUNCTION_INFO_V1(gp_probe_arm_block_sequences);
+PG_FUNCTION_INFO_V1(gp_probe_arm_blocks);
+PG_FUNCTION_INFO_V1(gp_probe_blocks);
+PG_FUNCTION_INFO_V1(gp_probe_exercise_context);
 PG_FUNCTION_INFO_V1(gp_probe_arm_file_events);
 PG_FUNCTION_INFO_V1(gp_probe_arm_extend_fails);
 PG_FUNCTION_INFO_V1(gp_probe_file_events);
@@ -1608,6 +1675,123 @@ gp_probe_arm_block_sequences(PG_FUNCTION_ARGS)
 	PG_RETURN_VOID();
 }
 
+/*
+ * O25: count the blocks of every memory context from now on, refusing any
+ * new or larger one over "limit" bytes (0: none), or stop counting.
+ */
+Datum
+gp_probe_arm_blocks(PG_FUNCTION_ARGS)
+{
+	bool		on = PG_GETARG_BOOL(0);
+
+	arm_blocks = false;
+	if (on)
+		memset(&blocks, 0, sizeof(blocks));
+	arm_block_limit = (Size) PG_GETARG_INT64(1);
+	arm_blocks = on;
+	PG_RETURN_VOID();
+}
+
+/* O25: one of the counts since the blocks were armed */
+Datum
+gp_probe_blocks(PG_FUNCTION_ARGS)
+{
+	char	   *kind = text_to_cstring(PG_GETARG_TEXT_PP(0));
+	static const struct
+	{
+		const char *name;
+		int64	   *count;
+	}			counts[] = {
+		{"taken", &blocks.taken}, {"freed", &blocks.freed},
+		{"resized", &blocks.resized}, {"made", &blocks.made},
+		{"refused", &blocks.refused}, {"net", &blocks.net},
+		{"aset", &blocks.aset}, {"generation", &blocks.generation},
+		{"slab", &blocks.slab}, {"bump", &blocks.bump},
+		{"largest", &blocks.largest},
+	};
+
+	for (int i = 0; i < lengthof(counts); i++)
+	{
+		if (strcmp(kind, counts[i].name) == 0)
+			PG_RETURN_INT64(*counts[i].count);
+	}
+	elog(ERROR, "unknown block count \"%s\"", kind);
+}
+
+/*
+ * O25: a context of the kind asked for made, "nchunks" chunks of
+ * "chunk_size" bytes taken from it, grown where the kind can grow one in its
+ * block (an AllocSet's large chunk, which is realloc()ed), every other one
+ * freed where the kind frees one, reset and filled again where it is an
+ * AllocSet, and deleted: each path by which the kind takes a block and gives
+ * one back.  "first_block" is its first allocation's size where the kind
+ * takes one.  Returns the bytes the hook was told of over it all, 0 when
+ * every block given back was one it had been told was taken.
+ */
+Datum
+gp_probe_exercise_context(PG_FUNCTION_ARGS)
+{
+	char	   *kind = text_to_cstring(PG_GETARG_TEXT_PP(0));
+	int			chunk_size = PG_GETARG_INT32(1);
+	int			nchunks = PG_GETARG_INT32(2);
+	int			first_block = PG_GETARG_INT32(3);
+	void	  **chunks = palloc(sizeof(void *) * Max(nchunks, 1));
+	bool		aset = false;
+	bool		frees = true;
+	MemoryContext cxt;
+	int64		before = blocks.net;
+	int64		result;
+
+	/* Not a freelist's default sizes, so that its own block is malloc()ed. */
+	if (strcmp(kind, "aset") == 0)
+	{
+		cxt = AllocSetContextCreate(CurrentMemoryContext, "gp_probe aset",
+									first_block, 16 * 1024,
+									ALLOCSET_DEFAULT_MAXSIZE);
+		aset = true;
+	}
+	else if (strcmp(kind, "generation") == 0)
+		cxt = GenerationContextCreate(CurrentMemoryContext, "gp_probe generation",
+									  first_block, 16 * 1024,
+									  ALLOCSET_DEFAULT_MAXSIZE);
+	else if (strcmp(kind, "slab") == 0)
+		cxt = SlabContextCreate(CurrentMemoryContext, "gp_probe slab",
+								SLAB_DEFAULT_BLOCK_SIZE, chunk_size);
+	else if (strcmp(kind, "bump") == 0)
+	{
+		cxt = BumpContextCreate(CurrentMemoryContext, "gp_probe bump",
+								first_block, 16 * 1024,
+								ALLOCSET_DEFAULT_MAXSIZE);
+		frees = false;
+	}
+	else
+		elog(ERROR, "unknown memory context kind \"%s\"", kind);
+
+	for (int i = 0; i < nchunks; i++)
+		chunks[i] = MemoryContextAlloc(cxt, chunk_size);
+	if (aset)
+	{
+		for (int i = 0; i < nchunks; i++)
+			chunks[i] = repalloc(chunks[i], (Size) chunk_size * 2);
+	}
+	if (frees)
+	{
+		for (int i = 0; i < nchunks; i += 2)
+			pfree(chunks[i]);
+	}
+	if (aset)
+	{
+		MemoryContextReset(cxt);
+		for (int i = 0; i < nchunks; i++)
+			chunks[i] = MemoryContextAlloc(cxt, chunk_size);
+	}
+	MemoryContextDelete(cxt);
+
+	result = blocks.net - before;
+	pfree(chunks);
+	PG_RETURN_INT64(result);
+}
+
 /* O21: count relations' file events, or stop counting and forget them */
 Datum
 gp_probe_arm_file_events(PG_FUNCTION_ARGS)
@@ -1686,6 +1870,7 @@ _PG_init(void)
 							   NULL, NULL, NULL);
 	tablespace_location_hook = probe_tablespace_location;
 	tablespace_location_drop_hook = probe_tablespace_location_drop;
+	memory_block_alloc_hook = probe_memory_block;
 
 	/*
 	 * O23: entries of a database directory named by a number and "_probe"
