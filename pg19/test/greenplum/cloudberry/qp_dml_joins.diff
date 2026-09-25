@@ -1,0 +1,9 @@
+@@
++HINT:  Use ALTER TABLE "dml_ao_s" SET WITH (REORGANIZE=TRUE) DISTRIBUTED BY (b) to force redistribution
++WARNING:  distribution policy of relation "dml_ao_s" already set to (b)
+@@
++HINT:  Use ALTER TABLE "dml_co_s" SET WITH (REORGANIZE=TRUE) DISTRIBUTED BY (b) to force redistribution
++WARNING:  distribution policy of relation "dml_co_s" already set to (b)
+@@
++HINT:  Use ALTER TABLE "dml_heap_s" SET WITH (REORGANIZE=TRUE) DISTRIBUTED BY (b) to force redistribution
++WARNING:  distribution policy of relation "dml_heap_s" already set to (b)

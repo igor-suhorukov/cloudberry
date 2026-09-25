@@ -181,12 +181,10 @@ partition_storage, uao_ddl_gp_partition_tables_column,
   pg_class.reloptions and gp_ao keeps in a label of its own: its reloptions
   and psql's Options: footer are empty.
 
-qp_dml_joins (planner, orca)  an UPDATE of the distribution key that finds
-  one row twice moves it once (see qp_union_intersect).  And the WARNING of
-  an ALTER TABLE ... SET DISTRIBUTED BY (b) of a table CREATE TABLE AS made
-  distributed by b already: the port gives a table made from a query its
-  first column as its key, where Cloudberry's planner gives it the key its
-  rows arrive by.
+qp_dml_joins  the WARNING of an ALTER TABLE ... SET DISTRIBUTED BY (b) of a
+  table CREATE TABLE AS made distributed by b already: the port gives a
+  table made from a query its first column as its key, where Cloudberry's
+  planner gives it the key its rows arrive by.
 
 qp_functions (planner, orca)  PostgreSQL 19's words for a call no function
   takes -- a DETAIL where Cloudberry's HINT stood -- and for a SQL function's
@@ -200,11 +198,6 @@ qp_functions (planner, orca)  PostgreSQL 19's words for a call no function
   calls it in the coordinator's own plan, and answers in both passes -- with
   a row for tstab among the relations named tst%, a table
   alter_distribution_policy leaves behind, which runs earlier.
-
-qp_union_intersect  an UPDATE of the distribution key that finds one row
-  twice moves it once, as PostgreSQL's UPDATE ... FROM changes it once,
-  where Cloudberry's Split refuses it ("multiple updates to a row by the
-  same query is not allowed").
 
 returning_gp, triggers_gp, update_gp  what Cloudberry refuses on an
   append-optimized table, or on a table another inherits from, and the port

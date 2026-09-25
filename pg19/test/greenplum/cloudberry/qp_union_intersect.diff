@@ -1,9 +1,0 @@
-@@
--ERROR:  multiple updates to a row by the same query is not allowed
-@@
--ERROR:  current transaction is aborted, commands ignored until end of transaction block
-+ count 
-+-------
-+     1
-+(1 row)
-+

@@ -402,6 +402,21 @@ split_modify_begin(CustomScanState *node, EState *estate, int eflags)
 											&TTSOpsVirtual);
 }
 
+/*
+ * A row the statement's join found twice, and moved once already: which of
+ * its new versions would win is the join's order, so Cloudberry refuses it
+ * (nodeModifyTable.c, ExecDelete() under a split update), in these words and
+ * with this code, and so does this.  PostgreSQL's UPDATE, which changes the
+ * row where it is, changes it once and passes the second over.
+ */
+static void
+split_multiple_updates(void)
+{
+	ereport(ERROR,
+			(errcode(ERRCODE_IN_FAILED_SQL_TRANSACTION),
+			 errmsg("multiple updates to a row by the same query is not allowed")));
+}
+
 static void
 split_delete(SplitModifyState *state, ItemPointer tid)
 {
@@ -418,6 +433,9 @@ split_delete(SplitModifyState *state, ItemPointer tid)
 		case TM_Ok:
 			break;
 		case TM_SelfModified:
+			/* this statement's own, as another row of its join moved it */
+			if (tmfd.cmax == estate->es_output_cid)
+				split_multiple_updates();
 			ereport(ERROR,
 					(errcode(ERRCODE_TRIGGERED_DATA_CHANGE_VIOLATION),
 					 errmsg("tuple to be updated was already modified by an operation triggered by the current command")));
@@ -721,7 +739,8 @@ gp_split_delete(PG_FUNCTION_ARGS)
 					ereport(ERROR,
 							(errcode(ERRCODE_TRIGGERED_DATA_CHANGE_VIOLATION),
 							 errmsg("tuple to be updated was already modified by an operation triggered by the current command")));
-				continue;
+				split_multiple_updates();
+				break;
 			case TM_Updated:
 			case TM_Deleted:
 				ereport(ERROR,
