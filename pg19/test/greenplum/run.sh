@@ -300,8 +300,8 @@ for pass in ${PASSES:-planner orca}; do
 	rc=$?
 	kill "$WATCHDOG" 2> /dev/null; wait "$WATCHDOG" 2> /dev/null; WATCHDOG=
 
-	# test_setup's tablespace is the coordinator's alone, as every
-	# tablespace is, and outlives the database: gone before the next pass.
+	# test_setup's tablespace outlives the database: gone before the next
+	# pass.
 	"$PSQL" -X -q -d postgres -c "DROP DATABASE IF EXISTS regression" \
 		-c "DROP TABLESPACE IF EXISTS regress_tblspace" > /dev/null 2>&1
 

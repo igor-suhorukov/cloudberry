@@ -63,6 +63,9 @@
  */
 #include "postgres.h"
 
+#include <sys/stat.h>
+#include <unistd.h>
+
 #include "access/htup_details.h"
 #include "access/relation.h"
 #include "access/table.h"
@@ -75,6 +78,7 @@
 #include "catalog/indexing.h"
 #include "catalog/pg_index.h"
 #include "commands/defrem.h"
+#include "commands/tablespace.h"
 #include "commands/vacuum.h"
 #include "miscadmin.h"
 #include "nodes/makefuncs.h"
@@ -83,6 +87,7 @@
 #include "parser/parser.h"
 #include "storage/lmgr.h"
 #include "tcop/utility.h"
+#include "utils/guc.h"
 #include "utils/lsyscache.h"
 #include "utils/memutils.h"
 #include "utils/rel.h"
@@ -277,10 +282,8 @@ drop_temp_namespaces(void)
  *     rows: a table filled from a query is the coordinator's until the
  *     distributed INSERT exists to fill it everywhere, and it has no
  *     distribution label, so everything that reads it reads it here;
- *   - tablespaces: a tablespace is a directory on each machine, and nodes that
- *     share a machine would share the directory, which PostgreSQL's layout
- *     under it has no room to tell apart (Cloudberry puts the dbid in the
- *     path, in code the port cannot change);
+ *   - moving a database to another tablespace, whose other connections the
+ *     segments cannot see to refuse it;
  *   - publications, subscriptions and event triggers, which are about this
  *     node's own WAL and this node's own DDL.
  *
@@ -345,6 +348,17 @@ dispatch_class(Node *parsetree)
 			}
 
 		/*
+		 * A tablespace is a directory on each machine, and each node's is the
+		 * directory of its dbid under it (tablespace_location()).
+		 */
+		case T_CreateTableSpaceStmt:
+		case T_DropTableSpaceStmt:
+			return GP_DISPATCH_OWN_XACT;
+		case T_AlterTableSpaceOptionsStmt:
+		case T_AlterTableMoveAllStmt:
+			return GP_DISPATCH_IN_XACT;
+
+		/*
 		 * A table made from a query WITH NO DATA is made on every node, as
 		 * the CREATE TABLE PostgreSQL makes of it (ctas_as_create); gp_sql
 		 * turns every CREATE TABLE AS on a cluster into one, and fills the
@@ -360,10 +374,6 @@ dispatch_class(Node *parsetree)
 			}
 
 		case T_RefreshMatViewStmt:
-		case T_CreateTableSpaceStmt:
-		case T_DropTableSpaceStmt:
-		case T_AlterTableSpaceOptionsStmt:
-		case T_AlterTableMoveAllStmt:
 		case T_CreatePublicationStmt:
 		case T_AlterPublicationStmt:
 		case T_CreateSubscriptionStmt:
@@ -443,6 +453,120 @@ dispatch_class(Node *parsetree)
 		default:
 			return GP_DISPATCH_LOCAL;
 	}
+}
+
+/* ------------------------------------------------------------------------- */
+/* Tablespaces                                                               */
+/* ------------------------------------------------------------------------- */
+
+static void next_ProcessUtility(PlannedStmt *pstmt, const char *queryString,
+								bool readOnlyTree, ProcessUtilityContext context,
+								ParamListInfo params, QueryEnvironment *queryEnv,
+								DestReceiver *dest, QueryCompletion *qc);
+
+/*
+ * A tablespace is a directory, and the nodes of a cluster may share a
+ * machine: each node's is the directory named for its dbid under the one
+ * the statement gives, made where it is not there yet, as Cloudberry makes
+ * it (create_tablespace_directories() in its tablespace.c), and
+ * pg_tablespace_location() says so, as Cloudberry's does.  The statement is
+ * run with that location, on the coordinator and on each segment, and sent
+ * with the one it was given.  An in-place tablespace is each node's own
+ * already.
+ */
+static PlannedStmt *
+tablespace_location(PlannedStmt *pstmt)
+{
+	CreateTableSpaceStmt *stmt = (CreateTableSpaceStmt *) pstmt->utilityStmt;
+	char	   *location;
+	PlannedStmt *copy;
+
+	if (GpClusterIsSingleNode() || stmt->location == NULL ||
+		!is_absolute_path(stmt->location))
+		return pstmt;
+
+	location = psprintf("%s/%d", stmt->location, GpClusterDbid());
+	if (mkdir(location, S_IRWXU) < 0 && errno != EEXIST)
+		ereport(ERROR,
+				(errcode_for_file_access(),
+				 errmsg("could not create directory \"%s\": %m", location)));
+
+	copy = copyObject(pstmt);
+	((CreateTableSpaceStmt *) copy->utilityStmt)->location = location;
+	return copy;
+}
+
+/*
+ * The directory a tablespace of that name has here, if it is one
+ * tablespace_location() made -- the one named for this node's dbid -- for
+ * DROP TABLESPACE to remove once it has emptied it, as Cloudberry's removes
+ * it (destroy_tablespace_directories()).
+ */
+static char *
+tablespace_dbid_directory(DropTableSpaceStmt *stmt)
+{
+	char		link[MAXPGPATH];
+	char		target[MAXPGPATH];
+	char		suffix[32];
+	ssize_t		len;
+	Oid			spcoid = get_tablespace_oid(stmt->tablespacename, true);
+
+	if (!OidIsValid(spcoid) || GpClusterIsSingleNode())
+		return NULL;
+	snprintf(link, sizeof(link), "pg_tblspc/%u", spcoid);
+	len = readlink(link, target, sizeof(target) - 1);
+	if (len < 0)
+		return NULL;
+	target[len] = '\0';
+	snprintf(suffix, sizeof(suffix), "/%d", GpClusterDbid());
+	if (len <= strlen(suffix) || strcmp(target + len - strlen(suffix), suffix) != 0)
+		return NULL;
+	return pstrdup(target);
+}
+
+/*
+ * Run a tablespace's statement here: CREATE TABLESPACE in this node's
+ * directory, and, on a segment, an in-place one as the coordinator allowed
+ * it; DROP TABLESPACE, and then the directory of this node's.
+ */
+static void
+run_tablespace_statement(PlannedStmt *pstmt, const char *queryString,
+						 bool readOnlyTree, ProcessUtilityContext context,
+						 ParamListInfo params, QueryEnvironment *queryEnv,
+						 DestReceiver *dest, QueryCompletion *qc,
+						 bool dispatched)
+{
+	Node	   *parsetree = pstmt->utilityStmt;
+
+	if (IsA(parsetree, CreateTableSpaceStmt))
+	{
+		CreateTableSpaceStmt *stmt = (CreateTableSpaceStmt *) parsetree;
+		int			nestlevel = -1;
+
+		if (dispatched && stmt->location != NULL && stmt->location[0] == '\0')
+		{
+			nestlevel = NewGUCNestLevel();
+			(void) set_config_option("allow_in_place_tablespaces", "on",
+									 PGC_SUSET, PGC_S_SESSION,
+									 GUC_ACTION_SAVE, true, 0, false);
+		}
+		next_ProcessUtility(tablespace_location(pstmt), queryString,
+							readOnlyTree, context, params, queryEnv, dest, qc);
+		if (nestlevel >= 0)
+			AtEOXact_GUC(true, nestlevel);
+	}
+	else if (IsA(parsetree, DropTableSpaceStmt))
+	{
+		char	   *dir = tablespace_dbid_directory((DropTableSpaceStmt *) parsetree);
+
+		next_ProcessUtility(pstmt, queryString, readOnlyTree, context,
+							params, queryEnv, dest, qc);
+		if (dir != NULL)
+			(void) rmdir(dir);
+	}
+	else
+		next_ProcessUtility(pstmt, queryString, readOnlyTree, context,
+							params, queryEnv, dest, qc);
 }
 
 /* ------------------------------------------------------------------------- */
@@ -715,8 +839,8 @@ gp_ddl_ProcessUtility(PlannedStmt *pstmt, const char *queryString,
 	{
 		PG_TRY();
 		{
-			next_ProcessUtility(pstmt, queryString, readOnlyTree, context,
-								params, queryEnv, dest, qc);
+			run_tablespace_statement(pstmt, queryString, readOnlyTree, context,
+									 params, queryEnv, dest, qc, true);
 
 			if (next_preassigned < npreassigned)
 				ereport(ERROR,
@@ -740,8 +864,8 @@ gp_ddl_ProcessUtility(PlannedStmt *pstmt, const char *queryString,
 	 */
 	if (recording || GpClusterBackendRole() != GP_ROLE_DISPATCH)
 	{
-		next_ProcessUtility(pstmt, queryString, readOnlyTree, context,
-							params, queryEnv, dest, qc);
+		run_tablespace_statement(pstmt, queryString, readOnlyTree, context,
+								 params, queryEnv, dest, qc, false);
 		return;
 	}
 
@@ -765,8 +889,8 @@ gp_ddl_ProcessUtility(PlannedStmt *pstmt, const char *queryString,
 	recording = true;
 	PG_TRY();
 	{
-		next_ProcessUtility(pstmt, queryString, readOnlyTree, context,
-							params, queryEnv, dest, qc);
+		run_tablespace_statement(pstmt, queryString, readOnlyTree, context,
+								 params, queryEnv, dest, qc, false);
 	}
 	PG_FINALLY();
 	{

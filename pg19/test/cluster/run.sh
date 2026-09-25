@@ -397,6 +397,27 @@ if [ "$started" -eq 1 ]; then
 	same_everywhere "a role, and a table it was given" \
 		"SELECT 'r1'::regrole::oid || ' ' || pg_get_userbyid(relowner) FROM pg_class WHERE relname = 'owned'"
 
+	# A tablespace is each node's directory of its dbid under the location,
+	# as Cloudberry's is; a table in it has its rows on the segments, and
+	# DROP TABLESPACE takes the directories away.
+	mkdir -p "$ROOT/tblspc"
+	out=$(q 0 "CREATE TABLESPACE ts1 LOCATION '$ROOT/tblspc';")
+	[ -z "$out" ] && ok "CREATE TABLESPACE runs" || notok "CREATE TABLESPACE" "$out"
+	same_everywhere "and the tablespace has one OID everywhere" \
+		"SELECT oid::text FROM pg_tablespace WHERE spcname = 'ts1'"
+	out=$(q 0 "SELECT pg_tablespace_location(oid) FROM pg_tablespace WHERE spcname = 'ts1';")
+	out2=$(q 1 "SELECT pg_tablespace_location(oid) FROM pg_tablespace WHERE spcname = 'ts1';")
+	q 0 "CREATE TABLE tsp (a int) TABLESPACE ts1; INSERT INTO tsp SELECT generate_series(1, 100);" >/dev/null
+	n1=$(q 1 "SELECT count(*) FROM tsp;"); n2=$(q 2 "SELECT count(*) FROM tsp;")
+	[ "$out|$out2|$((n1 + n2))|$(ls "$ROOT/tblspc" | tr '\n' ' ')" = "$ROOT/tblspc/1|$ROOT/tblspc/2|100|1 2 3 " ] \
+		&& ok "each node's is the directory of its dbid under the location, and a table's rows are in it" \
+		|| notok "a tablespace's directories" "$out / $out2 / $n1 + $n2 / $(ls "$ROOT/tblspc")"
+	q 0 "DROP TABLE tsp;" >/dev/null
+	out=$(q 0 "DROP TABLESPACE ts1;")
+	[ -z "$out" ] && [ -z "$(ls "$ROOT/tblspc")" ] \
+		&& ok "DROP TABLESPACE follows, and takes the directories away" \
+		|| notok "DROP TABLESPACE" "$out / $(ls "$ROOT/tblspc")"
+
 	# Each backend makes its own temporary namespace, so its OID is the one
 	# thing that differs; the tables in it do not.
 	out=$(printf '%s\n' "SET client_min_messages = warning;" "CREATE TEMP TABLE tmp1 (a int);" "CREATE TEMP TABLE tmp2 (a int);" \
