@@ -53,12 +53,13 @@ qn() {						# qn <host> <port> <sql>
 
 # A node recovered as the mirror of its content's primary.
 recover() {					# recover <dbid>
-	local dbid="$1" content host port dir phost pport rewound=0
+	local dbid="$1" content host port dir phost pport pdbid loc rewound=0
+	local maps=()
 
 	IFS='|' read -r content host port dir <<< \
 		"$(q "SELECT content, hostname, port, datadir FROM gp_segment_configuration WHERE dbid = $dbid")"
-	IFS='|' read -r phost pport <<< \
-		"$(q "SELECT hostname, port FROM gp_segment_configuration WHERE content = $content AND role = 'p'")"
+	IFS='|' read -r phost pport pdbid <<< \
+		"$(q "SELECT hostname, port, dbid FROM gp_segment_configuration WHERE content = $content AND role = 'p'")"
 	[ -n "$dir" ] && [ -n "$pport" ] ||
 		{ echo "gprecoverseg: dbid $dbid, or its primary, is not in gp_segment_configuration" >&2; return 1; }
 
@@ -84,8 +85,18 @@ recover() {					# recover <dbid>
 	fi
 	if [ "$rewound" -eq 0 ]; then
 		rm -rf "$dir"
+		# A tablespace is each node's directory of its dbid under the
+		# location (gp_core's gp_ddl.c): the copy's is this node's, emptied
+		# first, as Cloudberry's pg_basebackup --target-gp-dbid makes it.
+		while IFS= read -r loc; do
+			case "$loc" in
+				*/"$pdbid")
+					rm -rf "${loc%/*}/$dbid"
+					maps+=(-T "$loc=${loc%/*}/$dbid") ;;
+			esac
+		done < <(qn "$phost" "$pport" "SELECT pg_catalog.pg_tablespace_location(oid) FROM pg_catalog.pg_tablespace")
 		"$PG_BINDIR/pg_basebackup" -D "$dir" -h "$phost" -p "$pport" -X stream -c fast -S "$SLOT" \
-			> "$dir.basebackup.log" 2>&1 ||
+			"${maps[@]}" > "$dir.basebackup.log" 2>&1 ||
 			{ echo "gprecoverseg: could not copy the primary of content $content" >&2; return 1; }
 	fi
 
