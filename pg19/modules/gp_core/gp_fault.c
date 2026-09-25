@@ -607,6 +607,22 @@ fault_inject_here(const char *name, const char *typename, const char *ddl,
 	return pstrdup("Success:");
 }
 
+/* Is FTS's probe of this node skipped, by its own fts_probe fault? */
+static bool
+fts_probe_skipped_here(void)
+{
+	GpFaultEntry *e;
+	bool		skipped;
+
+	if (fault_shared == NULL)
+		return false;
+	LWLockAcquire(fault_shared->lock, LW_SHARED);
+	e = fault_lookup("fts_probe");
+	skipped = (e != NULL && e->type == GP_FAULT_SKIP);
+	LWLockRelease(fault_shared->lock);
+	return skipped;
+}
+
 PG_FUNCTION_INFO_V1(gp_inject_fault);
 
 /*
@@ -630,6 +646,7 @@ gp_inject_fault(PG_FUNCTION_ARGS)
 	int			session = PG_GETARG_INT32(9);
 	const GpSegmentConfig *node;
 	char	   *answer;
+	bool		fts_skipped = false;
 
 	if (!superuser())
 		ereport(ERROR,
@@ -645,6 +662,7 @@ gp_inject_fault(PG_FUNCTION_ARGS)
 					 errmsg("there is no node with dbid %d", dbid)));
 		answer = fault_inject_here(name, type, ddl, database, table, start,
 								   end, extra, session);
+		fts_skipped = fts_probe_skipped_here();
 	}
 	else
 	{
@@ -676,13 +694,34 @@ gp_inject_fault(PG_FUNCTION_ARGS)
 		keywords[n] = NULL;
 		values[n] = NULL;
 
-		conn = libpqsrv_connect_params(keywords, values, false, fault_wait_event());
-		if (conn == NULL || PQstatus(conn) != CONNECTION_OK)
+		/*
+		 * A node restarting -- after a panic a fault of this function's made
+		 * -- refuses the connection, or closes it as its postmaster ends the
+		 * backend it had started: tried again, five times, two seconds apart,
+		 * as the dispatcher tries a segment in recovery (gp_dispatch.c).
+		 */
+		for (int attempt = 0;; attempt++)
 		{
-			char	   *msg = conn ? pstrdup(PQerrorMessage(conn)) : "out of memory";
+			char	   *msg;
 
+			conn = libpqsrv_connect_params(keywords, values, false, fault_wait_event());
+			if (conn != NULL && PQstatus(conn) == CONNECTION_OK)
+				break;
+			msg = conn ? pstrdup(PQerrorMessage(conn)) : "out of memory";
 			if (conn != NULL)
 				libpqsrv_disconnect(conn);
+			if (attempt < 5 &&
+				(strstr(msg, "the database system is starting up") != NULL ||
+				 strstr(msg, "the database system is in recovery mode") != NULL ||
+				 strstr(msg, "the database system is not yet accepting connections") != NULL ||
+				 strstr(msg, "server closed the connection unexpectedly") != NULL))
+			{
+				(void) WaitLatch(MyLatch, WL_LATCH_SET | WL_TIMEOUT | WL_EXIT_ON_PM_DEATH,
+								 2000, fault_wait_event());
+				ResetLatch(MyLatch);
+				CHECK_FOR_INTERRUPTS();
+				continue;
+			}
 			ereport(ERROR,
 					(errcode(ERRCODE_CONNECTION_FAILURE),
 					 errmsg("connection to dbid %d %s:%d failed", dbid,
@@ -716,6 +755,22 @@ gp_inject_fault(PG_FUNCTION_ARGS)
 		}
 		answer = pstrdup(PQgetvalue(res, 0, 0));
 		PQclear(res);
+
+		/* whether the node's own fts_probe fault skips its probes */
+		if (strcmp(type, "panic") == 0)
+		{
+			const char *status_params[2];
+
+			status_params[0] = psprintf("%d", dbid);
+			res = libpqsrv_exec_params(conn,
+									   "SELECT gp_inject_fault('fts_probe', 'status', '', '', '', 1, -1, 0, $1::int4, -1)",
+									   1, NULL, status_params, NULL, NULL, 0,
+									   fault_wait_event());
+			fts_skipped = (PQresultStatus(res) == PGRES_TUPLES_OK &&
+						   PQntuples(res) == 1 &&
+						   strstr(PQgetvalue(res, 0, 0), "fault type:'skip'") != NULL);
+			PQclear(res);
+		}
 		libpqsrv_disconnect(conn);
 	}
 
@@ -723,6 +778,18 @@ gp_inject_fault(PG_FUNCTION_ARGS)
 		ereport(ERROR,
 				(errcode(ERRCODE_INTERNAL_ERROR),
 				 errmsg("%s", answer)));
+
+	/*
+	 * A panic on a segment, which FTS may take for the segment down and fail
+	 * over from: Cloudberry's gp_inject_fault warns where FTS probes
+	 * (fts_with_panic_warning()), as the node's own fts_probe fault does not
+	 * skip them.
+	 */
+	if (strcmp(type, "panic") == 0 && node != NULL && node->content >= 0 &&
+		!fts_skipped)
+		ereport(WARNING,
+				(errmsg("consider disabling FTS probes while injecting a panic."),
+				 errhint("Inject an infinite 'skip' into the 'fts_probe' fault to disable FTS probing.")));
 	PG_RETURN_TEXT_P(cstring_to_text(answer));
 }
 
