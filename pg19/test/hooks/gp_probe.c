@@ -34,6 +34,8 @@
  */
 #include "postgres.h"
 
+#include <sys/stat.h>
+
 #include "access/heapam.h"
 #include "access/relation.h"
 #include "access/relscan.h"
@@ -48,6 +50,7 @@
 #include "catalog/pg_type.h"
 #include "commands/explain.h"
 #include "commands/matview.h"
+#include "commands/tablespace.h"
 #include "commands/vacuum.h"
 #include "executor/executor.h"
 #include "fmgr.h"
@@ -70,6 +73,7 @@
 #include "utils/array.h"
 #include "utils/builtins.h"
 #include "utils/combocid.h"
+#include "utils/guc.h"
 #include "utils/lsyscache.h"
 #include "utils/memutils.h"
 #include "utils/rel.h"
@@ -956,6 +960,34 @@ probe_smgr_file_event(RelFileLocatorBackend rlocator, ForkNumber forknum,
 						rlocator.locator.relNumber)));
 }
 
+/* ------------------------------------------------------------------------- */
+/* O32: tablespace_location_hook                                             */
+/* ------------------------------------------------------------------------- */
+
+/*
+ * A subdirectory of the location, named by gp_probe.tablespace_subdir, as a
+ * node of a cluster names one by its dbid; the location as given where the
+ * setting is empty.  The setting is read where the hook is asked, so the
+ * startup process, replaying CREATE TABLESPACE, reads the value the server
+ * was started with.
+ */
+static char *probe_tablespace_subdir = NULL;
+
+static const char *
+probe_tablespace_location(const char *location, Oid tablespaceoid)
+{
+	char	   *dir;
+
+	if (probe_tablespace_subdir == NULL || probe_tablespace_subdir[0] == '\0')
+		return location;
+	dir = psprintf("%s/%s", location, probe_tablespace_subdir);
+	if (mkdir(dir, S_IRWXU) < 0 && errno != EEXIST)
+		ereport(ERROR,
+				(errcode_for_file_access(),
+				 errmsg("could not create directory \"%s\": %m", dir)));
+	return dir;
+}
+
 /* A table of the probe's method keeps its TOAST in a heap table. */
 static Oid
 probe_relation_toast_am(Relation rel)
@@ -1615,6 +1647,16 @@ _PG_init(void)
 	query_lockmode_hook = probe_query_lockmode;
 	deparse_range_function_hook = probe_deparse_range;
 	smgr_file_event_hook = probe_smgr_file_event;
+
+	DefineCustomStringVariable("gp_probe.tablespace_subdir",
+							   "O32: the subdirectory of a tablespace's location this server links to.",
+							   "Empty: the location as CREATE TABLESPACE gave it.",
+							   &probe_tablespace_subdir,
+							   "",
+							   PGC_SIGHUP,
+							   0,
+							   NULL, NULL, NULL);
+	tablespace_location_hook = probe_tablespace_location;
 
 	/*
 	 * O23: entries of a database directory named by a number and "_probe"

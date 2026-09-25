@@ -1072,6 +1072,84 @@ is "and leaves the table readable, with what it had" o21 readable 1
 is "and able to grow once the hook lets it" o21 grows 1001
 
 ###############################################################################
+echo "O32 tablespace_location_hook: this server's directory of a tablespace, in redo too"
+###############################################################################
+# gp_probe.tablespace_subdir names the directory under the location that
+# this server links to, as a node of a cluster names one by its dbid.  A
+# crash before the next checkpoint, and a start with another name, show the
+# redo of CREATE TABLESPACE asking the hook again, with the location as the
+# statement gave it, which the record carries.
+mkdir -p "$WORK/o32loc" "$WORK/o32plain"
+echo "gp_probe.tablespace_subdir = 'first'" >> "$WORK/data/postgresql.conf"
+session o32 <<SQL
+SELECT pg_reload_conf();
+SELECT pg_sleep(0.5);
+SELECT 'subdir=' || current_setting('gp_probe.tablespace_subdir');
+CHECKPOINT;
+CREATE TABLESPACE o32_ts LOCATION '$WORK/o32loc';
+SELECT 'oid=' || oid FROM pg_tablespace WHERE spcname = 'o32_ts';
+SELECT 'location=' || pg_tablespace_location(oid) FROM pg_tablespace WHERE spcname = 'o32_ts';
+CREATE TABLE o32_t (a int) TABLESPACE o32_ts;
+INSERT INTO o32_t VALUES (1);
+SELECT 'path=' || pg_relation_filepath('o32_t');
+SQL
+o32_oid=$(val o32 oid)
+o32_path=$(val o32 path)
+if [ "$(val o32 subdir)" = "first" ] && [ -n "$o32_oid" ] &&
+   [ "$(readlink "$WORK/data/pg_tblspc/$o32_oid")" = "$WORK/o32loc/first" ]; then
+	ok "CREATE TABLESPACE links the directory the hook chose under the location"
+else
+	notok "pg_tblspc/$o32_oid should link $WORK/o32loc/first" \
+		"$(readlink "$WORK/data/pg_tblspc/$o32_oid" 2>&1) $(grep -i error "$WORK/o32.out" | head -3)"
+fi
+is "and pg_tablespace_location(), which reads the link, says it" o32 location "$WORK/o32loc/first"
+if [ -n "$o32_path" ] && [ -f "$WORK/o32loc/first/${o32_path#pg_tblspc/$o32_oid/}" ]; then
+	ok "a table made in the tablespace has its file there"
+else
+	notok "the table's file should be under $WORK/o32loc/first" "$o32_path"
+fi
+
+"$BINDIR/pg_ctl" -D "$WORK/data" -m immediate stop > /dev/null 2>&1
+sed -i "s/^gp_probe.tablespace_subdir = 'first'$/gp_probe.tablespace_subdir = 'second'/" \
+	"$WORK/data/postgresql.conf"
+if "$BINDIR/pg_ctl" -D "$WORK/data" -l "$WORK/log" -w -t 60 start > /dev/null 2>&1; then
+	session o32_redo <<'SQL'
+SELECT 'rows=' || count(*) FROM o32_t;
+SQL
+	if [ "$(readlink "$WORK/data/pg_tblspc/$o32_oid")" = "$WORK/o32loc/second" ] &&
+	   [ -f "$WORK/o32loc/second/${o32_path#pg_tblspc/$o32_oid/}" ]; then
+		ok "its redo asks the hook again, with the location the record carries, and links what it chose"
+	else
+		notok "after recovery pg_tblspc/$o32_oid should link $WORK/o32loc/second" \
+			"$(readlink "$WORK/data/pg_tblspc/$o32_oid" 2>&1)"
+	fi
+	is "and the table's row, replayed there, is read from it" o32_redo rows 1
+else
+	notok "the server should come back from the crash" "$(tail -5 "$WORK/log")"
+fi
+
+# A hook that chooses nothing: the location as given, as PostgreSQL 19 links it.
+sed -i "/^gp_probe.tablespace_subdir = /d" "$WORK/data/postgresql.conf"
+session o32_plain <<SQL
+SELECT pg_reload_conf();
+SELECT pg_sleep(0.5);
+SELECT 'subdir=[' || current_setting('gp_probe.tablespace_subdir') || ']';
+DROP TABLE o32_t;
+DROP TABLESPACE o32_ts;
+CREATE TABLESPACE o32_plain LOCATION '$WORK/o32plain';
+SELECT 'oid=' || oid FROM pg_tablespace WHERE spcname = 'o32_plain';
+SQL
+if [ "$(val o32_plain subdir)" = "[]" ] &&
+   [ "$(readlink "$WORK/data/pg_tblspc/$(val o32_plain oid)")" = "$WORK/o32plain" ]; then
+	ok "a hook that chooses nothing leaves the location as the statement gave it"
+else
+	notok "pg_tblspc should link $WORK/o32plain" "$(grep -i error "$WORK/o32_plain.out" | head -3)"
+fi
+session o32_end <<'SQL'
+DROP TABLESPACE o32_plain;
+SQL
+
+###############################################################################
 echo "O23 extension marks: pg_checksums passes over what an extension marked, pg_upgrade carries it"
 ###############################################################################
 # Last, because it stops the server: pg_checksums reads a stopped cluster.

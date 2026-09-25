@@ -143,6 +143,7 @@ patch_probe = '''
 #include "catalog/catalog.h"
 #include "commands/explain.h"
 #include "commands/matview.h"
+#include "commands/tablespace.h"
 #include "commands/vacuum.h"
 #include "miscadmin.h"
 #include "parser/parse_expr.h"
@@ -173,6 +174,7 @@ cb_probe(void)
 	smgr_file_event_hook = NULL;			/* O21 */
 	raw_parser_hook = NULL;					/* O26 */
 	star_expansion_filter_hook = NULL;		/* O28 */
+	tablespace_location_hook = NULL;		/* O32 */
 
 	(void) LastNewOidWasPreassigned;					/* R1  */
 	(void) XactAdoptCurrentXids;						/* R2  */
@@ -213,7 +215,7 @@ if not have_patched_pg and get_option('require_patched_pg')
   error('''
     @0@
     compiles, but does not carry the Cloudberry core patch series (R1-R4, O3,
-    O4, O10, O13-O23, O26-O28).  Build PostgreSQL from github/postgres, branch
+    O4, O10, O13-O23, O26-O28, O32).  Build PostgreSQL from github/postgres, branch
     REL_19_STABLE_CLOUDBERRY, and point -Dpg_config at it.
     Pass -Drequire_patched_pg=false to configure anyway.'''.format(
     pg_config.full_path()))
