@@ -164,9 +164,9 @@ static const struct config_enum_entry gp_log_gang_options[] = {
  * mean the same thing there: which schema a name is looked up in, which role
  * is doing it, how a date is read and written, where a table goes.
  * Cloudberry marks the ones it ships with GUC_GPDB_NEED_SYNC, 189 of them;
- * these are the ones anything the port dispatches yet can tell apart.
- * default_tablespace is not among them: a tablespace is a directory on one
- * machine, and at M2 each node keeps its own.
+ * these are the ones anything the port dispatches yet can tell apart.  A
+ * tablespace is every node's, of the same name (gp_ddl.c), so the ones a
+ * relation or a temporary file is made in are too.
  */
 static const char *const synced_settings[] = {
 	"search_path",
@@ -175,6 +175,8 @@ static const char *const synced_settings[] = {
 	"IntervalStyle",
 	"TimeZone",
 	"default_table_access_method",
+	"default_tablespace",
+	"temp_tablespaces",
 	"check_function_bodies",
 	"bytea_output",
 	"extra_float_digits",

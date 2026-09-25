@@ -412,7 +412,15 @@ if [ "$started" -eq 1 ]; then
 	[ "$out|$out2|$((n1 + n2))|$(ls "$ROOT/tblspc" | tr '\n' ' ')" = "$ROOT/tblspc/1|$ROOT/tblspc/2|100|1 2 3 " ] \
 		&& ok "each node's is the directory of its dbid under the location, and a table's rows are in it" \
 		|| notok "a tablespace's directories" "$out / $out2 / $n1 + $n2 / $(ls "$ROOT/tblspc")"
-	q 0 "DROP TABLE tsp;" >/dev/null
+	# default_tablespace goes to the segments with a statement, as Cloudberry
+	# sends it: a table made under it is in the tablespace on every node.
+	qf 0 > /dev/null <<'EOF'
+SET default_tablespace = ts1;
+CREATE TABLE tsd (a int) DISTRIBUTED BY (a);
+EOF
+	same_everywhere "a table made under default_tablespace is in it on every node" \
+		"SELECT spcname::text FROM pg_class c JOIN pg_tablespace t ON t.oid = c.reltablespace WHERE relname = 'tsd'"
+	q 0 "DROP TABLE tsp, tsd;" >/dev/null
 	out=$(q 0 "DROP TABLESPACE ts1;")
 	[ -z "$out" ] && [ -z "$(ls "$ROOT/tblspc")" ] \
 		&& ok "DROP TABLESPACE follows, and takes the directories away" \
