@@ -230,8 +230,8 @@ applies (`pg19/docker/patches`), not a patch of the core series.  Left
 open: six of Cloudberry's FTS tests, each for what the port does not have
 (`cloudberry.md`).
 
-M5 — storage and loading — has begun (2026-09-25), on ten more patches
-of the core series, O13 to O21 and O23:
+M5 — storage and loading — has begun (2026-09-25), on eleven more patches
+of the core series, O13 to O21, O23 and O32:
 
 - `gp_ao`: append-optimized tables, by row (`ao_row`) and by column
   (`ao_column`), as table access methods whose blocks are 8K pages of the
@@ -259,7 +259,13 @@ of the core series, O13 to O21 and O23:
   `gp_core` runs a query of `gp_dist_random()` alone that calls a function
   which is not immutable on the segments, with the values its parameters
   and subqueries have on the coordinator, and makes the size functions the
-  cluster's, as Cloudberry's are.
+  cluster's, as Cloudberry's are;
+- tablespaces, every node's: each node's directory of a tablespace is the
+  one of its dbid under the location, as Cloudberry's is, which PostgreSQL
+  asks `gp_core` for through O32 -- as a node runs CREATE TABLESPACE, and as
+  a mirror or a standby replays it, making a directory of its own on a
+  machine it shares with its primary -- and every node's
+  `pg_tablespace_location()` says the location, which `pg_dump` writes.
 
 Left of M5: `pax`, and `COPY`'s `FILL MISSING FIELDS`, `NEWLINE` and
 `ESCAPE` outside CSV, which external tables take (`cloudberry.md`).  The resource and transport modules — `pax`,

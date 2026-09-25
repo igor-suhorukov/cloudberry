@@ -29,26 +29,26 @@
 # cores, 32 threads), with every job at once; they order the jobs and
 # nothing else, and run.sh's summary gives each run's own.
 
-greenplum              orca     374   PASSES=orca
-diskquota              regress  312   DQ_PARTS=regress
-greenplum              planner  281   PASSES=planner
-singlenode             orca     235   PASSES=orca
-isolation2             planner  135   PASSES=planner
-postgis_regress        orca     116   PASSES=orca
-isolation2             orca     115   PASSES=orca
-diskquota              isolation2 109   DQ_PARTS=isolation2
-orca                   -         85
-singlenode             planner   79   PASSES=planner
-cluster                -         77
-fts                    -         55
-task                   -         41
-postgis_regress        planner   24   PASSES=planner
-hooks                  -         21
-security               -         18
-dirtable               -         17
-postgis                -         17
-grammar                -         11
+greenplum              orca     330   PASSES=orca
+diskquota              regress  289   DQ_PARTS=regress
+greenplum              planner  254   PASSES=planner
+singlenode             orca     225   PASSES=orca
+isolation2             planner  143   PASSES=planner
+isolation2             orca     126   PASSES=orca
+diskquota              isolation2 116   DQ_PARTS=isolation2
+postgis_regress        orca     104   PASSES=orca
+task                   -         83
+orca                   -         82
+singlenode             planner   80   PASSES=planner
+cluster                -         80
+fts                    -         56
+postgis_regress        planner   33   PASSES=planner
+hooks                  -         30
+postgis                -         27
+security               -         22
+dirtable               -         22
+grammar                -         22
 dynamic                -         10
-ao                     -          9
+ao                     -         10
 singlenode_isolation2  orca       6   PASSES=orca
 singlenode_isolation2  planner    6   PASSES=planner
