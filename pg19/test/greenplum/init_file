@@ -36,4 +36,16 @@ s/.//gs
 m/reset gp\.enable_parallel;/
 s/.//gs
 
+# gp_toolkit.__gp_aoblkdir()'s tupleid, where a row of a table's block
+# directory is: gp_ao keeps every table's rows in one table, so the place
+# depends on the tables written before, where Cloudberry's is in the table's
+# own pg_aoblkdir relation.  The column -- its values, its header and the
+# rule under that, whose width follows them -- is made one.
+m/^ gp_segment_id \| tupleid +\| segno \| columngroup_no \| entry_no \| first_row_no \| file_offset \| row_count $/
+s/tupleid +\|/tupleid |/
+m/^-{15}\+-+\+-{7}\+-{16}\+-{10}\+-{14}\+-{13}\+-{11}$/
+s/^(-{15}\+)-+\+/$1---------+/
+m/^ +\d+ \| \(\d+,\d+\) +\| +\d+ \| +\d+ \| +\d+ \| +\d+ \| +\d+ \| +\d+$/
+s/\| \(\d+,\d+\) +\|/| (tid)   |/
+
 -- end_matchsubs

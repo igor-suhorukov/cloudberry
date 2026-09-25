@@ -70,9 +70,6 @@
 +INFO:  GPORCA failed to produce a plan, falling back to Postgres-based planner
 +DETAIL:  Falling back to Postgres-based planner because GPORCA does not support the following feature: Queries on master-only tables
 @@
-+INFO:  GPORCA failed to produce a plan, falling back to Postgres-based planner
-+DETAIL:  Falling back to Postgres-based planner because GPORCA does not support the following feature: Unsupported table AM
-@@
 -     8
 +     4
 @@

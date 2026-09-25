@@ -22,10 +22,11 @@ alter_table_set_am  psql's \d+ footers of an append-optimized table, which
   are Cloudberry's psql's and not PostgreSQL 19's.  The segment files of a
   table ALTER TABLE ... SET ACCESS METHOD rewrites into gp_ao: numbered from
   1, where Cloudberry's rewrite writes segment 0, in gp_ao's own format,
-  version 1, with the lengths of its 8K blocks.  And
-  gp_toolkit.__gp_aoblkdir() over gp_dist_random('gp_id'), which the port
-  calls on the coordinator (see sequence_gp), where the table has no rows
-  and so no block directory.
+  version 1, with the lengths of its 8K blocks.  And each segment's
+  gp_toolkit.__gp_aoblkdir(): a directory row's segment file is the
+  rewrite's, 1, and its tupleid, which the port's init_file masks, is its
+  place in gp_ao.blkdir, one table of every table's directory rows, where
+  Cloudberry's is in the table's own pg_aoblkdir relation.
 
 am_encoding  psql's \d+ of a table by column, which PostgreSQL 19's psql
   prints without Cloudberry's columns for a column's compression and block
@@ -46,17 +47,14 @@ aocs (planner, orca)  aototal(), which sums the tuples of each table's
   table's visibility map and block directory the test looks for.  PostgreSQL
   19's words for FETCH BACKWARD in a cursor that cannot scan backward, and
   psql's \d+ footer.  zlib's ratio over gp_ao's 8K blocks, 1.23 where
-  Cloudberry's 32K ones give 1.26.  And pg_relation_size() on the
-  coordinator, which measures the coordinator's own file of a table, where
-  Cloudberry's adds up the segments': the sizes before and after the
-  TRUNCATE are one.  Under the planner a cursor's plan is a Sort of the
-  gathered rows, which can scan backward, and pg_cursors says it is
-  scrollable.
+  Cloudberry's 32K ones give 1.26.  Under the planner a cursor's plan is a
+  Sort of the gathered rows, which can scan backward, and pg_cursors says it
+  is scrollable.
 
-AORO_Compression  pg_relation_size() on the coordinator, which measures the
-  coordinator's own file of a table -- a page of gp_ao's format, 8192 bytes
-  -- where Cloudberry's adds up the segments'; and zlib's ratio over gp_ao's
-  8K blocks.
+AORO_Compression  pg_relation_size(), the cluster's, of gp_ao's 8K pages:
+  each node's file of a table has a page from the start, the coordinator's
+  too, 32 kB for an empty table where Cloudberry's has 0 bytes; and zlib's
+  ratio over gp_ao's 8K blocks.
 
 as_alias  an ORDER BY of text, which puts "XXXX" before "bbbb": the cluster
   is made with the C locale, and Cloudberry's expected output with one that
@@ -299,10 +297,12 @@ uaocs_catalog_tables  what gp_toolkit.__gp_aovisimap_hidden_info() finds
   file with deleted rows into a new one, 2, and lists the files it emptied
   as well.
 
-vacuum_full_ao, vacuum_full_heap_bitmapindex  pg_relation_size() over
-  gp_dist_random('gp_id'), which the port calls on the coordinator (see
-  sequence_gp), where the tables have no rows: of a table's own files, 0,
-  and of pg_appendonly's segrelid, which is 0, nothing.
+vacuum_full_ao  pg_relation_size() of pg_appendonly's segrelid on segment
+  1: gp_ao keeps segment files in gp_ao.segfile, so segrelid is 0, and the
+  size of no relation is null.
+
+vacuum_full_heap_bitmapindex  the table's size on segment 1, of 8K pages,
+  122880 bytes where Cloudberry's 32K pages make 131072.
 
 with_clause  three recursive queries Cloudberry refuses -- a join of nested
   RECURSIVE clauses, and window functions in a recursive query's target
