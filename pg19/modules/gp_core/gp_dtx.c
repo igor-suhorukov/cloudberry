@@ -145,6 +145,7 @@
 #include "replication/slot.h"
 #include "replication/syncrep.h"
 #include "storage/dsm_registry.h"
+#include "storage/fd.h"
 #include "storage/ipc.h"
 #include "storage/latch.h"
 #include "storage/lmgr.h"
@@ -1510,7 +1511,12 @@ static FullTransactionId dtx_preparing = {0};
  * COMMIT PREPARED unlinks -- ON COMMIT DROP drops one in every such
  * transaction -- so the backend that prepared it unlinks it after, and a
  * temporary schema the transaction made is gone if it is rolled back, which
- * leaves this backend pointing at nothing.
+ * leaves this backend pointing at nothing.  And a prepared transaction's
+ * record lists no temporary relation's files at all (smgrGetPendingDeletes()),
+ * so what TRUNCATE, a rewrite or SET TABLESPACE left of one at a COMMIT
+ * PREPARED, and what the transaction made at a ROLLBACK PREPARED, are this
+ * backend's files that no temporary relation of its has: swept after the
+ * second phase of a transaction that used one (sweep_temp_files()).
  */
 typedef struct DroppedTemp
 {
@@ -1526,6 +1532,7 @@ typedef struct PreparedTemp
 	FullTransactionId gxid;
 	List	   *dropped;		/* of DroppedTemp * */
 	bool		made_schema;	/* the transaction made the temporary schema */
+	bool		used_temp;		/* the transaction used a temporary relation */
 } PreparedTemp;
 
 static List *prepared_temp = NIL;	/* of PreparedTemp *, in TopMemoryContext */
@@ -1600,6 +1607,119 @@ unlink_temp(List *dropped)
 	pfree(srels);
 }
 
+/*
+ * This backend's temporary relations' files that no temporary relation of its
+ * has any more -- t<its proc number>_<relfilenumber>, in the database's
+ * directory and in each tablespace's -- unlinked through the storage
+ * manager, as a commit unlinks them, so that whoever follows files hears of
+ * it (O21).  After the second phase, when the catalogs say what is left.
+ */
+static void
+sweep_temp_files(void)
+{
+	Oid			ns,
+				toast;
+	HASHCTL		ctl;
+	HTAB	   *live;
+	Relation	pg_class;
+	TableScanDesc scan;
+	HeapTuple	tuple;
+	List	   *dirs = NIL;
+	List	   *orphans = NIL;
+	DIR		   *dir;
+	struct dirent *de;
+	ProcNumber	procno = ProcNumberForTempRelations();
+
+	/* what this backend's temporary relations have: (tablespace, number) */
+	memset(&ctl, 0, sizeof(ctl));
+	ctl.keysize = sizeof(RelFileLocator);
+	ctl.entrysize = sizeof(RelFileLocator);
+	ctl.hcxt = CurrentMemoryContext;
+	live = hash_create("gp temporary files", 64, &ctl,
+					   HASH_ELEM | HASH_BLOBS | HASH_CONTEXT);
+	GetTempNamespaceState(&ns, &toast);
+	pg_class = table_open(RelationRelationId, AccessShareLock);
+	scan = table_beginscan_catalog(pg_class, 0, NULL);
+	while ((tuple = heap_getnext(scan, ForwardScanDirection)) != NULL)
+	{
+		Form_pg_class form = (Form_pg_class) GETSTRUCT(tuple);
+		RelFileLocator locator;
+
+		if (form->relpersistence != RELPERSISTENCE_TEMP ||
+			(form->relnamespace != ns && form->relnamespace != toast))
+			continue;
+		locator.spcOid = OidIsValid(form->reltablespace)
+			? form->reltablespace : MyDatabaseTableSpace;
+		locator.dbOid = MyDatabaseId;
+		locator.relNumber = form->relfilenode;
+		(void) hash_search(live, &locator, HASH_ENTER, NULL);
+	}
+	table_endscan(scan);
+	table_close(pg_class, AccessShareLock);
+
+	/* the database's directory, and its directory in every tablespace */
+	dirs = lappend(dirs, list_make2_oid(MyDatabaseTableSpace, InvalidOid));
+	if ((dir = AllocateDir(PG_TBLSPC_DIR)) != NULL)
+	{
+		while ((de = ReadDir(dir, PG_TBLSPC_DIR)) != NULL)
+		{
+			Oid			spc = atooid(de->d_name);
+
+			if (OidIsValid(spc) && spc != MyDatabaseTableSpace)
+				dirs = lappend(dirs, list_make2_oid(spc, InvalidOid));
+		}
+		FreeDir(dir);
+	}
+
+	foreach_ptr(List, d, dirs)
+	{
+		Oid			spc = linitial_oid(d);
+		char	   *path = GetDatabasePath(MyDatabaseId, spc);
+
+		if ((dir = AllocateDir(path)) == NULL)
+			continue;
+		while ((de = ReadDirExtended(dir, path, LOG)) != NULL)
+		{
+			int			owner;
+			unsigned int number;
+			int			len;
+			RelFileLocator locator;
+			bool		found;
+
+			/* t<proc>_<number>, then a fork's suffix or a segment's, or not */
+			if (sscanf(de->d_name, "t%d_%u%n", &owner, &number, &len) != 2 ||
+				owner != procno ||
+				(de->d_name[len] != '\0' && de->d_name[len] != '_' &&
+				 de->d_name[len] != '.'))
+				continue;
+			locator.spcOid = spc;
+			locator.dbOid = MyDatabaseId;
+			locator.relNumber = number;
+			(void) hash_search(live, &locator, HASH_ENTER, &found);
+			if (found)
+				continue;		/* a relation's, or listed already */
+			orphans = lappend(orphans,
+							  smgropen(locator, procno));
+		}
+		FreeDir(dir);
+		pfree(path);
+	}
+
+	if (orphans != NIL)
+	{
+		SMgrRelation *srels = palloc_array(SMgrRelation, list_length(orphans));
+		int			n = 0;
+
+		foreach_ptr(SMgrRelationData, srel, orphans)
+			srels[n++] = srel;
+		smgrdounlinkall(srels, n, false);
+		for (int i = 0; i < n; i++)
+			smgrclose(srels[i]);
+		pfree(srels);
+	}
+	hash_destroy(live);
+}
+
 /* A PREPARE TRANSACTION of a distributed transaction: its part in the map. */
 static void
 dtx_pre_prepare(void)
@@ -1611,15 +1731,17 @@ dtx_pre_prepare(void)
 				toast;
 	PreparedTemp *pt;
 	MemoryContext oldcxt;
+	bool		used_temp;
 
 	GP_FAULT("start_prepare");
 
 	/* see "Temporary relations" above */
 	PreCommit_on_commit_actions();
+	used_temp = (MyXactFlags & XACT_FLAGS_ACCESSEDTEMPNAMESPACE) != 0;
 	MyXactFlags &= ~XACT_FLAGS_ACCESSEDTEMPNAMESPACE;
 
 	GetTempNamespaceState(&ns, &toast);
-	if (dropped_temp != NIL || (!temp_schema_before && OidIsValid(ns)))
+	if (dropped_temp != NIL || used_temp || (!temp_schema_before && OidIsValid(ns)))
 	{
 		oldcxt = MemoryContextSwitchTo(TopMemoryContext);
 		pt = palloc0(sizeof(PreparedTemp));
@@ -1632,6 +1754,7 @@ dtx_pre_prepare(void)
 			pt->dropped = lappend(pt->dropped, copy);
 		}
 		pt->made_schema = !temp_schema_before && OidIsValid(ns);
+		pt->used_temp = used_temp;
 		prepared_temp = lappend(prepared_temp, pt);
 		MemoryContextSwitchTo(oldcxt);
 	}
@@ -1698,7 +1821,9 @@ dtx_finished(FullTransactionId gxid, bool commit)
 		prepared_temp = foreach_delete_current(prepared_temp, lc);
 		if (commit)
 			unlink_temp(pt->dropped);
-		else if (pt->made_schema)
+		if (pt->used_temp)
+			sweep_temp_files();
+		if (!commit && pt->made_schema)
 			ereport(FATAL,
 					(errcode(ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE),
 					 errmsg("the temporary schema of this session was made by a distributed transaction that rolled back"),

@@ -2242,6 +2242,20 @@ SQL
 	[ "$out" = "0" ] \
 		&& ok "temporary tables commit in two phases, and one dropped leaves no file on a segment" \
 		|| notok "temporary tables under two-phase commit" "$out"
+	# And one TRUNCATE gave new files leaves no old ones: a prepared
+	# transaction's record lists no temporary relation's files, and the
+	# backend sweeps its own after the second phase.
+	out=$(printf '%s\n' "SET client_min_messages = warning;" \
+		"CREATE TEMP TABLE ttrunc (a int) DISTRIBUTED BY (a);" \
+		"INSERT INTO ttrunc SELECT generate_series(1, 100);" "TRUNCATE ttrunc;" \
+		"INSERT INTO ttrunc SELECT generate_series(1, 100);" "TRUNCATE ttrunc;" \
+		"INSERT INTO ttrunc SELECT generate_series(1, 10);" \
+		"SELECT count(*) FROM ttrunc;" \
+		"SELECT count(DISTINCT split_part(f, '_', 2)) FROM (SELECT unnest(string_to_array(result, ',')) AS f FROM gp.exec_on_segments(\$\$SELECT string_agg(f, ',') FROM pg_ls_dir('base/' || (SELECT oid FROM pg_database WHERE datname = current_database())) f WHERE f LIKE 't%'\$\$)) s;" | qf 0)
+	[ "$out" = "10
+1" ] \
+		&& ok "a temporary table TRUNCATE gave new files leaves no old ones on a segment" \
+		|| notok "a temporary table's old files under two-phase commit" "$out"
 
 	# A gid of the distributed kind is the coordinator's.
 	out=$(printf '%s\n' "BEGIN;" "PREPARE TRANSACTION 'gp_dtx_12345';" | qf 1)
