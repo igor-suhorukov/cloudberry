@@ -26,22 +26,29 @@
 
 ARG PG_VANILLA_IMAGE=cloudberry/pg19-vanilla:latest
 ARG PG_PATCHED_IMAGE=cloudberry/pg19-patched:latest
+ARG PG_VANILLA_NOASSERT_IMAGE=cloudberry/pg19-vanilla-noassert:latest
+ARG PG_PATCHED_NOASSERT_IMAGE=cloudberry/pg19-patched-noassert:latest
 ARG CB_REF=extension_postgresql_19
 
 FROM ${PG_VANILLA_IMAGE} AS vanilla
 FROM ${PG_PATCHED_IMAGE} AS patched
+FROM ${PG_VANILLA_NOASSERT_IMAGE} AS vanilla-noassert
+FROM ${PG_PATCHED_NOASSERT_IMAGE} AS patched-noassert
 
 FROM debian:trixie-slim
 ARG CB_REF
 USER root
 RUN apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
         libreadline8t64 zlib1g libicu76 libssl3t64 liblz4-1 libzstd1 libxml2 libxslt1.1 \
-        ca-certificates locales tzdata python3 git abigail-tools diffutils procps \
+        ca-certificates locales tzdata python3 git abigail-tools diffutils procps valgrind \
     && rm -rf /var/lib/apt/lists/* \
     && useradd -m -u 1000 -s /bin/bash postgres
 
 COPY --from=vanilla /usr/local/pgsql /pg/vanilla
 COPY --from=patched /usr/local/pgsql /pg/patched
+# Without assertions, for check 9's instruction counts.
+COPY --from=vanilla-noassert /usr/local/pgsql /pg/vanilla-noassert
+COPY --from=patched-noassert /usr/local/pgsql /pg/patched-noassert
 
 # The harness comes out of the branch, as it does for cb-ext, so that what runs
 # is what is committed rather than whatever the working tree happens to hold.
@@ -50,6 +57,8 @@ RUN --mount=type=bind,from=cbsrc,target=/cbsrc,ro \
 
 ENV PG_VANILLA=/pg/vanilla \
     PG_PATCHED=/pg/patched \
+    PG_VANILLA_NOASSERT=/pg/vanilla-noassert \
+    PG_PATCHED_NOASSERT=/pg/patched-noassert \
     PG_SRC_REPO=/pgsrc \
     TMPDIR=/tmp
 

@@ -27,7 +27,9 @@
 # them loads a Cloudberry module.
 #
 # The checks are numbered as in cloudberry.md, "Checking that the server stays
-# vanilla".  Those it does not cover are noted at the end.
+# vanilla".  Those it does not cover are noted at the end.  Check 9 counts
+# instructions on the builds without assertions where the image has them
+# (PG_VANILLA_NOASSERT, PG_PATCHED_NOASSERT).
 #
 #   PG_VANILLA=/prefix PG_PATCHED=/prefix pg19/test/vanilla/run.sh [check...]
 #
@@ -83,9 +85,10 @@ skipped=$(grep -c '^skip$' "$RESULTS" || true)
 
 echo "  $pass passed, $fail failed, $skipped skipped"
 echo
-echo "  not covered here: check 8 (third-party binaries) needs PGDG packages"
-echo "  for this PostgreSQL; check 9 (instruction counts) needs perf or"
-echo "  cachegrind; check 12 belongs to M5, when the modules first write data"
-echo "  of their own.  Check 11, that the hooks are called, is the hooks suite."
+echo "  not covered here: check 1, PostgreSQL's own tests, runs in each build's"
+echo "  tree (meson.sh); check 8 (third-party binaries) needs PGDG packages for"
+echo "  this PostgreSQL; check 11, that the hooks are called, is the hooks suite;"
+echo "  check 12's FATAL at redo without a module is in the suites of the ones"
+echo "  that write WAL of their own (ao, dirtable)."
 
 [ "$fail" -eq 0 ]

@@ -56,6 +56,33 @@ services:
       args:
         PG_REF: ${PG_PATCHED_REF:-REL_19_STABLE_CLOUDBERRY}
 
+  # The two again without assertions, for check 9, which counts a workload's
+  # instructions: no production server runs an assertion's, and they would
+  # thin out a hook's share of the count.
+  pg19-vanilla-noassert:
+    image: cloudberry/pg19-vanilla-noassert:latest
+    build:
+      context: .
+      dockerfile: Dockerfile.pg
+      additional_contexts:
+        pgsrc: ${PG_SRC:-../../../postgres}
+      args:
+        PG_REF: ${PG_VANILLA_REF:-origin/REL_19_STABLE}
+        PG_CASSERT: "false"
+    profiles: ["compare"]
+
+  pg19-patched-noassert:
+    image: cloudberry/pg19-patched-noassert:latest
+    build:
+      context: .
+      dockerfile: Dockerfile.pg
+      additional_contexts:
+        pgsrc: ${PG_SRC:-../../../postgres}
+      args:
+        PG_REF: ${PG_PATCHED_REF:-REL_19_STABLE_CLOUDBERRY}
+        PG_CASSERT: "false"
+    profiles: ["compare"]
+
   # The port's modules, on top of the patched server.
   cb-ext:
     image: cloudberry/cb-ext:latest
@@ -96,7 +123,7 @@ services:
   #   docker compose -f pg19/docker/compose.yml run --rm compare 03 05
   compare:
     image: cloudberry/pg19-compare:latest
-    depends_on: [pg19-vanilla, pg19-patched]
+    depends_on: [pg19-vanilla, pg19-patched, pg19-vanilla-noassert, pg19-patched-noassert]
     build:
       context: .
       dockerfile: Dockerfile.compare
@@ -105,12 +132,56 @@ services:
       args:
         PG_VANILLA_IMAGE: cloudberry/pg19-vanilla:latest
         PG_PATCHED_IMAGE: cloudberry/pg19-patched:latest
+        PG_VANILLA_NOASSERT_IMAGE: cloudberry/pg19-vanilla-noassert:latest
+        PG_PATCHED_NOASSERT_IMAGE: cloudberry/pg19-patched-noassert:latest
         CB_REF: ${CB_REF:-extension_postgresql_19}
     volumes:
       - ${PG_SRC:-../../../postgres}:/pgsrc:ro
     tmpfs:
       - /tmp
     profiles: ["compare"]
+
+  # Check 1: PostgreSQL's own tests, meson test, in each build's tree -- the
+  # build stage of the images above, which keeps it.  pg19/test/vanilla/
+  # meson.sh runs them, as a user of its own since initdb refuses root, and
+  # lists each test with its result: the two lists have to be the same.
+  # It is mounted from the working tree, as the build stage has no port.
+  #
+  #   docker compose -f pg19/docker/compose.yml run --rm meson-vanilla > vanilla.txt
+  #   docker compose -f pg19/docker/compose.yml run --rm meson-patched > patched.txt
+  meson-vanilla:
+    image: cloudberry/pg19-vanilla-build:latest
+    build:
+      context: .
+      dockerfile: Dockerfile.pg
+      target: build
+      additional_contexts:
+        pgsrc: ${PG_SRC:-../../../postgres}
+      args:
+        PG_REF: ${PG_VANILLA_REF:-origin/REL_19_STABLE}
+    user: root
+    entrypoint: ["bash", "/vanilla/meson.sh"]
+    volumes:
+      - ../test/vanilla:/vanilla:ro
+    shm_size: 4gb
+    profiles: ["meson"]
+
+  meson-patched:
+    image: cloudberry/pg19-patched-build:latest
+    build:
+      context: .
+      dockerfile: Dockerfile.pg
+      target: build
+      additional_contexts:
+        pgsrc: ${PG_SRC:-../../../postgres}
+      args:
+        PG_REF: ${PG_PATCHED_REF:-REL_19_STABLE_CLOUDBERRY}
+    user: root
+    entrypoint: ["bash", "/vanilla/meson.sh"]
+    volumes:
+      - ../test/vanilla:/vanilla:ro
+    shm_size: 4gb
+    profiles: ["meson"]
 
   # A coordinator, a standby coordinator and two segment hosts with mirrors --
   # the topology of Cloudberry's own sandbox.  It arrives with M2, which is the
