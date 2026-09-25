@@ -1346,18 +1346,15 @@ copy_end_sreh(CopySreh *sreh)
 }
 
 /*
- * COPY t FROM, into a table whose rows are here -- one node's, or one the
- * coordinator keeps -- under SEGMENT REJECT LIMIT: DoCopy()'s checks, and
- * PostgreSQL's COPY, reading through the filter.
+ * COPY FROM's privileges, checked as DoCopy() checks them: INSERT on the
+ * table or its columns, through ExecCheckPermissions() and so through its
+ * hook, where diskquota refuses a load into a table over its quota.
  */
-static uint64
-copy_from_local_sreh(ParseState *pstate, CopyStmt *stmt, Relation rel,
-					 CopySreh *sreh)
+static void
+copy_from_check_permissions(ParseState *pstate, CopyStmt *stmt, Relation rel)
 {
 	ParseNamespaceItem *nsitem;
 	RTEPermissionInfo *perminfo;
-	CopyFromState cstate;
-	uint64		processed;
 
 	nsitem = addRangeTableEntryForRelation(pstate, rel, RowExclusiveLock,
 										   NULL, false, false);
@@ -1367,6 +1364,21 @@ copy_from_local_sreh(ParseState *pstate, CopyStmt *stmt, Relation rel,
 		perminfo->insertedCols = bms_add_member(perminfo->insertedCols,
 												attnum - FirstLowInvalidHeapAttributeNumber);
 	ExecCheckPermissions(pstate->p_rtable, list_make1(perminfo), true);
+}
+
+/*
+ * COPY t FROM, into a table whose rows are here -- one node's, or one the
+ * coordinator keeps -- under SEGMENT REJECT LIMIT: DoCopy()'s checks, and
+ * PostgreSQL's COPY, reading through the filter.
+ */
+static uint64
+copy_from_local_sreh(ParseState *pstate, CopyStmt *stmt, Relation rel,
+					 CopySreh *sreh)
+{
+	CopyFromState cstate;
+	uint64		processed;
+
+	copy_from_check_permissions(pstate, stmt, rel);
 	if (check_enable_rls(RelationGetRelid(rel), InvalidOid, false) == RLS_ENABLED)
 		ereport(ERROR,
 				(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
@@ -1521,12 +1533,10 @@ gp_modify_ProcessUtility(PlannedStmt *pstmt, const char *queryString,
 
 			/*
 			 * DoCopy() would check these; this path does not go through it.
-			 * The lock and the privilege are the ones COPY FROM takes.
+			 * The lock and the privileges are the ones COPY FROM takes.
 			 */
 			rel = table_open(relid, RowExclusiveLock);
-			if (pg_class_aclcheck(relid, GetUserId(), ACL_INSERT) != ACLCHECK_OK)
-				aclcheck_error(ACLCHECK_NO_PRIV, get_relkind_objtype(rel->rd_rel->relkind),
-							   RelationGetRelationName(rel));
+			copy_from_check_permissions(pstate, stmt, rel);
 			if (stmt->filename != NULL && !has_privs_of_role(GetUserId(),
 															 stmt->is_program ? ROLE_PG_EXECUTE_SERVER_PROGRAM : ROLE_PG_READ_SERVER_FILES))
 				ereport(ERROR,
