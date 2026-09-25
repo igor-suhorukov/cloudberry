@@ -114,7 +114,7 @@ static const char *const gp_trigger_words[] = {
 	"account", "execute", "decode", "subpartition", "gp_dist_random",
 	"orientation", "encoding",
 	"reorganize", "external", "reject", "protocol",
-	"createexttable", "nocreateexttable", "newline",
+	"createexttable", "nocreateexttable", "newline", "resource",
 	NULL
 };
 
@@ -1241,6 +1241,352 @@ rw_drop_profile(GpRewrite *rw)
 	rw_whole(rw);
 	appendStringInfo(&rw->body, "CALL gp_security.drop_profile(%s, %s)",
 					 name_array(names, "name"), missing_ok ? "true" : "false");
+	return true;
+}
+
+/* ------------------------------------------------------------------------- */
+/* Resource queues and resource groups, gp_resource's                        */
+/* ------------------------------------------------------------------------- */
+
+/*
+ * One option of a queue's or a group's, into the text array its procedure is
+ * called with: the name alone, or name=k:value, k saying what the value was
+ * as Cloudberry's grammar read it -- i an integer, f a number with a fraction
+ * or an exponent, s a string, w a word -- which decides what its defGet*()
+ * answer.  gp_resource's resdefs.c reads them back.
+ */
+static void
+append_option(StringInfo arr, const char *name, char kind, const char *value)
+{
+	char	   *item = value != NULL ? psprintf("%s=%c:%s", name, kind, value)
+		: pstrdup(name);
+
+	appendStringInfo(arr, "%s%s", arr->len > 0 ? ", " : "",
+					 quote_literal_cstr(item));
+}
+
+/*
+ * The value of one of Cloudberry's def_args at token i: a signed number, a
+ * string, or a word -- a type name or a keyword, to its grammar.  Returns
+ * the index after it, or -1 where there is none.
+ */
+static int
+option_value(const GpTokens *ts, int i, int limit, char *kind, char **value)
+{
+	bool		negative = false;
+
+	if (i < limit && (tok_is_char(ts, i, '-') || tok_is_char(ts, i, '+')))
+	{
+		negative = tok_is_char(ts, i, '-');
+		i++;
+		if (i >= limit ||
+			(ts->toks[i].code != GP_ICONST && ts->toks[i].code != GP_FCONST))
+			return -1;
+	}
+	if (i >= limit)
+		return -1;
+
+	switch (ts->toks[i].code)
+	{
+		case GP_ICONST:
+			*kind = 'i';
+			*value = psprintf("%s%d", negative ? "-" : "", ts->toks[i].ival);
+			return i + 1;
+		case GP_FCONST:
+			*kind = 'f';
+			*value = psprintf("%s%s", negative ? "-" : "", ts->toks[i].str);
+			return i + 1;
+		case GP_SCONST:
+			*kind = 's';
+			*value = ts->toks[i].str;
+			return i + 1;
+		default:
+			if (!tok_is_name(ts, i))
+				return -1;
+			*kind = 'w';
+			*value = tok_name(ts, i);
+			return i + 1;
+	}
+}
+
+/*
+ * Cloudberry's "definition", ( name [= value] [, ...] ), whose "(" is at
+ * `open`, into the array: returns the index after its ")".
+ */
+static int
+definition_list(GpRewrite *rw, int open, StringInfo arr)
+{
+	const GpTokens *ts = rw->ts;
+	int			close;
+	int			i = open + 1;
+
+	if (!tok_is_char(ts, open, '('))
+		rw_syntax_error(rw, open);
+	close = match_close(ts, open, rw->last);
+	if (close < 0)
+		rw_syntax_error(rw, rw->last);
+	if (i == close)
+		rw_syntax_error(rw, close);
+
+	while (i < close)
+	{
+		char	   *name;
+		char		kind = 0;
+		char	   *value = NULL;
+
+		if (!tok_is_name(ts, i))
+			rw_syntax_error(rw, i);
+		name = tok_name(ts, i++);
+		if (tok_is_char(ts, i, '='))
+		{
+			int			next = option_value(ts, i + 1, close, &kind, &value);
+
+			if (next < 0)
+				rw_syntax_error(rw, i + 1);
+			i = next;
+		}
+		append_option(arr, name, kind, value);
+
+		if (i < close)
+		{
+			if (!tok_is_char(ts, i, ','))
+				rw_syntax_error(rw, i);
+			if (++i == close)
+				rw_syntax_error(rw, close);
+		}
+	}
+	return close + 1;
+}
+
+/*
+ * CREATE RESOURCE QUEUE name [ACTIVE THRESHOLD n] [COST THRESHOLD n]
+ *		[IGNORE THRESHOLD n] [OVERCOMMIT | NOOVERCOMMIT] ... [WITH (...)]
+ * ALTER RESOURCE QUEUE name [those] [WITH (...)] [WITHOUT (...)]
+ * DROP RESOURCE QUEUE name
+ *	 -> CALL gp_resource.create_resource_queue('name', ARRAY[...]), and
+ *		alter_ and drop_
+ *
+ * The options go in the order Cloudberry's grammar lists them, with the marks
+ * it puts where the WITH and WITHOUT lists begin -- "withliststart", always
+ * at CREATE, and "withoutliststart" -- which CreateQueue() and AlterQueue()
+ * read them by, and whose names a user may therefore not give an option.
+ */
+static bool
+rw_resource_queue(GpRewrite *rw)
+{
+	const GpTokens *ts = rw->ts;
+	int			i = rw->first;
+	bool		creating = tok_is(ts, i, "create");
+	char	   *name;
+	StringInfoData arr;
+
+	if (!(creating || tok_is(ts, i, "alter") || tok_is(ts, i, "drop")) ||
+		!tok_is(ts, i + 1, "resource") || !tok_is(ts, i + 2, "queue"))
+		return false;
+	i += 3;
+	if (!tok_is_name(ts, i))
+		rw_syntax_error(rw, i);
+	name = tok_name(ts, i++);
+
+	if (tok_is(ts, rw->first, "drop"))
+	{
+		if (i != rw->last)
+			rw_syntax_error(rw, i);
+		rw_whole(rw);
+		appendStringInfo(&rw->body, "CALL gp_resource.drop_resource_queue(%s)",
+						 quote_literal_cstr(name));
+		return true;
+	}
+
+	initStringInfo(&arr);
+	for (;;)
+	{
+		if (tok_is(ts, i, "active") || tok_is(ts, i, "cost") ||
+			tok_is(ts, i, "ignore"))
+		{
+			const char *option = tok_is(ts, i, "active") ? "active_statements" :
+				tok_is(ts, i, "cost") ? "max_cost" : "min_cost";
+			char		kind = 0;
+			char	   *value = NULL;
+			int			next;
+
+			if (!tok_is(ts, i + 1, "threshold"))
+				rw_syntax_error(rw, i + 1);
+			next = option_value(ts, i + 2, rw->last, &kind, &value);
+			if (next < 0 || kind == 's' || kind == 'w')
+				rw_syntax_error(rw, i + 2);
+			append_option(&arr, option, kind, value);
+			i = next;
+		}
+		else if (tok_is(ts, i, "overcommit") || tok_is(ts, i, "noovercommit"))
+		{
+			append_option(&arr, "cost_overcommit", 'i',
+						  tok_is(ts, i, "overcommit") ? "1" : "0");
+			i++;
+		}
+		else
+			break;
+	}
+
+	if (creating)
+	{
+		append_option(&arr, "withliststart", 0, NULL);
+		if (tok_is(ts, i, "with"))
+			i = definition_list(rw, i + 1, &arr);
+	}
+	else if (tok_is(ts, i, "with") || tok_is(ts, i, "without"))
+	{
+		append_option(&arr, "withliststart", 0, NULL);
+		if (tok_is(ts, i, "with"))
+			i = definition_list(rw, i + 1, &arr);
+		append_option(&arr, "withoutliststart", 0, NULL);
+		if (tok_is(ts, i, "without"))
+			i = definition_list(rw, i + 1, &arr);
+	}
+
+	if (i != rw->last)
+		rw_syntax_error(rw, i);
+
+	rw_whole(rw);
+	appendStringInfo(&rw->body, "CALL gp_resource.%s_resource_queue(%s, ARRAY[%s]::text[])",
+					 creating ? "create" : "alter", quote_literal_cstr(name),
+					 arr.data);
+	return true;
+}
+
+/*
+ * CREATE RESOURCE GROUP name WITH (...)
+ * ALTER RESOURCE GROUP name SET option value
+ * DROP RESOURCE GROUP name
+ *	 -> CALL gp_resource.create_resource_group('name', ARRAY[...]), and
+ *		alter_ and drop_
+ *
+ * ALTER takes one option, whose value is a signed integer but for CPUSET's
+ * and IO_LIMIT's, strings, as Cloudberry's grammar has it; anything else is
+ * its syntax error.
+ */
+static bool
+rw_resource_group(GpRewrite *rw)
+{
+	static const char *const int_options[] = {
+		"concurrency", "cpu_max_percent", "cpu_weight", "memory_quota",
+		"min_cost", NULL
+	};
+	const GpTokens *ts = rw->ts;
+	int			i = rw->first;
+	const char *verb;
+	char	   *name;
+	StringInfoData arr;
+
+	if (tok_is(ts, i, "create"))
+		verb = "create";
+	else if (tok_is(ts, i, "alter"))
+		verb = "alter";
+	else if (tok_is(ts, i, "drop"))
+		verb = "drop";
+	else
+		return false;
+	if (!tok_is(ts, i + 1, "resource") || !tok_is(ts, i + 2, "group"))
+		return false;
+	i += 3;
+	if (!tok_is_name(ts, i))
+		rw_syntax_error(rw, i);
+	name = tok_name(ts, i++);
+
+	initStringInfo(&arr);
+	if (strcmp(verb, "create") == 0)
+	{
+		if (!tok_is(ts, i, "with"))
+			rw_syntax_error(rw, i);
+		i = definition_list(rw, i + 1, &arr);
+	}
+	else if (strcmp(verb, "alter") == 0)
+	{
+		const char *option = NULL;
+
+		if (!tok_is(ts, i, "set"))
+			rw_syntax_error(rw, i);
+		i++;
+		for (int k = 0; int_options[k] != NULL; k++)
+		{
+			if (tok_is(ts, i, int_options[k]))
+				option = int_options[k];
+		}
+		if (option != NULL)
+		{
+			bool		negative = tok_is_char(ts, i + 1, '-');
+			int			v = i + 1 + (negative ? 1 : 0);
+
+			if (v >= rw->last || ts->toks[v].code != GP_ICONST)
+				rw_syntax_error(rw, v);
+			append_option(&arr, option, 'i',
+						  psprintf("%s%d", negative ? "-" : "", ts->toks[v].ival));
+			i = v + 1;
+		}
+		else if (tok_is(ts, i, "cpuset") || tok_is(ts, i, "io_limit"))
+		{
+			if (!tok_is_string(ts, i + 1))
+				rw_syntax_error(rw, i + 1);
+			append_option(&arr, tok_is(ts, i, "cpuset") ? "cpuset" : "io_limit",
+						  's', ts->toks[i + 1].str);
+			i += 2;
+		}
+		else
+			rw_syntax_error(rw, i);
+	}
+
+	if (i != rw->last)
+		rw_syntax_error(rw, i);
+
+	rw_whole(rw);
+	if (strcmp(verb, "drop") == 0)
+		appendStringInfo(&rw->body, "CALL gp_resource.drop_resource_group(%s)",
+						 quote_literal_cstr(name));
+	else
+		appendStringInfo(&rw->body, "CALL gp_resource.%s_resource_group(%s, ARRAY[%s]::text[])",
+						 verb, quote_literal_cstr(name), arr.data);
+	return true;
+}
+
+/*
+ * COMMENT ON RESOURCE QUEUE name IS 'text' | NULL, and RESOURCE GROUP's
+ *	 -> CALL gp_resource.comment_on_resource_queue('name', 'text')
+ *
+ * A comment is the definition's own: pg_shdescription has no class for it.
+ */
+static bool
+rw_comment_resource(GpRewrite *rw)
+{
+	const GpTokens *ts = rw->ts;
+	int			i = rw->first;
+	const char *kind;
+	const char *comment = NULL;
+
+	if (!tok_is(ts, i, "comment") || !tok_is(ts, i + 1, "on") ||
+		!tok_is(ts, i + 2, "resource"))
+		return false;
+	if (tok_is(ts, i + 3, "queue"))
+		kind = "queue";
+	else if (tok_is(ts, i + 3, "group"))
+		kind = "group";
+	else
+		return false;
+	if (!tok_is_name(ts, i + 4))
+		rw_syntax_error(rw, i + 4);
+	if (!tok_is(ts, i + 5, "is"))
+		rw_syntax_error(rw, i + 5);
+	if (tok_is_string(ts, i + 6))
+		comment = quote_literal_cstr(ts->toks[i + 6].str);
+	else if (tok_is(ts, i + 6, "null"))
+		comment = "NULL";
+	else
+		rw_syntax_error(rw, i + 6);
+	if (i + 7 != rw->last)
+		rw_syntax_error(rw, i + 7);
+
+	rw_whole(rw);
+	appendStringInfo(&rw->body, "CALL gp_resource.comment_on_resource_%s(%s, %s)",
+					 kind, quote_literal_cstr(tok_name(ts, i + 4)), comment);
 	return true;
 }
 
@@ -3552,6 +3898,46 @@ rw_role_exttable(GpRewrite *rw)
 	return did;
 }
 
+/*
+ * CREATE ROLE ... RESOURCE QUEUE q, RESOURCE GROUP g, and ALTER ROLE's, USER
+ * and GROUP alike
+ *	 -> the statement, carrying gp_resource.resource_queue = 'q' and
+ *		resource_group = 'g'
+ *
+ * Cloudberry's pg_authid keeps them in rolresqueue and rolresgroup; the port
+ * keeps them in the role's "gp" label, which gp_resource's ProcessUtility
+ * hook writes, taking the options off the statement first (resdefs.c).
+ */
+static bool
+rw_role_resource(GpRewrite *rw)
+{
+	const GpTokens *ts = rw->ts;
+	int			i = rw->first;
+	bool		did = false;
+
+	if (!(tok_is(ts, i, "create") || tok_is(ts, i, "alter")) ||
+		!(tok_is(ts, i + 1, "role") || tok_is(ts, i + 1, "user") ||
+		  tok_is(ts, i + 1, "group")) ||
+		!tok_is_name(ts, i + 2))
+		return false;
+
+	for (int j = i + 3; j + 1 < rw->last; j++)
+	{
+		if (!tok_is(ts, j, "resource") ||
+			!(tok_is(ts, j + 1, "queue") || tok_is(ts, j + 1, "group")))
+			continue;
+		if (j + 2 >= rw->last || !tok_is_name(ts, j + 2))
+			rw_syntax_error(rw, j + 2);
+		rw_add_carrier(rw, "gp_resource",
+					   tok_is(ts, j + 1, "queue") ? "resource_queue" : "resource_group",
+					   tok_name(ts, j + 2), ts->toks[j].off);
+		rw_edit(rw, ts->toks[j].off, tok_stop(ts, j + 2), "");
+		j += 2;
+		did = true;
+	}
+	return did;
+}
+
 /* ------------------------------------------------------------------------- */
 /* The classic partition clauses                                             */
 /* ------------------------------------------------------------------------- */
@@ -5095,7 +5481,9 @@ rw_statement_itself(GpRewrite *rw)
 	/* Statements PostgreSQL has no counterpart of: a CALL. */
 	if (rw_create_tag(rw) || rw_alter_tag(rw) || rw_drop_tag(rw) ||
 		rw_profile(rw) || rw_drop_profile(rw) ||
-		rw_task(rw) || rw_drop_task(rw) || rw_protocol(rw))
+		rw_task(rw) || rw_drop_task(rw) || rw_protocol(rw) ||
+		rw_resource_queue(rw) || rw_resource_group(rw) ||
+		rw_comment_resource(rw))
 		return;
 
 	/* ALTER USER ... PROFILE and the rest: ALTER USER, carrying it. */
@@ -5104,6 +5492,9 @@ rw_statement_itself(GpRewrite *rw)
 
 	/* [NO]CREATEEXTTABLE, carried the same way */
 	(void) rw_role_exttable(rw);
+
+	/* RESOURCE QUEUE and RESOURCE GROUP, carried for gp_resource */
+	(void) rw_role_resource(rw);
 
 	/* ALTER TYPE ... SET DEFAULT ENCODING: a label of gp_ao's. */
 	if (rw_alter_type_encoding(rw))
@@ -5389,6 +5780,15 @@ GpAttachCarriers(List *parsetree, List *carried)
 								strcmp(def->defname, "profile") == 0 ?
 								"a role's profile" : "locking an account"),
 						 errhint("Add \"gp_security\" to \"shared_preload_libraries\".")));
+			/* and a queue or a group is gp_resource's */
+			if (strcmp(def->defnamespace, "gp_resource") == 0 &&
+				*find_rendezvous_variable(CB_RESOURCE_RENDEZVOUS) == NULL)
+				ereport(ERROR,
+						(errcode(ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE),
+						 errmsg("a role's resource %s needs \"gp_resource\"",
+								strcmp(def->defname, "resource_queue") == 0 ?
+								"queue" : "group"),
+						 errhint("Add \"gp_resource\" to \"shared_preload_libraries\".")));
 		}
 
 		switch (nodeTag(target->stmt))

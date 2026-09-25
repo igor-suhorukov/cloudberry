@@ -24,5 +24,6 @@ comment = 'Resource groups, resource queues and memory protection'
 default_version = '1.0'
 module_pathname = '$libdir/gp_resource'
 relocatable = false
+schema = gp_resource
 requires = 'gp_core'
 superuser = true

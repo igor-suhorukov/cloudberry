@@ -413,8 +413,14 @@ modules = [
     'c_args': curl_dep.found() ? ['-DUSE_CURL'] : [],
   },
   {
-    'name': 'gp_resource', 'preload': false, 'extension': true, 'build': true,
-    'sources': files('modules/gp_resource/gp_resource.c'),
+    # Preloaded: shared memory for the queues and the groups, the hooks every
+    # statement goes through, and a label provider every backend that reads a
+    # definition needs.
+    'name': 'gp_resource', 'preload': true, 'extension': true, 'build': true,
+    'sources': files('modules/gp_resource/gp_resource.c',
+                     'modules/gp_resource/resdefs.c',
+                     'modules/gp_resource/resqueue.c',
+                     'modules/gp_resource/resgroup.c'),
   },
   {
     # Preloaded: it registers a background worker and the authentication hook,

@@ -50,6 +50,13 @@
 #define CB_SECURITY_RENDEZVOUS	"Cloudberry/gp_security"
 
 /*
+ * Set by gp_resource while it is preloaded, for the same reason: O26 carries
+ * a role's RESOURCE QUEUE and RESOURCE GROUP to its statement for
+ * gp_resource's hook to take out.
+ */
+#define CB_RESOURCE_RENDEZVOUS	"Cloudberry/gp_resource"
+
+/*
  * Refuse to load outside shared_preload_libraries.
  *
  * A module that registers a custom WAL resource manager, requests shared
