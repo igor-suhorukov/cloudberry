@@ -34,11 +34,17 @@
 # The builds are the ones without assertions, where the image has them
 # (PG_VANILLA_NOASSERT, PG_PATCHED_NOASSERT): no production server runs an
 # assertion's instructions, and they would thin out a hook's share.  Where
-# it has not, the builds the other checks run, and says so.  A workload
-# passes if the patched build's count is within CHECK9_THRESHOLD percent of
-# the vanilla build's, 0.5 by default: a threshold proposed with this check
-# (cloudberry.md, "Checking that the server stays vanilla"), which the
-# numbers it prints are for deciding.
+# it has not, the builds the other checks run, and says so.
+#
+# Two lines, decided 2026-09-25 (cloudberry.md, "Check 9's threshold"): a
+# workload fails if the patched build's count is more than CHECK9_THRESHOLD
+# percent from the vanilla build's, 0.5 by default -- wide enough for the two
+# builds' own differences in code layout -- and past CHECK9_REVIEW, 0.05 by
+# default, five times the widest noise, it passes only with a review written
+# down: a line of 09-reviewed names the workload, the patches that cost it
+# and where the review is, and this prints it beside the workload.  A
+# workload past the review line with no such line passes too, saying that
+# its review is owed.
 #
 # The workloads, and the insertion points they reach unused:
 #   select    pgbench -S's point query, 20,000 statements: each one's
@@ -55,6 +61,10 @@
 #             table access method registry's tests (O13-O19)
 #   plan      EXPLAIN of a six-way join, 300 times: the planner, O15's
 #             physical target list, O4's node labels
+#   alloc     100,000 values of 8 to 16 kB, each a block of its own in its
+#             context, as every palloc() over 8 kB is; a string grown past
+#             8 kB by realloc(); a sort's tuples in the blocks of a Bump
+#             context: each block taken and given back asks O25
 #
 set -u
 . "$(dirname "${BASH_SOURCE[0]}")/../lib.sh"
@@ -74,9 +84,11 @@ if [ -x "${PG_VANILLA_NOASSERT:-/nonexistent}/bin/postgres" ] &&
 	builds="the builds without assertions"
 fi
 threshold="${CHECK9_THRESHOLD:-0.5}"
+review="${CHECK9_REVIEW:-0.05}"
+reviewed="$(dirname "${BASH_SOURCE[0]}")/09-reviewed"
 PERF="$WORKDIR/perf"
 mkdir -p "$PERF"
-echo "  $builds: $vanilla, $patched; threshold $threshold%"
+echo "  $builds: $vanilla, $patched; threshold $threshold%, review line $review%"
 
 ###############################################################################
 # The data, loaded alike by each build
@@ -142,6 +154,10 @@ write("plan", ["EXPLAIN (COSTS OFF) SELECT j1.a, j6.f FROM j1 JOIN j2 ON j2.j1 =
                "JOIN j3 ON j3.j2 = j2.id JOIN j4 ON j4.j3 = j3.id JOIN j5 ON j5.j4 = j4.id "
                "JOIN j6 ON j6.j5 = j5.id WHERE j1.a < %d AND j6.f > %d" % (100 + i, i)
                for i in range(300)])
+write("alloc", ["SELECT sum(length(repeat('x', 8192 + g % 8192))) FROM generate_series(1, 100000) g",
+                "SELECT length(string_agg(repeat('y', 1000), ',')) FROM generate_series(1, 20000)",
+                "SELECT count(*) FROM (SELECT g, repeat('z', 64) AS t FROM generate_series(1, 100000) g "
+                "ORDER BY t DESC, g) s"])
 PY
 
 for b in vanilla patched; do
@@ -159,7 +175,7 @@ done
 ###############################################################################
 # The counts
 ###############################################################################
-workloads="select tpcb update combocid copy plan"
+workloads="select tpcb update combocid copy plan alloc"
 
 # measure <build> <workload> <run>: the backend's instructions, on a copy of
 # the build's data directory, into $PERF/<build>-<workload>-<run>.ir
@@ -213,26 +229,35 @@ for w in $workloads; do
 		notok "the $w workload runs" "$bad"
 		continue
 	fi
-	line=$(python3 - "$threshold" \
+	line=$(python3 - "$threshold" "$review" \
 		"$(ir vanilla "$w" 1)" "$(ir vanilla "$w" 2)" "$(ir vanilla empty 1)" "$(ir vanilla empty 2)" \
 		"$(ir patched "$w" 1)" "$(ir patched "$w" 2)" "$(ir patched empty 1)" "$(ir patched empty 2)" <<'PY'
 import sys
 t = float(sys.argv[1])
-v1, v2, ve1, ve2, p1, p2, pe1, pe2 = map(int, sys.argv[2:])
+r = float(sys.argv[2])
+v1, v2, ve1, ve2, p1, p2, pe1, pe2 = map(int, sys.argv[3:])
 v = [v1 - ve1, v2 - ve2]
 p = [p1 - pe1, p2 - pe2]
 vm, pm = sum(v) / 2, sum(p) / 2
 delta = 100.0 * (pm - vm) / vm
 noise = 100.0 * max(abs(v[0] - v[1]) / vm, abs(p[0] - p[1]) / pm)
-print("%d %d %+.3f %.3f %s" % (vm, pm, delta, noise, "ok" if abs(delta) <= t else "notok"))
+print("%d %d %+.3f %.3f %s %s" % (vm, pm, delta, noise, "ok" if abs(delta) <= t else "notok",
+                                 "past" if abs(delta) > r else "within"))
 PY
 	)
-	read -r vm pm delta noise verdict <<< "$line"
+	read -r vm pm delta noise verdict line_review <<< "$line"
 	printf '           %-9s %15s %15s %7s%% %6s%%\n' "$w" "$vm" "$pm" "$delta" "$noise"
 	if [ "$verdict" = ok ]; then
 		ok "$w: the patched build within $threshold% of vanilla's instructions ($delta%)"
 	else
 		notok "$w: the patched build within $threshold% of vanilla's instructions" \
 			"$delta%, the noise $noise%"
+	fi
+	[ "$line_review" = past ] || continue
+	why=$(awk -v w="$w" '$1 == w { sub(/^[^ \t]+[ \t]+/, ""); print; exit }' "$reviewed" 2>/dev/null)
+	if [ -n "$why" ]; then
+		printf '  review %s\n' "$w: $delta% is past the review line, $review%, and reviewed: $why"
+	else
+		printf '  review %s\n' "$w: $delta% is past the review line, $review%, and no review is written down: one is owed in 09-reviewed and cloudberry.md (\"Check 9's threshold\")"
 	fi
 done
