@@ -285,6 +285,7 @@ typedef struct GpSegmentError
 	char	   *message;
 	char	   *detail;
 	char	   *hint;
+	char	   *context;
 } GpSegmentError;
 
 /* A statement whose slices run at once: the readers running them. */
@@ -1017,6 +1018,8 @@ collect_error(List **errors, int content, PGresult *res, PGconn *conn,
 	err->detail = field ? pstrdup(field) : NULL;
 	field = res ? PQresultErrorField(res, PG_DIAG_MESSAGE_HINT) : NULL;
 	err->hint = field ? pstrdup(field) : NULL;
+	field = res ? PQresultErrorField(res, PG_DIAG_CONTEXT) : NULL;
+	err->context = field ? pstrdup(field) : NULL;
 
 	*errors = lappend(*errors, err);
 }
@@ -1028,7 +1031,9 @@ collect_error(List **errors, int content, PGresult *res, PGconn *conn,
  * unique violation on a segment is a unique violation here; the segment it came
  * from is in the detail, as Cloudberry puts "(seg0 host:port)" in its own.  The
  * rest are counted, because a statement that fails on one segment usually fails
- * on all of them and repeating it three times helps nobody.
+ * on all of them and repeating it three times helps nobody.  Where it failed
+ * there -- an external table's line, a function's -- comes first in the
+ * context, before where the statement was here, as Cloudberry's does.
  */
 static void
 raise_segment_errors(List *errors)
@@ -1082,7 +1087,8 @@ raise_segment_errors(List *errors)
 			 : ERRCODE_INTERNAL_ERROR),
 			 errmsg("%s", first->message),
 			 errdetail_internal("%s", detail.data),
-			 first->hint ? errhint("%s", first->hint) : 0));
+			 first->hint ? errhint("%s", first->hint) : 0,
+			 first->context ? errcontext("%s", first->context) : 0));
 }
 
 /*

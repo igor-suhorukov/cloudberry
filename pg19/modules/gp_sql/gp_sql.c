@@ -1178,6 +1178,45 @@ execute_as_query(ExecuteStmt *stmt, const char *queryString)
 }
 
 /*
+ * An error of the INSERT that fills a CREATE TABLE AS's table, raised again
+ * without the line SPI adds to its context for it: the statement is the
+ * CREATE TABLE AS, and not an INSERT nobody wrote, as Cloudberry, which
+ * fills the table itself, reports it.  The line is found by the INSERT's
+ * text, quoted, whatever language it is in.
+ */
+static void
+rethrow_without_insert(const char *sql, MemoryContext cxt)
+{
+	ErrorData  *edata;
+	char	   *quoted;
+	char	   *at;
+
+	MemoryContextSwitchTo(cxt);
+	edata = CopyErrorData();
+	FlushErrorState();
+	quoted = psprintf("\"%s\"", sql);
+
+	if (edata->context != NULL && (at = strstr(edata->context, quoted)) != NULL)
+	{
+		char	   *start = at;
+		char	   *end = at + strlen(quoted);
+
+		while (start > edata->context && start[-1] != '\n')
+			start--;
+		while (*end != '\0' && *end != '\n')
+			end++;
+		if (*end == '\n')
+			end++;
+		else if (start > edata->context)
+			start--;			/* the last line: the newline before it goes */
+		memmove(start, end, strlen(end) + 1);
+		if (edata->context[0] == '\0')
+			edata->context = NULL;
+	}
+	ReThrowError(edata);
+}
+
+/*
  * CREATE TABLE AS, and SELECT INTO, on a cluster's coordinator: see where it
  * is called.  The rows are the query's, deparsed as ruleutils deparses a
  * view: the query was analyzed here, and the INSERT is analyzed again from
@@ -1245,8 +1284,20 @@ gp_sql_cluster_ctas(PlannedStmt *pstmt, const char *queryString,
 
 	if (SPI_connect() != SPI_OK_CONNECT)
 		elog(ERROR, "SPI_connect failed");
-	if (SPI_execute(sql, false, 0) != SPI_OK_INSERT)
-		elog(ERROR, "could not fill the table CREATE TABLE AS made");
+	{
+		MemoryContext cxt = CurrentMemoryContext;
+
+		PG_TRY();
+		{
+			if (SPI_execute(sql, false, 0) != SPI_OK_INSERT)
+				elog(ERROR, "could not fill the table CREATE TABLE AS made");
+		}
+		PG_CATCH();
+		{
+			rethrow_without_insert(sql, cxt);
+		}
+		PG_END_TRY();
+	}
 	processed = SPI_processed;
 	SPI_finish();
 
