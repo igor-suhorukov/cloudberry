@@ -509,7 +509,10 @@ distributed_sample_rows(Relation rel, int elevel, HeapTuple *rows, int targrows,
 
 /*
  * O3's hook: a distributed table is sampled on the segments, and its pages
- * are the segments' pages together.
+ * are the segments' pages together: their bytes rounded up to pages, as
+ * Cloudberry's AcquireNumberOfBlocks() rounds them.  An append-optimized or
+ * PAX table's files are no whole pages, and a small one rounded down would
+ * be counted as none, which the planner takes for a table never analyzed.
  */
 static bool
 gp_analyze_sample_rows(Relation relation, AnalyzeSampleRowsFunc *func,
@@ -559,7 +562,7 @@ gp_analyze_sample_rows(Relation relation, AnalyzeSampleRowsFunc *func,
 		if (sizes[i] != NULL)
 			bytes += strtod(sizes[i], NULL);
 
-	*totalpages = (BlockNumber) Min(bytes / BLCKSZ, (double) MaxBlockNumber);
+	*totalpages = (BlockNumber) Min(ceil(bytes / BLCKSZ), (double) MaxBlockNumber);
 	*func = distributed_sample_rows;
 	return true;
 }

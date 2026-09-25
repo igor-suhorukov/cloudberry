@@ -70,6 +70,8 @@
  */
 #include "postgres.h"
 
+#include <math.h>
+
 #include "access/htup_details.h"
 #include "access/sysattr.h"
 #include "access/table.h"
@@ -91,10 +93,12 @@
 #include "optimizer/optimizer.h"
 #include "optimizer/pathnode.h"
 #include "optimizer/paths.h"
+#include "optimizer/plancat.h"
 #include "optimizer/planmain.h"
 #include "optimizer/restrictinfo.h"
 #include "parser/parsetree.h"
 #include "rewrite/rewriteManip.h"
+#include "storage/bufpage.h"
 #include "utils/array.h"
 #include "utils/builtins.h"
 #include "utils/datum.h"
@@ -808,7 +812,18 @@ GpScanDirectDispatchContents(Oid relid, Node *quals, Index varno)
  * by the pages the table has now, and the coordinator's copy has none, so a
  * table ANALYZE has counted would be estimated at no rows at all.  What
  * ANALYZE wrote is the size across the segments (gp_analyze.c), and is taken
- * as it stands.  A table never analyzed keeps the planner's own guess.
+ * as it stands.
+ *
+ * A table never analyzed keeps the planner's own guess, which for a heap
+ * table is PostgreSQL's for one never vacuumed: ten pages of rows as wide as
+ * its columns (table_block_relation_estimate_size()).  An append-optimized
+ * or PAX table's method counts its own files instead, of which the
+ * coordinator has none, and says no rows: a join of two such tables would
+ * be a nested loop that runs its inner scan on the segments again for each
+ * outer row.  It is guessed at as a heap table is, as Cloudberry guesses at
+ * every distributed table alike (cdb_estimate_rel_size()): not through
+ * table_block_relation_estimate_size() itself, which reads a fillfactor
+ * from options that are the method's own.
  */
 static void
 gp_build_simple_rel(PlannerInfo *root, RelOptInfo *rel, RangeTblEntry *rte)
@@ -836,6 +851,20 @@ gp_build_simple_rel(PlannerInfo *root, RelOptInfo *rel, RangeTblEntry *rte)
 		rel->tuples = classForm->reltuples;
 		rel->allvisfrac = Min(1.0, (double) classForm->relallvisible /
 							  classForm->relpages);
+	}
+	else if (classForm->reltuples < 0 && !classForm->relhassubclass &&
+			 rel->tuples <= 0)
+	{
+		int32		width;
+
+		width = get_relation_data_width(rte->relid,
+										rel->attr_widths - rel->min_attr);
+		width += MAXALIGN(SizeofHeapTupleHeader) + sizeof(ItemIdData);
+		rel->pages = 10;
+		/* integer division, as the heap's */
+		rel->tuples = rint(clamp_row_est((BLCKSZ - SizeOfPageHeaderData) / width) *
+						   rel->pages);
+		rel->allvisfrac = 0;
 	}
 	ReleaseSysCache(tuple);
 }
