@@ -656,6 +656,27 @@ if get_option('hook_tests')
   )
   built_modules += 'cb_regress (test only)'
 
+  # An OAuth validator and a client that logs in with a token, for the
+  # security suite's OAuth logins: PostgreSQL 19's own, of its
+  # oauth_validator test module, are not installed with the server.
+  shared_module('gp_oauth_probe', files('test/security/gp_oauth_probe.c'),
+    c_args: mod_c_args,
+    link_args: mod_link_args,
+    include_directories: [pg_inc, cb_inc],
+    name_prefix: '',
+    install: true,
+    install_dir: pg_pkglibdir,
+  )
+  executable('gp_oauth_client', files('test/security/gp_oauth_client.c'),
+    include_directories: [pg_client_inc],
+    dependencies: [libpq_dep],
+    build_rpath: pg_libdir,
+    install_rpath: pg_libdir,
+    install: true,
+    install_dir: pg['bindir'],
+  )
+  built_modules += 'gp_oauth_probe and gp_oauth_client (test only)'
+
   # A storage handler for the storage and cluster suites: a directory stands
   # for the store, and credentials a user mapping gives are asked for.
   shared_module('gp_storage_probe', files('test/storage/gp_storage_probe.c'),

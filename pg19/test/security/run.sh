@@ -22,8 +22,8 @@
 # Cloudberry keeps all of this in three shared catalogs, seven pg_authid
 # columns and a pair of postmaster children.  Here it is shared security
 # labels, a table nobody may read, and one background worker -- so these tests
-# log in for real, over a socket that asks for a password, and ask whether the
-# same things are refused.
+# log in for real, over a socket that asks for a password or an OAuth token,
+# and ask whether the same things are refused.
 #
 #   PG_BINDIR=/path/to/patched/pg19/bin pg19/test/security/run.sh
 #
@@ -81,6 +81,12 @@ echo "password profiles: shared labels, a revoked table and one worker"
 echo "  bindir $BINDIR"
 echo
 
+# The OAuth validator and client of the port's tests, where they are built
+# (meson's hook_tests); the OAuth checks are skipped where they are not.
+PKGLIB="$("$BINDIR/pg_config" --pkglibdir)"
+OAUTH=
+[ -f "$PKGLIB/gp_oauth_probe.so" ] && [ -x "$BINDIR/gp_oauth_client" ] && OAUTH=1
+
 "$BINDIR/initdb" -D "$WORK/data" -N --locale=C --encoding=UTF8 -U postgres \
 	> "$WORK/initdb.log" 2>&1 \
 	|| { echo "initdb failed"; tail -20 "$WORK/initdb.log"; exit 1; }
@@ -94,10 +100,13 @@ echo
 	echo "password_encryption = 'scram-sha-256'"
 	# the secret a dispatcher's connection proves itself with (section 9)
 	echo "gp.cluster_secret = 'security-suite-secret-0123456789'"
+	[ -n "$OAUTH" ] && echo "oauth_validator_libraries = 'gp_oauth_probe'"
 } >> "$WORK/data/postgresql.conf"
-# A socket that asks for a password, so that a failed login is a real one.
+# A socket that asks for a password, so that a failed login is a real one --
+# and for oscar a token, which gp_oauth_probe takes if it is "good".
 {
 	echo "local all postgres trust"
+	[ -n "$OAUTH" ] && echo 'local all oscar oauth issuer="https://256.256.256.256" scope="openid"'
 	echo "local all all scram-sha-256"
 } > "$WORK/data/pg_hba.conf"
 "$BINDIR/pg_ctl" -D "$WORK/data" -l "$WORK/log" -w -t 60 start > /dev/null 2>&1 \
@@ -375,7 +384,51 @@ case "$("$BINDIR/pg_dumpall" -U postgres --roles-only 2>&1 | grep "ON ROLE dora"
 esac
 
 ###############################################################################
-echo "10. with the feature off, nothing is enforced"
+echo "10. what is not a failed login"
+###############################################################################
+# psql -w: a password asked for and none given, which libpq answers by
+# hanging up -- as it does before it asks its user for one.
+q "SELECT gp_security.unlock_role('alice');" > /dev/null
+for i in 1 2 3 4 5; do
+	PGPASSWORD= "$PSQL" -X -w -q -d postgres -U alice -c "SELECT 1" > /dev/null 2>&1
+done
+is "a client that hangs up is not counted" "SELECT gp_security.role_failed_logins('alice');" "0"
+login alice wrong-pass > /dev/null
+is "a wrong password still is" "SELECT gp_security.role_failed_logins('alice');" "1"
+q "SELECT gp_security.unlock_role('alice');" > /dev/null
+if [ -z "$OAUTH" ]; then
+	echo "  skip   OAuth logins: gp_oauth_probe and gp_oauth_client are not built (meson's hook_tests)"
+else
+	q "CALL gp_security.create_profile('three', failed_login_attempts => 3);
+	   CREATE ROLE oscar LOGIN;
+	   SELECT gp_security.assign_profile('oscar', 'three');" > /dev/null
+	issuer="host=$SOCK port=$PORT dbname=postgres user=oscar oauth_issuer=https://256.256.256.256 oauth_client_id=suite"
+	# psql has no token: libpq's discovery round trip, then it gives up
+	for i in 1 2 3 4; do
+		PGOAUTHDEBUG=UNSAFE "$PSQL" -X -d "$issuer" -c "SELECT 1" > /dev/null 2>&1
+	done
+	is "OAuth's discovery round trip is not counted" \
+	   "SELECT gp_security.role_failed_logins('oscar');" "0"
+	out=$(PGOAUTHDEBUG=UNSAFE "$BINDIR/gp_oauth_client" good "$issuer" 2>&1)
+	[ "$out" = "ok" ] && ok "a good token logs in, after its discovery" \
+		|| notok "a good token logs in" "$out"
+	PGOAUTHDEBUG=UNSAFE "$BINDIR/gp_oauth_client" bad "$issuer" > /dev/null 2>&1
+	sleep 0.5
+	is "a refused token is counted, once, its discovery not" \
+	   "SELECT gp_security.role_failed_logins('oscar');" "1"
+	for i in 1 2; do
+		PGOAUTHDEBUG=UNSAFE "$BINDIR/gp_oauth_client" bad "$issuer" > /dev/null 2>&1
+	done
+	sleep 0.5
+	case "$(PGOAUTHDEBUG=UNSAFE "$BINDIR/gp_oauth_client" good "$issuer" 2>&1)" in
+		*"is locked"*) ok "and as many as the profile allows lock the role" ;;
+		*) notok "three refused tokens lock oscar" \
+		         "$(PGOAUTHDEBUG=UNSAFE "$BINDIR/gp_oauth_client" good "$issuer" 2>&1)" ;;
+	esac
+fi
+
+###############################################################################
+echo "11. with the feature off, nothing is enforced"
 ###############################################################################
 "$BINDIR/pg_ctl" -D "$WORK/data" -m fast -w -t 60 stop > /dev/null 2>&1
 sed -i "s/^gp.enable_password_profile = on/gp.enable_password_profile = off/" \
@@ -385,7 +438,7 @@ isl "a password that was refused is now accepted" \
    "ALTER ROLE alice PASSWORD 'first-pass';
     SELECT 'accepted';" "accepted"
 is "and the profiles are still there, waiting to be turned back on" \
-   "SELECT count(*) FROM gp_security.profiles;" "2"
+   "SELECT count(*) FROM gp_security.profiles;" "$([ -n "$OAUTH" ] && echo 3 || echo 2)"
 case "$(login dora dora-pass)" in
 	*"login not permitted at this time"*) notok "a DENY window is not a profile's" "it refused" ;;
 	*) ;;

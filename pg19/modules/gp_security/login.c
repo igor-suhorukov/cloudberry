@@ -41,6 +41,12 @@
  * label.  It also keeps Cloudberry's message, which "Profiles, login monitor
  * and login restrictions" expected to lose.
  *
+ * What is not a failed login.  A client that hangs up has said nothing:
+ * libpq does that before it asks its user for a password, which PostgreSQL
+ * does not even log.  And OAuth's discovery round trip, the connection a
+ * client without a token makes to be told where to get one, fails at the
+ * server as a login does, but tells only the client: see login_defer().
+ *
  * Cloudberry sources this file is made of:
  *	  src/backend/postmaster/loginmonitor.c, and the profile and DENY code of
  *	  auth.c and postinit.c
@@ -54,6 +60,7 @@
 #include "catalog/pg_authid.h"
 #include "commands/seclabel.h"
 #include "libpq/auth.h"
+#include "libpq/hba.h"
 #include "libpq/libpq-be.h"
 #include "miscadmin.h"
 #include "pgstat.h"
@@ -354,6 +361,102 @@ login_check_deny(Port *port)
 }
 
 /*
+ * A failed attempt, st being the role's state before it.  Nothing is counted
+ * unless the profile says how many are too many, which is what Cloudberry's
+ * FAILED_LOGIN_ATTEMPTS does.
+ */
+static void
+login_count_failure(Oid roleid, const char *user, int failed_login_attempts,
+					int password_lock_time, GpLoginState *st, TimestampTz now)
+{
+	if (failed_login_attempts <= 0)
+		return;
+
+	st->failed_logins++;
+
+	if (st->failed_logins >= failed_login_attempts)
+	{
+		/*
+		 * PASSWORD_LOCK_TIME says for how long.  Left unset it means until an
+		 * administrator unlocks the account, which is the safe reading.
+		 */
+		if (password_lock_time > 0)
+			st->locked_until = TimestampTzPlusMilliseconds(now,
+														   (int64) password_lock_time *
+														   86400 * 1000);
+		else
+			st->locked_until = DT_NOEND;
+
+		st->failed_logins = 0;
+
+		ereport(LOG,
+				(errmsg("locking role \"%s\": %d failed login attempts",
+						user, failed_login_attempts)));
+	}
+
+	GpLoginStateSet(roleid, st);
+}
+
+/*
+ * OAuth's discovery round trip.  A client with no token yet connects once to
+ * be told where to get one, and the server fails that login -- to this hook
+ * as it fails any, STATUS_ERROR -- but tells only the client: auth_failed()
+ * reports it at FATAL_CLIENT_ONLY, which never reaches the server's log,
+ * where a token that is refused is reported at FATAL.  Nothing else the hook
+ * is given tells the two apart, so an OAuth failure is counted as the
+ * backend exits, and only if the FATAL that ends it went to the log, which
+ * emit_log_hook sees.  A server that logs nothing below PANIC counts no
+ * OAuth failure.
+ *
+ * What is counted is worked out in the hook, where the role's state may be
+ * read from its label, and only stored at exit, which reads no catalog.
+ */
+static bool deferred = false;
+static bool deferred_logged = false;
+static Oid	deferred_role = InvalidOid;
+static char *deferred_user = NULL;
+static int	deferred_attempts = 0;
+static int	deferred_lock_time = 0;
+static GpLoginState deferred_state;
+static TimestampTz deferred_now = 0;
+static emit_log_hook_type prev_emit_log_hook = NULL;
+
+static void
+login_emit_log(ErrorData *edata)
+{
+	if (deferred && edata->elevel == FATAL)
+		deferred_logged = true;
+	if (prev_emit_log_hook)
+		prev_emit_log_hook(edata);
+}
+
+static void
+login_count_deferred(int code, Datum arg)
+{
+	if (!deferred || !deferred_logged)
+		return;
+	deferred = false;
+	login_count_failure(deferred_role, deferred_user, deferred_attempts,
+						deferred_lock_time, &deferred_state, deferred_now);
+}
+
+static void
+login_defer(Oid roleid, const char *user, const GpProfile *profile)
+{
+	deferred_role = roleid;
+	deferred_user = MemoryContextStrdup(TopMemoryContext, user);
+	deferred_attempts = profile->failed_login_attempts;
+	deferred_lock_time = profile->password_lock_time;
+	deferred_now = GetCurrentTimestamp();
+	GpLoginStateGet(roleid, &deferred_state);
+
+	prev_emit_log_hook = emit_log_hook;
+	emit_log_hook = login_emit_log;
+	before_shmem_exit(login_count_deferred, (Datum) 0);
+	deferred = true;
+}
+
+/*
  * Every authentication comes through here, successful or not.
  */
 static void
@@ -367,7 +470,11 @@ gp_security_ClientAuthentication(Port *port, int status)
 	if (prev_ClientAuthentication)
 		prev_ClientAuthentication(port, status);
 
-	if (port->user_name == NULL)
+	/*
+	 * A client that hung up: libpq does that before it asks for a password,
+	 * which is no attempt at all.
+	 */
+	if (port->user_name == NULL || status == STATUS_EOF)
 		return;
 
 	if (status == STATUS_OK)
@@ -383,6 +490,13 @@ gp_security_ClientAuthentication(Port *port, int status)
 	/* A role with no profile is held to nothing. */
 	if (!GpProfileForRole(roleid, &profile))
 		return;
+
+	if (status != STATUS_OK && port->hba != NULL &&
+		port->hba->auth_method == uaOAuth)
+	{
+		login_defer(roleid, port->user_name, &profile);
+		return;
+	}
 
 	now = GetCurrentTimestamp();
 	GpLoginStateGet(roleid, &st);
@@ -417,36 +531,8 @@ gp_security_ClientAuthentication(Port *port, int status)
 		return;
 	}
 
-	/*
-	 * A failed attempt.  Nothing is counted unless the profile says how many
-	 * are too many, which is what Cloudberry's FAILED_LOGIN_ATTEMPTS does.
-	 */
-	if (profile.failed_login_attempts <= 0)
-		return;
-
-	st.failed_logins++;
-
-	if (st.failed_logins >= profile.failed_login_attempts)
-	{
-		/*
-		 * PASSWORD_LOCK_TIME says for how long.  Left unset it means until an
-		 * administrator unlocks the account, which is the safe reading.
-		 */
-		if (profile.password_lock_time > 0)
-			st.locked_until = TimestampTzPlusMilliseconds(now,
-														  (int64) profile.password_lock_time *
-														  86400 * 1000);
-		else
-			st.locked_until = DT_NOEND;
-
-		st.failed_logins = 0;
-
-		ereport(LOG,
-				(errmsg("locking role \"%s\": %d failed login attempts",
-						port->user_name, profile.failed_login_attempts)));
-	}
-
-	GpLoginStateSet(roleid, &st);
+	login_count_failure(roleid, port->user_name, profile.failed_login_attempts,
+						profile.password_lock_time, &st, now);
 }
 
 void
