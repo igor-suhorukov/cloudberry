@@ -1648,8 +1648,13 @@ reader_connect(GpGang *g, int content)
 	values[n++] = portbuf;
 	keywords[n] = "dbname";
 	values[n++] = get_database_name(MyDatabaseId);
+	/*
+	 * The user its writer connected as, who the writer's session is: the
+	 * session's, until a SET SESSION AUTHORIZATION, which leaves the gang
+	 * as it is (gp_share.c checks that a reader's is its writer's).
+	 */
 	keywords[n] = "user";
-	values[n++] = GetUserNameFromId(GetSessionUserId(), false);
+	values[n++] = gang_username;
 	keywords[n] = "application_name";
 	values[n++] = "cloudberry reader";
 	keywords[n] = "client_encoding";
