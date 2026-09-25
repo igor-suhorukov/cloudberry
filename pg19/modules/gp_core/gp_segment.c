@@ -63,10 +63,15 @@
  * gp_internal.segment_query() with the query's text, printed as ruleutils
  * prints it, and each segment reads its own rows of the relation; what the
  * query does with the rows -- ORDER BY, DISTINCT, LIMIT -- is done here, as
- * Cloudberry does it above its Gather Motion.  A query that uses a sequence
- * stays on the coordinator, where the port's sequences are; so does one that
- * needs something only the coordinator has: an outer query's column, a
- * parameter, a subquery; and one that aggregates.
+ * Cloudberry does it above its Gather Motion.  So is what Cloudberry
+ * evaluates on the coordinator for the segments: a parameter -- a PL/pgSQL
+ * variable, say -- and a subquery of the query's own, which the segments'
+ * text names as $1, $2, ..., and gp_internal.segment_query() is given as
+ * its further arguments, so that the planner makes them initplans, as
+ * Cloudberry's does, and the call sends their values.  A query that uses a
+ * sequence stays on the coordinator, where the port's sequences are; so does
+ * one that aggregates, and one with a column of an outer query or a
+ * subquery that reads the row, which only the coordinator could answer.
  *
  * pg_catalog.pg_locks has Cloudberry's three columns the same way, where
  * PostgreSQL 19's view has none of them: gp_segment_id, segment_of() of its
@@ -181,6 +186,7 @@ static Oid	lock_writer_oid = InvalidOid;
 static Oid	pg_stat_activity_oid = InvalidOid;
 static Oid	activity_session_oid = InvalidOid;
 static Oid	segment_query_oid = InvalidOid;
+static Oid	segment_query_values_oid = InvalidOid;
 
 static void
 invalidate_func_oids(Datum arg, SysCacheIdentifier cacheid, uint32 hashvalue)
@@ -194,7 +200,8 @@ invalidate_func_oids(Datum arg, SysCacheIdentifier cacheid, uint32 hashvalue)
  * ORCA's metadata asks for segment_of() for every relation it reads.
  */
 static Oid
-lookup_func(const char *schema, const char *name, Oid argtype)
+lookup_func_args(const char *schema, const char *name, const Oid *argtypes,
+				 int nargs)
 {
 	Oid			nsp = get_namespace_oid(schema, true);
 
@@ -202,8 +209,14 @@ lookup_func(const char *schema, const char *name, Oid argtype)
 		return InvalidOid;
 	return GetSysCacheOid3(PROCNAMEARGSNSP, Anum_pg_proc_oid,
 						   CStringGetDatum(name),
-						   PointerGetDatum(buildoidvector(&argtype, 1)),
+						   PointerGetDatum(buildoidvector(argtypes, nargs)),
 						   ObjectIdGetDatum(nsp));
+}
+
+static Oid
+lookup_func(const char *schema, const char *name, Oid argtype)
+{
+	return lookup_func_args(schema, name, &argtype, 1);
 }
 
 static void
@@ -217,6 +230,8 @@ lookup_func_oids(void)
 										   "dist_random_segments",
 										   ANYELEMENTOID);
 	segment_query_oid = lookup_func("gp_internal", "segment_query", TEXTOID);
+	segment_query_values_oid = lookup_func_args("gp_internal", "segment_query",
+												(Oid[]) {TEXTOID, ANYOID}, 2);
 	pg_locks_oid = get_relname_relid("pg_locks", PG_CATALOG_NAMESPACE);
 	lock_session_oid = lock_writer_oid = InvalidOid;
 	if (OidIsValid(pg_locks_oid))
@@ -1056,10 +1071,33 @@ gp_segment_object_access(ObjectAccessType access, Oid classId, Oid objectId,
 /* ------------------------------------------------------------------------- */
 
 /*
+ * A value the coordinator evaluates for the segments: a parameter, or a
+ * subquery of a value's kind -- EXPR or ARRAY, whose test reads nothing of
+ * the row -- that reads nothing of the query it is in, nor of one outside.
+ */
+static bool
+carried_value(Node *node)
+{
+	if (IsA(node, Param))
+		return ((Param *) node)->paramkind == PARAM_EXTERN;
+	if (IsA(node, SubLink))
+	{
+		SubLink    *sublink = (SubLink *) node;
+		Oid			type = exprType(node);
+
+		return (sublink->subLinkType == EXPR_SUBLINK ||
+				sublink->subLinkType == ARRAY_SUBLINK) &&
+			!contain_vars_of_level(sublink->subselect, 1) &&
+			type != RECORDOID && get_typtype(type) != TYPTYPE_PSEUDO;
+	}
+	return false;
+}
+
+/*
  * Is there something in the expression that only the coordinator can
  * answer: a sequence, which the port keeps there; a column of an outer
- * query, or a parameter; or a subquery or an aggregate, which a query of
- * this shape does not have anyway?
+ * query, or a subquery that is not a value to carry (above); or an
+ * aggregate, which a query of this shape does not have anyway?
  */
 static bool
 coordinator_only_walker(Node *node, void *context)
@@ -1068,8 +1106,9 @@ coordinator_only_walker(Node *node, void *context)
 		return false;
 	if (IsA(node, Var))
 		return ((Var *) node)->varlevelsup > 0;
-	if (IsA(node, Param) || IsA(node, SubLink) || IsA(node, Aggref) ||
-		IsA(node, GroupingFunc) || IsA(node, WindowFunc) ||
+	if (IsA(node, Param) || IsA(node, SubLink))
+		return !carried_value(node);
+	if (IsA(node, Aggref) || IsA(node, GroupingFunc) || IsA(node, WindowFunc) ||
 		IsA(node, NextValueExpr))
 		return true;
 	if (IsA(node, FuncExpr))
@@ -1104,7 +1143,7 @@ dist_random_pushable(Query *q)
 	if (q->commandType != CMD_SELECT || q->utilityStmt != NULL ||
 		q->setOperations != NULL || q->cteList != NIL || q->hasRecursive ||
 		q->hasModifyingCTE || q->hasAggs || q->hasWindowFuncs ||
-		q->hasSubLinks || q->hasForUpdate || q->rowMarks != NIL ||
+		q->hasForUpdate || q->rowMarks != NIL ||
 		q->groupClause != NIL || q->groupingSets != NIL ||
 		q->havingQual != NULL || q->windowClause != NIL ||
 		q->limitOption == LIMIT_OPTION_WITH_TIES)
@@ -1131,11 +1170,13 @@ dist_random_pushable(Query *q)
 		coordinator_only_walker(q->jointree->quals, NULL))
 		return false;
 
+	/* void, what a function called for what it does answers, travels too */
 	foreach_node(TargetEntry, tle, q->targetList)
 	{
 		Oid			type = exprType((Node *) tle->expr);
 
-		if (type == RECORDOID || get_typtype(type) == TYPTYPE_PSEUDO ||
+		if (type == RECORDOID ||
+			(get_typtype(type) == TYPTYPE_PSEUDO && type != VOIDOID) ||
 			GpTransferType(type) != type)
 			return false;
 	}
@@ -1143,12 +1184,43 @@ dist_random_pushable(Query *q)
 }
 
 /*
+ * The values the coordinator evaluates for the segments, taken out of the
+ * query the segments are sent, each made the parameter $n of it, in order.
+ */
+typedef struct CarryContext
+{
+	List	   *values;			/* of Node *, the expressions */
+} CarryContext;
+
+static Node *
+carry_mutator(Node *node, CarryContext *context)
+{
+	if (node == NULL)
+		return NULL;
+	if ((IsA(node, Param) || IsA(node, SubLink)) && carried_value(node))
+	{
+		Param	   *param = makeNode(Param);
+
+		context->values = lappend(context->values, copyObject(node));
+		param->paramkind = PARAM_EXTERN;
+		param->paramid = list_length(context->values);
+		param->paramtype = exprType(node);
+		param->paramtypmod = exprTypmod(node);
+		param->paramcollid = exprCollation(node);
+		param->location = -1;
+		return (Node *) param;
+	}
+	return expression_tree_mutator(node, carry_mutator, context);
+}
+
+/*
  * Make q, which dist_random_pushable() took, a query of the rows its text
- * gives on every segment: gp_internal.segment_query(text) with a column
+ * gives on every segment: gp_internal.segment_query(text, ...) with a column
  * definition list of q's target list, and the same target list over it,
  * ordered, made distinct and limited here.  What the segments are sent is
  * the target list whole -- what ORDER BY alone names too -- and the
- * condition.
+ * condition, with the values carried (carry_mutator()) the call's further
+ * arguments.
  */
 static void
 dist_random_push(Query *q)
@@ -1164,6 +1236,11 @@ dist_random_push(Query *q)
 	List	   *tlist = NIL;
 	int			n = 0;
 
+	CarryContext carry = {NIL};
+
+	sent->targetList = (List *) carry_mutator((Node *) sent->targetList, &carry);
+	sent->jointree->quals = carry_mutator(sent->jointree->quals, &carry);
+	sent->hasSubLinks = false;
 	sent->sortClause = NIL;
 	sent->distinctClause = NIL;
 	sent->hasDistinctOn = false;
@@ -1200,10 +1277,14 @@ dist_random_push(Query *q)
 		tlist = lappend(tlist, copy);
 	}
 
-	call = makeFuncExpr(segment_query_oid, RECORDOID,
-						list_make1(makeConst(TEXTOID, -1, DEFAULT_COLLATION_OID,
-											 -1, CStringGetTextDatum(sql),
-											 false, false)),
+	/* the text alone, or the text and the values its $n are */
+	call = makeFuncExpr(carry.values != NIL ?
+						segment_query_values_oid : segment_query_oid,
+						RECORDOID,
+						lcons(makeConst(TEXTOID, -1, DEFAULT_COLLATION_OID,
+										-1, CStringGetTextDatum(sql),
+										false, false),
+							  carry.values),
 						InvalidOid, InvalidOid, COERCE_EXPLICIT_CALL);
 	call->funcretset = true;
 	rtfunc->funcexpr = (Node *) call;
@@ -1221,6 +1302,11 @@ dist_random_push(Query *q)
 	q->jointree = makeFromExpr(list_make1(rtr), NULL);
 	q->targetList = tlist;
 	q->hasTargetSRFs = false;
+	/* a subquery carried is the call's argument now, planned as an initplan */
+	q->hasSubLinks = false;
+	foreach_ptr(Node, value, carry.values)
+		if (IsA(value, SubLink))
+			q->hasSubLinks = true;
 }
 
 static bool
@@ -1256,6 +1342,7 @@ GpSegmentPushDistRandom(Query *parse)
 		return;
 	lookup_func_oids();
 	if (!OidIsValid(segment_query_oid) ||
+		!OidIsValid(segment_query_values_oid) ||
 		(!OidIsValid(dist_random_oid) && !OidIsValid(dist_random_segments_oid)))
 		return;
 	(void) push_dist_random_walker((Node *) parse, NULL);

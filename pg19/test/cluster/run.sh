@@ -972,6 +972,21 @@ mine" ] && ok "a transaction reads its own rows, and a LIMIT leaves the connecti
 			ok "a sequence stays here, columns alone are gathered, and segment_query() runs nothing else" ;;
 		*) notok "what stays on the coordinator" "$out / $out2 / $out3 / $out4" ;;
 	esac
+	# What Cloudberry evaluates here for the segments goes with the query:
+	# a PL/pgSQL variable, a regclass among them, and a subquery of the
+	# query's own -- the table's count, the coordinator's, where a segment
+	# would count its share.  A function called for what it does gives void,
+	# which travels too.
+	q 0 "CREATE FUNCTION gdsq_carry(r regclass, s int) RETURNS text LANGUAGE plpgsql AS \$\$ DECLARE v text; BEGIN SELECT current_setting('port') || ' ' || pg_relation_size(r) || ' ' || (SELECT count(*) FROM gs) INTO v FROM gp_dist_random('gp_id') WHERE gp_segment_id = s; RETURN v; END \$\$;" >/dev/null
+	out=$(q 0 "SELECT gdsq_carry('gs', 1);")
+	out2=$(q 2 "SELECT pg_relation_size('gs');")
+	out3=$(q 0 "SELECT count(*) FROM (SELECT pg_sleep(0) FROM gp_dist_random('gp_id')) s;")
+	out4=$(q 0 "EXPLAIN (COSTS OFF) SELECT pg_sleep(0) FROM gp_dist_random('gp_id');")
+	case "$out|$out3|$out4" in
+		"$(port 2) $out2 100|2|"*"Function Scan on segment_query"*)
+			ok "a variable and a subquery are evaluated here for the segments, and void comes back" ;;
+		*) notok "what the coordinator evaluates for the segments" "$out ($out2) / $out3 / $out4" ;;
+	esac
 	out=$(q 0 "SELECT gp_segment_id FROM gs, gr;")
 	out2=$(q 0 "SELECT gp_segment_id FROM (SELECT a FROM gs) s;")
 	case "$out|$out2" in
@@ -2285,16 +2300,17 @@ SQL
 		|| notok "temporary tables under two-phase commit" "$out"
 	# And one TRUNCATE gave new files leaves no old ones: a prepared
 	# transaction's record lists no temporary relation's files, and the
-	# backend sweeps its own after the second phase.
+	# backend sweeps its own after the second phase.  Each segment has one
+	# file number left, its own: a segment numbers a new file itself.
 	out=$(printf '%s\n' "SET client_min_messages = warning;" \
 		"CREATE TEMP TABLE ttrunc (a int) DISTRIBUTED BY (a);" \
 		"INSERT INTO ttrunc SELECT generate_series(1, 100);" "TRUNCATE ttrunc;" \
 		"INSERT INTO ttrunc SELECT generate_series(1, 100);" "TRUNCATE ttrunc;" \
 		"INSERT INTO ttrunc SELECT generate_series(1, 10);" \
 		"SELECT count(*) FROM ttrunc;" \
-		"SELECT count(DISTINCT split_part(f, '_', 2)) FROM (SELECT unnest(string_to_array(result, ',')) AS f FROM gp.exec_on_segments(\$\$SELECT string_agg(f, ',') FROM pg_ls_dir('base/' || (SELECT oid FROM pg_database WHERE datname = current_database())) f WHERE f LIKE 't%'\$\$)) s;" | qf 0)
+		"SELECT string_agg(result, ' ' ORDER BY content) FROM gp.exec_on_segments(\$\$SELECT count(DISTINCT split_part(f, '_', 2)) FROM pg_ls_dir('base/' || (SELECT oid FROM pg_database WHERE datname = current_database())) f WHERE f LIKE 't%'\$\$);" | qf 0)
 	[ "$out" = "10
-1" ] \
+1 1" ] \
 		&& ok "a temporary table TRUNCATE gave new files leaves no old ones on a segment" \
 		|| notok "a temporary table's old files under two-phase commit" "$out"
 

@@ -466,6 +466,15 @@ AS 'MODULE_PATHNAME', 'gp_segment_query'
 LANGUAGE C STRICT;
 
 /*
+ * The same, for a query whose $n are values the coordinator evaluates, given
+ * after its text.  Not STRICT: a value may be null.
+ */
+CREATE FUNCTION gp_internal.segment_query(sql text, VARIADIC params "any")
+RETURNS SETOF record
+AS 'MODULE_PATHNAME', 'gp_segment_query'
+LANGUAGE C;
+
+/*
  * The size functions, the cluster's (gp_size.c): each of PostgreSQL's here
  * and every segment's added, as Cloudberry's add them.  A call of
  * PostgreSQL's is made a call of the one here of its name and arguments

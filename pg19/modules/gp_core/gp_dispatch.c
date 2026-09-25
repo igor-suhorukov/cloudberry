@@ -77,6 +77,7 @@
 #include "catalog/namespace.h"
 #include "catalog/pg_type.h"
 #include "commands/dbcommands.h"
+#include "common/keywords.h"
 #include "executor/spi.h"
 #include "executor/tuptable.h"
 #include "fmgr.h"
@@ -87,6 +88,7 @@
 #include "miscadmin.h"
 #include "nodes/pg_list.h"
 #include "parser/parser.h"
+#include "parser/scanner.h"
 #include "storage/ipc.h"
 #include "storage/latch.h"
 #include "storage/lmgr.h"
@@ -113,6 +115,7 @@
 #include "gp_dtx.h"
 #include "gp_fault.h"
 #include "gp_fts.h"
+#include "gp_grammar_int.h"
 #include "gp_label.h"
 #include "gp_loopback.h"
 #include "gp_settings.h"
@@ -4074,20 +4077,114 @@ is_segment_query(const char *sql)
 		strcmp(name, "gp_dist_random") == 0;
 }
 
+/*
+ * Is the type one of the OID's aliases, regclass and the others?  Their
+ * value is written for a segment as the OID, which is every node's, and not
+ * as the name, which the segment would look up again.
+ */
+static bool
+is_oid_alias(Oid type)
+{
+	switch (type)
+	{
+		case REGPROCOID:
+		case REGPROCEDUREOID:
+		case REGOPEROID:
+		case REGOPERATOROID:
+		case REGCLASSOID:
+		case REGCOLLATIONOID:
+		case REGTYPEOID:
+		case REGCONFIGOID:
+		case REGDICTIONARYOID:
+		case REGROLEOID:
+		case REGNAMESPACEOID:
+		case REGDATABASEOID:
+			return true;
+		default:
+			return false;
+	}
+}
+
+/*
+ * The query's $n, each the call's argument n as a literal of its type -- the
+ * values the coordinator evaluated for the segments (gp_segment.c) -- found
+ * by PostgreSQL's own scanner, so that a $n in a string is left alone.
+ */
+static char *
+segment_query_values(const char *sql, FunctionCallInfo fcinfo)
+{
+	core_yyscan_t scanner;
+	core_yy_extra_type extra;
+	core_YYSTYPE lval;
+	YYLTYPE		loc;
+	int			code;
+	StringInfoData out;
+	int			copied = 0;
+
+	initStringInfo(&out);
+	scanner = scanner_init(sql, &extra, &ScanKeywords, ScanKeywordTokens);
+	while ((code = core_yylex(&lval, &loc, scanner)) != 0)
+	{
+		int			n = lval.ival;
+		int			len = 1;
+		Oid			type;
+
+		if (code != GP_PARAM)
+			continue;
+		if (n < 1 || n >= PG_NARGS())
+			ereport(ERROR,
+					(errcode(ERRCODE_UNDEFINED_PARAMETER),
+					 errmsg("there is no value for parameter $%d", n)));
+		while (isdigit((unsigned char) sql[loc + len]))
+			len++;
+		appendBinaryStringInfo(&out, sql + copied, loc - copied);
+		type = get_fn_expr_argtype(fcinfo->flinfo, n);
+		if (PG_ARGISNULL(n))
+			appendStringInfo(&out, "NULL::%s", format_type_be_qualified(type));
+		else if (is_oid_alias(type))
+			appendStringInfo(&out, "('%u'::%s)", DatumGetObjectId(PG_GETARG_DATUM(n)),
+							 format_type_be_qualified(type));
+		else
+		{
+			Oid			output;
+			bool		varlena;
+
+			getTypeOutputInfo(type, &output, &varlena);
+			appendStringInfo(&out, "(%s::%s)",
+							 quote_literal_cstr(OidOutputFunctionCall(output,
+																	 PG_GETARG_DATUM(n))),
+							 format_type_be_qualified(type));
+		}
+		copied = loc + len;
+	}
+	scanner_finish(scanner);
+	appendStringInfoString(&out, sql + copied);
+	return out.data;
+}
+
 PG_FUNCTION_INFO_V1(gp_segment_query);
 
 /*
- * gp_internal.segment_query(sql text)
+ * gp_internal.segment_query(sql text, VARIADIC "any")
  *		A query of gp_dist_random() alone, run on every segment: the rows
- *		each answers, in the column definition list's types.
+ *		each answers, in the column definition list's types.  Its $n are the
+ *		further arguments.
  */
 Datum
 gp_segment_query(PG_FUNCTION_ARGS)
 {
 	ReturnSetInfo *rsinfo = (ReturnSetInfo *) fcinfo->resultinfo;
-	char	   *sql = text_to_cstring(PG_GETARG_TEXT_PP(0));
+	char	   *sql;
 	TupleTableSlot *slot;
 	GpGatherState *gather;
+
+	if (PG_ARGISNULL(0))
+		ereport(ERROR,
+				(errcode(ERRCODE_NULL_VALUE_NOT_ALLOWED),
+				 errmsg("gp_internal.segment_query() runs only a query of one gp_dist_random()")));
+	sql = text_to_cstring(PG_GETARG_TEXT_PP(0));
+	if (PG_NARGS() > 1)
+		sql = segment_query_values(sql, fcinfo);
 
 	if (!is_segment_query(sql))
 		ereport(ERROR,
