@@ -230,9 +230,32 @@ applies (`pg19/docker/patches`), not a patch of the core series.  Left
 open: six of Cloudberry's FTS tests, each for what the port does not have
 (`cloudberry.md`).
 
-The storage, resource and transport modules — `gp_ao`, `pax`, `gp_exttable`,
+M5 — storage and loading — has begun (2026-09-25), on ten more patches
+of the core series, O13 to O21 and O23:
+
+- `gp_ao`: append-optimized tables, by row (`ao_row`) and by column
+  (`ao_column`), as table access methods whose blocks are 8K pages of the
+  table's own relation, through the buffer manager and logged by `gp_ao`'s
+  resource manager (ID 200), so that a standby, a base backup and
+  `pg_checksums` see them as any relation's pages.  What Cloudberry keeps in
+  `pg_aoseg`, `pg_aovisimap` and `pg_aoblkdir` is in three tables of
+  `gp_ao`'s.  Compression (zlib, zstd, rle_type), column `ENCODING`, the
+  columns `ALTER TABLE` adds without a rewrite, UPDATE through the plan's
+  old row (O20), unique indexes, BRIN and Cloudberry's bitmap index, VACUUM
+  and its compaction, on one node and on the cluster;
+- `gp_exttable`: external tables, as foreign tables of `gp_exttable_server`
+  -- `file://`, `EXECUTE`, `gpfdist://` and `http://` through libcurl, a
+  protocol's own functions, text, CSV and a formatter's custom format,
+  writable tables, single-row error handling and its error logs -- read on
+  the segments, or on the one node; Cloudberry's protocols and
+  `CREATEEXTTABLE`; and `COPY ... LOG ERRORS SEGMENT REJECT LIMIT`;
+- `gpfdist`, Cloudberry's file server, built as a program of the port's.
+
+Left of M5: `pax` and `diskquota`, and `COPY`'s `FILL MISSING FIELDS`,
+`NEWLINE` and `ESCAPE` outside CSV, which external tables take
+(`cloudberry.md`).  The resource and transport modules — `pax`,
 `gp_resource`, `gp_tde`, `interconnect`, `udp2` — are still stubs: M5 and M6
-fill the first five, and the streaming transports, tcp and udpifc, live in
+fill the first three, and the streaming transports, tcp and udpifc, live in
 `gp_core` for now.
 
 ## Tests
@@ -250,6 +273,7 @@ M4, FTS and mirrors, run by Cloudberry's own driver on the same cluster, with
 a standby coordinator for the test that asks for one, and mirrors for the
 FTS tests; `fts`, M4's, a coordinator and three primaries
 each with a mirror, and what FTS does when a mirror or a primary stops;
+`ao`, M5's, append-optimized tables on one node, a standby and recovery;
 `singlenode` and
 `singlenode_isolation2`, Cloudberry's single-node suites with PostgreSQL 19's
 own regression tests; and PostGIS's regression suite.  Each is run under the
