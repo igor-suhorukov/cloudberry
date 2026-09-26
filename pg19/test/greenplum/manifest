@@ -18,8 +18,12 @@
 #         what another made is in its group (bb_mpph_heap's tables,
 #         bb_memory_quota's)
 #
-# The schedule's other tests -- fault injection, FTS, the interconnect's
-# settings -- need M7, and are not listed.
+# Every test of the schedule is listed.  The ones the port had left for M7 --
+# fault injection, FTS, the interconnect's settings, and the rest -- come
+# last, in the schedule's order, tried on 2026-09-26: those that run are in
+# groups of their own, m7a and m7b, and each that is skipped says what
+# stopped it.  "differs:" says it for a test that stops at nothing, and
+# answers otherwise than Cloudberry's expected output says.
 group g1
 skip gp_aggregates  relation "aggtest" does not exist
 run  update_gp
@@ -252,3 +256,254 @@ run  uao_dml/uao_dml_unique_index_delete_row
 run  uao_dml/uao_dml_unique_index_delete_column
 run  uao_dml/uao_dml_unique_index_update_row
 run  uao_dml/uao_dml_unique_index_update_column
+
+# The tests the port had left for M7 (see the head of this file).
+group m7a
+skip autovacuum  could not find function "test_consume_xids" in file "regress.so"; unrecognized configuration parameter "debug_burn_xids"
+skip autovacuum-segment  could not find function "test_consume_xids" in file "regress.so"; function test_consume_xids(integer) does not exist
+skip autovacuum-template0-segment  could not find function "test_consume_xids" in file "regress.so"; function test_consume_xids(integer) does not exist
+skip profile  differs: its \d+ of pg_authid and pg_roles shows Cloudberry's catalog columns, and pg_profile is Cloudberry's catalog: relation "pg_profile" does not exist
+skip pg_ext_aux  schema "pg_ext_aux" does not exist; relation "pg_ext_aux.extaux_t" does not exist
+run  pg_dump_binary_upgrade
+skip gp_dispatch_keepalives  could not find function "gp_keepalives_check" in file "regress.so"; spiexceptions.UndefinedFunction: function gp_keepalives_check() does not exist
+skip copy_eol  could not open file "/tmp/copy_lf.file" for reading: No such file or directory; could not open file "/tmp/copy_cr.file" for reading: No such file or directory
+skip copy_encoding_error  segment reject limit reached, aborting operation
+run  dedupset
+run  disable_autovacuum
+skip python_processed64bit  differs: the fault executor_run_high_processed, which has the executor count past 2^32 rows, is none of the port's
+run  enable_autovacuum
+skip log_guc  relation "gp_toolkit.__gp_log_master_ext" does not exist; relation "gp_toolkit.__gp_log_segment_ext" does not exist
+skip instr_in_shmem_setup  gp_enable_query_metrics is none of the port's settings: gpconfig refuses it, and instr_in_shmem and instr_in_shmem_verify, which it sets up for, fail without it
+skip instr_in_shmem  unrecognized configuration parameter "gp_enable_query_metrics"; unrecognized configuration parameter "gp_instrument_shmem_size"
+skip createdb  function force_mirrors_to_catch_up() does not exist
+skip gp_aggregates_costs  unrecognized configuration parameter "gp_eager_two_phase_agg"
+skip gp_metadata  function gp_opt_version() does not exist
+run  variadic_parameters
+run  default_parameters
+skip function_extensions  column "prodataaccess" does not exist; unrecognized configuration parameter "gp_contentid"
+skip spi  differs: a function's query of a table in a segment's slice runs, where Cloudberry refuses it: function cannot execute on a QE slice because it accesses relation
+run  gp_xml
+run  shared_scan
+run  cluster_gp
+skip combocid_gp  differs: a segment's command ids for the rows a transaction writes count from 0, where Cloudberry's go on from the coordinator's
+skip gp_prepared_xacts  differs: its utility-mode session asks for -c gp_role=utility, a setting PostgreSQL 19 refuses a connection for
+skip gp_backend_info  function gp_backend_info() does not exist
+run  gp_locale
+skip spi_processed64bit  differs: the fault executor_run_high_processed, which has the executor count past 2^32 rows, is none of the port's
+skip gp_tablespace_with_faults  function force_mirrors_to_catch_up() does not exist
+skip gp_tablespace  function gp_tablespace_location(oid) does not exist; function get_tablespace_version_directory_name() does not exist
+skip temp_tablespaces  the faults sisc_xslice_temp_files and hashagg_spill_temp_files are none of the port's: canceling statement due to user request
+run  default_tablespace
+run  leastsquares
+run  opr_sanity_gp
+skip decode_expr  function decode(boolean) does not exist; function decode(integer) does not exist
+skip gpcopy_encoding  invalid byte sequence for encoding "UTF8": 0xc4
+run  gp_create_view
+skip window_views  cannot copy window "w" because it has a frame clause; relation "v8" does not exist
+skip replication_slots  differs: pg_get_replication_slots() has PostgreSQL 19's columns, and a slot made on one segment gets no WARNING that it is that segment's alone
+run  create_table_like_gp
+skip gp_constraints  differs: a segment's unique violation carries no schema, table or constraint name, and its LOCATION is the dispatcher's
+skip gpcopy_dispatch  unrecognized configuration parameter "test_copy_qd_qe_split"; segment 0 took 0 of the 1 rows sent to it
+skip gpcopy  differs: COPY's errors of a line with a column too many or too few are not in Cloudberry's words
+run  orca_static_pruning
+run  orca_groupingsets_fallbacks
+skip table_functions  type anytable does not exist; OUT and INOUT arguments aren't allowed in TABLE functions
+skip opclass_ddl  must be able to SET ROLE "regtest_alter_user2"
+run  information_schema
+skip guc_env_var  could not find function "udf_setenv" in file "regress.so"; could not find function "udf_unsetenv" in file "regress.so"
+skip gp_explain  unrecognized configuration parameter "gp_enable_explain_allstat"; unrecognized EXPLAIN option "slicetable"
+skip explain_format  differs: EXPLAIN in each of its formats prints the port's plans, which this test compares
+run  olap_plans
+run  gp_copy_dtx
+skip guc_gp  unrecognized configuration parameter "gp_workfile_limit_per_query"; unrecognized configuration parameter "allow_segment_dml"
+skip toast  spiexceptions.UndefinedTable: relation "pg_toast.pg_toast_25090" does not exist; spiexceptions.UndefinedTable: relation "pg_toast.pg_toast_25084" does not exist
+run  misc_jiras
+run  write_gang_idle_in_transaction_session_timeout
+skip gp_connections  differs: a primary takes a direct connection, where Cloudberry refuses it: This database instance is running as a primary segment in a Cloudberry cluster and does not permit direct connections
+skip gp_dump_query_oids  function gp_dump_query_oids(unknown) does not exist
+skip analyze  unrecognized configuration parameter "optimizer_analyze_root_partition"; unrecognized configuration parameter "optimizer_analyze_midlevel_partition"
+skip gp_owner_permission  relation "pg_stat_operations" does not exist
+skip incremental_analyze  syntax error at or near "foo"; syntax error at or near "foo_1_prt_2"
+run  regex_gp
+skip dispatch_encoding  relation "gp_toolkit.__gp_log_segment_ext" does not exist; raise_error called on "funny char Ä"
+run  icudp/gp_interconnect_queue_depth
+run  icudp/gp_interconnect_queue_depth_longtime
+skip icudp/gp_interconnect_snd_queue_depth  unrecognized configuration parameter "gp_interconnect_snd_queue_depth"
+skip icudp/gp_interconnect_snd_queue_depth_longtime  unrecognized configuration parameter "gp_interconnect_snd_queue_depth"
+skip icudp/gp_interconnect_min_retries_before_timeout  unrecognized configuration parameter "gp_interconnect_min_retries_before_timeout"
+run  icudp/gp_interconnect_transmit_timeout
+skip icudp/gp_interconnect_cache_future_packets  unrecognized configuration parameter "gp_interconnect_cache_future_packets"
+run  icudp/gp_interconnect_default_rtt
+skip icudp/gp_interconnect_fc_method  unrecognized configuration parameter "gp_interconnect_fc_method"
+run  icudp/gp_interconnect_min_rto
+skip icudp/gp_interconnect_timer_checking_period  unrecognized configuration parameter "gp_interconnect_timer_checking_period"
+skip icudp/gp_interconnect_timer_period  unrecognized configuration parameter "gp_interconnect_timer_period"
+skip icudp/queue_depth_combination_loss  unrecognized configuration parameter "gp_interconnect_snd_queue_depth"
+skip icudp/queue_depth_combination_capacity  unrecognized configuration parameter "gp_interconnect_fc_method"; unrecognized configuration parameter "gp_interconnect_snd_queue_depth"
+skip icudp/queue_depth_combination_loss_advance  unrecognized configuration parameter "gp_interconnect_fc_method"; unrecognized configuration parameter "gp_interconnect_snd_queue_depth"
+skip event_trigger_gp  event trigger "regress_event_trigger" does not exist
+skip deadlock  canceling statement due to user request; function gp_dist_wait_status() does not exist
+skip deadlock2  differs: Cloudberry's NOTICE that a slice prefetches a join's qual is not the port's
+run  workfile/hashagg_spill
+run  workfile/hashjoin_spill
+skip workfile/materialize_spill  differs: EXPLAIN ANALYZE says nothing of Cloudberry's "Workfile: (N spilling)" of a node that spilled, which it counts
+skip workfile/sisc_mat_sort  differs: EXPLAIN ANALYZE says nothing of Cloudberry's "Workfile: (N spilling)" of a node that spilled, which it counts
+skip workfile/sisc_sort_spill  differs: EXPLAIN ANALYZE says nothing of Cloudberry's "Workfile: (N spilling)" of a node that spilled, which it counts
+run  workfile/sort_spill
+run  workfile/spilltodisk
+skip zlib  canceling statement due to user request
+skip workfile_limits  unrecognized configuration parameter "gp_workfile_limit_per_query"; unrecognized configuration parameter "gp_workfile_limit_files_per_query"
+skip segspace  relation "gp_toolkit.gp_workfile_mgr_used_diskspace" does not exist; relation "gp_toolkit.gp_workfile_entries" does not exist
+skip query_finish_pending  differs: gp_inject_fault's report of a finish_pending fault
+skip gpdiffcheck  unrecognized configuration parameter "gp_cost_hashjoin_chainwalk"
+run  gptokencheck
+run  co_nestloop_idxscan
+skip dml_in_udf  differs: a function's write in a segment's slice runs, where Cloudberry refuses it: function cannot execute on a QE slice because it issues a non-SELECT statement
+skip gpdtm_plpgsql  unrecognized configuration parameter "gp_enable_slow_writer_testmode"
+skip dtm_retry  canceling statement due to user request
+skip rangefuncs_cdb  function gp_execution_segment() does not exist; input of anonymous composite types is not implemented
+skip sirv_functions  differs: a function's DDL in a segment's slice runs, where Cloudberry refuses it: function cannot execute on a QE slice because it issues a non-SELECT statement
+skip query_finish  canceling statement due to user request: under ORCA, its LIMIT 1 over a slice that sleeps on segment 0 does not end the statement early, and it runs past the suite's 60 seconds
+skip partial_table  differs: a table whose policy spreads it over more segments than the cluster has is refused ("Its distribution policy spreads it over 10 segments, and the cluster has 3"), where Cloudberry reads it
+run  subselect_gp_indexes
+skip partition_indexing  REINDEX INDEX cannot run inside a transaction block; UNIQUE constraint on partitioned table must include all partitioning columns
+run  partition_with_user_defined_function
+skip partition_unlogged  partitioned tables cannot be unlogged; relation "unlogged_pt1" does not exist
+run  partition_subquery
+run  partition_with_user_defined_function_that_truncates
+run  index_constraint_naming
+skip index_constraint_naming_partition  distribution policy for "e" must be the same as that for "r"; cannot drop inherited constraint "r_1_prt_r1_r_key_r_name_excl" of relation "r_1_prt_r1"
+skip index_constraint_naming_upgrade  differs: PostgreSQL 19 keeps NOT NULL constraints in pg_constraint, and its listing of a table's constraints has them
+run  rle
+skip rle_delta  differs: \d+ of a column-oriented table prints no Compression Type, Compression Level or Block Size column
+skip dsp  compresstype "zlib" can't be used with compresslevel 0; compresslevel=7 is out of range for rle_type (should be in the range 1 to 6)
+skip not_out_of_shmem_exit_slots  unrecognized configuration parameter "debug_dtm_action_segment"; unrecognized configuration parameter "debug_dtm_action_target"
+skip create_am_gp  function ao_row_tableam_handler(internal) does not exist; function ao_column_tableam_handler(internal) does not exist
+skip cbdb_optimizer_test  unrecognized configuration parameter "gp_enable_ao_indexscan"
+skip gp_runtime_filter  unrecognized configuration parameter "gp_enable_runtime_filter"; unrecognized configuration parameter "gp_enable_runtime_filter_pushdown"
+skip db_size_functions  database with OID 9999 does not exist; tablespace with OID 9999 does not exist
+skip cbdb_db_size_functions  function cbdb_relation_size(regclass[]) does not exist; function cbdb_relation_size(oid[], unknown) does not exist
+skip eagerfree  unrecognized configuration parameter "gp_enable_agg_distinct"
+skip alter_table_set  syntax error at or near "on"; unrecognized configuration parameter "gp_enable_segment_copy_checking"
+skip alter_table_gp  differs: Cloudberry refuses to alter a column of a primary key, a unique constraint or the distribution key ("cannot alter column with primary key or unique constraint"), which the port alters
+run  subtransaction_visibility
+skip oid_consistency  differs: \d of an append-optimized table prints no Compression Type, Level, Block Size or Checksum
+skip udf_exception_blocks  unrecognized configuration parameter "debug_dtm_action_segment"; unrecognized configuration parameter "debug_dtm_action_target"
+skip ic  unrecognized configuration parameter "gp_interconnect_snd_queue_depth"; -1 is outside the valid range for parameter "gp.interconnect_queue_depth" (1 .. 4096)
+skip instr_in_shmem_verify  could not access file "gp_instrument_shmem": No such file or directory; function gp_instrument_shmem_detail_f() does not exist
+skip partition_locking  differs: the locks a statement takes on a partitioned table's parts, and on which nodes
+skip vacuum_gp  relation "gp_toolkit.__gp_log_master_ext" does not exist
+run  vacuum_fsm_nondefault_tablespace
+skip pg_stat  relation "gp_stat_all_tables_summary" does not exist; relation "gp_stat_user_tables_summary" does not exist
+skip bfv_partition  unrecognized configuration parameter "optimizer_analyze_root_partition"; relation "gp_partition_template" does not exist
+skip qp_misc_rio  function gp_toolkit.gp_param_setting(unknown) does not exist; cannot copy window "w" because it has a frame clause
+skip bfv_partition_plans  differs: a count of its plan's partition selections is 0, where Cloudberry's is 2
+run  gp_covering_index
+skip planhints  could not access file "pg_hint_plan": No such file or directory
+skip rowhints  could not access file "pg_hint_plan": No such file or directory; function disable_xform(unknown) does not exist
+skip joinhints  could not access file "pg_hint_plan": No such file or directory
+skip qp_indexscan  differs: under ORCA, its plans of index scans over partitions
+run  gp_index_costing
+skip pgstat_qd_tabstat  relation "gp_stat_all_tables_summary" does not exist; syntax error at or near "on"
+skip dispatch  unrecognized configuration parameter "gp_max_plan_size"; could not find function "cleanupAllGangs" in file "regress.so"
+run  wrkloadadmin
+run  trig
+skip role  syntax error at or near "only"
+skip portals_updatable  cursor "c" is not positioned on a row; cursor "c" is not a simply updatable scan of table "portals_updatable_rank_1_prt_2"
+skip plpgsql_cache  differs: how often a function's NOTICE is raised, the segments running it where Cloudberry's coordinator does
+skip timeseries  function interval_interval_div(interval, interval) does not exist; function interval_bound(integer, integer) does not exist
+skip pg_stat_last_operation  relation "pg_stat_last_operation" does not exist; relation "pg_stat_last_operation_testview" does not exist
+skip pg_stat_last_shoperation  relation "pg_stat_last_shoperation" does not exist
+run  gp_numeric_agg
+run  partindex_test
+skip runtime_stats  language "plpython3u" does not exist; function isspilling(unknown) does not exist
+run  interrupt_holdoff_count
+skip bfv_catalog  non-standard string literals are not supported; unrecognized configuration parameter "escape_string_warning"
+run  bfv_index
+skip bfv_statistic  table row type and query-specified row type do not match; relation "gp_toolkit.gp_stats_missing" does not exist
+run  nested_case_null
+run  sort
+run  aggregate_with_groupingsets
+skip gporca  function gp_opt_version() does not exist; table row type and query-specified row type do not match
+skip gpsd  relation "gpsd_foo" does not exist; table row type and query-specified row type do not match
+run  catcache
+skip minirepro  relation "minirepro_foo" does not exist; table "minirepro_foo" does not exist
+run  gporca_faults
+skip rpt_tpch  unrecognized configuration parameter "gp_enable_sort_limit"
+run  rpt_returning
+skip bfv_planner  differs: two counts of what its plans read are 27 and 9, where Cloudberry's are 33 and 11
+run  bfv_legacy
+skip bfv_temp  syntax error at or near ")"; relation "n" does not exist
+skip bfv_dml  syntax error at or near ")"
+skip tpcds_q04  table row type and query-specified row type do not match
+skip qp_olap_mdqa  function group_id() does not exist
+skip gp_recursive_cte  unrecognized configuration parameter "gp_recursive_cte"
+run  qp_skew
+run  gp_tsrf
+run  qp_join_universal
+skip qp_rowsecurity  permission denied for table roottabmid1; permission denied for table roottableaf1
+run  qp_query_params
+skip qp_misc_jiras  cannot derive ending value of partition based upon starting of next partition; relation "qp_misc_jiras.tbl5028_part_test" does not exist
+skip qp_executor  unrecognized configuration parameter "debug_print_slice_table"
+skip qp_olap_windowerr  cannot copy window "win1" because it has a frame clause; argument of RANGE must not contain variables
+skip qp_olap_window  cannot copy window "win1" because it has a frame clause; argument of RANGE must not contain variables
+skip qp_dropped_cols  a distributed transaction's part that wrote is committed by the coordinator's two phases, or by its one-phase commit: The coordinator did not know this part wrote
+skip qp_with_functional_inlining  UPDATE is not allowed in a non-volatile function; unrecognized configuration parameter "gp_cte_sharing"
+skip qp_with_functional_noinlining  UPDATE is not allowed in a non-volatile function; unrecognized configuration parameter "gp_cte_sharing"
+run  qp_functions_in_contexts_setup
+run  qp_misc_rio_join_small
+group m7b
+run  qp_gist_indexes2
+run  qp_gist_indexes3
+skip qp_gist_indexes4  canceling statement due to user request: under the planner, its join of two tables by a GiST operator runs past the suite's 60 seconds
+skip qp_query_execution  differs: two counts of its plans' nodes are 0, where Cloudberry's are 1
+skip qp_functions_in_from  UPDATE is not allowed in a non-volatile function
+skip qp_functions_in_select  UPDATE is not allowed in a non-volatile function; function cannot execute on a QE slice because it accesses relation "qp_funcs_in_select.bar"
+skip qp_functions_in_subquery  UPDATE is not allowed in a non-volatile function; function cannot execute on a QE slice because it accesses relation "qp_funcs_in_subquery.bar"
+skip qp_functions_in_subquery_column  UPDATE is not allowed in a non-volatile function
+skip qp_functions_in_subquery_constant  UPDATE is not allowed in a non-volatile function; function cannot execute on a QE slice because it accesses relation "qp_funcs_in_subquery_constant.bar"
+skip qp_functions_in_with  UPDATE is not allowed in a non-volatile function
+skip qp_dpe  differs: under ORCA, which of its plans eliminate partitions while they run
+skip qp_functions_idf  function percentile_cont(numeric, timestamp with time zone) does not exist; function percentile_cont(numeric, date) does not exist
+run  qp_regexp
+skip qp_orca_fallback  differs: an UPDATE of a partitioned table with a foreign partition runs, where Cloudberry refuses it: cannot update foreign table "p2_ext"
+skip gp_sync_lc_gucs  column "sess_id" does not exist
+skip qp_olap_group  relation "sale" does not exist; prepared statement "p" does not exist
+skip qp_olap_group2  relation "product" does not exist
+skip hooktest  could not access file "hooktest/test_hook.so": No such file or directory
+run  tuple_serialization
+skip query_info_hook_test  could not access file "query_info_hook_test/query_info_hook_test.so": No such file or directory
+skip freeze_aux_tables  differs: an append-optimized table's aux tables are not pg_aoseg_<oid>, pg_aoblkdir_<oid> and pg_aovisimap_<oid> of pg_aoseg
+skip cbdb_parallel  unrecognized configuration parameter "gp_appendonly_insert_files"; unrecognized configuration parameter "enable_parallel_semi_join"
+skip window_parallel  unrecognized configuration parameter "gp_appendonly_insert_files"
+skip vacuum_full_freeze_heap  differs: a heap's size in 8 kB pages, where Cloudberry's expected output counts its 32 kB blocks
+skip vacuum_full_heap  differs: a heap's size in 8 kB pages, where Cloudberry's expected output counts its 32 kB blocks
+skip autostats  unrecognized configuration parameter "log_autostats"; permission denied to set parameter "gp.autostats_allow_nonowner"
+skip dpe  function disable_xform(unknown) does not exist; function enable_xform(unknown) does not exist
+skip table_statistics  CLUSTER cannot run inside a transaction block
+skip fts_error  differs: two of its checks that FTS marked a node down answer f, and Cloudberry's DEBUG trace of the probe's statement is not the port's
+skip psql_gp_commands  differs: psql 19's \dx has a Default version column, and Cloudberry's psql describes its storage and external tables in its own way
+skip pg_resetwal  differs: PostgreSQL 19's pg_resetwal has no -k, the data checksum version Cloudberry's sets
+skip dropdb_check_shared_buffer_cache  could not find function "check_shared_buffer_cache_for_dboid" in file "regress.so"; function check_shared_buffer_cache_for_dboid(integer) does not exist
+skip gp_upgrade_cornercases  cannot drop schema public because other objects depend on it
+skip temp_relation  language "plpython3u" does not exist; function gp_execution_segment() does not exist
+skip alter_db_set_tablespace  function force_mirrors_to_catch_up() does not exist; spiexceptions.UndefinedFunction: function get_tablespace_version_directory_name() does not exist
+skip oid_wraparound  could not find function "gp_set_next_oid" in file "regress.so"; could not find function "gp_get_next_oid" in file "regress.so"
+skip fts_recovery_in_progress  canceling statement due to user request
+skip gangsize  differs: the gangs its statements are dispatched to, by Cloudberry's INFO lines, are not the sizes Cloudberry makes them
+skip gang_reuse  unrecognized configuration parameter "gp_cached_segworkers_threshold"
+skip run_utility_gpexpand_phase1  gpcheckcat and gppkg are not installed (pg19/gpMgmt/files.txt)
+skip create_extension_fail  the fault create_function_fail is none of the port's: its CREATE EXTENSION gp_debug_numsegments succeeds, and the next says the extension already exists
+skip offload_entry_to_qe  unrecognized configuration parameter "enable_offload_entry_to_qe"; unrecognized EXPLAIN option "locus"
+skip aqumv  unrecognized configuration parameter "enable_answer_query_using_materialized_views"; unrecognized parameter namespace "gp"
+skip matview_data  relation "gp_matview_aux" does not exist; current transaction is aborted, commands ignored until end of transaction block
+skip directory_table  relation "gp_storage_server" does not exist; syntax error at or near "DATA"
+skip motion_socket  language "plpython3u" does not exist; function check_motion_sockets() does not exist
+run  ic_proxy_socket
+skip subtrx_overflow  relation "gp_suboverflowed_backend" does not exist
+skip bfv_meta_track  relation "pg_stat_last_operation" does not exist; publication "pub1" does not exist
+skip bfv_copy  segment reject limit reached, aborting operation
+skip dynamic_table  unrecognized parameter namespace "gp"; relation "dt0" does not exist
+skip hba_conf  differs: its pg_hba.conf line asks for LDAP, which the image's server is built without, so pg_hba_file_rules gives the line as an error; it passes on a server built with LDAP
+skip dboptions  differs: the psql its shell commands run connects to /tmp's socket, where this suite's nodes have directories of their own
+skip gp_log_mem_dispatch  function gp_log_backend_memory_contexts(integer) does not exist; function gp_log_backend_memory_contexts(integer, integer) does not exist

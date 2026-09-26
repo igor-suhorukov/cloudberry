@@ -239,6 +239,8 @@ make_suite() {
 	cp -r "$WORK/data" "$SN/data"
 	cp "$HERE"/sql/*.sql "$SN/sql/"
 	cp "$HERE"/expected/*.out "$SN/expected/" 2> /dev/null
+	# a test loads regress.so from PG_ABS_SRCDIR too, the suite's directory
+	ln -sf "$("$BINDIR/pg_config" --pkglibdir)/cb_regress.so" "$SN/regress.so"
 	{ echo "test: test_setup"; echo "test: gp_setup"; } > "$SN/schedule"
 	for i in "${!run_tests[@]}"; do
 		[ "${run_group[$i]}" = "$g" ] || continue
@@ -392,6 +394,14 @@ run_group() {
 	# they run from, whose test functions of Cloudberry's own the port's
 	# cb_regress.so serves (auth_constraint's check_auth_time_constraints)
 	ln -sf "$("$BINDIR/pg_config" --pkglibdir)/cb_regress.so" "$R/regress.so"
+	# and the tablespaces' directories Cloudberry's GNUmakefile makes beside
+	# the results, PG_ABS_BUILDDIR, which its tests name
+	(cd "$R" && mkdir -p testtablespace testtablespace_otherloc testtablespace_unlogged \
+		testtablespace_default_tablespace testtablespace_temp_tablespace \
+		testtablespace_mytempsp0 testtablespace_mytempsp1 testtablespace_mytempsp2 \
+		testtablespace_mytempsp3 testtablespace_mytempsp4 testtablespace_database_tablespace \
+		testtablespace_1111111111222222222233333333334444444444555555555566666666667777777777888888888899999999990000000000 \
+		$(for i in 1 2 3 4 5 6 7 8; do echo testtablespace_existing_version_dir/$i/GPDB_99_399999991; done))
 	# ORCA's counts, from the pass's start (gp_orca.fallbacks()), and where
 	# the coordinator's log was then
 	"$PSQL" -X -q -d template1 -c "SELECT gp_orca.reset_fallbacks()" > /dev/null 2>&1

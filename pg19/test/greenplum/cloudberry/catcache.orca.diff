@@ -1,0 +1,7 @@
+@@
++INFO:  GPORCA failed to produce a plan, falling back to Postgres-based planner
++DETAIL:  Falling back to Postgres-based planner because GPORCA does not support the following feature: an UPDATE that moves rows, of a partitioned table
+@@
++INFO:  GPORCA failed to produce a plan, falling back to Postgres-based planner
+@@
++DETAIL:  Falling back to Postgres-based planner because GPORCA does not support the following feature: an UPDATE that moves rows, of a partitioned table

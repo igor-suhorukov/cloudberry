@@ -1,0 +1,15 @@
+@@
+-HINT:  Could not choose a best candidate function. You might need to add explicit type casts.
++DETAIL:  Could not choose a best candidate function.
++HINT:  You might need to add explicit type casts.
+@@
+-HINT:  Could not choose a best candidate function. You might need to add explicit type casts.
++DETAIL:  Could not choose a best candidate function.
++HINT:  You might need to add explicit type casts.
+@@
+-HINT:  Could not choose a best candidate function. You might need to add explicit type casts.
++DETAIL:  Could not choose a best candidate function.
++HINT:  You might need to add explicit type casts.
+@@
+-HINT:  No function matches the given name and argument types. You might need to add explicit type casts.
++DETAIL:  No function of that name accepts the given number of arguments.

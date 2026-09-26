@@ -1,0 +1,38 @@
+@@
++INFO:  GPORCA failed to produce a plan, falling back to Postgres-based planner
++DETAIL:  Falling back to Postgres-based planner because GPORCA does not support the following feature: a value one slice computes, used in another the segments run
+@@
++INFO:  GPORCA failed to produce a plan, falling back to Postgres-based planner
++DETAIL:  Falling back to Postgres-based planner because GPORCA does not support the following feature: a value one slice computes, used in another the segments run
+@@
++INFO:  GPORCA failed to produce a plan, falling back to Postgres-based planner
++DETAIL:  Falling back to Postgres-based planner because GPORCA does not support the following feature: a value one slice computes, used in another the segments run
+@@
++INFO:  GPORCA failed to produce a plan, falling back to Postgres-based planner
++DETAIL:  Falling back to Postgres-based planner because GPORCA does not support the following feature: a value one slice computes, used in another the segments run
+@@
++INFO:  GPORCA failed to produce a plan, falling back to Postgres-based planner
++DETAIL:  Falling back to Postgres-based planner because GPORCA does not support the following feature: a value one slice computes, used in another the segments run
+@@
++
++explain verbose with cte1 as (select v3 from t2) select * from t1,t2 where t1.v1 in (select v3 from cte1) and t1.v1 in (select v3 from t3,cte1 where v4=v6);
++INFO:  GPORCA failed to produce a plan, falling back to Postgres-based planner
++DETAIL:  Falling back to Postgres-based planner because GPORCA does not support the following feature: a value one slice computes, used in another the segments run
++QUERY PLAN
++___________
+@@
+-explain verbose with cte1 as (select v3 from t2) select * from t1,t2 where t1.v1 in (select v3 from cte1) and t1.v1 in (select v3 from t3,cte1 where v4=v6);
++explain verbose with cte1 as (select v3 from t2) select * from t1,t2 where t1.v1 in (select v3 from cte1,t3 where v4=v6 and v4 < 10);
+@@
+-explain verbose with cte1 as (select v3 from t2) select * from t1,t2 where t1.v1 in (select v3 from cte1,t3 where v4=v6 and v4 < 10);
++explain verbose with cte1 as (select v3 from t2) select * from t1,t2 where t1.v1 in (select v3 from cte1) and t1.v1 in (select v3 from cte1,t3 where v4=v6 and v4 < 10);
++INFO:  GPORCA failed to produce a plan, falling back to Postgres-based planner
++DETAIL:  Falling back to Postgres-based planner because GPORCA does not support the following feature: a value one slice computes, used in another the segments run
+@@
+-
+-explain verbose with cte1 as (select v3 from t2) select * from t1,t2 where t1.v1 in (select v3 from cte1) and t1.v1 in (select v3 from cte1,t3 where v4=v6 and v4 < 10);
+-QUERY PLAN
+-___________
+@@
++INFO:  GPORCA failed to produce a plan, falling back to Postgres-based planner
++DETAIL:  Falling back to Postgres-based planner because GPORCA does not support the following feature: a value one slice computes, used in another the segments run
