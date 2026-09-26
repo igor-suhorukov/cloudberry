@@ -268,8 +268,9 @@ echo "9. on one node too, that part is prepared, and committed with the transact
 ###############################################################################
 # Two-phase, as on a cluster's coordinator: prepared under this server's
 # transaction ID and the maintenance database's OID, committed after the
-# commit record, and finished by the recovery process if the server fails
-# between the two -- which leaves no window between two commits.
+# commit record -- the asking transaction in progress for the others until
+# then (O33) -- and finished by the recovery process if the server fails
+# between the two, which leaves no window between two commits.
 q "CREATE EXTENSION gp_inject_fault;" > /dev/null
 is "one node runs the recovery process too, since it may prepare" \
    "SELECT count(*) FROM pg_stat_activity WHERE backend_type = 'gp_core dtx recovery';" "1"
@@ -288,8 +289,8 @@ q "SELECT gp_inject_fault('loopback_commit_prepared', 'reset', 1);" > /dev/null
 after=$(q "SELECT count(*) FROM pg_foreign_server WHERE srvname = 'two_phase';")
 left=$(q "SELECT count(*) FROM pg_prepared_xacts;")
 case "$gid|$status|$seen|$after|$left" in
-	"gp_dtx_"[0-9]*"_$dbo|committed|0|1|0")
-		ok "its part is prepared under the asking transaction's ID, and committed after that commits" ;;
+	"gp_dtx_"[0-9]*"_$dbo|in progress|0|1|0")
+		ok "its part is prepared under the asking transaction's ID, which is in progress for the others until the part is committed" ;;
 	*) notok "the loopback's two phases on one node" "$gid / $dbo / $status / $seen / $after / $left" ;;
 esac
 out=$(q "BEGIN; PREPARE TRANSACTION 'gp_dtx_$x';")
