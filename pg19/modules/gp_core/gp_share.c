@@ -47,6 +47,10 @@
  *   writer's own proves still held; and a combo command ID it does not have
  *   is looked up in what the writer published (R2's combocid_miss_hook).
  *
+ * A reader stays a member of its writer's lock group for as long as it
+ * lives, and a member cannot lead a group of its own, which a backend that
+ * starts parallel workers becomes: so it never plans them (share_planner()).
+ *
  * A reader's transaction reads only, which READ ONLY enforces, and is over
  * when the statement is.  Its caches are the thing that outlives it: a
  * reader that read the catalog as a transaction that has written saw rows
@@ -71,6 +75,7 @@
 #include "access/xact.h"
 #include "miscadmin.h"
 #include "nodes/parsenodes.h"
+#include "optimizer/planner.h"
 #include "storage/condition_variable.h"
 #include "storage/dsm_registry.h"
 #include "storage/lwlock.h"
@@ -161,6 +166,7 @@ static bool reader_caches_stale = false;
 static char *shared_snapshot_setting = NULL;
 
 static ProcessUtility_hook_type prev_ProcessUtility = NULL;
+static planner_hook_type prev_planner = NULL;
 static combocid_create_hook_type prev_combocid_create = NULL;
 static combocid_miss_hook_type prev_combocid_miss = NULL;
 
@@ -636,6 +642,32 @@ share_ProcessUtility(PlannedStmt *pstmt, const char *queryString,
 		share_attach_reader(shared_snapshot_setting);
 }
 
+/*
+ * What a member of another backend's lock group plans, it plans without
+ * parallel workers: starting them makes a backend the leader of a group
+ * (BecomeLockGroupLeader()), which a member may not become -- an assertion
+ * fails, or, without assertions, the writer's list of its group is
+ * corrupted.  The coordinator connects a reader with
+ * max_parallel_workers_per_gather=0, which a function's SET clause, or a SET
+ * inside one, raises again for a query the function runs; this holds
+ * whatever the setting says.  ORCA never plans parallel workers, and a
+ * fragment the coordinator sends runs without parallel mode (fragment_plan()
+ * in gp_motion.c), so the planner here is the only way to them.
+ */
+static PlannedStmt *
+share_planner(Query *parse, const char *query_string, int cursorOptions,
+			  ParamListInfo boundParams, ExplainState *es)
+{
+	if (MyProc->lockGroupLeader != NULL && MyProc->lockGroupLeader != MyProc)
+		cursorOptions &= ~CURSOR_OPT_PARALLEL_OK;
+
+	if (prev_planner)
+		return prev_planner(parse, query_string, cursorOptions, boundParams,
+							es);
+	return standard_planner(parse, query_string, cursorOptions, boundParams,
+							es);
+}
+
 /* ------------------------------------------------------------------------- */
 /* The end of a transaction                                                  */
 /* ------------------------------------------------------------------------- */
@@ -703,6 +735,9 @@ GpShareInit(void)
 
 	prev_ProcessUtility = ProcessUtility_hook;
 	ProcessUtility_hook = share_ProcessUtility;
+
+	prev_planner = planner_hook;
+	planner_hook = share_planner;
 
 	prev_combocid_create = combocid_create_hook;
 	combocid_create_hook = share_combocid_create;

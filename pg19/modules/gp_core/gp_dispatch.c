@@ -1732,7 +1732,9 @@ reader_connect(GpGang *g, int content)
 
 	/*
 	 * A reader is a member of its writer's lock group, and a member cannot
-	 * lead a group of its own: it starts no parallel workers.
+	 * lead a group of its own: it starts no parallel workers.  Its planner
+	 * holds to that whatever a function sets (share_planner()); the setting
+	 * spares it the look at each query.
 	 */
 	values[n++] = psprintf("%s -c max_parallel_workers_per_gather=0",
 						   qe_identity_option(content));

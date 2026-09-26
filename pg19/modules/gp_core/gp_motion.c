@@ -3347,6 +3347,14 @@ fragment_plan(const char *payload, const char *key)
 		foreach(lc, stmt->planTree->targetlist)
 			lfirst_node(TargetEntry, lc)->resjunk = false;
 
+	/*
+	 * A segment runs a slice in one process.  The fragment is a copy of the
+	 * coordinator's whole statement, which may need parallel mode for a
+	 * part the coordinator runs; this part starts no workers, and a reader,
+	 * a member of its writer's lock group, could not lead any (gp_share.c).
+	 */
+	stmt->parallelModeNeeded = false;
+
 	/* what the coordinator marked it with, and that it is a fragment */
 	stmt->extension_state = lappend(stmt->extension_state,
 									makeDefElem(pstrdup(GP_FRAGMENT_MARK),

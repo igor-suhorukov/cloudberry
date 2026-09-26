@@ -1475,6 +1475,19 @@ a\b|\N' ] && [ "$(cat "$ROOT/ce_prog.txt" 2>&1)" = "to a program" ] \
 	orca_same "a GROUP BY off the key: partial aggregates, redistributed by it" \
 		"SELECT b, count(*), avg(a) FROM o GROUP BY b ORDER BY b;" \
 		"Redistribute Motion 2:2  (slice2; segments: 2)"
+	# A reader is a member of its writer's lock group, and cannot lead a group
+	# of its own, which starting parallel workers makes a backend: what a
+	# function the reader runs plans, it plans without them, whatever the
+	# function sets (gp_share.c).  Before, the segments' readers failed an
+	# assertion in BecomeLockGroupLeader().
+	q 0 "CREATE FUNCTION wants_workers(x int) RETURNS int LANGUAGE plpgsql IMMUTABLE
+	     SET max_parallel_workers_per_gather = 2 SET debug_parallel_query = on
+	     SET parallel_setup_cost = 0 SET parallel_tuple_cost = 0
+	     AS \$\$ BEGIN PERFORM count(*) FROM pg_class WHERE oid > x; RETURN x; END \$\$;" >/dev/null
+	orca_same "a function that asks for parallel workers, in the readers of a join's slices" \
+		"SELECT count(*) FROM o JOIN po ON o.b = po.y WHERE wants_workers(o.a) > 0 AND wants_workers(po.x) > 0;" \
+		"Redistribute Motion 2:2  (slice3; segments: 2)"
+
 	orca_same "a join on columns neither table is distributed by" \
 		"SELECT count(*) FROM o JOIN po ON o.b = po.y;" "Hash Key: po.y"
 	orca_same "a small side broadcast to every segment" \

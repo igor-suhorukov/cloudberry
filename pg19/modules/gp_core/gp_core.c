@@ -210,8 +210,9 @@ _PG_init(void)
 
 	/*
 	 * ORCA's Gather Motion, and on a segment the planner hook that takes the
-	 * fragment it sends.  Last of the planner hooks, so that it is the first
-	 * to see a query.
+	 * fragment it sends.  Last of the planner hooks that plan, so that it is
+	 * the first of them to see a query; gp_share.c's, after it, only keeps a
+	 * reader from planning parallel workers.
 	 */
 	GpMotionInit();
 
