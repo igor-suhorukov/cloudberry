@@ -48,6 +48,8 @@ orca                   -         94
 cluster                -         89
 task                   -         68
 fts                    -         57
+dump                   -         30
+postgis_cluster        -         30
 hooks                  -         32
 postgis_regress        planner   31   PASSES=planner
 singlenode_isolation2  orca      28   PASSES=orca
