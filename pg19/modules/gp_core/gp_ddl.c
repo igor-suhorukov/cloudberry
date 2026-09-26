@@ -49,6 +49,13 @@
  * namespace, which each backend makes for itself when it first needs one --
  * see new_oid().
  *
+ * A catalog row a segment makes for itself -- that namespace, or anything
+ * made there outside a dispatched statement -- takes an OID the coordinator
+ * never gives: one from the top of the OID space down (local_oid()), where
+ * Cloudberry's segment took one from its own counter and its coordinator,
+ * before it made a relation, moved its counter past every segment's
+ * (cdb_sync_oid_to_segments()).
+ *
  * Which statements: the ones PostgreSQL itself calls "not read-only" --
  * DDL and TRUNCATE (ClassifyUtilityCommandAsReadOnly in utility.c) -- less
  * those whose effect is local to this node or which carry data, and plus
@@ -94,7 +101,9 @@
 #include "nodes/parsenodes.h"
 #include "nodes/readfuncs.h"
 #include "parser/parser.h"
+#include "port/atomics.h"
 #include "storage/bufmgr.h"
+#include "storage/dsm_registry.h"
 #include "storage/lmgr.h"
 #include "tcop/tcopprot.h"
 #include "tcop/utility.h"
@@ -106,6 +115,7 @@
 #include "utils/memutils.h"
 #include "utils/rel.h"
 #include "utils/ruleutils.h"
+#include "utils/snapmgr.h"
 #include "utils/syscache.h"
 
 #include "gp_cluster.h"
@@ -163,6 +173,15 @@ static int	npreassigned = 0;
 static int	next_preassigned = 0;
 static bool preassigning = false;
 
+/*
+ * A segment's own catalog OIDs, from the top of the OID space down: the next
+ * to try, shared by the node's backends (local_oid()).
+ */
+#define LOCAL_OID_TOP		((Oid) 0xFFFFFFFE)
+#define LOCAL_OID_BOTTOM	((Oid) 0x80000000)
+
+static pg_atomic_uint32 *local_oid_next = NULL;
+
 /* ------------------------------------------------------------------------- */
 /* R1: the OIDs                                                              */
 /* ------------------------------------------------------------------------- */
@@ -175,6 +194,67 @@ preassigned_clear(void)
 	next_preassigned = 0;
 	preassigning = false;
 	dispatched_tree = NULL;
+}
+
+static void
+local_oid_init(void *ptr, void *arg)
+{
+	pg_atomic_init_u32((pg_atomic_uint32 *) ptr, LOCAL_OID_TOP);
+}
+
+/*
+ * An OID for a catalog row a segment makes for itself: a session's temporary
+ * namespace, which each backend makes when it first needs one, or anything
+ * made on the segment outside a dispatched statement.
+ *
+ * The coordinator knows nothing of such a row, and may later give its OID to
+ * an object of its own, which every node then makes with that OID: on this
+ * segment the catalog's unique index would refuse it, and the statement
+ * would fail.  An OID from this node's counter could well be one the
+ * coordinator gives later -- the counter runs ahead of the coordinator's
+ * with each TOAST value stored here -- so it is taken instead from the top
+ * of the OID space down, where the coordinator's counter, which DDL moves,
+ * would take some two billion OIDs to reach.  One already in the catalog is
+ * passed over, as GetNewOidWithIndex() passes one over: any row, dead or
+ * alive, committed or not.
+ */
+static Oid
+local_oid(Relation relation, Oid indexId, AttrNumber oidcolumn)
+{
+	if (local_oid_next == NULL)
+	{
+		bool		found;
+
+		local_oid_next = GetNamedDSMSegment("gp_core local OIDs",
+											sizeof(pg_atomic_uint32),
+											local_oid_init, &found, NULL);
+	}
+
+	for (;;)
+	{
+		Oid			oid = pg_atomic_fetch_sub_u32(local_oid_next, 1);
+		ScanKeyData key;
+		SysScanDesc scan;
+		bool		used;
+
+		/* two billion of them made on this node since it started: again */
+		if (oid < LOCAL_OID_BOTTOM)
+		{
+			pg_atomic_write_u32(local_oid_next, LOCAL_OID_TOP);
+			continue;
+		}
+
+		ScanKeyInit(&key, oidcolumn, BTEqualStrategyNumber, F_OIDEQ,
+					ObjectIdGetDatum(oid));
+		scan = systable_beginscan(relation, indexId, true, SnapshotAny, 1,
+								  &key);
+		used = HeapTupleIsValid(systable_getnext(scan));
+		systable_endscan(scan);
+		if (!used)
+			return oid;
+
+		CHECK_FOR_INTERRUPTS();
+	}
 }
 
 /*
@@ -240,11 +320,11 @@ new_oid(Relation relation, Oid indexId, AttrNumber oidcolumn)
 			 * backend still has to make one says nothing about whether the
 			 * coordinator's did.  The coordinator leaves its own out of the
 			 * list (see drop_temp_namespaces()), and the segment takes one
-			 * from its own counter.  A temporary namespace is never named by
-			 * OID in anything dispatched, so nothing is lost.
+			 * of its own (local_oid()).  A temporary namespace is never named
+			 * by OID in anything dispatched, so nothing is lost.
 			 */
 			if (catalog == NamespaceRelationId)
-				return InvalidOid;
+				return local_oid(relation, indexId, oidcolumn);
 
 			if (next_preassigned >= npreassigned)
 				ereport(ERROR,
@@ -266,8 +346,21 @@ new_oid(Relation relation, Oid indexId, AttrNumber oidcolumn)
 		return a->oid;
 	}
 
-	return prev_new_oid_hook ? prev_new_oid_hook(relation, indexId, oidcolumn)
-		: InvalidOid;
+	if (prev_new_oid_hook)
+	{
+		Oid			oid = prev_new_oid_hook(relation, indexId, oidcolumn);
+
+		if (OidIsValid(oid))
+			return oid;
+	}
+
+	/*
+	 * A row a segment makes for itself.  pg_upgrade gives the OIDs it cares
+	 * about itself, and leaves the rest to the counter.
+	 */
+	if (GpClusterContentId() >= 0 && !IsBinaryUpgrade)
+		return local_oid(relation, indexId, oidcolumn);
+	return InvalidOid;
 }
 
 /*

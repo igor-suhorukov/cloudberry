@@ -480,6 +480,44 @@ t" ] && ok "temporary tables, two of them, have the coordinator's OIDs" \
 	[ "$out" = "10|56|t" ] && ok "a temporary table read and written on the segments, whose temporary schemas are named otherwise" \
 		|| notok "temporary schemas named otherwise on the segments" "$out"
 
+	# A segment's temporary namespace is a catalog row of its own, and takes
+	# an OID the coordinator never gives: from the top of the OID space down
+	# (gp_ddl.c's local_oid()).  Its own counter would not do -- it runs ahead
+	# of the coordinator's with each TOAST value the segment stores, and the
+	# coordinator could later give one of its OIDs to a schema, which that
+	# segment would refuse as a duplicate.  So, in a new database, which has
+	# no temporary namespace yet: TOAST values put segment 0's counter ahead,
+	# a temporary table makes segment 0 a namespace, and the coordinator's
+	# counter, stepped to where segment 0's is, gives the next schemas the
+	# OIDs its counter would have given the namespace.
+	qdb() {					# qdb <n> <database> <sql>
+		"$PSQL" -X -q -t -A -h "$(sockdir "$1")" -p "$(port "$1")" -d "$2" \
+			-c "$3" 2>&1
+	}
+	q 0 "CREATE DATABASE oids;" >/dev/null
+	# A TOAST value takes an OID of its node's counter; the coordinator's
+	# runs ahead of a segment's with DDL, so segment 0 is given as many as
+	# put it ahead, about half of the rows.
+	qdb 0 oids "CREATE TABLE toasted (a int, b text) DISTRIBUTED BY (a);
+	            ALTER TABLE toasted ALTER b SET STORAGE EXTERNAL;
+	            INSERT INTO toasted SELECT i, repeat('x', 2100) FROM generate_series(1, 100) i;" >/dev/null
+	toast=$(qdb 0 oids "SELECT reltoastrelid::regclass FROM pg_class WHERE relname = 'toasted';")
+	counter=$(qdb 1 oids "SELECT max(chunk_id) FROM $toast;")
+	coord=$(qdb 0 oids "SELECT lo_create(0);")
+	if isnum "$counter" && isnum "$coord" && [ "$counter" -le $((coord + 100)) ]; then
+		qdb 0 oids "INSERT INTO toasted SELECT i, repeat('x', 2100) FROM generate_series(101, 100 + ($coord - $counter + 300) * 5 / 2) i;" >/dev/null
+		counter=$(qdb 1 oids "SELECT max(chunk_id) FROM $toast;")
+	fi
+	qdb 0 oids "SET client_min_messages = warning; CREATE TEMP TABLE tmp_local (a int);" >/dev/null
+	out=$(qdb 1 oids "SELECT count(*) FILTER (WHERE oid >= 2147483648) || '/' || count(*) FROM pg_namespace WHERE nspname ~ '^pg_(toast_)?temp_';")
+	qdb 0 oids "DO \$\$ BEGIN WHILE lo_create(0) < $counter LOOP END LOOP; END \$\$;" >/dev/null
+	out2=$(for s in 1 2 3; do qdb 0 oids "CREATE SCHEMA stepped$s;"; done)
+	out3=$(qdb 1 oids "SELECT count(*) FROM pg_namespace WHERE nspname ~ '^stepped' AND oid > $counter AND oid <= $counter + 3;")
+	q 0 "DROP DATABASE oids;" >/dev/null
+	isnum "$counter" && [ "$counter" -gt "$coord" ] && [ "$out|$out2|$out3" = "2/2||3" ] \
+		&& ok "a segment's temporary namespace takes an OID the coordinator never gives, and the coordinator's counter meeting the segment's fails no schema" \
+		|| notok "a segment's own OIDs" "counters $coord and $counter / namespaces in the band: $out / $out2 / $out3"
+
 	###########################################################################
 	echo "8. a distributed table's rows live on the segments"
 	###########################################################################
