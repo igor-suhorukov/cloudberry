@@ -15,11 +15,12 @@ KIND, either express or implied.  See the License for the
 specific language governing permissions and limitations
 under the License.
 
-Injection points for the port's tests, at four of Apache Cloudberry's
+Injection points for the port's tests, at five of Apache Cloudberry's
 faults inside PostgreSQL's own replication code, which its FTS tests in
 isolation2 hold or count (src/test/isolation2/sql/segwalrep):
 
   wal-sender-loop        walsender.c, WalSndLoop()        wal_sender_loop
+  wal-sender-after-send  walsender.c, WalSndLoop()        wal_sender_after_caughtup_within_range
   walrecv-skip-flush     walreceiver.c, XLogWalRcvFlush() walrecv_skip_flush
   sync-rep-query-die     syncrep.c, SyncRepWaitForLSN()   sync_rep_query_die
   sync-rep-query-cancel  syncrep.c, SyncRepWaitForLSN()   sync_rep_query_cancel
@@ -112,3 +113,13 @@ point nothing attached to runs no callback.
  		/* Clear any already-pending wakeups */
  		ResetLatch(MyLatch);
  
+@@ -3104,6 +3108,9 @@
+ 		if (pq_flush_if_writable() != 0)
+ 			WalSndShutdown();
+ 
++		/* A test may hold the WAL sender once it has sent what it had. */
++		INJECTION_POINT("wal-sender-after-send", NULL);
++
+ 		/* If nothing remains to be sent right now ... */
+ 		if (WalSndCaughtUp && !pq_is_send_pending())
+ 		{

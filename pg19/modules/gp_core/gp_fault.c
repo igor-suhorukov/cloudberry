@@ -79,11 +79,14 @@ static const char *const fault_type_names[] = {
  * written -- a prepared transaction's second phase
  * (RecordTransactionCommitPrepared, PostgreSQL 19's own point), and any
  * other commit (RecordTransactionCommit, the core series' O29).  And the
- * four in its replication code that its FTS tests hold or count, whose
+ * five in its replication code that its FTS tests hold or count, whose
  * points only the tests' build has (pg19/docker/patches): the WAL sender's
- * loop, a standby's flush -- which a "skip" fault skips, the point giving
- * its callback a bool to set -- and a commit's wait for its standby, as it
- * goes on and as a cancel comes.
+ * loop, and the moment in it after the sender has sent what it had --
+ * where Cloudberry's has just looked whether it caught up within
+ * gp.repl_catchup_within_range, which the port looks at from outside
+ * (gp_standby.c, gp_fts.c) -- a standby's flush -- which a "skip" fault
+ * skips, the point giving its callback a bool to set -- and a commit's wait
+ * for its standby, as it goes on and as a cancel comes.
  */
 static const struct
 {
@@ -94,6 +97,7 @@ static const struct
 	{"before_xlog_xact_commit_prepared", "commit-after-delay-checkpoint", false},
 	{"onephase_transaction_commit", "transaction-commit-after-delay-checkpoint", false},
 	{"wal_sender_loop", "wal-sender-loop", false},
+	{"wal_sender_after_caughtup_within_range", "wal-sender-after-send", false},
 	{"walrecv_skip_flush", "walrecv-skip-flush", true},
 	{"sync_rep_query_die", "sync-rep-query-die", false},
 	{"sync_rep_query_cancel", "sync-rep-query-cancel", false},

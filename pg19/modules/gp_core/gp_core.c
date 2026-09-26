@@ -56,9 +56,11 @@
 #include "gp_loopback.h"
 #include "gp_policy.h"
 #include "gp_scan.h"
+#include "gp_segadmin.h"
 #include "gp_segment.h"
 #include "gp_settings.h"
 #include "gp_share.h"
+#include "gp_standby.h"
 #include "gp_ic.h"
 
 PG_MODULE_MAGIC_EXT(
@@ -149,12 +151,26 @@ _PG_init(void)
 	GpClusterInit();
 
 	/*
+	 * Cloudberry's segment administration functions, whose changes to the
+	 * nodes are written as a transaction commits: their callbacks first, so
+	 * that they run after every other one at PRE_COMMIT (gp_segadmin.c).
+	 */
+	GpSegadminInit();
+
+	/*
 	 * FTS: on the coordinator the prober, which keeps what the file's nodes
 	 * are now -- which of a content's two is its primary, whether they are in
 	 * sync, whether each is up -- and on a segment what it answers a probe,
 	 * and the hold on a cancel while a commit waits for the mirror (R3).
 	 */
 	GpFtsInit();
+
+	/*
+	 * The coordinator's standby, whose commits wait for it while it streams
+	 * or has nearly caught up, as Cloudberry's coordinator waits for it
+	 * (gp_standby.c); and on every node gp.repl_catchup_within_range.
+	 */
+	GpStandbyInit();
 
 	/*
 	 * Cloudberry's fault injector, which the tests set on one node and the

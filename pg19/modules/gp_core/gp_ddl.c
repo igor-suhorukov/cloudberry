@@ -81,13 +81,16 @@
 #include "commands/tablespace.h"
 #include "commands/vacuum.h"
 #include "common/relpath.h"
+#include "mb/pg_wchar.h"
 #include "miscadmin.h"
 #include "nodes/makefuncs.h"
 #include "nodes/parsenodes.h"
 #include "nodes/readfuncs.h"
 #include "parser/parser.h"
 #include "storage/lmgr.h"
+#include "tcop/tcopprot.h"
 #include "tcop/utility.h"
+#include "utils/backend_status.h"
 #include "utils/guc.h"
 #include "utils/lsyscache.h"
 #include "utils/memutils.h"
@@ -102,7 +105,11 @@
 
 /*
  * What a dispatched statement's text starts with.  Only a dispatched backend
- * looks for it, so a user who types it gets PostgreSQL's syntax error.
+ * looks for it, so a user who types it gets PostgreSQL's syntax error.  Then
+ * the OIDs, "oids=<catalog>:<oid>,...", and " text=<n>" where the client's
+ * statement follows the line's end in n bytes -- what the segment's
+ * pg_stat_activity shows while it runs the tree, as Cloudberry's segments
+ * show the statement the coordinator dispatched -- and then the tree.
  */
 #define GP_TREE_MARKER		"/*gp:dispatched-tree*/"
 
@@ -605,7 +612,28 @@ next_ProcessUtility(PlannedStmt *pstmt, const char *queryString,
 }
 
 /*
- * What the segments are sent: the marker, the OIDs, and the tree.
+ * The end of the first line of what the segments are sent, and the client's
+ * statement after it: what pg_stat_activity shows of it here, as much of it
+ * as a segment's shows.
+ */
+static void
+payload_text(StringInfo buf)
+{
+	int			len = 0;
+
+	if (pgstat_track_activities && debug_query_string != NULL)
+		len = pg_mbcliplen(debug_query_string, strlen(debug_query_string),
+						   pgstat_track_activity_query_size - 1);
+	if (len > 0)
+		appendStringInfo(buf, " text=%d", len);
+	appendStringInfoChar(buf, '\n');
+	if (len > 0)
+		appendBinaryStringInfo(buf, debug_query_string, len);
+}
+
+/*
+ * What the segments are sent: the marker, the OIDs, the client's statement
+ * and the tree.
  */
 static char *
 build_payload(const char *tree)
@@ -623,7 +651,7 @@ build_payload(const char *tree)
 		appendStringInfo(&buf, "%s%u:%u", first ? "" : ",", a->catalog, a->oid);
 		first = false;
 	}
-	appendStringInfoChar(&buf, '\n');
+	payload_text(&buf);
 	appendStringInfoString(&buf, tree);
 
 	return buf.data;
@@ -700,7 +728,15 @@ GpDdlLabelPayloadOf(const ObjectAddress *object, const char *provider,
 	stmt->provider = pstrdup(provider);
 	stmt->label = label != NULL ? pstrdup(label) : NULL;
 
-	return psprintf("%s" "oids=\n%s", GP_TREE_MARKER, nodeToString(stmt));
+	{
+		StringInfoData buf;
+
+		initStringInfo(&buf);
+		appendStringInfoString(&buf, GP_TREE_MARKER "oids=");
+		payload_text(&buf);
+		appendStringInfoString(&buf, nodeToString(stmt));
+		return buf.data;
+	}
 }
 
 /*
@@ -958,6 +994,8 @@ gp_ddl_raw_parser(const char *str, RawParseMode mode)
 	{
 		const char *p = str + strlen(GP_TREE_MARKER);
 		const char *nl;
+		const char *oids_end;
+		const char *tree;
 		RawStmt    *raw;
 		Node	   *stmt;
 		MemoryContext oldcxt;
@@ -969,18 +1007,41 @@ gp_ddl_raw_parser(const char *str, RawParseMode mode)
 					 errmsg("malformed dispatched statement")));
 		p += 5;
 
+		/* the client's statement, which this backend shows while it runs */
+		tree = nl + 1;
+		oids_end = memchr(p, ' ', nl - p);
+		if (oids_end == NULL)
+			oids_end = nl;
+		else
+		{
+			char	   *end;
+			long		len;
+
+			if (strncmp(oids_end, " text=", 6) != 0)
+				ereport(ERROR,
+						(errcode(ERRCODE_PROTOCOL_VIOLATION),
+						 errmsg("malformed dispatched statement")));
+			len = strtol(oids_end + 6, &end, 10);
+			if (end != nl || len < 0 || len > (long) strlen(tree))
+				ereport(ERROR,
+						(errcode(ERRCODE_PROTOCOL_VIOLATION),
+						 errmsg("malformed dispatched statement")));
+			pgstat_report_activity(STATE_RUNNING, pnstrdup(tree, len));
+			tree += len;
+		}
+
 		preassigned_clear();
 		MemoryContextReset(ddl_cxt);
 
 		/* The OIDs outlive this parse: they are used when the statement runs. */
 		oldcxt = MemoryContextSwitchTo(ddl_cxt);
-		for (const char *q = p; q < nl; q++)
+		for (const char *q = p; q < oids_end; q++)
 			if (*q == ':')
 				n++;
 		preassigned = n > 0 ? palloc_array(GpOidAssignment, n) : NULL;
 		MemoryContextSwitchTo(oldcxt);
 
-		while (p < nl)
+		while (p < oids_end)
 		{
 			char	   *end;
 			unsigned long catalog;
@@ -992,7 +1053,7 @@ gp_ddl_raw_parser(const char *str, RawParseMode mode)
 						(errcode(ERRCODE_PROTOCOL_VIOLATION),
 						 errmsg("malformed OID list in dispatched statement")));
 			oid = strtoul(end + 1, &end, 10);
-			if (*end != ',' && end != nl)
+			if (*end != ',' && end != oids_end)
 				ereport(ERROR,
 						(errcode(ERRCODE_PROTOCOL_VIOLATION),
 						 errmsg("malformed OID list in dispatched statement")));
@@ -1002,7 +1063,7 @@ gp_ddl_raw_parser(const char *str, RawParseMode mode)
 			p = (*end == ',') ? end + 1 : end;
 		}
 
-		stmt = (Node *) stringToNode(nl + 1);
+		stmt = (Node *) stringToNode(tree);
 
 		raw = makeNode(RawStmt);
 		raw->stmt = stmt;

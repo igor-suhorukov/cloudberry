@@ -2385,7 +2385,8 @@ dtx_finish_again(int content, const char *sql, bool commit)
 
 	(void) GpClusterLiveStates(states);
 	for (int i = 0; i < nnodes; i++)
-		if (nodes[i].content == content && states[i].role == 'p')
+		if (nodes[i].content == content && states[i].role == 'p' &&
+			states[i].dbid == nodes[i].dbid)
 			node = &nodes[i];
 	pfree(states);
 	if (node == NULL || gang_dbname == NULL || gang_username == NULL)
@@ -2716,6 +2717,16 @@ dispatch_xact_callback(XactEvent event, void *arg)
 			 */
 			PG_TRY();
 			{
+				/*
+				 * Cloudberry's fault at the start of an abort, before the
+				 * segments are told anything (AbortTransaction(), xact.c): a
+				 * test holds a coordinator here whose parts are prepared,
+				 * and has its standby finish them (dtm_recovery_on_standby).
+				 * The abort record is written already, where Cloudberry's is
+				 * not; either way the transaction did not commit.
+				 */
+				(void) GP_FAULT("transaction_abort_failure");
+
 				gang_cancel_and_drain();
 				if (gang != NULL && gang_in_xact)
 				{

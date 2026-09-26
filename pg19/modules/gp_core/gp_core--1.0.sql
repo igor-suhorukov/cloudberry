@@ -1187,3 +1187,81 @@ CREATE FUNCTION pg_catalog.gp_request_fts_probe_scan()
 RETURNS bool
 AS 'MODULE_PATHNAME', 'gp_request_fts_probe_scan'
 LANGUAGE C VOLATILE;
+
+/*
+ * Cloudberry's segment administration functions (gp_segadmin.c), which its
+ * tools call to add, remove and put elsewhere the cluster's mirrors and its
+ * standby: on the coordinator, by a superuser, in a transaction -- the
+ * session sees its changes at once, the others once it commits, when they
+ * are written to the cluster configuration file and the coordinator's live
+ * copy of it; a rollback undoes them.  Their names and arguments are
+ * Cloudberry's; none is granted to anybody.
+ */
+CREATE FUNCTION pg_catalog.gp_add_segment_primary(text, text, int4, text)
+RETURNS int2
+AS 'MODULE_PATHNAME', 'gp_add_segment_primary'
+LANGUAGE C VOLATILE PARALLEL RESTRICTED;
+
+CREATE FUNCTION pg_catalog.gp_add_segment(int2, int2, "char", "char", "char", "char", int4, text, text, text)
+RETURNS int2
+AS 'MODULE_PATHNAME', 'gp_add_segment'
+LANGUAGE C VOLATILE PARALLEL RESTRICTED;
+
+CREATE FUNCTION pg_catalog.gp_remove_segment(int2)
+RETURNS bool
+AS 'MODULE_PATHNAME', 'gp_remove_segment'
+LANGUAGE C VOLATILE PARALLEL RESTRICTED;
+
+CREATE FUNCTION pg_catalog.gp_add_segment_mirror(int2, text, text, int4, text)
+RETURNS int2
+AS 'MODULE_PATHNAME', 'gp_add_segment_mirror'
+LANGUAGE C VOLATILE PARALLEL RESTRICTED;
+
+CREATE FUNCTION pg_catalog.gp_remove_segment_mirror(int2)
+RETURNS bool
+AS 'MODULE_PATHNAME', 'gp_remove_segment_mirror'
+LANGUAGE C VOLATILE PARALLEL RESTRICTED;
+
+CREATE FUNCTION pg_catalog.gp_add_master_standby(text, text, text)
+RETURNS int2
+AS 'MODULE_PATHNAME', 'gp_add_master_standby'
+LANGUAGE C VOLATILE PARALLEL RESTRICTED;
+
+CREATE FUNCTION pg_catalog.gp_add_master_standby(text, text, text, int4)
+RETURNS int2
+AS 'MODULE_PATHNAME', 'gp_add_master_standby_port'
+LANGUAGE C VOLATILE PARALLEL RESTRICTED;
+
+CREATE FUNCTION pg_catalog.gp_remove_master_standby()
+RETURNS bool
+AS 'MODULE_PATHNAME', 'gp_remove_master_standby'
+LANGUAGE C VOLATILE PARALLEL RESTRICTED;
+
+CREATE FUNCTION pg_catalog.gp_update_segment_configuration_mode_status(int4, "char", "char")
+RETURNS int2
+AS 'MODULE_PATHNAME', 'gp_update_segment_configuration_mode_status'
+LANGUAGE C VOLATILE PARALLEL RESTRICTED;
+
+/*
+ * gp_activate_standby(): on a standby promoted with pg_ctl, what Cloudberry's
+ * startup process does to its catalog as it promotes one -- the old
+ * coordinator gone, this node the coordinator -- called by the tool that
+ * activates it (gpactivatestandby), since the port's promotion changes no
+ * node.
+ */
+CREATE FUNCTION pg_catalog.gp_activate_standby()
+RETURNS bool
+AS 'MODULE_PATHNAME', 'gp_activate_standby'
+LANGUAGE C VOLATILE PARALLEL RESTRICTED;
+
+REVOKE ALL ON FUNCTION pg_catalog.gp_add_segment_primary(text, text, int4, text),
+	pg_catalog.gp_add_segment(int2, int2, "char", "char", "char", "char", int4, text, text, text),
+	pg_catalog.gp_remove_segment(int2),
+	pg_catalog.gp_add_segment_mirror(int2, text, text, int4, text),
+	pg_catalog.gp_remove_segment_mirror(int2),
+	pg_catalog.gp_add_master_standby(text, text, text),
+	pg_catalog.gp_add_master_standby(text, text, text, int4),
+	pg_catalog.gp_remove_master_standby(),
+	pg_catalog.gp_update_segment_configuration_mode_status(int4, "char", "char"),
+	pg_catalog.gp_activate_standby()
+	FROM PUBLIC;

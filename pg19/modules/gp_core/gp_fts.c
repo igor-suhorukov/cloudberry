@@ -130,6 +130,7 @@
 #include "gp_dispatch.h"
 #include "gp_fault.h"
 #include "gp_fts.h"
+#include "gp_standby.h"
 
 /* What the prober's connections are called, on the segments and in their logs. */
 #define GP_FTS_APPNAME			"cloudberry fts"
@@ -284,6 +285,9 @@ fts_walsender_exit(int code, Datum arg)
 		fts_shared->walsender_attempts++;
 	}
 	SpinLockRelease(&fts_shared->mutex);
+
+	/* on the coordinator, its standby is waited for no more */
+	GpStandbyWake();
 }
 
 /*
@@ -314,15 +318,32 @@ fts_client_auth(Port *port, int status)
 		fts_shared->walsender_pid = MyProcPid;
 		SpinLockRelease(&fts_shared->mutex);
 		before_shmem_exit(fts_walsender_exit, (Datum) 0);
+
+		/* on the coordinator, its standby may be waited for again */
+		GpStandbyWake();
 	}
+}
+
+int
+GpFtsWalreceiverSender(void)
+{
+	int			pid;
+
+	if (fts_shared == NULL)
+		return 0;
+	SpinLockAcquire(&fts_shared->mutex);
+	pid = fts_shared->walsender_pid;
+	SpinLockRelease(&fts_shared->mutex);
+	return pid;
 }
 
 /*
  * Cloudberry's GetMirrorStatus(): whether the mirror is up -- its WAL sender
- * has sent it some WAL -- whether it is in sync -- streaming, which is also
- * what makes it ready for synchronous replication -- whether synchronous
- * replication is on, and, for a mirror that is not up, whether FTS should ask
- * again before it says so.
+ * has sent it some WAL -- whether it is in sync -- streaming -- whether it is
+ * ready for synchronous replication -- streaming, or catching up and within
+ * gp.repl_catchup_within_range of this node's WAL (gp_standby.c) -- whether
+ * synchronous replication is on, and, for a mirror that is not up, whether
+ * FTS should ask again before it says so.
  */
 static void
 fts_mirror_status(bool *mirror_up, bool *in_sync, bool *ready,
@@ -347,11 +368,13 @@ fts_mirror_status(bool *mirror_up, bool *in_sync, bool *ready,
 		pid_t		walsnd_pid;
 		WalSndState state;
 		XLogRecPtr	write;
+		XLogRecPtr	sent;
 
 		SpinLockAcquire(&walsnd->mutex);
 		walsnd_pid = walsnd->pid;
 		state = walsnd->state;
 		write = walsnd->write;
+		sent = walsnd->sentPtr;
 		SpinLockRelease(&walsnd->mutex);
 
 		if (walsnd_pid != pid)
@@ -365,7 +388,8 @@ fts_mirror_status(bool *mirror_up, bool *in_sync, bool *ready,
 		*mirror_up = (state == WALSNDSTATE_CATCHUP && XLogRecPtrIsValid(write)) ||
 			state == WALSNDSTATE_STREAMING;
 		*in_sync = *mirror_up && state == WALSNDSTATE_STREAMING;
-		*ready = *in_sync;
+		*ready = *in_sync ||
+			(*mirror_up && state == WALSNDSTATE_CATCHUP && GpStandbyWithinRange(sent));
 		break;
 	}
 	*syncrep_on = (WalSndCtl->sync_standbys_status & SYNC_STANDBY_DEFINED) != 0;
@@ -742,6 +766,15 @@ static GpClusterNodeState *fts_states = NULL;
 /* When each node was first found starting up, 0 while it is not. */
 static TimestampTz *fts_restarting_since = NULL;
 
+/* Whose each place was at the last cycle, so that a new node starts afresh. */
+static int *fts_dbids = NULL;
+
+/*
+ * A node was added, removed or moved during this cycle (gp_segadmin.c):
+ * nothing it found is published or acted on, and a cycle follows at once.
+ */
+static bool fts_nodes_changed = false;
+
 /* Who the prober connects as: the bootstrap superuser. */
 static char *fts_user = NULL;
 
@@ -1110,7 +1143,13 @@ fts_update(FtsPair *p, char new_primary_role, char new_mirror_role,
 		pfree(desc);
 	}
 
-	GpClusterPublish(fts_states);
+	if (!GpClusterPublish(fts_states))
+	{
+		FTS_LOG(FTS_LOG_TERSE,
+				"FTS: the cluster's nodes changed during the probe; probing again");
+		fts_nodes_changed = true;
+		return false;
+	}
 	return true;
 }
 
@@ -1172,6 +1211,11 @@ fts_probe_answered(FtsPair *p)
 		 * first, and then the primary is told to stop waiting for it.
 		 */
 		(void) fts_update(p, 'p', 'm', p->in_sync, true, false);
+		if (fts_nodes_changed)
+		{
+			p->processed = true;
+			return;
+		}
 		FTS_LOG(FTS_LOG_VERBOSE, "FTS turning syncrep off on (content=%d, dbid=%d)",
 				primary->content, primary->dbid);
 		fts_next_message(p, FTS_MSG_SYNCREP_OFF, p->primary);
@@ -1228,6 +1272,11 @@ fts_primary_down(FtsPair *p)
 	 * mirror, and FTS no longer probes the primary.
 	 */
 	(void) fts_update(p, 'm', 'p', false, false, true);
+	if (fts_nodes_changed)
+	{
+		p->processed = true;
+		return;
+	}
 	FTS_LOG(FTS_LOG_VERBOSE, "FTS promoting mirror (content=%d, dbid=%d) to be the new primary",
 			mirror->content, mirror->dbid);
 	swap = p->primary;
@@ -1311,7 +1360,27 @@ fts_cycle(void)
 	FtsPair    *pairs;
 	int			npairs = 0;
 
+	/*
+	 * The nodes as they are now, and their states: a place whose node is
+	 * not the one this process adopted -- one added, removed or moved just
+	 * now -- makes the cycle wait for the next.
+	 */
+	fts_nodes_changed = false;
+	(void) GpClusterRefresh();
 	(void) GpClusterLiveStates(fts_states);
+	for (int i = 0; i < fts_nnodes; i++)
+	{
+		if (fts_states[i].dbid != fts_nodes[i].dbid)
+		{
+			fts_nodes_changed = true;
+			return;
+		}
+		if (fts_dbids[i] != fts_nodes[i].dbid)
+		{
+			fts_dbids[i] = fts_nodes[i].dbid;
+			fts_restarting_since[i] = 0;
+		}
+	}
 
 	pairs = palloc0_array(FtsPair, fts_nnodes);
 	for (int i = 0; i < fts_nnodes; i++)
@@ -1445,6 +1514,8 @@ GpFtsProberMain(Datum main_arg)
 										Max(fts_nnodes, 1) * sizeof(GpClusterNodeState));
 	fts_restarting_since = MemoryContextAllocZero(TopMemoryContext,
 												  Max(fts_nnodes, 1) * sizeof(TimestampTz));
+	fts_dbids = MemoryContextAllocZero(TopMemoryContext,
+									   Max(fts_nnodes, 1) * sizeof(int));
 	cycle_cxt = AllocSetContextCreate(TopMemoryContext, "gp_core fts",
 									  ALLOCSET_DEFAULT_SIZES);
 
@@ -1491,7 +1562,7 @@ GpFtsProberMain(Datum main_arg)
 
 		SpinLockAcquire(&fts_shared->mutex);
 		fts_shared->done_count = fts_shared->start_count;
-		requested = fts_shared->probe_requested;
+		requested = fts_shared->probe_requested || fts_nodes_changed;
 		SpinLockRelease(&fts_shared->mutex);
 		ConditionVariableBroadcast(&fts_shared->cv);
 

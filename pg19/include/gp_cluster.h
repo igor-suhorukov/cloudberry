@@ -38,6 +38,15 @@
  * (GpClusterRefresh), so that the primaries a gang reaches do not change
  * under it.
  *
+ * The nodes themselves change while the cluster runs too, on the coordinator
+ * alone: a mirror or a standby added, one removed, a failed one recovered
+ * somewhere else -- Cloudberry's segment administration functions, which its
+ * tools call (gp_segadmin.c).  Such a change is written to the file first,
+ * which a node started after it reads, and then to the coordinator's live
+ * copy, whose room is fixed as the server starts: a primary and a mirror for
+ * each content, the coordinator and a standby.  A place with no node in it
+ * has dbid 0.
+ *
  *-------------------------------------------------------------------------
  */
 #ifndef GP_CLUSTER_H
@@ -63,12 +72,16 @@ typedef struct GpSegmentConfig
 	char	   *datadir;
 } GpSegmentConfig;
 
-/* What FTS keeps of a node, in the order of GpClusterNodes(). */
+/*
+ * What FTS keeps of a node, in the order of GpClusterNodes(), and whose it
+ * is: the dbid of the node in that place, 0 where there is none.
+ */
 typedef struct GpClusterNodeState
 {
 	char		role;
 	char		mode;
 	char		status;
+	int			dbid;
 } GpClusterNodeState;
 
 /* FTS's durable form of them, in the coordinator's data directory. */
@@ -86,7 +99,11 @@ extern const GpSegmentConfig *GpClusterSegments(int *nsegments);
 /* The primary that holds this content id, or NULL. */
 extern const GpSegmentConfig *GpClusterSegmentByContent(int content);
 
-/* Every node the file lists, mirrors too, as this backend last adopted them. */
+/*
+ * Every place for a node, as this backend last adopted them: the nodes the
+ * file lists, mirrors too, and the places where one could be added, whose
+ * dbid is 0.
+ */
 extern int	GpClusterNodes(const GpSegmentConfig **nodes);
 
 /* Does any segment have a mirror? */
@@ -119,14 +136,30 @@ extern uint64 GpClusterLiveStates(GpClusterNodeState *states);
 /*
  * FTS only: make these the cluster's states -- written to
  * gpsegconfig_dump durably first, and then to shared memory, so that what a
- * backend adopts has been written.
+ * backend adopts has been written.  False, and nothing written, where a node
+ * was added, removed or moved since FTS read them: its dbids say so.
  */
-extern void GpClusterPublish(const GpClusterNodeState *states);
+extern bool GpClusterPublish(const GpClusterNodeState *states);
+
+/*
+ * Changing the nodes, on the coordinator: gp_segadmin.c's.  Between
+ * GpClusterLockNodes() and the end of the transaction, or
+ * GpClusterUnlockNodes(), nothing else changes them: GpClusterLiveNodes()
+ * returns each place as it is now, palloc'd, and GpClusterReplaceNodes()
+ * makes the places what it is given -- written to the file gp.cluster_config
+ * names, rewritten in place, then to gpsegconfig_dump and shared memory --
+ * if they are a cluster: a dbid once each, one primary for each content,
+ * every content there, and each node one the file can hold.
+ */
+extern void GpClusterLockNodes(void);
+extern void GpClusterUnlockNodes(void);
+extern int	GpClusterLiveNodes(GpSegmentConfig **nodes);
+extern void GpClusterReplaceNodes(const GpSegmentConfig *nodes);
 
 /* This node's own entry, or NULL when no cluster is configured. */
 extern const GpSegmentConfig *GpClusterSelf(void);
 
-/* The node of that dbid, coordinator included, or NULL. */
+/* The node of that dbid, coordinator included, or NULL, as last adopted. */
 extern const GpSegmentConfig *GpClusterNodeByDbid(int dbid);
 
 /* The coordinator, the primary with content id -1; NULL with no cluster. */

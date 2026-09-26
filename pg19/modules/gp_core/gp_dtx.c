@@ -156,6 +156,7 @@
 #include "tcop/pquery.h"
 #include "tcop/utility.h"
 #include "utils/array.h"
+#include "utils/backend_status.h"
 #include "utils/builtins.h"
 #include "utils/dsa.h"
 #include "utils/fmgroids.h"
@@ -1195,6 +1196,31 @@ static ExecutorRun_hook_type prev_executor_run = NULL;
 static ExecutorEnd_hook_type prev_executor_end = NULL;
 
 /*
+ * What a segment's part last showed of a statement it was sent, which
+ * pg_stat_activity goes on showing while the part is prepared and finished,
+ * as Cloudberry's does: its protocol's commands leave a backend's activity as
+ * it was, where the port's PREPARE TRANSACTION is a statement that would
+ * show itself (commit_blocking_on_standby finds a prepare waiting for its
+ * mirror by the statement).  The activity, not the text the part was sent,
+ * which for DDL is a tree whose activity is the client's statement
+ * (gp_ddl.c).  Empty until a part has been sent one.
+ */
+static char *dtx_part_statement = NULL;
+
+static void
+dtx_note_statement(void)
+{
+	if (!GpClusterIsDispatched() || !pgstat_track_activities ||
+		MyBEEntry == NULL || MyBEEntry->st_activity_raw == NULL)
+		return;
+	if (dtx_part_statement == NULL)
+		dtx_part_statement = MemoryContextAlloc(TopMemoryContext,
+												pgstat_track_activity_query_size);
+	strlcpy(dtx_part_statement, MyBEEntry->st_activity_raw,
+			pgstat_track_activity_query_size);
+}
+
+/*
  * Every statement a segment's dispatched backend runs -- a fragment, a
  * statement sent as text, a query a function in either runs -- reads with a
  * snapshot that agrees with the distributed one.  A reader's snapshot is its
@@ -1214,6 +1240,10 @@ dtx_executor_start(QueryDesc *queryDesc, int eflags)
 
 	/* who this backend is, for the global deadlock detector */
 	GpGddNoteBackend();
+
+	/* the client's statement, not one a function or a setting runs */
+	if (queryDesc->sourceText == debug_query_string)
+		dtx_note_statement();
 
 	/*
 	 * Where Cloudberry's segment starts a statement it was dispatched
@@ -1890,6 +1920,11 @@ dtx_ProcessUtility(PlannedStmt *pstmt, const char *queryString,
 
 		if (ts->gid != NULL && GpDtxParseGid(ts->gid, &gxid))
 		{
+			/* the part's statement is what its phases show */
+			if (dtx_part_statement != NULL && dtx_part_statement[0] != '\0' &&
+				GpClusterIsDispatched())
+				pgstat_report_activity(STATE_RUNNING, dtx_part_statement);
+
 			switch (ts->kind)
 			{
 				case TRANS_STMT_PREPARE:
@@ -1917,6 +1952,9 @@ dtx_ProcessUtility(PlannedStmt *pstmt, const char *queryString,
 					GP_DTX_SNAPSHOT_SETTING) == 0 &&
 			 ((VariableSetStmt *) parsetree)->kind == VAR_SET_VALUE)
 		snapshot_set = true;
+	else if (!IsA(parsetree, VariableSetStmt) &&
+			 context == PROCESS_UTILITY_TOPLEVEL && queryString == debug_query_string)
+		dtx_note_statement();
 
 	/* Cloudberry's, at the start of FinishPreparedTransaction() (twophase.c) */
 	if (finishing)

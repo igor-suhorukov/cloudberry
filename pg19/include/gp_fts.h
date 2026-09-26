@@ -48,6 +48,13 @@
 extern void GpFtsNotifyProber(void);
 
 /*
+ * The process id of this node's WAL sender to the receiver that connected
+ * as gp_walreceiver -- on a primary its mirror's, on the coordinator its
+ * standby's -- or 0 while there is none.
+ */
+extern int	GpFtsWalreceiverSender(void);
+
+/*
  * Settings, shared memory, the prober and what a segment answers it; from
  * gp_core's _PG_init, after the cluster is read.
  */
