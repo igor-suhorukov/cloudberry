@@ -135,6 +135,7 @@
 #include "gp_ic.h"
 #include "gp_motion.h"
 #include "gp_policy.h"
+#include "gp_refresh.h"
 #include "gp_scan.h"
 #include "gp_settings.h"
 #include "gp_share.h"
@@ -3562,6 +3563,10 @@ motion_executor_start(QueryDesc *queryDesc, int eflags)
 	if (GpClusterBackendRole() == GP_ROLE_DISPATCH &&
 		!(eflags & EXEC_FLAG_EXPLAIN_ONLY))
 		report_slices(queryDesc->plannedstmt);
+
+	/* a materialized view read from the segments, and not populated */
+	if (GpClusterBackendRole() == GP_ROLE_DISPATCH && !GpClusterIsSingleNode())
+		GpRefreshCheckScannable(queryDesc->plannedstmt, eflags);
 
 	/*
 	 * A gather the coordinator checked the privileges of: none to check

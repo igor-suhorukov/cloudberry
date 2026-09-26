@@ -400,7 +400,8 @@ GpDistributionApplyDefault(CreateStmt *stmt, Oid relid)
 		return;
 
 	relkind = get_rel_relkind(relid);
-	if (relkind != RELKIND_RELATION && relkind != RELKIND_PARTITIONED_TABLE)
+	if (relkind != RELKIND_RELATION && relkind != RELKIND_PARTITIONED_TABLE &&
+		relkind != RELKIND_MATVIEW)
 		return;
 
 	/* One the user already gave, in whatever way, stands. */

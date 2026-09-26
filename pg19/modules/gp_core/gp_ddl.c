@@ -105,6 +105,7 @@
 #include "utils/lsyscache.h"
 #include "utils/memutils.h"
 #include "utils/rel.h"
+#include "utils/ruleutils.h"
 #include "utils/syscache.h"
 
 #include "gp_cluster.h"
@@ -112,6 +113,7 @@
 #include "gp_dispatch.h"
 #include "gp_label.h"
 #include "gp_policy.h"
+#include "gp_refresh.h"
 #include "gp_scan.h"
 
 /*
@@ -299,10 +301,10 @@ drop_temp_namespaces(void)
  * Every statement PostgreSQL counts as changing the database -- the DDL list
  * of ClassifyUtilityCommandAsReadOnly() -- goes to every node, except:
  *
- *   - CREATE TABLE AS, SELECT INTO and REFRESH MATERIALIZED VIEW, which carry
- *     rows: a table filled from a query is the coordinator's until the
- *     distributed INSERT exists to fill it everywhere, and it has no
- *     distribution label, so everything that reads it reads it here;
+ *   - CREATE TABLE AS, SELECT INTO, CREATE MATERIALIZED VIEW and REFRESH
+ *     MATERIALIZED VIEW, which carry rows: made on every node WITH NO DATA,
+ *     as gp_sql makes each on a cluster, and filled by an INSERT, which puts
+ *     each row where it belongs (gp_refresh.c for a materialized view);
  *   - moving a database to another tablespace, whose other connections the
  *     segments cannot see to refuse it;
  *   - publications, subscriptions and event triggers, which are about this
@@ -389,12 +391,28 @@ dispatch_class(Node *parsetree)
 			{
 				CreateTableAsStmt *ctas = (CreateTableAsStmt *) parsetree;
 
-				if (ctas->objtype == OBJECT_TABLE && ctas->into->skipData)
+				if ((ctas->objtype == OBJECT_TABLE ||
+					 ctas->objtype == OBJECT_MATVIEW) && ctas->into->skipData)
 					return GP_DISPATCH_IN_XACT;
 				return GP_DISPATCH_LOCAL;
 			}
 
+		/*
+		 * A materialized view whose rows are on the segments is emptied on
+		 * every node, as gp_refresh.c's REFRESH begins; one of the
+		 * coordinator's alone is refreshed here.
+		 */
 		case T_RefreshMatViewStmt:
+			{
+				RefreshMatViewStmt *stmt = (RefreshMatViewStmt *) parsetree;
+				Oid			relid = RangeVarGetRelid(stmt->relation, NoLock, true);
+
+				if (stmt->skipData && !stmt->concurrent &&
+					OidIsValid(relid) && GpRefreshIsDistributed(relid))
+					return GP_DISPATCH_IN_XACT;
+				return GP_DISPATCH_LOCAL;
+			}
+
 		case T_CreatePublicationStmt:
 		case T_AlterPublicationStmt:
 		case T_CreateSubscriptionStmt:
@@ -803,6 +821,29 @@ run_tablespace_statement(PlannedStmt *pstmt, const char *queryString,
 							params, queryEnv, dest, qc);
 }
 
+/* A statement's arguments, for a callback that runs it (GpRefreshRunCopy). */
+typedef struct RunArgs
+{
+	PlannedStmt *pstmt;
+	const char *queryString;
+	bool		readOnlyTree;
+	ProcessUtilityContext context;
+	ParamListInfo params;
+	QueryEnvironment *queryEnv;
+	DestReceiver *dest;
+	QueryCompletion *qc;
+} RunArgs;
+
+static void
+run_copy(void *arg)
+{
+	RunArgs    *a = (RunArgs *) arg;
+
+	run_tablespace_statement(a->pstmt, a->queryString, a->readOnlyTree,
+							 a->context, a->params, a->queryEnv, a->dest,
+							 a->qc, false);
+}
+
 /* ------------------------------------------------------------------------- */
 /* The hooks                                                                 */
 /* ------------------------------------------------------------------------- */
@@ -1002,6 +1043,41 @@ ctas_as_create(CreateTableAsStmt *ctas)
 }
 
 /*
+ * What a segment is sent for a CREATE MATERIALIZED VIEW: the statement
+ * itself, WITH NO DATA -- a view's rule is its query, so the segment has to
+ * make the view from one -- its query printed here as ruleutils prints a
+ * view's, and parsed again, to be analyzed there against the same catalogs,
+ * in the same search_path, as it was here.  Its rows come after, by REFRESH
+ * (gp_refresh.c).  NULL when it made nothing.
+ */
+static char *
+matview_as_create(CreateTableAsStmt *ctas)
+{
+	CreateTableAsStmt *create;
+	RawStmt    *raw;
+	Oid			relid;
+
+	if (recorded == NIL)
+		return NULL;
+	relid = RangeVarGetRelid(ctas->into->rel, NoLock, false);
+
+	raw = linitial_node(RawStmt,
+						raw_parser(pg_get_querydef(castNode(Query, ctas->query), false),
+								   RAW_PARSE_DEFAULT));
+	create = makeNode(CreateTableAsStmt);
+	create->query = raw->stmt;
+	create->into = copyObject(ctas->into);
+	create->into->viewQuery = NULL;
+	create->into->skipData = true;
+	if (create->into->rel->relpersistence != RELPERSISTENCE_TEMP)
+		create->into->rel->schemaname = get_namespace_name(get_rel_namespace(relid));
+	create->objtype = OBJECT_MATVIEW;
+	create->is_select_into = false;
+	create->if_not_exists = false;
+	return nodeToString(create);
+}
+
+/*
  * After CREATE INDEX: indcheckxmin here where a segment set it, as
  * Cloudberry's cdb_sync_indcheckxmin_with_segments() sets it (indexcmds.c).
  * An index built over a heap with HOT chains the build found broken is not
@@ -1123,12 +1199,35 @@ gp_ddl_ProcessUtility(PlannedStmt *pstmt, const char *queryString,
 	/*
 	 * Only the coordinator dispatches, and a statement run while another one
 	 * is being recorded is part of that one: the segments run the outer
-	 * statement, and do what it does inside, themselves.
+	 * statement, and do what it does inside, themselves.  A segment's COPY
+	 * that brings a materialized view its rows runs as gp_refresh.c says.
 	 */
 	if (recording || GpClusterBackendRole() != GP_ROLE_DISPATCH)
 	{
+		RangeVar   *staging;
+
+		if (GpClusterBackendRole() == GP_ROLE_EXECUTE &&
+			IsA(parsetree, CopyStmt) &&
+			(staging = GpRefreshFillTarget((CopyStmt *) parsetree)) != NULL)
+		{
+			PlannedStmt *copy = copyObject(pstmt);
+			RunArgs		args = {copy, queryString, false, context,
+			params, queryEnv, dest, qc};
+
+			castNode(CopyStmt, copy->utilityStmt)->relation = staging;
+			GpRefreshRunCopy(run_copy, &args);
+			return;
+		}
 		run_tablespace_statement(pstmt, queryString, readOnlyTree, context,
 								 params, queryEnv, dest, qc, false);
+		return;
+	}
+
+	/* REFRESH of a materialized view on the segments, with its rows */
+	if (IsA(parsetree, RefreshMatViewStmt) &&
+		GpRefreshNeedsFill((RefreshMatViewStmt *) parsetree))
+	{
+		GpRefreshMatView(pstmt, queryString, context, params, queryEnv, qc);
 		return;
 	}
 
@@ -1172,7 +1271,9 @@ gp_ddl_ProcessUtility(PlannedStmt *pstmt, const char *queryString,
 	 */
 	if (IsA(parsetree, CreateTableAsStmt))
 	{
-		tree = ctas_as_create((CreateTableAsStmt *) parsetree);
+		tree = ((CreateTableAsStmt *) parsetree)->objtype == OBJECT_MATVIEW
+			? matview_as_create((CreateTableAsStmt *) parsetree)
+			: ctas_as_create((CreateTableAsStmt *) parsetree);
 		if (tree == NULL)
 		{
 			recorded = NIL;

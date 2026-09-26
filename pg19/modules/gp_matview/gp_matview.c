@@ -243,6 +243,19 @@ gp_matview_ProcessUtility(PlannedStmt *pstmt, const char *queryString,
 
 	if (incremental)
 	{
+		const GpCoreApi *core = GpCoreApiLookup();
+
+		/*
+		 * On a cluster a materialized view's rows are on the segments
+		 * (gp_core's gp_refresh.c), where the delta maintenance of one kept
+		 * up to date would have to reach them: not built.
+		 */
+		if (core != NULL && !core->is_single_node())
+			ereport(ERROR,
+					(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+					 errmsg("incremental materialized views are not supported on a cluster"),
+					 errhint("Create it without INCREMENTAL, and refresh it with REFRESH MATERIALIZED VIEW.")));
+
 		/* What the view is made of has to be something maintenance can follow. */
 		GpIvmCheckQuery((Query *) ctas->query);
 

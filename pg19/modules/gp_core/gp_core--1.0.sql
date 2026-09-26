@@ -61,6 +61,16 @@ AS 'MODULE_PATHNAME', 'gp_exec_fragment'
 LANGUAGE C STRICT;
 
 /*
+ * A segment told that the COPY the coordinator sends next brings a
+ * materialized view its rows, as its REFRESH on a cluster fills it
+ * (gp_refresh.c).  Only from a connection that carries the cluster secret.
+ */
+CREATE FUNCTION gp_internal.matview_fill(view regclass, phase text)
+RETURNS void
+AS 'MODULE_PATHNAME', 'gp_matview_fill'
+LANGUAGE C STRICT VOLATILE;
+
+/*
  * A batch of a Motion's rows, relayed to the segment that receives them, and
  * the statement's word that it is done with them.  Both only from a
  * connection that carries the cluster secret.

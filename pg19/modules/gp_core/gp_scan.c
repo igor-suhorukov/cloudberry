@@ -245,6 +245,7 @@ GpScanDistributedPolicy(Oid relid)
 		return NULL;
 	if (get_rel_relkind(relid) != RELKIND_RELATION &&
 		get_rel_relkind(relid) != RELKIND_PARTITIONED_TABLE &&
+		get_rel_relkind(relid) != RELKIND_MATVIEW &&
 		!GpPolicyIsExternalTable(relid))
 		return NULL;
 

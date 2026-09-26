@@ -369,6 +369,7 @@ modules = [
                      'modules/gp_core/gp_gdd.c',
                      'modules/gp_core/gp_loopback.c',
                      'modules/gp_core/gp_ddl.c',
+                     'modules/gp_core/gp_refresh.c',
                      'modules/gp_core/gp_hash.c',
                      'modules/gp_core/gp_legacyhash.c',
                      'modules/gp_core/gp_scan.c',

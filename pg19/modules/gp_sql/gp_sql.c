@@ -1221,6 +1221,10 @@ rethrow_without_insert(const char *sql, MemoryContext cxt)
  * is called.  The rows are the query's, deparsed as ruleutils deparses a
  * view: the query was analyzed here, and the INSERT is analyzed again from
  * its text, against the same catalogs, in the same transaction.
+ *
+ * CREATE MATERIALIZED VIEW the same way, but filled by REFRESH, which on a
+ * cluster puts a view's rows on the segments (gp_core's gp_refresh.c), as
+ * PostgreSQL fills a view it has made WITH NO DATA by its REFRESH.
  */
 static void
 gp_sql_cluster_ctas(PlannedStmt *pstmt, const char *queryString,
@@ -1276,6 +1280,27 @@ gp_sql_cluster_ctas(PlannedStmt *pstmt, const char *queryString,
 	GpDistributionApplyCtasDefault(relid, query);
 	if (!fill)
 		return;
+
+	if (ctas->objtype == OBJECT_MATVIEW)
+	{
+		RefreshMatViewStmt *refresh = makeNode(RefreshMatViewStmt);
+		PlannedStmt *wrapper = makeNode(PlannedStmt);
+		QueryCompletion rqc;
+
+		refresh->relation = makeRangeVar(get_namespace_name(get_rel_namespace(relid)),
+										 get_rel_name(relid), -1);
+		wrapper->commandType = CMD_UTILITY;
+		wrapper->canSetTag = false;
+		wrapper->utilityStmt = (Node *) refresh;
+		wrapper->stmt_location = pstmt->stmt_location;
+		wrapper->stmt_len = pstmt->stmt_len;
+		InitializeQueryCompletion(&rqc);
+		ProcessUtility(wrapper, queryString, false, PROCESS_UTILITY_SUBCOMMAND,
+					   NULL, queryEnv, None_Receiver, &rqc);
+		if (qc)
+			SetQueryCompletion(qc, CMDTAG_SELECT, rqc.nprocessed);
+		return;
+	}
 
 	sql = psprintf("INSERT INTO %s %s",
 				   quote_qualified_identifier(get_namespace_name(get_rel_namespace(relid)),
@@ -1763,7 +1788,8 @@ gp_sql_ProcessUtility(PlannedStmt *pstmt, const char *queryString,
 	}
 
 	if (IsA(parsetree, CreateTableAsStmt) && on_cluster_coordinator() &&
-		((CreateTableAsStmt *) parsetree)->objtype == OBJECT_TABLE &&
+		(((CreateTableAsStmt *) parsetree)->objtype == OBJECT_TABLE ||
+		 ((CreateTableAsStmt *) parsetree)->objtype == OBJECT_MATVIEW) &&
 		IsA(((CreateTableAsStmt *) parsetree)->query, Query) && params == NULL &&
 		!in_cluster_ctas)
 	{
