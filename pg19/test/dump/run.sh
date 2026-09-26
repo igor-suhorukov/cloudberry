@@ -38,12 +38,11 @@
 #      for what names an OID of the new one -- a directory table's
 #      directory, a dynamic table's job;
 #   5. and what the objects do there is what they did: where each row is,
-#      tags, queues, groups and profiles, materialized views populated or
-#      not, AO options and encodings, PAX, a bitmap index;
+#      tags, an index's too, queues, groups and profiles, materialized
+#      views populated or not, AO options and encodings, PAX, a bitmap index;
 #   6. one node: an incremental view's triggers, which the dump does not
 #      carry and its label makes again, a dynamic table's job, and a
-#      directory table's directory, whose files the dump does not carry;
-#   7. and what the plan says is not carried: an index's tags.
+#      directory table's directory, whose files the dump does not carry.
 #
 #     PG_BINDIR=/path/to/pg19/bin pg19/test/dump/run.sh
 #
@@ -168,6 +167,14 @@ for line in open(sys.argv[1], encoding='utf-8'):
             out.extend(sorted(block)); out.append(line); block = None
         else:
             block.append(line)
+        continue
+    # an object's labels, one line each, come in the order pg_seclabel's
+    # rows are read, which a restore need not keep
+    if line.startswith('SECURITY LABEL FOR ') and out and out[-1].startswith('SECURITY LABEL FOR '):
+        run = len(out)
+        while run > 0 and out[run - 1].startswith('SECURITY LABEL FOR '):
+            run -= 1
+        out[run:] = sorted(out[run:] + [line])
         continue
     out.append(line)
     if line.startswith('COPY ') and line.rstrip().endswith('FROM stdin;'):
@@ -300,9 +307,9 @@ out=$(grep -c -e 'CREATE SCHEMA gp_ao;' -e 'CREATE SCHEMA gp_sql;' "$ROOT/a.sql"
 out=$(grep -c 'pg_pax_blocks' "$ROOT/a.sql")
 [ "$out" = 0 ] && ok "no PAX table's aux table is written: they are in pg_ext_aux" \
 	|| notok "PAX's aux tables" "$(grep 'pg_pax_blocks' "$ROOT/a.sql" | head -3)"
-out=$(grep -c -e '^COPY gp_sql.index_tag' "$ROOT/a.sql")
-[ "$out" = 0 ] && ok "nor an index's tags, which name the index by OID" \
-	|| notok "index tags" "$out"
+out=$(grep -c -e "^SECURITY LABEL FOR gp_index_tag ON TABLE public.t_hash IS '{\"t_hash_b\": {\"owner_team\": \"index\"}}';" "$ROOT/a.sql")
+[ "$out" = 1 ] && ok "an index's tags are its table's label, by the index's name, written with the table" \
+	|| notok "index tags" "$(grep 'gp_index_tag' "$ROOT/a.sql")"
 out=$(grep -c 'gp_dynamic_table_refresh_' "$ROOT/a.sql")
 [ "$out" = 0 ] && ok "nor a dynamic table's job, which its label makes again" \
 	|| notok "a dynamic table's job" "$(grep 'gp_dynamic_table_refresh_' "$ROOT/a.sql")"
@@ -371,6 +378,8 @@ same "an external table's options" src \
         FROM pg_foreign_table t JOIN pg_class c ON c.oid = t.ftrelid ORDER BY 1"
 same "the tags on tables" src \
      "SELECT objname, label FROM pg_seclabels WHERE provider = 'gp_tag' ORDER BY 1"
+same "and an index's, on the index made again under another OID" src \
+     "SELECT indexrelid::regclass::text, tagname, tagvalue FROM gp_sql.index_tag ORDER BY 1, 2"
 same "the tags' definitions, each owned by the role it was" postgres \
      "SELECT tagname, pg_get_userbyid(tagowner), allowed_values FROM pg_tag ORDER BY 1"
 same "each role's queue, group, profile and DENY windows" postgres \
@@ -449,14 +458,6 @@ is "a directory table's row comes back, and its file does not" two src \
 cp -r "$(datadir one 0)/$old/." "$(datadir two 0)/$new/"
 is "until the old directory's files are copied into its new one" two src \
    "SELECT convert_from(gp_sql.directory_table_get('docs'::regclass, 'a/b.txt'), 'UTF8')" "hello"
-
-###############################################################################
-echo "7. what the plan says a dump does not carry"
-###############################################################################
-is "an index's tags: the source has them" a src \
-   "SELECT count(*) FROM gp_sql.index_tag WHERE indexrelid = 't_hash_b'::regclass" "1"
-is "and the restored index has none" b src \
-   "SELECT count(*) FROM gp_sql.index_tag" "0"
 
 echo
 echo "$pass passed, $fail failed"

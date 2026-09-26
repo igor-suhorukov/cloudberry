@@ -45,6 +45,12 @@ struct QueryDesc;
 #define GP_TAGDEF_ROLE		"gp_tag_definitions"
 
 /*
+ * An index's tags: a label of this provider on the index's table, by the
+ * index's name, since PostgreSQL 19 labels no index.  See tag.c.
+ */
+#define GP_INDEX_TAG_PROVIDER	"gp_index_tag"
+
+/*
  * The namespace of the shorthand:
  *
  *	  CREATE TABLE t (...) WITH (gp_tag.env = 'prod')
@@ -153,6 +159,12 @@ extern void GpTagCheckClause(Oid classId, Oid objectId, List *tags,
 
 /* An index is being dropped: forget the tags kept for it. */
 extern void GpTagIndexDropped(Oid indexRelId);
+
+/*
+ * An index was renamed from oldname: its tags follow it.  Call after the
+ * rename, with the command counter advanced.
+ */
+extern void GpTagIndexRenamed(Oid indexRelId, const char *oldname);
 
 /*
  * DROP ROLE, from its drop hook: a role that owns a tag is refused, as

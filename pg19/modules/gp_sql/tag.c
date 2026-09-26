@@ -44,14 +44,28 @@
  * owner's OID, as the port wrote it before, is still read.
  *
  * A role's label is the cluster's, as pg_tag is, so a tag defined in one
- * database is one in every other -- the extension need not even be there, but
- * for an index's tags, which are rows of its own (see below) -- and pg_dumpall
- * writes it with the roles.  A definition is no secret, so a label anybody can
+ * database is one in every other -- the extension need not even be there --
+ * and pg_dumpall writes it with the roles.  A definition is no secret, so a label anybody can
  * read costs nothing.  What it does cost: every CREATE, ALTER and DROP TAG
  * rewrites the one label, so two of them in flight take turns; and DROP TAG
  * sees only its own database's assignments, where Cloudberry's shared
  * pg_tag_description holds every database's, so an assignment whose tag is
  * gone is passed over rather than failed on.
+ *
+ * An index can carry no label in PostgreSQL 19 (SecLabelSupportsObjectType),
+ * so an index's tags are its table's, a label of a third provider,
+ * "gp_index_tag", by the index's name:
+ *
+ *	  SECURITY LABEL FOR gp_index_tag ON TABLE t IS '{"t_a_idx": {"env": "prod"}}'
+ *
+ * By name rather than OID, so that they are dumped and restored as the
+ * rest are: pg_dump writes the table's label with the table, and a restore
+ * makes the index later, after the tables' rows, under an OID of its own, but
+ * under the same name.  The name follows the index -- a rename moves its
+ * tags (GpTagIndexRenamed), and a drop takes them (GpTagIndexDropped); an
+ * index is in its table's schema always, and REINDEX CONCURRENTLY keeps its
+ * name -- and tags under a name no index of the table has, as in a restore
+ * before its indexes are made, are kept and read as no index's.
  *
  * Why providers of their own, beside gp_core's "gp".  The keys of a "gp"
  * label are fixed, and checked against a list when the label is set, because
@@ -71,6 +85,7 @@
 
 #include "access/transam.h"
 #include "catalog/dependency.h"
+#include "catalog/index.h"
 #include "catalog/namespace.h"
 #include "catalog/objectaddress.h"
 #include "catalog/pg_authid.h"
@@ -85,7 +100,6 @@
 #include "common/int.h"
 #include "fmgr.h"
 #include "funcapi.h"
-#include "executor/spi.h"
 #include "lib/stringinfo.h"
 #include "miscadmin.h"
 #include "nodes/makefuncs.h"
@@ -94,6 +108,7 @@
 #include "utils/array.h"
 #include "utils/builtins.h"
 #include "utils/fmgrprotos.h"
+#include "utils/json.h"
 #include "utils/jsonb.h"
 #include "utils/lsyscache.h"
 #include "utils/numeric.h"
@@ -109,43 +124,14 @@
  */
 #define GP_TAG_MAX_PER_OBJECT	50
 
+/* An index's tags, which are its table's label's (below). */
+static bool rel_is_index(Oid relId);
+static char *index_tags_of(Oid indexRelId);
+static void gp_index_tag_check(const ObjectAddress *object, const char *seclabel);
+
 /* ------------------------------------------------------------------------- */
 /* The definitions                                                           */
 /* ------------------------------------------------------------------------- */
-
-/*
- * One of the module's own tables, or InvalidOid when it is not there.
- *
- * The table rather than the schema, because DROP EXTENSION drops them one at
- * a time: while it runs, the schema still exists and the tables are going
- * away under it, and this module's own hooks fire on each drop.
- */
-static Oid
-tag_table_oid(const char *relname)
-{
-	Oid			nsp = get_namespace_oid(GP_SQL_SCHEMA, true);
-
-	if (!OidIsValid(nsp))
-		return InvalidOid;
-
-	return get_relname_relid(relname, nsp);
-}
-
-/*
- * An index's tags are rows in gp_sql.index_tag, so tagging one needs the
- * extension in the index's database.  Say that, rather than let a query fail
- * with "relation does not exist".
- */
-static void
-tag_require_extension(void)
-{
-	if (!OidIsValid(tag_table_oid("index_tag")))
-		ereport(ERROR,
-				(errcode(ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE),
-				 errmsg("tags of an index need the \"%s\" extension in this database",
-						GP_SQL_SCHEMA),
-				 errhint("Run \"CREATE EXTENSION gp_sql\".")));
-}
 
 /*
  * A tag as its definition says it: what Cloudberry's pg_tag row holds.  The
@@ -709,6 +695,7 @@ GpTagRegisterProvider(void)
 {
 	register_label_provider(GP_TAG_PROVIDER, gp_tag_check);
 	register_label_provider(GP_TAGDEF_PROVIDER, gp_tagdef_check);
+	register_label_provider(GP_INDEX_TAG_PROVIDER, gp_index_tag_check);
 }
 
 /* ------------------------------------------------------------------------- */
@@ -895,31 +882,32 @@ tag_object_name(Oid classId, Oid objectId)
  * AddTagDescriptions, AlterTagDescriptions and UnsetTagDescriptions): with the
  * object it makes, a tag named twice is refused; on an ALTER, a tag the object
  * does not carry yet is added with a WARNING, and one taken away that it does
- * not carry is refused.  An index's tags are rows, and are not asked about.
+ * not carry is refused.  An index's tags are its table's label's, under its
+ * name.
  */
 void
 GpTagCheckClause(Oid classId, Oid objectId, List *tags, bool creating)
 {
 	ObjectAddress addr;
-	char	   *label;
+	char	   *label = NULL;
 	Jsonb	   *had = NULL;
 	List	   *seen = NIL;
 	char	   *objname;
 
 	if (tags == NIL || tag_checked_elsewhere())
 		return;
-	if (classId == RelationRelationId)
-	{
-		char		relkind = get_rel_relkind(objectId);
-
-		if (relkind == RELKIND_INDEX || relkind == RELKIND_PARTITIONED_INDEX ||
-			get_rel_persistence(objectId) == RELPERSISTENCE_TEMP)
-			return;
-	}
+	if (classId == RelationRelationId &&
+		get_rel_persistence(objectId) == RELPERSISTENCE_TEMP)
+		return;
 
 	objname = tag_object_name(classId, objectId);
-	ObjectAddressSet(addr, classId, objectId);
-	label = GetSecurityLabel(&addr, GP_TAG_PROVIDER);
+	if (classId == RelationRelationId && rel_is_index(objectId))
+		label = index_tags_of(objectId);
+	else
+	{
+		ObjectAddressSet(addr, classId, objectId);
+		label = GetSecurityLabel(&addr, GP_TAG_PROVIDER);
+	}
 	if (label != NULL)
 		had = DatumGetJsonbP(DirectFunctionCall1(jsonb_in, CStringGetDatum(label)));
 
@@ -958,53 +946,213 @@ GpTagCheckClause(Oid classId, Oid objectId, List *tags, bool creating)
 	}
 }
 
+/* ------------------------------------------------------------------------- */
+/* An index's tags: its table's label, by its name                           */
+/* ------------------------------------------------------------------------- */
+
+static bool
+rel_is_index(Oid relId)
+{
+	char		relkind = get_rel_relkind(relId);
+
+	return relkind == RELKIND_INDEX || relkind == RELKIND_PARTITIONED_INDEX;
+}
+
+/* A table's "gp_index_tag" label, parsed, or NULL. */
+static Jsonb *
+index_tags_label(Oid tableId)
+{
+	ObjectAddress addr;
+	char	   *label;
+
+	ObjectAddressSet(addr, RelationRelationId, tableId);
+	label = GetSecurityLabel(&addr, GP_INDEX_TAG_PROVIDER);
+	if (label == NULL)
+		return NULL;
+	return DatumGetJsonbP(DirectFunctionCall1(jsonb_in, CStringGetDatum(label)));
+}
+
+/* The entry of `name` in a label, as JSON text, or NULL. */
+static char *
+index_tags_entry(Jsonb *label, const char *name)
+{
+	JsonbValue	buf;
+	JsonbValue *v;
+
+	if (label == NULL || !JB_ROOT_IS_OBJECT(label))
+		return NULL;
+	v = getKeyJsonValueFromContainer(&label->root, name, strlen(name), &buf);
+	if (v == NULL || v->type != jbvBinary)
+		return NULL;
+	return JsonbToCString(NULL, v->val.binary.data, v->val.binary.len);
+}
+
 /*
- * Tags an index carries.  A security label cannot reach an index -- PG19's
- * SecLabelSupportsObjectType says so -- so they go to a table of the module's
- * own.  The cost is that they are dumped with that table rather than beside
- * the index, which is the one place tags round-trip less well than the rest.
+ * The label with `name`'s entry taken out and, where entry is not NULL,
+ * put back as entry: JSON text, an object of tags.  An entry with no tags
+ * left is left out, and so is a label with no entries: NULL.
  */
+static char *
+index_tags_with(Jsonb *label, const char *name, const char *entry)
+{
+	Datum		result;
+	Jsonb	   *jb;
+
+	result = label != NULL && JB_ROOT_IS_OBJECT(label)
+		? DirectFunctionCall2(jsonb_delete, JsonbPGetDatum(label),
+							  CStringGetTextDatum(name))
+		: DirectFunctionCall1(jsonb_in, CStringGetDatum("{}"));
+	if (entry != NULL && strcmp(entry, "{}") != 0)
+	{
+		StringInfoData one;
+
+		initStringInfo(&one);
+		appendStringInfoChar(&one, '{');
+		escape_json(&one, name);
+		appendStringInfo(&one, ": %s}", entry);
+		result = DirectFunctionCall2(jsonb_concat, result,
+									 DirectFunctionCall1(jsonb_in,
+														 CStringGetDatum(one.data)));
+	}
+	jb = DatumGetJsonbP(result);
+	if (JB_ROOT_COUNT(jb) == 0)
+		return NULL;
+	return JsonbToCString(NULL, &jb->root, VARSIZE(jb));
+}
+
+static void
+index_tags_store(Oid tableId, const char *label)
+{
+	ObjectAddress addr;
+
+	ObjectAddressSet(addr, RelationRelationId, tableId);
+	SetSecurityLabel(&addr, GP_INDEX_TAG_PROVIDER, label);
+}
+
+/* The tags an index carries, as JSON text, or NULL. */
+static char *
+index_tags_of(Oid indexRelId)
+{
+	Oid			tableId = IndexGetRelation(indexRelId, true);
+	char	   *name = get_rel_name(indexRelId);
+
+	if (!OidIsValid(tableId) || name == NULL)
+		return NULL;
+	return index_tags_entry(index_tags_label(tableId), name);
+}
+
 static void
 tag_apply_to_index(Oid indexRelId, List *tags)
 {
-	ListCell   *lc;
+	Oid			tableId = IndexGetRelation(indexRelId, false);
+	char	   *name = get_rel_name(indexRelId);
+	Jsonb	   *label = index_tags_label(tableId);
 
-	tag_require_extension();
+	index_tags_store(tableId,
+					 index_tags_with(label, name,
+									 tag_merge(index_tags_entry(label, name), tags)));
+}
 
-	if (SPI_connect() != SPI_OK_CONNECT)
-		elog(ERROR, "SPI_connect failed");
+/*
+ * The relabel check hook of "gp_index_tag": what SECURITY LABEL FOR
+ * gp_index_tag accepts, as a restore writes it.  On a relation that can have
+ * indexes; an object of entries, each an object of tags, checked as
+ * gp_tag_check checks an object's; an entry need not name an index that is
+ * there, which a restore makes after the label.
+ */
+static void
+gp_index_tag_check(const ObjectAddress *object, const char *seclabel)
+{
+	Jsonb	   *jb;
+	Jsonb	   *had = NULL;
+	char	   *existing;
+	JsonbIterator *it;
+	JsonbIteratorToken tok;
+	JsonbValue	v;
+	char		relkind;
 
-	foreach(lc, tags)
+	if (object->classId != RelationRelationId || object->objectSubId != 0 ||
+		!((relkind = get_rel_relkind(object->objectId)) == RELKIND_RELATION ||
+		  relkind == RELKIND_PARTITIONED_TABLE || relkind == RELKIND_MATVIEW))
+		ereport(ERROR,
+				(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+				 errmsg("a \"%s\" security label goes on a table or a materialized view",
+						GP_INDEX_TAG_PROVIDER)));
+	if (seclabel == NULL)
+		return;
+
+	jb = DatumGetJsonbP(DirectFunctionCall1(jsonb_in, CStringGetDatum(seclabel)));
+	if (!JB_ROOT_IS_OBJECT(jb))
+		ereport(ERROR,
+				(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+				 errmsg("a \"%s\" security label must be a JSON object",
+						GP_INDEX_TAG_PROVIDER),
+				 errhint("Write it as {\"index\": {\"env\": \"prod\"}}, or use TAG on the index.")));
+	existing = GetSecurityLabel(object, GP_INDEX_TAG_PROVIDER);
+	if (existing != NULL)
+		had = DatumGetJsonbP(DirectFunctionCall1(jsonb_in, CStringGetDatum(existing)));
+
+	it = JsonbIteratorInit(&jb->root);
+	tok = JsonbIteratorNext(&it, &v, true);		/* the object's start */
+	while ((tok = JsonbIteratorNext(&it, &v, true)) != WJB_DONE)
 	{
-		DefElem    *def = (DefElem *) lfirst(lc);
-		Oid			argtypes[3] = {OIDOID, NAMEOID, TEXTOID};
-		Datum		values[3];
+		char	   *name;
+		char	   *entry;
+		char	   *before;
+		Jsonb	   *was = NULL;
+		JsonbIterator *eit;
+		JsonbValue	ev;
+		JsonbIteratorToken etok;
+		char	   *key = NULL;
+		int			count = 0;
 
-		values[0] = ObjectIdGetDatum(indexRelId);
-		values[1] = CStringGetDatum(def->defname);
-
-		if (def->arg == NULL)
-		{
-			if (SPI_execute_with_args("DELETE FROM " GP_SQL_SCHEMA ".index_tag"
-									  " WHERE indexrelid = $1 AND tagname = $2",
-									  2, argtypes, values, NULL, false, 0) != SPI_OK_DELETE)
-				elog(ERROR, "gp_sql: could not remove a tag from an index");
+		if (tok != WJB_KEY)
 			continue;
+		name = pnstrdup(v.val.string.val, v.val.string.len);
+		tok = JsonbIteratorNext(&it, &v, true);
+		if (tok != WJB_VALUE || v.type != jbvBinary ||
+			!JsonContainerIsObject(v.val.binary.data))
+			ereport(ERROR,
+					(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+					 errmsg("index \"%s\" must be given an object of tags", name)));
+		entry = JsonbToCString(NULL, v.val.binary.data, v.val.binary.len);
+		before = index_tags_entry(had, name);
+		if (before != NULL)
+			was = DatumGetJsonbP(DirectFunctionCall1(jsonb_in, CStringGetDatum(before)));
+
+		eit = JsonbIteratorInit(v.val.binary.data);
+		while ((etok = JsonbIteratorNext(&eit, &ev, true)) != WJB_DONE)
+		{
+			if (etok == WJB_KEY)
+				key = pnstrdup(ev.val.string.val, ev.val.string.len);
+			else if (etok == WJB_VALUE && key != NULL)
+			{
+				JsonbValue	buf;
+				JsonbValue *prior = NULL;
+
+				if (ev.type != jbvString)
+					ereport(ERROR,
+							(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+							 errmsg("tag \"%s\" must be given a string value", key)));
+				if (was != NULL)
+					prior = getKeyJsonValueFromContainer(&was->root, key,
+														 strlen(key), &buf);
+				if (prior == NULL || prior->type != jbvString ||
+					prior->val.string.len != ev.val.string.len ||
+					memcmp(prior->val.string.val, ev.val.string.val,
+						   ev.val.string.len) != 0)
+					GpTagValidate(key, pnstrdup(ev.val.string.val, ev.val.string.len));
+				count++;
+				key = NULL;
+			}
 		}
-
-		values[2] = CStringGetTextDatum(defGetString(def));
-
-		if (SPI_execute_with_args(
-								  "INSERT INTO " GP_SQL_SCHEMA ".index_tag"
-								  "       (indexrelid, tagname, tagvalue)"
-								  " VALUES ($1, $2, $3)"
-								  " ON CONFLICT (indexrelid, tagname)"
-								  " DO UPDATE SET tagvalue = excluded.tagvalue",
-								  3, argtypes, values, NULL, false, 0) != SPI_OK_INSERT)
-			elog(ERROR, "gp_sql: could not record the tags of an index");
+		if (count > GP_TAG_MAX_PER_OBJECT)
+			ereport(ERROR,
+					(errcode(ERRCODE_PROGRAM_LIMIT_EXCEEDED),
+					 errmsg("an object may carry at most %d tags, and index \"%s\" has %d",
+							GP_TAG_MAX_PER_OBJECT, name, count)));
+		pfree(entry);
 	}
-
-	SPI_finish();
 }
 
 void
@@ -1061,28 +1209,45 @@ GpTagApplyToObject(Oid classId, Oid objectId, List *tags)
 }
 
 /*
- * An index is being dropped.  Its tags are rows in a table rather than a
- * label, so nothing drops them for us.
+ * An index is being dropped, its catalog rows still there: its tags are its
+ * table's label's, which nothing else takes them out of.
  */
 void
 GpTagIndexDropped(Oid indexRelId)
 {
-	Oid			argtypes[1] = {OIDOID};
-	Datum		values[1];
+	Oid			tableId = IndexGetRelation(indexRelId, true);
+	char	   *name = get_rel_name(indexRelId);
+	Jsonb	   *label;
 
-	if (!OidIsValid(tag_table_oid("index_tag")))
+	if (!OidIsValid(tableId) || name == NULL)
 		return;
+	label = index_tags_label(tableId);
+	if (index_tags_entry(label, name) == NULL)
+		return;
+	index_tags_store(tableId, index_tags_with(label, name, NULL));
+}
 
-	if (SPI_connect() != SPI_OK_CONNECT)
-		elog(ERROR, "SPI_connect failed");
+/*
+ * An index renamed from oldname -- ALTER INDEX ... RENAME, ALTER TABLE on the
+ * index, or the rename of the constraint it backs -- takes its tags with it.
+ */
+void
+GpTagIndexRenamed(Oid indexRelId, const char *oldname)
+{
+	Oid			tableId = IndexGetRelation(indexRelId, true);
+	char	   *newname = get_rel_name(indexRelId);
+	Jsonb	   *label;
+	char	   *entry;
 
-	values[0] = ObjectIdGetDatum(indexRelId);
-	if (SPI_execute_with_args("DELETE FROM " GP_SQL_SCHEMA ".index_tag"
-							  " WHERE indexrelid = $1",
-							  1, argtypes, values, NULL, false, 0) != SPI_OK_DELETE)
-		elog(ERROR, "gp_sql: could not forget the tags of a dropped index");
-
-	SPI_finish();
+	if (!OidIsValid(tableId) || newname == NULL || strcmp(newname, oldname) == 0)
+		return;
+	label = index_tags_label(tableId);
+	entry = index_tags_entry(label, oldname);
+	if (entry == NULL)
+		return;
+	label = DatumGetJsonbP(DirectFunctionCall2(jsonb_delete, JsonbPGetDatum(label),
+											   CStringGetTextDatum(oldname)));
+	index_tags_store(tableId, index_tags_with(label, newname, entry));
 }
 
 /* ------------------------------------------------------------------------- */

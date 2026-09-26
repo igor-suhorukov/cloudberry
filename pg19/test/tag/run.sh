@@ -227,16 +227,54 @@ isl "SET beside an option PostgreSQL knows changes both" \
    "qa {fillfactor=60}"
 
 ###############################################################################
-echo "6. an index keeps its tags in a table, because a label cannot reach one"
+echo "6. an index keeps its tags in its table's label, by its name, because a label cannot reach one"
 ###############################################################################
-is "they are rows, not labels" \
+is "they are the table's gp_index_tag label, under the index's name" \
+   "SELECT label FROM pg_seclabel WHERE objoid = 'wt'::regclass AND provider = 'gp_index_tag';" \
+   '{"wt_id_idx": {"env": "prod"}}'
+is "and read as the index's" \
    "SELECT count(*) FROM gp_sql.index_tag WHERE indexrelid = 'wt_id_idx'::regclass;" "1"
 is "and they are listed with everything else" \
    "SELECT tagname || '=' || tagvalue FROM gp_sql.relation_tag_descriptions
      WHERE relname = 'wt_id_idx';" "env=prod"
-isl "dropping the index forgets them" \
+isl "a rename takes them along" \
+   "ALTER INDEX wt_id_idx RENAME TO wt_id_idx2;
+    SELECT gp_sql.relation_tags('wt_id_idx2'::regclass)::text || ' '
+           || (SELECT label FROM pg_seclabel WHERE objoid = 'wt'::regclass AND provider = 'gp_index_tag');" \
+   '{"env": "prod"} {"wt_id_idx2": {"env": "prod"}}'
+isl "and so does ALTER TABLE's rename of the index" \
+   "ALTER TABLE wt_id_idx2 RENAME TO wt_id_idx;
+    SELECT gp_sql.relation_tags('wt_id_idx'::regclass)::text;" '{"env": "prod"}'
+q "REINDEX INDEX CONCURRENTLY wt_id_idx;" > /dev/null
+is "REINDEX CONCURRENTLY keeps them: the new index has the name" \
+   "SELECT gp_sql.relation_tags('wt_id_idx'::regclass)::text;" '{"env": "prod"}'
+isl "a constraint's rename renames its index, and the tags follow" \
+   "ALTER TABLE wt ADD CONSTRAINT wt_pk PRIMARY KEY (id);
+    SELECT gp_sql.set_relation_tag('wt_pk'::regclass, 'env', 'qa');
+    ALTER TABLE wt RENAME CONSTRAINT wt_pk TO wt_key;
+    SELECT gp_sql.relation_tags('wt_key'::regclass)::text;" '{"env": "qa"}'
+isl "UNSET takes one away, and the last one the index's entry" \
+   "SELECT gp_sql.unset_relation_tag('wt_key'::regclass, 'env');
+    SELECT count(*) FROM gp_sql.index_tag WHERE indexrelid = 'wt_key'::regclass;" "0"
+isl "a label under a name no index has is kept, and read as nothing" \
+   "SECURITY LABEL FOR gp_index_tag ON TABLE wt IS '{\"wt_later\": {\"env\": \"prod\"}, \"wt_id_idx\": {\"env\": \"prod\"}}';
+    SELECT count(*) FROM gp_sql.index_tag;" "1"
+isl "until an index of that name is made, as a restore makes it after the label" \
+   "CREATE INDEX wt_later ON wt (id);
+    SELECT gp_sql.relation_tags('wt_later'::regclass)::text;" '{"env": "prod"}'
+refused "a label of tags that are not strings is refused" \
+        "SECURITY LABEL FOR gp_index_tag ON TABLE wt IS '{\"wt_later\": {\"env\": 1}}';" \
+        "must be given a string value"
+refused "and one of a tag nobody defined" \
+        "SECURITY LABEL FOR gp_index_tag ON TABLE wt IS '{\"wt_later\": {\"nope\": \"x\"}}';" \
+        "tag \"nope\" does not exist"
+isl "dropping an index forgets its tags" \
+   "DROP INDEX wt_later;
+    SELECT label FROM pg_seclabel WHERE objoid = 'wt'::regclass AND provider = 'gp_index_tag';" \
+   '{"wt_id_idx": {"env": "prod"}}'
+isl "and dropping the last takes the label" \
    "DROP INDEX wt_id_idx;
-    SELECT count(*) FROM gp_sql.index_tag;" "0"
+    SELECT count(*) FROM pg_seclabel WHERE provider = 'gp_index_tag';" "0"
 
 ###############################################################################
 echo "7. every other kind of object Cloudberry can tag"

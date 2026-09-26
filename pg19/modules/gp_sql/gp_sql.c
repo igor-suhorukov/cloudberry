@@ -73,6 +73,7 @@
 #include "utils/guc.h"
 #include "utils/acl.h"
 #include "utils/builtins.h"
+#include "catalog/pg_constraint.h"
 #include "utils/lsyscache.h"
 #include "utils/memutils.h"
 #include "utils/ruleutils.h"
@@ -1556,6 +1557,43 @@ is_external_table_create(CreateForeignTableStmt *stmt)
 	return false;
 }
 
+/*
+ * The index a RENAME renames, or InvalidOid: the relation it names, where
+ * that is an index, or the index of the constraint it names.
+ */
+static Oid
+renamed_index(RenameStmt *rs)
+{
+	Oid			relid;
+	char		relkind;
+
+	if (rs->relation == NULL)
+		return InvalidOid;
+	switch (rs->renameType)
+	{
+		case OBJECT_INDEX:
+		case OBJECT_TABLE:
+		case OBJECT_SEQUENCE:
+		case OBJECT_VIEW:
+		case OBJECT_MATVIEW:
+		case OBJECT_FOREIGN_TABLE:
+			relid = RangeVarGetRelid(rs->relation, NoLock, true);
+			if (!OidIsValid(relid))
+				return InvalidOid;
+			relkind = get_rel_relkind(relid);
+			return relkind == RELKIND_INDEX || relkind == RELKIND_PARTITIONED_INDEX
+				? relid : InvalidOid;
+		case OBJECT_TABCONSTRAINT:
+			relid = RangeVarGetRelid(rs->relation, NoLock, true);
+			if (!OidIsValid(relid) || rs->subname == NULL)
+				return InvalidOid;
+			relid = get_relation_constraint_oid(relid, rs->subname, true);
+			return OidIsValid(relid) ? get_constraint_index(relid) : InvalidOid;
+		default:
+			return InvalidOid;
+	}
+}
+
 static void
 gp_sql_ProcessUtility(PlannedStmt *pstmt, const char *queryString,
 					  bool readOnlyTree, ProcessUtilityContext context,
@@ -1846,6 +1884,27 @@ gp_sql_ProcessUtility(PlannedStmt *pstmt, const char *queryString,
 		GpDirTableRestored(RangeVarGetRelid(makeRangeVarFromNameList(castNode(List, sl->object)),
 											NoLock, false));
 		return;
+	}
+
+	/*
+	 * An index renamed -- ALTER INDEX ... RENAME, ALTER TABLE on an index, or
+	 * the rename of a constraint, which renames the index it has -- takes its
+	 * tags with it: they are its table's label's, by its name (tag.c).
+	 */
+	if (IsA(parsetree, RenameStmt))
+	{
+		Oid			indexid = renamed_index((RenameStmt *) parsetree);
+
+		if (OidIsValid(indexid))
+		{
+			char	   *oldname = get_rel_name(indexid);
+
+			GpSqlProcessUtilityNext(pstmt, queryString, readOnlyTree, context,
+									params, queryEnv, dest, qc);
+			CommandCounterIncrement();
+			GpTagIndexRenamed(indexid, oldname);
+			return;
+		}
 	}
 
 	/* ALTER ROLE ... RENAME TO: the tags the role owns follow it (tag.c) */

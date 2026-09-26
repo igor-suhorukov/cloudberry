@@ -87,39 +87,76 @@ AS 'MODULE_PATHNAME', 'gp_sql_change_tag_owner'
 LANGUAGE C STRICT;
 
 /*
- * A security label cannot be put on an index, so the tags of one live here.
- * This is the single place where the port's tags round-trip less well than
- * the rest: they are not dumped.  A row names its index by OID, and a
- * restore makes the index again under another -- after the tables' rows,
- * which is where pg_dump would put this table's -- so a dumped row would
- * tag another index, or none.  Cloudberry dumps no tag at all.
+ * A security label cannot be put on an index, so the tags of one are its
+ * table's label of a provider of their own, gp_index_tag, by the index's
+ * name -- {"t_a_idx": {"env": "prod"}} -- which pg_dump writes with the
+ * table, and a restore reads back before it makes the index under an OID of
+ * its own (tag.c).  This is them as rows, each index by its OID: tags under
+ * a name the table has no index of, as in a restore before its indexes are
+ * made, are no index's, and not here.
  */
-CREATE TABLE gp_sql.index_tag (
-	indexrelid	oid NOT NULL,
-	tagname		name NOT NULL,
-	tagvalue	text NOT NULL,
-	PRIMARY KEY (indexrelid, tagname)
-);
+CREATE VIEW gp_sql.index_tag AS
+	SELECT ic.oid AS indexrelid,
+		   d.key::name AS tagname,
+		   d.value #>> '{}' AS tagvalue
+	  FROM pg_catalog.pg_seclabel l
+	  CROSS JOIN LATERAL jsonb_each(l.label::jsonb) AS e(indexname, tags)
+	  JOIN pg_catalog.pg_index x ON x.indrelid = l.objoid
+	  JOIN pg_catalog.pg_class ic ON ic.oid = x.indexrelid
+								 AND ic.relname = e.indexname
+	  CROSS JOIN LATERAL jsonb_each(e.tags) AS d(key, value)
+	 WHERE l.provider = 'gp_index_tag'
+	   AND l.classoid = 'pg_catalog.pg_class'::regclass
+	   AND l.objsubid = 0;
 
-COMMENT ON TABLE gp_sql.index_tag IS
-	'tags of indexes, which PostgreSQL security labels cannot reach';
+COMMENT ON VIEW gp_sql.index_tag IS
+	'tags of indexes, which PostgreSQL security labels cannot reach: their tables'' gp_index_tag labels, by index name';
 
-ALTER TABLE gp_sql.index_tag ENABLE ROW LEVEL SECURITY;
+GRANT SELECT ON gp_sql.index_tag TO PUBLIC;
 
-CREATE POLICY index_tag_read ON gp_sql.index_tag FOR SELECT USING (true);
+/*
+ * The gp_index_tag label of an index's table with the index's tags changed
+ * by one: tagvalue NULL takes the tag away.  Written by SECURITY LABEL, which
+ * checks that the user owns the table, as the index's owner does.
+ */
+CREATE FUNCTION gp_sql.change_index_tag(obj regclass, tagname name, tagvalue text)
+RETURNS void
+LANGUAGE plpgsql
+AS $$
+DECLARE
+	tbl oid;
+	idx text;
+	label jsonb;
+	entry jsonb;
+BEGIN
+	SELECT x.indrelid, c.relname INTO tbl, idx
+	  FROM pg_catalog.pg_index x
+	  JOIN pg_catalog.pg_class c ON c.oid = x.indexrelid
+	 WHERE x.indexrelid = obj;
+	label := coalesce((SELECT l.label::jsonb FROM pg_catalog.pg_seclabel l
+						WHERE l.objoid = tbl
+						  AND l.classoid = 'pg_catalog.pg_class'::regclass
+						  AND l.objsubid = 0 AND l.provider = 'gp_index_tag'),
+					  '{}'::jsonb);
+	entry := coalesce(label -> idx, '{}'::jsonb) - tagname::text;
+	IF tagvalue IS NOT NULL THEN
+		entry := entry || jsonb_build_object(tagname, tagvalue);
+	END IF;
+	label := label - idx;
+	IF entry <> '{}'::jsonb THEN
+		label := label || jsonb_build_object(idx, entry);
+	END IF;
+	EXECUTE format('SECURITY LABEL FOR gp_index_tag ON %s %s IS %s',
+				   CASE (SELECT c.relkind FROM pg_catalog.pg_class c WHERE c.oid = tbl)
+					   WHEN 'm' THEN 'MATERIALIZED VIEW' ELSE 'TABLE' END,
+				   tbl::regclass::text,
+				   CASE WHEN label = '{}'::jsonb THEN 'NULL'
+						ELSE quote_literal(label::text) END);
+END;
+$$;
 
-CREATE POLICY index_tag_write ON gp_sql.index_tag FOR ALL
-	USING (pg_catalog.pg_has_role(
-			   (SELECT c.relowner FROM pg_catalog.pg_class c
-				 WHERE c.oid = indexrelid), 'USAGE')
-		   /* the index is already gone: let its rows be cleaned up */
-		   OR NOT EXISTS (SELECT 1 FROM pg_catalog.pg_class c
-						   WHERE c.oid = indexrelid))
-	WITH CHECK (pg_catalog.pg_has_role(
-					(SELECT c.relowner FROM pg_catalog.pg_class c
-					  WHERE c.oid = indexrelid), 'USAGE'));
-
-GRANT SELECT, INSERT, UPDATE, DELETE ON gp_sql.index_tag TO PUBLIC;
+COMMENT ON FUNCTION gp_sql.change_index_tag(regclass, name, text) IS
+	'give an index a tag, or take one away (NULL): its table''s gp_index_tag label, which only the owner may write';
 
 -----------------------------------------------------------------------------
 -- Defining a tag: CREATE TAG, ALTER TAG, DROP TAG
@@ -483,10 +520,7 @@ BEGIN
 				USING ERRCODE = 'insufficient_privilege';
 		END IF;
 		PERFORM gp_sql.validate_tag(tagname, tagvalue);
-		INSERT INTO gp_sql.index_tag AS i (indexrelid, tagname, tagvalue)
-			 VALUES (obj, tagname, tagvalue)
-		ON CONFLICT (indexrelid, tagname)
-		DO UPDATE SET tagvalue = excluded.tagvalue;
+		PERFORM gp_sql.change_index_tag(obj, tagname, tagvalue);
 		RETURN;
 	END IF;
 
@@ -524,8 +558,7 @@ BEGIN
 			RAISE EXCEPTION 'must be owner of index %', obj::text
 				USING ERRCODE = 'insufficient_privilege';
 		END IF;
-		DELETE FROM gp_sql.index_tag i
-		 WHERE i.indexrelid = obj AND i.tagname = unset_relation_tag.tagname;
+		PERFORM gp_sql.change_index_tag(obj, tagname, NULL);
 		RETURN;
 	END IF;
 
