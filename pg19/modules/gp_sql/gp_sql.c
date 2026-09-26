@@ -1826,6 +1826,19 @@ gp_sql_ProcessUtility(PlannedStmt *pstmt, const char *queryString,
 		return;
 	}
 
+	/* ALTER ROLE ... RENAME TO: the tags the role owns follow it (tag.c) */
+	if (IsA(parsetree, RenameStmt) &&
+		((RenameStmt *) parsetree)->renameType == OBJECT_ROLE)
+	{
+		RenameStmt *rs = (RenameStmt *) parsetree;
+
+		GpSqlProcessUtilityNext(pstmt, queryString, readOnlyTree, context,
+								params, queryEnv, dest, qc);
+		CommandCounterIncrement();
+		GpTagRoleRenamed(rs->subname, rs->newname);
+		return;
+	}
+
 	/* REASSIGN OWNED gives the tags away with the rest (tag.c) */
 	if (IsA(parsetree, ReassignOwnedStmt))
 	{

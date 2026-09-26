@@ -347,6 +347,9 @@ extern void GpPartitionRenamed(Oid relid, const char *oldname, const char *newna
  */
 extern void GpTagValidate(const char *tagname, const char *tagvalue);
 
+/* A role renamed: the tags it owns name it by its new name (tag.c). */
+extern void GpTagRoleRenamed(const char *oldname, const char *newname);
+
 /*
  * PostGIS's scripts as the port runs them (extscript.c): a statement of an
  * extension's script before it runs, and a CREATE or ALTER EXTENSION after.

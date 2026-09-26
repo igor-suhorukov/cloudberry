@@ -1158,7 +1158,15 @@ gp_resource_create_queue(PG_FUNCTION_ARGS)
 				(errcode(ERRCODE_DUPLICATE_OBJECT),
 				 errmsg("resource queue \"%s\" already exists", name)));
 
-	def->oid = GetNewObjectId();
+	/*
+	 * An OID no queue has: the definitions are no catalog whose unique
+	 * index would say so, and a restore of pg_dumpall's output brings back
+	 * queues whose OIDs another cluster's counter gave -- the roles' labels
+	 * name them by those.
+	 */
+	do
+		def->oid = GetNewObjectId();
+	while (ResQueueDefByOid(defs, def->oid) != NULL);
 	if (qo.with)
 		apply_capabilities(def, options, qo.withlist, true);
 	else
@@ -1625,7 +1633,10 @@ gp_resource_create_group(PG_FUNCTION_ARGS)
 				(errcode(ERRCODE_DUPLICATE_OBJECT),
 				 errmsg("resource group \"%s\" already exists", name)));
 
-	def->oid = ResGroupNewOid();
+	/* one no group has, as a queue's (above) */
+	do
+		def->oid = ResGroupNewOid();
+	while (ResGroupDefByOid(defs, def->oid) != NULL);
 	ResGroupValidate(defs, def);
 
 	if (!IsResGroupEnabled() && GpResourceIsDispatcher())

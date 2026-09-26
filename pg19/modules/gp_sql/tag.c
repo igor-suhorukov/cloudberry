@@ -35,7 +35,13 @@
  * The definitions are one shared label, "gp_tag_definitions", on the NOLOGIN
  * role of that name, which the extension's script makes or finds made:
  *
- *	  {"env": {"oid": 16390, "owner": 10, "allowed_values": ["prod", "dev"]}}
+ *	  {"env": {"oid": 16390, "owner": "alice", "allowed_values": ["prod", "dev"]}}
+ *
+ * The owner by name, as pg_dumpall writes a role: a restore makes the roles
+ * again under OIDs of their own, and the label as it was, so an owner by OID
+ * would be some other role, or none, after it.  A role that is renamed takes
+ * its tags' owner with it (GpTagRoleRenamed()).  A label written with the
+ * owner's OID, as the port wrote it before, is still read.
  *
  * A role's label is the cluster's, as pg_tag is, so a tag defined in one
  * database is one in every other -- the extension need not even be there, but
@@ -151,6 +157,7 @@ typedef struct TagDef
 	char	   *name;
 	Oid			oid;
 	Oid			owner;
+	char	   *owner_name;		/* as the label names it, when by name */
 	bool		listed;			/* false: any value is allowed */
 	List	   *values;			/* of char *, in the order they were added */
 } TagDef;
@@ -160,6 +167,23 @@ static Oid
 tagdef_role(void)
 {
 	return get_role_oid(GP_TAGDEF_ROLE, true);
+}
+
+/* The owner, by name or, as the label was written before, by OID. */
+static void
+json_owner(JsonbContainer *obj, TagDef *d)
+{
+	JsonbValue	buf;
+	JsonbValue *v = getKeyJsonValueFromContainer(obj, "owner", strlen("owner"), &buf);
+
+	if (v != NULL && v->type == jbvString)
+	{
+		d->owner_name = pnstrdup(v->val.string.val, v->val.string.len);
+		d->owner = get_role_oid(d->owner_name, true);
+	}
+	else if (v != NULL && v->type == jbvNumeric)
+		d->owner = (Oid) DatumGetInt64(DirectFunctionCall1(numeric_int8,
+														   NumericGetDatum(v->val.numeric)));
 }
 
 static Oid
@@ -214,7 +238,7 @@ tagdef_load(void)
 			JsonbValue *list;
 
 			cur->oid = json_oid(obj, "oid");
-			cur->owner = json_oid(obj, "owner");
+			json_owner(obj, cur);
 			list = getKeyJsonValueFromContainer(obj, "allowed_values",
 												strlen("allowed_values"), &buf);
 			if (list != NULL && list->type == jbvBinary)
@@ -272,6 +296,27 @@ push_oid(JsonbInState *state, const char *key, Oid value)
 }
 
 /*
+ * A new tag's OID: one GetNewObjectId() gives, as Cloudberry's pg_tag row
+ * takes one, and none a tag has already.  The definitions are no catalog
+ * whose unique index would say so, and a restore brings back tags whose OIDs
+ * another cluster's counter gave.
+ */
+static Oid
+tagdef_new_oid(List *defs)
+{
+	for (;;)
+	{
+		Oid			oid = GetNewObjectId();
+		bool		taken = false;
+
+		foreach_ptr(TagDef, d, defs)
+			taken |= (d->oid == oid);
+		if (!taken)
+			return oid;
+	}
+}
+
+/*
  * The one statement that may change the definitions: whoever gets here
  * first rewrites the label, and the next waits for it and reads what it
  * wrote.  A lock on the carrier role, as SECURITY LABEL on it takes, whose
@@ -303,10 +348,19 @@ tagdef_store(Oid role, List *defs)
 	pushJsonbValue(&state, WJB_BEGIN_OBJECT, NULL);
 	foreach_ptr(TagDef, d, defs)
 	{
+		const char *owner = OidIsValid(d->owner)
+			? GetUserNameFromId(d->owner, true) : d->owner_name;
+
 		push_string(&state, WJB_KEY, d->name);
 		pushJsonbValue(&state, WJB_BEGIN_OBJECT, NULL);
 		push_oid(&state, "oid", d->oid);
-		push_oid(&state, "owner", d->owner);
+		if (owner != NULL)
+		{
+			push_string(&state, WJB_KEY, "owner");
+			push_string(&state, WJB_VALUE, owner);
+		}
+		else
+			push_oid(&state, "owner", d->owner);
 		if (d->listed)
 		{
 			push_string(&state, WJB_KEY, "allowed_values");
@@ -1155,7 +1209,7 @@ gp_sql_define_tag(PG_FUNCTION_ARGS)
 
 	d = palloc0(sizeof(TagDef));
 	d->name = pstrdup(name);
-	d->oid = GetNewObjectId();
+	d->oid = tagdef_new_oid(defs);
 	d->owner = GetUserId();
 	tagdef_check_role_exists(d->owner);
 	if (!PG_ARGISNULL(1))
@@ -1298,6 +1352,36 @@ GpTagRoleDropped(Oid roleid)
 			 errmsg("role \"%s\" cannot be dropped because some objects depend on it",
 					GetUserNameFromId(roleid, false)),
 			 errdetail_internal("%s", detail.data)));
+}
+
+/*
+ * ALTER ROLE ... RENAME TO, once it has run: the tags the role owns name
+ * their owner by its new name.
+ */
+void
+GpTagRoleRenamed(const char *oldname, const char *newname)
+{
+	Oid			carrier;
+	Oid			roleid;
+	List	   *defs;
+	bool		changed = false;
+
+	if (tag_checked_elsewhere() || !OidIsValid(tagdef_role()))
+		return;
+
+	roleid = get_role_oid(newname, false);
+	carrier = tagdef_lock();
+	defs = tagdef_load();
+	foreach_ptr(TagDef, d, defs)
+	{
+		if (d->owner_name != NULL && strcmp(d->owner_name, oldname) == 0)
+		{
+			d->owner = roleid;
+			changed = true;
+		}
+	}
+	if (changed)
+		tagdef_store(carrier, defs);
 }
 
 /*
