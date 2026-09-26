@@ -128,6 +128,9 @@ extern "C" {
 /* A table's old row, carried up to its ModifyTable; see CarryWholeRow. */
 #include "cb_wholerow.h"
 
+/* NOT IN's anti-join as a hashed SubPlan; see NotInSubplan. */
+#include "cb_notin.h"
+
 /* PostGIS's index support function; see IsPostgisIndexSupport. */
 #include "gp_orca_postgis.h"
 
@@ -3024,6 +3027,19 @@ gpdb::RelOldRowFromPlan(Oid relid)
 	}
 	GP_WRAP_END;
 	return false;
+}
+
+Plan *
+gpdb::NotInSubplan(List *clauses, Plan *inner, List *paramids, Expr **testexpr,
+				   bool *hashable)
+{
+	GP_WRAP_START;
+	{
+		return gp_orca_not_in_subplan(clauses, inner, paramids, testexpr,
+									  hashable);
+	}
+	GP_WRAP_END;
+	return nullptr;
 }
 
 AttrNumber

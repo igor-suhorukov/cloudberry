@@ -1537,6 +1537,17 @@ a\b|\N' ] && [ "$(cat "$ROOT/ce_prog.txt" 2>&1)" = "to a program" ] \
 	orca_same "two gathers, one slice each" \
 		"SELECT a FROM o WHERE a IN (SELECT b FROM o WHERE a < 20) ORDER BY a;" \
 		"(slice2; segments: 2)"
+	# NOT IN, ORCA's anti-join, which PostgreSQL 19's joins cannot run: the
+	# planner's hashed SubPlan, on the segments, over the inner rows ORCA
+	# broadcasts to each; a NULL among them leaves no row, and a NULL outer
+	# value is no row.
+	orca_same "NOT IN: a hashed SubPlan on the segments, over the rows broadcast to each" \
+		"SELECT count(*), sum(a) FROM o WHERE a NOT IN (SELECT x * 2 FROM po WHERE y < 3);" \
+		"hashed SubPlan"
+	orca_same "... none, a NULL among them" \
+		"SELECT count(*) FROM o WHERE a NOT IN (SELECT CASE WHEN x = 7 THEN NULL ELSE x END FROM po);"
+	orca_same "... and an outer NULL no row" \
+		"SELECT count(*), count(a) FROM (SELECT NULLIF(a, 5) AS a FROM o) s WHERE a NOT IN (SELECT x FROM po WHERE y = 0);"
 
 	# gp_segment_id is ORCA's system column, which its plan computes where
 	# the row is read: a query naming it is ORCA's, a random table's

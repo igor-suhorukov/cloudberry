@@ -893,6 +893,13 @@ bool RelOldRowFromPlan(Oid relid);
 // cannot pass it on (O20's "wholerow"; compat/wholerow.c).
 AttrNumber CarryWholeRow(Plan *plan, AttrNumber resno, List *rtable);
 
+// The plan of the hashed SubPlan that stands for NOT IN's anti-join over
+// "inner", the join's conditions "clauses", and its test over "paramids";
+// nullptr where a condition is not an outer expression's equality with an
+// inner one (compat/notin.c).
+Plan *NotInSubplan(List *clauses, Plan *inner, List *paramids,
+				   Expr **testexpr, bool *hashable);
+
 // ON CONFLICT, as the planner makes it: the arbiter indexes of the INSERT
 // "query" -- infer_arbiter_indexes(), over its own Query -- an UPDATE's
 // target list numbered as the executor takes it, with the columns it sets,

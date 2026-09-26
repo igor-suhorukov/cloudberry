@@ -1652,6 +1652,144 @@ CTranslatorDXLToPlStmt::TranslateDXLLimit(
 
 //---------------------------------------------------------------------------
 //	@function:
+//		CTranslatorDXLToPlStmt::TranslateDXLHashJoinNotIn
+//
+//	@doc:
+//		ORCA's anti-join for NOT IN, Cloudberry's JOIN_LASJ_NOTIN, which
+//		PostgreSQL 19 has not: the outer side under a Result that keeps a
+//		row where NOT (its keys = ANY (a hashed SubPlan of the inner side)),
+//		as the planner makes NOT IN (compat/notin.c).  The inner side, as
+//		ORCA planned it, is the SubPlan's plan, which runs where the Result
+//		does, once.  Not a condition beside the equalities, nor inner rows
+//		the SubPlan could not hash: those stay the planner's.
+//
+//---------------------------------------------------------------------------
+Plan *
+CTranslatorDXLToPlStmt::TranslateDXLHashJoinNotIn(
+	const CDXLNode *hj_dxlnode, CDXLTranslateContext *output_context,
+	CDXLTranslationContextArray *ctxt_translation_prev_siblings)
+{
+	Result *result = MakeNode(Result);
+	Plan *plan = &(result->plan);
+	plan->plan_node_id = m_dxl_to_plstmt_context->GetNextPlanId();
+	TranslatePlanCosts(hj_dxlnode, plan);
+
+	CDXLNode *left_tree_dxlnode = (*hj_dxlnode)[EdxlhjIndexHashLeft];
+	CDXLNode *right_tree_dxlnode = (*hj_dxlnode)[EdxlhjIndexHashRight];
+	CDXLNode *project_list_dxlnode = (*hj_dxlnode)[EdxlhjIndexProjList];
+	CDXLNode *filter_dxlnode = (*hj_dxlnode)[EdxlhjIndexFilter];
+	CDXLNode *join_filter_dxlnode = (*hj_dxlnode)[EdxlhjIndexJoinFilter];
+	CDXLNode *hash_cond_list_dxlnode = (*hj_dxlnode)[EdxlhjIndexHashCondList];
+
+	CDXLTranslateContext left_dxl_translate_ctxt(
+		m_mp, false, output_context->GetColIdToParamIdMap());
+	CDXLTranslateContext right_dxl_translate_ctxt(
+		m_mp, false, output_context->GetColIdToParamIdMap());
+
+	Plan *left_plan =
+		TranslateDXLOperatorToPlan(left_tree_dxlnode, &left_dxl_translate_ctxt,
+								   ctxt_translation_prev_siblings);
+
+	CDXLTranslationContextArray *translation_context_arr_with_siblings =
+		GPOS_NEW(m_mp) CDXLTranslationContextArray(m_mp);
+	translation_context_arr_with_siblings->Append(&left_dxl_translate_ctxt);
+	translation_context_arr_with_siblings->AppendArray(
+		ctxt_translation_prev_siblings);
+	Plan *right_plan = TranslateDXLOperatorToPlan(
+		right_tree_dxlnode, &right_dxl_translate_ctxt,
+		translation_context_arr_with_siblings);
+
+	CDXLTranslationContextArray *child_contexts =
+		GPOS_NEW(m_mp) CDXLTranslationContextArray(m_mp);
+	child_contexts->Append(&left_dxl_translate_ctxt);
+	child_contexts->Append(&right_dxl_translate_ctxt);
+	TranslateProjListAndFilter(project_list_dxlnode, filter_dxlnode,
+							   nullptr,	 // translate context for the base table
+							   child_contexts, &plan->targetlist, &plan->qual,
+							   output_context);
+
+	List *join_qual = TranslateDXLFilterToQual(
+		join_filter_dxlnode, nullptr, child_contexts, output_context);
+	if (NIL != join_qual)
+	{
+		GP_UNPORTED("NOT IN as an anti-join");
+	}
+
+	List *clauses = NIL;
+	const ULONG arity = hash_cond_list_dxlnode->Arity();
+	for (ULONG ul = 0; ul < arity; ul++)
+	{
+		clauses = gpdb::ListConcat(
+			clauses, TranslateDXLScCondToQual((*hash_cond_list_dxlnode)[ul],
+											  nullptr, child_contexts,
+											  output_context));
+	}
+
+	// a parameter for each condition's inner expression, of its type
+	List *paramids = NIL;
+	ListCell *lc = nullptr;
+	ForEach(lc, clauses)
+	{
+		Node *clause = (Node *) lfirst(lc);
+		if (!IsA(clause, OpExpr) ||
+			2 != gpdb::ListLength(((OpExpr *) clause)->args))
+		{
+			GP_UNPORTED("NOT IN as an anti-join");
+		}
+		paramids = gpdb::LAppendInt(
+			paramids,
+			(int) m_dxl_to_plstmt_context->GetNextParamId(gpdb::ExprType(
+				(Node *) gpdb::ListNth(((OpExpr *) clause)->args, 1))));
+	}
+
+	Expr *testexpr = nullptr;
+	bool hashable = false;
+	Plan *subplan_plan = gpdb::NotInSubplan(clauses, right_plan, paramids,
+											&testexpr, &hashable);
+	if (nullptr == subplan_plan || !hashable)
+	{
+		GP_UNPORTED("NOT IN as an anti-join");
+	}
+	subplan_plan->plan_node_id = m_dxl_to_plstmt_context->GetNextPlanId();
+	SetParamIds(subplan_plan);
+	m_dxl_to_plstmt_context->AddSubplan(subplan_plan);
+
+	TargetEntry *first =
+		(TargetEntry *) gpdb::ListNth(subplan_plan->targetlist, 0);
+	SubPlan *subplan = MakeNode(SubPlan);
+	subplan->subLinkType = ANY_SUBLINK;
+	subplan->testexpr = (Node *) testexpr;
+	subplan->paramIds = paramids;
+	subplan->plan_id =
+		gpdb::ListLength(m_dxl_to_plstmt_context->GetSubplanEntriesList());
+	CHAR plan_name[32];
+	snprintf(plan_name, sizeof(plan_name), "SubPlan %d", subplan->plan_id);
+	subplan->plan_name = PStrDup(plan_name);
+	subplan->firstColType = gpdb::ExprType((Node *) first->expr);
+	subplan->firstColTypmod = gpdb::ExprTypeMod((Node *) first->expr);
+	subplan->firstColCollation = gpdb::ExprCollation((Node *) first->expr);
+	subplan->useHashTable = true;
+	subplan->unknownEqFalse = false;
+	subplan->parallel_safe = false;
+	subplan->startup_cost = subplan_plan->total_cost;
+	subplan->per_call_cost = 0;
+
+	BoolExpr *not_in = MakeNode(BoolExpr);
+	not_in->boolop = NOT_EXPR;
+	not_in->args = ListMake1(subplan);
+	not_in->location = -1;
+
+	plan->qual = gpdb::LPrepend(not_in, plan->qual);
+	plan->lefttree = left_plan;
+	result->result_type = RESULT_TYPE_GATING;
+	SetParamIds(plan);
+
+	// PostgreSQL 19's Result tests no qual: the filter goes where one is
+	return PlaceResultFilter(result);
+}
+
+//---------------------------------------------------------------------------
+//	@function:
 //		CTranslatorDXLToPlStmt::TranslateDXLHashJoin
 //
 //	@doc:
@@ -1718,6 +1856,12 @@ CTranslatorDXLToPlStmt::TranslateDXLHashJoin(
 
 	CDXLPhysicalHashJoin *hashjoin_dxlop =
 		CDXLPhysicalHashJoin::Cast(hj_dxlnode->GetOperator());
+
+	if (EdxljtLeftAntiSemijoinNotIn == hashjoin_dxlop->GetJoinType())
+	{
+		return TranslateDXLHashJoinNotIn(hj_dxlnode, output_context,
+										 ctxt_translation_prev_siblings);
+	}
 
 	// set join type
 	//

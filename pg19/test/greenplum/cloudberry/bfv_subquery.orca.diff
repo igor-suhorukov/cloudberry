@@ -1,0 +1,3 @@
+@@
+-HINT:  To uniquely identify a row within a distributed table, use the "gp_segment_id" column together with the "ctid" column.
+-NOTICE:  SELECT uses system-defined column "t_inner.ctid" without the necessary companion column "t_inner.gp_segment_id"

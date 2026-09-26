@@ -281,6 +281,11 @@ private:
 			ctxt_translation_prev_siblings	// translation contexts of previous siblings
 	);
 
+	// NOT IN's anti-join, as a Result filtered by a hashed SubPlan
+	Plan *TranslateDXLHashJoinNotIn(
+		const CDXLNode *hj_dxlnode, CDXLTranslateContext *output_context,
+		CDXLTranslationContextArray *ctxt_translation_prev_siblings);
+
 	// translate DXL hash join into a HashJoin node
 	Plan *TranslateDXLHashJoin(
 		const CDXLNode *TranslateDXLHashJoin,

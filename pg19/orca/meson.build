@@ -140,6 +140,7 @@ orca_compat_sources = files(
   'compat/lsyscache.c',
   'compat/motion.c',
   'compat/nextvalue.c',
+  'compat/notin.c',
   'compat/plancat.c',
   'compat/prepagg.c',
   'compat/selfuncs.c',
