@@ -701,19 +701,42 @@ gp_inject_fault(PG_FUNCTION_ARGS)
 		keywords[n] = NULL;
 		values[n] = NULL;
 
+		params[0] = name;
+		params[1] = type;
+		params[2] = ddl;
+		params[3] = database;
+		params[4] = table;
+		params[5] = psprintf("%d", start);
+		params[6] = psprintf("%d", end);
+		params[7] = psprintf("%d", extra);
+		params[8] = psprintf("%d", dbid);
+		params[9] = psprintf("%d", session);
+
 		/*
 		 * A node restarting -- after a panic a fault of this function's made
 		 * -- refuses the connection, or closes it as its postmaster ends the
-		 * backend it had started: tried again, five times, two seconds apart,
-		 * as the dispatcher tries a segment in recovery (gp_dispatch.c).
+		 * backend it had started, before the fault's query is answered: tried
+		 * again, five times, two seconds apart, as the dispatcher tries a
+		 * segment in recovery (gp_dispatch.c).  The restart forgot every
+		 * fault, so asking again sets or resets this one once.
 		 */
 		for (int attempt = 0;; attempt++)
 		{
 			char	   *msg;
+			bool		connected;
 
 			conn = libpqsrv_connect_params(keywords, values, false, fault_wait_event());
-			if (conn != NULL && PQstatus(conn) == CONNECTION_OK)
-				break;
+			connected = (conn != NULL && PQstatus(conn) == CONNECTION_OK);
+			if (connected)
+			{
+				res = libpqsrv_exec_params(conn,
+										   "SELECT gp_inject_fault($1, $2, $3, $4, $5, $6::int4, $7::int4, $8::int4, $9::int4, $10::int4)",
+										   10, NULL, params, NULL, NULL, 0,
+										   fault_wait_event());
+				if (PQresultStatus(res) == PGRES_TUPLES_OK && PQntuples(res) == 1)
+					break;
+				PQclear(res);
+			}
 			msg = conn ? pstrdup(PQerrorMessage(conn)) : "out of memory";
 			if (conn != NULL)
 				libpqsrv_disconnect(conn);
@@ -729,33 +752,12 @@ gp_inject_fault(PG_FUNCTION_ARGS)
 				CHECK_FOR_INTERRUPTS();
 				continue;
 			}
-			ereport(ERROR,
-					(errcode(ERRCODE_CONNECTION_FAILURE),
-					 errmsg("connection to dbid %d %s:%d failed", dbid,
-							node->hostname, node->port),
-					 errdetail_internal("%s", msg)));
-		}
-
-		params[0] = name;
-		params[1] = type;
-		params[2] = ddl;
-		params[3] = database;
-		params[4] = table;
-		params[5] = psprintf("%d", start);
-		params[6] = psprintf("%d", end);
-		params[7] = psprintf("%d", extra);
-		params[8] = psprintf("%d", dbid);
-		params[9] = psprintf("%d", session);
-		res = libpqsrv_exec_params(conn,
-								   "SELECT gp_inject_fault($1, $2, $3, $4, $5, $6::int4, $7::int4, $8::int4, $9::int4, $10::int4)",
-								   10, NULL, params, NULL, NULL, 0,
-								   fault_wait_event());
-		if (PQresultStatus(res) != PGRES_TUPLES_OK || PQntuples(res) != 1)
-		{
-			char	   *msg = pstrdup(PQerrorMessage(conn));
-
-			PQclear(res);
-			libpqsrv_disconnect(conn);
+			if (!connected)
+				ereport(ERROR,
+						(errcode(ERRCODE_CONNECTION_FAILURE),
+						 errmsg("connection to dbid %d %s:%d failed", dbid,
+								node->hostname, node->port),
+						 errdetail_internal("%s", msg)));
 			ereport(ERROR,
 					(errcode(ERRCODE_INTERNAL_ERROR),
 					 errmsg("failed to inject fault: %s", msg)));
