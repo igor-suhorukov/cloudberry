@@ -451,7 +451,7 @@ skip qp_misc_jiras  cannot derive ending value of partition based upon starting 
 skip qp_executor  unrecognized configuration parameter "debug_print_slice_table"
 skip qp_olap_windowerr  cannot copy window "win1" because it has a frame clause; argument of RANGE must not contain variables
 skip qp_olap_window  cannot copy window "win1" because it has a frame clause; argument of RANGE must not contain variables
-skip qp_dropped_cols  a distributed transaction's part that wrote is committed by the coordinator's two phases, or by its one-phase commit: The coordinator did not know this part wrote
+run  qp_dropped_cols
 skip qp_with_functional_inlining  UPDATE is not allowed in a non-volatile function; unrecognized configuration parameter "gp_cte_sharing"
 skip qp_with_functional_noinlining  UPDATE is not allowed in a non-volatile function; unrecognized configuration parameter "gp_cte_sharing"
 run  qp_functions_in_contexts_setup
