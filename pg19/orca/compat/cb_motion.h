@@ -49,7 +49,9 @@
 
 /*
  * The first of the reasons above that the plan has; GP_ORCA_MOTION_OK if
- * none, in which case each Gather has been given its Motions to carry out.
+ * none, in which case each Gather has been given its Motions to carry out,
+ * and the statement the slice that calls each of its subplans
+ * (GP_SUBPLAN_SLICES, gp_motion.h).
  */
 extern int	gp_orca_check_motions(PlannedStmt *stmt);
 

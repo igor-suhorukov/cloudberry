@@ -2323,7 +2323,8 @@ state_includes(MotionState *state, int segment)
  * The slices of "plan", run by slice "slice", that scan a temporary table,
  * which only its session's own backend -- the writer -- can read: added to
  * *slices, but for "top", the writer's own.  A scan of one in a subplan's top
- * part, which runs in whichever slice calls it, sets *unknown.
+ * part, which runs in whichever slice calls it, sets *unknown where the plan
+ * does not say which slice that is.
  */
 static void
 temp_scan_slices(Plan *plan, int slice, int top, List *rtable, List **slices,
@@ -2417,7 +2418,8 @@ temp_scan_slices(Plan *plan, int slice, int top, List *rtable, List **slices,
  * (gp_motion_put_shared()).
  *
  * The relay stays for all of it where a temporary table is scanned in a
- * subplan's part that runs in whichever slice calls it; where the translator
+ * subplan's own part, which runs in whichever slice calls it, and the plan
+ * does not say which slice that is (GP_SUBPLAN_SLICES); where the translator
  * did not say which slice receives one; and where a slice would run on a
  * reader of a segment whose writer runs none of the Gather's fragment, and
  * so publishes no snapshot for it.  Direct dispatch would make that last
@@ -2433,6 +2435,8 @@ stream_plan(MotionState *state, List *order, List *motions)
 	int			nsegs = GpClusterSegmentCount();
 	List	   *slices = NIL;
 	List	   *relayed = NIL;
+	List	   *callers = (List *) fragment_mark(estate->es_plannedstmt,
+												 GP_SUBPLAN_SLICES);
 	bool		unknown = false;
 	bool		more;
 	ListCell   *lc;
@@ -2442,9 +2446,25 @@ stream_plan(MotionState *state, List *order, List *motions)
 
 	temp_scan_slices(outerPlan(state->css.ss.ps.plan), top, top,
 					 estate->es_range_table, &relayed, &unknown);
+
+	/*
+	 * A subplan's own part runs in the slice that calls it: this Gather's
+	 * own or one below it, another Gather's, the coordinator's -- or, where
+	 * the plan does not say, whichever.
+	 */
 	foreach(lc, estate->es_plannedstmt->subplans)
-		temp_scan_slices((Plan *) lfirst(lc), SLICE_OF_CALLER, top,
+	{
+		int			i = foreach_current_index(lc);
+		int			caller = i < list_length(callers)
+			? list_nth_int(callers, i) : GP_SUBPLAN_UNKNOWN;
+
+		if (caller == GP_SUBPLAN_COORDINATOR ||
+			(caller >= 0 && caller != top && !list_member_int(order, caller)))
+			continue;
+		temp_scan_slices((Plan *) lfirst(lc),
+						 caller >= 0 ? caller : SLICE_OF_CALLER, top,
 						 estate->es_range_table, &relayed, &unknown);
+	}
 	if (unknown)
 		return false;
 

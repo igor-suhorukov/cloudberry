@@ -48,6 +48,19 @@
 #define GP_MOTION_FROM_COORDINATOR	(-2)
 
 /*
+ * On a statement's PlannedStmt, a DefElem of its extension_state that ORCA's
+ * translator adds: for each of the statement's subplans, in order, the slice
+ * that calls it -- where its own part, above any Motion in it, runs -- in an
+ * IntList; GP_SUBPLAN_COORDINATOR for the coordinator's own part, and
+ * GP_SUBPLAN_UNKNOWN where no one slice does.  A Gather relays only the
+ * slice that calls a subplan whose own part scans a temporary table, which
+ * the writer alone can read, rather than every slice below it.
+ */
+#define GP_SUBPLAN_SLICES			"gp_subplan_slices"
+#define GP_SUBPLAN_COORDINATOR		(-1)
+#define GP_SUBPLAN_UNKNOWN			(-2)
+
+/*
  * Can ORCA's plans with a Motion be carried out from this backend?  The
  * coordinator, with a cluster secret, in a database gp_core is installed in.
  */

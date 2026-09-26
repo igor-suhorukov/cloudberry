@@ -1759,6 +1759,24 @@ COMMIT;"
 2" ] && ok "a temporary table: the slice that scans it relayed through the writer, the other streamed" \
 		|| notok "a temporary table and streaming" "$out"
 
+	# One scanned in a subplan's own part -- a replicated one, which ORCA
+	# reads where a correlated subquery is called -- relays only the slice
+	# that calls the subplan, which the plan says (GP_SUBPLAN_SLICES), and
+	# not every slice of the statement.
+	mk="CREATE TEMP TABLE tmpr (x int, y int) DISTRIBUTED REPLICATED;
+		INSERT INTO tmpr SELECT i, i % 7 FROM generate_series(1, 70) i; ANALYZE tmpr;"
+	sql="SELECT count(*), sum(o.a) FROM o JOIN po ON o.b = po.y WHERE o.a > (SELECT count(*) * 90 FROM tmpr WHERE tmpr.y = o.a % 7);"
+	plan=$(printf '%s\n' "$mk" "EXPLAIN (COSTS OFF) $sql" | qf 0)
+	out=$(printf '%s\n' "$mk" "$sql" "$readers" | qf 0)
+	want=$(printf '%s\n' "$mk" "SET gp.optimizer = off;" "$sql" | qf 0)
+	case "$plan" in
+		*"SubPlan"*"Seq Scan on tmpr"*"Optimizer: GPORCA"*)
+			[ -n "$want" ] && [ "$out" = "$want
+2" ] && ok "a temporary table in a subplan's own part: the slice that calls it relayed, the other streamed" \
+				|| notok "a temporary table in a subplan and streaming" "$out / planner: $want" ;;
+		*) notok "a temporary table in a subplan: the plan" "$plan" ;;
+	esac
+
 	# The coordinator's own slice -- a LIMIT over a Gather, broadcast back --
 	# feeding a slice that a reader runs: the writer keeps the rows it is
 	# sent in files the reader opens (gp_motion_put_shared()).

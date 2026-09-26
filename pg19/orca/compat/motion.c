@@ -80,7 +80,28 @@ typedef struct motion_check_context
 	bool		may_write;		/* the fragment a write is dispatched as */
 	int			slice;			/* the fragment's slice, where in one */
 	bool		on_coordinator; /* a fragment the coordinator sends from */
+	List	  **callers;		/* each subplan's calling slice; see gp_motion.h */
 } motion_check_context;
+
+/* A subplan no SubPlan the walk met calls. */
+#define SUBPLAN_UNSEEN		(-3)
+
+/* Subplan "plan_id" is called from "slice": the one, or several. */
+static void
+note_subplan_caller(motion_check_context *ctx, int plan_id, int slice)
+{
+	List	   *callers = *ctx->callers;
+	ListCell   *cell;
+
+	while (list_length(callers) < plan_id)
+		callers = lappend_int(callers, SUBPLAN_UNSEEN);
+	cell = list_nth_cell(callers, plan_id - 1);
+	if (lfirst_int(cell) == SUBPLAN_UNSEEN)
+		lfirst_int(cell) = slice;
+	else if (lfirst_int(cell) != slice)
+		lfirst_int(cell) = GP_SUBPLAN_UNKNOWN;
+	*ctx->callers = callers;
+}
 
 static bool
 is_motion(Node *node)
@@ -235,6 +256,14 @@ motion_check_walker(Node *node, void *arg)
 		((Plan *) node)->initPlan = NIL;
 	}
 
+	/*
+	 * A subplan's own part runs where the expression that calls it is: in
+	 * the fragment's slice, or on the coordinator.
+	 */
+	if (IsA(node, SubPlan))
+		note_subplan_caller(ctx, ((SubPlan *) node)->plan_id,
+							ctx->in_fragment ? ctx->slice : GP_SUBPLAN_COORDINATOR);
+
 	if (ctx->in_fragment)
 	{
 		switch (nodeTag(node))
@@ -351,6 +380,7 @@ gp_orca_check_motions(PlannedStmt *stmt)
 	motion_check_context ctx;
 	Bitmapset  *fragment_produced = NULL;
 	List	   *params = NIL;
+	List	   *callers = NIL;
 	ListCell   *lc;
 
 	exec_init_plan_tree_base(&ctx.base, stmt);
@@ -367,6 +397,7 @@ gp_orca_check_motions(PlannedStmt *stmt)
 	ctx.may_write = false;
 	ctx.slice = -1;
 	ctx.on_coordinator = false;
+	ctx.callers = &callers;
 
 	(void) motion_check_walker((Node *) stmt->planTree, &ctx);
 	if (ctx.problem != GP_ORCA_MOTION_OK)
@@ -390,6 +421,19 @@ gp_orca_check_motions(PlannedStmt *stmt)
 		cb_core_api()->motion_set_params(mp->motion,
 										 bms_to_int_list(mp->exec_params),
 										 bms_to_int_list(mp->extern_params));
+	}
+
+	/* where each subplan's own part runs, for the Gathers that stream */
+	if (stmt->subplans != NIL)
+	{
+		while (list_length(callers) < list_length(stmt->subplans))
+			callers = lappend_int(callers, SUBPLAN_UNSEEN);
+		foreach(lc, callers)
+			if (lfirst_int(lc) == SUBPLAN_UNSEEN)
+				lfirst_int(lc) = GP_SUBPLAN_UNKNOWN;
+		stmt->extension_state = lappend(stmt->extension_state,
+										makeDefElem(pstrdup(GP_SUBPLAN_SLICES),
+													(Node *) callers, -1));
 	}
 	return GP_ORCA_MOTION_OK;
 }
