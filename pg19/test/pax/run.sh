@@ -28,9 +28,10 @@
 # groups: manifest says of each test of the schedule whether it runs and, if
 # not, why.  What Cloudberry has built in, the port has as extensions,
 # gp_core's, gp_sql's, gp_ao's and pax's, in every database the tests use;
-# what Cloudberry's initdb put in pg_ext_aux is in the schema pax, as the
-# tests are read here; and a setting of Cloudberry's core is respelled as the
-# port spells it, as the greenplum suite respells it.
+# PAX's catalogs, which Cloudberry's initdb put in pg_ext_aux, are in the
+# schema pax, as the tests are read here -- each table's aux table is in
+# pg_ext_aux, as Cloudberry's is; and a setting of Cloudberry's core is
+# respelled as the port spells it, as the greenplum suite respells it.
 #
 # Each test is compared as Cloudberry's pg_regress compares it: gpdiff.pl
 # under Cloudberry's init files, PAX's and the port's, or exactly a difference
@@ -137,8 +138,8 @@ for db in postgres template1; do
 done
 
 # The settings the port has, as sed that respells Cloudberry's names for
-# them, as the greenplum suite makes it; and pg_ext_aux, PAX's schema of
-# Cloudberry's, as the extension's.
+# them, as the greenplum suite makes it; and PAX's catalogs in
+# pg_ext_aux, Cloudberry's schema of them, as the extension's.
 PGOPTIONS="-c gp.optimizer=off" "$PSQL" -X -q -t -A -d postgres \
 	-c "SELECT name FROM pg_settings WHERE name LIKE 'gp.%' ORDER BY length(name) DESC" |
 while read -r name; do
@@ -159,7 +160,7 @@ while read -r name; do
 		printf 's/^( +)%s( +)$/\\1%s\\2/\n' "$cbname" "$name" ;;
 	esac
 done > "$WORK/respell.sed"
-echo 's/\bpg_ext_aux\./pax./g' >> "$WORK/respell.sed"
+echo 's/\bpg_ext_aux\.(pg_pax_tables|pg_pax_fastsequence|paxauxstats)\b/pax.\1/g' >> "$WORK/respell.sed"
 
 # The suite, from PAX's directory, as its Makefile runs it.
 SN="$WORK/pax"

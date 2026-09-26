@@ -22,11 +22,14 @@
  *
  * Cloudberry's initdb wrote PAX's objects into every database with fixed
  * OIDs, which PAX's code names (comm/pax_rel.h).  The port's are the
- * extension's, in its schema "pax", each looked up by name the first time a
- * backend asks and remembered until something in pg_namespace changes --
- * DROP EXTENSION pax drops the schema -- and not remembered while one of them
- * is missing, as it is in a database without the extension, and part of the
- * way through CREATE EXTENSION.
+ * extension's, in its schema "pax", and each table's aux table is in
+ * pg_ext_aux, which the extension's script makes, as Cloudberry's initdb
+ * did -- a schema pg_dump passes over, as it should each table's aux
+ * table: the restored table makes its own.  Each is looked up by name the
+ * first time a backend asks and remembered until something in pg_namespace
+ * changes -- DROP EXTENSION pax drops both schemas -- and not remembered
+ * while one of them is missing, as it is in a database without the
+ * extension, and part of the way through CREATE EXTENSION.
  *
  *-------------------------------------------------------------------------
  */
@@ -47,6 +50,7 @@ typedef struct PaxCatalogOids
 {
 	bool		valid;
 	Oid			nsp;
+	Oid			aux_nsp;
 	Oid			tables;
 	Oid			tables_relid_index;
 	Oid			tables_storage_index;
@@ -76,6 +80,7 @@ pax_catalog_oids(void)
 
 	memset(&o, 0, sizeof(o));
 	o.nsp = get_namespace_oid(PAX_NAMESPACE_NAME, true);
+	o.aux_nsp = get_namespace_oid(PAX_AUX_NAMESPACE_NAME, true);
 	if (OidIsValid(o.nsp))
 	{
 		o.tables = get_relname_relid("pg_pax_tables", o.nsp);
@@ -97,7 +102,7 @@ pax_catalog_oids(void)
 			}
 		}
 	}
-	o.valid = OidIsValid(o.nsp) && OidIsValid(o.tables) &&
+	o.valid = OidIsValid(o.nsp) && OidIsValid(o.aux_nsp) && OidIsValid(o.tables) &&
 		OidIsValid(o.tables_relid_index) && OidIsValid(o.tables_storage_index) &&
 		OidIsValid(o.fastseq) && OidIsValid(o.fastseq_index) &&
 		OidIsValid(o.stats_type) && OidIsValid(o.am) && OidIsValid(o.handler);
@@ -115,6 +120,12 @@ Oid
 PaxNamespaceOid(void)
 {
 	return pax_catalog_oids()->nsp;
+}
+
+Oid
+PaxAuxNamespaceOid(void)
+{
+	return pax_catalog_oids()->aux_nsp;
 }
 
 Oid

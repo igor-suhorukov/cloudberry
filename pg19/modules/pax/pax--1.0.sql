@@ -7,11 +7,17 @@
  * PAX, Cloudberry's table access method that keeps a table's rows in files
  * of its own, by column.  What Cloudberry's initdb wrote into every database
  * with fixed OIDs (contrib/pax_storage/tools/gen_sql.c), in pg_catalog and
- * pg_ext_aux, is here, in the extension's schema pax -- a name beginning
- * pg_ being PostgreSQL's -- and PAX finds each by name (pax_catalog.c).
- * Each table has an aux table beside, pax.pg_pax_blocks_<relid>, made as
- * the table is: a row a file.
+ * pg_ext_aux, is here, in the extension's schema pax, and PAX finds each by
+ * name (pax_catalog.c).  Each table has an aux table beside,
+ * pg_ext_aux.pg_pax_blocks_<relid>, made as the table is: a row a file.
+ * pg_ext_aux is Cloudberry's schema of them, whose name, beginning pg_,
+ * keeps pg_dump from dumping them -- a restored table makes its own, and its
+ * files are not dumped with it -- and which PostgreSQL makes only with
+ * allow_system_table_mods, as gp_ao makes pg_bitmapindex.
  */
+SET allow_system_table_mods = on;
+CREATE SCHEMA pg_ext_aux;
+RESET allow_system_table_mods;
 
 CREATE FUNCTION pax.pax_tableam_handler(internal)
 RETURNS table_am_handler

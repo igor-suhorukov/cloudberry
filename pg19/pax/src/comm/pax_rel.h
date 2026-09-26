@@ -49,6 +49,7 @@ struct TableAmRoutine;
  * InvalidOid while it is not there.
  */
 extern Oid PaxNamespaceOid(void);
+extern Oid PaxAuxNamespaceOid(void);
 extern Oid PaxTablesRelationId(void);
 extern Oid PaxTablesRelidIndexId(void);
 extern Oid PaxTablesStorageIndexId(void);
@@ -85,7 +86,7 @@ extern const struct TableAmRoutine *PaxTableAmRoutine(void);
 #define PG_PAX_FASTSEQUENCE_INDEX_NAME "pg_pax_fastsequence_objid_idx"
 
 /* Cloudberry's pg_ext_aux, where each table's pg_pax_blocks_<relid> is */
-#define PG_EXTAUX_NAMESPACE PaxNamespaceOid()
+#define PG_EXTAUX_NAMESPACE PaxAuxNamespaceOid()
 
 /* Cloudberry's core named the method's OID for ORCA and the planner */
 #define PAX_AM_OID PaxTableAmOid()

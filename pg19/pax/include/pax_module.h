@@ -29,8 +29,11 @@
 
 #include "comm/pax_rel.h"
 
-/* The extension's schema, Cloudberry's pg_ext_aux. */
+/* The extension's schema, where Cloudberry's initdb made PAX's catalogs. */
 #define PAX_NAMESPACE_NAME "pax"
+
+/* Each table's aux table's, Cloudberry's own, which pg_dump passes over. */
+#define PAX_AUX_NAMESPACE_NAME "pg_ext_aux"
 
 #ifdef __cplusplus
 extern "C" {
