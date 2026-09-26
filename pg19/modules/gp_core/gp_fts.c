@@ -1352,13 +1352,16 @@ fts_process(FtsPair *p)
 
 /*
  * Probe every primary that has a mirror, at once, and act on the answers:
- * Cloudberry's FtsWalRepMessageSegments().
+ * Cloudberry's FtsWalRepMessageSegments().  Only on the coordinator: on a
+ * standby promoted, until gp_activate_standby() has made it the coordinator,
+ * a cycle does nothing.
  */
 static void
 fts_cycle(void)
 {
 	FtsPair    *pairs;
 	int			npairs = 0;
+	const GpSegmentConfig *self = GpClusterSelf();
 
 	/*
 	 * The nodes as they are now, and their states: a place whose node is
@@ -1381,6 +1384,8 @@ fts_cycle(void)
 			fts_restarting_since[i] = 0;
 		}
 	}
+	if (self == NULL || !GpClusterIsPrimaryNow(self->dbid))
+		return;
 
 	pairs = palloc0_array(FtsPair, fts_nnodes);
 	for (int i = 0; i < fts_nnodes; i++)
@@ -1603,7 +1608,7 @@ GpFtsNotifyProber(void)
 		fts_shared->probe_requested = true;
 	SpinLockRelease(&fts_shared->mutex);
 
-	/* None runs: a coordinator whose segments have no mirrors, or its standby. */
+	/* None runs: a standby coordinator, until it is promoted. */
 	if (pid == 0 || procno == INVALID_PROC_NUMBER)
 		return;
 	SetLatch(&GetPGProcByNumber(procno)->procLatch);
@@ -1877,12 +1882,15 @@ GpFtsInit(void)
 	}
 
 	/*
-	 * The prober, on the coordinator, where some segment has a mirror to fail
-	 * over to; not on its standby, which has nothing to probe until it is
-	 * activated.
+	 * The prober, on the coordinator, and on its standby, where it starts once
+	 * a promotion has ended recovery and probes once gp_activate_standby() has
+	 * made the node the coordinator (fts_cycle()).  A segment's mirror may be
+	 * added while the coordinator runs -- gpinitsystem's
+	 * gp_add_segment_mirror(), gpaddmirrors' gp_add_segment() -- and FTS is
+	 * what marks it up: so the prober runs on a coordinator of segments that
+	 * have no mirror too, a cycle finding nothing to probe.
 	 */
-	if (self != NULL && self->content == -1 && self->preferred_role == 'p' &&
-		GpClusterHasMirrors())
+	if (self != NULL && self->content == -1)
 	{
 		BackgroundWorker worker;
 
