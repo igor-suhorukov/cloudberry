@@ -2,8 +2,8 @@
 # runs it on a coordinator and three segments: the tests of the schedule
 # that bear on M2 -- dispatch, distribution, Motions, joins, aggregates,
 # subqueries, partitions, DML -- on M5's append-optimized and
-# column-oriented tables and external tables, and on M6's resource queues
-# and groups, in the schedule's order.
+# column-oriented tables and external tables, on M6's resource queues and
+# groups, and on M7's materialized views, in the schedule's order.
 #
 #   run   the test runs here, in both passes; cloudberry/ holds a difference
 #         reviewed and kept, where one pass has one
@@ -32,7 +32,7 @@ skip percentile  function percentile_cont(numeric, timestamp without time zone) 
 run  join_gp
 skip union_gp  UNION types text and integer cannot be matched
 run  gp_create_table
-skip matview_ao  relation "public.m_heap" does not exist; relation "m_heap" does not exist
+run  matview_ao
 skip filter  cannot copy window "w" because it has a frame clause
 run  gpctas
 run  gpdist
@@ -130,7 +130,7 @@ run  qp_bitmapscan
 skip qp_correlated_query  differs: answers the queries with a correlation that skips a level, which Cloudberry refuses, in an order that varies from run to run
 run  qp_targeted_dispatch
 run  correlated_subquery
-skip qp_subquery  relation "qp_subquery.v" does not exist; relation "v" does not exist
+run  qp_subquery
 run  qp_left_anti_semi_join
 run  qp_union_intersect
 run  qp_functions

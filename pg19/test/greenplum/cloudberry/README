@@ -164,11 +164,14 @@ gp_dqa (orca)  the fallback trace of two queries of count(DISTINCT) over a
 gp_types  PostgreSQL 19's words for an operator no type takes: a DETAIL
   where Cloudberry's HINT stood.
 
-gpctas (planner, orca)  the rows gp_distribution_policy has for a
-  materialized view made by CREATE ... AS, and for its table: the port keeps
-  a materialized view on the coordinator alone, with no policy (see
-  matview_ao in the manifest), so what is counted is the table's row on each
-  of the four nodes.  Under ORCA the fallback trace too.
+gpctas (orca)  the lines ORCA's fallback trace prints and nothing else,
+  the test setting optimizer_trace_fallback: catalogs, a column of a
+  non-default collation, functions called without a FROM, a ROW expression
+  and a subquery that is not a scalar, which Cloudberry's ORCA declines in
+  its own expected output too, and three plans with a Gather Motion into a
+  slice the segments run, which the port's Motions do not do yet.  A
+  REFRESH, whose query the port's planner plans, says nothing where
+  Cloudberry's ORCA says it declines one.
 
 gpdist_legacy_opclasses  the complex type, Cloudberry's own, which
   PostgreSQL 19 has not got: the table whose key takes every legacy
@@ -183,6 +186,9 @@ join_gp  the NOTICE of test_print_prefetch_joinqual: where a join's outer
   PostgreSQL's joins, the port's, never do.  Its table of one segment,
   which gp_debug_numsegments makes, is read there alone, and answers as
   Cloudberry's does.
+
+matview_ao  psql's \dm, whose title PostgreSQL 19's psql gives as "List of
+  materialized views" where Cloudberry's psql says "List of relations".
 
 part_external_table (orca)  the lines ORCA's fallback trace prints for a
   partitioned table with external partitions: the dynamic foreign scan ORCA
@@ -230,6 +236,14 @@ qp_functions (planner, orca)  PostgreSQL 19's words for a call no function
   calls it in the coordinator's own plan, and answers in both passes -- with
   a row for tstab among the relations named tst%, a table
   alter_distribution_policy leaves behind, which runs earlier.
+
+qp_subquery (orca)  the fallback trace of the queries ORCA's translator
+  declines -- subqueries that are not scalar, NOT IN as an anti-join, an
+  UPDATE or DELETE that reads another relation, an inherited table, a
+  whole-row variable -- which the planner answers the same; and, as DROP
+  SCHEMA ... CASCADE drops the test's indexes, of gp_sql's query of each
+  index's tags in gp_sql.index_tag, a table of the coordinator's, which ORCA
+  leaves to the planner.
 
 resource_queue  SHOW resource_scheduler, whose header is the port's name
   of it, gp.resource_scheduler, three letters wider.  And the NOTICE of the
