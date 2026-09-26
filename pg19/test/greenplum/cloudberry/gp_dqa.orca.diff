@@ -259,21 +259,3 @@
 @@
 +INFO:  GPORCA failed to produce a plan, falling back to Postgres-based planner
 +DETAIL:  Falling back to Postgres-based planner because GPORCA does not support the following feature: Multiple Distinct Qualified Aggregates are disabled in the optimizer
-@@
-+INFO:  GPORCA failed to produce a plan, falling back to Postgres-based planner
-+DETAIL:  Falling back to Postgres-based planner because GPORCA does not support the following feature: a value one slice computes, used in another the segments run
-@@
-+INFO:  GPORCA failed to produce a plan, falling back to Postgres-based planner
-+DETAIL:  Falling back to Postgres-based planner because GPORCA does not support the following feature: a value one slice computes, used in another the segments run
-@@
-+INFO:  GPORCA failed to produce a plan, falling back to Postgres-based planner
-+DETAIL:  Falling back to Postgres-based planner because GPORCA does not support the following feature: a value one slice computes, used in another the segments run
-@@
-+INFO:  GPORCA failed to produce a plan, falling back to Postgres-based planner
-+DETAIL:  Falling back to Postgres-based planner because GPORCA does not support the following feature: a value one slice computes, used in another the segments run
-@@
-+INFO:  GPORCA failed to produce a plan, falling back to Postgres-based planner
-+DETAIL:  Falling back to Postgres-based planner because GPORCA does not support the following feature: a value one slice computes, used in another the segments run
-@@
-+INFO:  GPORCA failed to produce a plan, falling back to Postgres-based planner
-+DETAIL:  Falling back to Postgres-based planner because GPORCA does not support the following feature: a value one slice computes, used in another the segments run

@@ -168,8 +168,7 @@ gp_dqa (orca)  ORCA's fallback trace, which the expected output closest to
   the pass, the planner's, does not print, for the queries it declines and
   the planner answers the same: several DISTINCT aggregates, where
   optimizer_enable_multiple_distinct_aggs is off, as Cloudberry's ORCA
-  declines them; an aggregate with FILTER; and a DISTINCT aggregate whose
-  plan would read in one slice a value another computes.
+  declines them; and an aggregate with FILTER.
 
 gp_types  PostgreSQL 19's words for an operator no type takes: a DETAIL
   where Cloudberry's HINT stood.
