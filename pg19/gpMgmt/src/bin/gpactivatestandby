@@ -1,0 +1,436 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+# Line too long - pylint: disable=C0301
+# Invalid name  - pylint: disable=C0103
+#
+# Copyright (c) EMC 2011
+# Copyright (c) Greenplum Inc 2010
+# All Rights Reserved. 
+#
+# Ported to PostgreSQL 19: the port's copy of gpMgmt/bin/gpactivatestandby
+# (pg19/gpMgmt/meson.build).
+#
+#   - The original coordinator's address is read from the standby's
+#     primary_conninfo as a connection string, whose values may be quoted --
+#     a host with a hyphen is, as PostgreSQL 19's pg_basebackup -R writes it.
+#   - A standby that is not running is started as the standby it is and
+#     promoted as a running one is: Cloudberry's started it in utility mode
+#     with a promote_trigger_file, a setting PostgreSQL 16 removed.
+#   - The promotion changes no node of the cluster: Cloudberry's startup
+#     process does, as it promotes the standby, what the tool asks of
+#     gp_core's gp_activate_standby() once the standby is promoted -- the old
+#     coordinator goes, and the standby is the coordinator -- in its cluster
+#     file, which is then given to every node (gppylib/clusterfile.py).
+#
+"""
+Activates a standby coordinator instance when the primary coordinator instance has 
+failed.  Will promote the standby, update the system catalog
+tables to make the standby coordinator instance as the new coordinator.
+"""
+
+import os
+import sys
+import signal
+import glob
+import time
+import shutil
+import tempfile
+from datetime import datetime, timedelta
+
+# import GPDB modules
+try:
+    import pg as pygresql
+    from gppylib.commands import unix, gp, pg
+    from gppylib.db import dbconn
+    from gppylib.gpparseopts import OptParser, OptChecker, OptionGroup, SUPPRESS_HELP
+    from gppylib.gplog import get_default_logger, setup_tool_logging, enable_verbose_logging
+    from gppylib import gparray, pgconf, clusterfile, nodecopy
+    from gppylib.userinput import ask_yesno
+except Exception as e:
+    sys.exit('ERROR: Cannot import modules.  Please check that you '
+             'have sourced cloudberry-env.sh.  Detail: ' + str(e))
+
+EXECNAME = os.path.split(__file__)[-1]
+
+# Threshold values
+LOG_TIME_THRESHOLD_MINS = 120
+
+STANDBY_SIGNAL_FILE = "standby.signal"
+POSTGRESQL_AUTO_CONF_FILE = "postgresql.auto.conf"
+
+_description = sys.modules[__name__].__doc__
+_usage = "\n"
+
+
+class GpActivateStandbyException(Exception):
+    "Generic exception for all things activatestandby"
+    pass
+
+
+#-------------------------------------------------------------------------
+def parseargs():
+    """Parses and validates command line args."""
+    
+    parser = OptParser(option_class=OptChecker,
+                       description=' '.join(_description.split()),
+                       version='%prog version $Revision$')
+    parser.setHelp([])
+    parser.remove_option('-h')
+    
+    # General options section
+    optgrp = OptionGroup(parser, 'General options')
+    optgrp.add_option('-h', '-?', '--help', dest='help', action='store_true',
+                      help='display this help message and exit')
+    optgrp.add_option('-v', dest='version', action='store_true',
+                      help='display version information and exit')
+    parser.add_option_group(optgrp)
+
+    # Logging options section
+    optgrp = OptionGroup(parser, 'Logging options')
+    optgrp.add_option('-q', '--quiet', action='store_true',
+                      help='quiet mode, do not log progress to screen')
+    optgrp.add_option('-l', '--logfile', type='string', default=None,
+                      help='alternative logfile directory')
+    optgrp.add_option('-a', help='don\'t ask to confirm standby coordinator activation',
+                      dest='confirm', default=True, action='store_false')
+    parser.add_option_group(optgrp)
+
+    # Standby activation options section
+    optgrp = OptionGroup(parser, 'Standby activation options')
+    optgrp.add_option('-d', '--master-data-directory', dest='coordinator_data_dir',
+                      type='string', help='standby coordinator data directory')
+    optgrp.add_option('-f', '--force', action='store_true',
+                      help='force activation if standby process not running')
+    optgrp.add_option('--ignore', dest='ignore', type='string', help=SUPPRESS_HELP)
+    parser.add_option_group(optgrp)
+    
+    parser.set_defaults(quiet=False, force=False)
+
+    # Parse the command line arguments
+    (options, args) = parser.parse_args()
+
+    if options.help:
+        parser.print_help()
+        parser.exit(0, None)
+
+    if options.version:
+        parser.print_version()
+        parser.exit(0, None)
+
+
+    if not options.coordinator_data_dir:
+        logger.info('Option -d or --master-data-directory not set. Checking environment variable COORDINATOR_DATA_DIRECTORY')
+        env_coordinator_data_dir = gp.get_coordinatordatadir()
+        # check for environment variable COORDINATOR_DATA_DIRECTORY
+        if not env_coordinator_data_dir:
+            logger.fatal('Both -d parameter and COORDINATOR_DATA_DIRECTORY environment variable are not set.')
+            logger.fatal('Required option coordinator data directory is missing.')
+            parser.exit(2, None)
+        options.coordinator_data_dir = env_coordinator_data_dir
+        
+    # We have to normalize this path for a later comparison
+    options.coordinator_data_dir = os.path.abspath(options.coordinator_data_dir)
+
+    # check if PGPORT environment variable is set.
+    env_pgport = os.getenv('PGPORT', None)
+    if not env_pgport:
+        logger.fatal('PGPORT environment variable not set.')
+        parser.exit(2, None)
+
+    if options.logfile and not os.path.exists(options.logfile):
+        logger.fatal('Log directory %s does not exist.' % options.logfile)
+        parser.exit(2, None)
+
+    # The default logging for gpactivatestandby is verbose
+    if not options.quiet:
+        enable_verbose_logging()
+
+    # There shouldn't be any args
+    if len(args) > 0:
+        logger.error('Unknown arguments:')
+        for arg in args:
+            logger.error('  %s' % arg)
+        parser.exit(2, None)
+        
+    return options, args
+
+
+#-------------------------------------------------------------------------
+def print_results(array, hostname, options):
+    """Prints out the summary of the operation."""
+    
+    logger.info('-----------------------------------------------------')
+    logger.info('The activation of the standby coordinator has completed successfully.')
+    logger.info('%s is now the new primary coordinator.' % hostname)
+    logger.info('You will need to update your user access mechanism to reflect')
+    logger.info('the change of coordinator hostname.')
+    logger.info('Do not re-start the failed coordinator while the fail-over coordinator is')
+    logger.info('operational, this could result in database corruption!')
+    logger.info('COORDINATOR_DATA_DIRECTORY is now %s if' % options.coordinator_data_dir)
+    logger.info('this has changed as a result of the standby coordinator activation, remember')
+    logger.info('to change this in any startup scripts etc, that may be configured')
+    logger.info('to set this value.')
+    logger.info('COORDINATOR_PORT is now %d, if this has changed, you' % array.coordinator.getSegmentPort())
+    logger.info('may need to make additional configuration changes to allow access')
+    logger.info('to the Cloudberry instance.')
+    logger.info('Refer to the Administrator Guide for instructions on how to re-activate')
+    logger.info('the coordinator to its previous state once it becomes available.')
+    logger.info('Query planner statistics must be updated on all databases')
+    logger.info('following standby coordinator activation.')
+    logger.info('When convenient, run ANALYZE against all user databases.')
+    logger.info('-----------------------------------------------------')
+
+
+#-------------------------------------------------------------------------
+def print_summary(options):
+    # Too many statements - pylint: disable=R0915
+
+    """Print summary of the action and asks user if they want to
+    continue with the activation."""
+
+    warnings_generated = False
+    require_force = False
+    
+    # check the standby coordinator
+    standby_running = check_standby_running(options)
+    if not standby_running:
+        require_force = True
+        
+    logger.info('-----------------------------------------------------')
+    logger.info('Standby data directory    = %s' % options.coordinator_data_dir)
+    logger.info('Standby port              = %s' % str(os.getenv('PGPORT')))
+    if options.logfile:
+        logger.info('Log directory             = %s' % options.logfile)
+    logger.info('Standby running           = %s' % ('yes' if standby_running else 'no'))
+    logger.info('Force standby activation  = %s' % ('yes' if options.force else 'no'))
+    logger.info('-----------------------------------------------------')
+
+    check_original_coordinator_status(options)
+
+    # Check if we require a force
+    if require_force and not options.force:
+        logger.warning('If you wish to continue you must use the -f option to force')
+        logger.warning('the activation process.')
+        warnings_generated = True
+        raise GpActivateStandbyException('Force activation required')
+    if options.confirm:
+        yn = ask_yesno(None, 'Do you want to continue with standby coordinator activation?', 'N')
+        if not yn:
+            raise GpActivateStandbyException('User canceled') 
+
+    return warnings_generated
+
+#-------------------------------------------------------------------------
+def check_original_coordinator_status(options):
+    original_coordinator_hostname = ""
+    original_coordinator_port = 0
+
+    standby_signal_file_location = os.path.join(options.coordinator_data_dir, STANDBY_SIGNAL_FILE) 
+    if not os.path.exists(standby_signal_file_location):
+        logger.warn('Please make sure the command gpactivatestandby is executed on current Standby host')
+        raise GpActivateStandbyException('Critical required file on standby \"%s\" is not present.' % standby_signal_file_location)
+
+    # primary_conninfo is a connection string, and its values may be quoted
+    postgres_auto_conf_file_location = os.path.join(options.coordinator_data_dir, POSTGRESQL_AUTO_CONF_FILE)
+    conninfo = nodecopy.conninfo_values(pgconf.readfile(postgres_auto_conf_file_location).str('primary_conninfo'))
+    if 'host' in conninfo:
+        original_coordinator_hostname = conninfo['host']
+    if 'port' in conninfo:
+        original_coordinator_port = int(conninfo['port'])
+
+    cmd = pg.ReadPostmasterTempFile.remote('Read postmaster file', original_coordinator_port, original_coordinator_hostname)
+    (file_exists, _, _) = cmd.getResults()
+    if file_exists:
+        logger.warn('Appears that there is an active postgres process on %s port=%d' % (original_coordinator_hostname, original_coordinator_port))
+        logger.warn('Need to stop current coordinator before activating the standby.')
+        logger.warn('Rare possibility is just /tmp/.s.PGSQL.%d and /tmp/.s.PGSQL.%d.* files exist on %s.' % (original_coordinator_port, original_coordinator_port, original_coordinator_hostname))
+        logger.warn('Need to delete these files')
+        logger.warn('Then call this utility again.')
+        raise GpActivateStandbyException('Active postgres process on coordinator')
+ 
+#-------------------------------------------------------------------------
+def get_config():
+    """Retrieves configuration information from the catalog."""
+    
+    logger.info('Reading current configuration...')
+    dburl = dbconn.DbURL()
+    array = gparray.GpArray.initFromCatalog(dburl, utility=True)
+    
+    return array
+
+#-------------------------------------------------------------------------
+def check_standby_running(options):
+    """Checks if the standby postmaster process is running."""
+    
+    return gp.getPostmasterPID('localhost', options.coordinator_data_dir) > 0
+
+
+#-------------------------------------------------------------------------
+def check_or_start_standby(options):
+    """
+    Check if standby postmaster is running.  We need the process
+    to activate it, but there could be some cases where user wants
+    to activate it anyway, with potentional data loss.  In such case,
+    we'll end up restarting the coordinator after promoting it.
+    """
+
+    pid = gp.get_postmaster_pid_locally(options.coordinator_data_dir) 
+
+
+    if pid > 0:
+        # we are good.  proceed with normal operation
+        logger.info('found standby postmaster process')
+        return True
+
+    if not options.force:
+        logger.error('Standby postmaster is not running.')
+        logger.error('Use -f option to bring the system anyway')
+        raise GpActivateStandbyException('postmaster is not running')
+    else:
+        # XXX: We don't have enough knowledge to bring up the standby
+        # but there could be a situation where user needs to activate
+        # it anyway.  This is nothing but a bailout and this could lose
+        # some of the latest changes from the primary.  PostgreSQL 19 has
+        # no promote_trigger_file, and the port no utility mode: the
+        # standby starts as the standby it is, and is promoted as a running
+        # one is.
+        start_coordinator(options)
+
+        return True
+
+#-------------------------------------------------------------------------
+def start_coordinator(options):
+    """Starts the coordinator."""
+
+    logger.info('Starting standby coordinator database in utility mode...')
+    gp.NewGpStart.local('Start CBDB', coordinatorOnly=True, coordinatorDirectory=options.coordinator_data_dir)
+
+#-------------------------------------------------------------------------
+def stop_coordinator():
+    """Stops the coordinator."""
+    
+    logger.info('Stopping standby coordinator...')
+    gp.GpStop.local('Stop CBDB', coordinatorOnly=True, fast=True)
+ 
+#-------------------------------------------------------------------------
+def promote_standby(coordinator_data_dir):
+    """Promote standby"""
+
+    logger.info('Promoting standby...')
+    # Keeping the timeout here consistent with
+    # MIRROR_PROMOTION_TIMEOUT which is defined as 10 mins
+    cmd = gp.Command('pg_ctl promote',
+                     'pg_ctl promote -D %s -t 600' % coordinator_data_dir)
+    cmd.run(validateAfter=True)
+    logger.info('Standby coordinator is promoted')
+
+    # After promotion run CHECKPOINT to force the new TimeLineID to be
+    # written to the pg_control file. This happens in async way in
+    # server since pg_ctl promote uses fast_promote. Given gpstart
+    # depends on TLI to be reflect after right after promotion mainly
+    # for testing we force CHECKPOINT here. We loop here since the
+    # pg_ctl promote wait logic simply checks for IN_PRODUCTION in the
+    # promoted coordinator's control file but the coordinator's
+    # postmaster will actually not be ready yet to accept database
+    # connections for a small period of time. Use the same
+    # MIRROR_PROMOTION_TIMEOUT of 10 minutes here as well.
+    logger.debug('forcing CHECKPOINT to reflect new TimeLineID...')
+    for i in range(600):
+        try:
+            dburl = dbconn.DbURL()
+            conn = dbconn.connect(dburl, utility=True, logConn=False)
+            dbconn.execSQL(conn, 'CHECKPOINT')
+            conn.close()
+            return True
+        except pygresql.InternalError as e:
+            pass
+        time.sleep(1)
+
+    return False
+
+#-------------------------------------------------------------------------
+def activate_standby():
+    """
+    What Cloudberry's promotion does to its catalog, gp_core's
+    gp_activate_standby() does to the new coordinator's cluster file: the old
+    coordinator goes, and this node is the coordinator.
+    """
+    logger.info('Making the promoted standby the coordinator of the cluster...')
+    dburl = dbconn.DbURL()
+    conn = dbconn.connect(dburl, utility=True)
+    try:
+        if not dbconn.querySingleton(conn, 'SELECT pg_catalog.gp_activate_standby()'):
+            raise GpActivateStandbyException('gp_activate_standby() did not activate the standby')
+        conn.commit()
+    finally:
+        conn.close()
+
+#-------------------------------------------------------------------------
+# Main
+#-------------------------------------------------------------------------
+
+# setup logging
+logger = get_default_logger()
+setup_tool_logging(EXECNAME, unix.getLocalHostname(), unix.getUserName())
+
+# parse args and options
+(options_, args_) = parseargs()
+
+# if we got a new log dir, we can now set it up.
+if options_.logfile:
+    setup_tool_logging(EXECNAME, unix.getLocalHostname(), unix.getUserName(), logdir=options_.logfile)
+
+try:
+    warnings_generated_ = print_summary(options_)
+
+
+    # disable keyboard interrupt to prevent users from canceling
+    # out of the process at a very bad time.  If there is a partial
+    # update to the gp_configuration catalog and the user cancels
+    # you get stuck where you can't go forward and you can't go
+    # backwards.
+    signal.signal(signal.SIGINT, signal.SIG_IGN)
+
+    requires_restart = not check_or_start_standby(options_)
+
+    # promote standby, only if the standby is running in recovery
+    if not requires_restart:
+        res = promote_standby(options_.coordinator_data_dir)
+        if not res:
+            raise GpActivateStandbyException('Timed out waiting for promoted coordinator to accept database connections.')
+
+    # The promoted standby is made the coordinator of the cluster file,
+    # which Cloudberry's promotion does itself.
+    activate_standby()
+
+    # now we can access the catalog.  promote action has already updated
+    # catalog, so array.coordinator is the old (promoted) standby at this point.
+    array_ = get_config()
+
+    # the new coordinator's cluster file, to every node
+    try:
+        clusterfile.distribute(array_, options_.coordinator_data_dir)
+    except Exception as e:
+        logger.warning('The cluster file was not given to every node: %s' % e)
+
+    # If we forced to start utility coordinator, this is the time to restart
+    # cluster so that the new coordinator becomes dispatch mode.
+    if requires_restart:
+        cmd = gp.GpStop.local('CBDB restart', restart=True, datadir=options_.coordinator_data_dir)
+
+    # At this point, cancel isn't all that bad so re-enable 
+    # keyboard interrupt.
+    signal.signal(signal.SIGINT, signal.default_int_handler)
+    
+    print_results(array_, unix.getLocalHostname(), options_)
+    
+    if warnings_generated_:
+        sys.exit(1)
+    else:
+        sys.exit(0)
+    
+except Exception as e:
+    logger.fatal('Error activating standby coordinator: %s' % str(e))
+    sys.exit(2)
+
+sys.exit(0)

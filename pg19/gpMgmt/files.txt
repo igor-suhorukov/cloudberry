@@ -1,0 +1,189 @@
+#-------------------------------------------------------------------------
+#
+# Licensed to the Apache Software Foundation (ASF) under one
+# or more contributor license agreements.  See the NOTICE file
+# distributed with this work for additional information
+# regarding copyright ownership.  The ASF licenses this file
+# to you under the Apache License, Version 2.0 (the
+# "License"); you may not use this file except in compliance
+# with the License.  You may obtain a copy of the License at
+#
+#   http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing,
+# software distributed under the License is distributed on an
+# "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+# KIND, either express or implied.  See the License for the
+# specific language governing permissions and limitations
+# under the License.
+#
+#-------------------------------------------------------------------------
+#
+# What of gpMgmt is installed, and where: a line per file, the directory
+# under GPHOME it goes to, then its path under gpMgmt/, as Cloudberry's
+# Makefiles install it (gpMgmt/Makefile and those of its subdirectories).
+# A file the port has a copy of, src/<path> here, is installed in place of
+# Cloudberry's; a path only src/ has is the port's own.  Anything under bin/
+# or sbin/ is installed executable, and so is a file executable where it is.
+#
+# The tools the port does not install, and why:
+#
+#   gpexpand, gpshrink  add and remove segments; a cluster's segment count
+#                       is fixed when its coordinator starts, and
+#                       gp_add_segment_primary() is refused
+#   gpcheckcat          checks Cloudberry's catalogs, which the port keeps
+#                       as views, labels and files (gppylib/data, the
+#                       catalog's JSON it reads, is not built either)
+#   gppkg, gpload,      packages, loads through gpfdist, and Cloudberry's
+#   gpdirtableload,     memory, log and support tools: not ported yet
+#   gpmemwatcher,
+#   gpmemreport,
+#   gplogfilter,
+#   gpcheckperf, gpsd,
+#   minirepro, analyzedb,
+#   gpreload, gpdemo
+
+# The tools
+bin bin/gpstart
+bin bin/gpstop
+bin bin/gpstate
+bin bin/gpconfig
+bin bin/gprecoverseg
+bin bin/gpinitsystem
+bin bin/gpinitstandby
+bin bin/gpactivatestandby
+bin bin/gpaddmirrors
+bin bin/gpmovemirrors
+bin bin/gpdeletesystem
+bin bin/gpssh
+bin bin/gpssh-exkeys
+bin bin/gpsync
+bin bin/gpcheckresgroupimpl
+bin bin/gpcheckresgroupv2impl
+
+bin/gpconfig_modules bin/gpconfig_modules/__init__.py
+bin/gpconfig_modules bin/gpconfig_modules/compare_segment_guc.py
+bin/gpconfig_modules bin/gpconfig_modules/database_segment_guc.py
+bin/gpconfig_modules bin/gpconfig_modules/file_segment_guc.py
+bin/gpconfig_modules bin/gpconfig_modules/guc_collection.py
+bin/gpconfig_modules bin/gpconfig_modules/parse_guc_metadata.py
+bin/gpconfig_modules bin/gpconfig_modules/segment_guc.py
+
+bin/gpssh_modules bin/gpssh_modules/__init__.py
+bin/gpssh_modules bin/gpssh_modules/gppxssh_wrapper.py
+
+bin/lib bin/lib/__init__.py
+bin/lib bin/lib/gp_bash_functions.sh
+bin/lib bin/lib/gpconfigurenewsegment
+bin/lib bin/lib/gpcreateseg.sh
+bin/lib bin/lib/gppinggpfdist.py
+bin/lib bin/lib/gpstate.py
+bin/lib bin/lib/multidd
+bin/lib/pexpect bin/lib/pexpect/__init__.py
+bin/lib/pexpect bin/lib/pexpect/pxssh.py
+
+# What the tools run on each host
+sbin sbin/gpcleansegmentdir.py
+sbin sbin/gpconfig_helper.py
+sbin sbin/gpsegbasebackup.py
+sbin sbin/gpsegclusterfile.py
+sbin sbin/gpsegrewind.py
+sbin sbin/gpgetstatususingtransition.py
+sbin sbin/gpoperation.py
+sbin sbin/gpsegrecovery.py
+sbin sbin/gpsegsetuprecovery.py
+sbin sbin/gpsegstart.py
+sbin sbin/gpsegstop.py
+sbin sbin/packcore
+sbin sbin/recovery_base.py
+sbin sbin/seg_update_pg_hba.py
+
+# gppylib, and pipes, which Python 3.13 removed (the port's own)
+lib/python bin/ext/pipes.py
+lib/python/gppylib bin/gppylib/__init__.py
+lib/python/gppylib bin/gppylib/clusterfile.py
+lib/python/gppylib bin/gppylib/datetimeutils.py
+lib/python/gppylib bin/gppylib/gp_era.py
+lib/python/gppylib bin/gppylib/gparray.py
+lib/python/gppylib bin/gppylib/gpcatalog.py
+lib/python/gppylib bin/gppylib/gplog.py
+lib/python/gppylib bin/gppylib/gpparseopts.py
+lib/python/gppylib bin/gppylib/gpresgroup.py
+lib/python/gppylib bin/gppylib/gpsubprocess.py
+lib/python/gppylib bin/gppylib/gpversion.py
+lib/python/gppylib bin/gppylib/heapchecksum.py
+lib/python/gppylib bin/gppylib/logfilter.py
+lib/python/gppylib bin/gppylib/mainUtils.py
+lib/python/gppylib bin/gppylib/nodecopy.py
+lib/python/gppylib bin/gppylib/parseutils.py
+lib/python/gppylib bin/gppylib/pgconf.py
+lib/python/gppylib bin/gppylib/recoveryinfo.py
+lib/python/gppylib bin/gppylib/userinput.py
+lib/python/gppylib bin/gppylib/utils.py
+lib/python/gppylib/commands bin/gppylib/commands/__init__.py
+lib/python/gppylib/commands bin/gppylib/commands/base.py
+lib/python/gppylib/commands bin/gppylib/commands/dca.py
+lib/python/gppylib/commands bin/gppylib/commands/gp.py
+lib/python/gppylib/commands bin/gppylib/commands/pg.py
+lib/python/gppylib/commands bin/gppylib/commands/unix.py
+lib/python/gppylib/db bin/gppylib/db/__init__.py
+lib/python/gppylib/db bin/gppylib/db/catalog.py
+lib/python/gppylib/db bin/gppylib/db/dbconn.py
+lib/python/gppylib/gpMgmttest bin/gppylib/gpMgmttest/__init__.py
+lib/python/gppylib/operations bin/gppylib/operations/__init__.py
+lib/python/gppylib/operations bin/gppylib/operations/buildMirrorSegments.py
+lib/python/gppylib/operations bin/gppylib/operations/deletesystem.py
+lib/python/gppylib/operations bin/gppylib/operations/detect_unreachable_hosts.py
+lib/python/gppylib/operations bin/gppylib/operations/initstandby.py
+lib/python/gppylib/operations bin/gppylib/operations/package.py
+lib/python/gppylib/operations bin/gppylib/operations/rebalanceSegments.py
+lib/python/gppylib/operations bin/gppylib/operations/reload.py
+lib/python/gppylib/operations bin/gppylib/operations/segment_reconfigurer.py
+lib/python/gppylib/operations bin/gppylib/operations/segment_tablespace_locations.py
+lib/python/gppylib/operations bin/gppylib/operations/startSegments.py
+lib/python/gppylib/operations bin/gppylib/operations/unix.py
+lib/python/gppylib/operations bin/gppylib/operations/update_pg_hba_on_segments.py
+lib/python/gppylib/operations bin/gppylib/operations/utils.py
+lib/python/gppylib/programs bin/gppylib/programs/__init__.py
+lib/python/gppylib/programs bin/gppylib/programs/clsAddMirrors.py
+lib/python/gppylib/programs bin/gppylib/programs/clsRecoverSegment.py
+lib/python/gppylib/programs bin/gppylib/programs/clsRecoverSegment_triples.py
+lib/python/gppylib/programs bin/gppylib/programs/clsSystemState.py
+lib/python/gppylib/programs bin/gppylib/programs/programIoUtils.py
+lib/python/gppylib/system bin/gppylib/system/__init__.py
+lib/python/gppylib/system bin/gppylib/system/ComputeCatalogUpdate.py
+lib/python/gppylib/system bin/gppylib/system/configurationImplGpdb.py
+lib/python/gppylib/system bin/gppylib/system/configurationInterface.py
+lib/python/gppylib/system bin/gppylib/system/environment.py
+lib/python/gppylib/system bin/gppylib/system/faultProberImplGpdb.py
+lib/python/gppylib/system bin/gppylib/system/faultProberInterface.py
+lib/python/gppylib/system bin/gppylib/system/fileSystemImplOs.py
+lib/python/gppylib/system bin/gppylib/system/fileSystemImplTest.py
+lib/python/gppylib/system bin/gppylib/system/fileSystemInterface.py
+lib/python/gppylib/system bin/gppylib/system/info.py
+lib/python/gppylib/system bin/gppylib/system/osImplNative.py
+lib/python/gppylib/system bin/gppylib/system/osInterface.py
+lib/python/gppylib/util bin/gppylib/util/__init__.py
+lib/python/gppylib/util bin/gppylib/util/gp_utils.py
+lib/python/gppylib/util bin/gppylib/util/ssh_utils.py
+
+# The tools' help, and the configuration files gpinitsystem's help names
+docs/cli_help doc/gpactivatestandby_help
+docs/cli_help doc/gpaddmirrors_help
+docs/cli_help doc/gpconfig_help
+docs/cli_help doc/gpdeletesystem_help
+docs/cli_help doc/gpinitstandby_help
+docs/cli_help doc/gpinitsystem_help
+docs/cli_help doc/gprecoverseg_help
+docs/cli_help doc/gpssh-exkeys_help
+docs/cli_help doc/gpssh_help
+docs/cli_help doc/gpstart_help
+docs/cli_help doc/gpstate_help
+docs/cli_help doc/gpstop_help
+docs/cli_help/gpconfigs doc/gpconfigs/gpinitsystem_config
+docs/cli_help/gpconfigs doc/gpconfigs/gpinitsystem_singlenode
+docs/cli_help/gpconfigs doc/gpconfigs/hostfile_gpinitsystem
+docs/cli_help/gpconfigs doc/gpconfigs/hostfile_exkeys
+docs/cli_help/gpconfigs doc/gpconfigs/hostfile_gpssh_allhosts
+docs/cli_help/gpconfigs doc/gpconfigs/hostfile_gpssh_segonly
+docs/cli_help/gpconfigs doc/gpconfigs/hostlist_singlenode

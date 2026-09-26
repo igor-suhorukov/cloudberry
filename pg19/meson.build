@@ -694,6 +694,19 @@ if apr_dep.found() and event_dep.found()
 endif
 
 ###############################################################################
+# gpMgmt
+#
+# Cloudberry's management tools -- gpinitsystem, gpstart, gpstop, gpstate,
+# gpconfig, gprecoverseg and the rest -- installed beside the server, which
+# they drive through PostgreSQL 19's own tools.  See gpMgmt/meson.build.
+###############################################################################
+
+if get_option('gpmgmt')
+  subdir('gpMgmt')
+  built_modules += 'gpMgmt (tools)'
+endif
+
+###############################################################################
 # Test-only modules
 #
 # gp_probe sets every hook of the core patch series so that the hook tests can

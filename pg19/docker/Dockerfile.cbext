@@ -161,7 +161,10 @@ USER root
 # libcurl and gpfdist's libraries, and curl, with which Cloudberry's external
 # table tests wait for the gpfdist they start.  procps for pgrep, with which
 # Cloudberry's diskquota tests look for the launcher and its workers.
-# libprotobuf and liburing are PAX's.
+# libprotobuf and liburing are PAX's.  gpMgmt, the management tools meson
+# installs beside the server, needs psutil, PyYAML and pexpect besides
+# PyGreSQL, and the commands its scripts run on each host: ip and ss, ping,
+# rsync and less.
 RUN apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
         libxerces-c3.2 \
         libcurl4t64 libapr1t64 libevent-2.1-7t64 libyaml-0-2 curl \
@@ -169,6 +172,7 @@ RUN apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-ins
         libgeos-c1t64 libproj25 libgdal36 libjson-c5 libprotobuf-c1 \
         perl diffutils procps \
         python3 python3-pygresql \
+        python3-psutil python3-yaml python3-pexpect iproute2 iputils-ping rsync less \
     && rm -rf /var/lib/apt/lists/*
 # One locale beyond C: a function of Cloudberry's AOCO_Compression sets
 # lc_monetary to en_US.utf8, which its test machines have.

@@ -43,3 +43,5 @@ option('hook_tests', type: 'boolean', value: true,
        description: 'Build gp_probe, the module the hook tests use to exercise the core patch series')
 option('gpfdist', type: 'feature', value: 'auto',
        description: 'Build gpfdist, the file server of external tables; it needs APR and libevent, and takes transforms where libyaml is installed')
+option('gpmgmt', type: 'boolean', value: true,
+       description: 'Install gpMgmt, Cloudberry\'s management tools, beside the server (Python 3 with PyGreSQL and psutil at run time)')
