@@ -128,6 +128,7 @@ extern Plan *GpSplitMake(Plan *child, List *targetlist, List *deletecols,
 extern Plan *GpSplitModifyMake(Plan *child, Index rti, int natts,
 							   AttrNumber actioncol, AttrNumber ctidcol);
 extern bool GpSplitModifyIs(Plan *plan, Index *rti);
+extern void GpMotionRefuseRecheck(void);
 struct ExplainState;
 extern bool GpSplitExplainLabel(PlanState *planstate, struct ExplainState *es,
 								const char **pname, const char **suffix);

@@ -565,6 +565,20 @@ AS 'MODULE_PATHNAME', 'gp_split_insert'
 LANGUAGE C;
 
 /*
+ * Why a statement of the explicit write wrote fewer of a segment's rows than
+ * it was sent (gp_explicit.c, gp_split.c): a row another transaction updated
+ * since the coordinator read it fails the statement, and one it deleted
+ * fails it where "deleted" says so, 's' for a Split and 'm' for a MERGE.  Not
+ * STRICT, because NULL::t is how it is told which table; for a user who may
+ * update or delete the table's rows.
+ */
+CREATE FUNCTION gp_internal.explicit_recheck(rel anyelement, ctids tid[],
+	tables oid[], deleted "char")
+RETURNS void
+AS 'MODULE_PATHNAME', 'gp_explicit_recheck'
+LANGUAGE C;
+
+/*
  * pg_locks' mppsessionid and mppiswriter, which Cloudberry's pg_locks has as
  * columns and the parser makes of the names the same way (gp_segment.c):
  * the coordinator session the locking process works for, and whether it is

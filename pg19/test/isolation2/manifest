@@ -20,6 +20,10 @@
 #   skip  it needs what the port does not have yet: the rest of the line says
 #         what
 #
+# A test whose name begins "port/" is the port's own, beside Cloudberry's
+# (sql/port and expected/port here): what the port does in a place of
+# Cloudberry's the schedule's tests do not reach.
+#
 # The schedule's other tests -- append-optimized tables, bitmap indexes,
 # the rest of the fault injector's places in PostgreSQL's own code -- need
 # M5 to M7, and are not listed.  Its FTS tests
@@ -50,6 +54,7 @@ run  gdd/dist-deadlock-upsert                      gdd1
 run  gdd/delete-deadlock-root-leaf-concurrent-op   gdd2
 run  gdd/update-deadlock-root-leaf-concurrent-op   gdd2
 run  gdd/local-deadlock-03                         gdd2
+run  port/explicit_concurrent_update               gdd3
 run  gdd/end                                       gdd*
 run  alter_blocks_for_update_and_viceversa
 run  reader_waits_for_lock                         readers

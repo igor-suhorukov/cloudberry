@@ -122,7 +122,9 @@ On a cluster (M2), `gp_core` and `gp_orca`:
   RETURNING (old and new too) and a view's WITH CHECK OPTION and a table's
   policies evaluated on the coordinator, MERGE, WHERE CURRENT OF and ON
   CONFLICT in a WITH query, a replicated table's row found on every segment
-  by what it holds;
+  by what it holds, and — with the deadlock detector on — a row another
+  transaction updates between the coordinator's read and the segment's
+  write refused in Cloudberry's words, where it was passed over;
 - ALTER TABLE ... EXPAND TABLE and SHRINK TABLE TO n, as Cloudberry's
   gpexpand runs them, and direct dispatch to the segments a few key values
   are on;

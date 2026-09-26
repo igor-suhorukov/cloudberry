@@ -45,11 +45,20 @@
  * so that each segment's own UPDATE checks the constraints, fires the row
  * triggers and moves a row between partitions, as Cloudberry's segments
  * do; a partitioned table's rows are written through its root.  A target
- * row the plan finds more than once is changed once, as PostgreSQL's UPDATE
- * ... FROM changes it.  The rows are sent once the plan has finished with
- * the segments, as the routed INSERT's are, and an UPDATE or DELETE locks
- * the table as Cloudberry without its global deadlock detector locks it,
- * so that no row changes between being read and being written.
+ * row the plan finds more than once is sent once, by the first of the
+ * plan's rows that finds it, as PostgreSQL's UPDATE ... FROM changes it
+ * once; a Split refuses the second, in Cloudberry's words.  The rows are
+ * sent once the plan has finished with the segments, as the routed INSERT's
+ * are, and an UPDATE or DELETE locks the table as Cloudberry without its
+ * global deadlock detector locks it, so that no row changes between being
+ * read and being written.  With the detector on, rows are locked instead,
+ * and one may: a segment's statement then rechecks its new version, which
+ * the ctid it was sent never matches, and passes it over.  So a statement
+ * that wrote fewer rows than it was sent asks the segment why
+ * (explicit_recheck(), gp_split.c): a row another transaction updated fails
+ * it, as the recheck below Cloudberry's Motion fails it, and one deleted is
+ * passed over, as PostgreSQL passes it over -- but for a Split's, and a
+ * MERGE's that may insert instead.
  *
  * An INSERT's rows go to the segment their key hashes to, every segment for
  * a replicated table.  An UPDATE that sets a column of the key moves each
@@ -142,6 +151,7 @@
 #include "access/htup_details.h"
 #include "access/table.h"
 #include "access/tupconvert.h"
+#include "access/xact.h"
 #include "optimizer/optimizer.h"
 #include "catalog/pg_trigger.h"
 #include "catalog/pg_type.h"
@@ -437,6 +447,15 @@ typedef struct ExplicitState
 	bool		done;
 
 	/*
+	 * Each target row is sent once, so that a statement's count is exact;
+	 * with the global deadlock detector on, rows the segments' statements
+	 * came short of are asked about (explicit_recheck()).
+	 */
+	bool		recheck;
+	HTAB	   *sent;			/* the rows sent, by the plan's ctid */
+	int			mfrom;			/* a replicated MERGE target's rows' segment */
+
+	/*
 	 * A Split: an UPDATE of the distribution key.  Each row is deleted where
 	 * it is, returning it, and its new version -- the old one with the SET
 	 * columns' new values -- inserted where it hashes.
@@ -474,6 +493,29 @@ typedef struct ExplicitState
 	TupleConversionMap **mtoroot;	/* the relation's row to the root's */
 	FmgrInfo	mtextout;		/* a replicated table's row, as its text */
 } ExplicitState;
+
+/*
+ * What a statement's shortfall is asked about on a segment
+ * (explicit_recheck()): the table; what a row another transaction deleted
+ * meanwhile does -- 'p' it is passed over, 's' it fails a Split, 'm' a
+ * MERGE that may insert instead; and, for a replicated table's rows, which
+ * are sent by their text, the segment they were read on and each one's
+ * ctid there.
+ */
+typedef struct ExplicitRecheck
+{
+	Relation	target;
+	char		deleted;
+	int			content;		/* the rows' segment, or -1: the one sent to */
+	const char **ctids;			/* in the rows' order, or NULL: params[0] */
+} ExplicitRecheck;
+
+/* A row a write changes: its table, and the ctid the plan knows it by. */
+typedef struct RowTouched
+{
+	Oid			relid;
+	ItemPointerData tid;		/* zeroed before it is filled: it has padding */
+} RowTouched;
 
 /* Does an expression read RETURNING's old or new explicitly? */
 static bool
@@ -1443,6 +1485,21 @@ explicit_begin(CustomScanState *node, EState *estate, int eflags)
 			if (state->rels[i] != state->target)
 				LockRelationOid(RelationGetRelid(state->rels[i]), ExclusiveLock);
 	}
+
+	/*
+	 * With the detector on, it locks rows, as Cloudberry's does, and a row
+	 * may change between being read and being written: a segment's
+	 * statement then rechecks the row's new version, which the ctid it was
+	 * sent never matches, and passes it over.  So what a statement came
+	 * short of is asked about (explicit_recheck()) -- at READ COMMITTED: a
+	 * transaction snapshot's statement fails on such a row itself.
+	 */
+	state->recheck = gp_enable_global_deadlock_detector &&
+		!IsolationUsesXactSnapshot() &&
+		(state->operation == CMD_UPDATE || state->operation == CMD_DELETE ||
+		 state->operation == CMD_MERGE);
+	state->mfrom = -1;
+
 	if (state->operation == CMD_INSERT)
 		GpModifyLockPartitions(RelationGetRelid(state->target),
 							   state->on_conflict == ONCONFLICT_UPDATE
@@ -1473,6 +1530,35 @@ result_rel_of(ExplicitState *state, Oid relid)
 			return i;
 	elog(ERROR, "a row of relation %u is not one this write writes", relid);
 	return 0;					/* keep the compiler quiet */
+}
+
+/*
+ * Whether the plan names this target row for the first time.  Each is sent
+ * once -- as PostgreSQL's UPDATE ... FROM changes a row once, by the first
+ * of the plan's rows that finds it, and passes the others over -- so that
+ * a statement that writes fewer rows than it was sent came short of some.
+ */
+static bool
+explicit_first_time(ExplicitState *state, ItemPointer synthetic, Oid relid)
+{
+	RowTouched	key;
+	bool		found;
+
+	if (state->sent == NULL)
+	{
+		HASHCTL		ctl = {0};
+
+		ctl.keysize = sizeof(RowTouched);
+		ctl.entrysize = sizeof(RowTouched);
+		ctl.hcxt = state->css.ss.ps.state->es_query_cxt;
+		state->sent = hash_create("gp explicit rows sent", 256, &ctl,
+								  HASH_ELEM | HASH_BLOBS | HASH_CONTEXT);
+	}
+	memset(&key, 0, sizeof(key));
+	key.relid = relid;
+	ItemPointerCopy(synthetic, &key.tid);
+	(void) hash_search(state->sent, &key, HASH_ENTER, &found);
+	return !found;
 }
 
 /* Run the plan to its end: each row it would write, to its segment's batch. */
@@ -1518,6 +1604,24 @@ explicit_collect(ExplicitState *state)
 			if (!row_identity_find(estate, (ItemPointer) DatumGetPointer(d),
 								   &content, &tid))
 				elog(ERROR, "a row to write was not read from a segment");
+
+			/*
+			 * A row the plan found before is passed over; a Split's is
+			 * refused, as Cloudberry's is (split_multiple_updates(),
+			 * gp_split.c): its second new version could not be taken back.
+			 */
+			if (!explicit_first_time(state, (ItemPointer) DatumGetPointer(d),
+									 RelationGetRelid(state->rels[relidx])))
+			{
+				if (state->split)
+					ereport(ERROR,
+							(errcode(ERRCODE_IN_FAILED_SQL_TRANSACTION),
+							 errmsg("multiple updates to a row by the same query is not allowed")));
+				pfree(params);
+				MemoryContextSwitchTo(oldcxt);
+				ResetPerTupleExprContext(estate);
+				continue;
+			}
 
 			params[p++] = DatumGetCString(DirectFunctionCall1(tidout,
 															  ItemPointerGetDatum(&tid)));
@@ -1568,15 +1672,9 @@ explicit_collect(ExplicitState *state)
 static uint64 explicit_send_statements(int content, List *rows, int nparams,
 									   const char *head, const char *tail,
 									   List *casts, TupleDesc desc,
-									   Tuplestorestate *store);
+									   Tuplestorestate *store,
+									   const ExplicitRecheck *recheck);
 static uint64 explicit_send_split(ExplicitState *state);
-
-/* A row an action of a MERGE changed: its table, and its ctid in the plan. */
-typedef struct MergeTouched
-{
-	Oid			relid;
-	ItemPointerData tid;		/* zeroed before it is filled: it has padding */
-} MergeTouched;
 
 /*
  * A row an action of this MERGE changes, by its table and the ctid the plan
@@ -1587,15 +1685,15 @@ typedef struct MergeTouched
 static void
 merge_touch(ExplicitState *state, ItemPointer synthetic, Oid relid)
 {
-	MergeTouched key;
+	RowTouched	key;
 	bool		found;
 
 	if (state->mtouched == NULL)
 	{
 		HASHCTL		ctl = {0};
 
-		ctl.keysize = sizeof(MergeTouched);
-		ctl.entrysize = sizeof(MergeTouched);
+		ctl.keysize = sizeof(RowTouched);
+		ctl.entrysize = sizeof(RowTouched);
 		ctl.hcxt = state->css.ss.ps.state->es_query_cxt;
 		state->mtouched = hash_create("gp merge rows", 256, &ctl,
 									  HASH_ELEM | HASH_BLOBS | HASH_CONTEXT);
@@ -1639,12 +1737,22 @@ static const char **
 merge_row_params(ExplicitState *state, int nparams, ItemPointer synthetic,
 				 Datum target, Oid relid, int *content)
 {
-	const char **params = palloc0_array(const char *, Max(nparams, 1));
+	const char **params = palloc0_array(const char *, Max(nparams, 1) + 1);
 
 	if (state->by_content)
 	{
-		/* a replicated table's row, by its text, on every segment */
+		ItemPointerData tid;
+
+		/*
+		 * a replicated table's row, by its text, on every segment -- and,
+		 * after its parameters, its ctid on the segment it was read on, for
+		 * a statement that comes short of it (explicit_recheck())
+		 */
 		params[0] = OutputFunctionCall(&state->mtextout, target);
+		if (!row_identity_find(state->css.ss.ps.state, synthetic, &state->mfrom, &tid))
+			elog(ERROR, "a row to write was not read from a segment");
+		params[nparams] = DatumGetCString(DirectFunctionCall1(tidout,
+															  ItemPointerGetDatum(&tid)));
 		*content = GP_HASH_ALL_SEGMENTS;
 	}
 	else
@@ -1911,28 +2019,57 @@ explicit_collect_merge(ExplicitState *state)
 	}
 }
 
-/* One statement's rows, each segment's, and a replicated table's once. */
+/*
+ * One statement's rows, each segment's, and a replicated table's once.  An
+ * UPDATE's or a DELETE's that came short of a row another transaction
+ * changed fails, and so does one it deleted where the MERGE would have
+ * tried its NOT MATCHED actions for it, as PostgreSQL's does.
+ */
 static uint64
 merge_send_shape(ExplicitState *state, MergeShape *shape)
 {
 	int			nparams = list_length(shape->casts);
 	uint64		total = 0;
+	ExplicitRecheck recheck = {0};
+	const ExplicitRecheck *rc = NULL;
+
+	if (state->recheck && shape->cmd != CMD_INSERT)
+	{
+		recheck.target = state->target;
+		recheck.deleted = state->mactions[MERGE_WHEN_NOT_MATCHED_BY_TARGET] != NIL
+			? 'm' : 'p';
+		recheck.content = -1;
+		rc = &recheck;
+	}
 
 	for (int seg = 0; seg < state->nsegs; seg++)
 		if (shape->batches[seg] != NIL)
 			total += explicit_send_statements(seg, shape->batches[seg], nparams,
 											  shape->head, shape->tail,
-											  shape->casts, NULL, NULL);
+											  shape->casts, NULL, NULL, rc);
 	if (shape->everywhere != NIL)
+	{
+		if (rc != NULL)
+		{
+			ListCell   *lc;
+
+			/* a replicated table's rows' ctids where they were read */
+			recheck.content = state->mfrom;
+			recheck.ctids = palloc_array(const char *, list_length(shape->everywhere));
+			foreach(lc, shape->everywhere)
+				recheck.ctids[foreach_current_index(lc)] =
+					((const char **) lfirst(lc))[nparams];
+		}
 		for (int seg = 0; seg < Min(state->nsegs, state->numsegments); seg++)
 		{
 			uint64		n = explicit_send_statements(seg, shape->everywhere, nparams,
 													 shape->head, shape->tail,
-													 shape->casts, NULL, NULL);
+													 shape->casts, NULL, NULL, rc);
 
 			if (seg == 0)
 				total += n;
 		}
+	}
 	return total;
 }
 
@@ -1960,17 +2097,61 @@ explicit_send_merge(ExplicitState *state)
 }
 
 /*
+ * Why a statement wrote fewer of a batch's rows -- rows[first] on, nrows of
+ * them -- than it was sent: asked of the segment they were read on, which
+ * fails the statement where another transaction changed one since
+ * (explicit_recheck(), gp_split.c).
+ */
+static void
+explicit_recheck(const ExplicitRecheck *recheck, int content, List *rows,
+				 int first, int nrows)
+{
+	StringInfoData tids;
+	StringInfoData oids;
+	const char *values[2];
+	char	   *sql;
+
+	initStringInfo(&tids);
+	initStringInfo(&oids);
+	appendStringInfoChar(&tids, '{');
+	appendStringInfoChar(&oids, '{');
+	for (int i = first; i < first + nrows; i++)
+	{
+		const char **params = (const char **) list_nth(rows, i);
+
+		appendStringInfo(&tids, "%s\"%s\"", i > first ? "," : "",
+						 recheck->ctids != NULL ? recheck->ctids[i] : params[0]);
+		appendStringInfo(&oids, "%s%s", i > first ? "," : "", params[1]);
+	}
+	appendStringInfoChar(&tids, '}');
+	appendStringInfoChar(&oids, '}');
+	values[0] = tids.data;
+	values[1] = oids.data;
+	sql = psprintf("SELECT gp_internal.explicit_recheck(NULL::%s, $1::pg_catalog.tid[], $2::pg_catalog.oid[], '%c')",
+				   GpDispatchRelationName(RelationGetRelid(recheck->target)),
+				   recheck->deleted);
+	(void) GpDispatchWriteOnContent(recheck->content >= 0 ? recheck->content : content,
+									sql, 2, values, NULL, NULL);
+	pfree(sql);
+	pfree(tids.data);
+	pfree(oids.data);
+}
+
+/*
  * One segment's rows, a statement a batch; how many it wrote.  "store" takes
- * what RETURNING gave, where it is to be kept.
+ * what RETURNING gave, where it is to be kept; "recheck", where it is not
+ * NULL, says what a batch that came short is asked about.
  */
 static uint64
 explicit_send_statements(int content, List *rows, int nparams,
 						 const char *head, const char *tail, List *casts,
-						 TupleDesc desc, Tuplestorestate *store)
+						 TupleDesc desc, Tuplestorestate *store,
+						 const ExplicitRecheck *recheck)
 {
 	int			per = Min(EXPLICIT_BATCH_ROWS, EXPLICIT_MAX_PARAMS / Max(nparams, 1));
 	uint64		total = 0;
 	ListCell   *lc = list_head(rows);
+	int			first = 0;
 
 	while (lc != NULL)
 	{
@@ -1978,6 +2159,7 @@ explicit_send_statements(int content, List *rows, int nparams,
 		const char **values;
 		int			nrows = 0;
 		int			n = 0;
+		uint64		written;
 
 		initStringInfo(&sql);
 		appendStringInfoString(&sql, head);
@@ -1998,8 +2180,12 @@ explicit_send_statements(int content, List *rows, int nparams,
 		}
 		appendStringInfoString(&sql, tail);
 
-		total += GpDispatchWriteOnContent(content, sql.data, n, values,
-										  desc, store);
+		written = GpDispatchWriteOnContent(content, sql.data, n, values,
+										   desc, store);
+		if (recheck != NULL && written < (uint64) nrows)
+			explicit_recheck(recheck, content, rows, first, nrows);
+		total += written;
+		first += nrows;
 		pfree(sql.data);
 		pfree(values);
 	}
@@ -2008,12 +2194,13 @@ explicit_send_statements(int content, List *rows, int nparams,
 
 static uint64
 explicit_send_rows(ExplicitState *state, int content, List *rows,
-				   Tuplestorestate *store)
+				   Tuplestorestate *store, const ExplicitRecheck *recheck)
 {
 	return explicit_send_statements(content, rows,
 									state->nvals + (state->operation != CMD_INSERT ? 3 : 0),
 									state->sql_head, state->sql_tail,
-									state->casts, state->retdesc, store);
+									state->casts, state->retdesc, store,
+									recheck);
 }
 
 /*
@@ -2138,6 +2325,16 @@ explicit_send_split(ExplicitState *state)
 	MinimalTuple *olders = NULL;
 	uint64		deleted = 0;
 	MemoryContext oldcxt;
+	ExplicitRecheck recheck = {0};
+
+	/*
+	 * A row another transaction changed since is refused, deleted or
+	 * updated, as Cloudberry's Split refuses it: by split_delete() itself,
+	 * and after a DELETE that came short of it (explicit_recheck()).
+	 */
+	recheck.target = state->target;
+	recheck.deleted = 's';
+	recheck.content = -1;
 
 	for (int seg = 0; seg < state->nsegs; seg++)
 	{
@@ -2151,7 +2348,8 @@ explicit_send_split(ExplicitState *state)
 												state->delete_head,
 												state->delete_tail,
 												list_copy_head(state->casts, 3),
-												state->olddesc, olds);
+												state->olddesc, olds,
+												state->recheck ? &recheck : NULL);
 	}
 
 	/* the deleted rows by number, RETURNING's old ones */
@@ -2244,7 +2442,7 @@ explicit_send_split(ExplicitState *state)
 											state->insert_tail,
 											state->insert_casts,
 											state->back ? state->newdesc : NULL,
-											news);
+											news, NULL);
 		if (news == NULL)
 			continue;
 
@@ -2375,9 +2573,20 @@ explicit_send(ExplicitState *state)
 {
 	EState	   *estate = state->css.ss.ps.state;
 	uint64		total = 0;
+	ExplicitRecheck recheck = {0};
+	const ExplicitRecheck *rc = NULL;
 
 	if (state->back)
 		state->returned = tuplestore_begin_heap(false, false, work_mem);
+
+	/* an UPDATE's or a DELETE's rows; a row deleted meanwhile passed over */
+	if (state->recheck)
+	{
+		recheck.target = state->target;
+		recheck.deleted = 'p';
+		recheck.content = -1;
+		rc = &recheck;
+	}
 
 	if (state->split)
 		total += explicit_send_split(state);
@@ -2393,11 +2602,24 @@ explicit_send(ExplicitState *state)
 
 			if (state->batches[from] == NIL)
 				continue;
+			if (rc != NULL)
+			{
+				ListCell   *lc;
+
+				/* their ctids where they were read, before their text */
+				recheck.content = from;
+				recheck.ctids = palloc_array(const char *,
+											 list_length(state->batches[from]));
+				foreach(lc, state->batches[from])
+					recheck.ctids[foreach_current_index(lc)] =
+						((const char **) lfirst(lc))[0];
+			}
 			rows = explicit_rows_by_content(state, from, state->batches[from]);
 			for (int seg = 0; seg < Min(state->nsegs, state->numsegments); seg++)
 			{
 				uint64		n = explicit_send_rows(state, seg, rows,
-												   seg == 0 ? state->returned : NULL);
+												   seg == 0 ? state->returned : NULL,
+												   rc);
 
 				if (seg == 0)
 					total += n;
@@ -2408,7 +2630,7 @@ explicit_send(ExplicitState *state)
 		for (int seg = 0; seg < state->nsegs; seg++)
 			if (state->batches[seg] != NIL)
 				total += explicit_send_rows(state, seg, state->batches[seg],
-											state->returned);
+											state->returned, rc);
 
 	/*
 	 * a replicated table's rows are written on every segment of it -- a
@@ -2418,7 +2640,8 @@ explicit_send(ExplicitState *state)
 		for (int seg = 0; seg < Min(state->nsegs, state->numsegments); seg++)
 		{
 			uint64		n = explicit_send_rows(state, seg, state->everywhere,
-											   seg == 0 ? state->returned : NULL);
+											   seg == 0 ? state->returned : NULL,
+											   NULL);
 
 			if (seg == 0)
 				total += n;

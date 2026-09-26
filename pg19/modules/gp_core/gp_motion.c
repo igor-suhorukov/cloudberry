@@ -3073,15 +3073,23 @@ motion_recheck(ScanState *ss, TupleTableSlot *slot)
  * serialization failure the client may retry, in these words
  * (ExecInitMotion(), nodeMotion.c).  Here as the Motion runs rather than as
  * it is initialised, since EvalPlanQual initialises every subplan of the
- * statement, whichever it runs.
+ * statement, whichever it runs.  A row that the explicit write's statements
+ * or a Split find changed so is refused in the same words (gp_split.c):
+ * Cloudberry's recheck of it would meet the Motion below its write.
  */
+void
+GpMotionRefuseRecheck(void)
+{
+	ereport(ERROR,
+			(errcode(ERRCODE_T_R_SERIALIZATION_FAILURE),
+			 errmsg("EvalPlanQual can not handle subPlan with Motion node")));
+}
+
 static TupleTableSlot *
 motion_exec(CustomScanState *node)
 {
 	if (node->ss.ps.state->es_epq_active != NULL)
-		ereport(ERROR,
-				(errcode(ERRCODE_T_R_SERIALIZATION_FAILURE),
-				 errmsg("EvalPlanQual can not handle subPlan with Motion node")));
+		GpMotionRefuseRecheck();
 
 	return ExecScan(&node->ss, motion_next, motion_recheck);
 }

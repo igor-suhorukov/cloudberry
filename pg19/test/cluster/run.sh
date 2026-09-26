@@ -1012,7 +1012,17 @@ a\b|\N' ] && [ "$(cat "$ROOT/ce_prog.txt" 2>&1)" = "to a program" ] \
 		"DELETE FROM d USING d2 WHERE d.a = d2.v * 10 AND d2.v > 4 RETURNING d.a, d2.v;" "ROLLBACK;" | qf 0 | sort -u | tr '\n' ' ')
 	[ "$out" = "50|5 60|6 " ] && ok "a DELETE that joins another distributed table, its RETURNING reading both" \
 		|| notok "DELETE ... USING ... RETURNING" "$out"
-	out=$(q 0 "UPDATE dk SET a = dk.a + 5000 FROM d2 WHERE dk.a = d2.v RETURNING dk.a;" | sort -n | tr '\n' ' ')
+	# d2 has each value of v some fourteen times: a row of dk it finds is
+	# found fourteen times, and the second of its new versions could not be
+	# taken back -- Cloudberry's Split refuses it, and so does this.
+	out=$(q 0 "UPDATE dk SET a = dk.a + 5000 FROM d2 WHERE dk.a = d2.v RETURNING dk.a;")
+	case "$out" in
+		*"multiple updates to a row by the same query is not allowed"*)
+			ok "an UPDATE of the key joining a distributed table that finds a row twice is refused, as Cloudberry refuses it" ;;
+		*) notok "an UPDATE of the key that finds a row twice" "$out" ;;
+	esac
+	q 0 "CREATE TABLE dku (v int) DISTRIBUTED BY (v); INSERT INTO dku SELECT generate_series(1, 6);" >/dev/null
+	out=$(q 0 "UPDATE dk SET a = dk.a + 5000 FROM dku WHERE dk.a = dku.v RETURNING dk.a;" | sort -n | tr '\n' ' ')
 	out2=$(q 0 "SELECT count(*), sum(a) FROM dk;")
 	w1=$(q 1 "SELECT count(*) FROM dk WHERE expected_seg(a, 2) <> 0;")
 	w2=$(q 2 "SELECT count(*) FROM dk WHERE expected_seg(a, 2) <> 1;")
@@ -3005,6 +3015,41 @@ SQL
 	[ "$waits|$seen|$after" = "transactionid|$val|$((val + 11))" ] \
 		&& ok "an UPDATE of a row a one-phase commit wrote ends after it, and no snapshot sees the row twice" \
 		|| notok "commit ordering after a one-phase commit" "$waits / $seen / $after (was $val)"
+
+	# The planner's Split without the cluster secret -- an UPDATE of the
+	# distribution key the coordinator carries out, a DELETE ... RETURNING
+	# where the row is and an INSERT where it hashes (gp_explicit.c) -- of
+	# a row another transaction changes meanwhile: its DELETE comes short of
+	# the row, and asks the segment why (explicit_recheck(), gp_split.c).
+	# It was lost: the old version stayed, and nothing was moved.  Now it is
+	# refused in Cloudberry's words, as the Split with the secret refuses it.
+	q 0 "CREATE TABLE gdd_k (id int, val int) DISTRIBUTED BY (id); INSERT INTO gdd_k VALUES ($r0, 0), ($r1, 0);
+	     CREATE TABLE gdd_s (id int) DISTRIBUTED RANDOMLY; INSERT INTO gdd_s VALUES ($r0), ($r1);" >/dev/null
+	printf '%s\n' "BEGIN;" "UPDATE gdd_k SET val = val + 1 WHERE id = $r0;" "SELECT pg_sleep(2);" "COMMIT;" |
+		qf 0 >/dev/null 2>&1 &
+	holder=$!
+	sleep 0.5
+	out=$(q 0 "SET gp.optimizer = off; UPDATE gdd_k SET id = gdd_k.id + 1000 FROM gdd_s WHERE gdd_k.id = gdd_s.id AND gdd_s.id = $r0;")
+	wait "$holder"
+	out2=$(q 0 "SELECT id, val FROM gdd_k WHERE id IN ($r0, $r0 + 1000);")
+	case "$out|$out2" in
+		*"EvalPlanQual can not handle subPlan with Motion node"*"|$r0|1")
+			ok "without the secret a Split of a row updated meanwhile is refused, and the update stands" ;;
+		*) notok "a Split of a row updated meanwhile, without the secret" "$out / $out2" ;;
+	esac
+	printf '%s\n' "BEGIN;" "DELETE FROM gdd_k WHERE id = $r1;" "SELECT pg_sleep(2);" "COMMIT;" |
+		qf 0 >/dev/null 2>&1 &
+	holder=$!
+	sleep 0.5
+	out=$(q 0 "SET gp.optimizer = off; UPDATE gdd_k SET id = gdd_k.id + 1000 FROM gdd_s WHERE gdd_k.id = gdd_s.id AND gdd_s.id = $r1;")
+	wait "$holder"
+	out2=$(q 0 "SELECT count(*) FROM gdd_k WHERE id IN ($r1, $r1 + 1000);")
+	case "$out|$out2" in
+		*"could not split update tuple which has been deleted by other transaction"*"|0")
+			ok "and so is one deleted meanwhile, as Cloudberry refuses it" ;;
+		*) notok "a Split of a row deleted meanwhile, without the secret" "$out / $out2" ;;
+	esac
+	q 0 "DROP TABLE gdd_k, gdd_s;" >/dev/null
 
 	# SELECT ... FOR UPDATE (lockrows.c, gp_modify.c): without the detector
 	# Cloudberry's table lock, with it the rows, locked on the segments --

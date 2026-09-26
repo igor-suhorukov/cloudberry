@@ -436,14 +436,19 @@ run_group() {
 		# a test gives this machine, os.uname()[1], is its nodes' host: the
 		# socket directory they share, by which, with its port and data
 		# directory, gprecoverseg -i finds a node (recoverseg_from_file's).
-		if [ -f "$CB/input/$t.source" ]; then
-			convert "$CB/input/$t.source" | respell | own_tmp | own_host > "$R/sql/$t.sql"
+		# A test whose name begins "port/" is the port's own, from sql/port
+		# and expected/port beside this file, as Cloudberry's are from its
+		# suite's.
+		src="$CB"
+		[[ "$t" == port/* ]] && src="$HERE"
+		if [ -f "$src/input/$t.source" ]; then
+			convert "$src/input/$t.source" | respell | own_tmp | own_host > "$R/sql/$t.sql"
 		else
-			respell "$CB/sql/$t.sql" | own_tmp | own_host > "$R/sql/$t.sql"
+			respell "$src/sql/$t.sql" | own_tmp | own_host > "$R/sql/$t.sql"
 		fi
-		exp="$CB/expected/$t.out"
-		[ "$pass" = orca ] && [ -f "$CB/expected/${t}_optimizer.out" ] && exp="$CB/expected/${t}_optimizer.out"
-		[ -f "$CB/output/$t.source" ] && exp="$CB/output/$t.source"
+		exp="$src/expected/$t.out"
+		[ "$pass" = orca ] && [ -f "$src/expected/${t}_optimizer.out" ] && exp="$src/expected/${t}_optimizer.out"
+		[ -f "$src/output/$t.source" ] && exp="$src/output/$t.source"
 		name="$(basename "$exp" .out)"
 		name="${name%.source}"
 		convert "$exp" | respell | own_tmp | own_host > "$R/expected/$t.out"

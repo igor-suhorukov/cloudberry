@@ -1,0 +1,140 @@
+-- The port's own: the explicit write, with the global deadlock detector on.
+--
+-- An UPDATE, a DELETE or a MERGE the planner cannot send the segments whole
+-- -- of one randomly distributed table by another, here -- is the
+-- coordinator's: it reads the target's rows, each with its segment and
+-- ctid, runs the plan, and sends each segment a statement that changes its
+-- rows by their ctids (gp_explicit.c).  With the detector on the table is
+-- not locked against other writers, as Cloudberry's is not, and a row may
+-- change between the coordinator's read and the segment's write: the
+-- segment's statement rechecked the row's new version, which the ctid it
+-- was sent never matches, and passed it over, and the update was lost.
+-- Now a statement that writes fewer rows than it was sent asks the segment
+-- why: a row another transaction updated fails it with 40001, in the words
+-- Cloudberry fails it in (its gdd/concurrent_update, "Test EvalplanQual"),
+-- and one deleted is passed over, as PostgreSQL passes it over.
+
+1: SHOW gp.enable_global_deadlock_detector;
+1: SET gp.optimizer = off;
+2: SET gp.optimizer = off;
+
+1: CREATE TABLE ec_t (c1 int, c2 int) DISTRIBUTED RANDOMLY;
+1: CREATE TABLE ec_s (c1 int, c2 int) DISTRIBUTED RANDOMLY;
+1: INSERT INTO ec_s VALUES (1, 1);
+
+-- Cloudberry's interleaving: the second UPDATE waits on a segment for the
+-- first's row, and fails once the first commits
+1: INSERT INTO ec_t VALUES (1, 1);
+1: BEGIN;
+1: UPDATE ec_t SET c1 = c1 + 1 WHERE c2 = 1;
+2&: UPDATE ec_t SET c1 = ec_t.c1 + 1 FROM ec_s WHERE ec_t.c2 = ec_s.c2;
+1: COMMIT;
+2<:
+1: SELECT * FROM ec_t;
+
+-- The first commits after the second's snapshot and before its write,
+-- which waits for nothing on the segment: the second holds on an advisory
+-- lock, taken as it computes its new values, which the first holds
+1: CREATE FUNCTION ec_wait(int) RETURNS int LANGUAGE sql VOLATILE AS $$
+   SELECT pg_advisory_xact_lock_shared(1); SELECT $1 $$;
+1: SELECT pg_advisory_lock(1);
+2&: UPDATE ec_t SET c1 = ec_wait(ec_t.c1 + 1) FROM ec_s WHERE ec_t.c2 = ec_s.c2;
+1: UPDATE ec_t SET c1 = c1 + 100 WHERE c2 = 1;
+1: SELECT pg_advisory_unlock(1);
+2<:
+1: SELECT * FROM ec_t;
+
+-- A DELETE ... USING and a MERGE's UPDATE fail the same way
+1: BEGIN;
+1: UPDATE ec_t SET c1 = c1 + 1 WHERE c2 = 1;
+2&: DELETE FROM ec_t USING ec_s WHERE ec_t.c2 = ec_s.c2;
+1: COMMIT;
+2<:
+1: BEGIN;
+1: UPDATE ec_t SET c1 = c1 + 1 WHERE c2 = 1;
+2&: MERGE INTO ec_t USING ec_s ON ec_t.c2 = ec_s.c2 WHEN MATCHED THEN UPDATE SET c1 = ec_t.c1 + 1;
+1: COMMIT;
+2<:
+1: SELECT * FROM ec_t;
+
+-- A row deleted meanwhile is passed over: UPDATE 0, as PostgreSQL's
+1: BEGIN;
+1: DELETE FROM ec_t WHERE c2 = 1;
+2&: UPDATE ec_t SET c1 = ec_t.c1 + 1 FROM ec_s WHERE ec_t.c2 = ec_s.c2;
+1: COMMIT;
+2<:
+-- ... and by a MERGE with no NOT MATCHED action, which a MERGE with one
+-- would have tried for its source row, as PostgreSQL's does: that one fails
+1: INSERT INTO ec_t VALUES (1, 1);
+1: BEGIN;
+1: DELETE FROM ec_t WHERE c2 = 1;
+2&: MERGE INTO ec_t USING ec_s ON ec_t.c2 = ec_s.c2 WHEN MATCHED THEN UPDATE SET c1 = ec_t.c1 + 1;
+1: COMMIT;
+2<:
+1: INSERT INTO ec_t VALUES (1, 1);
+1: BEGIN;
+1: DELETE FROM ec_t WHERE c2 = 1;
+2&: MERGE INTO ec_t USING ec_s ON ec_t.c2 = ec_s.c2 WHEN MATCHED THEN UPDATE SET c1 = ec_t.c1 + 1 WHEN NOT MATCHED THEN INSERT VALUES (ec_s.c1, ec_s.c2);
+1: COMMIT;
+2<:
+1: SELECT * FROM ec_t;
+
+-- No row changed meanwhile, none refused: two rows of the plan for one
+-- target row change it once, by the first, and a trigger that keeps a row
+-- from being written keeps it
+1: INSERT INTO ec_t VALUES (1, 1);
+1: INSERT INTO ec_s VALUES (2, 1);
+2: UPDATE ec_t SET c1 = ec_t.c1 + 1 FROM ec_s WHERE ec_t.c2 = ec_s.c2;
+1: SELECT * FROM ec_t;
+1: CREATE FUNCTION ec_skip() RETURNS trigger LANGUAGE plpgsql AS $$
+   BEGIN RETURN NULL; END $$;
+1: CREATE TRIGGER ec_skip BEFORE UPDATE ON ec_t FOR EACH ROW EXECUTE FUNCTION ec_skip();
+2: UPDATE ec_t SET c1 = ec_t.c1 + 1 FROM ec_s WHERE ec_t.c2 = ec_s.c2;
+1: DROP TRIGGER ec_skip ON ec_t;
+1: SELECT * FROM ec_t;
+1: DELETE FROM ec_s WHERE c1 = 2;
+
+-- A Split -- an UPDATE of the distribution key, each row deleted where it
+-- is and inserted where it hashes -- is refused a row found twice, and a
+-- row updated or deleted meanwhile, in Cloudberry's words
+1: CREATE TABLE ec_h (c1 int, c2 int) DISTRIBUTED BY (c1);
+1: INSERT INTO ec_h VALUES (1, 1);
+1: INSERT INTO ec_s VALUES (2, 1);
+2: UPDATE ec_h SET c1 = ec_h.c1 + 1 FROM ec_s WHERE ec_h.c2 = ec_s.c2;
+1: DELETE FROM ec_s WHERE c1 = 2;
+1: BEGIN;
+1: UPDATE ec_h SET c2 = c2 WHERE c1 = 1;
+2&: UPDATE ec_h SET c1 = ec_h.c1 + 1 FROM ec_s WHERE ec_h.c2 = ec_s.c2;
+1: COMMIT;
+2<:
+1: BEGIN;
+1: DELETE FROM ec_h WHERE c1 = 1;
+2&: UPDATE ec_h SET c1 = ec_h.c1 + 1 FROM ec_s WHERE ec_h.c2 = ec_s.c2;
+1: COMMIT;
+2<:
+1: SELECT * FROM ec_h;
+
+-- A replicated table's rows are found by their text on every segment
+1: CREATE TABLE ec_r (c1 int, c2 int) DISTRIBUTED REPLICATED;
+1: INSERT INTO ec_r VALUES (1, 1);
+1: BEGIN;
+1: UPDATE ec_r SET c1 = c1 + 1 WHERE c2 = 1;
+2&: UPDATE ec_r SET c1 = ec_r.c1 + 1 FROM ec_s WHERE ec_r.c2 = ec_s.c2;
+1: COMMIT;
+2<:
+1: SELECT * FROM ec_r;
+
+-- At REPEATABLE READ the segment's statement fails itself, as before
+1: BEGIN;
+1: UPDATE ec_t SET c1 = c1 + 1 WHERE c2 = 1;
+2: BEGIN ISOLATION LEVEL REPEATABLE READ;
+2&: UPDATE ec_t SET c1 = ec_t.c1 + 1 FROM ec_s WHERE ec_t.c2 = ec_s.c2;
+1: COMMIT;
+2<:
+2: END;
+1: SELECT * FROM ec_t;
+
+1: DROP TABLE ec_t, ec_s, ec_h, ec_r;
+1: DROP FUNCTION ec_wait(int), ec_skip();
+1q:
+2q:

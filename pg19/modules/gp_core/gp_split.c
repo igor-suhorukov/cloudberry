@@ -44,18 +44,23 @@
  * the table's partitions as COPY routes them.  Neither fires a trigger or
  * applies a policy, as Cloudberry's Split does neither; the coordinator
  * checked the rows.  So each runs only for a connection that carries the
- * cluster secret, the coordinator's own.
+ * cluster secret, the coordinator's own.  A third, explicit_recheck(), says
+ * why a statement of the coordinator's explicit write wrote fewer rows than
+ * it was sent, failing it where another transaction changed one since the
+ * coordinator read it.
  *
  *-------------------------------------------------------------------------
  */
 #include "postgres.h"
 
+#include "access/heapam.h"
 #include "access/htup_details.h"
 #include "access/table.h"
 #include "access/tableam.h"
 #include "access/tupconvert.h"
 #include "access/xact.h"
 #include "catalog/objectaddress.h"
+#include "catalog/pg_am_d.h"
 #include "catalog/pg_inherits.h"
 #include "catalog/pg_type.h"
 #include "commands/explain.h"
@@ -71,6 +76,7 @@
 #include "parser/parse_relation.h"
 #include "parser/parse_type.h"
 #include "parser/parsetree.h"
+#include "storage/bufmgr.h"
 #include "utils/acl.h"
 #include "utils/array.h"
 #include "utils/builtins.h"
@@ -417,6 +423,34 @@ split_multiple_updates(void)
 			 errmsg("multiple updates to a row by the same query is not allowed")));
 }
 
+/*
+ * A row a Split would move that another transaction changed since the
+ * statement's snapshot, refused as Cloudberry's ExecDelete() refuses it
+ * under a split update: where the transaction's snapshot is its first, as
+ * PostgreSQL refuses it; updated, as the recheck that meets the Motion below
+ * the write refuses it (GpMotionRefuseRecheck()), a split's new version
+ * being one no recheck could take back; deleted, in words of its own.
+ */
+static void
+split_changed_concurrently(TM_Result result)
+{
+	if (IsolationUsesXactSnapshot())
+	{
+		if (result == TM_Deleted)
+			ereport(ERROR,
+					(errcode(ERRCODE_T_R_SERIALIZATION_FAILURE),
+					 errmsg("could not serialize access due to concurrent delete")));
+		ereport(ERROR,
+				(errcode(ERRCODE_T_R_SERIALIZATION_FAILURE),
+				 errmsg("could not serialize access due to concurrent update")));
+	}
+	if (result == TM_Deleted)
+		ereport(ERROR,
+				(errcode(ERRCODE_IN_FAILED_SQL_TRANSACTION),
+				 errmsg("could not split update tuple which has been deleted by other transaction")));
+	GpMotionRefuseRecheck();
+}
+
 static void
 split_delete(SplitModifyState *state, ItemPointer tid)
 {
@@ -442,9 +476,7 @@ split_delete(SplitModifyState *state, ItemPointer tid)
 			break;
 		case TM_Updated:
 		case TM_Deleted:
-			ereport(ERROR,
-					(errcode(ERRCODE_T_R_SERIALIZATION_FAILURE),
-					 errmsg("could not serialize access due to concurrent update")));
+			split_changed_concurrently(result);
 			break;
 		default:
 			elog(ERROR, "unexpected table_tuple_delete status: %u", result);
@@ -748,9 +780,7 @@ gp_split_delete(PG_FUNCTION_ARGS)
 				break;
 			case TM_Updated:
 			case TM_Deleted:
-				ereport(ERROR,
-						(errcode(ERRCODE_T_R_SERIALIZATION_FAILURE),
-						 errmsg("could not serialize access due to concurrent update")));
+				split_changed_concurrently(result);
 				break;
 			default:
 				elog(ERROR, "unexpected table_tuple_delete status: %u", result);
@@ -766,6 +796,123 @@ gp_split_delete(PG_FUNCTION_ARGS)
 	ExecDropSingleTupleTableSlot(rootslot);
 	table_close(root, NoLock);
 	return (Datum) 0;
+}
+
+/*
+ * What heap_update() and heap_delete() would find at a row's version now;
+ * one that is no longer there, what they find at a version another
+ * transaction updated.
+ */
+static TM_Result
+recheck_row(Relation rel, ItemPointer tid, CommandId cid)
+{
+	HeapTupleData tuple;
+	Buffer		buffer;
+	TM_Result	result;
+
+	if (!ItemPointerIsValid(tid) ||
+		ItemPointerGetBlockNumber(tid) >= RelationGetNumberOfBlocks(rel))
+		return TM_Updated;
+	tuple.t_self = *tid;
+	if (!heap_fetch(rel, SnapshotAny, &tuple, &buffer, false))
+		return TM_Updated;
+	LockBuffer(buffer, BUFFER_LOCK_SHARE);
+	result = HeapTupleSatisfiesUpdate(&tuple, cid, buffer);
+	UnlockReleaseBuffer(buffer);
+	return result;
+}
+
+PG_FUNCTION_INFO_V1(gp_explicit_recheck);
+
+/*
+ * gp_internal.explicit_recheck(NULL::t, ctids, tables, deleted)
+ *		Why a statement of the explicit write (gp_explicit.c) wrote fewer of
+ *		the rows it sent this segment than it sent.  The statement found
+ *		each row by the ctid the coordinator read it at, under the
+ *		coordinator's snapshot; at READ COMMITTED a row another transaction
+ *		changed since is rechecked in its new version, which that ctid never
+ *		matches, and passed over -- and the new values the coordinator
+ *		computed from the version it read are lost.  So each row's version is
+ *		looked at as heap_update() finds it.  One another transaction
+ *		updated, or moved to another partition, fails the statement, as the
+ *		recheck below Cloudberry's Explicit Redistribute Motion fails it.  One
+ *		another transaction deleted is passed over, as PostgreSQL passes it
+ *		over, but for a Split's ("deleted" 's'), which Cloudberry refuses,
+ *		and a MERGE's that would have tried its NOT MATCHED actions for it
+ *		('m'), a serialization failure the client may retry.  One this
+ *		transaction wrote, or a trigger or a policy kept from being written,
+ *		is passed over.  A version that is no longer there was pruned once
+ *		the statement's snapshot was let go, so another transaction updated
+ *		or deleted it, which cannot be told apart: it fails the statement as
+ *		an update does.  A table whose rows are not heap's is not looked at,
+ *		and fails it so.
+ */
+Datum
+gp_explicit_recheck(PG_FUNCTION_ARGS)
+{
+	Oid			rowtype = get_fn_expr_argtype(fcinfo->flinfo, 0);
+	Oid			relid = OidIsValid(rowtype) ? typeidTypeRelid(rowtype) : InvalidOid;
+	CommandId	cid = GetCurrentCommandId(false);
+	Datum	   *tids;
+	Datum	   *toids;
+	int			n = -1;
+	char		deleted;
+	List	   *tree;
+	List	   *rels = NIL;
+
+	if (!OidIsValid(relid))
+		elog(ERROR, "gp_internal.explicit_recheck() is not given a table's row type");
+	for (int i = 1; i < PG_NARGS(); i++)
+		if (PG_ARGISNULL(i))
+			ereport(ERROR,
+					(errcode(ERRCODE_NULL_VALUE_NOT_ALLOWED),
+					 errmsg("gp_internal.explicit_recheck()'s arguments must not be null")));
+	/* who may change the table's rows may ask what became of them */
+	if (pg_class_aclcheck(relid, GetUserId(), ACL_UPDATE | ACL_DELETE) != ACLCHECK_OK)
+		aclcheck_error(ACLCHECK_NO_PRIV, get_relkind_objtype(get_rel_relkind(relid)),
+					   get_rel_name(relid));
+	split_array(PG_GETARG_ARRAYTYPE_P(1), TIDOID, &tids, &n);
+	split_array(PG_GETARG_ARRAYTYPE_P(2), OIDOID, &toids, &n);
+	deleted = PG_GETARG_CHAR(3);
+
+	tree = find_all_inheritors(relid, NoLock, NULL);
+	for (int i = 0; i < n; i++)
+	{
+		Oid			toid = DatumGetObjectId(toids[i]);
+		Relation	rel = NULL;
+		TM_Result	result;
+
+		CHECK_FOR_INTERRUPTS();
+		foreach_ptr(RelationData, r, rels)
+			if (RelationGetRelid(r) == toid)
+				rel = r;
+		if (rel == NULL)
+		{
+			if (!list_member_oid(tree, toid))
+				elog(ERROR, "relation %u is not \"%s\" or one of its partitions",
+					 toid, get_rel_name(relid));
+			rel = table_open(toid, AccessShareLock);
+			rels = lappend(rels, rel);
+		}
+
+		result = rel->rd_rel->relam == HEAP_TABLE_AM_OID
+			? recheck_row(rel, DatumGetItemPointer(tids[i]), cid)
+			: TM_Updated;
+		if (result == TM_Updated || (result == TM_Deleted && deleted == 's'))
+		{
+			if (deleted == 's')
+				split_changed_concurrently(result);
+			GpMotionRefuseRecheck();
+		}
+		if (result == TM_Deleted && deleted == 'm')
+			ereport(ERROR,
+					(errcode(ERRCODE_T_R_SERIALIZATION_FAILURE),
+					 errmsg("could not serialize access due to concurrent delete")));
+	}
+
+	foreach_ptr(RelationData, r, rels)
+		table_close(r, NoLock);
+	PG_RETURN_VOID();
 }
 
 PG_FUNCTION_INFO_V1(gp_split_insert);
