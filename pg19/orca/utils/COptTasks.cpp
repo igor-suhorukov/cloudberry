@@ -1017,6 +1017,37 @@ COptTasks::OptimizeTask(void *ptr)
 			CAutoTraceFlag atf2(EopttraceUseLegacyOpfamilies,
 								use_legacy_opfamilies);
 
+			// An aggregate called with ORDER BY takes its rows in that
+			// order, and ORCA would split one that has a combine function
+			// into a partial aggregate on each segment and a final one
+			// combining their states: each segment's rows in order, and
+			// the segments one after another.  Cloudberry's ORCA decides
+			// what it may split by the aggregate (IsAggPartialCapable()),
+			// and its aggregates of order -- string_agg(), array_agg() --
+			// had no combine function before PostgreSQL 16; the planner
+			// splits no aggregate called with ORDER BY
+			// (preprocess_aggrefs()).  Nor does ORCA here, in the query
+			// that calls one: every aggregate of it is split by none of
+			// the transforms that split one.
+			BOOL no_split =
+				gpdb::QueryOrdersPartialCapableAgg((Query *) opt_ctxt->m_query);
+			CAutoTraceFlag atf3(
+				GPOPT_DISABLE_XFORM_TF(CXform::ExfSplitGbAgg),
+				no_split ||
+					GPOS_FTRACE(GPOPT_DISABLE_XFORM_TF(CXform::ExfSplitGbAgg)));
+			CAutoTraceFlag atf4(
+				GPOPT_DISABLE_XFORM_TF(CXform::ExfSplitGbAggDedup),
+				no_split || GPOS_FTRACE(GPOPT_DISABLE_XFORM_TF(
+								CXform::ExfSplitGbAggDedup)));
+			CAutoTraceFlag atf5(
+				GPOPT_DISABLE_XFORM_TF(CXform::ExfSplitDQA),
+				no_split ||
+					GPOS_FTRACE(GPOPT_DISABLE_XFORM_TF(CXform::ExfSplitDQA)));
+			CAutoTraceFlag atf6(
+				GPOPT_DISABLE_XFORM_TF(CXform::ExfEagerAgg),
+				no_split ||
+					GPOS_FTRACE(GPOPT_DISABLE_XFORM_TF(CXform::ExfEagerAgg)));
+
 			// gp_core carries out every Motion but an Explicit Redistribute,
 			// which only a DML plan has (gp_motion.c).
 

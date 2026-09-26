@@ -353,6 +353,10 @@ bool IsRepSafeAgg(Oid aggid);
 // does aggregate have a combine function (and serial/deserial functions, if needed)
 bool IsAggPartialCapable(Oid aggid);
 
+// does the query, or one in it, call with ORDER BY an aggregate that has a
+// combine function -- not an ordered-set aggregate's WITHIN GROUP?
+bool QueryOrdersPartialCapableAgg(Query *query);
+
 // intermediate result type of given aggregate
 Oid GetAggregate(const char *agg, Oid type_oid);
 

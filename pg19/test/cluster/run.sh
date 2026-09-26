@@ -1455,6 +1455,20 @@ a\b|\N' ] && [ "$(cat "$ROOT/ce_prog.txt" 2>&1)" = "to a program" ] \
 		"SELECT count(*), sum(a), max(c) FROM o;" "Partial Aggregate"
 	orca_same "ORDER BY ... LIMIT: the segments' sorted rows, merged" \
 		"SELECT a, c FROM o ORDER BY a LIMIT 5;" "Merge Key: o.a"
+
+	# An aggregate called with ORDER BY takes its rows in that order: not a
+	# partial aggregate on each segment and a final one combining them,
+	# which is each segment's rows in order, one segment after another.
+	# ORCA aggregates the gathered rows, as the planner does; one without
+	# ORDER BY is still split.
+	orca_same "an aggregate called with ORDER BY: the gathered rows, aggregated in its order" \
+		"SELECT string_agg(c, ',' ORDER BY a), array_agg(a ORDER BY a DESC) FROM o WHERE a < 40;" \
+		"Aggregate"
+	plan=$(q 0 "EXPLAIN (COSTS OFF) SELECT string_agg(c, ',' ORDER BY a) FROM o;")
+	plan2=$(q 0 "EXPLAIN (COSTS OFF) SELECT string_agg(c, ',') FROM o;")
+	[[ "$plan" != *"Partial Aggregate"* && "$plan2" == *"Partial Aggregate"* ]] \
+		&& ok "... not split into a partial aggregate on each segment, as one without ORDER BY is" \
+		|| notok "an aggregate called with ORDER BY, split" "$plan / $plan2"
 	orca_same "one key's rows: direct dispatch to its segment" \
 		"SELECT * FROM o WHERE a = 42;" "Gather Motion 1:1  (slice1; segments: 1)"
 

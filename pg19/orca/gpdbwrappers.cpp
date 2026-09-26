@@ -706,6 +706,45 @@ gpdb::IsAggPartialCapable(Oid aggid)
 	return false;
 }
 
+namespace
+{
+bool
+OrderedPartialCapableAggWalker(Node *node, void *context)
+{
+	if (node == nullptr)
+		return false;
+
+	if (IsA(node, Query))
+		return query_tree_walker((Query *) node,
+								 OrderedPartialCapableAggWalker, context, 0);
+
+	if (IsA(node, Aggref))
+	{
+		Aggref *aggref = (Aggref *) node;
+
+		if (aggref->aggorder != NIL &&
+			!AGGKIND_IS_ORDERED_SET(aggref->aggkind) &&
+			is_agg_partial_capable(aggref->aggfnoid))
+			return true;
+	}
+
+	return expression_tree_walker(node, OrderedPartialCapableAggWalker,
+								  context);
+}
+}  // namespace
+
+bool
+gpdb::QueryOrdersPartialCapableAgg(Query *query)
+{
+	GP_WRAP_START;
+	{
+		/* catalog tables: pg_aggregate */
+		return OrderedPartialCapableAggWalker((Node *) query, nullptr);
+	}
+	GP_WRAP_END;
+	return false;
+}
+
 Oid
 gpdb::GetAggregate(const char *agg, Oid type_oid)
 {
