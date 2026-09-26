@@ -1,0 +1,16 @@
+-- The port's additions to Cloudberry's init files for its resource group
+-- tests (init_file_resgroup), read by gpdiff.pl after them.
+
+-- start_matchsubs
+
+# A group's memory in gp_resgroup_status_per_host, which is what its
+# cgroup's memory.current says: what processes that ran in the group, or
+# were moved into it, charged there, until the kernel takes it back.  A
+# dropped group's idle sessions are moved into default_group, as
+# Cloudberry's cgroup code moves them, and charge it some as they end; so
+# resgroup_views finds default_group, idle, with a little.  That figure is
+# made one; the CPU beside it is compared.
+m/^ default_group \| 6437    \| \d+\.\d\d      \| \d+\.\d\d +$/
+s/\| \d+\.\d\d +$/| (memory)/
+
+-- end_matchsubs

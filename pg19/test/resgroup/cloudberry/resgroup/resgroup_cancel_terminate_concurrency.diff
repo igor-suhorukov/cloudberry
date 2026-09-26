@@ -1,0 +1,23 @@
+@@
+- t       | ResourceGroup   | active              | BEGIN; | rg_concurrency_test 
+- t       | ResourceGroup   | active              | BEGIN; | rg_concurrency_test 
++ t       | Extension       | active              | BEGIN; | rg_concurrency_test 
++ t       | Extension       | active              | BEGIN; | rg_concurrency_test 
+@@
+- t       | ResourceGroup   | active              | BEGIN; | rg_concurrency_test 
+- t       | ResourceGroup   | active              | BEGIN; | rg_concurrency_test 
++ t       | Extension       | active              | BEGIN; | rg_concurrency_test 
++ t       | Extension       | active              | BEGIN; | rg_concurrency_test 
+@@
+- t       | ResourceGroup   | active | BEGIN;                  | rg_concurrency_test 
+- t       | ResourceGroup   | active | BEGIN;                  | rg_concurrency_test 
++ t       | Extension       | active | BEGIN;                  | rg_concurrency_test 
++ t       | Extension       | active | BEGIN;                  | rg_concurrency_test 
+@@
+- t       | ResourceGroup   | active | BEGIN;                  | rg_concurrency_test 
+- t       | ResourceGroup   | active | BEGIN;                  | rg_concurrency_test 
++ t       | Extension       | active | BEGIN;                  | rg_concurrency_test 
++ t       | Extension       | active | BEGIN;                  | rg_concurrency_test 
+@@
+- t       | ResourceGroup   | active              | SELECT 1; | rg_concurrency_test 
++ t       | Extension       | active              | SELECT 1; | rg_concurrency_test 

@@ -106,14 +106,23 @@ services:
   #
   # The jobs start some sixty servers at once, and each puts its dynamic
   # shared memory in /dev/shm, which is 64 MB unless the container is given
-  # more.
+  # more.  Privileged, and started as root, for the resource group suite: the
+  # entrypoint makes a cgroup v2 subtree of the container's own cgroup
+  # namespace the tests' to write, /sys/fs/cgroup/gpdb, and then runs the
+  # suites as postgres (pg19/test/cgroup.sh).  Without it that suite skips.
+  # The volume is a disk for that suite's clusters, whose I/O limits name
+  # the disk a directory is on; run --rm removes it with the container.
   tests:
     image: cloudberry/cb-ext:latest
     depends_on: [cb-ext]
-    entrypoint: ["/cb/pg19/test/run.sh"]
+    user: root
+    privileged: true
+    entrypoint: ["/cb/pg19/test/cgroup.sh"]
     shm_size: 4gb
     tmpfs:
       - /tmp
+    volumes:
+      - /var/lib/cbdisk
 
   # Does the patched server still behave like vanilla PostgreSQL 19?  It runs
   # both builds against each other and loads no Cloudberry module.  Check 10

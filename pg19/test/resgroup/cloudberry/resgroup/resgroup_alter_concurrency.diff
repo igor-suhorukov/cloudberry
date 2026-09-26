@@ -1,0 +1,15 @@
+@@
+- rg_concurrency_test | ResourceGroup   | active              | BEGIN; 
++ rg_concurrency_test | Extension       | active              | BEGIN; 
+@@
+- rg_concurrency_test | ResourceGroup   | active | BEGIN; 
++ rg_concurrency_test | Extension       | active | BEGIN; 
+@@
+- rg_concurrency_test | ResourceGroup   | active              | BEGIN; 
++ rg_concurrency_test | Extension       | active              | BEGIN; 
+@@
+- rg_concurrency_test | ResourceGroup   | active              | BEGIN; 
++ rg_concurrency_test | Extension       | active              | BEGIN; 
+@@
+- rg_concurrency_test | ResourceGroup   | active | BEGIN; 
++ rg_concurrency_test | Extension       | active | BEGIN; 

@@ -64,7 +64,20 @@ PSQL="$BINDIR/psql"
 export LD_LIBRARY_PATH="$("$BINDIR/pg_config" --libdir)${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# Another schedule of Cloudberry's suite runs through this harness too, with
+# a manifest and reviewed differences of its own: ../resgroup's, the
+# resource group tests (ISOLATION2_SUITE names it in what is printed).
+SUITE="${ISOLATION2_SUITE:-isolation2}"
+MANIFEST="${ISOLATION2_MANIFEST:-$HERE/manifest}"
+KEPT="${ISOLATION2_KEPT:-$HERE/cloudberry}"
+SCHEDULE_NAME="${ISOLATION2_SCHEDULE_NAME:-isolation2_schedule}"
+# ... and the database it runs in, and the init file of Cloudberry's that its
+# target in Cloudberry's Makefile reads, with the port's own beside the
+# isolation2 suite's
+DBNAME="${ISOLATION2_DBNAME:-isolation2test}"
+EXTRA_INIT="${ISOLATION2_EXTRA_INIT:-}"
 CB="${CB_ISOLATION2_DIR:-/cb/src/test/isolation2}"
+CB_INIT="${ISOLATION2_CB_INIT:-$CB/init_file_isolation2}"
 GPDIFF="${GPDIFF_DIR:-/cb/src/test/regress}"
 
 if [ ! -f "$CB/sql_isolation_testcase.py" ] || [ ! -f "$GPDIFF/gpdiff.pl" ] ||
@@ -80,6 +93,11 @@ EXEC="$(mktemp -d "${HOME:-/var/lib/postgresql}/cb-isolation2c-XXXXXX")"
 BASEPORT="${PGPORT:-$((7500 + RANDOM % 200))}"
 NODES=4					# a coordinator and Cloudberry's three segments
 PRELOAD='gp_core,gp_orca,gp_sql,gp_resource'
+# The superuser is Cloudberry's demo cluster's, gpadmin, as the greenplum
+# suite's is: Cloudberry's expected output names it, and a PL/Python helper
+# of a test that runs psql -- in the server's environment, which the nodes
+# are started in -- connects as it.
+export PGUSER=gpadmin
 SECRET="isolation2-schedule-$RANDOM$RANDOM$RANDOM"
 
 # The tests the manifest runs, in its order, and the group each is in; the
@@ -88,7 +106,7 @@ SECRET="isolation2-schedule-$RANDOM$RANDOM$RANDOM"
 run_tests=(); run_group=()
 while read -r t g; do
 	run_tests+=("$t"); run_group+=("${g:-main}")
-done < <(awk '$1 == "run" { print $2, $3 }' "$HERE/manifest")
+done < <(awk '$1 == "run" { print $2, $3 }' "$MANIFEST")
 groups=()
 for g in "${run_group[@]}"; do
 	[[ "$g" == *"*" ]] && continue
@@ -129,7 +147,7 @@ cleanup() {
 			esac
 			[ -d "$d" ] || continue
 			[ -n "${RESULTS_DIR:-}" ] &&
-				cp "$d.log" "$RESULTS_DIR/isolation2-$g-node$n.log" 2> /dev/null
+				cp "$d.log" "$RESULTS_DIR/$SUITE-$g-node$n.log" 2> /dev/null
 			"$BINDIR/pg_ctl" -D "$d" -m immediate stop > /dev/null 2>&1
 		done
 	done
@@ -138,12 +156,12 @@ cleanup() {
 }
 trap cleanup EXIT
 
-echo "isolation2: part of Cloudberry's isolation2_schedule, on a coordinator and three segments"
+echo "$SUITE: part of Cloudberry's $SCHEDULE_NAME, on a coordinator and three segments"
 printf '  of the %d tests of the schedule the manifest lists: %d run here, in %d groups, %d are skipped\n' \
-	"$(awk '$1 == "run" || $1 == "skip"' "$HERE/manifest" | wc -l)" \
+	"$(awk '$1 == "run" || $1 == "skip"' "$MANIFEST" | wc -l)" \
 	"${#run_tests[@]}" "${#groups[@]}" \
-	"$(awk '$1 == "skip"' "$HERE/manifest" | wc -l)"
-awk '$1 == "skip" { $1 = ""; sub(/^ /, ""); print "  skip " $0 }' "$HERE/manifest" | cut -c1-150
+	"$(awk '$1 == "skip"' "$MANIFEST" | wc -l)"
+awk '$1 == "skip" { $1 = ""; sub(/^ /, ""); print "  skip " $0 }' "$MANIFEST" | cut -c1-150
 echo
 
 # A group's cluster, as the greenplum suite makes one.  Every node's log is
@@ -167,7 +185,7 @@ make_cluster() {
 	} > "$conf"
 	for n in $(seq 0 $((NODES - 1))); do
 		mkdir -p "$(node_sock "$g" "$n")"
-		"$BINDIR/initdb" -D "$(node_dir "$g" "$n")" -N --locale=C --encoding=UTF8 \
+		"$BINDIR/initdb" -D "$(node_dir "$g" "$n")" -N -U gpadmin --locale=C --encoding=UTF8 \
 			> "$WORK/$g/initdb$n.log" 2>&1 \
 			|| { echo "initdb failed for node $n of group $g"; tail -20 "$WORK/$g/initdb$n.log"; return 1; }
 		{
@@ -197,9 +215,12 @@ make_cluster() {
 	done
 	# The driver asks database postgres which nodes there are, when a test
 	# runs a shell command with one's address, and some tests run there: it
-	# has gp_core too, and so its gp_segment_configuration.
+	# has gp_core too, and so its gp_segment_configuration; and gp_resource,
+	# whose procedures a resource group test's helper, running psql there,
+	# makes a group with.
 	PGHOST="$(node_sock "$g" 0)" PGPORT="$(node_port "$gi" 0)" \
-		"$PSQL" -X -q -d postgres -c "CREATE EXTENSION gp_core" > /dev/null 2>&1
+		"$PSQL" -X -q -d postgres -c "CREATE EXTENSION gp_core" \
+			-c "CREATE EXTENSION gp_resource" > /dev/null 2>&1
 
 	# A standby coordinator: the coordinator's copy, streaming from it, and
 	# no hot standby, as Cloudberry's hot_standby is off by default -- which
@@ -293,6 +314,12 @@ while read -r name; do
 	printf "s/\\\\b(current_setting|set_config)\\\\('%s'/\\\\1('%s'/gI\n" "$cbname" "$name"
 	# ... FROM pg_settings WHERE name = 'gp_session_id'
 	printf "s/\\\\b(name\\\\s*=\\\\s*)'%s'/\\\\1'%s'/gI\n" "$cbname" "$name"
+	# ... show_guc('gp_resource_group_cpu_limit'), the resource group
+	# tests' PL/Python helper, which SHOWs the setting it is named
+	printf "s/\\\\bshow_guc\\\\('%s'\\\\)/show_guc('%s')/g\n" "$cbname" "$name"
+	# ... query LIKE '%gp_vmem_idle_resource_timeout%', a test finding the
+	# session that SET it by the statement it ran, which it ran respelled
+	printf "s/'%%%s%%'/'%%%s%%'/g\n" "$cbname" "$name"
 	case "$cbname" in
 		gp_*) printf 's/^( *)%s( *)$/\\1%s\\2/\n' "$cbname" "$name" ;;
 	esac
@@ -300,6 +327,17 @@ while read -r name; do
 done > "$WORK/respell.sed"
 # ... and no utility mode but a node's own connection, in a shell command too
 echo "s/-c gp_role=utility//g" >> "$WORK/respell.sed"
+# A backend waiting for a resource group's slot waits on the Extension wait
+# event ResourceGroup, where Cloudberry's wait event has a type of its own,
+# ResourceGroup: a test that finds the waiter by its type finds it by name.
+echo "s/wait_event_type\\s*=\\s*'ResourceGroup'/wait_event='ResourceGroup'/g" >> "$WORK/respell.sed"
+# A resource group test's PL/Python helper calls the server's
+# get_tablespace_path() through ctypes, which takes a function's result as a
+# C int unless it is told otherwise: a pointer cut to 32 bits, which on the
+# port's server, a position-independent executable whose heap is far above
+# that, it then reads a string at.  It is told the function returns one, in
+# the helper and in the expected output, which echoes it on one line.
+echo "s/(get_tablespace_path = postgres\\['get_tablespace_path'\\])/\\1; get_tablespace_path.restype = ctypes.c_void_p/" >> "$WORK/respell.sed"
 
 # The driver, less "-c gp_role=utility"; run from Cloudberry's directory, as
 # it sources global_sh_executor.sh from there.
@@ -322,6 +360,7 @@ gpdiff() {
 convert() {
 	sed -e "s#@abs_srcdir@#$CB#g" \
 	    -e "s#@abs_builddir@#$CB#g" \
+	    -e "s#@testtablespace@#/tmp/testtablespace#g" \
 	    -e "s#@bindir@#$BINDIR#g" \
 	    -e "s#@libdir@#${PG_REGRESS_SUITE:-/cb/pgregress}#g" \
 	    -e "s#@DLSUFFIX@#.so#g" "$1"
@@ -339,10 +378,10 @@ run_group() {
 	mkdir -p "$R/results" "$R/canon" "$R/sql" "$R/expected"
 	own_tablespaces() { sed -E "s#/tmp/([A-Za-z0-9_]*tablespace[A-Za-z0-9_]*)#$R/\\1#g"; }
 	: > "$R/status"
-	"$PSQL" -X -q -d postgres -c "DROP DATABASE IF EXISTS isolation2test" > /dev/null 2>&1
-	"$PSQL" -X -q -d postgres -c "CREATE DATABASE isolation2test" > /dev/null
+	"$PSQL" -X -q -d postgres -c "DROP DATABASE IF EXISTS $DBNAME" > /dev/null 2>&1
+	"$PSQL" -X -q -d postgres -c "CREATE DATABASE $DBNAME" > /dev/null
 	if ! out=$(sed -e "s#@BINDIR@#$BINDIR#g" "$HERE/setup.sql" |
-			   "$PSQL" -X -q -v ON_ERROR_STOP=1 -d isolation2test -f - 2>&1); then
+			   "$PSQL" -X -q -v ON_ERROR_STOP=1 -d "$DBNAME" -f - 2>&1); then
 		echo "  the setup failed in group $g:" > "$R/setup-failed"
 		printf '%s\n' "$out" | sed 's/^/    /' >> "$R/setup-failed"
 		return 1
@@ -373,13 +412,14 @@ run_group() {
 		# As pg_isolation2_regress runs it, from the suite's directory.
 		( cd "$CB" && PGOPTIONS="-c gp.optimizer=$optimizer" \
 			timeout 600 python3 "$EXEC/sql_isolation_testcase.py" \
-				--dbname=isolation2test --initfile_prefix="$res" \
+				--dbname="$DBNAME" --initfile_prefix="$res" \
 				< "$R/sql/$t.sql" > "$res" 2>&1 )
 
 		# The port's first: what it takes off a segment's error -- which
 		# segment -- leaves the lines Cloudberry's init files mask.
 		inits=(--gpd_init "$HERE/init_file" --gpd_init "$GPDIFF/init_file"
-		       --gpd_init "$CB/init_file_isolation2")
+		       --gpd_init "$CB_INIT")
+		[ -n "$EXTRA_INIT" ] && inits+=(--gpd_init "$EXTRA_INIT")
 		[ -s "$res.initfile" ] && inits+=(--gpd_init "$res.initfile")
 
 		gpdiff -U0 "${inits[@]}" "$R/expected/$t.out" "$res" 2> /dev/null |
@@ -387,7 +427,7 @@ run_group() {
 		# A comparison that could not be made is a difference, never an empty one.
 		st=("${PIPESTATUS[@]}")
 		[ "${st[0]}" -le 1 ] && [ "${st[1]}" -eq 0 ] || echo "no comparison was made" >> "$R/canon/$t.diff"
-		dir="$HERE/cloudberry/$(dirname "$t")"
+		dir="$KEPT/$(dirname "$t")"
 		if [ ! -s "$R/canon/$t.diff" ] ||
 		   cmp -s "$R/canon/$t.diff" "$dir/$name.$pass.diff" ||
 		   cmp -s "$R/canon/$t.diff" "$dir/$name.diff"; then
@@ -441,10 +481,10 @@ for pass in ${PASSES:-planner orca}; do
 		failed=$((failed + 1))
 		if [ -n "${RESULTS_DIR:-}" ]; then
 			for g in "${groups[@]}"; do
-				mkdir -p "$RESULTS_DIR/isolation2-$pass/$g"
+				mkdir -p "$RESULTS_DIR/$SUITE-$pass/$g"
 				cp -r "$WORK/$g/$pass/results" "$WORK/$g/$pass/canon" \
-					"$RESULTS_DIR/isolation2-$pass/$g/" 2> /dev/null
-				cat "$WORK/$g/$pass/regression.diffs" >> "$RESULTS_DIR/isolation2-$pass.diffs" 2> /dev/null
+					"$RESULTS_DIR/$SUITE-$pass/$g/" 2> /dev/null
+				cat "$WORK/$g/$pass/regression.diffs" >> "$RESULTS_DIR/$SUITE-$pass.diffs" 2> /dev/null
 			done
 		fi
 	fi

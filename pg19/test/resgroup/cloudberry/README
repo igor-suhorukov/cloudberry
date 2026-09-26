@@ -1,0 +1,50 @@
+Part of Cloudberry's isolation2_resgroup_v2_schedule on the port's cluster:
+the differences from Cloudberry's expected output that have been reviewed,
+and are the port's for a reason of its own.
+
+Each file is one test's difference in the form ../../singlenode/canon.pl
+gives it, named for the expected output it differs from and kept in the
+test's directory, resgroup/; a name with a pass in it (test.orca.diff) holds
+for that pass alone.  ../isolation2/run.sh counts a test as passing when
+gpdiff.pl, under Cloudberry's init_file and init_file_resgroup and the
+port's ../init_file, finds no difference or exactly the file's.
+
+resgroup_concurrency
+  The wait event of a backend that waits for a group's slot.  Cloudberry's
+  is of a type of its own, ResourceGroup, and names the group
+  (rg_concurrency_test); PostgreSQL 19 gives a module's waits the type
+  Extension, and a name the module registers once -- of a few hundred for
+  every module of the server -- so the port's wait is the Extension wait
+  ResourceGroup, whichever the group, and pg_stat_activity's rsgname says
+  which group it is.  The test finds the waiter by its wait's type, which
+  the harness respells as its name.
+
+resgroup_alter_concurrency, resgroup_cancel_terminate_concurrency
+  The same wait's type, which these tests print: Extension, where
+  Cloudberry's is ResourceGroup.
+
+resgroup_cpuset_empty_default
+  The command tags psql prints for CREATE and ALTER RESOURCE GROUP, which a
+  shell line of the test runs through psql: CALL, the statement each is
+  rewritten into (O26; ../../../grammar/gp_desugar.c), since PostgreSQL 19's
+  command tags are a fixed list without them.  The tests' own sessions print
+  a statement's first word either way.
+
+resgroup_memory_limit_resgroup_v2
+  SHOW statement_mem's column, which is the setting's name: the port's is
+  gp.statement_mem.  The memory each query is given, which the test reads
+  from EXPLAIN ANALYZE's "Memory used", is Cloudberry's: statement_mem, a
+  group's memory_quota over its concurrency where that is more, and
+  gp_resgroup_memory_query_fixed_mem where it is set.
+
+resgroup_move_query
+  One check of test 7's, whether every backend of the moved session is in
+  the new group's cgroup: yes here, no in Cloudberry's.  The move itself is
+  Cloudberry's -- the slot taken for the target, offered, taken by the
+  target in a signal handler after the mover's wait timed out, and the
+  segments' backends moved after -- but in Cloudberry the query's reader
+  gangs had finished their slice by then, and a reader not running a slice
+  is not moved; the port's planner reads gp_dist_random('gp_id') through a
+  cursor on the session's writer on each segment, which the mover moves
+  with the rest.  Tests 8 and 10, where Cloudberry's readers are still at
+  work, find every backend moved in both.
