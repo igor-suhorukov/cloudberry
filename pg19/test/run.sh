@@ -33,7 +33,10 @@
 # own servers, in directories of its own, listening on sockets in them only,
 # so the jobs cannot meet.  JOBS of them run at once (all of them, when it
 # is not set); each job's output is held and printed whole as it finishes,
-# with the time it took, and a summary of the jobs ends the run.
+# with the time it took, and a summary of the jobs ends the run.  A job
+# "jobs" marks ALONE=1 runs by itself, after all the others: resgroup's,
+# whose tests keep every core busy in a cgroup that outweighs the others',
+# and measure what they get.
 #
 # RESULTS_DIR, when set, is given to each job as a directory of its own
 # under it, named for the job: isolation2.orca, cluster.
@@ -53,7 +56,7 @@ fi
 # The jobs: a suite, the job's name ("" when the suite is one job), how long
 # it takes, and what it is run with.  PASSES in the environment keeps the
 # jobs of those passes only.
-j_suite=(); j_name=(); j_secs=(); j_env=()
+j_suite=(); j_name=(); j_secs=(); j_env=(); j_alone=()
 failed=()
 for s in "${suites[@]}"; do
 	if [ ! -x "$here/$s/run.sh" ]; then
@@ -70,17 +73,20 @@ for s in "${suites[@]}"; do
 			continue
 		fi
 		j_suite+=("$s"); j_name+=("$name"); j_secs+=("$secs"); j_env+=("$env")
+		[[ " $env " == *" ALONE=1 "* ]] && j_alone+=(1) || j_alone+=(0)
 	done < <(awk -v s="$s" '$1 == s' "$here/jobs" 2> /dev/null)
 	if [ "$listed" -eq 0 ]; then
-		j_suite+=("$s"); j_name+=(""); j_secs+=(0); j_env+=("")
+		j_suite+=("$s"); j_name+=(""); j_secs+=(0); j_env+=(""); j_alone+=(0)
 	fi
 done
 
-# Longest first; the order "jobs" gives them in among equals.
+# Longest first; the order "jobs" gives them in among equals.  And the jobs
+# that run alone after all the rest.
 order=()
-while read -r _ i; do
+while read -r _ _ i; do
 	order+=("$i")
-done < <(for i in "${!j_suite[@]}"; do echo "${j_secs[$i]} $i"; done | sort -s -k1,1nr)
+done < <(for i in "${!j_suite[@]}"; do echo "${j_alone[$i]} ${j_secs[$i]} $i"; done |
+	sort -s -k1,1n -k2,2nr)
 
 label() {
 	echo "${j_suite[$1]}${j_name[$1]:+ (${j_name[$1]})}"
@@ -120,8 +126,10 @@ skipped=()
 next=0
 while [ "$next" -lt "${#order[@]}" ] || [ "${#running[@]}" -gt 0 ]; do
 	while [ "$next" -lt "${#order[@]}" ] && [ "${#running[@]}" -lt "$max" ]; do
+		[ "${j_alone[${order[$next]}]}" -eq 1 ] && [ "${#running[@]}" -gt 0 ] && break
 		start_job "${order[$next]}"
 		next=$((next + 1))
+		[ "${j_alone[${order[$((next - 1))]}]}" -eq 1 ] && break
 	done
 
 	wait -n -p done_pid

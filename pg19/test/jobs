@@ -27,11 +27,12 @@
 # A suite that runs its tests under the planner and under ORCA is one job a
 # pass -- but resgroup, whose tests read the cgroups under
 # /sys/fs/cgroup/gpdb by name, and so run one cluster at a time: its two
-# passes are one job.  The seconds are a run's, on the machine the port is
+# passes are one job, which runs alone (ALONE=1), after the rest, since its
+# CPU tests take every core in a cgroup that outweighs the other jobs'.  The seconds are a run's, on the machine the port is
 # built on (16 cores, 32 threads), with every job at once; they order the
 # jobs and nothing else, and run.sh's summary gives each run's own.
 
-resgroup               -        760
+resgroup               -        760   ALONE=1
 greenplum              orca     347   PASSES=orca
 diskquota              regress  295   DQ_PARTS=regress
 greenplum              planner  249   PASSES=planner
