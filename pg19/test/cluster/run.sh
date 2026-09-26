@@ -2710,6 +2710,25 @@ SQL
 		&& ok "a coordinator that went down between the phases: its recovery process commits the parts" \
 		|| notok "recovery after the coordinator went down" "$out / $p1 / $p2 / $log"
 
+	# gp.dtx_recovered(), which gpstart waits for as Cloudberry's pg_ctl
+	# waits for "DTM recovered": false from the coordinator's start until a
+	# round of its recovery process has reached every node.
+	"$BINDIR/pg_ctl" -D "$(datadir 2)" -m fast stop >/dev/null 2>&1
+	logsize=$(stat -c %s "$ROOT/node0.log")
+	"$BINDIR/pg_ctl" -D "$(datadir 0)" -l "$ROOT/node0.log" -m fast -w -t 30 restart >/dev/null 2>&1
+	sleep 2
+	down=$(q 0 "SELECT gp.dtx_recovered();")
+	"$BINDIR/pg_ctl" -D "$(datadir 2)" -l "$ROOT/node2.log" -w -t 30 start >/dev/null 2>&1
+	for i in $(seq 1 40); do
+		up=$(q 0 "SELECT gp.dtx_recovered();")
+		[ "$up" = "t" ] && break
+		sleep 0.5
+	done
+	log=$(tail -c +"$((logsize + 1))" "$ROOT/node0.log" | grep -c "DTM Started")
+	[ "$down|$up|$log" = "f|t|1" ] \
+		&& ok "gp.dtx_recovered(): not while a segment cannot be reached since the coordinator started, then \"DTM Started\"" \
+		|| notok "gp.dtx_recovered()" "$down / $up / $log"
+
 	# REPEATABLE READ: the snapshot taken on the coordinator before another
 	# transaction committed hides it on every segment, though each segment's
 	# own snapshot, taken after, would see it.

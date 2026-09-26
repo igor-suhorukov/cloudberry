@@ -140,6 +140,20 @@ CREATE TABLE gp_internal.distributed_log (
 CREATE INDEX distributed_log_gxid ON gp_internal.distributed_log (gxid);
 
 /*
+ * Whether this node's distributed transaction recovery has reached every node
+ * since the server started: Cloudberry's "DTM recovered", which its pg_ctl
+ * waits for on a coordinator, and gpstart polls for.  True on a node that
+ * runs none.  See gp_dtx.c.
+ */
+CREATE FUNCTION gp.dtx_recovered()
+RETURNS bool
+AS 'MODULE_PATHNAME', 'gp_dtx_recovered'
+LANGUAGE C STRICT VOLATILE;
+
+COMMENT ON FUNCTION gp.dtx_recovered() IS
+	'whether distributed transaction recovery has reached every node since the server started';
+
+/*
  * Wait until this node's mirror has what the node has flushed: Cloudberry's
  * wait_for_mirror(), which the coordinator runs on a segment when a COMMIT
  * PREPARED it sends again finds the part committed already.  See gp_dtx.c.

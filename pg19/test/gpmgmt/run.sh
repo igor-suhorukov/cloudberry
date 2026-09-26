@@ -267,6 +267,11 @@ if run start gpstart -a; then
 	[ "$out" = "$want" ] && [ "$(q "$CPORT" "SELECT count(*) FROM t")" = 300 ] \
 		&& ok "gpstart: every node starts, and the pairs are in sync" \
 		|| notok "gpstart" "$out"
+	# as Cloudberry's pg_ctl waits for "DTM recovered"
+	grep -q "Distributed transaction recovery has reached every segment" "$LOGDIR/start.out" &&
+	[ "$(q "$CPORT" "SELECT gp.dtx_recovered()")" = t ] \
+		&& ok "gpstart waits for the coordinator's distributed transaction recovery to reach every segment" \
+		|| notok "gpstart's wait for distributed transaction recovery" "$(tail_of start)"
 else
 	notok "gpstart" "$(tail_of start)"
 fi

@@ -14,7 +14,9 @@
 # the coordinator once.  A coordinator-only start (-m) is a start of the
 # coordinator as any other, and so is a single node's, a server that names no
 # cluster file; and the recovery of a coordinator that did not shut down is
-# its next start's.
+# its next start's.  Where Cloudberry's pg_ctl waits for a coordinator's
+# "DTM recovered", this waits for gp.dtx_recovered(): the coordinator's
+# distributed transaction recovery has reached every node (gp_dtx.c).
 #
 # THIS IMPORT MUST COME FIRST
 #
@@ -547,6 +549,45 @@ class GpStart:
                 waited += recovery_poll_interval
 
     ######
+    def _waitForDtxRecovery(self):
+        """ Poll gp.dtx_recovered() until the coordinator's distributed
+            transaction recovery has reached every node, the parts a failure
+            left prepared on the segments finished -- what Cloudberry's pg_ctl
+            waits for, "DTM recovered" -- or the recovery wait timeout passes.
+            A coordinator without the function, made before it, is not waited
+            for.
+
+            Returns None on success or an error message string on failure.
+        """
+        waited = 0.0
+        poll_interval = 0.5
+        while True:
+            try:
+                conn = dbconn.connect(self.dburl)
+                try:
+                    recovered = dbconn.querySingleton(conn, "SELECT gp.dtx_recovered()")
+                finally:
+                    conn.close()
+            except Exception as e:
+                msg = str(e)
+                if 'does not exist' in msg:
+                    logger.debug("Not waiting for distributed transaction recovery: %s" % msg)
+                    return None
+                logger.warning("Could not ask whether distributed transaction recovery is done: %s" % msg)
+                return msg
+            if recovered:
+                logger.info("Distributed transaction recovery has reached every segment")
+                return None
+            if waited >= self.recovery_wait_timeout:
+                msg = "Timed out after %d seconds waiting for distributed transaction recovery" % waited
+                logger.warning(msg)
+                return msg
+            if waited == 0:
+                logger.info("Waiting for distributed transaction recovery to reach every segment")
+            time.sleep(poll_interval)
+            waited += poll_interval
+
+    ######
     def _read_cluster(self):
         """
         What Cloudberry's _startCoordinator() learns from the coordinator it
@@ -881,6 +922,8 @@ class GpStart:
         msg = self._waitForCoordinatorRecovery(self.dburl)
         if msg is not None and 'PANIC' in msg:
             return False
+        if msg is None:
+            msg = self._waitForDtxRecovery()
 
         # set the era we used when starting the segments
         e = GpEraFile(self.coordinator_datadir, logger=get_logger_if_verbose())

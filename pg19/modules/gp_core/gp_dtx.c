@@ -501,10 +501,20 @@ typedef struct GpDtxShared
 	/* The coordinator's recovery process, to be woken. */
 	ProcNumber	recovery_proc;
 	int			recovery_pid;
+
+	/*
+	 * A round of it has reached every node since the server started:
+	 * Cloudberry's "DTM Started" (shmDtmStarted), which its pg_ctl waits
+	 * for, and gpstart waits for here (gp.dtx_recovered()).
+	 */
+	bool		recovered;
 } GpDtxShared;
 
 static GpDtxShared *dtx_shared = NULL;
 static dsa_area *dtx_area = NULL;
+
+/* This node runs distributed transaction recovery, as the postmaster set up. */
+static bool dtx_recovery_registered = false;
 
 static void
 dtx_init_shared(void *ptr, void *arg)
@@ -2342,7 +2352,18 @@ GpDtxRecoveryMain(Datum main_arg)
 
 		/* until a round reaches every segment, each takes everything */
 		if (recovery_round(everything ? 0 : dtx_recovery_prepared_period))
+		{
 			everything = false;
+			if (!dtx_shared->recovered)
+			{
+				LWLockAcquire(&dtx_shared->lock, LW_EXCLUSIVE);
+				dtx_shared->recovered = true;
+				LWLockRelease(&dtx_shared->lock);
+				ereport(LOG,
+						(errmsg("DTM Started"),
+						 errdetail("Distributed transaction recovery has reached every node.")));
+			}
+		}
 
 		rc = WaitLatch(MyLatch, WL_LATCH_SET | WL_TIMEOUT | WL_EXIT_ON_PM_DEATH,
 					   (everything ? 5 : dtx_recovery_interval) * 1000L,
@@ -2625,6 +2646,31 @@ gp_dtx_wait_mirror(PG_FUNCTION_ARGS)
 /* Seeing it                                                                 */
 /* ------------------------------------------------------------------------- */
 
+PG_FUNCTION_INFO_V1(gp_dtx_recovered);
+
+/*
+ * gp.dtx_recovered()
+ *		Whether this node's distributed transaction recovery has reached every
+ *		node since the server started -- what Cloudberry's pg_ctl waits for
+ *		on a coordinator, "DTM recovered", and gpstart polls for here.  True
+ *		on a node that runs none: a segment, a standby until its promotion
+ *		has ended, and one node that prepares nothing.
+ */
+Datum
+gp_dtx_recovered(PG_FUNCTION_ARGS)
+{
+	bool		recovered = true;
+
+	if (dtx_recovery_registered && !RecoveryInProgress())
+	{
+		dtx_attach();
+		LWLockAcquire(&dtx_shared->lock, LW_SHARED);
+		recovered = dtx_shared->recovered;
+		LWLockRelease(&dtx_shared->lock);
+	}
+	PG_RETURN_BOOL(recovered);
+}
+
 PG_FUNCTION_INFO_V1(gp_dtx_map);
 
 /*
@@ -2678,6 +2724,7 @@ dtx_register_recovery(void)
 	worker.bgw_restart_time = 5;
 	snprintf(worker.bgw_library_name, BGW_MAXLEN, "gp_core");
 	snprintf(worker.bgw_function_name, BGW_MAXLEN, "GpDtxRecoveryMain");
+	dtx_recovery_registered = true;
 	snprintf(worker.bgw_name, BGW_MAXLEN, "gp_core distributed transaction recovery");
 	snprintf(worker.bgw_type, BGW_MAXLEN, "gp_core dtx recovery");
 	RegisterBackgroundWorker(&worker);
