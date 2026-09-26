@@ -38,8 +38,10 @@
 #      for what names an OID of the new one -- a directory table's
 #      directory, a dynamic table's job;
 #   5. and what the objects do there is what they did: where each row is,
-#      tags, an index's too, queues, groups and profiles, materialized
-#      views populated or not, AO options and encodings, PAX, a bitmap index;
+#      tags, an index's too, a protocol of the user's, queues, groups and
+#      profiles, materialized
+#      views populated or not, AO options and encodings, PAX, a bitmap
+#      index;
 #   6. one node: an incremental view's triggers, which the dump does not
 #      carry and its label makes again, a dynamic table's job, and a
 #      directory table's directory, whose files the dump does not carry.
@@ -286,6 +288,14 @@ ALTER TAG aaa_tag OWNER TO aaa;
 CREATE ROLE zzz LOGIN;
 CREATE TAG zzz_tag ALLOWED_VALUES 'a';
 ALTER TAG zzz_tag OWNER TO zzz;
+-- a protocol of the user's, given to a role, a privilege on it granted, and
+-- an external table of it
+CREATE FUNCTION write_to_file() RETURNS integer AS '$libdir/gpextprotocol.so', 'demoprot_export' LANGUAGE C STABLE NO SQL;
+CREATE FUNCTION read_from_file() RETURNS integer AS '$libdir/gpextprotocol.so', 'demoprot_import' LANGUAGE C STABLE NO SQL;
+CREATE TRUSTED PROTOCOL demoprot (readfunc = 'read_from_file', writefunc = 'write_to_file');
+ALTER PROTOCOL demoprot OWNER TO zzz;
+GRANT SELECT ON PROTOCOL demoprot TO aaa;
+CREATE EXTERNAL TABLE ext_demo (a int) LOCATION ('demoprot://demo.txt') FORMAT 'text';
 EOF
 out=$(qf a src "$ROOT/source.sql")
 case "$out" in
@@ -310,6 +320,9 @@ out=$(grep -c 'pg_pax_blocks' "$ROOT/a.sql")
 out=$(grep -c -e "^SECURITY LABEL FOR gp_index_tag ON TABLE public.t_hash IS '{\"t_hash_b\": {\"owner_team\": \"index\"}}';" "$ROOT/a.sql")
 [ "$out" = 1 ] && ok "an index's tags are its table's label, by the index's name, written with the table" \
 	|| notok "index tags" "$(grep 'gp_index_tag' "$ROOT/a.sql")"
+out=$(grep -c "^SECURITY LABEL FOR gp_protocol ON FUNCTION public.read_from_file() IS '{\"demoprot\": {" "$ROOT/a.sql")
+[ "$out" = 1 ] && ok "a protocol is a label on each of its functions, written with the function" \
+	|| notok "a protocol's label" "$(grep 'gp_protocol' "$ROOT/a.sql")"
 out=$(grep -c 'gp_dynamic_table_refresh_' "$ROOT/a.sql")
 [ "$out" = 0 ] && ok "nor a dynamic table's job, which its label makes again" \
 	|| notok "a dynamic table's job" "$(grep 'gp_dynamic_table_refresh_' "$ROOT/a.sql")"
@@ -380,6 +393,13 @@ same "the tags on tables" src \
      "SELECT objname, label FROM pg_seclabels WHERE provider = 'gp_tag' ORDER BY 1"
 same "and an index's, on the index made again under another OID" src \
      "SELECT indexrelid::regclass::text, tagname, tagvalue FROM gp_sql.index_tag ORDER BY 1, 2"
+same "a protocol of the user's: its functions, trust, owner and privileges" src \
+     "SELECT ptcname, ptcreadfn, ptcwritefn, ptcvalidatorfn, pg_get_userbyid(ptcowner), ptctrusted, ptcacl
+        FROM pg_extprotocol ORDER BY 1"
+is "on every segment too" b src \
+   "SELECT string_agg(result, ',' ORDER BY content) FROM gp.exec_on_segments(
+      'SELECT ptcname || '' '' || pg_get_userbyid(ptcowner) || '' '' || ptcacl::text FROM pg_extprotocol')" \
+   "demoprot zzz {zzz=ar/zzz,aaa=r/zzz},demoprot zzz {zzz=ar/zzz,aaa=r/zzz},demoprot zzz {zzz=ar/zzz,aaa=r/zzz}"
 same "the tags' definitions, each owned by the role it was" postgres \
      "SELECT tagname, pg_get_userbyid(tagowner), allowed_values FROM pg_tag ORDER BY 1"
 same "each role's queue, group, profile and DENY windows" postgres \

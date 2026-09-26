@@ -260,6 +260,7 @@ _PG_init(void)
 
 	GpDispatchAddNoticeFilter(SrehRelayNotice);
 	ExtRegisterLabelProvider();
+	ExtProtocolRegisterLabelProvider();
 	RegisterXactCallback(gp_exttable_xact_callback, NULL);
 	RegisterSubXactCallback(gp_exttable_subxact_callback, NULL);
 

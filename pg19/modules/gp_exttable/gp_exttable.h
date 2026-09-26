@@ -354,6 +354,9 @@ extern Oid	ExtProtocolOid(const char *name, bool missing_ok);
 extern Oid	ExtProtocolFunction(const char *name, bool iswritable, bool *exists);
 extern void ExtProtocolCheckUse(const char *name, bool iswritable);
 
+/* A protocol's label on its function, which a dump carries; see protocol.c. */
+extern void ExtProtocolRegisterLabelProvider(void);
+
 /* ------------------------------------------------------------------------- */
 /* Scans and writes (extaccess.c; gp_exttable_fdw's)                          */
 /* ------------------------------------------------------------------------- */

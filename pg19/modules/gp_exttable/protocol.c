@@ -35,6 +35,24 @@
  * not done for a row of a table: DROP PROTOCOL finds the external tables
  * that name it by their locations instead.
  *
+ * Nor does pg_dump write a row of an extension's table, where Cloudberry's
+ * writes CREATE PROTOCOL.  So a protocol is also a label on each of its
+ * functions, of the provider "gp_protocol", which pg_dump writes with the
+ * function:
+ *
+ *	  {"demoprot": {"trusted": true, "readfunc": "public.read_from_file",
+ *	                "owner": "alice", "acl": "{alice=ar/alice,bob=r/alice}"}}
+ *
+ * its functions, owner and privileges by name, as a restore makes them
+ * again.  Each change of a protocol writes its functions' labels again, on
+ * the coordinator or one node (protocol_label_refresh); and SECURITY LABEL
+ * FOR gp_protocol, a superuser's, as a restore runs it, makes each protocol
+ * it names that the database has not, once every function it names is
+ * there -- whichever of them the dump writes last (gp_protocol_label_check)
+ * -- with a new OID, before the external tables that name it, which the
+ * dump writes after the functions; and sends the segments the call that
+ * makes it, as CREATE PROTOCOL sends one.
+ *
  * Cloudberry sources this file is made of:
  *	  src/backend/commands/extprotocolcmds.c, catalog/pg_extprotocol.c,
  *	  and the protocol's part of catalog/aclchk.c
@@ -65,6 +83,9 @@
 #include "utils/fmgroids.h"
 #include "utils/formatting.h"
 #include "utils/lsyscache.h"
+#include "commands/seclabel.h"
+#include "utils/json.h"
+#include "utils/jsonb.h"
 #include "utils/regproc.h"
 #include "utils/syscache.h"
 
@@ -78,6 +99,10 @@ PG_FUNCTION_INFO_V1(gp_exttable_drop_protocol);
 PG_FUNCTION_INFO_V1(gp_exttable_rename_protocol);
 PG_FUNCTION_INFO_V1(gp_exttable_alter_protocol_owner);
 PG_FUNCTION_INFO_V1(gp_exttable_grant_protocol);
+PG_FUNCTION_INFO_V1(gp_exttable_restore_protocol);
+
+/* the label a protocol's definition is kept in, on its function */
+#define PROTOCOL_LABEL_PROVIDER	"gp_protocol"
 
 /* the privileges a protocol has, Cloudberry's ACL_ALL_RIGHTS_EXTPROTOCOL */
 #define PROTOCOL_ALL_RIGHTS		(ACL_SELECT | ACL_INSERT)
@@ -143,44 +168,58 @@ enum
  * segment reads it where a scan of a custom location opens it, which is in
  * a slice, where a query of a function's may not read a table.
  */
-static bool
-protocol_get(const char *name, Protocol *p)
+static Relation
+protocol_table_open(void)
 {
 	Oid			relid = get_relname_relid("protocol", get_namespace_oid("gp_exttable", false));
-	Relation	rel;
-	TableScanDesc scan;
-	HeapTuple	tup;
-	bool		found = false;
 
 	if (!OidIsValid(relid))
 		ereport(ERROR,
 				(errcode(ERRCODE_UNDEFINED_TABLE),
 				 errmsg("protocols need the gp_exttable extension")));
-	rel = table_open(relid, AccessShareLock);
+	return table_open(relid, AccessShareLock);
+}
+
+/* A row of the table, into *p. */
+static void
+protocol_from_tuple(HeapTuple tup, TupleDesc desc, Protocol *p)
+{
+	bool		isnull;
+	Datum		d;
+
+	p->name = pstrdup(NameStr(*DatumGetName(heap_getattr(tup, Anum_protocol_ptcname, desc, &isnull))));
+	p->oid = DatumGetObjectId(heap_getattr(tup, Anum_protocol_oid, desc, &isnull));
+	d = heap_getattr(tup, Anum_protocol_ptcreadfn, desc, &isnull);
+	p->readfn = isnull ? InvalidOid : DatumGetObjectId(d);
+	d = heap_getattr(tup, Anum_protocol_ptcwritefn, desc, &isnull);
+	p->writefn = isnull ? InvalidOid : DatumGetObjectId(d);
+	d = heap_getattr(tup, Anum_protocol_ptcvalidatorfn, desc, &isnull);
+	p->validatorfn = isnull ? InvalidOid : DatumGetObjectId(d);
+	p->owner = DatumGetObjectId(heap_getattr(tup, Anum_protocol_ptcowner, desc, &isnull));
+	p->trusted = DatumGetBool(heap_getattr(tup, Anum_protocol_ptctrusted, desc, &isnull));
+	d = heap_getattr(tup, Anum_protocol_ptcacl, desc, &isnull);
+	p->acl_text = isnull ? NULL :
+		DatumGetCString(OidFunctionCall1(F_ARRAY_OUT, d));
+}
+
+static bool
+protocol_get(const char *name, Protocol *p)
+{
+	Relation	rel = protocol_table_open();
+	TableScanDesc scan;
+	HeapTuple	tup;
+	bool		found = false;
+
 	scan = table_beginscan_catalog(rel, 0, NULL);
 	while ((tup = heap_getnext(scan, ForwardScanDirection)) != NULL)
 	{
-		TupleDesc	desc = RelationGetDescr(rel);
 		bool		isnull;
-		Datum		d;
+		Datum		d = heap_getattr(tup, Anum_protocol_ptcname, RelationGetDescr(rel), &isnull);
 
-		d = heap_getattr(tup, Anum_protocol_ptcname, desc, &isnull);
 		if (isnull || strcmp(NameStr(*DatumGetName(d)), name) != 0)
 			continue;
+		protocol_from_tuple(tup, RelationGetDescr(rel), p);
 		found = true;
-		p->oid = DatumGetObjectId(heap_getattr(tup, Anum_protocol_oid, desc, &isnull));
-		d = heap_getattr(tup, Anum_protocol_ptcreadfn, desc, &isnull);
-		p->readfn = isnull ? InvalidOid : DatumGetObjectId(d);
-		d = heap_getattr(tup, Anum_protocol_ptcwritefn, desc, &isnull);
-		p->writefn = isnull ? InvalidOid : DatumGetObjectId(d);
-		d = heap_getattr(tup, Anum_protocol_ptcvalidatorfn, desc, &isnull);
-		p->validatorfn = isnull ? InvalidOid : DatumGetObjectId(d);
-		p->owner = DatumGetObjectId(heap_getattr(tup, Anum_protocol_ptcowner, desc, &isnull));
-		p->trusted = DatumGetBool(heap_getattr(tup, Anum_protocol_ptctrusted, desc, &isnull));
-		d = heap_getattr(tup, Anum_protocol_ptcacl, desc, &isnull);
-		p->acl_text = isnull ? NULL :
-			DatumGetCString(OidFunctionCall1(F_ARRAY_OUT, d));
-		p->name = pstrdup(name);
 		break;
 	}
 	table_endscan(scan);
@@ -207,6 +246,95 @@ protocol_must_exist(const char *name, Protocol *p)
 		ereport(ERROR,
 				(errcode(ERRCODE_UNDEFINED_OBJECT),
 				 errmsg("protocol \"%s\" does not exist", name)));
+}
+
+static void protocol_label_refresh(Oid fnoid);
+
+/* The labels of a protocol's functions, each of which carries it. */
+static void
+protocol_labels_refresh(const Protocol *p)
+{
+	protocol_label_refresh(p->readfn);
+	if (p->writefn != p->readfn)
+		protocol_label_refresh(p->writefn);
+	if (p->validatorfn != p->readfn && p->validatorfn != p->writefn)
+		protocol_label_refresh(p->validatorfn);
+}
+
+/* A function by its schema and name, as the label keeps it. */
+static char *
+protocol_function_name(Oid fnoid)
+{
+	return quote_qualified_identifier(get_namespace_name(get_func_namespace(fnoid)),
+									  get_func_name(fnoid));
+}
+
+static void
+protocol_label_member(StringInfo buf, const char *key, const char *value, bool *first)
+{
+	if (value == NULL)
+		return;
+	appendStringInfoString(buf, *first ? "" : ", ");
+	escape_json(buf, key);
+	appendStringInfoString(buf, ": ");
+	escape_json(buf, value);
+	*first = false;
+}
+
+/*
+ * The "gp_protocol" label of a function again, from the protocols of this
+ * node's table it is a function of: none, and it has none.  On the
+ * coordinator or one node, whose labels pg_dump reads; a segment's table
+ * changes by the coordinator's calls.
+ */
+static void
+protocol_label_refresh(Oid fnoid)
+{
+	Relation	rel;
+	TableScanDesc scan;
+	HeapTuple	tup;
+	StringInfoData buf;
+	bool		any = false;
+	ObjectAddress addr;
+
+	if (!OidIsValid(fnoid) || GpClusterBackendRole() == GP_ROLE_EXECUTE ||
+		!SearchSysCacheExists1(PROCOID, ObjectIdGetDatum(fnoid)))
+		return;
+
+	initStringInfo(&buf);
+	appendStringInfoChar(&buf, '{');
+	rel = protocol_table_open();
+	scan = table_beginscan_catalog(rel, 0, NULL);
+	while ((tup = heap_getnext(scan, ForwardScanDirection)) != NULL)
+	{
+		Protocol	p;
+		bool		first;
+
+		protocol_from_tuple(tup, RelationGetDescr(rel), &p);
+		if (p.readfn != fnoid && p.writefn != fnoid && p.validatorfn != fnoid)
+			continue;
+		appendStringInfoString(&buf, any ? ", " : "");
+		escape_json(&buf, p.name);
+		appendStringInfoString(&buf, ": {");
+		appendStringInfo(&buf, "\"trusted\": %s", p.trusted ? "true" : "false");
+		first = false;
+		protocol_label_member(&buf, "readfunc",
+							  OidIsValid(p.readfn) ? protocol_function_name(p.readfn) : NULL, &first);
+		protocol_label_member(&buf, "writefunc",
+							  OidIsValid(p.writefn) ? protocol_function_name(p.writefn) : NULL, &first);
+		protocol_label_member(&buf, "validatorfunc",
+							  OidIsValid(p.validatorfn) ? protocol_function_name(p.validatorfn) : NULL, &first);
+		protocol_label_member(&buf, "owner", GetUserNameFromId(p.owner, false), &first);
+		protocol_label_member(&buf, "acl", p.acl_text, &first);
+		appendStringInfoChar(&buf, '}');
+		any = true;
+	}
+	table_endscan(scan);
+	table_close(rel, AccessShareLock);
+	appendStringInfoChar(&buf, '}');
+
+	ObjectAddressSet(addr, ProcedureRelationId, fnoid);
+	SetSecurityLabel(&addr, PROTOCOL_LABEL_PROVIDER, any ? buf.data : NULL);
 }
 
 /*
@@ -409,6 +537,11 @@ gp_exttable_create_protocol(PG_FUNCTION_ARGS)
 				  " (oid, ptcname, ptcreadfn, ptcwritefn, ptcvalidatorfn, ptcowner, ptctrusted)"
 				  " VALUES ($1, $2::name, $3, $4, $5, $6, $7)",
 				  7, argtypes, values, nulls);
+	protocol_label_refresh(readfn);
+	if (writefn != readfn)
+		protocol_label_refresh(writefn);
+	if (validatorfn != readfn && validatorfn != writefn)
+		protocol_label_refresh(validatorfn);
 
 	if (dispatching())
 		GpDispatchCommand(psprintf("CALL gp_exttable.create_protocol(%s, %s, %s, %u)",
@@ -516,6 +649,7 @@ gp_exttable_drop_protocol(PG_FUNCTION_ARGS)
 		values[0] = ObjectIdGetDatum(p.oid);
 		protocol_exec("DELETE FROM gp_exttable.protocol WHERE oid = $1",
 					  1, argtypes, values, NULL);
+		protocol_labels_refresh(&p);
 	}
 
 	if (dispatching())
@@ -549,6 +683,7 @@ gp_exttable_rename_protocol(PG_FUNCTION_ARGS)
 	values[1] = CStringGetTextDatum(newname);
 	protocol_exec("UPDATE gp_exttable.protocol SET ptcname = $2::name WHERE oid = $1",
 				  2, argtypes, values, NULL);
+	protocol_labels_refresh(&p);
 
 	if (dispatching())
 		GpDispatchCommand(psprintf("CALL gp_exttable.rename_protocol(%s, %s)",
@@ -586,6 +721,7 @@ gp_exttable_alter_protocol_owner(PG_FUNCTION_ARGS)
 		values[1] = ObjectIdGetDatum(newowner);
 		protocol_exec("UPDATE gp_exttable.protocol SET ptcowner = $2 WHERE oid = $1",
 					  2, argtypes, values, NULL);
+		protocol_labels_refresh(&p);
 	}
 
 	if (dispatching())
@@ -732,6 +868,7 @@ gp_exttable_grant_protocol(PG_FUNCTION_ARGS)
 										OidFunctionCall1(F_ARRAY_OUT, PointerGetDatum(acl)));
 		protocol_exec("UPDATE gp_exttable.protocol SET ptcacl = $2::aclitem[] WHERE oid = $1",
 					  2, argtypes, values, NULL);
+		protocol_labels_refresh(&p);
 	}
 
 	if (dispatching())
@@ -785,4 +922,217 @@ ExtProtocolOid(const char *name, bool missing_ok)
 				(errcode(ERRCODE_UNDEFINED_OBJECT),
 				 errmsg("protocol \"%s\" does not exist", name)));
 	return InvalidOid;
+}
+
+/*
+ * A protocol as its label has it (gp_protocol_label_check), made in this
+ * node's table: its functions by name, checked as CREATE PROTOCOL checks
+ * them, its owner and privileges by name, and the OID given, or a new one.
+ * On the coordinator, the segments are sent the call that makes it there,
+ * with the OID.
+ */
+static void
+protocol_restore(const char *name, bool trusted, const char *readfunc,
+				 const char *writefunc, const char *validatorfunc,
+				 const char *owner, const char *acl, Oid oid)
+{
+	Protocol	existing;
+	Oid			readfn = InvalidOid;
+	Oid			writefn = InvalidOid;
+	Oid			validatorfn = InvalidOid;
+	Oid			argtypes[8] = {OIDOID, TEXTOID, OIDOID, OIDOID, OIDOID, OIDOID, BOOLOID, TEXTOID};
+	Datum		values[8];
+	char		nulls[9] = "        ";
+
+	if (!superuser())
+		ereport(ERROR,
+				(errcode(ERRCODE_INSUFFICIENT_PRIVILEGE),
+				 errmsg("must be superuser to create an external protocol")));
+	if (protocol_get(name, &existing))
+		ereport(ERROR,
+				(errcode(ERRCODE_DUPLICATE_OBJECT),
+				 errmsg("protocol \"%s\" already exists", name)));
+	if (readfunc != NULL)
+		readfn = validate_protocol_function(stringToQualifiedNameList(readfunc, NULL),
+											PROTOCOL_READER);
+	if (writefunc != NULL)
+		writefn = validate_protocol_function(stringToQualifiedNameList(writefunc, NULL),
+											 PROTOCOL_WRITER);
+	if (validatorfunc != NULL)
+		validatorfn = validate_protocol_function(stringToQualifiedNameList(validatorfunc, NULL),
+												 PROTOCOL_VALIDATOR);
+	if (!OidIsValid(readfn) && !OidIsValid(writefn))
+		ereport(ERROR,
+				(errcode(ERRCODE_INVALID_FUNCTION_DEFINITION),
+				 errmsg("protocol must be specify at least a readfunc or a writefunc")));
+
+	if (!OidIsValid(oid))
+		oid = GetNewObjectId();
+	values[0] = ObjectIdGetDatum(oid);
+	values[1] = CStringGetTextDatum(name);
+	values[2] = oid_or_null(readfn, &nulls[2]);
+	values[3] = oid_or_null(writefn, &nulls[3]);
+	values[4] = oid_or_null(validatorfn, &nulls[4]);
+	values[5] = ObjectIdGetDatum(get_role_oid(owner, false));
+	values[6] = BoolGetDatum(trusted);
+	values[7] = acl != NULL ? CStringGetTextDatum(acl) : (Datum) 0;
+	nulls[7] = acl != NULL ? ' ' : 'n';
+	protocol_exec("INSERT INTO gp_exttable.protocol"
+				  " (oid, ptcname, ptcreadfn, ptcwritefn, ptcvalidatorfn, ptcowner, ptctrusted, ptcacl)"
+				  " VALUES ($1, $2::name, $3, $4, $5, $6, $7, $8::aclitem[])",
+				  8, argtypes, values, nulls);
+
+	if (dispatching())
+	{
+#define LITERAL_OR_NULL(x) ((x) != NULL ? quote_literal_cstr(x) : "NULL")
+		GpDispatchCommand(psprintf("CALL gp_exttable.restore_protocol(%s, %s, %s, %s, %s, %s, %s, %u)",
+								   quote_literal_cstr(name), trusted ? "true" : "false",
+								   LITERAL_OR_NULL(readfunc), LITERAL_OR_NULL(writefunc),
+								   LITERAL_OR_NULL(validatorfunc),
+								   quote_literal_cstr(owner), LITERAL_OR_NULL(acl), oid));
+#undef LITERAL_OR_NULL
+	}
+}
+
+static char *
+text_arg_or_null(FunctionCallInfo fcinfo, int n)
+{
+	return PG_ARGISNULL(n) ? NULL : text_to_cstring(PG_GETARG_TEXT_PP(n));
+}
+
+/*
+ * CALL gp_exttable.restore_protocol(name, trusted, readfunc, writefunc,
+ * validatorfunc, owner, acl, oid): what a gp_protocol label restored on the
+ * coordinator sends a segment, with the coordinator's OID.
+ */
+Datum
+gp_exttable_restore_protocol(PG_FUNCTION_ARGS)
+{
+	if (PG_ARGISNULL(0) || PG_ARGISNULL(1) || PG_ARGISNULL(5))
+		ereport(ERROR,
+				(errcode(ERRCODE_NULL_VALUE_NOT_ALLOWED),
+				 errmsg("a protocol's name, trust and owner must not be null")));
+	protocol_restore(text_to_cstring(PG_GETARG_TEXT_PP(0)), PG_GETARG_BOOL(1),
+					 text_arg_or_null(fcinfo, 2), text_arg_or_null(fcinfo, 3),
+					 text_arg_or_null(fcinfo, 4), text_to_cstring(PG_GETARG_TEXT_PP(5)),
+					 text_arg_or_null(fcinfo, 6),
+					 PG_ARGISNULL(7) ? InvalidOid : PG_GETARG_OID(7));
+	PG_RETURN_VOID();
+}
+
+/* A member of a label's entry, a string, or NULL where it has none. */
+static char *
+label_string(JsonbContainer *entry, const char *protocol, const char *key)
+{
+	JsonbValue	buf;
+	JsonbValue *v = getKeyJsonValueFromContainer(entry, key, strlen(key), &buf);
+
+	if (v == NULL || v->type == jbvNull)
+		return NULL;
+	if (v->type != jbvString)
+		ereport(ERROR,
+				(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+				 errmsg("\"%s\" of protocol \"%s\" must be a string", key, protocol)));
+	return pnstrdup(v->val.string.val, v->val.string.len);
+}
+
+/* Is there a function of no arguments of this name?  NULL: none is asked for. */
+static bool
+function_is_there(const char *qualified)
+{
+	if (qualified == NULL)
+		return true;
+	return OidIsValid(LookupFuncName(stringToQualifiedNameList(qualified, NULL),
+									 0, NULL, true));
+}
+
+/*
+ * The relabel check hook of "gp_protocol": a superuser's, on a function; an
+ * object of protocols by name, each {"trusted": bool, "readfunc",
+ * "writefunc", "validatorfunc", "owner", "acl": text}.  Each protocol it
+ * names that this database has not is made, as a restore writes the label;
+ * one it has is left as it is.  A segment makes none: the coordinator sends
+ * it the call.
+ */
+static void
+gp_protocol_label_check(const ObjectAddress *object, const char *seclabel)
+{
+	Jsonb	   *jb;
+	JsonbIterator *it;
+	JsonbIteratorToken tok;
+	JsonbValue	v;
+
+	if (object->classId != ProcedureRelationId)
+		ereport(ERROR,
+				(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+				 errmsg("a \"%s\" security label goes on a function",
+						PROTOCOL_LABEL_PROVIDER)));
+	if (!superuser())
+		ereport(ERROR,
+				(errcode(ERRCODE_INSUFFICIENT_PRIVILEGE),
+				 errmsg("must be superuser to create an external protocol")));
+	if (seclabel == NULL)
+		return;
+
+	jb = DatumGetJsonbP(DirectFunctionCall1(jsonb_in, CStringGetDatum(seclabel)));
+	if (!JB_ROOT_IS_OBJECT(jb))
+		ereport(ERROR,
+				(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+				 errmsg("a \"%s\" security label must be a JSON object",
+						PROTOCOL_LABEL_PROVIDER)));
+
+	it = JsonbIteratorInit(&jb->root);
+	(void) JsonbIteratorNext(&it, &v, true);	/* the object's start */
+	while ((tok = JsonbIteratorNext(&it, &v, true)) != WJB_DONE)
+	{
+		char	   *name;
+		JsonbContainer *entry;
+		JsonbValue	buf;
+		JsonbValue *trusted;
+		char	   *owner;
+		char	   *readfunc;
+		char	   *writefunc;
+		char	   *validatorfunc;
+		Protocol	existing;
+
+		if (tok != WJB_KEY)
+			continue;
+		name = pnstrdup(v.val.string.val, v.val.string.len);
+		tok = JsonbIteratorNext(&it, &v, true);
+		if (tok != WJB_VALUE || v.type != jbvBinary ||
+			!JsonContainerIsObject(v.val.binary.data))
+			ereport(ERROR,
+					(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+					 errmsg("protocol \"%s\" must be given an object", name)));
+		entry = v.val.binary.data;
+		trusted = getKeyJsonValueFromContainer(entry, "trusted", strlen("trusted"), &buf);
+		if (trusted == NULL || trusted->type != jbvBool)
+			ereport(ERROR,
+					(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+					 errmsg("\"trusted\" of protocol \"%s\" must be true or false", name)));
+		owner = label_string(entry, name, "owner");
+		if (owner == NULL)
+			ereport(ERROR,
+					(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+					 errmsg("protocol \"%s\" must be given its owner", name)));
+
+		if (GpClusterBackendRole() == GP_ROLE_EXECUTE || protocol_get(name, &existing))
+			continue;
+		readfunc = label_string(entry, name, "readfunc");
+		writefunc = label_string(entry, name, "writefunc");
+		validatorfunc = label_string(entry, name, "validatorfunc");
+		/* made with the label of the last of its functions a restore makes */
+		if (!function_is_there(readfunc) || !function_is_there(writefunc) ||
+			!function_is_there(validatorfunc))
+			continue;
+		protocol_restore(name, trusted->val.boolean, readfunc, writefunc,
+						 validatorfunc, owner, label_string(entry, name, "acl"),
+						 InvalidOid);
+	}
+}
+
+void
+ExtProtocolRegisterLabelProvider(void)
+{
+	register_label_provider(PROTOCOL_LABEL_PROVIDER, gp_protocol_label_check);
 }

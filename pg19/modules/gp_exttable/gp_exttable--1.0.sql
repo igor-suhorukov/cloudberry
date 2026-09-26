@@ -151,3 +151,15 @@ CREATE PROCEDURE gp_exttable.grant_protocol(is_grant bool, privileges text[],
 											grant_option bool, cascade bool)
 AS 'MODULE_PATHNAME', 'gp_exttable_grant_protocol'
 LANGUAGE C;
+
+/*
+ * What a protocol's label on its function makes, as a restore writes it: a
+ * protocol by its functions', owner's and privileges' names -- the call the
+ * coordinator sends a segment, with its OID (protocol.c).
+ */
+CREATE PROCEDURE gp_exttable.restore_protocol(name text, trusted bool,
+											  readfunc text, writefunc text,
+											  validatorfunc text, owner text,
+											  acl text, coordinator_oid oid DEFAULT 0)
+AS 'MODULE_PATHNAME', 'gp_exttable_restore_protocol'
+LANGUAGE C;
