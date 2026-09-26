@@ -1056,6 +1056,31 @@ refuse_reserved_schema(const char *name)
 				 errdetail("Schema %s is reserved for system use.", name)));
 }
 
+/*
+ * The schemas the port's own extensions install into, which their control
+ * files name.  PostgreSQL's CREATE EXTENSION makes such a schema itself, and
+ * it is not the extension's: pg_dump writes it, as CREATE SCHEMA and ALTER
+ * SCHEMA ... OWNER TO, before the CREATE EXTENSION ... WITH SCHEMA it writes,
+ * which wants the schema there.  A superuser restoring a dump may do both,
+ * as gp_toolkit's are anyone's in Cloudberry; not anyone else, who could
+ * make a schema before the extension is made, and own what it puts there.
+ */
+static const char *const extension_schemas[] = {
+	"gp_ao", "gp_exttable", "gp_matview", "gp_resource", "gp_security",
+	"gp_sql", "gp_task",
+};
+
+static bool
+is_extension_schema(const char *name)
+{
+	if (!superuser())
+		return false;
+	for (int i = 0; i < lengthof(extension_schemas); i++)
+		if (strcmp(name, extension_schemas[i]) == 0)
+			return true;
+	return false;
+}
+
 static void
 check_reserved_names(Node *parsetree)
 {
@@ -1068,6 +1093,8 @@ check_reserved_names(Node *parsetree)
 			{
 				CreateSchemaStmt *stmt = (CreateSchemaStmt *) parsetree;
 
+				if (stmt->schemaname != NULL && is_extension_schema(stmt->schemaname))
+					break;
 				if (stmt->schemaname != NULL)
 					refuse_reserved_gp_name(stmt->schemaname, "schema");
 				else if (stmt->authrole != NULL)
@@ -1096,7 +1123,8 @@ check_reserved_names(Node *parsetree)
 			{
 				AlterOwnerStmt *stmt = (AlterOwnerStmt *) parsetree;
 
-				if (stmt->objectType == OBJECT_SCHEMA)
+				if (stmt->objectType == OBJECT_SCHEMA &&
+					!is_extension_schema(strVal(stmt->object)))
 					refuse_reserved_schema(strVal(stmt->object));
 			}
 			break;
