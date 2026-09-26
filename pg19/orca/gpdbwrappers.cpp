@@ -76,6 +76,7 @@ extern "C" {
 #include "catalog/pg_index.h"
 #include "catalog/pg_inherits.h"
 #include "catalog/pg_statistic_ext_data.h"
+#include "commands/extension.h"
 #include "commands/defrem.h"
 #include "foreign/fdwapi.h"
 #include "foreign/foreign.h"
@@ -2890,6 +2891,17 @@ gpdb::CanDispatchPlans(void)
 		const GpCoreApi *api = motion_api();
 
 		return api != nullptr && api->motion_can_dispatch();
+	}
+	GP_WRAP_END;
+	return false;
+}
+
+bool
+gpdb::HasCoreExtension(void)
+{
+	GP_WRAP_START;
+	{
+		return OidIsValid(get_extension_oid("gp_core", true));
 	}
 	GP_WRAP_END;
 	return false;

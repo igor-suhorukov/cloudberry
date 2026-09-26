@@ -864,6 +864,8 @@ List *DynamicScanTlist(Plan *scan);
 // (compat/cb_motion.h).  Not in Cloudberry's layer, whose executor has a
 // Motion node and whose dispatcher sends a slice's parameters with it.
 bool CanDispatchPlans(void);
+// Whether the database has gp_core's extension, whose functions run a slice.
+bool HasCoreExtension(void);
 Plan *MakeGatherMotion(Plan *fragment, List *targetlist, List *qual,
 					   int content, int slice, int nkeys,
 					   const AttrNumber *keys, const Oid *sortops,

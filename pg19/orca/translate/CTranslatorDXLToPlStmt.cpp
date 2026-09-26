@@ -162,6 +162,25 @@ using namespace gpmd;
 #define GPDXL_MOTION_ID_START 1
 #define GPDXL_PARAM_ID_START 0
 
+// NOT IN CLOUDBERRY.  A Motion's slices run on the segments through gp_core
+// (gp_motion.c): without the cluster secret they take no plan (gp_cluster.c),
+// and a database without gp_core's extension -- one made from template0,
+// which has none -- has no function to run a slice in.  Cloudberry's slices
+// are its executor's, in every database.
+static void
+CheckCanDispatchPlans()
+{
+	if (gpdb::CanDispatchPlans())
+	{
+		return;
+	}
+	if (!gpdb::HasCoreExtension())
+	{
+		GP_UNPORTED("a Motion, in a database without gp_core's extension");
+	}
+	GP_UNPORTED("a Motion, without gp.cluster_secret");
+}
+
 //---------------------------------------------------------------------------
 //	@function:
 //		CTranslatorDXLToPlStmt::CTranslatorDXLToPlStmt
@@ -2743,11 +2762,7 @@ CTranslatorDXLToPlStmt::TranslateDXLMotion(
 		GP_UNPORTED("a Motion to some of the segments");
 	}
 
-	// Without the cluster secret the segments take no plan (gp_cluster.c).
-	if (!gpdb::CanDispatchPlans())
-	{
-		GP_UNPORTED("a Motion, without gp.cluster_secret");
-	}
+	CheckCanDispatchPlans();
 
 	// Cloudberry's order: the Motion's id and costs before the slice changes.
 	int plan_node_id = m_dxl_to_plstmt_context->GetNextPlanId();
@@ -2969,10 +2984,7 @@ CTranslatorDXLToPlStmt::TranslateDXLRedistributeMotionToResultHashFilters(
 	CDXLPhysicalMotion *motion_dxlop =
 		CDXLPhysicalMotion::Cast(motion_dxlnode->GetOperator());
 
-	if (!gpdb::CanDispatchPlans())
-	{
-		GP_UNPORTED("a Motion, without gp.cluster_secret");
-	}
+	CheckCanDispatchPlans();
 
 	// The filter keeps what hashes to the segment it runs on, and the
 	// coordinator is none of them.
@@ -5960,10 +5972,7 @@ CTranslatorDXLToPlStmt::TranslateDXLDml(
 		IMDRelation::EreldistrRandom == target_distribution ||
 		IMDRelation::EreldistrReplicated == target_distribution)
 	{
-		if (!gpdb::CanDispatchPlans())
-		{
-			GP_UNPORTED("a Motion, without gp.cluster_secret");
-		}
+		CheckCanDispatchPlans();
 		if (0 != recvslice->sliceIndex)
 		{
 			GP_UNPORTED("a write inside a slice the segments run");
