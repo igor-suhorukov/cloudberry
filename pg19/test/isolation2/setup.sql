@@ -16,6 +16,20 @@ CREATE EXTENSION gp_resource;
 CREATE EXTENSION gp_inject_fault;
 
 --
+-- Faults for everyone, as Cloudberry's script grants them and its tests
+-- inject them, some as roles of their own (gp_inject_fault--1.0.sql).
+--
+GRANT EXECUTE ON FUNCTION gp_inject_fault(text, text, text, text, text,
+	int4, int4, int4, int4, int4) TO PUBLIC;
+
+--
+-- CREATE on the schema public for everyone, which PostgreSQL gave PUBLIC
+-- until 15 and Cloudberry gives it still: a test's own role makes its
+-- tables there.
+--
+GRANT CREATE ON SCHEMA public TO PUBLIC;
+
+--
 -- pg_ctl(datadir, command, command_mode): stop or restart the node whose
 -- data directory that is, waiting for it, as Cloudberry's does.  The
 -- harness keeps each node's log beside its data directory.

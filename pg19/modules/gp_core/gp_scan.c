@@ -1724,7 +1724,61 @@ gather_current_of(GatherScanState *state, int *content, ItemPointer tid)
 	return true;
 }
 
-/* Start reading: from the segments the plan names, or the cursor's one. */
+/*
+ * A plan's cost less what the planner charges its gathers for starting --
+ * the round trip to each segment, which Cloudberry's cost model has no
+ * counterpart of -- for what a cost is compared with that was set in
+ * Cloudberry's units: a resource group's min_cost, under which a query runs
+ * without a slot (gp_resource's resgroup.c).  ORCA's plans have no gathers
+ * of the planner's.
+ */
+static void
+gather_startup_walker(Plan *plan, int *ngathers)
+{
+	if (plan == NULL)
+		return;
+	if (IsA(plan, CustomScan) &&
+		((CustomScan *) plan)->methods == &gather_scan_methods)
+		(*ngathers)++;
+	gather_startup_walker(plan->lefttree, ngathers);
+	gather_startup_walker(plan->righttree, ngathers);
+	if (IsA(plan, CustomScan))
+	{
+		foreach_ptr(Plan, child, ((CustomScan *) plan)->custom_plans)
+			gather_startup_walker(child, ngathers);
+	}
+	else if (IsA(plan, Append))
+	{
+		foreach_ptr(Plan, child, ((Append *) plan)->appendplans)
+			gather_startup_walker(child, ngathers);
+	}
+	else if (IsA(plan, SubqueryScan))
+		gather_startup_walker(((SubqueryScan *) plan)->subplan, ngathers);
+}
+
+double
+GpPlanCostLessGathers(PlannedStmt *stmt)
+{
+	int			ngathers = 0;
+	double		cost;
+
+	gather_startup_walker(stmt->planTree, &ngathers);
+	foreach_ptr(Plan, sub, stmt->subplans)
+		gather_startup_walker(sub, &ngathers);
+	cost = stmt->planTree->total_cost - ngathers * GATHER_STARTUP_COST;
+	return cost > 0 ? cost : 0;
+}
+
+/*
+ * Start reading: from the segments the plan names, or the cursor's one.
+ *
+ * The coordinator checked the statement's privileges before it ran any of
+ * it, the table's among them, as the user each is checked as -- a view's
+ * owner for a table the view reads -- and a segment knows only the session's
+ * role.  So the query says it was checked (GP_CHECKED_MARKER), and a segment
+ * checks none of its privileges, for the coordinator's connection alone, as
+ * Cloudberry's segments check none of a SELECT's (InitPlan()).
+ */
 static bool
 gather_start(GatherScanState *state)
 {
@@ -1732,6 +1786,7 @@ gather_start(GatherScanState *state)
 	StringInfoData sql;
 
 	initStringInfo(&sql);
+	appendStringInfoString(&sql, GP_CHECKED_MARKER);
 	appendStringInfoString(&sql, state->select);
 
 	if (gather_is_current_of(state))

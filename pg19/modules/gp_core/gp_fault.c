@@ -333,7 +333,10 @@ GpFaultTrigger(const char *name, const char *database, const char *table)
 				 * suspend at it again for another session, and a look that
 				 * falls between the two lets this one go on
 				 * (startup_rename_prepared_xlog).  An interrupt is taken at
-				 * once, as the latch wakes the wait.
+				 * once, as the latch wakes the wait.  It is no wait event, as
+				 * Cloudberry's pg_usleep() is none: a test finds a suspended
+				 * backend among those whose wait_event_type is null
+				 * (resgroup_bypass).
 				 */
 				fault_log(local.name, type);
 				while ((now = fault_current_type(local.name)) != GP_FAULT_NONE &&
@@ -341,7 +344,7 @@ GpFaultTrigger(const char *name, const char *database, const char *table)
 				{
 					CHECK_FOR_INTERRUPTS();
 					(void) WaitLatch(MyLatch, WL_LATCH_SET | WL_TIMEOUT | WL_EXIT_ON_PM_DEATH,
-									 1000L, fault_wait_event());
+									 1000L, 0);
 					ResetLatch(MyLatch);
 				}
 				if (now == GP_FAULT_RESUME)
@@ -648,11 +651,11 @@ gp_inject_fault(PG_FUNCTION_ARGS)
 	char	   *answer;
 	bool		fts_skipped = false;
 
-	if (!superuser())
-		ereport(ERROR,
-				(errcode(ERRCODE_INSUFFICIENT_PRIVILEGE),
-				 errmsg("must be superuser to inject a fault")));
-
+	/*
+	 * Who may is who may EXECUTE it: the extension's script grants PUBLIC
+	 * none, so a superuser, until someone grants a role -- as a test
+	 * cluster's setup grants PUBLIC, which Cloudberry's tests assume.
+	 */
 	node = GpClusterNodeByDbid(dbid);
 	if (GpClusterIsSingleNode() || GpClusterDbid() == dbid || node == NULL)
 	{

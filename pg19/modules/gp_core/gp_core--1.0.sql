@@ -568,6 +568,33 @@ AS 'MODULE_PATHNAME', 'gp_activity_session'
 LANGUAGE C VOLATILE STRICT;
 
 /*
+ * gp_stat_activity: pg_stat_activity of every node, as Cloudberry's view of
+ * that name gives it (its system_views_gp.in makes one of each pg_stat
+ * view): the coordinator's rows and each segment's, with the content id of
+ * the node, gp_segment_id, first, and sess_id, which each node works out for
+ * its own backends (stat_activity, which gp.dist_random() reads on each).
+ */
+CREATE VIEW gp_internal.stat_activity AS
+	SELECT a.*, gp_internal.activity_session(a) AS sess_id
+	FROM pg_catalog.pg_stat_activity a;
+
+SET allow_system_table_mods = on;
+CREATE VIEW pg_catalog.gp_stat_activity AS
+	SELECT -1 AS gp_segment_id, s.*
+	FROM gp_internal.stat_activity s
+	UNION ALL
+	SELECT d.gp_segment_id, d.datid, d.datname, d.pid, d.leader_pid,
+		   d.usesysid, d.usename, d.application_name, d.client_addr,
+		   d.client_hostname, d.client_port, d.backend_start, d.xact_start,
+		   d.query_start, d.state_change, d.wait_event_type, d.wait_event,
+		   d.state, d.backend_xid, d.backend_xmin, d.query_id, d.query,
+		   d.backend_type, d.sess_id
+	FROM gp.dist_random(NULL::gp_internal.stat_activity) d;
+RESET allow_system_table_mods;
+
+GRANT SELECT ON gp_internal.stat_activity, pg_catalog.gp_stat_activity TO PUBLIC;
+
+/*
  * How a relation's rows are spread over the segments.
  *
  * gp_sql.set_distribution() records what DISTRIBUTED BY said as text on the

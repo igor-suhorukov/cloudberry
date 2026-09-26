@@ -76,3 +76,14 @@ CREATE FUNCTION gp_wait_until_triggered_fault(
 RETURNS text
 AS $$ select gp_inject_fault($1, 'wait_until_triggered', '', '', '', 1, 1, $2, $3, -1) $$
 LANGUAGE SQL;
+
+/*
+ * Who may inject a fault: whom EXECUTE on the function that does it is
+ * granted to, the wrappers above running as their caller.  Cloudberry's
+ * script grants PUBLIC, as a script does unless it says otherwise, and its
+ * tests call these as roles of their own; here PUBLIC has none, since a fault
+ * stops a server as readily as it tests one, and the test suites' setups
+ * grant it.
+ */
+REVOKE EXECUTE ON FUNCTION gp_inject_fault(text, text, text, text, text,
+	int4, int4, int4, int4, int4) FROM PUBLIC;

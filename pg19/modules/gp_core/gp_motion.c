@@ -81,6 +81,8 @@
  */
 #include "postgres.h"
 
+#include <ctype.h>
+
 #include "access/detoast.h"
 #include "access/genam.h"
 #include "access/htup_details.h"
@@ -127,6 +129,7 @@
 #include "gp_cluster.h"
 #include "gp_core_api.h"
 #include "gp_dispatch.h"
+#include "gp_fault.h"
 #include "gp_gdd.h"
 #include "gp_hash.h"
 #include "gp_ic.h"
@@ -3525,6 +3528,31 @@ starting_cursor(void)
  * snapshot and its transaction's state, for its readers, before anything of
  * it runs -- they wait for it to start.
  */
+/*
+ * Is this the cursor of a gather whose privileges the coordinator checked
+ * (gp_scan.c's gather_start())?  Only its own text says so -- "DECLARE
+ * gp_gather_N [BINARY ]NO SCROLL CURSOR FOR" and the marker right after,
+ * which nothing a user writes can put there -- and only the coordinator's
+ * own connection is believed.
+ */
+static bool
+gather_was_checked(const char *query_string)
+{
+	const char *p;
+
+	if (query_string == NULL || strncmp(query_string, "DECLARE gp_gather_", 18) != 0 ||
+		!GpClusterDispatchTrusted())
+		return false;
+	p = query_string + 18;
+	while (isdigit((unsigned char) *p))
+		p++;
+	if (strncmp(p, " BINARY", 7) == 0)
+		p += 7;
+	if (strncmp(p, " NO SCROLL CURSOR FOR ", 22) != 0)
+		return false;
+	return strncmp(p + 22, GP_CHECKED_MARKER, strlen(GP_CHECKED_MARKER)) == 0;
+}
+
 static void
 motion_executor_start(QueryDesc *queryDesc, int eflags)
 {
@@ -3533,6 +3561,18 @@ motion_executor_start(QueryDesc *queryDesc, int eflags)
 	if (GpClusterBackendRole() == GP_ROLE_DISPATCH &&
 		!(eflags & EXEC_FLAG_EXPLAIN_ONLY))
 		report_slices(queryDesc->plannedstmt);
+
+	/*
+	 * A gather the coordinator checked the privileges of: none to check
+	 * here (gather_was_checked()), so its plan has none, and its range table
+	 * points at none, as a reader's fragment has none.
+	 */
+	if (GpClusterIsDispatched() && gather_was_checked(queryDesc->sourceText))
+	{
+		foreach_node(RangeTblEntry, rte, queryDesc->plannedstmt->rtable)
+			rte->perminfoindex = 0;
+		queryDesc->plannedstmt->permInfos = NIL;
+	}
 
 	if (GpClusterIsDispatched() && is_fragment(queryDesc->plannedstmt))
 	{
@@ -3581,6 +3621,9 @@ motion_executor_start(QueryDesc *queryDesc, int eflags)
 		prev_executor_start(queryDesc, eflags);
 	else
 		standard_ExecutorStart(queryDesc, eflags);
+
+	/* InitPlan()'s last fault, where its plan is set up */
+	(void) GP_FAULT("func_init_plan_end");
 
 	if (params != NIL)
 		fragment_params_after_start(queryDesc, params);
@@ -3725,6 +3768,8 @@ static PlannedStmt *
 motion_planner(Query *parse, const char *query_string, int cursorOptions,
 			   ParamListInfo boundParams, ExplainState *es)
 {
+	PlannedStmt *stmt;
+
 	if (GpClusterIsDispatched())
 	{
 		char	   *key = NULL;
@@ -3737,10 +3782,115 @@ motion_planner(Query *parse, const char *query_string, int cursorOptions,
 	}
 
 	if (prev_planner)
-		return prev_planner(parse, query_string, cursorOptions, boundParams,
+		stmt = prev_planner(parse, query_string, cursorOptions, boundParams,
 							es);
-	return standard_planner(parse, query_string, cursorOptions, boundParams,
-							es);
+	else
+		stmt = standard_planner(parse, query_string, cursorOptions,
+								boundParams, es);
+	return stmt;
+}
+
+/*
+ * Does the plan go to one segment at most, as a plan Cloudberry dispatches
+ * directly does (resgroup.c's can_bypass_direct_dispatch_plan())?  ORCA's
+ * says so in its slice table: each slice it dispatches, to one segment.  The
+ * planner's, node by node: a gather of one segment's rows ("Segment: 1"), a
+ * Dispatch of a write to one, and an INSERT of one row of constants, which
+ * one segment takes; anything else sent to the segments is to more.
+ */
+typedef struct OneSegment
+{
+	bool		one;			/* nothing seen goes to more */
+	int			seen;			/* what goes to the segments */
+} OneSegment;
+
+static bool
+plan_one_segment_walker(Plan *plan, OneSegment *os)
+{
+	if (plan == NULL || !os->one)
+		return false;
+	if (IsA(plan, CustomScan))
+	{
+		CustomScan *cscan = (CustomScan *) plan;
+		const char *name = cscan->methods->CustomName;
+
+		if (strcmp(name, "Gather Motion") == 0)
+		{
+			List	   *contents = (List *) list_nth(cscan->custom_private, 3);
+			int			nsegments = intVal(list_nth(cscan->custom_private, 4));
+
+			os->seen++;
+			if (list_length(contents) != 1 && nsegments != 1)
+				os->one = false;
+		}
+		else if (strcmp(name, "Dispatch") == 0)
+		{
+			os->seen++;
+			if (list_length((List *) lthird(cscan->custom_private)) != 1 &&
+				intVal(lfourth(cscan->custom_private)) != 1)
+				os->one = false;
+		}
+		else if (strcmp(name, "Redistribute Motion") == 0)
+		{
+			Plan	   *rows = linitial(cscan->custom_plans);
+
+			os->seen++;
+			if (!IsA(rows, Result) || rows->lefttree != NULL)
+				os->one = false;
+		}
+		else if (strcmp(name, GP_MOTION_NAME) == 0 ||
+				 strcmp(name, "Explicit Redistribute Motion") == 0)
+		{
+			/* an explicit one moves a gather's rows, which are judged below */
+		}
+	}
+	if (plan->lefttree != NULL)
+		(void) plan_one_segment_walker(plan->lefttree, os);
+	if (plan->righttree != NULL)
+		(void) plan_one_segment_walker(plan->righttree, os);
+	if (IsA(plan, CustomScan))
+	{
+		foreach_ptr(Plan, child, ((CustomScan *) plan)->custom_plans)
+			(void) plan_one_segment_walker(child, os);
+	}
+	else if (IsA(plan, Append))
+	{
+		foreach_ptr(Plan, child, ((Append *) plan)->appendplans)
+			(void) plan_one_segment_walker(child, os);
+	}
+	else if (IsA(plan, SubqueryScan))
+		(void) plan_one_segment_walker(((SubqueryScan *) plan)->subplan, os);
+	return false;
+}
+
+bool
+GpPlanIsDirectDispatch(PlannedStmt *stmt)
+{
+	List	   *table = (List *) fragment_mark(stmt, GP_SLICE_TABLE);
+	OneSegment	os = {true, 0};
+	int			dispatched = 0;
+
+	if (table != NIL)
+	{
+		foreach_ptr(List, slice, table)
+		{
+			int			gang = intVal(list_nth(slice, 2));
+			int			nsegs = intVal(list_nth(slice, 3));
+			int			direct = intVal(list_nth(slice, 5));
+
+			if (gang == 0)
+				continue;
+			dispatched++;
+			if (direct < 0 && nsegs != 1)
+				return false;
+		}
+		return dispatched > 0;
+	}
+
+	if (stmt->subplans != NIL)
+		return false;
+	(void) plan_one_segment_walker(stmt->planTree, &os);
+	return os.one && os.seen > 0;
 }
 
 PG_FUNCTION_INFO_V1(gp_exec_fragment);

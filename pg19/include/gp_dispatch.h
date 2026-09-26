@@ -49,6 +49,29 @@
 #include "utils/tuplestore.h"
 
 /*
+ * What a gather's query starts with when the coordinator checked the
+ * privileges of the statement it is part of: a segment, on the
+ * coordinator's own connection, checks none of them (gp_scan.c,
+ * gp_motion.c).
+ */
+#define GP_CHECKED_MARKER	"/*gp:checked*/ "
+
+/*
+ * Does a plan go to one segment at most -- a direct dispatch, as Cloudberry
+ * calls it -- which a resource group lets run without a slot (gp_motion.c)?
+ */
+struct PlannedStmt;
+extern bool GpPlanIsDirectDispatch(struct PlannedStmt *stmt);
+
+/*
+ * A plan's cost less what the planner charges its gathers for starting,
+ * which Cloudberry's cost model has no counterpart of: what a cost set in
+ * Cloudberry's units -- a resource group's min_cost -- is compared with
+ * (gp_scan.c).
+ */
+extern double GpPlanCostLessGathers(struct PlannedStmt *stmt);
+
+/*
  * Run a statement on every segment and wait for all of them.
  *
  * Raises if any segment failed, naming the segment and repeating its own
@@ -290,6 +313,15 @@ extern void GpDispatchRelayNotices(struct pg_conn *conn);
 typedef bool (*GpNoticeFilter) (const char *sqlstate, const char *message);
 extern void GpDispatchAddNoticeFilter(GpNoticeFilter filter);
 extern void GpDispatchFlushNotices(void);
+
+/*
+ * A module's call just before the segments are told the settings that
+ * changed, to set one of its own again that changed as the statement ran,
+ * outside any hook it has: gp_resource's, when the transaction is moved to
+ * another group (gp_dispatch.c).
+ */
+typedef void (*GpDispatchSyncCallback) (void);
+extern void GpDispatchAddSyncCallback(GpDispatchSyncCallback callback);
 
 /*
  * An object whose "gp" label the coordinator changed: the segments are sent

@@ -224,7 +224,8 @@ static const char *const synced_settings[] = {
 	"gp.udpic_dropxmit_percent",
 	/*
 	 * gp_resource's, what the coordinator's resource manager says of the
-	 * statement: the weight its queue's priority gives it
+	 * statement: the weight its queue's priority gives it, the group it runs
+	 * in, and the memory it is given
 	 */
 	"gp_resource.statement",
 	/* PAX's, which a segment's scans and writers read */
@@ -805,6 +806,32 @@ GpDispatchAddNoticeFilter(GpNoticeFilter filter)
 	if (n_notice_filters >= MAX_NOTICE_FILTERS)
 		elog(ERROR, "too many notice filters");
 	notice_filters[n_notice_filters++] = filter;
+}
+
+/*
+ * The modules' calls before the settings are synced (GpDispatchAddSyncCallback()):
+ * each may set a setting of its own again, as a backend's own statement does.
+ */
+#define MAX_SYNC_CALLBACKS	4
+static GpDispatchSyncCallback sync_callbacks[MAX_SYNC_CALLBACKS];
+static int	n_sync_callbacks = 0;
+
+void
+GpDispatchAddSyncCallback(GpDispatchSyncCallback callback)
+{
+	for (int i = 0; i < n_sync_callbacks; i++)
+		if (sync_callbacks[i] == callback)
+			return;
+	if (n_sync_callbacks >= MAX_SYNC_CALLBACKS)
+		elog(ERROR, "too many dispatch sync callbacks");
+	sync_callbacks[n_sync_callbacks++] = callback;
+}
+
+static void
+run_sync_callbacks(void)
+{
+	for (int i = 0; i < n_sync_callbacks; i++)
+		sync_callbacks[i] ();
 }
 
 /* s less its trailing whitespace, in place; s. */
@@ -1722,6 +1749,7 @@ reader_sync_settings(GpReaderConn *r)
 	const char *values[NUM_SYNCED_SETTINGS];
 	bool		any = false;
 
+	run_sync_callbacks();
 	initStringInfo(&sql);
 	appendStringInfoString(&sql, "SELECT ");
 	for (int i = 0; i < NUM_SYNCED_SETTINGS; i++)
@@ -1899,6 +1927,7 @@ gang_sync_settings(GpGang *g)
 	const char *values[NUM_SYNCED_SETTINGS];
 	bool		any = false;
 
+	run_sync_callbacks();
 	initStringInfo(&sql);
 	appendStringInfoString(&sql, "SELECT ");
 
