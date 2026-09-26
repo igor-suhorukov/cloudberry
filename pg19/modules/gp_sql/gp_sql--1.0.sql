@@ -89,7 +89,10 @@ LANGUAGE C STRICT;
 /*
  * A security label cannot be put on an index, so the tags of one live here.
  * This is the single place where the port's tags round-trip less well than
- * the rest: they are dumped with this table rather than beside the index.
+ * the rest: they are not dumped.  A row names its index by OID, and a
+ * restore makes the index again under another -- after the tables' rows,
+ * which is where pg_dump would put this table's -- so a dumped row would
+ * tag another index, or none.  Cloudberry dumps no tag at all.
  */
 CREATE TABLE gp_sql.index_tag (
 	indexrelid	oid NOT NULL,
@@ -100,8 +103,6 @@ CREATE TABLE gp_sql.index_tag (
 
 COMMENT ON TABLE gp_sql.index_tag IS
 	'tags of indexes, which PostgreSQL security labels cannot reach';
-
-SELECT pg_catalog.pg_extension_config_dump('gp_sql.index_tag', '');
 
 ALTER TABLE gp_sql.index_tag ENABLE ROW LEVEL SECURITY;
 
