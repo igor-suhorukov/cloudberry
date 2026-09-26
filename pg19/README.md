@@ -12,6 +12,8 @@ applying to them; this directory is the only new top-level directory.
     orca/        ORCA: its core taken from Cloudberry's tree unmodified, and
                  the translator, which is the port's own code
     docker/      the Compose project: patched PG19, the modules, a cluster
+    gpMgmt/      Cloudberry's management tools on PostgreSQL 19's own: what
+                 is installed, and the port's copies of the files it changes
     test/        the port's test harness
 
 ## ORCA
@@ -346,12 +348,32 @@ tools:
 - the coordinator tells the segments a transaction's second phase before
   the transaction ends for the other sessions, as Cloudberry's does, from
   O33, `xact_commit_recorded_hook`, so that no session sees it committed
-  while a segment's part is still prepared.
+  while a segment's part is still prepared;
+- FTS probes from every coordinator, as Cloudberry's does: a mirror added
+  while the coordinator runs is marked up once it streams, and a promoted
+  standby probes once `gp_activate_standby()` has made it the coordinator.
 
-The isolation2 harness has what the tests ask of Cloudberry's tools: its
-`gprecoverseg` recovers a node to another directory from a file (`-i`),
-and its `gpinitstandby` removes a standby and makes one.  Cloudberry's own
-tools are gpMgmt's, the rest of M7.
+Cloudberry's management tools, gpMgmt, are installed beside the server
+(`gpMgmt/`, GPHOME the server's prefix), and run on PostgreSQL 19's own
+initdb, pg_ctl, pg_basebackup and pg_rewind: gpinitsystem, gpstart,
+gpstop, gpstate, gpconfig, gprecoverseg, gpaddmirrors, gpinitstandby,
+gpactivatestandby and gpdeletesystem.  What they ask of Cloudberry's
+patched tools that PostgreSQL 19's do not do — pg_basebackup's
+`--target-gp-dbid`, `--force-overwrite` and `-E`, pg_rewind's `--slot`, a
+connection's `gp_role=utility` — the port's copies do around them
+(`gppylib/nodecopy.py`); gpconfig takes a setting by Cloudberry's name and
+sets the port's, `gp.*`; and the tools read the cluster from the
+coordinator's cluster file and change it through `gp_core`'s segment
+administration functions, where Cloudberry's read and write its catalog.
+A file the port changes is a copy under `gpMgmt/src`, headed with what it
+changes; the rest are installed from Cloudberry's tree as they are.
+`gpMgmt/files.txt` lists both, and what is not installed, and why —
+gpexpand and gpshrink, since a cluster's segments are fixed when its
+coordinator starts; gpcheckcat, since the port keeps Cloudberry's catalogs
+as views, labels and files; and the loading, packaging and support tools,
+not ported yet.  The suites whose tests run Cloudberry's tools —
+`isolation2`, `singlenode_isolation2`, `diskquota` and `greenplum` — run
+gpMgmt's.
 
 The transport and encryption modules — `interconnect`, `udp2`, `gp_tde` —
 are still stubs: the streaming transports, tcp and udpifc, live in
@@ -385,6 +407,11 @@ output has them; `resgroup`, M6's, Cloudberry's resource group schedule
 for cgroup v2, whose tests write the cgroups under `/sys/fs/cgroup/gpdb`
 -- the tests service is privileged, and its entrypoint makes that subtree
 (`test/cgroup.sh`) -- and `memprot`, memory protection's refusals;
+`gpmgmt`, M7's, gpMgmt's tools on clusters they make on this host --
+gpinitsystem's, a mirror for each primary, and one of primaries alone that
+gpaddmirrors gives mirrors -- each tool checked by what the cluster says
+after it: a primary stopped, failed over from and recovered with pg_rewind
+and with pg_basebackup, a standby made and made the coordinator;
 `singlenode` and
 `singlenode_isolation2`, Cloudberry's single-node suites with PostgreSQL 19's
 own regression tests; and PostGIS's regression suite.  Each is run under the

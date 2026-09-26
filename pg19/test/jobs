@@ -32,29 +32,30 @@
 # built on (16 cores, 32 threads), with every job at once; they order the
 # jobs and nothing else, and run.sh's summary gives each run's own.
 
-resgroup               -        548   ALONE=1
-greenplum              orca     370   PASSES=orca
-diskquota              regress  301   DQ_PARTS=regress
-greenplum              planner  269   PASSES=planner
-singlenode             orca     241   PASSES=orca
-pax                    -        146
-isolation2             planner  141   PASSES=planner
-postgis_regress        orca     120   PASSES=orca
-diskquota              isolation2 115   DQ_PARTS=isolation2
-isolation2             orca     115   PASSES=orca
-singlenode             planner   90   PASSES=planner
-cluster                -         82
-orca                   -         80
-fts                    -         62
-task                   -         33
-hooks                  -         30
-postgis_regress        planner   27   PASSES=planner
-security               -         22
-postgis                -         22
-singlenode_isolation2  orca      19   PASSES=orca
+resgroup               -        557   ALONE=1
+greenplum              orca     449   PASSES=orca
+diskquota              regress  336   DQ_PARTS=regress
+greenplum              planner  283   PASSES=planner
+singlenode             orca     254   PASSES=orca
+pax                    -        157
+isolation2             planner  143   PASSES=planner
+isolation2             orca     143   PASSES=orca
+postgis_regress        orca     132   PASSES=orca
+diskquota              isolation2 131   DQ_PARTS=isolation2
+gpmgmt                 -        121
+singlenode             planner  101   PASSES=planner
+orca                   -         94
+cluster                -         89
+task                   -         68
+fts                    -         57
+hooks                  -         32
+postgis_regress        planner   31   PASSES=planner
+singlenode_isolation2  orca      28   PASSES=orca
+singlenode_isolation2  planner   25   PASSES=planner
+security               -         24
+postgis                -         24
 dirtable               -         17
-memprot                -         15
-singlenode_isolation2  planner   14   PASSES=planner
-grammar                -         14
-ao                     -         10
+memprot                -         16
+grammar                -         15
+ao                     -         11
 dynamic                -         10
