@@ -227,8 +227,8 @@ and a promotion, and a background worker of each segment's, a mirror's
 too, keeps the slot that holds back what those transactions deleted.  The
 injection points Cloudberry's FTS tests hold are a patch the tests' build
 applies (`pg19/docker/patches`), not a patch of the core series.  Left
-open: six of Cloudberry's FTS tests, each for what the port does not have
-(`cloudberry.md`).
+open: six of Cloudberry's FTS tests, each for what the port did not have
+(`cloudberry.md`) -- three of them run since M7's tools (below).
 
 M5 — storage and loading — has begun (2026-09-25), on eleven more patches
 of the core series, O13 to O21, O23 and O32:
@@ -325,6 +325,34 @@ the core series, O25:
   its label; and a client that hangs up, or OAuth's discovery round trip,
   is no failed login under a profile.
 
+M7 — planner parity and tools — has begun (2026-09-26), on one more patch
+of the core series, O33, with the three isolation2 tests M4 left for its
+tools:
+
+- the coordinator waits for its standby as Cloudberry's does: while the
+  standby, connected as `gp_walreceiver`, streams, or has caught up within
+  `gp.repl_catchup_within_range` WAL segments, and not otherwise
+  (`gp_standby.c`); on a segment the setting says when FTS turns a
+  primary's synchronous replication back on;
+- Cloudberry's segment administration functions change the cluster's
+  nodes while it runs — `gp_add_segment()`, `gp_remove_segment()`,
+  `gp_add_segment_mirror()`, `gp_remove_segment_mirror()`,
+  `gp_add_master_standby()`, `gp_remove_master_standby()`,
+  `gp_update_segment_configuration_mode_status()`, and
+  `gp_activate_standby()` for a standby promoted (`gp_segadmin.c`).  A
+  call's change is its transaction's: `gp_segment_configuration` shows it
+  to the session, a rollback drops it, and the commit writes every change
+  at once — the cluster file, `gpsegconfig_dump` and shared memory;
+- the coordinator tells the segments a transaction's second phase before
+  the transaction ends for the other sessions, as Cloudberry's does, from
+  O33, `xact_commit_recorded_hook`, so that no session sees it committed
+  while a segment's part is still prepared.
+
+The isolation2 harness has what the tests ask of Cloudberry's tools: its
+`gprecoverseg` recovers a node to another directory from a file (`-i`),
+and its `gpinitstandby` removes a standby and makes one.  Cloudberry's own
+tools are gpMgmt's, the rest of M7.
+
 The transport and encryption modules — `interconnect`, `udp2`, `gp_tde` —
 are still stubs: the streaming transports, tcp and udpifc, live in
 `gp_core`, and TDE waits for a formal requirement.
@@ -343,10 +371,10 @@ core series through a test module); `greenplum`, part of Cloudberry's
 `greenplum_schedule` on a coordinator and three segments; `isolation2`, the
 tests of Cloudberry's `isolation2_schedule` that bear on M3 — distributed
 transactions and snapshots, locks and the global deadlock detector — on
-M4, FTS and mirrors, and on M6, resource queues and memory accounting, run
-by Cloudberry's own driver on the same cluster, with
-a standby coordinator for the test that asks for one, and mirrors for the
-FTS tests; `fts`, M4's, a coordinator and three primaries
+M4, FTS and mirrors, on M6, resource queues and memory accounting, and on
+M7's tools, a node recovered elsewhere and the standby promoted and made
+again, run by Cloudberry's own driver on the same cluster, with a standby
+coordinator for the tests that ask for one, and mirrors for the FTS tests; `fts`, M4's, a coordinator and three primaries
 each with a mirror, and what FTS does when a mirror or a primary stops;
 `ao`, M5's, append-optimized tables on one node, a standby and recovery;
 `diskquota`, M5's too, Cloudberry's diskquota tests on a coordinator and

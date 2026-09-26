@@ -32,29 +32,29 @@
 # built on (16 cores, 32 threads), with every job at once; they order the
 # jobs and nothing else, and run.sh's summary gives each run's own.
 
-resgroup               -        552   ALONE=1
-greenplum              orca     371   PASSES=orca
-diskquota              regress  303   DQ_PARTS=regress
-greenplum              planner  268   PASSES=planner
-singlenode             orca     244   PASSES=orca
-pax                    -        147
-isolation2             planner  138   PASSES=planner
-postgis_regress        orca     124   PASSES=orca
+resgroup               -        548   ALONE=1
+greenplum              orca     370   PASSES=orca
+diskquota              regress  301   DQ_PARTS=regress
+greenplum              planner  269   PASSES=planner
+singlenode             orca     241   PASSES=orca
+pax                    -        146
+isolation2             planner  141   PASSES=planner
+postgis_regress        orca     120   PASSES=orca
 diskquota              isolation2 115   DQ_PARTS=isolation2
-isolation2             orca     114   PASSES=orca
+isolation2             orca     115   PASSES=orca
 singlenode             planner   90   PASSES=planner
-orca                   -         83
-cluster                -         78
-fts                    -         61
-task                   -         34
-postgis_regress        planner   26   PASSES=planner
-hooks                  -         24
-security               -         21
-postgis                -         19
+cluster                -         82
+orca                   -         80
+fts                    -         62
+task                   -         33
+hooks                  -         30
+postgis_regress        planner   27   PASSES=planner
+security               -         22
+postgis                -         22
 singlenode_isolation2  orca      19   PASSES=orca
 dirtable               -         17
-memprot                -         16
-singlenode_isolation2  planner   13   PASSES=planner
-grammar                -         13
+memprot                -         15
+singlenode_isolation2  planner   14   PASSES=planner
+grammar                -         14
 ao                     -         10
-dynamic                -          9
+dynamic                -         10
