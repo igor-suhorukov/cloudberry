@@ -1336,6 +1336,17 @@ a\b|\N' ] && [ "$(cat "$ROOT/ce_prog.txt" 2>&1)" = "to a program" ] \
 	[ "$out" = "300" ] && ok "a replicated table's rows are counted once, not once a segment" \
 		|| notok "reltuples of a replicated table" "$out"
 
+	# VACUUM ANALYZE: the coordinator runs the statement before it dispatches
+	# it whole, and its ANALYZE samples the segments all the same -- once
+	# sampled the coordinator's empty copy, and left no statistics at all.
+	q 0 "CREATE TABLE vst (a int, g int) DISTRIBUTED BY (a); INSERT INTO vst SELECT i, i % 10 FROM generate_series(1, 2000) i;" >/dev/null
+	q 0 "VACUUM ANALYZE vst;" >/dev/null
+	out=$(q 0 "SELECT n_distinct FROM pg_stats WHERE tablename = 'vst' AND attname = 'g';")
+	q 0 "VACUUM (FULL, ANALYZE) vst;" >/dev/null
+	out2=$(q 0 "SELECT n_distinct FROM pg_stats WHERE tablename = 'vst' AND attname = 'g';")
+	[ "$out|$out2" = "10|10" ] && ok "VACUUM ANALYZE, and VACUUM FULL's, sample the segments too" \
+		|| notok "the statistics of VACUUM ANALYZE" "$out / $out2"
+
 	q 0 "ANALYZE sales;" >/dev/null
 	out=$(q 0 "SELECT reltuples FROM pg_class WHERE relname = 'sales';")
 	out2=$(q 0 "SELECT count(*) FROM pg_stats WHERE tablename = 'sales' AND inherited;")

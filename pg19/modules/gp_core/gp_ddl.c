@@ -164,6 +164,7 @@ static MemoryContext ddl_cxt = NULL;
 
 /* The coordinator: the statement being run here and dispatched after. */
 static bool recording = false;
+static bool recording_vacuum = false;	/* and it is a VACUUM */
 static List *recorded = NIL;	/* of GpOidAssignment *, in ddl_cxt */
 
 /* A segment: the statement the coordinator dispatched, and its OIDs. */
@@ -1342,6 +1343,7 @@ gp_ddl_ProcessUtility(PlannedStmt *pstmt, const char *queryString,
 	MemoryContextReset(ddl_cxt);
 	recorded = NIL;
 	recording = true;
+	recording_vacuum = IsA(parsetree, VacuumStmt);
 	PG_TRY();
 	{
 		run_tablespace_statement(pstmt, queryString, readOnlyTree, context,
@@ -1350,6 +1352,7 @@ gp_ddl_ProcessUtility(PlannedStmt *pstmt, const char *queryString,
 	PG_FINALLY();
 	{
 		recording = false;
+		recording_vacuum = false;
 	}
 	PG_END_TRY();
 
@@ -1500,6 +1503,7 @@ gp_ddl_xact_callback(XactEvent event, void *arg)
 	{
 		preassigned_clear();
 		recording = false;
+		recording_vacuum = false;
 		recorded = NIL;
 		MemoryContextReset(ddl_cxt);
 	}
@@ -1517,10 +1521,16 @@ GpDispatchIsDispatchedStatement(Node *utilityStmt)
 	return dispatched_tree != NULL && utilityStmt == dispatched_tree;
 }
 
+/*
+ * A VACUUM is dispatched whole too -- a VACUUM FULL's new files have to be
+ * recorded -- but nothing it runs inside is a query of the kind: what its
+ * ANALYZE samples is the segments' rows, the coordinator's statistics of a
+ * distributed table (gp_analyze.c), as a plain ANALYZE's are.
+ */
 bool
 GpDispatchIsRecording(void)
 {
-	return recording;
+	return recording && !recording_vacuum;
 }
 
 bool
