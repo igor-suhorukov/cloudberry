@@ -1458,6 +1458,16 @@ a\b|\N' ] && [ "$(cat "$ROOT/ce_prog.txt" 2>&1)" = "to a program" ] \
 	orca_same "one key's rows: direct dispatch to its segment" \
 		"SELECT * FROM o WHERE a = 42;" "Gather Motion 1:1  (slice1; segments: 1)"
 
+	# A BRIN index is ORCA's where Cloudberry's ORCA takes it -- over values
+	# in the order of the table's pages, as Cloudberry's brin test has them --
+	# its statistics from the segments after VACUUM ANALYZE.
+	q 0 "CREATE TABLE wbr (a int, b int) DISTRIBUTED BY (a);
+	     INSERT INTO wbr SELECT x / 100, x % 100 FROM generate_series(1, 200000) x;
+	     CREATE INDEX wbr_a ON wbr USING brin (a) WITH (pages_per_range = 2);" >/dev/null
+	q 0 "VACUUM ANALYZE wbr;" >/dev/null
+	orca_same "a BRIN index over values in the order of the pages: a bitmap scan of it" \
+		"SELECT count(*), sum(b) FROM wbr WHERE a = 1;" "Bitmap Index Scan on wbr_a"
+
 	# A key of two columns: ORCA's core gives it no direct dispatch, and the
 	# Query's own conditions do, as the planner's; a row of constants is
 	# written on its segment alone.

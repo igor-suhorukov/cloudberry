@@ -2484,6 +2484,16 @@ shape "a merge join" "Merge Full Join" \
       "SELECT t1a.i, t1b.i FROM t1a FULL JOIN t1b ON t1a.i = t1b.i WHERE coalesce(t1a.i, t1b.i) < 20 OR t1a.i IS NULL OR t1b.i IS NULL ORDER BY 1, 2" \
       "SET gp.optimizer_enable_hashjoin = off"
 
+# A BRIN index, where Cloudberry's ORCA takes one: over values in the order
+# of the table's pages, as Cloudberry's brin test has them.  Over values in
+# no order its cost model prefers the table scan, as Cloudberry's does.
+q "CREATE TABLE t1br (a int, b int);
+   INSERT INTO t1br SELECT x / 100, x % 100 FROM generate_series(1, 200000) x;
+   CREATE INDEX t1br_a ON t1br USING brin (a) WITH (pages_per_range = 2);" > /dev/null
+q "VACUUM ANALYZE t1br;" > /dev/null
+shape "a BRIN index over values in the order of the pages: a bitmap scan of it" \
+      "Bitmap Index Scan on t1br_a" "SELECT count(*), sum(b) FROM t1br WHERE a = 1"
+
 shape "an index nested loop, its parameter set for each outer row" "Index Cond: (t1b.i = t1a.i)" \
       "SELECT t1a.i, t1b.k FROM t1a JOIN t1b ON t1a.i = t1b.i WHERE t1a.j = 1 ORDER BY 1" \
       "SET gp.optimizer_enable_hashjoin = off; SET gp.optimizer_enable_mergejoin = off"
