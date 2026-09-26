@@ -351,7 +351,30 @@ tools:
   while a segment's part is still prepared;
 - FTS probes from every coordinator, as Cloudberry's does: a mirror added
   while the coordinator runs is marked up once it streams, and a promoted
-  standby probes once `gp_activate_standby()` has made it the coordinator.
+  standby probes once `gp_activate_standby()` has made it the coordinator;
+- a materialized view's rows are on the segments, as a table's are
+  (`gp_refresh.c`): CREATE MATERIALIZED VIEW takes its DISTRIBUTED BY, or
+  the key CREATE TABLE AS would choose, and REFRESH -- CONCURRENTLY too --
+  fills each segment's copy.  A dynamic table follows; an incremental view
+  is refused on a cluster, where its delta maintenance would have to reach
+  the segments;
+- stock PostGIS on a cluster.  An extension's script runs on every node,
+  a query in it each node's own, its tables replicated and the
+  coordinator's copy of them emptied (`gp_ddl.c`); the same version of an
+  extension on every node, and of the GEOS, PROJ and GDAL PostGIS reports,
+  or CREATE and ALTER EXTENSION are refused; ST_Union in one stage, and
+  postgis_topology's functions on the coordinator, as the plan decided
+  (`gp_sql`'s `extscript.c`); and raster's settings sent to the segments.
+
+What PostgreSQL 19's own pg_dump and pg_dumpall write of a cluster reads
+back into another: the port's extensions' schemas, which a superuser may
+make; a materialized view with its distribution, filled by REFRESH; a
+tag's owner, by name; an incremental view, whose triggers are internal and
+made again by its label, and a dynamic table, whose job its label makes
+again; and a directory table, given a directory of its own, without its
+files, which pg_dump does not carry.  Neither PAX's aux tables, which are
+in `pg_ext_aux` now, nor an index's tags, which name the index by OID, are
+dumped.
 
 Cloudberry's management tools, gpMgmt, are installed beside the server
 (`gpMgmt/`, GPHOME the server's prefix), and run on PostgreSQL 19's own
@@ -412,6 +435,9 @@ gpinitsystem's, a mirror for each primary, and one of primaries alone that
 gpaddmirrors gives mirrors -- each tool checked by what the cluster says
 after it: a primary stopped, failed over from and recovered with pg_rewind
 and with pg_basebackup, a standby made and made the coordinator;
+`dump`, M7's, a cluster's pg_dumpall read back into another cluster, and
+one node's into another node; `postgis_cluster`, M7's, stock PostGIS on a
+coordinator and three segments, its answers checked against one node's;
 `singlenode` and
 `singlenode_isolation2`, Cloudberry's single-node suites with PostgreSQL 19's
 own regression tests; and PostGIS's regression suite.  Each is run under the

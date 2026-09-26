@@ -32,32 +32,32 @@
 # built on (16 cores, 32 threads), with every job at once; they order the
 # jobs and nothing else, and run.sh's summary gives each run's own.
 
-resgroup               -        557   ALONE=1
-greenplum              orca     449   PASSES=orca
-diskquota              regress  336   DQ_PARTS=regress
-greenplum              planner  283   PASSES=planner
-singlenode             orca     254   PASSES=orca
-pax                    -        157
-isolation2             planner  143   PASSES=planner
-isolation2             orca     143   PASSES=orca
-postgis_regress        orca     132   PASSES=orca
-diskquota              isolation2 131   DQ_PARTS=isolation2
-gpmgmt                 -        121
-singlenode             planner  101   PASSES=planner
-orca                   -         94
-cluster                -         89
-task                   -         68
-fts                    -         57
-dump                   -         30
-postgis_cluster        -         30
+resgroup               -        555   ALONE=1
+greenplum              orca     390   PASSES=orca
+diskquota              regress  339   DQ_PARTS=regress
+greenplum              planner  288   PASSES=planner
+singlenode             orca     258   PASSES=orca
+pax                    -        161
+isolation2             orca     146   PASSES=orca
+isolation2             planner  144   PASSES=planner
+postgis_regress        orca     138   PASSES=orca
+diskquota              isolation2 136   DQ_PARTS=isolation2
+gpmgmt                 -        115
+singlenode             planner  103   PASSES=planner
+orca                   -         92
+cluster                -         90
+task                   -         84
+fts                    -         53
+postgis_cluster        -         47
+dump                   -         45
 hooks                  -         32
-postgis_regress        planner   31   PASSES=planner
-singlenode_isolation2  orca      28   PASSES=orca
+postgis_regress        planner   32   PASSES=planner
+singlenode_isolation2  orca      29   PASSES=orca
 singlenode_isolation2  planner   25   PASSES=planner
-security               -         24
-postgis                -         24
+postgis                -         25
+security               -         22
 dirtable               -         17
 memprot                -         16
-grammar                -         15
-ao                     -         11
-dynamic                -         10
+grammar                -         14
+ao                     -         10
+dynamic                -          9
