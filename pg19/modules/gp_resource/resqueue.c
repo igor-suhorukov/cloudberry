@@ -548,22 +548,18 @@ statement_weight(void)
 }
 
 /*
- * On the coordinator, before a statement is dispatched: what the segments
- * are told of it, which gp_core sends them as it sends the statement when
- * it has changed -- the weight, which changes as the role or its queue does.
+ * On the coordinator, before a statement is dispatched: the weight the
+ * segments are told of, which changes as the role or its queue does; 0
+ * where queues or priorities are off (gp_resource.c's
+ * set_statement_setting()).
  */
-void
-ResQueuePriorityDispatch(void)
+int
+ResQueueDispatchWeight(void)
 {
-	char		value[32];
-
 	if (!IsResQueueEnabled() || !gp_resqueue_priority ||
 		!GpResourceIsCoordinator() || !IsTransactionState())
-		return;
-	snprintf(value, sizeof(value), "weight=%d", statement_weight());
-	if (gp_resource_statement == NULL || strcmp(gp_resource_statement, value) != 0)
-		(void) set_config_option("gp_resource.statement", value, PGC_USERSET,
-								 PGC_S_SESSION, GUC_ACTION_SET, true, 0, false);
+		return 0;
+	return statement_weight();
 }
 
 /* The statements this backend has begun, its own count of them */
@@ -584,7 +580,6 @@ ResQueuePriorityStart(void)
 		MyProcNumber < 0 || MyProcNumber >= MaxBackends)
 		return;
 	ResQueueBackendStart();		/* which forgets the statement at exit */
-	ResQueuePriorityDispatch();
 	weight = statement_weight();
 	me = my_proc();
 	me->stmt_session = -1;

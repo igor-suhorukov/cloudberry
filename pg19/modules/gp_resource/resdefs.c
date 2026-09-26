@@ -114,6 +114,7 @@
 #include "gp_core_api.h"
 #include "gp_dispatch.h"
 #include "gp_label.h"
+#include "gp_fault.h"
 #include "gp_resource.h"
 
 /* Cloudberry's predefined role that may manage groups (pg_authid.dat) */
@@ -820,10 +821,22 @@ options_from_array(ArrayType *arr)
 static void
 prevent_in_transaction_block(const char *stmt)
 {
+	/*
+	 * PreventInTransactionBlock(), of the CALL the statement became: not
+	 * top-level where a function ran it (GpResourceCallIsTopLevel()).
+	 */
 	if (IsTransactionBlock())
 		ereport(ERROR,
 				(errcode(ERRCODE_ACTIVE_SQL_TRANSACTION),
 				 errmsg("%s cannot run inside a transaction block", stmt)));
+	if (IsSubTransaction())
+		ereport(ERROR,
+				(errcode(ERRCODE_ACTIVE_SQL_TRANSACTION),
+				 errmsg("%s cannot run inside a subtransaction", stmt)));
+	if (!GpResourceCallIsTopLevel())
+		ereport(ERROR,
+				(errcode(ERRCODE_ACTIVE_SQL_TRANSACTION),
+				 errmsg("%s cannot be executed from a function", stmt)));
 }
 
 /* ------------------------------------------------------------------------- */
@@ -1365,6 +1378,12 @@ has_privs_of_manage_resource_groups(void)
 	return OidIsValid(role) && has_privs_of_role(GetUserId(), role);
 }
 
+bool
+ResDefsCanManageGroups(void)
+{
+	return has_privs_of_manage_resource_groups();
+}
+
 static ResGroupLimitType
 group_option_type(const char *defname)
 {
@@ -1616,6 +1635,9 @@ gp_resource_create_group(PG_FUNCTION_ARGS)
 
 	store_groups(role, lappend(defs, def));
 	ResGroupCreated(def);
+	/* where Cloudberry's CreateResourceGroup() has it: the group made, then */
+	if (IsResGroupEnabled())
+		(void) GP_FAULT("create_resource_group_fail");
 	PG_RETURN_VOID();
 }
 

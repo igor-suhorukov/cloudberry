@@ -103,8 +103,10 @@ USER root
 # and http:// locations; APR, libevent and libyaml are gpfdist's.  Protocol
 # buffers and liburing are PAX's: its files' footers and statistics are
 # protobuf messages, and its reader reads a file's groups through io_uring.
+# bison and flex are gp_resource's, for Cloudberry's io_limit grammar, which
+# a resource group's io_limit is read with.
 RUN apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
-        build-essential meson ninja-build pkg-config git ca-certificates \
+        build-essential meson ninja-build pkg-config git ca-certificates bison flex \
         libreadline-dev zlib1g-dev libicu-dev libssl-dev liblz4-dev libzstd-dev \
         libxml2-dev libxslt1-dev libxerces-c-dev \
         libcurl4-openssl-dev libapr1-dev libevent-dev libyaml-dev \

@@ -1371,6 +1371,105 @@ definition_list(GpRewrite *rw, int open, StringInfo arr)
  * at CREATE, and "withoutliststart" -- which CreateQueue() and AlterQueue()
  * read them by, and whose names a user may therefore not give an option.
  */
+/*
+ * A U&"..." identifier's name, as parser.c's str_udeescape() makes it: each
+ * \XXXX and \+XXXXXX the character it codes, a surrogate pair one, and \\ a
+ * backslash; then truncated, as an identifier is (a UESCAPE clause after it
+ * is not read).
+ */
+static char *
+udeescape_ident(GpRewrite *rw, int i)
+{
+	const char *in = rw->ts->toks[i].str;
+	StringInfoData buf;
+	pg_wchar	pair = 0;
+
+	initStringInfo(&buf);
+	while (*in)
+	{
+		pg_wchar	cp = 0;
+		int			ndigits;
+		unsigned char utf8[MAX_UNICODE_EQUIVALENT_STRING + 1];
+
+		if (in[0] != '\\')
+		{
+			appendStringInfoChar(&buf, *in++);
+			continue;
+		}
+		if (in[1] == '\\')
+		{
+			appendStringInfoChar(&buf, '\\');
+			in += 2;
+			continue;
+		}
+		if (in[1] == '+')
+		{
+			ndigits = 6;
+			in += 2;
+		}
+		else
+		{
+			ndigits = 4;
+			in += 1;
+		}
+		for (int k = 0; k < ndigits; k++)
+		{
+			if (!isxdigit((unsigned char) in[k]))
+				rw_syntax_error(rw, i);
+			cp = (cp << 4) + (isdigit((unsigned char) in[k]) ? in[k] - '0' :
+							  pg_ascii_tolower((unsigned char) in[k]) - 'a' + 10);
+		}
+		in += ndigits;
+		if (is_utf16_surrogate_first(cp))
+		{
+			pair = cp;
+			continue;
+		}
+		if (pair != 0)
+		{
+			if (!is_utf16_surrogate_second(cp))
+				rw_syntax_error(rw, i);
+			cp = surrogate_pair_to_codepoint(pair, cp);
+			pair = 0;
+		}
+		memset(utf8, 0, sizeof(utf8));
+		pg_unicode_to_server(cp, utf8);
+		appendStringInfoString(&buf, (char *) utf8);
+	}
+	truncate_identifier(buf.data, buf.len, true);
+	return buf.data;
+}
+
+/*
+ * A resource queue's or group's name where Cloudberry's grammar reads a
+ * ColId: an identifier, quoted or U&-quoted, or a keyword that is not
+ * reserved; anything else a syntax error at it, as Cloudberry's grammar
+ * gives ("CREATE RESOURCE GROUP group ..." is one).
+ */
+static char *
+rw_colid(GpRewrite *rw, int i)
+{
+	const GpTokens *ts = rw->ts;
+	int			kwnum;
+
+	if (i >= rw->last)
+		rw_syntax_error(rw, i);
+	if (ts->toks[i].code == GP_IDENT)
+		return ts->toks[i].str;
+	if (ts->toks[i].code == GP_UIDENT)
+		return udeescape_ident(rw, i);
+	if (ts->toks[i].kw != NULL)
+	{
+		kwnum = ScanKeywordLookup(ts->toks[i].kw, &ScanKeywords);
+		if (kwnum >= 0 &&
+			(ScanKeywordCategories[kwnum] == UNRESERVED_KEYWORD ||
+			 ScanKeywordCategories[kwnum] == COL_NAME_KEYWORD))
+			return pstrdup(ts->toks[i].kw);
+	}
+	rw_syntax_error(rw, i);
+	return NULL;				/* not reached */
+}
+
 static bool
 rw_resource_queue(GpRewrite *rw)
 {
@@ -1384,9 +1483,7 @@ rw_resource_queue(GpRewrite *rw)
 		!tok_is(ts, i + 1, "resource") || !tok_is(ts, i + 2, "queue"))
 		return false;
 	i += 3;
-	if (!tok_is_name(ts, i))
-		rw_syntax_error(rw, i);
-	name = tok_name(ts, i++);
+	name = rw_colid(rw, i++);
 
 	if (tok_is(ts, rw->first, "drop"))
 	{
@@ -1489,9 +1586,7 @@ rw_resource_group(GpRewrite *rw)
 	if (!tok_is(ts, i + 1, "resource") || !tok_is(ts, i + 2, "group"))
 		return false;
 	i += 3;
-	if (!tok_is_name(ts, i))
-		rw_syntax_error(rw, i);
-	name = tok_name(ts, i++);
+	name = rw_colid(rw, i++);
 
 	initStringInfo(&arr);
 	if (strcmp(verb, "create") == 0)
@@ -1561,6 +1656,7 @@ rw_comment_resource(GpRewrite *rw)
 	int			i = rw->first;
 	const char *kind;
 	const char *comment = NULL;
+	char	   *name;
 
 	if (!tok_is(ts, i, "comment") || !tok_is(ts, i + 1, "on") ||
 		!tok_is(ts, i + 2, "resource"))
@@ -1571,8 +1667,7 @@ rw_comment_resource(GpRewrite *rw)
 		kind = "group";
 	else
 		return false;
-	if (!tok_is_name(ts, i + 4))
-		rw_syntax_error(rw, i + 4);
+	name = rw_colid(rw, i + 4);
 	if (!tok_is(ts, i + 5, "is"))
 		rw_syntax_error(rw, i + 5);
 	if (tok_is_string(ts, i + 6))
@@ -1586,7 +1681,7 @@ rw_comment_resource(GpRewrite *rw)
 
 	rw_whole(rw);
 	appendStringInfo(&rw->body, "CALL gp_resource.comment_on_resource_%s(%s, %s)",
-					 kind, quote_literal_cstr(tok_name(ts, i + 4)), comment);
+					 kind, quote_literal_cstr(name), comment);
 	return true;
 }
 

@@ -27,6 +27,7 @@
 
 #include "postgres.h"
 
+#include "lib/stringinfo.h"
 #include "nodes/bitmapset.h"
 #include "nodes/parsenodes.h"
 #include "utils/timestamp.h"
@@ -197,6 +198,7 @@ extern void ResDefsRegisterProvider(void);
 extern List *ResQueueDefsLoad(void);	/* of ResQueueDef, by OID */
 extern List *ResGroupDefsLoad(void);	/* of ResGroupDef, by OID */
 extern ResQueueDef *ResQueueDefFind(List *defs, const char *name);
+extern bool ResDefsCanManageGroups(void);	/* superuser, or pg_manage_resource_groups */
 extern ResQueueDef *ResQueueDefByOid(List *defs, Oid oid);
 extern ResGroupDef *ResGroupDefFind(List *defs, const char *name);
 extern ResGroupDef *ResGroupDefByOid(List *defs, Oid oid);
@@ -243,7 +245,7 @@ extern int	ResQueueQueryBudgetKB(void);
 extern PGDLLEXPORT bool GpResQueueMemoryLimitInSync(const char *queuename);
 extern int	ResQueuePriorityLookup(const char *priority);
 extern void ResQueuePriorityStart(void);
-extern void ResQueuePriorityDispatch(void);
+extern int	ResQueueDispatchWeight(void);
 extern void ResQueuePriorityEnd(void);
 
 /* resgroup.c: the groups at run time */
@@ -265,6 +267,21 @@ extern void ResGroupAltered(ResGroupDef *old, ResGroupDef *def,
 							ResGroupLimitType type);
 extern void ResGroupDropped(Oid groupid);
 extern void ResGroupCheckDrop(Oid groupid, const char *name);
+extern char *ResGroupBitsetToCpuset(const Bitmapset *bms);
+extern char *ResGroupCpusetOfRole(const char *cpuset);
+extern void ResGroupCgroupInit(void);
+extern void ResGroupBackendStart(void);
+extern void ResGroupStatementStart(const char *query_string);
+extern void ResGroupExecutorStart(struct QueryDesc *queryDesc, bool toplevel);
+extern void ResGroupSegmentStatementStart(void);
+extern void ResGroupMovePoll(void);
+extern void ResGroupCheckTablespaceDrop(Oid tablespace);
+extern bool ResGroupDispatchStale(void);
+extern int	ResGroupQueryBudgetKB(void);
+extern void ResGroupDispatchInfo(StringInfo buf);
+
+/* gp_resource.c: is the CALL running now a statement of its own? */
+extern bool GpResourceCallIsTopLevel(void);
 
 /* gp_resource.c: a utility statement, before it runs */
 extern void ResourceManagerUtilityStart(struct PlannedStmt *pstmt,

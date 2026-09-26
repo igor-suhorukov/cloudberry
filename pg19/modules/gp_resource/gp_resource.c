@@ -48,10 +48,15 @@
 
 #include "access/xact.h"
 #include "catalog/namespace.h"
+#include "catalog/objectaccess.h"
 #include "catalog/pg_namespace.h"
 #include "catalog/pg_authid.h"
 #include "catalog/pg_proc.h"
+#include "catalog/pg_tablespace.h"
 #include "catalog/pg_type.h"
+#include "commands/explain.h"
+#include "commands/explain_format.h"
+#include "commands/explain_state.h"
 #include "executor/executor.h"
 #include "fmgr.h"
 #include "miscadmin.h"
@@ -396,6 +401,7 @@ gp_resource_shmem_startup(void)
 static ExecutorStart_hook_type prev_ExecutorStart = NULL;
 static ExecutorRun_hook_type prev_ExecutorRun = NULL;
 static ExecutorEnd_hook_type prev_ExecutorEnd = NULL;
+static explain_per_plan_hook_type prev_explain_per_plan_hook = NULL;
 
 /*
  * The budgets of the queries this backend has started and not ended, in kB:
@@ -458,40 +464,128 @@ statement_end(void)
 }
 
 /*
- * A query about to run: its queue's slot, where queues are on.  The memory
- * that gives it is its budget, which it runs with as its work_mem.
+ * What the segments are told of the statement the coordinator is about to
+ * dispatch, which gp_core sends with it when it has changed
+ * (gp_resource.statement): the weight its queue's priority gives it, the
+ * group it runs in, with the group's limits, and the memory it is given, in
+ * kB, which a segment's executor runs it with as its work_mem too.
+ */
+static int	statement_budget_kb = 0;	/* the budget it was last set with */
+
+static void
+set_statement_setting(int budget_kb)
+{
+	StringInfoData buf;
+	int			weight;
+
+	statement_budget_kb = budget_kb;
+	if (!GpResourceIsCoordinator() || !IsTransactionState())
+		return;
+	initStringInfo(&buf);
+	weight = ResQueueDispatchWeight();
+	if (weight > 0)
+		appendStringInfo(&buf, "weight=%d", weight);
+	ResGroupDispatchInfo(&buf);
+	if (budget_kb > 0)
+		appendStringInfo(&buf, "%sbudget=%d", buf.len > 0 ? " " : "", budget_kb);
+	if (gp_resource_statement == NULL || strcmp(gp_resource_statement, buf.data) != 0)
+		(void) set_config_option("gp_resource.statement", buf.data, PGC_USERSET,
+								 PGC_S_SESSION, GUC_ACTION_SET, true, 0, false);
+	pfree(buf.data);
+}
+
+/*
+ * gp_core's call before it tells the segments what changed: the setting
+ * again where the transaction was moved to another group since the
+ * statement set it (resgroup.c), so that what the statement sends the
+ * segments from here names the group it runs in now, as Cloudberry's
+ * dispatch does.
+ */
+static void
+gp_resource_before_sync(void)
+{
+	if (ResGroupDispatchStale())
+		set_statement_setting(statement_budget_kb);
+}
+
+static object_access_hook_type prev_object_access_hook = NULL;
+
+/*
+ * DROP TABLESPACE, as it drops: Cloudberry's check, just before its drop
+ * hook, that no group's io_limit names the tablespace (resgroup.c).
+ */
+static void
+gp_resource_object_access(ObjectAccessType access, Oid classId, Oid objectId,
+						  int subId, void *arg)
+{
+	if (prev_object_access_hook)
+		prev_object_access_hook(access, classId, objectId, subId, arg);
+	if (access == OAT_DROP && classId == TableSpaceRelationId &&
+		GpResourceIsDispatcher())
+		ResGroupCheckTablespaceDrop(objectId);
+}
+
+/* A segment's: the memory the coordinator gave the statement, in kB */
+static int
+dispatched_budget(void)
+{
+	const char *b = gp_resource_statement != NULL ?
+		strstr(gp_resource_statement, "budget=") : NULL;
+
+	return b != NULL ? atoi(b + strlen("budget=")) : 0;
+}
+
+/*
+ * A query about to run.  On the coordinator: the transaction's group, if
+ * this is its first statement, and a slot of it, or of the role's queue,
+ * where queues are on; the memory that gives it is its budget, which it runs
+ * with as its work_mem.  On a segment: the group and the budget the
+ * coordinator dispatched with it.
  */
 static void
 gp_resource_ExecutorStart(QueryDesc *queryDesc, int eflags)
 {
-	ResQueueBackendStart();
-	if (!(eflags & EXEC_FLAG_EXPLAIN_ONLY))
-	{
-		int			kb;
+	bool		toplevel = statement_depth == 0;
+	int			kb = 0;
 
+	ResQueueBackendStart();
+	ResGroupBackendStart();
+	if (GpResourceIsSegment())
+	{
+		if (toplevel)
+			ResGroupSegmentStatementStart();
+		kb = dispatched_budget();
+	}
+	else if (!(eflags & EXEC_FLAG_EXPLAIN_ONLY))
+	{
+		if (toplevel)
+			ResGroupStatementStart(queryDesc->sourceText);
+		ResGroupExecutorStart(queryDesc, toplevel);
 		ResQueueExecutorStart(queryDesc);
-		kb = ResQueueQueryBudgetKB();
+		kb = IsResGroupEnabled() ? ResGroupQueryBudgetKB() : ResQueueQueryBudgetKB();
 		/* what standard_ExecutorStart() logs of it on the coordinator */
-		if (gp_log_resqueue_memory && IsResQueueEnabled() &&
-			gp_resqueue_memory_policy != RESMANAGER_MEMORY_POLICY_NONE &&
-			GpResourceIsDispatcher())
+		if (GpResourceIsDispatcher() &&
+			((gp_log_resqueue_memory && IsResQueueEnabled() &&
+			  gp_resqueue_memory_policy != RESMANAGER_MEMORY_POLICY_NONE) ||
+			 (gp_log_resgroup_memory && IsResGroupEnabled() &&
+			  gp_resgroup_memory_policy != RESMANAGER_MEMORY_POLICY_NONE)))
 			ereport(NOTICE,
 					(errmsg("query requested %.0fKB of memory", (double) kb)));
-		if (kb > 0)
-		{
-			MemoryContext oldcxt = MemoryContextSwitchTo(TopMemoryContext);
-			QueryBudget *b = palloc(sizeof(QueryBudget));
+	}
+	if (kb > 0)
+	{
+		MemoryContext oldcxt = MemoryContextSwitchTo(TopMemoryContext);
+		QueryBudget *b = palloc(sizeof(QueryBudget));
 
-			b->queryDesc = queryDesc;
-			b->kb = kb;
-			query_budgets = lappend(query_budgets, b);
-			MemoryContextSwitchTo(oldcxt);
-		}
+		b->queryDesc = queryDesc;
+		b->kb = kb;
+		query_budgets = lappend(query_budgets, b);
+		MemoryContextSwitchTo(oldcxt);
 	}
 
 	/* before gp_core's hook dispatches it: what the segments are told */
-	if (statement_depth == 0)
-		ResQueuePriorityDispatch();
+	if (toplevel)
+		set_statement_setting(kb);
 
 	if (prev_ExecutorStart)
 		prev_ExecutorStart(queryDesc, eflags);
@@ -503,10 +597,45 @@ static void
 gp_resource_ExecutorEnd(QueryDesc *queryDesc)
 {
 	forget_budget(queryDesc);
+	/* a move of the transaction the statement's work put off */
+	ResGroupMovePoll();
 	if (prev_ExecutorEnd)
 		prev_ExecutorEnd(queryDesc);
 	else
 		standard_ExecutorEnd(queryDesc);
+}
+
+/*
+ * EXPLAIN ANALYZE's summary: the memory the statement was given, which
+ * Cloudberry's "Statement statistics" print where a memory policy is on --
+ * a query given none prints none.  In text alone, where Cloudberry's gives
+ * it in every format: PostgreSQL's own tests, which the singlenode suite
+ * runs under Cloudberry's memory policy, read plans in JSON, XML and YAML,
+ * and a text plan's line the suite takes out as it takes gp_orca's out.
+ * Before calling the hook of the module loaded earlier, so the line comes
+ * before gp_orca's "Optimizer", as Cloudberry's does.
+ */
+static void
+gp_resource_explain_per_plan(PlannedStmt *plannedstmt, IntoClause *into,
+							 ExplainState *es, const char *queryString,
+							 ParamListInfo params, QueryEnvironment *queryEnv)
+{
+	int			kb = 0;
+
+	if (es->analyze && es->summary && es->format == EXPLAIN_FORMAT_TEXT)
+	{
+		foreach_ptr(QueryBudget, b, query_budgets)
+		{
+			if (b->queryDesc->plannedstmt == plannedstmt)
+				kb = b->kb;
+		}
+	}
+	if (kb > 0)
+		appendStringInfo(es->str, "Memory used:  %dkB\n", kb);
+
+	if (prev_explain_per_plan_hook)
+		prev_explain_per_plan_hook(plannedstmt, into, es, queryString,
+								   params, queryEnv);
 }
 
 /*
@@ -726,21 +855,50 @@ resource_process_utility(PlannedStmt *pstmt, const char *queryString,
 	}
 }
 
+/*
+ * Is the CALL running now one a client sent, or the rewriting of one
+ * (CREATE RESOURCE GROUP is a CALL, gp_desugar.c), and not one a function
+ * ran?  The procedure asks, as PreventInTransactionBlock() asks isTopLevel.
+ */
+static bool call_toplevel = true;
+
+bool
+GpResourceCallIsTopLevel(void)
+{
+	return call_toplevel;
+}
+
 static void
 gp_resource_ProcessUtility(PlannedStmt *pstmt, const char *queryString,
 						   bool readOnlyTree, ProcessUtilityContext context,
 						   ParamListInfo params, QueryEnvironment *queryEnv,
 						   DestReceiver *dest, QueryCompletion *qc)
 {
+	bool		save_call_toplevel = call_toplevel;
+
+	if (IsA(pstmt->utilityStmt, CallStmt))
+		call_toplevel = context == PROCESS_UTILITY_TOPLEVEL;
 	PG_TRY();
 	{
 		statement_begin();
+		if (statement_depth == 1)
+		{
+			/* the transaction's group, or the one the coordinator's runs in */
+			ResQueueBackendStart();
+			ResGroupBackendStart();
+			if (GpResourceIsSegment())
+				ResGroupSegmentStatementStart();
+			else
+				ResGroupStatementStart(queryString);
+			set_statement_setting(0);
+		}
 		resource_process_utility(pstmt, queryString, readOnlyTree, context,
 								 params, queryEnv, dest, qc);
 	}
 	PG_FINALLY();
 	{
 		statement_end();
+		call_toplevel = save_call_toplevel;
 	}
 	PG_END_TRY();
 }
@@ -758,6 +916,8 @@ static Oid	role_queue_roles_oid = InvalidOid;
 static Oid	role_queue_authid_oid = InvalidOid;
 static Oid	role_group_roles_oid = InvalidOid;
 static Oid	role_group_authid_oid = InvalidOid;
+static Oid	activity_rsgid_oid = InvalidOid;
+static Oid	activity_rsgname_oid = InvalidOid;
 
 static Oid
 lookup_row_function(const char *name, const char *rowtype)
@@ -786,6 +946,8 @@ lookup_role_funcs(void)
 	role_queue_authid_oid = lookup_row_function("rolresqueue", "pg_authid");
 	role_group_roles_oid = lookup_row_function("rolresgroup", "pg_roles");
 	role_group_authid_oid = lookup_row_function("rolresgroup", "pg_authid");
+	activity_rsgid_oid = lookup_row_function("rsgid", "pg_stat_activity");
+	activity_rsgname_oid = lookup_row_function("rsgname", "pg_stat_activity");
 	role_funcs_lxid = MyProc->vxid.lxid;
 }
 
@@ -803,6 +965,12 @@ role_function_for(ParseNamespaceItem *nsitem, const char *name)
 	relname = get_rel_name(rte->relid);
 	if (relname == NULL)
 		return InvalidOid;
+	if (strcmp(name, "rsgid") == 0 || strcmp(name, "rsgname") == 0)
+	{
+		if (strcmp(relname, "pg_stat_activity") != 0)
+			return InvalidOid;
+		return strcmp(name, "rsgid") == 0 ? activity_rsgid_oid : activity_rsgname_oid;
+	}
 	if (strcmp(relname, "pg_roles") == 0)
 		return queue ? role_queue_roles_oid : role_group_roles_oid;
 	if (strcmp(relname, "pg_authid") == 0)
@@ -822,7 +990,7 @@ make_role_call(ParseState *pstate, ParseNamespaceItem *nsitem,
 	markNullableIfNeeded(pstate, var);
 	markVarForSelectPriv(pstate, var);
 
-	fexpr = makeFuncExpr(funcid, OIDOID, list_make1(var),
+	fexpr = makeFuncExpr(funcid, get_func_rettype(funcid), list_make1(var),
 						 InvalidOid, InvalidOid, COERCE_EXPLICIT_CALL);
 	fexpr->location = location;
 	return (Node *) fexpr;
@@ -847,7 +1015,8 @@ gp_resource_columnref_fallback(ParseState *pstate, ColumnRef *cref)
 	if (nfields > 3 || !IsA(last, String))
 		return NULL;
 	name = strVal(last);
-	if (strcmp(name, "rolresqueue") != 0 && strcmp(name, "rolresgroup") != 0)
+	if (strcmp(name, "rolresqueue") != 0 && strcmp(name, "rolresgroup") != 0 &&
+		strcmp(name, "rsgid") != 0 && strcmp(name, "rsgname") != 0)
 		return NULL;
 	lookup_role_funcs();
 
@@ -909,6 +1078,10 @@ gp_resource_deparse_function_as_column(FuncExpr *expr)
 		return "rolresqueue";
 	if (expr->funcid == role_group_roles_oid || expr->funcid == role_group_authid_oid)
 		return "rolresgroup";
+	if (expr->funcid == activity_rsgid_oid)
+		return "rsgid";
+	if (expr->funcid == activity_rsgname_oid)
+		return "rsgname";
 	if (prev_deparse_function_as_column_hook)
 		return prev_deparse_function_as_column_hook(expr);
 	return NULL;
@@ -948,6 +1121,8 @@ _PG_init(void)
 	ExecutorRun_hook = gp_resource_ExecutorRun;
 	prev_ExecutorEnd = ExecutorEnd_hook;
 	ExecutorEnd_hook = gp_resource_ExecutorEnd;
+	prev_explain_per_plan_hook = explain_per_plan_hook;
+	explain_per_plan_hook = gp_resource_explain_per_plan;
 
 	prev_columnref_fallback_hook = columnref_fallback_hook;
 	columnref_fallback_hook = gp_resource_columnref_fallback;
@@ -956,4 +1131,14 @@ _PG_init(void)
 
 	/* O26 carries a role's queue and group to its statement for the hook above */
 	*find_rendezvous_variable(CB_RESOURCE_RENDEZVOUS) = (void *) &gp_resource_scheduler;
+
+	/* the statement's setting, set again after a move (above) */
+	GpDispatchAddSyncCallback(gp_resource_before_sync);
+
+	prev_object_access_hook = object_access_hook;
+	object_access_hook = gp_resource_object_access;
+
+	/* the postmaster, before it forks anything: the groups' cgroups */
+	if (!IsUnderPostmaster && IsResGroupEnabled())
+		ResGroupCgroupInit();
 }

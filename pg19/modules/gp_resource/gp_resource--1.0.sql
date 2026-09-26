@@ -96,6 +96,15 @@ AS 'MODULE_PATHNAME', 'gp_resource_role_group'
 LANGUAGE C STABLE STRICT;
 
 /*
+ * rsgid and rsgname of a row of pg_stat_activity: the group its backend
+ * runs in or waits for, which Cloudberry's pg_stat_activity has as columns
+ * and O10 makes the names a call of (gp_resource.c); 0 and NULL for none.
+ */
+CREATE FUNCTION gp_resource.rsgid(pg_catalog.pg_stat_activity) RETURNS oid
+AS 'MODULE_PATHNAME', 'gp_resource_activity_rsgid'
+LANGUAGE C VOLATILE STRICT;
+
+/*
  * The backends that hold a queue's slot or wait for one, one row a backend
  * and queue as Cloudberry's pg_locks has its queues' locks; gp_toolkit's
  * views of the queues read these rows where Cloudberry's read pg_locks.
@@ -162,6 +171,37 @@ LANGUAGE C STABLE STRICT;
 
 CREATE VIEW pg_catalog.pg_resgroupcapability AS
 	SELECT * FROM pg_catalog.gp_resource_resgroupcapability();
+
+/*
+ * The groups' state (resgroup.c): Cloudberry's pg_resgroup_get_status(),
+ * of each group or the one asked for, pg_resgroup_get_status_kv('dump'),
+ * and pg_resgroup_move_query().
+ */
+CREATE FUNCTION pg_catalog.pg_resgroup_get_status(groupid oid,
+	OUT groupid oid, OUT num_running int4, OUT num_queueing int4,
+	OUT num_queued int8, OUT num_executed int8,
+	OUT total_queue_duration interval, OUT cpu_usage json,
+	OUT memory_usage json)
+RETURNS SETOF record
+AS 'MODULE_PATHNAME', 'gp_resource_resgroup_status'
+LANGUAGE C VOLATILE ROWS 1000;
+
+CREATE FUNCTION pg_catalog.pg_resgroup_get_status_kv(prop_in text,
+	OUT rsgid oid, OUT prop text, OUT value text)
+RETURNS SETOF record
+AS 'MODULE_PATHNAME', 'gp_resource_resgroup_status_kv'
+LANGUAGE C VOLATILE ROWS 1000;
+
+CREATE FUNCTION pg_catalog.pg_resgroup_move_query(pid int4, "group" text)
+RETURNS bool
+AS 'MODULE_PATHNAME', 'gp_resource_resgroup_move_query'
+LANGUAGE C VOLATILE;
+
+/* What the mover sends each segment: the session's backends there, moved */
+CREATE FUNCTION gp_resource.move_session(session int4, words text)
+RETURNS void
+AS 'MODULE_PATHNAME', 'gp_resource_move_session'
+LANGUAGE C VOLATILE STRICT;
 
 /* The queues' state, Cloudberry's functions and views of it */
 CREATE FUNCTION pg_catalog.pg_resqueue_status()
@@ -429,6 +469,136 @@ GRANT SELECT ON gp_toolkit.gp_resq_activity, gp_toolkit.gp_resq_activity_by_queu
 	gp_toolkit.gp_resq_priority_statement, gp_toolkit.gp_locks_on_resqueue,
 	gp_toolkit.gp_resqueue_status TO PUBLIC;
 
+/* rsgname, by the group's name (see rsgid above) */
+CREATE FUNCTION gp_resource.rsgname(a pg_catalog.pg_stat_activity) RETURNS text
+AS $$ SELECT rsgname::text FROM pg_catalog.pg_resgroup WHERE oid = gp_resource.rsgid(a) $$
+LANGUAGE sql VOLATILE STRICT;
+
+/******************************************************************************
+ * gp_toolkit's views of the groups, in Cloudberry's shapes
+ * (gp_toolkit--1.0.sql, with 1.6's memory_quota).
+ *****************************************************************************/
+
+CREATE VIEW gp_toolkit.gp_resgroup_config AS
+	SELECT G.oid		AS groupid
+		 , G.rsgname	AS groupname
+		 , T1.value		AS concurrency
+		 , T2.value		AS cpu_max_percent
+		 , T3.value		AS cpu_weight
+		 , T4.value		AS cpuset
+		 , T5.value		AS memory_quota
+		 , T6.value		AS min_cost
+		 , T7.value		AS io_limit
+	FROM pg_resgroup G
+		 JOIN pg_resgroupcapability T1 ON G.oid = T1.resgroupid AND T1.reslimittype = 1
+		 JOIN pg_resgroupcapability T2 ON G.oid = T2.resgroupid AND T2.reslimittype = 2
+		 JOIN pg_resgroupcapability T3 ON G.oid = T3.resgroupid AND T3.reslimittype = 3
+		 JOIN pg_resgroupcapability T5 ON G.oid = T5.resgroupid AND T5.reslimittype = 5
+		 JOIN pg_resgroupcapability T6 ON G.oid = T6.resgroupid AND T6.reslimittype = 6
+		 JOIN pg_resgroupcapability T7 ON G.oid = T7.resgroupid AND T7.reslimittype = 7
+		 LEFT JOIN pg_resgroupcapability T4 ON G.oid = T4.resgroupid AND T4.reslimittype = 4
+	;
+
+CREATE VIEW gp_toolkit.gp_resgroup_status AS
+	SELECT s.groupid, r.rsgname as groupname, s.num_running, s.num_queueing,
+		   s.num_queued, s.num_executed, s.total_queue_duration
+	FROM pg_resgroup_get_status(null) AS s,
+		 pg_resgroup AS r
+	WHERE s.groupid = r.oid;
+
+CREATE VIEW gp_toolkit.gp_resgroup_status_per_host AS
+	WITH es AS (
+		SELECT
+			rsgname
+		  , groupid
+		  , (json_each(cpu_usage)).key::smallint AS segment_id
+		  , (json_each(cpu_usage)).value AS cpu_usage
+		  , (json_each(memory_usage)).value AS memory_usage
+		FROM pg_resgroup_get_status(null) as s,
+			 pg_resgroup AS r
+		WHERE s.groupid = r.oid
+	)
+	SELECT
+		es.groupid
+	  , es.rsgname as groupname
+	  , c.hostname
+	  , round(avg((es.cpu_usage)::text::numeric), 2) AS cpu_usage
+	  , round(avg((es.memory_usage)::text::numeric), 2) AS memory_usage
+	FROM es
+	INNER JOIN pg_catalog.gp_segment_configuration AS c
+		ON es.segment_id = c.content
+		AND c.role = 'p'
+	GROUP BY
+		es.rsgname
+	  , es.groupid
+	  , c.hostname
+	;
+
+CREATE VIEW gp_toolkit.gp_resgroup_role
+AS
+	SELECT
+		pgr.rolname AS rrrolname,
+		pgrg.rsgname AS rrrsgname
+	FROM
+		pg_catalog.pg_roles pgr
+	JOIN
+		pg_catalog.pg_resgroup pgrg
+	ON
+		gp_resource.rolresgroup(pgr) = pgrg.oid
+	;
+
+GRANT SELECT ON gp_toolkit.gp_resgroup_config, gp_toolkit.gp_resgroup_status,
+	gp_toolkit.gp_resgroup_status_per_host, gp_toolkit.gp_resgroup_role
+	TO PUBLIC;
+
+/*
+ * gp_toolkit's view of the groups' I/O by host, Cloudberry's
+ * (gp_toolkit--1.0--1.1.sql), over __gp_resgroup_iostats() on the
+ * coordinator and on each segment; a group's name is the coordinator's.
+ */
+CREATE TYPE gp_toolkit.__iostats AS (segindex int4, rsgname text, groupid oid,
+	tablespace text, "rbps" int8, "wbps" int8, "riops" int8, "wiops" int8);
+
+CREATE FUNCTION gp_toolkit.__gp_resgroup_iostats()
+RETURNS SETOF gp_toolkit.__iostats
+AS 'MODULE_PATHNAME', 'gp_resource_resgroup_iostats'
+LANGUAGE C STRICT;
+
+/* PL/pgSQL, whose statements are planned as they run: where gp_sql rewrites gp_dist_random() */
+CREATE FUNCTION gp_toolkit.__gp_resgroup_iostats_on_segments()
+RETURNS SETOF gp_toolkit.__iostats
+LANGUAGE plpgsql VOLATILE
+AS $$
+BEGIN
+	RETURN QUERY SELECT (gp_toolkit.__gp_resgroup_iostats()).* FROM gp_dist_random('gp_id');
+END
+$$;
+
+GRANT EXECUTE ON FUNCTION gp_toolkit.__gp_resgroup_iostats(),
+	gp_toolkit.__gp_resgroup_iostats_on_segments() TO PUBLIC;
+
+CREATE VIEW gp_toolkit.gp_resgroup_iostats_per_host AS
+	WITH iostats AS (
+		SELECT stats.*, segs.hostname, r.rsgname AS name FROM
+		(SELECT * FROM gp_toolkit.__gp_resgroup_iostats()
+		 UNION ALL
+		 SELECT * FROM gp_toolkit.__gp_resgroup_iostats_on_segments()) AS stats
+		JOIN
+		(SELECT content, hostname FROM pg_catalog.gp_segment_configuration) AS segs
+		ON stats.segindex = segs.content
+		LEFT JOIN pg_catalog.pg_resgroup r ON r.oid = stats.groupid
+	)
+	SELECT coalesce(name::text, rsgname) AS rsgname,
+		   hostname,
+		   tablespace,
+		   avg("rbps")::bigint rbps,
+		   avg("wbps")::bigint wbps,
+		   avg("riops")::bigint riops,
+		   avg("wiops")::bigint wiops
+	FROM iostats GROUP BY (hostname, coalesce(name::text, rsgname), tablespace);
+
+GRANT SELECT ON gp_toolkit.gp_resgroup_iostats_per_host TO PUBLIC;
+
 /******************************************************************************
  * Memory protection (memprot.c): each session's memory on a node, as
  * Cloudberry's gp_internal_tools gives it, and gp_toolkit's two functions of
@@ -462,3 +632,75 @@ $$;
 
 GRANT EXECUTE ON FUNCTION gp_toolkit.session_state_memory_entries_f_on_master(),
 	gp_toolkit.session_state_memory_entries_f_on_segments() TO PUBLIC;
+
+/*
+ * gp_toolkit's views of the sessions' memory by group, Cloudberry's
+ * (gp_toolkit--1.0.sql): each session's memory on each node, from the
+ * session states of the memory protection above, beside its backend's row
+ * of pg_stat_activity on the coordinator -- rsgid, rsgname and sess_id
+ * through gp_resource's and gp_core's functions of the row, which the
+ * columns are the names of (O10) -- and each group's sum on each node.
+ */
+CREATE VIEW gp_toolkit.resgroup_session_level_memory_consumption AS
+WITH all_entries AS (
+	SELECT C.*
+	  FROM gp_toolkit.session_state_memory_entries_f_on_master() AS C (
+			segid int,
+			sessionid int,
+			vmem_mb int,
+			runaway_status int,
+			qe_count int,
+			active_qe_count int,
+			dirty_qe_count int,
+			runaway_vmem_mb int,
+			runaway_command_cnt int,
+			idle_start timestamp with time zone
+		  )
+	UNION ALL
+	SELECT C.*
+	  FROM gp_toolkit.session_state_memory_entries_f_on_segments() AS C (
+			segid int,
+			sessionid int,
+			vmem_mb int,
+			runaway_status int,
+			qe_count int,
+			active_qe_count int,
+			dirty_qe_count int,
+			runaway_vmem_mb int,
+			runaway_command_cnt int,
+			idle_start timestamp with time zone
+		  ))
+SELECT S.datname,
+	   M.sessionid AS sess_id,
+	   gp_resource.rsgid(S) AS rsgid,
+	   gp_resource.rsgname(S) AS rsgname,
+	   S.usename,
+	   S.query AS query,
+	   M.segid,
+	   M.vmem_mb,
+	   CASE WHEN M.runaway_status = 0 THEN false ELSE true END AS is_runaway,
+	   M.qe_count,
+	   M.active_qe_count,
+	   M.dirty_qe_count,
+	   M.runaway_vmem_mb,
+	   M.runaway_command_cnt,
+	   idle_start
+  FROM all_entries M LEFT OUTER JOIN
+	   pg_catalog.pg_stat_activity AS S
+	ON M.sessionid = gp_internal.activity_session(S);
+
+CREATE VIEW gp_toolkit.gp_resgroup_status_per_segment AS
+	SELECT v.rsgid AS groupid
+		 , v.rsgname AS groupname
+		 , v.segid AS segment_id
+		 , sum(v.vmem_mb) AS vmem_usage
+	FROM gp_toolkit.resgroup_session_level_memory_consumption AS v
+		 INNER JOIN pg_resgroup AS r
+			ON r.oid = v.rsgid
+	GROUP BY v.rsgname
+		   , v.rsgid
+		   , v.segid
+	ORDER BY v.rsgid, v.segid;
+
+GRANT SELECT ON gp_toolkit.resgroup_session_level_memory_consumption,
+	gp_toolkit.gp_resgroup_status_per_segment TO PUBLIC;

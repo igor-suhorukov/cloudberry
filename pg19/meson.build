@@ -307,6 +307,54 @@ gp_memprot = static_library('gp_memprot',
   pic: true,
 )
 
+# Cloudberry's cgroup code -- the cgroup file system of either version, a
+# resource group's cgroup, and the io_limit grammar -- compiled where it lies,
+# unmodified, for gp_resource's groups, which drive it through its table of
+# operations (resgroup.c), as Cloudberry's resgroup.c does; it reads
+# Cloudberry's resource manager through the include overlay
+# (compat/resgroup/).  It is Linux's, as Cloudberry's is.  GP_VERSION_NUM is
+# the project's version, as Cloudberry's configure makes it: it keeps the
+# cpuset controller optional.
+if host_machine.system() == 'linux'
+  bison = find_program('bison', required: true)
+  flex = find_program('flex', required: true)
+  cgroup_src = '../src/backend/utils/resgroup/'
+  io_limit_gram = custom_target('io_limit_gram',
+    input: cgroup_src + 'io_limit_gram.y',
+    output: ['io_limit_gram.c', 'io_limit_gram.h'],
+    command: [bison, '-d', '-Wno-deprecated', '-o', '@OUTPUT0@', '@INPUT@'],
+  )
+  io_limit_scanner = custom_target('io_limit_scanner',
+    input: cgroup_src + 'io_limit_scanner.l',
+    output: 'io_limit_scanner.c',
+    command: [flex, '-CF', '-p', '-p', '-o', '@OUTPUT@', '@INPUT@'],
+  )
+  gp_version = meson.project_version().split('-')[0].split('.')
+  gp_version_num = gp_version[0].to_int() * 10000 + gp_version[1].to_int() * 100 + gp_version[2].to_int()
+  gp_cgroup = static_library('gp_cgroup',
+    files(cgroup_src + 'cgroup.c',
+          cgroup_src + 'cgroup-ops-linux-v1.c',
+          cgroup_src + 'cgroup-ops-linux-v2.c',
+          cgroup_src + 'cgroup_io_limit.c'),
+    io_limit_gram, io_limit_scanner,
+    c_args: mod_c_args + ['-D_GNU_SOURCE', '-DGP_VERSION_NUM=' + gp_version_num.to_string()] +
+      cc.get_supported_arguments('-Wno-declaration-after-statement',
+                                 '-Wno-missing-prototypes',
+                                 '-Wno-shadow=compatible-local',
+                                 '-Wno-unused-variable',
+                                 '-Wno-unused-function'),
+    include_directories: [include_directories('compat/resgroup', 'modules/gp_resource', 'include'), pg_inc],
+    pic: true,
+  )
+else
+  gp_cgroup = static_library('gp_cgroup',
+    files('../src/backend/utils/resgroup/cgroup-ops-dummy.c'),
+    c_args: mod_c_args,
+    include_directories: [include_directories('compat/resgroup', 'modules/gp_resource', 'include'), pg_inc],
+    pic: true,
+  )
+endif
+
 modules = [
   {
     'name': 'gp_core', 'preload': true, 'extension': true, 'build': true,
@@ -442,7 +490,8 @@ modules = [
                      'modules/gp_resource/resqueue.c',
                      'modules/gp_resource/resgroup.c',
                      'modules/gp_resource/memprot.c'),
-    'link_with': [gp_memprot],
+    'link_with': [gp_cgroup, gp_memprot],
+    'include_directories': [include_directories('compat/resgroup')],
   },
   {
     # Preloaded: it registers a background worker and the authentication hook,
