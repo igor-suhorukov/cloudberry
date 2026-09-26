@@ -10,7 +10,8 @@
 #   skip  it needs what the port does not have yet: the rest of the line is
 #         the first of Cloudberry's statements it refuses, as the port says
 #   port  a test of the port's own, sql/ and expected/ here, run where the
-#         line is: what a skipped test would have left for the tests after it
+#         line is: what a skipped test would have left for the tests after it,
+#         or a setting the schedule gives the tests of a group
 #   group the tests after it, to the next such line, are a group: each group
 #         has a cluster of its own, test_setup and gp_setup first, and the
 #         groups of a pass run side by side, each in the schedule's order.
@@ -133,6 +134,7 @@ run  bfv_joins
 run  bfv_subquery
 run  qp_misc
 group g4
+port autovacuum_off
 run  qp_dml_joins
 run  qp_select
 run  partition_prune_opfamily
@@ -163,6 +165,7 @@ run  uao_compaction/full_eof_truncate
 run  uao_compaction/full_threshold
 run  uao_compaction/index
 group g5
+port autovacuum_off
 run  uao_compaction/index2
 run  uaocs_compaction/index
 run  uaocs_compaction/alter_table_analyze
@@ -192,6 +195,7 @@ run  uao_ddl/blocksize_row
 run  uao_ddl/compresstype_column
 run  uao_ddl/alter_ao_table_setdefault_column
 group g6
+port autovacuum_off
 run  uao_ddl/blocksize_column
 run  uao_ddl/temp_on_commit_delete_rows_row
 run  uao_ddl/temp_on_commit_delete_rows_column
