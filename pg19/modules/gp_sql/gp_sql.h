@@ -180,6 +180,9 @@ extern void GpDirTableCheckDML(struct QueryDesc *queryDesc);
 /* TRUNCATE would orphan every file a directory table has. */
 extern void GpDirTableCheckTruncate(TruncateStmt *stmt);
 
+/* Nor can one go to another tablespace, whose files would stay behind. */
+extern void GpDirTableCheckMove(Node *parsetree);
+
 /* A directory table is being dropped: its files follow it at commit. */
 extern void GpDirTableDropped(Oid relid);
 

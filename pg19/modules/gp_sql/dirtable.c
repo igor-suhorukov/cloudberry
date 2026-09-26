@@ -73,11 +73,15 @@
 #include <sys/stat.h>
 #include <unistd.h>
 
+#include "access/heapam.h"
+#include "access/table.h"
+#include "access/tableam.h"
 #include "access/xact.h"
 #include "access/xlog.h"
 #include "access/xlog_internal.h"
 #include "access/xloginsert.h"
 #include "access/xlogreader.h"
+#include "catalog/catalog.h"
 #include "catalog/namespace.h"
 #include "catalog/objectaddress.h"
 #include "catalog/pg_class.h"
@@ -85,6 +89,7 @@
 #include "common/extmarkfile.h"
 #include "common/file_perm.h"
 #include "common/file_utils.h"
+#include "commands/tablespace.h"
 #include "common/relpath.h"
 #include "executor/executor.h"
 #include "executor/spi.h"
@@ -96,6 +101,7 @@
 #include "storage/fd.h"
 #include "utils/acl.h"
 #include "utils/builtins.h"
+#include "utils/fmgroids.h"
 #include "utils/fmgrprotos.h"
 #include "utils/lsyscache.h"
 #include "utils/memutils.h"
@@ -569,17 +575,113 @@ dirtable_compute_location(Oid relid)
 /*
  * Where this relation keeps its files, or NULL if it is not a directory
  * table.  The label is what says it is one.
+ *
+ * A table whose files are this node's has them where
+ * dirtable_compute_location() says, in its database's directory of its
+ * tablespace, whatever path the label holds: that is the path in the
+ * database the table was made in, and a copy of that database (CREATE
+ * DATABASE ... TEMPLATE) has the template's label, and a database moved
+ * (ALTER DATABASE ... SET TABLESPACE) the one it had.  The files go with the
+ * database (gp_core's gp_dbcopy.c), and the table cannot go to another
+ * tablespace without them (GpDirTableCheckMove()).  A storage server's
+ * files are where the label says.
  */
 char *
 GpDirTableLocation(Oid relid)
 {
 	ObjectAddress addr;
+	char	   *location;
 
 	if (get_rel_relkind(relid) != RELKIND_RELATION)
 		return NULL;
 
 	ObjectAddressSet(addr, RelationRelationId, relid);
-	return GpLabelGet(&addr, GP_LABEL_directory_location);
+	location = GpLabelGet(&addr, GP_LABEL_directory_location);
+	if (location == NULL || GpLabelGet(&addr, GP_LABEL_storage_server) != NULL)
+		return location;
+	return dirtable_compute_location(relid);
+}
+
+/*
+ * ALTER TABLE ... SET TABLESPACE of a directory table, or ALTER TABLE ALL IN
+ * TABLESPACE of the one it is in: refused, as Cloudberry refuses the first
+ * and passes a directory table over in the second.  Its files are in its
+ * database's directory of its tablespace, and would stay behind.
+ */
+void
+GpDirTableCheckMove(Node *parsetree)
+{
+	if (IsA(parsetree, AlterTableStmt))
+	{
+		AlterTableStmt *stmt = (AlterTableStmt *) parsetree;
+		ListCell   *lc;
+		Oid			relid;
+
+		foreach(lc, stmt->cmds)
+		{
+			if (((AlterTableCmd *) lfirst(lc))->subtype == AT_SetTableSpace)
+				break;
+		}
+		if (lc == NULL)
+			return;
+
+		relid = RangeVarGetRelid(stmt->relation, NoLock, true);
+		if (OidIsValid(relid) && GpDirTableLocation(relid) != NULL)
+			ereport(ERROR,
+					(errcode(ERRCODE_WRONG_OBJECT_TYPE),
+					 errmsg("ALTER action SET TABLESPACE cannot be performed on relation \"%s\"",
+							get_rel_name(relid)),
+					 errdetail("This operation is not supported for directory tables.")));
+	}
+	else if (IsA(parsetree, AlterTableMoveAllStmt))
+	{
+		AlterTableMoveAllStmt *stmt = (AlterTableMoveAllStmt *) parsetree;
+		Oid			spc;
+		List	   *roles = NIL;
+		ListCell   *lc;
+		Relation	rel;
+		ScanKeyData key;
+		TableScanDesc scan;
+		HeapTuple	tup;
+
+		if (stmt->objtype != OBJECT_TABLE)
+			return;
+		spc = get_tablespace_oid(stmt->orig_tablespacename, true);
+		if (!OidIsValid(spc))
+			return;
+
+		/* the tables AlterTableMoveAll() would move */
+		if (spc == MyDatabaseTableSpace)
+			spc = InvalidOid;
+		foreach(lc, stmt->roles)
+			roles = lappend_oid(roles,
+								get_rolespec_oid(lfirst(lc), false));
+
+		rel = table_open(RelationRelationId, AccessShareLock);
+		ScanKeyInit(&key, Anum_pg_class_reltablespace, BTEqualStrategyNumber,
+					F_OIDEQ, ObjectIdGetDatum(spc));
+		scan = table_beginscan_catalog(rel, 1, &key);
+		while ((tup = heap_getnext(scan, ForwardScanDirection)) != NULL)
+		{
+			Form_pg_class form = (Form_pg_class) GETSTRUCT(tup);
+
+			if (form->relkind != RELKIND_RELATION ||
+				IsCatalogNamespace(form->relnamespace) ||
+				IsToastNamespace(form->relnamespace) ||
+				(roles != NIL && !list_member_oid(roles, form->relowner)) ||
+				GpDirTableLocation(form->oid) == NULL)
+				continue;
+
+			ereport(ERROR,
+					(errcode(ERRCODE_WRONG_OBJECT_TYPE),
+					 errmsg("cannot move directory table \"%s\" to another tablespace",
+							NameStr(form->relname)),
+					 errdetail("A directory table's files stay in the tablespace it was made in."),
+					 errhint("Move the other tables one by one.")));
+		}
+		table_endscan(scan);
+		table_close(rel, AccessShareLock);
+	}
 }
 
 /*
@@ -893,12 +995,20 @@ GpDirTableClaim(Oid relid)
 void
 GpDirTableRestored(Oid relid)
 {
-	char	   *location = GpDirTableLocation(relid);
+	char	   *location;
 	Oid			reltablespace;
 	char	   *server;
 	char	   *own;
 	ObjectAddress addr;
 
+	/*
+	 * The label as it was written, not GpDirTableLocation(), which gives a
+	 * table whose files are this node's the directory it has here.
+	 */
+	if (get_rel_relkind(relid) != RELKIND_RELATION)
+		return;
+	ObjectAddressSet(addr, RelationRelationId, relid);
+	location = GpLabelGet(&addr, GP_LABEL_directory_location);
 	if (location == NULL)
 		return;
 	reltablespace = get_rel_tablespace(relid);
@@ -910,7 +1020,6 @@ GpDirTableRestored(Oid relid)
 	if (strcmp(location, own) == 0)
 		return;
 
-	ObjectAddressSet(addr, RelationRelationId, relid);
 	GpLabelSet(&addr, GP_LABEL_directory_location, NULL);
 	GpLabelSet(&addr, GP_LABEL_storage_server, NULL);
 	(void) GpDirTableClaim(relid);

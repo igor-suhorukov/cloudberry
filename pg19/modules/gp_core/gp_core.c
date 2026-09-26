@@ -46,6 +46,7 @@
 #include "cb_module.h"
 #include "gp_cluster.h"
 #include "gp_core_api.h"
+#include "gp_dbcopy.h"
 #include "gp_dispatch.h"
 #include "gp_dtx.h"
 #include "gp_fault.h"
@@ -190,6 +191,15 @@ _PG_init(void)
 	 * segment still working for a statement that has already failed here.
 	 */
 	GpDispatchInit();
+
+	/*
+	 * A database copied or moved takes its modules' directories with it
+	 * (gp_dbcopy.c), and gp_core's WAL resource manager, which logs the
+	 * copies.  Before DDL dispatch, so that each node copies them inside the
+	 * statement it runs, before the coordinator dispatches it; and on one
+	 * node too.
+	 */
+	GpDbcopyInit();
 
 	/*
 	 * DDL dispatch, with R1 giving every object the coordinator's OID.  Only

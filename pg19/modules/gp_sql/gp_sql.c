@@ -1695,6 +1695,9 @@ gp_sql_ProcessUtility(PlannedStmt *pstmt, const char *queryString,
 		return;
 	}
 
+	/* A directory table stays in its tablespace, as its files do. */
+	GpDirTableCheckMove(parsetree);
+
 	/*
 	 * ALTER TABLE ... SET DISTRIBUTED: the new policy, carried out
 	 * (distribution.c).
