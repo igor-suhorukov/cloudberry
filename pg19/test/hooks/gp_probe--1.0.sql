@@ -112,3 +112,9 @@ CREATE FUNCTION gp_probe.exercise_context(kind text, chunk_size int, nchunks int
                                           first_block int DEFAULT 0)
   RETURNS bigint
   AS 'MODULE_PATHNAME', 'gp_probe_exercise_context' LANGUAGE C STRICT;
+-- O33: count what xact_commit_recorded_hook is given, and read a count --
+-- calls, with_xid, committed or current.
+CREATE FUNCTION gp_probe.arm_commits(on_off boolean) RETURNS void
+  AS 'MODULE_PATHNAME', 'gp_probe_arm_commits' LANGUAGE C STRICT;
+CREATE FUNCTION gp_probe.commits(kind text) RETURNS bigint
+  AS 'MODULE_PATHNAME', 'gp_probe_commits' LANGUAGE C STRICT;

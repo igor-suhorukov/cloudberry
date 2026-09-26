@@ -1017,6 +1017,46 @@ probe_tablespace_location_drop(const char *linkloc, Oid tablespaceoid, bool redo
 }
 
 /* ------------------------------------------------------------------------- */
+/* O33: xact_commit_recorded_hook                                            */
+/* ------------------------------------------------------------------------- */
+
+/*
+ * What the hook was given while armed: how many commits, how many of them
+ * with an XID, how many the clog already had committed, and how many were
+ * still this backend's own transaction.  And gp_probe.commit_recorded_sleep,
+ * milliseconds to wait in the hook, so that another session can look at the
+ * transaction meanwhile.
+ */
+static bool arm_commits = false;
+static int	probe_commit_sleep = 0;
+static struct
+{
+	int64		calls;
+	int64		with_xid;
+	int64		committed;
+	int64		current;
+}			commits;
+
+static void
+probe_commit_recorded(TransactionId latestXid)
+{
+	if (arm_commits)
+	{
+		commits.calls++;
+		if (TransactionIdIsValid(latestXid))
+		{
+			commits.with_xid++;
+			if (TransactionIdDidCommit(latestXid))
+				commits.committed++;
+			if (TransactionIdIsCurrentTransactionId(latestXid))
+				commits.current++;
+		}
+	}
+	if (probe_commit_sleep > 0)
+		pg_usleep(probe_commit_sleep * 1000L);
+}
+
+/* ------------------------------------------------------------------------- */
 /* O25: memory_block_alloc_hook                                              */
 /* ------------------------------------------------------------------------- */
 
@@ -1157,6 +1197,8 @@ PG_FUNCTION_INFO_V1(gp_probe_exercise_context);
 PG_FUNCTION_INFO_V1(gp_probe_arm_file_events);
 PG_FUNCTION_INFO_V1(gp_probe_arm_extend_fails);
 PG_FUNCTION_INFO_V1(gp_probe_file_events);
+PG_FUNCTION_INFO_V1(gp_probe_arm_commits);
+PG_FUNCTION_INFO_V1(gp_probe_commits);
 
 Datum
 gp_probe_reset(PG_FUNCTION_ARGS)
@@ -1792,6 +1834,33 @@ gp_probe_exercise_context(PG_FUNCTION_ARGS)
 	PG_RETURN_INT64(result);
 }
 
+/* O33: count what the hook is given from now on, or stop counting */
+Datum
+gp_probe_arm_commits(PG_FUNCTION_ARGS)
+{
+	arm_commits = PG_GETARG_BOOL(0);
+	if (arm_commits)
+		memset(&commits, 0, sizeof(commits));
+	PG_RETURN_VOID();
+}
+
+/* O33: one of the counts: calls, with_xid, committed or current */
+Datum
+gp_probe_commits(PG_FUNCTION_ARGS)
+{
+	char	   *kind = text_to_cstring(PG_GETARG_TEXT_PP(0));
+
+	if (strcmp(kind, "calls") == 0)
+		PG_RETURN_INT64(commits.calls);
+	if (strcmp(kind, "with_xid") == 0)
+		PG_RETURN_INT64(commits.with_xid);
+	if (strcmp(kind, "committed") == 0)
+		PG_RETURN_INT64(commits.committed);
+	if (strcmp(kind, "current") == 0)
+		PG_RETURN_INT64(commits.current);
+	elog(ERROR, "unknown commit count \"%s\"", kind);
+}
+
 /* O21: count relations' file events, or stop counting and forget them */
 Datum
 gp_probe_arm_file_events(PG_FUNCTION_ARGS)
@@ -1871,6 +1940,16 @@ _PG_init(void)
 	tablespace_location_hook = probe_tablespace_location;
 	tablespace_location_drop_hook = probe_tablespace_location_drop;
 	memory_block_alloc_hook = probe_memory_block;
+
+	DefineCustomIntVariable("gp_probe.commit_recorded_sleep",
+							"O33: milliseconds a commit waits in xact_commit_recorded_hook.",
+							NULL,
+							&probe_commit_sleep,
+							0, 0, 60000,
+							PGC_USERSET,
+							GUC_UNIT_MS,
+							NULL, NULL, NULL);
+	xact_commit_recorded_hook = probe_commit_recorded;
 
 	/*
 	 * O23: entries of a database directory named by a number and "_probe"

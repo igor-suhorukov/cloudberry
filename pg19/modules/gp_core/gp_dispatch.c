@@ -2653,6 +2653,28 @@ gang_commit_second_phase(void)
 	dtx_forget();
 }
 
+/*
+ * O33: the second phase, once the coordinator's commit is recorded and
+ * before its transaction ends for the other sessions -- as Cloudberry's
+ * coordinator notifies the segments before it ends its own
+ * (notifyCommittedDtxTransaction(), before ProcArrayEndTransaction() in its
+ * xact.c).  So a session whose snapshot sees the transaction committed finds
+ * its parts committed on the segments too, rather than waiting there for a
+ * second phase on its way -- or held, as a test holds it
+ * (dtm_broadcast_commit_prepared).  XACT_EVENT_COMMIT comes only after the
+ * transaction has ended for the others.
+ */
+static xact_commit_recorded_hook_type prev_commit_recorded_hook = NULL;
+
+static void
+dispatch_commit_recorded(TransactionId latestXid)
+{
+	if (prev_commit_recorded_hook)
+		prev_commit_recorded_hook(latestXid);
+	if (dtx_nprepared > 0)
+		gang_commit_second_phase();
+}
+
 static void
 dispatch_xact_callback(XactEvent event, void *arg)
 {
@@ -2788,8 +2810,8 @@ dispatch_xact_callback(XactEvent event, void *arg)
 			/* sent at PRE_COMMIT; the memory goes with the transaction */
 			labels_pending = NIL;
 			gang_forget_snapshot();
-			if (dtx_nprepared > 0)
-				gang_commit_second_phase();
+			/* the second phase is done already (dispatch_commit_recorded()) */
+			Assert(dtx_nprepared == 0);
 			break;
 
 		default:
@@ -4525,4 +4547,6 @@ GpDispatchInit(void)
 
 	RegisterXactCallback(dispatch_xact_callback, NULL);
 	RegisterSubXactCallback(dispatch_subxact_callback, NULL);
+	prev_commit_recorded_hook = xact_commit_recorded_hook;
+	xact_commit_recorded_hook = dispatch_commit_recorded;
 }

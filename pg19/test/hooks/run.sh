@@ -1308,6 +1308,61 @@ is "a block under the limit is taken meanwhile" o25_refuse small 100000
 is "and the backend goes on, the hook unset" o25_refuse after 3000000
 
 ###############################################################################
+echo "O33 xact_commit_recorded_hook: a commit recorded, before the others see it"
+###############################################################################
+# In the committing backend: called once a commit is in the clog, with the
+# transaction's XID, which is still this backend's own, and with none where
+# the transaction had no XID; once per commit, not for a subtransaction's.
+# Each count has the commit of the statement that armed it too, which has
+# no XID.
+session o33 <<'SQL'
+SELECT gp_probe.arm_commits(true);
+CREATE TABLE o33_a (a int);
+SELECT 'calls=' || gp_probe.commits('calls');
+SELECT 'with_xid=' || gp_probe.commits('with_xid');
+SELECT 'committed=' || gp_probe.commits('committed');
+SELECT 'current=' || gp_probe.commits('current');
+SELECT gp_probe.arm_commits(true);
+BEGIN;
+SAVEPOINT s;
+INSERT INTO o33_a VALUES (1);
+RELEASE s;
+INSERT INTO o33_a VALUES (2);
+COMMIT;
+SELECT 'subxact_calls=' || gp_probe.commits('calls');
+SELECT gp_probe.arm_commits(true);
+SELECT 1;
+SELECT 'readonly_calls=' || gp_probe.commits('calls');
+SELECT 'readonly_with_xid=' || gp_probe.commits('with_xid');
+SQL
+is "called once a commit is in the clog" o33 calls 2
+is "with the transaction's XID, committed there" o33 committed 1
+is "which is still this backend's own" o33 current 1
+is "once for a transaction with a subtransaction" o33 subxact_calls 2
+is "and for one with no XID, given none" o33 readonly_with_xid 0
+
+# Another session, while a commit waits in the hook: the transaction is in
+# progress for it -- what it made is not there yet -- and there once the
+# hook has returned.  The SET's own commit waits in the hook first.
+"$PSQL" -X -q -d postgres -c "SET gp_probe.commit_recorded_sleep = 3000" \
+	-c "CREATE TABLE o33_b (a int)" > "$WORK/o33_b.out" 2>&1 &
+o33_pid=$!
+seen=
+for _ in $(seq 100); do
+	sleep 0.1
+	seen=$("$PSQL" -X -q -t -A -d postgres -c "SELECT count(*) FROM pg_stat_activity WHERE query = 'CREATE TABLE o33_b (a int)'")
+	[ "$seen" = 1 ] && break
+done
+during=$("$PSQL" -X -q -t -A -d postgres -c "SELECT to_regclass('o33_b') IS NULL")
+wait "$o33_pid"
+after=$("$PSQL" -X -q -t -A -d postgres -c "SELECT to_regclass('o33_b') IS NOT NULL")
+[ "$seen" = 1 ] && [ "$during" = t ] \
+	&& ok "another session does not see the transaction while the hook runs" \
+	|| notok "another session should not see the transaction while the hook runs" "seen [$seen] during [$during] $(cat "$WORK/o33_b.out")"
+[ "$after" = t ] && ok "and sees it once the hook has returned" \
+	|| notok "another session should see the transaction after the hook" "after [$after]"
+
+###############################################################################
 echo "O23 extension marks: pg_checksums passes over what an extension marked, pg_upgrade carries it"
 ###############################################################################
 # Last, because it stops the server: pg_checksums reads a stopped cluster.

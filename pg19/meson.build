@@ -178,6 +178,7 @@ cb_probe(void)
 	star_expansion_filter_hook = NULL;		/* O28 */
 	tablespace_location_hook = NULL;		/* O32 */
 	tablespace_location_drop_hook = NULL;	/* O32 */
+	xact_commit_recorded_hook = NULL;		/* O33 */
 
 	(void) LastNewOidWasPreassigned;					/* R1  */
 	(void) XactAdoptCurrentXids;						/* R2  */

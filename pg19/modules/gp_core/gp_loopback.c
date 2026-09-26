@@ -592,6 +592,23 @@ loopback_second_phase(bool commit)
 	parts = NIL;
 }
 
+/*
+ * O33: the loopback's second phase, as the segments' (gp_dispatch.c): once
+ * the commit is recorded, and before the transaction ends for the other
+ * sessions, which see it in progress until its part in the other database
+ * is committed too.
+ */
+static xact_commit_recorded_hook_type prev_commit_recorded_hook = NULL;
+
+static void
+loopback_commit_recorded(TransactionId latestXid)
+{
+	if (prev_commit_recorded_hook)
+		prev_commit_recorded_hook(latestXid);
+	if (parts != NIL)
+		loopback_second_phase(true);
+}
+
 static void
 loopback_xact_callback(XactEvent event, void *arg)
 {
@@ -609,8 +626,8 @@ loopback_xact_callback(XactEvent event, void *arg)
 			break;
 		case XACT_EVENT_COMMIT:
 			writes = NIL;
-			if (parts != NIL)
-				loopback_second_phase(true);
+			/* the second phase is done already (loopback_commit_recorded()) */
+			Assert(parts == NIL);
 			break;
 		case XACT_EVENT_ABORT:
 			writes = NIL;
@@ -802,4 +819,6 @@ GpLoopbackInit(void)
 
 	RegisterXactCallback(loopback_xact_callback, NULL);
 	RegisterSubXactCallback(loopback_subxact_callback, NULL);
+	prev_commit_recorded_hook = xact_commit_recorded_hook;
+	xact_commit_recorded_hook = loopback_commit_recorded;
 }
