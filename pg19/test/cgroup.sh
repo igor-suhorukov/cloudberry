@@ -67,9 +67,9 @@ if [ -f "$cg/cgroup.controllers" ] && [ -w "$cg/cgroup.procs" ] &&
 			done
 		done
 		mkdir -p "$cg/jobs" &&
-		echo "+cpu" > "$cg/jobs/cgroup.subtree_control" &&
+		echo "+cpu +memory" > "$cg/jobs/cgroup.subtree_control" &&
 		chown -R "$user" "$cg/jobs" ||
-			echo "cgroup.sh: could not set up $cg/jobs; run.sh will not say the CPU time each job took" >&2
+			echo "cgroup.sh: could not set up $cg/jobs; run.sh will not say the CPU time and memory each job took" >&2
 	else
 		echo "cgroup.sh: could not turn the controllers on in $cg; the resgroup suite will skip" >&2
 	fi

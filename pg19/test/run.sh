@@ -46,9 +46,23 @@
 # job runs in a cgroup of its own under it, and the summary says the CPU
 # time each took -- its servers' too, but for those of a resource group
 # test, which move into their cgroup parent's groups, whose time the summary
-# gives beside.  Each job's cgroup weighs as many seconds as "jobs" says the
-# job takes, so that where the jobs want more CPU than there is, the long
-# ones, which bound the run, are the last to wait for it.
+# gives beside -- and the most memory it held.  Each job's cgroup weighs as
+# many seconds as "jobs" says the job takes, so that where the jobs want more
+# CPU than there is, the long ones, which bound the run, are the last to
+# wait for it.
+#
+# And a job starts only while there is memory for it.  Every server a job
+# makes keeps its data, its WAL and its shared buffers in memory -- /tmp is a
+# tmpfs in the tests service -- and all of the jobs at once took more than
+# the machine had: the kernel killed what it chose, the desktop's processes
+# among them.  So "jobs" says the most memory each job holds, MEM= in
+# megabytes (a job it says nothing of is given MEM_DEFAULT, 2048), and a job
+# is started while the running jobs' and its own come to no more than the
+# memory there is, less MEM_RESERVE (4096) -- the container's limit
+# (memory.max, which the tests service sets) or, where it has none, what the
+# machine had free as the run began -- and while what is in use now leaves
+# room for it; the first job always.  A job there is not room for waits, and
+# the shorter ones after it that fit start before it.
 set -u
 
 here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -118,6 +132,46 @@ trap 'exit 130' INT TERM
 max="${JOBS:-${#order[@]}}"
 [ "$max" -ge 1 ] 2> /dev/null || max=1
 
+# The memory the jobs may have, in megabytes: the container's limit, or what
+# the machine has free now; and what is in use of it now.
+mem_limited=0
+if [ -r /sys/fs/cgroup/memory.max ] && [ "$(cat /sys/fs/cgroup/memory.max)" != max ]; then
+	mem_limited=1
+	mem_budget=$(( $(cat /sys/fs/cgroup/memory.max) / 1048576 ))
+else
+	mem_budget=$(awk '$1 == "MemAvailable:" { print int($2 / 1024) }' /proc/meminfo)
+fi
+mem_reserve="${MEM_RESERVE:-4096}"
+mem_in_use() {
+	if [ "$mem_limited" -eq 1 ]; then
+		# Less the files' pages the kernel drops first, as docker stats
+		# counts it.
+		awk -v c="$(cat /sys/fs/cgroup/memory.current)" \
+			'$1 == "inactive_file" { print int((c - $2) / 1048576) }' /sys/fs/cgroup/memory.stat
+	else
+		awk '$1 == "MemAvailable:" { print '"$mem_budget"' - int($2 / 1024) }' /proc/meminfo
+	fi
+}
+j_mem=()
+for i in "${!j_suite[@]}"; do
+	if [[ " ${j_env[$i]} " =~ \ MEM=([0-9]+)\  ]]; then
+		j_mem[i]="${BASH_REMATCH[1]}"
+	else
+		j_mem[i]="${MEM_DEFAULT:-2048}"
+	fi
+done
+# Is there memory to start job i beside the running ones?
+mem_room() {
+	local i="$1" held=0 used p
+	[ "${#running[@]}" -eq 0 ] && return 0
+	for p in "${!running[@]}"; do
+		held=$((held + j_mem[${running[$p]}]))
+	done
+	used="$(mem_in_use)"
+	[ "$used" -gt "$held" ] 2> /dev/null && held="$used"
+	[ $((held + j_mem[i])) -le $((mem_budget - mem_reserve)) ]
+}
+
 start_job() {
 	local i="$1" results=""
 
@@ -144,20 +198,33 @@ start_job() {
 	j_start[i]="$(date +%s%N)"
 }
 
-j_start=(); j_ms=(); j_rc=(); j_cpu=(); j_cg=()
+j_start=(); j_ms=(); j_rc=(); j_cpu=(); j_cg=(); j_peak=()
 t0="$(date +%s%N)"
 skipped=()
-next=0
+pending=("${order[@]}")
 alone=0
-while [ "$next" -lt "${#order[@]}" ] || [ "${#running[@]}" -gt 0 ]; do
-	while [ "$next" -lt "${#order[@]}" ] && [ "${#running[@]}" -lt "$max" ]; do
-		if [ "${j_alone[${order[$next]}]}" -eq 1 ] && [ "$alone" -eq 0 ]; then
-			[ "${#running[@]}" -gt 0 ] && break
+most=0
+while [ "${#pending[@]}" -gt 0 ] || [ "${#running[@]}" -gt 0 ]; do
+	# In order, each job there is room for: one there is not waits, and
+	# those after it that fit start.  The ALONE jobs, last in order, once
+	# nothing else runs.
+	left=()
+	for i in "${pending[@]}"; do
+		if [ "${j_alone[$i]}" -eq 1 ] && [ "$alone" -eq 0 ]; then
+			if [ "${#running[@]}" -gt 0 ]; then
+				left+=("$i")
+				continue
+			fi
 			alone=1
 		fi
-		start_job "${order[$next]}"
-		next=$((next + 1))
+		if [ "${#running[@]}" -ge "$max" ] || ! mem_room "$i"; then
+			left+=("$i")
+			continue
+		fi
+		start_job "$i"
 	done
+	pending=("${left[@]}")
+	[ "${#running[@]}" -gt "$most" ] && most="${#running[@]}"
 
 	wait -n -p done_pid
 	rc=$?
@@ -167,7 +234,8 @@ while [ "$next" -lt "${#order[@]}" ] || [ "${#running[@]}" -gt 0 ]; do
 	j_ms[i]=$(( ($(date +%s%N) - j_start[i]) / 1000000 ))
 	j_rc[i]="$rc"
 	[ -n "${j_cg[$i]}" ] &&
-		j_cpu[i]=$(awk '$1 == "usage_usec" { printf "%d", $2 / 1000000 }' "${j_cg[$i]}/cpu.stat" 2> /dev/null)
+		j_cpu[i]=$(awk '$1 == "usage_usec" { printf "%d", $2 / 1000000 }' "${j_cg[$i]}/cpu.stat" 2> /dev/null) &&
+		j_peak[i]=$(awk '{ printf "%d", $1 / 1048576 }' "${j_cg[$i]}/memory.peak" 2> /dev/null)
 
 	case "$rc" in
 		0)  result="passed" ;;
@@ -183,13 +251,15 @@ done
 
 wall=$(( ($(date +%s%N) - t0) / 1000000 ))
 echo "=============================================================="
-printf '%d jobs, %d at most at once, in %d s:\n' "${#order[@]}" "$max" $((wall / 1000))
+printf '%d jobs, %d at most at once, in %d s, in %d MB of memory less %d:\n' \
+	"${#order[@]}" "$most" $((wall / 1000)) "$mem_budget" "$mem_reserve"
 for i in "${order[@]}"; do
 	[ -n "${j_ms[$i]:-}" ] && echo "${j_ms[$i]} $i"
 done | sort -k1,1nr | while read -r ms i; do
 	case "${j_rc[$i]}" in 0) r="passed" ;; 77) r="skipped" ;; *) r="FAILED" ;; esac
-	printf '  %-32s %5d s  %s%s\n' "$(label "$i")" $((ms / 1000)) "$r" \
-		"${j_cpu[$i]:+, ${j_cpu[$i]} s of CPU}"
+	printf '  %-32s %5d s  %s%s%s\n' "$(label "$i")" $((ms / 1000)) "$r" \
+		"${j_cpu[$i]:+, ${j_cpu[$i]} s of CPU}" \
+		"${j_peak[$i]:+, ${j_peak[$i]} MB at most (MEM=${j_mem[$i]})}"
 done
 [ -n "$JOBCG" ] && for i in "${order[@]}"; do echo "${j_cpu[$i]:-0}"; done |
 	awk '{ s += $1 } END { printf "  %d s of CPU in all", s }' &&

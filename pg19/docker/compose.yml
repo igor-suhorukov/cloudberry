@@ -123,6 +123,13 @@ services:
     shm_size: 4gb
     tmpfs:
       - /tmp
+    # The servers keep their data, WAL and shared buffers in memory -- /tmp
+    # is a tmpfs -- and the run starts jobs while there is memory for them
+    # (test/run.sh, MEM= in test/jobs): within this limit, so that a run that
+    # still wants more is the one its OOM kills, not the machine's other
+    # processes.  No swap.
+    mem_limit: ${CB_TESTS_MEM:-40g}
+    memswap_limit: ${CB_TESTS_MEM:-40g}
     volumes:
       - /var/lib/cbdisk
 

@@ -32,42 +32,50 @@
 # half the cores (CPUS).  The seconds are a run's, on the machine the port is
 # built on (16 cores, 32 threads), with every job at once; they order the
 # jobs and nothing else, and run.sh's summary gives each run's own.
+#
+# MEM= is the most memory the job holds, in megabytes -- its servers' data,
+# WAL and shared memory, /tmp being a tmpfs -- as run.sh's summary gave it,
+# and some to spare: run.sh starts a job only while there is that much left
+# for it.  More than the summary said for the jobs the run's OOM killer
+# stopped short (greenplum's, diskquota's regress, pax's toast, the ORCA
+# pass of postgis_regress), and for resgroup's, whose servers move to cgroup
+# parents outside the job's cgroup, where the summary does not see them.
 
-resgroup               orca_cpu 110   PASSES=orca RG_GROUPS=cpu ALONE=1 CPUS=16-31
-resgroup               planner_cpu 110 PASSES=planner RG_GROUPS=cpu ALONE=1 CPUS=0-15
-resgroup               orca_cpuset 90 PASSES=orca RG_GROUPS=cpuset
-resgroup               planner_cpuset 90 PASSES=planner RG_GROUPS=cpuset
-resgroup               orca     115   PASSES=orca RG_GROUPS=main
-resgroup               planner  110   PASSES=planner RG_GROUPS=main
-greenplum              orca     396   PASSES=orca
-diskquota              regress  170   DQ_PARTS=regress DQ_GROUP=main
-diskquota              ctas     115   DQ_PARTS=regress DQ_GROUP=ctas
-diskquota              ctas_spc 110   DQ_PARTS=regress DQ_GROUP=ctas_spc
-greenplum              planner  290   PASSES=planner
-singlenode             orca     263   PASSES=orca
-pax                    toast    130   PAX_GROUP=toast
-pax                    -         60   PAX_GROUP=main
-isolation2             orca     145   PASSES=orca
-postgis_regress        orca     144   PASSES=orca
-isolation2             planner  143   PASSES=planner
-diskquota              isolation2 138   DQ_PARTS=isolation2
-gpmgmt                 -        120
-singlenode             planner  105   PASSES=planner
-cluster                -         99
-orca                   -         97
-fts                    -         57
-postgis_cluster        -         50
-dump                   -         50
-postgis_regress        planner   33   PASSES=planner
-hooks                  -         32
-task                   -         30
-singlenode_isolation2  orca      30   PASSES=orca
-postgis                -         25
-singlenode_isolation2  planner   24   PASSES=planner
-security               -         23
-dirtable               -         17
-memprot                -         16
-grammar                -         14
-dbcopy                 -         13
-ao                     -         10
-dynamic                -          9
+resgroup               orca_cpu 110   PASSES=orca RG_GROUPS=cpu ALONE=1 CPUS=16-31 MEM=1500
+resgroup               planner_cpu 110 PASSES=planner RG_GROUPS=cpu ALONE=1 CPUS=0-15 MEM=1500
+resgroup               orca_cpuset 90 PASSES=orca RG_GROUPS=cpuset MEM=1500
+resgroup               planner_cpuset 90 PASSES=planner RG_GROUPS=cpuset MEM=1500
+resgroup               orca     115   PASSES=orca RG_GROUPS=main MEM=1500
+resgroup               planner  110   PASSES=planner RG_GROUPS=main MEM=1500
+greenplum              orca     396   PASSES=orca MEM=14000
+diskquota              regress  170   DQ_PARTS=regress DQ_GROUP=main MEM=5500
+diskquota              ctas     115   DQ_PARTS=regress DQ_GROUP=ctas MEM=6000
+diskquota              ctas_spc 110   DQ_PARTS=regress DQ_GROUP=ctas_spc MEM=6000
+greenplum              planner  290   PASSES=planner MEM=14000
+singlenode             orca     263   PASSES=orca MEM=5500
+pax                    toast    130   PAX_GROUP=toast MEM=5000
+pax                    -         60   PAX_GROUP=main MEM=2200
+isolation2             orca     145   PASSES=orca MEM=11000
+postgis_regress        orca     144   PASSES=orca MEM=6000
+isolation2             planner  143   PASSES=planner MEM=11000
+diskquota              isolation2 138   DQ_PARTS=isolation2 MEM=2000
+gpmgmt                 -        120   MEM=1600
+singlenode             planner  105   PASSES=planner MEM=3500
+cluster                -         99   MEM=600
+orca                   -         97   MEM=300
+fts                    -         57   MEM=1000
+postgis_cluster        -         50   MEM=1700
+dump                   -         50   MEM=1700
+postgis_regress        planner   33   PASSES=planner MEM=2600
+hooks                  -         32   MEM=300
+task                   -         30   MEM=300
+singlenode_isolation2  orca      30   PASSES=orca MEM=300
+postgis                -         25   MEM=700
+singlenode_isolation2  planner   24   PASSES=planner MEM=300
+security               -         23   MEM=300
+dirtable               -         17   MEM=300
+memprot                -         16   MEM=600
+grammar                -         14   MEM=300
+dbcopy                 -         13   MEM=500
+ao                     -         10   MEM=600
+dynamic                -          9   MEM=300
