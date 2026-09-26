@@ -64,6 +64,11 @@ SOCK="$(mktemp -d /tmp/cbg-XXXXXX)"
 # What is executed cannot be in /tmp, which the Compose project mounts noexec
 # (see the singlenode suite).
 EXEC="$(mktemp -d "${HOME:-/var/lib/postgresql}/cb-greenplum-XXXXXX")"
+if ! . "$HERE/../gpmgmt/tools.sh" "$EXEC"; then
+	echo "gpMgmt, or the Python it needs, is not installed; skipping"
+	rm -rf "$WORK" "$SOCK" "$EXEC"
+	exit 77
+fi
 BASEPORT="${PGPORT:-$((7300 + RANDOM % 200))}"
 NODES=4					# a coordinator and Cloudberry's three segments
 PRELOAD='gp_core,gp_orca,gp_sql,gp_ao,gp_exttable,gp_security,gp_resource'
@@ -155,8 +160,6 @@ while read -r name; do
 	case "$cbname" in gp_*)
 		printf 's/^( +)%s( +)$/\\1%s\\2/\n' "$cbname" "$name" ;;
 	esac
-	# and the name for gpconfig, which a test runs by Cloudberry's
-	echo "$cbname $name" >> "$WORK/settings.map"
 done > "$WORK/respell.sed"
 # And a program of Cloudberry's suite that a test runs from the suite's
 # directory, ./extended_protocol_resqueue, is the one the port builds and
@@ -244,9 +247,15 @@ sed 's/##Version: ##/Apache Cloudberry (the PostgreSQL 19 port)/' \
 # The diff pg_regress runs: gpdiff.pl, for PostgreSQL's test_setup too, whose
 # tables are distributed here and say so; with a difference reviewed and
 # kept counted as none (canon.pl, cloudberry/, as the singlenode suite does).
-mkdir -p "$EXEC/bin"
-# gpconfig, as the isolation2 suite's shows a setting (resource_group_gucs)
-cp "$HERE/../isolation2/bin/gpconfig" "$EXEC/bin/"
+# gpMgmt's gpconfig, which shows a setting (resource_group_gucs): asking the
+# tests' database, which has gp_core, where it would ask template1, which
+# here has none of the port's extensions -- a database a test makes from it
+# has none either (external_table's).
+cat > "$EXEC/bin/gpconfig" <<EOF
+#!/bin/bash
+PGDATABASE="\${PGDATABASE:-regression}" exec "$GPHOME/bin/gpconfig" "\$@"
+EOF
+chmod +x "$EXEC/bin/gpconfig"
 # Cloudberry's client, through this: it sets gp_log_resqueue_memory by
 # Cloudberry's name, which a compiled program keeps and respell.sed cannot
 # reach, so the setting is given it by the port's as it connects.
@@ -341,7 +350,7 @@ for pass in ${PASSES:-planner orca}; do
 	# the programs, where they start gpfdist from.
 	PATH="$EXEC/bin:$PATH" CB_DIFF_MODE="$pass" PGOPTIONS="-c gp.optimizer=$optimizer" \
 	PG_HOSTNAME=localhost PG_BINDDIR="$BINDIR" \
-	PG_BINDIR="$BINDIR" GP_SETTINGS_MAP="$WORK/settings.map" \
+	PG_BINDIR="$BINDIR" COORDINATOR_DATA_DIRECTORY="$WORK/node0" \
 		"$PG_REGRESS" \
 			--bindir="$BINDIR" \
 			--inputdir="$SN" \

@@ -30,8 +30,11 @@
 # change is the setup: setup.sql here, in place of Cloudberry's, says why.
 # The other is the isolation2 suite's: a setting the port has is spelled as
 # the port spells it, in the tests and in their expected output alike, and a
-# shell command of a test finds gpconfig and gpstop in ../isolation2/bin,
-# which do on this node what the tests ask of Cloudberry's.
+# shell command of a test finds gpMgmt's gpconfig and gpstop, set up as
+# ../gpmgmt/tools.sh sets them up, which do on this node, the port's single
+# node, what the tests ask of Cloudberry's.  They connect to template1, which
+# has gp_core too, and the tests' database is made from template0, as it was
+# made before template1 had it.
 #
 # manifest says of each test the schedule names whether it runs, and why not.
 # A test passes if its result is Cloudberry's expected output, or differs from
@@ -61,14 +64,25 @@ fi
 
 WORK="$(mktemp -d "${TMPDIR:-/tmp}/cb-isolation2-XXXXXX")"
 SOCK="$(mktemp -d /tmp/cbi-XXXXXX)"
+# What is executed cannot be in /tmp, which the Compose project mounts noexec.
+EXEC="$(mktemp -d "${HOME:-/var/lib/postgresql}/cb-snisolation2-XXXXXX")"
+if ! . "$HERE/../gpmgmt/tools.sh" "$EXEC"; then
+	echo "gpMgmt, or the Python it needs, is not installed; skipping"
+	rm -rf "$WORK" "$SOCK" "$EXEC"
+	exit 77
+fi
 PORT="${PGPORT:-$((7700 + RANDOM % 200))}"
-export PGPORT="$PORT" PGHOST="$SOCK"
+export PGPORT="$PORT" PGHOST="$SOCK" COORDINATOR_DATA_DIRECTORY="$WORK/data"
 
 cleanup() {
-	[ -n "${RESULTS_DIR:-}" ] && cp "$WORK/log" "$RESULTS_DIR/isolation2-server.log" 2> /dev/null
+	if [ -n "${RESULTS_DIR:-}" ]; then
+		cp "$WORK/log" "$RESULTS_DIR/isolation2-server.log" 2> /dev/null
+		# ... and the log of a start of gpstart's
+		cp "$WORK/data/log/startup.log" "$RESULTS_DIR/isolation2-server.startup.log" 2> /dev/null
+	fi
 	"$BINDIR/pg_ctl" -D "$WORK/data" -m immediate stop > /dev/null 2>&1
 	[ -n "${KEEP:-}" ] && echo "kept: $WORK" || rm -rf "$WORK"
-	rm -rf "$SOCK"
+	rm -rf "$SOCK" "$EXEC"
 }
 trap cleanup EXIT
 
@@ -97,9 +111,12 @@ echo
 
 "$BINDIR/pg_ctl" -D "$WORK/data" -l "$WORK/log" -w -t 60 start > /dev/null 2>&1 \
 	|| { echo "server did not start"; tail -20 "$WORK/log"; exit 1; }
+# gp_core where gpMgmt's tools ask about the node
+"$PSQL" -X -q -d template1 -c "CREATE EXTENSION gp_core" > /dev/null ||
+	{ echo "could not create gp_core in template1"; exit 1; }
 
 # The settings the port has, respelled as the isolation2 suite respells them
-# (see there), and their names for gpconfig.
+# (see there).
 "$PSQL" -X -q -t -A -d postgres -c "SELECT name FROM pg_settings WHERE name LIKE 'gp.%' ORDER BY length(name) DESC" |
 while read -r name; do
 	short="${name#gp.}"
@@ -119,9 +136,8 @@ while read -r name; do
 	case "$cbname" in
 		gp_*) printf 's/^( *)%s( *)$/\\1%s\\2/\n' "$cbname" "$name" ;;
 	esac
-	echo "$cbname $name" >> "$WORK/settings.map"
 done > "$WORK/respell.sed"
-export PATH="$HERE/../isolation2/bin:$PATH" PG_BINDIR="$BINDIR" GP_SETTINGS_MAP="$WORK/settings.map"
+export PG_BINDIR="$BINDIR"
 
 mkdir -p "$WORK/gpdiff"
 cp "$GPDIFF"/gpdiff.pl "$GPDIFF"/atmsort.pm "$GPDIFF"/explain.pm "$WORK/gpdiff/"
@@ -145,7 +161,7 @@ for pass in ${PASSES:-planner orca}; do
 	esac
 
 	"$PSQL" -X -q -d postgres -c "DROP DATABASE IF EXISTS isolation2test" > /dev/null 2>&1
-	"$PSQL" -X -q -d postgres -c "CREATE DATABASE isolation2test" > /dev/null
+	"$PSQL" -X -q -d postgres -c "CREATE DATABASE isolation2test TEMPLATE template0" > /dev/null
 	if ! out=$("$PSQL" -X -q -v ON_ERROR_STOP=1 -d isolation2test -f "$HERE/setup.sql" 2>&1); then
 		echo "  the setup failed:"; printf '%s\n' "$out" | sed 's/^/    /'
 		failed=$((failed + 1)); continue

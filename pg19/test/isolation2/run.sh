@@ -54,10 +54,15 @@
 # assume it: a mirror for each segment too, a hot standby streaming from its
 # primary, and FTS on the coordinator (M4).  Shell commands of the tests --
 # and the nodes themselves, which a test's PL/Python helper runs one from --
-# find gpconfig, gpstop, gprecoverseg and gpinitstandby in bin/ here, which
-# do what the tests ask of Cloudberry's (gpMgmt's, M7's) on this cluster, and
+# find gpMgmt's gpconfig, gpstop, gprecoverseg and gpinitstandby (M7), set up
+# as ../gpmgmt/tools.sh sets them up, gpfts in bin/ here, and
 # COORDINATOR_DATA_DIRECTORY; and "-c gp_role=utility" goes from them as it
-# goes from the driver's sessions of a node's own.
+# goes from the driver's sessions of a node's own.  The tools connect to
+# template1, which has gp_core too, so a test's database is made from
+# template0, as it was made before template1 had it.  A group's nodes share
+# one socket directory, their host in gp_segment_configuration, which a node
+# the tools copy -- a mirror recovered, a standby made -- has from the node
+# it is a copy of.
 
 set -u
 
@@ -92,6 +97,11 @@ WORK="$(mktemp -d "${TMPDIR:-/tmp}/cb-isolation2c-XXXXXX")"
 SOCK="$(mktemp -d /tmp/cbi2-XXXXXX)"
 # What is executed cannot be in /tmp, which the Compose project mounts noexec.
 EXEC="$(mktemp -d "${HOME:-/var/lib/postgresql}/cb-isolation2c-XXXXXX")"
+if ! . "$HERE/../gpmgmt/tools.sh" "$EXEC"; then
+	echo "gpMgmt, or the Python it needs, is not installed; skipping"
+	rm -rf "$WORK" "$SOCK" "$EXEC"
+	exit 77
+fi
 BASEPORT="${PGPORT:-$((7500 + RANDOM % 200))}"
 NODES=4					# a coordinator and Cloudberry's three segments
 PRELOAD='gp_core,gp_orca,gp_sql,gp_resource'
@@ -125,10 +135,11 @@ for i in "${!run_tests[@]}"; do
 	[ "$found" -eq 1 ] || { echo "manifest: ${run_tests[$i]} is in no group (${run_group[$i]})"; exit 1; }
 done
 
-# Node n of the cluster of the gi-th group, and a group's standby.
+# Node n of the cluster of the gi-th group, and a group's standby; and the
+# socket directory every node of a group is reached by, its host.
 node_dir()  { echo "$WORK/$1/node$2"; }
 node_port() { echo $((BASEPORT + $1 * NODES + $2)); }
-node_sock() { echo "$SOCK/$1/n$2"; }
+group_sock() { echo "$SOCK/$1"; }
 standby_port() { echo $((BASEPORT + 100 + $1)); }
 has_mirrors() { [[ "$1" == mirrors* ]]; }
 has_standby() { [ "$1" = standby ] || has_mirrors "$1"; }
@@ -136,7 +147,6 @@ has_standby() { [ "$1" = standby ] || has_mirrors "$1"; }
 # demo cluster's, the mirrors 5..7 and the standby 8, where there are mirrors.
 mirror_dir()  { echo "$WORK/$1/mirror$2"; }
 mirror_port() { echo $((BASEPORT + 300 + $1 * NODES + $2)); }
-mirror_sock() { echo "$SOCK/$1/m$2"; }
 standby_dbid() { if has_mirrors "$1"; then echo $((2 * NODES)); else echo $((NODES + 1)); fi; }
 
 cleanup() {
@@ -148,8 +158,11 @@ cleanup() {
 				*) d="$(node_dir "$g" "$n")" ;;
 			esac
 			[ -d "$d" ] || continue
-			[ -n "${RESULTS_DIR:-}" ] &&
+			# ... and the log of a start of gpstart's, in log/startup.log
+			if [ -n "${RESULTS_DIR:-}" ]; then
 				cp "$d.log" "$RESULTS_DIR/$SUITE-$g-node$n.log" 2> /dev/null
+				cp "$d/log/startup.log" "$RESULTS_DIR/$SUITE-$g-node$n.startup.log" 2> /dev/null
+			fi
 			"$BINDIR/pg_ctl" -D "$d" -m immediate stop > /dev/null 2>&1
 		done
 	done
@@ -175,33 +188,31 @@ make_cluster() {
 	# started with, so that what a node runs itself -- pg_ctl() here, a PL/Python
 	# helper's gpinitstandby -- finds the tools and the coordinator too, as the
 	# servers of Cloudberry's demo cluster are started from its environment.
-	export PATH="$EXEC/bin:$PATH" PG_BINDIR="$BINDIR" GP_SETTINGS_MAP="$WORK/settings.map"
-	export PGHOST="$(node_sock "$g" 0)" PGPORT="$(node_port "$gi" 0)"
+	export PG_BINDIR="$BINDIR"
+	export PGHOST="$(group_sock "$g")" PGPORT="$(node_port "$gi" 0)"
 	export COORDINATOR_DATA_DIRECTORY="$(node_dir "$g" 0)"
-	export ISOLATION2_STANDBY_HOT="$(has_mirrors "$g" && echo on || echo off)"
 
-	mkdir -p "$WORK/$g"
+	mkdir -p "$WORK/$g" "$(group_sock "$g")"
 	{
 		echo "# dbid content role host port datadir"
 		for n in $(seq 0 $((NODES - 1))); do
-			echo "$((n + 1)) $((n - 1)) p $(node_sock "$g" "$n") $(node_port "$gi" "$n") $(node_dir "$g" "$n")"
+			echo "$((n + 1)) $((n - 1)) p $(group_sock "$g") $(node_port "$gi" "$n") $(node_dir "$g" "$n")"
 		done
 		if has_mirrors "$g"; then
 			for n in $(seq 0 $((NODES - 2))); do
-				echo "$((NODES + 1 + n)) $n m $(mirror_sock "$g" "$n") $(mirror_port "$gi" "$n") $(mirror_dir "$g" "$n")"
+				echo "$((NODES + 1 + n)) $n m $(group_sock "$g") $(mirror_port "$gi" "$n") $(mirror_dir "$g" "$n")"
 			done
 		fi
 		has_standby "$g" &&
-			echo "$(standby_dbid "$g") -1 m $SOCK/$g/standby $(standby_port "$gi") $WORK/$g/standby"
+			echo "$(standby_dbid "$g") -1 m $(group_sock "$g") $(standby_port "$gi") $WORK/$g/standby"
 	} > "$conf"
 	for n in $(seq 0 $((NODES - 1))); do
-		mkdir -p "$(node_sock "$g" "$n")"
 		"$BINDIR/initdb" -D "$(node_dir "$g" "$n")" -N -U gpadmin --locale=C --encoding=UTF8 \
 			> "$WORK/$g/initdb$n.log" 2>&1 \
 			|| { echo "initdb failed for node $n of group $g"; tail -20 "$WORK/$g/initdb$n.log"; return 1; }
 		{
 			echo "shared_preload_libraries = '$PRELOAD'"
-			echo "unix_socket_directories = '$(node_sock "$g" "$n")'"
+			echo "unix_socket_directories = '$(group_sock "$g")'"
 			echo "listen_addresses = ''"
 			echo "port = $(node_port "$gi" "$n")"
 			echo "fsync = off"
@@ -228,10 +239,10 @@ make_cluster() {
 	# runs a shell command with one's address, and some tests run there: it
 	# has gp_core too, and so its gp_segment_configuration; and gp_resource,
 	# whose procedures a resource group test's helper, running psql there,
-	# makes a group with.
-	PGHOST="$(node_sock "$g" 0)" PGPORT="$(node_port "$gi" 0)" \
-		"$PSQL" -X -q -d postgres -c "CREATE EXTENSION gp_core" \
-			-c "CREATE EXTENSION gp_resource" > /dev/null 2>&1
+	# makes a group with.  gpMgmt's tools ask template1, which has gp_core.
+	"$PSQL" -X -q -d postgres -c "CREATE EXTENSION gp_core" \
+		-c "CREATE EXTENSION gp_resource" > /dev/null 2>&1
+	"$PSQL" -X -q -d template1 -c "CREATE EXTENSION gp_core" > /dev/null 2>&1
 
 	# A standby coordinator: the coordinator's copy, streaming from it as
 	# gp_walreceiver, as Cloudberry's standby does, so that the coordinator's
@@ -243,16 +254,14 @@ make_cluster() {
 	# over a connection of its own (commit_blocking_on_standby), where
 	# Cloudberry's fault injector reaches a standby that takes none.
 	if has_standby "$g"; then
-		mkdir -p "$SOCK/$g/standby"
-		"$BINDIR/pg_basebackup" -D "$WORK/$g/standby" -h "$(node_sock "$g" 0)" \
+		"$BINDIR/pg_basebackup" -D "$WORK/$g/standby" -h "$(group_sock "$g")" \
 			-p "$(node_port "$gi" 0)" -X stream -c fast > "$WORK/$g/basebackup.log" 2>&1 \
 			|| { echo "the standby of group $g could not be copied"; tail -5 "$WORK/$g/basebackup.log"; return 1; }
 		{
-			echo "unix_socket_directories = '$SOCK/$g/standby'"
 			echo "port = $(standby_port "$gi")"
 			echo "gp.dbid = $(standby_dbid "$g")"
-			echo "hot_standby = $ISOLATION2_STANDBY_HOT"
-			echo "primary_conninfo = 'host=$(node_sock "$g" 0) port=$(node_port "$gi" 0) application_name=gp_walreceiver'"
+			echo "hot_standby = $(has_mirrors "$g" && echo on || echo off)"
+			echo "primary_conninfo = 'host=$(group_sock "$g") port=$(node_port "$gi" 0) application_name=gp_walreceiver'"
 		} >> "$WORK/$g/standby/postgresql.auto.conf"
 		touch "$WORK/$g/standby/standby.signal"
 		"$BINDIR/pg_ctl" -D "$WORK/$g/standby" -l "$WORK/$g/standby.log" -w -t 60 start \
@@ -264,7 +273,7 @@ make_cluster() {
 	if has_mirrors "$g"; then
 		local synced=
 		for _ in $(seq 300); do
-			synced=$(PGHOST="$(node_sock "$g" 0)" PGPORT="$(node_port "$gi" 0)" "$PSQL" -X -q -t -A -d postgres \
+			synced=$("$PSQL" -X -q -t -A -d postgres \
 				-c "SELECT gp_request_fts_probe_scan(); SELECT count(*) FROM gp_segment_configuration WHERE content >= 0 AND mode <> 's'" \
 				2> /dev/null | tail -1)
 			[ "$synced" = 0 ] && break
@@ -283,19 +292,17 @@ make_mirrors() {
 	local g="$1" gi="$2" c d
 	for c in $(seq 0 $((NODES - 2))); do
 		d="$(mirror_dir "$g" "$c")"
-		mkdir -p "$(mirror_sock "$g" "$c")"
-		"$BINDIR/pg_basebackup" -D "$d" -h "$(node_sock "$g" $((c + 1)))" -p "$(node_port "$gi" $((c + 1)))" \
+		"$BINDIR/pg_basebackup" -D "$d" -h "$(group_sock "$g")" -p "$(node_port "$gi" $((c + 1)))" \
 			-X stream -c fast -C -S internal_wal_replication_slot > "$WORK/$g/basebackup-m$c.log" 2>&1 \
 			|| { echo "the mirror of content $c of group $g could not be copied"; tail -5 "$WORK/$g/basebackup-m$c.log"; return 1; }
-		grep -v -E '^(port|unix_socket_directories|gp\.dbid|primary_conninfo|primary_slot_name|hot_standby) ' \
+		grep -v -E '^(port|gp\.dbid|primary_conninfo|primary_slot_name|hot_standby) ' \
 			"$d/postgresql.auto.conf" > "$d.auto"
 		{
 			cat "$d.auto"
 			echo "port = $(mirror_port "$gi" "$c")"
-			echo "unix_socket_directories = '$(mirror_sock "$g" "$c")'"
 			echo "gp.dbid = $((NODES + 1 + c))"
 			echo "hot_standby = on"
-			echo "primary_conninfo = 'host=$(node_sock "$g" $((c + 1))) port=$(node_port "$gi" $((c + 1))) application_name=gp_walreceiver'"
+			echo "primary_conninfo = 'host=$(group_sock "$g") port=$(node_port "$gi" $((c + 1))) application_name=gp_walreceiver'"
 			echo "primary_slot_name = 'internal_wal_replication_slot'"
 		} > "$d/postgresql.auto.conf"
 		rm -f "$d.auto"
@@ -304,10 +311,9 @@ make_mirrors() {
 			|| { echo "the mirror of content $c of group $g did not start"; tail -20 "$d.log"; return 1; }
 	done
 }
-# The harness's stand-ins for Cloudberry's tools, where every node finds them
-# too: a test's PL/Python helper runs gpinitstandby in the server's
-# environment (dtm_recovery_on_standby).
-mkdir -p "$EXEC/bin"
+# gpfts, which a test runs as Cloudberry's external FTS, beside gpMgmt's
+# tools and where every node finds them too: a test's PL/Python helper runs
+# gpinitstandby in the server's environment (dtm_recovery_on_standby).
 cp "$HERE"/bin/* "$EXEC/bin/"
 chmod +x "$EXEC"/bin/*
 
@@ -321,7 +327,7 @@ done
 # The settings the port has, respelled as the greenplum suite respells them;
 # and, in the expected output, every word that names one, which is where a
 # SHOW's column header has it too -- "gp_" and "gp." are the same length.
-PGHOST="$(node_sock "${groups[0]}" 0)" PGPORT="$(node_port 0 0)" \
+PGHOST="$(group_sock "${groups[0]}")" PGPORT="$(node_port 0 0)" \
 "$PSQL" -X -q -t -A -d postgres -c "SELECT name FROM pg_settings WHERE name LIKE 'gp.%' ORDER BY length(name) DESC" |
 while read -r name; do
 	short="${name#gp.}"
@@ -394,16 +400,16 @@ convert() {
 run_group() {
 	local g="$1" gi="$2" pass="$3" optimizer="$4"
 	local R="$WORK/$g/$pass" t res exp name dir out i
-	export PGHOST="$(node_sock "$g" 0)" PGPORT="$(node_port "$gi" 0)"
-	export PATH="$EXEC/bin:$PATH" PG_BINDIR="$BINDIR" GP_SETTINGS_MAP="$WORK/settings.map"
+	export PGHOST="$(group_sock "$g")" PGPORT="$(node_port "$gi" 0)"
+	export PG_BINDIR="$BINDIR"
 	export COORDINATOR_DATA_DIRECTORY="$(node_dir "$g" 0)"
-	export ISOLATION2_STANDBY_HOT="$(has_mirrors "$g" && echo on || echo off)"
 
 	mkdir -p "$R/results" "$R/canon" "$R/sql" "$R/expected"
 	own_tmp() { sed -E "s#/tmp/([A-Za-z0-9_]+)#$R/\\1#g"; }
+	own_host() { sed -E "s#os\\.uname\\(\\)\\[1\\]#'$(group_sock "$g")'#g"; }
 	: > "$R/status"
 	"$PSQL" -X -q -d postgres -c "DROP DATABASE IF EXISTS $DBNAME" > /dev/null 2>&1
-	"$PSQL" -X -q -d postgres -c "CREATE DATABASE $DBNAME" > /dev/null
+	"$PSQL" -X -q -d postgres -c "CREATE DATABASE $DBNAME TEMPLATE template0" > /dev/null
 	if ! out=$(sed -e "s#@BINDIR@#$BINDIR#g" "$HERE/setup.sql" |
 			   "$PSQL" -X -q -v ON_ERROR_STOP=1 -d "$DBNAME" -f - 2>&1); then
 		echo "  the setup failed in group $g:" > "$R/setup-failed"
@@ -422,18 +428,21 @@ run_group() {
 		# two passes run side by side, as jobs of their own in a full run,
 		# and two tablespaces cannot share a directory (mirror_promotion's),
 		# nor two recoveries a file (recoverseg_from_file's, which one pass
-		# would read the other's recovery from, and remove).
+		# would read the other's recovery from, and remove).  And the name
+		# a test gives this machine, os.uname()[1], is its nodes' host: the
+		# socket directory they share, by which, with its port and data
+		# directory, gprecoverseg -i finds a node (recoverseg_from_file's).
 		if [ -f "$CB/input/$t.source" ]; then
-			convert "$CB/input/$t.source" | sed -E -f "$WORK/respell.sed" | own_tmp > "$R/sql/$t.sql"
+			convert "$CB/input/$t.source" | sed -E -f "$WORK/respell.sed" | own_tmp | own_host > "$R/sql/$t.sql"
 		else
-			sed -E -f "$WORK/respell.sed" "$CB/sql/$t.sql" | own_tmp > "$R/sql/$t.sql"
+			sed -E -f "$WORK/respell.sed" "$CB/sql/$t.sql" | own_tmp | own_host > "$R/sql/$t.sql"
 		fi
 		exp="$CB/expected/$t.out"
 		[ "$pass" = orca ] && [ -f "$CB/expected/${t}_optimizer.out" ] && exp="$CB/expected/${t}_optimizer.out"
 		[ -f "$CB/output/$t.source" ] && exp="$CB/output/$t.source"
 		name="$(basename "$exp" .out)"
 		name="${name%.source}"
-		convert "$exp" | sed -E -f "$WORK/respell.sed" | own_tmp > "$R/expected/$t.out"
+		convert "$exp" | sed -E -f "$WORK/respell.sed" | own_tmp | own_host > "$R/expected/$t.out"
 
 		# As pg_isolation2_regress runs it, from the suite's directory.
 		( cd "$CB" && PGOPTIONS="-c gp.optimizer=$optimizer" \

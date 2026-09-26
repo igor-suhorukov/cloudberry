@@ -31,10 +31,10 @@
 # and gp_ao's, in every database the tests use.
 #
 # The tests set their settings with gpconfig and restart the cluster with
-# gpstop, which here are the isolation2 suite's (../isolation2/bin), with one
-# difference: the preloaded libraries a test sets -- diskquota's alone, or
-# none -- are the port's modules with diskquota's, or without it, since a
-# node of the port does not start without gp_core.
+# gpstop, which here are gpMgmt's, set up as ../gpmgmt/tools.sh sets them up,
+# with one difference: the preloaded libraries a test sets -- diskquota's
+# alone, or none -- are the port's modules with diskquota's, or without it,
+# since a node of the port does not start without gp_core.
 #
 # Each test is compared as Cloudberry's pg_regress compares it: gpdiff.pl
 # under Cloudberry's init files, diskquota's and the port's, or exactly a
@@ -70,6 +70,11 @@ SOCK="$(mktemp -d /tmp/cbd-XXXXXX)"
 # isolation2 driver's own command line matches where $HOME is
 # /home/postgres.
 EXEC="$(mktemp -d "${HOME:-/var/lib/postgresql}/cb-dq-XXXXXX")"
+if ! . "$HERE/../gpmgmt/tools.sh" "$EXEC"; then
+	echo "gpMgmt, or the Python it needs, is not installed; skipping"
+	rm -rf "$WORK" "$SOCK" "$EXEC"
+	exit 77
+fi
 BASEPORT="${PGPORT:-$((7100 + RANDOM % 200))}"
 NODES=4					# a coordinator and Cloudberry's three segments
 MODULES='gp_core,gp_orca,gp_sql,gp_ao'
@@ -83,7 +88,11 @@ export PGPORT="$(port 0)" PGHOST="$SOCK/n0" PGUSER=gpadmin
 
 cleanup() {
 	for n in $(seq 0 $((NODES - 1))); do
-		[ -n "${RESULTS_DIR:-}" ] && cp "$WORK/node$n.log" "$RESULTS_DIR/diskquota-node$n.log" 2> /dev/null
+		# ... and the log of a start of gpstart's
+		if [ -n "${RESULTS_DIR:-}" ]; then
+			cp "$WORK/node$n.log" "$RESULTS_DIR/diskquota-node$n.log" 2> /dev/null
+			cp "$WORK/node$n/log/startup.log" "$RESULTS_DIR/diskquota-node$n.startup.log" 2> /dev/null
+		fi
 		"$BINDIR/pg_ctl" -D "$WORK/node$n" -m immediate stop > /dev/null 2>&1
 	done
 	[ -n "${KEEP:-}" ] && echo "kept: $WORK" || rm -rf "$WORK"
@@ -153,10 +162,8 @@ for n in 0 $(seq 1 $((NODES - 1))); do
 done
 start_nodes
 
-# gpconfig and gpstop, the isolation2 suite's; the preloaded libraries a test
-# sets, the port's modules with diskquota's or without it.
-mkdir -p "$EXEC/bin"
-cp "$HERE/../isolation2/bin/gpstop" "$EXEC/bin/gpstop"
+# gpMgmt's gpconfig, for which the preloaded libraries a test sets are the
+# port's modules with diskquota's or without it.
 cat > "$EXEC/bin/gpconfig" <<GPCONFIG
 #!/bin/bash
 args=("\$@")
@@ -168,9 +175,9 @@ for i in "\${!args[@]}"; do
 		esac
 	fi
 done
-exec bash "$HERE/../isolation2/bin/gpconfig" "\${args[@]}"
+exec "$GPHOME/bin/gpconfig" "\${args[@]}"
 GPCONFIG
-chmod +x "$EXEC/bin/gpstop" "$EXEC/bin/gpconfig"
+chmod +x "$EXEC/bin/gpconfig"
 
 # The suite, from the directory Cloudberry's tests run from: data/ has the
 # name of diskquota's library, as the version file gives it there.
