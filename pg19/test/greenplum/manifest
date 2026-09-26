@@ -32,7 +32,7 @@ run  triggers_gp
 run  returning_gp
 run  resource_queue_with_rule
 run  gp_types
-skip gp_index  multiple primary keys for table "tbl_create_index" are not allowed
+run  gp_index
 run  gp_sort
 run  foreign_key_gp
 run  bitmapscan
