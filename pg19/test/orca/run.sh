@@ -2199,11 +2199,13 @@ same "two-stage aggregation" \
      "SET gp.optimizer_force_multistage_agg = on"
 
 # PostgreSQL 19 runs an Agg in one split mode; Cloudberry's executor finishes
-# each Aggref by its own, and ORCA mixes them in one node here.
-declined "an aggregate that mixes stages in one node" \
-         "SELECT avg(c), stddev(a), count(DISTINCT b) FROM t0" \
-         "mixes aggregation stages" \
-         "SET gp.optimizer_force_multistage_agg = on"
+# each Aggref by its own, and ORCA's split of a DISTINCT aggregate into
+# stages mixes them in one node, beside another aggregate.  Such a query is
+# optimized without that split, the distinct values aggregated where they
+# meet, in one stage.
+same "a DISTINCT aggregate beside others, aggregated in one stage, not in mixed ones" \
+     "SELECT avg(c), stddev(a), count(DISTINCT b) FROM t0" \
+     "SET gp.optimizer_force_multistage_agg = on"
 
 # ORCA's core rewrites percentile_cont into Cloudberry's gp_percentile_cont,
 # by OID (naucrates/dxl/gpdb_types.h), and PostgreSQL 19 has no such function.

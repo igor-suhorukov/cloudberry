@@ -162,10 +162,12 @@ gp_create_table  the OID of text's hash operator class in
   gp_distribution_policy.distclass: the same class, which Cloudberry's
   catalog numbers 10039 and PostgreSQL 19's 10037.
 
-gp_dqa (orca)  the fallback trace of two queries of count(DISTINCT) over a
-  table with a primary key of two columns, grouped by it, which ORCA's
-  translator declines -- "No attribute entry found due to incorrect
-  normalization of query" -- and the planner answers the same.
+gp_dqa (orca)  ORCA's fallback trace, which the expected output closest to
+  the pass, the planner's, does not print, for the queries it declines and
+  the planner answers the same: several DISTINCT aggregates, where
+  optimizer_enable_multiple_distinct_aggs is off, as Cloudberry's ORCA
+  declines them; an aggregate with FILTER; and a DISTINCT aggregate whose
+  plan would read in one slice a value another computes.
 
 gp_types  PostgreSQL 19's words for an operator no type takes: a DETAIL
   where Cloudberry's HINT stood.

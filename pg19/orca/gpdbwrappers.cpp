@@ -745,6 +745,53 @@ gpdb::QueryOrdersPartialCapableAgg(Query *query)
 	return false;
 }
 
+namespace
+{
+struct DistinctAggContext
+{
+	bool distinct;
+	bool plain;
+};
+
+bool
+DistinctAggWalker(Node *node, void *context)
+{
+	DistinctAggContext *ctx = (DistinctAggContext *) context;
+
+	if (node == nullptr)
+		return false;
+
+	if (IsA(node, Query))
+		return query_tree_walker((Query *) node, DistinctAggWalker, context,
+								 0);
+
+	if (IsA(node, Aggref))
+	{
+		if (((Aggref *) node)->aggdistinct != NIL)
+			ctx->distinct = true;
+		else
+			ctx->plain = true;
+		if (ctx->distinct && ctx->plain)
+			return true;
+	}
+
+	return expression_tree_walker(node, DistinctAggWalker, context);
+}
+}  // namespace
+
+bool
+gpdb::QueryMixesDistinctAgg(Query *query)
+{
+	GP_WRAP_START;
+	{
+		DistinctAggContext ctx = {false, false};
+
+		return DistinctAggWalker((Node *) query, &ctx);
+	}
+	GP_WRAP_END;
+	return false;
+}
+
 Oid
 gpdb::GetAggregate(const char *agg, Oid type_oid)
 {

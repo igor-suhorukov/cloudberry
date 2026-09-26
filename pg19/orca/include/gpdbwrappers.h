@@ -357,6 +357,10 @@ bool IsAggPartialCapable(Oid aggid);
 // combine function -- not an ordered-set aggregate's WITHIN GROUP?
 bool QueryOrdersPartialCapableAgg(Query *query);
 
+// does the query, or one in it, call a DISTINCT aggregate beside one that is
+// not?
+bool QueryMixesDistinctAgg(Query *query);
+
 // intermediate result type of given aggregate
 Oid GetAggregate(const char *agg, Oid type_oid);
 
