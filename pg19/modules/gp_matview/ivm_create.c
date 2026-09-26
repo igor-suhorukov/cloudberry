@@ -37,8 +37,11 @@
  */
 #include "postgres.h"
 
+#include "access/genam.h"
 #include "access/table.h"
 #include "catalog/dependency.h"
+#include "catalog/indexing.h"
+#include "catalog/pg_depend.h"
 #include "catalog/pg_inherits.h"
 #include "catalog/objectaddress.h"
 #include "catalog/pg_class.h"
@@ -56,6 +59,7 @@
 #include "parser/parser.h"
 #include "parser/parsetree.h"
 #include "utils/builtins.h"
+#include "utils/fmgroids.h"
 #include "utils/lsyscache.h"
 #include "utils/rel.h"
 #include "utils/syscache.h"
@@ -359,6 +363,10 @@ GpIvmIsIncremental(Oid matviewOid)
  * field is only read when the statement is dispatched to segments, so a
  * single node does not need it -- and this file records the dependency
  * itself, which is what that field was for.
+ *
+ * Internal, as Cloudberry's and pg_ivm's are: pg_dump passes over it, as it
+ * should one whose argument is an OID of this database's, and the view's
+ * label makes it again as a restore sets it (GpIvmRestored()).
  */
 static void
 create_ivm_trigger(Oid relOid, Oid matviewOid, int16 events, int16 timing)
@@ -433,7 +441,7 @@ create_ivm_trigger(Oid relOid, Oid matviewOid, int16 events, int16 timing)
 
 	address = CreateTrigger(stmt, NULL, relOid, InvalidOid, InvalidOid,
 							InvalidOid, InvalidOid, InvalidOid, NULL,
-							false, false);
+							true, false);
 
 	/* So that dropping the view takes its triggers with it. */
 	recordDependencyOn(&address, &refaddr, DEPENDENCY_AUTO);
@@ -470,6 +478,51 @@ create_triggers_on_base_tables(Query *qry, Oid matviewOid)
 	}
 
 	list_free(seen);
+}
+
+/* Does the view have its triggers?  They depend on it (create_ivm_trigger). */
+static bool
+has_ivm_triggers(Oid matviewOid)
+{
+	Relation	depRel;
+	ScanKeyData key[2];
+	SysScanDesc scan;
+	HeapTuple	tup;
+	bool		found = false;
+
+	depRel = table_open(DependRelationId, AccessShareLock);
+	ScanKeyInit(&key[0], Anum_pg_depend_refclassid, BTEqualStrategyNumber,
+				F_OIDEQ, ObjectIdGetDatum(RelationRelationId));
+	ScanKeyInit(&key[1], Anum_pg_depend_refobjid, BTEqualStrategyNumber,
+				F_OIDEQ, ObjectIdGetDatum(matviewOid));
+	scan = systable_beginscan(depRel, DependReferenceIndexId, true, NULL,
+							  2, key);
+	while (!found && HeapTupleIsValid(tup = systable_getnext(scan)))
+		found = ((Form_pg_depend) GETSTRUCT(tup))->classid == TriggerRelationId;
+	systable_endscan(scan);
+	table_close(depRel, AccessShareLock);
+	return found;
+}
+
+/*
+ * A view labelled incremental by SECURITY LABEL rather than made so -- as a
+ * restore of pg_dump's output labels it, made WITH NO DATA, its query the
+ * rewritten one with the hidden columns in it, which is what its rule keeps
+ * -- gets its triggers here, when it has none.  REFRESH fills it; until then
+ * the triggers find it not populated, and leave it be.
+ */
+void
+GpIvmRestored(Oid matviewOid)
+{
+	Relation	rel;
+	Query	   *query;
+
+	if (!GpIvmIsIncremental(matviewOid) || has_ivm_triggers(matviewOid))
+		return;
+	rel = table_open(matviewOid, AccessShareLock);
+	query = GpIvmGetViewQuery(rel);
+	table_close(rel, AccessShareLock);
+	create_triggers_on_base_tables(query, matviewOid);
 }
 
 void

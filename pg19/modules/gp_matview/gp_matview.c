@@ -31,6 +31,7 @@
  */
 #include "postgres.h"
 
+#include "access/xact.h"
 #include "catalog/namespace.h"
 #include "catalog/objectaccess.h"
 #include "catalog/pg_class.h"
@@ -191,6 +192,39 @@ gp_matview_ProcessUtility(PlannedStmt *pstmt, const char *queryString,
 		else
 			standard_ProcessUtility(pstmt, queryString, readOnlyTree, context,
 									params, queryEnv, dest, qc);
+		return;
+	}
+
+	/*
+	 * SECURITY LABEL on a materialized view, as a restore of pg_dump's output
+	 * labels one: what the label says the view is, it is made -- an
+	 * incremental view's triggers, a dynamic table's job -- where it is not
+	 * yet.  On a cluster no view is incremental (below).
+	 */
+	if (IsA(parsetree, SecLabelStmt) &&
+		((SecLabelStmt *) parsetree)->objtype == OBJECT_MATVIEW &&
+		((SecLabelStmt *) parsetree)->provider != NULL &&
+		strcmp(((SecLabelStmt *) parsetree)->provider, "gp") == 0)
+	{
+		const GpCoreApi *core = GpCoreApiLookup();
+		Oid			relid;
+
+		if (prev_ProcessUtility)
+			prev_ProcessUtility(pstmt, queryString, readOnlyTree, context,
+								params, queryEnv, dest, qc);
+		else
+			standard_ProcessUtility(pstmt, queryString, readOnlyTree, context,
+									params, queryEnv, dest, qc);
+		CommandCounterIncrement();
+		relid = RangeVarGetRelid(makeRangeVarFromNameList(castNode(List, ((SecLabelStmt *) parsetree)->object)),
+								 NoLock, false);
+		if (GpIvmIsIncremental(relid) && core != NULL && !core->is_single_node())
+			ereport(ERROR,
+					(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+					 errmsg("incremental materialized views are not supported on a cluster"),
+					 errhint("Create it without INCREMENTAL, and refresh it with REFRESH MATERIALIZED VIEW.")));
+		GpIvmRestored(relid);
+		GpDynRestored(relid);
 		return;
 	}
 

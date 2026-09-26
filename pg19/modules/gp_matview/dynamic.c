@@ -234,6 +234,71 @@ GpDynAfterCreate(Oid matviewOid, const char *schedule)
 	SPI_finish();
 }
 
+static Oid
+view_owner(Oid matviewOid)
+{
+	HeapTuple	tup = SearchSysCache1(RELOID, ObjectIdGetDatum(matviewOid));
+	Oid			owner;
+
+	if (!HeapTupleIsValid(tup))
+		elog(ERROR, "cache lookup failed for relation %u", matviewOid);
+	owner = ((Form_pg_class) GETSTRUCT(tup))->relowner;
+	ReleaseSysCache(tup);
+	return owner;
+}
+
+/*
+ * A view labelled dynamic by SECURITY LABEL rather than made so -- as a
+ * restore of pg_dump's output labels it, whose job gp_task's dump leaves out,
+ * the job's name carrying the view's OID -- gets its job here, or the
+ * schedule its label says if it has one already; it runs as the view's
+ * owner, who made it.
+ */
+void
+GpDynRestored(Oid matviewOid)
+{
+	ObjectAddress addr = matview_address(matviewOid);
+	char	   *schedule = GpLabelGet(&addr, GP_LABEL_dynamic_schedule);
+	char	   *name = dyn_task_name(matviewOid);
+	StringInfoData buf;
+	char	   *current = NULL;
+
+	if (schedule == NULL || task_is_elsewhere())
+		return;
+	check_the_scheduler_is_loaded();
+	if (!task_extension_present())
+		ereport(ERROR,
+				(errcode(ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE),
+				 errmsg("a dynamic table needs the task scheduler"),
+				 errhint("Run \"CREATE EXTENSION gp_task\" first.")));
+
+	if (SPI_connect() != SPI_OK_CONNECT)
+		elog(ERROR, "SPI_connect failed");
+	initStringInfo(&buf);
+	appendStringInfo(&buf, "SELECT schedule FROM gp_task.job_rows() WHERE jobname = %s",
+					 quote_literal_cstr(name));
+	run(buf.data, SPI_OK_SELECT);
+	if (SPI_processed > 0)
+		current = SPI_getvalue(SPI_tuptable->vals[0], SPI_tuptable->tupdesc, 1);
+
+	resetStringInfo(&buf);
+	if (current == NULL)
+		appendStringInfo(&buf,
+						 "CALL gp_task.create_task(%s, %s, %s, username => %s)",
+						 quote_literal_cstr(name), quote_literal_cstr(schedule),
+						 quote_literal_cstr(psprintf("REFRESH MATERIALIZED VIEW %s",
+													 quote_qualified_identifier(get_namespace_name(get_rel_namespace(matviewOid)),
+																				get_rel_name(matviewOid)))),
+						 quote_literal_cstr(GetUserNameFromId(view_owner(matviewOid), false)));
+	else if (strcmp(current, schedule) != 0)
+		appendStringInfo(&buf, "CALL gp_task.alter_task(%s, schedule => %s)",
+						 quote_literal_cstr(name), quote_literal_cstr(schedule));
+	if (buf.len > 0)
+		run(buf.data, SPI_OK_UTILITY);
+	pfree(buf.data);
+	SPI_finish();
+}
+
 /*
  * A materialized view is being dropped.  Cloudberry records the task as an
  * internal dependency of the view; here the view's row in another extension's

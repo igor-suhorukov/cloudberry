@@ -95,12 +95,14 @@ extern bool GpIvmTakeOption(List **options);
 extern void GpIvmCheckQuery(Query *query);
 extern Query *GpIvmRewriteQuery(Query *query, List *colNames);
 extern void GpIvmAfterCreate(Oid matviewOid, Query *rewritten);
+extern void GpIvmRestored(Oid matviewOid);
 extern bool GpIvmIsIncremental(Oid matviewOid);
 extern char *ivm_companion_name(const char *kind, const char *resname);
 
 /* dynamic.c */
 extern bool GpDynTakeOption(List **options, char **schedule);
 extern void GpDynAfterCreate(Oid matviewOid, const char *schedule);
+extern void GpDynRestored(Oid matviewOid);
 extern void GpDynDropped(Oid matviewOid);
 
 /* ivm_state.c */

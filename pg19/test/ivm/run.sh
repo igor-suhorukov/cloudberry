@@ -533,9 +533,10 @@ refused "an unknown gp option is still rejected" \
 echo "8. dropping the view takes its triggers with it"
 ###############################################################################
 q "DROP MATERIALIZED VIEW mv2;" > /dev/null
+# An internal trigger's name ends with its own OID, after the view's.
 is "the triggers of the dropped view are gone" \
    "SELECT count(*) FROM pg_trigger WHERE tgrelid = 'base'::regclass
-      AND tgname LIKE '%_' || (SELECT oid FROM pg_class WHERE relname = 'mv');" "8"
+      AND tgname LIKE '%\_' || (SELECT oid FROM pg_class WHERE relname = 'mv') || '\_%';" "8"
 q "DROP MATERIALIZED VIEW mv;" > /dev/null
 is "and with the last view gone, so are all of them" \
    "SELECT count(*) FROM pg_trigger WHERE tgrelid = 'base'::regclass;" "0"

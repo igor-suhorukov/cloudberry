@@ -40,7 +40,13 @@ CREATE TABLE gp_task.run_history (
 
 CREATE INDEX run_history_jobid_index ON gp_task.run_history (jobid);
 
-SELECT pg_catalog.pg_extension_config_dump('gp_task.job', '');
+/*
+ * pg_dump writes the jobs, but a dynamic table's: its name has the view's
+ * OID in it, and the view's label, restored, makes the job again under the
+ * view's new one (gp_matview's dynamic.c).
+ */
+SELECT pg_catalog.pg_extension_config_dump('gp_task.job',
+	'WHERE jobname OPERATOR(pg_catalog.!~) ''^gp_dynamic_table_refresh_[0-9]+$''');
 SELECT pg_catalog.pg_extension_config_dump('gp_task.job_jobid_seq', '');
 SELECT pg_catalog.pg_extension_config_dump('gp_task.run_history_runid_seq', '');
 

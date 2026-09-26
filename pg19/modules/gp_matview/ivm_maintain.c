@@ -44,6 +44,7 @@
 #include "access/table.h"
 #include "access/xact.h"
 #include "catalog/namespace.h"
+#include "catalog/pg_class.h"
 #include "commands/matview.h"
 #include "commands/trigger.h"
 #include "executor/spi.h"
@@ -55,6 +56,7 @@
 #include "utils/memutils.h"
 #include "utils/rel.h"
 #include "utils/snapmgr.h"
+#include "utils/syscache.h"
 
 #include "gp_matview.h"
 
@@ -169,16 +171,36 @@ matview_from_trigger_args(TriggerData *trigdata, const char *caller)
  * why.  The trigger also forces the base table to be locked before the
  * statement runs.
  */
+/*
+ * A view not populated -- made WITH NO DATA, as a restore of pg_dump's output
+ * makes it before it loads the base tables -- has nothing to be kept up to
+ * date: REFRESH fills it.  Neither trigger does anything for it.
+ */
+static bool
+populated(Oid matviewOid)
+{
+	HeapTuple	tup = SearchSysCache1(RELOID, ObjectIdGetDatum(matviewOid));
+	bool		result;
+
+	if (!HeapTupleIsValid(tup))
+		elog(ERROR, "cache lookup failed for relation %u", matviewOid);
+	result = ((Form_pg_class) GETSTRUCT(tup))->relispopulated;
+	ReleaseSysCache(tup);
+	return result;
+}
+
 Datum
 gp_ivm_immediate_before(PG_FUNCTION_ARGS)
 {
 	TriggerData *trigdata = (TriggerData *) fcinfo->context;
+	Oid			matviewOid;
 
 	if (!CALLED_AS_TRIGGER(fcinfo))
 		elog(ERROR, "gp_ivm_immediate_before is a trigger function");
 
-	GpIvmEntryBefore(matview_from_trigger_args(trigdata,
-											   "gp_ivm_immediate_before"));
+	matviewOid = matview_from_trigger_args(trigdata, "gp_ivm_immediate_before");
+	if (populated(matviewOid))
+		GpIvmEntryBefore(matviewOid);
 
 	return PointerGetDatum(NULL);
 }
@@ -204,6 +226,8 @@ gp_ivm_immediate_maintenance(PG_FUNCTION_ARGS)
 		elog(ERROR, "gp_ivm_immediate_maintenance is a trigger function");
 
 	matviewOid = matview_from_trigger_args(trigdata, "gp_ivm_immediate_maintenance");
+	if (!populated(matviewOid))
+		return PointerGetDatum(NULL);
 
 	entry = GpIvmEntryAfter(matviewOid, trigdata, &is_last);
 	if (!is_last)
