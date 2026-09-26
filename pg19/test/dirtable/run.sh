@@ -194,6 +194,21 @@ refused "so is an absolute one" \
 refused "and an empty one" \
         "SELECT gp_sql.directory_table_put('docs'::regclass, '', 'x'::bytea);" \
         "must not be empty"
+# put is not STRICT, its tag being NULL where none is given: a NULL it reads
+# is refused before it is read, where it once crashed the server (a lost
+# connection, here)
+refused "a NULL path is refused" \
+        "SELECT gp_sql.directory_table_put('docs'::regclass, NULL, 'x'::bytea);" \
+        "file path must not be null"
+refused "so is NULL content, an empty file's being ''" \
+        "SELECT gp_sql.directory_table_put('docs'::regclass, 'null.txt', NULL);" \
+        "file content must not be null"
+refused "and a NULL table, which reached the others with no table at all" \
+        "SELECT gp_sql.directory_table_put(NULL, NULL, NULL);" \
+        "directory table must not be null"
+isl "a NULL tag is no tag: the file is written" \
+    "SELECT gp_sql.directory_table_put('docs'::regclass, 'untagged.txt', ''::bytea, NULL);
+     SELECT size || ',' || coalesce(tag, 'none') FROM docs WHERE relative_path = 'untagged.txt';" "0,none"
 is "a path with a dot in a name is fine" \
    "SELECT gp_sql.directory_table_put('docs'::regclass, 'a..b/c.txt', 'ok'::bytea);" "2"
 q "SELECT gp_sql.directory_table_put('docs'::regclass, 'once.txt', 'one'::bytea);" > /dev/null
@@ -224,6 +239,12 @@ out=$("$PSQL" -X -q -t -A -d postgres -U other \
 case "$out" in
 	*"must be owner of table docs"*) ok "someone else cannot write one" ;;
 	*) notok "someone else cannot write one" "$out" ;;
+esac
+out=$("$PSQL" -X -q -t -A -d postgres -U other \
+	  -c "SELECT gp_sql.directory_table_put(NULL, NULL, NULL);" 2>&1)
+case "$out" in
+	*"directory table must not be null"*) ok "and their NULLs are refused alike" ;;
+	*) notok "their NULLs are refused alike" "$out" ;;
 esac
 
 ###############################################################################

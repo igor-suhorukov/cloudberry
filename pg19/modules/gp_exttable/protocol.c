@@ -453,6 +453,21 @@ oid_or_null(Oid oid, char *null)
 }
 
 /*
+ * The first nargs arguments of a procedure below, which the grammar's CALL
+ * never leaves NULL: refused NULL from a CALL of the user's own, before any
+ * is read, as restore_protocol() refuses its own.
+ */
+static void
+protocol_require_args(FunctionCallInfo fcinfo, int nargs, const char *what)
+{
+	for (int i = 0; i < nargs; i++)
+		if (PG_ARGISNULL(i))
+			ereport(ERROR,
+					(errcode(ERRCODE_NULL_VALUE_NOT_ALLOWED),
+					 errmsg("%s must not be null", what)));
+}
+
+/*
  * CALL gp_exttable.create_protocol(name, trusted, definition, oid): CREATE
  * [TRUSTED] PROTOCOL name (readfunc = ..., writefunc = ..., validatorfunc =
  * ...), the definition as the grammar gives it, name and value in turn.
@@ -461,9 +476,9 @@ oid_or_null(Oid oid, char *null)
 Datum
 gp_exttable_create_protocol(PG_FUNCTION_ARGS)
 {
-	char	   *name = text_to_cstring(PG_GETARG_TEXT_PP(0));
-	bool		trusted = PG_GETARG_BOOL(1);
-	ArrayType  *defarr = PG_GETARG_ARRAYTYPE_P(2);
+	char	   *name;
+	bool		trusted;
+	ArrayType  *defarr;
 	Oid			oid = PG_ARGISNULL(3) ? InvalidOid : PG_GETARG_OID(3);
 	Datum	   *defs;
 	int			ndefs;
@@ -477,6 +492,11 @@ gp_exttable_create_protocol(PG_FUNCTION_ARGS)
 	Oid			argtypes[7] = {OIDOID, TEXTOID, OIDOID, OIDOID, OIDOID, OIDOID, BOOLOID};
 	Datum		values[7];
 	char		nulls[8] = "       ";
+
+	protocol_require_args(fcinfo, 3, "a protocol's name, trust and definition");
+	name = text_to_cstring(PG_GETARG_TEXT_PP(0));
+	trusted = PG_GETARG_BOOL(1);
+	defarr = PG_GETARG_ARRAYTYPE_P(2);
 
 	if (!superuser())
 		ereport(ERROR,
@@ -598,11 +618,16 @@ protocol_tables(const char *name)
 Datum
 gp_exttable_drop_protocol(PG_FUNCTION_ARGS)
 {
-	ArrayType  *namearr = PG_GETARG_ARRAYTYPE_P(0);
-	bool		if_exists = PG_GETARG_BOOL(1);
-	bool		cascade = PG_GETARG_BOOL(2);
+	ArrayType  *namearr;
+	bool		if_exists;
+	bool		cascade;
 	Datum	   *names;
 	int			nnames;
+
+	protocol_require_args(fcinfo, 3, "the protocols' names, IF EXISTS and CASCADE");
+	namearr = PG_GETARG_ARRAYTYPE_P(0);
+	if_exists = PG_GETARG_BOOL(1);
+	cascade = PG_GETARG_BOOL(2);
 
 	deconstruct_array_builtin(namearr, TEXTOID, &names, NULL, &nnames);
 	for (int i = 0; i < nnames; i++)
@@ -665,12 +690,16 @@ gp_exttable_drop_protocol(PG_FUNCTION_ARGS)
 Datum
 gp_exttable_rename_protocol(PG_FUNCTION_ARGS)
 {
-	char	   *name = text_to_cstring(PG_GETARG_TEXT_PP(0));
-	char	   *newname = text_to_cstring(PG_GETARG_TEXT_PP(1));
+	char	   *name;
+	char	   *newname;
 	Protocol	p;
 	Protocol	other;
 	Oid			argtypes[2] = {OIDOID, TEXTOID};
 	Datum		values[2];
+
+	protocol_require_args(fcinfo, 2, "a protocol's name and new name");
+	name = text_to_cstring(PG_GETARG_TEXT_PP(0));
+	newname = text_to_cstring(PG_GETARG_TEXT_PP(1));
 
 	protocol_must_exist(name, &p);
 	protocol_check_owner(&p);
@@ -699,12 +728,17 @@ gp_exttable_rename_protocol(PG_FUNCTION_ARGS)
 Datum
 gp_exttable_alter_protocol_owner(PG_FUNCTION_ARGS)
 {
-	char	   *name = text_to_cstring(PG_GETARG_TEXT_PP(0));
-	char	   *rolename = text_to_cstring(PG_GETARG_TEXT_PP(1));
-	Oid			newowner = role_oid(rolename);
+	char	   *name;
+	char	   *rolename;
+	Oid			newowner;
 	Protocol	p;
 	Oid			argtypes[2] = {OIDOID, OIDOID};
 	Datum		values[2];
+
+	protocol_require_args(fcinfo, 2, "a protocol's name and owner");
+	name = text_to_cstring(PG_GETARG_TEXT_PP(0));
+	rolename = text_to_cstring(PG_GETARG_TEXT_PP(1));
+	newowner = role_oid(rolename);
 
 	protocol_must_exist(name, &p);
 	if (p.owner != newowner)
@@ -755,12 +789,12 @@ protocol_acl(const Protocol *p)
 Datum
 gp_exttable_grant_protocol(PG_FUNCTION_ARGS)
 {
-	bool		is_grant = PG_GETARG_BOOL(0);
-	ArrayType  *privarr = PG_GETARG_ARRAYTYPE_P(1);
-	ArrayType  *namearr = PG_GETARG_ARRAYTYPE_P(2);
-	ArrayType  *granteearr = PG_GETARG_ARRAYTYPE_P(3);
-	bool		grant_option = PG_GETARG_BOOL(4);
-	bool		cascade = PG_GETARG_BOOL(5);
+	bool		is_grant;
+	ArrayType  *privarr;
+	ArrayType  *namearr;
+	ArrayType  *granteearr;
+	bool		grant_option;
+	bool		cascade;
 	Datum	   *privs;
 	Datum	   *names;
 	Datum	   *grantees;
@@ -770,6 +804,14 @@ gp_exttable_grant_protocol(PG_FUNCTION_ARGS)
 	AclMode		privileges = ACL_NO_RIGHTS;
 	bool		all_privs = false;
 	List	   *granteeids = NIL;
+
+	protocol_require_args(fcinfo, 6, "a grant's privileges, protocols, grantees and options");
+	is_grant = PG_GETARG_BOOL(0);
+	privarr = PG_GETARG_ARRAYTYPE_P(1);
+	namearr = PG_GETARG_ARRAYTYPE_P(2);
+	granteearr = PG_GETARG_ARRAYTYPE_P(3);
+	grant_option = PG_GETARG_BOOL(4);
+	cascade = PG_GETARG_BOOL(5);
 
 	deconstruct_array_builtin(privarr, TEXTOID, &privs, NULL, &nprivs);
 	deconstruct_array_builtin(namearr, TEXTOID, &names, NULL, &nnames);

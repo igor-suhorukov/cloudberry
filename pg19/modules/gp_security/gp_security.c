@@ -353,12 +353,18 @@ PG_FUNCTION_INFO_V1(gp_security_role_failed_logins);
  * gp_security.assign_profile(role name, profile name)
  *
  * What Cloudberry writes as ALTER USER ... PROFILE p; a NULL profile is its
- * ALTER USER ... NOPROFILE.
+ * ALTER USER ... NOPROFILE, and a NULL role is refused.
  */
 Datum
 gp_security_assign_profile(PG_FUNCTION_ARGS)
 {
-	Oid			roleid = get_role_oid(NameStr(*PG_GETARG_NAME(0)), false);
+	Oid			roleid;
+
+	if (PG_ARGISNULL(0))
+		ereport(ERROR,
+				(errcode(ERRCODE_NULL_VALUE_NOT_ALLOWED),
+				 errmsg("role name must not be null")));
+	roleid = get_role_oid(NameStr(*PG_GETARG_NAME(0)), false);
 
 	security_check_role(roleid);
 	security_assign_profile(roleid,

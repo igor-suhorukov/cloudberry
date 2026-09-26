@@ -409,7 +409,7 @@ Datum
 diskquota_fetch_table_stat(PG_FUNCTION_ARGS)
 {
 	FuncCallContext *funcctx;
-	int32            mode = PG_GETARG_INT32(0);
+	int32            mode;
 	AttInMetadata   *attinmeta;
 	bool             isFirstCall = true;
 	Oid              dbid;
@@ -417,6 +417,12 @@ diskquota_fetch_table_stat(PG_FUNCTION_ARGS)
 	HTAB                      *localCacheTable = NULL;
 	DiskQuotaSetOFCache       *cache           = NULL;
 	DiskQuotaActiveTableEntry *results_entry   = NULL;
+
+	/* not STRICT: its arguments refused NULL before they are read */
+	if (PG_ARGISNULL(0) || PG_ARGISNULL(1))
+		ereport(ERROR, (errcode(ERRCODE_NULL_VALUE_NOT_ALLOWED),
+		                errmsg("diskquota_fetch_table_stat()'s mode and OIDs must not be null")));
+	mode = PG_GETARG_INT32(0);
 
 #ifdef FAULT_INJECTOR
 	if (SIMPLE_FAULT_INJECTOR("ereport_warning_from_segment") == FaultInjectorTypeSkip)

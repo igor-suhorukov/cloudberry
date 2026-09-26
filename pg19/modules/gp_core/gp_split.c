@@ -576,7 +576,7 @@ GpSplitExplainLabel(PlanState *planstate, ExplainState *es,
 /*
  * The table a split function is called for -- NULL::t says which -- once it
  * is known that the coordinator called it, for a user who may update the
- * table.
+ * table, with arrays, none of them NULL, which are read after this.
  */
 static Oid
 split_target(FunctionCallInfo fcinfo, const char *name)
@@ -595,6 +595,11 @@ split_target(FunctionCallInfo fcinfo, const char *name)
 	if (pg_class_aclcheck(relid, GetUserId(), ACL_UPDATE) != ACLCHECK_OK)
 		aclcheck_error(ACLCHECK_NO_PRIV, get_relkind_objtype(get_rel_relkind(relid)),
 					   get_rel_name(relid));
+	for (int i = 1; i < PG_NARGS(); i++)
+		if (PG_ARGISNULL(i))
+			ereport(ERROR,
+					(errcode(ERRCODE_NULL_VALUE_NOT_ALLOWED),
+					 errmsg("%s()'s arrays must not be null", name)));
 	return relid;
 }
 

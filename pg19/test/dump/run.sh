@@ -44,7 +44,9 @@
 #      index;
 #   6. one node: an incremental view's triggers, which the dump does not
 #      carry and its label makes again, a dynamic table's job, and a
-#      directory table's directory, whose files the dump does not carry.
+#      directory table's directory, whose files the dump does not carry;
+#   7. and, the ten modules being there, each of their C functions not
+#      declared STRICT called with NULLs, which none may crash on.
 #
 #     PG_BINDIR=/path/to/pg19/bin pg19/test/dump/run.sh
 #
@@ -503,6 +505,71 @@ is "a directory table's row comes back, and its file does not" two src \
 cp -r "$(datadir one 0)/$old/." "$(datadir two 0)/$new/"
 is "until the old directory's files are copied into its new one" two src \
    "SELECT convert_from(gp_sql.directory_table_get('docs'::regclass, 'a/b.txt'), 'UTF8')" "hello"
+
+###############################################################################
+echo "7. no C function of the modules crashes the server on a NULL argument"
+###############################################################################
+# Each C function and procedure of the ten modules that is not STRICT and
+# takes an argument, called with every argument NULL -- by a role of no
+# privilege, and by a superuser in a transaction rolled back -- errs or
+# answers, and never loses its connection: seventeen of them read a NULL as a
+# pointer, and the postmaster restarted every session of the node.  A
+# polymorphic argument is given an int's NULL, an array one an int[]'s; one
+# of type internal, which SQL cannot pass, is not called.
+q a src "CREATE ROLE sweeper LOGIN" > /dev/null
+q a src "
+SELECT CASE p.prokind WHEN 'p' THEN 'CALL ' ELSE 'SELECT ' END
+       || quote_ident(n.nspname) || '.' || quote_ident(p.proname) || '('
+       || (SELECT string_agg(CASE WHEN t.typname IN ('anyelement', 'anynonarray', 'anycompatible', 'any')
+                                  THEN 'NULL::int4'
+                                  WHEN t.typname IN ('anyarray', 'anycompatiblearray') THEN 'NULL::int4[]'
+                                  ELSE 'NULL::' || format_type(a.t, NULL) END, ', ' ORDER BY a.i)
+             FROM unnest(p.proargtypes::oid[]) WITH ORDINALITY a(t, i) JOIN pg_type t ON t.oid = a.t)
+       || ')'
+  FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace
+ WHERE p.prolang = (SELECT oid FROM pg_language WHERE lanname = 'c')
+   AND NOT p.proisstrict AND p.pronargs > 0
+   AND NOT 'internal'::regtype = ANY (p.proargtypes::oid[])
+   AND EXISTS (SELECT FROM pg_depend d JOIN pg_extension e ON e.oid = d.refobjid
+                WHERE d.classid = 'pg_proc'::regclass AND d.objid = p.oid AND d.deptype = 'e'
+                  AND e.extname = ANY (string_to_array('$MODULES', ' ')))
+ ORDER BY 1" > "$ROOT/sweep.calls"
+sweep() {					# sweep <role> <sql>: on a's coordinator, in src
+	PGOPTIONS="$PGOPTIONS -c statement_timeout=60s" \
+	"$PSQL" -X -q -t -A -h "$(sockdir a 0)" -p "$(base_of a)" -d src -U "$1" -c "$2" 2>&1
+}
+lost=""
+while read -r call; do
+	for as in sweeper "$SUPERUSER"; do
+		[ "$as" = sweeper ] && sql="$call" || sql="BEGIN; $call; ROLLBACK;"
+		out=$(sweep "$as" "$sql")
+		case "$out" in
+			*"server closed the connection"*|*"connection to server"*|*"terminating connection"*|*"recovery mode"*)
+				lost="$lost$as: $call: $(printf '%s\n' "$out" | head -1)"$'\n' ;;
+		esac
+	done
+done < "$ROOT/sweep.calls"
+calls=$(grep -c . "$ROOT/sweep.calls")
+grep -q '^SELECT gp_sql\.directory_table_put(' "$ROOT/sweep.calls" && [ -z "$lost" ] \
+	&& ok "each of the $calls errs or answers, by either role, with the connection kept" \
+	|| notok "$calls functions called with NULLs" "${lost:-directory_table_put() was not among them}"
+out=$(grep -H -e 'terminated by signal' -e 'terminated by exception' "$ROOT"/a/node*.log)
+[ -z "$out" ] && ok "and no process of the cluster ended on a signal" || notok "a process ended on a signal" "$out"
+refused_null() {			# refused_null <name> <sql> <message>: as the superuser
+	local got; got=$(q a src "$2")
+	case "$got" in
+		*"$3"*) ok "$1" ;;
+		*) notok "$1" "expected an error containing [$3], got [$got]" ;;
+	esac
+}
+refused_null "a NULL option of a statement's CALL is refused, as PostgreSQL refuses one" \
+	"CALL gp_resource.create_resource_queue('q_null', ARRAY['active_statements=i:2', NULL])" \
+	"null array element not allowed in this context"
+refused_null "ALTER RESOURCE GROUP's CALL of no option is refused, where it read the first of none" \
+	"CALL gp_resource.alter_resource_group('admin_group', ARRAY[]::text[])" \
+	"ALTER RESOURCE GROUP sets one option, not 0"
+is "pg_resgroup_move_query() answers NULL for a NULL, as Cloudberry's, strict, does" a src \
+   "SELECT pg_resgroup_move_query(NULL, 'admin_group') IS NULL" "t"
 
 echo
 echo "$pass passed, $fail failed"

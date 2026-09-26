@@ -1049,19 +1049,21 @@ gp_sql_dirtable_location(PG_FUNCTION_ARGS)
  * Write a file and the row that describes it.  Cloudberry writes both with
  * COPY into a directory table; PG19's COPY has no place to put the file, so
  * this is the form the O26 grammar desugars that COPY to.
+ *
+ * Not STRICT, the tag being NULL where the COPY gives none: the table, the
+ * path and the content are refused NULL here, before they are read.
  */
 Datum
 gp_sql_dirtable_put(PG_FUNCTION_ARGS)
 {
-	Oid			relid = PG_GETARG_OID(0);
-	text	   *relpath_txt = PG_GETARG_TEXT_PP(1);
-	bytea	   *content = PG_GETARG_BYTEA_PP(2);
-	char	   *tag = PG_ARGISNULL(3) ? NULL : text_to_cstring(PG_GETARG_TEXT_PP(3));
-	char	   *relative_path = text_to_cstring(relpath_txt);
+	Oid			relid;
+	char	   *tag;
+	char	   *relative_path;
+	bytea	   *content;
 	char	   *path;
 	int			fd;
-	int			len = VARSIZE_ANY_EXHDR(content);
-	char	   *data = VARDATA_ANY(content);
+	int			len;
+	char	   *data;
 	Oid			argtypes[5] = {TEXTOID, INT8OID, TEXTOID, TEXTOID, TEXTOID};
 	Datum		values[5];
 	char		nulls[5] = {' ', ' ', ' ', ' ', ' '};
@@ -1069,6 +1071,26 @@ gp_sql_dirtable_put(PG_FUNCTION_ARGS)
 	bool		existed;
 	const GpStorageHandler *handler;
 	GpStorageFile file;
+
+	if (PG_ARGISNULL(0))
+		ereport(ERROR,
+				(errcode(ERRCODE_NULL_VALUE_NOT_ALLOWED),
+				 errmsg("directory table must not be null")));
+	if (PG_ARGISNULL(1))
+		ereport(ERROR,
+				(errcode(ERRCODE_NULL_VALUE_NOT_ALLOWED),
+				 errmsg("file path must not be null")));
+	if (PG_ARGISNULL(2))
+		ereport(ERROR,
+				(errcode(ERRCODE_NULL_VALUE_NOT_ALLOWED),
+				 errmsg("file content must not be null"),
+				 errhint("An empty file's content is ''.")));
+	relid = PG_GETARG_OID(0);
+	relative_path = text_to_cstring(PG_GETARG_TEXT_PP(1));
+	content = PG_GETARG_BYTEA_PP(2);
+	tag = PG_ARGISNULL(3) ? NULL : text_to_cstring(PG_GETARG_TEXT_PP(3));
+	len = VARSIZE_ANY_EXHDR(content);
+	data = VARDATA_ANY(content);
 
 	dirtable_require_owner(relid);
 	dirtable_refuse_in_recovery("write a file of a directory table");

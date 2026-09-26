@@ -2306,13 +2306,20 @@ check_distribution_policy(const char *policy)
  * What DISTRIBUTED BY says, recorded on the table.  What reads it is ORCA's
  * relcache translator, which asks every relation what it is distributed by,
  * and the dispatch of M2; on one node every table is on the one node, so
- * recording it is all there is to do here.
+ * recording it is all there is to do here.  A NULL policy clears it; a NULL
+ * table, which would be a superuser's label on no table at all, is refused.
  */
 Datum
 gp_sql_set_distribution(PG_FUNCTION_ARGS)
 {
-	Oid			relid = PG_GETARG_OID(0);
+	Oid			relid;
 	ObjectAddress addr;
+
+	if (PG_ARGISNULL(0))
+		ereport(ERROR,
+				(errcode(ERRCODE_NULL_VALUE_NOT_ALLOWED),
+				 errmsg("table must not be null")));
+	relid = PG_GETARG_OID(0);
 
 	if (!object_ownercheck(RelationRelationId, relid, GetUserId()))
 		aclcheck_error(ACLCHECK_NOT_OWNER, OBJECT_TABLE, get_rel_name(relid));

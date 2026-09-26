@@ -2860,13 +2860,14 @@ gp_resource_move_session(PG_FUNCTION_ARGS)
  * or already was, there.  Cloudberry's checks, in its order: groups on, the
  * caller a superuser or of pg_manage_resource_groups, not itself, not into
  * system_group, the session there, and running in a group now -- idle, or
- * waiting for a slot, it runs in none.
+ * waiting for a slot, it runs in none.  NULL for a NULL pid or group, as
+ * Cloudberry's, strict, answers it.
  */
 Datum
 gp_resource_resgroup_move_query(PG_FUNCTION_ARGS)
 {
-	int			pid = PG_GETARG_INT32(0);
-	char	   *name = text_to_cstring(PG_GETARG_TEXT_PP(1));
+	int			pid;
+	char	   *name;
 	Oid			groupid;
 	Oid			current = InvalidOid;
 	PGPROC	   *proc;
@@ -2874,6 +2875,11 @@ gp_resource_resgroup_move_query(PG_FUNCTION_ARGS)
 	int			session = -1;
 	bool		reader;
 	StringInfoData words;
+
+	if (PG_ARGISNULL(0) || PG_ARGISNULL(1))
+		PG_RETURN_NULL();
+	pid = PG_GETARG_INT32(0);
+	name = text_to_cstring(PG_GETARG_TEXT_PP(1));
 
 	if (!IsResGroupEnabled() || rg_ctl == NULL)
 		ereport(ERROR,

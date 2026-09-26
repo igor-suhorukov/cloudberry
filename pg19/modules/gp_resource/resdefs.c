@@ -764,17 +764,18 @@ ResDefsAssignRoleGroup(Oid roleid, const char *group, bool creating)
  * "name=k:value", k saying what the value was -- i an integer, f a number
  * with a fraction or exponent, s a string, w a word (a type name, to
  * Cloudberry's grammar) -- which is what decides the node Cloudberry's
- * defGet*() were given, and so their answers.
+ * defGet*() were given, and so their answers.  A NULL option, which O26
+ * never writes, is refused, as deconstruct_array() refuses one given no
+ * array for NULLs.
  */
 static List *
 options_from_array(ArrayType *arr)
 {
 	Datum	   *elems;
-	bool	   *nulls;
 	int			n;
 	List	   *options = NIL;
 
-	deconstruct_array_builtin(arr, TEXTOID, &elems, &nulls, &n);
+	deconstruct_array_builtin(arr, TEXTOID, &elems, NULL, &n);
 	for (int i = 0; i < n; i++)
 	{
 		char	   *item = TextDatumGetCString(elems[i]);
@@ -786,6 +787,8 @@ options_from_array(ArrayType *arr)
 			char		kind = eq[1];
 			char	   *value = eq + 3;
 
+			if (kind == '\0' || eq[2] != ':')
+				elog(ERROR, "O26: unrecognized option \"%s\"", item);
 			*eq = '\0';
 			switch (kind)
 			{
@@ -815,6 +818,30 @@ options_from_array(ArrayType *arr)
 		options = lappend(options, makeDefElem(pstrdup(item), arg, -1));
 	}
 	return options;
+}
+
+/*
+ * A statement's name and options, as its CALL passes them: never NULL from
+ * O26, and refused NULL from a CALL of the user's own, before either is read.
+ */
+static char *
+name_arg(FunctionCallInfo fcinfo, const char *what)
+{
+	if (PG_ARGISNULL(0))
+		ereport(ERROR,
+				(errcode(ERRCODE_NULL_VALUE_NOT_ALLOWED),
+				 errmsg("%s name must not be null", what)));
+	return NameStr(*PG_GETARG_NAME(0));
+}
+
+static List *
+options_arg(FunctionCallInfo fcinfo)
+{
+	if (PG_ARGISNULL(1))
+		ereport(ERROR,
+				(errcode(ERRCODE_NULL_VALUE_NOT_ALLOWED),
+				 errmsg("options array must not be null")));
+	return options_from_array(PG_GETARG_ARRAYTYPE_P(1));
 }
 
 /* Cloudberry's statements that may not run in a transaction block */
@@ -1111,8 +1138,8 @@ PG_FUNCTION_INFO_V1(gp_resource_comment_queue);
 Datum
 gp_resource_create_queue(PG_FUNCTION_ARGS)
 {
-	char	   *name = NameStr(*PG_GETARG_NAME(0));
-	List	   *options = options_from_array(PG_GETARG_ARRAYTYPE_P(1));
+	char	   *name = name_arg(fcinfo, "resource queue");
+	List	   *options = options_arg(fcinfo);
 	QueueOptions qo;
 	ResQueueDef *def;
 	List	   *defs;
@@ -1197,8 +1224,8 @@ gp_resource_create_queue(PG_FUNCTION_ARGS)
 Datum
 gp_resource_alter_queue(PG_FUNCTION_ARGS)
 {
-	char	   *name = NameStr(*PG_GETARG_NAME(0));
-	List	   *options = options_from_array(PG_GETARG_ARRAYTYPE_P(1));
+	char	   *name = name_arg(fcinfo, "resource queue");
+	List	   *options = options_arg(fcinfo);
 	QueueOptions qo;
 	ResQueueDef *def;
 	ResQueueDef check;
@@ -1305,7 +1332,7 @@ group_has_roles(Oid groupid)
 Datum
 gp_resource_drop_queue(PG_FUNCTION_ARGS)
 {
-	char	   *name = NameStr(*PG_GETARG_NAME(0));
+	char	   *name = name_arg(fcinfo, "resource queue");
 	ResQueueDef *def;
 	List	   *defs;
 	Oid			role;
@@ -1349,7 +1376,7 @@ gp_resource_drop_queue(PG_FUNCTION_ARGS)
 Datum
 gp_resource_comment_queue(PG_FUNCTION_ARGS)
 {
-	char	   *name = NameStr(*PG_GETARG_NAME(0));
+	char	   *name = name_arg(fcinfo, "resource queue");
 	ResQueueDef *def;
 	List	   *defs;
 	Oid			role;
@@ -1598,8 +1625,8 @@ PG_FUNCTION_INFO_V1(gp_resource_comment_group);
 Datum
 gp_resource_create_group(PG_FUNCTION_ARGS)
 {
-	char	   *name = NameStr(*PG_GETARG_NAME(0));
-	List	   *options = options_from_array(PG_GETARG_ARRAYTYPE_P(1));
+	char	   *name = name_arg(fcinfo, "resource group");
+	List	   *options = options_arg(fcinfo);
 	ResGroupDef *def;
 	List	   *defs;
 	Oid			role;
@@ -1656,8 +1683,8 @@ gp_resource_create_group(PG_FUNCTION_ARGS)
 Datum
 gp_resource_alter_group(PG_FUNCTION_ARGS)
 {
-	char	   *name = NameStr(*PG_GETARG_NAME(0));
-	List	   *options = options_from_array(PG_GETARG_ARRAYTYPE_P(1));
+	char	   *name = name_arg(fcinfo, "resource group");
+	List	   *options = options_arg(fcinfo);
 	DefElem    *defel;
 	ResGroupLimitType type;
 	int			value = 0;
@@ -1676,7 +1703,10 @@ gp_resource_alter_group(PG_FUNCTION_ARGS)
 				 errmsg("permission denied to alter resource group \"%s\"", name),
 				 errhint("Must be superuser or have privileges of the pg_manage_resource_groups role.")));
 
-	Assert(list_length(options) == 1);
+	/* one, as O26 writes ALTER's SET; a CALL of the user's own may not */
+	if (list_length(options) != 1)
+		elog(ERROR, "O26: ALTER RESOURCE GROUP sets one option, not %d",
+			 list_length(options));
 	defel = linitial_node(DefElem, options);
 	type = group_option_type(defel->defname);
 	if (type == RESGROUP_LIMIT_TYPE_UNKNOWN)
@@ -1758,7 +1788,7 @@ gp_resource_alter_group(PG_FUNCTION_ARGS)
 Datum
 gp_resource_drop_group(PG_FUNCTION_ARGS)
 {
-	char	   *name = NameStr(*PG_GETARG_NAME(0));
+	char	   *name = name_arg(fcinfo, "resource group");
 	ResGroupDef *def;
 	List	   *defs;
 	Oid			role;
@@ -1801,7 +1831,7 @@ gp_resource_drop_group(PG_FUNCTION_ARGS)
 Datum
 gp_resource_comment_group(PG_FUNCTION_ARGS)
 {
-	char	   *name = NameStr(*PG_GETARG_NAME(0));
+	char	   *name = name_arg(fcinfo, "resource group");
 	ResGroupDef *def;
 	List	   *defs;
 	Oid			role;
