@@ -845,7 +845,8 @@ gp_build_simple_rel(PlannerInfo *root, RelOptInfo *rel, RangeTblEntry *rte)
 
 	if (GpClusterBackendRole() != GP_ROLE_DISPATCH)
 		return;
-	if (rte->rtekind != RTE_RELATION || rte->relkind != RELKIND_RELATION)
+	if (rte->rtekind != RTE_RELATION ||
+		(rte->relkind != RELKIND_RELATION && rte->relkind != RELKIND_MATVIEW))
 		return;
 	if (GpScanDistributedPolicy(rte->relid) == NULL)
 		return;
@@ -1099,8 +1100,12 @@ gp_set_rel_pathlist(PlannerInfo *root, RelOptInfo *rel, Index rti,
 		return;
 	if (IS_DUMMY_REL(rel))
 		return;
-	/* a table's, or an external table's, which the segments read */
+	/*
+	 * a table's, a materialized view's or an external table's, which the
+	 * segments read
+	 */
 	if (get_rel_relkind(rte->relid) != RELKIND_RELATION &&
+		get_rel_relkind(rte->relid) != RELKIND_MATVIEW &&
 		get_rel_relkind(rte->relid) != RELKIND_FOREIGN_TABLE)
 		return;
 

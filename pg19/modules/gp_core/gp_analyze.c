@@ -546,7 +546,8 @@ gp_analyze_sample_rows(Relation relation, AnalyzeSampleRowsFunc *func,
 	}
 
 	if (GpClusterBackendRole() != GP_ROLE_DISPATCH ||
-		relation->rd_rel->relkind != RELKIND_RELATION ||
+		(relation->rd_rel->relkind != RELKIND_RELATION &&
+		 relation->rd_rel->relkind != RELKIND_MATVIEW) ||
 		AmAutoVacuumWorkerProcess() ||
 		(policy = GpScanDistributedPolicy(RelationGetRelid(relation))) == NULL)
 		return prev_analyze_sample_rows
@@ -606,7 +607,8 @@ distributed_relids(VacuumStmt *stmt)
 		{
 			Form_pg_class form = (Form_pg_class) GETSTRUCT(tuple);
 
-			if (form->relkind == RELKIND_RELATION)
+			if (form->relkind == RELKIND_RELATION ||
+				form->relkind == RELKIND_MATVIEW)
 				candidates = lappend_oid(candidates, form->oid);
 		}
 		table_endscan(scan);
@@ -631,7 +633,8 @@ distributed_relids(VacuumStmt *stmt)
 
 	foreach_oid(relid, candidates)
 	{
-		if (get_rel_relkind(relid) == RELKIND_RELATION &&
+		if ((get_rel_relkind(relid) == RELKIND_RELATION ||
+			 get_rel_relkind(relid) == RELKIND_MATVIEW) &&
 			pg_class_aclcheck(relid, GetUserId(), ACL_MAINTAIN) == ACLCHECK_OK &&
 			GpScanDistributedPolicy(relid) != NULL)
 			result = list_append_unique_oid(result, relid);
