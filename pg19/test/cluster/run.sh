@@ -2254,7 +2254,10 @@ SQL
 		&& ok "a segment says with its answer that it wrote, even where a function it ran wrote, and its part is prepared" \
 		|| notok "the transaction ID a segment reports" "$out / $out2"
 
-	# A commit held between its phases.
+	# A commit held between its phases: decided by its commit record, and in
+	# progress for every other session until its second phase is done, as
+	# Cloudberry's is -- the coordinator sends COMMIT PREPARED before its
+	# transaction ends for the others (O33).
 	q 0 "SELECT gp_inject_fault('dtm_broadcast_commit_prepared', 'suspend', 1);" >/dev/null
 	q 0 "INSERT INTO dtx SELECT i, i FROM generate_series(22, 60) i;" >/dev/null 2>&1 &
 	writer=$!
@@ -2263,8 +2266,8 @@ SQL
 	gid2=$(q 2 "SELECT gid FROM pg_prepared_xacts;")
 	status=$(q 0 "SELECT pg_xact_status('${gid#gp_dtx_}'::xid8);")
 	case "$gid|$gid2|$status" in
-		"gp_dtx_"[0-9]*"|$gid|committed")
-			ok "its parts are prepared on both segments under the coordinator's transaction ID, which has committed" ;;
+		"gp_dtx_"[0-9]*"|$gid|in progress")
+			ok "its parts are prepared on both segments under the coordinator's transaction ID, in progress for the others until they are told" ;;
 		*) notok "the prepared parts and their decision" "$gid / $gid2 / $status" ;;
 	esac
 	q 0 "SELECT count(*), sum(b) FROM dtx;" > "$ROOT/dtx_reader.out" 2>&1 &
@@ -2275,10 +2278,11 @@ SQL
 	wait "$writer" "$reader"
 	q 0 "SELECT gp_inject_fault('dtm_broadcast_commit_prepared', 'reset', 1);" >/dev/null
 	out2=$(cat "$ROOT/dtx_reader.out")
+	out3=$(q 0 "SELECT count(*), sum(b) FROM dtx;")
 	p1=$(q 1 "SELECT count(*) FROM pg_prepared_xacts;")
-	[ "$out|$out2|$p1" = "transactionid|60|1830|0" ] \
-		&& ok "a statement whose snapshot says it committed waits on a segment for its second phase, then sees it" \
-		|| notok "a statement meeting a transaction between its phases" "$out / $out2 / $p1"
+	[ "$out|$out2|$out3|$p1" = "|21|231|60|1830|0" ] \
+		&& ok "a statement meeting a transaction between its phases sees it in progress, waiting for nothing, and one after sees it" \
+		|| notok "a statement meeting a transaction between its phases" "$out / $out2 / $out3 / $p1"
 
 	# A segment that cannot prepare.
 	q 0 "SELECT gp_inject_fault('start_prepare', 'error', $(dbid 2));" >/dev/null
@@ -2292,6 +2296,30 @@ SQL
 			ok "a segment that fails to prepare fails the commit, and what the other prepared is rolled back" ;;
 		*) notok "a failure in the first phase" "$out / $out2 / $p1 / $p2" ;;
 	esac
+
+	# A second phase that fails on a segment: the coordinator's transaction
+	# ends all the same, its commit decided, and the recovery process is left
+	# the part; a statement whose snapshot says it committed waits on that
+	# segment for it meanwhile (gp_dtx.c), then sees it.
+	q 0 "CREATE TABLE dtxf (a int, b int) DISTRIBUTED BY (a);" >/dev/null
+	q 0 "SELECT gp_inject_fault('dtx_recovery_round', 'suspend', 1);" >/dev/null
+	q 0 "SELECT gp_inject_fault('finish_prepared_start_of_function', 'error', $(dbid 1));" >/dev/null
+	out=$(q 0 "INSERT INTO dtxf SELECT i, i FROM generate_series(1, 20) i;")
+	q 0 "SELECT count(*), sum(b) FROM dtxf;" > "$ROOT/dtxf_reader.out" 2>&1 &
+	reader=$!
+	sleep 1
+	out2=$(q 1 "SELECT wait_event FROM pg_stat_activity WHERE backend_type = 'client backend' AND wait_event_type = 'Lock';")
+	q 0 "SELECT gp_inject_fault('dtx_recovery_round', 'reset', 1);" >/dev/null
+	wait "$reader"
+	q 0 "SELECT gp_inject_fault('finish_prepared_start_of_function', 'reset', $(dbid 1));" >/dev/null
+	out3=$(cat "$ROOT/dtxf_reader.out")
+	p1=$(q 1 "SELECT count(*) FROM pg_prepared_xacts;")
+	case "$out|$out2|$out3|$p1" in
+		*"was committed, but 1 of its segments have not been told yet"*"|transactionid|20|210|0")
+			ok "a part whose second phase failed is the recovery process's, and a statement that sees it committed waits for it there" ;;
+		*) notok "a second phase that failed on a segment" "$out / $out2 / $out3 / $p1" ;;
+	esac
+	q 0 "DROP TABLE dtxf;" >/dev/null
 
 	# What gp.test_print_direct_dispatch_info says of the two phases, in
 	# Cloudberry's words (doDispatchDtxProtocolCommand(), cdbtm.c): each
@@ -2451,8 +2479,8 @@ SQL
 	after=$(q 0 "SELECT count(*) FROM pg_foreign_server WHERE srvname = 'lb_s2';")
 	p0=$(q 0 "SELECT count(*) FROM pg_prepared_xacts;")
 	case "$gid|$status|$seen|$after|$p0" in
-		"gp_dtx_"[0-9]*"_$dbo|committed|0|1|0")
-			ok "its part there is prepared under the coordinator's transaction ID, and committed after that commits" ;;
+		"gp_dtx_"[0-9]*"_$dbo|in progress|0|1|0")
+			ok "its part there is prepared under the coordinator's transaction ID, in progress for the others until that part is committed" ;;
 		*) notok "the loopback's two phases" "$gid / $dbo / $status / $seen / $after / $p0" ;;
 	esac
 	out=$(q 0 "SELECT (SELECT count(*) FROM gp_internal.dtx_map()) || ' ' ||
