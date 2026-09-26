@@ -293,10 +293,41 @@ of the core series, O13 to O21, O23 and O32:
   coordinator's planner sizes it, and an append-optimized table, as it
   sizes a heap table.
 
-M5's modules are built; what they leave open is in `cloudberry.md`.  The
-resource and transport modules — `gp_resource`, `gp_tde`, `interconnect`,
-`udp2` — are still stubs: M6 fills the first two, and the streaming
-transports, tcp and udpifc, live in `gp_core` for now.
+M5's modules are built; what they leave open is in `cloudberry.md`.
+
+M6 — resources and security — is built (2026-09-26), on one more patch of
+the core series, O25:
+
+- `gp_resource`: Cloudberry's resource queues and resource groups.  Their
+  definitions are a JSON label each on a carrier role, as decided, which
+  `pg_resqueue`, `pg_resgroup` and the rest show by Cloudberry's names, and
+  a role's queue and group `gp` label keys, which `pg_roles` shows as
+  `rolresqueue` and `rolresgroup` (O10); CREATE, ALTER, DROP and COMMENT ON
+  RESOURCE QUEUE and RESOURCE GROUP, and a role's RESOURCE clauses, are
+  O26's.  A query of a queue takes its slot as ResLockPortal() takes one,
+  and waits in shared memory, where the module looks for deadlocks between
+  queues and locks itself; a transaction of a group holds one of its slots
+  from its first statement to its end, or runs without one where
+  Cloudberry's bypass says, and a segment's backend runs in the group the
+  dispatch names.  A query runs with its budget — statement_mem, its
+  queue's or its group's share — as its work_mem.  The groups' cgroups are
+  Cloudberry's code, compiled where it lies (`compat/resgroup/`), v2's on
+  the hosts here: CPU limits, weights and cpusets, and I/O limits by
+  tablespace.  `pg_resgroup_move_query()` moves a running transaction to
+  another group through a signal handler of the module's own, which acts
+  where the backend waits on its latch.  Memory protection is Cloudberry's
+  vmem tracker, red zone handler and runaway cleaner, compiled where they
+  lie (`compat/memprot/`) and told of every memory context's blocks by O25,
+  `memory_block_alloc_hook`: a segment's statement or node past its limit
+  is refused with Cloudberry's "Out of memory", and the largest session in
+  the red zone cancelled;
+- `gp_security`: DENY windows, the times a role may not log in, as a key of
+  its label; and a client that hangs up, or OAuth's discovery round trip,
+  is no failed login under a profile.
+
+The transport and encryption modules — `interconnect`, `udp2`, `gp_tde` —
+are still stubs: the streaming transports, tcp and udpifc, live in
+`gp_core`, and TDE waits for a formal requirement.
 
 ## Tests
 
@@ -311,8 +342,9 @@ a coordinator and two segments, and `hooks`, which drives every hook of the
 core series through a test module); `greenplum`, part of Cloudberry's
 `greenplum_schedule` on a coordinator and three segments; `isolation2`, the
 tests of Cloudberry's `isolation2_schedule` that bear on M3 — distributed
-transactions and snapshots, locks and the global deadlock detector — and on
-M4, FTS and mirrors, run by Cloudberry's own driver on the same cluster, with
+transactions and snapshots, locks and the global deadlock detector — on
+M4, FTS and mirrors, and on M6, resource queues and memory accounting, run
+by Cloudberry's own driver on the same cluster, with
 a standby coordinator for the test that asks for one, and mirrors for the
 FTS tests; `fts`, M4's, a coordinator and three primaries
 each with a mirror, and what FTS does when a mirror or a primary stops;
@@ -321,7 +353,10 @@ each with a mirror, and what FTS does when a mirror or a primary stops;
 three segments, its regression and isolation2 schedules as two jobs;
 `pax`, M5's too, Cloudberry's PAX tests, its `pax_schedule` on a
 coordinator and three segments under the planner, as Cloudberry's expected
-output has them;
+output has them; `resgroup`, M6's, Cloudberry's resource group schedule
+for cgroup v2, whose tests write the cgroups under `/sys/fs/cgroup/gpdb`
+-- the tests service is privileged, and its entrypoint makes that subtree
+(`test/cgroup.sh`) -- and `memprot`, memory protection's refusals;
 `singlenode` and
 `singlenode_isolation2`, Cloudberry's single-node suites with PostgreSQL 19's
 own regression tests; and PostGIS's regression suite.  Each is run under the
@@ -333,5 +368,7 @@ start first, and each job's output is printed whole as it finishes, with a
 summary of the jobs at the end.  The long suites split themselves further:
 PostGIS's tests over eight servers, `isolation2`'s over a cluster a group of
 tests, and `singlenode`'s Cloudberry half over copies of the server
-PostgreSQL's tests ran on.  `JOBS=1` runs one job at a time, `PASSES=planner`
+PostgreSQL's tests ran on.  `resgroup`'s job runs alone, after the rest: its
+CPU tests keep every core busy in cgroups that outweigh the other jobs', and
+measure what they get.  `JOBS=1` runs one job at a time, `PASSES=planner`
 only the planner passes, and `RESULTS_DIR` gets a directory for each job.
