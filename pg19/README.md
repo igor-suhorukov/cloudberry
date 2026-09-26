@@ -374,7 +374,21 @@ tools:
   extension on every node, and of the GEOS, PROJ and GDAL PostGIS reports,
   or CREATE and ALTER EXTENSION are refused; ST_Union in one stage, and
   postgis_topology's functions on the coordinator, as the plan decided
-  (`gp_sql`'s `extscript.c`); and raster's settings sent to the segments.
+  (`gp_sql`'s `extscript.c`); and raster's settings sent to the segments;
+- the nodes authenticate each other by certificates, as decision 5 asks
+  for production: every connection `gp_core` opens to another node takes
+  libpq's TLS options from `gp.internal_sslmode`, `gp.internal_sslcert`,
+  `gp.internal_sslkey`, `gp.internal_sslrootcert` and `gp.internal_sslcrl`,
+  and a segment takes the node's certificate for any role through a
+  `pg_ident.conf` map;
+- the coordinator's distributed transaction recovery says when a round has
+  reached every node, Cloudberry's "DTM Started", and `gp.dtx_recovered()`
+  answers it, which gpstart waits for, as Cloudberry's pg_ctl waits;
+- a session's own PREPARE TRANSACTION is refused on a node of a cluster, and
+  ALTER SYSTEM is every node's, as in Cloudberry; REFRESH ... CONCURRENTLY
+  of a distributed view writes only the rows that changed; CREATE ROLE
+  takes PROFILE and ACCOUNT LOCK among its options; and `gp.optimizer_log_fallback`
+  logs each statement ORCA would not plan, and why.
 
 What PostgreSQL 19's own pg_dump and pg_dumpall write of a cluster reads
 back into another: the port's extensions' schemas, which a superuser may
@@ -382,15 +396,19 @@ make; a materialized view with its distribution, filled by REFRESH; a
 tag's owner, by name; an incremental view, whose triggers are internal and
 made again by its label, and a dynamic table, whose job its label makes
 again; and a directory table, given a directory of its own, without its
-files, which pg_dump does not carry.  Neither PAX's aux tables, which are
-in `pg_ext_aux` now, nor an index's tags, which name the index by OID, are
-dumped.
+files, which pg_dump does not carry; an index's tags, which are its table's
+label, by the index's name; and a protocol of the user's, which is a label
+on each of its functions, made again once the last of them is.  PAX's aux
+tables, which are in `pg_ext_aux` now, are not dumped.
 
 Cloudberry's management tools, gpMgmt, are installed beside the server
 (`gpMgmt/`, GPHOME the server's prefix), and run on PostgreSQL 19's own
 initdb, pg_ctl, pg_basebackup and pg_rewind: gpinitsystem, gpstart,
-gpstop, gpstate, gpconfig, gprecoverseg, gpaddmirrors, gpinitstandby,
-gpactivatestandby and gpdeletesystem.  What they ask of Cloudberry's
+gpstop, gpstate, gpconfig, gprecoverseg, gpaddmirrors, gpmovemirrors,
+gpinitstandby, gpactivatestandby and gpdeletesystem.  gpinitsystem's
+`NODE_SSL_DIR` makes a cluster whose nodes authenticate each other by
+certificates, and the lines the tools add to a node's `pg_hba.conf` later
+follow it (`gppylib/nodetls.py`).  What they ask of Cloudberry's
 patched tools that PostgreSQL 19's do not do — pg_basebackup's
 `--target-gp-dbid`, `--force-overwrite` and `-E`, pg_rewind's `--slot`, a
 connection's `gp_role=utility` — the port's copies do around them
@@ -422,8 +440,10 @@ checks, the instructions six workloads take on the two built without
 assertions (check 9) -- and `... run --rm meson-vanilla` and
 `meson-patched` run PostgreSQL's own tests in each build's tree (check 1).  The suites: the module suites (among them `cluster`,
 a coordinator and two segments, and `hooks`, which drives every hook of the
-core series through a test module); `greenplum`, part of Cloudberry's
-`greenplum_schedule` on a coordinator and three segments; `isolation2`, the
+core series through a test module); `greenplum`, Cloudberry's
+`greenplum_schedule` on a coordinator and three segments -- every test of it
+listed, those that run and those skipped with what stops them, and the
+reasons ORCA would not plan a statement in its ORCA pass totalled; `isolation2`, the
 tests of Cloudberry's `isolation2_schedule` that bear on M3 — distributed
 transactions and snapshots, locks and the global deadlock detector — on
 M4, FTS and mirrors, on M6, resource queues and memory accounting, and on
@@ -443,9 +463,10 @@ own, `/sys/fs/cgroup/gpdb_<pass>_<group>` -- the tests service is
 privileged, and its entrypoint makes them (`test/cgroup.sh`) -- and `memprot`, memory protection's refusals;
 `gpmgmt`, M7's, gpMgmt's tools on clusters they make on this host --
 gpinitsystem's, a mirror for each primary, and one of primaries alone that
-gpaddmirrors gives mirrors -- each tool checked by what the cluster says
-after it: a primary stopped, failed over from and recovered with pg_rewind
-and with pg_basebackup, a standby made and made the coordinator;
+gpaddmirrors gives mirrors, its nodes authenticating each other by
+certificates -- each tool checked by what the cluster says after it: a
+primary stopped, failed over from and recovered with pg_rewind and with
+pg_basebackup, a standby made and made the coordinator, a mirror moved;
 `dump`, M7's, a cluster's pg_dumpall read back into another cluster, and
 one node's into another node; `dbcopy`, a database copied by either
 strategy and moved to another tablespace and back, with PAX tables and
@@ -461,7 +482,12 @@ pass, `pg19/test/jobs` lists how long each job takes so that the longest
 start first, and each job's output is printed whole as it finishes, with a
 summary of the jobs at the end -- with the CPU time each took, where the
 tests service gives the jobs a cgroup each, which weighs as the job is long.
-The long suites split themselves further: `greenplum`'s tests over six
+Every server a job makes keeps its data in memory, the tests service's
+`/tmp` being a tmpfs, so `pg19/test/jobs` says too how much memory each job
+holds (`MEM=`), and a job starts only while the memory it needs is left:
+the tests service has a limit of its own, `CB_TESTS_MEM`, 40g unless given,
+and a full run takes some 25 GB of it at most, ten jobs at once.
+The long suites split themselves further: `greenplum`'s tests over eight
 clusters, PostGIS's over eight servers, `isolation2`'s over a cluster a
 group of tests, `singlenode`'s Cloudberry half over copies of the server
 PostgreSQL's tests ran on, and `diskquota`'s, `pax`'s and `resgroup`'s over
