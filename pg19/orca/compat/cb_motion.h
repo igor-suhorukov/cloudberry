@@ -40,7 +40,8 @@
 #include "cdb/cdb_plan_nodes.h"
 
 #define GP_ORCA_MOTION_OK			0
-#define GP_ORCA_MOTION_NESTED		1	/* a Gather in a slice the segments run */
+#define GP_ORCA_MOTION_NESTED		1	/* a Gather in a slice the segments
+										 * run, and a gp_core before 1.9 */
 #define GP_ORCA_MOTION_PARAM		2	/* a value another fragment computes */
 #define GP_ORCA_MOTION_EXTERN		3	/* a statement parameter, and an old gp_core */
 #define GP_ORCA_MOTION_WRITE		4	/* a write in a fragment */

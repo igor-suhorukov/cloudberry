@@ -39,7 +39,7 @@
  * here changes meaning or moves.
  */
 #define GP_CORE_API_VERSION_MAJOR	1
-#define GP_CORE_API_VERSION_MINOR	8
+#define GP_CORE_API_VERSION_MINOR	9
 
 struct Node;
 struct List;
@@ -170,6 +170,12 @@ typedef struct GpCoreApi
 	 * PostgreSQL's planner does.
 	 */
 	void		(*prepare_query) (struct Query *parse);
+
+	/*
+	 * Since 1.9, nothing new here but what a Motion does: a Gather in a
+	 * fragment a segment runs -- the slice it is in runs on one -- is
+	 * received there as a Motion between segments is (gp_motion.c).
+	 */
 } GpCoreApi;
 
 /*

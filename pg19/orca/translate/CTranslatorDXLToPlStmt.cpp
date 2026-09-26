@@ -180,6 +180,7 @@ CTranslatorDXLToPlStmt::CTranslatorDXLToPlStmt(
 	  m_is_tgt_tbl_distributed(false),
 	  m_result_rel_list(nullptr),
 	  m_partition_scans(nullptr),
+	  m_gather_into_segment(false),
 	  m_num_of_segments(num_of_segments),
 	  m_partition_selector_counter(0)
 {
@@ -351,8 +352,9 @@ CTranslatorDXLToPlStmt::GetPlannedStmtFromDXL(const CDXLNode *dxlnode,
 			contents = QueryDirectDispatchContents();
 		}
 
-		// Every Motion a Gather: a Motion between segments is a plan that
-		// reads more than one segment's rows.
+		// Every Motion a Gather to the coordinator: a Motion between
+		// segments -- a Gather into one of them too -- is a plan that reads
+		// more than one segment's rows.
 		ListCell *lc_motion = nullptr;
 		ForEach(lc_motion, m_dxl_to_plstmt_context->GetMotions())
 		{
@@ -360,6 +362,10 @@ CTranslatorDXLToPlStmt::GetPlannedStmtFromDXL(const CDXLNode *dxlnode,
 			{
 				contents = NIL;
 			}
+		}
+		if (m_gather_into_segment)
+		{
+			contents = NIL;
 		}
 
 		if (NIL != contents)
@@ -2712,15 +2718,23 @@ CTranslatorDXLToPlStmt::TranslateDXLMotion(
 			GP_UNPORTED("a Motion of an unknown kind");
 	}
 
-	// The coordinator is where a Gather's rows go, and only there: a Gather
-	// into a slice the segments run would be dispatched from a segment.  The
+	// A Gather's rows go to the coordinator, or to one segment.  The
 	// coordinator's own slice below a Motion it sends from -- Cloudberry's
-	// entry DB -- runs here, and a Gather in it as one above the rest.  And
-	// the rows of a Motion between segments go to segments.
+	// entry DB -- runs here, and a Gather in it as one above the rest.  A
+	// slice that runs on one segment -- Cloudberry's singleton reader, an
+	// aggregate of a subquery an UPDATE or DELETE compares with -- receives
+	// its Gather as a Motion between segments is received, its senders
+	// streaming every row to the one process that runs it (gp_motion.c).
+	// A slice every segment runs has no one segment to gather to.  And the
+	// rows of a Motion between segments go to segments.
 	if (GP_MOTION_GATHER == motion_type && 0 != recvslice->sliceIndex &&
 		GANGTYPE_ENTRYDB_READER != recvslice->gangType)
 	{
-		GP_UNPORTED("a Gather Motion inside a slice the segments run");
+		if (1 != recvslice->numsegments)
+		{
+			GP_UNPORTED("a Gather Motion inside a slice the segments run");
+		}
+		m_gather_into_segment = true;
 	}
 	if (GP_MOTION_GATHER != motion_type &&
 		(0 == recvslice->sliceIndex ||

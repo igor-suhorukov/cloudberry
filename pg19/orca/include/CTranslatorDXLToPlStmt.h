@@ -173,6 +173,10 @@ private:
 	// result relations, as the planner's are its scans' own
 	List *m_partition_scans;
 
+	// a Gather Motion into a slice that runs on one segment, which gp_core
+	// carries out as it does a Motion between segments
+	BOOL m_gather_into_segment;
+
 	// number of segments
 	ULONG m_num_of_segments;
 

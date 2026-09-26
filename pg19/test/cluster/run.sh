@@ -1957,6 +1957,30 @@ COMMIT;"
 		*) notok "a partitioned table's UPDATE that ORCA declines" "$out" ;;
 	esac
 
+	# A subquery an UPDATE or DELETE compares with, finished in one place --
+	# an aggregate, the first of its ordered rows: ORCA gathers to a segment,
+	# where the slice that finishes it runs alone -- Cloudberry's singleton
+	# reader -- and broadcasts the answer back to the writers.  The Gather's
+	# senders stream every row to that one process, and a sorted Gather's
+	# rows are sorted there; relayed, they reach it through the coordinator.
+	orca_write "a DELETE of a subquery's aggregate: gathered to one segment, and broadcast back" \
+		"DELETE FROM wu WHERE a = (SELECT max(x) FROM po WHERE x < 90);" \
+		"SELECT count(*), sum(a) FROM wu;" "Gather Motion 2:1  (slice3; segments: 2)"
+	orca_write "an UPDATE of the first of a subquery's ordered rows: a sorted Gather to one segment" \
+		"UPDATE wu SET b = (SELECT x FROM po WHERE y = 2 ORDER BY x DESC LIMIT 1) WHERE a < 50;" \
+		"SELECT count(*), sum(b) FROM wu;" "Merge Key"
+	sql="DELETE FROM wu WHERE a = (SELECT max(x) FROM po WHERE x < 90);
+		UPDATE wu SET b = (SELECT x FROM po WHERE y = 2 ORDER BY x DESC LIMIT 1) WHERE a < 50;"
+	want=$(printf '%s\n' "SET gp.optimizer = off;" "BEGIN;" "$sql" "SELECT count(*), sum(a), sum(b) FROM wu;" "ROLLBACK;" | qf 0)
+	got=""
+	for ic in udpifc relay; do
+		got="$got$ic: $(printf '%s\n' "SET gp.interconnect_type = $ic;" "BEGIN;" "$sql" \
+			"SELECT count(*), sum(a), sum(b) FROM wu;" "ROLLBACK;" | qf 0) "
+	done
+	[ -n "$want" ] && [ "$got" = "udpifc: $want relay: $want " ] \
+		&& ok "... over UDP and relayed, the planner's answers" \
+		|| notok "a Gather to one segment, over UDP and relayed" "$got / planner: $want"
+
 	# A statement that fails on some segments while its slices stream fails
 	# with their error, and ends: the rest of it is stopped as the first
 	# fails (gp_dispatch.c) -- a slice whose receiver failed would wait for

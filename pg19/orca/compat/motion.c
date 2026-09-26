@@ -112,19 +112,26 @@ motion_check_walker(Node *node, void *arg)
 		Plan	   *plan = (Plan *) node;
 		const GpCoreApi *api = cb_core_api();
 		int			type = api->motion_type(plan);
-		bool		gather = type == GP_MOTION_GATHER || type == GP_MOTION_DML;
+		bool		to_segment = type == GP_MOTION_GATHER &&
+			ctx->in_fragment && !ctx->on_coordinator;
+		bool		gather = (type == GP_MOTION_GATHER && !to_segment) ||
+			type == GP_MOTION_DML;
 		List	   *order = NIL;
 		motion_check_context sub;
 
 		/*
 		 * A Gather's rows go to the coordinator, from where it runs; so do a
-		 * dispatched write's counts.  The fragment a Motion from the
-		 * coordinator sends is the coordinator's own, which runs a Gather in
-		 * it as it runs one above every fragment -- Cloudberry's entry DB
-		 * slice, a LIMIT or an aggregate over a Gather broadcast back.
+		 * dispatched write's counts, and no write is in a fragment.  The
+		 * fragment a Motion from the coordinator sends is the coordinator's
+		 * own, which runs a Gather in it as it runs one above every fragment
+		 * -- Cloudberry's entry DB slice, a LIMIT or an aggregate over a
+		 * Gather broadcast back.  A Gather in a fragment a segment runs goes
+		 * to that segment -- the slice it is in runs on one -- which receives
+		 * it as it receives a Motion between segments, from gp_core 1.9 on;
+		 * so it is one here too.
 		 */
-		if (gather && ctx->in_fragment &&
-			!(ctx->on_coordinator && type == GP_MOTION_GATHER))
+		if ((type == GP_MOTION_DML && ctx->in_fragment) ||
+			(to_segment && api->version_minor < 9))
 		{
 			ctx->problem = GP_ORCA_MOTION_NESTED;
 			return true;

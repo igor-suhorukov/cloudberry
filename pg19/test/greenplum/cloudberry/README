@@ -68,8 +68,10 @@ bfv_dd, direct_dispatch, qp_targeted_dispatch (planner, orca)  the INFO
   Cloudberry reads the partitions in one; its INSERT and COPY send rows only
   to the segments their keys hash to; and a transaction that wrote on one
   segment commits there in one phase, where Cloudberry prepares it on every
-  segment the transaction's statements went to.  The rows the statements
-  return and change are Cloudberry's.
+  segment the transaction's statements went to.  Under ORCA, the slices
+  below a write are numbered one higher than Cloudberry's: its write is its
+  root slice, slice 0, and the port's is slice 1, below the coordinator's
+  own.  The rows the statements return and change are Cloudberry's.
 
 bfv_dd_multicolumn  the INFO lines of test_print_direct_dispatch_info that
   say where a statement goes.  Its INSERT ... SELECT of generate_series()
@@ -107,21 +109,21 @@ brin_ao, brin_aocs (planner, orca)  under the planner, the plans the test
 case_gp  IS NOT DISTINCT FROM, and the CASE form, printed as the searched
   CASE the port's rewrite makes of them (see the singlenode suite's README).
 
-correlated_subquery, qp_derived_table, qp_misc (orca)  the lines ORCA's
-  fallback trace prints and nothing else: each test sets
-  optimizer_trace_fallback, and ORCA declines the plans Cloudberry makes with
-  a Gather Motion into a slice the segments run -- one segment gathering
-  another's rows, which the port's Motions do not do yet -- so PostgreSQL's
-  planner plans them, with the same answers, and the trace says so.
+qp_misc (orca)  the lines ORCA's fallback trace prints where Cloudberry's
+  expected output has none, and nothing else: the test sets
+  optimizer_trace_fallback, and the port's ORCA declines NOT IN as an
+  anti-join, several DISTINCT aggregates, two subqueries that are not
+  scalars, and one plan it finds none for; PostgreSQL's planner plans them,
+  with the same answers.
 
 DML_over_joins (orca)  the lines ORCA's fallback trace prints and nothing
-  else: ORCA declines a Gather Motion into a slice the segments run, an
-  UPDATE that moves a row of a partitioned table, a query of a multi-level
-  partitioned one, a function it may not call on the segments (SIRV), and a
-  table the coordinator alone has; the planner's answers are the same.  An
-  UPDATE or DELETE that reads another table, or of a partitioned table, is
-  ORCA's where its target is held in ExclusiveLock, as without the global
-  deadlock detector it is.
+  else: ORCA declines an UPDATE that moves a row of a partitioned table, a
+  query of a multi-level partitioned one, a function it may not call on the
+  segments (SIRV), and a table the coordinator alone has; the planner's
+  answers are the same.  An UPDATE or DELETE that reads another table, or of
+  a partitioned table, is ORCA's where its target is held in ExclusiveLock,
+  as without the global deadlock detector it is; so is one that compares
+  with a subquery's aggregate, which ORCA gathers to one segment.
 
 expand_table_ao  pg_appendonly's compresstype of a table made with
   compresstype=none, which gp_ao records as no compression at all, an empty
@@ -172,10 +174,8 @@ gpctas (orca)  the lines ORCA's fallback trace prints and nothing else,
   the test setting optimizer_trace_fallback: catalogs, a column of a
   non-default collation, functions called without a FROM, a ROW expression
   and a subquery that is not a scalar, which Cloudberry's ORCA declines in
-  its own expected output too, and three plans with a Gather Motion into a
-  slice the segments run, which the port's Motions do not do yet.  A
-  REFRESH, whose query the port's planner plans, says nothing where
-  Cloudberry's ORCA says it declines one.
+  its own expected output too.  A REFRESH, whose query the port's planner
+  plans, says nothing where Cloudberry's ORCA says it declines one.
 
 gpdist_legacy_opclasses  the complex type, Cloudberry's own, which
   PostgreSQL 19 has not got: the table whose key takes every legacy

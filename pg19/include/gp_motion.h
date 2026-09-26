@@ -36,7 +36,7 @@
 #define GP_MOTION_NAME		"GpMotion"
 
 /* What a Motion does with the rows its senders send: Cloudberry's kinds. */
-#define GP_MOTION_GATHER		0	/* to the coordinator */
+#define GP_MOTION_GATHER		0	/* to the coordinator, or one segment */
 #define GP_MOTION_HASH			1	/* each to the segment its keys hash to */
 #define GP_MOTION_BROADCAST		2	/* each to every segment */
 #define GP_MOTION_RANDOM		3	/* each to the next segment in turn */
@@ -60,6 +60,9 @@ extern bool GpMotionCanDispatchPlans(void);
  * for every one; "slice" the slice it receives, for EXPLAIN.  With nkeys > 0
  * it merges the segments' sorted streams, the keys being columns of the
  * Motion's target list.  NULL when a key is not a column passed through.
+ * In a fragment a segment runs, it gathers to that segment, the one its
+ * slice runs on, which receives it as a Motion between segments -- and
+ * sorts what came, rather than merge it.
  */
 extern Plan *GpMotionMakeGather(Plan *fragment, List *targetlist, List *qual,
 								int content, int slice, int nkeys,
@@ -122,9 +125,9 @@ extern int	GpMotionType(Plan *plan);
 extern int	GpMotionSlice(Plan *plan);
 
 /*
- * The slice that receives a Motion between segments -- the slice of the
- * fragment it is in, which the translator knows -- so that its senders can
- * stream to the processes running that slice.
+ * The slice that receives a Motion between segments, or a Gather into one
+ * -- the slice of the fragment it is in, which the translator knows -- so
+ * that its senders can stream to the processes running that slice.
  */
 extern void GpMotionSetParent(Plan *plan, int parent);
 extern int	GpMotionParent(Plan *plan);
