@@ -171,6 +171,20 @@ static const struct config_enum_entry gp_log_gang_options[] = {
  * relation or a temporary file is made in are too.
  */
 static const char *const synced_settings[] = {
+	/*
+	 * PostGIS raster's, which its functions read on a segment as on the
+	 * coordinator: where GDAL finds its data, which drivers it may use and
+	 * whether a raster's file outside the database may be read -- settings
+	 * only a superuser sets, sent only for one (sync_value()), and before
+	 * "role", while the connection is still the session user's -- and the
+	 * options a session gives GDAL's virtual file systems.  Passed over where
+	 * postgis_raster is not loaded, and not set.
+	 */
+	"postgis.gdal_datapath",
+	"postgis.gdal_enabled_drivers",
+	"postgis.enable_outdb_rasters",
+	"postgis.gdal_cpl_debug",
+	"postgis.gdal_vsi_options",
 	"search_path",
 	"role",
 	"DateStyle",
@@ -246,6 +260,29 @@ static const char *const synced_settings[] = {
 };
 
 #define NUM_SYNCED_SETTINGS	lengthof(synced_settings)
+
+/* The ones a segment takes from a superuser only, and so is sent by one. */
+static const char *const superuser_settings[] = {
+	"postgis.gdal_datapath",
+	"postgis.gdal_enabled_drivers",
+	"postgis.enable_outdb_rasters",
+	"postgis.gdal_cpl_debug",
+};
+
+/*
+ * A setting's value, to be sent -- or NULL, for one not defined here or one
+ * the session user may not set, which its segments take from the cluster's
+ * configuration, as the coordinator took it.
+ */
+static const char *
+sync_value(int i)
+{
+	for (int j = 0; j < lengthof(superuser_settings); j++)
+		if (strcmp(synced_settings[i], superuser_settings[j]) == 0 &&
+			!superuser_arg(GetSessionUserId()))
+			return NULL;
+	return GetConfigOption(synced_settings[i], true, false);
+}
 
 /* How many rows a segment sends at a time when a relation is read. */
 #define GATHER_FETCH_ROWS	1000
@@ -1754,7 +1791,7 @@ reader_sync_settings(GpReaderConn *r)
 	appendStringInfoString(&sql, "SELECT ");
 	for (int i = 0; i < NUM_SYNCED_SETTINGS; i++)
 	{
-		values[i] = GetConfigOption(synced_settings[i], true, false);
+		values[i] = sync_value(i);
 		if (values[i] == NULL ||
 			(r->sent[i] != NULL && strcmp(r->sent[i], values[i]) == 0))
 			continue;
@@ -1933,7 +1970,7 @@ gang_sync_settings(GpGang *g)
 
 	for (int i = 0; i < NUM_SYNCED_SETTINGS; i++)
 	{
-		values[i] = GetConfigOption(synced_settings[i], true, false);
+		values[i] = sync_value(i);
 		if (values[i] == NULL)
 			continue;
 		if (g->sent[i] != NULL && strcmp(g->sent[i], values[i]) == 0)
