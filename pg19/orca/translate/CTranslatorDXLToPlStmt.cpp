@@ -6298,15 +6298,17 @@ CTranslatorDXLToPlStmt::TranslateDXLDml(
 			SetParamIds(write);
 		}
 
-		// Cloudberry sends an INSERT or DELETE whose rows all belong on one
-		// segment -- a row of constants, a DELETE that fixes the key -- to
-		// that segment alone, where the write is the plan's only slice; a
-		// DELETE whose key a few values fix, to their segments.  ORCA's core
-		// finds a single column's values; a key of two columns it does not
-		// look at, and the port finds them: an INSERT's in its one row of
-		// constants, a DELETE's in the Query's conditions.
+		// Cloudberry sends an INSERT, DELETE or UPDATE whose rows all belong
+		// on one segment -- a row of constants, a DELETE or an update in
+		// place that fixes the key -- to that segment alone, where the write
+		// is the plan's only slice; one whose key a few values fix, to their
+		// segments.  ORCA's core finds a single column's values; a key of
+		// two columns it does not look at, and the port finds them: an
+		// INSERT's in its one row of constants, a DELETE's and an UPDATE's in
+		// the Query's conditions.  Not a split update's, whose rows move.
 		List *contents = NIL;
-		if ((CMD_INSERT == m_cmd_type || CMD_DELETE == m_cmd_type) &&
+		if ((CMD_INSERT == m_cmd_type || CMD_DELETE == m_cmd_type ||
+			 (CMD_UPDATE == m_cmd_type && !split)) &&
 			NIL == m_dxl_to_plstmt_context->GetMotions())
 		{
 			contents = TranslateDXLDirectDispatchContents(
@@ -6318,7 +6320,7 @@ CTranslatorDXLToPlStmt::TranslateDXLDml(
 					CMDIdGPDB::CastMdid(mdid_target_table)->Oid(), md_rel,
 					result_plan);
 			}
-			if (NIL == contents && CMD_DELETE == m_cmd_type)
+			if (NIL == contents && CMD_INSERT != m_cmd_type)
 			{
 				contents = QueryDirectDispatchContents();
 			}

@@ -1968,6 +1968,9 @@ COMMIT;"
 	orca_write "UPDATE ... WHERE EXISTS" \
 		"UPDATE wu SET b = -b WHERE EXISTS (SELECT 1 FROM po WHERE po.x = wu.a AND po.y > 4);" \
 		"SELECT count(*), sum(b) FROM wu;" "Update on wu"
+	orca_write "an update in place whose condition fixes the key: to that segment alone" \
+		"UPDATE wu SET b = b + 1 WHERE a = 7;" \
+		"SELECT count(*), sum(b) FROM wu;" "Dispatch  (slice1; segments: 1)"
 	orca_write "an UPDATE of the key joined to another table: a Split, each row moved once" \
 		"UPDATE wu SET a = a + 1000 FROM po WHERE wu.a = po.x AND po.y = 2;" \
 		"SELECT count(*), sum(a), count(*) FILTER (WHERE a > 1000) FROM wu;" "Split Update"
