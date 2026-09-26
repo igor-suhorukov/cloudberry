@@ -74,6 +74,14 @@
 bool		gp_optimizer = true;
 bool		gp_optimizer_trace_fallback = false;
 
+/*
+ * The port's own: each statement ORCA was asked to plan and did not, and
+ * ORCA's reason, in the server's log -- the reasons of a whole workload, for
+ * the decision the counters are kept for (gp_orca.fallbacks()), where the
+ * trace reaches only the session that asked for it.
+ */
+static bool gp_optimizer_log_fallback = false;
+
 #define GP_ORCA_COUNTERS_NAME	"gp_orca_counters"
 
 /*
@@ -216,6 +224,12 @@ record_fallback(GpFallbackReason reason, const char *detail)
 				(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
 				 errmsg("GPORCA failed to produce a plan, falling back to Postgres-based planner"),
 				 detail ? errdetail("%s", detail) : 0));
+	if (gp_optimizer_log_fallback &&
+		(reason == GP_FALLBACK_declined || reason == GP_FALLBACK_error))
+		ereport(LOG_SERVER_ONLY,
+				(errmsg("ORCA fell back (%s): %s", GpOrcaFallbackReasonName(reason),
+						detail ? detail : GpOrcaFallbackReasonDoc(reason)),
+				 errhidestmt(true), errhidecontext(true)));
 }
 
 /*
@@ -394,6 +408,16 @@ GpOrcaInstallPlannerHook(void)
 							 &gp_optimizer_trace_fallback,
 							 false,
 							 PGC_USERSET,
+							 0,
+							 NULL, NULL, NULL);
+
+	DefineCustomBoolVariable("gp.optimizer_log_fallback",
+							 "Log each statement ORCA was asked to plan and did not, and why.",
+							 "The server's log, for a whole workload's reasons; "
+							 "gp.optimizer_trace_fallback tells the session.",
+							 &gp_optimizer_log_fallback,
+							 false,
+							 PGC_SUSET,
 							 0,
 							 NULL, NULL, NULL);
 

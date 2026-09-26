@@ -157,6 +157,9 @@ make_cluster() {
 			# cluster runs with: a statement's memory is its queue's to give
 			echo "gp.resqueue_memory_policy = 'eager_free'"
 			[ "$n" -eq 0 ] && echo "gp.role = 'dispatch'"
+			# each statement ORCA would not plan, and why, in the log: the
+			# ORCA pass's reasons, totalled below
+			[ "$n" -eq 0 ] && echo "gp.optimizer_log_fallback = on"
 		} >> "$d/postgresql.auto.conf"
 	done
 	for n in $(seq 1 $((NODES - 1))) 0; do
@@ -389,6 +392,10 @@ run_group() {
 	# they run from, whose test functions of Cloudberry's own the port's
 	# cb_regress.so serves (auth_constraint's check_auth_time_constraints)
 	ln -sf "$("$BINDIR/pg_config" --pkglibdir)/cb_regress.so" "$R/regress.so"
+	# ORCA's counts, from the pass's start (gp_orca.fallbacks()), and where
+	# the coordinator's log was then
+	"$PSQL" -X -q -d template1 -c "SELECT gp_orca.reset_fallbacks()" > /dev/null 2>&1
+	logpos=$(stat -c %s "$(node_dir "$g" 0).log")
 	watchdog "$R/cancelled" &
 	wd=$!
 	trap 'kill "$wd" 2> /dev/null; exit 1' TERM INT
@@ -417,6 +424,12 @@ run_group() {
 	echo "$rc" > "$R/rc"
 	echo $(( $(date +%s) - t0 )) > "$R/secs"
 	kill "$wd" 2> /dev/null; wait "$wd" 2> /dev/null
+	"$PSQL" -X -q -t -A -F ' ' -d template1 \
+		-c "SELECT reason, count FROM gp_orca.fallbacks() WHERE reason IN ('planned', 'declined', 'error')" \
+		> "$R/fallbacks" 2> /dev/null
+	tail -c +"$((logpos + 1))" "$(node_dir "$g" 0).log" |
+		sed -n 's/.*LOG:  ORCA fell back \(([a-z]*)\): \(Falling back to Postgres-based planner because GPORCA does not support the following feature: \)\{0,1\}\(.*\)$/\1: \3/p' \
+		> "$R/fallback_reasons"
 
 	# test_setup's tablespace outlives the database: gone before the next
 	# pass.
@@ -469,6 +482,17 @@ for pass in ${PASSES:-planner orca}; do
 	if cat "$WORK"/*/"$pass"/cancelled 2> /dev/null | grep -q .; then
 		echo "  cancelled after $TIMEOUT:"
 		cat "$WORK"/*/"$pass"/cancelled | sed 's/^/    /'
+	fi
+	# What ORCA would not plan, as the numbers decision 1 keeps for M7's
+	# decision of Route B: how many statements ORCA planned in the pass, how
+	# many it was asked to and did not, and the reasons, most often first.
+	if [ "$pass" = orca ]; then
+		read -r planned declined errored < <(cat "$WORK"/*/orca/fallbacks 2> /dev/null |
+			awk '{ n[$1] += $2 } END { print n["planned"] + 0, n["declined"] + 0, n["error"] + 0 }')
+		echo "  ORCA planned $planned statements, and would not plan $((declined + errored)): $declined declined, $errored raised"
+		cat "$WORK"/*/orca/fallback_reasons 2> /dev/null | sort | uniq -c | sort -rn > "$WORK/orca-fallbacks"
+		head -12 "$WORK/orca-fallbacks" | sed 's/^/    /'
+		[ -n "${RESULTS_DIR:-}" ] && cp "$WORK/orca-fallbacks" "$RESULTS_DIR/greenplum-orca-fallbacks.txt"
 	fi
 	unreviewed=$(for g in "${groups[@]}"; do
 					 (cd "$WORK/$g/$pass/canon" && ls -- *.diff 2> /dev/null | sed 's/\.diff$//')
