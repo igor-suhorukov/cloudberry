@@ -209,9 +209,8 @@ loopback_conn(const GpSegmentConfig *node, const char *dbname, bool trusted)
 	const char *user = GetUserNameFromId(GetSessionUserId(), false);
 	const GpSegmentConfig *self = node != NULL ? node : GpClusterSelf();
 	int			dbid = node != NULL ? node->dbid : 0;
-	const char *passfile = GpDispatchPassfile();
-	const char *keywords[10];
-	const char *values[10];
+	const char *keywords[7 + GP_INTERNAL_CONN_OPTIONS];
+	const char *values[7 + GP_INTERNAL_CONN_OPTIONS];
 	const char *host = "localhost";
 	char		portbuf[16];
 	char	   *options = NULL;
@@ -270,13 +269,7 @@ loopback_conn(const GpSegmentConfig *node, const char *dbname, bool trusted)
 		keywords[n] = "options";
 		values[n++] = options;
 	}
-	if (passfile != NULL && passfile[0] != '\0')
-	{
-		keywords[n] = "passfile";
-		values[n++] = passfile;
-	}
-	keywords[n] = NULL;
-	values[n] = NULL;
+	n = GpInternalConnOptions(keywords, values, n);
 
 	conn = libpqsrv_connect_params(keywords, values, false, loopback_wait_event());
 	if (conn == NULL || PQstatus(conn) != CONNECTION_OK)

@@ -33,7 +33,14 @@
  * on the early milestones, and "gp.internal_passfile" names the password file
  * the dispatcher hands libpq.  A file, not a setting: a setting is readable by
  * any user who can SHOW it, and this is a password for every database in the
- * cluster.
+ * cluster.  And for certificates in production: "gp.internal_sslmode",
+ * "gp.internal_sslcert", "gp.internal_sslkey", "gp.internal_sslrootcert" and
+ * "gp.internal_sslcrl" are libpq's options of the same names, the TLS a node
+ * asks of the node it connects to, the certificate it shows, and what it
+ * checks the other's by.  A segment's pg_hba.conf then takes the node's
+ * certificate for any role, through a map (cert map=...), as Cloudberry's
+ * takes its internal connections without a password.  Every connection gp_core
+ * opens to another node carries them (GpInternalConnOptions()).
  *
  * THE TRANSACTION.  Whatever the segments are sent is done inside the
  * coordinator's transaction: the first statement a transaction dispatches
@@ -124,6 +131,13 @@
 
 /* Where libpq finds the password for the segments; see the file header. */
 static char *gp_internal_passfile = NULL;
+
+/* The TLS of the connections between nodes, libpq's; see the file header. */
+static char *gp_internal_sslmode = NULL;
+static char *gp_internal_sslcert = NULL;
+static char *gp_internal_sslkey = NULL;
+static char *gp_internal_sslrootcert = NULL;
+static char *gp_internal_sslcrl = NULL;
 
 /*
  * How often, and how far apart, a gang is tried again while a segment is in
@@ -589,8 +603,8 @@ gang_connect(void)
 
 	for (int i = 0; i < nsegs; i++)
 	{
-		const char *keywords[10];
-		const char *values[10];
+		const char *keywords[7 + GP_INTERNAL_CONN_OPTIONS];
+		const char *values[7 + GP_INTERNAL_CONN_OPTIONS];
 		char		portbuf[16];
 		int			n = 0;
 		PGconn	   *conn;
@@ -611,13 +625,7 @@ gang_connect(void)
 		values[n++] = GetDatabaseEncodingName();
 		keywords[n] = "options";
 		values[n++] = qe_identity_option(segs[i].content);
-		if (gp_internal_passfile != NULL && gp_internal_passfile[0] != '\0')
-		{
-			keywords[n] = "passfile";
-			values[n++] = gp_internal_passfile;
-		}
-		keywords[n] = NULL;
-		values[n] = NULL;
+		n = GpInternalConnOptions(keywords, values, n);
 
 		/*
 		 * A segment in recovery is tried again, gp.gang_creation_retry_count
@@ -1754,8 +1762,8 @@ static GpReaderConn *
 reader_connect(GpGang *g, int content)
 {
 	const GpSegmentConfig *seg = GpClusterSegmentByContent(content);
-	const char *keywords[10];
-	const char *values[10];
+	const char *keywords[7 + GP_INTERNAL_CONN_OPTIONS];
+	const char *values[7 + GP_INTERNAL_CONN_OPTIONS];
 	char		portbuf[16];
 	int			n = 0;
 	PGconn	   *conn;
@@ -1789,13 +1797,7 @@ reader_connect(GpGang *g, int content)
 	 */
 	values[n++] = psprintf("%s -c max_parallel_workers_per_gather=0",
 						   qe_identity_option(content));
-	if (gp_internal_passfile != NULL && gp_internal_passfile[0] != '\0')
-	{
-		keywords[n] = "passfile";
-		values[n++] = gp_internal_passfile;
-	}
-	keywords[n] = NULL;
-	values[n] = NULL;
+	n = GpInternalConnOptions(keywords, values, n);
 
 	conn = libpqsrv_connect_params(keywords, values, false,
 								   dispatch_wait_event());
@@ -2486,8 +2488,8 @@ dtx_finish_again(int content, const char *sql, bool commit)
 	{
 		while (!done && GetCurrentTimestamp() < deadline)
 		{
-			const char *keywords[8];
-			const char *values[8];
+			const char *keywords[5 + GP_INTERNAL_CONN_OPTIONS];
+			const char *values[5 + GP_INTERNAL_CONN_OPTIONS];
 			char		portbuf[16];
 			int			n = 0;
 			PGconn	   *conn;
@@ -2503,13 +2505,7 @@ dtx_finish_again(int content, const char *sql, bool commit)
 			values[n++] = gang_username;
 			keywords[n] = "application_name";
 			values[n++] = "cloudberry dispatcher";
-			if (gp_internal_passfile != NULL && gp_internal_passfile[0] != '\0')
-			{
-				keywords[n] = "passfile";
-				values[n++] = gp_internal_passfile;
-			}
-			keywords[n] = NULL;
-			values[n] = NULL;
+			n = GpInternalConnOptions(keywords, values, n);
 
 			conn = libpqsrv_connect_params(keywords, values, false,
 										   dispatch_wait_event());
@@ -4715,10 +4711,53 @@ GpDistRandomLocal(Oid relid, Tuplestorestate *store, TupleDesc desc,
 /* Start-up                                                                  */
 /* ------------------------------------------------------------------------- */
 
-const char *
-GpDispatchPassfile(void)
+int
+GpInternalConnOptions(const char **keywords, const char **values, int n)
 {
-	return gp_internal_passfile;
+	static const struct
+	{
+		const char *keyword;
+		char	  **setting;
+	}			options[] =
+	{
+		{"passfile", &gp_internal_passfile},
+		{"sslmode", &gp_internal_sslmode},
+		{"sslcert", &gp_internal_sslcert},
+		{"sslkey", &gp_internal_sslkey},
+		{"sslrootcert", &gp_internal_sslrootcert},
+		{"sslcrl", &gp_internal_sslcrl},
+	};
+
+	StaticAssertStmt(lengthof(options) + 1 == GP_INTERNAL_CONN_OPTIONS,
+					 "GP_INTERNAL_CONN_OPTIONS counts the options and the terminator");
+	for (int i = 0; i < lengthof(options); i++)
+	{
+		const char *value = *options[i].setting;
+
+		if (value != NULL && value[0] != '\0')
+		{
+			keywords[n] = options[i].keyword;
+			values[n++] = value;
+		}
+	}
+	keywords[n] = NULL;
+	values[n] = NULL;
+	return n;
+}
+
+/* libpq's sslmode, or "" for libpq's own default. */
+static bool
+check_internal_sslmode(char **newval, void **extra, GucSource source)
+{
+	static const char *const modes[] = {
+		"", "disable", "allow", "prefer", "require", "verify-ca", "verify-full"
+	};
+
+	for (int i = 0; i < lengthof(modes); i++)
+		if (strcmp(*newval, modes[i]) == 0)
+			return true;
+	GUC_check_errdetail("Valid values are \"disable\", \"allow\", \"prefer\", \"require\", \"verify-ca\", \"verify-full\" and \"\", libpq's default.");
+	return false;
 }
 
 void
@@ -4759,6 +4798,52 @@ GpDispatchInit(void)
 							   "the password somewhere the server can read and "
 							   "a user cannot: a file, not a setting.",
 							   &gp_internal_passfile,
+							   "",
+							   PGC_SUSET,
+							   0,
+							   NULL, NULL, NULL);
+
+	/*
+	 * Certificates between nodes (decision 5): libpq's options, for every
+	 * connection gp_core opens to another node.  A relative path is the data
+	 * directory's, where a server's processes run.
+	 */
+	DefineCustomStringVariable("gp.internal_sslmode",
+							   "TLS a node asks of the node it connects to.",
+							   "libpq's sslmode; empty for libpq's default.",
+							   &gp_internal_sslmode,
+							   "",
+							   PGC_SUSET,
+							   0,
+							   check_internal_sslmode, NULL, NULL);
+	DefineCustomStringVariable("gp.internal_sslcert",
+							   "Certificate a node shows the node it connects to.",
+							   "libpq's sslcert; empty for libpq's default.",
+							   &gp_internal_sslcert,
+							   "",
+							   PGC_SUSET,
+							   0,
+							   NULL, NULL, NULL);
+	DefineCustomStringVariable("gp.internal_sslkey",
+							   "Private key of gp.internal_sslcert.",
+							   "libpq's sslkey; empty for libpq's default.",
+							   &gp_internal_sslkey,
+							   "",
+							   PGC_SUSET,
+							   0,
+							   NULL, NULL, NULL);
+	DefineCustomStringVariable("gp.internal_sslrootcert",
+							   "Certificate authorities a node checks another node's certificate by.",
+							   "libpq's sslrootcert; empty for libpq's default.",
+							   &gp_internal_sslrootcert,
+							   "",
+							   PGC_SUSET,
+							   0,
+							   NULL, NULL, NULL);
+	DefineCustomStringVariable("gp.internal_sslcrl",
+							   "Certificates revoked, of those another node may show.",
+							   "libpq's sslcrl; empty for libpq's default.",
+							   &gp_internal_sslcrl,
 							   "",
 							   PGC_SUSET,
 							   0,

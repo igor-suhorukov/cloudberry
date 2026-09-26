@@ -3114,10 +3114,157 @@ SQL
 			"$(datadir "$n")/pg_hba.conf"
 		"$BINDIR/pg_ctl" -D "$(datadir "$n")" -w -t 30 reload >/dev/null 2>&1
 	done
+
+	###########################################################################
+	echo "16. the nodes authenticate each other by certificates"
+	###########################################################################
+	# Decision 5 asks for certificates in production.  Each node has one of
+	# the cluster's authority, which it shows as a server and as a client:
+	# the segments take it for any role (cert map=gpnodes, pg_ident.conf's
+	# "all"), over TCP, where TLS is -- a socket has none -- and the
+	# coordinator connects with gp.internal_sslmode = verify-full, its
+	# certificate and the authority's, on every connection it makes: the
+	# gang, its readers, distributed transaction recovery, the detector.
+	certs="$ROOT/certs"
+	mkdir -p "$certs"
+	mkcert() {				# mkcert <name> <authority> <CN>
+		openssl req -new -nodes -newkey rsa:2048 -subj "/CN=$3" \
+			-keyout "$certs/$1.key" -out "$certs/$1.csr" &&
+		openssl x509 -req -in "$certs/$1.csr" -days 2 -CA "$certs/$2.crt" \
+			-CAkey "$certs/$2.key" -CAcreateserial -out "$certs/$1.crt" \
+			-extfile <(printf 'subjectAltName=DNS:localhost,IP:127.0.0.1,IP:::1\n')
+	}
+	if openssl req -new -x509 -nodes -newkey rsa:2048 -days 2 -subj "/CN=cluster-ca" \
+			-keyout "$certs/ca.key" -out "$certs/ca.crt" &&
+		openssl req -new -x509 -nodes -newkey rsa:2048 -days 2 -subj "/CN=other-ca" \
+			-keyout "$certs/other.key" -out "$certs/other.crt" &&
+		mkcert node ca cloudberry-node && mkcert rogue other cloudberry-node
+	then
+		chmod 600 "$certs"/*.key
+		ok "the cluster's authority, a node's certificate, and another authority's"
+	else
+		notok "openssl makes the certificates"
+	fi >"$ROOT/openssl.log" 2>&1
+	tail -1 "$ROOT/openssl.log"
+
+	# The same nodes, named by host and port: TLS is TCP's.
+	TCPCONF="$ROOT/gp_cluster_tcp.conf"
+	{
+		echo "# dbid content role host port datadir"
+		for n in 0 1 2; do
+			echo "$(dbid "$n") $(content "$n") p localhost $(port "$n") $(datadir "$n")"
+		done
+	} > "$TCPCONF"
+	TLS=("gp.cluster_config = '$TCPCONF'" "listen_addresses = 'localhost'"
+		 "ssl = on" "ssl_cert_file = '$certs/node.crt'"
+		 "ssl_key_file = '$certs/node.key'" "ssl_ca_file = '$certs/ca.crt'"
+		 "gp.cluster_secret = '$SECRET'")
+	for n in 1 2; do
+		cp "$(datadir "$n")/pg_hba.conf" "$ROOT/pg_hba.$n"
+		sed -i -E 's/^host(\s+all\s+all\s+\S+\s+)trust$/hostssl\1cert map=gpnodes/' \
+			"$(datadir "$n")/pg_hba.conf"
+		echo "gpnodes cloudberry-node all" >> "$(datadir "$n")/pg_ident.conf"
+		start_node "$n" "${TLS[@]}"
+	done
+
+	"$BINDIR/pg_ctl" -D "$(datadir 0)" -m immediate stop >/dev/null 2>&1
+	logsize=$(stat -c %s "$ROOT/node0.log")
+	start_node 0 "${TLS[@]}"
+	out=$(q 0 "SELECT count(*) FROM gp.exec_on_segments('SELECT 1');")
+	case "$out" in
+		*"certificate"*) ok "a coordinator without its certificate is refused by the segments" ;;
+		*) notok "a segment should have asked for a certificate" "$out" ;;
+	esac
+	out=0
+	for i in $(seq 1 20); do
+		out=$(tail -c +"$((logsize + 1))" "$ROOT/node0.log" |
+			grep -c "distributed transaction recovery could not connect")
+		[ "$out" -gt 0 ] && break
+		sleep 0.5
+	done
+	[ "$out" -gt 0 ] && ok "and so is its distributed transaction recovery, which connects as it starts" \
+		|| notok "recovery should have failed to connect without the certificate"
+
+	CLIENT=("gp.internal_sslmode = 'verify-full'"
+			"gp.internal_sslrootcert = '$certs/ca.crt'")
+	"$BINDIR/pg_ctl" -D "$(datadir 0)" -m immediate stop >/dev/null 2>&1
+	logsize=$(stat -c %s "$ROOT/node0.log")
+	start_node 0 "${TLS[@]}" "${CLIENT[@]}" \
+		"gp.internal_sslcert = '$certs/node.crt'" "gp.internal_sslkey = '$certs/node.key'" \
+		"shared_preload_libraries = '$PRELOAD,gp_orca'" \
+		"gp.enable_global_deadlock_detector = on" "gp.global_deadlock_detector_period = 5"
+	out=$(q 0 "SELECT DISTINCT result FROM gp.exec_on_segments('SELECT ssl::text || '' '' || client_dn FROM pg_stat_ssl WHERE pid = pg_backend_pid()');")
+	[ "$out" = "true /CN=cloudberry-node" ] \
+		&& ok "with it, the dispatcher's connections are TLS, the node's certificate its client's" \
+		|| notok "the dispatcher's connection to a segment over TLS" "$out"
+
+	# A join of two redistributed sides is a slice on a reader of each
+	# segment; the INSERT writes on both segments, so it commits in two
+	# phases, on the gang's connections.
+	out=$(printf '%s\n' "SET gp.optimizer = on;" \
+		"CREATE TABLE tls_t (a int, b int) DISTRIBUTED BY (a);" \
+		"INSERT INTO tls_t SELECT i, i % 7 FROM generate_series(1, 100) i;" \
+		"SELECT count(*) FROM tls_t t1 JOIN tls_t t2 ON t1.b = t2.a;" \
+		"SELECT count(*) FROM gp.exec_on_segments('SELECT count(*) FROM pg_stat_activity JOIN pg_stat_ssl USING (pid) WHERE application_name = ''cloudberry reader'' AND ssl AND client_dn = ''/CN=cloudberry-node''') WHERE result::int > 0;" \
+		"DROP TABLE tls_t;" | qf 0)
+	[ "$out" = "$(printf '86\n2')" ] \
+		&& ok "a join's readers connect with it too, and the INSERT's two phases commit over TLS" \
+		|| notok "readers and two-phase commit over TLS" "$out"
+
+	out=""
+	for i in $(seq 1 30); do
+		out=$(q 0 "SELECT count(*) FROM gp.exec_on_segments('SELECT count(*) FROM pg_stat_activity JOIN pg_stat_ssl USING (pid) WHERE application_name = ''cloudberry global deadlock detector'' AND ssl') WHERE result::int > 0;")
+		[ "$out" = "2" ] && break
+		sleep 0.5
+	done
+	[ "$out" = "2" ] && ok "the deadlock detector's connections to the segments are TLS" \
+		|| notok "the detector's connections over TLS" "$out"
+
+	out=$(tail -c +"$((logsize + 1))" "$ROOT/node0.log" | grep -c "could not connect")
+	[ "$out" = "0" ] && ok "distributed transaction recovery reaches every segment as the coordinator starts" \
+		|| notok "the coordinator's processes could not connect" \
+			"$(tail -c +"$((logsize + 1))" "$ROOT/node0.log" | grep "could not connect" | head -2)"
+
+	start_node 0 "${TLS[@]}" "${CLIENT[@]}" \
+		"gp.internal_sslcert = '$certs/rogue.crt'" "gp.internal_sslkey = '$certs/rogue.key'"
+	seglog=$(stat -c %s "$ROOT/node1.log")
+	out=$(q 0 "SELECT count(*) FROM gp.exec_on_segments('SELECT 1');")
+	case "$out" in
+		*"could not connect"*)
+			if tail -c +"$((seglog + 1))" "$ROOT/node1.log" | grep -q "could not accept SSL connection: certificate verify failed"; then
+				ok "a certificate of another authority is refused, its name though the node's"
+			else
+				notok "the segment should have refused the certificate itself" \
+					"$(tail -c +"$((seglog + 1))" "$ROOT/node1.log" | tail -2)"
+			fi ;;
+		*) notok "another authority's certificate should be refused" "$out" ;;
+	esac
+
+	start_node 0 "${TLS[@]}" "gp.internal_sslmode = 'verify-full'" \
+		"gp.internal_sslrootcert = '$certs/other.crt'" \
+		"gp.internal_sslcert = '$certs/node.crt'" "gp.internal_sslkey = '$certs/node.key'"
+	out=$(q 0 "SELECT count(*) FROM gp.exec_on_segments('SELECT 1');")
+	case "$out" in
+		*"certificate verify failed"*) ok "and the coordinator refuses a segment its authority did not sign" ;;
+		*) notok "the coordinator should have refused the segments' certificate" "$out" ;;
+	esac
+
+	out=$(q 0 "SET gp.internal_sslmode = 'verify-everything';" 2>&1)
+	case "$out" in
+		*"invalid value"*) ok "gp.internal_sslmode takes libpq's modes alone" ;;
+		*) notok "gp.internal_sslmode's check" "$out" ;;
+	esac
+
+	# Back to the sockets, trust and no TLS.
+	for n in 1 2; do
+		cp "$ROOT/pg_hba.$n" "$(datadir "$n")/pg_hba.conf"
+		start_node "$n"
+	done
+	start_node 0
 fi
 
 ###############################################################################
-echo "16. a cluster described wrongly is a server that does not start"
+echo "17. a cluster described wrongly is a server that does not start"
 ###############################################################################
 # The message has to name the file and the line: this is read in the
 # postmaster while it starts, so it is all the operator is given.
@@ -3187,7 +3334,7 @@ refuses "a file that is not there is refused" \
 	"gp.cluster_config = '$ROOT/nowhere.conf'"
 
 ###############################################################################
-echo "17. with no cluster configured, this is a single node"
+echo "18. with no cluster configured, this is a single node"
 ###############################################################################
 if start_node 0 "gp.cluster_config = ''" ; then
 	notok "node 0 should not have started: gp.role is dispatch with no cluster"

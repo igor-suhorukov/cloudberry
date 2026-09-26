@@ -326,11 +326,16 @@ extern void GpStreamEnd(GpStream *stream);
 extern void GpDispatchResetGang(void);
 
 /*
- * The password file the dispatcher hands libpq (gp.internal_passfile), for
- * the other processes of gp_core that connect to the segments: "" or NULL
- * when there is none.
+ * What every connection gp_core opens to another node carries besides its
+ * own options: the password file (gp.internal_passfile), and the TLS of
+ * certificates between nodes (gp.internal_sslmode, sslcert, sslkey,
+ * sslrootcert and sslcrl), each where it is set.  Appended to keywords and
+ * values at n, with their NULL terminator, which needs
+ * GP_INTERNAL_CONN_OPTIONS more entries; returns the new n.
  */
-extern const char *GpDispatchPassfile(void);
+#define GP_INTERNAL_CONN_OPTIONS	7
+extern int	GpInternalConnOptions(const char **keywords, const char **values,
+								  int n);
 
 /*
  * What another server says besides its answers -- a NOTICE, WARNING or INFO

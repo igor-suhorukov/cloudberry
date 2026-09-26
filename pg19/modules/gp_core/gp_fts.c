@@ -835,10 +835,9 @@ static void
 fts_attempt_begin(FtsPair *p)
 {
 	const GpSegmentConfig *node = &fts_nodes[p->target];
-	const char *keywords[8];
-	const char *values[8];
+	const char *keywords[5 + GP_INTERNAL_CONN_OPTIONS];
+	const char *values[5 + GP_INTERNAL_CONN_OPTIONS];
 	char		portbuf[16];
-	const char *passfile = GpDispatchPassfile();
 	int			n = 0;
 
 	snprintf(portbuf, sizeof(portbuf), "%d", node->port);
@@ -852,13 +851,7 @@ fts_attempt_begin(FtsPair *p)
 	values[n++] = fts_user;
 	keywords[n] = "application_name";
 	values[n++] = GP_FTS_APPNAME;
-	if (passfile != NULL && passfile[0] != '\0')
-	{
-		keywords[n] = "passfile";
-		values[n++] = passfile;
-	}
-	keywords[n] = NULL;
-	values[n] = NULL;
+	n = GpInternalConnOptions(keywords, values, n);
 
 	p->stmt = 0;
 	p->ready = false;

@@ -673,14 +673,13 @@ gp_inject_fault(PG_FUNCTION_ARGS)
 	}
 	else
 	{
-		const char *keywords[8];
-		const char *values[8];
+		const char *keywords[5 + GP_INTERNAL_CONN_OPTIONS];
+		const char *values[5 + GP_INTERNAL_CONN_OPTIONS];
 		char		portbuf[16];
 		const char *params[10];
 		int			n = 0;
 		PGconn	   *conn;
 		PGresult   *res;
-		const char *passfile = GpDispatchPassfile();
 
 		snprintf(portbuf, sizeof(portbuf), "%d", node->port);
 		keywords[n] = "host";
@@ -693,13 +692,7 @@ gp_inject_fault(PG_FUNCTION_ARGS)
 		values[n++] = GetUserNameFromId(GetUserId(), false);
 		keywords[n] = "application_name";
 		values[n++] = "cloudberry fault injector";
-		if (passfile != NULL && passfile[0] != '\0')
-		{
-			keywords[n] = "passfile";
-			values[n++] = passfile;
-		}
-		keywords[n] = NULL;
-		values[n] = NULL;
+		n = GpInternalConnOptions(keywords, values, n);
 
 		params[0] = name;
 		params[1] = type;

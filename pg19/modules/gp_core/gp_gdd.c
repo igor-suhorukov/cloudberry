@@ -493,11 +493,10 @@ gdd_conn(const GpSegmentConfig *seg)
 
 	for (int d = 0; d < lengthof(dbs); d++)
 	{
-		const char *keywords[8];
-		const char *values[8];
+		const char *keywords[5 + GP_INTERNAL_CONN_OPTIONS];
+		const char *values[5 + GP_INTERNAL_CONN_OPTIONS];
 		char		portbuf[16];
 		int			n = 0;
-		const char *passfile = GpDispatchPassfile();
 
 		snprintf(portbuf, sizeof(portbuf), "%d", seg->port);
 		keywords[n] = "host";
@@ -510,13 +509,7 @@ gdd_conn(const GpSegmentConfig *seg)
 		values[n++] = gdd_user;
 		keywords[n] = "application_name";
 		values[n++] = "cloudberry global deadlock detector";
-		if (passfile != NULL && passfile[0] != '\0')
-		{
-			keywords[n] = "passfile";
-			values[n++] = passfile;
-		}
-		keywords[n] = NULL;
-		values[n] = NULL;
+		n = GpInternalConnOptions(keywords, values, n);
 
 		conn = libpqsrv_connect_params(keywords, values, false, gdd_wait_event());
 		if (conn == NULL || PQstatus(conn) != CONNECTION_OK)

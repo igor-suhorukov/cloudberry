@@ -2158,12 +2158,11 @@ recovery_self(void)
 static PGconn *
 recovery_connect(const GpSegmentConfig *seg, const char *dbname)
 {
-	const char *keywords[8];
-	const char *values[8];
+	const char *keywords[5 + GP_INTERNAL_CONN_OPTIONS];
+	const char *values[5 + GP_INTERNAL_CONN_OPTIONS];
 	char		portbuf[16];
 	int			n = 0;
 	PGconn	   *conn;
-	const char *passfile = GpDispatchPassfile();
 
 	snprintf(portbuf, sizeof(portbuf), "%d", seg->port);
 	keywords[n] = "host";
@@ -2176,13 +2175,7 @@ recovery_connect(const GpSegmentConfig *seg, const char *dbname)
 	values[n++] = recovery_user;
 	keywords[n] = "application_name";
 	values[n++] = "cloudberry dtx recovery";
-	if (passfile != NULL && passfile[0] != '\0')
-	{
-		keywords[n] = "passfile";
-		values[n++] = passfile;
-	}
-	keywords[n] = NULL;
-	values[n] = NULL;
+	n = GpInternalConnOptions(keywords, values, n);
 
 	conn = libpqsrv_connect_params(keywords, values, false,
 								   recovery_wait_event());
