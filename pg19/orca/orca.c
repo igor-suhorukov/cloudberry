@@ -1351,27 +1351,25 @@ optimize_query(Query *parse, int cursorOptions, ParamListInfo boundParams,
 	root->parse = parse;
 
 	/*
-	 * PostGIS's indexable functions: the rewrite in front of ORCA, which
-	 * decision 1 asks for (postgis.c).  After folding, because folding
-	 * inlines the SQL-language wrappers PostGIS has over its C functions,
-	 * and a call that only appears then is one the planner would see too.
+	 * PostGIS's indexable functions, and PostgreSQL's own LIKE and its kin:
+	 * the rewrite in front of ORCA, which decision 1 asks for (postgis.c).
+	 * After folding, because folding inlines the SQL-language wrappers
+	 * PostGIS has over its C functions, and a call that only appears then is
+	 * one the planner would see too.
 	 *
-	 * Switched off, such a query is refused here, as Cloudberry's translator
-	 * refuses every extension function with a support function; the
-	 * translator itself no longer refuses PostGIS's.
+	 * Switched off, a query that calls PostGIS's is refused here, as
+	 * Cloudberry's translator refuses every extension function with a
+	 * support function; the translator itself no longer refuses PostGIS's.
 	 */
-	if (!gp_optimizer_postgis_rewrite)
+	if (!gp_optimizer_postgis_rewrite &&
+		GpOrcaQueryCallsPostgisIndexable(pqueryCopy))
 	{
-		if (GpOrcaQueryCallsPostgisIndexable(pqueryCopy))
-		{
-			failure->message = pstrdup("Falling back to Postgres-based planner because "
-									   "GPORCA does not support the following feature: "
-									   "extension functions with prosupport unsupported");
-			return NULL;
-		}
+		failure->message = pstrdup("Falling back to Postgres-based planner because "
+								   "GPORCA does not support the following feature: "
+								   "extension functions with prosupport unsupported");
+		return NULL;
 	}
-	else
-		GpOrcaPostgisRewrite(pqueryCopy);
+	GpOrcaPostgisRewrite(pqueryCopy);
 
 	/*
 	 * If any Query in the tree mixes window functions and aggregates, we need to

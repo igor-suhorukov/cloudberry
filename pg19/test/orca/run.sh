@@ -2494,6 +2494,36 @@ q "VACUUM ANALYZE t1br;" > /dev/null
 shape "a BRIN index over values in the order of the pages: a bitmap scan of it" \
       "Bitmap Index Scan on t1br_a" "SELECT count(*), sum(b) FROM t1br WHERE a = 1"
 
+# LIKE and its kin, whose operators no index's operator family has: the
+# planner asks their support function for the range a fixed prefix spans,
+# and so does the rewrite in front of ORCA (postgis.c), whose condition a
+# B-tree index then answers.  Only under the database's default collation.
+q "CREATE TABLE t1lk (id int, name text, addr inet);
+   INSERT INTO t1lk SELECT g, 'name' || g, ('10.' || (g % 250) || '.' || (g / 250 % 250) || '.1')::inet
+     FROM generate_series(1, 20000) g;
+   CREATE INDEX t1lk_name ON t1lk (name); CREATE INDEX t1lk_addr ON t1lk (addr);
+   CREATE TABLE t1lc (name text); INSERT INTO t1lc SELECT 'name' || g FROM generate_series(1, 20000) g;
+   CREATE INDEX t1lc_name ON t1lc (name COLLATE \"C\");" > /dev/null
+q "ANALYZE t1lk; ANALYZE t1lc;" > /dev/null
+shape "LIKE with a fixed prefix: the range it spans, from its support function" \
+      "Index Cond: ((t1lk.name >= 'name123'::text) AND (t1lk.name < 'name124'::text))" \
+      "SELECT count(*) FROM t1lk WHERE name LIKE 'name123%'"
+shape "a regular expression anchored at its start" \
+      "Index Cond: ((t1lk.name >= 'name99'::text) AND (t1lk.name < 'name9:'::text))" \
+      "SELECT count(*) FROM t1lk WHERE name ~ '^name99'"
+shape "starts_with()" \
+      "Index Cond: ((t1lk.name >= 'name777'::text) AND (t1lk.name < 'name778'::text))" \
+      "SELECT count(*) FROM t1lk WHERE starts_with(name, 'name777')"
+shape "LIKE with no wildcard: an equality" "Index Cond: (t1lk.name = 'name5'::text)" \
+      "SELECT count(*) FROM t1lk WHERE name LIKE 'name5'"
+shape "a network containment operator: the addresses the network spans" \
+      "Index Cond: ((t1lk.addr > '10.7.0.0/16'::inet) AND (t1lk.addr <= '10.7.255.255'::inet))" \
+      "SELECT count(*) FROM t1lk WHERE addr << '10.7.0.0/16'"
+shape "and a leading wildcard, which no range answers, is a filter" "Filter: (t1lk.name ~~ '%123'::text)" \
+      "SELECT count(*) FROM t1lk WHERE name LIKE '%123'"
+shape "and so is a prefix over an index of another collation, which ORCA plans nothing under" \
+      "Filter: (t1lc.name ~~ 'name12%'::text)" "SELECT count(*) FROM t1lc WHERE name LIKE 'name12%'"
+
 shape "an index nested loop, its parameter set for each outer row" "Index Cond: (t1b.i = t1a.i)" \
       "SELECT t1a.i, t1b.k FROM t1a JOIN t1b ON t1a.i = t1b.i WHERE t1a.j = 1 ORDER BY 1" \
       "SET gp.optimizer_enable_hashjoin = off; SET gp.optimizer_enable_mergejoin = off"

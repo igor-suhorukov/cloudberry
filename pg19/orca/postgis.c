@@ -18,7 +18,8 @@
  * under the License.
  *
  * postgis.c
- *	  The rewrite in front of ORCA for PostGIS's indexable functions.
+ *	  The rewrite in front of ORCA for PostGIS's indexable functions, and
+ *	  PostgreSQL's own.
  *
  * PostGIS's spatial predicates -- ST_Intersects, ST_DWithin, ST_Contains and
  * the rest, 21 signatures over geometry and geography -- are C functions
@@ -89,6 +90,18 @@
  * gp.optimizer_postgis_rewrite off puts the refusal back, per query, in
  * orca.c.
  *
+ * POSTGRESQL'S OWN.  LIKE, ILIKE, the regular expression operators and
+ * starts_with() have a support function too (like_support.c), which gives a
+ * B-tree index over a text column the range a fixed prefix spans --
+ * name LIKE 'abc%' gives name >= 'abc' AND name < 'abd' -- and so do the
+ * network containment operators (network.c).  No index's operator family
+ * has those operators, so the planner asks the support function, and ORCA,
+ * which does not, read every row.  They are asked the same way, beside
+ * PostGIS's; what they answer needs a constant pattern, as the planner's
+ * does, and is kept only where it compares under the database's default
+ * collation, which is the one collation ORCA plans with.  ORCA accepted
+ * the calls already: their support functions are pg_catalog's.
+ *
  *-------------------------------------------------------------------------
  */
 #include "postgres.h"
@@ -98,6 +111,7 @@
 #include "access/relation.h"
 #include "access/transam.h"
 #include "catalog/pg_am_d.h"
+#include "catalog/pg_collation.h"
 #include "catalog/pg_index.h"
 #include "catalog/pg_language.h"
 #include "catalog/pg_proc.h"
@@ -109,6 +123,7 @@
 #include "optimizer/optimizer.h"
 #include "parser/parsetree.h"
 #include "utils/builtins.h"
+#include "utils/fmgroids.h"
 #include "utils/lsyscache.h"
 #include "utils/rel.h"
 #include "utils/snapmgr.h"
@@ -200,6 +215,54 @@ GpOrcaIsPostgisIndexSupport(Oid supportfn)
 	ReleaseSysCache(tup);
 
 	return result;
+}
+
+/*
+ * Is `supportfn` one of PostgreSQL's own that turns a call into index
+ * conditions?  The prefix range of LIKE, ILIKE, the regular expressions and
+ * starts_with() (like_support.c), and the range of the network containment
+ * operators (network.c): the only support functions of pg_proc.dat that
+ * answer SupportRequestIndexCondition.
+ */
+static bool
+is_builtin_index_support(Oid supportfn)
+{
+	switch (supportfn)
+	{
+		case F_TEXTLIKE_SUPPORT:
+		case F_TEXTICLIKE_SUPPORT:
+		case F_TEXTREGEXEQ_SUPPORT:
+		case F_TEXTICREGEXEQ_SUPPORT:
+		case F_TEXT_STARTS_WITH_SUPPORT:
+		case F_NETWORK_SUBSET_SUPPORT:
+			return true;
+		default:
+			return false;
+	}
+}
+
+/*
+ * Does `node` compare or yield under a collation other than the database's
+ * default?  A condition that did would have ORCA refuse the whole query
+ * (CheckCollation), and ORCA, which does not look at an index's collation,
+ * could scan an index of another one with it.
+ */
+static bool
+other_collation_walker(Node *node, void *context)
+{
+	Oid			coll;
+
+	if (node == NULL)
+		return false;
+
+	coll = exprInputCollation(node);
+	if (OidIsValid(coll) && coll != DEFAULT_COLLATION_OID)
+		return true;
+	coll = exprCollation(node);
+	if (OidIsValid(coll) && coll != DEFAULT_COLLATION_OID)
+		return true;
+
+	return expression_tree_walker(node, other_collation_walker, context);
 }
 
 static bool
@@ -499,7 +562,7 @@ trace_column(Var *var, List *levels, int depth, Index varno, List **columns)
  * index as get_relation_info would fill it.
  */
 static List *
-ask(Oid supportfn, FuncExpr *call, int indexarg, IndexColumn *ic,
+ask(Oid supportfn, Oid funcid, Node *call, int indexarg, IndexColumn *ic,
 	RewriteContext *cxt)
 {
 	SupportRequestIndexCondition req;
@@ -524,8 +587,8 @@ ask(Oid supportfn, FuncExpr *call, int indexarg, IndexColumn *ic,
 
 	req.type = T_SupportRequestIndexCondition;
 	req.root = cxt->root;
-	req.funcid = call->funcid;
-	req.node = (Node *) call;
+	req.funcid = funcid;
+	req.node = call;
 	req.indexarg = indexarg;
 	req.index = index;
 	req.indexcol = ic->indexcol;
@@ -566,7 +629,12 @@ has_condition(List *clauses, Node *cond)
 }
 
 /*
- * The index conditions PostGIS's support function gives for `call`.
+ * The index conditions a support function gives for `call`, a FuncExpr or
+ * an OpExpr: PostGIS's for its indexable functions, and PostgreSQL's own
+ * for LIKE and its kin and the network containment operators, whose
+ * operators no index's operator family has, as the planner asks it
+ * (match_opclause_to_indexcol(), match_funcclause_to_indexcol()).  The
+ * latter's only where they compare under the database's default collation.
  *
  * For each index column an argument is, the first argument that is it, as
  * match_funcclause_to_indexcol() asks: ST_Intersects(t.geom, t.geom) is
@@ -575,22 +643,41 @@ has_condition(List *clauses, Node *cond)
  * about, as it is two scans to the planner.
  */
 static List *
-index_conditions(FuncExpr *call, RewriteContext *cxt)
+index_conditions(Node *call, RewriteContext *cxt)
 {
+	Oid			funcid;
+	List	   *args;
 	Oid			supportfn;
+	bool		postgis;
 	List	   *asked = NIL;
 	List	   *conds = NIL;
 	int			indexarg = 0;
 	ListCell   *lc;
 
-	if (call->funcresulttype != BOOLOID)
+	if (IsA(call, FuncExpr))
+	{
+		if (((FuncExpr *) call)->funcresulttype != BOOLOID)
+			return NIL;
+		funcid = ((FuncExpr *) call)->funcid;
+		args = ((FuncExpr *) call)->args;
+	}
+	else if (IsA(call, OpExpr))
+	{
+		if (((OpExpr *) call)->opresulttype != BOOLOID)
+			return NIL;
+		set_opfuncid((OpExpr *) call);
+		funcid = ((OpExpr *) call)->opfuncid;
+		args = ((OpExpr *) call)->args;
+	}
+	else
 		return NIL;
 
-	supportfn = get_func_support(call->funcid);
-	if (!GpOrcaIsPostgisIndexSupport(supportfn))
+	supportfn = get_func_support(funcid);
+	postgis = GpOrcaIsPostgisIndexSupport(supportfn);
+	if (!postgis && !is_builtin_index_support(supportfn))
 		return NIL;
 
-	foreach(lc, call->args)
+	foreach(lc, args)
 	{
 		Node	   *arg = strip_relabel((Node *) lfirst(lc));
 		List	   *columns = NIL;
@@ -619,10 +706,12 @@ index_conditions(FuncExpr *call, RewriteContext *cxt)
 				continue;
 			asked = lappend(asked, ic);
 
-			foreach(lc3, ask(supportfn, call, indexarg, ic, cxt))
+			foreach(lc3, ask(supportfn, funcid, call, indexarg, ic, cxt))
 			{
 				Node	   *cond = (Node *) lfirst(lc3);
 
+				if (!postgis && other_collation_walker(cond, NULL))
+					continue;
 				if (IsA(cond, OpExpr))
 					set_opfuncid((OpExpr *) cond);
 				if (!has_condition(conds, cond))
@@ -661,11 +750,11 @@ rewrite_conjuncts(List *clauses, RewriteContext *cxt)
 			foreach(arm, ((BoolExpr *) clause)->args)
 				lfirst(arm) = rewrite_qual((Node *) lfirst(arm), cxt);
 		}
-		else if (IsA(clause, FuncExpr))
+		else if (IsA(clause, FuncExpr) || IsA(clause, OpExpr))
 		{
 			ListCell   *lc2;
 
-			foreach(lc2, index_conditions((FuncExpr *) clause, cxt))
+			foreach(lc2, index_conditions(clause, cxt))
 			{
 				Node	   *cond = (Node *) lfirst(lc2);
 

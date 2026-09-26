@@ -42,8 +42,9 @@ extern bool GpOrcaIsPostgisIndexSupport(Oid supportfn);
 extern bool GpOrcaQueryCallsPostgisIndexable(Query *query);
 
 /*
- * Add to `query`, in place, the index conditions PostGIS's support function
- * gives for the calls the planner would ask it about.
+ * Add to `query`, in place, the index conditions a support function gives
+ * for the calls the planner would ask it about: PostGIS's, and PostgreSQL's
+ * own for LIKE and its kin and the network containment operators.
  */
 extern void GpOrcaPostgisRewrite(Query *query);
 
