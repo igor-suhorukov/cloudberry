@@ -49,11 +49,13 @@
  * REFRESH ... CONCURRENTLY keeps the view readable while it runs.  It is
  * checked as PostgreSQL checks it -- populated, not WITH NO DATA, a unique
  * index to match rows by -- and locked as PostgreSQL locks it, in
- * ExclusiveLock; each segment deletes its rows under the view's maintenance,
- * and the INSERT puts the new ones in, so that a reader sees the old rows,
- * or once the transaction commits the new.  PostgreSQL's concurrent refresh
- * writes only the rows that changed, from a diff of the old against the
- * new; this one writes every row.
+ * ExclusiveLock; and each segment writes only the rows that changed, as
+ * PostgreSQL's refresh_by_match_merge() does: once the new rows are all
+ * there, it refuses new data with two rows the same, deletes the rows of
+ * its own the new data has not, and inserts the new rows it has not --
+ * matched by the unique indexes' columns and the whole row's image -- so
+ * that a reader sees the old rows, or once the transaction commits the new,
+ * and a row that did not change is not written.
  *
  * An incremental view is not distributed: gp_matview refuses one on a
  * cluster, whose delta maintenance would have to reach the segments.
@@ -105,6 +107,7 @@
  * rollback of it forgets the view, as the coordinator's does.
  */
 static Oid	filling = InvalidOid;
+static bool filling_concurrently = false;
 static SubTransactionId filling_subid = InvalidSubTransactionId;
 static bool callbacks_registered = false;
 
@@ -439,6 +442,112 @@ fill_subxact_callback(SubXactEvent event, SubTransactionId mySubid,
 		filling_subid = parentSubid;
 }
 
+/*
+ * The rows this segment has of the view made the new ones, writing only
+ * those that changed: PostgreSQL's refresh_by_match_merge() (matview.c), on
+ * the rows the coordinator sent into the staging table.  New data with two
+ * rows the same, NULLs apart, is refused, in PostgreSQL's words; then the
+ * rows of the view the new data has not are deleted, and the new rows the
+ * view has not inserted -- the same rows, by the columns of the view's
+ * unique indexes, with their opclasses' equality, and by the whole row's
+ * image, *=, as PostgreSQL matches them.
+ */
+static void
+merge_changed_rows(Relation rel, const char *view, const char *staging)
+{
+	StringInfoData match;
+	List	   *indexes = RelationGetIndexList(rel);
+	TupleDesc	desc = RelationGetDescr(rel);
+	Oid		   *used = palloc0_array(Oid, desc->natts);
+	Oid			save_userid;
+	int			save_sec_context;
+	int			save_depth = MatViewIncrementalMaintenanceDepthExternal();
+
+	/* the columns of every unique index a row can be matched by */
+	initStringInfo(&match);
+	foreach_oid(indexoid, indexes)
+	{
+		Relation	indexRel = index_open(indexoid, AccessShareLock);
+		Form_pg_index index = indexRel->rd_index;
+		bool		usable = index->indisunique && index->indimmediate &&
+			index->indisvalid && RelationGetIndexPredicate(indexRel) == NIL &&
+			index->indnkeyatts > 0;
+
+		for (int i = 0; usable && i < index->indnkeyatts; i++)
+			usable = index->indkey.values[i] > 0;
+		for (int i = 0; usable && i < index->indnkeyatts; i++)
+		{
+			AttrNumber	attnum = index->indkey.values[i];
+			Form_pg_attribute attr = TupleDescAttr(desc, attnum - 1);
+			Oid			opfamily = indexRel->rd_opfamily[i];
+			Oid			opcintype = indexRel->rd_opcintype[i];
+			Oid			op = get_opfamily_member_for_cmptype(opfamily, opcintype,
+															 opcintype, COMPARE_EQ);
+
+			if (!OidIsValid(op) || used[attnum - 1] == op)
+				continue;
+			used[attnum - 1] = op;
+			generate_operator_clause(&match,
+									 quote_qualified_identifier("newdata", NameStr(attr->attname)),
+									 attr->atttypid, op,
+									 quote_qualified_identifier("mv", NameStr(attr->attname)),
+									 attr->atttypid);
+			appendStringInfoString(&match, " AND ");
+		}
+		index_close(indexRel, AccessShareLock);
+	}
+	list_free(indexes);
+	appendStringInfoString(&match, "newdata.* OPERATOR(pg_catalog.*=) mv.*");
+
+	GetUserIdAndSecContext(&save_userid, &save_sec_context);
+	SetUserIdAndSecContext(rel->rd_rel->relowner,
+						   save_sec_context | SECURITY_LOCAL_USERID_CHANGE);
+	PG_TRY();
+	{
+		if (SPI_connect() != SPI_OK_CONNECT)
+			elog(ERROR, "SPI_connect failed");
+		if (SPI_execute(psprintf("ANALYZE %s", staging), false, 0) != SPI_OK_UTILITY)
+			elog(ERROR, "could not analyze the new rows of \"%s\"",
+				 RelationGetRelationName(rel));
+		if (SPI_execute(psprintf("SELECT newdata.*::%s FROM %s newdata"
+								 " WHERE newdata.* IS NOT NULL AND EXISTS"
+								 " (SELECT 1 FROM %s newdata2 WHERE newdata2.* IS NOT NULL"
+								 " AND newdata2.* OPERATOR(pg_catalog.*=) newdata.*"
+								 " AND newdata2.ctid OPERATOR(pg_catalog.<>) newdata.ctid)",
+								 staging, staging, staging),
+						false, 1) != SPI_OK_SELECT)
+			elog(ERROR, "could not check the new rows of \"%s\"",
+				 RelationGetRelationName(rel));
+		if (SPI_processed > 0)
+			ereport(ERROR,
+					(errcode(ERRCODE_CARDINALITY_VIOLATION),
+					 errmsg("new data for materialized view \"%s\" contains duplicate rows without any null columns",
+							RelationGetRelationName(rel)),
+					 errdetail("Row: %s",
+							   SPI_getvalue(SPI_tuptable->vals[0], SPI_tuptable->tupdesc, 1))));
+
+		OpenMatViewIncrementalMaintenanceExternal();
+		if (SPI_execute(psprintf("DELETE FROM %s mv WHERE NOT EXISTS"
+								 " (SELECT 1 FROM %s newdata WHERE %s)",
+								 view, staging, match.data),
+						false, 0) != SPI_OK_DELETE ||
+			SPI_execute(psprintf("INSERT INTO %s SELECT newdata.* FROM %s newdata"
+								 " WHERE NOT EXISTS (SELECT 1 FROM %s mv WHERE %s)",
+								 view, staging, view, match.data),
+						false, 0) != SPI_OK_INSERT)
+			elog(ERROR, "could not refresh materialized view \"%s\" concurrently",
+				 RelationGetRelationName(rel));
+		CloseMatViewIncrementalMaintenanceExternal();
+		SPI_finish();
+	}
+	PG_FINALLY();
+	{
+		RestoreMatViewIncrementalMaintenanceDepthExternal(save_depth);
+		SetUserIdAndSecContext(save_userid, save_sec_context);
+	}
+	PG_END_TRY();
+}
+
 PG_FUNCTION_INFO_V1(gp_matview_fill);
 
 /*
@@ -487,8 +596,11 @@ gp_matview_fill(PG_FUNCTION_ARGS)
 
 	if (done)
 	{
-		run_as_owner(rel, psprintf("INSERT INTO %s SELECT * FROM %s", view, staging),
-					 SPI_OK_INSERT, true);
+		if (filling_concurrently)
+			merge_changed_rows(rel, view, staging);
+		else
+			run_as_owner(rel, psprintf("INSERT INTO %s SELECT * FROM %s", view, staging),
+						 SPI_OK_INSERT, true);
 		run_as_owner(rel, psprintf("DROP TABLE %s", staging), SPI_OK_UTILITY, false);
 		filling = InvalidOid;
 		filling_subid = InvalidSubTransactionId;
@@ -496,9 +608,7 @@ gp_matview_fill(PG_FUNCTION_ARGS)
 		PG_RETURN_VOID();
 	}
 
-	if (concurrent)
-		run_as_owner(rel, psprintf("DELETE FROM %s", view), SPI_OK_DELETE, true);
-	else
+	if (!concurrent)
 		SetMatViewPopulatedState(rel, true);
 	run_as_owner(rel, psprintf("CREATE TEMP TABLE %s (LIKE %s) USING heap",
 							   staging, view),
@@ -512,6 +622,7 @@ gp_matview_fill(PG_FUNCTION_ARGS)
 		callbacks_registered = true;
 	}
 	filling = relid;
+	filling_concurrently = concurrent;
 	filling_subid = GetCurrentSubTransactionId();
 	PG_RETURN_VOID();
 }

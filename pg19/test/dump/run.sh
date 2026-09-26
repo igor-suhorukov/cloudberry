@@ -432,6 +432,26 @@ out=$(q b src "REFRESH MATERIALIZED VIEW CONCURRENTLY mv; SELECT count(*) FROM m
                REFRESH MATERIALIZED VIEW mv_empty; SELECT count(*) FROM mv_empty")
 [ "$out" = "100
 100" ] && ok "a restored view refreshes, concurrently too" || notok "refreshing a restored view" "$out"
+# CONCURRENTLY writes only the rows that changed, as PostgreSQL's does: each
+# segment's rows the new data has too stay where they are
+where="SELECT string_agg(gp_segment_id || ':' || ctid::text || ':' || a, ',' ORDER BY a) FROM mv WHERE a BETWEEN 3 AND 100"
+kept=$(q b src "$where")
+q b src "UPDATE t_hash SET b = 'changed' WHERE a = 1; DELETE FROM t_hash WHERE a = 2;
+         INSERT INTO t_hash VALUES (1001, 'new')" > /dev/null
+out=$(q b src "REFRESH MATERIALIZED VIEW CONCURRENTLY mv;
+               SELECT count(*) FROM ((SELECT a, b FROM t_hash EXCEPT SELECT a, b FROM mv)
+                                     UNION ALL (SELECT a, b FROM mv EXCEPT SELECT a, b FROM t_hash)) d;
+               SELECT b FROM mv WHERE a = 1")
+[ "$out" = "0
+changed" ] && [ "$(q b src "$where")" = "$kept" ] \
+	&& ok "and a concurrent refresh writes only the rows that changed, the others where they were" \
+	|| notok "a concurrent refresh's rows" "$out"
+out=$(q b src "INSERT INTO t_hash VALUES (1001, 'new'); REFRESH MATERIALIZED VIEW CONCURRENTLY mv" 2>&1)
+case "$out" in
+	*"new data for materialized view \"mv\" contains duplicate rows without any null columns"*)
+		ok "new data with a row twice is refused in PostgreSQL's words" ;;
+	*) notok "a concurrent refresh of duplicate rows" "$out" ;;
+esac
 
 ###############################################################################
 echo "6. one node: an incremental view, a dynamic table and a directory table's files"
