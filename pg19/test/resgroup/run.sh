@@ -48,9 +48,9 @@
 # group's share missed the test's ten points, and the test's own statements,
 # a superuser's in admin_group at a hundredth of the cores, came too late to
 # cancel what they started.  And the helper that finds on which cores a
-# group's processes run lists the parent's processes, where Cloudberry's
-# lists every process of the machine, once every 10 ms -- here the processes
-# of every job of a full run, which took minutes.
+# group's processes run reads the parent's processes (cb_ps.py), where
+# Cloudberry's runs ps, which reads every process of the machine, once every
+# 10 ms -- here the processes of every job of a full run, which took minutes.
 set -u
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -85,7 +85,6 @@ for group in ${RG_GROUPS:-$all_groups}; do
 	# prints it in, whose width stays the column's; and every core, as a
 	# shell command of a test counts them, as the parent's.
 	cpus="${CPUS:-}"
-	procs="','.join(p for f in __import__('glob').glob('/sys/fs/cgroup/$parent/*/cgroup.procs') + __import__('glob').glob('/sys/fs/cgroup/$parent/*/*/cgroup.procs') for p in open(f).read().split())"
 	sed="$(mktemp "${TMPDIR:-/tmp}/cb-resgroup-XXXXXX.sed")"
 	pad=$(printf '%*s' $(( ${#parent} - 4 )) '')
 	{
@@ -94,7 +93,7 @@ for group in ${RG_GROUPS:-$all_groups}; do
 		echo "s#(cgroup_parent -v )\"gpdb\"#\\1\"$parent\"#g"
 		echo "s#^ gpdb$pad( *)\$# $parent\\1#"
 		[ -n "$cpus" ] && echo "s#0-\\$\\(\\(\\$\\(nproc\\)-1\\)\\)#$cpus#g"
-		echo "s#subprocess\\.check_output\\(\\['ps', '-eF'\\]\\)#subprocess.check_output(['ps', '-F', '-p', $procs])#g"
+		echo "s#subprocess\\.check_output\\(\\['ps', '-eF'\\]\\)#(__import__('sys').path.__contains__('$HERE') or __import__('sys').path.insert(0, '$HERE'), __import__('cb_ps'))[1].ps('$parent')#g"
 	} > "$sed"
 
 	# As Cloudberry's installcheck-resgroup-v2 runs it: in its own database,

@@ -149,37 +149,36 @@ echo
 "$BINDIR/pg_ctl" -D "$WORK/data" -l "$WORK/log" -w -t 60 start > /dev/null 2>&1 \
 	|| { echo "server did not start"; tail -20 "$WORK/log"; exit 1; }
 
-# The settings the port has, as sed that respells Cloudberry's names for
-# them where a statement names one: SET, RESET, SHOW, current_setting() and
-# set_config().  gp.optimizer* was Cloudberry's optimizer*, and so were the
-# few other names Cloudberry gave no gp_ (gp_settings.c); every other gp.x
-# was gp_x.
-"$PSQL" -X -q -t -A -d postgres -c "SELECT name FROM pg_settings WHERE name LIKE 'gp.%' ORDER BY length(name) DESC" |
-while read -r name; do
-	short="${name#gp.}"
-	case "$short" in
-		optimizer*|statement_mem|enable_parallel|enable_groupagg|test_print_*|\
-		resource_scheduler|resource_select_only|resource_cleanup_gangs_on_wait|\
-		max_resource_queues|max_resource_portals_per_transaction|max_statement_mem|\
-		debug_resource_group|runaway_detector_activation_percent|\
-		vmem_process_interrupt|explain_memory_verbosity|coredump_on_memerror)
-			cbname="$short" ;;
-		*) cbname="gp_$short" ;;
-	esac
+# The settings the port has, and what respells Cloudberry's names for them
+# where a statement names one (../respell.pl): SET, RESET, SHOW,
+# current_setting() and set_config().  gp.optimizer* was Cloudberry's
+# optimizer*, and so were the few other names Cloudberry gave no gp_
+# (gp_settings.c); every other gp.x was gp_x.
+{
 	# SHOW's column is named for the setting, so a field of a row read from
 	# it -- FOR r IN EXECUTE 'show optimizer' ... r.optimizer -- is too,
 	# quoted for its dot.  First, so that the gp.optimizer SHOW becomes is
-	# not taken for a field.
-	printf 's/\\b([a-z_][a-z0-9_]*)\\.%s\\b/\\1."%s"/gI\n' "$cbname" "$name"
-	printf 's/\\b(set|reset|show)(\\s+(local|session)\\s+|\\s+)%s\\b/\\1\\2%s/gI\n' "$cbname" "$name"
-	printf "s/\\\\b(current_setting|set_config)\\\\('%s'/\\\\1('%s'/gI\n" "$cbname" "$name"
-	# And the header SHOW prints for it, in the expected output: gp_x and
-	# gp.x are as wide, so the column is.  optimizer and gp.optimizer are
-	# not, and a SHOW of one differs, header and rule.
-	case "$cbname" in gp_*)
-		printf 's/^( +)%s( +)$/\\1%s\\2/\n' "$cbname" "$name" ;;
-	esac
-done > "$WORK/respell.sed"
+	# not taken for a field.  And last the header SHOW prints for it, in the
+	# expected output: gp_x and gp.x are as wide, so the column is.
+	# optimizer and gp.optimizer are not, and a SHOW of one differs, header
+	# and rule.
+	echo "kinds field set func header"
+	"$PSQL" -X -q -t -A -d postgres -c "SELECT name FROM pg_settings WHERE name LIKE 'gp.%' ORDER BY length(name) DESC" |
+	while read -r name; do
+		short="${name#gp.}"
+		case "$short" in
+			optimizer*|statement_mem|enable_parallel|enable_groupagg|test_print_*|\
+			resource_scheduler|resource_select_only|resource_cleanup_gangs_on_wait|\
+			max_resource_queues|max_resource_portals_per_transaction|max_statement_mem|\
+			debug_resource_group|runaway_detector_activation_percent|\
+			vmem_process_interrupt|explain_memory_verbosity|coredump_on_memerror)
+				cbname="$short" ;;
+			*) cbname="gp_$short" ;;
+		esac
+		echo "map $cbname $name"
+	done
+} > "$WORK/respell"
+respell() { perl "$HERE/../respell.pl" "$WORK/respell" "$@"; }
 
 # The suite the tests run from: PostgreSQL 19's, with Cloudberry's tests
 # added after its schedule, and the port's expected output where it has one.
@@ -254,17 +253,17 @@ for t in $run_tests; do
 		fi
 	done
 	if [ -f "$CB/input/$src.source" ]; then
-		convert "$CB/input/$src.source" | amsub | sed -E -f "$WORK/respell.sed" |
+		convert "$CB/input/$src.source" | amsub | respell |
 			copy_data_end > "$SN/sql/$f.sql"
 	else
-		sed -E -f "$WORK/respell.sed" "$CB/sql/$t.sql" | copy_data_end > "$SN/sql/$f.sql"
+		respell "$CB/sql/$t.sql" | copy_data_end > "$SN/sql/$f.sql"
 	fi
 	if [ -f "$CB/output/$src.source" ]; then
-		convert "$CB/output/$src.source" | amsub | sed -E -f "$WORK/respell.sed" > "$SN/expected/$f.out"
+		convert "$CB/output/$src.source" | amsub | respell > "$SN/expected/$f.out"
 	else
 		for e in "$CB/expected/$t.out" "$CB"/expected/"$t"_[0-9].out; do
 			[ -f "$e" ] || continue
-			sed -E -f "$WORK/respell.sed" "$e" > "$SN/expected/$(echo "${e#"$CB"/expected/}" | tr / _)"
+			respell "$e" > "$SN/expected/$(echo "${e#"$CB"/expected/}" | tr / _)"
 		done
 	fi
 	g=$(awk -v t="$t" '$1 == "run" && $2 == t { print $3 }' "$HERE/manifest")
@@ -570,7 +569,7 @@ for pass in ${PASSES:-planner orca}; do
 				cp "$SN/sql/$t.sql" "$RESULTS_DIR/singlenode-inputs/sql/" 2> /dev/null
 				cp "$SN/expected/$t".out "$SN/expected/$t"_[0-9].out "$RESULTS_DIR/singlenode-inputs/expected/" 2> /dev/null
 			done < "$SN/cloudberry_tests"
-			cp "$WORK/respell.sed" "$RESULTS_DIR/singlenode-inputs/"
+			cp "$WORK/respell" "$RESULTS_DIR/singlenode-inputs/"
 			cp "$WORK/$pass/regression.diffs" "$RESULTS_DIR/singlenode-$pass.diffs" 2> /dev/null
 			mkdir -p "$RESULTS_DIR/singlenode-$pass-canon"
 			cp "$WORK/$pass"/canon/*.diff "$RESULTS_DIR/singlenode-$pass-canon/" 2> /dev/null

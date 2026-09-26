@@ -140,40 +140,39 @@ for db in postgres template1; do
 		{ echo "could not create the port's extensions in $db"; exit 1; }
 done
 
-# The settings the port has, as sed that respells Cloudberry's names for
-# them, as the greenplum suite makes it; and PAX's catalogs in
+# The settings the port has, and what respells Cloudberry's names for them,
+# as the greenplum suite makes it (../respell.pl); and PAX's catalogs in
 # pg_ext_aux, Cloudberry's schema of them, as the extension's.
-PGOPTIONS="-c gp.optimizer=off" "$PSQL" -X -q -t -A -d postgres \
-	-c "SELECT name FROM pg_settings WHERE name LIKE 'gp.%' ORDER BY length(name) DESC" |
-while read -r name; do
-	short="${name#gp.}"
-	case "$short" in
-		optimizer*|statement_mem|enable_parallel|enable_groupagg|test_print_*|\
-		resource_scheduler|resource_select_only|resource_cleanup_gangs_on_wait|\
-		max_resource_queues|max_resource_portals_per_transaction|max_statement_mem|\
-		debug_resource_group|runaway_detector_activation_percent|\
-		vmem_process_interrupt|explain_memory_verbosity|coredump_on_memerror)
-			cbname="$short" ;;
-		*) cbname="gp_$short" ;;
-	esac
-	printf 's/\\b([a-z_][a-z0-9_]*)\\.%s\\b/\\1."%s"/gI\n' "$cbname" "$name"
-	printf 's/\\b(set|reset|show)(\\s+(local|session)\\s+|\\s+)%s\\b/\\1\\2%s/gI\n' "$cbname" "$name"
-	printf "s/\\\\b(current_setting|set_config)\\\\('%s'/\\\\1('%s'/gI\n" "$cbname" "$name"
-	case "$cbname" in gp_*)
-		printf 's/^( +)%s( +)$/\\1%s\\2/\n' "$cbname" "$name" ;;
-	esac
-done > "$WORK/respell.sed"
-echo 's/\bpg_ext_aux\.(pg_pax_tables|pg_pax_fastsequence|paxauxstats)\b/pax.\1/g' >> "$WORK/respell.sed"
+{
+	echo "kinds field set func header"
+	PGOPTIONS="-c gp.optimizer=off" "$PSQL" -X -q -t -A -d postgres \
+		-c "SELECT name FROM pg_settings WHERE name LIKE 'gp.%' ORDER BY length(name) DESC" |
+	while read -r name; do
+		short="${name#gp.}"
+		case "$short" in
+			optimizer*|statement_mem|enable_parallel|enable_groupagg|test_print_*|\
+			resource_scheduler|resource_select_only|resource_cleanup_gangs_on_wait|\
+			max_resource_queues|max_resource_portals_per_transaction|max_statement_mem|\
+			debug_resource_group|runaway_detector_activation_percent|\
+			vmem_process_interrupt|explain_memory_verbosity|coredump_on_memerror)
+				cbname="$short" ;;
+			*) cbname="gp_$short" ;;
+		esac
+		echo "map $cbname $name"
+	done
+	echo 'sed s/\bpg_ext_aux\.(pg_pax_tables|pg_pax_fastsequence|paxauxstats)\b/pax.\1/g'
+} > "$WORK/respell"
+respell() { perl "$HERE/../respell.pl" "$WORK/respell" "$@"; }
 
 # The suite, from PAX's directory, as its Makefile runs it.
 SN="$WORK/pax"
 mkdir -p "$SN/sql" "$SN/expected"
 for t in $run_tests; do
 	mkdir -p "$SN/sql/$(dirname "$t")" "$SN/expected/$(dirname "$t")"
-	sed -E -f "$WORK/respell.sed" "$PAX/sql/$t.sql" > "$SN/sql/$t.sql"
+	respell "$PAX/sql/$t.sql" > "$SN/sql/$t.sql"
 	for e in "$PAX/expected/$t.out" "$PAX"/expected/"$t"_[0-9].out; do
 		[ -f "$e" ] || continue
-		sed -E -f "$WORK/respell.sed" "$e" > "$SN/expected/${e#"$PAX"/expected/}"
+		respell "$e" > "$SN/expected/${e#"$PAX"/expected/}"
 	done
 done
 # Cloudberry's schedule, its groups kept, less the tests the manifest skips

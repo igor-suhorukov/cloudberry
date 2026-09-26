@@ -328,53 +328,52 @@ for g in "${groups[@]}"; do
 	wait -n || exit 1
 done
 
-# The settings the port has, respelled as the greenplum suite respells them;
-# and, in the expected output, every word that names one, which is where a
-# SHOW's column header has it too -- "gp_" and "gp." are the same length.
-PGHOST="$(group_sock "${groups[0]}")" PGPORT="$(node_port 0 0)" \
-"$PSQL" -X -q -t -A -d postgres -c "SELECT name FROM pg_settings WHERE name LIKE 'gp.%' ORDER BY length(name) DESC" |
-while read -r name; do
-	short="${name#gp.}"
-	case "$short" in
-		optimizer*|statement_mem|enable_parallel|enable_groupagg|test_print_*|\
-		resource_scheduler|resource_select_only|resource_cleanup_gangs_on_wait|\
-		max_resource_queues|max_resource_portals_per_transaction|max_statement_mem|\
-		debug_resource_group|runaway_detector_activation_percent|\
-		vmem_process_interrupt|explain_memory_verbosity|coredump_on_memerror|\
-		repl_catchup_within_range)
-			cbname="$short" ;;
-		*) cbname="gp_$short" ;;
-	esac
-	printf 's/\\b(set|reset|show)(\\s+(local|session|system)\\s+|\\s+)%s\\b/\\1\\2%s/gI\n' "$cbname" "$name"
-	printf 's/\\b(alter\\s+system\\s+(set|reset)\\s+)%s\\b/\\1%s/gI\n' "$cbname" "$name"
-	printf "s/\\\\b(current_setting|set_config)\\\\('%s'/\\\\1('%s'/gI\n" "$cbname" "$name"
-	# ... FROM pg_settings WHERE name = 'gp_session_id'
-	printf "s/\\\\b(name\\\\s*=\\\\s*)'%s'/\\\\1'%s'/gI\n" "$cbname" "$name"
-	# ... show_guc('gp_resource_group_cpu_limit'), the resource group
-	# tests' PL/Python helper, which SHOWs the setting it is named
-	printf "s/\\\\bshow_guc\\\\('%s'\\\\)/show_guc('%s')/g\n" "$cbname" "$name"
-	# ... query LIKE '%gp_vmem_idle_resource_timeout%', a test finding the
-	# session that SET it by the statement it ran, which it ran respelled
-	printf "s/'%%%s%%'/'%%%s%%'/g\n" "$cbname" "$name"
-	case "$cbname" in
-		gp_*) printf 's/^( *)%s( *)$/\\1%s\\2/\n' "$cbname" "$name" ;;
-	esac
-	echo "$cbname $name" >> "$WORK/settings.map"
-done > "$WORK/respell.sed"
-# ... and no utility mode but a node's own connection, in a shell command too
-echo "s/-c gp_role=utility//g" >> "$WORK/respell.sed"
-# A backend waiting for a resource group's slot waits on the Extension wait
-# event ResourceGroup, where Cloudberry's wait event has a type of its own,
-# ResourceGroup: a test that finds the waiter by its type finds it by name.
-echo "s/wait_event_type\\s*=\\s*'ResourceGroup'/wait_event='ResourceGroup'/g" >> "$WORK/respell.sed"
-# A resource group test's PL/Python helper calls the server's
-# get_tablespace_path() through ctypes, which takes a function's result as a
-# C int unless it is told otherwise: a pointer cut to 32 bits, which on the
-# port's server, a position-independent executable whose heap is far above
-# that, it then reads a string at.  It is told the function returns one, in
-# the helper and in the expected output, which echoes it on one line.
-echo "s/(get_tablespace_path = postgres\\['get_tablespace_path'\\])/\\1; get_tablespace_path.restype = ctypes.c_void_p/" >> "$WORK/respell.sed"
-[ -n "$EXTRA_SED" ] && cat "$EXTRA_SED" >> "$WORK/respell.sed"
+# The settings the port has, respelled as the greenplum suite respells them
+# (../respell.pl); and, in the expected output, every word that names one,
+# which is where a SHOW's column header has it too -- "gp_" and "gp." are the
+# same length.  Beside SET, RESET, SHOW, current_setting() and set_config():
+# ALTER SYSTEM; ... FROM pg_settings WHERE name = 'gp_session_id';
+# show_guc('gp_resource_group_cpu_limit'), the resource group tests'
+# PL/Python helper, which SHOWs the setting it is named; and query LIKE
+# '%gp_vmem_idle_resource_timeout%', a test finding the session that SET it
+# by the statement it ran, which it ran respelled.
+{
+	echo "kinds setsys altersys func nameeq showguc like header0"
+	PGHOST="$(group_sock "${groups[0]}")" PGPORT="$(node_port 0 0)" \
+	"$PSQL" -X -q -t -A -d postgres -c "SELECT name FROM pg_settings WHERE name LIKE 'gp.%' ORDER BY length(name) DESC" |
+	while read -r name; do
+		short="${name#gp.}"
+		case "$short" in
+			optimizer*|statement_mem|enable_parallel|enable_groupagg|test_print_*|\
+			resource_scheduler|resource_select_only|resource_cleanup_gangs_on_wait|\
+			max_resource_queues|max_resource_portals_per_transaction|max_statement_mem|\
+			debug_resource_group|runaway_detector_activation_percent|\
+			vmem_process_interrupt|explain_memory_verbosity|coredump_on_memerror|\
+			repl_catchup_within_range)
+				cbname="$short" ;;
+			*) cbname="gp_$short" ;;
+		esac
+		echo "map $cbname $name"
+	done
+	# ... and no utility mode but a node's own connection, in a shell command
+	# too
+	echo "sed s/-c gp_role=utility//g"
+	# A backend waiting for a resource group's slot waits on the Extension
+	# wait event ResourceGroup, where Cloudberry's wait event has a type of
+	# its own, ResourceGroup: a test that finds the waiter by its type finds
+	# it by name.
+	echo "sed s/wait_event_type\\s*=\\s*'ResourceGroup'/wait_event='ResourceGroup'/g"
+	# A resource group test's PL/Python helper calls the server's
+	# get_tablespace_path() through ctypes, which takes a function's result
+	# as a C int unless it is told otherwise: a pointer cut to 32 bits, which
+	# on the port's server, a position-independent executable whose heap is
+	# far above that, it then reads a string at.  It is told the function
+	# returns one, in the helper and in the expected output, which echoes it
+	# on one line.
+	echo "sed s/(get_tablespace_path = postgres\\['get_tablespace_path'\\])/\\1; get_tablespace_path.restype = ctypes.c_void_p/"
+	[ -n "$EXTRA_SED" ] && sed 's/^/sed /' "$EXTRA_SED"
+} > "$WORK/respell"
+respell() { perl "$HERE/../respell.pl" "$WORK/respell" "$@"; }
 
 # The driver, less "-c gp_role=utility"; run from Cloudberry's directory, as
 # it sources global_sh_executor.sh from there.
@@ -438,16 +437,16 @@ run_group() {
 		# socket directory they share, by which, with its port and data
 		# directory, gprecoverseg -i finds a node (recoverseg_from_file's).
 		if [ -f "$CB/input/$t.source" ]; then
-			convert "$CB/input/$t.source" | sed -E -f "$WORK/respell.sed" | own_tmp | own_host > "$R/sql/$t.sql"
+			convert "$CB/input/$t.source" | respell | own_tmp | own_host > "$R/sql/$t.sql"
 		else
-			sed -E -f "$WORK/respell.sed" "$CB/sql/$t.sql" | own_tmp | own_host > "$R/sql/$t.sql"
+			respell "$CB/sql/$t.sql" | own_tmp | own_host > "$R/sql/$t.sql"
 		fi
 		exp="$CB/expected/$t.out"
 		[ "$pass" = orca ] && [ -f "$CB/expected/${t}_optimizer.out" ] && exp="$CB/expected/${t}_optimizer.out"
 		[ -f "$CB/output/$t.source" ] && exp="$CB/output/$t.source"
 		name="$(basename "$exp" .out)"
 		name="${name%.source}"
-		convert "$exp" | sed -E -f "$WORK/respell.sed" | own_tmp | own_host > "$R/expected/$t.out"
+		convert "$exp" | respell | own_tmp | own_host > "$R/expected/$t.out"
 
 		# As pg_isolation2_regress runs it, from the suite's directory; how
 		# long it ran is reported with its result, as pg_regress reports it.

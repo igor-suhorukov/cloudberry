@@ -174,39 +174,38 @@ for g in "${groups[@]}"; do
 done
 t1=$(date +%s)
 
-# The settings the port has, as sed that respells Cloudberry's names for
-# them; the singlenode suite says how.
-PGHOST="$(node_sock "${groups[0]}" 0)" PGPORT="$(node_port 0 0)" \
-"$PSQL" -X -q -t -A -d postgres -c "SELECT name FROM pg_settings WHERE name LIKE 'gp.%' ORDER BY length(name) DESC" |
-while read -r name; do
-	short="${name#gp.}"
-	case "$short" in
-		optimizer*|statement_mem|enable_parallel|enable_groupagg|test_print_*|\
-		resource_scheduler|resource_select_only|resource_cleanup_gangs_on_wait|\
-		max_resource_queues|max_resource_portals_per_transaction|max_statement_mem|\
-		debug_resource_group|runaway_detector_activation_percent|\
-		vmem_process_interrupt|explain_memory_verbosity|coredump_on_memerror)
-			cbname="$short" ;;
-		*) cbname="gp_$short" ;;
-	esac
-	# the column SHOW names, read as a row's field; see the singlenode suite
-	printf 's/\\b([a-z_][a-z0-9_]*)\\.%s\\b/\\1."%s"/gI\n' "$cbname" "$name"
-	printf 's/\\b(set|reset|show)(\\s+(local|session)\\s+|\\s+)%s\\b/\\1\\2%s/gI\n' "$cbname" "$name"
-	printf "s/\\\\b(current_setting|set_config)\\\\('%s'/\\\\1('%s'/gI\n" "$cbname" "$name"
-	# SHOW's header of it, the same width spelled either way; see the
-	# singlenode suite
-	case "$cbname" in gp_*)
-		printf 's/^( +)%s( +)$/\\1%s\\2/\n' "$cbname" "$name" ;;
-	esac
-done > "$WORK/respell.sed"
-# And a program of Cloudberry's suite that a test runs from the suite's
-# directory, ./extended_protocol_resqueue, is the one the port builds and
-# installs (meson's hook_tests), run from PATH as the diff is.
-echo 's#^[\\]! \./(extended_protocol_resqueue) #\\! \1 #' >> "$WORK/respell.sed"
-# So is bb_memory_quota's script, $PG_ABS_BUILDDIR/mem_quota_util.py, from
-# PATH (below); it runs its queries in the database it is named, which is
-# regression here.
-echo 's#^[\\]! \$PG_ABS_BUILDDIR/(mem_quota_util\.py) (.*)--dbname=regress #\\! \1 \2--dbname=regression #' >> "$WORK/respell.sed"
+# The settings the port has, and what respells Cloudberry's names for them
+# (../respell.pl); the singlenode suite says how.
+{
+	# the column SHOW names, read as a row's field; SET, RESET and SHOW;
+	# current_setting() and set_config(); and SHOW's header, the same width
+	# spelled either way (see the singlenode suite)
+	echo "kinds field set func header"
+	PGHOST="$(node_sock "${groups[0]}" 0)" PGPORT="$(node_port 0 0)" \
+	"$PSQL" -X -q -t -A -d postgres -c "SELECT name FROM pg_settings WHERE name LIKE 'gp.%' ORDER BY length(name) DESC" |
+	while read -r name; do
+		short="${name#gp.}"
+		case "$short" in
+			optimizer*|statement_mem|enable_parallel|enable_groupagg|test_print_*|\
+			resource_scheduler|resource_select_only|resource_cleanup_gangs_on_wait|\
+			max_resource_queues|max_resource_portals_per_transaction|max_statement_mem|\
+			debug_resource_group|runaway_detector_activation_percent|\
+			vmem_process_interrupt|explain_memory_verbosity|coredump_on_memerror)
+				cbname="$short" ;;
+			*) cbname="gp_$short" ;;
+		esac
+		echo "map $cbname $name"
+	done
+	# And a program of Cloudberry's suite that a test runs from the suite's
+	# directory, ./extended_protocol_resqueue, is the one the port builds and
+	# installs (meson's hook_tests), run from PATH as the diff is.
+	echo 'sed s#^[\\]! \./(extended_protocol_resqueue) #\\! \1 #'
+	# So is bb_memory_quota's script, $PG_ABS_BUILDDIR/mem_quota_util.py, from
+	# PATH (below); it runs its queries in the database it is named, which is
+	# regression here.
+	echo 'sed s#^[\\]! \$PG_ABS_BUILDDIR/(mem_quota_util\.py) (.*)--dbname=regress #\\! \1 \2--dbname=regression #'
+} > "$WORK/respell"
+respell() { perl "$HERE/../respell.pl" "$WORK/respell" "$@"; }
 
 # Cloudberry's file, as its pg_regress converts it, for a group
 convert() {
@@ -259,16 +258,16 @@ make_suite() {
 			fi
 		done
 		if [ -f "$CB/input/$src.source" ]; then
-			convert "$g" "$CB/input/$src.source" | amsub | sed -E -f "$WORK/respell.sed" > "$SN/sql/$f.sql"
+			convert "$g" "$CB/input/$src.source" | amsub | respell > "$SN/sql/$f.sql"
 		else
-			convert "$g" "$CB/sql/$t.sql" | sed -E -f "$WORK/respell.sed" > "$SN/sql/$f.sql"
+			convert "$g" "$CB/sql/$t.sql" | respell > "$SN/sql/$f.sql"
 		fi
 		if [ -f "$CB/output/$src.source" ]; then
-			convert "$g" "$CB/output/$src.source" | amsub | sed -E -f "$WORK/respell.sed" > "$SN/expected/$f.out"
+			convert "$g" "$CB/output/$src.source" | amsub | respell > "$SN/expected/$f.out"
 		else
 			for e in "$CB/expected/$t.out" "$CB"/expected/"$t"_[0-9].out; do
 				[ -f "$e" ] || continue
-				convert "$g" "$e" | sed -E -f "$WORK/respell.sed" \
+				convert "$g" "$e" | respell \
 					> "$SN/expected/$(echo "${e#"$CB"/expected/}" | tr / _)"
 			done
 		fi
@@ -306,7 +305,7 @@ PGDATABASE="\${PGDATABASE:-regression}" exec "$GPHOME/bin/gpconfig" "\$@"
 EOF
 chmod +x "$EXEC/bin/gpconfig"
 # Cloudberry's client, through this: it sets gp_log_resqueue_memory by
-# Cloudberry's name, which a compiled program keeps and respell.sed cannot
+# Cloudberry's name, which a compiled program keeps and respelling cannot
 # reach, so the setting is given it by the port's as it connects.
 if [ -x "$BINDIR/extended_protocol_resqueue" ]; then
 	cat > "$EXEC/bin/extended_protocol_resqueue" <<EOF

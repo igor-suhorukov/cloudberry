@@ -116,27 +116,25 @@ echo
 	{ echo "could not create gp_core in template1"; exit 1; }
 
 # The settings the port has, respelled as the isolation2 suite respells them
-# (see there).
-"$PSQL" -X -q -t -A -d postgres -c "SELECT name FROM pg_settings WHERE name LIKE 'gp.%' ORDER BY length(name) DESC" |
-while read -r name; do
-	short="${name#gp.}"
-	case "$short" in
-		optimizer*|statement_mem|enable_parallel|enable_groupagg|test_print_*|\
-		resource_scheduler|resource_select_only|resource_cleanup_gangs_on_wait|\
-		max_resource_queues|max_resource_portals_per_transaction|max_statement_mem|\
-		debug_resource_group|runaway_detector_activation_percent|\
-		vmem_process_interrupt|explain_memory_verbosity|coredump_on_memerror)
-			cbname="$short" ;;
-		*) cbname="gp_$short" ;;
-	esac
-	printf 's/\\b(set|reset|show)(\\s+(local|session|system)\\s+|\\s+)%s\\b/\\1\\2%s/gI\n' "$cbname" "$name"
-	printf 's/\\b(alter\\s+system\\s+(set|reset)\\s+)%s\\b/\\1%s/gI\n' "$cbname" "$name"
-	printf "s/\\\\b(current_setting|set_config)\\\\('%s'/\\\\1('%s'/gI\n" "$cbname" "$name"
-	printf "s/\\\\b(name\\\\s*=\\\\s*)'%s'/\\\\1'%s'/gI\n" "$cbname" "$name"
-	case "$cbname" in
-		gp_*) printf 's/^( *)%s( *)$/\\1%s\\2/\n' "$cbname" "$name" ;;
-	esac
-done > "$WORK/respell.sed"
+# (see there, and ../respell.pl).
+{
+	echo "kinds setsys altersys func nameeq header0"
+	"$PSQL" -X -q -t -A -d postgres -c "SELECT name FROM pg_settings WHERE name LIKE 'gp.%' ORDER BY length(name) DESC" |
+	while read -r name; do
+		short="${name#gp.}"
+		case "$short" in
+			optimizer*|statement_mem|enable_parallel|enable_groupagg|test_print_*|\
+			resource_scheduler|resource_select_only|resource_cleanup_gangs_on_wait|\
+			max_resource_queues|max_resource_portals_per_transaction|max_statement_mem|\
+			debug_resource_group|runaway_detector_activation_percent|\
+			vmem_process_interrupt|explain_memory_verbosity|coredump_on_memerror)
+				cbname="$short" ;;
+			*) cbname="gp_$short" ;;
+		esac
+		echo "map $cbname $name"
+	done
+} > "$WORK/respell"
+respell() { perl "$HERE/../respell.pl" "$WORK/respell" "$@"; }
 export PG_BINDIR="$BINDIR"
 
 mkdir -p "$WORK/gpdiff"
@@ -173,7 +171,7 @@ for pass in ${PASSES:-planner orca}; do
 		res="$R/results/$t.out"
 		mkdir -p "$(dirname "$res")" "$(dirname "$R/canon/$t")" \
 			"$(dirname "$R/sql/$t")" "$(dirname "$R/expected/$t")"
-		sed -E -f "$WORK/respell.sed" "$CB/sql/$t.sql" > "$R/sql/$t.sql"
+		respell "$CB/sql/$t.sql" > "$R/sql/$t.sql"
 
 		# As pg_isolation2_regress runs it, from the suite's directory.
 		( cd "$CB" && PGOPTIONS="-c gp.optimizer=$optimizer" \
@@ -185,7 +183,7 @@ for pass in ${PASSES:-planner orca}; do
 		[ "$pass" = orca ] && [ -f "$CB/expected/${t}_optimizer.out" ] && cbexp="$CB/expected/${t}_optimizer.out"
 		exp="$R/expected/${cbexp#"$CB"/expected/}"
 		mkdir -p "$(dirname "$exp")"
-		sed -E -f "$WORK/respell.sed" "$cbexp" > "$exp"
+		respell "$cbexp" > "$exp"
 		inits=(--gpd_init "$GPDIFF/init_file" --gpd_init "$CB/init_file_isolation2"
 		       --gpd_init "$HERE/init_file")
 		[ -s "$res.ini" ] && inits+=(--gpd_init "$res.ini")
