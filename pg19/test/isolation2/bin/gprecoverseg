@@ -124,6 +124,15 @@ recover() {					# recover <dbid>
 	touch "$dir/standby.signal"
 	"$PG_BINDIR/pg_ctl" -D "$dir" -l "$dir.log" -w -t 120 start > /dev/null 2>&1 ||
 		{ echo "gprecoverseg: dbid $dbid did not start" >&2; return 1; }
+
+	# Streaming before FTS is asked, which marks a mirror up only once its
+	# primary has a WAL sender for it, and does not ask again for one it has
+	# marked down: a recovery ends with the mirror up, as the tests read it
+	# at once (recoverseg_from_file).  A hot standby takes the question.
+	for _ in $(seq 300); do
+		[ "$(qn "$host" "$port" "SELECT status FROM pg_catalog.pg_stat_wal_receiver" 2> /dev/null)" = streaming ] && break
+		sleep 0.2
+	done
 }
 
 # A node recovered where -i's file says: stopped, removed from the cluster and
@@ -197,5 +206,8 @@ else
 		recover "$dbid" || failed=1
 	done
 fi
+# Twice, as Cloudberry's gprecoverseg asks (buildMirrorSegments.py), a probe
+# that began before the request being what the first may wait for.
+q "SELECT gp_request_fts_probe_scan()" > /dev/null
 q "SELECT gp_request_fts_probe_scan()" > /dev/null
 exit "$failed"
