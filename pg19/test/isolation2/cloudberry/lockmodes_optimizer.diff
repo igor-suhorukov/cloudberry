@@ -1102,6 +1102,20 @@
 + relation | ExclusiveLock | t       | t_lockmods 
 +(1 row)
 @@
+- locktype | mode          | granted | relation                        
+-----------+---------------+---------+---------------------------------
+- relation | ExclusiveLock | t       | t_lockmods_part_tbl_dml         
+- relation | ExclusiveLock | t       | t_lockmods_part_tbl_dml_1_prt_1 
+- relation | ExclusiveLock | t       | t_lockmods_part_tbl_dml_1_prt_2 
+-(3 rows)
++ locktype | mode            | granted | relation                        
++----------+-----------------+---------+---------------------------------
++ relation | AccessShareLock | t       | t_lockmods_part_tbl_dml         
++ relation | ExclusiveLock   | t       | t_lockmods_part_tbl_dml         
++ relation | ExclusiveLock   | t       | t_lockmods_part_tbl_dml_1_prt_1 
++ relation | ExclusiveLock   | t       | t_lockmods_part_tbl_dml_1_prt_2 
++(4 rows)
+@@
 -  'child' => [
 -    {
 -      'child' => [

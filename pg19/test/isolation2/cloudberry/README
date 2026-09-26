@@ -55,8 +55,11 @@ lockmodes, and its _optimizer output, which the orca pass is compared with
   locking clause names up under AccessShareLock first, where the port takes
   the ExclusiveLock alone; the port prints an UPDATE or DELETE for the
   segments, and PostgreSQL's ruleutils takes AccessShareLock on what it
-  prints; and a cached upsert's EXCLUDED entry asks for RowExclusiveLock,
-  after the target's ExclusiveLock.  The planner's plans are the port's:
+  prints; a cached upsert's EXCLUDED entry asks for RowExclusiveLock,
+  after the target's ExclusiveLock; and ORCA, which plans an UPDATE of a
+  partitioned table here where Cloudberry's leaves it to the planner, reads
+  each partition's constraint, which PostgreSQL builds under an
+  AccessShareLock on the table, one lock more beside its ExclusiveLock.  The planner's plans are the port's:
   each table gathered from the segments and joined on the coordinator, and
   with the detector on the rows of a locking clause locked on the segments
   by the gather's query, where Cloudberry's plan has a LockRows.  And
