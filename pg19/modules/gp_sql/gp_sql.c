@@ -1559,8 +1559,13 @@ gp_sql_ProcessUtility(PlannedStmt *pstmt, const char *queryString,
 		return;
 	}
 
+	/*
+	 * And on a segment, for a statement of a script the coordinator
+	 * dispatched whole -- postgis_topology's makes tables that reference each
+	 * other -- which the coordinator made without triggers.
+	 */
 	if ((IsA(parsetree, CreateStmt) || IsA(parsetree, AlterTableStmt)) &&
-		on_cluster_coordinator())
+		(on_cluster_coordinator() || GpDispatchIsRunningDispatched()))
 	{
 		pstmt = unenforce_foreign_keys(pstmt, &readOnlyTree);
 		parsetree = pstmt->utilityStmt;
@@ -1589,7 +1594,24 @@ gp_sql_ProcessUtility(PlannedStmt *pstmt, const char *queryString,
 		transform((CreateForeignTableStmt *) parsetree, queryString);
 	}
 
+	/* a statement of an extension's script, as PostGIS's is (extscript.c) */
+	if (creating_extension)
+	{
+		GpExtScriptStatement(&pstmt, &readOnlyTree);
+		parsetree = pstmt->utilityStmt;
+	}
+
 	check_reserved_names(parsetree);
+
+	/* and what the port adds once the script has run */
+	if (IsA(parsetree, CreateExtensionStmt) || IsA(parsetree, AlterExtensionStmt))
+	{
+		GpSqlProcessUtilityNext(pstmt, queryString, readOnlyTree, context,
+								params, queryEnv, dest, qc);
+		CommandCounterIncrement();
+		GpExtScriptDone(parsetree);
+		return;
+	}
 
 	if (IsA(parsetree, AlterTableStmt))
 		check_attach_external((AlterTableStmt *) parsetree);

@@ -347,4 +347,11 @@ extern void GpPartitionRenamed(Oid relid, const char *oldname, const char *newna
  */
 extern void GpTagValidate(const char *tagname, const char *tagvalue);
 
+/*
+ * PostGIS's scripts as the port runs them (extscript.c): a statement of an
+ * extension's script before it runs, and a CREATE or ALTER EXTENSION after.
+ */
+extern void GpExtScriptStatement(PlannedStmt **pstmt, bool *readOnlyTree);
+extern void GpExtScriptDone(Node *parsetree);
+
 #endif							/* GP_SQL_H */

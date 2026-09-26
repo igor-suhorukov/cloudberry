@@ -541,6 +541,7 @@ modules = [
                      'modules/gp_sql/dirtable.c',
                      'modules/gp_sql/storage.c',
                      'modules/gp_sql/distribution.c',
+                     'modules/gp_sql/extscript.c',
                      # O26's desugaring: Cloudberry's spelling of a statement
                      # rewritten into PostgreSQL's, before the grammar sees it,
                      # and the parse tree's positions put back in the user's.
