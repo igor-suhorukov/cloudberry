@@ -144,6 +144,7 @@ orca_compat_sources = files(
   'compat/plancat.c',
   'compat/prepagg.c',
   'compat/selfuncs.c',
+  'compat/sharedscan.c',
   'compat/subselect.c',
   'compat/tlist.c',
   'compat/walkers.c',

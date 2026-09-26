@@ -47,13 +47,17 @@
 #include "nodes/makefuncs.h"
 #include "nodes/nodeFuncs.h"
 #include "nodes/plannodes.h"
+#include "catalog/pg_class.h"
 #include "utils/fmgroids.h"
+#include "utils/guc.h"
+#include "utils/lsyscache.h"
 
 #include "optimizer/walkers.h"
 
 #include "cb_compat.h"
 #include "cb_dynamicscan.h"
 #include "cb_motion.h"
+#include "cb_sharedscan.h"
 #include "gp_motion.h"
 
 /* A Motion, and what its fragment is sent with. */
@@ -81,6 +85,8 @@ typedef struct motion_check_context
 	int			slice;			/* the fragment's slice, where in one */
 	bool		on_coordinator; /* a fragment the coordinator sends from */
 	List	  **callers;		/* each subplan's calling slice; see gp_motion.h */
+	List	  **shares;			/* each shared CTE's id and slices, IntLists */
+	bool	   *from_coordinator;	/* a fragment the coordinator sends */
 } motion_check_context;
 
 /* A subplan no SubPlan the walk met calls. */
@@ -101,6 +107,26 @@ note_subplan_caller(motion_check_context *ctx, int plan_id, int slice)
 	else if (lfirst_int(cell) != slice)
 		lfirst_int(cell) = GP_SUBPLAN_UNKNOWN;
 	*ctx->callers = callers;
+}
+
+/* Shared CTE "share_id" is read or written in "slice". */
+static void
+note_share(motion_check_context *ctx, int share_id, int slice)
+{
+	ListCell   *lc;
+
+	foreach(lc, *ctx->shares)
+	{
+		List	   *share = (List *) lfirst(lc);
+
+		if (linitial_int(share) == share_id)
+		{
+			if (!list_member_int(list_delete_first(list_copy(share)), slice))
+				lfirst(lc) = lappend_int(share, slice);
+			return;
+		}
+	}
+	*ctx->shares = lappend(*ctx->shares, list_make2_int(share_id, slice));
 }
 
 static bool
@@ -174,6 +200,8 @@ motion_check_walker(Node *node, void *arg)
 		sub.slice = api->motion_slice(plan);
 		sub.on_coordinator = !gather &&
 			api->motion_segment(plan) == GP_MOTION_FROM_COORDINATOR;
+		if (sub.on_coordinator)
+			*ctx->from_coordinator = true;
 		if (!ctx->in_fragment || gather)
 			sub.top = plan;
 		if (motion_check_walker((Node *) plan->lefttree, &sub))
@@ -344,7 +372,13 @@ motion_check_walker(Node *node, void *arg)
 			case T_CustomScan:
 				{
 					CustomScan *cscan = (CustomScan *) node;
+					int			share_id;
+					int			slice;
+					bool		producer;
 
+					if (gp_orca_is_shared_scan((Plan *) node, &share_id, &slice,
+											   &producer))
+						note_share(ctx, share_id, slice);
 					if (cscan->methods == &gp_orca_partition_selector_methods)
 						ctx->produced =
 							bms_add_member(ctx->produced,
@@ -381,6 +415,8 @@ gp_orca_check_motions(PlannedStmt *stmt)
 	Bitmapset  *fragment_produced = NULL;
 	List	   *params = NIL;
 	List	   *callers = NIL;
+	List	   *shares = NIL;
+	bool		from_coordinator = false;
 	ListCell   *lc;
 
 	exec_init_plan_tree_base(&ctx.base, stmt);
@@ -398,10 +434,53 @@ gp_orca_check_motions(PlannedStmt *stmt)
 	ctx.slice = -1;
 	ctx.on_coordinator = false;
 	ctx.callers = &callers;
+	ctx.shares = &shares;
+	ctx.from_coordinator = &from_coordinator;
 
 	(void) motion_check_walker((Node *) stmt->planTree, &ctx);
 	if (ctx.problem != GP_ORCA_MOTION_OK)
 		return ctx.problem;
+
+	/*
+	 * A CTE shared in a slice the segments run keeps its rows in files named
+	 * after the key of the Gather that sends the slice (compat/sharedscan.c),
+	 * which the Gathers are told the slices of.  One read in more than one
+	 * slice has them run at once, a consumer waiting for its producer; gp_core
+	 * relays slices one at a time -- every one with gp.interconnect_type =
+	 * relay, and otherwise one that scans a temporary table, one the
+	 * coordinator sends and those below them (gp_motion.c, stream_plan()) --
+	 * so such a plan is left to the planner, and a Gather that would relay
+	 * one all the same refuses rather than wait.
+	 */
+	if (shares != NIL)
+	{
+		const char *ic = GetConfigOption("gp.interconnect_type", true, false);
+		bool		across = false;
+		bool		temp = false;
+		List	   *slices = NIL;
+
+		foreach(lc, shares)
+		{
+			List	   *share = list_delete_first(list_copy((List *) lfirst(lc)));
+
+			across |= list_length(share) > 1;
+			slices = lappend(slices, share);
+		}
+		foreach(lc, stmt->rtable)
+		{
+			RangeTblEntry *rte = lfirst_node(RangeTblEntry, lc);
+
+			if (rte->rtekind == RTE_RELATION &&
+				get_rel_persistence(rte->relid) == RELPERSISTENCE_TEMP)
+				temp = true;
+		}
+		if (across &&
+			(temp || from_coordinator || (ic != NULL && strcmp(ic, "relay") == 0)))
+			return GP_ORCA_MOTION_SHARE;
+		stmt->extension_state = lappend(stmt->extension_state,
+										makeDefElem(pstrdup(GP_SHARE_SLICES),
+													(Node *) slices, -1));
+	}
 
 	/*
 	 * What a fragment is sent has to be the coordinator's to send: a value

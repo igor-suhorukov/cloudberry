@@ -177,6 +177,12 @@ private:
 	// carries out as it does a Motion between segments
 	BOOL m_gather_into_segment;
 
+	// the plan has a CTE, which a slice the segments run shares through
+	// files, its slices running at once: the coordinator's own slice below
+	// a Motion it would send from runs on a segment instead, where it reads
+	// nothing of its own (compat/sharedscan.c)
+	BOOL m_singletons_on_segment;
+
 	// number of segments
 	ULONG m_num_of_segments;
 
@@ -516,7 +522,8 @@ private:
 		const CDXLNode *cte_producer_dxlnode,
 		CDXLTranslateContext *output_context,
 		CDXLTranslationContextArray *
-			ctxt_translation_prev_siblings	// translation contexts of previous siblings
+			ctxt_translation_prev_siblings,	 // translation contexts of previous siblings
+		BOOL shared = false	 // read in another slice too
 	);
 
 	// translate a CTE consumer into a GPDB share input scan

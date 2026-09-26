@@ -893,6 +893,17 @@ bool RelOldRowFromPlan(Oid relid);
 // cannot pass it on (O20's "wholerow"; compat/wholerow.c).
 AttrNumber CarryWholeRow(Plan *plan, AttrNumber resno, List *rtable);
 
+// A CTE ORCA reads in more than one slice, whose rows each segment keeps in
+// files (compat/sharedscan.c): whether gp_core can name them; the Sequence
+// that runs "producers" before "plan"; a producer, writing the rows of
+// "child" as share "share_id" in slice "slice"; and a consumer, reading
+// them as "scan_tlist" and giving "targetlist" of them.
+bool CanShareAcrossSlices(void);
+Plan *MakeSequence(Plan *plan, List *producers);
+Plan *MakeShareProducer(Plan *child, int share_id, int slice);
+Plan *MakeShareConsumer(int share_id, int slice, List *scan_tlist,
+						List *targetlist);
+
 // The plan of the hashed SubPlan that stands for NOT IN's anti-join over
 // "inner", the join's conditions "clauses", and its test over "paramids";
 // nullptr where a condition is not an outer expression's equality with an

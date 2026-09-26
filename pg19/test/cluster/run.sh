@@ -1549,6 +1549,67 @@ a\b|\N' ] && [ "$(cat "$ROOT/ce_prog.txt" 2>&1)" = "to a program" ] \
 	orca_same "... and an outer NULL no row" \
 		"SELECT count(*), count(a) FROM (SELECT NULLIF(a, 5) AS a FROM o) s WHERE a NOT IN (SELECT x FROM po WHERE y = 0);"
 
+	# A CTE in a slice the segments run: Cloudberry's cross-slice
+	# ShareInputScan, whose producer writes the CTE's rows to files each
+	# segment keeps, which the consumers in its slice and in others read
+	# once they are all there (compat/sharedscan.c).  In such a plan the
+	# coordinator's aggregate of gathered rows, which ORCA sends back to the
+	# segments, runs on one of them, and every slice streams.
+	q 0 "CREATE TABLE sh (a int, b int) DISTRIBUTED BY (a);
+	     INSERT INTO sh SELECT i % 100, i FROM generate_series(1, 10000) i; ANALYZE sh;" >/dev/null
+	orca_same "a CTE read twice in the slice that produces it: a Shared Scan" \
+		"WITH c AS (SELECT a, count(*) cnt FROM sh GROUP BY a) SELECT count(*), sum(c1.cnt) FROM c c1 JOIN c c2 USING (a) WHERE c1.cnt > 5;" \
+		"Shared Scan (share slice:id"
+	orca_same "... and in another slice, below a Redistribute Motion" \
+		"WITH c AS (SELECT a, b FROM sh WHERE b % 3 = 0) SELECT count(*), sum(c1.b) FROM c c1 JOIN c c2 ON c1.b = c2.a;" \
+		"Redistribute Motion 2:2"
+	orca_same "grouping sets, which ORCA aggregates over a shared CTE, a slice each" \
+		"SELECT a % 3, b % 4, count(*) FROM sh GROUP BY CUBE (a % 3, b % 4) ORDER BY 1, 2;" \
+		"Sequence"
+	orca_same "the aggregate of gathered rows ORCA sends back to the segments, on one of them" \
+		"WITH r AS (SELECT b % 37 AS s, sum(a) AS t FROM sh GROUP BY 1) SELECT s, t FROM r WHERE t = (SELECT max(t) FROM r) ORDER BY 1;" \
+		"Motion 1:2"
+	out=$(q 0 "SET gp.optimizer_enable_hashjoin = off; SET gp.optimizer_enable_mergejoin = off;
+		EXPLAIN (COSTS OFF) WITH c AS (SELECT a, b FROM sh WHERE b < 400) SELECT count(*) FROM c c1 JOIN c c2 ON c1.a = c2.a AND c1.b < c2.b;" | tr '\n' '|')
+	got=$(q 0 "SET gp.optimizer_enable_hashjoin = off; SET gp.optimizer_enable_mergejoin = off;
+		WITH c AS (SELECT a, b FROM sh WHERE b < 400) SELECT count(*) FROM c c1 JOIN c c2 ON c1.a = c2.a AND c1.b < c2.b;")
+	want=$(q 0 "SET gp.optimizer = off; WITH c AS (SELECT a, b FROM sh WHERE b < 400) SELECT count(*) FROM c c1 JOIN c c2 ON c1.a = c2.a AND c1.b < c2.b;")
+	case "$out" in
+		*"Nested Loop"*"Shared Scan"*"Optimizer: GPORCA"*)
+			[ "$got" = "$want" ] && ok "... a consumer read again for each row of a nested loop" \
+				|| notok "a Shared Scan read again" "ORCA: $got / planner: $want" ;;
+		*) notok "a Shared Scan on a nested loop's inner side: the plan" "$out" ;;
+	esac
+	got=$(q 0 "SET statement_timeout = '60s'; WITH c AS (SELECT a, b FROM sh) SELECT c1.a FROM c c1 JOIN c c2 ON c1.b = c2.a LIMIT 3;" | grep -c '^[0-9][0-9]*$')
+	after=$(q 0 "SELECT count(*) FROM sh;")
+	[ "$got" = 3 ] && [ "$after" = 10000 ] \
+		&& ok "... a LIMIT that stops the Gather before the consumers have read, and nothing waits" \
+		|| notok "a Shared Scan below a LIMIT" "$got rows, then $after"
+	out=$(q 0 "SET statement_timeout = '60s'; WITH c AS (SELECT a, b FROM sh) SELECT count(*) FROM c c1 JOIN c c2 ON c1.b = c2.a WHERE 1 / (c2.b - 50) > -1;")
+	case "$out" in
+		*"division by zero"*) ok "... an error in a consumer's slice ends the statement, nothing waiting" ;;
+		*) notok "an error with a Shared Scan" "$out" ;;
+	esac
+	left=$(ls -d "$(datadir 1)"/base/pgsql_tmp/*.fileset "$(datadir 2)"/base/pgsql_tmp/*.fileset 2>/dev/null | wc -l)
+	[ "$left" = 0 ] && ok "... and the segments keep none of the shared CTEs' files after" \
+		|| notok "the shared CTEs' files, left on the segments" "$(ls -d "$(datadir 1)"/base/pgsql_tmp/* "$(datadir 2)"/base/pgsql_tmp/* 2>/dev/null | tr '\n' ' ')"
+	# gp_core relays a slice at a time with gp.interconnect_type = relay, and
+	# a slice that reads a temporary table: such a plan is the planner's.
+	shared_relayed() {			# shared_relayed <what> <setup> <table>
+		local out
+		out=$(printf '%s\n' "$2" "SET gp.optimizer_trace_fallback = on;" \
+			"WITH c AS (SELECT a, b FROM $3 WHERE b % 3 = 0) SELECT count(*), sum(c1.b) FROM c c1 JOIN c c2 ON c1.b = c2.a;" | qf 0 | tr '\n' '|')
+		case "$out" in
+			*"a CTE read in more than one slice, whose slices cannot all run at once"*"1122|57222|"*)
+				ok "$1" ;;
+			*) notok "$1" "$out" ;;
+		esac
+	}
+	shared_relayed "... left to the planner with gp.interconnect_type = relay" \
+		"SET gp.interconnect_type = relay;" sh
+	shared_relayed "... and where it reads a temporary table" \
+		"CREATE TEMP TABLE sht AS SELECT * FROM sh DISTRIBUTED BY (a); ANALYZE sht;" sht
+
 	# gp_segment_id is ORCA's system column, which its plan computes where
 	# the row is read: a query naming it is ORCA's, a random table's
 	# included, in a join too, where PostgreSQL's gather cannot give it; a

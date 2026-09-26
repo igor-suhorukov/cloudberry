@@ -71,6 +71,7 @@
 
 #include "cb_assertop.h"
 #include "cb_dynamicscan.h"
+#include "cb_sharedscan.h"
 #include "cb_motion.h"
 #include "cb_clauses.h"
 #include "cb_lsyscache.h"
@@ -1393,6 +1394,7 @@ _PG_init(void)
 	/* The executor nodes ORCA's plans use that PostgreSQL 19 does not have. */
 	gp_orca_register_assert();
 	gp_orca_register_dynamic_scans();
+	gp_orca_register_shared_scans();
 
 	/*
 	 * ORCA is not brought up here.  Its libraries build process-local state

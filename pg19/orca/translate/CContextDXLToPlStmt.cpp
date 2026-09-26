@@ -192,12 +192,12 @@ CContextDXLToPlStmt::GetParamTypes()
 void
 CContextDXLToPlStmt::RegisterCTEProducerInfo(
 	ULONG cte_id, ULongPtrArray *producer_output_colidx_map,
-	Plan *producer, SubPlan *initplan)
+	Plan *producer, SubPlan *initplan, BOOL shared, const PlanSlice *slice)
 {
 	ULONG *key = GPOS_NEW(m_mp) ULONG(cte_id);
 	BOOL result GPOS_ASSERTS_ONLY = m_cte_producer_info->Insert(
 		key, GPOS_NEW(m_mp) SCTEEntryInfo(producer_output_colidx_map,
-										  producer, initplan));
+										  producer, initplan, shared, slice));
 
 	GPOS_ASSERT(result);
 }

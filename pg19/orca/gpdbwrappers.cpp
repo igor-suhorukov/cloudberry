@@ -131,6 +131,9 @@ extern "C" {
 /* NOT IN's anti-join as a hashed SubPlan; see NotInSubplan. */
 #include "cb_notin.h"
 
+/* A CTE read in more than one slice; see MakeSequence. */
+#include "cb_sharedscan.h"
+
 /* PostGIS's index support function; see IsPostgisIndexSupport. */
 #include "gp_orca_postgis.h"
 
@@ -3027,6 +3030,52 @@ gpdb::RelOldRowFromPlan(Oid relid)
 	}
 	GP_WRAP_END;
 	return false;
+}
+
+bool
+gpdb::CanShareAcrossSlices(void)
+{
+	GP_WRAP_START;
+	{
+		return gp_orca_can_share_across_slices();
+	}
+	GP_WRAP_END;
+	return false;
+}
+
+Plan *
+gpdb::MakeSequence(Plan *plan, List *producers)
+{
+	GP_WRAP_START;
+	{
+		return gp_orca_make_sequence(plan, producers);
+	}
+	GP_WRAP_END;
+	return nullptr;
+}
+
+Plan *
+gpdb::MakeShareProducer(Plan *child, int share_id, int slice)
+{
+	GP_WRAP_START;
+	{
+		return gp_orca_make_share_producer(child, share_id, slice);
+	}
+	GP_WRAP_END;
+	return nullptr;
+}
+
+Plan *
+gpdb::MakeShareConsumer(int share_id, int slice, List *scan_tlist,
+						List *targetlist)
+{
+	GP_WRAP_START;
+	{
+		return gp_orca_make_share_consumer(share_id, slice, scan_tlist,
+										   targetlist);
+	}
+	GP_WRAP_END;
+	return nullptr;
 }
 
 Plan *
