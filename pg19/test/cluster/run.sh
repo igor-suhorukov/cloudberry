@@ -2108,6 +2108,24 @@ COMMIT;"
 	[ "$out" = "500|50497" ] && ok "a split update rolled back leaves every row where it was" \
 		|| notok "a split update rolled back" "$out"
 
+	# A segment applies a split update's DELETEs before its INSERTs, the
+	# order ORCA sorts its rows into where the update changes a key of the
+	# table's: an UPDATE that sets a unique key to another column that has
+	# the same value deletes each old row before its new one is checked
+	# against it.
+	q 0 "CREATE TABLE wq (a int UNIQUE, b int) DISTRIBUTED BY (a); INSERT INTO wq SELECT i, i FROM generate_series(1, 50) i;" >/dev/null
+	plan=$(q 0 "EXPLAIN (COSTS OFF) UPDATE wq SET a = b WHERE b <= 25;")
+	tag=$("$PSQL" -X -t -A -h "$(sockdir 0)" -p "$(port 0)" -d postgres \
+		-c "UPDATE wq SET a = b WHERE b <= 25;" 2>&1)
+	out=$(q 0 "SELECT count(*), sum(a) FROM wq;")
+	case "$plan" in
+		*"Split Update"*)
+			[ "$tag|$out" = "UPDATE 25|50|1275" ] \
+				&& ok "a split update of a unique key to the value it has: each row's DELETE before its INSERT" \
+				|| notok "a split update of a unique key" "$tag / $out" ;;
+		*) notok "a split update of a unique key: the plan" "$plan" ;;
+	esac
+
 	q 0 "CREATE TABLE wt (a int, b int) DISTRIBUTED BY (a);" >/dev/null
 	q 0 "CREATE FUNCTION wt_noop() RETURNS trigger LANGUAGE plpgsql AS \$\$ BEGIN RETURN NEW; END \$\$;" >/dev/null
 	q 0 "CREATE TRIGGER wt_t BEFORE INSERT ON wt FOR EACH ROW EXECUTE FUNCTION wt_noop();" >/dev/null

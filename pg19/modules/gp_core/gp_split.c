@@ -86,9 +86,16 @@
 /* Split Update: each row, twice                                             */
 /* ------------------------------------------------------------------------- */
 
-/* The action column's values, Cloudberry's DMLAction. */
+/*
+ * The action column's values, Cloudberry's DMLAction.  Where an update
+ * changes a key of the table's, ORCA sorts the rows a segment receives by
+ * this column, ascending (CPhysicalDML::PosComputeRequired()), so that the
+ * DELETE of a row's old version comes before any INSERT of a new one with
+ * the same key -- an UPDATE that sets a unique key to the value it has, or
+ * one that another row gives up.
+ */
+#define GP_DML_DELETE	0
 #define GP_DML_INSERT	1
-#define GP_DML_DELETE	2
 
 typedef struct SplitState
 {
