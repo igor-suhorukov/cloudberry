@@ -189,6 +189,9 @@ extern void GpDirTableDropped(Oid relid);
  */
 extern char *GpDirTableClaim(Oid relid);
 
+/* SECURITY LABEL made it one, as a restore does: a directory of its own. */
+extern void GpDirTableRestored(Oid relid);
+
 /* Registered during preload; drains the files a transaction leaves behind. */
 extern void GpDirTableRegisterXactCallback(void);
 extern void GpDirTableRegisterRmgr(void);

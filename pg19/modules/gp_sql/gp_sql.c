@@ -1826,6 +1826,25 @@ gp_sql_ProcessUtility(PlannedStmt *pstmt, const char *queryString,
 		return;
 	}
 
+	/*
+	 * SECURITY LABEL FOR gp on a table, as a restore of pg_dump's output
+	 * writes one: a directory table's location made its own (dirtable.c).
+	 */
+	if (IsA(parsetree, SecLabelStmt) &&
+		((SecLabelStmt *) parsetree)->objtype == OBJECT_TABLE &&
+		((SecLabelStmt *) parsetree)->provider != NULL &&
+		strcmp(((SecLabelStmt *) parsetree)->provider, "gp") == 0)
+	{
+		SecLabelStmt *sl = (SecLabelStmt *) parsetree;
+
+		GpSqlProcessUtilityNext(pstmt, queryString, readOnlyTree, context,
+								params, queryEnv, dest, qc);
+		CommandCounterIncrement();
+		GpDirTableRestored(RangeVarGetRelid(makeRangeVarFromNameList(castNode(List, sl->object)),
+											NoLock, false));
+		return;
+	}
+
 	/* ALTER ROLE ... RENAME TO: the tags the role owns follow it (tag.c) */
 	if (IsA(parsetree, RenameStmt) &&
 		((RenameStmt *) parsetree)->renameType == OBJECT_ROLE)

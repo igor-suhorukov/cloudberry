@@ -881,6 +881,42 @@ GpDirTableClaim(Oid relid)
 }
 
 /*
+ * A table labelled a directory table by SECURITY LABEL rather than made one
+ * -- as a restore of pg_dump's output labels it, with the location the table
+ * had where it was dumped, a directory of another database's and of another
+ * relation's OID -- is given a directory of its own here, as CREATE
+ * DIRECTORY TABLE gives one, when the label names any other.  The files are
+ * not carried: they are the old directory's, which neither pg_dump nor
+ * Cloudberry's tools copy, so the rows restored beside them name files the
+ * new directory does not have until they are copied into it or put again.
+ */
+void
+GpDirTableRestored(Oid relid)
+{
+	char	   *location = GpDirTableLocation(relid);
+	Oid			reltablespace;
+	char	   *server;
+	char	   *own;
+	ObjectAddress addr;
+
+	if (location == NULL)
+		return;
+	reltablespace = get_rel_tablespace(relid);
+	server = GpStorageTablespaceServer(OidIsValid(reltablespace)
+									   ? reltablespace : MyDatabaseTableSpace);
+	own = server != NULL
+		? psprintf("%u/%u%s", MyDatabaseId, relid, GP_DIRTABLE_SUFFIX)
+		: dirtable_compute_location(relid);
+	if (strcmp(location, own) == 0)
+		return;
+
+	ObjectAddressSet(addr, RelationRelationId, relid);
+	GpLabelSet(&addr, GP_LABEL_directory_location, NULL);
+	GpLabelSet(&addr, GP_LABEL_storage_server, NULL);
+	(void) GpDirTableClaim(relid);
+}
+
+/*
  * gp_sql.directory_table_location(regclass) -> text
  *
  * NULL for a table that is not a directory table, which is what makes the
