@@ -400,7 +400,7 @@ run_group() {
 	export ISOLATION2_STANDBY_HOT="$(has_mirrors "$g" && echo on || echo off)"
 
 	mkdir -p "$R/results" "$R/canon" "$R/sql" "$R/expected"
-	own_tablespaces() { sed -E "s#/tmp/([A-Za-z0-9_]*tablespace[A-Za-z0-9_]*)#$R/\\1#g"; }
+	own_tmp() { sed -E "s#/tmp/([A-Za-z0-9_]+)#$R/\\1#g"; }
 	: > "$R/status"
 	"$PSQL" -X -q -d postgres -c "DROP DATABASE IF EXISTS $DBNAME" > /dev/null 2>&1
 	"$PSQL" -X -q -d postgres -c "CREATE DATABASE $DBNAME" > /dev/null
@@ -418,20 +418,22 @@ run_group() {
 		mkdir -p "$(dirname "$res")" "$(dirname "$R/canon/$t")" \
 			"$(dirname "$R/sql/$t")" "$(dirname "$R/expected/$t")"
 
-		# A tablespace a test makes under /tmp is its pass's and group's
-		# own: the two passes run side by side, and two tablespaces cannot
-		# share a directory (mirror_promotion's).
+		# What a test makes under /tmp is its pass's and group's own: the
+		# two passes run side by side, as jobs of their own in a full run,
+		# and two tablespaces cannot share a directory (mirror_promotion's),
+		# nor two recoveries a file (recoverseg_from_file's, which one pass
+		# would read the other's recovery from, and remove).
 		if [ -f "$CB/input/$t.source" ]; then
-			convert "$CB/input/$t.source" | sed -E -f "$WORK/respell.sed" | own_tablespaces > "$R/sql/$t.sql"
+			convert "$CB/input/$t.source" | sed -E -f "$WORK/respell.sed" | own_tmp > "$R/sql/$t.sql"
 		else
-			sed -E -f "$WORK/respell.sed" "$CB/sql/$t.sql" | own_tablespaces > "$R/sql/$t.sql"
+			sed -E -f "$WORK/respell.sed" "$CB/sql/$t.sql" | own_tmp > "$R/sql/$t.sql"
 		fi
 		exp="$CB/expected/$t.out"
 		[ "$pass" = orca ] && [ -f "$CB/expected/${t}_optimizer.out" ] && exp="$CB/expected/${t}_optimizer.out"
 		[ -f "$CB/output/$t.source" ] && exp="$CB/output/$t.source"
 		name="$(basename "$exp" .out)"
 		name="${name%.source}"
-		convert "$exp" | sed -E -f "$WORK/respell.sed" | own_tablespaces > "$R/expected/$t.out"
+		convert "$exp" | sed -E -f "$WORK/respell.sed" | own_tmp > "$R/expected/$t.out"
 
 		# As pg_isolation2_regress runs it, from the suite's directory.
 		( cd "$CB" && PGOPTIONS="-c gp.optimizer=$optimizer" \
