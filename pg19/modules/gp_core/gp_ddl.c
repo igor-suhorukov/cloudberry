@@ -406,7 +406,8 @@ drop_temp_namespaces(void)
  *
  * VACUUM, REINDEX and CLUSTER are read-only by PostgreSQL's definition -- they
  * change nothing pg_dump would show -- but they have to reach the rows, and
- * the rows are on the segments.  ANALYZE stays here until O3 brings the
+ * the rows are on the segments; and ALTER SYSTEM is Cloudberry's every
+ * node's.  ANALYZE stays here until O3 brings the
  * segments' samples to it.
  */
 static GpDispatchClass
@@ -416,6 +417,14 @@ dispatch_class(Node *parsetree)
 	{
 		case T_CreatedbStmt:
 		case T_DropdbStmt:
+			return GP_DISPATCH_OWN_XACT;
+
+		/*
+		 * ALTER SYSTEM, read-only by PostgreSQL's definition, writes each
+		 * node's postgresql.auto.conf in Cloudberry, which dispatches it after
+		 * its own (utility.c); outside a transaction, as it runs.
+		 */
+		case T_AlterSystemStmt:
 			return GP_DISPATCH_OWN_XACT;
 
 		case T_VacuumStmt:

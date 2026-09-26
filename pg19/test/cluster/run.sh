@@ -347,6 +347,15 @@ if [ "$started" -eq 1 ]; then
 	same_everywhere "DROP follows" \
 		"SELECT count(*) FROM pg_class WHERE relname IN ('d1', 'v1', 'd1_pkey')"
 
+	# ALTER SYSTEM is every node's, as Cloudberry dispatches it: each node's
+	# postgresql.auto.conf, outside a transaction, as it runs.
+	q 0 "ALTER SYSTEM SET work_mem = '5MB';" >/dev/null
+	same_everywhere "ALTER SYSTEM writes every node's postgresql.auto.conf" \
+		"SELECT setting FROM pg_file_settings WHERE name = 'work_mem' AND sourcefile LIKE '%postgresql.auto.conf'"
+	q 0 "ALTER SYSTEM RESET work_mem;" >/dev/null
+	same_everywhere "and RESET takes it out of each" \
+		"SELECT count(*) FROM pg_file_settings WHERE name = 'work_mem' AND sourcefile LIKE '%postgresql.auto.conf'"
+
 	###########################################################################
 	echo "6. the segments' work is part of the coordinator's transaction"
 	###########################################################################
