@@ -6,6 +6,11 @@
 -- them: here, in the coordinator's database, and by DDL dispatch in each
 -- segment's.
 --
+-- The planner plans the setup in either pass: its statements are the
+-- extensions' scripts', which ORCA would try one by one, in every group of
+-- the suite.  The tests after it are the pass's, in a session of their own.
+--
+SET gp.optimizer = off;
 CREATE EXTENSION gp_core;
 CREATE EXTENSION gp_orca;
 CREATE EXTENSION gp_sql;
@@ -24,6 +29,7 @@ SELECT count(*) AS segments FROM gp.segment_configuration() WHERE content >= 0;
 -- every database of Cloudberry's has what they give.
 --
 \c template1
+SET gp.optimizer = off;
 SET client_min_messages = warning;
 CREATE EXTENSION IF NOT EXISTS gp_core;
 CREATE EXTENSION IF NOT EXISTS gp_orca;

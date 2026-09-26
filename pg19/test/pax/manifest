@@ -3,14 +3,18 @@
 # groups.
 #
 #   run   the test runs here; cloudberry/ holds a difference reviewed and
-#         kept, where it has one
+#         kept, where it has one.  A third word names the group it runs in,
+#         "main" when there is none, "*" for every group: each group is a job
+#         of its own on a cluster of its own (../jobs, PAX_GROUP), in the
+#         schedule's order and groups -- toast, whose 100 MB values take two
+#         minutes, beside the rest, and the setup and the teardown in each
 #   skip  it needs what the port does not have: the rest of the line says
 #         what
-run  setup
+run  setup      *
 run  pax_inject_fault
 skip cbdb_parallel  intra-segment parallelism, which the port has not before M7 (decision 2): gp.enable_parallel is accepted and a segment runs a slice in one process
 run  alter_distributed
-run  toast
+run  toast      toast
 run  toast_failed
 run  detoast
 run  ddl
@@ -39,4 +43,4 @@ run  default_value
 run  dictionary_encoding
 run  cluster
 run  db_size_functions
-run  teardown
+run  teardown   *

@@ -83,6 +83,10 @@ SCHEDULE_NAME="${ISOLATION2_SCHEDULE_NAME:-isolation2_schedule}"
 # isolation2 suite's
 DBNAME="${ISOLATION2_DBNAME:-isolation2test}"
 EXTRA_INIT="${ISOLATION2_EXTRA_INIT:-}"
+# ... and rules of sed of the schedule's own, applied as the port's
+# respelling is, to each test and its expected output alike (../resgroup's
+# parent of the cgroups)
+EXTRA_SED="${ISOLATION2_EXTRA_SED:-}"
 CB="${CB_ISOLATION2_DIR:-/cb/src/test/isolation2}"
 CB_INIT="${ISOLATION2_CB_INIT:-$CB/init_file_isolation2}"
 GPDIFF="${GPDIFF_DIR:-/cb/src/test/regress}"
@@ -370,6 +374,7 @@ echo "s/wait_event_type\\s*=\\s*'ResourceGroup'/wait_event='ResourceGroup'/g" >>
 # that, it then reads a string at.  It is told the function returns one, in
 # the helper and in the expected output, which echoes it on one line.
 echo "s/(get_tablespace_path = postgres\\['get_tablespace_path'\\])/\\1; get_tablespace_path.restype = ctypes.c_void_p/" >> "$WORK/respell.sed"
+[ -n "$EXTRA_SED" ] && cat "$EXTRA_SED" >> "$WORK/respell.sed"
 
 # The driver, less "-c gp_role=utility"; run from Cloudberry's directory, as
 # it sources global_sh_executor.sh from there.
@@ -444,11 +449,14 @@ run_group() {
 		name="${name%.source}"
 		convert "$exp" | sed -E -f "$WORK/respell.sed" | own_tmp | own_host > "$R/expected/$t.out"
 
-		# As pg_isolation2_regress runs it, from the suite's directory.
+		# As pg_isolation2_regress runs it, from the suite's directory; how
+		# long it ran is reported with its result, as pg_regress reports it.
+		t0=$(date +%s%N)
 		( cd "$CB" && PGOPTIONS="-c gp.optimizer=$optimizer" \
 			timeout 600 python3 "$EXEC/sql_isolation_testcase.py" \
 				--dbname="$DBNAME" --initfile_prefix="$res" \
 				< "$R/sql/$t.sql" > "$res" 2>&1 )
+		ms=$(( ($(date +%s%N) - t0) / 1000000 ))
 
 		# The port's first: what it takes off a segment's error -- which
 		# segment -- leaves the lines Cloudberry's init files mask.
@@ -467,9 +475,9 @@ run_group() {
 		   cmp -s "$R/canon/$t.diff" "$dir/$name.$pass.diff" ||
 		   cmp -s "$R/canon/$t.diff" "$dir/$name.diff"; then
 			rm -f "$R/canon/$t.diff"
-			echo "ok $t" >> "$R/status"
+			echo "ok $t $ms" >> "$R/status"
 		else
-			echo "bad $t" >> "$R/status"
+			echo "bad $t $ms" >> "$R/status"
 			gpdiff -U3 "${inits[@]}" "$R/expected/$t.out" "$res" >> "$R/regression.diffs" 2> /dev/null
 		fi
 	done
@@ -497,18 +505,21 @@ for pass in ${PASSES:-planner orca}; do
 	done
 
 	# In the schedule's order: a test passes when every group it ran in
-	# says so.
+	# says so; its time is the longest it took in one.
 	total=0; bad=0
 	for t in "${run_tests[@]}"; do
 		total=$((total + 1))
 		results=$(for g in "${groups[@]}"; do
 					  awk -v t="$t" '$2 == t { print $1 }' "$WORK/$g/$pass/status" 2> /dev/null
 				  done)
+		ms=$(for g in "${groups[@]}"; do
+				 awk -v t="$t" '$2 == t { print $3 }' "$WORK/$g/$pass/status" 2> /dev/null
+			 done | sort -n | tail -1)
 		if [ -n "$results" ] && ! grep -qv '^ok$' <<< "$results"; then
-			printf '  ok     %s\n' "$t"
+			printf '  ok     %-56s %7s ms\n' "$t" "${ms:-0}"
 		else
 			bad=$((bad + 1))
-			printf '  NOT OK %s\n' "$t"
+			printf '  NOT OK %-56s %7s ms\n' "$t" "${ms:-0}"
 		fi
 	done
 	echo "  Cloudberry's tests: $((total - bad)) of $total passed"

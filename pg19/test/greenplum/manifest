@@ -11,9 +11,16 @@
 #         the first of Cloudberry's statements it refuses, as the port says
 #   port  a test of the port's own, sql/ and expected/ here, run where the
 #         line is: what a skipped test would have left for the tests after it
+#   group the tests after it, to the next such line, are a group: each group
+#         has a cluster of its own, test_setup and gp_setup first, and the
+#         groups of a pass run side by side, each in the schedule's order.
+#         The groups are cut by time, the ORCA pass's, and a test that reads
+#         what another made is in its group (bb_mpph_heap's tables,
+#         bb_memory_quota's)
 #
 # The schedule's other tests -- fault injection, FTS, the interconnect's
 # settings -- need M7, and are not listed.
+group g1
 skip gp_aggregates  relation "aggtest" does not exist
 run  update_gp
 run  triggers_gp
@@ -69,6 +76,7 @@ skip olap_group  function group_id() does not exist
 skip olap_window_seq  DISTINCT is not implemented for window functions; cannot copy window "win1" because it has a frame clause
 skip appendonly  type "gp_fastsequence" does not exist
 run  create_table_distpol
+group g2
 run  alter_distpol_dropped
 run  gp_distinct_plans
 skip partition  syntax error at or near "only"
@@ -99,6 +107,7 @@ run  auth_constraint
 run  partition_pruning
 run  expand_table
 run  expand_table_ao
+group g3
 run  expand_table_aoco
 run  expand_table_regression
 run  shrink_table
@@ -119,6 +128,7 @@ skip bfv_cte  count(*) must be used to call a parameterless aggregate function; 
 run  bfv_joins
 run  bfv_subquery
 run  qp_misc
+group g4
 run  qp_dml_joins
 run  qp_select
 run  partition_prune_opfamily
@@ -148,6 +158,7 @@ run  uao_compaction/alter_table_analyze
 run  uao_compaction/full_eof_truncate
 run  uao_compaction/full_threshold
 run  uao_compaction/index
+group g5
 run  uao_compaction/index2
 run  uaocs_compaction/index
 run  uaocs_compaction/alter_table_analyze
@@ -176,6 +187,7 @@ run  uao_ddl/alter_ao_table_index_column
 run  uao_ddl/blocksize_row
 run  uao_ddl/compresstype_column
 run  uao_ddl/alter_ao_table_setdefault_column
+group g6
 run  uao_ddl/blocksize_column
 run  uao_ddl/temp_on_commit_delete_rows_row
 run  uao_ddl/temp_on_commit_delete_rows_column

@@ -357,16 +357,25 @@ chmod +x "$EXEC/bin/diff"
 # The statements are found first and cancelled one by one afterwards: a
 # query that cancels in its WHERE clause cancels whatever its quals are
 # evaluated against first, which is not only the rows the rest of it keeps.
+#
+# One statement is known not to finish in the orca pass, and is cancelled
+# there as soon as the watchdog sees it, rather than after the minute:
+# subselect's doubly correlated EXISTS over NOT EXISTS, which Cloudberry's own
+# subselect test runs with the planner (orca/README).  It is found by its
+# innermost subquery, which no other statement of the suite has.
 TIMEOUT="${STATEMENT_TIMEOUT:-60 seconds}"
-watchdog() {
-	local pid query
+HANGS='not exists \( select 1 from tenk1 d\s+where a\.thousand = d\.thousand \)'
+watchdog() {					# watchdog <file of what it cancelled> <pass>
+	local pid query hang=
+	[ "$2" = orca ] &&
+		hang="OR (query ~ '$HANGS' AND now() - query_start > interval '2 seconds')"
 	while :; do
-		sleep 5
+		sleep 2
 		PGOPTIONS="-c gp.optimizer=off" "$PSQL" -X -q -t -A -F ' ' -d postgres -c "
 			SELECT pid, regexp_replace(left(query, 300), '\\s+', ' ', 'g')
 			  FROM pg_stat_activity
 			 WHERE datname = 'regression' AND state = 'active'
-			   AND now() - query_start > interval '$TIMEOUT'" 2> /dev/null |
+			   AND (now() - query_start > interval '$TIMEOUT' $hang)" 2> /dev/null |
 		while read -r pid query; do
 			[ -n "$pid" ] || continue
 			PGOPTIONS="-c gp.optimizer=off" "$PSQL" -X -q -t -A -d postgres \
@@ -458,7 +467,7 @@ for pass in ${PASSES:-planner orca}; do
 
 	# PostgreSQL's tests and the port's setup, in the database pg_regress
 	# makes afresh.
-	watchdog "$WORK/$pass/cancelled" &
+	watchdog "$WORK/$pass/cancelled" "$pass" &
 	WATCHDOGS=($!)
 	regress "$SN/schedule" "$WORK/$pass/pg" "$SOCK"
 	rc=$?
@@ -495,7 +504,7 @@ for pass in ${PASSES:-planner orca}; do
 	pids=()
 	for i in "${!groups[@]}"; do
 		if [ "$i" -eq 0 ]; then host="$SOCK"; else host="$SOCK/copy$i"; fi
-		PGHOST="$host" watchdog "$WORK/$pass/cancelled" &
+		PGHOST="$host" watchdog "$WORK/$pass/cancelled" "$pass" &
 		WATCHDOGS+=($!)
 		regress "$SN/schedule.${groups[$i]}" "$WORK/$pass/${groups[$i]}" "$host" --use-existing &
 		pids+=($!)
@@ -537,7 +546,7 @@ for pass in ${PASSES:-planner orca}; do
 		echo "  $who: $((total - bad)) of $total passed"
 	done
 	if [ -s "$WORK/$pass/cancelled" ]; then
-		echo "  cancelled after $TIMEOUT:"
+		echo "  cancelled after $TIMEOUT, or as soon as seen where known not to finish:"
 		sed 's/^/    /' "$WORK/$pass/cancelled"
 	fi
 	# A test that passed on an alternative expected output left a difference

@@ -82,14 +82,17 @@ cleanup() {
 }
 trap cleanup EXIT
 
-run_tests=$(awk '$1 == "run" { print $2 }' "$HERE/manifest")
+# PAX_GROUP, a group of the manifest's, runs its tests and every group's
+run_tests=$(awk -v g="${PAX_GROUP:-}" '
+	$1 == "run" && (g == "" || $3 == "*" || ($3 == "" ? "main" : $3) == g) { print $2 }
+	' "$HERE/manifest")
 # PAX_TESTS, a list of the manifest's tests, runs those alone, setup first
 if [ -n "${PAX_TESTS:-}" ]; then
 	run_tests=$(for t in $run_tests; do
 		[[ " setup $PAX_TESTS " == *" $t "* ]] && echo "$t"; done)
 fi
 
-echo "pax: Cloudberry's PAX tests, on a coordinator and three segments"
+echo "pax: Cloudberry's PAX tests, on a coordinator and three segments${PAX_GROUP:+, group $PAX_GROUP}"
 printf '  of the %d tests of the schedule the manifest lists: %d run here, %d are skipped\n' \
 	"$(awk '$1 == "run" || $1 == "skip"' "$HERE/manifest" | wc -l)" \
 	"$(echo "$run_tests" | wc -w)" \

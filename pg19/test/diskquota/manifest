@@ -4,15 +4,20 @@
 #
 #   run   the test runs here; cloudberry/ holds a difference reviewed and
 #         kept, where it has one (cloudberry/isolation2/ an isolation2
-#         test's)
+#         test's).  A regression test's third word names the group it runs
+#         in, "main" when there is none, "*" for every group: each group is a
+#         job of its own on a cluster of its own (../jobs, DQ_GROUP), side by
+#         side, in the schedule's order -- the four tests that cancel a
+#         CREATE TABLE AS of a hundred million rows, each some 45 seconds,
+#         beside the rest, and the setup and the teardown in each
 #   skip  it needs what the port does not have yet: the rest of the line
 #         says what
 #
 # A regression test in the schedule twice is listed once, and runs where
 # the schedule has it.
 
-run  config
-run  test_create_extension
+run  config                       *
+run  test_create_extension        *
 run  test_max_monitored_databases
 skip test_readiness_logged    reads the coordinator's log through gp_toolkit's __gp_log_master_ext, an external web table of Cloudberry's the port has not
 run  test_init_table_size_table
@@ -59,16 +64,16 @@ run  test_rejectmap
 run  test_clean_rejectmap_after_drop
 run  test_rejectmap_mul_db
 run  test_ctas_pause
-run  test_ctas_role
-run  test_ctas_schema
-run  test_ctas_tablespace_role
-run  test_ctas_tablespace_schema
+run  test_ctas_role               ctas
+run  test_ctas_schema             ctas
+run  test_ctas_tablespace_role    ctas_spc
+run  test_ctas_tablespace_schema  ctas_spc
 run  test_default_tablespace
 run  test_tablespace_diff_schema
 run  test_dbname_encoding
 run  test_drop_any_extension
-run  test_drop_extension
-run  reset_config
+run  test_drop_extension          *
+run  reset_config                 *
 run  isolation2/config
 run  isolation2/test_create_extension
 run  isolation2/test_fast_quota_view

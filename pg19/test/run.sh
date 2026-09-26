@@ -33,13 +33,22 @@
 # own servers, in directories of its own, listening on sockets in them only,
 # so the jobs cannot meet.  JOBS of them run at once (all of them, when it
 # is not set); each job's output is held and printed whole as it finishes,
-# with the time it took, and a summary of the jobs ends the run.  A job
-# "jobs" marks ALONE=1 runs by itself, after all the others: resgroup's,
-# whose tests keep every core busy in a cgroup that outweighs the others',
-# and measure what they get.
+# with the time it took, and a summary of the jobs ends the run.  The jobs
+# "jobs" marks ALONE=1 run after all the others, side by side with each
+# other alone: jobs whose tests keep the cores they are given busy and
+# measure what a group of theirs gets of them -- resgroup's, a pass on half
+# the cores each.
 #
 # RESULTS_DIR, when set, is given to each job as a directory of its own
 # under it, named for the job: isolation2.orca, cluster.
+#
+# Where the tests service gives the jobs a cgroup to write (cgroup.sh), each
+# job runs in a cgroup of its own under it, and the summary says the CPU
+# time each took -- its servers' too, but for those of a resource group
+# test, which move into their cgroup parent's groups, whose time the summary
+# gives beside.  Each job's cgroup weighs as many seconds as "jobs" says the
+# job takes, so that where the jobs want more CPU than there is, the long
+# ones, which bound the run, are the last to wait for it.
 set -u
 
 here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -80,6 +89,9 @@ for s in "${suites[@]}"; do
 	fi
 done
 
+JOBCG=/sys/fs/cgroup/jobs
+[ -w "$JOBCG" ] && [ -w /sys/fs/cgroup/cgroup.procs ] || JOBCG=
+
 # Longest first; the order "jobs" gives them in among equals.  And the jobs
 # that run alone after all the rest.
 order=()
@@ -98,6 +110,7 @@ cleanup() {
 	[ "${#running[@]}" -gt 0 ] && kill "${!running[@]}" 2> /dev/null
 	wait 2> /dev/null
 	rm -rf "$LOGS"
+	[ -n "$JOBCG" ] && rmdir "$JOBCG"/job* 2> /dev/null
 }
 trap cleanup EXIT
 trap 'exit 130' INT TERM
@@ -112,24 +125,38 @@ start_job() {
 		results="$RESULTS_DIR/${j_suite[$i]}${j_name[$i]:+.${j_name[$i]}}"
 		mkdir -p "$results"
 	fi
+	local cg="" w
+	if [ -n "$JOBCG" ]; then
+		cg="$JOBCG/job$i"
+		mkdir -p "$cg" 2> /dev/null
+		w="${j_secs[$i]}"
+		[ "$w" -ge 1 ] 2> /dev/null || w=1
+		[ "$w" -le 10000 ] || w=10000
+		echo "$w" > "$cg/cpu.weight" 2> /dev/null
+	fi
+	j_cg[i]="$cg"
 	# shellcheck disable=SC2086 -- the job's settings are words
-	( [ -n "$results" ] && export RESULTS_DIR="$results"
+	( [ -n "$cg" ] && echo "$BASHPID" > "$cg/cgroup.procs" 2> /dev/null
+	  [ -n "$results" ] && export RESULTS_DIR="$results"
 	  exec env ${j_env[$i]} "$here/${j_suite[$i]}/run.sh" ) \
 		< /dev/null > "$LOGS/$i.log" 2>&1 &
 	running[$!]="$i"
 	j_start[i]="$(date +%s%N)"
 }
 
-j_start=(); j_ms=(); j_rc=()
+j_start=(); j_ms=(); j_rc=(); j_cpu=(); j_cg=()
 t0="$(date +%s%N)"
 skipped=()
 next=0
+alone=0
 while [ "$next" -lt "${#order[@]}" ] || [ "${#running[@]}" -gt 0 ]; do
 	while [ "$next" -lt "${#order[@]}" ] && [ "${#running[@]}" -lt "$max" ]; do
-		[ "${j_alone[${order[$next]}]}" -eq 1 ] && [ "${#running[@]}" -gt 0 ] && break
+		if [ "${j_alone[${order[$next]}]}" -eq 1 ] && [ "$alone" -eq 0 ]; then
+			[ "${#running[@]}" -gt 0 ] && break
+			alone=1
+		fi
 		start_job "${order[$next]}"
 		next=$((next + 1))
-		[ "${j_alone[${order[$((next - 1))]}]}" -eq 1 ] && break
 	done
 
 	wait -n -p done_pid
@@ -139,6 +166,8 @@ while [ "$next" -lt "${#order[@]}" ] || [ "${#running[@]}" -gt 0 ]; do
 	unset "running[$done_pid]"
 	j_ms[i]=$(( ($(date +%s%N) - j_start[i]) / 1000000 ))
 	j_rc[i]="$rc"
+	[ -n "${j_cg[$i]}" ] &&
+		j_cpu[i]=$(awk '$1 == "usage_usec" { printf "%d", $2 / 1000000 }' "${j_cg[$i]}/cpu.stat" 2> /dev/null)
 
 	case "$rc" in
 		0)  result="passed" ;;
@@ -159,8 +188,13 @@ for i in "${order[@]}"; do
 	[ -n "${j_ms[$i]:-}" ] && echo "${j_ms[$i]} $i"
 done | sort -k1,1nr | while read -r ms i; do
 	case "${j_rc[$i]}" in 0) r="passed" ;; 77) r="skipped" ;; *) r="FAILED" ;; esac
-	printf '  %-32s %5d s  %s\n' "$(label "$i")" $((ms / 1000)) "$r"
+	printf '  %-32s %5d s  %s%s\n' "$(label "$i")" $((ms / 1000)) "$r" \
+		"${j_cpu[$i]:+, ${j_cpu[$i]} s of CPU}"
 done
+[ -n "$JOBCG" ] && for i in "${order[@]}"; do echo "${j_cpu[$i]:-0}"; done |
+	awk '{ s += $1 } END { printf "  %d s of CPU in all", s }' &&
+	cat /sys/fs/cgroup/gpdb_*/cpu.stat 2> /dev/null |
+	awk '$1 == "usage_usec" { s += $2 } END { printf ", and %d s in the resource group tests'"'"' cgroup parents\n", s / 1000000 }'
 echo
 
 [ "${#skipped[@]}" -gt 0 ] && echo "skipped: ${skipped[*]}"

@@ -16,7 +16,6 @@
 -CONTEXT:  SQL function "is_invalid_name" during startup
 +     a_name     |  a_parent_name   |     b_name     |  b_parent_name   
 +----------------+------------------+----------------+------------------
-+                |                  | tstab          | tst_invalid_name
 + tst_valid_name | tst_invalid_name | tst_valid_name | tst_invalid_name
-+(2 rows)
++(1 row)
 +

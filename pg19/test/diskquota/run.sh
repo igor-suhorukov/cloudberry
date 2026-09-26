@@ -42,7 +42,10 @@
 # for the form).  One pass: diskquota's worker plans without ORCA, and its
 # tests ask the cluster about sizes, not about plans.  The two schedules are
 # the suite's two parts, regress and isolation2, which DQ_PARTS names, each
-# on a cluster of its own when they run as two jobs (../jobs).
+# on a cluster of its own when they run as jobs of their own (../jobs); and
+# DQ_GROUP names a group of the regression schedule's tests, which the
+# manifest gives, for a job of its own too: the group's tests and those of
+# every group -- the setup and the teardown -- in the schedule's order.
 
 set -u
 
@@ -100,9 +103,11 @@ cleanup() {
 }
 trap cleanup EXIT
 
-run_tests=$(awk '$1 == "run" { print $2 }' "$HERE/manifest")
+run_tests=$(awk -v g="${DQ_GROUP:-}" '
+	$1 == "run" && (g == "" || $2 ~ /^isolation2\// || $3 == "*" || ($3 == "" ? "main" : $3) == g) { print $2 }
+	' "$HERE/manifest")
 
-echo "diskquota: Cloudberry's diskquota tests, on a coordinator and three segments"
+echo "diskquota: Cloudberry's diskquota tests, on a coordinator and three segments${DQ_GROUP:+, the regression tests of group $DQ_GROUP}"
 printf '  of the %d tests of the schedule the manifest lists: %d run here, %d are skipped\n' \
 	"$(awk '$1 == "run" || $1 == "skip"' "$HERE/manifest" | wc -l)" \
 	"$(echo "$run_tests" | wc -w)" \

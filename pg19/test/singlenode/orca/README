@@ -81,5 +81,6 @@ The one query Cloudberry runs with the planner (subselect, one hunk)
   A doubly correlated EXISTS over NOT EXISTS that ORCA cannot decorrelate:
   Cloudberry's own subselect test runs it with optimizer off, "correct-but-
   slow plan that takes 45 minutes" (GPDB_92_MERGE_FIXME).  The suite's
-  watchdog cancels it after 60 seconds.  The third hunk of subselect is
-  EXPLAIN through a function.
+  watchdog knows the statement and cancels it within seconds, where it
+  cancels any other after 60.  The third hunk of subselect is EXPLAIN
+  through a function.

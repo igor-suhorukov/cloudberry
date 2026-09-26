@@ -237,9 +237,10 @@ qp_functions (planner, orca)  PostgreSQL 19's words for a call no function
   call is in the segments' slice and refused as Cloudberry refuses it.
   is_invalid_name() reads a replicated table, which Cloudberry's slice on the
   coordinator's entry database has no copy of; the port has no such slice,
-  calls it in the coordinator's own plan, and answers in both passes -- with
-  a row for tstab among the relations named tst%, a table
-  alter_distribution_policy leaves behind, which runs earlier.
+  calls it in the coordinator's own plan, and answers in both passes, from
+  the relations named tst% in its group's cluster -- a table an earlier test
+  leaves there would be among them, as alter_distribution_policy's tstab was
+  before the suite ran in groups.
 
 qp_subquery (orca)  the fallback trace of the queries ORCA's translator
   declines -- subqueries that are not scalar, NOT IN as an anti-join, an

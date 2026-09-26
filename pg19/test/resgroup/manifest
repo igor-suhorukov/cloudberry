@@ -4,10 +4,18 @@
 #
 #   run   the test runs here, in both passes; cloudberry/ holds a difference
 #         reviewed and kept, where one pass has one.  The third word is the
-#         group, main: the tests share one cluster, and run one at a time.
+#         group: each group's tests share a cluster and a cgroup parent of
+#         their own, and run one at a time, in a job of its own (../jobs,
+#         RG_GROUPS).  The group cpu has the test that keeps its cores busy
+#         and measures what a group gets of them, which runs after the other
+#         jobs (../jobs); the group cpuset the test that pins groups to cores
+#         0 and 1 and looks where their processes run, whose own statements
+#         are a superuser's, in admin_group at a tenth of the cores; "*" is
+#         every group, resgroup_auxiliary_tools_v2, which turns resource
+#         groups on.
 #   skip  it needs what the port does not have yet: the rest of the line says
 #         what
-run  resgroup/resgroup_auxiliary_tools_v2  main
+run  resgroup/resgroup_auxiliary_tools_v2  *
 run  resgroup/resgroup_bypass_catalog  main
 run  resgroup/resgroup_views  main
 run  resgroup/resgroup_syntax  main
@@ -19,8 +27,8 @@ run  resgroup/resgroup_unassign_entrydb  main
 run  resgroup/resgroup_concurrency  main
 run  resgroup/resgroup_wait_time  main
 run  resgroup/resgroup_alter_concurrency  main
-run  resgroup/resgroup_cpu_max_percent  main
-run  resgroup/resgroup_cpuset  main
+run  resgroup/resgroup_cpu_max_percent  cpu
+run  resgroup/resgroup_cpuset  cpuset
 run  resgroup/resgroup_cpuset_empty_default  main
 run  resgroup/resgroup_cancel_terminate_concurrency  main
 run  resgroup/resgroup_memory_limit_resgroup_v2  main
