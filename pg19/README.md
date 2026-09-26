@@ -109,9 +109,13 @@ On a cluster (M2), `gp_core` and `gp_orca`:
   classes, which `gp.use_legacy_hashops` gives a new key;
 - what a segment says — a trigger's NOTICE — reaching the client, and
   Cloudberry's rules for triggers and for the names it reserves;
-- ORCA's distributed plans — the five Motions, Split, direct dispatch, the
-  slice table — carried out by gp_core, each slice sent the values of the
-  parameters it reads; and PostgreSQL's own plans gathering from the
+- ORCA's distributed plans — the five Motions, a Gather to the one segment
+  a slice runs on among them, Split, direct dispatch, the slice table —
+  carried out by gp_core, each slice sent the values of the parameters it
+  reads; RETURNING and ON CONFLICT given to the ModifyTable beside ORCA's
+  plan, and ORCA's UPDATE and DELETE of a join or of a partitioned table
+  where the target is held against a re-check, as without the deadlock
+  detector it is; and PostgreSQL's own plans gathering from the
   segments where ORCA does not plan, writing a distributed table through an
   Explicit Redistribute Motion — each row changed on its segment by its ctid
   there, a row whose key changes moved by a Split that fires no trigger,
@@ -150,10 +154,9 @@ On a cluster (M2), `gp_core` and `gp_orca`:
   `gp_distribution_policy.numsegments` make, and which ORCA leaves to the
   planner, as Cloudberry's does.
 
-What M2 leaves open: ORCA's Gather into a slice that runs on one segment,
-which most of its uses merge in order, falls back to the planner (10
-statements in the greenplum suite); and a query that scans a temporary
-table in a subplan's own part is relayed whole.
+What M2 leaves open under ORCA: MERGE, and an UPDATE or DELETE of a join
+where a re-check can run -- on one node, or with the deadlock detector on
+-- stay the planner's.
 
 Distributed transactions (M3), in `gp_core`:
 
