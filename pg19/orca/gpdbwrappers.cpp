@@ -2594,6 +2594,27 @@ gpdb::HasUpdateTriggers(Oid relid)
 	return false;
 }
 
+bool
+gpdb::HasOwnUpdateTriggers(Oid relid)
+{
+	GP_WRAP_START;
+	{
+		return has_update_triggers(relid, false);
+	}
+	GP_WRAP_END;
+	return false;
+}
+
+void
+gpdb::RefuseStatement(int sqlerrcode, const char *message)
+{
+	GP_WRAP_START;
+	{
+		ereport(ERROR, (errcode(sqlerrcode), errmsg("%s", message)));
+	}
+	GP_WRAP_END;
+}
+
 // get index op family properties
 void
 gpdb::IndexOpProperties(Oid opno, Oid opfamily, StrategyNumber *strategynumber,

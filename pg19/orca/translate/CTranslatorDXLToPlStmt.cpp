@@ -5924,6 +5924,21 @@ CTranslatorDXLToPlStmt::TranslateDXLDml(
 		}
 		if (gpdb::HasAnyTriggers(CMDIdGPDB::CastMdid(mdid_target_table)->Oid()))
 		{
+			// An UPDATE trigger of its own: Cloudberry refuses an UPDATE of
+			// the key of such a table, in its words, under either planner
+			// (make_splitupdate_path(), cdbpath.c), and so does the
+			// planner's route here (gp_explicit.c).  That route asks a
+			// partitioned table's first result relation, which this plan
+			// does not have, since it moves no partitioned table's rows
+			// (below).
+			if (!md_rel->IsPartitioned() &&
+				gpdb::HasOwnUpdateTriggers(
+					CMDIdGPDB::CastMdid(mdid_target_table)->Oid()))
+			{
+				gpdb::RefuseStatement(
+					MAKE_SQLSTATE('0', 'A', 'M', '0', '1'),
+					"UPDATE on distributed key column not allowed on relation with update triggers");
+			}
 			GP_UNPORTED("an UPDATE of a distribution key, on a table with triggers");
 		}
 	}
@@ -6466,7 +6481,7 @@ CTranslatorDXLToPlStmt::TranslateReturningList(Index index)
 //		checked that they read nothing else (CheckOnConflict).
 //
 //		What Cloudberry's analyze.c refuses of a DO UPDATE on a cluster is
-//		left to the planner's route, which refuses it in the same words
+//		refused here, in the words the planner's route refuses it in too
 //		(GpExplicitOnConflict): a SET of a hash-distributed table's
 //		distribution column, which would leave the row on the wrong segment,
 //		and a volatile function in the update of a replicated table's rows,
@@ -6493,8 +6508,9 @@ CTranslatorDXLToPlStmt::TranslateOnConflict(ModifyTable *dml, Index index,
 				{
 					if (md_rel->GetDistrColAt(ul)->AttrNum() == te->resno)
 					{
-						GP_UNPORTED(
-							"ON CONFLICT DO UPDATE of a distribution column");
+						gpdb::RefuseStatement(
+							ERRCODE_FEATURE_NOT_SUPPORTED,
+							"modification of distribution columns in OnConflictUpdate is not supported");
 					}
 				}
 			}
@@ -6504,8 +6520,9 @@ CTranslatorDXLToPlStmt::TranslateOnConflict(ModifyTable *dml, Index index,
 				 (Node *) on_conflict->onConflictSet) ||
 			 gpdb::ContainsVolatileFunctions(on_conflict->onConflictWhere)))
 		{
-			GP_UNPORTED(
-				"a volatile function in ON CONFLICT DO UPDATE of a replicated table");
+			gpdb::RefuseStatement(
+				ERRCODE_FEATURE_NOT_SUPPORTED,
+				"modification of replicated tables containing volatile functions in OnConflictUpdate is not supported");
 		}
 	}
 

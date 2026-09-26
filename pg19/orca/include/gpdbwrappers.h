@@ -780,6 +780,13 @@ void CheckRTPermissions(List *rtable, List *rteperminfos);
 // throw an error if table has update triggers.
 bool HasUpdateTriggers(Oid relid);
 
+// does the table itself, not its partitions, have an enabled UPDATE trigger?
+bool HasOwnUpdateTriggers(Oid relid);
+
+// refuse the statement with an error of PostgreSQL's: what Cloudberry refuses
+// under either planner, as the planner's route here refuses it too
+void RefuseStatement(int sqlerrcode, const char *message);
+
 // get index operator family properties
 void IndexOpProperties(Oid opno, Oid opfamily, StrategyNumber *strategynumber,
 					   Oid *righttype);

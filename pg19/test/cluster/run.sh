@@ -2076,15 +2076,16 @@ COMMIT;"
 		&& ok "statements that fail on the segments while their slices stream fail with the error, over tcp, UDP and relayed, and every node stays up" \
 		|| notok "a statement failing on the segments" "$failed / crashes: $before before, $(crashes) after"
 
-	# What Cloudberry refuses of a DO UPDATE, the planner's route refuses in
-	# its words, and ORCA leaves to it: a distribution column set, and a
-	# volatile function in a replicated table's update.
+	# What Cloudberry refuses of a DO UPDATE, ORCA refuses in its words, as
+	# the planner's route does, without falling back to it: a distribution
+	# column set, and a volatile function in a replicated table's update.
 	out=$(printf '%s\n' "SET gp.optimizer_trace_fallback = on;" \
 		"INSERT INTO wu VALUES (5, 5, 'k') ON CONFLICT (a) DO UPDATE SET a = 500;" \
 		"INSERT INTO wur VALUES (3, 3) ON CONFLICT (a) DO UPDATE SET b = random()::int;" | qf 0)
 	case "$out" in
-		*"distribution column"*"modification of distribution columns in OnConflictUpdate is not supported"*"replicated table"*"modification of replicated tables containing volatile functions in OnConflictUpdate is not supported"*)
-			ok "a DO UPDATE of the key, or volatile on a replicated table, is the planner's to refuse, in Cloudberry's words" ;;
+		*"falling back"*) notok "ON CONFLICT that Cloudberry refuses" "$out" ;;
+		*"modification of distribution columns in OnConflictUpdate is not supported"*"modification of replicated tables containing volatile functions in OnConflictUpdate is not supported"*)
+			ok "a DO UPDATE of the key, or volatile on a replicated table, is refused by ORCA, in Cloudberry's words" ;;
 		*) notok "ON CONFLICT that Cloudberry refuses" "$out" ;;
 	esac
 
