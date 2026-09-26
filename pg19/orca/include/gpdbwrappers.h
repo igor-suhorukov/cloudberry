@@ -885,6 +885,12 @@ bool HasAnyTriggers(Oid relid);
 // the plan, as a whole-row column, rather than fetch it by its ctid (O20)?
 bool RelOldRowFromPlan(Oid relid);
 
+// The whole row as the scan that read column "resno" of "plan" -- the row's
+// ctid -- read it, carried up to "plan" as a new column; "rtable" is the
+// plan's range table.  Its resno, or InvalidAttrNumber where a node between
+// cannot pass it on (O20's "wholerow"; compat/wholerow.c).
+AttrNumber CarryWholeRow(Plan *plan, AttrNumber resno, List *rtable);
+
 // ON CONFLICT, as the planner makes it: the arbiter indexes of the INSERT
 // "query" -- infer_arbiter_indexes(), over its own Query -- an UPDATE's
 // target list numbered as the executor takes it, with the columns it sets,

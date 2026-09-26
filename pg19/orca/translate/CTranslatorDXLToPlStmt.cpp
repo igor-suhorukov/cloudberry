@@ -5903,19 +5903,13 @@ CTranslatorDXLToPlStmt::TranslateDXLDml(
 
 	// ORCA marks every INSERT and DELETE split too (CXformUtils,
 	// PexprLogicalDMLOverProject), where it means nothing; for an UPDATE it
-	// means the DMLAction column.  Cloudberry also splits every update of an
-	// append-optimized or PAX table, which ORCA's plan here does not write:
-	// the planner's does, taking the old row from the plan (O20).
+	// means the DMLAction column.
 	// A split update: the row moves to another segment, and gp_core applies
 	// it as a DELETE there and an INSERT where it goes (gp_split.c).  Only on
 	// a cluster, where the table is hash distributed; on one node ORCA plans
 	// none.  Not a table with triggers: they would not fire, as Cloudberry's
 	// do not for a split update, and a foreign key's checks are triggers.
 	BOOL split = CMD_UPDATE == m_cmd_type && phy_dml_dxlop->FSplit();
-	if (CMD_UPDATE == m_cmd_type && md_rel->IsNonBlockTable())
-	{
-		GP_UNPORTED("an UPDATE run as a DELETE and an INSERT");
-	}
 	if (split)
 	{
 		if (IMDRelation::EreldistrHash != md_rel->GetRelDistribution())
@@ -5998,22 +5992,14 @@ CTranslatorDXLToPlStmt::TranslateDXLDml(
 
 	// RETURNING, which ORCA never saw: the Query's list, which the
 	// ModifyTable evaluates over the row it wrote.  Not a split update's,
-	// whose rows gp_core's node writes as a DELETE and an INSERT.  Not a
-	// DELETE's from a table whose method cannot fetch the deleted row by its
-	// ctid, which it takes from a whole-row column of the plan's instead
-	// (O20): ORCA's DELETE carries the ctid alone.  And on the segments, not
-	// an anonymous record, whose text reads back only where its type is
-	// known, as a Gather's rows are read back (gp_motion.c).
+	// whose rows gp_core's node writes as a DELETE and an INSERT.  And on
+	// the segments, not an anonymous record, whose text reads back only
+	// where its type is known, as a Gather's rows are read back
+	// (gp_motion.c).
 	List *returning = TranslateReturningList(index);
 	if (NIL != returning && split)
 	{
 		GP_UNPORTED("RETURNING from an UPDATE that moves rows");
-	}
-	if (NIL != returning && CMD_DELETE == m_cmd_type &&
-		gpdb::RelOldRowFromPlan(CMDIdGPDB::CastMdid(mdid_target_table)->Oid()))
-	{
-		GP_UNPORTED(
-			"DELETE ... RETURNING of a table whose rows are not fetched by ctid");
 	}
 	if (NIL != returning && nullptr != writeslice)
 	{
@@ -6089,11 +6075,11 @@ CTranslatorDXLToPlStmt::TranslateDXLDml(
 	// and the partition a row is in, by the tableoid ORCA's DML carries in
 	// its second column (GetCtidAndSegmentId) -- which ORCA must then route
 	// no row by.  The partitions are locked as the table is, so that no row
-	// of theirs changes under the statement either.  One whose method takes
-	// a row's old version from the plan (O20) is not written here, as an
-	// append-optimized table is not (above).
+	// of theirs changes under the statement either.
 	List *part_rtis = NIL;
 	List *part_oids = NIL;
+	BOOL old_row_from_plan =
+		gpdb::RelOldRowFromPlan(CMDIdGPDB::CastMdid(mdid_target_table)->Oid());
 	if (partitioned)
 	{
 		ListCell *lc_motion = nullptr;
@@ -6158,8 +6144,7 @@ CTranslatorDXLToPlStmt::TranslateDXLDml(
 			if ((CMD_UPDATE == m_cmd_type || NIL != returning) &&
 				gpdb::RelOldRowFromPlan(part_oid))
 			{
-				GP_UNPORTED(
-					"a partition whose rows are not fetched by ctid, updated or returned");
+				old_row_from_plan = true;
 			}
 			RangeTblEntry *part_rte = m_dxl_to_plstmt_context->GetRTEByIndex(
 				(Index) lfirst_int(lc_rti));
@@ -6184,6 +6169,31 @@ CTranslatorDXLToPlStmt::TranslateDXLDml(
 	result_plan->lefttree = child_plan;
 
 	result_plan->targetlist = dml_target_list;
+
+	// A table whose method takes a changed row's old version from the plan
+	// (O20), an append-optimized or a PAX table, finds it in a whole-row
+	// column beside the ctid, which ORCA's plan does not have: its core
+	// keeps the new values alone.  The scan that read the ctid gives it,
+	// passed up through the plan as the ctid is (compat/wholerow.c) -- for
+	// an update in place, which builds its new row over the old one, and for
+	// DELETE ... RETURNING; a partitioned table's, from each partition's
+	// scan, where one of its partitions is such a table.  A split update's
+	// DELETE takes no old row.
+	if (!split && old_row_from_plan &&
+		(CMD_UPDATE == m_cmd_type ||
+		 (CMD_DELETE == m_cmd_type && NIL != returning)))
+	{
+		AttrNumber wholerow = gpdb::CarryWholeRow(
+			result_plan, ctid_col,
+			m_dxl_to_plstmt_context->GetRTableEntriesList());
+		if (InvalidAttrNumber == wholerow)
+		{
+			GP_UNPORTED(
+				"the old row of a table whose rows are not fetched by ctid, which the plan does not carry");
+		}
+		((TargetEntry *) gpdb::ListNth(result_plan->targetlist, wholerow - 1))
+			->resname = PStrDup("wholerow");
+	}
 	SetParamIds(result_plan);
 
 	dml->operation = m_cmd_type;

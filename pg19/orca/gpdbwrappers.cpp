@@ -124,6 +124,9 @@ extern "C" {
 /* An identity column's next value, as ORCA carries it; see NextValueCall. */
 #include "cb_nextvalue.h"
 
+/* A table's old row, carried up to its ModifyTable; see CarryWholeRow. */
+#include "cb_wholerow.h"
+
 /* PostGIS's index support function; see IsPostgisIndexSupport. */
 #include "gp_orca_postgis.h"
 
@@ -3009,6 +3012,17 @@ gpdb::RelOldRowFromPlan(Oid relid)
 	}
 	GP_WRAP_END;
 	return false;
+}
+
+AttrNumber
+gpdb::CarryWholeRow(Plan *plan, AttrNumber resno, List *rtable)
+{
+	GP_WRAP_START;
+	{
+		return gp_orca_carry_whole_row(plan, resno, rtable);
+	}
+	GP_WRAP_END;
+	return InvalidAttrNumber;
 }
 
 List *

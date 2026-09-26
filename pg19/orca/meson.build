@@ -146,6 +146,7 @@ orca_compat_sources = files(
   'compat/subselect.c',
   'compat/tlist.c',
   'compat/walkers.c',
+  'compat/wholerow.c',
 )
 
 # The translator proper, built by operator group rather than by file; see
