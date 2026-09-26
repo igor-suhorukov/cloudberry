@@ -31,7 +31,8 @@
 # the roles back to the ones preferred; gpinitstandby makes a standby
 # coordinator, and gpactivatestandby makes it the coordinator; and
 # gpdeletesystem removes the cluster.  A second cluster, of primaries alone,
-# is given its mirrors by gpaddmirrors.
+# whose nodes authenticate each other by certificates, is given its mirrors
+# by gpaddmirrors, and gpmovemirrors moves one of them.
 #
 # The nodes are on this host, under its name, as the demo cluster's are, and
 # take TCP connections, as a cluster's nodes must: gpinitsystem gives them
@@ -379,12 +380,48 @@ else
 fi
 
 ###############################################################################
-echo "10. gpaddmirrors gives a cluster of primaries its mirrors"
+echo "10. a cluster whose nodes authenticate each other by certificates, and gpaddmirrors gives its primaries mirrors"
 ###############################################################################
+# Decision 5's certificates in production: gpinitsystem's NODE_SSL_DIR, the
+# directory every host has the cluster's authority in, and its own
+# certificate, whose common name is every node's.  The tools connect from a
+# node's address too, so they show the certificate as well: here from the
+# environment, as a host's user of the tools would have it.
+certs="$WORK/certs"
+mkdir -p "$certs"
+if openssl req -new -x509 -nodes -newkey rsa:2048 -days 2 -subj "/CN=cluster-ca" \
+		-keyout "$certs/ca.key" -out "$certs/ca.crt" &&
+	openssl req -new -nodes -newkey rsa:2048 -subj "/CN=cloudberry-node" \
+		-keyout "$certs/node.key" -out "$certs/node.csr" &&
+	openssl x509 -req -in "$certs/node.csr" -days 2 -CA "$certs/ca.crt" \
+		-CAkey "$certs/ca.key" -CAcreateserial -out "$certs/node.crt" \
+		-extfile <(printf 'subjectAltName=DNS:%s,DNS:localhost,IP:127.0.0.1\n' "$HOST")
+then
+	chmod 600 "$certs"/*.key
+else
+	notok "openssl makes the certificates"
+fi > "$LOGDIR/openssl.out" 2>&1
+export PGSSLCERT="$certs/node.crt" PGSSLKEY="$certs/node.key" \
+	PGSSLROOTCERT="$certs/ca.crt" PGSSLMODE=verify-full
+
 init_config "$B" $((BASE + 5)) $((BASE + 6))
+echo "NODE_SSL_DIR=$certs" >> "$B/gpinitsystem_config"
 export COORDINATOR_DATA_DIRECTORY="$B/qddir/demoDataDir-1" PGPORT=$((BASE + 5))
 CPORT=$((BASE + 5))
 if run init-b gpinitsystem -a -c "$B/gpinitsystem_config" -l "$LOGDIR"; then
+	out=$(q "$CPORT" "SELECT DISTINCT result FROM gp.exec_on_segments('SELECT ssl::text || '' '' || client_dn FROM pg_stat_ssl WHERE pid = pg_backend_pid()')")
+	hba=$(cat "$COORDINATOR_DATA_DIRECTORY/pg_hba.conf" "$B"/dbfast*/demoDataDir*/pg_hba.conf |
+		grep -E -c '^host[[:space:]].*trust')
+	[ "$out" = "true /CN=cloudberry-node" ] && [ "$hba" = 0 ] \
+		&& ok "gpinitsystem with NODE_SSL_DIR: the dispatcher's connections are TLS with the node's certificate, and no node's address is trusted" \
+		|| notok "gpinitsystem with NODE_SSL_DIR" "$out / $hba lines trust a host"
+	p0=$(q "$CPORT" "SELECT port FROM gp_segment_configuration WHERE content = 0 AND role = 'p'")
+	out=$(PGSSLCERT=/nonexistent PGSSLKEY=/nonexistent q "$p0" "SELECT 1")
+	case "$out" in
+		*"certificate"*) ok "a connection to a segment from a node's address without the certificate is refused" ;;
+		*) notok "a segment should have asked for a certificate" "$out" ;;
+	esac
+
 	for c in 0 1 2; do
 		echo "$c|$HOST|$((BASE + 16 + c))|$B/mirror/demoDataDir$c"
 	done > "$B/mirrors"
@@ -395,13 +432,41 @@ if run init-b gpinitsystem -a -c "$B/gpinitsystem_config" -l "$LOGDIR"; then
 		[ "$out" = "-1:1:ppnu 0:2:ppsu 0:5:mmsu 1:3:ppsu 1:6:mmsu 2:4:ppsu 2:7:mmsu" ] \
 			&& ok "gpaddmirrors: three mirrors, in sync" \
 			|| notok "gpaddmirrors" "$out"
+		out=$(q "$CPORT" "SELECT count(*) FROM gp.exec_on_segments('SELECT count(*) FROM pg_stat_replication JOIN pg_stat_ssl USING (pid) WHERE ssl AND client_dn = ''/CN=cloudberry-node''') WHERE result = '1'")
+		[ "$out" = 3 ] \
+			&& ok "and each mirror streams from its primary over TLS, with the node's certificate" \
+			|| notok "the mirrors' replication over TLS" "$out"
 	else
 		notok "gpaddmirrors" "$(tail_of addmirrors)"
 	fi
+
+	###########################################################################
+	echo "11. gpmovemirrors moves a mirror to another directory and port"
+	###########################################################################
+	m0=$(q "$CPORT" "SELECT hostname || '|' || port || '|' || datadir FROM gp_segment_configuration WHERE content = 0 AND role = 'm'")
+	echo "$m0 $HOST|$((BASE + 19))|$B/moved/demoDataDir0" > "$B/move"
+	mkdir -p "$B/moved"
+	if run movemirrors gpmovemirrors -i "$B/move"; then
+		in_sync "$CPORT" > /dev/null
+		out=$(q "$CPORT" "SELECT role::text || mode::text || status::text || ':' || port || ':' || datadir FROM gp_segment_configuration WHERE content = 0 AND role = 'm'")
+		rows=$(q "$CPORT" "SELECT count(*) FROM gp.exec_on_segments('SELECT count(*) FROM pg_stat_replication JOIN pg_stat_ssl USING (pid) WHERE ssl') WHERE result = '1'")
+		[ "$out" = "msu:$((BASE + 19)):$B/moved/demoDataDir0" ] && [ "$rows" = 3 ] &&
+		[ ! -e "${m0##*|}/postmaster.pid" ] \
+			&& ok "gpmovemirrors: content 0's mirror is in its new place, in sync, over TLS, the old one stopped" \
+			|| notok "gpmovemirrors" "$out / $rows"
+	else
+		notok "gpmovemirrors" "$(tail_of movemirrors)"
+	fi
+	hba=$(find "$B" -name pg_hba.conf -exec cat {} + | grep -E -c '^host[[:space:]].*trust')
+	ssl=$(find "$B" -name pg_hba.conf -exec cat {} + | grep -E -c '^hostssl[[:space:]]+replication[[:space:]].*cert map=gpnodes')
+	[ "$hba" = 0 ] && [ "$ssl" -gt 0 ] \
+		&& ok "the lines gpaddmirrors and gpmovemirrors add for the mirrors take the certificate too" \
+		|| notok "pg_hba.conf after gpaddmirrors and gpmovemirrors" "$hba lines trust a host, $ssl replication lines take the certificate"
 else
-	notok "gpinitsystem of primaries alone" "$(tail_of init-b)"
+	notok "gpinitsystem with NODE_SSL_DIR, of primaries alone" "$(tail_of init-b)"
 fi
 printf 'y\ny\n' | run delete-b gpdeletesystem -f -d "$COORDINATOR_DATA_DIRECTORY"
+unset PGSSLCERT PGSSLKEY PGSSLROOTCERT PGSSLMODE
 
 echo
 echo "gpMgmt tests: $pass passed, $fail failed"

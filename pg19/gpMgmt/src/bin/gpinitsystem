@@ -44,6 +44,20 @@
 #   - the port's core extension is gp_core, which makes gp_segment_configuration
 #     and the rest where Cloudberry's gp_toolkit is made, in template1 and
 #     postgres, with the extensions of the other modules preloaded;
+#   - with NODE_SSL_DIR in the configuration file, the nodes authenticate
+#     each other by certificates (decision 5): the directory, the same path on
+#     every host, holds ca.crt, the cluster's authority, the host's node.crt
+#     and node.key, and root.crl if there is one; every node's certificate
+#     has one common name, NODE_SSL_NAME, node.crt's unless it says
+#     otherwise.  Each node takes TLS with its certificate, connects to the
+#     others with it, verify-full, and takes theirs for any role -- its
+#     pg_hba.conf lines for the nodes' addresses "hostssl ... cert
+#     map=gpnodes", pg_ident.conf mapping the name to every role
+#     (SET_PORT_SETTINGS and SECURE_PG_HBA in lib/gp_bash_functions.sh).  The
+#     tools' own connections to the nodes are TLS too, from a node's address:
+#     the user running them has the certificate where libpq looks,
+#     ~/.postgresql or the PGSSLCERT, PGSSLKEY and PGSSLROOTCERT of the
+#     environment;
 #   - neither single-node mode, which is a server with no cluster file on the
 #     port, nor Cloudberry's external FTS or its TDE options.
 #******************************************************************************
@@ -2289,6 +2303,22 @@ PRELOAD_LIBRARIES=${PRELOAD_LIBRARIES:-gp_core,gp_sql}
 CLUSTER_SECRET=`head -c 24 /dev/urandom | base64 | $TR -d '\n=' | $TR '+/' '-_'`
 CLUSTER_FILE=${COORDINATOR_DIRECTORY}/${SEG_PREFIX}-1/gp_cluster.conf
 export PRELOAD_LIBRARIES CLUSTER_SECRET CLUSTER_FILE
+
+# And, where NODE_SSL_DIR is given, the certificates the nodes authenticate
+# each other by, and the common name they have (see the head of this file).
+if [ x"" != x"$NODE_SSL_DIR" ]; then
+	for f in ca.crt node.crt node.key; do
+		[ -r "$NODE_SSL_DIR/$f" ] || ERROR_EXIT "[FATAL]:-NODE_SSL_DIR $NODE_SSL_DIR has no $f readable here"
+	done
+	if [ x"" == x"$NODE_SSL_NAME" ]; then
+		NODE_SSL_NAME=`openssl x509 -noout -subject -nameopt RFC2253 -in "$NODE_SSL_DIR/node.crt" | $SED -n 's/^subject= *.*CN=\([^,]*\).*/\1/p'`
+		[ x"" != x"$NODE_SSL_NAME" ] || ERROR_EXIT "[FATAL]:-$NODE_SSL_DIR/node.crt names no common name; set NODE_SSL_NAME"
+	fi
+	NODE_SSL_CRL=0
+	[ -r "$NODE_SSL_DIR/root.crl" ] && NODE_SSL_CRL=1
+	LOG_MSG "[INFO]:-The nodes authenticate each other by the certificates of $NODE_SSL_DIR, named $NODE_SSL_NAME" 1
+fi
+export NODE_SSL_DIR NODE_SSL_NAME NODE_SSL_CRL
 
 CREATE_QD_DB
 

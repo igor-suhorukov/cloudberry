@@ -19,7 +19,10 @@
 # Cloudberry's gp_dbid is in internal.auto.conf), the secret the nodes share,
 # and what Cloudberry's initdb and postgresql.conf.sample have that
 # PostgreSQL's do not: the logging collector into log/, and prepared
-# transactions for two-phase commit.
+# transactions for two-phase commit.  Where NODE_SSL_DIR is given
+# (gpinitsystem), SET_PORT_SETTINGS gives the node its certificate, and
+# SECURE_PG_HBA makes the lines that trust a node's address take its
+# certificate instead.
 #***************************************************************
 # Location Functions
 #******************************************************************************
@@ -827,6 +830,7 @@ BUILD_COORDINATOR_PG_HBA_FILE () {
                         fi
                 done
         fi
+        SECURE_PG_HBA ${GP_DIR}/$PG_HBA
         LOG_MSG "[INFO]:-Complete Coordinator $PG_HBA configuration"
         LOG_MSG "[INFO]:-End Function $FUNCNAME"
 }
@@ -1356,7 +1360,65 @@ SET_PORT_SETTINGS () {
 	if [ "$CONTENT" = "-1" ]; then
 		SED_PG_CONF $CONF "gp.role" "gp.role = 'dispatch'" 0 $SET_HOST
 	fi
+	# Certificates between nodes: the node's as a server, the authority's
+	# for the certificates it is shown, and the node's again for its own
+	# connections to the others (gp_core's gp.internal_ssl* settings), each
+	# other node's checked against the authority and its host; and
+	# pg_ident.conf's map of the nodes' name to every role (SECURE_PG_HBA).
+	if [ x"" != x"$NODE_SSL_DIR" ]; then
+		local TLS="ssl = on
+ssl_cert_file = '${NODE_SSL_DIR}/node.crt'
+ssl_key_file = '${NODE_SSL_DIR}/node.key'
+ssl_ca_file = '${NODE_SSL_DIR}/ca.crt'
+gp.internal_sslmode = 'verify-full'
+gp.internal_sslcert = '${NODE_SSL_DIR}/node.crt'
+gp.internal_sslkey = '${NODE_SSL_DIR}/node.key'
+gp.internal_sslrootcert = '${NODE_SSL_DIR}/ca.crt'"
+		if [ x"$NODE_SSL_CRL" == x"1" ]; then
+			TLS="$TLS
+ssl_crl_file = '${NODE_SSL_DIR}/root.crl'
+gp.internal_sslcrl = '${NODE_SSL_DIR}/root.crl'"
+		fi
+		local IDENT="$(dirname $CONF)/pg_ident.conf"
+		if [ x"" == x"$SET_HOST" ]; then
+			$ECHO "$TLS" >> $CONF && $ECHO "gpnodes ${NODE_SSL_NAME} all" >> $IDENT
+		else
+			$TRUSTED_SHELL $SET_HOST "cat >> $CONF && $ECHO gpnodes ${NODE_SSL_NAME} all >> $IDENT" <<< "$TLS"
+		fi
+		RETVAL=$?
+		if [ $RETVAL -ne 0 ]; then
+			ERROR_EXIT "[FATAL]:-Failed to give $CONF its certificate"
+		fi
+	fi
 	LOG_MSG "[INFO]:-End Function $FUNCNAME"
+}
+
+# Where the nodes authenticate each other by certificates (NODE_SSL_DIR), a
+# line of pg_hba.conf that trusts a node's address, "host <database> <user>
+# <address> trust" as gpMgmt writes them, takes the node's certificate over
+# TLS instead, for any role through pg_ident.conf's gpnodes map
+# (SET_PORT_SETTINGS); gppylib/nodetls.py does the same for the tools that
+# add lines later.  SECURE_HBA_LINES does it to lines on stdin.
+SECURE_HBA_SED='s/^host([[:space:]]+[^[:space:]]+[[:space:]]+[^[:space:]]+[[:space:]]+[^[:space:]]+[[:space:]]+)trust[[:space:]]*$/hostssl\1cert map=gpnodes/'
+SECURE_PG_HBA () {
+	# SECURE_PG_HBA <pg_hba.conf> [host]
+	[ x"" == x"$NODE_SSL_DIR" ] && return 0
+	if [ x"" == x"$2" ]; then
+		$SED -i -E "$SECURE_HBA_SED" $1
+	else
+		$TRUSTED_SHELL $2 "$SED -i -E '$SECURE_HBA_SED' $1"
+	fi
+	RETVAL=$?
+	if [ $RETVAL -ne 0 ]; then
+		ERROR_EXIT "[FATAL]:-Failed to make $1 take the nodes' certificates"
+	fi
+}
+SECURE_HBA_LINES () {
+	if [ x"" == x"$NODE_SSL_DIR" ]; then
+		$CAT
+	else
+		$SED -E "$SECURE_HBA_SED"
+	fi
 }
 
 SET_VAR () {

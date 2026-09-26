@@ -12,7 +12,9 @@
 # through gppylib's PgBaseBackup, which writes its dbid and the name its WAL
 # receiver streams under; the copy has the coordinator's cluster file, with
 # the standby in it.  A standby host given as a path, a socket directory of
-# this host's, is not pinged.
+# this host's, is not pinged.  Where the nodes authenticate each other by
+# certificates, the coordinator's lines for the standby take it over TLS
+# with its certificate (gppylib/nodetls.py), as gpinitsystem's do.
 #
 import os
 import sys
@@ -31,7 +33,7 @@ try:
     from gppylib.operations.update_pg_hba_on_segments import update_pg_hba_on_segments_for_standby
     from gppylib.operations.package import SyncPackages
     from gppylib.commands.pg import PgBaseBackup
-    from gppylib import clusterfile
+    from gppylib import clusterfile, nodetls
 except ImportError as e:
     sys.exit('ERROR: Cannot import modules.  Please check that you '
              'have sourced cloudberry-env.sh.  Detail: ' + str(e))
@@ -543,8 +545,12 @@ def update_pg_hba_conf(options, array):
 
         new_section = ['# standby coordinator host ip addresses\n']
 
+        secure = nodetls.uses_certificates(coordinator_data_dir)
+
         def add_entry_to_new_section(values):
             newline = '\t'.join(values) + '\n'
+            if secure:
+                newline = nodetls.secure_hba_entry(newline)
             if newline not in pg_hba_conf:
                 new_section.append(newline)
 

@@ -27,7 +27,10 @@
 # --target-gp-dbid and no -E: its dbid, and the name its WAL receiver
 # streams under, gp_walreceiver, which Cloudberry's pg_basebackup writes and
 # FTS knows a mirror by, are written after the copy.  Nodes start with no
-# gp_role, which the cluster file gives them.
+# gp_role, which the cluster file gives them.  Where the nodes authenticate
+# each other by certificates (NODE_SSL_DIR), the lines a segment's
+# pg_hba.conf has for the nodes, and those a primary gets for its mirror,
+# take them (SECURE_PG_HBA), and a mirror streams with its certificate.
 #******************************************************************************
 #******************************************************************************
 # Prep Code
@@ -217,6 +220,7 @@ CREATE_QES_PRIMARY () {
         fi
         $TRUSTED_SHELL ${GP_HOSTADDRESS} "$ECHO host     all          $USER_NAME         $GP_HOSTADDRESS      trust >> ${GP_DIR}/$PG_HBA"
     fi
+    SECURE_PG_HBA ${GP_DIR}/$PG_HBA ${GP_HOSTADDRESS}
     LOG_MSG "[INFO][$INST_COUNT]:-End Function $FUNCNAME"
 }
 
@@ -242,12 +246,20 @@ CREATE_QES_MIRROR () {
             PG_HBA_ENTRIES="${PG_HBA_ENTRIES}"$'\n'"host replication ${GP_USER} ${PRIMARY_HOSTADDRESS} trust"
         fi
     fi
+    PG_HBA_ENTRIES=$(SECURE_HBA_LINES <<< "${PG_HBA_ENTRIES}")
     RUN_COMMAND_REMOTE ${PRIMARY_HOSTADDRESS} "${EXPORT_GPHOME}; . ${GPHOME}/cloudberry-env.sh; cat - >> ${PRIMARY_DIR}/pg_hba.conf; pg_ctl -D ${PRIMARY_DIR} reload" <<< "${PG_HBA_ENTRIES}"
     RUN_COMMAND_REMOTE ${GP_HOSTADDRESS} "${EXPORT_GPHOME}; . ${GPHOME}/cloudberry-env.sh; rm -rf ${GP_DIR}; ${GPHOME}/bin/pg_basebackup --wal-method=stream --create-slot --slot='internal_wal_replication_slot' -R -c fast -D ${GP_DIR} -h ${PRIMARY_HOSTADDRESS} -p ${PRIMARY_PORT}; rm -rf ${GP_DIR}/db_dumps;"
     # What Cloudberry's pg_basebackup --target-gp-dbid and -R write: this
     # node's dbid, and the name FTS knows a mirror's WAL receiver by.
     SED_PG_CONF ${GP_DIR}/$PG_CONF "gp.dbid" "gp.dbid = ${GP_DBID}" 1 $GP_HOSTADDRESS
-    RUN_COMMAND_REMOTE ${GP_HOSTADDRESS} "$ECHO \"primary_conninfo = 'user=${GP_USER} host=${PRIMARY_HOSTADDRESS} port=${PRIMARY_PORT} application_name=gp_walreceiver'\" >> ${GP_DIR}/postgresql.auto.conf"
+    # and, where the nodes authenticate each other by certificates, the
+    # node's to stream with
+    local TLS_CONNINFO=""
+    if [ x"" != x"$NODE_SSL_DIR" ]; then
+        TLS_CONNINFO=" sslmode=verify-full sslcert=${NODE_SSL_DIR}/node.crt sslkey=${NODE_SSL_DIR}/node.key sslrootcert=${NODE_SSL_DIR}/ca.crt"
+        [ x"$NODE_SSL_CRL" == x"1" ] && TLS_CONNINFO="${TLS_CONNINFO} sslcrl=${NODE_SSL_DIR}/root.crl"
+    fi
+    RUN_COMMAND_REMOTE ${GP_HOSTADDRESS} "$ECHO \"primary_conninfo = 'user=${GP_USER} host=${PRIMARY_HOSTADDRESS} port=${PRIMARY_PORT}${TLS_CONNINFO} application_name=gp_walreceiver'\" >> ${GP_DIR}/postgresql.auto.conf"
     START_QE "-w"
     RETVAL=$?
     PARA_EXIT $RETVAL "pg_basebackup of segment data directory from ${PRIMARY_HOSTADDRESS} to ${GP_HOSTADDRESS}"

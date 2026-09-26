@@ -115,6 +115,7 @@ lib/python/gppylib bin/gppylib/heapchecksum.py
 lib/python/gppylib bin/gppylib/logfilter.py
 lib/python/gppylib bin/gppylib/mainUtils.py
 lib/python/gppylib bin/gppylib/nodecopy.py
+lib/python/gppylib bin/gppylib/nodetls.py
 lib/python/gppylib bin/gppylib/parseutils.py
 lib/python/gppylib bin/gppylib/pgconf.py
 lib/python/gppylib bin/gppylib/recoveryinfo.py

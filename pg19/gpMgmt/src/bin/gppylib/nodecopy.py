@@ -47,7 +47,7 @@ import shutil
 import subprocess
 import time
 
-from gppylib import pgconf
+from gppylib import nodetls, pgconf
 
 RECEIVER_NAME = 'gp_walreceiver'
 AUTO_CONF = 'postgresql.auto.conf'
@@ -146,14 +146,20 @@ def settle(datadir, dbid, recovery=False, slot=None, source_host=None, source_po
     What Cloudberry's pg_basebackup and pg_rewind leave a copy with that
     PostgreSQL 19's do not: its own dbid and, as a node that streams from its
     source, the name its WAL receiver streams under and the slot it streams
-    from.  Written into its postgresql.auto.conf.
+    from.  Written into its postgresql.auto.conf.  Where the nodes
+    authenticate each other by certificates, the node streams over TLS with
+    its certificate, as gp_core's connections go (nodetls.py).
     """
     settings = {'gp.dbid': str(dbid)}
     if recovery:
         conninfo = primary_conninfo(datadir)
         if conninfo is None:
             conninfo = 'host=%s port=%s' % (source_host, source_port)
-        conninfo = re.sub(r"\s*application_name=('[^']*'|\S*)", '', conninfo).strip()
+        tls = nodetls.replication_options(datadir)
+        for option in ['application_name'] + list(tls):
+            conninfo = re.sub(r"\s*\b%s=('(?:[^'\\]|\\.)*'|\S*)" % option, '', conninfo).strip()
+        for option, value in tls.items():
+            conninfo += " %s='%s'" % (option, value.replace('\\', '\\\\').replace("'", "\\'"))
         settings['primary_conninfo'] = _quote('%s application_name=%s' % (conninfo, RECEIVER_NAME))
         if slot:
             settings['primary_slot_name'] = _quote(slot)
