@@ -1957,6 +1957,35 @@ COMMIT;"
 		*) notok "a partitioned table's UPDATE that ORCA declines" "$out" ;;
 	esac
 
+	# A statement that fails on some segments while its slices stream fails
+	# with their error, and ends: the rest of it is stopped as the first
+	# fails (gp_dispatch.c) -- a slice whose receiver failed would wait for
+	# it, over UDP, and its other receivers for the slice; and a reader that
+	# starts after its writer failed would wait for the writer's snapshot.
+	# Statements that fail so, one after another in a session, leave every
+	# node up -- UDP's first packet of a slice no receiver has asked for yet
+	# kept in the transaction's memory once crashed the segment at its end
+	# (gp_ic.c).  Each interconnect, a statement timeout for a hang.
+	crashes() { cat "$ROOT"/node*.log | grep -c "terminated by signal"; }
+	before=$(crashes)
+	q 0 "CREATE TABLE wck (a int, s text CHECK (length(s) < 5)) DISTRIBUTED RANDOMLY;" >/dev/null
+	failed=""
+	for ic in tcp udpifc relay; do
+		out=$(printf '%s\n' "SET gp.interconnect_type = $ic;" "SET statement_timeout = '60s';" \
+			"UPDATE wu SET b = (SELECT k FROM bo);" \
+			"UPDATE wu SET b = 1 / (bo.k - 60) FROM bo WHERE wu.b = bo.k;" \
+			"UPDATE wu SET b = (SELECT k FROM bo);" \
+			"INSERT INTO wck VALUES (1, 'toolong');" "INSERT INTO wck VALUES (2, 'toolong');" \
+			"SELECT 'alive';" | qf 0)
+		case "$out" in
+			*"more than one row returned by a subquery used as an expression"*"division by zero"*"more than one row returned by a subquery used as an expression"*"violates check constraint"*"violates check constraint"*alive) ;;
+			*) failed="$failed $ic: $out" ;;
+		esac
+	done
+	[ -z "$failed" ] && [ "$(crashes)" = "$before" ] \
+		&& ok "statements that fail on the segments while their slices stream fail with the error, over tcp, UDP and relayed, and every node stays up" \
+		|| notok "a statement failing on the segments" "$failed / crashes: $before before, $(crashes) after"
+
 	# What Cloudberry refuses of a DO UPDATE, the planner's route refuses in
 	# its words, and ORCA leaves to it: a distribution column set, and a
 	# volatile function in a replicated table's update.

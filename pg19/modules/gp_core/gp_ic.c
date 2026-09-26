@@ -668,7 +668,13 @@ in_route(IcIn *in)
 		}
 	}
 
-	unclaimed = lappend(unclaimed, in);
+	/* the transaction's end reads the list, whatever memory the caller is in */
+	{
+		MemoryContext oldcxt = MemoryContextSwitchTo(TopMemoryContext);
+
+		unclaimed = lappend(unclaimed, in);
+		MemoryContextSwitchTo(oldcxt);
+	}
 	return NULL;
 }
 

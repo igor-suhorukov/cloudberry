@@ -723,12 +723,14 @@ gang_build_wes(GpGang *g)
 	if (IsUnderPostmaster)
 		AddWaitEventToSet(g->wes, WL_EXIT_ON_PM_DEATH, PGINVALID_SOCKET,
 						  NULL, NULL);
+	/* not a connection that broke, which has no socket, and goes with the gang */
 	for (int i = 0; i < g->nconns; i++)
-		AddWaitEventToSet(g->wes, WL_SOCKET_READABLE,
-						  PQsocket(g->conns[i].conn), NULL, &g->conns[i]);
+		if (PQsocket(g->conns[i].conn) != PGINVALID_SOCKET)
+			AddWaitEventToSet(g->wes, WL_SOCKET_READABLE,
+							  PQsocket(g->conns[i].conn), NULL, &g->conns[i]);
 	foreach_ptr(GpReaderConn, r, g->readers)
 	{
-		if (r->conn != NULL)
+		if (r->conn != NULL && PQsocket(r->conn) != PGINVALID_SOCKET)
 			AddWaitEventToSet(g->wes, WL_SOCKET_READABLE, PQsocket(r->conn),
 							  NULL, NULL);
 	}
@@ -1200,6 +1202,15 @@ collect_error(List **errors, int content, PGresult *res, PGconn *conn,
 	*errors = lappend(*errors, err);
 }
 
+/* An interconnect failure, or a cancel: what another's failure causes. */
+static bool
+error_is_consequence(GpSegmentError *err)
+{
+	return err->sqlstate != NULL &&
+		(strcmp(err->sqlstate, "58M01") == 0 ||
+		 strcmp(err->sqlstate, "57014") == 0);
+}
+
 /*
  * Raise what the segments said.
  *
@@ -1224,21 +1235,28 @@ raise_segment_errors(List *errors)
 	 * With slices running at once, what fails first is often only where the
 	 * failure arrived: a receiver whose sender stopped, a slice cancelled
 	 * because another failed.  Every reader is stopped and heard, and the
-	 * message is the first that is neither.
+	 * message is the first that is neither.  The others that are either
+	 * failed of no fault of their own, and are not counted: they would say
+	 * the statement failed on more segments than the cluster has.
 	 */
 	if (active_streams != NIL)
 	{
+		ListCell   *lc;
+
 		readers_cancel_and_drain(&errors);
 		foreach_ptr(GpSegmentError, err, errors)
 		{
-			if (err->sqlstate == NULL ||
-				(strcmp(err->sqlstate, "58M01") != 0 &&
-				 strcmp(err->sqlstate, "57014") != 0))
+			if (!error_is_consequence(err))
 			{
 				errors = list_delete_ptr(errors, err);
 				errors = lcons(err, errors);
 				break;
 			}
+		}
+		for_each_from(lc, errors, 1)
+		{
+			if (error_is_consequence((GpSegmentError *) lfirst(lc)))
+				errors = foreach_delete_current(errors, lc);
 		}
 	}
 
@@ -1277,7 +1295,8 @@ raise_segment_errors(List *errors)
  *
  * Every segment is waited for even after one has failed, so that the
  * connections are left idle and usable; a connection that broke is not, and
- * takes the gang with it.  "keep", when given, receives each segment's first
+ * takes the gang with it.  Where the statement's slices run at once, the
+ * rest are stopped first.  "keep", when given, receives each segment's first
  * result with rows.  "commit" says the statement was a COMMIT, whose answer
  * is ROLLBACK -- and no error -- when the segment's transaction had already
  * failed; that is an error here.
@@ -1303,6 +1322,7 @@ gang_wait_all_ex(GpGang *g, PGresult **keep, bool commit, bool keep_commands)
 {
 	List	   *errors = NIL;
 	bool		broken = false;
+	bool		stopped = false;
 	int			nbusy;
 
 	do
@@ -1364,6 +1384,37 @@ gang_wait_all_ex(GpGang *g, PGresult **keep, bool commit, bool keep_commands)
 
 			if (c->busy)
 				nbusy++;
+		}
+
+		/*
+		 * A segment failed while the statement's slices run at once: the
+		 * rest are stopped, as Cloudberry's dispatcher cancels the rest of a
+		 * statement one of whose processes failed (checkDispatchResult(),
+		 * cdbdisp_async.c).  Waiting for them could be for ever: a slice
+		 * that sends to the one that failed as well waits for it -- in UDP
+		 * packets, which a process whose statement failed no longer
+		 * acknowledges -- and its other receivers wait for that slice.  What
+		 * they answer, a cancel, raise_segment_errors() tells apart from
+		 * the failure.
+		 */
+		if (nbusy > 0 && errors != NIL && active_streams != NIL && !stopped)
+		{
+			TimestampTz deadline = GetCurrentTimestamp() + 30 * USECS_PER_SEC;
+
+			readers_cancel_and_drain(&errors);
+			for (int i = 0; i < g->nconns; i++)
+			{
+				GpSegmentConn *c = &g->conns[i];
+				const char *err;
+
+				if (!c->busy || c->fetching != NULL)
+					continue;
+				err = libpqsrv_cancel(c->conn, deadline);
+				if (err != NULL)
+					elog(DEBUG1, "could not cancel the query on segment %d: %s",
+						 c->content, err);
+			}
+			stopped = true;
 		}
 
 		if (nbusy > 0)
@@ -2717,6 +2768,8 @@ dispatch_commit_recorded(TransactionId latestXid)
 static void
 dispatch_xact_callback(XactEvent event, void *arg)
 {
+	uint32		holdoff = InterruptHoldoffCount;
+
 	switch (event)
 	{
 		case XACT_EVENT_PRE_COMMIT:
@@ -2826,6 +2879,11 @@ dispatch_xact_callback(XactEvent event, void *arg)
 			}
 			PG_CATCH();
 			{
+				/*
+				 * errfinish() let interrupts through for the handler of the
+				 * error; the abort holds them, and expects them held still.
+				 */
+				InterruptHoldoffCount = holdoff;
 				FlushErrorState();
 				gang_close();
 				if (dtx_nprepared > 0)
@@ -2863,6 +2921,7 @@ dispatch_subxact_callback(SubXactEvent event, SubTransactionId mySubid,
 						  SubTransactionId parentSubid, void *arg)
 {
 	int			level = GetCurrentTransactionNestLevel();
+	uint32		holdoff = InterruptHoldoffCount;
 
 	if (gang == NULL || !gang_in_xact || gang_xact_depth < level)
 		return;
@@ -2887,6 +2946,8 @@ dispatch_subxact_callback(SubXactEvent event, SubTransactionId mySubid,
 			}
 			PG_CATCH();
 			{
+				/* as at the transaction's abort */
+				InterruptHoldoffCount = holdoff;
 				FlushErrorState();
 				gang_close();
 			}
