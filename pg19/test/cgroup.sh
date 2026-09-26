@@ -39,9 +39,7 @@
 #
 # And for run.sh, a cgroup the test user may make a cgroup in for each job,
 # jobs, which says the CPU time each took and weighs each as the job's
-# length (run.sh); jobs outweighs the parents of resource groups beside it,
-# which weigh ten times the rest of the container, so that the servers of a
-# resource group test do not come before every other job's.
+# length (run.sh).
 set -u
 
 here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -70,7 +68,6 @@ if [ -f "$cg/cgroup.controllers" ] && [ -w "$cg/cgroup.procs" ] &&
 		done
 		mkdir -p "$cg/jobs" &&
 		echo "+cpu" > "$cg/jobs/cgroup.subtree_control" &&
-		echo 10000 > "$cg/jobs/cpu.weight" &&
 		chown -R "$user" "$cg/jobs" ||
 			echo "cgroup.sh: could not set up $cg/jobs; run.sh will not say the CPU time each job took" >&2
 	else

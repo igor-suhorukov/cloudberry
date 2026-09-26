@@ -378,9 +378,10 @@ watchdog() {
 # R/pg_regress.out, and its status in R/rc.
 run_group() {
 	local g="$1" gi="$2" pass="$3" optimizer="$4" wd rc
-	local R="$WORK/$g/$pass" SN="$WORK/$g/src/test/regress"
+	local R="$WORK/$g/$pass" SN="$WORK/$g/src/test/regress" t0
 	export PGHOST="$(node_sock "$g" 0)" PGPORT="$(node_port "$gi" 0)"
 	mkdir -p "$R/canon"
+	t0=$(date +%s)
 	# Cloudberry's tests make functions from the regress.so of the directory
 	# they run from, whose test functions of Cloudberry's own the port's
 	# cb_regress.so serves (auth_constraint's check_auth_time_constraints)
@@ -411,6 +412,7 @@ run_group() {
 		> "$R/pg_regress.out" 2>&1
 	rc=$?
 	echo "$rc" > "$R/rc"
+	echo $(( $(date +%s) - t0 )) > "$R/secs"
 	kill "$wd" 2> /dev/null; wait "$wd" 2> /dev/null
 
 	# test_setup's tablespace outlives the database: gone before the next
@@ -457,6 +459,7 @@ for pass in ${PASSES:-planner orca}; do
 		printf '  %-6s %-4d - %-44s %6d ms\n' "${st/_/ }" "$total" "$t" "$ms"
 	done
 	echo "  $((total - bad)) of $total passed"
+	echo "  groups: $(for g in "${groups[@]}"; do printf '%s %s s, ' "$g" "$(cat "$WORK/$g/$pass/secs" 2> /dev/null)"; done | sed 's/, $//')"
 	for g in "${groups[@]}"; do
 		[ "$(cat "$WORK/$g/$pass/rc" 2> /dev/null)" = 0 ] || rc=1
 	done
