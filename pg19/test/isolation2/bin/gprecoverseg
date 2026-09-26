@@ -26,16 +26,24 @@
 # primary that is a preferred mirror is stopped, FTS fails over to its
 # mirror, and it comes back as the mirror.  FTS is asked to probe after, and
 # marks a mirror up once its primary says it streams.  -a, -F, -r and
-# --no-progress; not -i, which moves a node, where the port's cluster file
-# says where a node is, read as a server starts.  Cloudberry's own
-# gprecoverseg is gpMgmt's, which is M7's.
+# --no-progress; and -i <file>, whose lines say which node to recover and,
+# after a space, where: "host|port|datadir host|port|datadir" -- a node put
+# somewhere else is removed from the cluster and added again under its dbid
+# there, as Cloudberry's gprecoverseg does it (gp_remove_segment_mirror(),
+# gp_add_segment(); gp_segadmin.c), and made a full copy of its primary.
+# Every node of the harness's cluster is on this host, reached by a socket
+# directory of its own: a node is found by its port and data directory, and
+# keeps its socket directory wherever it goes.  Cloudberry's own gprecoverseg
+# is gpMgmt's, which is M7's.
 set -u
 
 SLOT=internal_wal_replication_slot
-full=0; rebalance=0
-for arg in "$@"; do
+full=0; rebalance=0; input=
+while [ "$#" -gt 0 ]; do
+	arg="$1"; shift
 	case "$arg" in
 		--no-progress) ;;
+		-i) input="${1:-}"; shift ;;
 		-*[!aFr]*) echo "gprecoverseg: this harness's gprecoverseg does not take $arg" >&2; exit 2 ;;
 		-*)
 			[[ "$arg" == *F* ]] && full=1
@@ -118,8 +126,52 @@ recover() {					# recover <dbid>
 		{ echo "gprecoverseg: dbid $dbid did not start" >&2; return 1; }
 }
 
+# A node recovered where -i's file says: stopped, removed from the cluster and
+# added again under its dbid at the port and data directory given -- down and
+# not in sync until FTS finds it streaming -- and a full copy of its primary
+# made there, the directory emptied first, as Cloudberry's pg_basebackup
+# --force-overwrite empties it.
+move() {					# move <dbid> <port> <datadir>
+	local dbid="$1" port="$2" dir="$3" content role host olddir saved="$full"
+
+	IFS='|' read -r content role host olddir <<< \
+		"$(q "SELECT content, role, hostname, datadir FROM gp_segment_configuration WHERE dbid = $dbid")"
+	[ "$role" = m ] ||
+		{ echo "gprecoverseg: dbid $dbid is the primary of content $content, not to be moved" >&2; return 1; }
+	"$PG_BINDIR/pg_ctl" -D "$olddir" -m immediate -w stop > /dev/null 2>&1
+	# one transaction, as gpMgmt's updateSystemConfig() makes it
+	PGOPTIONS="${PGOPTIONS:-} -c client_min_messages=warning" \
+	q "SELECT gp_remove_segment_mirror($content::int2);
+	   SELECT gp_add_segment($dbid::int2, $content::int2, 'm', 'm', 'n', 'd', $port, '$host', '$host', '$dir')" > /dev/null ||
+		{ echo "gprecoverseg: could not move dbid $dbid to $dir" >&2; return 1; }
+	full=1
+	recover "$dbid"
+	local rc=$?
+	full="$saved"
+	return "$rc"
+}
+
 failed=0
-if [ "$rebalance" -eq 1 ]; then
+if [ -n "$input" ]; then
+	[ -r "$input" ] || { echo "gprecoverseg: cannot read $input" >&2; exit 2; }
+	# the last line may have no newline, as a test's helper writes it
+	while read -r from to _ || [ -n "${from:-}" ]; do
+		[ -n "$from" ] && [[ "$from" != \#* ]] || continue
+		IFS='|' read -r _ fport fdir <<< "$from"
+		dbid=$(q "SELECT dbid FROM gp_segment_configuration WHERE content >= 0 AND port = $fport AND datadir = '$fdir'")
+		if [ -z "$dbid" ]; then
+			echo "gprecoverseg: no segment is at $fdir, port $fport" >&2
+			failed=1
+			continue
+		fi
+		if [ -n "$to" ]; then
+			IFS='|' read -r _ tport tdir <<< "$to"
+			move "$dbid" "$tport" "$tdir" || failed=1
+		else
+			recover "$dbid" || failed=1
+		fi
+	done < "$input"
+elif [ "$rebalance" -eq 1 ]; then
 	moved=$(q "SELECT dbid FROM gp_segment_configuration WHERE content >= 0 AND role = 'p' AND preferred_role = 'm'")
 	for dbid in $moved; do
 		"$PG_BINDIR/pg_ctl" -D "$(q "SELECT datadir FROM gp_segment_configuration WHERE dbid = $dbid")" \

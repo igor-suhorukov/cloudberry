@@ -67,6 +67,14 @@ lockmodes, and its _optimizer output, which the orca pass is compared with
   the drop, with a correlation -- in PostgreSQL 19's pg_stats, whose tableid
   the port's init_file masks.
 
+segwalrep/commit_blocking_on_standby
+  SHOW's column of repl_catchup_within_range, which is the setting's name:
+  the port's is gp.repl_catchup_within_range, three characters longer, so
+  the header and its rule are too.  The setting is Cloudberry's: 1 WAL
+  segment, within which the coordinator waits for a standby that is catching
+  up (gp_standby.c), and FTS turns a primary's synchronous replication on
+  for a mirror that is (gp_fts.c).
+
 segwalrep/die_commit_pending_replication
   Its one-phase half alone: the port commits in one phase only a segment's
   part that wrote, as it prepares only one that wrote (gp_dtx.c), where

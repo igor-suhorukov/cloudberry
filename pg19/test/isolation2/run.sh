@@ -19,8 +19,9 @@
 #
 # Part of Cloudberry's isolation2_schedule, on a cluster: M3's tests --
 # distributed transactions, snapshots, locks and the global deadlock
-# detector -- M4's, FTS and mirrors, and M6's resource queues and memory
-# accounting.
+# detector -- M4's, FTS and mirrors, M6's resource queues and memory
+# accounting, and M7's of the tools: a node recovered elsewhere, and the
+# standby coordinator promoted, made again and waited for.
 #
 # src/test/isolation2 is Cloudberry's suite of tests that need more than one
 # session at a time, written in its isolation2 syntax (1: ..., 2&: ..., 2<:,
@@ -51,9 +52,10 @@
 # Cloudberry's demo cluster has, made with pg_basebackup; and a group whose
 # name begins "mirrors" has that cluster whole, as Cloudberry's FTS tests
 # assume it: a mirror for each segment too, a hot standby streaming from its
-# primary, and FTS on the coordinator (M4).  Shell commands of
-# the tests find gpconfig and gpstop in bin/ here, which do what the tests
-# ask of Cloudberry's (gpMgmt's, M7's) on this cluster, and
+# primary, and FTS on the coordinator (M4).  Shell commands of the tests --
+# and the nodes themselves, which a test's PL/Python helper runs one from --
+# find gpconfig, gpstop, gprecoverseg and gpinitstandby in bin/ here, which
+# do what the tests ask of Cloudberry's (gpMgmt's, M7's) on this cluster, and
 # COORDINATOR_DATA_DIRECTORY; and "-c gp_role=utility" goes from them as it
 # goes from the driver's sessions of a node's own.
 
@@ -169,6 +171,15 @@ echo
 make_cluster() {
 	local g="$1" gi="$2" conf="$WORK/$1/gp_cluster.conf" n
 
+	# What a shell command of a test is given (run_group), every node is
+	# started with, so that what a node runs itself -- pg_ctl() here, a PL/Python
+	# helper's gpinitstandby -- finds the tools and the coordinator too, as the
+	# servers of Cloudberry's demo cluster are started from its environment.
+	export PATH="$EXEC/bin:$PATH" PG_BINDIR="$BINDIR" GP_SETTINGS_MAP="$WORK/settings.map"
+	export PGHOST="$(node_sock "$g" 0)" PGPORT="$(node_port "$gi" 0)"
+	export COORDINATOR_DATA_DIRECTORY="$(node_dir "$g" 0)"
+	export ISOLATION2_STANDBY_HOT="$(has_mirrors "$g" && echo on || echo off)"
+
 	mkdir -p "$WORK/$g"
 	{
 		echo "# dbid content role host port datadir"
@@ -222,21 +233,28 @@ make_cluster() {
 		"$PSQL" -X -q -d postgres -c "CREATE EXTENSION gp_core" \
 			-c "CREATE EXTENSION gp_resource" > /dev/null 2>&1
 
-	# A standby coordinator: the coordinator's copy, streaming from it, and
-	# no hot standby, as Cloudberry's hot_standby is off by default -- which
-	# lets a test lower max_prepared_transactions on every node, as
-	# prepare_limit does, where a hot standby refuses one below its primary's.
+	# A standby coordinator: the coordinator's copy, streaming from it as
+	# gp_walreceiver, as Cloudberry's standby does, so that the coordinator's
+	# commits wait for it (gp_standby.c).  No hot standby in group standby,
+	# as Cloudberry's hot_standby is off by default -- which lets a test lower
+	# max_prepared_transactions on every node, as prepare_limit does, where a
+	# hot standby refuses one below its primary's; a hot standby in a group
+	# with mirrors, as its mirrors are, since a test there sets faults on it
+	# over a connection of its own (commit_blocking_on_standby), where
+	# Cloudberry's fault injector reaches a standby that takes none.
 	if has_standby "$g"; then
 		mkdir -p "$SOCK/$g/standby"
 		"$BINDIR/pg_basebackup" -D "$WORK/$g/standby" -h "$(node_sock "$g" 0)" \
-			-p "$(node_port "$gi" 0)" -R -X stream -c fast > "$WORK/$g/basebackup.log" 2>&1 \
+			-p "$(node_port "$gi" 0)" -X stream -c fast > "$WORK/$g/basebackup.log" 2>&1 \
 			|| { echo "the standby of group $g could not be copied"; tail -5 "$WORK/$g/basebackup.log"; return 1; }
 		{
 			echo "unix_socket_directories = '$SOCK/$g/standby'"
 			echo "port = $(standby_port "$gi")"
 			echo "gp.dbid = $(standby_dbid "$g")"
-			echo "hot_standby = off"
+			echo "hot_standby = $ISOLATION2_STANDBY_HOT"
+			echo "primary_conninfo = 'host=$(node_sock "$g" 0) port=$(node_port "$gi" 0) application_name=gp_walreceiver'"
 		} >> "$WORK/$g/standby/postgresql.auto.conf"
+		touch "$WORK/$g/standby/standby.signal"
 		"$BINDIR/pg_ctl" -D "$WORK/$g/standby" -l "$WORK/$g/standby.log" -w -t 60 start \
 			> /dev/null 2>&1 \
 			|| { echo "the standby of group $g did not start"; tail -20 "$WORK/$g/standby.log"; return 1; }
@@ -286,6 +304,13 @@ make_mirrors() {
 			|| { echo "the mirror of content $c of group $g did not start"; tail -20 "$d.log"; return 1; }
 	done
 }
+# The harness's stand-ins for Cloudberry's tools, where every node finds them
+# too: a test's PL/Python helper runs gpinitstandby in the server's
+# environment (dtm_recovery_on_standby).
+mkdir -p "$EXEC/bin"
+cp "$HERE"/bin/* "$EXEC/bin/"
+chmod +x "$EXEC"/bin/*
+
 for gi in "${!groups[@]}"; do
 	make_cluster "${groups[$gi]}" "$gi" &
 done
@@ -305,7 +330,8 @@ while read -r name; do
 		resource_scheduler|resource_select_only|resource_cleanup_gangs_on_wait|\
 		max_resource_queues|max_resource_portals_per_transaction|max_statement_mem|\
 		debug_resource_group|runaway_detector_activation_percent|\
-		vmem_process_interrupt|explain_memory_verbosity|coredump_on_memerror)
+		vmem_process_interrupt|explain_memory_verbosity|coredump_on_memerror|\
+		repl_catchup_within_range)
 			cbname="$short" ;;
 		*) cbname="gp_$short" ;;
 	esac
@@ -343,9 +369,6 @@ echo "s/(get_tablespace_path = postgres\\['get_tablespace_path'\\])/\\1; get_tab
 # it sources global_sh_executor.sh from there.
 sed 's/given_opt="-c gp_role=utility"/given_opt=None/' "$CB/sql_isolation_testcase.py" \
 	> "$EXEC/sql_isolation_testcase.py"
-mkdir -p "$EXEC/bin"
-cp "$HERE"/bin/* "$EXEC/bin/"
-chmod +x "$EXEC"/bin/*
 
 mkdir -p "$WORK/gpdiff"
 cp "$GPDIFF"/gpdiff.pl "$GPDIFF"/atmsort.pm "$GPDIFF"/explain.pm "$WORK/gpdiff/"
@@ -374,6 +397,7 @@ run_group() {
 	export PGHOST="$(node_sock "$g" 0)" PGPORT="$(node_port "$gi" 0)"
 	export PATH="$EXEC/bin:$PATH" PG_BINDIR="$BINDIR" GP_SETTINGS_MAP="$WORK/settings.map"
 	export COORDINATOR_DATA_DIRECTORY="$(node_dir "$g" 0)"
+	export ISOLATION2_STANDBY_HOT="$(has_mirrors "$g" && echo on || echo off)"
 
 	mkdir -p "$R/results" "$R/canon" "$R/sql" "$R/expected"
 	own_tablespaces() { sed -E "s#/tmp/([A-Za-z0-9_]*tablespace[A-Za-z0-9_]*)#$R/\\1#g"; }

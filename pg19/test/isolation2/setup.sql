@@ -16,6 +16,13 @@ CREATE EXTENSION gp_resource;
 CREATE EXTENSION gp_inject_fault;
 
 --
+-- PL/Python, in which some of Cloudberry's tests write helpers of their own
+-- (recoverseg_from_file, dtm_recovery_on_standby), as Cloudberry's setup
+-- makes it for its own.
+--
+CREATE EXTENSION plpython3u;
+
+--
 -- Faults for everyone, as Cloudberry's script grants them and its tests
 -- inject them, some as roles of their own (gp_inject_fault--1.0.sql).
 --
@@ -30,13 +37,19 @@ GRANT EXECUTE ON FUNCTION gp_inject_fault(text, text, text, text, text,
 GRANT CREATE ON SCHEMA public TO PUBLIC;
 
 --
--- pg_ctl(datadir, command, command_mode): stop or restart the node whose
--- data directory that is, waiting for it, as Cloudberry's does.  The
+-- pg_ctl(datadir, command, command_mode): stop, restart or promote the node
+-- whose data directory that is, waiting for it, as Cloudberry's does.  The
 -- harness keeps each node's log beside its data directory.
 --
 CREATE FUNCTION pg_ctl(datadir text, command text, command_mode text DEFAULT 'immediate')
 RETURNS text AS $$
 BEGIN
+	IF command = 'promote' THEN
+		EXECUTE format('COPY (SELECT 1) TO PROGRAM %L',
+					   format('@BINDIR@/pg_ctl -D %s -w -t 600 promote > /dev/null 2>&1',
+							  datadir));
+		RETURN 'OK';
+	END IF;
 	IF command NOT IN ('stop', 'restart') THEN
 		RETURN 'Invalid command input';
 	END IF;
@@ -189,5 +202,31 @@ BEGIN
 		PERFORM pg_sleep(0.5);
 		i := i + 1;
 	END LOOP;
+END;
+$$ LANGUAGE plpgsql;
+
+--
+-- M7's: what Cloudberry's tests of the coordinator's standby ask of it.
+--
+
+-- wait_until_standby_in_state(state): Cloudberry's, as it is -- the node's
+-- own WAL sender, on the coordinator its standby's.
+CREATE FUNCTION wait_until_standby_in_state(targetstate text)
+RETURNS text AS $$
+DECLARE
+	replstate text;
+	i int;
+BEGIN
+	i := 0;
+	WHILE i < 1200 LOOP
+		SELECT state INTO replstate FROM pg_stat_replication;
+		IF replstate = targetstate THEN
+			RETURN replstate;
+		END IF;
+		PERFORM pg_sleep(0.1);
+		PERFORM pg_stat_clear_snapshot();
+		i := i + 1;
+	END LOOP;
+	RETURN replstate;
 END;
 $$ LANGUAGE plpgsql;

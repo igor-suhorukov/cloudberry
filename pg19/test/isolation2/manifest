@@ -1,8 +1,10 @@
 # Part of Cloudberry's isolation2_schedule (src/test/isolation2), as the port
 # runs it on a coordinator and three segments: the tests of the schedule
 # that bear on M3 -- distributed transactions, distributed snapshots, locks
-# and the global deadlock detector -- on M4, FTS and mirrors, and on M6's
-# resource queues and memory accounting, in the schedule's order.
+# and the global deadlock detector -- on M4, FTS and mirrors, on M6's
+# resource queues and memory accounting, and on M7's tools -- a node
+# recovered elsewhere, and the standby coordinator promoted, removed, made
+# again and waited for -- in the schedule's order.
 #
 #   run   the test runs here, in both passes; cloudberry/ holds a difference
 #         reviewed and kept, where one pass has one.  A third word names the
@@ -23,7 +25,7 @@
 # M5 to M7, and are not listed.  Its FTS tests
 # are M4's, and are: the ones that run are in the groups mirrors1 to
 # mirrors3, whose clusters have a mirror for each segment -- three, so that
-# they run side by side.
+# they run side by side -- and M7's in mirrors4, whose standby they change.
 run  lockmodes                                     lockmodes
 run  select_dropped_table
 run  resource_queue_self_deadlock                  queues
@@ -63,12 +65,12 @@ skip fts_errors                                    Cloudberry's DNS cache of seg
 run  segwalrep/replication_keeps_crash             mirrors3
 run  segwalrep/commit_blocking                     mirrors1
 run  segwalrep/fts_unblock_primary                 mirrors1
-skip segwalrep/recoverseg_from_file                gprecoverseg -i, which moves a mirror to another data directory, where the cluster file the port reads as a server starts says where a node is
+run  segwalrep/recoverseg_from_file                mirrors4
 run  segwalrep/mirror_promotion                    mirrors1
 run  segwalrep/cancel_commit_pending_replication   mirrors3
 run  segwalrep/twophase_tolerance_with_mirror_promotion  mirrors1
-skip segwalrep/dtm_recovery_on_standby             the standby coordinator activated, which is M7's (gpactivatestandby)
-skip segwalrep/commit_blocking_on_standby          a standby coordinator whose commits wait for it, as gpinitstandby makes one, which is M7's; and Cloudberry's WAL sender, which lets commits go on while a standby catches up, where PostgreSQL's holds them
+run  segwalrep/dtm_recovery_on_standby             mirrors4
+run  segwalrep/commit_blocking_on_standby          mirrors4
 skip segwalrep/dtx_recovery_wait_lsn               gp_stat_progress_dtx_recovery, Cloudberry's view of its recovery process reading the coordinator's WAL for committed distributed transactions, and a fault that fails the coordinator with a PANIC (exec_simple_query_start), neither of which the port has
 skip segwalrep/select_throttle                     wait_for_replication_threshold, Cloudberry's throttling of a backend's WAL until the mirror has it, and gp_disable_tuple_hints, which PostgreSQL does not have
 run  segwalrep/startup_rename_prepared_xlog        mirrors2
