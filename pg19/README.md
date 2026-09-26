@@ -98,7 +98,9 @@ On a cluster (M2), `gp_core` and `gp_orca`:
 - the nodes, read from a file (`gp.cluster_config`); the dispatcher, an
   ordinary libpq client authenticated with SCRAM, whose statements run in the
   coordinator's transaction, savepoints included;
-- DDL on every node with the coordinator's OIDs (R1), distribution policies
+- DDL on every node with the coordinator's OIDs (R1), and a segment's own
+  catalog rows, its temporary namespaces, with OIDs from the top of the OID
+  space, which the coordinator's counter does not reach; distribution policies
   hashed by Cloudberry's cdbhash, ANALYZE sampling the segments (O3), CREATE
   TABLE AS and ALTER TABLE ... SET DISTRIBUTED BY;
 - DISTRIBUTED BY checked as Cloudberry checks it — its columns, a column's
@@ -127,7 +129,8 @@ On a cluster (M2), `gp_core` and `gp_orca`:
 - **every slice of a query at once**: the writer, the session's backend on a
   segment, runs one slice, and readers — more backends of the session there,
   reading as a part of the writer's transaction through the shared snapshot
-  (R2 and R4) — run the others, each sender streaming its rows to its
+  (R2 and R4), members of its lock group, which plan no parallel workers
+  whatever a function sets — run the others, each sender streaming its rows to its
   receivers over a Unix socket or a TCP port, or, with
   `gp.interconnect_type = udpifc`, in UDP packets each receiver acknowledges,
   with Cloudberry's flow control, retransmission and deadlock check, a row
@@ -223,7 +226,11 @@ transaction a failover catches as Cloudberry's does.  A segment's commit
 waits for its mirror whatever cancels it (R3).  A directory table's files
 are WAL-logged, through `gp_sql`'s own resource manager, `gp_dirtable`
 (ID 198), so that a mirror has them; a server that replays them has to
-preload `gp_sql`.  A segment's map of its distributed transactions is
+preload `gp_sql`.  A database copied (CREATE DATABASE ... TEMPLATE) or moved
+(ALTER DATABASE ... SET TABLESPACE) takes PAX's and the directory tables'
+directories with it, which PostgreSQL copies a database without: `gp_core`
+copies them, and logs each copy through its own resource manager (ID 197),
+so that a mirror or a standby copies its own.  A segment's map of its distributed transactions is
 logged, in `gp_internal.distributed_log`, so that it outlives a restart
 and a promotion, and a background worker of each segment's, a mirror's
 too, keeps the slot that holds back what those transactions deleted.  The
@@ -436,7 +443,9 @@ gpaddmirrors gives mirrors -- each tool checked by what the cluster says
 after it: a primary stopped, failed over from and recovered with pg_rewind
 and with pg_basebackup, a standby made and made the coordinator;
 `dump`, M7's, a cluster's pg_dumpall read back into another cluster, and
-one node's into another node; `postgis_cluster`, M7's, stock PostGIS on a
+one node's into another node; `dbcopy`, a database copied by either
+strategy and moved to another tablespace and back, with PAX tables and
+directory tables, on one node and a standby; `postgis_cluster`, M7's, stock PostGIS on a
 coordinator and three segments, its answers checked against one node's;
 `singlenode` and
 `singlenode_isolation2`, Cloudberry's single-node suites with PostgreSQL 19's
