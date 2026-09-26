@@ -3549,6 +3549,7 @@ typedef struct GpGatherSeg
 	PGresult   *batch;			/* the rows being handed out */
 	int			row;			/* the next of them */
 	PGresult   *arrived;		/* a batch read but not yet handed out */
+	bool		whole;			/* the last batch read was all that was asked */
 	bool		declared;		/* the cursor exists there */
 	bool		done;			/* the cursor has nothing more */
 } GpGatherSeg;
@@ -3946,11 +3947,17 @@ gather_poll(GpGatherSeg *s)
 		MemoryContextSwitchTo(oldcxt);
 		progress = true;
 
+		/*
+		 * A batch short of what was asked for is the cursor's last.  The end
+		 * of the statement can come in a later read than its rows, which by
+		 * then may be handed out and gone from "arrived": the batch's size is
+		 * taken as it arrives.
+		 */
 		if (res == NULL)
 		{
 			c->busy = false;
 			c->fetching = NULL;
-			if (s->arrived == NULL || PQntuples(s->arrived) < GATHER_FETCH_ROWS)
+			if (!s->whole)
 				s->done = true;
 			break;
 		}
@@ -3960,6 +3967,7 @@ gather_poll(GpGatherSeg *s)
 		{
 			Assert(s->arrived == NULL);
 			s->arrived = res;
+			s->whole = PQntuples(res) >= GATHER_FETCH_ROWS;
 			continue;
 		}
 		if (status == PGRES_COMMAND_OK)
@@ -4007,6 +4015,7 @@ gather_fetch(GpGatherSeg *s)
 	conn_send(s->conn, psprintf("FETCH %d FROM %s", GATHER_FETCH_ROWS,
 								s->gather->cursor));
 	s->conn->fetching = s;
+	s->whole = false;
 }
 
 /*

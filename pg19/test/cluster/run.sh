@@ -600,6 +600,31 @@ EOF
 	out=$(q 0 "SELECT count(*) FROM d WHERE a < 10 AND b <> now()::text;")
 	[ "$out" = "9" ] && ok "and the answer is the same ($out)" || notok "a sent condition's answer" "$out"
 
+	# A segment's rows come a thousand at a time, through the gather's
+	# cursor, and the end of a batch's statement can come in a later read
+	# than its rows: the segment was then taken to have no more, its first
+	# thousand handed out (gp_dispatch.c, gather_poll()).  A race of
+	# microseconds, where the segment's send buffer fills as the first
+	# batch's statement ends and the end goes in a send of its own -- which
+	# rows as greenplum_schedule's rle has them, (c1 int, c2 char(30)), make
+	# it do: some four of 3,200 such gathers, in eight sessions side by
+	# side, lost every row past the thousandth.
+	q 0 "CREATE TABLE gat (c1 int, c2 char(30)) DISTRIBUTED BY (c1); INSERT INTO gat SELECT 1, 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaa' FROM generate_series(1, 10000);" >/dev/null
+	for gi in $(seq 400); do
+		printf 'SELECT * FROM gat \\g /dev/null\n\\echo :ROW_COUNT\n'
+	done > "$ROOT/gat.sql"
+	pids=()
+	for gs in 1 2 3 4 5 6 7 8; do
+		"$PSQL" -X -q -h "$(sockdir 0)" -p "$(port 0)" -d postgres -f "$ROOT/gat.sql" \
+			> "$ROOT/gat$gs" 2>&1 &
+		pids+=($!)
+	done
+	wait "${pids[@]}"
+	out=$(cat "$ROOT"/gat[1-8] | sort | uniq -c | sed 's/^ *//' | tr '\n' ' ')
+	[ "$out" = "3200 10000 " ] && ok "a segment's 10000 rows, in each of 3200 gathers, eight sessions side by side" \
+		|| notok "a gather's rows past a segment's first thousand" "$out"
+	q 0 "DROP TABLE gat;" >/dev/null
+
 	# The rows' system columns, as the segment that holds each has them, and
 	# Cloudberry's word for a ctid read without its gp_segment_id.
 	out=$(q 0 "SELECT count(*) FROM d WHERE gp_segment_id = 0 AND ctid = '(0,1)';")
