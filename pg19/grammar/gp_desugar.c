@@ -3933,6 +3933,63 @@ rw_role_profile(GpRewrite *rw)
 }
 
 /*
+ * CREATE ROLE ... PROFILE p, ACCOUNT LOCK or ACCOUNT UNLOCK, and CREATE USER
+ * and GROUP alike, among the statement's other options
+ *	 -> the statement, carrying gp.profile = 'p', gp.account = 'lock' or
+ *		'unlock', as ALTER USER's forms carry them (rw_role_profile)
+ *
+ * gp_security's hook takes them out and does them once the role is made.
+ * A PROFILE or ACCOUNT that is a role's name in a list -- IN ROLE a,
+ * profile -- is not one of these.  ENABLE PROFILE and DISABLE PROFILE,
+ * Cloudberry's switch of a role's profile on and off, are not taken: the
+ * port's profiles apply to every role that has one.
+ */
+static bool
+rw_create_role_profile(GpRewrite *rw)
+{
+	const GpTokens *ts = rw->ts;
+	int			i = rw->first;
+	bool		did = false;
+
+	if (!tok_is(ts, i, "create") ||
+		!(tok_is(ts, i + 1, "role") || tok_is(ts, i + 1, "user") ||
+		  tok_is(ts, i + 1, "group")) ||
+		!tok_is_name(ts, i + 2))
+		return false;
+
+	for (int j = i + 3; j + 1 < rw->last; j++)
+	{
+		const char *value;
+		const char *name;
+
+		/* a role's name in a list of them, not the role's own name */
+		if (j - 1 > i + 2 &&
+			(tok_is(ts, j - 1, "role") || tok_is(ts, j - 1, "group") ||
+			 tok_is(ts, j - 1, "admin") || tok_is(ts, j - 1, "user") ||
+			 tok_is_char(ts, j - 1, ',')))
+			continue;
+		if (tok_is(ts, j, "profile") && tok_is_name(ts, j + 1))
+		{
+			name = "profile";
+			value = tok_name(ts, j + 1);
+		}
+		else if (tok_is(ts, j, "account") &&
+				 (tok_is(ts, j + 1, "lock") || tok_is(ts, j + 1, "unlock")))
+		{
+			name = "account";
+			value = tok_is(ts, j + 1, "lock") ? "lock" : "unlock";
+		}
+		else
+			continue;
+		rw_add_carrier(rw, "gp", name, value, ts->toks[j].off);
+		rw_edit(rw, ts->toks[j].off, tok_stop(ts, j + 1), "");
+		j++;
+		did = true;
+	}
+	return did;
+}
+
+/*
  * CREATE ROLE ... [NO]CREATEEXTTABLE [(type = '...', protocol = '...')]
  * ALTER ROLE ... [NO]CREATEEXTTABLE [(...)], and USER and GROUP alike
  *	 -> the statement, carrying gp_exttable.exttabauth or exttabnoauth
@@ -5696,6 +5753,9 @@ rw_statement_itself(GpRewrite *rw)
 	/* ALTER USER ... PROFILE and the rest: ALTER USER, carrying it. */
 	if (rw_role_profile(rw))
 		return;
+
+	/* and CREATE USER's, among its other options */
+	(void) rw_create_role_profile(rw);
 
 	/* [NO]CREATEEXTTABLE, carried the same way */
 	(void) rw_role_exttable(rw);

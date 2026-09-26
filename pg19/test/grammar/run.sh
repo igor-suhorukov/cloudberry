@@ -707,6 +707,20 @@ is "ALTER USER ... NOPROFILE, on its own" \
    "ALTER USER carol NOPROFILE;" ""
 is "takes the profile away" \
    "SELECT gp_security.role_profile('carol') IS NULL;" "t"
+isl "CREATE USER ... PROFILE, among its other options" \
+   "CREATE USER dave LOGIN PASSWORD 'dave-pass' PROFILE strict CONNECTION LIMIT 3;
+    SELECT gp_security.role_profile('dave') || ' ' || rolconnlimit FROM pg_roles WHERE rolname = 'dave';" "strict 3"
+isl "CREATE ROLE ... ACCOUNT LOCK PROFILE" \
+   "CREATE ROLE erin LOGIN ACCOUNT LOCK PROFILE strict;
+    SELECT gp_security.role_profile('erin') || ' '
+           || (gp_security.role_locked_until('erin') = 'infinity'::timestamptz);" "strict true"
+refused "CREATE USER ... with a profile that is not one makes no role" \
+        "CREATE USER frank PROFILE nope;" 'profile "nope" does not exist'
+is "and there is no frank" "SELECT count(*) FROM pg_roles WHERE rolname = 'frank';" "0"
+isl "a role called profile, in CREATE ROLE's list of roles, is a role" \
+   "CREATE ROLE profile; CREATE ROLE grace IN ROLE profile;
+    SELECT count(*) FROM pg_auth_members WHERE roleid = 'profile'::regrole AND member = 'grace'::regrole;" "1"
+q "DROP ROLE dave, erin, grace, profile;" > /dev/null
 isl "DROP PROFILE" \
    "DROP PROFILE strict;
     SELECT count(*) FROM gp_security.profiles WHERE profile = 'strict';" "0"
