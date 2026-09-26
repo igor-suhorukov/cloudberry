@@ -171,6 +171,7 @@
 #include "utils/xid8.h"
 
 #include "gp_cluster.h"
+#include "gp_core_api.h"
 #include "gp_dispatch.h"
 #include "gp_dtx.h"
 #include "gp_fault.h"
@@ -1922,6 +1923,28 @@ dtx_ProcessUtility(PlannedStmt *pstmt, const char *queryString,
 	{
 		note_transaction();
 		GpGddNoteBackend();
+	}
+
+	/*
+	 * A session's own PREPARE TRANSACTION, on a node of a cluster: Cloudberry
+	 * prepares only its distributed transactions' parts, and refuses the
+	 * user's -- on the coordinator, and in a session of a node's own, which
+	 * is Cloudberry's utility mode (its utility.c and postgres.c).  A gid of
+	 * the distributed kind says it is reserved first, as before.
+	 */
+	if (IsA(parsetree, TransactionStmt) &&
+		((TransactionStmt *) parsetree)->kind == TRANS_STMT_PREPARE &&
+		!GpClusterIsDispatched())
+	{
+		const char *gid = ((TransactionStmt *) parsetree)->gid;
+
+		if (GpDtxParseGid(gid, &gxid))
+			dtx_check_gid_reserved(gid);
+		ereport(ERROR,
+				(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+				 GpClusterBackendRole() == GP_ROLE_DISPATCH ?
+				 errmsg("PREPARE TRANSACTION is not yet supported in Apache Cloudberry") :
+				 errmsg("PREPARE TRANSACTION is not supported in utility mode")));
 	}
 
 	if (IsA(parsetree, TransactionStmt))
