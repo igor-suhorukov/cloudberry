@@ -45,7 +45,10 @@ REVOKE ALL ON gp_security.password_history FROM PUBLIC;
 /*
  * The limits, as Cloudberry's grammar names them.  NULL means "say nothing
  * about this", which leaves it to the default profile; -2 is UNLIMITED, as in
- * Cloudberry.
+ * Cloudberry.  The role that holds the profile is made quietly: what
+ * CREATE ROLE says of a role -- gp_resource's queue and group it gives one
+ * without being asked -- is not said of a profile, which Cloudberry's
+ * CREATE PROFILE makes no role for.
  */
 CREATE PROCEDURE gp_security.create_profile(profile name,
 										   failed_login_attempts int DEFAULT NULL,
@@ -57,6 +60,7 @@ CREATE PROCEDURE gp_security.create_profile(profile name,
 										   password_allow_hashed boolean DEFAULT NULL,
 										   password_verify_function text DEFAULT NULL)
 LANGUAGE plpgsql
+SET client_min_messages = warning
 AS $$
 DECLARE
 	settings jsonb;

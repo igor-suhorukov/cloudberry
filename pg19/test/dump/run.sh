@@ -302,6 +302,11 @@ case "$out" in
 	*ERROR*) notok "every object is made" "$out" ;;
 	*) ok "every object is made: tables of each policy, partitions, AO, PAX, external tables, materialized views, a task, tags, a directory table, profiles, queues and groups" ;;
 esac
+# the role that holds a profile is made quietly: Cloudberry's CREATE PROFILE
+# makes none, and says nothing of a queue or a group
+out=$(q a src "CREATE PROFILE quiet LIMIT FAILED_LOGIN_ATTEMPTS 2; SELECT 'made'")
+[ "$out" = made ] && ok "CREATE PROFILE says nothing of the queue its role would get" \
+	|| notok "CREATE PROFILE's messages" "$out"
 
 ###############################################################################
 echo "2. pg_dumpall writes it"
