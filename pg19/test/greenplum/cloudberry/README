@@ -232,16 +232,22 @@ qp_functions (planner, orca)  PostgreSQL 19's words for a call no function
   alter_distribution_policy leaves behind, which runs earlier.
 
 resource_queue  SHOW resource_scheduler, whose header is the port's name
-  of it, gp.resource_scheduler, three letters wider.  gp_inject_fault(),
-  which the port's gp_core lets only a superuser call, and the test calls as
-  a role that is not one: so its fault res_increment_add_oosm is not set,
-  and the SELECT that was to fail "out of shared memory adding portal
-  increments" answers -- which it does, fault set, as a superuser sets it.
-  And the NOTICE of the SPI memory reservation of the Result node that
-  calls pg_sleep() in the extended-protocol client's query: Cloudberry
-  reserves an operator's share of the statement's memory for the queries it
-  runs through SPI, and the port's statement runs with its budget as its
-  work_mem, and gives no operator a share of its own.
+  of it, gp.resource_scheduler, three letters wider.  And the NOTICE of the
+  SPI memory reservation of the Result node that calls pg_sleep() in the
+  extended-protocol client's query: Cloudberry reserves an operator's share
+  of the statement's memory for the queries it runs through SPI, and the
+  port's statement runs with its budget as its work_mem, and gives no
+  operator a share of its own.
+
+statement_mem_for_windowagg  AVG(DISTINCT x) OVER (...), which PostgreSQL
+  19 refuses: "DISTINCT is not implemented for window functions".
+  Cloudberry's WindowAgg sorts each partition's values for DISTINCT, in a
+  sort its statement_mem sizes, which the test's second half measures, and
+  NOTICEs from its fault distinct_winagg_perform_sort; PostgreSQL 19 has
+  no such sort to size.  The first half is Cloudberry's: a window's
+  tuplestore in the memory statement_mem gives the statement, as its
+  work_mem, in memory at 4 MB and spilled at 1 MB, whose plans the suite
+  does not compare.
 
 returning_gp, triggers_gp, update_gp  what Cloudberry refuses on an
   append-optimized table, or on a table another inherits from, and the port

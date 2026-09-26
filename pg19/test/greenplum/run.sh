@@ -86,12 +86,14 @@ cleanup() {
 }
 trap cleanup EXIT
 
-run_tests=$(awk '$1 == "run" { print $2 }' "$HERE/manifest")
+# Cloudberry's tests, and the port's (port:name) among them where the
+# manifest puts them
+run_tests=$(awk '$1 == "run" { print $2 } $1 == "port" { print "port:" $2 }' "$HERE/manifest")
 
 echo "greenplum: part of Cloudberry's greenplum_schedule, on a coordinator and three segments"
 printf '  of the %d tests of the schedule the manifest lists: %d run here, %d are skipped\n' \
 	"$(awk '$1 == "run" || $1 == "skip"' "$HERE/manifest" | wc -l)" \
-	"$(echo "$run_tests" | wc -w)" \
+	"$(awk '$1 == "run"' "$HERE/manifest" | wc -l)" \
 	"$(awk '$1 == "skip"' "$HERE/manifest" | wc -l)"
 echo
 
@@ -160,6 +162,10 @@ done > "$WORK/respell.sed"
 # directory, ./extended_protocol_resqueue, is the one the port builds and
 # installs (meson's hook_tests), run from PATH as the diff is.
 echo 's#^[\\]! \./(extended_protocol_resqueue) #\\! \1 #' >> "$WORK/respell.sed"
+# So is bb_memory_quota's script, $PG_ABS_BUILDDIR/mem_quota_util.py, from
+# PATH (below); it runs its queries in the database it is named, which is
+# regression here.
+echo 's#^[\\]! \$PG_ABS_BUILDDIR/(mem_quota_util\.py) (.*)--dbname=regress #\\! \1 \2--dbname=regression #' >> "$WORK/respell.sed"
 
 convert() {
 	sed -e "s#@abs_srcdir@#$CB#g" \
@@ -198,6 +204,12 @@ amsub() {
 	fi
 }
 for t in $run_tests; do
+	case "$t" in
+		port:*)
+			echo "test: ${t#port:}" >> "$SN/schedule"
+			echo "${t#port:}" >> "$SN/port_tests"
+			continue ;;
+	esac
 	f=$(echo "$t" | tr / _)
 	src=$t am=
 	for v in row:ao_row:aoseg column:ao_column:aocsseg; do
@@ -245,6 +257,18 @@ PGOPTIONS="\${PGOPTIONS:-} -c gp.log_resqueue_memory=on" exec "$BINDIR/extended_
 EOF
 	chmod +x "$EXEC/bin/extended_protocol_resqueue"
 fi
+# Cloudberry's mem_quota_util.py, which runs a query in many sessions at once
+# through psql, as its resource queue lets them: it imports two modules of
+# gppylib, Cloudberry's management utilities, that it does not use, which a
+# package of that name, empty, stands for.
+mkdir -p "$WORK/pylib/gppylib/commands"
+touch "$WORK/pylib/gppylib/__init__.py" "$WORK/pylib/gppylib/gplog.py" \
+	"$WORK/pylib/gppylib/commands/__init__.py" "$WORK/pylib/gppylib/commands/unix.py"
+cat > "$EXEC/bin/mem_quota_util.py" <<EOF
+#!/bin/bash
+PYTHONPATH="$WORK/pylib\${PYTHONPATH:+:\$PYTHONPATH}" exec python3 "$CB/mem_quota_util.py" "\$@"
+EOF
+chmod +x "$EXEC/bin/mem_quota_util.py"
 cat > "$EXEC/bin/diff" <<EOF
 #!/bin/bash
 n=\$#

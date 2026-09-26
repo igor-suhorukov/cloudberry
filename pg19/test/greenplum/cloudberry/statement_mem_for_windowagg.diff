@@ -1,0 +1,26 @@
+@@
+-NOTICE:  distinct winagg sortstats: sort operation fitted in memory
+-QUERY PLAN
+-___________
+-
++ERROR:  DISTINCT is not implemented for window functions
++LINE 1: EXPLAIN ANALYZE SELECT AVG(DISTINCT x) OVER (PARTITION BY y)...
++                               ^
+@@
+- Success:
+- Success:
+- Success:
+-(3 rows)
+@@
+-NOTICE:  distinct winagg sortstats: sort operation spilled to disk
+-QUERY PLAN
+-___________
+-
++ERROR:  DISTINCT is not implemented for window functions
++LINE 1: EXPLAIN ANALYZE SELECT AVG(DISTINCT x) OVER (PARTITION BY y)...
++                               ^
+@@
+- Success:
+- Success:
+- Success:
+-(3 rows)

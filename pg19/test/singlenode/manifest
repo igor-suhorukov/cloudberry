@@ -266,8 +266,8 @@ run  brin_ao                                              cb2
 run  brin_aocs                                            cb2
 run  aoco_privileges                                      cb2
 run  aocs                                                 cb2
-skip resource_queue  resource queues, M6
-skip resource_queue_function  resource queues, M6
+run  resource_queue
+run  resource_queue_function
 run  bfv_dd                                               cb2
 run  bfv_dd_multicolumn                                   cb2
 run  bfv_dd_types                                         cb2

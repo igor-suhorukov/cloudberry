@@ -184,6 +184,8 @@ partition_unlogged  an unlogged partitioned table, which PostgreSQL 19 has
 qp_query_execution (orca)  qx_count_operator() of its hash joins and nested
   loops, which ORCA plans otherwise, counted by the planner's name for each
   (see above).
+resource_queue  SHOW resource_scheduler, whose header is the port's name
+  of it, gp.resource_scheduler.
 returning_gp  DELETE ... RETURNING of an append-optimized table.
 singlenode_compatibility_cbdb  the warning Cloudberry's single-node mode
   gives for DISTRIBUTED BY (the port records the policy, for ORCA and M2),

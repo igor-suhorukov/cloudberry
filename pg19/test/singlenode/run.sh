@@ -138,8 +138,10 @@ echo
 	echo "port = $PORT"
 	echo "fsync = off"
 	# Every module there is to load here, in the order cloudberry.md gives:
-	# M1's, and gp_ao and gp_exttable, M5's.
-	echo "shared_preload_libraries = 'gp_core,gp_orca,gp_task,gp_matview,gp_sql,gp_security,gp_ao,gp_exttable'"
+	# M1's, gp_ao and gp_exttable, M5's, and gp_resource, M6's.
+	echo "shared_preload_libraries = 'gp_core,gp_orca,gp_task,gp_matview,gp_sql,gp_security,gp_ao,gp_exttable,gp_resource'"
+	# the settings of Cloudberry's half alone (cloudberry_half below)
+	echo "include_if_exists = 'cloudberry_half.conf'"
 	# What pg_regress's own temporary instance sets that a test depends on.
 	echo "max_prepared_transactions = 2"
 } >> "$WORK/data/postgresql.conf"
@@ -190,8 +192,16 @@ cp -r "$PGSUITE" "$SN"
 # its output says @abs_srcdir@/regress.so.  Here both are the one directory
 # regress.so is in, but for a data file, which is Cloudberry's suite's own:
 # uao_dml_select's COPY FROM @abs_srcdir@/data/city.data.
+#
+# One function of Cloudberry's regress.so is the port's cb_regress's,
+# checkResourceQueueMemoryLimits(), which resource_queue_function loads from
+# it: this suite's regress.so is PostgreSQL's, whose functions other tests
+# need, so the one is loaded from cb_regress (the greenplum suite links its
+# regress.so to cb_regress, having none of PostgreSQL's to keep).
 convert() {
-	sed -e "s#@abs_srcdir@/data/#$CB/data/#g" \
+	sed -e "s#'@abs_builddir@/regress@DLSUFFIX@', 'checkResourceQueueMemoryLimits'#'\$libdir/cb_regress', 'checkResourceQueueMemoryLimits'#g" \
+	    -e "s#'@abs_srcdir@/regress.so', 'checkResourceQueueMemoryLimits'#'\$libdir/cb_regress', 'checkResourceQueueMemoryLimits'#g" \
+	    -e "s#@abs_srcdir@/data/#$CB/data/#g" \
 	    -e "s#@abs_srcdir@#$PGSUITE#g" \
 	    -e "s#@abs_builddir@#$PGSUITE#g" \
 	    -e "s#@testtablespace@#$WORK/testtablespace#g" \
@@ -415,9 +425,31 @@ regress() {
 		> "$out/pg_regress.out" 2>&1 )
 }
 
+# What Cloudberry's half runs with and PostgreSQL's does not: Cloudberry's
+# memory policy, as its postgresql.conf.sample sets it, under which a
+# statement's memory is its resource queue's to give -- gp_resource's
+# budget, which a query runs with as its work_mem, where PostgreSQL's tests
+# set work_mem themselves and read it back.  The file postgresql.conf
+# includes: written as the server stops to be copied for Cloudberry's half,
+# and emptied, and the server told, before PostgreSQL's half of each pass.
+cloudberry_half() {
+	if [ "$1" = on ]; then
+		echo "gp.resqueue_memory_policy = 'eager_free'" > "$WORK/data/cloudberry_half.conf"
+	else
+		: > "$WORK/data/cloudberry_half.conf"
+		"$BINDIR/pg_ctl" -D "$WORK/data" reload > /dev/null 2>&1
+		for _ in $(seq 1 50); do
+			[ "$("$PSQL" -X -q -t -A -h "$SOCK" -p "$PORT" -d postgres \
+				  -c "SHOW gp.resqueue_memory_policy" 2> /dev/null)" = none ] && break
+			sleep 0.1
+		done
+	fi
+}
+
 failed=0
 for pass in ${PASSES:-planner orca}; do
 	echo "== pass: $pass"
+	cloudberry_half off
 	mkdir -p "$WORK/$pass/canon"
 	case "$pass" in
 		planner) optimizer=off ;;
@@ -441,6 +473,7 @@ for pass in ${PASSES:-planner orca}; do
 		echo "  the server has a tablespace outside its data directory, which its copies would share"
 		exit 1
 	fi
+	cloudberry_half on
 	copies=()
 	for i in $(seq 1 $((${#groups[@]} - 1))); do
 		copy_data "$i" &

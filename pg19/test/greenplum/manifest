@@ -9,6 +9,8 @@
 #         reviewed and kept, where one pass has one
 #   skip  it needs what the port does not have yet: the rest of the line is
 #         the first of Cloudberry's statements it refuses, as the port says
+#   port  a test of the port's own, sql/ and expected/ here, run where the
+#         line is: what a skipped test would have left for the tests after it
 #
 # The schedule's other tests -- fault injection, FTS, the interconnect's
 # settings -- need M7, and are not listed.
@@ -41,7 +43,7 @@ run  sublink
 run  olap_setup
 skip complex  type "complex" does not exist; relation "complex_ttbl" does not exist
 skip distributed_transactions  unrecognized configuration parameter "debug_abort_after_distributed_prepared"; unrecognized configuration parameter "debug_dtm_action_segment"
-skip statement_mem_for_windowagg  function gp_inject_fault(unknown, unknown, smallint) does not exist; DISTINCT is not implemented for window functions
+run  statement_mem_for_windowagg
 skip namespace_gp  differs: its comparison of pg_namespace across the nodes finds the pg_temp_N schemas the tests before it leave, which each node makes with an OID of its own
 run  bitmap_index
 run  truncate_gp
@@ -107,8 +109,10 @@ run  bfv_dd_types
 skip bfv_olap  cannot copy window "w" because it has a frame clause
 skip bfv_aggregate  argument of ROWS must not contain variables; cannot copy window "w" because it has a frame clause
 run  DML_over_joins
+skip bb_mpph  its query 3 over append-optimized partitions runs past the suite's minute, and gp_enable_sort_limit is none of the port's settings
 run  part_external_table
-skip bb_memory_quota  memory quota (M6)
+port bb_mpph_heap
+run  bb_memory_quota
 run  rpt
 run  rpt_joins
 skip bfv_cte  count(*) must be used to call a parameterless aggregate function; type "cte" does not exist
