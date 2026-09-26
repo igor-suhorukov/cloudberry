@@ -124,6 +124,18 @@ extern RangeTblEntry *gp_orca_partition_rte(const RangeTblEntry *root,
  */
 extern List *gp_orca_partition_colnos(Oid root_relid, Oid part_relid,
 									  List *colnos);
+
+/*
+ * The steps that prune a scan of partitioned table `root_relid`, at
+ * `root_rti`, by what its conditions `quals` compare the partition key with
+ * where that is known only as the plan runs -- a statement's parameter, a
+ * nested loop's outer row -- as the planner's run-time pruning takes them;
+ * NIL where there are none.  The Dynamic Scan evaluates them each time it
+ * chooses its partitions.  An index-only scan's conditions are over the
+ * index's columns, which its `indextlist` names; NIL for any other scan.
+ */
+extern List *gp_orca_param_prune_steps(Oid root_relid, Index root_rti,
+									   List *quals, List *indextlist);
 extern List *gp_orca_partition_exprs(List *exprs, Index root_rti,
 									 Oid root_relid, Index part_rti,
 									 Oid part_relid);

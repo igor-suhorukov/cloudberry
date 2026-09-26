@@ -48,7 +48,10 @@
 #include "postgres.h"
 
 #include "access/attmap.h"
+#include "access/hash.h"
 #include "access/htup_details.h"
+#include "access/nbtree.h"
+#include "access/stratnum.h"
 #include "access/table.h"
 #include "access/transam.h"
 #include "catalog/partition.h"
@@ -61,6 +64,7 @@
 #include "miscadmin.h"
 #include "nodes/makefuncs.h"
 #include "nodes/nodeFuncs.h"
+#include "optimizer/optimizer.h"
 #include "parser/parsetree.h"
 #include "partitioning/partdesc.h"
 #include "partitioning/partprune.h"
@@ -335,6 +339,155 @@ gp_orca_partition_exprs(List *exprs, Index root_rti, Oid root_relid,
 	return exprs;
 }
 
+/*
+ * Is `node` the partition key, column `attno` of the table at `rti`?  Or,
+ * in an index-only scan's conditions, the index column that is it, by the
+ * scan's `indextlist`.
+ */
+static bool
+is_key_column(Node *node, Index rti, AttrNumber attno, List *indextlist)
+{
+	while (node != NULL && IsA(node, RelabelType))
+		node = (Node *) ((RelabelType *) node)->arg;
+	if (node != NULL && IsA(node, Var) && ((Var *) node)->varno == INDEX_VAR &&
+		((Var *) node)->varattno >= 1 &&
+		((Var *) node)->varattno <= list_length(indextlist))
+		node = (Node *) list_nth_node(TargetEntry, indextlist,
+									  ((Var *) node)->varattno - 1)->expr;
+	return node != NULL && IsA(node, Var) &&
+		((Var *) node)->varno == rti && ((Var *) node)->varattno == attno &&
+		((Var *) node)->varlevelsup == 0;
+}
+
+static bool
+contains_param_walker(Node *node, void *context)
+{
+	if (node == NULL)
+		return false;
+	if (IsA(node, Param))
+		return true;
+	return expression_tree_walker(node, contains_param_walker, context);
+}
+
+/*
+ * As partprune.c's match_clause_to_partition_key() and
+ * gen_prune_steps_from_opexps() take a condition, for the one-column keys
+ * ORCA plans: key op value, or value op key with the operator commuted,
+ * whose operator is in the key's operator family -- only its equality for a
+ * hash-partitioned table -- and compares under the key's collation, and
+ * whose value reads no column of the table, calls nothing volatile, and
+ * reads a parameter, since ORCA has pruned by constants already.  The
+ * comparison function is the key's own, or for a value of another type the
+ * operator family's cross-type one.
+ */
+List *
+gp_orca_param_prune_steps(Oid root_relid, Index root_rti, List *quals,
+						  List *indextlist)
+{
+	Relation	rel = table_open(root_relid, NoLock);
+	PartitionKey key = RelationGetPartitionKey(rel);
+	List	   *steps = NIL;
+	List	   *stepids = NIL;
+	int			step_id = 0;
+	ListCell   *lc;
+
+	if (key == NULL || key->partnatts != 1 || key->partattrs[0] == 0)
+	{
+		table_close(rel, NoLock);
+		return NIL;
+	}
+
+	/* each conjunct, of an AND ORCA's filter makes of them too */
+	quals = make_ands_implicit(make_ands_explicit(quals));
+	for (int i = 0; i < list_length(quals); i++)
+	{
+		Node	   *qual = (Node *) list_nth(quals, i);
+
+		if (is_andclause(qual))
+			quals = list_concat(quals, ((BoolExpr *) qual)->args);
+	}
+
+	foreach(lc, quals)
+	{
+		Node	   *qual = (Node *) lfirst(lc);
+		OpExpr	   *op;
+		Oid			opno;
+		Node	   *value;
+		int			strategy;
+		Oid			lefttype;
+		Oid			righttype;
+		Oid			cmpfn;
+		PartitionPruneStepOp *step;
+
+		if (!IsA(qual, OpExpr) || list_length(((OpExpr *) qual)->args) != 2)
+			continue;
+		op = (OpExpr *) qual;
+		opno = op->opno;
+		if (is_key_column(linitial(op->args), root_rti, key->partattrs[0],
+						  indextlist))
+			value = lsecond(op->args);
+		else if (is_key_column(lsecond(op->args), root_rti, key->partattrs[0],
+							   indextlist))
+		{
+			value = linitial(op->args);
+			opno = get_commutator(opno);
+			if (!OidIsValid(opno))
+				continue;
+		}
+		else
+			continue;
+
+		if (contain_var_clause(value) || contain_volatile_functions(value) ||
+			!contains_param_walker(value, NULL))
+			continue;
+		if (OidIsValid(key->partcollation[0]) &&
+			op->inputcollid != key->partcollation[0])
+			continue;
+		if (!op_in_opfamily(opno, key->partopfamily[0]))
+			continue;
+		get_op_opfamily_properties(opno, key->partopfamily[0], false,
+								   &strategy, &lefttype, &righttype);
+		if (key->strategy == PARTITION_STRATEGY_HASH &&
+			strategy != HTEqualStrategyNumber)
+			continue;
+
+		if (righttype == key->partopcintype[0])
+			cmpfn = key->partsupfunc[0].fn_oid;
+		else if (key->strategy == PARTITION_STRATEGY_HASH)
+			cmpfn = get_opfamily_proc(key->partopfamily[0], righttype,
+									  righttype, HASHEXTENDED_PROC);
+		else
+			cmpfn = get_opfamily_proc(key->partopfamily[0],
+									  key->partopcintype[0], righttype,
+									  BTORDER_PROC);
+		if (!OidIsValid(cmpfn))
+			continue;
+
+		step = makeNode(PartitionPruneStepOp);
+		step->step.step_id = step_id++;
+		step->opstrategy = strategy;
+		step->exprs = list_make1(copyObject(value));
+		step->cmpfns = list_make1_oid(cmpfn);
+		step->nullkeys = NULL;
+		steps = lappend(steps, step);
+		stepids = lappend_int(stepids, step->step.step_id);
+	}
+
+	/* each condition holds, so the partitions are those all of them allow */
+	if (list_length(steps) > 1)
+	{
+		PartitionPruneStepCombine *combine = makeNode(PartitionPruneStepCombine);
+
+		combine->step.step_id = step_id++;
+		combine->combineOp = PARTPRUNE_COMBINE_INTERSECT;
+		combine->source_stepids = stepids;
+		steps = lappend(steps, combine);
+	}
+
+	table_close(rel, NoLock);
+	return steps;
+}
+
 static Node *
 index_var_mutator(Node *node, List *indextlist)
 {
@@ -428,7 +581,16 @@ typedef struct DynamicScanState
 	Bitmapset  *valid;			/* the children to run */
 	int			current;		/* the child being run, or -1 */
 	int			nscanned;		/* children run, for EXPLAIN ANALYZE */
+
+	/* its own conditions' pruning, by parameters: gp_orca_param_prune_steps() */
+	List	   *prune_steps;
+	PartitionPruneContext prune_context;
 } DynamicScanState;
+
+static void init_prune_context(PartitionPruneContext *context,
+							   PlanState *planstate, List *steps,
+							   PartitionDesc partdesc, PartitionKey partkey);
+static Index dynamic_scan_table(CustomScan *cscan);
 
 static Node *create_dynamic_scan_state(CustomScan *cscan);
 static void begin_dynamic_scan(CustomScanState *node, EState *estate,
@@ -473,7 +635,7 @@ begin_dynamic_scan(CustomScanState *node, EState *estate, int eflags)
 	ListCell   *lc;
 	int			i = 0;
 
-	Assert(list_length(cscan->custom_private) == 4);
+	Assert(list_length(cscan->custom_private) == 5);
 	Assert(list_length(part_index) == list_length(cscan->custom_plans));
 
 	state->nchildren = list_length(cscan->custom_plans);
@@ -491,6 +653,28 @@ begin_dynamic_scan(CustomScanState *node, EState *estate, int eflags)
 	}
 
 	/*
+	 * Pruning by its own conditions' parameters, with the table's partition
+	 * descriptor as the executor has it, the table locked by the plan's
+	 * range table.
+	 */
+	state->prune_steps = (List *) list_nth(cscan->custom_private, 4);
+	if (state->prune_steps != NIL)
+	{
+		Relation	rel = table_open(exec_rt_fetch(dynamic_scan_table(cscan),
+												   estate)->relid, NoLock);
+
+		if (estate->es_partition_directory == NULL)
+			estate->es_partition_directory =
+				CreatePartitionDirectory(estate->es_query_cxt, false);
+		init_prune_context(&state->prune_context, &node->ss.ps,
+						   state->prune_steps,
+						   PartitionDirectoryLookup(estate->es_partition_directory,
+													rel),
+						   RelationGetPartitionKey(rel));
+		table_close(rel, NoLock);
+	}
+
+	/*
 	 * The rows are the children's, in whatever slots they come in, as an
 	 * Append's are.
 	 */
@@ -500,7 +684,8 @@ begin_dynamic_scan(CustomScanState *node, EState *estate, int eflags)
 
 /*
  * The children to run: all of them, less those whose partition a Partition
- * Selector that has finished did not choose.
+ * Selector that has finished did not choose, and those the scan's own
+ * conditions rule out by the values their parameters have now.
  */
 static Bitmapset *
 choose_children(DynamicScanState *state)
@@ -511,6 +696,24 @@ choose_children(DynamicScanState *state)
 
 	for (int i = 0; i < state->nchildren; i++)
 		valid = bms_add_member(valid, i);
+
+	if (state->prune_steps != NIL)
+	{
+		ExprContext *econtext = state->css.ss.ps.ps_ExprContext;
+		MemoryContext oldcontext;
+		Bitmapset  *matched;
+
+		ResetExprContext(econtext);
+		oldcontext = MemoryContextSwitchTo(econtext->ecxt_per_tuple_memory);
+		matched = get_matching_partitions(&state->prune_context,
+										  state->prune_steps);
+		MemoryContextSwitchTo(oldcontext);
+		for (int i = 0; i < state->nchildren; i++)
+		{
+			if (!bms_is_member(state->part_index[i], matched))
+				valid = bms_del_member(valid, i);
+		}
+	}
 
 	foreach(lc, state->paramids)
 	{
@@ -796,11 +999,10 @@ create_partition_selector_state(CustomScan *cscan)
  * handed reads the row.
  */
 static void
-init_prune_context(PartitionSelectorState *state, PartitionDesc partdesc,
-				   PartitionKey partkey)
+init_prune_context(PartitionPruneContext *context, PlanState *planstate,
+				   List *steps, PartitionDesc partdesc, PartitionKey partkey)
 {
-	PartitionPruneContext *context = &state->context;
-	int			n_steps = list_length(state->steps);
+	int			n_steps = list_length(steps);
 	int			partnatts = partkey->partnatts;
 	ListCell   *lc;
 
@@ -812,11 +1014,11 @@ init_prune_context(PartitionSelectorState *state, PartitionDesc partdesc,
 	context->partsupfunc = partkey->partsupfunc;
 	context->stepcmpfuncs = palloc0_array(FmgrInfo, n_steps * partnatts);
 	context->ppccontext = CurrentMemoryContext;
-	context->planstate = &state->css.ss.ps;
-	context->exprcontext = state->css.ss.ps.ps_ExprContext;
+	context->planstate = planstate;
+	context->exprcontext = planstate->ps_ExprContext;
 	context->exprstates = palloc0_array(ExprState *, n_steps * partnatts);
 
-	foreach(lc, state->steps)
+	foreach(lc, steps)
 	{
 		PartitionPruneStepOp *step = (PartitionPruneStepOp *) lfirst(lc);
 		ListCell   *lc2;
@@ -865,7 +1067,8 @@ begin_partition_selector(CustomScanState *node, EState *estate, int eflags)
 			CreatePartitionDirectory(estate->es_query_cxt, false);
 	partdesc = PartitionDirectoryLookup(estate->es_partition_directory,
 										state->rel);
-	init_prune_context(state, partdesc, RelationGetPartitionKey(state->rel));
+	init_prune_context(&state->context, &state->css.ss.ps, state->steps,
+					   partdesc, RelationGetPartitionKey(state->rel));
 
 	/* nothing chosen yet */
 	estate->es_param_exec_vals[state->paramid].value = (Datum) 0;

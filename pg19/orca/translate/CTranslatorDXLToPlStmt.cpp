@@ -5511,6 +5511,35 @@ CTranslatorDXLToPlStmt::TranslateDynamicScan(
 		gpdb::LAppend(dynamic_scan->custom_private,
 					  gpdb::MakeIntegerValue((long) index_oid));
 
+	// What ORCA could not prune the partitions by as it planned: the scan's
+	// own conditions on the partition key over a statement's parameter or a
+	// nested loop's outer row, which the node evaluates each time it
+	// chooses its partitions, as the planner's run-time pruning does.  An
+	// index-only scan's conditions are over the index's columns, which its
+	// indextlist names.
+	List *prune_quals = gpdb::ListCopy(scan->qual);
+	List *indextlist = NIL;
+	if (IsA(scan, IndexScan))
+	{
+		prune_quals = gpdb::ListConcat(
+			prune_quals, gpdb::ListCopy(((IndexScan *) scan)->indexqualorig));
+	}
+	else if (IsA(scan, IndexOnlyScan))
+	{
+		prune_quals = gpdb::ListConcat(
+			prune_quals, gpdb::ListCopy(((IndexOnlyScan *) scan)->indexqual));
+		indextlist = ((IndexOnlyScan *) scan)->indextlist;
+	}
+	else if (IsA(scan, BitmapHeapScan))
+	{
+		prune_quals = gpdb::ListConcat(
+			prune_quals,
+			gpdb::ListCopy(((BitmapHeapScan *) scan)->bitmapqualorig));
+	}
+	dynamic_scan->custom_private = gpdb::LAppend(
+		dynamic_scan->custom_private,
+		gpdb::ParamPruneSteps(root_oid, root_rti, prune_quals, indextlist));
+
 	Plan *plan = &(dynamic_scan->scan.plan);
 	plan->plan_node_id = m_dxl_to_plstmt_context->GetNextPlanId();
 	TranslatePlanCosts(dynamic_scan_dxlnode, plan);

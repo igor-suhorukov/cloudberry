@@ -1932,6 +1932,20 @@ COMMIT;"
 	orca_write "a partitioned table's DELETE ... USING another table" \
 		"DELETE FROM wp USING po WHERE wp.a = po.x AND po.y < 3;" \
 		"SELECT tableoid::regclass, count(*) FROM wp GROUP BY 1 ORDER BY 1;" "Delete on wp"
+	# A generic plan's parameter prunes a partitioned table's scan on the
+	# segments, where the fragment is sent with the parameter's value and the
+	# Dynamic Scan's steps: the planner's answers, a NULL among them.
+	gen="SET plan_cache_mode = force_generic_plan; PREPARE wpp(int) AS SELECT count(*), sum(a) FROM wp WHERE b = \$1;"
+	plan=$(printf '%s\n' "$gen" "EXPLAIN (COSTS OFF) EXECUTE wpp(15);" | qf 0)
+	orca=$(printf '%s\n' "$gen" "EXECUTE wpp(15);" "EXECUTE wpp(25);" "EXECUTE wpp(NULL);" | qf 0)
+	pg=$(printf '%s\n' "$gen" "SET gp.optimizer = off;" "EXECUTE wpp(15);" "EXECUTE wpp(25);" "EXECUTE wpp(NULL);" | qf 0)
+	case "$plan" in
+		*"Dynamic Seq Scan on wp"*"Optimizer: GPORCA"*)
+			[ -n "$orca" ] && [ "$orca" = "$pg" ] \
+				&& ok "a generic plan's parameter prunes a partitioned table's scan on the segments, answering as the planner" \
+				|| notok "a generic plan's pruning on the segments" "ORCA: $orca / planner: $pg" ;;
+		*) notok "a generic plan's pruning on the segments: the plan" "$plan" ;;
+	esac
 	orca_write "a partitioned table's UPDATE whose condition no partition's rows meet, and one joining the table to itself" \
 		"UPDATE wp SET c = 'x' WHERE b = 100; UPDATE wp SET c = 'y' FROM wp w2 WHERE wp.a = w2.a AND w2.b = 5;" \
 		"SELECT count(*) FILTER (WHERE c = 'x'), count(*) FILTER (WHERE c = 'y') FROM wp;" "Update on wp"

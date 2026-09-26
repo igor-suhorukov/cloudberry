@@ -830,6 +830,11 @@ RangeTblEntry *PartitionRTE(const RangeTblEntry *root_rte, Oid part_oid);
 // expressions over the table's result relation as over the partition's
 // (compat/cb_dynamicscan.h).
 List *PartitionColnos(Oid root_oid, Oid part_oid, List *colnos);
+
+// The steps that prune a partitioned table's scan by its conditions'
+// parameters, which the Dynamic Scan evaluates as it runs.
+List *ParamPruneSteps(Oid root_oid, Index root_rti, List *quals,
+					  List *indextlist);
 List *PartitionExprs(List *exprs, Index root_rti, Oid root_oid,
 					 Index part_rti, Oid part_oid);
 Plan *PlanForPartition(Plan *scan, Index root_rti, Index part_rti,

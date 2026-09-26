@@ -2707,6 +2707,19 @@ gpdb::PartitionColnos(Oid root_oid, Oid part_oid, List *colnos)
 }
 
 List *
+gpdb::ParamPruneSteps(Oid root_oid, Index root_rti, List *quals,
+					  List *indextlist)
+{
+	GP_WRAP_START;
+	{
+		return gp_orca_param_prune_steps(root_oid, root_rti, quals,
+										 indextlist);
+	}
+	GP_WRAP_END;
+	return NIL;
+}
+
+List *
 gpdb::PartitionExprs(List *exprs, Index root_rti, Oid root_oid, Index part_rti,
 					 Oid part_oid)
 {

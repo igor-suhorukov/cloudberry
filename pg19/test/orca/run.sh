@@ -3559,6 +3559,31 @@ same "a join on a list partition's key, NULLs and all" \
 same "a join on a hash partition's key" \
      "SELECT count(*) FROM t3h JOIN t3j ON t3h.id = t3j.a"
 
+# And by what a scan's own conditions compare the partition key with where it
+# is known only as the plan runs (gp_orca_param_prune_steps), as the planner
+# prunes: a generic plan's parameter, as the plan starts, and a nested loop's
+# outer row, at each rescan.  ORCA prunes by constants as it plans.
+t3gen="SET plan_cache_mode = force_generic_plan;
+       PREPARE t3pp(int) AS SELECT count(*), sum(c) FROM t3p WHERE a = \$1;
+       PREPARE t3pr(int, int) AS SELECT count(*), sum(c) FROM t3p WHERE a >= \$1 AND a < \$2"
+got=$(q2 "$t3gen" "EXPLAIN (ANALYZE, COSTS OFF, TIMING OFF, SUMMARY OFF, BUFFERS OFF) EXECUTE t3pp(150);
+                   EXPLAIN (ANALYZE, COSTS OFF, TIMING OFF, SUMMARY OFF, BUFFERS OFF) EXECUTE t3pr(120, 260)" | tr '\n' ' ')
+case "$got" in
+	*"Partitions Scanned: 1"*"Optimizer: GPORCA"*"Partitions Scanned: 2"*"Optimizer: GPORCA"*)
+		ok "a generic plan's parameters prune the partitions as the plan starts" ;;
+	*) notok "a generic plan's pruning" "$got" ;;
+esac
+orca=$(q2 "$t3gen" "EXECUTE t3pp(150); EXECUTE t3pp(-5); EXECUTE t3pp(NULL); EXECUTE t3pr(120, 260); EXECUTE t3pr(290, 1000)")
+pg=$(q2 "$t3gen; SET gp.optimizer = off" "EXECUTE t3pp(150); EXECUTE t3pp(-5); EXECUTE t3pp(NULL); EXECUTE t3pr(120, 260); EXECUTE t3pr(290, 1000)")
+[ "$orca" = "$pg" ] && ok "... and it answers as the planner does, a NULL and the default partition among them" \
+	|| notok "a generic plan's pruning: the answers" "orca [$orca], planner [$pg]"
+
+has "an index nested loop's outer row prunes the inner's partitions at each rescan" \
+    "EXPLAIN (ANALYZE, COSTS OFF, TIMING OFF, SUMMARY OFF, BUFFERS OFF)
+       SELECT count(*) FROM t3q JOIN (VALUES (10), (20), (30)) v(a) ON t3q.a = v.a" "Partitions Scanned: 3"
+same "... and answers as the planner does" \
+     "SELECT count(*), sum(t3q.a) FROM t3q JOIN (VALUES (10), (20), (160), (NULL)) v(a) ON t3q.a = v.a"
+
 same "a subquery's value, which ORCA selects by as a join" \
      "SELECT count(*) FROM t3p WHERE a = (SELECT max(a) FROM t3k)"
 
