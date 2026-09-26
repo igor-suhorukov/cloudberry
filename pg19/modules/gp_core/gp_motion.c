@@ -2923,9 +2923,28 @@ motion_recheck(ScanState *ss, TupleTableSlot *slot)
 	return true;
 }
 
+/*
+ * EvalPlanQual runs the plan below an UPDATE or DELETE again, in an EState
+ * of its own, over the new version of a row another transaction changed
+ * while the statement waited for it -- which only happens where the rows
+ * are locked rather than the table, with the global deadlock detector on.
+ * A Motion's rows come from other processes, which ran their slices once,
+ * and there is no running them again for one row: the recheck would find
+ * none -- motion_recheck() stores no row -- and the row would be passed
+ * over, its update lost.  Cloudberry refuses the recheck, as a
+ * serialization failure the client may retry, in these words
+ * (ExecInitMotion(), nodeMotion.c).  Here as the Motion runs rather than as
+ * it is initialised, since EvalPlanQual initialises every subplan of the
+ * statement, whichever it runs.
+ */
 static TupleTableSlot *
 motion_exec(CustomScanState *node)
 {
+	if (node->ss.ps.state->es_epq_active != NULL)
+		ereport(ERROR,
+				(errcode(ERRCODE_T_R_SERIALIZATION_FAILURE),
+				 errmsg("EvalPlanQual can not handle subPlan with Motion node")));
+
 	return ExecScan(&node->ss, motion_next, motion_recheck);
 }
 

@@ -1850,6 +1850,44 @@ COMMIT;"
 	[ "$out" = "2|4" ] && ok "... each of its segments with the same two rows" \
 		|| notok "ON CONFLICT of a replicated table on every segment" "$out"
 
+	# An UPDATE or DELETE that reads another table: without the deadlock
+	# detector the statement holds its target in ExclusiveLock, so no row of
+	# it changes under the statement and nothing is re-checked; ORCA joins
+	# where the rows are, and each target row is written on its segment.
+	# Each runs in a transaction rolled back, under ORCA and the planner, and
+	# what a query reads afterwards is compared.
+	orca_write() {				# orca_write <what> <sql> <check> <what EXPLAIN must say>
+		local plan orca pg
+		plan=$(q 0 "EXPLAIN (COSTS OFF) $2")
+		case "$plan" in
+			*"$4"*"Optimizer: GPORCA"*) ;;
+			*) notok "$1: the plan" "$plan"; return ;;
+		esac
+		orca=$(printf '%s\n' "BEGIN;" "$2" "$3" "ROLLBACK;" | qf 0)
+		pg=$(printf '%s\n' "SET gp.optimizer = off;" "BEGIN;" "$2" "$3" "ROLLBACK;" | qf 0)
+		[ -n "$orca" ] && [ "$orca" = "$pg" ] && ok "$1" \
+			|| notok "$1: the same rows as the planner's" "ORCA: $orca / planner: $pg"
+	}
+	orca_write "UPDATE ... FROM another table: joined on the segments, each row written where it is" \
+		"UPDATE wu SET c = 'u' || po.y FROM po WHERE wu.b = po.x;" \
+		"SELECT count(*), string_agg(DISTINCT c, ',' ORDER BY c) FROM wu WHERE c LIKE 'u%';" \
+		"Redistribute Motion 2:2"
+	orca_write "DELETE ... USING another table" \
+		"DELETE FROM wu USING po WHERE wu.a = po.x * 3;" \
+		"SELECT count(*), sum(a) FROM wu;" "Delete on wu"
+	orca_write "DELETE ... WHERE IN a subquery, a semi-join" \
+		"DELETE FROM wu WHERE a IN (SELECT x FROM po WHERE y = 3);" \
+		"SELECT count(*), sum(a) FROM wu;" "Delete on wu"
+	orca_write "UPDATE ... WHERE EXISTS" \
+		"UPDATE wu SET b = -b WHERE EXISTS (SELECT 1 FROM po WHERE po.x = wu.a AND po.y > 4);" \
+		"SELECT count(*), sum(b) FROM wu;" "Update on wu"
+	orca_write "an UPDATE of the key joined to another table: a Split, each row moved once" \
+		"UPDATE wu SET a = a + 1000 FROM po WHERE wu.a = po.x AND po.y = 2;" \
+		"SELECT count(*), sum(a), count(*) FILTER (WHERE a > 1000) FROM wu;" "Split Update"
+	orca_write "a random table's UPDATE ... FROM, routed back by where each row is" \
+		"UPDATE orr SET b = orr.b + po.y FROM po WHERE orr.a = po.x;" \
+		"SELECT count(*), sum(b) FROM orr;" "Explicit Redistribute Motion"
+
 	# What Cloudberry refuses of a DO UPDATE, the planner's route refuses in
 	# its words, and ORCA leaves to it: a distribution column set, and a
 	# volatile function in a replicated table's update.
@@ -2777,6 +2815,29 @@ SQL
 		*"Gather Motion"*"Merge Key"*"LockRows"*"Sort"*"Seq Scan on gdd"*)
 			ok "ORCA locks the rows below the Gather, above the sort its merge keeps" ;;
 		*) notok "ORCA's plan for FOR UPDATE" "$out" ;;
+	esac
+
+	# With rows locked, an UPDATE that waited for another's update of its row
+	# re-checks the row's new version (EvalPlanQual), running the plan below
+	# its write again: ORCA's, on the segment, acts on the new version.  A
+	# Motion below the write could not run again for one row, and would fail
+	# the recheck as Cloudberry's does (gp_motion.c); ORCA's plan of an UPDATE
+	# or DELETE of one table has none, and one that reads another table, whose
+	# plan would, is the planner's while its rows may change under it.
+	q 0 "CREATE TABLE gddr (a int, b int) DISTRIBUTED RANDOMLY; INSERT INTO gddr VALUES (1, 1);" >/dev/null
+	plan=$(q 0 "EXPLAIN (COSTS OFF) UPDATE gddr SET b = b + 10 WHERE a = 1;")
+	printf '%s\n' "BEGIN;" "UPDATE gddr SET b = b + 1 WHERE a = 1;" "SELECT pg_sleep(2);" "COMMIT;" |
+		qf 0 >/dev/null 2>&1 &
+	holder=$!
+	sleep 0.5
+	out=$(q 0 "UPDATE gddr SET b = b + 10 WHERE a = 1 RETURNING b;")
+	wait "$holder"
+	out2=$(printf '%s\n' "SET gp.optimizer_trace_fallback = on;" "BEGIN;" \
+		"UPDATE gdd SET val = val FROM gddr WHERE gdd.id = gddr.a;" "ROLLBACK;" | qf 0)
+	case "$plan|$out|$out2" in
+		*"Update on gddr"*"Optimizer: GPORCA"*"|12|"*"an UPDATE or DELETE that reads another relation"*)
+			ok "with it, ORCA's UPDATE that waited acts on the row's new version; one that reads another table is the planner's" ;;
+		*) notok "EvalPlanQual under ORCA with the detector" "$plan / $out / $out2" ;;
 	esac
 	for opt in off on; do
 		printf '%s\n' "SET gp.optimizer = $opt;" "BEGIN;" "SELECT id FROM gdd WHERE id = $r0 FOR UPDATE;" \

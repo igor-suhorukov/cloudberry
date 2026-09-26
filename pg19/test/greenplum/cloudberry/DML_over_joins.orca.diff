@@ -1,381 +1,120 @@
 @@
 +INFO:  GPORCA failed to produce a plan, falling back to Postgres-based planner
-+DETAIL:  Falling back to Postgres-based planner because GPORCA does not support the following feature: an UPDATE or DELETE that reads another relation
++DETAIL:  Falling back to Postgres-based planner because GPORCA does not support the following feature: a Gather Motion inside a slice the segments run
 @@
 +INFO:  GPORCA failed to produce a plan, falling back to Postgres-based planner
-+DETAIL:  Falling back to Postgres-based planner because GPORCA does not support the following feature: an UPDATE or DELETE that reads another relation
++DETAIL:  Falling back to Postgres-based planner because GPORCA does not support the following feature: a Gather Motion inside a slice the segments run
 @@
 +INFO:  GPORCA failed to produce a plan, falling back to Postgres-based planner
-+DETAIL:  Falling back to Postgres-based planner because GPORCA does not support the following feature: an UPDATE or DELETE that reads another relation
++DETAIL:  Falling back to Postgres-based planner because GPORCA does not support the following feature: a Gather Motion inside a slice the segments run
 @@
 +INFO:  GPORCA failed to produce a plan, falling back to Postgres-based planner
-+DETAIL:  Falling back to Postgres-based planner because GPORCA does not support the following feature: an UPDATE or DELETE that reads another relation
++DETAIL:  Falling back to Postgres-based planner because GPORCA does not support the following feature: a Gather Motion inside a slice the segments run
 @@
 +INFO:  GPORCA failed to produce a plan, falling back to Postgres-based planner
-+DETAIL:  Falling back to Postgres-based planner because GPORCA does not support the following feature: an UPDATE or DELETE that reads another relation
-@@
-+INFO:  GPORCA failed to produce a plan, falling back to Postgres-based planner
-+DETAIL:  Falling back to Postgres-based planner because GPORCA does not support the following feature: an UPDATE or DELETE that reads another relation
-@@
-+INFO:  GPORCA failed to produce a plan, falling back to Postgres-based planner
-+DETAIL:  Falling back to Postgres-based planner because GPORCA does not support the following feature: an UPDATE or DELETE that reads another relation
-@@
-+INFO:  GPORCA failed to produce a plan, falling back to Postgres-based planner
-+DETAIL:  Falling back to Postgres-based planner because GPORCA does not support the following feature: an UPDATE or DELETE that reads another relation
-@@
-+INFO:  GPORCA failed to produce a plan, falling back to Postgres-based planner
-+DETAIL:  Falling back to Postgres-based planner because GPORCA does not support the following feature: an UPDATE or DELETE that reads another relation
-@@
-+INFO:  GPORCA failed to produce a plan, falling back to Postgres-based planner
-+DETAIL:  Falling back to Postgres-based planner because GPORCA does not support the following feature: an UPDATE or DELETE that reads another relation
-@@
-+INFO:  GPORCA failed to produce a plan, falling back to Postgres-based planner
-+DETAIL:  Falling back to Postgres-based planner because GPORCA does not support the following feature: an UPDATE or DELETE that reads another relation
-@@
-+INFO:  GPORCA failed to produce a plan, falling back to Postgres-based planner
-+DETAIL:  Falling back to Postgres-based planner because GPORCA does not support the following feature: an UPDATE or DELETE that reads another relation
-@@
-+INFO:  GPORCA failed to produce a plan, falling back to Postgres-based planner
-+DETAIL:  Falling back to Postgres-based planner because GPORCA does not support the following feature: an UPDATE or DELETE that reads another relation
-@@
-+INFO:  GPORCA failed to produce a plan, falling back to Postgres-based planner
-+DETAIL:  Falling back to Postgres-based planner because GPORCA does not support the following feature: an UPDATE or DELETE that reads another relation
-@@
-+INFO:  GPORCA failed to produce a plan, falling back to Postgres-based planner
-+DETAIL:  Falling back to Postgres-based planner because GPORCA does not support the following feature: an UPDATE or DELETE that reads another relation
-@@
-+INFO:  GPORCA failed to produce a plan, falling back to Postgres-based planner
-+DETAIL:  Falling back to Postgres-based planner because GPORCA does not support the following feature: an UPDATE or DELETE that reads another relation
-@@
-+INFO:  GPORCA failed to produce a plan, falling back to Postgres-based planner
-+DETAIL:  Falling back to Postgres-based planner because GPORCA does not support the following feature: an UPDATE or DELETE that reads another relation
-@@
-+INFO:  GPORCA failed to produce a plan, falling back to Postgres-based planner
-+DETAIL:  Falling back to Postgres-based planner because GPORCA does not support the following feature: an UPDATE or DELETE that reads another relation
-@@
-+INFO:  GPORCA failed to produce a plan, falling back to Postgres-based planner
-+DETAIL:  Falling back to Postgres-based planner because GPORCA does not support the following feature: an UPDATE or DELETE that reads another relation
-@@
-+INFO:  GPORCA failed to produce a plan, falling back to Postgres-based planner
-+DETAIL:  Falling back to Postgres-based planner because GPORCA does not support the following feature: an UPDATE or DELETE that reads another relation
-@@
-+INFO:  GPORCA failed to produce a plan, falling back to Postgres-based planner
-+DETAIL:  Falling back to Postgres-based planner because GPORCA does not support the following feature: an UPDATE or DELETE that reads another relation
-@@
-+INFO:  GPORCA failed to produce a plan, falling back to Postgres-based planner
-+DETAIL:  Falling back to Postgres-based planner because GPORCA does not support the following feature: an UPDATE or DELETE that reads another relation
-@@
-+INFO:  GPORCA failed to produce a plan, falling back to Postgres-based planner
-+DETAIL:  Falling back to Postgres-based planner because GPORCA does not support the following feature: an UPDATE or DELETE that reads another relation
-@@
-+INFO:  GPORCA failed to produce a plan, falling back to Postgres-based planner
-+DETAIL:  Falling back to Postgres-based planner because GPORCA does not support the following feature: an UPDATE or DELETE that reads another relation
-@@
-+INFO:  GPORCA failed to produce a plan, falling back to Postgres-based planner
-+DETAIL:  Falling back to Postgres-based planner because GPORCA does not support the following feature: an UPDATE or DELETE that reads another relation
-@@
-+INFO:  GPORCA failed to produce a plan, falling back to Postgres-based planner
-+DETAIL:  Falling back to Postgres-based planner because GPORCA does not support the following feature: an UPDATE or DELETE that reads another relation
-@@
-+INFO:  GPORCA failed to produce a plan, falling back to Postgres-based planner
-+DETAIL:  Falling back to Postgres-based planner because GPORCA does not support the following feature: an UPDATE or DELETE that reads another relation
-@@
-+INFO:  GPORCA failed to produce a plan, falling back to Postgres-based planner
-+DETAIL:  Falling back to Postgres-based planner because GPORCA does not support the following feature: an UPDATE or DELETE that reads another relation
-@@
-+INFO:  GPORCA failed to produce a plan, falling back to Postgres-based planner
-+DETAIL:  Falling back to Postgres-based planner because GPORCA does not support the following feature: an UPDATE or DELETE that reads another relation
-@@
-+INFO:  GPORCA failed to produce a plan, falling back to Postgres-based planner
-+DETAIL:  Falling back to Postgres-based planner because GPORCA does not support the following feature: an UPDATE or DELETE that reads another relation
-@@
-+INFO:  GPORCA failed to produce a plan, falling back to Postgres-based planner
-+DETAIL:  Falling back to Postgres-based planner because GPORCA does not support the following feature: an UPDATE or DELETE that reads another relation
-@@
-+INFO:  GPORCA failed to produce a plan, falling back to Postgres-based planner
-+DETAIL:  Falling back to Postgres-based planner because GPORCA does not support the following feature: an UPDATE or DELETE that reads another relation
-@@
-+INFO:  GPORCA failed to produce a plan, falling back to Postgres-based planner
-+DETAIL:  Falling back to Postgres-based planner because GPORCA does not support the following feature: an UPDATE or DELETE that reads another relation
-@@
-+INFO:  GPORCA failed to produce a plan, falling back to Postgres-based planner
-+DETAIL:  Falling back to Postgres-based planner because GPORCA does not support the following feature: an UPDATE or DELETE that reads another relation
-@@
-+INFO:  GPORCA failed to produce a plan, falling back to Postgres-based planner
-+DETAIL:  Falling back to Postgres-based planner because GPORCA does not support the following feature: an UPDATE or DELETE that reads another relation
-@@
-+INFO:  GPORCA failed to produce a plan, falling back to Postgres-based planner
-+DETAIL:  Falling back to Postgres-based planner because GPORCA does not support the following feature: an UPDATE or DELETE that reads another relation
-@@
-+INFO:  GPORCA failed to produce a plan, falling back to Postgres-based planner
-+DETAIL:  Falling back to Postgres-based planner because GPORCA does not support the following feature: an UPDATE or DELETE that reads another relation
-@@
-+INFO:  GPORCA failed to produce a plan, falling back to Postgres-based planner
-+DETAIL:  Falling back to Postgres-based planner because GPORCA does not support the following feature: an UPDATE or DELETE that reads another relation
-@@
-+INFO:  GPORCA failed to produce a plan, falling back to Postgres-based planner
-+DETAIL:  Falling back to Postgres-based planner because GPORCA does not support the following feature: an UPDATE or DELETE that reads another relation
-@@
-+INFO:  GPORCA failed to produce a plan, falling back to Postgres-based planner
-+DETAIL:  Falling back to Postgres-based planner because GPORCA does not support the following feature: an UPDATE or DELETE that reads another relation
-@@
-+INFO:  GPORCA failed to produce a plan, falling back to Postgres-based planner
-+DETAIL:  Falling back to Postgres-based planner because GPORCA does not support the following feature: an UPDATE or DELETE that reads another relation
-@@
-+INFO:  GPORCA failed to produce a plan, falling back to Postgres-based planner
-+DETAIL:  Falling back to Postgres-based planner because GPORCA does not support the following feature: an UPDATE or DELETE that reads another relation
-@@
-+INFO:  GPORCA failed to produce a plan, falling back to Postgres-based planner
-+DETAIL:  Falling back to Postgres-based planner because GPORCA does not support the following feature: an UPDATE or DELETE that reads another relation
-@@
-+INFO:  GPORCA failed to produce a plan, falling back to Postgres-based planner
-+DETAIL:  Falling back to Postgres-based planner because GPORCA does not support the following feature: an UPDATE or DELETE that reads another relation
-@@
-+INFO:  GPORCA failed to produce a plan, falling back to Postgres-based planner
-+DETAIL:  Falling back to Postgres-based planner because GPORCA does not support the following feature: an UPDATE or DELETE that reads another relation
-@@
-+INFO:  GPORCA failed to produce a plan, falling back to Postgres-based planner
-+DETAIL:  Falling back to Postgres-based planner because GPORCA does not support the following feature: an UPDATE or DELETE that reads another relation
-@@
-+INFO:  GPORCA failed to produce a plan, falling back to Postgres-based planner
-+DETAIL:  Falling back to Postgres-based planner because GPORCA does not support the following feature: an UPDATE or DELETE that reads another relation
-@@
-+INFO:  GPORCA failed to produce a plan, falling back to Postgres-based planner
-+DETAIL:  Falling back to Postgres-based planner because GPORCA does not support the following feature: an UPDATE or DELETE that reads another relation
-@@
-+INFO:  GPORCA failed to produce a plan, falling back to Postgres-based planner
-+DETAIL:  Falling back to Postgres-based planner because GPORCA does not support the following feature: an UPDATE or DELETE that reads another relation
-@@
-+INFO:  GPORCA failed to produce a plan, falling back to Postgres-based planner
-+DETAIL:  Falling back to Postgres-based planner because GPORCA does not support the following feature: an UPDATE or DELETE that reads another relation
-@@
-+INFO:  GPORCA failed to produce a plan, falling back to Postgres-based planner
-+DETAIL:  Falling back to Postgres-based planner because GPORCA does not support the following feature: an UPDATE or DELETE that reads another relation
-@@
-+INFO:  GPORCA failed to produce a plan, falling back to Postgres-based planner
-+DETAIL:  Falling back to Postgres-based planner because GPORCA does not support the following feature: an UPDATE or DELETE that reads another relation
-@@
-+INFO:  GPORCA failed to produce a plan, falling back to Postgres-based planner
-+DETAIL:  Falling back to Postgres-based planner because GPORCA does not support the following feature: an UPDATE or DELETE that reads another relation
-@@
-+INFO:  GPORCA failed to produce a plan, falling back to Postgres-based planner
-+DETAIL:  Falling back to Postgres-based planner because GPORCA does not support the following feature: an UPDATE or DELETE that reads another relation
-@@
-+INFO:  GPORCA failed to produce a plan, falling back to Postgres-based planner
-+DETAIL:  Falling back to Postgres-based planner because GPORCA does not support the following feature: an UPDATE or DELETE that reads another relation
-@@
-+INFO:  GPORCA failed to produce a plan, falling back to Postgres-based planner
-+DETAIL:  Falling back to Postgres-based planner because GPORCA does not support the following feature: an UPDATE or DELETE that reads another relation
-@@
-+INFO:  GPORCA failed to produce a plan, falling back to Postgres-based planner
-+DETAIL:  Falling back to Postgres-based planner because GPORCA does not support the following feature: an UPDATE or DELETE that reads another relation
-@@
-+INFO:  GPORCA failed to produce a plan, falling back to Postgres-based planner
-+DETAIL:  Falling back to Postgres-based planner because GPORCA does not support the following feature: an UPDATE or DELETE that reads another relation
-@@
-+INFO:  GPORCA failed to produce a plan, falling back to Postgres-based planner
-+DETAIL:  Falling back to Postgres-based planner because GPORCA does not support the following feature: an UPDATE or DELETE that reads another relation
-@@
-+INFO:  GPORCA failed to produce a plan, falling back to Postgres-based planner
-+DETAIL:  Falling back to Postgres-based planner because GPORCA does not support the following feature: an UPDATE or DELETE that reads another relation
++DETAIL:  Falling back to Postgres-based planner because GPORCA does not support the following feature: a Gather Motion inside a slice the segments run
 @@
 +INFO:  GPORCA failed to produce a plan, falling back to Postgres-based planner
 +DETAIL:  Falling back to Postgres-based planner because GPORCA does not support the following feature: DML(update) on partitioned tables
 @@
 +INFO:  GPORCA failed to produce a plan, falling back to Postgres-based planner
-+DETAIL:  Falling back to Postgres-based planner because GPORCA does not support the following feature: an UPDATE or DELETE that reads another relation
-@@
-+INFO:  GPORCA failed to produce a plan, falling back to Postgres-based planner
-+DETAIL:  Falling back to Postgres-based planner because GPORCA does not support the following feature: an UPDATE or DELETE that reads another relation
-@@
-+INFO:  GPORCA failed to produce a plan, falling back to Postgres-based planner
-+DETAIL:  Falling back to Postgres-based planner because GPORCA does not support the following feature: an UPDATE or DELETE that reads another relation
-@@
-+INFO:  GPORCA failed to produce a plan, falling back to Postgres-based planner
-+DETAIL:  Falling back to Postgres-based planner because GPORCA does not support the following feature: an UPDATE or DELETE that reads another relation
++DETAIL:  Falling back to Postgres-based planner because GPORCA does not support the following feature: DML(update) on partitioned tables
 @@
 +INFO:  GPORCA failed to produce a plan, falling back to Postgres-based planner
 +DETAIL:  Falling back to Postgres-based planner because GPORCA does not support the following feature: DML(update) on partitioned tables
 @@
 +INFO:  GPORCA failed to produce a plan, falling back to Postgres-based planner
-+DETAIL:  Falling back to Postgres-based planner because GPORCA does not support the following feature: an UPDATE or DELETE that reads another relation
-@@
-+INFO:  GPORCA failed to produce a plan, falling back to Postgres-based planner
-+DETAIL:  Falling back to Postgres-based planner because GPORCA does not support the following feature: an UPDATE or DELETE that reads another relation
-@@
-+INFO:  GPORCA failed to produce a plan, falling back to Postgres-based planner
-+DETAIL:  Falling back to Postgres-based planner because GPORCA does not support the following feature: an UPDATE or DELETE that reads another relation
-@@
-+INFO:  GPORCA failed to produce a plan, falling back to Postgres-based planner
-+DETAIL:  Falling back to Postgres-based planner because GPORCA does not support the following feature: an UPDATE or DELETE that reads another relation
++DETAIL:  Falling back to Postgres-based planner because GPORCA does not support the following feature: DML(update) on partitioned tables
 @@
 +INFO:  GPORCA failed to produce a plan, falling back to Postgres-based planner
 +DETAIL:  Falling back to Postgres-based planner because GPORCA does not support the following feature: DML(update) on partitioned tables
 @@
 +INFO:  GPORCA failed to produce a plan, falling back to Postgres-based planner
-+DETAIL:  Falling back to Postgres-based planner because GPORCA does not support the following feature: an UPDATE or DELETE that reads another relation
-@@
-+INFO:  GPORCA failed to produce a plan, falling back to Postgres-based planner
-+DETAIL:  Falling back to Postgres-based planner because GPORCA does not support the following feature: an UPDATE or DELETE that reads another relation
-@@
-+INFO:  GPORCA failed to produce a plan, falling back to Postgres-based planner
-+DETAIL:  Falling back to Postgres-based planner because GPORCA does not support the following feature: an UPDATE or DELETE that reads another relation
-@@
-+INFO:  GPORCA failed to produce a plan, falling back to Postgres-based planner
-+DETAIL:  Falling back to Postgres-based planner because GPORCA does not support the following feature: an UPDATE or DELETE that reads another relation
++DETAIL:  Falling back to Postgres-based planner because GPORCA does not support the following feature: DML(update) on partitioned tables
 @@
 +INFO:  GPORCA failed to produce a plan, falling back to Postgres-based planner
 +DETAIL:  Falling back to Postgres-based planner because GPORCA does not support the following feature: DML(update) on partitioned tables
 @@
 +INFO:  GPORCA failed to produce a plan, falling back to Postgres-based planner
-+DETAIL:  Falling back to Postgres-based planner because GPORCA does not support the following feature: an UPDATE or DELETE that reads another relation
-@@
-+INFO:  GPORCA failed to produce a plan, falling back to Postgres-based planner
-+DETAIL:  Falling back to Postgres-based planner because GPORCA does not support the following feature: an UPDATE or DELETE that reads another relation
-@@
-+INFO:  GPORCA failed to produce a plan, falling back to Postgres-based planner
-+DETAIL:  Falling back to Postgres-based planner because GPORCA does not support the following feature: an UPDATE or DELETE that reads another relation
-@@
-+INFO:  GPORCA failed to produce a plan, falling back to Postgres-based planner
-+DETAIL:  Falling back to Postgres-based planner because GPORCA does not support the following feature: an UPDATE or DELETE that reads another relation
++DETAIL:  Falling back to Postgres-based planner because GPORCA does not support the following feature: DML(update) on partitioned tables
 @@
 +INFO:  GPORCA failed to produce a plan, falling back to Postgres-based planner
 +DETAIL:  Falling back to Postgres-based planner because GPORCA does not support the following feature: DML(update) on partitioned tables
 @@
 +INFO:  GPORCA failed to produce a plan, falling back to Postgres-based planner
-+DETAIL:  Falling back to Postgres-based planner because GPORCA does not support the following feature: an UPDATE or DELETE that reads another relation
++DETAIL:  Falling back to Postgres-based planner because GPORCA does not support the following feature: DML(update) on partitioned tables
 @@
 +INFO:  GPORCA failed to produce a plan, falling back to Postgres-based planner
-+DETAIL:  Falling back to Postgres-based planner because GPORCA does not support the following feature: an UPDATE or DELETE that reads another relation
++DETAIL:  Falling back to Postgres-based planner because GPORCA does not support the following feature: DML(update) on partitioned tables
 @@
 +INFO:  GPORCA failed to produce a plan, falling back to Postgres-based planner
-+DETAIL:  Falling back to Postgres-based planner because GPORCA does not support the following feature: an UPDATE or DELETE that reads another relation
++DETAIL:  Falling back to Postgres-based planner because GPORCA does not support the following feature: DML(delete) on partitioned tables
 @@
 +INFO:  GPORCA failed to produce a plan, falling back to Postgres-based planner
-+DETAIL:  Falling back to Postgres-based planner because GPORCA does not support the following feature: an UPDATE or DELETE that reads another relation
++DETAIL:  Falling back to Postgres-based planner because GPORCA does not support the following feature: DML(delete) on partitioned tables
 @@
 +INFO:  GPORCA failed to produce a plan, falling back to Postgres-based planner
-+DETAIL:  Falling back to Postgres-based planner because GPORCA does not support the following feature: an UPDATE or DELETE that reads another relation
++DETAIL:  Falling back to Postgres-based planner because GPORCA does not support the following feature: DML(delete) on partitioned tables
 @@
 +INFO:  GPORCA failed to produce a plan, falling back to Postgres-based planner
-+DETAIL:  Falling back to Postgres-based planner because GPORCA does not support the following feature: an UPDATE or DELETE that reads another relation
++DETAIL:  Falling back to Postgres-based planner because GPORCA does not support the following feature: DML(delete) on partitioned tables
 @@
 +INFO:  GPORCA failed to produce a plan, falling back to Postgres-based planner
-+DETAIL:  Falling back to Postgres-based planner because GPORCA does not support the following feature: an UPDATE or DELETE that reads another relation
++DETAIL:  Falling back to Postgres-based planner because GPORCA does not support the following feature: DML(update) on partitioned tables
 @@
 +INFO:  GPORCA failed to produce a plan, falling back to Postgres-based planner
-+DETAIL:  Falling back to Postgres-based planner because GPORCA does not support the following feature: an UPDATE or DELETE that reads another relation
++DETAIL:  Falling back to Postgres-based planner because GPORCA does not support the following feature: DML(delete) on partitioned tables
 @@
 +INFO:  GPORCA failed to produce a plan, falling back to Postgres-based planner
-+DETAIL:  Falling back to Postgres-based planner because GPORCA does not support the following feature: an UPDATE or DELETE that reads another relation
++DETAIL:  Falling back to Postgres-based planner because GPORCA does not support the following feature: DML(delete) on partitioned tables
 @@
 +INFO:  GPORCA failed to produce a plan, falling back to Postgres-based planner
-+DETAIL:  Falling back to Postgres-based planner because GPORCA does not support the following feature: an UPDATE or DELETE that reads another relation
++DETAIL:  Falling back to Postgres-based planner because GPORCA does not support the following feature: DML(delete) on partitioned tables
 @@
 +INFO:  GPORCA failed to produce a plan, falling back to Postgres-based planner
-+DETAIL:  Falling back to Postgres-based planner because GPORCA does not support the following feature: an UPDATE or DELETE that reads another relation
++DETAIL:  Falling back to Postgres-based planner because GPORCA does not support the following feature: DML(delete) on partitioned tables
 @@
 +INFO:  GPORCA failed to produce a plan, falling back to Postgres-based planner
-+DETAIL:  Falling back to Postgres-based planner because GPORCA does not support the following feature: an UPDATE or DELETE that reads another relation
++DETAIL:  Falling back to Postgres-based planner because GPORCA does not support the following feature: DML(update) on partitioned tables
 @@
 +INFO:  GPORCA failed to produce a plan, falling back to Postgres-based planner
-+DETAIL:  Falling back to Postgres-based planner because GPORCA does not support the following feature: an UPDATE or DELETE that reads another relation
++DETAIL:  Falling back to Postgres-based planner because GPORCA does not support the following feature: DML(delete) on partitioned tables
 @@
 +INFO:  GPORCA failed to produce a plan, falling back to Postgres-based planner
-+DETAIL:  Falling back to Postgres-based planner because GPORCA does not support the following feature: an UPDATE or DELETE that reads another relation
++DETAIL:  Falling back to Postgres-based planner because GPORCA does not support the following feature: DML(delete) on partitioned tables
 @@
 +INFO:  GPORCA failed to produce a plan, falling back to Postgres-based planner
-+DETAIL:  Falling back to Postgres-based planner because GPORCA does not support the following feature: an UPDATE or DELETE that reads another relation
++DETAIL:  Falling back to Postgres-based planner because GPORCA does not support the following feature: DML(delete) on partitioned tables
 @@
 +INFO:  GPORCA failed to produce a plan, falling back to Postgres-based planner
-+DETAIL:  Falling back to Postgres-based planner because GPORCA does not support the following feature: an UPDATE or DELETE that reads another relation
++DETAIL:  Falling back to Postgres-based planner because GPORCA does not support the following feature: DML(delete) on partitioned tables
 @@
 +INFO:  GPORCA failed to produce a plan, falling back to Postgres-based planner
-+DETAIL:  Falling back to Postgres-based planner because GPORCA does not support the following feature: an UPDATE or DELETE that reads another relation
++DETAIL:  Falling back to Postgres-based planner because GPORCA does not support the following feature: DML(update) on partitioned tables
 @@
 +INFO:  GPORCA failed to produce a plan, falling back to Postgres-based planner
-+DETAIL:  Falling back to Postgres-based planner because GPORCA does not support the following feature: an UPDATE or DELETE that reads another relation
++DETAIL:  Falling back to Postgres-based planner because GPORCA does not support the following feature: DML(delete) on partitioned tables
 @@
 +INFO:  GPORCA failed to produce a plan, falling back to Postgres-based planner
-+DETAIL:  Falling back to Postgres-based planner because GPORCA does not support the following feature: an UPDATE or DELETE that reads another relation
++DETAIL:  Falling back to Postgres-based planner because GPORCA does not support the following feature: DML(delete) on partitioned tables
 @@
 +INFO:  GPORCA failed to produce a plan, falling back to Postgres-based planner
-+DETAIL:  Falling back to Postgres-based planner because GPORCA does not support the following feature: an UPDATE or DELETE that reads another relation
++DETAIL:  Falling back to Postgres-based planner because GPORCA does not support the following feature: DML(delete) on partitioned tables
 @@
 +INFO:  GPORCA failed to produce a plan, falling back to Postgres-based planner
-+DETAIL:  Falling back to Postgres-based planner because GPORCA does not support the following feature: an UPDATE or DELETE that reads another relation
++DETAIL:  Falling back to Postgres-based planner because GPORCA does not support the following feature: DML(delete) on partitioned tables
 @@
 +INFO:  GPORCA failed to produce a plan, falling back to Postgres-based planner
-+DETAIL:  Falling back to Postgres-based planner because GPORCA does not support the following feature: an UPDATE or DELETE that reads another relation
++DETAIL:  Falling back to Postgres-based planner because GPORCA does not support the following feature: DML(update) on partitioned tables
 @@
 +INFO:  GPORCA failed to produce a plan, falling back to Postgres-based planner
-+DETAIL:  Falling back to Postgres-based planner because GPORCA does not support the following feature: an UPDATE or DELETE that reads another relation
++DETAIL:  Falling back to Postgres-based planner because GPORCA does not support the following feature: DML(delete) on partitioned tables
 @@
 +INFO:  GPORCA failed to produce a plan, falling back to Postgres-based planner
-+DETAIL:  Falling back to Postgres-based planner because GPORCA does not support the following feature: an UPDATE or DELETE that reads another relation
++DETAIL:  Falling back to Postgres-based planner because GPORCA does not support the following feature: DML(delete) on partitioned tables
 @@
 +INFO:  GPORCA failed to produce a plan, falling back to Postgres-based planner
-+DETAIL:  Falling back to Postgres-based planner because GPORCA does not support the following feature: an UPDATE or DELETE that reads another relation
-@@
-+INFO:  GPORCA failed to produce a plan, falling back to Postgres-based planner
-+DETAIL:  Falling back to Postgres-based planner because GPORCA does not support the following feature: an UPDATE or DELETE that reads another relation
-@@
-+INFO:  GPORCA failed to produce a plan, falling back to Postgres-based planner
-+DETAIL:  Falling back to Postgres-based planner because GPORCA does not support the following feature: an UPDATE or DELETE that reads another relation
-@@
-+INFO:  GPORCA failed to produce a plan, falling back to Postgres-based planner
-+DETAIL:  Falling back to Postgres-based planner because GPORCA does not support the following feature: an UPDATE or DELETE that reads another relation
-@@
-+INFO:  GPORCA failed to produce a plan, falling back to Postgres-based planner
-+DETAIL:  Falling back to Postgres-based planner because GPORCA does not support the following feature: an UPDATE or DELETE that reads another relation
-@@
-+INFO:  GPORCA failed to produce a plan, falling back to Postgres-based planner
-+DETAIL:  Falling back to Postgres-based planner because GPORCA does not support the following feature: an UPDATE or DELETE that reads another relation
-@@
-+INFO:  GPORCA failed to produce a plan, falling back to Postgres-based planner
-+DETAIL:  Falling back to Postgres-based planner because GPORCA does not support the following feature: an UPDATE or DELETE that reads another relation
-@@
-+INFO:  GPORCA failed to produce a plan, falling back to Postgres-based planner
-+DETAIL:  Falling back to Postgres-based planner because GPORCA does not support the following feature: an UPDATE or DELETE that reads another relation
-@@
-+INFO:  GPORCA failed to produce a plan, falling back to Postgres-based planner
-+DETAIL:  Falling back to Postgres-based planner because GPORCA does not support the following feature: an UPDATE or DELETE that reads another relation
-@@
-+INFO:  GPORCA failed to produce a plan, falling back to Postgres-based planner
-+DETAIL:  Falling back to Postgres-based planner because GPORCA does not support the following feature: an UPDATE or DELETE that reads another relation
-@@
-+INFO:  GPORCA failed to produce a plan, falling back to Postgres-based planner
-+DETAIL:  Falling back to Postgres-based planner because GPORCA does not support the following feature: an UPDATE or DELETE that reads another relation
-@@
-+INFO:  GPORCA failed to produce a plan, falling back to Postgres-based planner
-+DETAIL:  Falling back to Postgres-based planner because GPORCA does not support the following feature: an UPDATE or DELETE that reads another relation
-@@
-+INFO:  GPORCA failed to produce a plan, falling back to Postgres-based planner
-+DETAIL:  Falling back to Postgres-based planner because GPORCA does not support the following feature: an UPDATE or DELETE that reads another relation
-@@
-+INFO:  GPORCA failed to produce a plan, falling back to Postgres-based planner
-+DETAIL:  Falling back to Postgres-based planner because GPORCA does not support the following feature: an UPDATE or DELETE that reads another relation
-@@
-+INFO:  GPORCA failed to produce a plan, falling back to Postgres-based planner
-+DETAIL:  Falling back to Postgres-based planner because GPORCA does not support the following feature: SIRV functions
-@@
-+INFO:  GPORCA failed to produce a plan, falling back to Postgres-based planner
-+DETAIL:  Falling back to Postgres-based planner because GPORCA does not support the following feature: SIRV functions
-@@
-+INFO:  GPORCA failed to produce a plan, falling back to Postgres-based planner
-+DETAIL:  Falling back to Postgres-based planner because GPORCA does not support the following feature: an UPDATE or DELETE that reads another relation
-@@
-+INFO:  GPORCA failed to produce a plan, falling back to Postgres-based planner
-+DETAIL:  Falling back to Postgres-based planner because GPORCA does not support the following feature: an UPDATE or DELETE that reads another relation
-@@
-+INFO:  GPORCA failed to produce a plan, falling back to Postgres-based planner
-+DETAIL:  Falling back to Postgres-based planner because GPORCA does not support the following feature: an UPDATE or DELETE that reads another relation
-@@
-+INFO:  GPORCA failed to produce a plan, falling back to Postgres-based planner
-+DETAIL:  Falling back to Postgres-based planner because GPORCA does not support the following feature: an UPDATE or DELETE that reads another relation
-@@
-+INFO:  GPORCA failed to produce a plan, falling back to Postgres-based planner
-+DETAIL:  Falling back to Postgres-based planner because GPORCA does not support the following feature: an UPDATE or DELETE that reads another relation
++DETAIL:  Falling back to Postgres-based planner because GPORCA does not support the following feature: DML(delete) on partitioned tables
 @@
 +INFO:  GPORCA failed to produce a plan, falling back to Postgres-based planner
 +DETAIL:  Falling back to Postgres-based planner because GPORCA does not support the following feature: DML(delete) on partitioned tables
@@ -384,16 +123,22 @@
 +DETAIL:  Falling back to Postgres-based planner because GPORCA does not support the following feature: SIRV functions
 @@
 +INFO:  GPORCA failed to produce a plan, falling back to Postgres-based planner
-+DETAIL:  Falling back to Postgres-based planner because GPORCA does not support the following feature: an UPDATE or DELETE that reads another relation
++DETAIL:  Falling back to Postgres-based planner because GPORCA does not support the following feature: SIRV functions
 @@
 +INFO:  GPORCA failed to produce a plan, falling back to Postgres-based planner
-+DETAIL:  Falling back to Postgres-based planner because GPORCA does not support the following feature: an UPDATE or DELETE that reads another relation
++DETAIL:  Falling back to Postgres-based planner because GPORCA does not support the following feature: DML(delete) on partitioned tables
 @@
 +INFO:  GPORCA failed to produce a plan, falling back to Postgres-based planner
-+DETAIL:  Falling back to Postgres-based planner because GPORCA does not support the following feature: an UPDATE or DELETE that reads another relation
++DETAIL:  Falling back to Postgres-based planner because GPORCA does not support the following feature: SIRV functions
 @@
 +INFO:  GPORCA failed to produce a plan, falling back to Postgres-based planner
-+DETAIL:  Falling back to Postgres-based planner because GPORCA does not support the following feature: an UPDATE or DELETE that reads another relation
++DETAIL:  Falling back to Postgres-based planner because GPORCA does not support the following feature: DML(update) on partitioned tables
+@@
++INFO:  GPORCA failed to produce a plan, falling back to Postgres-based planner
++DETAIL:  Falling back to Postgres-based planner because GPORCA does not support the following feature: DML(update) on partitioned tables
+@@
++INFO:  GPORCA failed to produce a plan, falling back to Postgres-based planner
++DETAIL:  Falling back to Postgres-based planner because GPORCA does not support the following feature: DML(delete) on partitioned tables
 @@
 +INFO:  GPORCA failed to produce a plan, falling back to Postgres-based planner
 +DETAIL:  Falling back to Postgres-based planner because GPORCA does not support the following feature: Multi-level partitioned tables
@@ -471,19 +216,13 @@
 +DETAIL:  Falling back to Postgres-based planner because GPORCA does not support the following feature: SIRV functions
 @@
 +INFO:  GPORCA failed to produce a plan, falling back to Postgres-based planner
-+DETAIL:  Falling back to Postgres-based planner because GPORCA does not support the following feature: an UPDATE or DELETE that reads another relation
++DETAIL:  Falling back to Postgres-based planner because GPORCA does not support the following feature: DML(update) on partitioned tables
 @@
 +INFO:  GPORCA failed to produce a plan, falling back to Postgres-based planner
-+DETAIL:  Falling back to Postgres-based planner because GPORCA does not support the following feature: an UPDATE or DELETE that reads another relation
++DETAIL:  Falling back to Postgres-based planner because GPORCA does not support the following feature: DML(delete) on partitioned tables
 @@
 +INFO:  GPORCA failed to produce a plan, falling back to Postgres-based planner
-+DETAIL:  Falling back to Postgres-based planner because GPORCA does not support the following feature: an UPDATE or DELETE that reads another relation
-@@
-+INFO:  GPORCA failed to produce a plan, falling back to Postgres-based planner
-+DETAIL:  Falling back to Postgres-based planner because GPORCA does not support the following feature: an UPDATE or DELETE that reads another relation
-@@
-+INFO:  GPORCA failed to produce a plan, falling back to Postgres-based planner
-+DETAIL:  Falling back to Postgres-based planner because GPORCA does not support the following feature: an UPDATE or DELETE that reads another relation
++DETAIL:  Falling back to Postgres-based planner because GPORCA does not support the following feature: DML(delete) on partitioned tables
 @@
 +INFO:  GPORCA failed to produce a plan, falling back to Postgres-based planner
 +DETAIL:  Falling back to Postgres-based planner because GPORCA does not support the following feature: DML(delete) on partitioned tables
@@ -492,28 +231,13 @@
 +DETAIL:  Falling back to Postgres-based planner because GPORCA does not support the following feature: SIRV functions
 @@
 +INFO:  GPORCA failed to produce a plan, falling back to Postgres-based planner
-+DETAIL:  Falling back to Postgres-based planner because GPORCA does not support the following feature: an UPDATE or DELETE that reads another relation
++DETAIL:  Falling back to Postgres-based planner because GPORCA does not support the following feature: DML(update) on partitioned tables
 @@
 +INFO:  GPORCA failed to produce a plan, falling back to Postgres-based planner
-+DETAIL:  Falling back to Postgres-based planner because GPORCA does not support the following feature: an UPDATE or DELETE that reads another relation
++DETAIL:  Falling back to Postgres-based planner because GPORCA does not support the following feature: DML(delete) on partitioned tables
 @@
 +INFO:  GPORCA failed to produce a plan, falling back to Postgres-based planner
-+DETAIL:  Falling back to Postgres-based planner because GPORCA does not support the following feature: an UPDATE or DELETE that reads another relation
-@@
-+INFO:  GPORCA failed to produce a plan, falling back to Postgres-based planner
-+DETAIL:  Falling back to Postgres-based planner because GPORCA does not support the following feature: an UPDATE or DELETE that reads another relation
-@@
-+INFO:  GPORCA failed to produce a plan, falling back to Postgres-based planner
-+DETAIL:  Falling back to Postgres-based planner because GPORCA does not support the following feature: an UPDATE or DELETE that reads another relation
-@@
-+INFO:  GPORCA failed to produce a plan, falling back to Postgres-based planner
-+DETAIL:  Falling back to Postgres-based planner because GPORCA does not support the following feature: an UPDATE or DELETE that reads another relation
-@@
-+INFO:  GPORCA failed to produce a plan, falling back to Postgres-based planner
-+DETAIL:  Falling back to Postgres-based planner because GPORCA does not support the following feature: an UPDATE or DELETE that reads another relation
-@@
-+INFO:  GPORCA failed to produce a plan, falling back to Postgres-based planner
-+DETAIL:  Falling back to Postgres-based planner because GPORCA does not support the following feature: an UPDATE or DELETE that reads another relation
++DETAIL:  Falling back to Postgres-based planner because GPORCA does not support the following feature: DML(delete) on partitioned tables
 @@
 +INFO:  GPORCA failed to produce a plan, falling back to Postgres-based planner
 +DETAIL:  Falling back to Postgres-based planner because GPORCA does not support the following feature: Queries on master-only tables
@@ -528,100 +252,97 @@
 +DETAIL:  Falling back to Postgres-based planner because GPORCA does not support the following feature: Queries on master-only tables
 @@
 +INFO:  GPORCA failed to produce a plan, falling back to Postgres-based planner
-+DETAIL:  Falling back to Postgres-based planner because GPORCA does not support the following feature: an UPDATE or DELETE that reads another relation
++DETAIL:  Falling back to Postgres-based planner because GPORCA does not support the following feature: DML(delete) on partitioned tables
 @@
 +INFO:  GPORCA failed to produce a plan, falling back to Postgres-based planner
-+DETAIL:  Falling back to Postgres-based planner because GPORCA does not support the following feature: an UPDATE or DELETE that reads another relation
++DETAIL:  Falling back to Postgres-based planner because GPORCA does not support the following feature: DML(delete) on partitioned tables
 @@
 +INFO:  GPORCA failed to produce a plan, falling back to Postgres-based planner
-+DETAIL:  Falling back to Postgres-based planner because GPORCA does not support the following feature: an UPDATE or DELETE that reads another relation
++DETAIL:  Falling back to Postgres-based planner because GPORCA does not support the following feature: DML(delete) on partitioned tables
 @@
 +INFO:  GPORCA failed to produce a plan, falling back to Postgres-based planner
-+DETAIL:  Falling back to Postgres-based planner because GPORCA does not support the following feature: an UPDATE or DELETE that reads another relation
++DETAIL:  Falling back to Postgres-based planner because GPORCA does not support the following feature: DML(delete) on partitioned tables
 @@
 +INFO:  GPORCA failed to produce a plan, falling back to Postgres-based planner
-+DETAIL:  Falling back to Postgres-based planner because GPORCA does not support the following feature: an UPDATE or DELETE that reads another relation
++DETAIL:  Falling back to Postgres-based planner because GPORCA does not support the following feature: DML(delete) on partitioned tables
 @@
 +INFO:  GPORCA failed to produce a plan, falling back to Postgres-based planner
-+DETAIL:  Falling back to Postgres-based planner because GPORCA does not support the following feature: an UPDATE or DELETE that reads another relation
++DETAIL:  Falling back to Postgres-based planner because GPORCA does not support the following feature: DML(delete) on partitioned tables
 @@
 +INFO:  GPORCA failed to produce a plan, falling back to Postgres-based planner
-+DETAIL:  Falling back to Postgres-based planner because GPORCA does not support the following feature: an UPDATE or DELETE that reads another relation
++DETAIL:  Falling back to Postgres-based planner because GPORCA does not support the following feature: DML(delete) on partitioned tables
 @@
 +INFO:  GPORCA failed to produce a plan, falling back to Postgres-based planner
-+DETAIL:  Falling back to Postgres-based planner because GPORCA does not support the following feature: an UPDATE or DELETE that reads another relation
++DETAIL:  Falling back to Postgres-based planner because GPORCA does not support the following feature: DML(delete) on partitioned tables
 @@
 +INFO:  GPORCA failed to produce a plan, falling back to Postgres-based planner
-+DETAIL:  Falling back to Postgres-based planner because GPORCA does not support the following feature: an UPDATE or DELETE that reads another relation
++DETAIL:  Falling back to Postgres-based planner because GPORCA does not support the following feature: DML(delete) on partitioned tables
 @@
 +INFO:  GPORCA failed to produce a plan, falling back to Postgres-based planner
-+DETAIL:  Falling back to Postgres-based planner because GPORCA does not support the following feature: an UPDATE or DELETE that reads another relation
++DETAIL:  Falling back to Postgres-based planner because GPORCA does not support the following feature: DML(delete) on partitioned tables
 @@
 +INFO:  GPORCA failed to produce a plan, falling back to Postgres-based planner
-+DETAIL:  Falling back to Postgres-based planner because GPORCA does not support the following feature: an UPDATE or DELETE that reads another relation
++DETAIL:  Falling back to Postgres-based planner because GPORCA does not support the following feature: DML(delete) on partitioned tables
 @@
 +INFO:  GPORCA failed to produce a plan, falling back to Postgres-based planner
-+DETAIL:  Falling back to Postgres-based planner because GPORCA does not support the following feature: an UPDATE or DELETE that reads another relation
++DETAIL:  Falling back to Postgres-based planner because GPORCA does not support the following feature: DML(delete) on partitioned tables
 @@
 +INFO:  GPORCA failed to produce a plan, falling back to Postgres-based planner
-+DETAIL:  Falling back to Postgres-based planner because GPORCA does not support the following feature: an UPDATE or DELETE that reads another relation
++DETAIL:  Falling back to Postgres-based planner because GPORCA does not support the following feature: DML(delete) on partitioned tables
 @@
 +INFO:  GPORCA failed to produce a plan, falling back to Postgres-based planner
-+DETAIL:  Falling back to Postgres-based planner because GPORCA does not support the following feature: an UPDATE or DELETE that reads another relation
++DETAIL:  Falling back to Postgres-based planner because GPORCA does not support the following feature: DML(delete) on partitioned tables
 @@
 +INFO:  GPORCA failed to produce a plan, falling back to Postgres-based planner
-+DETAIL:  Falling back to Postgres-based planner because GPORCA does not support the following feature: an UPDATE or DELETE that reads another relation
++DETAIL:  Falling back to Postgres-based planner because GPORCA does not support the following feature: DML(delete) on partitioned tables
 @@
 +INFO:  GPORCA failed to produce a plan, falling back to Postgres-based planner
-+DETAIL:  Falling back to Postgres-based planner because GPORCA does not support the following feature: an UPDATE or DELETE that reads another relation
++DETAIL:  Falling back to Postgres-based planner because GPORCA does not support the following feature: DML(delete) on partitioned tables
 @@
 +INFO:  GPORCA failed to produce a plan, falling back to Postgres-based planner
-+DETAIL:  Falling back to Postgres-based planner because GPORCA does not support the following feature: an UPDATE or DELETE that reads another relation
++DETAIL:  Falling back to Postgres-based planner because GPORCA does not support the following feature: DML(delete) on partitioned tables
 @@
 +INFO:  GPORCA failed to produce a plan, falling back to Postgres-based planner
-+DETAIL:  Falling back to Postgres-based planner because GPORCA does not support the following feature: an UPDATE or DELETE that reads another relation
++DETAIL:  Falling back to Postgres-based planner because GPORCA does not support the following feature: DML(delete) on partitioned tables
 @@
 +INFO:  GPORCA failed to produce a plan, falling back to Postgres-based planner
-+DETAIL:  Falling back to Postgres-based planner because GPORCA does not support the following feature: an UPDATE or DELETE that reads another relation
++DETAIL:  Falling back to Postgres-based planner because GPORCA does not support the following feature: DML(delete) on partitioned tables
 @@
 +INFO:  GPORCA failed to produce a plan, falling back to Postgres-based planner
-+DETAIL:  Falling back to Postgres-based planner because GPORCA does not support the following feature: an UPDATE or DELETE that reads another relation
++DETAIL:  Falling back to Postgres-based planner because GPORCA does not support the following feature: DML(delete) on partitioned tables
 @@
 +INFO:  GPORCA failed to produce a plan, falling back to Postgres-based planner
-+DETAIL:  Falling back to Postgres-based planner because GPORCA does not support the following feature: an UPDATE or DELETE that reads another relation
++DETAIL:  Falling back to Postgres-based planner because GPORCA does not support the following feature: DML(delete) on partitioned tables
 @@
 +INFO:  GPORCA failed to produce a plan, falling back to Postgres-based planner
-+DETAIL:  Falling back to Postgres-based planner because GPORCA does not support the following feature: an UPDATE or DELETE that reads another relation
++DETAIL:  Falling back to Postgres-based planner because GPORCA does not support the following feature: DML(delete) on partitioned tables
 @@
 +INFO:  GPORCA failed to produce a plan, falling back to Postgres-based planner
-+DETAIL:  Falling back to Postgres-based planner because GPORCA does not support the following feature: an UPDATE or DELETE that reads another relation
++DETAIL:  Falling back to Postgres-based planner because GPORCA does not support the following feature: DML(delete) on partitioned tables
 @@
 +INFO:  GPORCA failed to produce a plan, falling back to Postgres-based planner
-+DETAIL:  Falling back to Postgres-based planner because GPORCA does not support the following feature: an UPDATE or DELETE that reads another relation
++DETAIL:  Falling back to Postgres-based planner because GPORCA does not support the following feature: DML(delete) on partitioned tables
 @@
 +INFO:  GPORCA failed to produce a plan, falling back to Postgres-based planner
-+DETAIL:  Falling back to Postgres-based planner because GPORCA does not support the following feature: an UPDATE or DELETE that reads another relation
++DETAIL:  Falling back to Postgres-based planner because GPORCA does not support the following feature: DML(delete) on partitioned tables
 @@
 +INFO:  GPORCA failed to produce a plan, falling back to Postgres-based planner
-+DETAIL:  Falling back to Postgres-based planner because GPORCA does not support the following feature: an UPDATE or DELETE that reads another relation
++DETAIL:  Falling back to Postgres-based planner because GPORCA does not support the following feature: DML(delete) on partitioned tables
 @@
 +INFO:  GPORCA failed to produce a plan, falling back to Postgres-based planner
-+DETAIL:  Falling back to Postgres-based planner because GPORCA does not support the following feature: an UPDATE or DELETE that reads another relation
++DETAIL:  Falling back to Postgres-based planner because GPORCA does not support the following feature: DML(delete) on partitioned tables
 @@
 +INFO:  GPORCA failed to produce a plan, falling back to Postgres-based planner
-+DETAIL:  Falling back to Postgres-based planner because GPORCA does not support the following feature: an UPDATE or DELETE that reads another relation
++DETAIL:  Falling back to Postgres-based planner because GPORCA does not support the following feature: DML(delete) on partitioned tables
 @@
 +INFO:  GPORCA failed to produce a plan, falling back to Postgres-based planner
-+DETAIL:  Falling back to Postgres-based planner because GPORCA does not support the following feature: an UPDATE or DELETE that reads another relation
++DETAIL:  Falling back to Postgres-based planner because GPORCA does not support the following feature: DML(delete) on partitioned tables
 @@
 +INFO:  GPORCA failed to produce a plan, falling back to Postgres-based planner
-+DETAIL:  Falling back to Postgres-based planner because GPORCA does not support the following feature: an UPDATE or DELETE that reads another relation
++DETAIL:  Falling back to Postgres-based planner because GPORCA does not support the following feature: DML(delete) on partitioned tables
 @@
 +INFO:  GPORCA failed to produce a plan, falling back to Postgres-based planner
-+DETAIL:  Falling back to Postgres-based planner because GPORCA does not support the following feature: an UPDATE or DELETE that reads another relation
++DETAIL:  Falling back to Postgres-based planner because GPORCA does not support the following feature: DML(delete) on partitioned tables
 @@
 +INFO:  GPORCA failed to produce a plan, falling back to Postgres-based planner
-+DETAIL:  Falling back to Postgres-based planner because GPORCA does not support the following feature: an UPDATE or DELETE that reads another relation
-@@
-+INFO:  GPORCA failed to produce a plan, falling back to Postgres-based planner
-+DETAIL:  Falling back to Postgres-based planner because GPORCA does not support the following feature: an UPDATE or DELETE that reads another relation
++DETAIL:  Falling back to Postgres-based planner because GPORCA does not support the following feature: DML(delete) on partitioned tables

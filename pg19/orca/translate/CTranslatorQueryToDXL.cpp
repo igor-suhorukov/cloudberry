@@ -1145,7 +1145,8 @@ CTranslatorQueryToDXL::CheckDMLTarget(const RangeTblEntry *rte)
 //		CTranslatorQueryToDXL::CheckDMLReadsOnlyTarget
 //
 //	@doc:
-//		Refuse an UPDATE or DELETE that reads a relation besides its target.
+//		Refuse an UPDATE or DELETE that reads a relation besides its target
+//		where a row it changes may change under it.
 //
 //		Under READ COMMITTED, PostgreSQL 19 re-checks a row another
 //		transaction has just updated (EvalPlanQual): it re-runs the plan
@@ -1155,13 +1156,22 @@ CTranslatorQueryToDXL::CheckDMLTarget(const RangeTblEntry *rte)
 //		column.  ORCA's DML operator carries the target's identity and
 //		nothing else, so a plan that read another relation would re-check
 //		against whatever rows of it match now, not the ones it was joined
-//		to, and read all of it again for each such row.  Cloudberry mostly
-//		escapes the question: without its global deadlock detector it
-//		takes an ExclusiveLock for an UPDATE or DELETE, and no row is
-//		updated under one (table.c, CdbTryOpenTable).  With the detector,
-//		and in its single-node mode, it re-checks as PostgreSQL does, over
-//		the same plans.  A sublink is refused with a join, since ORCA makes
-//		most of them one.
+//		to, and read all of it again for each such row.
+//
+//		A statement that holds its target in ExclusiveLock or more re-checks
+//		nothing: no other transaction can change a row of it until the
+//		statement's transaction ends, and the parser takes the lock before
+//		the statement's snapshot is.  That is Cloudberry's lock of a
+//		distributed table an UPDATE or DELETE writes, without its global
+//		deadlock detector (O30, gp_modify.c), and of an append-optimized
+//		table always (gp_ao.c), and the target's range table entry records
+//		it -- so such a statement is ORCA's, as Cloudberry's is, whose ORCA
+//		plans it with no row marks at all.  Elsewhere -- one node, a
+//		coordinator's table, the detector on -- it stays the planner's.
+//		Cloudberry's ORCA plan re-checks there by reading the others again,
+//		and fails as a serialization failure where a Motion is below the
+//		write (nodeMotion.c), as the port's does (gp_motion.c).  A sublink
+//		is a relation read too, since ORCA makes most of them joins.
 //
 //---------------------------------------------------------------------------
 void
@@ -1175,10 +1185,19 @@ CTranslatorQueryToDXL::CheckDMLReadsOnlyTarget() const
 			m_query->resultRelation &&
 		!m_query->hasSubLinks;
 
-	if (!reads_only_target)
+	if (reads_only_target)
 	{
-		GP_UNPORTED("an UPDATE or DELETE that reads another relation");
+		return;
 	}
+
+	const RangeTblEntry *target = (RangeTblEntry *) gpdb::ListNth(
+		m_query->rtable, m_query->resultRelation - 1);
+	if (ExclusiveLock <= target->rellockmode)
+	{
+		return;
+	}
+
+	GP_UNPORTED("an UPDATE or DELETE that reads another relation");
 }
 
 //---------------------------------------------------------------------------

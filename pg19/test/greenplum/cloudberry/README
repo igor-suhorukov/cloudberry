@@ -115,9 +115,12 @@ correlated_subquery, qp_derived_table, qp_misc (orca)  the lines ORCA's
   planner plans them, with the same answers, and the trace says so.
 
 DML_over_joins (orca)  the lines ORCA's fallback trace prints and nothing
-  else: ORCA declines an UPDATE or DELETE that reads another relation, which
-  the port's Motions do not carry out yet, and the planner's answers are the
-  same.
+  else: ORCA declines an UPDATE or DELETE of a partitioned table, a query of
+  a multi-level partitioned one, a function it may not call on the segments
+  (SIRV), a Gather Motion into a slice the segments run, and a table the
+  coordinator alone has; the planner's answers are the same.  An UPDATE or
+  DELETE that reads another table is ORCA's where its target is held in
+  ExclusiveLock, as without the global deadlock detector it is.
 
 expand_table_ao  pg_appendonly's compresstype of a table made with
   compresstype=none, which gp_ao records as no compression at all, an empty
@@ -239,8 +242,8 @@ qp_functions (planner, orca)  PostgreSQL 19's words for a call no function
 
 qp_subquery (orca)  the fallback trace of the queries ORCA's translator
   declines -- subqueries that are not scalar, NOT IN as an anti-join, an
-  UPDATE or DELETE that reads another relation, an inherited table, a
-  whole-row variable -- which the planner answers the same; and, as DROP
+  inherited table, a whole-row variable -- which the planner answers the
+  same; and, as DROP
   SCHEMA ... CASCADE drops the test's indexes, of gp_sql's query of each
   index's tags in gp_sql.index_tag, a table of the coordinator's, which ORCA
   leaves to the planner.
