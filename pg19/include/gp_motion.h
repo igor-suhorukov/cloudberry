@@ -93,7 +93,9 @@ extern Plan *GpMotionMakeHashFilter(Plan *child, List *targetlist, List *qual,
  * A write of a distributed table, where its rows are: "modify", a
  * ModifyTable, runs on the segments -- every one, or "content" -- in the
  * slice Cloudberry calls its writer gang, and the coordinator counts the
- * rows they changed.  Carries out the Motions below it first, as a Gather.
+ * rows they changed; with RETURNING, the rows it gives come back through
+ * it, as a Gather's do.  Carries out the Motions below it first, as a
+ * Gather.
  */
 extern Plan *GpMotionMakeDml(Plan *modify, int content, int slice);
 

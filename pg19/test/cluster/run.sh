@@ -1772,6 +1772,96 @@ COMMIT;"
 	[ "$tag|$out" = "DELETE 1|999" ] && ok "a DELETE on the segments ($tag)" \
 		|| notok "ORCA's DELETE" "$tag / $out"
 
+	# RETURNING, which ORCA never sees: the ModifyTable on the segments
+	# evaluates the Query's list, and they send back the rows it gives, as
+	# the Gather Motion over Cloudberry's ModifyTable does.  Each statement
+	# runs in a transaction rolled back, under ORCA and under the planner,
+	# and their rows are compared.
+	orca_returning() {			# orca_returning <what> <sql> <what EXPLAIN must say>
+		local plan orca pg
+		plan=$(q 0 "EXPLAIN (COSTS OFF) $2")
+		case "$plan" in
+			*"$3"*"Optimizer: GPORCA"*) ;;
+			*) notok "$1: the plan" "$plan"; return ;;
+		esac
+		orca=$(printf '%s\n' "BEGIN;" "$2" "ROLLBACK;" | qf 0 | sort)
+		pg=$(printf '%s\n' "SET gp.optimizer = off;" "BEGIN;" "$2" "ROLLBACK;" | qf 0 | sort)
+		[ -n "$orca" ] && [ "$orca" = "$pg" ] && ok "$1" \
+			|| notok "$1: the same rows as the planner's" "ORCA: $orca / planner: $pg"
+	}
+	orca_returning "UPDATE ... RETURNING, old and new: the rows the segments wrote, gathered" \
+		"UPDATE wo SET c = 'r' WHERE b < 20 RETURNING a, b, old.c, new.c;" \
+		"Gather Motion 2:1  (slice1; segments: 2)"
+	orca_returning "DELETE ... RETURNING the rows it deleted" \
+		"DELETE FROM wo WHERE b > 480 RETURNING *;" "Delete on wo"
+	orca_returning "INSERT ... SELECT ... RETURNING, redistributed and gathered" \
+		"INSERT INTO wo SELECT y + 100, x, 'i' FROM po WHERE x < 30 RETURNING a, b, c;" \
+		"Redistribute Motion 2:2"
+	orca_returning "a row of constants' RETURNING, from its segment alone" \
+		"INSERT INTO wo VALUES (7, 7, 'seven') RETURNING *;" \
+		"Gather Motion 1:1  (slice1; segments: 1)"
+	orca_returning "a random table's UPDATE ... RETURNING, each row written where it is" \
+		"UPDATE orr SET b = -b WHERE a % 10 = 0 RETURNING a, b;" "Update on orr"
+	orca_returning "a replicated table's INSERT ... RETURNING" \
+		"INSERT INTO ro SELECT i, 'new' || i FROM generate_series(100, 104) i RETURNING *;" \
+		"Insert on ro"
+
+	# Every segment writes a replicated table's rows, and returns them: once
+	# here, and counted once.  An UPDATE with RETURNING counts what it wrote.
+	out=$("$PSQL" -X -t -A -h "$(sockdir 0)" -p "$(port 0)" -d postgres -c "BEGIN" \
+		-c "INSERT INTO ro SELECT i, 'n' FROM generate_series(300, 302) i RETURNING b" \
+		-c "UPDATE wo SET c = 'n' WHERE a = 3 AND b < 60 RETURNING b % 2" -c "ROLLBACK" 2>&1 | tr '\n' '/')
+	[ "$out" = "BEGIN/300/301/302/INSERT 0 3/$(q 0 "SELECT b % 2 FROM wo WHERE a = 3 AND b < 60;" | tr '\n' '/')UPDATE $(q 0 "SELECT count(*) FROM wo WHERE a = 3 AND b < 60;")/ROLLBACK/" ] \
+		&& ok "RETURNING's rows, a replicated table's once, and the statements' counts" \
+		|| notok "RETURNING's counts" "$out"
+
+	# What stays the planner's: a split update's RETURNING, whose rows
+	# gp_core's Split writes as a DELETE and an INSERT, and a subquery in
+	# the list, which the planner would make a SubPlan of.
+	out=$(printf '%s\n' "SET gp.optimizer_trace_fallback = on;" "BEGIN;" \
+		"UPDATE wo SET a = a + 1 WHERE b = 3 RETURNING a;" \
+		"UPDATE wo SET c = 's' WHERE b = 4 RETURNING (SELECT count(*) FROM po);" "ROLLBACK;" | qf 0)
+	case "$out" in
+		*"RETURNING from an UPDATE that moves rows"*"a subquery in RETURNING"*)
+			ok "a split update's RETURNING and a subquery in the list are the planner's, and say why" ;;
+		*) notok "RETURNING that ORCA declines" "$out" ;;
+	esac
+
+	# ON CONFLICT: each proposed row goes to the segment its key hashes to,
+	# and the ModifyTable there checks the arbiter index the planner's
+	# infer_arbiter_indexes() found -- every unique index of a distributed
+	# table holds its key, so the row it meets is on that segment too.
+	q 0 "CREATE TABLE wu (a int PRIMARY KEY, b int, c text) DISTRIBUTED BY (a); INSERT INTO wu SELECT i, i, 'x' || i FROM generate_series(1, 100) i;" >/dev/null
+	q 0 "CREATE TABLE wur (a int PRIMARY KEY, b int) DISTRIBUTED REPLICATED; INSERT INTO wur SELECT i, i FROM generate_series(1, 10) i;" >/dev/null
+	orca_returning "ON CONFLICT DO UPDATE on the segments: EXCLUDED, the row met, and a condition" \
+		"INSERT INTO wu SELECT i, i * 10, 'n' FROM generate_series(95, 110) i ON CONFLICT (a) DO UPDATE SET b = excluded.b + wu.b WHERE wu.b % 2 = 0 RETURNING *;" \
+		"Conflict Resolution: UPDATE"
+	orca_returning "ON CONFLICT DO NOTHING on the segments" \
+		"INSERT INTO wu VALUES (1, 0, 'z'), (200, 0, 'z') ON CONFLICT (a) DO NOTHING RETURNING a, c;" \
+		"Conflict Resolution: NOTHING"
+	orca_returning "ON CONFLICT DO SELECT on the segments" \
+		"INSERT INTO wu VALUES (7, 0, 'z'), (300, 0, 'z') ON CONFLICT (a) DO SELECT RETURNING a, b;" \
+		"Conflict Resolution: SELECT"
+	orca_returning "ON CONFLICT DO UPDATE of a replicated table, every segment's copy alike" \
+		"INSERT INTO wur VALUES (1, 100), (20, 20) ON CONFLICT (a) DO UPDATE SET b = excluded.b + wur.b RETURNING *;" \
+		"Conflict Resolution: UPDATE"
+	out=$(printf '%s\n' "BEGIN;" "INSERT INTO wur VALUES (2, 200), (30, 30) ON CONFLICT (a) DO UPDATE SET b = excluded.b;" \
+		"SELECT count(DISTINCT (a, b)), count(*) FROM gp_dist_random('wur') WHERE a IN (2, 30);" "ROLLBACK;" | qf 0)
+	[ "$out" = "2|4" ] && ok "... each of its segments with the same two rows" \
+		|| notok "ON CONFLICT of a replicated table on every segment" "$out"
+
+	# What Cloudberry refuses of a DO UPDATE, the planner's route refuses in
+	# its words, and ORCA leaves to it: a distribution column set, and a
+	# volatile function in a replicated table's update.
+	out=$(printf '%s\n' "SET gp.optimizer_trace_fallback = on;" \
+		"INSERT INTO wu VALUES (5, 5, 'k') ON CONFLICT (a) DO UPDATE SET a = 500;" \
+		"INSERT INTO wur VALUES (3, 3) ON CONFLICT (a) DO UPDATE SET b = random()::int;" | qf 0)
+	case "$out" in
+		*"distribution column"*"modification of distribution columns in OnConflictUpdate is not supported"*"replicated table"*"modification of replicated tables containing volatile functions in OnConflictUpdate is not supported"*)
+			ok "a DO UPDATE of the key, or volatile on a replicated table, is the planner's to refuse, in Cloudberry's words" ;;
+		*) notok "ON CONFLICT that Cloudberry refuses" "$out" ;;
+	esac
+
 	# Split: the key changes, and each row moves to the segment it hashes to.
 	plan=$(q 0 "EXPLAIN (COSTS OFF) UPDATE wo SET a = a + 1000 WHERE b < 50;")
 	tag=$("$PSQL" -X -t -A -h "$(sockdir 0)" -p "$(port 0)" -d postgres \

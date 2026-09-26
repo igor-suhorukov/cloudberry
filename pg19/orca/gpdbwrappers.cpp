@@ -69,6 +69,7 @@ extern "C" {
 #include "access/genam.h"
 #include "access/htup_details.h"
 #include "access/parallel.h"
+#include "access/tableamext.h"
 #include "access/transam.h"
 #include "catalog/pg_aggregate.h"
 #include "catalog/pg_am.h"
@@ -2844,6 +2845,71 @@ gpdb::HasAnyTriggers(Oid relid)
 	}
 	GP_WRAP_END;
 	return true;
+}
+
+bool
+gpdb::RelOldRowFromPlan(Oid relid)
+{
+	GP_WRAP_START;
+	{
+		/* the statement's parser has the table locked */
+		Relation	rel;
+		bool		from_plan;
+
+		if (TableAmExtensionCount == 0)
+			return false;
+		rel = RelationIdGetRelation(relid);
+		from_plan = table_old_row_from_plan(rel);
+		RelationClose(rel);
+		return from_plan;
+	}
+	GP_WRAP_END;
+	return false;
+}
+
+List *
+gpdb::InferArbiterIndexes(Query *query)
+{
+	GP_WRAP_START;
+	{
+		/*
+		 * infer_arbiter_indexes() reads root->parse alone, and the condition
+		 * of a partial index's inference as the planner leaves it, an
+		 * implicit AND (preprocess_expression(), EXPRKIND_QUAL).
+		 */
+		PlannerInfo *root = makeNode(PlannerInfo);
+		Query	   *parse = (Query *) copyObject(query);
+
+		parse->onConflict->arbiterWhere = (Node *)
+			make_ands_implicit((Expr *) parse->onConflict->arbiterWhere);
+		root->parse = parse;
+		root->glob = makeNode(PlannerGlobal);
+		return infer_arbiter_indexes(root);
+	}
+	GP_WRAP_END;
+	return NIL;
+}
+
+List *
+gpdb::ExtractUpdateTargetlistColnos(List *tlist)
+{
+	GP_WRAP_START;
+	{
+		return extract_update_targetlist_colnos(tlist);
+	}
+	GP_WRAP_END;
+	return NIL;
+}
+
+List *
+gpdb::MakeAndsImplicit(Expr *clause)
+{
+	GP_WRAP_START;
+	{
+		return make_ands_implicit(clause);
+	}
+	GP_WRAP_END;
+	return NIL;
 }
 
 int

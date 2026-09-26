@@ -471,6 +471,14 @@ private:
 	// complete the result relation's permission entry from the Query's
 	void CompleteResultRelationPermissions(Index index);
 
+	// the Query's RETURNING list, over the result relation at "index"
+	List *TranslateReturningList(Index index);
+
+	// the Query's ON CONFLICT, given to the ModifyTable
+	void TranslateOnConflict(ModifyTable *dml, Index index,
+							 const IMDRelation *md_rel);
+
+
 	// make every node of a plan tree depend on a parameter
 	static void AddParamToPlanTree(Plan *plan, int paramid);
 

@@ -5768,16 +5768,22 @@ CTranslatorDXLToPlStmt::TranslateDXLDynForeignScan(
 //
 //		Cloudberry's body, for PostgreSQL 19's ModifyTable.  What changed:
 //
-//		- No split update.  Cloudberry's ModifyTable can run an UPDATE as a
-//		  DELETE and an INSERT, told apart by a "DMLAction" column, which is
-//		  how a row moves to another segment; PostgreSQL 19's cannot.  ORCA
-//		  plans one when a distribution or partition key changes, which on
-//		  one node is never a heap table's -- UPDATE of a partitioned table
-//		  is refused before ORCA sees it -- so it is refused here.
+//		- A split update is gp_core's node, not ModifyTable's.  Cloudberry's
+//		  ModifyTable can run an UPDATE as a DELETE and an INSERT, told apart
+//		  by a "DMLAction" column, which is how a row moves to another
+//		  segment; PostgreSQL 19's cannot.  ORCA plans one when a
+//		  distribution key changes, only on a cluster, where gp_core applies
+//		  it (gp_split.c); on one node none is planned -- UPDATE of a
+//		  partitioned table is refused before ORCA sees it.
 //		- Cloudberry's refusal of an UPDATE of a table with UPDATE triggers
-//		  is dropped.  With no split, ModifyTable fires them as it does
-//		  under the planner's plan, a trigger declared UPDATE OF a column
-//		  included, which the ORCA suite checks.
+//		  is dropped where the row stays where it is: ModifyTable fires them
+//		  as it does under the planner's plan, a trigger declared UPDATE OF a
+//		  column included, which the ORCA suite checks.  A split update of a
+//		  table with triggers is refused, as Cloudberry refuses it.
+//		- RETURNING and ON CONFLICT, which Cloudberry's translator refuses:
+//		  ORCA never sees either, and the ModifyTable is given the Query's,
+//		  as the planner gives them to it (TranslateReturningList,
+//		  TranslateOnConflict).
 //		- The row is found by "ctid" alone.  Cloudberry adds "gp_segment_id"
 //		  beside it, a system column PostgreSQL 19 does not have; the Query
 //		  translator gives ORCA tableoid in its place, and it stops here.
@@ -5796,7 +5802,8 @@ CTranslatorDXLToPlStmt::TranslateDXLDynForeignScan(
 //		- rootRelation is zero and forceTupleRouting gone: PostgreSQL 19 sets
 //		  up tuple routing for an INSERT into a partitioned table by itself,
 //		  and names a root relation only when there are several result
-//		  relations, which there never are here.
+//		  relations -- an UPDATE's or a DELETE's of a partitioned table,
+//		  which is refused before ORCA sees it.
 //
 //---------------------------------------------------------------------------
 Plan *
@@ -5845,8 +5852,8 @@ CTranslatorDXLToPlStmt::TranslateDXLDml(
 	// ORCA marks every INSERT and DELETE split too (CXformUtils,
 	// PexprLogicalDMLOverProject), where it means nothing; for an UPDATE it
 	// means the DMLAction column.  Cloudberry also splits every update of an
-	// append-only table, which is M5's, and which the relcache translator
-	// does not report on this node.
+	// append-optimized or PAX table, which ORCA's plan here does not write:
+	// the planner's does, taking the old row from the plan (O20).
 	// A split update: the row moves to another segment, and gp_core applies
 	// it as a DELETE there and an INSERT where it goes (gp_split.c).  Only on
 	// a cluster, where the table is hash distributed; on one node ORCA plans
@@ -5910,6 +5917,40 @@ CTranslatorDXLToPlStmt::TranslateDXLDml(
 	m_result_rel_list = gpdb::LAppendInt(m_result_rel_list, index);
 
 	CompleteResultRelationPermissions(index);
+
+	// RETURNING, which ORCA never saw: the Query's list, which the
+	// ModifyTable evaluates over the row it wrote.  Not a split update's,
+	// whose rows gp_core's node writes as a DELETE and an INSERT.  Not a
+	// DELETE's from a table whose method cannot fetch the deleted row by its
+	// ctid, which it takes from a whole-row column of the plan's instead
+	// (O20): ORCA's DELETE carries the ctid alone.  And on the segments, not
+	// an anonymous record, whose text reads back only where its type is
+	// known, as a Gather's rows are read back (gp_motion.c).
+	List *returning = TranslateReturningList(index);
+	if (NIL != returning && split)
+	{
+		GP_UNPORTED("RETURNING from an UPDATE that moves rows");
+	}
+	if (NIL != returning && CMD_DELETE == m_cmd_type &&
+		gpdb::RelOldRowFromPlan(CMDIdGPDB::CastMdid(mdid_target_table)->Oid()))
+	{
+		GP_UNPORTED(
+			"DELETE ... RETURNING of a table whose rows are not fetched by ctid");
+	}
+	if (NIL != returning && nullptr != writeslice)
+	{
+		ListCell *lc_ret = nullptr;
+		ForEach(lc_ret, returning)
+		{
+			Oid type = gpdb::GetBaseType(
+				gpdb::ExprType((Node *) ((TargetEntry *) lfirst(lc_ret))->expr));
+			if (RECORDOID == type || RECORDARRAYOID == type)
+			{
+				GP_UNPORTED(
+					"a RETURNING value of an anonymous record type, from the segments");
+			}
+		}
+	}
 
 	CDXLNode *project_list_dxlnode = (*dml_dxlnode)[0];
 	CDXLNode *child_dxlnode = (*dml_dxlnode)[1];
@@ -5994,6 +6035,21 @@ CTranslatorDXLToPlStmt::TranslateDXLDml(
 	// one entry per result relation, whether or not it is a foreign table
 	dml->fdwPrivLists = ListMake1(NIL);
 	dml->onConflictAction = ONCONFLICT_NONE;
+	if (nullptr != m_dxl_to_plstmt_context->m_orig_query->onConflict)
+	{
+		TranslateOnConflict(dml, index, md_rel);
+	}
+
+	// What RETURNING gives is what the ModifyTable returns, and its target
+	// list, as set_plan_refs() makes it; OLD and NEW by the Query's names.
+	if (NIL != returning)
+	{
+		Query *query = m_dxl_to_plstmt_context->m_orig_query;
+
+		dml->returningLists = ListMake1(returning);
+		dml->returningOldAlias = query->returningOldAlias;
+		dml->returningNewAlias = query->returningNewAlias;
+	}
 
 	// The planner gives every ModifyTable one (planner.c,
 	// assign_special_exec_param), and makes every node below depend on it
@@ -6005,7 +6061,8 @@ CTranslatorDXLToPlStmt::TranslateDXLDml(
 
 	plan->lefttree = result_plan;
 	plan->righttree = nullptr;
-	plan->targetlist = NIL;
+	plan->targetlist =
+		NIL != returning ? (List *) gpdb::CopyObject(returning) : NIL;
 	plan->plan_node_id = m_dxl_to_plstmt_context->GetNextPlanId();
 
 	SetParamIds(plan);
@@ -6158,6 +6215,168 @@ CTranslatorDXLToPlStmt::CreateUpdateTargetList(List *target_list,
 	}
 
 	return result;
+}
+
+//---------------------------------------------------------------------------
+//	@function:
+//		CTranslatorDXLToPlStmt::TranslateReturningList
+//
+//	@doc:
+//		The Query's RETURNING list, as the ModifyTable evaluates it: over the
+//		row it wrote, the old version and the new, whose Vars name the
+//		result relation -- at "index" in ORCA's range table -- as the
+//		planner's set_plan_refs() leaves them naming it
+//		(set_returning_clause_references()).  The Query translator has
+//		checked that the list reads that row alone (CheckReturningList), and
+//		it comes folded, as ORCA's Query was.  NIL where there is none.
+//
+//---------------------------------------------------------------------------
+List *
+CTranslatorDXLToPlStmt::TranslateReturningList(Index index)
+{
+	Query *query = m_dxl_to_plstmt_context->m_orig_query;
+
+	if (NIL == query->returningList)
+	{
+		return NIL;
+	}
+
+	List *returning = (List *) gpdb::CopyObject(query->returningList);
+	List *vars = gpdb::ExtractNodesExpression(
+		(Node *) returning, T_Var, false /*descendIntoSubqueries*/);
+	ListCell *lc = nullptr;
+	ForEach(lc, vars)
+	{
+		Var *var = (Var *) lfirst(lc);
+		GPOS_ASSERT((Index) query->resultRelation == var->varno);
+		var->varno = index;
+		var->varnosyn = index;
+	}
+
+	return returning;
+}
+
+//---------------------------------------------------------------------------
+//	@function:
+//		CTranslatorDXLToPlStmt::TranslateOnConflict
+//
+//	@doc:
+//		An INSERT's ON CONFLICT, which ORCA never saw, given to the
+//		ModifyTable as the planner gives it (make_modifytable() and
+//		set_plan_refs()): the arbiter indexes infer_arbiter_indexes() finds;
+//		the EXCLUDED pseudo-relation, its range table entry added to ORCA's
+//		range table and its target list pointing at it, for EXPLAIN; the SET
+//		list numbered as the executor takes it, with the columns it sets;
+//		and the WHERE condition as an implicit AND.  In the last two a Var of
+//		the result relation reads the row the insert met, at "index" in
+//		ORCA's range table, and one of EXCLUDED the row it proposed, as
+//		INNER_VAR -- the EXCLUDED target list is numbered by the table's
+//		attributes, so the attribute number stays.  The Query translator has
+//		checked that they read nothing else (CheckOnConflict).
+//
+//		What Cloudberry's analyze.c refuses of a DO UPDATE on a cluster is
+//		left to the planner's route, which refuses it in the same words
+//		(GpExplicitOnConflict): a SET of a hash-distributed table's
+//		distribution column, which would leave the row on the wrong segment,
+//		and a volatile function in the update of a replicated table's rows,
+//		which each segment would compute its own.
+//
+//---------------------------------------------------------------------------
+void
+CTranslatorDXLToPlStmt::TranslateOnConflict(ModifyTable *dml, Index index,
+											const IMDRelation *md_rel)
+{
+	Query *query = m_dxl_to_plstmt_context->m_orig_query;
+	OnConflictExpr *on_conflict =
+		(OnConflictExpr *) gpdb::CopyObject(query->onConflict);
+	ListCell *lc = nullptr;
+
+	if (ONCONFLICT_UPDATE == on_conflict->action)
+	{
+		if (IMDRelation::EreldistrHash == md_rel->GetRelDistribution())
+		{
+			ForEach(lc, on_conflict->onConflictSet)
+			{
+				TargetEntry *te = (TargetEntry *) lfirst(lc);
+				for (ULONG ul = 0; ul < md_rel->DistrColumnCount(); ul++)
+				{
+					if (md_rel->GetDistrColAt(ul)->AttrNum() == te->resno)
+					{
+						GP_UNPORTED(
+							"ON CONFLICT DO UPDATE of a distribution column");
+					}
+				}
+			}
+		}
+		if (IMDRelation::EreldistrReplicated == md_rel->GetRelDistribution() &&
+			(gpdb::ContainsVolatileFunctions(
+				 (Node *) on_conflict->onConflictSet) ||
+			 gpdb::ContainsVolatileFunctions(on_conflict->onConflictWhere)))
+		{
+			GP_UNPORTED(
+				"a volatile function in ON CONFLICT DO UPDATE of a replicated table");
+		}
+	}
+
+	// EXCLUDED, which only DO UPDATE and DO SELECT have.  No permission is
+	// checked on it, the parser says, but the target's (analyze.c); so its
+	// entry points at none of ORCA's.
+	Index excl_index = 0;
+	if (0 < on_conflict->exclRelIndex)
+	{
+		RangeTblEntry *excl_rte = (RangeTblEntry *) gpdb::CopyObject(
+			gpdb::ListNth(query->rtable, on_conflict->exclRelIndex - 1));
+		excl_rte->perminfoindex = 0;
+		m_dxl_to_plstmt_context->AddRTE(excl_rte);
+		excl_rte->inFromCl = false;
+		excl_index = (Index) gpdb::ListLength(
+			m_dxl_to_plstmt_context->GetRTableEntriesList());
+	}
+
+	// the Vars of the SET list and the condition: the row met, and EXCLUDED's
+	Node *clause = (Node *) ListMake2(on_conflict->onConflictSet,
+									  on_conflict->onConflictWhere);
+	List *vars = gpdb::ExtractNodesExpression(
+		clause, T_Var, false /*descendIntoSubqueries*/);
+	ForEach(lc, vars)
+	{
+		Var *var = (Var *) lfirst(lc);
+		if ((Index) query->resultRelation == var->varno)
+		{
+			var->varno = index;
+			var->varnosyn = index;
+		}
+		else
+		{
+			GPOS_ASSERT((Index) on_conflict->exclRelIndex == var->varno);
+			var->varno = INNER_VAR;
+		}
+	}
+
+	// the EXCLUDED target list, which EXPLAIN reads EXCLUDED's names from
+	List *excl_tlist = (List *) gpdb::CopyObject(on_conflict->exclRelTlist);
+	if (NIL != excl_tlist)
+	{
+		List *excl_vars = gpdb::ExtractNodesExpression(
+			(Node *) excl_tlist, T_Var, false /*descendIntoSubqueries*/);
+		ForEach(lc, excl_vars)
+		{
+			Var *var = (Var *) lfirst(lc);
+			var->varno = excl_index;
+			var->varnosyn = excl_index;
+		}
+	}
+
+	dml->onConflictAction = on_conflict->action;
+	dml->onConflictLockStrength = on_conflict->lockStrength;
+	dml->arbiterIndexes = gpdb::InferArbiterIndexes(query);
+	dml->onConflictSet = on_conflict->onConflictSet;
+	dml->onConflictCols =
+		gpdb::ExtractUpdateTargetlistColnos(dml->onConflictSet);
+	dml->onConflictWhere = (Node *) gpdb::MakeAndsImplicit(
+		(Expr *) on_conflict->onConflictWhere);
+	dml->exclRelRTI = excl_index;
+	dml->exclRelTlist = excl_tlist;
 }
 
 //---------------------------------------------------------------------------

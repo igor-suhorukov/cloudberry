@@ -290,6 +290,11 @@ typedef struct MotionState
 	binaryheap *heap;
 	bool		merging;
 	int			last;			/* the segment whose row went out last */
+
+	/* A write: carried out, and the rows its RETURNING gave, to hand out. */
+	bool		written;
+	Tuplestorestate *returned;
+	TupleTableSlot *returnedslot;
 } MotionState;
 
 static Node *motion_create_state(CustomScan *cscan);
@@ -490,8 +495,27 @@ motion_make(int type, Plan *fragment, List *targetlist, List *qual,
 Plan *
 GpMotionMakeDml(Plan *modify, int content, int slice)
 {
+	List	   *tlist = NIL;
+
 	Assert(IsA(modify, ModifyTable) || GpSplitModifyIs(modify, NULL));
-	return (Plan *) motion_make(GP_MOTION_DML, modify, NIL, NIL, content,
+
+	/*
+	 * A write with RETURNING sends its rows up, as a Gather's fragment does:
+	 * the Motion's columns are the ModifyTable's, which are its RETURNING
+	 * list's, as setrefs.c makes them.  Without it the ModifyTable has none,
+	 * and neither has the Motion.
+	 */
+	foreach_node(TargetEntry, tle, modify->targetlist)
+	{
+		Var		   *var = makeVar(OUTER_VAR, tle->resno,
+								  exprType((Node *) tle->expr),
+								  exprTypmod((Node *) tle->expr),
+								  exprCollation((Node *) tle->expr), 0);
+
+		tlist = lappend(tlist, makeTargetEntry((Expr *) var, tle->resno,
+											   tle->resname, false));
+	}
+	return (Plan *) motion_make(GP_MOTION_DML, modify, tlist, NIL, content,
 								slice);
 }
 
@@ -1799,11 +1823,15 @@ fragment_sql_ex(EState *estate, Plan *fragment, CustomScan *motion,
 	bool		split = GpSplitModifyIs(fragment, NULL);
 	bool		write = IsA(fragment, ModifyTable) || split;
 
-	/* a write is the statement's own command; everything else reads */
+	/*
+	 * A write is the statement's own command, and returns its RETURNING's
+	 * rows where it has one; everything else reads.
+	 */
 	memcpy(frag, whole, sizeof(PlannedStmt));
 	frag->commandType = !write ? CMD_SELECT
 		: split ? CMD_UPDATE : ((ModifyTable *) fragment)->operation;
-	frag->hasReturning = false;
+	frag->hasReturning = write && !split &&
+		((ModifyTable *) fragment)->returningLists != NIL;
 	frag->hasModifyingCTE = false;
 	frag->canSetTag = true;
 	frag->planTree = fragment;
@@ -2640,7 +2668,34 @@ motion_dml_run(MotionState *state)
 	if (!state->prepared)
 		motion_prepare(state);
 
-	if (state->ncontents > 0)
+	/*
+	 * With RETURNING, what the segments return comes back with their counts
+	 * and is handed out from here: every segment's rows, but a replicated
+	 * table's, which every segment returns alike, once.
+	 */
+	if (write->targetlist != NIL)
+	{
+		TupleDesc	tupdesc = state->css.ss.ss_ScanTupleSlot->tts_tupleDescriptor;
+		MemoryContext oldcxt = MemoryContextSwitchTo(estate->es_query_cxt);
+
+		state->returned = tuplestore_begin_heap(false, false, work_mem);
+		state->returnedslot = MakeSingleTupleTableSlot(tupdesc,
+													   &TTSOpsMinimalTuple);
+		MemoryContextSwitchTo(oldcxt);
+
+		GpDispatchWriteReturning(fragment_sql_ex(estate, write,
+												 (CustomScan *) state->css.ss.ps.plan,
+												 state->css.ss.ps.ps_ExprContext,
+												 state->key,
+												 state->streaming ? stream_start(state) : NIL,
+												 false),
+								 state->ncontents > 0 ? -1 : state->content,
+								 state->ncontents > 0 ? state->contents : NULL,
+								 state->ncontents, tupdesc, state->returned,
+								 policy != NULL && GpPolicyIsReplicated(policy),
+								 counts);
+	}
+	else if (state->ncontents > 0)
 		GpDispatchCommandParamsOnContents(fragment_sql_ex(estate, write,
 														  (CustomScan *) state->css.ss.ps.plan,
 														  state->css.ss.ps.ps_ExprContext,
@@ -2824,7 +2879,15 @@ motion_next(ScanState *ss)
 
 	if (state->type == GP_MOTION_DML)
 	{
-		motion_dml_run(state);
+		if (!state->written)
+		{
+			motion_dml_run(state);
+			state->written = true;
+		}
+		if (state->returned != NULL &&
+			tuplestore_gettupleslot(state->returned, true, false,
+									state->returnedslot))
+			return ExecCopySlot(slot, state->returnedslot);
 		state->done = true;
 		return ExecClearTuple(slot);
 	}
@@ -2882,6 +2945,12 @@ motion_end(CustomScanState *node)
 		tuplestore_end(state->spool);
 		ExecDropSingleTupleTableSlot(state->spoolslot);
 		state->spool = NULL;
+	}
+	if (state->returned != NULL)
+	{
+		tuplestore_end(state->returned);
+		ExecDropSingleTupleTableSlot(state->returnedslot);
+		state->returned = NULL;
 	}
 
 
@@ -3032,16 +3101,26 @@ motion_explain_label(PlanState *planstate, ExplainState *es,
 		int			nsegs = motion_segments(state);
 		int			receivers = state->type == GP_MOTION_GATHER ? 1
 			: GpClusterSegmentCount();
+		const char *name = motion_type_name(state->type);
 
-		if (state->type == GP_MOTION_DML)
+		/*
+		 * The segments write, and send nothing up but their counts -- or,
+		 * with RETURNING, the rows it gives, as the Gather Motion over the
+		 * ModifyTable of Cloudberry's plan sends them.
+		 */
+		if (state->type == GP_MOTION_DML &&
+			planstate->plan->targetlist == NIL)
 		{
-			/* the segments write, and send nothing up but their counts */
 			*pname = "Dispatch";
 			*suffix = psprintf("  (slice%d; segments: %d)", state->slice, nsegs);
 			return;
 		}
-		*pname = psprintf("%s Motion %d:%d", motion_type_name(state->type),
-						  nsegs, receivers);
+		if (state->type == GP_MOTION_DML)
+		{
+			name = "Gather";
+			receivers = 1;
+		}
+		*pname = psprintf("%s Motion %d:%d", name, nsegs, receivers);
 		*suffix = psprintf("  (slice%d; segments: %d)", state->slice, nsegs);
 		return;
 	}

@@ -695,18 +695,18 @@ CTranslatorQueryToDXL::TranslateSelectQueryToDXL()
 		}
 	}
 
-	// RETURNING is not supported yet.
+	// RETURNING, which ORCA never sees: DXL to PlannedStmt gives the
+	// ModifyTable the Query's list (TranslateDXLDml).
 	if (m_query->returningList)
 	{
-		GPOS_RAISE(gpdxl::ExmaDXL, gpdxl::ExmiQuery2DXLUnsupportedFeature,
-				   GPOS_WSZ_LIT("RETURNING clause"));
+		CheckReturningList();
 	}
 
-	// ON CONFLICT is not supported yet.
+	// ON CONFLICT, which ORCA never sees either: DXL to PlannedStmt gives
+	// the ModifyTable the Query's clause (TranslateOnConflict).
 	if (m_query->onConflict)
 	{
-		GPOS_RAISE(gpdxl::ExmaDXL, gpdxl::ExmiQuery2DXLUnsupportedFeature,
-				   GPOS_WSZ_LIT("ON CONFLICT clause"));
+		CheckOnConflict();
 	}
 
 	if (m_query->limitOption == LIMIT_OPTION_WITH_TIES)
@@ -1178,6 +1178,108 @@ CTranslatorQueryToDXL::CheckDMLReadsOnlyTarget() const
 	if (!reads_only_target)
 	{
 		GP_UNPORTED("an UPDATE or DELETE that reads another relation");
+	}
+}
+
+//---------------------------------------------------------------------------
+//	@function:
+//		CTranslatorQueryToDXL::CheckReturningList
+//
+//	@doc:
+//		Refuse a RETURNING list the ModifyTable cannot take as it stands.
+//
+//		ORCA never sees the list.  DXL to PlannedStmt gives it to the
+//		ModifyTable, which evaluates it over the row it wrote -- the old one
+//		and the new, as OLD and NEW -- so a list that reads that row alone
+//		is taken, whatever else it computes.  A subquery is refused, which
+//		the planner would plan as a SubPlan of its own, and so is a column
+//		of another relation, which only an UPDATE ... FROM or a DELETE ...
+//		USING has, and which the plan would have to carry up to the
+//		ModifyTable.  Cloudberry's translator refuses every RETURNING.
+//
+//---------------------------------------------------------------------------
+void
+CTranslatorQueryToDXL::CheckReturningList() const
+{
+	if (0 != m_query_level || CMD_SELECT == m_query->commandType)
+	{
+		GPOS_RAISE(gpdxl::ExmaDXL, gpdxl::ExmiQuery2DXLUnsupportedFeature,
+				   GPOS_WSZ_LIT("RETURNING clause"));
+	}
+
+	Node *returning = (Node *) m_query->returningList;
+	List *sublinks = gpdb::ExtractNodesExpression(
+		returning, T_SubLink, false /*descendIntoSubqueries*/);
+	if (NIL != sublinks)
+	{
+		GP_UNPORTED("a subquery in RETURNING");
+	}
+
+	List *vars = gpdb::ExtractNodesExpression(
+		returning, T_Var, false /*descendIntoSubqueries*/);
+	ListCell *lc = nullptr;
+	ForEach(lc, vars)
+	{
+		Var *var = (Var *) lfirst(lc);
+		if (0 != var->varlevelsup ||
+			(Index) m_query->resultRelation != var->varno)
+		{
+			GP_UNPORTED("a RETURNING that reads another relation");
+		}
+	}
+}
+
+//---------------------------------------------------------------------------
+//	@function:
+//		CTranslatorQueryToDXL::CheckOnConflict
+//
+//	@doc:
+//		Refuse an ON CONFLICT clause the ModifyTable cannot take as it
+//		stands.
+//
+//		ORCA plans the rows an INSERT proposes and never sees the clause.
+//		DXL to PlannedStmt gives it to the ModifyTable, which evaluates its
+//		SET and WHERE over the row the insert met and the one it proposed,
+//		EXCLUDED, and nothing else -- so a subquery is refused, which the
+//		planner would plan as a SubPlan of its own.  Cloudberry's
+//		translator refuses every ON CONFLICT.
+//
+//---------------------------------------------------------------------------
+void
+CTranslatorQueryToDXL::CheckOnConflict() const
+{
+	OnConflictExpr *on_conflict = m_query->onConflict;
+
+	if (0 != m_query_level || CMD_INSERT != m_query->commandType)
+	{
+		GPOS_RAISE(gpdxl::ExmaDXL, gpdxl::ExmiQuery2DXLUnsupportedFeature,
+				   GPOS_WSZ_LIT("ON CONFLICT clause"));
+	}
+
+	Node *clause = (Node *) gpdb::LAppend(
+		gpdb::LAppend(gpdb::LAppend(ListMake1(on_conflict->arbiterElems),
+									on_conflict->arbiterWhere),
+					  on_conflict->onConflictSet),
+		on_conflict->onConflictWhere);
+	List *sublinks = gpdb::ExtractNodesExpression(
+		clause, T_SubLink, false /*descendIntoSubqueries*/);
+	if (NIL != sublinks)
+	{
+		GP_UNPORTED("a subquery in ON CONFLICT");
+	}
+
+	List *vars = gpdb::ExtractNodesExpression(
+		clause, T_Var, false /*descendIntoSubqueries*/);
+	ListCell *lc = nullptr;
+	ForEach(lc, vars)
+	{
+		Var *var = (Var *) lfirst(lc);
+		if (0 != var->varlevelsup ||
+			((Index) m_query->resultRelation != var->varno &&
+			 (Index) on_conflict->exclRelIndex != var->varno))
+		{
+			GP_UNPORTED("an ON CONFLICT that reads another relation");
+		}
 	}
 }
 

@@ -3202,6 +3202,125 @@ GpDispatchWriteOnContent(int content, const char *sql, int nparams,
 }
 
 /*
+ * A write whose RETURNING gives rows -- ORCA's plan of one, a ModifyTable
+ * each segment runs (gp_motion.c) -- on the segments asked, all at once, and
+ * what each said: how many rows it changed, and the rows it returned, read
+ * by "tupdesc"'s input functions, each segment's in turn.  Every segment of a
+ * replicated table returns the same rows, and "one_segment" keeps the first's.
+ */
+void
+GpDispatchWriteReturning(const char *sql, int content, const int *contents,
+						 int ncontents, TupleDesc tupdesc,
+						 Tuplestorestate *store, bool one_segment,
+						 uint64 *counts)
+{
+	GpGang	   *g = gang_get();
+	PGresult  **results;
+	int			natts = tupdesc->natts;
+	FmgrInfo   *in = palloc_array(FmgrInfo, Max(natts, 1));
+	Oid		   *ioparams = palloc_array(Oid, Max(natts, 1));
+	Datum	   *datums = palloc_array(Datum, Max(natts, 1));
+	bool	   *nulls = palloc_array(bool, Max(natts, 1));
+	MemoryContext rowcxt;
+	int			n = 0;
+	bool		kept = false;
+
+	gang_prepare(g, true);
+
+	for (int i = 0; i < g->nconns; i++)
+	{
+		GpSegmentConn *c = &g->conns[i];
+
+		if (contents != NULL ? !conn_listed(c, contents, ncontents)
+			: !conn_asked(c, content, 0))
+			continue;
+		if (c->busy && c->fetching != NULL)
+			conn_park(c);
+		if (!PQsendQueryParams(c->conn, sql, 0, NULL, NULL, NULL, NULL, 0))
+		{
+			char	   *msg = pstrdup(PQerrorMessage(c->conn));
+			int			failed = c->content;
+
+			gang_close();
+			ereport(ERROR,
+					(errcode(ERRCODE_CONNECTION_FAILURE),
+					 errmsg("could not send a statement to segment %d", failed),
+					 errdetail_internal("%s", msg)));
+		}
+		c->busy = true;
+	}
+
+	results = (PGresult **) palloc0_array(PGresult *, g->nconns);
+	gang_wait_all_keeping_commands(g, results);
+
+	/* the counts come back as command tags, in the order they were asked */
+	if (contents != NULL)
+	{
+		for (int k = 0; k < ncontents; k++)
+		{
+			counts[k] = 0;
+			for (int i = 0; i < g->nconns; i++)
+				if (g->conns[i].content == contents[k] && results[i] != NULL)
+					counts[k] = strtou64(PQcmdTuples(results[i]), NULL, 10);
+		}
+	}
+	else
+	{
+		for (int i = 0; i < g->nconns; i++)
+			if (conn_asked(&g->conns[i], content, 0))
+				counts[n++] = results[i] ? strtou64(PQcmdTuples(results[i]), NULL, 10) : 0;
+	}
+
+	for (int j = 0; j < natts; j++)
+	{
+		Oid			func;
+
+		getTypeInputInfo(GpTransferType(TupleDescAttr(tupdesc, j)->atttypid),
+						 &func, &ioparams[j]);
+		fmgr_info(func, &in[j]);
+	}
+
+	/* each row's values live until it is in the store */
+	rowcxt = AllocSetContextCreate(CurrentMemoryContext, "returned row",
+								   ALLOCSET_DEFAULT_SIZES);
+	for (int i = 0; i < g->nconns; i++)
+	{
+		PGresult   *res = results[i];
+
+		if (res == NULL || PQresultStatus(res) != PGRES_TUPLES_OK ||
+			(one_segment && kept))
+			continue;
+		if (PQnfields(res) != natts)
+			elog(ERROR, "segment %d returned %d columns, not %d",
+				 g->conns[i].content, PQnfields(res), natts);
+		kept = true;
+
+		for (int r = 0; r < PQntuples(res); r++)
+		{
+			MemoryContext oldcxt = MemoryContextSwitchTo(rowcxt);
+
+			for (int j = 0; j < natts; j++)
+			{
+				nulls[j] = PQgetisnull(res, r, j);
+				datums[j] = InputFunctionCall(&in[j],
+											  nulls[j] ? NULL : PQgetvalue(res, r, j),
+											  ioparams[j],
+											  TupleDescAttr(tupdesc, j)->atttypmod);
+			}
+			MemoryContextSwitchTo(oldcxt);
+			tuplestore_putvalues(store, tupdesc, datums, nulls);
+			MemoryContextReset(rowcxt);
+		}
+	}
+	MemoryContextDelete(rowcxt);
+
+	for (int i = 0; i < g->nconns; i++)
+		if (results[i] != NULL)
+			PQclear(results[i]);
+	pfree(results);
+}
+
+/*
  * A relation's name in SQL a segment is sent.  A temporary relation is in
  * this session's temporary schema, whose name -- pg_temp_N -- is the
  * coordinator's backend's; the segment backend's own is another number, and

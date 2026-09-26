@@ -246,6 +246,19 @@ extern uint64 GpDispatchWriteOnContent(int content, const char *sql,
 									   Tuplestorestate *store);
 
 /*
+ * A write whose RETURNING gives rows, on the segments asked -- one (content
+ * >= 0), the ncontents "contents" lists, or every one -- all at once: how
+ * many rows each changed, into "counts" (in content order, or the list's),
+ * and the rows it returned, into "store" in "tupdesc"'s columns: every
+ * segment's, or with "one_segment" the first's alone, where every segment
+ * returns the same rows -- a replicated table's.
+ */
+extern void GpDispatchWriteReturning(const char *sql, int content,
+									 const int *contents, int ncontents,
+									 TupleDesc tupdesc, Tuplestorestate *store,
+									 bool one_segment, uint64 *counts);
+
+/*
  * COPY ... FROM STDIN on one segment: begin with the COPY statement, send the
  * data in pieces, and end, which answers how many rows the segment took.  One
  * at a time.  An error the segment raises in the data has its context given

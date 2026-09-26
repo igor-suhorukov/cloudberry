@@ -852,6 +852,19 @@ Plan *MakeSplit(Plan *child, List *targetlist, List *deletecols,
 Plan *MakeSplitModify(Plan *child, Index rti, int natts, AttrNumber actioncol,
 					  AttrNumber ctidcol);
 bool HasAnyTriggers(Oid relid);
+
+// Does the relation's access method take a changed row's old version from
+// the plan, as a whole-row column, rather than fetch it by its ctid (O20)?
+bool RelOldRowFromPlan(Oid relid);
+
+// ON CONFLICT, as the planner makes it: the arbiter indexes of the INSERT
+// "query" -- infer_arbiter_indexes(), over its own Query -- an UPDATE's
+// target list numbered as the executor takes it, with the columns it sets,
+// and a condition as an implicit AND.
+List *InferArbiterIndexes(Query *query);
+List *ExtractUpdateTargetlistColnos(List *tlist);
+List *MakeAndsImplicit(Expr *clause);
+
 int MotionType(Plan *motion);
 int MotionSegment(Plan *motion);
 void SetMotionSegment(Plan *motion, int content);

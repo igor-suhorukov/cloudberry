@@ -425,6 +425,12 @@ private:
 	// refuse an UPDATE or DELETE that reads a relation besides its target
 	void CheckDMLReadsOnlyTarget() const;
 
+	// refuse a RETURNING list the ModifyTable cannot take as it stands
+	void CheckReturningList() const;
+
+	// refuse an ON CONFLICT clause the ModifyTable cannot take as it stands
+	void CheckOnConflict() const;
+
 	// translate a grouping func expression
 	CDXLNode *TranslateGroupingFuncToDXL(
 		const Expr *expr, CBitSet *bitset,

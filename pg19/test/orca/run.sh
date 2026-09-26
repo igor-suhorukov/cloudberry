@@ -2972,6 +2972,54 @@ dml "an UPDATE through a view" "Update on" \
     "CREATE TEMP TABLE t2vt AS SELECT g AS a, g AS b FROM generate_series(1, 10) g;
      CREATE TEMP VIEW t2v AS SELECT a, b FROM t2vt WHERE a > 5"
 
+# RETURNING, which ORCA never sees: the ModifyTable evaluates the Query's
+# list over the row it wrote -- the old version and the new, as OLD and NEW
+# name them -- and the rows it gives are the statement's.
+dml "an INSERT's RETURNING" "Insert on" \
+    "INSERT INTO t2d VALUES (1000, 1, 'r'), (1001, 2, 's') RETURNING a, c, a * b" \
+    "SELECT count(*) FROM t2d" "$T2D"
+
+dml "an UPDATE's RETURNING, old and new" "Update on" \
+    "UPDATE t2d SET b = b + 100 WHERE a <= 3 RETURNING a, old.b, new.b, b" \
+    "SELECT sum(b) FROM t2d" "$T2D"
+
+dml "a DELETE's RETURNING, the row it deleted, its system columns and the whole row" "Delete on" \
+    "DELETE FROM t2d WHERE a > 97 RETURNING *, upper(c), ctid IS NOT NULL, tableoid::regclass, t2d" \
+    "SELECT count(*) FROM t2d" "$T2D"
+
+dml "a prepared UPDATE's RETURNING, past the switch to a generic plan" "Update on" \
+    "EXECUTE t2ur(1); EXECUTE t2ur(2); EXECUTE t2ur(3); EXECUTE t2ur(4); EXECUTE t2ur(5); EXECUTE t2ur(6)" \
+    "SELECT sum(b) FROM t2d" \
+    "$T2D; PREPARE t2ur(int) AS UPDATE t2d SET b = -\$1 WHERE a = \$1 RETURNING a, b"
+
+# ON CONFLICT, which ORCA never sees either: ORCA plans the rows the INSERT
+# proposes, and the ModifyTable is given the clause as the planner gives it
+# -- the arbiter indexes infer_arbiter_indexes() finds, and SET and WHERE
+# reading the row met and the one proposed, EXCLUDED.  The table is
+# analyzed: an index built gives it a row count, and ORCA a NOTICE of the
+# columns with no statistics, which the planner has no counterpart of.
+T2C="$T2D; CREATE UNIQUE INDEX t2d_a ON t2d (a); ANALYZE t2d"
+
+dml "ON CONFLICT DO UPDATE, from EXCLUDED and the row met, where its condition holds" "Conflict Resolution: UPDATE" \
+    "INSERT INTO t2d SELECT a, a, 'n' || a FROM generate_series(95, 105) a
+       ON CONFLICT (a) DO UPDATE SET b = excluded.b + t2d.b, c = excluded.c WHERE t2d.b % 2 = 0 RETURNING *" \
+    "SELECT count(*), sum(b), count(*) FILTER (WHERE c LIKE 'n%') FROM t2d" "$T2C"
+
+dml "ON CONFLICT DO NOTHING, with an inference specification and without" "Conflict Resolution: NOTHING" \
+    "INSERT INTO t2d VALUES (1, 1, 'r'), (200, 2, 'r') ON CONFLICT (a) DO NOTHING RETURNING a;
+     INSERT INTO t2d VALUES (2, 1, 'r'), (201, 2, 'r') ON CONFLICT DO NOTHING" \
+    "SELECT count(*), sum(a) FROM t2d" "$T2C"
+
+dml "ON CONFLICT ON CONSTRAINT, and a SET of several columns at once" "Conflict Arbiter Indexes: t2k_pkey" \
+    "INSERT INTO t2k VALUES (1, 'one'), (3, 'three') ON CONFLICT ON CONSTRAINT t2k_pkey
+       DO UPDATE SET (a, b) = (excluded.a * 10, excluded.b || '!')" \
+    "SELECT * FROM t2k ORDER BY a" \
+    "CREATE TEMP TABLE t2k (a int PRIMARY KEY, b text); INSERT INTO t2k VALUES (1, 'uno'), (2, 'dos')"
+
+dml "ON CONFLICT DO SELECT, PostgreSQL 19's, and its lock" "Conflict Resolution: SELECT" \
+    "INSERT INTO t2d VALUES (5, 50, 'five'), (300, 3, 'new') ON CONFLICT (a) DO SELECT FOR UPDATE WHERE t2d.b < 10 RETURNING *" \
+    "SELECT count(*) FROM t2d" "$T2C"
+
 dml "a prepared UPDATE, past the plan cache's switch to a generic plan" "Update on" \
     "EXECUTE t2up(1, 11); EXECUTE t2up(2, 22); EXECUTE t2up(3, 33);
      EXECUTE t2up(4, 44); EXECUTE t2up(6, 66); EXECUTE t2up(7, 77)" \
@@ -3061,12 +3109,13 @@ declined "an UPDATE of a partitioned table, as in Cloudberry" \
          "CREATE TEMP TABLE t2p (a int, b text) PARTITION BY RANGE (a);
           CREATE TEMP TABLE t2p1 PARTITION OF t2p FOR VALUES FROM (0) TO (100)"
 
-declined "RETURNING" \
-         "INSERT INTO t2d VALUES (1000, 1, 'r') RETURNING a, c" "RETURNING clause" "$T2D"
+declined "a subquery in RETURNING, which the planner would make a SubPlan of" \
+         "UPDATE t2d SET c = 'z' WHERE a = 5 RETURNING (SELECT count(*) FROM t0)" \
+         "a subquery in RETURNING" "$T2D"
 
-declined "ON CONFLICT" \
-         "INSERT INTO t2d VALUES (1, 1, 'r') ON CONFLICT (a) DO UPDATE SET c = 'conflict'" \
-         "ON CONFLICT clause" "$T2D; CREATE UNIQUE INDEX ON t2d (a)"
+declined "a subquery in ON CONFLICT's SET" \
+         "INSERT INTO t2d VALUES (1, 1, 'r') ON CONFLICT (a) DO UPDATE SET c = (SELECT max(c) FROM t0)" \
+         "a subquery in ON CONFLICT" "$T2D; CREATE UNIQUE INDEX ON t2d (a)"
 
 declined "a view's INSTEAD OF trigger, which needs the whole old row" \
          "INSERT INTO t2vi VALUES (42, 42)" "a view's INSTEAD OF trigger" \
