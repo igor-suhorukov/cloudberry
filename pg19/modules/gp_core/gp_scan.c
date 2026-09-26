@@ -235,6 +235,14 @@ GpScanDistributedPolicy(Oid relid)
 
 	if (GpClusterIsSingleNode())
 		return NULL;
+
+	/*
+	 * A query inside a statement the coordinator dispatches whole reads and
+	 * writes the coordinator's copy: each segment runs it on its own
+	 * (GpDispatchIsRecording()).
+	 */
+	if (GpDispatchIsRecording())
+		return NULL;
 	if (get_rel_relkind(relid) != RELKIND_RELATION &&
 		get_rel_relkind(relid) != RELKIND_PARTITIONED_TABLE &&
 		!GpPolicyIsExternalTable(relid))

@@ -370,6 +370,7 @@ bool
 GpMotionCanDispatchPlans(void)
 {
 	return GpClusterBackendRole() == GP_ROLE_DISPATCH &&
+		!GpDispatchIsRecording() &&
 		GpClusterHasSecret() &&
 		OidIsValid(exec_fragment_oid());
 }

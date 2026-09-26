@@ -191,6 +191,25 @@ extern bool GpDispatchIsDispatchedStatement(Node *utilityStmt);
 extern bool GpDispatchIsTreeText(const char *str);
 
 /*
+ * On the coordinator: is it running a statement it dispatches whole once it
+ * has run here, as CREATE EXTENSION is?  Each segment runs that statement
+ * itself, and with it whatever the statement does inside -- an extension
+ * script's INSERT into a table the script made, a query of it -- so a query
+ * run inside it is the coordinator's alone, as on a node of its own.
+ */
+extern bool GpDispatchIsRecording(void);
+
+/*
+ * On a segment: is it running a statement the coordinator dispatched whole
+ * -- that statement, or one it runs inside, as an extension's script's
+ * statements are run?  The segment runs the script from its text, and takes
+ * the coordinator's OIDs in the order the coordinator took them, so what the
+ * coordinator's hooks made of a statement inside it, a segment's make of it
+ * too.
+ */
+extern bool GpDispatchIsRunningDispatched(void);
+
+/*
  * A statement with parameters, in text, on one segment (content >= 0), or
  * else on the first nsegments -- every one where that is 0; "types" gives
  * each parameter's type, or is NULL for the segment to infer them; "counts"

@@ -66,31 +66,41 @@
 #include <sys/stat.h>
 #include <unistd.h>
 
+#include "access/genam.h"
 #include "access/htup_details.h"
 #include "access/relation.h"
 #include "access/table.h"
 #include "access/xact.h"
 #include "catalog/catalog.h"
+#include "catalog/dependency.h"
 #include "catalog/namespace.h"
+#include "catalog/pg_depend.h"
+#include "catalog/pg_extension.h"
 #include "catalog/pg_namespace.h"
 #include "parser/parse_type.h"
 #include "catalog/objectaddress.h"
 #include "catalog/indexing.h"
 #include "catalog/pg_index.h"
 #include "commands/defrem.h"
+#include "commands/extension.h"
+#include "commands/tablecmds.h"
 #include "commands/tablespace.h"
 #include "commands/vacuum.h"
 #include "common/relpath.h"
+#include "executor/spi.h"
 #include "mb/pg_wchar.h"
 #include "miscadmin.h"
 #include "nodes/makefuncs.h"
 #include "nodes/parsenodes.h"
 #include "nodes/readfuncs.h"
 #include "parser/parser.h"
+#include "storage/bufmgr.h"
 #include "storage/lmgr.h"
 #include "tcop/tcopprot.h"
 #include "tcop/utility.h"
 #include "utils/backend_status.h"
+#include "utils/builtins.h"
+#include "utils/fmgroids.h"
 #include "utils/guc.h"
 #include "utils/lsyscache.h"
 #include "utils/memutils.h"
@@ -101,6 +111,7 @@
 #include "gp_core_api.h"
 #include "gp_dispatch.h"
 #include "gp_label.h"
+#include "gp_policy.h"
 #include "gp_scan.h"
 
 /*
@@ -463,6 +474,205 @@ dispatch_class(Node *parsetree)
 		default:
 			return GP_DISPATCH_LOCAL;
 	}
+}
+
+/*
+ * CREATE EXTENSION and ALTER EXTENSION UPDATE run the extension's script
+ * here and then on every segment, and while it runs here what its queries
+ * write is the coordinator's copy alone (GpDispatchIsRecording()); each
+ * segment writes its own as it runs the script.  So a table the script
+ * gave a distribution -- PostGIS's spatial_ref_sys, which gp_sql replicates
+ * (decision 14b) -- keeps its rows here only until the script is done: the
+ * coordinator keeps none of a distributed table's rows, as Cloudberry's does
+ * not, and a copy kept here would never see a later write.  A table the
+ * script made is emptied at no cost (ExecuteTruncateGuts() truncates one
+ * made in this transaction in place); one an update script wrote is given
+ * an empty file, as TRUNCATE gives it one.
+ */
+static void
+empty_script_tables(Node *parsetree)
+{
+	const char *extname;
+	Oid			extoid;
+	Relation	depRel;
+	ScanKeyData key[2];
+	SysScanDesc scan;
+	HeapTuple	tup;
+	List	   *rels = NIL;
+	List	   *relids = NIL;
+	List	   *relids_logged = NIL;
+	ListCell   *lc;
+
+	if (IsA(parsetree, CreateExtensionStmt))
+		extname = ((CreateExtensionStmt *) parsetree)->extname;
+	else if (IsA(parsetree, AlterExtensionStmt))
+		extname = ((AlterExtensionStmt *) parsetree)->extname;
+	else
+		return;
+	extoid = get_extension_oid(extname, true);
+	if (!OidIsValid(extoid))
+		return;
+
+	depRel = table_open(DependRelationId, AccessShareLock);
+	ScanKeyInit(&key[0], Anum_pg_depend_refclassid, BTEqualStrategyNumber,
+				F_OIDEQ, ObjectIdGetDatum(ExtensionRelationId));
+	ScanKeyInit(&key[1], Anum_pg_depend_refobjid, BTEqualStrategyNumber,
+				F_OIDEQ, ObjectIdGetDatum(extoid));
+	scan = systable_beginscan(depRel, DependReferenceIndexId, true, NULL,
+							  2, key);
+	while (HeapTupleIsValid(tup = systable_getnext(scan)))
+	{
+		Form_pg_depend dep = (Form_pg_depend) GETSTRUCT(tup);
+		GpPolicy   *policy;
+		Relation	rel;
+
+		if (dep->classid != RelationRelationId ||
+			dep->deptype != DEPENDENCY_EXTENSION ||
+			get_rel_relkind(dep->objid) != RELKIND_RELATION)
+			continue;
+		policy = GpPolicyGet(dep->objid);
+		if (GpPolicyIsEntry(policy))
+			continue;
+
+		/* the copy is empty here but where the script wrote it */
+		rel = table_open(dep->objid, AccessShareLock);
+		if (RelationGetNumberOfBlocks(rel) == 0)
+		{
+			table_close(rel, AccessShareLock);
+			continue;
+		}
+		table_close(rel, NoLock);
+		rel = table_open(dep->objid, AccessExclusiveLock);
+		rels = lappend(rels, rel);
+		relids = lappend_oid(relids, dep->objid);
+		if (RelationIsLogicallyLogged(rel))
+			relids_logged = lappend_oid(relids_logged, dep->objid);
+	}
+	systable_endscan(scan);
+	table_close(depRel, AccessShareLock);
+
+	if (rels == NIL)
+		return;
+	ExecuteTruncateGuts(rels, relids, relids_logged, DROP_RESTRICT, false,
+						false);
+	foreach(lc, rels)
+		table_close((Relation) lfirst(lc), NoLock);
+}
+
+/*
+ * The same extension on every node ("PostGIS on the hook-based Cloudberry",
+ * what the Cloudberry extension must add, item 5).  CREATE EXTENSION with no
+ * VERSION installs each node's own default version, and a node's library is
+ * whatever its host has installed; so once the statement has run everywhere,
+ * each segment's version of the extension is compared with the
+ * coordinator's -- and for PostGIS's, the libraries it reports it was built
+ * with, GEOS, PROJ and GDAL, since two hosts' PostGIS of one version may
+ * link different ones.  A difference is an error, which undoes the
+ * statement on every node.  PostGIS's full version string is not compared
+ * whole: it names PROJ's directories, which are a host's.
+ */
+static const struct
+{
+	const char *extname;
+	const char *query;			/* %1$s: the extension's schema, quoted */
+}			extension_libraries[] = {
+	{"postgis",
+		"SELECT %1$s.postgis_lib_version() || ', GEOS ' || %1$s.postgis_geos_version()"
+		" || ', PROJ ' || pg_catalog.split_part(%1$s.postgis_proj_version(), ' ', 1)"},
+	{"postgis_raster", "SELECT %1$s.postgis_gdal_version()"},
+	{"postgis_sfcgal", "SELECT %1$s.postgis_sfcgal_version()"},
+};
+
+/*
+ * The first column of the query's first row here, as text, or NULL.  Not
+ * read-only: that would read with the statement's snapshot, taken before
+ * the extension was made.
+ */
+static char *
+coordinator_value(const char *sql)
+{
+	MemoryContext cxt = CurrentMemoryContext;
+	char	   *result = NULL;
+
+	if (SPI_connect() != SPI_OK_CONNECT)
+		elog(ERROR, "SPI_connect failed");
+	if (SPI_execute(sql, false, 1) == SPI_OK_SELECT && SPI_processed > 0)
+	{
+		char	   *value = SPI_getvalue(SPI_tuptable->vals[0],
+										 SPI_tuptable->tupdesc, 1);
+
+		if (value != NULL)
+			result = MemoryContextStrdup(cxt, value);
+	}
+	SPI_finish();
+	return result;
+}
+
+static void
+check_same_everywhere(const char *extname, const char *sql)
+{
+	int			nsegments = GpClusterSegmentCount();
+	char	  **values = palloc0_array(char *, nsegments);
+	char	   *mine = coordinator_value(sql);
+
+	GpDispatchQueryFirstValues(sql, -1, values);
+	for (int i = 0; i < nsegments; i++)
+	{
+		if (values[i] != NULL && mine != NULL && strcmp(values[i], mine) == 0)
+			continue;
+		ereport(ERROR,
+				(errcode(ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE),
+				 errmsg("extension \"%s\" is not the same on segment %d as on the coordinator",
+						extname, i),
+				 errdetail("The segment has \"%s\", the coordinator \"%s\".",
+						   values[i] != NULL ? values[i] : "",
+						   mine != NULL ? mine : ""),
+				 errhint("Install the same version of the extension, and of the libraries it uses, on every host.")));
+	}
+}
+
+/*
+ * The check's queries are the planner's: ORCA would take one of the
+ * catalogs only to fall back from it, and say so to a session that traces
+ * its fallbacks, in lines Cloudberry's CREATE EXTENSION never prints.
+ */
+static void
+check_extension_everywhere(Node *parsetree)
+{
+	const char *extname;
+	Oid			extoid;
+	int			save_nestlevel;
+
+	if (IsA(parsetree, CreateExtensionStmt))
+		extname = ((CreateExtensionStmt *) parsetree)->extname;
+	else if (IsA(parsetree, AlterExtensionStmt))
+		extname = ((AlterExtensionStmt *) parsetree)->extname;
+	else
+		return;
+	extoid = get_extension_oid(extname, true);
+	if (!OidIsValid(extoid))
+		return;
+
+	save_nestlevel = NewGUCNestLevel();
+	if (GetConfigOption("gp.optimizer", true, false) != NULL)
+		(void) set_config_option("gp.optimizer", "off", PGC_USERSET,
+								 PGC_S_SESSION, GUC_ACTION_SAVE, true, 0,
+								 false);
+	check_same_everywhere(extname,
+						  psprintf("SELECT extversion FROM pg_catalog.pg_extension WHERE extname = %s",
+								   quote_literal_cstr(extname)));
+	for (int i = 0; i < lengthof(extension_libraries); i++)
+	{
+		char	   *schema;
+
+		if (strcmp(extension_libraries[i].extname, extname) != 0)
+			continue;
+		schema = get_namespace_name(get_extension_schema(extoid));
+		check_same_everywhere(extname,
+							  psprintf(extension_libraries[i].query,
+									   quote_identifier(schema)));
+	}
+	AtEOXact_GUC(false, save_nestlevel);
 }
 
 /* ------------------------------------------------------------------------- */
@@ -951,6 +1161,8 @@ gp_ddl_ProcessUtility(PlannedStmt *pstmt, const char *queryString,
 	}
 	PG_END_TRY();
 
+	empty_script_tables(parsetree);
+
 	/*
 	 * It ran here, so it will run there: most of what could make it fail --
 	 * the syntax, a name taken, a privilege missing -- has been checked on
@@ -971,6 +1183,7 @@ gp_ddl_ProcessUtility(PlannedStmt *pstmt, const char *queryString,
 
 	drop_temp_namespaces();
 	GpDispatchUtility(build_payload(tree), class == GP_DISPATCH_OWN_XACT);
+	check_extension_everywhere(parsetree);
 
 	if (IsA(parsetree, IndexStmt) && !((IndexStmt *) parsetree)->concurrent)
 		sync_indcheckxmin(recorded);
@@ -1108,6 +1321,18 @@ bool
 GpDispatchIsDispatchedStatement(Node *utilityStmt)
 {
 	return dispatched_tree != NULL && utilityStmt == dispatched_tree;
+}
+
+bool
+GpDispatchIsRecording(void)
+{
+	return recording;
+}
+
+bool
+GpDispatchIsRunningDispatched(void)
+{
+	return preassigning;
 }
 
 void
