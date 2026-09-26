@@ -165,12 +165,14 @@ make_cluster() {
 			|| { echo "node $n of group $g did not start"; tail -20 "$d.log"; return 1; }
 	done
 }
+t0=$(date +%s)
 for gi in "${!groups[@]}"; do
 	make_cluster "${groups[$gi]}" "$gi" &
 done
 for g in "${groups[@]}"; do
 	wait -n || exit 1
 done
+t1=$(date +%s)
 
 # The settings the port has, as sed that respells Cloudberry's names for
 # them; the singlenode suite says how.
@@ -283,6 +285,8 @@ amsub() {
 for g in "${groups[@]}"; do
 	make_suite "$g"
 done
+echo "  the clusters made in $((t1 - t0)) s, the groups' tests converted in $(( $(date +%s) - t1 )) s"
+echo
 
 mkdir -p "$WORK/gpdiff"
 cp "$CB"/gpdiff.pl "$CB"/atmsort.pm "$CB"/explain.pm "$WORK/gpdiff/"

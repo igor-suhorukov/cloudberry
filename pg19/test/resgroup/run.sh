@@ -85,7 +85,7 @@ for group in ${RG_GROUPS:-$all_groups}; do
 	# prints it in, whose width stays the column's; and every core, as a
 	# shell command of a test counts them, as the parent's.
 	cpus="${CPUS:-}"
-	procs="cat /sys/fs/cgroup/$parent/*/cgroup.procs /sys/fs/cgroup/$parent/*/*/cgroup.procs 2> /dev/null | paste -sd, -"
+	procs="','.join(p for f in __import__('glob').glob('/sys/fs/cgroup/$parent/*/cgroup.procs') + __import__('glob').glob('/sys/fs/cgroup/$parent/*/*/cgroup.procs') for p in open(f).read().split())"
 	sed="$(mktemp "${TMPDIR:-/tmp}/cb-resgroup-XXXXXX.sed")"
 	pad=$(printf '%*s' $(( ${#parent} - 4 )) '')
 	{
@@ -94,7 +94,7 @@ for group in ${RG_GROUPS:-$all_groups}; do
 		echo "s#(cgroup_parent -v )\"gpdb\"#\\1\"$parent\"#g"
 		echo "s#^ gpdb$pad( *)\$# $parent\\1#"
 		[ -n "$cpus" ] && echo "s#0-\\$\\(\\(\\$\\(nproc\\)-1\\)\\)#$cpus#g"
-		echo "s#subprocess\\.check_output\\(\\['ps', '-eF'\\]\\)#subprocess.check_output(['sh', '-c', 'ps -F -p \"\$($procs)\"'])#g"
+		echo "s#subprocess\\.check_output\\(\\['ps', '-eF'\\]\\)#subprocess.check_output(['ps', '-F', '-p', $procs])#g"
 	} > "$sed"
 
 	# As Cloudberry's installcheck-resgroup-v2 runs it: in its own database,

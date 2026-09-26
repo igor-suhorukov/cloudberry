@@ -433,13 +433,14 @@ coordinator for the tests that ask for one, and mirrors for the FTS tests; `fts`
 each with a mirror, and what FTS does when a mirror or a primary stops;
 `ao`, M5's, append-optimized tables on one node, a standby and recovery;
 `diskquota`, M5's too, Cloudberry's diskquota tests on a coordinator and
-three segments, its regression and isolation2 schedules as two jobs;
+three segments, its regression schedule as three jobs of its groups and its
+isolation2 schedule as one;
 `pax`, M5's too, Cloudberry's PAX tests, its `pax_schedule` on a
 coordinator and three segments under the planner, as Cloudberry's expected
 output has them; `resgroup`, M6's, Cloudberry's resource group schedule
-for cgroup v2, whose tests write the cgroups under `/sys/fs/cgroup/gpdb`
--- the tests service is privileged, and its entrypoint makes that subtree
-(`test/cgroup.sh`) -- and `memprot`, memory protection's refusals;
+for cgroup v2, whose tests write the cgroups under a parent of each job's
+own, `/sys/fs/cgroup/gpdb_<pass>_<group>` -- the tests service is
+privileged, and its entrypoint makes them (`test/cgroup.sh`) -- and `memprot`, memory protection's refusals;
 `gpmgmt`, M7's, gpMgmt's tools on clusters they make on this host --
 gpinitsystem's, a mirror for each primary, and one of primaries alone that
 gpaddmirrors gives mirrors -- each tool checked by what the cluster says
@@ -458,10 +459,14 @@ planner and under ORCA where it plans.
 The suites run side by side, as jobs: a suite with two passes is a job a
 pass, `pg19/test/jobs` lists how long each job takes so that the longest
 start first, and each job's output is printed whole as it finishes, with a
-summary of the jobs at the end.  The long suites split themselves further:
-PostGIS's tests over eight servers, `isolation2`'s over a cluster a group of
-tests, and `singlenode`'s Cloudberry half over copies of the server
-PostgreSQL's tests ran on.  `resgroup`'s job runs alone, after the rest: its
-CPU tests keep every core busy in cgroups that outweigh the other jobs', and
-measure what they get.  `JOBS=1` runs one job at a time, `PASSES=planner`
-only the planner passes, and `RESULTS_DIR` gets a directory for each job.
+summary of the jobs at the end -- with the CPU time each took, where the
+tests service gives the jobs a cgroup each, which weighs as the job is long.
+The long suites split themselves further: `greenplum`'s tests over six
+clusters, PostGIS's over eight servers, `isolation2`'s over a cluster a
+group of tests, `singlenode`'s Cloudberry half over copies of the server
+PostgreSQL's tests ran on, and `diskquota`'s, `pax`'s and `resgroup`'s over
+jobs of their groups.  `resgroup`'s test that measures what a group gets of
+the CPU runs after the rest, alone, each pass on half the cores: beside the
+other jobs, or on fewer cores, the shares it measures missed its bounds.
+`JOBS=1` runs one job at a time, `PASSES=planner` only the planner passes,
+and `RESULTS_DIR` gets a directory for each job.

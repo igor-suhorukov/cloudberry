@@ -107,9 +107,11 @@ services:
   # The jobs start some sixty servers at once, and each puts its dynamic
   # shared memory in /dev/shm, which is 64 MB unless the container is given
   # more.  Privileged, and started as root, for the resource group suite: the
-  # entrypoint makes a cgroup v2 subtree of the container's own cgroup
-  # namespace the tests' to write, /sys/fs/cgroup/gpdb, and then runs the
-  # suites as postgres (pg19/test/cgroup.sh).  Without it that suite skips.
+  # entrypoint makes cgroup v2 subtrees of the container's own cgroup
+  # namespace the tests' to write -- /sys/fs/cgroup/gpdb_<pass>_<group>, a
+  # cgroup parent for each of that suite's jobs, and jobs, a cgroup for each
+  # job of the run, which says its CPU time -- and then runs the suites as
+  # postgres (pg19/test/cgroup.sh).  Without it that suite skips.
   # The volume is a disk for that suite's clusters, whose I/O limits name
   # the disk a directory is on; run --rm removes it with the container.
   tests:
