@@ -133,6 +133,8 @@
 #include "parser/analyze.h"
 #include "parser/parse_relation.h"
 #include "parser/parsetree.h"
+#include "storage/proc.h"
+#include "storage/procarray.h"
 #include "utils/builtins.h"
 #include "utils/fmgroids.h"
 #include "utils/inval.h"
@@ -921,12 +923,25 @@ PG_FUNCTION_INFO_V1(gp_activity_session);
 Datum
 gp_activity_session(PG_FUNCTION_ARGS)
 {
+	int			pid = lock_row_pid(PG_GETARG_HEAPTUPLEHEADER(0));
 	int			session;
 	bool		reader;
 
-	if (!GpGddBackendIdentity(lock_row_pid(PG_GETARG_HEAPTUPLEHEADER(0)),
-							  &session, &reader))
+	if (!GpGddBackendIdentity(pid, &session, &reader))
+	{
+		/*
+		 * One node's backends tell no deadlock detector their session, there
+		 * being none to tell; a client's session is its own, its pid, as
+		 * GpClusterSessionId() says -- as in Cloudberry's single-node mode,
+		 * where every client backend has a gp_session_id.
+		 */
+		PGPROC	   *proc = pid != 0 && GpClusterIsSingleNode() ?
+			BackendPidGetProc(pid) : NULL;
+
+		if (proc != NULL && proc->backendType == B_BACKEND)
+			PG_RETURN_INT32(pid);
 		PG_RETURN_INT32(-1);
+	}
 	PG_RETURN_INT32(session);
 }
 
