@@ -167,6 +167,12 @@ private:
 	// or NULL for select queries
 	List *m_result_rel_list;
 
+	// the partitions each Dynamic Scan reads: for each, a list of the
+	// partitioned table's range table index, its partitions' indexes and
+	// their OIDs -- which an UPDATE or DELETE of the table takes for its
+	// result relations, as the planner's are its scans' own
+	List *m_partition_scans;
+
 	// number of segments
 	ULONG m_num_of_segments;
 

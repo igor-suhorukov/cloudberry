@@ -417,7 +417,12 @@ private:
 
 	// obtain the ids of the ctid and segmentid columns for the target
 	// table of a DML query
-	void GetCtidAndSegmentId(ULONG *ctid, ULONG *segment_id);
+	void GetCtidAndSegmentId(ULONG *ctid, ULONG *segment_id,
+							 BOOL partitioned);
+
+	// may ORCA plan this UPDATE or DELETE of a partitioned table?
+	static BOOL DMLPartitionedTargetTaken(const RangeTblEntry *rte,
+										  const IMDRelation *md_rel);
 
 	// refuse a DML target ORCA's DML operator cannot change
 	static void CheckDMLTarget(const RangeTblEntry *rte);

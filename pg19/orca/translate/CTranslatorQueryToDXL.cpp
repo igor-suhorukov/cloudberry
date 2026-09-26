@@ -1321,9 +1321,16 @@ CTranslatorQueryToDXL::CheckOnConflict() const
 //		a row of a randomly distributed table, which no relation is there,
 //		and DXL to PlannedStmt finds the row by ctid alone.
 //
+//		A partitioned table's row is found by its partition as well, whose
+//		tableoid PostgreSQL 19's ModifyTable reads (a "tableoid" junk
+//		column, ExecLookupResultRelByOid()), and tableoid rides in the
+//		second column: a hash-distributed table's rows are routed by their
+//		key, not by the column (DMLPartitionedTargetTaken).
+//
 //---------------------------------------------------------------------------
 void
-CTranslatorQueryToDXL::GetCtidAndSegmentId(ULONG *ctid, ULONG *segment_id)
+CTranslatorQueryToDXL::GetCtidAndSegmentId(ULONG *ctid, ULONG *segment_id,
+										   BOOL partitioned)
 {
 	const FormData_pg_attribute *att_tup_tupid =
 		SystemAttributeDefinition(SelfItemPointerAttributeNumber);
@@ -1339,7 +1346,7 @@ CTranslatorQueryToDXL::GetCtidAndSegmentId(ULONG *ctid, ULONG *segment_id)
 	mdid->Release();
 
 	// gp_segment_id, or tableoid in its place
-	if (InvalidOid != gpdb::SegmentOfFunction())
+	if (!partitioned && InvalidOid != gpdb::SegmentOfFunction())
 	{
 		mdid = GPOS_NEW(m_mp) CMDIdGPDB(IMDId::EmdidGeneral, INT4OID);
 		*segment_id = CTranslatorUtils::GetColId(
@@ -1354,6 +1361,35 @@ CTranslatorQueryToDXL::GetCtidAndSegmentId(ULONG *ctid, ULONG *segment_id)
 		m_query_level, m_query->resultRelation, TableOidAttributeNumber, mdid,
 		m_var_to_colid_map);
 	mdid->Release();
+}
+
+//---------------------------------------------------------------------------
+//	@function:
+//		CTranslatorQueryToDXL::DMLPartitionedTargetTaken
+//
+//	@doc:
+//		May ORCA plan this UPDATE or DELETE of a partitioned table?
+//
+//		Cloudberry's translator refuses every one (its a0f39821178, when
+//		PostgreSQL 14's executor took a partitioned table's rows through a
+//		result relation for each partition, and a "tableoid" junk column
+//		saying which).  DXL to PlannedStmt gives ModifyTable those, and
+//		the partitions' result relations are not the scans' range table
+//		entries, so the plan can re-check no row: the statement has to hold
+//		its target in ExclusiveLock or more, so that no row of it changes
+//		under the statement, as without the global deadlock detector it does
+//		(CheckDMLReadsOnlyTarget).  And the table is hash distributed, so
+//		that ORCA routes no row by the column tableoid rides in
+//		(GetCtidAndSegmentId); a randomly distributed table's rows are
+//		routed by where they are.
+//
+//---------------------------------------------------------------------------
+BOOL
+CTranslatorQueryToDXL::DMLPartitionedTargetTaken(const RangeTblEntry *rte,
+												 const IMDRelation *md_rel)
+{
+	return ExclusiveLock <= rte->rellockmode &&
+		   IMDRelation::EreldistrHash == md_rel->GetRelDistribution();
 }
 
 //---------------------------------------------------------------------------
@@ -1395,10 +1431,8 @@ CTranslatorQueryToDXL::TranslateDeleteQueryToDXL()
 
 	const IMDRelation *md_rel = m_md_accessor->RetrieveRel(table_descr->MDId());
 
-	// CBDB_MERGE_FIXME: Support DML operations on partitioned tables
-	if (md_rel->IsPartitioned())
+	if (md_rel->IsPartitioned() && !DMLPartitionedTargetTaken(rte, md_rel))
 	{
-		// GPDB_12_MERGE_FIXME: Support DML operations on partitioned tables
 		GPOS_RAISE(gpdxl::ExmaDXL, gpdxl::ExmiQuery2DXLUnsupportedFeature,
 				   GPOS_WSZ_LIT("DML(delete) on partitioned tables"));
 	}
@@ -1417,7 +1451,7 @@ CTranslatorQueryToDXL::TranslateDeleteQueryToDXL()
 
 	ULONG ctid_colid = 0;
 	ULONG segid_colid = 0;
-	GetCtidAndSegmentId(&ctid_colid, &segid_colid);
+	GetCtidAndSegmentId(&ctid_colid, &segid_colid, md_rel->IsPartitioned());
 
 	ULongPtrArray *delete_colid_array = GPOS_NEW(m_mp) ULongPtrArray(m_mp);
 
@@ -1489,10 +1523,8 @@ CTranslatorQueryToDXL::TranslateUpdateQueryToDXL()
 				   GPOS_WSZ_LIT("UPDATE with constraints"));
 	}
 
-	// CBDB_MERGE_FIXME: Support DML operations on partitioned tables
-	if (md_rel->IsPartitioned())
+	if (md_rel->IsPartitioned() && !DMLPartitionedTargetTaken(rte, md_rel))
 	{
-		// GPDB_12_MERGE_FIXME: Support DML operations on partitioned tables
 		GPOS_RAISE(gpdxl::ExmaDXL, gpdxl::ExmiQuery2DXLUnsupportedFeature,
 				   GPOS_WSZ_LIT("DML(update) on partitioned tables"));
 	}
@@ -1511,7 +1543,8 @@ CTranslatorQueryToDXL::TranslateUpdateQueryToDXL()
 
 	ULONG ctid_colid = 0;
 	ULONG segmentid_colid = 0;
-	GetCtidAndSegmentId(&ctid_colid, &segmentid_colid);
+	GetCtidAndSegmentId(&ctid_colid, &segmentid_colid,
+						md_rel->IsPartitioned());
 
 	// get (resno -> colId) mapping of columns to be updated
 	IntToUlongMap *update_column_map = UpdatedColumnMapping();

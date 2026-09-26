@@ -2647,8 +2647,12 @@ motion_dml_run(MotionState *state)
 		operation = CMD_UPDATE;
 	else
 	{
-		rti = linitial_int(((ModifyTable *) write)->resultRelations);
-		operation = ((ModifyTable *) write)->operation;
+		ModifyTable *mt = (ModifyTable *) write;
+
+		/* a partitioned table's partitions are written through the table */
+		rti = mt->rootRelation > 0 ? mt->rootRelation
+			: linitial_int(mt->resultRelations);
+		operation = mt->operation;
 	}
 	rte = rt_fetch(rti, estate->es_range_table);
 	policy = GpPolicyGet(rte->relid);
@@ -2656,12 +2660,16 @@ motion_dml_run(MotionState *state)
 	/*
 	 * Cloudberry without its global deadlock detector: an UPDATE or DELETE
 	 * of a distributed table locks the table, so that two of them never wait
-	 * for each other on different segments.  With it, rows (gp_gdd.c).  An
-	 * INSERT into a partitioned table locks every partition (gp_modify.c).
+	 * for each other on different segments, a partitioned table's every
+	 * partition too.  With it, rows (gp_gdd.c).  An INSERT into a
+	 * partitioned table locks every partition (gp_modify.c).
 	 */
 	if ((operation == CMD_UPDATE || operation == CMD_DELETE) &&
 		!gp_enable_global_deadlock_detector)
+	{
 		LockRelationOid(rte->relid, ExclusiveLock);
+		GpModifyLockPartitions(rte->relid, ExclusiveLock);
+	}
 	if (operation == CMD_INSERT)
 		GpModifyLockPartitions(rte->relid, RowExclusiveLock);
 

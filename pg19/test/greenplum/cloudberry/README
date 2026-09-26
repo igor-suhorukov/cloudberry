@@ -115,12 +115,13 @@ correlated_subquery, qp_derived_table, qp_misc (orca)  the lines ORCA's
   planner plans them, with the same answers, and the trace says so.
 
 DML_over_joins (orca)  the lines ORCA's fallback trace prints and nothing
-  else: ORCA declines an UPDATE or DELETE of a partitioned table, a query of
-  a multi-level partitioned one, a function it may not call on the segments
-  (SIRV), a Gather Motion into a slice the segments run, and a table the
-  coordinator alone has; the planner's answers are the same.  An UPDATE or
-  DELETE that reads another table is ORCA's where its target is held in
-  ExclusiveLock, as without the global deadlock detector it is.
+  else: ORCA declines a Gather Motion into a slice the segments run, an
+  UPDATE that moves a row of a partitioned table, a query of a multi-level
+  partitioned one, a function it may not call on the segments (SIRV), and a
+  table the coordinator alone has; the planner's answers are the same.  An
+  UPDATE or DELETE that reads another table, or of a partitioned table, is
+  ORCA's where its target is held in ExclusiveLock, as without the global
+  deadlock detector it is.
 
 expand_table_ao  pg_appendonly's compresstype of a table made with
   compresstype=none, which gp_ao records as no compression at all, an empty

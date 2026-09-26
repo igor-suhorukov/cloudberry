@@ -2695,6 +2695,30 @@ gpdb::PartitionRTE(const RangeTblEntry *root_rte, Oid part_oid)
 	return nullptr;
 }
 
+List *
+gpdb::PartitionColnos(Oid root_oid, Oid part_oid, List *colnos)
+{
+	GP_WRAP_START;
+	{
+		return gp_orca_partition_colnos(root_oid, part_oid, colnos);
+	}
+	GP_WRAP_END;
+	return NIL;
+}
+
+List *
+gpdb::PartitionExprs(List *exprs, Index root_rti, Oid root_oid, Index part_rti,
+					 Oid part_oid)
+{
+	GP_WRAP_START;
+	{
+		return gp_orca_partition_exprs(exprs, root_rti, root_oid, part_rti,
+									   part_oid);
+	}
+	GP_WRAP_END;
+	return NIL;
+}
+
 Plan *
 gpdb::PlanForPartition(Plan *scan, Index root_rti, Index part_rti,
 					   Oid root_oid, Oid part_oid, int *failure)

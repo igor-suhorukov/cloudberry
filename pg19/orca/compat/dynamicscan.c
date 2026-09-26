@@ -47,6 +47,7 @@
  */
 #include "postgres.h"
 
+#include "access/attmap.h"
 #include "access/htup_details.h"
 #include "access/table.h"
 #include "access/transam.h"
@@ -299,6 +300,39 @@ gp_orca_partition_rte(const RangeTblEntry *root, Oid part_relid)
 
 	table_close(part, NoLock);
 	return rte;
+}
+
+List *
+gp_orca_partition_colnos(Oid root_relid, Oid part_relid, List *colnos)
+{
+	Relation	root = table_open(root_relid, NoLock);
+	Relation	part = table_open(part_relid, NoLock);
+	AttrMap    *map = build_attrmap_by_name(RelationGetDescr(part),
+											RelationGetDescr(root), false);
+	List	   *result = NIL;
+
+	foreach_int(attno, colnos)
+		result = lappend_int(result, map->attnums[attno - 1]);
+
+	free_attrmap(map);
+	table_close(part, NoLock);
+	table_close(root, NoLock);
+	return result;
+}
+
+List *
+gp_orca_partition_exprs(List *exprs, Index root_rti, Oid root_relid,
+						Index part_rti, Oid part_relid)
+{
+	Relation	root = table_open(root_relid, NoLock);
+	Relation	part = table_open(part_relid, NoLock);
+
+	exprs = map_partition_varattnos(copyObject(exprs), root_rti, part, root);
+	ChangeVarNodes((Node *) exprs, root_rti, part_rti, 0);
+
+	table_close(part, NoLock);
+	table_close(root, NoLock);
+	return exprs;
 }
 
 static Node *

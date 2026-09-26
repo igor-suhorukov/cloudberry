@@ -115,6 +115,20 @@ extern RangeTblEntry *gp_orca_partition_rte(const RangeTblEntry *root,
 											Oid part_relid);
 
 /*
+ * An UPDATE or DELETE of a partitioned table, as the planner gives it to
+ * ModifyTable, a result relation for each partition: the partition's numbers
+ * of the table's columns `colnos` (inherit.c,
+ * adjust_inherited_attnums_multilevel), and expressions over the table's
+ * result relation at `root_rti` as over the partition's at `part_rti`
+ * (adjust_appendrel_attrs) -- each column by its name.
+ */
+extern List *gp_orca_partition_colnos(Oid root_relid, Oid part_relid,
+									  List *colnos);
+extern List *gp_orca_partition_exprs(List *exprs, Index root_rti,
+									 Oid root_relid, Index part_rti,
+									 Oid part_relid);
+
+/*
  * What a scan of the partitioned table returns, in the table's own columns:
  * its target list, with an index-only scan's references to the index's
  * columns (INDEX_VAR) read through its indextlist.  The Dynamic Scan's

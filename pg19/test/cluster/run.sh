@@ -1888,6 +1888,40 @@ COMMIT;"
 		"UPDATE orr SET b = orr.b + po.y FROM po WHERE orr.a = po.x;" \
 		"SELECT count(*), sum(b) FROM orr;" "Explicit Redistribute Motion"
 
+	# A partitioned table's UPDATE or DELETE: a result relation for each
+	# partition the plan scans, as the planner's are, found by the tableoid
+	# ORCA's DML carries, each partition's columns by their names -- the
+	# second partition has them in another order.
+	q 0 "CREATE TABLE wp (a int, b int, c text) DISTRIBUTED BY (a) PARTITION BY RANGE (b);
+	     CREATE TABLE wp_1 PARTITION OF wp FOR VALUES FROM (0) TO (10);
+	     CREATE TABLE wp_2 (c text, b int, a int) DISTRIBUTED BY (a);
+	     ALTER TABLE wp ATTACH PARTITION wp_2 FOR VALUES FROM (10) TO (20);
+	     CREATE TABLE wp_3 PARTITION OF wp FOR VALUES FROM (20) TO (30);
+	     INSERT INTO wp SELECT i, i % 30, 'c' || i FROM generate_series(1, 300) i; ANALYZE wp;" >/dev/null 2>&1
+	orca_write "a partitioned table's UPDATE: the partitions it scans its result relations" \
+		"UPDATE wp SET c = c || '!' WHERE b IN (5, 15);" \
+		"SELECT tableoid::regclass, count(*) FROM wp WHERE c LIKE '%!' GROUP BY 1 ORDER BY 1;" \
+		"Update on wp_1"
+	orca_returning "a partitioned table's DELETE ... RETURNING, each row's partition" \
+		"DELETE FROM wp WHERE a < 20 RETURNING tableoid::regclass, a, b, c;" \
+		"Delete on wp_3"
+	orca_returning "a partitioned table's UPDATE ... FROM another table, RETURNING old and new" \
+		"UPDATE wp SET c = 'j' || po.y FROM po WHERE wp.a = po.x RETURNING wp.a, wp.b, new.c, old.c;" \
+		"Update on wp_2"
+	orca_write "a partitioned table's DELETE ... USING another table" \
+		"DELETE FROM wp USING po WHERE wp.a = po.x AND po.y < 3;" \
+		"SELECT tableoid::regclass, count(*) FROM wp GROUP BY 1 ORDER BY 1;" "Delete on wp"
+	orca_write "a partitioned table's UPDATE whose condition no partition's rows meet, and one joining the table to itself" \
+		"UPDATE wp SET c = 'x' WHERE b = 100; UPDATE wp SET c = 'y' FROM wp w2 WHERE wp.a = w2.a AND w2.b = 5;" \
+		"SELECT count(*) FILTER (WHERE c = 'x'), count(*) FILTER (WHERE c = 'y') FROM wp;" "Update on wp"
+	out=$(printf '%s\n' "SET gp.optimizer_trace_fallback = on;" "BEGIN;" \
+		"UPDATE wp SET b = b + 1 WHERE a IN (9, 19);" "UPDATE wp SET a = a + 1000 WHERE a = 5;" "ROLLBACK;" | qf 0)
+	case "$out" in
+		*"an UPDATE that moves rows, of a partitioned table"*"an UPDATE that moves rows, of a partitioned table"*)
+			ok "an UPDATE of a partitioned table's partition or distribution key is the planner's, and says why" ;;
+		*) notok "a partitioned table's UPDATE that ORCA declines" "$out" ;;
+	esac
+
 	# What Cloudberry refuses of a DO UPDATE, the planner's route refuses in
 	# its words, and ORCA leaves to it: a distribution column set, and a
 	# volatile function in a replicated table's update.

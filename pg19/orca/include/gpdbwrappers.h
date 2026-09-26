@@ -824,6 +824,14 @@ Node *CoerceNullToDomain(Oid typid, int32 typmod);
 // sits in the table's partition descriptor.  Not in Cloudberry's layer,
 // whose executor reads the partitions itself; see compat/cb_dynamicscan.h.
 RangeTblEntry *PartitionRTE(const RangeTblEntry *root_rte, Oid part_oid);
+
+// An UPDATE or DELETE of a partitioned table, a result relation for each
+// partition: the partition's numbers of the table's columns, and
+// expressions over the table's result relation as over the partition's
+// (compat/cb_dynamicscan.h).
+List *PartitionColnos(Oid root_oid, Oid part_oid, List *colnos);
+List *PartitionExprs(List *exprs, Index root_rti, Oid root_oid,
+					 Index part_rti, Oid part_oid);
 Plan *PlanForPartition(Plan *scan, Index root_rti, Index part_rti,
 					   Oid root_oid, Oid part_oid, int *failure);
 int TopPartitionIndex(Oid root_oid, Oid leaf_oid);

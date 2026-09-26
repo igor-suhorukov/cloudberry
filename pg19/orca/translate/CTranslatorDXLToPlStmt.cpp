@@ -179,6 +179,7 @@ CTranslatorDXLToPlStmt::CTranslatorDXLToPlStmt(
 	  m_cmd_type(CMD_SELECT),
 	  m_is_tgt_tbl_distributed(false),
 	  m_result_rel_list(nullptr),
+	  m_partition_scans(nullptr),
 	  m_num_of_segments(num_of_segments),
 	  m_partition_selector_counter(0)
 {
@@ -5434,6 +5435,8 @@ CTranslatorDXLToPlStmt::TranslateDynamicScan(
 
 	List *children = NIL;
 	List *part_indexes = NIL;
+	List *part_rtis = NIL;
+	List *part_oids = NIL;
 	for (ULONG ul = 0; ul < parts->Size(); ul++)
 	{
 		OID part_oid = CMDIdGPDB::CastMdid((*parts)[ul])->Oid();
@@ -5442,6 +5445,8 @@ CTranslatorDXLToPlStmt::TranslateDynamicScan(
 		m_dxl_to_plstmt_context->AddRTE(gpdb::PartitionRTE(root_rte, part_oid));
 		Index part_rti =
 			gpdb::ListLength(m_dxl_to_plstmt_context->GetRTableEntriesList());
+		part_rtis = gpdb::LAppendInt(part_rtis, part_rti);
+		part_oids = gpdb::LAppendOid(part_oids, part_oid);
 
 		int failure = GP_ORCA_PARTITION_OK;
 		Plan *child = gpdb::PlanForPartition(scan, root_rti, part_rti,
@@ -5460,6 +5465,10 @@ CTranslatorDXLToPlStmt::TranslateDynamicScan(
 		part_indexes = gpdb::LAppendInt(
 			part_indexes, gpdb::TopPartitionIndex(root_oid, part_oid));
 	}
+
+	m_partition_scans = gpdb::LAppend(
+		m_partition_scans,
+		ListMake3(gpdb::MakeIntegerValue((long) root_rti), part_rtis, part_oids));
 
 	CustomScan *dynamic_scan = MakeNode(CustomScan);
 	dynamic_scan->methods = &gp_orca_dynamic_scan_methods;
@@ -5876,6 +5885,17 @@ CTranslatorDXLToPlStmt::TranslateDXLDml(
 		}
 	}
 
+	// An UPDATE or DELETE of a partitioned table has a result relation for
+	// each partition, as PostgreSQL 19's planner makes them (the Query
+	// translator took it, DMLPartitionedTargetTaken).  Not a split, whose
+	// rows gp_core's node writes into one table.
+	BOOL partitioned = md_rel->IsPartitioned() &&
+					   (CMD_UPDATE == m_cmd_type || CMD_DELETE == m_cmd_type);
+	if (partitioned && split)
+	{
+		GP_UNPORTED("an UPDATE that moves rows, of a partitioned table");
+	}
+
 	// On a cluster a distributed table is written where its rows are: the
 	// ModifyTable runs in a slice of its own on the segments -- Cloudberry's
 	// writer gang -- and the coordinator dispatches it and counts the rows
@@ -6007,6 +6027,91 @@ CTranslatorDXLToPlStmt::TranslateDXLDml(
 	}
 	AttrNumber ctid_col = (AttrNumber) gpdb::ListLength(dml_target_list);
 
+	// A partitioned table's partitions, each a result relation of its own,
+	// and the partition a row is in, by the tableoid ORCA's DML carries in
+	// its second column (GetCtidAndSegmentId) -- which ORCA must then route
+	// no row by.  The partitions are locked as the table is, so that no row
+	// of theirs changes under the statement either.  One whose method takes
+	// a row's old version from the plan (O20) is not written here, as an
+	// append-optimized table is not (above).
+	List *part_rtis = NIL;
+	List *part_oids = NIL;
+	if (partitioned)
+	{
+		ListCell *lc_motion = nullptr;
+		ForEach(lc_motion, m_dxl_to_plstmt_context->GetMotions())
+		{
+			if (GP_MOTION_EXPLICIT ==
+				gpdb::MotionType((Plan *) lfirst(lc_motion)))
+			{
+				GP_UNPORTED(
+					"a partitioned table's rows routed back to where they are");
+			}
+		}
+		AddJunkTargetEntryForColId(&dml_target_list, &child_context,
+								   phy_dml_dxlop->GetSegmentIdColId(),
+								   "tableoid");
+
+		// The partitions the plan scans the table through, where it scans
+		// it once, as the planner's result relations are its scans' own
+		// entries; else every partition, each an entry of its own.
+		List *scan = NIL;
+		ULONG nscans = 0;
+		ListCell *lc_scan = nullptr;
+		ForEach(lc_scan, m_partition_scans)
+		{
+			List *entry = (List *) lfirst(lc_scan);
+			if ((Index) intVal(gpdb::ListNth(entry, 0)) == index)
+			{
+				scan = entry;
+				nscans++;
+			}
+		}
+		RangeTblEntry *root_rte = m_dxl_to_plstmt_context->GetRTEByIndex(index);
+		if (1 == nscans)
+		{
+			part_rtis = (List *) gpdb::ListNth(scan, 1);
+			part_oids = (List *) gpdb::ListNth(scan, 2);
+		}
+		else
+		{
+			IMdIdArray *parts = md_rel->ChildPartitionMdids();
+			for (ULONG ul = 0; nullptr != parts && ul < parts->Size(); ul++)
+			{
+				OID part_oid = CMDIdGPDB::CastMdid((*parts)[ul])->Oid();
+				gpdb::GPDBLockRelationOid(part_oid, root_rte->rellockmode);
+				RangeTblEntry *part_rte =
+					gpdb::PartitionRTE(root_rte, part_oid);
+				m_dxl_to_plstmt_context->AddRTE(part_rte);
+				part_rte->inFromCl = false;
+				part_rtis = gpdb::LAppendInt(
+					part_rtis,
+					gpdb::ListLength(
+						m_dxl_to_plstmt_context->GetRTableEntriesList()));
+				part_oids = gpdb::LAppendOid(part_oids, part_oid);
+			}
+		}
+
+		ListCell *lc_rti = nullptr;
+		ListCell *lc_oid = nullptr;
+		ForBoth(lc_rti, part_rtis, lc_oid, part_oids)
+		{
+			OID part_oid = lfirst_oid(lc_oid);
+			if ((CMD_UPDATE == m_cmd_type || NIL != returning) &&
+				gpdb::RelOldRowFromPlan(part_oid))
+			{
+				GP_UNPORTED(
+					"a partition whose rows are not fetched by ctid, updated or returned");
+			}
+			RangeTblEntry *part_rte = m_dxl_to_plstmt_context->GetRTEByIndex(
+				(Index) lfirst_int(lc_rti));
+			part_rte->rellockmode = root_rte->rellockmode;
+			gpdb::GPDBLockRelationOid(part_oid, root_rte->rellockmode);
+			m_result_rel_list =
+				gpdb::LAppendInt(m_result_rel_list, lfirst_int(lc_rti));
+		}
+	}
+
 	// Add a Result node on top of the child plan, to coerce the target
 	// list to match the exact physical layout of the target table,
 	// including dropped columns.  Often, the Result node isn't really
@@ -6049,6 +6154,49 @@ CTranslatorDXLToPlStmt::TranslateDXLDml(
 		dml->returningLists = ListMake1(returning);
 		dml->returningOldAlias = query->returningOldAlias;
 		dml->returningNewAlias = query->returningNewAlias;
+	}
+
+	// A partitioned table's: its partitions are the result relations, the
+	// table the root, and each partition's lists are the table's, its
+	// columns taken by their names (inherit.c, adjust_appendrel_attrs()).
+	// A table with no partitions writes no row, through itself.
+	if (NIL != part_rtis)
+	{
+		OID root_oid = CMDIdGPDB::CastMdid(mdid_target_table)->Oid();
+		List *update_colnos_lists = NIL;
+		List *fdw_priv_lists = NIL;
+		List *returning_lists = NIL;
+		ListCell *lc_rti = nullptr;
+		ListCell *lc_oid = nullptr;
+		ForBoth(lc_rti, part_rtis, lc_oid, part_oids)
+		{
+			Index part_rti = (Index) lfirst_int(lc_rti);
+			OID part_oid = lfirst_oid(lc_oid);
+
+			if (CMD_UPDATE == m_cmd_type)
+			{
+				update_colnos_lists = gpdb::LAppend(
+					update_colnos_lists,
+					gpdb::PartitionColnos(root_oid, part_oid, update_colnos));
+			}
+			fdw_priv_lists = gpdb::LAppend(fdw_priv_lists, NIL);
+			if (NIL != returning)
+			{
+				returning_lists = gpdb::LAppend(
+					returning_lists,
+					gpdb::PartitionExprs(returning, index, root_oid, part_rti,
+										 part_oid));
+			}
+		}
+		dml->rootRelation = index;
+		dml->resultRelations = part_rtis;
+		dml->updateColnosLists = update_colnos_lists;
+		dml->fdwPrivLists = fdw_priv_lists;
+		if (NIL != returning)
+		{
+			dml->returningLists = returning_lists;
+			returning = (List *) gpdb::ListNth(returning_lists, 0);
+		}
 	}
 
 	// The planner gives every ModifyTable one (planner.c,
