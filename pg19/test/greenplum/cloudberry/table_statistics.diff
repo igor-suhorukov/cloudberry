@@ -1,0 +1,6 @@
+@@
++LINE 1: Alter table stat_part_heap_t7 alter column j type numeric;
++                                                   ^
+@@
++LINE 1: Alter table stat_part_co_t7 alter column i type numeric;
++                                                 ^

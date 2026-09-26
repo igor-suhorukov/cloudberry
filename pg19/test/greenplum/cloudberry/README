@@ -200,6 +200,14 @@ part_external_table (orca)  the lines ORCA's fallback trace prints for a
   (TranslateDXLDynForeignScan), and the planner plans the query; and an
   INSERT into one, which Cloudberry's ORCA declines too.
 
+partition_indexing  a UNIQUE index or constraint on a partitioned table
+  that holds neither the partition key nor the distribution key: both
+  refuse it, Cloudberry by its distribution key first, the port by
+  PostgreSQL 19's check of the partition key, which DefineIndex() makes as
+  it builds the index, before gp_sql checks the indexes a statement made
+  against the distribution (distribution.c); and PostgreSQL 19's word for
+  it, UNIQUE, where PostgreSQL 16's was unique.
+
 partition_prune_opfamily (planner, orca)  its first EXPLAIN, which
   gpdiff.pl compares as rows: a comment line of dashes in the test reads to
   it as the rule under a result's header, and what follows, to the plan's
@@ -300,6 +308,10 @@ sreh  COPY's SEGMENT REJECT LIMIT, reached: the port's COPY parses each row
   limit at the second bad row, line 3; Cloudberry's coordinator parses a
   row's distribution key alone, and reached it at the second bad key, line
   11, before the segments, which parse the rest, reached theirs.
+
+table_statistics  the position PostgreSQL 19 gives the error of an ALTER
+  TABLE ... ALTER COLUMN ... TYPE of a partition key column, a LINE and its
+  caret, which PostgreSQL 16's gives none.
 
 truncate_gp  the files stat_table_segfile_size(), a PL/Python function,
   finds of an append-optimized and a column-oriented table emptied by a

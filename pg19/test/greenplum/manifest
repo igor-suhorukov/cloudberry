@@ -67,7 +67,7 @@ skip transient_types  could not access file "regress.so": No such file or direct
 run  gp_rules
 skip motion_gp  row is too big: size 10032, maximum size 8160; syntax error at or near ")"
 run  gp_pullup_expr
-skip cursor  function gp_inject_fault_infinite(unknown, unknown, integer) does not exist; current transaction is aborted, commands ignored until end of transaction block
+skip cursor  its gp_wait_until_triggered_fault('qe_got_snapshot_and_interconnect') waits out the suite's minute: the fault, which Cloudberry's cursor reader raises once its slice has its snapshot, while the writer goes on to UPDATE, is none of the port's
 run  gp_hashagg
 run  sequence_gp
 run  tidscan_gp
@@ -370,7 +370,7 @@ skip sirv_functions  differs: a function's DDL in a segment's slice runs, where 
 skip query_finish  canceling statement due to user request: under ORCA, its LIMIT 1 over a slice that sleeps on segment 0 does not end the statement early, and it runs past the suite's 60 seconds
 skip partial_table  differs: a table whose policy spreads it over more segments than the cluster has is refused ("Its distribution policy spreads it over 10 segments, and the cluster has 3"), where Cloudberry reads it
 run  subselect_gp_indexes
-skip partition_indexing  REINDEX INDEX cannot run inside a transaction block; UNIQUE constraint on partitioned table must include all partitioning columns
+run  partition_indexing
 run  partition_with_user_defined_function
 skip partition_unlogged  partitioned tables cannot be unlogged; relation "unlogged_pt1" does not exist
 run  partition_subquery
@@ -484,7 +484,7 @@ skip vacuum_full_freeze_heap  differs: a heap's size in 8 kB pages, where Cloudb
 skip vacuum_full_heap  differs: a heap's size in 8 kB pages, where Cloudberry's expected output counts its 32 kB blocks
 skip autostats  unrecognized configuration parameter "log_autostats"; permission denied to set parameter "gp.autostats_allow_nonowner"
 skip dpe  function disable_xform(unknown) does not exist; function enable_xform(unknown) does not exist
-skip table_statistics  CLUSTER cannot run inside a transaction block
+run  table_statistics
 skip fts_error  differs: two of its checks that FTS marked a node down answer f, and Cloudberry's DEBUG trace of the probe's statement is not the port's
 skip psql_gp_commands  differs: psql 19's \dx has a Default version column, and Cloudberry's psql describes its storage and external tables in its own way
 skip pg_resetwal  differs: PostgreSQL 19's pg_resetwal has no -k, the data checksum version Cloudberry's sets

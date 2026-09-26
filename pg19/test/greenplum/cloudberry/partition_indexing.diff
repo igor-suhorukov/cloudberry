@@ -1,0 +1,66 @@
+@@
+-DETAIL:  Distribution key column "unique1" is not included in the constraint.
+-ERROR:  UNIQUE index must contain all columns in the table's distribution key
++DETAIL:  UNIQUE constraint on table "mpp3033a" lacks column "unique1" which is part of the partition key.
++ERROR:  UNIQUE constraint on partitioned table must include all partitioning columns
+@@
+-DETAIL:  Distribution key column "unique1" is not included in the constraint.
+-ERROR:  UNIQUE index must contain all columns in the table's distribution key
++DETAIL:  UNIQUE constraint on table "mpp3033a" lacks column "unique1" which is part of the partition key.
++ERROR:  UNIQUE constraint on partitioned table must include all partitioning columns
+@@
+-DETAIL:  Distribution key column "unique1" is not included in the constraint.
+-ERROR:  UNIQUE index must contain all columns in the table's distribution key
++DETAIL:  UNIQUE constraint on table "mpp3033a" lacks column "unique1" which is part of the partition key.
++ERROR:  UNIQUE constraint on partitioned table must include all partitioning columns
+@@
+-ERROR:  unique constraint on partitioned table must include all partitioning columns
++ERROR:  UNIQUE constraint on partitioned table must include all partitioning columns
+@@
+-DETAIL:  Distribution key column "unique1" is not included in the constraint.
+-ERROR:  UNIQUE index must contain all columns in the table's distribution key
++DETAIL:  UNIQUE constraint on table "mpp3033b" lacks column "unique1" which is part of the partition key.
++ERROR:  UNIQUE constraint on partitioned table must include all partitioning columns
+@@
+-DETAIL:  Distribution key column "unique1" is not included in the constraint.
+-ERROR:  UNIQUE index must contain all columns in the table's distribution key
++DETAIL:  UNIQUE constraint on table "mpp3033b" lacks column "unique1" which is part of the partition key.
++ERROR:  UNIQUE constraint on partitioned table must include all partitioning columns
+@@
+-DETAIL:  Distribution key column "unique1" is not included in the constraint.
+-ERROR:  UNIQUE index must contain all columns in the table's distribution key
++DETAIL:  UNIQUE constraint on table "mpp3033b" lacks column "unique1" which is part of the partition key.
++ERROR:  UNIQUE constraint on partitioned table must include all partitioning columns
+@@
+-DETAIL:  Distribution key column "unique1" is not included in the constraint.
+-ERROR:  UNIQUE index must contain all columns in the table's distribution key
++DETAIL:  UNIQUE constraint on table "mpp3033a" lacks column "unique1" which is part of the partition key.
++ERROR:  UNIQUE constraint on partitioned table must include all partitioning columns
+@@
+-DETAIL:  Distribution key column "unique1" is not included in the constraint.
+-ERROR:  UNIQUE index must contain all columns in the table's distribution key
++DETAIL:  UNIQUE constraint on table "mpp3033a" lacks column "unique1" which is part of the partition key.
++ERROR:  UNIQUE constraint on partitioned table must include all partitioning columns
+@@
+-DETAIL:  Distribution key column "unique1" is not included in the constraint.
+-ERROR:  UNIQUE index must contain all columns in the table's distribution key
++DETAIL:  UNIQUE constraint on table "mpp3033a" lacks column "unique1" which is part of the partition key.
++ERROR:  UNIQUE constraint on partitioned table must include all partitioning columns
+@@
+-ERROR:  unique constraint on partitioned table must include all partitioning columns
++ERROR:  UNIQUE constraint on partitioned table must include all partitioning columns
+@@
+-DETAIL:  Distribution key column "unique1" is not included in the constraint.
+-ERROR:  UNIQUE index must contain all columns in the table's distribution key
++DETAIL:  UNIQUE constraint on table "mpp3033b" lacks column "unique1" which is part of the partition key.
++ERROR:  UNIQUE constraint on partitioned table must include all partitioning columns
+@@
+-DETAIL:  Distribution key column "unique1" is not included in the constraint.
+-ERROR:  UNIQUE index must contain all columns in the table's distribution key
++DETAIL:  UNIQUE constraint on table "mpp3033b" lacks column "unique1" which is part of the partition key.
++ERROR:  UNIQUE constraint on partitioned table must include all partitioning columns
+@@
+-DETAIL:  Distribution key column "unique1" is not included in the constraint.
+-ERROR:  UNIQUE index must contain all columns in the table's distribution key
++DETAIL:  UNIQUE constraint on table "mpp3033b" lacks column "unique1" which is part of the partition key.
++ERROR:  UNIQUE constraint on partitioned table must include all partitioning columns

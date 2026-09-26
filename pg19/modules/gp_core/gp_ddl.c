@@ -410,6 +410,16 @@ drop_temp_namespaces(void)
  * node's.  ANALYZE stays here until O3 brings the
  * segments' samples to it.
  */
+/* Is it a partitioned table or index?  False where there is no such relation. */
+static bool
+is_partitioned(Oid relid)
+{
+	char		relkind = OidIsValid(relid) ? get_rel_relkind(relid) : '\0';
+
+	return relkind == RELKIND_PARTITIONED_TABLE ||
+		relkind == RELKIND_PARTITIONED_INDEX;
+}
+
 static GpDispatchClass
 dispatch_class(Node *parsetree)
 {
@@ -454,10 +464,46 @@ dispatch_class(Node *parsetree)
 						return GP_DISPATCH_OWN_XACT;
 				}
 
-				/* REINDEX DATABASE and SYSTEM commit as they go. */
-				if (stmt->kind == REINDEX_OBJECT_DATABASE ||
-					stmt->kind == REINDEX_OBJECT_SYSTEM)
+				/*
+				 * REINDEX SCHEMA, SYSTEM and DATABASE commit as they go, a
+				 * transaction a table, and so does one of a partitioned
+				 * table or index, a transaction a partition
+				 * (ReindexPartitions()): PostgreSQL runs none inside a
+				 * transaction block.
+				 */
+				if (stmt->kind == REINDEX_OBJECT_SCHEMA ||
+					stmt->kind == REINDEX_OBJECT_DATABASE ||
+					stmt->kind == REINDEX_OBJECT_SYSTEM ||
+					(stmt->relation != NULL &&
+					 is_partitioned(RangeVarGetRelid(stmt->relation, NoLock, true))))
 					return GP_DISPATCH_OWN_XACT;
+				return GP_DISPATCH_IN_XACT;
+			}
+
+		/*
+		 * CLUSTER and REPACK of every table, or of a partitioned one, commit
+		 * as they go, a transaction a table, and with CONCURRENTLY or
+		 * ANALYZE run outside a transaction block too (ExecRepack()); of one
+		 * table, in the transaction that asks.
+		 */
+		case T_RepackStmt:
+			{
+				RepackStmt *stmt = (RepackStmt *) parsetree;
+				ListCell   *lc;
+
+				if (stmt->relation == NULL ||
+					is_partitioned(RangeVarGetRelid(stmt->relation->relation,
+													NoLock, true)))
+					return GP_DISPATCH_OWN_XACT;
+				foreach(lc, stmt->params)
+				{
+					DefElem    *opt = (DefElem *) lfirst(lc);
+
+					if ((strcmp(opt->defname, "concurrently") == 0 ||
+						 strcmp(opt->defname, "analyze") == 0) &&
+						defGetBoolean(opt))
+						return GP_DISPATCH_OWN_XACT;
+				}
 				return GP_DISPATCH_IN_XACT;
 			}
 
@@ -589,7 +635,6 @@ dispatch_class(Node *parsetree)
 		case T_SecLabelStmt:
 		case T_TruncateStmt:
 		case T_ViewStmt:
-		case T_RepackStmt:
 			return GP_DISPATCH_IN_XACT;
 
 		default:

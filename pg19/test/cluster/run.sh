@@ -473,6 +473,23 @@ t" ] && ok "temporary tables, two of them, have the coordinator's OIDs" \
 	[ -z "$out" ] && ok "VACUUM, which runs outside a transaction block, reaches the segments too" \
 		|| notok "VACUUM" "$out"
 
+	# So do the forms of REINDEX and CLUSTER that commit as they go, a
+	# transaction a table or a partition, which PostgreSQL runs outside a
+	# transaction block, and which the segments refused inside the
+	# coordinator's (gp_ddl.c).
+	out=$(printf '%s\n' "SET client_min_messages = warning;" \
+		"CREATE TABLE rix (a int, b int) DISTRIBUTED BY (a) PARTITION BY RANGE (b);" \
+		"CREATE TABLE rix1 PARTITION OF rix FOR VALUES FROM (0) TO (50);" \
+		"CREATE TABLE rix2 PARTITION OF rix FOR VALUES FROM (50) TO (100);" \
+		"CREATE INDEX rix_b ON rix (b);" "INSERT INTO rix SELECT g, g FROM generate_series(0, 99) g;" \
+		"REINDEX SCHEMA public;" "REINDEX INDEX rix_b;" "REINDEX TABLE rix;" \
+		"CLUSTER rix USING rix_b;" "CLUSTER;" | qf 0 2>&1)
+	out2=$(q 0 "SELECT count(*) FROM rix WHERE b < 50;")
+	[ -z "$out" ] && [ "$out2" = 50 ] \
+		&& ok "REINDEX SCHEMA, REINDEX and CLUSTER of a partitioned table, and CLUSTER of every table, reach the segments too" \
+		|| notok "REINDEX and CLUSTER outside a transaction block" "$out / $out2"
+	q 0 "DROP TABLE rix;" >/dev/null
+
 	# A temporary table is in the session's own temporary schema, which on the
 	# coordinator and on each segment is a different pg_temp_N: here another
 	# session holds the coordinator's first backend slot, which no segment
