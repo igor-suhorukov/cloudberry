@@ -317,8 +317,6 @@ CTranslatorDXLToPlStmt::CTranslatorDXLToPlStmt(
 	  m_is_tgt_tbl_distributed(false),
 	  m_result_rel_list(nullptr),
 	  m_partition_scans(nullptr),
-	  m_gather_into_segment(false),
-	  m_singletons_on_segment(false),
 	  m_num_of_segments(num_of_segments),
 	  m_partition_selector_counter(0)
 {
@@ -372,7 +370,7 @@ CTranslatorDXLToPlStmt::GetPlannedStmtFromDXL(const CDXLNode *dxlnode,
 	m_dxl_to_plstmt_context->m_orig_query = (Query *) orig_query;
 	m_dxl_to_plstmt_context->AddSlice(topslice);
 	m_dxl_to_plstmt_context->SetCurrentSlice(topslice);
-	m_singletons_on_segment = HasCTEProducer(dxlnode);
+	m_dxl_to_plstmt_context->m_singletons_on_segment = HasCTEProducer(dxlnode);
 
 	CDXLTranslationContextArray *ctxt_translation_prev_siblings =
 		GPOS_NEW(m_mp) CDXLTranslationContextArray(m_mp);
@@ -502,7 +500,7 @@ CTranslatorDXLToPlStmt::GetPlannedStmtFromDXL(const CDXLNode *dxlnode,
 				contents = NIL;
 			}
 		}
-		if (m_gather_into_segment)
+		if (m_dxl_to_plstmt_context->m_gather_into_segment)
 		{
 			contents = NIL;
 		}
@@ -3020,7 +3018,7 @@ CTranslatorDXLToPlStmt::TranslateDXLMotion(
 		{
 			GP_UNPORTED("a Gather Motion inside a slice the segments run");
 		}
-		m_gather_into_segment = true;
+		m_dxl_to_plstmt_context->m_gather_into_segment = true;
 	}
 	if (GP_MOTION_GATHER != motion_type &&
 		(0 == recvslice->sliceIndex ||
@@ -3063,7 +3061,7 @@ CTranslatorDXLToPlStmt::TranslateDXLMotion(
 		// segments -- runs on the first segment instead, where it streams as
 		// the others do.
 		if (segindex < 0 && GP_MOTION_GATHER != motion_type &&
-			m_singletons_on_segment &&
+			m_dxl_to_plstmt_context->m_singletons_on_segment &&
 			WorksOnReceivedRowsOnly(
 				(*motion_dxlnode)[motion_dxlop->GetRelationChildIdx()]))
 		{

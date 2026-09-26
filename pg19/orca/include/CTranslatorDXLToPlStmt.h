@@ -173,15 +173,6 @@ private:
 	// result relations, as the planner's are its scans' own
 	List *m_partition_scans;
 
-	// a Gather Motion into a slice that runs on one segment, which gp_core
-	// carries out as it does a Motion between segments
-	BOOL m_gather_into_segment;
-
-	// the plan has a CTE, which a slice the segments run shares through
-	// files, its slices running at once: the coordinator's own slice below
-	// a Motion it would send from runs on a segment instead, where it reads
-	// nothing of its own (compat/sharedscan.c)
-	BOOL m_singletons_on_segment;
 
 	// number of segments
 	ULONG m_num_of_segments;

@@ -336,6 +336,18 @@ public:
 	// used by internal GPDB functions to build the RelOptInfo when creating foreign scans
 	Query *m_orig_query;
 
+	// NOT IN CLOUDBERRY.  What the whole plan's translation has to know, a
+	// scalar SubPlan's plan being translated by a translator of its own
+	// (CTranslatorDXLToScalar): a Gather Motion into a slice that runs on
+	// one segment, which gp_core carries out as it does a Motion between
+	// segments; and whether the plan has a CTE, which a slice the segments
+	// run shares through files, its slices running at once, so that the
+	// coordinator's own slice below a Motion it would send from runs on a
+	// segment instead, where it reads nothing of its own
+	// (compat/sharedscan.c).
+	BOOL m_gather_into_segment = false;
+	BOOL m_singletons_on_segment = false;
+
 	// get rte from m_rtable_entries_list by given index
 	RangeTblEntry *GetRTEByIndex(Index index);
 

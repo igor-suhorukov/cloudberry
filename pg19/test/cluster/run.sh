@@ -1569,6 +1569,19 @@ a\b|\N' ] && [ "$(cat "$ROOT/ce_prog.txt" 2>&1)" = "to a program" ] \
 	orca_same "the aggregate of gathered rows ORCA sends back to the segments, on one of them" \
 		"WITH r AS (SELECT b % 37 AS s, sum(a) AS t FROM sh GROUP BY 1) SELECT s, t FROM r WHERE t = (SELECT max(t) FROM r) ORDER BY 1;" \
 		"Motion 1:2"
+	# ... in a subquery's plan too, which a translator of its own translates:
+	# the aggregate a HAVING compares with, as TPC-DS's query 24 has it.
+	sql="WITH s AS (SELECT a, b % 7 AS k, sum(b) AS paid FROM sh GROUP BY a, b % 7) SELECT a, sum(paid) FROM s WHERE k = 3 GROUP BY a HAVING sum(paid) > (SELECT 0.05 * avg(paid) FROM s) ORDER BY a;"
+	plan=$(q 0 "SET gp.optimizer_enforce_subplans = on; EXPLAIN (COSTS OFF) $sql" | tr '\n' '|')
+	got=$(q 0 "SET gp.optimizer_enforce_subplans = on; $sql")
+	want=$(q 0 "SET gp.optimizer = off; $sql")
+	case "$plan" in
+		*"SubPlan"*"Motion 1:2"*"Shared Scan"*"Optimizer: GPORCA"*)
+			[ -n "$got" ] && [ "$got" = "$want" ] \
+				&& ok "... and in a subquery's plan, which is translated apart" \
+				|| notok "a shared CTE's aggregate in a SubPlan" "ORCA: $got / planner: $want" ;;
+		*) notok "a shared CTE's aggregate in a SubPlan: the plan" "$plan" ;;
+	esac
 	out=$(q 0 "SET gp.optimizer_enable_hashjoin = off; SET gp.optimizer_enable_mergejoin = off;
 		EXPLAIN (COSTS OFF) WITH c AS (SELECT a, b FROM sh WHERE b < 400) SELECT count(*) FROM c c1 JOIN c c2 ON c1.a = c2.a AND c1.b < c2.b;" | tr '\n' '|')
 	got=$(q 0 "SET gp.optimizer_enable_hashjoin = off; SET gp.optimizer_enable_mergejoin = off;
