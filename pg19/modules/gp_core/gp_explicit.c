@@ -764,6 +764,7 @@ GpExplicitOnConflict(Query *parse, GpPolicy *policy)
 											   exprCollation((Node *) tle->expr));
 	}
 
+	GpUnmergeAssignments(q);
 	sql = pg_get_querydef(q, false);
 	clause = strstr(sql, " ON CONFLICT");
 	if (clause == NULL)

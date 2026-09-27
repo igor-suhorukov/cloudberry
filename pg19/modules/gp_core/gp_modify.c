@@ -939,6 +939,123 @@ named_relations_walker(Node *node, List **relids)
 }
 
 /*
+ * The target entries of one column's assignments the rewriter merged into
+ * one (process_matched_tle()) -- two of a composite's fields, two of an
+ * array's elements -- taken apart again into the parser's, an assignment
+ * each, in order.  pg_get_querydef() prints a column's assignment as the
+ * parser gives it: of a nest, whose input is the assignment before it, it
+ * prints the last alone, and it refuses a FieldStore of several fields.
+ */
+static List *unmerge_assignment(TargetEntry *tle, Expr *expr, List *result);
+
+/* The assignments in an assignment's input, where there are any. */
+static List *
+unmerge_input(TargetEntry *tle, Expr *input, List *result)
+{
+	Expr	   *e = input;
+
+	if (IsA(e, CoerceToDomain) &&
+		((CoerceToDomain *) e)->coercionformat == COERCE_IMPLICIT_CAST)
+		e = ((CoerceToDomain *) e)->arg;
+	if (IsA(e, FieldStore) ||
+		(IsA(e, SubscriptingRef) && ((SubscriptingRef *) e)->refassgnexpr != NULL))
+		return unmerge_assignment(tle, input, result);
+	return result;
+}
+
+/* An entry of the parser's: tle, its expression expr, under coerce's */
+static List *
+unmerged_entry(TargetEntry *tle, CoerceToDomain *coerce, Expr *expr,
+			   List *result)
+{
+	TargetEntry *one = flatCopyTargetEntry(tle);
+
+	if (coerce != NULL)
+	{
+		CoerceToDomain *c = palloc_object(CoerceToDomain);
+
+		memcpy(c, coerce, sizeof(CoerceToDomain));
+		c->arg = expr;
+		expr = (Expr *) c;
+	}
+	one->expr = expr;
+	return lappend(result, one);
+}
+
+static List *
+unmerge_assignment(TargetEntry *tle, Expr *expr, List *result)
+{
+	CoerceToDomain *coerce = NULL;
+
+	if (IsA(expr, CoerceToDomain) &&
+		((CoerceToDomain *) expr)->coercionformat == COERCE_IMPLICIT_CAST)
+	{
+		coerce = (CoerceToDomain *) expr;
+		expr = coerce->arg;
+	}
+	if (IsA(expr, FieldStore))
+	{
+		FieldStore *fs = (FieldStore *) expr;
+		ListCell   *val;
+		ListCell   *num;
+
+		result = unmerge_input(tle, fs->arg, result);
+		forboth(val, fs->newvals, num, fs->fieldnums)
+		{
+			FieldStore *one = makeNode(FieldStore);
+
+			one->arg = fs->arg;
+			one->newvals = list_make1(lfirst(val));
+			one->fieldnums = list_make1_int(lfirst_int(num));
+			one->resulttype = fs->resulttype;
+			result = unmerged_entry(tle, coerce, (Expr *) one, result);
+		}
+		return result;
+	}
+	if (IsA(expr, SubscriptingRef) &&
+		((SubscriptingRef *) expr)->refassgnexpr != NULL)
+	{
+		SubscriptingRef *sbsref = (SubscriptingRef *) expr;
+		SubscriptingRef *one = palloc_object(SubscriptingRef);
+
+		result = unmerge_input(tle, sbsref->refexpr, result);
+		memcpy(one, sbsref, sizeof(SubscriptingRef));
+		return unmerged_entry(tle, coerce, (Expr *) one, result);
+	}
+	return unmerged_entry(tle, coerce, expr, result);
+}
+
+static List *
+unmerge_target_list(List *tlist)
+{
+	List	   *result = NIL;
+
+	foreach_node(TargetEntry, tle, tlist)
+	{
+		if (tle->resjunk)
+			result = lappend(result, tle);
+		else
+			result = unmerge_assignment(tle, tle->expr, result);
+	}
+	return result;
+}
+
+void
+GpUnmergeAssignments(Query *query)
+{
+	if (query->commandType == CMD_UPDATE || query->commandType == CMD_INSERT)
+		query->targetList = unmerge_target_list(query->targetList);
+	if (query->onConflict != NULL)
+		query->onConflict->onConflictSet =
+			unmerge_target_list(query->onConflict->onConflictSet);
+	foreach_node(MergeAction, action, query->mergeActionList)
+		action->targetList = unmerge_target_list(action->targetList);
+	foreach_node(CommonTableExpr, cte, query->cteList)
+		if (IsA(cte->ctequery, Query))
+			GpUnmergeAssignments((Query *) cte->ctequery);
+}
+
+/*
  * The statement, as the segments are sent it.  pg_get_querydef() takes an
  * AccessShareLock on each relation it names and keeps it, as deparsing a
  * view does (AcquireRewriteLocks()); a statement that is run holds its own
@@ -956,6 +1073,8 @@ statement_text(Query *query)
 	foreach_oid(relid, relids)
 		if (!CheckRelationOidLockedByMe(relid, AccessShareLock, false))
 			added = lappend_oid(added, relid);
+	query = copyObject(query);
+	GpUnmergeAssignments(query);
 	sql = pg_get_querydef(query, false);
 	foreach_oid(relid, added)
 		if (CheckRelationOidLockedByMe(relid, AccessShareLock, false))

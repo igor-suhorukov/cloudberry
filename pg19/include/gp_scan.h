@@ -171,4 +171,11 @@ extern struct Plan *GpModifyWriteExplicitly(struct PlannedStmt *stmt,
 extern char *GpExplicitOnConflict(struct Query *parse, GpPolicy *policy);
 extern void GpExplicitInit(void);
 
+/*
+ * A query to be printed for the segments with each column's assignments the
+ * rewriter merged taken apart again, as pg_get_querydef() prints only the
+ * parser's (gp_modify.c).
+ */
+extern void GpUnmergeAssignments(struct Query *query);
+
 #endif							/* GP_SCAN_H */
