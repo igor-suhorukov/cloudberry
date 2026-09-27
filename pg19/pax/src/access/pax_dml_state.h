@@ -28,8 +28,9 @@
  * belongs to the query running then, or to no query where a utility
  * statement writes -- COPY FROM; the module finishes it as that query
  * finishes, before its AFTER triggers, as a utility statement ends, at
- * finish_bulk_insert, and before a commit, and drops it, unwritten, where
- * its subtransaction aborts (access/pax_access_handle.cc).
+ * finish_bulk_insert, before a commit, and before a row it has in memory
+ * still is fetched by its TID, and drops it, unwritten, where its
+ * subtransaction aborts (access/pax_access_handle.cc).
  *-------------------------------------------------------------------------
  */
 
@@ -81,6 +82,9 @@ class CPaxDmlStateLocal final {
   void Reparent(SubTransactionId subid, SubTransactionId parent);
   // A table being dropped: its states go, unwritten.
   void ForgetRelation(Oid relid);
+  // A row of rel's to be fetched by its TID from block: the writer writing
+  // that block now is finished first, where there is one.
+  void FinishWriting(Relation rel, BlockNumber block);
 
   bool IsInitialized() const { return cbdb::pax_memory_context != nullptr; }
   CPaxInserter *GetInserter(Relation rel);

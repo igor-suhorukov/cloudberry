@@ -28,8 +28,9 @@
  * belongs to the query running then, or to no query where a utility
  * statement writes -- COPY FROM; the module finishes it as that query
  * finishes, before its AFTER triggers, as a utility statement ends, at
- * finish_bulk_insert, and before a commit, and drops it, unwritten, where
- * its subtransaction aborts (access/pax_access_handle.cc).
+ * finish_bulk_insert, before a commit, and before a row it has in memory
+ * still is fetched by its TID, and drops it, unwritten, where its
+ * subtransaction aborts (access/pax_access_handle.cc).
  *-------------------------------------------------------------------------
  */
 
@@ -145,6 +146,26 @@ void CPaxDmlStateLocal::Reparent(SubTransactionId subid,
 }
 
 void CPaxDmlStateLocal::ForgetRelation(Oid relid) { RemoveDmlState(relid); }
+
+// The rows of the micro-partition a writer writes are in memory until it is
+// finished, and its file is written then: an AFTER trigger's row, which COPY
+// FROM fetches before the statement's end, where the writers are finished.
+// The writer alone is finished, the statement's deletes kept for its end; a
+// later row of the statement's has a writer of its own.
+void CPaxDmlStateLocal::FinishWriting(Relation rel, BlockNumber block) {
+  auto state = FindDmlState(cbdb::RelationGetRelationId(rel));
+  MemoryContext old_ctx;
+
+  if (state == nullptr || state->inserter == nullptr ||
+      state->inserter->WritingBlock() != block)
+    return;
+
+  Assert(cbdb::pax_memory_context);
+  old_ctx = MemoryContextSwitchTo(cbdb::pax_memory_context);
+  state->inserter->FinishInsert();
+  MemoryContextSwitchTo(old_ctx);
+  state->inserter = nullptr;
+}
 
 void CPaxDmlStateLocal::FinishDmlState(Relation rel, CmdType /*operation*/) {
   auto oid = cbdb::RelationGetRelationId(rel);

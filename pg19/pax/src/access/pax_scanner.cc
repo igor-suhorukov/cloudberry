@@ -451,8 +451,8 @@ void PaxScanDesc::ReScan(ScanKey /*key*/, bool /*set_params*/,
                          bool /*allow_strat*/, bool /*allow_sync*/,
                          bool /*allow_pagemode*/) {
   MemoryContext old_ctx;
-  Assert(reader_);
 
+  // a TID scan's, which fetches its rows one by one, has no reader
   if (!reader_) return;
   old_ctx = MemoryContextSwitchTo(memory_context_);
   reader_->ReOpen();
