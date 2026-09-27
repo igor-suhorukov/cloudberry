@@ -601,6 +601,20 @@ What Cloudberry's tests asked for next (2026-09-27), in `gp_core`,
   counted where they lie as a run ends; gp_toolkit's four workfile views of
   the same files; and a segment's cancel in its QE's words
   (`gp_workfile.c`);
+- **parallelism within a segment** (`gp.enable_parallel`, off by default as
+  Cloudberry's is; PostgreSQL's `max_parallel_workers_per_gather` and
+  parallel costs, sent to the segments): the segment's writer runs a Gather
+  of PostgreSQL's in what it runs for the coordinator, whole at its first
+  FETCH, its workers in the writer's lock group — a gather's query of the
+  planner's route that the coordinator reads to its end, which the segment
+  plans with parallel plans allowed, and ORCA's fragments of the writer,
+  which the ORCA module gives Gathers where PostgreSQL's costs say they pay:
+  over a large sequential scan, a hash join whose outer side's scan the
+  participants share and whose inner side each hashes, or an aggregate in
+  three stages (`orca/parallel.c`); a reader's slice runs without them, a
+  member of a lock group leading none of its own;
+  EXPLAIN ANALYZE says "Workers Launched"; `max_worker_processes` is the
+  cluster's to size (`modules/gp_core/gp_parallel.c`);
 - and the server built with LDAP, for `pg_hba.conf`'s ldap lines.
 
 M8 (2026-09-27) adds `gpfts`, the coordinator's automatic failover
@@ -726,6 +740,14 @@ restart between its phases, a failover and a storage server; `dbcopy`, a databas
 strategy and moved to another tablespace and back, with PAX tables and
 directory tables, on one node and a standby; `postgis_cluster`, M7's, stock PostGIS on a
 coordinator and three segments, its answers checked against one node's;
+`tpc`, on request only, TPC-H's 22 queries and TPC-DS's 99 at scale factor
+1 on a coordinator and four segments, their data, queries and a reference
+answer to each from DuckDB (pinned, in the image), each query planned by
+ORCA and answering as DuckDB answers it -- `CB_TPC=check` in the tests
+service -- and each timed under ORCA and under the planner's route, on the
+port built without assertions -- the compose file's `tpc` service,
+`CB_TPC=time` -- and with as many parallel workers on each segment as
+`TPC_WORKERS` lists, `"0 2 4"` for the speedups;
 `singlenode` and
 `singlenode_isolation2`, Cloudberry's single-node suites with PostgreSQL 19's
 own regression tests; PostGIS's regression suite; `pxf_fdw`, M8's,

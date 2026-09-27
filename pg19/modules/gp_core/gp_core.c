@@ -64,6 +64,7 @@
 #include "gp_loopback.h"
 #include "gp_metatrack.h"
 #include "gp_metrics.h"
+#include "gp_parallel.h"
 #include "gp_partanalyze.h"
 #include "gp_policy.h"
 #include "gp_rtfilter.h"
@@ -367,6 +368,15 @@ _PG_init(void)
 	 * the segments gpexpand added or gpshrink removed.
 	 */
 	GpExpandInit();
+
+	/*
+	 * Parallelism within a segment: its settings, and PostgreSQL's Gather in
+	 * a segment's writer (gp_parallel.c).  Last of gp_core's executor hooks,
+	 * so that its ExecutorRun, which runs a statement with a Gather whole at
+	 * its first FETCH, is the first to see each FETCH and the others see the
+	 * one run.
+	 */
+	GpParallelInit();
 
 	/*
 	 * Deliberately no MarkGUCPrefixReserved("gp") here.  It drops every

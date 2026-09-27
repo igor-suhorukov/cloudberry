@@ -84,6 +84,19 @@ extern bool GpGatherScanStartEarly(struct PlanState *ps);
 extern void GpGatherScanMarkRescans(struct PlanState *root);
 
 /*
+ * As a statement starts, where parallelism within a segment is on: the
+ * gathers it reads to their end -- all of them, where "whole" says its top
+ * is read to its end -- tell their segments so (gp_parallel.c).
+ */
+extern void GpGatherScanMarkWhole(struct PlanState *root, bool whole);
+
+/*
+ * What ends the query of a gather read to its end, which a segment may plan
+ * with parallel workers and run whole at its first FETCH (gp_parallel.c).
+ */
+#define GP_WHOLE_MARKER		" /*gp:whole*/"
+
+/*
  * Is this node a gather: its slice, as the executor met it, and how many
  * segments it reads (EXPLAIN's slice table).
  */

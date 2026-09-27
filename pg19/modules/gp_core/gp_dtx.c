@@ -118,6 +118,7 @@
 
 #include "access/genam.h"
 #include "access/heapam.h"
+#include "access/parallel.h"
 #include "access/table.h"
 #include "access/tableam.h"
 #include "access/transam.h"
@@ -1311,6 +1312,19 @@ dtx_executor_start(QueryDesc *queryDesc, int eflags)
 		}
 	}
 
+	/*
+	 * A parallel worker of a segment's writer (gp_parallel.c) reads with the
+	 * snapshot the writer made, which PostgreSQL restores as its active one;
+	 * under REPEATABLE READ its transaction's snapshot is the writer's own,
+	 * not made to agree, whose xmin may be later.  Its xmin is lowered to the
+	 * made one's, as the writer's was: the writer holds it, and a
+	 * subtransaction the made snapshot hides is looked up in pg_subtrans only
+	 * above the backend's own xmin.
+	 */
+	if (IsParallelWorker() && GpClusterIsDispatched() && ActiveSnapshotSet() &&
+		GetActiveSnapshot()->snapshot_type == SNAPSHOT_MVCC)
+		dtx_lower_xmin(GetActiveSnapshot()->xmin);
+
 	if (prev_executor_start)
 		prev_executor_start(queryDesc, eflags);
 	else
@@ -1408,13 +1422,15 @@ static FullTransactionId dtx_one_phase_gxid = {0};
  * A dispatched writer's part of a distributed transaction: what the
  * coordinator commits.  A reader's transaction is its own and writes
  * nothing, and the loopback's part, on the coordinator, is the coordinator's
- * to decide.
+ * to decide.  A parallel worker of the writer (gp_parallel.c) is a part of
+ * the writer's transaction, which the writer reports and ends: in parallel
+ * mode it could set no setting either.
  */
 static bool
 dtx_is_writer_part(void)
 {
 	return GpClusterIsDispatched() && !GpShareIsReader() &&
-		GpClusterContentId() >= 0;
+		!IsParallelWorker() && GpClusterContentId() >= 0;
 }
 
 /*

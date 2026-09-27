@@ -4081,10 +4081,10 @@ fragment_plan(const char *payload, const char *key)
 	}
 
 	/*
-	 * A segment runs a slice in one process.  The fragment is a copy of the
-	 * coordinator's whole statement, which may need parallel mode for a
-	 * part the coordinator runs; this part starts no workers, and a reader,
-	 * a member of its writer's lock group, could not lead any (gp_share.c).
+	 * The fragment is a copy of the coordinator's whole statement, which may
+	 * need parallel mode for a part the coordinator runs; this part needs it
+	 * only for Gathers of its own, which the writer keeps and a reader, a
+	 * member of its writer's lock group, could not lead (gp_parallel.c).
 	 */
 	stmt->parallelModeNeeded = false;
 

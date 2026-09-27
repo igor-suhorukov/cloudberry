@@ -609,6 +609,7 @@ typedef struct GpReportNode
 	int64		execmem;		/* its own context's bytes, 0 where not asked */
 	int64		workmem;		/* bytes of work_mem a Sort, hash or Material used */
 	int64		nsearches;		/* an index scan's searches */
+	int32		nworkers;		/* the workers a Gather launched, at most */
 	WalUsage	wal;
 } GpReportNode;
 
@@ -1047,6 +1048,10 @@ node_figures(PlanState *ps, GpExplainQuery *q, GpReportNode *n)
 	n->total_ns = INSTR_TIME_GET_NANOSEC(instr->instr.total);
 	n->wal = instr->instr.walusage;
 	n->nsearches = node_searches(ps);
+	if (IsA(ps, GatherState))
+		n->nworkers = ((GatherState *) ps)->nworkers_launched;
+	else if (IsA(ps, GatherMergeState))
+		n->nworkers = ((GatherMergeState *) ps)->nworkers_launched;
 	if (q->firststart != NULL && id >= 0 && id < q->nnodes)
 		n->firststart = q->firststart[id];
 	if (q->contexts != NULL && id >= 0 && id < q->nnodes && q->contexts[id] != NULL)
@@ -1283,6 +1288,7 @@ add_figures(SegFigures *to, const GpReportNode *n)
 	t->execmem = Max(t->execmem, n->execmem);
 	t->workmem = Max(t->workmem, n->workmem);
 	t->nsearches += n->nsearches;
+	t->nworkers = Max(t->nworkers, n->nworkers);
 	wal_add(&t->wal, &n->wal);
 }
 
@@ -1393,7 +1399,7 @@ slice_walker(PlanState *ps, SliceWalk *w)
  * given the figures of the segment that returned the most rows, or ran it
  * the most times where none returned any -- Cloudberry's winner
  * (cdbexplain_depositStatsToNode()) -- and the WAL and index searches of
- * all of them.
+ * all of them.  A Gather's workers are the winner's.
  */
 static void
 deposit_fragment(PlanState *ps, SegFigures *segs)
@@ -1435,9 +1441,19 @@ deposit_fragment(PlanState *ps, SegFigures *segs)
 		nsearches += segs[c].node.nsearches;
 	}
 
-	/* the counter gp_motion.c gives a described index scan */
+	/*
+	 * the counter gp_motion.c gives a described index scan, and the workers
+	 * the winner's Gather launched (gp_parallel.c), which EXPLAIN prints as
+	 * "Workers Launched"
+	 */
 	switch (nodeTag(ps))
 	{
+		case T_GatherState:
+			((GatherState *) ps)->nworkers_launched = n->nworkers;
+			break;
+		case T_GatherMergeState:
+			((GatherMergeState *) ps)->nworkers_launched = n->nworkers;
+			break;
 		case T_IndexScanState:
 			if (((IndexScanState *) ps)->iss_Instrument != NULL)
 				((IndexScanState *) ps)->iss_Instrument->nsearches += nsearches;

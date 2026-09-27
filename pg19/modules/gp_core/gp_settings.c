@@ -49,12 +49,13 @@
  *
  * And those it accepts and has nothing to apply to yet, each for a reason
  * that says when it will: the planner's own MPP plans (Route B, decided at
- * M7), memory accounting (M6), intra-segment parallelism (after M7,
- * decision 2) -- or that it will not: the executor's prefetch of a join's
- * quals, which PostgreSQL's joins do not do, and the planner's knobs of a
- * sort under a LIMIT and of a hash join's cost, which are PostgreSQL's
- * here.  They are defined so that a script written for Cloudberry runs;
- * their descriptions say what they do here, which is nothing until then.
+ * M7) and memory accounting (M6) -- or that it will not: the executor's
+ * prefetch of a join's quals, which PostgreSQL's joins do not do, and the
+ * planner's knobs of a sort under a LIMIT and of a hash join's cost, which
+ * are PostgreSQL's here.  They are defined so that a script written for
+ * Cloudberry runs; their descriptions say what they do here, which is
+ * nothing until then.  Parallelism within a segment has settings of its own
+ * (gp_parallel.c).
  *
  *-------------------------------------------------------------------------
  */
@@ -130,11 +131,11 @@ static bool gp_autostats_lock_wait = false;
 /* ------------------------------------------------------------------------- */
 
 int			gp_statement_mem = 128000;
-static bool enable_parallel = false;
 static int	gp_vmem_idle_resource_timeout = 18000;
 static int	gp_segments_for_planner = 0;
 static bool gp_workfile_compression = false;
 static bool gp_enable_multiphase_agg = true;
+static bool gp_enable_multiphase_limit = true;
 static bool gp_eager_two_phase_agg = false;
 static bool gp_cte_sharing = false;
 static bool test_print_prefetch_joinqual = false;
@@ -787,12 +788,6 @@ GpSettingsInit(void)
 							check_statement_mem, NULL, NULL);
 
 	/* Accepted, with nothing to apply them to yet; see the file header. */
-	DefineCustomBoolVariable("gp.enable_parallel",
-							 "allow to use of parallel query facilities or not.",
-							 "Accepted for Cloudberry's scripts: a segment runs each slice in one process until intra-segment parallelism (after M7, decision 2).",
-							 &enable_parallel,
-							 false, PGC_USERSET, GUC_EXPLAIN,
-							 NULL, NULL, NULL);
 	DefineCustomIntVariable("gp.vmem_idle_resource_timeout",
 							"Sets the time a session can be idle (in milliseconds) before we release gangs on the segment DBs to free resources.",
 							"Accepted for Cloudberry's scripts: a session keeps its segment connections until it ends.",
@@ -827,6 +822,9 @@ GpSettingsInit(void)
 	define_accepted_bool("gp.enable_multiphase_agg",
 						 "Enables the planner's use of two- or three-stage parallel aggregation plans." ROUTE_B,
 						 &gp_enable_multiphase_agg, true);
+	define_accepted_bool("gp.enable_multiphase_limit",
+						 "Enables the planner's use of two phase limit plans." ROUTE_B,
+						 &gp_enable_multiphase_limit, true);
 	define_accepted_bool("gp.eager_two_phase_agg",
 						 "Eager two stage agg." ROUTE_B,
 						 &gp_eager_two_phase_agg, false);

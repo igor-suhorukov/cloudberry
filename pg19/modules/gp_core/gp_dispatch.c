@@ -338,6 +338,22 @@ static const char *const synced_settings[] = {
 	"gpsc.report_nested_queries",
 	"gpsc.min_analyze_time",
 	"gpsc.command_count",
+	/*
+	 * whether a segment's writer may start parallel workers, and how many and
+	 * where they pay, as PostgreSQL's planner and Gather read them there
+	 * (gp_parallel.c) -- not debug_parallel_query, which would put a Gather
+	 * above every query a segment plans with them; a reader, a member of its
+	 * writer's lock group, plans none whatever they say (gp_share.c)
+	 */
+	"gp.enable_parallel",
+	"max_parallel_workers_per_gather",
+	"parallel_setup_cost",
+	"parallel_tuple_cost",
+	"min_parallel_table_scan_size",
+	"min_parallel_index_scan_size",
+	"parallel_leader_participation",
+	"enable_parallel_append",
+	"enable_parallel_hash",
 };
 
 #define NUM_SYNCED_SETTINGS	lengthof(synced_settings)

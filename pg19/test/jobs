@@ -63,8 +63,12 @@ diskquota              isolation2 105   DQ_PARTS=isolation2 MEM=2000
 gpmgmt                 -        270   MEM=2000
 expandshrink           orca      85   PASSES=orca MEM=2500
 expandshrink           planner   85   PASSES=planner MEM=2500
+# tpc runs only on request (CB_TPC; tpc/run.sh) and is skipped at once
+# otherwise.  Checked, on four segments: its data and DuckDB's CSV files as
+# they are loaded, in the tmpfs, 10.9 GB at most.
+tpc                    -         90   MEM=12000
 singlenode             planner   26   PASSES=planner MEM=3500
-cluster                -        100   MEM=600
+cluster                -        115   MEM=700
 orca                   -         54   MEM=300
 fts                    -         55   MEM=1000
 gpfts                  -         73   MEM=1300
