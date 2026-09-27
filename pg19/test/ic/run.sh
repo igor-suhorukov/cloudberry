@@ -162,7 +162,10 @@ q 0 "CREATE TABLE o (a int, b int, c text) DISTRIBUTED BY (a);
      INSERT INTO bo SELECT i, md5((i % 20000)::text) FROM generate_series(1, 60000) i;
      CREATE TABLE wu (a int PRIMARY KEY, b int) DISTRIBUTED BY (a);
      INSERT INTO wu SELECT i, i FROM generate_series(1, 100) i;
-     ANALYZE o; ANALYZE po; ANALYZE bo; ANALYZE wu;" > /dev/null
+     CREATE TABLE lr (k int, s text) DISTRIBUTED BY (k);
+     ALTER TABLE lr ALTER COLUMN s SET STORAGE EXTERNAL;
+     INSERT INTO lr SELECT i, repeat(md5(i::text), 3200) FROM generate_series(1, 20) i;
+     ANALYZE o; ANALYZE po; ANALYZE bo; ANALYZE wu; ANALYZE lr;" > /dev/null
 
 ###############################################################################
 echo "2. the same rows over every transport"
@@ -200,6 +203,8 @@ same "a tenth of the packets lost, and a third of the acknowledgements, where a 
 	"Redistribute Motion" \
 	"SET gp.udpic_dropxmit_percent = 10; SET gp.udpic_dropacks_percent = 30;
 SELECT count(*), sum(length(s)) FROM (SELECT s, count(*) FROM bo GROUP BY s) x;"
+same "rows of a hundred kilobytes, longer than a UDP receiver's room" "Redistribute Motion" \
+	"SELECT count(*), sum(length(s)) FROM (SELECT s, count(*) FROM lr GROUP BY s) x;"
 same "a Gather to one segment, which an UPDATE's subquery reads" "Gather Motion 2:1" \
 	"BEGIN;
 UPDATE wu SET b = (SELECT max(x) FROM po WHERE x < 90) WHERE a < 50;

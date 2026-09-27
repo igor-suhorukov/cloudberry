@@ -847,11 +847,18 @@ udp_find_in(const IcUdpPacket *pkt, IcReceiver **owner)
 	return NULL;
 }
 
-/* A sender's next bytes, into its stream here if there is room. */
+/*
+ * A sender's next bytes, into its stream here if there is room.  A row
+ * longer than the room -- gp.interconnect_queue_depth packets' worth --
+ * could never be taken whole: the room grows to the row's length once the
+ * length has come, and the acknowledgements tell the sender so, as
+ * Cloudberry's receiver joins a long tuple's chunks in memory of its own.
+ */
 static bool
 udp_take(IcIn *in, const char *data, int len)
 {
 	int			unread = in->end - in->start;
+	uint32		frame;
 
 	if (unread + len > in->bufsize)
 		return false;
@@ -864,6 +871,20 @@ udp_take(IcIn *in, const char *data, int len)
 	memcpy(in->buf + in->end, data, len);
 	in->end += len;
 	in->udp_recv += len;
+
+	unread = in->end - in->start;
+	if (unread < (int) sizeof(uint32))
+		return true;
+	memcpy(&frame, in->buf + in->start, sizeof(uint32));
+	frame = pg_ntoh32(frame);
+	if (frame != IC_END_OF_ROWS && sizeof(uint32) + (uint64) frame > (uint64) in->bufsize)
+	{
+		memmove(in->buf, in->buf + in->start, unread);
+		in->start = 0;
+		in->end = unread;
+		in->bufsize = sizeof(uint32) + frame;
+		in->buf = repalloc(in->buf, in->bufsize);
+	}
 	return true;
 }
 
