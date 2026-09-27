@@ -349,6 +349,29 @@ extern int	GpStreamAddReader(GpStream *stream, int content,
 extern void GpStreamStartReader(GpStream *stream, int reader, const char *sql);
 extern void GpStreamEnd(GpStream *stream);
 
+/*
+ * A parallel retrieve cursor's stream, held from one statement of its
+ * transaction to another (gp_endpoint.c): its readers stay its own until
+ * GpStreamRelease(), and what they answer is raised only by
+ * GpStreamRaise().  GpStreamReaderExec() runs a statement on one of them
+ * and waits, the settings synced first where asked; GpStreamContinueReader()
+ * sends one in the transaction the
+ * reader has open; GpStreamWait() waits for them, timeout_ms at most, -1 as
+ * long as it takes, and says whether none is busy; GpStreamCancel() stops
+ * the busy ones and forgets what they answer.
+ */
+extern GpStream *GpStreamBeginHeld(void);
+extern void GpStreamReaderExec(GpStream *stream, int reader, const char *sql,
+							   bool settings);
+extern void GpStreamContinueReader(GpStream *stream, int reader,
+								   const char *sql);
+extern bool GpStreamWait(GpStream *stream, long timeout_ms);
+extern bool GpStreamReaderDone(GpStream *stream, int reader);
+extern bool GpStreamFailed(GpStream *stream);
+extern void GpStreamRaise(GpStream *stream);
+extern void GpStreamCancel(GpStream *stream);
+extern void GpStreamRelease(GpStream *stream);
+
 /* Close every connection: the session is over, or something went wrong. */
 extern void GpDispatchResetGang(void);
 

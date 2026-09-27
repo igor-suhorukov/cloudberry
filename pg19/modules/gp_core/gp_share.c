@@ -102,11 +102,17 @@
 /* How long a gp.qe_identity may be to be compared. */
 #define GP_SHARE_IDLEN		128
 
-/* One statement's publication: its key and what it holds. */
+/*
+ * One statement's publication: its key, what it holds, and the session user
+ * it was made as, which its readers' is to be -- a transaction's statements
+ * may be made as several, SET SESSION AUTHORIZATION between them, and a
+ * parallel retrieve cursor's readers read long after (gp_endpoint.c).
+ */
 typedef struct GpSharePub
 {
 	char		key[GP_SHARE_KEYLEN];	/* "" when free */
 	uint64		seq;			/* the oldest is replaced first */
+	Oid			user;
 	dsa_pointer data;			/* GpShareData */
 } GpSharePub;
 
@@ -118,7 +124,6 @@ typedef struct GpShareSlot
 	int			pid;			/* the writer; 0 before it first publishes */
 	uint64		xact;			/* which of its transactions published */
 	Oid			database;
-	Oid			user;
 	char		identity[GP_SHARE_IDLEN];
 	uint64		nextseq;
 	GpSharePub	pubs[GP_SHARE_MAXPUB];
@@ -299,7 +304,6 @@ writer_take_slot(void)
 	slot->pid = MyProcPid;
 	slot->xact++;
 	slot->database = MyDatabaseId;
-	slot->user = GetSessionUserId();
 	strlcpy(slot->identity, GpClusterQeIdentity(), GP_SHARE_IDLEN);
 	for (int i = 0; i < n; i++)
 		slot_add_combo(slot, i, pairs[2 * i], pairs[2 * i + 1]);
@@ -376,6 +380,7 @@ GpSharePublish(const char *key, Snapshot snapshot)
 		dsa_free(share_area, pub->data);
 	strlcpy(pub->key, key, GP_SHARE_KEYLEN);
 	pub->seq = ++slot->nextseq;
+	pub->user = GetSessionUserId();
 	pub->data = dp;
 	LWLockRelease(&slot->lock);
 
@@ -487,7 +492,6 @@ share_attach_reader(const char *value)
 		if (slot->pid == (int) pid)
 		{
 			mine = slot->database == MyDatabaseId &&
-				slot->user == GetSessionUserId() &&
 				strcmp(slot->identity, GpClusterQeIdentity()) == 0;
 			for (int p = 0; mine && p < GP_SHARE_MAXPUB; p++)
 			{
@@ -495,6 +499,11 @@ share_attach_reader(const char *value)
 
 				if (pub->key[0] == '\0' || strcmp(pub->key, key) != 0)
 					continue;
+				if (pub->user != GetSessionUserId())
+				{
+					mine = false;
+					break;
+				}
 				memcpy(&header, dsa_get_address(share_area, pub->data),
 					   offsetof(GpShareData, bytes));
 				bytes = palloc(offsetof(GpShareData, bytes) +

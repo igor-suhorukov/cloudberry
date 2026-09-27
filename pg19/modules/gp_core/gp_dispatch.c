@@ -531,6 +531,7 @@ struct GpStream
 {
 	List	   *readers;		/* GpReaderConn, as they were added */
 	List	   *errors;			/* GpSegmentError, what they answered */
+	bool		held;			/* a parallel retrieve cursor's; see below */
 };
 
 /* The ones running; in TopMemoryContext, as the readers point at them. */
@@ -1791,6 +1792,32 @@ error_is_consequence(GpSegmentError *err)
 }
 
 /*
+ * The first error that is neither a receiver's whose sender stopped nor a
+ * cancel, first, and the others that are either left out.
+ */
+static List *
+errors_cause_first(List *errors)
+{
+	ListCell   *lc;
+
+	foreach_ptr(GpSegmentError, err, errors)
+	{
+		if (!error_is_consequence(err))
+		{
+			errors = list_delete_ptr(errors, err);
+			errors = lcons(err, errors);
+			break;
+		}
+	}
+	for_each_from(lc, errors, 1)
+	{
+		if (error_is_consequence((GpSegmentError *) lfirst(lc)))
+			errors = foreach_delete_current(errors, lc);
+	}
+	return errors;
+}
+
+/*
  * Raise what the segments said.
  *
  * The first segment's message is the message, with its own SQLSTATE, so that a
@@ -1825,23 +1852,8 @@ raise_segment_errors(List *errors)
 	 */
 	if (active_streams != NIL)
 	{
-		ListCell   *lc;
-
 		readers_cancel_and_drain(&errors);
-		foreach_ptr(GpSegmentError, err, errors)
-		{
-			if (!error_is_consequence(err))
-			{
-				errors = list_delete_ptr(errors, err);
-				errors = lcons(err, errors);
-				break;
-			}
-		}
-		for_each_from(lc, errors, 1)
-		{
-			if (error_is_consequence((GpSegmentError *) lfirst(lc)))
-				errors = foreach_delete_current(errors, lc);
-		}
+		errors = errors_cause_first(errors);
 	}
 
 	first = (GpSegmentError *) linitial(errors);
@@ -2253,13 +2265,27 @@ streams_raise_if_failed(void)
 }
 
 /*
- * Stop every reader that is still running a slice and read it to the end,
- * adding what the readers answered to *errors, when given.  Called with an
- * error on its way, so it raises nothing; a reader that does not answer
- * within a while is dropped.
+ * Is this reader one readers_stop() stops: one of the stream's, when a
+ * stream is given, and otherwise any but a held stream's, whose readers are
+ * its cursor's to stop (GpStreamCancel()).
+ */
+static bool
+reader_stopped_by(const GpReaderConn *r, const GpStream *only)
+{
+	if (r->conn == NULL || !r->busy)
+		return false;
+	if (only != NULL)
+		return r->stream == only;
+	return r->stream == NULL || !r->stream->held;
+}
+
+/*
+ * Stop every reader that is still running a slice and read it to the end:
+ * those of one stream, or all but a held stream's.  Raises nothing; a reader
+ * that does not answer within a while is dropped.
  */
 static void
-readers_cancel_and_drain(List **errors)
+readers_stop(GpStream *only)
 {
 	TimestampTz deadline = GetCurrentTimestamp() + 30 * USECS_PER_SEC;
 	bool		any;
@@ -2269,7 +2295,7 @@ readers_cancel_and_drain(List **errors)
 
 	foreach_ptr(GpReaderConn, r, gang->readers)
 	{
-		if (r->conn != NULL && r->busy)
+		if (reader_stopped_by(r, only))
 		{
 			const char *err = libpqsrv_cancel(r->conn, deadline);
 
@@ -2286,7 +2312,7 @@ readers_cancel_and_drain(List **errors)
 		readers_poll();
 		any = false;
 		foreach_ptr(GpReaderConn, r, gang->readers)
-			if (r->conn != NULL && r->busy)
+			if (reader_stopped_by(r, only))
 				any = true;
 		if (!any)
 			break;
@@ -2294,7 +2320,7 @@ readers_cancel_and_drain(List **errors)
 		{
 			foreach_ptr(GpReaderConn, r, gang->readers)
 			{
-				if (r->conn != NULL && r->busy)
+				if (reader_stopped_by(r, only))
 				{
 					libpqsrv_disconnect(r->conn);
 					r->conn = NULL;
@@ -2309,6 +2335,16 @@ readers_cancel_and_drain(List **errors)
 			(occurred[0].events & WL_LATCH_SET))
 			ResetLatch(MyLatch);
 	} while (any);
+}
+
+/*
+ * Stop every reader still running a slice of a statement, adding what they
+ * answered to *errors, when given.  Called with an error on its way.
+ */
+static void
+readers_cancel_and_drain(List **errors)
+{
+	readers_stop(NULL);
 
 	foreach_ptr(GpStream, stream, active_streams)
 	{
@@ -2608,6 +2644,184 @@ GpStreamEnd(GpStream *stream)
 	foreach_ptr(GpReaderConn, r, stream->readers)
 		r->stream = NULL;
 	active_streams = list_delete_ptr(active_streams, stream);
+	list_free(stream->readers);
+	pfree(stream);
+}
+
+/* ------------------------------------------------------------------------- */
+/* A parallel retrieve cursor's stream                                       */
+/* ------------------------------------------------------------------------- */
+
+/*
+ * A parallel retrieve cursor's slices run on readers that stay the cursor's
+ * until it is closed, across the statements of its transaction: a held
+ * stream (gp_endpoint.c).  It is no statement's, so no statement's end
+ * releases it, and no other statement's wait raises what its readers
+ * answer or stops them; the cursor asks, as it waits for its endpoints and
+ * as it is closed, as Cloudberry's cursor checks its own dispatcher state.
+ */
+GpStream *
+GpStreamBeginHeld(void)
+{
+	MemoryContext oldcxt = MemoryContextSwitchTo(TopMemoryContext);
+	GpStream   *stream = palloc0(sizeof(GpStream));
+
+	(void) gang_get();
+	stream->held = true;
+	MemoryContextSwitchTo(oldcxt);
+	return stream;
+}
+
+static GpReaderConn *
+stream_reader(GpStream *stream, int reader)
+{
+	GpReaderConn *r = (GpReaderConn *) list_nth(stream->readers, reader);
+
+	if (r->conn == NULL)
+		ereport(ERROR,
+				(errcode(ERRCODE_CONNECTION_FAILURE),
+				 errmsg("lost a reader's connection to segment %d", r->content)));
+	return r;
+}
+
+/*
+ * A statement on one of its readers, waited for; what it answers is raised.
+ * With "settings", the settings that changed since the reader was last told
+ * go first, for a statement that reads them.
+ */
+void
+GpStreamReaderExec(GpStream *stream, int reader, const char *sql,
+				   bool settings)
+{
+	GpReaderConn *r = stream_reader(stream, reader);
+
+	/* one its slice left in a transaction, which is over */
+	if (PQtransactionStatus(r->conn) != PQTRANS_IDLE)
+		reader_exec(r, "ROLLBACK", NULL);
+	if (settings)
+		reader_sync_settings(r);
+	reader_exec(r, sql, NULL);
+}
+
+/* A statement sent to one of its readers, in the transaction it has open. */
+void
+GpStreamContinueReader(GpStream *stream, int reader, const char *sql)
+{
+	GpReaderConn *r = stream_reader(stream, reader);
+
+	if (!PQsendQuery(r->conn, sql))
+	{
+		char	   *msg = pstrdup(PQerrorMessage(r->conn));
+
+		libpqsrv_disconnect(r->conn);
+		r->conn = NULL;
+		gang_build_wes(gang);
+		ereport(ERROR,
+				(errcode(ERRCODE_CONNECTION_FAILURE),
+				 errmsg("could not send a slice to segment %d", r->content),
+				 errdetail_internal("%s", msg)));
+	}
+	r->busy = true;
+}
+
+/*
+ * Wait for its readers to finish what they were sent, for at most timeout_ms
+ * (-1: as long as it takes): true when none is busy any more.  What they
+ * answered stays with the stream, for GpStreamFailed() and GpStreamRaise();
+ * one that answered an error ends the wait.
+ */
+bool
+GpStreamWait(GpStream *stream, long timeout_ms)
+{
+	TimestampTz deadline = timeout_ms > 0
+		? TimestampTzPlusMilliseconds(GetCurrentTimestamp(), timeout_ms) : 0;
+
+	for (;;)
+	{
+		bool		busy = false;
+		long		wait_ms = 1000;
+		WaitEvent	occurred[1];
+
+		/*
+		 * Twice: a reader whose backend ended after saying something -- its
+		 * last warning -- says it closed only on the next read.
+		 */
+		CHECK_FOR_INTERRUPTS();
+		readers_poll();
+		readers_poll();
+		foreach_ptr(GpReaderConn, r, stream->readers)
+			if (r->conn != NULL && r->busy)
+				busy = true;
+		if (!busy || stream->errors != NIL || gang == NULL)
+			return !busy;
+		if (timeout_ms == 0)
+			return false;
+		if (timeout_ms > 0)
+		{
+			long		left = TimestampDifferenceMilliseconds(GetCurrentTimestamp(),
+															   deadline);
+
+			if (left <= 0)
+				return false;
+			wait_ms = Min(wait_ms, left);
+		}
+		flush_segment_notices();
+		if (WaitEventSetWait(gang->wes, wait_ms, occurred, 1,
+							 dispatch_wait_event()) > 0 &&
+			(occurred[0].events & WL_LATCH_SET))
+			ResetLatch(MyLatch);
+	}
+}
+
+/* Is one of its readers connected, and done with what it was sent? */
+bool
+GpStreamReaderDone(GpStream *stream, int reader)
+{
+	GpReaderConn *r = (GpReaderConn *) list_nth(stream->readers, reader);
+
+	return r->conn != NULL && !r->busy;
+}
+
+/* Has one of its readers answered an error? */
+bool
+GpStreamFailed(GpStream *stream)
+{
+	return stream->errors != NIL;
+}
+
+/*
+ * Raise what its readers answered, the cause over its consequences, once
+ * the ones still busy are stopped: a slice that failed fails the cursor.
+ */
+void
+GpStreamRaise(GpStream *stream)
+{
+	List	   *errors = stream->errors;
+
+	if (errors == NIL)
+		return;
+	stream->errors = NIL;
+	readers_stop(stream);
+	errors = list_concat(errors, stream->errors);
+	stream->errors = NIL;
+	raise_segment_errors(errors_cause_first(errors));
+}
+
+/* Stop its readers that are still busy, and forget what they answer. */
+void
+GpStreamCancel(GpStream *stream)
+{
+	readers_stop(stream);
+	stream->errors = NIL;
+}
+
+/* The readers go back to the session, and the stream is forgotten. */
+void
+GpStreamRelease(GpStream *stream)
+{
+	foreach_ptr(GpReaderConn, r, stream->readers)
+		if (r->stream == stream)
+			r->stream = NULL;
 	list_free(stream->readers);
 	pfree(stream);
 }
