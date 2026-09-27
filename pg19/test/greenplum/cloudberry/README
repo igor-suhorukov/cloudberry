@@ -308,6 +308,15 @@ gpdist_legacy_opclasses  the complex type, Cloudberry's own, which
   complex's place -- takes them, holds a row and finds it; the rows the test
   places on the segments are where Cloudberry places them.
 
+gpsd  the statistics gpsd dumps and reads back, which are the port's
+  ANALYZE's (analyze, above): no number of distinct values over the
+  segments, Cloudberry's kind 8, in any row, and a root's merged slots
+  naming the column's collation, which Cloudberry leaves 0; and with --hll
+  a leaf's HyperLogLog counter, which the port keeps in
+  gp_internal.leaf_hll and gpsd dumps with it, where Cloudberry's is the
+  row's fifth slot, kind 99.  And psql's \d+ of pg_statistic, whose
+  not-null constraints PostgreSQL 19's psql lists.
+
 ic (planner)  the interconnect a segment of a join sets up, where
   Cloudberry's fault interconnect_setup_palloc fails the query on segment
   0: the planner reads both tables through gathers and joins them here, and
@@ -361,6 +370,16 @@ matview_data  a write of a partitioned table marks the views of its
   that it found no partition of par written -- are not printed.  One node
   marks the partitions written, as Cloudberry does: the singlenode suite's
   matview_data has no difference.
+
+minirepro  the statistics, as gpsd's (above); the SECURITY LABEL that
+  PostgreSQL 19's pg_dump writes of each table, the port's distribution
+  policy, where Cloudberry's pg_dump writes DISTRIBUTED BY in its CREATE
+  TABLE; with --hll the INSERT of each counter into gp_internal.leaf_hll
+  after its leaf's row; and pg_tablespace, of five columns in PostgreSQL 19
+  where Cloudberry's has seven: two statistics rows fewer, and the dump's
+  CREATE TABLE of it two lines shorter, so that the errors the test expects
+  from it are two lines earlier.  And psql's \d+ of pg_statistic, as
+  gpsd's.
 
 part_external_table (orca)  the lines ORCA's fallback trace prints for a
   partitioned table with external partitions: the dynamic foreign scan ORCA
