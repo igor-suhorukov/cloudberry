@@ -1105,9 +1105,9 @@ motion_recv_next(MotionState *state)
 			StringInfoData buf;
 
 			initReadOnlyStringInfo(&buf, data, len);
-			slot->tts_values[i] = ReceiveFunctionCall(&state->inprocs[i], &buf,
-													  state->inparams[i],
-													  TupleDescAttr(tupdesc, i)->atttypmod);
+			slot->tts_values[i] = GpReceiveFunctionCall(&state->inprocs[i], &buf,
+														state->inparams[i],
+														TupleDescAttr(tupdesc, i)->atttypmod);
 		}
 		else
 			slot->tts_values[i] = InputFunctionCall(&state->inprocs[i], data,
@@ -1387,8 +1387,8 @@ motion_send_all(MotionState *state)
 				}
 				else if (state->send_binary)
 				{
-					bytea	   *b = SendFunctionCall(&state->outprocs[i],
-													 slot->tts_values[i]);
+					bytea	   *b = GpSendFunctionCall(&state->outprocs[i],
+													   slot->tts_values[i]);
 
 					values[i] = VARDATA(b);
 					lengths[i] = VARSIZE(b) - VARHDRSZ;
@@ -1516,9 +1516,9 @@ motion_decode_row(MotionState *state, const char *data, int len)
 			StringInfoData buf;
 
 			initReadOnlyStringInfo(&buf, value, vlen);
-			slot->tts_values[i] = ReceiveFunctionCall(&state->inprocs[i], &buf,
-													  state->inparams[i],
-													  TupleDescAttr(tupdesc, i)->atttypmod);
+			slot->tts_values[i] = GpReceiveFunctionCall(&state->inprocs[i], &buf,
+														state->inparams[i],
+														TupleDescAttr(tupdesc, i)->atttypmod);
 		}
 		else
 			slot->tts_values[i] = InputFunctionCall(&state->inprocs[i], value,
@@ -2312,8 +2312,8 @@ motion_relay(MotionState *gather, CustomScan *motion, int to)
 				}
 				else if (binary)
 				{
-					bytea	   *b = SendFunctionCall(&outprocs[i],
-													 slot->tts_values[i]);
+					bytea	   *b = GpSendFunctionCall(&outprocs[i],
+													   slot->tts_values[i]);
 
 					values[i] = VARDATA(b);
 					lengths[i] = VARSIZE(b) - VARHDRSZ;

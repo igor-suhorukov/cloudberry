@@ -788,6 +788,24 @@ mine" ] && ok "a transaction reads its own rows, and a LIMIT leaves the connecti
 702" ] && [ "$out2" = "94" ] && ok "COPY TO, of a query and of the table, gathers" \
 		|| notok "COPY TO" "$out / $out2 lines"
 
+	# A client that asked for another encoding than the database's is sent
+	# a segment's text in its own, and the rows it writes reach the segments
+	# in the database's: a value's binary form between the nodes is the
+	# database's (gp_record.c).  It was read and written as the client's --
+	# an A with diaeresis, 0xC4 in LATIN1, reached such a client as the two
+	# bytes of its UTF-8, and a row it copied in failed on its segment,
+	# "invalid byte sequence for encoding "UTF8": 0xc4".
+	out=$(printf '%s\n' "CREATE TABLE enc (a int, t text) DISTRIBUTED BY (a);" \
+		"SET client_encoding = 'LATIN1';" \
+		"INSERT INTO enc VALUES (1, 'funny char ' || chr(196));" \
+		"COPY enc FROM STDIN;" "$(printf '2\tcopied \304')" '\.' \
+		"SELECT t FROM enc ORDER BY a;" | qf 0 | od -An -tx1 | tr -d ' \n')
+	want=$(printf 'funny char \304\ncopied \304\n' | od -An -tx1 | tr -d ' \n')
+	out2=$(q 0 "SELECT string_agg(octet_length(t)::text, ' ' ORDER BY a) FROM enc;")
+	[ "$out" = "$want" ] && [ "$out2" = "13 9" ] \
+		&& ok "a client's own encoding for a segment's text, and the database's for what it writes there" \
+		|| notok "a client encoding not the database's" "$out / $out2"
+
 	# An error a segment raises in rows routed to it names no COPY of the
 	# segment's -- the rows travel by COPY -- but where the statement was: an
 	# INSERT's none, as Cloudberry's has none, a function's its own lines,
@@ -1693,6 +1711,16 @@ EOF
 		"SELECT (SELECT string_agg(c, ',' ORDER BY a) FROM o WHERE a < 20), (SELECT sum(a) FROM o);"
 	orca_same "one key's rows: direct dispatch to its segment" \
 		"SELECT * FROM o WHERE a = 42;" "Gather Motion 1:1  (slice1; segments: 1)"
+
+	# A Gather Motion's rows reach a client that asked for another encoding
+	# than the database's in its own, as the planner's gathers do (section 8).
+	out=$(printf '%s\n' "SET client_encoding = 'LATIN1';" "SELECT t FROM enc ORDER BY a;" \
+		| qf 0 | od -An -tx1 | tr -d ' \n')
+	want=$(printf 'funny char \304\ncopied \304\n' | od -An -tx1 | tr -d ' \n')
+	plan=$(q 0 "EXPLAIN (COSTS OFF) SELECT t FROM enc ORDER BY a;")
+	[ "$out" = "$want" ] && [[ "$plan" == *"Gather Motion"*"Optimizer: GPORCA"* ]] \
+		&& ok "a client's own encoding for a segment's text, under ORCA" \
+		|| notok "a client encoding not the database's, under ORCA" "$out / $plan"
 
 	# now() is the transaction's start, and in a segment's slice ORCA's plan
 	# evaluates it there: each segment's process took its own, none of them

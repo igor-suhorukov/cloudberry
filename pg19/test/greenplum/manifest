@@ -307,7 +307,7 @@ run  default_tablespace
 run  leastsquares
 run  opr_sanity_gp
 skip decode_expr  function decode(boolean) does not exist; function decode(integer) does not exist
-skip gpcopy_encoding  invalid byte sequence for encoding "UTF8": 0xc4
+run  gpcopy_encoding
 run  gp_create_view
 run  window_views
 skip replication_slots  differs: pg_get_replication_slots() has PostgreSQL 19's columns, and a slot made on one segment gets no WARNING that it is that segment's alone
@@ -335,7 +335,7 @@ skip analyze  unrecognized configuration parameter "optimizer_analyze_root_parti
 skip gp_owner_permission  relation "pg_stat_operations" does not exist
 skip incremental_analyze  syntax error at or near "foo"; syntax error at or near "foo_1_prt_2"
 run  regex_gp
-skip dispatch_encoding  relation "gp_toolkit.__gp_log_segment_ext" does not exist; raise_error called on "funny char Ä"
+skip dispatch_encoding  relation "gp_toolkit.__gp_log_segment_ext" does not exist
 port icudp_on
 run  icudp/gp_interconnect_queue_depth
 run  icudp/gp_interconnect_queue_depth_longtime

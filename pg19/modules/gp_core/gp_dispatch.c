@@ -4083,10 +4083,10 @@ gather_store_row(GpGatherState *gather, PGresult *res, int row,
 
 			initReadOnlyStringInfo(&buf, PQgetvalue(res, row, i),
 								   PQgetlength(res, row, i));
-			slot->tts_values[i] = ReceiveFunctionCall(&gather->columns[i].proc,
-													  &buf,
-													  gather->columns[i].ioparam,
-													  gather->columns[i].typmod);
+			slot->tts_values[i] = GpReceiveFunctionCall(&gather->columns[i].proc,
+														&buf,
+														gather->columns[i].ioparam,
+														gather->columns[i].typmod);
 		}
 		else
 			slot->tts_values[i] = InputFunctionCall(&gather->columns[i].proc,
@@ -4341,7 +4341,7 @@ GpGatherDecodeValue(GpGatherState *gather, int col, const char *value,
 		StringInfoData buf;
 
 		initReadOnlyStringInfo(&buf, (char *) value, length);
-		return ReceiveFunctionCall(&in->proc, &buf, in->ioparam, in->typmod);
+		return GpReceiveFunctionCall(&in->proc, &buf, in->ioparam, in->typmod);
 	}
 	return InputFunctionCall(&in->proc, (char *) value, in->ioparam,
 							 in->typmod);

@@ -396,7 +396,7 @@ router_encode(GpRouter *r, TupleTableSlot *slot, StringInfo buf)
 				pq_sendint32(buf, -1);
 			else
 			{
-				bytea	   *out = SendFunctionCall(&r->out[i], slot->tts_values[i]);
+				bytea	   *out = GpSendFunctionCall(&r->out[i], slot->tts_values[i]);
 
 				pq_sendint32(buf, VARSIZE(out) - VARHDRSZ);
 				appendBinaryStringInfo(buf, VARDATA(out), VARSIZE(out) - VARHDRSZ);
