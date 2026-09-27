@@ -7961,6 +7961,22 @@ CTranslatorDXLToPlStmt::ProcessDXLTblDescr(
 		table_descr->MdName()->GetMDName()->GetBuffer());
 
 	// get column names
+	//
+	// A column the table descriptor leaves out is a dropped one, or one ORCA
+	// pruned as the plan reads nothing of it -- which the port's own
+	// expressions over ORCA's plan may read: a RETURNING list, a MERGE's
+	// actions.  EXPLAIN names each column by this list, and "" is a name, so
+	// a pruned column keeps its own; a dropped one is "", as Cloudberry's.
+	auto gap_colname = [&](INT gap_attno) -> String * {
+		const IMDColumn *md_col =
+			md_rel->GetMdCol(md_rel->GetPosFromAttno(gap_attno));
+
+		if (md_col->IsDropped())
+			return gpdb::MakeStringValue(PStrDup(""));
+		return gpdb::MakeStringValue(
+			CTranslatorUtils::CreateMultiByteCharStringFromWCString(
+				md_col->Mdname().GetMDName()->GetBuffer()));
+	};
 	INT last_attno = 0;
 	for (ULONG ul = 0; ul < arity; ++ul)
 	{
@@ -7969,14 +7985,13 @@ CTranslatorDXLToPlStmt::ProcessDXLTblDescr(
 
 		if (0 < attno)
 		{
-			// if attno > last_attno + 1, there were dropped attributes
-			// add those to the RTE as they are required by GPDB
+			// if attno > last_attno + 1, there were dropped or pruned
+			// attributes; add those to the RTE as they are required by GPDB
 			for (INT dropped_col_attno = last_attno + 1;
 				 dropped_col_attno < attno; dropped_col_attno++)
 			{
-				String *val_dropped_colname = gpdb::MakeStringValue(PStrDup(""));
 				alias->colnames =
-					gpdb::LAppend(alias->colnames, val_dropped_colname);
+					gpdb::LAppend(alias->colnames, gap_colname(dropped_col_attno));
 			}
 
 			// non-system attribute
@@ -7990,11 +8005,12 @@ CTranslatorDXLToPlStmt::ProcessDXLTblDescr(
 		}
 	}
 
-	// if there are any dropped columns at the end, add those too to the RangeTblEntry
+	// if there are any dropped or pruned columns at the end, add those too to
+	// the RangeTblEntry
 	for (ULONG ul = last_attno + 1; ul <= num_of_non_sys_cols; ul++)
 	{
-		String *val_dropped_colname = gpdb::MakeStringValue(PStrDup(""));
-		alias->colnames = gpdb::LAppend(alias->colnames, val_dropped_colname);
+		alias->colnames =
+			gpdb::LAppend(alias->colnames, gap_colname((INT) ul));
 	}
 
 	rte->eref = alias;
