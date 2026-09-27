@@ -45,5 +45,7 @@ option('gpfdist', type: 'feature', value: 'auto',
        description: 'Build gpfdist, the file server of external tables; it needs APR and libevent, and takes transforms where libyaml is installed')
 option('gpfts', type: 'feature', value: 'auto',
        description: 'Build gpfts, the coordinator\'s automatic failover; it needs libcurl and jansson, and etcd where it runs')
+option('gpcloud', type: 'boolean', value: true,
+       description: 'Build gpcloud, Cloudberry\'s s3:// protocol of external tables, and gpcheckcloud (C++; needs libcurl, libxml2 and OpenSSL)')
 option('gpmgmt', type: 'boolean', value: true,
        description: 'Install gpMgmt, Cloudberry\'s management tools, beside the server (Python 3 with PyGreSQL and psutil at run time)')

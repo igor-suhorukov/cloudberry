@@ -23,7 +23,8 @@
  * Cloudberry spread these over access/external.h, access/url.h,
  * access/extprotocol.h, access/formatter.h, cdb/cdbsreh.h, utils/uri.h and
  * gp_exttable_fdw's extaccess.h, headers of its server; here they are one
- * module's.
+ * module's, and the four of access/ its headers for the modules of other
+ * libraries too (include/access/).
  *
  *-------------------------------------------------------------------------
  */
@@ -41,6 +42,14 @@
 #include "nodes/parsenodes.h"
 #include "nodes/pg_list.h"
 #include "utils/rel.h"
+
+/*
+ * What gp_exttable shares with the modules of other libraries, whose copies
+ * of these find its functions (external.h): here, its own.
+ */
+#define GP_EXTTABLE_INTERNAL
+#include "access/external.h"
+#include "access/url.h"
 
 /* The foreign server every external table is a foreign table of. */
 #define GP_EXTTABLE_SERVER_NAME		"gp_exttable_server"
@@ -88,30 +97,6 @@ extern void FreeExternalTableUri(Uri *uri);
 /* What a foreign table of gp_exttable_server says (external.c)              */
 /* ------------------------------------------------------------------------- */
 
-#define fmttype_is_custom(c) ((c) == 'b')
-#define fmttype_is_text(c)   ((c) == 't')
-#define fmttype_is_csv(c)    ((c) == 'c')
-
-typedef struct ExtTableEntry
-{
-	List	   *urilocations;	/* String */
-	List	   *execlocations;	/* one String: ALL_SEGMENTS, HOST:h, ... */
-	char		fmtcode;		/* 't', 'c' or 'b' */
-	List	   *options;		/* the rest, for COPY or a formatter */
-	char	   *command;		/* EXECUTE's */
-	int			rejectlimit;	/* -1 for none */
-	char		rejectlimittype;	/* 'r' rows, 'p' percent */
-	char		logerrors;		/* LOG_ERRORS_* */
-	int			encoding;
-	bool		iswritable;
-} ExtTableEntry;
-
-extern bool rel_is_external_table(Oid relid);
-extern List *TokenizeLocationUris(char *locations);
-extern ExtTableEntry *GetExtTableEntry(Oid relid);
-extern ExtTableEntry *GetExtTableEntryIfExists(Oid relid);
-extern ExtTableEntry *GetExtFromForeignTableOptions(List *ftoptions, Oid relid);
-
 /*
  * What a scan of an external table needs, which Cloudberry keeps in its own
  * ExternalScanInfo node.  A plan's fdw_private is copied and written out as
@@ -139,9 +124,6 @@ extern ExternalScanInfo *ExternalScanInfoFromList(List *list);
 /* Single row error handling (sreh.c; Cloudberry's cdb/cdbsreh.c)            */
 /* ------------------------------------------------------------------------- */
 
-#define LOG_ERRORS_ENABLE			't'
-#define LOG_ERRORS_PERSISTENTLY		'p'
-#define LOG_ERRORS_DISABLE			'f'
 #define IS_LOG_TO_FILE(c)				((c) == 't' || (c) == 'p')
 #define IS_LOG_ERRORS_ENABLE(c)			((c) == 't')
 #define IS_LOG_ERRORS_PERSISTENTLY(c)	((c) == 'p')
@@ -212,99 +194,11 @@ typedef struct ExternalSelectDescData
 /* The data sources (url*.c)                                                 */
 /* ------------------------------------------------------------------------- */
 
-enum fcurl_type_e
-{
-	CFTYPE_NONE = 0,
-	CFTYPE_FILE = 1,
-	CFTYPE_CURL = 2,
-	CFTYPE_EXEC = 3,
-	CFTYPE_CUSTOM = 4
-};
-
-typedef struct URL_FILE
-{
-	enum fcurl_type_e type;
-	char	   *url;
-	char		current[MAXPGPATH];	/* "url [file]" read now, for the error log */
-	/* implementation-specific fields follow */
-} URL_FILE;
-
-/* the global transaction id Cloudberry puts in GP_XID: TMGIDSIZE */
-#define EXT_XID_SIZE	64
-
-typedef struct extvar_t
-{
-	char	   *GP_MASTER_HOST;
-	char	   *GP_MASTER_PORT;
-	char	   *GP_DATABASE;
-	char	   *GP_USER;
-	char	   *GP_SEG_PG_CONF;
-	char	   *GP_SEG_DATADIR;
-	char		GP_DATE[9];		/* YYYYMMDD */
-	char		GP_TIME[7];		/* HHMMSS */
-	char		GP_XID[EXT_XID_SIZE];
-	char		GP_CID[10];
-	char		GP_SN[10];
-	char		GP_SEGMENT_ID[11];
-	char		GP_SEG_PORT[11];
-	char		GP_SESSION_ID[11];
-	char		GP_SEGMENT_COUNT[11];
-	char		GP_CSVOPT[15];
-	char	   *GP_LINE_DELIM_STR;
-	char		GP_LINE_DELIM_LENGTH[11];
-	char	   *GP_QUERY_STRING;
-} extvar_t;
-
-#define EXEC_URL_PREFIX "execute:"
-
-/*
- * What a writer of an external table formats its rows with: COPY TO's text
- * and CSV, which PostgreSQL 19 keeps static (copyto.c), made here
- * (copyout.c).
- */
-typedef struct ExtCopyOut
-{
-	CopyFormatOptions opts;
-	int			file_encoding;
-	bool		need_transcoding;
-	bool		encoding_embeds_ascii;
-	TupleDesc	tupdesc;
-	FmgrInfo   *out_functions;
-	List	   *attnumlist;
-	StringInfoData line;		/* the row being made */
-	MemoryContext rowcontext;
-} ExtCopyOut;
-
-extern ExtCopyOut *ExtCopyOutBegin(Relation rel, List *options);
-extern void ExtCopyOutRow(ExtCopyOut *co, TupleTableSlot *slot);
-extern void ExtCopyOutEnd(ExtCopyOut *co);
-
-extern int	readable_external_table_timeout;
-extern int	gpfdist_retry_timeout;
 extern bool gp_external_enable_exec;
 extern int	gp_external_max_segs;
 extern bool gp_external_enable_filter_pushdown;
 extern int	writable_external_table_bufsize;
 extern bool verify_gpfdists_cert;
-
-extern void external_set_env_vars(extvar_t *extvar, char *uri, bool csv,
-								  char *escape, char *quote, bool header,
-								  uint32 scancounter);
-extern void external_set_env_vars_ext(extvar_t *extvar, char *uri, bool csv,
-									  char *escape, char *quote,
-									  EolType eol_type, bool header,
-									  uint32 scancounter, List *params);
-extern URL_FILE *url_fopen(char *url, bool forwrite, extvar_t *ev,
-						   CopyFormatOptions *opts, ExternalSelectDesc desc,
-						   char *relname);
-extern void url_fclose(URL_FILE *file, bool failOnError, const char *relname);
-extern bool url_feof(URL_FILE *file, int bytesread);
-extern bool url_ferror(URL_FILE *file, int bytesread, char *ebuf, int ebuflen);
-extern size_t url_fread(void *ptr, size_t size, URL_FILE *file,
-						CopyFromState pstate);
-extern size_t url_fwrite(void *ptr, size_t size, URL_FILE *file);
-extern void url_fflush(URL_FILE *file);
-extern char *make_command(const char *cmd, extvar_t *ev);
 
 extern URL_FILE *url_file_fopen(char *url, bool forwrite, extvar_t *ev,
 								CopyFormatOptions *opts, char *relname);
@@ -333,13 +227,16 @@ extern size_t url_curl_fwrite(void *ptr, size_t size, URL_FILE *file);
 extern void url_curl_fflush(URL_FILE *file);
 
 extern URL_FILE *url_custom_fopen(char *url, bool forwrite, extvar_t *ev,
-								  ExternalSelectDesc desc);
+								  ExternalSelectDesc desc, Relation rel);
 extern void url_custom_fclose(URL_FILE *file, bool failOnError, const char *relname);
 extern bool url_custom_feof(URL_FILE *file, int bytesread);
 extern bool url_custom_ferror(URL_FILE *file, int bytesread, char *ebuf, int ebuflen);
 extern size_t url_custom_fread(void *ptr, size_t size, URL_FILE *file,
 							   CopyFromState pstate);
 extern size_t url_custom_fwrite(void *ptr, size_t size, URL_FILE *file);
+
+extern URL_FILE *url_source_fopen(const char *name, ExtSourceRead read,
+								  void *arg);
 
 /* a user's protocol: its functions, as CREATE PROTOCOL recorded them */
 extern Oid	LookupExtProtocolFunction(const char *prot_name, bool iswritable,
@@ -413,10 +310,12 @@ typedef struct FileScanDescData
 	bool		fs_header;
 	EolType		fs_eol_type;
 	List	   *fs_options;
-	int			fs_encoding;
-} FileScanDescData;
+	int			fs_encoding;	/* -1: COPY's own, or the options' */
 
-typedef FileScanDescData *FileScanDesc;
+	/* the caller's read function, for a scan of data it reads itself */
+	ExtSourceRead fs_source_read;
+	void	   *fs_source_arg;
+} FileScanDescData;
 
 extern FileScanDesc external_beginscan(Relation relation, uint32 scancounter,
 									   List *uriList, char fmtType,

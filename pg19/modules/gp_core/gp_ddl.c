@@ -122,6 +122,7 @@
 #include "gp_core_api.h"
 #include "gp_dispatch.h"
 #include "gp_fault.h"
+#include "gp_foreign.h"
 #include "gp_label.h"
 #include "gp_loopback.h"
 #include "gp_policy.h"
@@ -1015,10 +1016,34 @@ node_tablespace_location_drop(const char *linkloc, Oid tablespaceoid, bool redo)
 				 errmsg("could not remove directory \"%s\": %m", target)));
 }
 
+/* A statement's arguments, for a callback that runs it (GpRefreshRunCopy). */
+typedef struct RunArgs
+{
+	PlannedStmt *pstmt;
+	const char *queryString;
+	bool		readOnlyTree;
+	ProcessUtilityContext context;
+	ParamListInfo params;
+	QueryEnvironment *queryEnv;
+	DestReceiver *dest;
+	QueryCompletion *qc;
+} RunArgs;
+
+static void
+run_next(PlannedStmt *pstmt, bool readOnlyTree, void *arg)
+{
+	RunArgs    *a = (RunArgs *) arg;
+
+	next_ProcessUtility(pstmt, a->queryString, readOnlyTree, a->context,
+						a->params, a->queryEnv, a->dest, a->qc);
+}
+
 /*
  * Run a tablespace's statement here: CREATE TABLESPACE in this node's
  * directory, and, on a segment, an in-place one as the coordinator allowed
- * it.
+ * it.  And a statement that sets a wrapper's, a server's or a foreign
+ * table's options, with mpp_execute and num_segments kept from its validator
+ * (gp_foreign.c): after the tree to send the segments is made, on each node.
  */
 static void
 run_tablespace_statement(PlannedStmt *pstmt, const char *queryString,
@@ -1046,23 +1071,17 @@ run_tablespace_statement(PlannedStmt *pstmt, const char *queryString,
 		if (nestlevel >= 0)
 			AtEOXact_GUC(true, nestlevel);
 	}
+	else if (GpForeignSetsOptions(parsetree))
+	{
+		RunArgs		args = {pstmt, queryString, readOnlyTree, context,
+		params, queryEnv, dest, qc};
+
+		GpForeignRunStatement(pstmt, readOnlyTree, run_next, &args);
+	}
 	else
 		next_ProcessUtility(pstmt, queryString, readOnlyTree, context,
 							params, queryEnv, dest, qc);
 }
-
-/* A statement's arguments, for a callback that runs it (GpRefreshRunCopy). */
-typedef struct RunArgs
-{
-	PlannedStmt *pstmt;
-	const char *queryString;
-	bool		readOnlyTree;
-	ProcessUtilityContext context;
-	ParamListInfo params;
-	QueryEnvironment *queryEnv;
-	DestReceiver *dest;
-	QueryCompletion *qc;
-} RunArgs;
 
 static void
 run_copy(void *arg)

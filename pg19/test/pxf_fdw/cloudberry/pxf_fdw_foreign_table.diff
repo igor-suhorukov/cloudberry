@@ -1,0 +1,3 @@
+@@
+-ERROR:  quote available only in CSV mode
++ERROR:  COPY QUOTE requires CSV mode

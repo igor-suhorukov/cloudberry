@@ -200,17 +200,20 @@ appendCopyEncodingOption(List *copyFmtOpts, int encoding)
 /* Scans                                                                     */
 /* ------------------------------------------------------------------------- */
 
-FileScanDesc
-external_beginscan(Relation relation, uint32 scancounter, List *uriList,
-				   char fmtType, bool isMasterOnly, int rejLimit,
-				   bool rejLimitInRows, char logErrors, int encoding,
-				   List *extOptions)
+/*
+ * A scan of uri, NULL where this node reads nothing, or of the data a
+ * caller's function reads (ExtScanSourceBegin()); an encoding of -1 is
+ * COPY's own, or the one the options give.
+ */
+static FileScanDesc
+begin_scan(Relation relation, uint32 scancounter, char *uri,
+		   ExtSourceRead source_read, void *source_arg, char fmtType,
+		   int rejLimit, bool rejLimitInRows, char logErrors, int encoding,
+		   List *extOptions)
 {
 	FileScanDesc scan;
 	TupleDesc	tupDesc;
-	int			segindex = GpClusterIsSingleNode() ? 0 : GpClusterContentId();
 	int			role = GpClusterBackendRole();
-	char	   *uri = NULL;
 	List	   *copyOpts;
 
 	RelationIncrementReferenceCount(relation);
@@ -222,25 +225,8 @@ external_beginscan(Relation relation, uint32 scancounter, List *uriList,
 	scan->fs_fmttype = fmtType;
 	scan->fs_options = extOptions;
 	scan->fs_encoding = encoding;
-
-	/*
-	 * The URI this node reads: a segment its content's, the coordinator the
-	 * first where the table is read ON COORDINATOR, one node the one there is.
-	 */
-	if (GpClusterIsSingleNode())
-		segindex = 0;
-	else if (role == GP_ROLE_DISPATCH)
-		segindex = isMasterOnly ? 0 : -1;
-	else if (isMasterOnly)
-		segindex = -1;			/* the coordinator's to read */
-
-	if (segindex >= 0 && segindex < list_length(uriList))
-	{
-		String	   *v = list_nth(uriList, segindex);
-
-		if (strlen(strVal(v)) > 0)
-			uri = strVal(v);
-	}
+	scan->fs_source_read = source_read;
+	scan->fs_source_arg = source_arg;
 
 	scan->fs_uri = uri;
 	scan->fs_noop = (uri == NULL);
@@ -261,7 +247,8 @@ external_beginscan(Relation relation, uint32 scancounter, List *uriList,
 	copyOpts = fmttype_is_custom(fmtType) ? NIL :
 		copy_options_ext(extOptions, &scan->fs_escape_off, &scan->fs_escape_char,
 						 &scan->fs_delim_off);
-	copyOpts = appendCopyEncodingOption(list_copy(copyOpts), encoding);
+	if (encoding >= 0)
+		copyOpts = appendCopyEncodingOption(list_copy(copyOpts), encoding);
 	if ((scan->fs_escape_off || scan->fs_escape_char || scan->fs_delim_off) &&
 		PG_ENCODING_IS_CLIENT_ONLY(encoding))
 		ereport(ERROR,
@@ -275,6 +262,7 @@ external_beginscan(Relation relation, uint32 scancounter, List *uriList,
 	reading_scan = NULL;
 
 	if (scan->fs_pstate->opts.header_line != COPY_HEADER_FALSE &&
+		source_read == NULL &&
 		role == GP_ROLE_DISPATCH && !GpClusterIsSingleNode())
 		ereport(NOTICE,
 				(errmsg("HEADER means that each one of the data files has a header row")));
@@ -326,6 +314,38 @@ external_beginscan(Relation relation, uint32 scancounter, List *uriList,
 	return scan;
 }
 
+FileScanDesc
+external_beginscan(Relation relation, uint32 scancounter, List *uriList,
+				   char fmtType, bool isMasterOnly, int rejLimit,
+				   bool rejLimitInRows, char logErrors, int encoding,
+				   List *extOptions)
+{
+	int			segindex = GpClusterIsSingleNode() ? 0 : GpClusterContentId();
+	char	   *uri = NULL;
+
+	/*
+	 * The URI this node reads: a segment its content's, the coordinator the
+	 * first where the table is read ON COORDINATOR, one node the one there is.
+	 */
+	if (GpClusterIsSingleNode())
+		segindex = 0;
+	else if (GpClusterBackendRole() == GP_ROLE_DISPATCH)
+		segindex = isMasterOnly ? 0 : -1;
+	else if (isMasterOnly)
+		segindex = -1;			/* the coordinator's to read */
+
+	if (segindex >= 0 && segindex < list_length(uriList))
+	{
+		String	   *v = list_nth(uriList, segindex);
+
+		if (strlen(strVal(v)) > 0)
+			uri = strVal(v);
+	}
+
+	return begin_scan(relation, scancounter, uri, NULL, NULL, fmtType,
+					  rejLimit, rejLimitInRows, logErrors, encoding, extOptions);
+}
+
 void
 external_rescan(FileScanDesc scan)
 {
@@ -337,7 +357,8 @@ external_rescan(FileScanDesc scan)
 	if (scan->fs_pstate != NULL)
 		EndCopyFrom(scan->fs_pstate);
 	copyOpts = fmttype_is_custom(scan->fs_fmttype) ? NIL : copy_options(scan->fs_options);
-	copyOpts = appendCopyEncodingOption(list_copy(copyOpts), scan->fs_encoding);
+	if (scan->fs_encoding >= 0)
+		copyOpts = appendCopyEncodingOption(list_copy(copyOpts), scan->fs_encoding);
 	reading_scan = scan;
 	scan->fs_pstate = BeginCopyFrom(NULL, scan->fs_rd, NULL, NULL, false,
 									external_getdata_callback, NIL, copyOpts);
@@ -449,6 +470,56 @@ external_getnext(FileScanDesc scan, ScanDirection direction,
 
 	pgstat_count_heap_getnext(scan->fs_rd);
 	return tuple;
+}
+
+/*
+ * A scan of data a caller reads itself -- pxf_fdw's, from its server --
+ * parsed and its bad rows handled as an external table's are, where
+ * Cloudberry's COPY FROM took the caller's callback and its single row error
+ * handling (external.h).  The node reading it is whichever begins it: the
+ * caller decides where it runs.
+ */
+FileScanDesc
+ExtScanSourceBegin(Relation rel, const char *source, char fmtType,
+				   List *options, int rejLimit, bool rejLimitInRows,
+				   char logErrors, ExtSourceRead read, void *arg)
+{
+	if (!fmttype_is_text(fmtType) && !fmttype_is_csv(fmtType))
+		elog(ERROR, "a scan of a source reads text or CSV, not format '%c'",
+			 fmtType);
+
+	return begin_scan(rel, 0, pstrdup(source), read, arg, fmtType, rejLimit,
+					  rejLimitInRows, logErrors, -1, options);
+}
+
+/*
+ * What the scan keeps between rows -- the source it opens with the first --
+ * lives in the context it was begun in, whatever the caller's is now: an
+ * executor's per-row context, for a foreign scan's IterateForeignScan.
+ */
+HeapTuple
+ExtScanSourceNext(FileScanDesc scan)
+{
+	MemoryContext old = MemoryContextSwitchTo(GetMemoryChunkContext(scan));
+	HeapTuple	tuple = external_getnext(scan, ForwardScanDirection, NULL);
+
+	MemoryContextSwitchTo(old);
+	return tuple;
+}
+
+void
+ExtScanSourceRescan(FileScanDesc scan)
+{
+	MemoryContext old = MemoryContextSwitchTo(GetMemoryChunkContext(scan));
+
+	external_rescan(scan);
+	MemoryContextSwitchTo(old);
+}
+
+void
+ExtScanSourceEnd(FileScanDesc scan)
+{
+	external_endscan(scan);
 }
 
 /*
@@ -870,6 +941,13 @@ open_external_readable_source(FileScanDesc scan, ExternalSelectDesc desc)
 {
 	extvar_t	extvar;
 
+	if (scan->fs_source_read != NULL)
+	{
+		scan->fs_file = url_source_fopen(scan->fs_uri, scan->fs_source_read,
+										 scan->fs_source_arg);
+		return;
+	}
+
 	memset(&extvar, 0, sizeof(extvar));
 	external_set_env_vars_ext(&extvar, scan->fs_uri, scan->fs_csv,
 							  scan->fs_escape, scan->fs_quote,
@@ -878,8 +956,7 @@ open_external_readable_source(FileScanDesc scan, ExternalSelectDesc desc)
 							  scan->fs_custom_formatter_params);
 
 	scan->fs_file = url_fopen(scan->fs_uri, false, &extvar,
-							  &scan->fs_pstate->opts, desc,
-							  RelationGetRelationName(scan->fs_rd));
+							  &scan->fs_pstate->opts, desc, scan->fs_rd);
 }
 
 static int
@@ -1012,9 +1089,15 @@ external_insert_init(Relation rel)
 
 	extInsertDesc = (ExternalInsertDesc) palloc0(sizeof(ExternalInsertDescData));
 	extInsertDesc->ext_rel = rel;
-	/* the coordinator writes nothing: the segments hold the rows */
+
+	/*
+	 * The coordinator writes nothing of a table its segments write, whose
+	 * rows go to them; one ON COORDINATOR, which has no policy, is its own.
+	 */
 	extInsertDesc->ext_noop = (!GpClusterIsSingleNode() &&
-							   GpClusterBackendRole() == GP_ROLE_DISPATCH);
+							   GpClusterBackendRole() == GP_ROLE_DISPATCH &&
+							   strcmp(strVal(linitial(extentry->execlocations)),
+									  "COORDINATOR_ONLY") != 0);
 	extInsertDesc->ext_tupDesc = RelationGetDescr(rel);
 
 	if (extentry->command)
@@ -1076,8 +1159,7 @@ open_external_writable_source(ExternalInsertDesc extInsertDesc)
 							  extInsertDesc->ext_custom_formatter_params);
 
 	extInsertDesc->ext_file = url_fopen(extInsertDesc->ext_uri, true, &extvar,
-										&co->opts, NULL,
-										RelationGetRelationName(extInsertDesc->ext_rel));
+										&co->opts, NULL, extInsertDesc->ext_rel);
 }
 
 static void

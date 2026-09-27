@@ -1,0 +1,17 @@
+Cloudberry's pxf_fdw tests on the port, on one node and on a cluster: the
+differences from Cloudberry's expected output that have been reviewed, and
+are the port's for a reason of its own.
+
+Each file is one test's difference in the form ../../singlenode/canon.pl
+gives it, named for the expected output it differs from; a file named
+<test>.<target>.diff is the difference of one target alone, one_node or
+cluster.  run.sh counts a test as passing when gpdiff.pl, under Cloudberry's
+init file and the port's, finds no difference or exactly the file's.
+
+  pxf_fdw_foreign_table  PostgreSQL 19's COPY says an option CSV alone takes
+                         in its own words, "COPY QUOTE requires CSV mode",
+                         where PostgreSQL 16's, which Cloudberry's test masks
+                         to "quote available only in CSV mode", said "COPY
+                         quote available only in CSV mode".  The validator
+                         asks PostgreSQL's COPY about the options it has, as
+                         Cloudberry's does.

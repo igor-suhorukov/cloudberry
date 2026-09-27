@@ -44,6 +44,8 @@ extern "C" {
 
 // GP_SEGMENT_ID_ATTNO: gp_segment_id's number in ORCA's metadata
 #include "gp_core_api.h"
+// where a foreign table is read, by its mpp_execute
+#include "gp_foreign.h"
 
 #include "access/heapam.h"
 #include "catalog/heap.h"
@@ -861,14 +863,32 @@ CTranslatorRelcacheToDXL::GetDistributionFromForeignRelExecLocation(
 	// Cloudberry switches on ForeignTable.exec_location, a field it adds to
 	// PostgreSQL's ForeignTable: FTEXECLOCATION_COORDINATOR,
 	// FTEXECLOCATION_ANY or FTEXECLOCATION_ALL_SEGMENTS.  PostgreSQL 19 has
-	// no such field.  Where an MPP foreign table runs is Track D's, parsed
-	// from an mpp_execute option at M5, and until then every foreign table
-	// runs where PostgreSQL runs it: on the coordinator, which is Cloudberry's
-	// FTEXECLOCATION_COORDINATOR.  When mpp_execute arrives, ANY is
-	// EreldistrUniversal and ALL_SEGMENTS is EreldistrRandom, as Cloudberry
-	// maps them.
-	(void) ft;
-	return IMDRelation::EreldistrMasterOnly;
+	// no such field; gp_core reads the table's mpp_execute, or its
+	// server's or its wrapper's, as Cloudberry's GetForeignTable() does
+	// (gp_foreign.c), and it is mapped as Cloudberry maps it.  A table read
+	// on fewer segments than the cluster has -- its num_segments -- is
+	// partially distributed, which ORCA does not plan, as for a table.  On
+	// one node every relation is the coordinator's (see above).
+	int numsegments;
+
+	if (gpdb::IsSingleNode())
+	{
+		return IMDRelation::EreldistrMasterOnly;
+	}
+	switch (GpForeignExecLocation(ft->relid, &numsegments))
+	{
+		case GP_FOREIGN_ANY:
+			return IMDRelation::EreldistrUniversal;
+		case GP_FOREIGN_ALL_SEGMENTS:
+			if (gpdb::GetGPSegmentCount() != numsegments)
+			{
+				GPOS_RAISE(gpdxl::ExmaMD, gpdxl::ExmiDXLInvalidAttributeValue,
+						   GPOS_WSZ_LIT("Partially Distributed Data"));
+			}
+			return IMDRelation::EreldistrRandom;
+		default:
+			return IMDRelation::EreldistrMasterOnly;
+	}
 }
 
 

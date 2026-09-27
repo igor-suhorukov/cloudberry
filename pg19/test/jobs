@@ -85,3 +85,5 @@ gp_stats_collector     orca       6   PASSES=orca MEM=1100
 gp_stats_collector     planner    5   PASSES=planner MEM=1100
 datalake_fdw           orca       2   PASSES=orca MEM=800
 datalake_fdw           planner    2   PASSES=planner MEM=800
+gpcloud                -         90   MEM=6500
+pxf_fdw                -          5   MEM=800

@@ -1,0 +1,44 @@
+@@
+-FDW options: (format 'csv', delimiter ',', "null" '', escape '"', quote '"', format_type 'c', location_uris 's3://s3-us-east-1.amazonaws.com/us-east-1.s3test.pivotal.io/regress/small17/data0000 config=s3.conf', execute_on 'ALL_SEGMENTS', log_errors 'f', encoding '6', is_writable 'false')
++Server: gp_exttable_server
++FDW options: (format 'csv', delimiter ',', "null" '', escape '"', quote '"', format_type 'c', location_uris 's3://s3-us-east-1.amazonaws.com/us-east-1.s3test.pivotal.io/regress/small17/data0000 config=s3.conf', execute_on 'COORDINATOR_ONLY', log_errors 'f', encoding '6', is_writable 'false')
+@@
+-FDW options: (format 'csv', delimiter ',', "null" '', escape '"', quote '"', format_type 'c', location_uris 's3://s3-us-east-2.amazonaws.com/us-east-2.s3test.pivotal.io/regress/small17/data0000 config=s3.conf', execute_on 'ALL_SEGMENTS', log_errors 'f', encoding '6', is_writable 'false')
++Server: gp_exttable_server
++FDW options: (format 'csv', delimiter ',', "null" '', escape '"', quote '"', format_type 'c', location_uris 's3://s3-us-east-2.amazonaws.com/us-east-2.s3test.pivotal.io/regress/small17/data0000 config=s3.conf', execute_on 'COORDINATOR_ONLY', log_errors 'f', encoding '6', is_writable 'false')
+@@
+-FDW options: (format 'csv', delimiter ',', "null" '', escape '"', quote '"', format_type 'c', location_uris 's3://s3-us-west-1.amazonaws.com/us-west-1.s3test.pivotal.io/regress/small17/data0000 config=s3.conf', execute_on 'ALL_SEGMENTS', log_errors 'f', encoding '6', is_writable 'false')
++Server: gp_exttable_server
++FDW options: (format 'csv', delimiter ',', "null" '', escape '"', quote '"', format_type 'c', location_uris 's3://s3-us-west-1.amazonaws.com/us-west-1.s3test.pivotal.io/regress/small17/data0000 config=s3.conf', execute_on 'COORDINATOR_ONLY', log_errors 'f', encoding '6', is_writable 'false')
+@@
+-FDW options: (format 'csv', delimiter ',', "null" '', escape '"', quote '"', format_type 'c', location_uris 's3://s3-ap-south-1.amazonaws.com/ap-south-1.s3test.pivotal.io/regress/small17/data0000 config=s3.conf', execute_on 'ALL_SEGMENTS', log_errors 'f', encoding '6', is_writable 'false')
++Server: gp_exttable_server
++FDW options: (format 'csv', delimiter ',', "null" '', escape '"', quote '"', format_type 'c', location_uris 's3://s3-ap-south-1.amazonaws.com/ap-south-1.s3test.pivotal.io/regress/small17/data0000 config=s3.conf', execute_on 'COORDINATOR_ONLY', log_errors 'f', encoding '6', is_writable 'false')
+@@
+-FDW options: (format 'csv', delimiter ',', "null" '', escape '"', quote '"', format_type 'c', location_uris 's3://s3-ap-northeast-2.amazonaws.com/ap-northeast-2.s3test.pivotal.io/regress/small17/data0000 config=s3.conf', execute_on 'ALL_SEGMENTS', log_errors 'f', encoding '6', is_writable 'false')
++Server: gp_exttable_server
++FDW options: (format 'csv', delimiter ',', "null" '', escape '"', quote '"', format_type 'c', location_uris 's3://s3-ap-northeast-2.amazonaws.com/ap-northeast-2.s3test.pivotal.io/regress/small17/data0000 config=s3.conf', execute_on 'COORDINATOR_ONLY', log_errors 'f', encoding '6', is_writable 'false')
+@@
+-FDW options: (format 'csv', delimiter ',', "null" '', escape '"', quote '"', format_type 'c', location_uris 's3://s3-ap-southeast-1.amazonaws.com/ap-southeast-1.s3test.pivotal.io/regress/small17/data0000 config=s3.conf', execute_on 'ALL_SEGMENTS', log_errors 'f', encoding '6', is_writable 'false')
++Server: gp_exttable_server
++FDW options: (format 'csv', delimiter ',', "null" '', escape '"', quote '"', format_type 'c', location_uris 's3://s3-ap-southeast-1.amazonaws.com/ap-southeast-1.s3test.pivotal.io/regress/small17/data0000 config=s3.conf', execute_on 'COORDINATOR_ONLY', log_errors 'f', encoding '6', is_writable 'false')
+@@
+-FDW options: (format 'csv', delimiter ',', "null" '', escape '"', quote '"', format_type 'c', location_uris 's3://s3-ap-southeast-2.amazonaws.com/ap-southeast-2.s3test.pivotal.io/regress/small17/data0000 config=s3.conf', execute_on 'ALL_SEGMENTS', log_errors 'f', encoding '6', is_writable 'false')
++Server: gp_exttable_server
++FDW options: (format 'csv', delimiter ',', "null" '', escape '"', quote '"', format_type 'c', location_uris 's3://s3-ap-southeast-2.amazonaws.com/ap-southeast-2.s3test.pivotal.io/regress/small17/data0000 config=s3.conf', execute_on 'COORDINATOR_ONLY', log_errors 'f', encoding '6', is_writable 'false')
+@@
+-FDW options: (format 'csv', delimiter ',', "null" '', escape '"', quote '"', format_type 'c', location_uris 's3://s3-ap-northeast-1.amazonaws.com/ap-northeast-1.s3test.pivotal.io/regress/small17/data0000 config=s3.conf', execute_on 'ALL_SEGMENTS', log_errors 'f', encoding '6', is_writable 'false')
++Server: gp_exttable_server
++FDW options: (format 'csv', delimiter ',', "null" '', escape '"', quote '"', format_type 'c', location_uris 's3://s3-ap-northeast-1.amazonaws.com/ap-northeast-1.s3test.pivotal.io/regress/small17/data0000 config=s3.conf', execute_on 'COORDINATOR_ONLY', log_errors 'f', encoding '6', is_writable 'false')
+@@
+-FDW options: (format 'csv', delimiter ',', "null" '', escape '"', quote '"', format_type 'c', location_uris 's3://s3-eu-central-1.amazonaws.com/eu-central-1.s3test.pivotal.io/regress/small17/data0000 config=s3.conf', execute_on 'ALL_SEGMENTS', log_errors 'f', encoding '6', is_writable 'false')
++Server: gp_exttable_server
++FDW options: (format 'csv', delimiter ',', "null" '', escape '"', quote '"', format_type 'c', location_uris 's3://s3-eu-central-1.amazonaws.com/eu-central-1.s3test.pivotal.io/regress/small17/data0000 config=s3.conf', execute_on 'COORDINATOR_ONLY', log_errors 'f', encoding '6', is_writable 'false')
+@@
+-FDW options: (format 'csv', delimiter ',', "null" '', escape '"', quote '"', format_type 'c', location_uris 's3://s3-eu-west-1.amazonaws.com/eu-west-1.s3test.pivotal.io/regress/small17/data0000 config=s3.conf', execute_on 'ALL_SEGMENTS', log_errors 'f', encoding '6', is_writable 'false')
++Server: gp_exttable_server
++FDW options: (format 'csv', delimiter ',', "null" '', escape '"', quote '"', format_type 'c', location_uris 's3://s3-eu-west-1.amazonaws.com/eu-west-1.s3test.pivotal.io/regress/small17/data0000 config=s3.conf', execute_on 'COORDINATOR_ONLY', log_errors 'f', encoding '6', is_writable 'false')
+@@
+-FDW options: (format 'csv', delimiter ',', "null" '', escape '"', quote '"', format_type 'c', location_uris 's3://s3-sa-east-1.amazonaws.com/sa-east-1.s3test.pivotal.io/regress/small17/data0000 config=s3.conf', execute_on 'ALL_SEGMENTS', log_errors 'f', encoding '6', is_writable 'false')
++Server: gp_exttable_server
++FDW options: (format 'csv', delimiter ',', "null" '', escape '"', quote '"', format_type 'c', location_uris 's3://s3-sa-east-1.amazonaws.com/sa-east-1.s3test.pivotal.io/regress/small17/data0000 config=s3.conf', execute_on 'COORDINATOR_ONLY', log_errors 'f', encoding '6', is_writable 'false')

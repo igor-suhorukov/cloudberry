@@ -42,10 +42,11 @@ project('cloudberry-pg19', 'c',
 )
 
 cc = meson.get_compiler('c')
+fs = import('fs')
 
-# ORCA and PAX are C++.  Ask for the language only when one of them is being
-# built, so that a build without both needs no C++ compiler at all.
-if get_option('orca') or get_option('pax')
+# ORCA, PAX and gpcloud are C++.  Ask for the language only when one of them
+# is being built, so that a build without them needs no C++ compiler at all.
+if get_option('orca') or get_option('pax') or get_option('gpcloud')
   add_languages('cpp', native: false, required: true)
   cpp = meson.get_compiler('cpp')
 endif
@@ -404,7 +405,8 @@ modules = [
                      'modules/gp_core/gp_partanalyze.c',
                      'modules/gp_core/gp_hll.c',
                      'modules/gp_core/gp_partmerge.c',
-                     'modules/gp_core/gp_rtfilter.c'),
+                     'modules/gp_core/gp_rtfilter.c',
+                     'modules/gp_core/gp_foreign.c'),
     # The dispatcher is a libpq client of the segments; see gp_dispatch.c.
     'dependencies': [libpq_dep],
     'include_directories': [pg_client_inc],
@@ -853,6 +855,115 @@ install_data('modules/gp_stats_collector/gp_stats_collector.control',
 built_modules += 'gp_stats_collector'
 
 ###############################################################################
+# pxf_fdw
+#
+# Cloudberry's gpcontrib/pxf_fdw, the foreign-data wrapper of a PXF server,
+# which it asks over HTTP through libcurl: the port's copies of its files
+# (modules/pxf_fdw, each headed with what changed) -- the scan and the
+# writer, which read and write through gp_exttable's (include/access/
+# external.h), the options, and PostgreSQL 19's API drift -- and the one that
+# needs no change, compiled where it lies.  They find Cloudberry's headers,
+# kept in gpcontrib/pxf_fdw but for pxf_bridge.h, gp_exttable's public ones,
+# and GpIdentity in the include overlay compat/gpcontrib/.  The extension's
+# script and control file are Cloudberry's as they are.
+###############################################################################
+
+if curl_dep.found()
+  pxf_root = '../gpcontrib/pxf_fdw'
+  shared_module('pxf_fdw',
+    files('modules/pxf_fdw/pxf_fdw.c',
+          'modules/pxf_fdw/pxf_bridge.c',
+          'modules/pxf_fdw/pxf_fragment.c',
+          'modules/pxf_fdw/pxf_header.c',
+          'modules/pxf_fdw/pxf_option.c',
+          'modules/pxf_fdw/libchurl.c',
+          'modules/pxf_fdw/pxf_filter.c',
+          pxf_root / 'pxf_deparse.c'),
+    # Cloudberry's sources, whose declarations follow statements throughout.
+    c_args: mod_c_args + ['-Wno-declaration-after-statement'],
+    link_args: mod_link_args,
+    include_directories: [pg_inc, cb_inc,
+                          include_directories('modules/pxf_fdw', 'compat/gpcontrib',
+                                              'modules/gp_exttable/include',
+                                              pxf_root)],
+    dependencies: [curl_dep],
+    name_prefix: '',
+    install: true,
+    install_dir: pg_pkglibdir,
+  )
+  install_data(pxf_root / 'pxf_fdw.control', pxf_root / 'pxf_fdw--1.0.sql',
+               install_dir: pg_extensiondir)
+  built_modules += 'pxf_fdw'
+endif
+
+###############################################################################
+# gpcloud
+#
+# Cloudberry's gpcontrib/gpcloud, the s3:// protocol of external tables, whose
+# read and write functions gp_exttable calls as Cloudberry's server calls a
+# protocol's (include/access/extprotocol.h): its C++ compiled where it lies,
+# but for gpcloud.cpp, the port's copy (modules/gpcloud), with what its other
+# files ask of Cloudberry's cdbvars.h in the include overlay compat/gpcontrib/.
+# Installed as gpcloud.so, with the link gps3ext.so Cloudberry's Makefile
+# makes, the library's older name, which its tests still use.  gpcheckcloud,
+# its tool, is the same C++ built on its own (S3_STANDALONE); and its unit
+# tests, where googletest is in the tree, the test-only program gpcloud_test.
+###############################################################################
+
+if get_option('gpcloud')
+  gpcloud_root = '../gpcontrib/gpcloud'
+  xml_dep = dependency('libxml-2.0', required: true)
+  gpcloud_ssl_dep = dependency('openssl', required: true)
+  gpcloud_curl_dep = dependency('libcurl', required: true)
+  gpcloud_common = []
+  foreach f : ['gpreader', 'gpwriter', 's3conf', 's3utils', 's3log', 's3url',
+               's3http_headers', 's3interface', 's3restful_service',
+               's3bucket_reader', 's3common_reader', 's3common_writer',
+               'decompress_reader', 'compress_writer', 's3key_reader',
+               's3key_writer']
+    gpcloud_common += files(gpcloud_root / 'src' / f + '.cpp')
+  endforeach
+  gpcloud_lib = files(gpcloud_root / 'lib' / 'http_parser.cpp',
+                      gpcloud_root / 'lib' / 'ini.cpp')
+  gpcloud_deps = [gpcloud_curl_dep, xml_dep, gpcloud_ssl_dep, zlib_dep,
+                  dependency('threads')]
+  # OpenSSL 3 deprecates the digests and HMAC gpcloud signs its requests with,
+  # which it still provides; and gpcloud is Cloudberry's C++ as it is.
+  gpcloud_cpp_args = cpp.get_supported_arguments('-Wno-deprecated-declarations',
+                                                 '-Wno-unused-result',
+                                                 '-Wno-missing-field-initializers')
+
+  shared_module('gpcloud',
+    files('modules/gpcloud/gpcloud.cpp') + gpcloud_common + gpcloud_lib,
+    cpp_args: gpcloud_cpp_args,
+    link_args: mod_link_args,
+    include_directories: [include_directories('compat/gpcontrib'), pg_inc, cb_inc,
+                          include_directories('modules/gp_exttable/include',
+                                              gpcloud_root / 'include',
+                                              gpcloud_root / 'lib')],
+    dependencies: gpcloud_deps,
+    name_prefix: '',
+    install: true,
+    install_dir: pg_pkglibdir,
+  )
+  meson.add_install_script('sh', '-c',
+    'ln -sf gpcloud.so "${DESTDIR}@0@/gps3ext.so"'.format(pg_pkglibdir))
+  built_modules += 'gpcloud'
+
+  executable('gpcheckcloud',
+    files(gpcloud_root / 'bin' / 'gpcheckcloud' / 'gpcheckcloud.cpp') +
+      gpcloud_common + gpcloud_lib,
+    cpp_args: gpcloud_cpp_args + ['-DS3_STANDALONE', '-DS3_STANDALONE_CHECKCLOUD'],
+    include_directories: include_directories(gpcloud_root / 'include',
+                                              gpcloud_root / 'lib'),
+    dependencies: gpcloud_deps,
+    install: true,
+    install_dir: pg['bindir'],
+  )
+  built_modules += 'gpcheckcloud (program)'
+endif
+
+###############################################################################
 # gpfdist
 #
 # Cloudberry's file server of external tables (src/bin/gpfdist), a program
@@ -1077,6 +1188,42 @@ if get_option('hook_tests')
     install_dir: pg_pkglibdir,
   )
   built_modules += 'gpformatter (test only)'
+
+  # gpcloud's unit tests, Cloudberry's googletest program, built as its test
+  # Makefile builds it -- each test file includes the source it tests, with
+  # S3_STANDALONE -- where the tree has googletest: a git submodule of
+  # Cloudberry's, which the image clones at the commit the tree names, into
+  # PAX's copy of it (Dockerfile.cbext), and which gpcloud's tests are built
+  # against too.
+  gtest_root = '../contrib/pax_storage/src/cpp/contrib/googletest'
+  if get_option('gpcloud') and fs.is_file(gtest_root / 'googletest' / 'src' / 'gtest-all.cc')
+    gpcloud_tests = []
+    foreach f : ['gpreader', 'gpwriter', 's3conf', 's3utils', 's3log', 's3url',
+                 's3http_headers', 's3interface', 's3restful_service',
+                 's3bucket_reader', 's3common_reader', 's3common_writer',
+                 'decompress_reader', 'compress_writer', 's3key_reader',
+                 's3key_writer']
+      gpcloud_tests += files(gpcloud_root / 'test' / f + '_test.cpp')
+    endforeach
+    executable('gpcloud_test',
+      gpcloud_tests + files(gtest_root / 'googletest' / 'src' / 'gtest-all.cc',
+                            gtest_root / 'googlemock' / 'src' / 'gmock-all.cc',
+                            gtest_root / 'googletest' / 'src' / 'gtest_main.cc'),
+      cpp_args: gpcloud_cpp_args + ['-DS3_STANDALONE'] +
+        cpp.get_supported_arguments('-Wno-sign-compare', '-Wno-unused-variable'),
+      include_directories: include_directories(gpcloud_root / 'src',
+                                                gpcloud_root / 'include',
+                                                gpcloud_root / 'lib',
+                                                gtest_root / 'googletest' / 'include',
+                                                gtest_root / 'googletest',
+                                                gtest_root / 'googlemock' / 'include',
+                                                gtest_root / 'googlemock'),
+      dependencies: gpcloud_deps,
+      install: true,
+      install_dir: pg['bindir'],
+    )
+    built_modules += 'gpcloud_test (test only)'
+  endif
 
   # Cloudberry's extension for diskquota's tests (control/test), whose
   # functions are diskquota's library's.

@@ -215,7 +215,7 @@ pg   rowtypes
 pg   returning
 pg   with
 pg   xml
-skip gp_foreign_data  a foreign table's mpp_execute option, which is where an MPP foreign table runs, M2/M5
+run  gp_foreign_data                                      cb1
 pg   partition_join
 pg   partition_prune
 pg   reloptions
