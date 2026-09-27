@@ -295,6 +295,12 @@ static const char *const synced_settings[] = {
 	"pax.default_storage_format",
 	"pax.bloom_filter_work_memory_bytes",
 	"pax.log_filter_tree",
+	/*
+	 * the workfile manager's limits of a statement, which a segment's
+	 * processes hold their temporary files to (gp_workfile.c)
+	 */
+	"gp.workfile_limit_per_query",
+	"gp.workfile_limit_files_per_query",
 };
 
 #define NUM_SYNCED_SETTINGS	lengthof(synced_settings)

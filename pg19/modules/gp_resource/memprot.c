@@ -423,9 +423,10 @@ static bool memprot_nudging = false;
  * works in memory it has -- would hold the red zone, and the runaway
  * detector with it.  Asked by a backend of the node as it takes a chunk in
  * the red zone: once the event is a second old, the runaway's processes
- * that still run a statement are sent a cancel, once, which is PostgreSQL's
- * own "canceling statement" -- and as a cancelled one ends its statement it
- * cleans up, as the cleaner's other processes do.
+ * that still run a statement are sent a cancel, once -- PostgreSQL's own,
+ * which a segment's backend words as Cloudberry's does, "canceling MPP
+ * operation" (gp_core's gp_workfile.c) -- and as a cancelled one ends its
+ * statement it cleans up, as the cleaner's other processes do.
  */
 static void
 runaway_nudge(void)

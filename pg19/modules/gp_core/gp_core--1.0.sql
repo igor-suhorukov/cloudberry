@@ -1484,11 +1484,11 @@ REVOKE ALL ON FUNCTION pg_catalog.gp_add_segment_primary(text, text, int4, text)
  * gp_toolkit, Cloudberry's (gpcontrib/gp_toolkit, gp_toolkit--1.3.sql and the
  * update scripts after it): its views and functions of what gp_core has what
  * they read.  Its append-optimized tables' are gp_ao's, beside gp_ao's own
- * functions there, and its resource managers' gp_resource's.  Not here: the
- * workfile manager's views, whose manager the port has not.  The servers'
+ * functions there, and its resource managers' gp_resource's.  The servers'
  * logs and the views over them, gp_disk_free, the checks for orphaned and
  * missing files and the partitions' functions are at the end of this
- * file, "gp_toolkit's rest".
+ * file, "gp_toolkit's rest", and the workfile manager's views after them,
+ * with gp_workfile.c's own.
  *****************************************************************************/
 
 /*
@@ -2551,3 +2551,174 @@ SELECT
 FROM partitions;
 
 GRANT SELECT ON gp_toolkit.gp_partitions TO PUBLIC;
+
+/* ------------------------------------------------------------------------- */
+/* gp_toolkit's views of the workfile manager (gp_workfile.c)                */
+/* ------------------------------------------------------------------------- */
+
+/*
+ * Each temporary file of the node the call runs on -- a file, or a FileSet's
+ * directory with its files -- as Cloudberry's gp_workfile_mgr_cache_entries()
+ * gives each workfile set of its manager (gp_internal_tools'
+ * gp_workfile_mgr.c): the node's content id, the file's name as its prefix,
+ * its size, the session of the process that made it and how many files it
+ * is; the operator, slice and command, which a file's name does not say,
+ * NULL.  And the bytes of them all, the node's.
+ */
+CREATE FUNCTION gp_toolkit.__gp_workfile_entries_here(OUT segid int4,
+	OUT prefix text, OUT size int8, OUT optype text, OUT slice int4,
+	OUT sessionid int4, OUT commandid int4, OUT numfiles int4)
+RETURNS SETOF record
+AS 'MODULE_PATHNAME', 'gp_workfile_entries'
+LANGUAGE C VOLATILE;
+
+CREATE FUNCTION gp_toolkit.__gp_workfile_mgr_used_diskspace_here(OUT segid int4,
+	OUT bytes int8)
+RETURNS SETOF record
+AS 'MODULE_PATHNAME', 'gp_workfile_used_diskspace'
+LANGUAGE C VOLATILE;
+
+/*
+ * Cloudberry's functions of the names its views call, on the coordinator
+ * and on every segment (EXECUTE ON ALL SEGMENTS, as a query of
+ * gp_dist_random('gp_id') alone runs there), and its views, with its text
+ * and grants (gp_toolkit--1.3.sql).
+ */
+CREATE FUNCTION gp_toolkit.__gp_workfile_entries_f_on_coordinator()
+RETURNS SETOF record
+LANGUAGE sql VOLATILE
+AS $$
+	SELECT * FROM gp_toolkit.__gp_workfile_entries_here()
+$$;
+
+GRANT EXECUTE ON FUNCTION gp_toolkit.__gp_workfile_entries_f_on_coordinator() TO public;
+
+/* prefer the *_coordinator function, but keep this for backwards compatibility */
+CREATE FUNCTION gp_toolkit.__gp_workfile_entries_f_on_master()
+RETURNS SETOF record
+LANGUAGE sql VOLATILE
+AS $$
+	SELECT * FROM gp_toolkit.__gp_workfile_entries_here()
+$$;
+
+GRANT EXECUTE ON FUNCTION gp_toolkit.__gp_workfile_entries_f_on_master() TO public;
+
+CREATE FUNCTION gp_toolkit.__gp_workfile_entries_f_on_segments()
+RETURNS SETOF record
+LANGUAGE plpgsql VOLATILE
+AS $$
+BEGIN
+	RETURN QUERY SELECT (gp_toolkit.__gp_workfile_entries_here()).* FROM gp_dist_random('gp_id');
+END
+$$;
+
+GRANT EXECUTE ON FUNCTION gp_toolkit.__gp_workfile_entries_f_on_segments() TO public;
+
+CREATE VIEW gp_toolkit.gp_workfile_entries AS
+WITH all_entries AS (
+    SELECT C.*
+        FROM gp_toolkit.__gp_workfile_entries_f_on_coordinator() AS C (
+           segid int,
+           prefix text,
+           size bigint,
+           optype text,
+           slice int,
+           sessionid int,
+           commandid int,
+           numfiles int
+        )
+    UNION ALL
+    SELECT C.*
+        FROM gp_toolkit.__gp_workfile_entries_f_on_segments() AS C (
+            segid int,
+            prefix text,
+            size bigint,
+            optype text,
+            slice int,
+            sessionid int,
+            commandid int,
+            numfiles int
+        ))
+SELECT S.datname,
+       S.pid,
+       C.sessionid as sess_id,
+       C.commandid as command_cnt,
+       S.usename,
+       S.query,
+       C.segid,
+       C.slice,
+       C.optype,
+       C.size,
+       C.numfiles,
+       C.prefix
+FROM all_entries C LEFT OUTER JOIN gp_stat_activity S
+ON C.sessionid = S.sess_id and C.segid=S.gp_segment_id;
+
+GRANT SELECT ON gp_toolkit.gp_workfile_entries TO public;
+
+CREATE VIEW gp_toolkit.gp_workfile_usage_per_segment AS
+SELECT gpseg.content AS segid, COALESCE(SUM(wfe.size),0) AS size,
+       SUM(wfe.numfiles) AS numfiles
+FROM (
+         SELECT content
+         FROM gp_segment_configuration
+         WHERE role = 'p') gpseg
+         LEFT JOIN gp_toolkit.gp_workfile_entries wfe
+                   ON (gpseg.content = wfe.segid)
+GROUP BY gpseg.content;
+
+GRANT SELECT ON gp_toolkit.gp_workfile_usage_per_segment TO public;
+
+CREATE VIEW gp_toolkit.gp_workfile_usage_per_query AS
+SELECT datname, pid, sess_id, command_cnt, usename, query, segid,
+       SUM(size) AS size, SUM(numfiles) AS numfiles
+FROM gp_toolkit.gp_workfile_entries
+GROUP BY datname, pid, sess_id, command_cnt, usename, query, segid;
+
+GRANT SELECT ON gp_toolkit.gp_workfile_usage_per_query TO public;
+
+CREATE FUNCTION gp_toolkit.__gp_workfile_mgr_used_diskspace_f_on_coordinator()
+RETURNS SETOF record
+LANGUAGE sql VOLATILE
+AS $$
+	SELECT * FROM gp_toolkit.__gp_workfile_mgr_used_diskspace_here()
+$$;
+
+GRANT EXECUTE ON FUNCTION gp_toolkit.__gp_workfile_mgr_used_diskspace_f_on_coordinator() TO public;
+
+/* prefer the *_coordinator function, but keep this for backwards compatibility */
+CREATE FUNCTION gp_toolkit.__gp_workfile_mgr_used_diskspace_f_on_master()
+RETURNS SETOF record
+LANGUAGE sql VOLATILE
+AS $$
+	SELECT * FROM gp_toolkit.__gp_workfile_mgr_used_diskspace_here()
+$$;
+
+GRANT EXECUTE ON FUNCTION gp_toolkit.__gp_workfile_mgr_used_diskspace_f_on_master() TO public;
+
+CREATE FUNCTION gp_toolkit.__gp_workfile_mgr_used_diskspace_f_on_segments()
+RETURNS SETOF record
+LANGUAGE plpgsql VOLATILE
+AS $$
+BEGIN
+	RETURN QUERY SELECT (gp_toolkit.__gp_workfile_mgr_used_diskspace_here()).* FROM gp_dist_random('gp_id');
+END
+$$;
+
+GRANT EXECUTE ON FUNCTION gp_toolkit.__gp_workfile_mgr_used_diskspace_f_on_segments() TO public;
+
+CREATE VIEW gp_toolkit.gp_workfile_mgr_used_diskspace AS
+  SELECT C.*
+	FROM gp_toolkit.__gp_workfile_mgr_used_diskspace_f_on_coordinator() as C (
+	  segid int,
+	  bytes bigint
+	)
+  UNION ALL
+  SELECT C.*
+	FROM gp_toolkit.__gp_workfile_mgr_used_diskspace_f_on_segments() as C (
+	  segid int,
+	  bytes bigint
+	)
+ORDER BY segid;
+
+GRANT SELECT ON gp_toolkit.gp_workfile_mgr_used_diskspace TO public;

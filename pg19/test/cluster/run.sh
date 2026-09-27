@@ -4221,6 +4221,99 @@ t" ] && ok "a message's trailing whitespace off, and gp_log_command_timings" \
 	[ "$out" = "0:mf:true" ] && [ "$out2" = "0
 10" ] && ok "gp_check_missing_files lists a table's file a segment has not" \
 		|| notok "gp_check_missing_files" "$out / $out2"
+
+	# The workfile manager's (gp_workfile.c): gp_toolkit's views of the
+	# temporary files, read where they lie, a row for each and each node's
+	# bytes; the limits on a statement's files, in Cloudberry's words, on the
+	# coordinator and in a segment's slice; and a segment's cancel, in the
+	# words of Cloudberry's QE.
+	out=$(q 0 "SELECT string_agg(segid || ':' || bytes, ' ' ORDER BY segid) FROM gp_toolkit.gp_workfile_mgr_used_diskspace;
+			   SELECT count(*) FROM gp_toolkit.gp_workfile_entries;
+			   SELECT string_agg(segid || ':' || size, ' ' ORDER BY segid) FROM gp_toolkit.gp_workfile_usage_per_segment;")
+	[ "$out" = "-1:0 0:0 1:0
+0
+-1:0 0:0 1:0" ] && ok "gp_toolkit's workfile views: no temporary file, and 0 bytes on each node" \
+		|| notok "the workfile views, nothing spilled" "$out"
+	out=$(printf '%s\n' "SET work_mem = '1MB';" "BEGIN;" \
+		"DECLARE wf CURSOR FOR SELECT g FROM generate_series(1, 300000) g ORDER BY g DESC;" \
+		"FETCH 1 FROM wf;" \
+		"SELECT count(*) || ' ' || sum(numfiles) || ' ' || bool_and(size > 0) || ' ' ||
+				bool_and(sess_id = pg_backend_pid() AND pid = pg_backend_pid() AND usename = current_user)
+		 FROM gp_toolkit.gp_workfile_entries WHERE segid = -1;" \
+		"SELECT size > 0 FROM gp_toolkit.gp_workfile_usage_per_query WHERE sess_id = pg_backend_pid();" \
+		"SELECT bytes > 0 FROM gp_toolkit.gp_workfile_mgr_used_diskspace WHERE segid = -1;" \
+		"COMMIT;" \
+		"SELECT count(*) FROM gp_toolkit.gp_workfile_entries;" | qf 0)
+	[ "$out" = "300000
+2 2 true true
+t
+t
+0" ] && ok "a cursor's spilled rows and sort on the coordinator: two files, its session's, until it ends" \
+		|| notok "the workfile views of a cursor's spill" "$out"
+	q 1 "SET work_mem = '1MB'; BEGIN;
+		 DECLARE wf CURSOR FOR SELECT g FROM generate_series(1, 300000) g ORDER BY g DESC;
+		 FETCH 1 FROM wf; SELECT pg_sleep(5); COMMIT;" >/dev/null 2>&1 &
+	holder=$!
+	# the cursor's two files, once its FETCH has sorted
+	for i in $(seq 1 20); do
+		out=$(q 0 "SELECT string_agg(segid || ':' || numfiles, ' ') FROM gp_toolkit.gp_workfile_usage_per_segment WHERE size > 0;
+				   SELECT string_agg(segid::text, ' ') FROM gp_toolkit.gp_workfile_mgr_used_diskspace WHERE bytes > 0;")
+		[ "$out" = "0:2
+0" ] && break
+		sleep 0.5
+	done
+	wait "$holder" 2>/dev/null
+	out2=$(q 0 "SELECT sum(bytes) FROM gp_toolkit.gp_workfile_mgr_used_diskspace;")
+	[ "$out|$out2" = "0:2
+0|0" ] && ok "and a segment's, which its node's rows show while they last" \
+		|| notok "the workfile views of a segment's spill" "$out / $out2"
+
+	out=$(printf '%s\n' "SET work_mem = '1MB';" "SET gp.workfile_limit_per_query = '1MB';" \
+		"SELECT count(DISTINCT g) FROM generate_series(1, 300000) g;" \
+		"SHOW temp_file_limit;" \
+		"SET temp_file_limit = '512kB';" \
+		"SELECT count(DISTINCT g) FROM generate_series(1, 300000) g;" \
+		"RESET temp_file_limit;" \
+		"CREATE FUNCTION wf_sort(n int) RETURNS bigint LANGUAGE sql
+		 AS 'SELECT count(*) FROM (SELECT g FROM generate_series(1, n) g ORDER BY g DESC) s';" \
+		"SELECT wf_sort(300000) FROM gp_dist_random('gp_id');" \
+		"RESET gp.workfile_limit_per_query;" \
+		"SELECT wf_sort(300000) FROM gp_dist_random('gp_id');" | qf 0 |
+		grep -v '^DETAIL\|^CONTEXT' | sed 's/^psql:[^:]*:[0-9]*: //' | tr '\n' '/')
+	[ "$out" = 'ERROR:  workfile per query size limit exceeded/-1/ERROR:  temporary file size exceeds "temp_file_limit" (512kB)/ERROR:  workfile per query size limit exceeded/300000/300000/' ] \
+		&& ok "gp.workfile_limit_per_query: a spill past it fails in Cloudberry's words, a segment's too, and a lower temp_file_limit is its own" \
+		|| notok "gp.workfile_limit_per_query" "$out"
+	three="SELECT count(g) FROM generate_series(1, 300000) g UNION SELECT count(g) FROM generate_series(1, 300000) g UNION SELECT count(g) FROM generate_series(1, 300000) g"
+	out=$(printf '%s\n' "SET work_mem = '1MB';" "SET gp.workfile_limit_files_per_query = 2;" \
+		"$three;" \
+		"SET gp.workfile_limit_files_per_query = 3;" \
+		"$three;" \
+		"CREATE FUNCTION wf_files() RETURNS bigint LANGUAGE sql AS '$three';" \
+		"SET gp.workfile_limit_files_per_query = 2;" \
+		"SELECT wf_files() FROM gp_dist_random('gp_id');" | qf 0 |
+		grep -v '^DETAIL\|^CONTEXT' | sed 's/^psql:[^:]*:[0-9]*: //' | tr '\n' '/')
+	[ "$out" = "ERROR:  number of workfiles per query limit exceeded/300000/ERROR:  number of workfiles per query limit exceeded/" ] \
+		&& ok "gp.workfile_limit_files_per_query: three spilled function scans are one file too many for 2, on the coordinator and on a segment" \
+		|| notok "gp.workfile_limit_files_per_query" "$out"
+	out=$(q 0 "SELECT sum(bytes) FROM gp_toolkit.gp_workfile_mgr_used_diskspace;")
+	[ "$out" = "0" ] && ok "and each failed statement's files are gone with it" \
+		|| notok "temporary files left by the failed statements" "$out"
+
+	start_node 1 "gp.workfile_limit_per_segment = 1024"
+	out=$(q 0 "SET work_mem = '1MB'; SELECT wf_sort(300000) FROM gp_dist_random('gp_id');" | grep -o 'ERROR:.*')
+	start_node 1
+	out2=$(q 0 "SET work_mem = '1MB'; SELECT wf_sort(300000) FROM gp_dist_random('gp_id'); DROP FUNCTION wf_sort(int), wf_files();" | tr '\n' ' ')
+	[ "$out|$out2" = "ERROR:  workfile per segment size limit exceeded|300000 300000 " ] \
+		&& ok "gp.workfile_limit_per_segment, a node's: past it there, a spill fails in Cloudberry's words" \
+		|| notok "gp.workfile_limit_per_segment" "$out / $out2"
+
+	out=$(q 0 "CREATE TABLE wfc (a int) DISTRIBUTED BY (a); INSERT INTO wfc SELECT generate_series(1, 10);
+			   SELECT gp_inject_fault('exec_mpp_query_start', 'interrupt', $(dbid 1));")
+	out2=$(q 0 "SELECT count(*) FROM wfc;" | grep -o 'ERROR:.*')
+	q 0 "SELECT gp_inject_fault('exec_mpp_query_start', 'reset', $(dbid 1)); DROP TABLE wfc;" >/dev/null
+	[ "$out|$out2" = "Success:|ERROR:  canceling MPP operation" ] \
+		&& ok "a segment's cancel is Cloudberry's QE's: canceling MPP operation" \
+		|| notok "a segment's cancel" "$out / $out2"
 fi
 
 ###############################################################################

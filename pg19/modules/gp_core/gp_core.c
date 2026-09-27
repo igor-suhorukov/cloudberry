@@ -69,6 +69,7 @@
 #include "gp_share.h"
 #include "gp_standby.h"
 #include "gp_ic.h"
+#include "gp_workfile.h"
 
 PG_MODULE_MAGIC_EXT(
 					.name = "gp_core",
@@ -308,6 +309,13 @@ _PG_init(void)
 	 * on one node too; its file is every process's, through shared memory.
 	 */
 	GpLogInit();
+
+	/*
+	 * Cloudberry's workfile manager, as far as a module sees it: the limits
+	 * on a statement's temporary files and on the node's, gp_toolkit's views
+	 * of them, and a segment's cancel in Cloudberry's words.
+	 */
+	GpWorkfileInit();
 
 	/*
 	 * Deliberately no MarkGUCPrefixReserved("gp") here.  It drops every
