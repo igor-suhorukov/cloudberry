@@ -130,12 +130,18 @@ cleanup() {
 }
 trap cleanup EXIT
 
+# The manifest's lines of the schedule's tests, less the one of Cloudberry's
+# parallel_schedule it runs too.
+of_schedule() {
+	awk 'NR == FNR { if ($1 == "test:") for (i = 2; i <= NF; i++) s[$i]; next }
+		 ($1 == "run" || $1 == "skip") && ($2 in s)' "$CB/greenplum_schedule" "$HERE/manifest"
+}
 echo "greenplum: part of Cloudberry's greenplum_schedule, on a coordinator and three segments"
 printf '  of the %d tests of the schedule the manifest lists: %d run here, %d of them in one pass, in %d groups, %d are skipped\n' \
-	"$(awk '$1 == "run" || $1 == "skip"' "$HERE/manifest" | wc -l)" \
-	"$(awk '$1 == "run"' "$HERE/manifest" | wc -l)" \
-	"$(awk '$1 == "run" && NF > 2' "$HERE/manifest" | wc -l)" "${#groups[@]}" \
-	"$(awk '$1 == "skip"' "$HERE/manifest" | wc -l)"
+	"$(of_schedule | wc -l)" \
+	"$(of_schedule | awk '$1 == "run"' | wc -l)" \
+	"$(of_schedule | awk '$1 == "run" && NF > 2' | wc -l)" "${#groups[@]}" \
+	"$(of_schedule | awk '$1 == "skip"' | wc -l)"
 echo
 
 # A group's cluster, as run.sh of the cluster suite makes one.
