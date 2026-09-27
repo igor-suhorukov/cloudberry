@@ -1,0 +1,23 @@
+@@
+-Compression Type: None
+-Compression Level: 0
+-Block Size: 32768
+-Checksum: t
+@@
+-Checksum: t
+@@
+- t            | t
+- t            | t
+-(2 rows)
++(0 rows)
+@@
+- t            | t
+-(1 row)
++(0 rows)
+@@
+-Compression Type: None
+-Compression Level: 0
+-Block Size: 32768
+-Checksum: t
+@@
+-Checksum: t

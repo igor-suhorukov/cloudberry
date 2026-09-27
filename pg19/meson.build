@@ -391,7 +391,18 @@ modules = [
                      'modules/gp_core/gp_catalog.c',
                      'modules/gp_core/gp_median.c',
                      'modules/gp_core/gp_policy.c',
-                     'modules/gp_core/gp_settings.c'),
+                     'modules/gp_core/gp_settings.c',
+                     'modules/gp_core/gp_explain.c',
+                     'modules/gp_core/gp_dtm_debug.c',
+                     'modules/gp_core/gp_metrics.c',
+                     'modules/gp_core/gp_log.c',
+                     'modules/gp_core/gp_toolkit.c',
+                     'modules/gp_core/gp_partmaint.c',
+                     'modules/gp_core/gp_workfile.c',
+                     'modules/gp_core/gp_partanalyze.c',
+                     'modules/gp_core/gp_hll.c',
+                     'modules/gp_core/gp_partmerge.c',
+                     'modules/gp_core/gp_rtfilter.c'),
     # The dispatcher is a libpq client of the segments; see gp_dispatch.c.
     'dependencies': [libpq_dep],
     'include_directories': [pg_client_inc],
@@ -533,7 +544,10 @@ modules = [
                      'modules/gp_matview/ivm_create.c',
                      'modules/gp_matview/ivm_delta.c',
                      'modules/gp_matview/ivm_maintain.c',
-                     'modules/gp_matview/ivm_state.c'),
+                     'modules/gp_matview/ivm_state.c',
+                     'modules/gp_matview/ivm_cluster.c',
+                     'modules/gp_matview/mvaux.c',
+                     'modules/gp_matview/aqumv.c'),
   },
   {
     # Preloaded: it reads CREATE TABLE and its friends before PostgreSQL does,
@@ -617,6 +631,24 @@ foreach m : modules
     preload_modules += name
   endif
 endforeach
+
+###############################################################################
+# gp_instrument_shmem
+#
+# Cloudberry's gpcontrib library of that name, which reads the slots of
+# gp_core's query metrics (gp_metrics.c): a library alone, as Cloudberry's
+# is, whose functions its users make themselves.
+###############################################################################
+
+shared_module('gp_instrument_shmem', files('modules/gp_core/gp_instrument_shmem.c'),
+  c_args: mod_c_args,
+  link_args: mod_link_args,
+  include_directories: [pg_inc, cb_inc],
+  name_prefix: '',
+  install: true,
+  install_dir: pg_pkglibdir,
+)
+built_modules += 'gp_instrument_shmem'
 
 ###############################################################################
 # diskquota
@@ -784,6 +816,22 @@ if get_option('hook_tests')
     install_dir: pg['bindir'],
   )
   built_modules += 'extended_protocol_resqueue (test only)'
+
+  # distributed_transactions' client, which sets debug_dtm_action by
+  # Cloudberry's names: compiled where it lies, unmodified, its PQexec()
+  # one that respells them (test/greenplum/twophase_respell.c).
+  executable('twophase_pqexecparams',
+    files('../src/test/regress/twophase_pqexecparams.c',
+          'test/greenplum/twophase_respell.c'),
+    c_args: ['-DPQexec=cb_respell_PQexec'],
+    include_directories: [pg_client_inc],
+    dependencies: [libpq_dep],
+    build_rpath: pg_libdir,
+    install_rpath: pg_libdir,
+    install: true,
+    install_dir: pg['bindir'],
+  )
+  built_modules += 'twophase_pqexecparams (test only)'
 
   # A storage handler for the storage and cluster suites: a directory stands
   # for the store, and credentials a user mapping gives are asked for.

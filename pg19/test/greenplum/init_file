@@ -18,6 +18,17 @@ m/^Distributed (by: \(.*\)|randomly|Replicated)$/
 # Cloudberry's init_file takes away.  So does this, the line with it.
 m/^DETAIL:  segment \d+ \([^)]*\)(; \d+ other segments failed too)?$/
 
+# PostgreSQL 19's ANALYZE VERBOSE ends each relation with what it cost --
+# the time, the reads, the WAL -- where PostgreSQL 16's, Cloudberry's, said
+# nothing: one INFO of several lines, each of them numbers of the run's.
+m/^INFO:  finished analyzing table "/
+m/^avg read rate: [0-9.]+ MB\/s, avg write rate: [0-9.]+ MB\/s$/
+m/^buffer usage: \d+ hits, \d+ reads, \d+ dirtied$/
+m/^WAL usage: \d+ records, \d+ full page images, \d+ bytes, /
+m/^system usage: CPU: user: /
+m/^I\/O timings: read: /
+m/^delay time: /
+
 -- end_matchignore
 
 -- start_matchsubs
@@ -32,6 +43,12 @@ s/^DETAIL:  segment \d+ \([^)]*\): (.*?)(; \d+ other segments failed too)?$/DETA
 # port's (faultinjector.c), and without it in Cloudberry's expected files.
 m/^ERROR:  fault triggered, fault name:'\w+' fault type:'\w+' $/
 s/ $//
+
+# The segment a gather of a replicated table reads, which EXPLAIN names:
+# the session's backend's (gp_scan.c, GpScanReplicatedContent()), which
+# changes from run to run, in a plan gpdiff.pl compares as rows.
+m/^\s+Segment: \d+\s*$/
+s/Segment: \d+/Segment: N/
 
 # Cloudberry's init_file drops "set enable_parallel = off;" and its reset,
 # which its tests carry and its expected files do not; the harness has

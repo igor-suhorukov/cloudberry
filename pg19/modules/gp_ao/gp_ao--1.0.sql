@@ -82,6 +82,18 @@ CREATE TABLE gp_ao.blkdir (
 CREATE UNIQUE INDEX blkdir_key ON gp_ao.blkdir (storage_id, segno, first_row);
 
 /*
+ * pg_appendonly.segfilecount, as Cloudberry's ANALYZE counts it: on a
+ * cluster's coordinator the segments' segment files of a table together,
+ * over the number of segments.  Kept by storage ID, so that TRUNCATE and a
+ * rewrite start it again at 0, as Cloudberry's TRUNCATE sets it.
+ */
+CREATE TABLE gp_ao.segfilecount (
+	storage_id		bigint NOT NULL,
+	segfilecount	smallint NOT NULL
+);
+CREATE UNIQUE INDEX segfilecount_key ON gp_ao.segfilecount (storage_id);
+
+/*
  * The storage ID of a table's current files; NULL for a table of another
  * access method.
  */
@@ -99,8 +111,8 @@ AS 'MODULE_PATHNAME', 'gp_ao_options'
 LANGUAGE C STRICT;
 
 GRANT USAGE ON SCHEMA gp_ao TO PUBLIC;
-REVOKE ALL ON gp_ao.segfile, gp_ao.visimap, gp_ao.blkdir FROM PUBLIC;
-GRANT SELECT ON gp_ao.segfile, gp_ao.visimap, gp_ao.blkdir TO PUBLIC;
+REVOKE ALL ON gp_ao.segfile, gp_ao.visimap, gp_ao.blkdir, gp_ao.segfilecount FROM PUBLIC;
+GRANT SELECT ON gp_ao.segfile, gp_ao.visimap, gp_ao.blkdir, gp_ao.segfilecount TO PUBLIC;
 REVOKE ALL ON SEQUENCE gp_ao.storage_id_seq FROM PUBLIC;
 
 /* ------------------------------------------------------------------------- */
@@ -112,7 +124,9 @@ REVOKE ALL ON SEQUENCE gp_ao.storage_id_seq FROM PUBLIC;
  * columns.  The options are what pg_class.reloptions holds, read without
  * opening the table; the port has no relations of its own for a table's
  * segment files, visibility map and block directory, so their OIDs are 0,
- * and segfilecount is how many segment files the table has on this node.
+ * and segfilecount is what ANALYZE last counted (gp_ao.segfilecount).
+ * gp_ao.segfile_count() is how many segment files the table has on this node
+ * now, which ORCA's metadata reads.
  */
 CREATE FUNCTION gp_ao.reloption_values(relam oid, relkind "char", reloptions text[],
 	OUT blocksize integer, OUT compresstype text, OUT compresslevel integer,
@@ -124,6 +138,11 @@ LANGUAGE C STABLE;
 CREATE FUNCTION gp_ao.segfile_count(rel oid)
 RETURNS integer
 AS 'MODULE_PATHNAME', 'gp_ao_segfile_count'
+LANGUAGE C STRICT STABLE;
+
+CREATE FUNCTION gp_ao.segfilecount_of(rel oid)
+RETURNS smallint
+AS 'MODULE_PATHNAME', 'gp_ao_segfilecount_of'
 LANGUAGE C STRICT STABLE;
 
 /*
@@ -140,7 +159,7 @@ SELECT c.oid AS relid,
 	   (CASE o.compresstype WHEN 'none' THEN '' ELSE o.compresstype END)::name AS compresstype,
 	   o.columnstore,
 	   0::oid AS segrelid,
-	   gp_ao.segfile_count(c.oid)::int2 AS segfilecount,
+	   gp_ao.segfilecount_of(c.oid) AS segfilecount,
 	   2::int2 AS version,
 	   0::oid AS blkdirrelid,
 	   0::oid AS blkdiridxid,
@@ -503,3 +522,114 @@ BEGIN
 	END LOOP;
 END
 $$;
+
+/******************************************************************************
+ * gp_toolkit's rest of append-optimized tables: the segment files' history,
+ * and their part in the checks for missing files, whose other views are
+ * gp_core's (gp_toolkit--1.3.sql).
+ *****************************************************************************/
+
+/*
+ * Every version of each segment file gp_ao.segfile still holds, a dead
+ * one's too, as Cloudberry's reads its pg_aoseg relation under SnapshotAny.
+ */
+CREATE FUNCTION gp_toolkit.__gp_aoseg_history(regclass)
+RETURNS TABLE (segment_id integer, segno integer, tupcount bigint, eof bigint,
+	eof_uncompressed bigint, modcount bigint, formatversion smallint,
+	state smallint)
+AS 'MODULE_PATHNAME', 'gp_ao_aoseg_history'
+LANGUAGE C STRICT;
+SECURITY LABEL FOR gp ON FUNCTION gp_toolkit.__gp_aoseg_history(regclass) IS 'execute_on=all_segments';
+
+CREATE FUNCTION gp_toolkit.__gp_aocsseg_history(regclass)
+RETURNS TABLE (segment_id integer, segno integer, column_num smallint,
+	physical_segno integer, tupcount bigint, eof bigint,
+	eof_uncompressed bigint, modcount bigint, formatversion smallint,
+	state smallint)
+AS 'MODULE_PATHNAME', 'gp_ao_aocsseg_history'
+LANGUAGE C STRICT;
+SECURITY LABEL FOR gp ON FUNCTION gp_toolkit.__gp_aocsseg_history(regclass) IS 'execute_on=all_segments';
+
+/*
+ * The files of a table's relation past its first that hold its data, this
+ * node's: where Cloudberry keeps each segment file as relfilenode.<segno>,
+ * gp_ao keeps them in the pages of the relation, whose files past the first
+ * are PostgreSQL's 1 GB segments of it.  So __get_ao_segno_list() and
+ * __get_aoco_segno_list() list those, in Cloudberry's shape, and
+ * __get_expect_files_ext expects relfilenode.<segno> of each as
+ * Cloudberry's does.
+ */
+CREATE FUNCTION gp_toolkit.__gp_ao_segment_files(regclass)
+RETURNS TABLE (segno integer, eof bigint)
+AS 'MODULE_PATHNAME', 'gp_ao_segment_files'
+LANGUAGE C STRICT;
+
+CREATE FUNCTION gp_toolkit.__get_ao_segno_list()
+RETURNS TABLE (relid oid, segno int, eof bigint)
+LANGUAGE sql
+AS $$
+	SELECT c.oid, f.segno, f.eof
+	FROM pg_catalog.pg_class c
+	JOIN pg_catalog.pg_am am ON am.oid = c.relam
+	CROSS JOIN LATERAL gp_toolkit.__gp_ao_segment_files(c.oid) f
+	WHERE am.amname = 'ao_row' AND c.relkind IN ('r', 'm')
+$$;
+
+CREATE FUNCTION gp_toolkit.__get_aoco_segno_list()
+RETURNS TABLE (relid oid, segno int, eof bigint)
+LANGUAGE sql
+AS $$
+	SELECT c.oid, f.segno, f.eof
+	FROM pg_catalog.pg_class c
+	JOIN pg_catalog.pg_am am ON am.oid = c.relam
+	CROSS JOIN LATERAL gp_toolkit.__gp_ao_segment_files(c.oid) f
+	WHERE am.amname = 'ao_column' AND c.relkind IN ('r', 'm')
+$$;
+
+GRANT EXECUTE ON FUNCTION gp_toolkit.__gp_aoseg_history(regclass),
+	gp_toolkit.__gp_aocsseg_history(regclass),
+	gp_toolkit.__get_ao_segno_list(), gp_toolkit.__get_aoco_segno_list() TO PUBLIC;
+
+/* Cloudberry's views of the files expected, and missing, with them. */
+CREATE VIEW gp_toolkit.__get_expect_files_ext AS
+SELECT s.reltablespace AS tablespace, s.relname, a.amname AS AM,
+	   (CASE WHEN s.relfilenode != 0 THEN s.relfilenode
+			 ELSE pg_catalog.pg_relation_filenode(s.oid) END)::text AS filename
+FROM pg_catalog.pg_class s LEFT JOIN pg_catalog.pg_am a ON s.relam = a.oid
+WHERE s.relkind != 'v'
+UNION
+-- AO extended files
+SELECT c.reltablespace AS tablespace, c.relname, a.amname AS AM,
+	   format(c.relfilenode::text || '.' || s.segno::text) AS filename
+FROM gp_toolkit.__get_ao_segno_list() s
+JOIN pg_catalog.pg_class c ON s.relid = c.oid
+LEFT JOIN pg_catalog.pg_am a ON c.relam = a.oid
+WHERE s.eof > 0 AND c.relkind != 'v'
+UNION
+-- CO extended files
+SELECT c.reltablespace AS tablespace, c.relname, a.amname AS AM,
+	   format(c.relfilenode::text || '.' || s.segno::text) AS filename
+FROM gp_toolkit.__get_aoco_segno_list() s
+JOIN pg_catalog.pg_class c ON s.relid = c.oid
+LEFT JOIN pg_catalog.pg_am a ON c.relam = a.oid
+WHERE s.eof > 0 AND c.relkind != 'v';
+
+CREATE VIEW gp_toolkit.__check_missing_files_ext AS
+SELECT f1.tablespace, f1.relname, f1.filename
+FROM gp_toolkit.__get_expect_files_ext f1
+LEFT JOIN gp_toolkit.__get_exist_files f2
+ON f1.tablespace = f2.tablespace AND f1.filename = f2.filename
+WHERE f2.tablespace IS NULL
+  AND f1.filename SIMILAR TO '[0-9]+(\.[0-9]+)?';
+
+/* The coordinator's without the extended files, as Cloudberry's. */
+CREATE VIEW gp_toolkit.gp_check_missing_files_ext AS
+SELECT d.gp_segment_id, d.tablespace, d.relname, d.filename
+FROM gp.dist_random(NULL::gp_toolkit.__check_missing_files_ext) d
+UNION ALL
+SELECT -1 AS gp_segment_id, *
+FROM gp_toolkit.__check_missing_files;
+
+GRANT SELECT ON gp_toolkit.__get_expect_files_ext,
+	gp_toolkit.__check_missing_files_ext,
+	gp_toolkit.gp_check_missing_files_ext TO PUBLIC;

@@ -22,6 +22,8 @@ CREATE EXTENSION gp_ao;
 CREATE EXTENSION gp_exttable;
 CREATE EXTENSION gp_security;
 CREATE EXTENSION gp_resource;
+CREATE EXTENSION gp_matview;
+CREATE EXTENSION gp_task;
 CREATE EXTENSION gp_inject_fault;
 -- faults for everyone, as Cloudberry's script grants them and its tests
 -- inject them, some as roles of their own (gp_inject_fault--1.0.sql)
@@ -42,7 +44,19 @@ CREATE EXTENSION IF NOT EXISTS gp_ao;
 CREATE EXTENSION IF NOT EXISTS gp_exttable;
 CREATE EXTENSION IF NOT EXISTS gp_security;
 CREATE EXTENSION IF NOT EXISTS gp_resource;
+CREATE EXTENSION IF NOT EXISTS gp_matview;
+CREATE EXTENSION IF NOT EXISTS gp_task;
 CREATE EXTENSION IF NOT EXISTS gp_inject_fault;
 GRANT EXECUTE ON FUNCTION gp_inject_fault(text, text, text, text, text, int4, int4, int4, int4, int4) TO PUBLIC;
+RESET client_min_messages;
+--
+-- The task scheduler reads its jobs from one database, gp.task_database's,
+-- where a dynamic table's job is written from any other.
+--
+\c postgres
+SET gp.optimizer = off;
+SET client_min_messages = warning;
+CREATE EXTENSION IF NOT EXISTS gp_core;
+CREATE EXTENSION IF NOT EXISTS gp_task;
 RESET client_min_messages;
 \c regression

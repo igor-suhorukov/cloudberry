@@ -1,9 +1,0 @@
-@@
-- ?column? 
------------
-- t
--(1 row)
--
-+ERROR:  relation "gp_toolkit.__gp_log_master_ext" does not exist
-+LINE 4:     gp_toolkit.__gp_log_master_ext
-+            ^

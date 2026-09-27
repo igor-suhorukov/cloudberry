@@ -1,17 +1,4 @@
 @@
-+ERROR:  unrecognized configuration parameter "gp_recursive_cte"
-@@
--ERROR:  RECURSIVE clauses in WITH queries are currently disabled
--HINT:  In order to use recursive CTEs, "gp_recursive_cte" must be turned on.
-+ id 
-+----
-+  1
-+  2
-+(2 rows)
-+
-@@
-+ERROR:  unrecognized configuration parameter "gp_recursive_cte"
-@@
 -                                    QUERY PLAN                                    
 -----------------------------------------------------------------------------------
 -               ->  Seq Scan on t_rand_test_rcte  (cost=0.00..1.03 rows=3 width=4)

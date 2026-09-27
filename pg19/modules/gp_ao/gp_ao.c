@@ -88,6 +88,7 @@
 #include "cb_module.h"
 #include "gp_core_api.h"
 #include "gp_dispatch.h"
+#include "gp_policy.h"
 #include "gp_ao.h"
 #include "gp_encoding.h"
 
@@ -102,6 +103,14 @@ int			gp_appendonly_compaction_threshold = 10;
 
 /* Cloudberry's gp_appendonly_compaction: whether VACUUM compacts at all. */
 bool		gp_appendonly_compaction = true;
+
+/*
+ * Cloudberry's gp_appendonly_insert_files and ..._tuples_range: how many
+ * segment files an insert spreads its rows over, and how many rows go to one
+ * before the next (ao_dml.c).
+ */
+int			gp_appendonly_insert_files = 0;
+int			gp_appendonly_insert_files_tuples_range = 100000;
 
 /*
  * Cloudberry's gp_select_invisible, for an append-optimized table: a scan
@@ -1424,10 +1433,51 @@ ao_acquire_sample_rows(Relation rel, int elevel, HeapTuple *rows,
 	return numrows;
 }
 
+/*
+ * pg_appendonly.segfilecount, as Cloudberry's ANALYZE counts it
+ * (AcquireCountOfSegmentFile()): on a cluster's coordinator, the segments'
+ * segment files of a distributed table together, over the number of
+ * segments, as each segment counts its own; elsewhere this node's.  Not on a
+ * segment sampling for the coordinator's ANALYZE, which asks for the count
+ * apart.
+ */
+static void
+ao_note_segfilecount(Relation rel)
+{
+	const GpCoreApi *core = GpCoreApiLookup();
+	int64		storage_id = ao_storage_id(rel);
+	int			count = 0;
+
+	if (core != NULL && core->get_role() == GP_ROLE_EXECUTE)
+		return;
+	if (core != NULL && core->get_role() == GP_ROLE_DISPATCH &&
+		!core->is_single_node() &&
+		!GpPolicyIsEntry(GpPolicyGet(RelationGetRelid(rel))))
+	{
+		int			nsegs = core->get_segment_count();
+		char	  **values = palloc0_array(char *, nsegs);
+
+		GpDispatchQueryFirstValues(psprintf("SELECT gp_ao.segfile_count(%u)",
+											RelationGetRelid(rel)),
+								   -1, values);
+		for (int i = 0; i < nsegs; i++)
+			if (values[i] != NULL)
+				count += pg_strtoint32(values[i]);
+		count /= nsegs;
+	}
+	else
+		pfree(ao_segfiles_read(storage_id, GetLatestSnapshot(), &count));
+	ao_segfilecount_set(storage_id, count);
+}
+
 static bool
 gp_ao_analyze_sample_rows(Relation relation, AnalyzeSampleRowsFunc *func,
 						  BlockNumber *totalpages)
 {
+	if (ao_is_ao_table(relation) &&
+		RELKIND_HAS_STORAGE(relation->rd_rel->relkind))
+		ao_note_segfilecount(relation);
+
 	/* A table whose rows are on the segments: gp_core samples them there. */
 	if (prev_analyze_sample_rows &&
 		prev_analyze_sample_rows(relation, func, totalpages))
@@ -1505,6 +1555,20 @@ _PG_init(void)
 							"Cloudberry calls this gp_appendonly_compaction_threshold.",
 							&gp_appendonly_compaction_threshold,
 							10, 0, 100,
+							PGC_USERSET, 0,
+							NULL, NULL, NULL);
+	DefineCustomIntVariable("gp.appendonly_insert_files",
+							"Number of segment files to insert for appendonly table within a transaction.",
+							"Cloudberry calls this gp_appendonly_insert_files: an insert spreads its rows over as many segment files, gp.appendonly_insert_files_tuples_range rows at a time, where more than one.",
+							&gp_appendonly_insert_files,
+							0, 0, 127,
+							PGC_USERSET, 0,
+							NULL, NULL, NULL);
+	DefineCustomIntVariable("gp.appendonly_insert_files_tuples_range",
+							"Number of rows an insert writes to one segment file before the next, when it writes several.",
+							"Cloudberry calls this gp_appendonly_insert_files_tuples_range.",
+							&gp_appendonly_insert_files_tuples_range,
+							100000, 0, INT_MAX,
 							PGC_USERSET, 0,
 							NULL, NULL, NULL);
 	DefineCustomStringVariable("gp.default_storage_options",

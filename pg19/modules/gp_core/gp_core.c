@@ -44,19 +44,26 @@
 #include "utils/lsyscache.h"
 
 #include "cb_module.h"
+#include "gp_catalog.h"
 #include "gp_cluster.h"
 #include "gp_core_api.h"
 #include "gp_dbcopy.h"
 #include "gp_dispatch.h"
+#include "gp_dtm_debug.h"
 #include "gp_dtx.h"
+#include "gp_explain.h"
 #include "gp_fault.h"
 #include "gp_fts.h"
 #include "gp_gdd.h"
 #include "gp_motion.h"
 #include "gp_label.h"
+#include "gp_log.h"
 #include "gp_loopback.h"
 #include "gp_metatrack.h"
+#include "gp_metrics.h"
+#include "gp_partanalyze.h"
 #include "gp_policy.h"
+#include "gp_rtfilter.h"
 #include "gp_scan.h"
 #include "gp_segadmin.h"
 #include "gp_segment.h"
@@ -64,6 +71,7 @@
 #include "gp_share.h"
 #include "gp_standby.h"
 #include "gp_ic.h"
+#include "gp_workfile.h"
 
 PG_MODULE_MAGIC_EXT(
 					.name = "gp_core",
@@ -221,7 +229,10 @@ _PG_init(void)
 	GpScanInit();
 	GpModifyInit();
 
-	/* O3: ANALYZE samples a distributed table on the segments. */
+	/*
+	 * O3: ANALYZE samples a distributed table on the segments; and on one
+	 * node too, a leaf partition, for the merge of its root's statistics.
+	 */
 	GpAnalyzeInit();
 
 	/*
@@ -272,6 +283,59 @@ _PG_init(void)
 	 * coordinator writes as statements change what they name.
 	 */
 	GpMetaTrackInit();
+
+	/*
+	 * A statistics row written by hand: an array constant for a column of
+	 * type anyarray taken as anyarray, as Cloudberry's parser takes it.
+	 */
+	GpCatalogInit();
+
+	/*
+	 * Cloudberry's options of EXPLAIN, SLICETABLE and LOCUS, on one node
+	 * too.
+	 */
+	GpExplainInit();
+
+	/*
+	 * Cloudberry's debug_dtm_action: a segment's part of a distributed
+	 * transaction failing at a command, as its tests ask.
+	 */
+	GpDtmDebugInit();
+
+	/*
+	 * Cloudberry's query metrics: each plan node's instrumentation in a slot
+	 * of shared memory, where gp.enable_query_metrics is on.
+	 */
+	GpMetricsInit();
+
+	/*
+	 * Cloudberry's own log, the CSV file gp_toolkit's views of the logs
+	 * read, written beside PostgreSQL's log from emit_log_hook (gp_log.c),
+	 * on one node too; its file is every process's, through shared memory.
+	 */
+	GpLogInit();
+
+	/*
+	 * Cloudberry's workfile manager, as far as a module sees it: the limits
+	 * on a statement's temporary files and on the node's, gp_toolkit's views
+	 * of them, and a segment's cancel in Cloudberry's words.
+	 */
+	GpWorkfileInit();
+
+	/*
+	 * Cloudberry's runtime filters: a Bloom filter of a hash join's inner
+	 * keys above its outer side, and pushed down into the scans below it
+	 * (gp_rtfilter.c); on one node too.
+	 */
+	GpRtFilterInit();
+
+	/*
+	 * ANALYZE of a partitioned table as Cloudberry does it: the relations a
+	 * statement takes, by its two settings and ROOTPARTITION, in its order.
+	 * Last of gp_core's utility hooks, so that it is the first to see the
+	 * statement and the others see the list it makes; on one node too.
+	 */
+	GpPartAnalyzeInit();
 
 	/*
 	 * Deliberately no MarkGUCPrefixReserved("gp") here.  It drops every

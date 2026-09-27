@@ -78,7 +78,10 @@ if ! . "$HERE/../gpmgmt/tools.sh" "$EXEC"; then
 fi
 BASEPORT="${PGPORT:-$((7300 + RANDOM % 200))}"
 NODES=4					# a coordinator and Cloudberry's three segments
-PRELOAD='gp_core,gp_orca,gp_sql,gp_ao,gp_exttable,gp_security,gp_resource'
+# gp_matview after gp_sql, whose hooks it runs outside of, as the dump suite
+# has it: an incremental view's distribution is an option gp_sql reads; and
+# gp_task, whose scheduler refreshes a dynamic table
+PRELOAD='gp_core,gp_orca,gp_sql,gp_ao,gp_exttable,gp_security,gp_resource,gp_matview,gp_task'
 SECRET="greenplum-schedule-$RANDOM$RANDOM$RANDOM"
 
 # The tests the manifest runs -- Cloudberry's, and the port's (port:name)
@@ -127,12 +130,18 @@ cleanup() {
 }
 trap cleanup EXIT
 
+# The manifest's lines of the schedule's tests, less the one of Cloudberry's
+# parallel_schedule it runs too.
+of_schedule() {
+	awk 'NR == FNR { if ($1 == "test:") for (i = 2; i <= NF; i++) s[$i]; next }
+		 ($1 == "run" || $1 == "skip") && ($2 in s)' "$CB/greenplum_schedule" "$HERE/manifest"
+}
 echo "greenplum: part of Cloudberry's greenplum_schedule, on a coordinator and three segments"
 printf '  of the %d tests of the schedule the manifest lists: %d run here, %d of them in one pass, in %d groups, %d are skipped\n' \
-	"$(awk '$1 == "run" || $1 == "skip"' "$HERE/manifest" | wc -l)" \
-	"$(awk '$1 == "run"' "$HERE/manifest" | wc -l)" \
-	"$(awk '$1 == "run" && NF > 2' "$HERE/manifest" | wc -l)" "${#groups[@]}" \
-	"$(awk '$1 == "skip"' "$HERE/manifest" | wc -l)"
+	"$(of_schedule | wc -l)" \
+	"$(of_schedule | awk '$1 == "run"' | wc -l)" \
+	"$(of_schedule | awk '$1 == "run" && NF > 2' | wc -l)" "${#groups[@]}" \
+	"$(of_schedule | awk '$1 == "skip"' | wc -l)"
 echo
 
 # A group's cluster, as run.sh of the cluster suite makes one.
@@ -166,6 +175,10 @@ make_cluster() {
 			# cluster runs with: a statement's memory is its queue's to give
 			echo "gp.resqueue_memory_policy = 'eager_free'"
 			[ "$n" -eq 0 ] && echo "gp.role = 'dispatch'"
+			# every statement in the coordinator's log, as gpinitsystem sets
+			# it on the cluster Cloudberry's tests run on: log_guc reads
+			# them back
+			[ "$n" -eq 0 ] && echo "log_statement = 'all'"
 			# each statement ORCA would not plan, and why, in the log: the
 			# ORCA pass's reasons, totalled below
 			[ "$n" -eq 0 ] && echo "gp.optimizer_log_fallback = on"
@@ -204,20 +217,34 @@ t1=$(date +%s)
 			max_resource_queues|max_resource_portals_per_transaction|max_statement_mem|\
 			debug_resource_group|runaway_detector_activation_percent|\
 			vmem_process_interrupt|explain_memory_verbosity|coredump_on_memerror|\
-			debug_print_slice_table)
+			debug_print_slice_table|\
+			enable_offload_entry_to_qe|debug_dtm_action*|debug_abort_after_distributed_prepared|\
+			debug_print_full_dtm|enable_answer_query_using_materialized_views|aqumv_allow_foreign_table)
 				cbname="$short" ;;
 			*) cbname="gp_$short" ;;
 		esac
 		echo "map $cbname $name"
 	done
 	# And a program of Cloudberry's suite that a test runs from the suite's
-	# directory, ./extended_protocol_resqueue, is the one the port builds and
-	# installs (meson's hook_tests), run from PATH as the diff is.
-	echo 'sed s#^[\\]! \./(extended_protocol_resqueue) #\\! \1 #'
+	# directory, ./extended_protocol_resqueue or ./twophase_pqexecparams, is
+	# the one the port builds and installs (meson's hook_tests), run from
+	# PATH as the diff is.
+	echo 'sed s#^[\\]! \./(extended_protocol_resqueue|twophase_pqexecparams) #\\! \1 #'
 	# So is bb_memory_quota's script, $PG_ABS_BUILDDIR/mem_quota_util.py, from
 	# PATH (below); it runs its queries in the database it is named, which is
 	# regression here.
 	echo 'sed s#^[\\]! \$PG_ABS_BUILDDIR/(mem_quota_util\.py) (.*)--dbname=regress #\\! \1 \2--dbname=regression #'
+	# PostgreSQL 19's pg_stats has five columns Cloudberry's has not -- the
+	# table's OID, the column's number, and three of a range's histograms --
+	# so a test's SELECT * of it asks for Cloudberry's fourteen by name, in
+	# the test and its expected output alike.
+	echo 'sed s#\b(select) \* (from pg_stats)\b#\1 schemaname, tablename, attname, inherited, null_frac, avg_width, n_distinct, most_common_vals, most_common_freqs, histogram_bounds, correlation, most_common_elems, most_common_elem_freqs, elem_count_histogram \2#Ig'
+	# aqumv orders rows by c2 - c1 - 1, which all but one of them have the
+	# same: which of those comes first is the order the segments' rows reach
+	# the coordinator's sort in, which varies from run to run, where
+	# Cloudberry's Gather Motion merges the segments' sorted rows in one
+	# order.  Compared as the rows they are, atmsort's "-- order none".
+	echo 'sed s#^(select c1, c3 from aqumv_t5 where c1 > 90 order by c2 - c1 - 1 asc;)#\1 -- order none#'
 } > "$WORK/respell"
 respell() { perl "$HERE/../respell.pl" "$WORK/respell" "$@"; }
 
@@ -386,12 +413,18 @@ EOF
 chmod +x "$EXEC/bin/diff"
 
 # A statement that runs for minutes is a finding, as the singlenode suite
-# says; so is one that waits for ever on a lock a segment holds.
+# says; so is one that waits for ever on a lock a segment holds.  The
+# watchdog does not look while a test runs that counts the coordinator's
+# sessions, or the statements holding its slots of query metrics, where its
+# own would be counted: the test whose results file is the newest.
 TIMEOUT="${STATEMENT_TIMEOUT:-60 seconds}"
+QUIET_TESTS=" instr_in_shmem instr_in_shmem_verify "
 watchdog() {
-	local pid query
+	local pid query newest
 	while :; do
 		sleep 5
+		newest=$(ls -t "$2/results" 2> /dev/null | head -1)
+		case "$QUIET_TESTS" in *" ${newest%.out} "*) continue ;; esac
 		PGOPTIONS="-c gp.optimizer=off" "$PSQL" -X -q -t -A -F ' ' -d postgres -c "
 			SELECT pid, regexp_replace(left(query, 300), '\\s+', ' ', 'g')
 			  FROM pg_stat_activity
@@ -439,7 +472,7 @@ run_group() {
 		-c "CREATE EXTENSION IF NOT EXISTS gp_orca CASCADE" \
 		-c "SELECT gp_orca.reset_fallbacks()" > /dev/null 2>&1
 	logpos=$(stat -c %s "$(node_dir "$g" 0).log")
-	watchdog "$R/cancelled" &
+	watchdog "$R/cancelled" "$R" &
 	wd=$!
 	trap 'kill "$wd" 2> /dev/null; exit 1' TERM INT
 	# From Cloudberry's suite's directory, as its Makefile runs it: its tests

@@ -77,10 +77,23 @@ extern bool GpScanSetCursor(bool cursor);
 extern bool GpGatherScanStartEarly(struct PlanState *ps);
 
 /*
- * As a statement starts: an external table's gathers that the plan may read
- * again keep what they read, and read that again (gp_motion.c).
+ * As a statement starts: the gathers that the plan may read again keep what
+ * they read, and read that again (gp_motion.c) -- but for those that bring
+ * each row's ctid.
  */
 extern void GpGatherScanMarkRescans(struct PlanState *root);
+
+/*
+ * Is this node a gather: its slice, as the executor met it, and how many
+ * segments it reads (EXPLAIN's slice table).
+ */
+extern bool GpGatherScanSlice(struct PlanState *ps, int *slice, int *nsegs);
+
+/*
+ * EXPLAIN ANALYZE's end of a gather a LIMIT left open, before the plan is
+ * printed; false if ps is not a gather.
+ */
+extern bool GpGatherScanFinish(struct PlanState *ps);
 
 /*
  * After planning: a gather a LIMIT reads sends the segments the LIMIT
@@ -109,7 +122,10 @@ extern void GpModifyInit(void);
  */
 extern void GpModifyLockPartitions(Oid relid, LOCKMODE lockmode);
 
-/* ANALYZE of a distributed table through O3, where there is a cluster. */
+/*
+ * ANALYZE of a distributed table through O3, where there is a cluster, and
+ * of a partitioned table's leaves, on one node too (gp_analyze.c).
+ */
 extern void GpAnalyzeInit(void);
 
 /*

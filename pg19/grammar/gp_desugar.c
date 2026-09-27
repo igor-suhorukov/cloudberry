@@ -116,6 +116,7 @@ static const char *const gp_trigger_words[] = {
 	"orientation", "encoding",
 	"reorganize", "external", "reject", "protocol",
 	"createexttable", "nocreateexttable", "newline", "resource", "deny",
+	"rootpartition", "fullscan",
 	NULL
 };
 
@@ -4204,6 +4205,56 @@ rw_role_deny(GpRewrite *rw)
 }
 
 /* ------------------------------------------------------------------------- */
+/* ANALYZE's words of Cloudberry's                                           */
+/* ------------------------------------------------------------------------- */
+
+/*
+ * ANALYZE [VERBOSE] ROOTPARTITION name [, ...]
+ *	 -> ANALYZE ([VERBOSE,] ROOTPARTITION) name [, ...]
+ * ANALYZE [VERBOSE] ROOTPARTITION ALL
+ *	 -> ANALYZE ([VERBOSE,] ROOTPARTITION)
+ * ANALYZE [VERBOSE] FULLSCAN name [, ...]
+ *	 -> ANALYZE ([VERBOSE,] FULLSCAN) name [, ...]
+ *
+ * Cloudberry's two options of ANALYZE in its old spelling (gram.y's
+ * AnalyzeStmt), which become options of the statement's own list, where
+ * Cloudberry's grammar takes them too and PostgreSQL's grammar takes any
+ * word; gp_core takes them out again (gp_partanalyze.c).  Only where a
+ * relation, or ROOTPARTITION's ALL, follows: without one the word is a
+ * table's name, as it is in Cloudberry's grammar, which makes neither word
+ * reserved -- ANALYZE rootpartition analyzes a table called rootpartition.
+ */
+static bool
+rw_analyze_options(GpRewrite *rw)
+{
+	const GpTokens *ts = rw->ts;
+	int			i = rw->first;
+	int			word;
+	bool		verbose;
+	bool		rootpartition;
+	char	   *options;
+
+	if (!tok_is_kw(ts, i, "analyze") && !tok_is_kw(ts, i, "analyse"))
+		return false;
+	verbose = tok_is_kw(ts, i + 1, "verbose");
+	word = verbose ? i + 2 : i + 1;
+	rootpartition = tok_is_word(ts, word, "rootpartition");
+	if (!rootpartition && !tok_is_word(ts, word, "fullscan"))
+		return false;
+
+	options = psprintf("(%s%s)", verbose ? "VERBOSE, " : "",
+					   rootpartition ? "ROOTPARTITION" : "FULLSCAN");
+	if (rootpartition && tok_is_kw(ts, word + 1, "all") && word + 2 == rw->last)
+		rw_edit(rw, ts->toks[i + 1].off, tok_stop(ts, word + 1), options);
+	else if (word + 1 < rw->last && tok_is_name(ts, word + 1) &&
+			 !tok_is_kw(ts, word + 1, "all"))
+		rw_edit(rw, ts->toks[i + 1].off, tok_stop(ts, word), options);
+	else
+		return false;
+	return true;
+}
+
+/* ------------------------------------------------------------------------- */
 /* The classic partition clauses                                             */
 /* ------------------------------------------------------------------------- */
 
@@ -5769,6 +5820,10 @@ rw_statement_itself(GpRewrite *rw)
 
 	/* ALTER TYPE ... SET DEFAULT ENCODING: a label of gp_ao's. */
 	if (rw_alter_type_encoding(rw))
+		return;
+
+	/* ANALYZE ROOTPARTITION and FULLSCAN: options of the statement's own */
+	if (rw_analyze_options(rw))
 		return;
 
 	(void) rw_storage_and_dynamic(rw);

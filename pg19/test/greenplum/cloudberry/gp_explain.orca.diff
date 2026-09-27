@@ -1,0 +1,18 @@
+@@
+-                           et                           
+---------------------------------------------------------
+- Hash Cond: ("*VALUES*".column1 = "*VALUES*_1".column1)
+-(1 row)
++                         et                         
++----------------------------------------------------
++ Hash Cond: ("Values".column1 = "Values_1".column1)
++ Join Filter: true
++ Join Filter: true
++(3 rows)
+@@
+-                           et                           
+---------------------------------------------------------
+- Hash Cond: ("*VALUES*".column1 = "*VALUES*_1".column1)
++                         et                         
++----------------------------------------------------
++ Hash Cond: ("Values".column1 = "Values_1".column1)

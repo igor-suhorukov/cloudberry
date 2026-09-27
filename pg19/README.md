@@ -76,7 +76,14 @@ On one node (M1):
   tables.  A view over one table, over several, or over a table joined to
   itself is maintained by delta, as are `count`, `sum` and `avg`; what the
   delta cannot express — an outer join, `min`, `max`, TRUNCATE — is
-  recomputed.  A dynamic table refreshes itself through `gp_task`.
+  recomputed.  A dynamic table refreshes itself through `gp_task`.  A
+  query is answered from a materialized view that holds what it asks,
+  where that costs less (`gp.enable_answer_query_using_materialized_views`,
+  Cloudberry's AQUMV), under ORCA too unless `gp.aqumv_under_orca` is off:
+  from a view that is up to date, or incremental.  Which views are, from
+  what was done to their base tables since each REFRESH, is kept as
+  Cloudberry's `gp_matview_aux` and `gp_matview_tables` show it, and a
+  REFRESH of a view that is up to date does nothing.
 - `gp_task` — the task scheduler, run by a background worker, its jobs in
   one database (`gp.task_database`), written there from any other and read
   from any other as Cloudberry's `pg_task` and `pg_task_run_history`, a
@@ -151,6 +158,23 @@ On a cluster (M2), `gp_core` and `gp_orca`:
   coordinator writes;
 - Cloudberry's settings of the dispatcher and the planner, as `gp.*`, among
   them direct dispatch's INFO lines and autostats;
+- EXPLAIN's `slicetable` and `locus` options, Cloudberry's; **EXPLAIN
+  ANALYZE of what the segments ran**, which each segment measures and
+  sends the coordinator as an INFO of gp_core's as its part ends: the
+  segment with the most rows' figures for a fragment's nodes, the WAL of a
+  write's statements, each slice's memory and Vmem reserved, a node's
+  Executor Memory, work_mem and spilling segments, and allstat
+  (`modules/gp_core/gp_explain.c`); and
+  **query metrics** (`gp.enable_query_metrics`): each plan node's
+  instrumentation in a slot of shared memory on every node, whose process,
+  session and statement it says, which Cloudberry's `gp_instrument_shmem`
+  library reads (`modules/gp_core/gp_metrics.c`);
+- Cloudberry's **runtime filters** (`gp.enable_runtime_filter`,
+  `gp.enable_runtime_filter_pushdown`): a Bloom filter of a hash join's inner
+  keys, in a RuntimeFilter node above the outer side of the planner's joins,
+  and pushed down into the gathers and sequential scans below a join's outer
+  side, those of ORCA's slices on the segments among them
+  (`modules/gp_core/gp_rtfilter.c`);
 - **every slice of a query at once**: the writer, the session's backend on a
   segment, runs one slice, and readers — more backends of the session there,
   reading as a part of the writer's transaction through the shared snapshot
@@ -240,10 +264,27 @@ Distributed transactions (M3), in `gp_core`:
   coordinator's from a segment;
 - the coordinator's `pg_class` counts a distributed table's pages, rows and
   all-visible pages as the segments do, after VACUUM and ANALYZE, as
-  Cloudberry's brings them back;
+  Cloudberry's brings them back, and an empty table's one page;
+- ANALYZE of a partitioned table as Cloudberry's takes it, on one node too:
+  the root and the mid-levels as `gp.optimizer_analyze_root_partition` and
+  `_midlevel_partition` say, ANALYZE ROOTPARTITION, the leaves before the
+  table above them and that table after a partition whose siblings all have
+  statistics; and an inheritance tree sampled on the segments in one
+  dispatch, as Cloudberry's is;
+- the root's statistics merged from its leaves' as Cloudberry merges them,
+  each leaf keeping a HyperLogLog counter of each column
+  (`gp_hyperloglog_estimator`, `gp_hyperloglog_accum()`), ANALYZE FULLSCAN's
+  of every row;
 - Cloudberry's fault injector, `gp_inject_fault`, for the tests: its faults
   at the port's own places under Cloudberry's names, and at PostgreSQL 19's
-  injection points, among them O29's in PostgreSQL's commit.
+  injection points, among them O29's in PostgreSQL's commit;
+- Cloudberry's `debug_dtm_action` settings, `gp.debug_dtm_action*`: a
+  segment fails the protocol command -- PREPARE, COMMIT PREPARED, a
+  subtransaction's begin, release or rollback -- or the SQL command they
+  name, with Cloudberry's error, which the coordinator answers as
+  Cloudberry's does: a second phase retried over a new connection, in its
+  words; a function's block's failed rollback escaping its handler; and
+  `gp.debug_abort_after_distributed_prepared`.
 
 What M3 leaves open: a server that cannot prepare
 (`max_prepared_transactions` at zero, PostgreSQL's default) leaves the
@@ -288,7 +329,10 @@ of the core series, O13 to O21, O23 and O32:
   `gp_ao`'s.  Compression (zlib, zstd, rle_type), column `ENCODING`, the
   columns `ALTER TABLE` adds without a rewrite, UPDATE through the plan's
   old row (O20), unique indexes, BRIN and Cloudberry's bitmap index, VACUUM
-  and its compaction, on one node and on the cluster;
+  and its compaction, an insert's rows spread over several segment files
+  (`gp.appendonly_insert_files` and `..._tuples_range`) and
+  `pg_appendonly.segfilecount` as ANALYZE counts it, on one node and on the
+  cluster;
 - `gp_exttable`: external tables, as foreign tables of `gp_exttable_server`
   -- `file://`, `EXECUTE`, `gpfdist://` and `http://` through libcurl, a
   protocol's own functions, text, CSV and a formatter's custom format,
@@ -399,9 +443,15 @@ tools:
 - a materialized view's rows are on the segments, as a table's are
   (`gp_refresh.c`): CREATE MATERIALIZED VIEW takes its DISTRIBUTED BY, or
   the key CREATE TABLE AS would choose, and REFRESH -- CONCURRENTLY too --
-  fills each segment's copy.  A dynamic table follows; an incremental view
-  is refused on a cluster, where its delta maintenance would have to reach
-  the segments;
+  fills each segment's copy.  A dynamic table follows; so does an
+  incremental view, which the coordinator keeps up to date once each
+  statement is over, from the transition tables the segments' triggers kept:
+  it computes the deltas and sends each segment those of its own rows of the
+  view, which the view is distributed by -- its GROUP BY columns, or every
+  segment for one of a single row (`gp_matview`'s `ivm_cluster.c`).  The
+  coordinator keeps which views are up to date, and answers a query from
+  one; a write through a partitioned table, whose rows the segments route,
+  marks the views of every partition;
 - stock PostGIS on a cluster.  An extension's script runs on every node,
   a query in it each node's own, its tables replicated and the
   coordinator's copy of them emptied (`gp_ddl.c`); the same version of an
@@ -475,6 +525,19 @@ What Cloudberry's tests asked for next (2026-09-27), in `gp_core`,
 - gp_toolkit's views of the cluster, of skew, statistics, bloat and sizes,
   and `gp_param_setting()` by Cloudberry's names; `gp_backend_info()`,
   `gp_opt_version()`, `gp_execution_segment()` and `gp_execution_dbid()`;
+- Cloudberry's own log, a CSV file of thirty columns in each node's log
+  directory beside PostgreSQL's log, written from `emit_log_hook`
+  (`gp_log.c`, `gp.log_format`), and gp_toolkit's views of it: a
+  segment's records name the coordinator's statement, which what it is
+  sent carries, an error's record is followed by its statement's, and
+  `log_min_messages`, `log_min_error_statement` and
+  `log_min_duration_statement` reach the segments;
+- the rest of gp_toolkit: `gp_disk_free`, each segment's own; the checks
+  for orphaned and missing files and `gp_move_orphaned_files()`, each node
+  locking its `pg_class` and checkpointing for itself; an append-optimized
+  table's segment files' history (`__gp_aoseg_history`); and the functions
+  of a partitioned table, `gp_partitions` among them (`gp_toolkit.c`,
+  `gp_partmaint.c`);
 - a record of no declared type carried between the nodes with its row type
   described (`gp_record.c`) — through a Motion, a gather, a query of
   `gp_dist_random()` alone, and as a fragment's parameter or constant;
@@ -491,11 +554,10 @@ What Cloudberry's tests asked for next (2026-09-27), in `gp_core`,
   coordinator writes as statements change what they name
   (`gp_metatrack.c`);
 - `gp.debug_print_slice_table`; Cloudberry's settings of its planner's
-  plans, of the gangs a session keeps and of an append-optimized insert's
-  files accepted, with nothing to apply them to here
-  (`gp.eager_two_phase_agg`, `gp.enable_agg_distinct`,
+  plans and of the gangs a session keeps accepted, with nothing to apply
+  them to here (`gp.eager_two_phase_agg`, `gp.enable_agg_distinct`,
   `gp.enable_sort_limit`, `gp.cost_hashjoin_chainwalk`,
-  `gp.cached_segworkers_threshold`, `gp.appendonly_insert_files`); a plan
+  `gp.cached_segworkers_threshold`); a plan
   of more slices than a segment takes readers for declined by ORCA; a
   publication's, subscription's or event trigger's DROP, RENAME, OWNER TO
   and COMMENT kept on the coordinator, as their CREATE is;
@@ -503,6 +565,11 @@ What Cloudberry's tests asked for next (2026-09-27), in `gp_core`,
   constraint it names, and its place in the segment's code, as Cloudberry
   relays it; a table of no columns taking rows on the planner's route; and
   the fault `create_function_fail`;
+- Cloudberry's workfile limits, in its words: `gp.workfile_limit_per_query`
+  as a run's `temp_file_limit`, and a statement's files and a node's bytes
+  counted where they lie as a run ends; gp_toolkit's four workfile views of
+  the same files; and a segment's cancel in its QE's words
+  (`gp_workfile.c`);
 - and the server built with LDAP, for `pg_hba.conf`'s ldap lines.
 
 The transport and encryption modules — `interconnect`, `udp2`, `gp_tde` —

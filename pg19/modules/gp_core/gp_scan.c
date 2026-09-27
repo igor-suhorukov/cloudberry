@@ -113,6 +113,7 @@
 #include "gp_cluster.h"
 #include "gp_core_api.h"
 #include "gp_dispatch.h"
+#include "gp_explain.h"
 #include "gp_hash.h"
 #include "gp_policy.h"
 #include "gp_scan.h"
@@ -213,9 +214,9 @@ typedef struct GatherScanState
 	GpGatherState *gather;
 	bool		done;
 	int			current_content;	/* the segment of the scan tuple's row */
-	bool		external;		/* an external table's */
 	Tuplestorestate *spool;		/* what it read, when it may be read again */
 	TupleTableSlot *spooled;	/* a row of it, read back */
+	int			slice;			/* its slice, as the executor met it */
 } GatherScanState;
 
 /*
@@ -1574,13 +1575,16 @@ gather_begin(CustomScanState *node, EState *estate, int eflags)
 	state->rowvalues = palloc_array(Datum, Max(state->natts, 1));
 	state->rownulls = palloc_array(bool, Max(state->natts, 1));
 	state->current_content = -1;
-	state->external = !gather_is_current_of(state) &&
-		GpPolicyIsExternalTable(RelationGetRelid(node->ss.ss_currentRelation));
 
-	/* each gather is a slice of its own, numbered as the executor meets it */
+	/*
+	 * Each gather is a slice of its own, numbered as the executor meets it --
+	 * in a plan EXPLAIN only describes too, whose label and slice table say
+	 * it (gp_explain.c).
+	 */
+	state->slice = GpNextGatherSlice();
 	if (!(eflags & EXEC_FLAG_EXPLAIN_ONLY))
 	{
-		int			slice = GpNextGatherSlice();
+		int			slice = state->slice;
 
 		if (gather_is_current_of(state))
 			GpReportDispatch(slice, true, state->nsegments);
@@ -1896,6 +1900,17 @@ gather_store(GatherScanState *state, TupleTableSlot *slot, int content)
 				break;
 		}
 	}
+
+	/*
+	 * A scan that reads no column -- count(*) -- has the relation's columns
+	 * in its tuple, where it has no scan list: they are NULL, and a spool
+	 * copies a row of them.
+	 */
+	for (int i = state->nsources; i < slot->tts_tupleDescriptor->natts; i++)
+	{
+		slot->tts_values[i] = (Datum) 0;
+		slot->tts_isnull[i] = true;
+	}
 	ExecStoreVirtualTuple(slot);
 
 	if (state->ctid_remote >= 0 && !remote->tts_isnull[state->ctid_remote])
@@ -1905,6 +1920,20 @@ gather_store(GatherScanState *state, TupleTableSlot *slot, int content)
 		ItemPointerSetInvalid(&slot->tts_tid);
 	slot->tts_tableOid = RelationGetRelid(rel);
 	state->current_content = content;
+}
+
+/*
+ * The segments' cursors closed.  What their statements say of their run as
+ * they end, under EXPLAIN ANALYZE, is this gather's (gp_explain.c).
+ */
+static void
+gather_close(GatherScanState *state)
+{
+	PlanState  *prev = GpExplainAnswerFor(&state->css.ss.ps);
+
+	GpGatherEnd(state->gather);
+	(void) GpExplainAnswerFor(prev);
+	state->gather = NULL;
 }
 
 /* The segments' next row, into the scan slot; false when they have no more. */
@@ -1945,8 +1974,7 @@ gather_fetch(GatherScanState *state, TupleTableSlot *slot)
 	if (got)
 		return true;
 
-	GpGatherEnd(state->gather);
-	state->gather = NULL;
+	gather_close(state);
 	state->done = true;
 	state->current_content = -1;
 	return false;
@@ -2008,18 +2036,17 @@ gather_end(CustomScanState *node)
 	GatherScanState *state = (GatherScanState *) node;
 
 	if (state->gather != NULL)
-		GpGatherEnd(state->gather);
-	state->gather = NULL;
+		gather_close(state);
 	if (state->spool != NULL)
 		tuplestore_end(state->spool);
 	state->spool = NULL;
 }
 
 /*
- * Read again: the segments run the query again -- or, for an external table
- * that keeps what it read, that is read again (GpGatherScanMarkRescans()).
- * The query the segments run has no parameter in it, which is what makes
- * what it read the answer whatever the parameters now are.
+ * Read again: what it kept is read again (GpGatherScanMarkRescans()) -- or,
+ * where it keeps nothing, the segments run the query again.  The query the
+ * segments run has no parameter in it, which is what makes what it read the
+ * answer whatever the parameters now are.
  */
 static void
 gather_rescan(CustomScanState *node)
@@ -2033,21 +2060,27 @@ gather_rescan(CustomScanState *node)
 	}
 
 	if (state->gather != NULL)
-		GpGatherEnd(state->gather);
-	state->gather = NULL;
+		gather_close(state);
 	state->done = false;
 	state->current_content = -1;
 }
 
 /*
- * An external table's gather that the plan may read more than once -- the
- * inner side of a nested loop, a subquery run for each row, the recursive
- * part of WITH RECURSIVE -- keeps the rows it read and reads them again: its
- * source is read once, as Cloudberry's planner makes sure of by putting a
- * Materialize above an external scan it would rescan (the path is not
- * "rescannable").  A command runs once, a file's rejected rows are counted
- * once, and gpfdist serves a scan once.  A Materialize that already keeps
- * the rows, above a subtree with no parameter to change, reads them once.
+ * A gather that the plan may read more than once -- the inner side of a
+ * nested loop, a subquery run for each row, the recursive part of WITH
+ * RECURSIVE -- keeps the rows it read and reads them again, as Cloudberry's
+ * planner makes sure a Motion or an external scan it would rescan is read
+ * once, by putting a Materialize above it (neither path is "rescannable").
+ * An external table's source is read once: a command runs once, a file's
+ * rejected rows are counted once, and gpfdist serves a scan once.  A table's
+ * rows cross from the segments once: run again for each outer row, the
+ * gathers of a join's inner side of many partitions -- a Nested Loop the
+ * planner chose for tables it had no statistics of -- took minutes, where
+ * reading what they kept takes seconds (bb_mpph's queries 3 and 8).  A
+ * gather that brings each row's ctid -- of a table the statement writes, or
+ * locks rows of -- is run again, since a row it keeps has none.  A
+ * Materialize that already keeps the rows, above a subtree with no parameter
+ * to change, reads them once.
  */
 static void mark_rescans(PlanState *ps, bool again);
 
@@ -2077,7 +2110,8 @@ mark_rescans(PlanState *ps, bool again)
 	{
 		GatherScanState *state = (GatherScanState *) ps;
 
-		if (state->external && state->spool == NULL)
+		if (state->spool == NULL && state->ctid_remote < 0 &&
+			!gather_is_current_of(state))
 		{
 			EState	   *estate = ps->state;
 			MemoryContext oldcxt = MemoryContextSwitchTo(estate->es_query_cxt);
@@ -2301,12 +2335,50 @@ gp_scan_explain_label(PlanState *planstate, ExplainState *es,
 			: state->ncontents > 0 ? state->ncontents : state->nsegments;
 
 		*pname = psprintf("Gather Motion %d:1", nsegs);
-		*suffix = psprintf("  (slice1; segments: %d)", nsegs);
+		*suffix = psprintf("  (slice%d; segments: %d)", state->slice, nsegs);
 		return;
 	}
 
 	if (prev_explain_node_label)
 		prev_explain_node_label(planstate, es, pname, suffix);
+}
+
+/*
+ * EXPLAIN ANALYZE's end of a gather a LIMIT above it left open: its
+ * segments' cursors closed now, so that what they say of their run is in
+ * before the plan is printed (gp_explain.c).  Nothing reads it after
+ * ExecutorFinish.
+ */
+bool
+GpGatherScanFinish(PlanState *ps)
+{
+	GatherScanState *state = (GatherScanState *) ps;
+
+	if (!IsA(ps, CustomScanState) ||
+		((CustomScanState *) ps)->methods != &gather_exec_methods)
+		return false;
+	if (state->gather != NULL)
+		gather_close(state);
+	state->done = true;
+	return true;
+}
+
+/*
+ * Is this node a gather?  Its slice, and how many segments it reads, for
+ * EXPLAIN's slice table (gp_explain.c).
+ */
+bool
+GpGatherScanSlice(PlanState *ps, int *slice, int *nsegs)
+{
+	GatherScanState *state = (GatherScanState *) ps;
+
+	if (!IsA(ps, CustomScanState) ||
+		((CustomScanState *) ps)->methods != &gather_exec_methods)
+		return false;
+	*slice = state->slice;
+	*nsegs = gather_is_current_of(state) ? 1
+		: state->ncontents > 0 ? state->ncontents : state->nsegments;
+	return true;
 }
 
 void

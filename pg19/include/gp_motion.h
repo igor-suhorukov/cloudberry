@@ -216,6 +216,16 @@ extern int	GpMotionDirectDispatchSegment(Oid relid, int nvalues,
 struct FileSet;
 extern bool GpMotionShareFileSet(PlannedStmt *stmt, struct FileSet *fileset);
 
+/*
+ * EXPLAIN ANALYZE's (gp_explain.c): is "stmt" a fragment a segment runs;
+ * is "ps" a Motion that sends, a reader's fragment; and the coordinator's
+ * Motion ended, its gather and readers with it, before the plan is printed
+ * -- false if "ps" is not a Motion.
+ */
+extern bool GpMotionIsFragment(PlannedStmt *stmt);
+extern bool GpMotionIsSender(PlanState *ps);
+extern bool GpMotionFinish(PlanState *ps);
+
 /* The CustomScan, and the segments' planner hook; from gp_core's _PG_init. */
 extern void GpMotionInit(void);
 

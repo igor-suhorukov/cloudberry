@@ -362,9 +362,11 @@ q "SECURITY LABEL FOR gp ON AGGREGATE sum(int4) IS 'replicate_safe';" > /dev/nul
 is "and labelling the aggregate is what says so" \
    "SELECT is_repsafe FROM gp_orca.aggregate_fact('sum(int4)'::regprocedure);" "t"
 
+# gp_toolkit's functions a segment runs carry a label of their own
 is "the label goes on the aggregate's pg_proc row, which is its OID" \
-   "SELECT objoid = 'sum(int4)'::regprocedure::oid FROM pg_seclabel
-      WHERE provider = 'gp' AND classoid = 'pg_proc'::regclass;" "t"
+   "SELECT count(*) = 1 FROM pg_seclabel
+      WHERE provider = 'gp' AND classoid = 'pg_proc'::regclass
+        AND objoid = 'sum(int4)'::regprocedure::oid AND label = 'replicate_safe';" "t"
 
 is "a sibling aggregate is untouched" \
    "SELECT is_repsafe FROM gp_orca.aggregate_fact('sum(int8)'::regprocedure);" "f"

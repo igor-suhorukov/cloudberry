@@ -145,10 +145,13 @@
 #include "gp_cluster.h"
 #include "gp_core_api.h"
 #include "gp_dispatch.h"
+#include "gp_explain.h"
 #include "gp_fault.h"
 #include "gp_gdd.h"
 #include "gp_hash.h"
+#include "gp_metrics.h"
 #include "gp_ic.h"
+#include "gp_log.h"
 #include "gp_motion.h"
 #include "gp_policy.h"
 #include "gp_refresh.h"
@@ -1108,9 +1111,9 @@ motion_recv_next(MotionState *state)
 			StringInfoData buf;
 
 			initReadOnlyStringInfo(&buf, data, len);
-			slot->tts_values[i] = ReceiveFunctionCall(&state->inprocs[i], &buf,
-													  state->inparams[i],
-													  TupleDescAttr(tupdesc, i)->atttypmod);
+			slot->tts_values[i] = GpReceiveFunctionCall(&state->inprocs[i], &buf,
+														state->inparams[i],
+														TupleDescAttr(tupdesc, i)->atttypmod);
 		}
 		else
 			slot->tts_values[i] = InputFunctionCall(&state->inprocs[i], data,
@@ -1390,8 +1393,8 @@ motion_send_all(MotionState *state)
 				}
 				else if (state->send_binary)
 				{
-					bytea	   *b = SendFunctionCall(&state->outprocs[i],
-													 slot->tts_values[i]);
+					bytea	   *b = GpSendFunctionCall(&state->outprocs[i],
+													   slot->tts_values[i]);
 
 					values[i] = VARDATA(b);
 					lengths[i] = VARSIZE(b) - VARHDRSZ;
@@ -1519,9 +1522,9 @@ motion_decode_row(MotionState *state, const char *data, int len)
 			StringInfoData buf;
 
 			initReadOnlyStringInfo(&buf, value, vlen);
-			slot->tts_values[i] = ReceiveFunctionCall(&state->inprocs[i], &buf,
-													  state->inparams[i],
-													  TupleDescAttr(tupdesc, i)->atttypmod);
+			slot->tts_values[i] = GpReceiveFunctionCall(&state->inprocs[i], &buf,
+														state->inparams[i],
+														TupleDescAttr(tupdesc, i)->atttypmod);
 		}
 		else
 			slot->tts_values[i] = InputFunctionCall(&state->inprocs[i], value,
@@ -1895,9 +1898,13 @@ motion_begin(CustomScanState *node, EState *estate, int eflags)
 
 	/*
 	 * The fragment is the segments' to run.  Here it is only described: for
-	 * EXPLAIN, and for EXPLAIN ANALYZE, where it shows as never executed.
+	 * EXPLAIN, and for EXPLAIN ANALYZE, whose nodes the segments' figures
+	 * are given (gp_explain.c) -- not for a statement instrumented for query
+	 * metrics alone.
 	 */
-	if ((eflags & EXEC_FLAG_EXPLAIN_ONLY) || estate->es_instrument)
+	if ((eflags & EXEC_FLAG_EXPLAIN_ONLY) ||
+		(estate->es_instrument != 0 &&
+		 !(estate->es_instrument & GP_INSTR_METRICS_ONLY)))
 	{
 		outerPlanState(node) = ExecInitNode(outerPlan(cscan), estate,
 											eflags | EXEC_FLAG_EXPLAIN_ONLY);
@@ -2146,6 +2153,14 @@ fragment_sql_ex(EState *estate, Plan *fragment, CustomScan *motion,
 		frag->rowMarks = whole->rowMarks;
 	frag->extension_state = list_copy(marks);
 	frag->utilityStmt = NULL;
+
+	/* an explained statement's: what the segment measures it with */
+	{
+		DefElem    *explain = GpExplainFragmentMark(estate);
+
+		if (explain != NULL)
+			frag->extension_state = lappend(frag->extension_state, explain);
+	}
 
 	if (estate->es_sourceText != NULL)
 	{
@@ -2474,8 +2489,8 @@ motion_relay(MotionState *gather, CustomScan *motion, int to)
 				}
 				else if (binary)
 				{
-					bytea	   *b = SendFunctionCall(&outprocs[i],
-													 slot->tts_values[i]);
+					bytea	   *b = GpSendFunctionCall(&outprocs[i],
+													   slot->tts_values[i]);
 
 					values[i] = VARDATA(b);
 					lengths[i] = VARSIZE(b) - VARHDRSZ;
@@ -2969,11 +2984,11 @@ stream_start(MotionState *state)
 			char	   *sql;
 
 			sql = psprintf("BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY; "
-						   "SET LOCAL %s = %s; %s; COMMIT",
+						   "SET LOCAL %s = %s; %s; COMMIT%s",
 						   GP_SHARE_SETTING,
 						   quote_literal_cstr(psprintf("%d/%s", writer_pid[seg],
 													   sharekey)),
-						   fragment);
+						   fragment, GpLogStatementComment());
 			GpStreamStartReader(stream, ss->readers[i], sql);
 		}
 	}
@@ -3242,6 +3257,29 @@ motion_finish(MotionState *state)
 	state->gather = NULL;
 	stream_end(state);
 	state->done = true;
+}
+
+bool
+GpMotionIsSender(PlanState *ps)
+{
+	return IsA(ps, CustomScanState) &&
+		((CustomScanState *) ps)->methods == &motion_exec_methods &&
+		((MotionState *) ps)->sending;
+}
+
+/*
+ * EXPLAIN ANALYZE's end of the coordinator's Motion, which a LIMIT above it
+ * left open: its segments' parts end now, and say what they did, before
+ * the plan is printed rather than as the executor ends (gp_explain.c).
+ */
+bool
+GpMotionFinish(PlanState *ps)
+{
+	if (!IsA(ps, CustomScanState) ||
+		((CustomScanState *) ps)->methods != &motion_exec_methods)
+		return false;
+	motion_finish((MotionState *) ps);
+	return true;
 }
 
 /* binaryheap is a max-heap; the least row has to come out first. */
@@ -4057,6 +4095,12 @@ is_fragment(PlannedStmt *stmt)
 	return false;
 }
 
+bool
+GpMotionIsFragment(PlannedStmt *stmt)
+{
+	return is_fragment(stmt);
+}
+
 /*
  * The INFO line of each slice the statement dispatches, when
  * gp.test_print_direct_dispatch_info asks for them: read off the slice
@@ -4377,6 +4421,15 @@ motion_executor_start(QueryDesc *queryDesc, int eflags)
 
 	/* InitPlan()'s last fault, where its plan is set up */
 	(void) GP_FAULT("func_init_plan_end");
+
+	/*
+	 * Where Cloudberry's segment has its slice's snapshot and interconnect
+	 * (standard_ExecutorStart()): a fragment of the coordinator's plan, or
+	 * a gather's query, on a writer or a reader.
+	 */
+	if (GpClusterIsDispatched() &&
+		(is_fragment(queryDesc->plannedstmt) || gather_was_checked(queryDesc->sourceText)))
+		(void) GP_FAULT("qe_got_snapshot_and_interconnect");
 
 	if (params != NIL)
 		fragment_params_after_start(queryDesc, params);

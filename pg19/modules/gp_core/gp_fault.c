@@ -88,7 +88,12 @@ static const char *const fault_type_names[] = {
  * skips, the point giving its callback a bool to set -- and a commit's wait
  * for its standby, as it goes on and as a cancel comes.  And the start of a
  * simple query (exec_simple_query()), which a test fails the coordinator
- * at, the tests' build's too.
+ * at, the tests' build's too.  And three moments of a spill, which segspace
+ * and zlib interrupt or fail, the tests' build's as well: a hash join's move
+ * to its next batch (ExecHashJoinNewBatch()), a temporary file just made
+ * (BufFileCreateTemp()), and a write to one -- as its buffer is written out
+ * (BufFileDumpBuffer()), once a block, where Cloudberry's asks at each
+ * BufFileWrite().
  */
 static const struct
 {
@@ -104,6 +109,9 @@ static const struct
 	{"sync_rep_query_die", "sync-rep-query-die", false},
 	{"sync_rep_query_cancel", "sync-rep-query-cancel", false},
 	{"exec_simple_query_start", "exec-simple-query-start", false},
+	{"exec_hashjoin_new_batch", "exec-hashjoin-new-batch", false},
+	{"workfile_creation_failure", "workfile-creation-failure", false},
+	{"workfile_write_failure", "workfile-write-failure", false},
 };
 
 /* The injection point a fault is attached to: its own name, or PostgreSQL's. */

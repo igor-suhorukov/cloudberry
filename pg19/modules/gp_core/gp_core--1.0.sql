@@ -1485,10 +1485,11 @@ REVOKE ALL ON FUNCTION pg_catalog.gp_add_segment_primary(text, text, int4, text)
  * gp_toolkit, Cloudberry's (gpcontrib/gp_toolkit, gp_toolkit--1.3.sql and the
  * update scripts after it): its views and functions of what gp_core has what
  * they read.  Its append-optimized tables' are gp_ao's, beside gp_ao's own
- * functions there, and its resource managers' gp_resource's.  Not here: the
- * external tables of the servers' logs and the views over them, which read
- * Cloudberry's own log format; the workfile manager's views, whose manager
- * the port has not; and the checks for orphaned and missing files.
+ * functions there, and its resource managers' gp_resource's.  The servers'
+ * logs and the views over them, gp_disk_free, the checks for orphaned and
+ * missing files and the partitions' functions are at the end of this
+ * file, "gp_toolkit's rest", and the workfile manager's views after them,
+ * with gp_workfile.c's own.
  *****************************************************************************/
 
 /*
@@ -2013,3 +2014,811 @@ GRANT SELECT ON gp_toolkit.__gp_is_append_only, gp_toolkit.__gp_fullname,
 	gp_toolkit.gp_size_of_table_and_indexes_disk,
 	gp_toolkit.gp_size_of_schema_disk, gp_toolkit.gp_size_of_database
 	TO PUBLIC;
+
+/* ------------------------------------------------------------------------- */
+/* debug_dtm_action (gp_dtm_debug.c)                                         */
+/* ------------------------------------------------------------------------- */
+
+/*
+ * The error Cloudberry's segment raises for debug_dtm_action, which the
+ * coordinator sends the segment the settings name, for it to raise; and the
+ * one its PREPARE TRANSACTION or COMMIT is to fail with, as it prepares or
+ * commits.
+ */
+CREATE FUNCTION gp_internal.dtm_raise(action integer, message text)
+RETURNS void
+AS 'MODULE_PATHNAME', 'gp_dtm_raise'
+LANGUAGE C STRICT VOLATILE;
+
+CREATE FUNCTION gp_internal.dtm_fail_at_commit(message text)
+RETURNS void
+AS 'MODULE_PATHNAME', 'gp_dtm_fail_at_commit'
+LANGUAGE C STRICT VOLATILE;
+
+/******************************************************************************
+ * gp_toolkit's rest: the servers' logs and the views of them, gp_disk_free,
+ * the checks for orphaned and missing files, and the partitions' functions,
+ * as gp_toolkit--1.3.sql and the update scripts after it have them.  The
+ * segment files' history is gp_ao's, beside its __gp_aoseg().
+ *****************************************************************************/
+
+/*
+ * The servers' logs: the records of Cloudberry's own log, which gp_core
+ * writes beside PostgreSQL's (gp_log.c) -- where Cloudberry's external
+ * tables cat each node's CSV files, every segment's and the coordinator's.
+ * The superuser's alone, as Cloudberry's tables are: nothing is granted.
+ */
+CREATE FUNCTION gp_toolkit.__gp_log_segment_rows(
+	OUT logtime timestamptz, OUT loguser text, OUT logdatabase text,
+	OUT logpid text, OUT logthread text, OUT loghost text, OUT logport text,
+	OUT logsessiontime timestamptz, OUT logtransaction int4,
+	OUT logsession text, OUT logcmdcount text, OUT logsegment text,
+	OUT logslice text, OUT logdistxact text, OUT loglocalxact text,
+	OUT logsubxact text, OUT logseverity text, OUT logstate text,
+	OUT logmessage text, OUT logdetail text, OUT loghint text,
+	OUT logquery text, OUT logquerypos int4, OUT logcontext text,
+	OUT logdebug text, OUT logcursorpos int4, OUT logfunction text,
+	OUT logfile text, OUT logline int4, OUT logstack text)
+RETURNS SETOF record
+AS 'MODULE_PATHNAME', 'gp_log_segment_rows'
+LANGUAGE C VOLATILE;
+SECURITY LABEL FOR gp ON FUNCTION gp_toolkit.__gp_log_segment_rows() IS 'execute_on=all_segments';
+
+CREATE FUNCTION gp_toolkit.__gp_log_coordinator_rows(
+	OUT logtime timestamptz, OUT loguser text, OUT logdatabase text,
+	OUT logpid text, OUT logthread text, OUT loghost text, OUT logport text,
+	OUT logsessiontime timestamptz, OUT logtransaction int4,
+	OUT logsession text, OUT logcmdcount text, OUT logsegment text,
+	OUT logslice text, OUT logdistxact text, OUT loglocalxact text,
+	OUT logsubxact text, OUT logseverity text, OUT logstate text,
+	OUT logmessage text, OUT logdetail text, OUT loghint text,
+	OUT logquery text, OUT logquerypos int4, OUT logcontext text,
+	OUT logdebug text, OUT logcursorpos int4, OUT logfunction text,
+	OUT logfile text, OUT logline int4, OUT logstack text)
+RETURNS SETOF record
+AS 'MODULE_PATHNAME', 'gp_log_coordinator_rows'
+LANGUAGE C VOLATILE;
+
+REVOKE ALL ON FUNCTION gp_toolkit.__gp_log_segment_rows(),
+	gp_toolkit.__gp_log_coordinator_rows() FROM PUBLIC;
+
+CREATE VIEW gp_toolkit.__gp_log_segment_ext AS
+	SELECT * FROM gp_toolkit.__gp_log_segment_rows();
+
+CREATE VIEW gp_toolkit.__gp_log_coordinator_ext AS
+	SELECT * FROM gp_toolkit.__gp_log_coordinator_rows();
+
+CREATE VIEW gp_toolkit.__gp_log_master_ext AS
+	SELECT * FROM gp_toolkit.__gp_log_coordinator_ext;
+
+CREATE VIEW gp_toolkit.gp_log_system AS
+	SELECT * FROM gp_toolkit.__gp_log_segment_ext
+	UNION ALL
+	SELECT * FROM gp_toolkit.__gp_log_coordinator_ext
+	ORDER BY logtime;
+
+CREATE VIEW gp_toolkit.gp_log_database AS
+	SELECT * FROM gp_toolkit.gp_log_system
+	WHERE logdatabase = pg_catalog.current_database();
+
+CREATE VIEW gp_toolkit.gp_log_coordinator_concise AS
+	SELECT logtime, logdatabase, logsession, logcmdcount, logseverity, logmessage
+	FROM gp_toolkit.__gp_log_coordinator_ext;
+
+CREATE VIEW gp_toolkit.gp_log_master_concise AS
+	SELECT * FROM gp_toolkit.gp_log_coordinator_concise;
+
+/* Each command of the coordinator's log, and when its records began and ended. */
+CREATE VIEW gp_toolkit.gp_log_command_timings AS
+	SELECT logsession, logcmdcount, logdatabase, loguser, logpid,
+		   min(logtime) AS logtimemin, max(logtime) AS logtimemax,
+		   max(logtime) - min(logtime) AS logduration
+	FROM gp_toolkit.__gp_log_coordinator_ext
+	WHERE logsession IS NOT NULL AND logcmdcount IS NOT NULL
+	  AND logdatabase IS NOT NULL
+	GROUP BY 1, 2, 3, 4, 5;
+
+/*
+ * gp_disk_free: the space free for each segment's data directory, which
+ * the segment reads itself (gp_toolkit.c), where Cloudberry's external
+ * table runs df there through gppylib.  The superuser's, as Cloudberry's.
+ */
+CREATE FUNCTION gp_toolkit.__gp_disk_free_rows(OUT dfsegment int4,
+	OUT dfhostname text, OUT dfdevice text, OUT dfspace int8)
+RETURNS SETOF record
+AS 'MODULE_PATHNAME', 'gp_disk_free_rows'
+LANGUAGE C VOLATILE;
+SECURITY LABEL FOR gp ON FUNCTION gp_toolkit.__gp_disk_free_rows() IS 'execute_on=all_segments';
+REVOKE ALL ON FUNCTION gp_toolkit.__gp_disk_free_rows() FROM PUBLIC;
+
+CREATE VIEW gp_toolkit.gp_disk_free AS
+	SELECT * FROM gp_toolkit.__gp_disk_free_rows();
+
+/*
+ * The directory of a tablespace this version keeps its files in, which
+ * Cloudberry has built in; and adminpack's pg_file_rename(), likewise, the
+ * superuser's (gp_toolkit.c).
+ */
+CREATE FUNCTION pg_catalog.get_tablespace_version_directory_name()
+RETURNS text
+AS 'MODULE_PATHNAME', 'gp_tablespace_version_directory_name'
+LANGUAGE C IMMUTABLE;
+
+CREATE FUNCTION pg_catalog.pg_file_rename(text, text, text)
+RETURNS bool
+AS 'MODULE_PATHNAME', 'gp_file_rename'
+LANGUAGE C VOLATILE;
+REVOKE ALL ON FUNCTION pg_catalog.pg_file_rename(text, text, text) FROM PUBLIC;
+
+/*
+ * The checks for orphaned and missing files: the files each node's
+ * directories of the database hold, and the ones its catalog expects,
+ * Cloudberry's views.  A tablespace this database has no directory in has
+ * no files, where Cloudberry's pg_ls_dir() of it fails.  Those of the
+ * segment files of append-optimized tables are gp_ao's, beside its
+ * __gp_aoseg().
+ */
+CREATE VIEW gp_toolkit.__get_exist_files AS
+WITH Tablespaces AS (
+	-- the default tablespace
+	SELECT 0 AS tablespace, 'base/' || d.oid::text AS dirname
+	FROM pg_catalog.pg_database d
+	WHERE d.datname = pg_catalog.current_database()
+	UNION
+	-- the global tablespace
+	SELECT 1664 AS tablespace, 'global/' AS dirname
+	UNION
+	-- the user's tablespaces
+	SELECT ts.oid AS tablespace,
+		   'pg_tblspc/' || ts.oid::text || '/' ||
+		   pg_catalog.get_tablespace_version_directory_name() || '/' ||
+		   (SELECT d.oid::text FROM pg_catalog.pg_database d
+			WHERE d.datname = pg_catalog.current_database()) AS dirname
+	FROM pg_catalog.pg_tablespace ts
+	WHERE ts.oid > 1664
+)
+SELECT tablespace, files.filename, dirname || '/' || files.filename AS filepath
+FROM Tablespaces, pg_catalog.pg_ls_dir(dirname, true, false) AS files(filename);
+
+CREATE VIEW gp_toolkit.__get_expect_files AS
+SELECT s.reltablespace AS tablespace, s.relname, a.amname AS AM,
+	   (CASE WHEN s.relfilenode != 0 THEN s.relfilenode
+			 ELSE pg_catalog.pg_relation_filenode(s.oid) END)::text AS filename
+FROM pg_catalog.pg_class s
+LEFT JOIN pg_catalog.pg_am a ON s.relam = a.oid
+WHERE s.relkind != 'v';
+
+/*
+ * A file whose relfilenode no relation has; gp_segment_id is the node's
+ * that looked, as gp_toolkit 1.4 has it.
+ */
+CREATE VIEW gp_toolkit.__check_orphaned_files AS
+SELECT f1.tablespace, f1.filename, f1.filepath,
+	   pg_catalog.gp_execution_segment() AS gp_segment_id
+FROM gp_toolkit.__get_exist_files f1
+LEFT JOIN gp_toolkit.__get_expect_files f2
+ON f1.tablespace = f2.tablespace AND substring(f1.filename from '[0-9]+') = f2.filename
+WHERE f2.tablespace IS NULL
+  AND f1.filename SIMILAR TO '[0-9]+(\.)?(\_)?%';
+
+CREATE VIEW gp_toolkit.__check_missing_files AS
+SELECT f1.tablespace, f1.relname, f1.filename
+FROM gp_toolkit.__get_expect_files f1
+LEFT JOIN gp_toolkit.__get_exist_files f2
+ON f1.tablespace = f2.tablespace AND f1.filename = f2.filename
+WHERE f2.tablespace IS NULL
+  AND f1.filename SIMILAR TO '[0-9]+';
+
+/* Every segment's missing files and the coordinator's, as gp_dist_random() reads them. */
+CREATE VIEW gp_toolkit.gp_check_missing_files AS
+SELECT d.gp_segment_id, d.tablespace, d.relname, d.filename
+FROM gp.dist_random(NULL::gp_toolkit.__check_missing_files) d
+UNION ALL
+SELECT -1 AS gp_segment_id, *
+FROM gp_toolkit.__check_missing_files;
+
+GRANT SELECT ON gp_toolkit.__get_exist_files, gp_toolkit.__get_expect_files,
+	gp_toolkit.__check_orphaned_files, gp_toolkit.__check_missing_files,
+	gp_toolkit.gp_check_missing_files TO PUBLIC;
+
+/*
+ * A node's orphaned files, found with its pg_class locked and after a
+ * checkpoint, which has removed the files of the relations dropped before
+ * it -- and moved to target_location where one is given, each as
+ * seg<content id>_<its path, "/" as "_">.  Cloudberry's LOCK and
+ * CHECKPOINT reach every segment; the port's reach the node they run on,
+ * so each node runs this.
+ */
+CREATE FUNCTION gp_toolkit.__gp_orphaned_files_here(target_location text,
+	OUT gp_segment_id int4, OUT tablespace oid, OUT filename text,
+	OUT filepath text, OUT move_success bool, OUT oldpath text,
+	OUT newpath text)
+RETURNS SETOF record
+LANGUAGE plpgsql VOLATILE
+AS $$
+BEGIN
+	LOCK TABLE pg_catalog.pg_class IN SHARE MODE NOWAIT;
+	CHECKPOINT;
+	RETURN QUERY
+	SELECT o.gp_segment_id, o.tablespace, o.filename, o.filepath,
+		   CASE WHEN target_location IS NULL THEN NULL
+				ELSE pg_catalog.pg_file_rename(o.oldpath, o.newpath, NULL) END,
+		   o.oldpath, o.newpath
+	FROM (SELECT f.gp_segment_id, f.tablespace, f.filename, f.filepath,
+				 CASE WHEN target_location IS NULL THEN NULL
+					  ELSE pg_catalog.current_setting('data_directory') || '/' || f.filepath END AS oldpath,
+				 target_location || '/seg' || f.gp_segment_id::text || '_' ||
+				 pg_catalog.replace(f.filepath, '/', '_') AS newpath
+		  FROM gp_toolkit.__check_orphaned_files f
+		  ORDER BY f.filepath) o;
+END
+$$;
+
+/* And each segment's, run there. */
+CREATE FUNCTION gp_toolkit.__gp_orphaned_files_on_segments(target_location text,
+	OUT gp_segment_id int4, OUT tablespace oid, OUT filename text,
+	OUT filepath text, OUT move_success bool, OUT oldpath text,
+	OUT newpath text)
+RETURNS SETOF record
+LANGUAGE sql VOLATILE
+AS $$
+	SELECT * FROM gp_toolkit.__gp_orphaned_files_here($1)
+$$;
+SECURITY LABEL FOR gp ON FUNCTION gp_toolkit.__gp_orphaned_files_on_segments(text) IS 'execute_on=all_segments';
+
+REVOKE ALL ON FUNCTION gp_toolkit.__gp_orphaned_files_here(text),
+	gp_toolkit.__gp_orphaned_files_on_segments(text) FROM PUBLIC;
+
+/*
+ * The orphaned files of every node, gp_toolkit 1.5's: refused while another
+ * session is at work, whose files might not be in the catalog yet -- the
+ * port's gp.session_id is Cloudberry's gp_session_id.
+ */
+CREATE FUNCTION gp_toolkit.__gp_check_orphaned_files_func()
+RETURNS TABLE (
+	gp_segment_id int,
+	tablespace oid,
+	filename text,
+	filepath text
+)
+LANGUAGE plpgsql AS $$
+BEGIN
+	BEGIN
+		-- lock pg_class so that no one will be adding/altering relfilenodes
+		LOCK TABLE pg_catalog.pg_class IN SHARE MODE NOWAIT;
+
+		-- make sure no other active/idle transaction is running
+		IF EXISTS (
+			SELECT 1
+			FROM pg_catalog.gp_stat_activity
+			WHERE
+			sess_id <> -1 AND backend_type IN ('client backend', 'unknown process type') -- exclude background worker types
+			AND sess_id <> pg_catalog.current_setting('gp.session_id')::int -- Exclude the current session
+			AND state <> 'idle' -- Exclude idle session like GDD
+		) THEN
+			RAISE EXCEPTION 'There is a client session running on one or more segment. Aborting...';
+		END IF;
+
+		RETURN QUERY
+		SELECT v.gp_segment_id, v.tablespace, v.filename, v.filepath
+		FROM gp_toolkit.__gp_orphaned_files_on_segments(NULL) v
+		UNION ALL
+		SELECT -1 AS gp_segment_id, v.tablespace, v.filename, v.filepath
+		FROM gp_toolkit.__gp_orphaned_files_here(NULL) v;
+	EXCEPTION
+		WHEN lock_not_available THEN
+			RAISE EXCEPTION 'cannot obtain SHARE lock on pg_class';
+		WHEN OTHERS THEN
+			RAISE;
+	END;
+
+	RETURN;
+END;
+$$;
+GRANT EXECUTE ON FUNCTION gp_toolkit.__gp_check_orphaned_files_func() TO PUBLIC;
+
+CREATE VIEW gp_toolkit.gp_check_orphaned_files AS
+SELECT * FROM gp_toolkit.__gp_check_orphaned_files_func();
+
+GRANT SELECT ON gp_toolkit.gp_check_orphaned_files TO PUBLIC;
+
+/*
+ * Move every node's orphaned files to target_location, a directory of each
+ * node's host: gp_toolkit 1.5's, each node's path its data_directory's.
+ */
+CREATE FUNCTION gp_toolkit.gp_move_orphaned_files(target_location text)
+RETURNS TABLE (
+	gp_segment_id int,
+	move_success bool,
+	oldpath text,
+	newpath text
+)
+LANGUAGE plpgsql AS $$
+BEGIN
+	-- lock pg_class so that no one will be adding/altering relfilenodes
+	LOCK TABLE pg_catalog.pg_class IN SHARE MODE NOWAIT;
+
+	-- make sure no other active/idle transaction is running
+	IF EXISTS (
+		SELECT 1
+		FROM pg_catalog.gp_stat_activity
+		WHERE
+		sess_id <> -1 AND backend_type IN ('client backend', 'unknown process type') -- exclude background worker types
+		AND sess_id <> pg_catalog.current_setting('gp.session_id')::int -- Exclude the current session
+		AND state <> 'idle' -- Exclude idle session like GDD
+	) THEN
+		RAISE EXCEPTION 'There is a client session running on one or more segment. Aborting...';
+	END IF;
+
+	RETURN QUERY
+	SELECT q.gp_segment_id, q.move_success, q.oldpath, q.newpath
+	FROM (
+		SELECT h.gp_segment_id, h.move_success, h.oldpath, h.newpath
+		FROM gp_toolkit.__gp_orphaned_files_here(target_location) h
+		UNION ALL
+		SELECT s.gp_segment_id, s.move_success, s.oldpath, s.newpath
+		FROM gp_toolkit.__gp_orphaned_files_on_segments(target_location) s
+	) q
+	ORDER BY q.gp_segment_id, q.oldpath;
+EXCEPTION
+	WHEN lock_not_available THEN
+		RAISE EXCEPTION 'cannot obtain SHARE lock on pg_class';
+	WHEN OTHERS THEN
+		RAISE;
+END;
+$$;
+GRANT EXECUTE ON FUNCTION gp_toolkit.gp_move_orphaned_files(text) TO PUBLIC;
+
+/*
+ * The partitions' functions and gp_partitions, gp_toolkit 1.4's, over
+ * PostgreSQL's partitioning (gp_partmaint.c): a range partition's rank, its
+ * bounds, the lowest and highest of a table's, and every partition under a
+ * table with its level, strategy and rank -- as Cloudberry 6's
+ * pg_partitions had them.
+ */
+CREATE FUNCTION gp_toolkit.pg_partition_rank(rp regclass)
+RETURNS int
+AS 'MODULE_PATHNAME', 'gp_partition_rank'
+LANGUAGE C VOLATILE STRICT;
+
+CREATE FUNCTION gp_toolkit.pg_partition_bound_value(partrel regclass, bound_type text)
+RETURNS text
+LANGUAGE plpgsql
+AS $$
+DECLARE
+	v_relpartbound text;
+	v_bound_value text;
+	v_parent_table regclass;
+	v_nkeys int;
+BEGIN
+	-- Check if the given table is a non-default child partition
+	SELECT inhparent INTO v_parent_table
+	FROM pg_catalog.pg_inherits
+	WHERE inhrelid = partrel;
+
+	IF v_parent_table IS NULL THEN
+		RETURN NULL;
+	END IF;
+
+	-- Check if the parent table is partitioned by a single key
+	SELECT partnatts INTO v_nkeys
+	FROM pg_catalog.pg_partitioned_table
+	WHERE partrelid = v_parent_table;
+
+	IF v_nkeys IS NOT NULL AND v_nkeys != 1 THEN
+		RETURN NULL;
+	END IF;
+
+	-- Get the partition bounds
+	SELECT pg_catalog.pg_get_expr(relpartbound, oid) INTO v_relpartbound
+	FROM pg_catalog.pg_class
+	WHERE oid = partrel;
+
+	-- Parse the bound value from relpartbound
+	IF lower(bound_type) = 'from' THEN
+		SELECT (regexp_matches(v_relpartbound, 'FOR VALUES FROM \((.+)\) TO \((.+)\)'))[1] INTO v_bound_value;
+	ELSIF lower(bound_type) = 'to' THEN
+		SELECT (regexp_matches(v_relpartbound, 'FOR VALUES FROM \((.+)\) TO \((.+)\)'))[2] INTO v_bound_value;
+	ELSIF lower(bound_type) = 'in' THEN
+		SELECT (regexp_matches(v_relpartbound, 'FOR VALUES IN \((.+)\)'))[1] INTO v_bound_value;
+	ELSE
+		RAISE EXCEPTION 'Invalid bound type: %', bound_type;
+	END IF;
+
+	RETURN v_bound_value;
+END;
+$$;
+
+CREATE FUNCTION gp_toolkit.pg_partition_range_from(rp regclass)
+RETURNS text
+LANGUAGE sql
+AS $$
+	SELECT gp_toolkit.pg_partition_bound_value(rp, 'from');
+$$;
+
+CREATE FUNCTION gp_toolkit.pg_partition_range_to(rp regclass)
+RETURNS text
+LANGUAGE sql
+AS $$
+	SELECT gp_toolkit.pg_partition_bound_value(rp, 'to');
+$$;
+
+CREATE FUNCTION gp_toolkit.pg_partition_list_values(rp regclass)
+RETURNS text
+LANGUAGE sql
+AS $$
+	SELECT gp_toolkit.pg_partition_bound_value(rp, 'in'::text);
+$$;
+
+CREATE FUNCTION gp_toolkit.pg_partition_isdefault(relid regclass)
+RETURNS boolean
+LANGUAGE plpgsql
+AS $$
+DECLARE
+	boundspec text;
+BEGIN
+	-- Get the partition bound definition for the relation
+	SELECT pg_catalog.pg_get_expr(relpartbound, oid) INTO boundspec
+	FROM pg_catalog.pg_class
+	WHERE oid = relid;
+
+	-- If partition_def is null, the relation is not a partition at all
+	IF boundspec IS NULL THEN
+		RETURN FALSE;
+	END IF;
+
+	-- Check if the partition bound spec exactly matches 'DEFAULT'
+	RETURN boundspec = 'DEFAULT';
+END;
+$$;
+
+CREATE FUNCTION gp_toolkit.pg_partition_lowest_child(rp regclass)
+RETURNS regclass
+AS 'MODULE_PATHNAME', 'gp_partition_lowest_child'
+LANGUAGE C VOLATILE STRICT;
+
+CREATE FUNCTION gp_toolkit.pg_partition_highest_child(rp regclass)
+RETURNS regclass
+AS 'MODULE_PATHNAME', 'gp_partition_highest_child'
+LANGUAGE C VOLATILE STRICT;
+
+CREATE TYPE gp_toolkit.get_partition_result AS (
+	relid regclass,
+	parentid regclass,
+	isleaf bool,
+	partitionlevel int,
+	partitiontype text,
+	partitionrank int,
+	is_default bool
+);
+
+CREATE FUNCTION gp_toolkit.gp_get_partitions(rp regclass)
+RETURNS SETOF gp_toolkit.get_partition_result
+AS 'MODULE_PATHNAME', 'gp_get_partitions'
+LANGUAGE C VOLATILE STRICT;
+
+CREATE VIEW gp_toolkit.gp_partitions AS
+WITH default_ts(default_spcname) AS
+(SELECT s.spcname
+	FROM pg_catalog.pg_database, pg_catalog.pg_tablespace s
+	WHERE datname = pg_catalog.current_database() AND dattablespace = s.oid),
+partitions AS
+(SELECT p.*,
+		pg_catalog.pg_get_expr(pc.relpartbound, pc.oid) AS bound,
+		rns.nspname AS rootnamespacename,
+		pns.nspname AS partitionschemaname,
+		pc.relname AS partitiontablename,
+		coalesce(rt.spcname, default_spcname) AS parenttablespacename,
+		coalesce(pt.spcname, default_spcname) AS partitiontablespacename
+	FROM
+	(SELECT relnamespace,
+			relname AS roottablename,
+			(gp_toolkit.gp_get_partitions(oid)).*
+	 FROM pg_catalog.pg_class
+			WHERE relkind = 'p'
+			AND oid NOT IN (SELECT inhrelid FROM pg_catalog.pg_inherits)) p
+	 JOIN pg_catalog.pg_class pc ON p.relid = pc.oid
+	 JOIN pg_catalog.pg_class parentc ON parentc.oid = p.parentid
+	 LEFT JOIN pg_catalog.pg_namespace rns ON p.relnamespace = rns.oid
+	 LEFT JOIN pg_catalog.pg_namespace pns ON pc.relnamespace = pns.oid
+	 LEFT JOIN pg_catalog.pg_tablespace rt ON parentc.reltablespace = rt.oid
+	 LEFT JOIN pg_catalog.pg_tablespace pt ON pc.reltablespace = pt.oid
+	 JOIN default_ts ON 1=1)
+SELECT
+	rootnamespacename AS schemaname,
+	roottablename AS tablename,
+	partitionschemaname,
+	partitiontablename,
+	parentid::regclass AS parentpartitiontablename,
+	partitiontype,
+	partitionlevel,
+	partitionrank,
+	CASE
+		WHEN partitiontype = 'list'
+			THEN substring(bound FROM 'FOR VALUES IN \((.+)\)')
+		END AS partitionlistvalues,
+	CASE
+		WHEN partitiontype = 'range'
+			THEN substring(bound FROM 'FOR VALUES FROM \((.+)\) TO \((.+)\)')
+		END AS partitionrangestart,
+	CASE
+		WHEN partitiontype = 'range'
+			THEN substring(bound FROM 'TO \((.+)\)')
+		END AS partitionrangeend,
+	is_default AS partitionisdefault,
+	bound AS partitionboundary,
+	parenttablespacename AS parenttablespace,
+	partitiontablespacename AS partitiontablespace
+FROM partitions;
+
+GRANT SELECT ON gp_toolkit.gp_partitions TO PUBLIC;
+
+/* ------------------------------------------------------------------------- */
+/* gp_toolkit's views of the workfile manager (gp_workfile.c)                */
+/* ------------------------------------------------------------------------- */
+
+/*
+ * Each temporary file of the node the call runs on -- a file, or a FileSet's
+ * directory with its files -- as Cloudberry's gp_workfile_mgr_cache_entries()
+ * gives each workfile set of its manager (gp_internal_tools'
+ * gp_workfile_mgr.c): the node's content id, the file's name as its prefix,
+ * its size, the session of the process that made it and how many files it
+ * is; the operator, slice and command, which a file's name does not say,
+ * NULL.  And the bytes of them all, the node's.
+ */
+CREATE FUNCTION gp_toolkit.__gp_workfile_entries_here(OUT segid int4,
+	OUT prefix text, OUT size int8, OUT optype text, OUT slice int4,
+	OUT sessionid int4, OUT commandid int4, OUT numfiles int4)
+RETURNS SETOF record
+AS 'MODULE_PATHNAME', 'gp_workfile_entries'
+LANGUAGE C VOLATILE;
+
+CREATE FUNCTION gp_toolkit.__gp_workfile_mgr_used_diskspace_here(OUT segid int4,
+	OUT bytes int8)
+RETURNS SETOF record
+AS 'MODULE_PATHNAME', 'gp_workfile_used_diskspace'
+LANGUAGE C VOLATILE;
+
+/*
+ * Cloudberry's functions of the names its views call, on the coordinator
+ * and on every segment (EXECUTE ON ALL SEGMENTS, as a query of
+ * gp_dist_random('gp_id') alone runs there), and its views, with its text
+ * and grants (gp_toolkit--1.3.sql).
+ */
+CREATE FUNCTION gp_toolkit.__gp_workfile_entries_f_on_coordinator()
+RETURNS SETOF record
+LANGUAGE sql VOLATILE
+AS $$
+	SELECT * FROM gp_toolkit.__gp_workfile_entries_here()
+$$;
+
+GRANT EXECUTE ON FUNCTION gp_toolkit.__gp_workfile_entries_f_on_coordinator() TO public;
+
+/* prefer the *_coordinator function, but keep this for backwards compatibility */
+CREATE FUNCTION gp_toolkit.__gp_workfile_entries_f_on_master()
+RETURNS SETOF record
+LANGUAGE sql VOLATILE
+AS $$
+	SELECT * FROM gp_toolkit.__gp_workfile_entries_here()
+$$;
+
+GRANT EXECUTE ON FUNCTION gp_toolkit.__gp_workfile_entries_f_on_master() TO public;
+
+CREATE FUNCTION gp_toolkit.__gp_workfile_entries_f_on_segments()
+RETURNS SETOF record
+LANGUAGE plpgsql VOLATILE
+AS $$
+BEGIN
+	RETURN QUERY SELECT (gp_toolkit.__gp_workfile_entries_here()).* FROM gp_dist_random('gp_id');
+END
+$$;
+
+GRANT EXECUTE ON FUNCTION gp_toolkit.__gp_workfile_entries_f_on_segments() TO public;
+
+CREATE VIEW gp_toolkit.gp_workfile_entries AS
+WITH all_entries AS (
+    SELECT C.*
+        FROM gp_toolkit.__gp_workfile_entries_f_on_coordinator() AS C (
+           segid int,
+           prefix text,
+           size bigint,
+           optype text,
+           slice int,
+           sessionid int,
+           commandid int,
+           numfiles int
+        )
+    UNION ALL
+    SELECT C.*
+        FROM gp_toolkit.__gp_workfile_entries_f_on_segments() AS C (
+            segid int,
+            prefix text,
+            size bigint,
+            optype text,
+            slice int,
+            sessionid int,
+            commandid int,
+            numfiles int
+        ))
+SELECT S.datname,
+       S.pid,
+       C.sessionid as sess_id,
+       C.commandid as command_cnt,
+       S.usename,
+       S.query,
+       C.segid,
+       C.slice,
+       C.optype,
+       C.size,
+       C.numfiles,
+       C.prefix
+FROM all_entries C LEFT OUTER JOIN gp_stat_activity S
+ON C.sessionid = S.sess_id and C.segid=S.gp_segment_id;
+
+GRANT SELECT ON gp_toolkit.gp_workfile_entries TO public;
+
+CREATE VIEW gp_toolkit.gp_workfile_usage_per_segment AS
+SELECT gpseg.content AS segid, COALESCE(SUM(wfe.size),0) AS size,
+       SUM(wfe.numfiles) AS numfiles
+FROM (
+         SELECT content
+         FROM gp_segment_configuration
+         WHERE role = 'p') gpseg
+         LEFT JOIN gp_toolkit.gp_workfile_entries wfe
+                   ON (gpseg.content = wfe.segid)
+GROUP BY gpseg.content;
+
+GRANT SELECT ON gp_toolkit.gp_workfile_usage_per_segment TO public;
+
+CREATE VIEW gp_toolkit.gp_workfile_usage_per_query AS
+SELECT datname, pid, sess_id, command_cnt, usename, query, segid,
+       SUM(size) AS size, SUM(numfiles) AS numfiles
+FROM gp_toolkit.gp_workfile_entries
+GROUP BY datname, pid, sess_id, command_cnt, usename, query, segid;
+
+GRANT SELECT ON gp_toolkit.gp_workfile_usage_per_query TO public;
+
+CREATE FUNCTION gp_toolkit.__gp_workfile_mgr_used_diskspace_f_on_coordinator()
+RETURNS SETOF record
+LANGUAGE sql VOLATILE
+AS $$
+	SELECT * FROM gp_toolkit.__gp_workfile_mgr_used_diskspace_here()
+$$;
+
+GRANT EXECUTE ON FUNCTION gp_toolkit.__gp_workfile_mgr_used_diskspace_f_on_coordinator() TO public;
+
+/* prefer the *_coordinator function, but keep this for backwards compatibility */
+CREATE FUNCTION gp_toolkit.__gp_workfile_mgr_used_diskspace_f_on_master()
+RETURNS SETOF record
+LANGUAGE sql VOLATILE
+AS $$
+	SELECT * FROM gp_toolkit.__gp_workfile_mgr_used_diskspace_here()
+$$;
+
+GRANT EXECUTE ON FUNCTION gp_toolkit.__gp_workfile_mgr_used_diskspace_f_on_master() TO public;
+
+CREATE FUNCTION gp_toolkit.__gp_workfile_mgr_used_diskspace_f_on_segments()
+RETURNS SETOF record
+LANGUAGE plpgsql VOLATILE
+AS $$
+BEGIN
+	RETURN QUERY SELECT (gp_toolkit.__gp_workfile_mgr_used_diskspace_here()).* FROM gp_dist_random('gp_id');
+END
+$$;
+
+GRANT EXECUTE ON FUNCTION gp_toolkit.__gp_workfile_mgr_used_diskspace_f_on_segments() TO public;
+
+CREATE VIEW gp_toolkit.gp_workfile_mgr_used_diskspace AS
+  SELECT C.*
+	FROM gp_toolkit.__gp_workfile_mgr_used_diskspace_f_on_coordinator() as C (
+	  segid int,
+	  bytes bigint
+	)
+  UNION ALL
+  SELECT C.*
+	FROM gp_toolkit.__gp_workfile_mgr_used_diskspace_f_on_segments() as C (
+	  segid int,
+	  bytes bigint
+	)
+ORDER BY segid;
+
+GRANT SELECT ON gp_toolkit.gp_workfile_mgr_used_diskspace TO public;
+
+/* ------------------------------------------------------------------------- */
+/* ANALYZE of a partitioned table                                            */
+/* ------------------------------------------------------------------------- */
+
+/*
+ * A segment's sample of a table and every table under it, as one sample of
+ * the table's rows, for ANALYZE of the tree on the coordinator -- what
+ * Cloudberry's gp_acquire_sample_rows(t, n, 't') samples (gp_analyze.c).
+ * The rows come as sample_rows()'s do, each member's as a row of the
+ * table's own type; the caller may read or ANALYZE the table, as there.
+ */
+CREATE FUNCTION gp_internal.sample_tree(
+	rel anyelement,
+	targrows int,
+	OUT totalrows float8,
+	OUT totaldeadrows float8,
+	OUT sample anyelement)
+RETURNS SETOF record
+AS 'MODULE_PATHNAME', 'gp_sample_tree'
+LANGUAGE C;
+
+/*
+ * Cloudberry's HyperLogLog counter, which ANALYZE keeps of a leaf's column
+ * so that the root's number of distinct values can be merged from its
+ * leaves', and the aggregate ANALYZE FULLSCAN counts a leaf's column with
+ * (gp_hll.c).  In pg_catalog under Cloudberry's names, where Cloudberry's
+ * catalog has them.  Like Cloudberry's, it travels as text: base 64, no
+ * binary form.
+ */
+CREATE TYPE pg_catalog.gp_hyperloglog_estimator;
+
+CREATE FUNCTION pg_catalog.gp_hyperloglog_in(value cstring)
+RETURNS pg_catalog.gp_hyperloglog_estimator
+AS 'MODULE_PATHNAME', 'gp_hyperloglog_in'
+LANGUAGE C IMMUTABLE STRICT;
+
+CREATE FUNCTION pg_catalog.gp_hyperloglog_out(counter pg_catalog.gp_hyperloglog_estimator)
+RETURNS cstring
+AS 'MODULE_PATHNAME', 'gp_hyperloglog_out'
+LANGUAGE C IMMUTABLE STRICT;
+
+CREATE TYPE pg_catalog.gp_hyperloglog_estimator (
+	INPUT = pg_catalog.gp_hyperloglog_in,
+	OUTPUT = pg_catalog.gp_hyperloglog_out,
+	INTERNALLENGTH = VARIABLE,
+	ALIGNMENT = int4,
+	STORAGE = extended,
+	CATEGORY = 'X');
+
+COMMENT ON TYPE pg_catalog.gp_hyperloglog_estimator IS
+	'gp_hyperloglog_estimator''s internal bytea representation for hyperloglog counter';
+
+CREATE FUNCTION pg_catalog.gp_hyperloglog_comp(counter pg_catalog.gp_hyperloglog_estimator)
+RETURNS pg_catalog.gp_hyperloglog_estimator
+AS 'MODULE_PATHNAME', 'gp_hyperloglog_comp'
+LANGUAGE C IMMUTABLE STRICT;
+
+CREATE FUNCTION pg_catalog.gp_hyperloglog_merge(
+	estimator1 pg_catalog.gp_hyperloglog_estimator,
+	estimator2 pg_catalog.gp_hyperloglog_estimator)
+RETURNS pg_catalog.gp_hyperloglog_estimator
+AS 'MODULE_PATHNAME', 'gp_hyperloglog_merge'
+LANGUAGE C IMMUTABLE;
+
+CREATE FUNCTION pg_catalog.gp_hyperloglog_get_estimate(counter pg_catalog.gp_hyperloglog_estimator)
+RETURNS float8
+AS 'MODULE_PATHNAME', 'gp_hyperloglog_get_estimate'
+LANGUAGE C IMMUTABLE STRICT;
+
+CREATE FUNCTION pg_catalog.gp_hyperloglog_add_item_agg_default(
+	counter pg_catalog.gp_hyperloglog_estimator, item anyelement)
+RETURNS pg_catalog.gp_hyperloglog_estimator
+AS 'MODULE_PATHNAME', 'gp_hyperloglog_add_item_agg_default'
+LANGUAGE C IMMUTABLE;
+
+CREATE AGGREGATE pg_catalog.gp_hyperloglog_accum(anyelement) (
+	SFUNC = pg_catalog.gp_hyperloglog_add_item_agg_default,
+	STYPE = pg_catalog.gp_hyperloglog_estimator,
+	FINALFUNC = pg_catalog.gp_hyperloglog_comp,
+	COMBINEFUNC = pg_catalog.gp_hyperloglog_merge);
+
+/*
+ * A leaf partition's HyperLogLog counter of each column ANALYZE took, which
+ * its root's number of distinct values is merged from (gp_partmerge.c).
+ * Cloudberry keeps it in the last slot of the leaf's pg_statistic row,
+ * under kinds 98 and 99, which are in PostgreSQL's range of kinds; here it
+ * goes with that row by the row's xmin, and one whose row has been replaced
+ * since is not read.  Only gp_core reads and writes it.
+ */
+CREATE TABLE gp_internal.leaf_hll (
+	starelid oid NOT NULL,
+	staattnum int2 NOT NULL,
+	staxmin xid NOT NULL,
+	fullscan bool NOT NULL,
+	counter bytea NOT NULL
+);
+CREATE INDEX leaf_hll_attnum ON gp_internal.leaf_hll (starelid, staattnum);
+REVOKE ALL ON gp_internal.leaf_hll FROM PUBLIC;

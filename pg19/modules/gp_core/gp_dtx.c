@@ -124,6 +124,7 @@
 #include "access/twophase.h"
 #include "access/xact.h"
 #include "access/xlog.h"
+#include "catalog/index.h"
 #include "catalog/indexing.h"
 #include "catalog/namespace.h"
 #include "catalog/objectaccess.h"
@@ -165,6 +166,7 @@
 #include "utils/memutils.h"
 #include "utils/rel.h"
 #include "utils/snapmgr.h"
+#include "utils/syscache.h"
 #include "utils/timestamp.h"
 #include "utils/varlena.h"
 #include "utils/wait_event.h"
@@ -983,8 +985,10 @@ map_load_database(void)
 				Datum	   *elems;
 				int			n;
 
-				deconstruct_array_builtin(DatumGetArrayTypeP(children), XIDOID,
-										  &elems, NULL, &n);
+				/* not deconstruct_array_builtin(), which knows no xid */
+				deconstruct_array(DatumGetArrayTypeP(children), XIDOID,
+								  sizeof(TransactionId), true, TYPALIGN_INT,
+								  &elems, NULL, &n);
 				p->children = palloc_array(TransactionId, Max(n, 1));
 				for (int i = 0; i < n; i++)
 					p->children[i] = DatumGetTransactionId(elems[i]);
@@ -1918,6 +1922,32 @@ dtx_check_gid_reserved(const char *gid)
 						 GP_DTX_GID_PREFIX)));
 }
 
+/* Does this REINDEX TABLE or INDEX rebuild an index of a mapped table? */
+static bool
+reindex_of_mapped_table(ReindexStmt *stmt)
+{
+	Oid			relid;
+	HeapTuple	tuple;
+	bool		mapped;
+
+	if ((stmt->kind != REINDEX_OBJECT_TABLE && stmt->kind != REINDEX_OBJECT_INDEX) ||
+		stmt->relation == NULL)
+		return false;
+	relid = RangeVarGetRelid(stmt->relation, NoLock, true);
+	if (OidIsValid(relid) && stmt->kind == REINDEX_OBJECT_INDEX)
+		relid = IndexGetRelation(relid, true);
+	if (!OidIsValid(relid))
+		return false;
+	tuple = SearchSysCache1(RELOID, ObjectIdGetDatum(relid));
+	if (!HeapTupleIsValid(tuple))
+		return false;
+	/* a mapped relation's pg_class row has no file number of its own */
+	mapped = ((Form_pg_class) GETSTRUCT(tuple))->relfilenode == InvalidOid &&
+		RELKIND_HAS_STORAGE(((Form_pg_class) GETSTRUCT(tuple))->relkind);
+	ReleaseSysCache(tuple);
+	return mapped;
+}
+
 static void
 dtx_ProcessUtility(PlannedStmt *pstmt, const char *queryString,
 				   bool readOnlyTree, ProcessUtilityContext context,
@@ -1957,6 +1987,17 @@ dtx_ProcessUtility(PlannedStmt *pstmt, const char *queryString,
 				 errmsg("PREPARE TRANSACTION is not yet supported in Apache Cloudberry") :
 				 errmsg("PREPARE TRANSACTION is not supported in utility mode")));
 	}
+
+	/*
+	 * REINDEX of a mapped catalog table -- pg_class, say -- in a transaction
+	 * block: its parts on the segments change relation mappings, which
+	 * PREPARE TRANSACTION cannot take, so the commit would fail; refused now,
+	 * in Cloudberry's words (reindex_index(), catalog/index.c).
+	 */
+	if (IsA(parsetree, ReindexStmt) &&
+		GpClusterBackendRole() == GP_ROLE_DISPATCH &&
+		reindex_of_mapped_table((ReindexStmt *) parsetree))
+		PreventInTransactionBlock(true, "REINDEX of a catalog table");
 
 	if (IsA(parsetree, TransactionStmt))
 	{

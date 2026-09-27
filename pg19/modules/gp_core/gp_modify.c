@@ -77,6 +77,7 @@
 #include "catalog/pg_class.h"
 #include "catalog/pg_inherits.h"
 #include "catalog/pg_proc.h"
+#include "catalog/pg_trigger.h"
 #include "catalog/pg_type.h"
 #include "commands/copy.h"
 #include "commands/copyfrom_internal.h"
@@ -396,7 +397,7 @@ router_encode(GpRouter *r, TupleTableSlot *slot, StringInfo buf)
 				pq_sendint32(buf, -1);
 			else
 			{
-				bytea	   *out = SendFunctionCall(&r->out[i], slot->tts_values[i]);
+				bytea	   *out = GpSendFunctionCall(&r->out[i], slot->tts_values[i]);
 
 				pq_sendint32(buf, VARSIZE(out) - VARHDRSZ);
 				appendBinaryStringInfo(buf, VARDATA(out), VARSIZE(out) - VARHDRSZ);
@@ -1463,16 +1464,22 @@ gp_modify_planner_routed(Query *parse, const char *query_string, int cursorOptio
 		/*
 		 * The segments fire the row triggers, each for its own rows, as
 		 * Cloudberry's do.  A statement trigger has no segment to be fired
-		 * on once, and firing it on each would fire it once per segment.
+		 * on once, and firing it on each would fire it once per segment --
+		 * but for an internal one, gp_matview's, which keeps each segment's
+		 * rows for the coordinator's maintenance of an incremental view.
 		 */
 		rel = table_open(rte->relid, NoLock);
-		if (rel->trigdesc != NULL &&
-			(rel->trigdesc->trig_insert_before_statement ||
-			 rel->trigdesc->trig_insert_after_statement))
-			ereport(ERROR,
-					(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
-					 errmsg("statement-level triggers on distributed table \"%s\" are not supported",
-							RelationGetRelationName(rel))));
+		for (int i = 0; rel->trigdesc != NULL && i < rel->trigdesc->numtriggers; i++)
+		{
+			Trigger    *trig = &rel->trigdesc->triggers[i];
+
+			if (!trig->tgisinternal && !TRIGGER_FOR_ROW(trig->tgtype) &&
+				TRIGGER_FOR_INSERT(trig->tgtype))
+				ereport(ERROR,
+						(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+						 errmsg("statement-level triggers on distributed table \"%s\" are not supported",
+								RelationGetRelationName(rel))));
+		}
 		table_close(rel, NoLock);
 
 		cscan = make_custom_scan(&mt->plan, &insert_scan_methods);

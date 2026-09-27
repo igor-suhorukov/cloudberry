@@ -122,11 +122,13 @@
 #include "gp_cluster.h"
 #include "gp_core_api.h"
 #include "gp_dispatch.h"
+#include "gp_dtm_debug.h"
 #include "gp_dtx.h"
 #include "gp_fault.h"
 #include "gp_fts.h"
 #include "gp_grammar_int.h"
 #include "gp_label.h"
+#include "gp_log.h"
 #include "gp_loopback.h"
 #include "gp_motion.h"
 #include "gp_settings.h"
@@ -201,6 +203,14 @@ static const char *const synced_settings[] = {
 	"postgis.enable_outdb_rasters",
 	"postgis.gdal_cpl_debug",
 	"postgis.gdal_vsi_options",
+	/*
+	 * what a segment logs, as Cloudberry's segments take it from the
+	 * coordinator: which messages, and a statement with them, and each
+	 * statement's time -- settings only a superuser sets, likewise
+	 */
+	"log_min_messages",
+	"log_min_error_statement",
+	"log_min_duration_statement",
 	"search_path",
 	"role",
 	"DateStyle",
@@ -229,6 +239,8 @@ static const char *const synced_settings[] = {
 	"gp.select_invisible",
 	"gp.appendonly_compaction",
 	"gp.appendonly_compaction_threshold",
+	"gp.appendonly_insert_files",
+	"gp.appendonly_insert_files_tuples_range",
 	/*
 	 * gp_exttable's, which a segment's scan of an external table reads: the
 	 * statement's name and text, for gpfdist and a command's environment, and
@@ -244,6 +256,10 @@ static const char *const synced_settings[] = {
 	"gp.gpfdist_retry_timeout",
 	"gp.writable_external_table_bufsize",
 	"gp.verify_gpfdists_cert",
+	/* the statement's count, which the slots of query metrics carry */
+	"gp.command_count",
+	/* what EXPLAIN ANALYZE asks a segment to measure (gp_explain.c) */
+	"gp.explain_instrument",
 	/* the UDP interconnect's, which the segments' senders and receivers use */
 	"gp.interconnect_queue_depth",
 	"gp.max_packet_size",
@@ -281,6 +297,15 @@ static const char *const synced_settings[] = {
 	"pax.default_storage_format",
 	"pax.bloom_filter_work_memory_bytes",
 	"pax.log_filter_tree",
+	/*
+	 * the workfile manager's limits of a statement, which a segment's
+	 * processes hold their temporary files to (gp_workfile.c)
+	 */
+	"gp.workfile_limit_per_query",
+	"gp.workfile_limit_files_per_query",
+	/* the runtime filters of a segment's hash joins (gp_rtfilter.c) */
+	"gp.enable_runtime_filter",
+	"gp.enable_runtime_filter_pushdown",
 };
 
 #define NUM_SYNCED_SETTINGS	lengthof(synced_settings)
@@ -291,21 +316,61 @@ static const char *const superuser_settings[] = {
 	"postgis.gdal_enabled_drivers",
 	"postgis.enable_outdb_rasters",
 	"postgis.gdal_cpl_debug",
+	"log_min_messages",
+	"log_min_error_statement",
+	"log_min_duration_statement",
 };
 
 /*
  * A setting's value, to be sent -- or NULL, for one not defined here or one
  * the session user may not set, which its segments take from the cluster's
- * configuration, as the coordinator took it.
+ * configuration, as the coordinator took it.  A copy: GetConfigOption()
+ * writes a number in a buffer of its own, which the next one overwrites.
  */
 static const char *
 sync_value(int i)
 {
+	const char *value;
+
 	for (int j = 0; j < lengthof(superuser_settings); j++)
 		if (strcmp(synced_settings[i], superuser_settings[j]) == 0 &&
 			!superuser_arg(GetSessionUserId()))
 			return NULL;
-	return GetConfigOption(synced_settings[i], true, false);
+	value = GetConfigOption(synced_settings[i], true, false);
+	return value != NULL ? pstrdup(value) : NULL;
+}
+
+/*
+ * A setting only a superuser sets, about to be sent to a segment whose role
+ * may be one the session set, which may be no superuser -- it was told one,
+ * or what it was told was forgotten: the role reset first, and sent again
+ * after it, "role" coming after every such setting in synced_settings[].
+ * "sent" is what the segment was told; "reset", that it was reset already.
+ */
+static void
+sync_reset_role(StringInfo sql, char **sent, int i, bool *any, bool *reset)
+{
+	static int	role = -1;
+
+	if (role < 0)
+		for (int j = 0; j < NUM_SYNCED_SETTINGS; j++)
+			if (strcmp(synced_settings[j], "role") == 0)
+				role = j;
+	if (*reset || i > role ||
+		(sent[role] != NULL && strcmp(sent[role], "none") == 0))
+		return;
+	for (int j = 0; j < lengthof(superuser_settings); j++)
+		if (strcmp(synced_settings[i], superuser_settings[j]) == 0)
+		{
+			appendStringInfo(sql, "%spg_catalog.set_config('role', 'none', false)",
+							 *any ? ", " : "");
+			*any = true;
+			*reset = true;
+			if (sent[role] != NULL)
+				pfree(sent[role]);
+			sent[role] = NULL;
+			return;
+		}
 }
 
 /*
@@ -466,6 +531,8 @@ static List *active_streams = NIL;
 #define MAX_READERS_PER_SEGMENT	GP_MAX_READERS_PER_SEGMENT
 
 static void gang_close(void);
+static void gang_drain_keeping(List **errors);
+static void forget_kept_errors(void);
 static void gang_build_wes(GpGang *g);
 static void segment_notice_receiver(void *arg, const struct pg_result *res);
 static void last_word_forget(const PGconn *conn);
@@ -521,6 +588,7 @@ gang_close(void)
 
 	GANG_LOG(GANG_LOG_TERSE, "gang of %d segments closed%s", gang->nconns,
 			 gang_in_xact ? ", with a transaction open on it" : "");
+	GpDtmDebugGangClosed();
 	if (gang_in_xact)
 		gang_xact_lost = true;
 	gang_in_xact = false;
@@ -561,6 +629,44 @@ void
 GpDispatchResetGang(void)
 {
 	gang_close();
+}
+
+/*
+ * The gang let go of to retry a part's second phase over a new connection,
+ * as Cloudberry's coordinator releases its gangs to retry a broadcast
+ * (ResetAllGangs()): the segments' backends end, and this session's
+ * temporary tables there with them, which Cloudberry then drops on the
+ * coordinator too, saying so (resetSessionForPrimaryGangLoss(), cdbgang.c)
+ * -- here as the next statement begins (GpDispatchDropLostTempTables()).
+ */
+static bool temp_tables_lost = false;	/* to be dropped on the coordinator */
+static bool temp_tables_dropped = false;	/* by this transaction */
+
+static void
+gang_release_for_retry(void)
+{
+	Oid			temp_namespace;
+	Oid			temp_toast_namespace;
+
+	gang_close();
+	GetTempNamespaceState(&temp_namespace, &temp_toast_namespace);
+	if (OidIsValid(temp_namespace))
+	{
+		ereport(WARNING,
+				(errmsg("Any temporary tables for this session have been dropped because the gang was disconnected (session id = %d)",
+						GpClusterSessionId())));
+		temp_tables_lost = true;
+	}
+}
+
+void
+GpDispatchDropLostTempTables(void)
+{
+	if (!temp_tables_lost || temp_tables_dropped || !IsTransactionState())
+		return;
+	/* as DISCARD TEMP drops them; again, should the transaction roll back */
+	ResetTempTableNamespace();
+	temp_tables_dropped = true;
 }
 
 /*
@@ -757,6 +863,7 @@ gang_connect(void)
 	}
 
 	gang_build_wes(gang);
+	GpDtmDebugGangMade();
 	GANG_LOG(GANG_LOG_TERSE, "gang of %d segments made for database \"%s\", user \"%s\"",
 			 nsegs, dbname, username);
 }
@@ -910,9 +1017,10 @@ static LastWord *last_words = NULL;
 /*
  * A module's filters of what the segments say: a NOTICE it raises there to
  * tell the coordinator something -- gp_exttable's count of the rows a scan
- * rejected -- which the filter takes, and the client never sees.  Called in
- * libpq's notice callback: a filter raises nothing, and allocates nothing
- * it keeps.
+ * rejected -- or an INFO, which no client_min_messages holds back --
+ * EXPLAIN ANALYZE's statistics (gp_explain.c) -- which the filter takes,
+ * and the client never sees.  Called in libpq's notice callback: a filter
+ * raises nothing, and pallocs nothing.
  */
 #define MAX_NOTICE_FILTERS	8
 static GpNoticeFilter notice_filters[MAX_NOTICE_FILTERS];
@@ -1361,6 +1469,64 @@ gang_send_all(GpGang *g, const char *sql)
 {
 	for (int i = 0; i < g->nconns; i++)
 		conn_send(&g->conns[i], sql);
+}
+
+/*
+ * The connection a fail_end_command of the command just sent names, and the
+ * error it is then to raise, once the command is answered (gang_dtm_end()).
+ */
+static int	dtm_end_conn = -1;
+static char *dtm_end_raise = NULL;
+
+static void gang_wait_all(GpGang *g, PGresult **keep, bool commit);
+
+/*
+ * Send a command to every segment, as gang_send_all() does -- but to one
+ * Cloudberry's debug_dtm_action names at it (gp_dtm_debug.c), the error
+ * Cloudberry's segment raises there: instead of the command, where it fails
+ * as it begins it, or after it, where it fails as it ends it.  A protocol
+ * command, or with GP_DTX_NONE a SQL command of the tag; "level" is the
+ * nesting level Cloudberry sends a subtransaction's command with.
+ */
+static void
+gang_send_all_dtm(GpGang *g, const char *sql, GpDtxCommand command,
+				  const char *tag, int level)
+{
+	dtm_end_conn = -1;
+	for (int i = 0; i < g->nconns; i++)
+	{
+		GpSegmentConn *c = &g->conns[i];
+		char	   *msg;
+		int			action = command != GP_DTX_NONE ?
+			GpDtmDebugProtocol(command, c->content, level, &msg) :
+			GpDtmDebugSql(tag, c->content, &msg);
+
+		if (action == GP_DTM_ACTION_FAIL_BEGIN ||
+			action == GP_DTM_ACTION_PANIC_BEGIN)
+			conn_send(c, GpDtmDebugRaiseStatement(action, msg));
+		else
+		{
+			conn_send(c, sql);
+			if (action == GP_DTM_ACTION_FAIL_END)
+			{
+				dtm_end_conn = i;
+				dtm_end_raise = GpDtmDebugRaiseStatement(action, msg);
+			}
+		}
+	}
+}
+
+/* A fail_end_command's error, once the command it follows is answered. */
+static void
+gang_dtm_end(GpGang *g)
+{
+	int			i = dtm_end_conn;
+
+	dtm_end_conn = -1;
+	if (i < 0 || g != gang)
+		return;
+	conn_send(&g->conns[i], dtm_end_raise);
+	gang_wait_all(g, NULL, false);
 }
 
 /*
@@ -1818,6 +1984,16 @@ gang_wait_all_counting(GpGang *g, uint64 *counts, int content, int nsegments)
 static void
 gang_drain_quietly(void)
 {
+	gang_drain_keeping(NULL);
+}
+
+/*
+ * As gang_drain_quietly(), keeping the segments' errors in *errors where it
+ * is given.
+ */
+static void
+gang_drain_keeping(List **errors)
+{
 	GpGang	   *g = gang;
 
 	if (g == NULL)
@@ -1847,6 +2023,8 @@ gang_drain_quietly(void)
 					c->busy = false;
 					break;
 				}
+				if (errors != NULL && PQresultStatus(res) == PGRES_FATAL_ERROR)
+					collect_error(errors, c->content, res, c->conn, NULL);
 				PQclear(res);
 			}
 
@@ -2193,6 +2371,7 @@ reader_sync_settings(GpReaderConn *r)
 	StringInfoData sql;
 	const char *values[NUM_SYNCED_SETTINGS];
 	bool		any = false;
+	bool		reset = false;
 
 	run_sync_callbacks();
 	initStringInfo(&sql);
@@ -2203,6 +2382,7 @@ reader_sync_settings(GpReaderConn *r)
 		if (values[i] == NULL ||
 			(r->sent[i] != NULL && strcmp(r->sent[i], values[i]) == 0))
 			continue;
+		sync_reset_role(&sql, r->sent, i, &any, &reset);
 		appendStringInfo(&sql, "%spg_catalog.set_config(%s, %s, false)",
 						 any ? ", " : "",
 						 quote_literal_cstr(synced_settings[i]),
@@ -2371,6 +2551,7 @@ gang_sync_settings(GpGang *g)
 	StringInfoData sql;
 	const char *values[NUM_SYNCED_SETTINGS];
 	bool		any = false;
+	bool		reset = false;
 
 	run_sync_callbacks();
 	initStringInfo(&sql);
@@ -2384,6 +2565,7 @@ gang_sync_settings(GpGang *g)
 		if (g->sent[i] != NULL && strcmp(g->sent[i], values[i]) == 0)
 			continue;
 
+		sync_reset_role(&sql, g->sent, i, &any, &reset);
 		appendStringInfo(&sql, "%spg_catalog.set_config(%s, %s, false)",
 						 any ? ", " : "",
 						 quote_literal_cstr(synced_settings[i]),
@@ -2566,6 +2748,30 @@ gang_sync_snapshot(GpGang *g)
 }
 
 /*
+ * The segments' next level of subtransaction, SAVEPOINT gp_sp_N: sent as
+ * Cloudberry sends a user's SAVEPOINT -- SQL, whose tag debug_dtm_action's
+ * SQL target names -- or the subtransaction a function's block begins -- a
+ * protocol command, with the level it begins at (gp_dtm_debug.c).
+ */
+static void
+gang_send_savepoint(GpGang *g, bool user)
+{
+	int			next = gang_xact_depth + 1;
+	char	   *sql = psprintf("SAVEPOINT gp_sp_%d", next);
+
+	notices_quiet++;
+	if (user)
+		gang_send_all_dtm(g, sql, GP_DTX_NONE, "SAVEPOINT", 0);
+	else
+		gang_send_all_dtm(g, sql, GP_DTX_SUBTRANSACTION_BEGIN, NULL,
+						  gang_xact_depth);
+	gang_wait_all(g, NULL, false);
+	gang_dtm_end(g);
+	notices_quiet--;
+	gang_xact_depth = next;
+}
+
+/*
  * Get the segments ready for a statement: the settings it depends on, and --
  * unless it is one that runs in a transaction of its own -- the coordinator's
  * transaction, down to the savepoint it is being run in, and its snapshot.
@@ -2575,6 +2781,7 @@ gang_prepare(GpGang *g, bool in_xact)
 {
 	int			level;
 
+	GpDispatchRaiseKeptError();
 	gang_sync_settings(g);
 
 	if (!in_xact)
@@ -2601,16 +2808,47 @@ gang_prepare(GpGang *g, bool in_xact)
 
 	level = GetCurrentTransactionNestLevel();
 	while (gang_xact_depth < level)
-	{
-		notices_quiet++;
-		gang_send_all(g, psprintf("SAVEPOINT gp_sp_%d", gang_xact_depth + 1));
-		gang_wait_all(g, NULL, false);
-		notices_quiet--;
-		gang_xact_depth++;
-	}
+		gang_send_savepoint(g, GpDtmDebugLevelIsUser(gang_xact_depth + 1));
 
 	gang_sync_snapshot(g);
 	gang_sync_labels(g);
+}
+
+/*
+ * A user's SAVEPOINT, or ROLLBACK TO, sent as it runs, as Cloudberry sends
+ * it, where the port sends a savepoint with the next statement and rolls it
+ * back as the coordinator's rolls back: debug_dtm_action's SQL target asks
+ * for its failure at the statement (gp_dtm_debug.c).  The segments'
+ * transaction is begun if it is not, and the levels not sent yet are sent
+ * first.  "level" is the savepoint's.
+ */
+void
+GpDispatchSavepointNow(int level)
+{
+	GpGang	   *g = gang_get();
+
+	gang_prepare(g, true);
+	if (gang_xact_depth == level - 1)
+		gang_send_savepoint(g, true);
+}
+
+void
+GpDispatchRollbackToNow(int level)
+{
+	if (gang == NULL || !gang_in_xact || gang_xact_depth < level)
+		return;
+	notices_quiet++;
+	gang_send_all_dtm(gang, psprintf("ROLLBACK TO SAVEPOINT gp_sp_%d", level),
+					  GP_DTX_NONE, "ROLLBACK", 0);
+	gang_wait_all(gang, NULL, false);
+	gang_dtm_end(gang);
+	notices_quiet--;
+
+	/*
+	 * The levels above are gone, and the coordinator's abort of them sends
+	 * nothing; its restart of this one is sent with the next statement.
+	 */
+	gang_xact_depth = level;
 }
 
 /* ------------------------------------------------------------------------- */
@@ -2697,6 +2935,33 @@ dtx_report(const char *command, const int *set, int nset, bool reached)
 }
 
 /*
+ * A part's PREPARE TRANSACTION or one-phase COMMIT, as debug_dtm_action asks
+ * for it (gp_dtm_debug.c): failing as it begins, as the part prepares or
+ * commits -- so that the part ends as after any failed PREPARE, rolled back
+ * -- or after it, the error raised once it is answered (gang_dtm_end()).
+ */
+static const char *
+dtm_commit_statement(GpSegmentConn *c, GpDtxCommand command, const char *sql)
+{
+	char	   *msg;
+	int			action = GpDtmDebugProtocol(command, c->content, 0, &msg);
+
+	switch (action)
+	{
+		case GP_DTM_ACTION_FAIL_BEGIN:
+			return psprintf("%s; %s", GpDtmDebugFailAtCommitStatement(msg), sql);
+		case GP_DTM_ACTION_PANIC_BEGIN:
+			return GpDtmDebugRaiseStatement(action, msg);
+		case GP_DTM_ACTION_FAIL_END:
+			dtm_end_conn = c - gang->conns;
+			dtm_end_raise = GpDtmDebugRaiseStatement(action, msg);
+			return sql;
+		default:
+			return sql;
+	}
+}
+
+/*
  * The first phase, at PRE_COMMIT, while raising still undoes the
  * coordinator's part.  Which segments' parts wrote each has said with its
  * answers (conn_wrote()).  One that did not commits now, having nothing to
@@ -2753,13 +3018,16 @@ gang_commit_first_phase(GpGang *g)
 		/* the others' COMMIT is a one-phase commit of nothing */
 		dtx_report("Distributed Commit (one-phase)", writers, 1, true);
 		notices_quiet++;
+		dtm_end_conn = -1;
 		for (int i = 0; i < g->nconns; i++)
 			conn_send(&g->conns[i],
 					  i == lone
-					  ? psprintf("SET LOCAL " GP_DTX_ONE_PHASE_SETTING " = '" UINT64_FORMAT "'; COMMIT",
-								 U64FromFullTransactionId(gxid))
+					  ? dtm_commit_statement(&g->conns[i], GP_DTX_COMMIT_ONEPHASE,
+											 psprintf("SET LOCAL " GP_DTX_ONE_PHASE_SETTING " = '" UINT64_FORMAT "'; COMMIT",
+													  U64FromFullTransactionId(gxid)))
 					  : "COMMIT");
 		gang_wait_all(g, NULL, true);
+		gang_dtm_end(g);
 		notices_quiet--;
 		dtx_wait_for_depends(&g->conns[lone]);
 		return;
@@ -2783,6 +3051,7 @@ gang_commit_first_phase(GpGang *g)
 	else
 		dtx_report("Distributed Commit (one-phase)", NULL, 0, true);
 
+	dtm_end_conn = -1;
 	for (int i = 0; i < g->nconns; i++)
 	{
 		if (writes[i])
@@ -2790,12 +3059,15 @@ gang_commit_first_phase(GpGang *g)
 			/* the abort rolls it back, whether or not it was prepared */
 			dtx_prepared[i] = true;
 			dtx_nprepared++;
-			conn_send(&g->conns[i], psprintf("PREPARE TRANSACTION '%s'", dtx_gid));
+			conn_send(&g->conns[i],
+					  dtm_commit_statement(&g->conns[i], GP_DTX_PREPARE,
+										   psprintf("PREPARE TRANSACTION '%s'", dtx_gid)));
 		}
 		else
 			conn_send(&g->conns[i], "COMMIT");
 	}
 	gang_wait_all(g, NULL, true);
+	gang_dtm_end(g);
 	notices_quiet--;
 
 	/*
@@ -2815,6 +3087,10 @@ gang_commit_first_phase(GpGang *g)
 
 		/* and this one after prepareDtxTransaction() (xact.c) */
 		GP_FAULT("transaction_abort_after_distributed_prepared");
+		if (gp_debug_abort_after_distributed_prepared)
+			ereport(ERROR,
+					(errcode(MAKE_SQLSTATE('X', 'X', '0', '0', '9')),
+					 errmsg("Raise an error as directed by Debug_abort_after_distributed_prepared")));
 	}
 }
 
@@ -2939,8 +3215,13 @@ gang_finish_prepared(bool commit)
 	int			nfailed = 0;
 	TimestampTz deadline;
 	bool	   *again;
+	bool	   *refused;
+	char	  **then_raise;
 	int		   *conn_content;
 	int			nconns;
+	int			nrefused = 0;
+	GpDtxCommand command = commit ? GP_DTX_COMMIT_PREPARED :
+		dtx_all_prepared ? GP_DTX_ABORT_PREPARED : GP_DTX_ABORT_SOME_PREPARED;
 
 	if (dtx_nprepared == 0)
 		return 0;
@@ -2974,17 +3255,30 @@ gang_finish_prepared(bool commit)
 
 	sql = psprintf("%s PREPARED '%s'", commit ? "COMMIT" : "ROLLBACK", dtx_gid);
 	again = palloc0_array(bool, g->nconns);
+	refused = palloc0_array(bool, g->nconns);
+	then_raise = palloc0_array(char *, g->nconns);
 	for (int i = 0; i < g->nconns && i < dtx_prepared_size; i++)
 	{
 		GpSegmentConn *c = &g->conns[i];
+		const char *send = sql;
+		char	   *msg;
+		int			action;
 
 		if (!dtx_prepared[i])
 			continue;
 		c->fetching = NULL;
 
+		/* where debug_dtm_action asks for a part's failure (gp_dtm_debug.c) */
+		action = GpDtmDebugProtocol(command, c->content, 0, &msg);
+		if (action == GP_DTM_ACTION_FAIL_BEGIN ||
+			action == GP_DTM_ACTION_PANIC_BEGIN)
+			send = GpDtmDebugRaiseStatement(action, msg);
+		else if (action == GP_DTM_ACTION_FAIL_END)
+			then_raise[i] = GpDtmDebugRaiseStatement(action, msg);
+
 		/* on a primary FTS failed over from, or not to be sent to */
 		if (!GpClusterIsPrimaryNow(c->seg->dbid) ||
-			c->busy || !PQsendQuery(c->conn, sql))
+			c->busy || !PQsendQuery(c->conn, send))
 		{
 			again[i] = true;
 			dtx_prepared[i] = false;
@@ -3021,15 +3315,22 @@ gang_finish_prepared(bool commit)
 
 				if (res == NULL)
 				{
+					/* then the error a fail_end_command asks for */
+					if (then_raise[i] != NULL && PQsendQuery(c->conn, then_raise[i]))
+					{
+						then_raise[i] = NULL;
+						continue;
+					}
 					c->busy = false;
 					break;
 				}
 				state = PQresultErrorField(res, PG_DIAG_SQLSTATE);
 				if (PQresultStatus(res) != PGRES_COMMAND_OK &&
+					PQresultStatus(res) != PGRES_TUPLES_OK &&
 					(state == NULL ||
 					 (strcmp(state, "42704") != 0 && strcmp(state, "55000") != 0)))
 				{
-					nfailed++;
+					refused[i] = true;
 					ereport(LOG,
 							(errmsg("%s on segment %d failed: %s", sql, c->content,
 									PQresultErrorMessage(res))));
@@ -3064,6 +3365,37 @@ gang_finish_prepared(bool commit)
 		if (WaitEventSetWait(g->wes, 1000, occurred, 1, dispatch_wait_event()) > 0 &&
 			(occurred[0].events & WL_LATCH_SET))
 			ResetLatch(MyLatch);
+	}
+
+	/*
+	 * A part that answered with an error is told again over a connection of
+	 * its own, as Cloudberry's coordinator retries a broadcast that failed
+	 * over a new gang, saying so (doNotifyingCommitPrepared(),
+	 * doNotifyingAbort(), cdbtm.c); and the gang goes, as Cloudberry's do.
+	 */
+	for (int i = 0; i < nconns; i++)
+		if (refused[i])
+		{
+			nrefused++;
+			again[i] = true;
+		}
+	if (nrefused > 0)
+	{
+		if (commit)
+		{
+			ereport(WARNING,
+					(errmsg("the distributed transaction 'Commit Prepared' broadcast failed to one or more segments. Retrying ... try %d", 1),
+					 errdetail_internal("%s", GpDtmDebugGidDetail(dtx_gid, "Retry Commit Prepared"))));
+			ereport(NOTICE,
+					(errmsg("Releasing segworker group to retry broadcast.")));
+		}
+		else
+			ereport(WARNING,
+					(errmsg("the distributed transaction broadcast failed to one or more segments"),
+					 errdetail_internal("%s", GpDtmDebugGidDetail(dtx_gid,
+																  dtx_all_prepared ? "Notifying Abort Prepared" :
+																  "Notifying Abort (Some Prepared)"))));
+		gang_release_for_retry();
 	}
 
 	for (int i = 0; i < nconns; i++)
@@ -3145,6 +3477,7 @@ dispatch_xact_callback(XactEvent event, void *arg)
 	{
 		case XACT_EVENT_PRE_COMMIT:
 		case XACT_EVENT_PARALLEL_PRE_COMMIT:
+			GpDispatchRaiseKeptError();
 			if (gang_xact_lost)
 			{
 				gang_xact_lost = false;
@@ -3265,6 +3598,8 @@ dispatch_xact_callback(XactEvent event, void *arg)
 			gang_in_xact = false;
 			gang_xact_depth = 0;
 			gang_xact_lost = false;
+			temp_tables_dropped = false;
+			forget_kept_errors();
 			gang_forget_settings();
 			gang_forget_snapshot();
 			dtx_forget();
@@ -3276,6 +3611,10 @@ dispatch_xact_callback(XactEvent event, void *arg)
 
 		case XACT_EVENT_COMMIT:
 		case XACT_EVENT_PARALLEL_COMMIT:
+			if (temp_tables_dropped)
+				temp_tables_lost = false;
+			temp_tables_dropped = false;
+			forget_kept_errors();
 			/* sent at PRE_COMMIT; the memory goes with the transaction */
 			labels_pending = NIL;
 			gang_forget_snapshot();
@@ -3293,6 +3632,176 @@ dispatch_xact_callback(XactEvent event, void *arg)
 	}
 }
 
+/*
+ * A subtransaction's rollback that a segment failed, while debug_dtm_action
+ * is armed.  Cloudberry's coordinator sends a subtransaction's rollback after
+ * its own, and raises a segment's failure of it there: the error escapes the
+ * block's cleanup before the block's handler runs, and each block around it
+ * that rolls back fails as well, on the segment that went on failing
+ * (RollbackAndReleaseCurrentSubTransaction(), xact.c).  The coordinator's
+ * abort may raise nothing, so the segments' errors are kept, those of the
+ * first rollback that failed, and raised at the next point that may
+ * (GpDispatchRaiseKeptError()): the next statement of a function -- the
+ * handler's first -- a release, the commit, the next statement dispatched.
+ * A segment that has left the level already, its savepoint released,
+ * answers the rollback with an error of its own, where Cloudberry's says the
+ * level was "already processed".
+ */
+static List *kept_errors = NIL;
+static MemoryContext kept_context = NULL;
+
+static void
+keep_errors(List *errors)
+{
+	MemoryContext oldcxt;
+
+	if (kept_context == NULL)
+		kept_context = AllocSetContextCreate(TopMemoryContext,
+											 "gp_dispatch kept errors",
+											 ALLOCSET_SMALL_SIZES);
+	else
+		MemoryContextReset(kept_context);	/* the last, raised already */
+	oldcxt = MemoryContextSwitchTo(kept_context);
+	foreach_ptr(GpSegmentError, err, errors)
+	{
+		GpSegmentError *copy = palloc_object(GpSegmentError);
+
+		*copy = *err;
+		copy->sqlstate = err->sqlstate ? pstrdup(err->sqlstate) : NULL;
+		copy->message = pstrdup(err->message);
+		copy->detail = err->detail ? pstrdup(err->detail) : NULL;
+		copy->hint = err->hint ? pstrdup(err->hint) : NULL;
+		copy->context = err->context ? pstrdup(err->context) : NULL;
+		for (int i = 0; i < lengthof(error_names); i++)
+			copy->names[i] = err->names[i] ? pstrdup(err->names[i]) : NULL;
+		/* file and func are location_name()'s, kept for good */
+		kept_errors = lappend(kept_errors, copy);
+	}
+	MemoryContextSwitchTo(oldcxt);
+}
+
+void
+GpDispatchRaiseKeptError(void)
+{
+	List	   *errors = kept_errors;
+
+	if (errors == NIL)
+		return;
+	/* the memory stays until the transaction ends, or the next is kept */
+	kept_errors = NIL;
+	raise_segment_errors(errors);
+}
+
+static void
+forget_kept_errors(void)
+{
+	kept_errors = NIL;
+	if (kept_context != NULL)
+		MemoryContextReset(kept_context);
+}
+
+static void
+gang_rollback_keeping_error(int level)
+{
+	char	   *sql = psprintf("ROLLBACK TO SAVEPOINT gp_sp_%d; RELEASE SAVEPOINT gp_sp_%d",
+							   level, level);
+	bool		user = GpDtmDebugLevelIsUser(level);
+	char	  **instead = palloc0_array(char *, gang->nconns);
+	char	  **then_raise = palloc0_array(char *, gang->nconns);
+	List	   *errors = NIL;
+	bool		more = false;
+
+	for (int i = 0; i < gang->nconns; i++)
+	{
+		GpSegmentConn *c = &gang->conns[i];
+		char	   *msg;
+		int			action = user ?
+			GpDtmDebugSql("ROLLBACK", c->content, &msg) :
+			GpDtmDebugProtocol(GP_DTX_SUBTRANSACTION_ROLLBACK, c->content,
+							   level - 1, &msg);
+		const char *send = sql;
+
+		if (action == GP_DTM_ACTION_FAIL_BEGIN ||
+			action == GP_DTM_ACTION_PANIC_BEGIN)
+		{
+			send = GpDtmDebugRaiseStatement(action, msg);
+			instead[i] = msg;
+		}
+		else if (action == GP_DTM_ACTION_FAIL_END)
+			then_raise[i] = GpDtmDebugRaiseStatement(action, msg);
+		if (!PQsendQuery(c->conn, send))
+		{
+			gang_close();
+			return;
+		}
+		c->busy = true;
+	}
+	gang_drain_keeping(&errors);
+
+	/*
+	 * A segment whose part has failed already runs nothing but a rollback:
+	 * it answers what it was sent to raise instead with 25P02, where
+	 * Cloudberry's raises that error before it looks at its transaction.
+	 */
+	foreach_ptr(GpSegmentError, err, errors)
+	{
+		for (int i = 0; gang != NULL && i < gang->nconns; i++)
+			if (gang->conns[i].content == err->content && instead[i] != NULL &&
+				err->sqlstate != NULL && strcmp(err->sqlstate, "25P02") == 0)
+			{
+				err->sqlstate = pstrdup("XX009");
+				err->message = instead[i];
+			}
+	}
+
+	/* then the errors a fail_end_command asks for, where the rollback was done */
+	for (int i = 0; gang != NULL && i < gang->nconns; i++)
+	{
+		bool		failed = false;
+
+		foreach_ptr(GpSegmentError, err, errors)
+			if (err->content == gang->conns[i].content)
+				failed = true;
+		if (then_raise[i] == NULL || failed)
+			continue;
+		if (!PQsendQuery(gang->conns[i].conn, then_raise[i]))
+		{
+			gang_close();
+			return;
+		}
+		gang->conns[i].busy = true;
+		more = true;
+	}
+	if (more)
+		gang_drain_keeping(&errors);
+
+	if (errors != NIL && kept_errors == NIL)
+		keep_errors(errors);
+}
+
+/*
+ * A function's block with an exception handler, as it begins: its
+ * subtransaction sent to the segments now, and the levels not sent yet
+ * before it, as Cloudberry sends "Begin Internal Subtransaction" before it
+ * begins one (BeginInternalSubTransaction(), xact.c), where the port sends
+ * it with the block's first statement that goes there -- while
+ * debug_dtm_action asks for a subtransaction's failure (gp_dtm_debug.c's
+ * PL/pgSQL plugin).
+ */
+void
+GpDispatchSubtransactionBeginNow(void)
+{
+	GpGang	   *g;
+
+	if (GpClusterIsSingleNode() || GpClusterBackendRole() != GP_ROLE_DISPATCH ||
+		!IsTransactionState())
+		return;
+	g = gang_get();
+	gang_prepare(g, true);
+	if (gang_xact_depth == GetCurrentTransactionNestLevel())
+		gang_send_savepoint(g, false);
+}
+
 static void
 dispatch_subxact_callback(SubXactEvent event, SubTransactionId mySubid,
 						  SubTransactionId parentSubid, void *arg)
@@ -3300,6 +3809,8 @@ dispatch_subxact_callback(SubXactEvent event, SubTransactionId mySubid,
 	int			level = GetCurrentTransactionNestLevel();
 	uint32		holdoff = InterruptHoldoffCount;
 
+	if (event == SUBXACT_EVENT_PRE_COMMIT_SUB)
+		GpDispatchRaiseKeptError();
 	if (gang == NULL || !gang_in_xact || gang_xact_depth < level)
 		return;
 
@@ -3307,8 +3818,14 @@ dispatch_subxact_callback(SubXactEvent event, SubTransactionId mySubid,
 	{
 		case SUBXACT_EVENT_PRE_COMMIT_SUB:
 			notices_quiet++;
-			gang_send_all(gang, psprintf("RELEASE SAVEPOINT gp_sp_%d", level));
+			if (GpDtmDebugLevelIsUser(level))
+				gang_send_all_dtm(gang, psprintf("RELEASE SAVEPOINT gp_sp_%d", level),
+								  GP_DTX_NONE, "RELEASE", 0);
+			else
+				gang_send_all_dtm(gang, psprintf("RELEASE SAVEPOINT gp_sp_%d", level),
+								  GP_DTX_SUBTRANSACTION_RELEASE, NULL, level);
 			gang_wait_all(gang, NULL, false);
+			gang_dtm_end(gang);
 			notices_quiet--;
 			gang_xact_depth = level - 1;
 			break;
@@ -3317,7 +3834,9 @@ dispatch_subxact_callback(SubXactEvent event, SubTransactionId mySubid,
 			PG_TRY();
 			{
 				gang_cancel_and_drain();
-				if (gang != NULL)
+				if (gang != NULL && GpDtmDebugArmed())
+					gang_rollback_keeping_error(level);
+				else if (gang != NULL)
 					gang_send_all_quietly(psprintf("ROLLBACK TO SAVEPOINT gp_sp_%d; RELEASE SAVEPOINT gp_sp_%d",
 												   level, level));
 			}
@@ -3400,8 +3919,9 @@ GpDispatchUtility(const char *payload, bool own_xact)
 		GpReportDtxReached(NULL, NULL, 0);
 	/* the coordinator has said what the statement says, once */
 	notices_quiet++;
-	gang_send_all(g, payload);
+	gang_send_all_dtm(g, payload, GP_DTX_NONE, "MPPEXEC UTILITY", 0);
 	gang_wait_all(g, NULL, false);
+	gang_dtm_end(g);
 	notices_quiet--;
 	if (!own_xact)
 		gang_sync_labels(g);
@@ -4150,6 +4670,7 @@ gather_start(const char *sql, TupleDesc tupdesc, int content, int nsegments,
 	GpGatherState *gather = (GpGatherState *) palloc0(sizeof(GpGatherState));
 	GpGang	   *g;
 	int			n = 0;
+	const char *statement = GpLogStatementComment();
 
 	/*
 	 * Where Cloudberry's coordinator sets up the interconnect its slices'
@@ -4206,9 +4727,9 @@ gather_start(const char *sql, TupleDesc tupdesc, int content, int nsegments,
 		s->conn = &g->conns[i];
 		s->asked = GATHER_FETCH_FIRST;
 		conn_send(s->conn,
-				  psprintf("DECLARE %s %sNO SCROLL CURSOR FOR %s; FETCH %d FROM %s",
+				  psprintf("DECLARE %s %sNO SCROLL CURSOR FOR %s; FETCH %d FROM %s%s",
 						   gather->cursor, gather->binary ? "BINARY " : "",
-						   sql, s->asked, gather->cursor));
+						   sql, s->asked, gather->cursor, statement));
 		s->conn->fetching = s;
 		s->declared = true;
 	}
@@ -4253,10 +4774,10 @@ gather_store_row(GpGatherState *gather, PGresult *res, int row,
 
 			initReadOnlyStringInfo(&buf, PQgetvalue(res, row, i),
 								   PQgetlength(res, row, i));
-			slot->tts_values[i] = ReceiveFunctionCall(&gather->columns[i].proc,
-													  &buf,
-													  gather->columns[i].ioparam,
-													  gather->columns[i].typmod);
+			slot->tts_values[i] = GpReceiveFunctionCall(&gather->columns[i].proc,
+														&buf,
+														gather->columns[i].ioparam,
+														gather->columns[i].typmod);
 		}
 		else
 			slot->tts_values[i] = InputFunctionCall(&gather->columns[i].proc,
@@ -4512,7 +5033,7 @@ GpGatherDecodeValue(GpGatherState *gather, int col, const char *value,
 		StringInfoData buf;
 
 		initReadOnlyStringInfo(&buf, (char *) value, length);
-		return ReceiveFunctionCall(&in->proc, &buf, in->ioparam, in->typmod);
+		return GpReceiveFunctionCall(&in->proc, &buf, in->ioparam, in->typmod);
 	}
 	return InputFunctionCall(&in->proc, (char *) value, in->ioparam,
 							 in->typmod);

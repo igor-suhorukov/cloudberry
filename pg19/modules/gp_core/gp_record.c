@@ -52,6 +52,15 @@
  * a Motion's rows are all of one type, most often -- and the receiver
  * compares a description as it arrives with the last one's bytes.
  *
+ * And any value's binary form, as it travels: a type's send and receive
+ * functions write and read text in the encoding of the client the backend
+ * serves (pq_sendtext(), pq_getmsgtext()), which between the nodes is the
+ * database's, every connection the dispatcher opens asking for it.  A
+ * coordinator whose client asked for another sends and reads the values of
+ * the segments with its client encoding the database's meanwhile
+ * (GpSendFunctionCall()), as Cloudberry's interconnect carries a value's
+ * bytes as they are.
+ *
  * Cloudberry source this file stands in for:
  *	  src/backend/cdb/motion/tupleremap.c
  *
@@ -66,6 +75,7 @@
 #include "fmgr.h"
 #include "funcapi.h"
 #include "libpq/pqformat.h"
+#include "mb/pg_wchar.h"
 #include "utils/builtins.h"
 #include "utils/datum.h"
 #include "utils/lsyscache.h"
@@ -206,7 +216,7 @@ wire_write(StringInfo buf, Datum value, FmgrInfo *flinfo)
 		}
 		else if (col->binary)
 		{
-			bytea	   *b = SendFunctionCall(&col->proc, values[i]);
+			bytea	   *b = GpSendFunctionCall(&col->proc, values[i]);
 
 			pq_sendint32(buf, VARSIZE(b) - VARHDRSZ);
 			pq_sendbytes(buf, VARDATA(b), VARSIZE(b) - VARHDRSZ);
@@ -365,8 +375,8 @@ wire_read(StringInfo buf, FmgrInfo *flinfo)
 		if (col->record)
 			values[i] = wire_read(&item, NULL);
 		else if (col->binary)
-			values[i] = ReceiveFunctionCall(&col->proc, &item, col->ioparam,
-											col->typmod);
+			values[i] = GpReceiveFunctionCall(&col->proc, &item, col->ioparam,
+											  col->typmod);
 		else
 		{
 			values[i] = InputFunctionCall(&col->proc, pnstrdup(item.data, len),
@@ -416,6 +426,60 @@ Datum
 GpRecordWireRead(StringInfo buf)
 {
 	return wire_read(buf, NULL);
+}
+
+/*
+ * A value's binary form, sent to another node: its text in the database's
+ * encoding, the one every connection between the nodes asks for (see the
+ * file header), whatever this session's client asked for.  Where the two are
+ * the same -- on every segment, and for most clients -- the send function is
+ * called as it is.
+ */
+bytea *
+GpSendFunctionCall(FmgrInfo *flinfo, Datum val)
+{
+	int			client = pg_get_client_encoding();
+	bytea	   *result;
+
+	if (client == GetDatabaseEncoding())
+		return SendFunctionCall(flinfo, val);
+
+	SetClientEncoding(GetDatabaseEncoding());
+	PG_TRY();
+	{
+		result = SendFunctionCall(flinfo, val);
+	}
+	PG_FINALLY();
+	{
+		/* the client's encoding was set up before; this cannot fail */
+		SetClientEncoding(client);
+	}
+	PG_END_TRY();
+	return result;
+}
+
+/* And one another node sent, read the same way. */
+Datum
+GpReceiveFunctionCall(FmgrInfo *flinfo, StringInfo buf, Oid typioparam,
+					  int32 typmod)
+{
+	int			client = pg_get_client_encoding();
+	Datum		result;
+
+	if (client == GetDatabaseEncoding())
+		return ReceiveFunctionCall(flinfo, buf, typioparam, typmod);
+
+	SetClientEncoding(GetDatabaseEncoding());
+	PG_TRY();
+	{
+		result = ReceiveFunctionCall(flinfo, buf, typioparam, typmod);
+	}
+	PG_FINALLY();
+	{
+		SetClientEncoding(client);
+	}
+	PG_END_TRY();
+	return result;
 }
 
 PG_FUNCTION_INFO_V1(gp_record_from_wire);

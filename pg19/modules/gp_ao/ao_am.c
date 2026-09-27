@@ -1109,8 +1109,12 @@ ao_multi_insert(Relation rel, TupleTableSlot **slots, int nslots,
 {
 	AoInsertState *st = ao_insert_state(rel);
 
+	/* each row to the writer its group turns to, as a row inserted alone */
 	for (int i = 0; i < nslots; i++)
+	{
+		st = ao_insert_turn(st, rel);
 		ao_insert_slot(st, rel, slots[i]);
+	}
 	pgstat_count_heap_insert(rel, nslots);
 }
 

@@ -1,0 +1,6 @@
+@@
+-ERROR:  transaction  at level 1 already processed (SOMEFILE:SOMEFUNC)
++ERROR:  savepoint "gp_sp_2" does not exist
+@@
+-ERROR:  transaction  at level 1 already processed (SOMEFILE:SOMEFUNC)
++ERROR:  savepoint "gp_sp_2" does not exist

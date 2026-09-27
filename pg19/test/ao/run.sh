@@ -703,6 +703,16 @@ is "a rewrite writes by them still" \
 is "and a table that leaves PAX leaves them" \
    "ALTER TABLE pxr SET ACCESS METHOD heap;
     SELECT count(*) FROM pg_attribute_encoding WHERE attrelid = 'pxr'::regclass;" "0"
+# Cloudberry's delta encoder takes a stream appended once, a text column's
+# offsets; a column's values, appended one at a time, failed at a group's
+# second, and a group of one could not be read back.  They are written as
+# they are, the clause kept (pg19/pax/src/storage/columns/pax_encoding.cc).
+is "a column ENCODING (compresstype=delta) takes groups of many rows, and reads them back" \
+   "CREATE TABLE pxd (a int ENCODING (compresstype=delta), b int8, c date, d text)
+      USING pax WITH (compresstype=delta);
+    INSERT INTO pxd SELECT i, i, date '2020-01-01' + i % 1000, 'v' || i FROM generate_series(1, 200000) i;
+    SELECT count(*) || ' ' || sum(a) || ' ' || sum(b) || ' ' || max(c) || ' ' || count(DISTINCT d) FROM pxd;" \
+   "200000 20000100000 20000100000 2022-09-26 200000"
 
 ###############################################################################
 echo "16. gp_toolkit's views of append-optimized tables, Cloudberry's"
@@ -727,6 +737,44 @@ is "gp_size_of_table_uncompressed, by the table's compression ratio" \
 is "and gp_size_of_table_and_indexes_licensing beside it" \
    "SELECT (sotailtablesizeuncompressed > sotailtablesizedisk)::text
       FROM gp_toolkit.gp_size_of_table_and_indexes_licensing WHERE sotailtablename = 'tkc';" "true"
+
+# The segment files' history: every version gp_ao.segfile holds, a dead
+# one's too, as Cloudberry's reads its pg_aoseg under SnapshotAny -- here
+# inside the transaction that wrote them, which no pruning reaches.
+is "__gp_aoseg_history: each version of a segment file, as each write left it" \
+   "BEGIN;
+    CREATE TABLE tkh (a int, b text) WITH (appendonly=true);
+    INSERT INTO tkh SELECT i, 'x' FROM generate_series(1, 100) i;
+    INSERT INTO tkh SELECT i, 'y' FROM generate_series(1, 100) i;
+    SELECT string_agg(segno || ':' || tupcount || ':' || modcount, ' ' ORDER BY tupcount)
+      FROM gp_toolkit.__gp_aoseg_history('tkh');
+    COMMIT;" "1:0:0 1:100:1 1:200:2"
+is "__gp_aocsseg_history: each version, a row a column" \
+   "BEGIN;
+    CREATE TABLE tkhc (a int, b text) WITH (appendonly=true, orientation=column);
+    INSERT INTO tkhc SELECT i, 'x' FROM generate_series(1, 100) i;
+    SELECT string_agg(column_num || ':' || physical_segno || ':' || tupcount, ' '
+                      ORDER BY column_num, tupcount)
+      FROM gp_toolkit.__gp_aocsseg_history('tkhc');
+    COMMIT;" "0:1:0 0:1:100 1:129:0 1:129:100"
+refused "and a table by column's history as a row table's, refused in Cloudberry's words" \
+   "SELECT * FROM gp_toolkit.__gp_aoseg_history('tkhc');" \
+   "Relation 'tkhc' does not have appendoptimized row-oriented storage"
+
+# The check for missing files with the files past a relation's first, which
+# hold an append-optimized table's bytes past its first gigabyte: none
+# here, and the table's first file is missed like any.
+is "__get_ao_segno_list: no file past the first of a small table" \
+   "SELECT count(*) FROM gp_toolkit.__get_ao_segno_list() UNION ALL
+    SELECT count(*) FROM gp_toolkit.__get_aoco_segno_list();" "0
+0"
+q "CHECKPOINT;" > /dev/null
+path=$(q "SELECT pg_relation_filepath('tkh');")
+mv "$WORK/data/$path" "$WORK/tkh.file"
+got=$(q "SELECT string_agg(relname, ' ') FROM gp_toolkit.__check_missing_files_ext;")
+mv "$WORK/tkh.file" "$WORK/data/$path"
+[ "$got" = "tkh" ] && ok "__check_missing_files_ext lists the table whose file is gone" \
+	|| notok "__check_missing_files_ext" "want [tkh], got [$got]"
 
 echo
 echo "  $pass passed, $fail failed"
