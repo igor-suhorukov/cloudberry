@@ -338,6 +338,12 @@ extern void GpStreamEnd(GpStream *stream);
 extern void GpDispatchResetGang(void);
 
 /*
+ * ROLLBACK TO SAVEPOINT, refused where the transaction's part on the segments
+ * went with a gang that closed.
+ */
+extern void GpDispatchCheckRollbackTo(const char *savepoint);
+
+/*
  * What every connection gp_core opens to another node carries besides its
  * own options: the password file (gp.internal_passfile), and the TLS of
  * certificates between nodes (gp.internal_sslmode, sslcert, sslkey,

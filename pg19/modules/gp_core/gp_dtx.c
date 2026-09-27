@@ -1987,6 +1987,11 @@ dtx_ProcessUtility(PlannedStmt *pstmt, const char *queryString,
 			GpClusterBackendRole() == GP_ROLE_DISPATCH)
 			GpReportDtxReached(NULL, NULL, 0);
 
+		/* the segments' part gone with its gang: no savepoint to go back to */
+		if (ts->kind == TRANS_STMT_ROLLBACK_TO &&
+			GpClusterBackendRole() == GP_ROLE_DISPATCH)
+			GpDispatchCheckRollbackTo(ts->savepoint_name);
+
 		if (ts->gid != NULL && GpDtxParseGid(ts->gid, &gxid))
 		{
 			/* the part's statement is what its phases show */

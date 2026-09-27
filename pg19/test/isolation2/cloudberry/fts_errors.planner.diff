@@ -1,0 +1,15 @@
+@@
+- c1 | c2 
+-----+----
+-(0 rows)
++ERROR:  server closed the connection unexpectedly
++	This probably means the server terminated abnormally
++	before or while processing the request.
+@@
+-ERROR:  gang was lost due to cluster reconfiguration
++END
+@@
+-ERROR:  relation "tmp4" does not exist
+-LINE 1: select * from tmp4;
+-                      ^
++ERROR:  relation "pg_temp.tmp4" does not exist

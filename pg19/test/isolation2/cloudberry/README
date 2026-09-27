@@ -42,6 +42,25 @@ export_distributed_snapshot
   the snapshot a distributed session exported, which Cloudberry's utility
   mode refuses.
 
+fts_errors, in each pass (fts_errors.planner.diff, fts_errors.orca.diff)
+  Two of its sessions after content 1 is failed over, where the port's
+  dispatch differs, and nothing of FTS's: its name that does not resolve
+  (get_dns_cached_address) fails FTS's round and marks no segment down, as
+  Cloudberry's; the transaction that ends on the old primary fails and asks
+  FTS to probe, which fails content 1 over; a session outside a
+  transaction goes to the new primary; one with temporary tables is told
+  its gang was lost; and one in a subtransaction fails its statement and
+  its ROLLBACK TO SAVEPOINT, as Cloudberry's do.  The session whose cursor
+  is open: Cloudberry's FETCH returns what its segments sent as the cursor
+  was declared, none, and its END finds the gang lost; the port's cursor
+  reads from the segments as it is fetched from, and its FETCH meets the
+  old primary's closed connection.  And the session with temporary tables,
+  on its next statement: Cloudberry's forgets them as the gang goes, and
+  the name does not resolve; the port's coordinator keeps them, and the new
+  primaries' backends have none -- "relation "pg_temp.tmp4" does not exist"
+  from the planner's gather, and ORCA's fragment names it by its OID, which
+  the port's init_file masks.
+
 gdd/concurrent_update, and its _optimizer output, which the orca pass is
 compared with
   PostgreSQL 19's words for a row another transaction's Split moved away,

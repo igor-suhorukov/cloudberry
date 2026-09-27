@@ -31,7 +31,8 @@
 # mirrors3, whose clusters have a mirror for each segment -- three, so that
 # they run side by side -- M7's in mirrors4, whose standby they change, and
 # dtx_recovery_wait_lsn in mirrors5, whose recovery process waits a minute
-# for FTS to let a mirror go.
+# for FTS to let a mirror go, and fts_errors in mirrors6, which fails two
+# contents over and recovers both, a minute and a half on its own.
 run  lockmodes                                     lockmodes
 run  select_dropped_table
 run  resource_queue_self_deadlock                  queues
@@ -69,7 +70,7 @@ run  vacuum_recently_dead_tuple_due_to_distributed_snapshot
 run  distributedlog-bug
 run  distributed_snapshot
 run  segwalrep/die_commit_pending_replication      mirrors3
-skip fts_errors                                    Cloudberry's DNS cache of segment addresses (get_dns_cached_address), which the port's dispatcher has none of
+run  fts_errors                                    mirrors6
 run  segwalrep/replication_keeps_crash             mirrors3
 run  segwalrep/commit_blocking                     mirrors1
 run  segwalrep/fts_unblock_primary                 mirrors1

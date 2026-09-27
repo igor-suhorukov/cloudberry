@@ -746,6 +746,21 @@ gang_connect(void)
 }
 
 /*
+ * A connection of the gang broke: the gang goes, and FTS is asked to probe
+ * and waited for, as Cloudberry's dispatcher asks it when a segment's
+ * connection fails (FtsNotifyProber(), cdbdisp_async.c) -- so that a primary
+ * that is down is failed over from before the session's next statement, which
+ * then finds the cluster changed: a transaction on the gang that is gone
+ * fails, and one after it goes to the new primary.
+ */
+static void
+gang_close_broken(void)
+{
+	gang_close();
+	GpFtsNotifyProber();
+}
+
+/*
  * One wait set for the gang, built when its connections change: the sockets
  * do not change while the connections live, and building an epoll set per
  * row would cost more than the rows.  It has no resource owner, because the
@@ -822,9 +837,34 @@ gang_get(void)
 		}
 		else if (checked != MyProc->vxid.lxid)
 		{
+			Oid			temp_ns;
+			Oid			temp_toast_ns;
+
 			checked = MyProc->vxid.lxid;
 			if (GpClusterRefresh())
+			{
 				gang_close();
+
+				/*
+				 * A session with temporary tables had their segments' parts
+				 * in the gang's backends, which are gone with it: it cannot
+				 * go on to the new primaries as if they were there, and is
+				 * told so, as Cloudberry's session is -- which also forgets
+				 * the tables here (resetSessionForPrimaryGangLoss(),
+				 * cdbgang.c), where the port leaves the coordinator's to be
+				 * dropped.
+				 */
+				GetTempNamespaceState(&temp_ns, &temp_toast_ns);
+				if (OidIsValid(temp_ns))
+				{
+					ereport(WARNING,
+							(errmsg("the temporary tables of this session have lost their rows on the segments, whose connections are gone"),
+							 errhint("Drop them, or DISCARD TEMP.")));
+					ereport(ERROR,
+							(errcode(ERRCODE_CONNECTION_FAILURE),
+							 errmsg("gang was lost due to cluster reconfiguration")));
+				}
+			}
 		}
 	}
 	if (gang == NULL)
@@ -1612,7 +1652,7 @@ gang_wait_all_ex(GpGang *g, PGresult **keep, bool commit, bool keep_commands)
 	} while (nbusy > 0);
 
 	if (broken)
-		gang_close();
+		gang_close_broken();
 
 	flush_segment_notices();
 	if (errors != NIL)
@@ -2946,6 +2986,24 @@ gang_commit_second_phase(void)
 }
 
 /*
+ * ROLLBACK TO SAVEPOINT in a transaction whose part on the segments went with
+ * a gang that closed: the segments' part cannot be rolled back to the
+ * savepoint, so the statement fails, as Cloudberry's fails where it cannot
+ * send the segments its rollback (DispatchRollbackToSavepoint(), xact.c) --
+ * and the transaction, aborted, ends in a rollback, rather than going on
+ * here to fail as it commits.
+ */
+void
+GpDispatchCheckRollbackTo(const char *savepoint)
+{
+	if (gang_xact_lost && savepoint != NULL)
+		ereport(ERROR,
+				(errcode(ERRCODE_CONNECTION_FAILURE),
+				 errmsg("Could not rollback to savepoint (ROLLBACK TO SAVEPOINT %s)",
+						quote_identifier(savepoint))));
+}
+
+/*
  * O33: the second phase, once the coordinator's commit is recorded and
  * before its transaction ends for the other sessions -- as Cloudberry's
  * coordinator notifies the segments before it ends its own
@@ -4179,7 +4237,7 @@ gather_poll(GpGatherSeg *s)
 			collect_error(&errors, c->content, res, c->conn, NULL);
 			PQclear(res);
 			if (PQstatus(c->conn) == CONNECTION_BAD)
-				gang_close();
+				gang_close_broken();
 			raise_segment_errors(errors);
 		}
 	}

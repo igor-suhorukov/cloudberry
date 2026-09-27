@@ -50,4 +50,10 @@ s/ \(cdbgang_async\.c:(\d+|LINE_NUM)\)$//
 m/^ \w+ +\| \w+ +\| \d+ +\| \w+ +\| \d+ +\| [tf] +\| /
 s/^( \w+ +\| \w+ +\| )\d+( +\| \w+ +\| \d+ +\| [tf] +\| )/$1######$2/
 
+# A relation a segment's fragment names by OID and the segment has not --
+# a session's temporary table, whose segments' parts went with its gang
+# (fts_errors) -- whose OID depends on what ran before it.
+m/^ERROR:  relation with OID \d+ does not exist$/
+s/OID \d+/OID ######/
+
 -- end_matchsubs
