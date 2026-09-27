@@ -377,8 +377,51 @@ static ExecutorEnd_hook_type prev_executor_end = NULL;
  */
 #define GP_READ_ONLY_MARK	"gp_read_only"
 
+/*
+ * On a fragment's PlannedStmt: the role the coordinator runs the statement
+ * as, and its security context, as (user, context) -- a SECURITY DEFINER
+ * function's owner where the statement is the function's query.  The
+ * segment process checks the fragment's privileges and runs it as that role,
+ * where the coordinator may be trusted to say so (fragment_user_enter()), as
+ * Cloudberry's QE takes its dispatcher's current user.  Its own role is the
+ * session's, which the dispatcher keeps in step (gp_dispatch.c).
+ */
+#define GP_USER_MARK	"gp_user"
+
 /* How many fragments this segment process is running, one inside another. */
 static int	fragment_depth = 0;
+
+static Node *fragment_mark(PlannedStmt *stmt, const char *name);
+static bool is_fragment(PlannedStmt *stmt);
+
+/*
+ * The role a fragment runs as (GP_USER_MARK), where it is not this
+ * process's own, taken on: false where there is nothing to take on --
+ * not a fragment, one sent by a coordinator this node does not trust with
+ * it, or its role this process's already.  The caller gives the saved one
+ * back with SetUserIdAndSecContext(); an error gives it back as the
+ * transaction or subtransaction aborts.
+ */
+static bool
+fragment_user_enter(PlannedStmt *stmt, Oid *save_userid, int *save_sec_context)
+{
+	List	   *user;
+	Oid			userid;
+	int			sec_context;
+
+	if (!GpClusterIsDispatched() || !is_fragment(stmt))
+		return false;
+	user = (List *) fragment_mark(stmt, GP_USER_MARK);
+	if (user == NIL || !GpClusterDispatchTrusted())
+		return false;
+	userid = (Oid) intVal(linitial(user));
+	sec_context = intVal(lsecond(user)) | SECURITY_LOCAL_USERID_CHANGE;
+	GetUserIdAndSecContext(save_userid, save_sec_context);
+	if (userid == *save_userid && sec_context == *save_sec_context)
+		return false;
+	SetUserIdAndSecContext(userid, sec_context);
+	return true;
+}
 
 /* ------------------------------------------------------------------------- */
 /* Building one, for ORCA's translator                                       */
@@ -2080,6 +2123,19 @@ fragment_sql_ex(EState *estate, Plan *fragment, CustomScan *motion,
 			lappend(frag->extension_state,
 					makeDefElem(pstrdup(GP_READ_ONLY_MARK),
 								(Node *) makeBoolean(true), -1));
+
+	{
+		Oid			userid;
+		int			sec_context;
+
+		GetUserIdAndSecContext(&userid, &sec_context);
+		frag->extension_state =
+			lappend(frag->extension_state,
+					makeDefElem(pstrdup(GP_USER_MARK),
+								(Node *) list_make2(makeInteger((int) userid),
+													makeInteger(sec_context)),
+								-1));
+	}
 
 	params = fragment_params(estate, motion, econtext);
 	if (params != NIL)
@@ -4176,10 +4232,20 @@ motion_executor_start(QueryDesc *queryDesc, int eflags)
 		}
 	}
 
-	if (prev_executor_start)
-		prev_executor_start(queryDesc, eflags);
-	else
-		standard_ExecutorStart(queryDesc, eflags);
+	{
+		Oid			save_userid;
+		int			save_sec_context;
+		bool		as_user = fragment_user_enter(queryDesc->plannedstmt,
+												  &save_userid,
+												  &save_sec_context);
+
+		if (prev_executor_start)
+			prev_executor_start(queryDesc, eflags);
+		else
+			standard_ExecutorStart(queryDesc, eflags);
+		if (as_user)
+			SetUserIdAndSecContext(save_userid, save_sec_context);
+	}
 
 	/* InitPlan()'s last fault, where its plan is set up */
 	(void) GP_FAULT("func_init_plan_end");
@@ -4246,10 +4312,18 @@ motion_executor_run(QueryDesc *queryDesc, ScanDirection direction,
 		fragment_depth++;
 	PG_TRY();
 	{
+		Oid			save_userid;
+		int			save_sec_context;
+		bool		as_user = fragment_user_enter(queryDesc->plannedstmt,
+												  &save_userid,
+												  &save_sec_context);
+
 		if (prev_executor_run)
 			prev_executor_run(queryDesc, direction, count);
 		else
 			standard_ExecutorRun(queryDesc, direction, count);
+		if (as_user)
+			SetUserIdAndSecContext(save_userid, save_sec_context);
 	}
 	PG_FINALLY();
 	{
