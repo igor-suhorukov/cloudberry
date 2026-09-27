@@ -918,6 +918,9 @@ AttrNumber CarryRteColumn(Plan *plan, Index rti, Var *proto);
 // "child" as share "share_id" in slice "slice"; and a consumer, reading
 // them as "scan_tlist" and giving "targetlist" of them.
 bool CanShareAcrossSlices(void);
+// Whether the coordinator's own slices a Gather relays last as long as it,
+// so that a CTE the coordinator's slice produces is read in them.
+bool CoordinatorSlicesReadCTEs(void);
 Plan *MakeSequence(Plan *plan, List *producers);
 Plan *MakeShareProducer(Plan *child, int share_id, int slice);
 Plan *MakeShareConsumer(int share_id, int slice, List *scan_tlist,

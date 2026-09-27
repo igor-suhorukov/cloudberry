@@ -376,6 +376,16 @@ motion_check_walker(Node *node, void *arg)
 											   ((RecursiveUnion *) node)->wtParam);
 				break;
 			case T_CteScan:
+
+				/*
+				 * The coordinator's own fragment runs in its process, where
+				 * the CTE its slice produces is, and from gp_core 1.11 the
+				 * Gather that relays it keeps it to its end: its CteScans
+				 * read the CTE as the coordinator's slice's do.  Not a work
+				 * table, which a relay would read once, not each time round.
+				 */
+				if (ctx->on_coordinator && cb_core_api()->version_minor >= 11)
+					break;
 				ctx->referenced_ptr = bms_add_member(ctx->referenced_ptr,
 													 ((CteScan *) node)->cteParam);
 				break;

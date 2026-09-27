@@ -200,6 +200,13 @@ typedef struct GpCoreApi
 	 */
 	void		(*split_modify_set_tableoid) (struct Plan *plan,
 											  AttrNumber tableoidcol);
+
+	/*
+	 * Since 1.11 too, nothing new here but what a Gather does: the
+	 * coordinator's own slices it relays, run in its process, are ended
+	 * with it rather than as each is relayed, so that a CTE the
+	 * coordinator's slice produces is read in them (gp_motion.c).
+	 */
 } GpCoreApi;
 
 /*

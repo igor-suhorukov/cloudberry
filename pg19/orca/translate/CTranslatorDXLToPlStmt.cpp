@@ -181,25 +181,35 @@ CheckCanDispatchPlans()
 	GP_UNPORTED("a Motion, without gp.cluster_secret");
 }
 
-// NOT IN CLOUDBERRY.  Does "dxlnode" read CTE "cte_id" below a Motion -- in
-// another slice than the one "dxlnode" is in?  A CTE the coordinator's slice
-// produces is PostgreSQL's, one process's, which no other slice can read.
+// NOT IN CLOUDBERRY.  Does "dxlnode" read CTE "cte_id" in a slice the
+// segments run, below a Motion?  A CTE the coordinator's slice produces is
+// PostgreSQL's, one process's, which no segment can read.  A slice the
+// coordinator sends from -- its own rows, sent to the segments -- runs in
+// that process, relayed by the Gather above it (gp_motion.c), and reads it
+// there, where gp_core keeps the slices it relays until the Gather ends;
+// "on_segments" says which the slice "dxlnode" is in is.
 static BOOL
-ReadsCTEBelowMotion(const CDXLNode *dxlnode, ULONG cte_id, BOOL below_motion)
+ReadsCTEBelowMotion(const CDXLNode *dxlnode, ULONG cte_id, BOOL on_segments)
 {
-	switch (dxlnode->GetOperator()->GetDXLOperator())
+	CDXLOperator *dxlop = dxlnode->GetOperator();
+	switch (dxlop->GetDXLOperator())
 	{
 		case EdxlopPhysicalMotionGather:
 		case EdxlopPhysicalMotionBroadcast:
 		case EdxlopPhysicalMotionRedistribute:
 		case EdxlopPhysicalMotionRoutedDistribute:
 		case EdxlopPhysicalMotionRandom:
-			below_motion = true;
+		{
+			const IntPtrArray *senders =
+				CDXLPhysicalMotion::Cast(dxlop)->GetInputSegIdsArray();
+
+			on_segments = !(gpdb::CoordinatorSlicesReadCTEs() &&
+							1 == senders->Size() && 0 > *((*senders)[0]));
 			break;
+		}
 		case EdxlopPhysicalCTEConsumer:
-			if (below_motion &&
-				cte_id ==
-					CDXLPhysicalCTEConsumer::Cast(dxlnode->GetOperator())->Id())
+			if (on_segments &&
+				cte_id == CDXLPhysicalCTEConsumer::Cast(dxlop)->Id())
 			{
 				return true;
 			}
@@ -211,7 +221,7 @@ ReadsCTEBelowMotion(const CDXLNode *dxlnode, ULONG cte_id, BOOL below_motion)
 	const ULONG arity = dxlnode->Arity();
 	for (ULONG ul = 0; ul < arity; ul++)
 	{
-		if (ReadsCTEBelowMotion((*dxlnode)[ul], cte_id, below_motion))
+		if (ReadsCTEBelowMotion((*dxlnode)[ul], cte_id, on_segments))
 		{
 			return true;
 		}

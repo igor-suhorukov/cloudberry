@@ -266,6 +266,14 @@ typedef struct MotionState
 	FmgrInfo   *inprocs;
 	Oid		   *inparams;
 
+	/*
+	 * The coordinator's own slices this Gather relayed, run here: ended with
+	 * it, as the executor ends a plan's nodes with the plan.  A CTE the
+	 * coordinator produces is read through the first CteScan started, whose
+	 * end frees the rows the others read (ExecEndCteScan()).
+	 */
+	List	   *relayed_states;	/* PlanState */
+
 	/* The coordinator, streaming: the slices below, and their readers. */
 	bool		streaming;
 	List	   *stream_slices;	/* StreamSlice */
@@ -2298,7 +2306,12 @@ motion_relay(MotionState *gather, CustomScan *motion, int to)
 				if (bufs[i].len >= MOTION_BATCH_BYTES)
 					motion_flush(gather->key, slice, i, &bufs[i], shared);
 		}
-		ExecEndNode(ps);
+		{
+			MemoryContext oldcxt = MemoryContextSwitchTo(estate->es_query_cxt);
+
+			gather->relayed_states = lappend(gather->relayed_states, ps);
+			MemoryContextSwitchTo(oldcxt);
+		}
 	}
 	else
 	{
@@ -3253,6 +3266,9 @@ motion_end(CustomScanState *node)
 			ExecDropSingleTupleTableSlot(state->segslots[i]);
 		ExecDropSingleTupleTableSlot(state->receive);
 	}
+	foreach_ptr(PlanState, ps, state->relayed_states)
+		ExecEndNode(ps);
+	state->relayed_states = NIL;
 	if (outerPlanState(node) != NULL)
 		ExecEndNode(outerPlanState(node));
 }

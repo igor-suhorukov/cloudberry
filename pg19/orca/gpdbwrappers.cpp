@@ -3034,6 +3034,19 @@ gpdb::CanShareAcrossSlices(void)
 	return false;
 }
 
+bool
+gpdb::CoordinatorSlicesReadCTEs(void)
+{
+	GP_WRAP_START;
+	{
+		const GpCoreApi *api = motion_api();
+
+		return api != nullptr && api->version_minor >= 11;
+	}
+	GP_WRAP_END;
+	return false;
+}
+
 Plan *
 gpdb::MakeSequence(Plan *plan, List *producers)
 {

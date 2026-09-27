@@ -1715,6 +1715,19 @@ $((n + 1))" ] && ok "a serial column's values, taken on the segments from the co
 	shared_relayed "... and where it reads a temporary table" \
 		"CREATE TEMP TABLE sht AS SELECT * FROM sh DISTRIBUTED BY (a); ANALYZE sht;" sht
 
+	# A CTE the coordinator's slice produces -- an aggregate of gathered
+	# rows, a LIMIT of them -- is PostgreSQL's, in the coordinator's process,
+	# and ORCA's slices that send the coordinator's rows to the segments read
+	# it there: the Gather above relays them in that process (gp_motion.c),
+	# and keeps each to its end, the first CteScan holding what the others
+	# read.
+	orca_same "a CTE the coordinator produces, read by two of its slices that send to the segments" \
+		"WITH m(mx) AS (SELECT max(b) FROM sh) SELECT count(*), sum(sh.b) FROM sh, m WHERE sh.b < (SELECT mx FROM m) AND sh.b > m.mx - 500;" \
+		"CTE Scan on cte0 cte0_1"
+	orca_same "... and a LIMIT's, sent one way and the other" \
+		"WITH l AS (SELECT a, b FROM sh ORDER BY b LIMIT 20) SELECT count(*), sum(l1.b) FROM l l1 JOIN sh USING (a) JOIN l l2 ON l2.b = sh.b;" \
+		"CTE Scan on cte0 cte0_1"
+
 	# gp_segment_id is ORCA's system column, which its plan computes where
 	# the row is read: a query naming it is ORCA's, a random table's
 	# included, in a join too, where PostgreSQL's gather cannot give it; a
