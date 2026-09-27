@@ -40,12 +40,15 @@
  *
  * The nodes themselves change while the cluster runs too, on the coordinator
  * alone: a mirror or a standby added, one removed, a failed one recovered
- * somewhere else -- Cloudberry's segment administration functions, which its
- * tools call (gp_segadmin.c).  Such a change is written to the file first,
- * which a node started after it reads, and then to the coordinator's live
- * copy, whose room is fixed as the server starts: a primary and a mirror for
- * each content, the coordinator and a standby.  A place with no node in it
- * has dbid 0.
+ * somewhere else, a segment added by gpexpand or the last one removed by
+ * gpshrink -- Cloudberry's segment administration functions, which its tools
+ * call (gp_segadmin.c).  Such a change is written to the file first, which a
+ * node started after it reads, and then to the coordinator's live copy, whose
+ * room is fixed as the server starts: a primary and a mirror for each
+ * content the cluster may grow to (gp.max_segments), the coordinator and a
+ * standby.  A place with no node in it has dbid 0.  The number of segments
+ * is kept beside the nodes, and a backend takes it once a transaction, with
+ * no gang in use (GpClusterAdoptSegments).
  *
  *-------------------------------------------------------------------------
  */
@@ -143,11 +146,37 @@ extern bool GpClusterPublish(const GpClusterNodeState *states);
 
 /*
  * gpexpand's version of the cluster, Cloudberry's gp_expand_version: 0 as
- * the server starts, bumped by gp_expand_bump_version().  0 on a server of
- * no cluster.
+ * the server starts, bumped by gp_expand_bump_version() and as a segment is
+ * added or removed.  0 on a server of no cluster.  And the version this
+ * backend's number of segments is of.
  */
 extern uint64 GpClusterExpandVersion(void);
 extern void GpClusterBumpExpandVersion(void);
+extern uint64 GpClusterAdoptedExpandVersion(void);
+
+/*
+ * Has a segment been added or removed, or gpexpand's version bumped, since
+ * this backend took the number of segments?  GpClusterAdoptSegments() takes
+ * it, and the primaries of the contents it counts: true when anything was
+ * new.  A dispatcher takes it with no gang open, as a transaction begins:
+ * the gang's connections point at the primaries.
+ */
+extern bool GpClusterSegmentsChanged(void);
+extern bool GpClusterAdoptSegments(void);
+
+/*
+ * On the coordinator, once in each transaction, as a backend first asks for
+ * the segments -- the getters here call it, and a dispatcher does before it
+ * uses the gang it has -- whether it takes those changed since: the decider
+ * says, which gp_expand.c registers.  Nothing in the transaction has used
+ * the number before.
+ */
+typedef void (*GpClusterDecider) (void);
+extern void GpClusterSetDecider(GpClusterDecider decider);
+extern void GpClusterDecideSegments(void);
+
+/* How many segments the cluster may grow to while it runs; 0 on one node. */
+extern int	GpClusterMaxSegments(void);
 
 /*
  * Changing the nodes, on the coordinator: gp_segadmin.c's.  Between
@@ -183,9 +212,18 @@ extern int	GpClusterSessionId(void);
 /*
  * How many segments to compute with.  Never 0 -- consumers divide by it; see
  * gp_core_api.h -- so a server with no segments answers 1, as Cloudberry's own
- * getgpsegmentCount() does for a singleton.
+ * getgpsegmentCount() does for a singleton.  On the coordinator the number
+ * this backend last took; in a segment process its coordinator backend's.
  */
 extern int	GpClusterSegmentCount(void);
+
+/*
+ * How many segments the cluster has now, whatever this backend took: what a
+ * distribution policy that names no number spreads its rows over.  Another
+ * number than the above only in a session that kept the old one when a
+ * segment was added or removed (gp_expand.c).
+ */
+extern int	GpClusterSegmentCountNow(void);
 
 /* Are there no segments at all?  The question the count cannot answer. */
 extern bool GpClusterIsSingleNode(void);

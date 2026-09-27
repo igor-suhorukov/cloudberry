@@ -739,18 +739,20 @@ gdd_round(void)
 	ListCell   *lc;
 	List	   *victims;
 
-	segs = GpClusterSegments(&nsegs);
-
-	/* A primary FTS failed over from is asked nothing more. */
-	if (GpClusterRefresh())
+	/*
+	 * A primary FTS failed over from is asked nothing more, nor a segment
+	 * gpshrink removed; one gpexpand added is asked too.
+	 */
+	if (GpClusterAdoptSegments() || GpClusterRefresh())
 	{
-		for (int s = 0; s < nsegs; s++)
+		for (int s = 0; s < GpClusterMaxSegments(); s++)
 		{
 			if (gdd_conns[s] != NULL)
 				libpqsrv_disconnect(gdd_conns[s]);
 			gdd_conns[s] = NULL;
 		}
 	}
+	segs = GpClusterSegments(&nsegs);
 
 	for (int s = 0; s < nsegs; s++)
 	{
@@ -832,7 +834,6 @@ void
 GpGddMain(Datum main_arg)
 {
 	MemoryContext round_cxt;
-	int			nsegs;
 
 	pqsignal(SIGHUP, SignalHandlerForConfigReload);
 	pqsignal(SIGTERM, die);
@@ -845,9 +846,9 @@ GpGddMain(Datum main_arg)
 	CommitTransactionCommand();
 
 	gdd_attach();
-	GpClusterSegments(&nsegs);
 	gdd_conns = MemoryContextAllocZero(TopMemoryContext,
-									   Max(nsegs, 1) * sizeof(PGconn *));
+									   Max(GpClusterMaxSegments(), 1) *
+									   sizeof(PGconn *));
 	round_cxt = AllocSetContextCreate(TopMemoryContext, "gp_core deadlock detector",
 									  ALLOCSET_DEFAULT_SIZES);
 

@@ -342,7 +342,8 @@ _PG_init(void)
 	 * gpexpand's catalog lock, which every statement that changes a catalog
 	 * on the coordinator takes (gp_expand.c): last of gp_core's utility
 	 * hooks, so that it is the first to see the statement, before any of
-	 * them has changed anything.
+	 * them has changed anything.  And what decides whether a session takes
+	 * the segments gpexpand added or gpshrink removed.
 	 */
 	GpExpandInit();
 

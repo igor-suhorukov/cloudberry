@@ -69,6 +69,7 @@
 #include "utils/syscache.h"
 #include "utils/typcache.h"
 
+#include "gp_cluster.h"
 #include "gp_core_api.h"
 #include "gp_hash.h"
 #include "gp_label.h"
@@ -370,16 +371,19 @@ GpPolicyOpclassByName(const char *name)
 
 /*
  * How many segments the label spreads the rows over: its numsegments key, or
- * every segment.  Through the published API rather than gp_core.c's static
- * function, so that this file reads the same number every other module does;
- * it is never 0, and a consumer divides by it (see gp_core_api.h).
+ * every segment there is now.  Through the published API rather than
+ * gp_core.c's static function, so that this file reads the same number every
+ * other module does; it is never 0, and a consumer divides by it (see
+ * gp_core_api.h).
  *
  * More segments than the cluster has cannot be read: the rows on the ones
  * missing are nowhere to be found.  Cloudberry refuses such a table in a
  * transaction that cannot see the segments an expansion added, which is how
- * it comes by one; here a label written so is how, and it is refused the
- * same, unless "check" is off, for gp_distribution_policy, which reports the
- * label as it is.
+ * it comes by one; here too -- a session that keeps the number it had
+ * before gpexpand added a segment (gp_expand.c) finds a table made since,
+ * whose label has no key, spread over more than it knows -- and a label
+ * written so is another way, and each is refused the same, unless "check"
+ * is off, for gp_distribution_policy, which reports the label as it is.
  */
 static int
 policy_numsegments(const ObjectAddress *addr, bool check)
@@ -390,12 +394,13 @@ policy_numsegments(const ObjectAddress *addr, bool check)
 	char	   *end;
 	long		n;
 
-	if (value == NULL)
-		return cluster;
-
 	errno = 0;
-	n = strtol(value, &end, 10);
-	if (errno != 0 || *end != '\0' || end == value || n < 1 || n > INT_MAX)
+	if (value == NULL)
+		n = GpClusterSegmentCountNow();
+	else
+		n = strtol(value, &end, 10);
+	if (value != NULL &&
+		(errno != 0 || *end != '\0' || end == value || n < 1 || n > INT_MAX))
 		ereport(ERROR,
 				(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
 				 errmsg("invalid numsegments \"%s\" in the distribution policy of \"%s\"",

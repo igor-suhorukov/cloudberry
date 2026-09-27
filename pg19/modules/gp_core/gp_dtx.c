@@ -2505,8 +2505,10 @@ recovery_round(int min_age, bool startup)
 	/*
 	 * The primaries FTS last published: a part prepared on a primary it
 	 * failed over from is on the mirror it promoted, from PREPARE's WAL.
+	 * And the segments gpexpand added, or gpshrink left.
 	 */
-	(void) GpClusterRefresh();
+	if (!GpClusterAdoptSegments())
+		(void) GpClusterRefresh();
 	segs = GpClusterSegments(&nsegs);
 	for (int s = 0; s <= nsegs; s++)
 	{

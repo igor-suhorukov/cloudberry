@@ -56,7 +56,8 @@ dbid()    { echo $(($1 + 1)); }
 content() { [ "$1" -eq 0 ] && echo -1 || echo $(($1 - 1)); }
 
 cleanup() {
-	for n in 0 1 2; do
+	# node 3 is the segment section 18 adds to the running cluster
+	for n in 0 1 2 3; do
 		"$BINDIR/pg_ctl" -D "$(datadir $n)" -m immediate stop >/dev/null 2>&1
 	done
 	rm -rf "$ROOT"
@@ -4711,10 +4712,105 @@ t
 	[ "$out|$out2" = "Success:|ERROR:  canceling MPP operation" ] \
 		&& ok "a segment's cancel is Cloudberry's QE's: canceling MPP operation" \
 		|| notok "a segment's cancel" "$out / $out2"
+
+	###########################################################################
+	echo "18. a segment added to the running cluster, and removed"
+	###########################################################################
+	# As gpexpand adds one, by hand: every table of the database given the
+	# number of segments it is on (gp.expand_pin_numsegments()); node 3,
+	# content 2, a copy of the coordinator -- its catalogs, and none of the
+	# rows, which are the segments' -- started with its line in the file
+	# every node reads; then added with gp_add_segment(), and taken by each
+	# session as its next transaction begins (gp_expand.c).  And as gpshrink
+	# removes it, the rows moved off it first.
+	add3="SELECT gp_add_segment($(dbid 3)::int2, $(content 3)::int2, 'p', 'p', 'n', 'u', $(port 3), '$(sockdir 3)', '$(sockdir 3)', '$(datadir 3)');"
+	psql0="$PSQL -X -q -t -A -h $(sockdir 0) -p $(port 0) -d postgres"
+	out=$(q 0 "CREATE TABLE ex_old (a int) DISTRIBUTED BY (a); INSERT INTO ex_old SELECT generate_series(1, 30);
+			   SELECT gp.expand_pin_numsegments() > 0; SELECT gp.expand_pin_numsegments();
+			   SELECT label FROM pg_seclabels WHERE objoid = 'ex_old'::regclass AND provider = 'gp';" | tr '\n' ' ')
+	[ "$out" = "t 0 distributed_by=(a),numsegments=2 " ] \
+		&& ok "gp.expand_pin_numsegments() names the two segments in each table's label, once" \
+		|| notok "gp.expand_pin_numsegments()" "$out"
+	mkdir -p "$(sockdir 3)"
+	if "$BINDIR/pg_basebackup" -D "$(datadir 3)" -h "$(sockdir 0)" -p "$(port 0)" \
+		   -X stream -c fast > "$ROOT/basebackup3.log" 2>&1; then
+		rm -f "$(datadir 3)"/gpsegconfig_dump*
+		echo "$(dbid 3) $(content 3) p $(sockdir 3) $(port 3) $(datadir 3)" >> "$CONF"
+		start_node 3 || notok "node 3 starts" "$(tail -5 "$ROOT/node3.log")"
+	else
+		notok "the coordinator copied for node 3" "$(tail -5 "$ROOT/basebackup3.log")"
+	fi
+
+	# A session that has reached the two segments with a temporary table, and
+	# the segment added in another: it keeps the two while it has the table,
+	# whose parts its gang's backends hold, and takes the third once DISCARD
+	# TEMP has dropped it; the segments compute with three too.  A statement
+	# it prepared before is planned again for three.  The table made
+	# before stays on two until EXPAND TABLE, and one made after is on three.
+	out=$(printf '%s\n' \
+		"CREATE TEMP TABLE ex_tmp (a int) DISTRIBUTED BY (a);" \
+		"SELECT count(*) FROM ex_old, gp_dist_random('gp_id') \\parse ex_ps" \
+		"\\bind_named ex_ps \\g" \
+		"\\! $psql0 -c \"BEGIN\" -c \"$add3\" -c \"COMMIT\" 2>&1 | grep -v '^NOTICE' | tr '\\n' ' '" \
+		"SELECT count(*) FROM gp_dist_random('gp_id');" \
+		"DISCARD TEMP;" \
+		"\\bind_named ex_ps \\g" \
+		"SELECT string_agg(n.content_id || ':' || n.segments, ',' ORDER BY n.content_id) FROM (SELECT (gp.node()).* FROM gp_dist_random('gp_id')) n;" \
+		"SELECT count(DISTINCT gp_segment_id) || ' ' || count(*) FROM ex_old;" \
+		"ALTER TABLE ex_old EXPAND TABLE;" \
+		"SELECT count(DISTINCT gp_segment_id) || ' ' || count(*) FROM ex_old;" \
+		"CREATE TABLE ex_new (a int) DISTRIBUTED BY (a);" \
+		"INSERT INTO ex_new SELECT generate_series(1, 30);" \
+		"SELECT count(DISTINCT gp_segment_id) || ' ' || count(*) FROM ex_new;" \
+		"SELECT string_agg(numsegments::text, ' ' ORDER BY localoid) FROM gp_distribution_policy WHERE localoid IN ('ex_old'::regclass, 'ex_new'::regclass);" | qf 0 | tr '\n' '/')
+	[ "$out" = "60/4 2/90/0:3,1:3,2:3/2 30/3 30/3 30/3 3/" ] \
+		&& ok "a session takes the segment added as its next transaction begins, once it has no temporary table: an old table stays on two until EXPAND TABLE" \
+		|| notok "a segment added while a session is idle" "$out"
+	out=$(q 0 "SELECT segments FROM gp.node(); SELECT count(*) FROM gp_segment_configuration WHERE content = $(content 3) AND role = 'p' AND status = 'u';" | tr '\n' ' ')
+	[ "$out" = "3 1 " ] && ok "a new session has three segments, the new one up in gp_segment_configuration" \
+		|| notok "a new session after the segment was added" "$out"
+
+	# A session that kept the old segments may change no catalog, as
+	# Cloudberry's may not: gpexpand's version bumped under a session with a
+	# temporary table ends it at its next DDL.
+	out=$(printf '%s\n' \
+		"CREATE TEMP TABLE ex_tmp (a int) DISTRIBUTED BY (a);" \
+		"\\! $psql0 -c \"SELECT gp_expand_bump_version()\"" \
+		"CREATE TABLE ex_fatal (a int);" | qf 0 | grep -o 'FATAL:.*')
+	[ "$out" = "FATAL:  cluster is expanded from version 1 to 2, catalog changes are disallowed" ] \
+		&& ok "a session that kept the old segments is ended at its next catalog change" \
+		|| notok "a catalog change in a session that kept the old segments" "$out"
+
+	out=$(q 0 "BEGIN; SELECT gp_add_segment(9::int2, 4::int2, 'p', 'p', 'n', 'u', $(port 3), '$(sockdir 3)', '$(sockdir 3)', '$ROOT/nowhere'); COMMIT;" 2>&1 | grep -o 'ERROR:.*')
+	out2=$(q 0 "BEGIN; SELECT gp_add_segment(9::int2, 64::int2, 'p', 'p', 'n', 'u', $(port 3), '$(sockdir 3)', '$(sockdir 3)', '$ROOT/nowhere'); COMMIT;" 2>&1 | grep -o 'ERROR:.*')
+	out3=$(q 0 "SELECT gp_remove_segment($(dbid 1)::int2);" 2>&1 | grep -o 'ERROR:.*')
+	[ "$out|$out2|$out3" = "ERROR:  content 3 would have no node|ERROR:  the cluster has no room for content 64|ERROR:  content 0 would have no node" ] \
+		&& ok "a segment is added after the last, within gp.max_segments, and only the last is removed" \
+		|| notok "the checks of a segment added or removed" "$out / $out2 / $out3"
+
+	# gpshrink's way back: the rows moved to the first two, then the segment
+	# removed and stopped; the session that had three takes two.
+	out=$(printf '%s\n' \
+		"ALTER TABLE ex_old SHRINK TABLE TO 2;" \
+		"ALTER TABLE ex_new SHRINK TABLE TO 2;" \
+		"SELECT count(DISTINCT gp_segment_id) || ' ' || count(*) FROM ex_new;" \
+		"\\! $psql0 -c \"SELECT gp_remove_segment($(dbid 3)::int2)\" 2>&1 | tr '\\n' ' '" \
+		"SELECT segments FROM gp.node();" \
+		"SELECT count(*) FROM ex_new;" | qf 0 | tr '\n' '/')
+	"$BINDIR/pg_ctl" -D "$(datadir 3)" -m fast stop > /dev/null 2>&1
+	[ "$out" = "2 30/t 2/30/" ] \
+		&& ok "the rows moved off it, the segment removed: a session with a gang to three takes two" \
+		|| notok "a segment removed" "$out"
+	out=$(q 0 "SELECT segments FROM gp.node(); SELECT count(*) FROM gp_segment_configuration;
+			   SELECT count(DISTINCT gp_segment_id) || ' ' || count(*) FROM ex_old; SELECT count(*) FROM ex_new;
+			   DROP TABLE ex_old, ex_new;" | tr '\n' ' ')
+	out2=$(grep -c "^$(dbid 3) " "$CONF")
+	[ "$out|$out2" = "2 3 2 30 30 |0" ] && ok "and every session has two again, the tables their rows, the file no line of it" \
+		|| notok "the cluster after the segment was removed" "$out / $out2"
 fi
 
 ###############################################################################
-echo "18. a cluster described wrongly is a server that does not start"
+echo "19. a cluster described wrongly is a server that does not start"
 ###############################################################################
 # The message has to name the file and the line: this is read in the
 # postmaster while it starts, so it is all the operator is given.
@@ -4784,7 +4880,7 @@ refuses "a file that is not there is refused" \
 	"gp.cluster_config = '$ROOT/nowhere.conf'"
 
 ###############################################################################
-echo "19. with no cluster configured, this is a single node"
+echo "20. with no cluster configured, this is a single node"
 ###############################################################################
 if start_node 0 "gp.cluster_config = ''" ; then
 	notok "node 0 should not have started: gp.role is dispatch with no cluster"

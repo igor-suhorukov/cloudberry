@@ -2097,11 +2097,12 @@ LANGUAGE C VOLATILE;
 /*
  * Cloudberry's segment administration functions (gp_segadmin.c), which its
  * tools call to add, remove and put elsewhere the cluster's mirrors and its
- * standby: on the coordinator, by a superuser, in a transaction -- the
- * session sees its changes at once, the others once it commits, when they
- * are written to the cluster configuration file and the coordinator's live
- * copy of it; a rollback undoes them.  Their names and arguments are
- * Cloudberry's; none is granted to anybody.
+ * standby, and to add and remove its segments: on the coordinator, by a
+ * superuser, in a transaction -- the session sees its changes at once, the
+ * others once it commits, when they are written to the cluster
+ * configuration file and the coordinator's live copy of it; a rollback
+ * undoes them.  Their names and arguments are Cloudberry's; none is granted
+ * to anybody.
  */
 CREATE FUNCTION pg_catalog.gp_add_segment_primary(text, text, int4, text)
 RETURNS int2
@@ -3536,6 +3537,18 @@ RETURNS void
 AS 'MODULE_PATHNAME', 'gp_expand_bump_version'
 LANGUAGE C VOLATILE PARALLEL RESTRICTED;
 
+/*
+ * gp.expand_pin_numsegments(): every distributed table of this database
+ * whose policy names no number of segments given this session's, before
+ * gpexpand adds a segment, which would otherwise count the table's rows as
+ * spread over it too; how many there were.  The port's own.
+ */
+CREATE FUNCTION gp.expand_pin_numsegments()
+RETURNS int4
+AS 'MODULE_PATHNAME', 'gp_expand_pin_numsegments'
+LANGUAGE C VOLATILE PARALLEL RESTRICTED;
+
 REVOKE ALL ON FUNCTION pg_catalog.gp_expand_lock_catalog(),
-	pg_catalog.gp_expand_bump_version()
+	pg_catalog.gp_expand_bump_version(),
+	gp.expand_pin_numsegments()
 	FROM PUBLIC;

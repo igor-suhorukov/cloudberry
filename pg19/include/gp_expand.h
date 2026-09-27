@@ -25,7 +25,11 @@
 #ifndef GP_EXPAND_H
 #define GP_EXPAND_H
 
-/* The catalog lock's hook, installed last of gp_core's utility hooks. */
+/*
+ * The catalog lock's hook, installed last of gp_core's utility hooks, and
+ * what decides whether a session takes the segments changed as a
+ * transaction begins (GpClusterDecideSegments()).
+ */
 extern void GpExpandInit(void);
 
 #endif							/* GP_EXPAND_H */
