@@ -215,12 +215,25 @@ GpHashSegment(GpHash *h, const Datum *values, const bool *isnull)
 		return GP_HASH_ALL_SEGMENTS;
 
 	/*
-	 * No key: a random segment, as Cloudberry's cdbhashrandomseg() chooses
-	 * one.  Its modulo favours low segments by one part in 2^31 / n, which it
-	 * says is acceptable, and is here.
+	 * No key: the segments in turn, from one chosen at random with the first
+	 * row, as the port's Redistribute Motion deals a random one's rows
+	 * (gp_motion.c).  Cloudberry chooses each row's segment at random
+	 * (cdbhashrandomseg()), so that a statement's few rows may miss a
+	 * segment -- ten rows one of three, one statement in nineteen -- which
+	 * its commit does not show, as it prepares every segment its write went
+	 * to, and the port's would: it prepares the parts that wrote.  In turn,
+	 * a statement of as many rows as segments reaches every one.
 	 */
 	if (h->nattrs == 0)
-		return (int) (pg_prng_uint32(&pg_global_prng_state) % (uint32) h->numsegs);
+	{
+		int			seg;
+
+		if (h->turn == 0)
+			h->turn = pg_prng_uint32(&pg_global_prng_state) % (uint32) h->numsegs + 1;
+		seg = (int) (h->turn - 1);
+		h->turn = (uint32) (seg + 1) % (uint32) h->numsegs + 1;
+		return seg;
+	}
 
 	if (h->legacy)
 	{

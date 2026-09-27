@@ -53,6 +53,8 @@ typedef struct GpHash
 	AttrNumber *attrs;			/* the key's columns, in the relation */
 	FmgrInfo   *hashfuncs;		/* and each one's hash function */
 	bool		legacy;			/* hashed as Cloudberry's legacy cdbhash */
+	uint32		turn;			/* no key: 1 + the next row's segment, 0
+								 * before the first row */
 } GpHash;
 
 /*
@@ -71,7 +73,8 @@ extern void GpHashSetFunction(GpHash *h, int i, Oid funcid);
 /*
  * The segment for a row whose columns are values[]/isnull[], indexed as the
  * relation's attributes are, from 0.  GP_HASH_ALL_SEGMENTS for a replicated
- * table; a random segment for a randomly distributed one.
+ * table; for a randomly distributed one, the segments in turn, from one
+ * chosen at random with the first row.
  */
 extern int	GpHashSegment(GpHash *h, const Datum *values, const bool *isnull);
 
