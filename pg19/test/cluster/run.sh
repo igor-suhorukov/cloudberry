@@ -2796,6 +2796,33 @@ COMMIT;"
 		&& ok "and now() and CURRENT_TIMESTAMP on the segments are the coordinator's transaction start" \
 		|| notok "now() in a condition sent to the segments" "$out"
 
+	# A correlated scalar subquery of an aggregate, which the planner would
+	# run for each row -- a gather of the table at each -- is a join with its
+	# rows grouped by the correlation, as Cloudberry's planner makes it
+	# (gp_subselect.c): TPC-H's query 20.  Where the subquery's value over
+	# no rows is not NULL -- count() -- it stays a subquery.  The answers are
+	# the subquery's own, which OFFSET 0 keeps one.
+	q 0 "CREATE TABLE cps (pk int, sk int, qty int) DISTRIBUTED BY (pk);
+	     CREATE TABLE cli (pk int, sk int, n numeric, d date) DISTRIBUTED BY (pk);
+	     INSERT INTO cps SELECT p, s, (p * 7 + s * 13) % 100 FROM generate_series(1, 200) p, generate_series(1, 4) s;
+	     INSERT INTO cli SELECT (i % 250) + 1, (i / 250) % 4 + 1, i % 3, date '1993-06-01' + (i % 900) FROM generate_series(1, 20000) i;
+	     ANALYZE cps; ANALYZE cli;" >/dev/null
+	sub="SELECT 0.5 * sum(n) FROM cli WHERE cli.pk = cps.pk AND cli.sk = cps.sk AND d >= date '1994-01-01' AND d < date '1995-01-01'"
+	plan=$(q 0 "SET gp.optimizer = off; EXPLAIN (COSTS OFF) SELECT count(*) FROM cps WHERE qty > ($sub);" | tr '\n' ' ')
+	joined=$(q 0 "SET gp.optimizer = off; SELECT count(*), sum(qty) FROM cps WHERE qty > ($sub);")
+	perrow=$(q 0 "SET gp.optimizer = off; SELECT count(*), sum(qty) FROM cps WHERE qty > ($sub OFFSET 0);")
+	inner=$(q 0 "SET gp.optimizer = off; SELECT count(*) FROM cps p1 WHERE p1.sk IN (SELECT sk FROM cps WHERE pk < 50 AND (SELECT max(n) FROM cli WHERE cli.pk = cps.pk) < qty);")
+	inner1=$(q 0 "SET gp.optimizer = off; SELECT count(*) FROM cps p1 WHERE p1.sk IN (SELECT sk FROM cps WHERE pk < 50 AND (SELECT max(n) FROM cli WHERE cli.pk = cps.pk OFFSET 0) < qty);")
+	counted=$(q 0 "SET gp.optimizer = off; EXPLAIN (COSTS OFF) SELECT count(*) FROM cps WHERE qty > (SELECT count(*) FROM cli WHERE cli.pk = cps.pk);" | grep -c SubPlan)
+	case "$plan" in
+		*SubPlan*) notok "a correlated scalar subquery of an aggregate as a join" "$plan" ;;
+		*"Group Key: cli.pk, cli.sk"*)
+			[ "$joined" = "$perrow" ] && [ -n "$joined" ] && [ "$inner" = "$inner1" ] && [ "$counted" -ge 1 ] \
+				&& ok "under the planner a correlated scalar subquery of an aggregate is a join with its rows grouped by the correlation, answering as the subquery does; count()'s stays a subquery" \
+				|| notok "a correlated scalar subquery of an aggregate as a join" "$joined / $perrow / $inner / $inner1 / $counted" ;;
+		*) notok "a correlated scalar subquery of an aggregate as a join" "$plan" ;;
+	esac
+
 	# No secret on the coordinator: ORCA is told, and the planner gathers.
 	# None on the segments either -- a segment that has one takes the
 	# coordinator's word only with it, and a transaction's two-phase commit

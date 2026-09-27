@@ -119,6 +119,7 @@
 #include "gp_scan.h"
 #include "gp_segment.h"
 #include "gp_settings.h"
+#include "gp_subselect.h"
 
 /* How much of a COPY's data is sent to libpq at a time. */
 #define ROUTE_CHUNK		65536
@@ -1385,6 +1386,13 @@ gp_modify_planner_routed(Query *parse, const char *query_string, int cursorOptio
 		if (target != NULL)
 			on_conflict = GpExplicitOnConflict(parse, target);
 	}
+
+	/*
+	 * A correlated scalar subquery of an aggregate, whose every run would
+	 * gather a distributed table again, made a join (gp_subselect.c), as
+	 * Cloudberry's planner makes one.
+	 */
+	GpSubselectDecorrelate(parse);
 
 	/* A cursor's gathers bring each row's ctid, for WHERE CURRENT OF. */
 	was_cursor = GpScanSetCursor((cursorOptions & CURSOR_OPT_FAST_PLAN) != 0);
