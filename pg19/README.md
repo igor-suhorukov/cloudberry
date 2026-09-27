@@ -149,7 +149,8 @@ On a cluster (M2), `gp_core` and `gp_orca`:
   sends the coordinator as an INFO of gp_core's as its part ends: the
   segment with the most rows' figures for a fragment's nodes, the WAL of a
   write's statements, each slice's memory and Vmem reserved, a node's
-  Executor Memory, and allstat (`modules/gp_core/gp_explain.c`); and
+  Executor Memory, work_mem and spilling segments, and allstat
+  (`modules/gp_core/gp_explain.c`); and
   **query metrics** (`gp.enable_query_metrics`): each plan node's
   instrumentation in a slot of shared memory on every node, whose process,
   session and statement it says, which Cloudberry's `gp_instrument_shmem`

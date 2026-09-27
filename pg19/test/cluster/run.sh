@@ -1991,10 +1991,11 @@ $((n + 1))" ] && ok "a serial column's values, taken on the segments from the co
 		*) notok "EXPLAIN ANALYZE of a Motion" "$most / $out" ;;
 	esac
 
-	# What the segments' part wrote to the WAL, its slices' memory, and each
+	# What the segments' part wrote to the WAL, its slices' memory, each
 	# segment's run of a node with gp.enable_explain_allstat -- after a
 	# LIMIT above the Motion too, whose segments' part is ended before the
-	# plan is printed -- Cloudberry's words for them all.
+	# plan is printed -- and a sort that spilled, Cloudberry's words for
+	# them all.
 	q 0 "CREATE TABLE ow (a int, b int) DISTRIBUTED BY (a);" >/dev/null
 	out=$(q 0 "EXPLAIN (ANALYZE, WAL, COSTS OFF, TIMING OFF, SUMMARY OFF) INSERT INTO ow SELECT a, b FROM o;
 			   EXPLAIN (ANALYZE, WAL, COSTS OFF, TIMING OFF, SUMMARY OFF) UPDATE ow SET b = b + 1;
@@ -2016,6 +2017,12 @@ $((n + 1))" ] && ok "a serial column's values, taken on the segments from the co
 		*"Seq Scan on o (actual rows=3.00 loops=1)"*"allstat: seg_firststart_total_ntuples/seg0_"*"_3/seg1_"*"_3//end"*)
 			ok "gp.enable_explain_allstat: each segment's run, a LIMIT's left open included" ;;
 		*) notok "gp.enable_explain_allstat under ORCA" "$out" ;;
+	esac
+	out=$(q 0 "EXPLAIN (ANALYZE, VERBOSE, COSTS OFF, TIMING OFF, SUMMARY OFF) SELECT k, repeat(s, 8) r FROM bo ORDER BY r, k;")
+	case "$out" in
+		*"Sort (actual rows="*"work_mem: "*"kB  Segments: 2  Max: "*"kB (segment "*")  Workfile: (2 spilling)"*)
+			ok "a sort that spilled on both segments: Cloudberry's work_mem line" ;;
+		*) notok "EXPLAIN ANALYZE's work_mem line" "$out" ;;
 	esac
 
 	# The Motions between segments.

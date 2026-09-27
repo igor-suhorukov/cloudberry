@@ -358,9 +358,9 @@ skip deadlock  canceling statement due to user request; function gp_dist_wait_st
 skip deadlock2  differs: Cloudberry's NOTICE that a slice prefetches a join's qual is not the port's
 run  workfile/hashagg_spill
 run  workfile/hashjoin_spill
-skip workfile/materialize_spill  differs: EXPLAIN ANALYZE says nothing of Cloudberry's "Workfile: (N spilling)" of a node that spilled, which it counts
-skip workfile/sisc_mat_sort  differs: EXPLAIN ANALYZE says nothing of Cloudberry's "Workfile: (N spilling)" of a node that spilled, which it counts
-skip workfile/sisc_sort_spill  differs: EXPLAIN ANALYZE says nothing of Cloudberry's "Workfile: (N spilling)" of a node that spilled, which it counts
+skip workfile/materialize_spill  differs: optimizer=off, and the planner's route sorts, materializes and hashes on the coordinator, above its gathers, so that no segment spills: EXPLAIN ANALYZE's "work_mem: ... Workfile: (N spilling)", which is of the nodes the segments run, is printed of none
+skip workfile/sisc_mat_sort  differs: optimizer=off, and the planner's route sorts, materializes and hashes on the coordinator, above its gathers, so that no segment spills: EXPLAIN ANALYZE's "work_mem: ... Workfile: (N spilling)", which is of the nodes the segments run, is printed of none
+skip workfile/sisc_sort_spill  differs: optimizer=off, and the planner's route sorts, materializes and hashes on the coordinator, above its gathers, so that no segment spills: EXPLAIN ANALYZE's "work_mem: ... Workfile: (N spilling)", which is of the nodes the segments run, is printed of none
 run  workfile/sort_spill
 run  workfile/spilltodisk
 skip zlib  canceling statement due to user request

@@ -84,9 +84,9 @@
  *					"winner" -- and the WAL of all, so that "never executed"
  *					becomes the segments' "actual"; a write takes its
  *					statements' WAL.  Under each node, Cloudberry's "Executor
- *					Memory" and "allstat" lines; after the plan, each slice's
- *					memory: "(slice1)    Executor memory: ...  Vmem reserved:
- *					...".
+ *					Memory", "work_mem ... Workfile: (N spilling)" and
+ *					"allstat" lines; after the plan, each slice's memory:
+ *					"(slice1)    Executor memory: ...  Vmem reserved: ...".
  *
  * Cloudberry sources this file stands in for:
  *	  src/backend/commands/explain.c (the options, ExplainPrintSliceTable()
@@ -109,6 +109,7 @@
 #include "commands/explain_state.h"
 #include "common/base64.h"
 #include "executor/executor.h"
+#include "executor/hashjoin.h"
 #include "executor/instrument.h"
 #include "nodes/execnodes.h"
 #include "nodes/extensible.h"
@@ -122,6 +123,8 @@
 #include "utils/guc.h"
 #include "utils/memutils.h"
 #include "utils/timestamp.h"
+#include "utils/tuplesort.h"
+#include "utils/tuplestore.h"
 
 #include "gp_cluster.h"
 #include "gp_core_api.h"
@@ -594,6 +597,7 @@ print_slice_table(GpExplainSlice *slices, int n, ExplainState *es)
 typedef struct GpReportNode
 {
 	int32		plan_node_id;
+	bool		spilled;		/* its work_mem ran out, and it wrote to disk */
 	double		ntuples;
 	double		ntuples2;
 	double		nloops;
@@ -603,6 +607,7 @@ typedef struct GpReportNode
 	int64		total_ns;
 	TimestampTz firststart;		/* 0 where not asked for */
 	int64		execmem;		/* its own context's bytes, 0 where not asked */
+	int64		workmem;		/* bytes of work_mem a Sort, hash or Material used */
 	int64		nsearches;		/* an index scan's searches */
 	WalUsage	wal;
 } GpReportNode;
@@ -647,6 +652,7 @@ typedef struct SliceStats
 	bool	   *seen;			/* by content */
 	int64	   *execmem;
 	int64	   *vmem;
+	int64		workmem;		/* the most any of its nodes used */
 } SliceStats;
 
 /*
@@ -934,6 +940,72 @@ asked_options(QueryDesc *queryDesc, int *kind, int *serial)
 	return 0;
 }
 
+/*
+ * The work_mem a Sort, a hash join, a hashed Agg or a Material used, and
+ * whether it spilled -- the four Cloudberry says so of
+ * (nodeSupportWorkfileCaching()) -- as PostgreSQL 19's own EXPLAIN reads
+ * them.  A sort that spilled says only the disk it wrote, which is what it
+ * gives, where Cloudberry's gives its memory's peak.
+ */
+static void
+node_work_mem(PlanState *ps, GpReportNode *n)
+{
+	switch (nodeTag(ps))
+	{
+		case T_SortState:
+			{
+				SortState  *sort = (SortState *) ps;
+				TuplesortInstrumentation stats;
+
+				if (!sort->sort_Done || sort->tuplesortstate == NULL)
+					break;
+				tuplesort_get_stats((Tuplesortstate *) sort->tuplesortstate, &stats);
+				n->workmem = stats.spaceUsed * 1024;
+				n->spilled = stats.spaceType == SORT_SPACE_TYPE_DISK;
+				break;
+			}
+		case T_MaterialState:
+			{
+				MaterialState *mat = (MaterialState *) ps;
+				char	   *type;
+				int64		space;
+
+				if (mat->tuplestorestate == NULL)
+					break;
+				tuplestore_get_stats(mat->tuplestorestate, &type, &space);
+				n->workmem = space;
+				n->spilled = strcmp(type, "Disk") == 0;
+				break;
+			}
+		case T_HashJoinState:
+			{
+				HashJoinTable table = ((HashJoinState *) ps)->hj_HashTable;
+				HashState  *hash = (HashState *) innerPlanState(ps);
+
+				if (table != NULL)
+				{
+					n->workmem = table->spacePeak;
+					n->spilled = table->nbatch > 1;
+				}
+				else if (hash != NULL && hash->hinstrument != NULL)
+				{
+					n->workmem = hash->hinstrument->space_peak;
+					n->spilled = hash->hinstrument->nbatch > 1;
+				}
+				break;
+			}
+		case T_AggState:
+			if (((Agg *) ps->plan)->aggstrategy == AGG_HASHED)
+			{
+				n->workmem = ((AggState *) ps)->hash_mem_peak;
+				n->spilled = ((AggState *) ps)->hash_disk_used > 0;
+			}
+			break;
+		default:
+			break;
+	}
+}
+
 static uint64
 node_searches(PlanState *ps)
 {
@@ -979,6 +1051,7 @@ node_figures(PlanState *ps, GpExplainQuery *q, GpReportNode *n)
 		n->firststart = q->firststart[id];
 	if (q->contexts != NULL && id >= 0 && id < q->nnodes && q->contexts[id] != NULL)
 		n->execmem = MemoryContextMemAllocated(q->contexts[id], true);
+	node_work_mem(ps, n);
 }
 
 typedef struct ReportWalk
@@ -1197,6 +1270,7 @@ add_figures(SegFigures *to, const GpReportNode *n)
 		to->seen = true;
 		return;
 	}
+	t->spilled |= n->spilled;
 	t->ntuples += n->ntuples;
 	t->ntuples2 += n->ntuples2;
 	t->nloops += n->nloops;
@@ -1207,6 +1281,7 @@ add_figures(SegFigures *to, const GpReportNode *n)
 	if (n->firststart != 0 && (t->firststart == 0 || n->firststart < t->firststart))
 		t->firststart = n->firststart;
 	t->execmem = Max(t->execmem, n->execmem);
+	t->workmem = Max(t->workmem, n->workmem);
 	t->nsearches += n->nsearches;
 	wal_add(&t->wal, &n->wal);
 }
@@ -1278,6 +1353,8 @@ take_report(GpExplainQuery *q, RawReport *r)
 	s->seen[hdr.content] = true;
 	s->execmem[hdr.content] = Max(s->execmem[hdr.content], hdr.execmem);
 	s->vmem[hdr.content] = Max(s->vmem[hdr.content], hdr.vmem);
+	for (int i = 0; i < hdr.nnodes; i++)
+		s->workmem = Max(s->workmem, nodes[i].workmem);
 	pfree(nodes);
 }
 
@@ -1530,8 +1607,11 @@ format_ms(double ms, bool unit)
  * What the segments did of a node (cdbexplain_showExecStats()): its memory
  * and the coordinator's, under explain_memory_verbosity = detail -- a
  * gather of the planner's route has both, Cloudberry's Gather Motion and
- * the scan below it -- and each segment's run, with
- * gp.enable_explain_allstat.
+ * the scan below it -- its work_mem and how many segments spilled, with
+ * VERBOSE, and each segment's run, with gp.enable_explain_allstat.  Never
+ * a node's the coordinator alone ran but its memory: "(segment -1)" of a
+ * work_mem line would not be Cloudberry's, whose nodes that spill run on
+ * the segments.
  */
 static void
 print_node_statistics(PlanState *ps, ExplainState *es)
@@ -1564,6 +1644,38 @@ print_node_statistics(PlanState *ps, ExplainState *es)
 		if (es->format == EXPLAIN_FORMAT_TEXT || theirs.vcnt == 0)
 			print_memory(&own, es);
 		print_memory(&theirs, es);
+	}
+
+	if (es->verbose && ns->frag != NULL)
+	{
+		StatAgg		used = {0};
+		int			spilling = 0;
+
+		for (int c = 0; c < nsegs; c++)
+		{
+			if (!segs[c].seen)
+				continue;
+			agg_add(&used, segs[c].node.workmem, c);
+			if (segs[c].node.spilled)
+				spilling++;
+		}
+		if (used.vcnt > 0 && es->format == EXPLAIN_FORMAT_TEXT)
+		{
+			ExplainIndentText(es);
+			appendStringInfo(es->str, "work_mem: %ldkB  Segments: %d  Max: %ldkB (segment %d)  Workfile: (%d spilling)\n",
+							 KB(used.vsum), used.vcnt, KB(used.vmax),
+							 used.imax, spilling);
+		}
+		else if (used.vcnt > 0)
+		{
+			ExplainOpenGroup("work_mem", "work_mem", true, es);
+			ExplainPropertyInteger("Used", "kB", KB(used.vsum), es);
+			ExplainPropertyInteger("Segments", NULL, used.vcnt, es);
+			ExplainPropertyInteger("Max Memory", "kB", KB(used.vmax), es);
+			ExplainPropertyInteger("Max Memory Segment", NULL, used.imax, es);
+			ExplainPropertyInteger("Workfile Spilling", NULL, spilling, es);
+			ExplainCloseGroup("work_mem", "work_mem", true, es);
+		}
 	}
 
 	if (gp_enable_explain_allstat && (q->options & GP_EXPLAIN_ALLSTAT) &&
@@ -1704,6 +1816,11 @@ print_slice_statistics(PlannedStmt *plannedstmt, ExplainState *es)
 		print_slice_memory("Executor Memory", "Executor memory: ", &mem, es);
 		if (verbosity > VERBOSITY_SUPPRESS)
 			print_slice_memory("Virtual Memory", "  Vmem reserved: ", &vmem, es);
+		if (s->workmem > 0 && es->format == EXPLAIN_FORMAT_TEXT)
+			appendStringInfo(es->str, "  Work_mem: %.0fK bytes max.",
+							 (double) KB(s->workmem));
+		else if (s->workmem > 0)
+			ExplainPropertyInteger("Work Maximum Memory", "kB", KB(s->workmem), es);
 		if (es->format == EXPLAIN_FORMAT_TEXT)
 			appendStringInfoChar(es->str, '\n');
 		else
