@@ -467,38 +467,35 @@ router_send(GpRouter *r, Tuplestorestate *store, int content)
 	return GpCopyInEnd();
 }
 
-/* Send every segment its rows; answer how many rows the statement wrote. */
+/*
+ * Send every segment its rows; answer how many rows the statement wrote:
+ * those the segments took, which a BEFORE row trigger that answers NULL
+ * leaves fewer than were sent, as PostgreSQL's INSERT and COPY count them.
+ */
 static uint64
 router_finish(GpRouter *r)
 {
+	uint64		total = 0;
+
 	if (r->replicated)
 	{
 		/* Every segment takes every row; the statement wrote each once. */
 		if (r->stores[0] != NULL)
 			for (int seg = 0; seg < r->nsegs; seg++)
-				(void) router_send(r, r->stores[0], seg);
-		return r->nrows;
+				total = router_send(r, r->stores[0], seg);
+		return total;
 	}
 
 	for (int seg = 0; seg < r->nsegs; seg++)
 	{
 		if (r->stores[seg] != NULL)
 		{
-			uint64		took;
-
 			if (r->reached_stmt != NULL)
 				GpReportDtxReached(r->reached_stmt, &seg, 1);
-			took = router_send(r, r->stores[seg], seg);
-
-			if (took != (uint64) tuplestore_tuple_count(r->stores[seg]))
-				ereport(ERROR,
-						(errcode(ERRCODE_INTERNAL_ERROR),
-						 errmsg("segment %d took %llu of the %lld rows sent to it",
-								seg, (unsigned long long) took,
-								(long long) tuplestore_tuple_count(r->stores[seg]))));
+			total += router_send(r, r->stores[seg], seg);
 		}
 	}
-	return r->nrows;
+	return total;
 }
 
 static void
