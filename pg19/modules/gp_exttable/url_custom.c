@@ -104,7 +104,8 @@ InvokeExtProtocol(void *ptr, size_t nbytes, URL_CUSTOM_FILE *file,
 }
 
 URL_FILE *
-url_custom_fopen(char *url, bool forwrite, extvar_t *ev, ExternalSelectDesc desc)
+url_custom_fopen(char *url, bool forwrite, extvar_t *ev, ExternalSelectDesc desc,
+				 Relation rel)
 {
 	URL_CUSTOM_FILE *file;
 	MemoryContext oldcontext;
@@ -115,6 +116,13 @@ url_custom_fopen(char *url, bool forwrite, extvar_t *ev, ExternalSelectDesc desc
 	file = palloc0(sizeof(URL_CUSTOM_FILE));
 	file->common.type = CFTYPE_CUSTOM;
 	file->common.url = pstrdup(url);
+
+	/*
+	 * The table read or written, which the function is called with, as
+	 * Cloudberry calls it with its COPY's -- a writer's too, which gpcloud's
+	 * s3_export() asks for its format.
+	 */
+	file->rel = rel;
 
 	prot_name = pstrdup(url);
 	colon = strchr(prot_name, ':');
@@ -168,11 +176,7 @@ url_custom_ferror(URL_FILE *file, int bytesread, char *ebuf, int ebuflen)
 size_t
 url_custom_fread(void *ptr, size_t size, URL_FILE *file, CopyFromState pstate)
 {
-	URL_CUSTOM_FILE *cfile = (URL_CUSTOM_FILE *) file;
-
-	if (pstate)
-		cfile->rel = pstate->rel;
-	return (size_t) InvokeExtProtocol(ptr, size, cfile, false);
+	return (size_t) InvokeExtProtocol(ptr, size, (URL_CUSTOM_FILE *) file, false);
 }
 
 size_t

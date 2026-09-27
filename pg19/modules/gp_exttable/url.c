@@ -223,16 +223,41 @@ get_eol_delimiter(List *params)
 
 URL_FILE *
 url_fopen(char *url, bool forwrite, extvar_t *ev, CopyFormatOptions *opts,
-		  ExternalSelectDesc desc, char *relname)
+		  ExternalSelectDesc desc, Relation rel)
 {
 	if (pg_strncasecmp(url, EXEC_URL_PREFIX, strlen(EXEC_URL_PREFIX)) == 0)
 		return url_execute_fopen(url, forwrite, ev);
 	else if (IS_FILE_URI(url))
-		return url_file_fopen(url, forwrite, ev, opts, relname);
+		return url_file_fopen(url, forwrite, ev, opts,
+							  RelationGetRelationName(rel));
 	else if (IS_HTTP_URI(url) || IS_GPFDIST_URI(url) || IS_GPFDISTS_URI(url))
 		return url_curl_fopen(url, forwrite, ev, opts);
 	else
-		return url_custom_fopen(url, forwrite, ev, desc);
+		return url_custom_fopen(url, forwrite, ev, desc, rel);
+}
+
+/*
+ * A location that is a caller's read function, named for the error log: the
+ * data of a scan begun by ExtScanSourceBegin() (extaccess.c), which pxf_fdw
+ * reads from its server itself.
+ */
+typedef struct URL_SOURCE_FILE
+{
+	URL_FILE	common;
+	ExtSourceRead read;
+	void	   *arg;
+} URL_SOURCE_FILE;
+
+URL_FILE *
+url_source_fopen(const char *name, ExtSourceRead read, void *arg)
+{
+	URL_SOURCE_FILE *file = palloc0(sizeof(URL_SOURCE_FILE));
+
+	file->common.type = CFTYPE_SOURCE;
+	file->common.url = pstrdup(name);
+	file->read = read;
+	file->arg = arg;
+	return (URL_FILE *) file;
 }
 
 void
@@ -258,6 +283,10 @@ url_fclose(URL_FILE *file, bool failOnError, const char *relname)
 		case CFTYPE_CUSTOM:
 			url_custom_fclose(file, failOnError, relname);
 			break;
+		case CFTYPE_SOURCE:
+			pfree(file->url);
+			pfree(file);
+			break;
 		default:
 			elog(ERROR, "unrecognized external table type: %d", file->type);
 			break;
@@ -277,6 +306,8 @@ url_feof(URL_FILE *file, int bytesread)
 			return url_curl_feof(file, bytesread);
 		case CFTYPE_CUSTOM:
 			return url_custom_feof(file, bytesread);
+		case CFTYPE_SOURCE:
+			return bytesread == 0;
 		default:
 			elog(ERROR, "unrecognized external table type: %d", file->type);
 	}
@@ -296,6 +327,8 @@ url_ferror(URL_FILE *file, int bytesread, char *ebuf, int ebuflen)
 			return url_curl_ferror(file, bytesread, ebuf, ebuflen);
 		case CFTYPE_CUSTOM:
 			return url_custom_ferror(file, bytesread, ebuf, ebuflen);
+		case CFTYPE_SOURCE:
+			return bytesread == -1;
 		default:
 			elog(ERROR, "unrecognized external table type: %d", file->type);
 	}
@@ -315,6 +348,9 @@ url_fread(void *ptr, size_t size, URL_FILE *file, CopyFromState pstate)
 			return url_curl_fread(ptr, size, file, pstate);
 		case CFTYPE_CUSTOM:
 			return url_custom_fread(ptr, size, file, pstate);
+		case CFTYPE_SOURCE:
+			return (size_t) ((URL_SOURCE_FILE *) file)->read(((URL_SOURCE_FILE *) file)->arg,
+															ptr, (int) size);
 		default:
 			elog(ERROR, "unrecognized external table type: %d", file->type);
 	}
