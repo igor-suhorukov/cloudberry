@@ -146,6 +146,19 @@ extern struct Plan *GpExplicitMake(struct ModifyTable *mt,
 								   const char *on_conflict);
 
 /*
+ * Over a plan ORCA made, for the explicit write: its column "ctidcol", a
+ * row's ctid on the segment in column "contentcol", made the ctid the
+ * statement's map knows the row by, the other columns as they come
+ * (gp_explicit.c).  And the explicit write in a MERGE's ModifyTable's place,
+ * refused as the planner's route refuses it (gp_modify.c).
+ */
+extern struct Plan *GpRowIdentityNodeMake(struct Plan *child,
+										  AttrNumber contentcol,
+										  AttrNumber ctidcol);
+extern struct Plan *GpModifyWriteExplicitly(struct PlannedStmt *stmt,
+											struct Plan *modify);
+
+/*
  * The junk column a MERGE into a distributed table carries the target's row
  * in, for the explicit write's actions to read (gp_modify.c).
  */

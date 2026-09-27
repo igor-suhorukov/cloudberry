@@ -1761,6 +1761,44 @@ $((n + 1))" ] && ok "a serial column's values, taken on the segments from the co
 		"WITH l AS (SELECT a, b FROM sh ORDER BY b LIMIT 20) SELECT count(*), sum(l1.b) FROM l l1 JOIN sh USING (a) JOIN l l2 ON l2.b = sh.b;" \
 		"CTE Scan on cte0 cte0_1"
 
+	# MERGE, which ORCA has no operator for, rides a SELECT: ORCA plans the
+	# join, on the segments, and the explicit write writes each action's rows
+	# where they are, as the planner's route does (gp_orca's merge.c) --
+	# gp_core's Row Identity node making each target row's segment and ctid
+	# the ctid the explicit write knows it by, the target's row come up whole.
+	# Its source may be a VALUES list here, the explicit write re-checking no
+	# row through EvalPlanQual; a row whose key changes is moved.
+	q 0 "CREATE TABLE omt (id int, v text, n int) DISTRIBUTED BY (id);
+	     INSERT INTO omt SELECT g, 'o' || g, g FROM generate_series(1, 200) g;
+	     CREATE TABLE oms (id int, v text, d boolean) DISTRIBUTED BY (id);
+	     INSERT INTO oms SELECT g * 3, 's' || g, g % 5 = 0 FROM generate_series(1, 100) g;
+	     ANALYZE omt; ANALYZE oms;" >/dev/null
+	merge_same() {				# merge_same <what> <merge> [what EXPLAIN must say]
+		local plan want got
+		plan=$(q 0 "EXPLAIN (COSTS OFF) $2")
+		want=$(printf '%s\n' "SET gp.optimizer = off;" "BEGIN;" "$2;" \
+			"SELECT count(*), sum(id), sum(n), string_agg(DISTINCT v, ',' ORDER BY v) FROM omt;" "ROLLBACK;" | qf 0)
+		got=$(printf '%s\n' "BEGIN;" "$2;" \
+			"SELECT count(*), sum(id), sum(n), string_agg(DISTINCT v, ',' ORDER BY v) FROM omt;" "ROLLBACK;" | qf 0)
+		case "$plan" in
+			*"${3:-Row Identity}"*"Optimizer: GPORCA"*) ;;
+			*) notok "$1: planned by ORCA" "$plan"; return ;;
+		esac
+		[ "$got" = "$want" ] && [ -n "$got" ] && ok "$1" \
+			|| notok "$1: the same rows as the planner's" "ORCA: $got / planner: $want"
+	}
+	merge_same "a MERGE under ORCA: its join on the segments, the explicit write over it" \
+		"MERGE INTO omt t USING oms s ON t.id = s.id WHEN MATCHED AND s.d THEN DELETE WHEN MATCHED THEN UPDATE SET v = s.v, n = t.n + 1000 WHEN NOT MATCHED THEN INSERT VALUES (s.id, s.v)"
+	merge_same "... from a VALUES list" \
+		"MERGE INTO omt t USING (VALUES (5, 'five'), (500, 'new')) s(id, v) ON t.id = s.id WHEN MATCHED THEN UPDATE SET v = s.v WHEN NOT MATCHED THEN INSERT (id, v) VALUES (s.id, s.v)"
+	merge_same "... and one that changes the key, a Split" \
+		"MERGE INTO omt t USING oms s ON t.id = s.id WHEN MATCHED AND s.id < 100 THEN UPDATE SET id = t.id + 1000"
+	q 0 "MERGE INTO omt t USING oms s ON t.id = s.id WHEN MATCHED AND s.id < 60 THEN UPDATE SET id = t.id + 1000 WHEN NOT MATCHED THEN INSERT VALUES (s.id, s.v);" >/dev/null
+	w1=$(q 1 "SELECT count(*) FROM omt WHERE expected_seg(id, 2) <> 0;"); w2=$(q 2 "SELECT count(*) FROM omt WHERE expected_seg(id, 2) <> 1;")
+	out=$(q 0 "SELECT count(*) FROM omt WHERE id IN (1003, 1057, 201, 300);")
+	[ "$w1|$w2|$out" = "0|0|4" ] && ok "... each row it wrote on the segment it hashes to" \
+		|| notok "the rows ORCA's MERGE wrote, where they are" "misplaced $w1 $w2 / $out"
+
 	# gp_segment_id is ORCA's system column, which its plan computes where
 	# the row is read: a query naming it is ORCA's, a random table's
 	# included, in a join too, where PostgreSQL's gather cannot give it; a

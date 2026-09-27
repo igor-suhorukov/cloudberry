@@ -202,6 +202,21 @@ typedef struct GpCoreApi
 											  AttrNumber tableoidcol);
 
 	/*
+	 * Since 1.11: a MERGE ORCA plans on a cluster (gp_orca's merge.c) is
+	 * written by the explicit write, as the planner's is -- over ORCA's plan
+	 * of its join, which reads each target row's segment and ctid:
+	 * row_identity_make() makes the ctid the explicit write knows the row by
+	 * of the two, the other columns passed on; explicit_write() puts the
+	 * explicit write in the MERGE's ModifyTable's place, refused as the
+	 * planner's route refuses it (gp_explicit.c, gp_modify.c).
+	 */
+	struct Plan *(*row_identity_make) (struct Plan *child,
+									   AttrNumber contentcol,
+									   AttrNumber ctidcol);
+	struct Plan *(*explicit_write) (struct PlannedStmt *stmt,
+									struct Plan *modify);
+
+	/*
 	 * Since 1.11 too, nothing new here but what a Gather does: the
 	 * coordinator's own slices it relays, run in its process, are ended
 	 * with it rather than as each is relayed, so that a CTE the

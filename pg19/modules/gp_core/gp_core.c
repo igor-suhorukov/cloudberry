@@ -117,6 +117,8 @@ static const GpCoreApi gp_core_api = {
 	.prepare_query = GpPrepareQuery,
 	.share_fileset = GpMotionShareFileSet,
 	.split_modify_set_tableoid = GpSplitModifySetTableOid,
+	.row_identity_make = GpRowIdentityNodeMake,
+	.explicit_write = GpModifyWriteExplicitly,
 };
 
 /*

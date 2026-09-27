@@ -36,13 +36,23 @@
  * its scan, so that EvalPlanQual re-checks a target row another transaction
  * updated meanwhile with the source row it was joined to.
  *
- * Not yet, and the planner's: a cluster, where the rows are written on the
- * segments; a partitioned, inherited or foreign table or a view as the
- * target, or one whose method takes the old row from the plan (O20); WHEN
+ * On a cluster the MERGE is written as the planner's route writes it, by
+ * the explicit write (gp_core's gp_explicit.c), from the coordinator: ORCA's
+ * join comes up through its Gather with the target's segment and ctid,
+ * which gp_core's Row Identity node makes the ctid the explicit write knows
+ * the row by, and the target's whole row, carried up from its scan, in the
+ * junk column the explicit write reads its actions' old row from.  The
+ * explicit write re-checks no row through EvalPlanQual -- a row changed
+ * meanwhile is refused where the segment writes it -- so the MERGE takes no
+ * row marks, and its source may be anything.
+ *
+ * Not yet, and the planner's: a partitioned, inherited or foreign table or a
+ * view as the target, a replicated one or a coordinator's on a cluster, and
+ * on one node one whose method takes the old row from the plan (O20); WHEN
  * NOT MATCHED BY SOURCE, whose test of the source's row is a whole-row Var,
- * which ORCA does not take; RETURNING; a subquery anywhere in it; and a
- * source that is not plain tables, whose rows a row mark would copy whole,
- * as a ROW() the translator does not take.
+ * which ORCA does not take; RETURNING; a subquery anywhere in it; and on one
+ * node a source that is not plain tables, whose rows a row mark would copy
+ * whole, as a ROW() the translator does not take.
  *
  *-------------------------------------------------------------------------
  */
@@ -66,20 +76,25 @@
 
 #include "cb_compat.h"
 #include "cb_wholerow.h"
+#include "gp_core_api.h"
 #include "gp_orca_lockrows.h"
 #include "gp_orca_merge.h"
+#include "gp_policy.h"
+#include "gp_scan.h"
 
 struct OrcaMerge
 {
 	Query	   *merge;			/* the MERGE, its join made */
-	List	   *vars;			/* the source's Vars the SELECT returns, after
-								 * the ctid */
-	List	   *sources;		/* the source's tables, by range table index */
+	bool		cluster;		/* written by the explicit write */
+	int			nfirst;			/* the SELECT's columns before the source's:
+								 * the ctid, and on a cluster the segment */
+	List	   *vars;			/* the source's Vars the SELECT returns */
+	List	   *sources;		/* on one node, the source's tables */
 };
 
-/* Is the relation a plain table whose method fetches a row by its ctid? */
+/* Is the relation a plain table -- whose method fetches a row by its ctid? */
 static bool
-fetchable_table(RangeTblEntry *rte)
+plain_table(RangeTblEntry *rte, bool fetchable)
 {
 	Relation	rel;
 	bool		from_plan;
@@ -87,10 +102,18 @@ fetchable_table(RangeTblEntry *rte)
 	if (rte->rtekind != RTE_RELATION || rte->relkind != RELKIND_RELATION ||
 		has_subclass(rte->relid))
 		return false;
+	if (!fetchable)
+		return true;
 	rel = table_open(rte->relid, NoLock);
 	from_plan = table_old_row_from_plan(rel);
 	table_close(rel, NoLock);
 	return !from_plan;
+}
+
+static bool
+fetchable_table(RangeTblEntry *rte)
+{
+	return plain_table(rte, true);
 }
 
 /* The source's tables into *sources; false where it reads anything else. */
@@ -139,6 +162,8 @@ GpOrcaPrepareMerge(Query *query, Query **select, OrcaMerge **statep,
 	List	   *vars = NIL;
 	List	   *sources = NIL;
 	AttrNumber	resno = 1;
+	bool		cluster = !IS_SINGLENODE();
+	const GpCoreApi *api = cb_core_api();
 
 	*select = NULL;
 	*statep = NULL;
@@ -146,9 +171,11 @@ GpOrcaPrepareMerge(Query *query, Query **select, OrcaMerge **statep,
 	if (query->commandType != CMD_MERGE)
 		return true;
 
-	if (!IS_SINGLENODE())
+	if (cluster &&
+		(api == NULL || api->version_major != GP_CORE_API_VERSION_MAJOR ||
+		 api->version_minor < 11 || !OidIsValid(api->segment_of_function())))
 	{
-		*why = "a MERGE on a cluster";
+		*why = "a MERGE on a cluster, with a gp_core before 1.11";
 		return false;
 	}
 	if (query->returningList != NIL)
@@ -163,10 +190,21 @@ GpOrcaPrepareMerge(Query *query, Query **select, OrcaMerge **statep,
 	}
 	target = rt_fetch(query->resultRelation, query->rtable);
 	if (query->mergeTargetRelation != query->resultRelation ||
-		!fetchable_table(target))
+		!plain_table(target, !cluster))
 	{
 		*why = "a MERGE into a view, or a table that is not a plain one fetched by its ctid";
 		return false;
+	}
+	if (cluster)
+	{
+		GpPolicy   *policy = GpPolicyGet(target->relid);
+
+		if (policy == NULL ||
+			!(GpPolicyIsHashPartitioned(policy) || GpPolicyIsRandomPartitioned(policy)))
+		{
+			*why = "a MERGE into a replicated table, or a coordinator's on a cluster";
+			return false;
+		}
 	}
 	foreach_node(MergeAction, action, query->mergeActionList)
 	{
@@ -227,7 +265,7 @@ GpOrcaPrepareMerge(Query *query, Query **select, OrcaMerge **statep,
 			}
 		}
 	}
-	if (!source_tables(join->rarg, merge, &sources))
+	if (!cluster && !source_tables(join->rarg, merge, &sources))
 	{
 		*why = "a MERGE whose source is not tables, whose rows a row mark would copy";
 		return false;
@@ -255,6 +293,22 @@ GpOrcaPrepareMerge(Query *query, Query **select, OrcaMerge **statep,
 													SelfItemPointerAttributeNumber,
 													TIDOID, -1, InvalidOid, 0),
 								   resno++, pstrdup("ctid"), false));
+
+	/* on a cluster, the segment the target's row is on: gp_segment_id */
+	if (cluster)
+	{
+		Var		   *row = makeVar(merge->resultRelation, InvalidAttrNumber,
+								  get_rel_type_id(target->relid), -1,
+								  InvalidOid, 0);
+
+		sel->targetList =
+			lappend(sel->targetList,
+					makeTargetEntry((Expr *) makeFuncExpr(api->segment_of_function(),
+														  INT4OID, list_make1(row),
+														  InvalidOid, InvalidOid,
+														  COERCE_EXPLICIT_CALL),
+									resno++, pstrdup("gp_segment_id"), false));
+	}
 	foreach_node(Var, var, vars)
 		sel->targetList = lappend(sel->targetList,
 								  makeTargetEntry((Expr *) copyObject(var),
@@ -262,6 +316,8 @@ GpOrcaPrepareMerge(Query *query, Query **select, OrcaMerge **statep,
 
 	state = palloc0(sizeof(OrcaMerge));
 	state->merge = merge;
+	state->cluster = cluster;
+	state->nfirst = cluster ? 2 : 1;
 	state->vars = vars;
 	state->sources = sources;
 	*select = sel;
@@ -336,7 +392,7 @@ merge_vars_mutator(Node *node, merge_vars_context *context)
 		if (i < 0)
 			elog(ERROR, "a MERGE's column the plan does not return");
 		var->varno = INNER_VAR;
-		var->varattno = i + 2;	/* after the ctid */
+		var->varattno = i + 1 + context->state->nfirst;
 		return (Node *) var;
 	}
 	return expression_tree_mutator(node, merge_vars_mutator, context);
@@ -447,6 +503,30 @@ GpOrcaFinishMerge(PlannedStmt *stmt, OrcaMerge *state, const char **why)
 		tle->resjunk = true;
 	linitial_node(TargetEntry, sub->targetlist)->resname = pstrdup("ctid");
 
+	/*
+	 * On a cluster: the target's whole row, carried up from the scan that
+	 * read its ctid, in the junk column the explicit write reads an action's
+	 * old row from (gp_modify.c, merge_target_junk()); and over ORCA's plan,
+	 * gp_core's node that makes the ctid of a row on a segment the ctid the
+	 * explicit write knows it by.
+	 */
+	if (state->cluster)
+	{
+		AttrNumber	resno = gp_orca_carry_whole_row(sub, 1, stmt->rtable);
+		TargetEntry *tle;
+
+		if (resno == InvalidAttrNumber)
+		{
+			*why = "a MERGE whose target's rows the plan does not carry";
+			return false;
+		}
+		tle = list_nth_node(TargetEntry, sub->targetlist, resno - 1);
+		tle->resname = pstrdup(GP_MERGE_TARGET_JUNK);
+		tle->resjunk = true;
+		sub = cb_core_api()->row_identity_make(sub, 2, 1);
+		sub->plan_node_id = GpOrcaMaxPlanNodeId(stmt->planTree) + 1;
+	}
+
 	/* the source's row marks, each table's ctid carried up to them */
 	foreach_int(qrti, state->sources)
 	{
@@ -531,6 +611,8 @@ GpOrcaFinishMerge(PlannedStmt *stmt, OrcaMerge *state, const char **why)
 	GpOrcaAddParamToTree(sub, epq);
 
 	stmt->planTree = &mt->plan;
+	if (state->cluster)
+		stmt->planTree = cb_core_api()->explicit_write(stmt, &mt->plan);
 	stmt->commandType = CMD_MERGE;
 	stmt->canSetTag = merge->canSetTag;
 	stmt->hasReturning = false;

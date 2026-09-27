@@ -1181,6 +1181,13 @@ write_explicitly(PlannedStmt *stmt, ModifyTable *mt, const char *on_conflict)
 	return GpExplicitMake(mt, on_conflict);
 }
 
+/* The explicit write for a ModifyTable ORCA's translator made (merge.c). */
+Plan *
+GpModifyWriteExplicitly(PlannedStmt *stmt, Plan *modify)
+{
+	return write_explicitly(stmt, castNode(ModifyTable, modify), NULL);
+}
+
 /*
  * A ModifyTable left in a plan that writes a distributed table, where
  * nothing above took it: it would run on the coordinator, against its empty

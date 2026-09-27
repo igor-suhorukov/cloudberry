@@ -2962,8 +2962,162 @@ explicit_explain(CustomScanState *node, List *ancestors, ExplainState *es)
 	ExplainPropertyText("Remote SQL", sql.data, es);
 }
 
+/* ------------------------------------------------------------------------- */
+/* A plan ORCA made                                                          */
+/* ------------------------------------------------------------------------- */
+
+/*
+ * The explicit write over a plan ORCA made (gp_orca's merge.c): the rows come
+ * through ORCA's Gather with each target row's segment and ctid, as columns
+ * of ORCA's plan, not through a gather of gp_scan.c, which makes the ctid
+ * the plan knows the row by as it reads it.  This node does the same over
+ * ORCA's plan -- the row at "ctidcol" on the segment in "contentcol" made
+ * the ctid the statement's map knows it by (GpRowIdentityMake()) -- and
+ * passes on the other columns as they come, under the same names.
+ */
+typedef struct RowIdentityState
+{
+	CustomScanState css;
+	AttrNumber	contentcol;
+	AttrNumber	ctidcol;
+} RowIdentityState;
+
+static Node *row_identity_create_state(CustomScan *cscan);
+static void row_identity_begin(CustomScanState *node, EState *estate, int eflags);
+static TupleTableSlot *row_identity_exec(CustomScanState *node);
+static void row_identity_end(CustomScanState *node);
+static void row_identity_rescan(CustomScanState *node);
+
+static const CustomScanMethods row_identity_scan_methods = {
+	.CustomName = "Row Identity",
+	.CreateCustomScanState = row_identity_create_state,
+};
+
+static const CustomExecMethods row_identity_exec_methods = {
+	.CustomName = "Row Identity",
+	.BeginCustomScan = row_identity_begin,
+	.ExecCustomScan = row_identity_exec,
+	.EndCustomScan = row_identity_end,
+	.ReScanCustomScan = row_identity_rescan,
+};
+
+Plan *
+GpRowIdentityNodeMake(Plan *child, AttrNumber contentcol, AttrNumber ctidcol)
+{
+	CustomScan *cscan = makeNode(CustomScan);
+	List	   *scan_tlist = NIL;
+	List	   *tlist = NIL;
+
+	/* the child's row as the scan tuple, and the same again as the node's */
+	foreach_node(TargetEntry, tle, child->targetlist)
+	{
+		Oid			type = exprType((Node *) tle->expr);
+		int32		typmod = exprTypmod((Node *) tle->expr);
+		Oid			collation = exprCollation((Node *) tle->expr);
+
+		scan_tlist = lappend(scan_tlist,
+							 makeTargetEntry((Expr *) makeVar(OUTER_VAR, tle->resno,
+															  type, typmod,
+															  collation, 0),
+											 tle->resno, tle->resname,
+											 tle->resjunk));
+		tlist = lappend(tlist,
+						makeTargetEntry((Expr *) makeVar(INDEX_VAR, tle->resno,
+														 type, typmod,
+														 collation, 0),
+										tle->resno, tle->resname,
+										tle->resjunk));
+	}
+	cscan->scan.plan.startup_cost = child->startup_cost;
+	cscan->scan.plan.total_cost = child->total_cost;
+	cscan->scan.plan.plan_rows = child->plan_rows;
+	cscan->scan.plan.plan_width = child->plan_width;
+	cscan->scan.plan.targetlist = tlist;
+	cscan->scan.plan.lefttree = child;
+	cscan->scan.scanrelid = 0;
+	cscan->custom_scan_tlist = scan_tlist;
+	cscan->custom_private = list_make2(makeInteger(contentcol),
+									   makeInteger(ctidcol));
+	cscan->methods = &row_identity_scan_methods;
+	return &cscan->scan.plan;
+}
+
+static Node *
+row_identity_create_state(CustomScan *cscan)
+{
+	RowIdentityState *state = (RowIdentityState *) newNode(sizeof(RowIdentityState),
+														   T_CustomScanState);
+
+	state->css.methods = &row_identity_exec_methods;
+	state->css.slotOps = &TTSOpsVirtual;
+	return (Node *) state;
+}
+
+static void
+row_identity_begin(CustomScanState *node, EState *estate, int eflags)
+{
+	RowIdentityState *state = (RowIdentityState *) node;
+	CustomScan *cscan = (CustomScan *) node->ss.ps.plan;
+
+	state->contentcol = (AttrNumber) intVal(linitial(cscan->custom_private));
+	state->ctidcol = (AttrNumber) intVal(lsecond(cscan->custom_private));
+	outerPlanState(node) = ExecInitNode(outerPlan(cscan), estate, eflags);
+}
+
+static TupleTableSlot *
+row_identity_exec(CustomScanState *node)
+{
+	RowIdentityState *state = (RowIdentityState *) node;
+	ExprContext *econtext = node->ss.ps.ps_ExprContext;
+	TupleTableSlot *child = ExecProcNode(outerPlanState(node));
+	TupleTableSlot *slot = node->ss.ss_ScanTupleSlot;
+	int			natts = slot->tts_tupleDescriptor->natts;
+
+	if (TupIsNull(child))
+		return NULL;
+
+	ResetExprContext(econtext);
+	slot_getallattrs(child);
+	ExecClearTuple(slot);
+	memcpy(slot->tts_values, child->tts_values, natts * sizeof(Datum));
+	memcpy(slot->tts_isnull, child->tts_isnull, natts * sizeof(bool));
+	if (!slot->tts_isnull[state->ctidcol - 1])
+	{
+		ItemPointer synthetic;
+
+		if (slot->tts_isnull[state->contentcol - 1])
+			elog(ERROR, "a row ORCA's plan read came without its segment");
+		synthetic = MemoryContextAlloc(econtext->ecxt_per_tuple_memory,
+									   sizeof(ItemPointerData));
+		GpRowIdentityMake(node->ss.ps.state,
+						  DatumGetInt32(slot->tts_values[state->contentcol - 1]),
+						  (ItemPointer) DatumGetPointer(slot->tts_values[state->ctidcol - 1]),
+						  synthetic);
+		slot->tts_values[state->ctidcol - 1] = PointerGetDatum(synthetic);
+	}
+	ExecStoreVirtualTuple(slot);
+	if (node->ss.ps.ps_ProjInfo == NULL)
+		return slot;
+	econtext->ecxt_scantuple = slot;
+	return ExecProject(node->ss.ps.ps_ProjInfo);
+}
+
+static void
+row_identity_end(CustomScanState *node)
+{
+	ExecEndNode(outerPlanState(node));
+}
+
+static void
+row_identity_rescan(CustomScanState *node)
+{
+	if (outerPlanState(node)->chgParam == NULL)
+		ExecReScan(outerPlanState(node));
+}
+
 void
 GpExplicitInit(void)
 {
 	RegisterCustomScanMethods(&explicit_scan_methods);
+	RegisterCustomScanMethods(&row_identity_scan_methods);
 }
