@@ -60,6 +60,7 @@
 #include "access/stratnum.h"
 #include "access/table.h"
 #include "access/tableam.h"
+#include "catalog/index.h"
 #include "catalog/indexing.h"
 #include "catalog/namespace.h"
 #include "catalog/pg_class.h"
@@ -703,18 +704,12 @@ current_counts(Oid relid, BlockNumber *pages, double *tuples)
  * VACUUM and ANALYZE hold it: taken table by table in OID order, so that two
  * of these never wait for each other.
  */
+static void segment_counts(List *tables, bool vacuumed);
+
 void
 GpAnalyzeSegmentCounts(VacuumStmt *stmt)
 {
-	bool		vacuumed = stmt->is_vacuumcmd;
 	List	   *tables;
-	List	   *order = NIL;
-	HASHCTL		ctl;
-	HTAB	   *counts;
-	SegmentCounts *c;
-	StringInfoData oids;
-	char	  **values;
-	int			nsegs;
 
 	if (GpClusterBackendRole() != GP_ROLE_DISPATCH)
 		return;
@@ -727,6 +722,170 @@ GpAnalyzeSegmentCounts(VacuumStmt *stmt)
 	tables = distributed_relids(stmt);
 	if (tables == NIL)
 		return;
+	segment_counts(tables, stmt->is_vacuumcmd);
+}
+
+/*
+ * The distributed tables of "candidates", and of a partitioned table among
+ * them its leaves, that the user may maintain.
+ */
+static List *
+distributed_of(List *candidates)
+{
+	List	   *leaves = NIL;
+	List	   *result = NIL;
+
+	foreach_oid(relid, candidates)
+	{
+		if (get_rel_relkind(relid) == RELKIND_PARTITIONED_TABLE)
+			leaves = list_concat(leaves, find_all_inheritors(relid, NoLock, NULL));
+		else
+			leaves = lappend_oid(leaves, relid);
+	}
+	foreach_oid(relid, leaves)
+	{
+		char		relkind = get_rel_relkind(relid);
+
+		if ((relkind == RELKIND_RELATION || relkind == RELKIND_MATVIEW) &&
+			pg_class_aclcheck(relid, GetUserId(), ACL_MAINTAIN) == ACLCHECK_OK &&
+			GpScanDistributedPolicy(relid) != NULL)
+			result = list_append_unique_oid(result, relid);
+	}
+	return result;
+}
+
+/* The tables and materialized views of a namespace, or of the database. */
+static List *
+tables_in(Oid nspid)
+{
+	Relation	pgclass = table_open(RelationRelationId, AccessShareLock);
+	TableScanDesc scan = table_beginscan_catalog(pgclass, 0, NULL);
+	HeapTuple	tuple;
+	List	   *result = NIL;
+
+	while ((tuple = heap_getnext(scan, ForwardScanDirection)) != NULL)
+	{
+		Form_pg_class form = (Form_pg_class) GETSTRUCT(tuple);
+
+		if ((form->relkind == RELKIND_RELATION ||
+			 form->relkind == RELKIND_MATVIEW) &&
+			(!OidIsValid(nspid) || form->relnamespace == nspid))
+			result = lappend_oid(result, form->oid);
+	}
+	table_endscan(scan);
+	table_close(pgclass, AccessShareLock);
+	return result;
+}
+
+/*
+ * After a statement that builds an index of a distributed table on the
+ * coordinator -- CREATE INDEX, REINDEX, CLUSTER and REPACK, and ALTER TABLE, which adds
+ * constraints with indexes and rewrites tables: the build counted the
+ * coordinator's copy of the table, which is empty, and wrote no pages and no
+ * rows into the table's pg_class and the index's (index_update_stats()),
+ * where Cloudberry's coordinator writes none (its index.c).  Both planners
+ * then read a table ANALYZE had counted as an empty one: a join of it a
+ * nested loop over rows the gathers bring again for each outer row --
+ * minutes, for PostgreSQL's join test over tenk1, whose indexes are made
+ * after it is analyzed.  What the segments count, which their own builds
+ * wrote, is brought back instead, as after a VACUUM: the tables' pages,
+ * rows and all-visible pages, and their indexes'.
+ */
+void
+GpAnalyzeSegmentCountsAfterBuild(Node *stmt)
+{
+	List	   *candidates = NIL;
+	List	   *tables;
+	Oid			relid;
+
+	if (GpClusterBackendRole() != GP_ROLE_DISPATCH)
+		return;
+
+	switch (nodeTag(stmt))
+	{
+		case T_IndexStmt:
+			relid = RangeVarGetRelid(((IndexStmt *) stmt)->relation, NoLock, true);
+			if (OidIsValid(relid))
+				candidates = list_make1_oid(relid);
+			break;
+		case T_ReindexStmt:
+			{
+				ReindexStmt *r = (ReindexStmt *) stmt;
+
+				if (r->kind == REINDEX_OBJECT_INDEX)
+				{
+					relid = RangeVarGetRelid(r->relation, NoLock, true);
+					if (OidIsValid(relid) &&
+						(get_rel_relkind(relid) == RELKIND_INDEX ||
+						 get_rel_relkind(relid) == RELKIND_PARTITIONED_INDEX))
+						candidates = list_make1_oid(IndexGetRelation(relid, false));
+				}
+				else if (r->kind == REINDEX_OBJECT_TABLE)
+				{
+					relid = RangeVarGetRelid(r->relation, NoLock, true);
+					if (OidIsValid(relid))
+						candidates = list_make1_oid(relid);
+				}
+				else if (r->kind == REINDEX_OBJECT_SCHEMA)
+				{
+					Oid			nspid = get_namespace_oid(r->name, true);
+
+					if (OidIsValid(nspid))
+						candidates = tables_in(nspid);
+				}
+				else
+					candidates = tables_in(InvalidOid);
+			}
+			break;
+		case T_RepackStmt:
+			{
+				VacuumRelation *vrel = ((RepackStmt *) stmt)->relation;
+
+				if (vrel == NULL)
+					candidates = tables_in(InvalidOid);
+				else
+				{
+					relid = OidIsValid(vrel->oid) ? vrel->oid
+						: RangeVarGetRelid(vrel->relation, NoLock, true);
+					if (OidIsValid(relid))
+						candidates = list_make1_oid(relid);
+				}
+			}
+			break;
+		case T_AlterTableStmt:
+			if (((AlterTableStmt *) stmt)->objtype == OBJECT_TABLE ||
+				((AlterTableStmt *) stmt)->objtype == OBJECT_MATVIEW)
+			{
+				relid = RangeVarGetRelid(((AlterTableStmt *) stmt)->relation, NoLock, true);
+				if (OidIsValid(relid))
+					candidates = list_make1_oid(relid);
+			}
+			break;
+		default:
+			break;
+	}
+
+	tables = distributed_of(candidates);
+	if (tables != NIL)
+		segment_counts(tables, true);
+}
+
+/*
+ * "tables"' counts on the segments, into the coordinator's pg_class: after a
+ * VACUUM ("vacuumed") their pages, rows, all-visible and all-frozen pages,
+ * and their indexes' pages and rows; after an ANALYZE the all-visible and
+ * all-frozen pages alone.
+ */
+static void
+segment_counts(List *tables, bool vacuumed)
+{
+	List	   *order = NIL;
+	HASHCTL		ctl;
+	HTAB	   *counts;
+	SegmentCounts *c;
+	StringInfoData oids;
+	char	  **values;
+	int			nsegs;
 
 	ctl.keysize = sizeof(Oid);
 	ctl.entrysize = sizeof(SegmentCounts);

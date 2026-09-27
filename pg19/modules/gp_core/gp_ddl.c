@@ -1535,6 +1535,11 @@ gp_ddl_ProcessUtility(PlannedStmt *pstmt, const char *queryString,
 	if (IsA(parsetree, VacuumStmt))
 		GpAnalyzeSegmentCounts((VacuumStmt *) parsetree);
 
+	/* an index built here, of the empty copy: the segments' counts too */
+	if (IsA(parsetree, IndexStmt) || IsA(parsetree, ReindexStmt) ||
+		IsA(parsetree, RepackStmt) || IsA(parsetree, AlterTableStmt))
+		GpAnalyzeSegmentCountsAfterBuild(parsetree);
+
 	recorded = NIL;
 	MemoryContextReset(ddl_cxt);
 }

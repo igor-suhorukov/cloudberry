@@ -119,6 +119,8 @@ extern void GpAnalyzeInit(void);
  */
 struct VacuumStmt;
 extern void GpAnalyzeSegmentCounts(struct VacuumStmt *stmt);
+/* ... and after a statement that builds an index of one here */
+extern void GpAnalyzeSegmentCountsAfterBuild(Node *stmt);
 
 /*
  * The ctid the coordinator's plan knows a segment's row by -- the row at
