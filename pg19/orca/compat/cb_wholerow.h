@@ -43,4 +43,12 @@ extern AttrNumber gp_orca_carry_whole_row(Plan *plan, AttrNumber resno,
 extern AttrNumber gp_orca_carry_tableoid(Plan *plan, AttrNumber resno,
 										 List *rtable);
 
+/*
+ * A column of range table entry "rti" -- the relation, attribute, type,
+ * typmod and collation "proto" names -- from the scan of it below "plan",
+ * carried up to "plan" the same way: its resno in "plan"'s target list, or
+ * InvalidAttrNumber.
+ */
+extern AttrNumber gp_orca_carry_rte_column(Plan *plan, Index rti, Var *proto);
+
 #endif							/* CB_WHOLEROW_H */

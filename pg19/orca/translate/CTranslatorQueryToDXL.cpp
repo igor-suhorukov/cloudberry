@@ -1210,11 +1210,14 @@ CTranslatorQueryToDXL::CheckDMLReadsOnlyTarget() const
 //		ORCA never sees the list.  DXL to PlannedStmt gives it to the
 //		ModifyTable, which evaluates it over the row it wrote -- the old one
 //		and the new, as OLD and NEW -- so a list that reads that row alone
-//		is taken, whatever else it computes.  A subquery is refused, which
-//		the planner would plan as a SubPlan of its own, and so is a column
-//		of another relation, which only an UPDATE ... FROM or a DELETE ...
-//		USING has, and which the plan would have to carry up to the
-//		ModifyTable.  Cloudberry's translator refuses every RETURNING.
+//		is taken, whatever else it computes.  A column of another table,
+//		which an UPDATE ... FROM or a DELETE ... USING reads, is carried up
+//		from that table's scan to the ModifyTable, which reads it from its
+//		input row, as the planner's does (TranslateReturningList).  A
+//		subquery is refused, which the planner would plan as a SubPlan of
+//		its own, and so is a column of another kind of relation -- a
+//		subquery's, a function's -- which has no scan of its own to carry
+//		it from.  Cloudberry's translator refuses every RETURNING.
 //
 //---------------------------------------------------------------------------
 void
@@ -1240,10 +1243,17 @@ CTranslatorQueryToDXL::CheckReturningList() const
 	ForEach(lc, vars)
 	{
 		Var *var = (Var *) lfirst(lc);
-		if (0 != var->varlevelsup ||
-			(Index) m_query->resultRelation != var->varno)
+		if (0 != var->varlevelsup)
 		{
 			GP_UNPORTED("a RETURNING that reads another relation");
+		}
+		if ((Index) m_query->resultRelation != var->varno &&
+			RTE_RELATION != ((RangeTblEntry *) gpdb::ListNth(
+								 m_query->rtable, var->varno - 1))
+								->rtekind)
+		{
+			GP_UNPORTED(
+				"a RETURNING that reads another relation, which is no table");
 		}
 	}
 }

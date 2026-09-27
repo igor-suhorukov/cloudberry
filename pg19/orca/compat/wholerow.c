@@ -290,6 +290,106 @@ gp_orca_carry_whole_row(Plan *plan, AttrNumber resno, List *rtable)
 	return carry(plan, resno, rtable, CARRY_WHOLE_ROW);
 }
 
+/* A Var of "varno", column "attno", of "proto"'s type, typmod and collation. */
+static Var *
+typed_var(int varno, AttrNumber attno, Var *proto)
+{
+	return makeVar(varno, attno, proto->vartype, proto->vartypmod,
+				   proto->varcollid, 0);
+}
+
+/*
+ * A column of another relation than the one a ctid names: the scan of range
+ * table entry "rti" is looked for below "plan", and the column "proto" names
+ * is appended to its target list and passed up through each node on the way,
+ * as the ctid is -- the RETURNING of an UPDATE ... FROM or a DELETE ...
+ * USING reads the other relation's row the statement joined.  Not through
+ * the inner side of a semi- or anti-join, whose rows a join does not return,
+ * nor through any node but those that pass a column on.
+ */
+AttrNumber
+gp_orca_carry_rte_column(Plan *plan, Index rti, Var *proto)
+{
+	AttrNumber	childno;
+
+	switch (nodeTag(plan))
+	{
+		case T_SeqScan:
+		case T_SampleScan:
+		case T_IndexScan:
+		case T_BitmapHeapScan:
+		case T_TidScan:
+		case T_TidRangeScan:
+			if (((Scan *) plan)->scanrelid != rti)
+				return InvalidAttrNumber;
+			return append_column(&plan->targetlist,
+								 (Expr *) typed_var(rti, proto->varattno, proto),
+								 true);
+
+		case T_Result:
+		case T_Sort:
+		case T_IncrementalSort:
+		case T_Material:
+		case T_Limit:
+		case T_Unique:
+		case T_Hash:
+			if (plan->lefttree == NULL)
+				return InvalidAttrNumber;
+			childno = gp_orca_carry_rte_column(plan->lefttree, rti, proto);
+			if (childno == InvalidAttrNumber)
+				return InvalidAttrNumber;
+			return append_column(&plan->targetlist,
+								 (Expr *) typed_var(OUTER_VAR, childno, proto),
+								 true);
+
+		case T_NestLoop:
+		case T_MergeJoin:
+		case T_HashJoin:
+			{
+				JoinType	jointype = ((Join *) plan)->jointype;
+
+				if (jointype != JOIN_RIGHT_SEMI && jointype != JOIN_RIGHT_ANTI)
+				{
+					childno = gp_orca_carry_rte_column(plan->lefttree, rti, proto);
+					if (childno != InvalidAttrNumber)
+						return append_column(&plan->targetlist,
+											 (Expr *) typed_var(OUTER_VAR, childno, proto),
+											 true);
+				}
+				if (jointype == JOIN_SEMI || jointype == JOIN_ANTI)
+					return InvalidAttrNumber;
+				childno = gp_orca_carry_rte_column(plan->righttree, rti, proto);
+				if (childno == InvalidAttrNumber)
+					return InvalidAttrNumber;
+				return append_column(&plan->targetlist,
+									 (Expr *) typed_var(INNER_VAR, childno, proto),
+									 true);
+			}
+
+		case T_CustomScan:
+			{
+				CustomScan *cscan = (CustomScan *) plan;
+				AttrNumber	scanno;
+
+				if (!(is_motion(plan) || is_passthrough(plan)) ||
+					plan->lefttree == NULL)
+					return InvalidAttrNumber;
+				childno = gp_orca_carry_rte_column(plan->lefttree, rti, proto);
+				if (childno == InvalidAttrNumber)
+					return InvalidAttrNumber;
+				scanno = append_column(&cscan->custom_scan_tlist,
+									   (Expr *) typed_var(OUTER_VAR, childno, proto),
+									   false);
+				return append_column(&plan->targetlist,
+									 (Expr *) typed_var(INDEX_VAR, scanno, proto),
+									 true);
+			}
+
+		default:
+			return InvalidAttrNumber;
+	}
+}
+
 AttrNumber
 gp_orca_carry_tableoid(Plan *plan, AttrNumber resno, List *rtable)
 {

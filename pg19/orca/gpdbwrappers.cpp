@@ -3119,6 +3119,17 @@ gpdb::CarryWholeRow(Plan *plan, AttrNumber resno, List *rtable)
 }
 
 AttrNumber
+gpdb::CarryRteColumn(Plan *plan, Index rti, Var *proto)
+{
+	GP_WRAP_START;
+	{
+		return gp_orca_carry_rte_column(plan, rti, proto);
+	}
+	GP_WRAP_END;
+	return InvalidAttrNumber;
+}
+
+AttrNumber
 gpdb::CarryTableOid(Plan *plan, AttrNumber resno, List *rtable)
 {
 	GP_WRAP_START;

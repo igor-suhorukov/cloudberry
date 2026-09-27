@@ -6433,7 +6433,8 @@ CTranslatorDXLToPlStmt::TranslateDXLDml(
 	// the segments, not an anonymous record, whose text reads back only
 	// where its type is known, as a Gather's rows are read back
 	// (gp_motion.c).
-	List *returning = TranslateReturningList(index);
+	List *returning_other_vars = NIL;
+	List *returning = TranslateReturningList(index, &returning_other_vars);
 	if (NIL != returning && split)
 	{
 		GP_UNPORTED("RETURNING from an UPDATE that moves rows");
@@ -6606,6 +6607,9 @@ CTranslatorDXLToPlStmt::TranslateDXLDml(
 	result_plan->lefttree = child_plan;
 
 	result_plan->targetlist = dml_target_list;
+
+	// The columns of other tables RETURNING reads, from their scans.
+	CarryReturningColumns(returning_other_vars, result_plan);
 
 	// A partitioned table's row's partition: its tableoid, from the scan
 	// that read the ctid, which ModifyTable finds by its name, and gp_core's
@@ -6904,16 +6908,22 @@ CTranslatorDXLToPlStmt::CreateUpdateTargetList(List *target_list,
 //		row it wrote, the old version and the new, whose Vars name the
 //		result relation -- at "index" in ORCA's range table -- as the
 //		planner's set_plan_refs() leaves them naming it
-//		(set_returning_clause_references()).  The Query translator has
-//		checked that the list reads that row alone (CheckReturningList), and
-//		it comes folded, as ORCA's Query was.  NIL where there is none.
+//		(set_returning_clause_references()).  A Var of another table, which
+//		an UPDATE ... FROM or a DELETE ... USING reads, the ModifyTable reads
+//		from its input row, as OUTER_VAR, as the planner's does; it is left
+//		naming the Query's range table entry, in *other_vars, for the column
+//		to be carried up from that table's scan once the plan below is made
+//		(CarryReturningColumns).  The Query translator has checked that the
+//		list reads nothing else (CheckReturningList), and it comes folded, as
+//		ORCA's Query was.  NIL where there is none.
 //
 //---------------------------------------------------------------------------
 List *
-CTranslatorDXLToPlStmt::TranslateReturningList(Index index)
+CTranslatorDXLToPlStmt::TranslateReturningList(Index index, List **other_vars)
 {
 	Query *query = m_dxl_to_plstmt_context->m_orig_query;
 
+	*other_vars = NIL;
 	if (NIL == query->returningList)
 	{
 		return NIL;
@@ -6926,12 +6936,86 @@ CTranslatorDXLToPlStmt::TranslateReturningList(Index index)
 	ForEach(lc, vars)
 	{
 		Var *var = (Var *) lfirst(lc);
-		GPOS_ASSERT((Index) query->resultRelation == var->varno);
+		if ((Index) query->resultRelation != var->varno)
+		{
+			*other_vars = gpdb::LAppend(*other_vars, var);
+			continue;
+		}
 		var->varno = index;
 		var->varnosyn = index;
 	}
 
 	return returning;
+}
+
+//---------------------------------------------------------------------------
+//	@function:
+//		CTranslatorDXLToPlStmt::CarryReturningColumns
+//
+//	@doc:
+//		The columns of other tables a RETURNING list reads (other_vars, from
+//		TranslateReturningList), carried up from each table's scan below
+//		"plan" -- the ModifyTable's input -- as junk columns of its target
+//		list, and each Var made the OUTER_VAR that reads one there.  The
+//		scan is ORCA's range table entry for the Query's, the table under
+//		the same name; where there is not one such scan, or a node between
+//		does not pass the column on, the statement is left to the planner.
+//
+//---------------------------------------------------------------------------
+void
+CTranslatorDXLToPlStmt::CarryReturningColumns(List *other_vars, Plan *plan)
+{
+	Query *query = m_dxl_to_plstmt_context->m_orig_query;
+	List *rtable = m_dxl_to_plstmt_context->GetRTableEntriesList();
+	ListCell *lc = nullptr;
+
+	ForEach(lc, other_vars)
+	{
+		Var *var = (Var *) lfirst(lc);
+		RangeTblEntry *qrte =
+			(RangeTblEntry *) gpdb::ListNth(query->rtable, var->varno - 1);
+		const char *name = nullptr;
+		if (nullptr != qrte->alias)
+		{
+			name = qrte->alias->aliasname;
+		}
+		else
+		{
+			// the table's own name, as the Query translator named its
+			// descriptor (CTranslatorUtils::GetTableDescr)
+			CMDIdGPDB *mdid = GPOS_NEW(m_mp) CMDIdGPDB(IMDId::EmdidRel, qrte->relid);
+			name = CTranslatorUtils::CreateMultiByteCharStringFromWCString(
+				m_md_accessor->RetrieveRel(mdid)->Mdname().GetMDName()->GetBuffer());
+			mdid->Release();
+		}
+		Index rti = 0;
+		ULONG matches = 0;
+		ListCell *lc_rte = nullptr;
+		Index i = 0;
+
+		ForEach(lc_rte, rtable)
+		{
+			RangeTblEntry *rte = (RangeTblEntry *) lfirst(lc_rte);
+			i++;
+			if (RTE_RELATION == rte->rtekind && rte->relid == qrte->relid &&
+				nullptr != rte->eref && 0 == strcmp(rte->eref->aliasname, name))
+			{
+				rti = i;
+				matches++;
+			}
+		}
+
+		AttrNumber resno = 1 == matches
+							   ? gpdb::CarryRteColumn(plan, rti, var)
+							   : (AttrNumber) InvalidAttrNumber;
+		if (InvalidAttrNumber == resno)
+		{
+			GP_UNPORTED(
+				"a RETURNING that reads another relation, whose rows the plan does not carry");
+		}
+		var->varno = OUTER_VAR;
+		var->varattno = resno;
+	}
 }
 
 //---------------------------------------------------------------------------

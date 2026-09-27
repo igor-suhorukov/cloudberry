@@ -484,7 +484,10 @@ private:
 	void CompleteResultRelationPermissions(Index index);
 
 	// the Query's RETURNING list, over the result relation at "index"
-	List *TranslateReturningList(Index index);
+	List *TranslateReturningList(Index index, List **other_vars);
+
+	// the columns of other tables a RETURNING list reads, carried up to plan
+	void CarryReturningColumns(List *other_vars, Plan *plan);
 
 	// the Query's ON CONFLICT, given to the ModifyTable
 	void TranslateOnConflict(ModifyTable *dml, Index index,

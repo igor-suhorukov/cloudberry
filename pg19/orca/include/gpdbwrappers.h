@@ -900,6 +900,11 @@ AttrNumber CarryWholeRow(Plan *plan, AttrNumber resno, List *rtable);
 // row is in, which its UPDATE and DELETE find it by.
 AttrNumber CarryTableOid(Plan *plan, AttrNumber resno, List *rtable);
 
+// A column of another relation, from its scan -- range table entry "rti" --
+// carried up to "plan": what a RETURNING of an UPDATE ... FROM or a DELETE
+// ... USING reads of it.
+AttrNumber CarryRteColumn(Plan *plan, Index rti, Var *proto);
+
 // A CTE ORCA reads in more than one slice, whose rows each segment keeps in
 // files (compat/sharedscan.c): whether gp_core can name them; the Sequence
 // that runs "producers" before "plan"; a producer, writing the rows of

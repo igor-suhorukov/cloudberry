@@ -2129,6 +2129,17 @@ COMMIT;"
 	orca_write "DELETE ... USING another table" \
 		"DELETE FROM wu USING po WHERE wu.a = po.x * 3;" \
 		"SELECT count(*), sum(a) FROM wu;" "Delete on wu"
+
+	# A RETURNING that reads the other table: its columns, and its whole
+	# row, carried up from its scan to the write, through the join and the
+	# Motions, as the ctid is; the write reads them from its input row, as
+	# the planner's does.
+	orca_returning "UPDATE ... FROM another table, RETURNING its columns beside old and new" \
+		"UPDATE wu SET c = 'f' || po.y FROM po WHERE wu.b = po.x RETURNING wu.a, po.x, po.y, old.c, new.c;" \
+		"Update on wu"
+	orca_returning "DELETE ... USING another table, RETURNING its row" \
+		"DELETE FROM wu USING po WHERE wu.a = po.x AND po.y = 3 RETURNING wu.*, po.y, po;" \
+		"Delete on wu"
 	orca_write "DELETE ... WHERE IN a subquery, a semi-join" \
 		"DELETE FROM wu WHERE a IN (SELECT x FROM po WHERE y = 3);" \
 		"SELECT count(*), sum(a) FROM wu;" "Delete on wu"
