@@ -430,6 +430,9 @@ private:
 	// refuse an UPDATE or DELETE that reads a relation besides its target
 	void CheckDMLReadsOnlyTarget() const;
 
+	// can the other relations an UPDATE or DELETE reads take row marks?
+	BOOL OtherRelationsMarkable() const;
+
 	// refuse a RETURNING list the ModifyTable cannot take as it stands
 	void CheckReturningList() const;
 

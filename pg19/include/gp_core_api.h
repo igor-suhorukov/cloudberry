@@ -205,7 +205,10 @@ typedef struct GpCoreApi
 	 * Since 1.11 too, nothing new here but what a Gather does: the
 	 * coordinator's own slices it relays, run in its process, are ended
 	 * with it rather than as each is relayed, so that a CTE the
-	 * coordinator's slice produces is read in them (gp_motion.c).
+	 * coordinator's slice produces is read in them; and the fragment of an
+	 * UPDATE or DELETE whose ModifyTable has row marks keeps the
+	 * statement's, which its re-check of a row changed meanwhile fetches
+	 * the rows it was joined to by (gp_motion.c).
 	 */
 } GpCoreApi;
 

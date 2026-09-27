@@ -3150,7 +3150,8 @@ epq() {
 		*) notok "$1" "not planned by ORCA: $(printf '%s' "$plan" | tail -3 | tr '\n' '|')"; return ;;
 	esac
 	for opt in on off; do
-		q "TRUNCATE t2e; INSERT INTO t2e SELECT g, g FROM generate_series(1, 5) g;" > /dev/null
+		q "TRUNCATE t2e; INSERT INTO t2e SELECT g, g FROM generate_series(1, 5) g;
+		   TRUNCATE t2j; INSERT INTO t2j SELECT g, g * 100 FROM generate_series(1, 5) g;" > /dev/null
 		( "$PSQL" -X -q -d postgres -c "BEGIN" -c "$3" -c "SELECT pg_sleep(1)" -c "COMMIT" > /dev/null 2>&1 ) &
 		# until the other transaction holds the row, as it sleeps
 		local tries=0
@@ -3167,7 +3168,7 @@ epq() {
 	[ "$orca" = "$pg" ] && ok "$1" || notok "$1" "orca [$orca], planner [$pg]"
 }
 
-q "CREATE TABLE t2e (a int, b int); CREATE INDEX ON t2e (a);" > /dev/null
+q "CREATE TABLE t2e (a int, b int); CREATE INDEX ON t2e (a); CREATE TABLE t2j (a int, w int);" > /dev/null
 
 epq "an UPDATE that waited acts on the new version of its row" \
     "UPDATE t2e SET b = b * 10 WHERE a = 1" \
@@ -3189,10 +3190,32 @@ epq "two rows re-checked in one statement" \
     "UPDATE t2e SET b = b + 1000 WHERE a IN (1, 2)" \
     "SELECT a, b FROM t2e ORDER BY a"
 
+# One that reads another table re-checks the row it waited for with the row
+# of the other it was joined to, fetched again by its ctid through a row mark
+# (ROW_MARK_REFERENCE), as the planner's does: the translator carries the
+# ctid up to ModifyTable (AddOtherRowMarks).  The joined row changed by the
+# same transaction is read as it was.
+dml "an UPDATE that reads another table: its ctid carried up for the row mark" \
+    "t2y.ctid" \
+    "UPDATE t2x SET b = t2x.b + t2y.w FROM t2y WHERE t2x.a = t2y.a AND t2y.w > 150" \
+    "SELECT a, b FROM t2x ORDER BY a" \
+    "CREATE TEMP TABLE t2x AS SELECT g AS a, g AS b FROM generate_series(1, 5) g;
+     CREATE TEMP TABLE t2y AS SELECT g AS a, g * 100 AS w FROM generate_series(1, 5) g"
+
+epq "and waits, then re-checks with the other table's row it was joined to" \
+    "UPDATE t2e SET b = t2e.b + t2j.w FROM t2j WHERE t2e.a = t2j.a AND t2e.a <= 2" \
+    "UPDATE t2e SET b = b + 1000 WHERE a = 1; UPDATE t2j SET w = -1 WHERE a = 1" \
+    "SELECT a, b FROM t2e ORDER BY a"
+
+epq "a DELETE that reads another table, re-checked alike" \
+    "DELETE FROM t2e USING t2j WHERE t2e.a = t2j.a AND t2e.b >= 3 AND t2j.w > 0" \
+    "UPDATE t2e SET b = 50 WHERE a = 3; UPDATE t2j SET w = 0 WHERE a = 4" \
+    "SELECT a, b FROM t2e ORDER BY a"
+
 # --- what is refused --------------------------------------------------------------
 
-declined "an UPDATE that reads another relation, which row marks would re-read" \
-         "UPDATE t2d SET b = 0 FROM t0 WHERE t2d.a = t0.a" \
+declined "an UPDATE that reads a subquery, whose whole row a row mark would copy" \
+         "UPDATE t2d SET b = 0 FROM (SELECT a FROM t0 ORDER BY a LIMIT 5) s WHERE t2d.a = s.a" \
          "an UPDATE or DELETE that reads another relation" "$T2D"
 
 declined "a DELETE with a subquery, which ORCA would make a join" \

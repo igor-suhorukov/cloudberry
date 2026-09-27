@@ -326,6 +326,7 @@ CTranslatorDXLToPlStmt::CTranslatorDXLToPlStmt(
 	  m_cmd_type(CMD_SELECT),
 	  m_is_tgt_tbl_distributed(false),
 	  m_result_rel_list(nullptr),
+	  m_row_marks(nullptr),
 	  m_partition_scans(nullptr),
 	  m_num_of_segments(num_of_segments),
 	  m_partition_selector_counter(0)
@@ -448,6 +449,7 @@ CTranslatorDXLToPlStmt::GetPlannedStmtFromDXL(const CDXLNode *dxlnode,
 	planned_stmt->rewindPlanIDs = m_dxl_to_plstmt_context->GetRewindPlanIds();
 	planned_stmt->paramExecTypes = m_dxl_to_plstmt_context->GetParamTypes();
 	planned_stmt->relationOids = oids_list;
+	planned_stmt->rowMarks = m_row_marks;
 
 	// Every range table entry is unprunable, because nothing is pruned: T0
 	// has no partition pruning.  This is not bookkeeping.  PostgreSQL 19's
@@ -6621,6 +6623,13 @@ CTranslatorDXLToPlStmt::TranslateDXLDml(
 	// The columns of other tables RETURNING reads, from their scans.
 	CarryReturningColumns(returning_other_vars, result_plan);
 
+	// The other tables' row marks, for EvalPlanQual; a split update takes
+	// none, gp_core's refusing a row changed meanwhile (gp_split.c).
+	if (CMD_DELETE == m_cmd_type || (CMD_UPDATE == m_cmd_type && !split))
+	{
+		AddOtherRowMarks(dml, result_plan);
+	}
+
 	// A partitioned table's row's partition: its tableoid, from the scan
 	// that read the ctid, which ModifyTable finds by its name, and gp_core's
 	// split update by its number.
@@ -6984,40 +6993,10 @@ CTranslatorDXLToPlStmt::CarryReturningColumns(List *other_vars, Plan *plan)
 		Var *var = (Var *) lfirst(lc);
 		RangeTblEntry *qrte =
 			(RangeTblEntry *) gpdb::ListNth(query->rtable, var->varno - 1);
-		const char *name = nullptr;
-		if (nullptr != qrte->alias)
-		{
-			name = qrte->alias->aliasname;
-		}
-		else
-		{
-			// the table's own name, as the Query translator named its
-			// descriptor (CTranslatorUtils::GetTableDescr)
-			CMDIdGPDB *mdid = GPOS_NEW(m_mp) CMDIdGPDB(IMDId::EmdidRel, qrte->relid);
-			name = CTranslatorUtils::CreateMultiByteCharStringFromWCString(
-				m_md_accessor->RetrieveRel(mdid)->Mdname().GetMDName()->GetBuffer());
-			mdid->Release();
-		}
-		Index rti = 0;
-		ULONG matches = 0;
-		ListCell *lc_rte = nullptr;
-		Index i = 0;
+		Index rti = PlanRtiOf(qrte);
 
-		ForEach(lc_rte, rtable)
-		{
-			RangeTblEntry *rte = (RangeTblEntry *) lfirst(lc_rte);
-			i++;
-			if (RTE_RELATION == rte->rtekind && rte->relid == qrte->relid &&
-				nullptr != rte->eref && 0 == strcmp(rte->eref->aliasname, name))
-			{
-				rti = i;
-				matches++;
-			}
-		}
-
-		AttrNumber resno = 1 == matches
-							   ? gpdb::CarryRteColumn(plan, rti, var)
-							   : (AttrNumber) InvalidAttrNumber;
+		AttrNumber resno = 0 != rti ? gpdb::CarryRteColumn(plan, rti, var)
+									: (AttrNumber) InvalidAttrNumber;
 		if (InvalidAttrNumber == resno)
 		{
 			GP_UNPORTED(
@@ -7025,6 +7004,156 @@ CTranslatorDXLToPlStmt::CarryReturningColumns(List *other_vars, Plan *plan)
 		}
 		var->varno = OUTER_VAR;
 		var->varattno = resno;
+	}
+}
+
+//---------------------------------------------------------------------------
+//	@function:
+//		CTranslatorDXLToPlStmt::PlanRtiOf
+//
+//	@doc:
+//		ORCA's range table index of the Query's table "qrte": the one entry
+//		of the same table under the same name, or 0 where there is not one.
+//
+//---------------------------------------------------------------------------
+Index
+CTranslatorDXLToPlStmt::PlanRtiOf(const RangeTblEntry *qrte)
+{
+	List *rtable = m_dxl_to_plstmt_context->GetRTableEntriesList();
+	const char *name = nullptr;
+	if (nullptr != qrte->alias)
+	{
+		name = qrte->alias->aliasname;
+	}
+	else
+	{
+		// the table's own name, as the Query translator named its
+		// descriptor (CTranslatorUtils::GetTableDescr)
+		CMDIdGPDB *mdid = GPOS_NEW(m_mp) CMDIdGPDB(IMDId::EmdidRel, qrte->relid);
+		name = CTranslatorUtils::CreateMultiByteCharStringFromWCString(
+			m_md_accessor->RetrieveRel(mdid)->Mdname().GetMDName()->GetBuffer());
+		mdid->Release();
+	}
+	Index rti = 0;
+	ULONG matches = 0;
+	ListCell *lc_rte = nullptr;
+	Index i = 0;
+
+	ForEach(lc_rte, rtable)
+	{
+		RangeTblEntry *rte = (RangeTblEntry *) lfirst(lc_rte);
+		i++;
+		if (RTE_RELATION == rte->rtekind && rte->relid == qrte->relid &&
+			nullptr != rte->eref && 0 == strcmp(rte->eref->aliasname, name))
+		{
+			rti = i;
+			matches++;
+		}
+	}
+	return 1 == matches ? rti : 0;
+}
+
+// NOT IN CLOUDBERRY.  The range table indexes of the relations a FROM
+// clause reads, in its joins too.
+static void
+CollectJoinTreeRtis(Node *node, List **rtis)
+{
+	if (nullptr == node)
+	{
+		return;
+	}
+	if (IsA(node, RangeTblRef))
+	{
+		*rtis = gpdb::LAppendInt(*rtis, ((RangeTblRef *) node)->rtindex);
+	}
+	else if (IsA(node, JoinExpr))
+	{
+		CollectJoinTreeRtis(((JoinExpr *) node)->larg, rtis);
+		CollectJoinTreeRtis(((JoinExpr *) node)->rarg, rtis);
+	}
+	else if (IsA(node, FromExpr))
+	{
+		ListCell *lc = nullptr;
+		ForEach(lc, ((FromExpr *) node)->fromlist)
+		{
+			CollectJoinTreeRtis((Node *) lfirst(lc), rtis);
+		}
+	}
+}
+
+//---------------------------------------------------------------------------
+//	@function:
+//		CTranslatorDXLToPlStmt::AddOtherRowMarks
+//
+//	@doc:
+//		NOT IN CLOUDBERRY.  The row marks of the other tables an UPDATE or
+//		DELETE reads, where a row it changes may change under it: the
+//		planner's (preprocess_rowmarks()), ROW_MARK_REFERENCE for a plain
+//		table (select_rowmark_type()), by which EvalPlanQual fetches the row
+//		the changed one was joined to again -- its ctid, carried up from
+//		the table's scan as the junk column "ctid<n>" ModifyTable finds it
+//		by (ExecBuildAuxRowMark()), the marks in the plan's rowMarks and
+//		the ModifyTable's.  A target held in ExclusiveLock re-checks
+//		nothing and takes none, as Cloudberry's ORCA takes none.  On a
+//		cluster a ctid is one segment's: a re-check that meets a Motion
+//		fails as a serialization failure (gp_motion.c), as Cloudberry's
+//		does.  The Query translator took only plain tables
+//		(CheckDMLReadsOnlyTarget).
+//
+//---------------------------------------------------------------------------
+void
+CTranslatorDXLToPlStmt::AddOtherRowMarks(ModifyTable *dml, Plan *plan)
+{
+	Query *query = m_dxl_to_plstmt_context->m_orig_query;
+	const RangeTblEntry *target = (RangeTblEntry *) gpdb::ListNth(
+		query->rtable, query->resultRelation - 1);
+	if (ExclusiveLock <= target->rellockmode)
+	{
+		return;
+	}
+
+	List *rtis = NIL;
+	CollectJoinTreeRtis((Node *) query->jointree, &rtis);
+	ListCell *lc = nullptr;
+	ForEach(lc, rtis)
+	{
+		Index qrti = (Index) lfirst_int(lc);
+		if (qrti == (Index) query->resultRelation)
+		{
+			continue;
+		}
+		RangeTblEntry *qrte =
+			(RangeTblEntry *) gpdb::ListNth(query->rtable, qrti - 1);
+		Index rti = PlanRtiOf(qrte);
+		Var *ctid = gpdb::MakeVar(qrti, SelfItemPointerAttributeNumber, TIDOID,
+								  -1, 0);
+		AttrNumber resno = 0 != rti ? gpdb::CarryRteColumn(plan, rti, ctid)
+									: (AttrNumber) InvalidAttrNumber;
+		if (InvalidAttrNumber == resno)
+		{
+			GP_UNPORTED(
+				"an UPDATE or DELETE that reads another relation, whose rows the plan does not carry");
+		}
+
+		PlanRowMark *rc = MakeNode(PlanRowMark);
+		rc->rti = rti;
+		rc->prti = rti;
+		rc->rowmarkId = (Index) gpdb::ListLength(m_row_marks) + 1;
+		rc->markType = ROW_MARK_REFERENCE;
+		rc->allMarkTypes = (1 << ROW_MARK_REFERENCE);
+		rc->strength = LCS_NONE;
+		rc->waitPolicy = LockWaitBlock;
+		rc->isParent = false;
+
+		char resname[32];
+		snprintf(resname, sizeof(resname), "ctid%u", rc->rowmarkId);
+		TargetEntry *tle =
+			(TargetEntry *) gpdb::ListNth(plan->targetlist, resno - 1);
+		tle->resname = PStrDup(resname);
+		tle->resjunk = true;
+
+		dml->rowMarks = gpdb::LAppend(dml->rowMarks, rc);
+		m_row_marks = gpdb::LAppend(m_row_marks, rc);
 	}
 }
 

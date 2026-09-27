@@ -3047,6 +3047,22 @@ gpdb::CoordinatorSlicesReadCTEs(void)
 	return false;
 }
 
+bool
+gpdb::WriteFragmentsKeepRowMarks(void)
+{
+	GP_WRAP_START;
+	{
+		/* without gp_core, no fragment: the plan runs whole, here */
+		const GpCoreApi *api = cb_core_api();
+
+		return api == nullptr ||
+			   (api->version_major == GP_CORE_API_VERSION_MAJOR &&
+				api->version_minor >= 11);
+	}
+	GP_WRAP_END;
+	return false;
+}
+
 Plan *
 gpdb::MakeSequence(Plan *plan, List *producers)
 {

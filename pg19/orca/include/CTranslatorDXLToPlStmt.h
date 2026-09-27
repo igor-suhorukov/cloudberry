@@ -167,6 +167,10 @@ private:
 	// or NULL for select queries
 	List *m_result_rel_list;
 
+	// the row marks of the other tables an UPDATE or DELETE reads, for the
+	// PlannedStmt (AddOtherRowMarks)
+	List *m_row_marks;
+
 	// the partitions each Dynamic Scan reads: for each, a list of the
 	// partitioned table's range table index, its partitions' indexes and
 	// their OIDs -- which an UPDATE or DELETE of the table takes for its
@@ -488,6 +492,12 @@ private:
 
 	// the columns of other tables a RETURNING list reads, carried up to plan
 	void CarryReturningColumns(List *other_vars, Plan *plan);
+
+	// ORCA's range table index of the Query's table "qrte", or 0
+	Index PlanRtiOf(const RangeTblEntry *qrte);
+
+	// the row marks of the other tables an UPDATE or DELETE reads
+	void AddOtherRowMarks(ModifyTable *dml, Plan *plan);
 
 	// the Query's ON CONFLICT, given to the ModifyTable
 	void TranslateOnConflict(ModifyTable *dml, Index index,

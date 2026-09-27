@@ -1998,12 +1998,17 @@ fragment_sql_ex(EState *estate, Plan *fragment, CustomScan *motion,
 	 * the LockRows at the top of its fragment -- or under a LIMIT -- which
 	 * finds the tables it locks in the statement's row marks (ORCA's
 	 * lockrows.c).  The writer runs it: a reader's transaction reads only.
+	 * An UPDATE's or DELETE's ModifyTable finds there the other tables it
+	 * re-checks a row changed meanwhile against (ORCA's translator,
+	 * AddOtherRowMarks), from gp_core 1.11.
 	 */
 	frag->rowMarks = NIL;
 	if (!write && whole->rowMarks != NIL &&
 		(IsA(fragment, LockRows) ||
 		 (IsA(fragment, Limit) && fragment->lefttree != NULL &&
 		  IsA(fragment->lefttree, LockRows))))
+		frag->rowMarks = whole->rowMarks;
+	else if (write && !split && ((ModifyTable *) fragment)->rowMarks != NIL)
 		frag->rowMarks = whole->rowMarks;
 	frag->extension_state = list_copy(marks);
 	frag->utilityStmt = NULL;

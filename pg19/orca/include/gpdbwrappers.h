@@ -921,6 +921,10 @@ bool CanShareAcrossSlices(void);
 // Whether the coordinator's own slices a Gather relays last as long as it,
 // so that a CTE the coordinator's slice produces is read in them.
 bool CoordinatorSlicesReadCTEs(void);
+
+// Whether a write's fragment keeps the statement's row marks, which its
+// ModifyTable re-checks a row changed meanwhile by.
+bool WriteFragmentsKeepRowMarks(void);
 Plan *MakeSequence(Plan *plan, List *producers);
 Plan *MakeShareProducer(Plan *child, int share_id, int slice);
 Plan *MakeShareConsumer(int share_id, int slice, List *scan_tlist,

@@ -3380,11 +3380,13 @@ SQL
 
 	# With rows locked, an UPDATE that waited for another's update of its row
 	# re-checks the row's new version (EvalPlanQual), running the plan below
-	# its write again: ORCA's, on the segment, acts on the new version.  A
-	# Motion below the write could not run again for one row, and would fail
-	# the recheck as Cloudberry's does (gp_motion.c); ORCA's plan of an UPDATE
-	# or DELETE of one table has none, and one that reads another table, whose
-	# plan would, is the planner's while its rows may change under it.
+	# its write again: ORCA's, on the segment, acts on the new version.  One
+	# that reads another table re-checks it with the row of it the changed
+	# one was joined to, fetched again by its ctid through a row mark, as the
+	# planner's does (the translator's AddOtherRowMarks): on the segment,
+	# where the tables are distributed alike and no Motion is below the
+	# write.  A Motion below the write could not run again for one row, and
+	# fails the recheck as Cloudberry's does (gp_motion.c).
 	q 0 "CREATE TABLE gddr (a int, b int) DISTRIBUTED RANDOMLY; INSERT INTO gddr VALUES (1, 1);" >/dev/null
 	plan=$(q 0 "EXPLAIN (COSTS OFF) UPDATE gddr SET b = b + 10 WHERE a = 1;")
 	printf '%s\n' "BEGIN;" "UPDATE gddr SET b = b + 1 WHERE a = 1;" "SELECT pg_sleep(2);" "COMMIT;" |
@@ -3393,12 +3395,30 @@ SQL
 	sleep 0.5
 	out=$(q 0 "UPDATE gddr SET b = b + 10 WHERE a = 1 RETURNING b;")
 	wait "$holder"
-	out2=$(printf '%s\n' "SET gp.optimizer_trace_fallback = on;" "BEGIN;" \
-		"UPDATE gdd SET val = val FROM gddr WHERE gdd.id = gddr.a;" "ROLLBACK;" | qf 0)
+	case "$plan|$out" in
+		*"Update on gddr"*"Optimizer: GPORCA"*"|12")
+			ok "with it, ORCA's UPDATE that waited acts on the row's new version" ;;
+		*) notok "EvalPlanQual under ORCA with the detector" "$plan / $out" ;;
+	esac
+	q 0 "CREATE TABLE gddj (id int, w int) DISTRIBUTED BY (id); INSERT INTO gddj SELECT id, id * 100 FROM gdd;" >/dev/null
+	plan=$(q 0 "EXPLAIN (COSTS OFF, VERBOSE) UPDATE gdd SET val = gdd.val + gddj.w FROM gddj WHERE gdd.id = gddj.id AND gdd.id = $r0;")
+	before=$(q 0 "SELECT val FROM gdd WHERE id = $r0;")
+	printf '%s\n' "BEGIN;" "UPDATE gdd SET val = val + 1 WHERE id = $r0;" "SELECT pg_sleep(2);" "COMMIT;" |
+		qf 0 >/dev/null 2>&1 &
+	holder=$!
+	sleep 0.5
+	out=$(q 0 "UPDATE gdd SET val = gdd.val + gddj.w FROM gddj WHERE gdd.id = gddj.id AND gdd.id = $r0 RETURNING gdd.val;")
+	wait "$holder"
+	printf '%s\n' "BEGIN;" "UPDATE gdd SET val = val WHERE id = 1;" "SELECT pg_sleep(2);" "COMMIT;" |
+		qf 0 >/dev/null 2>&1 &
+	holder=$!
+	sleep 0.5
+	out2=$(q 0 "UPDATE gdd SET val = val FROM gddr WHERE gdd.id = gddr.a;")
+	wait "$holder"
 	case "$plan|$out|$out2" in
-		*"Update on gddr"*"Optimizer: GPORCA"*"|12|"*"an UPDATE or DELETE that reads another relation"*)
-			ok "with it, ORCA's UPDATE that waited acts on the row's new version; one that reads another table is the planner's" ;;
-		*) notok "EvalPlanQual under ORCA with the detector" "$plan / $out / $out2" ;;
+		*"gddj.ctid"*"Optimizer: GPORCA"*"|$((before + 1 + r0 * 100))|"*"EvalPlanQual can not handle subPlan with Motion node"*)
+			ok "... and one that joins a table distributed alike, with the row it was joined to; through a Motion, Cloudberry's error" ;;
+		*) notok "EvalPlanQual of ORCA's joined UPDATE with the detector" "$plan / $before / $out / $out2" ;;
 	esac
 	for opt in off on; do
 		printf '%s\n' "SET gp.optimizer = $opt;" "BEGIN;" "SELECT id FROM gdd WHERE id = $r0 FOR UPDATE;" \
