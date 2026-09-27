@@ -127,6 +127,7 @@
 #include "gp_fault.h"
 #include "gp_fts.h"
 #include "gp_grammar_int.h"
+#include "gp_ic.h"
 #include "gp_label.h"
 #include "gp_log.h"
 #include "gp_loopback.h"
@@ -285,6 +286,7 @@ static const char *const synced_settings[] = {
 	"gp.interconnect_timer_checking_period",
 	"gp.udpic_dropacks_percent",
 	"gp.udpic_dropxmit_percent",
+	"gp.log_interconnect",
 	/*
 	 * gp_resource's, what the coordinator's resource manager says of the
 	 * statement: the weight its queue's priority gives it, the group it runs
@@ -420,8 +422,11 @@ typedef struct GpSegmentConn
 	bool		pipelined;
 	int			pipe_step;
 
-	/* Where its backend receives a Motion's rows; NULL until asked. */
-	char	   *icaddress;
+	/*
+	 * Where its backend receives a Motion's rows, over each transport, by
+	 * its place in gp_ic.c's table; NULL until asked.
+	 */
+	char	   *icaddress[GP_IC_MAX_TRANSPORTS];
 } GpSegmentConn;
 
 /*
@@ -434,7 +439,7 @@ typedef struct GpReaderConn
 {
 	int			content;
 	PGconn	   *conn;			/* NULL once broken */
-	char	   *icaddress;
+	char	   *icaddress[GP_IC_MAX_TRANSPORTS];	/* as a writer's */
 	bool		busy;			/* its slice is running */
 	struct GpStream *stream;	/* the statement it is taken for */
 	char	   *sent[NUM_SYNCED_SETTINGS];
@@ -2433,11 +2438,6 @@ reader_connect(GpGang *g, int content)
 		MemoryContextSwitchTo(oldcxt);
 	}
 	gang_build_wes(g);
-
-	reader_exec(r, "SELECT gp_internal.interconnect_address()", &r->icaddress);
-	if (r->icaddress == NULL)
-		elog(ERROR, "segment %d gave its reader no interconnect address",
-			 content);
 	return r;
 }
 
@@ -2492,11 +2492,20 @@ GpStreamBegin(void)
 	return stream;
 }
 
+/* The query that asks a segment process where it receives over a transport. */
+static char *
+icaddress_query(const GpIcTransport *transport)
+{
+	return psprintf("SELECT gp_internal.interconnect_address(%s)",
+					quote_literal_cstr(transport->name));
+}
+
 const char *
-GpStreamWriterAddress(int content, int *pid)
+GpStreamWriterAddress(int content, const GpIcTransport *transport, int *pid)
 {
 	GpGang	   *g = gang_get();
 	GpSegmentConn *c = NULL;
+	int			t = GpIcTransportIndex(transport);
 
 	for (int i = 0; i < g->nconns; i++)
 		if (g->conns[i].content == content)
@@ -2504,31 +2513,32 @@ GpStreamWriterAddress(int content, int *pid)
 	if (c == NULL)
 		elog(ERROR, "there is no segment with content id %d", content);
 
-	if (c->icaddress == NULL)
+	if (c->icaddress[t] == NULL)
 	{
 		char	  **values = palloc0_array(char *, g->nconns);
 
-		GpDispatchQueryFirstValues("SELECT gp_internal.interconnect_address()",
-								   -1, values);
+		GpDispatchQueryFirstValues(icaddress_query(transport), -1, values);
 		for (int i = 0; i < g->nconns; i++)
 		{
 			if (values[i] == NULL)
 				elog(ERROR, "segment %d gave no interconnect address",
 					 g->conns[i].content);
-			g->conns[i].icaddress = MemoryContextStrdup(TopMemoryContext,
-														values[i]);
+			g->conns[i].icaddress[t] = MemoryContextStrdup(TopMemoryContext,
+														   values[i]);
 		}
 	}
 	*pid = PQbackendPID(c->conn);
-	return c->icaddress;
+	return c->icaddress[t];
 }
 
 int
-GpStreamAddReader(GpStream *stream, int content, const char **address)
+GpStreamAddReader(GpStream *stream, int content,
+				  const GpIcTransport *transport, const char **address)
 {
 	GpGang	   *g = gang_get();
 	GpReaderConn *found = NULL;
 	int			count = 0;
+	int			t;
 	MemoryContext oldcxt;
 
 	readers_poll();				/* a broken one is found broken now */
@@ -2550,11 +2560,26 @@ GpStreamAddReader(GpStream *stream, int content, const char **address)
 		found = reader_connect(g, content);
 	}
 
+	/*
+	 * Where it receives over the transport, asked the first time -- out of
+	 * the transaction a slice that failed there left open.
+	 */
+	t = GpIcTransportIndex(transport);
+	if (found->icaddress[t] == NULL)
+	{
+		if (PQtransactionStatus(found->conn) != PQTRANS_IDLE)
+			reader_exec(found, "ROLLBACK", NULL);
+		reader_exec(found, icaddress_query(transport), &found->icaddress[t]);
+		if (found->icaddress[t] == NULL)
+			elog(ERROR, "segment %d gave its reader no interconnect address",
+				 content);
+	}
+
 	found->stream = stream;
 	oldcxt = MemoryContextSwitchTo(TopMemoryContext);
 	stream->readers = lappend(stream->readers, found);
 	MemoryContextSwitchTo(oldcxt);
-	*address = found->icaddress;
+	*address = found->icaddress[t];
 	return list_length(stream->readers) - 1;
 }
 

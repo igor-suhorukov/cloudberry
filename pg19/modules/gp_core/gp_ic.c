@@ -95,6 +95,16 @@
  * the coordinator starts every slice at once.  It waits among the unclaimed
  * ones until its receiver asks for it, or its statement ends here.
  *
+ * The two are transports of a table, as Cloudberry's interconnects are
+ * MotionIPCLayers of its (cdbmotion.c): a Motion sends and receives through
+ * the functions of its statement's transport (gp_ic.h), which a module
+ * registers too -- udp2's and the proxy's.  The table is at the level of a
+ * row, which is what the port's Motions send, not of Cloudberry's tuple
+ * chunks.  What the coordinator told a statement's processes -- its
+ * transport, and each slice's senders and receivers and where they receive
+ * -- each has as a stream (GpIcStream), from its fragment's start until its
+ * end, or its (sub)transaction's.
+ *
  * Cloudberry sources this file stands in for:
  *	  contrib/interconnect/tcp/ic_tcp.c, contrib/interconnect/udp/ic_udpifc.c,
  *	  src/backend/cdb/motion/cdbmotion.c
@@ -140,7 +150,7 @@ typedef struct IcHandshake
 } IcHandshake;
 
 /* A row's frame: its length, or this for the end of a sender's rows. */
-#define IC_END_OF_ROWS	0xFFFFFFFF
+#define IC_END_OF_ROWS	GP_IC_END_OF_ROWS
 
 /* How much a sender holds for a receiver before it sends. */
 #define IC_FLUSH_BYTES	(64 * 1024)
@@ -205,25 +215,25 @@ typedef struct IcUdpEnded
 	uint32		slice;
 } IcUdpEnded;
 
-/* udpifc's settings, as Cloudberry names them without its gp_ */
-static int	gp_interconnect_queue_depth = 4;
-static int	gp_max_packet_size = 8192;
-static int	gp_interconnect_transmit_timeout = 3600;
-static int	gp_interconnect_min_rto = 20;
-static int	gp_interconnect_default_rtt = 20;
-static int	gp_interconnect_snd_queue_depth = 2;
-static int	gp_interconnect_min_retries_before_timeout = 100;
-static int	gp_interconnect_debug_retry_interval = 10;
-static bool gp_interconnect_cache_future_packets = true;
-static int	gp_interconnect_timer_period = 5;
-static int	gp_interconnect_timer_checking_period = 20;
+/* udpifc's settings, which udp2 reads too (gp_ic.h), as Cloudberry names them */
+int			gp_interconnect_queue_depth = 4;
+int			gp_max_packet_size = 8192;
+int			gp_interconnect_transmit_timeout = 3600;
+int			gp_interconnect_min_rto = 20;
+int			gp_interconnect_default_rtt = 20;
+int			gp_interconnect_snd_queue_depth = 2;
+int			gp_interconnect_min_retries_before_timeout = 100;
+int			gp_interconnect_debug_retry_interval = 10;
+bool		gp_interconnect_cache_future_packets = true;
+int			gp_interconnect_timer_period = 5;
+int			gp_interconnect_timer_checking_period = 20;
 
 /* Cloudberry's flow control methods, by its numbers (cdbvars.h) */
 #define IC_FC_CAPACITY		0
 #define IC_FC_LOSS			2
 #define IC_FC_LOSS_ADVANCE	3
 #define IC_FC_LOSS_TIMER	4
-static int	gp_interconnect_fc_method = IC_FC_LOSS;
+int			gp_interconnect_fc_method = IC_FC_LOSS;
 
 static const struct config_enum_entry fc_methods[] = {
 	{"loss", IC_FC_LOSS, false},
@@ -236,8 +246,19 @@ static const struct config_enum_entry fc_methods[] = {
 #define IC_FC_BY_LOSS() (gp_interconnect_fc_method != IC_FC_CAPACITY)
 
 /* and its tests': packets dropped as they would be sent, as lost ones are */
-static int	gp_udpic_dropacks_percent = 0;
-static int	gp_udpic_dropxmit_percent = 0;
+int			gp_udpic_dropacks_percent = 0;
+int			gp_udpic_dropxmit_percent = 0;
+
+/* How much the transports say of what they do, Cloudberry's gp_log_interconnect */
+int			gp_log_interconnect = GP_IC_VERBOSITY_TERSE;
+
+static const struct config_enum_entry log_interconnect_options[] = {
+	{"terse", GP_IC_VERBOSITY_TERSE, false},
+	{"off", GP_IC_VERBOSITY_OFF, false},
+	{"verbose", GP_IC_VERBOSITY_VERBOSE, false},
+	{"debug", GP_IC_VERBOSITY_DEBUG, false},
+	{NULL, 0, false}
+};
 
 /* One sender's connection, as a receiver has it. */
 typedef struct IcIn
@@ -265,8 +286,9 @@ typedef struct IcIn
 	TimestampTz udp_last;		/* its sender's last packet, or its first STOP */
 } IcIn;
 
-struct GpIcReceiver
+typedef struct IcReceiver
 {
+	GpIcReceiver base;		/* tcp's or udpifc's */
 	char		token[GP_IC_TOKEN_LEN + 1];
 	int			slice;
 	int			nsenders;
@@ -277,11 +299,11 @@ struct GpIcReceiver
 	int			next;			/* whose row to look at first */
 	WaitEventSet *wes;
 	bool		wes_stale;		/* a connection came since it was built */
-	WaitEventSet *wes_one;		/* GpIcRecvFrom()'s: one sender's socket */
+	WaitEventSet *wes_one;		/* ic_recv_from()'s: one sender's socket */
 	IcIn	   *wes_one_in;		/* which */
 	int			wes_one_conns;	/* and how many had come, and were */
 	int			wes_one_unclaimed;	/* unclaimed, when it was built */
-};
+} IcReceiver;
 
 /* One receiver's connection, as a sender has it. */
 typedef struct IcOut
@@ -309,8 +331,9 @@ typedef struct IcOut
 	TimestampTz last_query;		/* the last status query sent it */
 } IcOut;
 
-struct GpIcSender
+typedef struct IcSender
 {
+	GpIcSender	base;		/* tcp's or udpifc's */
 	int			slice;
 	int			nreceivers;
 	IcOut	   *outs;
@@ -325,7 +348,7 @@ struct GpIcSender
 	int			inflight;		/* packets sent, not yet acknowledged */
 	TimestampTz last_check;		/* when the unacknowledged were last looked at */
 	bool		warned;			/* Cloudberry's WARNING of retries given */
-};
+} IcSender;
 
 static pgsocket listen_sock = PGINVALID_SOCKET;
 static char *listen_address = NULL;
@@ -334,13 +357,12 @@ static char *listen_path = NULL;
 static pgsocket udp_sock = PGINVALID_SOCKET;
 static char *udp_address = NULL;
 static char *udp_path = NULL;
-static char *both_addresses = NULL;
 static List *udp_ended = NIL;	/* IcUdpEnded, in TopMemoryContext */
 
 /* In TopMemoryContext; what an error leaves here, the transaction's end closes. */
 static List *unclaimed = NIL;	/* IcIn */
-static List *receivers = NIL;	/* GpIcReceiver */
-static List *senders = NIL;		/* GpIcSender */
+static List *receivers = NIL;	/* IcReceiver */
+static List *senders = NIL;		/* IcSender */
 
 static bool udp_poll(void);
 
@@ -547,16 +569,17 @@ ic_udp_open(const GpSegmentConfig *self)
 }
 
 /*
- * Where this process receives, both ways: its listener's address and its
- * datagram socket's, a space between them -- see GpIcAddressOf().
+ * Where this process receives, opened the first time: its listener, and its
+ * datagram socket -- both, whichever of tcp and udpifc asks, as a receiver
+ * waits on both.
  */
-const char *
-GpIcAddress(void)
+static void
+ic_open(void)
 {
 	const GpSegmentConfig *self = GpClusterSelf();
 
-	if (both_addresses != NULL)
-		return both_addresses;
+	if (udp_address != NULL)
+		return;
 
 	if (self == NULL)
 		ereport(ERROR,
@@ -574,20 +597,6 @@ GpIcAddress(void)
 				 errmsg("could not listen on the interconnect socket: %m")));
 
 	ic_udp_open(self);
-	both_addresses = MemoryContextStrdup(TopMemoryContext,
-										 psprintf("%s %s", listen_address,
-												  udp_address));
-	return both_addresses;
-}
-
-const char *
-GpIcAddressOf(const char *address, bool udp)
-{
-	const char *space = strchr(address, ' ');
-
-	if (space == NULL)
-		elog(ERROR, "interconnect address \"%s\" has no part for UDP", address);
-	return udp ? pstrdup(space + 1) : pnstrdup(address, space - address);
 }
 
 /* ------------------------------------------------------------------------- */
@@ -700,14 +709,14 @@ in_close(IcIn *in)
 }
 
 /* A connection whose handshake has come: to its receiver, if it has one. */
-static GpIcReceiver *
+static IcReceiver *
 in_route(IcIn *in)
 {
 	ListCell   *lc;
 
 	foreach(lc, receivers)
 	{
-		GpIcReceiver *r = (GpIcReceiver *) lfirst(lc);
+		IcReceiver *r = (IcReceiver *) lfirst(lc);
 
 		if (r->slice == (int) in->hs.slice &&
 			memcmp(r->token, in->hs.token, GP_IC_TOKEN_LEN) == 0)
@@ -813,10 +822,10 @@ ic_accept(void)
 
 /* UDP: a sender's stream here, claimed by its receiver ("owner") or not yet. */
 static IcIn *
-udp_find_in(const IcUdpPacket *pkt, GpIcReceiver **owner)
+udp_find_in(const IcUdpPacket *pkt, IcReceiver **owner)
 {
 	*owner = NULL;
-	foreach_ptr(GpIcReceiver, r, receivers)
+	foreach_ptr(IcReceiver, r, receivers)
 	{
 		if (r->slice != (int) pkt->slice ||
 			memcmp(r->token, pkt->token, GP_IC_TOKEN_LEN) != 0)
@@ -881,7 +890,7 @@ static void
 udp_on_data(const IcUdpPacket *pkt, const struct sockaddr_storage *from,
 			socklen_t fromlen)
 {
-	GpIcReceiver *r;
+	IcReceiver *r;
 	IcIn	   *in = udp_find_in(pkt, &r);
 
 	if (pkt->type == IC_UDP_CLOSE)
@@ -916,7 +925,7 @@ udp_on_data(const IcUdpPacket *pkt, const struct sockaddr_storage *from,
 		{
 			bool		begun = false;
 
-			foreach_ptr(GpIcReceiver, rr, receivers)
+			foreach_ptr(IcReceiver, rr, receivers)
 				if (rr->slice == (int) pkt->slice &&
 					memcmp(rr->token, pkt->token, GP_IC_TOKEN_LEN) == 0)
 					begun = true;
@@ -1024,21 +1033,16 @@ udp_on_data(const IcUdpPacket *pkt, const struct sockaddr_storage *from,
 	udp_ack(in);
 }
 
-GpIcReceiver *
-GpIcRecvBegin(const char *token, int slice, int nsenders, bool udp)
+static IcReceiver *
+ic_recv_begin(const char *token, int slice, int nsenders, bool udp)
 {
-	MemoryContext oldcxt;
-	GpIcReceiver *r;
-
-	/* where Cloudberry's segment sets up its interconnect (SetupInterconnect()) */
-	GP_FAULT("interconnect_setup_palloc");
-	oldcxt = MemoryContextSwitchTo(TopMemoryContext);
-	r = palloc0(sizeof(GpIcReceiver));
+	MemoryContext oldcxt = MemoryContextSwitchTo(TopMemoryContext);
+	IcReceiver *r = palloc0(sizeof(IcReceiver));
 	List	   *mine = NIL;
 	ListCell   *lc;
 
 	Assert(strlen(token) == GP_IC_TOKEN_LEN);
-	(void) GpIcAddress();		/* the coordinator asked for it already */
+	ic_open();				/* the coordinator asked for it already */
 
 	memcpy(r->token, token, GP_IC_TOKEN_LEN + 1);
 	r->slice = slice;
@@ -1098,7 +1102,7 @@ in_take(IcIn *in, char **data, int *len)
 
 /* Read what has come on a connection, without waiting; true if anything. */
 static bool
-in_read(GpIcReceiver *r, IcIn *in)
+in_read(IcReceiver *r, IcIn *in)
 {
 	ssize_t		n;
 
@@ -1142,7 +1146,7 @@ in_read(GpIcReceiver *r, IcIn *in)
 }
 
 static void
-recv_wait(GpIcReceiver *r)
+recv_wait(IcReceiver *r)
 {
 	WaitEvent	occurred[1];
 	ListCell   *lc;
@@ -1189,9 +1193,11 @@ recv_wait(GpIcReceiver *r)
 	CHECK_FOR_INTERRUPTS();
 }
 
-bool
-GpIcRecv(GpIcReceiver *r, char **data, int *len)
+static bool
+ic_recv(GpIcReceiver *receiver, char **data, int *len)
 {
+	IcReceiver *r = (IcReceiver *) receiver;
+
 	for (;;)
 	{
 		int			n = list_length(r->conns);
@@ -1257,12 +1263,12 @@ GpIcRecv(GpIcReceiver *r, char **data, int *len)
 }
 
 /*
- * GpIcRecvFrom()'s wait: for sender "in" alone, or none yet connected -- the
+ * ic_recv_from()'s wait: for sender "in" alone, or none yet connected -- the
  * others' sockets stay readable while their rows wait their turn, and would
  * wake a wait on them at once, for ever.
  */
 static void
-recv_wait_one(GpIcReceiver *r, IcIn *in)
+recv_wait_one(IcReceiver *r, IcIn *in)
 {
 	WaitEvent	occurred[1];
 
@@ -1301,9 +1307,11 @@ recv_wait_one(GpIcReceiver *r, IcIn *in)
  * The next row from one sender, for a merge of the senders' streams: the
  * k-th to have come, in the order the senders came, which stays each one's.
  */
-bool
-GpIcRecvFrom(GpIcReceiver *r, int k, char **data, int *len)
+static bool
+ic_recv_from(GpIcReceiver *receiver, int k, char **data, int *len)
 {
+	IcReceiver *r = (IcReceiver *) receiver;
+
 	Assert(k >= 0 && k < r->nsenders);
 	for (;;)
 	{
@@ -1347,7 +1355,7 @@ GpIcRecvFrom(GpIcReceiver *r, int k, char **data, int *len)
 }
 
 static void
-receiver_free(GpIcReceiver *r)
+receiver_free(IcReceiver *r)
 {
 	foreach_ptr(IcIn, in, r->conns)
 		in_close(in);
@@ -1365,7 +1373,7 @@ receiver_free(GpIcReceiver *r)
  * that still come, until udp_wait().
  */
 static void
-udp_recv_stop(GpIcReceiver *r)
+udp_recv_stop(IcReceiver *r)
 {
 	TimestampTz now = GetCurrentTimestamp();
 
@@ -1403,7 +1411,7 @@ udp_wait(List *rs)
 		TimestampTz now = GetCurrentTimestamp();
 		bool		open = false;
 
-		foreach_ptr(GpIcReceiver, r, rs)
+		foreach_ptr(IcReceiver, r, rs)
 		{
 			if (list_length(r->conns) < r->nsenders)
 				open = true;
@@ -1442,7 +1450,7 @@ udp_wait(List *rs)
 
 /* UDP: a receiver gone; a packet that comes still, while this process listens, gets a STOP. */
 static void
-udp_recv_free(GpIcReceiver *r)
+udp_recv_free(IcReceiver *r)
 {
 	MemoryContext oldcxt = MemoryContextSwitchTo(TopMemoryContext);
 	IcUdpEnded *e = palloc(sizeof(IcUdpEnded));
@@ -1456,9 +1464,11 @@ udp_recv_free(GpIcReceiver *r)
 	receiver_free(r);
 }
 
-void
-GpIcRecvEnd(GpIcReceiver *r)
+static void
+ic_recv_end(GpIcReceiver *receiver)
 {
+	IcReceiver *r = (IcReceiver *) receiver;
+
 	if (!r->udp)
 	{
 		receivers = list_delete_ptr(receivers, r);
@@ -1490,7 +1500,7 @@ udp_finish(const char *token)
 {
 	List	   *mine = NIL;
 
-	foreach_ptr(GpIcReceiver, r, receivers)
+	foreach_ptr(IcReceiver, r, receivers)
 	{
 		if (!r->udp || memcmp(r->token, token, GP_IC_TOKEN_LEN) != 0)
 			continue;
@@ -1501,13 +1511,13 @@ udp_finish(const char *token)
 	if (mine == NIL)
 		return;
 	udp_wait(mine);
-	foreach_ptr(GpIcReceiver, r, mine)
+	foreach_ptr(IcReceiver, r, mine)
 		udp_recv_free(r);
 	list_free(mine);
 }
 
-void
-GpIcForget(const char *token)
+static void
+ic_forget(const char *token)
 {
 	List	   *keep = NIL;
 	MemoryContext oldcxt;
@@ -1689,7 +1699,7 @@ out_flush(IcOut *out)
 
 /* A packet of a sender's stream, sent -- again, if it was before. */
 static void
-udp_transmit(GpIcSender *s, IcOut *out, IcUdpSent *p)
+udp_transmit(IcSender *s, IcOut *out, IcUdpSent *p)
 {
 	udp_put(&out->addr, out->addrlen, IC_UDP_DATA, s->token, (uint32) s->slice,
 			s->self, out->index, p->offset, 0, p->data, p->len);
@@ -1702,7 +1712,7 @@ udp_transmit(GpIcSender *s, IcOut *out, IcUdpSent *p)
 
 /* A packet acknowledged: under the loss methods, the window opened by it. */
 static void
-udp_cwnd_acked(GpIcSender *s)
+udp_cwnd_acked(IcSender *s)
 {
 	s->inflight--;
 	if (!IC_FC_BY_LOSS())
@@ -1716,7 +1726,7 @@ udp_cwnd_acked(GpIcSender *s)
  * before it, and closed to where it began where its time ran out.
  */
 static void
-udp_cwnd_lost(GpIcSender *s, bool timeout)
+udp_cwnd_lost(IcSender *s, bool timeout)
 {
 	if (!IC_FC_BY_LOSS())
 		return;
@@ -1731,7 +1741,7 @@ udp_cwnd_lost(GpIcSender *s, bool timeout)
  * waits on this receiver at all.
  */
 static bool
-udp_may_send(GpIcSender *s, IcOut *out)
+udp_may_send(IcSender *s, IcOut *out)
 {
 	if (!IC_FC_BY_LOSS())
 		return list_length(out->unacked) < gp_interconnect_snd_queue_depth;
@@ -1752,7 +1762,7 @@ udp_rtt_sample(IcOut *out, int64 rtt)
 }
 
 static void
-udp_out_forget(GpIcSender *s, IcOut *out)
+udp_out_forget(IcSender *s, IcOut *out)
 {
 	s->inflight -= list_length(out->unacked);
 	foreach_ptr(IcUdpSent, p, out->unacked)
@@ -1766,7 +1776,7 @@ udp_out_forget(GpIcSender *s, IcOut *out)
 static void
 udp_on_ack(const IcUdpPacket *pkt)
 {
-	foreach_ptr(GpIcSender, s, senders)
+	foreach_ptr(IcSender, s, senders)
 	{
 		IcOut	   *out;
 		TimestampTz now;
@@ -1874,7 +1884,7 @@ udp_poll(void)
  * Then a wait for a packet, the next of these, or an interrupt.
  */
 static void
-udp_sender_wait(GpIcSender *s, IcOut *out)
+udp_sender_wait(IcSender *s, IcOut *out)
 {
 	TimestampTz now = GetCurrentTimestamp();
 	int64		next = IC_UDP_DEADLOCK_CHECK_US;
@@ -1966,7 +1976,7 @@ udp_sender_wait(GpIcSender *s, IcOut *out)
  * it has every byte.
  */
 static void
-udp_out_flush(GpIcSender *s, IcOut *out, bool drain)
+udp_out_flush(IcSender *s, IcOut *out, bool drain)
 {
 	int			payload = gp_max_packet_size - IC_UDP_HEADER;
 	int			off = 0;
@@ -2010,7 +2020,7 @@ udp_out_flush(GpIcSender *s, IcOut *out, bool drain)
 }
 
 static void
-out_append(GpIcSender *s, IcOut *out, uint32 frame, const char *data, int len)
+out_append(IcSender *s, IcOut *out, uint32 frame, const char *data, int len)
 {
 	uint32		nframe = pg_hton32(frame);
 	int			need = out->len + sizeof(uint32) + Max(len, 0);
@@ -2075,17 +2085,13 @@ udp_resolve(const char *address, struct sockaddr_storage *addr,
 	}
 }
 
-GpIcSender *
-GpIcSendBegin(const char *token, int slice, int self, int nreceivers,
+static IcSender *
+ic_send_begin(const char *token, int slice, int self, int nreceivers,
 			  char **addresses)
 {
-	MemoryContext oldcxt;
-	GpIcSender *s;
+	MemoryContext oldcxt = MemoryContextSwitchTo(TopMemoryContext);
+	IcSender   *s = palloc0(sizeof(IcSender));
 	IcHandshake hs;
-
-	GP_FAULT("interconnect_setup_palloc");
-	oldcxt = MemoryContextSwitchTo(TopMemoryContext);
-	s = palloc0(sizeof(GpIcSender));
 
 	Assert(strlen(token) == GP_IC_TOKEN_LEN);
 	s->slice = slice;
@@ -2116,7 +2122,7 @@ GpIcSendBegin(const char *token, int slice, int self, int nreceivers,
 		if (strncmp(addresses[i], "udp:", 4) == 0 ||
 			strncmp(addresses[i], "udpunix:", 8) == 0)
 		{
-			(void) GpIcAddress();	/* this process's socket, for the ACKs */
+			ic_open();			/* this process's socket, for the ACKs */
 			udp_resolve(addresses[i], &out->addr, &out->addrlen);
 			out->udp = true;
 			out->index = (uint32) i;
@@ -2146,9 +2152,11 @@ GpIcSendBegin(const char *token, int slice, int self, int nreceivers,
 	return s;
 }
 
-void
-GpIcSend(GpIcSender *s, int receiver, const char *data, int len)
+static void
+ic_send(GpIcSender *sender, int receiver, const char *data, int len)
 {
+	IcSender   *s = (IcSender *) sender;
+
 	if (receiver >= 0)
 	{
 		Assert(receiver < s->nreceivers);
@@ -2159,9 +2167,11 @@ GpIcSend(GpIcSender *s, int receiver, const char *data, int len)
 		out_append(s, &s->outs[i], (uint32) len, data, len);
 }
 
-bool
-GpIcSendWanted(GpIcSender *s)
+static bool
+ic_send_wanted(GpIcSender *sender)
 {
+	IcSender   *s = (IcSender *) sender;
+
 	for (int i = 0; i < s->nreceivers; i++)
 		if (s->outs[i].wanted)
 			return true;
@@ -2169,7 +2179,7 @@ GpIcSendWanted(GpIcSender *s)
 }
 
 static void
-sender_free(GpIcSender *s)
+sender_free(IcSender *s)
 {
 	for (int i = 0; i < s->nreceivers; i++)
 	{
@@ -2183,9 +2193,11 @@ sender_free(GpIcSender *s)
 	pfree(s);
 }
 
-void
-GpIcSendEnd(GpIcSender *s)
+static void
+ic_send_end(GpIcSender *sender)
 {
+	IcSender   *s = (IcSender *) sender;
+
 	for (int i = 0; i < s->nreceivers; i++)
 	{
 		IcOut	   *out = &s->outs[i];
@@ -2209,6 +2221,320 @@ GpIcSendEnd(GpIcSender *s)
 }
 
 /* ------------------------------------------------------------------------- */
+/* tcp and udpifc, as transports                                             */
+/* ------------------------------------------------------------------------- */
+
+static const char *
+tcp_address(void)
+{
+	ic_open();
+	return listen_address;
+}
+
+static const char *
+udpifc_address(void)
+{
+	ic_open();
+	return udp_address;
+}
+
+/* Either: each receiver's address says which of the two it receives by. */
+static GpIcSender *
+tcp_send_begin(GpIcStream *stream, GpIcSlice *slice)
+{
+	IcSender   *s = ic_send_begin(stream->token, slice->slice,
+								  GpClusterContentId(), slice->nreceivers,
+								  slice->receiver_addresses);
+
+	return &s->base;
+}
+
+static GpIcReceiver *
+tcp_recv_begin(GpIcStream *stream, GpIcSlice *slice)
+{
+	return &ic_recv_begin(stream->token, slice->slice, slice->nsenders,
+						  false)->base;
+}
+
+static GpIcReceiver *
+udpifc_recv_begin(GpIcStream *stream, GpIcSlice *slice)
+{
+	return &ic_recv_begin(stream->token, slice->slice, slice->nsenders,
+						  true)->base;
+}
+
+/* What an error leaves, the transaction's end closes (ic_xact_callback()). */
+static void
+tcp_stmt_end(GpIcStream *stream, bool error)
+{
+	if (!error)
+		ic_forget(stream->token);
+}
+
+static const GpIcTransport tcp_transport = {
+	.name = "tcp",
+	.address = tcp_address,
+	.send_begin = tcp_send_begin,
+	.send = ic_send,
+	.send_wanted = ic_send_wanted,
+	.send_end = ic_send_end,
+	.recv_begin = tcp_recv_begin,
+	.recv = ic_recv,
+	.recv_from = ic_recv_from,
+	.recv_end = ic_recv_end,
+	.stmt_end = tcp_stmt_end,
+};
+
+static const GpIcTransport udpifc_transport = {
+	.name = "udpifc",
+	.address = udpifc_address,
+	.send_begin = tcp_send_begin,
+	.send = ic_send,
+	.send_wanted = ic_send_wanted,
+	.send_end = ic_send_end,
+	.recv_begin = udpifc_recv_begin,
+	.recv = ic_recv,
+	.recv_from = ic_recv_from,
+	.recv_end = ic_recv_end,
+	.stmt_end = tcp_stmt_end,
+};
+
+/* ------------------------------------------------------------------------- */
+/* The transports' table, and the statements' streams                       */
+/* ------------------------------------------------------------------------- */
+
+static const GpIcTransport *transports[GP_IC_MAX_TRANSPORTS];
+static int	ntransports = 0;
+
+/* GpIcStream, each in a memory context of its own under TopMemoryContext */
+static List *streams = NIL;
+
+void
+GpIcRegisterTransport(const GpIcTransport *transport)
+{
+	if (!process_shared_preload_libraries_in_progress)
+		elog(ERROR, "interconnect transport \"%s\" registered outside shared_preload_libraries",
+			 transport->name);
+	if (GpIcFindTransport(transport->name) != NULL)
+		elog(ERROR, "interconnect transport \"%s\" registered twice",
+			 transport->name);
+	if (ntransports >= GP_IC_MAX_TRANSPORTS)
+		elog(ERROR, "too many interconnect transports");
+	transports[ntransports++] = transport;
+}
+
+const GpIcTransport *
+GpIcFindTransport(const char *name)
+{
+	for (int i = 0; i < ntransports; i++)
+		if (strcmp(transports[i]->name, name) == 0)
+			return transports[i];
+	return NULL;
+}
+
+int
+GpIcTransportIndex(const GpIcTransport *transport)
+{
+	for (int i = 0; i < ntransports; i++)
+		if (transports[i] == transport)
+			return i;
+	elog(ERROR, "interconnect transport \"%s\" is not registered",
+		 transport->name);
+	return -1;
+}
+
+const char *
+GpIcAddress(const GpIcTransport *transport)
+{
+	return transport->address();
+}
+
+/*
+ * A stream is kept from here until GpIcForget(), or the end of the
+ * (sub)transaction it began in, which ends it as an error does.  Its
+ * transport's stmt_begin may fail: the stream is kept first, so that its
+ * end finds what it began.
+ */
+void
+GpIcStatementBegin(GpIcStream *stream)
+{
+	MemoryContext oldcxt = MemoryContextSwitchTo(TopMemoryContext);
+
+	stream->subxid = GetCurrentSubTransactionId();
+	streams = lappend(streams, stream);
+	MemoryContextSwitchTo(oldcxt);
+	if (stream->transport->stmt_begin != NULL)
+		stream->transport->stmt_begin(stream);
+}
+
+GpIcStream *
+GpIcStatementFind(const char *token)
+{
+	foreach_ptr(GpIcStream, stream, streams)
+		if (strcmp(stream->token, token) == 0)
+			return stream;
+	return NULL;
+}
+
+/* The memory a stream is in, with what its transport kept there. */
+static void
+stream_free(GpIcStream *stream)
+{
+	MemoryContextDelete(GetMemoryChunkContext(stream));
+}
+
+void
+GpIcForget(GpIcStream *stream)
+{
+	streams = list_delete_ptr(streams, stream);
+	PG_TRY();
+	{
+		stream->transport->stmt_end(stream, false);
+	}
+	PG_FINALLY();
+	{
+		stream_free(stream);
+	}
+	PG_END_TRY();
+}
+
+GpIcSlice *
+GpIcStreamSlice(GpIcStream *stream, int slice)
+{
+	for (int i = 0; i < stream->nslices; i++)
+		if (stream->slices[i].slice == slice)
+			return &stream->slices[i];
+	return NULL;
+}
+
+GpIcSender *
+GpIcSendBegin(GpIcStream *stream, int slice)
+{
+	GpIcSlice  *s = GpIcStreamSlice(stream, slice);
+	GpIcSender *sender;
+
+	/* where Cloudberry's segment sets up its interconnect (SetupInterconnect()) */
+	GP_FAULT("interconnect_setup_palloc");
+	if (s == NULL)
+		elog(ERROR, "interconnect: slice %d of the statement does not stream",
+			 slice);
+	sender = stream->transport->send_begin(stream, s);
+	sender->transport = stream->transport;
+	return sender;
+}
+
+void
+GpIcSend(GpIcSender *sender, int receiver, const char *data, int len)
+{
+	sender->transport->send(sender, receiver, data, len);
+}
+
+bool
+GpIcSendWanted(GpIcSender *sender)
+{
+	return sender->transport->send_wanted(sender);
+}
+
+void
+GpIcSendEnd(GpIcSender *sender)
+{
+	sender->transport->send_end(sender);
+}
+
+GpIcReceiver *
+GpIcRecvBegin(GpIcStream *stream, int slice)
+{
+	GpIcSlice  *s = GpIcStreamSlice(stream, slice);
+	GpIcReceiver *receiver;
+
+	GP_FAULT("interconnect_setup_palloc");
+	if (s == NULL)
+		elog(ERROR, "interconnect: slice %d of the statement does not stream",
+			 slice);
+	receiver = stream->transport->recv_begin(stream, s);
+	receiver->transport = stream->transport;
+	return receiver;
+}
+
+bool
+GpIcRecv(GpIcReceiver *receiver, char **data, int *len)
+{
+	return receiver->transport->recv(receiver, data, len);
+}
+
+bool
+GpIcRecvFrom(GpIcReceiver *receiver, int k, char **data, int *len)
+{
+	return receiver->transport->recv_from(receiver, k, data, len);
+}
+
+void
+GpIcRecvEnd(GpIcReceiver *receiver)
+{
+	receiver->transport->recv_end(receiver);
+}
+
+/*
+ * The streams a (sub)transaction's end leaves, ended as an error ends them:
+ * the transports close what is theirs.
+ */
+static void
+streams_end(SubTransactionId subxid)
+{
+	List	   *ending = NIL;
+
+	foreach_ptr(GpIcStream, stream, streams)
+		if (subxid == InvalidSubTransactionId || stream->subxid == subxid)
+			ending = lappend(ending, stream);
+	foreach_ptr(GpIcStream, stream, ending)
+	{
+		streams = list_delete_ptr(streams, stream);
+		stream->transport->stmt_end(stream, true);
+		stream_free(stream);
+	}
+	list_free(ending);
+}
+
+static void
+ic_subxact_callback(SubXactEvent event, SubTransactionId mySubid,
+					SubTransactionId parentSubid, void *arg)
+{
+	if (event == SUBXACT_EVENT_COMMIT_SUB)
+	{
+		foreach_ptr(GpIcStream, stream, streams)
+			if (stream->subxid == mySubid)
+				stream->subxid = parentSubid;
+	}
+	else if (event == SUBXACT_EVENT_ABORT_SUB)
+		streams_end(mySubid);
+}
+
+/*
+ * gp.interconnect_type names a module's transport that no module in
+ * shared_preload_libraries registered: the server does not start, rather
+ * than run its statements over another -- the check gp_motion.c's check hook
+ * leaves for after the modules have loaded.
+ */
+static shmem_request_hook_type prev_shmem_request = NULL;
+
+static void
+ic_check_transport(void)
+{
+	const char *type = GetConfigOption("gp.interconnect_type", true, false);
+
+	if (prev_shmem_request)
+		prev_shmem_request();
+	if (type != NULL && strcmp(type, "relay") != 0 &&
+		GpIcFindTransport(type) == NULL)
+		ereport(ERROR,
+				(errcode(ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE),
+				 errmsg("gp.interconnect_type is \"%s\", which no module in \"shared_preload_libraries\" provides",
+						type),
+				 errhint("Add \"%s\" to \"shared_preload_libraries\" after \"gp_core\".",
+						 strcmp(type, "proxy") == 0 ? "interconnect" : type)));
+}
+
+/* ------------------------------------------------------------------------- */
 /* The end of a transaction                                                  */
 /* ------------------------------------------------------------------------- */
 
@@ -2224,12 +2550,14 @@ ic_xact_callback(XactEvent event, void *arg)
 		event != XACT_EVENT_PREPARE)
 		return;
 
-	foreach_ptr(GpIcSender, s, senders)
+	streams_end(InvalidSubTransactionId);
+
+	foreach_ptr(IcSender, s, senders)
 		sender_free(s);
 	list_free(senders);
 	senders = NIL;
 
-	foreach_ptr(GpIcReceiver, r, receivers)
+	foreach_ptr(IcReceiver, r, receivers)
 		receiver_free(r);
 	list_free(receivers);
 	receivers = NIL;
@@ -2333,7 +2661,21 @@ GpIcInit(void)
 							GUC_NO_SHOW_ALL | GUC_NOT_IN_SAMPLE,
 							NULL, NULL, NULL);
 
+	DefineCustomEnumVariable("gp.log_interconnect",
+							 "Sets the verbosity of logged messages pertaining to connections between worker processes.",
+							 "Valid values are \"off\", \"terse\", \"verbose\" and \"debug\".  Cloudberry calls this gp_log_interconnect.",
+							 &gp_log_interconnect,
+							 GP_IC_VERBOSITY_TERSE, log_interconnect_options,
+							 PGC_USERSET, GUC_NOT_IN_SAMPLE,
+							 NULL, NULL, NULL);
+
+	GpIcRegisterTransport(&tcp_transport);
+	GpIcRegisterTransport(&udpifc_transport);
+	prev_shmem_request = shmem_request_hook;
+	shmem_request_hook = ic_check_transport;
+
 	if (GpClusterIsSingleNode())
 		return;
 	RegisterXactCallback(ic_xact_callback, NULL);
+	RegisterSubXactCallback(ic_subxact_callback, NULL);
 }

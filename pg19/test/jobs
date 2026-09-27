@@ -63,6 +63,7 @@ diskquota              isolation2 105   DQ_PARTS=isolation2 MEM=2000
 gpmgmt                 -        154   MEM=1600
 singlenode             planner   26   PASSES=planner MEM=3500
 cluster                -        100   MEM=600
+ic                     -         30   MEM=900
 orca                   -         54   MEM=300
 fts                    -         55   MEM=1000
 postgis_cluster        -         16   MEM=1700

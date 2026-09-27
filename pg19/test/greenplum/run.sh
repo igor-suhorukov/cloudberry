@@ -81,7 +81,15 @@ NODES=4					# a coordinator and Cloudberry's three segments
 # gp_matview after gp_sql, whose hooks it runs outside of, as the dump suite
 # has it: an incremental view's distribution is an option gp_sql reads; and
 # gp_task, whose scheduler refreshes a dynamic table
-PRELOAD='gp_core,gp_orca,gp_sql,gp_ao,gp_exttable,gp_security,gp_resource,gp_matview,gp_task'
+PRELOAD="gp_core,gp_orca,gp_sql,gp_ao,gp_exttable,gp_security,gp_resource,gp_matview,gp_task${GP_PRELOAD_MORE:+,$GP_PRELOAD_MORE}"
+# The modules and settings the clusters have besides (GP_PRELOAD_MORE,
+# GP_SETTINGS); and the interconnect every node has, GP_INTERCONNECT, tcp
+# by default -- the ic_udp2 and ic_proxy suites run this one with theirs --
+# which each node is checked to have once it is up.  The proxies listen on
+# TCP whatever the nodes do, each on its node's port and IC_PROXY_OFFSET
+# more, a range no suite's nodes use (the isolation2 suite's is 2000 above).
+INTERCONNECT="${GP_INTERCONNECT:-tcp}"
+IC_PROXY_OFFSET=12000
 SECRET="greenplum-schedule-$RANDOM$RANDOM$RANDOM"
 
 # The tests the manifest runs -- Cloudberry's, and the port's (port:name)
@@ -131,6 +139,22 @@ standby_sock() { echo "$SOCK/$1/s"; }
 # tests still connect to the coordinator through its socket.
 over_tcp()     { [[ "$1" == tcp* ]]; }
 node_host()    { if over_tcp "$1"; then echo 127.0.0.1; else node_sock "$1" "$2"; fi; }
+# The proxies' addresses of a group (GP_INTERCONNECT=proxy): every node,
+# mirrors and the standby too, as Cloudberry's gp_interconnect_proxy_addresses
+# lists them -- dbid:content:host:port, in dbid order.
+proxy_addresses() {
+	local g="$1" gi="$2" n out=""
+	for n in $(seq 0 $((NODES - 1))); do
+		out="$out,$((n + 1)):$((n - 1)):127.0.0.1:$(($(node_port "$gi" "$n") + IC_PROXY_OFFSET))"
+	done
+	if has_mirrors "$g"; then
+		for n in $(seq 0 $((NODES - 2))); do
+			out="$out,$((NODES + 1 + n)):$n:127.0.0.1:$(($(mirror_port "$gi" "$n") + IC_PROXY_OFFSET))"
+		done
+		out="$out,$((2 * NODES)):-1:127.0.0.1:$(($(standby_port "$gi") + IC_PROXY_OFFSET))"
+	fi
+	echo "${out#,}"
+}
 # The superuser is Cloudberry's demo cluster's, gpadmin, as the singlenode
 # suite's is: Cloudberry's expected output names it.
 export PGUSER=gpadmin
@@ -196,6 +220,10 @@ make_cluster() {
 			echo "listen_addresses = '$(over_tcp "$g" && echo 127.0.0.1)'"
 			echo "port = $(node_port "$gi" "$n")"
 			echo "fsync = off"
+			[ -n "${GP_SETTINGS:-}" ] && echo "$GP_SETTINGS"
+			[ -n "${GP_INTERCONNECT:-}" ] && echo "gp.interconnect_type = '$INTERCONNECT'"
+			[ "$INTERCONNECT" = proxy ] &&
+				echo "gp.interconnect_proxy_addresses = '$(proxy_addresses "$g" "$gi")'"
 			echo "gp.cluster_config = '$conf'"
 			echo "gp.dbid = $((n + 1))"
 			echo "gp.cluster_secret = '$SECRET'"
@@ -296,6 +324,16 @@ for gi in "${!groups[@]}"; do
 done
 for g in "${groups[@]}"; do
 	wait -n || exit 1
+done
+# Every node has the interconnect asked for: a run over udp2 or the proxy
+# is never one over tcp unawares.
+for gi in "${!groups[@]}"; do
+	for n in $(seq 0 $((NODES - 1))); do
+		ic=$("$PSQL" -X -q -t -A -h "$(node_sock "${groups[$gi]}" "$n")" -p "$(node_port "$gi" "$n")" \
+			-d postgres -c "SHOW gp.interconnect_type" 2>&1)
+		[ "$ic" = "$INTERCONNECT" ] ||
+			{ echo "node $n of group ${groups[$gi]} has gp.interconnect_type \"$ic\", not $INTERCONNECT"; exit 1; }
+	done
 done
 t1=$(date +%s)
 

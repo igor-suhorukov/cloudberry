@@ -333,18 +333,23 @@ extern void GpDistRandomLocal(Oid relid, Tuplestorestate *store,
  * transaction (gp_share.c) -- run the others.
  *
  * GpStreamBegin() starts one; GpStreamWriterAddress() says where the writer
- * on a segment receives rows, and its process id; GpStreamAddReader() takes
- * a reader on a segment for it, answering the reader's place among the
- * stream's and where it receives; GpStreamStartReader() sends that reader
+ * on a segment receives rows over a transport, and its process id;
+ * GpStreamAddReader() takes a reader on a segment for it, answering the
+ * reader's place among the stream's and where it receives over the
+ * transport; GpStreamStartReader() sends that reader
  * its slice, the whole of what it runs; GpStreamEnd() waits for every reader
  * to finish.  A reader that fails fails whatever the coordinator is waiting
  * for, and the error raised is the one that caused the others.
  */
 typedef struct GpStream GpStream;
+struct GpIcTransport;
 
 extern GpStream *GpStreamBegin(void);
-extern const char *GpStreamWriterAddress(int content, int *pid);
+extern const char *GpStreamWriterAddress(int content,
+										 const struct GpIcTransport *transport,
+										 int *pid);
 extern int	GpStreamAddReader(GpStream *stream, int content,
+							  const struct GpIcTransport *transport,
 							  const char **address);
 extern void GpStreamStartReader(GpStream *stream, int reader, const char *sql);
 extern void GpStreamEnd(GpStream *stream);

@@ -106,11 +106,11 @@ LANGUAGE C STRICT;
 
 /*
  * Where a segment process receives the rows of a Motion whose slices run at
- * once (gp.interconnect_type = tcp or udpifc), opening its listener and its
- * datagram socket on first use.  Only from a connection that carries the
- * cluster secret.
+ * once, over a transport (gp.interconnect_type's value: tcp, udpifc, udp2 or
+ * proxy), opening what it needs on first use.  Only from a connection that
+ * carries the cluster secret.
  */
-CREATE FUNCTION gp_internal.interconnect_address()
+CREATE FUNCTION gp_internal.interconnect_address(transport text)
 RETURNS text
 AS 'MODULE_PATHNAME', 'gp_interconnect_address'
 LANGUAGE C STRICT VOLATILE;
