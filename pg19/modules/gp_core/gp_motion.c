@@ -3738,6 +3738,8 @@ typedef struct SliceReport
 	int			below;
 	bool		single;
 	List	   *contents;		/* direct dispatch's segments, if several */
+	int			content;		/* a single process's segment; -1 the coordinator */
+	int			nsegs;			/* how many run it, the first so many */
 } SliceReport;
 
 static int
@@ -3783,6 +3785,7 @@ report_slices(PlannedStmt *stmt)
 		int			index = intVal(linitial(slice));
 		int			gang = intVal(list_nth(slice, 2));
 		int			nsegs = intVal(list_nth(slice, 3));
+		int			segindex = intVal(list_nth(slice, 4));
 		int			direct = intVal(list_nth(slice, 5));
 		List	   *several = list_length(slice) > 6 ? (List *) list_nth(slice, 6) : NIL;
 		SliceReport *r;
@@ -3797,6 +3800,8 @@ report_slices(PlannedStmt *stmt)
 		r->single = gang == 1 || gang == 2 || direct >= 0 || nsegs == 1;
 		r->size = r->single ? 1 : several != NIL ? list_length(several) : nsegs;
 		r->contents = several;
+		r->content = direct >= 0 ? direct : gang == 1 ? -1 : Max(segindex, 0);
+		r->nsegs = nsegs;
 		for (int i = 0; i < n; i++)
 			for (int p = parent[i]; p >= 0 && p < n && p != i; p = parent[p])
 				if (p == index)
@@ -3817,9 +3822,17 @@ report_slices(PlannedStmt *stmt)
 			foreach_int(c, reports[i].contents)
 				contents[ncontents++] = c;
 			GpReportDispatchContents(reports[i].index, contents, ncontents);
+			GpReportDtxReached(stmt, contents, ncontents);
 		}
 		else
+		{
 			GpReportDispatch(reports[i].index, reports[i].single, 0);
+			/* an entry slice runs on the coordinator, which is no segment */
+			if (!reports[i].single)
+				GpReportDtxReached(stmt, NULL, reports[i].nsegs);
+			else if (reports[i].content >= 0)
+				GpReportDtxReached(stmt, &reports[i].content, 1);
+		}
 	}
 }
 

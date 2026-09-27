@@ -68,7 +68,11 @@ bfv_dd, direct_dispatch, qp_targeted_dispatch (planner, orca)  the INFO
   Cloudberry reads the partitions in one; its INSERT and COPY send rows only
   to the segments their keys hash to; and a transaction that wrote on one
   segment commits there in one phase, where Cloudberry prepares it on every
-  segment the transaction's statements went to.  Under ORCA, the slices
+  segment the transaction's statements went to.  A one-phase commit and a
+  rollback before any part is prepared name every segment the transaction's
+  statements went to, in the order they first went, as Cloudberry's do --
+  so where a statement's slices go elsewhere than Cloudberry's, its commit's
+  line differs with them.  Under ORCA, the slices
   below a write are numbered one higher than Cloudberry's: its write is its
   root slice, slice 0, and the port's is slice 1, below the coordinator's
   own.  The rows the statements return and change are Cloudberry's.

@@ -2824,12 +2824,14 @@ SQL
 
 	# What gp.test_print_direct_dispatch_info says of the two phases, in
 	# Cloudberry's words (doDispatchDtxProtocolCommand(), cdbtm.c): each
-	# command, before it is sent, and the segments it goes to -- those whose
-	# parts wrote.  A part that wrote alone commits in one phase, as
-	# Cloudberry's does; a transaction that only read says nothing; and a
-	# rollback is named by how far the first phase got -- none of the parts
-	# that wrote prepared, a fault once every part is prepared, where
-	# Cloudberry's is, and a segment that fails to.
+	# command, before it is sent, and the segments it goes to -- the parts
+	# that wrote, for the two phases, and for a one-phase commit and a
+	# rollback before any part is prepared, every segment the transaction
+	# reached.  A part that wrote alone commits in one phase, as Cloudberry's
+	# does; a transaction that only read says nothing; and a rollback is
+	# named by how far the first phase got -- none of the parts that wrote
+	# prepared, a fault once every part is prepared, where Cloudberry's is,
+	# and a segment that fails to.
 	out=$(printf '%s\n' "SET gp.test_print_direct_dispatch_info = on;" \
 		"CREATE TABLE dtxi (a int) DISTRIBUTED BY (a);" \
 		"INSERT INTO dtxi VALUES (1);" \
@@ -2859,6 +2861,33 @@ SQL
 		*"fault name:'dtm_broadcast_prepare'"*"fault name:'start_prepare'"*"|$expect|10|0|0")
 			ok "gp.test_print_direct_dispatch_info names each command of the two phases, and the segments it goes to" ;;
 		*) notok "the two phases' INFO lines" "$info / $out2 / $p1 / $p2" ;;
+	esac
+
+	# The segments a one-phase commit and a rollback name: every one the
+	# transaction's dispatches reached, whether or not a part wrote there, in
+	# the order they were first reached, as Cloudberry names its dtxSegments
+	# (addToGxactDtxSegments(), cdbtm.c) -- a write's, and in a transaction
+	# block a read's too.  A write that changed nothing commits in one phase
+	# on both segments; a block that read, then rolled back, names what it
+	# read; one whose first statement went to segment 1 alone names it first.
+	q 0 "CREATE TABLE dtxr (a int, b int) DISTRIBUTED BY (a);
+		 INSERT INTO dtxr SELECT i, i FROM generate_series(1, 10) i;" >/dev/null
+	k1=$(q 0 "SELECT min(a) FROM dtxr WHERE gp_segment_id = 1;")
+	out=$(printf '%s\n' "SET gp.test_print_direct_dispatch_info = on;" \
+		"UPDATE dtxr SET b = 0 WHERE b < 0;" \
+		"BEGIN;" "SELECT count(*) FROM dtxr;" "ROLLBACK;" \
+		"BEGIN;" "SELECT b FROM dtxr WHERE a = $k1;" "SELECT count(*) FROM dtxr;" "ROLLBACK;" \
+		"SELECT count(*) FROM dtxr;" \
+		"RESET gp.test_print_direct_dispatch_info;" | qf 0)
+	info=$(printf '%s\n' "$out" | grep -o 'INFO:  Distributed.*' | tr '\n' '/')
+	q 0 "DROP TABLE dtxr;" >/dev/null
+	expect="$dtxc 'Distributed Commit (one-phase)' to ALL contents: 0 1/"
+	expect="$expect$dtxc 'Distributed Abort (No Prepared)' to ALL contents: 0 1/"
+	expect="$expect$dtxc 'Distributed Abort (No Prepared)' to ALL contents: 1 0/"
+	case "$k1|$info" in
+		[0-9]*"|$expect")
+			ok "a one-phase commit and a rollback name every segment the transaction reached, in the order it reached them" ;;
+		*) notok "the segments a transaction reached, in its INFO lines" "$k1 / $info" ;;
 	esac
 
 	# The coordinator goes down between the phases.  Its postmaster restarts

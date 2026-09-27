@@ -73,6 +73,31 @@ extern void GpReportDispatchContents(int slice, const int *contents, int n);
 extern void GpReportDtxCommand(const char *command, const int *contents, int n);
 
 /*
+ * A statement's dispatch to segments, for the INFO lines of its
+ * transaction's commit, which name the segments the transaction reached as
+ * Cloudberry's do: the n segments "contents" lists, in the order it sends to
+ * them, or, when it is NULL, the first n -- every one where n is 0.  "stmt"
+ * is the plan being run, which says whether the statement writes; NULL is
+ * DDL's, COPY's or a savepoint's, which count as writes.  Kept only while
+ * gp.test_print_direct_dispatch_info is on.
+ */
+struct PlannedStmt;
+extern void GpReportDtxReached(struct PlannedStmt *stmt, const int *contents,
+							   int n);
+
+/*
+ * The segments a command of the commit names, palloc'd, in the order the
+ * transaction first reached them: every one it reached, when "reached" says
+ * so, and those of the nset "set" lists -- and after them any of "set" no
+ * dispatch noted, in the order given.  How many is returned.
+ */
+extern int	GpReportDtxContents(const int *set, int nset, bool reached,
+								int **contents);
+
+/* The transaction is over: no segment is reached any more. */
+extern void GpReportDtxForget(void);
+
+/*
  * The planner's gathers have no slice table; each is a slice of its own,
  * numbered from 1 in the order the executor starts them.  The count starts
  * again with every statement.

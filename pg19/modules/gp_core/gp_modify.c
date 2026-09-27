@@ -154,6 +154,13 @@ typedef struct GpRouter
 	bool	   *linenulls;
 	CopyFromState cstate;
 	uint64		error_lineno;
+
+	/*
+	 * An INSERT of one row reaches the segment it routes the row to, which
+	 * only routing says: the statement's plan, for GpReportDtxReached(), or
+	 * NULL where the statement noted its segments as it began.
+	 */
+	struct PlannedStmt *reached_stmt;
 } GpRouter;
 
 /*
@@ -473,7 +480,11 @@ router_finish(GpRouter *r)
 	{
 		if (r->stores[seg] != NULL)
 		{
-			uint64		took = router_send(r, r->stores[seg], seg);
+			uint64		took;
+
+			if (r->reached_stmt != NULL)
+				GpReportDtxReached(r->reached_stmt, &seg, 1);
+			took = router_send(r, r->stores[seg], seg);
 
 			if (took != (uint64) tuplestore_tuple_count(r->stores[seg]))
 				ereport(ERROR,
@@ -566,6 +577,14 @@ insert_begin(CustomScanState *node, EState *estate, int eflags)
 		 */
 		GpReportDispatch(0, IsA(source, Result) && outerPlan(source) == NULL &&
 						 !GpPolicyIsReplicated(policy), policy->numsegments);
+
+		/* the segments it reaches: the single row's, as it is routed */
+		if (IsA(source, Result) && outerPlan(source) == NULL &&
+			!GpPolicyIsReplicated(policy))
+			state->router->reached_stmt = estate->es_plannedstmt;
+		else
+			GpReportDtxReached(estate->es_plannedstmt, NULL,
+							   policy->numsegments);
 	}
 }
 
@@ -701,10 +720,19 @@ modify_begin(CustomScanState *node, EState *estate, int eflags)
 	if (!gp_enable_global_deadlock_detector)
 		LockRelationOid(((ModifyState *) node)->relid, ExclusiveLock);
 	if (((ModifyState *) node)->ncontents > 0)
+	{
 		GpReportDispatchContents(0, ((ModifyState *) node)->contents,
 								 ((ModifyState *) node)->ncontents);
+		GpReportDtxReached(estate->es_plannedstmt,
+						   ((ModifyState *) node)->contents,
+						   ((ModifyState *) node)->ncontents);
+	}
 	else
+	{
 		GpReportDispatch(0, false, ((ModifyState *) node)->nsegments);
+		GpReportDtxReached(estate->es_plannedstmt, NULL,
+						   ((ModifyState *) node)->nsegments);
+	}
 }
 
 static TupleTableSlot *
@@ -1589,6 +1617,8 @@ copy_from_distributed(ParseState *pstate, CopyStmt *stmt, Relation rel,
 							   NULL, stmt->attlist, stmt->options);
 	router = router_begin(rel, policy, true);
 	router->cstate = cstate;
+	/* Cloudberry's COPY is sent to every segment of the table */
+	GpReportDtxReached(NULL, NULL, policy->numsegments);
 	slot = MakeSingleTupleTableSlot(RelationGetDescr(rel), &TTSOpsVirtual);
 	econtext = GetPerTupleExprContext(estate);
 

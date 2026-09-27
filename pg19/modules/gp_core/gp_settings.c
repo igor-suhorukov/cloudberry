@@ -58,6 +58,7 @@
 #include <limits.h>
 
 #include "access/htup_details.h"
+#include "access/xact.h"
 #include "catalog/pg_class.h"
 #include "catalog/pg_database.h"
 #include "commands/vacuum.h"
@@ -242,6 +243,131 @@ GpReportDtxCommand(const char *command, const int *contents, int n)
 	append_contents(&buf, contents, n);
 	elog(INFO, "Distributed transaction command '%s' to %s", command, buf.data);
 	pfree(buf.data);
+}
+
+/*
+ * The segments this transaction's statements were dispatched to, in the
+ * order they were first reached: Cloudberry's dtxSegments
+ * (addToGxactDtxSegments(), cdb/cdbtm.c), which its INFO lines of the
+ * commit name -- a one-phase commit's and a rollback's, to every segment
+ * the transaction reached, whether or not a segment wrote.  Cloudberry adds
+ * a statement's slices once the transaction writes, and every dispatch in
+ * a transaction block, reads too; DDL, COPY and a savepoint, which it sends
+ * to every segment in two phases, write.  Whether a segment wrote is what
+ * its answer says (gp_dispatch.c); this is only whom the lines name.
+ */
+static int *dtx_reached = NULL;
+static int	dtx_nreached = 0;
+static int	dtx_reached_size = 0;
+static bool dtx_xact_writes = false;
+
+/*
+ * Whether a plan writes, as Cloudberry's ExecCheckXactReadOnly() decides it
+ * (executor/execMain.c): a permission beyond SELECT on a table that is not
+ * a foreign table -- but for a table FOR UPDATE or FOR SHARE locks, whose
+ * UPDATE permission is the lock's.
+ */
+static bool
+plan_writes(PlannedStmt *stmt)
+{
+	int			index = 0;
+
+	foreach_node(RTEPermissionInfo, perminfo, stmt->permInfos)
+	{
+		bool		locked = false;
+
+		index++;
+		if ((perminfo->requiredPerms & ~ACL_SELECT) == 0 ||
+			get_rel_relkind(perminfo->relid) == RELKIND_FOREIGN_TABLE)
+			continue;
+		if ((perminfo->requiredPerms & ~(ACL_SELECT | ACL_SELECT_FOR_UPDATE)) == 0)
+		{
+			foreach_node(PlanRowMark, rowmark, stmt->rowMarks)
+			{
+				if (rt_fetch(rowmark->rti, stmt->rtable)->perminfoindex == index)
+				{
+					locked = true;
+					break;
+				}
+			}
+		}
+		if (!locked)
+			return true;
+	}
+	return false;
+}
+
+void
+GpReportDtxReached(PlannedStmt *stmt, const int *contents, int n)
+{
+	if (!gp_test_print_direct_dispatch_info)
+		return;
+	if (stmt == NULL || plan_writes(stmt))
+		dtx_xact_writes = true;
+	if (!dtx_xact_writes && !IsTransactionBlock())
+		return;
+
+	if (contents == NULL)
+	{
+		int			nsegs;
+
+		GpClusterSegments(&nsegs);
+		if (n <= 0 || n > nsegs)
+			n = nsegs;
+	}
+	for (int i = 0; i < n; i++)
+	{
+		int			content = contents != NULL ? contents[i] : i;
+		bool		seen = false;
+
+		for (int j = 0; j < dtx_nreached && !seen; j++)
+			seen = dtx_reached[j] == content;
+		if (seen)
+			continue;
+		if (dtx_nreached == dtx_reached_size)
+		{
+			dtx_reached_size = Max(16, dtx_reached_size * 2);
+			dtx_reached = dtx_reached == NULL
+				? MemoryContextAlloc(TopMemoryContext, dtx_reached_size * sizeof(int))
+				: repalloc(dtx_reached, dtx_reached_size * sizeof(int));
+		}
+		dtx_reached[dtx_nreached++] = content;
+	}
+}
+
+int
+GpReportDtxContents(const int *set, int nset, bool reached, int **contents)
+{
+	int		   *out = palloc_array(int, dtx_nreached + nset + 1);
+	int			n = 0;
+
+	for (int i = 0; i < dtx_nreached; i++)
+	{
+		bool		in = reached;
+
+		for (int j = 0; j < nset && !in; j++)
+			in = set[j] == dtx_reached[i];
+		if (in)
+			out[n++] = dtx_reached[i];
+	}
+	for (int j = 0; j < nset; j++)
+	{
+		bool		seen = false;
+
+		for (int i = 0; i < dtx_nreached && !seen; i++)
+			seen = dtx_reached[i] == set[j];
+		if (!seen)
+			out[n++] = set[j];
+	}
+	*contents = out;
+	return n;
+}
+
+void
+GpReportDtxForget(void)
+{
+	dtx_nreached = 0;
+	dtx_xact_writes = false;
 }
 
 int

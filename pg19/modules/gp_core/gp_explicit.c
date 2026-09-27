@@ -1519,6 +1519,7 @@ explicit_begin(CustomScanState *node, EState *estate, int eflags)
 										  "gp explicit rows",
 										  ALLOCSET_DEFAULT_SIZES);
 	GpReportDispatch(0, false, state->numsegments);
+	GpReportDtxReached(estate->es_plannedstmt, NULL, state->numsegments);
 }
 
 /* The result relation a row of this table is written as. */

@@ -2425,6 +2425,25 @@ dtx_wait_for_depends(const GpSegmentConn *c)
 }
 
 /*
+ * A command of the commit's INFO line, when gp.test_print_direct_dispatch_info
+ * asks for one: to the n segments "set" lists, and every segment the
+ * transaction reached when "reached" says so, in the order the transaction
+ * first reached them (gp_settings.c), as Cloudberry names its dtxSegments.
+ */
+static void
+dtx_report(const char *command, const int *set, int nset, bool reached)
+{
+	int		   *contents;
+	int			n;
+
+	if (!gp_test_print_direct_dispatch_info)
+		return;
+	n = GpReportDtxContents(set, nset, reached, &contents);
+	GpReportDtxCommand(command, contents, n);
+	pfree(contents);
+}
+
+/*
  * The first phase, at PRE_COMMIT, while raising still undoes the
  * coordinator's part.  Which segments' parts wrote each has said with its
  * answers (conn_wrote()).  One that did not commits now, having nothing to
@@ -2478,7 +2497,8 @@ gang_commit_first_phase(GpGang *g)
 	{
 		FullTransactionId gxid = GetTopFullTransactionId();
 
-		GpReportDtxCommand("Distributed Commit (one-phase)", writers, 1);
+		/* the others' COMMIT is a one-phase commit of nothing */
+		dtx_report("Distributed Commit (one-phase)", writers, 1, true);
 		notices_quiet++;
 		for (int i = 0; i < g->nconns; i++)
 			conn_send(&g->conns[i],
@@ -2505,8 +2525,10 @@ gang_commit_first_phase(GpGang *g)
 												  g->nconns * sizeof(bool));
 			dtx_prepared_size = g->nconns;
 		}
-		GpReportDtxCommand("Distributed Prepare", writers, nwriters);
+		dtx_report("Distributed Prepare", writers, nwriters, false);
 	}
+	else
+		dtx_report("Distributed Commit (one-phase)", NULL, 0, true);
 
 	for (int i = 0; i < g->nconns; i++)
 	{
@@ -2690,10 +2712,10 @@ gang_finish_prepared(bool commit)
 		for (int i = 0; i < g->nconns && i < dtx_prepared_size; i++)
 			if (dtx_prepared[i])
 				contents[n++] = g->conns[i].content;
-		GpReportDtxCommand(commit ? "Distributed Commit Prepared" :
-						   dtx_all_prepared ? "Distributed Abort Prepared" :
-						   "Distributed Abort (Some Prepared)",
-						   contents, n);
+		dtx_report(commit ? "Distributed Commit Prepared" :
+				   dtx_all_prepared ? "Distributed Abort Prepared" :
+				   "Distributed Abort (Some Prepared)",
+				   contents, n, false);
 		pfree(contents);
 	}
 
@@ -2941,11 +2963,10 @@ dispatch_xact_callback(XactEvent event, void *arg)
 				if (gang != NULL && gang_in_xact)
 				{
 					/*
-					 * Parts that wrote and were never prepared, named as
-					 * Cloudberry names their rollback
-					 * (rollbackDtxTransaction(), cdbtm.c) -- the parts its
-					 * answers said wrote, where Cloudberry names those it sent
-					 * a write to.
+					 * Nothing prepared: the rollback of every segment the
+					 * transaction reached, and of each part that wrote, as
+					 * Cloudberry names it (rollbackDtxTransaction(),
+					 * cdbtm.c).
 					 */
 					if (gp_test_print_direct_dispatch_info)
 					{
@@ -2955,8 +2976,9 @@ dispatch_xact_callback(XactEvent event, void *arg)
 						for (int i = 0; i < gang->nconns; i++)
 							if (conn_wrote(&gang->conns[i]))
 								contents[n++] = gang->conns[i].content;
-						GpReportDtxCommand("Distributed Abort (No Prepared)",
-										   contents, n);
+						dtx_report("Distributed Abort (No Prepared)",
+								   contents, n, true);
+						pfree(contents);
 					}
 					gang_send_all_quietly("ROLLBACK");
 				}
@@ -2993,6 +3015,7 @@ dispatch_xact_callback(XactEvent event, void *arg)
 			gang_forget_settings();
 			gang_forget_snapshot();
 			dtx_forget();
+			GpReportDtxForget();
 			streams_release();
 			labels_pending = NIL;
 			drop_segment_notices();
@@ -3005,6 +3028,11 @@ dispatch_xact_callback(XactEvent event, void *arg)
 			gang_forget_snapshot();
 			/* the second phase is done already (dispatch_commit_recorded()) */
 			Assert(dtx_nprepared == 0);
+			GpReportDtxForget();
+			break;
+
+		case XACT_EVENT_PREPARE:
+			GpReportDtxForget();
 			break;
 
 		default:
@@ -3114,6 +3142,9 @@ GpDispatchUtility(const char *payload, bool own_xact)
 		labels_held = false;
 	}
 	PG_END_TRY();
+	/* as Cloudberry's DDL, sent in two phases to every segment */
+	if (!own_xact)
+		GpReportDtxReached(NULL, NULL, 0);
 	/* the coordinator has said what the statement says, once */
 	notices_quiet++;
 	gang_send_all(g, payload);

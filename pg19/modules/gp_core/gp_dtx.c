@@ -174,6 +174,7 @@
 #include "gp_core_api.h"
 #include "gp_dispatch.h"
 #include "gp_dtx.h"
+#include "gp_settings.h"
 #include "gp_fault.h"
 #include "gp_gdd.h"
 #include "gp_share.h"
@@ -1952,6 +1953,16 @@ dtx_ProcessUtility(PlannedStmt *pstmt, const char *queryString,
 	if (IsA(parsetree, TransactionStmt))
 	{
 		TransactionStmt *ts = (TransactionStmt *) parsetree;
+
+		/*
+		 * Cloudberry sends a savepoint's command to every segment as it runs
+		 * it, where the port sends it with the next statement; its commit's
+		 * INFO lines name them all (DefineDispatchSavepoint(), xact.c).
+		 */
+		if ((ts->kind == TRANS_STMT_SAVEPOINT || ts->kind == TRANS_STMT_RELEASE ||
+			 ts->kind == TRANS_STMT_ROLLBACK_TO) && IsTransactionBlock() &&
+			GpClusterBackendRole() == GP_ROLE_DISPATCH)
+			GpReportDtxReached(NULL, NULL, 0);
 
 		if (ts->gid != NULL && GpDtxParseGid(ts->gid, &gxid))
 		{
