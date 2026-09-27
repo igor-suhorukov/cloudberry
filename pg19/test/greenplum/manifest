@@ -281,7 +281,7 @@ skip instr_in_shmem_setup  gp_enable_query_metrics is none of the port's setting
 skip instr_in_shmem  unrecognized configuration parameter "gp_enable_query_metrics"; unrecognized configuration parameter "gp_instrument_shmem_size"
 skip createdb  function force_mirrors_to_catch_up() does not exist
 skip gp_aggregates_costs  unrecognized configuration parameter "gp_eager_two_phase_agg"
-skip gp_metadata  function gp_opt_version() does not exist
+run  gp_metadata
 run  variadic_parameters
 run  default_parameters
 skip function_extensions  column "prodataaccess" does not exist; unrecognized configuration parameter "gp_contentid"
@@ -291,7 +291,7 @@ run  shared_scan
 run  cluster_gp
 skip combocid_gp  differs: a segment's command ids for the rows a transaction writes count from 0, where Cloudberry's go on from the coordinator's
 skip gp_prepared_xacts  differs: its utility-mode session asks for -c gp_role=utility, a setting PostgreSQL 19 refuses a connection for
-skip gp_backend_info  function gp_backend_info() does not exist
+run  gp_backend_info
 run  gp_locale
 skip spi_processed64bit  differs: the fault executor_run_high_processed, which has the executor count past 2^32 rows, is none of the port's
 skip gp_tablespace_with_faults  function force_mirrors_to_catch_up() does not exist
@@ -314,7 +314,7 @@ run  orca_groupingsets_fallbacks
 skip table_functions  type anytable does not exist; OUT and INOUT arguments aren't allowed in TABLE functions
 skip opclass_ddl  must be able to SET ROLE "regtest_alter_user2"
 run  information_schema
-skip guc_env_var  could not find function "udf_setenv" in file "regress.so"; could not find function "udf_unsetenv" in file "regress.so"
+run  guc_env_var
 skip gp_explain  unrecognized configuration parameter "gp_enable_explain_allstat"; unrecognized EXPLAIN option "slicetable"
 skip explain_format  differs: EXPLAIN in each of its formats prints the port's plans, which this test compares
 run  olap_plans
@@ -488,7 +488,7 @@ run  table_statistics
 skip fts_error  differs: two of its checks that FTS marked a node down answer f, and Cloudberry's DEBUG trace of the probe's statement is not the port's
 skip psql_gp_commands  differs: psql 19's \dx has a Default version column, and Cloudberry's psql describes its storage and external tables in its own way
 skip pg_resetwal  differs: PostgreSQL 19's pg_resetwal has no -k, the data checksum version Cloudberry's sets
-skip dropdb_check_shared_buffer_cache  could not find function "check_shared_buffer_cache_for_dboid" in file "regress.so"; function check_shared_buffer_cache_for_dboid(integer) does not exist
+run  dropdb_check_shared_buffer_cache
 skip gp_upgrade_cornercases  cannot drop schema public because other objects depend on it
 skip temp_relation  language "plpython3u" does not exist; function gp_execution_segment() does not exist
 skip alter_db_set_tablespace  function force_mirrors_to_catch_up() does not exist; spiexceptions.UndefinedFunction: function get_tablespace_version_directory_name() does not exist

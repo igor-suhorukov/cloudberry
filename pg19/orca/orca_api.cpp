@@ -56,6 +56,8 @@ extern "C"
 
 #include "config/CConfigParamMapping.h"
 
+#include <xercesc/util/XercesVersion.hpp>
+
 #include "CMemoryPoolPallocManager.h"
 #include "gp_orca_api.h"
 
@@ -360,4 +362,14 @@ GpOrcaTraceFlags(int **flags)
 
 	*flags = arg.flags;
 	return arg.count;
+}
+
+//---------------------------------------------------------------------------
+//	The Xerces-C version DXL is parsed with, as Cloudberry's
+//	gp_opt_version() reports it (LibraryVersion(), gpopt/utils/funcs.cpp).
+//---------------------------------------------------------------------------
+extern "C" const char *
+GpOrcaXercesVersion(void)
+{
+	return XERCES_FULLVERSIONDOT;
 }

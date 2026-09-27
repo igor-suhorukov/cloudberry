@@ -91,6 +91,7 @@ PG_MODULE_MAGIC_EXT(
 );
 
 PG_FUNCTION_INFO_V1(gp_orca_version);
+PG_FUNCTION_INFO_V1(gp_opt_version);
 PG_FUNCTION_INFO_V1(gp_orca_type_name);
 PG_FUNCTION_INFO_V1(gp_orca_function_fact);
 PG_FUNCTION_INFO_V1(gp_orca_find_aggregate);
@@ -160,6 +161,20 @@ gp_orca_version(PG_FUNCTION_ARGS)
 	PG_RETURN_DATUM(HeapTupleGetDatum(tuple));
 }
 
+
+/*
+ * pg_catalog.gp_opt_version()
+ *
+ * The optimizer's version and the Xerces-C library's, in Cloudberry's words
+ * (LibraryVersion(), gpopt/utils/funcs.cpp): its ORCA is 4.0.0, and so is
+ * the one linked in here.
+ */
+Datum
+gp_opt_version(PG_FUNCTION_ARGS)
+{
+	PG_RETURN_TEXT_P(cstring_to_text(psprintf("GPOPT version: 4.0.0, Xerces version: %s",
+											  GpOrcaXercesVersion())));
+}
 
 /*
  * gp_orca.fallbacks()

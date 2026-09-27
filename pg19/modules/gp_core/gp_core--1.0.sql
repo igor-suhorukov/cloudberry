@@ -1357,6 +1357,18 @@ AS 'MODULE_PATHNAME', 'gp_execution_segment'
 LANGUAGE C VOLATILE;
 
 /*
+ * The session's backends: this one, each segment's writer and each reader,
+ * as Cloudberry's gp_backend_info() gives them (cdbgang.c).  See
+ * gp_dispatch.c.
+ */
+CREATE FUNCTION pg_catalog.gp_backend_info(OUT id int4, OUT type "char",
+										   OUT content int4, OUT host text,
+										   OUT port int4, OUT pid int4)
+RETURNS SETOF record
+AS 'MODULE_PATHNAME', 'gp_backend_info'
+LANGUAGE C VOLATILE;
+
+/*
  * Each node of the cluster as Cloudberry's gp_pgdatabase() gives it
  * (cdbpgdatabase.c): whether it is a primary now, valid -- up -- and a
  * primary by its preference.

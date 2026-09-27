@@ -98,6 +98,7 @@
 #include "nodes/pg_list.h"
 #include "parser/parser.h"
 #include "parser/scanner.h"
+#include "postmaster/postmaster.h"
 #include "storage/ipc.h"
 #include "storage/latch.h"
 #include "storage/lmgr.h"
@@ -4358,6 +4359,78 @@ GpDispatchQueryFirstValues(const char *sql, int content, char **values)
 		if (results[i] != NULL)
 			PQclear(results[i]);
 	}
+}
+
+PG_FUNCTION_INFO_V1(gp_backend_info);
+
+/* Cloudberry's SQLSTATE for a command that cannot run where it was asked */
+#define ERRCODE_GP_COMMAND_ERROR	MAKE_SQLSTATE('4','2','M','0','0')
+
+/*
+ * pg_catalog.gp_backend_info()
+ *		The session's backends, as Cloudberry's gp_backend_info() lists them
+ *		(cdbgang.c): this one, the coordinator's, of type 'Q' and id -1; the
+ *		writer on each segment, 'w'; and each reader, 'r' -- each with an id
+ *		of its own, its node's content id, host and port, and its pid.  The
+ *		port has no entry reader, Cloudberry's 'R': the coordinator's own
+ *		slice runs in this backend.
+ */
+Datum
+gp_backend_info(PG_FUNCTION_ARGS)
+{
+	ReturnSetInfo *rsinfo = (ReturnSetInfo *) fcinfo->resultinfo;
+	const GpSegmentConfig *self = GpClusterSelf();
+	Datum		values[6];
+	bool		nulls[6] = {false, false, false, false, false, false};
+	int			id = 0;
+
+	if (GpClusterBackendRole() != GP_ROLE_DISPATCH)
+		ereport(ERROR,
+				(errcode(ERRCODE_GP_COMMAND_ERROR),
+				 errmsg("gp_backend_info() could only be called on QD")));
+
+	InitMaterializedSRF(fcinfo, 0);
+
+	values[0] = Int32GetDatum(-1);
+	values[1] = CharGetDatum('Q');
+	values[2] = Int32GetDatum(-1);
+	values[3] = CStringGetTextDatum(self != NULL ? self->hostname : "localhost");
+	values[4] = Int32GetDatum(self != NULL ? self->port : PostPortNumber);
+	values[5] = Int32GetDatum(MyProcPid);
+	tuplestore_putvalues(rsinfo->setResult, rsinfo->setDesc, values, nulls);
+
+	if (gang == NULL)
+		return (Datum) 0;
+	for (int i = 0; i < gang->nconns; i++)
+	{
+		GpSegmentConn *c = &gang->conns[i];
+
+		values[0] = Int32GetDatum(id++);
+		values[1] = CharGetDatum('w');
+		values[2] = Int32GetDatum(c->content);
+		values[3] = CStringGetTextDatum(c->seg->hostname);
+		values[4] = Int32GetDatum(c->seg->port);
+		values[5] = Int32GetDatum(PQbackendPID(c->conn));
+		tuplestore_putvalues(rsinfo->setResult, rsinfo->setDesc, values, nulls);
+	}
+	foreach_ptr(GpReaderConn, r, gang->readers)
+	{
+		const GpSegmentConfig *seg = NULL;
+
+		if (r->conn == NULL)
+			continue;
+		for (int i = 0; i < gang->nconns; i++)
+			if (gang->conns[i].content == r->content)
+				seg = gang->conns[i].seg;
+		values[0] = Int32GetDatum(id++);
+		values[1] = CharGetDatum('r');
+		values[2] = Int32GetDatum(r->content);
+		values[3] = CStringGetTextDatum(seg != NULL ? seg->hostname : "");
+		values[4] = Int32GetDatum(seg != NULL ? seg->port : 0);
+		values[5] = Int32GetDatum(PQbackendPID(r->conn));
+		tuplestore_putvalues(rsinfo->setResult, rsinfo->setDesc, values, nulls);
+	}
+	return (Datum) 0;
 }
 
 PG_FUNCTION_INFO_V1(gp_exec_on_segments);

@@ -164,6 +164,15 @@ external_table_persistent_error_log (orca)  the lines ORCA's fallback trace
   declines there ("SIRV functions") as Cloudberry's ORCA does -- its own
   expected output for ORCA has them.
 
+gp_backend_info  the backends of a query that needs a reader gang, and
+  the singleton reader on the coordinator: the port's gather reads each
+  table through the segment's one connection, and joins them here, so
+  after the join of temp and temp2 and the one of temp and pg_class the
+  function lists the coordinator's backend and the writers alone, where
+  Cloudberry's lists a reader of each segment's too and an entry-db
+  reader.  Before those, what it lists is Cloudberry's: one backend for
+  the coordinator, then one writer on each segment.
+
 gp_create_table  the OID of text's hash operator class in
   gp_distribution_policy.distclass: the same class, which Cloudberry's
   catalog numbers 10039 and PostgreSQL 19's 10037.
@@ -173,6 +182,10 @@ gp_dqa (orca)  ORCA's fallback trace, which the expected output closest to
   the planner answers the same: several DISTINCT aggregates, where
   optimizer_enable_multiple_distinct_aggs is off, as Cloudberry's ORCA
   declines them; and an aggregate with FILTER.
+
+gp_metadata  version(), which is PostgreSQL 19's and names no Apache
+  Cloudberry: the port is PostgreSQL's server, with its modules.
+  gp_opt_version() answers in Cloudberry's words.
 
 gp_types  PostgreSQL 19's words for an operator no type takes: a DETAIL
   where Cloudberry's HINT stood.
