@@ -3513,3 +3513,57 @@ CREATE TABLE gp_internal.leaf_hll (
 );
 CREATE INDEX leaf_hll_attnum ON gp_internal.leaf_hll (starelid, staattnum);
 REVOKE ALL ON gp_internal.leaf_hll FROM PUBLIC;
+
+/******************************************************************************
+ * gpMgmt's tools: what the tools of M8's item 5 ask the server for beside
+ * what gp_core has already (pg19/gpMgmt).
+ *****************************************************************************/
+
+/*
+ * pg_get_table_distributedby(): a table's DISTRIBUTED clause, as CREATE
+ * TABLE takes it -- DISTRIBUTED BY (a, b opclass), RANDOMLY or REPLICATED
+ * -- or '' for a table with no policy, as Cloudberry's ruleutils.c writes
+ * it.  gpcheckcat compares a partition's with its root's, and gpload makes
+ * its staging table with its target's.  An operator class is written where
+ * it is not the default of its access method for the column's type, or of
+ * a type the column's is binary-coercible to (Cloudberry's
+ * get_opclass_name()), qualified where the search path does not find it.
+ */
+CREATE FUNCTION pg_catalog.pg_get_table_distributedby(oid)
+RETURNS text
+LANGUAGE sql STABLE STRICT
+AS $$
+SELECT coalesce((
+	SELECT CASE
+			   WHEN p.policytype = 'r' THEN 'DISTRIBUTED REPLICATED'
+			   WHEN pg_catalog.cardinality(p.distkey::int2[]) = 0 THEN 'DISTRIBUTED RANDOMLY'
+			   ELSE 'DISTRIBUTED BY (' || (
+				   SELECT pg_catalog.string_agg(
+							  pg_catalog.quote_ident(a.attname) ||
+							  CASE
+								  WHEN oc.opcdefault AND
+									   (oc.opcintype = a.atttypid OR
+										EXISTS (SELECT 1 FROM pg_catalog.pg_cast c
+												 WHERE c.castsource = a.atttypid
+												   AND c.casttarget = oc.opcintype
+												   AND c.castmethod = 'b'))
+									   THEN ''
+								  WHEN pg_catalog.pg_opclass_is_visible(oc.oid)
+									   THEN ' ' || pg_catalog.quote_ident(oc.opcname)
+								  ELSE ' ' || pg_catalog.quote_ident(n.nspname) || '.' ||
+									   pg_catalog.quote_ident(oc.opcname)
+							  END, ', ' ORDER BY k.n)
+					 FROM ROWS FROM (pg_catalog.unnest(p.distkey::int2[]),
+									 pg_catalog.unnest(p.distclass::oid[]))
+						  WITH ORDINALITY AS k(attnum, opclass, n)
+					 JOIN pg_catalog.pg_attribute a
+					   ON a.attrelid = p.localoid AND a.attnum = k.attnum
+					 JOIN pg_catalog.pg_opclass oc ON oc.oid = k.opclass
+					 JOIN pg_catalog.pg_namespace n ON n.oid = oc.opcnamespace) || ')'
+		   END
+	  FROM pg_catalog.gp_distribution_policy p
+	 WHERE p.localoid = $1), '')
+$$;
+
+COMMENT ON FUNCTION pg_catalog.pg_get_table_distributedby(oid) IS
+	'a table''s DISTRIBUTED clause, or '''' for a table with no policy';
