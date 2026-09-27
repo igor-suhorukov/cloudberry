@@ -1,0 +1,20 @@
+@@
++    -1 | CREATE TABLE pt_test (a int, b int)+| QUERY_STATUS_SUBMIT
++       | DISTRIBUTED BY (a)                 +| 
++       | PARTITION BY RANGE (a)             +| 
++       | (START (0) END (100) EVERY (50));   | 
++    -1 | CREATE TABLE pt_test (a int, b int)+| QUERY_STATUS_SUBMIT
++       | DISTRIBUTED BY (a)                 +| 
++       | PARTITION BY RANGE (a)             +| 
++       | (START (0) END (100) EVERY (50));   | 
++    -1 | CREATE TABLE pt_test (a int, b int)+| QUERY_STATUS_DONE
++       | DISTRIBUTED BY (a)                 +| 
++       | PARTITION BY RANGE (a)             +| 
++       | (START (0) END (100) EVERY (50));   | 
++    -1 | CREATE TABLE pt_test (a int, b int)+| QUERY_STATUS_DONE
++       | DISTRIBUTED BY (a)                 +| 
++       | PARTITION BY RANGE (a)             +| 
++       | (START (0) END (100) EVERY (50));   | 
+@@
+-(6 rows)
++(10 rows)

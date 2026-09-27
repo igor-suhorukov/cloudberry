@@ -1,0 +1,10 @@
+@@
++     2 |                                                         | QUERY_STATUS_SUBMIT
+@@
++     2 |                                                         | QUERY_STATUS_START
++     2 |                                                         | QUERY_STATUS_END
+@@
++     2 |                                                         | QUERY_STATUS_DONE
+@@
+-(16 rows)
++(20 rows)

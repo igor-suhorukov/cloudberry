@@ -1,0 +1,11 @@
+# gp_stats_collector extension
+#
+# Cloudberry's gpcontrib/gp_stats_collector/gp_stats_collector.control, but
+# that its script reads gp_core's objects -- gp_dist_random(), the functions'
+# EXECUTE ON -- which Cloudberry's core has in every database, and a node of
+# the port on its own has only where gp_core's extension is made.
+comment = 'Intercept query and plan execution hooks and report them to Cloudberry monitor agents'
+default_version = '1.1'
+module_pathname = '$libdir/gp_stats_collector'
+requires = 'gp_core'
+superuser = true

@@ -786,6 +786,73 @@ install_data(datalake_root / 'datalake_fdw.control',
 built_modules += 'datalake_fdw'
 
 ###############################################################################
+# gp_stats_collector
+#
+# Cloudberry's gpcontrib/gp_stats_collector: a query's metrics sent to an
+# agent's Unix socket as protobuf messages, C++'s protobuf as Cloudberry's
+# Makefile builds it, the messages made by protoc (gen/protos).  Its files
+# are compiled where they lie, but for the port's copies of the ones
+# PostgreSQL 19 or the port changed, under modules/gp_stats_collector/src at
+# the same paths, which come first on the include path, as PAX's copies do;
+# each says at its head what changed.  gpsc_frozen.c is the port's own, the
+# frozen insert of Cloudberry's heapam.c its log table is written with.
+# Preloaded, after gp_core, on every node; its extension's script is the
+# port's copy of Cloudberry's 1.1, the version its control file names, and
+# its control file Cloudberry's, which requires gp_core.
+###############################################################################
+
+add_languages('cpp', native: false, required: true)
+protobuf_dep = dependency('protobuf', required: true)
+protoc = find_program('protoc', required: true)
+subdir('modules/gp_stats_collector/gen/protos')
+gpsc_root = '../gpcontrib/gp_stats_collector'
+gpsc_sources = [gpsc_proto_sources, files('modules/gp_stats_collector/gpsc_frozen.c')]
+foreach path : ['src/gp_stats_collector.c',
+                'src/hook_wrappers.cpp',
+                'src/EventSender.cpp',
+                'src/Config.cpp',
+                'src/GpscStat.cpp',
+                'src/PgUtils.cpp',
+                'src/ProcStats.cpp',
+                'src/ProtoUtils.cpp',
+                'src/UDSConnector.cpp',
+                'src/log/LogOps.cpp',
+                'src/log/LogSchema.cpp',
+                'src/memory/gpdbwrappers.cpp',
+                'src/stat_statements_parser/pg_stat_statements_parser.c']
+  if import('fs').is_file('modules/gp_stats_collector' / path)
+    gpsc_sources += files('modules/gp_stats_collector' / path)
+  else
+    gpsc_sources += files(gpsc_root / path)
+  endif
+endforeach
+shared_module('gp_stats_collector', gpsc_sources,
+  # Cloudberry's C, whose declarations follow statements, as diskquota's do
+  c_args: mod_c_args + ['-Wno-declaration-after-statement'],
+  # Cloudberry's Makefile's C++ flags, less -Werror, and its symbols its
+  # own, as PAX's are
+  cpp_args: ['-DGPBUILD', '-Wno-unused-but-set-variable',
+             '-fvisibility=hidden', '-fvisibility-inlines-hidden'],
+  link_args: mod_link_args,
+  dependencies: [protobuf_dep],
+  include_directories: [include_directories('modules/gp_stats_collector',
+                                            'modules/gp_stats_collector/src',
+                                            gpsc_root / 'src',
+                                            gpsc_root / 'src' / 'log',
+                                            gpsc_root / 'src' / 'stat_statements_parser',
+                                            'modules/gp_stats_collector/gen',
+                                            'modules/gp_stats_collector/gen/protos'),
+                        pg_inc, cb_inc],
+  name_prefix: '',
+  install: true,
+  install_dir: pg_pkglibdir,
+)
+install_data('modules/gp_stats_collector/gp_stats_collector.control',
+             'modules/gp_stats_collector/gp_stats_collector--1.1.sql',
+             install_dir: pg_extensiondir)
+built_modules += 'gp_stats_collector'
+
+###############################################################################
 # gpfdist
 #
 # Cloudberry's file server of external tables (src/bin/gpfdist), a program

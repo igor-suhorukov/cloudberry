@@ -220,6 +220,19 @@ static const char *const synced_settings[] = {
 	"log_min_messages",
 	"log_min_error_statement",
 	"log_min_duration_statement",
+	/*
+	 * gp_stats_collector's, which Cloudberry syncs (GUC_GPDB_NEED_SYNC):
+	 * whether a segment's collector reports, what, and where -- settings
+	 * only a superuser sets, likewise
+	 */
+	"gpsc.enable",
+	"gpsc.enable_analyze",
+	"gpsc.enable_cdbstats",
+	"gpsc.ignored_users_list",
+	"gpsc.logging_mode",
+	"gpsc.uds_path",
+	"gpsc.max_text_size",
+	"gpsc.max_plan_size",
 	"search_path",
 	"role",
 	"DateStyle",
@@ -315,6 +328,16 @@ static const char *const synced_settings[] = {
 	/* the runtime filters of a segment's hash joins (gp_rtfilter.c) */
 	"gp.enable_runtime_filter",
 	"gp.enable_runtime_filter_pushdown",
+	/*
+	 * gp_stats_collector's the session may set, which Cloudberry syncs
+	 * (GUC_GPDB_NEED_SYNC): which statements a segment's collector reports,
+	 * and the coordinator's count of its client's statements, which it
+	 * reports them under
+	 */
+	"gpsc.enable_utility",
+	"gpsc.report_nested_queries",
+	"gpsc.min_analyze_time",
+	"gpsc.command_count",
 };
 
 #define NUM_SYNCED_SETTINGS	lengthof(synced_settings)
@@ -328,6 +351,14 @@ static const char *const superuser_settings[] = {
 	"log_min_messages",
 	"log_min_error_statement",
 	"log_min_duration_statement",
+	"gpsc.enable",
+	"gpsc.enable_analyze",
+	"gpsc.enable_cdbstats",
+	"gpsc.ignored_users_list",
+	"gpsc.logging_mode",
+	"gpsc.uds_path",
+	"gpsc.max_text_size",
+	"gpsc.max_plan_size",
 };
 
 /*
