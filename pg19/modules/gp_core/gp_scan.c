@@ -113,6 +113,7 @@
 #include "gp_cluster.h"
 #include "gp_core_api.h"
 #include "gp_dispatch.h"
+#include "gp_explain.h"
 #include "gp_hash.h"
 #include "gp_policy.h"
 #include "gp_scan.h"
@@ -1921,6 +1922,20 @@ gather_store(GatherScanState *state, TupleTableSlot *slot, int content)
 	state->current_content = content;
 }
 
+/*
+ * The segments' cursors closed.  What their statements say of their run as
+ * they end, under EXPLAIN ANALYZE, is this gather's (gp_explain.c).
+ */
+static void
+gather_close(GatherScanState *state)
+{
+	PlanState  *prev = GpExplainAnswerFor(&state->css.ss.ps);
+
+	GpGatherEnd(state->gather);
+	(void) GpExplainAnswerFor(prev);
+	state->gather = NULL;
+}
+
 /* The segments' next row, into the scan slot; false when they have no more. */
 static bool
 gather_fetch(GatherScanState *state, TupleTableSlot *slot)
@@ -1959,8 +1974,7 @@ gather_fetch(GatherScanState *state, TupleTableSlot *slot)
 	if (got)
 		return true;
 
-	GpGatherEnd(state->gather);
-	state->gather = NULL;
+	gather_close(state);
 	state->done = true;
 	state->current_content = -1;
 	return false;
@@ -2022,8 +2036,7 @@ gather_end(CustomScanState *node)
 	GatherScanState *state = (GatherScanState *) node;
 
 	if (state->gather != NULL)
-		GpGatherEnd(state->gather);
-	state->gather = NULL;
+		gather_close(state);
 	if (state->spool != NULL)
 		tuplestore_end(state->spool);
 	state->spool = NULL;
@@ -2047,8 +2060,7 @@ gather_rescan(CustomScanState *node)
 	}
 
 	if (state->gather != NULL)
-		GpGatherEnd(state->gather);
-	state->gather = NULL;
+		gather_close(state);
 	state->done = false;
 	state->current_content = -1;
 }
@@ -2329,6 +2341,26 @@ gp_scan_explain_label(PlanState *planstate, ExplainState *es,
 
 	if (prev_explain_node_label)
 		prev_explain_node_label(planstate, es, pname, suffix);
+}
+
+/*
+ * EXPLAIN ANALYZE's end of a gather a LIMIT above it left open: its
+ * segments' cursors closed now, so that what they say of their run is in
+ * before the plan is printed (gp_explain.c).  Nothing reads it after
+ * ExecutorFinish.
+ */
+bool
+GpGatherScanFinish(PlanState *ps)
+{
+	GatherScanState *state = (GatherScanState *) ps;
+
+	if (!IsA(ps, CustomScanState) ||
+		((CustomScanState *) ps)->methods != &gather_exec_methods)
+		return false;
+	if (state->gather != NULL)
+		gather_close(state);
+	state->done = true;
+	return true;
 }
 
 /*

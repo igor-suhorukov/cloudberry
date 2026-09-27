@@ -151,7 +151,13 @@ On a cluster (M2), `gp_core` and `gp_orca`:
   coordinator writes;
 - Cloudberry's settings of the dispatcher and the planner, as `gp.*`, among
   them direct dispatch's INFO lines and autostats;
-- EXPLAIN's `slicetable` and `locus` options, Cloudberry's, and
+- EXPLAIN's `slicetable` and `locus` options, Cloudberry's; **EXPLAIN
+  ANALYZE of what the segments ran**, which each segment measures and
+  sends the coordinator as an INFO of gp_core's as its part ends: the
+  segment with the most rows' figures for a fragment's nodes, the WAL of a
+  write's statements, each slice's memory and Vmem reserved, a node's
+  Executor Memory, work_mem and spilling segments, and allstat
+  (`modules/gp_core/gp_explain.c`); and
   **query metrics** (`gp.enable_query_metrics`): each plan node's
   instrumentation in a slot of shared memory on every node, whose process,
   session and statement it says, which Cloudberry's `gp_instrument_shmem`

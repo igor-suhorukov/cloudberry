@@ -258,6 +258,8 @@ static const char *const synced_settings[] = {
 	"gp.verify_gpfdists_cert",
 	/* the statement's count, which the slots of query metrics carry */
 	"gp.command_count",
+	/* what EXPLAIN ANALYZE asks a segment to measure (gp_explain.c) */
+	"gp.explain_instrument",
 	/* the UDP interconnect's, which the segments' senders and receivers use */
 	"gp.interconnect_queue_depth",
 	"gp.max_packet_size",
@@ -970,9 +972,10 @@ static int	notices_quiet = 0;
 /*
  * A module's filters of what the segments say: a NOTICE it raises there to
  * tell the coordinator something -- gp_exttable's count of the rows a scan
- * rejected -- which the filter takes, and the client never sees.  Called in
- * libpq's notice callback: a filter raises nothing, and allocates nothing
- * it keeps.
+ * rejected -- or an INFO, which no client_min_messages holds back --
+ * EXPLAIN ANALYZE's statistics (gp_explain.c) -- which the filter takes,
+ * and the client never sees.  Called in libpq's notice callback: a filter
+ * raises nothing, and pallocs nothing.
  */
 #define MAX_NOTICE_FILTERS	8
 static GpNoticeFilter notice_filters[MAX_NOTICE_FILTERS];

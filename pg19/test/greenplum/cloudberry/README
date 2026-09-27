@@ -255,6 +255,13 @@ gp_dqa (orca)  ORCA's fallback trace, which the expected output closest to
   optimizer_enable_multiple_distinct_aggs is off, as Cloudberry's ORCA
   declines them; and an aggregate with FILTER.
 
+gp_explain (orca)  the Hash Cond and Join Filter lines of two VALUES lists'
+  join, which ORCA's plan prints as Cloudberry's ORCA does -- its own
+  expected output for ORCA has the same three lines, the lists named
+  "Values" and a Join Filter of true for each join with foo -- in the order
+  the port's plan prints them, where the expected output closest to the
+  pass is the planner's.
+
 gp_metadata  version(), which is PostgreSQL 19's and names no Apache
   Cloudberry: the port is PostgreSQL's server, with its modules.
   gp_opt_version() answers in Cloudberry's words.
