@@ -27,7 +27,8 @@
 # see them as any relation's; the metadata is in gp_ao's three tables, keyed
 # by the storage ID the first page holds; row numbers and TIDs are the
 # port's; and the core patches gp_ao asks (O13-O18, O20) are used as they
-# were meant to be.
+# were meant to be.  And a PAX table's ENCODING clauses, which gp_ao takes
+# for it and PAX checks and writes by (section 15).
 #
 #   PG_BINDIR=/path/to/patched/pg19/bin pg19/test/ao/run.sh
 #
@@ -114,7 +115,7 @@ echo
 	echo "unix_socket_directories = '$SOCK'"
 	echo "listen_addresses = ''"
 	echo "port = $PORT"
-	echo "shared_preload_libraries = 'gp_core,gp_sql,gp_ao'"
+	echo "shared_preload_libraries = 'gp_core,gp_sql,gp_ao,pax'"
 	echo "wal_level = replica"
 	echo "max_wal_senders = 4"
 } >> "$WORK/data/postgresql.conf"
@@ -635,6 +636,62 @@ q "CHECKPOINT;" > /dev/null
 	|| notok "pg_checksums --check" "$(tail -3 "$WORK/checksums.log")"
 "$BINDIR/pg_ctl" -D "$WORK/data" -l "$WORK/log" -w -t 60 start > /dev/null 2>&1
 is "and the rows read back" "SELECT count(*) FROM rep;" "$want"
+
+###############################################################################
+echo "15. a PAX table's ENCODING clauses: gp_ao keeps them, PAX checks and writes by them"
+###############################################################################
+q "CREATE EXTENSION pax;" > /dev/null
+q "CREATE TABLE px (a int ENCODING (compresstype=rle), b text, c int,
+                    COLUMN c ENCODING (compresstype=zlib, compresslevel=3))
+     USING pax WITH (compresstype=zstd, compresslevel=5);" > /dev/null
+is "each column has what its statement says of it -- the table's own compression the default -- as given" \
+   "SELECT string_agg(attnum || ':' || array_to_string(attoptions, ' '), ', ' ORDER BY attnum)
+      FROM pg_attribute_encoding WHERE attrelid = 'px'::regclass;" \
+   "1:compresstype=rle, 2:compresstype=zstd compresslevel=5, 3:compresstype=zlib compresslevel=3"
+is "and a column of a table without them has none, PAX's defaults its own" \
+   "CREATE TABLE pxn (a int, b int) USING pax;
+    SELECT count(*) FROM pg_attribute_encoding WHERE attrelid = 'pxn'::regclass;" "0"
+q "CREATE TABLE pxr (a int ENCODING (compresstype=rle), b int ENCODING (compresstype=zstd, compresslevel=19)) USING pax;
+   INSERT INTO pxn SELECT i % 10, i % 100 FROM generate_series(1, 200000) i;
+   INSERT INTO pxr SELECT i % 10, i % 100 FROM generate_series(1, 200000) i;
+   INSERT INTO px SELECT i % 10, 'value ' || (i % 5), i FROM generate_series(1, 100000) i;" > /dev/null
+is "which PAX writes each column by" \
+   "SELECT pg_relation_size('pxr') * 5 < pg_relation_size('pxn');" "t"
+is "and reads back" \
+   "SELECT count(*) || ' ' || sum(a) || ' ' || sum(b) FROM pxr;" "200000 900000 9900000"
+is "a table's too" \
+   "SELECT count(*) || ' ' || sum(a) || ' ' || count(DISTINCT b) || ' ' || sum(c) FROM px;" \
+   "100000 450000 5 5000050000"
+refused "an encoding that is AO's, not PAX's, is PAX's error" \
+        "CREATE TABLE pxbad (a int ENCODING (compresstype=rle_type)) USING pax;" \
+        "unsupported compress type: 'rle_type'"
+refused "and an option PAX takes from its table alone" \
+        "CREATE TABLE pxbad (a int ENCODING (compresstype=zstd, blocksize=32768)) USING pax;" \
+        "blocksize not allow setting in ENCODING CLAUSES."
+refused "and a level an encoding has none of" \
+        "CREATE TABLE pxbad (a int ENCODING (compresstype=rle, compresslevel=2)) USING pax;" \
+        "compresslevel=2 should setting is not work for current encoding."
+refused "a column named by two COLUMN ENCODING clauses is Cloudberry's error, for a table by column too" \
+        "CREATE TABLE pxbad (a int, COLUMN a ENCODING (compresstype=zstd),
+                             COLUMN a ENCODING (compresstype=zlib)) USING pax;" \
+        "column \"a\" referenced in more than one COLUMN ENCODING clause"
+is "ALTER COLUMN SET ENCODING and ADD COLUMN ... ENCODING, and ADD COLUMN given none" \
+   "ALTER TABLE px ALTER COLUMN b SET ENCODING (compresstype=dict),
+                   ADD COLUMN d int ENCODING (compresstype=zlib, compresslevel=1),
+                   ADD COLUMN e int;
+    SELECT string_agg(attnum || ':' || array_to_string(attoptions, ' '), ', ' ORDER BY attnum)
+      FROM pg_attribute_encoding WHERE attrelid = 'px'::regclass;" \
+   "1:compresstype=rle, 2:compresstype=dict, 3:compresstype=zlib compresslevel=3, 4:compresstype=zlib compresslevel=1"
+refused "a label written by hand is PAX's to check" \
+        "SECURITY LABEL FOR gp_ao ON COLUMN px.e IS 'compresstype=rle_type';" \
+        "unsupported compress type: 'rle_type'"
+is "a rewrite writes by them still" \
+   "ALTER TABLE pxr ALTER COLUMN b TYPE bigint;
+    SELECT (pg_relation_size('pxr') * 5 < pg_relation_size('pxn'))::text || ' ' || sum(b) FROM pxr;" \
+   "true 9900000"
+is "and a table that leaves PAX leaves them" \
+   "ALTER TABLE pxr SET ACCESS METHOD heap;
+    SELECT count(*) FROM pg_attribute_encoding WHERE attrelid = 'pxr'::regclass;" "0"
 
 echo
 echo "  $pass passed, $fail failed"

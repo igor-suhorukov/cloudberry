@@ -383,7 +383,11 @@ extern void ao_enc_validate(List *opts, bool table);
 extern List *ao_enc_fillin(List *given, const AoOptions *dflt);
 extern void ao_column_options(Relation rel, AoOptions *colopts);
 extern void ao_encoding_take(List **options, List **encodings);
+struct GpEncodingMethod;
+extern void ao_encoding_check(List *encodings,
+							  const struct GpEncodingMethod *method);
 extern List *ao_storage_opts_of(List *options);
+extern List *ao_compression_opts_of(List *options);
 extern List *ao_partitioned_take(List **options);
 extern void ao_partitioned_set(Oid relid, List *opts);
 extern void ao_partition_inherit(Oid parentid, List *pending, List **options);
@@ -392,6 +396,10 @@ extern void ao_replace_reloptions(Relation rel, Oid newam, List *opts);
 extern void ao_encoding_apply(Oid relid, List *encodings, List *withopts,
 							  List *only, bool replace);
 extern void ao_encoding_set_column(Oid relid, const char *colname, List *opts);
+extern void ao_encoding_apply_given(Oid relid, List *encodings, List *withopts);
+extern void ao_encoding_set_column_given(Oid relid, const char *colname,
+										 List *opts,
+										 const struct GpEncodingMethod *method);
 extern char *ao_encoding_type_label(const char *label);
 extern bool ao_default_storage_options_check(char **newval, void **extra,
 											 GucSource source);

@@ -45,6 +45,10 @@ extern "C" {
 
 #include "access/detoast.h"
 #include "access/genam.h"
+#include "access/htup_details.h"
+#include "access/table.h"
+#include "catalog/pg_class.h"
+#include "catalog/pg_seclabel.h"
 #include "access/hash.h"
 #include "access/heapam.h"
 #include "access/nbtree.h"

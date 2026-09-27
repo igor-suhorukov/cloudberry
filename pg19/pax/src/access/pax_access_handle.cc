@@ -46,6 +46,9 @@
  *   - CLUSTER, a RepackStmt in PostgreSQL 19, of a table clustered by its
  *     cluster_columns is PAX's on each node, sent to the segments through
  *     gp_core; there are no DFS tablespaces to refuse;
+ *   - a column's ENCODING clause, which gp_ao takes and keeps as the
+ *     column's label, PAX checks through what pax_init() registers with it
+ *     (gp_encoding.h), where Cloudberry had its encoding callbacks;
  *   - the module's magic block and _PG_init are modules/pax/pax.c's, which
  *     calls pax_init() here.
  *
@@ -79,6 +82,7 @@
 extern "C" {
 #include "gp_dispatch.h"
 #include "gp_dtx.h"
+#include "gp_encoding.h"
 }
 
 #define NOT_IMPLEMENTED_YET                        \
@@ -1292,7 +1296,21 @@ out:
 
 // Cloudberry's _PG_init, as modules/pax/pax.c's calls it, once the module
 // is known to be preloaded with gp_core.
+/*
+ * A PAX table's column's ENCODING clause, which gp_ao takes and keeps as the
+ * column's label (gp_encoding.h): checked as Cloudberry's
+ * transform_column_encoding_clauses callback checks it, in its words.
+ */
+static void PaxCheckColumnEncoding(List *opts) {
+  (void)paxc::paxc_transform_column_encoding_clauses(opts, true, false);
+}
+
+static const GpEncodingMethod kPaxEncodingMethod = {"pax",
+                                                    PaxCheckColumnEncoding};
+
 void pax_init(void) {  // NOLINT
+  GpEncodingRegisterMethod(&kPaxEncodingMethod);
+
   prev_object_access_hook = object_access_hook;
   object_access_hook = PaxObjectAccessHook;
 

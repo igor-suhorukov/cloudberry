@@ -89,6 +89,7 @@
 #include "gp_core_api.h"
 #include "gp_dispatch.h"
 #include "gp_ao.h"
+#include "gp_encoding.h"
 
 PG_MODULE_MAGIC_EXT(
 					.name = "gp_ao",
@@ -275,6 +276,9 @@ typedef struct CreatePending
 	List	   *own_opts;		/* the storage options its WITH list gave */
 	List	   *parent_opts;	/* a partitioned table's, for its label */
 	bool		partitioned;
+
+	/* a method of another module's that takes the clauses (gp_encoding.h) */
+	const GpEncodingMethod *method;
 } CreatePending;
 
 /*
@@ -433,11 +437,26 @@ prepare_create(CreateStmt *stmt)
 	am = effective_am(stmt, &parentid);
 	cp->relation = stmt->relation;
 	cp->partitioned = (stmt->partspec != NULL);
+	cp->method = GpEncodingMethodOf(am);
 
-	if (cp->encodings != NIL && (am == NULL || strcmp(am, "ao_column") != 0))
+	if (cp->encodings != NIL && cp->method == NULL &&
+		(am == NULL || strcmp(am, "ao_column") != 0))
 		ereport(ERROR,
 				(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
 				 errmsg("ENCODING clause only supported with column oriented tables")));
+	ao_encoding_check(cp->encodings, cp->method);
+
+	/*
+	 * Another module's method takes what the clauses say, and its table's
+	 * own compression options as their default -- nothing on a partitioned
+	 * table, which Cloudberry keeps none for but a table by column.
+	 */
+	if (cp->method != NULL)
+	{
+		cp->own_opts = ao_compression_opts_of(stmt->options);
+		check_default_encoding(cp->encodings, cp->own_opts);
+		return cp;
+	}
 	if (!am_name_is_ao(am))
 		return cp;
 
@@ -463,6 +482,13 @@ finish_create(CreatePending *cp)
 {
 	Oid			relid = RangeVarGetRelid(cp->relation, NoLock, true);
 
+	if (cp->method != NULL)
+	{
+		if (OidIsValid(relid) && !cp->partitioned &&
+			get_rel_relam(relid) == get_table_am_oid(cp->method->amname, true))
+			ao_encoding_apply_given(relid, cp->encodings, cp->own_opts);
+		return;
+	}
 	if (cp->partitioned)
 		pending_parent_pop(cp->relation);
 	if (!OidIsValid(relid) || !relid_is_ao(relid))
@@ -656,11 +682,12 @@ finish_set_access_method(Oid relid, Oid oldam, List *withopts)
 	Oid			aocol = get_table_am_oid("ao_column", true);
 	Oid			newam = get_rel_relam(relid);
 
-	if (newam == oldam || !OidIsValid(aocol))
+	if (newam == oldam)
 		return;
-	if (newam == aocol)
+	if (OidIsValid(aocol) && newam == aocol)
 		ao_encoding_apply(relid, NIL, withopts, NIL, true);
-	else if (oldam == aocol)
+	else if ((OidIsValid(aocol) && oldam == aocol) ||
+			 (OidIsValid(oldam) && GpEncodingMethodOf(get_am_name(oldam)) != NULL))
 		ao_encoding_clear(relid);
 }
 
@@ -716,17 +743,47 @@ finish_alter(Oid relid, AlterPending *ap)
 {
 	List	   *relids;
 	Oid			aocol = get_table_am_oid("ao_column", true);
+	Oid			am;
+	const GpEncodingMethod *method = NULL;
 
-	if (!OidIsValid(relid) || !OidIsValid(aocol))
+	if (!OidIsValid(relid))
 		return;
 	relids = list_make1_oid(relid);
 	if (get_rel_relkind(relid) == RELKIND_PARTITIONED_TABLE)
 		relids = find_all_inheritors(relid, NoLock, NULL);
 
-	if (ap->colnames != NIL && get_rel_relam(relid) != aocol)
+	am = get_rel_relam(relid);
+	if (OidIsValid(am) && am != aocol)
+		method = GpEncodingMethodOf(get_am_name(am));
+	if (ap->colnames != NIL && (!OidIsValid(aocol) || am != aocol) &&
+		method == NULL)
 		ereport(ERROR,
 				(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
 				 errmsg("ENCODING clause only supported with column oriented tables")));
+
+	/*
+	 * Another module's method: the columns named are given what the command
+	 * says, and the rest nothing, as Cloudberry adds a column of such a table
+	 * with no options of its own.
+	 */
+	if (method != NULL)
+	{
+		foreach_oid(r, relids)
+		{
+			ListCell   *lc1;
+			ListCell   *lc2;
+
+			if (get_rel_relkind(r) == RELKIND_PARTITIONED_TABLE ||
+				get_rel_relam(r) != am)
+				continue;
+			forboth(lc1, ap->colnames, lc2, ap->opts)
+				ao_encoding_set_column_given(r, strVal(lfirst(lc1)), lfirst(lc2),
+											 method);
+		}
+		return;
+	}
+	if (!OidIsValid(aocol))
+		return;
 
 	foreach_oid(r, relids)
 	{
@@ -909,6 +966,7 @@ gp_ao_ProcessUtility(PlannedStmt *pstmt, const char *queryString,
 	List	   *type_encoding = NIL;
 	IntoClause *ctas_into = NULL;
 	List	   *ctas_opts = NIL;
+	const GpEncodingMethod *ctas_method = NULL;
 	Oid			am_changed = InvalidOid;
 	Oid			am_before = InvalidOid;
 	List	   *am_withopts = NIL;
@@ -977,6 +1035,14 @@ gp_ao_ProcessUtility(PlannedStmt *pstmt, const char *queryString,
 				{
 					ctas_opts = ao_storage_opts_of(into->options);
 					ao_default_storage_options_add(&into->options);
+					ctas_into = into;
+				}
+				else if ((ctas_method = GpEncodingMethodOf(into->accessMethod ?
+														   into->accessMethod :
+														   default_table_access_method)) != NULL)
+				{
+					/* its columns take its compression options, as a CREATE's */
+					ctas_opts = ao_compression_opts_of(into->options);
 					ctas_into = into;
 				}
 				break;
@@ -1078,8 +1144,10 @@ gp_ao_ProcessUtility(PlannedStmt *pstmt, const char *queryString,
 	{
 		Oid			relid = RangeVarGetRelid(ctas_into->rel, NoLock, true);
 
-		if (OidIsValid(relid) &&
-			get_rel_relam(relid) == get_table_am_oid("ao_column", true))
+		if (OidIsValid(relid) && ctas_method != NULL)
+			ao_encoding_apply_given(relid, NIL, ctas_opts);
+		else if (OidIsValid(relid) &&
+				 get_rel_relam(relid) == get_table_am_oid("ao_column", true))
 			ao_encoding_apply(relid, NIL, ctas_opts, NIL, false);
 	}
 	if (OidIsValid(am_changed))
