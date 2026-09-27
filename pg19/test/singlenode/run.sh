@@ -242,11 +242,13 @@ copy_data_end() {
 			blanks = blanks $0 "\n"
 			next
 		}
-		if (pending && (l ~ /^--/ || l ~ /^[ \t]*(abort|begin|commit|copy|create|drop|end|insert|reset|rollback|select|set)([ \t;]|$)/))
+		if (pending && (l ~ /^--/ || l ~ /^[ \t]*(abort|alter|analyze|begin|call|checkpoint|close|cluster|comment|commit|copy|create|deallocate|declare|delete|discard|do|drop|end|execute|explain|fetch|grant|insert|listen|lock|merge|notify|prepare|refresh|reindex|release|reset|revoke|rollback|savepoint|select|set|show|start|table|truncate|update|vacuum|values|with)([ \t;(]|$)/))
 			print "\\."
 		printf "%s", blanks
 		blanks = ""
-		pending = (l ~ /^[ \t]*copy[ \t].*[ \t]from[ \t]+stdin([ \t].*)?;[ \t]*(--.*)?$/)
+		# (not a line of a combined query of psql, ended by a backslash and a semicolon)
+		pending = (l ~ /^[ \t]*copy[ \t].*[ \t]from[ \t]+stdin([ \t].*)?;[ \t]*(--.*)?$/ &&
+				   l !~ /\\;[ \t]*(--.*)?$/)
 		print
 	}
 	END { printf "%s", blanks }'
