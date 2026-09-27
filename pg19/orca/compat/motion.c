@@ -289,12 +289,16 @@ motion_check_walker(Node *node, void *arg)
 
 		/*
 		 * A Motion between segments is carried out after the ones its own
-		 * fragment receives from, and before the Gather above it sends.
+		 * fragment receives from, and before the Gather above it sends --
+		 * once, though a subplan's Motions are walked for each SubPlan that
+		 * calls it: a partitioned scan's condition calls one for each
+		 * partition.
 		 */
 		if (gather)
 			api->motion_set_prepare(plan, order);
 		else if (ctx->order != NULL)
-			*ctx->order = lappend_int(*ctx->order, api->motion_slice(plan));
+			*ctx->order = list_append_unique_int(*ctx->order,
+												 api->motion_slice(plan));
 
 		/*
 		 * The fragment it is in receives it -- in a SubPlan too, which is

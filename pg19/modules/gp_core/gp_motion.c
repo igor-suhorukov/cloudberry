@@ -2807,8 +2807,16 @@ stream_plan(MotionState *state, List *order, List *motions)
 		CustomScan *motion = NULL;
 		StreamSlice *ss;
 		int			content;
+		bool		seen = false;
 
 		if (list_member_int(relayed, slice))
+			continue;
+
+		/* once each, however often the order names it */
+		foreach_ptr(StreamSlice, other, slices)
+			if (other->slice == slice)
+				seen = true;
+		if (seen)
 			continue;
 		foreach_ptr(Plan, m, motions)
 			if (GpMotionSlice(m) == slice)
