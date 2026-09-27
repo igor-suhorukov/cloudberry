@@ -680,6 +680,22 @@ AS 'MODULE_PATHNAME', 'gp_activity_session'
 LANGUAGE C VOLATILE STRICT;
 
 /*
+ * pg_proc's prodataaccess and proexeclocation, which Cloudberry's pg_proc has
+ * as columns and the parser makes of the names the same way (gp_segment.c):
+ * what the function does with SQL and where it runs, which the "gp" label
+ * keeps (gp_sql's funcattr.c).
+ */
+CREATE FUNCTION gp_internal.proc_data_access(pg_catalog.pg_proc)
+RETURNS "char"
+AS 'MODULE_PATHNAME', 'gp_proc_data_access'
+LANGUAGE C STABLE STRICT;
+
+CREATE FUNCTION gp_internal.proc_exec_location(pg_catalog.pg_proc)
+RETURNS "char"
+AS 'MODULE_PATHNAME', 'gp_proc_exec_location'
+LANGUAGE C STABLE STRICT;
+
+/*
  * gp_stat_activity: pg_stat_activity of every node, as Cloudberry's view of
  * that name gives it (its system_views_gp.in makes one of each pg_stat
  * view): the coordinator's rows and each segment's, with the content id of

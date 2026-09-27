@@ -26,7 +26,8 @@
 # stopped it.  "differs:" says it for a test that stops at nothing, and
 # answers otherwise than Cloudberry's expected output says.
 group g1
-skip gp_aggregates  relation "aggtest" does not exist
+port aggtest
+run  gp_aggregates
 run  update_gp
 run  triggers_gp
 run  returning_gp
@@ -284,7 +285,7 @@ skip gp_aggregates_costs  unrecognized configuration parameter "gp_eager_two_pha
 run  gp_metadata
 run  variadic_parameters
 run  default_parameters
-skip function_extensions  column "prodataaccess" does not exist; unrecognized configuration parameter "gp_contentid"
+run  function_extensions
 skip spi  differs: a function's query of a table in a segment's slice runs, where Cloudberry refuses it: function cannot execute on a QE slice because it accesses relation
 run  gp_xml
 run  shared_scan
@@ -471,7 +472,7 @@ skip qp_dpe  differs: under ORCA, which of its plans eliminate partitions while 
 skip qp_functions_idf  function percentile_cont(numeric, timestamp with time zone) does not exist; function percentile_cont(numeric, date) does not exist
 run  qp_regexp
 skip qp_orca_fallback  differs: an UPDATE of a partitioned table with a foreign partition runs, where Cloudberry refuses it: cannot update foreign table "p2_ext"
-skip gp_sync_lc_gucs  column "sess_id" does not exist
+run  gp_sync_lc_gucs
 skip qp_olap_group  relation "sale" does not exist; prepared statement "p" does not exist
 skip qp_olap_group2  relation "product" does not exist
 skip hooktest  could not access file "hooktest/test_hook.so": No such file or directory
@@ -490,9 +491,9 @@ skip psql_gp_commands  differs: psql 19's \dx has a Default version column, and 
 skip pg_resetwal  differs: PostgreSQL 19's pg_resetwal has no -k, the data checksum version Cloudberry's sets
 run  dropdb_check_shared_buffer_cache
 skip gp_upgrade_cornercases  cannot drop schema public because other objects depend on it
-skip temp_relation  language "plpython3u" does not exist; function gp_execution_segment() does not exist
+skip temp_relation  differs: a temporary table's file is t<proc number>_<relfilenode> in PostgreSQL 19, and the test looks for Cloudberry's t_<relfilenode>, which it finds on no node, before DROP TABLE and after
 skip alter_db_set_tablespace  function force_mirrors_to_catch_up() does not exist; spiexceptions.UndefinedFunction: function get_tablespace_version_directory_name() does not exist
-skip oid_wraparound  could not find function "gp_set_next_oid" in file "regress.so"; could not find function "gp_get_next_oid" in file "regress.so"
+run  oid_wraparound
 skip fts_recovery_in_progress  canceling statement due to user request
 skip gangsize  differs: the gangs its statements are dispatched to, by Cloudberry's INFO lines, are not the sizes Cloudberry makes them
 skip gang_reuse  unrecognized configuration parameter "gp_cached_segworkers_threshold"

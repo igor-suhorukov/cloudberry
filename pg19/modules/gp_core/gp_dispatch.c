@@ -4589,9 +4589,12 @@ gp_dist_random(PG_FUNCTION_ARGS)
 
 /*
  * Is "sql" a query gp_segment.c makes the planner run on the segments: one
- * SELECT, of one gp_dist_random() and nothing else, as ruleutils prints it
- * and O26 reads it -- gp.dist_random(NULL::t), or gp_dist_random('t') where
- * gp_sql does not desugar it?  Nothing more is taken by name.
+ * SELECT and nothing else, as ruleutils prints it and O26 reads it -- of one
+ * gp_dist_random() alone, gp.dist_random(NULL::t) or gp_dist_random('t')
+ * where gp_sql does not desugar it; of one function's rows alone, a function
+ * that runs on all segments; or of no relation, a query that calls one?  A
+ * SELECT is all it runs: nothing that writes but by a function it calls, as
+ * the same query would through the coordinator, and nothing that locks.
  */
 static bool
 is_segment_query(const char *sql)
@@ -4600,16 +4603,17 @@ is_segment_query(const char *sql)
 	SelectStmt *select;
 	RangeFunction *range;
 	List	   *call;
-	FuncCall   *fcall;
-	char	   *name;
 
 	if (list_length(stmts) != 1)
 		return false;
 	select = (SelectStmt *) linitial_node(RawStmt, stmts)->stmt;
 	if (!IsA(select, SelectStmt) || select->op != SETOP_NONE ||
 		select->withClause != NULL || select->intoClause != NULL ||
-		select->lockingClause != NIL || select->valuesLists != NIL ||
-		list_length(select->fromClause) != 1 ||
+		select->lockingClause != NIL || select->valuesLists != NIL)
+		return false;
+	if (select->fromClause == NIL)
+		return true;
+	if (list_length(select->fromClause) != 1 ||
 		!IsA(linitial(select->fromClause), RangeFunction))
 		return false;
 	range = linitial_node(RangeFunction, select->fromClause);
@@ -4617,15 +4621,7 @@ is_segment_query(const char *sql)
 		list_length(range->functions) != 1)
 		return false;
 	call = linitial_node(List, range->functions);
-	if (!IsA(linitial(call), FuncCall))
-		return false;
-	fcall = linitial_node(FuncCall, call);
-	name = strVal(llast(fcall->funcname));
-	if (list_length(fcall->funcname) == 2)
-		return strcmp(strVal(linitial(fcall->funcname)), "gp") == 0 &&
-			strcmp(name, "dist_random") == 0;
-	return list_length(fcall->funcname) == 1 &&
-		strcmp(name, "gp_dist_random") == 0;
+	return IsA(linitial(call), FuncCall);
 }
 
 /*
@@ -4732,7 +4728,7 @@ gp_segment_query(PG_FUNCTION_ARGS)
 	if (PG_ARGISNULL(0))
 		ereport(ERROR,
 				(errcode(ERRCODE_NULL_VALUE_NOT_ALLOWED),
-				 errmsg("gp_internal.segment_query() runs only a query of one gp_dist_random()")));
+				 errmsg("gp_internal.segment_query() runs only a query of one gp_dist_random(), of one function's rows, or of no relation")));
 	sql = text_to_cstring(PG_GETARG_TEXT_PP(0));
 	if (PG_NARGS() > 1)
 		sql = segment_query_values(sql, fcinfo);
@@ -4740,7 +4736,7 @@ gp_segment_query(PG_FUNCTION_ARGS)
 	if (!is_segment_query(sql))
 		ereport(ERROR,
 				(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
-				 errmsg("gp_internal.segment_query() runs only a query of one gp_dist_random()")));
+				 errmsg("gp_internal.segment_query() runs only a query of one gp_dist_random(), of one function's rows, or of no relation")));
 	if (GpDistRandomIsLocal())
 		ereport(ERROR,
 				(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),

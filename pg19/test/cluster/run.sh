@@ -1184,6 +1184,26 @@ a\b|\N' ] && [ "$(cat "$ROOT/ce_prog.txt" 2>&1)" = "to a program" ] \
 			ok "a variable and a subquery are evaluated here for the segments, and void comes back" ;;
 		*) notok "what the coordinator evaluates for the segments" "$out ($out2) / $out3 / $out4" ;;
 	esac
+	# A function that runs on all segments, EXECUTE ON ALL SEGMENTS, is asked
+	# of them the same way, as Cloudberry runs it: in FROM, whatever else the
+	# query reads, and in the SELECT list of a query of no relation, each
+	# segment calling it once; in the SELECT list of a query with FROM it is
+	# refused.  Where a function runs, and what it does with SQL, are
+	# pg_proc's proexeclocation and prodataaccess, as in Cloudberry, and a
+	# node says which segment it is as gp_contentid.
+	q 0 "CREATE FUNCTION segs_of(n int) RETURNS SETOF text LANGUAGE plpgsql
+	     EXECUTE ON ALL SEGMENTS AS \$\$ BEGIN
+	       RETURN NEXT current_setting('gp.contentid') || ':' || n;
+	     END \$\$;" >/dev/null
+	out=$(q 0 "SELECT segs_of(7) ORDER BY 1;" | tr '\n' ' ')
+	out2=$(q 0 "SELECT s FROM segs_of(8) s JOIN (SELECT count(*) AS c FROM gs) g ON true ORDER BY 1;" | tr '\n' ' ')
+	out3=$(q 0 "SELECT segs_of(9) FROM gs;")
+	out4=$(q 0 "SELECT proexeclocation, prodataaccess FROM pg_proc WHERE proname = 'segs_of';")
+	case "$out|$out2|$out3|$out4" in
+		"0:7 1:7 |0:8 1:8 |"*"cannot be used in the SELECT list of a query with FROM"*"|s|n")
+			ok "a function EXECUTE ON ALL SEGMENTS runs on each, in FROM and in a query of no relation, as Cloudberry runs it" ;;
+		*) notok "a function EXECUTE ON ALL SEGMENTS" "$out / $out2 / $out3 / $out4" ;;
+	esac
 	out=$(q 0 "SELECT gp_segment_id FROM gs, gr;")
 	out2=$(q 0 "SELECT gp_segment_id FROM (SELECT a FROM gs) s;")
 	case "$out|$out2" in

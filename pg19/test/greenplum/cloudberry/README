@@ -164,6 +164,25 @@ external_table_persistent_error_log (orca)  the lines ORCA's fallback trace
   declines there ("SIRV functions") as Cloudberry's ORCA does -- its own
   expected output for ORCA has them.
 
+function_extensions  pg_proc's column prodataaccess in pg_attribute, which
+  has none: the port gives pg_proc Cloudberry's prodataaccess and
+  proexeclocation as names of calls of its row (gp_segment.c), from the
+  "gp" label that keeps them, and a query of pg_proc by either name answers
+  as Cloudberry's.  A function that runs on the coordinator, EXECUTE ON
+  COORDINATOR, called in the SELECT list of a query with FROM, which
+  Cloudberry refuses: the port calls it on the coordinator, where it would
+  run anyway, for each row gathered there -- one that runs on all segments
+  it refuses as Cloudberry does.  And psql 19's \df+, which has no Data
+  access or Execute on column.
+
+gp_aggregates (planner, orca)  PostgreSQL 19's words for a call no
+  function takes -- a DETAIL where Cloudberry's HINT stood -- and the DETAIL
+  of a view made temporary by the temporary table it reads.  Under the
+  planner the port aggregates mysum_prefunc() in one stage, over the rows
+  gathered here, and so never calls the combine function its prefunc
+  names, whose NOTICE Cloudberry's two stages raise; ORCA's two stages
+  raise it as Cloudberry's do.
+
 gp_backend_info  the backends of a query that needs a reader gang, and
   the singleton reader on the coordinator: the port's gather reads each
   table through the segment's one connection, and joins them here, so
@@ -219,6 +238,16 @@ part_external_table (orca)  the lines ORCA's fallback trace prints for a
   plans for it the port's ORCA does not translate
   (TranslateDXLDynForeignScan), and the planner plans the query; and an
   INSERT into one, which Cloudberry's ORCA declines too.
+
+oid_wraparound  the OID counters, the coordinator's and each segment's.  A
+  segment makes the coordinator's objects with the OIDs the coordinator
+  gave them (gp_ddl.c) and takes none from its own counter, which
+  Cloudberry's segment moves past each OID it is given -- the fast-forward
+  to 16384 the test looks for on every segment, where the port's stay at
+  4290000001.  And a relation's relfilenumber, which the port gives it
+  apart from its OID, takes one more from the coordinator's counter: after
+  CREATE TABLE it is at 16388 where Cloudberry's is at 16387, and after the
+  CREATE TABLE AS of the second scenario at neither 16390 nor 16391.
 
 partition_indexing  a UNIQUE index or constraint on a partitioned table
   that holds neither the partition key nor the distribution key: both

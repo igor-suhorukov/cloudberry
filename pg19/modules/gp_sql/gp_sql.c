@@ -1685,6 +1685,31 @@ gp_sql_ProcessUtility(PlannedStmt *pstmt, const char *queryString,
 		transform((CreateForeignTableStmt *) parsetree, queryString);
 	}
 
+	/*
+	 * CREATE AGGREGATE's prefunc, the name Greenplum 5 and before gave
+	 * combinefunc, which Cloudberry still takes for it (DefineAggregate(),
+	 * commands/aggregatecmds.c).
+	 */
+	if (IsA(parsetree, DefineStmt) &&
+		((DefineStmt *) parsetree)->kind == OBJECT_AGGREGATE)
+	{
+		foreach_node(DefElem, def, ((DefineStmt *) parsetree)->definition)
+		{
+			if (pg_strcasecmp(def->defname, "prefunc") != 0)
+				continue;
+			if (readOnlyTree)
+			{
+				pstmt = copyObject(pstmt);
+				parsetree = pstmt->utilityStmt;
+				readOnlyTree = false;
+			}
+			foreach_node(DefElem, d, ((DefineStmt *) parsetree)->definition)
+				if (pg_strcasecmp(d->defname, "prefunc") == 0)
+					d->defname = pstrdup("combinefunc");
+			break;
+		}
+	}
+
 	/* a statement of an extension's script, as PostGIS's is (extscript.c) */
 	if (creating_extension)
 	{

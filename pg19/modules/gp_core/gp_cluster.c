@@ -91,6 +91,8 @@ static char *gp_qe_identity = NULL;
 
 /* gp.session_id, which is shown and never set; see show_session_id(). */
 static int	gp_session_id_shown = -1;
+/* gp.contentid, the same; see show_contentid(). */
+static int	gp_contentid_shown = -1;
 static char *gp_cluster_secret = NULL;
 static char *gp_qe_secret = NULL;
 
@@ -1608,6 +1610,20 @@ show_session_id(void)
 	return buf;
 }
 
+/*
+ * gp.contentid: Cloudberry's gp_contentid, read-only.  Which segment this
+ * node is, by its line of the cluster's file: -1 for the coordinator and on
+ * a node with no cluster.
+ */
+static const char *
+show_contentid(void)
+{
+	static char buf[16];
+
+	snprintf(buf, sizeof(buf), "%d", GpClusterContentId());
+	return buf;
+}
+
 /* ------------------------------------------------------------------------- */
 /* Start-up                                                                  */
 /* ------------------------------------------------------------------------- */
@@ -1704,6 +1720,16 @@ GpClusterInit(void)
 							PGC_POSTMASTER,
 							0,
 							NULL, NULL, NULL);
+
+	DefineCustomIntVariable("gp.contentid",
+							"Segment this server is, as Cloudberry's gp_contentid.",
+							"The content id of this node's line in \"gp.cluster_config\": "
+							"-1 for the coordinator, and on a server that has no segments.",
+							&gp_contentid_shown,
+							-1, -1, INT_MAX,
+							PGC_INTERNAL,
+							GUC_NOT_IN_SAMPLE | GUC_DISALLOW_IN_FILE,
+							NULL, NULL, show_contentid);
 
 	if (gp_cluster_config != NULL && gp_cluster_config[0] != '\0')
 	{
