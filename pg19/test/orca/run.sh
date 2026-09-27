@@ -2376,15 +2376,36 @@ got=$("$PSQL" -X -q -t -A -d postgres \
 
 # The same kind of loss, found by T2: ORCA prunes a computed column nothing
 # reads, volatile or not, where the planner keeps a volatile one -- so a
-# sequence a subquery's unread column advances was never advanced.
-declined "a volatile function in a column nothing reads" \
-         "SELECT count(*) FROM (SELECT nextval('t0_seq') n, a FROM t0) x" \
+# sequence a subquery's unread column advances was never advanced.  Where the
+# subquery is in the FROM of the SELECT ORCA plans, the SELECT is given a
+# column that reads it -- count() of it where the SELECT aggregates -- which
+# the plan returns as junk; deeper, the query is refused still.
+same "a volatile function in a column nothing reads: called for every row, by ORCA's plan" \
+     "SELECT count(*) FROM (SELECT nextval('t0_seq') n, a FROM t0) x; SELECT last_value FROM t0_seq" \
+     "CREATE TEMP SEQUENCE t0_seq"
+
+has "the SELECT counting it, in a column the plan does not return" \
+    "CREATE TEMP SEQUENCE t0_seq;
+     EXPLAIN (COSTS OFF, VERBOSE) SELECT count(*) FROM (SELECT nextval('t0_seq') n, a FROM t0) x" \
+    "Output: count(*), count("
+
+same "and read beside a sort by a column the SELECT does not return: one column still" \
+     "SELECT a FROM (SELECT nextval('t0_seq') n, a, b FROM t0) x WHERE a < 4 ORDER BY b, a;
+      SELECT last_value FROM t0_seq" \
+     "CREATE TEMP SEQUENCE t0_seq"
+
+declined "a volatile function in a column nothing reads, a subquery further down" \
+         "SELECT count(*) FROM (SELECT a FROM (SELECT nextval('t0_seq') n, a FROM t0) y) x" \
          "a volatile function in a column nothing reads" \
          "CREATE TEMP SEQUENCE t0_seq"
 
-is "and the planner that plans it advances the sequence for every row" \
-   "CREATE TEMP SEQUENCE t0_seq; SELECT count(*) FROM (SELECT nextval('t0_seq') n, a FROM t0) x;
-    SELECT last_value FROM t0_seq" "$(printf '1001\n1001')"
+# A column that returns a set ORCA keeps, read or not, since it decides how
+# many rows there are: Cloudberry's sreh test counts an error log so.
+q "CREATE FUNCTION t0_vsrf() RETURNS SETOF int VOLATILE LANGUAGE plpgsql
+     AS \$\$ BEGIN PERFORM nextval('t0_srfseq'); RETURN QUERY SELECT generate_series(1, 3); END \$\$" > /dev/null
+same "a volatile set-returning function in a CTE nothing reads is ORCA's" \
+     "WITH e AS (SELECT t0_vsrf()) SELECT count(*) FROM e; SELECT last_value FROM t0_srfseq" \
+     "CREATE TEMP SEQUENCE t0_srfseq"
 
 same "a volatile column the query reads is ORCA's to plan" \
      "SELECT count(*), count(DISTINCT n) FROM (SELECT nextval('t0_seq') n, a FROM t0) x" \

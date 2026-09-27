@@ -69,6 +69,7 @@
 
 #include "access/htup_details.h"
 #include "access/table.h"
+#include "catalog/pg_aggregate.h"
 #include "catalog/pg_namespace.h"
 #include "catalog/pg_proc.h"
 #include "catalog/pg_type.h"
@@ -83,6 +84,7 @@
 #include "parser/parse_relation.h"
 #include "parser/parsetree.h"
 #include "rewrite/rewriteManip.h"
+#include "utils/fmgroids.h"
 #include "utils/lsyscache.h"
 #include "utils/rel.h"
 #include "utils/syscache.h"
@@ -331,8 +333,17 @@ has_virtual_generated_columns_walker(Node *node, void *context)
  * refused: ORCA's core is taken unmodified, and nothing the translator hands
  * it makes it keep a column its parent does not ask for.
  *
+ * Where the query ORCA plans is a SELECT and the column one of a subquery in
+ * its own FROM, the SELECT is made to read it (read_unread_volatile_outputs()
+ * below), and ORCA keeps it; deeper, the query is still refused.
+ *
  * A column is volatile if its expression calls a volatile function, or reads
- * a volatile column of a subquery below it, which ORCA would prune with it;
+ * a volatile column of a subquery below it, which ORCA would prune with it --
+ * unless the expression returns a set, which ORCA keeps, unread, both where
+ * it prunes (PexprPruneUnusedComputedCols) and where it makes a ComputeScalar
+ * a Result (CTranslatorExprToDXL::PdxlnComputeScalar), since it changes how
+ * many rows there are: a set-returning function in a CTE, as in `WITH e AS
+ * (SELECT gp_read_error_log('t')) SELECT count(*) FROM e`, is ORCA's;
  * a set operation's column, if any branch's is.  It is read if a Var of the
  * query above names it, at any depth -- other than through a join's alias
  * list, which the parser leaves only for a FULL JOIN's merged column, and
@@ -452,7 +463,7 @@ volatile_columns(Query *query)
 	{
 		TargetEntry *tle = lfirst_node(TargetEntry, lc);
 
-		if (tle->resjunk)
+		if (tle->resjunk || expression_returns_set((Node *) tle->expr))
 			continue;
 
 		if (contain_volatile_functions((Node *) tle->expr) ||
@@ -461,6 +472,107 @@ volatile_columns(Query *query)
 	}
 
 	return result;
+}
+
+/* count() of "arg", which evaluates it for every row */
+static Expr *
+count_of(Expr *arg)
+{
+	Aggref	   *aggref = makeNode(Aggref);
+
+	aggref->aggfnoid = F_COUNT_ANY;
+	aggref->aggtype = INT8OID;
+	aggref->aggcollid = InvalidOid;
+	aggref->inputcollid = exprCollation((Node *) arg);
+	aggref->aggargtypes = list_make1_oid(exprType((Node *) arg));
+	aggref->args = list_make1(makeTargetEntry(arg, 1, NULL, false));
+	aggref->aggkind = AGGKIND_NORMAL;
+	aggref->aggsplit = AGGSPLIT_SIMPLE;
+	aggref->aggno = -1;
+	aggref->aggtransno = -1;
+	aggref->location = -1;
+	return (Expr *) aggref;
+}
+
+/*
+ * A volatile column of a subquery in the FROM of the SELECT ORCA plans that
+ * the SELECT does not read: read by a column the SELECT is given -- the
+ * column itself, or where the SELECT aggregates, count() of it -- so that
+ * ORCA keeps it, and the function is called for every row the subquery gives,
+ * as the planner's plan calls it.  The column is an output of the query ORCA
+ * plans, since ORCA keeps no junk column of the query (the translator's
+ * CreateDXLOutputCols), and junk in the plan ORCA makes: the executor drops
+ * it, as it drops every junk column of a SELECT's plan (InitPlan()'s junk
+ * filter).  As lockrows.c does with a locked table's ctid.
+ *
+ * Not a SELECT with DISTINCT, grouping sets or a set operation, nor one that
+ * returns sets or computes windows, where the column would be more than read.
+ * Returns how many columns were added; *first is where the first is among the
+ * query's outputs, which are the plan's (0-based).
+ */
+static int
+read_unread_volatile_outputs(Query *query, int *first)
+{
+	Index		rtindex = 0;
+	int			added = 0;
+	ListCell   *lc;
+
+	if (query->commandType != CMD_SELECT || query->setOperations != NULL ||
+		query->groupingSets != NIL || query->distinctClause != NIL ||
+		query->hasTargetSRFs || query->hasWindowFuncs)
+		return 0;
+
+	*first = 0;
+	foreach(lc, query->targetList)
+		if (!lfirst_node(TargetEntry, lc)->resjunk)
+			(*first)++;
+
+	foreach(lc, query->rtable)
+	{
+		RangeTblEntry *rte = lfirst_node(RangeTblEntry, lc);
+		Bitmapset  *volatile_cols;
+		columns_read_context read;
+		int			attno = -1;
+
+		rtindex++;
+		if (rte->rtekind != RTE_SUBQUERY)
+			continue;
+		volatile_cols = volatile_columns(rte->subquery);
+		if (bms_is_empty(volatile_cols))
+			continue;
+
+		read.rtindex = rtindex;
+		read.sublevels_up = 0;
+		read.read = NULL;
+		read.whole_row = false;
+		(void) query_tree_walker(query, columns_read_walker, (void *) &read,
+								 QTW_IGNORE_JOINALIASES);
+		if (read.whole_row)
+			continue;
+
+		while ((attno = bms_next_member(volatile_cols, attno)) >= 0)
+		{
+			TargetEntry *sub_tle;
+			Expr	   *expr;
+
+			if (bms_is_member(attno, read.read))
+				continue;
+			sub_tle = get_tle_by_resno(rte->subquery->targetList, attno);
+			expr = (Expr *) makeVar(rtindex, attno,
+									exprType((Node *) sub_tle->expr),
+									exprTypmod((Node *) sub_tle->expr),
+									exprCollation((Node *) sub_tle->expr), 0);
+			if (query->hasAggs || query->groupClause != NIL)
+				expr = count_of(expr);
+			query->targetList = lappend(query->targetList,
+										makeTargetEntry(expr,
+														list_length(query->targetList) + 1,
+														NULL, false));
+			added++;
+		}
+	}
+
+	return added;
 }
 
 static bool
@@ -1231,6 +1343,8 @@ optimize_query(Query *parse, int cursorOptions, ParamListInfo boundParams,
 	bool		hasRowSecurity;
 	ListCell   *lp;
 	List	   *row_marks = NIL;
+	int			read_added = 0;
+	int			read_first = 0;
 
 	failure->unexpected = false;
 	failure->from_postgres = false;
@@ -1332,8 +1446,9 @@ optimize_query(Query *parse, int cursorOptions, ParamListInfo boundParams,
 	/*
 	 * A volatile expression ORCA would prune; see the walker.  After the
 	 * grouping step is folded, so that a Var reads a column rather than a
-	 * grouping expression.
+	 * grouping expression -- the SELECT made to read what it can first.
 	 */
+	read_added = read_unread_volatile_outputs(pqueryCopy, &read_first);
 	if (has_unread_volatile_output_walker((Node *) pqueryCopy, NULL))
 	{
 		failure->message = pstrdup("Falling back to Postgres-based planner because "
@@ -1455,6 +1570,21 @@ optimize_query(Query *parse, int cursorOptions, ParamListInfo boundParams,
 	result->planTree = remove_redundant_results(result->planTree);
 	foreach(lp, result->subplans)
 		lfirst(lp) = remove_redundant_results((Plan *) lfirst(lp));
+
+	/* the columns read_unread_volatile_outputs() added, which the SELECT does not return */
+	if (read_added > 0)
+	{
+		if (read_first + read_added > list_length(result->planTree->targetlist))
+		{
+			failure->message = pstrdup("Falling back to Postgres-based planner because "
+									   "GPORCA does not support the following feature: "
+									   "a volatile function in a column nothing reads, "
+									   "whose column the plan does not return");
+			return NULL;
+		}
+		for (int i = read_first; i < read_first + read_added; i++)
+			list_nth_node(TargetEntry, result->planTree->targetlist, i)->resjunk = true;
+	}
 
 	/* the rows the query locks, locked where they are (lockrows.c) */
 	{
