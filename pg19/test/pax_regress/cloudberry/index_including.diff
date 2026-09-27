@@ -1,0 +1,34 @@
+@@
+-         pg_get_constraintdef          | conname  | conkey 
+----------------------------------------+----------+--------
+- PRIMARY KEY (c1, c2) INCLUDE (c3, c4) | covering | {1,2}
+-(1 row)
++         pg_get_constraintdef          |     conname     | conkey 
++---------------------------------------+-----------------+--------
++ NOT NULL c1                           | tbl_c1_not_null | {1}
++ NOT NULL c2                           | tbl_c2_not_null | {2}
++ PRIMARY KEY (c1, c2) INCLUDE (c3, c4) | covering        | {1,2}
++(3 rows)
+@@
+-         pg_get_constraintdef          | conname  | conkey 
+----------------------------------------+----------+--------
+- PRIMARY KEY (c1, c2) INCLUDE (c3, c4) | tbl_pkey | {1,2}
+-(1 row)
++         pg_get_constraintdef          |     conname     | conkey 
++---------------------------------------+-----------------+--------
++ NOT NULL c1                           | tbl_c1_not_null | {1}
++ NOT NULL c2                           | tbl_c2_not_null | {2}
++ PRIMARY KEY (c1, c2) INCLUDE (c3, c4) | tbl_pkey        | {1,2}
++(3 rows)
+@@
+-ERROR:  cannot alter column with primary key or unique constraint
+-HINT:  DROP the constraint first, and recreate it after the ALTER
+@@
+-ERROR:  cannot alter column with primary key or unique constraint
+-HINT:  DROP the constraint first, and recreate it after the ALTER
+@@
+- c1     | integer |           |          | 
++ c1     | bigint  |           |          | 
+@@
+- c3     | integer |           |          | 
++ c3     | bigint  |           |          | 

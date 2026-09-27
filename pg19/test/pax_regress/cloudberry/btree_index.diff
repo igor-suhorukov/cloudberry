@@ -1,0 +1,10 @@
+@@
+-             0 | btree_stats_idx |         1
+-             1 | btree_stats_idx |         1
++             0 | btree_stats_idx |         0
++             1 | btree_stats_idx |         0
+@@
+-             0 | btree_stats_idx |         1
+-             1 | btree_stats_idx |         1
++             0 | btree_stats_idx |         0
++             1 | btree_stats_idx |         0

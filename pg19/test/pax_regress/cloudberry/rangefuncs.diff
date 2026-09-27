@@ -1,0 +1,129 @@
+@@
+-ERROR:  query plan with multiple segworker groups is not supported
+-HINT:  likely caused by a function that reads or modifies data in a distributed table
+-CONTEXT:  SQL function "rngfunct" statement 1
++ rngfuncid | f2  | rngfuncid | f2  
++-----------+-----+-----------+-----
++         1 |  11 |         1 |  11
++         1 | 111 |         1 | 111
++         2 |  22 |         2 |  22
++(3 rows)
++
+@@
+-ERROR:  query plan with multiple segworker groups is not supported
+-HINT:  likely caused by a function that reads or modifies data in a distributed table
+-CONTEXT:  SQL function "rngfunct" statement 1
++ rngfuncid | f2  | rngfuncid | f2  | ord 
++-----------+-----+-----------+-----+-----
++         1 |  11 |         1 |  11 |   1
++         1 | 111 |         1 | 111 |   2
++         2 |  22 |         2 |  22 |   1
++(3 rows)
++
+@@
+-ERROR:  function cannot execute on a QE slice because it accesses relation "public.rngfunc2"
+-CONTEXT:  SQL function "rngfunct" during startup
++ rngfuncid | f2  
++-----------+-----
++         1 |  11
++         1 | 111
++         2 |  22
++(3 rows)
++
+@@
+-ERROR:  function cannot execute on a QE slice because it accesses relation "public.rngfunc2"
+-CONTEXT:  SQL function "rngfunct" during startup
++ rngfuncid | f2  
++-----------+-----
++         1 |  11
++         1 | 111
++(2 rows)
++
+@@
+-ERROR:  function cannot execute on a QE slice because it accesses relation "public.rngfunc2"
+-CONTEXT:  SQL function "rngfunct" during startup
++ rngfuncid | f2  
++-----------+-----
++         1 |  11
++         1 | 111
++(2 rows)
++
+@@
+-ERROR:  not implemented yet on pax relations: TupleFetchRowVersion
+-CONTEXT:  SQL function "insert_tt2" statement 1
++NOTICE:  noticetrigger 11 foolme
++NOTICE:  noticetrigger 12 barme
++ insert_tt2 
++------------
++         11
++(1 row)
++
+@@
+-(10 rows)
++ 11 | foolme
++ 12 | barme
++(12 rows)
+@@
+-ERROR:  not implemented yet on pax relations: TupleFetchRowVersion
+-CONTEXT:  SQL function "insert_tt2" statement 1
++NOTICE:  noticetrigger 13 foollog
++NOTICE:  noticetrigger 14 barlog
++ insert_tt2 
++------------
++         13
++(1 row)
++
+@@
+-(10 rows)
++ 11 | foolme
++ 12 | barme
++ 13 | foollog
++ 14 | barlog
++(14 rows)
+@@
+- data 
+-------
+-(0 rows)
++  data   
++---------
++ barlog
++ barlog
++ foollog
++ foollog
++(4 rows)
+@@
++DETAIL:  It depends on temporary type users.
++NOTICE:  function "get_first_user" will be effectively temporary
+@@
++DETAIL:  It depends on temporary type users.
++NOTICE:  function "get_users" will be effectively temporary
+@@
+-ERROR:  permission denied: "pg_depend" is a system catalog
++              obj               |              ref               | deptype 
++--------------------------------+--------------------------------+---------
++ rule _RETURN on view usersview | column moredrop of table users | n
++(1 row)
++
+@@
+-ERROR:  current transaction is aborted, commands ignored until end of transaction block
+@@
+-ERROR:  current transaction is aborted, commands ignored until end of transaction block
++ERROR:  attribute 5 of type record has been dropped
+@@
+-DETAIL:  rule _RETURN on view usersview depends on column "seq"
++DETAIL:  rule _RETURN on view usersview depends on column "seq".
+@@
+-ERROR:  permission denied: "pg_depend" is a system catalog
++              obj               |            ref            | deptype 
++--------------------------------+---------------------------+---------
++ rule _RETURN on view usersview | column seq of table users | n
++(1 row)
++
+@@
+-ERROR:  current transaction is aborted, commands ignored until end of transaction block
++ userid | seq | email  | moredrop | enabled | generate_series | ordinality 
++--------+-----+--------+----------+---------+-----------------+------------
++ id     |   1 | email  |       11 | t       |              10 |          1
++ id2    |   2 | email2 |       12 | t       |              11 |          2
++(2 rows)
++

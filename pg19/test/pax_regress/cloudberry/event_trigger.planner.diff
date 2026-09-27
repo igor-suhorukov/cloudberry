@@ -1,0 +1,37 @@
+@@
+-ERROR:  object audit_tbls.schema_two_table_three of type table cannot be dropped
+-CONTEXT:  PL/pgSQL function undroppable() line 14 at RAISE
+-SQL statement "DROP TABLE IF EXISTS audit_tbls.schema_two_table_three"
+-PL/pgSQL function test_evtrig_dropped_objects() line 8 at EXECUTE
+@@
+-DETAIL:  drop cascades to table schema_two.table_two
+-NOTICE:  drop cascades to 7 other objects
+-drop cascades to table schema_two.table_three
+-drop cascades to function schema_two.add(integer,integer)
+-drop cascades to function schema_two.newton(integer)
+-drop cascades to table schema_one.table_one
+-drop cascades to table schema_one."table two"
+-drop cascades to table schema_one.table_three
+-ERROR:  object schema_one.table_three of type table cannot be dropped
+-CONTEXT:  PL/pgSQL function undroppable() line 14 at RAISE
++ERROR:  schema "schema_one" does not exist
+@@
+-DETAIL:  drop cascades to table schema_two.table_two
+-NOTICE:  drop cascades to 7 other objects
+-drop cascades to table schema_two.table_three
+-drop cascades to function schema_two.add(integer,integer)
+-drop cascades to function schema_two.newton(integer)
+-drop cascades to table schema_one.table_one
+-drop cascades to table schema_one."table two"
+-drop cascades to table schema_one.table_three
++ERROR:  schema "schema_one" does not exist
+@@
+-  type  | schema |   object   
+---------+--------+------------
+- schema |        | audit_tbls
+- schema |        | schema_one
+- schema |        | schema_two
+-(3 rows)
++ type | schema | object 
++------+--------+--------
++(0 rows)

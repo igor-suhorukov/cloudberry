@@ -1,0 +1,75 @@
+PAX's copy of Cloudberry's regression suite on the port's cluster: the
+differences from PAX's expected output that have been reviewed, and are the
+port's for a reason of its own.
+
+Each file is one test's difference in the form ../../singlenode/canon.pl
+gives it, named for the expected output it differs from; a name with a pass
+in it (test.orca.diff) holds for that pass alone.  ../../greenplum/run.sh
+counts a test as passing when gpdiff.pl, under Cloudberry's init_file, PAX's
+copy of it, the port's and this suite's, finds no difference, exactly a
+file's here, or exactly one the greenplum suite keeps for the same test of
+Cloudberry's own copy (../../greenplum/cloudberry): of greenplum_schedule's
+tests PAX's copies mostly answer alike.
+
+Each difference was read, and is kept for one or more of these reasons.  A
+test whose difference is long, or not the same from run to run, is skipped
+in the manifest instead, with what differs first.
+
+PostgreSQL 19's own answers.  parallel_schedule is PostgreSQL 14's tests as
+Cloudberry keeps them.  PostgreSQL 19 words its errors otherwise -- a
+function or an operator no argument types match has a DETAIL and then the
+HINT, where 14's had one HINT; "Key columns ... of the referencing table";
+a subquery is "unnamed_subquery" -- and answers otherwise where it has done
+more since: a record's NULL row populated (json, jsonb), an enum's new value
+usable in its transaction, a cursor that cannot scan backward says so
+(hash_index, xmlmap), an input it refused (date's five digits), pg_lsn in
+eight digits, psql's \d, the constraints NOT NULL makes, the catalogs'
+columns (type_sanity's attcacheoff), a leakproof function a superuser's
+alone (create_function_sql); privileges' own -- the MAINTAIN privilege
+("arwdDxtm"), no RULE privilege, a role's grants and "must be able to SET
+ROLE", a security-restricted operation's safe search_path, which finds
+none of the test's functions before the operation refuses them -- and
+psql 19 passes over the data of a COPY FROM STDIN that failed, where 14's
+read each line as a command ("invalid command \.", copy).
+
+The port's names and settings.  A setting of Cloudberry's core that the
+port has as a module's is shown by its name (resource_queue's SHOW
+gp.resource_scheduler);
+one it has not is unrecognized (gp_statistics_pullup_from_child_partition,
+gp_allow_date_field_width_5digits, planner_work_mem, allow_segment_dml);
+a table access method's handler is a function of its module's
+(gp_ao.ao_column_handler); the port's extensions' tables and functions are
+among a catalog's rows, and Cloudberry's own (gp_current_snapshot,
+gp_hyperloglog_estimator, the test helpers of regress_gp.c) are not; OIDs
+the port allocates otherwise (oid_wraparound); TOAST tables PostgreSQL 19's
+catalogs have not.
+
+What the port does that Cloudberry's PAX refused.  A row fetched by its TID
+(pax/src/access/pax_access_handle.cc): an AFTER INSERT row trigger fires
+(triggers_gp, copydml; the port's own pax_copy_trigger runs copy2's, whose
+UPDATE of the table its COPY fills runs on the segment), DELETE and UPDATE
+... RETURNING return the old row
+(returning_gp, fast_default), where Cloudberry's PAX said "not implemented
+yet on pax relations: TupleFetchRowVersion"; and what follows from it, a
+row the trigger's INSERT left there.  A PAX table's access method changed
+by ALTER TABLE ... SET WITH, where Cloudberry's PAX refused to swap its
+files with another method's (alter_distribution_policy).
+
+What the port refuses otherwise than Cloudberry.  An exclusion constraint's
+index is checked against the distribution once it is built, so PAX refuses
+its gist index first (gpdist_opclasses); COPY FROM ... WHERE into a
+distributed table; a subquery in ON CONFLICT DO UPDATE; an index built
+CONCURRENTLY on a PAX table.
+
+What PAX's expected output was made with.  The LIMIT query of
+workfile/hashagg_spill, whose hash aggregate spills in Cloudberry's run and
+not in the port's, which Cloudberry's own copy of the test ignores.
+
+A finding, kept until it is fixed.  A role that has some of a table's
+columns alone -- privileges' atest5, mtarget, t1 and errtst -- is refused
+on the segments ("permission denied for table atest5") by an INSERT the
+router sends, an upsert and a write the explicit write sends -- the
+planner's route, which ORCA falls back to for an upsert -- which name
+every column and are checked as the session's role there, where PAX's
+expected output has PAX's own errors or the row's.  ORCA's own fragments
+carry the coordinator's checks, and answer.

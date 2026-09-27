@@ -1,0 +1,103 @@
+@@
+-ERROR:  currval() not supported
++ERROR:  currval of sequence "sequence_test" is not yet defined in this session
+@@
+- public     | sequence_test10    |           1 |               -20000 |               32767 |            1 | f     |         20 |           
+- public     | sequence_test11    |           1 |                    1 |          2147483647 |            1 | f     |         20 |           
+- public     | sequence_test12    |          -1 |          -2147483648 |                  -1 |           -1 | f     |         20 |           
+- public     | sequence_test13    |      -32768 |          -2147483648 |          2147483647 |            1 | f     |         20 |           
+- public     | sequence_test14    |       32767 |          -2147483648 |          2147483647 |           -1 | f     |         20 |           
+- public     | sequence_test2     |          32 |                    5 |                  36 |            4 | t     |         20 |          5
+- public     | sequence_test3     |           1 |                    1 | 9223372036854775807 |            1 | f     |         20 |           
+- public     | sequence_test4     |          -1 | -9223372036854775808 |                  -1 |           -1 | f     |         20 |        -20
+- public     | sequence_test5     |           1 |                    1 |               32767 |            1 | f     |         20 |           
+- public     | sequence_test6     |           1 |                    1 |               32767 |            1 | f     |         20 |           
+- public     | sequence_test7     |           1 |                    1 | 9223372036854775807 |            1 | f     |         20 |           
+- public     | sequence_test8     |           1 |                    1 |               20000 |            1 | f     |         20 |           
+- public     | sequence_test9     |          -1 |               -32768 |                  -1 |           -1 | f     |         20 |           
++ public     | sequence_test10    |           1 |               -20000 |               32767 |            1 | f     |          1 |           
++ public     | sequence_test11    |           1 |                    1 |          2147483647 |            1 | f     |          1 |           
++ public     | sequence_test12    |          -1 |          -2147483648 |                  -1 |           -1 | f     |          1 |           
++ public     | sequence_test13    |      -32768 |          -2147483648 |          2147483647 |            1 | f     |          1 |           
++ public     | sequence_test14    |       32767 |          -2147483648 |          2147483647 |           -1 | f     |          1 |           
++ public     | sequence_test2     |          32 |                    5 |                  36 |            4 | t     |          1 |          5
++ public     | sequence_test3     |           1 |                    1 | 9223372036854775807 |            1 | f     |          1 |           
++ public     | sequence_test4     |          -1 | -9223372036854775808 |                  -1 |           -1 | f     |          1 |         -1
++ public     | sequence_test5     |           1 |                    1 |               32767 |            1 | f     |          1 |           
++ public     | sequence_test6     |           1 |                    1 |               32767 |            1 | f     |          1 |           
++ public     | sequence_test7     |           1 |                    1 | 9223372036854775807 |            1 | f     |          1 |           
++ public     | sequence_test8     |           1 |                    1 |               20000 |            1 | f     |          1 |           
++ public     | sequence_test9     |          -1 |               -32768 |                  -1 |           -1 | f     |          1 |           
+@@
+-          -1 | -9223372036854775808 |            -1 |        -1 | f            |         20 |        20
++          -1 | -9223372036854775808 |            -1 |        -1 | f            |          1 |        20
+@@
+- bigint |    -1 | -9223372036854775808 |      -1 |        -1 | no      |    20
++ bigint |    -1 | -9223372036854775808 |      -1 |        -1 | no      |     1
+@@
+-ERROR:  lastval() not supported
++ lastval 
++---------
++       1
++(1 row)
++
+@@
+-ERROR:  lastval() not supported
++ lastval 
++---------
++      99
++(1 row)
++
+@@
+-ERROR:  lastval() not supported
++ERROR:  lastval is not yet defined in this session
+@@
+-ERROR:  lastval() not supported
++ERROR:  lastval is not yet defined in this session
+@@
+-ERROR:  unlogged sequences are not supported
+@@
+-ERROR:  relation "sequence_test_unlogged" does not exist
+@@
++                   Sequence "public.sequence_test_unlogged"
++  Type  | Start | Minimum |       Maximum       | Increment | Cycles? | Cache 
++--------+-------+---------+---------------------+-----------+---------+-------
++ bigint |     1 |       1 | 9223372036854775807 |         1 | no      |     1
++
+@@
+-ERROR:  relation "sequence_test_unlogged" does not exist
+@@
++              Unlogged sequence "public.sequence_test_unlogged"
++  Type  | Start | Minimum |       Maximum       | Increment | Cycles? | Cache 
++--------+-------+---------+---------------------+-----------+---------+-------
++ bigint |     1 |       1 | 9223372036854775807 |         1 | no      |     1
++
+@@
+-ERROR:  sequence "sequence_test_unlogged" does not exist
+@@
+-ERROR:  currval() not supported
++ currval 
++---------
++       1
++(1 row)
++
+@@
+-ERROR:  currval() not supported
++ERROR:  permission denied for sequence seq3
+@@
+-ERROR:  currval() not supported
++ currval 
++---------
++       1
++(1 row)
++
+@@
+-ERROR:  lastval() not supported
++ lastval 
++---------
++       1
++(1 row)
++
+@@
+-ERROR:  lastval() not supported
++ERROR:  permission denied for sequence seq3

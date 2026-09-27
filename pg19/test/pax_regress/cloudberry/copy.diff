@@ -1,0 +1,16 @@
+@@
+-c1	"colname with tab: 	"
++c1	colname with tab: \t
+@@
+-ERROR:  cannot perform COPY FREEZE on a partitioned table
+@@
++ERROR:  COPY FROM ... WHERE into distributed table "tab_progress_reporting" is not supported yet
+@@
+-ERROR:  header requires a Boolean value or "match"
++ERROR:  header requires a Boolean value, an integer value greater than or equal to zero, or the string "match"
+@@
+-\.
+-invalid command \.
+@@
+-\.
+-invalid command \.

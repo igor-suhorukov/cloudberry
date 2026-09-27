@@ -1,0 +1,3 @@
+@@
+-DETAIL:  There is a column named "q2" in table "*SELECT* 2", but it cannot be referenced from this part of the query.
++DETAIL:  There is a column named "q2" in table "unnamed_subquery", but it cannot be referenced from this part of the query.

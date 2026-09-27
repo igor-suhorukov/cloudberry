@@ -1,0 +1,47 @@
+@@
+-ERROR:  virtual tuple table slot does not have system attributes (execTuples.c:163)
++ERROR:  cannot retrieve a system column in this context
+@@
+-ERROR:  virtual tuple table slot does not have system attributes (execTuples.c:163)
++ERROR:  cannot retrieve a system column in this context
+@@
+-ERROR:  virtual tuple table slot does not have system attributes (execTuples.c:163)
++ERROR:  cannot retrieve a system column in this context
+@@
++ERROR:  function cannot execute on a QE slice because it accesses relation "public.xacttest"
++CONTEXT:  SQL function "max_xacttest" statement 1
+@@
+-  a  |    b    
+------+---------
+-   0 | 0.09561
+- 787 |     7.8
+- 787 |  324.78
+- 787 |  99.097
+- 787 | 777.777
+-(5 rows)
+-
++ERROR:  current transaction is aborted, commands ignored until end of transaction block
+@@
++ERROR:  function cannot execute on a QE slice because it accesses relation "public.xacttest"
++CONTEXT:  PL/pgSQL expression "max(a) from xacttest"
++PL/pgSQL function max_xacttest() line 1 at RETURN
+@@
+-  a  |    b    
+------+---------
+-   0 | 0.09561
+- 787 |     7.8
+- 787 |  324.78
+- 787 |  99.097
+- 787 | 777.777
+-(5 rows)
+-
++ERROR:  current transaction is aborted, commands ignored until end of transaction block
+@@
+- repeatable read
++ serializable
+@@
+- repeatable read
++ serializable
+@@
+- repeatable read
++ serializable

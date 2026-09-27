@@ -1,0 +1,16 @@
+@@
+-DETAIL:  default_table_access_method cannot be empty.
++DETAIL:  "default_table_access_method" cannot be empty.
+@@
+-  amname   |         amhandler         | amtype 
+------------+---------------------------+--------
+- ao_column | ao_column_tableam_handler | t
+- ao_row    | ao_row_tableam_handler    | t
+- heap      | heap_tableam_handler      | t
+- heap2     | heap_tableam_handler      | t
++  amname   |        amhandler        | amtype 
++-----------+-------------------------+--------
++ ao_column | gp_ao.ao_column_handler | t
++ ao_row    | gp_ao.ao_row_handler    | t
++ heap      | heap_tableam_handler    | t
++ heap2     | heap_tableam_handler    | t

@@ -1,0 +1,4 @@
+@@
+-ERROR:  backward scan is not supported in this version of Apache Cloudberry
++ERROR:  cursor can only scan forward
++HINT:  Declare it with SCROLL option to enable backward scan.

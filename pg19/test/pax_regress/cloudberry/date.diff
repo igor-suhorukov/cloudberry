@@ -1,0 +1,39 @@
+@@
+-ERROR:  invalid input syntax for type date: "2020516"
+-LINE 1: SELECT date '2020516';
+-                    ^
++    date    
++------------
++ 0202-05-16
++(1 row)
++
+@@
++ERROR:  unrecognized configuration parameter "gp_allow_date_field_width_5digits"
+@@
++ERROR:  unrecognized configuration parameter "gp_allow_date_field_width_5digits"
+@@
+-ERROR:  invalid input syntax for type date: "2020516"
+-LINE 1: SELECT date '2020516';
+-                    ^
++    date    
++------------
++ 0202-05-16
++(1 row)
++
+@@
++ERROR:  unrecognized configuration parameter "gp_allow_date_field_width_5digits"
+@@
++ERROR:  unrecognized configuration parameter "gp_allow_date_field_width_5digits"
+@@
+-ERROR:  invalid input syntax for type date: "2020516"
+-LINE 1: SELECT date '2020516';
+-                    ^
++    date    
++------------
++ 0202-05-16
++(1 row)
++
+@@
++ERROR:  unrecognized configuration parameter "gp_allow_date_field_width_5digits"
+@@
++ERROR:  unrecognized configuration parameter "gp_allow_date_field_width_5digits"

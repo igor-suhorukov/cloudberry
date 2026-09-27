@@ -1,0 +1,201 @@
+@@
+-NOTICE:  no privileges could be revoked
+@@
+-ERROR:  grantor must be current user
++ERROR:  must inherit privileges of role "regress_priv_user5"
+@@
+-ERROR:  permission denied: "pg_class" is a system catalog
++ERROR:  permission denied for table pg_class
+@@
+-ERROR:  permission denied: "pg_class" is a system catalog
++ERROR:  permission denied for table pg_class
+@@
+-ERROR:  permission denied: "pg_toast_1213" is a system catalog
++ERROR:  permission denied for table pg_toast_1213
+@@
++ERROR:  permission denied for table atest5
+@@
++ERROR:  permission denied for table atest5
+@@
+-ERROR:  not implemented yet on pax relations: TupleInsertSpeculative
++ERROR:  permission denied for table atest5
+@@
+-ERROR:  not implemented yet on pax relations: TupleInsertSpeculative
++ERROR:  permission denied for table atest5
+@@
+-ERROR:  not implemented yet on pax relations: TupleInsertSpeculative
++ERROR:  permission denied for table atest5
+@@
++ERROR:  permission denied for table atest5
+@@
+-ERROR:  not implemented yet on pax relations: TupleLock
++ERROR:  permission denied for table atest5
+@@
+-ERROR:  not implemented yet on pax relations: TupleLock
++ERROR:  permission denied for table atest5
+@@
+-ERROR:  not implemented yet on pax relations: TupleFetchRowVersion
++ERROR:  permission denied for table mtarget
+@@
+-ERROR:  not implemented yet on pax relations: TupleFetchRowVersion
++ERROR:  permission denied for table mtarget
+@@
+-ERROR:  not implemented yet on pax relations: TupleFetchRowVersion
++ERROR:  permission denied for table mtarget
+@@
+-ERROR:  not implemented yet on pax relations: TupleFetchRowVersion
+@@
+-ERROR:  duplicate key value violates unique constraint "t1_pkey"
++ERROR:  permission denied for table t1
+@@
+-DETAIL:  Failing row contains (#####).
+-ERROR:  null value in column "b" of relation "errtst_part_1" violates not-null constraint
++ERROR:  permission denied for table errtst
+@@
+-NOTICE:  no privileges could be revoked
+@@
+- has_table_privilege 
+----------------------
+- f
+-(1 row)
+-
++ERROR:  unrecognized privilege type: "rule"
+@@
+-NOTICE:  no privileges could be revoked
+@@
+-ERROR:  cannot create a cursor WITH HOLD within security-restricted operation
++ERROR:  function unwanted_grant() does not exist
++LINE 1: DECLARE c CURSOR WITH HOLD FOR SELECT unwanted_grant(); SELE...
++                                              ^
++DETAIL:  A function of that name exists, but it is not in the search_path.
++QUERY:  DECLARE c CURSOR WITH HOLD FOR SELECT unwanted_grant(); SELECT true
+@@
+-ERROR:  cannot create a cursor WITH HOLD within security-restricted operation
++ERROR:  function unwanted_grant() does not exist
++LINE 1: DECLARE c CURSOR WITH HOLD FOR SELECT unwanted_grant(); SELE...
++                                              ^
++DETAIL:  A function of that name exists, but it is not in the search_path.
++QUERY:  DECLARE c CURSOR WITH HOLD FOR SELECT unwanted_grant(); SELECT true
+@@
+-ERROR:  cannot fire deferred trigger within security-restricted operation
++ERROR:  relation "sro_trojan_table" does not exist
++LINE 1: INSERT INTO sro_trojan_table DEFAULT VALUES; SELECT true
++                    ^
++QUERY:  INSERT INTO sro_trojan_table DEFAULT VALUES; SELECT true
++CONTEXT:  SQL function "mv_action" statement 1
+@@
+-ERROR:  cannot fire deferred trigger within security-restricted operation
++ERROR:  relation "sro_trojan_table" does not exist
++LINE 1: INSERT INTO sro_trojan_table DEFAULT VALUES; SELECT true
++                    ^
++QUERY:  INSERT INTO sro_trojan_table DEFAULT VALUES; SELECT true
++CONTEXT:  SQL function "mv_action" statement 1
+@@
+-ERROR:  not implemented yet on pax relations: TupleFetchRowVersion
++ERROR:  current transaction is aborted, commands ignored until end of transaction block
++ERROR:  unrecognized configuration parameter "allow_segment_dml"
+@@
++NOTICE:  role "regress_sro_user" has already been granted membership in role "regress_priv_group2" by role "gpadmin"
++WARNING:  owned
+@@
++DETAIL:  Only roles with the ADMIN option on role "regress_priv_group2" may grant this role.
++ERROR:  permission denied to grant role "regress_priv_group2"
+@@
+- dogrant_ok 
+-------------
+- 
+-(1 row)
+-
++CONTEXT:  SQL function "dogrant_ok" statement 1
+@@
+-                         message                         | detail | hint | sql_error_code 
+----------------------------------------------------------+--------+------+----------------
+- invalid mode character: must be one of "arwdDxtXUCTcsA" |        |      | 22P02
++                         message                          | detail | hint | sql_error_code 
++----------------------------------------------------------+--------+------+----------------
++ invalid mode character: must be one of "arwdDxtXUCTcsAm" |        |      | 22P02
+@@
+- Schema |     Name      | Type  |               Access privileges               | Column privileges | Policies 
+---------+---------------+-------+-----------------------------------------------+-------------------+----------
+-        |               |       | regress_priv_user2=r*/regress_priv_user1     +|                   | 
+-        |               |       | regress_priv_user3=r*/regress_priv_user1     +|                   | 
+-        |               |       | regress_priv_user4=r*/regress_priv_user2     +|                   | 
+-        |               |       | regress_priv_user4=r*/regress_priv_user3     +|                   | 
+-        |               |       | regress_priv_user5=r/regress_priv_user4       |                   | 
+- public | dep_priv_test | table | regress_priv_user1=arwdDxt/regress_priv_user1+|                   | 
++ Schema |     Name      | Type  |               Access privileges                | Column privileges | Policies 
++--------+---------------+-------+------------------------------------------------+-------------------+----------
++        |               |       | regress_priv_user2=r*/regress_priv_user1      +|                   | 
++        |               |       | regress_priv_user3=r*/regress_priv_user1      +|                   | 
++        |               |       | regress_priv_user4=r*/regress_priv_user2      +|                   | 
++        |               |       | regress_priv_user4=r*/regress_priv_user3      +|                   | 
++        |               |       | regress_priv_user5=r/regress_priv_user4        |                   | 
++ public | dep_priv_test | table | regress_priv_user1=arwdDxtm/regress_priv_user1+|                   | 
+@@
+- Schema |     Name      | Type  |               Access privileges               | Column privileges | Policies 
+---------+---------------+-------+-----------------------------------------------+-------------------+----------
+-        |               |       | regress_priv_user2=r*/regress_priv_user1     +|                   | 
+-        |               |       | regress_priv_user3=r*/regress_priv_user1     +|                   | 
+-        |               |       | regress_priv_user4=r*/regress_priv_user3     +|                   | 
+-        |               |       | regress_priv_user5=r/regress_priv_user4       |                   | 
+- public | dep_priv_test | table | regress_priv_user1=arwdDxt/regress_priv_user1+|                   | 
++ Schema |     Name      | Type  |               Access privileges                | Column privileges | Policies 
++--------+---------------+-------+------------------------------------------------+-------------------+----------
++        |               |       | regress_priv_user2=r*/regress_priv_user1      +|                   | 
++        |               |       | regress_priv_user3=r*/regress_priv_user1      +|                   | 
++        |               |       | regress_priv_user4=r*/regress_priv_user3      +|                   | 
++        |               |       | regress_priv_user5=r/regress_priv_user4        |                   | 
++ public | dep_priv_test | table | regress_priv_user1=arwdDxtm/regress_priv_user1+|                   | 
+@@
+- Schema |     Name      | Type  |               Access privileges               | Column privileges | Policies 
+---------+---------------+-------+-----------------------------------------------+-------------------+----------
+-        |               |       | regress_priv_user2=r*/regress_priv_user1     +|                   | 
+-        |               |       | regress_priv_user3=r*/regress_priv_user1      |                   | 
+- public | dep_priv_test | table | regress_priv_user1=arwdDxt/regress_priv_user1+|                   | 
++ Schema |     Name      | Type  |               Access privileges                | Column privileges | Policies 
++--------+---------------+-------+------------------------------------------------+-------------------+----------
++        |               |       | regress_priv_user2=r*/regress_priv_user1      +|                   | 
++        |               |       | regress_priv_user3=r*/regress_priv_user1       |                   | 
++ public | dep_priv_test | table | regress_priv_user1=arwdDxtm/regress_priv_user1+|                   | 
+@@
+-ERROR:  cannot create a cursor WITH HOLD within security-restricted operation
++ERROR:  function unwanted_grant() does not exist
++LINE 1: DECLARE c CURSOR WITH HOLD FOR SELECT unwanted_grant(); SELE...
++                                              ^
++DETAIL:  A function of that name exists, but it is not in the search_path.
++QUERY:  DECLARE c CURSOR WITH HOLD FOR SELECT unwanted_grant(); SELECT true
+@@
+-ERROR:  cannot create a cursor WITH HOLD within security-restricted operation
++ERROR:  function unwanted_grant() does not exist
++LINE 1: DECLARE c CURSOR WITH HOLD FOR SELECT unwanted_grant(); SELE...
++                                              ^
++DETAIL:  A function of that name exists, but it is not in the search_path.
++QUERY:  DECLARE c CURSOR WITH HOLD FOR SELECT unwanted_grant(); SELECT true
+@@
+-ERROR:  cannot fire deferred trigger within security-restricted operation
++ERROR:  relation "sro_trojan_table" does not exist
++LINE 1: INSERT INTO sro_trojan_table DEFAULT VALUES; SELECT true
++                    ^
++QUERY:  INSERT INTO sro_trojan_table DEFAULT VALUES; SELECT true
++CONTEXT:  SQL function "mv_action" statement 1
+@@
+-ERROR:  cannot fire deferred trigger within security-restricted operation
++ERROR:  relation "sro_trojan_table" does not exist
++LINE 1: INSERT INTO sro_trojan_table DEFAULT VALUES; SELECT true
++                    ^
++QUERY:  INSERT INTO sro_trojan_table DEFAULT VALUES; SELECT true
++CONTEXT:  SQL function "mv_action" statement 1
+@@
+-ERROR:  not implemented yet on pax relations: TupleFetchRowVersion
++ERROR:  current transaction is aborted, commands ignored until end of transaction block
++ERROR:  unrecognized configuration parameter "allow_segment_dml"
+@@
++ERROR:  unrecognized configuration parameter "allow_segment_dml"
+@@
++ERROR:  unrecognized configuration parameter "allow_segment_dml"
++CONTEXT:  SQL function "trap_sfunc" statement 1
+@@
+-ERROR:  cannot fire deferred trigger within security-restricted operation
+-CONTEXT:  SQL function "trap_sfunc" statement 2
+@@
++ERROR:  must be able to SET ROLE "regress_roleoption_donor"

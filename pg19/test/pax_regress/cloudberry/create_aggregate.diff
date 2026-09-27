@@ -1,0 +1,4 @@
+@@
++ERROR:  syntax error at or near "ordered"
++LINE 1: create ordered aggregate should_error(integer,integer,text) ...
++               ^

@@ -1,0 +1,12 @@
+@@
+-ERROR:  operator attribute "commutator" cannot be changed
++ERROR:  operator does not exist: boolean ==== boolean
+@@
+-ERROR:  operator attribute "negator" cannot be changed
++ERROR:  operator does not exist: boolean ==== boolean
+@@
+-ERROR:  operator attribute "commutator" cannot be changed
++ERROR:  operator is only a shell: boolean !== boolean
+@@
+-ERROR:  operator attribute "negator" cannot be changed
++ERROR:  operator is only a shell: boolean !== boolean

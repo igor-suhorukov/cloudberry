@@ -1,0 +1,32 @@
+@@
+-ERROR:  function currtid2 is not supported by GPDB
++ERROR:  not supported on pax relations: TupleGetLatestTid
+@@
+-ERROR:  function currtid2 is not supported by GPDB
++ERROR:  not supported on pax relations: TupleGetLatestTid
+@@
+-ERROR:  function currtid2 is not supported by GPDB
++ currtid2 
++----------
++ (0,1)
++(1 row)
++
+@@
+-ERROR:  function currtid2 is not supported by GPDB
++DETAIL:  This operation is not supported for indexes.
++ERROR:  cannot open relation "tid_ind"
+@@
+-ERROR:  function currtid2 is not supported by GPDB
++ERROR:  cannot look at latest visible tid for relation "public.tid_part"
+@@
+-ERROR:  function currtid2 is not supported by GPDB
++ERROR:  currtid cannot handle views with no CTID
+@@
+-ERROR:  function currtid2 is not supported by GPDB
++ERROR:  not supported on pax relations: TupleGetLatestTid
+@@
+-ERROR:  function currtid2 is not supported by GPDB
++ERROR:  not supported on pax relations: TupleGetLatestTid
+@@
+-ERROR:  function currtid2 is not supported by GPDB
++ERROR:  ctid isn't of type TID

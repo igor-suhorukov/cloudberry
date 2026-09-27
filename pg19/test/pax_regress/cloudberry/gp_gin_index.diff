@@ -1,0 +1,39 @@
+@@
++ERROR:  type "complex[]" does not exist
++LINE 1: CREATE TABLE complex_array_table (complex_arr complex[]);
++                                                      ^
+@@
++ERROR:  relation "complex_array_table" does not exist
+@@
++ERROR:  relation "complex_array_table" does not exist
++LINE 1: INSERT INTO complex_array_table VALUES (ARRAY[COMPLEX(1,3), ...
++                    ^
+@@
++ERROR:  relation "complex_array_table" does not exist
++LINE 1: INSERT INTO complex_array_table VALUES (ARRAY[COMPLEX(2,4), ...
++                    ^
+@@
+-QUERY PLAN
+-___________
+-
++ERROR:  relation "complex_array_table" does not exist
++LINE 1: EXPLAIN SELECT * FROM complex_array_table WHERE complex_arr ...
++                              ^
+@@
+-     complex_arr     
+----------------------
+- {"2 + 4i","6 + 8i"}
+-(1 row)
+-
++ERROR:  relation "complex_array_table" does not exist
++LINE 1: SELECT * FROM complex_array_table WHERE complex_arr @> ARRAY...
++                      ^
+@@
+-QUERY PLAN
+-___________
+-
++ERROR:  relation "complex_array_table" does not exist
++LINE 1: EXPLAIN SELECT * FROM complex_array_table WHERE complex_arr ...
++                              ^
+@@
++ERROR:  table "complex_array_table" does not exist

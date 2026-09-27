@@ -1,0 +1,6 @@
+@@
++DETAIL:  It depends on temporary table gstest2.
+@@
+-ERROR:  permission denied: "pg_class" is a system catalog
+@@
+-ERROR:  permission denied: "pg_class" is a system catalog

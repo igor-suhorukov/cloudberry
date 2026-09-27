@@ -1,0 +1,528 @@
+# PAX's copy of Cloudberry's regression suite (contrib/pax_storage/src/test/
+# regress): its parallel_schedule, PostgreSQL's tests as Cloudberry keeps
+# them, and its greenplum_schedule, Cloudberry's, each test with PAX's
+# expected output, as the port runs them on a coordinator and three segments
+# with PAX the default table access method (run.sh), in the schedules'
+# order.  The lines are ../greenplum/manifest's:
+#
+#   run   the test runs here, in both passes -- or in the one pass named
+#         after it, the rest of the line saying what the other meets;
+#         cloudberry/ holds a difference reviewed and kept, where one pass
+#         has one, or ../greenplum/cloudberry, where the same test of
+#         Cloudberry's own copy answers alike
+#   skip  it needs what the port does not have yet, or answers otherwise
+#         than PAX's expected output says ("differs:"): the rest of the line
+#         says what
+#   port  a test of the port's own -- ../greenplum's sql/ and expected/, or
+#         this suite's -- run where the line is
+#   group the tests after it, to the next such line, are a group, with a
+#         cluster of its own
+#
+# PostgreSQL's tests are PostgreSQL 14's as Cloudberry keeps them: where
+# PostgreSQL 19 answers otherwise in a line or a few -- its words, a feature
+# it has since -- the difference is kept; where it answers otherwise at
+# length, the test is skipped with what differs first.  They run in groups
+# of their own, pg and pgN, after gp_setup, pax_setup and test_setup,
+# PostgreSQL 19's, in parallel_schedule's order.  greenplum_schedule's tests
+# are in the groups, and at the places among the port's tests, the greenplum
+# suite's manifest gives them; a test that suite skips is skipped here for
+# its reason, which PAX's copy of it meets first too.
+group pg
+skip test_setup  PostgreSQL 19's own runs in its place, in every group, after the setup of the port and PAX (run.sh)
+run  boolean
+run  char
+run  name
+run  varchar
+run  text
+run  int2
+run  int4
+run  int8
+run  oid
+run  float4
+run  float8
+run  bit
+run  numeric
+run  txid
+run  uuid
+run  enum
+run  money
+run  rangetypes
+run  pg_lsn
+run  regproc
+skip strings  differs: PostgreSQL 19 has no standard_conforming_strings = off ("non-standard string literals are not supported"), and answers the test's escapes otherwise, 22 places
+run  numerology
+run  point
+run  lseg
+run  line
+run  box
+run  path
+run  polygon
+run  circle
+run  date
+run  time
+run  timetz
+run  timestamp
+run  timestamptz
+run  interval
+run  inet  orca  under the planner, a query with LIMIT and no ORDER BY gives rows whose column widths vary from run to run
+run  macaddr
+run  macaddr8
+run  multirangetypes
+run  geometry
+run  horology
+run  tstypes
+run  regex
+run  type_sanity
+skip opr_sanity  differs: PostgreSQL 19's catalogs, and functions of Cloudberry's core the port has in extensions (gp_current_snapshot, gp_get_segment_configuration), 28 places, some in no order
+run  misc_sanity
+run  comments
+run  expressions
+run  unicode
+run  xid
+run  mvcc
+run  create_type
+run  create_table
+run  create_function_sql
+run  copy
+run  copyselect
+run  copydml
+run  insert
+run  create_misc
+run  create_operator
+run  create_procedure
+run  create_index
+run  create_view
+run  index_including
+run  create_aggregate
+run  create_cast
+run  select
+skip inherit  differs: PostgreSQL 19's psql lists a table's parents and its NOT NULL constraints on lines of their own, 21 places under the planner, 28 under ORCA
+run  typed_table
+run  drop_if_exists
+run  roleattributes
+run  create_am
+run  hash_func
+run  errors
+run  infinite_recurse
+skip sanity_check  differs: the extensions' own tables and their indexes, where Cloudberry's catalogs were (blkdir, distributed_log, configuration_history, ...)
+run  select_into
+run  select_distinct
+run  select_distinct_on
+run  select_implicit
+run  select_having
+run  subselect
+run  union
+run  case
+run  join
+run  aggregates  planner  under ORCA it falls back to the planner for ONLY in the FROM clause, which the test prints (optimizer_trace_fallback), 83 places
+run  arrays
+run  btree_index
+run  hash_index
+run  update
+run  delete
+run  namespace
+run  transactions
+run  privileges
+run  init_privs
+run  security_label
+run  collate
+run  lock
+run  replica_identity
+skip rowsecurity  differs: PostgreSQL 19's \dp and its policies' words, at length, 75 places under the planner and 95 under ORCA, some in no order
+run  object_address
+skip tablesample  differs: TABLESAMPLE's rows, which the port's PAX samples from other blocks than Cloudberry's, 67 places
+run  groupingsets
+run  drop_operator
+run  password
+run  identity  planner  under ORCA, rows of equal keys come in no order, which varies from run to run
+skip appendonly_sample  differs: TABLESAMPLE's rows, which the port's append-optimized tables sample from other blocks than Cloudberry's, 62 places
+skip aocs_sample  differs: TABLESAMPLE's rows, which the port's column-oriented tables sample from other blocks than Cloudberry's, 62 places
+run  matview
+run  gin
+skip task  the port's tasks are the extension gp_task's, which the test does not create: schema "gp_task" does not exist
+run  create_table_like
+skip alter_generic  differs: PostgreSQL 19's words for what a role must be to take an object ("must be able to SET ROLE"), and more, 25 places
+run  alter_operator
+run  misc
+run  async
+run  dbsize
+run  misc_functions
+run  sysviews
+run  tsrf
+run  tid
+skip collate.icu.utf8  differs: ICU's collations as the host's ICU has them, and PostgreSQL 19's ICU locales, 45 places, some in no order
+run  incremental_sort
+skip psql  differs: PostgreSQL 19's psql -- its \pset list, its \df, its describe -- 60 places
+skip psql_crosstab  differs: \crosstabview's columns, in the order the rows arrive in where the query orders none, which varies
+run  amutils
+skip stats_ext  unrecognized configuration parameter "gp_selectivity_damping_for_scans"; and PostgreSQL 19's extended statistics, 30 places under the planner
+run  collate.linux.utf8
+skip publication  differs: PostgreSQL 19's \dRp+, with its sequences and generated columns, 52 places
+skip subscription  differs: PostgreSQL 19's \dRs+ and its words, 27 places
+run  select_views
+run  portals_p2
+run  dependency
+run  guc
+run  bitmapops
+run  tsearch
+run  tsdicts
+skip foreign_data  differs: PostgreSQL 19's psql and words, and the port's own foreign-data wrapper, gp_storage's, in its lists, 69 places
+run  xmlmap
+run  functional_deps
+run  advisory_lock
+run  indirect_toast
+run  equivclass
+run  cluster
+run  json
+run  jsonb
+run  json_encoding
+run  jsonpath
+run  jsonpath_encoding
+run  jsonb_jsonpath
+run  gp_gin_index
+run  plancache
+run  limit
+skip copy2  differs: the port's COPYs into x fire its AFTER INSERT trigger, whose UPDATE of x runs (Cloudberry's PAX refused them, TupleFetchRowVersion), and COPY x TO stdout then prints x's rows in the order the segments send them, which varies from run to run; pax_copy_trigger runs its triggers in an order that does not
+port pax_copy_trigger
+run  temp
+run  domain
+run  rangefuncs
+run  prepare
+run  conversion
+run  truncate
+skip alter_table  differs: PostgreSQL 19's psql, NOT NULL constraints and words, over a hundred places, some in no order
+run  sequence
+skip polymorphism  differs: PostgreSQL 19's words for a function or an operator no argument types match, 38 places
+run  rowtypes
+run  xml
+run  gp_foreign_data
+run  partition_join
+skip partition_prune  differs: PostgreSQL 19's plans, and a backward scan Cloudberry refused, 29 places
+run  hash_part
+skip indexing  differs: PostgreSQL 19's words, and a partition's index refused for its distribution where Cloudberry's refused it as no index, 30 places
+run  partition_aggregate
+run  partition_info
+run  tuplesort  orca  under the planner, rows of equal keys come in no order, which varies from run to run
+run  explain  planner  under ORCA, EXPLAIN's plans are ORCA's, whose widths the test prints, 28 places
+run  compression
+skip memoize  differs: EXPLAIN (ANALYZE)'s plans and counts, which vary from run to run, 10 places under the planner and 12 under ORCA
+run  event_trigger  planner  under ORCA, the roles the planner's pass left make the test's own CREATE ROLE fail, and its event triggers stay for the tests after it
+run  oidjoins
+run  fast_default  planner  under ORCA, the event triggers event_trigger leaves there print their NOTICEs
+run  stats
+skip tablespace  differs: pg_authid's TOAST table, which PostgreSQL 19 has not (pg_toast_1260), and more, 21 places under the planner and 148 under ORCA
+group g1
+port aggtest
+run  gp_aggregates
+run  update_gp
+run  triggers_gp
+run  returning_gp
+run  resource_queue_with_rule
+run  gp_types
+run  gp_index
+run  gp_sort
+run  bitmapscan
+run  bitmapscan_ao
+run  case_gp
+run  limit_gp
+run  notin
+skip percentile  function percentile_cont(numeric, timestamp without time zone) does not exist; function percentile_cont(numeric, timestamp with time zone) does not exist
+run  join_gp
+skip union_gp  UNION types text and integer cannot be matched
+run  gp_create_table
+run  matview_ao
+run  filter  orca  under the planner, the last digit of covar_pop() follows the order the segments' rows reach the coordinator in, which varies from run to run
+run  gpctas
+run  gpdist
+run  gpdist_opclasses
+run  gpdist_legacy_opclasses
+skip matrix  function sum(smallint[]) does not exist; function sum(integer[]) does not exist
+run  sublink
+run  olap_setup
+skip complex  type "complex" does not exist; relation "complex_ttbl" does not exist
+skip distributed_transactions  unrecognized configuration parameter "debug_abort_after_distributed_prepared"; unrecognized configuration parameter "debug_dtm_action_segment"
+group ns
+run  namespace_gp
+group g1
+run  bitmap_index
+run  truncate_gp
+run  indexjoin
+run  as_alias
+run  gpparams
+run  with_clause
+run  transient_types
+run  gp_rules
+skip motion_gp  row is too big: size 10032, maximum size 8160; syntax error at or near ")"
+skip cursor  its gp_wait_until_triggered_fault('qe_got_snapshot_and_interconnect') waits out the suite's minute: the fault, which Cloudberry's cursor reader raises once its slice has its snapshot, while the writer goes on to UPDATE, is none of the port's
+run  gp_hashagg
+run  sequence_gp
+run  tidscan_gp
+run  agg_pushdown
+skip gp_array_agg  function gp_array_agg(integer) does not exist; function gp_array_agg(text) does not exist
+run  gp_dqa
+skip subselect_gp  unrecognized EXPLAIN option "locus"
+run  subselect_gp2
+run  gp_transactions
+run  olap_group  planner  under ORCA, the last digit of a stddev() follows the order a Redistribute Motion's rows reach its group's aggregate in, which varies from run to run
+skip olap_window_seq  DISTINCT is not implemented for window functions; argument of ROWS must not contain variables
+skip appendonly  type "gp_fastsequence" does not exist; cursor can only scan forward
+run  create_table_distpol
+group g2
+run  alter_distpol_dropped
+skip partition  syntax error at or near "only"; relation "gp_partition_template" does not exist
+skip partition1  type "cc" does not exist; column "partition" of relation "hhh_l1" does not exist
+run  partition_storage
+skip partition_ddl  type "aa" does not exist; cannot specify storage parameters for a partitioned table
+run  brin_ao
+run  brin_aocs
+run  sreh
+run  external_table
+run  external_table_union_all
+run  external_table_persistent_error_log
+skip column_compression  relation "gp_partition_template" does not exist; column "i" referenced in more than one COLUMN ENCODING clause
+skip alter_table_aocs  type "gp_fastsequence" does not exist
+skip alter_table_aocs2  unrecognized configuration parameter "gp_recursive_cte"; function descendants_of(unknown) does not exist
+run  alter_distribution_policy
+run  alter_table_ao
+run  aocs
+run  resource_queue
+run  resource_queue_function
+run  auth_constraint
+run  partition_pruning
+run  expand_table
+run  expand_table_ao
+group g3
+run  expand_table_aoco
+run  expand_table_regression
+run  direct_dispatch
+run  bfv_dd
+run  bfv_dd_multicolumn
+run  bfv_dd_types
+run  bfv_olap
+skip bfv_aggregate  argument of ROWS must not contain variables
+run  DML_over_joins
+skip bb_mpph  its queries 3 and 8 over append-optimized partitions run past the suite's minute
+port bb_mpph_heap
+run  bb_memory_quota
+run  rpt
+run  rpt_joins
+skip bfv_cte  type "cte" does not exist; the fault get_shareinput_reference_done is none of the port's: canceling statement due to user request
+run  bfv_joins
+run  bfv_subquery
+run  qp_misc
+group g4
+port autovacuum_off
+run  qp_dml_joins  planner  under ORCA, an INSERT ... SELECT from the PAX table it inserts into reads the micro-partition the insert, in another slice's process, is writing: IO Error, Fail to ReadBatch with io_uring (open)
+run  qp_with_clause  planner  under ORCA, query 3 of its nested CTEs is still running at the harness's 60 seconds
+skip qp_correlated_query  differs: answers the queries with a correlation that skips a level, which Cloudberry refuses, in an order that varies from run to run
+run  qp_targeted_dispatch
+run  qp_subquery
+run  qp_union_intersect
+run  qp_functions
+group g5
+port autovacuum_off
+run  uao_ddl/cursor_row
+run  uao_ddl/cursor_column
+run  uao_ddl/alter_ao_table_statistics_row
+run  uao_ddl/alter_ao_table_statistics_column
+run  uao_ddl/alter_ao_table_setdefault_row
+run  uao_ddl/alter_ao_table_index_row
+run  uao_ddl/alter_ao_table_owner_column
+run  uao_ddl/spgist_over_ao_table_row
+run  uao_ddl/alter_ao_table_owner_row
+run  uao_ddl/alter_ao_table_setstorage_row
+run  uao_ddl/alter_ao_table_constraint_row
+run  uao_ddl/alter_ao_table_constraint_column
+run  uao_ddl/alter_ao_table_index_column
+run  uao_ddl/blocksize_row
+run  uao_ddl/compresstype_column
+run  uao_ddl/alter_ao_table_setdefault_column
+group g6
+port autovacuum_off
+run  uao_ddl/blocksize_column
+run  uao_ddl/temp_on_commit_delete_rows_row
+run  uao_ddl/temp_on_commit_delete_rows_column
+run  uao_ddl/spgist_over_ao_table_column
+run  uao_ddl/alter_ao_table_setstorage_column
+run  uao_ddl/alter_ao_table_col_ddl_row
+run  uao_ddl/compresstype_row
+run  uao_ddl/alter_ao_table_col_ddl_column
+run  uao_ddl/alter_ao_part_tables_splitpartition_row
+run  uao_ddl/alter_ao_part_tables_splitpartition_column
+run  uao_ddl/create_ao_tables_row
+run  uao_ddl/create_ao_table_500cols_row
+run  uao_ddl/create_ao_tables_column
+run  uao_ddl/alter_ao_part_exch_row
+run  uao_ddl/alter_ao_part_exch_column
+run  uao_ddl/alter_ao_part_tables_row
+run  uao_ddl/create_ao_table_500cols_column
+run  uao_ddl/alter_ao_part_tables_column
+run  uao_ddl/alter_drop_allcol_row
+run  uao_ddl/alter_drop_allcol_column
+run  uao_ddl/alter_rollback_row
+run  uao_ddl/alter_rollback_column
+run  uao_ddl/uao_allalter_row
+run  uao_ddl/uao_allalter_column
+run  uao_dml/uao_dml_cursor_row
+run  uao_dml/uao_dml_select_row
+run  uao_dml/uao_dml_cursor_column
+run  uao_dml/uao_dml_select_column
+run  uao_compaction/index_stats
+run  uaocs_compaction/index_stats
+run  uao_ddl/analyze_ao_table_every_dml_row
+run  uao_ddl/analyze_ao_table_every_dml_column
+run  uao_dml/uao_dml_row
+run  uao_dml/uao_dml_column
+skip AOCO_Compression  relation "gp_partition_template" does not exist
+run  AORO_Compression
+run  am_encoding
+run  uao_dml/uao_dml_unique_index_delete_row
+run  uao_dml/uao_dml_unique_index_delete_column
+run  uao_dml/uao_dml_unique_index_update_row
+run  uao_dml/uao_dml_unique_index_update_column
+group m7a
+skip pg_ext_aux  schema "pg_ext_aux" does not exist; relation "pg_ext_aux.extaux_t" does not exist
+skip copy_eol  could not open file "/tmp/copy_lf.file" for reading: No such file or directory; could not open file "/tmp/copy_cr.file" for reading: No such file or directory
+run  disable_autovacuum
+skip python_processed64bit  differs: the fault executor_run_high_processed, which has the executor count past 2^32 rows, is none of the port's
+run  enable_autovacuum
+skip log_guc  relation "gp_toolkit.__gp_log_master_ext" does not exist; relation "gp_toolkit.__gp_log_segment_ext" does not exist
+skip instr_in_shmem_setup  gp_enable_query_metrics is none of the port's settings: gpconfig refuses it, and instr_in_shmem and instr_in_shmem_verify, which it sets up for, fail without it
+skip instr_in_shmem  unrecognized configuration parameter "gp_enable_query_metrics"; unrecognized configuration parameter "gp_instrument_shmem_size"
+skip createdb  function force_mirrors_to_catch_up() does not exist
+run  gp_aggregates_costs
+run  variadic_parameters
+run  function_extensions
+skip spi  differs: a function's query of a table in a segment's slice runs, where Cloudberry refuses it: function cannot execute on a QE slice because it accesses relation
+run  shared_scan
+run  cluster_gp
+skip combocid_gp  differs: a segment's command ids for the rows a transaction writes count from 0, where Cloudberry's go on from the coordinator's
+skip spi_processed64bit  differs: the fault executor_run_high_processed, which has the executor count past 2^32 rows, is none of the port's
+skip gp_tablespace  function gp_tablespace_location(oid) does not exist; function get_tablespace_version_directory_name() does not exist
+skip temp_tablespaces  the faults sisc_xslice_temp_files and hashagg_spill_temp_files are none of the port's: canceling statement due to user request
+run  default_tablespace
+run  leastsquares
+skip decode_expr  function decode(boolean) does not exist; function decode(integer) does not exist
+skip gpcopy_encoding  invalid byte sequence for encoding "UTF8": 0xc4
+run  gp_create_view
+run  window_views
+run  create_table_like_gp
+run  gp_constraints
+skip gpcopy_dispatch  unrecognized configuration parameter "test_copy_qd_qe_split"; segment 0 took 0 of the 1 rows sent to it
+skip gpcopy  differs: COPY's errors of a line with a column too many or too few are not in Cloudberry's words
+run  orca_static_pruning
+run  orca_groupingsets_fallbacks
+skip table_functions  type anytable does not exist; OUT and INOUT arguments aren't allowed in TABLE functions
+run  opclass_ddl
+run  information_schema
+run  guc_env_var
+skip gp_explain  unrecognized configuration parameter "gp_enable_explain_allstat"; unrecognized EXPLAIN option "slicetable"
+skip explain_format  differs: EXPLAIN in each of its formats prints the port's plans, which this test compares
+run  olap_plans
+run  gp_copy_dtx
+skip guc_gp  unrecognized configuration parameter "gp_workfile_limit_per_query"; unrecognized configuration parameter "allow_segment_dml"
+run  misc_jiras
+skip gp_connections  differs: a primary takes a direct connection, where Cloudberry refuses it: This database instance is running as a primary segment in a Cloudberry cluster and does not permit direct connections
+skip gp_dump_query_oids  function gp_dump_query_oids(unknown) does not exist
+skip analyze  unrecognized configuration parameter "optimizer_analyze_root_partition"; unrecognized configuration parameter "optimizer_analyze_midlevel_partition"
+skip gp_owner_permission  relation "pg_stat_operations" does not exist
+skip incremental_analyze  syntax error at or near "foo"; syntax error at or near "foo_1_prt_2"
+run  regex_gp
+skip dispatch_encoding  relation "gp_toolkit.__gp_log_segment_ext" does not exist; raise_error called on "funny char Ä"
+port icudp_on
+run  icudp/gp_interconnect_fc_method
+run  icudp/queue_depth_combination_capacity
+port icudp_off
+skip deadlock  canceling statement due to user request; function gp_dist_wait_status() does not exist
+skip deadlock2  differs: Cloudberry's NOTICE that a slice prefetches a join's qual is not the port's
+run  workfile/hashagg_spill
+run  workfile/hashjoin_spill
+skip workfile/materialize_spill  differs: EXPLAIN ANALYZE says nothing of Cloudberry's "Workfile: (N spilling)" of a node that spilled, which it counts
+skip workfile/sisc_mat_sort  differs: EXPLAIN ANALYZE says nothing of Cloudberry's "Workfile: (N spilling)" of a node that spilled, which it counts
+skip workfile/sisc_sort_spill  differs: EXPLAIN ANALYZE says nothing of Cloudberry's "Workfile: (N spilling)" of a node that spilled, which it counts
+run  workfile/sort_spill
+run  workfile/spilltodisk
+skip zlib  canceling statement due to user request
+skip segspace  relation "gp_toolkit.gp_workfile_mgr_used_diskspace" does not exist; relation "gp_toolkit.gp_workfile_entries" does not exist
+skip query_finish_pending  differs: gp_inject_fault's report of a finish_pending fault
+run  gpdiffcheck
+run  gptokencheck
+run  co_nestloop_idxscan
+skip dml_in_udf  differs: a function's write in a segment's slice runs, where Cloudberry refuses it: function cannot execute on a QE slice because it issues a non-SELECT statement
+skip gpdtm_plpgsql  unrecognized configuration parameter "gp_enable_slow_writer_testmode"
+skip dtm_retry  canceling statement due to user request
+run  rangefuncs_cdb
+skip sirv_functions  differs: a function's DDL in a segment's slice runs, where Cloudberry refuses it: function cannot execute on a QE slice because it issues a non-SELECT statement
+run  query_finish  planner  under ORCA, its LIMIT 1 over a slice that sleeps on segment 0 does not end the statement early, and it runs past the suite's 60 seconds
+skip partial_table  differs: a table whose policy spreads it over more segments than the cluster has is refused ("Its distribution policy spreads it over 10 segments, and the cluster has 3"), where Cloudberry reads it
+run  subselect_gp_indexes
+run  partition_indexing
+run  partition_with_user_defined_function
+skip partition_unlogged  partitioned tables cannot be unlogged; relation "unlogged_pt1" does not exist
+run  partition_subquery
+run  partition_with_user_defined_function_that_truncates
+run  index_constraint_naming
+skip index_constraint_naming_partition  distribution policy for "e" must be the same as that for "r"; cannot drop inherited constraint "r_1_prt_r1_r_key_r_name_excl" of relation "r_1_prt_r1"
+skip index_constraint_naming_upgrade  differs: PostgreSQL 19 keeps NOT NULL constraints in pg_constraint, and its listing of a table's constraints has them
+run  rle
+skip rle_delta  differs: \d+ of a column-oriented table prints no Compression Type, Compression Level or Block Size column
+skip dsp  compresstype "zlib" can't be used with compresslevel 0; compresslevel=7 is out of range for rle_type (should be in the range 1 to 6)
+skip not_out_of_shmem_exit_slots  unrecognized configuration parameter "debug_dtm_action_segment"; unrecognized configuration parameter "debug_dtm_action_target"
+skip create_am_gp  function ao_row_tableam_handler(internal) does not exist; function ao_column_tableam_handler(internal) does not exist
+skip gp_runtime_filter  unrecognized configuration parameter "gp_enable_runtime_filter"; unrecognized configuration parameter "gp_enable_runtime_filter_pushdown"
+run  eagerfree
+skip alter_table_set  syntax error at or near "on"; unrecognized configuration parameter "gp_enable_segment_copy_checking"
+skip alter_table_gp  differs: Cloudberry refuses to alter a column of a primary key, a unique constraint or the distribution key ("cannot alter column with primary key or unique constraint"), which the port alters
+run  subtransaction_visibility
+skip oid_consistency  differs: \d of an append-optimized table prints no Compression Type, Level, Block Size or Checksum
+skip udf_exception_blocks  unrecognized configuration parameter "debug_dtm_action_segment"; unrecognized configuration parameter "debug_dtm_action_target"
+run  ic
+skip partition_locking  differs: the locks a statement takes on a partitioned table's parts, and on which nodes
+skip vacuum_gp  relation "gp_toolkit.__gp_log_master_ext" does not exist
+skip pg_stat  relation "gp_stat_all_tables_summary" does not exist; relation "gp_stat_user_tables_summary" does not exist
+skip bfv_partition  unrecognized configuration parameter "optimizer_analyze_root_partition"; relation "gp_partition_template" does not exist
+skip bfv_partition_plans  differs: a count of its plan's partition selections is 0, where Cloudberry's is 2
+skip pgstat_qd_tabstat  relation "gp_stat_all_tables_summary" does not exist; syntax error at or near "on"
+skip dispatch  unrecognized configuration parameter "gp_max_plan_size"; could not find function "cleanupAllGangs" in file "regress.so"
+skip role  syntax error at or near "only"
+skip plpgsql_cache  differs: how often a function's NOTICE is raised, the segments running it where Cloudberry's coordinator does
+run  pg_stat_last_operation
+run  gp_numeric_agg
+run  partindex_test
+run  runtime_stats
+skip bfv_catalog  non-standard string literals are not supported; unrecognized configuration parameter "escape_string_warning"
+run  bfv_index
+skip bfv_statistic  table row type and query-specified row type do not match; unexpected null value in cached tuple for catalog pg_statistic column stavalues2
+run  nested_case_null
+run  sort
+run  aggregate_with_groupingsets
+skip gporca  table row type and query-specified row type do not match; could not find hash function for hash operator
+run  gporca_faults
+run  rpt_tpch
+skip bfv_planner  differs: two counts of what its plans read are 27 and 9, where Cloudberry's are 33 and 11
+run  bfv_legacy
+skip bfv_temp  syntax error at or near ")"; relation "n" does not exist
+skip gp_recursive_cte  unrecognized configuration parameter "gp_recursive_cte"
+run  qp_dropped_cols
+run  qp_misc_rio_join_small
+group m7b
+skip qp_query_execution  differs: two counts of its plans' nodes are 0, where Cloudberry's are 1
+run  qp_regexp
+skip qp_orca_fallback  differs: an UPDATE of a partitioned table with a foreign partition runs, where Cloudberry refuses it: cannot update foreign table "p2_ext"
+skip qp_olap_group2  relation "product" does not exist
+skip hooktest  could not access file "hooktest/test_hook.so": No such file or directory
+run  tuple_serialization
+skip query_info_hook_test  could not access file "query_info_hook_test/query_info_hook_test.so": No such file or directory
+skip freeze_aux_tables  differs: an append-optimized table's aux tables are not pg_aoseg_<oid>, pg_aoblkdir_<oid> and pg_aovisimap_<oid> of pg_aoseg
+skip autostats  unrecognized configuration parameter "log_autostats"
+skip dpe  function disable_xform(unknown) does not exist; function enable_xform(unknown) does not exist
+run  table_statistics
+skip psql_gp_commands  differs: psql 19's \dx has a Default version column, and Cloudberry's psql describes its storage and external tables in its own way
+run  dropdb_check_shared_buffer_cache
+skip gp_upgrade_cornercases  cannot drop schema public because other objects depend on it: the database it makes is template1's copy, where gp_setup made gp_orca and gp_inject_fault in schema public
+skip temp_relation  differs: a temporary table's file is t<proc number>_<relfilenode> in PostgreSQL 19, and the test looks for Cloudberry's t_<relfilenode>, which it finds on no node, before DROP TABLE and after
+run  oid_wraparound
+skip gangsize  differs: the gangs its statements are dispatched to, by Cloudberry's INFO lines, are not the sizes Cloudberry makes them
+run  gang_reuse
+run  create_extension_fail
+skip aqumv  unrecognized configuration parameter "enable_answer_query_using_materialized_views"; unrecognized parameter namespace "gp"

@@ -1,0 +1,24 @@
+-- The pax_regress suite's additions, read by gpdiff.pl after Cloudberry's
+-- init_file, PAX's copy of it and the port's (../greenplum/init_file).
+
+-- start_matchsubs
+
+# An error PAX raises with elog(), whose message Cloudberry's server ends
+# with the place in its source that raised it -- PAX's init_file masks the
+# line, "(pax_access_handle.cc:###)" -- and PostgreSQL 19's does not.
+m/ \((pax_access_handle|paxc_rel_options)\.cc:(\d+|###)\)$/
+s/ \((pax_access_handle|paxc_rel_options)\.cc:(\d+|###)\)$//
+
+# What one run names otherwise than another: a session's temporary schema,
+# by its backend's number; the temporary table a materialized view is
+# filled from (gp_core's gp_refresh.c), by its OID; and the buffers an
+# EXPLAIN (ANALYZE, BUFFERS) counts, which a page read earlier leaves in
+# shared buffers or not.
+m/pg_temp_\d+/
+s/pg_temp_\d+/pg_temp_N/
+m/gp_matview_fill_\d+/
+s/gp_matview_fill_\d+/gp_matview_fill_N/
+m/Buffers: shared hit=\d+/
+s/Buffers: shared hit=\d+( read=\d+)?/Buffers: shared hit=N/
+
+-- end_matchsubs

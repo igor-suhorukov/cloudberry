@@ -1,0 +1,29 @@
+@@
+-ERROR:  PAX not allow swap relation files for different AM (cluster.c:###)
+@@
+-(0 rows)
++ atsdb   | f        | 
++(1 row)
+@@
+-ERROR:  PAX not allow swap relation files for different AM (cluster.c:###)
+@@
+- relname | ?column? | reloptions 
+----------+----------+------------
+-(0 rows)
++ relname | ?column? |    reloptions     
++---------+----------+-------------------
++ atsdb   | f        | {compresslevel=3}
++(1 row)
+@@
+- relname | ?column? | reloptions 
+----------+----------+------------
+-(0 rows)
++ relname | ?column? |    reloptions     
++---------+----------+-------------------
++ atsdb   | f        | {compresslevel=3}
++(1 row)
+@@
+-ERROR:  table "mpp5738_1_prt_1" is not partitioned
+@@
+- f
++ t

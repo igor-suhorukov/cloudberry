@@ -1,0 +1,45 @@
+@@
+-ERROR:  correlated subquery with skip-level correlations is not supported
++ min_tb_id 
++-----------
++         1
++         3
++(2 rows)
++
+@@
+-ERROR:  correlated subquery with skip-level correlations is not supported
++ qq1 
++-----
++(0 rows)
++
+@@
+-ERROR:  not implemented yet on pax relations: TupleInsertSpeculative
++DETAIL:  Each segment would answer it from its own rows alone.
++ERROR:  a subquery in ON CONFLICT DO UPDATE of a distributed table is not supported yet
+@@
+-ERROR:  not implemented yet on pax relations: TupleInsertSpeculative
++DETAIL:  Each segment would answer it from its own rows alone.
++ERROR:  a subquery in ON CONFLICT DO UPDATE of a distributed table is not supported yet
+@@
+-HINT:  No operator matches the given name and argument types. You might need to add explicit type casts.
++DETAIL:  No operator of that name accepts the given argument types.
++HINT:  You might need to add explicit type casts.
+@@
+-ERROR:  correlated subquery with skip-level correlations is not supported
++QUERY PLAN
++___________
++
+@@
+-ERROR:  correlated subquery with skip-level correlations is not supported
++ sum 
++-----
++ 100
++(1 row)
++
+@@
+-NOTICE:  x = 9, y = 8
+@@
+-                           explain_sq_limit                           
+-----------------------------------------------------------------------
++                                         explain_sq_limit                                          
++---------------------------------------------------------------------------------------------------

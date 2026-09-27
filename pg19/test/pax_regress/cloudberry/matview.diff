@@ -1,0 +1,55 @@
+@@
+-DETAIL:  Key (a)=(1) is duplicated.
+-ERROR:  could not create unique index "mvtest_mv_a_idx"
++DETAIL:  Key (a)=(1) already exists.
++ERROR:  duplicate key value violates unique constraint "mvtest_mv_a_idx"
++CONTEXT:  SQL statement "INSERT INTO public.mvtest_mv SELECT * FROM pg_temp.gp_matview_fill_N"
+@@
+-ERROR:  division by zero
+@@
+-ERROR:  function cannot execute on a QE slice because it issues a non-SELECT statement
+-CONTEXT:  SQL statement "DROP INDEX IF EXISTS mvtest_drop_idx"
+-PL/pgSQL function mvtest_drop_the_index() line 3 at EXECUTE
+@@
+-ERROR:  relation "drop_idx_matview" does not exist
+@@
+-ERROR:  relation "drop_idx_matview" does not exist
+@@
+-ERROR:  materialized view "drop_idx_matview" does not exist
+@@
++ERROR:  relation "t_github_issue_11956" does not exist
++LINE 2: select sum(a+b)::int from t_github_issue_11956
++                                  ^
++QUERY:  
++select sum(a+b)::int from t_github_issue_11956
++
++CONTEXT:  SQL function "f_github_issue_11956" during inlining
+@@
++ERROR:  relation "mat_view_github_issue_11956" does not exist
+@@
++ERROR:  materialized view "mat_view_github_issue_11956" does not exist
+@@
++ERROR:  permission denied for materialized view mv_withdata1
+@@
+-QUERY PLAN
+-___________
+-
++ERROR:  unrecognized parameter namespace "gp"
+@@
++ERROR:  relation "matview_schema.mv_withdata2" does not exist
+@@
+-DETAIL:  drop cascades to materialized view matview_schema.mv_withdata1
+-NOTICE:  drop cascades to 4 other objects
+-drop cascades to materialized view matview_schema.mv_withdata2
+-drop cascades to materialized view matview_schema.mv_nodata1
++DETAIL:  drop cascades to materialized view matview_schema.mv_nodata1
++NOTICE:  drop cascades to 2 other objects
+@@
++ERROR:  unrecognized configuration parameter "gp_enable_refresh_fast_path"
+@@
++ERROR:  unrecognized configuration parameter "gp_enable_refresh_fast_path"
+@@
+-     1
++     0
+@@
++ERROR:  unrecognized configuration parameter "gp_enable_refresh_fast_path"

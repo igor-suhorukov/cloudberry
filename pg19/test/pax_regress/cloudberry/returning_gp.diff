@@ -1,0 +1,19 @@
+@@
+-ERROR:  not implemented yet on pax relations: TupleFetchRowVersion
++ distkey | partkey |    t     
++---------+---------+----------
++       2 |      14 | multi2 4
++(1 row)
++
+@@
+-       2 |      14 | multi2 4
+@@
+-(12 rows)
++(11 rows)
+@@
+-ERROR:  feature not supported on appendoptimized relations
++ id 
++----
++  1
++(1 row)
++

@@ -1,0 +1,47 @@
+@@
+-Inherits: test_like_5,
+-          test_like_5x
++Inherits:
++    test_like_5
++    test_like_5x
+@@
+-    "inhz_x_fkey" FOREIGN KEY (x) REFERENCES inhz(xx)
++    "inhz_x_fkey" FOREIGN KEY (x) REFERENCES inhz(xx) NOT ENFORCED
+@@
+-    TABLE "inhz" CONSTRAINT "inhz_x_fkey" FOREIGN KEY (x) REFERENCES inhz(xx)
++    TABLE "inhz" CONSTRAINT "inhz_x_fkey" FOREIGN KEY (x) REFERENCES inhz(xx) NOT ENFORCED
+@@
++Not-null constraints:
++    "ctlt1_a_not_null" NOT NULL "a"
+@@
++Not-null constraints:
++    "ctlt1_a_not_null" NOT NULL "a"
+@@
+-Inherits: ctlt1
++Not-null constraints:
++    "ctlt1_a_not_null" NOT NULL "a" (local, inherited)
++Inherits:
++    ctlt1
+@@
+-Inherits: ctlt1,
+-          ctlt3
++Not-null constraints:
++    "ctlt1_a_not_null" NOT NULL "a" (inherited)
++Inherits:
++    ctlt1
++    ctlt3
+@@
+-Inherits: ctlt1
++Not-null constraints:
++    "ctlt1_a_not_null" NOT NULL "a" (inherited)
++Inherits:
++    ctlt1
+@@
++Not-null constraints:
++    "ctlt1_a_not_null" NOT NULL "a"
+@@
++Not-null constraints:
++    "ctlt1_a_not_null" NOT NULL "a"
+@@
++Not-null constraints:
++    "ctlt1_a_not_null" NOT NULL "a"

@@ -1,0 +1,35 @@
+@@
+-      float8_regr_accum       
+-------------------------------
+- {5,240,6280,1490,95080,8680}
+-(1 row)
+-
++ERROR:  float8_regr_accum: expected 8-element float8 array
+@@
+-    float8_regr_combine    
+----------------------------
+- {3,60,200,750,20000,2000}
+-(1 row)
+-
++ERROR:  float8_regr_combine: expected 8-element float8 array
+@@
+-     float8_regr_combine     
+------------------------------
+- {2,180,200,740,57800,-3400}
+-(1 row)
+-
++ERROR:  float8_regr_combine: expected 8-element float8 array
+@@
+-     float8_regr_combine      
+-------------------------------
+- {5,240,6280,1490,95080,8680}
+-(1 row)
+-
++ERROR:  float8_regr_combine: expected 8-element float8 array
+@@
+- balk 
+-------
+-     
++  balk  
++--------
++ 495000
