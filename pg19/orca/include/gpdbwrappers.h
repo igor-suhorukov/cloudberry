@@ -353,9 +353,16 @@ bool IsRepSafeAgg(Oid aggid);
 // does aggregate have a combine function (and serial/deserial functions, if needed)
 bool IsAggPartialCapable(Oid aggid);
 
-// does the query, or one in it, call with ORDER BY an aggregate that has a
-// combine function -- not an ordered-set aggregate's WITHIN GROUP?
-bool QueryOrdersPartialCapableAgg(Query *query);
+// A call with ORDER BY of an aggregate that has a combine function -- not an
+// ordered-set aggregate's WITHIN GROUP -- takes its rows in that order, and
+// ORCA may not split it into partial aggregates.  ORCA decides what it may
+// split by the aggregate's metadata, not by the call, so such a call is
+// given the aggregate under a metadata id of this minor version, which the
+// relcache translator describes as the same aggregate, not splittable
+// (CTranslatorRelcacheToDXL::RetrieveAgg): the aggregation that calls it is
+// not split, and the others of the query are free to be.
+#define GP_ORCA_ORDERED_AGG_CALL_VERSION 1
+bool IsOrderedPartialCapableAggCall(const Aggref *aggref);
 
 // does the query, or one in it, call a DISTINCT aggregate beside one that is
 // not?

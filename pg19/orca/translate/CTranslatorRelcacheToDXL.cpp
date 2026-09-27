@@ -1725,13 +1725,18 @@ CTranslatorRelcacheToDXL::RetrieveAgg(CMemoryPool *mp, IMDId *mdid)
 	BOOL is_repsafe = gpdb::IsRepSafeAgg(agg_oid);
 
 	// GPDB does not support splitting of ordered aggs and aggs without a
-	// combine function
-	BOOL is_splittable = !is_ordered && gpdb::IsAggPartialCapable(agg_oid);
+	// combine function -- nor, here, of a call with ORDER BY, which the
+	// scalar translator names by a version of its own
+	// (GP_ORCA_ORDERED_AGG_CALL_VERSION)
+	BOOL ordered_call = GP_ORCA_ORDERED_AGG_CALL_VERSION ==
+						CMDIdGPDB::CastMdid(mdid)->VersionMinor();
+	BOOL is_splittable =
+		!is_ordered && !ordered_call && gpdb::IsAggPartialCapable(agg_oid);
 
 	// cannot use hash agg for ordered aggs or aggs without a combine func
 	// due to the fact that hashAgg may spill
 	BOOL is_hash_agg_capable =
-		!is_ordered && gpdb::IsAggPartialCapable(agg_oid);
+		!is_ordered && !ordered_call && gpdb::IsAggPartialCapable(agg_oid);
 
 	CMDAggregateGPDB *pmdagg = GPOS_NEW(mp) CMDAggregateGPDB(
 		mp, mdid, mdname, result_type_mdid, intermediate_result_type_mdid,

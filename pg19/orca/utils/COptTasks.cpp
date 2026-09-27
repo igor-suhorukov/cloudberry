@@ -1021,25 +1021,13 @@ COptTasks::OptimizeTask(void *ptr)
 			// order, and ORCA would split one that has a combine function
 			// into a partial aggregate on each segment and a final one
 			// combining their states: each segment's rows in order, and
-			// the segments one after another.  Cloudberry's ORCA decides
-			// what it may split by the aggregate (IsAggPartialCapable()),
-			// and its aggregates of order -- string_agg(), array_agg() --
-			// had no combine function before PostgreSQL 16; the planner
-			// splits no aggregate called with ORDER BY
-			// (preprocess_aggrefs()).  Nor does ORCA here, in the query
-			// that calls one: every aggregate of it is split by none of
-			// the transforms that split one.
-			BOOL no_split =
-				gpdb::QueryOrdersPartialCapableAgg((Query *) opt_ctxt->m_query);
-			CAutoTraceFlag atf3(
-				GPOPT_DISABLE_XFORM_TF(CXform::ExfSplitGbAgg),
-				no_split ||
-					GPOS_FTRACE(GPOPT_DISABLE_XFORM_TF(CXform::ExfSplitGbAgg)));
-			CAutoTraceFlag atf4(
-				GPOPT_DISABLE_XFORM_TF(CXform::ExfSplitGbAggDedup),
-				no_split || GPOS_FTRACE(GPOPT_DISABLE_XFORM_TF(
-								CXform::ExfSplitGbAggDedup)));
-			// And a DISTINCT aggregate beside one that is not: the
+			// the segments one after another.  Such a call is given ORCA
+			// as an aggregate it may not split, the aggregation that calls
+			// it alone (GP_ORCA_ORDERED_AGG_CALL_VERSION, the scalar
+			// translator); the planner splits no aggregate called with
+			// ORDER BY (preprocess_aggrefs()).
+			//
+			// A DISTINCT aggregate beside one that is not: the
 			// transform that splits a DISTINCT aggregate into stages
 			// finishes it in the node where the others are combined from
 			// their partial states, and PostgreSQL 19's Agg runs every
@@ -1048,16 +1036,11 @@ COptTasks::OptimizeTask(void *ptr)
 			// it, ORCA aggregates the distinct values where they meet, in
 			// one stage, or dedups them first.
 			BOOL no_split_dqa =
-				no_split ||
 				gpdb::QueryMixesDistinctAgg((Query *) opt_ctxt->m_query);
 			CAutoTraceFlag atf5(
 				GPOPT_DISABLE_XFORM_TF(CXform::ExfSplitDQA),
 				no_split_dqa ||
 					GPOS_FTRACE(GPOPT_DISABLE_XFORM_TF(CXform::ExfSplitDQA)));
-			CAutoTraceFlag atf6(
-				GPOPT_DISABLE_XFORM_TF(CXform::ExfEagerAgg),
-				no_split ||
-					GPOS_FTRACE(GPOPT_DISABLE_XFORM_TF(CXform::ExfEagerAgg)));
 
 			// gp_core carries out every Motion but an Explicit Redistribute,
 			// which only a DML plan has (gp_motion.c).

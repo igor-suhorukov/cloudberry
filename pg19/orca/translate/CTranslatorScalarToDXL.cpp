@@ -1549,8 +1549,12 @@ CTranslatorScalarToDXL::TranslateAggrefToDXL(
 	GPOS_ASSERT(aggref->aggsplit == AGGSPLIT_SIMPLE);
 	EdxlAggrefStage agg_stage = EdxlaggstageNormal;
 
-	CMDIdGPDB *agg_mdid =
-		GPOS_NEW(m_mp) CMDIdGPDB(IMDId::EmdidGeneral, aggref->aggfnoid);
+	// a call ORCA may not split, if it is ordered and the aggregate could be
+	CMDIdGPDB *agg_mdid = GPOS_NEW(m_mp) CMDIdGPDB(
+		IMDId::EmdidGeneral, aggref->aggfnoid, 1 /* major */,
+		gpdb::IsOrderedPartialCapableAggCall(aggref)
+			? GP_ORCA_ORDERED_AGG_CALL_VERSION
+			: 0);
 
 	if (0 != aggref->agglevelsup)
 	{

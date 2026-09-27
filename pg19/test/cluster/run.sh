@@ -1530,6 +1530,16 @@ a\b|\N' ] && [ "$(cat "$ROOT/ce_prog.txt" 2>&1)" = "to a program" ] \
 	[[ "$plan" != *"Partial Aggregate"* && "$plan2" == *"Partial Aggregate"* ]] \
 		&& ok "... not split into a partial aggregate on each segment, as one without ORDER BY is" \
 		|| notok "an aggregate called with ORDER BY, split" "$plan / $plan2"
+	# ORCA decides what it may split by the aggregate's metadata, and the
+	# call is given it under an id of its own: the aggregation that calls it
+	# is not split, and another of the same query still is.
+	plan=$(q 0 "EXPLAIN (COSTS OFF) SELECT (SELECT string_agg(c, ',' ORDER BY a) FROM o WHERE a < 20), (SELECT sum(a) FROM o);")
+	[[ "$plan" == *"Aggregate"*"Gather Motion"*"Finalize Aggregate"*"Partial Aggregate"* ]] \
+		&& [[ "$plan" != *"Partial Aggregate"*"Partial Aggregate"* ]] \
+		&& ok "... and beside it another aggregation of the query is split, as the planner's would be" \
+		|| notok "an ordered call beside another aggregation" "$plan"
+	orca_same "... and answers so" \
+		"SELECT (SELECT string_agg(c, ',' ORDER BY a) FROM o WHERE a < 20), (SELECT sum(a) FROM o);"
 	orca_same "one key's rows: direct dispatch to its segment" \
 		"SELECT * FROM o WHERE a = 42;" "Gather Motion 1:1  (slice1; segments: 1)"
 
