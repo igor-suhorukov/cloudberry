@@ -42,6 +42,7 @@
 
 #include <stdlib.h>
 
+#include "access/commit_ts.h"
 #include "access/htup_details.h"
 #include "access/transam.h"
 #include "access/xact.h"
@@ -57,6 +58,20 @@ PG_MODULE_MAGIC_EXT(
 					.name = "cb_regress",
 					.version = "1.0"
 );
+
+/* gp.debug_burn_xids: test_consume_xids() takes XIDs fast; see there */
+static bool debug_burn_xids = false;
+
+void		_PG_init(void);
+
+void
+_PG_init(void)
+{
+	DefineCustomBoolVariable("gp.debug_burn_xids",
+							 "Consume XIDs faster, in test_consume_xids(), as Cloudberry's debug_burn_xids does.",
+							 NULL, &debug_burn_xids, false, PGC_USERSET, 0,
+							 NULL, NULL, NULL);
+}
 
 typedef bool (*deny_allows_fn) (const char *rolename, TimestampTz when);
 typedef bool (*queue_in_sync_fn) (const char *queuename);
@@ -129,8 +144,36 @@ cleanupAllGangs(PG_FUNCTION_ARGS)
 PG_FUNCTION_INFO_V1(test_consume_xids);
 
 /*
+ * Under gp.debug_burn_xids, the next transaction ID made the last of its
+ * page but one, as Cloudberry's GetNewTransactionId() makes it under its
+ * debug_burn_xids: what is skipped is a stretch of IDs that are like one
+ * another, and each page's first IDs are still made one at a time, so the
+ * pages of the SLRUs that follow the IDs are made as they are reached.
+ * The page is pg_subtrans's, the smallest of those PostgreSQL 19 makes as
+ * the IDs reach them -- 2,048 IDs of 8K, where Cloudberry's steps are
+ * 4,096 of its 32K pages -- but for pg_commit_ts's, which a setting turns
+ * on and under which nothing is skipped.
+ */
+static void
+burn_xids(void)
+{
+	const uint64 per_page = BLCKSZ / sizeof(TransactionId);
+	uint64		next;
+	uint64		r;
+
+	if (!debug_burn_xids || track_commit_timestamp)
+		return;
+	LWLockAcquire(XidGenLock, LW_EXCLUSIVE);
+	next = U64FromFullTransactionId(TransamVariables->nextXid);
+	r = next % per_page;
+	if (r > 1 && r < per_page - 1)
+		TransamVariables->nextXid = FullTransactionIdFromU64(next + per_page - r - 1);
+	LWLockRelease(XidGenLock);
+}
+
+/*
  * test_consume_xids(int4): take that many transaction IDs, fast, to test
- * wraparound (autovacuum).
+ * wraparound (autovacuum) -- faster still under gp.debug_burn_xids.
  */
 Datum
 test_consume_xids(PG_FUNCTION_ARGS)
@@ -149,7 +192,10 @@ test_consume_xids(PG_FUNCTION_ARGS)
 		targetxid++;
 
 	while (TransactionIdPrecedes(xid, targetxid))
+	{
 		xid = XidFromFullTransactionId(GetNewTransactionId(true));
+		burn_xids();
+	}
 
 	PG_RETURN_VOID();
 }

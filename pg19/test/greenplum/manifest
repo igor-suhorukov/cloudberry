@@ -73,7 +73,7 @@ run  transient_types
 run  gp_rules
 skip motion_gp  row is too big: size 10032, maximum size 8160; syntax error at or near ")"
 run  gp_pullup_expr
-skip cursor  its gp_wait_until_triggered_fault('qe_got_snapshot_and_interconnect') waits out the suite's minute: the fault, which Cloudberry's cursor reader raises once its slice has its snapshot, while the writer goes on to UPDATE, is none of the port's
+skip cursor  differs: its cursor starts no reader of its own on segment 0, which Cloudberry's does as the cursor is declared and the fault qe_got_snapshot_and_interconnect holds while the writer updates the row: gp_wait_until_triggered_fault() waits out the suite's minute -- the FETCH after the UPDATE answers (1, 666), as Cloudberry's does
 run  gp_hashagg
 run  sequence_gp
 run  tidscan_gp
@@ -135,7 +135,7 @@ port bb_mpph_heap
 run  bb_memory_quota
 run  rpt
 run  rpt_joins
-skip bfv_cte  type "cte" does not exist; the fault get_shareinput_reference_done is none of the port's: canceling statement due to user request
+skip bfv_cte  unrecognized configuration parameter "debug_shareinput_xslice"; the faults get_shareinput_reference_delay_writer and get_shareinput_reference_done, which it holds and counts, are Cloudberry's ShareInputScan's, a plan of its planner's, where the port's shared scan is ORCA's, files each segment keeps: canceling statement due to user request
 run  bfv_joins
 run  bfv_subquery
 run  qp_misc
@@ -254,7 +254,7 @@ run  uao_dml/uao_dml_column
 run  ao_locks
 run  vacuum_full_ao
 run  vacuum_full_heap_bitmapindex
-skip vacuum_ao_aux_only  relation "ao_aux_only" does not exist; failed to inject fault: ERROR:  fault not set, fault name:'vacuum_rel_finished_one_relation'
+skip vacuum_ao_aux_only  syntax error at or near "vac_example_heap": VACUUM AO_AUX_ONLY is none of the port's, nor is the visibility map it vacuums a table's own, pg_appendonly's visimaprelid, which gp_ao keeps in one table of every table's
 skip ao_checksum_corruption  unrecognized configuration parameter "gp_appendonly_verify_block_checksums"
 skip AOCO_Compression  relation "gp_partition_template" does not exist
 run  AORO_Compression
@@ -269,9 +269,9 @@ run  uao_dml/uao_dml_unique_index_update_column
 
 # The tests the port had left for M7 (see the head of this file).
 group m7a
-skip autovacuum  unrecognized configuration parameter "debug_burn_xids"; the faults auto_vac_worker_before_do_autovacuum and vacuum_update_dat_frozen_xid are none of the port's: canceling statement due to user request
-skip autovacuum-segment  the faults auto_vac_worker_before_do_autovacuum and vacuum_update_dat_frozen_xid are none of the port's, and debug_burn_xids none of its settings: canceling statement due to user request
-skip autovacuum-template0-segment  the faults auto_vac_worker_before_do_autovacuum and vacuum_update_dat_frozen_xid are none of the port's, and debug_burn_xids none of its settings: canceling statement due to user request
+run  autovacuum
+run  autovacuum-segment
+run  autovacuum-template0-segment
 skip profile  differs: its \d+ of pg_authid and pg_roles shows Cloudberry's catalog columns, and pg_profile is Cloudberry's catalog: relation "pg_profile" does not exist
 skip pg_ext_aux  schema "pg_ext_aux" does not exist; relation "pg_ext_aux.extaux_t" does not exist
 run  pg_dump_binary_upgrade
@@ -280,7 +280,7 @@ skip copy_eol  could not open file "/tmp/copy_lf.file" for reading: No such file
 skip copy_encoding_error  segment reject limit reached, aborting operation
 run  dedupset
 run  disable_autovacuum
-skip python_processed64bit  differs: the fault executor_run_high_processed, which has the executor count past 2^32 rows, is none of the port's
+skip python_processed64bit  differs: an INSERT's count is the coordinator's own, which the fault executor_run_high_processed makes 2^32 - 11, where Cloudberry's is the sum of each segment's so made, 3 x (2^32 - 11)
 run  enable_autovacuum
 skip log_guc  relation "gp_toolkit.__gp_log_master_ext" does not exist; relation "gp_toolkit.__gp_log_segment_ext" does not exist
 skip instr_in_shmem_setup  gp_enable_query_metrics is none of the port's settings: gpconfig refuses it, and instr_in_shmem and instr_in_shmem_verify, which it sets up for, fail without it
@@ -299,10 +299,10 @@ skip combocid_gp  differs: a segment's command ids for the rows a transaction wr
 skip gp_prepared_xacts  differs: its utility-mode session asks for -c gp_role=utility, a setting PostgreSQL 19 refuses a connection for
 run  gp_backend_info
 run  gp_locale
-skip spi_processed64bit  differs: the fault executor_run_high_processed, which has the executor count past 2^32 rows, is none of the port's
+skip spi_processed64bit  differs: an INSERT's count is the coordinator's own, which the fault executor_run_high_processed makes 2^32 - 11, where Cloudberry's is the sum of each segment's so made -- an UPDATE's and a DELETE's are that sum, as there -- and an INSERT ... SELECT of 10,000 rows reaches the fault's threshold, which no segment's share of it does
 skip gp_tablespace_with_faults  function force_mirrors_to_catch_up() does not exist
 skip gp_tablespace  function force_mirrors_to_catch_up() does not exist; unlogged append-optimized tables are not supported
-skip temp_tablespaces  the faults sisc_xslice_temp_files and hashagg_spill_temp_files are none of the port's: canceling statement due to user request
+skip temp_tablespaces  its statement_mem of 1MB leaves the hash aggregate unspilled here, and its CTEs are a shared scan across slices under ORCA alone: gp_wait_until_triggered_fault() of sisc_xslice_temp_files and hashagg_spill_temp_files, faults the port has not, waits out the suite's minute
 run  default_tablespace
 run  leastsquares
 run  opr_sanity_gp

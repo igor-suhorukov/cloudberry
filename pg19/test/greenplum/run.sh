@@ -191,9 +191,10 @@ t1=$(date +%s)
 {
 	# the column SHOW names, read as a row's field; SET, RESET and SHOW;
 	# current_setting() and set_config(); SHOW's header, the same width
-	# spelled either way (see the singlenode suite); and an error's naming
-	# of a setting, parameter "gp_..."
-	echo "kinds field set func header param"
+	# spelled either way (see the singlenode suite); an error's naming of a
+	# setting, parameter "gp_..."; and gpconfig's -c, -r and -s, which set,
+	# remove and show a setting in every node's configuration file
+	echo "kinds field set func header param gpconfig"
 	PGHOST="$(node_sock "${groups[0]}" 0)" PGPORT="$(node_port 0 0)" \
 	"$PSQL" -X -q -t -A -d postgres -c "SELECT name FROM pg_settings WHERE name LIKE 'gp.%' ORDER BY length(name) DESC" |
 	while read -r name; do
@@ -210,6 +211,10 @@ t1=$(date +%s)
 		esac
 		echo "map $cbname $name"
 	done
+	# The setting of the tests' own library (cb_regress.c), which no module
+	# defines: test_consume_xids() takes XIDs fast under it, as Cloudberry's
+	# GetNewTransactionId() does under debug_burn_xids.
+	echo "map debug_burn_xids gp.debug_burn_xids"
 	# And a program of Cloudberry's suite that a test runs from the suite's
 	# directory, ./extended_protocol_resqueue, is the one the port builds and
 	# installs (meson's hook_tests), run from PATH as the diff is.
