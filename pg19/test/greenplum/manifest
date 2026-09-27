@@ -146,7 +146,7 @@ run  qp_select
 run  partition_prune_opfamily
 run  qp_join_union_all
 skip qp_full_join  function disable_xform(unknown) does not exist; function enable_xform(unknown) does not exist
-run  qp_with_clause  planner  under ORCA, query 3 of its nested CTEs is still running at the harness's 60 seconds
+run  qp_with_clause
 run  qp_derived_table
 run  qp_bitmapscan
 skip qp_correlated_query  differs: answers the queries with a correlation that skips a level, which Cloudberry refuses, in an order that varies from run to run

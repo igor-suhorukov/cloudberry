@@ -64,6 +64,12 @@ extern Plan *gp_orca_make_share_consumer(int share_id, int slice,
 										 List *scan_tlist, List *targetlist);
 
 /*
+ * A producer whose CTE is read in other slices than its own: run when its
+ * slice is done, if its Sequence never ran it (compat/sharedscan.c).
+ */
+extern void gp_orca_set_share_across(Plan *plan);
+
+/*
  * Is "plan" a Shared Scan, and if so of which share, in which slice, and
  * does it produce the rows?
  */

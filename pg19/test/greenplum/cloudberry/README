@@ -343,6 +343,13 @@ qp_subquery (orca)  the fallback trace of the queries ORCA's translator
   declines -- subqueries that are not scalar, an inherited table, a
   whole-row variable -- which the planner answers the same.
 
+qp_with_clause (orca)  the lines ORCA's fallback trace prints and nothing
+  else: the test sets optimizer_trace_fallback, and ORCA declines its
+  eighteen queries of several DISTINCT aggregates, as Cloudberry's does,
+  and the catalog queries PostgreSQL 19's psql makes for \d+ of a view --
+  ten of a non-default collation and one of a table the coordinator alone
+  has, where Cloudberry's psql made seven; the planner answers the same.
+
 rangefuncs_cdb (planner, orca)  the planner's settings the test lists,
   enable_*: PostgreSQL 19's, which has enable_distinct_reordering and four
   more that PostgreSQL 14 had not, and none of Cloudberry's own --

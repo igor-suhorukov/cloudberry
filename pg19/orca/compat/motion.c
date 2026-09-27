@@ -91,6 +91,7 @@ typedef struct motion_check_context
 	bool		on_coordinator; /* a fragment the coordinator sends from */
 	List	  **callers;		/* each subplan's calling slice; see gp_motion.h */
 	List	  **shares;			/* each shared CTE's id and slices, IntLists */
+	List	  **producers;		/* and each one's producer, a Shared Scan */
 	bool	   *from_coordinator;	/* a fragment the coordinator sends */
 } motion_check_context;
 
@@ -500,7 +501,11 @@ motion_check_walker(Node *node, void *arg)
 
 					if (gp_orca_is_shared_scan((Plan *) node, &share_id, &slice,
 											   &producer))
+					{
 						note_share(ctx, share_id, slice);
+						if (producer)
+							*ctx->producers = lappend(*ctx->producers, node);
+					}
 					if (cscan->methods == &gp_orca_partition_selector_methods)
 						ctx->produced =
 							bms_add_member(ctx->produced,
@@ -538,6 +543,7 @@ gp_orca_check_motions(PlannedStmt *stmt)
 	List	   *params = NIL;
 	List	   *callers = NIL;
 	List	   *shares = NIL;
+	List	   *producers = NIL;
 	bool		from_coordinator = false;
 	ListCell   *lc;
 
@@ -557,6 +563,7 @@ gp_orca_check_motions(PlannedStmt *stmt)
 	ctx.on_coordinator = false;
 	ctx.callers = &callers;
 	ctx.shares = &shares;
+	ctx.producers = &producers;
 	ctx.from_coordinator = &from_coordinator;
 
 	(void) motion_check_walker((Node *) stmt->planTree, &ctx);
@@ -587,6 +594,20 @@ gp_orca_check_motions(PlannedStmt *stmt)
 
 			across |= list_length(share) > 1;
 			slices = lappend(slices, share);
+
+			/* its producer runs when its slice is done, if it has not */
+			if (list_length(share) > 1)
+				foreach_ptr(Plan, producer, producers)
+				{
+					int			share_id;
+					int			slice;
+					bool		is_producer;
+
+					if (gp_orca_is_shared_scan(producer, &share_id, &slice,
+											   &is_producer) &&
+						share_id == linitial_int((List *) lfirst(lc)))
+						gp_orca_set_share_across(producer);
+				}
 		}
 		foreach(lc, stmt->rtable)
 		{

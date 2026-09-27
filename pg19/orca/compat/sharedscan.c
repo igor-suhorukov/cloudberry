@@ -52,6 +52,19 @@
  * slice waits for one that waits for it.  The translator plans nothing
  * else, and gp_core refuses to relay the slices of such a plan one at a
  * time (stream_plan()), which would run a consumer before its producer.
+ *
+ * But a slice may be done without ever asking its Sequence for a row: a
+ * hash join whose outer side is empty on a segment -- every row of it
+ * redistributed to another -- builds no hash table there, and the Sequence
+ * under it never runs.  The consumers of that segment, in the other
+ * slices, would wait for the producer for ever, and the processes of every
+ * segment that wait for their rows with them: the statement hung.  So a
+ * producer the translator marks as read in other slices (the fourth of its
+ * custom_private, gp_orca_set_share_across()) is run when its slice's plan
+ * is done, if it has not run -- the Sequence's ShutdownCustomScan, which the
+ * executor calls when a run of the plan ends, before gp_core ends the
+ * fragment's streams -- as Cloudberry's squelched ShareInputScan writes its
+ * rows for the other slices (ExecSquelchShareInputScan()).
  * The files go when the Gather above ends, with its Motions' rows
  * (gp_internal.motion_drop()), or with the aborted transaction of the
  * process that wrote them.
@@ -84,6 +97,7 @@
 #define SHARE_PRIVATE_ID		0
 #define SHARE_PRIVATE_SLICE		1
 #define SHARE_PRIVATE_PRODUCER	2
+#define SHARE_PRIVATE_ACROSS	3	/* a producer: read in other slices */
 
 /* How long a consumer sleeps between looks for its rows, at most, in ms. */
 #define SHARE_WAIT_MAX_MS		20
@@ -92,6 +106,7 @@ typedef struct SequenceState
 {
 	CustomScanState css;
 	bool		produced;
+	bool		across;			/* a producer's CTE is read in other slices */
 } SequenceState;
 
 typedef struct SharedScanState
@@ -117,6 +132,7 @@ static void end_sequence(CustomScanState *node);
 static void rescan_sequence(CustomScanState *node);
 
 static Node *create_shared_scan_state(CustomScan *cscan);
+static void shutdown_sequence(CustomScanState *node);
 static void begin_shared_scan(CustomScanState *node, EState *estate,
 							  int eflags);
 static TupleTableSlot *exec_shared_scan(CustomScanState *node);
@@ -136,6 +152,7 @@ static const CustomExecMethods sequence_exec_methods = {
 	.ExecCustomScan = exec_sequence,
 	.EndCustomScan = end_sequence,
 	.ReScanCustomScan = rescan_sequence,
+	.ShutdownCustomScan = shutdown_sequence,
 };
 
 const CustomScanMethods gp_orca_shared_scan_methods = {
@@ -227,9 +244,10 @@ make_shared_scan(int share_id, int slice, bool producer)
 
 	cscan->methods = &gp_orca_shared_scan_methods;
 	cscan->scan.scanrelid = 0;
-	cscan->custom_private = list_make3(makeInteger(share_id),
+	cscan->custom_private = list_make4(makeInteger(share_id),
 									   makeInteger(slice),
-									   makeBoolean(producer));
+									   makeBoolean(producer),
+									   makeBoolean(false));
 	return cscan;
 }
 
@@ -253,6 +271,28 @@ gp_orca_make_share_consumer(int share_id, int slice, List *scan_tlist,
 	cscan->custom_scan_tlist = scan_tlist;
 	cscan->scan.plan.targetlist = targetlist;
 	return (Plan *) cscan;
+}
+
+void
+gp_orca_set_share_across(Plan *plan)
+{
+	CustomScan *cscan = (CustomScan *) plan;
+
+	Assert(IsA(plan, CustomScan) && cscan->methods == &gp_orca_shared_scan_methods);
+	list_nth_cell(cscan->custom_private, SHARE_PRIVATE_ACROSS)->ptr_value =
+		makeBoolean(true);
+}
+
+/* Is "plan" a producer whose CTE other slices read? */
+static bool
+share_read_across(Plan *plan)
+{
+	CustomScan *cscan = (CustomScan *) plan;
+
+	return IsA(plan, CustomScan) &&
+		cscan->methods == &gp_orca_shared_scan_methods &&
+		list_length(cscan->custom_private) > SHARE_PRIVATE_ACROSS &&
+		boolVal(list_nth(cscan->custom_private, SHARE_PRIVATE_ACROSS));
 }
 
 bool
@@ -285,14 +325,19 @@ create_sequence_state(CustomScan *cscan)
 static void
 begin_sequence(CustomScanState *node, EState *estate, int eflags)
 {
+	SequenceState *state = (SequenceState *) node;
 	CustomScan *cscan = (CustomScan *) node->ss.ps.plan;
 	ListCell   *lc;
 
 	outerPlanState(node) = ExecInitNode(outerPlan(cscan), estate, eflags);
 	foreach(lc, cscan->custom_plans)
+	{
 		node->custom_ps = lappend(node->custom_ps,
 								  ExecInitNode((Plan *) lfirst(lc), estate,
 											   eflags));
+		if (share_read_across((Plan *) lfirst(lc)))
+			state->across = true;
+	}
 
 	/* the rows are the outer plan's, in whatever slots they come in */
 	node->ss.ps.resultopsset = true;
@@ -314,6 +359,27 @@ exec_sequence(CustomScanState *node)
 		state->produced = true;
 	}
 	return ExecProcNode(outerPlanState(node));
+}
+
+/*
+ * A run of the plan is over, and it never asked for a row: a producer whose
+ * CTE other slices read runs all the same, so that their consumers do not
+ * wait for it for ever -- see the file's header.  A run that ends with rows
+ * still to fetch -- a FETCH's -- may produce before the plan would have: the
+ * CTE reads nothing the plan sets.
+ */
+static void
+shutdown_sequence(CustomScanState *node)
+{
+	SequenceState *state = (SequenceState *) node;
+	ListCell   *lc;
+
+	if (state->produced || !state->across ||
+		(node->ss.ps.state->es_top_eflags & EXEC_FLAG_EXPLAIN_ONLY))
+		return;
+	foreach(lc, node->custom_ps)
+		(void) ExecProcNode((PlanState *) lfirst(lc));
+	state->produced = true;
 }
 
 static void
