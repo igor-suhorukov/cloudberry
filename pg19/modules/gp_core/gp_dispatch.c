@@ -92,6 +92,7 @@
 #include "fmgr.h"
 #include "funcapi.h"
 #include "libpq-fe.h"
+#include "libpq/libpq-be.h"
 #include "libpq/libpq-be-fe-helpers.h"
 #include "mb/pg_wchar.h"
 #include "miscadmin.h"
@@ -2964,6 +2965,21 @@ dispatch_commit_recorded(TransactionId latestXid)
 		prev_commit_recorded_hook(latestXid);
 	if (dtx_nprepared > 0)
 		gang_commit_second_phase();
+
+	/*
+	 * Cloudberry's fault as a transaction ends for the other sessions
+	 * (ProcArrayEndTransaction(), in its procarray.c), after its parts
+	 * committed: a test holds a coordinator here, its transaction still in
+	 * progress for every snapshot, while a transaction that waited for its
+	 * row on a segment goes on there (gdd/concurrent_update).  Only a suspend
+	 * or a sleep belongs here: the transaction is committed, and an error
+	 * would be a PANIC.  In the connection's database, as Cloudberry names
+	 * it, with no catalog read after the commit.
+	 */
+	if (gp_fault_active != NULL && *gp_fault_active > 0)
+		(void) GpFaultTrigger("before_xact_end_procarray",
+							  MyProcPort != NULL ? MyProcPort->database_name : "",
+							  "");
 }
 
 static void

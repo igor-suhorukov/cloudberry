@@ -1,0 +1,9 @@
+@@
+-ERROR:  tuple to be locked was already moved to another partition or segment due to concurrent update
++ERROR:  tuple to be locked was already moved to another partition due to concurrent update
+@@
+-ERROR:  tuple to be locked was already moved to another partition or segment due to concurrent update
++ERROR:  tuple to be locked was already moved to another partition due to concurrent update
+@@
+-ERROR:  tuple to be locked was already moved to another partition or segment due to concurrent update
++ERROR:  tuple to be locked was already moved to another partition due to concurrent update

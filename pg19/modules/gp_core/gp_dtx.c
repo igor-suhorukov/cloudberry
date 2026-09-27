@@ -1279,8 +1279,23 @@ dtx_executor_start(QueryDesc *queryDesc, int eflags)
 		GpClusterIsDispatched() && !GpShareIsReader() &&
 		(ds = dtx_current()) != NULL)
 	{
-		Snapshot	crafted = dtx_craft(queryDesc->snapshot, ds);
+		Snapshot	crafted;
 
+		/*
+		 * Where Cloudberry's segment asks which distributed transaction a
+		 * local one is, before it waits for its row (LocalXidGetDistributedXid()
+		 * in XactLockTableWait()): here, as a statement that writes or locks
+		 * rows looks up the distributed transactions of the local ones in the
+		 * map.  A test holds such a statement here while the transaction it
+		 * would have waited for commits everywhere, and the map, not the
+		 * procarray, must answer for it (gdd/concurrent_update).
+		 */
+		if (gp_fault_active != NULL && *gp_fault_active > 0 &&
+			(queryDesc->operation != CMD_SELECT ||
+			 queryDesc->plannedstmt->rowMarks != NIL))
+			GP_FAULT("before_get_distributed_xid");
+
+		crafted = dtx_craft(queryDesc->snapshot, ds);
 		if (crafted != queryDesc->snapshot)
 		{
 			Snapshot	old = queryDesc->snapshot;

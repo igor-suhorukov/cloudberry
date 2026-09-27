@@ -42,6 +42,7 @@ run  create_index_deadlock
 run  commit_transaction_block_checkpoint
 run  prepare_limit                                 standby
 run  gdd/prepare                                   gdd*
+run  gdd/concurrent_update                         gdd3
 run  gdd/dist-deadlock-01                          gdd1
 run  gdd/dist-deadlock-04                          gdd1
 run  gdd/dist-deadlock-05                          gdd1
