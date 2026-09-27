@@ -195,7 +195,16 @@ CPaxDeleter *CPaxDmlStateLocal::GetDeleter(Relation rel, Snapshot snapshot,
     InitDmlState(rel, CMD_DELETE);
     state = FindDmlState(cbdb::RelationGetRelationId(rel));
   }
+  // Its deletes are made as the state is finished: with the outer
+  // statement, where a statement of a trigger's -- an AFTER INSERT
+  // trigger's UPDATE of the table its COPY writes -- made the deleter.
+  // Its snapshot, that statement's, is kept until then.
   if (state->deleter == nullptr && !missing_null) {
+    if (snapshot != nullptr && IsMVCCSnapshot(snapshot)) {
+      state->deleter_snapshot =
+          RegisterSnapshotOnOwner(snapshot, TopTransactionResourceOwner);
+      snapshot = state->deleter_snapshot;
+    }
     state->deleter = std::make_unique<CPaxDeleter>(rel, snapshot);
   }
   return state->deleter.get();

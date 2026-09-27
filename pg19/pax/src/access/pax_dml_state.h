@@ -102,6 +102,15 @@ class CPaxDmlStateLocal final {
     std::unique_ptr<CPaxDeleter> deleter;
     const void *owner = nullptr;
     SubTransactionId subid = InvalidSubTransactionId;
+    // the deleter's snapshot, kept until the state's deletes are made
+    Snapshot deleter_snapshot = nullptr;
+
+    ~DmlStateValue() {
+      deleter = nullptr;
+      if (deleter_snapshot)
+        UnregisterSnapshotFromOwner(deleter_snapshot,
+                                    TopTransactionResourceOwner);
+    }
   };
 
   void FinishState(Oid oid, std::shared_ptr<DmlStateValue> state);
