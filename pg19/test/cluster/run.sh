@@ -4825,6 +4825,241 @@ else
 	notok "a server with no cluster starts" "$(tail -5 "$ROOT/node0.log")"
 fi
 
+###############################################################################
+echo "20. parallelism within a segment"
+###############################################################################
+# gp_parallel.c: with gp.enable_parallel on, a segment's writer runs a Gather
+# of PostgreSQL's in what it runs for the coordinator -- a gather's query of
+# the planner's route that the coordinator reads to its end, planned there
+# with parallel plans allowed -- whole at its first FETCH.  The evidence is each
+# segment's own count of the workers it launched (pg_stat_database), which a
+# session's segment backends report as they end with it.
+if [ "$started" -eq 1 ]; then
+	par_started=1
+	for n in 1 2 0; do
+		start_node "$n" "shared_preload_libraries = '$PRELOAD,gp_orca,gp_ao,pax'" \
+			"gp.cluster_secret = '$SECRET'" "max_worker_processes = 16" \
+			"max_parallel_workers = 8" || par_started=0
+	done
+	out=$(q 0 "SET client_min_messages = warning; CREATE EXTENSION IF NOT EXISTS gp_orca;
+			   CREATE EXTENSION gp_ao; CREATE EXTENSION pax;
+			   CREATE TABLE ph (a int, b int) WITH (parallel_workers = 2) DISTRIBUTED BY (a);
+			   CREATE TABLE pa (a int, b int) USING ao_row WITH (parallel_workers = 2) DISTRIBUTED BY (a);
+			   CREATE TABLE pc (a int, b int) USING ao_column WITH (parallel_workers = 2) DISTRIBUTED BY (a);
+			   CREATE TABLE pp (a int, b int) USING pax WITH (parallel_workers = 2) DISTRIBUTED BY (a);
+			   SET gp.appendonly_insert_files = 4;
+			   INSERT INTO ph SELECT i, i FROM generate_series(1, 300000) i;
+			   INSERT INTO pa SELECT i, i FROM generate_series(1, 300000) i;
+			   INSERT INTO pc SELECT i, i FROM generate_series(1, 300000) i;
+			   INSERT INTO pp SELECT i, i FROM generate_series(1, 300000) i;
+			   ANALYZE ph; ANALYZE pa; ANALYZE pc; ANALYZE pp;")
+	if [ "$par_started" -eq 1 ] && [ -z "$out" ]; then
+		ok "the cluster restarts with room for workers, and a heap, an AO row, an AO column and a PAX table of 300,000 rows"
+	else
+		notok "the cluster for parallelism within a segment" "$out $(tail -3 "$ROOT/node0.log")"
+	fi
+
+	# what makes a Gather pay on tables this small, as a session sets it
+	PAR="SET gp.enable_parallel = on; SET max_parallel_workers_per_gather = 2;
+		 SET parallel_setup_cost = 0; SET parallel_tuple_cost = 0;
+		 SET min_parallel_table_scan_size = 0;"
+	par_launched() {			# each segment's count of the workers it launched
+		echo "$(q 1 "SELECT parallel_workers_launched FROM pg_stat_database WHERE datname = current_database();")" \
+			"$(q 2 "SELECT parallel_workers_launched FROM pg_stat_database WHERE datname = current_database();")"
+	}
+	par_after() {				# par_after <before>: once both have gone past it, or 5 s on
+		local now i
+		for i in $(seq 1 10); do
+			now=$(par_launched)
+			par_more "$1" "$now" && break
+			sleep 0.5
+		done
+		echo "$now"
+	}
+	par_more() {				# par_more <before> <after>: both segments launched more
+		local b1 b2 a1 a2
+		read -r b1 b2 <<< "$1"; read -r a1 a2 <<< "$2"
+		isnum "$b1" && isnum "$b2" && isnum "$a1" && isnum "$a2" && [ "$a1" -gt "$b1" ] && [ "$a2" -gt "$b2" ]
+	}
+	# par_same <what> <optimizer> <sql> [EXPLAIN's pattern]: the rows with
+	# workers are the rows without, and both segments launched workers
+	par_same() {
+		local want got before after plan
+		want=$(q 0 "SET gp.optimizer = $2; $3")
+		before=$(par_launched)
+		got=$(q 0 "SET gp.optimizer = $2; $PAR $3")
+		after=$(par_after "$before")
+		plan=$(q 0 "SET gp.optimizer = $2; $PAR EXPLAIN (COSTS OFF) $3")
+		if [ -z "$want" ] || [ "$got" != "$want" ]; then
+			notok "$1" "want [$want] got [$got]"
+		elif ! par_more "$before" "$after"; then
+			notok "$1: workers on each segment" "launched $before, then $after"
+		elif [ -n "${4:-}" ] && [[ "$plan" != $4 ]]; then
+			notok "$1: the plan" "$plan"
+		else
+			ok "$1"
+		fi
+	}
+
+	for t in ph pa pc pp; do
+		par_same "the planner's route: a gather of $t read whole on each segment, by the writer and its workers" \
+			off "SELECT count(*), sum(b) FROM $t WHERE b % 7 = 0;"
+	done
+	# Not read whole, not run whole: a gather below a LIMIT the segments
+	# are not sent, and a cursor's -- in batches, as before, with no workers.
+	sleep 1
+	before=$(par_launched)
+	out=$(q 0 "SET gp.optimizer = off; $PAR SELECT count(*) FROM (SELECT a FROM ph WHERE b % 7 = 0 AND a > random() - 2 LIMIT 5) s;")
+	out2=$(printf '%s\n' "SET gp.optimizer = off;" "$PAR" "BEGIN;" \
+		"DECLARE pc1 CURSOR FOR SELECT a FROM ph WHERE b % 7 = 0;" \
+		"FETCH 2 FROM pc1;" "COMMIT;" | qf 0 | wc -l)
+	sleep 1
+	after=$(par_launched)
+	[ "$out|$out2|$after" = "5|2|$before" ] \
+		&& ok "the planner's route: a gather below a LIMIT not sent, and a cursor's, are fetched in batches, with no workers" \
+		|| notok "gathers not read whole" "$out / $out2 / $before -> $after"
+
+	# The transaction's own work, seen by the workers: its rows written
+	# earlier, and a combo command id of its own rows it updated -- heap,
+	# AO and PAX, PAX's deletes too -- and gp.dtx_xid reported by the
+	# writer, not its workers, which could set no setting.
+	for opt in off; do
+		before=$(par_launched)
+		out=$(printf '%s\n' "SET gp.optimizer = $opt;" "$PAR" "BEGIN;" \
+			"INSERT INTO ph SELECT i, 7 FROM generate_series(300001, 300100) i;" \
+			"SELECT count(*) FROM ph WHERE b % 7 = 0;" \
+			"UPDATE ph SET b = b WHERE a > 300000;" \
+			"SELECT count(*) FROM ph WHERE b % 7 = 0;" \
+			"INSERT INTO pa SELECT i, 7 FROM generate_series(300001, 300100) i;" \
+			"SELECT count(*) FROM pa WHERE b % 7 = 0;" \
+			"INSERT INTO pp SELECT i, 7 FROM generate_series(300001, 300100) i;" \
+			"SELECT count(*) FROM pp WHERE b % 7 = 0;" \
+			"DELETE FROM pp WHERE a <= 1000;" \
+			"SELECT count(*) FROM pp WHERE b % 7 = 0;" \
+			"ROLLBACK;" | qf 0 | tr '\n' ' ')
+		after=$(par_after "$before")
+		if [ "$out" = "42957 42957 42957 42957 42815 " ] && par_more "$before" "$after"; then
+			ok "gp.optimizer = $opt: workers see what their writer's transaction wrote, updated and deleted"
+		else
+			notok "the writer's own work under workers, gp.optimizer = $opt" "$out / $before -> $after"
+		fi
+	done
+
+	# The distributed snapshot, as section 13 checks it, under workers: the
+	# snapshot the writer made to agree with it is its workers', a commit it
+	# hides hidden from them, and what it deleted kept for them by VACUUM.
+	# The sessions are kept in step by files their psql waits for (\!): the
+	# reading one takes its distributed snapshot, the others do their work,
+	# and only then does it read -- the segments' own snapshots taken after.
+	par_step() {				# par_step <name>: the psql line that waits for it
+		echo "\\! while [ ! -f $ROOT/par_$1 ]; do sleep 0.1; done"
+	}
+	par_signal() {				# par_signal <name>: the psql line that gives it
+		echo "\\! touch $ROOT/par_$1"
+	}
+	par_await() {				# par_await <name>: the shell waits for it, 30 s at most
+		local i
+		for i in $(seq 1 300); do [ -f "$ROOT/par_$1" ] && return 0; sleep 0.1; done
+		return 1
+	}
+	# par_read <opt> <extra settings>: a REPEATABLE READ reader in the
+	# background, its snapshot taken, waiting for "go"; its answer in par_read.out
+	par_read() {
+		rm -f "$ROOT"/par_ready "$ROOT"/par_go
+		printf '%s\n' "SET gp.optimizer = $1;" "$PAR" "$2" "BEGIN ISOLATION LEVEL REPEATABLE READ;" \
+			"SELECT 'established';" "$(par_signal ready)" "$(par_step go)" \
+			"SELECT count(*), sum(b) FROM pd WHERE b % 7 = 0;" "COMMIT;" |
+			qf 0 > "$ROOT/par_read.out" 2>&1 &
+		par_reader=$!
+		par_await ready
+	}
+	# ANALYZE before each: a VACUUM of a distributed table while a snapshot
+	# still sees what it deleted leaves the coordinator's reltuples 0.
+	q 0 "CREATE TABLE pd (a int, b int) WITH (parallel_workers = 2) DISTRIBUTED BY (a);
+		 INSERT INTO pd SELECT i, i FROM generate_series(1, 100000) i;" >/dev/null
+	for opt in off; do
+		q 0 "ANALYZE pd;" >/dev/null
+		want=$(q 0 "SELECT count(*), sum(b) FROM pd WHERE b % 7 = 0;")
+		before=$(par_launched)
+		par_read "$opt" ""
+		q 0 "INSERT INTO pd SELECT i, 7 FROM generate_series(100001, 100010) i;" >/dev/null
+		touch "$ROOT/par_go"
+		wait "$par_reader"
+		out=$(tail -1 "$ROOT/par_read.out")
+		after=$(par_after "$before")
+		if [ -n "$want" ] && [ "$out" = "$want" ] && par_more "$before" "$after"; then
+			ok "gp.optimizer = $opt: a snapshot taken before a commit hides it from the segments' workers too"
+		else
+			notok "a distributed snapshot's view under workers, gp.optimizer = $opt" "$want / $out / $before -> $after"
+		fi
+
+		want=$(q 0 "SELECT count(*), sum(b) FROM pd WHERE b % 7 = 0;")
+		before=$(par_launched)
+		par_read "$opt" ""
+		q 0 "DELETE FROM pd WHERE a > 100000;" >/dev/null
+		q 0 "VACUUM pd;" >/dev/null
+		q 0 "ANALYZE pd;" >/dev/null
+		touch "$ROOT/par_go"
+		wait "$par_reader"
+		out=$(tail -1 "$ROOT/par_read.out")
+		after=$(par_after "$before")
+		if [ -n "$want" ] && [ "$out" = "$want" ] && par_more "$before" "$after"; then
+			ok "gp.optimizer = $opt: VACUUM keeps what a hidden transaction deleted for the workers too"
+		else
+			notok "the horizon under workers, gp.optimizer = $opt" "$want / $out / $before -> $after"
+		fi
+	done
+
+	# A worker's xmin, under REPEATABLE READ: the made snapshot's, lower
+	# than the writer's own transaction snapshot's, which PostgreSQL gives
+	# its workers.  A snapshot of a segment where another transaction has
+	# more subtransactions than a backend keeps (suboverflowed) finds a
+	# hidden transaction's subtransaction in pg_subtrans, which asserts that
+	# it is no older than the backend's xmin.  The hidden one commits after
+	# the reader's distributed snapshot, having written in a subtransaction;
+	# the overflowing one begins after it, and holds 100 subtransactions,
+	# each writing on both segments, open while the workers -- the workers
+	# alone, the writer not taking part -- read the table; and a write after
+	# it has committed, so that the reader's snapshot has it in progress
+	# rather than beyond its xmax.  Without the xmin, an assert-enabled
+	# server's worker fails in SubTransGetTopmostTransaction().
+	for opt in off; do
+		q 0 "ANALYZE pd;" >/dev/null
+		want=$(q 0 "SELECT count(*), sum(b) FROM pd WHERE b % 7 = 0;")
+		before=$(par_launched)
+		par_read "$opt" "SET parallel_leader_participation = off;"
+		printf '%s\n' "BEGIN;" "SAVEPOINT s;" \
+			"INSERT INTO pd SELECT i, 7 FROM generate_series(200001, 200010) i;" \
+			"RELEASE s;" "COMMIT;" | qf 0 > /dev/null 2>&1
+		rm -f "$ROOT"/par_open "$ROOT"/par_end
+		{
+			echo "BEGIN;"
+			for i in $(seq 1 100); do
+				echo "SAVEPOINT s$i; INSERT INTO pd SELECT g, 1 FROM generate_series($((300000 + 10 * i)), $((300007 + 10 * i))) g;"
+			done
+			par_signal open
+			par_step end
+			echo "ROLLBACK;"
+		} | qf 0 > /dev/null 2>&1 &
+		overflow=$!
+		par_await open
+		q 0 "INSERT INTO pd SELECT i, 1 FROM generate_series(400001, 400004) i;" >/dev/null
+		touch "$ROOT/par_go"
+		wait "$par_reader"
+		touch "$ROOT/par_end"
+		wait "$overflow"
+		out=$(tail -1 "$ROOT/par_read.out")
+		after=$(par_after "$before")
+		if [ -n "$want" ] && [ "$out" = "$want" ] && par_more "$before" "$after"; then
+			ok "gp.optimizer = $opt: a worker finds a hidden subtransaction under REPEATABLE READ, its xmin the made snapshot's"
+		else
+			notok "a worker's xmin under REPEATABLE READ, gp.optimizer = $opt" "$want / $out / $before -> $after"
+		fi
+		q 0 "DELETE FROM pd WHERE a > 100000;" >/dev/null
+	done
+	q 0 "DROP TABLE ph, pa, pc, pp, pd;" >/dev/null
+fi
+
 echo
 echo "  $pass passed, $fail failed"
 [ "$fail" -eq 0 ]

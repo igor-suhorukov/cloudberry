@@ -205,6 +205,7 @@ typedef struct GatherScanState
 	int			natts;			/* the relation's attributes, and each one's */
 	int		   *attrs;			/* column in the remote row, or -1 */
 	int			ctid_remote;	/* the remote row's ctid, or -1 */
+	bool		whole;			/* read to its end (GpGatherScanMarkWhole()) */
 	char	   *cursor_name;	/* WHERE CURRENT OF this cursor */
 	int			cursor_param;	/* or the one this parameter names */
 	bool		identity;		/* the rows of a table being changed */
@@ -1835,6 +1836,10 @@ gather_start(GatherScanState *state)
 	appendStringInfoString(&sql, state->limit);
 	appendStringInfoString(&sql, state->locking);
 
+	/* read to its end: its segments may run it whole (gp_parallel.c) */
+	if (state->whole)
+		appendStringInfoString(&sql, GP_WHOLE_MARKER);
+
 	/* the segments direct dispatch named, or the table's: all, or the first */
 	if (state->ncontents > 0)
 		state->gather = GpGatherStartOnContents(sql.data, desc, state->contents,
@@ -2167,6 +2172,105 @@ void
 GpGatherScanMarkRescans(PlanState *root)
 {
 	mark_rescans(root, false);
+}
+
+/*
+ * The gathers a statement reads to their end, whose segments may run their
+ * query whole, with parallel workers where PostgreSQL's planner there finds
+ * that they pay (gp_parallel.c).  A node that reads all of its input before
+ * it returns a row -- a Sort, a Hash, a plain or hashed Agg, a hashed SetOp,
+ * a ModifyTable, a hashed SubPlan -- reads a gather below it to its end
+ * whenever it runs at all; a Limit, the inner side of a NestLoop, either
+ * side of a merge join, any other SubPlan and a CustomScan of another's may
+ * stop short; the rest read their input as far as what reads them does.  A
+ * gather that sends its LIMIT is read no further than it, and marked where
+ * the walk reaches it.  Not a gather of rows being changed or locked or of a
+ * cursor's rows, which are read as they are wanted.
+ */
+static void mark_whole(PlanState *ps, bool whole);
+
+static void
+mark_whole_array(PlanState **planstates, int n, bool whole)
+{
+	for (int i = 0; i < n; i++)
+		mark_whole(planstates[i], whole);
+}
+
+static void
+mark_whole(PlanState *ps, bool whole)
+{
+	if (ps == NULL)
+		return;
+	check_stack_depth();
+
+	if (IsA(ps, CustomScanState) &&
+		((CustomScanState *) ps)->methods == &gather_exec_methods)
+	{
+		GatherScanState *state = (GatherScanState *) ps;
+
+		state->whole = (whole || state->limit[0] != '\0') &&
+			!state->identity && state->ctid_remote < 0 &&
+			state->locking[0] == '\0' && !gather_is_current_of(state);
+		return;
+	}
+
+	foreach_node(SubPlanState, sps, ps->initPlan)
+		mark_whole(sps->planstate, false);
+	foreach_node(SubPlanState, sps, ps->subPlan)
+		mark_whole(sps->planstate, sps->subplan->useHashTable);
+
+	switch (nodeTag(ps))
+	{
+		case T_SortState:
+		case T_HashState:
+		case T_ModifyTableState:
+			whole = true;
+			break;
+		case T_AggState:
+			if (((Agg *) ps->plan)->aggstrategy == AGG_PLAIN ||
+				((Agg *) ps->plan)->aggstrategy == AGG_HASHED)
+				whole = true;
+			break;
+		case T_SetOpState:
+			if (((SetOp *) ps->plan)->strategy == SETOP_HASHED)
+				whole = true;
+			break;
+		case T_LimitState:
+		case T_MergeJoinState:
+		case T_RecursiveUnionState:
+			whole = false;
+			break;
+		case T_NestLoopState:
+			mark_whole(outerPlanState(ps), whole);
+			mark_whole(innerPlanState(ps), false);
+			return;
+		case T_AppendState:
+			mark_whole_array(((AppendState *) ps)->appendplans,
+							 ((AppendState *) ps)->as_nplans, whole);
+			break;
+		case T_MergeAppendState:
+			mark_whole_array(((MergeAppendState *) ps)->mergeplans,
+							 ((MergeAppendState *) ps)->ms_nplans, whole);
+			break;
+		case T_SubqueryScanState:
+			mark_whole(((SubqueryScanState *) ps)->subplan, whole);
+			break;
+		case T_CustomScanState:
+			foreach_ptr(PlanState, child, ((CustomScanState *) ps)->custom_ps)
+				mark_whole(child, false);
+			whole = false;
+			break;
+		default:
+			break;
+	}
+	mark_whole(outerPlanState(ps), whole);
+	mark_whole(innerPlanState(ps), whole);
+}
+
+void
+GpGatherScanMarkWhole(PlanState *root, bool whole)
+{
+	mark_whole(root, whole);
 }
 
 /*

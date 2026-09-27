@@ -59,6 +59,7 @@
 
 #include <signal.h>
 
+#include "access/parallel.h"
 #include "access/xact.h"
 #include "catalog/pg_authid.h"
 #include "funcapi.h"
@@ -174,8 +175,10 @@ GpGddNoteBackend(void)
 		/*
 		 * A reader is one once it has attached to its writer's transaction,
 		 * which a slice does before it runs; pg_locks says so of its locks.
+		 * So is a parallel worker of the writer (gp_parallel.c), which is not
+		 * the writer, and holds its locks in its group.
 		 */
-		b->reader = GpShareIsReader();
+		b->reader = GpShareIsReader() || IsParallelWorker();
 	}
 	else if (GpClusterBackendRole() == GP_ROLE_DISPATCH)
 	{

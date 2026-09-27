@@ -575,6 +575,15 @@ What Cloudberry's tests asked for next (2026-09-27), in `gp_core`,
   counted where they lie as a run ends; gp_toolkit's four workfile views of
   the same files; and a segment's cancel in its QE's words
   (`gp_workfile.c`);
+- **parallelism within a segment** (`gp.enable_parallel`, off by default as
+  Cloudberry's is; PostgreSQL's `max_parallel_workers_per_gather` and
+  parallel costs, sent to the segments): the segment's writer runs a Gather
+  of PostgreSQL's in what it runs for the coordinator, whole at its first
+  FETCH, its workers in the writer's lock group — a gather's query of the
+  planner's route that the coordinator reads to its end, which the segment
+  plans with parallel plans allowed; a reader's slice runs without them, a
+  member of a lock group leading none of its own; `max_worker_processes` is
+  the cluster's to size (`modules/gp_core/gp_parallel.c`);
 - and the server built with LDAP, for `pg_hba.conf`'s ldap lines.
 
 The transport and encryption modules — `interconnect`, `udp2`, `gp_tde` —

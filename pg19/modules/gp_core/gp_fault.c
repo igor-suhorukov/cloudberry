@@ -44,6 +44,7 @@
  */
 #include "postgres.h"
 
+#include "access/parallel.h"
 #include "commands/dbcommands.h"
 #include "fmgr.h"
 #include "libpq-fe.h"
@@ -288,6 +289,15 @@ GpFaultTrigger(const char *name, const char *database, const char *table)
 	GpFaultType type = GP_FAULT_NONE;
 
 	if (fault_shared == NULL || fault_shared->nactive == 0)
+		return GP_FAULT_NONE;
+
+	/*
+	 * A fault is the process's that runs its part of a statement, as it is
+	 * Cloudberry's QE's: a parallel worker of a segment's writer, which reads
+	 * a share of a scan for it (gp_parallel.c), fires none, and counts no
+	 * hit twice.
+	 */
+	if (IsParallelWorker())
 		return GP_FAULT_NONE;
 	memset(&local, 0, sizeof(local));
 
