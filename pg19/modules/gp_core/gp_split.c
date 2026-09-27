@@ -842,8 +842,9 @@ PG_FUNCTION_INFO_V1(gp_split_delete);
  * gp_internal.split_delete(NULL::t, ctids, tables, numbers)
  *		A Split's DELETE half on this segment: each row the coordinator names,
  *		by its table and ctid, deleted as ORCA's Split deletes it, and returned
- *		with its number as t's row.  A row this statement deleted already is
- *		passed over, as ExecDelete() passes it over.
+ *		with its number, its table and its ctid, as t's row.  A row this
+ *		statement deleted already is passed over, as ExecDelete() passes it
+ *		over.
  */
 Datum
 gp_split_delete(PG_FUNCTION_ARGS)
@@ -876,8 +877,8 @@ gp_split_delete(PG_FUNCTION_ARGS)
 		ItemPointer tid = DatumGetItemPointer(tids[i]);
 		TM_FailureData tmfd;
 		TM_Result	result;
-		Datum		values[3];
-		bool		nulls[3] = {false, false, false};
+		Datum		values[4];
+		bool		nulls[4] = {false, false, false, false};
 
 		CHECK_FOR_INTERRUPTS();
 		if (!table_tuple_fetch_row_version(part->rel, tid, snapshot, part->slot))
@@ -905,7 +906,8 @@ gp_split_delete(PG_FUNCTION_ARGS)
 
 		values[0] = numbers[i];
 		values[1] = toids[i];
-		values[2] = split_root_row(part->slot, part->toroot, rootslot);
+		values[2] = tids[i];
+		values[3] = split_root_row(part->slot, part->toroot, rootslot);
 		tuplestore_putvalues(rsinfo->setResult, rsinfo->setDesc, values, nulls);
 	}
 
@@ -1040,8 +1042,8 @@ PG_FUNCTION_INFO_V1(gp_split_insert);
  *		inserted as ORCA's Split inserts it -- its generated columns computed,
  *		its constraints checked, its index entries made -- into the partition
  *		t's routing gives it, or where the old version was, for a table of an
- *		inheritance tree; and returned with its number and its table, as t's
- *		row.
+ *		inheritance tree; and returned with its number, its table and its
+ *		ctid, as t's row.
  */
 Datum
 gp_split_insert(PG_FUNCTION_ARGS)
@@ -1110,8 +1112,8 @@ gp_split_insert(PG_FUNCTION_ARGS)
 		TupleConversionMap *map = NULL;
 		TupleTableSlot *slot = rootslot;
 		SplitTable *part = NULL;
-		Datum		values[3];
-		bool		nulls[3] = {false, false, false};
+		Datum		values[4];
+		bool		nulls[4] = {false, false, false, false};
 
 		CHECK_FOR_INTERRUPTS();
 		ResetPerTupleExprContext(estate);
@@ -1180,18 +1182,19 @@ gp_split_insert(PG_FUNCTION_ARGS)
 		if (rri->ri_NumIndices > 0)
 			(void) ExecInsertIndexTuples(rri, estate, 0, slot, NIL, NULL);
 
-		/* the row as it was written, as the root has it */
+		/* the row as it was written, where, and as the root has it */
 		values[0] = numbers[i];
 		values[1] = ObjectIdGetDatum(RelationGetRelid(rri->ri_RelationDesc));
+		values[2] = ItemPointerGetDatum(&slot->tts_tid);
 		if (slot == rootslot)
-			values[2] = split_root_row(slot, NULL, outslot);
+			values[3] = split_root_row(slot, NULL, outslot);
 		else if (part != NULL)
-			values[2] = split_root_row(slot, part->toroot, outslot);
+			values[3] = split_root_row(slot, part->toroot, outslot);
 		else
 		{
 			TupleConversionMap *toroot = ExecGetChildToRootMap(rri);
 
-			values[2] = split_root_row(slot, toroot, outslot);
+			values[3] = split_root_row(slot, toroot, outslot);
 		}
 		tuplestore_putvalues(rsinfo->setResult, rsinfo->setDesc, values, nulls);
 	}

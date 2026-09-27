@@ -850,9 +850,9 @@ explicit_create_state(CustomScan *cscan)
 
 /*
  * What a segment's RETURNING gives back: the number of the plan's row that
- * asked (with_n), the table the row is in, and the target's columns but the
- * dropped ones -- and, with_other, the table and the columns of the row's
- * other version, all null where it has none.
+ * asked (with_n), the table the row is in, its ctid there, and the target's
+ * columns but the dropped ones -- and, with_other, the table, the ctid and
+ * the columns of the row's other version, all null where it has none.
  */
 static TupleDesc
 returned_desc(TupleDesc targetdesc, bool with_n, bool with_other)
@@ -864,13 +864,14 @@ returned_desc(TupleDesc targetdesc, bool with_n, bool with_other)
 	for (int i = 0; i < targetdesc->natts; i++)
 		if (!TupleDescAttr(targetdesc, i)->attisdropped)
 			ncols++;
-	desc = CreateTemplateTupleDesc((ncols + 1) * (with_other ? 2 : 1) +
+	desc = CreateTemplateTupleDesc((ncols + 2) * (with_other ? 2 : 1) +
 								   (with_n ? 1 : 0));
 	if (with_n)
 		TupleDescInitEntry(desc, col++, "gp_n", INT8OID, -1, 0);
 	for (int image = 0; image < (with_other ? 2 : 1); image++)
 	{
 		TupleDescInitEntry(desc, col++, "gp_toid", OIDOID, -1, 0);
+		TupleDescInitEntry(desc, col++, "gp_ctid", TIDOID, -1, 0);
 		for (int i = 0; i < targetdesc->natts; i++)
 		{
 			Form_pg_attribute att = TupleDescAttr(targetdesc, i);
@@ -1354,9 +1355,9 @@ explicit_begin(CustomScanState *node, EState *estate, int eflags)
 						 state->on_conflict == ONCONFLICT_UPDATE)) ||
 			(state->checks && state->on_conflict == ONCONFLICT_UPDATE);
 
-		appendStringInfo(&tail, " RETURNING %sgp_t.tableoid, gp_t.*%s",
+		appendStringInfo(&tail, " RETURNING %sgp_t.tableoid, gp_t.ctid, gp_t.*%s",
 						 state->operation != CMD_INSERT ? "gp_s.gp_n, " : "",
-						 state->other ? ", old.tableoid, old.*" : "");
+						 state->other ? ", old.tableoid, old.ctid, old.*" : "");
 		state->retdesc = returned_desc(targetdesc,
 									   state->operation != CMD_INSERT,
 									   state->other);
@@ -1413,7 +1414,7 @@ explicit_begin(CustomScanState *node, EState *estate, int eflags)
 						 state->only ? "ONLY " : "",
 						 GpDispatchRelationName(RelationGetRelid(state->target)));
 		state->delete_head = dh.data;
-		state->delete_tail = ") AS gp_s (gp_ctid, gp_toid, gp_n) WHERE gp_t.ctid = gp_s.gp_ctid AND gp_t.tableoid = gp_s.gp_toid RETURNING gp_s.gp_n, gp_t.tableoid, gp_t.*";
+		state->delete_tail = ") AS gp_s (gp_ctid, gp_toid, gp_n) WHERE gp_t.ctid = gp_s.gp_ctid AND gp_t.tableoid = gp_s.gp_toid RETURNING gp_s.gp_n, gp_t.tableoid, gp_t.ctid, gp_t.*";
 		state->olddesc = returned_desc(targetdesc, true, false);
 
 		initStringInfo(&ih);
@@ -1442,7 +1443,7 @@ explicit_begin(CustomScanState *node, EState *estate, int eflags)
 		appendStringInfo(&ih, ")%s VALUES ",
 						 identity ? " OVERRIDING SYSTEM VALUE" : "");
 		state->insert_head = ih.data;
-		state->insert_tail = state->back ? " RETURNING gp_t.tableoid, gp_t.*" : "";
+		state->insert_tail = state->back ? " RETURNING gp_t.tableoid, gp_t.ctid, gp_t.*" : "";
 		state->newdesc = returned_desc(targetdesc, false, false);
 		state->hash = GpHashMake(policy, targetdesc);
 		if (state->outerslot == NULL)
@@ -2209,8 +2210,8 @@ explicit_send_rows(ExplicitState *state, int content, List *rows,
  * split_insert() (gp_split.c): the rows -- the ctids of those to delete, or
  * the new versions, as the root's rows -- their tables and their numbers,
  * each an array, EXPLICIT_SPLIT_ROWS at a time.  What the call returns --
- * each row's number, its table, and it as the root has it -- goes to
- * "store".
+ * each row's number, its table, its ctid there, and it as the root has it
+ * -- goes to "store".
  */
 static uint64
 explicit_split_call(ExplicitState *state, int content, bool insert,
@@ -2228,9 +2229,9 @@ explicit_split_call(ExplicitState *state, int content, bool insert,
 
 	get_typlenbyvalalign(rowtype, &typlen, &typbyval, &typalign);
 	sql = insert
-		? psprintf("SELECT gp_n, gp_toid, (gp_row).* FROM gp_internal.split_insert(NULL::%s, $1::%s[], $2::pg_catalog.oid[], $3::pg_catalog.int8[])",
+		? psprintf("SELECT gp_n, gp_toid, gp_ctid, (gp_row).* FROM gp_internal.split_insert(NULL::%s, $1::%s[], $2::pg_catalog.oid[], $3::pg_catalog.int8[])",
 				   name, name)
-		: psprintf("SELECT gp_n, gp_toid, (gp_row).* FROM gp_internal.split_delete(NULL::%s, $1::pg_catalog.tid[], $2::pg_catalog.oid[], $3::pg_catalog.int8[])",
+		: psprintf("SELECT gp_n, gp_toid, gp_ctid, (gp_row).* FROM gp_internal.split_delete(NULL::%s, $1::pg_catalog.tid[], $2::pg_catalog.oid[], $3::pg_catalog.int8[])",
 				   name);
 
 	while (first < list_length(rows))
@@ -2361,7 +2362,7 @@ explicit_send_split(ExplicitState *state)
 	while (tuplestore_gettupleslot(olds, true, false, oldslot))
 	{
 		int64		n;
-		int			col = 2;
+		int			col = 3;	/* past its number, its table and its ctid */
 		int			seg;
 
 		slot_getallattrs(oldslot);
@@ -2479,7 +2480,7 @@ explicit_send_split(ExplicitState *state)
 			memcpy(&rn[1], &newslot->tts_isnull[from], width * sizeof(bool));
 			if (state->other)
 			{
-				/* the old row after the new: its table and columns */
+				/* the old row after the new: its table, ctid and columns */
 				ExecStoreMinimalTuple(olders[n], oldslot, false);
 				slot_getallattrs(oldslot);
 				memcpy(&rv[1 + width], &oldslot->tts_values[1], width * sizeof(Datum));
@@ -2654,9 +2655,11 @@ explicit_send(ExplicitState *state)
 
 /*
  * A version of a row the segments sent back, from column *col of it on: its
- * table, then its columns, as the root has them, in "rootslot"; and as the
- * result relation relidx has them, where that is not the root.  NULL where
- * the row has no such version, its table null.
+ * table, its ctid on the segment that wrote it -- what RETURNING's ctid
+ * says, as a segment's own ModifyTable would say it -- then its columns, as
+ * the root has them, in "rootslot"; and as the result relation relidx has
+ * them, where that is not the root.  NULL where the row has no such
+ * version, its table null.
  */
 static TupleTableSlot *
 explicit_returned_version(ExplicitState *state, int *col,
@@ -2667,6 +2670,13 @@ explicit_returned_version(ExplicitState *state, int *col,
 	TupleTableSlot *slot;
 	bool		exists = !state->retslot->tts_isnull[*col];
 	Oid			relid = DatumGetObjectId(state->retslot->tts_values[(*col)++]);
+	ItemPointerData tid;
+
+	if (state->retslot->tts_isnull[*col])
+		ItemPointerSetInvalid(&tid);
+	else
+		ItemPointerCopy(DatumGetItemPointer(state->retslot->tts_values[*col]), &tid);
+	(*col)++;
 
 	/* the root's row, a dropped column null */
 	ExecClearTuple(rootslot);
@@ -2696,6 +2706,7 @@ explicit_returned_version(ExplicitState *state, int *col,
 			slot = ExecCopySlot(relslot, rootslot);
 	}
 	slot->tts_tableOid = relid;
+	slot->tts_tid = tid;
 	return slot;
 }
 

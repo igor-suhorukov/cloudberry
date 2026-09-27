@@ -995,6 +995,23 @@ a\b|\N' ] && [ "$(cat "$ROOT/ce_prog.txt" 2>&1)" = "to a program" ] \
 	[ "$out" = "v2|v2! 10|t t|110 ->dos one>uno 4|104|40|1040 sales_1_prt_1|sales_1_prt_3 " ] \
 		&& ok "RETURNING old and new: an UPDATE's, a DELETE's, an INSERT's, an upsert's, a moved row's, a row moved between partitions" \
 		|| notok "RETURNING old and new" "$out"
+	# RETURNING ctid: each row's own, on the segment that wrote it -- an
+	# UPDATE's new version and its old one, a moved row's, an INSERT's, a
+	# DELETE's row -- as a segment's own ModifyTable gives it.
+	q 0 "CREATE TABLE rct (a int, b int) DISTRIBUTED BY (a); INSERT INTO rct SELECT g, g FROM generate_series(1, 20) g;" >/dev/null
+	before=$(for n in 1 2; do q $n "SELECT ctid FROM rct WHERE a = 6;"; done)
+	out=$( { q 0 "UPDATE rct SET b = -b WHERE a IN (3, 4) RETURNING a, gp_segment_id, ctid, old.ctid <> new.ctid;"
+	         q 0 "UPDATE rct SET a = a + 100 WHERE a = 5 RETURNING a, gp_segment_id, ctid, old.ctid <> new.ctid;"
+	         q 0 "INSERT INTO rct VALUES (30, 30) RETURNING a, gp_segment_id, ctid, true;"; } | sort)
+	out2=$(q 0 "DELETE FROM rct WHERE a = 6 RETURNING ctid;")
+	bad=""
+	while IFS='|' read -r a seg ctid moved; do
+		isnum "$seg" && [ "$(q $((seg + 1)) "SELECT ctid FROM rct WHERE a = $a;")" = "$ctid" ] && [ "$moved" = t ] \
+			|| bad="$bad $a"
+	done <<< "$out"
+	[ "$(echo "$out" | wc -l)" = 4 ] && [ -z "$bad" ] && [ -n "$before" ] && [ "$out2" = "$before" ] \
+		&& ok "RETURNING ctid: each row's, on the segment that wrote it" \
+		|| notok "RETURNING ctid" "$out / not the segment's:$bad / deleted $out2, was $before"
 	# Check options.  A view's WITH CHECK OPTION is the coordinator's: the
 	# rows the segments wrote come back and are checked here -- an INSERT's,
 	# an UPDATE's, a moved row's, an upsert's -- LOCAL and CASCADED as
