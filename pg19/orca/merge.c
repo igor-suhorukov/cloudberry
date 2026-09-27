@@ -31,6 +31,11 @@
  * join's row, as set_plan_refs() makes them read them (INNER_VAR), and the
  * target's from the row the ctid fetches, the scan tuple.
  *
+ * RETURNING, on one node, as set_returning_clause_references() fixes it:
+ * the target's Vars read the row the action wrote, the scan tuple, and the
+ * source's the join's row, as OUTER_VAR -- the SELECT returns them as it
+ * returns an action's -- and merge_action() the MERGE's own node answers.
+ *
  * Row marks, as the planner makes them for a MERGE (preprocess_rowmarks()):
  * ROW_MARK_REFERENCE on each table of the source, its ctid carried up from
  * its scan, so that EvalPlanQual re-checks a target row another transaction
@@ -50,7 +55,9 @@
  * view as the target, a replicated one or a coordinator's on a cluster, and
  * on one node one whose method takes the old row from the plan (O20); WHEN
  * NOT MATCHED BY SOURCE, whose test of the source's row is a whole-row Var,
- * which ORCA does not take; RETURNING; a subquery anywhere in it; and on one
+ * which ORCA does not take; RETURNING on a cluster, whose merge_action()
+ * only a MERGE's own node answers, where the explicit write writes; a
+ * subquery anywhere in it; and on one
  * node a source that is not plain tables, whose rows a row mark would copy
  * whole, as a ROW() the translator does not take.
  *
@@ -178,9 +185,9 @@ GpOrcaPrepareMerge(Query *query, Query **select, OrcaMerge **statep,
 		*why = "a MERGE on a cluster, with a gp_core before 1.11";
 		return false;
 	}
-	if (query->returningList != NIL)
+	if (query->returningList != NIL && cluster)
 	{
-		*why = "a MERGE's RETURNING";
+		*why = "a MERGE's RETURNING on a cluster";
 		return false;
 	}
 	if (query->hasSubLinks)
@@ -290,6 +297,7 @@ GpOrcaPrepareMerge(Query *query, Query **select, OrcaMerge **statep,
 		add_source_vars((Node *) action->targetList, merge->resultRelation, &vars);
 	}
 	add_source_vars(merge->mergeJoinCondition, merge->resultRelation, &vars);
+	add_source_vars((Node *) merge->returningList, merge->resultRelation, &vars);
 
 	/* the SELECT ORCA plans: the join, and what ModifyTable reads of it */
 	sel = copyObject(merge);
@@ -368,12 +376,14 @@ typedef struct merge_vars_context
 {
 	OrcaMerge  *state;
 	Index		rti;			/* the target's, in ORCA's range table */
+	int			source;			/* the join's row: INNER_VAR or OUTER_VAR */
 } merge_vars_context;
 
 /*
  * An action's expression over ORCA's plan: the target's Vars read the scan
  * tuple, as they are, at the target's index in ORCA's range table; the
- * source's read the join's row, as INNER_VAR, by their place in it.
+ * source's read the join's row, as INNER_VAR -- RETURNING's as OUTER_VAR,
+ * as ExecProcessReturning() hands it the row -- by their place in it.
  */
 static Node *
 merge_vars_mutator(Node *node, merge_vars_context *context)
@@ -404,7 +414,7 @@ merge_vars_mutator(Node *node, merge_vars_context *context)
 		}
 		if (i < 0)
 			elog(ERROR, "a MERGE's column the plan does not return");
-		var->varno = INNER_VAR;
+		var->varno = context->source;
 		var->varattno = i + 1 + context->state->nfirst;
 		return (Node *) var;
 	}
@@ -414,9 +424,17 @@ merge_vars_mutator(Node *node, merge_vars_context *context)
 static Node *
 merge_vars(Node *node, OrcaMerge *state, Index rti)
 {
-	merge_vars_context context = {.state = state,.rti = rti};
+	merge_vars_context context = {.state = state,.rti = rti,.source = INNER_VAR};
 
 	return merge_vars_mutator(node, &context);
+}
+
+static List *
+merge_returning(List *returning, OrcaMerge *state, Index rti)
+{
+	merge_vars_context context = {.state = state,.rti = rti,.source = OUTER_VAR};
+
+	return (List *) merge_vars_mutator((Node *) returning, &context);
 }
 
 /* A WHEN condition or the join condition, as the executor takes it */
@@ -616,6 +634,14 @@ GpOrcaFinishMerge(PlannedStmt *stmt, OrcaMerge *state, const char **why)
 	mt->mergeJoinConditions =
 		list_make1(merge_vars((Node *) implicit_qual(merge->mergeJoinCondition),
 							  state, rti));
+	if (merge->returningList != NIL)
+	{
+		mt->returningLists = list_make1(merge_returning(merge->returningList,
+														state, rti));
+		mt->returningOldAlias = merge->returningOldAlias;
+		mt->returningNewAlias = merge->returningNewAlias;
+		mt->plan.targetlist = copyObject(linitial(mt->returningLists));
+	}
 
 	/* EvalPlanQual's parameter, which every node below depends on */
 	epq = list_length(stmt->paramExecTypes);
@@ -628,7 +654,7 @@ GpOrcaFinishMerge(PlannedStmt *stmt, OrcaMerge *state, const char **why)
 		stmt->planTree = cb_core_api()->explicit_write(stmt, &mt->plan);
 	stmt->commandType = CMD_MERGE;
 	stmt->canSetTag = merge->canSetTag;
-	stmt->hasReturning = false;
+	stmt->hasReturning = merge->returningList != NIL;
 	stmt->resultRelationRelids = bms_make_singleton(rti);
 	stmt->rowMarks = marks;
 

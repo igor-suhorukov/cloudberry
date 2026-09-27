@@ -2906,7 +2906,9 @@ echo "23. INSERT, UPDATE and DELETE, assertions, functions in FROM and foreign t
 # each other -- and compares what a query afterwards reads, after checking
 # that ORCA planned it and that its plan has the node the check is about.
 
-# dml <name> <node> <statement> <check> <setup>
+# dml <name> <node> <statement> <check> <setup> [sort]: with "sort", the
+# lines compared in any order -- a RETURNING whose rows come as the join
+# gives them, which the two plans may join in orders of their own.
 dml() {
 	local plan orca pg
 	plan=$(q2 "$5" "EXPLAIN (COSTS OFF, VERBOSE) $3")
@@ -2920,6 +2922,9 @@ dml() {
 	esac
 	orca=$("$PSQL" -X -q -t -A -d postgres -c "$5" -c "$3" -c "$4" 2>&1)
 	pg=$("$PSQL" -X -q -t -A -d postgres -c "$5; SET gp.optimizer = off" -c "$3" -c "$4" 2>&1)
+	if [ "${6:-}" = sort ]; then
+		orca=$(printf '%s\n' "$orca" | sort); pg=$(printf '%s\n' "$pg" | sort)
+	fi
 	[ "$orca" = "$pg" ] && ok "$1" || notok "$1" "orca [$orca], planner [$pg]"
 }
 
@@ -3265,6 +3270,20 @@ dml "MERGE: ORCA's join, and the MERGE's ModifyTable over it" \
        WHEN NOT MATCHED AND s.a > 7 THEN INSERT (a, b) VALUES (s.a, s.b)
        WHEN NOT MATCHED THEN DO NOTHING" \
     "SELECT a, b, c FROM t2m ORDER BY a" "$T2M"
+
+# Its RETURNING, on one node, as the planner fixes it: the target's columns
+# read the row the action wrote, the source's the join's row, and
+# merge_action() the MERGE's own node answers.  EXPLAIN names each column,
+# one ORCA's plan does not read too, and old and new by their aliases.
+dml "MERGE's RETURNING: merge_action(), the row written, the source's, old and new" \
+    "Output: MERGE_ACTION(), t.a, t.b, t.c, s.b, old.c, new.c" \
+    "MERGE INTO t2m t USING t2n s ON t.a = s.a
+       WHEN MATCHED AND s.d THEN DELETE
+       WHEN MATCHED THEN UPDATE SET b = s.b, c = t.c + 100
+       WHEN NOT MATCHED AND s.a > 7 THEN INSERT (a, b) VALUES (s.a, s.b)
+       WHEN NOT MATCHED THEN DO NOTHING
+       RETURNING merge_action(), t.*, s.b, old.c, new.c" \
+    "SELECT a, b, c FROM t2m ORDER BY a" "$T2M" sort
 
 epq "a MERGE that waited re-checks with the source row it was joined to" \
     "MERGE INTO t2e USING t2j ON t2e.a = t2j.a WHEN MATCHED THEN UPDATE SET b = t2e.b + t2j.w WHEN NOT MATCHED THEN INSERT VALUES (t2j.a, -t2j.w)" \
