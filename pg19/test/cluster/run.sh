@@ -2149,12 +2149,25 @@ COMMIT;"
 	orca_write "a partitioned table's UPDATE whose condition no partition's rows meet, and one joining the table to itself" \
 		"UPDATE wp SET c = 'x' WHERE b = 100; UPDATE wp SET c = 'y' FROM wp w2 WHERE wp.a = w2.a AND w2.b = 5;" \
 		"SELECT count(*) FILTER (WHERE c = 'x'), count(*) FILTER (WHERE c = 'y') FROM wp;" "Update on wp"
-	out=$(printf '%s\n' "SET gp.optimizer_trace_fallback = on;" "BEGIN;" \
-		"UPDATE wp SET b = b + 1 WHERE a IN (9, 19);" "UPDATE wp SET a = a + 1000 WHERE a = 5;" "ROLLBACK;" | qf 0)
+	# An UPDATE of a partitioned table's partition key or distribution key
+	# moves rows: ORCA's Split, whose DELETE gp_core's node applies in the
+	# partition the row's tableoid names, and whose INSERT it routes through
+	# the table, as an INSERT into it is routed -- wp_2's columns in another
+	# order -- the INSERT sent to the segment the new key hashes to.
+	orca_write "a partitioned table's UPDATE of its partition key: each row deleted from its partition and routed to its new one" \
+		"UPDATE wp SET b = (b + 12) % 30 WHERE a < 100;" \
+		"SELECT tableoid::regclass, count(*), sum(a), sum(b), count(c) FROM wp GROUP BY 1 ORDER BY 1;" \
+		"Split Update"
+	orca_write "... and of its distribution key too, the rows moving to other segments and partitions" \
+		"UPDATE wp SET a = a + 1000, b = 29 - b WHERE b < 15;" \
+		"SELECT tableoid::regclass, gp_segment_id, count(*), sum(a), sum(b) FROM wp GROUP BY 1, 2 ORDER BY 1, 2;" \
+		"Redistribute Motion 2:2"
+	out=$(printf '%s\n' "SET gp.optimizer_trace_fallback = on;" "UPDATE wp SET b = b + 100 WHERE a = 7;" | qf 0)
 	case "$out" in
-		*"an UPDATE that moves rows, of a partitioned table"*"an UPDATE that moves rows, of a partitioned table"*)
-			ok "an UPDATE of a partitioned table's partition or distribution key is the planner's, and says why" ;;
-		*) notok "a partitioned table's UPDATE that ORCA declines" "$out" ;;
+		*"GPORCA failed"*) notok "a row no partition takes: planned by ORCA" "$out" ;;
+		*'no partition of relation "wp" found for row'*)
+			ok "... and a row no partition takes is refused, in PostgreSQL's words" ;;
+		*) notok "a partitioned table's row routed nowhere" "$out" ;;
 	esac
 
 	# A subquery an UPDATE or DELETE compares with, finished in one place --

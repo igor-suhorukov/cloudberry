@@ -881,6 +881,9 @@ Plan *MakeSplit(Plan *child, List *targetlist, List *deletecols,
 				List *insertcols, AttrNumber actioncol);
 Plan *MakeSplitModify(Plan *child, Index rti, int natts, AttrNumber actioncol,
 					  AttrNumber ctidcol);
+// A partitioned table's split update, through gp_core 1.11: which column
+// says each DELETE's partition; false where gp_core is older.
+bool SetSplitModifyTableOid(Plan *modify, AttrNumber tableoidcol);
 bool HasAnyTriggers(Oid relid);
 
 // Does the relation's access method take a changed row's old version from

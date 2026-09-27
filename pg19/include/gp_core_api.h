@@ -39,7 +39,7 @@
  * here changes meaning or moves.
  */
 #define GP_CORE_API_VERSION_MAJOR	1
-#define GP_CORE_API_VERSION_MINOR	10
+#define GP_CORE_API_VERSION_MINOR	11
 
 struct Node;
 struct List;
@@ -191,6 +191,15 @@ typedef struct GpCoreApi
 	 */
 	bool		(*share_fileset) (struct PlannedStmt *stmt,
 								  struct FileSet *fileset);
+
+	/*
+	 * Since 1.11: a partitioned table's split update, on the node
+	 * split_modify_make() made -- the column of its rows that says which
+	 * partition each DELETE's row is in, by its tableoid; each INSERT is
+	 * routed into the table's partitions, as an INSERT into it is.
+	 */
+	void		(*split_modify_set_tableoid) (struct Plan *plan,
+											  AttrNumber tableoidcol);
 } GpCoreApi;
 
 /*

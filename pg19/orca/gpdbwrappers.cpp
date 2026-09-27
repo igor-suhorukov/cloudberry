@@ -2997,6 +2997,22 @@ gpdb::MakeSplitModify(Plan *child, Index rti, int natts, AttrNumber actioncol,
 }
 
 bool
+gpdb::SetSplitModifyTableOid(Plan *modify, AttrNumber tableoidcol)
+{
+	GP_WRAP_START;
+	{
+		const GpCoreApi *api = motion_api();
+
+		if (api == nullptr || api->version_minor < 11)
+			return false;
+		api->split_modify_set_tableoid(modify, tableoidcol);
+		return true;
+	}
+	GP_WRAP_END;
+	return false;
+}
+
+bool
 gpdb::HasAnyTriggers(Oid relid)
 {
 	GP_WRAP_START;

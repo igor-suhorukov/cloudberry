@@ -6331,15 +6331,27 @@ CTranslatorDXLToPlStmt::TranslateDXLDml(
 		{
 			GP_UNPORTED("an UPDATE run as a DELETE and an INSERT");
 		}
-		if (gpdb::HasAnyTriggers(CMDIdGPDB::CastMdid(mdid_target_table)->Oid()))
+
+		// A partitioned table's partitions have triggers of their own,
+		// which the table's flag does not say.
+		BOOL triggers =
+			gpdb::HasAnyTriggers(CMDIdGPDB::CastMdid(mdid_target_table)->Oid());
+		IMdIdArray *leaves =
+			md_rel->IsPartitioned() ? md_rel->ChildPartitionMdids() : nullptr;
+		for (ULONG ul = 0; !triggers && nullptr != leaves && ul < leaves->Size();
+			 ul++)
+		{
+			triggers = gpdb::HasAnyTriggers(
+				CMDIdGPDB::CastMdid((*leaves)[ul])->Oid());
+		}
+		if (triggers)
 		{
 			// An UPDATE trigger of its own: Cloudberry refuses an UPDATE of
 			// the key of such a table, in its words, under either planner
 			// (make_splitupdate_path(), cdbpath.c), and so does the
 			// planner's route here (gp_explicit.c).  That route asks a
 			// partitioned table's first result relation, which this plan
-			// does not have, since it moves no partitioned table's rows
-			// (below).
+			// does not have (below).
 			if (!md_rel->IsPartitioned() &&
 				gpdb::HasOwnUpdateTriggers(
 					CMDIdGPDB::CastMdid(mdid_target_table)->Oid()))
@@ -6354,14 +6366,12 @@ CTranslatorDXLToPlStmt::TranslateDXLDml(
 
 	// An UPDATE or DELETE of a partitioned table has a result relation for
 	// each partition, as PostgreSQL 19's planner makes them (the Query
-	// translator took it, DMLPartitionedTargetTaken).  Not a split, whose
-	// rows gp_core's node writes into one table.
+	// translator took it, DMLPartitionedTargetTaken) -- but for a split,
+	// whose rows gp_core's node writes: each DELETE in the partition its
+	// row's tableoid names, and each INSERT routed through the table, as an
+	// INSERT into it is (gp_split.c).
 	BOOL partitioned = md_rel->IsPartitioned() &&
 					   (CMD_UPDATE == m_cmd_type || CMD_DELETE == m_cmd_type);
-	if (partitioned && split)
-	{
-		GP_UNPORTED("an UPDATE that moves rows, of a partitioned table");
-	}
 
 	// On a cluster a distributed table is written where its rows are: the
 	// ModifyTable runs in a slice of its own on the segments -- Cloudberry's
@@ -6490,6 +6500,7 @@ CTranslatorDXLToPlStmt::TranslateDXLDml(
 	// of theirs changes under the statement either.
 	List *part_rtis = NIL;
 	List *part_oids = NIL;
+	AttrNumber tableoid_col = InvalidAttrNumber;
 	BOOL old_row_from_plan =
 		gpdb::RelOldRowFromPlan(CMDIdGPDB::CastMdid(mdid_target_table)->Oid());
 	if (partitioned)
@@ -6507,7 +6518,23 @@ CTranslatorDXLToPlStmt::TranslateDXLDml(
 		AddJunkTargetEntryForColId(&dml_target_list, &child_context,
 								   phy_dml_dxlop->GetSegmentIdColId(),
 								   "tableoid");
-
+		tableoid_col = (AttrNumber) gpdb::ListLength(dml_target_list);
+	}
+	if (partitioned && split)
+	{
+		// A split's INSERT may go to any partition, and its DELETE to any
+		// the plan reads: each is locked as the table is, so that no row
+		// of theirs changes under the statement.
+		RangeTblEntry *root_rte = m_dxl_to_plstmt_context->GetRTEByIndex(index);
+		IMdIdArray *parts = md_rel->ChildPartitionMdids();
+		for (ULONG ul = 0; nullptr != parts && ul < parts->Size(); ul++)
+		{
+			gpdb::GPDBLockRelationOid(CMDIdGPDB::CastMdid((*parts)[ul])->Oid(),
+									  root_rte->rellockmode);
+		}
+	}
+	else if (partitioned)
+	{
 		// The partitions the plan scans the table through, where it scans
 		// it once, as the planner's result relations are its scans' own
 		// entries; else every partition, each an entry of its own.
@@ -6712,6 +6739,11 @@ CTranslatorDXLToPlStmt::TranslateDXLDml(
 		{
 			write = gpdb::MakeSplitModify(result_plan, index, natts,
 										  action_col, ctid_col);
+			if (partitioned &&
+				!gpdb::SetSplitModifyTableOid(write, tableoid_col))
+			{
+				GP_UNPORTED("an UPDATE that moves rows, of a partitioned table");
+			}
 			write->plan_node_id = plan->plan_node_id;
 			write->startup_cost = plan->startup_cost;
 			write->total_cost = plan->total_cost;

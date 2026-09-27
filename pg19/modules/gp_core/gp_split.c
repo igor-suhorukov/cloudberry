@@ -328,9 +328,26 @@ typedef struct SplitModifyState
 	int			natts;			/* the table's attributes, first in each row */
 	AttrNumber	actioncol;
 	AttrNumber	ctidcol;
+	AttrNumber	tableoidcol;	/* a partitioned table's: the row's partition */
 	ResultRelInfo *rri;
 	TupleTableSlot *newslot;
+
+	/*
+	 * A partitioned table's: each DELETE's partition, opened as it comes,
+	 * and the routing of each INSERT into its partition, as an INSERT into
+	 * the table routes it.
+	 */
+	List	   *partitions;		/* SplitPartition */
+	List	   *tree;			/* the table and its partitions' OIDs */
+	ModifyTableState *mtstate;
+	PartitionTupleRouting *proute;
 } SplitModifyState;
+
+typedef struct SplitPartition
+{
+	Oid			relid;
+	Relation	rel;
+} SplitPartition;
 
 static Node *split_modify_create_state(CustomScan *cscan);
 static void split_modify_begin(CustomScanState *node, EState *estate, int eflags);
@@ -361,11 +378,25 @@ GpSplitModifyMake(Plan *child, Index rti, int natts, AttrNumber actioncol,
 	cscan->scan.plan.lefttree = child;
 	cscan->scan.scanrelid = 0;
 	cscan->custom_scan_tlist = child_columns(child);
-	cscan->custom_private = list_make4(makeInteger(rti), makeInteger(natts),
+	cscan->custom_private = list_make5(makeInteger(rti), makeInteger(natts),
 									   makeInteger(actioncol),
-									   makeInteger(ctidcol));
+									   makeInteger(ctidcol),
+									   makeInteger(InvalidAttrNumber));
 	cscan->methods = &split_modify_scan_methods;
 	return (Plan *) cscan;
+}
+
+/*
+ * A partitioned table's split update: the column that says which partition
+ * each DELETE's row is in, by its tableoid.  The INSERTs are routed.
+ */
+void
+GpSplitModifySetTableOid(Plan *plan, AttrNumber tableoidcol)
+{
+	if (!GpSplitModifyIs(plan, NULL))
+		elog(ERROR, "not a split update's node");
+	lfirst(list_nth_cell(((CustomScan *) plan)->custom_private, 4)) =
+		makeInteger(tableoidcol);
 }
 
 bool
@@ -400,6 +431,7 @@ split_modify_begin(CustomScanState *node, EState *estate, int eflags)
 	state->natts = intVal(lsecond(priv));
 	state->actioncol = (AttrNumber) intVal(lthird(priv));
 	state->ctidcol = (AttrNumber) intVal(lfourth(priv));
+	state->tableoidcol = (AttrNumber) intVal(list_nth(priv, 4));
 
 	outerPlanState(node) = ExecInitNode(outerPlan(cscan), estate, eflags);
 	if (eflags & EXEC_FLAG_EXPLAIN_ONLY)
@@ -409,10 +441,54 @@ split_modify_begin(CustomScanState *node, EState *estate, int eflags)
 	state->rri = makeNode(ResultRelInfo);
 	ExecInitResultRelation(estate, state->rri, state->rti);
 	CheckValidResultRel(state->rri, CMD_UPDATE, ONCONFLICT_NONE, NIL);
-	ExecOpenIndices(state->rri, false);
 	state->newslot = ExecInitExtraTupleSlot(estate,
 											RelationGetDescr(state->rri->ri_RelationDesc),
 											&TTSOpsVirtual);
+	if (state->rri->ri_RelationDesc->rd_rel->relkind != RELKIND_PARTITIONED_TABLE)
+	{
+		ExecOpenIndices(state->rri, false);
+		return;
+	}
+
+	/*
+	 * A partitioned table's rows are its partitions': a DELETE's is found in
+	 * the one its tableoid names, and an INSERT goes where the table's
+	 * routing sends it, as an INSERT into the table would -- set up as
+	 * gp_internal.split_insert() sets it up, for a ModifyTable that is not
+	 * there.
+	 */
+	if (state->tableoidcol == InvalidAttrNumber)
+		elog(ERROR, "a partitioned table's split update has no tableoid");
+	state->tree = find_all_inheritors(RelationGetRelid(state->rri->ri_RelationDesc),
+									  NoLock, NULL);
+	state->mtstate = makeNode(ModifyTableState);
+	state->mtstate->ps.plan = NULL;
+	state->mtstate->ps.state = estate;
+	state->mtstate->operation = CMD_INSERT;
+	state->mtstate->mt_nrels = 1;
+	state->mtstate->resultRelInfo = state->rri;
+	state->mtstate->rootResultRelInfo = state->rri;
+	state->proute = ExecSetupPartitionTupleRouting(estate,
+												   state->rri->ri_RelationDesc);
+}
+
+/* The partition a partitioned table's DELETE finds its row in, opened once. */
+static Relation
+split_partition(SplitModifyState *state, Oid relid)
+{
+	SplitPartition *part;
+
+	foreach_ptr(SplitPartition, p, state->partitions)
+		if (p->relid == relid)
+			return p->rel;
+	if (!list_member_oid(state->tree, relid))
+		elog(ERROR, "relation %u is not \"%s\" or one of its partitions",
+			 relid, RelationGetRelationName(state->rri->ri_RelationDesc));
+	part = palloc0_object(SplitPartition);
+	part->relid = relid;
+	part->rel = table_open(relid, RowExclusiveLock);
+	state->partitions = lappend(state->partitions, part);
+	return part->rel;
 }
 
 /*
@@ -459,10 +535,9 @@ split_changed_concurrently(TM_Result result)
 }
 
 static void
-split_delete(SplitModifyState *state, ItemPointer tid)
+split_delete(SplitModifyState *state, Relation rel, ItemPointer tid)
 {
 	EState	   *estate = state->css.ss.ps.state;
-	Relation	rel = state->rri->ri_RelationDesc;
 	TM_FailureData tmfd;
 	TM_Result	result;
 
@@ -514,6 +589,25 @@ split_insert(SplitModifyState *state, TupleTableSlot *row)
 		}
 	}
 	ExecStoreVirtualTuple(slot);
+
+	/*
+	 * A partitioned table's new row goes to the partition the table's
+	 * routing chooses, in that partition's row shape.
+	 */
+	if (state->proute != NULL)
+	{
+		TupleConversionMap *map;
+
+		rri = ExecFindPartition(state->mtstate, state->rri, state->proute,
+								slot, estate);
+		map = ExecGetRootToChildMap(rri, estate);
+		if (map != NULL)
+			slot = execute_attr_map_slot(map->attrMap, slot,
+										 rri->ri_PartitionTupleSlot);
+		rel = rri->ri_RelationDesc;
+		tupdesc = RelationGetDescr(rel);
+		slot->tts_tableOid = RelationGetRelid(rel);
+	}
 	ExecMaterializeSlot(slot);
 
 	/* a new row: every generated column computed, every index given it */
@@ -550,10 +644,20 @@ split_modify_exec(CustomScanState *node)
 		if (action == GP_DML_DELETE)
 		{
 			Datum		ctid = slot_getattr(row, state->ctidcol, &isnull);
+			Relation	rel = state->rri->ri_RelationDesc;
 
 			if (isnull)
 				elog(ERROR, "a split update's DELETE has no ctid");
-			split_delete(state, DatumGetItemPointer(ctid));
+			if (state->proute != NULL)
+			{
+				Datum		tableoid = slot_getattr(row, state->tableoidcol,
+													&isnull);
+
+				if (isnull)
+					elog(ERROR, "a split update's DELETE has no tableoid");
+				rel = split_partition(state, DatumGetObjectId(tableoid));
+			}
+			split_delete(state, rel, DatumGetItemPointer(ctid));
 		}
 		else if (action == GP_DML_INSERT)
 		{
@@ -570,7 +674,13 @@ split_modify_exec(CustomScanState *node)
 static void
 split_modify_end(CustomScanState *node)
 {
+	SplitModifyState *state = (SplitModifyState *) node;
+
 	ExecEndNode(outerPlanState(node));
+	if (state->proute != NULL)
+		ExecCleanupTupleRouting(state->mtstate, state->proute);
+	foreach_ptr(SplitPartition, p, state->partitions)
+		table_close(p->rel, NoLock);
 }
 
 static void

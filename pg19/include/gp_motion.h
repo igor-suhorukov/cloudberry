@@ -139,6 +139,13 @@ extern Plan *GpSplitMake(Plan *child, List *targetlist, List *deletecols,
 						 List *insertcols, AttrNumber actioncol);
 extern Plan *GpSplitModifyMake(Plan *child, Index rti, int natts,
 							   AttrNumber actioncol, AttrNumber ctidcol);
+
+/*
+ * A partitioned table's split update: its rows' tableoid column, the
+ * partition each DELETE's row is in; each INSERT is routed as an INSERT into
+ * the table is.
+ */
+extern void GpSplitModifySetTableOid(Plan *plan, AttrNumber tableoidcol);
 extern bool GpSplitModifyIs(Plan *plan, Index *rti);
 extern void GpMotionRefuseRecheck(void);
 struct ExplainState;
