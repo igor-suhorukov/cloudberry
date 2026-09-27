@@ -1370,3 +1370,13 @@ LANGUAGE C STRICT IMMUTABLE;
 
 COMMENT ON FUNCTION gp_sql.desugar(text) IS
 	'Cloudberry''s spelling of a statement, rewritten into PostgreSQL 19''s';
+
+/*
+ * Cloudberry's GROUP_ID(), as O26's rewrite makes a call of it: the copy of
+ * a grouping set the row is of, which the rewrite has counted by
+ * GROUPING() of the constant columns each copy but the first groups by
+ * (gp_desugar.c), given back under its name.  Inlined where it is called.
+ */
+CREATE FUNCTION pg_catalog.group_id(int4) RETURNS int4
+LANGUAGE sql IMMUTABLE PARALLEL SAFE
+RETURN $1;

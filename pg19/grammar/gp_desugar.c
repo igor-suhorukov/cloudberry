@@ -6184,14 +6184,325 @@ window_names(Node *stmt)
 	}
 }
 
+/* ------------------------------------------------------------------------- */
+/* GROUP_ID(): which copy of a grouping set a row is of                       */
+/* ------------------------------------------------------------------------- */
+
+/*
+ * Cloudberry's GROUP_ID() numbers the copies of a grouping set a query's
+ * GROUP BY names more than once -- GROUP BY ROLLUP(pn), pn has (pn) twice --
+ * 0 for a row of the first copy, 1 of the second, and so on, as its Agg
+ * meets them (nodeAgg.c), where PostgreSQL has nothing that tells two alike
+ * apart.  So a query that calls it has its GROUP BY written out as the
+ * grouping sets it stands for, PostgreSQL's expansion of it, and each copy
+ * of a set but the first given constant columns to group by as well -- the
+ * second one, the third two -- which change no group and which GROUPING()
+ * tells apart; GROUP_ID() is pg_catalog.group_id() of the count of those its
+ * row's set groups by (gp_sql's script), which gives it back, under
+ * Cloudberry's name.  Which copy is the first no row can tell.
+ */
+#define GROUP_ID_COLUMN		"gp_group_id_"
+
+/* An expression's grouping sets, each a list of expressions. */
+static List *group_sets(Node *item);
+
+/* A set with the other's expressions added, those it has once. */
+static List *
+set_union(List *a, List *b)
+{
+	List	   *result = list_copy(a);
+
+	foreach_ptr(Node, e, b)
+		if (!list_member(result, e))
+			result = lappend(result, e);
+	return result;
+}
+
+/* Each set of "left" with each of "right": GROUP BY's items together. */
+static List *
+sets_product(List *left, List *right)
+{
+	List	   *result = NIL;
+
+	foreach_ptr(List, l, left)
+		foreach_ptr(List, r, right)
+			result = lappend(result, set_union(l, r));
+	return result;
+}
+
+/* A ROLLUP's or CUBE's element: an expression, or a parenthesized list. */
+static List *
+element_exprs(Node *elem)
+{
+	if (IsA(elem, RowExpr) &&
+		((RowExpr *) elem)->row_format == COERCE_IMPLICIT_CAST)
+		return list_copy(((RowExpr *) elem)->args);
+	return list_make1(elem);
+}
+
+static List *
+group_sets(Node *item)
+{
+	List	   *result = NIL;
+
+	if (IsA(item, RowExpr) &&
+		((RowExpr *) item)->row_format == COERCE_IMPLICIT_CAST)
+		return list_make1(list_copy(((RowExpr *) item)->args));
+	if (!IsA(item, GroupingSet))
+		return list_make1(list_make1(item));
+
+	switch (((GroupingSet *) item)->kind)
+	{
+		case GROUPING_SET_EMPTY:
+			return list_make1(NIL);
+		case GROUPING_SET_SIMPLE:
+			return list_make1(list_copy(((GroupingSet *) item)->content));
+		case GROUPING_SET_SETS:
+			foreach_ptr(Node, e, ((GroupingSet *) item)->content)
+				result = list_concat(result, group_sets(e));
+			return result;
+		case GROUPING_SET_ROLLUP:
+			{
+				List	   *elems = ((GroupingSet *) item)->content;
+
+				/* (e1 ... en), (e1 ... en-1), ..., () */
+				for (int n = list_length(elems); n >= 0; n--)
+				{
+					List	   *set = NIL;
+
+					for (int i = 0; i < n; i++)
+						set = set_union(set, element_exprs(list_nth(elems, i)));
+					result = lappend(result, set);
+				}
+				return result;
+			}
+		case GROUPING_SET_CUBE:
+			{
+				List	   *elems = ((GroupingSet *) item)->content;
+				int			n = list_length(elems);
+
+				/* every subset of the elements */
+				for (int mask = (1 << n) - 1; mask >= 0; mask--)
+				{
+					List	   *set = NIL;
+
+					for (int i = 0; i < n; i++)
+						if (mask & (1 << (n - 1 - i)))
+							set = set_union(set, element_exprs(list_nth(elems, i)));
+					result = lappend(result, set);
+				}
+				return result;
+			}
+	}
+	return list_make1(list_make1(item));
+}
+
+/* Are two sets the same, their expressions in any order? */
+static bool
+same_set(List *a, List *b)
+{
+	if (list_length(a) != list_length(b))
+		return false;
+	foreach_ptr(Node, e, a)
+		if (!list_member(b, e))
+			return false;
+	return true;
+}
+
+/* An integer, as the grammar makes one. */
+static Node *
+int_const(int val)
+{
+	A_Const    *n = makeNode(A_Const);
+
+	n->val.ival.type = T_Integer;
+	n->val.ival.ival = val;
+	n->location = -1;
+	return (Node *) n;
+}
+
+/* The constant a copy of a set groups by as well: 'gp_group_id_N'::text. */
+static Node *
+group_id_column(int n)
+{
+	TypeCast   *cast = makeNode(TypeCast);
+
+	cast->arg = makeStringConst(psprintf(GROUP_ID_COLUMN "%d", n), -1);
+	cast->typeName = SystemTypeName("text");
+	cast->location = -1;
+	return (Node *) cast;
+}
+
+/* Does the expression, at its query's own level, call group_id()? */
+static bool
+calls_group_id_walker(Node *node, void *context)
+{
+	if (node == NULL)
+		return false;
+	if (IsA(node, SelectStmt))
+		return false;
+	if (IsA(node, FuncCall))
+	{
+		FuncCall   *fc = (FuncCall *) node;
+
+		if (list_length(fc->funcname) == 1 && fc->args == NIL &&
+			!fc->agg_star && fc->over == NULL &&
+			pg_strcasecmp(strVal(linitial(fc->funcname)), "group_id") == 0)
+		{
+			if (context != NULL)
+				fc->args = list_make1(copyObject((Node *) context));
+			return context == NULL;
+		}
+	}
+	return raw_expression_tree_walker(node, calls_group_id_walker, context);
+}
+
+/* A query that calls group_id(): its GROUP BY written out, and each call made. */
+static void
+group_id_query(SelectStmt *stmt)
+{
+	List	   *sets = list_make1(NIL);
+	List	   *out = NIL;
+	int			ncolumns = 0;
+	Node	   *copies = NULL;
+
+	if (!calls_group_id_walker((Node *) stmt->targetList, NULL) &&
+		!calls_group_id_walker(stmt->havingClause, NULL) &&
+		!calls_group_id_walker((Node *) stmt->sortClause, NULL))
+		return;
+
+	/* GROUP BY DISTINCT has each set once, and GROUP_ID() is always 0 */
+	if (!stmt->groupDistinct)
+	{
+		foreach_ptr(Node, item, stmt->groupClause)
+			sets = sets_product(sets, group_sets(item));
+
+		/* each set, with a column more for each copy of it before it */
+		foreach_ptr(List, set, sets)
+		{
+			int			copies_before = 0;
+			List	   *written = list_copy(set);
+
+			foreach_ptr(List, seen, out)
+				if (same_set(linitial(seen), set))
+					copies_before++;
+			for (int i = 1; i <= copies_before; i++)
+				written = lappend(written, group_id_column(i));
+			ncolumns = Max(ncolumns, copies_before);
+			out = lappend(out, list_make2(set, written));
+		}
+	}
+
+	/* the count of the constant columns the row's set groups by */
+	copies = int_const(0);
+	for (int i = 1; i <= ncolumns; i++)
+	{
+		GroupingFunc *g = makeNode(GroupingFunc);
+
+		g->args = list_make1(group_id_column(i));
+		g->location = -1;
+		copies = (Node *) makeSimpleA_Expr(AEXPR_OP, "+", copies,
+										   (Node *) makeSimpleA_Expr(AEXPR_OP, "-",
+																	 int_const(1),
+																	 (Node *) g, -1),
+										   -1);
+	}
+
+	if (ncolumns > 0)
+	{
+		List	   *content = NIL;
+
+		/* each set as the grammar gives it: an expression, a row of them, () */
+		foreach_ptr(List, pair, out)
+		{
+			List	   *written = lsecond(pair);
+
+			if (written == NIL)
+				content = lappend(content, makeGroupingSet(GROUPING_SET_EMPTY, NIL, -1));
+			else if (list_length(written) == 1)
+				content = lappend(content, linitial(written));
+			else
+			{
+				RowExpr    *row = makeNode(RowExpr);
+
+				row->args = written;
+				row->row_typeid = InvalidOid;
+				row->row_format = COERCE_IMPLICIT_CAST;
+				row->location = -1;
+				content = lappend(content, row);
+			}
+		}
+		stmt->groupClause = list_make1(makeGroupingSet(GROUPING_SET_SETS, content, -1));
+	}
+
+	(void) calls_group_id_walker((Node *) stmt->targetList, copies);
+	(void) calls_group_id_walker(stmt->havingClause, copies);
+	(void) calls_group_id_walker((Node *) stmt->sortClause, copies);
+}
+
+/* Every query of the statement, each at its own level. */
+static bool
+group_id_walker(Node *node, void *context)
+{
+	if (node == NULL)
+		return false;
+	if (IsA(node, SelectStmt))
+		group_id_query((SelectStmt *) node);
+	return raw_expression_tree_walker(node, group_id_walker, context);
+}
+
+static void
+group_ids(Node *stmt)
+{
+	if (stmt == NULL)
+		return;
+	switch (nodeTag(stmt))
+	{
+		case T_SelectStmt:
+		case T_InsertStmt:
+		case T_UpdateStmt:
+		case T_DeleteStmt:
+		case T_MergeStmt:
+			(void) group_id_walker(stmt, NULL);
+			break;
+		case T_ViewStmt:
+			group_ids(((ViewStmt *) stmt)->query);
+			break;
+		case T_CreateTableAsStmt:
+			group_ids(((CreateTableAsStmt *) stmt)->query);
+			break;
+		case T_ExplainStmt:
+			group_ids(((ExplainStmt *) stmt)->query);
+			break;
+		case T_DeclareCursorStmt:
+			group_ids(((DeclareCursorStmt *) stmt)->query);
+			break;
+		case T_CopyStmt:
+			group_ids(((CopyStmt *) stmt)->query);
+			break;
+		case T_PrepareStmt:
+			group_ids(((PrepareStmt *) stmt)->query);
+			break;
+		default:
+			break;
+	}
+}
+
 static List *
 with_window_names(List *parsetree, const char *str)
 {
 	bool		over = false;
+	bool		group_id = false;
 
-	/* only where the text can hold an OVER */
-	for (const char *c = str; *c != '\0' && !over; c++)
-		over = pg_strncasecmp(c, "over", 4) == 0;
+	/* only where the text can hold an OVER, or a GROUP_ID */
+	for (const char *c = str; *c != '\0' && !(over && group_id); c++)
+	{
+		over |= pg_strncasecmp(c, "over", 4) == 0;
+		group_id |= pg_strncasecmp(c, "group_id", 8) == 0;
+	}
+	if (group_id)
+		foreach_ptr(Node, raw, parsetree)
+			group_ids(IsA(raw, RawStmt) ? ((RawStmt *) raw)->stmt : raw);
 	if (!over)
 		return parsetree;
 	foreach_ptr(Node, raw, parsetree)

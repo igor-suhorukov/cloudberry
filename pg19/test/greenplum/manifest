@@ -78,7 +78,7 @@ run  gp_dqa
 skip subselect_gp  unrecognized EXPLAIN option "locus"
 run  subselect_gp2
 run  gp_transactions
-skip olap_group  function group_id() does not exist
+run  olap_group
 skip olap_window_seq  DISTINCT is not implemented for window functions; cannot copy window "win1" because it has a frame clause
 skip appendonly  type "gp_fastsequence" does not exist
 run  create_table_distpol
@@ -443,7 +443,7 @@ run  bfv_legacy
 skip bfv_temp  syntax error at or near ")"; relation "n" does not exist
 skip bfv_dml  syntax error at or near ")"
 skip tpcds_q04  table row type and query-specified row type do not match
-skip qp_olap_mdqa  function group_id() does not exist
+skip qp_olap_mdqa  differs: GROUP_ID() numbers each grouping set's copies 0, 1, and so on, where Cloudberry's numbers them as its Agg's phases meet them -- in the rollups and hashed sets its planner arranges them into -- and gives some rows 2 and 3 where the port gives 0 and 1
 skip gp_recursive_cte  unrecognized configuration parameter "gp_recursive_cte"
 run  qp_skew
 run  gp_tsrf

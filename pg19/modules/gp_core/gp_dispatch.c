@@ -128,6 +128,7 @@
 #include "gp_grammar_int.h"
 #include "gp_label.h"
 #include "gp_loopback.h"
+#include "gp_motion.h"
 #include "gp_settings.h"
 
 /* Where libpq finds the password for the segments; see the file header. */
@@ -438,8 +439,8 @@ struct GpStream
 /* The ones running; in TopMemoryContext, as the readers point at them. */
 static List *active_streams = NIL;
 
-/* How many readers a segment may have for one session. */
-#define MAX_READERS_PER_SEGMENT	64
+/* How many readers a segment may have for one session (gp_motion.h). */
+#define MAX_READERS_PER_SEGMENT	GP_MAX_READERS_PER_SEGMENT
 
 static void gang_close(void);
 static void gang_build_wes(GpGang *g);
