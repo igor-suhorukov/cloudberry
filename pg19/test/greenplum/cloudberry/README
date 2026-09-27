@@ -399,7 +399,11 @@ minirepro  the statistics, as gpsd's (above); the SECURITY LABEL that
   where Cloudberry's has seven: two statistics rows fewer, and the dump's
   CREATE TABLE of it two lines shorter, so that the errors the test expects
   from it are two lines earlier.  And psql's \d+ of pg_statistic, as
-  gpsd's.
+  gpsd's.  pg_tablespace's statistics are the group's: test_setup makes
+  regress_tblspace, which later tests of the group -- analyze, vacuum_gp,
+  gp_runtime_filter, each analyzing the whole database -- analyze before
+  minirepro runs, so the dump has three tablespaces where Cloudberry's has
+  two -- in a trial of fewer tests, two.
 
 part_external_table (orca)  the lines ORCA's fallback trace prints for a
   partitioned table with external partitions: the dynamic foreign scan ORCA
