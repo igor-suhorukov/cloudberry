@@ -583,6 +583,7 @@ typedef struct SegmentCounts
 	double		allvisible;
 	double		allfrozen;
 	int			nsegs;
+	bool		counted;		/* a segment has counted its rows */
 } SegmentCounts;
 
 /*
@@ -726,6 +727,26 @@ GpAnalyzeSegmentCounts(VacuumStmt *stmt)
 }
 
 /*
+ * A table's policy as its label records it, where it is distributed:
+ * unchecked, since a statement that has just changed a key column's type is
+ * followed by gp_sql's own change of the policy (GpDistributionAlterTableDone()),
+ * which has not run yet -- the label names a column whose new type may have
+ * no hash class, which GpPolicyGet() refuses.
+ */
+static GpPolicy *
+recorded_policy(Oid relid)
+{
+	GpPolicy   *policy;
+
+	if (GpClusterIsSingleNode())
+		return NULL;
+	policy = GpPolicyGetRecorded(relid);
+	if (policy == NULL || GpPolicyIsEntry(policy))
+		return NULL;
+	return policy;
+}
+
+/*
  * The distributed tables of "candidates", and of a partitioned table among
  * them its leaves, that the user may maintain.
  */
@@ -748,7 +769,7 @@ distributed_of(List *candidates)
 
 		if ((relkind == RELKIND_RELATION || relkind == RELKIND_MATVIEW) &&
 			pg_class_aclcheck(relid, GetUserId(), ACL_MAINTAIN) == ACLCHECK_OK &&
-			GpScanDistributedPolicy(relid) != NULL)
+			recorded_policy(relid) != NULL)
 			result = list_append_unique_oid(result, relid);
 	}
 	return result;
@@ -937,6 +958,7 @@ segment_counts(List *tables, bool vacuumed)
 				continue;
 			c->pages += pages;
 			c->tuples += Max(tuples, 0);
+			c->counted |= tuples >= 0;
 			c->allvisible += allvisible;
 			c->allfrozen += allfrozen;
 			c->nsegs++;
@@ -957,15 +979,16 @@ segment_counts(List *tables, bool vacuumed)
 		if (c->relid == c->table)
 			LockRelationOid(c->table, ShareUpdateExclusiveLock);
 		if (c->nsegs < nsegs ||
-			(policy = GpScanDistributedPolicy(c->table)) == NULL ||
+			(policy = recorded_policy(c->table)) == NULL ||
 			(rel = try_relation_open(c->relid, AccessShareLock)) == NULL)
 			continue;
 		share = GpPolicyIsReplicated(policy) ? Max(policy->numsegments, 1) : 1;
 
 		if (vacuumed)
 		{
+			/* a table no segment has counted yet is not known to be empty */
 			pages = (BlockNumber) (c->pages / share);
-			tuples = c->tuples / share;
+			tuples = c->counted ? c->tuples / share : -1;
 		}
 		else
 			current_counts(c->relid, &pages, &tuples);
