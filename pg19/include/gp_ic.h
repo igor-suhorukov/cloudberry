@@ -84,6 +84,14 @@ extern GpIcReceiver *GpIcRecvBegin(const char *token, int slice, int nsenders,
 extern bool GpIcRecv(GpIcReceiver *receiver, char **data, int *len);
 
 /*
+ * The next row from one sender, for a merge of their streams: the k-th of
+ * the "nsenders" to have come, in the order they came, which stays each
+ * one's; waited for, the others' rows waiting their turn.  False once that
+ * sender has sent its last.
+ */
+extern bool GpIcRecvFrom(GpIcReceiver *receiver, int k, char **data, int *len);
+
+/*
  * Done, whether or not every row arrived: the senders stop.  A UDP receiver
  * that ends before every row arrived lasts until GpIcForget(), which waits
  * for its senders.

@@ -2456,15 +2456,20 @@ COMMIT;"
 	# where the slice that finishes it runs alone -- Cloudberry's singleton
 	# reader -- and broadcasts the answer back to the writers.  The Gather's
 	# senders stream every row to that one process, and a sorted Gather's
-	# rows are sorted there; relayed, they reach it through the coordinator.
+	# streams are merged there, each sender's apart, as they come; relayed,
+	# they reach it through the coordinator, and are sorted there.
 	orca_write "a DELETE of a subquery's aggregate: gathered to one segment, and broadcast back" \
 		"DELETE FROM wu WHERE a = (SELECT max(x) FROM po WHERE x < 90);" \
 		"SELECT count(*), sum(a) FROM wu;" "Gather Motion 2:1  (slice3; segments: 2)"
 	orca_write "an UPDATE of the first of a subquery's ordered rows: a sorted Gather to one segment" \
 		"UPDATE wu SET b = (SELECT x FROM po WHERE y = 2 ORDER BY x DESC LIMIT 1) WHERE a < 50;" \
 		"SELECT count(*), sum(b) FROM wu;" "Merge Key"
+	orca_write "... past an OFFSET, every sender's rows merged" \
+		"UPDATE wu SET b = (SELECT x FROM po WHERE y = 2 ORDER BY x DESC OFFSET 7 LIMIT 1) WHERE a < 60;" \
+		"SELECT count(*), sum(b) FROM wu;" "Merge Key"
 	sql="DELETE FROM wu WHERE a = (SELECT max(x) FROM po WHERE x < 90);
-		UPDATE wu SET b = (SELECT x FROM po WHERE y = 2 ORDER BY x DESC LIMIT 1) WHERE a < 50;"
+		UPDATE wu SET b = (SELECT x FROM po WHERE y = 2 ORDER BY x DESC LIMIT 1) WHERE a < 50;
+		UPDATE wu SET b = (SELECT x FROM po WHERE y = 2 ORDER BY x DESC OFFSET 7 LIMIT 1) WHERE a < 60;"
 	want=$(printf '%s\n' "SET gp.optimizer = off;" "BEGIN;" "$sql" "SELECT count(*), sum(a), sum(b) FROM wu;" "ROLLBACK;" | qf 0)
 	got=""
 	for ic in udpifc relay; do

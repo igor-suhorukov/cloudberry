@@ -80,9 +80,12 @@
  * outer plan as it would under a Motion.
  *
  * A sorted Motion -- Cloudberry's merge-receive -- merges the segments'
- * streams, each already in order, with a binary heap as MergeAppend does.
- * A sorted Gather into one segment, whose senders' rows come mixed on one
- * stream, sorts them there instead: the order the merge would give.
+ * streams, each already in order, with a binary heap as MergeAppend does:
+ * the coordinator's from each segment's gather, and a sorted Gather into one
+ * segment's from each sender's stream apart (GpIcRecvFrom()), so that a
+ * LIMIT above it takes its rows as they come and stops the senders.  One
+ * relayed into a segment, whose rows come mixed in the file the coordinator
+ * fills, sorts them there: the order the merge would give.
  *
  *-------------------------------------------------------------------------
  */
@@ -1576,10 +1579,93 @@ motion_stream_next(MotionState *state)
 	return ExecClearTuple(slot);
 }
 
+static int32 motion_heap_compare(Datum a, Datum b, void *arg);
+
+/* A sender's next row into its slot; false when it has none. */
+static bool
+stream_merge_read(MotionState *state, int k)
+{
+	char	   *data;
+	int			len;
+
+	if (!GpIcRecvFrom(state->icrecv, k, &data, &len))
+	{
+		ExecClearTuple(state->segslots[k]);
+		return false;
+	}
+	ExecCopySlot(state->segslots[k], motion_decode_row(state, data, len));
+	ResetExprContext(state->css.ss.ps.ps_ExprContext);
+	return true;
+}
+
 /*
- * A sorted Gather into this segment: every row its senders sent, mixed as
- * they came, sorted by its keys -- the order Cloudberry's merge of their
- * streams gives -- and kept, for a rescan.
+ * A sorted Gather into this segment, streamed: its senders' streams, each
+ * in order, merged by its keys as they come, each row kept for a rescan --
+ * Cloudberry's merge-receive -- so that the first row goes out once every
+ * sender has sent one, and a LIMIT above that has its rows ends the
+ * receiver, which stops the senders.
+ */
+static TupleTableSlot *
+motion_stream_merge_next(MotionState *state)
+{
+	TupleTableSlot *slot = state->css.ss.ss_ScanTupleSlot;
+
+	if (state->replaying)
+	{
+		if (tuplestore_gettupleslot(state->spool, true, false, state->spoolslot))
+			return ExecCopySlot(slot, state->spoolslot);
+		return ExecClearTuple(slot);
+	}
+	if (state->stream_done)
+		return ExecClearTuple(slot);
+
+	if (!state->merging)
+	{
+		TupleDesc	tupdesc = slot->tts_tupleDescriptor;
+
+		state->icrecv = GpIcRecvBegin(state->token, state->slice,
+									  state->nsenders,
+									  stream_udp(state->css.ss.ps.state->es_plannedstmt));
+		state->nsegs = state->nsenders;
+		state->segslots = palloc_array(TupleTableSlot *, Max(state->nsegs, 1));
+		for (int k = 0; k < state->nsegs; k++)
+			state->segslots[k] = MakeSingleTupleTableSlot(tupdesc, &TTSOpsVirtual);
+		state->receive = MakeSingleTupleTableSlot(tupdesc, &TTSOpsVirtual);
+		state->heap = binaryheap_allocate(Max(state->nsegs, 1),
+										  motion_heap_compare, state);
+		for (int k = 0; k < state->nsegs; k++)
+			if (stream_merge_read(state, k))
+				binaryheap_add_unordered(state->heap, Int32GetDatum(k));
+		binaryheap_build(state->heap);
+		state->merging = true;
+		state->last = -1;
+	}
+	else if (state->last >= 0)
+	{
+		/* the row that went out last is gone; its sender's next takes its place */
+		if (stream_merge_read(state, state->last))
+			binaryheap_replace_first(state->heap, Int32GetDatum(state->last));
+		else
+			(void) binaryheap_remove_first(state->heap);
+	}
+
+	if (binaryheap_empty(state->heap))
+	{
+		GpIcRecvEnd(state->icrecv);
+		state->icrecv = NULL;
+		state->stream_done = true;
+		state->last = -1;
+		return ExecClearTuple(slot);
+	}
+	state->last = DatumGetInt32(binaryheap_first(state->heap));
+	tuplestore_puttupleslot(state->spool, state->segslots[state->last]);
+	return state->segslots[state->last];
+}
+
+/*
+ * A sorted Gather relayed into this segment: every row its senders sent,
+ * mixed as they came in the file, sorted by its keys -- the order
+ * Cloudberry's merge of their streams gives -- and kept, for a rescan.
  */
 static TupleTableSlot *
 motion_sorted_next(MotionState *state)
@@ -1702,6 +1788,27 @@ fragment_instrument_walker(PlanState *planstate, void *context)
 	return planstate_tree_walker(planstate, fragment_instrument_walker, context);
 }
 
+/* A sorted Motion's keys, which a merge of its senders' streams compares by. */
+static void
+motion_sort_keys(MotionState *state, List *keys, List *sortops, List *colls,
+				 List *nfs)
+{
+	state->keys = palloc_array(AttrNumber, state->nkeys);
+	state->sortkeys = palloc0_array(SortSupportData, state->nkeys);
+	for (int i = 0; i < state->nkeys; i++)
+	{
+		SortSupport sk = &state->sortkeys[i];
+
+		state->keys[i] = (AttrNumber) list_nth_int(keys, i);
+		sk->ssup_cxt = CurrentMemoryContext;
+		sk->ssup_collation = list_nth_oid(colls, i);
+		sk->ssup_nulls_first = list_nth_int(nfs, i) != 0;
+		sk->ssup_attno = state->keys[i];
+		sk->abbreviate = false;
+		PrepareSortSupportFromOrderingOp(list_nth_oid(sortops, i), sk);
+	}
+}
+
 static void
 motion_begin(CustomScanState *node, EState *estate, int eflags)
 {
@@ -1746,7 +1853,8 @@ motion_begin(CustomScanState *node, EState *estate, int eflags)
 
 		/*
 		 * A slice that streams, received as it comes rather than from a
-		 * file; kept for a rescan, but where it is sorted, which keeps it.
+		 * file, and kept for a rescan -- a sorted Gather's as its senders'
+		 * streams merge, by its keys.
 		 */
 		if (entry != NULL)
 		{
@@ -1754,13 +1862,12 @@ motion_begin(CustomScanState *node, EState *estate, int eflags)
 			state->stream_here = stream_receives(estate->es_plannedstmt, entry);
 			state->token = stream_token(estate->es_plannedstmt);
 			state->nsenders = intVal(lsecond(entry));
-			if (state->nkeys == 0)
-			{
-				state->spool = tuplestore_begin_heap(false, false, work_mem);
-				state->spoolslot = MakeSingleTupleTableSlot(tupdesc,
-															&TTSOpsMinimalTuple);
-			}
+			state->spool = tuplestore_begin_heap(false, false, work_mem);
+			state->spoolslot = MakeSingleTupleTableSlot(tupdesc,
+														&TTSOpsMinimalTuple);
 			state->recv_tuples = motion_tuples(tupdesc);
+			if (state->nkeys > 0)
+				motion_sort_keys(state, keys, sortops, colls, nfs);
 		}
 
 		state->receiving = true;
@@ -1784,22 +1891,7 @@ motion_begin(CustomScanState *node, EState *estate, int eflags)
 	}
 
 	if (state->nkeys > 0)
-	{
-		state->keys = palloc_array(AttrNumber, state->nkeys);
-		state->sortkeys = palloc0_array(SortSupportData, state->nkeys);
-		for (int i = 0; i < state->nkeys; i++)
-		{
-			SortSupport sk = &state->sortkeys[i];
-
-			state->keys[i] = (AttrNumber) list_nth_int(keys, i);
-			sk->ssup_cxt = CurrentMemoryContext;
-			sk->ssup_collation = list_nth_oid(colls, i);
-			sk->ssup_nulls_first = list_nth_int(nfs, i) != 0;
-			sk->ssup_attno = state->keys[i];
-			sk->abbreviate = false;
-			PrepareSortSupportFromOrderingOp(list_nth_oid(sortops, i), sk);
-		}
-	}
+		motion_sort_keys(state, keys, sortops, colls, nfs);
 
 	/*
 	 * The fragment is the segments' to run.  Here it is only described: for
@@ -3184,6 +3276,9 @@ motion_next(ScanState *ss)
 		return ExecClearTuple(slot);
 	}
 
+	if (state->streamed && state->nkeys > 0)
+		return motion_stream_merge_next(state);
+
 	if (state->receiving && state->nkeys > 0)
 		return motion_sorted_next(state);
 
@@ -3331,22 +3426,16 @@ motion_rescan(CustomScanState *node)
 	MotionState *state = (MotionState *) node;
 
 	/*
-	 * A sorted Gather into this segment reads again what it sorted, and one
-	 * that has sorted nothing yet has read nothing.
+	 * What a streaming slice sent is read again from what was kept of it,
+	 * its rest read first -- a sorted one's merged.
 	 */
-	if (state->receiving && state->nkeys > 0)
-	{
-		if (state->sort != NULL)
-			tuplesort_rescan(state->sort);
-		return;
-	}
-
-	/* What a streaming slice sent is read again from what was kept of it. */
 	if (state->streamed)
 	{
 		while (!state->stream_done && !state->replaying)
 		{
-			TupleTableSlot *slot = motion_stream_next(state);
+			TupleTableSlot *slot = state->nkeys > 0
+				? motion_stream_merge_next(state)
+				: motion_stream_next(state);
 
 			if (TupIsNull(slot))
 				break;
@@ -3354,6 +3443,17 @@ motion_rescan(CustomScanState *node)
 		}
 		state->replaying = true;
 		tuplestore_rescan(state->spool);
+		return;
+	}
+
+	/*
+	 * A sorted Gather relayed into this segment reads again what it sorted,
+	 * and one that has sorted nothing yet has read nothing.
+	 */
+	if (state->receiving && state->nkeys > 0)
+	{
+		if (state->sort != NULL)
+			tuplesort_rescan(state->sort);
 		return;
 	}
 

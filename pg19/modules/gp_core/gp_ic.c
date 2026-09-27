@@ -277,6 +277,10 @@ struct GpIcReceiver
 	int			next;			/* whose row to look at first */
 	WaitEventSet *wes;
 	bool		wes_stale;		/* a connection came since it was built */
+	WaitEventSet *wes_one;		/* GpIcRecvFrom()'s: one sender's socket */
+	IcIn	   *wes_one_in;		/* which */
+	int			wes_one_conns;	/* and how many had come, and were */
+	int			wes_one_unclaimed;	/* unclaimed, when it was built */
 };
 
 /* One receiver's connection, as a sender has it. */
@@ -1252,6 +1256,96 @@ GpIcRecv(GpIcReceiver *r, char **data, int *len)
 	}
 }
 
+/*
+ * GpIcRecvFrom()'s wait: for sender "in" alone, or none yet connected -- the
+ * others' sockets stay readable while their rows wait their turn, and would
+ * wake a wait on them at once, for ever.
+ */
+static void
+recv_wait_one(GpIcReceiver *r, IcIn *in)
+{
+	WaitEvent	occurred[1];
+
+	if (r->wes_one == NULL || r->wes_one_in != in ||
+		r->wes_one_conns != list_length(r->conns) ||
+		r->wes_one_unclaimed != list_length(unclaimed))
+	{
+		int			n = 5 + list_length(unclaimed);
+
+		if (r->wes_one != NULL)
+			FreeWaitEventSet(r->wes_one);
+		r->wes_one = CreateWaitEventSet(NULL, n);
+		AddWaitEventToSet(r->wes_one, WL_LATCH_SET, PGINVALID_SOCKET, MyLatch, NULL);
+		if (IsUnderPostmaster)
+			AddWaitEventToSet(r->wes_one, WL_EXIT_ON_PM_DEATH, PGINVALID_SOCKET,
+							  NULL, NULL);
+		AddWaitEventToSet(r->wes_one, WL_SOCKET_READABLE, listen_sock, NULL, NULL);
+		if (udp_sock != PGINVALID_SOCKET)
+			AddWaitEventToSet(r->wes_one, WL_SOCKET_READABLE, udp_sock, NULL, NULL);
+		if (in != NULL && !in->ended && !in->udp)
+			AddWaitEventToSet(r->wes_one, WL_SOCKET_READABLE, in->sock, NULL, NULL);
+		foreach_ptr(IcIn, u, unclaimed)
+			if (!u->udp && u->hslen < (int) sizeof(IcHandshake))
+				AddWaitEventToSet(r->wes_one, WL_SOCKET_READABLE, u->sock, NULL, NULL);
+		r->wes_one_in = in;
+		r->wes_one_conns = list_length(r->conns);
+		r->wes_one_unclaimed = list_length(unclaimed);
+	}
+	if (WaitEventSetWait(r->wes_one, 100, occurred, 1, ic_wait_event(false)) > 0 &&
+		(occurred[0].events & WL_LATCH_SET))
+		ResetLatch(MyLatch);
+	CHECK_FOR_INTERRUPTS();
+}
+
+/*
+ * The next row from one sender, for a merge of the senders' streams: the
+ * k-th to have come, in the order the senders came, which stays each one's.
+ */
+bool
+GpIcRecvFrom(GpIcReceiver *r, int k, char **data, int *len)
+{
+	Assert(k >= 0 && k < r->nsenders);
+	for (;;)
+	{
+		IcIn	   *in = k < list_length(r->conns)
+			? (IcIn *) list_nth(r->conns, k) : NULL;
+		int			before;
+
+		if (in != NULL)
+		{
+			int			got;
+
+			if (in->ended)
+				return false;
+			got = in_take(in, data, len);
+			if (got == 1)
+				return true;
+			if (got == 2)
+			{
+				r->nended++;
+				r->wes_stale = true;
+				return false;
+			}
+			if (!in->udp && in_read(r, in))
+				continue;
+		}
+		if (udp_poll())
+			continue;
+		before = list_length(r->conns);
+		ic_accept();
+		if (list_length(r->conns) != before)
+			continue;
+
+		/* UDP: each sender told of the room taking its rows made, as below */
+		foreach_ptr(IcIn, i, r->conns)
+			if (i->udp && !i->ended &&
+				i->bufsize - (i->end - i->start) > i->udp_advertised)
+				udp_ack(i);
+
+		recv_wait_one(r, in);
+	}
+}
+
 static void
 receiver_free(GpIcReceiver *r)
 {
@@ -1260,6 +1354,8 @@ receiver_free(GpIcReceiver *r)
 	list_free(r->conns);
 	if (r->wes != NULL)
 		FreeWaitEventSet(r->wes);
+	if (r->wes_one != NULL)
+		FreeWaitEventSet(r->wes_one);
 	pfree(r);
 }
 
