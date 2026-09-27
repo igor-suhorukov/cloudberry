@@ -172,6 +172,44 @@ is "a role with no profile has none" \
    "CREATE ROLE bob LOGIN PASSWORD 'bob-pass';
     SELECT gp_security.role_profile('bob') IS NULL;" "t"
 
+# Cloudberry's switch: a role's profile holds it only once ENABLE PROFILE has
+# turned it on (pg_authid.rolenableprofile, false for a new role) -- its own
+# profile, or the default one for a role with none.
+for i in 1 2; do login alice wrong-pass > /dev/null; done
+is "a profile does not hold its role before ENABLE PROFILE: no failed login is counted" \
+   "SELECT gp_security.role_failed_logins('alice');" "0"
+isl "ALTER USER ... ENABLE PROFILE turns it on" \
+   "ALTER USER alice ENABLE PROFILE;
+    SELECT rolname || ' ' || profile || ' ' || rolenableprofile
+      FROM gp_security.role_profiles WHERE rolname = 'alice';" "alice strict true"
+isl "CREATE USER ... ENABLE PROFILE PROFILE p, and ALTER USER ... DISABLE PROFILE PROFILE p, as Cloudberry writes them" \
+   "CREATE USER carol ENABLE PROFILE PROFILE strict;
+    ALTER USER carol DISABLE PROFILE PROFILE gp_default;
+    SELECT rolname || ' ' || profile || ' ' || rolenableprofile
+      FROM gp_security.role_profiles WHERE rolname = 'carol';" "carol gp_default false"
+refused "a profile named alone after ENABLE PROFILE is Cloudberry's syntax error" \
+        "ALTER USER carol ENABLE PROFILE PROFILE;" "syntax error"
+default_fla=$(q "SELECT coalesce(failed_login_attempts::text, 'unset') FROM gp_security.profiles WHERE profile = 'gp_default';")
+q "CREATE ROLE eve LOGIN PASSWORD 'eve-pass' ENABLE PROFILE;
+   CALL gp_security.alter_profile('gp_default', failed_login_attempts => 2);" > /dev/null
+for i in 1 2; do login eve wrong-pass > /dev/null; done
+case "$(login eve eve-pass)" in
+	*"is locked"*) ok "a role with no profile of its own, switched on, is held to the default profile" ;;
+	*) notok "ENABLE PROFILE with no profile holds the role to the default profile" "$(login eve eve-pass)" ;;
+esac
+if [ "$default_fla" = unset ]; then
+	q "CALL gp_security.alter_profile('gp_default', unset => ARRAY['failed_login_attempts']);" > /dev/null
+else
+	q "CALL gp_security.alter_profile('gp_default', failed_login_attempts => $default_fla);" > /dev/null
+fi
+isl "and DISABLE PROFILE lets it go" \
+   "SELECT gp_security.unlock_role('eve');
+    ALTER USER eve DISABLE PROFILE;
+    SELECT gp_security.role_profile_enabled('eve');" "f"
+for i in 1 2 3; do login eve wrong-pass > /dev/null; done
+[ "$(login eve eve-pass)" = "ok" ] && ok "after which its failed logins lock nothing" \
+	|| notok "a role whose profile is off is not locked" "$(login eve eve-pass)"
+
 ###############################################################################
 echo "3. failed logins are counted, and too many lock the account"
 ###############################################################################
@@ -220,7 +258,7 @@ case "$(login alice first-pass)" in
 	*"is locked"*) ok "and it is still refused after the restart" ;;
 	*) notok "still refused after the restart" "$(login alice first-pass)" ;;
 esac
-q "SECURITY LABEL FOR gp ON ROLE alice IS 'profile=strict,locked_until=2020-01-01 00:00:00+00';" > /dev/null
+q "SECURITY LABEL FOR gp ON ROLE alice IS 'profile=strict,locked_until=2020-01-01 00:00:00+00,enable_profile';" > /dev/null
 "$BINDIR/pg_ctl" -D "$WORK/data" -m fast -w -t 60 restart > /dev/null 2>&1
 [ "$(login alice first-pass)" = "ok" ] && ok "a lock whose time has passed lets the role in" \
 	|| notok "a lock whose time has passed lets the role in" "$(login alice first-pass)"
@@ -315,7 +353,8 @@ out=$("$PSQL" -X -q -t -A -d other_db -U postgres \
 echo "9. a login at a time its role's DENY windows forbid"
 ###############################################################################
 q "CREATE ROLE dora LOGIN PASSWORD 'dora-pass' DENY BETWEEN DAY 0 AND DAY 6;
-   SELECT gp_security.assign_profile('dora', 'strict');" > /dev/null
+   SELECT gp_security.assign_profile('dora', 'strict');
+   SELECT gp_security.enable_profile('dora', true);" > /dev/null
 is "a DENY window is the role's, in Cloudberry's catalog by its name" \
    "SELECT start_day || ' ' || start_time || ' ' || end_day || ' ' || end_time
       FROM pg_auth_time_constraint WHERE authid = 'dora'::regrole;" "0 00:00:00 6 24:00:00"
@@ -400,7 +439,7 @@ if [ -z "$OAUTH" ]; then
 	echo "  skip   OAuth logins: gp_oauth_probe and gp_oauth_client are not built (meson's hook_tests)"
 else
 	q "CALL gp_security.create_profile('three', failed_login_attempts => 3);
-	   CREATE ROLE oscar LOGIN;
+	   CREATE ROLE oscar LOGIN ENABLE PROFILE;
 	   SELECT gp_security.assign_profile('oscar', 'three');" > /dev/null
 	issuer="host=$SOCK port=$PORT dbname=postgres user=oscar oauth_issuer=https://256.256.256.256 oauth_client_id=suite"
 	# psql has no token: libpq's discovery round trip, then it gives up

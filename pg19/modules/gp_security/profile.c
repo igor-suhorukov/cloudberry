@@ -326,6 +326,24 @@ GpProfileNameForRole(Oid roleid)
 	return GpLabelGet(&addr, GP_LABEL_profile);
 }
 
+/*
+ * Does a role's profile hold it?  Cloudberry's pg_authid.rolenableprofile,
+ * which ENABLE PROFILE and DISABLE PROFILE set, a flag of the role's label.
+ */
+bool
+GpProfileEnabledForRole(Oid roleid)
+{
+	ObjectAddress addr = role_address(roleid);
+
+	return GpLabelHas(&addr, GP_LABEL_enable_profile);
+}
+
+/*
+ * The limits a role is held to, as Cloudberry holds it: none until its
+ * profile is switched on (ENABLE PROFILE), and then its own profile's, or
+ * the default profile's for a role that has none -- Cloudberry's
+ * pg_authid.rolprofile is the default profile until another is given.
+ */
 bool
 GpProfileForRole(Oid roleid, GpProfile *out)
 {
@@ -337,9 +355,12 @@ GpProfileForRole(Oid roleid, GpProfile *out)
 	if (!gp_enable_password_profile)
 		return false;
 
+	if (!GpProfileEnabledForRole(roleid))
+		return false;
+
 	name = GpProfileNameForRole(roleid);
 	if (name == NULL)
-		return false;
+		name = GP_DEFAULT_PROFILE;
 
 	if (!GpProfileRead(name, out))
 	{
@@ -360,12 +381,30 @@ GpProfileForRole(Oid roleid, GpProfile *out)
 	return true;
 }
 
+/*
+ * A profile by its name, as GpProfileForRole() gives a role's: every
+ * "default" filled in from the default profile.  False when there is none.
+ */
+bool
+GpProfileNamed(const char *name, GpProfile *out)
+{
+	GpProfile	fallback;
+
+	profile_init(out);
+	if (!GpProfileRead(name, out))
+		return false;
+	if (GpProfileRead(GP_DEFAULT_PROFILE, &fallback))
+		profile_fill_defaults(out, &fallback);
+	return true;
+}
+
 /* ------------------------------------------------------------------------- */
 /* SQL                                                                       */
 /* ------------------------------------------------------------------------- */
 
 PG_FUNCTION_INFO_V1(gp_security_profile_setting);
 PG_FUNCTION_INFO_V1(gp_security_role_profile);
+PG_FUNCTION_INFO_V1(gp_security_role_profile_enabled);
 
 /*
  * gp_security.profile_setting(profile name, setting text) -> integer
@@ -420,4 +459,20 @@ gp_security_role_profile(PG_FUNCTION_ARGS)
 		PG_RETURN_NULL();
 
 	PG_RETURN_DATUM(DirectFunctionCall1(namein, CStringGetDatum(profile)));
+}
+
+/*
+ * gp_security.role_profile_enabled(role name) -> boolean
+ *
+ * Whether a role's profile holds it; what Cloudberry reads from
+ * pg_authid.rolenableprofile.
+ */
+Datum
+gp_security_role_profile_enabled(PG_FUNCTION_ARGS)
+{
+	Oid			roleid = get_role_oid(NameStr(*PG_GETARG_NAME(0)), true);
+
+	if (!OidIsValid(roleid))
+		PG_RETURN_NULL();
+	PG_RETURN_BOOL(GpProfileEnabledForRole(roleid));
 }

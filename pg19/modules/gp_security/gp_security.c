@@ -115,6 +115,23 @@ security_assign_profile(Oid roleid, const char *profile)
 }
 
 /*
+ * Switch a role's profile on or off: Cloudberry's ENABLE PROFILE and DISABLE
+ * PROFILE, which set pg_authid.rolenableprofile.  A role's profile -- its own,
+ * or the default one -- holds it only while the switch is on
+ * (GpProfileForRole()), and it is off for a role until it is turned on, as
+ * Cloudberry's column is false for a role until then.  A flag of the role's
+ * "gp" label.
+ */
+static void
+security_enable_profile(Oid roleid, bool enable)
+{
+	ObjectAddress addr;
+
+	ObjectAddressSet(addr, AuthIdRelationId, roleid);
+	GpLabelSet(&addr, GP_LABEL_enable_profile, enable ? "" : NULL);
+}
+
+/*
  * Lock an account, or unlock it.  The lock is the label and nothing else:
  * rolcanlogin keeps saying what an administrator said, so the two never have
  * to be told apart.
@@ -146,10 +163,11 @@ security_lock_role(Oid roleid, bool lock)
 
 /*
  * What O26 carried to a CREATE or ALTER ROLE for this module (gp_desugar.c,
- * GpAttachCarriers): Cloudberry's role options PROFILE p and ACCOUNT LOCK and
- * UNLOCK, the port's NOPROFILE, and DENY and DROP DENY, as DefElems in the
- * "gp" namespace -- gp.profile = 'p' or DEFAULT, gp.account = 'lock' or
- * 'unlock', gp.deny and gp.drop_deny = a clause's points (deny.c).
+ * GpAttachCarriers): Cloudberry's role options PROFILE p, ACCOUNT LOCK and
+ * UNLOCK, ENABLE PROFILE and DISABLE PROFILE, the port's NOPROFILE, and DENY
+ * and DROP DENY, as DefElems in the "gp" namespace -- gp.profile = 'p' or
+ * DEFAULT, gp.account = 'lock' or 'unlock', gp.enable_profile = 'on' or
+ * 'off', gp.deny and gp.drop_deny = a clause's points (deny.c).
  * PostgreSQL's grammar never puts a namespace on a role option, so these are
  * all ours.
  */
@@ -211,6 +229,8 @@ apply_role_carriers(Oid roleid, List *carried)
 			security_assign_profile(roleid, value);
 		else if (strcmp(def->defname, "account") == 0)
 			security_lock_role(roleid, value != NULL && strcmp(value, "lock") == 0);
+		else if (strcmp(def->defname, "enable_profile") == 0)
+			security_enable_profile(roleid, value != NULL && strcmp(value, "on") == 0);
 		else if (strcmp(def->defname, "deny") == 0 ||
 				 strcmp(def->defname, "drop_deny") == 0)
 			continue;			/* GpDenyApply()'s */
@@ -303,6 +323,22 @@ gp_security_ProcessUtility(PlannedStmt *pstmt, const char *queryString,
 	if (gp_enable_password_profile)
 		rolename = GpPasswordRoleOfStmt(parsetree);
 
+	/* a new role's password is checked before the role exists */
+	if (IsA(parsetree, CreateRoleStmt))
+	{
+		bool		enabled = false;
+		const char *profile = NULL;
+
+		foreach_node(DefElem, def, carried)
+		{
+			if (strcmp(def->defname, "enable_profile") == 0)
+				enabled = def->arg != NULL && strcmp(strVal(def->arg), "on") == 0;
+			else if (strcmp(def->defname, "profile") == 0)
+				profile = def->arg != NULL ? strVal(def->arg) : NULL;
+		}
+		GpPasswordNewRole(enabled, profile);
+	}
+
 	if (prev_ProcessUtility)
 		prev_ProcessUtility(pstmt, queryString, readOnlyTree, context,
 							params, queryEnv, dest, qc);
@@ -344,6 +380,7 @@ gp_security_ProcessUtility(PlannedStmt *pstmt, const char *queryString,
 /* ------------------------------------------------------------------------- */
 
 PG_FUNCTION_INFO_V1(gp_security_assign_profile);
+PG_FUNCTION_INFO_V1(gp_security_enable_profile);
 PG_FUNCTION_INFO_V1(gp_security_lock_role);
 PG_FUNCTION_INFO_V1(gp_security_unlock_role);
 PG_FUNCTION_INFO_V1(gp_security_role_locked_until);
@@ -369,6 +406,22 @@ gp_security_assign_profile(PG_FUNCTION_ARGS)
 	security_check_role(roleid);
 	security_assign_profile(roleid,
 							PG_ARGISNULL(1) ? NULL : NameStr(*PG_GETARG_NAME(1)));
+	PG_RETURN_VOID();
+}
+
+/*
+ * gp_security.enable_profile(role name, enable boolean)
+ *
+ * What Cloudberry writes as ALTER USER ... ENABLE PROFILE, and with false
+ * DISABLE PROFILE.
+ */
+Datum
+gp_security_enable_profile(PG_FUNCTION_ARGS)
+{
+	Oid			roleid = get_role_oid(NameStr(*PG_GETARG_NAME(0)), false);
+
+	security_check_role(roleid);
+	security_enable_profile(roleid, PG_GETARG_BOOL(1));
 	PG_RETURN_VOID();
 }
 

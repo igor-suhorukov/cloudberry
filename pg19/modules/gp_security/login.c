@@ -487,7 +487,7 @@ gp_security_ClientAuthentication(Port *port, int status)
 	if (!OidIsValid(roleid))
 		return;
 
-	/* A role with no profile is held to nothing. */
+	/* A role whose profile is not switched on (ENABLE PROFILE) is held to nothing. */
 	if (!GpProfileForRole(roleid, &profile))
 		return;
 

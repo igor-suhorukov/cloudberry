@@ -77,11 +77,18 @@ extern void GpProfileRegisterProvider(void);
 extern bool GpProfileIsProfileRole(Oid roleid);
 
 /*
- * The profile a role is under, with every "default" filled in from the
- * default profile.  Returns false when the role has no profile, which is when
- * none of this applies to it.
+ * The profile a role is under -- the default one for a role with none of its
+ * own -- with every "default" filled in from the default profile.  Returns
+ * false when the role's profile is not switched on (ENABLE PROFILE), which is
+ * when none of this applies to it.
  */
 extern bool GpProfileForRole(Oid roleid, GpProfile *out);
+
+/* Whether a role's profile holds it: Cloudberry's rolenableprofile. */
+extern bool GpProfileEnabledForRole(Oid roleid);
+
+/* A profile by its name, filled in as GpProfileForRole() fills a role's. */
+extern bool GpProfileNamed(const char *name, GpProfile *out);
 
 /* The name of the profile a role is under, or NULL. */
 extern char *GpProfileNameForRole(Oid roleid);
@@ -121,6 +128,9 @@ extern void GpPasswordInstallHook(void);
  * statement that set it.
  */
 extern void GpPasswordRecorded(const char *rolename);
+
+/* What a CREATE ROLE about to run carries of its profile, for its password. */
+extern void GpPasswordNewRole(bool enabled, const char *profile);
 
 /* Which roles a CREATE/ALTER ROLE statement gave a password to. */
 extern char *GpPasswordRoleOfStmt(Node *parsetree);
