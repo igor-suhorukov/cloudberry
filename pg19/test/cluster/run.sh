@@ -2242,6 +2242,23 @@ COMMIT;"
 	[ "$out" = "500|50497" ] && ok "a split update rolled back leaves every row where it was" \
 		|| notok "a split update rolled back" "$out"
 
+	# A database made from template0 has gp_core's extension, which the
+	# coordinator makes in it, and its segments' copies, as gpinitsystem
+	# gives template1 and postgres theirs: ORCA's slices run there, which
+	# gp_internal.exec_fragment() carries.
+	q 0 "CREATE DATABASE db0 TEMPLATE template0;" >/dev/null
+	out=$("$PSQL" -X -q -t -A -h "$(sockdir 0)" -p "$(port 0)" -d db0 \
+		-c "SELECT count(*) FROM gp_dist_random('pg_extension') WHERE extname = 'gp_core';" \
+		-c "CREATE TABLE z (a int, b int) DISTRIBUTED BY (a); INSERT INTO z SELECT i, i % 3 FROM generate_series(1, 30) i;" \
+		-c "EXPLAIN (COSTS OFF) SELECT b, count(*) FROM z GROUP BY b;" \
+		-c "SELECT string_agg(b || ':' || n, ',' ORDER BY b) FROM (SELECT b, count(*) n FROM z GROUP BY b) s;" 2>&1)
+	case "$out" in
+		2*"Redistribute Motion"*"Optimizer: GPORCA"*"0:10,1:10,2:10")
+			ok "a database made from template0 has gp_core, on every node, and ORCA's Motions run there" ;;
+		*) notok "gp_core in a database made from template0" "$out" ;;
+	esac
+	q 0 "DROP DATABASE db0;" >/dev/null
+
 	# A segment applies a split update's DELETEs before its INSERTs, the
 	# order ORCA sorts its rows into where the update changes a key of the
 	# table's: an UPDATE that sets a unique key to another column that has

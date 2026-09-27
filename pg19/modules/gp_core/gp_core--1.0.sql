@@ -9,7 +9,15 @@
  * segment as the session's own user, and ANALYZE by a table's owner has to be
  * able to call sample_rows() there.  So every function in it either checks the
  * caller's privileges itself or has EXECUTE revoked from PUBLIC.
+ *
+ * Each is the extension's own, made here: the control file names pg_catalog,
+ * where CREATE EXTENSION makes no schema, so that pg_dump writes none of them
+ * apart from CREATE EXTENSION -- which a restore passes over where the
+ * database has gp_core already, as every database a cluster's coordinator
+ * makes has (gp_ddl.c).  Every object this script makes is named with its
+ * schema.
  */
+CREATE SCHEMA gp;
 CREATE SCHEMA IF NOT EXISTS gp_internal;
 GRANT USAGE ON SCHEMA gp_internal TO PUBLIC;
 

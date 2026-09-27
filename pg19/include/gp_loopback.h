@@ -77,6 +77,14 @@ extern void GpLoopbackQueryInto(const char *dbname, const char *sql,
  */
 extern List *GpLoopbackReadRows(const char *dbname, const char *sql, int ncols);
 
+/*
+ * Run a statement in `dbname` of this server now, as this session's user,
+ * over a connection of its own, which is closed after it: in a transaction
+ * of its own there, apart from this one.  The message it fails with, or
+ * NULL.
+ */
+extern char *GpLoopbackRunApart(const char *dbname, const char *sql);
+
 /* The setting and the transaction callbacks; from gp_core's _PG_init. */
 extern void GpLoopbackInit(void);
 

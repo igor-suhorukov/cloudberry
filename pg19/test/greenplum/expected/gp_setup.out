@@ -11,7 +11,11 @@
 -- the suite.  The tests after it are the pass's, in a session of their own.
 --
 SET gp.optimizer = off;
-CREATE EXTENSION gp_core;
+-- gp_core's own the database has already: a cluster's coordinator makes it
+-- in every database a superuser makes (gp_ddl.c, create_core_extension()).
+SET client_min_messages = warning;
+CREATE EXTENSION IF NOT EXISTS gp_core;
+RESET client_min_messages;
 CREATE EXTENSION gp_orca;
 CREATE EXTENSION gp_sql;
 CREATE EXTENSION gp_ao;

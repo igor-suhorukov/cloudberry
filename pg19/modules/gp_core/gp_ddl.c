@@ -122,6 +122,7 @@
 #include "gp_core_api.h"
 #include "gp_dispatch.h"
 #include "gp_label.h"
+#include "gp_loopback.h"
 #include "gp_policy.h"
 #include "gp_refresh.h"
 #include "gp_scan.h"
@@ -798,6 +799,53 @@ check_same_everywhere(const char *extname, const char *sql)
 }
 
 /*
+ * A database a superuser makes on a cluster's coordinator gets gp_core's
+ * extension, as gpinitsystem gives it template1 and postgres
+ * (CREATE_GPEXTENSIONS): one made from template0, which has none, would
+ * otherwise lack the functions the cluster runs through there --
+ * gp_internal.exec_fragment(), by which a segment runs a slice of ORCA's
+ * plan, the interconnect's, a split update's -- and every plan of ORCA's
+ * with a Motion would be refused in it.  Cloudberry's are its catalog's, in
+ * every database.  The other modules' extensions stay the database's own
+ * affair, as they are in one made from template1.
+ *
+ * CREATE DATABASE runs in a transaction of its own, and its database is
+ * another backend's to connect to only once that has committed: so it is
+ * committed here, as VACUUM commits its own, and the statement goes on in
+ * a new one.  The extension is made over a connection to the new database,
+ * whose CREATE EXTENSION is dispatched to the segments from there as any
+ * is -- quietly, where the template had it already, and planned by the
+ * planner.  If it fails, the database is left as it is, and a WARNING
+ * says why: the database was made.
+ */
+static void
+create_core_extension(const char *dbname)
+{
+	char	   *failure;
+
+	if (GpClusterBackendRole() != GP_ROLE_DISPATCH ||
+		GpClusterIsSingleNode() || !superuser() ||
+		!extension_file_exists("gp_core"))
+		return;
+
+	/* the portal's snapshot goes with the transaction, as VACUUM's does */
+	if (ActiveSnapshotSet())
+		PopActiveSnapshot();
+	CommitTransactionCommand();
+	StartTransactionCommand();
+
+	failure = GpLoopbackRunApart(dbname,
+								 "SET client_min_messages = warning; "
+								 "SET gp.optimizer = off; "
+								 "CREATE EXTENSION IF NOT EXISTS gp_core");
+	if (failure != NULL)
+		ereport(WARNING,
+				(errmsg("extension \"gp_core\" was not created in database \"%s\"",
+						dbname),
+				 errdetail_internal("%s", failure)));
+}
+
+/*
  * The check's queries are the planner's: ORCA would take one of the
  * catalogs only to fall back from it, and say so to a session that traces
  * its fallbacks, in lines Cloudberry's CREATE EXTENSION never prints.
@@ -1435,6 +1483,8 @@ gp_ddl_ProcessUtility(PlannedStmt *pstmt, const char *queryString,
 	drop_temp_namespaces();
 	GpDispatchUtility(build_payload(tree), class == GP_DISPATCH_OWN_XACT);
 	check_extension_everywhere(parsetree);
+	if (IsA(parsetree, CreatedbStmt))
+		create_core_extension(((CreatedbStmt *) parsetree)->dbname);
 
 	if (IsA(parsetree, IndexStmt) && !((IndexStmt *) parsetree)->concurrent)
 		sync_indcheckxmin(recorded);

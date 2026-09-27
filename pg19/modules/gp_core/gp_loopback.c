@@ -792,6 +792,41 @@ GpLoopbackReadRows(const char *dbname, const char *sql, int ncols)
 	return loopback_read(dbname, sql, ncols);
 }
 
+char *
+GpLoopbackRunApart(const char *dbname, const char *sql)
+{
+	MemoryContext oldcxt = CurrentMemoryContext;
+	LoopbackConn *volatile lc = NULL;
+	char	   *failure = NULL;
+
+	PG_TRY();
+	{
+		lc = loopback_conn(NULL, dbname, false);
+		PQclear(loopback_exec(lc, sql, dbname));
+	}
+	PG_CATCH();
+	{
+		ErrorData  *edata;
+
+		MemoryContextSwitchTo(oldcxt);
+		edata = CopyErrorData();
+		FlushErrorState();
+		failure = edata->message;
+	}
+	PG_END_TRY();
+
+	/* loopback_exec() closes a connection its statement failed on */
+	foreach_ptr(LoopbackConn, c, conns)
+	{
+		if (c == lc)
+		{
+			loopback_forget(c);
+			break;
+		}
+	}
+	return failure;
+}
+
 /* ------------------------------------------------------------------------- */
 /* Start-up                                                                  */
 /* ------------------------------------------------------------------------- */

@@ -207,6 +207,8 @@ make_server a
 for db in postgres src; do
 	[ "$db" = src ] && q a postgres "CREATE DATABASE src" > /dev/null
 	for m in $MODULES; do
+		# a database the coordinator makes has gp_core already (gp_ddl.c)
+		[ "$db" = src ] && [ "$m" = gp_core ] && continue
 		out=$(q a "$db" "CREATE EXTENSION $m")
 		[ -n "$out" ] && { echo "CREATE EXTENSION $m in $db: $out"; exit 1; }
 	done

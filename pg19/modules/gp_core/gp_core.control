@@ -24,5 +24,9 @@ comment = 'Apache Cloudberry: cluster state, dispatch and the motion layer'
 default_version = '1.0'
 module_pathname = '$libdir/gp_core'
 relocatable = false
-schema = gp
+# pg_catalog, not gp: the script makes gp, gp_internal and gp_toolkit, each a
+# member of the extension, so that a dump carries none of them apart from it
+# -- a database made on a cluster's coordinator has gp_core already (gp_ddl.c,
+# create_core_extension()), and a restore's CREATE SCHEMA gp failed there
+schema = pg_catalog
 superuser = true
