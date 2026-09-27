@@ -33,7 +33,10 @@
  *   - Cloudberry's swap_relation_files callback is gone, the catalog
  *     following the storage instead, and so are its custom object classes,
  *     which PostgreSQL 19's dependencies do not have: the module's object
- *     access hook deletes a dropped table's rows.
+ *     access hook deletes a dropped table's rows;
+ *   - the size and the estimate leave out a file this backend's writer
+ *     writes still, whose aux table's row, with no size yet, a statement of
+ *     a trigger's the writer's statement fired sees.
  *-------------------------------------------------------------------------
  */
 
@@ -393,7 +396,9 @@ uint64 PaxAccessMethod::RelationSize(Relation rel, ForkNumber fork_number) {
     Datum tup_datum = heap_getattr(
         aux_tup, ANUM_PG_PAX_BLOCK_TABLES_PTBLOCKSIZE, aux_tup_desc, &isnull);
 
-    Assert(!isnull);
+    // a file this backend's writer writes still, its row as the writer made
+    // it
+    if (isnull) continue;
     pax_size += DatumGetUInt32(tup_datum);
   }
 
@@ -440,7 +445,8 @@ void PaxAccessMethod::EstimateRelSize(Relation rel, int32 * /*attr_widths*/,
 
     pttupcount_datum = heap_getattr(
         aux_tup, ANUM_PG_PAX_BLOCK_TABLES_PTTUPCOUNT, aux_tup_desc, &isnull);
-    Assert(!isnull);
+    // a file being written still, as in RelationSize()
+    if (isnull) continue;
     total_tuples += DatumGetUInt32(pttupcount_datum);
 
     isnull = false;

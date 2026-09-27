@@ -30,7 +30,9 @@
  * finishes, before its AFTER triggers, as a utility statement ends, at
  * finish_bulk_insert, before a commit, and before a row it has in memory
  * still is fetched by its TID, and drops it, unwritten, where its
- * subtransaction aborts (access/pax_access_handle.cc).
+ * subtransaction aborts (access/pax_access_handle.cc).  A statement of a
+ * trigger's writes into its outer statement's state, and its writer is
+ * finished as it ends.
  *-------------------------------------------------------------------------
  */
 
@@ -95,6 +97,10 @@ void CPaxDmlStateLocal::FinishState(Oid oid,
     state->deleter = nullptr;
   }
 
+  FinishInserter(state.get());
+}
+
+void CPaxDmlStateLocal::FinishInserter(DmlStateValue *state) {
   if (state->inserter) {
     MemoryContext old_ctx;
     Assert(cbdb::pax_memory_context);
@@ -106,13 +112,27 @@ void CPaxDmlStateLocal::FinishState(Oid oid,
   }
 }
 
+// A statement of a trigger's that wrote rows into its outer statement's state
+// -- an AFTER INSERT trigger's UPDATE of the table its COPY writes -- has
+// them written as it ends, as its outer statement's are: a later statement's
+// snapshot sees its file's aux table's row as the writer finished it, where
+// the row the writer made, with no rows yet, is one a scan refuses.  Its
+// deletes are made with its outer statement's (GetDeleter()).
 void CPaxDmlStateLocal::FinishOwned(const void *owner) {
   std::vector<Oid> oids;
+  std::vector<std::shared_ptr<DmlStateValue>> writers;
   SubTransactionId subid = GetCurrentSubTransactionId();
 
-  for (auto &it : dml_descriptor_tab_)
-    if (it.second->owner == owner && it.second->subid == subid)
+  for (auto &it : dml_descriptor_tab_) {
+    auto state = it.second;
+
+    if (state->owner == owner && state->subid == subid)
       oids.push_back(it.first);
+    else if (state->inserter && state->inserter_owner == owner &&
+             state->inserter_subid == subid)
+      writers.push_back(state);
+  }
+  for (auto &state : writers) FinishInserter(state.get());
   for (auto oid : oids) {
     auto state = RemoveDmlState(oid);
     if (state) FinishState(oid, state);
@@ -135,14 +155,18 @@ void CPaxDmlStateLocal::Forget(SubTransactionId subid) {
   for (auto &it : dml_descriptor_tab_)
     if (subid == InvalidSubTransactionId || it.second->subid == subid)
       oids.push_back(it.first);
+    else if (it.second->inserter && it.second->inserter_subid == subid)
+      it.second->inserter = nullptr;
   for (auto oid : oids) RemoveDmlState(oid);
   if (subid == InvalidSubTransactionId) owners_.clear();
 }
 
 void CPaxDmlStateLocal::Reparent(SubTransactionId subid,
                                  SubTransactionId parent) {
-  for (auto &it : dml_descriptor_tab_)
+  for (auto &it : dml_descriptor_tab_) {
     if (it.second->subid == subid) it.second->subid = parent;
+    if (it.second->inserter_subid == subid) it.second->inserter_subid = parent;
+  }
 }
 
 void CPaxDmlStateLocal::ForgetRelation(Oid relid) { RemoveDmlState(relid); }
@@ -183,6 +207,8 @@ CPaxInserter *CPaxDmlStateLocal::GetInserter(Relation rel) {
   }
   if (state->inserter == nullptr) {
     state->inserter = std::make_unique<CPaxInserter>(rel);
+    state->inserter_owner = owners_.empty() ? nullptr : owners_.back();
+    state->inserter_subid = GetCurrentSubTransactionId();
   }
   return state->inserter.get();
 }
