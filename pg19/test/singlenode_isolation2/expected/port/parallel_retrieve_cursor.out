@@ -1,0 +1,132 @@
+-- The port's own: parallel retrieve cursors on one node, in place of
+-- Cloudberry's parallel_retrieve_cursor_schedule of this suite, whose
+-- expected output is a cluster's.  One node's cursor has its one endpoint
+-- there, filled as DECLARE runs its plan (gp_endpoint.c), and a retrieve
+-- session of the node (-1R:) reads it.
+CREATE TABLE prc_t (a int);
+CREATE
+INSERT INTO prc_t SELECT generate_series(1, 20);
+INSERT 20
+
+1: BEGIN;
+BEGIN
+1: DECLARE c1 PARALLEL RETRIEVE CURSOR FOR SELECT * FROM prc_t;
+DECLARE
+1: @post_run 'parse_endpoint_info 1 1 2 3 4': SELECT endpointname,auth_token,hostname,port,state FROM gp_get_endpoints() WHERE cursorname='c1';
+ endpoint_id1 | token_id | host_id | port_id | READY
+(1 row)
+1: SELECT gp_segment_id, cursorname, state FROM gp_get_endpoints();
+ gp_segment_id | cursorname | state 
+---------------+------------+-------
+ -1            | c1         | READY 
+(1 row)
+2: SELECT senderpid <> -1, receiverpid <> -1, state FROM gp_get_segment_endpoints();
+ ?column? | ?column? | state 
+----------+----------+-------
+ t        | f        | READY 
+(1 row)
+1: SELECT * FROM gp_wait_parallel_retrieve_cursor('c1', 0);
+ finished 
+----------
+ f        
+(1 row)
+-1R: @pre_run 'set_endpoint_variable @ENDPOINT1': RETRIEVE 5 FROM ENDPOINT "@ENDPOINT1";
+ a 
+---
+ 1 
+ 2 
+ 3 
+ 4 
+ 5 
+(5 rows)
+2: SELECT senderpid <> -1, receiverpid <> -1, state FROM gp_get_segment_endpoints();
+ ?column? | ?column? | state    
+----------+----------+----------
+ t        | t        | ATTACHED 
+(1 row)
+-1R: @pre_run 'set_endpoint_variable @ENDPOINT1': RETRIEVE ALL FROM ENDPOINT "@ENDPOINT1";
+ a  
+----
+ 6  
+ 7  
+ 8  
+ 9  
+ 10 
+ 11 
+ 12 
+ 13 
+ 14 
+ 15 
+ 16 
+ 17 
+ 18 
+ 19 
+ 20 
+(15 rows)
+1: SELECT * FROM gp_wait_parallel_retrieve_cursor('c1', -1);
+ finished 
+----------
+ t        
+(1 row)
+1: SELECT state FROM gp_get_endpoints();
+ state    
+----------
+ FINISHED 
+(1 row)
+-- a retrieve session runs RETRIEVE alone
+-1R: SELECT 1;
+ERROR:  This is a retrieve connection, but the query is not a RETRIEVE.
+-1R: @pre_run 'set_endpoint_variable @ENDPOINT1': RETRIEVE ALL FROM ENDPOINT "@ENDPOINT1";
+ a 
+---
+(0 rows)
+1: ROLLBACK;
+ROLLBACK
+1: SELECT count(*) FROM gp_get_endpoints();
+ count 
+-------
+ 0     
+(1 row)
+-1Rq: ... <quitting>
+
+-- where the endpoint is, as EXPLAIN says it
+EXPLAIN (COSTS false) DECLARE c2 PARALLEL RETRIEVE CURSOR FOR SELECT * FROM prc_t ORDER BY a;
+ QUERY PLAN                 
+----------------------------
+ Sort                       
+   Sort Key: prc_t.a        
+   ->  Seq Scan on prc_t    
+ Endpoint: "on coordinator" 
+ Optimizer: GPORCA          
+(5 rows)
+
+-- a retrieve session that quits partway cancels the cursor
+1: BEGIN;
+BEGIN
+1: DECLARE c3 PARALLEL RETRIEVE CURSOR FOR SELECT * FROM prc_t ORDER BY a;
+DECLARE
+1: @post_run 'parse_endpoint_info 3 1 2 3 4': SELECT endpointname,auth_token,hostname,port,state FROM gp_get_endpoints() WHERE cursorname='c3';
+ endpoint_id3 | token_id | host_id | port_id | READY
+(1 row)
+-1R: @pre_run 'set_endpoint_variable @ENDPOINT3': RETRIEVE 5 FROM ENDPOINT "@ENDPOINT3";
+ a 
+---
+ 1 
+ 2 
+ 3 
+ 4 
+ 5 
+(5 rows)
+-1Rq: ... <quitting>
+1: SELECT * FROM gp_wait_parallel_retrieve_cursor('c3', 0);
+ERROR:  canceling MPP operation: "Endpoint retrieve session is quitting. All unfinished parallel retrieve cursors on the session will be terminated."
+1: ROLLBACK;
+ROLLBACK
+1: SELECT count(*) FROM gp_get_endpoints();
+ count 
+-------
+ 0     
+(1 row)
+
+DROP TABLE prc_t;
+DROP
