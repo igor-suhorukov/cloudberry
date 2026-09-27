@@ -51,6 +51,7 @@
 #include "gp_dispatch.h"
 #include "gp_dtm_debug.h"
 #include "gp_dtx.h"
+#include "gp_expand.h"
 #include "gp_explain.h"
 #include "gp_fault.h"
 #include "gp_fts.h"
@@ -336,6 +337,14 @@ _PG_init(void)
 	 * statement and the others see the list it makes; on one node too.
 	 */
 	GpPartAnalyzeInit();
+
+	/*
+	 * gpexpand's catalog lock, which every statement that changes a catalog
+	 * on the coordinator takes (gp_expand.c): last of gp_core's utility
+	 * hooks, so that it is the first to see the statement, before any of
+	 * them has changed anything.
+	 */
+	GpExpandInit();
 
 	/*
 	 * Deliberately no MarkGUCPrefixReserved("gp") here.  It drops every

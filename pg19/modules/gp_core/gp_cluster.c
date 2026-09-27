@@ -150,9 +150,10 @@ typedef struct GpClusterSlot
  */
 typedef struct GpClusterShared
 {
-	slock_t		mutex;			/* the states, and the two versions */
+	slock_t		mutex;			/* the states, and the versions */
 	uint64		version;		/* bumped at each change of a state or a node */
 	uint64		nodes_version;	/* bumped at each change of a node */
+	uint64		expand_version; /* gpexpand's, 0 as the server starts */
 	LWLock	   *lock;
 	int			nnodes;
 	GpClusterNodeState nodes[FLEXIBLE_ARRAY_MEMBER];
@@ -851,6 +852,7 @@ cluster_shmem_startup(void)
 		SpinLockInit(&cluster_shared->mutex);
 		cluster_shared->version = 1;
 		cluster_shared->nodes_version = 1;
+		cluster_shared->expand_version = 0;
 		cluster_shared->lock = &(GetNamedLWLockTranche("gp_core cluster"))->lock;
 		cluster_shared->nnodes = cluster_nnodes;
 		for (int i = 0; i < cluster_nnodes; i++)
@@ -1065,6 +1067,29 @@ GpClusterPublish(const GpClusterNodeState *states)
 	SpinLockRelease(&cluster_shared->mutex);
 	LWLockRelease(cluster_shared->lock);
 	return true;
+}
+
+uint64
+GpClusterExpandVersion(void)
+{
+	uint64		version;
+
+	if (cluster_shared == NULL)
+		return 0;
+	SpinLockAcquire(&cluster_shared->mutex);
+	version = cluster_shared->expand_version;
+	SpinLockRelease(&cluster_shared->mutex);
+	return version;
+}
+
+void
+GpClusterBumpExpandVersion(void)
+{
+	if (cluster_shared == NULL)
+		return;
+	SpinLockAcquire(&cluster_shared->mutex);
+	cluster_shared->expand_version++;
+	SpinLockRelease(&cluster_shared->mutex);
 }
 
 /* ------------------------------------------------------------------------- */

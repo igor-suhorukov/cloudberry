@@ -31,7 +31,9 @@
 # mirrors3, whose clusters have a mirror for each segment -- three, so that
 # they run side by side -- M7's in mirrors4, whose standby they change, and
 # dtx_recovery_wait_lsn in mirrors5, whose recovery process waits a minute
-# for FTS to let a mirror go.
+# for FTS to let a mirror go.  gpexpand_catalog_lock, whose sessions hold
+# every other session's catalog changes, is in a group of its own, as the
+# schedule keeps it.
 run  lockmodes                                     lockmodes
 run  select_dropped_table
 run  resource_queue_self_deadlock                  queues
@@ -39,6 +41,7 @@ run  resource_queue_terminate                      queues
 run  concurrent_partition_table_operations_should_not_deadlock
 run  starve_case
 run  create_index_deadlock
+run  gpexpand_catalog_lock                         catalog_lock
 run  commit_transaction_block_checkpoint
 run  prepare_limit                                 standby
 run  gdd/prepare                                   gdd*

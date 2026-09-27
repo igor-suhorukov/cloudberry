@@ -3513,3 +3513,29 @@ CREATE TABLE gp_internal.leaf_hll (
 );
 CREATE INDEX leaf_hll_attnum ON gp_internal.leaf_hll (starelid, staattnum);
 REVOKE ALL ON gp_internal.leaf_hll FROM PUBLIC;
+
+/******************************************************************************
+ * gpexpand and gpshrink: a segment added to a running cluster, and removed
+ * from it (gp_expand.c).
+ *****************************************************************************/
+
+/*
+ * gp_expand_lock_catalog(): gpexpand's catalog lock, which every statement
+ * that changes a catalog on the coordinator takes shared, and fails where
+ * gpexpand holds it or waits for it: held for the rest of the transaction.
+ * gp_expand_bump_version(): gpexpand's word that the segments have changed.
+ * Cloudberry's; none is granted to anybody.
+ */
+CREATE FUNCTION pg_catalog.gp_expand_lock_catalog()
+RETURNS void
+AS 'MODULE_PATHNAME', 'gp_expand_lock_catalog'
+LANGUAGE C VOLATILE PARALLEL RESTRICTED;
+
+CREATE FUNCTION pg_catalog.gp_expand_bump_version()
+RETURNS void
+AS 'MODULE_PATHNAME', 'gp_expand_bump_version'
+LANGUAGE C VOLATILE PARALLEL RESTRICTED;
+
+REVOKE ALL ON FUNCTION pg_catalog.gp_expand_lock_catalog(),
+	pg_catalog.gp_expand_bump_version()
+	FROM PUBLIC;

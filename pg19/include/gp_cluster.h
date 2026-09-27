@@ -142,6 +142,14 @@ extern uint64 GpClusterLiveStates(GpClusterNodeState *states);
 extern bool GpClusterPublish(const GpClusterNodeState *states);
 
 /*
+ * gpexpand's version of the cluster, Cloudberry's gp_expand_version: 0 as
+ * the server starts, bumped by gp_expand_bump_version().  0 on a server of
+ * no cluster.
+ */
+extern uint64 GpClusterExpandVersion(void);
+extern void GpClusterBumpExpandVersion(void);
+
+/*
  * Changing the nodes, on the coordinator: gp_segadmin.c's.  Between
  * GpClusterLockNodes() and the end of the transaction, or
  * GpClusterUnlockNodes(), nothing else changes them: GpClusterLiveNodes()

@@ -404,7 +404,8 @@ modules = [
                      'modules/gp_core/gp_partanalyze.c',
                      'modules/gp_core/gp_hll.c',
                      'modules/gp_core/gp_partmerge.c',
-                     'modules/gp_core/gp_rtfilter.c'),
+                     'modules/gp_core/gp_rtfilter.c',
+                     'modules/gp_core/gp_expand.c'),
     # The dispatcher is a libpq client of the segments; see gp_dispatch.c.
     'dependencies': [libpq_dep],
     'include_directories': [pg_client_inc],
