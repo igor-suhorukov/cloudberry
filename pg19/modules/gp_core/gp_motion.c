@@ -4935,6 +4935,7 @@ GpEndpointDispatch(QueryDesc *queryDesc, CustomScan *gather,
 	char	   *sharekey;
 	List	   *marks = NIL;
 	char	   *fragment;
+	const GpIcTransport *transport = interconnect_transport();
 	static uint32 endpoint_counter = 0;
 	MemoryContext oldcxt = MemoryContextSwitchTo(estate->es_query_cxt);
 
@@ -4955,13 +4956,13 @@ GpEndpointDispatch(QueryDesc *queryDesc, CustomScan *gather,
 	GpDispatchCommand(psprintf("SELECT gp_internal.share_publish(%s)",
 							   quote_literal_cstr(sharekey)));
 	for (int seg = 0; seg < nsegs; seg++)
-		(void) GpStreamWriterAddress(seg, &writer_pid[seg]);
+		(void) GpStreamWriterAddress(seg, transport, &writer_pid[seg]);
 
 	for (int i = 0; i < nendpoints; i++)
 	{
 		const char *address;
 
-		readers[i] = GpStreamAddReader(stream, contents[i], &address);
+		readers[i] = GpStreamAddReader(stream, contents[i], transport, &address);
 		top[contents[i]] = address;
 		GpStreamReaderExec(stream, readers[i],
 						   psprintf("BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY; "
