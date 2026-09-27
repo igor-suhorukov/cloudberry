@@ -3643,6 +3643,38 @@ SQL
 		*) notok "the table under a view without the detector" "$out" ;;
 	esac
 
+	# A MERGE that only inserts changes no row it reads, and locks as an
+	# INSERT does: RowExclusiveLock alone, which the parser took for INSERT
+	# privilege -- not an ExclusiveLock after it, an upgrade two such MERGEs
+	# deadlock on -- and one waits for no other.  A MERGE that updates holds
+	# ExclusiveLock, from the parser.
+	q 0 "CREATE TABLE gddm (id int, val int) DISTRIBUTED BY (id);" >/dev/null
+	for opt in off on; do
+		q 0 "TRUNCATE gddm;" >/dev/null
+		out=$(printf '%s\n' "SET gp.optimizer = $opt;" "BEGIN;" \
+			"MERGE INTO gddm t USING (VALUES (1, 1), (2, 2)) s(id, val) ON t.id = s.id WHEN NOT MATCHED THEN INSERT VALUES (s.id, s.val);" \
+			"SELECT string_agg(mode, ',' ORDER BY mode) FROM pg_locks WHERE relation = 'gddm'::regclass AND pid = pg_backend_pid();" \
+			"COMMIT;" | qf 0 | tail -1)
+		out2=$(printf '%s\n' "SET gp.optimizer = $opt;" "BEGIN;" \
+			"MERGE INTO gddm t USING (VALUES (1, 10), (3, 3)) s(id, val) ON t.id = s.id WHEN MATCHED THEN UPDATE SET val = s.val WHEN NOT MATCHED THEN INSERT VALUES (s.id, s.val);" \
+			"SELECT string_agg(mode, ',' ORDER BY mode) FROM pg_locks WHERE relation = 'gddm'::regclass AND pid = pg_backend_pid();" \
+			"COMMIT;" | qf 0 | tail -1)
+		printf '%s\n' "SET gp.optimizer = $opt;" "BEGIN;" \
+			"MERGE INTO gddm t USING (VALUES (4, 4)) s(id, val) ON t.id = s.id WHEN NOT MATCHED THEN INSERT VALUES (s.id, s.val);" \
+			"SELECT pg_sleep(3);" "COMMIT;" | qf 0 > /dev/null 2>&1 &
+		holder=$!
+		sleep 0.5
+		start=$(date +%s%N)
+		out3=$(q 0 "SET gp.optimizer = $opt; MERGE INTO gddm t USING (VALUES (5, 5)) s(id, val) ON t.id = s.id WHEN NOT MATCHED THEN INSERT VALUES (s.id, s.val);")
+		took=$(( ($(date +%s%N) - start) / 1000000 ))
+		wait "$holder"
+		n=$(q 0 "SELECT string_agg(id || ':' || val, ' ' ORDER BY id) FROM gddm;")
+		[ "$out" = "RowExclusiveLock" ] && [ "$out2" = "ExclusiveLock" ] && [ "$took" -lt 2000 ] &&
+			[ "$n" = "1:10 2:2 3:3 4:4 5:5" ] \
+			&& ok "without it, a MERGE that only inserts locks as an INSERT does, and waits for no other; one that updates holds ExclusiveLock, under gp.optimizer = $opt" \
+			|| notok "a MERGE's table lock without the detector, under gp.optimizer = $opt" "$out / $out2 / $took ms / $n / $out3"
+	done
+
 	for n in 1 2 0; do
 		start_node "$n" "shared_preload_libraries = '$PRELOAD,gp_orca'"
 	done

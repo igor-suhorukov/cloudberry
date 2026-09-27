@@ -1128,6 +1128,7 @@ explicit_begin(CustomScanState *node, EState *estate, int eflags)
 	StringInfoData head;
 	StringInfoData tail;
 	bool		view_checks = false;
+	bool		merge_inserts;
 	int			i;
 
 	outerPlanState(node) = ExecInitNode(subplan, estate, eflags);
@@ -1474,9 +1475,21 @@ explicit_begin(CustomScanState *node, EState *estate, int eflags)
 	 * table's partitions it writes are locked as it is, as Cloudberry's
 	 * planner locks them in the table's mode; an INSERT into one locks every
 	 * partition.
+	 *
+	 * A MERGE whose actions only insert, or do nothing, changes no row it
+	 * reads, and locks as an INSERT does.  Cloudberry's parser locks any
+	 * MERGE in ExclusiveLock; the port's parser asks gp_core for a lock by the
+	 * privileges a statement needs (gp_modify_query_lockmode()), and INSERT
+	 * privilege alone is an INSERT's, so it took RowExclusiveLock -- and an
+	 * ExclusiveLock here would be an upgrade, which two such MERGEs deadlock
+	 * on.  Its rows not matched are decided under its snapshot, as
+	 * PostgreSQL's MERGE decides them: a row another transaction inserts
+	 * meanwhile is not seen.
 	 */
+	merge_inserts = state->operation == CMD_MERGE && state->mshapes == NIL &&
+		state->mdelete == NULL && !state->split;
 	if ((state->operation == CMD_UPDATE || state->operation == CMD_DELETE ||
-		 state->operation == CMD_MERGE ||
+		 (state->operation == CMD_MERGE && !merge_inserts) ||
 		 state->on_conflict == ONCONFLICT_UPDATE) &&
 		!gp_enable_global_deadlock_detector)
 	{
@@ -1505,7 +1518,8 @@ explicit_begin(CustomScanState *node, EState *estate, int eflags)
 							   state->on_conflict == ONCONFLICT_UPDATE
 							   ? ExclusiveLock : RowExclusiveLock);
 	if (state->operation == CMD_MERGE)
-		GpModifyLockPartitions(RelationGetRelid(state->target), ExclusiveLock);
+		GpModifyLockPartitions(RelationGetRelid(state->target),
+							   merge_inserts ? RowExclusiveLock : ExclusiveLock);
 
 	GpClusterSegments(&state->nsegs);
 	state->batches = palloc0_array(List *, state->nsegs);
