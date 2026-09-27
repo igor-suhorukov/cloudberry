@@ -431,12 +431,12 @@ run  runtime_stats
 run  interrupt_holdoff_count
 skip bfv_catalog  non-standard string literals are not supported; unrecognized configuration parameter "escape_string_warning"
 run  bfv_index
-skip bfv_statistic  table row type and query-specified row type do not match; unexpected null value in cached tuple for catalog pg_statistic column stavalues2
+skip bfv_statistic  no binary output function available for type aclitem: gp_dist_random('pg_statistic') brings each segment's rows whole, the statistics of pg_class's relacl among them; and under the planner Cloudberry's internal error ends with its source's place, which the test's matchsubs leave a space of
 run  nested_case_null
 run  sort
 run  aggregate_with_groupingsets
-skip gporca  table row type and query-specified row type do not match; could not find hash function for hash operator
-skip gpsd  relation "gpsd_foo" does not exist; table row type and query-specified row type do not match
+skip gporca  function disable_xform(unknown) does not exist; under the planner, EXPLAIN of a hash join by an operator declared HASHES without a hash function fails, as PostgreSQL 19's does -- since PostgreSQL 18 the executor looks the function up as it starts (adf97c15623), where Cloudberry's looks it up as it builds the table and fails the SELECT alone, on a segment, with the same error; under ORCA, 21 statements fall back with "Partially Distributed Data"
+skip gpsd  cannot create data/gpsd-with-hll.sql: Permission denied -- the gpsd tool writes into Cloudberry's suite directory, which the harness runs from and cannot write; then relation "gpsd_foo" does not exist
 run  catcache
 skip minirepro  relation "minirepro_foo" does not exist; table "minirepro_foo" does not exist
 run  gporca_faults
@@ -448,7 +448,7 @@ skip bfv_planner  differs: two counts of what its plans read are 27 and 9, where
 run  bfv_legacy
 skip bfv_temp  syntax error at or near ")"; relation "n" does not exist
 run  bfv_dml
-skip tpcds_q04  table row type and query-specified row type do not match
+run  tpcds_q04
 skip qp_olap_mdqa  differs: GROUP_ID() numbers each grouping set's copies 0, 1, and so on, where Cloudberry's numbers them as its Agg's phases meet them -- in the rollups and hashed sets its planner arranges them into -- and gives some rows 2 and 3 where the port gives 0 and 1
 skip gp_recursive_cte  unrecognized configuration parameter "gp_recursive_cte"
 run  qp_skew

@@ -44,6 +44,7 @@
 #include "utils/lsyscache.h"
 
 #include "cb_module.h"
+#include "gp_catalog.h"
 #include "gp_cluster.h"
 #include "gp_core_api.h"
 #include "gp_dbcopy.h"
@@ -272,6 +273,12 @@ _PG_init(void)
 	 * coordinator writes as statements change what they name.
 	 */
 	GpMetaTrackInit();
+
+	/*
+	 * A statistics row written by hand: an array constant for a column of
+	 * type anyarray taken as anyarray, as Cloudberry's parser takes it.
+	 */
+	GpCatalogInit();
 
 	/*
 	 * Deliberately no MarkGUCPrefixReserved("gp") here.  It drops every

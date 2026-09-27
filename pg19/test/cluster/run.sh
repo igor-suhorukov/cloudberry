@@ -1440,6 +1440,41 @@ a\b|\N' ] && [ "$(cat "$ROOT/ce_prog.txt" 2>&1)" = "to a program" ] \
 		&& ok "a key column renamed is renamed in the policy; one dropped leaves the table random, with Cloudberry's NOTICE" \
 		|| notok "the key's columns renamed and dropped" "$out / $out2 / $out3 / $out4 / $out5 / $out6"
 
+	# A randomly distributed table's rows are dealt to the segments in turn,
+	# from one chosen at random: a statement of as many rows as segments
+	# reaches every one (direct_dispatch's ten rows, which a random choice
+	# for each row left a segment of one statement in nineteen).
+	q 0 "CREATE TABLE rrt (a int) DISTRIBUTED RANDOMLY;" >/dev/null
+	out=""
+	for i in 1 2 3; do
+		out="$out$(q 0 "TRUNCATE rrt; INSERT INTO rrt SELECT generate_series(1, 10);
+				   SELECT string_agg(n::text, ' ') FROM (SELECT count(*) AS n FROM rrt
+				   GROUP BY gp_segment_id ORDER BY gp_segment_id) c;") "
+	done
+	[ "$out" = "5 5 5 5 5 5 " ] && ok "a random table's rows are dealt to the segments in turn ($out)" \
+		|| notok "the rows of a randomly distributed table" "$out"
+
+	# A gather the plan reads again -- the inner side of a Nested Loop --
+	# keeps the rows it read, and the segments run its query once.
+	q 0 "CREATE TABLE nlo (a int) DISTRIBUTED BY (a); INSERT INTO nlo SELECT generate_series(1, 6);
+		 CREATE TABLE nli (a int, t text) DISTRIBUTED BY (a); INSERT INTO nli SELECT i, md5(i::text) FROM generate_series(1, 50) i;" >/dev/null
+	scans() { q 1 "SELECT seq_scan FROM pg_stat_user_tables WHERE relname = 'nli';"; }
+	before=$(scans)
+	out=$(q 0 "SET enable_hashjoin = off; SET enable_mergejoin = off; SET enable_material = off;
+			   SELECT count(*) FROM nlo, nli WHERE nlo.a = nli.a;")
+	after=$before
+	for i in $(seq 1 40); do
+		after=$(scans)
+		[ "$after" != "$before" ] && break
+		sleep 0.25
+	done
+	isnum "$before" && isnum "$after" && [ "$out" = "6" ] && [ $((after - before)) -eq 1 ] \
+		&& ok "a Nested Loop's inner gather keeps its rows: the segment scanned the table once for six outer rows" \
+		|| notok "a rescanned gather" "count $out, scans $before -> $after"
+	out=$(q 0 "SELECT count(*) FROM (SELECT 1) s, (SELECT count(*) AS n FROM nli) l WHERE l.n > 0;")
+	[ "$out" = "1" ] && ok "and one that reads no column keeps rows of NULLs (a segfault once)" \
+		|| notok "a kept gather of count(*)" "$out"
+
 	###########################################################################
 	echo "9. ANALYZE samples the segments, and the planner believes it"
 	###########################################################################
@@ -1541,6 +1576,40 @@ a\b|\N' ] && [ "$(cat "$ROOT/ce_prog.txt" 2>&1)" = "to a program" ] \
 		*"permission denied"*) ok "a sample is refused to a role that cannot read the table" ;;
 		*) notok "gp_internal.sample_rows without SELECT" "$out" ;;
 	esac
+
+	# A statistics row written by hand, as ORCA's tests, gpsd and minirepro
+	# write pg_statistic: an array constant for a column of type anyarray is
+	# taken as anyarray, as Cloudberry's parser takes it, in a VALUES list of
+	# several rows too; and values not of their column's type are refused as
+	# the planner reads them, in Cloudberry's words, where PostgreSQL's
+	# planner would crash comparing them.
+	q 0 "CREATE TABLE hst (a int, b text) DISTRIBUTED BY (a);
+		 INSERT INTO hst SELECT i, 'v' || (i % 5) FROM generate_series(1, 100) i; ANALYZE hst;" >/dev/null
+	out=$(qf 0 <<'EOF'
+SET allow_system_table_mods = on;
+DELETE FROM pg_statistic WHERE starelid = 'hst'::regclass;
+INSERT INTO pg_statistic VALUES
+ ('hst'::regclass, 1, false, 0, 4, -1, 1, 0, 0, 0, 0, 96, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+  '{0.5}'::real[], NULL, NULL, NULL, NULL, '{7}'::int[], NULL, NULL, NULL, NULL),
+ ('hst'::regclass, 2, false, 0, 3, -0.05, 1, 0, 0, 0, 0, 98, 0, 0, 0, 0, 100, 0, 0, 0, 0,
+  '{0.9}'::real[], NULL, NULL, NULL, NULL, '{v1}'::text[], NULL, NULL, NULL, NULL);
+SELECT string_agg(most_common_vals::text, ' ' ORDER BY attname) FROM pg_stats WHERE tablename = 'hst';
+EOF
+)
+	est=$(q 0 "EXPLAIN SELECT * FROM hst WHERE b = 'v1';" | sed -n 's/.*rows=\([0-9]*\).*/\1/p' | head -1)
+	[ "$out" = "{7} {v1}" ] && [ "$est" = "90" ] \
+		&& ok "a statistics row written by hand, its arrays taken as anyarray, is the planner's ($est rows)" \
+		|| notok "pg_statistic written by hand" "$out / $est"
+	out=$(q 0 "SET allow_system_table_mods = on;
+			   UPDATE pg_statistic SET stavalues1 = '{1,2}'::int[] WHERE starelid = 'hst'::regclass AND staattnum = 2;
+			   RESET allow_system_table_mods;
+			   SELECT count(*) FROM hst WHERE b = 'v1';")
+	case "$out" in
+		*"invalid MCV array of type integer, for attribute of type text"*)
+			ok "an MCV list not of its column's type is refused as Cloudberry refuses it" ;;
+		*) notok "statistics not of their column's type" "$out" ;;
+	esac
+	q 0 "ANALYZE hst;" >/dev/null
 
 	###########################################################################
 	echo "10. ORCA's plans run on the segments, with Cloudberry's Motions"

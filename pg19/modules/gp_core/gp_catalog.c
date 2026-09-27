@@ -38,10 +38,21 @@
  * A catalog is written only with allow_system_table_mods on.  The views here
  * are ordinary ones, so a trigger refuses the rest in Cloudberry's words.
  *
+ * And a statistics row written by hand, as ORCA's tests and Cloudberry's
+ * gpsd and minirepro write pg_statistic: an array constant given for a
+ * column of type anyarray is taken as anyarray, as Cloudberry's parser takes
+ * it (coerce_type(), MPP-3786), where PostgreSQL's leaves it the array's own
+ * type, which the executor refuses ("table row type and query-specified row
+ * type do not match").  And statistics whose values are not of their
+ * column's type refused as the planner reads them, as Cloudberry's refuses
+ * them, where PostgreSQL's would crash comparing them.
+ *
  * Cloudberry sources this file stands in for:
  *	  src/include/catalog/gp_id.h, gp_segment_configuration.h,
- *	  gp_configuration_history.h, gp_distribution_policy.h, and the checks
- *	  in copy.c and parse_clause.c that refuse a write to a system catalog
+ *	  gp_configuration_history.h, gp_distribution_policy.h, the checks in
+ *	  copy.c and parse_clause.c that refuse a write to a system catalog, and
+ *	  parse_coerce.c's coerce_type() for a constant of type anyarray, and
+ *	  selfuncs.c's check of the statistics' values
  *
  *-------------------------------------------------------------------------
  */
@@ -50,24 +61,31 @@
 #include "access/genam.h"
 #include "access/htup_details.h"
 #include "access/table.h"
+#include "catalog/catalog.h"
 #include "catalog/pg_am_d.h"
 #include "catalog/pg_attribute.h"
 #include "catalog/pg_class.h"
 #include "catalog/pg_seclabel.h"
+#include "catalog/pg_statistic.h"
 #include "catalog/pg_type.h"
 #include "commands/trigger.h"
 #include "executor/spi.h"
 #include "fmgr.h"
 #include "funcapi.h"
 #include "miscadmin.h"
+#include "parser/analyze.h"
 #include "parser/parse_coerce.h"
+#include "parser/parsetree.h"
+#include "utils/array.h"
 #include "utils/builtins.h"
 #include "utils/inval.h"
 #include "utils/lsyscache.h"
 #include "utils/rel.h"
+#include "utils/selfuncs.h"
 #include "utils/syscache.h"
 #include "utils/tuplestore.h"
 
+#include "gp_catalog.h"
 #include "gp_cluster.h"
 #include "gp_core_api.h"
 #include "gp_dispatch.h"
@@ -438,4 +456,179 @@ gp_catalog_distribution_policy_write(PG_FUNCTION_ARGS)
 				 numsegments);
 
 	return PointerGetDatum(row);
+}
+
+/* ------------------------------------------------------------------------- */
+/* A statistics row written by hand                                          */
+/* ------------------------------------------------------------------------- */
+
+static post_parse_analyze_hook_type prev_post_parse_analyze_hook = NULL;
+static get_relation_stats_hook_type prev_get_relation_stats_hook = NULL;
+
+/*
+ * An array constant, as anyarray: Cloudberry's coerce_type() gives a
+ * constant coerced to anyarray that type, and its value is the array's, as
+ * a statistics row keeps it.  Anything else is left as it is.
+ */
+static bool
+relabel_anyarray_const(Node *node)
+{
+	Const	   *con = (Const *) node;
+
+	if (node == NULL || !IsA(node, Const))
+		return false;
+	if (con->consttype != ANYARRAYOID)
+	{
+		if (con->consttype == UNKNOWNOID ||
+			!OidIsValid(get_element_type(con->consttype)))
+			return false;
+		con->consttype = ANYARRAYOID;
+		con->consttypmod = -1;
+		con->constcollid = InvalidOid;
+	}
+	return true;
+}
+
+/*
+ * A column of a VALUES list of several rows, which the target list reads: its
+ * constants, and the column itself, as anyarray, where every row's value is
+ * a constant.
+ */
+static void
+relabel_anyarray_values(Query *query, Var *var)
+{
+	RangeTblEntry *rte = rt_fetch(var->varno, query->rtable);
+	int			col = var->varattno - 1;
+
+	if (rte->rtekind != RTE_VALUES || col < 0 ||
+		col >= list_length(rte->coltypes))
+		return;
+	foreach_node(List, row, rte->values_lists)
+	{
+		Node	   *item = list_nth(row, col);
+
+		if (item == NULL || !IsA(item, Const) ||
+			(((Const *) item)->consttype != ANYARRAYOID &&
+			 !OidIsValid(get_element_type(((Const *) item)->consttype))))
+			return;
+	}
+	foreach_node(List, row, rte->values_lists)
+		(void) relabel_anyarray_const(list_nth(row, col));
+	list_nth_cell(rte->coltypes, col)->oid_value = ANYARRAYOID;
+	list_nth_cell(rte->coltypmods, col)->int_value = -1;
+	list_nth_cell(rte->colcollations, col)->oid_value = InvalidOid;
+	var->vartype = ANYARRAYOID;
+	var->vartypmod = -1;
+	var->varcollid = InvalidOid;
+}
+
+/*
+ * An INSERT or UPDATE of a system catalog -- the only tables a column of
+ * type anyarray is in, pg_statistic's stavalues among them -- whose value for
+ * such a column is an array constant.
+ */
+static void
+catalog_post_parse_analyze(ParseState *pstate, Query *query,
+						   const JumbleState *jstate)
+{
+	RangeTblEntry *target;
+
+	if (prev_post_parse_analyze_hook)
+		prev_post_parse_analyze_hook(pstate, query, jstate);
+
+	if ((query->commandType != CMD_INSERT && query->commandType != CMD_UPDATE) ||
+		query->resultRelation <= 0)
+		return;
+	target = rt_fetch(query->resultRelation, query->rtable);
+	if (target->rtekind != RTE_RELATION || !IsCatalogRelationOid(target->relid))
+		return;
+
+	foreach_node(TargetEntry, tle, query->targetList)
+	{
+		if (tle->resjunk || get_atttype(target->relid, tle->resno) != ANYARRAYOID)
+			continue;
+		if (IsA(tle->expr, Var) && ((Var *) tle->expr)->varlevelsup == 0)
+			relabel_anyarray_values(query, (Var *) tle->expr);
+		else
+			(void) relabel_anyarray_const((Node *) tle->expr);
+	}
+}
+
+/*
+ * One kind of statistics of a column, where the row has it: an MCV list or a
+ * histogram whose values are not of the column's type.  The planner would
+ * read them as the column's own values and crash comparing them; Cloudberry
+ * raises this, in these words (get_variable_range(), selfuncs.c).
+ */
+static void
+check_stats_values(HeapTuple tuple, int16 kind, Oid atttype, const char *what)
+{
+	Form_pg_statistic stats = (Form_pg_statistic) GETSTRUCT(tuple);
+
+	for (int i = 0; i < STATISTIC_NUM_SLOTS; i++)
+	{
+		Datum		d;
+		bool		isnull;
+		ArrayType  *values;
+
+		if ((&stats->stakind1)[i] != kind)
+			continue;
+		d = SysCacheGetAttr(STATRELATTINH, tuple,
+							Anum_pg_statistic_stavalues1 + i, &isnull);
+		if (isnull)
+			continue;
+		values = (ArrayType *) PG_DETOAST_DATUM_SLICE(d, 0, sizeof(ArrayType));
+		if (!IsBinaryCoercible(ARR_ELEMTYPE(values), atttype))
+			elog(ERROR, "invalid %s of type %s, for attribute of type %s", what,
+				 format_type_be(ARR_ELEMTYPE(values)), format_type_be(atttype));
+	}
+}
+
+static void
+check_relation_stats(Oid relid, AttrNumber attnum, bool inh, Oid atttype)
+{
+	HeapTuple	tuple = SearchSysCache3(STATRELATTINH, ObjectIdGetDatum(relid),
+										Int16GetDatum(attnum),
+										BoolGetDatum(inh));
+
+	if (!HeapTupleIsValid(tuple))
+		return;
+	check_stats_values(tuple, STATISTIC_KIND_HISTOGRAM, atttype, "histogram");
+	check_stats_values(tuple, STATISTIC_KIND_MCV, atttype, "MCV array");
+	ReleaseSysCache(tuple);
+}
+
+/*
+ * The statistics of a column, as the planner is about to read them: checked,
+ * and left to it to read as it would.  A row written by hand may hold values
+ * of another type -- one the relabelling above lets through, as Cloudberry's
+ * parser does, and bfv_statistic writes to see refused.
+ */
+static bool
+catalog_relation_stats(PlannerInfo *root, RangeTblEntry *rte,
+					   AttrNumber attnum, VariableStatData *vardata)
+{
+	Oid			atttype;
+
+	if (prev_get_relation_stats_hook &&
+		prev_get_relation_stats_hook(root, rte, attnum, vardata))
+		return true;
+	if (rte->rtekind != RTE_RELATION || attnum <= 0)
+		return false;
+
+	atttype = OidIsValid(vardata->atttype) ? vardata->atttype
+		: get_atttype(rte->relid, attnum);
+	check_relation_stats(rte->relid, attnum, false, atttype);
+	if (rte->inh)
+		check_relation_stats(rte->relid, attnum, true, atttype);
+	return false;
+}
+
+void
+GpCatalogInit(void)
+{
+	prev_post_parse_analyze_hook = post_parse_analyze_hook;
+	post_parse_analyze_hook = catalog_post_parse_analyze;
+	prev_get_relation_stats_hook = get_relation_stats_hook;
+	get_relation_stats_hook = catalog_relation_stats;
 }
