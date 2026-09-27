@@ -247,6 +247,8 @@ bool PaxScanDesc::BitmapNextTuple(TupleTableSlot *slot, bool *recheck,
       }
     }
     cindex_ = 0;
+    // the bitmap run out: no page left over for a rescan to read again
+    bm_noffsets_ = 0;
     if (!BitmapNextPage(&rs_base_, &bm_block_, bm_offsets_, &bm_noffsets_,
                         recheck, lossy_pages, exact_pages))
       return false;
@@ -452,6 +454,10 @@ void PaxScanDesc::ReScan(ScanKey /*key*/, bool /*set_params*/,
                          bool /*allow_pagemode*/) {
   MemoryContext old_ctx;
 
+  // a bitmap scan's page is the bitmap's it came from, which a rescan
+  // begins again
+  cindex_ = 0;
+  bm_noffsets_ = 0;
   // a TID scan's, which fetches its rows one by one, has no reader
   if (!reader_) return;
   old_ctx = MemoryContextSwitchTo(memory_context_);
