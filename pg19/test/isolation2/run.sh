@@ -151,6 +151,9 @@ has_standby() { [ "$1" = standby ] || has_mirrors "$1"; }
 # demo cluster's, the mirrors 5..7 and the standby 8, where there are mirrors.
 mirror_dir()  { echo "$WORK/$1/mirror$2"; }
 mirror_port() { echo $((BASEPORT + 300 + $1 * NODES + $2)); }
+# ... and the k-th node a test adds with gpexpand, as Cloudberry's demo
+# cluster's port 7008 + k (own_nodes)
+new_node_port() { echo $((BASEPORT + 400 + $1 * NODES + $2)); }
 standby_dbid() { if has_mirrors "$1"; then echo $((2 * NODES)); else echo $((NODES + 1)); fi; }
 
 cleanup() {
@@ -169,6 +172,11 @@ cleanup() {
 			fi
 			"$BINDIR/pg_ctl" -D "$d" -m immediate stop > /dev/null 2>&1
 		done
+	done
+	# ... and the segments a test added with gpexpand, which a test that
+	# failed leaves running (own_nodes)
+	for d in "$WORK"/*/*/datadirs/*/*; do
+		[ -f "$d/postmaster.pid" ] && "$BINDIR/pg_ctl" -D "$d" -m immediate stop > /dev/null 2>&1
 	done
 	[ -n "${KEEP:-}" ] && echo "kept: $WORK" || rm -rf "$WORK"
 	rm -rf "$SOCK" "$EXEC"
@@ -422,6 +430,13 @@ run_group() {
 	mkdir -p "$R/results" "$R/canon" "$R/sql" "$R/expected"
 	own_tmp() { sed -E "s#/tmp/([A-Za-z0-9_]+)#$R/\\1#g"; }
 	own_host() { sed -E "s#os\\.uname\\(\\)\\[1\\]#'$(group_sock "$g")'#g"; }
+	own_nodes() {
+		local k e=()
+		for k in 0 1 2 3; do
+			e+=(-e "s#localhost|localhost|70$(printf %02d $((8 + k)))|#$(group_sock "$g")|$(group_sock "$g")|$(new_node_port "$gi" "$k")|#g")
+		done
+		sed "${e[@]}"
+	}
 	: > "$R/status"
 	"$PSQL" -X -q -d postgres -c "DROP DATABASE IF EXISTS $DBNAME" > /dev/null 2>&1
 	"$PSQL" -X -q -d postgres -c "CREATE DATABASE $DBNAME TEMPLATE template0" > /dev/null
@@ -447,22 +462,24 @@ run_group() {
 		# a test gives this machine, os.uname()[1], is its nodes' host: the
 		# socket directory they share, by which, with its port and data
 		# directory, gprecoverseg -i finds a node (recoverseg_from_file's).
-		# A test whose name begins "port/" is the port's own, from sql/port
+		# So is a node gpexpand adds, localhost at Cloudberry's port 7008
+		# and after in its input file: the group's socket directory, at a
+		# port of the group's (gpexpand_gpshrink's).  A test whose name begins "port/" is the port's own, from sql/port
 		# and expected/port beside this file, as Cloudberry's are from its
 		# suite's.
 		src="$CB"
 		[[ "$t" == port/* ]] && src="$HERE"
 		if [ -f "$src/input/$t.source" ]; then
-			convert "$src/input/$t.source" | respell | own_tmp | own_host > "$R/sql/$t.sql"
+			convert "$src/input/$t.source" | respell | own_tmp | own_host | own_nodes > "$R/sql/$t.sql"
 		else
-			respell "$src/sql/$t.sql" | own_tmp | own_host > "$R/sql/$t.sql"
+			respell "$src/sql/$t.sql" | own_tmp | own_host | own_nodes > "$R/sql/$t.sql"
 		fi
 		exp="$src/expected/$t.out"
 		[ "$pass" = orca ] && [ -f "$src/expected/${t}_optimizer.out" ] && exp="$src/expected/${t}_optimizer.out"
 		[ -f "$src/output/$t.source" ] && exp="$src/output/$t.source"
 		name="$(basename "$exp" .out)"
 		name="${name%.source}"
-		convert "$exp" | respell | own_tmp | own_host > "$R/expected/$t.out"
+		convert "$exp" | respell | own_tmp | own_host | own_nodes > "$R/expected/$t.out"
 
 		# As pg_isolation2_regress runs it, from the suite's directory; how
 		# long it ran is reported with its result, as pg_regress reports it.

@@ -28,7 +28,8 @@
 # name; gpstop has it read its files again, restarts it and stops it, and
 # gpstart starts it; a primary that stops is failed over from, and
 # gprecoverseg brings it back -- with pg_rewind, and with pg_basebackup -- and
-# the roles back to the ones preferred; gpinitstandby makes a standby
+# the roles back to the ones preferred; gpexpand adds a segment with its
+# mirror, and gpshrink takes them away; gpinitstandby makes a standby
 # coordinator, and gpactivatestandby makes it the coordinator; and
 # gpdeletesystem removes the cluster.  A second cluster, of primaries alone,
 # whose nodes authenticate each other by certificates, is given its mirrors
@@ -80,8 +81,9 @@ for _ in $(seq 20); do
 done
 
 # cluster A: the coordinator BASE, the standby BASE+1, the primaries
-# BASE+2..4, the mirrors BASE+12..14; cluster B: the coordinator BASE+5,
-# its primaries BASE+6..8 and its mirrors BASE+16..18.
+# BASE+2..4, the mirrors BASE+12..14, and the pair gpexpand adds BASE+9 and
+# BASE+15; cluster B: the coordinator BASE+5, its primaries BASE+6..8 and its
+# mirrors BASE+16..18.
 CPORT=$BASE
 SPORT=$((BASE + 1))
 A="$WORK/a"
@@ -330,7 +332,62 @@ else
 fi
 
 ###############################################################################
-echo "7. gpinitstandby makes a standby coordinator"
+echo "7. gpexpand adds a segment and its mirror to the running cluster, and gpshrink takes them away"
+###############################################################################
+# As isolation2's gpexpand_gpshrink does on Cloudberry's demo cluster, on the
+# cluster gpinitsystem made, whose nodes each have a cluster file of their
+# own and their settings in postgresql.conf: gpexpand's input, a line a node,
+# host|address|port|data directory|dbid|content|role.  The cluster has a
+# tablespace (section 6), so gpexpand's first run writes where the new
+# segment's goes, for the user to look at, and stops; the second adds the
+# segments, the third moves the table's rows onto them; gpshrink's two runs
+# take them back.
+mkdir -p "$A/dbfast4" "$A/dbfast_mirror4"
+{
+	echo "$HOST|$HOST|$((BASE + 9))|$A/dbfast4/demoDataDir3|8|3|p"
+	echo "$HOST|$HOST|$((BASE + 15))|$A/dbfast_mirror4/demoDataDir3|9|3|m"
+} > "$A/expand"
+run expand-ts gpexpand -i "$A/expand"
+[ $? -eq 1 ] && grep -q "^8|$WORK/ts\$" "$A/expand.ts" \
+	&& ok "gpexpand writes the new segment's tablespace directory to a file of its own, and asks for a rerun" \
+	|| notok "gpexpand's tablespace file" "$(tail_of expand-ts; cat "$A/expand.ts")"
+if run expand gpexpand -i "$A/expand" && run expand2 gpexpand -i "$A/expand"; then
+	in_sync "$CPORT" > /dev/null
+	out=$(config "$CPORT")
+	rows=$(q "$CPORT" "SELECT count(DISTINCT gp_segment_id) || ':' || count(*) FROM t;
+	                   SELECT count(DISTINCT gp_segment_id) || ':' || count(*) FROM tt;
+	                   SELECT numsegments FROM gp_distribution_policy WHERE localoid = 't'::regclass" | tr '\n' ' ')
+	[ "$out" = "$want 3:8:ppsu 3:9:mmsu" ] && [ "$rows" = "4:300 4:100 4 " ] &&
+	[ -d "$WORK/ts/8" ] && [ -d "$WORK/ts/9" ] \
+		&& ok "gpexpand: a fourth pair, in sync, its tablespace directories their own, and the tables' rows spread over the four segments" \
+		|| notok "gpexpand" "$out / $rows"
+else
+	notok "gpexpand" "$(tail_of expand; tail_of expand2)"
+fi
+run state-x gpstate
+grep -q "Total segment instance count from metadata *= 8" "$LOGDIR/state-x.out" \
+	&& ok "gpstate: eight segments" \
+	|| notok "gpstate after gpexpand" "$(tail_of state-x)"
+if run shrink gpshrink -i "$A/expand" && run shrink2 gpshrink -i "$A/expand"; then
+	out=$(config "$CPORT")
+	rows=$(q "$CPORT" "SELECT count(DISTINCT gp_segment_id) || ':' || count(*) FROM t")
+	[ "$out" = "$want" ] && [ "$rows" = "3:300" ] && [ ! -e "$A/dbfast4/demoDataDir3/postmaster.pid" ] \
+		&& ok "gpshrink: the table's rows back on three segments, and the fourth pair removed and stopped" \
+		|| notok "gpshrink" "$out / $rows"
+else
+	notok "gpshrink" "$(tail_of shrink; tail_of shrink2)"
+fi
+if yes | run expand-c gpexpand -c && run shrink-c gpshrink -c; then
+	out=$(q "$CPORT" "SELECT count(*) FROM pg_namespace WHERE nspname IN ('gpexpand', 'gpshrink')")
+	[ "$out" = 0 ] \
+		&& ok "gpexpand -c and gpshrink -c drop their schemas" \
+		|| notok "gpexpand -c and gpshrink -c" "$out"
+else
+	notok "gpexpand -c and gpshrink -c" "$(tail_of expand-c; tail_of shrink-c)"
+fi
+
+###############################################################################
+echo "8. gpinitstandby makes a standby coordinator"
 ###############################################################################
 if run standby gpinitstandby -a -s "$HOST" -P "$SPORT" -S "$A/standby"; then
 	out=$(wait_for "$CPORT" "SELECT application_name || ':' || state FROM pg_stat_replication" "gp_walreceiver:streaming")
@@ -355,7 +412,7 @@ else
 fi
 
 ###############################################################################
-echo "8. gpactivatestandby makes the standby the coordinator"
+echo "9. gpactivatestandby makes the standby the coordinator"
 ###############################################################################
 q "$CPORT" "INSERT INTO t VALUES (301, 'before the coordinator stops')" > /dev/null
 "$BINDIR/pg_ctl" -D "$COORDINATOR_DATA_DIRECTORY" -m fast stop > /dev/null 2>&1
@@ -372,7 +429,7 @@ else
 fi
 
 ###############################################################################
-echo "9. gpdeletesystem removes the cluster"
+echo "10. gpdeletesystem removes the cluster"
 ###############################################################################
 # every node's but the old coordinator's, which activation left out
 dbids=$(q "$CPORT" "SELECT string_agg(dbid::text, ' ') FROM gp_segment_configuration")
@@ -385,7 +442,7 @@ else
 fi
 
 ###############################################################################
-echo "10. a cluster whose nodes authenticate each other by certificates, and gpaddmirrors gives its primaries mirrors"
+echo "11. a cluster whose nodes authenticate each other by certificates, and gpaddmirrors gives its primaries mirrors"
 ###############################################################################
 # Decision 5's certificates in production: gpinitsystem's NODE_SSL_DIR, the
 # directory every host has the cluster's authority in, and its own
@@ -446,7 +503,7 @@ if run init-b gpinitsystem -a -c "$B/gpinitsystem_config" -l "$LOGDIR"; then
 	fi
 
 	###########################################################################
-	echo "11. gpmovemirrors moves a mirror to another directory and port"
+	echo "12. gpmovemirrors moves a mirror to another directory and port"
 	###########################################################################
 	m0=$(q "$CPORT" "SELECT hostname || '|' || port || '|' || datadir FROM gp_segment_configuration WHERE content = 0 AND role = 'm'")
 	echo "$m0 $HOST|$((BASE + 19))|$B/moved/demoDataDir0" > "$B/move"

@@ -28,9 +28,6 @@
 #
 # The tools the port does not install, and why:
 #
-#   gpexpand, gpshrink  add and remove segments; a cluster's segment count
-#                       is fixed when its coordinator starts, and
-#                       gp_add_segment_primary() is refused
 #   gpcheckcat          checks Cloudberry's catalogs, which the port keeps
 #                       as views, labels and files (gppylib/data, the
 #                       catalog's JSON it reads, is not built either)
@@ -60,6 +57,8 @@ bin bin/gpssh-exkeys
 bin bin/gpsync
 bin bin/gpcheckresgroupimpl
 bin bin/gpcheckresgroupv2impl
+bin bin/gpexpand
+bin bin/gpshrink
 
 bin/gpconfig_modules bin/gpconfig_modules/__init__.py
 bin/gpconfig_modules bin/gpconfig_modules/compare_segment_guc.py
@@ -172,6 +171,7 @@ lib/python/gppylib/util bin/gppylib/util/ssh_utils.py
 docs/cli_help doc/gpactivatestandby_help
 docs/cli_help doc/gpaddmirrors_help
 docs/cli_help doc/gpconfig_help
+docs/cli_help doc/gpexpand_help
 docs/cli_help doc/gpdeletesystem_help
 docs/cli_help doc/gpinitstandby_help
 docs/cli_help doc/gpinitsystem_help
