@@ -357,8 +357,14 @@ sync_value(int i)
 	 * The session user, where the gang's connection may take it: any, where
 	 * a superuser logged in, and its own always.  A gang made as a user who
 	 * may not -- SET SESSION AUTHORIZATION to another user, since -- keeps
-	 * the one it was made as.
+	 * the one it was made as.  A process that has none of its own -- a
+	 * background worker connected as the bootstrap superuser, diskquota's
+	 * launcher, whose setting is empty -- sends none: a segment takes no
+	 * empty name ("role \"\" does not exist").
 	 */
+	if (value != NULL && value[0] == '\0' &&
+		strcmp(synced_settings[i], "session_authorization") == 0)
+		return NULL;
 	if (value != NULL && IsTransactionState() &&
 		strcmp(synced_settings[i], "session_authorization") == 0 &&
 		gang_username != NULL && strcmp(value, gang_username) != 0)
