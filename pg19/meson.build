@@ -665,6 +665,35 @@ install_data(
 built_modules += diskquota_binary
 
 ###############################################################################
+# pg_hint_plan
+#
+# Cloudberry's gpcontrib/pg_hint_plan, 1.3.9, for PostgreSQL 19: its join
+# search is core.c, PostgreSQL 19's copied by gen_core.py, and ORCA reads its
+# hints through gp_orca's plan_hint_hook (pg_hint_plan.c's head says what
+# changed from Cloudberry's).  Nothing preloads it: a session LOADs it, as
+# the tests do.  The extension, whose table the hint table setting reads, is
+# Cloudberry's scripts as they are.
+###############################################################################
+
+shared_module('pg_hint_plan',
+  files('modules/pg_hint_plan/pg_hint_plan.c'),
+  c_args: mod_c_args,
+  link_args: mod_link_args,
+  include_directories: [pg_inc],
+  name_prefix: '',
+  install: true,
+  install_dir: pg_pkglibdir,
+)
+pg_hint_plan_scripts = ['pg_hint_plan.control', 'pg_hint_plan--1.3.0.sql']
+foreach v : ['0', '1', '2', '3', '4', '5', '6', '7', '8']
+  pg_hint_plan_scripts += 'pg_hint_plan--1.3.@0@--1.3.@1@.sql'.format(v, v.to_int() + 1)
+endforeach
+foreach f : pg_hint_plan_scripts
+  install_data('../gpcontrib/pg_hint_plan' / f, install_dir: pg_extensiondir)
+endforeach
+built_modules += 'pg_hint_plan'
+
+###############################################################################
 # gpfdist
 #
 # Cloudberry's file server of external tables (src/bin/gpfdist), a program

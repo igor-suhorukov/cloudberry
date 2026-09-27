@@ -444,6 +444,13 @@ GpOrcaInstallPlannerHook(void)
 	prev_planner_hook = planner_hook;
 	planner_hook = gp_orca_planner;
 
+	/*
+	 * Where a hint extension finds plan_hint_hook (optimizer/orca.h): the
+	 * variable is this library's, whose symbols are hidden as every module's
+	 * are, so its address is published under its name.
+	 */
+	*find_rendezvous_variable("plan_hint_hook") = &plan_hint_hook;
+
 	prev_explain_per_plan_hook = explain_per_plan_hook;
 	explain_per_plan_hook = gp_orca_explain_per_plan;
 

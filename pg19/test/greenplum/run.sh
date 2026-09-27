@@ -190,6 +190,10 @@ make_cluster() {
 			# cluster runs with: a statement's memory is its queue's to give
 			echo "gp.resqueue_memory_policy = 'eager_free'"
 			[ "$n" -eq 0 ] && echo "gp.role = 'dispatch'"
+			# each statement in the coordinator's log, as gpinitsystem sets
+			# it, which a test sees as it lowers client_min_messages to log
+			# (planhints)
+			[ "$n" -eq 0 ] && echo "log_statement = 'all'"
 			# each statement ORCA would not plan, and why, in the log: the
 			# ORCA pass's reasons, totalled below
 			[ "$n" -eq 0 ] && echo "gp.optimizer_log_fallback = on"
@@ -558,8 +562,18 @@ run_group() {
 	wd=$!
 	trap 'kill "$wd" 2> /dev/null; exit 1' TERM INT
 	# From Cloudberry's suite's directory, as its Makefile runs it: its tests
-	# read data/ by relative paths.
-	cd "$CB"
+	# read data/ by relative paths.  Its entries, that is, from a directory of
+	# the group's, whose results/ is the pass's, as the Makefile's results/
+	# is beside them: rowhints writes a plan there that sql/maskout.sh reads
+	# back.  The suite's own directory is not the tests' to write in.
+	if [ ! -d "$WORK/$g/cwd" ]; then
+		mkdir -p "$WORK/$g/cwd"
+		for e in "$CB"/*; do
+			[ "$(basename "$e")" = results ] || ln -s "$e" "$WORK/$g/cwd/"
+		done
+	fi
+	ln -sfn "$R/results" "$WORK/$g/cwd/results"
+	cd "$WORK/$g/cwd"
 	# PG_HOSTNAME and PG_BINDDIR are what Cloudberry's pg_regress sets for
 	# its tests: the host of segment 0, for their file:// and gpfdist://
 	# locations -- here every node's is this one -- and the directory of

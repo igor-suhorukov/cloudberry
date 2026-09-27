@@ -272,6 +272,19 @@ join_gp  the NOTICE of test_print_prefetch_joinqual: where a join's outer
   which gp_debug_numsegments makes, is read there alone, and answers as
   Cloudberry's does.
 
+joinhints (planner, orca)  a join method hint for the join a NOT IN makes
+  in Cloudberry's planner, a left anti-semi join: PostgreSQL 19's planner
+  keeps NOT IN a subplan, so the hint finds no join and pg_hint_plan
+  reports it not used -- under ORCA too, which falls back for a merge join
+  of one, as Cloudberry's does.  Under the planner the CTE of its query is
+  inlined, as PostgreSQL has done since 12, so the Leading hint of the
+  CTE's joins and the query's are two at one level, which pg_hint_plan
+  refuses as conflicting, where Cloudberry's planner plans the CTE as a
+  query of its own and uses both.  Under ORCA, ORCA's trace of the hints it
+  read, which Cloudberry's expected output for its ORCA,
+  joinhints_optimizer.out, prints as the port's ORCA does, where the one
+  the suite compares, the planner's, has pg_hint_plan's report.
+
 matview_ao  psql's \dm, whose title PostgreSQL 19's psql gives as "List of
   materialized views" where Cloudberry's psql says "List of relations".
 
@@ -349,6 +362,11 @@ pg_stat  the scans of its table after SET enable_seqscan TO off: the
   table where Cloudberry's plan reads the index -- a sequential scan more
   and the rows it read, and no index scan.
 
+planhints (orca)  ORCA's trace of the hints it read, which Cloudberry's
+  expected output for its ORCA, planhints_optimizer.out, prints as the
+  port's ORCA does, where the one the suite compares, the planner's, has
+  pg_hint_plan's report of the hints the planner used.
+
 qp_dml_joins  the WARNING of an ALTER TABLE ... SET DISTRIBUTED BY (b) of a
   table CREATE TABLE AS made distributed by b already: the port gives a
   table made from a query its first column as its key, where Cloudberry's
@@ -425,6 +443,15 @@ returning_gp, triggers_gp, update_gp  what Cloudberry refuses on an
   trigger on one ("feature not supported on appendoptimized relations"), and
   an UPDATE of the distribution key of an inherited table ("can't split
   update for inherit table"), whose plan the port prints.
+
+rowhints (planner, orca)  the plans it prints through sql/maskout.sh,
+  which gpdiff.pl does not read as plans.  Under the planner, the port's:
+  each table's rows gathered to the coordinator and joined there -- a Rows
+  hint is not used, as Cloudberry's planner uses none.  Under ORCA,
+  Cloudberry's ORCA's, but that the Dynamic Seq Scan prints the partitions
+  it scans beneath it, a custom scan's children in the port; and ORCA's
+  trace of the hints it read, as in Cloudberry's expected output for its
+  ORCA, rowhints_optimizer.out.
 
 rpt (planner, orca)  the plans of writes to a replicated table that compute
   a volatile function -- random() in a condition, in a CREATE TABLE AS's

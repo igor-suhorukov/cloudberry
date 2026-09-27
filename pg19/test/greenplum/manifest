@@ -417,9 +417,9 @@ skip bfv_partition  unrecognized configuration parameter "optimizer_analyze_root
 run  qp_misc_rio
 skip bfv_partition_plans  differs: a count of its plan's partition selections is 0, where Cloudberry's is 2
 run  gp_covering_index
-skip planhints  could not access file "pg_hint_plan": No such file or directory
-skip rowhints  could not access file "pg_hint_plan": No such file or directory; function disable_xform(unknown) does not exist
-skip joinhints  could not access file "pg_hint_plan": No such file or directory
+run  planhints
+run  rowhints
+run  joinhints
 run  qp_indexscan  planner  differs under ORCA: its plans of index scans over partitions
 run  gp_index_costing
 skip pgstat_qd_tabstat  syntax error at or near "on": its COPY ... ON SEGMENT, to and from a file of each segment, is none of the port's

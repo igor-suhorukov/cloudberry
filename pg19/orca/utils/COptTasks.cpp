@@ -313,8 +313,17 @@ COptTasks::LogExceptionMessageAndDelete(CHAR *err_buf)
 {
 	if ('\0' != err_buf[0])
 	{
-		elog(LOG, "%s",
-			 CreateMultiByteCharStringFromWCString((WCHAR *) err_buf));
+		CHAR *message =
+			CreateMultiByteCharStringFromWCString((WCHAR *) err_buf);
+		CHAR *end = message + strlen(message);
+
+		// Without the white space it ends with, the newline of ORCA's last
+		// trace line: Cloudberry's elog.c trims every message's
+		// (cdb_tidy_message), PostgreSQL 19's does not, and psql would print
+		// a blank line after the message (planhints).
+		while (end > message && end[-1] <= ' ' && end[-1] > '\0')
+			*--end = '\0';
+		elog(LOG, "%s", message);
 	}
 
 	pfree(err_buf);

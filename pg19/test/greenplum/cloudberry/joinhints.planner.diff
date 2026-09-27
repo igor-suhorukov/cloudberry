@@ -1,0 +1,21 @@
+@@
++INFO:  pg_hint_plan: hint syntax error at or near "Leading(((t3 t2) t1))
++    Leading((t5 t4))
++ "
++DETAIL:  Conflict leading hint.
+@@
+-Leading(((t3 t2) t1))
+@@
++Leading(((t3 t2) t1))
+@@
+-NestLoop(t1 t2)
+@@
++NestLoop(t1 t2)
+@@
+-MergeJoin(t1 t2)
+@@
++MergeJoin(t1 t2)
+@@
+-HashJoin(t1 t2)
+@@
++HashJoin(t1 t2)
