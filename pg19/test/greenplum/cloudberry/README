@@ -88,6 +88,11 @@ bfv_dd_multicolumn  the INFO lines of test_print_direct_dispatch_info that
   and how each commits, in one phase on the segment an INSERT of one row
   wrote on.
 
+bfv_dml (orca)  the line ORCA's fallback trace prints for the UPDATE whose
+  condition compares a ROW with a subquery's, which Cloudberry's ORCA
+  declines in its own expected output too (bfv_dml_optimizer.out): the
+  expected output closest to the pass, the planner's, does not print it.
+
 bfv_joins  a join of twenty empty tables, which Cloudberry's demo cluster
   cancels for the memory its planner takes -- the runaway cleaner's red
   zone, M6's memory accounting -- and the port plans and answers, with no

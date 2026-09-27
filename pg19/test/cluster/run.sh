@@ -803,6 +803,21 @@ mine" ] && ok "a transaction reads its own rows, and a LIMIT leaves the connecti
 			ok "an INSERT's error on a segment names no COPY, a function's its own lines" ;;
 		*) notok "an INSERT's error on a segment" "$out / $out2" ;;
 	esac
+	# And it carries what the segment's error named, and where in its code
+	# the segment raised it, as Cloudberry's does: a client reads a unique
+	# violation's constraint off the error as it would off one server's.
+	out=$(printf '%s\n' '\set VERBOSITY verbose' "INSERT INTO cx VALUES (7, 'dup');" | qf 0)
+	case "$out" in
+		*"SCHEMA NAME:  public"*"TABLE NAME:  cx"*"CONSTRAINT NAME:  cx_pkey"*"LOCATION:  _bt_check_unique, nbtinsert.c:"*)
+			ok "a segment's error carries its schema, table and constraint, and its location there" ;;
+		*) notok "what a segment's error names" "$out" ;;
+	esac
+	# A table of no columns takes rows as any other: the segments' COPY of
+	# them has no column list, which COPY does not take empty.
+	out=$(q 0 "CREATE TABLE cz ();" 2>&1; q 0 "INSERT INTO cz DEFAULT VALUES;"; q 0 "INSERT INTO cz SELECT FROM generate_series(1, 5);"; q 0 "SELECT count(*) FROM cz;")
+	[ "$(echo "$out" | tail -1)" = "6" ] \
+		&& ok "a table of no columns takes rows" \
+		|| notok "rows of a table of no columns" "$out"
 	out=$(printf '%s\n' "COPY cx FROM STDIN;" "30	a" "31	b" "9	dup" "32	c" '\.' | qf 0 | grep CONTEXT)
 	out2=$(printf '%s\n' "COPY cx FROM STDIN;" "33	a" "x34	b" '\.' | qf 0 | grep CONTEXT)
 	[ "$out" = "CONTEXT:  COPY cx, line 3" ] &&

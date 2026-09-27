@@ -418,6 +418,15 @@ static bool dtx_all_prepared = false;
 /* Names the cursors of the gathers of one transaction apart. */
 static uint32 gather_counter = 0;
 
+/*
+ * The fields of a segment's error that name what it was about, which the
+ * error raised here carries as the segment raised them.
+ */
+static const char error_names[] = {
+	PG_DIAG_SCHEMA_NAME, PG_DIAG_TABLE_NAME, PG_DIAG_COLUMN_NAME,
+	PG_DIAG_DATATYPE_NAME, PG_DIAG_CONSTRAINT_NAME
+};
+
 /* What a segment answered when it failed. */
 typedef struct GpSegmentError
 {
@@ -427,6 +436,10 @@ typedef struct GpSegmentError
 	char	   *detail;
 	char	   *hint;
 	char	   *context;
+	char	   *names[lengthof(error_names)];
+	const char *file;			/* where the segment raised it, if it said */
+	int			line;
+	const char *func;
 } GpSegmentError;
 
 /* A statement whose slices run at once: the readers running them. */
@@ -1278,6 +1291,32 @@ conn_pipeline_own(GpSegmentConn *c, PGresult *res)
 	}
 }
 
+/*
+ * A source file's or function's name a segment's error gave, kept for the
+ * backend's life: the error raised here points at it, and so does a copy of
+ * that error (CopyErrorData() copies neither), which a PL/pgSQL handler
+ * keeps past the subtransaction whose memory it was raised in.  The names
+ * are the segment's code's, a few hundred at most.
+ */
+static const char *
+location_name(const char *name)
+{
+	static List *names = NIL;
+	MemoryContext oldcxt;
+	char	   *kept;
+
+	foreach_ptr(char, n, names)
+	{
+		if (strcmp(n, name) == 0)
+			return n;
+	}
+	oldcxt = MemoryContextSwitchTo(TopMemoryContext);
+	kept = pstrdup(name);
+	names = lappend(names, kept);
+	MemoryContextSwitchTo(oldcxt);
+	return kept;
+}
+
 /* Remember why a segment failed, in the caller's context. */
 static void
 collect_error(List **errors, int content, PGresult *res, PGconn *conn,
@@ -1313,6 +1352,22 @@ collect_error(List **errors, int content, PGresult *res, PGconn *conn,
 	field = res ? PQresultErrorField(res, PG_DIAG_CONTEXT) : NULL;
 	err->context = field ? pstrdup(field) : NULL;
 
+	for (int i = 0; i < lengthof(error_names); i++)
+	{
+		field = res ? PQresultErrorField(res, error_names[i]) : NULL;
+		err->names[i] = field ? pstrdup(field) : NULL;
+	}
+	field = res ? PQresultErrorField(res, PG_DIAG_SOURCE_FILE) : NULL;
+	if (field != NULL)
+	{
+		const char *line = PQresultErrorField(res, PG_DIAG_SOURCE_LINE);
+		const char *func = PQresultErrorField(res, PG_DIAG_SOURCE_FUNCTION);
+
+		err->file = location_name(field);
+		err->line = line ? atoi(line) : 0;
+		err->func = func ? location_name(func) : NULL;
+	}
+
 	*errors = lappend(*errors, err);
 }
 
@@ -1334,7 +1389,12 @@ error_is_consequence(GpSegmentError *err)
  * rest are counted, because a statement that fails on one segment usually fails
  * on all of them and repeating it three times helps nobody.  Where it failed
  * there -- an external table's line, a function's -- comes first in the
- * context, before where the statement was here, as Cloudberry's does.
+ * context, before where the statement was here, as Cloudberry's does.  And it
+ * is raised with the objects the segment's error named -- a unique
+ * violation's schema, table and constraint -- and at the segment's location
+ * in its code, as Cloudberry raises it (cdbdisp_get_PQerror()): what a
+ * client reads of the error is the segment's.  A connection that failed,
+ * which says nowhere, fails here.
  */
 static void
 raise_segment_errors(List *errors)
@@ -1391,17 +1451,30 @@ raise_segment_errors(List *errors)
 		appendStringInfo(&detail, "; %d other segments failed too",
 						 list_length(errors) - 1);
 
-	ereport(ERROR,
-			(errcode(first->sqlstate ? MAKE_SQLSTATE(first->sqlstate[0],
-													 first->sqlstate[1],
-													 first->sqlstate[2],
-													 first->sqlstate[3],
-													 first->sqlstate[4])
-			 : ERRCODE_INTERNAL_ERROR),
-			 errmsg("%s", first->message),
-			 errdetail_internal("%s", detail.data),
-			 first->hint ? errhint("%s", first->hint) : 0,
-			 first->context ? errcontext("%s", first->context) : 0));
+	if (!errstart(ERROR, TEXTDOMAIN))
+		pg_unreachable();
+	errcode(first->sqlstate ? MAKE_SQLSTATE(first->sqlstate[0],
+											first->sqlstate[1],
+											first->sqlstate[2],
+											first->sqlstate[3],
+											first->sqlstate[4])
+			: ERRCODE_INTERNAL_ERROR);
+	errmsg("%s", first->message);
+	errdetail_internal("%s", detail.data);
+	if (first->hint)
+		errhint("%s", first->hint);
+	if (first->context)
+		errcontext("%s", first->context);
+	for (int i = 0; i < lengthof(error_names); i++)
+	{
+		if (first->names[i] != NULL)
+			err_generic_string(error_names[i], first->names[i]);
+	}
+	if (first->file != NULL)
+		errfinish(first->file, first->line, first->func);
+	else
+		errfinish(__FILE__, __LINE__, __func__);
+	pg_unreachable();
 }
 
 /*

@@ -200,10 +200,12 @@ router_begin(Relation rel, GpPolicy *policy, bool lines)
 
 	/*
 	 * The columns the segment is given: all but the dropped ones and the
-	 * generated ones, which the segment's own COPY computes.
+	 * generated ones, which the segment's own COPY computes.  A table with
+	 * none of those -- CREATE TABLE t () -- is given no list: COPY takes no
+	 * empty one, and its rows are each an empty line, or no fields.
 	 */
 	initStringInfo(&sql);
-	appendStringInfo(&sql, "COPY %s (",
+	appendStringInfo(&sql, "COPY %s",
 					 GpDispatchRelationName(RelationGetRelid(rel)));
 	for (int i = 0; i < tupdesc->natts; i++)
 	{
@@ -213,7 +215,7 @@ router_begin(Relation rel, GpPolicy *policy, bool lines)
 
 		if (att->attisdropped || att->attgenerated != '\0')
 			continue;
-		appendStringInfo(&sql, "%s%s", first ? "" : ", ",
+		appendStringInfo(&sql, "%s%s", first ? " (" : ", ",
 						 quote_identifier(NameStr(att->attname)));
 		first = false;
 
@@ -223,7 +225,8 @@ router_begin(Relation rel, GpPolicy *policy, bool lines)
 			getTypeOutputInfo(att->atttypid, &func, &isvarlena);
 		fmgr_info(func, &r->out[i]);
 	}
-	appendStringInfo(&sql, ") FROM STDIN%s", r->binary ? " (FORMAT binary)" : "");
+	appendStringInfo(&sql, "%s FROM STDIN%s", first ? "" : ")",
+					 r->binary ? " (FORMAT binary)" : "");
 	r->copy_sql = sql.data;
 
 	return r;

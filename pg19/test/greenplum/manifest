@@ -307,7 +307,7 @@ run  gp_create_view
 run  window_views
 skip replication_slots  differs: pg_get_replication_slots() has PostgreSQL 19's columns, and a slot made on one segment gets no WARNING that it is that segment's alone
 run  create_table_like_gp
-skip gp_constraints  differs: a segment's unique violation carries no schema, table or constraint name, and its LOCATION is the dispatcher's
+run  gp_constraints
 skip gpcopy_dispatch  unrecognized configuration parameter "test_copy_qd_qe_split"; segment 0 took 0 of the 1 rows sent to it
 skip gpcopy  differs: COPY's errors of a line with a column too many or too few are not in Cloudberry's words
 run  orca_static_pruning
@@ -441,7 +441,7 @@ run  rpt_returning
 skip bfv_planner  differs: two counts of what its plans read are 27 and 9, where Cloudberry's are 33 and 11
 run  bfv_legacy
 skip bfv_temp  syntax error at or near ")"; relation "n" does not exist
-skip bfv_dml  syntax error at or near ")"
+run  bfv_dml
 skip tpcds_q04  table row type and query-specified row type do not match
 skip qp_olap_mdqa  differs: GROUP_ID() numbers each grouping set's copies 0, 1, and so on, where Cloudberry's numbers them as its Agg's phases meet them -- in the rollups and hashed sets its planner arranges them into -- and gives some rows 2 and 3 where the port gives 0 and 1
 skip gp_recursive_cte  unrecognized configuration parameter "gp_recursive_cte"
