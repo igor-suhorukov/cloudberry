@@ -81,6 +81,47 @@
 -(12 rows)
 +(8 rows)
 @@
+-               ->  Seq Scan on ex_mtarget t (actual rows=54.00 loops=1)
+-               Sort Key: s.a
+-               Sort Key: t.a
+-               Sort Method: quicksort  Memory: xxx
+-               Sort Method: quicksort  Memory: xxx
+-         ->  Sort (actual rows=100.00 loops=1)
+-         ->  Sort (actual rows=54.00 loops=1)
+-         Merge Cond: (t.a = s.a)
+-   ->  Merge Left Join (actual rows=54.00 loops=1)
++               Buckets: xxx  Batches: xxx  Memory Usage: xxx
++         ->  Hash (actual rows=100.00 loops=1)
++         ->  Seq Scan on ex_mtarget t (actual rows=54.00 loops=1)
++         Hash Cond: (t.a = s.a)
++   ->  Hash Left Join (actual rows=54.00 loops=1)
+@@
+-(12 rows)
++(8 rows)
+@@
+-                              explain_merge                              
+--------------------------------------------------------------------------
+-               ->  Seq Scan on ex_msource s (actual rows=100.00 loops=1)
++                             explain_merge                              
++------------------------------------------------------------------------
+@@
+-               Sort Key: s.a
+-               Sort Key: t.a
+-               Sort Method: quicksort  Memory: xxx
+-               Sort Method: quicksort  Memory: xxx
+-         ->  Sort (actual rows=100.00 loops=1)
+-         ->  Sort (actual rows=54.00 loops=1)
+-         Merge Cond: (t.a = s.a)
+-   ->  Merge Full Join (actual rows=100.00 loops=1)
++               Buckets: xxx  Batches: xxx  Memory Usage: xxx
++         ->  Hash (actual rows=54.00 loops=1)
++         ->  Seq Scan on ex_msource s (actual rows=100.00 loops=1)
++         Hash Cond: (s.a = t.a)
++   ->  Hash Full Join (actual rows=100.00 loops=1)
+@@
+-(12 rows)
++(8 rows)
+@@
 -                             explain_merge                             
 ------------------------------------------------------------------------
 +                          explain_merge                          

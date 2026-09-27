@@ -14,9 +14,9 @@ The differences that were wrong answers or crashes were fixed rather than
 kept: see cloudberry.md, "The singlenode suites", for the seven the ORCA pass
 found.
 
-A plan gpdiff.pl does not pass over, and estimates (9)
+A plan gpdiff.pl does not pass over, and estimates (10)
 
-    explain  incremental_sort  join_hash  memoize  planner_est
+    explain  incremental_sort  join_hash  memoize  merge  planner_est
     select_parallel  stats_ext  stats  tsearch
 
   gpdiff.pl passes over a plan psql prints, and not over one a PL/pgSQL
@@ -25,12 +25,14 @@ A plan gpdiff.pl does not pass over, and estimates (9)
   planner_est read out of one; in tsearch it leaves a plan's detail lines
   (Recheck Cond, Filter) behind.  The plans are ORCA's: no incremental sort,
   no Memoize, an index scan for a bitmap one, a hash join with another
-  number of batches (join_hash), no alias on a Function Scan, and ORCA's own
-  estimates, which use neither extended statistics nor a function's support
-  for row estimates.  stats also checks that a query counted an index scan in
-  the statistics views, and ORCA's plan did not use the index.
-  (partition_prune and merge differed only by the Optimizer line, which
-  run.sh strips in both passes, and have no file.)
+  number of batches (join_hash), a MERGE's hash join where the planner
+  merges -- a full or left one for WHEN NOT MATCHED BY SOURCE -- (merge's
+  explain_merge()), no alias on a Function Scan, and ORCA's own estimates,
+  which use neither extended statistics nor a function's support for row
+  estimates.  stats also checks that a query counted an index scan in the
+  statistics views, and ORCA's plan did not use the index.
+  (partition_prune differed only by the Optimizer line, which run.sh strips
+  in both passes, and has no file.)
 
 An order the query leaves open (8)
 
