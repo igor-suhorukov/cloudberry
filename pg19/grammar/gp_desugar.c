@@ -3419,8 +3419,8 @@ rw_storage_and_dynamic(GpRewrite *rw)
 			return false;
 
 		rw_edit(rw, ts->toks[i + 1].off, ts->toks[i + 2].off, "");	/* drop STORAGE */
-		rw_edit(rw, tok_end(ts, e - 1), tok_end(ts, e - 1),
-				"FOREIGN DATA WRAPPER gp_storage ");
+		rw_edit(rw, tok_stop(ts, e - 1), tok_stop(ts, e - 1),
+				" FOREIGN DATA WRAPPER gp_storage");
 		return true;
 	}
 

@@ -650,6 +650,9 @@ isl "DROP STORAGE USER MAPPING and DROP STORAGE SERVER" \
    "DROP STORAGE USER MAPPING FOR CURRENT_USER STORAGE SERVER s3;
     DROP STORAGE SERVER s3;
     SELECT count(*) FROM gp_sql.storage_servers;" "0"
+isl "CREATE STORAGE SERVER with no options, whose clause the rewrite once glued to its name" \
+   "CREATE STORAGE SERVER bare;
+    SELECT count(*) FROM gp_sql.storage_servers WHERE servername = 'bare';" "1"
 
 ###############################################################################
 echo "7. tasks"
