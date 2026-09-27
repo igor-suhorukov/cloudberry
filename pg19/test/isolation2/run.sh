@@ -351,7 +351,7 @@ done
 			vmem_process_interrupt|explain_memory_verbosity|coredump_on_memerror|\
 			repl_catchup_within_range|\
 			enable_offload_entry_to_qe|debug_dtm_action*|debug_abort_after_distributed_prepared|\
-			debug_print_full_dtm)
+			debug_print_full_dtm|enable_answer_query_using_materialized_views|aqumv_allow_foreign_table)
 				cbname="$short" ;;
 			*) cbname="gp_$short" ;;
 		esac

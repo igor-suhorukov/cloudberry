@@ -1,0 +1,61 @@
+@@
+- mv_par1_2 | u
++ mv_par1_2 | i
+@@
+- mv_par1_2 | u
++ mv_par1_2 | i
+@@
+- mv_par2_1 | u
++ mv_par2_1 | i
+@@
+- mv_par2   | u
+- mv_par2_1 | u
++ mv_par2   | i
++ mv_par2_1 | i
+@@
+- mv_par1   | u
+- mv_par1_1 | u
+- mv_par1_2 | u
++ mv_par1   | e
++ mv_par1_1 | e
++ mv_par1_2 | e
+@@
+- mv_par1_2 | i
+- mv_par2   | u
+- mv_par2_1 | u
++ mv_par1_2 | e
++ mv_par2   | e
++ mv_par2_1 | e
+@@
+- mv_par1_2 | i
+- mv_par2   | u
+- mv_par2_1 | u
++ mv_par1_2 | e
++ mv_par2   | e
++ mv_par2_1 | e
+@@
+-WARNING:  fail to find leafs of partitioned table: par
+@@
+-WARNING:  Extend Protocol Data unconsumed, subtag: 0
+-WARNING:  Extend Protocol Data unconsumed, subtag: 2
+@@
+-WARNING:  fail to find leafs of partitioned table: par
+@@
+-WARNING:  Extend Protocol Data unconsumed, subtag: 0
+@@
+-WARNING:  fail to find leafs of partitioned table: par
+@@
+-WARNING:  Extend Protocol Data unconsumed, subtag: 0
+-WARNING:  Extend Protocol Data unconsumed, subtag: 2
+@@
+-WARNING:  fail to find leafs of partitioned table: par
+@@
+-WARNING:  Extend Protocol Data unconsumed, subtag: 0
+-WARNING:  Extend Protocol Data unconsumed, subtag: 2
+@@
+-WARNING:  fail to find leafs of partitioned table: par
+@@
+-WARNING:  fail to find leafs of partitioned table: par
+@@
+-WARNING:  Extend Protocol Data unconsumed, subtag: 0
+-WARNING:  Extend Protocol Data unconsumed, subtag: 2

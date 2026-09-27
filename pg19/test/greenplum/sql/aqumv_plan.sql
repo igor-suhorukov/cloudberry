@@ -1,0 +1,212 @@
+--
+-- Answering a query from a materialized view (gp_matview's aqumv.c): which
+-- relation the plan reads.  The suite compares answers and not plans, so
+-- Cloudberry's aqumv test, whose answers are the same whichever relation
+-- answers them, cannot tell whether AQUMV worked: this asks each plan.
+--
+CREATE SCHEMA aqumv_plan;
+SET search_path = aqumv_plan;
+
+-- Does the plan of the query read the relation?
+CREATE FUNCTION reads(query text, rel text) RETURNS boolean
+LANGUAGE plpgsql AS $$
+DECLARE plan json;
+BEGIN
+  EXECUTE 'EXPLAIN (FORMAT JSON, COSTS OFF) ' || query INTO plan;
+  RETURN plan::text ~ ('"Relation Name": "' || rel || '"');
+END $$;
+
+CREATE TABLE t (c1 int, c2 int, c3 int) DISTRIBUTED BY (c1);
+INSERT INTO t SELECT i, i + 1, i % 10 FROM generate_series(1, 1000) i;
+ANALYZE t;
+
+CREATE MATERIALIZED VIEW v_rows AS
+  SELECT c1 AS m1, c2 AS m2, abs(c2 - 500) AS m3 FROM t WHERE c1 > 900;
+CREATE MATERIALIZED VIEW v_total AS
+  SELECT count(*) AS n, sum(c2) AS s FROM t;
+CREATE MATERIALIZED VIEW v_group AS
+  SELECT c3, count(*) AS n, sum(c1) AS s FROM t GROUP BY c3;
+ANALYZE v_rows;
+ANALYZE v_total;
+ANALYZE v_group;
+
+-- Registered, up to date, with their one base table.
+SELECT mvname, datastatus, has_foreign FROM gp_matview_aux
+ WHERE mvname LIKE 'v\_%' ORDER BY 1;
+SELECT mvoid::regclass, relid::regclass FROM gp_matview_tables
+ WHERE mvoid::regclass::text LIKE 'v\_%' ORDER BY 1;
+
+-- Off, as it is by default: the table.
+SELECT reads('SELECT c1, c2 FROM t WHERE c1 > 900', 'v_rows') AS off;
+
+SET gp.enable_answer_query_using_materialized_views = on;
+
+-- A view without aggregates answers a query of its rows, the query's other
+-- conditions applied to them, an expression of the view's columns computed
+-- from them, and its aggregates, grouping and order over them.
+SELECT reads('SELECT c1, c2 FROM t WHERE c1 > 900', 'v_rows'),
+       reads('SELECT c1, c2 FROM t WHERE c1 > 900', 't');
+SELECT reads('SELECT c1 FROM t WHERE c1 > 900 AND c2 < 950', 'v_rows'),
+       reads('SELECT abs(c2 - 500) + 1 FROM t WHERE c1 > 900', 'v_rows'),
+       reads('SELECT count(*), max(c2) FROM t WHERE c1 > 900', 'v_rows'),
+       reads('SELECT c2 % 3, count(*) FROM t WHERE c1 > 900 GROUP BY 1 ORDER BY 1', 'v_rows'),
+       reads('SELECT c1 FROM t WHERE c1 > 900 ORDER BY c2 LIMIT 3', 'v_rows');
+SELECT count(*), max(c2), sum(abs(c2 - 500)) FROM t WHERE c1 > 900 AND c2 < 950;
+SELECT c1 FROM t WHERE c1 > 900 ORDER BY c2 LIMIT 3;
+-- but not one it has no column for, or whose rows are not all among its own
+SELECT reads('SELECT c3 FROM t WHERE c1 > 900', 'v_rows') AS other_column,
+       reads('SELECT c1 FROM t WHERE c1 > 800', 'v_rows') AS more_rows;
+
+-- An ungrouped aggregate answers the same aggregates of the same rows, and a
+-- HAVING is a condition on its one row.
+SELECT reads('SELECT count(*), sum(c2) FROM t', 'v_total'),
+       reads('SELECT sum(c2) FROM t HAVING count(*) > 10', 'v_total'),
+       reads('SELECT count(*) FROM t WHERE c1 > 5', 'v_total') AS other_rows,
+       reads('SELECT count(*) FROM t GROUP BY c3', 'v_total') AS grouped;
+SELECT count(*), sum(c2) FROM t;
+
+-- A grouped view answers a query grouped by the same expressions.
+SELECT reads('SELECT c3, sum(c1), count(*) FROM t GROUP BY c3', 'v_group'),
+       reads('SELECT c3 % 2, count(*) FROM t GROUP BY c3 % 2', 'v_group') AS other_groups;
+SELECT c3, sum(c1), count(*) FROM t GROUP BY c3 ORDER BY 1 LIMIT 3;
+
+-- Of two views that could answer, the one that costs less: the one with
+-- fewer rows.
+CREATE MATERIALIZED VIEW v_rows_fewer AS
+  SELECT c1 AS m1, c2 AS m2 FROM t WHERE c1 > 900 AND c2 > 950;
+ANALYZE v_rows_fewer;
+SELECT reads('SELECT c1 FROM t WHERE c1 > 900 AND c2 > 950', 'v_rows_fewer') AS fewer,
+       reads('SELECT c1 FROM t WHERE c1 > 900 AND c2 > 950', 'v_rows') AS more;
+DROP MATERIALIZED VIEW v_rows_fewer;
+
+-- A view stale since a write of its table answers nothing until REFRESH;
+-- VACUUM FULL leaves the data as it was, and the view usable.
+INSERT INTO t VALUES (2000, 2001, 3);
+SELECT mvname, datastatus FROM gp_matview_aux WHERE mvname LIKE 'v\_%' ORDER BY 1;
+SELECT reads('SELECT count(*), sum(c2) FROM t', 'v_total') AS stale;
+SELECT count(*), sum(c2) FROM t;
+REFRESH MATERIALIZED VIEW v_total;
+ANALYZE v_total;
+SELECT reads('SELECT count(*), sum(c2) FROM t', 'v_total') AS refreshed;
+VACUUM FULL t;
+SELECT datastatus FROM gp_matview_aux WHERE mvname = 'v_total';
+SELECT reads('SELECT count(*), sum(c2) FROM t', 'v_total') AS reorganized;
+UPDATE t SET c2 = c2 WHERE c1 = 1;
+SELECT datastatus FROM gp_matview_aux WHERE mvname = 'v_total';
+TRUNCATE t;
+SELECT mvname, datastatus FROM gp_matview_aux WHERE mvname LIKE 'v\_%' ORDER BY 1;
+SELECT count(*), sum(c2) FROM t;
+INSERT INTO t SELECT i, i + 1, i % 10 FROM generate_series(1, 1000) i;
+REFRESH MATERIALIZED VIEW v_rows;
+REFRESH MATERIALIZED VIEW v_total;
+REFRESH MATERIALIZED VIEW v_group;
+ANALYZE t;
+ANALYZE v_rows;
+ANALYZE v_total;
+ANALYZE v_group;
+
+-- REFRESH of a view already up to date does nothing, gp.enable_refresh_fast_path
+SELECT relfilenode AS before FROM pg_class WHERE relname = 'v_total' \gset
+REFRESH MATERIALIZED VIEW v_total;
+SELECT relfilenode = :before AS same_file FROM pg_class WHERE relname = 'v_total';
+SET gp.enable_refresh_fast_path = off;
+REFRESH MATERIALIZED VIEW v_total;
+SELECT relfilenode = :before AS same_file FROM pg_class WHERE relname = 'v_total';
+RESET gp.enable_refresh_fast_path;
+ANALYZE v_total;
+
+-- A write rolled back leaves the view fresh.
+BEGIN;
+DELETE FROM t WHERE c1 = 1;
+SELECT datastatus FROM gp_matview_aux WHERE mvname = 'v_total';
+ROLLBACK;
+SELECT datastatus FROM gp_matview_aux WHERE mvname = 'v_total';
+
+-- A prepared statement's plan is made again when the view goes stale.
+PREPARE total AS SELECT count(*), sum(c2) FROM t;
+EXECUTE total;
+INSERT INTO t VALUES (3000, 3001, 3);
+EXECUTE total;
+DEALLOCATE total;
+DELETE FROM t WHERE c1 = 3000;
+REFRESH MATERIALIZED VIEW v_total;
+ANALYZE v_total;
+
+-- An incremental view is kept up to date by its maintenance, and answers
+-- whatever its status says.
+CREATE INCREMENTAL MATERIALIZED VIEW v_incr AS
+  SELECT c1 AS m1, c2 AS m2 FROM t WHERE c1 <= 50 DISTRIBUTED BY (m1);
+ANALYZE v_incr;
+INSERT INTO t VALUES (-1, 0, 0);
+SELECT datastatus FROM gp_matview_aux WHERE mvname = 'v_incr';
+SELECT reads('SELECT c1, c2 FROM t WHERE c1 <= 50', 'v_incr') AS incremental;
+SELECT count(*), sum(c2) FROM t WHERE c1 <= 50;
+DELETE FROM t WHERE c1 = -1;
+REFRESH MATERIALIZED VIEW v_total;
+ANALYZE v_total;
+
+-- A query of several tables that is a view's own query is answered whole.
+CREATE TABLE u (c1 int, tag text) DISTRIBUTED BY (c1);
+INSERT INTO u SELECT i, 'u' || i FROM generate_series(1, 100) i;
+ANALYZE u;
+CREATE MATERIALIZED VIEW v_join AS
+  SELECT t.c1, u.tag FROM t JOIN u ON t.c1 = u.c1 WHERE t.c3 = 1;
+ANALYZE v_join;
+SELECT reads('SELECT t.c1, u.tag FROM t JOIN u ON t.c1 = u.c1 WHERE t.c3 = 1', 'v_join') AS same_query,
+       reads('SELECT t.c1, u.tag FROM t JOIN u ON t.c1 = u.c1 WHERE t.c3 = 2', 'v_join') AS other_query;
+SELECT t.c1, u.tag FROM t JOIN u ON t.c1 = u.c1 WHERE t.c3 = 1 ORDER BY 1 LIMIT 3;
+
+-- An INSERT's SELECT is answered too.
+CREATE TABLE sink (n bigint, s bigint) DISTRIBUTED BY (n);
+SELECT reads('INSERT INTO sink SELECT count(*), sum(c2) FROM t', 'v_total') AS insert_select;
+INSERT INTO sink SELECT count(*), sum(c2) FROM t;
+SELECT * FROM sink;
+
+-- The query's own privileges are checked on its table, and the view is read
+-- as its owner reads it: a role that may read the table and not the view is
+-- answered from the view; one that may not read the table is refused, view
+-- or none.
+CREATE ROLE aqumv_plan_reader;
+CREATE ROLE aqumv_plan_nobody;
+GRANT USAGE ON SCHEMA aqumv_plan TO aqumv_plan_reader, aqumv_plan_nobody;
+GRANT SELECT ON t TO aqumv_plan_reader;
+GRANT EXECUTE ON FUNCTION reads(text, text) TO aqumv_plan_reader;
+SET ROLE aqumv_plan_reader;
+SELECT reads('SELECT count(*), sum(c2) FROM t', 'v_total') AS reader;
+SELECT count(*), sum(c2) FROM t;
+SELECT count(*) FROM v_total;
+RESET ROLE;
+SET ROLE aqumv_plan_nobody;
+SELECT count(*), sum(c2) FROM t;
+RESET ROLE;
+
+-- A table with row-level security is not answered for.
+CREATE TABLE r (c1 int, c2 int) DISTRIBUTED BY (c1);
+INSERT INTO r SELECT i, i FROM generate_series(1, 100) i;
+CREATE MATERIALIZED VIEW v_r AS SELECT count(*) AS n FROM r;
+ALTER TABLE r ENABLE ROW LEVEL SECURITY;
+SELECT reads('SELECT count(*) FROM r', 'v_r') AS row_security;
+
+-- Under ORCA too, unless gp.aqumv_under_orca is off: Cloudberry answers
+-- from a view only where its planner plans, ORCA having fallen back.
+SET gp.optimizer = on;
+SELECT reads('SELECT count(*), sum(c2) FROM t', 'v_total') AS orca;
+SET gp.aqumv_under_orca = off;
+SELECT reads('SELECT count(*), sum(c2) FROM t', 'v_total') AS orca_off;
+SET gp.optimizer = off;
+SELECT reads('SELECT count(*), sum(c2) FROM t', 'v_total') AS planner_with_it_off;
+RESET gp.aqumv_under_orca;
+RESET gp.optimizer;
+
+-- A view dropped is forgotten.
+DROP MATERIALIZED VIEW v_group;
+SELECT count(*) FROM gp_matview_aux WHERE mvname = 'v_group';
+SELECT count(*) FROM gp_matview_tables WHERE mvoid::regclass::text = 'v_group';
+
+RESET gp.enable_answer_query_using_materialized_views;
+RESET search_path;
+SET client_min_messages = warning;
+DROP SCHEMA aqumv_plan CASCADE;
+DROP ROLE aqumv_plan_reader;
+DROP ROLE aqumv_plan_nobody;
+RESET client_min_messages;

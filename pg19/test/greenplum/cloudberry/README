@@ -312,6 +312,18 @@ join_gp  the NOTICE of test_print_prefetch_joinqual: where a join's outer
 matview_ao  psql's \dm, whose title PostgreSQL 19's psql gives as "List of
   materialized views" where Cloudberry's psql says "List of relations".
 
+matview_data  a write of a partitioned table marks the views of its
+  partitions as stale, the partitions it could have written: an INSERT
+  through a partitioned table, and an UPDATE or DELETE of one, marks the
+  views of the partitions under it, where Cloudberry marks those of the
+  partitions its segments report they wrote, which reach the coordinator
+  in a message of its own protocol (gp_matview's mvaux.c).  So the
+  WARNINGs Cloudberry prints where the fault consume_extend_protocol_data
+  keeps those messages from it -- that a message was not consumed, and
+  that it found no partition of par written -- are not printed.  One node
+  marks the partitions written, as Cloudberry does: the singlenode suite's
+  matview_data has no difference.
+
 part_external_table (orca)  the lines ORCA's fallback trace prints for a
   partitioned table with external partitions: the dynamic foreign scan ORCA
   plans for it the port's ORCA does not translate

@@ -546,6 +546,12 @@ has_update_triggers(Oid relid)
 	return found;
 }
 
+/*
+ * Does the relation have a statement-level trigger for this operation that
+ * would fire on every segment?  An internal one is passed over: those are
+ * gp_matview's, which keep each segment's rows for the coordinator's
+ * maintenance of an incremental view, and are made to fire there.
+ */
 static bool
 has_statement_triggers(Relation rel, CmdType operation, List *merge_actions)
 {
@@ -553,27 +559,28 @@ has_statement_triggers(Relation rel, CmdType operation, List *merge_actions)
 
 	if (td == NULL)
 		return false;
-	switch (operation)
+	if (operation == CMD_MERGE)
 	{
-		case CMD_MERGE:
-			/* a MERGE fires those of each kind of action it has */
-			foreach_node(MergeAction, action, merge_actions)
-				if (action->commandType != CMD_NOTHING &&
-					has_statement_triggers(rel, action->commandType, NIL))
-					return true;
-			return false;
-		case CMD_INSERT:
-			return td->trig_insert_before_statement ||
-				td->trig_insert_after_statement;
-		case CMD_UPDATE:
-			return td->trig_update_before_statement ||
-				td->trig_update_after_statement;
-		case CMD_DELETE:
-			return td->trig_delete_before_statement ||
-				td->trig_delete_after_statement;
-		default:
-			return false;
+		/* a MERGE fires those of each kind of action it has */
+		foreach_node(MergeAction, action, merge_actions)
+			if (action->commandType != CMD_NOTHING &&
+				has_statement_triggers(rel, action->commandType, NIL))
+				return true;
+		return false;
 	}
+	for (int i = 0; i < td->numtriggers; i++)
+	{
+		Trigger    *trig = &td->triggers[i];
+
+		if (trig->tgisinternal || TRIGGER_FOR_ROW(trig->tgtype) ||
+			TRIGGER_FOR_INSTEAD(trig->tgtype))
+			continue;
+		if ((operation == CMD_INSERT && TRIGGER_FOR_INSERT(trig->tgtype)) ||
+			(operation == CMD_UPDATE && TRIGGER_FOR_UPDATE(trig->tgtype)) ||
+			(operation == CMD_DELETE && TRIGGER_FOR_DELETE(trig->tgtype)))
+			return true;
+	}
+	return false;
 }
 
 /*

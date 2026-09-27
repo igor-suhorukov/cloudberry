@@ -78,7 +78,10 @@ if ! . "$HERE/../gpmgmt/tools.sh" "$EXEC"; then
 fi
 BASEPORT="${PGPORT:-$((7300 + RANDOM % 200))}"
 NODES=4					# a coordinator and Cloudberry's three segments
-PRELOAD='gp_core,gp_orca,gp_sql,gp_ao,gp_exttable,gp_security,gp_resource'
+# gp_matview after gp_sql, whose hooks it runs outside of, as the dump suite
+# has it: an incremental view's distribution is an option gp_sql reads; and
+# gp_task, whose scheduler refreshes a dynamic table
+PRELOAD='gp_core,gp_orca,gp_sql,gp_ao,gp_exttable,gp_security,gp_resource,gp_matview,gp_task'
 SECRET="greenplum-schedule-$RANDOM$RANDOM$RANDOM"
 
 # The tests the manifest runs -- Cloudberry's, and the port's (port:name)
@@ -127,12 +130,18 @@ cleanup() {
 }
 trap cleanup EXIT
 
+# The manifest's lines of the schedule's tests, less the one of Cloudberry's
+# parallel_schedule it runs too.
+of_schedule() {
+	awk 'NR == FNR { if ($1 == "test:") for (i = 2; i <= NF; i++) s[$i]; next }
+		 ($1 == "run" || $1 == "skip") && ($2 in s)' "$CB/greenplum_schedule" "$HERE/manifest"
+}
 echo "greenplum: part of Cloudberry's greenplum_schedule, on a coordinator and three segments"
 printf '  of the %d tests of the schedule the manifest lists: %d run here, %d of them in one pass, in %d groups, %d are skipped\n' \
-	"$(awk '$1 == "run" || $1 == "skip"' "$HERE/manifest" | wc -l)" \
-	"$(awk '$1 == "run"' "$HERE/manifest" | wc -l)" \
-	"$(awk '$1 == "run" && NF > 2' "$HERE/manifest" | wc -l)" "${#groups[@]}" \
-	"$(awk '$1 == "skip"' "$HERE/manifest" | wc -l)"
+	"$(of_schedule | wc -l)" \
+	"$(of_schedule | awk '$1 == "run"' | wc -l)" \
+	"$(of_schedule | awk '$1 == "run" && NF > 2' | wc -l)" "${#groups[@]}" \
+	"$(of_schedule | awk '$1 == "skip"' | wc -l)"
 echo
 
 # A group's cluster, as run.sh of the cluster suite makes one.
@@ -210,7 +219,7 @@ t1=$(date +%s)
 			vmem_process_interrupt|explain_memory_verbosity|coredump_on_memerror|\
 			debug_print_slice_table|\
 			enable_offload_entry_to_qe|debug_dtm_action*|debug_abort_after_distributed_prepared|\
-			debug_print_full_dtm)
+			debug_print_full_dtm|enable_answer_query_using_materialized_views|aqumv_allow_foreign_table)
 				cbname="$short" ;;
 			*) cbname="gp_$short" ;;
 		esac
@@ -230,6 +239,12 @@ t1=$(date +%s)
 	# so a test's SELECT * of it asks for Cloudberry's fourteen by name, in
 	# the test and its expected output alike.
 	echo 'sed s#\b(select) \* (from pg_stats)\b#\1 schemaname, tablename, attname, inherited, null_frac, avg_width, n_distinct, most_common_vals, most_common_freqs, histogram_bounds, correlation, most_common_elems, most_common_elem_freqs, elem_count_histogram \2#Ig'
+	# aqumv orders rows by c2 - c1 - 1, which all but one of them have the
+	# same: which of those comes first is the order the segments' rows reach
+	# the coordinator's sort in, which varies from run to run, where
+	# Cloudberry's Gather Motion merges the segments' sorted rows in one
+	# order.  Compared as the rows they are, atmsort's "-- order none".
+	echo 'sed s#^(select c1, c3 from aqumv_t5 where c1 > 90 order by c2 - c1 - 1 asc;)#\1 -- order none#'
 } > "$WORK/respell"
 respell() { perl "$HERE/../respell.pl" "$WORK/respell" "$@"; }
 

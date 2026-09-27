@@ -309,5 +309,5 @@ run  uao_dml/uao_dml_cursor_column                        cb3
 run  uao_dml/uao_dml_select_column                        cb3
 run  AOCO_Compression                                     cb3
 run  AORO_Compression                                     cb3
-skip matview_data  AQUMV's bookkeeping in gp_matview_aux, which is not built
+run  matview_data                                         cb3
 run  singlenode_compatibility_cbdb                        cb3

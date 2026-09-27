@@ -407,6 +407,41 @@ is "and removing the only non-null input makes the sum NULL again" \
 q "DELETE FROM base WHERE grp = 8;" > /dev/null
 
 ###############################################################################
+echo "3h. a view's own column names, and a writer who may not touch the view"
+###############################################################################
+# The columns beside an aggregate are named after the view's column, which a
+# column list names: named after the query's instead, maintenance did not
+# find them, and recomputed the view.
+q "CREATE TABLE cn (id int, grp int, amt numeric);
+   INSERT INTO cn VALUES (1,1,10),(2,1,20),(3,2,30);
+   CREATE MATERIALIZED VIEW mv_cn (g, cnt, s, a) WITH (gp.incremental) AS
+     SELECT grp, count(*), sum(amt), avg(amt) FROM cn GROUP BY grp;" > /dev/null
+is "the columns beside an aggregate take the name the column list gives it" \
+   "SELECT string_agg(attname, ' ' ORDER BY attnum) FROM pg_attribute
+     WHERE attrelid = 'mv_cn'::regclass AND attname LIKE '\\_\\_ivm\\_%';" \
+   "__ivm_count_s__ __ivm_sum_a__ __ivm_count_a__ __ivm_count__"
+isl "so such a view is maintained by delta" \
+    "SELECT gp_matview.stats_reset();
+     INSERT INTO cn VALUES (4,2,5);
+     SELECT gp_matview.applied_delta() || '/' || gp_matview.recomputed();" "1/0"
+same "and says what its query says" "SELECT g, cnt, s, a FROM mv_cn" \
+     "SELECT grp, count(*), sum(amt), avg(amt) FROM cn GROUP BY grp"
+
+# Maintenance runs as the view's owner, as a refresh does: whoever writes the
+# base table need not be able to read or write the view.
+q "CREATE ROLE cn_writer;
+   GRANT INSERT, DELETE, SELECT ON cn TO cn_writer;" > /dev/null
+isl "a role that may write the base table but not the view writes it" \
+    "SET ROLE cn_writer;
+     INSERT INTO cn VALUES (5,1,1);
+     DELETE FROM cn WHERE id = 1;
+     RESET ROLE;
+     SELECT cnt FROM mv_cn WHERE g = 1;" "2"
+same "and the view follows" "SELECT g, cnt, s, a FROM mv_cn" \
+     "SELECT grp, count(*), sum(amt), avg(amt) FROM cn GROUP BY grp"
+q "DROP MATERIALIZED VIEW mv_cn; DROP TABLE cn; DROP ROLE cn_writer;" > /dev/null
+
+###############################################################################
 echo "3d. a DISTINCT view counts duplicates"
 ###############################################################################
 q "CREATE TABLE dup (a int);
@@ -602,6 +637,42 @@ q "SELECT mksql10();" > /dev/null
 is "through a SQL-language function too" \
    "SELECT count(*) FROM pg_seclabels
       WHERE objname = 's10' AND provider = 'gp' AND label = 'incremental';" "1"
+
+###############################################################################
+echo "11. a query answered from an incremental view (AQUMV)"
+###############################################################################
+# An incremental view is kept up to date by its maintenance, so AQUMV answers
+# from it whatever the bookkeeping's status of it says -- a write of its
+# base table leaves an ordinary view stale, and the query to the table.
+q "CREATE TABLE aq (id int, grp int, amt int);
+   INSERT INTO aq SELECT g, g % 10, g FROM generate_series(1, 2000) g;
+   ANALYZE aq;
+   CREATE MATERIALIZED VIEW aq_incr WITH (gp.incremental) AS
+     SELECT grp, count(*) AS n, sum(amt) AS total FROM aq GROUP BY grp;
+   CREATE MATERIALIZED VIEW aq_plain AS
+     SELECT grp, count(*) AS n, sum(amt) AS total FROM aq GROUP BY grp;
+   ANALYZE aq_incr; ANALYZE aq_plain;
+   INSERT INTO aq VALUES (2001, 1, 5);" > /dev/null
+isl "the bookkeeping has the ordinary view stale after the write" \
+    "SELECT string_agg(mvname || '=' || datastatus::text, ' ' ORDER BY mvname)
+       FROM gp_matview_aux WHERE mvname LIKE 'aq\\_%';" "aq_incr=i aq_plain=i"
+isl "the query is answered from the incremental view all the same" \
+    "SET gp.enable_answer_query_using_materialized_views = on;
+     EXPLAIN (COSTS OFF) SELECT grp, sum(amt), count(*) FROM aq GROUP BY grp;" \
+    "Seq Scan on aq_incr"
+isl "with the answer the table gives" \
+    "SET gp.enable_answer_query_using_materialized_views = on;
+     SELECT sum(amt) FROM aq WHERE grp = 1 GROUP BY grp;" "199205"
+isl "and not from the ordinary one, until it is refreshed" \
+    "DROP MATERIALIZED VIEW aq_incr; SET gp.enable_answer_query_using_materialized_views = on;
+     EXPLAIN (COSTS OFF) SELECT grp, sum(amt), count(*) FROM aq GROUP BY grp;" \
+    "  ->  Seq Scan on aq"
+isl "after which it answers" \
+    "REFRESH MATERIALIZED VIEW aq_plain; ANALYZE aq_plain;
+     SET gp.enable_answer_query_using_materialized_views = on;
+     EXPLAIN (COSTS OFF) SELECT grp, sum(amt), count(*) FROM aq GROUP BY grp;" \
+    "Seq Scan on aq_plain"
+q "DROP MATERIALIZED VIEW aq_plain; DROP TABLE aq;" > /dev/null
 
 echo
 echo "  $pass passed, $fail failed"

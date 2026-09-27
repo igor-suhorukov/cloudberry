@@ -41,6 +41,13 @@
  * (pg_export_snapshot_def, ivm_import_snapshot).  On one node the snapshot is
  * simply registered, so none of that machinery is ported.
  *
+ * On a cluster an entry is what a node's triggers keep for the coordinator,
+ * which maintains the view once the statement is over (ivm_cluster.c): the
+ * transition tables every statement on this node left, copied, since the
+ * statements are over before they are asked for -- and no snapshot, since
+ * the coordinator builds the pre-update state from rows rather than from
+ * one (ivm_delta.c).
+ *
  *-------------------------------------------------------------------------
  */
 #include "postgres.h"
@@ -171,45 +178,115 @@ find_entry(Oid matviewOid)
 }
 
 /*
+ * A new entry for a view, in a context of its own under the transaction's.
+ * GpIvmEntryBefore() puts it in the list the triggers find it in; a cluster's
+ * coordinator gathers into one of its own what the nodes kept.
+ */
+IvmEntry *
+GpIvmEntryMake(Oid matviewOid)
+{
+	MemoryContext cxt;
+	IvmEntry   *entry;
+
+	if (!ivm_cleanup_registered)
+	{
+		RegisterXactCallback(ivm_forget_all, NULL);
+		RegisterSubXactCallback(ivm_forget_subxact, NULL);
+		ivm_cleanup_registered = true;
+	}
+
+	cxt = AllocSetContextCreate(TopTransactionContext,
+								"gp_matview maintenance",
+								ALLOCSET_SMALL_SIZES);
+	entry = MemoryContextAllocZero(cxt, sizeof(IvmEntry));
+	entry->matviewOid = matviewOid;
+	entry->cxt = cxt;
+	entry->subid = GetCurrentSubTransactionId();
+	return entry;
+}
+
+/* The entry's record of one base table, made the first time it is asked for. */
+IvmModifiedTable *
+GpIvmEntryTable(IvmEntry *entry, Relation rel)
+{
+	IvmModifiedTable *table = GpIvmFindTable(entry, RelationGetRelid(rel));
+	MemoryContext oldcxt;
+
+	if (table != NULL)
+		return table;
+
+	oldcxt = MemoryContextSwitchTo(entry->cxt);
+	table = palloc0(sizeof(IvmModifiedTable));
+	table->relid = RelationGetRelid(rel);
+	table->tupdesc = CreateTupleDescCopy(RelationGetDescr(rel));
+	entry->tables = lappend(entry->tables, table);
+	MemoryContextSwitchTo(oldcxt);
+
+	return table;
+}
+
+/*
+ * A transition table of one of the entry's base tables, the rows it lost
+ * ("old") or gained, under a name of its own: the trigger calls them all
+ * "__ivm_oldtable" and "__ivm_newtable", which is enough while one table is
+ * in play and ambiguous as soon as two are.  "owned" says the entry ends it.
+ */
+IvmTransition *
+GpIvmEntryAddTransition(IvmEntry *entry, IvmModifiedTable *table,
+						Tuplestorestate *store, bool old, bool owned)
+{
+	MemoryContext oldcxt = MemoryContextSwitchTo(entry->cxt);
+	IvmTransition *tr = palloc0(sizeof(IvmTransition));
+
+	tr->store = store;
+	tr->owned = owned;
+	if (old)
+	{
+		tr->name = psprintf("__ivm_old_%u_%d", table->relid,
+							list_length(table->old_stores) + 1);
+		table->old_stores = lappend(table->old_stores, tr);
+	}
+	else
+	{
+		tr->name = psprintf("__ivm_new_%u_%d", table->relid,
+							list_length(table->new_stores) + 1);
+		table->new_stores = lappend(table->new_stores, tr);
+	}
+	MemoryContextSwitchTo(oldcxt);
+
+	return tr;
+}
+
+/*
  * A view's BEFORE trigger: start the entry if this is the statement's first,
- * and take the snapshot that says what the tables held before it ran.
+ * and take the snapshot that says what the tables held before it ran -- on
+ * one node; on a cluster the entry is kept for the coordinator, which needs
+ * none.
  */
 void
-GpIvmEntryBefore(Oid matviewOid)
+GpIvmEntryBefore(Oid matviewOid, bool kept)
 {
 	IvmEntry   *entry = find_entry(matviewOid);
 
 	if (entry == NULL)
 	{
-		MemoryContext cxt;
 		MemoryContext oldcxt;
 
-		if (!ivm_cleanup_registered)
+		entry = GpIvmEntryMake(matviewOid);
+		if (!kept)
 		{
-			RegisterXactCallback(ivm_forget_all, NULL);
-			RegisterSubXactCallback(ivm_forget_subxact, NULL);
-			ivm_cleanup_registered = true;
+			oldcxt = MemoryContextSwitchTo(entry->cxt);
+			entry->snapshot = copy_statement_snapshot();
+			MemoryContextSwitchTo(oldcxt);
 		}
-
-		cxt = AllocSetContextCreate(TopTransactionContext,
-									"gp_matview maintenance",
-									ALLOCSET_SMALL_SIZES);
-		oldcxt = MemoryContextSwitchTo(cxt);
-
-		entry = palloc0(sizeof(IvmEntry));
-		entry->matviewOid = matviewOid;
-		entry->cxt = cxt;
-		entry->subid = GetCurrentSubTransactionId();
-		entry->snapshot = copy_statement_snapshot();
 
 		/*
 		 * The list has to outlive the entry's context, which is deleted when
 		 * the statement is done with the view, so it is built in the
 		 * transaction's context rather than in that one.
 		 */
-		MemoryContextSwitchTo(TopTransactionContext);
+		oldcxt = MemoryContextSwitchTo(TopTransactionContext);
 		ivm_entries = lappend(ivm_entries, entry);
-
 		MemoryContextSwitchTo(oldcxt);
 	}
 
@@ -219,16 +296,16 @@ GpIvmEntryBefore(Oid matviewOid)
 /*
  * A view's AFTER trigger: record what this trigger is handing over, and say
  * whether it is the last one the statement will fire for this view.  Only
- * then is the view brought up to date.
+ * then is the view brought up to date.  An entry "kept" for a cluster's
+ * coordinator outlives the statement, so everything it is handed is copied.
  */
 IvmEntry *
-GpIvmEntryAfter(Oid matviewOid, TriggerData *trigdata, bool *is_last)
+GpIvmEntryAfter(Oid matviewOid, TriggerData *trigdata, bool kept,
+				bool *is_last)
 {
 	IvmEntry   *entry = find_entry(matviewOid);
 	MemoryContext oldcxt;
 	IvmModifiedTable *table;
-	Oid			relid = RelationGetRelid(trigdata->tg_relation);
-	ListCell   *lc;
 
 	if (entry == NULL)
 		elog(ERROR, "gp_matview: an AFTER trigger fired for view %u with no BEFORE trigger",
@@ -236,27 +313,9 @@ GpIvmEntryAfter(Oid matviewOid, TriggerData *trigdata, bool *is_last)
 
 	entry->after_count++;
 
+	table = GpIvmEntryTable(entry, trigdata->tg_relation);
+
 	oldcxt = MemoryContextSwitchTo(entry->cxt);
-
-	table = NULL;
-	foreach(lc, entry->tables)
-	{
-		IvmModifiedTable *cand = (IvmModifiedTable *) lfirst(lc);
-
-		if (cand->relid == relid)
-		{
-			table = cand;
-			break;
-		}
-	}
-
-	if (table == NULL)
-	{
-		table = palloc0(sizeof(IvmModifiedTable));
-		table->relid = relid;
-		table->tupdesc = CreateTupleDescCopy(RelationGetDescr(trigdata->tg_relation));
-		entry->tables = lappend(entry->tables, table);
-	}
 
 	/*
 	 * TRUNCATE leaves no transition tables at all, so a statement containing
@@ -265,29 +324,12 @@ GpIvmEntryAfter(Oid matviewOid, TriggerData *trigdata, bool *is_last)
 	if (TRIGGER_FIRED_BY_TRUNCATE(trigdata->tg_event))
 		entry->truncated = true;
 
-	/*
-	 * Each transition table gets a name of its own.  The trigger calls them
-	 * all "__ivm_oldtable" and "__ivm_newtable", which is enough while one
-	 * table is in play and ambiguous as soon as two are.
-	 */
 	if (trigdata->tg_oldtable != NULL)
-	{
-		IvmTransition *tr = palloc0(sizeof(IvmTransition));
-
-		tr->store = trigdata->tg_oldtable;
-		tr->name = psprintf("__ivm_old_%u_%d", relid,
-							list_length(table->old_stores) + 1);
-		table->old_stores = lappend(table->old_stores, tr);
-	}
+		(void) GpIvmEntryAddTransition(entry, table, trigdata->tg_oldtable,
+									   true, false);
 	if (trigdata->tg_newtable != NULL)
-	{
-		IvmTransition *tr = palloc0(sizeof(IvmTransition));
-
-		tr->store = trigdata->tg_newtable;
-		tr->name = psprintf("__ivm_new_%u_%d", relid,
-							list_length(table->new_stores) + 1);
-		table->new_stores = lappend(table->new_stores, tr);
-	}
+		(void) GpIvmEntryAddTransition(entry, table, trigdata->tg_newtable,
+									   false, false);
 
 	/*
 	 * Every BEFORE trigger this statement fired for this view has a matching
@@ -298,7 +340,7 @@ GpIvmEntryAfter(Oid matviewOid, TriggerData *trigdata, bool *is_last)
 	*is_last = (entry->before_count == entry->after_count);
 
 	/* What the last trigger will not read straight away is taken out. */
-	if (!*is_last)
+	if (!*is_last || kept)
 	{
 		if (table->old_stores != NIL)
 		{
@@ -325,6 +367,33 @@ GpIvmEntryAfter(Oid matviewOid, TriggerData *trigdata, bool *is_last)
 	MemoryContextSwitchTo(oldcxt);
 
 	return entry;
+}
+
+/*
+ * A cluster's node: the entry its triggers kept for a view, taken out of the
+ * list, so that the next statement's triggers start another; NULL where it
+ * has none.  GpIvmEntryForget() is what ends it.
+ */
+IvmEntry *
+GpIvmEntryTake(Oid matviewOid)
+{
+	IvmEntry   *entry = find_entry(matviewOid);
+
+	if (entry != NULL)
+		ivm_entries = list_delete_ptr(ivm_entries, entry);
+	return entry;
+}
+
+/* The views this node's triggers have kept an entry for. */
+List *
+GpIvmEntryViews(void)
+{
+	List	   *views = NIL;
+	ListCell   *lc;
+
+	foreach(lc, ivm_entries)
+		views = lappend_oid(views, ((IvmEntry *) lfirst(lc))->matviewOid);
+	return views;
 }
 
 /*

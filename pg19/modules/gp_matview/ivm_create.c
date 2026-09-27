@@ -275,6 +275,10 @@ GpIvmRewriteQuery(Query *query, List *colNames)
 	 * expression, named after it.  avg() is that sum divided by that count,
 	 * so it gains both and is read off them.  This is Cloudberry's
 	 * makeIvmAggColumn, for the aggregates the delta path handles.
+	 *
+	 * Named after the view's column, which is the name the statement's
+	 * column list gives it, where it has one: that is what maintenance finds
+	 * the aggregate's companions by (ivm_delta.c, describe_view()).
 	 */
 	if (rewritten->hasAggs)
 	{
@@ -287,6 +291,7 @@ GpIvmRewriteQuery(Query *query, List *colNames)
 			TargetEntry *tle = (TargetEntry *) lfirst(lc);
 			Aggref	   *aggref;
 			char	   *aggname;
+			char	   *colname;
 
 			if (tle->resjunk || !IsA(tle->expr, Aggref))
 				continue;
@@ -294,19 +299,21 @@ GpIvmRewriteQuery(Query *query, List *colNames)
 			aggname = get_func_name(aggref->aggfnoid);
 			if (aggname == NULL || list_length(aggref->args) != 1)
 				continue;
+			colname = tle->resno <= list_length(colNames)
+				? strVal(list_nth(colNames, tle->resno - 1)) : tle->resname;
 
 			if (strcmp(aggname, "sum") == 0)
 				extra = lappend(extra,
 								make_companion(pstate, aggref, "count",
-											   tle->resname, next_resno++));
+											   colname, next_resno++));
 			else if (strcmp(aggname, "avg") == 0)
 			{
 				extra = lappend(extra,
 								make_companion(pstate, aggref, "sum",
-											   tle->resname, next_resno++));
+											   colname, next_resno++));
 				extra = lappend(extra,
 								make_companion(pstate, aggref, "count",
-											   tle->resname, next_resno++));
+											   colname, next_resno++));
 			}
 		}
 

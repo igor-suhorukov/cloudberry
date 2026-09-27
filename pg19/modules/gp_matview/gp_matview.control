@@ -20,7 +20,7 @@
 #-------------------------------------------------------------------------
 
 # gp_matview -- part of Apache Cloudberry on PostgreSQL 19
-comment = 'Incremental materialized views, dynamic tables and AQUMV bookkeeping'
+comment = 'Incremental materialized views, dynamic tables, and queries answered from materialized views (AQUMV)'
 default_version = '1.0'
 module_pathname = '$libdir/gp_matview'
 relocatable = false

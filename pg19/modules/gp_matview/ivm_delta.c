@@ -61,6 +61,18 @@
  * TRUNCATE, and a base table that has had a column dropped.  Each of those
  * leaves the view correct, just not incrementally.
  *
+ * On a cluster the same algebra runs in two places (ivm_cluster.c).  The
+ * coordinator computes each step's deltas, from the transition tables the
+ * segments sent it, and each segment applies the part of them that is its
+ * own rows' -- with the same statements as one node, over its own copy of
+ * the view.  The two halves meet in GpIvmComputeDeltas(), which hands each
+ * step's deltas to whoever applies them, and GpIvmApplyStaged(), which
+ * applies deltas that arrived from elsewhere.  The one thing the coordinator
+ * cannot do as one node does is read a table as the statement found it: the
+ * snapshot that says which rows those were is each segment's.  So there the
+ * pre-update state is the table as it is now less the rows the statement
+ * added, as a multiset, plus the rows it deleted (prestate_subquery()).
+ *
  *-------------------------------------------------------------------------
  */
 #include "postgres.h"
@@ -125,13 +137,18 @@ GpIvmGetViewQuery(Relation matviewRel)
 /*
  * Where each table this statement changed sits in the view's query.  A table
  * joined to itself sits in more than one place, and each place gets its own
- * delta.
+ * delta.  Found afresh each time it is asked, so that asking twice -- once to
+ * see whether a delta can be taken, once to take it -- counts each place
+ * once.
  */
 static void
 locate_modified_tables(Query *viewQuery, IvmEntry *entry)
 {
 	ListCell   *lc;
 	int			rti = 0;
+
+	foreach(lc, entry->tables)
+		((IvmModifiedTable *) lfirst(lc))->rte_indexes = NIL;
 
 	foreach(lc, viewQuery->rtable)
 	{
@@ -236,9 +253,18 @@ transitions_subquery(List *transitions)
 /*
  * The table as the statement found it: what is there now and was already
  * there, plus what the statement deleted, which no scan can reach any more.
+ *
+ * On one node "was already there" is what the snapshot ivm_state.c took
+ * before the statement sees.  On a cluster that snapshot is each segment's,
+ * and the coordinator, which computes the deltas, has the rows instead: the
+ * table as it is now, less the rows the statement added -- EXCEPT ALL, one
+ * row taken out for each copy added, since a table may hold a row twice --
+ * is what it held before less what the statement deleted, to which those
+ * are added back.  delta_supported() has seen that every column of the
+ * table can be compared for that.
  */
 static char *
-prestate_subquery(Oid matviewOid, IvmModifiedTable *table)
+prestate_subquery(Oid matviewOid, IvmModifiedTable *table, bool cluster)
 {
 	StringInfoData buf;
 	char	   *relname;
@@ -248,10 +274,26 @@ prestate_subquery(Oid matviewOid, IvmModifiedTable *table)
 										 get_rel_name(table->relid));
 
 	initStringInfo(&buf);
-	appendStringInfo(&buf,
-					 "SELECT t.* FROM %s t"
-					 " WHERE gp_matview.visible_in_prestate(t.tableoid, t.ctid, %u::pg_catalog.oid)",
-					 relname, matviewOid);
+	if (!cluster)
+		appendStringInfo(&buf,
+						 "SELECT t.* FROM %s t"
+						 " WHERE gp_matview.visible_in_prestate(t.tableoid, t.ctid, %u::pg_catalog.oid)",
+						 relname, matviewOid);
+	else if (table->new_stores == NIL)
+		appendStringInfo(&buf, "SELECT t.* FROM %s t", relname);
+	else
+	{
+		appendStringInfo(&buf, "(SELECT t.* FROM %s t", relname);
+		foreach(lc, table->new_stores)
+		{
+			IvmTransition *tr = (IvmTransition *) lfirst(lc);
+
+			appendStringInfo(&buf, " %s SELECT * FROM %s",
+							 foreach_current_index(lc) == 0 ? "EXCEPT ALL (" : "UNION ALL",
+							 quote_identifier(tr->name));
+		}
+		appendStringInfoString(&buf, "))");
+	}
 
 	foreach(lc, table->old_stores)
 	{
@@ -267,9 +309,9 @@ prestate_subquery(Oid matviewOid, IvmModifiedTable *table)
 /*
  * Run a query into a tuplestore, and describe what came out.
  */
-static Tuplestorestate *
-run_into_tuplestore(Query *query, QueryEnvironment *queryEnv,
-					TupleDesc *tupdesc_out, double *ntuples_out)
+Tuplestorestate *
+GpIvmRunQuery(Query *query, QueryEnvironment *queryEnv,
+			  TupleDesc *tupdesc_out, double *ntuples_out)
 {
 	PlannedStmt *plan;
 	QueryDesc  *qd;
@@ -321,24 +363,21 @@ register_transition(QueryEnvironment *queryEnv, IvmModifiedTable *table,
 }
 
 /*
- * Compute one delta and hand it to SPI under a name the apply statements use.
- * Returns false when nothing came out, so there is nothing to apply.
+ * Compute one delta: the view's query with the place at rti reading the
+ * given transition tables.  Returns the rows, and their descriptor in
+ * *desc_out, or NULL when nothing came out, so there is nothing to apply.
  */
-static bool
-make_delta(Relation matviewRel, Query *working, int rti, List *transitions,
-		   const char *deltaname, QueryEnvironment *queryEnv,
-		   Tuplestorestate **ts_out)
+static Tuplestorestate *
+make_delta(Query *working, int rti, List *transitions,
+		   QueryEnvironment *queryEnv, TupleDesc *desc_out)
 {
 	Query	   *delta_query;
 	Tuplestorestate *ts;
-	TupleDesc	tupdesc;
 	double		ntuples;
-	EphemeralNamedRelation enr;
 	char	   *sql;
 
-	*ts_out = NULL;
 	if (transitions == NIL)
-		return false;
+		return NULL;
 
 	/*
 	 * The working query keeps the range table's state from step to step, so
@@ -349,38 +388,39 @@ make_delta(Relation matviewRel, Query *working, int rti, List *transitions,
 	point_at_subquery(delta_query, rti, sql, queryEnv);
 	pfree(sql);
 
-	ts = run_into_tuplestore(delta_query, queryEnv, &tupdesc, &ntuples);
+	ts = GpIvmRunQuery(delta_query, queryEnv, desc_out, &ntuples);
 
 	if (ntuples == 0)
 	{
 		tuplestore_end(ts);
-		return false;
+		return NULL;
 	}
+
+	return ts;
+}
+
+/*
+ * Hand a delta to SPI under the name the apply statements read it by.  Its
+ * descriptor is its own, and no relation's: were it the view's, O28 would
+ * keep the hidden columns out of the "*" of a statement that needs them.
+ */
+static void
+register_delta(Relation matviewRel, const char *deltaname,
+			   Tuplestorestate *ts, TupleDesc desc)
+{
+	EphemeralNamedRelation enr;
 
 	enr = palloc0(sizeof(EphemeralNamedRelationData));
 	enr->md.name = pstrdup(deltaname);
 	enr->md.reliddesc = InvalidOid;
-	enr->md.tupdesc = tupdesc;
+	enr->md.tupdesc = desc;
 	enr->md.enrtype = ENR_NAMED_TUPLESTORE;
-	enr->md.enrtuples = ntuples;
+	enr->md.enrtuples = tuplestore_tuple_count(ts);
 	enr->reldata = ts;
 
 	if (SPI_register_relation(enr) != SPI_OK_REL_REGISTER)
 		elog(ERROR, "could not register the %s delta of \"%s\"",
 			 deltaname, RelationGetRelationName(matviewRel));
-
-	*ts_out = ts;
-	return true;
-}
-
-static void
-drop_delta(const char *deltaname, Tuplestorestate *ts)
-{
-	if (ts == NULL)
-		return;
-
-	SPI_unregister_relation(deltaname);
-	tuplestore_end(ts);
 }
 
 /* ------------------------------------------------------------------------- */
@@ -859,15 +899,67 @@ apply_new_delta_no_count(const char *mvname, ViewShape *shape)
 	pfree(buf.data);
 }
 
+/*
+ * One step's deltas, applied to the view's rows here: the old before the
+ * new, so that a row that is both removed and added stays.  Inside SPI.
+ */
+static void
+apply_step(Relation matviewRel, ViewShape *shape, Tuplestorestate *old_rows,
+		   Tuplestorestate *new_rows, TupleDesc desc)
+{
+	char	   *mvname = quote_qualified_identifier(get_namespace_name(RelationGetNamespace(matviewRel)),
+													RelationGetRelationName(matviewRel));
+
+	if (old_rows != NULL)
+	{
+		register_delta(matviewRel, IVM_OLD_DELTA, old_rows, desc);
+		if (shape->count_col != NULL)
+			apply_old_delta_with_count(mvname, shape);
+		else
+			apply_old_delta_no_count(mvname, shape);
+		SPI_unregister_relation(IVM_OLD_DELTA);
+	}
+	if (new_rows != NULL)
+	{
+		register_delta(matviewRel, IVM_NEW_DELTA, new_rows, desc);
+		if (shape->count_col != NULL)
+			apply_new_delta_with_count(mvname, shape);
+		else
+			apply_new_delta_no_count(mvname, shape);
+		SPI_unregister_relation(IVM_NEW_DELTA);
+	}
+}
+
 /* ------------------------------------------------------------------------- */
+
+/*
+ * Can every column of this table be compared, as EXCEPT ALL compares the
+ * rows of the pre-update state a cluster's coordinator builds?
+ */
+static bool
+comparable(TupleDesc desc)
+{
+	for (int i = 0; i < desc->natts; i++)
+	{
+		Form_pg_attribute att = TupleDescAttr(desc, i);
+
+		if (!att->attisdropped &&
+			!OidIsValid(lookup_type_cache(att->atttypid, TYPECACHE_EQ_OPR)->eq_opr))
+			return false;
+	}
+
+	return true;
+}
 
 /*
  * Can this statement's effect on this view be expressed as a delta?
  */
 static bool
-delta_supported(Query *viewQuery, IvmEntry *entry, ViewShape *shape)
+delta_supported(Query *viewQuery, IvmEntry *entry, ViewShape *shape,
+				bool cluster)
 {
 	ListCell   *lc;
+	int			places = 0;
 
 	/*
 	 * TRUNCATE leaves no transition tables, so there is nothing to compute a
@@ -904,53 +996,79 @@ delta_supported(Query *viewQuery, IvmEntry *entry, ViewShape *shape)
 
 		if (has_dropped_column(table->tupdesc))
 			return false;
+
+		places += list_length(table->rte_indexes);
+	}
+
+	/*
+	 * A cluster's pre-update state is its rows compared, which is only asked
+	 * for where some step reads a changed place other than its own: a
+	 * statement that changed more than one of the view's tables, or one the
+	 * view reads twice.
+	 */
+	if (cluster && places > 1)
+	{
+		foreach(lc, entry->tables)
+		{
+			IvmModifiedTable *table = (IvmModifiedTable *) lfirst(lc);
+
+			if (!comparable(table->tupdesc))
+				return false;
+		}
 	}
 
 	return true;
 }
 
 /*
- * Bring a view up to date from the transition tables the statement left.
- * Returns false when this view's delta cannot be computed, so the caller
- * recomputes it whole instead.
+ * Is this statement's effect on this view one a delta can express?  Asked
+ * by a cluster's coordinator before it fetches the transition tables it
+ * would compute the delta from: a view it recomputes needs none of them.
  */
 bool
-GpIvmApplyDelta(IvmEntry *entry)
+GpIvmDeltaSupported(IvmEntry *entry, Relation matviewRel, bool cluster)
 {
-	Relation	matviewRel;
+	Query	   *viewQuery = GpIvmGetViewQuery(matviewRel);
+	ViewShape	shape;
+
+	describe_view(matviewRel, viewQuery, &shape);
+	locate_modified_tables(viewQuery, entry);
+	return delta_supported(viewQuery, entry, &shape, cluster);
+}
+
+/*
+ * Compute the deltas that bring a view up to date from the transition tables
+ * the statement left, a step at a time, and hand each step's to "apply",
+ * which is done with them when it returns.  Returns false, having computed
+ * nothing, when this view's delta cannot be computed, so the caller
+ * recomputes it whole instead.  "cluster" says whose snapshot the
+ * pre-update state is taken with (prestate_subquery()).  The caller holds the
+ * view open, in ExclusiveLock.
+ */
+bool
+GpIvmComputeDeltas(IvmEntry *entry, Relation matviewRel, bool cluster,
+				   IvmDeltaApplier apply, void *arg)
+{
 	Query	   *viewQuery;
 	Query	   *working;
 	QueryEnvironment *queryEnv;
 	ViewShape	shape;
-	char	   *mvname;
 	RangeTblEntry **original;
 	int			nrtable;
 	ListCell   *lc;
 
-	/*
-	 * The apply statements find view rows by ctid and then write them, so no
-	 * one else may be maintaining this view at the same time.  This is the
-	 * lock Cloudberry takes, and for the same reason.
-	 */
-	matviewRel = table_open(entry->matviewOid, ExclusiveLock);
 	viewQuery = GpIvmGetViewQuery(matviewRel);
 
 	describe_view(matviewRel, viewQuery, &shape);
 	locate_modified_tables(viewQuery, entry);
 
-	if (!delta_supported(viewQuery, entry, &shape))
-	{
-		table_close(matviewRel, NoLock);
+	if (!delta_supported(viewQuery, entry, &shape, cluster))
 		return false;
-	}
-
-	if (SPI_connect() != SPI_OK_CONNECT)
-		elog(ERROR, "SPI_connect failed");
 
 	/*
 	 * The transition tables are what the delta queries read, so they are put
 	 * in an environment of their own; the apply statements read the deltas
-	 * instead, which SPI is told about as each one is computed.
+	 * instead, which SPI is told about as each one is applied.
 	 */
 	queryEnv = create_queryEnv();
 	foreach(lc, entry->tables)
@@ -964,9 +1082,6 @@ GpIvmApplyDelta(IvmEntry *entry)
 			register_transition(queryEnv, table, (IvmTransition *) lfirst(lc2));
 	}
 
-	mvname = quote_qualified_identifier(get_namespace_name(RelationGetNamespace(matviewRel)),
-										RelationGetRelationName(matviewRel));
-
 	/*
 	 * The working copy carries the range table from step to step.  Its RTEs
 	 * come from a stored rule, so they are locked here rather than left to
@@ -974,6 +1089,20 @@ GpIvmApplyDelta(IvmEntry *entry)
 	 */
 	working = copyObject(viewQuery);
 	AcquireRewriteLocks(working, true, false);
+
+	/*
+	 * A delta's columns are called what the view's are, which the apply
+	 * statements name them by: the query's own names are not the view's where
+	 * the statement gave it a column list.  Cloudberry renames them so too.
+	 */
+	foreach(lc, working->targetList)
+	{
+		TargetEntry *tle = (TargetEntry *) lfirst(lc);
+
+		if (!tle->resjunk && tle->resno <= RelationGetDescr(matviewRel)->natts)
+			tle->resname = pstrdup(NameStr(TupleDescAttr(RelationGetDescr(matviewRel),
+														 tle->resno - 1)->attname));
+	}
 
 	nrtable = list_length(working->rtable);
 	original = (RangeTblEntry **) palloc0((nrtable + 1) * sizeof(RangeTblEntry *));
@@ -987,7 +1116,7 @@ GpIvmApplyDelta(IvmEntry *entry)
 		foreach(lc2, table->rte_indexes)
 		{
 			int			rti = lfirst_int(lc2);
-			char	   *sql = prestate_subquery(entry->matviewOid, table);
+			char	   *sql = prestate_subquery(entry->matviewOid, table, cluster);
 
 			/*
 			 * Kept whole, because pointing the entry at the pre-update state
@@ -1013,42 +1142,111 @@ GpIvmApplyDelta(IvmEntry *entry)
 		foreach(lc2, table->rte_indexes)
 		{
 			int			rti = lfirst_int(lc2);
-			Tuplestorestate *old_ts;
-			Tuplestorestate *new_ts;
-			bool		old_delta;
-			bool		new_delta;
+			Tuplestorestate *old_rows;
+			Tuplestorestate *new_rows;
+			TupleDesc	old_desc = NULL;
+			TupleDesc	new_desc = NULL;
 
-			old_delta = make_delta(matviewRel, working, rti, table->old_stores,
-								   IVM_OLD_DELTA, queryEnv, &old_ts);
-			new_delta = make_delta(matviewRel, working, rti, table->new_stores,
-								   IVM_NEW_DELTA, queryEnv, &new_ts);
+			old_rows = make_delta(working, rti, table->old_stores, queryEnv, &old_desc);
+			new_rows = make_delta(working, rti, table->new_stores, queryEnv, &new_desc);
 
 			/* This place is now past its change. */
 			lfirst(list_nth_cell(working->rtable, rti - 1)) = original[rti];
 
-			/* Old before new: a row that is both removed and added stays. */
-			if (old_delta)
-			{
-				if (shape.count_col != NULL)
-					apply_old_delta_with_count(mvname, &shape);
-				else
-					apply_old_delta_no_count(mvname, &shape);
-			}
-			if (new_delta)
-			{
-				if (shape.count_col != NULL)
-					apply_new_delta_with_count(mvname, &shape);
-				else
-					apply_new_delta_no_count(mvname, &shape);
-			}
+			if (old_rows != NULL || new_rows != NULL)
+				apply(matviewRel, old_rows, new_rows,
+					  old_rows != NULL ? old_desc : new_desc, arg);
 
-			drop_delta(IVM_OLD_DELTA, old_ts);
-			drop_delta(IVM_NEW_DELTA, new_ts);
+			if (old_rows != NULL)
+				tuplestore_end(old_rows);
+			if (new_rows != NULL)
+				tuplestore_end(new_rows);
+		}
+	}
+
+	return true;
+}
+
+/* One node's step: the deltas applied here, by SPI. */
+static void
+apply_here(Relation matviewRel, Tuplestorestate *old_rows,
+		   Tuplestorestate *new_rows, TupleDesc desc, void *arg)
+{
+	if (SPI_connect() != SPI_OK_CONNECT)
+		elog(ERROR, "SPI_connect failed");
+	apply_step(matviewRel, (ViewShape *) arg, old_rows, new_rows, desc);
+	SPI_finish();
+}
+
+/*
+ * Bring a view up to date from the transition tables the statement left.
+ * Returns false when this view's delta cannot be computed, so the caller
+ * recomputes it whole instead.
+ */
+bool
+GpIvmApplyDelta(IvmEntry *entry)
+{
+	Relation	matviewRel;
+	ViewShape	shape;
+	bool		done;
+
+	/*
+	 * The apply statements find view rows by ctid and then write them, so no
+	 * one else may be maintaining this view at the same time.  This is the
+	 * lock Cloudberry takes, and for the same reason.
+	 */
+	matviewRel = table_open(entry->matviewOid, ExclusiveLock);
+	describe_view(matviewRel, GpIvmGetViewQuery(matviewRel), &shape);
+	done = GpIvmComputeDeltas(entry, matviewRel, false, apply_here, &shape);
+	table_close(matviewRel, NoLock);
+
+	return done;
+}
+
+/*
+ * On a segment of a cluster: deltas the coordinator computed, the part of
+ * them that is this segment's rows' (ivm_cluster.c), applied to this
+ * segment's copy of the view by the statements one node applies its own
+ * deltas with -- or, with "replace", the rows the view is to hold here in
+ * place of the ones it has, as a recomputation leaves them.  The rows are
+ * the view's own, in its descriptor.
+ */
+void
+GpIvmApplyStaged(Relation matviewRel, Tuplestorestate *old_rows,
+				 Tuplestorestate *new_rows, bool replace)
+{
+	TupleDesc	desc = CreateTupleDescCopy(RelationGetDescr(matviewRel));
+	ViewShape	shape;
+
+	describe_view(matviewRel, GpIvmGetViewQuery(matviewRel), &shape);
+
+	if (SPI_connect() != SPI_OK_CONNECT)
+		elog(ERROR, "SPI_connect failed");
+
+	if (!replace)
+		apply_step(matviewRel, &shape, old_rows, new_rows, desc);
+	else
+	{
+		char	   *mvname = quote_qualified_identifier(get_namespace_name(RelationGetNamespace(matviewRel)),
+														RelationGetRelationName(matviewRel));
+		StringInfoData cols;
+
+		/* every column of the view, the hidden ones among them */
+		initStringInfo(&cols);
+		for (int i = 0; i < desc->natts; i++)
+			appendStringInfo(&cols, "%s%s", i > 0 ? ", " : "",
+							 quote_identifier(NameStr(TupleDescAttr(desc, i)->attname)));
+
+		run(psprintf("DELETE FROM %s", mvname), SPI_OK_DELETE);
+		if (new_rows != NULL)
+		{
+			register_delta(matviewRel, IVM_NEW_DELTA, new_rows, desc);
+			run(psprintf("INSERT INTO %s (%s) SELECT %s FROM %s",
+						 mvname, cols.data, cols.data, IVM_NEW_DELTA),
+				SPI_OK_INSERT);
+			SPI_unregister_relation(IVM_NEW_DELTA);
 		}
 	}
 
 	SPI_finish();
-	table_close(matviewRel, NoLock);
-
-	return true;
 }

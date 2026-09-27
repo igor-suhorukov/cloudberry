@@ -30,6 +30,10 @@
 # groups of their own, m7a and m7b, and each that is skipped says what
 # stopped it.  "differs:" says it for a test that stops at nothing, and
 # answers otherwise than Cloudberry's expected output says.
+#
+# One test of Cloudberry's parallel_schedule runs here too, ivm, its
+# incremental views on a cluster: Cloudberry runs that schedule on its
+# cluster before this one.
 group g1
 port aggtest
 run  gp_aggregates
@@ -510,15 +514,18 @@ run  gang_reuse
 skip run_utility_gpexpand_phase1  gpcheckcat and gppkg are not installed (pg19/gpMgmt/files.txt)
 run  create_extension_fail
 skip offload_entry_to_qe  a temporary external table is not supported: CREATE EXTERNAL WEB TEMP TABLE -- an external table is a foreign table, which PostgreSQL makes in no temporary schema; and enable_offload_entry_to_qe, which moves the coordinator's work above a Motion to one segment, has nothing to move on the planner's route, whose gathers are the coordinator's
-skip aqumv  unrecognized configuration parameter "enable_answer_query_using_materialized_views"; unrecognized parameter namespace "gp"
-skip matview_data  relation "gp_matview_aux" does not exist; current transaction is aborted, commands ignored until end of transaction block
+port ivm_cluster
+run  ivm
+run  aqumv  planner  it turns optimizer off itself, so both passes would plan it alike, and ORCA's pass, on the planner's pass's clusters, would read the rows the planner's wrote into its external table's demoprot file on each segment too
+port aqumv_plan
+run  matview_data
 skip directory_table  relation "gp_storage_server" does not exist; syntax error at or near "DATA"
 skip motion_socket  differs: its check_motion_sockets() looks up each segment's address, which on this suite's clusters is a socket's directory: socket.gaierror: [Errno -2] Name or service not known
 run  ic_proxy_socket
 skip subtrx_overflow  relation "gp_suboverflowed_backend" does not exist
 run  bfv_meta_track
 skip bfv_copy  segment reject limit reached, aborting operation
-skip dynamic_table  unrecognized parameter namespace "gp"; relation "dt0" does not exist
+skip dynamic_table  function pg_catalog.pg_get_dynamic_table_schedule(oid) does not exist; relation "pg_dynamic_tables" does not exist -- and psql 19's \d+ calls a dynamic table a materialized view, as DROP ... CASCADE does, its job runs REFRESH MATERIALIZED VIEW where Cloudberry's runs REFRESH DYNAMIC TABLE, the names of its jobs are not reserved, and its wait of 80 seconds for its job is cancelled after 60
 run  hba_conf
 skip dboptions  differs: the psql its shell commands run connects to /tmp's socket, where this suite's nodes have directories of their own
 skip gp_log_mem_dispatch  function gp_log_backend_memory_contexts(integer) does not exist; function gp_log_backend_memory_contexts(integer, integer) does not exist
