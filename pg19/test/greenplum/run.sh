@@ -403,8 +403,17 @@ run_group() {
 		testtablespace_1111111111222222222233333333334444444444555555555566666666667777777777888888888899999999990000000000 \
 		$(for i in 1 2 3 4 5 6 7 8; do echo testtablespace_existing_version_dir/$i/GPDB_99_399999991; done))
 	# ORCA's counts, from the pass's start (gp_orca.fallbacks()), and where
-	# the coordinator's log was then
-	"$PSQL" -X -q -d template1 -c "SELECT gp_orca.reset_fallbacks()" > /dev/null 2>&1
+	# the coordinator's log was then.  template1 has gp_orca's functions only
+	# once gp_setup, the pass's first test, has made them there, so they are
+	# made here first -- without, the reset failed and the counts kept what
+	# fell back before the pass, gp_core's recovery process's first query in
+	# each group, which the log's tail does not have (3,898 counted, 3,890
+	# in the log, in M7's recorded run).  gp_setup's IF NOT EXISTS passes
+	# over it quietly.
+	"$PSQL" -X -q -d template1 -c "SET gp.optimizer = off" \
+		-c "SET client_min_messages = warning" \
+		-c "CREATE EXTENSION IF NOT EXISTS gp_orca CASCADE" \
+		-c "SELECT gp_orca.reset_fallbacks()" > /dev/null 2>&1
 	logpos=$(stat -c %s "$(node_dir "$g" 0).log")
 	watchdog "$R/cancelled" &
 	wd=$!
