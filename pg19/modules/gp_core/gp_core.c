@@ -68,6 +68,7 @@
 #include "gp_share.h"
 #include "gp_standby.h"
 #include "gp_ic.h"
+#include "gp_workfile.h"
 
 PG_MODULE_MAGIC_EXT(
 					.name = "gp_core",
@@ -300,6 +301,13 @@ _PG_init(void)
 	 * of shared memory, where gp.enable_query_metrics is on.
 	 */
 	GpMetricsInit();
+
+	/*
+	 * Cloudberry's workfile manager, as far as a module sees it: the limits
+	 * on a statement's temporary files and on the node's, and gp_toolkit's
+	 * views of them.
+	 */
+	GpWorkfileInit();
 
 	/*
 	 * Deliberately no MarkGUCPrefixReserved("gp") here.  It drops every
