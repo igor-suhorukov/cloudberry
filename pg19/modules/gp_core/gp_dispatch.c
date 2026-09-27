@@ -203,6 +203,13 @@ static const char *const synced_settings[] = {
 	"postgis.gdal_cpl_debug",
 	"postgis.gdal_vsi_options",
 	"search_path",
+	/*
+	 * the session user, SET SESSION AUTHORIZATION's, before the role: what a
+	 * statement a segment decides for itself -- CLUSTER and VACUUM of every
+	 * table the user may -- it decides as the coordinator's user, not as the
+	 * connection's
+	 */
+	"session_authorization",
 	"role",
 	"DateStyle",
 	"IntervalStyle",
