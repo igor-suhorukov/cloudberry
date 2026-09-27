@@ -256,6 +256,8 @@ pax_sources = []
 pax_cpp_args = []
 pax_deps = []
 pax_inc = []
+pax_gtest_sources = []
+pax_gtest_inc = []
 
 if get_option('pax')
   subdir('pax')
@@ -828,6 +830,31 @@ if get_option('hook_tests')
     install_dir: pg_pkglibdir,
   )
   built_modules += 'gpformatter (test only)'
+
+  # PAX's unit tests, Cloudberry's googletest programs, in a module a
+  # backend runs them in (pax/meson.build, pax/src/pax_gtest.cc): PAX
+  # compiled in again, as its own test program had it, and without
+  # optimization, as Cloudberry builds them -- a test replaces a function of
+  # PAX's or of the server's by patching its code (cpp-stub), which a call
+  # the compiler inlined would pass by.
+  if pax_gtest_sources.length() > 0
+    shared_module('pax_gtest',
+      files('modules/pax/pax_catalog.c', 'modules/pax/pax_cbcore.c',
+            'modules/pax/pax_numeric.c') + pax_sources + pax_gtest_sources,
+      c_args: mod_c_args,
+      cpp_args: pax_cpp_args + ['-DRUN_GTEST'],
+      link_args: mod_link_args,
+      dependencies: pax_deps + [dependency('threads')],
+      include_directories: [pg_inc, cb_inc, pax_inc, pax_gtest_inc],
+      override_options: ['optimization=0'],
+      build_rpath: pg_libdir,
+      install_rpath: pg_libdir,
+      name_prefix: '',
+      install: true,
+      install_dir: pg_pkglibdir,
+    )
+    built_modules += 'pax_gtest (test only)'
+  endif
 
   # Cloudberry's extension for diskquota's tests (control/test), whose
   # functions are diskquota's library's.

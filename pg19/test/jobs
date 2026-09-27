@@ -70,6 +70,7 @@ dump                   -         30   MEM=1700
 postgis_regress        planner   10   PASSES=planner MEM=2600
 hooks                  -         28   MEM=300
 task                   -         32   MEM=300
+pax_gtest              -         10   MEM=400
 singlenode_isolation2  orca      17   PASSES=orca MEM=300
 postgis                -         10   MEM=700
 singlenode_isolation2  planner   11   PASSES=planner MEM=300

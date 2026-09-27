@@ -122,3 +122,32 @@ if fs.is_file(tabulate_dir / 'tabulate' / 'table.hpp')
   pax_inc = [pax_inc, include_directories(tabulate_dir)]
   pax_cpp_args += '-DPAX_DUMP_FUNCTIONS'
 endif
+
+# PAX's unit tests (tests.txt), where the tree has googletest -- a git
+# submodule of Cloudberry's, which the image clones at the commit the tree
+# names, as it clones tabulate: pg19/meson.build builds them into the
+# test-only module pax_gtest, which runs them in a backend (src/pax_gtest.cc).
+gtest_root = pax_root / 'contrib' / 'googletest'
+pax_gtest_sources = []
+pax_gtest_inc = []
+if fs.is_file(gtest_root / 'googletest' / 'src' / 'gtest-all.cc')
+  pax_gtest_sources = files(gtest_root / 'googletest' / 'src' / 'gtest-all.cc',
+                            gtest_root / 'googlemock' / 'src' / 'gmock-all.cc')
+  foreach line : fs.read('tests.txt').strip().split('\n')
+    path = line.strip()
+    if path == '' or path.startswith('#')
+      continue
+    endif
+    if fs.is_file('src' / path)
+      pax_gtest_sources += files('src' / path)
+    else
+      pax_gtest_sources += files(pax_root / path)
+    endif
+  endforeach
+  pax_gtest_inc = include_directories(gtest_root / 'googletest' / 'include',
+                                      gtest_root / 'googletest',
+                                      gtest_root / 'googlemock' / 'include',
+                                      gtest_root / 'googlemock',
+                                      pax_root / 'cpp-stub' / 'src',
+                                      pax_root / 'cpp-stub' / 'src_linux')
+endif
