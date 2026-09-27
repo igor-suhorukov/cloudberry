@@ -18,14 +18,18 @@
  * under the License.
  *
  * gpcontrib/cdb/cdbvars.h
- *	  The include overlay of gpcontrib's modules: what the port's copies of
- *	  their files, and the files compiled where they lie, ask of Cloudberry's
+ *	  The include overlay of gpcloud and pxf_fdw: what their files compiled
+ *	  where they lie, and the port's copies of theirs, ask of Cloudberry's
  *	  cdbvars.h.
  *
- * pxf_fdw, whose copies include it as Cloudberry's files do, names the node
- * its share of a table's fragments is -- pxf_fragment.h's PXF_SEGMENT_ID,
- * GpIdentity.segindex -- which is gp_core's content id here: -1 on the
- * coordinator and on one node, which read them all.
+ * gpcloud's C++ (gpcontrib/gpcloud/src) is compiled unchanged, with this
+ * directory on its include path (meson.build).  s3conf.cpp reads which
+ * segment reads a location's keys, GpIdentity.segindex, of the segments
+ * getgpsegmentCount() counts, to take its share of them: gp_core's content
+ * id here -- -1 on the coordinator and on one node, which read them all, as
+ * Cloudberry's coordinator does.  getgpsegmentCount() and write_log(),
+ * which it declares itself, are defined by the port's gpcloud.cpp.  pxf_fdw
+ * names the node in its debug messages (pxf_fragment.h's PXF_SEGMENT_ID).
  *
  *-------------------------------------------------------------------------
  */

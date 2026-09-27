@@ -1,0 +1,67 @@
+# Cloudberry's gpcloud regression schedule (gpcontrib/gpcloud/regress/
+# regress_schedule) on the port, against the suite's S3 (run.sh): each test
+# of the schedule, in its order, and whether it runs here --
+#
+#   run  <test>
+#   skip <test>  why not
+#
+# A skipped test reads a data set of Cloudberry's own, in its bucket
+# s3test.pivotal.io, which is not public and which the suite does not make
+# for its size -- stock ticks of 31 million rows (normal/, 1.3 GB), the
+# airline data of five GB a file, their gzipped and deflated copies -- or
+# asks for what only Amazon's S3 does.  The data a test that runs reads is
+# s3data.py's.  1_19_proxy and 5_02_normal_https_param are not in the
+# schedule, and are not run here either.
+
+run  0_00_prepare_protocols
+run  1_03_bad_data
+run  1_04_empty_prefix
+run  1_05_one_line
+run  1_06_1correct_1wrong
+run  2_02_invalid_region
+run  2_03_invalid_config
+run  2_04_invalid_header
+run  2_05_limit_zero
+run  3_01_create_wet
+run  3_02_quick_shoot_wet
+run  3_11_write_with_encryption
+run  4_01_create_invalid_wet
+run  2_06_invalid_sub_query
+run  1_17_no_eol_at_eof
+run  2_07_wrong_proxy
+run  5_01_normal_http_param
+skip 1_01_normal  reads normal/, Cloudberry's 31 million rows of stock ticks (1.3 GB)
+skip 1_02_log_error  reads normal/, Cloudberry's 31 million rows of stock ticks (1.3 GB)
+run  1_10_all_regions
+skip 1_11_gzipped_data  reads gzipped_normal1/ and gzipped_2002and2003/, Cloudberry's stock ticks and airline data, gzipped (42 million rows)
+run  1_12_no_prefix
+skip 1_13_parallel1  reads normal/, Cloudberry's 31 million rows of stock ticks (1.3 GB)
+skip 1_13_parallel2  reads normal/, Cloudberry's 31 million rows of stock ticks (1.3 GB)
+skip 1_09_partition  reads normal/xao, a file of Cloudberry's stock ticks (1.9 million rows), counted by the partitions of their volumes
+run  3_09_write_big_row
+run  3_10_write_mixed_length_rows
+skip 1_15_normal_sub_query  reads normal/xab and normal/xac, two files of Cloudberry's stock ticks (3.9 million rows), and the dates they share
+run  1_16_multiple_files_with_header_line
+run  1_18_all_regions_version2
+skip 1_20_deflate_data  reads deflate_normal1/ and deflate_2002and2003/, Cloudberry's stock ticks and airline data, deflated (42 million rows)
+skip 1_07_huge_bad_data  reads hugefile/airlinedata2.csv, Cloudberry's airline data (44 million rows, five GB)
+skip 1_08_huge_correct_data  reads hugefile_correct_data/airlinedata1.csv, Cloudberry's airline data (48 million rows, five GB)
+run  1_14_thousands_of_files
+run  3_03_insert_lots_of_rows
+run  3_07_write_lots_of_files
+run  3_04_insert_mixed_workload
+run  3_05_insert_to_wet_from_ret
+run  3_06_special_characters
+run  3_08_join_query_wet_local_tbl
+run  4_02_wet_with_mixed_format
+run  2_01_invalid_data_schema_setup
+run  2_01_invalid_data_schema_select_1
+run  2_01_invalid_data_schema_select_2
+run  2_01_invalid_data_schema_select_3
+run  2_01_invalid_data_schema_select_4
+run  2_01_invalid_data_schema_select_5
+run  2_01_invalid_data_schema_select_6
+run  2_01_invalid_data_schema_select_7
+run  2_01_invalid_data_schema_select_8
+run  2_01_invalid_data_schema_drop
+run  9_99_clean_protocols

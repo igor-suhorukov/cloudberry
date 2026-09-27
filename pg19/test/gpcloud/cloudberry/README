@@ -1,0 +1,30 @@
+Cloudberry's gpcloud regression tests on the port, against the suite's S3,
+on a cluster and on one node: the differences from Cloudberry's expected
+output that have been reviewed, and are the port's for a reason of its own,
+or the S3's.
+
+Each file is one test's difference in the form ../../singlenode/canon.pl
+gives it, named for the expected output it differs from; a file named
+<test>.<target>.diff is the difference of one target alone, cluster or
+one_node.  run.sh counts a test as passing when gpdiff.pl, under Cloudberry's
+init file and the port's, finds no difference or exactly the file's.
+
+  1_10_all_regions, 1_18_all_regions_version2
+      psql 19's \d of a foreign table names its server, gp_exttable_server,
+      where Cloudberry's gives its FDW options alone.  On one node the
+      table's options say execute_on 'COORDINATOR_ONLY': the port reads
+      every external table of one node there, as Cloudberry's single-node
+      mode does (exttable_ddl.c).
+  3_01_create_wet
+      The test drops a table it never made, s3regress_create_wet_on_master,
+      and Cloudberry's expected output says nothing of it; Cloudberry's
+      server refuses it as the port does, a DROP of a foreign table that is
+      not there.  Cloudberry's CI does not run gpcloud's regression tests
+      (it needs Amazon's bucket and credentials), and the file is older than
+      external tables as foreign tables.
+  3_11_write_with_encryption
+      The bucket s3test.encrypt.pivotal.io has a policy of Amazon's that
+      refuses an upload without server-side encryption, which the test's
+      third table makes; moto keeps the encryption's header of an upload but
+      has no such policy, so the upload is taken and read back.  The rest --
+      a table with sse_s3 written and read -- is Cloudberry's.

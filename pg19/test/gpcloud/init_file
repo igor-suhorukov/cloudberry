@@ -1,0 +1,24 @@
+-- The port's additions to Cloudberry's init files for gpcloud's regression
+-- tests, read by gpdiff.pl after them.
+
+-- start_matchsubs
+
+# The place in gpcloud's C++ an error names, which gpcloud's regress/Makefile
+# adds to the init file it runs the tests with.
+m/\(.*\.cpp:\d+\)/
+s/\(.*\.cpp:\d+\)//
+
+# gpcloud's error of a segment's, which Cloudberry's relays with the segment
+# and its pid after it -- "(seg1 slice1 ... pid=N)" -- and which atmsort.pm's
+# rule for that takes away from "(segid = " to the end, gpcloud's own words
+# after its first ones with it.  A segment's error carries no pid here (its
+# segment is a DETAIL's, the greenplum suite's init_file), so the rule is
+# made here.
+m/^ERROR:  Failed to init gpcloud extension \(segid = /
+s/ \(segid = .*//
+
+# The configuration file, the suite's, in a directory of the run's.
+m/config=\S*\/s3\.conf/
+s/config=\S*\/s3\.conf/config=s3.conf/
+
+-- end_matchsubs

@@ -578,10 +578,11 @@ What Cloudberry's tests asked for next (2026-09-27), in `gp_core`,
 - and the server built with LDAP, for `pg_hba.conf`'s ldap lines.
 
 M8's extensions (2026-09-28): `pxf_fdw`, Cloudberry's foreign-data wrapper
-of a PXF server, built against `gp_exttable`'s headers (`access/external.h`
+of a PXF server, and `gpcloud`, its `s3://` protocol of external tables, with
+`gpcheckcloud`, both built against `gp_exttable`'s headers (`access/external.h`
 and `access/url.h` among them), whose scan -- its single row error handling
-too -- and writer it reads and writes its server's data with; and a foreign
-table read where its `mpp_execute` says, as Cloudberry reads one --
+too -- and writer `pxf_fdw` reads and writes its server's data with; and a
+foreign table read where its `mpp_execute` says, as Cloudberry reads one --
 `'all segments'` on the segments, each its share, over `num_segments` of them
 -- the option kept among the object's, and from its wrapper's validator
 (`gp_core`'s `gp_foreign.c`).
@@ -634,9 +635,11 @@ directory tables, on one node and a standby; `postgis_cluster`, M7's, stock Post
 coordinator and three segments, its answers checked against one node's;
 `singlenode` and
 `singlenode_isolation2`, Cloudberry's single-node suites with PostgreSQL 19's
-own regression tests; PostGIS's regression suite; and `pxf_fdw`, M8's,
+own regression tests; PostGIS's regression suite; `pxf_fdw`, M8's,
 Cloudberry's `pxf_fdw` tests and a stand-in for PXF, on one node and on a
-cluster.  Each is run under the
+cluster; and `gpcloud`, gpcloud's unit tests, `gpcheckcloud` and its
+regression schedule against an S3 of the suite's own, moto's server, on a
+cluster and on one node.  Each is run under the
 planner and under ORCA where it plans.
 
 The suites run side by side, as jobs: a suite with two passes is a job a
