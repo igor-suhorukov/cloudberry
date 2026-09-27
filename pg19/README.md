@@ -471,9 +471,10 @@ What Cloudberry's tests asked for next (2026-09-27), in `gp_core`,
   `log_min_duration_statement` reach the segments;
 - the rest of gp_toolkit: `gp_disk_free`, each segment's own; the checks
   for orphaned and missing files and `gp_move_orphaned_files()`, each node
-  locking its `pg_class` and checkpointing for itself (`gp_toolkit.c`); and
-  an append-optimized table's segment files' history
-  (`__gp_aoseg_history`);
+  locking its `pg_class` and checkpointing for itself; an append-optimized
+  table's segment files' history (`__gp_aoseg_history`); and the functions
+  of a partitioned table, `gp_partitions` among them (`gp_toolkit.c`,
+  `gp_partmaint.c`);
 - a record of no declared type carried between the nodes with its row type
   described (`gp_record.c`) — through a Motion, a gather, a query of
   `gp_dist_random()` alone, and as a fragment's parameter or constant;

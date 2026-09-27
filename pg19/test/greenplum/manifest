@@ -466,6 +466,7 @@ skip qp_with_functional_inlining  UPDATE is not allowed in a non-volatile functi
 skip qp_with_functional_noinlining  UPDATE is not allowed in a non-volatile function; unrecognized configuration parameter "gp_cte_sharing"
 run  qp_functions_in_contexts_setup
 run  qp_misc_rio_join_small
+port gp_partition_maint
 group m7b
 run  qp_gist_indexes2
 run  qp_gist_indexes3
