@@ -728,6 +728,37 @@ is "and gp_size_of_table_and_indexes_licensing beside it" \
    "SELECT (sotailtablesizeuncompressed > sotailtablesizedisk)::text
       FROM gp_toolkit.gp_size_of_table_and_indexes_licensing WHERE sotailtablename = 'tkc';" "true"
 
+###############################################################################
+echo "17. PAX's dump functions: a file's parts and data, printed as tables"
+###############################################################################
+# In pax.so, as Cloudberry builds them (storage/micro_partition_udf.cc), and
+# created by hand as its source's comments say, since no script of PAX's
+# creates them.  A PAX table's first file is <relation's path>_pax/0.
+q "CREATE FUNCTION dump_pax_file_desc(file_path text, spcid oid) RETURNS text
+     AS '\$libdir/pax', 'dump_pax_file_desc' LANGUAGE C IMMUTABLE;
+   CREATE FUNCTION dump_pax_file_desc_schema(file_path text, spcid oid) RETURNS text
+     AS '\$libdir/pax', 'dump_pax_file_desc_schema' LANGUAGE C IMMUTABLE;
+   CREATE FUNCTION dump_pax_file_desc_group_info(file_path text, spcid oid, group_start int4, group_len int4) RETURNS text
+     AS '\$libdir/pax', 'dump_pax_file_desc_group_info' LANGUAGE C IMMUTABLE;
+   CREATE FUNCTION dump_pax_file_data(file_path text, toast_file_path text, spcid oid, groupid int4,
+                                      colid_start int4, colid_len int4, rowid_start int4, rowid_len int4) RETURNS text
+     AS '\$libdir/pax', 'dump_pax_file_data' LANGUAGE C IMMUTABLE;
+   CREATE TABLE pxd (a int, b int, c bigint) USING pax;
+   INSERT INTO pxd SELECT i, i * 10, i * 100 FROM generate_series(1, 5) i;" > /dev/null
+desc=$(q "SELECT dump_pax_file_desc(pg_relation_filepath('pxd') || '_pax/0', 0);")
+case "$desc" in
+	*"Magic         | PORC"*"Number Of Groups  | 1"*"Number Of Columns | 3"*"Number Of Rows    | 5"*)
+		ok "dump_pax_file_desc(): the post script, the footer, the schema and each group of a file" ;;
+	*) notok "dump_pax_file_desc()" "$desc" ;;
+esac
+data=$(q "SELECT dump_pax_file_data(pg_relation_filepath('pxd') || '_pax/0', NULL, 0, 0, 0, 3, 0, 5);" |
+	grep -E '^\| \| [0-9]' | tr -s ' ' | tr '\n' ' ')
+[ "$data" = "$(for i in 1 2 3 4 5; do printf '| | %d | %d0 | %d00 | | ' $i $i $i; done)" ] \
+	&& ok "dump_pax_file_data(): a group's rows, column by column" \
+	|| notok "dump_pax_file_data()" "$data"
+refused "and a file that is not there is refused" \
+        "SELECT dump_pax_file_desc_schema('base/1/no_such_file', 0);" "Fail to open"
+
 echo
 echo "  $pass passed, $fail failed"
 [ "$fail" -eq 0 ]

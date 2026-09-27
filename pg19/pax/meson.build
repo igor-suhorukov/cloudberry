@@ -103,3 +103,22 @@ pax_deps = [protobuf_dep, uring_dep, zstd_dep, zlib_dep]
 if pax_lz4_dep.found()
   pax_deps += pax_lz4_dep
 endif
+
+# PAX's dump functions -- dump_pax_file_desc() and the rest of
+# storage/micro_partition_udf.cc, over its ORC dump reader -- which print
+# through tabulate, a header-only library Cloudberry carries as a git
+# submodule of its tree (contrib/tabulate).  A git archive of the tree has
+# none, so the image clones it at the commit the tree's submodule names
+# (Dockerfile.cbext); where it is not there, PAX is built without them.
+tabulate_dir = pax_root / 'contrib' / 'tabulate' / 'include'
+if fs.is_file(tabulate_dir / 'tabulate' / 'table.hpp')
+  foreach path : ['storage/orc/orc_dump_reader.cpp', 'storage/micro_partition_udf.cc']
+    if fs.is_file('src' / path)
+      pax_sources += files('src' / path)
+    else
+      pax_sources += files(pax_root / path)
+    endif
+  endforeach
+  pax_inc = [pax_inc, include_directories(tabulate_dir)]
+  pax_cpp_args += '-DPAX_DUMP_FUNCTIONS'
+endif
