@@ -213,7 +213,6 @@ typedef struct GatherScanState
 	GpGatherState *gather;
 	bool		done;
 	int			current_content;	/* the segment of the scan tuple's row */
-	bool		external;		/* an external table's */
 	Tuplestorestate *spool;		/* what it read, when it may be read again */
 	TupleTableSlot *spooled;	/* a row of it, read back */
 } GatherScanState;
@@ -1574,8 +1573,6 @@ gather_begin(CustomScanState *node, EState *estate, int eflags)
 	state->rowvalues = palloc_array(Datum, Max(state->natts, 1));
 	state->rownulls = palloc_array(bool, Max(state->natts, 1));
 	state->current_content = -1;
-	state->external = !gather_is_current_of(state) &&
-		GpPolicyIsExternalTable(RelationGetRelid(node->ss.ss_currentRelation));
 
 	/* each gather is a slice of its own, numbered as the executor meets it */
 	if (!(eflags & EXEC_FLAG_EXPLAIN_ONLY))
@@ -1896,6 +1893,17 @@ gather_store(GatherScanState *state, TupleTableSlot *slot, int content)
 				break;
 		}
 	}
+
+	/*
+	 * A scan that reads no column -- count(*) -- has the relation's columns
+	 * in its tuple, where it has no scan list: they are NULL, and a spool
+	 * copies a row of them.
+	 */
+	for (int i = state->nsources; i < slot->tts_tupleDescriptor->natts; i++)
+	{
+		slot->tts_values[i] = (Datum) 0;
+		slot->tts_isnull[i] = true;
+	}
 	ExecStoreVirtualTuple(slot);
 
 	if (state->ctid_remote >= 0 && !remote->tts_isnull[state->ctid_remote])
@@ -2016,10 +2024,10 @@ gather_end(CustomScanState *node)
 }
 
 /*
- * Read again: the segments run the query again -- or, for an external table
- * that keeps what it read, that is read again (GpGatherScanMarkRescans()).
- * The query the segments run has no parameter in it, which is what makes
- * what it read the answer whatever the parameters now are.
+ * Read again: what it kept is read again (GpGatherScanMarkRescans()) -- or,
+ * where it keeps nothing, the segments run the query again.  The query the
+ * segments run has no parameter in it, which is what makes what it read the
+ * answer whatever the parameters now are.
  */
 static void
 gather_rescan(CustomScanState *node)
@@ -2040,14 +2048,21 @@ gather_rescan(CustomScanState *node)
 }
 
 /*
- * An external table's gather that the plan may read more than once -- the
- * inner side of a nested loop, a subquery run for each row, the recursive
- * part of WITH RECURSIVE -- keeps the rows it read and reads them again: its
- * source is read once, as Cloudberry's planner makes sure of by putting a
- * Materialize above an external scan it would rescan (the path is not
- * "rescannable").  A command runs once, a file's rejected rows are counted
- * once, and gpfdist serves a scan once.  A Materialize that already keeps
- * the rows, above a subtree with no parameter to change, reads them once.
+ * A gather that the plan may read more than once -- the inner side of a
+ * nested loop, a subquery run for each row, the recursive part of WITH
+ * RECURSIVE -- keeps the rows it read and reads them again, as Cloudberry's
+ * planner makes sure a Motion or an external scan it would rescan is read
+ * once, by putting a Materialize above it (neither path is "rescannable").
+ * An external table's source is read once: a command runs once, a file's
+ * rejected rows are counted once, and gpfdist serves a scan once.  A table's
+ * rows cross from the segments once: run again for each outer row, the
+ * gathers of a join's inner side of many partitions -- a Nested Loop the
+ * planner chose for tables it had no statistics of -- took minutes, where
+ * reading what they kept takes seconds (bb_mpph's queries 3 and 8).  A
+ * gather that brings each row's ctid -- of a table the statement writes, or
+ * locks rows of -- is run again, since a row it keeps has none.  A
+ * Materialize that already keeps the rows, above a subtree with no parameter
+ * to change, reads them once.
  */
 static void mark_rescans(PlanState *ps, bool again);
 
@@ -2077,7 +2092,8 @@ mark_rescans(PlanState *ps, bool again)
 	{
 		GatherScanState *state = (GatherScanState *) ps;
 
-		if (state->external && state->spool == NULL)
+		if (state->spool == NULL && state->ctid_remote < 0 &&
+			!gather_is_current_of(state))
 		{
 			EState	   *estate = ps->state;
 			MemoryContext oldcxt = MemoryContextSwitchTo(estate->es_query_cxt);
