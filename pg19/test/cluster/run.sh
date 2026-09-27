@@ -2275,6 +2275,20 @@ COMMIT;"
 				|| notok "the coordinator's slice moved to a segment" "$out / $want" ;;
 		*) notok "the coordinator's slice moved to a segment: the plan" "$plan" ;;
 	esac
+	# One that makes its rows itself -- a VALUES list, whose DEFAULT takes
+	# the next value of a temporary table's sequence -- stays the
+	# coordinator's in a plan that shares no CTE: its sequence is the
+	# coordinator's session's, which a segment's slice could not take.
+	out=$(printf '%s\n' "CREATE TEMP TABLE tv (f1 serial, f2 text, f3 int DEFAULT 42) DISTRIBUTED BY (f1);" \
+		"EXPLAIN (COSTS OFF) INSERT INTO tv (f2, f3) VALUES ('a', DEFAULT), ('b', 11), (upper('c'), 7 + 9);" \
+		"INSERT INTO tv (f2, f3) VALUES ('a', DEFAULT), ('b', 11), (upper('c'), 7 + 9);" \
+		"SELECT string_agg(concat_ws(':', f1, f2, f3), ' ' ORDER BY f1) FROM tv;" | qf 0)
+	case "$out" in
+		*gp_internal.nextval*) notok "a VALUES list's slice of the coordinator's own" "$out" ;;
+		*"Redistribute Motion 1:2"*"nextval('tv_f1_seq'::regclass)"*"Values Scan"*"Optimizer: GPORCA"*"1:a:42 2:b:11 3:C:16")
+			ok "... and one that makes its rows itself, a VALUES list taking a temporary sequence's values, stays the coordinator's" ;;
+		*) notok "a VALUES list's slice of the coordinator's own" "$out" ;;
+	esac
 
 	# ORCA's writes, carried out where the rows are.
 	placed() {					# placed <table>: rows on the wrong segment

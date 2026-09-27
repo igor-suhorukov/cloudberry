@@ -229,16 +229,41 @@ ReadsCTEBelowMotion(const CDXLNode *dxlnode, ULONG cte_id, BOOL on_segments)
 	return false;
 }
 
+// NOT IN CLOUDBERRY.  Does the plan have a CTE producer?
+static BOOL
+HasCTEProducer(const CDXLNode *dxlnode)
+{
+	if (EdxlopPhysicalCTEProducer == dxlnode->GetOperator()->GetDXLOperator())
+	{
+		return true;
+	}
+	const ULONG arity = dxlnode->Arity();
+	for (ULONG ul = 0; ul < arity; ul++)
+	{
+		if (HasCTEProducer((*dxlnode)[ul]))
+		{
+			return true;
+		}
+	}
+	return false;
+}
+
 // NOT IN CLOUDBERRY.  Does the part of a plan below a Motion, down to the
 // Motions it receives from, read nothing itself -- no table, no function's
 // rows, no CTE -- but work on the rows it receives: an aggregate, a sort, a
 // limit, a window, a join of them?  Then it runs on a segment as it would
-// on the coordinator.
+// on the coordinator.  Rows it makes itself -- a VALUES list, a Result with
+// nothing below it -- count as received with "own_rows" alone: whose
+// expressions, a DEFAULT's next value of a sequence among them, are the
+// coordinator's to evaluate where nothing makes the slice move.
 static BOOL
-WorksOnReceivedRowsOnly(const CDXLNode *dxlnode)
+WorksOnReceivedRowsOnly(const CDXLNode *dxlnode, BOOL own_rows)
 {
 	const CDXLOperator *dxlop = dxlnode->GetOperator();
-	if (EdxloptypePhysical == dxlop->GetDXLOperatorType())
+	const BOOL physical = EdxloptypePhysical == dxlop->GetDXLOperatorType();
+	ULONG inputs = 0;
+
+	if (physical)
 	{
 		switch (dxlop->GetDXLOperator())
 		{
@@ -249,6 +274,12 @@ WorksOnReceivedRowsOnly(const CDXLNode *dxlnode)
 			case EdxlopPhysicalMotionRoutedDistribute:
 			case EdxlopPhysicalMotionRandom:
 				return true;
+			case EdxlopPhysicalValuesScan:
+				if (!own_rows)
+				{
+					return false;
+				}
+				break;
 			case EdxlopPhysicalResult:
 			case EdxlopPhysicalLimit:
 			case EdxlopPhysicalSort:
@@ -259,7 +290,6 @@ WorksOnReceivedRowsOnly(const CDXLNode *dxlnode)
 			case EdxlopPhysicalNLJoin:
 			case EdxlopPhysicalMergeJoin:
 			case EdxlopPhysicalAppend:
-			case EdxlopPhysicalValuesScan:
 			case EdxlopPhysicalAssert:
 				break;
 			default:
@@ -270,12 +300,18 @@ WorksOnReceivedRowsOnly(const CDXLNode *dxlnode)
 	const ULONG arity = dxlnode->Arity();
 	for (ULONG ul = 0; ul < arity; ul++)
 	{
-		if (!WorksOnReceivedRowsOnly((*dxlnode)[ul]))
+		const CDXLNode *child = (*dxlnode)[ul];
+
+		if (EdxloptypePhysical == child->GetOperator()->GetDXLOperatorType())
+		{
+			inputs++;
+		}
+		if (!WorksOnReceivedRowsOnly(child, own_rows))
 		{
 			return false;
 		}
 	}
-	return true;
+	return !physical || 0 < inputs || own_rows;
 }
 
 // NOT IN CLOUDBERRY.  Does "slice" run on every segment -- a Motion's sending
@@ -360,6 +396,7 @@ CTranslatorDXLToPlStmt::GetPlannedStmtFromDXL(const CDXLNode *dxlnode,
 	topslice->directDispatch.haveProcessedAnyCalculations = false;
 
 	m_dxl_to_plstmt_context->m_orig_query = (Query *) orig_query;
+	m_dxl_to_plstmt_context->m_shares_cte = HasCTEProducer(dxlnode);
 	m_dxl_to_plstmt_context->AddSlice(topslice);
 	m_dxl_to_plstmt_context->SetCurrentSlice(topslice);
 
@@ -3076,13 +3113,14 @@ CTranslatorDXLToPlStmt::TranslateDXLMotion(
 		// below it run to their end before those above it start.  Such a
 		// slice that works only on the rows it receives -- ORCA's aggregate
 		// of gathered rows, sent back to the segments -- runs on the first
-		// segment instead, where it streams as the others do: in a plan that
-		// shares a CTE between slices, which all run at once, as it must, and
-		// in any other.  One that reads anything itself -- a function's rows
-		// -- stays the coordinator's.
+		// segment instead, where it streams as the others do.  In a plan
+		// that shares a CTE between slices, which all run at once, so does
+		// one that makes its rows itself -- a VALUES list -- as it must.  One
+		// that reads anything -- a function's rows -- stays the coordinator's.
 		if (segindex < 0 && GP_MOTION_GATHER != motion_type &&
 			WorksOnReceivedRowsOnly(
-				(*motion_dxlnode)[motion_dxlop->GetRelationChildIdx()]))
+				(*motion_dxlnode)[motion_dxlop->GetRelationChildIdx()],
+				m_dxl_to_plstmt_context->m_shares_cte))
 		{
 			segindex = 0;
 		}
