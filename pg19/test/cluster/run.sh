@@ -4977,7 +4977,7 @@ else
 fi
 
 ###############################################################################
-echo "20. parallelism within a segment"
+echo "22. parallelism within a segment"
 ###############################################################################
 # gp_parallel.c: with gp.enable_parallel on, a segment's writer runs a Gather
 # of PostgreSQL's in what it runs for the coordinator -- a gather's query of

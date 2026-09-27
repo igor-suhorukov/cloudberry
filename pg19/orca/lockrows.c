@@ -317,15 +317,22 @@ int
 GpOrcaMaxPlanNodeId(Plan *plan)
 {
 	int			max;
+	int			below;
 	List	   *subs = NIL;
 	ListCell   *lc;
 
 	if (plan == NULL)
 		return -1;
 
+	/*
+	 * Each child's once: Max() is a macro, and would walk a subtree it is
+	 * given a call for twice, at every level of the plan.
+	 */
 	max = plan->plan_node_id;
-	max = Max(max, GpOrcaMaxPlanNodeId(plan->lefttree));
-	max = Max(max, GpOrcaMaxPlanNodeId(plan->righttree));
+	below = GpOrcaMaxPlanNodeId(plan->lefttree);
+	max = Max(max, below);
+	below = GpOrcaMaxPlanNodeId(plan->righttree);
+	max = Max(max, below);
 	if (IsA(plan, Append))
 		subs = ((Append *) plan)->appendplans;
 	else if (IsA(plan, BitmapAnd))
@@ -335,7 +342,10 @@ GpOrcaMaxPlanNodeId(Plan *plan)
 	else if (IsA(plan, CustomScan))
 		subs = ((CustomScan *) plan)->custom_plans;
 	foreach(lc, subs)
-		max = Max(max, GpOrcaMaxPlanNodeId((Plan *) lfirst(lc)));
+	{
+		below = GpOrcaMaxPlanNodeId((Plan *) lfirst(lc));
+		max = Max(max, below);
+	}
 	return max;
 }
 
