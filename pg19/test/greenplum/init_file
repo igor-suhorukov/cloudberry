@@ -33,6 +33,13 @@ m/^delay time: /
 
 -- start_matchsubs
 
+# The prefix psql gives a message of a file a test includes, which the
+# harness has it include from the group's suite, converted and respelled
+# (run.sh's include_files()): Cloudberry's init_file takes away its own,
+# psql:sql/<file>:<line>.
+m/^psql:\S+\/include\/sql\/[\w.]+:\d+: /
+s/^psql:\S+\/include\/sql\/[\w.]+:\d+: //
+
 # Where an error a segment raised has a detail of its own, that detail is
 # Cloudberry's DETAIL, and the segment and the count before and after it go,
 # as the "(seg0 ...)" after Cloudberry's message goes.

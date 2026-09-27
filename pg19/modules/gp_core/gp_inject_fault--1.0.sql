@@ -78,6 +78,23 @@ AS $$ select gp_inject_fault($1, 'wait_until_triggered', '', '', '', 1, 1, $2, $
 LANGUAGE SQL;
 
 /*
+ * force_mirrors_to_catch_up(): every mirror of the cluster, and the
+ * coordinator's standby, has replayed what its primary has written, which a
+ * test waits for before it looks at a mirror's files.  Cloudberry's writes
+ * a no-op record on each node and waits for each mirror's fault at its
+ * redo; here each node waits for the standbys streaming from it
+ * (gp_internal.mirror_replay_wait(), gp_core's).
+ */
+CREATE FUNCTION force_mirrors_to_catch_up() RETURNS void AS $$
+BEGIN
+	PERFORM gp_internal.mirror_replay_wait();
+	IF EXISTS (SELECT 1 FROM gp.segment_configuration() WHERE content >= 0) THEN
+		PERFORM r FROM gp.exec_on_segments('SELECT gp_internal.mirror_replay_wait()') r;
+	END IF;
+END;
+$$ LANGUAGE plpgsql;
+
+/*
  * Who may inject a fault: whom EXECUTE on the function that does it is
  * granted to, the wrappers above running as their caller.  Cloudberry's
  * script grants PUBLIC, as a script does unless it says otherwise, and its

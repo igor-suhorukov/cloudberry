@@ -29,10 +29,14 @@ CREATE EXTENSION gp_inject_fault;
 -- inject them, some as roles of their own (gp_inject_fault--1.0.sql)
 GRANT EXECUTE ON FUNCTION gp_inject_fault(text, text, text, text, text, int4, int4, int4, int4, int4) TO PUBLIC;
 SELECT extname FROM pg_extension WHERE extname LIKE 'gp\_%' ORDER BY 1;
-SELECT count(*) AS segments FROM gp.segment_configuration() WHERE content >= 0;
+SELECT count(*) AS segments FROM gp.segment_configuration() WHERE content >= 0 AND role = 'p';
 --
 -- A database a test makes is template1's copy, which has the extensions too:
--- every database of Cloudberry's has what they give.
+-- every database of Cloudberry's has what they give.  Not gp_inject_fault,
+-- which Cloudberry's template1 has not, and a test makes where it sets a
+-- fault (vacuum_ao_aux_only's CREATE EXTENSION gp_inject_fault); and nothing
+-- of any of them in schema public, which a test drops in a copy of template1
+-- (gp_upgrade_cornercases).
 --
 \c template1
 SET gp.optimizer = off;
@@ -46,8 +50,8 @@ CREATE EXTENSION IF NOT EXISTS gp_security;
 CREATE EXTENSION IF NOT EXISTS gp_resource;
 CREATE EXTENSION IF NOT EXISTS gp_matview;
 CREATE EXTENSION IF NOT EXISTS gp_task;
-CREATE EXTENSION IF NOT EXISTS gp_inject_fault;
-GRANT EXECUTE ON FUNCTION gp_inject_fault(text, text, text, text, text, int4, int4, int4, int4, int4) TO PUBLIC;
+SELECT e.extname, n.nspname FROM pg_extension e JOIN pg_namespace n ON n.oid = e.extnamespace
+ WHERE n.nspname = 'public' ORDER BY 1;
 RESET client_min_messages;
 --
 -- The task scheduler reads its jobs from one database, gp.task_database's,

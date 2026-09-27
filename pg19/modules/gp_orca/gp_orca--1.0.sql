@@ -807,3 +807,28 @@ CREATE FUNCTION gp_orca.slices(query text,
 RETURNS SETOF record
 AS 'MODULE_PATHNAME', 'gp_orca_slices'
 LANGUAGE C STRICT;
+
+/*
+ * Cloudberry's disable_xform() and enable_xform(): one of ORCA's
+ * transformation rules, by the name gp_orca.xforms() gives it, turned off
+ * for the queries the session plans after, or on again.  Immutable, as
+ * Cloudberry's catalog has them, though they change what the session plans:
+ * a volatile function called without FROM is one ORCA declines, and a
+ * script's SELECT disable_xform(...) would go to the planner, where
+ * Cloudberry's ORCA plans it -- either way the call is made once, as the
+ * statement is planned or run.
+ */
+CREATE FUNCTION pg_catalog.disable_xform(text)
+RETURNS text
+AS 'MODULE_PATHNAME', 'gp_disable_xform'
+LANGUAGE C IMMUTABLE STRICT PARALLEL RESTRICTED;
+
+CREATE FUNCTION pg_catalog.enable_xform(text)
+RETURNS text
+AS 'MODULE_PATHNAME', 'gp_enable_xform'
+LANGUAGE C IMMUTABLE STRICT PARALLEL RESTRICTED;
+
+COMMENT ON FUNCTION pg_catalog.disable_xform(text) IS
+	'disables transformations in the optimizer';
+COMMENT ON FUNCTION pg_catalog.enable_xform(text) IS
+	'enables transformations in the optimizer';

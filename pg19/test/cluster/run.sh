@@ -432,6 +432,13 @@ if [ "$started" -eq 1 ]; then
 			ok "every node says the location, as Cloudberry's does, and pg_dumpall writes it" ;;
 		*) notok "pg_tablespace_location(), and pg_dumpall's CREATE TABLESPACE" "$out / $out2 / $out3" ;;
 	esac
+	# gp_tablespace_location() says each node's, with its content id, and
+	# the directory of this release under it is PostgreSQL 19's.
+	out=$(q 0 "SELECT string_agg(gp_segment_id || ' ' || (tblspc_loc = '$ROOT/tblspc'), ',' ORDER BY gp_segment_id) FROM gp_tablespace_location((SELECT oid FROM pg_tablespace WHERE spcname = 'ts1'));")
+	out2=$(q 0 "SELECT pg_ls_dir('pg_tblspc/$ts') = get_tablespace_version_directory_name();")
+	[ "$out|$out2" = "-1 true,0 true,1 true|t" ] \
+		&& ok "gp_tablespace_location() says each node's location, and get_tablespace_version_directory_name() the directory under it" \
+		|| notok "gp_tablespace_location()" "$out / $out2"
 	# default_tablespace goes to the segments with a statement, as Cloudberry
 	# sends it: a table made under it is in the tablespace on every node.
 	qf 0 > /dev/null <<'EOF'
@@ -458,6 +465,14 @@ EOF
 		"$((s1 + s2))|t|t|"*"pg_relation_size('sized'::regclass)"*"|$s1")
 			ok "the size functions add every segment's size to the coordinator's, as Cloudberry's do" ;;
 		*) notok "the size functions on the coordinator" "$out / $out2 / $c0 (segments: $s1, $s2)" ;;
+	esac
+	# cbdb_relation_size() asks the segments once for many relations, and
+	# says what pg_relation_size() says of each; a relation gone is 0.
+	out=$(q 0 "SELECT string_agg((r.size = pg_relation_size('sized'))::text || ' ' || r.size, ',') FROM cbdb_relation_size(ARRAY['sized'::regclass::oid, 'sized'::regclass::oid]) r;")
+	out2=$(q 0 "SELECT reloid || ' ' || size FROM cbdb_relation_size(ARRAY[0::oid], 'fsm');")
+	case "$out|$out2" in
+		"true "*",true "*"|0 0") ok "cbdb_relation_size() is the cluster's pg_relation_size() of each relation, and 0 of one gone" ;;
+		*) notok "cbdb_relation_size()" "$out / $out2" ;;
 	esac
 
 	# Each backend makes its own temporary namespace, so its OID is the one
@@ -503,6 +518,52 @@ t" ] && ok "temporary tables, two of them, have the coordinator's OIDs" \
 	[ "$out" = "0" ] \
 		&& ok "DROP INDEX CONCURRENTLY of an index pg_stat_last_operation names, which then names it no more" \
 		|| notok "DROP INDEX CONCURRENTLY" "$out"
+
+	# REINDEX SCHEMA records each index it rebuilt, as Cloudberry's
+	# reindex_index() does, and pg_stat_operations names it (gp_metatrack.c).
+	out=$(printf '%s\n' "SET client_min_messages = warning;" \
+		"CREATE SCHEMA rsch;" "CREATE TABLE rsch.t (a int, b int) DISTRIBUTED BY (a);" \
+		"CREATE INDEX rsch_b ON rsch.t (b);" "REINDEX SCHEMA rsch;" \
+		"SELECT schemaname || ' ' || actionname || ' ' || usestatus FROM pg_stat_operations WHERE objname = 'rsch_b' AND subtype = 'REINDEX';" \
+		"DROP SCHEMA rsch CASCADE;" | qf 0 2>&1)
+	[ "$out" = "rsch VACUUM CURRENT" ] \
+		&& ok "REINDEX SCHEMA records each index it rebuilds, which pg_stat_operations names" \
+		|| notok "REINDEX SCHEMA in pg_stat_last_operation" "$out"
+
+	# gp_log_backend_memory_contexts(): each segment's backends of the
+	# session log their memory contexts, one segment's too; a session that
+	# is none's, none (gp_monitor.c).
+	out=$(printf '%s\n' "SET client_min_messages = error;" "SELECT count(*) FROM kept;" \
+		"SELECT gp_log_backend_memory_contexts(sess_id), gp_log_backend_memory_contexts(sess_id, 1), gp_log_backend_memory_contexts(0) FROM pg_stat_activity WHERE pid = pg_backend_pid();" | qf 0 2>&1 | tail -1)
+	[ "$out" = "2|1|0" ] \
+		&& ok "gp_log_backend_memory_contexts() has a session's backends on each segment log their memory contexts" \
+		|| notok "gp_log_backend_memory_contexts()" "$out"
+
+	# gp_suboverflowed_backend: a transaction whose subtransactions wrote on
+	# every node past the cache of its PGPROC shows on each (gp_monitor.c).
+	out=$(printf '%s\n' "SET client_min_messages = warning;" \
+		"CREATE TABLE subovf (a int) DISTRIBUTED BY (a);" "BEGIN;" \
+		"DO \$\$ BEGIN FOR i IN 1..300 LOOP BEGIN INSERT INTO subovf VALUES (i); CREATE TEMP TABLE subovf_t (a int); DROP TABLE subovf_t; EXCEPTION WHEN others THEN NULL; END; END LOOP; END \$\$;" \
+		"SELECT string_agg(segid::text, ',' ORDER BY segid) FROM gp_suboverflowed_backend WHERE pg_backend_pid() = ANY (pids) OR (segid >= 0 AND array_length(pids, 1) > 0);" \
+		"COMMIT;" "SELECT count(*) FROM gp_suboverflowed_backend WHERE array_length(pids, 1) > 0;" \
+		"DROP TABLE subovf;" | qf 0 2>&1)
+	[ "$out" = "-1,0,1
+0" ] && ok "gp_suboverflowed_backend shows the transaction's overflowed subtransactions on every node, and none once it commits" \
+		|| notok "gp_suboverflowed_backend" "$out"
+
+	# gp_dist_wait_status(): every node's waits in Cloudberry's columns, a
+	# statement waiting for a table another session holds among them.
+	(printf '%s\n' "BEGIN;" "LOCK TABLE kept IN ACCESS EXCLUSIVE MODE;" "SELECT pg_sleep(6);" "COMMIT;" | qf 0 >/dev/null 2>&1) &
+	holder=$!
+	sleep 1
+	(q 0 "SELECT count(*) FROM kept;" >/dev/null 2>&1) &
+	waiter=$!
+	sleep 2
+	out=$(q 0 "SELECT segid || ' ' || waiter_locktype || ' ' || \"holdTillEndXact\" || ' ' || (waiter_sessionid > 0) || ' ' || (holder_sessionid > 0) FROM gp_dist_wait_status() WHERE waiter_lockmode = 'AccessShareLock';")
+	wait "$holder" "$waiter"
+	[ "$out" = "-1 relation true true true" ] \
+		&& ok "gp_dist_wait_status() shows a statement waiting for a table another session holds, and their sessions" \
+		|| notok "gp_dist_wait_status()" "$out"
 
 	# A temporary table is in the session's own temporary schema, which on the
 	# coordinator and on each segment is a different pg_temp_N: here another

@@ -1,0 +1,818 @@
+@@
+-LOG:  pg_hint_plan:
++LOG:  YYYY-MM-DD HH:MM:SS:MSMSMS TMZ,THD000,TRACE,"PlanHint: [
+@@
+-SeqScan(t1)
+-SeqScan(t2)
+-SeqScan(t3)
++ScanHint: t1[indexes: types:SeqScan]
++ScanHint: t2[indexes: types:SeqScan]
++ScanHint: t3[indexes: types:SeqScan]
+@@
+-duplication hint:
+-error hint:
++]",
+@@
+-LOG:  available indexes for IndexScan(t1): my_incredible_index
+-LOG:  available indexes for IndexScan(our_table_1_prt_p1_1): our_table_1_prt_p1_1_a_idx2 our_table_1_prt_p1_1_a_idx1 our_table_1_prt_p1_1_a_idx
+-LOG:  available indexes for IndexScan(our_table_1_prt_p1_2): our_table_1_prt_p1_2_a_idx2 our_table_1_prt_p1_2_a_idx1 our_table_1_prt_p1_2_a_idx
+-LOG:  available indexes for IndexScan(our_table_1_prt_p1_3): our_table_1_prt_p1_3_a_idx2 our_table_1_prt_p1_3_a_idx1 our_table_1_prt_p1_3_a_idx
+-LOG:  available indexes for IndexScan(our_table_1_prt_p1_4): our_table_1_prt_p1_4_a_idx2 our_table_1_prt_p1_4_a_idx1 our_table_1_prt_p1_4_a_idx
+-LOG:  pg_hint_plan:
++LOG:  YYYY-MM-DD HH:MM:SS:MSMSMS TMZ,THD000,TRACE,"PlanHint: [
+@@
+-IndexScan(t1 my_incredible_index)
+-IndexScan(t3 our_amazing_index)
++ScanHint: t1[indexes:my_incredible_index types:IndexScan]
++ScanHint: t3[indexes:our_amazing_index types:IndexScan]
+@@
+-duplication hint:
+-error hint:
++]",
+@@
+-LOG:  pg_hint_plan:
++LOG:  YYYY-MM-DD HH:MM:SS:MSMSMS TMZ,THD000,TRACE,"PlanHint: [
+@@
+-IndexScan(t1)
+-IndexScan(t3)
++ScanHint: t1[indexes: types:IndexScan]
++ScanHint: t3[indexes: types:IndexScan]
+@@
+-duplication hint:
+-error hint:
++]",
+@@
+-LOG:  available indexes for IndexOnlyScan(t1): my_incredible_index
+-LOG:  available indexes for IndexOnlyScan(t2): your_amazing_index
+-LOG:  available indexes for IndexOnlyScan(our_table_1_prt_p1_1): our_table_1_prt_p1_1_a_idx2 our_table_1_prt_p1_1_a_idx1 our_table_1_prt_p1_1_a_idx
+-LOG:  available indexes for IndexOnlyScan(our_table_1_prt_p1_2): our_table_1_prt_p1_2_a_idx2 our_table_1_prt_p1_2_a_idx1 our_table_1_prt_p1_2_a_idx
+-LOG:  available indexes for IndexOnlyScan(our_table_1_prt_p1_3): our_table_1_prt_p1_3_a_idx2 our_table_1_prt_p1_3_a_idx1 our_table_1_prt_p1_3_a_idx
+-LOG:  available indexes for IndexOnlyScan(our_table_1_prt_p1_4): our_table_1_prt_p1_4_a_idx2 our_table_1_prt_p1_4_a_idx1 our_table_1_prt_p1_4_a_idx
+-LOG:  pg_hint_plan:
++LOG:  YYYY-MM-DD HH:MM:SS:MSMSMS TMZ,THD000,TRACE,"PlanHint: [
+@@
+-IndexOnlyScan(t1 my_incredible_index)
+-IndexOnlyScan(t2 your_amazing_index)
+-IndexOnlyScan(t3 our_amazing_index)
++ScanHint: t1[indexes:my_incredible_index types:IndexOnlyScan]
++ScanHint: t2[indexes:your_amazing_index types:IndexOnlyScan]
++ScanHint: t3[indexes:our_amazing_index types:IndexOnlyScan]
+@@
+-duplication hint:
+-error hint:
++]",
+@@
+-LOG:  pg_hint_plan:
++LOG:  YYYY-MM-DD HH:MM:SS:MSMSMS TMZ,THD000,TRACE,"PlanHint: [
+@@
+-IndexOnlyScan(t1)
+-IndexOnlyScan(t2)
+-IndexOnlyScan(t3)
++ScanHint: t1[indexes: types:IndexOnlyScan]
++ScanHint: t2[indexes: types:IndexOnlyScan]
++ScanHint: t3[indexes: types:IndexOnlyScan]
+@@
+-duplication hint:
+-error hint:
++]",
+@@
+-LOG:  available indexes for BitmapScan(t1): my_bitmap_index
+-LOG:  available indexes for BitmapScan(t2): your_bitmap_index
+-LOG:  available indexes for BitmapScan(our_table_1_prt_p1_1): our_table_1_prt_p1_1_a_idx3
+-LOG:  available indexes for BitmapScan(our_table_1_prt_p1_2): our_table_1_prt_p1_2_a_idx3
+-LOG:  available indexes for BitmapScan(our_table_1_prt_p1_3): our_table_1_prt_p1_3_a_idx3
+-LOG:  available indexes for BitmapScan(our_table_1_prt_p1_4): our_table_1_prt_p1_4_a_idx3
+-LOG:  pg_hint_plan:
++LOG:  YYYY-MM-DD HH:MM:SS:MSMSMS TMZ,THD000,TRACE,"PlanHint: [
+@@
+-BitmapScan(t1 my_bitmap_index)
+-BitmapScan(t2 your_bitmap_index)
+-BitmapScan(t3 our_bitmap_index)
++ScanHint: t1[indexes:my_bitmap_index types:BitmapScan]
++ScanHint: t2[indexes:your_bitmap_index types:BitmapScan]
++ScanHint: t3[indexes:our_bitmap_index types:BitmapScan]
+@@
+-duplication hint:
+-error hint:
++]",
+@@
+-LOG:  pg_hint_plan:
++LOG:  YYYY-MM-DD HH:MM:SS:MSMSMS TMZ,THD000,TRACE,"PlanHint: [
+@@
+-BitmapScan(t1)
+-BitmapScan(t2)
+-BitmapScan(t3)
++ScanHint: t1[indexes: types:BitmapScan]
++ScanHint: t2[indexes: types:BitmapScan]
++ScanHint: t3[indexes: types:BitmapScan]
+@@
+-duplication hint:
+-error hint:
++]",
+@@
+-LOG:  pg_hint_plan:
++LOG:  YYYY-MM-DD HH:MM:SS:MSMSMS TMZ,THD000,TRACE,"PlanHint: [
+@@
+-SeqScan(t1)
++ScanHint: t1[indexes: types:SeqScan]
+@@
+-duplication hint:
+-error hint:
++]",
+@@
+-LOG:  pg_hint_plan:
++LOG:  YYYY-MM-DD HH:MM:SS:MSMSMS TMZ,THD000,TRACE,"PlanHint: [
+@@
+-SeqScan(t2)
++ScanHint: t2[indexes: types:SeqScan]
+@@
+-duplication hint:
+-error hint:
++]",
+@@
+-LOG:  pg_hint_plan:
++LOG:  YYYY-MM-DD HH:MM:SS:MSMSMS TMZ,THD000,TRACE,"PlanHint: [
+@@
+-SeqScan(t3)
++ScanHint: t3[indexes: types:SeqScan]
+@@
+-duplication hint:
+-error hint:
++]",
+@@
+-LOG:  available indexes for IndexScan(t1): my_incredible_index
+-LOG:  pg_hint_plan:
++LOG:  YYYY-MM-DD HH:MM:SS:MSMSMS TMZ,THD000,TRACE,"PlanHint: [
+@@
+-IndexScan(t1 my_incredible_index)
++ScanHint: t1[indexes:my_incredible_index types:IndexScan]
+@@
+-duplication hint:
+-error hint:
++]",
+@@
+-LOG:  pg_hint_plan:
++LOG:  YYYY-MM-DD HH:MM:SS:MSMSMS TMZ,THD000,TRACE,"PlanHint: [
+@@
+-IndexScan(t1)
++ScanHint: t1[indexes: types:IndexScan]
+@@
+-duplication hint:
+-error hint:
++]",
+@@
+-LOG:  available indexes for IndexScan(our_table_1_prt_p1_1): our_table_1_prt_p1_1_a_idx2 our_table_1_prt_p1_1_a_idx1 our_table_1_prt_p1_1_a_idx
+-LOG:  available indexes for IndexScan(our_table_1_prt_p1_2): our_table_1_prt_p1_2_a_idx2 our_table_1_prt_p1_2_a_idx1 our_table_1_prt_p1_2_a_idx
+-LOG:  available indexes for IndexScan(our_table_1_prt_p1_3): our_table_1_prt_p1_3_a_idx2 our_table_1_prt_p1_3_a_idx1 our_table_1_prt_p1_3_a_idx
+-LOG:  available indexes for IndexScan(our_table_1_prt_p1_4): our_table_1_prt_p1_4_a_idx2 our_table_1_prt_p1_4_a_idx1 our_table_1_prt_p1_4_a_idx
+-LOG:  pg_hint_plan:
++LOG:  YYYY-MM-DD HH:MM:SS:MSMSMS TMZ,THD000,TRACE,"PlanHint: [
+@@
+-IndexScan(t3 our_amazing_index)
++ScanHint: t3[indexes:our_amazing_index types:IndexScan]
+@@
+-duplication hint:
+-error hint:
++]",
+@@
+-LOG:  pg_hint_plan:
++LOG:  YYYY-MM-DD HH:MM:SS:MSMSMS TMZ,THD000,TRACE,"PlanHint: [
+@@
+-IndexScan(t3)
++ScanHint: t3[indexes: types:IndexScan]
+@@
+-duplication hint:
+-error hint:
++]",
+@@
+-LOG:  available indexes for IndexOnlyScan(t1): my_incredible_index
+-LOG:  pg_hint_plan:
++LOG:  YYYY-MM-DD HH:MM:SS:MSMSMS TMZ,THD000,TRACE,"PlanHint: [
+@@
+-IndexOnlyScan(t1 my_incredible_index)
++ScanHint: t1[indexes:my_incredible_index types:IndexOnlyScan]
+@@
+-duplication hint:
+-error hint:
++]",
+@@
+-LOG:  pg_hint_plan:
++LOG:  YYYY-MM-DD HH:MM:SS:MSMSMS TMZ,THD000,TRACE,"PlanHint: [
+@@
+-IndexOnlyScan(t1)
++ScanHint: t1[indexes: types:IndexOnlyScan]
+@@
+-duplication hint:
+-error hint:
++]",
+@@
+-LOG:  available indexes for IndexOnlyScan(t2): your_amazing_index
+-LOG:  pg_hint_plan:
++LOG:  YYYY-MM-DD HH:MM:SS:MSMSMS TMZ,THD000,TRACE,"PlanHint: [
+@@
+-IndexOnlyScan(t2 your_amazing_index)
++ScanHint: t2[indexes:your_amazing_index types:IndexOnlyScan]
+@@
+-duplication hint:
+-error hint:
++]",
+@@
+-LOG:  pg_hint_plan:
++LOG:  YYYY-MM-DD HH:MM:SS:MSMSMS TMZ,THD000,TRACE,"PlanHint: [
+@@
+-IndexOnlyScan(t2)
++ScanHint: t2[indexes: types:IndexOnlyScan]
+@@
+-duplication hint:
+-error hint:
++]",
+@@
+-LOG:  available indexes for IndexOnlyScan(our_table_1_prt_p1_1): our_table_1_prt_p1_1_a_idx2 our_table_1_prt_p1_1_a_idx1 our_table_1_prt_p1_1_a_idx
+-LOG:  available indexes for IndexOnlyScan(our_table_1_prt_p1_2): our_table_1_prt_p1_2_a_idx2 our_table_1_prt_p1_2_a_idx1 our_table_1_prt_p1_2_a_idx
+-LOG:  available indexes for IndexOnlyScan(our_table_1_prt_p1_3): our_table_1_prt_p1_3_a_idx2 our_table_1_prt_p1_3_a_idx1 our_table_1_prt_p1_3_a_idx
+-LOG:  available indexes for IndexOnlyScan(our_table_1_prt_p1_4): our_table_1_prt_p1_4_a_idx2 our_table_1_prt_p1_4_a_idx1 our_table_1_prt_p1_4_a_idx
+-LOG:  pg_hint_plan:
++LOG:  YYYY-MM-DD HH:MM:SS:MSMSMS TMZ,THD000,TRACE,"PlanHint: [
+@@
+-IndexOnlyScan(t3 our_amazing_index)
++ScanHint: t3[indexes:our_amazing_index types:IndexOnlyScan]
+@@
+-duplication hint:
+-error hint:
++]",
+@@
+-LOG:  pg_hint_plan:
++LOG:  YYYY-MM-DD HH:MM:SS:MSMSMS TMZ,THD000,TRACE,"PlanHint: [
+@@
+-IndexOnlyScan(t3)
++ScanHint: t3[indexes: types:IndexOnlyScan]
+@@
+-duplication hint:
+-error hint:
++]",
+@@
+-LOG:  available indexes for BitmapScan(t1): my_bitmap_index
+-LOG:  pg_hint_plan:
++LOG:  YYYY-MM-DD HH:MM:SS:MSMSMS TMZ,THD000,TRACE,"PlanHint: [
+@@
+-BitmapScan(t1 my_bitmap_index)
++ScanHint: t1[indexes:my_bitmap_index types:BitmapScan]
+@@
+-duplication hint:
+-error hint:
++]",
+@@
+-LOG:  pg_hint_plan:
++LOG:  YYYY-MM-DD HH:MM:SS:MSMSMS TMZ,THD000,TRACE,"PlanHint: [
+@@
+-BitmapScan(t1)
++ScanHint: t1[indexes: types:BitmapScan]
+@@
+-duplication hint:
+-error hint:
++]",
+@@
+-LOG:  available indexes for BitmapScan(t2): your_bitmap_index
+-LOG:  pg_hint_plan:
++LOG:  YYYY-MM-DD HH:MM:SS:MSMSMS TMZ,THD000,TRACE,"PlanHint: [
+@@
+-BitmapScan(t2 your_bitmap_index)
++ScanHint: t2[indexes:your_bitmap_index types:BitmapScan]
+@@
+-duplication hint:
+-error hint:
++]",
+@@
+-LOG:  pg_hint_plan:
++LOG:  YYYY-MM-DD HH:MM:SS:MSMSMS TMZ,THD000,TRACE,"PlanHint: [
+@@
+-BitmapScan(t2)
++ScanHint: t2[indexes: types:BitmapScan]
+@@
+-duplication hint:
+-error hint:
++]",
+@@
+-LOG:  available indexes for BitmapScan(our_table_1_prt_p1_1): our_table_1_prt_p1_1_a_idx3
+-LOG:  available indexes for BitmapScan(our_table_1_prt_p1_2): our_table_1_prt_p1_2_a_idx3
+-LOG:  available indexes for BitmapScan(our_table_1_prt_p1_3): our_table_1_prt_p1_3_a_idx3
+-LOG:  available indexes for BitmapScan(our_table_1_prt_p1_4): our_table_1_prt_p1_4_a_idx3
+-LOG:  pg_hint_plan:
++LOG:  YYYY-MM-DD HH:MM:SS:MSMSMS TMZ,THD000,TRACE,"PlanHint: [
+@@
+-BitmapScan(t3 our_bitmap_index)
++ScanHint: t3[indexes:our_bitmap_index types:BitmapScan]
+@@
+-duplication hint:
+-error hint:
++]",
+@@
+-LOG:  pg_hint_plan:
++LOG:  YYYY-MM-DD HH:MM:SS:MSMSMS TMZ,THD000,TRACE,"PlanHint: [
+@@
+-BitmapScan(t3)
++ScanHint: t3[indexes: types:BitmapScan]
+@@
+-duplication hint:
+-error hint:
++]",
+@@
+-LOG:  pg_hint_plan:
++LOG:  YYYY-MM-DD HH:MM:SS:MSMSMS TMZ,THD000,TRACE,"PlanHint: [
+@@
+-NoSeqScan(t1)
+-NoSeqScan(t2)
+-NoSeqScan(t3)
++ScanHint: t1[indexes: types:NoSeqScan]
++ScanHint: t2[indexes: types:NoSeqScan]
++ScanHint: t3[indexes: types:NoSeqScan]
+@@
+-duplication hint:
+-error hint:
++]",
+@@
+-LOG:  pg_hint_plan:
++LOG:  YYYY-MM-DD HH:MM:SS:MSMSMS TMZ,THD000,TRACE,"PlanHint: [
+@@
+-NoIndexScan(t1)
+-NoIndexScan(t2)
+-NoIndexScan(t3)
++ScanHint: t1[indexes: types:NoIndexScan]
++ScanHint: t2[indexes: types:NoIndexScan]
++ScanHint: t3[indexes: types:NoIndexScan]
+@@
+-duplication hint:
+-error hint:
++]",
+@@
+-LOG:  pg_hint_plan:
++LOG:  YYYY-MM-DD HH:MM:SS:MSMSMS TMZ,THD000,TRACE,"PlanHint: [
+@@
+-NoIndexOnlyScan(t1)
+-NoIndexOnlyScan(t2)
+-NoIndexOnlyScan(t3)
++ScanHint: t1[indexes: types:NoIndexOnlyScan]
++ScanHint: t2[indexes: types:NoIndexOnlyScan]
++ScanHint: t3[indexes: types:NoIndexOnlyScan]
+@@
+-duplication hint:
+-error hint:
++]",
+@@
+-LOG:  pg_hint_plan:
++LOG:  YYYY-MM-DD HH:MM:SS:MSMSMS TMZ,THD000,TRACE,"PlanHint: [
+@@
+-NoBitmapScan(t1)
+-NoBitmapScan(t2)
+-NoBitmapScan(t3)
++ScanHint: t1[indexes: types:NoBitmapScan]
++ScanHint: t2[indexes: types:NoBitmapScan]
++ScanHint: t3[indexes: types:NoBitmapScan]
+@@
+-duplication hint:
+-error hint:
++]",
+@@
+-LOG:  pg_hint_plan:
++LOG:  YYYY-MM-DD HH:MM:SS:MSMSMS TMZ,THD000,TRACE,"PlanHint: [
+@@
+-NoBitmapScan(t1)
++ScanHint: t1[indexes: types:NoIndexScan,NoIndexOnlyScan,NoBitmapScan]
+@@
+-duplication hint:
+-NoIndexScan(t1)
+-NoIndexOnlyScan(t1)
+-error hint:
++]",
+@@
+-LOG:  pg_hint_plan:
++LOG:  YYYY-MM-DD HH:MM:SS:MSMSMS TMZ,THD000,TRACE,"PlanHint: [
+@@
+-NoBitmapScan(t2)
++ScanHint: t2[indexes: types:NoIndexScan,NoIndexOnlyScan,NoBitmapScan]
+@@
+-duplication hint:
+-NoIndexScan(t2)
+-NoIndexOnlyScan(t2)
+-error hint:
++]",
+@@
+-LOG:  pg_hint_plan:
++LOG:  YYYY-MM-DD HH:MM:SS:MSMSMS TMZ,THD000,TRACE,"PlanHint: [
+@@
+-NoBitmapScan(t3)
++ScanHint: t3[indexes: types:NoIndexScan,NoIndexOnlyScan,NoBitmapScan]
+@@
+-duplication hint:
+-NoIndexScan(t3)
+-NoIndexOnlyScan(t3)
+-error hint:
++]",
+@@
+-LOG:  pg_hint_plan:
++LOG:  YYYY-MM-DD HH:MM:SS:MSMSMS TMZ,THD000,TRACE,"PlanHint: [
+@@
+-NoBitmapScan(t1)
++ScanHint: t1[indexes: types:NoSeqScan,NoIndexOnlyScan,NoBitmapScan]
+@@
+-duplication hint:
+-NoSeqScan(t1)
+-NoIndexOnlyScan(t1)
+-error hint:
++]",
+@@
++LOG:  YYYY-MM-DD HH:MM:SS:MSMSMS TMZ,THD000,ERROR,"Falling back to Postgres-based planner because no plan has been computed for required properties in GPORCA",
++YYYY-MM-DD HH:MM:SS:MSMSMS TMZ,THD000,ERROR,"Falling back to Postgres-based planner because no plan has been computed for required properties in GPORCA",
++INFO:  GPORCA failed to produce a plan, falling back to Postgres-based planner
++DETAIL:  Falling back to Postgres-based planner because no plan has been computed for required properties in GPORCA
+@@
+-LOG:  pg_hint_plan:
++LOG:  YYYY-MM-DD HH:MM:SS:MSMSMS TMZ,THD000,TRACE,"PlanHint: [
+@@
+-NoBitmapScan(t3)
++ScanHint: t3[indexes: types:NoSeqScan,NoIndexOnlyScan,NoBitmapScan]
+@@
+-duplication hint:
+-NoSeqScan(t3)
+-NoIndexOnlyScan(t3)
+-error hint:
++]",
+@@
+-LOG:  pg_hint_plan:
++LOG:  YYYY-MM-DD HH:MM:SS:MSMSMS TMZ,THD000,TRACE,"PlanHint: [
+@@
+-NoBitmapScan(t1)
++ScanHint: t1[indexes: types:NoSeqScan,NoIndexScan,NoBitmapScan]
+@@
+-duplication hint:
+-NoSeqScan(t1)
+-NoIndexScan(t1)
+-error hint:
++]",
+@@
+-LOG:  pg_hint_plan:
++LOG:  YYYY-MM-DD HH:MM:SS:MSMSMS TMZ,THD000,TRACE,"PlanHint: [
+@@
+-NoBitmapScan(t2)
++ScanHint: t2[indexes: types:NoSeqScan,NoIndexScan,NoBitmapScan]
+@@
+-duplication hint:
+-NoSeqScan(t2)
+-NoIndexScan(t2)
+-error hint:
++]",
+@@
+-LOG:  pg_hint_plan:
++LOG:  YYYY-MM-DD HH:MM:SS:MSMSMS TMZ,THD000,TRACE,"PlanHint: [
+@@
+-NoBitmapScan(t3)
++ScanHint: t3[indexes: types:NoSeqScan,NoIndexScan,NoBitmapScan]
+@@
+-duplication hint:
+-NoSeqScan(t3)
+-NoIndexScan(t3)
+-error hint:
++]",
+@@
+-LOG:  pg_hint_plan:
++LOG:  YYYY-MM-DD HH:MM:SS:MSMSMS TMZ,THD000,TRACE,"PlanHint: [
+@@
+-NoIndexOnlyScan(t1)
++ScanHint: t1[indexes: types:NoSeqScan,NoIndexScan,NoIndexOnlyScan]
+@@
+-duplication hint:
+-NoSeqScan(t1)
+-NoIndexScan(t1)
+-error hint:
++]",
+@@
+-LOG:  pg_hint_plan:
++LOG:  YYYY-MM-DD HH:MM:SS:MSMSMS TMZ,THD000,TRACE,"PlanHint: [
+@@
+-NoIndexOnlyScan(t2)
++ScanHint: t2[indexes: types:NoSeqScan,NoIndexScan,NoIndexOnlyScan]
+@@
+-duplication hint:
+-NoSeqScan(t2)
+-NoIndexScan(t2)
+-error hint:
++]",
+@@
+-LOG:  pg_hint_plan:
++LOG:  YYYY-MM-DD HH:MM:SS:MSMSMS TMZ,THD000,TRACE,"PlanHint: [
+@@
+-NoIndexOnlyScan(t3)
++ScanHint: t3[indexes: types:NoSeqScan,NoIndexScan,NoIndexOnlyScan]
+@@
+-duplication hint:
+-NoSeqScan(t3)
+-NoIndexScan(t3)
+-error hint:
++]",
+@@
+-LOG:  pg_hint_plan:
++LOG:  YYYY-MM-DD HH:MM:SS:MSMSMS TMZ,THD000,TRACE,"PlanHint: [
+@@
+-SeqScan(t1)
+-SeqScan(t2)
+-SeqScan(t3)
++ScanHint: t1[indexes: types:SeqScan]
++ScanHint: t2[indexes: types:SeqScan]
++ScanHint: t3[indexes: types:SeqScan]
+@@
+-duplication hint:
+-error hint:
++]",
+@@
+-LOG:  available indexes for IndexScan(t1): my_incredible_index
+-LOG:  available indexes for IndexScan(our_table_1_prt_p1_1): our_table_1_prt_p1_1_a_idx2 our_table_1_prt_p1_1_a_idx1 our_table_1_prt_p1_1_a_idx
+-LOG:  available indexes for IndexScan(our_table_1_prt_p1_2): our_table_1_prt_p1_2_a_idx2 our_table_1_prt_p1_2_a_idx1 our_table_1_prt_p1_2_a_idx
+-LOG:  available indexes for IndexScan(our_table_1_prt_p1_3): our_table_1_prt_p1_3_a_idx2 our_table_1_prt_p1_3_a_idx1 our_table_1_prt_p1_3_a_idx
+-LOG:  available indexes for IndexScan(our_table_1_prt_p1_4): our_table_1_prt_p1_4_a_idx2 our_table_1_prt_p1_4_a_idx1 our_table_1_prt_p1_4_a_idx
+-LOG:  pg_hint_plan:
++LOG:  YYYY-MM-DD HH:MM:SS:MSMSMS TMZ,THD000,TRACE,"PlanHint: [
+@@
+-IndexScan(t1 my_incredible_index)
+-IndexScan(t3 our_amazing_index)
++ScanHint: t1[indexes:my_incredible_index types:IndexScan]
++ScanHint: t3[indexes:our_amazing_index types:IndexScan]
+@@
+-duplication hint:
+-error hint:
++]",
+@@
+-LOG:  pg_hint_plan:
++LOG:  YYYY-MM-DD HH:MM:SS:MSMSMS TMZ,THD000,TRACE,"PlanHint: [
+@@
+-IndexScan(t1)
+-IndexScan(t3)
++ScanHint: t1[indexes: types:IndexScan]
++ScanHint: t3[indexes: types:IndexScan]
+@@
+-duplication hint:
+-error hint:
++]",
+@@
+-LOG:  available indexes for IndexOnlyScan(t1): my_incredible_index
+-LOG:  available indexes for IndexOnlyScan(t2): your_amazing_index
+-LOG:  available indexes for IndexOnlyScan(our_table_1_prt_p1_1): our_table_1_prt_p1_1_a_idx2 our_table_1_prt_p1_1_a_idx1 our_table_1_prt_p1_1_a_idx
+-LOG:  available indexes for IndexOnlyScan(our_table_1_prt_p1_2): our_table_1_prt_p1_2_a_idx2 our_table_1_prt_p1_2_a_idx1 our_table_1_prt_p1_2_a_idx
+-LOG:  available indexes for IndexOnlyScan(our_table_1_prt_p1_3): our_table_1_prt_p1_3_a_idx2 our_table_1_prt_p1_3_a_idx1 our_table_1_prt_p1_3_a_idx
+-LOG:  available indexes for IndexOnlyScan(our_table_1_prt_p1_4): our_table_1_prt_p1_4_a_idx2 our_table_1_prt_p1_4_a_idx1 our_table_1_prt_p1_4_a_idx
+-LOG:  pg_hint_plan:
++LOG:  YYYY-MM-DD HH:MM:SS:MSMSMS TMZ,THD000,TRACE,"PlanHint: [
+@@
+-IndexOnlyScan(t1 my_incredible_index)
+-IndexOnlyScan(t2 your_amazing_index)
+-IndexOnlyScan(t3 our_amazing_index)
++ScanHint: t1[indexes:my_incredible_index types:IndexOnlyScan]
++ScanHint: t2[indexes:your_amazing_index types:IndexOnlyScan]
++ScanHint: t3[indexes:our_amazing_index types:IndexOnlyScan]
+@@
+-duplication hint:
+-error hint:
++]",
+@@
+-LOG:  pg_hint_plan:
++LOG:  YYYY-MM-DD HH:MM:SS:MSMSMS TMZ,THD000,TRACE,"PlanHint: [
+@@
+-IndexOnlyScan(t1)
+-IndexOnlyScan(t2)
+-IndexOnlyScan(t3)
++ScanHint: t1[indexes: types:IndexOnlyScan]
++ScanHint: t2[indexes: types:IndexOnlyScan]
++ScanHint: t3[indexes: types:IndexOnlyScan]
+@@
+-duplication hint:
+-error hint:
++]",
+@@
+-LOG:  available indexes for BitmapScan(t1): my_bitmap_index
+-LOG:  available indexes for BitmapScan(t2): your_bitmap_index
+-LOG:  available indexes for BitmapScan(our_table_1_prt_p1_1): our_table_1_prt_p1_1_a_idx3
+-LOG:  available indexes for BitmapScan(our_table_1_prt_p1_2): our_table_1_prt_p1_2_a_idx3
+-LOG:  available indexes for BitmapScan(our_table_1_prt_p1_3): our_table_1_prt_p1_3_a_idx3
+-LOG:  available indexes for BitmapScan(our_table_1_prt_p1_4): our_table_1_prt_p1_4_a_idx3
+-LOG:  pg_hint_plan:
++LOG:  YYYY-MM-DD HH:MM:SS:MSMSMS TMZ,THD000,TRACE,"PlanHint: [
+@@
+-BitmapScan(t1 my_bitmap_index)
+-BitmapScan(t2 your_bitmap_index)
+-BitmapScan(t3 our_bitmap_index)
++ScanHint: t1[indexes:my_bitmap_index types:BitmapScan]
++ScanHint: t2[indexes:your_bitmap_index types:BitmapScan]
++ScanHint: t3[indexes:our_bitmap_index types:BitmapScan]
+@@
+-duplication hint:
+-error hint:
++]",
+@@
+-LOG:  pg_hint_plan:
++LOG:  YYYY-MM-DD HH:MM:SS:MSMSMS TMZ,THD000,TRACE,"PlanHint: [
+@@
+-BitmapScan(t1)
+-BitmapScan(t2)
+-BitmapScan(t3)
++ScanHint: t1[indexes: types:BitmapScan]
++ScanHint: t2[indexes: types:BitmapScan]
++ScanHint: t3[indexes: types:BitmapScan]
+@@
+-duplication hint:
+-error hint:
++]",
+@@
+-LOG:  pg_hint_plan:
++LOG:  YYYY-MM-DD HH:MM:SS:MSMSMS TMZ,THD000,TRACE,"PlanHint: [
+@@
+-SeqScan(t1)
+-SeqScan(t2)
+-SeqScan(t3)
++ScanHint: t1[indexes: types:SeqScan]
++ScanHint: t2[indexes: types:SeqScan]
++ScanHint: t3[indexes: types:SeqScan]
+@@
+-duplication hint:
+-error hint:
++]",
+@@
+-LOG:  available indexes for IndexScan(t1): my_incredible_index
+-LOG:  available indexes for IndexScan(our_table_1_prt_p1_1): our_table_1_prt_p1_1_a_idx2 our_table_1_prt_p1_1_a_idx1 our_table_1_prt_p1_1_a_idx
+-LOG:  available indexes for IndexScan(our_table_1_prt_p1_2): our_table_1_prt_p1_2_a_idx2 our_table_1_prt_p1_2_a_idx1 our_table_1_prt_p1_2_a_idx
+-LOG:  available indexes for IndexScan(our_table_1_prt_p1_3): our_table_1_prt_p1_3_a_idx2 our_table_1_prt_p1_3_a_idx1 our_table_1_prt_p1_3_a_idx
+-LOG:  available indexes for IndexScan(our_table_1_prt_p1_4): our_table_1_prt_p1_4_a_idx2 our_table_1_prt_p1_4_a_idx1 our_table_1_prt_p1_4_a_idx
+-LOG:  pg_hint_plan:
++LOG:  YYYY-MM-DD HH:MM:SS:MSMSMS TMZ,THD000,TRACE,"PlanHint: [
+@@
+-IndexScan(t1 my_incredible_index)
+-IndexScan(t3 our_amazing_index)
++ScanHint: t1[indexes:my_incredible_index types:IndexScan]
++ScanHint: t3[indexes:our_amazing_index types:IndexScan]
+@@
+-duplication hint:
+-error hint:
++]",
+@@
+-LOG:  pg_hint_plan:
++LOG:  YYYY-MM-DD HH:MM:SS:MSMSMS TMZ,THD000,TRACE,"PlanHint: [
+@@
+-IndexScan(t1)
+-IndexScan(t3)
++ScanHint: t1[indexes: types:IndexScan]
++ScanHint: t3[indexes: types:IndexScan]
+@@
+-duplication hint:
+-error hint:
++]",
+@@
+-LOG:  available indexes for IndexOnlyScan(t1): my_incredible_index
+-LOG:  available indexes for IndexOnlyScan(t2): your_amazing_index
+-LOG:  available indexes for IndexOnlyScan(our_table_1_prt_p1_1): our_table_1_prt_p1_1_a_idx2 our_table_1_prt_p1_1_a_idx1 our_table_1_prt_p1_1_a_idx
+-LOG:  available indexes for IndexOnlyScan(our_table_1_prt_p1_2): our_table_1_prt_p1_2_a_idx2 our_table_1_prt_p1_2_a_idx1 our_table_1_prt_p1_2_a_idx
+-LOG:  available indexes for IndexOnlyScan(our_table_1_prt_p1_3): our_table_1_prt_p1_3_a_idx2 our_table_1_prt_p1_3_a_idx1 our_table_1_prt_p1_3_a_idx
+-LOG:  available indexes for IndexOnlyScan(our_table_1_prt_p1_4): our_table_1_prt_p1_4_a_idx2 our_table_1_prt_p1_4_a_idx1 our_table_1_prt_p1_4_a_idx
+-LOG:  pg_hint_plan:
++LOG:  YYYY-MM-DD HH:MM:SS:MSMSMS TMZ,THD000,TRACE,"PlanHint: [
+@@
+-IndexOnlyScan(t1 my_incredible_index)
+-IndexOnlyScan(t2 your_amazing_index)
+-IndexOnlyScan(t3 our_amazing_index)
++ScanHint: t1[indexes:my_incredible_index types:IndexOnlyScan]
++ScanHint: t2[indexes:your_amazing_index types:IndexOnlyScan]
++ScanHint: t3[indexes:our_amazing_index types:IndexOnlyScan]
+@@
+-duplication hint:
+-error hint:
++]",
+@@
+-LOG:  pg_hint_plan:
++LOG:  YYYY-MM-DD HH:MM:SS:MSMSMS TMZ,THD000,TRACE,"PlanHint: [
+@@
+-IndexOnlyScan(t1)
+-IndexOnlyScan(t2)
+-IndexOnlyScan(t3)
++ScanHint: t1[indexes: types:IndexOnlyScan]
++ScanHint: t2[indexes: types:IndexOnlyScan]
++ScanHint: t3[indexes: types:IndexOnlyScan]
+@@
+-duplication hint:
+-error hint:
++]",
+@@
+-LOG:  available indexes for BitmapScan(t1): my_bitmap_index
+-LOG:  available indexes for BitmapScan(t2): your_bitmap_index
+-LOG:  available indexes for BitmapScan(our_table_1_prt_p1_1): our_table_1_prt_p1_1_a_idx3
+-LOG:  available indexes for BitmapScan(our_table_1_prt_p1_2): our_table_1_prt_p1_2_a_idx3
+-LOG:  available indexes for BitmapScan(our_table_1_prt_p1_3): our_table_1_prt_p1_3_a_idx3
+-LOG:  available indexes for BitmapScan(our_table_1_prt_p1_4): our_table_1_prt_p1_4_a_idx3
+-LOG:  pg_hint_plan:
++LOG:  YYYY-MM-DD HH:MM:SS:MSMSMS TMZ,THD000,TRACE,"PlanHint: [
+@@
+-BitmapScan(t1 my_bitmap_index)
+-BitmapScan(t2 your_bitmap_index)
+-BitmapScan(t3 our_bitmap_index)
++ScanHint: t1[indexes:my_bitmap_index types:BitmapScan]
++ScanHint: t2[indexes:your_bitmap_index types:BitmapScan]
++ScanHint: t3[indexes:our_bitmap_index types:BitmapScan]
+@@
+-duplication hint:
+-error hint:
++]",
+@@
+-LOG:  pg_hint_plan:
++LOG:  YYYY-MM-DD HH:MM:SS:MSMSMS TMZ,THD000,TRACE,"PlanHint: [
+@@
+-BitmapScan(t1)
+-BitmapScan(t2)
+-BitmapScan(t3)
++ScanHint: t1[indexes: types:BitmapScan]
++ScanHint: t2[indexes: types:BitmapScan]
++ScanHint: t3[indexes: types:BitmapScan]
+@@
+-duplication hint:
+-error hint:
++]",
+@@
++LOG:  YYYY-MM-DD HH:MM:SS:MSMSMS TMZ,THD000,NOTICE,"Operator Unsupported plan hint: TidScan not supported",
++INFO:  GPORCA failed to produce a plan, falling back to Postgres-based planner
++DETAIL:  Operator Unsupported plan hint: TidScan not supported
+@@
++LOG:  YYYY-MM-DD HH:MM:SS:MSMSMS TMZ,THD000,NOTICE,"Operator Unsupported plan hint: NoTidScan not supported",
++INFO:  GPORCA failed to produce a plan, falling back to Postgres-based planner
++DETAIL:  Operator Unsupported plan hint: NoTidScan not supported
+@@
++LOG:  YYYY-MM-DD HH:MM:SS:MSMSMS TMZ,THD000,NOTICE,"Operator Unsupported plan hint: IndexScanRegexp not supported",
++INFO:  GPORCA failed to produce a plan, falling back to Postgres-based planner
++DETAIL:  Operator Unsupported plan hint: IndexScanRegexp not supported
+@@
++LOG:  YYYY-MM-DD HH:MM:SS:MSMSMS TMZ,THD000,NOTICE,"Operator Unsupported plan hint: IndexOnlyScanRegexp not supported",
++INFO:  GPORCA failed to produce a plan, falling back to Postgres-based planner
++DETAIL:  Operator Unsupported plan hint: IndexOnlyScanRegexp not supported
+@@
++LOG:  YYYY-MM-DD HH:MM:SS:MSMSMS TMZ,THD000,NOTICE,"Operator Unsupported plan hint: BitmapScanRegexp not supported",
++INFO:  GPORCA failed to produce a plan, falling back to Postgres-based planner
++DETAIL:  Operator Unsupported plan hint: BitmapScanRegexp not supported
+@@
+-LOG:  pg_hint_plan:
++LOG:  YYYY-MM-DD HH:MM:SS:MSMSMS TMZ,THD000,TRACE,"PlanHint: [
+@@
+-duplication hint:
+-error hint:
+-SeqScan()
++]",
+@@
+-LOG:  pg_hint_plan:
++LOG:  YYYY-MM-DD HH:MM:SS:MSMSMS TMZ,THD000,TRACE,"PlanHint: [
+@@
+-NoIndexScan(t1)
++ScanHint: t1[indexes: types:SeqScan,NoIndexScan]
+@@
+-duplication hint:
+-SeqScan(t1)
+-error hint:
++]",
+@@
+-LOG:  pg_hint_plan:
++LOG:  YYYY-MM-DD HH:MM:SS:MSMSMS TMZ,THD000,TRACE,"PlanHint: [
+@@
+-SeqScan(t1)
++ScanHint: t1[indexes: types:SeqScan,NoIndexScan]
+@@
+-duplication hint:
+-NoIndexScan(t1)
+-error hint:
++]",
+@@
+-LOG:  pg_hint_plan:
++LOG:  YYYY-MM-DD HH:MM:SS:MSMSMS TMZ,THD000,TRACE,"PlanHint: [
+@@
+-SeqScan(t1)
+-SeqScan(t2)
++ScanHint: t1[indexes: types:SeqScan]
++ScanHint: t2[indexes: types:SeqScan]
+@@
+-duplication hint:
+-error hint:
++]",
+@@
+-LOG:  pg_hint_plan:
++LOG:  YYYY-MM-DD HH:MM:SS:MSMSMS TMZ,THD000,TRACE,"PlanHint: [
+@@
+-SeqScan(t1)
+-SeqScan(t2)
++ScanHint: t1[indexes: types:SeqScan]
++ScanHint: t2[indexes: types:SeqScan]
+@@
+-duplication hint:
+-error hint:
++]",
+@@
+-LOG:  pg_hint_plan:
++LOG:  YYYY-MM-DD HH:MM:SS:MSMSMS TMZ,THD000,TRACE,"PlanHint: [
+@@
+-SeqScan(y)
+-NoIndexScan(z)
+-duplication hint:
+-error hint:
++ScanHint: y[indexes: types:SeqScan]
++ScanHint: z[indexes: types:NoIndexScan]
++]",

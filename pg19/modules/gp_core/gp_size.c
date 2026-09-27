@@ -41,20 +41,30 @@
  * which is what pg_dump has to write for a restore to put each node's
  * directory under it again.
  *
+ * And Cloudberry's own: cbdb_relation_size(), the sizes of many relations
+ * at once, the segments asked once for them all; and
+ * gp_tablespace_location(), each node's location of a tablespace.
+ *
  *-------------------------------------------------------------------------
  */
 #include "postgres.h"
 
+#include "access/relation.h"
 #include "catalog/namespace.h"
+#include "catalog/pg_class.h"
 #include "catalog/pg_proc.h"
 #include "catalog/pg_type.h"
+#include "common/relpath.h"
 #include "fmgr.h"
+#include "funcapi.h"
 #include "nodes/nodeFuncs.h"
+#include "utils/array.h"
 #include "utils/builtins.h"
 #include "utils/fmgroids.h"
 #include "utils/fmgrprotos.h"
 #include "utils/inval.h"
 #include "utils/lsyscache.h"
+#include "utils/rel.h"
 #include "utils/syscache.h"
 
 #include "gp_cluster.h"
@@ -327,4 +337,140 @@ gp_tablespace_location(PG_FUNCTION_ARGS)
 		PG_RETURN_TEXT_P(cstring_to_text(path));
 	}
 	PG_RETURN_DATUM(answer);
+}
+
+PG_FUNCTION_INFO_V1(gp_tablespace_segment_location);
+
+/*
+ * gp_internal.tablespace_segment_location(oid): each segment's location of
+ * the tablespace, as gp_internal.tablespace_location() says it there, with
+ * the segment's content id -- Cloudberry's gp_tablespace_segment_location(),
+ * EXECUTE ON ALL SEGMENTS.  None from the coordinator, which
+ * gp_tablespace_location() asks for its own.
+ */
+Datum
+gp_tablespace_segment_location(PG_FUNCTION_ARGS)
+{
+	ReturnSetInfo *rsinfo = (ReturnSetInfo *) fcinfo->resultinfo;
+	Datum		values[2];
+	bool		nulls[2] = {false, false};
+
+	if (GpDispatchFunctionToSegments(fcinfo))
+		return (Datum) 0;
+
+	InitMaterializedSRF(fcinfo, 0);
+	if (GpClusterContentId() < 0)
+		return (Datum) 0;
+	values[0] = Int32GetDatum(GpClusterContentId());
+	values[1] = DirectFunctionCall1(gp_tablespace_location, PG_GETARG_DATUM(0));
+	tuplestore_putvalues(rsinfo->setResult, rsinfo->setDesc, values, nulls);
+	return (Datum) 0;
+}
+
+PG_FUNCTION_INFO_V1(gp_cbdb_relation_size);
+
+/*
+ * cbdb_relation_size(oid[], text): the size of a fork of each relation, the
+ * cluster's, in the array's order -- Cloudberry's (dbsize.c), which asks
+ * every segment once for them all where pg_relation_size() asks for each.
+ * A relation that is gone is 0.  A foreign table, an external table among
+ * them, has no files and its wrapper no size to give: 0, with Cloudberry's
+ * WARNING, and the segments are not asked.
+ */
+Datum
+gp_cbdb_relation_size(PG_FUNCTION_ARGS)
+{
+	ArrayType  *array = PG_GETARG_ARRAYTYPE_P(0);
+	text	   *forkname = PG_GETARG_TEXT_PP(1);
+	ReturnSetInfo *rsinfo = (ReturnSetInfo *) fcinfo->resultinfo;
+	Datum	   *oids;
+	int			n;
+	int64	   *sizes;
+	StringInfoData asked;
+	int			nasked = 0;
+
+	if (array_contains_nulls(array))
+		ereport(ERROR,
+				(errcode(ERRCODE_ARRAY_ELEMENT_ERROR),
+				 errmsg("cannot work with arrays containing NULLs")));
+	/* refuse a fork of no name before anything */
+	(void) forkname_to_number(text_to_cstring(forkname));
+
+	deconstruct_array_builtin(array, OIDOID, &oids, NULL, &n);
+	sizes = palloc0_array(int64, n);
+	initStringInfo(&asked);
+
+	for (int i = 0; i < n; i++)
+	{
+		Oid			relid = DatumGetObjectId(oids[i]);
+		Relation	rel = try_relation_open(relid, AccessShareLock);
+
+		if (rel == NULL)
+			continue;
+		if (rel->rd_rel->relkind == RELKIND_FOREIGN_TABLE)
+		{
+			ereport(WARNING,
+					(errmsg("skipping \"%s\" --- cannot calculate this foreign table size",
+							RelationGetRelationName(rel))));
+			relation_close(rel, AccessShareLock);
+			continue;
+		}
+		/* this node's, the relation held open so that it is still there */
+		sizes[i] = DatumGetInt64(DirectFunctionCall2(pg_relation_size,
+													 ObjectIdGetDatum(relid),
+													 PointerGetDatum(forkname)));
+		relation_close(rel, AccessShareLock);
+
+		/* the segments are asked of each relation once */
+		for (int j = 0; j < i; j++)
+			if (DatumGetObjectId(oids[j]) == relid)
+				goto asked_already;
+		appendStringInfo(&asked, "%s%u", nasked++ > 0 ? "," : "", relid);
+asked_already:
+		;
+	}
+
+	/* and every segment's, each segment's as one line of "oid size" pairs */
+	if (nasked > 0 && !GpClusterIsSingleNode() &&
+		GpClusterBackendRole() == GP_ROLE_DISPATCH)
+	{
+		int			nsegments = GpClusterSegmentCount();
+		char	  **values = palloc0_array(char *, nsegments);
+
+		GpDispatchQueryFirstValues(psprintf("SELECT pg_catalog.string_agg(reloid || ' ' || size, ' ')"
+											" FROM pg_catalog.cbdb_relation_size('{%s}'::pg_catalog.oid[], %s)",
+											asked.data,
+											quote_literal_cstr(text_to_cstring(forkname))),
+								   -1, values);
+		for (int s = 0; s < nsegments; s++)
+		{
+			char	   *p = values[s];
+
+			while (p != NULL && *p != '\0')
+			{
+				char	   *end;
+				Oid			relid = (Oid) strtoul(p, &end, 10);
+				int64		size = strtoi64(end, &end, 10);
+
+				for (int i = 0; i < n; i++)
+					if (DatumGetObjectId(oids[i]) == relid)
+						sizes[i] += size;
+				p = end;
+				while (*p == ' ')
+					p++;
+			}
+		}
+	}
+
+	InitMaterializedSRF(fcinfo, 0);
+	for (int i = 0; i < n; i++)
+	{
+		Datum		values[2];
+		bool		nulls[2] = {false, false};
+
+		values[0] = oids[i];
+		values[1] = Int64GetDatum(sizes[i]);
+		tuplestore_putvalues(rsinfo->setResult, rsinfo->setDesc, values, nulls);
+	}
+	return (Datum) 0;
 }

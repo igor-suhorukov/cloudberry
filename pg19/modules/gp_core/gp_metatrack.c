@@ -677,10 +677,90 @@ truncate_(TruncateStmt *stmt)
 	}
 }
 
+/*
+ * The tables REINDEX SCHEMA, DATABASE or SYSTEM goes through, as PostgreSQL
+ * 19's ReindexMultipleTables() chooses them: the tables and materialized
+ * views of the schema, of the database less its catalogs, or the catalogs --
+ * not another session's temporary ones, nor a shared one the user may not
+ * maintain, nor a catalog with CONCURRENTLY.
+ */
+static List *
+reindexed_tables(ReindexStmt *stmt)
+{
+	List	   *result = NIL;
+	bool		concurrently = false;
+	ScanKeyData key[1];
+	int			nkeys = 0;
+	Relation	pg_class;
+	TableScanDesc scan;
+	HeapTuple	tuple;
+
+	foreach_node(DefElem, opt, stmt->params)
+		if (strcmp(opt->defname, "concurrently") == 0)
+			concurrently = defGetBoolean(opt);
+
+	if (stmt->kind == REINDEX_OBJECT_SCHEMA)
+	{
+		Oid			nspid = get_namespace_oid(stmt->name, true);
+
+		if (!OidIsValid(nspid))
+			return NIL;
+		ScanKeyInit(&key[0], Anum_pg_class_relnamespace, BTEqualStrategyNumber,
+					F_OIDEQ, ObjectIdGetDatum(nspid));
+		nkeys = 1;
+	}
+
+	pg_class = table_open(RelationRelationId, AccessShareLock);
+	scan = table_beginscan_catalog(pg_class, nkeys, key);
+	while ((tuple = heap_getnext(scan, ForwardScanDirection)) != NULL)
+	{
+		Form_pg_class form = (Form_pg_class) GETSTRUCT(tuple);
+		bool		catalog = IsCatalogRelationOid(form->oid);
+
+		if ((form->relkind != RELKIND_RELATION && form->relkind != RELKIND_MATVIEW) ||
+			(form->relpersistence == RELPERSISTENCE_TEMP &&
+			 !isTempNamespace(form->relnamespace)) ||
+			(stmt->kind == REINDEX_OBJECT_SYSTEM && !catalog) ||
+			(stmt->kind == REINDEX_OBJECT_DATABASE && catalog) ||
+			(form->relisshared &&
+			 pg_class_aclcheck(form->oid, GetUserId(), ACL_MAINTAIN) != ACLCHECK_OK) ||
+			(concurrently && catalog))
+			continue;
+		result = lappend_oid(result, form->oid);
+	}
+	table_endscan(scan);
+	table_close(pg_class, AccessShareLock);
+	return result;
+}
+
+/*
+ * Each index a REINDEX rebuilt, as Cloudberry's reindex_index() records it:
+ * of the index, of the table's, and of every table REINDEX SCHEMA, DATABASE
+ * or SYSTEM went through.
+ */
 static void
 reindex(ReindexStmt *stmt)
 {
 	Oid			relid;
+
+	if (stmt->kind == REINDEX_OBJECT_SCHEMA ||
+		stmt->kind == REINDEX_OBJECT_SYSTEM ||
+		stmt->kind == REINDEX_OBJECT_DATABASE)
+	{
+		foreach_oid(table, reindexed_tables(stmt))
+		{
+			Relation	rel = try_relation_open(table, AccessShareLock);
+			List	   *indexes;
+
+			if (rel == NULL)
+				continue;
+			indexes = RelationGetIndexList(rel);
+			relation_close(rel, AccessShareLock);
+			foreach_oid(index, indexes)
+				record_relation(index, "VACUUM", "REINDEX");
+		}
+		return;
+	}
 
 	if (stmt->relation == NULL)
 		return;

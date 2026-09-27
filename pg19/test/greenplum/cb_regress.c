@@ -41,7 +41,11 @@
 #include "postgres.h"
 
 #include <stdlib.h>
+#include <netinet/in.h>
+#include <netinet/tcp.h>
+#include <sys/socket.h>
 
+#include "access/commit_ts.h"
 #include "access/htup_details.h"
 #include "access/transam.h"
 #include "access/xact.h"
@@ -52,11 +56,26 @@
 #include "storage/lwlock.h"
 #include "utils/guc.h"
 #include "utils/timestamp.h"
+#include "utils/tuplestore.h"
 
 PG_MODULE_MAGIC_EXT(
 					.name = "cb_regress",
 					.version = "1.0"
 );
+
+/* gp.debug_burn_xids: test_consume_xids() takes XIDs fast; see there */
+static bool debug_burn_xids = false;
+
+void		_PG_init(void);
+
+void
+_PG_init(void)
+{
+	DefineCustomBoolVariable("gp.debug_burn_xids",
+							 "Consume XIDs faster, in test_consume_xids(), as Cloudberry's debug_burn_xids does.",
+							 NULL, &debug_burn_xids, false, PGC_USERSET, 0,
+							 NULL, NULL, NULL);
+}
 
 typedef bool (*deny_allows_fn) (const char *rolename, TimestampTz when);
 typedef bool (*queue_in_sync_fn) (const char *queuename);
@@ -100,11 +119,135 @@ checkResourceQueueMemoryLimits(PG_FUNCTION_ARGS)
 	PG_RETURN_BOOL(in_sync(PG_GETARG_CSTRING(0)));
 }
 
+typedef void (*reset_gang_fn) (void);
+
+PG_FUNCTION_INFO_V1(cleanupAllGangs);
+
+/*
+ * cleanupAllGangs() -> bool: the session's connections to the segments
+ * closed, which gp_core's dispatcher makes again as the next statement
+ * needs them -- Cloudberry's DisconnectAndDestroyAllGangs().  On the
+ * coordinator alone, as there.
+ */
+Datum
+cleanupAllGangs(PG_FUNCTION_ARGS)
+{
+	static reset_gang_fn reset = NULL;
+	const char *role = GetConfigOption("gp.role", true, false);
+
+	if (role == NULL || strcmp(role, "dispatch") != 0)
+		elog(ERROR, "cleanupAllGangs can only be executed on master");
+	if (reset == NULL)
+		reset = (reset_gang_fn)
+			load_external_function("$libdir/gp_core", "GpDispatchResetGang",
+								   true, NULL);
+	reset();
+	PG_RETURN_BOOL(true);
+}
+
+typedef int (*gang_sockets_fn) (int *contents, bool *writers, int *sockets,
+								int max);
+
+/* One socket option of a connection to a segment, as an int. */
+static int
+socket_option(int fd, int level, int option, const char *name)
+{
+	int			value;
+	socklen_t	size = sizeof(value);
+
+	if (getsockopt(fd, level, option, &value, &size) < 0)
+		elog(ERROR, "getsockopt(%s) failed: %m", name);
+	return value;
+}
+
+PG_FUNCTION_INFO_V1(gp_keepalives_check);
+
+/*
+ * gp_keepalives_check() -> setof (qe_id, is_writer, keepalives_enabled,
+ * keepalives_interval, keepalives_count, keepalives_idle): the TCP
+ * keepalives each of the session's connections to the segments has, as its
+ * socket says -- what gp.dispatch_keepalives_* asked of it.  A connection
+ * over a Unix socket has no TCP options, and fails the call, as
+ * Cloudberry's does.  The connections are gp_core's dispatcher's
+ * (GpDispatchGangSockets()), a writer on each segment and the readers the
+ * session keeps, where Cloudberry's walks its gangs' free lists.
+ */
+Datum
+gp_keepalives_check(PG_FUNCTION_ARGS)
+{
+	static gang_sockets_fn gang_sockets = NULL;
+	ReturnSetInfo *rsinfo = (ReturnSetInfo *) fcinfo->resultinfo;
+	int			max = 1024;
+	int		   *contents = palloc_array(int, max);
+	bool	   *writers = palloc_array(bool, max);
+	int		   *sockets = palloc_array(int, max);
+	int			n;
+
+	if (gang_sockets == NULL)
+		gang_sockets = (gang_sockets_fn)
+			load_external_function("$libdir/gp_core", "GpDispatchGangSockets",
+								   true, NULL);
+	InitMaterializedSRF(fcinfo, 0);
+
+	n = gang_sockets(contents, writers, sockets, max);
+	for (int i = 0; i < n; i++)
+	{
+		Datum		values[6];
+		bool		nulls[6] = {false};
+
+		values[0] = Int16GetDatum(contents[i]);
+		values[1] = BoolGetDatum(writers[i]);
+		values[2] = BoolGetDatum(socket_option(sockets[i], SOL_SOCKET,
+											   SO_KEEPALIVE,
+											   "SO_KEEPALIVE") > 0);
+		values[3] = Int32GetDatum(socket_option(sockets[i], IPPROTO_TCP,
+												TCP_KEEPINTVL,
+												"TCP_KEEPINTVL"));
+		values[4] = Int32GetDatum(socket_option(sockets[i], IPPROTO_TCP,
+												TCP_KEEPCNT,
+												"TCP_KEEPCNT"));
+		values[5] = Int32GetDatum(socket_option(sockets[i], IPPROTO_TCP,
+												TCP_KEEPIDLE,
+												"TCP_KEEPIDLE"));
+		tuplestore_putvalues(rsinfo->setResult, rsinfo->setDesc, values,
+							 nulls);
+	}
+	return (Datum) 0;
+}
+
 PG_FUNCTION_INFO_V1(test_consume_xids);
 
 /*
+ * Under gp.debug_burn_xids, the next transaction ID made the last of its
+ * page but one, as Cloudberry's GetNewTransactionId() makes it under its
+ * debug_burn_xids: what is skipped is a stretch of IDs that are like one
+ * another, and each page's first IDs are still made one at a time, so the
+ * pages of the SLRUs that follow the IDs are made as they are reached.
+ * The page is pg_subtrans's, the smallest of those PostgreSQL 19 makes as
+ * the IDs reach them -- 2,048 IDs of 8K, where Cloudberry's steps are
+ * 4,096 of its 32K pages -- but for pg_commit_ts's, which a setting turns
+ * on and under which nothing is skipped.
+ */
+static void
+burn_xids(void)
+{
+	const uint64 per_page = BLCKSZ / sizeof(TransactionId);
+	uint64		next;
+	uint64		r;
+
+	if (!debug_burn_xids || track_commit_timestamp)
+		return;
+	LWLockAcquire(XidGenLock, LW_EXCLUSIVE);
+	next = U64FromFullTransactionId(TransamVariables->nextXid);
+	r = next % per_page;
+	if (r > 1 && r < per_page - 1)
+		TransamVariables->nextXid = FullTransactionIdFromU64(next + per_page - r - 1);
+	LWLockRelease(XidGenLock);
+}
+
+/*
  * test_consume_xids(int4): take that many transaction IDs, fast, to test
- * wraparound (autovacuum).
+ * wraparound (autovacuum) -- faster still under gp.debug_burn_xids.
  */
 Datum
 test_consume_xids(PG_FUNCTION_ARGS)
@@ -123,7 +266,10 @@ test_consume_xids(PG_FUNCTION_ARGS)
 		targetxid++;
 
 	while (TransactionIdPrecedes(xid, targetxid))
+	{
 		xid = XidFromFullTransactionId(GetNewTransactionId(true));
+		burn_xids();
+	}
 
 	PG_RETURN_VOID();
 }

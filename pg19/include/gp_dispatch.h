@@ -377,6 +377,15 @@ extern void GpDispatchRaiseKeptError(void);
 extern void GpDispatchDropLostTempTables(void);
 
 /*
+ * The session's connections to the segments, for a test to look at what
+ * the dispatcher set on them: each one's content, whether it is its
+ * segment's writer or a reader, and its socket, at most max of them -- how
+ * many.  None before the session's first dispatch.
+ */
+extern int	GpDispatchGangSockets(int *contents, bool *writers, int *sockets,
+								  int max);
+
+/*
  * What every connection gp_core opens to another node carries besides its
  * own options: the password file (gp.internal_passfile), and the TLS of
  * certificates between nodes (gp.internal_sslmode, sslcert, sslkey,

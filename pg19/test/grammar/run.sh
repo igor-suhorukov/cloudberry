@@ -1265,6 +1265,21 @@ is "with an even count of arguments, the last is its default" \
 is "and NULL matches NULL, which = never does" \
    "SELECT decode(null, null, true, false), decode(NULL::int, 1, 100, NULL, 200, 300);" "t|200"
 
+# decode_expr's: an operand of no type yet is text, as a CASE's operand is in
+# PostgreSQL's parse analysis and so in Cloudberry's DECODE, where written
+# into each arm it would take the type of what it is compared with.
+at "DECODE's operand of no type yet is text, as a CASE's is" \
+   "SELECT decode(null, 1, 'null = 1', 'null != 1');" \
+   'operator does not exist: text = integer' "1,"
+is "and a quoted one compares as text" \
+   "SELECT decode('abc', 'abc', 'same', 'other'), CASE 'x' WHEN IS NOT DISTINCT FROM 'x' THEN 1 END;" "same|1"
+
+# decode_expr's too: fewer than two arguments are no call Cloudberry's grammar
+# has -- its DECODE takes three or more, and decode(text, text) two.
+at "a DECODE of one argument is Cloudberry's syntax error, at its parenthesis" \
+   "SELECT decode(2);" 'syntax error at or near ")"' ");"
+at "and of none" "SELECT decode() FROM (VALUES (1)) v(a);" 'syntax error at or near ")"' ") FROM"
+
 is "PostgreSQL's two-argument decode() is left to be PostgreSQL's" \
    "SELECT gp_sql.desugar('SELECT decode(''aGk='', ''base64'')') = 'SELECT decode(''aGk='', ''base64'')',
            convert_from(decode('aGk=', 'base64'), 'UTF8');" "t|hi"

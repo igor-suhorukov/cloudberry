@@ -350,6 +350,11 @@ of the core series, O13 to O21, O23 and O32:
   which is not immutable on the segments, with the values its parameters
   and subqueries have on the coordinator, and makes the size functions the
   cluster's, as Cloudberry's are;
+- `pg_hint_plan`: Cloudberry's fork of pg_hint_plan, 1.3.9, whose hints
+  reach both planners -- ORCA's through gp_orca's `plan_hint_hook` -- with
+  PostgreSQL 19's join search copied for it (`core.c`, made by
+  `gen_core.py`) and the enable_* settings a hint sets copied into each
+  relation's `pgs_mask`; a session LOADs it, as Cloudberry's tests do;
 - tablespaces, every node's: each node's directory of a tablespace is the
   one of its dbid under the location, as Cloudberry's is, which PostgreSQL
   asks `gp_core` for through O32 -- as a node runs CREATE TABLESPACE, and as

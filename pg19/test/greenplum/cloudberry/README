@@ -146,11 +146,23 @@ brin_ao, brin_aocs (planner, orca)  under the planner, the plans the test
 case_gp  IS NOT DISTINCT FROM, and the CASE form, printed as the searched
   CASE the port's rewrite makes of them (see the singlenode suite's README).
 
+cbdb_db_size_functions  the size of a heap's free space map, which a
+  table of 1,000 rows has on 8K pages, the port's, 24 kB on each segment,
+  and not on Cloudberry's 32K ones, which its rows fit on one of.
+
 create_extension_fail  the context of the error the fault
   create_function_fail raises: a segment runs the script of the CREATE
   EXTENSION it was sent, so its CREATE FUNCTION fails inside the script,
   where Cloudberry's coordinator runs the script and dispatches each of its
   statements alone.
+
+decode_expr  DECODE, which is no keyword of the port's: a table, a
+  database, a column, a constraint, an index and a partition named decode
+  are made, where Cloudberry's grammar, which reserves the word, refuses
+  them -- and the constraint and the index then find the table.  A view's
+  DECODE printed as the searched CASE the port makes of it, as case_gp's
+  is.  PostgreSQL 19's words for a call no function or operator takes, and
+  an ORDER BY of text in the C locale, which puts "APJ" before "Americas".
 
 qp_misc (orca)  the lines ORCA's fallback trace prints where Cloudberry's
   expected output has none, and nothing else: the test sets
@@ -236,6 +248,12 @@ gp_aggregates (planner, orca)  PostgreSQL 19's words for a call no
   names, whose NOTICE Cloudberry's two stages raise; ORCA's two stages
   raise it as Cloudberry's do.
 
+gp_array_agg (orca)  ORCA's fallback trace -- a function in FROM,
+  several DISTINCT aggregates, a column of a non-default collation -- which
+  Cloudberry's expected output for its ORCA, gp_array_agg_optimizer.out,
+  prints as the port's ORCA does, and the one the suite compares, the
+  planner's, does not.
+
 gp_backend_info  the backends of a query that needs a reader gang, and
   the singleton reader on the coordinator: the port's gather reads each
   table through the segment's one connection, and joins them here, so
@@ -316,6 +334,19 @@ join_gp  the NOTICE of test_print_prefetch_joinqual: where a join's outer
   which gp_debug_numsegments makes, is read there alone, and answers as
   Cloudberry's does.
 
+joinhints (planner, orca)  a join method hint for the join a NOT IN makes
+  in Cloudberry's planner, a left anti-semi join: PostgreSQL 19's planner
+  keeps NOT IN a subplan, so the hint finds no join and pg_hint_plan
+  reports it not used -- under ORCA too, which falls back for a merge join
+  of one, as Cloudberry's does.  Under the planner the CTE of its query is
+  inlined, as PostgreSQL has done since 12, so the Leading hint of the
+  CTE's joins and the query's are two at one level, which pg_hint_plan
+  refuses as conflicting, where Cloudberry's planner plans the CTE as a
+  query of its own and uses both.  Under ORCA, ORCA's trace of the hints it
+  read, which Cloudberry's expected output for its ORCA,
+  joinhints_optimizer.out, prints as the port's ORCA does, where the one
+  the suite compares, the planner's, has pg_hint_plan's report.
+
 matview_ao  psql's \dm, whose title PostgreSQL 19's psql gives as "List of
   materialized views" where Cloudberry's psql says "List of relations".
 
@@ -389,6 +420,27 @@ partition_storage, uao_ddl_gp_partition_tables_column,
   pg_class.reloptions and gp_ao keeps in a label of its own: its reloptions
   and psql's Options: footer are empty.
 
+percentile  median(), a plain aggregate of the port's (gp_median.c): a
+  view prints it as median((a)::double precision), where Cloudberry's
+  grammar makes MEDIAN(a) an ordered-set aggregate and prints it so; a
+  median(a) OVER (...), which Cloudberry's grammar refuses, is taken, and
+  fails for its GROUP BY; and median('text') finds four candidates, where
+  Cloudberry's one reads the text as a number.  GROUP_ID() in an
+  aggregate's argument, which the port's desugaring makes group_id(0) and
+  Cloudberry refuses as an aggregate nested.  And PostgreSQL 19's words for
+  a call no function takes -- a DETAIL where Cloudberry's HINT stood.
+
+pg_stat  the scans of its table after SET enable_seqscan TO off: the
+  planner's route has the segment plan its fragment, and the setting,
+  the coordinator's, is none a gang is sent, so the segment reads the
+  table where Cloudberry's plan reads the index -- a sequential scan more
+  and the rows it read, and no index scan.
+
+planhints (orca)  ORCA's trace of the hints it read, which Cloudberry's
+  expected output for its ORCA, planhints_optimizer.out, prints as the
+  port's ORCA does, where the one the suite compares, the planner's, has
+  pg_hint_plan's report of the hints the planner used.
+
 qp_dml_joins  the WARNING of an ALTER TABLE ... SET DISTRIBUTED BY (b) of a
   table CREATE TABLE AS made distributed by b already: the port gives a
   table made from a query its first column as its key, where Cloudberry's
@@ -407,6 +459,20 @@ qp_functions (planner, orca)  PostgreSQL 19's words for a call no function
   the relations named tst% in its group's cluster -- a table an earlier test
   leaves there would be among them, as alter_distribution_policy's tstab was
   before the suite ran in groups.
+
+qp_full_join (orca)  its full joins by IS NOT DISTINCT FROM, which
+  Cloudberry's planner refuses ("FULL JOIN is only supported with
+  merge-joinable or hash-joinable join conditions") and its ORCA answers,
+  as the port's ORCA does: Cloudberry's expected output for its ORCA,
+  qp_full_join_optimizer.out, has the port's answers, and the one the
+  suite compares, the planner's, the errors.
+
+qp_functions_idf  the same median() and GROUP_ID(): views of median()
+  calls printed as median(...), median(group_id()) answered 0 for each group
+  where Cloudberry refuses it, and median(a) OVER () in an ordered-set
+  aggregate's ORDER BY, which PostgreSQL 19 refuses as a window function in
+  an aggregate where Cloudberry's grammar finds a syntax error; and
+  PostgreSQL 19's words for a call no function takes.
 
 qp_misc_rio  a PL/Python function whose query reads a table, called in the
   segments' slice: it runs there, where Cloudberry refuses it ("function
@@ -459,6 +525,15 @@ returning_gp, triggers_gp, update_gp  what Cloudberry refuses on an
   an UPDATE of the distribution key of an inherited table ("can't split
   update for inherit table"), whose plan the port prints.
 
+rowhints (planner, orca)  the plans it prints through sql/maskout.sh,
+  which gpdiff.pl does not read as plans.  Under the planner, the port's:
+  each table's rows gathered to the coordinator and joined there -- a Rows
+  hint is not used, as Cloudberry's planner uses none.  Under ORCA,
+  Cloudberry's ORCA's, but that the Dynamic Seq Scan prints the partitions
+  it scans beneath it, a custom scan's children in the port; and ORCA's
+  trace of the hints it read, as in Cloudberry's expected output for its
+  ORCA, rowhints_optimizer.out.
+
 rpt (planner, orca)  the plans of writes to a replicated table that compute
   a volatile function -- random() in a condition, in a CREATE TABLE AS's
   HAVING -- which Cloudberry cannot devise, since each segment would
@@ -488,6 +563,9 @@ sreh  COPY's SEGMENT REJECT LIMIT, reached: the port's COPY parses each row
 table_statistics  the position PostgreSQL 19 gives the error of an ALTER
   TABLE ... ALTER COLUMN ... TYPE of a partition key column, a LINE and its
   caret, which PostgreSQL 16's gives none.
+
+timeseries  PostgreSQL 19's words for a call no function takes -- a
+  DETAIL where Cloudberry's HINT stood.
 
 truncate_gp  the files stat_table_segfile_size(), a PL/Python function,
   finds of an append-optimized and a column-oriented table emptied by a

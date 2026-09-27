@@ -1,0 +1,38 @@
+@@
+- Gather Motion 3:1  (slice1; segments: 3)  (cost=xxx..xxx rows=1000000 width=xxx)
+-   ->  Nested Loop  (cost=xxx..xxx rows=333333 width=xxx)
+-         ->  Broadcast Motion 3:3  (slice2; segments: 3)  (cost=xxx..xxx rows=100 width=xxx)
+-               ->  Seq Scan on your_table t2  (cost=xxx..xxx rows=33 width=xxx)
+-         ->  Materialize  (cost={inf}..{inf} rows=3333 width=xxx)
+-               ->  Nested Loop  (cost={inf}..{inf} rows=3333 width=xxx)
+-                     ->  Broadcast Motion 3:3  (slice3; segments: 3)  (cost=xxx..xxx rows=102 width=xxx)
+-                           ->  Append  (cost=xxx..xxx rows=34 width=xxx)
+-                                 ->  Seq Scan on our_table_1_prt_p1_1 t3_1  (cost=xxx..xxx rows=6 width=xxx)
+-                                 ->  Seq Scan on our_table_1_prt_p1_2 t3_2  (cost=xxx..xxx rows=7 width=xxx)
+-                                 ->  Seq Scan on our_table_1_prt_p1_3 t3_3  (cost=xxx..xxx rows=7 width=xxx)
+-                                 ->  Seq Scan on our_table_1_prt_p1_4 t3_4  (cost=xxx..xxx rows=7 width=xxx)
+-                                 ->  Seq Scan on our_table_1_prt_p1_5 t3_5  (cost=xxx..xxx rows=7 width=xxx)
+-                                 ->  Seq Scan on our_table_1_prt_p1_6 t3_6  (cost=xxx..xxx rows=1 width=xxx)
+-                     ->  Materialize  (cost=xxx..xxx rows=33 width=xxx)
+-                           ->  Seq Scan on my_table t1  (cost=xxx..xxx rows=33 width=xxx)
++ Nested Loop  (cost=xxx..xxx rows=1000000 width=xxx)
++   ->  Nested Loop  (cost=xxx..xxx rows=10000 width=xxx)
++         ->  Gather Motion 3:1 on my_table t1  (slice1; segments: 3)  (cost=xxx..xxx rows=100 width=xxx)
++               Segments: 3
++         ->  Materialize  (cost=xxx..xxx rows=100 width=xxx)
++               ->  Gather Motion 3:1 on your_table t2  (slice2; segments: 3)  (cost=xxx..xxx rows=100 width=xxx)
++                     Segments: 3
++   ->  Materialize  (cost=xxx..xxx rows=100 width=xxx)
++         ->  Append  (cost=xxx..xxx rows=100 width=xxx)
++               ->  Gather Motion 3:1 on our_table_1_prt_p1_1 t3_1  (slice3; segments: 3)  (cost=xxx..xxx rows=19 width=xxx)
++                     Segments: 3
++               ->  Gather Motion 3:1 on our_table_1_prt_p1_2 t3_2  (slice4; segments: 3)  (cost=xxx..xxx rows=20 width=xxx)
++                     Segments: 3
++               ->  Gather Motion 3:1 on our_table_1_prt_p1_3 t3_3  (slice5; segments: 3)  (cost=xxx..xxx rows=20 width=xxx)
++                     Segments: 3
++               ->  Gather Motion 3:1 on our_table_1_prt_p1_4 t3_4  (slice6; segments: 3)  (cost=xxx..xxx rows=20 width=xxx)
++                     Segments: 3
++               ->  Gather Motion 3:1 on our_table_1_prt_p1_5 t3_5  (slice7; segments: 3)  (cost=xxx..xxx rows=20 width=xxx)
++                     Segments: 3
++               ->  Gather Motion 3:1 on our_table_1_prt_p1_6 t3_6  (slice8; segments: 3)  (cost=xxx..xxx rows=1 width=xxx)
++                     Segments: 3

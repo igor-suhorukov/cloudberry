@@ -28,6 +28,20 @@ coordinator at:
   sync-rep-query-cancel    syncrep.c, SyncRepWaitForLSN()   sync_rep_query_cancel
   exec-simple-query-start  postgres.c, exec_simple_query()  exec_simple_query_start
 
+And three more of its faults, under their own names, which the tests of
+greenplum_schedule set: an autovacuum worker's before it vacuums a
+database, and the update of the database's row that vacuuming it ends
+with (the autovacuum tests), each giving the fault's callback the
+database's name, as Cloudberry's call does; and a count of rows made
+almost 2^32 where a "skip" asks, in the executor's run and a SELECT's
+count of its rows, which SPI's check of its count then passes over, as
+Cloudberry's does (the processed64bit tests):
+
+  auto_vac_worker_before_do_autovacuum  autovacuum.c, AutoVacWorkerMain()
+  vacuum_update_dat_frozen_xid          vacuum.c, vac_update_datfrozenxid()
+  executor_run_high_processed           execMain.c, standard_ExecutorRun()
+                                        and ExecutePlan(); spi.c, _SPI_pquery()
+
 gp_core's fault injector attaches a fault of Cloudberry's name to the point
 (gp_fault.c); walrecv-skip-flush is given a bool its callback sets to skip
 the flush.  They serve tests alone, so they are not in the core series:
@@ -138,3 +152,110 @@ point nothing attached to runs no callback.
  	/*
  	 * Report query to various monitoring facilities.
  	 */
+--- a/src/backend/postmaster/autovacuum.c
++++ b/src/backend/postmaster/autovacuum.c
+@@ -1628,6 +1628,13 @@
+ 		ereport(DEBUG1,
+ 				(errmsg_internal("autovacuum: processing database \"%s\"", dbname)));
+ 
++		/* A test may hold the worker here, before it vacuums the database. */
++		{
++			const char *names[2] = {dbname, ""};
++
++			INJECTION_POINT("auto_vac_worker_before_do_autovacuum", (void *) names);
++		}
++
+ 		if (PostAuthDelay)
+ 			pg_usleep(PostAuthDelay * 1000000L);
+ 
+--- a/src/backend/commands/vacuum.c
++++ b/src/backend/commands/vacuum.c
+@@ -1796,7 +1796,14 @@
+ 		newMinMulti = dbform->datminmxid;
+ 
+ 	if (dirty)
++	{
++		const char *names[2] = {NameStr(dbform->datname), ""};
++
+ 		systable_inplace_update_finish(inplace_state, tuple);
++
++		/* A test may see that the database's row was brought up to date. */
++		INJECTION_POINT("vacuum_update_dat_frozen_xid", (void *) names);
++	}
+ 	else
+ 		systable_inplace_update_cancel(inplace_state);
+ 
+--- a/src/backend/executor/execMain.c
++++ b/src/backend/executor/execMain.c
+@@ -60,6 +60,7 @@
+ #include "tcop/utility.h"
+ #include "utils/acl.h"
+ #include "utils/backend_status.h"
++#include "utils/injection_point.h"
+ #include "utils/lsyscache.h"
+ #include "utils/partcache.h"
+ #include "utils/rls.h"
+@@ -382,6 +383,19 @@
+ 					dest);
+ 
+ 	/*
++	 * A test may have the rows counted past 2^32, without processing that
++	 * many: a count of 10,000 to 1,000,000 made UINT_MAX - 10.
++	 */
++	if (estate->es_processed >= 10000 && estate->es_processed <= 1000000)
++	{
++		bool		skip = false;
++
++		INJECTION_POINT("executor_run_high_processed", &skip);
++		if (skip)
++			estate->es_processed = UINT_MAX - 10;
++	}
++
++	/*
+ 	 * Update es_total_processed to keep track of the number of tuples
+ 	 * processed across multiple ExecutorRun() calls.
+ 	 */
+@@ -1776,8 +1790,20 @@
+ 		 * events.)
+ 		 */
+ 		if (operation == CMD_SELECT)
++		{
+ 			(estate->es_processed)++;
+ 
++			/* and a SELECT's, as it counts them */
++			if (estate->es_processed >= 10000 && estate->es_processed <= 1000000)
++			{
++				bool		skip = false;
++
++				INJECTION_POINT("executor_run_high_processed", &skip);
++				if (skip)
++					estate->es_processed = UINT_MAX - 10;
++			}
++		}
++
+ 		/*
+ 		 * check our tuple count.. if we've processed the proper number then
+ 		 * quit, else loop again and process more tuples.  Zero numberTuples
+--- a/src/backend/executor/spi.c
++++ b/src/backend/executor/spi.c
+@@ -27,6 +27,7 @@
+ #include "tcop/utility.h"
+ #include "utils/builtins.h"
+ #include "utils/datum.h"
++#include "utils/injection_point.h"
+ #include "utils/lsyscache.h"
+ #include "utils/memutils.h"
+ #include "utils/rel.h"
+@@ -2936,7 +2937,11 @@
+ 	if ((res == SPI_OK_SELECT || queryDesc->plannedstmt->hasReturning) &&
+ 		queryDesc->dest->mydest == DestSPI)
+ 	{
+-		if (_SPI_checktuples())
++		bool		skip = false;
++
++		/* not where a test has counted the rows past 2^32, as above */
++		INJECTION_POINT("executor_run_high_processed", &skip);
++		if (!skip && _SPI_checktuples())
+ 			elog(ERROR, "consistency check on SPI tuple count failed");
+ 	}
+ 

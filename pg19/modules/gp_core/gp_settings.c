@@ -140,6 +140,7 @@ static bool gp_cte_sharing = false;
 static bool test_print_prefetch_joinqual = false;
 static bool gp_enable_preunique = true;
 static bool gp_enable_agg_distinct_pruning = true;
+static bool gp_dynamic_partition_pruning = true;
 static bool gp_eager_distinct_dedup = false;
 static bool gp_enable_agg_pushdown = false;
 static bool gp_enable_fast_sri = true;
@@ -841,6 +842,13 @@ GpSettingsInit(void)
 	define_accepted_bool("gp.enable_agg_distinct_pruning",
 						 "Enable 3-phase aggregation and join to compute distinct-qualified aggregates." ROUTE_B,
 						 &gp_enable_agg_distinct_pruning, true);
+	define_accepted_bool("gp.dynamic_partition_pruning",
+						 "Enables plans that can dynamically eliminate scanning of partitions."
+						 " Accepted for Cloudberry's scripts: it is its planner's join pruning (joinpartprune.c),"
+						 " a Partition Selector of the parts the other side's rows can meet, which the planner"
+						 " here has not -- its run-time pruning is PostgreSQL 19's, under"
+						 " enable_partition_pruning -- and ORCA's is ORCA's own.",
+						 &gp_dynamic_partition_pruning, true);
 	define_accepted_bool("gp.eager_distinct_dedup",
 						 "Eager a 3-phase agg with deduplication for DISTINCT aggregations." ROUTE_B,
 						 &gp_eager_distinct_dedup, false);

@@ -1,0 +1,1324 @@
+@@
+-LOG:  pg_hint_plan:
++LOG:  YYYY-MM-DD HH:MM:SS:MSMSMS TMZ,THD000,TRACE,"PlanHint: [
+@@
+-Leading((t1 (t2 t3)))
++JoinHint:(t1 (t2 t3))
+@@
+-duplication hint:
+-error hint:
++]",
+@@
+-LOG:  pg_hint_plan:
++LOG:  YYYY-MM-DD HH:MM:SS:MSMSMS TMZ,THD000,TRACE,"PlanHint: [
+@@
+-Leading((t1 (t3 t2)))
++JoinHint:(t1 (t3 t2))
+@@
+-duplication hint:
+-error hint:
++]",
+@@
+-LOG:  pg_hint_plan:
++LOG:  YYYY-MM-DD HH:MM:SS:MSMSMS TMZ,THD000,TRACE,"PlanHint: [
+@@
+-Leading(((t2 t3) t1))
++JoinHint:((t2 t3) t1)
+@@
+-duplication hint:
+-error hint:
++]",
+@@
+-LOG:  pg_hint_plan:
++LOG:  YYYY-MM-DD HH:MM:SS:MSMSMS TMZ,THD000,TRACE,"PlanHint: [
+@@
+-Leading(((t3 t2) t1))
++JoinHint:((t3 t2) t1)
+@@
+-duplication hint:
+-error hint:
++]",
+@@
+-LOG:  pg_hint_plan:
++LOG:  YYYY-MM-DD HH:MM:SS:MSMSMS TMZ,THD000,TRACE,"PlanHint: [
+@@
+-Leading(((t1 t3) t2))
++JoinHint:((t1 t3) t2)
+@@
+-duplication hint:
+-error hint:
++]",
+@@
+-LOG:  pg_hint_plan:
++LOG:  YYYY-MM-DD HH:MM:SS:MSMSMS TMZ,THD000,TRACE,"PlanHint: [
+@@
+-Leading(((t3 t1) t2))
++JoinHint:((t3 t1) t2)
+@@
+-duplication hint:
+-error hint:
++]",
+@@
+-LOG:  pg_hint_plan:
++LOG:  YYYY-MM-DD HH:MM:SS:MSMSMS TMZ,THD000,TRACE,"PlanHint: [
+@@
+-Leading((t2 (t1 t3)))
++JoinHint:(t2 (t1 t3))
+@@
+-duplication hint:
+-error hint:
++]",
+@@
+-LOG:  pg_hint_plan:
++LOG:  YYYY-MM-DD HH:MM:SS:MSMSMS TMZ,THD000,TRACE,"PlanHint: [
+@@
+-Leading((t2 (t3 t1)))
++JoinHint:(t2 (t3 t1))
+@@
+-duplication hint:
+-error hint:
++]",
+@@
+-LOG:  pg_hint_plan:
++LOG:  YYYY-MM-DD HH:MM:SS:MSMSMS TMZ,THD000,TRACE,"PlanHint: [
+@@
+-Leading(((t1 t2) t3))
++JoinHint:((t1 t2) t3)
+@@
+-duplication hint:
+-error hint:
++]",
+@@
+-LOG:  pg_hint_plan:
++LOG:  YYYY-MM-DD HH:MM:SS:MSMSMS TMZ,THD000,TRACE,"PlanHint: [
+@@
+-Leading(((t2 t1) t3))
++JoinHint:((t2 t1) t3)
+@@
+-duplication hint:
+-error hint:
++]",
+@@
+-LOG:  pg_hint_plan:
++LOG:  YYYY-MM-DD HH:MM:SS:MSMSMS TMZ,THD000,TRACE,"PlanHint: [
+@@
+-Leading((t3 (t1 t2)))
++JoinHint:(t3 (t1 t2))
+@@
+-duplication hint:
+-error hint:
++]",
+@@
+-LOG:  pg_hint_plan:
++LOG:  YYYY-MM-DD HH:MM:SS:MSMSMS TMZ,THD000,TRACE,"PlanHint: [
+@@
+-Leading((t3 (t2 t1)))
++JoinHint:(t3 (t2 t1))
+@@
+-duplication hint:
+-error hint:
++]",
+@@
+-LOG:  pg_hint_plan:
++LOG:  YYYY-MM-DD HH:MM:SS:MSMSMS TMZ,THD000,TRACE,"PlanHint: [
+@@
++JoinHint:(t2 (t1 t3))
+@@
+-Leading((t2 (t1 t3)))
+-duplication hint:
+-error hint:
++]",
+@@
+-LOG:  pg_hint_plan:
++LOG:  YYYY-MM-DD HH:MM:SS:MSMSMS TMZ,THD000,TRACE,"PlanHint: [
+@@
++JoinHint:((t5 (t4 t3)) (t1 t2))
+@@
+-Leading(((t5 (t4 t3)) (t1 t2)))
+-duplication hint:
+-error hint:
++]",
+@@
+-LOG:  pg_hint_plan:
++LOG:  YYYY-MM-DD HH:MM:SS:MSMSMS TMZ,THD000,TRACE,"PlanHint: [
+@@
+-Leading((t1 (t2 t5)))
++JoinHint:(t1 (t2 t5))
+@@
+-duplication hint:
+-error hint:
++]",
+@@
+-LOG:  pg_hint_plan:
++LOG:  YYYY-MM-DD HH:MM:SS:MSMSMS TMZ,THD000,TRACE,"PlanHint: [
+@@
++JoinHint:(((t1 t2) t3) t4)
+@@
+-Leading((((t1 t2) t3) t4))
+-duplication hint:
+-error hint:
++]",
+@@
+-LOG:  pg_hint_plan:
++LOG:  YYYY-MM-DD HH:MM:SS:MSMSMS TMZ,THD000,TRACE,"PlanHint: [
+@@
++JoinHint:((((g2_t1 g2_t2) g2_t3) t4) (g1_t1 (g1_t3 g1_t2)))
+@@
+-Leading(((((g2_t1 g2_t2) g2_t3) t4) (g1_t1 (g1_t3 g1_t2))))
+-duplication hint:
+-error hint:
++]",
+@@
+-LOG:  pg_hint_plan:
++LOG:  YYYY-MM-DD HH:MM:SS:MSMSMS TMZ,THD000,TRACE,"PlanHint: [
+@@
+-Leading(((t3 t2) t1))
+-Leading((t5 t4))
++JoinHint:((t3 t2) t1)
++JoinHint:(t5 t4)
+@@
+-duplication hint:
+-error hint:
++]",
+@@
+-LOG:  pg_hint_plan:
++LOG:  YYYY-MM-DD HH:MM:SS:MSMSMS TMZ,THD000,TRACE,"PlanHint: [
+@@
+-Leading((t1 t3))
+-duplication hint:
+-error hint:
++JoinHint:(t1 t3)
++]",
+@@
+-LOG:  pg_hint_plan:
++LOG:  YYYY-MM-DD HH:MM:SS:MSMSMS TMZ,THD000,TRACE,"PlanHint: [
+@@
+-Leading((t2 t3))
+-duplication hint:
+-error hint:
++JoinHint:(t2 t3)
++]",
+@@
+-LOG:  pg_hint_plan:
++LOG:  YYYY-MM-DD HH:MM:SS:MSMSMS TMZ,THD000,TRACE,"PlanHint: [
+@@
+-duplication hint:
+-error hint:
+-Leading(((t1 t2)))
++]",
+@@
+-LOG:  pg_hint_plan:
++LOG:  YYYY-MM-DD HH:MM:SS:MSMSMS TMZ,THD000,TRACE,"PlanHint: [
+@@
+-duplication hint:
+-error hint:
+-Leading((t1 (t2 t3 t4)))
++]",
+@@
+-LOG:  pg_hint_plan:
++LOG:  YYYY-MM-DD HH:MM:SS:MSMSMS TMZ,THD000,TRACE,"PlanHint: [
+@@
+-Leading(((t1 t5) (t2 t4)))
+-duplication hint:
+-error hint:
++JoinHint:((t1 t5) (t2 t4))
++]",
+@@
+-LOG:  pg_hint_plan:
++LOG:  YYYY-MM-DD HH:MM:SS:MSMSMS TMZ,THD000,TRACE,"PlanHint: [
+@@
+-Leading(((t1 t3) (t2 t4)))
+-duplication hint:
+-error hint:
++JoinHint:((t1 t3) (t2 t4))
++]",
+@@
+-INFO:  pg_hint_plan: hint syntax error at or near "Leading((t1 t2))
+-  Leading((t2 t1))
+-"
+-DETAIL:  Conflict leading hint.
+-LOG:  pg_hint_plan:
++LOG:  YYYY-MM-DD HH:MM:SS:MSMSMS TMZ,THD000,TRACE,"PlanHint: [
+@@
+-Leading((t2 t1))
++JoinHint:(t1 t2)
+@@
+-duplication hint:
+-Leading((t1 t2))
+-error hint:
++JoinHint:(t2 t1)
++]",
+@@
+-LOG:  pg_hint_plan:
++LOG:  YYYY-MM-DD HH:MM:SS:MSMSMS TMZ,THD000,TRACE,"PlanHint: [
+@@
+-Leading((((t5 t4) (t1 t3)) t2))
++JoinHint:(((t5 t4) (t1 t3)) t2)
+@@
+-duplication hint:
+-error hint:
++]",
+@@
+-LOG:  pg_hint_plan:
++LOG:  YYYY-MM-DD HH:MM:SS:MSMSMS TMZ,THD000,TRACE,"PlanHint: [
+@@
+-Leading(((t5 t4) (t1 t3)))
++JoinHint:((t5 t4) (t1 t3))
+@@
+-duplication hint:
+-error hint:
++]",
+@@
+-LOG:  pg_hint_plan:
++LOG:  YYYY-MM-DD HH:MM:SS:MSMSMS TMZ,THD000,TRACE,"PlanHint: [
+@@
+-Leading((t2 t1))
++JoinHint:(t2 t1)
+@@
+-duplication hint:
+-error hint:
++]",
+@@
+-LOG:  pg_hint_plan:
++LOG:  YYYY-MM-DD HH:MM:SS:MSMSMS TMZ,THD000,TRACE,"PlanHint: [
+@@
+-Leading((t5 (((t4 t3) t2) t1)))
++JoinHint:(t5 (((t4 t3) t2) t1))
+@@
+-duplication hint:
+-error hint:
++]",
+@@
+-LOG:  pg_hint_plan:
++LOG:  YYYY-MM-DD HH:MM:SS:MSMSMS TMZ,THD000,TRACE,"PlanHint: [
+@@
+-Leading((t5 (((t4 t3) t2) t1)))
++JoinHint:(t5 (((t4 t3) t2) t1))
+@@
+-duplication hint:
+-error hint:
++]",
+@@
+-LOG:  pg_hint_plan:
++LOG:  YYYY-MM-DD HH:MM:SS:MSMSMS TMZ,THD000,TRACE,"PlanHint: [
+@@
+-Leading((t3 t4))
+-Leading((t1 (t2 t5)))
++JoinHint:(t3 t4)
++JoinHint:(t1 (t2 t5))
+@@
+-duplication hint:
+-error hint:
++]",
+@@
+-LOG:  pg_hint_plan:
++LOG:  YYYY-MM-DD HH:MM:SS:MSMSMS TMZ,THD000,TRACE,"PlanHint: [
+@@
+-Leading((t3 t4))
+-Leading(t1 t2 t5)
++JoinHint:(t3 t4)
++JoinHint:t1 t2 t5
+@@
+-duplication hint:
+-error hint:
++]",
+@@
+-LOG:  pg_hint_plan:
++LOG:  YYYY-MM-DD HH:MM:SS:MSMSMS TMZ,THD000,TRACE,"PlanHint: [
+@@
+-Leading((t3 t4))
+-Leading((t1 (t2 t5)))
++JoinHint:(t3 t4)
++JoinHint:(t1 (t2 t5))
+@@
+-duplication hint:
+-error hint:
++]",
+@@
+-LOG:  pg_hint_plan:
++LOG:  YYYY-MM-DD HH:MM:SS:MSMSMS TMZ,THD000,TRACE,"PlanHint: [
+@@
+-Leading(t1 t2 t3)
++JoinHint:t1 t2 t3
+@@
+-duplication hint:
+-error hint:
++]",
+@@
+-LOG:  pg_hint_plan:
++LOG:  YYYY-MM-DD HH:MM:SS:MSMSMS TMZ,THD000,TRACE,"PlanHint: [
+@@
+-Leading(t3 t2 t1)
++JoinHint:t3 t2 t1
+@@
+-duplication hint:
+-error hint:
++]",
+@@
+-LOG:  pg_hint_plan:
++LOG:  YYYY-MM-DD HH:MM:SS:MSMSMS TMZ,THD000,TRACE,"PlanHint: [
+@@
+-HashJoin(t1 t2)
++JoinTypeHint: aliases:t1,t2 type:HashJoin
+@@
+-duplication hint:
+-error hint:
++]",
+@@
+-LOG:  pg_hint_plan:
++LOG:  YYYY-MM-DD HH:MM:SS:MSMSMS TMZ,THD000,TRACE,"PlanHint: [
+@@
+-NoHashJoin(t1 t2)
++JoinTypeHint: aliases:t1,t2 type:NoHashJoin
+@@
+-duplication hint:
+-error hint:
++]",
+@@
+-LOG:  pg_hint_plan:
++LOG:  YYYY-MM-DD HH:MM:SS:MSMSMS TMZ,THD000,TRACE,"PlanHint: [
+@@
+-SeqScan(t1)
+-SeqScan(t2)
+-NestLoop(t1 t2)
++ScanHint: t1[indexes: types:SeqScan]
++ScanHint: t2[indexes: types:SeqScan]
++JoinTypeHint: aliases:t1,t2 type:NestedLoopJoin
+@@
+-duplication hint:
+-error hint:
++]",
+@@
+-LOG:  pg_hint_plan:
++LOG:  YYYY-MM-DD HH:MM:SS:MSMSMS TMZ,THD000,TRACE,"PlanHint: [
+@@
+-IndexScan(t1)
+-NestLoop(t1 t2)
++ScanHint: t1[indexes: types:IndexScan]
++JoinTypeHint: aliases:t1,t2 type:NestedLoopJoin
+@@
+-duplication hint:
+-error hint:
++]",
+@@
+-LOG:  pg_hint_plan:
++LOG:  YYYY-MM-DD HH:MM:SS:MSMSMS TMZ,THD000,TRACE,"PlanHint: [
+@@
+-IndexScan(t2)
+-NestLoop(t1 t2)
++ScanHint: t2[indexes: types:IndexScan]
++JoinTypeHint: aliases:t1,t2 type:NestedLoopJoin
+@@
+-duplication hint:
+-error hint:
++]",
+@@
+-LOG:  pg_hint_plan:
++LOG:  YYYY-MM-DD HH:MM:SS:MSMSMS TMZ,THD000,TRACE,"PlanHint: [
+@@
+-NoNestLoop(t1 t2)
++JoinTypeHint: aliases:t1,t2 type:NoNestedLoopJoin
+@@
+-duplication hint:
+-error hint:
++]",
+@@
+-LOG:  pg_hint_plan:
++LOG:  YYYY-MM-DD HH:MM:SS:MSMSMS TMZ,THD000,TRACE,"PlanHint: [
+@@
+-NoHashJoin(t1 t2 t3)
++JoinTypeHint: aliases:t1,t2,t3 type:NoHashJoin
+@@
+-duplication hint:
+-error hint:
++]",
+@@
+-LOG:  pg_hint_plan:
++LOG:  YYYY-MM-DD HH:MM:SS:MSMSMS TMZ,THD000,TRACE,"PlanHint: [
+@@
+-NoHashJoin(t1 t2)
+-NoHashJoin(t1 t3)
+-NoHashJoin(t2 t3)
+-NoHashJoin(t1 t2 t3)
++JoinTypeHint: aliases:t1,t2 type:NoHashJoin
++JoinTypeHint: aliases:t1,t3 type:NoHashJoin
++JoinTypeHint: aliases:t2,t3 type:NoHashJoin
++JoinTypeHint: aliases:t1,t2,t3 type:NoHashJoin
+@@
+-duplication hint:
+-error hint:
++]",
+@@
+-LOG:  pg_hint_plan:
++LOG:  YYYY-MM-DD HH:MM:SS:MSMSMS TMZ,THD000,TRACE,"PlanHint: [
+@@
+-NoNestLoop(t1 t2 t3)
++JoinTypeHint: aliases:t1,t2,t3 type:NoNestedLoopJoin
+@@
+-duplication hint:
+-error hint:
++]",
+@@
+-LOG:  pg_hint_plan:
++LOG:  YYYY-MM-DD HH:MM:SS:MSMSMS TMZ,THD000,TRACE,"PlanHint: [
+@@
+-NoNestLoop(t1 t2)
+-NoNestLoop(t1 t3)
+-NoNestLoop(t2 t3)
+-NoNestLoop(t1 t2 t3)
++JoinTypeHint: aliases:t1,t2 type:NoNestedLoopJoin
++JoinTypeHint: aliases:t1,t3 type:NoNestedLoopJoin
++JoinTypeHint: aliases:t2,t3 type:NoNestedLoopJoin
++JoinTypeHint: aliases:t1,t2,t3 type:NoNestedLoopJoin
+@@
+-duplication hint:
+-error hint:
++]",
+@@
+-LOG:  pg_hint_plan:
++LOG:  YYYY-MM-DD HH:MM:SS:MSMSMS TMZ,THD000,TRACE,"PlanHint: [
+@@
+-NestLoop(t1 t2)
++JoinTypeHint: aliases:t1,t2 type:NestedLoopJoin
+@@
+-duplication hint:
+-error hint:
++]",
+@@
+-LOG:  pg_hint_plan:
++LOG:  YYYY-MM-DD HH:MM:SS:MSMSMS TMZ,THD000,TRACE,"PlanHint: [
+@@
+-NestLoop(t1 t2)
++JoinTypeHint: aliases:t1,t2 type:NestedLoopJoin
+@@
+-duplication hint:
+-error hint:
++]",
+@@
++LOG:  YYYY-MM-DD HH:MM:SS:MSMSMS TMZ,THD000,ERROR,"Falling back to Postgres-based planner because no plan has been computed for required properties in GPORCA",
++YYYY-MM-DD HH:MM:SS:MSMSMS TMZ,THD000,ERROR,"Falling back to Postgres-based planner because no plan has been computed for required properties in GPORCA",
++INFO:  GPORCA failed to produce a plan, falling back to Postgres-based planner
++DETAIL:  Falling back to Postgres-based planner because no plan has been computed for required properties in GPORCA
+@@
+-LOG:  pg_hint_plan:
++LOG:  YYYY-MM-DD HH:MM:SS:MSMSMS TMZ,THD000,TRACE,"PlanHint: [
+@@
+-NestLoop(t1 t2)
++JoinTypeHint: aliases:t1,t2 type:NestedLoopJoin
+@@
+-duplication hint:
+-error hint:
++]",
+@@
+-LOG:  pg_hint_plan:
++LOG:  YYYY-MM-DD HH:MM:SS:MSMSMS TMZ,THD000,TRACE,"PlanHint: [
+@@
+-NestLoop(t1 t2)
++JoinTypeHint: aliases:t1,t2 type:NestedLoopJoin
+@@
+-duplication hint:
+-error hint:
++]",
+@@
++LOG:  YYYY-MM-DD HH:MM:SS:MSMSMS TMZ,THD000,ERROR,"Falling back to Postgres-based planner because no plan has been computed for required properties in GPORCA",
++YYYY-MM-DD HH:MM:SS:MSMSMS TMZ,THD000,ERROR,"Falling back to Postgres-based planner because no plan has been computed for required properties in GPORCA",
++INFO:  GPORCA failed to produce a plan, falling back to Postgres-based planner
++DETAIL:  Falling back to Postgres-based planner because no plan has been computed for required properties in GPORCA
+@@
++LOG:  YYYY-MM-DD HH:MM:SS:MSMSMS TMZ,THD000,ERROR,"Falling back to Postgres-based planner because no plan has been computed for required properties in GPORCA",
++YYYY-MM-DD HH:MM:SS:MSMSMS TMZ,THD000,ERROR,"Falling back to Postgres-based planner because no plan has been computed for required properties in GPORCA",
++INFO:  GPORCA failed to produce a plan, falling back to Postgres-based planner
++DETAIL:  Falling back to Postgres-based planner because no plan has been computed for required properties in GPORCA
+@@
+-LOG:  pg_hint_plan:
++LOG:  YYYY-MM-DD HH:MM:SS:MSMSMS TMZ,THD000,TRACE,"PlanHint: [
+@@
+-MergeJoin(t1 t2)
++JoinTypeHint: aliases:t1,t2 type:MergeJoin
+@@
+-duplication hint:
+-error hint:
++]",
+@@
++LOG:  YYYY-MM-DD HH:MM:SS:MSMSMS TMZ,THD000,ERROR,"Falling back to Postgres-based planner because no plan has been computed for required properties in GPORCA",
++YYYY-MM-DD HH:MM:SS:MSMSMS TMZ,THD000,ERROR,"Falling back to Postgres-based planner because no plan has been computed for required properties in GPORCA",
++INFO:  GPORCA failed to produce a plan, falling back to Postgres-based planner
++DETAIL:  Falling back to Postgres-based planner because no plan has been computed for required properties in GPORCA
+@@
++LOG:  YYYY-MM-DD HH:MM:SS:MSMSMS TMZ,THD000,ERROR,"Falling back to Postgres-based planner because no plan has been computed for required properties in GPORCA",
++YYYY-MM-DD HH:MM:SS:MSMSMS TMZ,THD000,ERROR,"Falling back to Postgres-based planner because no plan has been computed for required properties in GPORCA",
++INFO:  GPORCA failed to produce a plan, falling back to Postgres-based planner
++DETAIL:  Falling back to Postgres-based planner because no plan has been computed for required properties in GPORCA
+@@
+-MergeJoin(t1 t2)
+@@
++MergeJoin(t1 t2)
+@@
+-LOG:  pg_hint_plan:
++LOG:  YYYY-MM-DD HH:MM:SS:MSMSMS TMZ,THD000,TRACE,"PlanHint: [
+@@
+-HashJoin(t1 t2)
++JoinTypeHint: aliases:t1,t2 type:HashJoin
+@@
+-duplication hint:
+-error hint:
++]",
+@@
+-LOG:  pg_hint_plan:
++LOG:  YYYY-MM-DD HH:MM:SS:MSMSMS TMZ,THD000,TRACE,"PlanHint: [
+@@
+-HashJoin(t1 t2)
++JoinTypeHint: aliases:t1,t2 type:HashJoin
+@@
+-duplication hint:
+-error hint:
++]",
+@@
+-LOG:  pg_hint_plan:
++LOG:  YYYY-MM-DD HH:MM:SS:MSMSMS TMZ,THD000,TRACE,"PlanHint: [
+@@
+-HashJoin(t1 t2)
++JoinTypeHint: aliases:t1,t2 type:HashJoin
+@@
+-duplication hint:
+-error hint:
++]",
+@@
+-LOG:  pg_hint_plan:
++LOG:  YYYY-MM-DD HH:MM:SS:MSMSMS TMZ,THD000,TRACE,"PlanHint: [
+@@
+-HashJoin(t1 t2)
++JoinTypeHint: aliases:t1,t2 type:HashJoin
+@@
+-duplication hint:
+-error hint:
++]",
+@@
+-LOG:  pg_hint_plan:
++LOG:  YYYY-MM-DD HH:MM:SS:MSMSMS TMZ,THD000,TRACE,"PlanHint: [
+@@
+-HashJoin(t1 t2)
++JoinTypeHint: aliases:t1,t2 type:HashJoin
+@@
+-duplication hint:
+-error hint:
++]",
+@@
+-LOG:  pg_hint_plan:
++LOG:  YYYY-MM-DD HH:MM:SS:MSMSMS TMZ,THD000,TRACE,"PlanHint: [
+@@
+-HashJoin(y z)
+-duplication hint:
+-error hint:
++JoinTypeHint: aliases:y,z type:HashJoin
++]",
+@@
+-LOG:  pg_hint_plan:
++LOG:  YYYY-MM-DD HH:MM:SS:MSMSMS TMZ,THD000,TRACE,"PlanHint: [
+@@
+-Leading((t1 (t2 t3)))
++JoinHint:(t1 (t2 t3))
+@@
+-duplication hint:
+-error hint:
++]",
+@@
+-LOG:  pg_hint_plan:
++LOG:  YYYY-MM-DD HH:MM:SS:MSMSMS TMZ,THD000,TRACE,"PlanHint: [
+@@
+-Leading(((t1 t4) (t2 t3)))
++JoinHint:((t1 t4) (t2 t3))
+@@
+-duplication hint:
+-error hint:
++]",
+@@
+-LOG:  pg_hint_plan:
++LOG:  YYYY-MM-DD HH:MM:SS:MSMSMS TMZ,THD000,TRACE,"PlanHint: [
+@@
+-Leading(((t3 t2) t1))
++JoinHint:((t3 t2) t1)
+@@
+-duplication hint:
+-error hint:
++]",
+@@
+-LOG:  pg_hint_plan:
++LOG:  YYYY-MM-DD HH:MM:SS:MSMSMS TMZ,THD000,TRACE,"PlanHint: [
+@@
+-Leading(((t3 t2) t1))
++JoinHint:((t3 t2) t1)
+@@
+-duplication hint:
+-error hint:
++]",
+@@
+-LOG:  pg_hint_plan:
++LOG:  YYYY-MM-DD HH:MM:SS:MSMSMS TMZ,THD000,TRACE,"PlanHint: [
+@@
+-Leading(((t3 t2) t1))
++JoinHint:((t3 t2) t1)
+@@
+-duplication hint:
+-error hint:
++]",
+@@
+-LOG:  pg_hint_plan:
++LOG:  YYYY-MM-DD HH:MM:SS:MSMSMS TMZ,THD000,TRACE,"PlanHint: [
+@@
+-Leading((t2 t1))
++JoinHint:(t2 t1)
+@@
+-duplication hint:
+-error hint:
++]",
+@@
+-LOG:  pg_hint_plan:
++LOG:  YYYY-MM-DD HH:MM:SS:MSMSMS TMZ,THD000,TRACE,"PlanHint: [
+@@
+-Leading(((t1 t4) (t2 t3)))
++JoinHint:((t1 t4) (t2 t3))
+@@
+-duplication hint:
+-error hint:
++]",
+@@
+-LOG:  pg_hint_plan:
++LOG:  YYYY-MM-DD HH:MM:SS:MSMSMS TMZ,THD000,TRACE,"PlanHint: [
+@@
+-Leading((t1 (t2 t3)))
++JoinHint:(t1 (t2 t3))
+@@
+-duplication hint:
+-error hint:
++]",
+@@
+-LOG:  pg_hint_plan:
++LOG:  YYYY-MM-DD HH:MM:SS:MSMSMS TMZ,THD000,TRACE,"PlanHint: [
+@@
+-Leading((t1 (t2 t3)))
+@@
+-duplication hint:
+-error hint:
++JoinHint:(t1 (t2 t3))
++]",
+@@
+-LOG:  pg_hint_plan:
++LOG:  YYYY-MM-DD HH:MM:SS:MSMSMS TMZ,THD000,TRACE,"PlanHint: [
+@@
+-Leading((t1 t2))
+@@
+-duplication hint:
+-error hint:
++JoinHint:(t1 t2)
++]",
+@@
+-LOG:  pg_hint_plan:
++LOG:  YYYY-MM-DD HH:MM:SS:MSMSMS TMZ,THD000,TRACE,"PlanHint: [
+@@
+-Leading((t1 t2))
+@@
+-duplication hint:
+-error hint:
++JoinHint:(t1 t2)
++]",
+@@
+-LOG:  pg_hint_plan:
++LOG:  YYYY-MM-DD HH:MM:SS:MSMSMS TMZ,THD000,TRACE,"PlanHint: [
+@@
+-Leading((t1 (t2 t3)))
++JoinHint:(t1 (t2 t3))
+@@
+-duplication hint:
+-error hint:
++]",
+@@
+-LOG:  pg_hint_plan:
++LOG:  YYYY-MM-DD HH:MM:SS:MSMSMS TMZ,THD000,TRACE,"PlanHint: [
+@@
+-Leading((t1 (t2 t3)))
++JoinHint:(t1 (t2 t3))
+@@
+-duplication hint:
+-error hint:
++]",
+@@
+-LOG:  pg_hint_plan:
++LOG:  YYYY-MM-DD HH:MM:SS:MSMSMS TMZ,THD000,TRACE,"PlanHint: [
+@@
+-Leading((t1 (t3 t2)))
++JoinHint:(t1 (t3 t2))
+@@
+-duplication hint:
+-error hint:
++]",
+@@
+-LOG:  pg_hint_plan:
++LOG:  YYYY-MM-DD HH:MM:SS:MSMSMS TMZ,THD000,TRACE,"PlanHint: [
+@@
+-Leading((t1 (t3 t2)))
++JoinHint:(t1 (t3 t2))
+@@
+-duplication hint:
+-error hint:
++]",
+@@
+-LOG:  pg_hint_plan:
++LOG:  YYYY-MM-DD HH:MM:SS:MSMSMS TMZ,THD000,TRACE,"PlanHint: [
+@@
+-Leading(((t2 t3) t1))
++JoinHint:((t2 t3) t1)
+@@
+-duplication hint:
+-error hint:
++]",
+@@
+-LOG:  pg_hint_plan:
++LOG:  YYYY-MM-DD HH:MM:SS:MSMSMS TMZ,THD000,TRACE,"PlanHint: [
+@@
+-Leading(((t2 t3) t1))
++JoinHint:((t2 t3) t1)
+@@
+-duplication hint:
+-error hint:
++]",
+@@
+-LOG:  pg_hint_plan:
++LOG:  YYYY-MM-DD HH:MM:SS:MSMSMS TMZ,THD000,TRACE,"PlanHint: [
+@@
+-Leading(((t3 t2) t1))
++JoinHint:((t3 t2) t1)
+@@
+-duplication hint:
+-error hint:
++]",
+@@
+-LOG:  pg_hint_plan:
++LOG:  YYYY-MM-DD HH:MM:SS:MSMSMS TMZ,THD000,TRACE,"PlanHint: [
+@@
+-Leading(((t3 t2) t1))
++JoinHint:((t3 t2) t1)
+@@
+-duplication hint:
+-error hint:
++]",
+@@
+-LOG:  pg_hint_plan:
++LOG:  YYYY-MM-DD HH:MM:SS:MSMSMS TMZ,THD000,TRACE,"PlanHint: [
+@@
+-Leading(((t1 t3) t2))
++JoinHint:((t1 t3) t2)
+@@
+-duplication hint:
+-error hint:
++]",
+@@
+-LOG:  pg_hint_plan:
++LOG:  YYYY-MM-DD HH:MM:SS:MSMSMS TMZ,THD000,TRACE,"PlanHint: [
+@@
+-Leading(((t1 t3) t2))
++JoinHint:((t1 t3) t2)
+@@
+-duplication hint:
+-error hint:
++]",
+@@
+-LOG:  pg_hint_plan:
++LOG:  YYYY-MM-DD HH:MM:SS:MSMSMS TMZ,THD000,TRACE,"PlanHint: [
+@@
+-Leading(((t3 t1) t2))
++JoinHint:((t3 t1) t2)
+@@
+-duplication hint:
+-error hint:
++]",
+@@
+-LOG:  pg_hint_plan:
++LOG:  YYYY-MM-DD HH:MM:SS:MSMSMS TMZ,THD000,TRACE,"PlanHint: [
+@@
+-Leading(((t3 t1) t2))
++JoinHint:((t3 t1) t2)
+@@
+-duplication hint:
+-error hint:
++]",
+@@
+-LOG:  pg_hint_plan:
++LOG:  YYYY-MM-DD HH:MM:SS:MSMSMS TMZ,THD000,TRACE,"PlanHint: [
+@@
+-Leading((t2 (t1 t3)))
++JoinHint:(t2 (t1 t3))
+@@
+-duplication hint:
+-error hint:
++]",
+@@
+-LOG:  pg_hint_plan:
++LOG:  YYYY-MM-DD HH:MM:SS:MSMSMS TMZ,THD000,TRACE,"PlanHint: [
+@@
+-Leading((t2 (t1 t3)))
++JoinHint:(t2 (t1 t3))
+@@
+-duplication hint:
+-error hint:
++]",
+@@
+-LOG:  pg_hint_plan:
++LOG:  YYYY-MM-DD HH:MM:SS:MSMSMS TMZ,THD000,TRACE,"PlanHint: [
+@@
+-Leading((t2 (t3 t1)))
++JoinHint:(t2 (t3 t1))
+@@
+-duplication hint:
+-error hint:
++]",
+@@
+-LOG:  pg_hint_plan:
++LOG:  YYYY-MM-DD HH:MM:SS:MSMSMS TMZ,THD000,TRACE,"PlanHint: [
+@@
+-Leading((t2 (t3 t1)))
++JoinHint:(t2 (t3 t1))
+@@
+-duplication hint:
+-error hint:
++]",
+@@
+-LOG:  pg_hint_plan:
++LOG:  YYYY-MM-DD HH:MM:SS:MSMSMS TMZ,THD000,TRACE,"PlanHint: [
+@@
+-Leading(((t1 t2) t3))
++JoinHint:((t1 t2) t3)
+@@
+-duplication hint:
+-error hint:
++]",
+@@
+-LOG:  pg_hint_plan:
++LOG:  YYYY-MM-DD HH:MM:SS:MSMSMS TMZ,THD000,TRACE,"PlanHint: [
+@@
+-Leading(((t1 t2) t3))
++JoinHint:((t1 t2) t3)
+@@
+-duplication hint:
+-error hint:
++]",
+@@
+-LOG:  pg_hint_plan:
++LOG:  YYYY-MM-DD HH:MM:SS:MSMSMS TMZ,THD000,TRACE,"PlanHint: [
+@@
+-Leading(((t2 t1) t3))
++JoinHint:((t2 t1) t3)
+@@
+-duplication hint:
+-error hint:
++]",
+@@
+-LOG:  pg_hint_plan:
++LOG:  YYYY-MM-DD HH:MM:SS:MSMSMS TMZ,THD000,TRACE,"PlanHint: [
+@@
+-Leading(((t2 t1) t3))
++JoinHint:((t2 t1) t3)
+@@
+-duplication hint:
+-error hint:
++]",
+@@
+-LOG:  pg_hint_plan:
++LOG:  YYYY-MM-DD HH:MM:SS:MSMSMS TMZ,THD000,TRACE,"PlanHint: [
+@@
+-Leading((t3 (t1 t2)))
++JoinHint:(t3 (t1 t2))
+@@
+-duplication hint:
+-error hint:
++]",
+@@
+-LOG:  pg_hint_plan:
++LOG:  YYYY-MM-DD HH:MM:SS:MSMSMS TMZ,THD000,TRACE,"PlanHint: [
+@@
+-Leading((t3 (t1 t2)))
++JoinHint:(t3 (t1 t2))
+@@
+-duplication hint:
+-error hint:
++]",
+@@
+-LOG:  pg_hint_plan:
++LOG:  YYYY-MM-DD HH:MM:SS:MSMSMS TMZ,THD000,TRACE,"PlanHint: [
+@@
+-Leading((t3 (t2 t1)))
++JoinHint:(t3 (t2 t1))
+@@
+-duplication hint:
+-error hint:
++]",
+@@
+-LOG:  pg_hint_plan:
++LOG:  YYYY-MM-DD HH:MM:SS:MSMSMS TMZ,THD000,TRACE,"PlanHint: [
+@@
+-Leading((t3 (t2 t1)))
++JoinHint:(t3 (t2 t1))
+@@
+-duplication hint:
+-error hint:
++]",
+@@
+-LOG:  pg_hint_plan:
++LOG:  YYYY-MM-DD HH:MM:SS:MSMSMS TMZ,THD000,TRACE,"PlanHint: [
+@@
+-Leading((t1 t2))
++JoinHint:(t1 t2)
+@@
+-duplication hint:
+-error hint:
++]",
+@@
+-LOG:  pg_hint_plan:
++LOG:  YYYY-MM-DD HH:MM:SS:MSMSMS TMZ,THD000,TRACE,"PlanHint: [
+@@
+-Leading((t1 t2))
++JoinHint:(t1 t2)
+@@
+-duplication hint:
+-error hint:
++]",
+@@
+-LOG:  pg_hint_plan:
++LOG:  YYYY-MM-DD HH:MM:SS:MSMSMS TMZ,THD000,TRACE,"PlanHint: [
+@@
+-Leading((t2 t1))
++JoinHint:(t2 t1)
+@@
+-duplication hint:
+-error hint:
++]",
+@@
+-LOG:  pg_hint_plan:
++LOG:  YYYY-MM-DD HH:MM:SS:MSMSMS TMZ,THD000,TRACE,"PlanHint: [
+@@
+-Leading((t2 t1))
++JoinHint:(t2 t1)
+@@
+-duplication hint:
+-error hint:
++]",
+@@
+-LOG:  pg_hint_plan:
++LOG:  YYYY-MM-DD HH:MM:SS:MSMSMS TMZ,THD000,TRACE,"PlanHint: [
+@@
+-Leading((t2 t3))
++JoinHint:(t2 t3)
+@@
+-duplication hint:
+-error hint:
++]",
+@@
+-LOG:  pg_hint_plan:
++LOG:  YYYY-MM-DD HH:MM:SS:MSMSMS TMZ,THD000,TRACE,"PlanHint: [
+@@
+-Leading((t2 t3))
++JoinHint:(t2 t3)
+@@
+-duplication hint:
+-error hint:
++]",
+@@
+-LOG:  pg_hint_plan:
++LOG:  YYYY-MM-DD HH:MM:SS:MSMSMS TMZ,THD000,TRACE,"PlanHint: [
+@@
+-Leading((t3 t2))
++JoinHint:(t3 t2)
+@@
+-duplication hint:
+-error hint:
++]",
+@@
+-LOG:  pg_hint_plan:
++LOG:  YYYY-MM-DD HH:MM:SS:MSMSMS TMZ,THD000,TRACE,"PlanHint: [
+@@
+-Leading((t3 t2))
++JoinHint:(t3 t2)
+@@
+-duplication hint:
+-error hint:
++]",
+@@
+-LOG:  pg_hint_plan:
++LOG:  YYYY-MM-DD HH:MM:SS:MSMSMS TMZ,THD000,TRACE,"PlanHint: [
+@@
+-Leading((t1 t3))
+@@
+-duplication hint:
+-error hint:
++JoinHint:(t1 t3)
++]",
+@@
+-LOG:  pg_hint_plan:
++LOG:  YYYY-MM-DD HH:MM:SS:MSMSMS TMZ,THD000,TRACE,"PlanHint: [
+@@
+-Leading((t1 t3))
+@@
+-duplication hint:
+-error hint:
++JoinHint:(t1 t3)
++]",
+@@
+-LOG:  pg_hint_plan:
++LOG:  YYYY-MM-DD HH:MM:SS:MSMSMS TMZ,THD000,TRACE,"PlanHint: [
+@@
+-Leading((t3 t1))
+@@
+-duplication hint:
+-error hint:
++JoinHint:(t3 t1)
++]",
+@@
+-LOG:  pg_hint_plan:
++LOG:  YYYY-MM-DD HH:MM:SS:MSMSMS TMZ,THD000,TRACE,"PlanHint: [
+@@
+-Leading((t3 t1))
+@@
+-duplication hint:
+-error hint:
++JoinHint:(t3 t1)
++]",
+@@
+-LOG:  pg_hint_plan:
++LOG:  YYYY-MM-DD HH:MM:SS:MSMSMS TMZ,THD000,TRACE,"PlanHint: [
+@@
+-Leading((t2 t3))
++JoinHint:(t2 t3)
+@@
+-duplication hint:
+-error hint:
++]",
+@@
+-LOG:  pg_hint_plan:
++LOG:  YYYY-MM-DD HH:MM:SS:MSMSMS TMZ,THD000,TRACE,"PlanHint: [
+@@
+-Leading((t2 t3))
++JoinHint:(t2 t3)
+@@
+-duplication hint:
+-error hint:
++]",
+@@
+-LOG:  pg_hint_plan:
++LOG:  YYYY-MM-DD HH:MM:SS:MSMSMS TMZ,THD000,TRACE,"PlanHint: [
+@@
+-Leading((t3 t2))
++JoinHint:(t3 t2)
+@@
+-duplication hint:
+-error hint:
++]",
+@@
+-LOG:  pg_hint_plan:
++LOG:  YYYY-MM-DD HH:MM:SS:MSMSMS TMZ,THD000,TRACE,"PlanHint: [
+@@
+-Leading((t3 t2))
++JoinHint:(t3 t2)
+@@
+-duplication hint:
+-error hint:
++]",
+@@
+-LOG:  pg_hint_plan:
++LOG:  YYYY-MM-DD HH:MM:SS:MSMSMS TMZ,THD000,TRACE,"PlanHint: [
+@@
+-Leading((t4 (t3 t2)))
++JoinHint:(t4 (t3 t2))
+@@
+-duplication hint:
+-error hint:
++]",
+@@
+-LOG:  pg_hint_plan:
++LOG:  YYYY-MM-DD HH:MM:SS:MSMSMS TMZ,THD000,TRACE,"PlanHint: [
+@@
+-Leading((t4 (t3 t2)))
++JoinHint:(t4 (t3 t2))
+@@
+-duplication hint:
+-error hint:
++]",
+@@
+-LOG:  pg_hint_plan:
++LOG:  YYYY-MM-DD HH:MM:SS:MSMSMS TMZ,THD000,TRACE,"PlanHint: [
+@@
+-Leading((t2 t3))
++JoinHint:(t2 t3)
+@@
+-duplication hint:
+-error hint:
++]",
+@@
+-LOG:  pg_hint_plan:
++LOG:  YYYY-MM-DD HH:MM:SS:MSMSMS TMZ,THD000,TRACE,"PlanHint: [
+@@
+-Leading((t2 t3))
++JoinHint:(t2 t3)
+@@
+-duplication hint:
+-error hint:
++]",
+@@
+-LOG:  pg_hint_plan:
++LOG:  YYYY-MM-DD HH:MM:SS:MSMSMS TMZ,THD000,TRACE,"PlanHint: [
+@@
+-Leading((t1 t3))
++JoinHint:(t1 t3)
+@@
+-duplication hint:
+-error hint:
++]",
+@@
+-LOG:  pg_hint_plan:
++LOG:  YYYY-MM-DD HH:MM:SS:MSMSMS TMZ,THD000,TRACE,"PlanHint: [
+@@
+-Leading((t1 t3))
++JoinHint:(t1 t3)
+@@
+-duplication hint:
+-error hint:
++]",
+@@
+-LOG:  pg_hint_plan:
++LOG:  YYYY-MM-DD HH:MM:SS:MSMSMS TMZ,THD000,TRACE,"PlanHint: [
+@@
+-Leading((t1 t2))
++JoinHint:(t1 t2)
+@@
+-duplication hint:
+-error hint:
++]",
+@@
+-LOG:  pg_hint_plan:
++LOG:  YYYY-MM-DD HH:MM:SS:MSMSMS TMZ,THD000,TRACE,"PlanHint: [
+@@
+-Leading((t1 t2))
++JoinHint:(t1 t2)
+@@
+-duplication hint:
+-error hint:
++]",
+@@
+-LOG:  pg_hint_plan:
++LOG:  YYYY-MM-DD HH:MM:SS:MSMSMS TMZ,THD000,TRACE,"PlanHint: [
+@@
+-Leading((t2 t3))
++JoinHint:(t2 t3)
+@@
+-duplication hint:
+-error hint:
++]",
+@@
+-LOG:  pg_hint_plan:
++LOG:  YYYY-MM-DD HH:MM:SS:MSMSMS TMZ,THD000,TRACE,"PlanHint: [
+@@
+-Leading((t2 t3))
++JoinHint:(t2 t3)
+@@
+-duplication hint:
+-error hint:
++]",
+@@
+-LOG:  pg_hint_plan:
++LOG:  YYYY-MM-DD HH:MM:SS:MSMSMS TMZ,THD000,TRACE,"PlanHint: [
+@@
+-Leading((t1 t3))
++JoinHint:(t1 t3)
+@@
+-duplication hint:
+-error hint:
++]",
+@@
+-LOG:  pg_hint_plan:
++LOG:  YYYY-MM-DD HH:MM:SS:MSMSMS TMZ,THD000,TRACE,"PlanHint: [
+@@
+-Leading((t1 t3))
++JoinHint:(t1 t3)
+@@
+-duplication hint:
+-error hint:
++]",
+@@
+-LOG:  pg_hint_plan:
++LOG:  YYYY-MM-DD HH:MM:SS:MSMSMS TMZ,THD000,TRACE,"PlanHint: [
+@@
+-Leading((t1 t2))
++JoinHint:(t1 t2)
+@@
+-duplication hint:
+-error hint:
++]",
+@@
+-LOG:  pg_hint_plan:
++LOG:  YYYY-MM-DD HH:MM:SS:MSMSMS TMZ,THD000,TRACE,"PlanHint: [
+@@
+-Leading((t1 t2))
++JoinHint:(t1 t2)
+@@
+-duplication hint:
+-error hint:
++]",
+@@
+-LOG:  pg_hint_plan:
++LOG:  YYYY-MM-DD HH:MM:SS:MSMSMS TMZ,THD000,TRACE,"PlanHint: [
+@@
++JoinHint:((t5 t4) (t3 (t1 t2)))
+@@
+-Leading(((t5 t4) (t3 (t1 t2))))
+-duplication hint:
+-error hint:
++]",
+@@
+-LOG:  pg_hint_plan:
++LOG:  YYYY-MM-DD HH:MM:SS:MSMSMS TMZ,THD000,TRACE,"PlanHint: [
+@@
++JoinHint:(((t1 t2) t3) (t4 t5))
+@@
+-Leading((((t1 t2) t3) (t4 t5)))
+-duplication hint:
+-error hint:
++]",
+@@
+-LOG:  pg_hint_plan:
++LOG:  YYYY-MM-DD HH:MM:SS:MSMSMS TMZ,THD000,TRACE,"PlanHint: [
+@@
++JoinHint:((t5 t4) (t3 (t1 t2)))
+@@
+-Leading(((t5 t4) (t3 (t1 t2))))
+-duplication hint:
+-error hint:
++]",
+@@
+-LOG:  pg_hint_plan:
++LOG:  YYYY-MM-DD HH:MM:SS:MSMSMS TMZ,THD000,TRACE,"PlanHint: [
+@@
++JoinHint:(((t2 t1) t3) (t4 t5))
+@@
+-Leading((((t2 t1) t3) (t4 t5)))
+-duplication hint:
+-error hint:
++]",
+@@
+-LOG:  pg_hint_plan:
++LOG:  YYYY-MM-DD HH:MM:SS:MSMSMS TMZ,THD000,TRACE,"PlanHint: [
+@@
++JoinHint:((t5 t4) (t3 (t1 t2)))
+@@
+-Leading(((t5 t4) (t3 (t1 t2))))
+-duplication hint:
+-error hint:
++]",
+@@
+-LOG:  pg_hint_plan:
++LOG:  YYYY-MM-DD HH:MM:SS:MSMSMS TMZ,THD000,TRACE,"PlanHint: [
+@@
++JoinHint:(((t2 t1) t3) (t4 t5))
+@@
+-Leading((((t2 t1) t3) (t4 t5)))
+-duplication hint:
+-error hint:
++]",

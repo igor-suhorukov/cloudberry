@@ -94,24 +94,40 @@ static const char *const fault_type_names[] = {
  * (BufFileCreateTemp()), and a write to one -- as its buffer is written out
  * (BufFileDumpBuffer()), once a block, where Cloudberry's asks at each
  * BufFileWrite().
+ *
+ * And the points of the tests' build that are Cloudberry's faults under
+ * their own names, whose calls in Cloudberry say more than that they came:
+ * an autovacuum worker's before it vacuums a database, and its update of
+ * the database's row, which name the database, as a test's fault may; and
+ * a count of rows made past 2^32, which a "skip" asks for.
  */
+typedef enum GpPointArg
+{
+	POINT_ARG_NONE,				/* nothing */
+	POINT_ARG_SKIP,				/* a bool *, set for a "skip" */
+	POINT_ARG_NAMES,			/* a const char *[2]: the database, the table */
+} GpPointArg;
+
 static const struct
 {
 	const char *fault;
 	const char *point;
-	bool		skips;			/* the point's argument is a bool *: skip */
+	GpPointArg	arg;
 }			fault_points[] = {
-	{"before_xlog_xact_commit_prepared", "commit-after-delay-checkpoint", false},
-	{"onephase_transaction_commit", "transaction-commit-after-delay-checkpoint", false},
-	{"wal_sender_loop", "wal-sender-loop", false},
-	{"wal_sender_after_caughtup_within_range", "wal-sender-after-send", false},
-	{"walrecv_skip_flush", "walrecv-skip-flush", true},
-	{"sync_rep_query_die", "sync-rep-query-die", false},
-	{"sync_rep_query_cancel", "sync-rep-query-cancel", false},
-	{"exec_simple_query_start", "exec-simple-query-start", false},
-	{"exec_hashjoin_new_batch", "exec-hashjoin-new-batch", false},
-	{"workfile_creation_failure", "workfile-creation-failure", false},
-	{"workfile_write_failure", "workfile-write-failure", false},
+	{"before_xlog_xact_commit_prepared", "commit-after-delay-checkpoint", POINT_ARG_NONE},
+	{"onephase_transaction_commit", "transaction-commit-after-delay-checkpoint", POINT_ARG_NONE},
+	{"wal_sender_loop", "wal-sender-loop", POINT_ARG_NONE},
+	{"wal_sender_after_caughtup_within_range", "wal-sender-after-send", POINT_ARG_NONE},
+	{"walrecv_skip_flush", "walrecv-skip-flush", POINT_ARG_SKIP},
+	{"sync_rep_query_die", "sync-rep-query-die", POINT_ARG_NONE},
+	{"sync_rep_query_cancel", "sync-rep-query-cancel", POINT_ARG_NONE},
+	{"exec_simple_query_start", "exec-simple-query-start", POINT_ARG_NONE},
+	{"exec_hashjoin_new_batch", "exec-hashjoin-new-batch", POINT_ARG_NONE},
+	{"workfile_creation_failure", "workfile-creation-failure", POINT_ARG_NONE},
+	{"workfile_write_failure", "workfile-write-failure", POINT_ARG_NONE},
+	{"auto_vac_worker_before_do_autovacuum", "auto_vac_worker_before_do_autovacuum", POINT_ARG_NAMES},
+	{"vacuum_update_dat_frozen_xid", "vacuum_update_dat_frozen_xid", POINT_ARG_NAMES},
+	{"executor_run_high_processed", "executor_run_high_processed", POINT_ARG_SKIP},
 };
 
 /* The injection point a fault is attached to: its own name, or PostgreSQL's. */
@@ -124,14 +140,14 @@ fault_point_name(const char *fault)
 	return fault;
 }
 
-/* Does the fault's point take a skip? */
-static bool
-fault_point_skips(const char *fault)
+/* What the fault's point gives its callback. */
+static GpPointArg
+fault_point_arg(const char *fault)
 {
 	for (int i = 0; i < lengthof(fault_points); i++)
 		if (strcmp(fault_points[i].fault, fault) == 0)
-			return fault_points[i].skips;
-	return false;
+			return fault_points[i].arg;
+	return POINT_ARG_NONE;
 }
 #endif
 
@@ -400,12 +416,26 @@ gp_fault_injection_point(const char *name, const void *private_data,
 						 void *arg)
 {
 	const char *fault = private_data != NULL ? (const char *) private_data : name;
+	const char *database = "";
+	const char *table = "";
+	bool		skip_arg = false;
 
-	if (GpFaultTrigger(fault, "", "") == GP_FAULT_SKIP && arg != NULL
 #ifdef USE_INJECTION_POINTS
-		&& fault_point_skips(fault)
+	switch (arg != NULL ? fault_point_arg(fault) : POINT_ARG_NONE)
+	{
+		case POINT_ARG_SKIP:
+			skip_arg = true;
+			break;
+		case POINT_ARG_NAMES:
+			database = ((const char *const *) arg)[0];
+			table = ((const char *const *) arg)[1];
+			break;
+		case POINT_ARG_NONE:
+			break;
+	}
 #endif
-		)
+
+	if (GpFaultTrigger(fault, database, table) == GP_FAULT_SKIP && skip_arg)
 		*(bool *) arg = true;
 }
 

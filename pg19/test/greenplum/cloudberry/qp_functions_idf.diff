@@ -1,0 +1,129 @@
+@@
+-HINT:  No function matches the given name and argument types. You might need to add explicit type casts.
++DETAIL:  There is no function of that name.
+@@
+-ERROR:  aggregate function calls cannot be nested
++ median 
++--------
++      0
++      0
++      0
++      0
++      0
++      0
++      0
++      0
++      0
++      0
++      0
++      0
++      0
++      0
++      0
++      0
++      0
++      0
++      0
++      0
++      0
++      0
++      0
++      0
++      0
++      0
++      0
++      0
++      0
++      0
++      0
++      0
++      0
++      0
++      0
++      0
++      0
++      0
++      0
++      0
++      0
++      0
++      0
++      0
++      0
++      0
++      0
++      0
++      0
++      0
++      0
++      0
++      0
++      0
++      0
++      0
++      0
++      0
++      0
++      0
++      0
++      0
++      0
++      0
++      0
++      0
++      0
++      0
++      0
++      0
++      0
++      0
++      0
++      0
++      0
++      0
++      0
++      0
++      0
++      0
++      0
++      0
++      0
++      0
++      0
++      0
++      0
++      0
++      0
++      0
++      0
++      0
++      0
++      0
++      0
++      0
++      0
++      0
++      0
++      0
++(100 rows)
++
+@@
+-ERROR:  syntax error at or near "over"
+-LINE 1: ...entile_cont(0.2) within group (order by median(a) over()) fr...
++ERROR:  aggregate function calls cannot contain window function calls
++LINE 1: ...elect percentile_cont(0.2) within group (order by median(a) ...
+@@
+-HINT:  No function matches the given name and argument types. You might need to add explicit type casts.
++DETAIL:  No function of that name accepts the given argument types.
++HINT:  You might need to add explicit type casts.
+@@
+-                            pg_get_viewdef                             
+------------------------------------------------------------------------
+-                    FROM perct perct_1)) AS "median"                  +
+-            FROM perct)) AS "median";
+-  SELECT MEDIAN(( SELECT MEDIAN(( SELECT MEDIAN(perct_1.a) AS "median"+
++                                     pg_get_viewdef                                      
++-----------------------------------------------------------------------------------------
++                    FROM perct perct_1)) AS median                                      +
++            FROM perct)) AS median;
++  SELECT median(( SELECT median(( SELECT median((perct_1.a)::double precision) AS median+

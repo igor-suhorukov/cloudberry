@@ -17,6 +17,9 @@
 #   group the tests after it, to the next such line, are a group: each group
 #         has a cluster of its own, test_setup and gp_setup first, and the
 #         groups of a pass run side by side, each in the schedule's order.
+#         A group whose name begins "mirrors" has Cloudberry's demo cluster
+#         whole: a mirror for each segment, and a standby coordinator.  One
+#         whose name begins "tcp" has its nodes reach one another over TCP.
 #         The groups are cut by time, the ORCA pass's, and a test that reads
 #         what another made is in its group (bb_mpph's tables,
 #         bb_memory_quota's).  rpt_tpch has one of its own, m7c, in the
@@ -50,7 +53,7 @@ run  bitmapscan_ao
 run  case_gp
 run  limit_gp
 run  notin
-skip percentile  function percentile_cont(numeric, timestamp without time zone) does not exist; function percentile_cont(numeric, timestamp with time zone) does not exist
+run  percentile
 run  join_gp
 skip union_gp  UNION types text and integer cannot be matched
 run  gp_create_table
@@ -60,7 +63,7 @@ run  gpctas
 run  gpdist
 run  gpdist_opclasses
 run  gpdist_legacy_opclasses
-skip matrix  function sum(smallint[]) does not exist; function sum(integer[]) does not exist
+run  matrix
 run  sublink
 run  olap_setup
 skip complex  type "complex" does not exist; relation "complex_ttbl" does not exist
@@ -75,14 +78,14 @@ run  gpparams
 run  with_clause
 run  transient_types
 run  gp_rules
-skip motion_gp  row is too big: size 10032, maximum size 8160; syntax error at or near ")"
+skip motion_gp  row is too big: size 10032, maximum size 8160
 run  gp_pullup_expr
 skip cursor  the UPDATE after its DECLARE waits out the suite's minute for segment 0's writer, suspended at qe_got_snapshot_and_interconnect in the cursor's gather: Cloudberry reads a cursor's rows on a reader of their own, which suspends while the writer goes on to UPDATE, and the port on the session's writer: canceling statement due to user request
 run  gp_hashagg
 run  sequence_gp
 run  tidscan_gp
 run  agg_pushdown
-skip gp_array_agg  function gp_array_agg(integer) does not exist; function gp_array_agg(text) does not exist
+run  gp_array_agg
 run  gp_dqa
 run  subselect_gp
 run  subselect_gp2
@@ -138,7 +141,7 @@ run  part_external_table
 run  bb_memory_quota
 run  rpt
 run  rpt_joins
-skip bfv_cte  type "cte" does not exist; the fault get_shareinput_reference_done is none of the port's: canceling statement due to user request
+skip bfv_cte  unrecognized configuration parameter "debug_shareinput_xslice"; the faults get_shareinput_reference_delay_writer and get_shareinput_reference_done, which it holds and counts, are Cloudberry's ShareInputScan's, a plan of its planner's, where the port's shared scan is ORCA's, files each segment keeps: canceling statement due to user request
 run  bfv_joins
 run  bfv_subquery
 run  qp_misc
@@ -148,7 +151,7 @@ run  qp_dml_joins
 run  qp_select
 run  partition_prune_opfamily
 run  qp_join_union_all
-skip qp_full_join  function disable_xform(unknown) does not exist; function enable_xform(unknown) does not exist
+run  qp_full_join
 run  qp_with_clause
 run  qp_derived_table
 run  qp_bitmapscan
@@ -257,7 +260,7 @@ run  uao_dml/uao_dml_column
 run  ao_locks
 run  vacuum_full_ao
 run  vacuum_full_heap_bitmapindex
-skip vacuum_ao_aux_only  relation "ao_aux_only" does not exist; failed to inject fault: ERROR:  fault not set, fault name:'vacuum_rel_finished_one_relation'
+skip vacuum_ao_aux_only  syntax error at or near "vac_example_heap": VACUUM AO_AUX_ONLY is none of the port's, nor is the visibility map it vacuums a table's own, pg_appendonly's visimaprelid, which gp_ao keeps in one table of every table's
 skip ao_checksum_corruption  unrecognized configuration parameter "gp_appendonly_verify_block_checksums"
 skip AOCO_Compression  relation "gp_partition_template" does not exist
 run  AORO_Compression
@@ -273,23 +276,27 @@ run  uao_dml/uao_dml_unique_index_update_column
 
 # The tests the port had left for M7 (see the head of this file).
 group m7a
-skip autovacuum  unrecognized configuration parameter "debug_burn_xids"; the faults auto_vac_worker_before_do_autovacuum and vacuum_update_dat_frozen_xid are none of the port's: canceling statement due to user request
-skip autovacuum-segment  the faults auto_vac_worker_before_do_autovacuum and vacuum_update_dat_frozen_xid are none of the port's, and debug_burn_xids none of its settings: canceling statement due to user request
-skip autovacuum-template0-segment  the faults auto_vac_worker_before_do_autovacuum and vacuum_update_dat_frozen_xid are none of the port's, and debug_burn_xids none of its settings: canceling statement due to user request
+run  autovacuum
+run  autovacuum-segment
+run  autovacuum-template0-segment
 skip profile  differs: its \d+ of pg_authid and pg_roles shows Cloudberry's catalog columns, and pg_profile is Cloudberry's catalog: relation "pg_profile" does not exist
 skip pg_ext_aux  schema "pg_ext_aux" does not exist; relation "pg_ext_aux.extaux_t" does not exist
 run  pg_dump_binary_upgrade
-skip gp_dispatch_keepalives  could not find function "gp_keepalives_check" in file "regress.so"; spiexceptions.UndefinedFunction: function gp_keepalives_check() does not exist
+group tcp1
+run  gp_dispatch_keepalives
+group m7a
 skip copy_eol  could not open file "/tmp/copy_lf.file" for reading: No such file or directory; could not open file "/tmp/copy_cr.file" for reading: No such file or directory
 skip copy_encoding_error  segment reject limit reached, aborting operation
 run  dedupset
 run  disable_autovacuum
-skip python_processed64bit  differs: the fault executor_run_high_processed, which has the executor count past 2^32 rows, is none of the port's
+run  python_processed64bit  orca  differs under the planner: an INSERT's count is the coordinator's own, which the fault executor_run_high_processed makes 2^32 - 11, where Cloudberry's is the sum of each segment's so made, 3 x (2^32 - 11)
 run  enable_autovacuum
 run  log_guc
 run  instr_in_shmem_setup
 run  instr_in_shmem
-skip createdb  function force_mirrors_to_catch_up() does not exist
+group mirrors1
+skip createdb  in a group with mirrors: the faults create_db_after_file_copy and after_xlog_create_database, in CREATE DATABASE, and end_prepare_two_phase are none of the port's
+group m7a
 run  gp_aggregates_costs
 run  gp_metadata
 run  variadic_parameters
@@ -303,14 +310,16 @@ skip combocid_gp  differs: a segment's command ids for the rows a transaction wr
 skip gp_prepared_xacts  differs: its utility-mode session asks for -c gp_role=utility, a setting PostgreSQL 19 refuses a connection for
 run  gp_backend_info
 run  gp_locale
-skip spi_processed64bit  differs: the fault executor_run_high_processed, which has the executor count past 2^32 rows, is none of the port's
-skip gp_tablespace_with_faults  function force_mirrors_to_catch_up() does not exist
-skip gp_tablespace  function gp_tablespace_location(oid) does not exist; function get_tablespace_version_directory_name() does not exist
-skip temp_tablespaces  the faults sisc_xslice_temp_files and hashagg_spill_temp_files are none of the port's: canceling statement due to user request
+skip spi_processed64bit  differs: an INSERT's count is the coordinator's own, which the fault executor_run_high_processed makes 2^32 - 11, where Cloudberry's is the sum of each segment's so made -- an UPDATE's and a DELETE's are that sum, as there -- and an INSERT ... SELECT of 10,000 rows reaches the fault's threshold, which no segment's share of it does
+group mirrors1
+skip gp_tablespace_with_faults  in a group with mirrors: the faults after_xlog_create_tablespace and after_xlog_tblspc_drop, in CREATE and DROP TABLESPACE, and before_xlog_xact_prepare and after_xlog_xact_prepare_flushed are none of the port's
+skip gp_tablespace  unlogged append-optimized tables are not supported; unrecognized parameter "content1": a tablespace's location of one segment's own is none of the port's
+group m7a
+skip temp_tablespaces  its statement_mem of 1MB leaves the hash aggregate unspilled here, and its CTEs are a shared scan across slices under ORCA alone: gp_wait_until_triggered_fault() of sisc_xslice_temp_files and hashagg_spill_temp_files, faults the port has not, waits out the suite's minute
 run  default_tablespace
 run  leastsquares
 run  opr_sanity_gp
-skip decode_expr  function decode(boolean) does not exist; function decode(integer) does not exist
+run  decode_expr
 run  gpcopy_encoding
 run  gp_create_view
 run  window_views
@@ -334,9 +343,9 @@ skip toast  spiexceptions.UndefinedTable: relation "pg_toast.pg_toast_25090" doe
 run  misc_jiras
 run  write_gang_idle_in_transaction_session_timeout
 skip gp_connections  differs: a primary takes a direct connection, where Cloudberry refuses it: This database instance is running as a primary segment in a Cloudberry cluster and does not permit direct connections
-skip gp_dump_query_oids  function gp_dump_query_oids(unknown) does not exist
+run  gp_dump_query_oids
 run  analyze
-skip gp_owner_permission  relation "pg_stat_operations" does not exist
+run  gp_owner_permission
 run  incremental_analyze
 run  regex_gp
 run  dispatch_encoding
@@ -358,7 +367,7 @@ run  icudp/queue_depth_combination_capacity
 run  icudp/queue_depth_combination_loss_advance
 port icudp_off
 skip event_trigger_gp  differs: CREATE EXTERNAL TABLE fires the event triggers as CREATE FOREIGN TABLE, which the port makes it, and CREATE PROTOCOL and DROP PROTOCOL fire none
-skip deadlock  canceling statement due to user request; function gp_dist_wait_status() does not exist
+run  deadlock  orca  under the planner, its left join of l and r by a nested loop, which the planner's route runs on the coordinator over both tables gathered, 100,000 rows each, runs past the suite's minute
 skip deadlock2  differs: Cloudberry's NOTICE that a slice prefetches a join's qual is not the port's
 run  workfile/hashagg_spill
 run  workfile/hashjoin_spill
@@ -398,7 +407,7 @@ skip create_am_gp  function ao_row_tableam_handler(internal) does not exist; fun
 skip cbdb_optimizer_test  unrecognized configuration parameter "gp_enable_ao_indexscan"
 run  gp_runtime_filter
 skip db_size_functions  database with OID 9999 does not exist; tablespace with OID 9999 does not exist
-skip cbdb_db_size_functions  function cbdb_relation_size(regclass[]) does not exist; function cbdb_relation_size(oid[], unknown) does not exist
+run  cbdb_db_size_functions
 run  eagerfree
 skip alter_table_set  syntax error at or near "on"; unrecognized configuration parameter "gp_enable_segment_copy_checking"
 skip alter_table_gp  differs: Cloudberry refuses to alter a column of a primary key, a unique constraint or the distribution key ("cannot alter column with primary key or unique constraint"), which the port alters
@@ -410,24 +419,24 @@ run  instr_in_shmem_verify
 skip partition_locking  differs: the locks a statement takes on a partitioned table's parts, and on which nodes
 run  vacuum_gp
 run  vacuum_fsm_nondefault_tablespace
-skip pg_stat  relation "gp_stat_all_tables_summary" does not exist; relation "gp_stat_user_tables_summary" does not exist
+run  pg_stat
 skip bfv_partition  relation "gp_partition_template" does not exist; differs: autovacuum on in its group, psql 19's list of a partitioned table's partitions, PostgreSQL 19's DETAIL of an operator it cannot choose, and the MAINTAIN privilege, m, in its ACL
 run  qp_misc_rio
 skip bfv_partition_plans  differs: a count of its plan's partition selections is 0, where Cloudberry's is 2
 run  gp_covering_index
-skip planhints  could not access file "pg_hint_plan": No such file or directory
-skip rowhints  could not access file "pg_hint_plan": No such file or directory; function disable_xform(unknown) does not exist
-skip joinhints  could not access file "pg_hint_plan": No such file or directory
+run  planhints
+run  rowhints
+run  joinhints
 run  qp_indexscan  planner  differs under ORCA: its plans of index scans over partitions
 run  gp_index_costing
-skip pgstat_qd_tabstat  relation "gp_stat_all_tables_summary" does not exist; syntax error at or near "on"
-skip dispatch  unrecognized configuration parameter "gp_max_plan_size"; could not find function "cleanupAllGangs" in file "regress.so"
+skip pgstat_qd_tabstat  syntax error at or near "on": its COPY ... ON SEGMENT, to and from a file of each segment, is none of the port's
+skip dispatch  the fault DoCopyToFail is none of the port's; unrecognized configuration parameter "gp_max_plan_size"; and its gangs' faults (process_startup_packet, send_qe_details_init_backend), retries (gp_gang_creation_retry_count) and regress.so's hasGangsExist() and hasBackendsExist()
 run  wrkloadadmin
 run  trig
 skip role  syntax error at or near "only"
 skip portals_updatable  cursor "c" is not positioned on a row; cursor "c" is not a simply updatable scan of table "portals_updatable_rank_1_prt_2"
 skip plpgsql_cache  differs: how often a function's NOTICE is raised, the segments running it where Cloudberry's coordinator does
-skip timeseries  function interval_interval_div(interval, interval) does not exist; function interval_bound(integer, integer) does not exist
+run  timeseries
 run  pg_stat_last_operation
 run  pg_stat_last_shoperation
 run  gp_numeric_agg
@@ -451,7 +460,7 @@ group m7a
 run  rpt_returning
 skip bfv_planner  differs: two counts of what its plans read are 27 and 9, where Cloudberry's are 33 and 11
 run  bfv_legacy
-skip bfv_temp  syntax error at or near ")"; relation "n" does not exist
+skip bfv_temp  differs: a session's temporary schemas outlive it, pg_temp_N and pg_toast_temp_N, which PostgreSQL keeps for the next session in that backend's slot, where Cloudberry drops them as the session ends
 run  bfv_dml
 run  tpcds_q04
 skip qp_olap_mdqa  differs: GROUP_ID() numbers each grouping set's copies 0, 1, and so on, where Cloudberry's numbers them as its Agg's phases meet them -- in the rollups and hashed sets its planner arranges them into -- and gives some rows 2 and 3 where the port gives 0 and 1
@@ -466,24 +475,24 @@ run  qp_executor
 skip qp_olap_windowerr  argument of RANGE must not contain variables; argument of ROWS must not contain variables
 skip qp_olap_window  argument of RANGE must not contain variables; argument of ROWS must not contain variables
 run  qp_dropped_cols
-skip qp_with_functional_inlining  UPDATE is not allowed in a non-volatile function; unrecognized configuration parameter "gp_cte_sharing"
-skip qp_with_functional_noinlining  UPDATE is not allowed in a non-volatile function; unrecognized configuration parameter "gp_cte_sharing"
-run  qp_functions_in_contexts_setup
-run  qp_misc_rio_join_small
+skip qp_with_functional_inlining  differs: a function's write in a segment's slice runs, where Cloudberry refuses it (function cannot execute on a QE slice because it issues a non-SELECT statement), and one declared stable PostgreSQL 19 refuses to write at all: UPDATE is not allowed in a non-volatile function
+skip qp_with_functional_noinlining  differs: a function's write in a segment's slice runs, where Cloudberry refuses it (function cannot execute on a QE slice because it issues a non-SELECT statement), and one declared stable PostgreSQL 19 refuses to write at all: UPDATE is not allowed in a non-volatile function
 port gp_partition_maint
 group m7b
+run  qp_functions_in_contexts_setup
+run  qp_misc_rio_join_small
 run  qp_gist_indexes2
 run  qp_gist_indexes3
 run  qp_gist_indexes4  orca  under the planner, its join of two tables of 50,000 polygons by a GiST operator is a Nested Loop on the coordinator over the two tables' gathers, 2.5 billion comparisons, past the suite's 60 seconds: the planner's route probes no segment's index for each outer row, which ORCA's plan does in a second
-skip qp_query_execution  differs: two counts of its plans' nodes are 0, where Cloudberry's are 1
+run  qp_query_execution  orca  differs under the planner: two counts of its plans' nodes are 0, where Cloudberry's are 1
 skip qp_functions_in_from  UPDATE is not allowed in a non-volatile function
 skip qp_functions_in_select  UPDATE is not allowed in a non-volatile function; function cannot execute on a QE slice because it accesses relation "qp_funcs_in_select.bar"
 skip qp_functions_in_subquery  UPDATE is not allowed in a non-volatile function; function cannot execute on a QE slice because it accesses relation "qp_funcs_in_subquery.bar"
-skip qp_functions_in_subquery_column  UPDATE is not allowed in a non-volatile function
+run  qp_functions_in_subquery_column  orca  under the planner, its functions that read a distributed table run on the coordinator over its rows gathered, where Cloudberry refuses to run them on a QE slice (function cannot execute on a QE slice because it accesses relation), and a stable one's UPDATE is refused as PostgreSQL 19 refuses it: UPDATE is not allowed in a non-volatile function
 skip qp_functions_in_subquery_constant  UPDATE is not allowed in a non-volatile function; function cannot execute on a QE slice because it accesses relation "qp_funcs_in_subquery_constant.bar"
-skip qp_functions_in_with  UPDATE is not allowed in a non-volatile function
+run  qp_functions_in_with  orca  under the planner, its functions that read a distributed table run on the coordinator over its rows gathered, where Cloudberry refuses to run them on a QE slice (function cannot execute on a QE slice because it accesses relation), and a stable one's UPDATE is refused as PostgreSQL 19 refuses it: UPDATE is not allowed in a non-volatile function
 run  qp_dpe  planner  differs under ORCA: which of its plans eliminate partitions while they run
-skip qp_functions_idf  function percentile_cont(numeric, timestamp with time zone) does not exist; function percentile_cont(numeric, date) does not exist
+run  qp_functions_idf
 run  qp_regexp
 skip qp_orca_fallback  differs: an UPDATE of a partitioned table with a foreign partition runs, where Cloudberry refuses it: cannot update foreign table "p2_ext"
 run  gp_sync_lc_gucs
@@ -498,15 +507,17 @@ run  window_parallel
 skip vacuum_full_freeze_heap  differs: a heap's size in 8 kB pages, where Cloudberry's expected output counts its 32 kB blocks
 skip vacuum_full_heap  differs: a heap's size in 8 kB pages, where Cloudberry's expected output counts its 32 kB blocks
 skip autostats  unrecognized configuration parameter "log_autostats"
-skip dpe  function disable_xform(unknown) does not exist; function enable_xform(unknown) does not exist
+run  dpe
 run  table_statistics
 skip fts_error  differs: two of its checks that FTS marked a node down answer f, and Cloudberry's DEBUG trace of the probe's statement is not the port's
 skip psql_gp_commands  differs: psql 19's \dx has a Default version column, and Cloudberry's psql describes its storage and external tables in its own way
 skip pg_resetwal  differs: PostgreSQL 19's pg_resetwal has no -k, the data checksum version Cloudberry's sets
 run  dropdb_check_shared_buffer_cache
-skip gp_upgrade_cornercases  cannot drop schema public because other objects depend on it: the database it makes is template1's copy, where gp_setup made gp_orca and gp_inject_fault in schema public
+run  gp_upgrade_cornercases
 skip temp_relation  differs: a temporary table's file is t<proc number>_<relfilenode> in PostgreSQL 19, and the test looks for Cloudberry's t_<relfilenode>, which it finds on no node, before DROP TABLE and after
-skip alter_db_set_tablespace  function force_mirrors_to_catch_up() does not exist; spiexceptions.UndefinedFunction: function get_tablespace_version_directory_name() does not exist
+group mirrors1
+skip alter_db_set_tablespace  in a group with mirrors: the faults inside_move_db_transaction and after_drop_database_directories, in ALTER DATABASE ... SET TABLESPACE, and ckpt_loop_begin and ckpt_loop_end are none of the port's, nor is the move of each segment's database
+group m7b
 run  oid_wraparound
 skip fts_recovery_in_progress  canceling statement due to user request
 skip gangsize  differs: the gangs its statements are dispatched to, by Cloudberry's INFO lines, are not the sizes Cloudberry makes them
@@ -522,10 +533,10 @@ run  matview_data
 skip directory_table  relation "gp_storage_server" does not exist; syntax error at or near "DATA"
 skip motion_socket  differs: its check_motion_sockets() looks up each segment's address, which on this suite's clusters is a socket's directory: socket.gaierror: [Errno -2] Name or service not known
 run  ic_proxy_socket
-skip subtrx_overflow  relation "gp_suboverflowed_backend" does not exist
+run  subtrx_overflow
 run  bfv_meta_track
 skip bfv_copy  segment reject limit reached, aborting operation
 skip dynamic_table  function pg_catalog.pg_get_dynamic_table_schedule(oid) does not exist; relation "pg_dynamic_tables" does not exist -- and psql 19's \d+ calls a dynamic table a materialized view, as DROP ... CASCADE does, its job runs REFRESH MATERIALIZED VIEW where Cloudberry's runs REFRESH DYNAMIC TABLE, the names of its jobs are not reserved, and its wait of 80 seconds for its job is cancelled after 60
 run  hba_conf
 skip dboptions  differs: the psql its shell commands run connects to /tmp's socket, where this suite's nodes have directories of their own
-skip gp_log_mem_dispatch  function gp_log_backend_memory_contexts(integer) does not exist; function gp_log_backend_memory_contexts(integer, integer) does not exist
+run  gp_log_mem_dispatch

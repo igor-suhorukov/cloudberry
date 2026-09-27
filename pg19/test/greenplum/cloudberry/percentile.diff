@@ -1,0 +1,48 @@
+@@
+-     MEDIAN(a) AS "median",                                                                                                 +
++     median((a)::double precision) AS median,                                                                               +
+@@
+-             pg_get_viewdef              
+------------------------------------------
+-     MEDIAN((a)::double precision) AS m2+
++                pg_get_viewdef                
++----------------------------------------------
++     median((a)::double precision) AS m2     +
+@@
+-  SELECT MEDIAN(a) AS m1,               +
++  SELECT median((a)::double precision) AS m1,+
+@@
+-HINT:  No function matches the given name and argument types. You might need to add explicit type casts.
++DETAIL:  No function of that name accepts the given number of arguments.
+@@
+-ERROR:  syntax error at or near "over"
++ERROR:  column "perct.a" must appear in the GROUP BY clause or be used in an aggregate function
+@@
+-                         ^
++                      ^
+@@
+-ERROR:  aggregate function calls cannot be nested
++ percentile_disc 
++-----------------
++               0
++(1 row)
++
+@@
+-HINT:  No function matches the given name and argument types. You might need to add explicit type casts.
++DETAIL:  No function of that name accepts the given number of arguments.
+@@
+-ERROR:  invalid input syntax for type double precision: "text"
++ERROR:  function median(unknown) is not unique
+@@
+-                      ^
++               ^
++DETAIL:  Could not choose a best candidate function.
++HINT:  You might need to add explicit type casts.
+@@
+-HINT:  No function matches the given name and argument types. You might need to add explicit type casts.
++DETAIL:  No function of that name accepts the given argument types.
++HINT:  You might need to add explicit type casts.
+@@
+-HINT:  No function matches the given name and argument types. You might need to add explicit type casts.
++DETAIL:  No function of that name accepts the given argument types.
++HINT:  You might need to add explicit type casts.

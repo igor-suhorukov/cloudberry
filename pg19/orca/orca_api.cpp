@@ -59,6 +59,7 @@ extern "C"
 #include <xercesc/util/XercesVersion.hpp>
 
 #include "CMemoryPoolPallocManager.h"
+#include "COptTasks.h"
 #include "gp_orca_api.h"
 
 extern "C"
@@ -231,6 +232,21 @@ GpOrcaXformName(int xform_id)
 		factory->Pxf((gpopt::CXform::EXformId) xform_id);
 
 	return xform == NULL ? NULL : xform->SzId();
+}
+
+//---------------------------------------------------------------------------
+//	A rule turned off or on by name: COptTasks::SetXform(), which the
+//	session's array of turned-off rules keeps (optimizer_xforms), and which
+//	the trace flags of each query it plans carry.  ORCA is brought up first,
+//	as Cloudberry's disable_xform() does, for the factory the name is looked
+//	up in; a name is found by its string, not an id, so a retired rule's is
+//	simply none.
+//---------------------------------------------------------------------------
+extern "C" bool
+GpOrcaSetXform(const char *name, bool disable)
+{
+	GpOrcaEnsureInitialized();
+	return COptTasks::SetXform(const_cast<char *>(name), disable);
 }
 
 //---------------------------------------------------------------------------

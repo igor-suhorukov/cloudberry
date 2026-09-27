@@ -34,7 +34,9 @@
  *	   core does.  Rule 4 of "Core patches that keep vanilla behaviour" forbids
  *	   new core surface, and a hint extension can set a variable in gp_orca
  *	   just as well -- it has to load gp_orca to be of any use in any case.
- *	   Nothing in the port sets it yet; pg_hint_plan is Track A's.
+ *	   pg_hint_plan sets it (pg19/modules/pg_hint_plan), and finds it by the
+ *	   rendezvous variable of its name, which gp_orca_planner.c publishes:
+ *	   the module's symbols are hidden.
  *
  *	 * optimize_query() says why it made no plan.  Cloudberry's reports a
  *	   fallback itself and returns NULL; gp_orca's planner hook counts every
