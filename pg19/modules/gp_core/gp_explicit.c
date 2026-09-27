@@ -85,7 +85,8 @@
  *	   UPDATE t AS gp_t SET a = gp_s.gp_c1, ...
  *		 FROM (VALUES ($1::text, $2::oid, $3::int8, $4::type, ...), ...)
  *			  AS gp_s (gp_old, gp_toid, gp_n, gp_c1, ...)
- *		WHERE gp_t::text = gp_s.gp_old AND gp_t.tableoid = gp_s.gp_toid
+ *		WHERE ROW(gp_t.a, ...)::text = gp_s.gp_old
+ *		  AND gp_t.tableoid = gp_s.gp_toid
  *
  * Two copies of one row on a segment are changed together, which is right:
  * Cloudberry does not show a replicated table's system columns (gp_segment.c),
@@ -893,6 +894,39 @@ cast_to(Oid type, int32 typmod)
 	return format_type_with_typemod(type, typmod);
 }
 
+/*
+ * What a replicated table's row is found by on a segment: "<its text> =
+ * gp_s.gp_old", its text as a ROW() of its columns, which prints as the row
+ * itself does, gp_t::text, and as the text of it the coordinator read
+ * (explicit_rows_by_content()).  Not the whole-row reference itself: where
+ * the table's access method takes UPDATE's old row from the plan (O20, PAX
+ * and gp_ao), the plan has a whole-row column of RECORD, which setrefs.c
+ * would give a reference of the table's row type too, refused as the join
+ * of two rows or more reads it.
+ */
+static char *
+row_text_match(Relation rel)
+{
+	TupleDesc	desc = RelationGetDescr(rel);
+	StringInfoData buf;
+	bool		first = true;
+
+	initStringInfo(&buf);
+	appendStringInfoString(&buf, "ROW(");
+	for (int i = 0; i < desc->natts; i++)
+	{
+		Form_pg_attribute att = TupleDescAttr(desc, i);
+
+		if (att->attisdropped)
+			continue;
+		appendStringInfo(&buf, "%sgp_t.%s", first ? "" : ", ",
+						 quote_identifier(NameStr(att->attname)));
+		first = false;
+	}
+	appendStringInfoString(&buf, ")::pg_catalog.text = gp_s.gp_old");
+	return buf.data;
+}
+
 
 /* ------------------------------------------------------------------------- */
 /* MERGE                                                                     */
@@ -939,15 +973,17 @@ merge_shape(ExplicitState *state, CmdType cmd, List *setcols, TupleDesc desc)
 		for (int k = 0; k < i; k++)
 			appendStringInfo(&tail, ", gp_c%d", k + 1);
 		appendStringInfo(&tail, ") WHERE %s AND gp_t.tableoid = gp_s.gp_toid",
-						 state->by_content ? "gp_t::pg_catalog.text = gp_s.gp_old"
+						 state->by_content ? row_text_match(state->target)
 						 : "gp_t.ctid = gp_s.gp_ctid");
 	}
 	else if (cmd == CMD_DELETE)
 	{
 		appendStringInfo(&head, "DELETE FROM %s%s AS gp_t USING (VALUES ", only, name);
-		appendStringInfoString(&tail, state->by_content
-							   ? ") AS gp_s (gp_old, gp_toid, gp_n) WHERE gp_t::pg_catalog.text = gp_s.gp_old AND gp_t.tableoid = gp_s.gp_toid"
-							   : ") AS gp_s (gp_ctid, gp_toid, gp_n) WHERE gp_t.ctid = gp_s.gp_ctid AND gp_t.tableoid = gp_s.gp_toid");
+		if (state->by_content)
+			appendStringInfo(&tail, ") AS gp_s (gp_old, gp_toid, gp_n) WHERE %s AND gp_t.tableoid = gp_s.gp_toid",
+							 row_text_match(state->target));
+		else
+			appendStringInfoString(&tail, ") AS gp_s (gp_ctid, gp_toid, gp_n) WHERE gp_t.ctid = gp_s.gp_ctid AND gp_t.tableoid = gp_s.gp_toid");
 	}
 	else
 	{
@@ -1200,7 +1236,7 @@ explicit_begin(CustomScanState *node, EState *estate, int eflags)
 		for (i = 0; i < state->nvals; i++)
 			appendStringInfo(&tail, ", gp_c%d", i + 1);
 		appendStringInfo(&tail, ") WHERE %s AND gp_t.tableoid = gp_s.gp_toid",
-						 state->by_content ? "gp_t::pg_catalog.text = gp_s.gp_old"
+						 state->by_content ? row_text_match(state->target)
 						 : "gp_t.ctid = gp_s.gp_ctid");
 	}
 	else if (state->operation == CMD_DELETE)
@@ -1209,9 +1245,11 @@ explicit_begin(CustomScanState *node, EState *estate, int eflags)
 		appendStringInfo(&head, "DELETE FROM %s%s AS gp_t USING (VALUES ",
 						 state->only ? "ONLY " : "",
 						 GpDispatchRelationName(RelationGetRelid(state->target)));
-		appendStringInfoString(&tail, state->by_content
-							   ? ") AS gp_s (gp_old, gp_toid, gp_n) WHERE gp_t::pg_catalog.text = gp_s.gp_old AND gp_t.tableoid = gp_s.gp_toid"
-							   : ") AS gp_s (gp_ctid, gp_toid, gp_n) WHERE gp_t.ctid = gp_s.gp_ctid AND gp_t.tableoid = gp_s.gp_toid");
+		if (state->by_content)
+			appendStringInfo(&tail, ") AS gp_s (gp_old, gp_toid, gp_n) WHERE %s AND gp_t.tableoid = gp_s.gp_toid",
+							 row_text_match(state->target));
+		else
+			appendStringInfoString(&tail, ") AS gp_s (gp_ctid, gp_toid, gp_n) WHERE gp_t.ctid = gp_s.gp_ctid AND gp_t.tableoid = gp_s.gp_toid");
 	}
 	else if (state->operation == CMD_MERGE)
 		explicit_begin_merge(state, policy);
