@@ -519,7 +519,7 @@ run  ic_proxy_socket
 skip subtrx_overflow  relation "gp_suboverflowed_backend" does not exist
 run  bfv_meta_track
 skip bfv_copy  segment reject limit reached, aborting operation
-skip dynamic_table  a dynamic table needs the task scheduler; relation "pg_task" does not exist
+skip dynamic_table  function pg_catalog.pg_get_dynamic_table_schedule(oid) does not exist; relation "pg_dynamic_tables" does not exist -- and psql 19's \d+ calls a dynamic table a materialized view, as DROP ... CASCADE does, its job runs REFRESH MATERIALIZED VIEW where Cloudberry's runs REFRESH DYNAMIC TABLE, the names of its jobs are not reserved, and its wait of 80 seconds for its job is cancelled after 60
 run  hba_conf
 skip dboptions  differs: the psql its shell commands run connects to /tmp's socket, where this suite's nodes have directories of their own
 skip gp_log_mem_dispatch  function gp_log_backend_memory_contexts(integer) does not exist; function gp_log_backend_memory_contexts(integer, integer) does not exist
