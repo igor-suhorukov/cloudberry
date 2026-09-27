@@ -323,26 +323,6 @@
 + relation | ExclusiveLock | t       | t_lockmods1 
 +(2 rows)
 @@
-- locktype | mode          | granted | relation   
------------+---------------+---------+------------
-- relation | ExclusiveLock | t       | t_lockmods 
--(1 row)
-+ locktype | mode            | granted | relation   
-+----------+-----------------+---------+------------
-+ relation | AccessShareLock | t       | t_lockmods 
-+ relation | ExclusiveLock   | t       | t_lockmods 
-+(2 rows)
-@@
-- locktype | mode          | granted | relation   
------------+---------------+---------+------------
-- relation | ExclusiveLock | t       | t_lockmods 
--(1 row)
-+ locktype | mode            | granted | relation   
-+----------+-----------------+---------+------------
-+ relation | AccessShareLock | t       | t_lockmods 
-+ relation | ExclusiveLock   | t       | t_lockmods 
-+(2 rows)
-@@
 - locktype | mode          | granted | relation          
 -----------+---------------+---------+-------------------
 - relation | ExclusiveLock | t       | t_lockmods_upsert 
@@ -351,26 +331,6 @@
 +----------+-----------------+---------+-------------------
 + relation | AccessShareLock | t       | t_lockmods_upsert 
 + relation | ExclusiveLock   | t       | t_lockmods_upsert 
-+(2 rows)
-@@
-- locktype | mode          | granted | relation   
------------+---------------+---------+------------
-- relation | ExclusiveLock | t       | t_lockmods 
--(1 row)
-+ locktype | mode            | granted | relation   
-+----------+-----------------+---------+------------
-+ relation | AccessShareLock | t       | t_lockmods 
-+ relation | ExclusiveLock   | t       | t_lockmods 
-+(2 rows)
-@@
-- locktype | mode          | granted | relation   
------------+---------------+---------+------------
-- relation | ExclusiveLock | t       | t_lockmods 
--(1 row)
-+ locktype | mode            | granted | relation   
-+----------+-----------------+---------+------------
-+ relation | AccessShareLock | t       | t_lockmods 
-+ relation | ExclusiveLock   | t       | t_lockmods 
 +(2 rows)
 @@
 - locktype | mode          | granted | relation          
@@ -1102,18 +1062,15 @@
 + relation | ExclusiveLock | t       | t_lockmods 
 +(1 row)
 @@
-- locktype | mode          | granted | relation                        
------------+---------------+---------+---------------------------------
-- relation | ExclusiveLock | t       | t_lockmods_part_tbl_dml_1_prt_1 
--(1 row)
-+ locktype | mode            | granted | relation                        
-+----------+-----------------+---------+---------------------------------
-+ relation | AccessShareLock | t       | t_lockmods_part_tbl_dml_1_prt_1 
-+ relation | ExclusiveLock   | t       | t_lockmods_part_tbl_dml_1_prt_1 
-+(2 rows)
-@@
+- locktype | mode            | granted | relation                        
+-----------+-----------------+---------+---------------------------------
 - relation | AccessShareLock | t       | t_lockmods_part_tbl_dml         
-+ relation | AccessShareLock | t       | t_lockmods_part_tbl_dml_1_prt_1 
+- relation | ExclusiveLock   | t       | t_lockmods_part_tbl_dml_1_prt_1 
+-(2 rows)
++ locktype | mode          | granted | relation                        
++----------+---------------+---------+---------------------------------
++ relation | ExclusiveLock | t       | t_lockmods_part_tbl_dml_1_prt_1 
++(1 row)
 @@
 -  'child' => [
 -    {
@@ -1374,16 +1331,6 @@
 -  'sendsize' => 3,
 -  'short' => 'Gather Motion'
 +  'short' => 'Nested Loop'
-@@
-+ relation | AccessShareLock  | t       | t_lockmods 
-@@
--(1 row)
-+(2 rows)
-@@
-+ relation | AccessShareLock  | t       | t_lockmods 
-@@
--(1 row)
-+(2 rows)
 @@
 + relation | AccessShareLock  | t       | t_lockmods_upsert 
 @@
@@ -1428,16 +1375,6 @@
 +----------+-----------------+---------+------------
 + relation | AccessShareLock | t       | t_lockmods 
 + relation | RowShareLock    | t       | t_lockmods 
-+(2 rows)
-@@
-+ relation | AccessShareLock  | t       | t_lockmods 
-@@
--(1 row)
-+(2 rows)
-@@
-+ relation | AccessShareLock  | t       | t_lockmods 
-@@
--(1 row)
 +(2 rows)
 @@
 + relation | AccessShareLock  | t       | t_lockmods_upsert 
@@ -2143,13 +2080,10 @@
 -  'short' => 'Gather Motion'
 +  'short' => 'Sort'
 @@
-+ relation | AccessShareLock  | t       | t_lockmods_part_tbl_dml_1_prt_1 
-@@
--(1 row)
-+(2 rows)
-@@
 - relation | AccessShareLock  | t       | t_lockmods_part_tbl_dml         
-+ relation | AccessShareLock  | t       | t_lockmods_part_tbl_dml_1_prt_1 
+@@
+-(2 rows)
++(1 row)
 @@
 - schemaname | tablename     | attname | inherited | null_frac | avg_width | n_distinct | most_common_vals | most_common_freqs | histogram_bounds                                 | correlation | most_common_elems | most_common_elem_freqs | elem_count_histogram 
 -------------+---------------+---------+-----------+-----------+-----------+------------+------------------+-------------------+--------------------------------------------------+-------------+-------------------+------------------------+----------------------

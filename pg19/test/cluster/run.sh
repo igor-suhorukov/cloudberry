@@ -917,6 +917,39 @@ a\b|\N' ] && [ "$(cat "$ROOT/ce_prog.txt" 2>&1)" = "to a program" ] \
 	[ "$out" = "87 10|sales_1_prt_3 11|sales_1_prt_3 12|sales_1_prt_3 3 " ] \
 		&& ok "a partitioned table's DELETE, and an UPDATE that moves rows to another partition" \
 		|| notok "writes of a partitioned table" "$out"
+	# ... sent to the segments whole, as a plain table's, where it reads only
+	# the table and every table it writes is distributed as the one it names
+	# -- the planner's one partition alone, or several: each segment finds
+	# each row's partition, and moves a row whose partition key changes into
+	# another, one whose columns are in another order among them.  The rows
+	# stay on their segments, and come out as an unpartitioned twin's do.  A
+	# partition is always distributed as its table; an inheritance child
+	# distributed otherwise leaves the statement to the explicit write.
+	q 0 "CREATE TABLE pdw (a int, b int, c int) DISTRIBUTED BY (a) PARTITION BY RANGE (b);
+	     CREATE TABLE pdw_1 PARTITION OF pdw FOR VALUES FROM (0) TO (100);
+	     CREATE TABLE pdw_2 PARTITION OF pdw FOR VALUES FROM (100) TO (200);
+	     CREATE TABLE pdw_3 (c int, b int, a int) DISTRIBUTED BY (a);
+	     ALTER TABLE pdw ATTACH PARTITION pdw_3 FOR VALUES FROM (200) TO (300);
+	     CREATE TABLE pdw_twin (a int, b int, c int) DISTRIBUTED BY (a);
+	     INSERT INTO pdw SELECT g, g % 300, g FROM generate_series(1, 3000) g;
+	     INSERT INTO pdw_twin SELECT * FROM pdw;" >/dev/null 2>&1
+	plans=""
+	for sql in "UPDATE %s SET c = c + 1 WHERE b < 50;" "UPDATE %s SET b = b + 150 WHERE b >= 50 AND b < 150;" \
+		"DELETE FROM %s WHERE a %% 10 = 0;"; do
+		# shellcheck disable=SC2059
+		plans="$plans$(q 0 "EXPLAIN (COSTS OFF) $(printf "$sql" pdw)" | head -1)|"
+		# shellcheck disable=SC2059
+		q 0 "$(printf "$sql" pdw) $(printf "$sql" pdw_twin)" >/dev/null
+	done
+	out=$(q 0 "SELECT string_agg(k || ':' || n || ':' || s, ' ' ORDER BY k) FROM (SELECT b / 100 AS k, count(*) n, sum(c) s FROM pdw GROUP BY 1) x;")
+	out2=$(q 0 "SELECT string_agg(k || ':' || n || ':' || s, ' ' ORDER BY k) FROM (SELECT b / 100 AS k, count(*) n, sum(c) s FROM pdw_twin GROUP BY 1) x;")
+	w1=$(q 1 "SELECT count(*) FROM pdw WHERE expected_seg(a, 2) <> 0;"); w2=$(q 2 "SELECT count(*) FROM pdw WHERE expected_seg(a, 2) <> 1;")
+	q 0 "CREATE TABLE pdw_inh (a int, b int) DISTRIBUTED BY (a); CREATE TABLE pdw_inh_c (c int) INHERITS (pdw_inh) DISTRIBUTED BY (b);" >/dev/null 2>&1
+	plan=$(q 0 "EXPLAIN (COSTS OFF) DELETE FROM pdw_inh WHERE a % 10 = 1;" | head -1)
+	[ "$plans|$out|$w1|$w2|$plan" = "Custom Scan (Dispatch)|Custom Scan (Dispatch)|Custom Scan (Dispatch)||$out2|0|0|Custom Scan (Explicit Redistribute Motion)" ] \
+		&& [ "$out2" = "0:450:619200 1:450:686250 2:1800:2745000" ] \
+		&& ok "... sent to the segments whole where each table it writes is distributed as the one it names, rows moved between partitions there" \
+		|| notok "a partitioned table's UPDATE and DELETE sent to the segments" "$plans / $out / twin $out2 / misplaced $w1 $w2 / $plan"
 	# RETURNING old and new by name: each row comes back with its other
 	# version -- an UPDATE's old row, an upsert's existing one, a moved row's
 	# deleted one -- and one that is not there is null.

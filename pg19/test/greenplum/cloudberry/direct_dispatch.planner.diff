@@ -189,17 +189,9 @@
 @@
 -INFO:  Distributed transaction command 'Distributed Abort (No Prepared)' to SINGLE content
 @@
--INFO:  (slice 0) Dispatch command to SINGLE content
-+INFO:  (slice 1) Dispatch command to SINGLE content
-+INFO:  (slice 0) Dispatch command to ALL contents: 0 1 2
-@@
 -INFO:  Distributed transaction command 'Distributed Abort (No Prepared)' to SINGLE content
 @@
 -INFO:  Distributed transaction command 'Distributed Abort (No Prepared)' to SINGLE content
-@@
--INFO:  (slice 0) Dispatch command to SINGLE content
-+INFO:  (slice 1) Dispatch command to SINGLE content
-+INFO:  (slice 0) Dispatch command to ALL contents: 0 1 2
 @@
 -INFO:  Distributed transaction command 'Distributed Abort (No Prepared)' to SINGLE content
 @@

@@ -883,6 +883,75 @@ push_walker(Node *node, PushContext *cxt)
 	return expression_tree_walker(node, push_walker, cxt);
 }
 
+static CustomScan *make_custom_scan(Plan *replaced,
+									const CustomScanMethods *methods);
+
+/* each relation a query names, at any level, into *relids */
+static bool
+named_relations_walker(Node *node, List **relids)
+{
+	if (node == NULL)
+		return false;
+	if (IsA(node, RangeTblEntry))
+	{
+		RangeTblEntry *rte = (RangeTblEntry *) node;
+
+		if (rte->rtekind == RTE_RELATION)
+			*relids = list_append_unique_oid(*relids, rte->relid);
+		return false;
+	}
+	if (IsA(node, Query))
+		return query_tree_walker((Query *) node, named_relations_walker,
+								 relids, QTW_EXAMINE_RTES_BEFORE);
+	return expression_tree_walker(node, named_relations_walker, relids);
+}
+
+/*
+ * The statement, as the segments are sent it.  pg_get_querydef() takes an
+ * AccessShareLock on each relation it names and keeps it, as deparsing a
+ * view does (AcquireRewriteLocks()); a statement that is run holds its own
+ * locks on them already, the parser's, and Cloudberry's dispatch takes no
+ * more, so the ones the deparsing added go again.
+ */
+static char *
+statement_text(Query *query)
+{
+	List	   *relids = NIL;
+	List	   *added = NIL;
+	char	   *sql;
+
+	(void) named_relations_walker((Node *) query, &relids);
+	foreach_oid(relid, relids)
+		if (!CheckRelationOidLockedByMe(relid, AccessShareLock, false))
+			added = lappend_oid(added, relid);
+	sql = pg_get_querydef(query, false);
+	foreach_oid(relid, added)
+		if (CheckRelationOidLockedByMe(relid, AccessShareLock, false))
+			UnlockRelationOid(relid, AccessShareLock);
+	return sql;
+}
+
+/*
+ * The statement "original", which changes "relid", sent to the segments
+ * whole in place of "mt": each changes its own rows, direct dispatch where
+ * its conditions fix the key.
+ */
+static Plan *
+pushed_modify(ModifyTable *mt, Query *original, Oid relid, GpPolicy *policy)
+{
+	CustomScan *cscan = make_custom_scan(&mt->plan, &modify_scan_methods);
+
+	cscan->custom_private =
+		list_make5(makeString(statement_text(original)),
+				   makeBoolean(GpPolicyIsReplicated(policy)),
+				   GpScanDirectDispatchContents(relid,
+												original->jointree->quals,
+												original->resultRelation),
+				   makeInteger(policy->numsegments),
+				   makeInteger((int) relid));
+	return &cscan->scan.plan;
+}
+
 static const char *
 cannot_push_reason(Query *query, Oid target, GpPolicy *policy)
 {
@@ -1034,6 +1103,38 @@ static PlannedStmt *gp_modify_planner_routed(Query *parse,
 											 int cursorOptions,
 											 ParamListInfo boundParams,
 											 ExplainState *es);
+
+/*
+ * The policy of "root", which a partitioned table's -- or an inheritance
+ * tree's -- statement names, if every table it writes is distributed as
+ * "root" is: the same key columns, by name, hashed alike, or all random, or
+ * all replicated, over as many segments.  Then a row a segment moves into
+ * another partition is still on the segment it belongs on.  NULL if not.
+ */
+static GpPolicy *
+written_alike(PlannedStmt *stmt, ModifyTable *mt, Oid root)
+{
+	GpPolicy   *policy = GpScanDistributedPolicy(root);
+
+	if (policy == NULL)
+		return NULL;
+	foreach_int(rti, mt->resultRelations)
+	{
+		Oid			relid = rt_fetch(rti, stmt->rtable)->relid;
+		GpPolicy   *leaf = GpScanDistributedPolicy(relid);
+
+		if (leaf == NULL || leaf->ptype != policy->ptype ||
+			leaf->numsegments != policy->numsegments ||
+			leaf->nattrs != policy->nattrs)
+			return NULL;
+		for (int k = 0; k < policy->nattrs; k++)
+			if (leaf->opclasses[k] != policy->opclasses[k] ||
+				strcmp(get_attname(relid, leaf->attrs[k], false),
+					   get_attname(root, policy->attrs[k], false)) != 0)
+				return NULL;
+	}
+	return policy;
+}
 
 /* Does it write a table whose rows are on the segments? */
 static bool
@@ -1267,11 +1368,35 @@ gp_modify_planner_routed(Query *parse, const char *query_string, int cursorOptio
 		return stmt;
 	mt = (ModifyTable *) stmt->planTree;
 
-	/* a partitioned table's partitions, or an inheritance tree */
-	if (list_length(mt->resultRelations) != 1)
+	/*
+	 * A partitioned table's partitions, or an inheritance tree -- one of
+	 * them alone, where the planner pruned the rest: sent to the segments
+	 * whole, as a plain table's statement is, where it reads only its target
+	 * and each table it writes is distributed as the one it names; each
+	 * segment's executor finds each row's partition, and moves a row whose
+	 * partition key changes into another, there.
+	 */
+	if (list_length(mt->resultRelations) != 1 ||
+		(original != NULL &&
+		 rt_fetch(original->resultRelation, original->rtable)->relid !=
+		 rt_fetch(linitial_int(mt->resultRelations), stmt->rtable)->relid))
 	{
-		if (writes_distributed(stmt, mt))
-			stmt->planTree = write_explicitly(stmt, mt, NULL);
+		if (!writes_distributed(stmt, mt))
+			return stmt;
+		if (original != NULL)
+		{
+			Oid			root = rt_fetch(original->resultRelation,
+										original->rtable)->relid;
+
+			policy = written_alike(stmt, mt, root);
+			if (policy != NULL &&
+				cannot_push_reason(original, root, policy) == NULL)
+			{
+				stmt->planTree = pushed_modify(mt, original, root, policy);
+				return stmt;
+			}
+		}
+		stmt->planTree = write_explicitly(stmt, mt, NULL);
 		return stmt;
 	}
 	rte = rt_fetch(linitial_int(mt->resultRelations), stmt->rtable);
@@ -1321,7 +1446,6 @@ gp_modify_planner_routed(Query *parse, const char *query_string, int cursorOptio
 
 	if (mt->operation == CMD_UPDATE || mt->operation == CMD_DELETE)
 	{
-		CustomScan *cscan;
 		const char *why;
 
 		/*
@@ -1347,16 +1471,7 @@ gp_modify_planner_routed(Query *parse, const char *query_string, int cursorOptio
 			return stmt;
 		}
 
-		cscan = make_custom_scan(&mt->plan, &modify_scan_methods);
-		cscan->custom_private =
-			list_make5(makeString(pg_get_querydef(original, false)),
-					   makeBoolean(GpPolicyIsReplicated(policy)),
-					   GpScanDirectDispatchContents(rte->relid,
-													original->jointree->quals,
-													original->resultRelation),
-					   makeInteger(policy->numsegments),
-					   makeInteger((int) rte->relid));
-		stmt->planTree = &cscan->scan.plan;
+		stmt->planTree = pushed_modify(mt, original, rte->relid, policy);
 		return stmt;
 	}
 
