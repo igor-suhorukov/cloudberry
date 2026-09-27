@@ -58,6 +58,7 @@
 #include "gp_label.h"
 #include "gp_loopback.h"
 #include "gp_metatrack.h"
+#include "gp_partanalyze.h"
 #include "gp_policy.h"
 #include "gp_scan.h"
 #include "gp_segadmin.h"
@@ -286,6 +287,14 @@ _PG_init(void)
 	 * too.
 	 */
 	GpExplainInit();
+
+	/*
+	 * ANALYZE of a partitioned table as Cloudberry does it: the relations a
+	 * statement takes, by its two settings and ROOTPARTITION, in its order.
+	 * Last of gp_core's utility hooks, so that it is the first to see the
+	 * statement and the others see the list it makes; on one node too.
+	 */
+	GpPartAnalyzeInit();
 
 	/*
 	 * Deliberately no MarkGUCPrefixReserved("gp") here.  It drops every

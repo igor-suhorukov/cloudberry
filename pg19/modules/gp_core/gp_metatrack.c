@@ -52,9 +52,11 @@
 #include "postgres.h"
 
 #include "access/genam.h"
+#include "access/heapam.h"
 #include "access/htup_details.h"
 #include "access/relation.h"
 #include "access/table.h"
+#include "access/tableam.h"
 #include "access/xact.h"
 #include "catalog/catalog.h"
 #include "catalog/dependency.h"
@@ -570,6 +572,64 @@ with_children(Oid relid)
 	return find_all_inheritors(relid, NoLock, NULL);
 }
 
+/*
+ * The relations a VACUUM or ANALYZE statement processed, as PostgreSQL's
+ * vacuum() finds them: one given by its OID as it is -- which is how
+ * gp_partanalyze.c hands on the list Cloudberry's rules make -- one named
+ * with its partitions and children unless ONLY says not, and where none is
+ * named, each table of the database the user may maintain
+ * (get_all_vacuum_rels()), whose rows Cloudberry writes one by one.
+ */
+static List *
+vacuumed_relations(VacuumStmt *stmt)
+{
+	List	   *result = NIL;
+
+	if (stmt->rels == NIL)
+	{
+		Relation	pgclass = table_open(RelationRelationId, AccessShareLock);
+		TableScanDesc scan = table_beginscan_catalog(pgclass, 0, NULL);
+		HeapTuple	tuple;
+
+		while ((tuple = heap_getnext(scan, ForwardScanDirection)) != NULL)
+		{
+			Form_pg_class form = (Form_pg_class) GETSTRUCT(tuple);
+
+			if ((form->relkind == RELKIND_RELATION ||
+				 form->relkind == RELKIND_MATVIEW ||
+				 form->relkind == RELKIND_PARTITIONED_TABLE) &&
+				!(form->relpersistence == RELPERSISTENCE_TEMP &&
+				  !isTempOrTempToastNamespace(form->relnamespace)) &&
+				((object_ownercheck(DatabaseRelationId, MyDatabaseId, GetUserId()) &&
+				  !form->relisshared) ||
+				 pg_class_aclcheck(form->oid, GetUserId(), ACL_MAINTAIN) == ACLCHECK_OK))
+				result = lappend_oid(result, form->oid);
+		}
+		table_endscan(scan);
+		table_close(pgclass, AccessShareLock);
+		return result;
+	}
+
+	foreach_node(VacuumRelation, vr, stmt->rels)
+	{
+		Oid			relid = OidIsValid(vr->oid) ? vr->oid :
+			(vr->relation != NULL ? RangeVarGetRelid(vr->relation, NoLock, true) : InvalidOid);
+
+		if (!OidIsValid(relid))
+			continue;
+		if (!OidIsValid(vr->oid) && vr->relation->inh)
+			result = list_concat(result, with_children(relid));
+		else
+			result = lappend_oid(result, relid);
+	}
+	return result;
+}
+
+/*
+ * VACUUM's row for each relation it vacuumed, but a partitioned table, which
+ * has nothing to vacuum and none in Cloudberry (vacuum_rel()); ANALYZE's for
+ * each it analyzed, a partitioned table's too (analyze_rel_internal()).
+ */
 static void
 vacuum(VacuumStmt *stmt)
 {
@@ -586,23 +646,17 @@ vacuum(VacuumStmt *stmt)
 			freeze = defGetBoolean(opt);
 		else if (strcmp(opt->defname, "analyze") == 0)
 			analyze = defGetBoolean(opt);
+		else if (strcmp(opt->defname, "only_database_stats") == 0 && defGetBoolean(opt))
+			return;
 	}
 	vsubtype = full && freeze ? "FULL FREEZE" : full ? "FULL" : freeze ? "FREEZE" : "";
 
-	foreach_node(VacuumRelation, vr, stmt->rels)
+	foreach_oid(relid, vacuumed_relations(stmt))
 	{
-		Oid			relid = OidIsValid(vr->oid) ? vr->oid :
-			(vr->relation != NULL ? RangeVarGetRelid(vr->relation, NoLock, true) : InvalidOid);
-
-		if (!OidIsValid(relid))
-			continue;
-		foreach_oid(child, with_children(relid))
-		{
-			if (stmt->is_vacuumcmd)
-				record_processed(child, "VACUUM", vsubtype);
-			if (analyze)
-				record_processed(child, "ANALYZE", "");
-		}
+		if (stmt->is_vacuumcmd && get_rel_relkind(relid) != RELKIND_PARTITIONED_TABLE)
+			record_processed(relid, "VACUUM", vsubtype);
+		if (analyze)
+			record_processed(relid, "ANALYZE", "");
 	}
 }
 

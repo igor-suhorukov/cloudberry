@@ -2026,6 +2026,19 @@ is "a table called rootpartition or fullscan is a table" \
    "ANALYZE rootpartition / ANALYZE fullscan, t"
 at "FULLSCAN ALL is not Cloudberry's, and is refused at ALL" \
    "ANALYZE FULLSCAN ALL" "syntax error" "ALL"
+isl "ANALYZE ROOTPARTITION gives the root statistics, and its leaves none" \
+   "CREATE TABLE ap (a int, b int) PARTITION BY RANGE (a);
+    CREATE TABLE ap1 PARTITION OF ap FOR VALUES FROM (0) TO (10);
+    CREATE TABLE ap2 PARTITION OF ap FOR VALUES FROM (10) TO (20);
+    INSERT INTO ap SELECT i, i FROM generate_series(0, 19) i;
+    ANALYZE ROOTPARTITION ap;
+    SELECT string_agg(tablename || ':' || inherited, ' ' ORDER BY tablename)
+      FROM pg_stats WHERE tablename LIKE 'ap%' AND attname = 'a';" "ap:true"
+refused "and a leaf named with it is refused" \
+   "ANALYZE ROOTPARTITION ap1;" "cannot analyze a non-root partition using ANALYZE ROOTPARTITION"
+refused "as the parenthesized option is, and FULLSCAN is VACUUM's no more than Cloudberry's" \
+   "ANALYZE (ROOTPARTITION on) ap2; VACUUM (FULLSCAN) ap;" 'unrecognized VACUUM option "fullscan"'
+
 echo
 echo "  $pass passed, $fail failed"
 [ "$fail" -eq 0 ]

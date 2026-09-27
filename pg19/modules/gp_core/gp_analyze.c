@@ -586,10 +586,12 @@ typedef struct SegmentCounts
 
 /*
  * The relations a VACUUM or ANALYZE statement took whose rows are on the
- * segments: each one it named, a partitioned table's leaves for it, or,
- * when it named none, every table of the database, as get_all_vacuum_rels()
- * takes them -- those the user may maintain, the others having been passed
- * over with a warning.
+ * segments, as vacuum() finds them: one given by its OID as it is -- which
+ * is how gp_partanalyze.c hands on the list Cloudberry's rules make -- one
+ * named with its partitions and children unless ONLY says not, or, when it
+ * named none, every table of the database, as get_all_vacuum_rels() takes
+ * them -- those the user may maintain, the others having been passed over
+ * with a warning.
  */
 static List *
 distributed_relids(VacuumStmt *stmt)
@@ -623,7 +625,7 @@ distributed_relids(VacuumStmt *stmt)
 
 			if (!OidIsValid(relid))
 				continue;
-			if (get_rel_relkind(relid) == RELKIND_PARTITIONED_TABLE)
+			if (!OidIsValid(vrel->oid) && vrel->relation->inh)
 				candidates = list_concat(candidates,
 										 find_all_inheritors(relid, NoLock, NULL));
 			else
@@ -810,6 +812,15 @@ GpAnalyzeSegmentCounts(VacuumStmt *stmt)
 		}
 		else
 			current_counts(c->relid, &pages, &tuples);
+
+		/*
+		 * A table that has no rows has a page, as Cloudberry's
+		 * vac_update_relstats() gives one to every relation it counts none
+		 * of, so that "analyzed, and empty" is not taken for "never
+		 * analyzed" (gp_partanalyze.c).
+		 */
+		if (pages < 1 && tuples >= 0)
+			pages = 1;
 		allvisible = (BlockNumber) Min(c->allvisible / share, (double) pages);
 		allfrozen = (BlockNumber) Min(c->allfrozen / share, (double) allvisible);
 
