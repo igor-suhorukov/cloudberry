@@ -105,13 +105,20 @@ else
 fi
 
 ###############################################################################
-echo "2. a module listed before gp_core says so, rather than failing to link"
+echo "2. a module listed before gp_core stops the server, naming gp_core"
 ###############################################################################
+# A module's _PG_init() says gp_core is missing when it runs first -- the
+# rendezvous variable gp_core publishes is not there yet; but a module that
+# calls gp_core's functions, every one of them since M8's interconnect, is
+# refused by the loader before that, which binds its symbols as it opens it
+# and names the first of gp_core's it does not find.  Either way the server
+# does not start half-initialised.
 if start_with 'interconnect'; then
 	notok "server should not have started with interconnect before gp_core"
 else
-	if grep -q 'requires "gp_core" to be loaded first' "$PGDATA_ROOT/log"; then
-		ok "startup fails and names gp_core"
+	if grep -q 'requires "gp_core" to be loaded first' "$PGDATA_ROOT/log" ||
+	   grep -qE 'could not load library ".*/interconnect\.so": .*undefined symbol: (gp_|Gp)' "$PGDATA_ROOT/log"; then
+		ok "startup fails, naming gp_core or a symbol of gp_core's"
 	else
 		notok "startup failed for the wrong reason" "$(tail -3 "$PGDATA_ROOT/log")"
 	fi
