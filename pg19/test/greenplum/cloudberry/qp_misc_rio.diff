@@ -1,0 +1,6 @@
+@@
+-ERROR:  spiexceptions.FeatureNotSupported: function cannot execute on a QE slice because it accesses relation "qp_misc_rio.testdata_in"
+-CONTEXT:  Traceback (most recent call last):
+-  PL/Python function "func_plpythonu", line 3, in <module>
+-    return plpy.execute(sqlstm);
+-PL/Python function "func_plpythonu"

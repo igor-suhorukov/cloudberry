@@ -16,17 +16,3 @@
 +ERROR:  argument of ROWS must not contain variables
 +LINE 1: ...ue(d) over(partition by b order by e rows between e precedin...
 +                                                             ^
-@@
-- id | val | sum | mysum1 | mysum2 
------+-----+-----+--------+--------
--  1 |   1 |   1 |      1 |      1
--  2 |   2 |   3 |      3 |      3
--  3 |   3 |   6 |      6 |      6
--  4 |   4 |   9 |      9 |      9
--  5 |   5 |  12 |     12 |     12
--(5 rows)
--
-+ERROR:  cannot copy window "w" because it has a frame clause
-+LINE 3:    sum(val) over (w),
-+                         ^
-+HINT:  Omit the parentheses in this OVER clause.

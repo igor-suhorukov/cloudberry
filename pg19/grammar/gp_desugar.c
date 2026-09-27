@@ -87,6 +87,7 @@
 #include "lib/stringinfo.h"
 #include "mb/pg_wchar.h"
 #include "nodes/makefuncs.h"
+#include "nodes/nodeFuncs.h"
 #include "nodes/parsenodes.h"
 #include "parser/parser.h"
 #include "parser/scanner.h"
@@ -6110,6 +6111,95 @@ GpAttachCarriers(List *parsetree, List *carried)
 }
 
 /* ------------------------------------------------------------------------- */
+/* OVER (w): the window named, as Cloudberry takes it                        */
+/* ------------------------------------------------------------------------- */
+
+/*
+ * agg() OVER (w), parentheses around a window's name and nothing else, is
+ * agg() OVER w in Cloudberry, which says so in transformWindowFuncCall()
+ * (parse_agg.c): the window itself, where PostgreSQL copies it into a new
+ * one -- and refuses to, where w has a frame clause ("cannot copy window").
+ * The answers are the same where both take it, so every such OVER names the
+ * window here, as the grammar gives it back.
+ */
+static bool
+window_name_walker(Node *node, void *context)
+{
+	if (node == NULL)
+		return false;
+	if (IsA(node, FuncCall) && ((FuncCall *) node)->over != NULL)
+	{
+		WindowDef  *w = ((FuncCall *) node)->over;
+
+		if (w->name == NULL && w->refname != NULL &&
+			w->partitionClause == NIL && w->orderClause == NIL &&
+			(w->frameOptions & FRAMEOPTION_NONDEFAULT) == 0)
+		{
+			w->name = w->refname;
+			w->refname = NULL;
+		}
+	}
+	return raw_expression_tree_walker(node, window_name_walker, context);
+}
+
+/* The queries a statement holds, each looked at; the rest hold none. */
+static void
+window_names(Node *stmt)
+{
+	if (stmt == NULL)
+		return;
+	switch (nodeTag(stmt))
+	{
+		case T_SelectStmt:
+		case T_InsertStmt:
+		case T_UpdateStmt:
+		case T_DeleteStmt:
+		case T_MergeStmt:
+			(void) window_name_walker(stmt, NULL);
+			break;
+		case T_ViewStmt:
+			window_names(((ViewStmt *) stmt)->query);
+			break;
+		case T_CreateTableAsStmt:
+			window_names(((CreateTableAsStmt *) stmt)->query);
+			break;
+		case T_ExplainStmt:
+			window_names(((ExplainStmt *) stmt)->query);
+			break;
+		case T_DeclareCursorStmt:
+			window_names(((DeclareCursorStmt *) stmt)->query);
+			break;
+		case T_CopyStmt:
+			window_names(((CopyStmt *) stmt)->query);
+			break;
+		case T_PrepareStmt:
+			window_names(((PrepareStmt *) stmt)->query);
+			break;
+		case T_RuleStmt:
+			foreach_ptr(Node, action, ((RuleStmt *) stmt)->actions)
+				window_names(action);
+			break;
+		default:
+			break;
+	}
+}
+
+static List *
+with_window_names(List *parsetree, const char *str)
+{
+	bool		over = false;
+
+	/* only where the text can hold an OVER */
+	for (const char *c = str; *c != '\0' && !over; c++)
+		over = pg_strncasecmp(c, "over", 4) == 0;
+	if (!over)
+		return parsetree;
+	foreach_ptr(Node, raw, parsetree)
+		window_names(IsA(raw, RawStmt) ? ((RawStmt *) raw)->stmt : raw);
+	return parsetree;
+}
+
+/* ------------------------------------------------------------------------- */
 /* O26                                                                       */
 /* ------------------------------------------------------------------------- */
 
@@ -6181,8 +6271,8 @@ gp_raw_parser(const char *str, RawParseMode mode)
 	if (rewritten == NULL)
 	{
 		if (prev_raw_parser)
-			return prev_raw_parser(str, mode);
-		return standard_raw_parser(str, mode);
+			return with_window_names(prev_raw_parser(str, mode), str);
+		return with_window_names(standard_raw_parser(str, mode), str);
 	}
 
 	errarg.original = str;
@@ -6206,7 +6296,7 @@ gp_raw_parser(const char *str, RawParseMode mode)
 	/* What has no place in the text goes on the nodes, now in the user's. */
 	GpAttachCarriers(result, carried);
 
-	return result;
+	return with_window_names(result, str);
 }
 
 void

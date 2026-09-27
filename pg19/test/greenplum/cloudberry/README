@@ -164,6 +164,9 @@ external_table_persistent_error_log (orca)  the lines ORCA's fallback trace
   declines there ("SIRV functions") as Cloudberry's ORCA does -- its own
   expected output for ORCA has them.
 
+filter  PostgreSQL 19's words for a call no function takes -- a DETAIL
+  where Cloudberry's HINT stood.
+
 function_extensions  pg_proc's column prodataaccess in pg_attribute, which
   has none: the port gives pg_proc Cloudberry's prodataaccess and
   proexeclocation as names of calls of its row (gp_segment.c), from the
@@ -308,6 +311,11 @@ qp_functions (planner, orca)  PostgreSQL 19's words for a call no function
   the relations named tst% in its group's cluster -- a table an earlier test
   leaves there would be among them, as alter_distribution_policy's tstab was
   before the suite ran in groups.
+
+qp_misc_rio  a PL/Python function whose query reads a table, called in the
+  segments' slice: it runs there, where Cloudberry refuses it ("function
+  cannot execute on a QE slice because it accesses relation"), as
+  qp_functions says of the port's slices.
 
 qp_subquery (orca)  the fallback trace of the queries ORCA's translator
   declines -- subqueries that are not scalar, an inherited table, a

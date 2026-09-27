@@ -46,7 +46,7 @@ run  join_gp
 skip union_gp  UNION types text and integer cannot be matched
 run  gp_create_table
 run  matview_ao
-skip filter  cannot copy window "w" because it has a frame clause
+run  filter
 run  gpctas
 run  gpdist
 run  gpdist_opclasses
@@ -121,7 +121,7 @@ run  direct_dispatch
 run  bfv_dd
 run  bfv_dd_multicolumn
 run  bfv_dd_types
-skip bfv_olap  cannot copy window "w" because it has a frame clause
+run  bfv_olap
 skip bfv_aggregate  argument of ROWS must not contain variables; cannot copy window "w" because it has a frame clause
 run  DML_over_joins
 skip bb_mpph  its query 3 over append-optimized partitions runs past the suite's minute, and gp_enable_sort_limit is none of the port's settings
@@ -304,7 +304,7 @@ run  opr_sanity_gp
 skip decode_expr  function decode(boolean) does not exist; function decode(integer) does not exist
 skip gpcopy_encoding  invalid byte sequence for encoding "UTF8": 0xc4
 run  gp_create_view
-skip window_views  cannot copy window "w" because it has a frame clause; relation "v8" does not exist
+run  window_views
 skip replication_slots  differs: pg_get_replication_slots() has PostgreSQL 19's columns, and a slot made on one segment gets no WARNING that it is that segment's alone
 run  create_table_like_gp
 skip gp_constraints  differs: a segment's unique violation carries no schema, table or constraint name, and its LOCATION is the dispatcher's
@@ -403,7 +403,7 @@ skip vacuum_gp  relation "gp_toolkit.__gp_log_master_ext" does not exist
 run  vacuum_fsm_nondefault_tablespace
 skip pg_stat  relation "gp_stat_all_tables_summary" does not exist; relation "gp_stat_user_tables_summary" does not exist
 skip bfv_partition  unrecognized configuration parameter "optimizer_analyze_root_partition"; relation "gp_partition_template" does not exist
-skip qp_misc_rio  function gp_toolkit.gp_param_setting(unknown) does not exist; cannot copy window "w" because it has a frame clause
+run  qp_misc_rio
 skip bfv_partition_plans  differs: a count of its plan's partition selections is 0, where Cloudberry's is 2
 run  gp_covering_index
 skip planhints  could not access file "pg_hint_plan": No such file or directory
