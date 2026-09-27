@@ -338,6 +338,30 @@ extern void GpStreamEnd(GpStream *stream);
 extern void GpDispatchResetGang(void);
 
 /*
+ * A user's SAVEPOINT or ROLLBACK TO sent to the segments as it runs, where
+ * debug_dtm_action asks for its failure there (gp_dtm_debug.c); "level" is
+ * the savepoint's.
+ */
+extern void GpDispatchSavepointNow(int level);
+extern void GpDispatchRollbackToNow(int level);
+
+/*
+ * A function's block's subtransaction sent to the segments as the block
+ * begins, and the error the segments answered a subtransaction's rollback
+ * with, raised where an error may be -- where debug_dtm_action asks for a
+ * subtransaction's failure (gp_dtm_debug.c's PL/pgSQL plugin).
+ */
+extern void GpDispatchSubtransactionBeginNow(void);
+extern void GpDispatchRaiseKeptError(void);
+
+/*
+ * This session's temporary tables dropped on the coordinator, where their
+ * segments' parts went with a gang let go of to retry a second phase; as a
+ * statement begins.
+ */
+extern void GpDispatchDropLostTempTables(void);
+
+/*
  * What every connection gp_core opens to another node carries besides its
  * own options: the password file (gp.internal_passfile), and the TLS of
  * certificates between nodes (gp.internal_sslmode, sslcert, sslkey,

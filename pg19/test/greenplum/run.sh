@@ -205,16 +205,18 @@ t1=$(date +%s)
 			debug_resource_group|runaway_detector_activation_percent|\
 			vmem_process_interrupt|explain_memory_verbosity|coredump_on_memerror|\
 			debug_print_slice_table|\
-			enable_offload_entry_to_qe)
+			enable_offload_entry_to_qe|debug_dtm_action*|debug_abort_after_distributed_prepared|\
+			debug_print_full_dtm)
 				cbname="$short" ;;
 			*) cbname="gp_$short" ;;
 		esac
 		echo "map $cbname $name"
 	done
 	# And a program of Cloudberry's suite that a test runs from the suite's
-	# directory, ./extended_protocol_resqueue, is the one the port builds and
-	# installs (meson's hook_tests), run from PATH as the diff is.
-	echo 'sed s#^[\\]! \./(extended_protocol_resqueue) #\\! \1 #'
+	# directory, ./extended_protocol_resqueue or ./twophase_pqexecparams, is
+	# the one the port builds and installs (meson's hook_tests), run from
+	# PATH as the diff is.
+	echo 'sed s#^[\\]! \./(extended_protocol_resqueue|twophase_pqexecparams) #\\! \1 #'
 	# So is bb_memory_quota's script, $PG_ABS_BUILDDIR/mem_quota_util.py, from
 	# PATH (below); it runs its queries in the database it is named, which is
 	# regression here.

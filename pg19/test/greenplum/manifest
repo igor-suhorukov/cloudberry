@@ -60,7 +60,7 @@ skip matrix  function sum(smallint[]) does not exist; function sum(integer[]) do
 run  sublink
 run  olap_setup
 skip complex  type "complex" does not exist; relation "complex_ttbl" does not exist
-skip distributed_transactions  unrecognized configuration parameter "debug_abort_after_distributed_prepared"; unrecognized configuration parameter "debug_dtm_action_segment"
+run  distributed_transactions
 run  statement_mem_for_windowagg
 skip namespace_gp  differs: its comparison of pg_namespace across the nodes finds the pg_temp_N schemas the tests before it leave, which each node makes with an OID of its own
 run  bitmap_index
@@ -389,7 +389,7 @@ skip index_constraint_naming_upgrade  differs: PostgreSQL 19 keeps NOT NULL cons
 run  rle
 skip rle_delta  differs: \d+ of a column-oriented table prints no Compression Type, Compression Level or Block Size column
 skip dsp  compresstype "zlib" can't be used with compresslevel 0; compresslevel=7 is out of range for rle_type (should be in the range 1 to 6)
-skip not_out_of_shmem_exit_slots  unrecognized configuration parameter "debug_dtm_action_segment"; unrecognized configuration parameter "debug_dtm_action_target"
+run  not_out_of_shmem_exit_slots
 skip create_am_gp  function ao_row_tableam_handler(internal) does not exist; function ao_column_tableam_handler(internal) does not exist
 skip cbdb_optimizer_test  unrecognized configuration parameter "gp_enable_ao_indexscan"
 skip gp_runtime_filter  unrecognized configuration parameter "gp_enable_runtime_filter"; unrecognized configuration parameter "gp_enable_runtime_filter_pushdown"
@@ -400,7 +400,7 @@ skip alter_table_set  syntax error at or near "on"; unrecognized configuration p
 skip alter_table_gp  differs: Cloudberry refuses to alter a column of a primary key, a unique constraint or the distribution key ("cannot alter column with primary key or unique constraint"), which the port alters
 run  subtransaction_visibility
 skip oid_consistency  differs: \d of an append-optimized table prints no Compression Type, Level, Block Size or Checksum
-skip udf_exception_blocks  unrecognized configuration parameter "debug_dtm_action_segment"; unrecognized configuration parameter "debug_dtm_action_target"
+run  udf_exception_blocks
 run  ic
 skip instr_in_shmem_verify  could not access file "gp_instrument_shmem": No such file or directory; function gp_instrument_shmem_detail_f() does not exist
 skip partition_locking  differs: the locks a statement takes on a partitioned table's parts, and on which nodes

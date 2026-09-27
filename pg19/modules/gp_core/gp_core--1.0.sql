@@ -2012,3 +2012,23 @@ GRANT SELECT ON gp_toolkit.__gp_is_append_only, gp_toolkit.__gp_fullname,
 	gp_toolkit.gp_size_of_table_and_indexes_disk,
 	gp_toolkit.gp_size_of_schema_disk, gp_toolkit.gp_size_of_database
 	TO PUBLIC;
+
+/* ------------------------------------------------------------------------- */
+/* debug_dtm_action (gp_dtm_debug.c)                                         */
+/* ------------------------------------------------------------------------- */
+
+/*
+ * The error Cloudberry's segment raises for debug_dtm_action, which the
+ * coordinator sends the segment the settings name, for it to raise; and the
+ * one its PREPARE TRANSACTION or COMMIT is to fail with, as it prepares or
+ * commits.
+ */
+CREATE FUNCTION gp_internal.dtm_raise(action integer, message text)
+RETURNS void
+AS 'MODULE_PATHNAME', 'gp_dtm_raise'
+LANGUAGE C STRICT VOLATILE;
+
+CREATE FUNCTION gp_internal.dtm_fail_at_commit(message text)
+RETURNS void
+AS 'MODULE_PATHNAME', 'gp_dtm_fail_at_commit'
+LANGUAGE C STRICT VOLATILE;

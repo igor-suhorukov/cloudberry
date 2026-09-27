@@ -152,6 +152,20 @@ DML_over_joins (orca)  the lines ORCA's fallback trace prints and nothing
   as without the global deadlock detector it is; so is one that compares
   with a subquery's aggregate, which ORCA gathers to one segment.
 
+distributed_transactions  the INFO lines of two of its transactions.  A
+  savepoint's INSERT of two rows, VALUES (2),(1): Cloudberry's planner reads
+  the VALUES in a slice of its own on one segment, (slice 1) Dispatch
+  command to SINGLE content, where the port's routes the rows from the
+  coordinator; and Cloudberry prepares every segment the savepoint went to,
+  ALL contents: 0 1 2, where the port prepares the two parts that wrote,
+  PARTIAL contents: 0 1.  And BEGIN; SET optimizer = false; END:
+  Cloudberry sends the SET to the segments in the transaction, which then
+  commits there in one phase, and the port sends no SET, and commits
+  nothing on them.  Its failures of debug_dtm_action's -- the PREPARE, the
+  COMMIT PREPARED retried over a new connection, the ROLLBACK PREPARED, the
+  DDL, SAVEPOINT, RELEASE and ROLLBACK TO a segment fails at, and
+  twophase_pqexecparams's -- are Cloudberry's.
+
 expand_table_ao  pg_appendonly's compresstype of a table made with
   compresstype=none, which gp_ao records as no compression at all, an empty
   name, where Cloudberry records "none"; and the OID of text's hash operator
@@ -450,6 +464,12 @@ uao_ddl_temp_on_commit_delete_rows_column,
   to in the transaction that made the table: 1, as gp_ao numbers them from
   1, where Cloudberry writes segment 0, which it keeps for a table made in
   the same transaction and for utility mode.
+
+udf_exception_blocks  the error of a function's block whose release a
+  segment failed, as the block around it rolls back: Cloudberry's segment,
+  whose part has left the level already, says "transaction N at level 1
+  already processed"; the port's has released the level's savepoint, and
+  says savepoint "gp_sp_2" does not exist.
 
 uaocs_catalog_tables  what gp_toolkit.__gp_aovisimap_hidden_info() finds
   after VACUUM FULL, which gp_ao carries out as CLUSTER rewrites a table,

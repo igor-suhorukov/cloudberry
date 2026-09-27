@@ -3201,21 +3201,36 @@ SQL
 		*) notok "a failure in the first phase" "$out / $out2 / $p1 / $p2" ;;
 	esac
 
-	# A second phase that fails on a segment: the coordinator's transaction
-	# ends all the same, its commit decided, and the recovery process is left
-	# the part; a statement whose snapshot says it committed waits on that
-	# segment for it meanwhile (gp_dtx.c), then sees it.
+	# A second phase a segment refuses is tried again over a connection of
+	# its own, as Cloudberry's coordinator retries it over a new gang, saying
+	# so (doNotifyingCommitPrepared(), cdbtm.c); the gang goes.
 	q 0 "CREATE TABLE dtxf (a int, b int) DISTRIBUTED BY (a);" >/dev/null
-	q 0 "SELECT gp_inject_fault('dtx_recovery_round', 'suspend', 1);" >/dev/null
 	q 0 "SELECT gp_inject_fault('finish_prepared_start_of_function', 'error', $(dbid 1));" >/dev/null
+	out=$(q 0 "INSERT INTO dtxf SELECT i, i FROM generate_series(1, 20) i;")
+	q 0 "SELECT gp_inject_fault('finish_prepared_start_of_function', 'reset', $(dbid 1));" >/dev/null
+	out2=$(q 0 "SELECT count(*), sum(b) FROM dtxf;")
+	p1=$(q 1 "SELECT count(*) FROM pg_prepared_xacts;")
+	case "$out|$out2|$p1" in
+		*"'Commit Prepared' broadcast failed to one or more segments. Retrying ... try 1"*"Releasing segworker group to retry broadcast."*"|20|210|0")
+			ok "a second phase a segment refuses is retried over a new connection, in Cloudberry's words" ;;
+		*) notok "a second phase refused once" "$out / $out2 / $p1" ;;
+	esac
+	q 0 "TRUNCATE dtxf;" >/dev/null
+
+	# One that goes on failing: the coordinator's transaction ends all the
+	# same, its commit decided, and the recovery process is left the part; a
+	# statement whose snapshot says it committed waits on that segment for
+	# it meanwhile (gp_dtx.c), then sees it.
+	q 0 "SELECT gp_inject_fault('dtx_recovery_round', 'suspend', 1);" >/dev/null
+	q 0 "SELECT gp_inject_fault_infinite('finish_prepared_start_of_function', 'error', $(dbid 1));" >/dev/null
 	out=$(q 0 "INSERT INTO dtxf SELECT i, i FROM generate_series(1, 20) i;")
 	q 0 "SELECT count(*), sum(b) FROM dtxf;" > "$ROOT/dtxf_reader.out" 2>&1 &
 	reader=$!
 	sleep 1
 	out2=$(q 1 "SELECT wait_event FROM pg_stat_activity WHERE backend_type = 'client backend' AND wait_event_type = 'Lock';")
+	q 0 "SELECT gp_inject_fault('finish_prepared_start_of_function', 'reset', $(dbid 1));" >/dev/null
 	q 0 "SELECT gp_inject_fault('dtx_recovery_round', 'reset', 1);" >/dev/null
 	wait "$reader"
-	q 0 "SELECT gp_inject_fault('finish_prepared_start_of_function', 'reset', $(dbid 1));" >/dev/null
 	out3=$(cat "$ROOT/dtxf_reader.out")
 	p1=$(q 1 "SELECT count(*) FROM pg_prepared_xacts;")
 	case "$out|$out2|$out3|$p1" in
@@ -3224,6 +3239,37 @@ SQL
 		*) notok "a second phase that failed on a segment" "$out / $out2 / $out3 / $p1" ;;
 	esac
 	q 0 "DROP TABLE dtxf;" >/dev/null
+
+	# debug_dtm_action's failures of a function's subtransactions, where
+	# Cloudberry's raise them (gp_dtm_debug.c): a block's rollback segment 0
+	# fails escapes the block's handler, and the handler around it, as that
+	# segment goes on failing; and a begin it fails fails the block's entry.
+	q 0 "CREATE TABLE dtxb (a int) DISTRIBUTED BY (a);
+		CREATE FUNCTION dtxb_f() RETURNS text LANGUAGE plpgsql AS \$\$
+		BEGIN
+			INSERT INTO dtxb VALUES (1);
+			BEGIN
+				BEGIN
+					PERFORM 1 / 0;
+				EXCEPTION WHEN division_by_zero THEN
+					RETURN 'inner handler';
+				END;
+			EXCEPTION WHEN OTHERS THEN
+				RETURN 'outer handler';
+			END;
+		END \$\$;" >/dev/null
+	dtm="SET gp.debug_dtm_action_segment = 0; SET gp.debug_dtm_action_target = protocol;"
+	out=$(q 0 "$dtm SET gp.debug_dtm_action_protocol = subtransaction_rollback;
+		SET gp.debug_dtm_action = fail_end_command; SELECT dtxb_f();")
+	out2=$(q 0 "$dtm SET gp.debug_dtm_action_protocol = subtransaction_begin;
+		SET gp.debug_dtm_action = fail_begin_command; SELECT dtxb_f();")
+	out3=$(q 0 "SELECT dtxb_f(); SELECT count(*) FROM dtxb;")
+	case "$out|$out2|$out3" in
+		"ERROR:  Raise error for debug_dtm_action = 3, debug_dtm_action_protocol = Rollback Current Subtransaction"*"line 11 at RETURN"*"|ERROR:  Raise ERROR for debug_dtm_action = 2, debug_dtm_action_protocol = Begin Internal Subtransaction"*"line 4 during statement block entry"*"|inner handler"*"1")
+			ok "a function's subtransaction a segment fails to roll back fails the handlers around it, and one it fails to begin fails the block's entry" ;;
+		*) notok "debug_dtm_action's subtransaction failures" "$out / $out2 / $out3" ;;
+	esac
+	q 0 "DROP FUNCTION dtxb_f(); DROP TABLE dtxb;" >/dev/null
 
 	# What gp.test_print_direct_dispatch_info says of the two phases, in
 	# Cloudberry's words (doDispatchDtxProtocolCommand(), cdbtm.c): each

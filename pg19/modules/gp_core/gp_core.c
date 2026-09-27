@@ -49,6 +49,7 @@
 #include "gp_core_api.h"
 #include "gp_dbcopy.h"
 #include "gp_dispatch.h"
+#include "gp_dtm_debug.h"
 #include "gp_dtx.h"
 #include "gp_explain.h"
 #include "gp_fault.h"
@@ -286,6 +287,12 @@ _PG_init(void)
 	 * too.
 	 */
 	GpExplainInit();
+
+	/*
+	 * Cloudberry's debug_dtm_action: a segment's part of a distributed
+	 * transaction failing at a command, as its tests ask.
+	 */
+	GpDtmDebugInit();
 
 	/*
 	 * Deliberately no MarkGUCPrefixReserved("gp") here.  It drops every

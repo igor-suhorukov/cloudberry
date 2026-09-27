@@ -227,7 +227,14 @@ Distributed transactions (M3), in `gp_core`:
   Cloudberry's brings them back;
 - Cloudberry's fault injector, `gp_inject_fault`, for the tests: its faults
   at the port's own places under Cloudberry's names, and at PostgreSQL 19's
-  injection points, among them O29's in PostgreSQL's commit.
+  injection points, among them O29's in PostgreSQL's commit;
+- Cloudberry's `debug_dtm_action` settings, `gp.debug_dtm_action*`: a
+  segment fails the protocol command -- PREPARE, COMMIT PREPARED, a
+  subtransaction's begin, release or rollback -- or the SQL command they
+  name, with Cloudberry's error, which the coordinator answers as
+  Cloudberry's does: a second phase retried over a new connection, in its
+  words; a function's block's failed rollback escaping its handler; and
+  `gp.debug_abort_after_distributed_prepared`.
 
 What M3 leaves open: a server that cannot prepare
 (`max_prepared_transactions` at zero, PostgreSQL's default) leaves the
