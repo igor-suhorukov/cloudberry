@@ -62,6 +62,7 @@ PG_FUNCTION_INFO_V1(gp_ao_segfile_count);
 PG_FUNCTION_INFO_V1(gp_ao_segfilecount_of);
 PG_FUNCTION_INFO_V1(gp_ao_aoseg);
 PG_FUNCTION_INFO_V1(gp_ao_aocsseg);
+PG_FUNCTION_INFO_V1(gp_ao_segment_files);
 PG_FUNCTION_INFO_V1(gp_ao_aovisimap);
 PG_FUNCTION_INFO_V1(gp_ao_aovisimap_hidden_info);
 PG_FUNCTION_INFO_V1(gp_ao_aovisimap_entry);
@@ -277,6 +278,48 @@ gp_ao_aocsseg(PG_FUNCTION_ARGS)
 			values[9] = Int16GetDatum(sf->state);
 			tuplestore_putvalues(rsinfo->setResult, rsinfo->setDesc, values, nulls);
 		}
+	}
+	relation_close(rel, AccessShareLock);
+	return (Datum) 0;
+}
+
+/*
+ * __gp_ao_segment_files(regclass): the files of a table's relation past its
+ * first that hold its segment files' bytes -- relfilenode.1 and on,
+ * PostgreSQL's segments of the relation -- and each one's bytes, up to the
+ * last page a segment file reaches: what gp_toolkit's __get_ao_segno_list()
+ * lists of a table, where Cloudberry keeps each segment file as a file of
+ * its own, relfilenode.<segno>.  This node's, which the checks for missing
+ * files ask on each.
+ */
+Datum
+gp_ao_segment_files(PG_FUNCTION_ARGS)
+{
+	ReturnSetInfo *rsinfo = (ReturnSetInfo *) fcinfo->resultinfo;
+	Relation	rel;
+	AoSegfile  *segfiles;
+	int			n;
+	bool		columnar;
+	BlockNumber end = 0;
+
+	InitMaterializedSRF(fcinfo, 0);
+	rel = open_ao(PG_GETARG_OID(0), AO_WANT_VISIMAP);
+	columnar = ao_storage_is_columnar(rel);
+	segfiles = ao_segfiles_read(ao_storage_id(rel), GetLatestSnapshot(), &n);
+	for (int i = 0; i < n; i++)
+		for (int g = 0; g < segfiles[i].ngroups; g++)
+			end = Max(end, ao_file_end(rel,
+									   AoFileNum(segfiles[i].segno, columnar ? g + 1 : 0),
+									   segfiles[i].eof[g]));
+	for (BlockNumber k = 1; (uint64) k * RELSEG_SIZE < end; k++)
+	{
+		Datum		values[2];
+		bool		nulls[2] = {0};
+		uint64		last = Min((uint64) end, (uint64) (k + 1) * RELSEG_SIZE);
+
+		values[0] = Int32GetDatum((int32) k);
+		values[1] = Int64GetDatum((int64) ((last - (uint64) k * RELSEG_SIZE) * BLCKSZ));
+		tuplestore_putvalues(rsinfo->setResult, rsinfo->setDesc, values, nulls);
 	}
 	relation_close(rel, AccessShareLock);
 	return (Datum) 0;

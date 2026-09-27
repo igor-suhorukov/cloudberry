@@ -1485,9 +1485,10 @@ REVOKE ALL ON FUNCTION pg_catalog.gp_add_segment_primary(text, text, int4, text)
  * update scripts after it): its views and functions of what gp_core has what
  * they read.  Its append-optimized tables' are gp_ao's, beside gp_ao's own
  * functions there, and its resource managers' gp_resource's.  Not here: the
- * workfile manager's views, whose manager the port has not; and the checks
- * for orphaned and missing files.  The servers' logs and the views over
- * them are at the end of this file, "gp_toolkit's rest".
+ * workfile manager's views, whose manager the port has not; and the
+ * partitions' functions.  The servers' logs and the views over them,
+ * gp_disk_free and the checks for orphaned and missing files are at the end
+ * of this file, "gp_toolkit's rest".
  *****************************************************************************/
 
 /*
@@ -2014,10 +2015,9 @@ GRANT SELECT ON gp_toolkit.__gp_is_append_only, gp_toolkit.__gp_fullname,
 	TO PUBLIC;
 
 /******************************************************************************
- * gp_toolkit's rest: the servers' logs and the views of them, gp_disk_free,
- * the checks for orphaned and missing files, and the partitions' functions,
- * as gp_toolkit--1.3.sql and the update scripts after it have them.  The
- * segment files' history is gp_ao's, beside its __gp_aoseg().
+ * gp_toolkit's rest: the servers' logs and the views of them, gp_disk_free
+ * and the checks for orphaned and missing files, as gp_toolkit--1.3.sql
+ * and the update scripts after it have them.
  *****************************************************************************/
 
 /*
@@ -2095,3 +2095,254 @@ CREATE VIEW gp_toolkit.gp_log_command_timings AS
 	WHERE logsession IS NOT NULL AND logcmdcount IS NOT NULL
 	  AND logdatabase IS NOT NULL
 	GROUP BY 1, 2, 3, 4, 5;
+
+/*
+ * gp_disk_free: the space free for each segment's data directory, which
+ * the segment reads itself (gp_toolkit.c), where Cloudberry's external
+ * table runs df there through gppylib.  The superuser's, as Cloudberry's.
+ */
+CREATE FUNCTION gp_toolkit.__gp_disk_free_rows(OUT dfsegment int4,
+	OUT dfhostname text, OUT dfdevice text, OUT dfspace int8)
+RETURNS SETOF record
+AS 'MODULE_PATHNAME', 'gp_disk_free_rows'
+LANGUAGE C VOLATILE;
+SECURITY LABEL FOR gp ON FUNCTION gp_toolkit.__gp_disk_free_rows() IS 'execute_on=all_segments';
+REVOKE ALL ON FUNCTION gp_toolkit.__gp_disk_free_rows() FROM PUBLIC;
+
+CREATE VIEW gp_toolkit.gp_disk_free AS
+	SELECT * FROM gp_toolkit.__gp_disk_free_rows();
+
+/*
+ * The directory of a tablespace this version keeps its files in, which
+ * Cloudberry has built in; and adminpack's pg_file_rename(), likewise, the
+ * superuser's (gp_toolkit.c).
+ */
+CREATE FUNCTION pg_catalog.get_tablespace_version_directory_name()
+RETURNS text
+AS 'MODULE_PATHNAME', 'gp_tablespace_version_directory_name'
+LANGUAGE C IMMUTABLE;
+
+CREATE FUNCTION pg_catalog.pg_file_rename(text, text, text)
+RETURNS bool
+AS 'MODULE_PATHNAME', 'gp_file_rename'
+LANGUAGE C VOLATILE;
+REVOKE ALL ON FUNCTION pg_catalog.pg_file_rename(text, text, text) FROM PUBLIC;
+
+/*
+ * The checks for orphaned and missing files: the files each node's
+ * directories of the database hold, and the ones its catalog expects,
+ * Cloudberry's views.  A tablespace this database has no directory in has
+ * no files, where Cloudberry's pg_ls_dir() of it fails.  Those of the
+ * segment files of append-optimized tables are gp_ao's, beside its
+ * __gp_aoseg().
+ */
+CREATE VIEW gp_toolkit.__get_exist_files AS
+WITH Tablespaces AS (
+	-- the default tablespace
+	SELECT 0 AS tablespace, 'base/' || d.oid::text AS dirname
+	FROM pg_catalog.pg_database d
+	WHERE d.datname = pg_catalog.current_database()
+	UNION
+	-- the global tablespace
+	SELECT 1664 AS tablespace, 'global/' AS dirname
+	UNION
+	-- the user's tablespaces
+	SELECT ts.oid AS tablespace,
+		   'pg_tblspc/' || ts.oid::text || '/' ||
+		   pg_catalog.get_tablespace_version_directory_name() || '/' ||
+		   (SELECT d.oid::text FROM pg_catalog.pg_database d
+			WHERE d.datname = pg_catalog.current_database()) AS dirname
+	FROM pg_catalog.pg_tablespace ts
+	WHERE ts.oid > 1664
+)
+SELECT tablespace, files.filename, dirname || '/' || files.filename AS filepath
+FROM Tablespaces, pg_catalog.pg_ls_dir(dirname, true, false) AS files(filename);
+
+CREATE VIEW gp_toolkit.__get_expect_files AS
+SELECT s.reltablespace AS tablespace, s.relname, a.amname AS AM,
+	   (CASE WHEN s.relfilenode != 0 THEN s.relfilenode
+			 ELSE pg_catalog.pg_relation_filenode(s.oid) END)::text AS filename
+FROM pg_catalog.pg_class s
+LEFT JOIN pg_catalog.pg_am a ON s.relam = a.oid
+WHERE s.relkind != 'v';
+
+/*
+ * A file whose relfilenode no relation has; gp_segment_id is the node's
+ * that looked, as gp_toolkit 1.4 has it.
+ */
+CREATE VIEW gp_toolkit.__check_orphaned_files AS
+SELECT f1.tablespace, f1.filename, f1.filepath,
+	   pg_catalog.gp_execution_segment() AS gp_segment_id
+FROM gp_toolkit.__get_exist_files f1
+LEFT JOIN gp_toolkit.__get_expect_files f2
+ON f1.tablespace = f2.tablespace AND substring(f1.filename from '[0-9]+') = f2.filename
+WHERE f2.tablespace IS NULL
+  AND f1.filename SIMILAR TO '[0-9]+(\.)?(\_)?%';
+
+CREATE VIEW gp_toolkit.__check_missing_files AS
+SELECT f1.tablespace, f1.relname, f1.filename
+FROM gp_toolkit.__get_expect_files f1
+LEFT JOIN gp_toolkit.__get_exist_files f2
+ON f1.tablespace = f2.tablespace AND f1.filename = f2.filename
+WHERE f2.tablespace IS NULL
+  AND f1.filename SIMILAR TO '[0-9]+';
+
+/* Every segment's missing files and the coordinator's, as gp_dist_random() reads them. */
+CREATE VIEW gp_toolkit.gp_check_missing_files AS
+SELECT d.gp_segment_id, d.tablespace, d.relname, d.filename
+FROM gp.dist_random(NULL::gp_toolkit.__check_missing_files) d
+UNION ALL
+SELECT -1 AS gp_segment_id, *
+FROM gp_toolkit.__check_missing_files;
+
+GRANT SELECT ON gp_toolkit.__get_exist_files, gp_toolkit.__get_expect_files,
+	gp_toolkit.__check_orphaned_files, gp_toolkit.__check_missing_files,
+	gp_toolkit.gp_check_missing_files TO PUBLIC;
+
+/*
+ * A node's orphaned files, found with its pg_class locked and after a
+ * checkpoint, which has removed the files of the relations dropped before
+ * it -- and moved to target_location where one is given, each as
+ * seg<content id>_<its path, "/" as "_">.  Cloudberry's LOCK and
+ * CHECKPOINT reach every segment; the port's reach the node they run on,
+ * so each node runs this.
+ */
+CREATE FUNCTION gp_toolkit.__gp_orphaned_files_here(target_location text,
+	OUT gp_segment_id int4, OUT tablespace oid, OUT filename text,
+	OUT filepath text, OUT move_success bool, OUT oldpath text,
+	OUT newpath text)
+RETURNS SETOF record
+LANGUAGE plpgsql VOLATILE
+AS $$
+BEGIN
+	LOCK TABLE pg_catalog.pg_class IN SHARE MODE NOWAIT;
+	CHECKPOINT;
+	RETURN QUERY
+	SELECT o.gp_segment_id, o.tablespace, o.filename, o.filepath,
+		   CASE WHEN target_location IS NULL THEN NULL
+				ELSE pg_catalog.pg_file_rename(o.oldpath, o.newpath, NULL) END,
+		   o.oldpath, o.newpath
+	FROM (SELECT f.gp_segment_id, f.tablespace, f.filename, f.filepath,
+				 CASE WHEN target_location IS NULL THEN NULL
+					  ELSE pg_catalog.current_setting('data_directory') || '/' || f.filepath END AS oldpath,
+				 target_location || '/seg' || f.gp_segment_id::text || '_' ||
+				 pg_catalog.replace(f.filepath, '/', '_') AS newpath
+		  FROM gp_toolkit.__check_orphaned_files f
+		  ORDER BY f.filepath) o;
+END
+$$;
+
+/* And each segment's, run there. */
+CREATE FUNCTION gp_toolkit.__gp_orphaned_files_on_segments(target_location text,
+	OUT gp_segment_id int4, OUT tablespace oid, OUT filename text,
+	OUT filepath text, OUT move_success bool, OUT oldpath text,
+	OUT newpath text)
+RETURNS SETOF record
+LANGUAGE sql VOLATILE
+AS $$
+	SELECT * FROM gp_toolkit.__gp_orphaned_files_here($1)
+$$;
+SECURITY LABEL FOR gp ON FUNCTION gp_toolkit.__gp_orphaned_files_on_segments(text) IS 'execute_on=all_segments';
+
+REVOKE ALL ON FUNCTION gp_toolkit.__gp_orphaned_files_here(text),
+	gp_toolkit.__gp_orphaned_files_on_segments(text) FROM PUBLIC;
+
+/*
+ * The orphaned files of every node, gp_toolkit 1.5's: refused while another
+ * session is at work, whose files might not be in the catalog yet -- the
+ * port's gp.session_id is Cloudberry's gp_session_id.
+ */
+CREATE FUNCTION gp_toolkit.__gp_check_orphaned_files_func()
+RETURNS TABLE (
+	gp_segment_id int,
+	tablespace oid,
+	filename text,
+	filepath text
+)
+LANGUAGE plpgsql AS $$
+BEGIN
+	BEGIN
+		-- lock pg_class so that no one will be adding/altering relfilenodes
+		LOCK TABLE pg_catalog.pg_class IN SHARE MODE NOWAIT;
+
+		-- make sure no other active/idle transaction is running
+		IF EXISTS (
+			SELECT 1
+			FROM pg_catalog.gp_stat_activity
+			WHERE
+			sess_id <> -1 AND backend_type IN ('client backend', 'unknown process type') -- exclude background worker types
+			AND sess_id <> pg_catalog.current_setting('gp.session_id')::int -- Exclude the current session
+			AND state <> 'idle' -- Exclude idle session like GDD
+		) THEN
+			RAISE EXCEPTION 'There is a client session running on one or more segment. Aborting...';
+		END IF;
+
+		RETURN QUERY
+		SELECT v.gp_segment_id, v.tablespace, v.filename, v.filepath
+		FROM gp_toolkit.__gp_orphaned_files_on_segments(NULL) v
+		UNION ALL
+		SELECT -1 AS gp_segment_id, v.tablespace, v.filename, v.filepath
+		FROM gp_toolkit.__gp_orphaned_files_here(NULL) v;
+	EXCEPTION
+		WHEN lock_not_available THEN
+			RAISE EXCEPTION 'cannot obtain SHARE lock on pg_class';
+		WHEN OTHERS THEN
+			RAISE;
+	END;
+
+	RETURN;
+END;
+$$;
+GRANT EXECUTE ON FUNCTION gp_toolkit.__gp_check_orphaned_files_func() TO PUBLIC;
+
+CREATE VIEW gp_toolkit.gp_check_orphaned_files AS
+SELECT * FROM gp_toolkit.__gp_check_orphaned_files_func();
+
+GRANT SELECT ON gp_toolkit.gp_check_orphaned_files TO PUBLIC;
+
+/*
+ * Move every node's orphaned files to target_location, a directory of each
+ * node's host: gp_toolkit 1.5's, each node's path its data_directory's.
+ */
+CREATE FUNCTION gp_toolkit.gp_move_orphaned_files(target_location text)
+RETURNS TABLE (
+	gp_segment_id int,
+	move_success bool,
+	oldpath text,
+	newpath text
+)
+LANGUAGE plpgsql AS $$
+BEGIN
+	-- lock pg_class so that no one will be adding/altering relfilenodes
+	LOCK TABLE pg_catalog.pg_class IN SHARE MODE NOWAIT;
+
+	-- make sure no other active/idle transaction is running
+	IF EXISTS (
+		SELECT 1
+		FROM pg_catalog.gp_stat_activity
+		WHERE
+		sess_id <> -1 AND backend_type IN ('client backend', 'unknown process type') -- exclude background worker types
+		AND sess_id <> pg_catalog.current_setting('gp.session_id')::int -- Exclude the current session
+		AND state <> 'idle' -- Exclude idle session like GDD
+	) THEN
+		RAISE EXCEPTION 'There is a client session running on one or more segment. Aborting...';
+	END IF;
+
+	RETURN QUERY
+	SELECT q.gp_segment_id, q.move_success, q.oldpath, q.newpath
+	FROM (
+		SELECT h.gp_segment_id, h.move_success, h.oldpath, h.newpath
+		FROM gp_toolkit.__gp_orphaned_files_here(target_location) h
+		UNION ALL
+		SELECT s.gp_segment_id, s.move_success, s.oldpath, s.newpath
+		FROM gp_toolkit.__gp_orphaned_files_on_segments(target_location) s
+	) q
+	ORDER BY q.gp_segment_id, q.oldpath;
+EXCEPTION
+	WHEN lock_not_available THEN
+		RAISE EXCEPTION 'cannot obtain SHARE lock on pg_class';
+	WHEN OTHERS THEN
+		RAISE;
+END;
+$$;
+GRANT EXECUTE ON FUNCTION gp_toolkit.gp_move_orphaned_files(text) TO PUBLIC;

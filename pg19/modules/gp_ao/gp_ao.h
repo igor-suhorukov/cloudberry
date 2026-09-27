@@ -185,6 +185,7 @@ extern void ao_file_read(Relation rel, uint32 filenum, uint64 offset,
 extern void ao_copy_storage(Relation rel, SMgrRelation dst,
 							RelFileLocator dstlocator, char persistence);
 extern void ao_storage_forget(Relation rel);
+extern BlockNumber ao_file_end(Relation rel, uint32 filenum, int64 size);
 extern void ao_register_rmgr(void);
 
 /* ------------------------------------------------------------------------- */

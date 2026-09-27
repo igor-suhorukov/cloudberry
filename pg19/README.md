@@ -469,6 +469,10 @@ What Cloudberry's tests asked for next (2026-09-27), in `gp_core`,
   sent carries, an error's record is followed by its statement's, and
   `log_min_messages`, `log_min_error_statement` and
   `log_min_duration_statement` reach the segments;
+- the rest of gp_toolkit: `gp_disk_free`, each segment's own; and the
+  checks for orphaned and missing files and `gp_move_orphaned_files()`,
+  each node locking its `pg_class` and checkpointing for itself
+  (`gp_toolkit.c`);
 - a record of no declared type carried between the nodes with its row type
   described (`gp_record.c`) — through a Motion, a gather, a query of
   `gp_dist_random()` alone, and as a fragment's parameter or constant;

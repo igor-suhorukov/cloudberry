@@ -522,3 +522,91 @@ BEGIN
 	END LOOP;
 END
 $$;
+
+/******************************************************************************
+ * gp_toolkit's rest of append-optimized tables: their part in the checks for
+ * missing files, whose other views are gp_core's (gp_toolkit--1.3.sql).
+ *****************************************************************************/
+
+/*
+ * The files of a table's relation past its first that hold its data, this
+ * node's: where Cloudberry keeps each segment file as relfilenode.<segno>,
+ * gp_ao keeps them in the pages of the relation, whose files past the first
+ * are PostgreSQL's 1 GB segments of it.  So __get_ao_segno_list() and
+ * __get_aoco_segno_list() list those, in Cloudberry's shape, and
+ * __get_expect_files_ext expects relfilenode.<segno> of each as
+ * Cloudberry's does.
+ */
+CREATE FUNCTION gp_toolkit.__gp_ao_segment_files(regclass)
+RETURNS TABLE (segno integer, eof bigint)
+AS 'MODULE_PATHNAME', 'gp_ao_segment_files'
+LANGUAGE C STRICT;
+
+CREATE FUNCTION gp_toolkit.__get_ao_segno_list()
+RETURNS TABLE (relid oid, segno int, eof bigint)
+LANGUAGE sql
+AS $$
+	SELECT c.oid, f.segno, f.eof
+	FROM pg_catalog.pg_class c
+	JOIN pg_catalog.pg_am am ON am.oid = c.relam
+	CROSS JOIN LATERAL gp_toolkit.__gp_ao_segment_files(c.oid) f
+	WHERE am.amname = 'ao_row' AND c.relkind IN ('r', 'm')
+$$;
+
+CREATE FUNCTION gp_toolkit.__get_aoco_segno_list()
+RETURNS TABLE (relid oid, segno int, eof bigint)
+LANGUAGE sql
+AS $$
+	SELECT c.oid, f.segno, f.eof
+	FROM pg_catalog.pg_class c
+	JOIN pg_catalog.pg_am am ON am.oid = c.relam
+	CROSS JOIN LATERAL gp_toolkit.__gp_ao_segment_files(c.oid) f
+	WHERE am.amname = 'ao_column' AND c.relkind IN ('r', 'm')
+$$;
+
+GRANT EXECUTE ON FUNCTION gp_toolkit.__get_ao_segno_list(),
+	gp_toolkit.__get_aoco_segno_list() TO PUBLIC;
+
+/* Cloudberry's views of the files expected, and missing, with them. */
+CREATE VIEW gp_toolkit.__get_expect_files_ext AS
+SELECT s.reltablespace AS tablespace, s.relname, a.amname AS AM,
+	   (CASE WHEN s.relfilenode != 0 THEN s.relfilenode
+			 ELSE pg_catalog.pg_relation_filenode(s.oid) END)::text AS filename
+FROM pg_catalog.pg_class s LEFT JOIN pg_catalog.pg_am a ON s.relam = a.oid
+WHERE s.relkind != 'v'
+UNION
+-- AO extended files
+SELECT c.reltablespace AS tablespace, c.relname, a.amname AS AM,
+	   format(c.relfilenode::text || '.' || s.segno::text) AS filename
+FROM gp_toolkit.__get_ao_segno_list() s
+JOIN pg_catalog.pg_class c ON s.relid = c.oid
+LEFT JOIN pg_catalog.pg_am a ON c.relam = a.oid
+WHERE s.eof > 0 AND c.relkind != 'v'
+UNION
+-- CO extended files
+SELECT c.reltablespace AS tablespace, c.relname, a.amname AS AM,
+	   format(c.relfilenode::text || '.' || s.segno::text) AS filename
+FROM gp_toolkit.__get_aoco_segno_list() s
+JOIN pg_catalog.pg_class c ON s.relid = c.oid
+LEFT JOIN pg_catalog.pg_am a ON c.relam = a.oid
+WHERE s.eof > 0 AND c.relkind != 'v';
+
+CREATE VIEW gp_toolkit.__check_missing_files_ext AS
+SELECT f1.tablespace, f1.relname, f1.filename
+FROM gp_toolkit.__get_expect_files_ext f1
+LEFT JOIN gp_toolkit.__get_exist_files f2
+ON f1.tablespace = f2.tablespace AND f1.filename = f2.filename
+WHERE f2.tablespace IS NULL
+  AND f1.filename SIMILAR TO '[0-9]+(\.[0-9]+)?';
+
+/* The coordinator's without the extended files, as Cloudberry's. */
+CREATE VIEW gp_toolkit.gp_check_missing_files_ext AS
+SELECT d.gp_segment_id, d.tablespace, d.relname, d.filename
+FROM gp.dist_random(NULL::gp_toolkit.__check_missing_files_ext) d
+UNION ALL
+SELECT -1 AS gp_segment_id, *
+FROM gp_toolkit.__check_missing_files;
+
+GRANT SELECT ON gp_toolkit.__get_expect_files_ext,
+	gp_toolkit.__check_missing_files_ext,
+	gp_toolkit.gp_check_missing_files_ext TO PUBLIC;

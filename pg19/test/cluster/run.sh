@@ -4127,6 +4127,54 @@ t" ] && ok "a message's trailing whitespace off, and gp_log_command_timings" \
 	[[ "$out2" == *"permission denied for view __gp_log_master_ext"* ]] \
 		&& ok "gp.log_format = text writes no record, and a user who is no superuser reads none" \
 		|| notok "gp.log_format, and the views' privileges" "$out / $out2"
+
+	# gp_disk_free: each segment's space free for its data directory, as df
+	# gives it, which the segment reads itself.
+	out=$(q 0 "SELECT string_agg(dfsegment || ':' || (dfhostname <> '') || ':' || dfdevice || ':' || dfspace,
+								 ' ' ORDER BY dfsegment)
+			   FROM gp_toolkit.gp_disk_free;")
+	read -r dev avail < <(df -Pk "$(datadir 1)" | awk 'NR == 2 { print $1, $4 }')
+	got=$(echo "$out" | sed -n 's/^0:true:\([^:]*\):\([0-9]*\) 1:true:.*/\1 \2/p')
+	isnum "${avail:-x}" && [ "${got% *}" = "$dev" ] && isnum "${got#* }" &&
+	[ $(( ${got#* } - avail )) -lt 102400 ] && [ $(( avail - ${got#* } )) -lt 102400 ] \
+		&& ok "gp_disk_free: each segment's device and kB free, as df -Pk says ($dev)" \
+		|| notok "gp_disk_free" "$out / df: $dev $avail"
+
+	# The checks for orphaned and missing files, which each node answers
+	# of its own directories after locking its pg_class and a checkpoint: a
+	# file of no relation on the coordinator and on segment 0, listed and
+	# moved away as seg<id>_<path>; refused while another session is in a
+	# transaction; and a table's file on a segment gone, listed missing.
+	dboid=$(q 0 "SELECT oid FROM pg_database WHERE datname = 'postgres';")
+	touch "$(datadir 0)/base/$dboid/999999998" "$(datadir 1)/base/$dboid/999999999"
+	out=$(q 0 "SELECT string_agg(gp_segment_id || ':' || filepath, ' ' ORDER BY gp_segment_id)
+			   FROM gp_toolkit.gp_check_orphaned_files WHERE filename LIKE '99999999_';")
+	{ echo "BEGIN; SELECT 1;"; sleep 3; } | "$PSQL" -X -q -h "$(sockdir 0)" -p "$(port 0)" -d postgres >/dev/null 2>&1 &
+	sleep 1
+	out2=$(q 0 "SELECT count(*) FROM gp_toolkit.gp_check_orphaned_files;")
+	wait
+	mkdir -p "$ROOT/orphans"
+	out3=$(q 0 "SELECT string_agg(gp_segment_id || ':' || move_success || ':' || newpath, ' ' ORDER BY gp_segment_id)
+				FROM gp_toolkit.gp_move_orphaned_files('$ROOT/orphans') WHERE oldpath LIKE '%/99999999_';")
+	[ "$out" = "-1:base/$dboid/999999998 0:base/$dboid/999999999" ] &&
+	[[ "$out2" == *"There is a client session running on one or more segment. Aborting..."* ]] &&
+	[ "$out3" = "-1:true:$ROOT/orphans/seg-1_base_${dboid}_999999998 0:true:$ROOT/orphans/seg0_base_${dboid}_999999999" ] &&
+	[ -f "$ROOT/orphans/seg0_base_${dboid}_999999999" ] && [ ! -e "$(datadir 1)/base/$dboid/999999999" ] \
+		&& ok "gp_check_orphaned_files and gp_move_orphaned_files, the coordinator's files and each segment's" \
+		|| notok "the checks for orphaned files" "$out / $out2 / $out3"
+	q 0 "CREATE TABLE mf (a int) DISTRIBUTED BY (a);
+		 INSERT INTO mf SELECT generate_series(1, 10);" >/dev/null
+	q 1 "CHECKPOINT;" >/dev/null
+	fnode=$(q 1 "SELECT pg_relation_filenode('mf');")
+	mv "$(datadir 1)/base/$dboid/$fnode" "$ROOT/mf.file"
+	out=$(q 0 "SELECT string_agg(gp_segment_id || ':' || relname || ':' || (filename = '$fnode'), ' ')
+			   FROM gp_toolkit.gp_check_missing_files WHERE relname = 'mf';")
+	mv "$ROOT/mf.file" "$(datadir 1)/base/$dboid/$fnode"
+	out2=$(q 0 "SELECT count(*) FROM gp_toolkit.gp_check_missing_files WHERE relname = 'mf';
+				SELECT count(*) FROM mf; DROP TABLE mf;")
+	[ "$out" = "0:mf:true" ] && [ "$out2" = "0
+10" ] && ok "gp_check_missing_files lists a table's file a segment has not" \
+		|| notok "gp_check_missing_files" "$out / $out2"
 fi
 
 ###############################################################################

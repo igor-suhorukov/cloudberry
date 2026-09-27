@@ -738,6 +738,23 @@ is "and gp_size_of_table_and_indexes_licensing beside it" \
    "SELECT (sotailtablesizeuncompressed > sotailtablesizedisk)::text
       FROM gp_toolkit.gp_size_of_table_and_indexes_licensing WHERE sotailtablename = 'tkc';" "true"
 
+# The check for missing files with the files past a relation's first, which
+# hold an append-optimized table's bytes past its first gigabyte: none
+# here, and the table's first file is missed like any.
+is "__get_ao_segno_list: no file past the first of a small table" \
+   "SELECT count(*) FROM gp_toolkit.__get_ao_segno_list() UNION ALL
+    SELECT count(*) FROM gp_toolkit.__get_aoco_segno_list();" "0
+0"
+q "CREATE TABLE tkh (a int, b text) WITH (appendonly=true);
+   INSERT INTO tkh SELECT i, 'x' FROM generate_series(1, 100) i;
+   CHECKPOINT;" > /dev/null
+path=$(q "SELECT pg_relation_filepath('tkh');")
+mv "$WORK/data/$path" "$WORK/tkh.file"
+got=$(q "SELECT string_agg(relname, ' ') FROM gp_toolkit.__check_missing_files_ext;")
+mv "$WORK/tkh.file" "$WORK/data/$path"
+[ "$got" = "tkh" ] && ok "__check_missing_files_ext lists the table whose file is gone" \
+	|| notok "__check_missing_files_ext" "want [tkh], got [$got]"
+
 echo
 echo "  $pass passed, $fail failed"
 [ "$fail" -eq 0 ]
