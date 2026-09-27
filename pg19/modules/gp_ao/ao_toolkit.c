@@ -59,6 +59,7 @@
 
 PG_FUNCTION_INFO_V1(gp_ao_reloption_values);
 PG_FUNCTION_INFO_V1(gp_ao_segfile_count);
+PG_FUNCTION_INFO_V1(gp_ao_segfilecount_of);
 PG_FUNCTION_INFO_V1(gp_ao_aoseg);
 PG_FUNCTION_INFO_V1(gp_ao_aocsseg);
 PG_FUNCTION_INFO_V1(gp_ao_aovisimap);
@@ -176,6 +177,21 @@ gp_ao_segfile_count(PG_FUNCTION_ARGS)
 		pfree(ao_segfiles_read(ao_storage_id(rel), GetLatestSnapshot(), &n));
 	relation_close(rel, AccessShareLock);
 	PG_RETURN_INT32(n);
+}
+
+/* pg_appendonly.segfilecount: what ANALYZE last counted, or NULL where gone. */
+Datum
+gp_ao_segfilecount_of(PG_FUNCTION_ARGS)
+{
+	Relation	rel = try_relation_open(PG_GETARG_OID(0), AccessShareLock);
+	int			n = 0;
+
+	if (rel == NULL)
+		PG_RETURN_NULL();
+	if (ao_is_ao_table(rel) && RELKIND_HAS_STORAGE(rel->rd_rel->relkind))
+		n = ao_segfilecount_get(ao_storage_id(rel));
+	relation_close(rel, AccessShareLock);
+	PG_RETURN_INT16((int16) n);
 }
 
 /* ------------------------------------------------------------------------- */

@@ -272,7 +272,10 @@ of the core series, O13 to O21, O23 and O32:
   `gp_ao`'s.  Compression (zlib, zstd, rle_type), column `ENCODING`, the
   columns `ALTER TABLE` adds without a rewrite, UPDATE through the plan's
   old row (O20), unique indexes, BRIN and Cloudberry's bitmap index, VACUUM
-  and its compaction, on one node and on the cluster;
+  and its compaction, an insert's rows spread over several segment files
+  (`gp.appendonly_insert_files` and `..._tuples_range`) and
+  `pg_appendonly.segfilecount` as ANALYZE counts it, on one node and on the
+  cluster;
 - `gp_exttable`: external tables, as foreign tables of `gp_exttable_server`
   -- `file://`, `EXECUTE`, `gpfdist://` and `http://` through libcurl, a
   protocol's own functions, text, CSV and a formatter's custom format,
@@ -475,11 +478,10 @@ What Cloudberry's tests asked for next (2026-09-27), in `gp_core`,
   coordinator writes as statements change what they name
   (`gp_metatrack.c`);
 - `gp.debug_print_slice_table`; Cloudberry's settings of its planner's
-  plans, of the gangs a session keeps and of an append-optimized insert's
-  files accepted, with nothing to apply them to here
-  (`gp.eager_two_phase_agg`, `gp.enable_agg_distinct`,
+  plans and of the gangs a session keeps accepted, with nothing to apply
+  them to here (`gp.eager_two_phase_agg`, `gp.enable_agg_distinct`,
   `gp.enable_sort_limit`, `gp.cost_hashjoin_chainwalk`,
-  `gp.cached_segworkers_threshold`, `gp.appendonly_insert_files`); a plan
+  `gp.cached_segworkers_threshold`); a plan
   of more slices than a segment takes readers for declined by ORCA; a
   publication's, subscription's or event trigger's DROP, RENAME, OWNER TO
   and COMMENT kept on the coordinator, as their CREATE is;

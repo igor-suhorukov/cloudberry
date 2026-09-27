@@ -258,7 +258,8 @@ skip ao_checksum_corruption  unrecognized configuration parameter "gp_appendonly
 skip AOCO_Compression  relation "gp_partition_template" does not exist
 run  AORO_Compression
 run  am_encoding
-skip ao_segfile  unrecognized configuration parameter "gp_appendonly_insert_files_tuples_range"
+run  ao_segfile
+port ao_segfile_spread
 run  uao_dml/ao_unique_index_build_row
 run  uao_dml/ao_unique_index_build_column
 run  uao_dml/uao_dml_unique_index_delete_row

@@ -82,6 +82,18 @@ CREATE TABLE gp_ao.blkdir (
 CREATE UNIQUE INDEX blkdir_key ON gp_ao.blkdir (storage_id, segno, first_row);
 
 /*
+ * pg_appendonly.segfilecount, as Cloudberry's ANALYZE counts it: on a
+ * cluster's coordinator the segments' segment files of a table together,
+ * over the number of segments.  Kept by storage ID, so that TRUNCATE and a
+ * rewrite start it again at 0, as Cloudberry's TRUNCATE sets it.
+ */
+CREATE TABLE gp_ao.segfilecount (
+	storage_id		bigint NOT NULL,
+	segfilecount	smallint NOT NULL
+);
+CREATE UNIQUE INDEX segfilecount_key ON gp_ao.segfilecount (storage_id);
+
+/*
  * The storage ID of a table's current files; NULL for a table of another
  * access method.
  */
@@ -99,8 +111,8 @@ AS 'MODULE_PATHNAME', 'gp_ao_options'
 LANGUAGE C STRICT;
 
 GRANT USAGE ON SCHEMA gp_ao TO PUBLIC;
-REVOKE ALL ON gp_ao.segfile, gp_ao.visimap, gp_ao.blkdir FROM PUBLIC;
-GRANT SELECT ON gp_ao.segfile, gp_ao.visimap, gp_ao.blkdir TO PUBLIC;
+REVOKE ALL ON gp_ao.segfile, gp_ao.visimap, gp_ao.blkdir, gp_ao.segfilecount FROM PUBLIC;
+GRANT SELECT ON gp_ao.segfile, gp_ao.visimap, gp_ao.blkdir, gp_ao.segfilecount TO PUBLIC;
 REVOKE ALL ON SEQUENCE gp_ao.storage_id_seq FROM PUBLIC;
 
 /* ------------------------------------------------------------------------- */
@@ -112,7 +124,9 @@ REVOKE ALL ON SEQUENCE gp_ao.storage_id_seq FROM PUBLIC;
  * columns.  The options are what pg_class.reloptions holds, read without
  * opening the table; the port has no relations of its own for a table's
  * segment files, visibility map and block directory, so their OIDs are 0,
- * and segfilecount is how many segment files the table has on this node.
+ * and segfilecount is what ANALYZE last counted (gp_ao.segfilecount).
+ * gp_ao.segfile_count() is how many segment files the table has on this node
+ * now, which ORCA's metadata reads.
  */
 CREATE FUNCTION gp_ao.reloption_values(relam oid, relkind "char", reloptions text[],
 	OUT blocksize integer, OUT compresstype text, OUT compresslevel integer,
@@ -124,6 +138,11 @@ LANGUAGE C STABLE;
 CREATE FUNCTION gp_ao.segfile_count(rel oid)
 RETURNS integer
 AS 'MODULE_PATHNAME', 'gp_ao_segfile_count'
+LANGUAGE C STRICT STABLE;
+
+CREATE FUNCTION gp_ao.segfilecount_of(rel oid)
+RETURNS smallint
+AS 'MODULE_PATHNAME', 'gp_ao_segfilecount_of'
 LANGUAGE C STRICT STABLE;
 
 /*
@@ -140,7 +159,7 @@ SELECT c.oid AS relid,
 	   (CASE o.compresstype WHEN 'none' THEN '' ELSE o.compresstype END)::name AS compresstype,
 	   o.columnstore,
 	   0::oid AS segrelid,
-	   gp_ao.segfile_count(c.oid)::int2 AS segfilecount,
+	   gp_ao.segfilecount_of(c.oid) AS segfilecount,
 	   2::int2 AS version,
 	   0::oid AS blkdirrelid,
 	   0::oid AS blkdiridxid,

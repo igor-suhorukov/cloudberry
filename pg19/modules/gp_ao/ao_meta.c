@@ -86,6 +86,11 @@
 #define Anum_blkdir_offsets			5
 #define Natts_blkdir				5
 
+/* gp_ao.segfilecount's */
+#define Anum_segfilecount_storage_id	1
+#define Anum_segfilecount_count		2
+#define Natts_segfilecount			2
+
 /*
  * The OID of one of gp_ao's tables or indexes.  Looked up by name each time:
  * two syscache lookups, and never stale across a DROP EXTENSION.
@@ -348,6 +353,78 @@ ao_meta_delete_storage(int64 storage_id)
 	delete_storage_rows("segfile", "segfile_key", storage_id);
 	delete_storage_rows("visimap", "visimap_key", storage_id);
 	delete_storage_rows("blkdir", "blkdir_key", storage_id);
+	delete_storage_rows("segfilecount", "segfilecount_key", storage_id);
+	CommandCounterIncrement();
+}
+
+/* ------------------------------------------------------------------------- */
+/* gp_ao.segfilecount                                                        */
+/* ------------------------------------------------------------------------- */
+
+/* The row of a storage ID, as the latest snapshot sees it, or NULL. */
+static HeapTuple
+segfilecount_row(Relation rel, int64 storage_id)
+{
+	ScanKeyData key;
+	SysScanDesc scan;
+	HeapTuple	tup;
+	Snapshot	snapshot = meta_snapshot_begin(GetLatestSnapshot());
+
+	ScanKeyInit(&key, Anum_segfilecount_storage_id, BTEqualStrategyNumber,
+				F_INT8EQ, Int64GetDatum(storage_id));
+	scan = systable_beginscan(rel, ao_meta_relid("segfilecount_key", false),
+							  true, snapshot, 1, &key);
+	tup = systable_getnext(scan);
+	if (tup != NULL)
+		tup = heap_copytuple(tup);
+	systable_endscan(scan);
+	meta_snapshot_end(snapshot);
+	return tup;
+}
+
+/* What ANALYZE last counted of a table's segment files; 0 before it has. */
+int
+ao_segfilecount_get(int64 storage_id)
+{
+	Oid			relid = ao_meta_relid("segfilecount", true);
+	Relation	rel;
+	HeapTuple	tup;
+	int			result = 0;
+
+	if (!OidIsValid(relid))
+		return 0;
+	rel = table_open(relid, AccessShareLock);
+	tup = segfilecount_row(rel, storage_id);
+	if (tup != NULL)
+	{
+		bool		isnull;
+		Datum		d = heap_getattr(tup, Anum_segfilecount_count,
+									 RelationGetDescr(rel), &isnull);
+
+		result = isnull ? 0 : DatumGetInt16(d);
+	}
+	table_close(rel, AccessShareLock);
+	return result;
+}
+
+void
+ao_segfilecount_set(int64 storage_id, int segfilecount)
+{
+	Relation	rel = table_open(ao_meta_relid("segfilecount", false),
+								 RowExclusiveLock);
+	HeapTuple	old = segfilecount_row(rel, storage_id);
+	Datum		values[Natts_segfilecount];
+	bool		nulls[Natts_segfilecount] = {0};
+	HeapTuple	tup;
+
+	values[Anum_segfilecount_storage_id - 1] = Int64GetDatum(storage_id);
+	values[Anum_segfilecount_count - 1] = Int16GetDatum((int16) segfilecount);
+	tup = heap_form_tuple(RelationGetDescr(rel), values, nulls);
+	if (old == NULL)
+		CatalogTupleInsert(rel, tup);
+	else
+		CatalogTupleUpdate(rel, &old->t_self, tup);
+	table_close(rel, RowExclusiveLock);
 	CommandCounterIncrement();
 }
 

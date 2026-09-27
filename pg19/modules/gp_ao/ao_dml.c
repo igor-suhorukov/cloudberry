@@ -44,6 +44,15 @@
  * they were.  What the dropped ones wrote is past the end their segment
  * files' rows say, and the next writer writes over it.
  *
+ * With gp.appendonly_insert_files above one, a statement's writer of a
+ * table is the first of a group, as Cloudberry's get_insert_descriptor()
+ * keeps a list: each writer takes gp.appendonly_insert_files_tuples_range
+ * rows, and the group then turns to the next, begun on another segment file
+ * until it has as many as the setting says -- so that a scan in parallel
+ * would have files to share out.  Not in a utility session, for VACUUM's
+ * compaction, or for a table this transaction made or rewrote, as
+ * Cloudberry's ShouldUseReservedSegno() says.
+ *
  *-------------------------------------------------------------------------
  */
 #include "postgres.h"
@@ -63,6 +72,7 @@
 #include "utils/syscache.h"
 
 #include "gp_ao.h"
+#include "gp_core_api.h"
 
 struct AoInsertState
 {
@@ -93,6 +103,11 @@ struct AoInsertState
 	int64	   *offsets;
 	int64		inserted;
 	int64		blocks;
+	int			range;			/* rows appended since its group turned to it */
+	AoInsertState *lead;		/* its group's first writer, itself for that one */
+	List	   *files;			/* the first's: the group's writers, as begun */
+	int			cur;			/* the first's: which of them is written to */
+	int			nfiles;			/* the first's: how many the group may have */
 };
 
 /* A statement's deletions from one table, one list a segment file. */
@@ -341,6 +356,7 @@ ao_has_unique_index(Relation rel)
 	return result;
 }
 
+/* The first writer of a group of rel's for this query and subtransaction. */
 static AoInsertState *
 ao_find_insert(Oid relid, void *owner, SubTransactionId subid)
 {
@@ -350,29 +366,51 @@ ao_find_insert(Oid relid, void *owner, SubTransactionId subid)
 	{
 		AoInsertState *st = lfirst(lc);
 
-		if (st->relid == relid && st->owner == owner && st->subid == subid)
+		if (st->relid == relid && st->owner == owner && st->subid == subid &&
+			st->lead == st)
 			return st;
 	}
 	return NULL;
 }
 
-/* The running query's writer of rel, begun if it has none. */
-AoInsertState *
-ao_insert_state(Relation rel)
+/*
+ * How many segment files a statement's insert into rel spreads over:
+ * gp.appendonly_insert_files, but for Cloudberry's exceptions -- a utility
+ * session, VACUUM's compaction, and a table whose pg_class row this
+ * transaction wrote, which it made or rewrote (ShouldUseReservedSegno()):
+ * CREATE TABLE AS, REFRESH and every rewrite write one.
+ */
+static int
+ao_insert_files(Relation rel)
 {
-	void	   *owner = ao_current_owner();
-	SubTransactionId subid = GetCurrentSubTransactionId();
-	AoInsertState *st = ao_find_insert(RelationGetRelid(rel), owner, subid);
-	MemoryContext old;
+	const GpCoreApi *core = GpCoreApiLookup();
+	HeapTuple	tup;
+	bool		made_here;
 
-	if (st != NULL)
-		return st;
+	if (gp_appendonly_insert_files <= 1 || ao_compaction_writer ||
+		core == NULL || core->get_role() == GP_ROLE_UTILITY)
+		return 1;
+	tup = SearchSysCache1(RELOID, ObjectIdGetDatum(RelationGetRelid(rel)));
+	if (!HeapTupleIsValid(tup))
+		return 1;
+	made_here = TransactionIdIsCurrentTransactionId(HeapTupleHeaderGetXmin(tup->t_data));
+	ReleaseSysCache(tup);
+	return made_here ? 1 : gp_appendonly_insert_files;
+}
+
+/* A writer of rel, on a segment file of its own. */
+static AoInsertState *
+ao_insert_begin(Relation rel, void *owner, SubTransactionId subid)
+{
+	AoInsertState *st;
+	MemoryContext old;
 
 	old = MemoryContextSwitchTo(ao_dml_context());
 	st = palloc0(sizeof(AoInsertState));
 	st->relid = RelationGetRelid(rel);
 	st->owner = owner;
 	st->subid = subid;
+	st->lead = st;
 	st->storage_id = ao_storage_id(rel);
 	st->columnar = ao_storage_is_columnar(rel);
 	st->natts = RelationGetDescr(rel)->natts;
@@ -409,6 +447,56 @@ ao_insert_state(Relation rel)
 	ao_inserts = lappend(ao_inserts, st);
 	MemoryContextSwitchTo(old);
 	return st;
+}
+
+/* The running query's writer of rel to append to now, begun if it has none. */
+AoInsertState *
+ao_insert_state(Relation rel)
+{
+	void	   *owner = ao_current_owner();
+	SubTransactionId subid = GetCurrentSubTransactionId();
+	AoInsertState *lead = ao_find_insert(RelationGetRelid(rel), owner, subid);
+
+	if (lead == NULL)
+	{
+		MemoryContext old;
+
+		lead = ao_insert_begin(rel, owner, subid);
+		lead->nfiles = ao_insert_files(rel);
+		old = MemoryContextSwitchTo(ao_dml_context());
+		lead->files = list_make1(lead);
+		MemoryContextSwitchTo(old);
+	}
+	return ao_insert_turn(list_nth(lead->files, lead->cur), rel);
+}
+
+/*
+ * The writer of st's group the next row goes to: st, until it has taken
+ * gp.appendonly_insert_files_tuples_range rows since the group turned to it;
+ * then the next, begun on a segment file of its own while the group has
+ * fewer than it may -- ao_choose_segfile() passes over its others' --
+ * and after the last the first again, as Cloudberry's
+ * get_insert_descriptor() turns.  Its test is Cloudberry's, an equality.
+ */
+AoInsertState *
+ao_insert_turn(AoInsertState *st, Relation rel)
+{
+	AoInsertState *lead = st->lead;
+
+	if (lead->nfiles <= 1 || st->range != gp_appendonly_insert_files_tuples_range)
+		return st;
+	st->range = 0;
+	if (list_length(lead->files) < lead->nfiles)
+	{
+		AoInsertState *next = ao_insert_begin(rel, lead->owner, lead->subid);
+		MemoryContext old = MemoryContextSwitchTo(ao_dml_context());
+
+		next->lead = lead;
+		lead->files = lappend(lead->files, next);
+		MemoryContextSwitchTo(old);
+	}
+	lead->cur = (lead->cur + 1) % list_length(lead->files);
+	return list_nth(lead->files, lead->cur);
 }
 
 /* Write the block being built, if it has rows, and its directory row. */
@@ -567,6 +655,7 @@ ao_insert_slot(AoInsertState *st, Relation rel, TupleTableSlot *slot)
 	st->next_rownum++;
 	st->block_nrows++;
 	st->inserted++;
+	st->range++;
 	st->sf->tupcount++;
 
 	if (blocksize >= (Size) st->opts.blocksize ||

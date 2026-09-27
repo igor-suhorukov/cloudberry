@@ -144,7 +144,6 @@ static bool gp_enable_agg_distinct = true;
 static bool gp_enable_sort_limit = true;
 static bool gp_cost_hashjoin_chainwalk = false;
 static int	gp_cached_gang_threshold = 5;
-static int	gp_appendonly_insert_files = 0;
 
 /*
  * Cloudberry's gpvars_check_statement_mem(): statement_mem is less than
@@ -742,12 +741,6 @@ GpSettingsInit(void)
 							"Accepted for Cloudberry's scripts: a session keeps every segment connection it has made until it ends.",
 							&gp_cached_gang_threshold,
 							5, 1, INT_MAX, PGC_USERSET, GUC_NOT_IN_SAMPLE,
-							NULL, NULL, NULL);
-	DefineCustomIntVariable("gp.appendonly_insert_files",
-							"Number of segment files to insert for appendonly table within a transaction.",
-							"Accepted for Cloudberry's scripts: an insert writes one segment file, a segment scanning a table in one process until intra-segment parallelism (after M7, decision 2).",
-							&gp_appendonly_insert_files,
-							0, 0, 127, PGC_USERSET, 0,
 							NULL, NULL, NULL);
 	DefineCustomBoolVariable("gp.workfile_compression",
 							 "Enables compression of temporary files.",

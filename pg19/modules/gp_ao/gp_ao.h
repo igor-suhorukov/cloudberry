@@ -279,6 +279,8 @@ extern void ao_segfile_insert(int64 storage_id, int segno, int ngroups);
 extern void ao_segfile_update(int64 storage_id, AoSegfile *sf);
 extern void ao_segfile_delete(int64 storage_id, int segno);
 extern void ao_meta_delete_storage(int64 storage_id);
+extern int	ao_segfilecount_get(int64 storage_id);
+extern void ao_segfilecount_set(int64 storage_id, int segfilecount);
 
 extern void ao_blkdir_insert(int64 storage_id, int segno, int64 first_row,
 							 int nrows, const int64 *offsets, int noffsets);
@@ -343,6 +345,7 @@ typedef struct AoInsertState AoInsertState;
 
 extern bool ao_has_unique_index(Relation rel);
 extern AoInsertState *ao_insert_state(Relation rel);
+extern AoInsertState *ao_insert_turn(AoInsertState *st, Relation rel);
 extern void ao_dml_set_compaction_writer(bool on);
 extern void ao_insert_slot(AoInsertState *st, Relation rel,
 						   TupleTableSlot *slot);
@@ -410,6 +413,8 @@ extern void ao_default_storage_options_add(List **options);
 /* ------------------------------------------------------------------------- */
 
 extern PGDLLIMPORT int gp_appendonly_compaction_threshold;
+extern PGDLLIMPORT int gp_appendonly_insert_files;
+extern PGDLLIMPORT int gp_appendonly_insert_files_tuples_range;
 extern PGDLLIMPORT bool gp_appendonly_compaction;
 extern PGDLLIMPORT bool gp_select_invisible;
 

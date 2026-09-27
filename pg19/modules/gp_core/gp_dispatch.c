@@ -229,6 +229,8 @@ static const char *const synced_settings[] = {
 	"gp.select_invisible",
 	"gp.appendonly_compaction",
 	"gp.appendonly_compaction_threshold",
+	"gp.appendonly_insert_files",
+	"gp.appendonly_insert_files_tuples_range",
 	/*
 	 * gp_exttable's, which a segment's scan of an external table reads: the
 	 * statement's name and text, for gpfdist and a command's environment, and
