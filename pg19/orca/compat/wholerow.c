@@ -18,7 +18,8 @@
  * under the License.
  *
  * compat/wholerow.c
- *	  A table's old row, carried up an UPDATE's plan to its ModifyTable.
+ *	  A table's old row, carried up an UPDATE's plan to its ModifyTable --
+ *	  and a partitioned table's row's partition, by its tableoid.
  *
  * A table whose method takes UPDATE's old row from the plan -- an
  * append-optimized one, or PAX -- cannot give the executor a row by its
@@ -45,6 +46,14 @@
  * column is a record, each row of its partition's type.  Any other node, or a
  * scan that cannot give a whole row, ends the walk with nothing.
  *
+ * A partitioned table's UPDATE and DELETE find each row's partition by its
+ * tableoid, a "tableoid" column ModifyTable reads (ExecLookupResultRelByOid()),
+ * and gp_core's split update its DELETE's.  ORCA's DML carries two columns of
+ * the row's identity, the ctid and gp_segment_id, which an Explicit
+ * Redistribute Motion routes the row back to its segment by: tableoid comes
+ * the same way, from the scan that read the ctid -- through a split update's
+ * Split too, which passes it to both of its rows, and a hash filter.
+ *
  *-------------------------------------------------------------------------
  */
 #include "postgres.h"
@@ -69,6 +78,26 @@ is_motion(Plan *plan)
 		strcmp(((CustomScan *) plan)->methods->CustomName, GP_MOTION_NAME) == 0;
 }
 
+/*
+ * gp_core's nodes that pass a column of their child's on unchanged, their
+ * scan tuple being its row: its Split Update (gp_split.c), and the hash
+ * filter that keeps the rows of one segment's share (gp_motion.c).
+ */
+static bool
+is_passthrough(Plan *plan)
+{
+	return IsA(plan, CustomScan) &&
+		(strcmp(((CustomScan *) plan)->methods->CustomName, "GpSplitUpdate") == 0 ||
+		 strcmp(((CustomScan *) plan)->methods->CustomName, "GpHashFilter") == 0);
+}
+
+/* What is carried: the scan's whole row, or its row's tableoid. */
+typedef enum CarryKind
+{
+	CARRY_WHOLE_ROW,
+	CARRY_TABLEOID,
+} CarryKind;
+
 /* "expr" as a new last entry of "tlist"; the entry's resno. */
 static AttrNumber
 append_column(List **tlist, Expr *expr, bool junk)
@@ -88,8 +117,8 @@ column_var(int varno, Plan *plan, AttrNumber attno)
 	return makeVar(varno, attno, exprType((Node *) tle->expr), -1, InvalidOid, 0);
 }
 
-AttrNumber
-gp_orca_carry_whole_row(Plan *plan, AttrNumber resno, List *rtable)
+static AttrNumber
+carry(Plan *plan, AttrNumber resno, List *rtable, CarryKind kind)
 {
 	TargetEntry *tle = get_tle_by_resno(plan->targetlist, resno);
 	Expr	   *expr;
@@ -102,6 +131,18 @@ gp_orca_carry_whole_row(Plan *plan, AttrNumber resno, List *rtable)
 	expr = tle->expr;
 	while (expr != NULL && IsA(expr, RelabelType))
 		expr = ((RelabelType *) expr)->arg;
+
+	/*
+	 * A plan that reads no row has a NULL for the ctid -- ORCA's Result in
+	 * the place of a scan all of whose partitions a condition prunes -- and
+	 * a NULL beside it, then.
+	 */
+	if (expr != NULL && IsA(expr, Const) && ((Const *) expr)->constisnull)
+		return append_column(&plan->targetlist,
+							 (Expr *) makeNullConst(kind == CARRY_TABLEOID
+													? OIDOID : RECORDOID,
+													-1, InvalidOid),
+							 true);
 	if (expr == NULL || !IsA(expr, Var))
 		return InvalidAttrNumber;
 	var = (Var *) expr;
@@ -122,6 +163,13 @@ gp_orca_carry_whole_row(Plan *plan, AttrNumber resno, List *rtable)
 				if (var->varno != scanrelid ||
 					var->varattno != SelfItemPointerAttributeNumber)
 					return InvalidAttrNumber;
+				if (kind == CARRY_TABLEOID)
+					return append_column(&plan->targetlist,
+										 (Expr *) makeVar(scanrelid,
+														  TableOidAttributeNumber,
+														  OIDOID, -1,
+														  InvalidOid, 0),
+										 true);
 				rowtype = get_rel_type_id(rt_fetch(scanrelid, rtable)->relid);
 				if (!OidIsValid(rowtype))
 					return InvalidAttrNumber;
@@ -168,13 +216,18 @@ gp_orca_carry_whole_row(Plan *plan, AttrNumber resno, List *rtable)
 				if (stle == NULL || !IsA(stle->expr, Var))
 					return InvalidAttrNumber;
 
-				if (is_motion(plan) && plan->lefttree != NULL &&
+				if ((is_motion(plan) || is_passthrough(plan)) &&
+					plan->lefttree != NULL &&
 					((Var *) stle->expr)->varno == OUTER_VAR)
 				{
-					/* the fragment's column, through the scan target list */
-					childno = gp_orca_carry_whole_row(plan->lefttree,
-													  ((Var *) stle->expr)->varattno,
-													  rtable);
+					/*
+					 * The fragment's column, through the scan target list; a
+					 * Split passes a column that is neither its DELETE's nor
+					 * its INSERT's to both.
+					 */
+					childno = carry(plan->lefttree,
+									((Var *) stle->expr)->varattno, rtable,
+									kind);
 					if (childno == InvalidAttrNumber)
 						return InvalidAttrNumber;
 					scanno = append_column(&cscan->custom_scan_tlist,
@@ -196,16 +249,18 @@ gp_orca_carry_whole_row(Plan *plan, AttrNumber resno, List *rtable)
 					scanno = list_length(cscan->custom_scan_tlist) + 1;
 					foreach(lc, cscan->custom_plans)
 					{
-						if (gp_orca_carry_whole_row((Plan *) lfirst(lc),
-													var->varattno,
-													rtable) != scanno)
+						if (carry((Plan *) lfirst(lc), var->varattno, rtable,
+								  kind) != scanno)
 							return InvalidAttrNumber;
 					}
 					(void) append_column(&cscan->custom_scan_tlist,
 										 (Expr *) makeVar(((Var *) stle->expr)->varno,
-														  InvalidAttrNumber,
-														  RECORDOID, -1,
-														  InvalidOid, 0),
+														  kind == CARRY_TABLEOID
+														  ? TableOidAttributeNumber
+														  : InvalidAttrNumber,
+														  kind == CARRY_TABLEOID
+														  ? OIDOID : RECORDOID,
+														  -1, InvalidOid, 0),
 										 false);
 				}
 				else
@@ -222,9 +277,21 @@ gp_orca_carry_whole_row(Plan *plan, AttrNumber resno, List *rtable)
 			return InvalidAttrNumber;
 	}
 
-	childno = gp_orca_carry_whole_row(child, var->varattno, rtable);
+	childno = carry(child, var->varattno, rtable, kind);
 	if (childno == InvalidAttrNumber)
 		return InvalidAttrNumber;
 	return append_column(&plan->targetlist,
 						 (Expr *) column_var(var->varno, child, childno), true);
+}
+
+AttrNumber
+gp_orca_carry_whole_row(Plan *plan, AttrNumber resno, List *rtable)
+{
+	return carry(plan, resno, rtable, CARRY_WHOLE_ROW);
+}
+
+AttrNumber
+gp_orca_carry_tableoid(Plan *plan, AttrNumber resno, List *rtable)
+{
+	return carry(plan, resno, rtable, CARRY_TABLEOID);
 }

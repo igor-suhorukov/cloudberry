@@ -1323,14 +1323,19 @@ CTranslatorQueryToDXL::CheckOnConflict() const
 //
 //		A partitioned table's row is found by its partition as well, whose
 //		tableoid PostgreSQL 19's ModifyTable reads (a "tableoid" junk
-//		column, ExecLookupResultRelByOid()), and tableoid rides in the
-//		second column: a hash-distributed table's rows are routed by their
-//		key, not by the column (DMLPartitionedTargetTaken).
+//		column, ExecLookupResultRelByOid()): DXL to PlannedStmt carries it
+//		up from the scan that read the ctid, as it carries an
+//		append-optimized row's whole row (compat/wholerow.c), and the second
+//		column is gp_segment_id, as a table's is, which an Explicit
+//		Redistribute Motion routes a row back to its segment by.  Where
+//		gp_core's extension is not, tableoid rides in the second column: a
+//		hash-distributed table's rows are routed by their key, not by the
+//		column (DMLPartitionedTargetTaken).
 //
 //---------------------------------------------------------------------------
 void
 CTranslatorQueryToDXL::GetCtidAndSegmentId(ULONG *ctid, ULONG *segment_id,
-										   BOOL partitioned)
+										   BOOL partitioned GPOS_UNUSED)
 {
 	const FormData_pg_attribute *att_tup_tupid =
 		SystemAttributeDefinition(SelfItemPointerAttributeNumber);
@@ -1346,7 +1351,7 @@ CTranslatorQueryToDXL::GetCtidAndSegmentId(ULONG *ctid, ULONG *segment_id,
 	mdid->Release();
 
 	// gp_segment_id, or tableoid in its place
-	if (!partitioned && InvalidOid != gpdb::SegmentOfFunction())
+	if (InvalidOid != gpdb::SegmentOfFunction())
 	{
 		mdid = GPOS_NEW(m_mp) CMDIdGPDB(IMDId::EmdidGeneral, INT4OID);
 		*segment_id = CTranslatorUtils::GetColId(
@@ -1378,10 +1383,10 @@ CTranslatorQueryToDXL::GetCtidAndSegmentId(ULONG *ctid, ULONG *segment_id,
 //		entries, so the plan can re-check no row: the statement has to hold
 //		its target in ExclusiveLock or more, so that no row of it changes
 //		under the statement, as without the global deadlock detector it does
-//		(CheckDMLReadsOnlyTarget).  And the table is hash distributed, so
-//		that ORCA routes no row by the column tableoid rides in
-//		(GetCtidAndSegmentId); a randomly distributed table's rows are
-//		routed by where they are.
+//		(CheckDMLReadsOnlyTarget).  And the table is hash distributed, or
+//		randomly where gp_segment_id is ORCA's second column of the row's
+//		identity, which a randomly distributed table's rows are routed back
+//		to their segments by (GetCtidAndSegmentId).
 //
 //---------------------------------------------------------------------------
 BOOL
@@ -1389,7 +1394,9 @@ CTranslatorQueryToDXL::DMLPartitionedTargetTaken(const RangeTblEntry *rte,
 												 const IMDRelation *md_rel)
 {
 	return ExclusiveLock <= rte->rellockmode &&
-		   IMDRelation::EreldistrHash == md_rel->GetRelDistribution();
+		   (IMDRelation::EreldistrHash == md_rel->GetRelDistribution() ||
+			(IMDRelation::EreldistrRandom == md_rel->GetRelDistribution() &&
+			 InvalidOid != gpdb::SegmentOfFunction()));
 }
 
 //---------------------------------------------------------------------------

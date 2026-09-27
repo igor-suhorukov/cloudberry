@@ -3118,6 +3118,17 @@ gpdb::CarryWholeRow(Plan *plan, AttrNumber resno, List *rtable)
 	return InvalidAttrNumber;
 }
 
+AttrNumber
+gpdb::CarryTableOid(Plan *plan, AttrNumber resno, List *rtable)
+{
+	GP_WRAP_START;
+	{
+		return gp_orca_carry_tableoid(plan, resno, rtable);
+	}
+	GP_WRAP_END;
+	return InvalidAttrNumber;
+}
+
 List *
 gpdb::InferArbiterIndexes(Query *query)
 {

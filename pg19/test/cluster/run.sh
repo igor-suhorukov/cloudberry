@@ -2162,6 +2162,28 @@ COMMIT;"
 		"UPDATE wp SET a = a + 1000, b = 29 - b WHERE b < 15;" \
 		"SELECT tableoid::regclass, gp_segment_id, count(*), sum(a), sum(b) FROM wp GROUP BY 1, 2 ORDER BY 1, 2;" \
 		"Redistribute Motion 2:2"
+	# A randomly distributed partitioned table: each row is written where it
+	# is, and a row a join moved goes back to its segment by gp_segment_id,
+	# ORCA's second column of the row's identity, its partition known by the
+	# tableoid carried up from the scan that read it (gp_orca's
+	# compat/wholerow.c) -- through a Split too, which passes it to both its
+	# rows.
+	q 0 "CREATE TABLE wr (a int, b int, c text) DISTRIBUTED RANDOMLY PARTITION BY RANGE (b);
+	     CREATE TABLE wr_1 PARTITION OF wr FOR VALUES FROM (0) TO (10);
+	     CREATE TABLE wr_2 PARTITION OF wr FOR VALUES FROM (10) TO (20);
+	     INSERT INTO wr SELECT i, i % 20, 'c' || i FROM generate_series(1, 200) i; ANALYZE wr;" >/dev/null 2>&1
+	wr_rows="SELECT tableoid::regclass, gp_segment_id, count(*), sum(a), sum(b), string_agg(DISTINCT left(c, 1), ',') FROM wr GROUP BY 1, 2 ORDER BY 1, 2;"
+	orca_write "a randomly distributed partitioned table's UPDATE, each row written where it is" \
+		"UPDATE wr SET c = 'x' || a WHERE a < 30;" "$wr_rows" "Update on wr_1"
+	orca_write "... its DELETE" \
+		"DELETE FROM wr WHERE a > 180;" "$wr_rows" "Delete on wr_2"
+	orca_write "... its UPDATE joined to another table, each row routed back to its segment" \
+		"UPDATE wr SET c = 'j' || po.y FROM po WHERE wr.a = po.x;" "$wr_rows" \
+		"Explicit Redistribute Motion"
+	orca_write "... and of its partition key, joined: a Split, both its rows routed back" \
+		"UPDATE wr SET b = (wr.b + po.y) % 20 FROM po WHERE wr.a = po.x AND po.y < 4;" \
+		"$wr_rows" "Split Update"
+
 	out=$(printf '%s\n' "SET gp.optimizer_trace_fallback = on;" "UPDATE wp SET b = b + 100 WHERE a = 7;" | qf 0)
 	case "$out" in
 		*"GPORCA failed"*) notok "a row no partition takes: planned by ORCA" "$out" ;;

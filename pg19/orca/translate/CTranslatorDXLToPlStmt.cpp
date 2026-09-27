@@ -6327,7 +6327,12 @@ CTranslatorDXLToPlStmt::TranslateDXLDml(
 	BOOL split = CMD_UPDATE == m_cmd_type && phy_dml_dxlop->FSplit();
 	if (split)
 	{
-		if (IMDRelation::EreldistrHash != md_rel->GetRelDistribution())
+		// A randomly distributed table has no key to change: its split is a
+		// partitioned table's, a row moved to another partition where it is,
+		// or routed back there by gp_segment_id.
+		if (IMDRelation::EreldistrHash != md_rel->GetRelDistribution() &&
+			!(md_rel->IsPartitioned() &&
+			  IMDRelation::EreldistrRandom == md_rel->GetRelDistribution()))
 		{
 			GP_UNPORTED("an UPDATE run as a DELETE and an INSERT");
 		}
@@ -6494,32 +6499,15 @@ CTranslatorDXLToPlStmt::TranslateDXLDml(
 	AttrNumber ctid_col = (AttrNumber) gpdb::ListLength(dml_target_list);
 
 	// A partitioned table's partitions, each a result relation of its own,
-	// and the partition a row is in, by the tableoid ORCA's DML carries in
-	// its second column (GetCtidAndSegmentId) -- which ORCA must then route
-	// no row by.  The partitions are locked as the table is, so that no row
-	// of theirs changes under the statement either.
+	// and the partition a row is in, by its tableoid, carried up from the
+	// scan that read the ctid, below (GetCtidAndSegmentId).  The partitions
+	// are locked as the table is, so that no row of theirs changes under the
+	// statement either.
 	List *part_rtis = NIL;
 	List *part_oids = NIL;
 	AttrNumber tableoid_col = InvalidAttrNumber;
 	BOOL old_row_from_plan =
 		gpdb::RelOldRowFromPlan(CMDIdGPDB::CastMdid(mdid_target_table)->Oid());
-	if (partitioned)
-	{
-		ListCell *lc_motion = nullptr;
-		ForEach(lc_motion, m_dxl_to_plstmt_context->GetMotions())
-		{
-			if (GP_MOTION_EXPLICIT ==
-				gpdb::MotionType((Plan *) lfirst(lc_motion)))
-			{
-				GP_UNPORTED(
-					"a partitioned table's rows routed back to where they are");
-			}
-		}
-		AddJunkTargetEntryForColId(&dml_target_list, &child_context,
-								   phy_dml_dxlop->GetSegmentIdColId(),
-								   "tableoid");
-		tableoid_col = (AttrNumber) gpdb::ListLength(dml_target_list);
-	}
 	if (partitioned && split)
 	{
 		// A split's INSERT may go to any partition, and its DELETE to any
@@ -6608,6 +6596,24 @@ CTranslatorDXLToPlStmt::TranslateDXLDml(
 	result_plan->lefttree = child_plan;
 
 	result_plan->targetlist = dml_target_list;
+
+	// A partitioned table's row's partition: its tableoid, from the scan
+	// that read the ctid, which ModifyTable finds by its name, and gp_core's
+	// split update by its number.
+	if (partitioned)
+	{
+		tableoid_col = gpdb::CarryTableOid(
+			result_plan, ctid_col,
+			m_dxl_to_plstmt_context->GetRTableEntriesList());
+		if (InvalidAttrNumber == tableoid_col)
+		{
+			GP_UNPORTED(
+				"the partition of a partitioned table's row, which the plan does not carry");
+		}
+		((TargetEntry *) gpdb::ListNth(result_plan->targetlist,
+									   tableoid_col - 1))
+			->resname = PStrDup("tableoid");
+	}
 
 	// A table whose method takes a changed row's old version from the plan
 	// (O20), an append-optimized or a PAX table, finds it in a whole-row

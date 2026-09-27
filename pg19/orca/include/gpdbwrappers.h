@@ -896,6 +896,10 @@ bool RelOldRowFromPlan(Oid relid);
 // cannot pass it on (O20's "wholerow"; compat/wholerow.c).
 AttrNumber CarryWholeRow(Plan *plan, AttrNumber resno, List *rtable);
 
+// And the row's tableoid, the same way: the partition a partitioned table's
+// row is in, which its UPDATE and DELETE find it by.
+AttrNumber CarryTableOid(Plan *plan, AttrNumber resno, List *rtable);
+
 // A CTE ORCA reads in more than one slice, whose rows each segment keeps in
 // files (compat/sharedscan.c): whether gp_core can name them; the Sequence
 // that runs "producers" before "plan"; a producer, writing the rows of

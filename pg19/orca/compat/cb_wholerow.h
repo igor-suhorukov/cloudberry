@@ -39,4 +39,8 @@
 extern AttrNumber gp_orca_carry_whole_row(Plan *plan, AttrNumber resno,
 										  List *rtable);
 
+/* And the row's tableoid, the same way: the partition a row is in. */
+extern AttrNumber gp_orca_carry_tableoid(Plan *plan, AttrNumber resno,
+										 List *rtable);
+
 #endif							/* CB_WHOLEROW_H */
