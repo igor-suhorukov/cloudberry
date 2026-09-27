@@ -1,0 +1,48 @@
+#!/usr/bin/env python3
+#
+# Licensed to the Apache Software Foundation (ASF) under one
+# or more contributor license agreements.  See the NOTICE file
+# distributed with this work for additional information
+# regarding copyright ownership.  The ASF licenses this file
+# to you under the Apache License, Version 2.0 (the
+# "License"); you may not use this file except in compliance
+# with the License.  You may obtain a copy of the License at
+#
+#   http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing,
+# software distributed under the License is distributed on an
+# "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+# KIND, either express or implied.  See the License for the
+# specific language governing permissions and limitations
+# under the License.
+#
+# gp_retrieve_rows <database> <cursor> <count>: the port's, for its own
+# tests.  RETRIEVE count rows, and then ALL the rest, from each endpoint of a
+# parallel retrieve cursor, in a retrieve session of its own on the
+# endpoint's node, which a superuser's connection to the coordinator finds in
+# gp_get_endpoints(); the rows each gave, in the order they came -- all of
+# them, since a retrieve session that quits leaving rows unread cancels the
+# endpoint's sender.  What isolation2's syntax cannot say: its
+# retrieve sessions name a node (0R:), or every one (*R:), whose outputs
+# come in the nodes' order, where a replicated table's endpoint is on the
+# node the session's id picks.
+import sys
+
+import pg
+
+database, cursor, count = sys.argv[1:4]
+coordinator = pg.connect(dbname=database)
+endpoints = coordinator.query(
+    "SELECT gp_segment_id, hostname, port, auth_token, endpointname "
+    "FROM pg_catalog.gp_get_endpoints() WHERE cursorname = $1 "
+    "ORDER BY gp_segment_id", (cursor,)).getresult()
+coordinator.close()
+for segment, host, port, token, name in endpoints:
+    session = pg.connect(dbname=database, host=host, port=port,
+                         opt='-c gp_retrieve_conn=true', passwd=token)
+    for what in (count, 'ALL'):
+        rows = session.query('RETRIEVE %s FROM ENDPOINT "%s"' % (what, name)).getresult()
+        print("RETRIEVE %s: %d rows: %s" % (what, len(rows),
+                                            " ".join(str(r[0]) for r in rows)))
+    session.close()

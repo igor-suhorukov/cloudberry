@@ -145,6 +145,7 @@
 #include "gp_cluster.h"
 #include "gp_core_api.h"
 #include "gp_dispatch.h"
+#include "gp_endpoint.h"
 #include "gp_explain.h"
 #include "gp_fault.h"
 #include "gp_gdd.h"
@@ -285,6 +286,7 @@ typedef struct MotionState
 	bool		streaming;
 	List	   *stream_slices;	/* StreamSlice */
 	GpStream   *stream;
+	bool		endpoints;		/* a parallel retrieve cursor's: none relayed */
 
 	/* On a segment, the Motion a reader's fragment is: it sends. */
 	bool		sending;
@@ -2886,9 +2888,14 @@ stream_slice_find(MotionState *state, int slice)
  * Start the slices that stream, each on a reader of every segment that runs
  * it, and answer what the writer's own fragment has to carry: where every
  * slice's receivers are, and the key the readers find its snapshot under.
+ * A parallel retrieve cursor's (GpEndpointDispatch()) gives the stream its
+ * readers are taken for, the top slice's receivers on each segment -- its
+ * endpoints' readers, where the Gather's are the writers -- and the key its
+ * writers published under.
  */
 static List *
-stream_start(MotionState *state)
+stream_start(MotionState *state, GpStream *stream,
+			 const char *const *top_addresses, const char *sharekey)
 {
 	EState	   *estate = state->css.ss.ps.state;
 	int			top = GpMotionSlice(state->css.ss.ps.plan);
@@ -2897,10 +2904,8 @@ stream_start(MotionState *state)
 	const char **writer_address = palloc0_array(const char *, nsegs);
 	uint8		random[GP_IC_TOKEN_LEN / 2];
 	char		token[GP_IC_TOKEN_LEN + 1];
-	char	   *sharekey;
 	List	   *entries = NIL;
 	DefElem    *streammark;
-	GpStream   *stream;
 	static uint32 share_counter = 0;
 
 	if (!pg_strong_random(random, sizeof(random)))
@@ -2909,13 +2914,20 @@ stream_start(MotionState *state)
 				 errmsg("could not generate a random interconnect token")));
 	for (int i = 0; i < (int) sizeof(random); i++)
 		snprintf(token + 2 * i, 3, "%02x", random[i]);
-	sharekey = psprintf("%d_%u", MyProcPid, ++share_counter);
+	if (sharekey == NULL)
+		sharekey = psprintf("%d_%u", MyProcPid, ++share_counter);
 
 	for (int seg = 0; seg < nsegs; seg++)
-		if (state_includes(state, seg))
-			writer_address[seg] = GpStreamWriterAddress(seg, &writer_pid[seg]);
+	{
+		if (!state_includes(state, seg))
+			continue;
+		writer_address[seg] = GpStreamWriterAddress(seg, &writer_pid[seg]);
+		if (top_addresses != NULL)
+			writer_address[seg] = top_addresses[seg];
+	}
 
-	stream = GpStreamBegin();
+	if (stream == NULL)
+		stream = GpStreamBegin();
 	state->stream = stream;
 	foreach_ptr(StreamSlice, ss, state->stream_slices)
 		for (int i = 0; i < ss->ncontents; i++)
@@ -2995,7 +3007,7 @@ stream_start(MotionState *state)
 
 	return list_make2(streammark,
 					  makeDefElem(pstrdup(GP_SHARE_MARK),
-								  (Node *) makeString(sharekey), -1));
+								  (Node *) makeString(pstrdup(sharekey)), -1));
 }
 
 /* The readers are done: they finished their slices, or were not wanted. */
@@ -3113,6 +3125,11 @@ motion_prepare(MotionState *state)
 		/* A streaming slice runs with the Gather's; the ones relayed, first. */
 		if (state->streaming && stream_slice_find(state, slice) != NULL)
 			continue;
+		if (state->endpoints)
+			ereport(ERROR,
+					(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+					 errmsg("slice %d of a parallel retrieve cursor cannot run with the others",
+							slice)));
 		motion_relay(state, motion, gather_target(motion, motions));
 	}
 }
@@ -3186,7 +3203,7 @@ motion_dml_run(MotionState *state)
 												 (CustomScan *) state->css.ss.ps.plan,
 												 state->css.ss.ps.ps_ExprContext,
 												 state->key,
-												 state->streaming ? stream_start(state) : NIL,
+												 state->streaming ? stream_start(state, NULL, NULL, NULL) : NIL,
 												 false),
 								 state->ncontents > 0 ? -1 : state->content,
 								 state->ncontents > 0 ? state->contents : NULL,
@@ -3199,7 +3216,7 @@ motion_dml_run(MotionState *state)
 														  (CustomScan *) state->css.ss.ps.plan,
 														  state->css.ss.ps.ps_ExprContext,
 														  state->key,
-														  state->streaming ? stream_start(state) : NIL,
+														  state->streaming ? stream_start(state, NULL, NULL, NULL) : NIL,
 														  false),
 										  0, NULL, NULL, state->contents,
 										  state->ncontents, counts);
@@ -3208,7 +3225,7 @@ motion_dml_run(MotionState *state)
 												(CustomScan *) state->css.ss.ps.plan,
 												state->css.ss.ps.ps_ExprContext,
 												state->key,
-												state->streaming ? stream_start(state) : NIL,
+												state->streaming ? stream_start(state, NULL, NULL, NULL) : NIL,
 												false),
 								0, NULL, NULL, state->content, 0, counts);
 	stream_end(state);
@@ -3238,7 +3255,7 @@ motion_start(MotionState *state)
 										  (CustomScan *) state->css.ss.ps.plan,
 										  state->css.ss.ps.ps_ExprContext,
 										  state->key,
-										  state->streaming ? stream_start(state) : NIL,
+										  state->streaming ? stream_start(state, NULL, NULL, NULL) : NIL,
 										  false);
 
 		state->gather = state->ncontents > 0
@@ -4475,6 +4492,13 @@ motion_executor_run(QueryDesc *queryDesc, ScanDirection direction,
 					uint64 count)
 {
 	bool		fragment = is_fragment(queryDesc->plannedstmt);
+	DestReceiver *client = queryDesc->dest;
+	DestReceiver *endpoint = fragment && GpClusterIsDispatched()
+		? GpEndpointRunDest(queryDesc) : NULL;
+
+	/* a parallel retrieve cursor's slice: its rows go to its endpoint */
+	if (endpoint != NULL)
+		queryDesc->dest = endpoint;
 
 	/*
 	 * Each of a cursor's FETCHes is a statement of the segment's own, whose
@@ -4523,6 +4547,13 @@ motion_executor_run(QueryDesc *queryDesc, ScanDirection direction,
 		foreach(lc, queryDesc->estate->es_subplanstates)
 			(void) motion_end_streams((PlanState *) lfirst(lc), NULL);
 		GpIcForget(stream_token(queryDesc->plannedstmt));
+	}
+
+	/* and the statement ends once they are all read (gp_endpoint.c) */
+	if (endpoint != NULL)
+	{
+		queryDesc->dest = client;
+		GpEndpointRunDone();
 	}
 }
 
@@ -4711,6 +4742,150 @@ GpPlanIsDirectDispatch(PlannedStmt *stmt)
 		return false;
 	(void) plan_one_segment_walker(stmt->planTree, &os);
 	return os.one && os.seen > 0;
+}
+
+/* ------------------------------------------------------------------------- */
+/* A parallel retrieve cursor's top slice, on the segments                   */
+/* ------------------------------------------------------------------------- */
+
+/*
+ * Can a parallel retrieve cursor's top slice, below this Gather, run on
+ * readers of its segments -- its endpoints (gp_endpoint.c)?  Not where the
+ * Gather does anything with the rows but pass them on -- merge several
+ * segments' sorted streams, filter or compute them, run an initplan, or send
+ * the slice a value the coordinator computes -- nor where a slice would run
+ * anywhere but on a reader: a temporary table only the writer reads, a
+ * slice of the coordinator's own, or every slice relayed
+ * (gp.interconnect_type = relay).  Nor with row locks, which a reader's
+ * transaction cannot take.  Such a cursor's endpoint is the coordinator's.
+ */
+bool
+GpMotionEndpointsCanRun(PlannedStmt *stmt, Plan *gather)
+{
+	CustomScan *cscan = (CustomScan *) gather;
+	List	   *priv = cscan->custom_private;
+	Plan	   *fragment = outerPlan(gather);
+	List	   *motions = NIL;
+	ListCell   *lc;
+	ListCell   *lf;
+
+	if ((List *) list_nth(priv, MOTION_PRIVATE_KEYS) != NIL &&
+		GpMotionSegment(gather) < 0)
+		return false;
+	if (gather->qual != NIL || gather->initPlan != NIL ||
+		stmt->rowMarks != NIL ||
+		(list_length(priv) > MOTION_PRIVATE_EXEC_PARAMS &&
+		 (List *) list_nth(priv, MOTION_PRIVATE_EXEC_PARAMS) != NIL))
+		return false;
+
+	/* the slice's columns, as they are */
+	if (list_length(gather->targetlist) != list_length(fragment->targetlist))
+		return false;
+	forboth(lc, gather->targetlist, lf, fragment->targetlist)
+	{
+		TargetEntry *tle = lfirst_node(TargetEntry, lc);
+		Var		   *var = (Var *) tle->expr;
+
+		if (tle->resjunk || lfirst_node(TargetEntry, lf)->resjunk ||
+			!IsA(var, Var) || var->varno != INDEX_VAR ||
+			var->varattno != tle->resno)
+			return false;
+	}
+
+	foreach_node(RangeTblEntry, rte, stmt->rtable)
+		if (rte->rtekind == RTE_RELATION &&
+			get_rel_persistence(rte->relid) == RELPERSISTENCE_TEMP)
+			return false;
+
+	collect_motions(fragment, &motions);
+	foreach(lc, stmt->subplans)
+		collect_motions((Plan *) lfirst(lc), &motions);
+	if (motions != NIL && gp_interconnect_type == GP_INTERCONNECT_RELAY)
+		return false;
+	foreach_ptr(Plan, m, motions)
+		if (GpMotionSegment(m) == GP_MOTION_FROM_COORDINATOR)
+			return false;
+	return true;
+}
+
+/*
+ * A parallel retrieve cursor's top slice started on its endpoints' segments,
+ * as the Gather its plan was stripped of would start it (motion_start()) but
+ * on a reader of each segment in the writer's place: every writer publishes
+ * DECLARE's snapshot and transaction under a key of the cursor's; each
+ * endpoint's reader, reading as a part of its writer's transaction, opens
+ * the endpoint with "open", which DECLARE waits for; the slices below start
+ * on readers of their own, streaming to the endpoints' readers; and each of
+ * those is sent the slice, marked to send its rows to its endpoint, and the
+ * end of its transaction.  The key of the slices' rows, or NULL.
+ */
+char *
+GpEndpointDispatch(QueryDesc *queryDesc, CustomScan *gather,
+				   GpStream *stream, const int *contents, int *readers,
+				   int nendpoints, const char *name, const char *open)
+{
+	EState	   *estate = queryDesc->estate;
+	int			nsegs = GpClusterSegmentCount();
+	const char **top = palloc0_array(const char *, nsegs);
+	int		   *writer_pid = palloc0_array(int, nsegs);
+	MotionState *state;
+	char	   *sharekey;
+	List	   *marks = NIL;
+	char	   *fragment;
+	static uint32 endpoint_counter = 0;
+	MemoryContext oldcxt = MemoryContextSwitchTo(estate->es_query_cxt);
+
+	state = (MotionState *) motion_create_state(gather);
+	state->css.ss.ps.plan = (Plan *) gather;
+	state->css.ss.ps.state = estate;
+	state->css.ss.ps.ps_ExprContext = CreateExprContext(estate);
+	state->content = GpMotionSegment((Plan *) gather);
+	state->contents = palloc_array(int, Max(list_length(GpMotionSegments((Plan *) gather)), 1));
+	foreach_int(c, GpMotionSegments((Plan *) gather))
+		state->contents[state->ncontents++] = c;
+	state->slice = GpMotionSlice((Plan *) gather);
+	state->type = GP_MOTION_GATHER;
+	state->endpoints = true;
+	motion_prepare(state);
+
+	sharekey = psprintf("%d_e%u", MyProcPid, ++endpoint_counter);
+	GpDispatchCommand(psprintf("SELECT gp_internal.share_publish(%s)",
+							   quote_literal_cstr(sharekey)));
+	for (int seg = 0; seg < nsegs; seg++)
+		(void) GpStreamWriterAddress(seg, &writer_pid[seg]);
+
+	for (int i = 0; i < nendpoints; i++)
+	{
+		const char *address;
+
+		readers[i] = GpStreamAddReader(stream, contents[i], &address);
+		top[contents[i]] = address;
+		GpStreamReaderExec(stream, readers[i],
+						   psprintf("BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY; "
+									"SET LOCAL %s = %s; "
+									"SET LOCAL client_connection_check_interval = 100; %s",
+									GP_SHARE_SETTING,
+									quote_literal_cstr(psprintf("%d/%s",
+																writer_pid[contents[i]],
+																sharekey)),
+									open),
+						   true);
+	}
+
+	if (state->streaming)
+		marks = list_make1(linitial(stream_start(state, stream, top, sharekey)));
+	marks = lappend(marks, makeDefElem(pstrdup(GP_ENDPOINT_RUN_MARK),
+									   (Node *) makeString(pstrdup(name)), -1));
+	fragment = fragment_sql_ex(estate, outerPlan(gather), gather,
+							   state->css.ss.ps.ps_ExprContext, state->key,
+							   marks, true);
+	for (int i = 0; i < nendpoints; i++)
+		GpStreamContinueReader(stream, readers[i],
+							   psprintf("%s; COMMIT%s", fragment,
+										GpLogStatementComment()));
+
+	MemoryContextSwitchTo(oldcxt);
+	return state->key;
 }
 
 PG_FUNCTION_INFO_V1(gp_exec_fragment);

@@ -2059,6 +2059,54 @@ isl "ANALYZE of the table merges the root's statistics from its leaves', on one 
 refused "as the parenthesized option is, and FULLSCAN is VACUUM's no more than Cloudberry's" \
    "ANALYZE (ROOTPARTITION on) ap2; VACUUM (FULLSCAN) ap;" 'unrecognized VACUUM option "fullscan"'
 
+###############################################################################
+echo "20. parallel retrieve cursors: DECLARE ... PARALLEL RETRIEVE and RETRIEVE"
+###############################################################################
+is "PARALLEL RETRIEVE is taken out, NO SCROLL put in, and gp_core's bit carried" \
+   "SELECT gp_sql.desugar('DECLARE c PARALLEL RETRIEVE CURSOR FOR SELECT 1');" \
+   "DECLARE c NO SCROLL CURSOR FOR SELECT 1 /* and on its parse node: gp_core.parallel_retrieve = 'true' */"
+is "among the other options, NO SCROLL kept, and under EXPLAIN" \
+   "SELECT gp_sql.desugar('DECLARE c BINARY NO SCROLL PARALLEL RETRIEVE CURSOR WITHOUT HOLD FOR SELECT 1')
+       || ' | ' || gp_sql.desugar('EXPLAIN (COSTS off) DECLARE c PARALLEL RETRIEVE CURSOR FOR SELECT 1');" \
+   "DECLARE c BINARY NO SCROLL CURSOR WITHOUT HOLD FOR SELECT 1 /* and on its parse node: gp_core.parallel_retrieve = 'true' */ | EXPLAIN (COSTS off) DECLARE c NO SCROLL CURSOR FOR SELECT 1 /* and on its parse node: gp_core.parallel_retrieve = 'true' */"
+refused "WITH HOLD is refused in Cloudberry's words" \
+   "BEGIN; DECLARE c PARALLEL RETRIEVE CURSOR WITH HOLD FOR SELECT 1;" \
+   "DECLARE PARALLEL RETRIEVE CURSOR WITH HOLD ... is not supported"
+refused "and SCROLL" \
+   "BEGIN; DECLARE c SCROLL PARALLEL RETRIEVE CURSOR FOR SELECT 1;" \
+   "SCROLL is not allowed for the PARALLEL RETRIEVE CURSORs"
+is "a cursor, a word and a column called retrieve are left alone" \
+   "SELECT gp_sql.desugar('SELECT 1 AS retrieve') || ' | ' || gp_sql.desugar('DECLARE retrieve CURSOR FOR SELECT 1');" \
+   "SELECT 1 AS retrieve | DECLARE retrieve CURSOR FOR SELECT 1"
+refused "RETRIEVE outside a retrieve session is refused, as Cloudberry's parse analysis refuses it" \
+   "RETRIEVE ALL FROM ENDPOINT e;" "This is not a retrieve connection, but the query is a RETRIEVE."
+at "an endpoint's name is a name, and 123 is not" \
+   "RETRIEVE ALL FROM ENDPOINT 123" "syntax error" "123"
+at "and a count is a number" \
+   "RETRIEVE x FROM ENDPOINT e" "syntax error" "x"
+q "CREATE TABLE prc (a int); INSERT INTO prc SELECT generate_series(1, 5);" > /dev/null
+isl "on one node the endpoint is the coordinator's, filled at DECLARE" \
+   "BEGIN; DECLARE c PARALLEL RETRIEVE CURSOR FOR SELECT * FROM prc;
+    SELECT gp_segment_id || ' ' || state FROM gp_get_endpoints() WHERE cursorname = 'c';" "-1 READY"
+refused "FETCH refuses a parallel retrieve cursor" \
+   "BEGIN; DECLARE c PARALLEL RETRIEVE CURSOR FOR SELECT * FROM prc; FETCH ALL FROM c;" \
+   "cannot specify 'FETCH' for PARALLEL RETRIEVE CURSOR"
+refused "and MOVE" \
+   "BEGIN; DECLARE c PARALLEL RETRIEVE CURSOR FOR SELECT * FROM prc; MOVE 1 FROM c;" \
+   "the 'MOVE' statement for PARALLEL RETRIEVE CURSOR is not supported"
+refused "and PL/pgSQL's FETCH, through SPI" \
+   "BEGIN; DECLARE c PARALLEL RETRIEVE CURSOR FOR SELECT * FROM prc;
+    DO \$\$ DECLARE i int; r refcursor = 'c'; BEGIN FETCH FROM r INTO i; END \$\$;" \
+   "The PARALLEL RETRIEVE CURSOR is not supported in SPI."
+refused "gp_wait_parallel_retrieve_cursor() refuses another cursor" \
+   "BEGIN; DECLARE c CURSOR FOR SELECT 1; SELECT * FROM gp_wait_parallel_retrieve_cursor('c', 0);" \
+   "cursor is not a PARALLEL RETRIEVE CURSOR"
+refused "EXPLAIN ANALYZE of one would run it, and is refused" \
+   "EXPLAIN ANALYZE DECLARE c PARALLEL RETRIEVE CURSOR FOR SELECT * FROM prc;" \
+   "EXPLAIN ANALYZE of a PARALLEL RETRIEVE CURSOR is not supported"
+is "and a cursor rolled back leaves no endpoint" \
+   "SELECT count(*) FROM gp_get_endpoints();" "0"
+
 echo
 echo "  $pass passed, $fail failed"
 [ "$fail" -eq 0 ]

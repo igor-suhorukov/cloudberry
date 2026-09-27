@@ -1,0 +1,8 @@
+@@
+- name | statement | is_holdable | is_binary | is_scrollable | creation_time | is_parallel 
+-------+-----------+-------------+-----------+---------------+---------------+-------------
++ name | statement | is_holdable | is_binary | is_scrollable | creation_time 
++------+-----------+-------------+-----------+---------------+---------------
+@@
+-ERROR:  Parallel retrieve cursor should run on the dispatcher only
++DECLARE

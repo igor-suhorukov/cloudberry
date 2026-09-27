@@ -90,3 +90,24 @@ run  restore_memory_accounting_default             memory
 run  runaway_query                                 memory
 run  sharedsnapshot
 run  export_distributed_snapshot
+#
+# And Cloudberry's parallel_retrieve_cursor_schedule, M8's, in a group of its
+# own, retrieve: parallel retrieve cursors and their retrieve sessions
+# (1R:, *R:).  Its tests read that schedule's init file, as its target in
+# Cloudberry's Makefile does, and the port's for it (run.sh).
+run  parallel_retrieve_cursor/set                  retrieve
+run  parallel_retrieve_cursor/extended_query       retrieve
+run  parallel_retrieve_cursor/corner               retrieve
+run  parallel_retrieve_cursor/explain              retrieve
+skip parallel_retrieve_cursor/replicated_table     its second test takes, among six sessions, the one whose gp_session_id modulo 3 is 1, which Cloudberry's session counter always has and the port's session ids, the coordinator's backends' process ids, may all miss; port/parallel_retrieve_cursor_replicated in its place
+run  port/parallel_retrieve_cursor_replicated     retrieve
+run  parallel_retrieve_cursor/special_query        retrieve
+run  parallel_retrieve_cursor/status_check         retrieve
+run  parallel_retrieve_cursor/status_wait          retrieve
+run  parallel_retrieve_cursor/syntax               retrieve
+run  parallel_retrieve_cursor/retrieve_quit_check  retrieve
+run  parallel_retrieve_cursor/retrieve_quit_wait   retrieve
+run  parallel_retrieve_cursor/fault_inject         retrieve
+run  parallel_retrieve_cursor/security             retrieve
+skip parallel_retrieve_cursor/privilege            CREATE USER by a user with CREATEROLE: "segment used 1 of the 2 OIDs the coordinator allocated for this statement", the segments running it as the gang's login user, which grants the new role to nobody
+run  parallel_retrieve_cursor/unset                retrieve

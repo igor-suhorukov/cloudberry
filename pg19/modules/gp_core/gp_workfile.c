@@ -92,6 +92,7 @@
 #include "utils/tuplestore.h"
 
 #include "gp_cluster.h"
+#include "gp_endpoint.h"
 #include "gp_gdd.h"
 #include "gp_workfile.h"
 
@@ -448,7 +449,9 @@ workfile_ExecutorFinish(QueryDesc *queryDesc)
  * A dispatched backend's cancel in the words of Cloudberry's QE: "canceling
  * MPP operation" (ProcessInterrupts()).  Its SQLSTATE stays PostgreSQL's
  * query_canceled, by which the coordinator tells a slice cancelled because
- * another failed from the failure (gp_dispatch.c).
+ * another failed from the failure (gp_dispatch.c).  An endpoint's sender
+ * that its retrieve session cancelled says why after it, as Cloudberry's
+ * does with the cancel message the session set (gp_endpoint.c).
  */
 static void
 workfile_emit_log(ErrorData *edata)
@@ -457,7 +460,13 @@ workfile_emit_log(ErrorData *edata)
 		edata->message_id != NULL &&
 		strcmp(edata->message_id, CANCEL_MSGID) == 0 &&
 		GpClusterIsDispatched())
-		edata->message = pstrdup("canceling MPP operation");
+	{
+		const char *why = GpEndpointCancelMessage();
+
+		edata->message = why != NULL
+			? psprintf("canceling MPP operation: \"%s\"", why)
+			: pstrdup("canceling MPP operation");
+	}
 
 	if (prev_emit_log_hook)
 		prev_emit_log_hook(edata);

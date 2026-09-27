@@ -577,6 +577,26 @@ What Cloudberry's tests asked for next (2026-09-27), in `gp_core`,
   (`gp_workfile.c`);
 - and the server built with LDAP, for `pg_hba.conf`'s ldap lines.
 
+Parallel retrieve cursors (M8), in `gp_core`, `gp_sql` and `gp_orca`
+(`modules/gp_core/gp_endpoint.c`): `DECLARE ... PARALLEL RETRIEVE CURSOR`,
+whose top slice runs on a reader of each segment it would be gathered from
+and puts its rows into an endpoint there, a shm_mq tuple queue, as
+Cloudberry's does; one whose rows meet on the coordinator -- ORDER BY, an
+aggregate of the whole, a catalog, a function -- has its endpoint there,
+filled as DECLARE runs its plan, where Cloudberry runs it in an entry-db
+process, which could not dispatch here.  A retrieve session reads an
+endpoint with `RETRIEVE { ALL | n } FROM ENDPOINT`, logged in to its node
+with the cursor's token -- Cloudberry's `gp_retrieve_conn` and the token as
+a password, asked for once `pg_hba.conf`'s method has let the user in, or
+the port's `gp.retrieve_token` -- and runs nothing else; and
+`gp_get_endpoints()`, `gp_get_segment_endpoints()`,
+`gp_get_session_endpoints()`, their views, and
+`gp_wait_parallel_retrieve_cursor()`.  One difference of the port's: ORCA
+plans every parallel retrieve cursor, whatever `gp.optimizer` says, since
+Cloudberry's are its planner's, whose plans have slices, and the port's
+planner of slices is ORCA; a cursor ORCA declines has its endpoint on the
+coordinator.
+
 The transport and encryption modules — `interconnect`, `udp2`, `gp_tde` —
 are still stubs: the streaming transports, tcp and udpifc, live in
 `gp_core`, and TDE waits for a formal requirement.
@@ -599,7 +619,9 @@ tests of Cloudberry's `isolation2_schedule` that bear on M3 — distributed
 transactions and snapshots, locks and the global deadlock detector — on
 M4, FTS and mirrors, on M6, resource queues and memory accounting, and on
 M7's tools, a node recovered elsewhere and the standby promoted and made
-again, run by Cloudberry's own driver on the same cluster, with a standby
+again, and its `parallel_retrieve_cursor_schedule`, M8's parallel retrieve
+cursors and their retrieve sessions, run by Cloudberry's own driver on the
+same cluster, with a standby
 coordinator for the tests that ask for one, and mirrors for the FTS tests; `fts`, M4's, a coordinator and three primaries
 each with a mirror, and what FTS does when a mirror or a primary stops;
 `ao`, M5's, append-optimized tables on one node, a standby and recovery;

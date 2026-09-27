@@ -4711,10 +4711,56 @@ t
 	[ "$out|$out2" = "Success:|ERROR:  canceling MPP operation" ] \
 		&& ok "a segment's cancel is Cloudberry's QE's: canceling MPP operation" \
 		|| notok "a segment's cancel" "$out / $out2"
+
+	###########################################################################
+	echo "18. parallel retrieve cursors, without ORCA: the coordinator's endpoint"
+	###########################################################################
+	# Without gp_orca every parallel retrieve cursor's endpoint is the
+	# coordinator's, filled as DECLARE runs the planner's plan (gp_endpoint.c);
+	# a retrieve session there reads it, logged in with the cursor's token as
+	# the port's setting or as Cloudberry's password.  The isolation2 suite
+	# runs Cloudberry's tests of them, whose endpoints ORCA puts on the
+	# segments.
+	q 0 "CREATE TABLE prc (a int) DISTRIBUTED BY (a); INSERT INTO prc SELECT generate_series(1, 10);" >/dev/null
+	retrieve() {				# retrieve <options> <password>, $PRC_NAME's rows
+		echo "\\! PGOPTIONS=\"$1\" PGPASSWORD=\"$2\" $PSQL -X -q -t -A -h $(sockdir 0) -p $(port 0) -d postgres -c \"RETRIEVE ALL FROM ENDPOINT \$PRC_NAME\" 2>&1 | sort -n | tr '\\n' ' '; echo"
+	}
+	out=$({
+		echo "BEGIN;"
+		echo "DECLARE c PARALLEL RETRIEVE CURSOR FOR SELECT * FROM prc;"
+		echo "SELECT gp_segment_id, state FROM gp_get_endpoints() WHERE cursorname = 'c';"
+		echo "SELECT auth_token AS token, endpointname AS name FROM gp_get_endpoints() WHERE cursorname = 'c' \\gset"
+		echo "\\setenv PRC_TOKEN :token"
+		echo "\\setenv PRC_NAME :name"
+		retrieve "-c gp.retrieve_token=\$PRC_TOKEN" ""
+		echo "SELECT * FROM gp_wait_parallel_retrieve_cursor('c', 0);"
+		echo "ROLLBACK;"
+	} | qf 0 | tr '\n' '/')
+	[ "$out" = "-1|READY/1 2 3 4 5 6 7 8 9 10 /t/" ] \
+		&& ok "an endpoint on the coordinator, read by a retrieve session with gp.retrieve_token" \
+		|| notok "a coordinator's endpoint, read with gp.retrieve_token" "$out"
+	out=$({
+		echo "BEGIN;"
+		echo "DECLARE c PARALLEL RETRIEVE CURSOR FOR SELECT a * 2 FROM prc ORDER BY 1 DESC;"
+		echo "SELECT auth_token AS token, endpointname AS name FROM gp_get_endpoints() WHERE cursorname = 'c' \\gset"
+		echo "\\setenv PRC_TOKEN :token"
+		echo "\\setenv PRC_NAME :name"
+		retrieve "-c gp_retrieve_conn=true" "0123456789abcdef0123456789abcdef"
+		retrieve "-c gp_retrieve_conn=true" "not a token"
+		retrieve "-c gp_retrieve_conn=true" "\$PRC_TOKEN"
+		echo "SELECT * FROM gp_wait_parallel_retrieve_cursor('c', 0);"
+		echo "ROLLBACK;"
+	} | qf 0 | sed 's/.*FATAL:  //' | tr '\n' '/')
+	[ "$out" = "Authentication failure (Wrong password or no endpoint for the user) /retrieve auth token is invalid /2 4 6 8 10 12 14 16 18 20 /t/" ] \
+		&& ok "and with Cloudberry's gp_retrieve_conn and the token as a password, a wrong one refused" \
+		|| notok "a coordinator's endpoint, read with gp_retrieve_conn" "$out"
+	out=$(q 0 "SELECT count(*) FROM gp_get_endpoints(); DROP TABLE prc;")
+	[ "$out" = "0" ] && ok "and the cursors' ends leave no endpoint" \
+		|| notok "endpoints left" "$out"
 fi
 
 ###############################################################################
-echo "18. a cluster described wrongly is a server that does not start"
+echo "19. a cluster described wrongly is a server that does not start"
 ###############################################################################
 # The message has to name the file and the line: this is read in the
 # postmaster while it starts, so it is all the operator is given.
@@ -4784,7 +4830,7 @@ refuses "a file that is not there is refused" \
 	"gp.cluster_config = '$ROOT/nowhere.conf'"
 
 ###############################################################################
-echo "19. with no cluster configured, this is a single node"
+echo "20. with no cluster configured, this is a single node"
 ###############################################################################
 if start_node 0 "gp.cluster_config = ''" ; then
 	notok "node 0 should not have started: gp.role is dispatch with no cluster"

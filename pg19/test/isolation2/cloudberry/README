@@ -163,3 +163,33 @@ starve_case
   the test is for, holds, each session found waiting by its gp_session_id
   in pg_locks.mppsessionid.
 
+
+Cloudberry's parallel_retrieve_cursor_schedule, in the group retrieve.  Its
+cursors are ORCA's in both passes (gp_endpoint.c), so each difference holds
+for both:
+
+parallel_retrieve_cursor/corner
+  Two lines of the port's.  pg_cursors is PostgreSQL 19's view, with no
+  is_parallel column, which an extension cannot add; and a session of the
+  coordinator's own (-1U), an ordinary one here, declares a parallel
+  retrieve cursor, which Cloudberry's utility mode refuses.
+
+parallel_retrieve_cursor/explain
+  ORCA's text of the plans Cloudberry's planner makes: a column named with
+  its relation (Output: t1.a), a function's scan with no alias and its
+  filter above it in a Subquery Scan -- where the endpoint is the
+  coordinator's either way -- and PostgreSQL 19's pg_class columns in place
+  of Cloudberry's.  Where the endpoints are, which the test is for, is
+  Cloudberry's in every case: on all 3 segments, on segments [1, 0], on the
+  one segment a replicated table is read on, on the coordinator.
+
+parallel_retrieve_cursor/status_check, parallel_retrieve_cursor/status_wait
+  Two things of the port's dispatcher, not of the endpoints.  A segment that
+  restarts after its endpoint's sender was killed with SIGQUIT (Test4) fails
+  the coordinator's statements in PostgreSQL's words for a connection that
+  closed, where Cloudberry's add "Error on receive from" the segment.  And a
+  session's id is its coordinator backend's process ID for its life, where
+  Cloudberry's session takes a new gp_session_id once a segment it had a
+  gang on was lost: the retrieve session that Test4 bound to the session
+  retrieves Test5's cursor there, rather than finding no endpoint of its own
+  session, and the session opened in its place finds the endpoint read.

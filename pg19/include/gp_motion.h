@@ -223,6 +223,13 @@ extern bool GpMotionShareFileSet(PlannedStmt *stmt, struct FileSet *fileset);
  * -- false if "ps" is not a Motion.
  */
 extern bool GpMotionIsFragment(PlannedStmt *stmt);
+
+/*
+ * Can a parallel retrieve cursor's top slice, below this Gather, run on
+ * readers of the segments -- its endpoints -- rather than the writers
+ * (gp_endpoint.c)?
+ */
+extern bool GpMotionEndpointsCanRun(PlannedStmt *stmt, Plan *gather);
 extern bool GpMotionIsSender(PlanState *ps);
 extern bool GpMotionFinish(PlanState *ps);
 

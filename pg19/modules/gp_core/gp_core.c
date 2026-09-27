@@ -51,6 +51,7 @@
 #include "gp_dispatch.h"
 #include "gp_dtm_debug.h"
 #include "gp_dtx.h"
+#include "gp_endpoint.h"
 #include "gp_explain.h"
 #include "gp_fault.h"
 #include "gp_fts.h"
@@ -129,6 +130,8 @@ static const GpCoreApi gp_core_api = {
 	.row_identity_make = GpRowIdentityNodeMake,
 	.explicit_write = GpModifyWriteExplicitly,
 	.metatrack_partition = GpMetaTrackPartition,
+	.endpoint_plan = GpEndpointPlan,
+	.retrieve_sql = GpEndpointRetrieveSql,
 };
 
 /*
@@ -336,6 +339,13 @@ _PG_init(void)
 	 * statement and the others see the list it makes; on one node too.
 	 */
 	GpPartAnalyzeInit();
+
+	/*
+	 * Parallel retrieve cursors: their endpoints, on the segments and on the
+	 * coordinator, and the retrieve sessions that read them (gp_endpoint.c);
+	 * on one node too.
+	 */
+	GpEndpointInit();
 
 	/*
 	 * Deliberately no MarkGUCPrefixReserved("gp") here.  It drops every
