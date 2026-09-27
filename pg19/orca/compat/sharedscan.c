@@ -107,6 +107,9 @@ typedef struct SequenceState
 	CustomScanState css;
 	bool		produced;
 	bool		across;			/* a producer's CTE is read in other slices */
+	bool		described;		/* initialised only to be described: the
+								 * coordinator's copy of a fragment */
+	bool		explained;		/* its children in EXPLAIN's order */
 } SequenceState;
 
 typedef struct SharedScanState
@@ -133,6 +136,8 @@ static void rescan_sequence(CustomScanState *node);
 
 static Node *create_shared_scan_state(CustomScan *cscan);
 static void shutdown_sequence(CustomScanState *node);
+static void explain_sequence(CustomScanState *node, List *ancestors,
+							 ExplainState *es);
 static void begin_shared_scan(CustomScanState *node, EState *estate,
 							  int eflags);
 static TupleTableSlot *exec_shared_scan(CustomScanState *node);
@@ -153,6 +158,7 @@ static const CustomExecMethods sequence_exec_methods = {
 	.EndCustomScan = end_sequence,
 	.ReScanCustomScan = rescan_sequence,
 	.ShutdownCustomScan = shutdown_sequence,
+	.ExplainCustomScan = explain_sequence,
 };
 
 const CustomScanMethods gp_orca_shared_scan_methods = {
@@ -338,6 +344,7 @@ begin_sequence(CustomScanState *node, EState *estate, int eflags)
 		if (share_read_across((Plan *) lfirst(lc)))
 			state->across = true;
 	}
+	state->described = (eflags & EXEC_FLAG_EXPLAIN_ONLY) != 0;
 
 	/* the rows are the outer plan's, in whatever slots they come in */
 	node->ss.ps.resultopsset = true;
@@ -374,12 +381,34 @@ shutdown_sequence(CustomScanState *node)
 	SequenceState *state = (SequenceState *) node;
 	ListCell   *lc;
 
-	if (state->produced || !state->across ||
-		(node->ss.ps.state->es_top_eflags & EXEC_FLAG_EXPLAIN_ONLY))
+	if (state->produced || !state->across || state->described)
 		return;
 	foreach(lc, node->custom_ps)
 		(void) ExecProcNode((PlanState *) lfirst(lc));
 	state->produced = true;
+}
+
+/*
+ * EXPLAIN: the producers first and then the plan that reads them, as
+ * Cloudberry's Sequence prints its subplans, in the order they run.  The
+ * node reads its rows through its outer plan -- the plan that reads the
+ * CTEs -- which EXPLAIN prints before a node's custom children; so once the
+ * node's own lines are printed, which read through it, the first producer
+ * takes the outer plan's place, and the outer plan goes after the others.
+ * Only for the rest of the statement's EXPLAIN, which runs it no more; the
+ * end of the node ends each of them as before.
+ */
+static void
+explain_sequence(CustomScanState *node, List *ancestors, ExplainState *es)
+{
+	SequenceState *state = (SequenceState *) node;
+	PlanState  *outer = outerPlanState(node);
+
+	if (state->explained || outer == NULL || node->custom_ps == NIL)
+		return;
+	outerPlanState(node) = (PlanState *) linitial(node->custom_ps);
+	node->custom_ps = lappend(list_delete_first(node->custom_ps), outer);
+	state->explained = true;
 }
 
 static void
