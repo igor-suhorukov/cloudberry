@@ -17,28 +17,23 @@
  * specific language governing permissions and limitations
  * under the License.
  *
- * gp_dbcopy.h
- *	  A database copied or moved takes its modules' directories with it.
- *	  See gp_dbcopy.c.
+ * gpfts/utils/etcd.h
+ *	  The include overlay of gpfts: this reaches a header of Cloudberry's own.
+ *
+ * gpfts is built with Cloudberry's etcd client compiled where it lies --
+ * src/backend/utils/etcd_lib/etcd.c, the keys of src/common/etcdutils.c and
+ * the log of src/fe_utils/log.c -- unchanged (meson.build).  They ask for
+ * Cloudberry's headers by these names, and the directory that holds them
+ * cannot go on the include path: it also holds Cloudberry's copies of
+ * PostgreSQL 16's headers, which would then be found instead of PostgreSQL
+ * 19's (see task/cron.h).  So the overlay holds one forwarding header for
+ * each, and nothing else.
  *
  *-------------------------------------------------------------------------
  */
-#ifndef GP_DBCOPY_H
-#define GP_DBCOPY_H
+#ifndef GP_COMPAT_GPFTS_UTILS_ETCD_H
+#define GP_COMPAT_GPFTS_UTILS_ETCD_H
 
-/*
- * gp_core's resource manager, among the custom ones (128-255): not one
- * PostgreSQL's wiki lists as taken (CustomWALResourceManagers), and none of
- * the port's others (gp_sql's 198, PAX's 199, gp_ao's 200 and 201).
- * gp_dbcopy.c registers it; its records are a database's directory copied,
- * and the nodes' states as the coordinator publishes them (gp_cluster.c).
- */
-#define GP_CORE_RMGR_ID			197
+#include "../../../../src/include/utils/etcd.h"
 
-#define XLOG_GP_CORE_DBCOPY		0x00	/* a database's directory, copied */
-#define XLOG_GP_CORE_CLUSTER	0x10	/* the nodes' states, gpsegconfig_dump */
-
-/* Called from gp_core's _PG_init, before GpDdlInit(). */
-extern void GpDbcopyInit(void);
-
-#endif							/* GP_DBCOPY_H */
+#endif							/* GP_COMPAT_GPFTS_UTILS_ETCD_H */

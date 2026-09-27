@@ -136,10 +136,18 @@ extern uint64 GpClusterLiveStates(GpClusterNodeState *states);
 /*
  * FTS only: make these the cluster's states -- written to
  * gpsegconfig_dump durably first, and then to shared memory, so that what a
- * backend adopts has been written.  False, and nothing written, where a node
- * was added, removed or moved since FTS read them: its dbids say so.
+ * backend adopts has been written, and waited for until the coordinator's
+ * standby has them too.  False, and nothing written, where a node was added,
+ * removed or moved since FTS read them: its dbids say so.
  */
 extern bool GpClusterPublish(const GpClusterNodeState *states);
+
+/*
+ * The replay of the states the coordinator logs as it writes
+ * gpsegconfig_dump, gp_core's resource manager's record (gp_dbcopy.c): on
+ * the standby, its own gpsegconfig_dump and shared memory.
+ */
+extern void GpClusterRedo(const char *text, int len);
 
 /*
  * Changing the nodes, on the coordinator: gp_segadmin.c's.  Between

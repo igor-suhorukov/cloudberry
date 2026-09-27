@@ -83,16 +83,8 @@
 #include "tcop/utility.h"
 #include "utils/syscache.h"
 
+#include "gp_cluster.h"
 #include "gp_dbcopy.h"
-
-/*
- * gp_core's resource manager, among the custom ones (128-255): not one
- * PostgreSQL's wiki lists as taken (CustomWALResourceManagers), and none of
- * the port's others (gp_sql's 198, PAX's 199, gp_ao's 200 and 201).
- */
-#define GP_CORE_RMGR_ID			197
-
-#define XLOG_GP_CORE_DBCOPY		0x00	/* a database's directory, copied */
 
 /* A directory copied: its name, with its NUL, follows. */
 typedef struct xl_gp_dbcopy
@@ -449,7 +441,8 @@ dbcopy_ProcessUtility(PlannedStmt *pstmt, const char *queryString,
  * The replay, on a mirror, a standby or a server recovering from an archive:
  * the same copy, of this server's own source.  A source that is gone was
  * removed after the copy was made here, by a drop replayed since: what was
- * copied then stays.
+ * copied then stays.  The resource manager's other record, the nodes'
+ * states, is gp_cluster.c's.
  */
 static void
 dbcopy_redo(XLogReaderState *record)
@@ -463,6 +456,11 @@ dbcopy_redo(XLogReaderState *record)
 	char	   *to;
 	struct stat st;
 
+	if (info == XLOG_GP_CORE_CLUSTER)
+	{
+		GpClusterRedo(XLogRecGetData(record), XLogRecGetDataLen(record));
+		return;
+	}
 	if (info != XLOG_GP_CORE_DBCOPY)
 		elog(PANIC, "gp_core_redo: unknown op code %u", info);
 
@@ -497,6 +495,11 @@ dbcopy_desc(StringInfo buf, XLogReaderState *record)
 	xl_gp_dbcopy rec;
 	const char *name = XLogRecGetData(record) + sizeof(rec);
 
+	if ((XLogRecGetInfo(record) & ~XLR_INFO_MASK) == XLOG_GP_CORE_CLUSTER)
+	{
+		appendStringInfo(buf, "nodes' states, %u bytes", XLogRecGetDataLen(record));
+		return;
+	}
 	memcpy(&rec, XLogRecGetData(record), sizeof(rec));
 	appendStringInfo(buf, "copy dir %u/%u/%s to %u/%u/%s",
 					 rec.src_spc, rec.src_db, name,
@@ -508,6 +511,8 @@ dbcopy_identify(uint8 info)
 {
 	if ((info & ~XLR_INFO_MASK) == XLOG_GP_CORE_DBCOPY)
 		return "DBCOPY";
+	if ((info & ~XLR_INFO_MASK) == XLOG_GP_CORE_CLUSTER)
+		return "CLUSTER";
 	return NULL;
 }
 

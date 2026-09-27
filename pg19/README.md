@@ -577,6 +577,20 @@ What Cloudberry's tests asked for next (2026-09-27), in `gp_core`,
   (`gp_workfile.c`);
 - and the server built with LDAP, for `pg_hba.conf`'s ldap lines.
 
+M8 (2026-09-27) adds `gpfts`, the coordinator's automatic failover
+(`bin/gpfts`): Cloudberry's external FTS program, for the coordinator alone,
+the segments staying `gp_core`'s FTS's.  Its instances elect a leader
+through an etcd lease, as Cloudberry's do, with Cloudberry's etcd client
+compiled where it lies; the leader probes the coordinator over SQL, keeps in
+etcd the cluster as the coordinator shows it and whether its standby
+streams, and when the coordinator stops promotes the standby with
+`pg_promote()`, makes it the coordinator with `gp_activate_standby()` and
+waits for its distributed transaction recovery — as gpactivatestandby now
+waits too.  The nodes' states the coordinator's FTS finds reach its standby
+in WAL, a record of `gp_core`'s resource manager the coordinator waits for
+its standby to have (`gp_cluster.c`), so that a standby promoted dispatches
+to the primaries the old coordinator last had.
+
 The transport and encryption modules — `interconnect`, `udp2`, `gp_tde` —
 are still stubs: the streaming transports, tcp and udpifc, live in
 `gp_core`, and TDE waits for a formal requirement.
@@ -602,6 +616,9 @@ M7's tools, a node recovered elsewhere and the standby promoted and made
 again, run by Cloudberry's own driver on the same cluster, with a standby
 coordinator for the tests that ask for one, and mirrors for the FTS tests; `fts`, M4's, a coordinator and three primaries
 each with a mirror, and what FTS does when a mirror or a primary stops;
+`gpfts`, M8's, a coordinator with a standby, three pairs, an etcd and two
+gpfts instances — one leads, the other takes over when it dies — and the
+coordinator stopped, its standby promoted, serving the cluster;
 `ao`, M5's, append-optimized tables on one node, a standby and recovery;
 `diskquota`, M5's too, Cloudberry's diskquota tests on a coordinator and
 three segments, its regression schedule as three jobs of its groups and its

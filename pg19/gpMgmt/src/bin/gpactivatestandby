@@ -21,6 +21,10 @@
 #     gp_core's gp_activate_standby() once the standby is promoted -- the old
 #     coordinator goes, and the standby is the coordinator -- in its cluster
 #     file, which is then given to every node (gppylib/clusterfile.py).
+#   - The tool returns once the new coordinator's distributed transaction
+#     recovery has reached every segment, gp.dtx_recovered(), as gpstart
+#     waits for a coordinator's: Cloudberry's pg_ctl waits for "DTM
+#     recovered".
 #
 """
 Activates a standby coordinator instance when the primary coordinator instance has 
@@ -54,6 +58,10 @@ EXECNAME = os.path.split(__file__)[-1]
 
 # Threshold values
 LOG_TIME_THRESHOLD_MINS = 120
+
+# How long the new coordinator's distributed transaction recovery may take,
+# gpstart's --recovery-wait-timeout by default.
+DTX_RECOVERY_TIMEOUT_SECS = 300
 
 STANDBY_SIGNAL_FILE = "standby.signal"
 POSTGRESQL_AUTO_CONF_FILE = "postgresql.auto.conf"
@@ -366,6 +374,39 @@ def activate_standby():
         conn.close()
 
 #-------------------------------------------------------------------------
+def wait_for_dtx_recovery():
+    """
+    Poll gp.dtx_recovered() until the new coordinator's distributed
+    transaction recovery has reached every segment -- the parts the old
+    coordinator left prepared finished -- as gpstart waits for a
+    coordinator's, and Cloudberry's pg_ctl for "DTM recovered".  A
+    coordinator without the function is not waited for.
+    """
+    waited = 0.0
+    poll_interval = 0.5
+    while True:
+        dburl = dbconn.DbURL()
+        conn = dbconn.connect(dburl, utility=True)
+        try:
+            recovered = dbconn.querySingleton(conn, 'SELECT gp.dtx_recovered()')
+        except Exception as e:
+            if 'does not exist' in str(e):
+                logger.debug('Not waiting for distributed transaction recovery: %s' % e)
+                return
+            raise
+        finally:
+            conn.close()
+        if recovered:
+            logger.info('Distributed transaction recovery has reached every segment')
+            return
+        if waited >= DTX_RECOVERY_TIMEOUT_SECS:
+            raise GpActivateStandbyException('Timed out after %d seconds waiting for distributed transaction recovery' % waited)
+        if waited == 0:
+            logger.info('Waiting for distributed transaction recovery to reach every segment')
+        time.sleep(poll_interval)
+        waited += poll_interval
+
+#-------------------------------------------------------------------------
 # Main
 #-------------------------------------------------------------------------
 
@@ -402,6 +443,7 @@ try:
     # The promoted standby is made the coordinator of the cluster file,
     # which Cloudberry's promotion does itself.
     activate_standby()
+    wait_for_dtx_recovery()
 
     # now we can access the catalog.  promote action has already updated
     # catalog, so array.coordinator is the old (promoted) standby at this point.

@@ -763,6 +763,50 @@ if apr_dep.found() and event_dep.found()
 endif
 
 ###############################################################################
+# gpfts
+#
+# Cloudberry's external FTS, a program of its own, for what gp_core's FTS
+# cannot do: fail over from the coordinator it runs on.  gpfts watches the
+# coordinator and promotes its standby, several instances electing a leader
+# through an etcd lease (bin/gpfts).  Cloudberry's etcd client -- an HTTP
+# client of etcd's JSON gateway, the keys, and its programs' log -- is
+# compiled where it lies, unchanged, through an include overlay
+# (compat/gpfts/), as a frontend's, with the frontend's port and common
+# libraries; it needs libcurl and jansson.  The configuration file gpfts
+# reads by default, and Cloudberry's scripts that bring a failed coordinator
+# or standby back as the standby, are installed where Cloudberry's are, in
+# bin/config and bin/failover; its scripts for segments are not, the
+# segments being gp_core's FTS's.
+###############################################################################
+
+gpfts_curl_dep = dependency('libcurl', required: get_option('gpfts'))
+jansson_dep = dependency('jansson', required: get_option('gpfts'))
+if gpfts_curl_dep.found() and jansson_dep.found()
+  executable('gpfts',
+    files('bin/gpfts/fts.c',
+          'bin/gpfts/ftsprobe.c',
+          'bin/gpfts/fts_etcd.c',
+          '../src/backend/utils/etcd_lib/etcd.c',
+          '../src/common/etcdutils.c',
+          '../src/fe_utils/log.c'),
+    c_args: ['-DFRONTEND'] + cc.get_supported_arguments('-Wno-pointer-sign'),
+    include_directories: [include_directories('bin/gpfts', 'compat/gpfts'),
+                          pg_inc, pg_client_inc],
+    dependencies: [libpq_dep, gpfts_curl_dep, jansson_dep],
+    link_args: [pg_libdir / 'libpgcommon.a', pg_libdir / 'libpgport.a', '-lm'],
+    install: true,
+    install_dir: pg['bindir'],
+  )
+  install_data('../src/bin/gpfts/config/cbdb_etcd_default.conf',
+               install_dir: pg['bindir'] / 'config')
+  install_data('../src/bin/gpfts/failover/master_check_back.sh',
+               '../src/bin/gpfts/failover/standby_check_back.sh',
+               install_dir: pg['bindir'] / 'failover',
+               install_mode: 'rwxr-xr-x')
+  built_modules += 'gpfts (program)'
+endif
+
+###############################################################################
 # gpMgmt
 #
 # Cloudberry's management tools -- gpinitsystem, gpstart, gpstop, gpstate,

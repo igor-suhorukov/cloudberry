@@ -41,6 +41,16 @@
  * about to connect to the segments (GpClusterRefresh), so that the node a
  * content id stands for does not change under a gang that is in use.
  *
+ * The coordinator's standby has them too, as Cloudberry's has its replicated
+ * catalog: each time the coordinator writes gpsegconfig_dump it logs the
+ * same text in WAL, a record of gp_core's resource manager, and waits for
+ * its standby to have it, as a commit waits, before anything is acted on.
+ * The standby's replay writes its own gpsegconfig_dump and its shared
+ * memory, and it reads the file back when it starts, as the coordinator
+ * does.  So a standby promoted -- by gpfts, the coordinator's automatic
+ * failover, or by gpactivatestandby -- dispatches to the primaries the old
+ * coordinator last had, and its FTS takes up from where the old one was.
+ *
  * The nodes change while the cluster runs too, on the coordinator, where
  * Cloudberry's segment administration functions add a mirror or a standby,
  * remove one, or put a failed one somewhere else (gp_segadmin.c).  Such a
@@ -63,9 +73,13 @@
 #include <ctype.h>
 #include <unistd.h>
 
+#include "access/xlog.h"
+#include "access/xlog_internal.h"
+#include "access/xloginsert.h"
 #include "funcapi.h"
 #include "miscadmin.h"
 #include "postmaster/postmaster.h"
+#include "replication/syncrep.h"
 #include "storage/fd.h"
 #include "storage/ipc.h"
 #include "storage/lwlock.h"
@@ -78,6 +92,7 @@
 
 #include "gp_cluster.h"
 #include "gp_core_api.h"
+#include "gp_dbcopy.h"
 #include "gp_segadmin.h"
 
 /* The longest line the configuration file may hold. */
@@ -167,6 +182,12 @@ static uint64 cluster_nodes_version = 0;
 
 /* The server has started: a later shared memory startup is a crash's. */
 static bool cluster_started = false;
+
+/*
+ * The end of the last record of the states this backend logged, until it has
+ * waited for the standby to have it (cluster_dump_replicated()).
+ */
+static XLogRecPtr cluster_dump_lsn = InvalidXLogRecPtr;
 
 static shmem_request_hook_type prev_shmem_request = NULL;
 static shmem_startup_hook_type prev_shmem_startup = NULL;
@@ -513,11 +534,11 @@ gp_cluster_read_file(const char *path)
 	/*
 	 * On the coordinator, what FTS last found of the nodes, if it has found
 	 * anything: a primary it failed over from is a mirror now, and down, and
-	 * must not be dispatched to because the file prefers it.  A dump that
-	 * cannot be read is a server that does not start, as a file that cannot
-	 * be is.
+	 * must not be dispatched to because the file prefers it.  On its standby,
+	 * the same, as it last reached the standby.  A dump that cannot be read
+	 * is a server that does not start, as a file that cannot be is.
 	 */
-	if (cluster_self->content == -1 && cluster_self->preferred_role == 'p')
+	if (cluster_self->content == -1)
 		(void) cluster_read_dump(ERROR);
 
 	cluster_build_segments(path);
@@ -573,22 +594,23 @@ cluster_build_segments(const char *path)
  * Read gpsegconfig_dump, what FTS last wrote of the nodes: a line per node,
  * "dbid content role preferred_role mode status port host address", as
  * Cloudberry's FTS writes it.  Of each line the role, mode and status are
- * taken, by dbid; the file this reads with the rest says which nodes there
- * are and where, so a line for a node it does not list, or with another
- * content id, is passed over with a warning -- the cluster was changed since
- * FTS last wrote -- and a node with no line keeps what the file gives it.
- * Nothing is taken unless every content id is left with one primary.
+ * taken into states, by dbid, in the places of cluster[]; the file this
+ * reads with the rest says which nodes there are and where, so a line for a
+ * node it does not list, or with another content id, is passed over with a
+ * warning -- the cluster was changed since FTS last wrote -- and a node with
+ * no line keeps what states has.  Nothing is taken unless every content id
+ * is left with one primary.
  *
  * No file is no change: FTS has not written one yet.  Anything else wrong is
  * reported at elevel, and false returned with nothing changed.
  */
 static bool
-cluster_read_dump(int elevel)
+cluster_parse_dump(GpClusterNodeState *states, int elevel)
 {
 	FILE	   *fp;
 	char		buf[GP_CLUSTER_LINE_MAX];
 	int			lineno = 0;
-	GpClusterNodeState *states;
+	GpClusterNodeState *found;
 
 	fp = AllocateFile(GP_CLUSTER_DUMP_FILE, "r");
 	if (fp == NULL)
@@ -601,13 +623,8 @@ cluster_read_dump(int elevel)
 		return false;
 	}
 
-	states = palloc_array(GpClusterNodeState, cluster_nnodes);
-	for (int i = 0; i < cluster_nnodes; i++)
-	{
-		states[i].role = cluster[i].role;
-		states[i].mode = cluster[i].mode;
-		states[i].status = cluster[i].status;
-	}
+	found = palloc_array(GpClusterNodeState, cluster_nnodes);
+	memcpy(found, states, cluster_nnodes * sizeof(GpClusterNodeState));
 
 	while (fgets(buf, sizeof(buf), fp) != NULL)
 	{
@@ -644,9 +661,9 @@ cluster_read_dump(int elevel)
 							GP_CLUSTER_DUMP_FILE, dbid, content)));
 			continue;
 		}
-		states[i].role = role;
-		states[i].mode = mode;
-		states[i].status = status;
+		found[i].role = role;
+		found[i].mode = mode;
+		found[i].status = status;
 	}
 	if (ferror(fp))
 	{
@@ -666,7 +683,7 @@ cluster_read_dump(int elevel)
 		if (cluster[i].dbid == 0)
 			continue;
 		for (int j = 0; j < cluster_nnodes; j++)
-			if (cluster[j].content == cluster[i].content && states[j].role == 'p')
+			if (cluster[j].content == cluster[i].content && found[j].role == 'p')
 				nprimaries++;
 		if (nprimaries != 1)
 		{
@@ -678,6 +695,29 @@ cluster_read_dump(int elevel)
 		}
 	}
 
+	memcpy(states, found, cluster_nnodes * sizeof(GpClusterNodeState));
+	pfree(found);
+	return true;
+}
+
+/* gpsegconfig_dump's states made this process's own copy's. */
+static bool
+cluster_read_dump(int elevel)
+{
+	GpClusterNodeState *states = palloc_array(GpClusterNodeState, cluster_nnodes);
+
+	for (int i = 0; i < cluster_nnodes; i++)
+	{
+		states[i].role = cluster[i].role;
+		states[i].mode = cluster[i].mode;
+		states[i].status = cluster[i].status;
+		states[i].dbid = cluster[i].dbid;
+	}
+	if (!cluster_parse_dump(states, elevel))
+	{
+		pfree(states);
+		return false;
+	}
 	for (int i = 0; i < cluster_nnodes; i++)
 	{
 		cluster[i].role = states[i].role;
@@ -689,13 +729,11 @@ cluster_read_dump(int elevel)
 }
 
 /*
- * Write the states to gpsegconfig_dump, durably: a whole new file, synced,
- * and renamed over the old one, the directory synced too.  In Cloudberry's
- * form, so that its tools could read it; the host is the address.  The nodes
- * are shared memory's, whose lock the caller holds.
+ * gpsegconfig_dump as a whole new file, durably: synced, and renamed over the
+ * old one, the directory synced too.
  */
 static void
-cluster_write_dump(const GpClusterNodeState *states)
+cluster_store_dump(const char *text, int len)
 {
 	FILE	   *fp;
 
@@ -704,23 +742,12 @@ cluster_write_dump(const GpClusterNodeState *states)
 		ereport(ERROR,
 				(errcode_for_file_access(),
 				 errmsg("could not create file \"%s\": %m", GP_CLUSTER_DUMP_FILE_TMP)));
-
-	for (int i = 0; i < cluster_nnodes; i++)
+	if (fwrite(text, 1, len, fp) != (size_t) len)
 	{
-		const GpClusterSlot *node = &cluster_slots[i];
-
-		if (node->dbid == 0)
-			continue;
-		if (fprintf(fp, "%d %d %c %c %c %c %d %s %s\n", node->dbid,
-					node->content, states[i].role, node->preferred_role,
-					states[i].mode, states[i].status, node->port,
-					node->hostname, node->hostname) < 0)
-		{
-			FreeFile(fp);
-			ereport(ERROR,
-					(errcode_for_file_access(),
-					 errmsg("could not write file \"%s\": %m", GP_CLUSTER_DUMP_FILE_TMP)));
-		}
+		FreeFile(fp);
+		ereport(ERROR,
+				(errcode_for_file_access(),
+				 errmsg("could not write file \"%s\": %m", GP_CLUSTER_DUMP_FILE_TMP)));
 	}
 	if (fflush(fp) != 0 || pg_fsync(fileno(fp)) != 0)
 	{
@@ -735,6 +762,95 @@ cluster_write_dump(const GpClusterNodeState *states)
 				 errmsg("could not close file \"%s\": %m", GP_CLUSTER_DUMP_FILE_TMP)));
 
 	(void) durable_rename(GP_CLUSTER_DUMP_FILE_TMP, GP_CLUSTER_DUMP_FILE, ERROR);
+}
+
+/*
+ * Write the states to gpsegconfig_dump, in Cloudberry's form, so that its
+ * tools could read it; the host is the address.  The nodes are shared
+ * memory's, whose lock the caller holds.  And the same text to WAL, for the
+ * standby, whom the caller waits for once it has let go of the lock
+ * (cluster_dump_replicated()): where the WAL is minimal there is none.
+ */
+static void
+cluster_write_dump(const GpClusterNodeState *states)
+{
+	StringInfoData buf;
+
+	initStringInfo(&buf);
+	for (int i = 0; i < cluster_nnodes; i++)
+	{
+		const GpClusterSlot *node = &cluster_slots[i];
+
+		if (node->dbid == 0)
+			continue;
+		appendStringInfo(&buf, "%d %d %c %c %c %c %d %s %s\n", node->dbid,
+						 node->content, states[i].role, node->preferred_role,
+						 states[i].mode, states[i].status, node->port,
+						 node->hostname, node->hostname);
+	}
+	cluster_store_dump(buf.data, buf.len);
+
+	if (XLogIsNeeded() && !RecoveryInProgress())
+	{
+		XLogBeginInsert();
+		XLogRegisterData(buf.data, buf.len);
+		cluster_dump_lsn = XLogInsert(GP_CORE_RMGR_ID, XLOG_GP_CORE_CLUSTER);
+	}
+	pfree(buf.data);
+}
+
+/*
+ * Wait until the standby has the states this backend last logged, as a
+ * commit waits for it -- Cloudberry's FTS commits its change to the catalog,
+ * which the standby replays, before it acts on it; so what the coordinator
+ * acts on, a standby promoted afterwards knows.  Called with the cluster's
+ * lock let go: a slow standby holds up the one that wrote, and nothing else.
+ */
+static void
+cluster_dump_replicated(void)
+{
+	XLogRecPtr	lsn = cluster_dump_lsn;
+
+	if (!XLogRecPtrIsValid(lsn))
+		return;
+	cluster_dump_lsn = InvalidXLogRecPtr;
+	XLogFlush(lsn);
+	HOLD_INTERRUPTS();
+	SyncRepWaitForLSN(lsn, false);
+	RESUME_INTERRUPTS();
+}
+
+/*
+ * The replay of the states the coordinator logged, on its standby: its own
+ * gpsegconfig_dump, and its shared memory, so that a promotion finds them
+ * there.  Not in crash recovery, where the node's own file is newer than its
+ * WAL, having been written before the record: only where the server follows
+ * a primary or recovers from an archive, as gp_dbcopy.c's record.
+ */
+void
+GpClusterRedo(const char *text, int len)
+{
+	GpClusterNodeState *states;
+
+	if (!ArchiveRecoveryRequested || cluster_shared == NULL)
+		return;
+
+	cluster_store_dump(text, len);
+
+	states = palloc_array(GpClusterNodeState, cluster_nnodes);
+	(void) GpClusterLiveStates(states);
+	if (cluster_parse_dump(states, WARNING))
+	{
+		LWLockAcquire(cluster_shared->lock, LW_EXCLUSIVE);
+		SpinLockAcquire(&cluster_shared->mutex);
+		for (int i = 0; i < cluster_nnodes; i++)
+			if (cluster_shared->nodes[i].dbid == states[i].dbid)
+				cluster_shared->nodes[i] = states[i];
+		cluster_shared->version++;
+		SpinLockRelease(&cluster_shared->mutex);
+		LWLockRelease(cluster_shared->lock);
+	}
+	pfree(states);
 }
 
 /* ------------------------------------------------------------------------- */
@@ -838,8 +954,9 @@ cluster_shmem_startup(void)
 									&found_slots);
 	if (!found)
 	{
+		/* the coordinator, or its standby, which keeps its states too */
 		bool		coordinator = cluster_self != NULL &&
-			cluster_self->content == -1 && cluster_self->preferred_role == 'p';
+			cluster_self->content == -1;
 
 		if (!IsUnderPostmaster && coordinator)
 		{
@@ -1055,7 +1172,10 @@ GpClusterPublish(const GpClusterNodeState *states)
 		}
 	}
 
-	/* Durable first: FTS promotes a mirror only once this has returned. */
+	/*
+	 * Durable first, and on the standby once the lock is let go: FTS promotes
+	 * a mirror only once this has returned.
+	 */
 	cluster_write_dump(states);
 
 	SpinLockAcquire(&cluster_shared->mutex);
@@ -1064,6 +1184,7 @@ GpClusterPublish(const GpClusterNodeState *states)
 	cluster_shared->version++;
 	SpinLockRelease(&cluster_shared->mutex);
 	LWLockRelease(cluster_shared->lock);
+	cluster_dump_replicated();
 	return true;
 }
 
@@ -1085,6 +1206,7 @@ void
 GpClusterUnlockNodes(void)
 {
 	LWLockRelease(cluster_shared->lock);
+	cluster_dump_replicated();
 }
 
 int
