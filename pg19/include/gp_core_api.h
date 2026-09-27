@@ -39,7 +39,7 @@
  * here changes meaning or moves.
  */
 #define GP_CORE_API_VERSION_MAJOR	1
-#define GP_CORE_API_VERSION_MINOR	10
+#define GP_CORE_API_VERSION_MINOR	11
 
 struct Node;
 struct List;
@@ -191,6 +191,14 @@ typedef struct GpCoreApi
 	 */
 	bool		(*share_fileset) (struct PlannedStmt *stmt,
 								  struct FileSet *fileset);
+
+	/*
+	 * Since 1.11: a partitioned table's PARTITION row in
+	 * pg_stat_last_operation, of Cloudberry's own partition commands, which
+	 * gp_sql carries out -- "ADD", "DROP", "EXCHANGE", "SPLIT", "TRUNCATE",
+	 * "RENAME", "SET TEMPLATE" (gp_metatrack.c).
+	 */
+	void		(*metatrack_partition) (Oid relid, const char *subtype);
 } GpCoreApi;
 
 /*

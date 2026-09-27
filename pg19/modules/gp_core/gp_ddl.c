@@ -402,7 +402,8 @@ drop_temp_namespaces(void)
  *   - moving a database to another tablespace, whose other connections the
  *     segments cannot see to refuse it;
  *   - publications, subscriptions and event triggers, which are about this
- *     node's own WAL and this node's own DDL.
+ *     node's own WAL and this node's own DDL -- and dropping, renaming,
+ *     giving away or commenting on one.
  *
  * VACUUM, REINDEX and CLUSTER are read-only by PostgreSQL's definition -- they
  * change nothing pg_dump would show -- but they have to reach the rows, and
@@ -410,6 +411,27 @@ drop_temp_namespaces(void)
  * node's.  ANALYZE stays here until O3 brings the
  * segments' samples to it.
  */
+/*
+ * Is it an object of this node's own -- a publication, a subscription, an
+ * event trigger -- which only the coordinator has, so that a statement that
+ * drops, renames, gives away or comments on one is the coordinator's too?
+ */
+static bool
+local_object(ObjectType type)
+{
+	switch (type)
+	{
+		case OBJECT_PUBLICATION:
+		case OBJECT_PUBLICATION_NAMESPACE:
+		case OBJECT_PUBLICATION_REL:
+		case OBJECT_SUBSCRIPTION:
+		case OBJECT_EVENT_TRIGGER:
+			return true;
+		default:
+			return false;
+	}
+}
+
 /* Is it a partitioned table or index?  False where there is no such relation. */
 static bool
 is_partitioned(Oid relid)
@@ -447,8 +469,23 @@ dispatch_class(Node *parsetree)
 				? GP_DISPATCH_OWN_XACT : GP_DISPATCH_IN_XACT;
 
 		case T_DropStmt:
+			if (local_object(((DropStmt *) parsetree)->removeType))
+				return GP_DISPATCH_LOCAL;
 			return ((DropStmt *) parsetree)->concurrent
 				? GP_DISPATCH_OWN_XACT : GP_DISPATCH_IN_XACT;
+
+		case T_RenameStmt:
+			return local_object(((RenameStmt *) parsetree)->renameType)
+				? GP_DISPATCH_LOCAL : GP_DISPATCH_IN_XACT;
+		case T_AlterOwnerStmt:
+			return local_object(((AlterOwnerStmt *) parsetree)->objectType)
+				? GP_DISPATCH_LOCAL : GP_DISPATCH_IN_XACT;
+		case T_CommentStmt:
+			return local_object(((CommentStmt *) parsetree)->objtype)
+				? GP_DISPATCH_LOCAL : GP_DISPATCH_IN_XACT;
+		case T_SecLabelStmt:
+			return local_object(((SecLabelStmt *) parsetree)->objtype)
+				? GP_DISPATCH_LOCAL : GP_DISPATCH_IN_XACT;
 
 		case T_ReindexStmt:
 			{
@@ -586,7 +623,6 @@ dispatch_class(Node *parsetree)
 		case T_AlterObjectSchemaStmt:
 		case T_AlterOpFamilyStmt:
 		case T_AlterOperatorStmt:
-		case T_AlterOwnerStmt:
 		case T_AlterPolicyStmt:
 		case T_AlterRoleSetStmt:
 		case T_AlterRoleStmt:
@@ -597,7 +633,6 @@ dispatch_class(Node *parsetree)
 		case T_AlterTableStmt:
 		case T_AlterTypeStmt:
 		case T_AlterUserMappingStmt:
-		case T_CommentStmt:
 		case T_CompositeTypeStmt:
 		case T_CreateAmStmt:
 		case T_CreateCastStmt:
@@ -630,9 +665,7 @@ dispatch_class(Node *parsetree)
 		case T_GrantStmt:
 		case T_ImportForeignSchemaStmt:
 		case T_ReassignOwnedStmt:
-		case T_RenameStmt:
 		case T_RuleStmt:
-		case T_SecLabelStmt:
 		case T_TruncateStmt:
 		case T_ViewStmt:
 			return GP_DISPATCH_IN_XACT;

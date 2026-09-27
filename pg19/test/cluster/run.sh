@@ -490,6 +490,20 @@ t" ] && ok "temporary tables, two of them, have the coordinator's OIDs" \
 		|| notok "REINDEX and CLUSTER outside a transaction block" "$out / $out2"
 	q 0 "DROP TABLE rix;" >/dev/null
 
+	# DROP INDEX CONCURRENTLY writes nothing before the index goes: the rows
+	# of pg_stat_last_operation that name it go as the statement ends, as
+	# Cloudberry's index_drop() drops them (gp_metatrack.c).
+	out=$(printf '%s\n' "SET client_min_messages = warning;" \
+		"CREATE TABLE cix (a int, b text) DISTRIBUTED BY (a);" \
+		"CREATE INDEX CONCURRENTLY cix_b ON cix (b);" \
+		"SELECT 'cix_b'::regclass::oid AS cix \\gset" \
+		"DROP INDEX CONCURRENTLY cix_b;" \
+		"SELECT count(*) FROM pg_stat_last_operation WHERE objid = :cix;" \
+		"DROP TABLE cix;" | qf 0 2>&1)
+	[ "$out" = "0" ] \
+		&& ok "DROP INDEX CONCURRENTLY of an index pg_stat_last_operation names, which then names it no more" \
+		|| notok "DROP INDEX CONCURRENTLY" "$out"
+
 	# A temporary table is in the session's own temporary schema, which on the
 	# coordinator and on each segment is a different pg_temp_N: here another
 	# session holds the coordinator's first backend slot, which no segment

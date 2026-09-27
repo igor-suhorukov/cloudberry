@@ -361,6 +361,57 @@ CREATE TRIGGER gp_configuration_history_write
 	FOR EACH ROW EXECUTE FUNCTION gp_internal.configuration_history_write();
 
 /*
+ * pg_stat_last_operation and pg_stat_last_shoperation, Cloudberry's catalogs
+ * of when each object was last created, altered, vacuumed, analyzed or
+ * truncated, and by whom: a row for each object and kind of operation, the
+ * next of that kind replacing it, and none once the object is dropped.  A
+ * cluster's coordinator writes them (gp_metatrack.c), into these tables of
+ * each database -- a shared object's too, where Cloudberry's are in a shared
+ * catalog -- and the views are what Cloudberry's catalogs are, written only
+ * with allow_system_table_mods on: the check is the tables', whose statement
+ * triggers are the ones a write to the views fires.
+ */
+CREATE TABLE gp_internal.stat_last_operation (
+	classid oid NOT NULL,
+	objid oid NOT NULL,
+	staactionname name NOT NULL,
+	stasysid oid NOT NULL,
+	stausename name NOT NULL,
+	stasubtype text,
+	statime timestamptz
+);
+CREATE UNIQUE INDEX stat_last_operation_key
+	ON gp_internal.stat_last_operation (classid, objid, staactionname);
+
+CREATE TABLE gp_internal.stat_last_shoperation (
+	classid oid NOT NULL,
+	objid oid NOT NULL,
+	staactionname name NOT NULL,
+	stasysid oid NOT NULL,
+	stausename name NOT NULL,
+	stasubtype text,
+	statime timestamptz
+);
+CREATE UNIQUE INDEX stat_last_shoperation_key
+	ON gp_internal.stat_last_shoperation (classid, objid, staactionname);
+
+CREATE VIEW pg_catalog.pg_stat_last_operation AS
+	SELECT * FROM gp_internal.stat_last_operation;
+CREATE VIEW pg_catalog.pg_stat_last_shoperation AS
+	SELECT * FROM gp_internal.stat_last_shoperation;
+GRANT SELECT ON pg_catalog.pg_stat_last_operation,
+	pg_catalog.pg_stat_last_shoperation TO PUBLIC;
+
+CREATE TRIGGER gp_catalog_write_check
+	BEFORE INSERT OR UPDATE OR DELETE
+	ON gp_internal.stat_last_operation
+	FOR EACH STATEMENT EXECUTE FUNCTION gp_internal.catalog_write_check();
+CREATE TRIGGER gp_catalog_write_check
+	BEFORE INSERT OR UPDATE OR DELETE
+	ON gp_internal.stat_last_shoperation
+	FOR EACH STATEMENT EXECUTE FUNCTION gp_internal.catalog_write_check();
+
+/*
  * gp_distribution_policy: how each table's rows are spread, as its "gp"
  * label records it (gp_policy.c), in Cloudberry's columns; on one node,
  * nothing, as Cloudberry's single node keeps no policy.  A row written to it
@@ -1411,6 +1462,12 @@ REVOKE ALL ON FUNCTION pg_catalog.gp_add_segment_primary(text, text, int4, text)
 CREATE FUNCTION pg_catalog.gp_execution_segment()
 RETURNS int4
 AS 'MODULE_PATHNAME', 'gp_execution_segment'
+LANGUAGE C VOLATILE;
+
+/* And its dbid: Cloudberry's gp_execution_dbid(). */
+CREATE FUNCTION pg_catalog.gp_execution_dbid()
+RETURNS int4
+AS 'MODULE_PATHNAME', 'gp_execution_dbid'
 LANGUAGE C VOLATILE;
 
 /*

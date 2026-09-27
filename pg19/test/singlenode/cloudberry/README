@@ -140,10 +140,11 @@ aocs  aototal(), which reads pg_aoseg's relation of a table, and the indexes
 bfv_aggregate (planner, orca)  A frame offset that reads a column; and
   under ORCA the GroupAggregate and HashAggregate count_operator() counts,
   which ORCA chooses otherwise.
-bfv_catalog  pg_stat_last_operation (Cloudberry's catalog of when an object
-  was last changed), escape_string_warning and standard_conforming_strings =
-  off, and one row more in a query over pg_constraint: the table's NOT NULL
-  constraint.
+bfv_catalog  VACUUM FULL of pg_stat_last_operation, Cloudberry's catalog of
+  when an object was last changed, which is gp_core's view of a table of
+  its own here, and skipped, so it leaves no VACUUM row of itself;
+  escape_string_warning and standard_conforming_strings = off, and one row
+  more in a query over pg_constraint: the table's NOT NULL constraint.
 bfv_partition_plans (orca)  The Dynamic Seq Scans, Dynamic Index Scans and
   Partition Selectors that count_operator() and find_operator() find under
   ORCA, where Cloudberry's planner makes none.

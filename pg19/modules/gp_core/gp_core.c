@@ -55,6 +55,7 @@
 #include "gp_motion.h"
 #include "gp_label.h"
 #include "gp_loopback.h"
+#include "gp_metatrack.h"
 #include "gp_policy.h"
 #include "gp_scan.h"
 #include "gp_segadmin.h"
@@ -116,6 +117,7 @@ static const GpCoreApi gp_core_api = {
 	.segment_of_function = GpSegmentOfFunction,
 	.prepare_query = GpPrepareQuery,
 	.share_fileset = GpMotionShareFileSet,
+	.metatrack_partition = GpMetaTrackPartition,
 };
 
 /*
@@ -263,6 +265,12 @@ _PG_init(void)
 	GpSegmentInit();
 
 	/*
+	 * pg_stat_last_operation and pg_stat_last_shoperation, which a cluster's
+	 * coordinator writes as statements change what they name.
+	 */
+	GpMetaTrackInit();
+
+	/*
 	 * Deliberately no MarkGUCPrefixReserved("gp") here.  It drops every
 	 * "gp.*" placeholder that is not defined yet, with a warning, and the
 	 * modules that load on demand define their own "gp.*" settings long after
@@ -292,6 +300,7 @@ PG_FUNCTION_INFO_V1(gp_version);
 PG_FUNCTION_INFO_V1(gp_node);
 PG_FUNCTION_INFO_V1(gp_policy);
 PG_FUNCTION_INFO_V1(gp_execution_segment);
+PG_FUNCTION_INFO_V1(gp_execution_dbid);
 
 /*
  * gp.version()
@@ -312,6 +321,17 @@ Datum
 gp_execution_segment(PG_FUNCTION_ARGS)
 {
 	PG_RETURN_INT32(GpClusterContentId());
+}
+
+/*
+ * pg_catalog.gp_execution_dbid()
+ *		The dbid of the node the call runs on, as Cloudberry's does
+ *		(mpp_execution_segment()'s sibling in cdbvars.c).
+ */
+Datum
+gp_execution_dbid(PG_FUNCTION_ARGS)
+{
+	PG_RETURN_INT32(GpClusterDbid());
 }
 
 /*

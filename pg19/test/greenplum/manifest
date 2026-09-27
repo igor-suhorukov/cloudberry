@@ -419,8 +419,8 @@ skip role  syntax error at or near "only"
 skip portals_updatable  cursor "c" is not positioned on a row; cursor "c" is not a simply updatable scan of table "portals_updatable_rank_1_prt_2"
 skip plpgsql_cache  differs: how often a function's NOTICE is raised, the segments running it where Cloudberry's coordinator does
 skip timeseries  function interval_interval_div(interval, interval) does not exist; function interval_bound(integer, integer) does not exist
-skip pg_stat_last_operation  relation "pg_stat_last_operation" does not exist; relation "pg_stat_last_operation_testview" does not exist
-skip pg_stat_last_shoperation  relation "pg_stat_last_shoperation" does not exist
+run  pg_stat_last_operation
+run  pg_stat_last_shoperation
 run  gp_numeric_agg
 run  partindex_test
 skip runtime_stats  language "plpython3u" does not exist; function isspilling(unknown) does not exist
@@ -508,7 +508,7 @@ skip directory_table  relation "gp_storage_server" does not exist; syntax error 
 skip motion_socket  language "plpython3u" does not exist; function check_motion_sockets() does not exist
 run  ic_proxy_socket
 skip subtrx_overflow  relation "gp_suboverflowed_backend" does not exist
-skip bfv_meta_track  relation "pg_stat_last_operation" does not exist; publication "pub1" does not exist
+run  bfv_meta_track
 skip bfv_copy  segment reject limit reached, aborting operation
 skip dynamic_table  unrecognized parameter namespace "gp"; relation "dt0" does not exist
 run  hba_conf
