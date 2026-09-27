@@ -197,6 +197,12 @@ gp_aggregates (planner, orca)  PostgreSQL 19's words for a call no
   names, whose NOTICE Cloudberry's two stages raise; ORCA's two stages
   raise it as Cloudberry's do.
 
+gp_array_agg (orca)  ORCA's fallback trace -- a function in FROM,
+  several DISTINCT aggregates, a column of a non-default collation -- which
+  Cloudberry's expected output for its ORCA, gp_array_agg_optimizer.out,
+  prints as the port's ORCA does, and the one the suite compares, the
+  planner's, does not.
+
 gp_backend_info  the backends of a query that needs a reader gang, and
   the singleton reader on the coordinator: the port's gather reads each
   table through the segment's one connection, and joins them here, so
@@ -315,6 +321,16 @@ partition_storage, uao_ddl_gp_partition_tables_column,
   pg_class.reloptions and gp_ao keeps in a label of its own: its reloptions
   and psql's Options: footer are empty.
 
+percentile  median(), a plain aggregate of the port's (gp_median.c): a
+  view prints it as median((a)::double precision), where Cloudberry's
+  grammar makes MEDIAN(a) an ordered-set aggregate and prints it so; a
+  median(a) OVER (...), which Cloudberry's grammar refuses, is taken, and
+  fails for its GROUP BY; and median('text') finds four candidates, where
+  Cloudberry's one reads the text as a number.  GROUP_ID() in an
+  aggregate's argument, which the port's desugaring makes group_id(0) and
+  Cloudberry refuses as an aggregate nested.  And PostgreSQL 19's words for
+  a call no function takes -- a DETAIL where Cloudberry's HINT stood.
+
 qp_dml_joins  the WARNING of an ALTER TABLE ... SET DISTRIBUTED BY (b) of a
   table CREATE TABLE AS made distributed by b already: the port gives a
   table made from a query its first column as its key, where Cloudberry's
@@ -333,6 +349,13 @@ qp_functions (planner, orca)  PostgreSQL 19's words for a call no function
   the relations named tst% in its group's cluster -- a table an earlier test
   leaves there would be among them, as alter_distribution_policy's tstab was
   before the suite ran in groups.
+
+qp_functions_idf  the same median() and GROUP_ID(): views of median()
+  calls printed as median(...), median(group_id()) answered 0 for each group
+  where Cloudberry refuses it, and median(a) OVER () in an ordered-set
+  aggregate's ORDER BY, which PostgreSQL 19 refuses as a window function in
+  an aggregate where Cloudberry's grammar finds a syntax error; and
+  PostgreSQL 19's words for a call no function takes.
 
 qp_misc_rio  a PL/Python function whose query reads a table, called in the
   segments' slice: it runs there, where Cloudberry refuses it ("function
@@ -407,6 +430,9 @@ sreh  COPY's SEGMENT REJECT LIMIT, reached: the port's COPY parses each row
 table_statistics  the position PostgreSQL 19 gives the error of an ALTER
   TABLE ... ALTER COLUMN ... TYPE of a partition key column, a LINE and its
   caret, which PostgreSQL 16's gives none.
+
+timeseries  PostgreSQL 19's words for a call no function takes -- a
+  DETAIL where Cloudberry's HINT stood.
 
 truncate_gp  the files stat_table_segfile_size(), a PL/Python function,
   finds of an append-optimized and a column-oriented table emptied by a

@@ -1392,6 +1392,290 @@ COMMENT ON AGGREGATE pg_catalog.median(timestamptz) IS
 	'median, as percentile_cont(0.5) computes it (Apache Cloudberry)';
 
 /*
+ * percentile_cont() WITHIN GROUP (ORDER BY a timestamp or a timestamptz),
+ * of one percentile and of an array of them: Cloudberry's, beside
+ * PostgreSQL's of float8 and of interval (gp_median.c).  A date sorted this
+ * way is a timestamptz, as in Cloudberry.
+ */
+CREATE FUNCTION gp.percentile_cont_transfn(internal, timestamp)
+RETURNS internal
+AS 'MODULE_PATHNAME', 'gp_percentile_cont_transfn'
+LANGUAGE C PARALLEL SAFE;
+
+CREATE FUNCTION gp.percentile_cont_transfn(internal, timestamptz)
+RETURNS internal
+AS 'MODULE_PATHNAME', 'gp_percentile_cont_transfn'
+LANGUAGE C PARALLEL SAFE;
+
+CREATE FUNCTION gp.percentile_cont_timestamp_final(internal, float8)
+RETURNS timestamp
+AS 'MODULE_PATHNAME', 'gp_percentile_cont_finalfn'
+LANGUAGE C PARALLEL SAFE;
+
+CREATE FUNCTION gp.percentile_cont_timestamptz_final(internal, float8)
+RETURNS timestamptz
+AS 'MODULE_PATHNAME', 'gp_percentile_cont_finalfn'
+LANGUAGE C PARALLEL SAFE;
+
+CREATE FUNCTION gp.percentile_cont_timestamp_multi_final(internal, float8[])
+RETURNS timestamp[]
+AS 'MODULE_PATHNAME', 'gp_percentile_cont_multi_finalfn'
+LANGUAGE C PARALLEL SAFE;
+
+CREATE FUNCTION gp.percentile_cont_timestamptz_multi_final(internal, float8[])
+RETURNS timestamptz[]
+AS 'MODULE_PATHNAME', 'gp_percentile_cont_multi_finalfn'
+LANGUAGE C PARALLEL SAFE;
+
+CREATE AGGREGATE pg_catalog.percentile_cont(float8 ORDER BY timestamp) (
+	SFUNC = gp.percentile_cont_transfn,
+	STYPE = internal,
+	FINALFUNC = gp.percentile_cont_timestamp_final,
+	FINALFUNC_MODIFY = SHAREABLE,
+	PARALLEL = SAFE
+);
+
+CREATE AGGREGATE pg_catalog.percentile_cont(float8[] ORDER BY timestamp) (
+	SFUNC = gp.percentile_cont_transfn,
+	STYPE = internal,
+	FINALFUNC = gp.percentile_cont_timestamp_multi_final,
+	FINALFUNC_MODIFY = SHAREABLE,
+	PARALLEL = SAFE
+);
+
+CREATE AGGREGATE pg_catalog.percentile_cont(float8 ORDER BY timestamptz) (
+	SFUNC = gp.percentile_cont_transfn,
+	STYPE = internal,
+	FINALFUNC = gp.percentile_cont_timestamptz_final,
+	FINALFUNC_MODIFY = SHAREABLE,
+	PARALLEL = SAFE
+);
+
+CREATE AGGREGATE pg_catalog.percentile_cont(float8[] ORDER BY timestamptz) (
+	SFUNC = gp.percentile_cont_transfn,
+	STYPE = internal,
+	FINALFUNC = gp.percentile_cont_timestamptz_multi_final,
+	FINALFUNC_MODIFY = SHAREABLE,
+	PARALLEL = SAFE
+);
+
+/*
+ * Cloudberry's analytic functions of arrays and of time series
+ * (gp_analytic.c), by its names in pg_catalog.
+ *
+ * sum() of an array, element by element: of smallint, integer and bigint
+ * into a bigint[], of double precision -- and so of real and numeric, cast
+ * -- into a double precision[].  The transition functions are Cloudberry's
+ * int2_matrix_accum(), int4_matrix_accum() and int8_matrix_accum(), all one
+ * here, which is the combining function as well.
+ */
+CREATE FUNCTION gp.int2_matrix_accum(int8[], int2[])
+RETURNS int8[]
+AS 'MODULE_PATHNAME', 'gp_matrix_accum'
+LANGUAGE C IMMUTABLE PARALLEL SAFE;
+
+CREATE FUNCTION gp.int4_matrix_accum(int8[], int4[])
+RETURNS int8[]
+AS 'MODULE_PATHNAME', 'gp_matrix_accum'
+LANGUAGE C IMMUTABLE PARALLEL SAFE;
+
+CREATE FUNCTION gp.int8_matrix_accum(int8[], int8[])
+RETURNS int8[]
+AS 'MODULE_PATHNAME', 'gp_matrix_accum'
+LANGUAGE C IMMUTABLE STRICT PARALLEL SAFE;
+
+CREATE FUNCTION gp.float8_matrix_accum(float8[], float8[])
+RETURNS float8[]
+AS 'MODULE_PATHNAME', 'gp_matrix_accum'
+LANGUAGE C IMMUTABLE STRICT PARALLEL SAFE;
+
+CREATE AGGREGATE pg_catalog.sum(int2[]) (
+	SFUNC = gp.int2_matrix_accum,
+	STYPE = int8[],
+	COMBINEFUNC = gp.int8_matrix_accum,
+	PARALLEL = SAFE
+);
+
+CREATE AGGREGATE pg_catalog.sum(int4[]) (
+	SFUNC = gp.int4_matrix_accum,
+	STYPE = int8[],
+	COMBINEFUNC = gp.int8_matrix_accum,
+	PARALLEL = SAFE
+);
+
+CREATE AGGREGATE pg_catalog.sum(int8[]) (
+	SFUNC = gp.int8_matrix_accum,
+	STYPE = int8[],
+	COMBINEFUNC = gp.int8_matrix_accum,
+	PARALLEL = SAFE
+);
+
+CREATE AGGREGATE pg_catalog.sum(float8[]) (
+	SFUNC = gp.float8_matrix_accum,
+	STYPE = float8[],
+	COMBINEFUNC = gp.float8_matrix_accum,
+	PARALLEL = SAFE
+);
+
+COMMENT ON AGGREGATE pg_catalog.sum(int2[]) IS 'sum of matrixes (Apache Cloudberry)';
+COMMENT ON AGGREGATE pg_catalog.sum(int4[]) IS 'sum of matrixes (Apache Cloudberry)';
+COMMENT ON AGGREGATE pg_catalog.sum(int8[]) IS 'sum of matrixes (Apache Cloudberry)';
+COMMENT ON AGGREGATE pg_catalog.sum(float8[]) IS 'sum of matrixes (Apache Cloudberry)';
+
+/*
+ * gp_array_agg(): array_agg(), which it is in Cloudberry too -- the one
+ * of its releases whose array_agg() had no combining function, which this
+ * one had.  PostgreSQL 19's array_agg() has one.
+ */
+CREATE AGGREGATE pg_catalog.gp_array_agg(anynonarray) (
+	SFUNC = array_agg_transfn,
+	STYPE = internal,
+	FINALFUNC = array_agg_finalfn,
+	FINALFUNC_EXTRA,
+	COMBINEFUNC = array_agg_combine,
+	SERIALFUNC = array_agg_serialize,
+	DESERIALFUNC = array_agg_deserialize,
+	PARALLEL = SAFE
+);
+
+CREATE AGGREGATE pg_catalog.gp_array_agg(anyarray) (
+	SFUNC = array_agg_array_transfn,
+	STYPE = internal,
+	FINALFUNC = array_agg_array_finalfn,
+	FINALFUNC_EXTRA,
+	COMBINEFUNC = array_agg_array_combine,
+	SERIALFUNC = array_agg_array_serialize,
+	DESERIALFUNC = array_agg_array_deserialize,
+	PARALLEL = SAFE
+);
+
+COMMENT ON AGGREGATE pg_catalog.gp_array_agg(anynonarray) IS
+	'concatenate aggregate input into an array (Apache Cloudberry)';
+COMMENT ON AGGREGATE pg_catalog.gp_array_agg(anyarray) IS
+	'concatenate aggregate input into an array (Apache Cloudberry)';
+
+/*
+ * One interval divided by another, a month taken as 30 days: the quotient,
+ * and the remainder, of the dividend's sign; and the operators / and %.
+ */
+CREATE FUNCTION pg_catalog.interval_interval_div(interval, interval)
+RETURNS float8
+AS 'MODULE_PATHNAME', 'gp_interval_interval_div'
+LANGUAGE C IMMUTABLE STRICT PARALLEL SAFE;
+
+CREATE FUNCTION pg_catalog.interval_interval_mod(interval, interval)
+RETURNS interval
+AS 'MODULE_PATHNAME', 'gp_interval_interval_mod'
+LANGUAGE C IMMUTABLE STRICT PARALLEL SAFE;
+
+COMMENT ON FUNCTION pg_catalog.interval_interval_div(interval, interval) IS
+	'implementation of / operator';
+COMMENT ON FUNCTION pg_catalog.interval_interval_mod(interval, interval) IS
+	'implementation of % operator';
+
+CREATE OPERATOR pg_catalog./ (
+	LEFTARG = interval,
+	RIGHTARG = interval,
+	FUNCTION = pg_catalog.interval_interval_div
+);
+
+CREATE OPERATOR pg_catalog.% (
+	LEFTARG = interval,
+	RIGHTARG = interval,
+	FUNCTION = pg_catalog.interval_interval_mod
+);
+
+/*
+ * interval_bound(value, width [, shift [, registration]]): the lower bound
+ * of the interval of the width, counted from the registration (the epoch, or
+ * 0), that holds the value, moved on shift widths.
+ */
+CREATE FUNCTION pg_catalog.interval_bound(numeric, numeric)
+RETURNS numeric
+AS 'MODULE_PATHNAME', 'gp_numeric_interval_bound'
+LANGUAGE C IMMUTABLE STRICT PARALLEL SAFE;
+
+CREATE FUNCTION pg_catalog.interval_bound(numeric, numeric, int4)
+RETURNS numeric
+AS 'MODULE_PATHNAME', 'gp_numeric_interval_bound'
+LANGUAGE C IMMUTABLE PARALLEL SAFE;
+
+CREATE FUNCTION pg_catalog.interval_bound(numeric, numeric, int4, numeric)
+RETURNS numeric
+AS 'MODULE_PATHNAME', 'gp_numeric_interval_bound'
+LANGUAGE C IMMUTABLE PARALLEL SAFE;
+
+CREATE FUNCTION pg_catalog.interval_bound(timestamp, interval)
+RETURNS timestamp
+AS 'MODULE_PATHNAME', 'gp_timestamp_interval_bound'
+LANGUAGE C IMMUTABLE STRICT PARALLEL SAFE;
+
+CREATE FUNCTION pg_catalog.interval_bound(timestamp, interval, int4)
+RETURNS timestamp
+AS 'MODULE_PATHNAME', 'gp_timestamp_interval_bound'
+LANGUAGE C IMMUTABLE PARALLEL SAFE;
+
+CREATE FUNCTION pg_catalog.interval_bound(timestamp, interval, int4, timestamp)
+RETURNS timestamp
+AS 'MODULE_PATHNAME', 'gp_timestamp_interval_bound'
+LANGUAGE C IMMUTABLE PARALLEL SAFE;
+
+-- stable: the widths' days are added in the session's time zone
+CREATE FUNCTION pg_catalog.interval_bound(timestamptz, interval)
+RETURNS timestamptz
+AS 'MODULE_PATHNAME', 'gp_timestamptz_interval_bound'
+LANGUAGE C STABLE STRICT PARALLEL SAFE;
+
+CREATE FUNCTION pg_catalog.interval_bound(timestamptz, interval, int4)
+RETURNS timestamptz
+AS 'MODULE_PATHNAME', 'gp_timestamptz_interval_bound'
+LANGUAGE C STABLE PARALLEL SAFE;
+
+CREATE FUNCTION pg_catalog.interval_bound(timestamptz, interval, int4, timestamptz)
+RETURNS timestamptz
+AS 'MODULE_PATHNAME', 'gp_timestamptz_interval_bound'
+LANGUAGE C STABLE PARALLEL SAFE;
+
+/*
+ * linear_interpolate(x, x0, y0, x1, y1): y at x on the line through (x0, y0)
+ * and (x1, y1), x of any of eleven types, y of the function's.
+ */
+CREATE FUNCTION pg_catalog.linear_interpolate(anyelement, anyelement, int8, anyelement, int8)
+RETURNS int8 AS 'MODULE_PATHNAME', 'gp_linear_interpolate'
+LANGUAGE C IMMUTABLE STRICT PARALLEL SAFE;
+CREATE FUNCTION pg_catalog.linear_interpolate(anyelement, anyelement, int4, anyelement, int4)
+RETURNS int4 AS 'MODULE_PATHNAME', 'gp_linear_interpolate'
+LANGUAGE C IMMUTABLE STRICT PARALLEL SAFE;
+CREATE FUNCTION pg_catalog.linear_interpolate(anyelement, anyelement, int2, anyelement, int2)
+RETURNS int2 AS 'MODULE_PATHNAME', 'gp_linear_interpolate'
+LANGUAGE C IMMUTABLE STRICT PARALLEL SAFE;
+CREATE FUNCTION pg_catalog.linear_interpolate(anyelement, anyelement, float8, anyelement, float8)
+RETURNS float8 AS 'MODULE_PATHNAME', 'gp_linear_interpolate'
+LANGUAGE C IMMUTABLE STRICT PARALLEL SAFE;
+CREATE FUNCTION pg_catalog.linear_interpolate(anyelement, anyelement, float4, anyelement, float4)
+RETURNS float4 AS 'MODULE_PATHNAME', 'gp_linear_interpolate'
+LANGUAGE C IMMUTABLE STRICT PARALLEL SAFE;
+CREATE FUNCTION pg_catalog.linear_interpolate(anyelement, anyelement, date, anyelement, date)
+RETURNS date AS 'MODULE_PATHNAME', 'gp_linear_interpolate'
+LANGUAGE C IMMUTABLE STRICT PARALLEL SAFE;
+CREATE FUNCTION pg_catalog.linear_interpolate(anyelement, anyelement, time, anyelement, time)
+RETURNS time AS 'MODULE_PATHNAME', 'gp_linear_interpolate'
+LANGUAGE C IMMUTABLE STRICT PARALLEL SAFE;
+CREATE FUNCTION pg_catalog.linear_interpolate(anyelement, anyelement, timestamp, anyelement, timestamp)
+RETURNS timestamp AS 'MODULE_PATHNAME', 'gp_linear_interpolate'
+LANGUAGE C IMMUTABLE STRICT PARALLEL SAFE;
+-- stable: a timestamptz ordinate moves in the session's time zone
+CREATE FUNCTION pg_catalog.linear_interpolate(anyelement, anyelement, timestamptz, anyelement, timestamptz)
+RETURNS timestamptz AS 'MODULE_PATHNAME', 'gp_linear_interpolate'
+LANGUAGE C STABLE STRICT PARALLEL SAFE;
+CREATE FUNCTION pg_catalog.linear_interpolate(anyelement, anyelement, interval, anyelement, interval)
+RETURNS interval AS 'MODULE_PATHNAME', 'gp_linear_interpolate'
+LANGUAGE C IMMUTABLE STRICT PARALLEL SAFE;
+CREATE FUNCTION pg_catalog.linear_interpolate(anyelement, anyelement, numeric, anyelement, numeric)
+RETURNS numeric AS 'MODULE_PATHNAME', 'gp_linear_interpolate'
+LANGUAGE C IMMUTABLE STRICT PARALLEL SAFE;
+
+/*
  * FTS (gp_fts.c).  gp_request_fts_probe_scan(): probe the segments now, and
  * return once a probe that began after the call has ended, as Cloudberry's
  * does -- at once where no prober runs, as on a coordinator whose segments

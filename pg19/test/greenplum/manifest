@@ -46,7 +46,7 @@ run  bitmapscan_ao
 run  case_gp
 run  limit_gp
 run  notin
-skip percentile  function percentile_cont(numeric, timestamp without time zone) does not exist; function percentile_cont(numeric, timestamp with time zone) does not exist
+run  percentile
 run  join_gp
 skip union_gp  UNION types text and integer cannot be matched
 run  gp_create_table
@@ -56,7 +56,7 @@ run  gpctas
 run  gpdist
 run  gpdist_opclasses
 run  gpdist_legacy_opclasses
-skip matrix  function sum(smallint[]) does not exist; function sum(integer[]) does not exist
+run  matrix
 run  sublink
 run  olap_setup
 skip complex  type "complex" does not exist; relation "complex_ttbl" does not exist
@@ -78,7 +78,7 @@ run  gp_hashagg
 run  sequence_gp
 run  tidscan_gp
 run  agg_pushdown
-skip gp_array_agg  function gp_array_agg(integer) does not exist; function gp_array_agg(text) does not exist
+run  gp_array_agg
 run  gp_dqa
 skip subselect_gp  unrecognized EXPLAIN option "locus"
 run  subselect_gp2
@@ -423,7 +423,7 @@ run  trig
 skip role  syntax error at or near "only"
 skip portals_updatable  cursor "c" is not positioned on a row; cursor "c" is not a simply updatable scan of table "portals_updatable_rank_1_prt_2"
 skip plpgsql_cache  differs: how often a function's NOTICE is raised, the segments running it where Cloudberry's coordinator does
-skip timeseries  function interval_interval_div(interval, interval) does not exist; function interval_bound(integer, integer) does not exist
+run  timeseries
 run  pg_stat_last_operation
 run  pg_stat_last_shoperation
 run  gp_numeric_agg
@@ -478,7 +478,7 @@ skip qp_functions_in_subquery_column  UPDATE is not allowed in a non-volatile fu
 skip qp_functions_in_subquery_constant  UPDATE is not allowed in a non-volatile function; function cannot execute on a QE slice because it accesses relation "qp_funcs_in_subquery_constant.bar"
 skip qp_functions_in_with  UPDATE is not allowed in a non-volatile function
 run  qp_dpe  planner  differs under ORCA: which of its plans eliminate partitions while they run
-skip qp_functions_idf  function percentile_cont(numeric, timestamp with time zone) does not exist; function percentile_cont(numeric, date) does not exist
+run  qp_functions_idf
 run  qp_regexp
 skip qp_orca_fallback  differs: an UPDATE of a partitioned table with a foreign partition runs, where Cloudberry refuses it: cannot update foreign table "p2_ext"
 run  gp_sync_lc_gucs

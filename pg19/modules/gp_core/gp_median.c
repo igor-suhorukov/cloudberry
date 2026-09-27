@@ -18,7 +18,9 @@
  * under the License.
  *
  * gp_median.c
- *	  median(), Cloudberry's, as a plain aggregate.
+ *	  median(), Cloudberry's, as a plain aggregate; and percentile_cont() of
+ *	  timestamps, Cloudberry's too, which sorts as the median does (at the
+ *	  file's end).
  *
  * Cloudberry's grammar makes MEDIAN(x) the ordered-set aggregate
  * median(0.5) WITHIN GROUP (ORDER BY x), whose final functions are
@@ -62,6 +64,9 @@
 #include "common/int.h"
 #include "fmgr.h"
 #include "miscadmin.h"
+#include "nodes/nodeFuncs.h"
+#include "optimizer/optimizer.h"
+#include "utils/array.h"
 #include "utils/builtins.h"
 #include "utils/datum.h"
 #include "utils/lsyscache.h"
@@ -181,7 +186,9 @@ gp_median_transfn(PG_FUNCTION_ARGS)
  * timestamp and for two finite ones further apart than an int64 counts; this
  * does not.  Halfway between a timestamp and an infinity is that infinity,
  * and between the two infinities there is no answer, which is what
- * PostgreSQL 19's interval arithmetic says of the same question.
+ * PostgreSQL 19's interval arithmetic says of the same question.  lo is the
+ * row sorted first, which percentile_cont()'s ORDER BY ... DESC makes the
+ * later of the two.
  */
 static Timestamp
 timestamp_halfway(Timestamp lo, Timestamp hi, double pct)
@@ -190,13 +197,13 @@ timestamp_halfway(Timestamp lo, Timestamp hi, double pct)
 
 	if (lo == hi)
 		return lo;
-	if (TIMESTAMP_IS_NOBEGIN(lo) && TIMESTAMP_IS_NOEND(hi))
+	if (TIMESTAMP_NOT_FINITE(lo) && TIMESTAMP_NOT_FINITE(hi))
 		ereport(ERROR,
 				(errcode(ERRCODE_DATETIME_VALUE_OUT_OF_RANGE),
 				 errmsg("timestamp out of range")));
-	if (TIMESTAMP_IS_NOBEGIN(lo))
+	if (TIMESTAMP_NOT_FINITE(lo))
 		return lo;
-	if (TIMESTAMP_IS_NOEND(hi))
+	if (TIMESTAMP_NOT_FINITE(hi))
 		return hi;
 
 	if (pg_sub_s64_overflow(hi, lo, &diff))
@@ -639,4 +646,319 @@ gp_median_mfinalfn(PG_FUNCTION_ARGS)
 
 	PG_RETURN_DATUM(median_lerp(mh->typid, mh->low[0]->value,
 								mh->high[0]->value, 0.5));
+}
+
+/* ------------------------------------------------------------------------- */
+/* percentile_cont() of timestamps                                           */
+/* ------------------------------------------------------------------------- */
+
+/*
+ * percentile_cont(float8) WITHIN GROUP (ORDER BY timestamp), and of
+ * timestamptz, and their forms of an array of percentiles: Cloudberry's
+ * (pg_aggregate.dat, "additional variants of percentile_cont, for
+ * timestamps"), whose final functions are percentile_cont_final_common()'s
+ * and percentile_cont_multi_final_common()'s with timestamp_lerp().
+ * PostgreSQL 19 has percentile_cont of float8 and of interval alone, and a
+ * date sorted as a timestamptz takes these, as it does in Cloudberry.
+ *
+ * They are ordered-set aggregates, as PostgreSQL's are, so the transition
+ * function sorts the rows itself, in the order the aggregate's ORDER BY
+ * names -- DESC makes the tenth percentile another row -- as
+ * ordered_set_startup() reads it from the Aggref, into a tuplesort as the
+ * median's; the final functions read the rows they want from it as the
+ * median's does, and interpolate with timestamp_halfway().  The state is the
+ * median's.  ORCA declines them as it declines every ordered-set aggregate
+ * (see the file's head).
+ */
+static GpMedianState *
+percentile_startup(FunctionCallInfo fcinfo, MemoryContext aggcontext)
+{
+	Aggref	   *aggref = AggGetAggref(fcinfo);
+	SortGroupClause *sortcl;
+	TargetEntry *tle;
+	GpMedianState *state;
+	MemoryContext oldcontext;
+	int			sortopt = TUPLESORT_NONE;
+
+	if (aggref == NULL || list_length(aggref->aggorder) != 1)
+		elog(ERROR, "ordered-set aggregate support function called in non-ordered-set-aggregate context");
+	sortcl = linitial_node(SortGroupClause, aggref->aggorder);
+	tle = get_sortgroupclause_tle(sortcl, aggref->args);
+
+	/* read twice where two calls share the state, as the median's */
+	if (AggStateIsShared(fcinfo))
+		sortopt |= TUPLESORT_RANDOMACCESS;
+
+	oldcontext = MemoryContextSwitchTo(aggcontext);
+
+	state = palloc_object(GpMedianState);
+	state->typid = exprType((Node *) tle->expr);
+	state->sort = tuplesort_begin_datum(state->typid, sortcl->sortop,
+										exprCollation((Node *) tle->expr),
+										sortcl->nulls_first, work_mem, NULL,
+										sortopt);
+	state->nrows = 0;
+	state->sorted = false;
+
+	MemoryContextSwitchTo(oldcontext);
+
+	AggRegisterCallback(fcinfo, median_shutdown, PointerGetDatum(state));
+
+	return state;
+}
+
+PG_FUNCTION_INFO_V1(gp_percentile_cont_transfn);
+PG_FUNCTION_INFO_V1(gp_percentile_cont_finalfn);
+PG_FUNCTION_INFO_V1(gp_percentile_cont_multi_finalfn);
+
+/*
+ * gp.percentile_cont_transfn(internal, timestamp | timestamptz): the ORDER
+ * BY's value of a row into the sort, a null one not, as PostgreSQL's
+ * ordered_set_transition() puts none.
+ */
+Datum
+gp_percentile_cont_transfn(PG_FUNCTION_ARGS)
+{
+	MemoryContext aggcontext;
+	GpMedianState *state;
+
+	if (AggCheckCallContext(fcinfo, &aggcontext) != AGG_CONTEXT_AGGREGATE)
+		elog(ERROR, "ordered-set aggregate called in non-aggregate context");
+
+	if (PG_ARGISNULL(0))
+		state = percentile_startup(fcinfo, aggcontext);
+	else
+		state = (GpMedianState *) PG_GETARG_POINTER(0);
+
+	if (!PG_ARGISNULL(1))
+	{
+		tuplesort_putdatum(state->sort, PG_GETARG_DATUM(1), false);
+		state->nrows++;
+	}
+
+	PG_RETURN_POINTER(state);
+}
+
+/* The sort done, or read again from its start. */
+static void
+percentile_sort_ready(GpMedianState *state)
+{
+	if (!state->sorted)
+	{
+		tuplesort_performsort(state->sort);
+		state->sorted = true;
+	}
+	else
+		tuplesort_rescan(state->sort);
+}
+
+static void
+percentile_check(double percentile)
+{
+	if (percentile < 0 || percentile > 1 || isnan(percentile))
+		ereport(ERROR,
+				(errcode(ERRCODE_NUMERIC_VALUE_OUT_OF_RANGE),
+				 errmsg("percentile value %g is not between 0 and 1",
+						percentile)));
+}
+
+/*
+ * gp.percentile_cont_<type>_final(internal, float8): the row at
+ * floor(p * (n - 1)) of the sorted rows, or the point between it and the
+ * next one that p reaches.  NULL for a NULL percentile, and for a group of no
+ * rows or of null ones alone; a percentile outside 0 to 1 refused first.
+ */
+Datum
+gp_percentile_cont_finalfn(PG_FUNCTION_ARGS)
+{
+	GpMedianState *state;
+	double		percentile;
+	int64		first_row;
+	int64		second_row;
+	Datum		first_val;
+	Datum		second_val;
+	bool		isnull;
+
+	Assert(AggCheckCallContext(fcinfo, NULL) == AGG_CONTEXT_AGGREGATE);
+
+	if (PG_ARGISNULL(1))
+		PG_RETURN_NULL();
+	percentile = PG_GETARG_FLOAT8(1);
+	percentile_check(percentile);
+
+	if (PG_ARGISNULL(0))
+		PG_RETURN_NULL();
+	state = (GpMedianState *) PG_GETARG_POINTER(0);
+	if (state->nrows == 0)
+		PG_RETURN_NULL();
+
+	percentile_sort_ready(state);
+
+	first_row = floor(percentile * (state->nrows - 1));
+	second_row = ceil(percentile * (state->nrows - 1));
+
+	if (!tuplesort_skiptuples(state->sort, first_row, true))
+		elog(ERROR, "missing row in percentile_cont");
+	if (!tuplesort_getdatum(state->sort, true, true, &first_val, &isnull, NULL))
+		elog(ERROR, "missing row in percentile_cont");
+
+	if (first_row == second_row)
+		PG_RETURN_DATUM(first_val);
+
+	if (!tuplesort_getdatum(state->sort, true, true, &second_val, &isnull, NULL))
+		elog(ERROR, "missing row in percentile_cont");
+
+	PG_RETURN_DATUM(median_lerp(state->typid, first_val, second_val,
+								percentile * (state->nrows - 1) - first_row));
+}
+
+/* One percentile of an array of them, as PostgreSQL's setup_pct_info() has it. */
+typedef struct PctInfo
+{
+	int64		first_row;		/* first row to sample, from 1 */
+	int64		second_row;		/* possible second row to sample */
+	double		proportion;		/* interpolation fraction */
+	int			idx;			/* index of this item in the array */
+} PctInfo;
+
+static int
+pct_info_cmp(const void *pa, const void *pb)
+{
+	const PctInfo *a = (const PctInfo *) pa;
+	const PctInfo *b = (const PctInfo *) pb;
+
+	if (a->first_row != b->first_row)
+		return (a->first_row < b->first_row) ? -1 : 1;
+	if (a->second_row != b->second_row)
+		return (a->second_row < b->second_row) ? -1 : 1;
+	return 0;
+}
+
+/*
+ * gp.percentile_cont_<type>_multi_final(internal, float8[]): an array of the
+ * answers, the percentiles' array's shape, as
+ * percentile_cont_multi_final_common() makes it -- the percentiles visited in
+ * the order of their rows, so that the sort is read once, a NULL
+ * percentile's answer NULL.
+ */
+Datum
+gp_percentile_cont_multi_finalfn(PG_FUNCTION_ARGS)
+{
+	GpMedianState *state;
+	ArrayType  *param;
+	Datum	   *percentiles_datum;
+	bool	   *percentiles_null;
+	int			num_percentiles;
+	PctInfo    *pct_info;
+	Datum	   *result_datum;
+	bool	   *result_isnull;
+	int64		rownum = 0;
+	Datum		first_val = (Datum) 0;
+	Datum		second_val = (Datum) 0;
+	bool		isnull;
+	int16		typlen;
+	bool		typbyval;
+	char		typalign;
+	int			i;
+
+	Assert(AggCheckCallContext(fcinfo, NULL) == AGG_CONTEXT_AGGREGATE);
+
+	if (PG_ARGISNULL(0))
+		PG_RETURN_NULL();
+	state = (GpMedianState *) PG_GETARG_POINTER(0);
+	if (state->nrows == 0)
+		PG_RETURN_NULL();
+
+	if (PG_ARGISNULL(1))
+		PG_RETURN_NULL();
+	param = PG_GETARG_ARRAYTYPE_P(1);
+
+	deconstruct_array_builtin(param, FLOAT8OID, &percentiles_datum,
+							  &percentiles_null, &num_percentiles);
+	if (num_percentiles == 0)
+		PG_RETURN_POINTER(construct_empty_array(state->typid));
+
+	pct_info = palloc_array(PctInfo, num_percentiles);
+	for (i = 0; i < num_percentiles; i++)
+	{
+		pct_info[i].idx = i;
+		if (percentiles_null[i])
+		{
+			/* sorted to the front, on row 0 */
+			pct_info[i].first_row = 0;
+			pct_info[i].second_row = 0;
+			pct_info[i].proportion = 0;
+		}
+		else
+		{
+			double		p = DatumGetFloat8(percentiles_datum[i]);
+
+			percentile_check(p);
+			pct_info[i].first_row = 1 + (int64) floor(p * (state->nrows - 1));
+			pct_info[i].second_row = 1 + (int64) ceil(p * (state->nrows - 1));
+			pct_info[i].proportion = (p * (state->nrows - 1)) - floor(p * (state->nrows - 1));
+		}
+	}
+	qsort(pct_info, num_percentiles, sizeof(PctInfo), pct_info_cmp);
+
+	result_datum = palloc_array(Datum, num_percentiles);
+	result_isnull = palloc_array(bool, num_percentiles);
+
+	/* the NULL percentiles, on row 0 */
+	for (i = 0; i < num_percentiles; i++)
+	{
+		if (pct_info[i].first_row > 0)
+			break;
+		result_datum[pct_info[i].idx] = (Datum) 0;
+		result_isnull[pct_info[i].idx] = true;
+	}
+
+	if (i < num_percentiles)
+	{
+		percentile_sort_ready(state);
+
+		for (; i < num_percentiles; i++)
+		{
+			int64		first_row = pct_info[i].first_row;
+			int64		second_row = pct_info[i].second_row;
+			int			idx = pct_info[i].idx;
+
+			/* on to first_row, unless the previous percentile read it */
+			if (first_row > rownum)
+			{
+				if (!tuplesort_skiptuples(state->sort, first_row - rownum - 1, true))
+					elog(ERROR, "missing row in percentile_cont");
+				if (!tuplesort_getdatum(state->sort, true, true, &first_val,
+										&isnull, NULL) || isnull)
+					elog(ERROR, "missing row in percentile_cont");
+				rownum = first_row;
+				second_val = first_val;
+			}
+			else if (first_row == rownum)
+				first_val = second_val;
+
+			if (second_row > rownum)
+			{
+				if (!tuplesort_getdatum(state->sort, true, true, &second_val,
+										&isnull, NULL) || isnull)
+					elog(ERROR, "missing row in percentile_cont");
+				rownum++;
+			}
+			Assert(second_row == rownum);
+
+			if (second_row > first_row)
+				result_datum[idx] = median_lerp(state->typid, first_val,
+												second_val,
+												pct_info[i].proportion);
+			else
+				result_datum[idx] = first_val;
+			result_isnull[idx] = false;
+		}
+	}
+
+	get_typlenbyvalalign(state->typid, &typlen, &typbyval, &typalign);
+	PG_RETURN_POINTER(construct_md_array(result_datum, result_isnull,
+										 ARR_NDIM(param), ARR_DIMS(param),
+										 ARR_LBOUND(param), state->typid,
+										 typlen, typbyval, typalign));
 }

@@ -1,0 +1,15 @@
+@@
++INFO:  GPORCA failed to produce a plan, falling back to Postgres-based planner
++DETAIL:  Falling back to Postgres-based planner because GPORCA does not support the following feature: SIRV functions
+@@
++INFO:  GPORCA failed to produce a plan, falling back to Postgres-based planner
++DETAIL:  Falling back to Postgres-based planner because GPORCA does not support the following feature: Multiple Distinct Qualified Aggregates are disabled in the optimizer
+@@
++INFO:  GPORCA failed to produce a plan, falling back to Postgres-based planner
++DETAIL:  Falling back to Postgres-based planner because GPORCA does not support the following feature: Multiple Distinct Qualified Aggregates are disabled in the optimizer
+@@
++INFO:  GPORCA failed to produce a plan, falling back to Postgres-based planner
++DETAIL:  Falling back to Postgres-based planner because GPORCA does not support the following feature: Non-default collation
+@@
++INFO:  GPORCA failed to produce a plan, falling back to Postgres-based planner
++DETAIL:  Falling back to Postgres-based planner because GPORCA does not support the following feature: Non-default collation
