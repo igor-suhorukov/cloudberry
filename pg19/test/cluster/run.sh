@@ -2757,6 +2757,45 @@ COMMIT;"
 		*) notok "SHOW gp.cluster_secret" "$out" ;;
 	esac
 
+	# The planner's route sends a scan's stable conditions to the segments --
+	# the built-in functions that are stable for the settings a statement is
+	# sent with, or for the transaction's start, which the gather brings --
+	# as Cloudberry's segments evaluate them; what a node answers of itself
+	# stays here.  Their answers are the coordinator's, in any time zone.
+	q 0 "CREATE TABLE stc (id int, ts timestamptz, amt numeric, body text) DISTRIBUTED BY (id);
+	     INSERT INTO stc SELECT i, '2026-09-20 00:00:00+00'::timestamptz + (i * 37 || ' minutes')::interval,
+	                           i * 1.5, 'the quick brown fox ' || i FROM generate_series(1, 400) i;" >/dev/null
+	out=$(q 0 "SET gp.optimizer = off; SET TimeZone = 'Asia/Tokyo';
+		EXPLAIN (VERBOSE, COSTS OFF) SELECT id FROM stc WHERE ts > now() - interval '9 days'
+		   AND ts::date < '2026-09-27'::date AND amt::money > '10'::money AND to_tsvector(body) @@ to_tsquery('fox')
+		   AND current_setting('TimeZone') <> '' AND id <> pg_backend_pid();" | grep -E "Remote SQL|Filter")
+	same=0
+	for tz in UTC Asia/Tokyo America/New_York; do
+		sent=$(q 0 "SET gp.optimizer = off; SET TimeZone = '$tz';
+			SELECT count(*) FROM stc WHERE extract(hour FROM ts) < 12 AND ts::date = '2026-09-22'::date;")
+		here=$(q 0 "SET gp.optimizer = off; SET TimeZone = '$tz';
+			SELECT count(*) FROM (SELECT * FROM stc OFFSET 0) s WHERE extract(hour FROM ts) < 12 AND ts::date = '2026-09-22'::date;")
+		[ -n "$sent" ] && [ "$sent" = "$here" ] && same=$((same + 1))
+	done
+	sql=$(printf '%s\n' "$out" | sed -n 's/^ *Remote SQL: //p')
+	sent=1
+	for want in "now()" "::date" "::money" "to_tsvector(body)"; do
+		case "$sql" in *"$want"*) ;; *) sent=0 ;; esac
+	done
+	case "$sql" in *current_setting*|*pg_backend_pid*) sent=0 ;; esac
+	[ "$(printf '%s\n' "$out" | grep -c 'pg_backend_pid\|current_setting')" = 2 ] || sent=0
+	[ "$same" = 3 ] && [ "$sent" = 1 ] \
+		&& ok "under the planner a scan's stable conditions go to the segments -- now(), a date against a time with a zone, a cast to money, to_tsvector() -- and answer as here in three time zones; current_setting() and pg_backend_pid() stay here" \
+		|| notok "a scan's stable conditions under the planner, as here in three time zones" "$same / $out"
+	out=$(printf '%s\n' "SET gp.optimizer = off;" "BEGIN;" \
+		"CREATE TABLE stn (id int, ts timestamptz) DISTRIBUTED BY (id);" \
+		"INSERT INTO stn SELECT i, now() FROM generate_series(1, 30) i;" \
+		"SELECT pg_sleep(1.1);" "SELECT count(*) FROM stn WHERE ts = now() AND ts = CURRENT_TIMESTAMP;" \
+		"COMMIT;" | qf 0 | tail -1)
+	[ "$out" = 30 ] \
+		&& ok "and now() and CURRENT_TIMESTAMP on the segments are the coordinator's transaction start" \
+		|| notok "now() in a condition sent to the segments" "$out"
+
 	# No secret on the coordinator: ORCA is told, and the planner gathers.
 	# None on the segments either -- a segment that has one takes the
 	# coordinator's word only with it, and a transaction's two-phase commit
@@ -2769,6 +2808,13 @@ COMMIT;"
 	case "$out" in
 		*"a Motion, without gp.cluster_secret"*"100|49800") ok "without a secret nothing is dispatched as a plan, and the answer is the same" ;;
 		*) notok "ORCA without a secret" "$out" ;;
+	esac
+	# ... nor is the coordinator's start taken from a gather: now() stays
+	# here, and a cast to money goes still.
+	out=$(q 0 "SET gp.optimizer = off; EXPLAIN (VERBOSE, COSTS OFF) SELECT id FROM stc WHERE ts > now() - interval '9 days' AND amt::money > '10'::money;" | grep -E "Remote SQL|Filter" | tr '\n' ' ')
+	case "$out" in
+		*"Filter:"*"now()"*"Remote SQL:"*"::money"*) ok "without a secret now() stays here, and a cast to money goes" ;;
+		*) notok "a scan's stable conditions without a secret" "$out" ;;
 	esac
 
 	###########################################################################

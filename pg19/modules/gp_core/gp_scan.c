@@ -78,12 +78,16 @@
 #include "access/sysattr.h"
 #include "access/table.h"
 #include "access/tableam.h"
+#include "access/transam.h"
+#include "access/xact.h"
 #include "catalog/heap.h"
 #include "catalog/namespace.h"
+#include "catalog/pg_namespace.h"
 #include "catalog/objectaddress.h"
 #include "catalog/pg_am.h"
 #include "catalog/pg_class.h"
 #include "catalog/pg_opfamily.h"
+#include "catalog/pg_proc.h"
 #include "catalog/pg_type.h"
 #include "commands/defrem.h"
 #include "commands/explain.h"
@@ -161,6 +165,14 @@
 #define GATHER_PRIVATE_CURSOR_PARAM 11	/* or the parameter naming it, or 0 */
 #define GATHER_PRIVATE_IDENTITY		12	/* the rows of a table being changed */
 #define GATHER_PRIVATE_LIMIT		13	/* " LIMIT n" a LIMIT above sends, or "" */
+#define GATHER_PRIVATE_FOLDED		14	/* the conditions sent, their stable
+										 * constant parts as $N, or "" */
+
+/*
+ * The first $N a condition's stable constant part is sent as, until the
+ * coordinator has computed it as the gather starts (fold_stable()).
+ */
+#define GATHER_FOLD_PARAM			90001
 
 static set_rel_pathlist_hook_type prev_set_rel_pathlist = NULL;
 static build_simple_rel_hook_type prev_build_simple_rel = NULL;
@@ -200,6 +212,9 @@ typedef struct GatherScanState
 	CustomScanState css;
 	char	   *select;			/* "SELECT ... FROM ONLY t" */
 	char	   *where;			/* the conditions sent, or "" */
+	char	   *folded;			/* and with their stable constant parts as
+								 * $N, or "" */
+	List	   *folds;			/* those parts, each an ExprState */
 	char	   *locking;		/* " FOR UPDATE ...", or "" */
 	int			ncontents;		/* direct dispatch's segments, or 0 */
 	int		   *contents;
@@ -305,6 +320,16 @@ shippable_walker(Node *node, ShippableContext *cxt)
 					return true;
 				return false;
 			}
+		case T_Const:
+
+			/*
+			 * A value of an anonymous record type, which no literal can
+			 * name: its text reads back nowhere ("input of anonymous
+			 * composite types is not implemented") -- a PL/pgSQL record's
+			 * value in a custom plan.
+			 */
+			return ((Const *) node)->consttype == RECORDOID ||
+				((Const *) node)->consttype == RECORDARRAYOID;
 		case T_Param:
 		case T_SubLink:
 		case T_SubPlan:
@@ -340,18 +365,278 @@ without_segment_id(Node *node, Index *relid)
 }
 
 /*
+ * The built-in STABLE functions a segment does not evaluate for the
+ * coordinator, by name in pg_catalog: those that read what a node has of its
+ * own -- its backends and their addresses, its transaction IDs -- those that
+ * ask who the session is or what it may do, which a segment answers for the
+ * gang's connection, those that look an object up by its name or name one by
+ * its OID, the catalog's own, and current_setting(), which reads any setting,
+ * sent or not.  Any "pg_" function is one of these, for its statistics,
+ * files, backends or temporary schema, but for shipped_pg_names; and so is
+ * any "has_", "reg" or "to_reg" one, and the planner's estimators.
+ */
+static const char *const unshipped_stable_names[] = {
+	"inet_client_addr", "inet_client_port", "inet_server_addr",
+	"inet_server_port", "txid_current", "txid_current_if_assigned",
+	"txid_current_snapshot", "mxid_age", "current_user", "session_user",
+	"system_user", "getpgusername", "current_setting", "current_schema",
+	"current_schemas", "row_security_active", "format_type", "oidvectortypes",
+	"col_description", "obj_description", "shobj_description",
+	"_pg_index_position", "aclexplode", "aclitemin", "aclitemout",
+	"enum_first", "enum_last", "enum_range", "ts_debug", "ts_parse",
+	"ts_token_type", "table_to_xml", "table_to_xmlschema",
+	"table_to_xml_and_xmlschema", "schema_to_xml", "schema_to_xmlschema",
+	"schema_to_xml_and_xmlschema", "database_to_xml", "database_to_xmlschema",
+	"database_to_xml_and_xmlschema",
+};
+
+static const char *const shipped_pg_names[] = {
+	"pg_input_is_valid", "pg_input_error_info", "pg_char_to_encoding",
+	"pg_encoding_to_char", "pg_column_size", "pg_options_to_table",
+	"pg_get_keywords", "pg_timezone_names", "pg_timezone_abbrevs_abbrevs",
+	"pg_timezone_abbrevs_zone",
+};
+
+static bool
+name_in(const char *name, const char *const *names, int n)
+{
+	for (int i = 0; i < n; i++)
+		if (strcmp(name, names[i]) == 0)
+			return true;
+	return false;
+}
+
+static bool
+name_ends(const char *name, const char *suffix)
+{
+	size_t		n = strlen(name);
+	size_t		m = strlen(suffix);
+
+	return n >= m && strcmp(name + n - m, suffix) == 0;
+}
+
+/*
+ * May a segment evaluate this built-in STABLE function for the coordinator?
+ * Yes where it is stable only for the settings a gang is sent with each
+ * statement -- DateStyle, IntervalStyle, TimeZone, lc_monetary, lc_numeric,
+ * lc_time, search_path, default_text_search_config, extra_float_digits,
+ * bytea_output, xmloption (gp_dispatch.c's synced_settings): a date compared
+ * with a time with a zone, a cast to money, to_char(), to_tsvector(), JSON's
+ * and XML's output -- or for the transaction's and the statement's start,
+ * now() and its kin and age() of one timestamp, which are the coordinator's
+ * where the gather's statement brings them ("times").  A user's STABLE
+ * function may read a table, which a segment has its own part of, and is
+ * not sent.
+ */
+static bool
+stable_is_shipped(Oid funcid, bool times)
+{
+	HeapTuple	tp;
+	Form_pg_proc proc;
+	const char *name;
+	bool		shipped;
+
+	if (funcid >= FirstNormalObjectId)
+		return false;
+	tp = SearchSysCache1(PROCOID, ObjectIdGetDatum(funcid));
+	if (!HeapTupleIsValid(tp))
+		return false;
+	proc = (Form_pg_proc) GETSTRUCT(tp);
+	name = NameStr(proc->proname);
+
+	if (proc->pronamespace != PG_CATALOG_NAMESPACE)
+		shipped = false;
+	else if (strncmp(name, "pg_", 3) == 0)
+		shipped = name_in(name, shipped_pg_names, lengthof(shipped_pg_names));
+	else if (strncmp(name, "has_", 4) == 0 || strncmp(name, "reg", 3) == 0 ||
+			 strncmp(name, "to_reg", 6) == 0 || strncmp(name, "fmgr_", 5) == 0 ||
+			 name_ends(name, "sel") || name_ends(name, "_typanalyze"))
+		shipped = false;
+	else
+		shipped = !name_in(name, unshipped_stable_names,
+						   lengthof(unshipped_stable_names));
+
+	/* age() of a transaction ID is this node's; of one timestamp, the day's */
+	if (shipped && strcmp(name, "age") == 0)
+		shipped = proc->pronargs > 0 && proc->proargtypes.values[0] != XIDOID &&
+			(proc->pronargs > 1 || times);
+	if (shipped && !times &&
+		(strcmp(name, "now") == 0 || strcmp(name, "transaction_timestamp") == 0 ||
+		 strcmp(name, "statement_timestamp") == 0))
+		shipped = false;
+
+	ReleaseSysCache(tp);
+	return shipped;
+}
+
+static bool
+unshippable_function(Oid funcid, void *context)
+{
+	switch (func_volatile(funcid))
+	{
+		case PROVOLATILE_IMMUTABLE:
+			return false;
+		case PROVOLATILE_STABLE:
+			return !stable_is_shipped(funcid, *(bool *) context);
+		default:
+			return true;
+	}
+}
+
+/*
+ * contain_mutable_functions(), less what a segment may evaluate for the
+ * coordinator (stable_is_shipped()): CURRENT_DATE and the rest of the SQL
+ * value functions of time where the gather brings the coordinator's times,
+ * none of those that name the session's user, database or schema.  JSON's
+ * constructors and expressions are stable for the dates and times they
+ * write, as TimeZone and DateStyle, which are sent, say.
+ */
+static bool
+contain_unshippable_functions(Node *node, void *context)
+{
+	bool		times = *(bool *) context;
+
+	if (node == NULL)
+		return false;
+	if (check_functions_in_node(node, unshippable_function, context))
+		return true;
+	if (IsA(node, SQLValueFunction))
+	{
+		switch (((SQLValueFunction *) node)->op)
+		{
+			case SVFOP_CURRENT_DATE:
+			case SVFOP_CURRENT_TIME:
+			case SVFOP_CURRENT_TIME_N:
+			case SVFOP_CURRENT_TIMESTAMP:
+			case SVFOP_CURRENT_TIMESTAMP_N:
+			case SVFOP_LOCALTIME:
+			case SVFOP_LOCALTIME_N:
+			case SVFOP_LOCALTIMESTAMP:
+			case SVFOP_LOCALTIMESTAMP_N:
+				if (!times)
+					return true;
+				break;
+			default:
+				return true;
+		}
+	}
+	if (IsA(node, NextValueExpr) || IsA(node, Query))
+		return true;
+	return expression_tree_walker(node, contain_unshippable_functions, context);
+}
+
+/*
+ * Can this expression be computed on its own, before a row is read: no
+ * column, parameter, subquery or aggregate in it, nothing a node above it
+ * gives it (CASE's value, a domain's), and no volatile function?
+ */
+static bool
+stands_alone_walker(Node *node, void *context)
+{
+	if (node == NULL)
+		return false;
+	switch (nodeTag(node))
+	{
+		case T_Var:
+		case T_Param:
+		case T_PlaceHolderVar:
+		case T_CaseTestExpr:
+		case T_CoerceToDomainValue:
+		case T_SetToDefault:
+		case T_CurrentOfExpr:
+		case T_NextValueExpr:
+		case T_Aggref:
+		case T_WindowFunc:
+		case T_GroupingFunc:
+		case T_SubLink:
+		case T_SubPlan:
+		case T_AlternativeSubPlan:
+			return true;
+		default:
+			break;
+	}
+	return expression_tree_walker(node, stands_alone_walker, context);
+}
+
+/*
+ * A condition's stable constant parts -- a STABLE function, or CURRENT_DATE
+ * and its kin, over constants alone -- each put in the condition as a
+ * parameter, $N from GATHER_FOLD_PARAM, and kept in *folds: the coordinator
+ * computes them as the gather starts, and sends their values, as
+ * Cloudberry's coordinator computes a plan's stable functions before it
+ * dispatches it (exec_make_plan_constant()).  So a segment compares a
+ * column with a constant, which a table access method's statistics can
+ * skip files and groups for -- PAX's cannot for a cast of a constant -- and
+ * evaluates the function once, not for each row.
+ */
+static bool
+fold_candidate(Node *node)
+{
+	switch (nodeTag(node))
+	{
+		case T_FuncExpr:
+		case T_OpExpr:
+		case T_DistinctExpr:
+		case T_NullIfExpr:
+		case T_ScalarArrayOpExpr:
+		case T_BoolExpr:
+		case T_CoerceViaIO:
+		case T_ArrayCoerceExpr:
+		case T_RelabelType:
+		case T_CaseExpr:
+		case T_CoalesceExpr:
+		case T_MinMaxExpr:
+		case T_SQLValueFunction:
+		case T_ArrayExpr:
+		case T_NullTest:
+		case T_BooleanTest:
+			return true;
+		default:
+			return false;
+	}
+}
+
+static Node *
+fold_stable(Node *node, List **folds)
+{
+	if (node == NULL)
+		return NULL;
+	if (fold_candidate(node) && exprType(node) != RECORDOID &&
+		exprType(node) != RECORDARRAYOID &&
+		contain_mutable_functions(node) && !contain_volatile_functions(node) &&
+		!stands_alone_walker(node, NULL))
+	{
+		Param	   *param = makeNode(Param);
+
+		param->paramkind = PARAM_EXTERN;
+		param->paramid = GATHER_FOLD_PARAM + list_length(*folds);
+		param->paramtype = exprType(node);
+		param->paramtypmod = exprTypmod(node);
+		param->paramcollid = exprCollation(node);
+		param->location = -1;
+		*folds = lappend(*folds, copyObject(node));
+		return (Node *) param;
+	}
+	return expression_tree_mutator(node, fold_stable, folds);
+}
+
+/*
  * Can this condition be evaluated on a segment and mean the same there?
  * Nothing whose answer could differ between nodes: only this table's columns,
- * no parameter or subquery, and no function that is not immutable -- now()
- * is a different instant on each node.  gp_segment_id is the exception.
+ * no parameter or subquery, and no function that is not immutable -- but the
+ * built-in STABLE ones a segment evaluates as the coordinator would, with the
+ * settings each statement is sent and, where the cluster has its secret, the
+ * coordinator's times (stable_is_shipped()), as Cloudberry's segments
+ * evaluate a scan's stable conditions.  gp_segment_id is the exception.
  */
 static bool
 is_shippable(Expr *expr, Index relid)
 {
 	ShippableContext cxt = {.relid = relid};
+	bool		times = GpClusterHasSecret();
 
 	expr = (Expr *) without_segment_id((Node *) expr, &relid);
-	if (contain_mutable_functions((Node *) expr))
+	if (contain_unshippable_functions((Node *) expr, &times))
 		return false;
 	return !shippable_walker((Node *) expr, &cxt);
 }
@@ -1279,6 +1564,8 @@ gather_plan(PlannerInfo *root, RelOptInfo *rel, CustomPath *best_path,
 	Bitmapset  *needed = NULL;
 	StringInfoData select;
 	StringInfoData where;
+	StringInfoData folded;
+	List	   *folds = NIL;
 	StringInfoData locking;
 	List	   *types = NIL;
 	List	   *typmods = NIL;
@@ -1450,6 +1737,7 @@ gather_plan(PlannerInfo *root, RelOptInfo *rel, CustomPath *best_path,
 	dpcontext = deparse_context_for(RelationGetRelationName(relation),
 									rte->relid);
 	initStringInfo(&where);
+	initStringInfo(&folded);
 	foreach_ptr(Node, clause, pushed)
 	{
 		Node	   *qual = copyObject(clause);
@@ -1459,6 +1747,10 @@ gather_plan(PlannerInfo *root, RelOptInfo *rel, CustomPath *best_path,
 		/* ruleutils brackets an operator's operands itself */
 		appendStringInfo(&where, "%s%s", where.len > 0 ? " AND " : "",
 						 deparse_expression(qual, dpcontext, false, true));
+		/* and as sent: its stable constant parts computed as it starts */
+		appendStringInfo(&folded, "%s%s", folded.len > 0 ? " AND " : "",
+						 deparse_expression(fold_stable(qual, &folds),
+											dpcontext, false, true));
 	}
 
 	/* the rows a SELECT ... FOR UPDATE locks, locked where they are */
@@ -1484,7 +1776,7 @@ gather_plan(PlannerInfo *root, RelOptInfo *rel, CustomPath *best_path,
 	cscan->scan.scanrelid = rel->relid;
 	cscan->flags = best_path->flags;
 	cscan->custom_plans = NIL;
-	cscan->custom_exprs = NIL;
+	cscan->custom_exprs = folds;
 	cscan->custom_scan_tlist = scan_tlist;
 	cscan->custom_private = list_make5(makeString(select.data),
 									   makeString(where.data),
@@ -1503,6 +1795,8 @@ gather_plan(PlannerInfo *root, RelOptInfo *rel, CustomPath *best_path,
 									makeInteger(current_of != NULL ? current_of->cursor_param : 0));
 	cscan->custom_private = lappend(cscan->custom_private, makeBoolean(identity));
 	cscan->custom_private = lappend(cscan->custom_private, makeString(""));
+	cscan->custom_private = lappend(cscan->custom_private,
+									makeString(folds != NIL ? folded.data : ""));
 	cscan->methods = &gather_scan_methods;
 
 	return &cscan->scan.plan;
@@ -1536,6 +1830,7 @@ gather_create_state(CustomScan *cscan)
 	state->css.slotOps = &TTSOpsVirtual;
 	state->select = strVal(list_nth(priv, GATHER_PRIVATE_SELECT));
 	state->where = strVal(list_nth(priv, GATHER_PRIVATE_WHERE));
+	state->folded = strVal(list_nth(priv, GATHER_PRIVATE_FOLDED));
 	state->locking = strVal(list_nth(priv, GATHER_PRIVATE_LOCKING));
 	state->contents = int_array((List *) list_nth(priv, GATHER_PRIVATE_CONTENTS),
 								&state->ncontents);
@@ -1581,6 +1876,7 @@ gather_begin(CustomScanState *node, EState *estate, int eflags)
 	state->remote = ExecInitExtraTupleSlot(estate, remote, &TTSOpsVirtual);
 	state->rowvalues = palloc_array(Datum, Max(state->natts, 1));
 	state->rownulls = palloc_array(bool, Max(state->natts, 1));
+	state->folds = ExecInitExprList(cscan->custom_exprs, &node->ss.ps);
 	state->current_content = -1;
 	state->external = !gather_is_current_of(state) &&
 		GpPolicyIsExternalTable(RelationGetRelid(node->ss.ss_currentRelation));
@@ -1843,6 +2139,88 @@ GpPlanCostLessGathers(PlannedStmt *stmt)
 }
 
 /*
+ * The conditions sent, their stable constant parts computed now, each as a
+ * literal of its type in its placeholder's place (fold_stable()); the
+ * placeholders are $N outside a quoted string or name.  Computed again at
+ * each start, as the executor computes a scan's runtime keys at each rescan.
+ */
+static char *
+gather_where(GatherScanState *state)
+{
+	ExprContext *econtext = state->css.ss.ps.ps_ExprContext;
+	int			nfolds = list_length(state->folds);
+	char	  **literals;
+	StringInfoData out;
+	const char *p;
+	int			i = 0;
+
+	if (nfolds == 0 || state->folded[0] == '\0')
+		return state->where;
+
+	literals = palloc_array(char *, nfolds);
+	foreach_ptr(ExprState, fold, state->folds)
+	{
+		Oid			type = exprType((Node *) fold->expr);
+		int32		typmod = exprTypmod((Node *) fold->expr);
+		bool		isnull;
+		Datum		value = ExecEvalExprSwitchContext(fold, econtext, &isnull);
+		char	   *typname = format_type_with_typemod(type, typmod);
+
+		if (isnull)
+			literals[i++] = psprintf("NULL::%s", typname);
+		else
+		{
+			Oid			out_func;
+			bool		isvarlena;
+
+			getTypeOutputInfo(type, &out_func, &isvarlena);
+			literals[i++] = psprintf("%s::%s",
+									 quote_literal_cstr(OidOutputFunctionCall(out_func, value)),
+									 typname);
+		}
+	}
+
+	initStringInfo(&out);
+	for (p = state->folded; *p != '\0';)
+	{
+		if (*p == '\'' || *p == '"')
+		{
+			char		quote = *p;
+
+			/* a quoted string or name, its doubled quotes inside */
+			appendStringInfoChar(&out, *p++);
+			while (*p != '\0')
+			{
+				if (*p == quote && p[1] == quote)
+				{
+					appendBinaryStringInfo(&out, p, 2);
+					p += 2;
+					continue;
+				}
+				appendStringInfoChar(&out, *p);
+				if (*p++ == quote)
+					break;
+			}
+			continue;
+		}
+		if (*p == '$' && isdigit((unsigned char) p[1]))
+		{
+			char	   *end;
+			long		n = strtol(p + 1, &end, 10);
+
+			if (n >= GATHER_FOLD_PARAM && n < GATHER_FOLD_PARAM + nfolds)
+			{
+				appendStringInfoString(&out, literals[n - GATHER_FOLD_PARAM]);
+				p = end;
+				continue;
+			}
+		}
+		appendStringInfoChar(&out, *p++);
+	}
+	return out.data;
+}
+
+/*
  * Start reading: from the segments the plan names, or the cursor's one.
  *
  * The coordinator checked the statement's privileges before it ran any of
@@ -1857,9 +2235,19 @@ gather_start(GatherScanState *state)
 {
 	TupleDesc	desc = state->remote->tts_tupleDescriptor;
 	StringInfoData sql;
+	char	   *where = gather_where(state);
 
 	initStringInfo(&sql);
 	appendStringInfoString(&sql, GP_CHECKED_MARKER);
+
+	/*
+	 * The coordinator's transaction and statement start, for now() and its
+	 * kin in the conditions it sends (is_shippable()), which a segment takes
+	 * on the coordinator's own connection (gp_motion.c).
+	 */
+	appendStringInfo(&sql, GP_TIMES_MARKER INT64_FORMAT " " INT64_FORMAT "*/ ",
+					 (int64) GetCurrentTransactionStartTimestamp(),
+					 (int64) GetCurrentStatementStartTimestamp());
 	appendStringInfoString(&sql, state->select);
 
 	if (gather_is_current_of(state))
@@ -1886,14 +2274,14 @@ gather_start(GatherScanState *state)
 							 ItemPointerGetBlockNumber(&tid),
 							 ItemPointerGetOffsetNumber(&tid));
 		appendStringInfo(&sql, "%s%s%s",
-						 state->where[0] != '\0' ? " AND " : "",
-						 state->where, state->locking);
+						 where[0] != '\0' ? " AND " : "",
+						 where, state->locking);
 		state->gather = GpGatherStartOn(sql.data, desc, content);
 		return true;
 	}
 
-	if (state->where[0] != '\0')
-		appendStringInfo(&sql, " WHERE %s", state->where);
+	if (where[0] != '\0')
+		appendStringInfo(&sql, " WHERE %s", where);
 	appendStringInfoString(&sql, state->limit);
 	appendStringInfoString(&sql, state->locking);
 

@@ -4028,22 +4028,46 @@ starting_cursor(void)
  * which nothing a user writes can put there -- and only the coordinator's
  * own connection is believed.
  */
-static bool
-gather_was_checked(const char *query_string)
+static const char *
+gather_checked_end(const char *query_string)
 {
 	const char *p;
 
 	if (query_string == NULL || strncmp(query_string, "DECLARE gp_gather_", 18) != 0 ||
 		!GpClusterDispatchTrusted())
-		return false;
+		return NULL;
 	p = query_string + 18;
 	while (isdigit((unsigned char) *p))
 		p++;
 	if (strncmp(p, " BINARY", 7) == 0)
 		p += 7;
 	if (strncmp(p, " NO SCROLL CURSOR FOR ", 22) != 0)
-		return false;
-	return strncmp(p + 22, GP_CHECKED_MARKER, strlen(GP_CHECKED_MARKER)) == 0;
+		return NULL;
+	p += 22;
+	if (strncmp(p, GP_CHECKED_MARKER, strlen(GP_CHECKED_MARKER)) != 0)
+		return NULL;
+	return p + strlen(GP_CHECKED_MARKER);
+}
+
+static bool
+gather_was_checked(const char *query_string)
+{
+	return gather_checked_end(query_string) != NULL;
+}
+
+/*
+ * The coordinator's start times a checked gather brings after its marker,
+ * "<transaction> <statement>", for the conditions it sends (gp_scan.c's
+ * gather_start()), or NULL.
+ */
+static const char *
+gather_times(const char *query_string)
+{
+	const char *p = gather_checked_end(query_string);
+
+	if (p == NULL || strncmp(p, GP_TIMES_MARKER, strlen(GP_TIMES_MARKER)) != 0)
+		return NULL;
+	return p + strlen(GP_TIMES_MARKER);
 }
 
 /*
@@ -4094,6 +4118,11 @@ motion_executor_start(QueryDesc *queryDesc, int eflags)
 	 */
 	if (GpClusterIsDispatched() && gather_was_checked(queryDesc->sourceText))
 	{
+		const char *times = gather_times(queryDesc->sourceText);
+
+		/* now() and its kin in the conditions it sends: the coordinator's */
+		if (times != NULL)
+			adopt_start_times(times);
 		foreach_node(RangeTblEntry, rte, queryDesc->plannedstmt->rtable)
 			rte->perminfoindex = 0;
 		queryDesc->plannedstmt->permInfos = NIL;
@@ -4199,6 +4228,19 @@ motion_executor_run(QueryDesc *queryDesc, ScanDirection direction,
 					uint64 count)
 {
 	bool		fragment = is_fragment(queryDesc->plannedstmt);
+
+	/*
+	 * A checked gather's cursor is run by a FETCH at a time, each a statement
+	 * of its own here, whose start statement_timestamp() would read: the
+	 * coordinator's again, as its statement began (gather_times()).
+	 */
+	if (!fragment && GpClusterIsDispatched())
+	{
+		const char *times = gather_times(queryDesc->sourceText);
+
+		if (times != NULL)
+			adopt_start_times(times);
+	}
 
 	if (fragment)
 		fragment_depth++;

@@ -218,6 +218,8 @@ static const char *const synced_settings[] = {
 	"lc_monetary",
 	"lc_numeric",
 	"lc_time",
+	/* to_tsvector() and its kin of one argument, sent in a scan's conditions */
+	"default_text_search_config",
 	/*
 	 * which messages a segment sends: a LOG one too where the client asks
 	 * for it, as Cloudberry's segments send it (segment_notice_receiver())

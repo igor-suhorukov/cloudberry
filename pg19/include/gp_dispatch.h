@@ -57,6 +57,14 @@
 #define GP_CHECKED_MARKER	"/*gp:checked*/ "
 
 /*
+ * And after it, the coordinator's transaction and statement start times: this
+ * marker, the two as integers, and the comment's end.  now() and its kin read
+ * them on the segment too, in conditions the gather sends (gp_scan.c,
+ * gp_motion.c).
+ */
+#define GP_TIMES_MARKER		"/*gp:times "
+
+/*
  * Does a plan go to one segment at most -- a direct dispatch, as Cloudberry
  * calls it -- which a resource group lets run without a slot (gp_motion.c)?
  */
