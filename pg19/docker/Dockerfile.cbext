@@ -273,6 +273,13 @@ COPY --from=build /cb/gpcontrib/pxf_fdw/expected /cb/gpcontrib/pxf_fdw/expected
 COPY --from=build /cb/gpcontrib/gpcloud/test/data /cb/gpcontrib/gpcloud/test/data
 COPY --from=build /cb/gpcontrib/gpcloud/regress /cb/gpcontrib/gpcloud/regress
 COPY --from=build /cb/gpcontrib/gpcloud/bin/dummyHTTPServer.py /cb/gpcontrib/gpcloud/bin/
+# datalake_fdw's three tests, its automation's smoke category, which the
+# datalake_fdw suite runs; and gp_stats_collector's eight, which the suite
+# of that name runs.
+COPY --from=build /cb/contrib/datalake_fdw/test/automation/sqlrepo/smoke/iceberg_am \
+                  /cb/contrib/datalake_fdw/test/automation/sqlrepo/smoke/iceberg_am
+COPY --from=build /cb/gpcontrib/gp_stats_collector/sql /cb/gpcontrib/gp_stats_collector/sql
+COPY --from=build /cb/gpcontrib/gp_stats_collector/expected /cb/gpcontrib/gp_stats_collector/expected
 COPY --from=build /pgregress /cb/pgregress
 COPY --from=postgis /postgis /postgis
 RUN chown -R postgres:postgres /cb /postgis
