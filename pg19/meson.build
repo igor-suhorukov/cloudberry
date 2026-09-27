@@ -393,7 +393,8 @@ modules = [
                      'modules/gp_core/gp_policy.c',
                      'modules/gp_core/gp_settings.c',
                      'modules/gp_core/gp_explain.c',
-                     'modules/gp_core/gp_dtm_debug.c'),
+                     'modules/gp_core/gp_dtm_debug.c',
+                     'modules/gp_core/gp_metrics.c'),
     # The dispatcher is a libpq client of the segments; see gp_dispatch.c.
     'dependencies': [libpq_dep],
     'include_directories': [pg_client_inc],
@@ -619,6 +620,24 @@ foreach m : modules
     preload_modules += name
   endif
 endforeach
+
+###############################################################################
+# gp_instrument_shmem
+#
+# Cloudberry's gpcontrib library of that name, which reads the slots of
+# gp_core's query metrics (gp_metrics.c): a library alone, as Cloudberry's
+# is, whose functions its users make themselves.
+###############################################################################
+
+shared_module('gp_instrument_shmem', files('modules/gp_core/gp_instrument_shmem.c'),
+  c_args: mod_c_args,
+  link_args: mod_link_args,
+  include_directories: [pg_inc, cb_inc],
+  name_prefix: '',
+  install: true,
+  install_dir: pg_pkglibdir,
+)
+built_modules += 'gp_instrument_shmem'
 
 ###############################################################################
 # diskquota

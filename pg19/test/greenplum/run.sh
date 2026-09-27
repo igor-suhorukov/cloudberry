@@ -389,12 +389,18 @@ EOF
 chmod +x "$EXEC/bin/diff"
 
 # A statement that runs for minutes is a finding, as the singlenode suite
-# says; so is one that waits for ever on a lock a segment holds.
+# says; so is one that waits for ever on a lock a segment holds.  The
+# watchdog does not look while a test runs that counts the coordinator's
+# sessions, or the statements holding its slots of query metrics, where its
+# own would be counted: the test whose results file is the newest.
 TIMEOUT="${STATEMENT_TIMEOUT:-60 seconds}"
+QUIET_TESTS=" instr_in_shmem instr_in_shmem_verify "
 watchdog() {
-	local pid query
+	local pid query newest
 	while :; do
 		sleep 5
+		newest=$(ls -t "$2/results" 2> /dev/null | head -1)
+		case "$QUIET_TESTS" in *" ${newest%.out} "*) continue ;; esac
 		PGOPTIONS="-c gp.optimizer=off" "$PSQL" -X -q -t -A -F ' ' -d postgres -c "
 			SELECT pid, regexp_replace(left(query, 300), '\\s+', ' ', 'g')
 			  FROM pg_stat_activity
@@ -442,7 +448,7 @@ run_group() {
 		-c "CREATE EXTENSION IF NOT EXISTS gp_orca CASCADE" \
 		-c "SELECT gp_orca.reset_fallbacks()" > /dev/null 2>&1
 	logpos=$(stat -c %s "$(node_dir "$g" 0).log")
-	watchdog "$R/cancelled" &
+	watchdog "$R/cancelled" "$R" &
 	wd=$!
 	trap 'kill "$wd" 2> /dev/null; exit 1' TERM INT
 	# From Cloudberry's suite's directory, as its Makefile runs it: its tests

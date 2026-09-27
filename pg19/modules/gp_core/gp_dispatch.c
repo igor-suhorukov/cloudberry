@@ -247,6 +247,8 @@ static const char *const synced_settings[] = {
 	"gp.gpfdist_retry_timeout",
 	"gp.writable_external_table_bufsize",
 	"gp.verify_gpfdists_cert",
+	/* the statement's count, which the slots of query metrics carry */
+	"gp.command_count",
 	/* the UDP interconnect's, which the segments' senders and receivers use */
 	"gp.interconnect_queue_depth",
 	"gp.max_packet_size",

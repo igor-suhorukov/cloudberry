@@ -53,6 +53,7 @@
 #include "gp_dtx.h"
 #include "gp_explain.h"
 #include "gp_fault.h"
+#include "gp_metrics.h"
 #include "gp_fts.h"
 #include "gp_gdd.h"
 #include "gp_motion.h"
@@ -293,6 +294,12 @@ _PG_init(void)
 	 * transaction failing at a command, as its tests ask.
 	 */
 	GpDtmDebugInit();
+
+	/*
+	 * Cloudberry's query metrics: each plan node's instrumentation in a slot
+	 * of shared memory, where gp.enable_query_metrics is on.
+	 */
+	GpMetricsInit();
 
 	/*
 	 * Deliberately no MarkGUCPrefixReserved("gp") here.  It drops every

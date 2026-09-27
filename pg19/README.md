@@ -144,6 +144,11 @@ On a cluster (M2), `gp_core` and `gp_orca`:
   coordinator writes;
 - Cloudberry's settings of the dispatcher and the planner, as `gp.*`, among
   them direct dispatch's INFO lines and autostats;
+- EXPLAIN's `slicetable` and `locus` options, Cloudberry's, and
+  **query metrics** (`gp.enable_query_metrics`): each plan node's
+  instrumentation in a slot of shared memory on every node, whose process,
+  session and statement it says, which Cloudberry's `gp_instrument_shmem`
+  library reads (`modules/gp_core/gp_metrics.c`);
 - **every slice of a query at once**: the writer, the session's backend on a
   segment, runs one slice, and readers — more backends of the session there,
   reading as a part of the writer's transaction through the shared snapshot

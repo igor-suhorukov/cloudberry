@@ -283,8 +283,8 @@ run  disable_autovacuum
 skip python_processed64bit  differs: the fault executor_run_high_processed, which has the executor count past 2^32 rows, is none of the port's
 run  enable_autovacuum
 skip log_guc  relation "gp_toolkit.__gp_log_master_ext" does not exist; relation "gp_toolkit.__gp_log_segment_ext" does not exist
-skip instr_in_shmem_setup  gp_enable_query_metrics is none of the port's settings: gpconfig refuses it, and instr_in_shmem and instr_in_shmem_verify, which it sets up for, fail without it
-skip instr_in_shmem  unrecognized configuration parameter "gp_enable_query_metrics"; unrecognized configuration parameter "gp_instrument_shmem_size"
+run  instr_in_shmem_setup
+run  instr_in_shmem
 skip createdb  function force_mirrors_to_catch_up() does not exist
 run  gp_aggregates_costs
 run  gp_metadata
@@ -402,7 +402,7 @@ run  subtransaction_visibility
 skip oid_consistency  differs: \d of an append-optimized table prints no Compression Type, Level, Block Size or Checksum
 run  udf_exception_blocks
 run  ic
-skip instr_in_shmem_verify  could not access file "gp_instrument_shmem": No such file or directory; function gp_instrument_shmem_detail_f() does not exist
+run  instr_in_shmem_verify
 skip partition_locking  differs: the locks a statement takes on a partitioned table's parts, and on which nodes
 skip vacuum_gp  relation "gp_toolkit.__gp_log_master_ext" does not exist
 run  vacuum_fsm_nondefault_tablespace

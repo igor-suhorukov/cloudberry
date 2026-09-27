@@ -145,6 +145,7 @@
 #include "gp_fault.h"
 #include "gp_gdd.h"
 #include "gp_hash.h"
+#include "gp_metrics.h"
 #include "gp_ic.h"
 #include "gp_motion.h"
 #include "gp_policy.h"
@@ -1803,9 +1804,11 @@ motion_begin(CustomScanState *node, EState *estate, int eflags)
 
 	/*
 	 * The fragment is the segments' to run.  Here it is only described: for
-	 * EXPLAIN, and for EXPLAIN ANALYZE, where it shows as never executed.
+	 * EXPLAIN, and for EXPLAIN ANALYZE, where it shows as never executed --
+	 * not for a statement instrumented for query metrics alone.
 	 */
-	if ((eflags & EXEC_FLAG_EXPLAIN_ONLY) || estate->es_instrument)
+	if ((eflags & EXEC_FLAG_EXPLAIN_ONLY) ||
+		(estate->es_instrument & ~GP_INSTR_METRICS_ONLY) != 0)
 	{
 		outerPlanState(node) = ExecInitNode(outerPlan(cscan), estate,
 											eflags | EXEC_FLAG_EXPLAIN_ONLY);
