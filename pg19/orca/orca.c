@@ -93,6 +93,7 @@
 #include "gp_orca_api.h"
 #include "gp_orca_guc.h"
 #include "gp_orca_lockrows.h"
+#include "gp_orca_merge.h"
 #include "gp_orca_postgis.h"
 #include "optimizer/orca.h"
 #include "optimizer/walkers.h"
@@ -1345,6 +1346,7 @@ optimize_query(Query *parse, int cursorOptions, ParamListInfo boundParams,
 	List	   *row_marks = NIL;
 	int			read_added = 0;
 	int			read_first = 0;
+	OrcaMerge  *merge = NULL;
 
 	failure->unexpected = false;
 	failure->from_postgres = false;
@@ -1493,6 +1495,26 @@ optimize_query(Query *parse, int cursorOptions, ParamListInfo boundParams,
 	pqueryCopy = (Query *) transformGroupedWindows((Node *) pqueryCopy, NULL);
 
 	/*
+	 * MERGE, which ORCA has no operator for: ORCA plans the SELECT of the
+	 * join the planner makes of its target and its source, and the MERGE's
+	 * ModifyTable is put over that plan below (merge.c).
+	 */
+	{
+		const char *why;
+		Query	   *select;
+
+		if (!GpOrcaPrepareMerge(pqueryCopy, &select, &merge, &why))
+		{
+			failure->message = psprintf("Falling back to Postgres-based planner because "
+										"GPORCA does not support the following feature: %s",
+										why);
+			return NULL;
+		}
+		if (select != NULL)
+			pqueryCopy = select;
+	}
+
+	/*
 	 * FOR UPDATE and the rest: each locked table's ctid made an output
 	 * column, or on a cluster that locks tables the table locked; the plan
 	 * gets its LockRows below (lockrows.c).
@@ -1584,6 +1606,20 @@ optimize_query(Query *parse, int cursorOptions, ParamListInfo boundParams,
 		}
 		for (int i = read_first; i < read_first + read_added; i++)
 			list_nth_node(TargetEntry, result->planTree->targetlist, i)->resjunk = true;
+	}
+
+	/* a MERGE's ModifyTable, over ORCA's plan of its join (merge.c) */
+	if (merge != NULL)
+	{
+		const char *why;
+
+		if (!GpOrcaFinishMerge(result, merge, &why))
+		{
+			failure->message = psprintf("Falling back to Postgres-based planner because "
+										"GPORCA does not support the following feature: %s",
+										why);
+			return NULL;
+		}
 	}
 
 	/* the rows the query locks, locked where they are (lockrows.c) */

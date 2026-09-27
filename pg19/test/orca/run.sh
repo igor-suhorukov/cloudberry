@@ -3246,9 +3246,39 @@ declined "a view's INSTEAD OF trigger, which needs the whole old row" \
 declined "row-level security's WITH CHECK, a check option" \
          "UPDATE t2_rls SET a = a + 10" "View with WITH CHECK OPTION" "$T2RLS"
 
-declined "MERGE" \
+# MERGE, which ORCA has no operator for, rides a SELECT: ORCA plans the join
+# the planner makes of target and source, and the MERGE's ModifyTable is put
+# over its plan (merge.c) -- the source's columns read from the join's rows,
+# the target's from the row its ctid fetches, and a row mark on each table of
+# the source, which re-checks a target row changed meanwhile with the source
+# row it was joined to.  Its source a subquery or a VALUES list, a row mark
+# would copy the row whole, which ORCA's plan cannot carry.
+T2M="CREATE TEMP TABLE t2m (a int PRIMARY KEY, b text, c int);
+     INSERT INTO t2m SELECT g, 'o' || g, g FROM generate_series(1, 6) g;
+     CREATE TEMP TABLE t2n (a int, b text, d boolean);
+     INSERT INTO t2n VALUES (2, 'u2', false), (3, 'd3', true), (7, 'n7', false), (8, 'n8', false)"
+dml "MERGE: ORCA's join, and the MERGE's ModifyTable over it" \
+    "Merge on" \
+    "MERGE INTO t2m t USING t2n s ON t.a = s.a
+       WHEN MATCHED AND s.d THEN DELETE
+       WHEN MATCHED THEN UPDATE SET b = s.b, c = t.c + 100
+       WHEN NOT MATCHED AND s.a > 7 THEN INSERT (a, b) VALUES (s.a, s.b)
+       WHEN NOT MATCHED THEN DO NOTHING" \
+    "SELECT a, b, c FROM t2m ORDER BY a" "$T2M"
+
+epq "a MERGE that waited re-checks with the source row it was joined to" \
+    "MERGE INTO t2e USING t2j ON t2e.a = t2j.a WHEN MATCHED THEN UPDATE SET b = t2e.b + t2j.w WHEN NOT MATCHED THEN INSERT VALUES (t2j.a, -t2j.w)" \
+    "UPDATE t2e SET b = b + 1000 WHERE a = 1; UPDATE t2j SET w = -1 WHERE a = 1" \
+    "SELECT a, b FROM t2e ORDER BY a"
+
+epq "and one whose target row went meanwhile inserts it" \
+    "MERGE INTO t2e USING t2j ON t2e.a = t2j.a WHEN MATCHED THEN UPDATE SET b = t2e.b + t2j.w WHEN NOT MATCHED THEN INSERT VALUES (t2j.a, -t2j.w)" \
+    "DELETE FROM t2e WHERE a = 2" \
+    "SELECT a, b FROM t2e ORDER BY a"
+
+declined "a MERGE whose source is a subquery, whose rows a row mark would copy" \
          "MERGE INTO t2d USING (SELECT 1 AS a) s ON t2d.a = s.a WHEN MATCHED THEN UPDATE SET c = 'm'" \
-         "MERGE command" "$T2D"
+         "a MERGE whose source is not tables" "$T2D"
 
 # --- identity columns ---------------------------------------------------------
 #

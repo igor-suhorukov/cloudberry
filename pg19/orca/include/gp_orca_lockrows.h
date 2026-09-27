@@ -47,4 +47,10 @@ extern bool GpOrcaPrepareRowMarks(Query *query, List **marks, const char **why);
  */
 extern bool GpOrcaAddLockRows(PlannedStmt *stmt, List *marks, const char **why);
 
+/* the largest plan node id in a tree, the fragments below Motions included */
+extern int	GpOrcaMaxPlanNodeId(Plan *plan);
+
+/* every node of a tree depending on EvalPlanQual's parameter "paramid" */
+extern void GpOrcaAddParamToTree(Plan *plan, int paramid);
+
 #endif							/* GP_ORCA_LOCKROWS_H */

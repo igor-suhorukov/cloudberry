@@ -191,6 +191,7 @@ orca_transl_sources = files(
   'config/gp_orca_guc.c',
   'gpdbwrappers.cpp',
   'lockrows.c',
+  'merge.c',
   'orca.c',
   'orca_api.cpp',
   'orca_probe.cpp',

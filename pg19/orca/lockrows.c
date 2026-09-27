@@ -313,8 +313,8 @@ mark_type(LockClauseStrength strength)
 }
 
 /* The largest plan node id in a tree, the fragments below Motions included. */
-static int
-max_plan_node_id(Plan *plan)
+int
+GpOrcaMaxPlanNodeId(Plan *plan)
 {
 	int			max;
 	List	   *subs = NIL;
@@ -324,8 +324,8 @@ max_plan_node_id(Plan *plan)
 		return -1;
 
 	max = plan->plan_node_id;
-	max = Max(max, max_plan_node_id(plan->lefttree));
-	max = Max(max, max_plan_node_id(plan->righttree));
+	max = Max(max, GpOrcaMaxPlanNodeId(plan->lefttree));
+	max = Max(max, GpOrcaMaxPlanNodeId(plan->righttree));
 	if (IsA(plan, Append))
 		subs = ((Append *) plan)->appendplans;
 	else if (IsA(plan, BitmapAnd))
@@ -335,7 +335,7 @@ max_plan_node_id(Plan *plan)
 	else if (IsA(plan, CustomScan))
 		subs = ((CustomScan *) plan)->custom_plans;
 	foreach(lc, subs)
-		max = Max(max, max_plan_node_id((Plan *) lfirst(lc)));
+		max = Max(max, GpOrcaMaxPlanNodeId((Plan *) lfirst(lc)));
 	return max;
 }
 
@@ -344,22 +344,22 @@ max_plan_node_id(Plan *plan)
  * planner makes them (finalize_plan); the translator does the same for
  * ModifyTable's (AddParamToPlanTree).
  */
-static void
-add_param_to_tree(Plan *plan, int paramid)
+void
+GpOrcaAddParamToTree(Plan *plan, int paramid)
 {
 	if (plan == NULL)
 		return;
 	plan->extParam = bms_add_member(plan->extParam, paramid);
 	plan->allParam = bms_add_member(plan->allParam, paramid);
-	add_param_to_tree(plan->lefttree, paramid);
-	add_param_to_tree(plan->righttree, paramid);
+	GpOrcaAddParamToTree(plan->lefttree, paramid);
+	GpOrcaAddParamToTree(plan->righttree, paramid);
 	if (IsA(plan, BitmapAnd) || IsA(plan, BitmapOr))
 	{
 		ListCell   *lc;
 
 		foreach(lc, IsA(plan, BitmapAnd) ? ((BitmapAnd *) plan)->bitmapplans
 				: ((BitmapOr *) plan)->bitmapplans)
-			add_param_to_tree((Plan *) lfirst(lc), paramid);
+			GpOrcaAddParamToTree((Plan *) lfirst(lc), paramid);
 	}
 }
 
@@ -532,10 +532,10 @@ GpOrcaAddLockRows(PlannedStmt *stmt, List *marks, const char **why)
 	lockrows->plan.total_cost = below->total_cost;
 	lockrows->plan.plan_rows = below->plan_rows;
 	lockrows->plan.plan_width = below->plan_width;
-	lockrows->plan.plan_node_id = max_plan_node_id(stmt->planTree) + 1;
+	lockrows->plan.plan_node_id = GpOrcaMaxPlanNodeId(stmt->planTree) + 1;
 	lockrows->rowMarks = rowmarks;
 	lockrows->epqParam = epq;
-	add_param_to_tree(below, epq);
+	GpOrcaAddParamToTree(below, epq);
 
 	if (parent == NULL)
 		stmt->planTree = &lockrows->plan;
