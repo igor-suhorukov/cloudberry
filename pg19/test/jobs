@@ -80,3 +80,4 @@ grammar                -          3   MEM=300
 dbcopy                 -         10   MEM=500
 ao                     -          4   MEM=600
 dynamic                -          9   MEM=300
+pxf_fdw                -          5   MEM=800

@@ -104,7 +104,8 @@ USER root
 # buffers and liburing are PAX's: its files' footers and statistics are
 # protobuf messages, and its reader reads a file's groups through io_uring.
 # bison and flex are gp_resource's, for Cloudberry's io_limit grammar, which
-# a resource group's io_limit is read with.
+# a resource group's io_limit is read with.  libcurl is pxf_fdw's too, PXF's
+# client.
 RUN apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
         build-essential meson ninja-build pkg-config git ca-certificates bison flex \
         libreadline-dev zlib1g-dev libicu-dev libssl-dev liblz4-dev libzstd-dev \
@@ -220,6 +221,9 @@ COPY --from=build /cb/contrib/pax_storage/pax_schedule /cb/contrib/pax_storage/i
                   /cb/contrib/pax_storage/
 COPY --from=build /cb/contrib/pax_storage/sql /cb/contrib/pax_storage/sql
 COPY --from=build /cb/contrib/pax_storage/expected /cb/contrib/pax_storage/expected
+# pxf_fdw's tests, which the pxf_fdw suite runs.
+COPY --from=build /cb/gpcontrib/pxf_fdw/sql /cb/gpcontrib/pxf_fdw/sql
+COPY --from=build /cb/gpcontrib/pxf_fdw/expected /cb/gpcontrib/pxf_fdw/expected
 COPY --from=build /pgregress /cb/pgregress
 COPY --from=postgis /postgis /postgis
 RUN chown -R postgres:postgres /cb /postgis

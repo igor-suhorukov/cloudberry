@@ -1,0 +1,5 @@
+-- The port's additions to Cloudberry's init file for pxf_fdw's tests, read by
+-- gpdiff.pl after it.
+
+-- start_matchignore
+-- end_matchignore

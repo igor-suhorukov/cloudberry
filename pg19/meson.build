@@ -727,6 +727,48 @@ endforeach
 built_modules += 'pg_hint_plan'
 
 ###############################################################################
+# pxf_fdw
+#
+# Cloudberry's gpcontrib/pxf_fdw, the foreign-data wrapper of a PXF server,
+# which it asks over HTTP through libcurl: the port's copies of its files
+# (modules/pxf_fdw, each headed with what changed) -- the scan and the
+# writer, which read and write through gp_exttable's (include/access/
+# external.h), the options, and PostgreSQL 19's API drift -- and the one that
+# needs no change, compiled where it lies.  They find Cloudberry's headers,
+# kept in gpcontrib/pxf_fdw but for pxf_bridge.h, gp_exttable's public ones,
+# and GpIdentity in the include overlay compat/gpcontrib/.  The extension's
+# script and control file are Cloudberry's as they are.
+###############################################################################
+
+if curl_dep.found()
+  pxf_root = '../gpcontrib/pxf_fdw'
+  shared_module('pxf_fdw',
+    files('modules/pxf_fdw/pxf_fdw.c',
+          'modules/pxf_fdw/pxf_bridge.c',
+          'modules/pxf_fdw/pxf_fragment.c',
+          'modules/pxf_fdw/pxf_header.c',
+          'modules/pxf_fdw/pxf_option.c',
+          'modules/pxf_fdw/libchurl.c',
+          'modules/pxf_fdw/pxf_filter.c',
+          pxf_root / 'pxf_deparse.c'),
+    # Cloudberry's sources, whose declarations follow statements throughout.
+    c_args: mod_c_args + ['-Wno-declaration-after-statement'],
+    link_args: mod_link_args,
+    include_directories: [pg_inc, cb_inc,
+                          include_directories('modules/pxf_fdw', 'compat/gpcontrib',
+                                              'modules/gp_exttable/include',
+                                              pxf_root)],
+    dependencies: [curl_dep],
+    name_prefix: '',
+    install: true,
+    install_dir: pg_pkglibdir,
+  )
+  install_data(pxf_root / 'pxf_fdw.control', pxf_root / 'pxf_fdw--1.0.sql',
+               install_dir: pg_extensiondir)
+  built_modules += 'pxf_fdw'
+endif
+
+###############################################################################
 # gpfdist
 #
 # Cloudberry's file server of external tables (src/bin/gpfdist), a program
