@@ -273,6 +273,11 @@ oid_wraparound  the OID counters, the coordinator's and each segment's.  A
   CREATE TABLE it is at 16388 where Cloudberry's is at 16387, and after the
   CREATE TABLE AS of the second scenario at neither 16390 nor 16391.
 
+opclass_ddl  the words of an OWNER TO a role the user cannot act as:
+  PostgreSQL 19's, "must be able to SET ROLE", where Cloudberry's own check
+  of a new owner, which is not PostgreSQL 16's (utils/adt/acl.c, its "mdb
+  admin" patch), says "must be member of role".
+
 partition_indexing  a UNIQUE index or constraint on a partitioned table
   that holds neither the partition key nor the distribution key: both
   refuse it, Cloudberry by its distribution key first, the port by

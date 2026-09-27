@@ -432,6 +432,51 @@ not ported yet.  The suites whose tests run Cloudberry's tools —
 `isolation2`, `singlenode_isolation2`, `diskquota` and `greenplum` — run
 gpMgmt's.
 
+What Cloudberry's tests asked for next (2026-09-27), in `gp_core`,
+`gp_sql`, `gp_orca` and `gp_ao`:
+
+- a statement sent with parameters closes its portal in the same round
+  trip, so what its end writes is reported with it; and the INFO lines of a
+  one-phase commit and of a rollback name every segment the transaction
+  reached, as Cloudberry's do;
+- `gp_stat_progress_dtx_recovery`, the distributed transaction recovery's
+  phase and counts, and the recovery's commits waiting for a part a
+  segment is still finishing;
+- PAX's ENCODING clauses, which `gp_ao` keeps and PAX checks and writes by
+  (`include/gp_encoding.h`);
+- gp_toolkit's views of the cluster, of skew, statistics, bloat and sizes,
+  and `gp_param_setting()` by Cloudberry's names; `gp_backend_info()`,
+  `gp_opt_version()`, `gp_execution_segment()` and `gp_execution_dbid()`;
+- a record of no declared type carried between the nodes with its row type
+  described (`gp_record.c`) — through a Motion, a gather, a query of
+  `gp_dist_random()` alone, and as a fragment's parameter or constant;
+- a function `EXECUTE ON ALL SEGMENTS` run on every segment — called in
+  FROM, and in the SELECT list of a query of no relation — and refused in
+  the SELECT list of a query with FROM, as Cloudberry refuses it;
+  `pg_proc`'s `prodataaccess` and `proexeclocation`, and `gp.contentid`;
+- the UDP interconnect's flow control — capacity, and the loss methods'
+  congestion window — and its retry, timer and future-packet settings, by
+  Cloudberry's names;
+- `agg() OVER (w)` naming the window, as Cloudberry takes it; `GROUP_ID()`;
+  and CREATE AGGREGATE's `prefunc` and `repsafe`;
+- `pg_stat_last_operation` and `pg_stat_last_shoperation`, which the
+  coordinator writes as statements change what they name
+  (`gp_metatrack.c`);
+- `gp.debug_print_slice_table`; Cloudberry's settings of its planner's
+  plans, of the gangs a session keeps and of an append-optimized insert's
+  files accepted, with nothing to apply them to here
+  (`gp.eager_two_phase_agg`, `gp.enable_agg_distinct`,
+  `gp.enable_sort_limit`, `gp.cost_hashjoin_chainwalk`,
+  `gp.cached_segworkers_threshold`, `gp.appendonly_insert_files`); a plan
+  of more slices than a segment takes readers for declined by ORCA; a
+  publication's, subscription's or event trigger's DROP, RENAME, OWNER TO
+  and COMMENT kept on the coordinator, as their CREATE is;
+- an error a segment raised carrying the schema, table, column, type and
+  constraint it names, and its place in the segment's code, as Cloudberry
+  relays it; a table of no columns taking rows on the planner's route; and
+  the fault `create_function_fail`;
+- and the server built with LDAP, for `pg_hba.conf`'s ldap lines.
+
 The transport and encryption modules — `interconnect`, `udp2`, `gp_tde` —
 are still stubs: the streaming transports, tcp and udpifc, live in
 `gp_core`, and TDE waits for a formal requirement.

@@ -1,0 +1,6 @@
+@@
+-ERROR:  must be member of role "regtest_alter_user2"
++ERROR:  must be able to SET ROLE "regtest_alter_user2"
+@@
+-ERROR:  must be member of role "regtest_alter_user2"
++ERROR:  must be able to SET ROLE "regtest_alter_user2"

@@ -44,7 +44,7 @@ run  bitmapscan_ao
 run  case_gp
 run  limit_gp
 run  notin
-skip percentile  function percentile_cont(numeric, timestamp without time zone) does not exist
+skip percentile  function percentile_cont(numeric, timestamp without time zone) does not exist; function percentile_cont(numeric, timestamp with time zone) does not exist
 run  join_gp
 skip union_gp  UNION types text and integer cannot be matched
 run  gp_create_table
@@ -82,13 +82,13 @@ skip subselect_gp  unrecognized EXPLAIN option "locus"
 run  subselect_gp2
 run  gp_transactions
 run  olap_group
-skip olap_window_seq  DISTINCT is not implemented for window functions; cannot copy window "win1" because it has a frame clause
-skip appendonly  type "gp_fastsequence" does not exist
+skip olap_window_seq  DISTINCT is not implemented for window functions; argument of ROWS must not contain variables
+skip appendonly  type "gp_fastsequence" does not exist; cursor can only scan forward
 run  create_table_distpol
 group g2
 run  alter_distpol_dropped
 run  gp_distinct_plans
-skip partition  syntax error at or near "only"
+skip partition  syntax error at or near "only"; relation "gp_partition_template" does not exist
 skip partition1  type "cc" does not exist; column "partition" of relation "hhh_l1" does not exist
 run  partition_storage
 skip partition_ddl  type "aa" does not exist; cannot specify storage parameters for a partitioned table
@@ -99,7 +99,7 @@ run  external_table
 run  external_table_union_all
 run  external_table_create_privs
 run  external_table_persistent_error_log
-skip column_compression  relation "gp_partition_template" does not exist
+skip column_compression  relation "gp_partition_template" does not exist; column "i" referenced in more than one COLUMN ENCODING clause
 skip alter_table_aocs  type "gp_fastsequence" does not exist
 skip alter_table_aocs2  unrecognized configuration parameter "gp_recursive_cte"; function descendants_of(unknown) does not exist
 run  alter_distribution_policy
@@ -125,7 +125,7 @@ run  bfv_dd
 run  bfv_dd_multicolumn
 run  bfv_dd_types
 run  bfv_olap
-skip bfv_aggregate  argument of ROWS must not contain variables; cannot copy window "w" because it has a frame clause
+skip bfv_aggregate  argument of ROWS must not contain variables
 run  DML_over_joins
 skip bb_mpph  its queries 3 and 8 over append-optimized partitions run past the suite's minute
 run  part_external_table
@@ -133,7 +133,7 @@ port bb_mpph_heap
 run  bb_memory_quota
 run  rpt
 run  rpt_joins
-skip bfv_cte  count(*) must be used to call a parameterless aggregate function; type "cte" does not exist
+skip bfv_cte  type "cte" does not exist; the fault get_shareinput_reference_done is none of the port's: canceling statement due to user request
 run  bfv_joins
 run  bfv_subquery
 run  qp_misc
@@ -267,9 +267,9 @@ run  uao_dml/uao_dml_unique_index_update_column
 
 # The tests the port had left for M7 (see the head of this file).
 group m7a
-skip autovacuum  could not find function "test_consume_xids" in file "regress.so"; unrecognized configuration parameter "debug_burn_xids"
-skip autovacuum-segment  could not find function "test_consume_xids" in file "regress.so"; function test_consume_xids(integer) does not exist
-skip autovacuum-template0-segment  could not find function "test_consume_xids" in file "regress.so"; function test_consume_xids(integer) does not exist
+skip autovacuum  unrecognized configuration parameter "debug_burn_xids"; the faults auto_vac_worker_before_do_autovacuum and vacuum_update_dat_frozen_xid are none of the port's: canceling statement due to user request
+skip autovacuum-segment  the faults auto_vac_worker_before_do_autovacuum and vacuum_update_dat_frozen_xid are none of the port's, and debug_burn_xids none of its settings: canceling statement due to user request
+skip autovacuum-template0-segment  the faults auto_vac_worker_before_do_autovacuum and vacuum_update_dat_frozen_xid are none of the port's, and debug_burn_xids none of its settings: canceling statement due to user request
 skip profile  differs: its \d+ of pg_authid and pg_roles shows Cloudberry's catalog columns, and pg_profile is Cloudberry's catalog: relation "pg_profile" does not exist
 skip pg_ext_aux  schema "pg_ext_aux" does not exist; relation "pg_ext_aux.extaux_t" does not exist
 run  pg_dump_binary_upgrade
@@ -316,7 +316,7 @@ skip gpcopy  differs: COPY's errors of a line with a column too many or too few 
 run  orca_static_pruning
 run  orca_groupingsets_fallbacks
 skip table_functions  type anytable does not exist; OUT and INOUT arguments aren't allowed in TABLE functions
-skip opclass_ddl  must be able to SET ROLE "regtest_alter_user2"
+run  opclass_ddl
 run  information_schema
 run  guc_env_var
 skip gp_explain  unrecognized configuration parameter "gp_enable_explain_allstat"; unrecognized EXPLAIN option "slicetable"
@@ -351,7 +351,7 @@ run  icudp/queue_depth_combination_loss
 run  icudp/queue_depth_combination_capacity
 run  icudp/queue_depth_combination_loss_advance
 port icudp_off
-skip event_trigger_gp  event trigger "regress_event_trigger" does not exist
+skip event_trigger_gp  differs: CREATE EXTERNAL TABLE fires the event triggers as CREATE FOREIGN TABLE, which the port makes it, and CREATE PROTOCOL and DROP PROTOCOL fire none
 skip deadlock  canceling statement due to user request; function gp_dist_wait_status() does not exist
 skip deadlock2  differs: Cloudberry's NOTICE that a slice prefetches a join's qual is not the port's
 run  workfile/hashagg_spill
@@ -426,15 +426,15 @@ run  pg_stat_last_operation
 run  pg_stat_last_shoperation
 run  gp_numeric_agg
 run  partindex_test
-skip runtime_stats  language "plpython3u" does not exist; function isspilling(unknown) does not exist
+run  runtime_stats
 run  interrupt_holdoff_count
 skip bfv_catalog  non-standard string literals are not supported; unrecognized configuration parameter "escape_string_warning"
 run  bfv_index
-skip bfv_statistic  table row type and query-specified row type do not match; relation "gp_toolkit.gp_stats_missing" does not exist
+skip bfv_statistic  table row type and query-specified row type do not match; unexpected null value in cached tuple for catalog pg_statistic column stavalues2
 run  nested_case_null
 run  sort
 run  aggregate_with_groupingsets
-skip gporca  function gp_opt_version() does not exist; table row type and query-specified row type do not match
+skip gporca  table row type and query-specified row type do not match; could not find hash function for hash operator
 skip gpsd  relation "gpsd_foo" does not exist; table row type and query-specified row type do not match
 run  catcache
 skip minirepro  relation "minirepro_foo" does not exist; table "minirepro_foo" does not exist
@@ -457,8 +457,8 @@ skip qp_rowsecurity  permission denied for table roottabmid1; permission denied 
 run  qp_query_params
 skip qp_misc_jiras  cannot derive ending value of partition based upon starting of next partition; relation "qp_misc_jiras.tbl5028_part_test" does not exist
 run  qp_executor
-skip qp_olap_windowerr  cannot copy window "win1" because it has a frame clause; argument of RANGE must not contain variables
-skip qp_olap_window  cannot copy window "win1" because it has a frame clause; argument of RANGE must not contain variables
+skip qp_olap_windowerr  argument of RANGE must not contain variables; argument of ROWS must not contain variables
+skip qp_olap_window  argument of RANGE must not contain variables; argument of ROWS must not contain variables
 run  qp_dropped_cols
 skip qp_with_functional_inlining  UPDATE is not allowed in a non-volatile function; unrecognized configuration parameter "gp_cte_sharing"
 skip qp_with_functional_noinlining  UPDATE is not allowed in a non-volatile function; unrecognized configuration parameter "gp_cte_sharing"
@@ -490,14 +490,14 @@ skip cbdb_parallel  unrecognized configuration parameter "gp_appendonly_insert_f
 run  window_parallel
 skip vacuum_full_freeze_heap  differs: a heap's size in 8 kB pages, where Cloudberry's expected output counts its 32 kB blocks
 skip vacuum_full_heap  differs: a heap's size in 8 kB pages, where Cloudberry's expected output counts its 32 kB blocks
-skip autostats  unrecognized configuration parameter "log_autostats"; permission denied to set parameter "gp.autostats_allow_nonowner"
+skip autostats  unrecognized configuration parameter "log_autostats"
 skip dpe  function disable_xform(unknown) does not exist; function enable_xform(unknown) does not exist
 run  table_statistics
 skip fts_error  differs: two of its checks that FTS marked a node down answer f, and Cloudberry's DEBUG trace of the probe's statement is not the port's
 skip psql_gp_commands  differs: psql 19's \dx has a Default version column, and Cloudberry's psql describes its storage and external tables in its own way
 skip pg_resetwal  differs: PostgreSQL 19's pg_resetwal has no -k, the data checksum version Cloudberry's sets
 run  dropdb_check_shared_buffer_cache
-skip gp_upgrade_cornercases  cannot drop schema public because other objects depend on it
+skip gp_upgrade_cornercases  cannot drop schema public because other objects depend on it: the database it makes is template1's copy, where gp_setup made gp_orca and gp_inject_fault in schema public
 skip temp_relation  differs: a temporary table's file is t<proc number>_<relfilenode> in PostgreSQL 19, and the test looks for Cloudberry's t_<relfilenode>, which it finds on no node, before DROP TABLE and after
 skip alter_db_set_tablespace  function force_mirrors_to_catch_up() does not exist; spiexceptions.UndefinedFunction: function get_tablespace_version_directory_name() does not exist
 run  oid_wraparound
@@ -510,7 +510,7 @@ skip offload_entry_to_qe  unrecognized configuration parameter "enable_offload_e
 skip aqumv  unrecognized configuration parameter "enable_answer_query_using_materialized_views"; unrecognized parameter namespace "gp"
 skip matview_data  relation "gp_matview_aux" does not exist; current transaction is aborted, commands ignored until end of transaction block
 skip directory_table  relation "gp_storage_server" does not exist; syntax error at or near "DATA"
-skip motion_socket  language "plpython3u" does not exist; function check_motion_sockets() does not exist
+skip motion_socket  differs: its check_motion_sockets() looks up each segment's address, which on this suite's clusters is a socket's directory: socket.gaierror: [Errno -2] Name or service not known
 run  ic_proxy_socket
 skip subtrx_overflow  relation "gp_suboverflowed_backend" does not exist
 run  bfv_meta_track
