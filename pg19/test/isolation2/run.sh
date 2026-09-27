@@ -110,7 +110,14 @@ if ! . "$HERE/../gpmgmt/tools.sh" "$EXEC"; then
 fi
 BASEPORT="${PGPORT:-$((7500 + RANDOM % 200))}"
 NODES=4					# a coordinator and Cloudberry's three segments
-PRELOAD='gp_core,gp_orca,gp_sql,gp_resource'
+PRELOAD="gp_core,gp_orca,gp_sql,gp_resource${ISOLATION2_PRELOAD_MORE:+,$ISOLATION2_PRELOAD_MORE}"
+# The modules and settings the clusters have besides
+# (ISOLATION2_PRELOAD_MORE, ISOLATION2_SETTINGS); and the interconnect every
+# node has, ISOLATION2_INTERCONNECT, tcp by default, which each node is
+# checked to have once it is up -- its proxies on TCP, at their nodes' ports
+# and IC_PROXY_OFFSET more (the greenplum suite's is 2000 below).
+INTERCONNECT="${ISOLATION2_INTERCONNECT:-tcp}"
+IC_PROXY_OFFSET=14000
 # The superuser is Cloudberry's demo cluster's, gpadmin, as the greenplum
 # suite's is: Cloudberry's expected output names it, and a PL/Python helper
 # of a test that runs psql -- in the server's environment, which the nodes
@@ -157,6 +164,24 @@ mirror_port() { echo $((BASEPORT + 300 + $1 * NODES + $2)); }
 # cluster's port 7008 + k (own_nodes)
 new_node_port() { echo $((BASEPORT + 400 + $1 * NODES + $2)); }
 standby_dbid() { if has_mirrors "$1"; then echo $((2 * NODES)); else echo $((NODES + 1)); fi; }
+# The proxies' addresses of a group (ISOLATION2_INTERCONNECT=proxy): every
+# node, mirrors and the standby too, as Cloudberry's
+# gp_interconnect_proxy_addresses lists them -- dbid:content:host:port, in
+# dbid order.
+proxy_addresses() {
+	local g="$1" gi="$2" n out=""
+	for n in $(seq 0 $((NODES - 1))); do
+		out="$out,$((n + 1)):$((n - 1)):127.0.0.1:$(($(node_port "$gi" "$n") + IC_PROXY_OFFSET))"
+	done
+	if has_mirrors "$g"; then
+		for n in $(seq 0 $((NODES - 2))); do
+			out="$out,$((NODES + 1 + n)):$n:127.0.0.1:$(($(mirror_port "$gi" "$n") + IC_PROXY_OFFSET))"
+		done
+	fi
+	has_standby "$g" &&
+		out="$out,$(standby_dbid "$g"):-1:127.0.0.1:$(($(standby_port "$gi") + IC_PROXY_OFFSET))"
+	echo "${out#,}"
+}
 
 cleanup() {
 	for g in "${groups[@]}"; do
@@ -230,6 +255,10 @@ make_cluster() {
 			echo "listen_addresses = ''"
 			echo "port = $(node_port "$gi" "$n")"
 			echo "fsync = off"
+			[ -n "${ISOLATION2_SETTINGS:-}" ] && echo "$ISOLATION2_SETTINGS"
+			[ -n "${ISOLATION2_INTERCONNECT:-}" ] && echo "gp.interconnect_type = '$INTERCONNECT'"
+			[ "$INTERCONNECT" = proxy ] &&
+				echo "gp.interconnect_proxy_addresses = '$(proxy_addresses "$g" "$gi")'"
 			echo "gp.cluster_config = '$conf'"
 			echo "gp.dbid = $((n + 1))"
 			echo "gp.cluster_secret = '$SECRET'"
@@ -336,6 +365,16 @@ for gi in "${!groups[@]}"; do
 done
 for g in "${groups[@]}"; do
 	wait -n || exit 1
+done
+# Every node has the interconnect asked for: a run over udp2 or the proxy
+# is never one over tcp unawares.
+for gi in "${!groups[@]}"; do
+	for n in $(seq 0 $((NODES - 1))); do
+		ic=$("$PSQL" -X -q -t -A -h "$(group_sock "${groups[$gi]}")" -p "$(node_port "$gi" "$n")" \
+			-d postgres -c "SHOW gp.interconnect_type" 2>&1)
+		[ "$ic" = "$INTERCONNECT" ] ||
+			{ echo "node $n of group ${groups[$gi]} has gp.interconnect_type \"$ic\", not $INTERCONNECT"; exit 1; }
+	done
 done
 
 # The settings the port has, respelled as the greenplum suite respells them

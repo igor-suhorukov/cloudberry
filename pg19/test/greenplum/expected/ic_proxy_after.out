@@ -1,0 +1,24 @@
+--
+-- ic_proxy_socket's follow-up.  ic_proxy_socket gives segment 0's proxy
+-- garbage on its port, where gp.interconnect_type is proxy, and then counts
+-- a table's rows, which crosses no proxy here: the port gathers a
+-- segment's rows to the coordinator over the coordinator's connection to
+-- it.  A join whose sides are both redistributed, as ORCA plans it, crosses
+-- every pair of segments' proxies, the one given garbage too.  Its rows
+-- are the planner's, and tcp's.
+--
+CREATE TABLE ic_proxy_after_a (a int, b int) DISTRIBUTED BY (a);
+CREATE TABLE ic_proxy_after_b (a int, b int) DISTRIBUTED BY (a);
+INSERT INTO ic_proxy_after_a SELECT i, i % 100 FROM generate_series(1, 1000) i;
+INSERT INTO ic_proxy_after_b SELECT i, i % 100 FROM generate_series(1, 1000) i;
+ANALYZE ic_proxy_after_a;
+ANALYZE ic_proxy_after_b;
+SET statement_timeout = 10000;
+SELECT count(*), sum(x.a) FROM ic_proxy_after_a x JOIN ic_proxy_after_b y ON x.b = y.b;
+ count |   sum   
+-------+---------
+ 10000 | 5005000
+(1 row)
+
+RESET statement_timeout;
+DROP TABLE ic_proxy_after_a, ic_proxy_after_b;

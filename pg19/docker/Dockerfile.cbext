@@ -110,13 +110,15 @@ USER root
 # libcurl: Cloudberry's etcd client speaks JSON to etcd's gateway.  libxml2,
 # OpenSSL and libcurl are gpcloud's too, the S3 protocol's: S3's answers are
 # XML, and a request is signed with OpenSSL's HMAC; and libcurl is
-# pxf_fdw's, PXF's client.
+# pxf_fdw's, PXF's client.  libuv is the interconnect module's: the proxy's
+# server, Cloudberry's ic-proxy, is written on it.
 RUN apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
         build-essential meson ninja-build pkg-config git ca-certificates bison flex \
         libreadline-dev zlib1g-dev libicu-dev libssl-dev liblz4-dev libzstd-dev \
         libxml2-dev libxslt1-dev libxerces-c-dev \
         libcurl4-openssl-dev libapr1-dev libevent-dev libyaml-dev libjansson-dev \
         protobuf-compiler libprotobuf-dev liburing-dev \
+        libuv1-dev \
     && rm -rf /var/lib/apt/lists/*
 
 COPY --from=pg /usr/local/pgsql /usr/local/pgsql
@@ -192,12 +194,14 @@ USER root
 # beside libcurl, and the gpfts suite an etcd, which it starts: Debian's, 3.5.
 # libxml2 is gpcloud's; and moto's S3 server, with Flask, which it serves
 # through, and boto3, which it brings, the S3 the gpcloud suite runs
-# Cloudberry's tests against.  python3-venv for DuckDB's, below.
+# Cloudberry's tests against.  python3-venv for DuckDB's, below.  libuv is
+# the interconnect module's, its proxy's.
 RUN apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
         libxerces-c3.2 libxml2 \
         libcurl4t64 libapr1t64 libevent-2.1-7t64 libyaml-0-2 curl \
         libjansson4 etcd-server \
         libprotobuf32t64 liburing2 \
+        libuv1t64 \
         libgeos-c1t64 libproj25 libgdal36 libjson-c5 libprotobuf-c1 \
         perl diffutils procps \
         python3 python3-pygresql python3-venv \

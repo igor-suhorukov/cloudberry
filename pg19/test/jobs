@@ -69,6 +69,14 @@ expandshrink           planner   85   PASSES=planner MEM=2500
 tpc                    -         90   MEM=12000
 singlenode             planner   26   PASSES=planner MEM=3500
 cluster                -        115   MEM=700
+ic                     -         30   MEM=900
+# ic_greenplum and ic_isolation2 run only on request (CB_IC; ic_greenplum/run.sh):
+# greenplum's and isolation2's ORCA passes again, over udp2 and over the
+# proxy, which every full run's ic checks; skipped at once otherwise.
+ic_greenplum           udp2     140   IC=udp2 PASSES=orca MEM=20000
+ic_greenplum           proxy    140   IC=proxy PASSES=orca MEM=20000
+ic_isolation2          udp2     140   IC=udp2 PASSES=orca MEM=14000
+ic_isolation2          proxy    140   IC=proxy PASSES=orca MEM=14000
 orca                   -         54   MEM=300
 fts                    -         55   MEM=1000
 gpfts                  -         73   MEM=1300

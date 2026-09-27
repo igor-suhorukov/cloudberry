@@ -186,18 +186,27 @@
 
 /*
  * How a Motion between segments is carried out: its slices all at once,
- * each sender streaming to its receivers over TCP (tcp) or in UDP packets,
- * acknowledged, as Cloudberry's udpifc sends them (udpifc) -- see gp_ic.c --
- * or a slice at a time, the rows relayed through the coordinator (relay).
+ * each sender streaming to its receivers over the transport of that name
+ * (gp_ic.c's table) -- over TCP (tcp), in UDP packets acknowledged as
+ * Cloudberry's udpifc sends them (udpifc), through UDP2's C++ core (udp2,
+ * the udp2 module), through a proxy on each node that carries every pair of
+ * nodes' Motions over one connection (proxy, the interconnect module) -- or
+ * a slice at a time, the rows relayed through the coordinator (relay).  An
+ * enum rather than Cloudberry's string, whose check takes udp2 and proxy
+ * only where their module has registered them.
  */
 #define GP_INTERCONNECT_RELAY	0
 #define GP_INTERCONNECT_TCP		1
 #define GP_INTERCONNECT_UDPIFC	2
+#define GP_INTERCONNECT_UDP2	3
+#define GP_INTERCONNECT_PROXY	4
 
 static const struct config_enum_entry interconnect_type_options[] = {
 	{"relay", GP_INTERCONNECT_RELAY, false},
 	{"tcp", GP_INTERCONNECT_TCP, false},
 	{"udpifc", GP_INTERCONNECT_UDPIFC, false},
+	{"udp2", GP_INTERCONNECT_UDP2, false},
+	{"proxy", GP_INTERCONNECT_PROXY, false},
 	{NULL, 0, false}
 };
 
@@ -205,9 +214,11 @@ static int	gp_interconnect_type = GP_INTERCONNECT_TCP;
 
 /*
  * On a fragment's PlannedStmt, where the coordinator runs its slices at
- * once: the statement's token and, for each slice that streams, how many
- * send and where its receivers are (GP_STREAM_MARK); and for the writer's
- * fragment, the key its readers find its snapshot under (GP_SHARE_MARK).
+ * once: the statement's token, and for each slice that streams, the slice
+ * that receives it, and its senders' and receivers' segments and where they
+ * receive (GP_STREAM_MARK) -- what each of its processes makes a GpIcStream
+ * of; and for the writer's fragment, the key its readers find its snapshot
+ * under (GP_SHARE_MARK).
  */
 #define GP_STREAM_MARK	"gp_stream"
 #define GP_SHARE_MARK	"gp_share"
@@ -296,9 +307,9 @@ typedef struct MotionState
 	ExprState **hashexprs;
 	GpHash		hash;
 	int		   *receiver_of;	/* by content id: a receiver's index, or -1 */
-	int			nreceivers;
-	char	  **receivers;
-	char	   *token;
+
+	/* On a segment, streaming, sending or receiving: its statement's stream. */
+	GpIcStream *icstream;
 
 	bool		file_own;		/* a reader's, of its writer's files: closed here */
 
@@ -1151,54 +1162,105 @@ fragment_mark(PlannedStmt *stmt, const char *name)
 }
 
 /*
- * What the coordinator said of a slice that streams: (slice, senders,
- * receivers' contents, receivers' addresses); NULL if it does not.
+ * GP_STREAM_MARK is (token, entries, transport, session, serial, top): the
+ * statement's token; an entry for each slice that streams, (slice, the
+ * slice that receives it, its senders' contents, their addresses, its
+ * receivers' contents, their addresses); the name of its transport; the
+ * coordinator's session, the statement's number in it, and the Gather's
+ * slice.
  */
-static List *
-stream_entry(PlannedStmt *stmt, int slice)
-{
-	List	   *info = (List *) fragment_mark(stmt, GP_STREAM_MARK);
-	ListCell   *lc;
-
-	if (info == NULL)
-		return NULL;
-	foreach(lc, (List *) lsecond(info))
-	{
-		List	   *entry = (List *) lfirst(lc);
-
-		if (intVal(linitial(entry)) == slice)
-			return entry;
-	}
-	return NULL;
-}
-
 static char *
 stream_token(PlannedStmt *stmt)
 {
 	return strVal(linitial((List *) fragment_mark(stmt, GP_STREAM_MARK)));
 }
 
-/* Do its slices stream in UDP packets (udpifc)? */
-static bool
-stream_udp(PlannedStmt *stmt)
+/* One side of an entry: its processes' contents and addresses, as arrays. */
+static void
+stream_processes(List *contents, List *addresses, int *n, int **cs,
+				 char ***as)
 {
-	return boolVal(lthird((List *) fragment_mark(stmt, GP_STREAM_MARK)));
+	int			i = 0;
+	ListCell   *lc,
+			   *la;
+
+	*n = list_length(contents);
+	*cs = palloc_array(int, Max(*n, 1));
+	*as = palloc_array(char *, Max(*n, 1));
+	forboth(lc, contents, la, addresses)
+	{
+		(*cs)[i] = intVal(lfirst(lc));
+		(*as)[i++] = pstrdup(strVal(lfirst(la)));
+	}
 }
 
 /*
- * Is this process one of a streaming slice's receivers?  A fragment carries
- * every subplan of the statement, the ones below other slices' Motions too,
- * whose Motions this process never reads.
+ * The stream of a fragment whose slices stream, as its mark says, in a
+ * memory context of its own, which its end deletes (gp_ic.c).  The slice
+ * this process runs is the one its Motion sends, at the top of a reader's
+ * plan, and otherwise the Gather's, the writer's.
  */
-static bool
-stream_receives(PlannedStmt *stmt, List *entry)
+static GpIcStream *
+stream_from_mark(PlannedStmt *stmt)
 {
-	const char *self = GpIcAddressOf(GpIcAddress(), stream_udp(stmt));
+	List	   *mark = (List *) fragment_mark(stmt, GP_STREAM_MARK);
+	const char *name = strVal(lthird(mark));
+	const GpIcTransport *transport = GpIcFindTransport(name);
+	MemoryContext cxt;
+	MemoryContext oldcxt;
+	GpIcStream *stream;
+	int			i = 0;
 
-	foreach_node(String, address, (List *) lfourth(entry))
-		if (strcmp(strVal(address), self) == 0)
-			return true;
-	return false;
+	if (transport == NULL)
+		ereport(ERROR,
+				(errcode(ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE),
+				 errmsg("the interconnect \"%s\" is not loaded on segment %d",
+						name, GpClusterContentId()),
+				 errhint("Load its module through \"shared_preload_libraries\" on every node.")));
+
+	cxt = AllocSetContextCreate(TopMemoryContext, "interconnect stream",
+								ALLOCSET_SMALL_SIZES);
+	oldcxt = MemoryContextSwitchTo(cxt);
+	stream = palloc0(sizeof(GpIcStream));
+	strlcpy(stream->token, strVal(linitial(mark)), sizeof(stream->token));
+	stream->transport = transport;
+	stream->session = intVal(lfourth(mark));
+	stream->serial = (uint32) intVal(list_nth(mark, 4));
+	stream->top = intVal(list_nth(mark, 5));
+	stream->nslices = list_length((List *) lsecond(mark));
+	stream->slices = palloc0_array(GpIcSlice, Max(stream->nslices, 1));
+	foreach_node(List, entry, (List *) lsecond(mark))
+	{
+		GpIcSlice  *slice = &stream->slices[i++];
+
+		slice->slice = intVal(linitial(entry));
+		slice->parent = intVal(lsecond(entry));
+		stream_processes((List *) lthird(entry), (List *) lfourth(entry),
+						 &slice->nsenders, &slice->sender_contents,
+						 &slice->sender_addresses);
+		stream_processes((List *) list_nth(entry, 4), (List *) list_nth(entry, 5),
+						 &slice->nreceivers, &slice->receiver_contents,
+						 &slice->receiver_addresses);
+	}
+	stream->self = stream->top;
+	if (GpMotionIs(stmt->planTree) &&
+		GpIcStreamSlice(stream, GpMotionSlice(stmt->planTree)) != NULL)
+		stream->self = GpMotionSlice(stmt->planTree);
+	MemoryContextSwitchTo(oldcxt);
+	return stream;
+}
+
+/*
+ * A fragment whose slices stream begins its stream here, before its plan is
+ * initialised: where Cloudberry's segment sets up its interconnect, at the
+ * start of its executor, so that a transport's connections are there before
+ * the rows that come to them.
+ */
+static void
+stream_begin(PlannedStmt *stmt)
+{
+	if (fragment_mark(stmt, GP_STREAM_MARK) != NULL)
+		GpIcStatementBegin(stream_from_mark(stmt));
 }
 
 /*
@@ -1209,13 +1271,11 @@ stream_receives(PlannedStmt *stmt, List *entry)
  */
 static void
 motion_begin_sending(MotionState *state, EState *estate, int eflags,
-					 List *entry)
+					 GpIcSlice *slice)
 {
 	CustomScan *cscan = (CustomScan *) state->css.ss.ps.plan;
 	List	   *hashfuncs = (List *) list_nth(cscan->custom_private,
 											  MOTION_PRIVATE_HASHFUNCS);
-	List	   *contents = (List *) lthird(entry);
-	List	   *addresses = (List *) lfourth(entry);
 	int			nsegs = GpClusterSegmentCount();
 	TupleDesc	tupdesc;
 	int			nkeys = list_length(cscan->custom_exprs);
@@ -1224,7 +1284,6 @@ motion_begin_sending(MotionState *state, EState *estate, int eflags,
 			   *lf;
 
 	state->sending = true;
-	state->token = stream_token(estate->es_plannedstmt);
 	outerPlanState(state) = ExecInitNode(outerPlan(cscan), estate, eflags);
 	tupdesc = ExecGetResultType(outerPlanState(state));
 
@@ -1264,20 +1323,16 @@ motion_begin_sending(MotionState *state, EState *estate, int eflags,
 		i++;
 	}
 
-	/* The receivers, and which of them is on each segment. */
-	state->nreceivers = list_length(addresses);
-	state->receivers = palloc_array(char *, Max(state->nreceivers, 1));
+	/* Which of the receivers is on each segment. */
 	state->receiver_of = palloc_array(int, nsegs);
 	for (i = 0; i < nsegs; i++)
 		state->receiver_of[i] = -1;
-	i = 0;
-	forboth(lc, contents, lf, addresses)
+	for (i = 0; i < slice->nreceivers; i++)
 	{
-		int			content = intVal(lfirst(lc));
+		int			content = slice->receiver_contents[i];
 
 		if (content >= 0 && content < nsegs)
 			state->receiver_of[content] = i;
-		state->receivers[i++] = strVal(lfirst(lf));
 	}
 }
 
@@ -1365,8 +1420,7 @@ motion_send_all(MotionState *state)
 	GpIcSender *sender;
 
 	initStringInfo(&row);
-	sender = GpIcSendBegin(state->token, state->slice, GpClusterContentId(),
-						   state->nreceivers, state->receivers);
+	sender = GpIcSendBegin(state->icstream, state->slice);
 
 	/* Until the rows end, or no receiver wants more: a LIMIT above them. */
 	while (GpIcSendWanted(sender))
@@ -1567,9 +1621,7 @@ motion_stream_next(MotionState *state)
 		return ExecClearTuple(slot);
 
 	if (state->icrecv == NULL)
-		state->icrecv = GpIcRecvBegin(state->token, state->slice,
-									  state->nsenders,
-									  stream_udp(state->css.ss.ps.state->es_plannedstmt));
+		state->icrecv = GpIcRecvBegin(state->icstream, state->slice);
 	if (GpIcRecv(state->icrecv, &data, &len))
 	{
 		TupleTableSlot *row = motion_decode_row(state, data, len);
@@ -1628,9 +1680,7 @@ motion_stream_merge_next(MotionState *state)
 	{
 		TupleDesc	tupdesc = slot->tts_tupleDescriptor;
 
-		state->icrecv = GpIcRecvBegin(state->token, state->slice,
-									  state->nsenders,
-									  stream_udp(state->css.ss.ps.state->es_plannedstmt));
+		state->icrecv = GpIcRecvBegin(state->icstream, state->slice);
 		state->nsegs = state->nsenders;
 		state->segslots = palloc_array(TupleTableSlot *, Max(state->nsegs, 1));
 		for (int k = 0; k < state->nsegs; k++)
@@ -1734,9 +1784,7 @@ motion_end_stream(MotionState *state)
 {
 	if (state->streamed && state->stream_here && state->icrecv == NULL &&
 		!state->stream_done)
-		state->icrecv = GpIcRecvBegin(state->token, state->slice,
-									  state->nsenders,
-									  stream_udp(state->css.ss.ps.state->es_plannedstmt));
+		state->icrecv = GpIcRecvBegin(state->icstream, state->slice);
 	if (state->icrecv != NULL)
 		GpIcRecvEnd(state->icrecv);
 	state->icrecv = NULL;
@@ -1846,12 +1894,22 @@ motion_begin(CustomScanState *node, EState *estate, int eflags)
 		!(eflags & EXEC_FLAG_EXPLAIN_ONLY))
 	{
 		TupleDesc	tupdesc = node->ss.ss_ScanTupleSlot->tts_tupleDescriptor;
-		List	   *entry = stream_entry(estate->es_plannedstmt, state->slice);
+		GpIcStream *stream = NULL;
+		GpIcSlice  *entry = NULL;
+
+		if (fragment_mark(estate->es_plannedstmt, GP_STREAM_MARK) != NULL)
+		{
+			stream = GpIcStatementFind(stream_token(estate->es_plannedstmt));
+			if (stream == NULL)
+				elog(ERROR, "a fragment's slices stream, but its stream has not begun");
+			entry = GpIcStreamSlice(stream, state->slice);
+		}
 
 		/* A reader's fragment is the Motion it sends through. */
 		if (entry != NULL &&
 			estate->es_plannedstmt->planTree == (Plan *) cscan)
 		{
+			state->icstream = stream;
 			motion_begin_sending(state, estate, eflags, entry);
 			return;
 		}
@@ -1859,14 +1917,17 @@ motion_begin(CustomScanState *node, EState *estate, int eflags)
 		/*
 		 * A slice that streams, received as it comes rather than from a
 		 * file, and kept for a rescan -- a sorted Gather's as its senders'
-		 * streams merge, by its keys.
+		 * streams merge, by its keys.  This process receives it if it runs
+		 * the slice that does: a fragment carries every subplan of the
+		 * statement, the ones below other slices' Motions too, whose Motions
+		 * this process never reads.
 		 */
 		if (entry != NULL)
 		{
 			state->streamed = true;
-			state->stream_here = stream_receives(estate->es_plannedstmt, entry);
-			state->token = stream_token(estate->es_plannedstmt);
-			state->nsenders = intVal(lsecond(entry));
+			state->stream_here = entry->parent == stream->self;
+			state->icstream = stream;
+			state->nsenders = entry->nsenders;
 			state->spool = tuplestore_begin_heap(false, false, work_mem);
 			state->spoolslot = MakeSingleTupleTableSlot(tupdesc,
 														&TTSOpsMinimalTuple);
@@ -2884,6 +2945,26 @@ stream_slice_find(MotionState *state, int slice)
 	return NULL;
 }
 
+/* The transport gp.interconnect_type names, which a streaming slice uses. */
+static const GpIcTransport *
+interconnect_transport(void)
+{
+	const char *name = NULL;
+	const GpIcTransport *transport;
+
+	for (const struct config_enum_entry *e = interconnect_type_options;
+		 e->name != NULL; e++)
+		if (e->val == gp_interconnect_type)
+			name = e->name;
+	transport = name != NULL ? GpIcFindTransport(name) : NULL;
+	if (transport == NULL)
+		ereport(ERROR,
+				(errcode(ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE),
+				 errmsg("the interconnect \"%s\" is not loaded",
+						name != NULL ? name : "?")));
+	return transport;
+}
+
 /*
  * Start the slices that stream, each on a reader of every segment that runs
  * it, and answer what the writer's own fragment has to carry: where every
@@ -2906,6 +2987,7 @@ stream_start(MotionState *state, GpStream *stream,
 	char		token[GP_IC_TOKEN_LEN + 1];
 	List	   *entries = NIL;
 	DefElem    *streammark;
+	const GpIcTransport *transport = interconnect_transport();
 	static uint32 share_counter = 0;
 
 	if (!pg_strong_random(random, sizeof(random)))
@@ -2921,7 +3003,8 @@ stream_start(MotionState *state, GpStream *stream,
 	{
 		if (!state_includes(state, seg))
 			continue;
-		writer_address[seg] = GpStreamWriterAddress(seg, &writer_pid[seg]);
+		writer_address[seg] = GpStreamWriterAddress(seg, transport,
+													&writer_pid[seg]);
 		if (top_addresses != NULL)
 			writer_address[seg] = top_addresses[seg];
 	}
@@ -2932,13 +3015,26 @@ stream_start(MotionState *state, GpStream *stream,
 	foreach_ptr(StreamSlice, ss, state->stream_slices)
 		for (int i = 0; i < ss->ncontents; i++)
 			ss->readers[i] = GpStreamAddReader(stream, ss->contents[i],
-											   &ss->addresses[i]);
+											   transport, &ss->addresses[i]);
 
-	/* where each slice's receivers are: the writers, or its parent's readers */
+	/*
+	 * Each slice's senders, its readers, and where its receivers are: the
+	 * writers, or its parent's readers.
+	 */
 	foreach_ptr(StreamSlice, ss, state->stream_slices)
 	{
+		List	   *sender_contents = NIL;
+		List	   *sender_addresses = NIL;
 		List	   *contents = NIL;
 		List	   *addresses = NIL;
+
+		for (int i = 0; i < ss->ncontents; i++)
+		{
+			sender_contents = lappend(sender_contents,
+									  makeInteger(ss->contents[i]));
+			sender_addresses = lappend(sender_addresses,
+									   makeString(pstrdup(ss->addresses[i])));
+		}
 
 		if (ss->parent == top)
 		{
@@ -2948,8 +3044,7 @@ stream_start(MotionState *state, GpStream *stream,
 					continue;
 				contents = lappend(contents, makeInteger(seg));
 				addresses = lappend(addresses,
-									makeString(pstrdup(GpIcAddressOf(writer_address[seg],
-																	 gp_interconnect_type == GP_INTERCONNECT_UDPIFC))));
+									makeString(pstrdup(writer_address[seg])));
 			}
 		}
 		else
@@ -2962,20 +3057,24 @@ stream_start(MotionState *state, GpStream *stream,
 				{
 					contents = lappend(contents, makeInteger(p->contents[i]));
 					addresses = lappend(addresses,
-										makeString(pstrdup(GpIcAddressOf(p->addresses[i],
-																		 gp_interconnect_type == GP_INTERCONNECT_UDPIFC))));
+										makeString(pstrdup(p->addresses[i])));
 				}
 			}
 		}
 		entries = lappend(entries,
-						  list_make4(makeInteger(ss->slice),
-									 makeInteger(ss->ncontents),
-									 contents, addresses));
+						  lappend(list_make5(makeInteger(ss->slice),
+											 makeInteger(ss->parent),
+											 sender_contents, sender_addresses,
+											 contents),
+								  addresses));
 	}
 	streammark = makeDefElem(pstrdup(GP_STREAM_MARK),
-							 (Node *) list_make3(makeString(pstrdup(token)),
-												 entries,
-												 makeBoolean(gp_interconnect_type == GP_INTERCONNECT_UDPIFC)),
+							 (Node *) lappend(list_make5(makeString(pstrdup(token)),
+														 entries,
+														 makeString(pstrdup(transport->name)),
+														 makeInteger(GpClusterSessionId()),
+														 makeInteger((int) share_counter)),
+											  makeInteger(top)),
 							 -1);
 
 	/*
@@ -4409,6 +4508,7 @@ motion_executor_start(QueryDesc *queryDesc, int eflags)
 
 			if (key != NULL)
 				GpSharePublish(strVal(key), queryDesc->snapshot);
+			stream_begin(queryDesc->plannedstmt);
 		}
 
 		/*
@@ -4467,24 +4567,25 @@ motion_executor_start(QueryDesc *queryDesc, int eflags)
 
 /*
  * A statement's connections that nothing here asked for are closed with it,
- * and its UDP senders waited for (GpIcForget()).
+ * and its UDP senders waited for (GpIcForget()) -- unless its plan ran out
+ * earlier, and ended its stream then.
  */
 static void
 motion_executor_end(QueryDesc *queryDesc)
 {
-	char	   *token = NULL;
+	GpIcStream *stream = NULL;
 
 	if (GpClusterIsDispatched() && is_fragment(queryDesc->plannedstmt) &&
 		fragment_mark(queryDesc->plannedstmt, GP_STREAM_MARK) != NULL)
-		token = stream_token(queryDesc->plannedstmt);
+		stream = GpIcStatementFind(stream_token(queryDesc->plannedstmt));
 
 	if (prev_executor_end)
 		prev_executor_end(queryDesc);
 	else
 		standard_ExecutorEnd(queryDesc);
 
-	if (token != NULL)
-		GpIcForget(token);
+	if (stream != NULL)
+		GpIcForget(stream);
 }
 
 static void
@@ -4541,12 +4642,14 @@ motion_executor_run(QueryDesc *queryDesc, ScanDirection direction,
 		GpClusterIsDispatched() &&
 		fragment_mark(queryDesc->plannedstmt, GP_STREAM_MARK) != NULL)
 	{
+		GpIcStream *stream = GpIcStatementFind(stream_token(queryDesc->plannedstmt));
 		ListCell   *lc;
 
 		(void) motion_end_streams(queryDesc->planstate, NULL);
 		foreach(lc, queryDesc->estate->es_subplanstates)
 			(void) motion_end_streams((PlanState *) lfirst(lc), NULL);
-		GpIcForget(stream_token(queryDesc->plannedstmt));
+		if (stream != NULL)
+			GpIcForget(stream);
 	}
 
 	/* and the statement ends once they are all read (gp_endpoint.c) */
@@ -4909,20 +5012,56 @@ gp_exec_fragment(PG_FUNCTION_ARGS)
 PG_FUNCTION_INFO_V1(gp_interconnect_address);
 
 /*
- * gp_internal.interconnect_address()
+ * gp_internal.interconnect_address(transport text)
  *
- * Where this segment process receives a Motion's rows, opening its listener
- * if it has none yet: what the coordinator hands the senders.  Only for the
- * coordinator.
+ * Where this segment process receives a Motion's rows over a transport,
+ * opening what it needs the first time: what the coordinator hands the
+ * senders.  Only for the coordinator.
  */
 Datum
 gp_interconnect_address(PG_FUNCTION_ARGS)
 {
+	char	   *name = text_to_cstring(PG_GETARG_TEXT_PP(0));
+	const GpIcTransport *transport = GpIcFindTransport(name);
+
 	if (!GpClusterDispatchTrusted())
 		ereport(ERROR,
 				(errcode(ERRCODE_INSUFFICIENT_PRIVILEGE),
 				 errmsg("the interconnect is opened only for the coordinator")));
-	PG_RETURN_TEXT_P(cstring_to_text(GpIcAddress()));
+	if (transport == NULL)
+		ereport(ERROR,
+				(errcode(ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE),
+				 errmsg("the interconnect \"%s\" is not loaded on segment %d",
+						name, GpClusterContentId()),
+				 errhint("Load its module through \"shared_preload_libraries\" on every node.")));
+	PG_RETURN_TEXT_P(cstring_to_text(GpIcAddress(transport)));
+}
+
+/*
+ * gp.interconnect_type takes a module's transport only once the module has
+ * registered it.  While the modules are being preloaded -- gp_core first,
+ * which defines the setting and is given the configuration file's value
+ * then -- any value is taken: gp_ic.c checks it once they have all loaded,
+ * and the server does not start if nothing registered it.
+ */
+static bool
+interconnect_type_check(int *newval, void **extra, GucSource source)
+{
+	const char *name = NULL;
+
+	if (!process_shared_preload_libraries_done ||
+		*newval == GP_INTERCONNECT_RELAY)
+		return true;
+	for (const struct config_enum_entry *e = interconnect_type_options;
+		 e->name != NULL; e++)
+		if (e->val == *newval)
+			name = e->name;
+	if (name != NULL && GpIcFindTransport(name) != NULL)
+		return true;
+	GUC_check_errdetail("The interconnect \"%s\" is not loaded.", name);
+	GUC_check_errhint("Add \"%s\" to \"shared_preload_libraries\" after \"gp_core\".",
+					  *newval == GP_INTERCONNECT_PROXY ? "interconnect" : name);
+	return false;
 }
 
 void
@@ -4936,15 +5075,20 @@ GpMotionInit(void)
 							 "the node's own or a TCP port.  \"udpifc\": the "
 							 "same, in UDP packets each receiver acknowledges, as "
 							 "Cloudberry's UDP interconnect sends them.  "
-							 "\"relay\": a slice at a time, its rows relayed "
-							 "through the coordinator to files the receiving "
-							 "segments keep.",
+							 "\"udp2\": the same, through Cloudberry's UDP2, "
+							 "where the udp2 module is loaded.  \"proxy\": "
+							 "through a proxy on each node, which carries every "
+							 "pair of nodes' rows over one connection, where the "
+							 "interconnect module is loaded.  \"relay\": a "
+							 "slice at a time, its rows relayed through the "
+							 "coordinator to files the receiving segments keep.  "
+							 "Cloudberry calls this gp_interconnect_type.",
 							 &gp_interconnect_type,
 							 GP_INTERCONNECT_TCP,
 							 interconnect_type_options,
 							 PGC_USERSET,
 							 0,
-							 NULL, NULL, NULL);
+							 interconnect_type_check, NULL, NULL);
 
 	if (GpClusterIsSingleNode())
 		return;
