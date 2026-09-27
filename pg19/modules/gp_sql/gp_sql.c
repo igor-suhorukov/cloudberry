@@ -84,6 +84,7 @@
 #include "gp_dispatch.h"
 #include "gp_policy.h"
 #include "gp_grammar.h"
+#include "gp_grammar_int.h"
 #include "gp_label.h"
 #include "gp_settings.h"
 #include "gp_partition.h"
@@ -1595,6 +1596,67 @@ renamed_index(RenameStmt *rs)
 	}
 }
 
+/*
+ * DROP DIRECTORY TABLE, which the grammar made DROP TABLE IF EXISTS
+ * (gp_desugar.c): known by the words at the statement's place in the user's
+ * text.
+ */
+static bool
+said_drop_directory_table(PlannedStmt *pstmt, const char *queryString)
+{
+	GpTokens   *ts;
+	int			len;
+
+	if (queryString == NULL || pstmt->stmt_location < 0)
+		return false;
+	len = pstmt->stmt_len > 0 ? pstmt->stmt_len :
+		(int) strlen(queryString + pstmt->stmt_location);
+	ts = GpTokenize(pnstrdup(queryString + pstmt->stmt_location, len));
+	return tok_is(ts, 0, "drop") && tok_is(ts, 1, "directory") &&
+		tok_is(ts, 2, "table");
+}
+
+/*
+ * Cloudberry's DROP DIRECTORY TABLE: a table that is not there skipped, IF
+ * EXISTS or not, in its words, and one that is no directory table refused
+ * (RemoveRelations(), DropErrorMsgWrongType()).  False when nothing is left
+ * to drop.
+ */
+static bool
+drop_directory_tables(PlannedStmt **pstmt, bool *readOnlyTree)
+{
+	DropStmt   *stmt;
+	List	   *kept = NIL;
+
+	if (*readOnlyTree)
+	{
+		*pstmt = copyObject(*pstmt);
+		*readOnlyTree = false;
+	}
+	stmt = (DropStmt *) (*pstmt)->utilityStmt;
+	foreach_node(List, name, stmt->objects)
+	{
+		RangeVar   *rv = makeRangeVarFromNameList(name);
+		Oid			relid = RangeVarGetRelid(rv, NoLock, true);
+
+		if (!OidIsValid(relid))
+		{
+			ereport(NOTICE,
+					(errmsg("directory table \"%s\" does not exist, skipping",
+							rv->relname)));
+			continue;
+		}
+		if (GpDirTableLocation(relid) == NULL)
+			ereport(ERROR,
+					(errcode(ERRCODE_WRONG_OBJECT_TYPE),
+					 errmsg("\"%s\" is not a directory table", rv->relname),
+					 errhint("Use DROP TABLE to remove a table.")));
+		kept = lappend(kept, name);
+	}
+	stmt->objects = kept;
+	return kept != NIL;
+}
+
 static void
 gp_sql_ProcessUtility(PlannedStmt *pstmt, const char *queryString,
 					  bool readOnlyTree, ProcessUtilityContext context,
@@ -1614,6 +1676,25 @@ gp_sql_ProcessUtility(PlannedStmt *pstmt, const char *queryString,
 	bool		is_alter = false;
 	List	  **carried;
 	GpSqlPending save;
+
+	/*
+	 * The two phases of a transaction, on any node: the gid a PREPARE keeps a
+	 * directory table's files under, and their sweep once COMMIT or ROLLBACK
+	 * PREPARED has ended it (dirtable.c).
+	 */
+	if (IsA(parsetree, TransactionStmt))
+	{
+		TransactionStmt *ts = (TransactionStmt *) parsetree;
+
+		if (ts->kind == TRANS_STMT_PREPARE)
+			GpDirTableNotePrepare(ts->gid);
+		GpSqlProcessUtilityNext(pstmt, queryString, readOnlyTree, context,
+								params, queryEnv, dest, qc);
+		if (ts->kind == TRANS_STMT_COMMIT_PREPARED ||
+			ts->kind == TRANS_STMT_ROLLBACK_PREPARED)
+			GpDirTableSecondPhase(ts->gid);
+		return;
+	}
 
 	/*
 	 * On a segment, the statement the coordinator dispatched: whatever this
@@ -1799,8 +1880,37 @@ gp_sql_ProcessUtility(PlannedStmt *pstmt, const char *queryString,
 		return;
 	}
 
-	/* A directory table stays in its tablespace, as its files do. */
-	GpDirTableCheckMove(parsetree);
+	/*
+	 * A directory table stays in its tablespace, as its files do, and keeps
+	 * the columns, the primary key and the name they rely on.
+	 */
+	GpDirTableCheckStatement(parsetree);
+
+	/* DROP DIRECTORY TABLE, in Cloudberry's words (drop_directory_tables()) */
+	if (IsA(parsetree, DropStmt) &&
+		((DropStmt *) parsetree)->removeType == OBJECT_TABLE &&
+		said_drop_directory_table(pstmt, queryString))
+	{
+		if (!drop_directory_tables(&pstmt, &readOnlyTree))
+		{
+			if (qc != NULL)
+				SetQueryCompletion(qc, CMDTAG_DROP_TABLE, 0);
+			return;
+		}
+		parsetree = pstmt->utilityStmt;
+	}
+
+	/*
+	 * Nor is it inherited from -- on a cluster's coordinator once the
+	 * distribution it would take is said, below, as Cloudberry says it first.
+	 */
+	if (IsA(parsetree, CreateStmt) && !on_cluster_coordinator())
+		GpDirTableCheckInherits((CreateStmt *) parsetree);
+
+	/* Cloudberry's COPY of a directory table's file (dircopy.c) */
+	if (IsA(parsetree, CopyStmt) &&
+		GpDirTableCopy((CopyStmt *) parsetree, queryString, qc))
+		return;
 
 	/*
 	 * ALTER TABLE ... SET DISTRIBUTED: the new policy, carried out
@@ -1851,6 +1961,8 @@ gp_sql_ProcessUtility(PlannedStmt *pstmt, const char *queryString,
 							stmt->relation->relname)));
 			return;
 		}
+		GpDirTableCheckDistribution(relid, new_policy != NULL ?
+									"SET DISTRIBUTED BY" : "SET WITH (REORGANIZE)");
 		GpDistributionAlter(relid, new_policy, reorganize, stmt->relation->inh);
 		return;
 	}
@@ -1891,6 +2003,9 @@ gp_sql_ProcessUtility(PlannedStmt *pstmt, const char *queryString,
 							stmt->relation->relname)));
 			return;
 		}
+		GpDirTableCheckDistribution(relid, mode == 's' ? "SHRINK TABLE" :
+									mode == 'p' ? "EXPAND PARTITION PREPARE" :
+									"EXPAND TABLE");
 		if (stmt->cmds != NIL)
 			gp_sql_ProcessUtility(pstmt, queryString, readOnlyTree, context,
 								  params, queryEnv, dest, qc);
@@ -2187,6 +2302,7 @@ gp_sql_ProcessUtility(PlannedStmt *pstmt, const char *queryString,
 		{
 			before = copyObject((CreateStmt *) parsetree);
 			GpDistributionNoteDefault(before, context == PROCESS_UTILITY_SUBCOMMAND);
+			GpDirTableCheckInherits(before);
 			GpSqlPendingArm(&save);
 			PG_TRY();
 			{
@@ -2258,6 +2374,7 @@ gp_sql_ProcessUtility(PlannedStmt *pstmt, const char *queryString,
 		before = copyObject((CreateStmt *) parsetree);
 		if (policy == NULL)
 			GpDistributionNoteDefault(before, context == PROCESS_UTILITY_SUBCOMMAND);
+		GpDirTableCheckInherits(before);
 	}
 
 	if (!is_alter)

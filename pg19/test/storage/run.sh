@@ -338,7 +338,14 @@ is "and it is read back through the handler" \
 out=$("$PSQL" -X -q -t -A -d postgres -U other \
 	  -c "SELECT gp_sql.directory_table_get('far', 'a.txt');" 2>&1)
 case "$out" in
-	*'refused the credentials of role "other"'*) ok "but not by a role whose own mapping gives no secret" ;;
+	*'permission denied for table far'*) ok "a role that may not read the table reads none of its files" ;;
+	*) notok "a role that may not read the table reads none of its files" "$out" ;;
+esac
+q "GRANT SELECT ON far TO other;" > /dev/null
+out=$("$PSQL" -X -q -t -A -d postgres -U other \
+	  -c "SELECT gp_sql.directory_table_get('far', 'a.txt');" 2>&1)
+case "$out" in
+	*'refused the credentials of role "other"'*) ok "and one that may, not when its own mapping gives no secret" ;;
 	*) notok "but not by a role whose own mapping gives no secret" "$out" ;;
 esac
 q "BEGIN; SELECT gp_sql.directory_table_put('far', 'b.txt', 'gone'); ROLLBACK;" > /dev/null

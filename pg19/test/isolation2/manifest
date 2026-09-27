@@ -2,9 +2,10 @@
 # runs it on a coordinator and three segments: the tests of the schedule
 # that bear on M3 -- distributed transactions, distributed snapshots, locks
 # and the global deadlock detector -- on M4, FTS and mirrors, on M6's
-# resource queues and memory accounting, and on M7's tools -- a node
+# resource queues and memory accounting, on M7's tools -- a node
 # recovered elsewhere, and the standby coordinator promoted, removed, made
-# again and waited for -- in the schedule's order.
+# again and waited for -- and on M8's directory tables on a cluster, in the
+# schedule's order.
 #
 #   run   the test runs here, in both passes; cloudberry/ holds a difference
 #         reviewed and kept, where one pass has one.  A third word names the
@@ -88,5 +89,6 @@ run  setup_startup_memory_accounting               memory
 run  oom_startup_memory                            memory
 run  restore_memory_accounting_default             memory
 run  runaway_query                                 memory
+run  local_directory_table_mixed
 run  sharedsnapshot
 run  export_distributed_snapshot

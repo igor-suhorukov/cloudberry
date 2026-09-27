@@ -401,8 +401,11 @@ gpdiff() {
 		-I HINT: -I CONTEXT: -I GP_IGNORE: "$@"
 }
 
+# A test's data file, @abs_srcdir@/data/..., is the regression suite's: its
+# Makefile links data to src/test/regress/data.
 convert() {
-	sed -e "s#@abs_srcdir@#$CB#g" \
+	sed -e "s#@abs_srcdir@/data/#$CB/../regress/data/#g" \
+	    -e "s#@abs_srcdir@#$CB#g" \
 	    -e "s#@abs_builddir@#$CB#g" \
 	    -e "s#@testtablespace@#/tmp/testtablespace#g" \
 	    -e "s#@bindir@#$BINDIR#g" \
