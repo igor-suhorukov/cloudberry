@@ -207,7 +207,7 @@ static const char *const synced_settings[] = {
 	 * the session user, SET SESSION AUTHORIZATION's, before the role: what a
 	 * statement a segment decides for itself -- CLUSTER and VACUUM of every
 	 * table the user may -- it decides as the coordinator's user, not as the
-	 * connection's
+	 * connection's, where the connection may take it (sync_value())
 	 */
 	"session_authorization",
 	"role",
@@ -332,6 +332,8 @@ segments_have_am(const char *amname)
  * configuration on faith, as PostgreSQL takes one outside a transaction; and
  * neither could make a table with it.  Once they have it, it is sent.
  */
+static char *gang_username;
+
 static const char *
 sync_value(int i)
 {
@@ -346,6 +348,22 @@ sync_value(int i)
 		strcmp(synced_settings[i], "default_table_access_method") == 0 &&
 		!segments_have_am(value))
 		return NULL;
+
+	/*
+	 * The session user, where the gang's connection may take it: any, where
+	 * a superuser logged in, and its own always.  A gang made as a user who
+	 * may not -- SET SESSION AUTHORIZATION to another user, since -- keeps
+	 * the one it was made as.
+	 */
+	if (value != NULL && IsTransactionState() &&
+		strcmp(synced_settings[i], "session_authorization") == 0 &&
+		gang_username != NULL && strcmp(value, gang_username) != 0)
+	{
+		Oid			login = get_role_oid(gang_username, true);
+
+		if (!OidIsValid(login) || !superuser_arg(login))
+			return NULL;
+	}
 	return value;
 }
 
