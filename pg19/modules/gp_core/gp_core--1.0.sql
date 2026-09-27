@@ -154,6 +154,39 @@ COMMENT ON FUNCTION gp.dtx_recovered() IS
 	'whether distributed transaction recovery has reached every node since the server started';
 
 /*
+ * What the coordinator's distributed transaction recovery is doing, while a
+ * round of it runs: Cloudberry's gp_stat_progress_dtx_recovery, the round's
+ * phase and its counts of distributed transactions -- the committed ones it
+ * finishes on the nodes, and the ones in doubt, still in progress or rolled
+ * back.  No row between rounds.  See gp_dtx.c.
+ */
+CREATE FUNCTION gp_internal.dtx_recovery_progress(
+	OUT phase int, OUT recover_commited_dtx_total bigint,
+	OUT recover_commited_dtx_completed bigint, OUT in_doubt_tx_total bigint,
+	OUT in_doubt_tx_in_progress bigint, OUT in_doubt_tx_aborted bigint)
+RETURNS SETOF record
+AS 'MODULE_PATHNAME', 'gp_dtx_recovery_progress'
+LANGUAGE C STRICT VOLATILE;
+
+SET allow_system_table_mods = on;
+CREATE VIEW pg_catalog.gp_stat_progress_dtx_recovery AS
+	SELECT CASE p.phase
+			   WHEN 0 THEN 'initializing'
+			   WHEN 1 THEN 'recovering commited distributed transactions'
+			   WHEN 2 THEN 'gathering in-doubt transactions'
+			   WHEN 3 THEN 'aborting in-doubt transactions'
+			   WHEN 4 THEN 'gathering in-doubt orphaned transactions'
+			   WHEN 5 THEN 'managing in-doubt orphaned transactions'
+		   END AS phase,
+		   p.recover_commited_dtx_total, p.recover_commited_dtx_completed,
+		   p.in_doubt_tx_total, p.in_doubt_tx_in_progress,
+		   p.in_doubt_tx_aborted
+	FROM gp_internal.dtx_recovery_progress() p;
+RESET allow_system_table_mods;
+
+GRANT SELECT ON pg_catalog.gp_stat_progress_dtx_recovery TO PUBLIC;
+
+/*
  * Wait until this node's mirror has what the node has flushed: Cloudberry's
  * wait_for_mirror(), which the coordinator runs on a segment when a COMMIT
  * PREPARED it sends again finds the part committed already.  See gp_dtx.c.

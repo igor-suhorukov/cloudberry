@@ -56,9 +56,9 @@ greenplum              planner  106   PASSES=planner MEM=14000
 singlenode             orca     165   PASSES=orca MEM=5500
 pax                    toast     78   PAX_GROUP=toast MEM=5000
 pax                    -         20   PAX_GROUP=main MEM=2200
-isolation2             orca     134   PASSES=orca MEM=11000
+isolation2             orca     134   PASSES=orca MEM=12500
 postgis_regress        orca     102   PASSES=orca MEM=6000
-isolation2             planner  133   PASSES=planner MEM=11000
+isolation2             planner  133   PASSES=planner MEM=12500
 diskquota              isolation2 105   DQ_PARTS=isolation2 MEM=2000
 gpmgmt                 -        154   MEM=1600
 singlenode             planner   26   PASSES=planner MEM=3500

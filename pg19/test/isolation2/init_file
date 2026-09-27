@@ -16,6 +16,12 @@ m/^while inserting index tuple \(\d+,\d+\) in relation /
 # masks it.
 m/^DETAIL:  segment \d+ \([^)]*\)(; \d+ other segments failed too)?$/
 
+# A fault's PANIC, when it reaches the client before the connection closes:
+# its message ends in a space, as Cloudberry's does, which the matchsubs of
+# the test that expects it (dtx_recovery_wait_lsn), written without the
+# space, do not take away.
+m/^PANIC:  fault triggered, fault name:'\w+' fault type:'panic' $/
+
 -- end_matchignore
 
 -- start_matchsubs

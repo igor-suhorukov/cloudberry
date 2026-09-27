@@ -29,7 +29,9 @@
 # M5 to M7, and are not listed.  Its FTS tests
 # are M4's, and are: the ones that run are in the groups mirrors1 to
 # mirrors3, whose clusters have a mirror for each segment -- three, so that
-# they run side by side -- and M7's in mirrors4, whose standby they change.
+# they run side by side -- M7's in mirrors4, whose standby they change, and
+# dtx_recovery_wait_lsn in mirrors5, whose recovery process waits a minute
+# for FTS to let a mirror go.
 run  lockmodes                                     lockmodes
 run  select_dropped_table
 run  resource_queue_self_deadlock                  queues
@@ -76,7 +78,7 @@ run  segwalrep/cancel_commit_pending_replication   mirrors3
 run  segwalrep/twophase_tolerance_with_mirror_promotion  mirrors1
 run  segwalrep/dtm_recovery_on_standby             mirrors4
 run  segwalrep/commit_blocking_on_standby          mirrors4
-skip segwalrep/dtx_recovery_wait_lsn               gp_stat_progress_dtx_recovery, Cloudberry's view of its recovery process reading the coordinator's WAL for committed distributed transactions, and a fault that fails the coordinator with a PANIC (exec_simple_query_start), neither of which the port has
+run  segwalrep/dtx_recovery_wait_lsn               mirrors5
 skip segwalrep/select_throttle                     wait_for_replication_threshold, Cloudberry's throttling of a backend's WAL until the mirror has it, and gp_disable_tuple_hints, which PostgreSQL does not have
 run  segwalrep/startup_rename_prepared_xlog        mirrors2
 run  fts_manual_probe                              mirrors1
