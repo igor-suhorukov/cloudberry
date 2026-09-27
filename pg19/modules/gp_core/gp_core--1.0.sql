@@ -1676,6 +1676,412 @@ RETURNS numeric AS 'MODULE_PATHNAME', 'gp_linear_interpolate'
 LANGUAGE C IMMUTABLE STRICT PARALLEL SAFE;
 
 /*
+ * Cloudberry's functions for looking into a query and into the cluster
+ * (gp_monitor.c, gp_size.c, gp_gdd.c).
+ *
+ * gp_dump_query_oids(): the relations and functions a query depends on, as
+ * Cloudberry's minirepro reads them.
+ */
+CREATE FUNCTION pg_catalog.gp_dump_query_oids(text)
+RETURNS text
+AS 'MODULE_PATHNAME', 'gp_dump_query_oids'
+LANGUAGE C VOLATILE STRICT PARALLEL RESTRICTED;
+
+COMMENT ON FUNCTION pg_catalog.gp_dump_query_oids(text) IS
+	'List function and relation OIDs that a query depends on, as a JSON object';
+
+/*
+ * gp_log_backend_memory_contexts(session [, content]): each segment's
+ * backends of the session, or one segment's, log their memory contexts; the
+ * count of the segments that did.  Superuser only, as PostgreSQL's
+ * pg_log_backend_memory_contexts(), which each segment calls.
+ */
+CREATE FUNCTION pg_catalog.gp_log_backend_memory_contexts(int8)
+RETURNS int8
+AS 'MODULE_PATHNAME', 'gp_log_backend_memory_contexts'
+LANGUAGE C VOLATILE STRICT;
+
+CREATE FUNCTION pg_catalog.gp_log_backend_memory_contexts(int8, int8)
+RETURNS int8
+AS 'MODULE_PATHNAME', 'gp_log_backend_memory_contexts'
+LANGUAGE C VOLATILE STRICT;
+
+REVOKE ALL ON FUNCTION pg_catalog.gp_log_backend_memory_contexts(int8) FROM PUBLIC;
+REVOKE ALL ON FUNCTION pg_catalog.gp_log_backend_memory_contexts(int8, int8) FROM PUBLIC;
+
+COMMENT ON FUNCTION pg_catalog.gp_log_backend_memory_contexts(int8) IS
+	'log memory contexts of the backend for the specified session ID';
+COMMENT ON FUNCTION pg_catalog.gp_log_backend_memory_contexts(int8, int8) IS
+	'log memory contexts of the backend for the specified session ID and content ID';
+
+/*
+ * gp_suboverflowed_backend: on each node, the processes whose
+ * subtransactions have overflowed their cache (segid, pids), the
+ * coordinator's as -1, as Cloudberry's view gives them -- read on each
+ * segment through the view here, which gp.dist_random() reads there.
+ */
+CREATE FUNCTION pg_catalog.gp_get_suboverflowed_backends()
+RETURNS int4[]
+AS 'MODULE_PATHNAME', 'gp_get_suboverflowed_backends'
+LANGUAGE C VOLATILE;
+
+COMMENT ON FUNCTION pg_catalog.gp_get_suboverflowed_backends() IS
+	'get backends of overflowed subtransaction';
+
+CREATE VIEW gp_internal.suboverflowed_backends AS
+	SELECT pg_catalog.gp_get_suboverflowed_backends() AS pids;
+
+/*
+ * gp_dist_wait_status(): every node's waiting relations, in Cloudberry's
+ * columns (gp_gdd.c).
+ */
+CREATE FUNCTION pg_catalog.gp_dist_wait_status(
+	OUT segid int4, OUT waiter_dxid int8, OUT holder_dxid int8,
+	OUT "holdTillEndXact" bool, OUT waiter_lpid int4, OUT holder_lpid int4,
+	OUT waiter_lockmode text, OUT waiter_locktype text,
+	OUT waiter_sessionid int4, OUT holder_sessionid int4)
+RETURNS SETOF record
+AS 'MODULE_PATHNAME', 'gp_dist_wait_status_cluster'
+LANGUAGE C VOLATILE PARALLEL RESTRICTED;
+
+/*
+ * cbdb_relation_size(oid[] [, fork]): each relation's size, the cluster's,
+ * the segments asked once for them all (gp_size.c).
+ */
+CREATE FUNCTION pg_catalog.cbdb_relation_size(reloids oid[], forkname text,
+	OUT reloid oid, OUT size int8)
+RETURNS SETOF record
+AS 'MODULE_PATHNAME', 'gp_cbdb_relation_size'
+LANGUAGE C VOLATILE STRICT PARALLEL UNSAFE ROWS 100;
+
+CREATE FUNCTION pg_catalog.cbdb_relation_size(reloids oid[],
+	OUT reloid oid, OUT size int8)
+RETURNS SETOF record
+LANGUAGE sql VOLATILE STRICT PARALLEL UNSAFE COST 1 ROWS 100
+BEGIN ATOMIC
+	SELECT * FROM pg_catalog.cbdb_relation_size($1, 'main');
+END;
+
+COMMENT ON FUNCTION pg_catalog.cbdb_relation_size(oid[], text) IS
+	'disk space usage for the specified fork of a group of tables or indexes';
+COMMENT ON FUNCTION pg_catalog.cbdb_relation_size(oid[]) IS
+	'disk space usage for the main fork of a group of tables or indexes';
+
+/*
+ * gp_tablespace_location(oid): each node's location of the tablespace, as
+ * pg_tablespace_location() says it there, with its content id; and
+ * get_tablespace_version_directory_name(), the directory of this release a
+ * node makes under it (gp_size.c).
+ */
+CREATE FUNCTION gp_internal.tablespace_segment_location(oid,
+	OUT gp_segment_id int4, OUT tblspc_loc text)
+RETURNS SETOF record
+AS 'MODULE_PATHNAME', 'gp_tablespace_segment_location'
+LANGUAGE C VOLATILE STRICT;
+
+CREATE FUNCTION pg_catalog.gp_tablespace_location(tblspc_oid oid,
+	OUT gp_segment_id int4, OUT tblspc_loc text)
+RETURNS SETOF record
+LANGUAGE sql VOLATILE STRICT
+AS $$
+	SELECT * FROM gp_internal.tablespace_segment_location($1)
+	UNION ALL
+	SELECT -1, gp_internal.tablespace_location($1)
+$$;
+
+CREATE FUNCTION pg_catalog.get_tablespace_version_directory_name()
+RETURNS text
+AS 'MODULE_PATHNAME', 'gp_tablespace_version_directory_name'
+LANGUAGE C IMMUTABLE PARALLEL SAFE;
+
+COMMENT ON FUNCTION pg_catalog.get_tablespace_version_directory_name() IS
+	'get the version directory name of this release for user tablespaces';
+
+SET allow_system_table_mods = on;
+
+CREATE VIEW pg_catalog.gp_suboverflowed_backend (segid, pids) AS
+	SELECT -1, s.pids FROM gp_internal.suboverflowed_backends s
+	UNION ALL
+	SELECT d.gp_segment_id, d.pids
+	  FROM gp.dist_random(NULL::gp_internal.suboverflowed_backends) d
+	ORDER BY 1;
+
+/*
+ * pg_stat_operations: pg_stat_last_operation and pg_stat_last_shoperation
+ * of the roles, relations, schemas, databases and tablespaces there are,
+ * with their names and whether the role that acted is the same still --
+ * Cloudberry's view, less its resource queues, of which the port's
+ * catalogs record no operation.
+ */
+CREATE VIEW pg_catalog.pg_stat_operations AS
+SELECT 'pg_authid' AS classname, a.rolname AS objname, c.objid,
+	   NULL::name AS schemaname,
+	   CASE WHEN b.oid = c.stasysid AND b.rolname = c.stausename THEN 'CURRENT'
+			WHEN b.rolname != c.stausename THEN 'CHANGED'
+			ELSE 'DROPPED' END AS usestatus,
+	   CASE WHEN b.rolname IS NULL THEN c.stausename ELSE b.rolname END AS usename,
+	   c.staactionname AS actionname, c.stasubtype AS subtype, c.statime
+  FROM pg_catalog.pg_authid a,
+	   (pg_catalog.pg_authid b FULL JOIN pg_catalog.pg_stat_last_shoperation c
+		ON b.oid = c.stasysid)
+ WHERE a.oid = c.objid AND c.classid = 'pg_catalog.pg_authid'::regclass
+UNION
+SELECT 'pg_class', a.relname, c.objid, n.nspname,
+	   CASE WHEN b.oid = c.stasysid AND b.rolname = c.stausename THEN 'CURRENT'
+			WHEN b.rolname != c.stausename THEN 'CHANGED'
+			ELSE 'DROPPED' END,
+	   CASE WHEN b.rolname IS NULL THEN c.stausename ELSE b.rolname END,
+	   c.staactionname, c.stasubtype, c.statime
+  FROM pg_catalog.pg_class a, pg_catalog.pg_namespace n,
+	   (pg_catalog.pg_authid b FULL JOIN pg_catalog.pg_stat_last_operation c
+		ON b.oid = c.stasysid)
+ WHERE a.relnamespace = n.oid AND a.oid = c.objid
+   AND c.classid = 'pg_catalog.pg_class'::regclass
+UNION
+SELECT 'pg_namespace', a.nspname, c.objid, NULL,
+	   CASE WHEN b.oid = c.stasysid AND b.rolname = c.stausename THEN 'CURRENT'
+			WHEN b.rolname != c.stausename THEN 'CHANGED'
+			ELSE 'DROPPED' END,
+	   CASE WHEN b.rolname IS NULL THEN c.stausename ELSE b.rolname END,
+	   c.staactionname, c.stasubtype, c.statime
+  FROM pg_catalog.pg_namespace a,
+	   (pg_catalog.pg_authid b FULL JOIN pg_catalog.pg_stat_last_operation c
+		ON b.oid = c.stasysid)
+ WHERE a.oid = c.objid AND c.classid = 'pg_catalog.pg_namespace'::regclass
+UNION
+SELECT 'pg_database', a.datname, c.objid, NULL,
+	   CASE WHEN b.oid = c.stasysid AND b.rolname = c.stausename THEN 'CURRENT'
+			WHEN b.rolname != c.stausename THEN 'CHANGED'
+			ELSE 'DROPPED' END,
+	   CASE WHEN b.rolname IS NULL THEN c.stausename ELSE b.rolname END,
+	   c.staactionname, c.stasubtype, c.statime
+  FROM pg_catalog.pg_database a,
+	   (pg_catalog.pg_authid b FULL JOIN pg_catalog.pg_stat_last_shoperation c
+		ON b.oid = c.stasysid)
+ WHERE a.oid = c.objid AND c.classid = 'pg_catalog.pg_database'::regclass
+UNION
+SELECT 'pg_tablespace', a.spcname, c.objid, NULL,
+	   CASE WHEN b.oid = c.stasysid AND b.rolname = c.stausename THEN 'CURRENT'
+			WHEN b.rolname != c.stausename THEN 'CHANGED'
+			ELSE 'DROPPED' END,
+	   CASE WHEN b.rolname IS NULL THEN c.stausename ELSE b.rolname END,
+	   c.staactionname, c.stasubtype, c.statime
+  FROM pg_catalog.pg_tablespace a,
+	   (pg_catalog.pg_authid b FULL JOIN pg_catalog.pg_stat_last_shoperation c
+		ON b.oid = c.stasysid)
+ WHERE a.oid = c.objid AND c.classid = 'pg_catalog.pg_tablespace'::regclass
+ORDER BY 9;
+
+/*
+ * The summary views of the statistics, Cloudberry's (its
+ * system_views_gp_summary.sql): what every node counted of a relation, an
+ * index or a function, added up -- a replicated table's divided by its
+ * segments, each of which holds all of it.  A user table's scans and tuples
+ * are the segments', which hold its rows, and a catalog's the coordinator's;
+ * its vacuums and analyzes the coordinator's, which runs them.  Those whose
+ * PostgreSQL 19 view has other columns than Cloudberry's -- the archiver's,
+ * the background writer's, the WAL's, a database's, the SLRUs', a vacuum's
+ * progress -- are not made.
+ */
+CREATE VIEW pg_catalog.gp_stat_all_tables_summary AS
+SELECT s.relid, s.schemaname, s.relname,
+	   m.seq_scan, m.last_seq_scan, m.seq_tup_read, m.idx_scan,
+	   m.last_idx_scan, m.idx_tup_fetch, m.n_tup_ins, m.n_tup_upd,
+	   m.n_tup_del, m.n_tup_hot_upd, m.n_live_tup, m.n_dead_tup,
+	   m.n_mod_since_analyze, s.last_vacuum, s.last_autovacuum,
+	   s.last_analyze, s.last_autoanalyze, s.vacuum_count,
+	   s.autovacuum_count, s.analyze_count, s.autoanalyze_count
+  FROM (SELECT allt.relid,
+			   CASE WHEN d.policytype = 'r' THEN (sum(allt.seq_scan) / d.numsegments)::bigint ELSE sum(allt.seq_scan) END AS seq_scan,
+			   max(allt.last_seq_scan) AS last_seq_scan,
+			   CASE WHEN d.policytype = 'r' THEN (sum(allt.seq_tup_read) / d.numsegments)::bigint ELSE sum(allt.seq_tup_read) END AS seq_tup_read,
+			   CASE WHEN d.policytype = 'r' THEN (sum(allt.idx_scan) / d.numsegments)::bigint ELSE sum(allt.idx_scan) END AS idx_scan,
+			   max(allt.last_idx_scan) AS last_idx_scan,
+			   CASE WHEN d.policytype = 'r' THEN (sum(allt.idx_tup_fetch) / d.numsegments)::bigint ELSE sum(allt.idx_tup_fetch) END AS idx_tup_fetch,
+			   CASE WHEN d.policytype = 'r' THEN (sum(allt.n_tup_ins) / d.numsegments)::bigint ELSE sum(allt.n_tup_ins) END AS n_tup_ins,
+			   CASE WHEN d.policytype = 'r' THEN (sum(allt.n_tup_upd) / d.numsegments)::bigint ELSE sum(allt.n_tup_upd) END AS n_tup_upd,
+			   CASE WHEN d.policytype = 'r' THEN (sum(allt.n_tup_del) / d.numsegments)::bigint ELSE sum(allt.n_tup_del) END AS n_tup_del,
+			   CASE WHEN d.policytype = 'r' THEN (sum(allt.n_tup_hot_upd) / d.numsegments)::bigint ELSE sum(allt.n_tup_hot_upd) END AS n_tup_hot_upd,
+			   CASE WHEN d.policytype = 'r' THEN (sum(allt.n_live_tup) / d.numsegments)::bigint ELSE sum(allt.n_live_tup) END AS n_live_tup,
+			   CASE WHEN d.policytype = 'r' THEN (sum(allt.n_dead_tup) / d.numsegments)::bigint ELSE sum(allt.n_dead_tup) END AS n_dead_tup,
+			   CASE WHEN d.policytype = 'r' THEN (sum(allt.n_mod_since_analyze) / d.numsegments)::bigint ELSE sum(allt.n_mod_since_analyze) END AS n_mod_since_analyze
+		  FROM gp.dist_random(NULL::pg_catalog.pg_stat_all_tables) allt
+		  JOIN pg_catalog.gp_distribution_policy d ON allt.relid = d.localoid
+		 WHERE allt.relid >= 16384
+		 GROUP BY allt.relid, d.policytype, d.numsegments
+		UNION ALL
+		SELECT relid, seq_scan, last_seq_scan, seq_tup_read, idx_scan,
+			   last_idx_scan, idx_tup_fetch, n_tup_ins, n_tup_upd, n_tup_del,
+			   n_tup_hot_upd, n_live_tup, n_dead_tup, n_mod_since_analyze
+		  FROM pg_catalog.pg_stat_all_tables
+		 WHERE relid < 16384) m
+  JOIN pg_catalog.pg_stat_all_tables s ON m.relid = s.relid;
+
+CREATE VIEW pg_catalog.gp_stat_user_tables_summary AS
+	SELECT * FROM pg_catalog.gp_stat_all_tables_summary
+	 WHERE schemaname NOT IN ('pg_catalog', 'information_schema', 'pg_aoseg')
+	   AND schemaname !~ '^pg_toast';
+
+CREATE VIEW pg_catalog.gp_stat_sys_tables_summary AS
+	SELECT * FROM pg_catalog.gp_stat_all_tables_summary
+	 WHERE schemaname IN ('pg_catalog', 'information_schema', 'pg_aoseg')
+		OR schemaname ~ '^pg_toast';
+
+CREATE VIEW pg_catalog.gp_stat_xact_all_tables_summary AS
+SELECT sxa.relid, sxa.schemaname, sxa.relname,
+	   CASE WHEN d.policytype = 'r' THEN (sum(sxa.seq_scan) / d.numsegments)::bigint ELSE sum(sxa.seq_scan) END AS seq_scan,
+	   CASE WHEN d.policytype = 'r' THEN (sum(sxa.seq_tup_read) / d.numsegments)::bigint ELSE sum(sxa.seq_tup_read) END AS seq_tup_read,
+	   CASE WHEN d.policytype = 'r' THEN (sum(sxa.idx_scan) / d.numsegments)::bigint ELSE sum(sxa.idx_scan) END AS idx_scan,
+	   CASE WHEN d.policytype = 'r' THEN (sum(sxa.idx_tup_fetch) / d.numsegments)::bigint ELSE sum(sxa.idx_tup_fetch) END AS idx_tup_fetch,
+	   CASE WHEN d.policytype = 'r' THEN (sum(sxa.n_tup_ins) / d.numsegments)::bigint ELSE sum(sxa.n_tup_ins) END AS n_tup_ins,
+	   CASE WHEN d.policytype = 'r' THEN (sum(sxa.n_tup_upd) / d.numsegments)::bigint ELSE sum(sxa.n_tup_upd) END AS n_tup_upd,
+	   CASE WHEN d.policytype = 'r' THEN (sum(sxa.n_tup_del) / d.numsegments)::bigint ELSE sum(sxa.n_tup_del) END AS n_tup_del,
+	   CASE WHEN d.policytype = 'r' THEN (sum(sxa.n_tup_hot_upd) / d.numsegments)::bigint ELSE sum(sxa.n_tup_hot_upd) END AS n_tup_hot_upd,
+	   CASE WHEN d.policytype = 'r' THEN (sum(sxa.n_tup_newpage_upd) / d.numsegments)::bigint ELSE sum(sxa.n_tup_newpage_upd) END AS n_tup_newpage_upd
+  FROM (SELECT * FROM pg_catalog.pg_stat_xact_all_tables
+		UNION ALL
+		SELECT * FROM gp.dist_random(NULL::pg_catalog.pg_stat_xact_all_tables)) sxa
+  LEFT JOIN pg_catalog.gp_distribution_policy d ON sxa.relid = d.localoid
+ GROUP BY sxa.relid, sxa.schemaname, sxa.relname, d.policytype, d.numsegments;
+
+CREATE VIEW pg_catalog.gp_stat_xact_user_tables_summary AS
+	SELECT * FROM pg_catalog.gp_stat_xact_all_tables_summary
+	 WHERE schemaname NOT IN ('pg_catalog', 'information_schema', 'pg_aoseg')
+	   AND schemaname !~ '^pg_toast';
+
+CREATE VIEW pg_catalog.gp_stat_xact_sys_tables_summary AS
+	SELECT * FROM pg_catalog.gp_stat_xact_all_tables_summary
+	 WHERE schemaname IN ('pg_catalog', 'information_schema', 'pg_aoseg')
+		OR schemaname ~ '^pg_toast';
+
+CREATE VIEW pg_catalog.gp_stat_all_indexes_summary AS
+SELECT s.relid, s.indexrelid, s.schemaname, s.relname, s.indexrelname,
+	   m.idx_scan, m.last_idx_scan, m.idx_tup_read, m.idx_tup_fetch
+  FROM (SELECT alli.indexrelid,
+			   CASE WHEN d.policytype = 'r' THEN (sum(alli.idx_scan) / d.numsegments)::bigint ELSE sum(alli.idx_scan) END AS idx_scan,
+			   max(alli.last_idx_scan) AS last_idx_scan,
+			   CASE WHEN d.policytype = 'r' THEN (sum(alli.idx_tup_read) / d.numsegments)::bigint ELSE sum(alli.idx_tup_read) END AS idx_tup_read,
+			   CASE WHEN d.policytype = 'r' THEN (sum(alli.idx_tup_fetch) / d.numsegments)::bigint ELSE sum(alli.idx_tup_fetch) END AS idx_tup_fetch
+		  FROM gp.dist_random(NULL::pg_catalog.pg_stat_all_indexes) alli
+		  LEFT JOIN pg_catalog.gp_distribution_policy d ON alli.relid = d.localoid
+		 WHERE alli.relid >= 16384
+		 GROUP BY alli.indexrelid, d.policytype, d.numsegments
+		UNION ALL
+		SELECT indexrelid, idx_scan, last_idx_scan, idx_tup_read, idx_tup_fetch
+		  FROM pg_catalog.pg_stat_all_indexes
+		 WHERE relid < 16384) m
+  JOIN pg_catalog.pg_stat_all_indexes s ON m.indexrelid = s.indexrelid;
+
+CREATE VIEW pg_catalog.gp_stat_user_indexes_summary AS
+	SELECT * FROM pg_catalog.gp_stat_all_indexes_summary
+	 WHERE schemaname NOT IN ('pg_catalog', 'information_schema', 'pg_aoseg')
+	   AND schemaname !~ '^pg_toast';
+
+CREATE VIEW pg_catalog.gp_stat_sys_indexes_summary AS
+	SELECT * FROM pg_catalog.gp_stat_all_indexes_summary
+	 WHERE schemaname IN ('pg_catalog', 'information_schema', 'pg_aoseg')
+		OR schemaname ~ '^pg_toast';
+
+CREATE VIEW pg_catalog.gp_statio_all_tables_summary AS
+SELECT sat.relid, sat.schemaname, sat.relname,
+	   CASE WHEN d.policytype = 'r' THEN (sum(sat.heap_blks_read) / d.numsegments)::bigint ELSE sum(sat.heap_blks_read) END AS heap_blks_read,
+	   CASE WHEN d.policytype = 'r' THEN (sum(sat.heap_blks_hit) / d.numsegments)::bigint ELSE sum(sat.heap_blks_hit) END AS heap_blks_hit,
+	   CASE WHEN d.policytype = 'r' THEN (sum(sat.idx_blks_read) / d.numsegments)::bigint ELSE sum(sat.idx_blks_read) END AS idx_blks_read,
+	   CASE WHEN d.policytype = 'r' THEN (sum(sat.idx_blks_hit) / d.numsegments)::bigint ELSE sum(sat.idx_blks_hit) END AS idx_blks_hit,
+	   CASE WHEN d.policytype = 'r' THEN (sum(sat.toast_blks_read) / d.numsegments)::bigint ELSE sum(sat.toast_blks_read) END AS toast_blks_read,
+	   CASE WHEN d.policytype = 'r' THEN (sum(sat.toast_blks_hit) / d.numsegments)::bigint ELSE sum(sat.toast_blks_hit) END AS toast_blks_hit,
+	   CASE WHEN d.policytype = 'r' THEN (sum(sat.tidx_blks_read) / d.numsegments)::bigint ELSE sum(sat.tidx_blks_read) END AS tidx_blks_read,
+	   CASE WHEN d.policytype = 'r' THEN (sum(sat.tidx_blks_hit) / d.numsegments)::bigint ELSE sum(sat.tidx_blks_hit) END AS tidx_blks_hit
+  FROM (SELECT * FROM pg_catalog.pg_statio_all_tables
+		UNION ALL
+		SELECT * FROM gp.dist_random(NULL::pg_catalog.pg_statio_all_tables)) sat
+  LEFT JOIN pg_catalog.gp_distribution_policy d ON sat.relid = d.localoid
+ GROUP BY sat.relid, sat.schemaname, sat.relname, d.policytype, d.numsegments;
+
+CREATE VIEW pg_catalog.gp_statio_user_tables_summary AS
+	SELECT * FROM pg_catalog.gp_statio_all_tables_summary
+	 WHERE schemaname NOT IN ('pg_catalog', 'information_schema', 'pg_aoseg')
+	   AND schemaname !~ '^pg_toast';
+
+CREATE VIEW pg_catalog.gp_statio_sys_tables_summary AS
+	SELECT * FROM pg_catalog.gp_statio_all_tables_summary
+	 WHERE schemaname IN ('pg_catalog', 'information_schema', 'pg_aoseg')
+		OR schemaname ~ '^pg_toast';
+
+CREATE VIEW pg_catalog.gp_statio_all_indexes_summary AS
+SELECT sai.relid, sai.indexrelid, sai.schemaname, sai.relname, sai.indexrelname,
+	   CASE WHEN d.policytype = 'r' THEN (sum(sai.idx_blks_read) / d.numsegments)::bigint ELSE sum(sai.idx_blks_read) END AS idx_blks_read,
+	   CASE WHEN d.policytype = 'r' THEN (sum(sai.idx_blks_hit) / d.numsegments)::bigint ELSE sum(sai.idx_blks_hit) END AS idx_blks_hit
+  FROM (SELECT * FROM pg_catalog.pg_statio_all_indexes
+		UNION ALL
+		SELECT * FROM gp.dist_random(NULL::pg_catalog.pg_statio_all_indexes)) sai
+  LEFT JOIN pg_catalog.gp_distribution_policy d ON sai.relid = d.localoid
+ GROUP BY sai.relid, sai.indexrelid, sai.schemaname, sai.relname,
+		  sai.indexrelname, d.policytype, d.numsegments;
+
+CREATE VIEW pg_catalog.gp_statio_user_indexes_summary AS
+	SELECT * FROM pg_catalog.gp_statio_all_indexes_summary
+	 WHERE schemaname NOT IN ('pg_catalog', 'information_schema', 'pg_aoseg')
+	   AND schemaname !~ '^pg_toast';
+
+CREATE VIEW pg_catalog.gp_statio_sys_indexes_summary AS
+	SELECT * FROM pg_catalog.gp_statio_all_indexes_summary
+	 WHERE schemaname IN ('pg_catalog', 'information_schema', 'pg_aoseg')
+		OR schemaname ~ '^pg_toast';
+
+CREATE VIEW pg_catalog.gp_statio_all_sequences_summary AS
+SELECT sas.relid, sas.schemaname, sas.relname,
+	   sum(sas.blks_read) AS blks_read, sum(sas.blks_hit) AS blks_hit
+  FROM (SELECT * FROM pg_catalog.pg_statio_all_sequences
+		UNION ALL
+		SELECT * FROM gp.dist_random(NULL::pg_catalog.pg_statio_all_sequences)) sas
+ GROUP BY sas.relid, sas.schemaname, sas.relname;
+
+CREATE VIEW pg_catalog.gp_statio_user_sequences_summary AS
+	SELECT * FROM pg_catalog.gp_statio_all_sequences_summary
+	 WHERE schemaname NOT IN ('pg_catalog', 'information_schema', 'pg_aoseg')
+	   AND schemaname !~ '^pg_toast';
+
+CREATE VIEW pg_catalog.gp_statio_sys_sequences_summary AS
+	SELECT * FROM pg_catalog.gp_statio_all_sequences_summary
+	 WHERE schemaname IN ('pg_catalog', 'information_schema', 'pg_aoseg')
+		OR schemaname ~ '^pg_toast';
+
+CREATE VIEW pg_catalog.gp_stat_user_functions_summary AS
+SELECT guf.funcid, guf.schemaname, guf.funcname,
+	   sum(guf.calls) AS calls, sum(guf.total_time) AS total_time,
+	   sum(guf.self_time) AS self_time
+  FROM (SELECT * FROM pg_catalog.pg_stat_user_functions
+		UNION ALL
+		SELECT * FROM gp.dist_random(NULL::pg_catalog.pg_stat_user_functions)) guf
+ GROUP BY guf.funcid, guf.schemaname, guf.funcname;
+
+CREATE VIEW pg_catalog.gp_stat_xact_user_functions_summary AS
+SELECT xuf.funcid, xuf.schemaname, xuf.funcname,
+	   sum(xuf.calls) AS calls, sum(xuf.total_time) AS total_time,
+	   sum(xuf.self_time) AS self_time
+  FROM (SELECT * FROM pg_catalog.pg_stat_xact_user_functions
+		UNION ALL
+		SELECT * FROM gp.dist_random(NULL::pg_catalog.pg_stat_xact_user_functions)) xuf
+ GROUP BY xuf.funcid, xuf.schemaname, xuf.funcname;
+
+RESET allow_system_table_mods;
+
+GRANT SELECT ON pg_catalog.gp_suboverflowed_backend, pg_catalog.pg_stat_operations,
+	pg_catalog.gp_stat_all_tables_summary, pg_catalog.gp_stat_user_tables_summary,
+	pg_catalog.gp_stat_sys_tables_summary, pg_catalog.gp_stat_xact_all_tables_summary,
+	pg_catalog.gp_stat_xact_user_tables_summary, pg_catalog.gp_stat_xact_sys_tables_summary,
+	pg_catalog.gp_stat_all_indexes_summary, pg_catalog.gp_stat_user_indexes_summary,
+	pg_catalog.gp_stat_sys_indexes_summary, pg_catalog.gp_statio_all_tables_summary,
+	pg_catalog.gp_statio_user_tables_summary, pg_catalog.gp_statio_sys_tables_summary,
+	pg_catalog.gp_statio_all_indexes_summary, pg_catalog.gp_statio_user_indexes_summary,
+	pg_catalog.gp_statio_sys_indexes_summary, pg_catalog.gp_statio_all_sequences_summary,
+	pg_catalog.gp_statio_user_sequences_summary, pg_catalog.gp_statio_sys_sequences_summary,
+	pg_catalog.gp_stat_user_functions_summary, pg_catalog.gp_stat_xact_user_functions_summary,
+	gp_internal.suboverflowed_backends
+	TO PUBLIC;
+
+/*
  * FTS (gp_fts.c).  gp_request_fts_probe_scan(): probe the segments now, and
  * return once a probe that began after the call has ended, as Cloudberry's
  * does -- at once where no prober runs, as on a coordinator whose segments

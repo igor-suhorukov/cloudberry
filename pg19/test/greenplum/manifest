@@ -301,7 +301,7 @@ run  gp_backend_info
 run  gp_locale
 skip spi_processed64bit  differs: the fault executor_run_high_processed, which has the executor count past 2^32 rows, is none of the port's
 skip gp_tablespace_with_faults  function force_mirrors_to_catch_up() does not exist
-skip gp_tablespace  function gp_tablespace_location(oid) does not exist; function get_tablespace_version_directory_name() does not exist
+skip gp_tablespace  function force_mirrors_to_catch_up() does not exist; unlogged append-optimized tables are not supported
 skip temp_tablespaces  the faults sisc_xslice_temp_files and hashagg_spill_temp_files are none of the port's: canceling statement due to user request
 run  default_tablespace
 run  leastsquares
@@ -330,9 +330,9 @@ skip toast  spiexceptions.UndefinedTable: relation "pg_toast.pg_toast_25090" doe
 run  misc_jiras
 run  write_gang_idle_in_transaction_session_timeout
 skip gp_connections  differs: a primary takes a direct connection, where Cloudberry refuses it: This database instance is running as a primary segment in a Cloudberry cluster and does not permit direct connections
-skip gp_dump_query_oids  function gp_dump_query_oids(unknown) does not exist
+run  gp_dump_query_oids
 skip analyze  unrecognized configuration parameter "optimizer_analyze_root_partition"; unrecognized configuration parameter "optimizer_analyze_midlevel_partition"
-skip gp_owner_permission  relation "pg_stat_operations" does not exist
+run  gp_owner_permission
 skip incremental_analyze  syntax error at or near "foo"; syntax error at or near "foo_1_prt_2"
 run  regex_gp
 skip dispatch_encoding  relation "gp_toolkit.__gp_log_segment_ext" does not exist; raise_error called on "funny char Ä"
@@ -354,7 +354,7 @@ run  icudp/queue_depth_combination_capacity
 run  icudp/queue_depth_combination_loss_advance
 port icudp_off
 skip event_trigger_gp  differs: CREATE EXTERNAL TABLE fires the event triggers as CREATE FOREIGN TABLE, which the port makes it, and CREATE PROTOCOL and DROP PROTOCOL fire none
-skip deadlock  canceling statement due to user request; function gp_dist_wait_status() does not exist
+run  deadlock  orca  under the planner, its left join of l and r by a nested loop, which the planner's route runs on the coordinator over both tables gathered, 100,000 rows each, runs past the suite's minute
 skip deadlock2  differs: Cloudberry's NOTICE that a slice prefetches a join's qual is not the port's
 run  workfile/hashagg_spill
 run  workfile/hashjoin_spill
@@ -394,7 +394,7 @@ skip create_am_gp  function ao_row_tableam_handler(internal) does not exist; fun
 skip cbdb_optimizer_test  unrecognized configuration parameter "gp_enable_ao_indexscan"
 skip gp_runtime_filter  unrecognized configuration parameter "gp_enable_runtime_filter"; unrecognized configuration parameter "gp_enable_runtime_filter_pushdown"
 skip db_size_functions  database with OID 9999 does not exist; tablespace with OID 9999 does not exist
-skip cbdb_db_size_functions  function cbdb_relation_size(regclass[]) does not exist; function cbdb_relation_size(oid[], unknown) does not exist
+run  cbdb_db_size_functions
 run  eagerfree
 skip alter_table_set  syntax error at or near "on"; unrecognized configuration parameter "gp_enable_segment_copy_checking"
 skip alter_table_gp  differs: Cloudberry refuses to alter a column of a primary key, a unique constraint or the distribution key ("cannot alter column with primary key or unique constraint"), which the port alters
@@ -406,7 +406,7 @@ skip instr_in_shmem_verify  could not access file "gp_instrument_shmem": No such
 skip partition_locking  differs: the locks a statement takes on a partitioned table's parts, and on which nodes
 skip vacuum_gp  relation "gp_toolkit.__gp_log_master_ext" does not exist
 run  vacuum_fsm_nondefault_tablespace
-skip pg_stat  relation "gp_stat_all_tables_summary" does not exist; relation "gp_stat_user_tables_summary" does not exist
+run  pg_stat
 skip bfv_partition  unrecognized configuration parameter "optimizer_analyze_root_partition"; relation "gp_partition_template" does not exist
 run  qp_misc_rio
 skip bfv_partition_plans  differs: a count of its plan's partition selections is 0, where Cloudberry's is 2
@@ -416,7 +416,7 @@ skip rowhints  could not access file "pg_hint_plan": No such file or directory; 
 skip joinhints  could not access file "pg_hint_plan": No such file or directory
 run  qp_indexscan  planner  differs under ORCA: its plans of index scans over partitions
 run  gp_index_costing
-skip pgstat_qd_tabstat  relation "gp_stat_all_tables_summary" does not exist; syntax error at or near "on"
+skip pgstat_qd_tabstat  syntax error at or near "on": its COPY ... ON SEGMENT, to and from a file of each segment, is none of the port's
 skip dispatch  unrecognized configuration parameter "gp_max_plan_size"; could not find function "cleanupAllGangs" in file "regress.so"
 run  wrkloadadmin
 run  trig
@@ -514,10 +514,10 @@ skip matview_data  relation "gp_matview_aux" does not exist; current transaction
 skip directory_table  relation "gp_storage_server" does not exist; syntax error at or near "DATA"
 skip motion_socket  differs: its check_motion_sockets() looks up each segment's address, which on this suite's clusters is a socket's directory: socket.gaierror: [Errno -2] Name or service not known
 run  ic_proxy_socket
-skip subtrx_overflow  relation "gp_suboverflowed_backend" does not exist
+run  subtrx_overflow
 run  bfv_meta_track
 skip bfv_copy  segment reject limit reached, aborting operation
 skip dynamic_table  unrecognized parameter namespace "gp"; relation "dt0" does not exist
 run  hba_conf
 skip dboptions  differs: the psql its shell commands run connects to /tmp's socket, where this suite's nodes have directories of their own
-skip gp_log_mem_dispatch  function gp_log_backend_memory_contexts(integer) does not exist; function gp_log_backend_memory_contexts(integer, integer) does not exist
+run  gp_log_mem_dispatch

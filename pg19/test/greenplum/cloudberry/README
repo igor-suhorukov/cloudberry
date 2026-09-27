@@ -121,6 +121,16 @@ brin_ao, brin_aocs (planner, orca)  under the planner, the plans the test
 case_gp  IS NOT DISTINCT FROM, and the CASE form, printed as the searched
   CASE the port's rewrite makes of them (see the singlenode suite's README).
 
+cbdb_db_size_functions  the size of a heap's free space map, which a
+  table of 1,000 rows has on 8K pages, the port's, 24 kB on each segment,
+  and not on Cloudberry's 32K ones, which its rows fit on one of.
+
+create_extension_fail  the context of the error the fault
+  create_function_fail raises: a segment runs the script of the CREATE
+  EXTENSION it was sent, so its CREATE FUNCTION fails inside the script,
+  where Cloudberry's coordinator runs the script and dispatches each of its
+  statements alone.
+
 decode_expr  DECODE, which is no keyword of the port's: a table, a
   database, a column, a constraint, an index and a partition named decode
   are made, where Cloudberry's grammar, which reserves the word, refuses
@@ -128,12 +138,6 @@ decode_expr  DECODE, which is no keyword of the port's: a table, a
   DECODE printed as the searched CASE the port makes of it, as case_gp's
   is.  PostgreSQL 19's words for a call no function or operator takes, and
   an ORDER BY of text in the C locale, which puts "APJ" before "Americas".
-
-create_extension_fail  the context of the error the fault
-  create_function_fail raises: a segment runs the script of the CREATE
-  EXTENSION it was sent, so its CREATE FUNCTION fails inside the script,
-  where Cloudberry's coordinator runs the script and dispatches each of its
-  statements alone.
 
 qp_misc (orca)  the lines ORCA's fallback trace prints where Cloudberry's
   expected output has none, and nothing else: the test sets
@@ -338,6 +342,12 @@ percentile  median(), a plain aggregate of the port's (gp_median.c): a
   aggregate's argument, which the port's desugaring makes group_id(0) and
   Cloudberry refuses as an aggregate nested.  And PostgreSQL 19's words for
   a call no function takes -- a DETAIL where Cloudberry's HINT stood.
+
+pg_stat  the scans of its table after SET enable_seqscan TO off: the
+  planner's route has the segment plan its fragment, and the setting,
+  the coordinator's, is none a gang is sent, so the segment reads the
+  table where Cloudberry's plan reads the index -- a sequential scan more
+  and the rows it read, and no index scan.
 
 qp_dml_joins  the WARNING of an ALTER TABLE ... SET DISTRIBUTED BY (b) of a
   table CREATE TABLE AS made distributed by b already: the port gives a

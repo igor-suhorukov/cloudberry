@@ -383,6 +383,33 @@ gdd_show_wait_status(void)
 	return buf.data;
 }
 
+/*
+ * One line of gp.dist_wait_status, as gdd_show_wait_status() writes it,
+ * into an edge; false for a line that is not one.  The strings point into
+ * the line, which the tabs are cut out of.
+ */
+static bool
+parse_edge_line(char *line, GddEdgeRow *row)
+{
+	char	   *f[7];
+	char	   *fsave = NULL;
+	int			nf = 0;
+
+	for (char *tok = strtok_r(line, "\t", &fsave); tok != NULL && nf < 7;
+		 tok = strtok_r(NULL, "\t", &fsave))
+		f[nf++] = tok;
+	if (nf != 7)
+		return false;
+	row->waiter = atoi(f[0]);
+	row->holder = atoi(f[1]);
+	row->waiter_session = atoi(f[2]);
+	row->holder_session = atoi(f[3]);
+	row->solid = f[4][0] == 't';
+	row->lockmode = f[5];
+	row->locktype = f[6];
+	return true;
+}
+
 PG_FUNCTION_INFO_V1(gp_dist_wait_status);
 
 /*
@@ -413,6 +440,104 @@ gp_dist_wait_status(PG_FUNCTION_ARGS)
 		values[7] = CStringGetTextDatum(e->locktype);
 		tuplestore_putvalues(rsinfo->setResult, rsinfo->setDesc, values, nulls);
 	}
+	return (Datum) 0;
+}
+
+/* The session of a coordinator's backend: its own pid for a client's. */
+static int
+client_session(int pid, int session)
+{
+	PGPROC	   *proc;
+
+	if (session != 0)
+		return session;
+	proc = BackendPidGetProc(pid);
+	return (proc != NULL && proc->backendType == B_BACKEND) ? pid : 0;
+}
+
+/* A row of pg_catalog.gp_dist_wait_status(): a node's edge. */
+static void
+put_cluster_wait_row(ReturnSetInfo *rsinfo, int segid, const GddEdgeRow *e)
+{
+	Datum		values[10];
+	bool		nulls[10] = {0};
+	bool		coordinator = GpClusterContentId() < 0;
+
+	values[0] = Int32GetDatum(segid);
+	values[1] = Int64GetDatum(coordinator ? (int64) session_seq(e->waiter_session, NULL) : 0);
+	values[2] = Int64GetDatum(coordinator ? (int64) session_seq(e->holder_session, NULL) : 0);
+	values[3] = BoolGetDatum(e->solid);
+	values[4] = Int32GetDatum(e->waiter);
+	values[5] = Int32GetDatum(e->holder);
+	values[6] = CStringGetTextDatum(e->lockmode);
+	values[7] = CStringGetTextDatum(e->locktype);
+	values[8] = Int32GetDatum(e->waiter_session);
+	values[9] = Int32GetDatum(e->holder_session);
+	tuplestore_putvalues(rsinfo->setResult, rsinfo->setDesc, values, nulls);
+}
+
+PG_FUNCTION_INFO_V1(gp_dist_wait_status_cluster);
+
+/*
+ * pg_catalog.gp_dist_wait_status(): Cloudberry's, every node's waiting
+ * relations in its columns -- the segments' first, each as it answers
+ * gp.dist_wait_status, then the coordinator's, the order the detector reads
+ * them in.  A transaction is named by the number the detector names it by
+ * (see the file's head), which the coordinator knows of a session's: 0
+ * where the session runs none, and on a segment, which answers for itself,
+ * as on one node.
+ */
+Datum
+gp_dist_wait_status_cluster(PG_FUNCTION_ARGS)
+{
+	ReturnSetInfo *rsinfo = (ReturnSetInfo *) fcinfo->resultinfo;
+	ListCell   *lc;
+
+	InitMaterializedSRF(fcinfo, 0);
+	gdd_attach();
+
+	if (!GpClusterIsSingleNode() && GpClusterContentId() < 0)
+	{
+		int			nsegs = GpClusterSegmentCount();
+		char	  **values = palloc0_array(char *, nsegs);
+
+		GpDispatchQueryFirstValues("SELECT pg_catalog.current_setting('gp.dist_wait_status')",
+								   -1, values);
+		for (int s = 0; s < nsegs; s++)
+		{
+			char	   *save = NULL;
+
+			if (values[s] == NULL)
+				continue;
+			for (char *line = strtok_r(values[s], "\n", &save); line != NULL;
+				 line = strtok_r(NULL, "\n", &save))
+			{
+				GddEdgeRow	row;
+
+				if (parse_edge_line(line, &row))
+					put_cluster_wait_row(rsinfo, s, &row);
+			}
+		}
+	}
+
+	foreach(lc, local_edges())
+	{
+		GddEdgeRow *e = (GddEdgeRow *) lfirst(lc);
+
+		/*
+		 * A client of the coordinator is the session of its own pid, which
+		 * it tells the detector only as it runs a statement's first
+		 * dispatch: one waiting before, for a lock its parse takes, is
+		 * named so (GpClusterSessionId()).
+		 */
+		if (GpClusterContentId() < 0)
+		{
+			e->waiter_session = client_session(e->waiter, e->waiter_session);
+			e->holder_session = client_session(e->holder, e->holder_session);
+		}
+		put_cluster_wait_row(rsinfo, GpClusterContentId(), e);
+	}
+
 	return (Datum) 0;
 }
 
@@ -654,23 +779,9 @@ gdd_round(void)
 				 line = strtok_r(NULL, "\n", &save))
 			{
 				GddEdgeRow	row;
-				char	   *f[7];
-				char	   *fsave = NULL;
-				int			nf = 0;
 
-				for (char *tok = strtok_r(line, "\t", &fsave); tok != NULL && nf < 7;
-					 tok = strtok_r(NULL, "\t", &fsave))
-					f[nf++] = tok;
-				if (nf != 7)
-					continue;
-				row.waiter = atoi(f[0]);
-				row.holder = atoi(f[1]);
-				row.waiter_session = atoi(f[2]);
-				row.holder_session = atoi(f[3]);
-				row.solid = f[4][0] == 't';
-				row.lockmode = f[5];
-				row.locktype = f[6];
-				gdd_add_edge(ctx, segs[s].content, &row);
+				if (parse_edge_line(line, &row))
+					gdd_add_edge(ctx, segs[s].content, &row);
 			}
 		}
 		PQclear(res);

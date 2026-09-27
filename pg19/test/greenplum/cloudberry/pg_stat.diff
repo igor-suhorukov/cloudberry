@@ -1,0 +1,12 @@
+@@
+- public     | pg_stat_test |       12 |          391 |        1 |             0 |       110 |         0 |        19 |             0 |         91 |         19 |                 129
++ public     | pg_stat_test |       13 |          424 |        0 |             0 |       110 |         0 |        19 |             0 |         91 |         19 |                 129
+@@
+- public     | pg_stat_test |       12 |          391 |        1 |             0 |       110 |         0 |        19 |             0 |         91 |         19 |                 129
++ public     | pg_stat_test |       13 |          424 |        0 |             0 |       110 |         0 |        19 |             0 |         91 |         19 |                 129
+@@
+- public     | pg_stat_test | pg_stat_user_table_index |        1 |            1 |             0
++ public     | pg_stat_test | pg_stat_user_table_index |        0 |            0 |             0
+@@
+- public     | pg_stat_test | pg_stat_user_table_index |        1 |            1 |             0
++ public     | pg_stat_test | pg_stat_user_table_index |        0 |            0 |             0
