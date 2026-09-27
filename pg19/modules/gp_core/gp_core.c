@@ -291,6 +291,7 @@ _PG_init(void)
 PG_FUNCTION_INFO_V1(gp_version);
 PG_FUNCTION_INFO_V1(gp_node);
 PG_FUNCTION_INFO_V1(gp_policy);
+PG_FUNCTION_INFO_V1(gp_execution_segment);
 
 /*
  * gp.version()
@@ -300,6 +301,17 @@ Datum
 gp_version(PG_FUNCTION_ARGS)
 {
 	PG_RETURN_TEXT_P(cstring_to_text(GP_VERSION_STR));
+}
+
+/*
+ * pg_catalog.gp_execution_segment()
+ *		The content id of the node running the call: -1 on the coordinator,
+ *		as Cloudberry's mpp_execution_segment() gives it (cdb/cdbvars.c).
+ */
+Datum
+gp_execution_segment(PG_FUNCTION_ARGS)
+{
+	PG_RETURN_INT32(GpClusterContentId());
 }
 
 /*

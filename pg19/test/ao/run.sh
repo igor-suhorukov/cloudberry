@@ -693,6 +693,30 @@ is "and a table that leaves PAX leaves them" \
    "ALTER TABLE pxr SET ACCESS METHOD heap;
     SELECT count(*) FROM pg_attribute_encoding WHERE attrelid = 'pxr'::regclass;" "0"
 
+###############################################################################
+echo "16. gp_toolkit's views of append-optimized tables, Cloudberry's"
+###############################################################################
+q "CREATE TABLE tkc (a int, b text) WITH (appendonly=true, orientation=column, compresstype=zlib);
+   INSERT INTO tkc SELECT i % 10, repeat('abc', 50) FROM generate_series(1, 20000) i;
+   CREATE TABLE tkp (a int, b int) PARTITION BY RANGE (a) WITH (appendonly=true);
+   CREATE TABLE tkp_1 PARTITION OF tkp FOR VALUES FROM (0) TO (10);" > /dev/null
+is "__gp_is_append_only: a table by column is, and a partition, not the partitioned table" \
+   "SELECT string_agg(relname || ':' || iaotype, ' ' ORDER BY relname)
+      FROM gp_toolkit.__gp_is_append_only JOIN pg_class ON oid = iaooid
+     WHERE relname IN ('tkc', 'tkp', 'tkp_1');" "tkc:true tkp:false tkp_1:true"
+is "gp_column_size_summary: each column's size, and its size uncompressed" \
+   "SELECT string_agg(attname || ':' || (size < size_uncompressed)::text || ':' || (compression_ratio > 1)::text,
+                      ' ' ORDER BY attnum)
+      FROM gp_toolkit.gp_column_size_summary WHERE relname = 'tkc';" "a:true:true b:true:true"
+is "gp_size_of_table_uncompressed, by the table's compression ratio" \
+   "SELECT (sotu.sotusize > sotd.sotdsize)::text
+      FROM gp_toolkit.gp_size_of_table_uncompressed sotu
+      JOIN gp_toolkit.gp_size_of_table_disk sotd ON sotd.sotdoid = sotu.sotuoid
+     WHERE sotu.sotutablename = 'tkc';" "true"
+is "and gp_size_of_table_and_indexes_licensing beside it" \
+   "SELECT (sotailtablesizeuncompressed > sotailtablesizedisk)::text
+      FROM gp_toolkit.gp_size_of_table_and_indexes_licensing WHERE sotailtablename = 'tkc';" "true"
+
 echo
 echo "  $pass passed, $fail failed"
 [ "$fail" -eq 0 ]

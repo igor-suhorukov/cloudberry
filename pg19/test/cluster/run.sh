@@ -3512,10 +3512,80 @@ SQL
 		start_node "$n"
 	done
 	start_node 0
+
+	###########################################################################
+	echo "17. gp_toolkit, Cloudberry's views of the cluster"
+	###########################################################################
+	q 0 "CREATE TABLE tk (a int, b int) DISTRIBUTED BY (a);
+		 INSERT INTO tk SELECT i, i FROM generate_series(1, 1000) i;
+		 CREATE TABLE tkr (a int) DISTRIBUTED REPLICATED;
+		 INSERT INTO tkr SELECT generate_series(1, 100);" >/dev/null
+	want=$(q 0 "SELECT string_agg(gp_segment_id || ':' || n, ' ' ORDER BY gp_segment_id)
+				FROM (SELECT gp_segment_id, count(*) AS n FROM tk GROUP BY 1) s;")
+	out=$(q 0 "SELECT string_agg(segid || ':' || segtupcount, ' ' ORDER BY segid)
+			   FROM gp_toolkit.gp_skew_details('tk'::regclass);")
+	[ -n "$want" ] && [ "$out" = "$want" ] \
+		&& ok "gp_skew_details counts a table's rows on each segment ($out)" \
+		|| notok "gp_skew_details" "want [$want] got [$out]"
+	out=$(q 0 "SELECT string_agg(segid || ':' || segtupcount, ' ' ORDER BY segid)
+			   FROM gp_toolkit.gp_skew_details('tkr'::regclass);")
+	[ "$out" = "0:100 1:100" ] && ok "and a replicated table's on each, the same" \
+		|| notok "gp_skew_details of a replicated table" "$out"
+	out=$(q 0 "SELECT (skccoeff < 20)::text || ' ' || (siffraction < 0.2)::text
+			   FROM gp_toolkit.gp_skew_coefficient('tk'::regclass),
+					gp_toolkit.gp_skew_idle_fraction('tk'::regclass);")
+	[ "$out" = "true true" ] && ok "and its skew coefficient and idle fraction" \
+		|| notok "gp_skew_coefficient and gp_skew_idle_fraction" "$out"
+	it=$(q 0 "SHOW gp.interconnect_type;")
+	out=$(q 0 "SELECT string_agg(paramsegment || ':' || paramname || '=' || paramvalue, ' '
+									ORDER BY paramsegment)
+			   FROM gp_toolkit.gp_param_setting('gp_interconnect_type');")
+	[ "$out" = "-1:gp_interconnect_type=$it 0:gp_interconnect_type=$it 1:gp_interconnect_type=$it" ] \
+		&& ok "gp_param_setting gives a setting by Cloudberry's name, on the coordinator and each segment" \
+		|| notok "gp_param_setting" "$out"
+	out=$(q 0 "SELECT string_agg(paramsegment || ':' || paramvalue, ' ' ORDER BY paramsegment)
+			   FROM gp_toolkit.gp_param_settings() WHERE paramname = 'gp.dbid';")
+	[ "$out" = "0:$(dbid 1) 1:$(dbid 2)" ] \
+		&& ok "gp_param_settings gives each segment's settings, run there" \
+		|| notok "gp_param_settings" "$out"
+	out=$(q 0 "SELECT count(*) FROM gp_toolkit.gp_param_settings_seg_value_diffs
+			   WHERE psdname IN ('gp.dbid', 'gp.qe_identity', 'hosts_file', 'port');")
+	[ "$out" = "0" ] && ok "and gp_param_settings_seg_value_diffs leaves out what is each node's own" \
+		|| notok "gp_param_settings_seg_value_diffs" "$out"
+	out=$(q 0 "SELECT pg_catalog.gp_execution_segment() || ' ' ||
+					  (SELECT string_agg(s::text, ' ' ORDER BY s)
+					   FROM (SELECT pg_catalog.gp_execution_segment() AS s
+							 FROM gp_dist_random('gp_id')) d);")
+	[ "$out" = "-1 0 1" ] && ok "gp_execution_segment() is the content id of the node the call runs on" \
+		|| notok "gp_execution_segment()" "$out"
+	out=$(q 0 "SELECT count(*) || ' ' || count(*) FILTER (WHERE valid) FROM pg_catalog.gp_pgdatabase;
+			   SELECT count(*) FROM gp_toolkit.gp_pgdatabase_invalid;")
+	[ "$out" = "3 3
+0" ] && ok "gp_pgdatabase has every node, valid, and gp_pgdatabase_invalid none" \
+		|| notok "gp_pgdatabase" "$out"
+	out=$(q 0 "SELECT count(*) FROM gp_toolkit.gp_stats_missing WHERE smitable = 'tk';
+			   ANALYZE tk;
+			   SELECT count(*) FROM gp_toolkit.gp_stats_missing WHERE smitable = 'tk';")
+	[ "$out" = "1
+0" ] && ok "gp_stats_missing lists a table until it is analyzed" \
+		|| notok "gp_stats_missing" "$out"
+	out=$(q 0 "SELECT (sotdsize = pg_relation_size('tk'))::text || ' ' || (sotdsize > 0)::text
+			   FROM gp_toolkit.gp_size_of_table_disk WHERE sotdtablename = 'tk';
+			   SELECT (sosdschematablesize >= pg_relation_size('tk'))::text
+			   FROM gp_toolkit.gp_size_of_schema_disk WHERE sosdnsp = 'public';")
+	[ "$out" = "true true
+true" ] && ok "gp_size_of_table_disk and gp_size_of_schema_disk, the cluster's sizes" \
+		|| notok "gp_toolkit's size views" "$out"
+	out=$(q 0 "SELECT count(*) FILTER (WHERE iaotype)
+			   FROM gp_toolkit.__gp_is_append_only JOIN pg_class ON oid = iaooid
+			   WHERE relname IN ('tk', 'tkr');
+			   DROP TABLE tk, tkr;")
+	[ "$out" = "0" ] && ok "__gp_is_append_only: no heap table is" \
+		|| notok "__gp_is_append_only" "$out"
 fi
 
 ###############################################################################
-echo "17. a cluster described wrongly is a server that does not start"
+echo "18. a cluster described wrongly is a server that does not start"
 ###############################################################################
 # The message has to name the file and the line: this is read in the
 # postmaster while it starts, so it is all the operator is given.
@@ -3585,7 +3655,7 @@ refuses "a file that is not there is refused" \
 	"gp.cluster_config = '$ROOT/nowhere.conf'"
 
 ###############################################################################
-echo "18. with no cluster configured, this is a single node"
+echo "19. with no cluster configured, this is a single node"
 ###############################################################################
 if start_node 0 "gp.cluster_config = ''" ; then
 	notok "node 0 should not have started: gp.role is dispatch with no cluster"

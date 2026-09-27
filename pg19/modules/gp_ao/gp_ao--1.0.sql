@@ -287,6 +287,118 @@ AS $$
 	 GROUP BY segment_id
 $$ LANGUAGE sql STRICT STABLE;
 
+/*
+ * gp_toolkit's views of append-optimized tables, Cloudberry's
+ * (gp_toolkit--1.3.sql), over the functions above and the views gp_core
+ * puts in gp_toolkit: a table's size uncompressed, by its compression
+ * ratio, and each column's of a table by column.
+ */
+CREATE TYPE gp_toolkit.__gp_aovisimap_hidden_t AS (seg int, hidden bigint, total bigint);
+
+CREATE FUNCTION gp_toolkit.__gp_aovisimap_hidden_typed(oid)
+RETURNS SETOF gp_toolkit.__gp_aovisimap_hidden_t
+AS $$
+	SELECT * FROM gp_toolkit.__gp_aovisimap_hidden_info($1);
+$$ LANGUAGE sql;
+
+CREATE VIEW gp_toolkit.gp_size_of_table_uncompressed AS
+	SELECT sotu.sotuoid AS sotuoid, sotu.sotusize AS sotusize,
+		   fn.fnnspname AS sotuschemaname, fn.fnrelname AS sotutablename
+	FROM (SELECT sotd.sotdoid AS sotuoid,
+				 CASE WHEN iao.iaotype
+					  THEN CASE WHEN pg_catalog.pg_relation_size(sotd.sotdoid) = 0 THEN 0
+								ELSE pg_catalog.pg_relation_size(sotd.sotdoid) *
+									 CASE WHEN (SELECT pg_catalog.get_ao_compression_ratio(sotd.sotdoid)) = -1
+										  THEN NULL
+										  ELSE (SELECT pg_catalog.get_ao_compression_ratio(sotd.sotdoid))
+									 END
+						   END
+					  ELSE sotd.sotdsize
+				 END + sotd.sotdtoastsize + sotd.sotdadditionalsize AS sotusize
+		  FROM gp_toolkit.gp_size_of_table_disk sotd
+		  JOIN gp_toolkit.__gp_is_append_only iao ON (sotd.sotdoid = iao.iaooid)) AS sotu
+	JOIN gp_toolkit.__gp_fullname fn ON (sotu.sotuoid = fn.fnoid);
+
+REVOKE ALL ON TABLE gp_toolkit.gp_size_of_table_uncompressed FROM PUBLIC;
+
+CREATE VIEW gp_toolkit.gp_size_of_table_and_indexes_licensing AS
+	SELECT sotail.sotailoid AS sotailoid,
+		   sotail.sotailtablesizedisk AS sotailtablesizedisk,
+		   sotail.sotailtablesizeuncompressed AS sotailtablesizeuncompressed,
+		   sotail.sotailindexessize AS sotailindexessize,
+		   fn.fnnspname AS sotailschemaname, fn.fnrelname AS sotailtablename
+	FROM (SELECT sotu.sotuoid AS sotailoid, sotaid.sotaidtablesize AS sotailtablesizedisk,
+				 sotu.sotusize AS sotailtablesizeuncompressed,
+				 sotaid.sotaididxsize AS sotailindexessize
+		  FROM gp_toolkit.gp_size_of_table_uncompressed sotu
+		  JOIN gp_toolkit.gp_size_of_table_and_indexes_disk sotaid
+			ON (sotu.sotuoid = sotaid.sotaidoid)) AS sotail
+	JOIN gp_toolkit.__gp_fullname fn ON (sotail.sotailoid = fn.fnoid);
+
+REVOKE ALL ON TABLE gp_toolkit.gp_size_of_table_and_indexes_licensing FROM PUBLIC;
+
+CREATE FUNCTION gp_toolkit.get_column_size(ao_oid oid,
+	OUT segment int, OUT attnum int, OUT size bigint,
+	OUT size_uncompressed bigint, OUT compression_ratio numeric)
+RETURNS SETOF record
+AS $$
+DECLARE
+	ao_rec record;
+BEGIN
+	FOR ao_rec IN
+		SELECT segment_id, column_num, sum(eof) AS size,
+			   sum(eof_uncompressed) AS size_uncompressed
+		FROM gp_toolkit.__gp_aocsseg(ao_oid)
+		GROUP BY segment_id, column_num
+	LOOP
+		segment := ao_rec.segment_id;
+		attnum := ao_rec.column_num + 1;	-- user attributes start at attnum=1
+		size := ao_rec.size;
+		size_uncompressed := ao_rec.size_uncompressed;
+		compression_ratio := round(size_uncompressed::numeric / size::numeric, 2);
+		RETURN NEXT;
+	END LOOP;
+	RETURN;
+END;
+$$ LANGUAGE plpgsql;
+
+CREATE VIEW gp_toolkit.gp_column_size AS (
+	SELECT s.segment AS gp_segment_id, c.oid AS relid, n.nspname AS schema,
+		   c.relname, a.attnum, a.attname,
+		   coalesce(s.size, 0) AS size,
+		   coalesce(s.size_uncompressed, 0) AS size_uncompressed,
+		   coalesce(s.compression_ratio, 0) AS compression_ratio
+	FROM pg_catalog.pg_class c
+	LEFT JOIN LATERAL gp_toolkit.get_column_size(oid) s ON true
+	JOIN pg_catalog.pg_attribute a ON a.attrelid = c.oid AND a.attnum = s.attnum
+	JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace
+	JOIN pg_catalog.pg_am am ON am.oid = c.relam
+	WHERE am.amname = 'ao_column'
+	  AND c.relkind = 'r'
+	  AND a.attisdropped = 'f'
+	  AND s.size IS NOT NULL
+	ORDER BY s.segment, c.oid, a.attnum, s.size
+);
+
+CREATE VIEW gp_toolkit.gp_column_size_summary AS (
+	SELECT c.oid AS relid, n.nspname AS schema, c.relname, a.attnum, a.attname,
+		   coalesce(sum(s.size), 0) AS size,
+		   coalesce(sum(s.size_uncompressed), 0) AS size_uncompressed,
+		   coalesce(round(avg(s.compression_ratio), 2), 0) AS compression_ratio
+	FROM pg_catalog.pg_class c
+	LEFT JOIN LATERAL gp_toolkit.get_column_size(oid) s ON true
+	JOIN pg_catalog.pg_attribute a ON a.attrelid = c.oid AND a.attnum = s.attnum
+	JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace
+	JOIN pg_catalog.pg_am am ON am.oid = c.relam
+	WHERE am.amname = 'ao_column'
+	  AND c.relkind = 'r'
+	  AND a.attisdropped = 'f'
+	  AND s.size IS NOT NULL
+	GROUP BY n.nspname, c.oid, a.attnum, a.attname, c.relname
+	ORDER BY n.nspname, c.oid, a.attnum, size
+);
+
+GRANT SELECT ON gp_toolkit.gp_column_size, gp_toolkit.gp_column_size_summary TO PUBLIC;
 GRANT EXECUTE ON ALL FUNCTIONS IN SCHEMA gp_toolkit TO PUBLIC;
 
 /* ------------------------------------------------------------------------- */

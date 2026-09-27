@@ -1336,3 +1336,518 @@ REVOKE ALL ON FUNCTION pg_catalog.gp_add_segment_primary(text, text, int4, text)
 	pg_catalog.gp_update_segment_configuration_mode_status(int4, "char", "char"),
 	pg_catalog.gp_activate_standby()
 	FROM PUBLIC;
+
+/******************************************************************************
+ * gp_toolkit, Cloudberry's (gpcontrib/gp_toolkit, gp_toolkit--1.3.sql and the
+ * update scripts after it): its views and functions of what gp_core has what
+ * they read.  Its append-optimized tables' are gp_ao's, beside gp_ao's own
+ * functions there, and its resource managers' gp_resource's.  Not here: the
+ * external tables of the servers' logs and the views over them, which read
+ * Cloudberry's own log format; the workfile manager's views, whose manager
+ * the port has not; and the checks for orphaned and missing files.
+ *****************************************************************************/
+
+/*
+ * The content id of the node the call runs on, -1 on the coordinator:
+ * Cloudberry's gp_execution_segment() (mpp_execution_segment(), cdbvars.c).
+ */
+CREATE FUNCTION pg_catalog.gp_execution_segment()
+RETURNS int4
+AS 'MODULE_PATHNAME', 'gp_execution_segment'
+LANGUAGE C VOLATILE;
+
+/*
+ * Each node of the cluster as Cloudberry's gp_pgdatabase() gives it
+ * (cdbpgdatabase.c): whether it is a primary now, valid -- up -- and a
+ * primary by its preference.
+ */
+SET allow_system_table_mods = on;
+CREATE VIEW pg_catalog.gp_pgdatabase AS
+	SELECT c.dbid::smallint AS dbid, c.role = 'p' AS isprimary,
+		   c.content::smallint AS content,
+		   c.status = 'u' AND c.mode IN ('s', 'n') AS valid,
+		   c.preferred_role = 'p' AS definedprimary
+	FROM pg_catalog.gp_segment_configuration c;
+RESET allow_system_table_mods;
+
+GRANT SELECT ON pg_catalog.gp_pgdatabase TO PUBLIC;
+
+/*
+ * Whether a table is append-optimized: Cloudberry's reads pg_appendonly,
+ * which is gp_ao's; its tables are those of gp_ao's two methods -- not a
+ * partitioned table, which PostgreSQL 19 gives the method its partitions
+ * take, and Cloudberry no row of pg_appendonly.
+ */
+CREATE VIEW gp_toolkit.__gp_is_append_only AS
+	SELECT pgc.oid AS iaooid,
+		   coalesce(am.amname IN ('ao_row', 'ao_column') AND pgc.relkind <> 'p',
+					false) AS iaotype
+	FROM pg_catalog.pg_class pgc
+	LEFT JOIN pg_catalog.pg_am am ON am.oid = pgc.relam;
+
+CREATE VIEW gp_toolkit.__gp_fullname AS
+	SELECT pgc.oid AS fnoid, nspname AS fnnspname, relname AS fnrelname
+	FROM pg_catalog.pg_class pgc, pg_catalog.pg_namespace pgn
+	WHERE pgc.relnamespace = pgn.oid;
+
+CREATE VIEW gp_toolkit.__gp_user_namespaces AS
+	SELECT oid AS aunoid, nspname AS aunnspname
+	FROM pg_catalog.pg_namespace
+	WHERE nspname NOT LIKE 'pg_%'
+	  AND nspname <> 'gp_toolkit'
+	  AND nspname <> 'information_schema';
+
+CREATE VIEW gp_toolkit.__gp_user_tables AS
+	SELECT fn.fnnspname AS autnspname, fn.fnrelname AS autrelname,
+		   relkind AS autrelkind, reltuples AS autreltuples,
+		   relpages AS autrelpages, relacl AS autrelacl, pgc.oid AS autoid,
+		   pgc.reltoastrelid AS auttoastoid, pgc.relam AS autrelam
+	FROM pg_catalog.pg_class pgc, gp_toolkit.__gp_fullname fn
+	WHERE pgc.relnamespace IN (SELECT aunoid FROM gp_toolkit.__gp_user_namespaces)
+	  AND pgc.relkind IN ('r', 'p', 'm')
+	  AND pgc.relispopulated = 't'
+	  AND pgc.oid = fn.fnoid;
+
+CREATE VIEW gp_toolkit.__gp_user_data_tables_readable AS
+	SELECT *
+	FROM gp_toolkit.__gp_user_tables aut
+	WHERE pg_catalog.has_table_privilege(aut.autoid, 'select');
+
+CREATE VIEW gp_toolkit.__gp_number_of_segments AS
+	SELECT count(*)::smallint AS numsegments
+	FROM pg_catalog.gp_segment_configuration
+	WHERE preferred_role = 'p' AND content >= 0;
+
+/*
+ * A setting's value on the coordinator and on each segment.  The name is
+ * the one given, Cloudberry's, and the server's own for it is found as the
+ * port's gpconfig finds it: the name, or Cloudberry's gp_foo or foo as the
+ * port's gp.foo -- every Cloudberry setting is a module's here, dotted.  A
+ * function Cloudberry runs on every segment (EXECUTE ON ALL SEGMENTS) runs
+ * there here as a query of gp_dist_random('gp_id') alone does (gp_sql).
+ */
+CREATE TYPE gp_toolkit.gp_param_setting_t AS (
+	paramsegment int,
+	paramname text,
+	paramvalue text
+);
+
+CREATE FUNCTION gp_toolkit.__gp_param_name(varchar)
+RETURNS text
+LANGUAGE sql STABLE
+AS $$
+	SELECT CASE
+		WHEN pg_catalog.current_setting($1, true) IS NOT NULL THEN $1::text
+		WHEN pg_catalog.current_setting('gp.' || pg_catalog.regexp_replace($1, '^gp_', ''), true) IS NOT NULL
+			THEN 'gp.' || pg_catalog.regexp_replace($1, '^gp_', '')
+		ELSE $1::text
+	END
+$$;
+
+CREATE FUNCTION gp_toolkit.__gp_param_setting_on_coordinator(varchar)
+RETURNS SETOF gp_toolkit.gp_param_setting_t
+LANGUAGE sql VOLATILE
+AS $$
+	SELECT pg_catalog.gp_execution_segment(), $1::text,
+		   pg_catalog.current_setting(gp_toolkit.__gp_param_name($1))
+$$;
+
+/* prefer the *_coordinator function, but keep this for backwards compatibility */
+CREATE FUNCTION gp_toolkit.__gp_param_setting_on_master(varchar)
+RETURNS SETOF gp_toolkit.gp_param_setting_t
+LANGUAGE sql VOLATILE
+AS $$
+	SELECT * FROM gp_toolkit.__gp_param_setting_on_coordinator($1)
+$$;
+
+/* PL/pgSQL, whose statements are planned as they run: where gp_sql rewrites gp_dist_random() */
+CREATE FUNCTION gp_toolkit.__gp_param_setting_on_segments(varchar)
+RETURNS SETOF gp_toolkit.gp_param_setting_t
+LANGUAGE plpgsql VOLATILE
+AS $$
+BEGIN
+	RETURN QUERY EXECUTE pg_catalog.format(
+		'SELECT pg_catalog.gp_execution_segment(), %L::text, pg_catalog.current_setting(%L) FROM gp_dist_random(''gp_id'')',
+		$1, gp_toolkit.__gp_param_name($1));
+END
+$$;
+
+CREATE FUNCTION gp_toolkit.gp_param_setting(varchar)
+RETURNS SETOF gp_toolkit.gp_param_setting_t
+LANGUAGE sql VOLATILE
+AS $$
+	SELECT * FROM gp_toolkit.__gp_param_setting_on_coordinator($1)
+	UNION ALL
+	SELECT * FROM gp_toolkit.__gp_param_setting_on_segments($1)
+$$;
+
+CREATE FUNCTION gp_toolkit.__gp_param_settings_here()
+RETURNS SETOF gp_toolkit.gp_param_setting_t
+LANGUAGE sql VOLATILE
+AS $$
+	SELECT pg_catalog.gp_execution_segment(), name, setting FROM pg_catalog.pg_settings
+$$;
+
+/* every setting of every segment, by the server's own names */
+CREATE FUNCTION gp_toolkit.gp_param_settings()
+RETURNS SETOF gp_toolkit.gp_param_setting_t
+LANGUAGE plpgsql VOLATILE
+AS $$
+BEGIN
+	RETURN QUERY SELECT (gp_toolkit.__gp_param_settings_here()).* FROM gp_dist_random('gp_id');
+END
+$$;
+
+CREATE VIEW gp_toolkit.gp_param_settings_seg_value_diffs AS
+	SELECT paramname AS psdname, paramvalue AS psdvalue, count(*) AS psdcount
+	FROM gp_toolkit.gp_param_settings()
+	WHERE paramname NOT IN ('config_file', 'data_directory', 'gp.dbid',
+							'gp.qe_identity', 'hba_file', 'hosts_file',
+							'ident_file', 'port')
+	GROUP BY 1, 2
+	HAVING count(*) < (SELECT numsegments FROM gp_toolkit.__gp_number_of_segments)
+	ORDER BY 1, 2, 3;
+
+CREATE VIEW gp_toolkit.gp_pgdatabase_invalid AS
+	SELECT dbid AS pgdbidbid, isprimary AS pgdbiisprimary,
+		   content AS pgdbicontent, valid AS pgdbivalid,
+		   definedprimary AS pgdbidefinedprimary
+	FROM pg_catalog.gp_pgdatabase
+	WHERE NOT valid
+	ORDER BY dbid;
+
+/*
+ * Skew: how a table's rows are spread over the segments.  An
+ * append-optimized table's are counted from its segment files, as
+ * Cloudberry counts them (get_ao_distribution(), gp_ao's), where the
+ * caller is a superuser; any other table's by gp_segment_id.
+ */
+CREATE TYPE gp_toolkit.gp_skew_details_t AS (
+	segoid oid,
+	segid int,
+	segtupcount bigint
+);
+
+CREATE FUNCTION gp_toolkit.gp_skew_details(oid)
+RETURNS SETOF gp_toolkit.gp_skew_details_t
+LANGUAGE plpgsql
+AS $$
+DECLARE
+	skewcrs refcursor;
+	skewrec record;
+	skewsegid int;
+	skewtablename record;
+	skewreplicated record;
+BEGIN
+	PERFORM 1
+	FROM pg_catalog.pg_class c, pg_catalog.pg_am am, pg_catalog.pg_roles r
+	WHERE c.oid = $1 AND am.oid = c.relam AND am.amname IN ('ao_row', 'ao_column')
+	  AND r.rolname = current_user AND r.rolsuper;
+	IF FOUND THEN
+		-- append-optimized table
+		FOR skewrec IN EXECUTE
+			'SELECT $1, segid, COALESCE(tupcount, 0)::bigint AS cnt'
+			' FROM (SELECT generate_series(0, numsegments - 1) FROM gp_toolkit.__gp_number_of_segments) segs(segid)'
+			' LEFT OUTER JOIN pg_catalog.get_ao_distribution($1) ON segid = segmentid'
+			USING $1
+		LOOP
+			RETURN NEXT skewrec;
+		END LOOP;
+	ELSE
+		-- heap table
+		SELECT * INTO skewtablename FROM gp_toolkit.__gp_fullname WHERE fnoid = $1;
+		SELECT * INTO skewreplicated FROM pg_catalog.gp_distribution_policy
+		WHERE policytype = 'r' AND localoid = $1;
+		IF FOUND THEN
+			-- replicated table: every replica has the same rows
+			OPEN skewcrs FOR EXECUTE
+				'SELECT ' || $1 || '::oid, segid, ' ||
+				'(SELECT COUNT(*) AS cnt FROM ' ||
+					pg_catalog.quote_ident(skewtablename.fnnspname) || '.' ||
+					pg_catalog.quote_ident(skewtablename.fnrelname) || ') ' ||
+				'FROM (SELECT generate_series(0, numsegments - 1) FROM gp_toolkit.__gp_number_of_segments) segs(segid)';
+		ELSE
+			OPEN skewcrs FOR EXECUTE
+				'SELECT ' || $1 || '::oid, segid, CASE WHEN gp_segment_id IS NULL THEN 0 ELSE cnt END ' ||
+				'FROM (SELECT generate_series(0, numsegments - 1) FROM gp_toolkit.__gp_number_of_segments) segs(segid) ' ||
+				'LEFT OUTER JOIN ' ||
+					'(SELECT gp_segment_id, COUNT(*) AS cnt FROM ' ||
+						pg_catalog.quote_ident(skewtablename.fnnspname) || '.' ||
+						pg_catalog.quote_ident(skewtablename.fnrelname) ||
+					' GROUP BY 1) details ' ||
+				'ON segid = gp_segment_id';
+		END IF;
+		FOR skewsegid IN
+			SELECT generate_series(1, numsegments) FROM gp_toolkit.__gp_number_of_segments
+		LOOP
+			FETCH skewcrs INTO skewrec;
+			IF FOUND THEN
+				RETURN NEXT skewrec;
+			ELSE
+				RETURN;
+			END IF;
+		END LOOP;
+		CLOSE skewcrs;
+	END IF;
+	RETURN;
+END;
+$$;
+
+CREATE TYPE gp_toolkit.gp_skew_analysis_t AS (
+	skewoid oid,
+	skewval numeric
+);
+
+CREATE FUNCTION gp_toolkit.gp_skew_coefficient(targetoid oid, OUT skcoid oid,
+											   OUT skccoeff numeric)
+RETURNS record
+LANGUAGE sql
+AS $$
+	SELECT $1 AS skcoid,
+		   CASE WHEN skewmean > 0 THEN ((skewdev / skewmean) * 100.0) ELSE 0 END AS skccoeff
+	FROM (SELECT stddev(segtupcount) AS skewdev, avg(segtupcount) AS skewmean,
+				 count(*) AS skewcnt
+		  FROM gp_toolkit.gp_skew_details($1)) AS skew
+$$;
+
+CREATE FUNCTION gp_toolkit.__gp_skew_coefficients()
+RETURNS SETOF gp_toolkit.gp_skew_analysis_t
+LANGUAGE plpgsql
+AS $$
+DECLARE
+	skcoid oid;
+	skcrec record;
+BEGIN
+	FOR skcoid IN SELECT autoid FROM gp_toolkit.__gp_user_data_tables_readable
+	LOOP
+		SELECT * INTO skcrec FROM gp_toolkit.gp_skew_coefficient(skcoid);
+		RETURN NEXT skcrec;
+	END LOOP;
+END;
+$$;
+
+CREATE VIEW gp_toolkit.gp_skew_coefficients AS
+	SELECT skew.skewoid AS skcoid, pgn.nspname AS skcnamespace,
+		   pgc.relname AS skcrelname, skew.skewval AS skccoeff
+	FROM gp_toolkit.__gp_skew_coefficients() skew
+	JOIN pg_catalog.pg_class pgc ON (skew.skewoid = pgc.oid)
+	JOIN pg_catalog.pg_namespace pgn ON (pgc.relnamespace = pgn.oid);
+
+CREATE FUNCTION gp_toolkit.gp_skew_idle_fraction(targetoid oid, OUT sifoid oid,
+												 OUT siffraction numeric)
+RETURNS record
+LANGUAGE sql
+AS $$
+	SELECT $1 AS sifoid,
+		   CASE WHEN min(skewmax) = 0 THEN 0
+				ELSE (sum(skewmax - segtupcount) / (min(skewmax) * min(numsegments)))
+		   END AS siffraction
+	FROM (SELECT segid, segtupcount, count(segid) OVER () AS numsegments,
+				 max(segtupcount) OVER () AS skewmax
+		  FROM gp_toolkit.gp_skew_details($1)) AS skewbaseline
+$$;
+
+CREATE FUNCTION gp_toolkit.__gp_skew_idle_fractions()
+RETURNS SETOF gp_toolkit.gp_skew_analysis_t
+LANGUAGE plpgsql
+AS $$
+DECLARE
+	skcoid oid;
+	skcrec record;
+BEGIN
+	FOR skcoid IN SELECT autoid FROM gp_toolkit.__gp_user_data_tables_readable
+	LOOP
+		SELECT * INTO skcrec FROM gp_toolkit.gp_skew_idle_fraction(skcoid);
+		RETURN NEXT skcrec;
+	END LOOP;
+END;
+$$;
+
+CREATE VIEW gp_toolkit.gp_skew_idle_fractions AS
+	SELECT skew.skewoid AS sifoid, pgn.nspname AS sifnamespace,
+		   pgc.relname AS sifrelname, skew.skewval AS siffraction
+	FROM gp_toolkit.__gp_skew_idle_fractions() skew
+	JOIN pg_catalog.pg_class pgc ON (skew.skewoid = pgc.oid)
+	JOIN pg_catalog.pg_namespace pgn ON (pgc.relnamespace = pgn.oid);
+
+/* Statistics missing, and bloat, from the coordinator's statistics. */
+CREATE VIEW gp_toolkit.gp_stats_missing AS
+	SELECT aut.autnspname AS smischema, aut.autrelname AS smitable,
+		   CASE WHEN aut.autrelpages = 0 OR aut.autreltuples = 0 THEN false ELSE true END AS smisize,
+		   attcnt AS smicols, coalesce(stacnt, 0) AS smirecs
+	FROM gp_toolkit.__gp_user_tables aut
+	JOIN (SELECT attrelid, count(*) AS attcnt
+		  FROM pg_catalog.pg_attribute
+		  WHERE attnum > 0 AND attisdropped = false
+		  GROUP BY attrelid) attrs ON aut.autoid = attrelid
+	LEFT OUTER JOIN (SELECT starelid, count(*) AS stacnt
+					 FROM pg_catalog.pg_statistic
+					 GROUP BY starelid) bar ON aut.autoid = starelid
+	WHERE aut.autrelkind = 'r'
+	  AND (aut.autrelpages = 0 OR aut.autreltuples = 0)
+	   OR (stacnt IS NOT NULL AND attcnt > stacnt);
+
+CREATE VIEW gp_toolkit.gp_bloat_expected_pages AS
+	SELECT btdrelid, btdrelpages,
+		   CASE WHEN btdexppages < numsegments THEN numsegments ELSE btdexppages END AS btdexppages
+	FROM (SELECT oid AS btdrelid, pgc.relpages AS btdrelpages,
+				 ceil((pgc.reltuples * (25 + width))::numeric /
+					  pg_catalog.current_setting('block_size')::numeric) AS btdexppages,
+				 (SELECT numsegments FROM gp_toolkit.__gp_number_of_segments) AS numsegments
+		  FROM (SELECT pgc.oid, pgc.reltuples, pgc.relpages
+				FROM pg_catalog.pg_class pgc
+				WHERE NOT EXISTS (SELECT iaooid FROM gp_toolkit.__gp_is_append_only
+								  WHERE iaooid = pgc.oid AND iaotype = 't')
+				  AND pgc.relkind NOT IN ('p')) AS pgc
+		  LEFT OUTER JOIN (SELECT starelid, sum(stawidth * (1.0 - stanullfrac)) AS width
+						   FROM pg_catalog.pg_statistic pgs
+						   GROUP BY 1) AS btwcols ON pgc.oid = btwcols.starelid
+		  WHERE starelid IS NOT NULL) AS subq;
+
+CREATE FUNCTION gp_toolkit.gp_bloat_diag(btdrelpages int, btdexppages numeric,
+										 aotable bool, OUT bltidx int,
+										 OUT bltdiag text)
+LANGUAGE sql
+AS $$
+	SELECT bloatidx,
+		   CASE WHEN bloatidx = 0 THEN 'no bloat detected'::text
+				WHEN bloatidx = 1 THEN 'moderate amount of bloat suspected'::text
+				WHEN bloatidx = 2 THEN 'significant amount of bloat suspected'::text
+				WHEN bloatidx = -1 THEN 'diagnosis inconclusive or no bloat suspected'::text
+		   END AS bloatdiag
+	FROM (SELECT CASE WHEN $3 = 't' THEN 0
+					  WHEN $1 < 10 AND $2 = 0 THEN -1
+					  WHEN $2 = 0 THEN 2
+					  WHEN $1 < $2 THEN 0
+					  WHEN ($1 / $2)::numeric > 10 THEN 2
+					  WHEN ($1 / $2)::numeric > 3 THEN 1
+					  ELSE -1
+				 END AS bloatidx) AS bloatmapping
+$$;
+
+CREATE VIEW gp_toolkit.gp_bloat_diag AS
+	SELECT btdrelid AS bdirelid, fnnspname AS bdinspname, fnrelname AS bdirelname,
+		   btdrelpages AS bdirelpages, btdexppages AS bdiexppages,
+		   bltdiag(bd) AS bdidiag
+	FROM (SELECT fn.*, beg.*,
+				 gp_toolkit.gp_bloat_diag(btdrelpages::int, btdexppages::numeric,
+										  iao.iaotype::bool) AS bd
+		  FROM gp_toolkit.gp_bloat_expected_pages beg, pg_catalog.pg_class pgc,
+			   gp_toolkit.__gp_fullname fn, gp_toolkit.__gp_is_append_only iao
+		  WHERE beg.btdrelid = pgc.oid AND pgc.oid = fn.fnoid
+			AND iao.iaooid = pgc.oid) AS bloatsummary
+	WHERE bltidx(bd) > 0;
+
+/* Locks on relations, and who has what role. */
+CREATE VIEW gp_toolkit.gp_locks_on_relation AS
+	SELECT pgl.locktype AS lorlocktype, pgl.database AS lordatabase,
+		   pgc.relname AS lorrelname, pgl.relation AS lorrelation,
+		   pgl.transactionid AS lortransaction, pgl.pid AS lorpid,
+		   pgl.mode AS lormode, pgl.granted AS lorgranted,
+		   pgsa.query AS lorcurrentquery
+	FROM pg_catalog.pg_locks pgl
+	JOIN pg_catalog.pg_class pgc ON (pgl.relation = pgc.oid)
+	JOIN pg_catalog.pg_stat_activity pgsa ON (pgl.pid = pgsa.pid)
+	ORDER BY pgc.relname;
+
+CREATE VIEW gp_toolkit.gp_roles_assigned AS
+	SELECT pgr.oid AS raroleid, pgr.rolname AS rarolename,
+		   pgam.member AS ramemberid, pgr2.rolname AS ramembername
+	FROM pg_catalog.pg_roles pgr
+	LEFT JOIN pg_catalog.pg_auth_members pgam ON (pgr.oid = pgam.roleid)
+	LEFT JOIN pg_catalog.pg_roles pgr2 ON (pgam.member = pgr2.oid);
+
+/*
+ * Sizes, the cluster's: the size functions of PostgreSQL a view calls on
+ * the coordinator give every node's sum (gp_size.c).  An append-optimized
+ * table has no auxiliary tables here -- its metadata is in gp_ao's tables,
+ * its visibility map in its relation -- so a table's additional size is 0;
+ * its uncompressed size, which asks gp_ao for its compression ratio, is
+ * gp_ao's view.
+ */
+CREATE VIEW gp_toolkit.gp_size_of_index AS
+	SELECT soi.soioid AS soioid, soi.soitableoid AS soitableoid,
+		   soi.soisize AS soisize, fnidx.fnnspname AS soiindexschemaname,
+		   fnidx.fnrelname AS soiindexname, fntbl.fnnspname AS soitableschemaname,
+		   fntbl.fnrelname AS soitablename
+	FROM (SELECT pgi.indexrelid AS soioid, pgi.indrelid AS soitableoid,
+				 pg_catalog.pg_relation_size(pgi.indexrelid) AS soisize
+		  FROM pg_catalog.pg_index pgi
+		  JOIN gp_toolkit.__gp_user_data_tables_readable ut ON (pgi.indrelid = ut.autoid)) AS soi
+	JOIN gp_toolkit.__gp_fullname fnidx ON (soi.soioid = fnidx.fnoid)
+	JOIN gp_toolkit.__gp_fullname fntbl ON (soi.soitableoid = fntbl.fnoid);
+
+CREATE VIEW gp_toolkit.gp_size_of_table_disk AS
+	SELECT sotd.sotdoid AS sotdoid, sotd.sotdsize AS sotdsize,
+		   sotd.sotdtoastsize AS sotdtoastsize,
+		   sotd.sotdadditionalsize AS sotdadditionalsize,
+		   fn.fnnspname AS sotdschemaname, fn.fnrelname AS sotdtablename
+	FROM (SELECT autoid AS sotdoid,
+				 pg_catalog.pg_relation_size(autoid) AS sotdsize,
+				 CASE WHEN auttoastoid > 0
+					  THEN pg_catalog.pg_total_relation_size(auttoastoid)
+					  ELSE 0 END AS sotdtoastsize,
+				 0::bigint AS sotdadditionalsize
+		  FROM gp_toolkit.__gp_user_data_tables_readable) AS sotd
+	JOIN gp_toolkit.__gp_fullname fn ON (sotd.sotdoid = fn.fnoid);
+
+CREATE VIEW gp_toolkit.gp_table_indexes AS
+	SELECT ti.tireloid AS tireloid, ti.tiidxoid AS tiidxoid,
+		   fntbl.fnnspname AS titableschemaname, fntbl.fnrelname AS titablename,
+		   fnidx.fnnspname AS tiindexschemaname, fnidx.fnrelname AS tiindexname
+	FROM (SELECT pgc.oid AS tireloid, pgc2.oid AS tiidxoid
+		  FROM pg_catalog.pg_class pgc
+		  JOIN pg_catalog.pg_index pgi ON (pgc.oid = pgi.indrelid)
+		  JOIN pg_catalog.pg_class pgc2 ON (pgi.indexrelid = pgc2.oid)
+		  JOIN gp_toolkit.__gp_user_data_tables_readable udt ON (udt.autoid = pgc.oid)) AS ti
+	JOIN gp_toolkit.__gp_fullname fntbl ON (ti.tireloid = fntbl.fnoid)
+	JOIN gp_toolkit.__gp_fullname fnidx ON (ti.tiidxoid = fnidx.fnoid);
+
+CREATE VIEW gp_toolkit.gp_size_of_all_table_indexes AS
+	SELECT soati.soatioid AS soatioid, soati.soatisize AS soatisize,
+		   fn.fnnspname AS soatischemaname, fn.fnrelname AS soatitablename
+	FROM (SELECT tireloid AS soatioid,
+				 sum(pg_catalog.pg_relation_size(tiidxoid)) AS soatisize
+		  FROM gp_toolkit.gp_table_indexes ti
+		  GROUP BY soatioid) AS soati
+	JOIN gp_toolkit.__gp_fullname fn ON (soati.soatioid = fn.fnoid);
+
+CREATE VIEW gp_toolkit.gp_size_of_table_and_indexes_disk AS
+	SELECT sotaid.sotaidoid AS sotaidoid, sotaid.sotaidtablesize AS sotaidtablesize,
+		   sotaid.sotaididxsize AS sotaididxsize, fn.fnnspname AS sotaidschemaname,
+		   fn.fnrelname AS sotaidtablename
+	FROM (SELECT sotd.sotdoid AS sotaidoid,
+				 sotd.sotdsize + sotd.sotdtoastsize + sotd.sotdadditionalsize AS sotaidtablesize,
+				 CASE WHEN soati.soatisize IS NULL THEN 0 ELSE soati.soatisize END AS sotaididxsize
+		  FROM gp_toolkit.gp_size_of_table_disk sotd
+		  LEFT JOIN gp_toolkit.gp_size_of_all_table_indexes soati
+			ON (sotd.sotdoid = soati.soatioid)) AS sotaid
+	JOIN gp_toolkit.__gp_fullname fn ON (sotaid.sotaidoid = fn.fnoid);
+
+CREATE VIEW gp_toolkit.gp_size_of_schema_disk AS
+	SELECT un.aunnspname AS sosdnsp,
+		   coalesce(sum(sotaid.sotaidtablesize), 0) AS sosdschematablesize,
+		   coalesce(sum(sotaid.sotaididxsize), 0) AS sosdschemaidxsize
+	FROM gp_toolkit.gp_size_of_table_and_indexes_disk sotaid
+	JOIN gp_toolkit.__gp_fullname fn ON (sotaid.sotaidoid = fn.fnoid)
+	RIGHT JOIN gp_toolkit.__gp_user_namespaces un ON (un.aunnspname = fn.fnnspname)
+	GROUP BY un.aunnspname;
+
+CREATE VIEW gp_toolkit.gp_size_of_database AS
+	SELECT datname AS sodddatname, pg_catalog.pg_database_size(oid) AS sodddatsize
+	FROM pg_catalog.pg_database
+	WHERE datname <> 'template0' AND datname <> 'template1' AND datname <> 'postgres';
+
+GRANT SELECT ON gp_toolkit.__gp_is_append_only, gp_toolkit.__gp_fullname,
+	gp_toolkit.__gp_user_namespaces, gp_toolkit.__gp_user_tables,
+	gp_toolkit.__gp_user_data_tables_readable, gp_toolkit.__gp_number_of_segments,
+	gp_toolkit.gp_param_settings_seg_value_diffs, gp_toolkit.gp_pgdatabase_invalid,
+	gp_toolkit.gp_skew_coefficients, gp_toolkit.gp_skew_idle_fractions,
+	gp_toolkit.gp_stats_missing, gp_toolkit.gp_bloat_expected_pages,
+	gp_toolkit.gp_bloat_diag, gp_toolkit.gp_locks_on_relation,
+	gp_toolkit.gp_roles_assigned, gp_toolkit.gp_size_of_index,
+	gp_toolkit.gp_size_of_table_disk, gp_toolkit.gp_table_indexes,
+	gp_toolkit.gp_size_of_all_table_indexes,
+	gp_toolkit.gp_size_of_table_and_indexes_disk,
+	gp_toolkit.gp_size_of_schema_disk, gp_toolkit.gp_size_of_database
+	TO PUBLIC;
