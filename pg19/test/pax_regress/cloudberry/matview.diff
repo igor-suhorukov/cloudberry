@@ -44,12 +44,3 @@
 -drop cascades to materialized view matview_schema.mv_nodata1
 +DETAIL:  drop cascades to materialized view matview_schema.mv_nodata1
 +NOTICE:  drop cascades to 2 other objects
-@@
-+ERROR:  unrecognized configuration parameter "gp_enable_refresh_fast_path"
-@@
-+ERROR:  unrecognized configuration parameter "gp_enable_refresh_fast_path"
-@@
--     1
-+     0
-@@
-+ERROR:  unrecognized configuration parameter "gp_enable_refresh_fast_path"

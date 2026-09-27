@@ -301,8 +301,7 @@ run  bfv_dd_types
 run  bfv_olap
 skip bfv_aggregate  argument of ROWS must not contain variables
 run  DML_over_joins
-skip bb_mpph  its queries 3 and 8 over append-optimized partitions run past the suite's minute
-port bb_mpph_heap
+run  bb_mpph
 run  bb_memory_quota
 run  rpt
 run  rpt_joins

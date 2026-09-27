@@ -39,8 +39,9 @@ one it has not is unrecognized (gp_statistics_pullup_from_child_partition,
 gp_allow_date_field_width_5digits, planner_work_mem, allow_segment_dml);
 a table access method's handler is a function of its module's
 (gp_ao.ao_column_handler); the port's extensions' tables and functions are
-among a catalog's rows, and Cloudberry's own (gp_current_snapshot,
-gp_hyperloglog_estimator, the test helpers of regress_gp.c) are not; OIDs
+among a catalog's rows, and Cloudberry's own (gp_current_snapshot, the
+complex type type_sanity's tab_core_types is made with, the test helpers
+of regress_gp.c) are not; OIDs
 the port allocates otherwise (oid_wraparound); TOAST tables PostgreSQL 19's
 catalogs have not.
 

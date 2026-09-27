@@ -15,6 +15,6 @@
 ------+---------+---------+---------+----------
 -(0 rows)
 -
-+ERROR:  type "gp_hyperloglog_estimator" does not exist
-+LINE 18:     oid != 'gp_hyperloglog_estimator'::regtype AND
-+                    ^
++ERROR:  relation "tab_core_types" does not exist
++LINE 29:                           a.attrelid='tab_core_types'::regcl...
++                                              ^

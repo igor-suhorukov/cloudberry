@@ -368,7 +368,21 @@
 +         "Triggers": [                                                                                                                                                                                   +
 +         ],                                                                                                                                                                                              +
 +         "Planning Time": 0.0,                                                                                                                                                                           +
-+         "Execution Time": 0.0                                                                                                                                                                           +
++         "Execution Time": 0.0,                                                                                                                                                                          +
++         "Slice statistics": [                                                                                                                                                                           +
++             {                                                                                                                                                                                           +
++                 "Slice": 0,                                                                                                                                                                             +
++                 "Executor Memory": 0                                                                                                                                                                    +
++             },                                                                                                                                                                                          +
++             {                                                                                                                                                                                           +
++                 "Slice": 0,                                                                                                                                                                             +
++                 "Executor Memory": {                                                                                                                                                                    +
++                     "Average": 0,                                                                                                                                                                       +
++                     "Workers": 0,                                                                                                                                                                       +
++                     "Maximum Memory Used": 0                                                                                                                                                            +
++                 }                                                                                                                                                                                       +
++             }                                                                                                                                                                                           +
++         ]                                                                                                                                                                                               +
 +     }                                                                                                                                                                                                   +
 @@
 -                              explain_filter                              
