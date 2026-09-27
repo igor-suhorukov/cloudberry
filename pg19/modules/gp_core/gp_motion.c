@@ -114,6 +114,7 @@
 #include "nodes/extensible.h"
 #include "nodes/makefuncs.h"
 #include "nodes/nodeFuncs.h"
+#include "nodes/print.h"
 #include "optimizer/optimizer.h"
 #include "optimizer/planner.h"
 #include "pgstat.h"
@@ -3770,6 +3771,11 @@ fragment_plan(const char *payload, const char *key)
 									makeDefElem(pstrdup(GP_FRAGMENT_MARK),
 												(Node *) makeString(pstrdup(key)),
 												-1));
+
+	/* the slice table, as Cloudberry's segment logs it as it starts its own */
+	if (gp_debug_print_slice_table &&
+		fragment_mark(stmt, GP_SLICE_TABLE) != NULL)
+		elog_node_display(DEBUG3, "slice table", fragment_mark(stmt, GP_SLICE_TABLE), true);
 	return stmt;
 }
 
@@ -3824,6 +3830,10 @@ report_slices(PlannedStmt *stmt)
 	SliceReport *reports;
 	int			nreports = 0;
 	ListCell   *lc;
+
+	/* the slice table, as Cloudberry's executor logs it (execMain.c) */
+	if (gp_debug_print_slice_table && table != NIL)
+		elog_node_display(DEBUG3, "slice table", table, true);
 
 	if (!gp_test_print_direct_dispatch_info || table == NIL)
 		return;

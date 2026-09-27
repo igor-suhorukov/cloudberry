@@ -249,6 +249,7 @@ static const char *const synced_settings[] = {
 	"gp.interconnect_transmit_timeout",
 	"gp.interconnect_min_rto",
 	"gp.interconnect_default_rtt",
+	"gp.debug_print_slice_table",
 	"gp.interconnect_snd_queue_depth",
 	"gp.interconnect_fc_method",
 	"gp.interconnect_min_retries_before_timeout",

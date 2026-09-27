@@ -33,6 +33,9 @@
  *	 gp.test_print_direct_dispatch_info  the INFO line per dispatched slice,
  *										 and per command of a two-phase
  *										 commit (gp_dispatch.c)
+ *	 gp.debug_print_slice_table			 the slice table in the server log,
+ *										 as a statement's slices start
+ *										 (gp_motion.c)
  *	 gp.enable_direct_dispatch			 asking one segment when one holds
  *										 every row a query can touch
  *	 gp.autostats_mode, and the rest	 ANALYZE after a write, as auto_stats()
@@ -89,6 +92,7 @@
 /* ------------------------------------------------------------------------- */
 
 bool		gp_test_print_direct_dispatch_info = false;
+bool		gp_debug_print_slice_table = false;
 bool		gp_enable_direct_dispatch = true;
 double		gp_motion_cost_per_row = 0;
 bool		gp_use_legacy_hashops = false;
@@ -126,6 +130,7 @@ static int	gp_vmem_idle_resource_timeout = 18000;
 static int	gp_segments_for_planner = 0;
 static bool gp_workfile_compression = false;
 static bool gp_enable_multiphase_agg = true;
+static bool gp_eager_two_phase_agg = false;
 static bool gp_cte_sharing = false;
 static bool test_print_prefetch_joinqual = false;
 static bool gp_enable_preunique = true;
@@ -636,6 +641,13 @@ GpSettingsInit(void)
 							 GUC_SUPERUSER_ONLY | GUC_NOT_IN_SAMPLE,
 							 NULL, NULL, NULL);
 
+	DefineCustomBoolVariable("gp.debug_print_slice_table",
+							 "Prints the slice table to server log.",
+							 "At DEBUG3, as Cloudberry's executor prints it: the slices of a statement's plan, on the coordinator as they start, and on a segment as it starts its own.",
+							 &gp_debug_print_slice_table,
+							 false, PGC_USERSET, 0,
+							 NULL, NULL, NULL);
+
 	DefineCustomBoolVariable("gp.enable_direct_dispatch",
 							 "Enable dispatch for single-row-insert targeted mirror-pairs.",
 							 "Don't involve the whole cluster if it isn't needed.",
@@ -741,6 +753,9 @@ GpSettingsInit(void)
 	define_accepted_bool("gp.enable_multiphase_agg",
 						 "Enables the planner's use of two- or three-stage parallel aggregation plans." ROUTE_B,
 						 &gp_enable_multiphase_agg, true);
+	define_accepted_bool("gp.eager_two_phase_agg",
+						 "Eager two stage agg." ROUTE_B,
+						 &gp_eager_two_phase_agg, false);
 	define_accepted_bool("gp.cte_sharing",
 						 "This guc enables sharing of plan fragments for common table expressions." ROUTE_B,
 						 &gp_cte_sharing, false);

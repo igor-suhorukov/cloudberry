@@ -33,6 +33,7 @@
  * per command of a two-phase commit
  */
 extern bool gp_test_print_direct_dispatch_info;
+extern bool gp_debug_print_slice_table;
 
 /* gp.enable_direct_dispatch: send to the one segment that holds the rows */
 extern bool gp_enable_direct_dispatch;

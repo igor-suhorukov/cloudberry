@@ -281,7 +281,7 @@ skip log_guc  relation "gp_toolkit.__gp_log_master_ext" does not exist; relation
 skip instr_in_shmem_setup  gp_enable_query_metrics is none of the port's settings: gpconfig refuses it, and instr_in_shmem and instr_in_shmem_verify, which it sets up for, fail without it
 skip instr_in_shmem  unrecognized configuration parameter "gp_enable_query_metrics"; unrecognized configuration parameter "gp_instrument_shmem_size"
 skip createdb  function force_mirrors_to_catch_up() does not exist
-skip gp_aggregates_costs  unrecognized configuration parameter "gp_eager_two_phase_agg"
+run  gp_aggregates_costs
 run  gp_metadata
 run  variadic_parameters
 run  default_parameters
@@ -451,7 +451,7 @@ run  qp_join_universal
 skip qp_rowsecurity  permission denied for table roottabmid1; permission denied for table roottableaf1
 run  qp_query_params
 skip qp_misc_jiras  cannot derive ending value of partition based upon starting of next partition; relation "qp_misc_jiras.tbl5028_part_test" does not exist
-skip qp_executor  unrecognized configuration parameter "debug_print_slice_table"
+run  qp_executor
 skip qp_olap_windowerr  cannot copy window "win1" because it has a frame clause; argument of RANGE must not contain variables
 skip qp_olap_window  cannot copy window "win1" because it has a frame clause; argument of RANGE must not contain variables
 run  qp_dropped_cols
