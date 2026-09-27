@@ -21,12 +21,3 @@
 -Checksum: t
 @@
 -Checksum: t
-@@
-- vacuum_gp_pt_1_prt_1 |         0 |        1
-+ vacuum_gp_pt_1_prt_1 |         0 |        0
-@@
-- vacuum_gp_pt_1_prt_1 |         0 |        1
-+ vacuum_gp_pt_1_prt_1 |         0 |        0
-@@
-- vacuum_gp_pt_1_prt_1 |         0 |        1
-+ vacuum_gp_pt_1_prt_1 |         0 |        0

@@ -229,7 +229,17 @@ Distributed transactions (M3), in `gp_core`:
   coordinator's from a segment;
 - the coordinator's `pg_class` counts a distributed table's pages, rows and
   all-visible pages as the segments do, after VACUUM and ANALYZE, as
-  Cloudberry's brings them back;
+  Cloudberry's brings them back, and an empty table's one page;
+- ANALYZE of a partitioned table as Cloudberry's takes it, on one node too:
+  the root and the mid-levels as `gp.optimizer_analyze_root_partition` and
+  `_midlevel_partition` say, ANALYZE ROOTPARTITION, the leaves before the
+  table above them and that table after a partition whose siblings all have
+  statistics; and an inheritance tree sampled on the segments in one
+  dispatch, as Cloudberry's is;
+- the root's statistics merged from its leaves' as Cloudberry merges them,
+  each leaf keeping a HyperLogLog counter of each column
+  (`gp_hyperloglog_estimator`, `gp_hyperloglog_accum()`), ANALYZE FULLSCAN's
+  of every row;
 - Cloudberry's fault injector, `gp_inject_fault`, for the tests: its faults
   at the port's own places under Cloudberry's names, and at PostgreSQL 19's
   injection points, among them O29's in PostgreSQL's commit;

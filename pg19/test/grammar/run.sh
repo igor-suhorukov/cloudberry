@@ -2004,6 +2004,46 @@ is "a role called deny is a role called deny" \
    "CREATE ROLE deny; CREATE ROLE denied IN ROLE deny;
     SELECT count(*) FROM pg_auth_members WHERE roleid = 'deny'::regrole;" "1"
 
+###############################################################################
+echo "19. ANALYZE ROOTPARTITION and FULLSCAN"
+###############################################################################
+# Options of the statement's own list, which gp_core takes out again
+# (gp_partanalyze.c); the parenthesized list takes them as it is.
+is "ANALYZE ROOTPARTITION t is an option of the statement's own" \
+   "SELECT gp_sql.desugar('ANALYZE ROOTPARTITION t');" \
+   "ANALYZE (ROOTPARTITION) t"
+is "with VERBOSE, and ALL for every table" \
+   "SELECT gp_sql.desugar('ANALYZE VERBOSE ROOTPARTITION t, s.u (a)') || ' / ' ||
+           gp_sql.desugar('ANALYSE ROOTPARTITION ALL');" \
+   "ANALYZE (VERBOSE, ROOTPARTITION) t, s.u (a) / ANALYSE (ROOTPARTITION)"
+is "and so is FULLSCAN" \
+   "SELECT gp_sql.desugar('analyze verbose fullscan t');" \
+   "analyze (VERBOSE, FULLSCAN) t"
+is "a table called rootpartition or fullscan is a table" \
+   "CREATE TABLE rootpartition (a int); CREATE TABLE fullscan (a int);
+    ANALYZE rootpartition; ANALYZE fullscan, rootpartition;
+    SELECT gp_sql.desugar('ANALYZE rootpartition') || ' / ' || gp_sql.desugar('ANALYZE fullscan, t');" \
+   "ANALYZE rootpartition / ANALYZE fullscan, t"
+at "FULLSCAN ALL is not Cloudberry's, and is refused at ALL" \
+   "ANALYZE FULLSCAN ALL" "syntax error" "ALL"
+isl "ANALYZE ROOTPARTITION gives the root statistics, and its leaves none" \
+   "CREATE TABLE ap (a int, b int) PARTITION BY RANGE (a);
+    CREATE TABLE ap1 PARTITION OF ap FOR VALUES FROM (0) TO (10);
+    CREATE TABLE ap2 PARTITION OF ap FOR VALUES FROM (10) TO (20);
+    INSERT INTO ap SELECT i, i FROM generate_series(0, 19) i;
+    ANALYZE ROOTPARTITION ap;
+    SELECT string_agg(tablename || ':' || inherited, ' ' ORDER BY tablename)
+      FROM pg_stats WHERE tablename LIKE 'ap%' AND attname = 'a';" "ap:true"
+refused "and a leaf named with it is refused" \
+   "ANALYZE ROOTPARTITION ap1;" "cannot analyze a non-root partition using ANALYZE ROOTPARTITION"
+isl "ANALYZE of the table merges the root's statistics from its leaves', on one node too" \
+   "ANALYZE ap;
+    SELECT histogram_bounds::text || ' ' || coalesce(correlation::text, 'none')
+      FROM pg_stats WHERE tablename = 'ap' AND attname = 'a';" \
+   "{0,1,2,3,4,5,6,7,8,9,11,12,13,14,15,16,17,18,19} none"
+refused "as the parenthesized option is, and FULLSCAN is VACUUM's no more than Cloudberry's" \
+   "ANALYZE (ROOTPARTITION on) ap2; VACUUM (FULLSCAN) ap;" 'unrecognized VACUUM option "fullscan"'
+
 echo
 echo "  $pass passed, $fail failed"
 [ "$fail" -eq 0 ]

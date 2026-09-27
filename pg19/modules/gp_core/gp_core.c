@@ -61,6 +61,7 @@
 #include "gp_loopback.h"
 #include "gp_metatrack.h"
 #include "gp_metrics.h"
+#include "gp_partanalyze.h"
 #include "gp_policy.h"
 #include "gp_scan.h"
 #include "gp_segadmin.h"
@@ -227,7 +228,10 @@ _PG_init(void)
 	GpScanInit();
 	GpModifyInit();
 
-	/* O3: ANALYZE samples a distributed table on the segments. */
+	/*
+	 * O3: ANALYZE samples a distributed table on the segments; and on one
+	 * node too, a leaf partition, for the merge of its root's statistics.
+	 */
 	GpAnalyzeInit();
 
 	/*
@@ -316,6 +320,14 @@ _PG_init(void)
 	 * of them, and a segment's cancel in Cloudberry's words.
 	 */
 	GpWorkfileInit();
+
+	/*
+	 * ANALYZE of a partitioned table as Cloudberry does it: the relations a
+	 * statement takes, by its two settings and ROOTPARTITION, in its order.
+	 * Last of gp_core's utility hooks, so that it is the first to see the
+	 * statement and the others see the list it makes; on one node too.
+	 */
+	GpPartAnalyzeInit();
 
 	/*
 	 * Deliberately no MarkGUCPrefixReserved("gp") here.  It drops every

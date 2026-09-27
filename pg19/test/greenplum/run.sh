@@ -225,6 +225,11 @@ t1=$(date +%s)
 	# PATH (below); it runs its queries in the database it is named, which is
 	# regression here.
 	echo 'sed s#^[\\]! \$PG_ABS_BUILDDIR/(mem_quota_util\.py) (.*)--dbname=regress #\\! \1 \2--dbname=regression #'
+	# PostgreSQL 19's pg_stats has five columns Cloudberry's has not -- the
+	# table's OID, the column's number, and three of a range's histograms --
+	# so a test's SELECT * of it asks for Cloudberry's fourteen by name, in
+	# the test and its expected output alike.
+	echo 'sed s#\b(select) \* (from pg_stats)\b#\1 schemaname, tablename, attname, inherited, null_frac, avg_width, n_distinct, most_common_vals, most_common_freqs, histogram_bounds, correlation, most_common_elems, most_common_elem_freqs, elem_count_histogram \2#Ig'
 } > "$WORK/respell"
 respell() { perl "$HERE/../respell.pl" "$WORK/respell" "$@"; }
 

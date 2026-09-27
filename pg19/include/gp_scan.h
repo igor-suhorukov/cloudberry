@@ -116,7 +116,10 @@ extern void GpModifyInit(void);
  */
 extern void GpModifyLockPartitions(Oid relid, LOCKMODE lockmode);
 
-/* ANALYZE of a distributed table through O3, where there is a cluster. */
+/*
+ * ANALYZE of a distributed table through O3, where there is a cluster, and
+ * of a partitioned table's leaves, on one node too (gp_analyze.c).
+ */
 extern void GpAnalyzeInit(void);
 
 /*
