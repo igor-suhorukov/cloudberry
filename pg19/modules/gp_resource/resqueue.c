@@ -94,6 +94,7 @@
 #include "gp_cluster.h"
 #include "gp_core_api.h"
 #include "gp_fault.h"
+#include "gp_query_info.h"
 #include "gp_resource.h"
 
 #define RES_COUNT_LIMIT		0
@@ -1585,6 +1586,7 @@ ResQueueExecutorStart(QueryDesc *queryDesc)
 	Oid			queueid;
 	double		memory;
 	double		cost;
+	bool		locked;
 
 	query_budget_kb = 0;
 	if (!IsResQueueEnabled() || !GpResourceIsDispatcher() || portal == NULL ||
@@ -1632,7 +1634,23 @@ ResQueueExecutorStart(QueryDesc *queryDesc)
 		ereport(NOTICE,
 				(errmsg("query requested %.0fKB", memory / 1024.0)));
 
-	if (lock_portal(portal, queueid, cost, memory, false) && memory > 0)
+	/*
+	 * The query is submitted before its portal waits for a slot, and fails
+	 * where the wait does, as Cloudberry's PortalStart() and ResLockPortal()
+	 * tell query_info_collect_hook (gp_query_info.h).
+	 */
+	gp_query_info_collect(METRICS_QUERY_SUBMIT, queryDesc);
+	PG_TRY();
+	{
+		locked = lock_portal(portal, queueid, cost, memory, false);
+	}
+	PG_CATCH();
+	{
+		gp_query_info_collect(METRICS_QUERY_ERROR, queryDesc);
+		PG_RE_THROW();
+	}
+	PG_END_TRY();
+	if (locked && memory > 0)
 		query_budget_kb = (int) Min(memory / 1024.0, (double) MAX_KILOBYTES);
 }
 
