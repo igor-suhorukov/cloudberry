@@ -33,6 +33,9 @@ option('pax', type: 'boolean', value: true,
 option('udp2', type: 'boolean', value: true,
        description: 'Build udp2, Cloudberry\'s UDP2 interconnect transport (C++)')
 
+option('ic_proxy', type: 'feature', value: 'auto',
+       description: 'Build the interconnect module\'s proxy transport, Cloudberry\'s ic-proxy; it needs libuv')
+
 option('tde', type: 'boolean', value: false,
        description: 'Build gp_tde (decision 8: only on a formal requirement for in-database encryption)')
 

@@ -371,6 +371,40 @@ else
   )
 endif
 
+# The interconnect proxy's server, Cloudberry's contrib/interconnect/proxy,
+# compiled where it lies, unmodified, for the interconnect module's proxy
+# transport: a background worker on each node that carries every pair of
+# nodes' Motions over one connection.  All of it but its backend half
+# (ic_proxy_backend.c, which is ic-tcp's), whose place the module's
+# proxy_backend.c takes; what it asks of Cloudberry's globals it reads through
+# the include overlay (compat/ic_proxy/).  It is written on libuv, and built
+# where libuv is.
+libuv_dep = dependency('libuv', required: get_option('ic_proxy'))
+ic_proxy_server = []
+ic_proxy_inc = []
+if libuv_dep.found()
+  ic_proxy_src = '../contrib/interconnect/proxy/'
+  ic_proxy_inc = include_directories('compat/ic_proxy', '../contrib/interconnect/proxy')
+  ic_proxy_server = static_library('ic_proxy_server',
+    files(ic_proxy_src + 'ic_proxy_addr.c',
+          ic_proxy_src + 'ic_proxy_client.c',
+          ic_proxy_src + 'ic_proxy_iobuf.c',
+          ic_proxy_src + 'ic_proxy_key.c',
+          ic_proxy_src + 'ic_proxy_main.c',
+          ic_proxy_src + 'ic_proxy_packet.c',
+          ic_proxy_src + 'ic_proxy_peer.c',
+          ic_proxy_src + 'ic_proxy_pkt_cache.c',
+          ic_proxy_src + 'ic_proxy_router.c'),
+    c_args: mod_c_args + cc.get_supported_arguments('-Wno-declaration-after-statement',
+                                                    '-Wno-missing-prototypes',
+                                                    '-Wno-shadow=compatible-local'),
+    include_directories: [ic_proxy_inc, include_directories('include'), pg_inc],
+    dependencies: libuv_dep,
+    gnu_symbol_visibility: 'hidden',
+    pic: true,
+  )
+endif
+
 modules = [
   {
     'name': 'gp_core', 'preload': true, 'extension': true, 'build': true,
@@ -429,8 +463,14 @@ modules = [
     'link_with': [gdd_graph],
   },
   {
+    # The proxy transport, where libuv is (ic_proxy_server, above).
     'name': 'interconnect', 'preload': true, 'extension': false, 'build': true,
-    'sources': files('modules/interconnect/interconnect.c'),
+    'sources': files('modules/interconnect/interconnect.c') +
+               (libuv_dep.found() ? files('modules/interconnect/proxy_backend.c') : []),
+    'c_args': libuv_dep.found() ? ['-DUSE_IC_PROXY'] : [],
+    'link_with': ic_proxy_server,
+    'dependencies': libuv_dep.found() ? [libuv_dep] : [],
+    'include_directories': ic_proxy_inc,
   },
   {
     # Cloudberry's UDP2 transport: its C++ core, unmodified (udp2/), under
