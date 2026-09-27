@@ -544,18 +544,22 @@ if [ -n "$tools" ]; then
 	fi
 	# What one segment alone was given, over a connection straight to it, in
 	# a database of its own: a table, a distribution policy -- the "gp"
-	# label -- of its own, a row of gp_ao's for no table, a PAX table without
-	# its row, and a file a directory table's row names, emptied.
+	# label -- of its own, a row of gp_ao's for no table and a PAX table
+	# without its row; and a directory table's file, put through the
+	# coordinator on the segment its path hashes to, emptied there.
 	q "$CPORT" "CREATE DATABASE catbad" > /dev/null
 	qd "$CPORT" catbad "CREATE TABLE h (a int, b text) DISTRIBUTED BY (a);
 						CREATE TABLE px (a int, b text) USING pax DISTRIBUTED BY (a);
-						CREATE DIRECTORY TABLE dt" > /dev/null
+						CREATE DIRECTORY TABLE dt;
+						SELECT gp_sql.directory_table_put('dt', 'x/y.txt', 'hello'::bytea)" > /dev/null
 	qd "$p0" catbad "CREATE TABLE only_here (a int);
 					 SECURITY LABEL FOR gp ON TABLE h IS 'distributed_by=(b)';
 					 INSERT INTO gp_ao.segfile VALUES (999999, 1, '{0}', '{0}', 0, 0, 0, 1, 3, NULL);
-					 DELETE FROM pax.pg_pax_tables WHERE relid = 'px'::regclass;
-					 SELECT gp_sql.directory_table_put('dt', 'x/y.txt', 'hello'::bytea)" > "$LOGDIR/checkcat-corrupt.out"
-	dtfile="$p0dir/$(qd "$p0" catbad "SELECT gp_sql.directory_table_location('dt')")/x/y.txt"
+					 DELETE FROM pax.pg_pax_tables WHERE relid = 'px'::regclass" > "$LOGDIR/checkcat-corrupt.out"
+	dtseg=$(qd "$CPORT" catbad "SELECT gp_segment_id FROM dt WHERE relative_path = 'x/y.txt'")
+	dtport=$(q "$CPORT" "SELECT port FROM gp_segment_configuration WHERE content = $dtseg AND role = 'p'")
+	dtdir=$(q "$CPORT" "SELECT datadir FROM gp_segment_configuration WHERE content = $dtseg AND role = 'p'")
+	dtfile="$dtdir/$(qd "$dtport" catbad "SELECT gp_sql.directory_table_location('dt')")/x/y.txt"
 	[ -f "$dtfile" ] && : > "$dtfile"
 	logat=$(stat -c %s "$catlog" 2> /dev/null || echo 0)
 	run checkcat-bad gpcheckcat catbad
@@ -572,8 +576,8 @@ if [ -n "$tools" ]; then
 	fi
 	grep -q "content 0, .*aux_table gp_ao.segfile, storage_id 999999" <<< "$details" &&
 	grep -q "content 0, .*relation public.px, issue has no pax.pg_pax_tables row" <<< "$details" &&
-	grep -q "content 0, .*dirtable public.dt, relative_path x/y.txt, size 5, on_disk 0" <<< "$details" \
-		&& ok "gpcheckcat: gp_ao's row of no table, a PAX table without its row, and a directory table's file of another size, on content 0" \
+	grep -q "content $dtseg, .*dirtable public.dt, relative_path x/y.txt, size 5, on_disk 0" <<< "$details" \
+		&& ok "gpcheckcat: gp_ao's row of no table and a PAX table without its row on content 0, and a directory table's file of another size on its segment" \
 		|| notok "gpcheckcat of the modules' own" "$(grep -E 'FAIL|content 0' <<< "$details" | head)"
 
 	###########################################################################
