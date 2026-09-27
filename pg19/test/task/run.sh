@@ -377,6 +377,48 @@ after=$(q "SELECT count(*) FROM gp_task.job WHERE jobname = 'held_open';")
 	         "$seen / $open / $prepared / $after"
 q "CALL gp_task.drop_task('{held_open}');" > /dev/null
 
+# And journalled with this transaction, in its own database
+# (gp_internal.loopback_journal): once the part there committed, distributed
+# transaction recovery removes the row; a part whose connection is lost
+# before its COMMIT, and one a crash takes between the two commits, it
+# writes there again, once.
+# journal_empty <label>: other_db's journal empty within a few seconds
+journal_empty() {
+	local got=
+	for i in $(seq 1 60); do
+		got=$(qd other_db "SELECT count(*) FROM gp_internal.loopback_journal;")
+		[ "$got" = 0 ] && { ok "$1"; return; }
+		sleep 0.5
+	done
+	notok "$1" "$got rows left: $(qd other_db "SELECT xid, dbname, part_xid, pg_xact_status(part_xid) FROM gp_internal.loopback_journal;")"
+}
+journal_empty "a part that committed there leaves no row in the journal"
+q "SELECT gp_inject_fault('loopback_commit_prepared', 'suspend', 1);" > /dev/null
+qd other_db "CALL gp_task.create_task('connection_lost', '@daily', 'SELECT 1');" > "$WORK/lost.out" 2>&1 &
+writer=$!
+q "SELECT gp_wait_until_triggered_fault('loopback_commit_prepared', 1, 1);" > /dev/null
+q "SELECT pg_terminate_backend(pid) FROM pg_stat_activity
+    WHERE application_name = 'cloudberry loopback' AND state = 'idle in transaction';" > /dev/null
+sleep 0.5
+q "SELECT gp_inject_fault('loopback_commit_prepared', 'resume', 1);" > /dev/null
+wait "$writer"
+q "SELECT gp_inject_fault('loopback_commit_prepared', 'reset', 1);" > /dev/null
+case "$(cat "$WORK/lost.out")" in
+	*"may not have been committed"*"writes it there again"*)
+		eventually "a part whose connection was lost before its COMMIT is written there again by recovery" \
+		   "SELECT count(*) FROM gp_task.job WHERE jobname = 'connection_lost';" "1" 30 ;;
+	*) notok "a part whose connection was lost before its COMMIT" "$(cat "$WORK/lost.out")" ;;
+esac
+q "SELECT gp_inject_fault('loopback_commit_prepared', 'panic', 1);" > /dev/null
+qd other_db "CALL gp_task.create_task('crashed_between', '@daily', 'SELECT 1');" > /dev/null 2>&1
+for i in $(seq 1 60); do q "SELECT 1;" > /dev/null 2>&1 && break; sleep 1; done
+eventually "a part a crash took between the two commits is written there again as the server starts" \
+   "SELECT count(*) FROM gp_task.job WHERE jobname = 'crashed_between';" "1" 60
+journal_empty "and their journal rows are gone"
+is "each written once" \
+   "SELECT count(*) FROM gp_task.job WHERE jobname IN ('connection_lost', 'crashed_between');" "2"
+q "CALL gp_task.drop_task('{connection_lost,crashed_between}');" > /dev/null
+
 ###############################################################################
 echo "10. a task of seconds runs as Cloudberry's does: an interval after it is written, one run at a time"
 ###############################################################################

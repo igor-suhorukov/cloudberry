@@ -518,6 +518,13 @@ typedef struct GpDtxShared
 	bool		progress_active;
 	int			progress_phase;
 	int64		progress[5];
+
+	/*
+	 * How many transactions have journalled a part of the loopback's and
+	 * committed (GpDtxNoteLoopbackJournal()): the recovery process reads the
+	 * journals when it changes.
+	 */
+	pg_atomic_uint32 loopback_journals;
 } GpDtxShared;
 
 static GpDtxShared *dtx_shared = NULL;
@@ -537,6 +544,7 @@ dtx_init_shared(void *ptr, void *arg)
 	s->held = InvalidTransactionId;
 	s->dbs = InvalidDsaPointer;
 	s->recovery_proc = INVALID_PROC_NUMBER;
+	pg_atomic_init_u32(&s->loopback_journals, 0);
 }
 
 static void
@@ -2138,6 +2146,14 @@ GpDtxWakeRecovery(void)
 		SetLatch(&GetPGProcByNumber(proc)->procLatch);
 }
 
+void
+GpDtxNoteLoopbackJournal(void)
+{
+	dtx_attach();
+	pg_atomic_fetch_add_u32(&dtx_shared->loopback_journals, 1);
+	GpDtxWakeRecovery();
+}
+
 typedef enum DtxOutcome
 {
 	DTX_IN_PROGRESS,
@@ -2595,12 +2611,254 @@ recovery_round(int min_age, bool startup)
 	return complete;
 }
 
+/* ------------------------------------------------------------------------- */
+/* The loopback's journal                                                    */
+/* ------------------------------------------------------------------------- */
+
+/*
+ * The loopback's parts a server that cannot prepare leaves open until the
+ * commit record of the transaction they are part of (gp_loopback.c), each
+ * journalled in the asking database with that transaction: the database it
+ * writes to, its own transaction there, the session's user and role it ran
+ * as, and its statements.  A part whose transaction there committed is done,
+ * and its row goes.  One whose transaction there did not -- a crash between
+ * the two commits, or a connection lost -- is run there again, once: its new
+ * transaction there is journalled before it commits, so that a failure then
+ * leaves the row naming a transaction that did not commit, and the next
+ * round runs it again.  One still in progress is its own backend's.
+ */
+
+/* Run a statement, quietly; its result, or NULL with the error logged. */
+static PGresult *
+journal_exec(PGconn *conn, const char *sql, ExecStatusType want,
+			 const char *where)
+{
+	PGresult   *res = libpqsrv_exec(conn, sql, recovery_wait_event());
+
+	if (res != NULL && PQresultStatus(res) == want)
+		return res;
+	ereport(LOG,
+			(errmsg("distributed transaction recovery could not read or write the loopback's journal in database \"%s\"",
+					where),
+			 errdetail_internal("%s", res != NULL ? PQresultErrorMessage(res)
+								: PQerrorMessage(conn))));
+	if (res != NULL)
+		PQclear(res);
+	return NULL;
+}
+
+/*
+ * One journalled part whose transaction there did not commit, run there
+ * again; false where it could not be, and is to be tried again.
+ */
+static bool
+journal_rewrite(PGconn *here, const char *here_db, const char *xid,
+				const char *dbname, const char *part_xid, const char *session_role,
+				const char *current_role)
+{
+	const GpSegmentConfig *self = recovery_self();
+	char	   *key = psprintf("xid = %s AND dbname = %s",
+							   quote_literal_cstr(xid), quote_literal_cstr(dbname));
+	PGconn	   *there;
+	PGresult   *res;
+	PGresult   *stmts;
+	char	   *new_xid;
+	bool		ok = false;
+
+	stmts = journal_exec(here,
+						 psprintf("SELECT s FROM gp_internal.loopback_journal,"
+								  " unnest(statements) WITH ORDINALITY AS u(s, n)"
+								  " WHERE %s AND part_xid = %s ORDER BY n",
+								  key, quote_literal_cstr(part_xid)),
+						 PGRES_TUPLES_OK, here_db);
+	if (stmts == NULL)
+		return false;
+	if ((there = recovery_connect(self, dbname)) == NULL)
+	{
+		PQclear(stmts);
+		return false;
+	}
+
+	res = libpqsrv_exec(there,
+						psprintf("BEGIN; SET LOCAL SESSION AUTHORIZATION %s;%s"
+								 " SELECT pg_catalog.pg_current_xact_id()",
+								 quote_identifier(session_role),
+								 current_role[0] != '\0'
+								 ? psprintf(" SET LOCAL ROLE %s;", quote_identifier(current_role))
+								 : ""),
+						recovery_wait_event());
+	if (res == NULL || PQresultStatus(res) != PGRES_TUPLES_OK)
+		goto failed;
+	new_xid = pstrdup(PQgetvalue(res, 0, 0));
+	PQclear(res);
+	res = NULL;
+
+	for (int i = 0; i < PQntuples(stmts); i++)
+	{
+		res = libpqsrv_exec(there, PQgetvalue(stmts, i, 0), recovery_wait_event());
+		if (res == NULL ||
+			(PQresultStatus(res) != PGRES_COMMAND_OK &&
+			 PQresultStatus(res) != PGRES_TUPLES_OK))
+			goto failed;
+		PQclear(res);
+		res = NULL;
+	}
+
+	/* its new transaction there, journalled before it commits */
+	res = journal_exec(here,
+					   psprintf("UPDATE gp_internal.loopback_journal SET part_xid = %s"
+								" WHERE %s AND part_xid = %s",
+								quote_literal_cstr(new_xid), key,
+								quote_literal_cstr(part_xid)),
+					   PGRES_COMMAND_OK, here_db);
+	if (res == NULL || strcmp(PQcmdTuples(res), "1") != 0)
+		goto failed;
+	PQclear(res);
+	res = libpqsrv_exec(there, "COMMIT", recovery_wait_event());
+	if (res == NULL || PQresultStatus(res) != PGRES_COMMAND_OK ||
+		strcmp(PQcmdStatus(res), "COMMIT") != 0)
+		goto failed;
+	PQclear(res);
+	res = journal_exec(here,
+					   psprintf("DELETE FROM gp_internal.loopback_journal"
+								" WHERE %s AND part_xid = %s",
+								key, quote_literal_cstr(new_xid)),
+					   PGRES_COMMAND_OK, here_db);
+	if (res != NULL)
+		PQclear(res);
+	ereport(LOG,
+			(errmsg("distributed transaction recovery wrote in database \"%s\" the part of transaction %s of database \"%s\", which a failure had lost",
+					dbname, xid, here_db)));
+	ok = true;
+	res = NULL;
+
+failed:
+	if (!ok)
+	{
+		ereport(WARNING,
+				(errmsg("distributed transaction recovery could not write in database \"%s\" the part of transaction %s of database \"%s\"",
+						dbname, xid, here_db),
+				 errdetail_internal("%s", res != NULL ? PQresultErrorMessage(res)
+									: PQerrorMessage(there)),
+				 errhint("It is journalled in gp_internal.loopback_journal of database \"%s\", and tried again as the server starts.",
+						 here_db)));
+		if (res != NULL)
+			PQclear(res);
+	}
+	PQclear(stmts);
+	libpqsrv_disconnect(there);
+	return ok;
+}
+
+/*
+ * Every database's journal, on the node the recovery process runs on: true
+ * where each was read and nothing is left to try again.
+ */
+static bool
+recovery_journals(void)
+{
+	const GpSegmentConfig *self = recovery_self();
+	PGconn	   *conn = recovery_connect(self, "postgres");
+	PGresult   *dbs;
+	bool		complete = true;
+
+	if (conn == NULL)
+		conn = recovery_connect(self, "template1");
+	if (conn == NULL)
+		return false;
+	dbs = journal_exec(conn,
+					   "SELECT datname FROM pg_catalog.pg_database"
+					   " WHERE datallowconn ORDER BY datname",
+					   PGRES_TUPLES_OK, "postgres");
+	libpqsrv_disconnect(conn);
+	if (dbs == NULL)
+		return false;
+
+	for (int d = 0; d < PQntuples(dbs); d++)
+	{
+		const char *here_db = PQgetvalue(dbs, d, 0);
+		PGconn	   *here = recovery_connect(self, here_db);
+		PGresult   *rows;
+
+		if (here == NULL)
+		{
+			complete = false;
+			continue;
+		}
+		/* a database without gp_core's extension has no journal */
+		rows = journal_exec(here,
+							"SELECT pg_catalog.to_regclass('gp_internal.loopback_journal') IS NOT NULL",
+							PGRES_TUPLES_OK, here_db);
+		if (rows == NULL || strcmp(PQgetvalue(rows, 0, 0), "t") != 0)
+		{
+			if (rows == NULL)
+				complete = false;
+			else
+				PQclear(rows);
+			libpqsrv_disconnect(here);
+			continue;
+		}
+		PQclear(rows);
+
+		rows = journal_exec(here,
+							"SELECT xid, dbname, part_xid, session_role,"
+							" coalesce(current_role_name, ''),"
+							" pg_catalog.pg_xact_status(part_xid)"
+							" FROM gp_internal.loopback_journal ORDER BY xid",
+							PGRES_TUPLES_OK, here_db);
+		if (rows == NULL)
+		{
+			complete = false;
+			libpqsrv_disconnect(here);
+			continue;
+		}
+
+		for (int r = 0; r < PQntuples(rows); r++)
+		{
+			const char *xid = PQgetvalue(rows, r, 0);
+			const char *dbname = PQgetvalue(rows, r, 1);
+			const char *part_xid = PQgetvalue(rows, r, 2);
+			const char *status = PQgetvalue(rows, r, 5);
+
+			if (strcmp(status, "committed") == 0)
+			{
+				PGresult   *res = journal_exec(here,
+											   psprintf("DELETE FROM gp_internal.loopback_journal"
+														" WHERE xid = %s AND dbname = %s AND part_xid = %s",
+														quote_literal_cstr(xid),
+														quote_literal_cstr(dbname),
+														quote_literal_cstr(part_xid)),
+											   PGRES_COMMAND_OK, here_db);
+
+				if (res != NULL)
+					PQclear(res);
+				else
+					complete = false;
+			}
+			else if (strcmp(status, "aborted") == 0)
+			{
+				if (!journal_rewrite(here, here_db, xid, dbname, part_xid,
+									 PQgetvalue(rows, r, 3), PQgetvalue(rows, r, 4)))
+					complete = false;
+			}
+			else
+				complete = false;	/* its own backend's, or older than the clog */
+		}
+		PQclear(rows);
+		libpqsrv_disconnect(here);
+	}
+	PQclear(dbs);
+	return complete;
+}
+
 PGDLLEXPORT void GpDtxRecoveryMain(Datum main_arg);
 
 void
 GpDtxRecoveryMain(Datum main_arg)
 {
 	bool		everything = true;
+	bool		journals_due = true;	/* every database's, at start */
+	uint32		journals_seen = 0;
 
 	pqsignal(SIGHUP, SignalHandlerForConfigReload);
 	pqsignal(SIGTERM, die);
@@ -2632,8 +2890,12 @@ GpDtxRecoveryMain(Datum main_arg)
 
 		GP_FAULT("dtx_recovery_round");
 
-		/* until a round reaches every segment, each takes everything */
-		if (recovery_round(everything ? 0 : dtx_recovery_prepared_period,
+		/*
+		 * Until a round reaches every segment, each takes everything.  One
+		 * node that cannot prepare has nothing prepared to finish.
+		 */
+		if ((GpClusterIsSingleNode() && max_prepared_xacts == 0) ||
+			recovery_round(everything ? 0 : dtx_recovery_prepared_period,
 						   !dtx_shared->recovered))
 		{
 			everything = false;
@@ -2645,6 +2907,21 @@ GpDtxRecoveryMain(Datum main_arg)
 				ereport(LOG,
 						(errmsg("DTM Started"),
 						 errdetail("Distributed transaction recovery has reached every node.")));
+			}
+		}
+
+		/*
+		 * The loopback's journals: as the server starts, and whenever a
+		 * transaction that journalled a part has committed since, and until
+		 * none is left to try again.
+		 */
+		{
+			uint32		journals = pg_atomic_read_u32(&dtx_shared->loopback_journals);
+
+			if (journals_due || journals != journals_seen)
+			{
+				journals_seen = journals;
+				journals_due = !recovery_journals();
 			}
 		}
 
@@ -3105,7 +3382,8 @@ GpDtxInit(void)
 	/*
 	 * One node prepares only the loopback's parts, when it may prepare at
 	 * all: the gid is reserved, and the recovery process finishes what a
-	 * failure left.
+	 * failure left.  Where it may not, the recovery process writes again
+	 * the loopback's journalled parts a failure lost.
 	 */
 	if (GpClusterIsSingleNode())
 	{
@@ -3113,8 +3391,8 @@ GpDtxInit(void)
 		{
 			prev_ProcessUtility = ProcessUtility_hook;
 			ProcessUtility_hook = dtx_single_ProcessUtility;
-			dtx_register_recovery();
 		}
+		dtx_register_recovery();
 		return;
 	}
 

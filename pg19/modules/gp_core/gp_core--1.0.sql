@@ -161,6 +161,25 @@ AS 'MODULE_PATHNAME', 'gp_current_tid'
 LANGUAGE C STRICT STABLE;
 
 /*
+ * The loopback's journal (gp_loopback.c): where this server cannot prepare, a
+ * transaction that writes to another of its databases through the loopback
+ * leaves its part there open until its own commit is recorded, and records
+ * here, with its own commit, the part's statements, the part's transaction
+ * there and who ran them -- so that a part a crash or a lost connection took
+ * before its COMMIT is written there again by distributed transaction
+ * recovery, once (gp_dtx.c).  Written with the heap's own functions, as
+ * gp_internal.distributed_log is.
+ */
+CREATE TABLE gp_internal.loopback_journal (
+	xid			xid8 NOT NULL,		-- the transaction here
+	dbname		name NOT NULL,		-- the database it wrote to
+	part_xid	xid8 NOT NULL,		-- its part's transaction there
+	session_role name NOT NULL,		-- the part's session user
+	current_role_name name,			-- and current user, where another
+	statements	text[] NOT NULL
+) USING heap;
+
+/*
  * Whether this node's distributed transaction recovery has reached every node
  * since the server started: Cloudberry's "DTM recovered", which its pg_ctl
  * waits for on a coordinator, and gpstart polls for.  True on a node that

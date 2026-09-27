@@ -46,9 +46,14 @@
  * committed once this transaction's commit record is written, or rolled back
  * with this transaction.  So a failure after PRE_COMMIT -- a SERIALIZABLE
  * transaction's serialization check, an ON COMMIT action, NOTIFY's queue,
- * which PostgreSQL runs after the callbacks -- rolls back both.  What is left
- * is a crash, or a lost connection, between the commit record and the part's
- * COMMIT: the part is then lost, which only a prepared part survives.
+ * which PostgreSQL runs after the callbacks -- rolls back both.  A crash, or
+ * a lost connection, between the commit record and the part's COMMIT would
+ * lose the part: so this transaction journals it too, in this database's
+ * gp_internal.loopback_journal, with its commit -- the part's statements, who
+ * ran them, and the part's own transaction there -- and distributed
+ * transaction recovery writes a part whose transaction there did not commit
+ * there again, once (gp_dtx.c).  A database without gp_core's extension has
+ * no journal, and its part is lost so.
  *
  * READS are run at once, in a read-only transaction of their own, as the
  * session's current user, and see what is committed there: what this
@@ -66,10 +71,15 @@
  */
 #include "postgres.h"
 
+#include "access/htup_details.h"
+#include "access/table.h"
 #include "access/twophase.h"
 #include "access/xact.h"
 #include "access/xlog.h"
+#include "catalog/indexing.h"
+#include "catalog/namespace.h"
 #include "catalog/pg_database.h"
+#include "catalog/pg_type.h"
 #include "commands/dbcommands.h"
 #include "executor/spi.h"
 #include "funcapi.h"
@@ -81,13 +91,17 @@
 #include "storage/ipc.h"
 #include "storage/latch.h"
 #include "tcop/utility.h"
+#include "utils/array.h"
 #include "utils/builtins.h"
+#include "utils/fmgrprotos.h"
 #include "utils/guc.h"
 #include "utils/lsyscache.h"
 #include "utils/memutils.h"
+#include "utils/snapmgr.h"
 #include "utils/timestamp.h"
 #include "utils/tuplestore.h"
 #include "utils/varlena.h"
+#include "utils/xid8.h"
 #include "utils/wait_event.h"
 
 #include "gp_cluster.h"
@@ -131,6 +145,7 @@ static List *writes = NIL;		/* this transaction's; TopTransactionContext */
 static List *conns = NIL;		/* the session's; TopMemoryContext */
 static List *parts = NIL;		/* this transaction's; TopMemoryContext */
 static bool exit_registered = false;
+static bool journaled = false;	/* this transaction journals a part */
 
 static uint32
 loopback_wait_event(void)
@@ -395,10 +410,59 @@ GpLoopbackDefer(const char *dbname, const char *sql)
 }
 
 /*
+ * A part left open where this server cannot prepare, journalled in this
+ * database with this transaction (gp_internal.loopback_journal): the
+ * database it writes to, its transaction there, as pg_current_xact_id() gave
+ * it, the session's user and role it runs as, and its statements, in order.
+ * With the heap's own functions, as gp_dtx.c logs a part.
+ */
+static void
+loopback_journal(const char *dbname, const char *part_xid, List *stmts)
+{
+	Oid			nsp = get_namespace_oid("gp_internal", true);
+	Oid			relid = OidIsValid(nsp) ? get_relname_relid("loopback_journal", nsp)
+		: InvalidOid;
+	Relation	rel;
+	Datum		values[6];
+	bool		nulls[6] = {false, false, false, false, false, false};
+	Datum	   *elems;
+	HeapTuple	tup;
+	int			i = 0;
+
+	if (!OidIsValid(relid))
+		return;
+
+	elems = palloc_array(Datum, Max(list_length(stmts), 1));
+	foreach_ptr(char, sql, stmts)
+		elems[i++] = CStringGetTextDatum(sql);
+
+	/* as the transaction commits, the statement's snapshot is gone */
+	PushActiveSnapshot(GetLatestSnapshot());
+	rel = table_open(relid, RowExclusiveLock);
+	values[0] = FullTransactionIdGetDatum(GetTopFullTransactionId());
+	values[1] = DirectFunctionCall1(namein, CStringGetDatum(dbname));
+	values[2] = DirectFunctionCall1(xid8in, CStringGetDatum(part_xid));
+	values[3] = DirectFunctionCall1(namein,
+									CStringGetDatum(GetUserNameFromId(GetSessionUserId(), false)));
+	if (GetUserId() != GetSessionUserId())
+		values[4] = DirectFunctionCall1(namein,
+										CStringGetDatum(GetUserNameFromId(GetUserId(), false)));
+	else
+		nulls[4] = true;
+	values[5] = PointerGetDatum(construct_array_builtin(elems, i, TEXTOID));
+	tup = heap_form_tuple(RelationGetDescr(rel), values, nulls);
+	CatalogTupleInsert(rel, tup);
+	heap_freetuple(tup);
+	table_close(rel, NoLock);
+	PopActiveSnapshot();
+	journaled = true;
+}
+
+/*
  * As this transaction commits: each database's statements, in one
  * transaction there, prepared, or left open where this server cannot
- * prepare.  Raising here still rolls this one back, and at ABORT what was
- * prepared or left open with it.
+ * prepare -- and then journalled here.  Raising here still rolls this one
+ * back, and at ABORT what was prepared or left open with it.
  */
 static void
 loopback_pre_commit(void)
@@ -429,12 +493,27 @@ loopback_pre_commit(void)
 		char	   *context = psprintf("run in database \"%s\" as the transaction commits", db);
 		LoopbackConn *lc = loopback_conn(NULL, db, two_phase);
 
+		List	   *stmts = NIL;
+
 		PQclear(loopback_exec(lc, "BEGIN", context));
 		loopback_set_role(lc, context);
 		foreach_ptr(LoopbackWrite, w, writes)
 		{
 			if (strcmp(w->dbname, db) == 0)
+			{
 				PQclear(loopback_exec(lc, w->sql, context));
+				stmts = lappend(stmts, w->sql);
+			}
+		}
+
+		/* left open: its transaction there, journalled here */
+		if (!two_phase)
+		{
+			PGresult   *res = loopback_exec(lc, "SELECT pg_catalog.pg_current_xact_id()",
+											context);
+
+			loopback_journal(db, PQgetvalue(res, 0, 0), stmts);
+			PQclear(res);
 		}
 
 		{
@@ -577,7 +656,9 @@ loopback_second_phase(bool commit)
 				ereport(WARNING,
 						(errmsg("the part of this transaction in database \"%s\" may not have been committed",
 								part->lc->dbname),
-						 errdetail("Its COMMIT was not answered, and what this transaction asked for there may not be written."),
+						 journaled
+						 ? errdetail("Its COMMIT was not answered; distributed transaction recovery writes it there again if it was not committed.")
+						 : errdetail("Its COMMIT was not answered, and what this transaction asked for there may not be written."),
 						 errhint("With \"max_prepared_transactions\" above zero such a part is prepared, and finished after a failure.")));
 		}
 	}
@@ -621,9 +702,21 @@ loopback_xact_callback(XactEvent event, void *arg)
 			writes = NIL;
 			/* the second phase is done already (loopback_commit_recorded()) */
 			Assert(parts == NIL);
+
+			/*
+			 * A journalled part, committed or not: distributed transaction
+			 * recovery looks at the journal now that this transaction's row
+			 * is there to be seen, and removes it, or writes the part again.
+			 */
+			if (journaled)
+			{
+				journaled = false;
+				GpDtxNoteLoopbackJournal();
+			}
 			break;
 		case XACT_EVENT_ABORT:
 			writes = NIL;
+			journaled = false;
 			if (parts != NIL)
 				loopback_second_phase(false);
 
