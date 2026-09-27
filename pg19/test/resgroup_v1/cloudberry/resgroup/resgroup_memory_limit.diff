@@ -1,0 +1,25 @@
+@@
+-CREATE RESOURCE GROUP
++CREATE
+@@
+-DROP RESOURCE GROUP
++DROP
+@@
+- statement_mem 
+----------------
+- 250MB         
++ gp.statement_mem 
++------------------
++ 125MB            
+@@
+- 256000kB         
++ 128000kB         
+@@
+- max_statement_mem 
+--------------------
+- 2000MB            
++ gp.max_statement_mem 
++----------------------
++ 2000MB               
+@@
++

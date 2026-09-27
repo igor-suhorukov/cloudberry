@@ -1,0 +1,17 @@
+Part of Cloudberry's isolation2_resgroup_v1_schedule on the port's cluster,
+in a KVM guest with cgroup v1 (../run.sh): the differences from Cloudberry's
+expected output that have been reviewed, and are the port's for a reason of
+its own, in the form ../../singlenode/canon.pl gives them, kept in the test's
+directory, resgroup/.  A test of the v2 schedule's too that answers alike
+has its difference in ../../resgroup/cloudberry, which ../run.sh reads
+after this directory.
+
+resgroup_memory_limit
+  The command tags of CREATE and DROP RESOURCE GROUP, which the port's
+  grammar makes other statements (CREATE, DROP), as for the v2 schedule's
+  tests; the header of SHOW statement_mem and max_statement_mem, the port's
+  names; and statement_mem itself, 125MB, and the query's memory that
+  follows it, 128000kB: the default, which the v2 schedule's expected output
+  of the same test has too, where this one's was made where statement_mem
+  was 250MB.  The last line, an empty one the driver prints after the
+  test's last statement.
