@@ -205,6 +205,9 @@ COPY --from=build /cb/src/test/regress/expected /cb/src/test/regress/expected
 COPY --from=build /cb/src/test/regress/input /cb/src/test/regress/input
 COPY --from=build /cb/src/test/regress/output /cb/src/test/regress/output
 COPY --from=build /cb/src/test/regress/data /cb/src/test/regress/data
+# and what rowhints pipes its plans through, sql/maskout.sh, a link there to
+# Cloudberry's pg_hint_plan
+COPY --from=build /cb/gpcontrib/pg_hint_plan/sql/maskout.sh /cb/gpcontrib/pg_hint_plan/sql/
 COPY --from=build /cb/src/test/singlenode_regress /cb/src/test/singlenode_regress
 COPY --from=build /cb/src/test/singlenode_isolation2 /cb/src/test/singlenode_isolation2
 COPY --from=build /cb/src/test/isolation2 /cb/src/test/isolation2
