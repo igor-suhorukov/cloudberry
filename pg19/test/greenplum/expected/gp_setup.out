@@ -39,7 +39,7 @@ SELECT extname FROM pg_extension WHERE extname LIKE 'gp\_%' ORDER BY 1;
  gp_sql
 (8 rows)
 
-SELECT count(*) AS segments FROM gp.segment_configuration() WHERE content >= 0;
+SELECT count(*) AS segments FROM gp.segment_configuration() WHERE content >= 0 AND role = 'p';
  segments 
 ----------
         3

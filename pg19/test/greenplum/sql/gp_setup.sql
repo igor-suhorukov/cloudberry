@@ -27,7 +27,7 @@ CREATE EXTENSION gp_inject_fault;
 -- inject them, some as roles of their own (gp_inject_fault--1.0.sql)
 GRANT EXECUTE ON FUNCTION gp_inject_fault(text, text, text, text, text, int4, int4, int4, int4, int4) TO PUBLIC;
 SELECT extname FROM pg_extension WHERE extname LIKE 'gp\_%' ORDER BY 1;
-SELECT count(*) AS segments FROM gp.segment_configuration() WHERE content >= 0;
+SELECT count(*) AS segments FROM gp.segment_configuration() WHERE content >= 0 AND role = 'p';
 --
 -- A database a test makes is template1's copy, which has the extensions too:
 -- every database of Cloudberry's has what they give.  Not gp_inject_fault,

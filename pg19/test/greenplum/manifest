@@ -73,7 +73,7 @@ run  gpparams
 run  with_clause
 run  transient_types
 run  gp_rules
-skip motion_gp  row is too big: size 10032, maximum size 8160; syntax error at or near ")"
+skip motion_gp  row is too big: size 10032, maximum size 8160
 run  gp_pullup_expr
 skip cursor  differs: its cursor starts no reader of its own on segment 0, which Cloudberry's does as the cursor is declared and the fault qe_got_snapshot_and_interconnect holds while the writer updates the row: gp_wait_until_triggered_fault() waits out the suite's minute -- the FETCH after the UPDATE answers (1, 666), as Cloudberry's does
 run  gp_hashagg
@@ -282,7 +282,7 @@ skip copy_eol  could not open file "/tmp/copy_lf.file" for reading: No such file
 skip copy_encoding_error  segment reject limit reached, aborting operation
 run  dedupset
 run  disable_autovacuum
-skip python_processed64bit  differs: an INSERT's count is the coordinator's own, which the fault executor_run_high_processed makes 2^32 - 11, where Cloudberry's is the sum of each segment's so made, 3 x (2^32 - 11)
+run  python_processed64bit  orca  differs under the planner: an INSERT's count is the coordinator's own, which the fault executor_run_high_processed makes 2^32 - 11, where Cloudberry's is the sum of each segment's so made, 3 x (2^32 - 11)
 run  enable_autovacuum
 skip log_guc  relation "gp_toolkit.__gp_log_master_ext" does not exist; relation "gp_toolkit.__gp_log_segment_ext" does not exist
 skip instr_in_shmem_setup  gp_enable_query_metrics is none of the port's settings: gpconfig refuses it, and instr_in_shmem and instr_in_shmem_verify, which it sets up for, fail without it
@@ -453,7 +453,7 @@ group m7a
 run  rpt_returning
 skip bfv_planner  differs: two counts of what its plans read are 27 and 9, where Cloudberry's are 33 and 11
 run  bfv_legacy
-skip bfv_temp  syntax error at or near ")"; relation "n" does not exist
+skip bfv_temp  differs: a session's temporary schemas outlive it, pg_temp_N and pg_toast_temp_N, which PostgreSQL keeps for the next session in that backend's slot, where Cloudberry drops them as the session ends
 run  bfv_dml
 skip tpcds_q04  table row type and query-specified row type do not match
 skip qp_olap_mdqa  differs: GROUP_ID() numbers each grouping set's copies 0, 1, and so on, where Cloudberry's numbers them as its Agg's phases meet them -- in the rollups and hashed sets its planner arranges them into -- and gives some rows 2 and 3 where the port gives 0 and 1
@@ -470,19 +470,19 @@ skip qp_olap_window  argument of RANGE must not contain variables; argument of R
 run  qp_dropped_cols
 skip qp_with_functional_inlining  differs: a function's write in a segment's slice runs, where Cloudberry refuses it (function cannot execute on a QE slice because it issues a non-SELECT statement), and one declared stable PostgreSQL 19 refuses to write at all: UPDATE is not allowed in a non-volatile function
 skip qp_with_functional_noinlining  differs: a function's write in a segment's slice runs, where Cloudberry refuses it (function cannot execute on a QE slice because it issues a non-SELECT statement), and one declared stable PostgreSQL 19 refuses to write at all: UPDATE is not allowed in a non-volatile function
+group m7b
 run  qp_functions_in_contexts_setup
 run  qp_misc_rio_join_small
-group m7b
 run  qp_gist_indexes2
 run  qp_gist_indexes3
 skip qp_gist_indexes4  canceling statement due to user request: under the planner, its join of two tables by a GiST operator runs past the suite's 60 seconds
-skip qp_query_execution  differs: two counts of its plans' nodes are 0, where Cloudberry's are 1
+run  qp_query_execution  orca  differs under the planner: two counts of its plans' nodes are 0, where Cloudberry's are 1
 skip qp_functions_in_from  UPDATE is not allowed in a non-volatile function
 skip qp_functions_in_select  UPDATE is not allowed in a non-volatile function; function cannot execute on a QE slice because it accesses relation "qp_funcs_in_select.bar"
 skip qp_functions_in_subquery  UPDATE is not allowed in a non-volatile function; function cannot execute on a QE slice because it accesses relation "qp_funcs_in_subquery.bar"
-skip qp_functions_in_subquery_column  UPDATE is not allowed in a non-volatile function
+run  qp_functions_in_subquery_column  orca  under the planner, its functions that read a distributed table run on the coordinator over its rows gathered, where Cloudberry refuses to run them on a QE slice (function cannot execute on a QE slice because it accesses relation), and a stable one's UPDATE is refused as PostgreSQL 19 refuses it: UPDATE is not allowed in a non-volatile function
 skip qp_functions_in_subquery_constant  UPDATE is not allowed in a non-volatile function; function cannot execute on a QE slice because it accesses relation "qp_funcs_in_subquery_constant.bar"
-skip qp_functions_in_with  UPDATE is not allowed in a non-volatile function
+run  qp_functions_in_with  orca  under the planner, its functions that read a distributed table run on the coordinator over its rows gathered, where Cloudberry refuses to run them on a QE slice (function cannot execute on a QE slice because it accesses relation), and a stable one's UPDATE is refused as PostgreSQL 19 refuses it: UPDATE is not allowed in a non-volatile function
 run  qp_dpe  planner  differs under ORCA: which of its plans eliminate partitions while they run
 run  qp_functions_idf
 run  qp_regexp
