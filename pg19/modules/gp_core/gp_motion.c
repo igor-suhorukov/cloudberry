@@ -1808,7 +1808,8 @@ motion_begin(CustomScanState *node, EState *estate, int eflags)
 	 * not for a statement instrumented for query metrics alone.
 	 */
 	if ((eflags & EXEC_FLAG_EXPLAIN_ONLY) ||
-		(estate->es_instrument & ~GP_INSTR_METRICS_ONLY) != 0)
+		(estate->es_instrument != 0 &&
+		 !(estate->es_instrument & GP_INSTR_METRICS_ONLY)))
 	{
 		outerPlanState(node) = ExecInitNode(outerPlan(cscan), estate,
 											eflags | EXEC_FLAG_EXPLAIN_ONLY);
