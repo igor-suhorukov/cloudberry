@@ -100,6 +100,32 @@ checkResourceQueueMemoryLimits(PG_FUNCTION_ARGS)
 	PG_RETURN_BOOL(in_sync(PG_GETARG_CSTRING(0)));
 }
 
+typedef void (*reset_gang_fn) (void);
+
+PG_FUNCTION_INFO_V1(cleanupAllGangs);
+
+/*
+ * cleanupAllGangs() -> bool: the session's connections to the segments
+ * closed, which gp_core's dispatcher makes again as the next statement
+ * needs them -- Cloudberry's DisconnectAndDestroyAllGangs().  On the
+ * coordinator alone, as there.
+ */
+Datum
+cleanupAllGangs(PG_FUNCTION_ARGS)
+{
+	static reset_gang_fn reset = NULL;
+	const char *role = GetConfigOption("gp.role", true, false);
+
+	if (role == NULL || strcmp(role, "dispatch") != 0)
+		elog(ERROR, "cleanupAllGangs can only be executed on master");
+	if (reset == NULL)
+		reset = (reset_gang_fn)
+			load_external_function("$libdir/gp_core", "GpDispatchResetGang",
+								   true, NULL);
+	reset();
+	PG_RETURN_BOOL(true);
+}
+
 PG_FUNCTION_INFO_V1(test_consume_xids);
 
 /*

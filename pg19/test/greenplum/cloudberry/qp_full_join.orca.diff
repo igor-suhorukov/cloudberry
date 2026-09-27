@@ -1,0 +1,96 @@
+@@
++
++explain (costs off, timing off, summary off) select * from vw_dist left join rand on vw_dist.c12 = rand.c1;
++QUERY PLAN
++___________
+@@
+-explain (costs off, timing off, summary off) select * from vw_dist left join rand on vw_dist.c12 = rand.c1;
++explain (costs off, timing off, summary off) select * from vw_dist left join rand on vw_dist.c11 is not distinct from rand.c1;
+@@
+-explain (costs off, timing off, summary off) select * from vw_dist left join rand on vw_dist.c11 is not distinct from rand.c1;
++explain (costs off, timing off, summary off) select * from vw_dist left join rand on vw_dist.c12 is not distinct from rand.c1;
+@@
+-explain (costs off, timing off, summary off) select * from vw_dist left join rand on vw_dist.c12 is not distinct from rand.c1;
++select count(*) from vw_dist left join rand on vw_dist.c11 = rand.c1;
++ count 
++-------
++  1119
++(1 row)
++
++select count(*) from vw_dist left join rand on vw_dist.c12 = rand.c1;
++ count 
++-------
++  1119
++(1 row)
++
++select count(*) from vw_dist left join rand on vw_dist.c11 is not distinct from rand.c1;
++ count 
++-------
++  2199
++(1 row)
++
++select count(*) from vw_dist left join rand on vw_dist.c12 is not distinct from rand.c1;
++ count 
++-------
++  2190
++(1 row)
++
++-- (distributed ⟗  distributed) ⟗  random
++explain (costs off, timing off, summary off) select * from vw_dist full join rand on vw_dist.c11 = rand.c1;
+@@
+-
+-select count(*) from vw_dist left join rand on vw_dist.c11 = rand.c1;
+- count 
+--------
+-  1119
+-(1 row)
+-
+-select count(*) from vw_dist left join rand on vw_dist.c12 = rand.c1;
+- count 
+--------
+-  1119
+-(1 row)
+-
+-select count(*) from vw_dist left join rand on vw_dist.c11 is not distinct from rand.c1;
+- count 
+--------
+-  2199
+-(1 row)
+@@
+-select count(*) from vw_dist left join rand on vw_dist.c12 is not distinct from rand.c1;
+- count 
+--------
+-  2190
+-(1 row)
++explain (costs off, timing off, summary off) select * from vw_dist full join rand on vw_dist.c12 = rand.c1;
++QUERY PLAN
++___________
+@@
+--- (distributed ⟗  distributed) ⟗  random
+-explain (costs off, timing off, summary off) select * from vw_dist full join rand on vw_dist.c11 = rand.c1;
++explain (costs off, timing off, summary off) select * from vw_dist full join rand on vw_dist.c11 is not distinct from rand.c1;
+@@
+-explain (costs off, timing off, summary off) select * from vw_dist full join rand on vw_dist.c12 = rand.c1;
++explain (costs off, timing off, summary off) select * from vw_dist full join rand on vw_dist.c12 is not distinct from rand.c1;
+@@
+-explain (costs off, timing off, summary off) select * from vw_dist full join rand on vw_dist.c11 is not distinct from rand.c1;
+-ERROR:  FULL JOIN is only supported with merge-joinable or hash-joinable join conditions
+-explain (costs off, timing off, summary off) select * from vw_dist full join rand on vw_dist.c12 is not distinct from rand.c1;
+-ERROR:  FULL JOIN is only supported with merge-joinable or hash-joinable join conditions
+@@
++  1230
++(1 row)
+@@
+-ERROR:  FULL JOIN is only supported with merge-joinable or hash-joinable join conditions
++ count 
++-------
++  2300
++(1 row)
++
+@@
+-ERROR:  FULL JOIN is only supported with merge-joinable or hash-joinable join conditions
++ count 
++-------
++  2390
++(1 row)
++

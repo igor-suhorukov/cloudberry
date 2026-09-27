@@ -92,6 +92,8 @@ PG_MODULE_MAGIC_EXT(
 
 PG_FUNCTION_INFO_V1(gp_orca_version);
 PG_FUNCTION_INFO_V1(gp_opt_version);
+PG_FUNCTION_INFO_V1(gp_disable_xform);
+PG_FUNCTION_INFO_V1(gp_enable_xform);
 PG_FUNCTION_INFO_V1(gp_orca_type_name);
 PG_FUNCTION_INFO_V1(gp_orca_function_fact);
 PG_FUNCTION_INFO_V1(gp_orca_find_aggregate);
@@ -174,6 +176,36 @@ gp_opt_version(PG_FUNCTION_ARGS)
 {
 	PG_RETURN_TEXT_P(cstring_to_text(psprintf("GPOPT version: 4.0.0, Xerces version: %s",
 											  GpOrcaXercesVersion())));
+}
+
+/*
+ * pg_catalog.disable_xform(text) and enable_xform(text)
+ *
+ * A transformation rule of ORCA's turned off, or on again, for the queries
+ * the session plans next, answered in Cloudberry's words
+ * (gpopt/utils/funcs.cpp): "<rule> is disabled", or "is not recognized".
+ */
+static Datum
+set_xform(FunctionCallInfo fcinfo, bool disable)
+{
+	char	   *name = text_to_cstring(PG_GETARG_TEXT_PP(0));
+
+	if (!GpOrcaSetXform(name, disable))
+		PG_RETURN_TEXT_P(cstring_to_text(psprintf("%s is not recognized", name)));
+	PG_RETURN_TEXT_P(cstring_to_text(psprintf(disable ? "%s is disabled" : "%s is enabled",
+											  name)));
+}
+
+Datum
+gp_disable_xform(PG_FUNCTION_ARGS)
+{
+	return set_xform(fcinfo, true);
+}
+
+Datum
+gp_enable_xform(PG_FUNCTION_ARGS)
+{
+	return set_xform(fcinfo, false);
 }
 
 /*

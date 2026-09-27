@@ -145,7 +145,7 @@ run  qp_dml_joins
 run  qp_select
 run  partition_prune_opfamily
 run  qp_join_union_all
-skip qp_full_join  function disable_xform(unknown) does not exist; function enable_xform(unknown) does not exist
+run  qp_full_join
 run  qp_with_clause  planner  under ORCA, query 3 of its nested CTEs is still running at the harness's 60 seconds
 run  qp_derived_table
 run  qp_bitmapscan
@@ -417,7 +417,7 @@ skip joinhints  could not access file "pg_hint_plan": No such file or directory
 run  qp_indexscan  planner  differs under ORCA: its plans of index scans over partitions
 run  gp_index_costing
 skip pgstat_qd_tabstat  syntax error at or near "on": its COPY ... ON SEGMENT, to and from a file of each segment, is none of the port's
-skip dispatch  unrecognized configuration parameter "gp_max_plan_size"; could not find function "cleanupAllGangs" in file "regress.so"
+skip dispatch  the fault DoCopyToFail is none of the port's; unrecognized configuration parameter "gp_max_plan_size"; and its gangs' faults (process_startup_packet, send_qe_details_init_backend), retries (gp_gang_creation_retry_count) and regress.so's hasGangsExist() and hasBackendsExist()
 run  wrkloadadmin
 run  trig
 skip role  syntax error at or near "only"
@@ -493,7 +493,7 @@ run  window_parallel
 skip vacuum_full_freeze_heap  differs: a heap's size in 8 kB pages, where Cloudberry's expected output counts its 32 kB blocks
 skip vacuum_full_heap  differs: a heap's size in 8 kB pages, where Cloudberry's expected output counts its 32 kB blocks
 skip autostats  unrecognized configuration parameter "log_autostats"
-skip dpe  function disable_xform(unknown) does not exist; function enable_xform(unknown) does not exist
+run  dpe
 run  table_statistics
 skip fts_error  differs: two of its checks that FTS marked a node down answer f, and Cloudberry's DEBUG trace of the probe's statement is not the port's
 skip psql_gp_commands  differs: psql 19's \dx has a Default version column, and Cloudberry's psql describes its storage and external tables in its own way

@@ -368,6 +368,13 @@ qp_functions (planner, orca)  PostgreSQL 19's words for a call no function
   leaves there would be among them, as alter_distribution_policy's tstab was
   before the suite ran in groups.
 
+qp_full_join (orca)  its full joins by IS NOT DISTINCT FROM, which
+  Cloudberry's planner refuses ("FULL JOIN is only supported with
+  merge-joinable or hash-joinable join conditions") and its ORCA answers,
+  as the port's ORCA does: Cloudberry's expected output for its ORCA,
+  qp_full_join_optimizer.out, has the port's answers, and the one the
+  suite compares, the planner's, the errors.
+
 qp_functions_idf  the same median() and GROUP_ID(): views of median()
   calls printed as median(...), median(group_id()) answered 0 for each group
   where Cloudberry refuses it, and median(a) OVER () in an ordered-set

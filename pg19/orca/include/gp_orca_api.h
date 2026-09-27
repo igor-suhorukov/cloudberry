@@ -105,6 +105,13 @@ extern const char *GpOrcaXercesVersion(void);
 extern int	GpOrcaXformIdLimit(void);
 
 /*
+ * Turn a transformation rule, named as ORCA names it, off for the queries
+ * the session plans after, or on again: false if no rule is so named.
+ * Cloudberry's disable_xform() and enable_xform() (gpopt/utils/funcs.cpp).
+ */
+extern bool GpOrcaSetXform(const char *name, bool disable);
+
+/*
  * The name of one transformation rule, or NULL if that id is not a rule.
  *
  * Ids run from 0 to GpOrcaXformIdLimit() - 1, but the space has holes: rules
