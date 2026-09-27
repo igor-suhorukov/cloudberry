@@ -148,12 +148,13 @@ static int	reset_numsegments = GP_DEFAULT_NUMSEGMENTS_FULL;
 /*
  * The port's own modules, whose scripts make the coordinator's metadata.
  * diskquota's tables are its worker's, which reads and writes them on the
- * coordinator alone.
+ * coordinator alone; gp_stats_collector's log is each node's own, which its
+ * collector writes there and gp_dist_random() reads.
  */
 static const char *const port_extensions[] = {
 	"gp_core", "gp_sql", "gp_task", "gp_security", "gp_matview", "gp_orca",
 	"gp_ao", "pax", "gp_exttable", "gp_resource", "gp_tde", "gp_probe",
-	"diskquota",
+	"diskquota", "gp_stats_collector",
 };
 
 static bool

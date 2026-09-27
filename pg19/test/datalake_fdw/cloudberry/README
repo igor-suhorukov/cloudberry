@@ -1,0 +1,17 @@
+Cloudberry's datalake_fdw tests on one node and on the port's cluster: the
+differences from Cloudberry's expected output that have been reviewed, and
+are the port's for a reason of its own.
+
+Each file is one test's difference in the form ../../singlenode/canon.pl
+gives it, named for the expected output it differs from, with .single
+before .diff for the one node, and .planner or .orca for one pass alone.
+run.sh counts a test as passing when gpdiff.pl, under Cloudberry's init_file
+and the port's greenplum one, finds no difference or exactly the file's.
+
+On the cluster every test runs as Cloudberry's does.
+
+iceberg_am_ddl.single  gp_distribution_policy of a lake table on one node,
+  which has none: a node on its own has nothing to distribute over, and the
+  view shows no table's policy there, as Cloudberry's single-node mode shows
+  none; Cloudberry's expected output is its cluster's, where the module has
+  given the table the random policy.

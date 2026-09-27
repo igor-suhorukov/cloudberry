@@ -57,6 +57,13 @@
 #define CB_RESOURCE_RENDEZVOUS	"Cloudberry/gp_resource"
 
 /*
+ * Cloudberry's query_info_collect_hook, which gp_stats_collector sets while
+ * it is preloaded and the port's modules call where Cloudberry's core calls
+ * it (gp_query_info.h).
+ */
+#define CB_QUERY_INFO_RENDEZVOUS	"Cloudberry/query_info_collect_hook"
+
+/*
  * Refuse to load outside shared_preload_libraries.
  *
  * A module that registers a custom WAL resource manager, requests shared

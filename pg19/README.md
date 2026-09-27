@@ -591,6 +591,24 @@ in WAL, a record of `gp_core`'s resource manager the coordinator waits for
 its standby to have (`gp_cluster.c`), so that a standby promoted dispatches
 to the primaries the old coordinator last had.
 
+M8 brings two of Cloudberry's extensions too, each a module of its
+own whose files are compiled where they lie, but for the port's copies of
+the ones PostgreSQL 19 or the port changed (`modules/<name>/src`):
+`datalake_fdw`, the Iceberg table access method and its catalog and volume
+foreign-data wrappers, on `ProcessUtility_hook` and `object_access_hook`,
+preloaded after gp_core and gp_sql -- a lake table distributed randomly, as
+Cloudberry's is, so that its scans and writes are the segments', and its
+metadata engine told by the coordinator, or by a node on its own; and
+`gp_stats_collector`, each query's life -- submitted, started, ended, done,
+failed, cancelled -- on every node, sent to an agent's Unix socket as
+protobuf messages or written into its log table, from the executor's
+hooks, `ProcessUtility_hook`, `emit_log_hook`, the transactions' aborts,
+and gp_resource's queue, which tells it of a query that fails while it
+waits (Cloudberry's `query_info_collect_hook`, `include/gp_query_info.h`);
+a plan node's own events, which PostgreSQL 19 calls no hook for, are not
+sent.  The suites of the same names run their tests on a coordinator and
+three segments and on one node.
+
 The transport and encryption modules — `interconnect`, `udp2`, `gp_tde` —
 are still stubs: the streaming transports, tcp and udpifc, live in
 `gp_core`, and TDE waits for a formal requirement.

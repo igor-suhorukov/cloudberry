@@ -1,0 +1,34 @@
+Cloudberry's gp_stats_collector tests on the port's cluster and on one node:
+the differences from Cloudberry's expected output that have been reviewed,
+and are the port's for a reason of its own.
+
+Each file is one test's difference in the form ../../singlenode/canon.pl
+gives it, named for the expected output it differs from, with .single
+before .diff for the one node, and .planner or .orca for one pass alone; a
+difference that depends on the run has a file for each way it may come
+out, .<n> before .diff.  run.sh counts a test as passing when gpdiff.pl,
+under Cloudberry's init_file and the port's greenplum one, finds no
+difference or exactly one of the files'.
+
+gpsc_utility, gpsc_utility.single  CREATE TABLE with Cloudberry's classic
+  partition clause: the port makes each partition a CREATE TABLE ...
+  PARTITION OF of its own, run as a subcommand of the statement, with its
+  text (gp_sql's partition.c), which the collector reports as a nested
+  utility statement, as it reports PostgreSQL's own subcommands -- a
+  primary key's index -- in Cloudberry too; Cloudberry's grammar made the
+  partitions within the one statement.  Two partitions: two more pairs of
+  SUBMIT and DONE.
+
+gpsc_dist.planner.0, .1, .2  A replicated table joined with a function
+  EXECUTE ON ALL SEGMENTS: the port's planner reads the function on every
+  segment and the table on one, the session's (gp_scan.c's
+  GpScanReplicatedContent(), its process id modulo the segments), and
+  joins them on the coordinator, so that segment runs one query more than
+  Cloudberry's one slice, and reports it: four more rows, under the
+  segment of the run -- 0, whose segment id the log leaves empty, as a
+  protobuf leaves a zero out, 1 or 2.
+
+gpsc_dist.orca  The same query: ORCA's plan has two slices on each segment
+  -- the function's rows redistributed into the slice that joins them with
+  the table -- where Cloudberry's has one, and a segment reports each slice
+  it runs, as Cloudberry's does: four more rows for each segment.
