@@ -1869,13 +1869,12 @@ $((n + 1))" ] && ok "a serial column's values, taken on the segments from the co
 	     CREATE TABLE oms (id int, v text, d boolean) DISTRIBUTED BY (id);
 	     INSERT INTO oms SELECT g * 3, 's' || g, g % 5 = 0 FROM generate_series(1, 100) g;
 	     ANALYZE omt; ANALYZE oms;" >/dev/null
-	merge_same() {				# merge_same <what> <merge> [what EXPLAIN must say]
+	merge_same() {				# merge_same <what> <merge> [what EXPLAIN must say] [check]
 		local plan want got
+		local check="${4:-SELECT count(*), sum(id), sum(n), string_agg(DISTINCT v, ',' ORDER BY v) FROM omt;}"
 		plan=$(q 0 "EXPLAIN (COSTS OFF) $2")
-		want=$(printf '%s\n' "SET gp.optimizer = off;" "BEGIN;" "$2;" \
-			"SELECT count(*), sum(id), sum(n), string_agg(DISTINCT v, ',' ORDER BY v) FROM omt;" "ROLLBACK;" | qf 0)
-		got=$(printf '%s\n' "BEGIN;" "$2;" \
-			"SELECT count(*), sum(id), sum(n), string_agg(DISTINCT v, ',' ORDER BY v) FROM omt;" "ROLLBACK;" | qf 0)
+		want=$(printf '%s\n' "SET gp.optimizer = off;" "BEGIN;" "$2;" "$check" "ROLLBACK;" | qf 0)
+		got=$(printf '%s\n' "BEGIN;" "$2;" "$check" "ROLLBACK;" | qf 0)
 		case "$plan" in
 			*"${3:-Row Identity}"*"Optimizer: GPORCA"*) ;;
 			*) notok "$1: planned by ORCA" "$plan"; return ;;
@@ -1895,6 +1894,20 @@ $((n + 1))" ] && ok "a serial column's values, taken on the segments from the co
 	# tests the source's whole row, which ORCA does not take.
 	merge_same "... WHEN NOT MATCHED BY SOURCE, a table's" \
 		"MERGE INTO omt t USING oms s ON t.id = s.id WHEN MATCHED AND s.d THEN DELETE WHEN MATCHED THEN UPDATE SET v = s.v WHEN NOT MATCHED THEN INSERT VALUES (s.id, s.v) WHEN NOT MATCHED BY SOURCE AND t.id % 7 = 0 THEN DELETE WHEN NOT MATCHED BY SOURCE THEN UPDATE SET n = -t.n"
+	# A partitioned target: each row's partition, its tableoid, carried up
+	# from the scan that read it, a result relation for each partition, and
+	# the target's row as its partition has it -- one of another column
+	# order, one dropped -- a row moved between partitions and segments.
+	q 0 "CREATE TABLE opm (id int, v text, n int) DISTRIBUTED BY (id) PARTITION BY RANGE (id);
+	     CREATE TABLE opm1 PARTITION OF opm FOR VALUES FROM (0) TO (100);
+	     CREATE TABLE opm2 (n int, junk int, v text, id int) DISTRIBUTED BY (id);
+	     ALTER TABLE opm2 DROP COLUMN junk;
+	     ALTER TABLE opm ATTACH PARTITION opm2 FOR VALUES FROM (100) TO (1000);
+	     INSERT INTO opm SELECT g, 'o' || g, g FROM generate_series(1, 300, 2) g;" >/dev/null
+	merge_same "... into a partitioned table, a result relation for each partition" \
+		"MERGE INTO opm t USING oms s ON t.id = s.id WHEN MATCHED AND s.d THEN DELETE WHEN MATCHED AND t.id = 9 THEN UPDATE SET id = 105, v = 'moved' WHEN MATCHED THEN UPDATE SET v = s.v, n = t.n + 1000 WHEN NOT MATCHED THEN INSERT VALUES (s.id, s.v) WHEN NOT MATCHED BY SOURCE AND t.id > 250 THEN DELETE" \
+		"Dynamic Seq Scan" \
+		"SELECT tableoid::regclass, count(*), sum(id), sum(n), string_agg(v, ',' ORDER BY id) FROM opm GROUP BY 1 ORDER BY 1;"
 	merge_same "... a VALUES list's and a subquery's" \
 		"MERGE INTO omt t USING (VALUES (5, 'five'), (500, 'new')) s(id, v) ON t.id = s.id WHEN MATCHED THEN UPDATE SET v = s.v WHEN NOT MATCHED BY SOURCE AND t.id > 150 THEN DELETE;
 		 MERGE INTO omt t USING (SELECT id, max(v) AS v FROM oms WHERE id < 200 GROUP BY id) s ON t.id = s.id WHEN MATCHED THEN UPDATE SET v = s.v WHEN NOT MATCHED BY SOURCE THEN UPDATE SET n = 0"

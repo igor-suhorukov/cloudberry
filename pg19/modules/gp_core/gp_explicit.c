@@ -1810,7 +1810,11 @@ merge_matched(ExplicitState *state, TupleTableSlot *slot, ItemPointer synthetic)
 	rri = &state->rris[relidx];
 	relid = RelationGetRelid(state->rels[relidx]);
 
-	/* the target's row, as the root has it and as its relation does */
+	/*
+	 * The target's row, as the root has it and as its relation does -- or
+	 * as its partition has it, where ORCA's plan carried it up from the
+	 * partition's scan (gp_orca's merge.c).
+	 */
 	target = slot_getattr(slot, state->targetcol, &isnull);
 	if (isnull)
 		elog(ERROR, "a row MERGE matched came without the target's row");
@@ -1819,16 +1823,31 @@ merge_matched(ExplicitState *state, TupleTableSlot *slot, ItemPointer synthetic)
 	ItemPointerSetInvalid(&tuple.t_self);
 	tuple.t_tableOid = relid;
 	tuple.t_data = td;
-	ExecClearTuple(state->mrootslot);
-	heap_deform_tuple(&tuple, rootdesc, state->mrootslot->tts_values,
-					  state->mrootslot->tts_isnull);
-	ExecStoreVirtualTuple(state->mrootslot);
-	oldslot = state->mrootslot;
-	if (state->rels[relidx] != state->target)
-		oldslot = state->mmaps[relidx] != NULL
-			? execute_attr_map_slot(state->mmaps[relidx]->attrMap,
-									state->mrootslot, state->moldslots[relidx])
-			: ExecCopySlot(state->moldslots[relidx], state->mrootslot);
+	if (HeapTupleHeaderGetTypeId(td) != rootdesc->tdtypeid &&
+		state->rels[relidx] != state->target)
+	{
+		TupleDesc	reldesc = RelationGetDescr(state->rels[relidx]);
+
+		if (HeapTupleHeaderGetTypeId(td) != reldesc->tdtypeid)
+			elog(ERROR, "a row MERGE matched came as a row of another table");
+		oldslot = state->moldslots[relidx];
+		ExecClearTuple(oldslot);
+		heap_deform_tuple(&tuple, reldesc, oldslot->tts_values, oldslot->tts_isnull);
+		ExecStoreVirtualTuple(oldslot);
+	}
+	else
+	{
+		ExecClearTuple(state->mrootslot);
+		heap_deform_tuple(&tuple, rootdesc, state->mrootslot->tts_values,
+						  state->mrootslot->tts_isnull);
+		ExecStoreVirtualTuple(state->mrootslot);
+		oldslot = state->mrootslot;
+		if (state->rels[relidx] != state->target)
+			oldslot = state->mmaps[relidx] != NULL
+				? execute_attr_map_slot(state->mmaps[relidx]->attrMap,
+										state->mrootslot, state->moldslots[relidx])
+				: ExecCopySlot(state->moldslots[relidx], state->mrootslot);
+	}
 	oldslot->tts_tableOid = relid;
 	econtext->ecxt_scantuple = oldslot;
 

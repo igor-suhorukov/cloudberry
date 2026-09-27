@@ -3146,7 +3146,9 @@ dml "a DELETE under a row-level security policy deletes only the rows it may see
 # Every node below ModifyTable depends on its EvalPlanQual parameter, so that
 # a second re-check in the same statement starts the plan again.
 
-# epq <name> <statement> <other transaction's update> <check>
+# epq <name> <statement> <other transaction's update> <check> [reset]: the
+# tables made as "reset" makes them before each run, t2e's and t2j's rows
+# by default.
 epq() {
 	local plan orca pg opt res
 	plan=$(q2 "SELECT" "EXPLAIN (COSTS OFF) $2")
@@ -3155,8 +3157,8 @@ epq() {
 		*) notok "$1" "not planned by ORCA: $(printf '%s' "$plan" | tail -3 | tr '\n' '|')"; return ;;
 	esac
 	for opt in on off; do
-		q "TRUNCATE t2e; INSERT INTO t2e SELECT g, g FROM generate_series(1, 5) g;
-		   TRUNCATE t2j; INSERT INTO t2j SELECT g, g * 100 FROM generate_series(1, 5) g;" > /dev/null
+		q "${5:-TRUNCATE t2e; INSERT INTO t2e SELECT g, g FROM generate_series(1, 5) g;
+		   TRUNCATE t2j; INSERT INTO t2j SELECT g, g * 100 FROM generate_series(1, 5) g;}" > /dev/null
 		( "$PSQL" -X -q -d postgres -c "BEGIN" -c "$3" -c "SELECT pg_sleep(1)" -c "COMMIT" > /dev/null 2>&1 ) &
 		# until the other transaction holds the row, as it sleeps
 		local tries=0
@@ -3315,6 +3317,44 @@ epq "and one whose target row went meanwhile inserts it" \
     "MERGE INTO t2e USING t2j ON t2e.a = t2j.a WHEN MATCHED THEN UPDATE SET b = t2e.b + t2j.w WHEN NOT MATCHED THEN INSERT VALUES (t2j.a, -t2j.w)" \
     "DELETE FROM t2e WHERE a = 2" \
     "SELECT a, b FROM t2e ORDER BY a"
+
+# A partitioned target: a result relation for each partition, the range
+# table entries of ORCA's scans of them under its Dynamic Scan, so that a
+# row another transaction changed meanwhile is re-checked in its
+# partition's scan, as in the planner's Append; each action taken to the
+# partition's columns by name -- t2pm2's are in another order, one dropped
+# -- a row moved between partitions, an INSERT routed.
+T2PM="CREATE TEMP TABLE t2pm (a int, b text, c int) PARTITION BY RANGE (a);
+      CREATE TEMP TABLE t2pm1 PARTITION OF t2pm FOR VALUES FROM (0) TO (10);
+      CREATE TEMP TABLE t2pm2 (c int, junk int, b text, a int);
+      ALTER TABLE t2pm2 DROP COLUMN junk;
+      ALTER TABLE t2pm ATTACH PARTITION t2pm2 FOR VALUES FROM (10) TO (20);
+      CREATE TEMP TABLE t2pm3 PARTITION OF t2pm FOR VALUES FROM (20) TO (100);
+      INSERT INTO t2pm SELECT g, 'p' || g, g FROM generate_series(1, 30, 2) g;
+      CREATE TEMP TABLE t2pn (a int, b text, d boolean);
+      INSERT INTO t2pn VALUES (3, 's3', false), (5, 's5', true), (11, 's11', false),
+        (13, 's13', true), (14, 's14', false), (25, 's25', false), (50, 's50', false)"
+dml "MERGE into a partitioned table: a result relation for each partition" \
+    "Dynamic Seq Scan" \
+    "MERGE INTO t2pm t USING t2pn s ON t.a = s.a
+       WHEN MATCHED AND s.d THEN DELETE
+       WHEN MATCHED AND t.a = 25 THEN UPDATE SET a = 5, b = 'moved'
+       WHEN MATCHED THEN UPDATE SET b = s.b, c = t.c + 100
+       WHEN NOT MATCHED THEN INSERT VALUES (s.a, s.b, -1)
+       WHEN NOT MATCHED BY SOURCE AND t.a > 20 THEN DELETE
+       RETURNING merge_action(), t.tableoid::regclass, t.*" \
+    "SELECT tableoid::regclass, * FROM t2pm ORDER BY a, b" "$T2PM" sort
+
+q "CREATE TABLE t2pe (a int, b int) PARTITION BY RANGE (a);
+   CREATE TABLE t2pe1 PARTITION OF t2pe FOR VALUES FROM (0) TO (3);
+   CREATE TABLE t2pe2 (b int, a int);
+   ALTER TABLE t2pe ATTACH PARTITION t2pe2 FOR VALUES FROM (3) TO (100);" > /dev/null
+epq "and one that waited re-checks the row in its partition's scan" \
+    "MERGE INTO t2pe USING t2j ON t2pe.a = t2j.a WHEN MATCHED THEN UPDATE SET b = t2pe.b + t2j.w WHEN NOT MATCHED THEN INSERT VALUES (t2j.a, -t2j.w)" \
+    "UPDATE t2pe SET b = b + 1000 WHERE a IN (1, 4); UPDATE t2j SET w = -1 WHERE a = 4" \
+    "SELECT tableoid::regclass, a, b FROM t2pe ORDER BY a" \
+    "TRUNCATE t2pe; INSERT INTO t2pe SELECT g, g FROM generate_series(1, 5) g;
+     TRUNCATE t2j; INSERT INTO t2j SELECT g, g * 100 FROM generate_series(1, 6) g;"
 
 # An automatically updatable view's conditions the rewriter puts beside the
 # target, a FROM list of it rather than the table: the backend stopped here.

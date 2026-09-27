@@ -59,12 +59,23 @@
  * join any of its tables'; a subquery and a VALUES list are given a column
  * of their own that is never null, gp_present.
  *
- * Not yet, and the planner's: a partitioned, inherited or foreign table or a
- * view as the target, a replicated one or a coordinator's on a cluster, and
- * on one node one whose method takes the old row from the plan (O20);
- * RETURNING on a cluster, whose merge_action() only a MERGE's own node
- * answers, where the explicit write writes; a subquery anywhere in it; and
- * on one
+ * A partitioned target: ModifyTable gets a result relation for each
+ * partition, as the planner gives a partitioned table's (inheritance
+ * planning) -- the range table entries of ORCA's scans of the partitions,
+ * under its Dynamic Scan, so that EvalPlanQual re-checks a row in its
+ * partition's scan as it does in the planner's Append -- each action, the
+ * join condition, RETURNING and the check options taken to the partition's
+ * columns by name, and the row's partition by its tableoid, carried up
+ * from the scan that read its ctid; an INSERT is routed through the table.
+ * On a cluster the explicit write writes it the same way, through the
+ * table, the target's row carried up as its partition's.
+ *
+ * Not yet, and the planner's: an inherited or foreign table or a view as
+ * the target, a replicated one or a coordinator's on a cluster, and on one
+ * node one whose method takes the old row from the plan (O20), a
+ * partition's too; RETURNING on a cluster, whose merge_action() only a
+ * MERGE's own node answers, where the explicit write writes; a subquery
+ * anywhere in it; and on one
  * node a source that is not plain tables, whose rows a row mark would copy
  * whole, as a ROW() the translator does not take.
  *
@@ -75,6 +86,7 @@
 #include "access/sysattr.h"
 #include "access/table.h"
 #include "access/tableamext.h"
+#include "catalog/partition.h"
 #include "catalog/pg_class.h"
 #include "catalog/pg_inherits.h"
 #include "catalog/pg_type.h"
@@ -85,10 +97,12 @@
 #include "parser/parse_coerce.h"
 #include "parser/parse_relation.h"
 #include "parser/parsetree.h"
+#include "storage/lmgr.h"
 #include "utils/lsyscache.h"
 #include "utils/rel.h"
 
 #include "cb_compat.h"
+#include "cb_dynamicscan.h"
 #include "cb_wholerow.h"
 #include "gp_core_api.h"
 #include "gp_orca_lockrows.h"
@@ -104,6 +118,7 @@ struct OrcaMerge
 								 * the ctid, and on a cluster the segment */
 	List	   *vars;			/* the source's Vars the SELECT returns */
 	List	   *sources;		/* on one node, the source's tables */
+	bool		partitioned;	/* the target is a partitioned table */
 };
 
 /* Is the relation a plain table -- whose method fetches a row by its ctid? */
@@ -128,6 +143,45 @@ static bool
 fetchable_table(RangeTblEntry *rte)
 {
 	return plain_table(rte, true);
+}
+
+/*
+ * Is the relation a partitioned table whose partitions are all plain
+ * tables -- and, "fetchable", each one's method fetches a row by its ctid?
+ * Its partitions are locked as the table is, as the planner's inheritance
+ * planning locks them (expand_inherited_rtentry()).
+ */
+static bool
+partitioned_table(RangeTblEntry *rte, bool fetchable)
+{
+	List	   *tree;
+	bool		ok = true;
+
+	if (rte->rtekind != RTE_RELATION || rte->relkind != RELKIND_PARTITIONED_TABLE)
+		return false;
+	tree = find_all_inheritors(rte->relid, rte->rellockmode, NULL);
+	foreach_oid(relid, tree)
+	{
+		char		relkind = get_rel_relkind(relid);
+		Relation	rel;
+
+		if (relkind == RELKIND_PARTITIONED_TABLE)
+			continue;
+		if (relkind != RELKIND_RELATION)
+		{
+			ok = false;
+			break;
+		}
+		if (!fetchable)
+			continue;
+		rel = table_open(relid, NoLock);
+		ok = !table_old_row_from_plan(rel);
+		table_close(rel, NoLock);
+		if (!ok)
+			break;
+	}
+	list_free(tree);
+	return ok;
 }
 
 /* The source's tables into *sources; false where it reads anything else. */
@@ -315,7 +369,7 @@ GpOrcaPrepareMerge(Query *query, Query **select, OrcaMerge **statep,
 	}
 	target = rt_fetch(query->resultRelation, query->rtable);
 	if (query->mergeTargetRelation != query->resultRelation ||
-		!plain_table(target, !cluster))
+		!(plain_table(target, !cluster) || partitioned_table(target, !cluster)))
 	{
 		*why = "a MERGE into a view, or a table that is not a plain one fetched by its ctid";
 		return false;
@@ -469,6 +523,7 @@ GpOrcaPrepareMerge(Query *query, Query **select, OrcaMerge **statep,
 	state->nfirst = cluster ? 2 : 1;
 	state->vars = vars;
 	state->sources = sources;
+	state->partitioned = target->relkind == RELKIND_PARTITIONED_TABLE;
 	*select = sel;
 	*statep = state;
 	return true;
@@ -634,6 +689,38 @@ insert_targetlist(List *tlist, Relation rel)
 	return result;
 }
 
+/* The Dynamic Scan of the partitioned table at "rti" below "plan", or NULL */
+static CustomScan *
+find_dynamic_scan(Plan *plan, Index rti)
+{
+	CustomScan *found;
+
+	if (plan == NULL)
+		return NULL;
+	if (IsA(plan, CustomScan))
+	{
+		CustomScan *cscan = (CustomScan *) plan;
+
+		if (cscan->methods == &gp_orca_dynamic_scan_methods)
+			return bms_is_member(rti, cscan->custom_relids) ? cscan : NULL;
+	}
+	found = find_dynamic_scan(plan->lefttree, rti);
+	return found != NULL ? found : find_dynamic_scan(plan->righttree, rti);
+}
+
+/*
+ * A list of a partitioned target's -- actions, their conditions, RETURNING,
+ * check options -- as the partition at "part_rti" has it: each column of the
+ * table by its name in the partition (adjust_appendrel_attrs()).
+ */
+static List *
+partition_exprs(List *exprs, Index rti, Oid root_oid, Index part_rti, Oid part_oid)
+{
+	if (exprs == NIL)
+		return NIL;
+	return gp_orca_partition_exprs(exprs, rti, root_oid, part_rti, part_oid);
+}
+
 bool
 GpOrcaFinishMerge(PlannedStmt *stmt, OrcaMerge *state, const char **why)
 {
@@ -647,6 +734,10 @@ GpOrcaFinishMerge(PlannedStmt *stmt, OrcaMerge *state, const char **why)
 	RTEPermissionInfo *qperminfo;
 	List	   *actions = NIL;
 	List	   *marks = NIL;
+	List	   *part_rtis = NIL;
+	List	   *wcos = NIL;
+	List	   *returning = NIL;
+	List	   *joincond;
 	Relation	rel;
 	int			epq;
 
@@ -661,6 +752,36 @@ GpOrcaFinishMerge(PlannedStmt *stmt, OrcaMerge *state, const char **why)
 	foreach_node(TargetEntry, tle, sub->targetlist)
 		tle->resjunk = true;
 	linitial_node(TargetEntry, sub->targetlist)->resname = pstrdup("ctid");
+
+	/*
+	 * A partitioned target: the partitions ORCA's Dynamic Scan reads it
+	 * through, each a result relation, and each row's partition, its
+	 * tableoid, carried up from the scan that read its ctid.
+	 */
+	if (state->partitioned)
+	{
+		CustomScan *dscan = find_dynamic_scan(sub, rti);
+		AttrNumber	resno;
+		TargetEntry *tle;
+
+		if (dscan != NULL)
+			foreach_ptr(Plan, child, dscan->custom_plans)
+				part_rtis = lappend_int(part_rtis, ((Scan *) child)->scanrelid);
+		if (part_rtis == NIL)
+		{
+			*why = "a MERGE into a partitioned table the plan does not scan through its partitions";
+			return false;
+		}
+		resno = gp_orca_carry_tableoid(sub, 1, stmt->rtable);
+		if (resno == InvalidAttrNumber)
+		{
+			*why = "a MERGE into a partitioned table whose rows' partitions the plan does not carry";
+			return false;
+		}
+		tle = list_nth_node(TargetEntry, sub->targetlist, resno - 1);
+		tle->resname = pstrdup("tableoid");
+		tle->resjunk = true;
+	}
 
 	/*
 	 * On a cluster: the target's whole row, carried up from the scan that
@@ -749,8 +870,7 @@ GpOrcaFinishMerge(PlannedStmt *stmt, OrcaMerge *state, const char **why)
 	mt->resultRelations = list_make1_int(rti);
 	if (merge->withCheckOptions != NIL)
 	{
-		List	   *wcos = copyObject(merge->withCheckOptions);
-
+		wcos = copyObject(merge->withCheckOptions);
 		foreach_node(WithCheckOption, wco, wcos)
 			wco->qual = merge_vars((Node *) implicit_qual(wco->qual), state, rti);
 		mt->withCheckOptionLists = list_make1(wcos);
@@ -759,16 +879,73 @@ GpOrcaFinishMerge(PlannedStmt *stmt, OrcaMerge *state, const char **why)
 	mt->rowMarks = marks;
 	mt->onConflictAction = ONCONFLICT_NONE;
 	mt->mergeActionLists = list_make1(actions);
-	mt->mergeJoinConditions =
-		list_make1(merge_vars((Node *) implicit_qual(merge->mergeJoinCondition),
-							  state, rti));
+	joincond = (List *) merge_vars((Node *) implicit_qual(merge->mergeJoinCondition),
+								   state, rti);
+	mt->mergeJoinConditions = list_make1(joincond);
 	if (merge->returningList != NIL)
 	{
-		mt->returningLists = list_make1(merge_returning(merge->returningList,
-														state, rti));
+		returning = merge_returning(merge->returningList, state, rti);
+		mt->returningLists = list_make1(returning);
 		mt->returningOldAlias = merge->returningOldAlias;
 		mt->returningNewAlias = merge->returningNewAlias;
-		mt->plan.targetlist = copyObject(linitial(mt->returningLists));
+		mt->plan.targetlist = copyObject(returning);
+	}
+
+	/*
+	 * A partitioned target's partitions, each a result relation with the
+	 * table's lists in its own columns -- an INSERT's, which is routed
+	 * through the table, in the table's -- locked as the table is, as the
+	 * planner's inheritance planning locks them; the table the root.
+	 */
+	if (state->partitioned)
+	{
+		Oid			root_oid = qtarget->relid;
+
+		mt->rootRelation = rti;
+		mt->resultRelations = part_rtis;
+		mt->withCheckOptionLists = NIL;
+		mt->fdwPrivLists = NIL;
+		mt->mergeActionLists = NIL;
+		mt->mergeJoinConditions = NIL;
+		mt->returningLists = NIL;
+		foreach_int(part_rti, part_rtis)
+		{
+			RangeTblEntry *prte = rt_fetch(part_rti, stmt->rtable);
+			Oid			part_oid = prte->relid;
+			List	   *pactions = NIL;
+
+			foreach_node(MergeAction, a, actions)
+			{
+				MergeAction *pa = copyObject(a);
+
+				if (pa->commandType != CMD_INSERT)
+					pa->targetList = partition_exprs(pa->targetList, rti, root_oid,
+													 part_rti, part_oid);
+				if (pa->commandType == CMD_UPDATE)
+					pa->updateColnos = gp_orca_partition_colnos(root_oid, part_oid,
+																pa->updateColnos);
+				pa->qual = (Node *) partition_exprs((List *) pa->qual, rti, root_oid,
+													part_rti, part_oid);
+				pactions = lappend(pactions, pa);
+			}
+			mt->mergeActionLists = lappend(mt->mergeActionLists, pactions);
+			mt->mergeJoinConditions =
+				lappend(mt->mergeJoinConditions,
+						partition_exprs(joincond, rti, root_oid, part_rti, part_oid));
+			if (wcos != NIL)
+				mt->withCheckOptionLists =
+					lappend(mt->withCheckOptionLists,
+							partition_exprs(wcos, rti, root_oid, part_rti, part_oid));
+			if (returning != NIL)
+				mt->returningLists =
+					lappend(mt->returningLists,
+							partition_exprs(returning, rti, root_oid, part_rti, part_oid));
+			mt->fdwPrivLists = lappend(mt->fdwPrivLists, NIL);
+			prte->rellockmode = qtarget->rellockmode;
+			LockRelationOid(part_oid, qtarget->rellockmode);
+		}
+		if (returning != NIL)
+			mt->plan.targetlist = copyObject(linitial(mt->returningLists));
 	}
 
 	/* EvalPlanQual's parameter, which every node below depends on */
@@ -784,7 +961,12 @@ GpOrcaFinishMerge(PlannedStmt *stmt, OrcaMerge *state, const char **why)
 	stmt->canSetTag = merge->canSetTag;
 	stmt->hasReturning = merge->returningList != NIL;
 	stmt->resultRelationRelids = bms_make_singleton(rti);
+	foreach_int(part_rti, part_rtis)
+		stmt->resultRelationRelids = bms_add_member(stmt->resultRelationRelids,
+													part_rti);
 	stmt->rowMarks = marks;
+	foreach_node(PlanRowMark, prm, marks)
+		stmt->rowMarkRelids = bms_add_member(stmt->rowMarkRelids, prm->rti);
 
 	/*
 	 * The result relation's permission entry, completed from the MERGE's:
