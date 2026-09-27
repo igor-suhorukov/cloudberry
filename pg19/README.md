@@ -115,11 +115,19 @@ On a cluster (M2), `gp_core` and `gp_orca`:
   reads; a CTE in a slice the segments run, and ROLLUP, CUBE and grouping
   sets, which ORCA aggregates over one, shared through files each segment
   keeps, Cloudberry's ShareInputScan, by a producer and consumers in its
-  slice and in others (`orca/compat/sharedscan.c`); NOT IN as the
-  planner's hashed SubPlan; RETURNING and ON CONFLICT given to the ModifyTable beside ORCA's
-  plan, and ORCA's UPDATE and DELETE of a join or of a partitioned table
-  where the target is held against a re-check, as without the deadlock
-  detector it is; and PostgreSQL's own plans gathering from the
+  slice and in others (`orca/compat/sharedscan.c`), and one the
+  coordinator's slice produces read in the coordinator's slices that send
+  to the segments; NOT IN as the planner's hashed SubPlan; now() and its kin
+  the coordinator's on every segment; a sequence's next value in a slice the
+  segments run, taken from the coordinator's sequence a block at a time
+  (`modules/gp_core/gp_seq.c`); RETURNING and ON CONFLICT given to the
+  ModifyTable beside ORCA's plan, and ORCA's UPDATE and DELETE of a join or
+  of a partitioned table -- one that moves rows between partitions or
+  segments among them -- re-checked as the planner's are, with row marks on
+  the other tables, where the target is not held against a re-check;
+  MERGE, ORCA planning its join and a MERGE ModifyTable over it on one node,
+  the explicit write over it on a cluster (`orca/merge.c`); and
+  PostgreSQL's own plans gathering from the
   segments where ORCA does not plan, writing a distributed table through an
   Explicit Redistribute Motion — each row changed on its segment by its ctid
   there, a row whose key changes moved by a Split that fires no trigger,
@@ -160,9 +168,13 @@ On a cluster (M2), `gp_core` and `gp_orca`:
   `gp_distribution_policy.numsegments` make, and which ORCA leaves to the
   planner, as Cloudberry's does.
 
-What M2 leaves open under ORCA: MERGE, and an UPDATE or DELETE of a join
-where a re-check can run -- on one node, or with the deadlock detector on
--- stay the planner's.
+What M2 leaves open under ORCA: a data-modifying statement in WITH; a
+MERGE's RETURNING and WHEN NOT MATCHED BY SOURCE, and a MERGE into a view or
+a partitioned, replicated or coordinator's table; and an UPDATE or DELETE
+whose re-check would copy a row whole -- of a subquery or a function read
+beside the target -- or read a sublink's again: they stay the planner's.
+The planner's route sends a partitioned table's UPDATE and DELETE that read
+only it to the segments whole, as a plain table's.
 
 Distributed transactions (M3), in `gp_core`:
 
