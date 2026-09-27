@@ -740,15 +740,17 @@ if [ -n "$tools" ]; then
 	###########################################################################
 	echo "19. gpcheckperf measures the host's disk, memory and network"
 	###########################################################################
-	mkdir -p "$WORK/cp"
-	if run checkperf-ds gpcheckperf -h "$HOST" -r ds -d "$WORK/cp" -S 32MB &&
+	# It copies its programs, multidd and gpnetbench, into its directory and
+	# runs them there: $EXEC's, not in /tmp.
+	mkdir -p "$EXEC/cp"
+	if run checkperf-ds gpcheckperf -h "$HOST" -r ds -d "$EXEC/cp" -S 32MB &&
 	   grep -q "disk write tot bytes: 33554432" "$LOGDIR/checkperf-ds.out" &&
 	   grep -q "stream tot bandwidth" "$LOGDIR/checkperf-ds.out"; then
 		ok "gpcheckperf -r ds: the disk written and read, and stream's memory bandwidth"
 	else
 		notok "gpcheckperf -r ds" "$(tail_of checkperf-ds)"
 	fi
-	if run checkperf-n gpcheckperf -h "$HOST" -h localhost -r n -d "$WORK/cp" --duration 5 &&
+	if run checkperf-n gpcheckperf -h "$HOST" -h localhost -r n -d "$EXEC/cp" --duration 5 &&
 	   grep -q "^$HOST -> localhost = [0-9]" "$LOGDIR/checkperf-n.out"; then
 		ok "gpcheckperf -r n: gpnetbench's bandwidth between the host's two names"
 	else
