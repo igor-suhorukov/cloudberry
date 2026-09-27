@@ -976,11 +976,36 @@ segment_counts(List *tables, bool vacuumed)
 		BlockNumber allfrozen;
 
 		c = hash_search(counts, &relid, HASH_FIND, NULL);
-		if (c->relid == c->table)
+		/*
+		 * A statement that built an index holds ShareLock or more, under
+		 * which PostgreSQL writes the row in place itself; asking for more
+		 * would wait for another session's REINDEX, which holds ShareLock
+		 * too, to end its transaction.
+		 */
+		if (c->relid == c->table &&
+			!CheckRelationOidLockedByMe(c->table, ShareLock, true))
 			LockRelationOid(c->table, ShareUpdateExclusiveLock);
 		if (c->nsegs < nsegs ||
-			(policy = recorded_policy(c->table)) == NULL ||
-			(rel = try_relation_open(c->relid, AccessShareLock)) == NULL)
+			(policy = recorded_policy(c->table)) == NULL)
+			continue;
+
+		/*
+		 * An index another session holds -- a REINDEX's AccessExclusiveLock --
+		 * is that session's to count: waiting for it here would hold this
+		 * statement, and a CREATE INDEX beside a REINDEX of the table's other
+		 * index would wait for the REINDEX's transaction.
+		 */
+		if (c->relid != c->table)
+		{
+			if (!ConditionalLockRelationOid(c->relid, AccessShareLock))
+				continue;
+			if ((rel = try_relation_open(c->relid, NoLock)) == NULL)
+			{
+				UnlockRelationOid(c->relid, AccessShareLock);
+				continue;
+			}
+		}
+		else if ((rel = try_relation_open(c->relid, AccessShareLock)) == NULL)
 			continue;
 		share = GpPolicyIsReplicated(policy) ? Max(policy->numsegments, 1) : 1;
 
