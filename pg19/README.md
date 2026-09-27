@@ -478,6 +478,13 @@ one node's into another node; `dbcopy`, a database copied by either
 strategy and moved to another tablespace and back, with PAX tables and
 directory tables, on one node and a standby; `postgis_cluster`, M7's, stock PostGIS on a
 coordinator and three segments, its answers checked against one node's;
+`tpc`, on request only, TPC-H's 22 queries and TPC-DS's 99 at scale factor
+1 on a coordinator and four segments, their data, queries and a reference
+answer to each from DuckDB (pinned, in the image), each query planned by
+ORCA and answering as DuckDB answers it -- `CB_TPC=check` in the tests
+service -- and each timed under ORCA and under the planner's route, on the
+port built without assertions -- the compose file's `tpc` service,
+`CB_TPC=time`;
 `singlenode` and
 `singlenode_isolation2`, Cloudberry's single-node suites with PostgreSQL 19's
 own regression tests; and PostGIS's regression suite.  Each is run under the
