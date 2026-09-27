@@ -124,15 +124,22 @@ On a cluster (M2), `gp_core` and `gp_orca`:
   ModifyTable beside ORCA's plan, and ORCA's UPDATE and DELETE of a join or
   of a partitioned table -- one that moves rows between partitions or
   segments among them -- re-checked as the planner's are, with row marks on
-  the other tables, where the target is not held against a re-check;
-  MERGE, ORCA planning its join and a MERGE ModifyTable over it on one node,
-  the explicit write over it on a cluster (`orca/merge.c`); and
+  the other tables, those of an EXISTS or an IN the WHERE clause ANDs in
+  too, whose semi-join returns the row each matched, where the target is
+  not held against a re-check; MERGE, ORCA planning its join and a MERGE
+  ModifyTable over it on one node, with RETURNING, WHEN NOT MATCHED BY
+  SOURCE and a partitioned target, a result relation for each partition,
+  the explicit write over it on a cluster (`orca/merge.c`); a CTE's
+  producer read in other slices run when its slice ends without it, as
+  Cloudberry's squelch runs it, and a Sequence that prints its producers
+  first; and
   PostgreSQL's own plans gathering from the
   segments where ORCA does not plan, writing a distributed table through an
   Explicit Redistribute Motion — each row changed on its segment by its ctid
   there, a row whose key changes moved by a Split that fires no trigger,
   RETURNING (old and new too) and a view's WITH CHECK OPTION and a table's
-  policies evaluated on the coordinator, MERGE, WHERE CURRENT OF and ON
+  policies evaluated on the coordinator, RETURNING's ctid the row's on its
+  segment, MERGE, WHERE CURRENT OF and ON
   CONFLICT in a WITH query, a replicated table's row found on every segment
   by what it holds, and — with the deadlock detector on — a row another
   transaction updates between the coordinator's read and the segment's
@@ -152,10 +159,15 @@ On a cluster (M2), `gp_core` and `gp_orca`:
   receivers over a Unix socket or a TCP port, or, with
   `gp.interconnect_type = udpifc`, in UDP packets each receiver acknowledges,
   with Cloudberry's flow control, retransmission and deadlock check, a row
-  as a tuple.  The earlier relay through the coordinator carries the slices
+  as a tuple; a sorted Gather into one segment merges its senders' streams
+  as they come, and the coordinator's gathers ask each segment for one row
+  first and ten times as many each batch after, so that a LIMIT above stops
+  them soon.  The earlier relay through the coordinator carries the slices
   that run on the coordinator or have to run in the writer — the
-  coordinator's own, one that scans a temporary table — first, and the rest
-  stream; it carries all of them on request (`gp.interconnect_type =
+  coordinator's own that reads a function's rows or makes its own, a VALUES
+  list, one that scans a temporary table — first, and the rest stream, the
+  coordinator's own that works on the rows it receives among them, on a
+  segment; it carries all of them on request (`gp.interconnect_type =
   relay`);
 - `gp_segment_id`, as a call of the row's segment (O10), and
   `gp_dist_random('t')`, which a view prints back as it was written (O31);
@@ -168,13 +180,17 @@ On a cluster (M2), `gp_core` and `gp_orca`:
   `gp_distribution_policy.numsegments` make, and which ORCA leaves to the
   planner, as Cloudberry's does.
 
-What M2 leaves open under ORCA: a data-modifying statement in WITH; a
-MERGE's RETURNING and WHEN NOT MATCHED BY SOURCE, and a MERGE into a view or
-a partitioned, replicated or coordinator's table; and an UPDATE or DELETE
-whose re-check would copy a row whole -- of a subquery or a function read
-beside the target -- or read a sublink's again: they stay the planner's.
-The planner's route sends a partitioned table's UPDATE and DELETE that read
-only it to the segments whole, as a plain table's.
+What M2 leaves open under ORCA: a data-modifying statement in WITH, and a
+subquery in RETURNING; a MERGE's RETURNING on a cluster, and a MERGE into a
+view or a replicated or coordinator's table; an UPDATE or DELETE whose
+re-check would copy a row whole -- of a subquery or a function read beside
+the target, or a MERGE's source that is not tables, on one node -- or read
+a NOT IN's or a NOT EXISTS's table again; and a CTE read in several slices
+one of which gp_core relays: they stay the planner's.  The planner's route
+sends a partitioned table's UPDATE and DELETE that read only it to the
+segments whole, as a plain table's; an index build keeps a distributed
+table's pages and rows on the coordinator, as Cloudberry's coordinator
+never writes them.
 
 Distributed transactions (M3), in `gp_core`:
 
