@@ -65,6 +65,7 @@ singlenode             planner   26   PASSES=planner MEM=3500
 cluster                -        100   MEM=600
 orca                   -         54   MEM=300
 fts                    -         55   MEM=1000
+gpfts                  -         73   MEM=1300
 postgis_cluster        -         16   MEM=1700
 dump                   -         30   MEM=1700
 postgis_regress        planner   10   PASSES=planner MEM=2600

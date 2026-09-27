@@ -104,12 +104,13 @@ USER root
 # buffers and liburing are PAX's: its files' footers and statistics are
 # protobuf messages, and its reader reads a file's groups through io_uring.
 # bison and flex are gp_resource's, for Cloudberry's io_limit grammar, which
-# a resource group's io_limit is read with.
+# a resource group's io_limit is read with.  jansson is gpfts's, with
+# libcurl: Cloudberry's etcd client speaks JSON to etcd's gateway.
 RUN apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
         build-essential meson ninja-build pkg-config git ca-certificates bison flex \
         libreadline-dev zlib1g-dev libicu-dev libssl-dev liblz4-dev libzstd-dev \
         libxml2-dev libxslt1-dev libxerces-c-dev \
-        libcurl4-openssl-dev libapr1-dev libevent-dev libyaml-dev \
+        libcurl4-openssl-dev libapr1-dev libevent-dev libyaml-dev libjansson-dev \
         protobuf-compiler libprotobuf-dev liburing-dev \
     && rm -rf /var/lib/apt/lists/*
 
@@ -164,10 +165,12 @@ USER root
 # libprotobuf and liburing are PAX's.  gpMgmt, the management tools meson
 # installs beside the server, needs psutil, PyYAML and pexpect besides
 # PyGreSQL, and the commands its scripts run on each host: ip and ss, ping,
-# rsync and less.
+# rsync and less.  gpfts needs jansson beside libcurl, and the gpfts suite an
+# etcd, which it starts: Debian's, 3.5.
 RUN apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
         libxerces-c3.2 \
         libcurl4t64 libapr1t64 libevent-2.1-7t64 libyaml-0-2 curl \
+        libjansson4 etcd-server \
         libprotobuf32t64 liburing2 \
         libgeos-c1t64 libproj25 libgdal36 libjson-c5 libprotobuf-c1 \
         perl diffutils procps \
