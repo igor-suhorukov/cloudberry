@@ -306,7 +306,9 @@ static const char *const superuser_settings[] = {
 /*
  * Whether the segments have a table access method of this database's: one
  * made before this transaction, as CREATE EXTENSION pax is sent to them once
- * the coordinator has run it.
+ * the coordinator has run it.  Heap, every node's, is not looked up: the
+ * catalog's page a session's first lookup reads would be counted to the
+ * gather whose dispatch asked, in its EXPLAIN ANALYZE's Buffers.
  */
 static bool
 segments_have_am(const char *amname)
@@ -314,6 +316,8 @@ segments_have_am(const char *amname)
 	HeapTuple	tuple;
 	bool		result;
 
+	if (strcmp(amname, "heap") == 0)
+		return true;
 	tuple = SearchSysCache1(AMNAME, CStringGetDatum(amname));
 	if (!HeapTupleIsValid(tuple))
 		return false;
