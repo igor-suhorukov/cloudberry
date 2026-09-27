@@ -2033,3 +2033,63 @@ CREATE FUNCTION gp_internal.sample_tree(
 RETURNS SETOF record
 AS 'MODULE_PATHNAME', 'gp_sample_tree'
 LANGUAGE C;
+
+/*
+ * Cloudberry's HyperLogLog counter, which ANALYZE keeps of a leaf's column
+ * so that the root's number of distinct values can be merged from its
+ * leaves', and the aggregate ANALYZE FULLSCAN counts a leaf's column with
+ * (gp_hll.c).  In pg_catalog under Cloudberry's names, where Cloudberry's
+ * catalog has them.  Like Cloudberry's, it travels as text: base 64, no
+ * binary form.
+ */
+CREATE TYPE pg_catalog.gp_hyperloglog_estimator;
+
+CREATE FUNCTION pg_catalog.gp_hyperloglog_in(value cstring)
+RETURNS pg_catalog.gp_hyperloglog_estimator
+AS 'MODULE_PATHNAME', 'gp_hyperloglog_in'
+LANGUAGE C IMMUTABLE STRICT;
+
+CREATE FUNCTION pg_catalog.gp_hyperloglog_out(counter pg_catalog.gp_hyperloglog_estimator)
+RETURNS cstring
+AS 'MODULE_PATHNAME', 'gp_hyperloglog_out'
+LANGUAGE C IMMUTABLE STRICT;
+
+CREATE TYPE pg_catalog.gp_hyperloglog_estimator (
+	INPUT = pg_catalog.gp_hyperloglog_in,
+	OUTPUT = pg_catalog.gp_hyperloglog_out,
+	INTERNALLENGTH = VARIABLE,
+	ALIGNMENT = int4,
+	STORAGE = extended,
+	CATEGORY = 'X');
+
+COMMENT ON TYPE pg_catalog.gp_hyperloglog_estimator IS
+	'gp_hyperloglog_estimator''s internal bytea representation for hyperloglog counter';
+
+CREATE FUNCTION pg_catalog.gp_hyperloglog_comp(counter pg_catalog.gp_hyperloglog_estimator)
+RETURNS pg_catalog.gp_hyperloglog_estimator
+AS 'MODULE_PATHNAME', 'gp_hyperloglog_comp'
+LANGUAGE C IMMUTABLE STRICT;
+
+CREATE FUNCTION pg_catalog.gp_hyperloglog_merge(
+	estimator1 pg_catalog.gp_hyperloglog_estimator,
+	estimator2 pg_catalog.gp_hyperloglog_estimator)
+RETURNS pg_catalog.gp_hyperloglog_estimator
+AS 'MODULE_PATHNAME', 'gp_hyperloglog_merge'
+LANGUAGE C IMMUTABLE;
+
+CREATE FUNCTION pg_catalog.gp_hyperloglog_get_estimate(counter pg_catalog.gp_hyperloglog_estimator)
+RETURNS float8
+AS 'MODULE_PATHNAME', 'gp_hyperloglog_get_estimate'
+LANGUAGE C IMMUTABLE STRICT;
+
+CREATE FUNCTION pg_catalog.gp_hyperloglog_add_item_agg_default(
+	counter pg_catalog.gp_hyperloglog_estimator, item anyelement)
+RETURNS pg_catalog.gp_hyperloglog_estimator
+AS 'MODULE_PATHNAME', 'gp_hyperloglog_add_item_agg_default'
+LANGUAGE C IMMUTABLE;
+
+CREATE AGGREGATE pg_catalog.gp_hyperloglog_accum(anyelement) (
+	SFUNC = pg_catalog.gp_hyperloglog_add_item_agg_default,
+	STYPE = pg_catalog.gp_hyperloglog_estimator,
+	FINALFUNC = pg_catalog.gp_hyperloglog_comp,
+	COMBINEFUNC = pg_catalog.gp_hyperloglog_merge);
