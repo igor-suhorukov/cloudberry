@@ -726,6 +726,66 @@ endforeach
 built_modules += 'pg_hint_plan'
 
 ###############################################################################
+# datalake_fdw
+#
+# Cloudberry's contrib/datalake_fdw: the Iceberg table access method and its
+# catalog and volume foreign-data wrappers, on ProcessUtility_hook and
+# object_access_hook, preloaded after gp_core and gp_sql.  Its files are
+# compiled where they lie, but for the port's copies of the ones PostgreSQL
+# 19 or the port changed, under modules/datalake_fdw/src at the same paths,
+# which come first on the include path and so shadow Cloudberry's headers
+# too, as PAX's copies do; each says at its head what changed.  Three of its
+# files are C++, which includes no header of PostgreSQL's.  Its symbols stay
+# its own but for what PostgreSQL calls, which PGDLLEXPORT marks, as
+# Cloudberry's export list has them (exports.txt).
+###############################################################################
+
+add_languages('cpp', native: false, required: true)
+datalake_root = '../contrib/datalake_fdw'
+datalake_sources = []
+foreach path : ['src/am_iceberg/pg_iceberg_am_handler.c',
+                'src/am_iceberg/pg_iceberg_extensible.c',
+                'src/am_iceberg/pg_iceberg_ddl.c',
+                'src/am_iceberg/pg_iceberg_options.c',
+                'src/am_iceberg/pg_iceberg_guc.c',
+                'src/am_iceberg/pg_iceberg_reject.c',
+                'src/iceberg_catalog_fdw/iceberg_catalog_fdw.c',
+                'src/iceberg_catalog_fdw/iceberg_catalog_option.c',
+                'src/iceberg_volume_fdw/iceberg_volume_fdw.c',
+                'src/iceberg_volume_fdw/iceberg_volume_option.c',
+                'src/meta/meta_engine_registry.c',
+                'src/meta/meta_engine_init.c',
+                'src/meta/engine_stub/stub_engine.c',
+                'src/format/format_registry.c',
+                'src/common/dl_err.c',
+                'src/common/dl_option_util.c',
+                'src/common/parser_option.c',
+                'src/common/file_system_wrapper.cpp',
+                'src/common/s3_file_system.cpp',
+                'src/common/backend_registry.cpp']
+  if import('fs').is_file('modules/datalake_fdw' / path)
+    datalake_sources += files('modules/datalake_fdw' / path)
+  else
+    datalake_sources += files(datalake_root / path)
+  endif
+endforeach
+shared_module('datalake_fdw', datalake_sources,
+  c_args: mod_c_args + ['-fvisibility=hidden'],
+  cpp_args: ['-fvisibility=hidden', '-fvisibility-inlines-hidden'],
+  link_args: mod_link_args,
+  include_directories: [include_directories('modules/datalake_fdw/src',
+                                            datalake_root / 'src'),
+                        pg_inc, cb_inc],
+  name_prefix: '',
+  install: true,
+  install_dir: pg_pkglibdir,
+)
+install_data(datalake_root / 'datalake_fdw.control',
+             datalake_root / 'datalake_fdw--1.0.sql',
+             install_dir: pg_extensiondir)
+built_modules += 'datalake_fdw'
+
+###############################################################################
 # gpfdist
 #
 # Cloudberry's file server of external tables (src/bin/gpfdist), a program
