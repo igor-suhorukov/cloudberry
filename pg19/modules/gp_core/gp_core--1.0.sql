@@ -2012,3 +2012,24 @@ GRANT SELECT ON gp_toolkit.__gp_is_append_only, gp_toolkit.__gp_fullname,
 	gp_toolkit.gp_size_of_table_and_indexes_disk,
 	gp_toolkit.gp_size_of_schema_disk, gp_toolkit.gp_size_of_database
 	TO PUBLIC;
+
+/* ------------------------------------------------------------------------- */
+/* ANALYZE of a partitioned table                                            */
+/* ------------------------------------------------------------------------- */
+
+/*
+ * A segment's sample of a table and every table under it, as one sample of
+ * the table's rows, for ANALYZE of the tree on the coordinator -- what
+ * Cloudberry's gp_acquire_sample_rows(t, n, 't') samples (gp_analyze.c).
+ * The rows come as sample_rows()'s do, each member's as a row of the
+ * table's own type; the caller may read or ANALYZE the table, as there.
+ */
+CREATE FUNCTION gp_internal.sample_tree(
+	rel anyelement,
+	targrows int,
+	OUT totalrows float8,
+	OUT totaldeadrows float8,
+	OUT sample anyelement)
+RETURNS SETOF record
+AS 'MODULE_PATHNAME', 'gp_sample_tree'
+LANGUAGE C;

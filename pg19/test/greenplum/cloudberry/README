@@ -34,6 +34,23 @@ am_encoding  psql's \d+ of a table by column, which PostgreSQL 19's psql
   in its WITH list, which both refuse: gp_ao refuses the ENCODING first,
   Cloudberry the option.
 
+analyze  what the port's ANALYZE computes as PostgreSQL 19 computes it, from
+  the sample the segments send: a partitioned table's own statistics, with
+  a correlation of 1, where Cloudberry merges its leaves' and gives none;
+  each column's correlation, over the sample in the order it arrived,
+  where Cloudberry's is the mean of each segment's over its own rows; and a
+  value wider than 1 kB, which PostgreSQL 19 counts in a column's
+  statistics -- as a distinct value, in an MCV list, in an expression
+  index's -- where Cloudberry's segments send NULL in its place.  What
+  VERBOSE says it sends the segments: the port's sample_rows() and
+  sample_tree(), whose rows are the table's own type, where Cloudberry's
+  is gp_acquire_sample_rows(), by OID.  relhassubclass on the segments,
+  which the coordinator's ANALYZE of a table whose children are gone puts
+  right on the coordinator alone: Cloudberry's segments put it right as
+  they sample.  And the number of distinct values over the segments, a
+  statistic of Cloudberry's own kind, 8, which PostgreSQL could give a
+  kind of its own and the port does not write.
+
 ao_locks (planner, orca)  the relations an append-optimized table's DELETE
   and UPDATE lock on a segment: Cloudberry's visibility map is a relation of
   each table's, with an index, and the port's is gp_ao.visimap, so only the

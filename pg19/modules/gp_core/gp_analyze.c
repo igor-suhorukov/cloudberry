@@ -38,10 +38,13 @@
  * are not installed, the coordinator samples the gathered rows itself -- the
  * same answer, at the cost of reading every row.
  *
- * A partitioned table's statistics are PostgreSQL's, from a sample of its
- * leaves, where Cloudberry's merge the leaves' own; the fault Cloudberry's
- * merge has once it has found the leaves is where PostgreSQL's has found
- * them.
+ * An inheritance tree -- a partitioned table's leaves -- is sampled as one,
+ * each segment sampling its members, as Cloudberry's is, rather than member
+ * by member (gp_internal.sample_tree()).  A partitioned table's statistics
+ * are PostgreSQL's, from that sample, where Cloudberry's merge the leaves'
+ * own; the fault Cloudberry's merge has once it has found the leaves is
+ * where PostgreSQL's has found them.  With VERBOSE each sample says what it
+ * sends the segments, as Cloudberry's does, in its words.
  *
  * Cloudberry sources this file stands in for:
  *	  acquire_sample_rows_dispatcher() and gp_acquire_sample_rows() in
@@ -60,12 +63,14 @@
 #include "access/stratnum.h"
 #include "access/table.h"
 #include "access/tableam.h"
+#include "access/tupconvert.h"
 #include "catalog/indexing.h"
 #include "catalog/namespace.h"
 #include "catalog/pg_class.h"
 #include "catalog/pg_inherits.h"
 #include "catalog/pg_type.h"
 #include "commands/defrem.h"
+#include "commands/tablecmds.h"
 #include "commands/vacuum.h"
 #include "common/pg_prng.h"
 #include "executor/tuptable.h"
@@ -97,10 +102,6 @@
 #include "gp_scan.h"
 
 static analyze_sample_rows_hook_type prev_analyze_sample_rows = NULL;
-
-/* The partitioned table this transaction's ANALYZE asked of, first */
-static Oid	asked_parent = InvalidOid;
-static LocalTransactionId asked_parent_lxid = InvalidLocalTransactionId;
 
 /* The segment that answers for a replicated table, as a gather of it reads. */
 static int
@@ -219,6 +220,84 @@ segment_sample_rows(Relation rel, HeapTuple *rows, int targrows,
 	return numrows;
 }
 
+/*
+ * The sampling function a table on this node is sampled with, and its pages:
+ * a table access method that samples its tables itself -- gp_ao's, whose
+ * rows are not where the block sampler would look -- says so through O3's
+ * hook, as it says so to an ANALYZE on this node; the others' rows are
+ * sampled as acquire_sample_rows() samples a heap's.  On the coordinator the
+ * hook is gp_core's own, which would ask the segments again.
+ */
+static AnalyzeSampleRowsFunc
+local_sampler(Relation rel, BlockNumber *totalpages)
+{
+	AnalyzeSampleRowsFunc func = NULL;
+
+	if (GpClusterBackendRole() != GP_ROLE_DISPATCH &&
+		analyze_sample_rows_hook != NULL &&
+		analyze_sample_rows_hook(rel, &func, totalpages) && func != NULL)
+		return func;
+	*totalpages = RelationGetNumberOfBlocks(rel);
+	return NULL;
+}
+
+static int
+local_sample_rows(Relation rel, AnalyzeSampleRowsFunc func, HeapTuple *rows,
+				  int targrows, double *totalrows, double *totaldeadrows)
+{
+	if (func != NULL)
+		return func(rel, DEBUG1, rows, targrows, totalrows, totaldeadrows);
+	return segment_sample_rows(rel, rows, targrows, totalrows, totaldeadrows);
+}
+
+/* The table whose row type is the first argument's, for the SQL functions. */
+static Oid
+sampled_relation(FunctionCallInfo fcinfo)
+{
+	Oid			argtype = get_fn_expr_argtype(fcinfo->flinfo, 0);
+	Oid			relid = get_typ_typrelid(argtype);
+
+	if (!OidIsValid(relid))
+		ereport(ERROR,
+				(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+				 errmsg("type %s is not a relation's row type",
+						format_type_be(argtype))));
+	if (PG_GETARG_INT32(1) <= 0)
+		ereport(ERROR,
+				(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+				 errmsg("the sample size must be positive")));
+
+	/* Whoever may read the rows, or ANALYZE the table, may sample it. */
+	if (pg_class_aclcheck(relid, GetUserId(), ACL_SELECT) != ACLCHECK_OK &&
+		pg_class_aclcheck(relid, GetUserId(), ACL_MAINTAIN) != ACLCHECK_OK)
+		aclcheck_error(ACLCHECK_NO_PRIV, OBJECT_TABLE, get_rel_name(relid));
+	return relid;
+}
+
+/* The rows and counts of a segment's sample, as the SQL functions give them. */
+static void
+put_sample(ReturnSetInfo *rsinfo, TupleDesc rowdesc, HeapTuple *rows,
+		   int numrows, double totalrows, double totaldeadrows)
+{
+	Datum		values[3];
+	bool		nulls[3];
+
+	values[0] = Float8GetDatum(totalrows);
+	values[1] = Float8GetDatum(totaldeadrows);
+	values[2] = (Datum) 0;
+	nulls[0] = nulls[1] = false;
+	nulls[2] = true;
+	tuplestore_putvalues(rsinfo->setResult, rsinfo->setDesc, values, nulls);
+
+	nulls[0] = nulls[1] = true;
+	nulls[2] = false;
+	for (int i = 0; i < numrows; i++)
+	{
+		values[2] = heap_copy_tuple_as_datum(rows[i], rowdesc);
+		tuplestore_putvalues(rsinfo->setResult, rsinfo->setDesc, values, nulls);
+	}
+}
+
 PG_FUNCTION_INFO_V1(gp_sample_rows);
 
 /*
@@ -233,71 +312,128 @@ Datum
 gp_sample_rows(PG_FUNCTION_ARGS)
 {
 	ReturnSetInfo *rsinfo = (ReturnSetInfo *) fcinfo->resultinfo;
-	Oid			argtype = get_fn_expr_argtype(fcinfo->flinfo, 0);
+	Oid			relid = sampled_relation(fcinfo);
 	int32		targrows = PG_GETARG_INT32(1);
-	Oid			relid = get_typ_typrelid(argtype);
 	Relation	rel;
 	HeapTuple  *rows;
 	int			numrows;
 	double		totalrows;
 	double		totaldeadrows;
-	AnalyzeSampleRowsFunc func = NULL;
+	AnalyzeSampleRowsFunc func;
 	BlockNumber totalpages;
-	Datum		values[3];
-	bool		nulls[3];
-
-	if (!OidIsValid(relid))
-		ereport(ERROR,
-				(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
-				 errmsg("type %s is not a relation's row type",
-						format_type_be(argtype))));
-	if (targrows <= 0)
-		ereport(ERROR,
-				(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
-				 errmsg("the sample size must be positive")));
-
-	/* Whoever may read the rows, or ANALYZE the table, may sample it. */
-	if (pg_class_aclcheck(relid, GetUserId(), ACL_SELECT) != ACLCHECK_OK &&
-		pg_class_aclcheck(relid, GetUserId(), ACL_MAINTAIN) != ACLCHECK_OK)
-		aclcheck_error(ACLCHECK_NO_PRIV, OBJECT_TABLE, get_rel_name(relid));
 
 	InitMaterializedSRF(fcinfo, MAT_SRF_USE_EXPECTED_DESC);
 
 	rel = table_open(relid, AccessShareLock);
 	rows = (HeapTuple *) palloc(targrows * sizeof(HeapTuple));
+	func = local_sampler(rel, &totalpages);
+	numrows = local_sample_rows(rel, func, rows, targrows, &totalrows,
+								&totaldeadrows);
+	put_sample(rsinfo, RelationGetDescr(rel), rows, numrows, totalrows,
+			   totaldeadrows);
+	table_close(rel, AccessShareLock);
+	return (Datum) 0;
+}
 
-	/*
-	 * A table access method that samples its tables itself -- gp_ao's,
-	 * whose rows are not where the block sampler would look -- says so
-	 * through O3's hook, as it says so to an ANALYZE on this node; the
-	 * others' rows are sampled as acquire_sample_rows() samples a heap's.
-	 * On the coordinator the hook is gp_core's own, which would ask the
-	 * segments again.
-	 */
-	if (GpClusterBackendRole() != GP_ROLE_DISPATCH &&
-		analyze_sample_rows_hook != NULL &&
-		analyze_sample_rows_hook(rel, &func, &totalpages) && func != NULL)
-		numrows = func(rel, DEBUG1, rows, targrows, &totalrows, &totaldeadrows);
-	else
-		numrows = segment_sample_rows(rel, rows, targrows, &totalrows,
-									  &totaldeadrows);
+PG_FUNCTION_INFO_V1(gp_sample_tree);
 
-	values[0] = Float8GetDatum(totalrows);
-	values[1] = Float8GetDatum(totaldeadrows);
-	values[2] = (Datum) 0;
-	nulls[0] = nulls[1] = false;
-	nulls[2] = true;
-	tuplestore_putvalues(rsinfo->setResult, rsinfo->setDesc, values, nulls);
+/*
+ * gp_internal.sample_tree(NULL::t, targrows)
+ *		This segment's sample of a table and every table under it, as one
+ *		sample of the table's rows, for the coordinator's ANALYZE of the
+ *		tree -- Cloudberry's gp_acquire_sample_rows(t, n, 't').
+ *
+ * PostgreSQL's acquire_inherited_sample_rows() on this segment's rows: each
+ * member sampled in proportion to its pages here, and its rows made rows of
+ * the table's own type.  The rows come as sample_rows()'s do.
+ */
+Datum
+gp_sample_tree(PG_FUNCTION_ARGS)
+{
+	ReturnSetInfo *rsinfo = (ReturnSetInfo *) fcinfo->resultinfo;
+	Oid			relid = sampled_relation(fcinfo);
+	int32		targrows = PG_GETARG_INT32(1);
+	Relation	parent;
+	List	   *members;
+	int			nmembers;
+	Relation   *rels;
+	AnalyzeSampleRowsFunc *funcs;
+	double	   *pages;
+	double		totalpages = 0;
+	HeapTuple  *rows;
+	int			numrows = 0;
+	double		totalrows = 0;
+	double		totaldeadrows = 0;
+	int			n = 0;
 
-	nulls[0] = nulls[1] = true;
-	nulls[2] = false;
-	for (int i = 0; i < numrows; i++)
+	InitMaterializedSRF(fcinfo, MAT_SRF_USE_EXPECTED_DESC);
+
+	parent = table_open(relid, AccessShareLock);
+	members = find_all_inheritors(relid, AccessShareLock, NULL);
+	nmembers = list_length(members);
+	rels = palloc_array(Relation, nmembers);
+	funcs = palloc0_array(AnalyzeSampleRowsFunc, nmembers);
+	pages = palloc0_array(double, nmembers);
+	foreach_oid(member, members)
 	{
-		values[2] = heap_copy_tuple_as_datum(rows[i], RelationGetDescr(rel));
-		tuplestore_putvalues(rsinfo->setResult, rsinfo->setDesc, values, nulls);
+		Relation	rel = table_open(member, NoLock);
+		BlockNumber relpages;
+
+		if (RELATION_IS_OTHER_TEMP(rel) ||
+			(rel->rd_rel->relkind != RELKIND_RELATION &&
+			 rel->rd_rel->relkind != RELKIND_MATVIEW))
+		{
+			table_close(rel, NoLock);
+			continue;
+		}
+		funcs[n] = local_sampler(rel, &relpages);
+		rels[n] = rel;
+		pages[n] = relpages;
+		totalpages += relpages;
+		n++;
 	}
 
-	table_close(rel, AccessShareLock);
+	rows = (HeapTuple *) palloc(targrows * sizeof(HeapTuple));
+	for (int i = 0; i < n; i++)
+	{
+		int			childtargrows;
+		int			childrows;
+		double		trows,
+					tdrows;
+
+		if (pages[i] <= 0)
+			continue;
+		childtargrows = Min((int) rint(targrows * pages[i] / totalpages),
+							targrows - numrows);
+		if (childtargrows <= 0)
+			continue;
+		childrows = local_sample_rows(rels[i], funcs[i], rows + numrows,
+									  childtargrows, &trows, &tdrows);
+
+		/* a member's rows as rows of the table's own type */
+		if (childrows > 0 &&
+			!equalRowTypes(RelationGetDescr(rels[i]), RelationGetDescr(parent)))
+		{
+			TupleConversionMap *map = convert_tuples_by_name(RelationGetDescr(rels[i]),
+															 RelationGetDescr(parent));
+
+			if (map != NULL)
+			{
+				for (int j = 0; j < childrows; j++)
+					rows[numrows + j] = execute_attr_map_tuple(rows[numrows + j], map);
+				free_conversion_map(map);
+			}
+		}
+		numrows += childrows;
+		totalrows += trows;
+		totaldeadrows += tdrows;
+	}
+
+	put_sample(rsinfo, RelationGetDescr(parent), rows, numrows, totalrows,
+			   totaldeadrows);
+	for (int i = 0; i < n; i++)
+		table_close(rels[i], NoLock);
+	table_close(parent, AccessShareLock);
 	return (Datum) 0;
 }
 
@@ -325,16 +461,16 @@ tuple_from_composite(Datum value, Oid relid)
 	return heap_copytuple(&tmp);
 }
 
-/* Does this database have gp_internal.sample_rows()? */
+/* Does this database have gp_internal.sample_rows(), or sample_tree()? */
 static bool
-have_sample_rows_function(void)
+have_sample_function(const char *name)
 {
 	Oid			argtypes[2] = {ANYELEMENTOID, INT4OID};
 
 	if (!OidIsValid(get_namespace_oid("gp_internal", true)))
 		return false;
 	return OidIsValid(LookupFuncName(list_make2(makeString("gp_internal"),
-												makeString("sample_rows")),
+												makeString(pstrdup(name))),
 									 2, argtypes, true));
 }
 
@@ -395,14 +531,16 @@ merge_segment_samples(SegmentSample *samples, int nsegs, HeapTuple *rows,
 }
 
 /*
- * The sampling function O3 hands ANALYZE for a distributed table.
+ * A distributed table's sample, or with "tree" its inheritance tree's, as
+ * one sample of the table's rows: each segment's own, merged.  Cloudberry's
+ * acquire_sample_rows_dispatcher(), which says at elevel what it sends.
  */
 static int
-distributed_sample_rows(Relation rel, int elevel, HeapTuple *rows, int targrows,
-						double *totalrows, double *totaldeadrows)
+gather_sample(Relation rel, GpPolicy *policy, bool tree, int elevel,
+			  HeapTuple *rows, int targrows,
+			  double *totalrows, double *totaldeadrows)
 {
 	Oid			relid = RelationGetRelid(rel);
-	GpPolicy   *policy = GpScanDistributedPolicy(relid);
 	bool		replicated = GpPolicyIsReplicated(policy);
 	int			content = replicated ? replicated_segment(policy) : -1;
 	char	   *qualified = GpDispatchRelationName(RelationGetRelid(rel));
@@ -411,12 +549,12 @@ distributed_sample_rows(Relation rel, int elevel, HeapTuple *rows, int targrows,
 	TupleTableSlot *slot;
 	GpGatherState *gather;
 	int			from;
-	int			numrows;
+	char	   *sql;
 
 	GpClusterSegments(&nsegs);
 	samples = palloc0_array(SegmentSample, nsegs);
 
-	if (have_sample_rows_function())
+	if (have_sample_function(tree ? "sample_tree" : "sample_rows"))
 	{
 		TupleDesc	tupdesc = CreateTemplateTupleDesc(3);
 
@@ -425,10 +563,11 @@ distributed_sample_rows(Relation rel, int elevel, HeapTuple *rows, int targrows,
 		TupleDescInitEntry(tupdesc, 3, "sample", RelationGetForm(rel)->reltype, -1, 0);
 		TupleDescFinalize(tupdesc);
 
+		sql = psprintf("SELECT * FROM gp_internal.%s(NULL::%s, %d)",
+					   tree ? "sample_tree" : "sample_rows", qualified, targrows);
+		ereport(elevel, (errmsg("Executing SQL: %s", sql)));
 		slot = MakeSingleTupleTableSlot(tupdesc, &TTSOpsVirtual);
-		gather = start_on_table(psprintf("SELECT * FROM gp_internal.sample_rows(NULL::%s, %d)",
-										 qualified, targrows),
-								tupdesc, content, policy);
+		gather = start_on_table(sql, tupdesc, content, policy);
 		while (GpGatherNext(gather, slot, &from))
 		{
 			SegmentSample *s = &samples[from];
@@ -455,10 +594,11 @@ distributed_sample_rows(Relation rel, int elevel, HeapTuple *rows, int targrows,
 		double		rowstoskip = -1;
 		double		seen = 0;
 
+		sql = psprintf("SELECT * FROM %s%s", tree ? "" : "ONLY ", qualified);
+		ereport(elevel, (errmsg("Executing SQL: %s", sql)));
 		reservoir_init_selection_state(&rstate, targrows);
 		slot = MakeSingleTupleTableSlot(RelationGetDescr(rel), &TTSOpsVirtual);
-		gather = start_on_table(psprintf("SELECT * FROM ONLY %s", qualified),
-								RelationGetDescr(rel), content, policy);
+		gather = start_on_table(sql, RelationGetDescr(rel), content, policy);
 
 		/* one list for the whole table: it is one sample already */
 		while (GpGatherNext(gather, slot, NULL))
@@ -495,60 +635,135 @@ distributed_sample_rows(Relation rel, int elevel, HeapTuple *rows, int targrows,
 		nsegs = 1;
 	}
 
-	numrows = merge_segment_samples(samples, nsegs, rows, targrows,
-									totalrows, totaldeadrows);
-
-	ereport(elevel,
-			(errmsg("\"%s\": sampled from %s: %d rows in sample, %.0f estimated total rows",
-					RelationGetRelationName(rel),
-					replicated ? "one segment" : "every segment",
-					numrows, *totalrows)));
-
-	return numrows;
+	return merge_segment_samples(samples, nsegs, rows, targrows,
+								 totalrows, totaldeadrows);
 }
 
 /*
- * O3's hook: a distributed table is sampled on the segments, and its pages
- * are the segments' pages together: their bytes rounded up to pages, as
- * Cloudberry's AcquireNumberOfBlocks() rounds them.  An append-optimized or
- * PAX table's files are no whole pages, and a small one rounded down would
- * be counted as none, which the planner takes for a table never analyzed.
+ * The sampling function O3 hands ANALYZE for a distributed table analyzed
+ * itself.  Cloudberry's do_analyze_rel() looks for the relation's
+ * inheritance tree first, and says it skips one there is none of -- and
+ * where the catalog said there was, says so no more, as PostgreSQL's own
+ * look does, which then has nothing to look for (Cloudberry's issue 14644).
+ */
+static int
+distributed_sample_rows(Relation rel, int elevel, HeapTuple *rows, int targrows,
+						double *totalrows, double *totaldeadrows)
+{
+	if (find_inheritance_children(RelationGetRelid(rel), NoLock) == NIL)
+	{
+		if (rel->rd_rel->relhassubclass)
+		{
+			CommandCounterIncrement();
+			SetRelationHasSubclass(RelationGetRelid(rel), false);
+		}
+		ereport(elevel,
+				(errmsg("skipping analyze of \"%s.%s\" inheritance tree --- this inheritance tree contains no child tables",
+						get_namespace_name(RelationGetNamespace(rel)),
+						RelationGetRelationName(rel))));
+	}
+	return gather_sample(rel, GpScanDistributedPolicy(RelationGetRelid(rel)),
+						 false, elevel, rows, targrows, totalrows, totaldeadrows);
+}
+
+/* The same, for a member of a tree whose members are sampled one by one. */
+static int
+member_sample_rows(Relation rel, int elevel, HeapTuple *rows, int targrows,
+				   double *totalrows, double *totaldeadrows)
+{
+	return gather_sample(rel, GpScanDistributedPolicy(RelationGetRelid(rel)),
+						 false, elevel, rows, targrows, totalrows, totaldeadrows);
+}
+
+/* ------------------------------------------------------------------------- */
+/* An inheritance tree, sampled at once                                      */
+/* ------------------------------------------------------------------------- */
+
+/*
+ * PostgreSQL's acquire_inherited_sample_rows() asks O3's hook of the tree's
+ * parent and then of each member find_all_inheritors() found, in that order,
+ * and samples each member in proportion to its pages.  Cloudberry's samples
+ * the whole tree in one dispatch instead, each segment sampling its members
+ * (gp_acquire_sample_rows(t, n, 't')); so does this, where it can: the
+ * parent is given the tree's sampling function and the members no pages, so
+ * that PostgreSQL samples none of them itself.  A round trip or two a
+ * member was the cost otherwise, which a table of a thousand partitions
+ * pays a thousand times.
+ */
+static List *walk_members = NIL;	/* not yet asked of, in TopTransactionContext */
+static LocalTransactionId walk_lxid = InvalidLocalTransactionId;
+static GpPolicy *walk_policy = NULL;	/* where the tree is sampled at once */
+
+/* The relation analyze_rel() asked of last, whose next ask is its tree's */
+static Oid	last_asked = InvalidOid;
+static LocalTransactionId last_asked_lxid = InvalidLocalTransactionId;
+
+/*
+ * The segments a tree can be sampled on at once, or NULL: every member with
+ * rows a table distributed over the same segments, and none of them
+ * replicated, a foreign table or a temporary table.
+ */
+static GpPolicy *
+tree_policy(List *members)
+{
+	GpPolicy   *policy = NULL;
+
+	foreach_oid(member, members)
+	{
+		char		relkind = get_rel_relkind(member);
+		GpPolicy   *p;
+
+		if (relkind == RELKIND_PARTITIONED_TABLE)
+			continue;
+		if ((relkind != RELKIND_RELATION && relkind != RELKIND_MATVIEW) ||
+			get_rel_persistence(member) == RELPERSISTENCE_TEMP ||
+			(p = GpScanDistributedPolicy(member)) == NULL ||
+			GpPolicyIsReplicated(p) ||
+			(policy != NULL && p->numsegments != policy->numsegments))
+			return NULL;
+		if (policy == NULL)
+			policy = p;
+	}
+	return policy;
+}
+
+/* The tree's sampling function, given to its parent. */
+static int
+tree_sample_rows(Relation rel, int elevel, HeapTuple *rows, int targrows,
+				 double *totalrows, double *totaldeadrows)
+{
+	return gather_sample(rel, walk_policy, true, elevel, rows, targrows,
+						 totalrows, totaldeadrows);
+}
+
+/* A member's, which is never called: the member has no pages to sample. */
+static int
+no_sample_rows(Relation rel, int elevel, HeapTuple *rows, int targrows,
+			   double *totalrows, double *totaldeadrows)
+{
+	*totalrows = 0;
+	*totaldeadrows = 0;
+	return 0;
+}
+
+/*
+ * A distributed table's pages and sampling function: its pages the
+ * segments' pages together, their bytes rounded up to pages, as Cloudberry's
+ * AcquireNumberOfBlocks() rounds them.  An append-optimized or PAX table's
+ * files are no whole pages, and a small one rounded down would be counted
+ * as none, which the planner takes for a table never analyzed.
  */
 static bool
-gp_analyze_sample_rows(Relation relation, AnalyzeSampleRowsFunc *func,
-					   BlockNumber *totalpages)
+distributed_table(Relation relation, AnalyzeSampleRowsFunc sampler,
+				  AnalyzeSampleRowsFunc *func, BlockNumber *totalpages)
 {
 	GpPolicy   *policy;
 	int			nsegs;
 	char	  **sizes;
 	double		bytes = 0;
 
-	/*
-	 * A partitioned table is asked of twice: by analyze_rel(), and then by
-	 * acquire_inherited_sample_rows() as the first of the tree
-	 * find_all_inheritors() has found and locked.  The second is where
-	 * Cloudberry's merge_leaf_stats() has found the leaves.
-	 */
-	if (GpClusterBackendRole() == GP_ROLE_DISPATCH &&
-		relation->rd_rel->relkind == RELKIND_PARTITIONED_TABLE)
-	{
-		if (RelationGetRelid(relation) == asked_parent &&
-			MyProc->vxid.lxid == asked_parent_lxid)
-		{
-			asked_parent = InvalidOid;
-			GP_FAULT("merge_leaf_stats_after_find_children");
-		}
-		else
-		{
-			asked_parent = RelationGetRelid(relation);
-			asked_parent_lxid = MyProc->vxid.lxid;
-		}
-	}
-
-	if (GpClusterBackendRole() != GP_ROLE_DISPATCH ||
-		(relation->rd_rel->relkind != RELKIND_RELATION &&
+	if ((relation->rd_rel->relkind != RELKIND_RELATION &&
 		 relation->rd_rel->relkind != RELKIND_MATVIEW) ||
-		AmAutoVacuumWorkerProcess() ||
 		(policy = GpScanDistributedPolicy(RelationGetRelid(relation))) == NULL)
 		return prev_analyze_sample_rows
 			? prev_analyze_sample_rows(relation, func, totalpages) : false;
@@ -564,8 +779,76 @@ gp_analyze_sample_rows(Relation relation, AnalyzeSampleRowsFunc *func,
 			bytes += strtod(sizes[i], NULL);
 
 	*totalpages = (BlockNumber) Min(ceil(bytes / BLCKSZ), (double) MaxBlockNumber);
-	*func = distributed_sample_rows;
+	*func = sampler;
 	return true;
+}
+
+/*
+ * O3's hook: a distributed table is sampled on the segments, and an
+ * inheritance tree of them at once, as above.
+ *
+ * Which ask is which: analyze_rel() asks of the relation it analyzes; if
+ * that relation has children, acquire_inherited_sample_rows() asks of it
+ * again, in the same transaction, and then of each member in turn.  A
+ * partitioned table's second ask is also where Cloudberry's
+ * merge_leaf_stats() has found the leaves, whose fault is there.
+ */
+static bool
+gp_analyze_sample_rows(Relation relation, AnalyzeSampleRowsFunc *func,
+					   BlockNumber *totalpages)
+{
+	Oid			relid = RelationGetRelid(relation);
+	LocalTransactionId lxid = MyProc->vxid.lxid;
+
+	if (GpClusterBackendRole() != GP_ROLE_DISPATCH || AmAutoVacuumWorkerProcess())
+		return prev_analyze_sample_rows
+			? prev_analyze_sample_rows(relation, func, totalpages) : false;
+
+	/* A member of the tree being walked, and those skipped before it gone */
+	if (walk_lxid == lxid && list_member_oid(walk_members, relid))
+	{
+		while (linitial_oid(walk_members) != relid)
+			walk_members = list_delete_first(walk_members);
+		walk_members = list_delete_first(walk_members);
+		if (walk_policy != NULL)
+		{
+			/* gp_ao's, outside this one, has counted its segment files */
+			*func = no_sample_rows;
+			*totalpages = 0;
+			return true;
+		}
+		return distributed_table(relation, member_sample_rows, func, totalpages);
+	}
+	walk_members = NIL;
+
+	/* The second ask of a parent: its tree's */
+	if (relid == last_asked && lxid == last_asked_lxid &&
+		relation->rd_rel->relhassubclass)
+	{
+		MemoryContext old = MemoryContextSwitchTo(TopTransactionContext);
+		List	   *members = find_all_inheritors(relid, NoLock, NULL);
+
+		last_asked = InvalidOid;
+		walk_policy = tree_policy(members);
+		walk_members = list_delete_first(members);
+		walk_lxid = lxid;
+		MemoryContextSwitchTo(old);
+
+		if (relation->rd_rel->relkind == RELKIND_PARTITIONED_TABLE)
+			GP_FAULT("merge_leaf_stats_after_find_children");
+
+		if (walk_policy != NULL)
+		{
+			*func = tree_sample_rows;
+			*totalpages = 1;
+			return true;
+		}
+		return distributed_table(relation, member_sample_rows, func, totalpages);
+	}
+
+	last_asked = relid;
+	last_asked_lxid = lxid;
+	return distributed_table(relation, distributed_sample_rows, func, totalpages);
 }
 
 /* ------------------------------------------------------------------------- */
