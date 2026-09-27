@@ -7,12 +7,16 @@
 -- rows by their ctids (gp_explicit.c).  With the detector on the table is
 -- not locked against other writers, as Cloudberry's is not, and a row may
 -- change between the coordinator's read and the segment's write: the
--- segment's statement rechecked the row's new version, which the ctid it
--- was sent never matches, and passed it over, and the update was lost.
--- Now a statement that writes fewer rows than it was sent asks the segment
--- why: a row another transaction updated fails it with 40001, in the words
--- Cloudberry fails it in (its gdd/concurrent_update, "Test EvalplanQual"),
--- and one deleted is passed over, as PostgreSQL passes it over.
+-- segment's statement rechecks the row's new version, which the ctid it
+-- was sent never matches, and passes it over.  So a statement that writes
+-- fewer rows than it was sent looks at what became of them.  At READ
+-- COMMITTED an UPDATE's or a DELETE's row another transaction updated is
+-- rechecked as PostgreSQL's ModifyTable rechecks it: the plan runs again
+-- over the row's newest version and the rows it was joined to, and the row
+-- is written in that version -- where Cloudberry fails the statement with
+-- 40001 (its gdd/concurrent_update, "Test EvalplanQual").  A MERGE's, a
+-- Split's and a replicated table's row fails it still, in Cloudberry's
+-- words, and one deleted is passed over, as PostgreSQL passes it over.
 
 1: SHOW gp.enable_global_deadlock_detector;
 1: SET gp.optimizer = off;
@@ -23,7 +27,7 @@
 1: INSERT INTO ec_s VALUES (1, 1);
 
 -- Cloudberry's interleaving: the second UPDATE waits on a segment for the
--- first's row, and fails once the first commits
+-- first's row, and once the first commits updates its new version
 1: INSERT INTO ec_t VALUES (1, 1);
 1: BEGIN;
 1: UPDATE ec_t SET c1 = c1 + 1 WHERE c2 = 1;
@@ -34,22 +38,68 @@
 
 -- The first commits after the second's snapshot and before its write,
 -- which waits for nothing on the segment: the second holds on an advisory
--- lock, taken as it computes its new values, which the first holds
+-- lock, taken as it computes its new values, which the first holds; the
+-- new values are computed again over the row's new version
 1: CREATE FUNCTION ec_wait(int) RETURNS int LANGUAGE sql VOLATILE AS $$
    SELECT pg_advisory_xact_lock_shared(1); SELECT $1 $$;
 1: SELECT pg_advisory_lock(1);
-2&: UPDATE ec_t SET c1 = ec_wait(ec_t.c1 + 1) FROM ec_s WHERE ec_t.c2 = ec_s.c2;
+2&: UPDATE ec_t SET c1 = ec_wait(ec_t.c1 + 1) FROM ec_s WHERE ec_t.c2 = ec_s.c2 RETURNING ec_t.*, ec_s.c1;
 1: UPDATE ec_t SET c1 = c1 + 100 WHERE c2 = 1;
 1: SELECT pg_advisory_unlock(1);
 2<:
 1: SELECT * FROM ec_t;
 
--- A DELETE ... USING and a MERGE's UPDATE fail the same way
+-- A row whose new version the plan no longer gives -- by the condition the
+-- gather sends the segment, or by the join's -- is passed over: UPDATE 0,
+-- as PostgreSQL's
 1: BEGIN;
-1: UPDATE ec_t SET c1 = c1 + 1 WHERE c2 = 1;
-2&: DELETE FROM ec_t USING ec_s WHERE ec_t.c2 = ec_s.c2;
+1: UPDATE ec_t SET c1 = 1000 WHERE c2 = 1;
+2&: UPDATE ec_t SET c1 = ec_t.c1 + 1 FROM ec_s WHERE ec_t.c2 = ec_s.c2 AND ec_t.c1 < 1000;
 1: COMMIT;
 2<:
+1: BEGIN;
+1: UPDATE ec_t SET c2 = 2 WHERE c2 = 1;
+2&: UPDATE ec_t SET c1 = ec_t.c1 + 1 FROM ec_s WHERE ec_t.c2 = ec_s.c2;
+1: COMMIT;
+2<:
+1: SELECT * FROM ec_t;
+1: UPDATE ec_t SET c1 = 1, c2 = 1;
+
+-- The rows of the other table are the ones the row was joined to, not
+-- what another transaction made of them meanwhile, as PostgreSQL's recheck
+-- fetches them again by their ctids: here by their segments too
+1: BEGIN;
+1: UPDATE ec_t SET c1 = c1 + 10 WHERE c2 = 1;
+1: UPDATE ec_s SET c1 = c1 + 50 WHERE c2 = 1;
+2&: UPDATE ec_t SET c1 = ec_t.c1 + ec_s.c1 FROM ec_s WHERE ec_t.c2 = ec_s.c2;
+1: COMMIT;
+2<:
+1: SELECT * FROM ec_t;
+1: UPDATE ec_s SET c1 = 1;
+
+-- The first held after its segment committed, before its transaction ends
+-- on the coordinator, where snapshots still see it in progress: the second
+-- waits for it there, and then writes the version it made
+1: BEGIN;
+1: UPDATE ec_t SET c1 = c1 + 1 WHERE c2 = 1;
+1: SELECT gp_inject_fault('before_xact_end_procarray', 'suspend', '', 'isolation2test', '', 1, 1, 0, dbid) FROM gp_segment_configuration WHERE role = 'p' AND content = -1;
+1&: COMMIT;
+3: SELECT gp_wait_until_triggered_fault('before_xact_end_procarray', 1, dbid) FROM gp_segment_configuration WHERE role = 'p' AND content = -1;
+2&: UPDATE ec_t SET c1 = ec_t.c1 + 1 FROM ec_s WHERE ec_t.c2 = ec_s.c2;
+3: SELECT wait_event_type, wait_event FROM pg_stat_activity WHERE query LIKE 'UPDATE ec_t SET c1 = ec_t.c1 + 1 FROM%';
+3: SELECT gp_inject_fault('before_xact_end_procarray', 'reset', dbid) FROM gp_segment_configuration WHERE role = 'p' AND content = -1;
+1<:
+2<:
+1: SELECT * FROM ec_t;
+
+-- A DELETE ... USING deletes the new version; a MERGE's UPDATE fails as
+-- before
+1: BEGIN;
+1: UPDATE ec_t SET c1 = c1 + 1 WHERE c2 = 1;
+2&: DELETE FROM ec_t USING ec_s WHERE ec_t.c2 = ec_s.c2 RETURNING ec_t.*;
+1: COMMIT;
+2<:
+1: INSERT INTO ec_t VALUES (1, 1);
 1: BEGIN;
 1: UPDATE ec_t SET c1 = c1 + 1 WHERE c2 = 1;
 2&: MERGE INTO ec_t USING ec_s ON ec_t.c2 = ec_s.c2 WHEN MATCHED THEN UPDATE SET c1 = ec_t.c1 + 1;
@@ -81,15 +131,24 @@
 
 -- No row changed meanwhile, none refused: two rows of the plan for one
 -- target row change it once, by the first, and a trigger that keeps a row
--- from being written keeps it
+-- from being written keeps it -- a row changed meanwhile too, whose new
+-- version the trigger is asked about
 1: INSERT INTO ec_t VALUES (1, 1);
 1: INSERT INTO ec_s VALUES (2, 1);
 2: UPDATE ec_t SET c1 = ec_t.c1 + 1 FROM ec_s WHERE ec_t.c2 = ec_s.c2;
 1: SELECT * FROM ec_t;
 1: CREATE FUNCTION ec_skip() RETURNS trigger LANGUAGE plpgsql AS $$
-   BEGIN RETURN NULL; END $$;
+   BEGIN IF old.c1 >= 100 THEN RETURN NULL; END IF; RETURN new; END $$;
 1: CREATE TRIGGER ec_skip BEFORE UPDATE ON ec_t FOR EACH ROW EXECUTE FUNCTION ec_skip();
+2: UPDATE ec_t SET c1 = 100 FROM ec_s WHERE ec_t.c2 = ec_s.c2;
 2: UPDATE ec_t SET c1 = ec_t.c1 + 1 FROM ec_s WHERE ec_t.c2 = ec_s.c2;
+1: DELETE FROM ec_t;
+1: INSERT INTO ec_t VALUES (1, 1);
+1: BEGIN;
+1: UPDATE ec_t SET c1 = 100 WHERE c2 = 1;
+2&: UPDATE ec_t SET c1 = ec_t.c1 + 1 FROM ec_s WHERE ec_t.c2 = ec_s.c2;
+1: COMMIT;
+2<:
 1: DROP TRIGGER ec_skip ON ec_t;
 1: SELECT * FROM ec_t;
 1: DELETE FROM ec_s WHERE c1 = 2;
@@ -114,7 +173,8 @@
 2<:
 1: SELECT * FROM ec_h;
 
--- A replicated table's rows are found by their text on every segment
+-- A replicated table's rows are found by their text on every segment, and
+-- one updated meanwhile fails the statement as before
 1: CREATE TABLE ec_r (c1 int, c2 int) DISTRIBUTED REPLICATED;
 1: INSERT INTO ec_r VALUES (1, 1);
 1: BEGIN;
@@ -138,3 +198,4 @@
 1: DROP FUNCTION ec_wait(int), ec_skip();
 1q:
 2q:
+3q:

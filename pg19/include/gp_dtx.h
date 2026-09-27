@@ -104,6 +104,13 @@ extern void GpDtxNoteLoopbackJournal(void);
 extern void GpDtxReportXid(void);
 
 /*
+ * A segment: the coordinator transactions whose parts have committed here
+ * and that a snapshot the coordinator takes now may still see in progress,
+ * as full transaction IDs, into a palloc'd array; how many.
+ */
+extern int	GpDtxCommittedParts(uint64 **gxids);
+
+/*
  * The settings, the segment's hooks and shared memory, and on the
  * coordinator the recovery process; from gp_core's _PG_init.  After
  * GpMotionInit(): a fragment's snapshot is made distributed before the

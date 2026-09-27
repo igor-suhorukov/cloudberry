@@ -1514,6 +1514,33 @@ dtx_report_depends(FullTransactionId self)
 	pfree(buf.data);
 }
 
+/*
+ * The coordinator transactions whose parts have committed here and are
+ * still in the map, into *gxids: a part commits here -- in one phase, or in
+ * its second -- before its coordinator transaction ends for the other
+ * sessions, so a snapshot the coordinator takes now may still see any of
+ * them in progress, and hide here what it wrote.  The explicit write waits
+ * for them before it sends a statement again under a newer snapshot, which
+ * must see a row version one of them made (explicit_latest(), gp_split.c).
+ * As short as dtx_report_depends()'s list, for the same reason.
+ */
+int
+GpDtxCommittedParts(uint64 **gxids)
+{
+	GpDtxEntry *e;
+	int			n = 0;
+
+	dtx_attach();
+	LWLockAcquire(&dtx_shared->lock, LW_SHARED);
+	*gxids = palloc_array(uint64, Max(dtx_shared->n, 1));
+	e = map_entries();
+	for (int i = 0; i < dtx_shared->n; i++)
+		if (e[i].done ? e[i].committed : TransactionIdDidCommit(e[i].xid))
+			(*gxids)[n++] = U64FromFullTransactionId(e[i].gxid);
+	LWLockRelease(&dtx_shared->lock);
+	return n;
+}
+
 static bool
 dtx_one_phase_check(char **newval, void **extra, GucSource source)
 {
