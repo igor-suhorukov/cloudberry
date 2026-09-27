@@ -48,7 +48,7 @@ resgroup               orca_cpuset 79 PASSES=orca RG_GROUPS=cpuset MEM=1500
 resgroup               planner_cpuset 77 PASSES=planner RG_GROUPS=cpuset MEM=1500
 resgroup               orca     144   PASSES=orca RG_GROUPS=main MEM=1500
 resgroup               planner  127   PASSES=planner RG_GROUPS=main MEM=1500
-greenplum              orca     136   PASSES=orca MEM=14000
+greenplum              orca     136   PASSES=orca MEM=16500
 diskquota              regress  121   DQ_PARTS=regress DQ_GROUP=main MEM=5500
 diskquota              ctas     101   DQ_PARTS=regress DQ_GROUP=ctas MEM=6000
 diskquota              ctas_spc 102   DQ_PARTS=regress DQ_GROUP=ctas_spc MEM=6000

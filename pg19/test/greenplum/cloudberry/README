@@ -121,6 +121,12 @@ brin_ao, brin_aocs (planner, orca)  under the planner, the plans the test
 case_gp  IS NOT DISTINCT FROM, and the CASE form, printed as the searched
   CASE the port's rewrite makes of them (see the singlenode suite's README).
 
+create_extension_fail  the context of the error the fault
+  create_function_fail raises: a segment runs the script of the CREATE
+  EXTENSION it was sent, so its CREATE FUNCTION fails inside the script,
+  where Cloudberry's coordinator runs the script and dispatches each of its
+  statements alone.
+
 qp_misc (orca)  the lines ORCA's fallback trace prints where Cloudberry's
   expected output has none, and nothing else: the test sets
   optimizer_trace_fallback, and the port's ORCA declines several DISTINCT

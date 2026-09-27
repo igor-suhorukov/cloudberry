@@ -17,7 +17,10 @@
 #         groups of a pass run side by side, each in the schedule's order.
 #         The groups are cut by time, the ORCA pass's, and a test that reads
 #         what another made is in its group (bb_mpph_heap's tables,
-#         bb_memory_quota's)
+#         bb_memory_quota's).  rpt_tpch has one of its own, m7c, in the
+#         schedule's place: TPC-H's query 20 correlates a scalar subquery,
+#         which the planner runs for each row, a minute in all, where
+#         Cloudberry's planner and ORCA make a join of it
 #
 # Every test of the schedule is listed.  The ones the port had left for M7 --
 # fault injection, FTS, the interconnect's settings, and the rest -- come
@@ -124,7 +127,7 @@ run  bfv_dd_types
 run  bfv_olap
 skip bfv_aggregate  argument of ROWS must not contain variables; cannot copy window "w" because it has a frame clause
 run  DML_over_joins
-skip bb_mpph  its query 3 over append-optimized partitions runs past the suite's minute, and gp_enable_sort_limit is none of the port's settings
+skip bb_mpph  its queries 3 and 8 over append-optimized partitions run past the suite's minute
 run  part_external_table
 port bb_mpph_heap
 run  bb_memory_quota
@@ -362,7 +365,7 @@ skip zlib  canceling statement due to user request
 skip workfile_limits  unrecognized configuration parameter "gp_workfile_limit_per_query"; unrecognized configuration parameter "gp_workfile_limit_files_per_query"
 skip segspace  relation "gp_toolkit.gp_workfile_mgr_used_diskspace" does not exist; relation "gp_toolkit.gp_workfile_entries" does not exist
 skip query_finish_pending  differs: gp_inject_fault's report of a finish_pending fault
-skip gpdiffcheck  unrecognized configuration parameter "gp_cost_hashjoin_chainwalk"
+run  gpdiffcheck
 run  gptokencheck
 run  co_nestloop_idxscan
 skip dml_in_udf  differs: a function's write in a segment's slice runs, where Cloudberry refuses it: function cannot execute on a QE slice because it issues a non-SELECT statement
@@ -390,7 +393,7 @@ skip cbdb_optimizer_test  unrecognized configuration parameter "gp_enable_ao_ind
 skip gp_runtime_filter  unrecognized configuration parameter "gp_enable_runtime_filter"; unrecognized configuration parameter "gp_enable_runtime_filter_pushdown"
 skip db_size_functions  database with OID 9999 does not exist; tablespace with OID 9999 does not exist
 skip cbdb_db_size_functions  function cbdb_relation_size(regclass[]) does not exist; function cbdb_relation_size(oid[], unknown) does not exist
-skip eagerfree  unrecognized configuration parameter "gp_enable_agg_distinct"
+run  eagerfree
 skip alter_table_set  syntax error at or near "on"; unrecognized configuration parameter "gp_enable_segment_copy_checking"
 skip alter_table_gp  differs: Cloudberry refuses to alter a column of a primary key, a unique constraint or the distribution key ("cannot alter column with primary key or unique constraint"), which the port alters
 run  subtransaction_visibility
@@ -436,7 +439,9 @@ skip gpsd  relation "gpsd_foo" does not exist; table row type and query-specifie
 run  catcache
 skip minirepro  relation "minirepro_foo" does not exist; table "minirepro_foo" does not exist
 run  gporca_faults
-skip rpt_tpch  unrecognized configuration parameter "gp_enable_sort_limit"
+group m7c
+run  rpt_tpch
+group m7a
 run  rpt_returning
 skip bfv_planner  differs: two counts of what its plans read are 27 and 9, where Cloudberry's are 33 and 11
 run  bfv_legacy
@@ -482,7 +487,7 @@ run  tuple_serialization
 skip query_info_hook_test  could not access file "query_info_hook_test/query_info_hook_test.so": No such file or directory
 skip freeze_aux_tables  differs: an append-optimized table's aux tables are not pg_aoseg_<oid>, pg_aoblkdir_<oid> and pg_aovisimap_<oid> of pg_aoseg
 skip cbdb_parallel  unrecognized configuration parameter "gp_appendonly_insert_files"; unrecognized configuration parameter "enable_parallel_semi_join"
-skip window_parallel  unrecognized configuration parameter "gp_appendonly_insert_files"
+run  window_parallel
 skip vacuum_full_freeze_heap  differs: a heap's size in 8 kB pages, where Cloudberry's expected output counts its 32 kB blocks
 skip vacuum_full_heap  differs: a heap's size in 8 kB pages, where Cloudberry's expected output counts its 32 kB blocks
 skip autostats  unrecognized configuration parameter "log_autostats"; permission denied to set parameter "gp.autostats_allow_nonowner"
@@ -498,9 +503,9 @@ skip alter_db_set_tablespace  function force_mirrors_to_catch_up() does not exis
 run  oid_wraparound
 skip fts_recovery_in_progress  canceling statement due to user request
 skip gangsize  differs: the gangs its statements are dispatched to, by Cloudberry's INFO lines, are not the sizes Cloudberry makes them
-skip gang_reuse  unrecognized configuration parameter "gp_cached_segworkers_threshold"
+run  gang_reuse
 skip run_utility_gpexpand_phase1  gpcheckcat and gppkg are not installed (pg19/gpMgmt/files.txt)
-skip create_extension_fail  the fault create_function_fail is none of the port's: its CREATE EXTENSION gp_debug_numsegments succeeds, and the next says the extension already exists
+run  create_extension_fail
 skip offload_entry_to_qe  unrecognized configuration parameter "enable_offload_entry_to_qe"; unrecognized EXPLAIN option "locus"
 skip aqumv  unrecognized configuration parameter "enable_answer_query_using_materialized_views"; unrecognized parameter namespace "gp"
 skip matview_data  relation "gp_matview_aux" does not exist; current transaction is aborted, commands ignored until end of transaction block

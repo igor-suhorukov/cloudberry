@@ -121,6 +121,7 @@
 #include "gp_cluster.h"
 #include "gp_core_api.h"
 #include "gp_dispatch.h"
+#include "gp_fault.h"
 #include "gp_label.h"
 #include "gp_policy.h"
 #include "gp_refresh.h"
@@ -1348,6 +1349,14 @@ gp_ddl_ProcessUtility(PlannedStmt *pstmt, const char *queryString,
 	Node	   *parsetree = pstmt->utilityStmt;
 	GpDispatchClass class;
 	char	   *tree;
+
+	/*
+	 * Cloudberry's fault at the start of CreateFunction(), on whichever node
+	 * runs it: a CREATE FUNCTION of an extension's script too, which a
+	 * segment runs as it runs the CREATE EXTENSION it was sent.
+	 */
+	if (IsA(parsetree, CreateFunctionStmt))
+		(void) GP_FAULT("create_function_fail");
 
 	/*
 	 * A segment, running what the coordinator sent.  It is run as the

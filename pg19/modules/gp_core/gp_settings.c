@@ -49,9 +49,10 @@
  * that says when it will: the planner's own MPP plans (Route B, decided at
  * M7), memory accounting (M6), intra-segment parallelism (after M7,
  * decision 2) -- or that it will not: the executor's prefetch of a join's
- * quals, which PostgreSQL's joins do not do.  They are defined so that a
- * script written for Cloudberry runs; their descriptions say what they do
- * here, which is nothing until then.
+ * quals, which PostgreSQL's joins do not do, and the planner's knobs of a
+ * sort under a LIMIT and of a hash join's cost, which are PostgreSQL's
+ * here.  They are defined so that a script written for Cloudberry runs;
+ * their descriptions say what they do here, which is nothing until then.
  *
  *-------------------------------------------------------------------------
  */
@@ -139,6 +140,11 @@ static bool gp_eager_distinct_dedup = false;
 static bool gp_enable_agg_pushdown = false;
 static bool gp_enable_fast_sri = true;
 static bool gp_force_random_redistribution = false;
+static bool gp_enable_agg_distinct = true;
+static bool gp_enable_sort_limit = true;
+static bool gp_cost_hashjoin_chainwalk = false;
+static int	gp_cached_gang_threshold = 5;
+static int	gp_appendonly_insert_files = 0;
 
 /*
  * Cloudberry's gpvars_check_statement_mem(): statement_mem is less than
@@ -731,6 +737,18 @@ GpSettingsInit(void)
 							&gp_vmem_idle_resource_timeout,
 							18000, 0, INT_MAX, PGC_USERSET, GUC_UNIT_MS,
 							NULL, NULL, NULL);
+	DefineCustomIntVariable("gp.cached_segworkers_threshold",
+							"Sets the maximum number of segment workers to cache between statements.",
+							"Accepted for Cloudberry's scripts: a session keeps every segment connection it has made until it ends.",
+							&gp_cached_gang_threshold,
+							5, 1, INT_MAX, PGC_USERSET, GUC_NOT_IN_SAMPLE,
+							NULL, NULL, NULL);
+	DefineCustomIntVariable("gp.appendonly_insert_files",
+							"Number of segment files to insert for appendonly table within a transaction.",
+							"Accepted for Cloudberry's scripts: an insert writes one segment file, a segment scanning a table in one process until intra-segment parallelism (after M7, decision 2).",
+							&gp_appendonly_insert_files,
+							0, 0, 127, PGC_USERSET, 0,
+							NULL, NULL, NULL);
 	DefineCustomBoolVariable("gp.workfile_compression",
 							 "Enables compression of temporary files.",
 							 "Accepted for Cloudberry's scripts: temporary files are PostgreSQL's own, which are not compressed.",
@@ -762,6 +780,9 @@ GpSettingsInit(void)
 	define_accepted_bool("gp.enable_preunique",
 						 "Enable 2-phase duplicate removal." ROUTE_B,
 						 &gp_enable_preunique, true);
+	define_accepted_bool("gp.enable_agg_distinct",
+						 "Enable 2-phase aggregation to compute a single distinct-qualified aggregate." ROUTE_B,
+						 &gp_enable_agg_distinct, true);
 	define_accepted_bool("gp.enable_agg_distinct_pruning",
 						 "Enable 3-phase aggregation and join to compute distinct-qualified aggregates." ROUTE_B,
 						 &gp_enable_agg_distinct_pruning, true);
@@ -777,6 +798,14 @@ GpSettingsInit(void)
 	define_accepted_bool("gp.force_random_redistribution",
 						 "Force redistribution of insert for randomly-distributed." ROUTE_B,
 						 &gp_force_random_redistribution, false);
+	define_accepted_bool("gp.enable_sort_limit",
+						 "Enable LIMIT operation to be performed while sorting."
+						 " Accepted for Cloudberry's scripts: PostgreSQL's sort below a LIMIT keeps only the rows the LIMIT can return, whatever this says.",
+						 &gp_enable_sort_limit, true);
+	define_accepted_bool("gp.cost_hashjoin_chainwalk",
+						 "Enable the cost for walking the chain in the hash join."
+						 " Accepted for Cloudberry's scripts: the planner here costs a hash join as PostgreSQL does, which has no such term.",
+						 &gp_cost_hashjoin_chainwalk, false);
 
 	prev_create_upper_paths = create_upper_paths_hook;
 	create_upper_paths_hook = settings_upper_paths;
