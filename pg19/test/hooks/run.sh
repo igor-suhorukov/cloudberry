@@ -931,6 +931,14 @@ MERGE INTO o20_t t USING (VALUES (1, 7), (42, 9)) s(a, c) ON t.a = s.a
 SELECT 'merged=' || string_agg(format('%s:%s:%s', a, b, c), ',' ORDER BY a) FROM o20_t WHERE a IN (1, 42);
 DELETE FROM o20_t WHERE a = 9;
 SELECT 'after=' || count(*) FROM o20_t;
+CREATE TEMP TABLE o20_ids AS SELECT a, ctid AS c FROM o20_t WHERE a IN (3, 4, 8);
+WITH d AS (DELETE FROM o20_t WHERE a = 8 RETURNING a, tableoid AS t, ctid AS c)
+SELECT 'delident=' || string_agg(format('%s:%s', d.t = 'o20_t'::regclass, d.c = i.c), ',') FROM d JOIN o20_ids i USING (a);
+WITH u AS (UPDATE o20_t SET c = c WHERE a = 3 RETURNING a, old.tableoid AS t, old.ctid AS c)
+SELECT 'updident=' || string_agg(format('%s:%s', u.t = 'o20_t'::regclass, u.c = i.c), ',') FROM u JOIN o20_ids i USING (a);
+WITH m AS (MERGE INTO o20_t t USING (VALUES (4)) s(a) ON t.a = s.a WHEN MATCHED THEN DELETE
+           RETURNING t.a, old.tableoid AS t, old.ctid AS c)
+SELECT 'mergeident=' || string_agg(format('%s:%s', m.t = 'o20_t'::regclass, m.c = i.c), ',') FROM m JOIN o20_ids i USING (a);
 SELECT gp_probe.arm_rowfetch_fails(false);
 EXPLAIN (VERBOSE, COSTS OFF) UPDATE o20_t SET c = 0;
 EXPLAIN (VERBOSE, COSTS OFF) UPDATE o20_heap SET c = 0;
@@ -948,6 +956,11 @@ is "RETURNING old and new reads the old row from the plan" o20 returning "r6:6>-
 is "DELETE ... RETURNING returns the deleted row from it" o20 deleted r10
 is "MERGE updates a matched row from it, and inserts the others" o20 merged "1:r1:7,42:new:9"
 is "a DELETE without RETURNING needs no old row" o20 after 9
+# ExecForceStoreHeapTuple() sets a row's table and CTID in a heap tuple's
+# slot alone, and gp_probe_am's is a buffer slot: the executor sets them.
+is "DELETE ... RETURNING tableoid, ctid: the row's table and the CTID it had" o20 delident "t:t"
+is "and UPDATE's RETURNING old.tableoid, old.ctid" o20 updident "t:t"
+is "and a MERGE's matched row" o20 mergeident "t:t"
 if grep -q "o20_t\.\*" "$WORK/o20.out" && ! grep -q "o20_heap\.\*" "$WORK/o20.out"; then
 	ok "the plan carries the method's table's whole row beside the ctid, and not a heap table's"
 else

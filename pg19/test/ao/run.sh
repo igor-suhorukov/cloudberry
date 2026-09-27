@@ -264,6 +264,17 @@ is "an UPDATE whose join reaches a row twice updates it once" \
     SELECT count(*) FROM r1 WHERE a = 1;" "1"
 is "RETURNING gives the new rows" \
    "UPDATE c1 SET b = 'c' WHERE a = 3 RETURNING a, b;" "3|c"
+# The old row keeps its table and the CTID a scan gives it, which
+# ExecForceStoreHeapTuple() sets in a heap tuple's slot alone: ao_row's is a
+# minimal tuple's, ao_column's a virtual one.
+is "DELETE ... RETURNING tableoid, ctid gives the row's table and CTID" \
+   "CREATE TEMP TABLE o20_r AS SELECT ctid AS c FROM r1 WHERE a = 21;
+    WITH d AS (DELETE FROM r1 WHERE a = 21 RETURNING tableoid::regclass AS t, ctid AS c)
+    SELECT t || ':' || (d.c = o20_r.c) FROM d, o20_r;" "r1:true"
+is "and so does UPDATE's RETURNING old.tableoid, old.ctid, of a column table" \
+   "CREATE TEMP TABLE o20_c AS SELECT ctid AS c FROM c1 WHERE a = 6;
+    WITH u AS (UPDATE c1 SET b = b WHERE a = 6 RETURNING old.tableoid::regclass AS t, old.ctid AS c)
+    SELECT t || ':' || (u.c = o20_c.c) FROM u, o20_c;" "c1:true"
 is "MERGE updates, deletes and inserts" \
    "MERGE INTO c1 USING (VALUES (4, 'u'), (5, 'd'), (9999, 'i')) s(a, b) ON c1.a = s.a
       WHEN MATCHED AND s.b = 'd' THEN DELETE
