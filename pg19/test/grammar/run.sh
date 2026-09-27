@@ -2004,6 +2004,28 @@ is "a role called deny is a role called deny" \
    "CREATE ROLE deny; CREATE ROLE denied IN ROLE deny;
     SELECT count(*) FROM pg_auth_members WHERE roleid = 'deny'::regrole;" "1"
 
+###############################################################################
+echo "19. ANALYZE ROOTPARTITION and FULLSCAN"
+###############################################################################
+# Options of the statement's own list, which gp_core takes out again
+# (gp_partanalyze.c); the parenthesized list takes them as it is.
+is "ANALYZE ROOTPARTITION t is an option of the statement's own" \
+   "SELECT gp_sql.desugar('ANALYZE ROOTPARTITION t');" \
+   "ANALYZE (ROOTPARTITION) t"
+is "with VERBOSE, and ALL for every table" \
+   "SELECT gp_sql.desugar('ANALYZE VERBOSE ROOTPARTITION t, s.u (a)') || ' / ' ||
+           gp_sql.desugar('ANALYSE ROOTPARTITION ALL');" \
+   "ANALYZE (VERBOSE, ROOTPARTITION) t, s.u (a) / ANALYSE (ROOTPARTITION)"
+is "and so is FULLSCAN" \
+   "SELECT gp_sql.desugar('analyze verbose fullscan t');" \
+   "analyze (VERBOSE, FULLSCAN) t"
+is "a table called rootpartition or fullscan is a table" \
+   "CREATE TABLE rootpartition (a int); CREATE TABLE fullscan (a int);
+    ANALYZE rootpartition; ANALYZE fullscan, rootpartition;
+    SELECT gp_sql.desugar('ANALYZE rootpartition') || ' / ' || gp_sql.desugar('ANALYZE fullscan, t');" \
+   "ANALYZE rootpartition / ANALYZE fullscan, t"
+at "FULLSCAN ALL is not Cloudberry's, and is refused at ALL" \
+   "ANALYZE FULLSCAN ALL" "syntax error" "ALL"
 echo
 echo "  $pass passed, $fail failed"
 [ "$fail" -eq 0 ]
