@@ -81,7 +81,7 @@ services:
       args:
         PG_REF: ${PG_PATCHED_REF:-REL_19_STABLE_CLOUDBERRY}
         PG_CASSERT: "false"
-    profiles: ["compare"]
+    profiles: ["compare", "tpc"]
 
   # The port's modules, on top of the patched server.
   cb-ext:
@@ -132,6 +132,46 @@ services:
     memswap_limit: ${CB_TESTS_MEM:-40g}
     volumes:
       - /var/lib/cbdisk
+
+  # The port without assertions, for timing: the modules built against the
+  # patched server built without them, which leaves ORCA's own checks
+  # (GPOS_DEBUG) out too.  Only with the tpc profile.
+  cb-ext-noassert:
+    image: cloudberry/cb-ext-noassert:latest
+    depends_on: [pg19-patched-noassert]
+    profiles: ["tpc"]
+    build:
+      context: .
+      dockerfile: Dockerfile.cbext
+      additional_contexts:
+        cbsrc: ${CB_SRC:-../..}
+        pgsrc: ${PG_SRC:-../../../postgres}
+      args:
+        PG_IMAGE: cloudberry/pg19-patched-noassert:latest
+        CB_REF: ${CB_REF:-extension_postgresql_19}
+
+  # TPC-H's and TPC-DS's queries on a cluster of the port without
+  # assertions, each timed under ORCA and under the planner's route, and
+  # each answer checked against DuckDB's (pg19/test/tpc/run.sh says how,
+  # and what the TPC_ settings change):
+  #
+  #   docker compose -f pg19/docker/compose.yml --profile tpc build pg19-patched-noassert cb-ext-noassert
+  #   docker compose -f pg19/docker/compose.yml --profile tpc run --rm tpc
+  #
+  # The data and the servers are in /tmp, a tmpfs, as the tests service's.
+  tpc:
+    image: cloudberry/cb-ext-noassert:latest
+    depends_on: [cb-ext-noassert]
+    profiles: ["tpc"]
+    user: postgres
+    entrypoint: ["/cb/pg19/test/run.sh", "tpc"]
+    environment:
+      CB_TPC: time
+    shm_size: 4gb
+    tmpfs:
+      - /tmp
+    mem_limit: ${CB_TESTS_MEM:-40g}
+    memswap_limit: ${CB_TESTS_MEM:-40g}
 
   # Does the patched server still behave like vanilla PostgreSQL 19?  It runs
   # both builds against each other and loads no Cloudberry module.  Check 10

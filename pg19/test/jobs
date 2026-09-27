@@ -61,6 +61,10 @@ postgis_regress        orca     102   PASSES=orca MEM=6000
 isolation2             planner  133   PASSES=planner MEM=12500
 diskquota              isolation2 105   DQ_PARTS=isolation2 MEM=2000
 gpmgmt                 -        154   MEM=1600
+# tpc runs only on request (CB_TPC; tpc/run.sh) and is skipped at once
+# otherwise.  Checked, on four segments: its data and DuckDB's CSV files as
+# they are loaded, in the tmpfs, 10.9 GB at most.
+tpc                    -         90   MEM=12000
 singlenode             planner   26   PASSES=planner MEM=3500
 cluster                -        100   MEM=600
 orca                   -         54   MEM=300
