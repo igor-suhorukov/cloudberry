@@ -257,6 +257,17 @@ join_gp  the NOTICE of test_print_prefetch_joinqual: where a join's outer
 matview_ao  psql's \dm, whose title PostgreSQL 19's psql gives as "List of
   materialized views" where Cloudberry's psql says "List of relations".
 
+namespace_gp  the built-in schemas of Cloudberry's catalog: the port has no
+  pg_aoseg, since gp_ao keeps no table's segment files in a schema of their
+  own, and its pg_bitmapindex is gp_ao's extension's schema, with an OID of
+  its own, which the port's init_file makes one (Cloudberry's is 7012).
+  The test's comparison of pg_namespace across the nodes finds nothing, as
+  Cloudberry's does, in a group of its own (manifest, ns): a node makes its
+  own temporary schema, pg_temp_N by the number of its own backend, with an
+  OID of its own, so the tests before it in a group would leave schemas the
+  nodes do not share, where Cloudberry's coordinator dispatches one name and
+  OID for a session's.
+
 part_external_table (orca)  the lines ORCA's fallback trace prints for a
   partitioned table with external partitions: the dynamic foreign scan ORCA
   plans for it the port's ORCA does not translate

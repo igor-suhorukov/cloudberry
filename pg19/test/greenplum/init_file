@@ -53,4 +53,11 @@ s/^(-{15}\+)-+\+/$1---------+/
 m/^ +\d+ \| \(\d+,\d+\) +\| +\d+ \| +\d+ \| +\d+ \| +\d+ \| +\d+ \| +\d+$/
 s/\| \(\d+,\d+\) +\|/| (tid)   |/
 
+# namespace_gp's OIDs of the built-in schemas: gp_ao's pg_bitmapindex is an
+# extension's schema, with an OID of its own, which the objects made before
+# it decide -- Cloudberry's is 7012, from its catalog.  The difference that
+# is left is kept (cloudberry/namespace_gp.diff).
+m/^ +\d+ \| pg_bitmapindex$/
+s/^ +\d+ \|/ OID |/
+
 -- end_matchsubs

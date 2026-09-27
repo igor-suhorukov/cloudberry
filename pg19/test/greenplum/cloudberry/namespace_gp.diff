@@ -1,0 +1,13 @@
+@@
+- oid  |    nspname     
+-------+----------------
+-   11 | pg_catalog
+-   99 | pg_toast
+- 7134 | pg_aoseg
++  oid  |    nspname     
++-------+----------------
++    11 | pg_catalog
++    99 | pg_toast
+@@
+-(4 rows)
++(3 rows)

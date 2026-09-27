@@ -22,7 +22,11 @@
 #         bb_memory_quota's).  rpt_tpch has one of its own, m7c, in the
 #         schedule's place: TPC-H's query 20 correlates a scalar subquery,
 #         which the planner runs for each row, a minute in all, where
-#         Cloudberry's planner and ORCA make a join of it
+#         Cloudberry's planner and ORCA make a join of it.  So has
+#         namespace_gp, ns, whose comparison of pg_namespace across the
+#         nodes must come before any test's temporary schema: a node makes
+#         its own, pg_temp_N by its own backend's number, with an OID of its
+#         own, where Cloudberry's coordinator dispatches one name and OID
 #
 # Every test of the schedule is listed.  The ones the port had left for M7 --
 # fault injection, FTS, the interconnect's settings, and the rest -- come
@@ -62,7 +66,9 @@ run  olap_setup
 skip complex  type "complex" does not exist; relation "complex_ttbl" does not exist
 skip distributed_transactions  unrecognized configuration parameter "debug_abort_after_distributed_prepared"; unrecognized configuration parameter "debug_dtm_action_segment"
 run  statement_mem_for_windowagg
-skip namespace_gp  differs: its comparison of pg_namespace across the nodes finds the pg_temp_N schemas the tests before it leave, which each node makes with an OID of its own
+group ns
+run  namespace_gp
+group g1
 run  bitmap_index
 run  truncate_gp
 run  indexjoin
