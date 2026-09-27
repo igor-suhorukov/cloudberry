@@ -1889,6 +1889,15 @@ $((n + 1))" ] && ok "a serial column's values, taken on the segments from the co
 		"MERGE INTO omt t USING (VALUES (5, 'five'), (500, 'new')) s(id, v) ON t.id = s.id WHEN MATCHED THEN UPDATE SET v = s.v WHEN NOT MATCHED THEN INSERT (id, v) VALUES (s.id, s.v)"
 	merge_same "... and one that changes the key, a Split" \
 		"MERGE INTO omt t USING oms s ON t.id = s.id WHEN MATCHED AND s.id < 100 THEN UPDATE SET id = t.id + 1000"
+	# WHEN NOT MATCHED BY SOURCE: what tells a target row the source has no
+	# row for is what is null exactly there -- the source table's ctid, a
+	# VALUES list's or a subquery's column of its own -- where the planner
+	# tests the source's whole row, which ORCA does not take.
+	merge_same "... WHEN NOT MATCHED BY SOURCE, a table's" \
+		"MERGE INTO omt t USING oms s ON t.id = s.id WHEN MATCHED AND s.d THEN DELETE WHEN MATCHED THEN UPDATE SET v = s.v WHEN NOT MATCHED THEN INSERT VALUES (s.id, s.v) WHEN NOT MATCHED BY SOURCE AND t.id % 7 = 0 THEN DELETE WHEN NOT MATCHED BY SOURCE THEN UPDATE SET n = -t.n"
+	merge_same "... a VALUES list's and a subquery's" \
+		"MERGE INTO omt t USING (VALUES (5, 'five'), (500, 'new')) s(id, v) ON t.id = s.id WHEN MATCHED THEN UPDATE SET v = s.v WHEN NOT MATCHED BY SOURCE AND t.id > 150 THEN DELETE;
+		 MERGE INTO omt t USING (SELECT id, max(v) AS v FROM oms WHERE id < 200 GROUP BY id) s ON t.id = s.id WHEN MATCHED THEN UPDATE SET v = s.v WHEN NOT MATCHED BY SOURCE THEN UPDATE SET n = 0"
 	q 0 "MERGE INTO omt t USING oms s ON t.id = s.id WHEN MATCHED AND s.id < 60 THEN UPDATE SET id = t.id + 1000 WHEN NOT MATCHED THEN INSERT VALUES (s.id, s.v);" >/dev/null
 	w1=$(q 1 "SELECT count(*) FROM omt WHERE expected_seg(id, 2) <> 0;"); w2=$(q 2 "SELECT count(*) FROM omt WHERE expected_seg(id, 2) <> 1;")
 	out=$(q 0 "SELECT count(*) FROM omt WHERE id IN (1003, 1057, 201, 300);")

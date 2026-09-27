@@ -51,13 +51,20 @@
  * meanwhile is refused where the segment writes it -- so the MERGE takes no
  * row marks, and its source may be anything.
  *
+ * WHEN NOT MATCHED BY SOURCE: the planner tells a target row the source
+ * has no row for by "src IS NOT NULL" of the source's whole row, which it
+ * adds to the join condition above the join (transform_MERGE_to_join()),
+ * and ORCA does not take a whole-row Var.  What stands in for the row is
+ * what is null exactly where the join found none: a table's ctid, and of a
+ * join any of its tables'; a subquery and a VALUES list are given a column
+ * of their own that is never null, gp_present.
+ *
  * Not yet, and the planner's: a partitioned, inherited or foreign table or a
  * view as the target, a replicated one or a coordinator's on a cluster, and
- * on one node one whose method takes the old row from the plan (O20); WHEN
- * NOT MATCHED BY SOURCE, whose test of the source's row is a whole-row Var,
- * which ORCA does not take; RETURNING on a cluster, whose merge_action()
- * only a MERGE's own node answers, where the explicit write writes; a
- * subquery anywhere in it; and on one
+ * on one node one whose method takes the old row from the plan (O20);
+ * RETURNING on a cluster, whose merge_action() only a MERGE's own node
+ * answers, where the explicit write writes; a subquery anywhere in it; and
+ * on one
  * node a source that is not plain tables, whose rows a row mark would copy
  * whole, as a ROW() the translator does not take.
  *
@@ -157,6 +164,117 @@ add_source_vars(Node *node, Index target, List **vars)
 	}
 }
 
+/*
+ * What is null in the join's row exactly where the join found no row of
+ * the source "jtnode": a table's ctid; of a join, any of its sides'; a
+ * subquery's or a VALUES list's column gp_present, added to it here, true
+ * in every row.  NULL where there is nothing to stand in -- a function, a
+ * CTE, a subquery of a set operation or DISTINCT.  "nulling" is the
+ * whole-row Var's varnullingrels, as the Vars above the join have them.
+ */
+static Expr *
+source_present(Node *jtnode, Query *query, Bitmapset *nulling)
+{
+	if (IsA(jtnode, JoinExpr))
+	{
+		JoinExpr   *join = (JoinExpr *) jtnode;
+		Expr	   *l = source_present(join->larg, query, nulling);
+		Expr	   *r = l != NULL ? source_present(join->rarg, query, nulling) : NULL;
+
+		return r != NULL ? make_orclause(list_make2(l, r)) : NULL;
+	}
+	if (IsA(jtnode, RangeTblRef))
+	{
+		Index		rti = ((RangeTblRef *) jtnode)->rtindex;
+		RangeTblEntry *rte = rt_fetch(rti, query->rtable);
+		Var		   *var = NULL;
+		NullTest   *ntest;
+
+		if (rte->rtekind == RTE_RELATION &&
+			(rte->relkind == RELKIND_RELATION ||
+			 rte->relkind == RELKIND_PARTITIONED_TABLE ||
+			 rte->relkind == RELKIND_MATVIEW))
+			var = makeVar(rti, SelfItemPointerAttributeNumber, TIDOID, -1,
+						  InvalidOid, 0);
+		else if (rte->rtekind == RTE_SUBQUERY &&
+				 rte->subquery->setOperations == NULL &&
+				 rte->subquery->distinctClause == NIL)
+		{
+			Query	   *sub = rte->subquery;
+			AttrNumber	attno = list_length(sub->targetList) + 1;
+
+			sub->targetList = lappend(sub->targetList,
+									  makeTargetEntry((Expr *) makeBoolConst(true, false),
+													  attno, pstrdup("gp_present"), false));
+			rte->eref->colnames = lappend(rte->eref->colnames,
+										  makeString(pstrdup("gp_present")));
+			var = makeVar(rti, attno, BOOLOID, -1, InvalidOid, 0);
+		}
+		else if (rte->rtekind == RTE_VALUES)
+		{
+			AttrNumber	attno = list_length(rte->coltypes) + 1;
+			List	   *rows = NIL;
+
+			foreach_ptr(List, row, rte->values_lists)
+				rows = lappend(rows, lappend(list_copy(row),
+											 makeBoolConst(true, false)));
+			rte->values_lists = rows;
+			rte->coltypes = lappend_oid(rte->coltypes, BOOLOID);
+			rte->coltypmods = lappend_int(rte->coltypmods, -1);
+			rte->colcollations = lappend_oid(rte->colcollations, InvalidOid);
+			rte->eref->colnames = lappend(rte->eref->colnames,
+										  makeString(pstrdup("gp_present")));
+			var = makeVar(rti, attno, BOOLOID, -1, InvalidOid, 0);
+		}
+		if (var == NULL)
+			return NULL;
+		var->varnullingrels = bms_copy(nulling);
+		ntest = makeNode(NullTest);
+		ntest->arg = (Expr *) var;
+		ntest->nulltesttype = IS_NOT_NULL;
+		ntest->argisrow = false;
+		ntest->location = -1;
+		return (Expr *) ntest;
+	}
+	return NULL;
+}
+
+typedef struct source_row_context
+{
+	Index		source;			/* the source's range table index */
+	Node	   *jtnode;			/* and the source */
+	Query	   *query;
+	bool		failed;			/* nothing stands in for its row */
+} source_row_context;
+
+/* "src IS NOT NULL" of the source's whole row, made source_present()'s */
+static Node *
+source_row_mutator(Node *node, source_row_context *context)
+{
+	if (node == NULL)
+		return NULL;
+	if (IsA(node, NullTest) && IsA(((NullTest *) node)->arg, Var) &&
+		((NullTest *) node)->nulltesttype == IS_NOT_NULL)
+	{
+		Var		   *var = (Var *) ((NullTest *) node)->arg;
+
+		if (var->varno == context->source && var->varattno == InvalidAttrNumber &&
+			var->varlevelsup == 0)
+		{
+			Expr	   *present = source_present(context->jtnode, context->query,
+												 var->varnullingrels);
+
+			if (present == NULL)
+			{
+				context->failed = true;
+				return node;
+			}
+			return (Node *) present;
+		}
+	}
+	return expression_tree_mutator(node, source_row_mutator, context);
+}
+
 bool
 GpOrcaPrepareMerge(Query *query, Query **select, OrcaMerge **statep,
 				   const char **why)
@@ -213,18 +331,28 @@ GpOrcaPrepareMerge(Query *query, Query **select, OrcaMerge **statep,
 			return false;
 		}
 	}
-	foreach_node(MergeAction, action, query->mergeActionList)
-	{
-		if (action->matchKind == MERGE_WHEN_NOT_MATCHED_BY_SOURCE)
-		{
-			*why = "a MERGE's WHEN NOT MATCHED BY SOURCE";
-			return false;
-		}
-	}
-
 	merge = copyObject(query);
 	transform_MERGE_to_join(merge);
 	join = linitial_node(JoinExpr, merge->jointree->fromlist);
+
+	/* WHEN NOT MATCHED BY SOURCE's test that the source has a row */
+	if (merge->mergeJoinCondition != NULL)
+	{
+		source_row_context context = {0};
+
+		context.jtnode = join->rarg;
+		context.source = IsA(join->rarg, RangeTblRef)
+			? ((RangeTblRef *) join->rarg)->rtindex
+			: IsA(join->rarg, JoinExpr) ? ((JoinExpr *) join->rarg)->rtindex : 0;
+		context.query = merge;
+		merge->mergeJoinCondition = source_row_mutator(merge->mergeJoinCondition,
+													   &context);
+		if (context.failed)
+		{
+			*why = "a MERGE's WHEN NOT MATCHED BY SOURCE, from a source nothing stands in for the row of";
+			return false;
+		}
+	}
 
 	/*
 	 * The target's side of the join is a FROM list of it alone, for a view's

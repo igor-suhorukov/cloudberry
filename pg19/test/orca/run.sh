@@ -3285,6 +3285,27 @@ dml "MERGE's RETURNING: merge_action(), the row written, the source's, old and n
        RETURNING merge_action(), t.*, s.b, old.c, new.c" \
     "SELECT a, b, c FROM t2m ORDER BY a" "$T2M" sort
 
+# WHEN NOT MATCHED BY SOURCE: the planner tells a target row the source has
+# no row for by the source's whole row, which ORCA does not take; what is
+# null exactly there stands in -- a table's ctid, and of a join any of its
+# tables'.
+dml "MERGE's WHEN NOT MATCHED BY SOURCE: the source table's ctid for its row" \
+    "Merge on" \
+    "MERGE INTO t2m t USING t2n s ON t.a = s.a
+       WHEN MATCHED AND s.d THEN DELETE
+       WHEN MATCHED THEN UPDATE SET b = s.b
+       WHEN NOT MATCHED BY SOURCE AND t.a > 5 THEN DELETE
+       WHEN NOT MATCHED BY SOURCE THEN UPDATE SET b = 'orphan'
+       RETURNING merge_action(), t.a, t.b" \
+    "SELECT a, b, c FROM t2m ORDER BY a" "$T2M" sort
+dml "... and a join's, beside WHEN NOT MATCHED, a full join" \
+    "Merge on" \
+    "MERGE INTO t2m t USING t2n s JOIN t2o o ON s.a = o.a ON t.a = s.a
+       WHEN MATCHED THEN UPDATE SET c = o.e
+       WHEN NOT MATCHED THEN INSERT VALUES (s.a, s.b, o.e)
+       WHEN NOT MATCHED BY SOURCE THEN UPDATE SET b = 'orphan'" \
+    "SELECT a, b, c FROM t2m ORDER BY a" "$T2M; CREATE TEMP TABLE t2o (a int, e int); INSERT INTO t2o VALUES (2, 20), (7, 70)"
+
 epq "a MERGE that waited re-checks with the source row it was joined to" \
     "MERGE INTO t2e USING t2j ON t2e.a = t2j.a WHEN MATCHED THEN UPDATE SET b = t2e.b + t2j.w WHEN NOT MATCHED THEN INSERT VALUES (t2j.a, -t2j.w)" \
     "UPDATE t2e SET b = b + 1000 WHERE a = 1; UPDATE t2j SET w = -1 WHERE a = 1" \
