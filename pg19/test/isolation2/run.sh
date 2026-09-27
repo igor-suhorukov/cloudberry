@@ -381,9 +381,12 @@ respell() { perl "$HERE/../respell.pl" "$WORK/respell" "$@"; }
 # it is resetting or in recovery -- and also when the connection is closed
 # before the node says anything: PostgreSQL 19's postmaster may end the
 # process it started for a connection as it resets, where a test connects
-# right after failing the coordinator (dtx_recovery_wait_lsn).
+# right after failing the coordinator (dtx_recovery_wait_lsn); and while
+# the node is "not yet accepting connections", which PostgreSQL 19 says
+# once redo has begun, in crash recovery too (PMSIGNAL_RECOVERY_STARTED),
+# where the same test's connection may come on a busy machine.
 sed -e 's/given_opt="-c gp_role=utility"/given_opt=None/' \
-	-e 's/("the database system is starting up" in str(e) or/&\n                         ("server closed the connection unexpectedly" in str(e) and "failed:" in str(e)) or/' \
+	-e 's/("the database system is starting up" in str(e) or/&\n                         ("server closed the connection unexpectedly" in str(e) and "failed:" in str(e)) or\n                         "the database system is not yet accepting connections" in str(e) or/' \
 	"$CB/sql_isolation_testcase.py" > "$EXEC/sql_isolation_testcase.py"
 
 mkdir -p "$WORK/gpdiff"
