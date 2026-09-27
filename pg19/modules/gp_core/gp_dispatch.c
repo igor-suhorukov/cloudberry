@@ -287,6 +287,12 @@ static const char *const synced_settings[] = {
 	"gp.udpic_dropacks_percent",
 	"gp.udpic_dropxmit_percent",
 	"gp.log_interconnect",
+	/* udp2's, which both ends of its connections read, passed over where not loaded */
+	"gp.interconnect_full_crc",
+	"gp.udpic_dropseg",
+	"gp.udpic_fault_inject_percent",
+	"gp.udpic_fault_inject_bitmap",
+	"gp.udpic_network_disable_ipv6",
 	/*
 	 * gp_resource's, what the coordinator's resource manager says of the
 	 * statement: the weight its queue's priority gives it, the group it runs

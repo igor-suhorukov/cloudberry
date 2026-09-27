@@ -43,9 +43,9 @@ project('cloudberry-pg19', 'c',
 
 cc = meson.get_compiler('c')
 
-# ORCA and PAX are C++.  Ask for the language only when one of them is being
-# built, so that a build without both needs no C++ compiler at all.
-if get_option('orca') or get_option('pax')
+# ORCA, PAX and UDP2 are C++.  Ask for the language only when one of them is
+# being built, so that a build without them needs no C++ compiler at all.
+if get_option('orca') or get_option('pax') or get_option('udp2')
   add_languages('cpp', native: false, required: true)
   cpp = meson.get_compiler('cpp')
 endif
@@ -262,6 +262,21 @@ if get_option('pax')
 endif
 
 ###############################################################################
+# UDP2
+#
+# Its C++ core, Cloudberry's contrib/udp2/ic_common, compiled where it lies
+# into a static library, which the udp2 module's entry links: see
+# udp2/meson.build.
+###############################################################################
+
+udp2_core = []
+udp2_inc = []
+
+if get_option('udp2')
+  subdir('udp2')
+endif
+
+###############################################################################
 # The modules
 #
 #   preload   this module may only be loaded through shared_preload_libraries
@@ -418,8 +433,14 @@ modules = [
     'sources': files('modules/interconnect/interconnect.c'),
   },
   {
+    # Cloudberry's UDP2 transport: its C++ core, unmodified (udp2/), under
+    # the port's adapter; it runs a thread of its own in each backend that
+    # uses it.
     'name': 'udp2', 'preload': true, 'extension': false, 'build': get_option('udp2'),
-    'sources': files('modules/udp2/udp2.c'),
+    'sources': files('modules/udp2/udp2.c', 'modules/udp2/udp2_interrupt.cpp'),
+    'link_with': udp2_core,
+    'include_directories': udp2_inc,
+    'dependencies': [dependency('threads')],
   },
   {
     # ORCA, which is C++: the module is its four core libraries from
