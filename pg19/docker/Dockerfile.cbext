@@ -236,6 +236,10 @@ COPY --from=build /cb/contrib/pax_storage/pax_schedule /cb/contrib/pax_storage/i
                   /cb/contrib/pax_storage/
 COPY --from=build /cb/contrib/pax_storage/sql /cb/contrib/pax_storage/sql
 COPY --from=build /cb/contrib/pax_storage/expected /cb/contrib/pax_storage/expected
+# and PAX's own copies of Cloudberry's regression and isolation2 suites,
+# which the pax_regress and pax_isolation2 suites run
+COPY --from=build /cb/contrib/pax_storage/src/test/regress /cb/contrib/pax_storage/src/test/regress
+COPY --from=build /cb/contrib/pax_storage/src/test/isolation2 /cb/contrib/pax_storage/src/test/isolation2
 COPY --from=build /pgregress /cb/pgregress
 COPY --from=postgis /postgis /postgis
 RUN chown -R postgres:postgres /cb /postgis
