@@ -738,6 +738,29 @@ is "and gp_size_of_table_and_indexes_licensing beside it" \
    "SELECT (sotailtablesizeuncompressed > sotailtablesizedisk)::text
       FROM gp_toolkit.gp_size_of_table_and_indexes_licensing WHERE sotailtablename = 'tkc';" "true"
 
+# The segment files' history: every version gp_ao.segfile holds, a dead
+# one's too, as Cloudberry's reads its pg_aoseg under SnapshotAny -- here
+# inside the transaction that wrote them, which no pruning reaches.
+is "__gp_aoseg_history: each version of a segment file, as each write left it" \
+   "BEGIN;
+    CREATE TABLE tkh (a int, b text) WITH (appendonly=true);
+    INSERT INTO tkh SELECT i, 'x' FROM generate_series(1, 100) i;
+    INSERT INTO tkh SELECT i, 'y' FROM generate_series(1, 100) i;
+    SELECT string_agg(segno || ':' || tupcount || ':' || modcount, ' ' ORDER BY tupcount)
+      FROM gp_toolkit.__gp_aoseg_history('tkh');
+    COMMIT;" "1:0:0 1:100:1 1:200:2"
+is "__gp_aocsseg_history: each version, a row a column" \
+   "BEGIN;
+    CREATE TABLE tkhc (a int, b text) WITH (appendonly=true, orientation=column);
+    INSERT INTO tkhc SELECT i, 'x' FROM generate_series(1, 100) i;
+    SELECT string_agg(column_num || ':' || physical_segno || ':' || tupcount, ' '
+                      ORDER BY column_num, tupcount)
+      FROM gp_toolkit.__gp_aocsseg_history('tkhc');
+    COMMIT;" "0:1:0 0:1:100 1:129:0 1:129:100"
+refused "and a table by column's history as a row table's, refused in Cloudberry's words" \
+   "SELECT * FROM gp_toolkit.__gp_aoseg_history('tkhc');" \
+   "Relation 'tkhc' does not have appendoptimized row-oriented storage"
+
 # The check for missing files with the files past a relation's first, which
 # hold an append-optimized table's bytes past its first gigabyte: none
 # here, and the table's first file is missed like any.
@@ -745,9 +768,7 @@ is "__get_ao_segno_list: no file past the first of a small table" \
    "SELECT count(*) FROM gp_toolkit.__get_ao_segno_list() UNION ALL
     SELECT count(*) FROM gp_toolkit.__get_aoco_segno_list();" "0
 0"
-q "CREATE TABLE tkh (a int, b text) WITH (appendonly=true);
-   INSERT INTO tkh SELECT i, 'x' FROM generate_series(1, 100) i;
-   CHECKPOINT;" > /dev/null
+q "CHECKPOINT;" > /dev/null
 path=$(q "SELECT pg_relation_filepath('tkh');")
 mv "$WORK/data/$path" "$WORK/tkh.file"
 got=$(q "SELECT string_agg(relname, ' ') FROM gp_toolkit.__check_missing_files_ext;")

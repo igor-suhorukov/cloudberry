@@ -274,6 +274,7 @@ typedef struct AoVisimap
 extern Oid	ao_meta_relid(const char *name, bool missing_ok);
 extern AoSegfile *ao_segfiles_read(int64 storage_id, Snapshot snapshot,
 								   int *nsegfiles);
+extern AoSegfile *ao_segfiles_history(int64 storage_id, int *nsegfiles);
 extern AoSegfile *ao_segfile_read(int64 storage_id, int segno,
 								  Snapshot snapshot);
 extern void ao_segfile_insert(int64 storage_id, int segno, int ngroups);

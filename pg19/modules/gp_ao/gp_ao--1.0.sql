@@ -524,9 +524,31 @@ END
 $$;
 
 /******************************************************************************
- * gp_toolkit's rest of append-optimized tables: their part in the checks for
- * missing files, whose other views are gp_core's (gp_toolkit--1.3.sql).
+ * gp_toolkit's rest of append-optimized tables: the segment files' history,
+ * and their part in the checks for missing files, whose other views are
+ * gp_core's (gp_toolkit--1.3.sql).
  *****************************************************************************/
+
+/*
+ * Every version of each segment file gp_ao.segfile still holds, a dead
+ * one's too, as Cloudberry's reads its pg_aoseg relation under SnapshotAny.
+ */
+CREATE FUNCTION gp_toolkit.__gp_aoseg_history(regclass)
+RETURNS TABLE (segment_id integer, segno integer, tupcount bigint, eof bigint,
+	eof_uncompressed bigint, modcount bigint, formatversion smallint,
+	state smallint)
+AS 'MODULE_PATHNAME', 'gp_ao_aoseg_history'
+LANGUAGE C STRICT;
+SECURITY LABEL FOR gp ON FUNCTION gp_toolkit.__gp_aoseg_history(regclass) IS 'execute_on=all_segments';
+
+CREATE FUNCTION gp_toolkit.__gp_aocsseg_history(regclass)
+RETURNS TABLE (segment_id integer, segno integer, column_num smallint,
+	physical_segno integer, tupcount bigint, eof bigint,
+	eof_uncompressed bigint, modcount bigint, formatversion smallint,
+	state smallint)
+AS 'MODULE_PATHNAME', 'gp_ao_aocsseg_history'
+LANGUAGE C STRICT;
+SECURITY LABEL FOR gp ON FUNCTION gp_toolkit.__gp_aocsseg_history(regclass) IS 'execute_on=all_segments';
 
 /*
  * The files of a table's relation past its first that hold its data, this
@@ -564,8 +586,9 @@ AS $$
 	WHERE am.amname = 'ao_column' AND c.relkind IN ('r', 'm')
 $$;
 
-GRANT EXECUTE ON FUNCTION gp_toolkit.__get_ao_segno_list(),
-	gp_toolkit.__get_aoco_segno_list() TO PUBLIC;
+GRANT EXECUTE ON FUNCTION gp_toolkit.__gp_aoseg_history(regclass),
+	gp_toolkit.__gp_aocsseg_history(regclass),
+	gp_toolkit.__get_ao_segno_list(), gp_toolkit.__get_aoco_segno_list() TO PUBLIC;
 
 /* Cloudberry's views of the files expected, and missing, with them. */
 CREATE VIEW gp_toolkit.__get_expect_files_ext AS

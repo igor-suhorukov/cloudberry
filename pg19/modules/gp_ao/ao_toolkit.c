@@ -62,6 +62,8 @@ PG_FUNCTION_INFO_V1(gp_ao_segfile_count);
 PG_FUNCTION_INFO_V1(gp_ao_segfilecount_of);
 PG_FUNCTION_INFO_V1(gp_ao_aoseg);
 PG_FUNCTION_INFO_V1(gp_ao_aocsseg);
+PG_FUNCTION_INFO_V1(gp_ao_aoseg_history);
+PG_FUNCTION_INFO_V1(gp_ao_aocsseg_history);
 PG_FUNCTION_INFO_V1(gp_ao_segment_files);
 PG_FUNCTION_INFO_V1(gp_ao_aovisimap);
 PG_FUNCTION_INFO_V1(gp_ao_aovisimap_hidden_info);
@@ -236,6 +238,47 @@ gp_ao_aoseg(PG_FUNCTION_ARGS)
 }
 
 /*
+ * __gp_aoseg_history(regclass): every version of each segment file of a
+ * table by row that gp_ao.segfile still holds, a dead one's too, as
+ * Cloudberry's reads its pg_aoseg relation under SnapshotAny -- the
+ * versions its writers, VACUUM and the rest made, until gp_ao.segfile is
+ * vacuumed.
+ */
+Datum
+gp_ao_aoseg_history(PG_FUNCTION_ARGS)
+{
+	ReturnSetInfo *rsinfo = (ReturnSetInfo *) fcinfo->resultinfo;
+	Relation	rel;
+	AoSegfile  *segfiles;
+	int			n;
+
+	if (GpDispatchFunctionToSegments(fcinfo))
+		return (Datum) 0;
+
+	InitMaterializedSRF(fcinfo, 0);
+	rel = open_ao(PG_GETARG_OID(0), AO_WANT_ROW);
+	segfiles = ao_segfiles_history(ao_storage_id(rel), &n);
+	for (int i = 0; i < n; i++)
+	{
+		AoSegfile  *sf = &segfiles[i];
+		Datum		values[8];
+		bool		nulls[8] = {0};
+
+		values[0] = Int32GetDatum(content_id());
+		values[1] = Int32GetDatum(sf->segno);
+		values[2] = Int64GetDatum(sf->tupcount);
+		values[3] = Int64GetDatum(sf->eof[0]);
+		values[4] = Int64GetDatum(sf->eof_uncompressed[0]);
+		values[5] = Int64GetDatum(sf->modcount);
+		values[6] = Int16GetDatum(sf->formatversion);
+		values[7] = Int16GetDatum(sf->state);
+		tuplestore_putvalues(rsinfo->setResult, rsinfo->setDesc, values, nulls);
+	}
+	relation_close(rel, AccessShareLock);
+	return (Datum) 0;
+}
+
+/*
  * __gp_aocsseg(regclass): each column of each segment file of a table by
  * column.  A column the segment file has no file of -- added after a
  * VACUUM compacted it -- has ends of -1, as in Cloudberry.
@@ -256,6 +299,53 @@ gp_ao_aocsseg(PG_FUNCTION_ARGS)
 	rel = open_ao(PG_GETARG_OID(0), AO_WANT_COLUMN);
 	natts = RelationGetDescr(rel)->natts;
 	segfiles = ao_segfiles_read(ao_storage_id(rel), GetLatestSnapshot(), &n);
+	for (int i = 0; i < n; i++)
+	{
+		AoSegfile  *sf = &segfiles[i];
+
+		for (int col = 0; col < natts; col++)
+		{
+			Datum		values[10];
+			bool		nulls[10] = {0};
+			bool		has = col < sf->ngroups;
+
+			values[0] = Int32GetDatum(content_id());
+			values[1] = Int32GetDatum(sf->segno);
+			values[2] = Int16GetDatum(col);
+			values[3] = Int32GetDatum(col * (AO_MAX_SEGNO + 1) + sf->segno);
+			values[4] = Int64GetDatum(sf->tupcount);
+			values[5] = Int64GetDatum(has ? sf->eof[col] : -1);
+			values[6] = Int64GetDatum(has ? sf->eof_uncompressed[col] : -1);
+			values[7] = Int64GetDatum(sf->modcount);
+			values[8] = Int16GetDatum(sf->formatversion);
+			values[9] = Int16GetDatum(sf->state);
+			tuplestore_putvalues(rsinfo->setResult, rsinfo->setDesc, values, nulls);
+		}
+	}
+	relation_close(rel, AccessShareLock);
+	return (Datum) 0;
+}
+
+/*
+ * __gp_aocsseg_history(regclass): the same of a table by column, each
+ * version of each segment file a row a column, in __gp_aocsseg()'s shape.
+ */
+Datum
+gp_ao_aocsseg_history(PG_FUNCTION_ARGS)
+{
+	ReturnSetInfo *rsinfo = (ReturnSetInfo *) fcinfo->resultinfo;
+	Relation	rel;
+	AoSegfile  *segfiles;
+	int			n;
+	int			natts;
+
+	if (GpDispatchFunctionToSegments(fcinfo))
+		return (Datum) 0;
+
+	InitMaterializedSRF(fcinfo, 0);
+	rel = open_ao(PG_GETARG_OID(0), AO_WANT_COLUMN);
+	natts = RelationGetDescr(rel)->natts;
+	segfiles = ao_segfiles_history(ao_storage_id(rel), &n);
 	for (int i = 0; i < n; i++)
 	{
 		AoSegfile  *sf = &segfiles[i];

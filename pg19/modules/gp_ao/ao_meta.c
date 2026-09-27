@@ -225,6 +225,54 @@ ao_segfiles_read(int64 storage_id, Snapshot snapshot, int *nsegfiles)
 	return result;
 }
 
+/* By segno, and each segment file's versions in the order they were written. */
+static int
+segfile_version_cmp(const void *a, const void *b)
+{
+	int			c = segfile_cmp(a, b);
+
+	return c != 0 ? c : ItemPointerCompare(&((const AoSegfile *) a)->tid,
+										   &((const AoSegfile *) b)->tid);
+}
+
+/*
+ * Every version of every segment file of storage_id gp_ao.segfile still
+ * holds, a dead one's as well as the live one's, by segno: what
+ * Cloudberry's __gp_aoseg_history() reads of its pg_aoseg relation, under
+ * SnapshotAny.
+ */
+AoSegfile *
+ao_segfiles_history(int64 storage_id, int *nsegfiles)
+{
+	Relation	rel = table_open(ao_meta_relid("segfile", false), AccessShareLock);
+	ScanKeyData key;
+	SysScanDesc scan;
+	HeapTuple	tup;
+	int			max = AO_MAX_SEGNO + 1;
+	AoSegfile  *result = palloc_array(AoSegfile, max);
+	int			n = 0;
+
+	ScanKeyInit(&key, Anum_segfile_storage_id, BTEqualStrategyNumber,
+				F_INT8EQ, Int64GetDatum(storage_id));
+	scan = systable_beginscan(rel, ao_meta_relid("segfile_key", false), true,
+							  SnapshotAny, 1, &key);
+	while ((tup = systable_getnext(scan)) != NULL)
+	{
+		if (n == max)
+		{
+			max *= 2;
+			result = repalloc_array(result, AoSegfile, max);
+		}
+		segfile_from_tuple(tup, RelationGetDescr(rel), &result[n++]);
+	}
+	systable_endscan(scan);
+	table_close(rel, AccessShareLock);
+
+	qsort(result, n, sizeof(AoSegfile), segfile_version_cmp);
+	*nsegfiles = n;
+	return result;
+}
+
 /* Segment file segno of storage_id, as snapshot sees it, or NULL. */
 AoSegfile *
 ao_segfile_read(int64 storage_id, int segno, Snapshot snapshot)
