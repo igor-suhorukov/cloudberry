@@ -1202,43 +1202,20 @@ CTranslatorQueryToDXL::CheckDMLReadsOnlyTarget() const
 	// fetches the row the changed one was joined to again by its ctid, and
 	// DXL to PlannedStmt carries the ctid up to ModifyTable
 	// (AddOtherRowMarks).  So a plain table, whose method fetches a row by
-	// its ctid, read in the FROM or USING clause; not a sublink's, whose
-	// rows ORCA's semi-join does not pass on, nor what needs its whole row
-	// copied (ROW_MARK_COPY) -- a subquery, a function, a foreign table.
-	if (!m_query->hasSubLinks && gpdb::WriteFragmentsKeepRowMarks() &&
-		OtherRelationsMarkable())
+	// its ctid, read in the FROM or USING clause, or in an EXISTS or IN
+	// (...) the WHERE clause ANDs in, which ORCA makes a semi-join -- whose
+	// inner side's row a semi-join returns, the first it matched, as the
+	// planner's semi-join returns it for its row mark; not what needs its
+	// whole row copied (ROW_MARK_COPY) -- a subquery, a function, a foreign
+	// table -- nor a sublink of another kind or elsewhere.
+	List *sublinks = NIL;
+	if (gpdb::WriteFragmentsKeepRowMarks() && OtherRelationsMarkable() &&
+		CTranslatorUtils::DMLSemiJoinSubLinks(m_query, &sublinks))
 	{
 		return;
 	}
 
 	GP_UNPORTED("an UPDATE or DELETE that reads another relation");
-}
-
-// NOT IN CLOUDBERRY.  Does a FROM clause's item read only plain tables,
-// "target" aside, in its joins too?
-static BOOL
-FromReadsPlainTables(Node *node, List *rtable, Index target)
-{
-	if (IsA(node, RangeTblRef))
-	{
-		Index rti = (Index) ((RangeTblRef *) node)->rtindex;
-		if (rti == target)
-		{
-			return true;
-		}
-		const RangeTblEntry *rte =
-			(RangeTblEntry *) gpdb::ListNth(rtable, rti - 1);
-		return RTE_RELATION == rte->rtekind &&
-			   RELKIND_RELATION == rte->relkind &&
-			   !gpdb::HasSubclassSlow(rte->relid) &&
-			   !gpdb::RelOldRowFromPlan(rte->relid);
-	}
-	if (IsA(node, JoinExpr))
-	{
-		return FromReadsPlainTables(((JoinExpr *) node)->larg, rtable, target) &&
-			   FromReadsPlainTables(((JoinExpr *) node)->rarg, rtable, target);
-	}
-	return false;
 }
 
 //---------------------------------------------------------------------------
@@ -1257,8 +1234,9 @@ CTranslatorQueryToDXL::OtherRelationsMarkable() const
 	ListCell *lc = nullptr;
 	ForEach(lc, m_query->jointree->fromlist)
 	{
-		if (!FromReadsPlainTables((Node *) lfirst(lc), m_query->rtable,
-								  (Index) m_query->resultRelation))
+		if (!CTranslatorUtils::FromReadsPlainTables(
+				(Node *) lfirst(lc), m_query->rtable,
+				(Index) m_query->resultRelation))
 		{
 			return false;
 		}

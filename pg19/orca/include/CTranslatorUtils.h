@@ -409,6 +409,16 @@ public:
 								 const RangeTblFunction *rtfunc);
 
 	// check if rel contains foreign partitions
+	// NOT IN CLOUDBERRY.  Does a FROM clause's item read only plain tables,
+	// fetched by their ctids, "target" aside, in its joins too?
+	static BOOL FromReadsPlainTables(Node *node, List *rtable, Index target);
+
+	// NOT IN CLOUDBERRY.  The sublinks an UPDATE's or DELETE's WHERE clause
+	// ANDs in, each EXISTS or IN (...) over plain tables alone, into
+	// *sublinks; false where the query has a sublink anywhere else, or of
+	// another kind.  See CTranslatorQueryToDXL::CheckDMLReadsOnlyTarget.
+	static BOOL DMLSemiJoinSubLinks(Query *query, List **sublinks);
+
 	static BOOL RelContainsForeignPartitions(const IMDRelation *rel,
 											 CMDAccessor *md_accessor);
 };

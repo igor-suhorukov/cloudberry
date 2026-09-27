@@ -3219,14 +3219,30 @@ epq "a DELETE that reads another table, re-checked alike" \
     "UPDATE t2e SET b = 50 WHERE a = 3; UPDATE t2j SET w = 0 WHERE a = 4" \
     "SELECT a, b FROM t2e ORDER BY a"
 
+# One whose WHERE has an EXISTS or an IN (...) over a table: ORCA makes it a
+# semi-join, which returns the first row of the table each row matched, and
+# that row's ctid is carried up for the row mark, as the planner's semi-join
+# carries it.
+dml "a DELETE whose IN (...) reads another table: a semi-join, its ctid carried" \
+    "Semi Join" \
+    "DELETE FROM t2x WHERE a IN (SELECT a FROM t2y WHERE w > 150)" \
+    "SELECT a, b FROM t2x ORDER BY a" \
+    "CREATE TEMP TABLE t2x AS SELECT g AS a, g AS b FROM generate_series(1, 5) g;
+     CREATE TEMP TABLE t2y AS SELECT g AS a, g * 100 AS w FROM generate_series(1, 5) g"
+
+epq "and an UPDATE whose EXISTS waited re-checks with the row it matched" \
+    "UPDATE t2e SET b = t2e.b * 10 WHERE EXISTS (SELECT 1 FROM t2j WHERE t2j.a = t2e.a AND t2j.w > 150)" \
+    "UPDATE t2e SET b = b + 1000 WHERE a IN (2, 4); UPDATE t2j SET w = 0 WHERE a = 4" \
+    "SELECT a, b FROM t2e ORDER BY a"
+
 # --- what is refused --------------------------------------------------------------
 
 declined "an UPDATE that reads a subquery, whose whole row a row mark would copy" \
          "UPDATE t2d SET b = 0 FROM (SELECT a FROM t0 ORDER BY a LIMIT 5) s WHERE t2d.a = s.a" \
          "an UPDATE or DELETE that reads another relation" "$T2D"
 
-declined "a DELETE with a subquery, which ORCA would make a join" \
-         "DELETE FROM t2d WHERE a IN (SELECT a FROM t0 WHERE a < 5)" \
+declined "a DELETE with a NOT IN (...), an anti-join, which returns no row of it" \
+         "DELETE FROM t2d WHERE a NOT IN (SELECT a FROM t0 WHERE a < 5)" \
          "an UPDATE or DELETE that reads another relation" "$T2D"
 
 declined "an UPDATE of a partitioned table, as in Cloudberry" \

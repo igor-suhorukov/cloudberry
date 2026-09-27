@@ -303,8 +303,11 @@ typed_var(int varno, AttrNumber attno, Var *proto)
  * table entry "rti" is looked for below "plan", and the column "proto" names
  * is appended to its target list and passed up through each node on the way,
  * as the ctid is -- the RETURNING of an UPDATE ... FROM or a DELETE ...
- * USING reads the other relation's row the statement joined.  Not through
- * the inner side of a semi- or anti-join, whose rows a join does not return,
+ * USING reads the other relation's row the statement joined.  Through the
+ * inner side of a semi-join too, which returns the first inner row each
+ * outer row matched as the one that matched it -- the planner's semi-join
+ * carries a row mark's ctid so (an UPDATE or DELETE whose WHERE has an
+ * EXISTS or an IN).  Not through an anti-join's, whose rows match nothing,
  * nor through any node but those that pass a column on.
  */
 AttrNumber
@@ -356,7 +359,7 @@ gp_orca_carry_rte_column(Plan *plan, Index rti, Var *proto)
 											 (Expr *) typed_var(OUTER_VAR, childno, proto),
 											 true);
 				}
-				if (jointype == JOIN_SEMI || jointype == JOIN_ANTI)
+				if (jointype == JOIN_ANTI)
 					return InvalidAttrNumber;
 				childno = gp_orca_carry_rte_column(plan->righttree, rti, proto);
 				if (childno == InvalidAttrNumber)

@@ -2435,6 +2435,128 @@ CTranslatorUtils::GetAssertErrorMsgs(CDXLNode *assert_constraint_list)
 
 //---------------------------------------------------------------------------
 //	@function:
+//		CTranslatorUtils::FromReadsPlainTables
+//
+//	@doc:
+//		NOT IN CLOUDBERRY.  Does a FROM clause's item read only plain tables,
+//		"target" aside, in its joins too -- each a table whose method fetches
+//		a row by its ctid, as a row mark fetches it?
+//
+//---------------------------------------------------------------------------
+BOOL
+CTranslatorUtils::FromReadsPlainTables(Node *node, List *rtable, Index target)
+{
+	if (IsA(node, RangeTblRef))
+	{
+		Index rti = (Index) ((RangeTblRef *) node)->rtindex;
+		if (rti == target)
+		{
+			return true;
+		}
+		const RangeTblEntry *rte =
+			(RangeTblEntry *) gpdb::ListNth(rtable, rti - 1);
+		return RTE_RELATION == rte->rtekind &&
+			   RELKIND_RELATION == rte->relkind &&
+			   !gpdb::HasSubclassSlow(rte->relid) &&
+			   !gpdb::RelOldRowFromPlan(rte->relid);
+	}
+	if (IsA(node, JoinExpr))
+	{
+		return FromReadsPlainTables(((JoinExpr *) node)->larg, rtable, target) &&
+			   FromReadsPlainTables(((JoinExpr *) node)->rarg, rtable, target);
+	}
+	return false;
+}
+
+//---------------------------------------------------------------------------
+//	@function:
+//		CTranslatorUtils::DMLSemiJoinSubLinks
+//
+//	@doc:
+//		NOT IN CLOUDBERRY.  The sublinks of an UPDATE or DELETE whose rows are
+//		re-checked with row marks, where ORCA makes each a semi-join: an
+//		EXISTS or an IN (...) the WHERE clause ANDs in, over plain tables
+//		alone, with no grouping, limit or set operation of its own -- into
+//		*sublinks.  False where a sublink is anywhere else, of another kind,
+//		or over anything else: its rows would not reach the write.
+//
+//---------------------------------------------------------------------------
+BOOL
+CTranslatorUtils::DMLSemiJoinSubLinks(Query *query, List **sublinks)
+{
+	*sublinks = NIL;
+	if (!query->hasSubLinks)
+	{
+		return true;
+	}
+
+	// none in the SET list, a join's condition, RETURNING
+	Node *elsewhere[] = {(Node *) query->targetList,
+						 (Node *) query->jointree->fromlist,
+						 (Node *) query->returningList};
+	for (ULONG ul = 0; ul < GPOS_ARRAY_SIZE(elsewhere); ul++)
+	{
+		if (nullptr != elsewhere[ul] &&
+			NIL != gpdb::ExtractNodesExpression(elsewhere[ul], T_SubLink, false))
+		{
+			return false;
+		}
+	}
+
+	Node *quals = query->jointree->quals;
+	List *args = NIL;
+	if (nullptr != quals && IsA(quals, BoolExpr) &&
+		AND_EXPR == ((BoolExpr *) quals)->boolop)
+	{
+		args = ((BoolExpr *) quals)->args;
+	}
+	else if (nullptr != quals)
+	{
+		args = ListMake1(quals);
+	}
+
+	ListCell *lc = nullptr;
+	ForEach(lc, args)
+	{
+		Node *arg = (Node *) lfirst(lc);
+		if (NIL == gpdb::ExtractNodesExpression(arg, T_SubLink, false))
+		{
+			continue;
+		}
+		if (!IsA(arg, SubLink))
+		{
+			return false;
+		}
+		SubLink *sublink = (SubLink *) arg;
+		Query *sub = (Query *) sublink->subselect;
+		if ((EXISTS_SUBLINK != sublink->subLinkType &&
+			 ANY_SUBLINK != sublink->subLinkType) ||
+			!IsA(sub, Query) || CMD_SELECT != sub->commandType ||
+			sub->hasSubLinks || sub->hasAggs || sub->hasWindowFuncs ||
+			sub->hasTargetSRFs || NIL != sub->groupClause ||
+			NIL != sub->groupingSets || nullptr != sub->havingQual ||
+			NIL != sub->distinctClause || nullptr != sub->setOperations ||
+			nullptr != sub->limitCount || nullptr != sub->limitOffset ||
+			NIL != sub->cteList || NIL != sub->rowMarks ||
+			nullptr == sub->jointree || NIL == sub->jointree->fromlist)
+		{
+			return false;
+		}
+		ListCell *lc_from = nullptr;
+		ForEach(lc_from, sub->jointree->fromlist)
+		{
+			if (!FromReadsPlainTables((Node *) lfirst(lc_from), sub->rtable, 0))
+			{
+				return false;
+			}
+		}
+		*sublinks = gpdb::LAppend(*sublinks, sublink);
+	}
+	return true;
+}
+
+//---------------------------------------------------------------------------
+//	@function:
 //		CTranslatorUtils::GetNumNonSystemColumns
 //
 //	@doc:

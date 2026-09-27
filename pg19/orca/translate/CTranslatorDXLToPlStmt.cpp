@@ -7105,7 +7105,10 @@ CollectJoinTreeRtis(Node *node, List **rtis)
 //		cluster a ctid is one segment's: a re-check that meets a Motion
 //		fails as a serialization failure (gp_motion.c), as Cloudberry's
 //		does.  The Query translator took only plain tables
-//		(CheckDMLReadsOnlyTarget).
+//		(CheckDMLReadsOnlyTarget) -- in the FROM or USING clause, and in an
+//		EXISTS or IN (...) the WHERE clause ANDs in, whose semi-join returns
+//		the first row of it it matched, as the planner's semi-join does for
+//		its row mark.
 //
 //---------------------------------------------------------------------------
 void
@@ -7119,6 +7122,9 @@ CTranslatorDXLToPlStmt::AddOtherRowMarks(ModifyTable *dml, Plan *plan)
 		return;
 	}
 
+	// each other table's entry, and its index in its own query's range table
+	List *qrtes = NIL;
+	List *qrtis = NIL;
 	List *rtis = NIL;
 	CollectJoinTreeRtis((Node *) query->jointree, &rtis);
 	ListCell *lc = nullptr;
@@ -7129,8 +7135,34 @@ CTranslatorDXLToPlStmt::AddOtherRowMarks(ModifyTable *dml, Plan *plan)
 		{
 			continue;
 		}
-		RangeTblEntry *qrte =
-			(RangeTblEntry *) gpdb::ListNth(query->rtable, qrti - 1);
+		qrtes = gpdb::LAppend(qrtes, gpdb::ListNth(query->rtable, qrti - 1));
+		qrtis = gpdb::LAppendInt(qrtis, (int) qrti);
+	}
+	List *sublinks = NIL;
+	if (!CTranslatorUtils::DMLSemiJoinSubLinks(query, &sublinks))
+	{
+		GP_UNPORTED("an UPDATE or DELETE that reads another relation");
+	}
+	ForEach(lc, sublinks)
+	{
+		Query *sub = (Query *) ((SubLink *) lfirst(lc))->subselect;
+		List *subrtis = NIL;
+		CollectJoinTreeRtis((Node *) sub->jointree, &subrtis);
+		ListCell *lc_rti = nullptr;
+		ForEach(lc_rti, subrtis)
+		{
+			Index qrti = (Index) lfirst_int(lc_rti);
+			qrtes = gpdb::LAppend(qrtes, gpdb::ListNth(sub->rtable, qrti - 1));
+			qrtis = gpdb::LAppendInt(qrtis, (int) qrti);
+		}
+	}
+
+	ListCell *lc_rte = nullptr;
+	ListCell *lc_qrti = nullptr;
+	ForBoth(lc_rte, qrtes, lc_qrti, qrtis)
+	{
+		Index qrti = (Index) lfirst_int(lc_qrti);
+		RangeTblEntry *qrte = (RangeTblEntry *) lfirst(lc_rte);
 		Index rti = PlanRtiOf(qrte);
 		Var *ctid = gpdb::MakeVar(qrti, SelfItemPointerAttributeNumber, TIDOID,
 								  -1, 0);

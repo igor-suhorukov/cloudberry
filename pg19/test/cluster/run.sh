@@ -3641,6 +3641,22 @@ SQL
 			ok "... and one that joins a table distributed alike, with the row it was joined to; through a Motion, Cloudberry's error" ;;
 		*) notok "EvalPlanQual of ORCA's joined UPDATE with the detector" "$plan / $before / $out / $out2" ;;
 	esac
+	# ... and one whose WHERE has an EXISTS over it: ORCA's semi-join, which
+	# returns the row of it the changed one matched, carried up for its row
+	# mark as the planner's semi-join carries it.
+	plan=$(q 0 "EXPLAIN (COSTS OFF, VERBOSE) UPDATE gdd SET val = gdd.val * 2 WHERE EXISTS (SELECT 1 FROM gddj WHERE gddj.id = gdd.id AND gddj.w > 0) AND gdd.id = $r0;")
+	before=$(q 0 "SELECT val FROM gdd WHERE id = $r0;")
+	printf '%s\n' "BEGIN;" "UPDATE gdd SET val = val + 1 WHERE id = $r0;" "SELECT pg_sleep(2);" "COMMIT;" |
+		qf 0 >/dev/null 2>&1 &
+	holder=$!
+	sleep 0.5
+	out=$(q 0 "UPDATE gdd SET val = gdd.val * 2 WHERE EXISTS (SELECT 1 FROM gddj WHERE gddj.id = gdd.id AND gddj.w > 0) AND gdd.id = $r0 RETURNING gdd.val;")
+	wait "$holder"
+	case "$plan|$out" in
+		*"Semi Join"*"gddj.ctid"*"Optimizer: GPORCA"*"|$(( (before + 1) * 2 ))")
+			ok "... and one whose EXISTS reads it, a semi-join, with the row it matched" ;;
+		*) notok "EvalPlanQual of ORCA's UPDATE with an EXISTS, with the detector" "$plan / $before / $out" ;;
+	esac
 	for opt in off on; do
 		printf '%s\n' "SET gp.optimizer = $opt;" "BEGIN;" "SELECT id FROM gdd WHERE id = $r0 FOR UPDATE;" \
 			"SELECT string_agg(mode, ',' ORDER BY mode) FROM pg_locks WHERE relation = 'gdd'::regclass;" \
