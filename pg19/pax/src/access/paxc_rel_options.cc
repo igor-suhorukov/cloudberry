@@ -23,10 +23,14 @@
  *	  contrib/pax_storage/src/cpp/access/paxc_rel_options.cc
  *
  *
- * Ported to PostgreSQL 19, which has no ENCODING clause and no
- * pg_attribute_encoding: a column has no options of its own, and is encoded
- * as the table's options and PAX's defaults say; the table access method's
- * callbacks for the clause, of Cloudberry's tableam.h, are gone.
+ * Ported to PostgreSQL 19, which has no ENCODING clause, no
+ * pg_attribute_encoding and no table access method callbacks for the
+ * clause (Cloudberry's tableam.h): gp_ao takes a column's ENCODING clause
+ * for a table of any method, checks a PAX table's through
+ * paxc_transform_column_encoding_clauses(), which PAX registers with it
+ * (gp_encoding.h), and keeps the column's options as its security label on
+ * the column -- which paxc_relation_get_attribute_options() reads, where
+ * Cloudberry's read pg_attribute_encoding.
  *-------------------------------------------------------------------------
  */
 
@@ -176,17 +180,74 @@ bytea *paxc_default_rel_options(Datum reloptions, char /*relkind*/,
   return rdopts;
 }
 
+/* A gp_ao label, "k=v,k=v", as the text[] reloptions keeps options in. */
+static Datum paxc_label_options(const char *label) {
+  List *defs = NIL;
+  char *copy = pstrdup(label);
+  char *save = NULL;
+
+  for (char *item = strtok_r(copy, ",", &save); item != NULL;
+       item = strtok_r(NULL, ",", &save)) {
+    char *eq = strchr(item, '=');
+
+    if (eq == NULL) continue;
+    *eq = '\0';
+    defs = lappend(defs, makeDefElem(pstrdup(item),
+                                     (Node *)makeString(pstrdup(eq + 1)), -1));
+  }
+  return transformRelOptions(PointerGetDatum(NULL), defs, NULL, NULL, false,
+                             false);
+}
+
+/*
+ * Each column's options, as its gp_ao label gives them, or NULL: one scan of
+ * pg_seclabel for the table's columns.  A rewrite writes the transient
+ * relation make_new_heap() named pg_temp_<the table's OID>, which has no
+ * labels of its own; its columns are the table's.
+ */
 PaxOptions **paxc_relation_get_attribute_options(Relation rel) {
-  Datum *dats;
+  int natts = RelationGetNumberOfAttributes(rel);
+  Oid relid = RelationGetRelid(rel);
+  Oid old;
   PaxOptions **opts;
-  int i;
+  Relation seclabel;
+  ScanKeyData keys[2];
+  SysScanDesc scan;
+  HeapTuple tup;
 
-  Assert(rel && OidIsValid(RelationGetRelid(rel)));
+  Assert(rel && OidIsValid(relid));
 
-  opts = (PaxOptions **)palloc0(RelationGetNumberOfAttributes(rel) *
-                                sizeof(PaxOptions *));
-  (void)dats;
-  (void)i;
+  opts = (PaxOptions **)palloc0(natts * sizeof(PaxOptions *));
+  if (sscanf(RelationGetRelationName(rel), "pg_temp_%u", &old) == 1 &&
+      get_rel_relkind(old) == RELKIND_RELATION)
+    relid = old;
+
+  seclabel = table_open(SecLabelRelationId, AccessShareLock);
+  ScanKeyInit(&keys[0], Anum_pg_seclabel_objoid, BTEqualStrategyNumber,
+              F_OIDEQ, ObjectIdGetDatum(relid));
+  ScanKeyInit(&keys[1], Anum_pg_seclabel_classoid, BTEqualStrategyNumber,
+              F_OIDEQ, ObjectIdGetDatum(RelationRelationId));
+  scan = systable_beginscan(seclabel, SecLabelObjectIndexId, true, NULL, 2,
+                            keys);
+  while ((tup = systable_getnext(scan)) != NULL) {
+    FormData_pg_seclabel *form = (FormData_pg_seclabel *)GETSTRUCT(tup);
+    bool isnull;
+    Datum provider;
+    Datum label;
+
+    if (form->objsubid <= 0 || form->objsubid > natts) continue;
+    provider = heap_getattr(tup, Anum_pg_seclabel_provider,
+                            RelationGetDescr(seclabel), &isnull);
+    if (isnull || strcmp(TextDatumGetCString(provider), "gp_ao") != 0)
+      continue;
+    label = heap_getattr(tup, Anum_pg_seclabel_label,
+                         RelationGetDescr(seclabel), &isnull);
+    if (isnull) continue;
+    opts[form->objsubid - 1] = (PaxOptions *)paxc_default_rel_options(
+        paxc_label_options(TextDatumGetCString(label)), 0, false);
+  }
+  systable_endscan(scan);
+  table_close(seclabel, AccessShareLock);
   return opts;
 }
 

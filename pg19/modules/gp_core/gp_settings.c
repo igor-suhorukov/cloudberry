@@ -33,6 +33,9 @@
  *	 gp.test_print_direct_dispatch_info  the INFO line per dispatched slice,
  *										 and per command of a two-phase
  *										 commit (gp_dispatch.c)
+ *	 gp.debug_print_slice_table			 the slice table in the server log,
+ *										 as a statement's slices start
+ *										 (gp_motion.c)
  *	 gp.enable_direct_dispatch			 asking one segment when one holds
  *										 every row a query can touch
  *	 gp.autostats_mode, and the rest	 ANALYZE after a write, as auto_stats()
@@ -46,9 +49,10 @@
  * that says when it will: the planner's own MPP plans (Route B, decided at
  * M7), memory accounting (M6), intra-segment parallelism (after M7,
  * decision 2) -- or that it will not: the executor's prefetch of a join's
- * quals, which PostgreSQL's joins do not do.  They are defined so that a
- * script written for Cloudberry runs; their descriptions say what they do
- * here, which is nothing until then.
+ * quals, which PostgreSQL's joins do not do, and the planner's knobs of a
+ * sort under a LIMIT and of a hash join's cost, which are PostgreSQL's
+ * here.  They are defined so that a script written for Cloudberry runs;
+ * their descriptions say what they do here, which is nothing until then.
  *
  *-------------------------------------------------------------------------
  */
@@ -58,6 +62,7 @@
 #include <limits.h>
 
 #include "access/htup_details.h"
+#include "access/xact.h"
 #include "catalog/pg_class.h"
 #include "catalog/pg_database.h"
 #include "commands/vacuum.h"
@@ -88,6 +93,7 @@
 /* ------------------------------------------------------------------------- */
 
 bool		gp_test_print_direct_dispatch_info = false;
+bool		gp_debug_print_slice_table = false;
 bool		gp_enable_direct_dispatch = true;
 double		gp_motion_cost_per_row = 0;
 bool		gp_use_legacy_hashops = false;
@@ -125,6 +131,7 @@ static int	gp_vmem_idle_resource_timeout = 18000;
 static int	gp_segments_for_planner = 0;
 static bool gp_workfile_compression = false;
 static bool gp_enable_multiphase_agg = true;
+static bool gp_eager_two_phase_agg = false;
 static bool gp_cte_sharing = false;
 static bool test_print_prefetch_joinqual = false;
 static bool gp_enable_preunique = true;
@@ -133,6 +140,11 @@ static bool gp_eager_distinct_dedup = false;
 static bool gp_enable_agg_pushdown = false;
 static bool gp_enable_fast_sri = true;
 static bool gp_force_random_redistribution = false;
+static bool gp_enable_agg_distinct = true;
+static bool gp_enable_sort_limit = true;
+static bool gp_cost_hashjoin_chainwalk = false;
+static int	gp_cached_gang_threshold = 5;
+static int	gp_appendonly_insert_files = 0;
 
 /*
  * Cloudberry's gpvars_check_statement_mem(): statement_mem is less than
@@ -242,6 +254,131 @@ GpReportDtxCommand(const char *command, const int *contents, int n)
 	append_contents(&buf, contents, n);
 	elog(INFO, "Distributed transaction command '%s' to %s", command, buf.data);
 	pfree(buf.data);
+}
+
+/*
+ * The segments this transaction's statements were dispatched to, in the
+ * order they were first reached: Cloudberry's dtxSegments
+ * (addToGxactDtxSegments(), cdb/cdbtm.c), which its INFO lines of the
+ * commit name -- a one-phase commit's and a rollback's, to every segment
+ * the transaction reached, whether or not a segment wrote.  Cloudberry adds
+ * a statement's slices once the transaction writes, and every dispatch in
+ * a transaction block, reads too; DDL, COPY and a savepoint, which it sends
+ * to every segment in two phases, write.  Whether a segment wrote is what
+ * its answer says (gp_dispatch.c); this is only whom the lines name.
+ */
+static int *dtx_reached = NULL;
+static int	dtx_nreached = 0;
+static int	dtx_reached_size = 0;
+static bool dtx_xact_writes = false;
+
+/*
+ * Whether a plan writes, as Cloudberry's ExecCheckXactReadOnly() decides it
+ * (executor/execMain.c): a permission beyond SELECT on a table that is not
+ * a foreign table -- but for a table FOR UPDATE or FOR SHARE locks, whose
+ * UPDATE permission is the lock's.
+ */
+static bool
+plan_writes(PlannedStmt *stmt)
+{
+	int			index = 0;
+
+	foreach_node(RTEPermissionInfo, perminfo, stmt->permInfos)
+	{
+		bool		locked = false;
+
+		index++;
+		if ((perminfo->requiredPerms & ~ACL_SELECT) == 0 ||
+			get_rel_relkind(perminfo->relid) == RELKIND_FOREIGN_TABLE)
+			continue;
+		if ((perminfo->requiredPerms & ~(ACL_SELECT | ACL_SELECT_FOR_UPDATE)) == 0)
+		{
+			foreach_node(PlanRowMark, rowmark, stmt->rowMarks)
+			{
+				if (rt_fetch(rowmark->rti, stmt->rtable)->perminfoindex == index)
+				{
+					locked = true;
+					break;
+				}
+			}
+		}
+		if (!locked)
+			return true;
+	}
+	return false;
+}
+
+void
+GpReportDtxReached(PlannedStmt *stmt, const int *contents, int n)
+{
+	if (!gp_test_print_direct_dispatch_info)
+		return;
+	if (stmt == NULL || plan_writes(stmt))
+		dtx_xact_writes = true;
+	if (!dtx_xact_writes && !IsTransactionBlock())
+		return;
+
+	if (contents == NULL)
+	{
+		int			nsegs;
+
+		GpClusterSegments(&nsegs);
+		if (n <= 0 || n > nsegs)
+			n = nsegs;
+	}
+	for (int i = 0; i < n; i++)
+	{
+		int			content = contents != NULL ? contents[i] : i;
+		bool		seen = false;
+
+		for (int j = 0; j < dtx_nreached && !seen; j++)
+			seen = dtx_reached[j] == content;
+		if (seen)
+			continue;
+		if (dtx_nreached == dtx_reached_size)
+		{
+			dtx_reached_size = Max(16, dtx_reached_size * 2);
+			dtx_reached = dtx_reached == NULL
+				? MemoryContextAlloc(TopMemoryContext, dtx_reached_size * sizeof(int))
+				: repalloc(dtx_reached, dtx_reached_size * sizeof(int));
+		}
+		dtx_reached[dtx_nreached++] = content;
+	}
+}
+
+int
+GpReportDtxContents(const int *set, int nset, bool reached, int **contents)
+{
+	int		   *out = palloc_array(int, dtx_nreached + nset + 1);
+	int			n = 0;
+
+	for (int i = 0; i < dtx_nreached; i++)
+	{
+		bool		in = reached;
+
+		for (int j = 0; j < nset && !in; j++)
+			in = set[j] == dtx_reached[i];
+		if (in)
+			out[n++] = dtx_reached[i];
+	}
+	for (int j = 0; j < nset; j++)
+	{
+		bool		seen = false;
+
+		for (int i = 0; i < dtx_nreached && !seen; i++)
+			seen = dtx_reached[i] == set[j];
+		if (!seen)
+			out[n++] = set[j];
+	}
+	*contents = out;
+	return n;
+}
+
+void
+GpReportDtxForget(void)
+{
+	dtx_nreached = 0;
+	dtx_xact_writes = false;
 }
 
 int
@@ -510,6 +647,13 @@ GpSettingsInit(void)
 							 GUC_SUPERUSER_ONLY | GUC_NOT_IN_SAMPLE,
 							 NULL, NULL, NULL);
 
+	DefineCustomBoolVariable("gp.debug_print_slice_table",
+							 "Prints the slice table to server log.",
+							 "At DEBUG3, as Cloudberry's executor prints it: the slices of a statement's plan, on the coordinator as they start, and on a segment as it starts its own.",
+							 &gp_debug_print_slice_table,
+							 false, PGC_USERSET, 0,
+							 NULL, NULL, NULL);
+
 	DefineCustomBoolVariable("gp.enable_direct_dispatch",
 							 "Enable dispatch for single-row-insert targeted mirror-pairs.",
 							 "Don't involve the whole cluster if it isn't needed.",
@@ -593,6 +737,18 @@ GpSettingsInit(void)
 							&gp_vmem_idle_resource_timeout,
 							18000, 0, INT_MAX, PGC_USERSET, GUC_UNIT_MS,
 							NULL, NULL, NULL);
+	DefineCustomIntVariable("gp.cached_segworkers_threshold",
+							"Sets the maximum number of segment workers to cache between statements.",
+							"Accepted for Cloudberry's scripts: a session keeps every segment connection it has made until it ends.",
+							&gp_cached_gang_threshold,
+							5, 1, INT_MAX, PGC_USERSET, GUC_NOT_IN_SAMPLE,
+							NULL, NULL, NULL);
+	DefineCustomIntVariable("gp.appendonly_insert_files",
+							"Number of segment files to insert for appendonly table within a transaction.",
+							"Accepted for Cloudberry's scripts: an insert writes one segment file, a segment scanning a table in one process until intra-segment parallelism (after M7, decision 2).",
+							&gp_appendonly_insert_files,
+							0, 0, 127, PGC_USERSET, 0,
+							NULL, NULL, NULL);
 	DefineCustomBoolVariable("gp.workfile_compression",
 							 "Enables compression of temporary files.",
 							 "Accepted for Cloudberry's scripts: temporary files are PostgreSQL's own, which are not compressed.",
@@ -615,12 +771,18 @@ GpSettingsInit(void)
 	define_accepted_bool("gp.enable_multiphase_agg",
 						 "Enables the planner's use of two- or three-stage parallel aggregation plans." ROUTE_B,
 						 &gp_enable_multiphase_agg, true);
+	define_accepted_bool("gp.eager_two_phase_agg",
+						 "Eager two stage agg." ROUTE_B,
+						 &gp_eager_two_phase_agg, false);
 	define_accepted_bool("gp.cte_sharing",
 						 "This guc enables sharing of plan fragments for common table expressions." ROUTE_B,
 						 &gp_cte_sharing, false);
 	define_accepted_bool("gp.enable_preunique",
 						 "Enable 2-phase duplicate removal." ROUTE_B,
 						 &gp_enable_preunique, true);
+	define_accepted_bool("gp.enable_agg_distinct",
+						 "Enable 2-phase aggregation to compute a single distinct-qualified aggregate." ROUTE_B,
+						 &gp_enable_agg_distinct, true);
 	define_accepted_bool("gp.enable_agg_distinct_pruning",
 						 "Enable 3-phase aggregation and join to compute distinct-qualified aggregates." ROUTE_B,
 						 &gp_enable_agg_distinct_pruning, true);
@@ -636,6 +798,14 @@ GpSettingsInit(void)
 	define_accepted_bool("gp.force_random_redistribution",
 						 "Force redistribution of insert for randomly-distributed." ROUTE_B,
 						 &gp_force_random_redistribution, false);
+	define_accepted_bool("gp.enable_sort_limit",
+						 "Enable LIMIT operation to be performed while sorting."
+						 " Accepted for Cloudberry's scripts: PostgreSQL's sort below a LIMIT keeps only the rows the LIMIT can return, whatever this says.",
+						 &gp_enable_sort_limit, true);
+	define_accepted_bool("gp.cost_hashjoin_chainwalk",
+						 "Enable the cost for walking the chain in the hash join."
+						 " Accepted for Cloudberry's scripts: the planner here costs a hash join as PostgreSQL does, which has no such term.",
+						 &gp_cost_hashjoin_chainwalk, false);
 
 	prev_create_upper_paths = create_upper_paths_hook;
 	create_upper_paths_hook = settings_upper_paths;

@@ -174,6 +174,7 @@
 #include "gp_core_api.h"
 #include "gp_dispatch.h"
 #include "gp_dtx.h"
+#include "gp_settings.h"
 #include "gp_fault.h"
 #include "gp_gdd.h"
 #include "gp_share.h"
@@ -509,6 +510,14 @@ typedef struct GpDtxShared
 	 * for, and gpstart waits for here (gp.dtx_recovered()).
 	 */
 	bool		recovered;
+
+	/*
+	 * The round the recovery process is running, if one is, and how far it
+	 * has got: gp_stat_progress_dtx_recovery's row (DtxProgress).
+	 */
+	bool		progress_active;
+	int			progress_phase;
+	int64		progress[5];
 } GpDtxShared;
 
 static GpDtxShared *dtx_shared = NULL;
@@ -1408,8 +1417,10 @@ dtx_is_writer_part(void)
  * gp.dtx_xid, after each statement a writer runs: this part's transaction ID,
  * or empty, so that the answer the coordinator reads carries it and the
  * coordinator knows as it commits which parts wrote, without asking.  After
- * a statement -- and after each executor run, for a portal the extended
- * protocol keeps open -- rather than as the ID is given, which no hook sees;
+ * a statement -- and after each executor run and at the executor's end, for
+ * a portal of the extended protocol, whose end the coordinator's Close of it
+ * brings within the same round trip (conn_send_params(), gp_dispatch.c) --
+ * rather than as the ID is given, which no hook sees;
  * a transaction's first statement, its BEGIN, empties it again.  Set as the
  * server sets in_hot_standby, outside any transaction's undo: it says what is
  * so, not what a statement asked for.
@@ -1951,6 +1962,16 @@ dtx_ProcessUtility(PlannedStmt *pstmt, const char *queryString,
 	{
 		TransactionStmt *ts = (TransactionStmt *) parsetree;
 
+		/*
+		 * Cloudberry sends a savepoint's command to every segment as it runs
+		 * it, where the port sends it with the next statement; its commit's
+		 * INFO lines name them all (DefineDispatchSavepoint(), xact.c).
+		 */
+		if ((ts->kind == TRANS_STMT_SAVEPOINT || ts->kind == TRANS_STMT_RELEASE ||
+			 ts->kind == TRANS_STMT_ROLLBACK_TO) && IsTransactionBlock() &&
+			GpClusterBackendRole() == GP_ROLE_DISPATCH)
+			GpReportDtxReached(NULL, NULL, 0);
+
 		if (ts->gid != NULL && GpDtxParseGid(ts->gid, &gxid))
 		{
 			/* the part's statement is what its phases show */
@@ -2226,23 +2247,219 @@ recovery_connect(const GpSegmentConfig *seg, const char *dbname)
 }
 
 /*
+ * Where a round is, for gp_stat_progress_dtx_recovery: Cloudberry's phases
+ * of its recovery (PROGRESS_DTX_RECOVERY_*, commands/progress.h), numbered
+ * as its view names them -- the first round after a start its start-up's,
+ * committing what committed and rolling back what is in doubt, and every
+ * round after it one of its periodic ones, which look for orphans -- and its
+ * counts, of distributed transactions: the parts on every node of one
+ * coordinator transaction.
+ */
+#define DTX_PHASE_INITIALIZING			0
+#define DTX_PHASE_RECOVER_COMMITTED		1
+#define DTX_PHASE_GATHER_IN_DOUBT		2
+#define DTX_PHASE_ABORT_IN_DOUBT		3
+#define DTX_PHASE_GATHER_ORPHANED		4
+#define DTX_PHASE_MANAGE_ORPHANED		5
+
+typedef enum DtxProgress
+{
+	DTX_COMMITTED_TOTAL,
+	DTX_COMMITTED_DONE,
+	DTX_IN_DOUBT_TOTAL,
+	DTX_IN_DOUBT_IN_PROGRESS,
+	DTX_IN_DOUBT_ABORTED,
+} DtxProgress;
+
+static void
+recovery_phase(int phase, bool active)
+{
+	LWLockAcquire(&dtx_shared->lock, LW_EXCLUSIVE);
+	if (active && !dtx_shared->progress_active)
+		memset(dtx_shared->progress, 0, sizeof(dtx_shared->progress));
+	dtx_shared->progress_active = active;
+	dtx_shared->progress_phase = phase;
+	LWLockRelease(&dtx_shared->lock);
+}
+
+static void
+recovery_count(DtxProgress which, int64 value)
+{
+	LWLockAcquire(&dtx_shared->lock, LW_EXCLUSIVE);
+	dtx_shared->progress[which] = value;
+	LWLockRelease(&dtx_shared->lock);
+}
+
+/* A part a round found prepared on a node, and what became of its transaction. */
+typedef struct RecoveryPart
+{
+	const GpSegmentConfig *node;
+	char	   *gid;
+	char	   *dbname;
+	FullTransactionId gxid;
+	DtxOutcome	outcome;
+} RecoveryPart;
+
+/* How many distributed transactions the parts of this outcome are. */
+static int64
+parts_transactions(const RecoveryPart *parts, int nparts, DtxOutcome outcome)
+{
+	int64		n = 0;
+
+	for (int i = 0; i < nparts; i++)
+	{
+		bool		first = parts[i].outcome == outcome;
+
+		for (int j = 0; j < i && first; j++)
+			first = !(parts[j].outcome == outcome &&
+					  FullTransactionIdEquals(parts[j].gxid, parts[i].gxid));
+		if (first)
+			n++;
+	}
+	return n;
+}
+
+typedef enum RecoveryFinish
+{
+	FINISH_DONE,				/* or done already */
+	FINISH_FAILED,				/* refused, logged */
+	FINISH_UNREACHED,			/* no connection, or busy past the wait */
+} RecoveryFinish;
+
+/*
+ * A part's COMMIT or ROLLBACK PREPARED, over a connection to the database it
+ * was prepared in: done, or done already -- by its own backend, whose commit
+ * is then waited for on the mirror, as dtx_finish_again() waits
+ * (gp_dispatch.c), or by a round before -- or not, logged.  A part another
+ * backend is still finishing, "is busy" -- its second phase, waiting for the
+ * mirror -- is asked for again each second, for up to five minutes:
+ * Cloudberry's recovery waits for such a part too, its COMMIT PREPARED
+ * waiting for the mirror (FinishPreparedTransaction(), twophase.c) until
+ * FTS lets it go.
+ */
+static RecoveryFinish
+recovery_finish(const RecoveryPart *part)
+{
+	bool		commit = part->outcome == DTX_COMMITTED;
+	char	   *sql = psprintf("%s PREPARED '%s'", commit ? "COMMIT" : "ROLLBACK",
+							   part->gid);
+	TimestampTz deadline = GetCurrentTimestamp() + 300 * USECS_PER_SEC;
+
+	for (;;)
+	{
+		PGconn	   *conn = recovery_connect(part->node, part->dbname);
+		PGresult   *res;
+		const char *state;
+		bool		done;
+		bool		gone;
+		bool		busy;
+
+		if (conn == NULL)
+			return FINISH_UNREACHED;
+		res = libpqsrv_exec(conn, sql, recovery_wait_event());
+		state = PQresultErrorField(res, PG_DIAG_SQLSTATE);
+		done = PQresultStatus(res) == PGRES_COMMAND_OK;
+		gone = state != NULL && strcmp(state, "42704") == 0;
+		busy = state != NULL && strcmp(state, "55000") == 0;
+		if (done)
+			ereport(LOG,
+					(errmsg("distributed transaction recovery: %s on %s",
+							sql, node_name(part->node))));
+		else if (!gone && (!busy || GetCurrentTimestamp() >= deadline))
+			ereport(LOG,
+					(errmsg("distributed transaction recovery could not finish \"%s\" on %s",
+							part->gid, node_name(part->node)),
+					 errdetail_internal("%s", PQerrorMessage(conn))));
+		PQclear(res);
+		if (gone && commit)
+			PQclear(libpqsrv_exec(conn, "SELECT gp_internal.dtx_wait_mirror()",
+								  recovery_wait_event()));
+		libpqsrv_disconnect(conn);
+
+		if (done || gone)
+			return FINISH_DONE;
+		if (!busy)
+			return FINISH_FAILED;
+		if (GetCurrentTimestamp() >= deadline)
+			return FINISH_UNREACHED;
+		(void) WaitLatch(MyLatch, WL_LATCH_SET | WL_TIMEOUT | WL_EXIT_ON_PM_DEATH,
+						 1000, recovery_wait_event());
+		ResetLatch(MyLatch);
+		CHECK_FOR_INTERRUPTS();
+	}
+}
+
+/*
+ * Finish the parts of every distributed transaction of one outcome, a
+ * transaction's parts together, counting the transactions finished on
+ * every node as "done".  Whether every part was reached is returned: one
+ * refused is logged, and left for the next round, as it always was.
+ */
+static bool
+recovery_finish_all(const RecoveryPart *parts, int nparts, DtxOutcome outcome,
+					DtxProgress done)
+{
+	bool		complete = true;
+	int64		ndone = 0;
+
+	for (int i = 0; i < nparts; i++)
+	{
+		bool		first = parts[i].outcome == outcome;
+		bool		all = true;
+
+		for (int j = 0; j < i && first; j++)
+			first = !(parts[j].outcome == outcome &&
+					  FullTransactionIdEquals(parts[j].gxid, parts[i].gxid));
+		if (!first)
+			continue;
+		for (int j = i; j < nparts; j++)
+		{
+			RecoveryFinish finish;
+
+			if (parts[j].outcome != outcome ||
+				!FullTransactionIdEquals(parts[j].gxid, parts[i].gxid))
+				continue;
+			finish = recovery_finish(&parts[j]);
+			if (finish != FINISH_DONE)
+				all = false;
+			if (finish == FINISH_UNREACHED)
+				complete = false;
+		}
+		if (all)
+			recovery_count(done, ++ndone);
+	}
+	return complete;
+}
+
+/*
  * One round: every part a node holds prepared under a distributed gid,
  * committed or rolled back by what the coordinator's clog says of its
  * transaction -- each segment's, and the coordinator's own, which the
  * loopback prepared in another of its databases (gp_loopback.c); on one node
- * those alone.  One still
- * in progress here is its backend's.  "min_age" leaves alone what was
- * prepared less than that many seconds ago, whose second phase is on its way
- * from the backend that prepared it; the round after a restart, and one a
- * backend asked for, take everything.  Returns whether every node was
- * reached.
+ * those alone.  One still in progress here is its backend's.  "min_age"
+ * leaves alone what was prepared less than that many seconds ago, whose
+ * second phase is on its way from the backend that prepared it; the round
+ * after a restart, and one a backend asked for, take everything.
+ *
+ * As Cloudberry's recovery goes, and its view says: the parts of every node
+ * are gathered first, then those whose transaction committed are committed,
+ * then the rest rolled back -- in "startup" rounds, those until one has
+ * reached every node, its start-up's phases, and after them its periodic
+ * rounds', which find orphans.  Returns whether every node was reached, and
+ * every part it found busy finished.
  */
 static bool
-recovery_round(int min_age)
+recovery_round(int min_age, bool startup)
 {
 	const GpSegmentConfig *segs;
 	int			nsegs;
 	bool		complete = true;
+	RecoveryPart *parts = NULL;
+	int			nparts = 0;
+	int			maxparts = 0;
+
+	recovery_phase(startup ? DTX_PHASE_INITIALIZING : DTX_PHASE_GATHER_ORPHANED,
+				   true);
 
 	/*
 	 * The primaries FTS last published: a part prepared on a primary it
@@ -2289,15 +2506,10 @@ recovery_round(int min_age)
 			int			age = atoi(PQgetvalue(res, r, 2));
 			FullTransactionId gxid;
 			DtxOutcome	outcome;
-			PGconn	   *dbconn;
-			PGresult   *done;
-			char	   *sql;
 
 			if (!GpDtxParseGid(gid, &gxid) || age < min_age)
 				continue;
 			outcome = dtx_outcome(gxid);
-			if (outcome == DTX_IN_PROGRESS)
-				continue;
 			if (outcome == DTX_UNKNOWN)
 			{
 				ereport(WARNING,
@@ -2307,32 +2519,59 @@ recovery_round(int min_age)
 								 dbname)));
 				continue;
 			}
-
-			/* COMMIT PREPARED runs in the database it was prepared in */
-			dbconn = recovery_connect(node, dbname);
-			if (dbconn == NULL)
+			if (nparts == maxparts)
 			{
-				complete = false;
-				continue;
+				maxparts = Max(16, maxparts * 2);
+				parts = parts == NULL ? palloc_array(RecoveryPart, maxparts)
+					: repalloc_array(parts, RecoveryPart, maxparts);
 			}
-			sql = psprintf("%s PREPARED '%s'",
-						   outcome == DTX_COMMITTED ? "COMMIT" : "ROLLBACK", gid);
-			done = libpqsrv_exec(dbconn, sql, recovery_wait_event());
-			if (PQresultStatus(done) != PGRES_COMMAND_OK)
-				ereport(LOG,
-						(errmsg("distributed transaction recovery could not finish \"%s\" on %s",
-								gid, node_name(node)),
-						 errdetail_internal("%s", PQerrorMessage(dbconn))));
-			else
-				ereport(LOG,
-						(errmsg("distributed transaction recovery: %s on %s",
-								sql, node_name(node))));
-			PQclear(done);
-			libpqsrv_disconnect(dbconn);
+			parts[nparts].node = node;
+			parts[nparts].gid = pstrdup(gid);
+			parts[nparts].dbname = pstrdup(dbname);
+			parts[nparts].gxid = gxid;
+			parts[nparts].outcome = outcome;
+			nparts++;
 		}
 		PQclear(res);
 		libpqsrv_disconnect(conn);
 	}
+
+	/* what committed is committed: COMMIT PREPARED in each part's database */
+	if (startup)
+		recovery_phase(DTX_PHASE_RECOVER_COMMITTED, true);
+	else
+		recovery_phase(DTX_PHASE_MANAGE_ORPHANED, true);
+	recovery_count(DTX_COMMITTED_TOTAL,
+				   parts_transactions(parts, nparts, DTX_COMMITTED));
+	if (!recovery_finish_all(parts, nparts, DTX_COMMITTED, DTX_COMMITTED_DONE))
+		complete = false;
+	if (startup)
+		GP_FAULT("post_progress_recovery_comitted");
+
+	/*
+	 * The rest is in doubt: one still in progress here is its backend's, and
+	 * one that did not commit is rolled back
+	 */
+	if (startup)
+		recovery_phase(DTX_PHASE_GATHER_IN_DOUBT, true);
+	recovery_count(DTX_IN_DOUBT_IN_PROGRESS,
+				   parts_transactions(parts, nparts, DTX_IN_PROGRESS));
+	recovery_count(DTX_IN_DOUBT_TOTAL,
+				   parts_transactions(parts, nparts, DTX_IN_PROGRESS) +
+				   parts_transactions(parts, nparts, DTX_ABORTED));
+	if (startup)
+		recovery_phase(DTX_PHASE_ABORT_IN_DOUBT, true);
+	if (!recovery_finish_all(parts, nparts, DTX_ABORTED, DTX_IN_DOUBT_ABORTED))
+		complete = false;
+
+	recovery_phase(DTX_PHASE_INITIALIZING, false);
+	for (int i = 0; i < nparts; i++)
+	{
+		pfree(parts[i].gid);
+		pfree(parts[i].dbname);
+	}
+	if (parts != NULL)
+		pfree(parts);
 	return complete;
 }
 
@@ -2374,7 +2613,8 @@ GpDtxRecoveryMain(Datum main_arg)
 		GP_FAULT("dtx_recovery_round");
 
 		/* until a round reaches every segment, each takes everything */
-		if (recovery_round(everything ? 0 : dtx_recovery_prepared_period))
+		if (recovery_round(everything ? 0 : dtx_recovery_prepared_period,
+						   !dtx_shared->recovered))
 		{
 			everything = false;
 			if (!dtx_shared->recovered)
@@ -2692,6 +2932,38 @@ gp_dtx_recovered(PG_FUNCTION_ARGS)
 		LWLockRelease(&dtx_shared->lock);
 	}
 	PG_RETURN_BOOL(recovered);
+}
+
+PG_FUNCTION_INFO_V1(gp_dtx_recovery_progress);
+
+/*
+ * gp_internal.dtx_recovery_progress()
+ *		The round the recovery process is running, if one is: its phase and
+ *		its counts, gp_stat_progress_dtx_recovery's row -- what Cloudberry
+ *		reports of its recovery as a command's progress
+ *		(pg_stat_get_progress_info('DTX RECOVERY')), and PostgreSQL 19's
+ *		fixed list of progress commands has no place for.
+ */
+Datum
+gp_dtx_recovery_progress(PG_FUNCTION_ARGS)
+{
+	ReturnSetInfo *rsinfo = (ReturnSetInfo *) fcinfo->resultinfo;
+
+	InitMaterializedSRF(fcinfo, 0);
+	dtx_attach();
+	LWLockAcquire(&dtx_shared->lock, LW_SHARED);
+	if (dtx_shared->progress_active)
+	{
+		Datum		values[6];
+		bool		nulls[6] = {false, false, false, false, false, false};
+
+		values[0] = Int32GetDatum(dtx_shared->progress_phase);
+		for (int i = 0; i < 5; i++)
+			values[i + 1] = Int64GetDatum(dtx_shared->progress[i]);
+		tuplestore_putvalues(rsinfo->setResult, rsinfo->setDesc, values, nulls);
+	}
+	LWLockRelease(&dtx_shared->lock);
+	return (Datum) 0;
 }
 
 PG_FUNCTION_INFO_V1(gp_dtx_map);

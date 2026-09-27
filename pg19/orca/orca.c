@@ -69,7 +69,9 @@
 
 #include "access/htup_details.h"
 #include "access/table.h"
+#include "catalog/namespace.h"
 #include "catalog/pg_aggregate.h"
+#include "catalog/pg_collation.h"
 #include "catalog/pg_namespace.h"
 #include "catalog/pg_proc.h"
 #include "catalog/pg_type.h"
@@ -84,6 +86,7 @@
 #include "parser/parse_relation.h"
 #include "parser/parsetree.h"
 #include "rewrite/rewriteManip.h"
+#include "utils/builtins.h"
 #include "utils/fmgroids.h"
 #include "utils/lsyscache.h"
 #include "utils/rel.h"
@@ -1096,6 +1099,77 @@ testexpr_marker_index(Node *testexpr)
 
 static Node *fold_constants_mutator(Node *node, void *context);
 
+/*
+ * NOT IN CLOUDBERRY.  A constant that is a record of no declared type, which
+ * folding makes of a parameter -- a PL/pgSQL record's field -- or of an
+ * immutable function's call, carries the coordinator's typmod for its row
+ * type, which a segment evaluating it in a slice has never registered;
+ * Cloudberry sends the segments its row types with the plan.  The port puts
+ * a call of gp_internal.record_from_wire() in its place, with record_wire's
+ * text of it, which makes the value again of a row type registered wherever
+ * it is evaluated (gp_core's gp_record.c).  Where gp_core has neither, the
+ * constant stays.
+ */
+typedef struct record_consts_context
+{
+	Oid			from_wire;		/* gp_internal.record_from_wire(text) */
+	Oid			wire_out;		/* record_wire's output function */
+} record_consts_context;
+
+static Node *
+record_consts_mutator(Node *node, void *context)
+{
+	record_consts_context *rcontext = (record_consts_context *) context;
+
+	if (node == NULL)
+		return NULL;
+
+	/* A subquery is folded on its own, level by level. */
+	if (IsA(node, Query))
+		return node;
+
+	if (IsA(node, Const) && ((Const *) node)->consttype == RECORDOID &&
+		!((Const *) node)->constisnull)
+	{
+		Const	   *c = (Const *) node;
+		char	   *hex;
+
+		if (!OidIsValid(rcontext->from_wire))
+		{
+			Oid			nsp = get_namespace_oid("gp_internal", true);
+			Oid			wire;
+			bool		isvarlena;
+
+			if (!OidIsValid(nsp))
+				return node;
+			rcontext->from_wire =
+				GetSysCacheOid3(PROCNAMEARGSNSP, Anum_pg_proc_oid,
+								CStringGetDatum("record_from_wire"),
+								PointerGetDatum(buildoidvector((Oid[]) {TEXTOID}, 1)),
+								ObjectIdGetDatum(nsp));
+			wire = GetSysCacheOid2(TYPENAMENSP, Anum_pg_type_oid,
+								   CStringGetDatum("record_wire"),
+								   ObjectIdGetDatum(nsp));
+			if (!OidIsValid(rcontext->from_wire) || !OidIsValid(wire))
+			{
+				rcontext->from_wire = InvalidOid;
+				return node;
+			}
+			getTypeOutputInfo(wire, &rcontext->wire_out, &isvarlena);
+		}
+		hex = OidOutputFunctionCall(rcontext->wire_out, c->constvalue);
+		return (Node *) makeFuncExpr(rcontext->from_wire, RECORDOID,
+									 list_make1(makeConst(TEXTOID, -1,
+														  DEFAULT_COLLATION_OID, -1,
+														  CStringGetTextDatum(hex),
+														  false, false)),
+									 InvalidOid, DEFAULT_COLLATION_OID,
+									 COERCE_EXPLICIT_CALL);
+	}
+
+	return expression_tree_mutator(node, record_consts_mutator, context);
+}
+
 static bool
 detach_testexprs_walker(Node *node, void *context)
 {
@@ -1181,6 +1255,11 @@ fold_constants_mutator(Node *node, void *context)
 
 	(void) detach_testexprs_walker(node, &fcontext);
 	node = eval_const_expressions(root, node);
+	{
+		record_consts_context rcontext = {InvalidOid, InvalidOid};
+
+		node = record_consts_mutator(node, &rcontext);
+	}
 
 	return reattach_testexprs_mutator(node, &fcontext);
 }

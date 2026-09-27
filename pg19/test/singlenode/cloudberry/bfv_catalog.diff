@@ -8,17 +8,12 @@
 -(1 row)
 +(2 rows)
 @@
-+ERROR:  relation "pg_stat_last_operation" does not exist
-+LINE 1: delete from pg_stat_last_operation
-+                    ^
-@@
-+ERROR:  relation "pg_stat_last_operation" does not exist
++WARNING:  skipping "pg_stat_last_operation" --- cannot vacuum non-tables or special system tables
 @@
 - classid  |         objid          | staactionname | stasubtype 
 -----------+------------------------+---------------+------------
 - pg_class | pg_stat_last_operation | VACUUM        | FULL
 -(1 row)
--
-+ERROR:  relation "pg_stat_last_operation" does not exist
-+LINE 1: ..., objid::regclass, staactionname, stasubtype from pg_stat_la...
-+                                                             ^
++ classid | objid | staactionname | stasubtype 
++---------+-------+---------------+------------
++(0 rows)

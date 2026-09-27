@@ -73,6 +73,17 @@
  * one that aggregates, and one with a column of an outer query or a
  * subquery that reads the row, which only the coordinator could answer.
  *
+ * A function that runs on all segments, EXECUTE ON ALL SEGMENTS, is asked of
+ * them the same way.  Called in FROM, its call becomes one of
+ * gp_internal.segment_query() with the text of a query of its rows alone,
+ * which each segment answers with its own, as Cloudberry's Function Scan in a
+ * slice of every segment does; called in the target list of a query of no
+ * relation, the query is one each segment answers once, as a query of
+ * gp_dist_random('gp_id') is; and called in the target list of a query that
+ * reads a relation, it is refused, as Cloudberry refuses it.  The port's own
+ * such functions, which send their call to the segments themselves, answer
+ * the same either way.
+ *
  * pg_catalog.pg_locks has Cloudberry's three columns the same way, where
  * PostgreSQL 19's view has none of them: gp_segment_id, segment_of() of its
  * row, which is this node's content id, the node whose locks it lists; and
@@ -84,6 +95,10 @@
  * the coordinator's does not gather the segments'.  And pg_stat_activity has
  * Cloudberry's sess_id the same way, activity_session() of its row, the
  * coordinator session the backend works for, as lock_session() gives it.
+ * And pg_proc has Cloudberry's prodataaccess and proexeclocation the same
+ * way, proc_data_access() and proc_exec_location() of its row: what the
+ * function does with SQL and where it runs, which the "gp" label keeps
+ * (gp_sql's funcattr.c).
  * A view its module labels a catalog ("gp" label key catalog) has
  * gp_segment_id too: it stands for a catalog table of Cloudberry's --
  * gp_ao's pg_appendonly and pg_attribute_encoding -- which has it, as every
@@ -119,9 +134,11 @@
 #include "catalog/pg_class.h"
 #include "catalog/pg_collation.h"
 #include "catalog/namespace.h"
+#include "catalog/pg_language.h"
 #include "catalog/pg_namespace.h"
 #include "catalog/pg_proc.h"
 #include "catalog/pg_type.h"
+#include "executor/executor.h"
 #include "executor/tuptable.h"
 #include "funcapi.h"
 #include "miscadmin.h"
@@ -139,6 +156,7 @@
 #include "utils/fmgroids.h"
 #include "utils/inval.h"
 #include "utils/lsyscache.h"
+#include "utils/regproc.h"
 #include "utils/rel.h"
 #include "utils/ruleutils.h"
 #include "utils/snapmgr.h"
@@ -161,6 +179,8 @@
 #define GP_MPPSESSIONID	"mppsessionid"
 #define GP_MPPISWRITER	"mppiswriter"
 #define GP_SESS_ID		"sess_id"
+#define GP_PRODATAACCESS	"prodataaccess"
+#define GP_PROEXECLOCATION	"proexeclocation"
 
 static columnref_fallback_hook_type prev_columnref_fallback_hook = NULL;
 static post_parse_analyze_hook_type prev_post_parse_analyze_hook = NULL;
@@ -187,8 +207,13 @@ static Oid	lock_session_oid = InvalidOid;
 static Oid	lock_writer_oid = InvalidOid;
 static Oid	pg_stat_activity_oid = InvalidOid;
 static Oid	activity_session_oid = InvalidOid;
+static Oid	proc_data_access_oid = InvalidOid;
+static Oid	proc_exec_location_oid = InvalidOid;
+
+static char exec_location(Oid funcid);
 static Oid	segment_query_oid = InvalidOid;
 static Oid	segment_query_values_oid = InvalidOid;
+static Oid	record_wire_oid = InvalidOid;
 
 static void
 invalidate_func_oids(Datum arg, SysCacheIdentifier cacheid, uint32 hashvalue)
@@ -234,6 +259,7 @@ lookup_func_oids(void)
 	segment_query_oid = lookup_func("gp_internal", "segment_query", TEXTOID);
 	segment_query_values_oid = lookup_func_args("gp_internal", "segment_query",
 												(Oid[]) {TEXTOID, ANYOID}, 2);
+	record_wire_oid = lookup_func("gp_internal", "record_wire", RECORDOID);
 	pg_locks_oid = get_relname_relid("pg_locks", PG_CATALOG_NAMESPACE);
 	lock_session_oid = lock_writer_oid = InvalidOid;
 	if (OidIsValid(pg_locks_oid))
@@ -249,6 +275,10 @@ lookup_func_oids(void)
 	if (OidIsValid(pg_stat_activity_oid))
 		activity_session_oid = lookup_func("gp_internal", "activity_session",
 										   get_rel_type_id(pg_stat_activity_oid));
+	proc_data_access_oid = lookup_func("gp_internal", "proc_data_access",
+									   ProcedureRelation_Rowtype_Id);
+	proc_exec_location_oid = lookup_func("gp_internal", "proc_exec_location",
+										 ProcedureRelation_Rowtype_Id);
 	func_oids_valid = true;
 }
 
@@ -376,13 +406,33 @@ nsitem_is_pg_locks(ParseNamespaceItem *nsitem)
 
 /* Is this entry pg_catalog.pg_stat_activity, which has Cloudberry's sess_id? */
 static bool
-nsitem_is_pg_stat_activity(ParseNamespaceItem *nsitem)
+nsitem_is_pg_proc(ParseNamespaceItem *nsitem)
 {
 	RangeTblEntry *rte = nsitem->p_rte;
 
+	return rte->rtekind == RTE_RELATION && rte->relid == ProcedureRelationId;
+}
+
+static bool
+nsitem_is_pg_stat_activity(ParseNamespaceItem *nsitem)
+{
+	RangeTblEntry *rte = nsitem->p_rte;
+	Node	   *f;
+
 	lookup_func_oids();
-	return rte->rtekind == RTE_RELATION && OidIsValid(pg_stat_activity_oid) &&
-		rte->relid == pg_stat_activity_oid;
+	if (!OidIsValid(pg_stat_activity_oid))
+		return false;
+	if (rte->rtekind == RTE_RELATION)
+		return rte->relid == pg_stat_activity_oid;
+
+	/* gp_dist_random('pg_stat_activity'): every segment's rows of it */
+	if (rte->rtekind != RTE_FUNCTION || rte->funcordinality ||
+		list_length(rte->functions) != 1 || !OidIsValid(dist_random_oid))
+		return false;
+	f = linitial_node(RangeTblFunction, rte->functions)->funcexpr;
+	return IsA(f, FuncExpr) && ((FuncExpr *) f)->funcid == dist_random_oid &&
+		list_length(((FuncExpr *) f)->args) == 1 &&
+		get_typ_typrelid(exprType(linitial(((FuncExpr *) f)->args))) == pg_stat_activity_oid;
 }
 
 /*
@@ -678,6 +728,18 @@ gp_columnref_fallback(ParseState *pstate, ColumnRef *cref)
 		funcid = activity_session_oid;
 		rettype = INT4OID;
 	}
+	else if (strcmp(name, GP_PRODATAACCESS) == 0 && OidIsValid(proc_data_access_oid))
+	{
+		has = nsitem_is_pg_proc;
+		funcid = proc_data_access_oid;
+		rettype = CHAROID;
+	}
+	else if (strcmp(name, GP_PROEXECLOCATION) == 0 && OidIsValid(proc_exec_location_oid))
+	{
+		has = nsitem_is_pg_proc;
+		funcid = proc_exec_location_oid;
+		rettype = CHAROID;
+	}
 	else
 		return NULL;
 
@@ -722,6 +784,10 @@ gp_deparse_function_as_column(FuncExpr *expr)
 		return GP_MPPISWRITER;
 	if (OidIsValid(activity_session_oid) && expr->funcid == activity_session_oid)
 		return GP_SESS_ID;
+	if (OidIsValid(proc_data_access_oid) && expr->funcid == proc_data_access_oid)
+		return GP_PRODATAACCESS;
+	if (OidIsValid(proc_exec_location_oid) && expr->funcid == proc_exec_location_oid)
+		return GP_PROEXECLOCATION;
 	if (prev_deparse_function_as_column_hook)
 		return prev_deparse_function_as_column_hook(expr);
 	return NULL;
@@ -945,6 +1011,65 @@ gp_activity_session(PG_FUNCTION_ARGS)
 	PG_RETURN_INT32(session);
 }
 
+PG_FUNCTION_INFO_V1(gp_proc_data_access);
+PG_FUNCTION_INFO_V1(gp_proc_exec_location);
+
+/* The function a pg_proc row is. */
+static Oid
+proc_row_oid(HeapTupleHeader row)
+{
+	bool		isnull;
+	Datum		oid = GetAttributeByNum(row, Anum_pg_proc_oid, &isnull);
+
+	return isnull ? InvalidOid : DatumGetObjectId(oid);
+}
+
+/*
+ * gp_internal.proc_data_access(pg_proc): prodataaccess, what the function
+ * does with SQL, as Cloudberry's pg_proc says it -- 'n'o SQL, 'c'ontains
+ * SQL, 'r'eads SQL data or 'm'odifies it -- by the "gp" label's data_access
+ * key, and where it has none by Cloudberry's default: CONTAINS SQL for a
+ * SQL function, NO SQL for any other.
+ */
+Datum
+gp_proc_data_access(PG_FUNCTION_ARGS)
+{
+	HeapTupleHeader row = PG_GETARG_HEAPTUPLEHEADER(0);
+	ObjectAddress addr;
+	char	   *value;
+	bool		isnull;
+	Datum		lang;
+
+	ObjectAddressSet(addr, ProcedureRelationId, proc_row_oid(row));
+	value = GpLabelGet(&addr, GP_LABEL_data_access);
+	if (value == NULL)
+	{
+		lang = GetAttributeByNum(row, Anum_pg_proc_prolang, &isnull);
+		PG_RETURN_CHAR(!isnull && DatumGetObjectId(lang) == SQLlanguageId ? 'c' : 'n');
+	}
+	if (strcmp(value, "none") == 0)
+		PG_RETURN_CHAR('n');
+	if (strcmp(value, "contains") == 0)
+		PG_RETURN_CHAR('c');
+	if (strcmp(value, "reads") == 0)
+		PG_RETURN_CHAR('r');
+	if (strcmp(value, "modifies") == 0)
+		PG_RETURN_CHAR('m');
+	PG_RETURN_NULL();
+}
+
+/*
+ * gp_internal.proc_exec_location(pg_proc): proexeclocation, where the
+ * function runs, as Cloudberry's pg_proc says it -- 'a'ny node, the
+ * 'c'oordinator, an 'i'nitplan, all 's'egments -- by the label's execute_on
+ * key.
+ */
+Datum
+gp_proc_exec_location(PG_FUNCTION_ARGS)
+{
+	PG_RETURN_CHAR(exec_location(proc_row_oid(PG_GETARG_HEAPTUPLEHEADER(0))));
+}
+
 PG_FUNCTION_INFO_V1(gp_dist_random_segments);
 
 /*
@@ -1109,10 +1234,58 @@ carried_value(Node *node)
 }
 
 /*
+ * An x IN (SELECT ...) that reads nothing of the query it is in -- an ANY
+ * subquery of one column, whose test is one operator between x and the
+ * subquery's value -- as x op ANY (ARRAY(SELECT ...)): the same answer,
+ * null where one is, with the subquery a value of ARRAY's kind, which the
+ * coordinator evaluates for the segments.  NULL where it is not that.
+ */
+static ScalarArrayOpExpr *
+any_as_array(SubLink *sublink)
+{
+	OpExpr	   *op;
+	Param	   *value;
+	SubLink    *array;
+	ScalarArrayOpExpr *saop;
+	int			ncols = 0;
+
+	if (sublink->subLinkType != ANY_SUBLINK || sublink->testexpr == NULL ||
+		!IsA(sublink->testexpr, OpExpr) ||
+		contain_vars_of_level(sublink->subselect, 1))
+		return NULL;
+	op = (OpExpr *) sublink->testexpr;
+	if (list_length(op->args) != 2 || !IsA(lsecond(op->args), Param))
+		return NULL;
+	value = (Param *) lsecond(op->args);
+	if (value->paramkind != PARAM_SUBLINK || value->paramid != 1 ||
+		value->paramtype == RECORDOID ||
+		!OidIsValid(get_array_type(value->paramtype)))
+		return NULL;
+	foreach_node(TargetEntry, tle, ((Query *) sublink->subselect)->targetList)
+		if (!tle->resjunk)
+			ncols++;
+	if (ncols != 1)
+		return NULL;
+
+	array = makeNode(SubLink);
+	array->subLinkType = ARRAY_SUBLINK;
+	array->subselect = sublink->subselect;
+	array->location = sublink->location;
+	saop = makeNode(ScalarArrayOpExpr);
+	saop->opno = op->opno;
+	saop->opfuncid = op->opfuncid;
+	saop->useOr = true;
+	saop->inputcollid = op->inputcollid;
+	saop->args = list_make2(linitial(op->args), array);
+	saop->location = op->location;
+	return saop;
+}
+
+/*
  * Is there something in the expression that only the coordinator can
  * answer: a sequence, which the port keeps there; a column of an outer
- * query, or a subquery that is not a value to carry (above); or an
- * aggregate, which a query of this shape does not have anyway?
+ * query, or a subquery that is not a value to carry (above) nor an IN of
+ * one; or an aggregate, which a query of this shape does not have anyway?
  */
 static bool
 coordinator_only_walker(Node *node, void *context)
@@ -1121,6 +1294,9 @@ coordinator_only_walker(Node *node, void *context)
 		return false;
 	if (IsA(node, Var))
 		return ((Var *) node)->varlevelsup > 0;
+	if (IsA(node, SubLink) && any_as_array((SubLink *) node) != NULL)
+		return coordinator_only_walker(linitial(((OpExpr *) ((SubLink *) node)->testexpr)->args),
+									   context);
 	if (IsA(node, Param) || IsA(node, SubLink))
 		return !carried_value(node);
 	if (IsA(node, Aggref) || IsA(node, GroupingFunc) || IsA(node, WindowFunc) ||
@@ -1144,6 +1320,44 @@ coordinator_only_walker(Node *node, void *context)
 }
 
 /*
+ * Can a segment send every column of the target list?  void, what a function
+ * called for what it does answers, travels too, and so does a record of no
+ * declared type, described (gp_internal.record_wire).
+ */
+static bool
+columns_travel(List *tlist)
+{
+	foreach_node(TargetEntry, tle, tlist)
+	{
+		Oid			type = exprType((Node *) tle->expr);
+
+		if (type == RECORDOID && OidIsValid(record_wire_oid))
+			continue;
+		if ((get_typtype(type) == TYPTYPE_PSEUDO && type != VOIDOID) ||
+			GpTransferType(type) != type)
+			return false;
+	}
+	return true;
+}
+
+/*
+ * Is q a SELECT whose rows each segment can make apart, the coordinator only
+ * gathering, sorting, making distinct and limiting them: one with no set
+ * operation, CTE, aggregate, window or grouping, and nothing locked?
+ */
+static bool
+select_alone(Query *q)
+{
+	return q->commandType == CMD_SELECT && q->utilityStmt == NULL &&
+		q->setOperations == NULL && q->cteList == NIL && !q->hasRecursive &&
+		!q->hasModifyingCTE && !q->hasAggs && !q->hasWindowFuncs &&
+		!q->hasForUpdate && q->rowMarks == NIL &&
+		q->groupClause == NIL && q->groupingSets == NIL &&
+		q->havingQual == NULL && q->windowClause == NIL &&
+		q->limitOption != LIMIT_OPTION_WITH_TIES;
+}
+
+/*
  * Is q a SELECT of one gp.dist_random() call, with no aggregate, whose
  * target list or condition calls a function that is not immutable, and
  * whose every column a segment can send?
@@ -1155,13 +1369,7 @@ dist_random_pushable(Query *q)
 	RangeTblFunction *rtfunc;
 	Oid			funcid;
 
-	if (q->commandType != CMD_SELECT || q->utilityStmt != NULL ||
-		q->setOperations != NULL || q->cteList != NIL || q->hasRecursive ||
-		q->hasModifyingCTE || q->hasAggs || q->hasWindowFuncs ||
-		q->hasForUpdate || q->rowMarks != NIL ||
-		q->groupClause != NIL || q->groupingSets != NIL ||
-		q->havingQual != NULL || q->windowClause != NIL ||
-		q->limitOption == LIMIT_OPTION_WITH_TIES)
+	if (!select_alone(q))
 		return false;
 	if (list_length(q->rtable) != 1 || q->jointree == NULL ||
 		list_length(q->jointree->fromlist) != 1 ||
@@ -1184,18 +1392,7 @@ dist_random_pushable(Query *q)
 	if (coordinator_only_walker((Node *) q->targetList, NULL) ||
 		coordinator_only_walker(q->jointree->quals, NULL))
 		return false;
-
-	/* void, what a function called for what it does answers, travels too */
-	foreach_node(TargetEntry, tle, q->targetList)
-	{
-		Oid			type = exprType((Node *) tle->expr);
-
-		if (type == RECORDOID ||
-			(get_typtype(type) == TYPTYPE_PSEUDO && type != VOIDOID) ||
-			GpTransferType(type) != type)
-			return false;
-	}
-	return true;
+	return columns_travel(q->targetList);
 }
 
 /*
@@ -1210,8 +1407,12 @@ typedef struct CarryContext
 static Node *
 carry_mutator(Node *node, CarryContext *context)
 {
+	ScalarArrayOpExpr *saop;
+
 	if (node == NULL)
 		return NULL;
+	if (IsA(node, SubLink) && (saop = any_as_array((SubLink *) node)) != NULL)
+		return carry_mutator((Node *) saop, context);
 	if ((IsA(node, Param) || IsA(node, SubLink)) && carried_value(node))
 	{
 		Param	   *param = makeNode(Param);
@@ -1240,7 +1441,7 @@ carry_mutator(Node *node, CarryContext *context)
 static void
 dist_random_push(Query *q)
 {
-	RangeTblEntry *old = linitial_node(RangeTblEntry, q->rtable);
+	RangeTblEntry *old = q->rtable != NIL ? linitial_node(RangeTblEntry, q->rtable) : NULL;
 	Query	   *sent = copyObject(q);
 	char	   *sql;
 	RangeTblFunction *rtfunc = makeNode(RangeTblFunction);
@@ -1268,6 +1469,11 @@ dist_random_push(Query *q)
 		tle->ressortgroupref = 0;
 		if (tle->resname == NULL)
 			tle->resname = psprintf("gp_c%d", tle->resno);
+		/* a record of no declared type is sent with its row type described */
+		if (exprType((Node *) tle->expr) == RECORDOID)
+			tle->expr = (Expr *) makeFuncExpr(record_wire_oid, GpRecordWireType(),
+											  list_make1(tle->expr), InvalidOid,
+											  InvalidOid, COERCE_EXPLICIT_CALL);
 	}
 	sql = pg_get_querydef(sent, false);
 
@@ -1308,7 +1514,8 @@ dist_random_push(Query *q)
 
 	rte->rtekind = RTE_FUNCTION;
 	rte->functions = list_make1(rtfunc);
-	rte->eref = makeAlias(old->eref->aliasname, copyObject(names));
+	rte->eref = makeAlias(old != NULL ? old->eref->aliasname : "gp_segments",
+						  copyObject(names));
 	rte->inFromCl = true;
 
 	q->rtable = list_make1(rte);
@@ -1324,6 +1531,189 @@ dist_random_push(Query *q)
 			q->hasSubLinks = true;
 }
 
+/* ------------------------------------------------------------------------- */
+/* A function that runs on all segments: EXECUTE ON ALL SEGMENTS              */
+/* ------------------------------------------------------------------------- */
+
+/*
+ * Where a set-returning function runs, by the execute_on key of its "gp"
+ * label, which gp_sql writes for EXECUTE ON (funcattr.c): 'a'ny node, the
+ * 'c'oordinator, an 'i'nitplan, or all 's'egments -- Cloudberry's
+ * pg_proc.proexeclocation.  Only a set-returning function has any but ANY,
+ * as Cloudberry takes it on no other.
+ */
+static char
+exec_location(Oid funcid)
+{
+	ObjectAddress addr;
+	char	   *value;
+
+	ObjectAddressSet(addr, ProcedureRelationId, funcid);
+	value = GpLabelGet(&addr, GP_LABEL_execute_on);
+	if (value == NULL || pg_strcasecmp(value, "any") == 0)
+		return 'a';
+	if (pg_strcasecmp(value, "all_segments") == 0)
+		return 's';
+	if (pg_strcasecmp(value, "coordinator") == 0 ||
+		pg_strcasecmp(value, "master") == 0)
+		return 'c';
+	if (pg_strcasecmp(value, "initplan") == 0)
+		return 'i';
+	ereport(ERROR,
+			(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+			 errmsg("unrecognized \"execute_on\" value \"%s\" on function %s",
+					value, format_procedure(funcid))));
+	pg_unreachable();
+}
+
+/* Does the expression, at its own level, call a function that runs on all segments? */
+static bool
+all_segments_walker(Node *node, void *context)
+{
+	if (node == NULL)
+		return false;
+	if (IsA(node, Query))
+		return false;
+	if (IsA(node, FuncExpr) && ((FuncExpr *) node)->funcretset &&
+		exec_location(((FuncExpr *) node)->funcid) == 's')
+		return true;
+	return expression_tree_walker(node, all_segments_walker, context);
+}
+
+/*
+ * A call in FROM of a function that runs on all segments -- one function,
+ * with arguments that read no column of the query -- made a call of
+ * gp_internal.segment_query() with the text of a query of the function's
+ * rows alone, which each segment answers with its own, as Cloudberry's Function
+ * Scan in a slice of every segment does.  An argument the coordinator
+ * evaluates for the segments -- a parameter, a subquery of its own -- is
+ * carried as a query of gp_dist_random() alone carries one.  WITH ORDINALITY
+ * numbers the rows here, gathered.  A call whose arguments read another
+ * relation's columns is left where it was, on the coordinator, as are the
+ * functions of the port's own that send their call to the segments
+ * themselves (GpDispatchFunctionToSegments()).
+ */
+static void
+all_segments_rte(RangeTblEntry *rte)
+{
+	RangeTblFunction *rtfunc = linitial_node(RangeTblFunction, rte->functions);
+	RangeTblFunction *call = makeNode(RangeTblFunction);
+	RangeTblEntry *srte;
+	RangeTblRef *rtr = makeNode(RangeTblRef);
+	Query	   *sent = makeNode(Query);
+	CarryContext carry = {NIL};
+	List	   *colnames;
+	List	   *colvars;
+	ListCell   *ln;
+	ListCell   *lv;
+	FuncExpr   *fexpr;
+	int			n = 0;
+
+	if (contain_vars_of_level(rtfunc->funcexpr, 0) ||
+		coordinator_only_walker(rtfunc->funcexpr, NULL))
+		return;
+
+	/* the query the segments answer: the function's rows, each column */
+	srte = copyObject(rte);
+	srte->funcordinality = false;
+	srte->lateral = false;
+	expandRTE(srte, 1, 0, VAR_RETURNING_DEFAULT, -1, true, &colnames, &colvars);
+	foreach_ptr(Node, expr, colvars)
+	{
+		Oid			type = exprType(expr);
+
+		if (type == RECORDOID ? !OidIsValid(record_wire_oid)
+			: (get_typtype(type) == TYPTYPE_PSEUDO && type != VOIDOID) ||
+			GpTransferType(type) != type)
+			return;
+	}
+	linitial_node(RangeTblFunction, srte->functions)->funcexpr =
+		carry_mutator(rtfunc->funcexpr, &carry);
+	sent->commandType = CMD_SELECT;
+	sent->querySource = QSRC_ORIGINAL;
+	sent->canSetTag = true;
+	sent->rtable = list_make1(srte);
+	rtr->rtindex = 1;
+	sent->jointree = makeFromExpr(list_make1(rtr), NULL);
+	forboth(ln, colnames, lv, colvars)
+	{
+		Node	   *expr = (Node *) lfirst(lv);
+		Node	   *col = expr;
+
+		n++;
+		/* a record of no declared type is sent with its row type described */
+		if (exprType(expr) == RECORDOID)
+			col = (Node *) makeFuncExpr(record_wire_oid, GpRecordWireType(),
+										list_make1(expr), InvalidOid,
+										InvalidOid, COERCE_EXPLICIT_CALL);
+		sent->targetList = lappend(sent->targetList,
+								   makeTargetEntry((Expr *) col, n,
+												   psprintf("gp_c%d", n), false));
+		call->funccolnames = lappend(call->funccolnames,
+									 makeString(pstrdup(strVal(lfirst(ln))[0] != '\0'
+														? strVal(lfirst(ln))
+														: psprintf("gp_c%d", n))));
+		call->funccoltypes = lappend_oid(call->funccoltypes, exprType(expr));
+		call->funccoltypmods = lappend_int(call->funccoltypmods, exprTypmod(expr));
+		call->funccolcollations = lappend_oid(call->funccolcollations,
+											  exprCollation(expr));
+	}
+
+	/* and the call that asks them for it */
+	fexpr = makeFuncExpr(carry.values != NIL ?
+						 segment_query_values_oid : segment_query_oid,
+						 RECORDOID,
+						 lcons(makeConst(TEXTOID, -1, DEFAULT_COLLATION_OID,
+										 -1,
+										 CStringGetTextDatum(pg_get_querydef(sent, false)),
+										 false, false),
+							   carry.values),
+						 InvalidOid, InvalidOid, COERCE_EXPLICIT_CALL);
+	fexpr->funcretset = true;
+	call->funcexpr = (Node *) fexpr;
+	call->funccolcount = n;
+	rte->functions = list_make1(call);
+}
+
+/*
+ * The functions of q that run on all segments.  One called in FROM is asked
+ * of them (all_segments_rte()); one in the target list of a query of no
+ * relation makes the query one the segments answer, as a query of
+ * gp_dist_random() alone is (dist_random_push()), where each runs it once,
+ * as Cloudberry runs it; and one in the target list of a query that reads a
+ * relation is refused, as Cloudberry refuses it (preprocess_expression()),
+ * for want of a place to run it that is the segments' and the relation's
+ * rows' both.
+ */
+static void
+all_segments_push(Query *q)
+{
+	foreach_node(RangeTblEntry, rte, q->rtable)
+	{
+		FuncExpr   *f;
+
+		if (rte->rtekind != RTE_FUNCTION || list_length(rte->functions) != 1 ||
+			!IsA(linitial_node(RangeTblFunction, rte->functions)->funcexpr, FuncExpr))
+			continue;
+		f = (FuncExpr *) linitial_node(RangeTblFunction, rte->functions)->funcexpr;
+		if (f->funcretset && exec_location(f->funcid) == 's')
+			all_segments_rte(rte);
+	}
+
+	if (q->commandType != CMD_SELECT ||
+		!all_segments_walker((Node *) q->targetList, NULL))
+		return;
+	if (q->rtable != NIL)
+		ereport(ERROR,
+				(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+				 errmsg("function with EXECUTE ON restrictions cannot be used in the SELECT list of a query with FROM")));
+	if (select_alone(q) && q->jointree != NULL &&
+		!coordinator_only_walker((Node *) q->targetList, NULL) &&
+		!coordinator_only_walker(q->jointree->quals, NULL) &&
+		columns_travel(q->targetList))
+		dist_random_push(q);
+}
+
 static bool
 push_dist_random_walker(Node *node, void *context)
 {
@@ -1336,6 +1726,8 @@ push_dist_random_walker(Node *node, void *context)
 		(void) query_tree_walker(q, push_dist_random_walker, context, 0);
 		if (dist_random_pushable(q))
 			dist_random_push(q);
+		else
+			all_segments_push(q);
 		return false;
 	}
 	return expression_tree_walker(node, push_dist_random_walker, context);

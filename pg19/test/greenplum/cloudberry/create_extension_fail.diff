@@ -1,0 +1,5 @@
+@@
++CONTEXT:  SQL statement "CREATE FUNCTION gp_debug_set_create_table_default_numsegments(text) RETURNS text
++AS '$libdir/gp_sql', 'gp_debug_set_create_table_default_numsegments'
++LANGUAGE C STRICT"
++extension script file "gp_debug_numsegments--1.0.sql", near line 17

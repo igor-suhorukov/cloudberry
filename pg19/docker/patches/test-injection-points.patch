@@ -17,13 +17,16 @@ under the License.
 
 Injection points for the port's tests, at five of Apache Cloudberry's
 faults inside PostgreSQL's own replication code, which its FTS tests in
-isolation2 hold or count (src/test/isolation2/sql/segwalrep):
+isolation2 hold or count (src/test/isolation2/sql/segwalrep), and one at
+the start of a simple query, which dtx_recovery_wait_lsn there fails the
+coordinator at:
 
-  wal-sender-loop        walsender.c, WalSndLoop()        wal_sender_loop
-  wal-sender-after-send  walsender.c, WalSndLoop()        wal_sender_after_caughtup_within_range
-  walrecv-skip-flush     walreceiver.c, XLogWalRcvFlush() walrecv_skip_flush
-  sync-rep-query-die     syncrep.c, SyncRepWaitForLSN()   sync_rep_query_die
-  sync-rep-query-cancel  syncrep.c, SyncRepWaitForLSN()   sync_rep_query_cancel
+  wal-sender-loop          walsender.c, WalSndLoop()        wal_sender_loop
+  wal-sender-after-send    walsender.c, WalSndLoop()        wal_sender_after_caughtup_within_range
+  walrecv-skip-flush       walreceiver.c, XLogWalRcvFlush() walrecv_skip_flush
+  sync-rep-query-die       syncrep.c, SyncRepWaitForLSN()   sync_rep_query_die
+  sync-rep-query-cancel    syncrep.c, SyncRepWaitForLSN()   sync_rep_query_cancel
+  exec-simple-query-start  postgres.c, exec_simple_query()  exec_simple_query_start
 
 gp_core's fault injector attaches a fault of Cloudberry's name to the point
 (gp_fault.c); walrecv-skip-flush is given a bool its callback sets to skip
@@ -123,3 +126,15 @@ point nothing attached to runs no callback.
  		/* If nothing remains to be sent right now ... */
  		if (WalSndCaughtUp && !pq_is_send_pending())
  		{
+--- a/src/backend/tcop/postgres.c
++++ b/src/backend/tcop/postgres.c
+@@ -1037,6 +1037,9 @@
+ 	bool		use_implicit_block;
+ 	char		msec_str[32];
+ 
++	/* A test may fail the backend here, before it takes in the query. */
++	INJECTION_POINT("exec-simple-query-start", NULL);
++
+ 	/*
+ 	 * Report query to various monitoring facilities.
+ 	 */

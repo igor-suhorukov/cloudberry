@@ -86,7 +86,9 @@ static const char *const fault_type_names[] = {
  * gp.repl_catchup_within_range, which the port looks at from outside
  * (gp_standby.c, gp_fts.c) -- a standby's flush -- which a "skip" fault
  * skips, the point giving its callback a bool to set -- and a commit's wait
- * for its standby, as it goes on and as a cancel comes.
+ * for its standby, as it goes on and as a cancel comes.  And the start of a
+ * simple query (exec_simple_query()), which a test fails the coordinator
+ * at, the tests' build's too.
  */
 static const struct
 {
@@ -101,6 +103,7 @@ static const struct
 	{"walrecv_skip_flush", "walrecv-skip-flush", true},
 	{"sync_rep_query_die", "sync-rep-query-die", false},
 	{"sync_rep_query_cancel", "sync-rep-query-cancel", false},
+	{"exec_simple_query_start", "exec-simple-query-start", false},
 };
 
 /* The injection point a fault is attached to: its own name, or PostgreSQL's. */

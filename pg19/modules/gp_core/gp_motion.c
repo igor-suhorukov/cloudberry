@@ -115,6 +115,7 @@
 #include "nodes/extensible.h"
 #include "nodes/makefuncs.h"
 #include "nodes/nodeFuncs.h"
+#include "nodes/print.h"
 #include "optimizer/optimizer.h"
 #include "optimizer/planner.h"
 #include "pgstat.h"
@@ -1818,28 +1819,64 @@ motion_begin(CustomScanState *node, EState *estate, int eflags)
  * with it as the tree, and the key its Motions' rows are kept under.
  */
 /*
- * A parameter's value as a Const, whole: a varlena detoasted and an expanded
- * object flattened, so that nodeToString() writes the value itself.
+ * A parameter as a fragment is sent it: its kind, its number, and its value
+ * as a Const, whole -- a varlena detoasted and an expanded object flattened,
+ * so that nodeToString() writes the value itself.  A record of no declared
+ * type is described by a typmod this backend registered, which a segment
+ * has never heard of: it goes as a bytea of its row type described and its
+ * columns (gp_record.c), and a fourth member of the entry says so, for the
+ * segment to make it again (param_value()).
  */
-static Const *
-param_const(Oid type, Datum value, bool isnull)
+static List *
+param_entry(int kind, int id, Oid type, Datum value, bool isnull)
 {
 	int16		typlen;
 	bool		typbyval;
 
-	/*
-	 * A record of no declared type is described by a typmod this backend
-	 * registered, which a segment has never heard of.
-	 */
-	if (type == RECORDOID)
-		ereport(ERROR,
-				(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
-				 errmsg("a value of an anonymous record type cannot be sent to the segments")));
+	if (type == RECORDOID && !isnull)
+	{
+		StringInfoData buf;
+		bytea	   *wire;
+
+		initStringInfo(&buf);
+		GpRecordWireWrite(&buf, value);
+		wire = (bytea *) palloc(VARHDRSZ + buf.len);
+		SET_VARSIZE(wire, VARHDRSZ + buf.len);
+		memcpy(VARDATA(wire), buf.data, buf.len);
+		return list_make4(makeInteger(kind), makeInteger(id),
+						  makeConst(BYTEAOID, -1, InvalidOid, -1,
+									PointerGetDatum(wire), false, false),
+						  makeBoolean(true));
+	}
 
 	get_typlenbyval(type, &typlen, &typbyval);
 	if (!isnull && typlen == -1)
 		value = PointerGetDatum(PG_DETOAST_DATUM_COPY(value));
-	return makeConst(type, -1, InvalidOid, typlen, value, isnull, typbyval);
+	return list_make3(makeInteger(kind), makeInteger(id),
+					  makeConst(type, -1, InvalidOid, typlen, value, isnull,
+								typbyval));
+}
+
+/*
+ * On a segment, a parameter's value and type as the entry has them: a
+ * record sent described made again, of a row type registered here.
+ */
+static Datum
+param_value(List *entry, Oid *type)
+{
+	Const	   *c = (Const *) lthird(entry);
+
+	*type = c->consttype;
+	if (list_length(entry) > 3 && !c->constisnull)
+	{
+		bytea	   *wire = DatumGetByteaPP(c->constvalue);
+		StringInfoData buf;
+
+		initReadOnlyStringInfo(&buf, VARDATA_ANY(wire), VARSIZE_ANY_EXHDR(wire));
+		*type = RECORDOID;
+		return GpRecordWireRead(&buf);
+	}
+	return c->constvalue;
 }
 
 /*
@@ -1869,8 +1906,7 @@ fragment_params(EState *estate, CustomScan *motion, ExprContext *econtext)
 		if (prm->execPlan != NULL)
 			ExecSetParamPlan((SubPlanState *) prm->execPlan, econtext);
 		result = lappend(result,
-						 list_make3(makeInteger(PARAM_EXEC), makeInteger(id),
-									param_const(type, prm->value, prm->isnull)));
+						 param_entry(PARAM_EXEC, id, type, prm->value, prm->isnull));
 	}
 
 	foreach(lc, (List *) list_nth(priv, MOTION_PRIVATE_EXTERN_PARAMS))
@@ -1889,8 +1925,8 @@ fragment_params(EState *estate, CustomScan *motion, ExprContext *econtext)
 		if (!OidIsValid(prm->ptype))
 			elog(ERROR, "parameter $%d has no type to send it as", id);
 		result = lappend(result,
-						 list_make3(makeInteger(PARAM_EXTERN), makeInteger(id),
-									param_const(prm->ptype, prm->value, prm->isnull)));
+						 param_entry(PARAM_EXTERN, id, prm->ptype, prm->value,
+									 prm->isnull));
 	}
 
 	return result;
@@ -1934,10 +1970,9 @@ fragment_params_before_start(QueryDesc *queryDesc, List *params)
 		if (intVal(linitial(entry)) != PARAM_EXTERN)
 			continue;
 		prm = &list->params[intVal(lsecond(entry)) - 1];
-		prm->value = c->constvalue;
+		prm->value = param_value(entry, &prm->ptype);
 		prm->isnull = c->constisnull;
 		prm->pflags = PARAM_FLAG_CONST;
-		prm->ptype = c->consttype;
 	}
 	queryDesc->params = list;
 }
@@ -1960,8 +1995,15 @@ fragment_params_after_start(QueryDesc *queryDesc, List *params)
 		prm = &estate->es_param_exec_vals[intVal(lsecond(entry))];
 		prm->execPlan = NULL;
 		prm->isnull = c->constisnull;
-		prm->value = c->constisnull ? (Datum) 0
-			: datumCopy(c->constvalue, c->constbyval, c->constlen);
+		if (list_length(entry) > 3)
+		{
+			Oid			type;
+
+			prm->value = c->constisnull ? (Datum) 0 : param_value(entry, &type);
+		}
+		else
+			prm->value = c->constisnull ? (Datum) 0
+				: datumCopy(c->constvalue, c->constbyval, c->constlen);
 	}
 	MemoryContextSwitchTo(oldcxt);
 }
@@ -3748,6 +3790,25 @@ fragment_plan(const char *payload, const char *key)
 			lfirst_node(TargetEntry, lc)->resjunk = false;
 
 	/*
+	 * A column that is a record of no declared type goes to the coordinator
+	 * as gp_internal.record_wire, its row type described, which is what the
+	 * Motion there reads it as (gp_record.c): relabelled, which leaves the
+	 * value as it is and gives the portal that type's send function.  A
+	 * reader's fragment is its Motion, which sends so itself.
+	 */
+	if (stmt->commandType == CMD_SELECT && !GpMotionIs(stmt->planTree) &&
+		OidIsValid(GpRecordWireType()))
+		foreach(lc, stmt->planTree->targetlist)
+		{
+			TargetEntry *tle = lfirst_node(TargetEntry, lc);
+
+			if (exprType((Node *) tle->expr) == RECORDOID)
+				tle->expr = (Expr *) makeRelabelType(tle->expr, GpRecordWireType(),
+													 -1, InvalidOid,
+													 COERCE_IMPLICIT_CAST);
+		}
+
+	/*
 	 * A segment runs a slice in one process.  The fragment is a copy of the
 	 * coordinator's whole statement, which may need parallel mode for a
 	 * part the coordinator runs; this part starts no workers, and a reader,
@@ -3760,6 +3821,11 @@ fragment_plan(const char *payload, const char *key)
 									makeDefElem(pstrdup(GP_FRAGMENT_MARK),
 												(Node *) makeString(pstrdup(key)),
 												-1));
+
+	/* the slice table, as Cloudberry's segment logs it as it starts its own */
+	if (gp_debug_print_slice_table &&
+		fragment_mark(stmt, GP_SLICE_TABLE) != NULL)
+		elog_node_display(DEBUG3, "slice table", fragment_mark(stmt, GP_SLICE_TABLE), true);
 	return stmt;
 }
 
@@ -3788,6 +3854,8 @@ typedef struct SliceReport
 	int			below;
 	bool		single;
 	List	   *contents;		/* direct dispatch's segments, if several */
+	int			content;		/* a single process's segment; -1 the coordinator */
+	int			nsegs;			/* how many run it, the first so many */
 } SliceReport;
 
 static int
@@ -3813,6 +3881,10 @@ report_slices(PlannedStmt *stmt)
 	int			nreports = 0;
 	ListCell   *lc;
 
+	/* the slice table, as Cloudberry's executor logs it (execMain.c) */
+	if (gp_debug_print_slice_table && table != NIL)
+		elog_node_display(DEBUG3, "slice table", table, true);
+
 	if (!gp_test_print_direct_dispatch_info || table == NIL)
 		return;
 
@@ -3833,6 +3905,7 @@ report_slices(PlannedStmt *stmt)
 		int			index = intVal(linitial(slice));
 		int			gang = intVal(list_nth(slice, 2));
 		int			nsegs = intVal(list_nth(slice, 3));
+		int			segindex = intVal(list_nth(slice, 4));
 		int			direct = intVal(list_nth(slice, 5));
 		List	   *several = list_length(slice) > 6 ? (List *) list_nth(slice, 6) : NIL;
 		SliceReport *r;
@@ -3847,6 +3920,8 @@ report_slices(PlannedStmt *stmt)
 		r->single = gang == 1 || gang == 2 || direct >= 0 || nsegs == 1;
 		r->size = r->single ? 1 : several != NIL ? list_length(several) : nsegs;
 		r->contents = several;
+		r->content = direct >= 0 ? direct : gang == 1 ? -1 : Max(segindex, 0);
+		r->nsegs = nsegs;
 		for (int i = 0; i < n; i++)
 			for (int p = parent[i]; p >= 0 && p < n && p != i; p = parent[p])
 				if (p == index)
@@ -3867,9 +3942,17 @@ report_slices(PlannedStmt *stmt)
 			foreach_int(c, reports[i].contents)
 				contents[ncontents++] = c;
 			GpReportDispatchContents(reports[i].index, contents, ncontents);
+			GpReportDtxReached(stmt, contents, ncontents);
 		}
 		else
+		{
 			GpReportDispatch(reports[i].index, reports[i].single, 0);
+			/* an entry slice runs on the coordinator, which is no segment */
+			if (!reports[i].single)
+				GpReportDtxReached(stmt, NULL, reports[i].nsegs);
+			else if (reports[i].content >= 0)
+				GpReportDtxReached(stmt, &reports[i].content, 1);
+		}
 	}
 }
 

@@ -98,6 +98,9 @@ extern struct PlannedStmt *GpOrcaOptimize(struct Query *query,
  */
 extern int	GpOrcaXformCount(void);
 
+/* The version of the Xerces-C library the DXL parser is linked against. */
+extern const char *GpOrcaXercesVersion(void);
+
 /* One past the largest transformation-rule id, for walking the id space. */
 extern int	GpOrcaXformIdLimit(void);
 

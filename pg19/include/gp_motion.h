@@ -48,6 +48,12 @@
 #define GP_MOTION_FROM_COORDINATOR	(-2)
 
 /*
+ * How many readers a segment takes for one session (gp_dispatch.c): the
+ * slices of a statement it runs at once, less the one its writer runs.
+ */
+#define GP_MAX_READERS_PER_SEGMENT	64
+
+/*
  * On a statement's PlannedStmt, a DefElem of its extension_state that ORCA's
  * translator adds: for each of the statement's subplans, in order, the slice
  * that calls it -- where its own part, above any Motion in it, runs -- in an

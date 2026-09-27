@@ -47,6 +47,7 @@
 #include "catalog/pg_class.h"
 #include "catalog/pg_database.h"
 #include "catalog/pg_namespace.h"
+#include "catalog/pg_proc.h"
 #include "catalog/pg_tablespace.h"
 #include "commands/dbcommands.h"
 #include "commands/defrem.h"
@@ -1683,6 +1684,71 @@ gp_sql_ProcessUtility(PlannedStmt *pstmt, const char *queryString,
 			load_external_function("$libdir/gp_exttable", "GpExtTableTransformCreate",
 								   true, NULL);
 		transform((CreateForeignTableStmt *) parsetree, queryString);
+	}
+
+	/*
+	 * CREATE AGGREGATE's options of Cloudberry's own (DefineAggregate(),
+	 * commands/aggregatecmds.c): prefunc, the name Greenplum 5 and before
+	 * gave combinefunc, which Cloudberry still takes for it; and repsafe,
+	 * that the aggregate may run in a replicated table's slice --
+	 * pg_aggregate.aggrepsafeexec there, the "gp" label's replicate_safe
+	 * flag here, which ORCA reads (is_agg_repsafe()).
+	 */
+	if (IsA(parsetree, DefineStmt) &&
+		((DefineStmt *) parsetree)->kind == OBJECT_AGGREGATE)
+	{
+		bool		cloudberrys = false;
+		int			repsafe = -1;
+
+		foreach_node(DefElem, def, ((DefineStmt *) parsetree)->definition)
+			cloudberrys |= pg_strcasecmp(def->defname, "prefunc") == 0 ||
+				pg_strcasecmp(def->defname, "repsafe") == 0;
+		if (cloudberrys)
+		{
+			List	   *kept = NIL;
+
+			if (readOnlyTree)
+			{
+				pstmt = copyObject(pstmt);
+				parsetree = pstmt->utilityStmt;
+				readOnlyTree = false;
+			}
+			foreach_node(DefElem, d, ((DefineStmt *) parsetree)->definition)
+			{
+				if (pg_strcasecmp(d->defname, "prefunc") == 0)
+					d->defname = pstrdup("combinefunc");
+				if (pg_strcasecmp(d->defname, "repsafe") == 0)
+					repsafe = defGetBoolean(d) ? 1 : 0;
+				else
+					kept = lappend(kept, d);
+			}
+			((DefineStmt *) parsetree)->definition = kept;
+		}
+		if (repsafe >= 0)
+		{
+			GpSqlPending save;
+			volatile Oid aggOid = InvalidOid;
+			ObjectAddress addr;
+
+			GpSqlPendingArm(&save);
+			PG_TRY();
+			{
+				GpSqlProcessUtilityNext(pstmt, queryString, readOnlyTree,
+										context, params, queryEnv, dest, qc);
+				aggOid = GpSqlPendingFirst(ProcedureRelationId);
+			}
+			PG_FINALLY();
+			{
+				GpSqlPendingRestore(&save);
+			}
+			PG_END_TRY();
+			if (!OidIsValid(aggOid))
+				elog(ERROR, "gp_sql: the aggregate the statement made was not found");
+			CommandCounterIncrement();
+			ObjectAddressSet(addr, ProcedureRelationId, aggOid);
+			GpLabelSet(&addr, GP_LABEL_replicate_safe, repsafe ? "" : NULL);
+			return;
+		}
 	}
 
 	/* a statement of an extension's script, as PostGIS's is (extscript.c) */

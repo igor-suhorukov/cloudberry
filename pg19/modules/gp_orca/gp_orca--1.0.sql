@@ -25,6 +25,12 @@ LANGUAGE C STRICT;
 COMMENT ON FUNCTION gp_orca.version() IS
 	'which ORCA is linked in, and whether it has been brought up here';
 
+/* Cloudberry's gp_opt_version(): the optimizer's and Xerces-C's versions. */
+CREATE FUNCTION pg_catalog.gp_opt_version()
+RETURNS text
+AS 'MODULE_PATHNAME', 'gp_opt_version'
+LANGUAGE C STRICT;
+
 /*
  * Every transformation rule this ORCA carries, by name.
  *

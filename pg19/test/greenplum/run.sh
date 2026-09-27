@@ -82,14 +82,22 @@ PRELOAD='gp_core,gp_orca,gp_sql,gp_ao,gp_exttable,gp_security,gp_resource'
 SECRET="greenplum-schedule-$RANDOM$RANDOM$RANDOM"
 
 # The tests the manifest runs -- Cloudberry's, and the port's (port:name)
-# among them where it puts them -- in its order, and the group each is in;
-# the groups, in the order they first appear.
-run_tests=(); run_group=()
-while read -r kind t g; do
+# among them where it puts them -- in its order, the group each is in, and
+# the pass it runs in where its line names one ("-" for both); the groups,
+# in the order they first appear.
+run_tests=(); run_group=(); run_pass=()
+while read -r kind t g p; do
 	[ "$kind" = port ] && t="port:$t"
-	run_tests+=("$t"); run_group+=("$g")
+	run_tests+=("$t"); run_group+=("$g"); run_pass+=("$p")
 done < <(awk '$1 == "group" { g = $2 }
-			  $1 == "run" || $1 == "port" { print $1, $2, (g == "" ? "main" : g) }' "$HERE/manifest")
+			  $1 == "run" || $1 == "port" {
+				  print $1, $2, (g == "" ? "main" : g), ($1 == "run" && NF > 2 ? $3 : "-") }' "$HERE/manifest")
+for p in "${run_pass[@]}"; do
+	case "$p" in
+		-|planner|orca) ;;
+		*) echo "greenplum: a run line of the manifest names the pass \"$p\", which is none" >&2; exit 1 ;;
+	esac
+done
 groups=()
 for g in "${run_group[@]}"; do
 	[[ " ${groups[*]} " == *" $g "* ]] || groups+=("$g")
@@ -120,9 +128,10 @@ cleanup() {
 trap cleanup EXIT
 
 echo "greenplum: part of Cloudberry's greenplum_schedule, on a coordinator and three segments"
-printf '  of the %d tests of the schedule the manifest lists: %d run here, in %d groups, %d are skipped\n' \
+printf '  of the %d tests of the schedule the manifest lists: %d run here, %d of them in one pass, in %d groups, %d are skipped\n' \
 	"$(awk '$1 == "run" || $1 == "skip"' "$HERE/manifest" | wc -l)" \
-	"$(awk '$1 == "run"' "$HERE/manifest" | wc -l)" "${#groups[@]}" \
+	"$(awk '$1 == "run"' "$HERE/manifest" | wc -l)" \
+	"$(awk '$1 == "run" && NF > 2' "$HERE/manifest" | wc -l)" "${#groups[@]}" \
 	"$(awk '$1 == "skip"' "$HERE/manifest" | wc -l)"
 echo
 
@@ -181,9 +190,10 @@ t1=$(date +%s)
 # (../respell.pl); the singlenode suite says how.
 {
 	# the column SHOW names, read as a row's field; SET, RESET and SHOW;
-	# current_setting() and set_config(); and SHOW's header, the same width
-	# spelled either way (see the singlenode suite)
-	echo "kinds field set func header"
+	# current_setting() and set_config(); SHOW's header, the same width
+	# spelled either way (see the singlenode suite); and an error's naming
+	# of a setting, parameter "gp_..."
+	echo "kinds field set func header param"
 	PGHOST="$(node_sock "${groups[0]}" 0)" PGPORT="$(node_port 0 0)" \
 	"$PSQL" -X -q -t -A -d postgres -c "SELECT name FROM pg_settings WHERE name LIKE 'gp.%' ORDER BY length(name) DESC" |
 	while read -r name; do
@@ -193,7 +203,8 @@ t1=$(date +%s)
 			resource_scheduler|resource_select_only|resource_cleanup_gangs_on_wait|\
 			max_resource_queues|max_resource_portals_per_transaction|max_statement_mem|\
 			debug_resource_group|runaway_detector_activation_percent|\
-			vmem_process_interrupt|explain_memory_verbosity|coredump_on_memerror)
+			vmem_process_interrupt|explain_memory_verbosity|coredump_on_memerror|\
+			debug_print_slice_table)
 				cbname="$short" ;;
 			*) cbname="gp_$short" ;;
 		esac
@@ -241,13 +252,16 @@ make_suite() {
 	cp "$HERE"/expected/*.out "$SN/expected/" 2> /dev/null
 	# a test loads regress.so from PG_ABS_SRCDIR too, the suite's directory
 	ln -sf "$("$BINDIR/pg_config" --pkglibdir)/cb_regress.so" "$SN/regress.so"
-	{ echo "test: test_setup"; echo "test: gp_setup"; } > "$SN/schedule"
+	# a schedule a pass, of the tests that run in it
+	for p in planner orca; do
+		{ echo "test: test_setup"; echo "test: gp_setup"; } > "$SN/schedule.$p"
+	done
 	for i in "${!run_tests[@]}"; do
 		[ "${run_group[$i]}" = "$g" ] || continue
 		t="${run_tests[$i]}"
 		case "$t" in
 			port:*)
-				echo "test: ${t#port:}" >> "$SN/schedule"
+				schedule_add "$SN" "${t#port:}" "${run_pass[$i]}"
 				continue ;;
 		esac
 		# A test in a directory, and one Cloudberry's pg_regress makes twice,
@@ -276,7 +290,17 @@ make_suite() {
 					> "$SN/expected/$(echo "${e#"$CB"/expected/}" | tr / _)"
 			done
 		fi
-		echo "test: $f" >> "$SN/schedule"
+		schedule_add "$SN" "$f" "${run_pass[$i]}"
+	done
+}
+# schedule_add <suite dir> <test> <pass or ->: the test into the schedule of
+# each pass it runs in.
+schedule_add() {
+	local p
+	for p in planner orca; do
+		if [ "$3" = - ] || [ "$3" = "$p" ]; then
+			echo "test: $2" >> "$1/schedule.$p"
+		fi
 	done
 }
 amsub() {
@@ -435,7 +459,7 @@ run_group() {
 			--expecteddir="$SN" \
 			--outputdir="$R" \
 			--dlpath="$PGSUITE" \
-			--schedule="$SN/schedule" \
+			--schedule="$SN/schedule.$pass" \
 			--max-connections=20 \
 			--host="$PGHOST" --port="$PGPORT" \
 		> "$R/pg_regress.out" 2>&1
@@ -483,7 +507,12 @@ for pass in ${PASSES:-planner orca}; do
 			"$WORK/$g/$pass/pg_regress.out" | sed 's/ not ok / not_ok /'
 	done > "$WORK/$pass.results"
 	total=0; bad=0; rc=0
-	for t in test_setup gp_setup "${run_tests[@]}"; do
+	pass_tests=(test_setup gp_setup)
+	for i in "${!run_tests[@]}"; do
+		[ "${run_pass[$i]}" = - ] || [ "${run_pass[$i]}" = "$pass" ] &&
+			pass_tests+=("${run_tests[$i]}")
+	done
+	for t in "${pass_tests[@]}"; do
 		t=$(echo "${t#port:}" | tr / _)
 		read -r st ms < <(awk -v t="$t" '
 			$1 == t { if ($2 != "ok") st = "not_ok"; else if (st == "") st = "ok"

@@ -490,6 +490,20 @@ t" ] && ok "temporary tables, two of them, have the coordinator's OIDs" \
 		|| notok "REINDEX and CLUSTER outside a transaction block" "$out / $out2"
 	q 0 "DROP TABLE rix;" >/dev/null
 
+	# DROP INDEX CONCURRENTLY writes nothing before the index goes: the rows
+	# of pg_stat_last_operation that name it go as the statement ends, as
+	# Cloudberry's index_drop() drops them (gp_metatrack.c).
+	out=$(printf '%s\n' "SET client_min_messages = warning;" \
+		"CREATE TABLE cix (a int, b text) DISTRIBUTED BY (a);" \
+		"CREATE INDEX CONCURRENTLY cix_b ON cix (b);" \
+		"SELECT 'cix_b'::regclass::oid AS cix \\gset" \
+		"DROP INDEX CONCURRENTLY cix_b;" \
+		"SELECT count(*) FROM pg_stat_last_operation WHERE objid = :cix;" \
+		"DROP TABLE cix;" | qf 0 2>&1)
+	[ "$out" = "0" ] \
+		&& ok "DROP INDEX CONCURRENTLY of an index pg_stat_last_operation names, which then names it no more" \
+		|| notok "DROP INDEX CONCURRENTLY" "$out"
+
 	# A temporary table is in the session's own temporary schema, which on the
 	# coordinator and on each segment is a different pg_temp_N: here another
 	# session holds the coordinator's first backend slot, which no segment
@@ -789,6 +803,21 @@ mine" ] && ok "a transaction reads its own rows, and a LIMIT leaves the connecti
 			ok "an INSERT's error on a segment names no COPY, a function's its own lines" ;;
 		*) notok "an INSERT's error on a segment" "$out / $out2" ;;
 	esac
+	# And it carries what the segment's error named, and where in its code
+	# the segment raised it, as Cloudberry's does: a client reads a unique
+	# violation's constraint off the error as it would off one server's.
+	out=$(printf '%s\n' '\set VERBOSITY verbose' "INSERT INTO cx VALUES (7, 'dup');" | qf 0)
+	case "$out" in
+		*"SCHEMA NAME:  public"*"TABLE NAME:  cx"*"CONSTRAINT NAME:  cx_pkey"*"LOCATION:  _bt_check_unique, nbtinsert.c:"*)
+			ok "a segment's error carries its schema, table and constraint, and its location there" ;;
+		*) notok "what a segment's error names" "$out" ;;
+	esac
+	# A table of no columns takes rows as any other: the segments' COPY of
+	# them has no column list, which COPY does not take empty.
+	out=$(q 0 "CREATE TABLE cz ();" 2>&1; q 0 "INSERT INTO cz DEFAULT VALUES;"; q 0 "INSERT INTO cz SELECT FROM generate_series(1, 5);"; q 0 "SELECT count(*) FROM cz;")
+	[ "$(echo "$out" | tail -1)" = "6" ] \
+		&& ok "a table of no columns takes rows" \
+		|| notok "rows of a table of no columns" "$out"
 	out=$(printf '%s\n' "COPY cx FROM STDIN;" "30	a" "31	b" "9	dup" "32	c" '\.' | qf 0 | grep CONTEXT)
 	out2=$(printf '%s\n' "COPY cx FROM STDIN;" "33	a" "x34	b" '\.' | qf 0 | grep CONTEXT)
 	[ "$out" = "CONTEXT:  COPY cx, line 3" ] &&
@@ -1216,6 +1245,26 @@ a\b|\N' ] && [ "$(cat "$ROOT/ce_prog.txt" 2>&1)" = "to a program" ] \
 		"$(port 2) $out2 100|2|"*"Function Scan on segment_query"*)
 			ok "a variable and a subquery are evaluated here for the segments, and void comes back" ;;
 		*) notok "what the coordinator evaluates for the segments" "$out ($out2) / $out3 / $out4" ;;
+	esac
+	# A function that runs on all segments, EXECUTE ON ALL SEGMENTS, is asked
+	# of them the same way, as Cloudberry runs it: in FROM, whatever else the
+	# query reads, and in the SELECT list of a query of no relation, each
+	# segment calling it once; in the SELECT list of a query with FROM it is
+	# refused.  Where a function runs, and what it does with SQL, are
+	# pg_proc's proexeclocation and prodataaccess, as in Cloudberry, and a
+	# node says which segment it is as gp_contentid.
+	q 0 "CREATE FUNCTION segs_of(n int) RETURNS SETOF text LANGUAGE plpgsql
+	     EXECUTE ON ALL SEGMENTS AS \$\$ BEGIN
+	       RETURN NEXT current_setting('gp.contentid') || ':' || n;
+	     END \$\$;" >/dev/null
+	out=$(q 0 "SELECT segs_of(7) ORDER BY 1;" | tr '\n' ' ')
+	out2=$(q 0 "SELECT s FROM segs_of(8) s JOIN (SELECT count(*) AS c FROM gs) g ON true ORDER BY 1;" | tr '\n' ' ')
+	out3=$(q 0 "SELECT segs_of(9) FROM gs;")
+	out4=$(q 0 "SELECT proexeclocation, prodataaccess FROM pg_proc WHERE proname = 'segs_of';")
+	case "$out|$out2|$out3|$out4" in
+		"0:7 1:7 |0:8 1:8 |"*"cannot be used in the SELECT list of a query with FROM"*"|s|n")
+			ok "a function EXECUTE ON ALL SEGMENTS runs on each, in FROM and in a query of no relation, as Cloudberry runs it" ;;
+		*) notok "a function EXECUTE ON ALL SEGMENTS" "$out / $out2 / $out3 / $out4" ;;
 	esac
 	out=$(q 0 "SELECT gp_segment_id FROM gs, gr;")
 	out2=$(q 0 "SELECT gp_segment_id FROM (SELECT a FROM gs) s;")
@@ -1656,6 +1705,36 @@ $((n + 1))" ] && ok "a serial column's values, taken on the segments from the co
 		"SELECT count(*) FROM o o1 JOIN o o2 USING (a) WHERE o2.b = 1;"
 	orca_same "a replicated table, read from one segment" \
 		"SELECT count(*), max(name) FROM ro;" "Gather Motion 1:1"
+
+	# A record of no declared type travels with its row type described
+	# (gp_record.c), where its typmod alone is the number the sending process
+	# gave the row type: made on the segments and gathered; sorted there and
+	# merged; one a query of gp_dist_random() alone gives on every segment;
+	# and a PL/pgSQL record's field, which ORCA's folding makes a constant
+	# the segments evaluate.
+	q 0 "CREATE FUNCTION rec_of(int, OUT int, OUT text) LANGUAGE sql
+	     AS 'SELECT \$1 - 1, \$1::text || ''z''';" >/dev/null
+	orca_same "a record of no declared type, made on the segments and gathered" \
+		"SELECT a, rec_of(a) FROM o WHERE a < 6 ORDER BY a;" "Gather Motion"
+	orca_same "... grouped by, sorted on the segments and merged" \
+		"SELECT r, count(*) FROM (SELECT rec_of(a % 5) AS r FROM o) s GROUP BY r ORDER BY r;" \
+		"Merge Key"
+	out=$(q 0 "SELECT rec_of(gp_execution_segment()) FROM gp_dist_random('gp_id') ORDER BY 1;" | tr '\n' '/')
+	[ "$out" = "(-1,0z)/(0,1z)/" ] \
+		&& ok "... one each segment makes in a query of gp_dist_random('gp_id') alone" \
+		|| notok "a record of no declared type from gp_dist_random('gp_id')" "$out"
+	q 0 "CREATE FUNCTION rec_param() RETURNS bigint LANGUAGE plpgsql AS \$\$
+	     DECLARE r record; n record; c bigint;
+	     BEGIN
+	       SELECT 1 AS i, 2 AS j INTO r;
+	       SELECT r AS rec, 'x' AS f INTO n;
+	       SELECT count(*) INTO c FROM o WHERE a > length(n.rec::text) + 990;
+	       RETURN c;
+	     END \$\$;" >/dev/null
+	out=$(q 0 "SELECT rec_param();")
+	[ "$out" = "5" ] \
+		&& ok "... and a PL/pgSQL record's field, in a condition the segments evaluate" \
+		|| notok "a PL/pgSQL record's field on the segments" "$out"
 	orca_same "a correlated subquery, run on the segments" \
 		"SELECT a, (SELECT name FROM ro WHERE ro.b = o.b) FROM o WHERE a < 4 ORDER BY a;" \
 		"SubPlan"
@@ -3037,12 +3116,14 @@ SQL
 
 	# What gp.test_print_direct_dispatch_info says of the two phases, in
 	# Cloudberry's words (doDispatchDtxProtocolCommand(), cdbtm.c): each
-	# command, before it is sent, and the segments it goes to -- those whose
-	# parts wrote.  A part that wrote alone commits in one phase, as
-	# Cloudberry's does; a transaction that only read says nothing; and a
-	# rollback is named by how far the first phase got -- none of the parts
-	# that wrote prepared, a fault once every part is prepared, where
-	# Cloudberry's is, and a segment that fails to.
+	# command, before it is sent, and the segments it goes to -- the parts
+	# that wrote, for the two phases, and for a one-phase commit and a
+	# rollback before any part is prepared, every segment the transaction
+	# reached.  A part that wrote alone commits in one phase, as Cloudberry's
+	# does; a transaction that only read says nothing; and a rollback is
+	# named by how far the first phase got -- none of the parts that wrote
+	# prepared, a fault once every part is prepared, where Cloudberry's is,
+	# and a segment that fails to.
 	out=$(printf '%s\n' "SET gp.test_print_direct_dispatch_info = on;" \
 		"CREATE TABLE dtxi (a int) DISTRIBUTED BY (a);" \
 		"INSERT INTO dtxi VALUES (1);" \
@@ -3072,6 +3153,33 @@ SQL
 		*"fault name:'dtm_broadcast_prepare'"*"fault name:'start_prepare'"*"|$expect|10|0|0")
 			ok "gp.test_print_direct_dispatch_info names each command of the two phases, and the segments it goes to" ;;
 		*) notok "the two phases' INFO lines" "$info / $out2 / $p1 / $p2" ;;
+	esac
+
+	# The segments a one-phase commit and a rollback name: every one the
+	# transaction's dispatches reached, whether or not a part wrote there, in
+	# the order they were first reached, as Cloudberry names its dtxSegments
+	# (addToGxactDtxSegments(), cdbtm.c) -- a write's, and in a transaction
+	# block a read's too.  A write that changed nothing commits in one phase
+	# on both segments; a block that read, then rolled back, names what it
+	# read; one whose first statement went to segment 1 alone names it first.
+	q 0 "CREATE TABLE dtxr (a int, b int) DISTRIBUTED BY (a);
+		 INSERT INTO dtxr SELECT i, i FROM generate_series(1, 10) i;" >/dev/null
+	k1=$(q 0 "SELECT min(a) FROM dtxr WHERE gp_segment_id = 1;")
+	out=$(printf '%s\n' "SET gp.test_print_direct_dispatch_info = on;" \
+		"UPDATE dtxr SET b = 0 WHERE b < 0;" \
+		"BEGIN;" "SELECT count(*) FROM dtxr;" "ROLLBACK;" \
+		"BEGIN;" "SELECT b FROM dtxr WHERE a = $k1;" "SELECT count(*) FROM dtxr;" "ROLLBACK;" \
+		"SELECT count(*) FROM dtxr;" \
+		"RESET gp.test_print_direct_dispatch_info;" | qf 0)
+	info=$(printf '%s\n' "$out" | grep -o 'INFO:  Distributed.*' | tr '\n' '/')
+	q 0 "DROP TABLE dtxr;" >/dev/null
+	expect="$dtxc 'Distributed Commit (one-phase)' to ALL contents: 0 1/"
+	expect="$expect$dtxc 'Distributed Abort (No Prepared)' to ALL contents: 0 1/"
+	expect="$expect$dtxc 'Distributed Abort (No Prepared)' to ALL contents: 1 0/"
+	case "$k1|$info" in
+		[0-9]*"|$expect")
+			ok "a one-phase commit and a rollback name every segment the transaction reached, in the order it reached them" ;;
+		*) notok "the segments a transaction reached, in its INFO lines" "$k1 / $info" ;;
 	esac
 
 	# The coordinator goes down between the phases.  Its postmaster restarts
@@ -3726,10 +3834,80 @@ SQL
 		start_node "$n"
 	done
 	start_node 0
+
+	###########################################################################
+	echo "17. gp_toolkit, Cloudberry's views of the cluster"
+	###########################################################################
+	q 0 "CREATE TABLE tk (a int, b int) DISTRIBUTED BY (a);
+		 INSERT INTO tk SELECT i, i FROM generate_series(1, 1000) i;
+		 CREATE TABLE tkr (a int) DISTRIBUTED REPLICATED;
+		 INSERT INTO tkr SELECT generate_series(1, 100);" >/dev/null
+	want=$(q 0 "SELECT string_agg(gp_segment_id || ':' || n, ' ' ORDER BY gp_segment_id)
+				FROM (SELECT gp_segment_id, count(*) AS n FROM tk GROUP BY 1) s;")
+	out=$(q 0 "SELECT string_agg(segid || ':' || segtupcount, ' ' ORDER BY segid)
+			   FROM gp_toolkit.gp_skew_details('tk'::regclass);")
+	[ -n "$want" ] && [ "$out" = "$want" ] \
+		&& ok "gp_skew_details counts a table's rows on each segment ($out)" \
+		|| notok "gp_skew_details" "want [$want] got [$out]"
+	out=$(q 0 "SELECT string_agg(segid || ':' || segtupcount, ' ' ORDER BY segid)
+			   FROM gp_toolkit.gp_skew_details('tkr'::regclass);")
+	[ "$out" = "0:100 1:100" ] && ok "and a replicated table's on each, the same" \
+		|| notok "gp_skew_details of a replicated table" "$out"
+	out=$(q 0 "SELECT (skccoeff < 20)::text || ' ' || (siffraction < 0.2)::text
+			   FROM gp_toolkit.gp_skew_coefficient('tk'::regclass),
+					gp_toolkit.gp_skew_idle_fraction('tk'::regclass);")
+	[ "$out" = "true true" ] && ok "and its skew coefficient and idle fraction" \
+		|| notok "gp_skew_coefficient and gp_skew_idle_fraction" "$out"
+	it=$(q 0 "SHOW gp.interconnect_type;")
+	out=$(q 0 "SELECT string_agg(paramsegment || ':' || paramname || '=' || paramvalue, ' '
+									ORDER BY paramsegment)
+			   FROM gp_toolkit.gp_param_setting('gp_interconnect_type');")
+	[ "$out" = "-1:gp_interconnect_type=$it 0:gp_interconnect_type=$it 1:gp_interconnect_type=$it" ] \
+		&& ok "gp_param_setting gives a setting by Cloudberry's name, on the coordinator and each segment" \
+		|| notok "gp_param_setting" "$out"
+	out=$(q 0 "SELECT string_agg(paramsegment || ':' || paramvalue, ' ' ORDER BY paramsegment)
+			   FROM gp_toolkit.gp_param_settings() WHERE paramname = 'gp.dbid';")
+	[ "$out" = "0:$(dbid 1) 1:$(dbid 2)" ] \
+		&& ok "gp_param_settings gives each segment's settings, run there" \
+		|| notok "gp_param_settings" "$out"
+	out=$(q 0 "SELECT count(*) FROM gp_toolkit.gp_param_settings_seg_value_diffs
+			   WHERE psdname IN ('gp.dbid', 'gp.qe_identity', 'hosts_file', 'port');")
+	[ "$out" = "0" ] && ok "and gp_param_settings_seg_value_diffs leaves out what is each node's own" \
+		|| notok "gp_param_settings_seg_value_diffs" "$out"
+	out=$(q 0 "SELECT pg_catalog.gp_execution_segment() || ' ' ||
+					  (SELECT string_agg(s::text, ' ' ORDER BY s)
+					   FROM (SELECT pg_catalog.gp_execution_segment() AS s
+							 FROM gp_dist_random('gp_id')) d);")
+	[ "$out" = "-1 0 1" ] && ok "gp_execution_segment() is the content id of the node the call runs on" \
+		|| notok "gp_execution_segment()" "$out"
+	out=$(q 0 "SELECT count(*) || ' ' || count(*) FILTER (WHERE valid) FROM pg_catalog.gp_pgdatabase;
+			   SELECT count(*) FROM gp_toolkit.gp_pgdatabase_invalid;")
+	[ "$out" = "3 3
+0" ] && ok "gp_pgdatabase has every node, valid, and gp_pgdatabase_invalid none" \
+		|| notok "gp_pgdatabase" "$out"
+	out=$(q 0 "SELECT count(*) FROM gp_toolkit.gp_stats_missing WHERE smitable = 'tk';
+			   ANALYZE tk;
+			   SELECT count(*) FROM gp_toolkit.gp_stats_missing WHERE smitable = 'tk';")
+	[ "$out" = "1
+0" ] && ok "gp_stats_missing lists a table until it is analyzed" \
+		|| notok "gp_stats_missing" "$out"
+	out=$(q 0 "SELECT (sotdsize = pg_relation_size('tk'))::text || ' ' || (sotdsize > 0)::text
+			   FROM gp_toolkit.gp_size_of_table_disk WHERE sotdtablename = 'tk';
+			   SELECT (sosdschematablesize >= pg_relation_size('tk'))::text
+			   FROM gp_toolkit.gp_size_of_schema_disk WHERE sosdnsp = 'public';")
+	[ "$out" = "true true
+true" ] && ok "gp_size_of_table_disk and gp_size_of_schema_disk, the cluster's sizes" \
+		|| notok "gp_toolkit's size views" "$out"
+	out=$(q 0 "SELECT count(*) FILTER (WHERE iaotype)
+			   FROM gp_toolkit.__gp_is_append_only JOIN pg_class ON oid = iaooid
+			   WHERE relname IN ('tk', 'tkr');
+			   DROP TABLE tk, tkr;")
+	[ "$out" = "0" ] && ok "__gp_is_append_only: no heap table is" \
+		|| notok "__gp_is_append_only" "$out"
 fi
 
 ###############################################################################
-echo "17. a cluster described wrongly is a server that does not start"
+echo "18. a cluster described wrongly is a server that does not start"
 ###############################################################################
 # The message has to name the file and the line: this is read in the
 # postmaster while it starts, so it is all the operator is given.
@@ -3799,7 +3977,7 @@ refuses "a file that is not there is refused" \
 	"gp.cluster_config = '$ROOT/nowhere.conf'"
 
 ###############################################################################
-echo "18. with no cluster configured, this is a single node"
+echo "19. with no cluster configured, this is a single node"
 ###############################################################################
 if start_node 0 "gp.cluster_config = ''" ; then
 	notok "node 0 should not have started: gp.role is dispatch with no cluster"

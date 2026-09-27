@@ -376,9 +376,15 @@ done
 respell() { perl "$HERE/../respell.pl" "$WORK/respell" "$@"; }
 
 # The driver, less "-c gp_role=utility"; run from Cloudberry's directory, as
-# it sources global_sh_executor.sh from there.
-sed 's/given_opt="-c gp_role=utility"/given_opt=None/' "$CB/sql_isolation_testcase.py" \
-	> "$EXEC/sql_isolation_testcase.py"
+# it sources global_sh_executor.sh from there.  A session it opens while a
+# node restarts after a crash it asks again, as it asks while the node says
+# it is resetting or in recovery -- and also when the connection is closed
+# before the node says anything: PostgreSQL 19's postmaster may end the
+# process it started for a connection as it resets, where a test connects
+# right after failing the coordinator (dtx_recovery_wait_lsn).
+sed -e 's/given_opt="-c gp_role=utility"/given_opt=None/' \
+	-e 's/("the database system is starting up" in str(e) or/&\n                         ("server closed the connection unexpectedly" in str(e) and "failed:" in str(e)) or/' \
+	"$CB/sql_isolation_testcase.py" > "$EXEC/sql_isolation_testcase.py"
 
 mkdir -p "$WORK/gpdiff"
 cp "$GPDIFF"/gpdiff.pl "$GPDIFF"/atmsort.pm "$GPDIFF"/explain.pm "$WORK/gpdiff/"

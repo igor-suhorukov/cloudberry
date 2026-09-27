@@ -1585,9 +1585,16 @@ gather_begin(CustomScanState *node, EState *estate, int eflags)
 		if (gather_is_current_of(state))
 			GpReportDispatch(slice, true, state->nsegments);
 		else if (state->ncontents > 0)
+		{
 			GpReportDispatchContents(slice, state->contents, state->ncontents);
+			GpReportDtxReached(estate->es_plannedstmt, state->contents,
+							   state->ncontents);
+		}
 		else
+		{
 			GpReportDispatch(slice, false, state->nsegments);
+			GpReportDtxReached(estate->es_plannedstmt, NULL, state->nsegments);
+		}
 	}
 }
 

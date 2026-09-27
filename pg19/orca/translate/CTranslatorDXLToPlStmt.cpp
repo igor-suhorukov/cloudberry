@@ -536,6 +536,31 @@ CTranslatorDXLToPlStmt::GetPlannedStmtFromDXL(const CDXLNode *dxlnode,
 	// segments it carries out first.
 	if (NIL != m_dxl_to_plstmt_context->GetMotions())
 	{
+		// NOT IN CLOUDBERRY.  The slices the segments run stream at once,
+		// each on a reader of its own there but the one the session's writer
+		// runs, and a segment takes only so many readers for a session
+		// (gp_dispatch.c): a plan of more -- the branches ORCA makes of scores
+		// of grouping sets -- is the planner's, whose gathers need none.
+		// Cloudberry's segments start a gang for every slice however many.
+		int nsegslices = 0;
+		ListCell *lc;
+
+		foreach (lc, m_dxl_to_plstmt_context->GetSliceList())
+		{
+			PlanSlice *slice = (PlanSlice *) lfirst(lc);
+
+			if (GANGTYPE_PRIMARY_READER == slice->gangType ||
+				GANGTYPE_PRIMARY_WRITER == slice->gangType ||
+				GANGTYPE_SINGLETON_READER == slice->gangType)
+			{
+				nsegslices++;
+			}
+		}
+		if (nsegslices - 1 > GP_MAX_READERS_PER_SEGMENT)
+		{
+			GP_UNPORTED("a plan of more slices than a segment takes readers for");
+		}
+
 		switch (gpdb::CheckMotions(planned_stmt))
 		{
 			case GP_ORCA_MOTION_NESTED:

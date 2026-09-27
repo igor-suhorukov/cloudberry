@@ -95,30 +95,30 @@ The reasons, by what brings them, and then each test:
   node in ORCA's plan.
 
   PostgreSQL 19's own behaviour where Cloudberry changed its parser or
-  PostgreSQL has changed since: OVER (w) of a window with a frame ("cannot
-  copy window"), a frame offset that reads a column ("argument of ROWS must
-  not contain variables"), a chain of UNIONs over NULLs, which PostgreSQL
-  types one UNION at a time ("UNION types text and integer cannot be
-  matched"), IS NOT DISTINCT FROM printed as NOT ... IS DISTINCT FROM,
-  standard_conforming_strings = off and escape_string_warning, which
-  PostgreSQL 19 no longer has, NOT NULL constraints, which PostgreSQL 18
-  keeps in pg_constraint, and "operator does not exist", which PostgreSQL 19
-  explains in a DETAIL and a HINT where PostgreSQL 14 had one HINT.  And of
-  partitioned tables: none may be UNLOGGED ("partitioned tables cannot be
-  unlogged"), an exclusion constraint on one is allowed (PostgreSQL 17),
-  "UNIQUE constraint" or "PRIMARY KEY constraint on partitioned table must
-  include all partitioning columns" names the constraint's kind, and
-  "cannot alter column ... because it is part of the partition key" has a
-  caret; PUBLIC may no longer CREATE in schema public (PostgreSQL 15), so a
-  table a role of the test's makes there is refused; and psql's \d+ lists
-  each partition on a line of its own, under "Partitions:", its \dt is
-  headed "List of tables" and has no Storage column, and its \dm is headed
-  "List of materialized views".  A NOTICE that CREATE FUNCTION has made a
-  shell type names the line and column of the type it made.  And cursors:
-  one PostgreSQL can scroll -- one whose plan sorts -- is scrollable, where
-  Cloudberry makes none so, and FETCH BACKWARD in one that is not says
-  "cursor can only scan forward", where Cloudberry's says "backward scan is
-  not supported in this version of Apache Cloudberry".
+  PostgreSQL has changed since: a frame offset that reads a column
+  ("argument of ROWS must not contain variables"), a chain of UNIONs over
+  NULLs, which PostgreSQL types one UNION at a time ("UNION types text and
+  integer cannot be matched"), IS NOT DISTINCT FROM printed as NOT ... IS
+  DISTINCT FROM, standard_conforming_strings = off and
+  escape_string_warning, which PostgreSQL 19 no longer has, NOT NULL
+  constraints, which PostgreSQL 18 keeps in pg_constraint, and "operator
+  does not exist", which PostgreSQL 19 explains in a DETAIL and a HINT where
+  PostgreSQL 14 had one HINT.  And of partitioned tables: none may be
+  UNLOGGED ("partitioned tables cannot be unlogged"), an exclusion
+  constraint on one is allowed (PostgreSQL 17), "UNIQUE constraint" or
+  "PRIMARY KEY constraint on partitioned table must include all partitioning
+  columns" names the constraint's kind, and "cannot alter column ... because
+  it is part of the partition key" has a caret; PUBLIC may no longer CREATE
+  in schema public (PostgreSQL 15), so a table a role of the test's makes
+  there is refused; and psql's \d+ lists each partition on a line of its
+  own, under "Partitions:", its \dt is headed "List of tables" and has no
+  Storage column, and its \dm is headed "List of materialized views".  A
+  NOTICE that CREATE FUNCTION has made a shell type names the line and
+  column of the type it made.  And cursors: one PostgreSQL can scroll -- one
+  whose plan sorts -- is scrollable, where Cloudberry makes none so, and
+  FETCH BACKWARD in one that is not says "cursor can only scan forward",
+  where Cloudberry's says "backward scan is not supported in this version of
+  Apache Cloudberry".
 
   DECODE and CASE x WHEN IS NOT DISTINCT FROM y, which Cloudberry's parser
   makes a CASE with an operand and the port's rewrite a searched CASE with
@@ -137,14 +137,14 @@ AORO_Compression  The size and compression ratio of an append-optimized
 aocs  aototal(), which reads pg_aoseg's relation of a table, and the indexes
   of pg_aovisimap_<oid> and pg_aoblkdir_<oid>; a TID; a compression ratio;
   psql's \d+; and a cursor's scrolling.
-bfv_aggregate (planner, orca)  OVER (w) with a frame, a frame offset that
-  reads a column; and under ORCA the GroupAggregate and HashAggregate
-  count_operator() counts, which ORCA chooses otherwise.
-bfv_catalog  pg_stat_last_operation (Cloudberry's catalog of when an object
-  was last changed), escape_string_warning and standard_conforming_strings =
-  off, and one row more in a query over pg_constraint: the table's NOT NULL
-  constraint.
-bfv_olap  OVER (w) with a frame.
+bfv_aggregate (planner, orca)  A frame offset that reads a column; and
+  under ORCA the GroupAggregate and HashAggregate count_operator() counts,
+  which ORCA chooses otherwise.
+bfv_catalog  VACUUM FULL of pg_stat_last_operation, Cloudberry's catalog of
+  when an object was last changed, which is gp_core's view of a table of
+  its own here, and skipped, so it leaves no VACUUM row of itself;
+  escape_string_warning and standard_conforming_strings = off, and one row
+  more in a query over pg_constraint: the table's NOT NULL constraint.
 bfv_partition_plans (orca)  The Dynamic Seq Scans, Dynamic Index Scans and
   Partition Selectors that count_operator() and find_operator() find under
   ORCA, where Cloudberry's planner makes none.

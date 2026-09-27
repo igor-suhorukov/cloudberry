@@ -41,6 +41,15 @@
  * The grammar (gp_sql's rewriter) gives the clauses as options gp_ao.* of the
  * statement; see ao_encoding_take().
  *
+ * A table of a method of another module's that takes the clauses -- PAX's,
+ * registered by gp_encoding.h -- is given what its statement says of each
+ * column, checked by the method, and nothing filled in: its own clause, a
+ * COLUMN ... ENCODING clause, the DEFAULT COLUMN ENCODING, or else the
+ * table's own compresstype and compresslevel, as Cloudberry's PAX transforms
+ * them (paxc_transform_column_encoding_clauses()); and none where there is
+ * none of those, as Cloudberry stores none, the method's own defaults then
+ * applying.  The method reads the labels as it writes.
+ *
  *-------------------------------------------------------------------------
  */
 #include "postgres.h"
@@ -72,6 +81,7 @@
 
 #include "gp_dispatch.h"
 #include "gp_ao.h"
+#include "gp_encoding.h"
 
 #define AO_LABEL_PROVIDER	"gp_ao"
 
@@ -280,13 +290,30 @@ enc_apply(List *opts, AoOptions *o)
 /* Labels                                                                    */
 /* ------------------------------------------------------------------------- */
 
+/* The method of another module's whose table's column the object is, or NULL. */
+static const GpEncodingMethod *
+column_method(const ObjectAddress *object)
+{
+	Oid			am;
+
+	if (object->classId != RelationRelationId || object->objectSubId <= 0)
+		return NULL;
+	am = get_rel_relam(object->objectId);
+	return OidIsValid(am) ? GpEncodingMethodOf(get_am_name(am)) : NULL;
+}
+
 static void
 label_check(const ObjectAddress *object, const char *seclabel)
 {
+	const GpEncodingMethod *method;
+
 	if (seclabel == NULL)
 		return;
-	ao_enc_validate(ao_enc_parse(seclabel),
-					object->classId == RelationRelationId && object->objectSubId == 0);
+	if ((method = column_method(object)) != NULL)
+		method->check(ao_enc_parse(seclabel));
+	else
+		ao_enc_validate(ao_enc_parse(seclabel),
+						object->classId == RelationRelationId && object->objectSubId == 0);
 }
 
 void
@@ -451,7 +478,6 @@ spec_parse(const char *spec)
 			elog(ERROR, "malformed gp_ao.encoding option \"%s\"", spec);
 		ce->colname = ce->is_default ? NULL : name.data;
 		ce->opts = ao_enc_parse(pnstrdup(open + 1, close - open - 1));
-		ao_enc_validate(ce->opts, false);
 		result = lappend(result, ce);
 		p = close + 1;
 	}
@@ -483,6 +509,51 @@ ao_encoding_take(List **options, List **encodings)
 }
 
 /*
+ * Check a statement's encoding clauses as Cloudberry's
+ * transformColumnEncoding() checks them, for a table by column -- gp_ao's
+ * options -- or of a method of another module's that takes them, "method",
+ * whose own check it is: a column named by one COLUMN ... ENCODING clause at
+ * most, one DEFAULT COLUMN ENCODING at most, and each clause's options the
+ * table's.
+ */
+void
+ao_encoding_check(List *encodings, const GpEncodingMethod *method)
+{
+	ListCell   *lc;
+	bool		deflt = false;
+
+	foreach(lc, encodings)
+	{
+		AoColumnEncoding *ce = lfirst(lc);
+
+		if (ce->is_default)
+		{
+			if (deflt)
+				elog(ERROR, "only one default column encoding may be specified");
+			deflt = true;
+		}
+		else if (ce->directive)
+		{
+			for (ListCell *lc2 = list_head(encodings); lc2 != lc;
+				 lc2 = lnext(encodings, lc2))
+			{
+				AoColumnEncoding *other = lfirst(lc2);
+
+				if (other->directive && strcmp(other->colname, ce->colname) == 0)
+					ereport(ERROR,
+							(errcode(ERRCODE_WRONG_OBJECT_TYPE),
+							 errmsg("column \"%s\" referenced in more than one COLUMN ENCODING clause",
+									ce->colname)));
+			}
+		}
+		if (method != NULL)
+			method->check(ce->opts);
+		else
+			ao_enc_validate(ce->opts, false);
+	}
+}
+
+/*
  * The table's own compression options and block size, which a statement's
  * WITH list gives, as a column's options: what Cloudberry makes the default
  * column encoding of when there is no DEFAULT COLUMN ENCODING.
@@ -502,6 +573,28 @@ ao_storage_opts_of(List *options)
 		if (strcmp(def->defname, "compresstype") == 0 ||
 			strcmp(def->defname, "compresslevel") == 0 ||
 			strcmp(def->defname, "blocksize") == 0)
+			result = lappend(result, makeDefElem(def->defname,
+												 (Node *) makeString(defGetString(def)), -1));
+	}
+	return result;
+}
+
+/*
+ * The table's own compresstype and compresslevel, which a statement's WITH
+ * list gives, as a column's options: what Cloudberry's PAX keeps of the
+ * default column encoding a table's WITH list makes, the other options
+ * being its table's alone (paxc_transform_column_encoding_clauses()).
+ */
+List *
+ao_compression_opts_of(List *options)
+{
+	List	   *result = NIL;
+
+	foreach_node(DefElem, def, options)
+	{
+		if (def->defnamespace == NULL &&
+			(strcmp(def->defname, "compresstype") == 0 ||
+			 strcmp(def->defname, "compresslevel") == 0))
 			result = lappend(result, makeDefElem(def->defname,
 												 (Node *) makeString(defGetString(def)), -1));
 	}
@@ -709,6 +802,71 @@ ao_encoding_apply(Oid relid, List *encodings, List *withopts, List *only,
 	if (parent)
 		relation_close(parent, AccessShareLock);
 	relation_close(rel, AccessShareLock);
+}
+
+/*
+ * Give the columns of a table of a method of another module's that takes
+ * encoding clauses what the statement says of each (see the file's
+ * comment): its own clause, a COLUMN ... ENCODING clause naming it, the
+ * DEFAULT COLUMN ENCODING, or else `withopts`, the table's own compression
+ * options -- each as given, the method having checked it.
+ */
+void
+ao_encoding_apply_given(Oid relid, List *encodings, List *withopts)
+{
+	Relation	rel = relation_open(relid, AccessShareLock);
+	TupleDesc	desc = RelationGetDescr(rel);
+	AoColumnEncoding *deflt = find_encoding(encodings, NULL);
+	ListCell   *lc;
+
+	foreach(lc, encodings)
+	{
+		AoColumnEncoding *ce = lfirst(lc);
+
+		if (!ce->is_default && get_attnum(relid, ce->colname) == InvalidAttrNumber)
+			ereport(ERROR,
+					(errcode(ERRCODE_UNDEFINED_COLUMN),
+					 errmsg("column \"%s\" does not exist", ce->colname)));
+	}
+
+	for (int i = 0; i < desc->natts; i++)
+	{
+		Form_pg_attribute att = TupleDescAttr(desc, i);
+		AoColumnEncoding *mine;
+		List	   *opts;
+
+		if (att->attisdropped)
+			continue;
+		if ((mine = find_encoding(encodings, NameStr(att->attname))) != NULL &&
+			(mine->directive || att->attinhcount == 0))
+			opts = mine->opts;
+		else if (deflt != NULL)
+			opts = deflt->opts;
+		else
+			opts = withopts;
+		if (opts != NIL)
+			label_set(RelationRelationId, relid, att->attnum, ao_enc_format(opts));
+	}
+	relation_close(rel, AccessShareLock);
+}
+
+/*
+ * ALTER COLUMN ... SET ENCODING, and ADD COLUMN ... ENCODING, of a table of
+ * a method of another module's: the column's options, as given, the method
+ * checking them.
+ */
+void
+ao_encoding_set_column_given(Oid relid, const char *colname, List *opts,
+							 const GpEncodingMethod *method)
+{
+	AttrNumber	attnum = get_attnum(relid, colname);
+
+	if (attnum == InvalidAttrNumber)
+		ereport(ERROR,
+				(errcode(ERRCODE_UNDEFINED_COLUMN),
+				 errmsg("column \"%s\" does not exist", colname)));
+	method->check(opts);
+	label_set(RelationRelationId, relid, attnum, ao_enc_format(opts));
 }
 
 /* A table that is no longer by column: its columns' encodings, gone. */

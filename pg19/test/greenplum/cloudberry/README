@@ -68,7 +68,11 @@ bfv_dd, direct_dispatch, qp_targeted_dispatch (planner, orca)  the INFO
   Cloudberry reads the partitions in one; its INSERT and COPY send rows only
   to the segments their keys hash to; and a transaction that wrote on one
   segment commits there in one phase, where Cloudberry prepares it on every
-  segment the transaction's statements went to.  Under ORCA, the slices
+  segment the transaction's statements went to.  A one-phase commit and a
+  rollback before any part is prepared name every segment the transaction's
+  statements went to, in the order they first went, as Cloudberry's do --
+  so where a statement's slices go elsewhere than Cloudberry's, its commit's
+  line differs with them.  Under ORCA, the slices
   below a write are numbered one higher than Cloudberry's: its write is its
   root slice, slice 0, and the port's is slice 1, below the coordinator's
   own.  The rows the statements return and change are Cloudberry's.
@@ -83,6 +87,11 @@ bfv_dd_multicolumn  the INFO lines of test_print_direct_dispatch_info that
   alike; an INSERT of one row of constants to the one segment it hashes to;
   and how each commits, in one phase on the segment an INSERT of one row
   wrote on.
+
+bfv_dml (orca)  the line ORCA's fallback trace prints for the UPDATE whose
+  condition compares a ROW with a subquery's, which Cloudberry's ORCA
+  declines in its own expected output too (bfv_dml_optimizer.out): the
+  expected output closest to the pass, the planner's, does not print it.
 
 bfv_joins  a join of twenty empty tables, which Cloudberry's demo cluster
   cancels for the memory its planner takes -- the runaway cleaner's red
@@ -111,6 +120,12 @@ brin_ao, brin_aocs (planner, orca)  under the planner, the plans the test
 
 case_gp  IS NOT DISTINCT FROM, and the CASE form, printed as the searched
   CASE the port's rewrite makes of them (see the singlenode suite's README).
+
+create_extension_fail  the context of the error the fault
+  create_function_fail raises: a segment runs the script of the CREATE
+  EXTENSION it was sent, so its CREATE FUNCTION fails inside the script,
+  where Cloudberry's coordinator runs the script and dispatches each of its
+  statements alone.
 
 qp_misc (orca)  the lines ORCA's fallback trace prints where Cloudberry's
   expected output has none, and nothing else: the test sets
@@ -160,6 +175,37 @@ external_table_persistent_error_log (orca)  the lines ORCA's fallback trace
   declines there ("SIRV functions") as Cloudberry's ORCA does -- its own
   expected output for ORCA has them.
 
+filter  PostgreSQL 19's words for a call no function takes -- a DETAIL
+  where Cloudberry's HINT stood.
+
+function_extensions  pg_proc's column prodataaccess in pg_attribute, which
+  has none: the port gives pg_proc Cloudberry's prodataaccess and
+  proexeclocation as names of calls of its row (gp_segment.c), from the
+  "gp" label that keeps them, and a query of pg_proc by either name answers
+  as Cloudberry's.  A function that runs on the coordinator, EXECUTE ON
+  COORDINATOR, called in the SELECT list of a query with FROM, which
+  Cloudberry refuses: the port calls it on the coordinator, where it would
+  run anyway, for each row gathered there -- one that runs on all segments
+  it refuses as Cloudberry does.  And psql 19's \df+, which has no Data
+  access or Execute on column.
+
+gp_aggregates (planner, orca)  PostgreSQL 19's words for a call no
+  function takes -- a DETAIL where Cloudberry's HINT stood -- and the DETAIL
+  of a view made temporary by the temporary table it reads.  Under the
+  planner the port aggregates mysum_prefunc() in one stage, over the rows
+  gathered here, and so never calls the combine function its prefunc
+  names, whose NOTICE Cloudberry's two stages raise; ORCA's two stages
+  raise it as Cloudberry's do.
+
+gp_backend_info  the backends of a query that needs a reader gang, and
+  the singleton reader on the coordinator: the port's gather reads each
+  table through the segment's one connection, and joins them here, so
+  after the join of temp and temp2 and the one of temp and pg_class the
+  function lists the coordinator's backend and the writers alone, where
+  Cloudberry's lists a reader of each segment's too and an entry-db
+  reader.  Before those, what it lists is Cloudberry's: one backend for
+  the coordinator, then one writer on each segment.
+
 gp_create_table  the OID of text's hash operator class in
   gp_distribution_policy.distclass: the same class, which Cloudberry's
   catalog numbers 10039 and PostgreSQL 19's 10037.
@@ -169,6 +215,10 @@ gp_dqa (orca)  ORCA's fallback trace, which the expected output closest to
   the planner answers the same: several DISTINCT aggregates, where
   optimizer_enable_multiple_distinct_aggs is off, as Cloudberry's ORCA
   declines them; and an aggregate with FILTER.
+
+gp_metadata  version(), which is PostgreSQL 19's and names no Apache
+  Cloudberry: the port is PostgreSQL's server, with its modules.
+  gp_opt_version() answers in Cloudberry's words.
 
 gp_types  PostgreSQL 19's words for an operator no type takes: a DETAIL
   where Cloudberry's HINT stood.
@@ -187,6 +237,16 @@ gpdist_legacy_opclasses  the complex type, Cloudberry's own, which
   complex's place -- takes them, holds a row and finds it; the rows the test
   places on the segments are where Cloudberry places them.
 
+ic (planner)  the interconnect a segment of a join sets up, where
+  Cloudberry's fault interconnect_setup_palloc fails the query on segment
+  0: the planner reads both tables through gathers and joins them here, and
+  no segment has an interconnect to set up.  And a query whose segments,
+  one failing and two asleep in exec_mpp_query_start, the coordinator waits
+  for: the planner's partial aggregate on the segments is a round of every
+  one's answer, as Cloudberry's is under its TCP interconnect, and the
+  statement timeout comes first, where Cloudberry's UDP interconnect reports
+  the failure at once, and ORCA's gather here does too.
+
 join_gp  the NOTICE of test_print_prefetch_joinqual: where a join's outer
   side and its join qual both read through a Motion, Cloudberry reads the
   qual's rows first, against a deadlock between the two, and says so;
@@ -202,6 +262,27 @@ part_external_table (orca)  the lines ORCA's fallback trace prints for a
   plans for it the port's ORCA does not translate
   (TranslateDXLDynForeignScan), and the planner plans the query; and an
   INSERT into one, which Cloudberry's ORCA declines too.
+
+oid_wraparound  the OID counters, the coordinator's and each segment's.  A
+  segment makes the coordinator's objects with the OIDs the coordinator
+  gave them (gp_ddl.c) and takes none from its own counter, which
+  Cloudberry's segment moves past each OID it is given -- the fast-forward
+  to 16384 the test looks for on every segment, where the port's stay at
+  4290000001.  And a relation's relfilenumber, which the port gives it
+  apart from its OID, takes one more from the coordinator's counter: after
+  CREATE TABLE it is at 16388 where Cloudberry's is at 16387, and after the
+  CREATE TABLE AS of the second scenario at neither 16390 nor 16391.  And
+  after that CREATE TABLE AS each segment's counter is at 16389, where
+  Cloudberry's is at 16385: the test's database is template1's copy, and
+  the suite makes gp_orca, and gp_core with it, in template1 as each pass
+  begins (run.sh), so on each segment gp_core's tables there were the
+  first files it made -- 16384 to 16387 among them -- which the counter
+  passes over, giving the new table's file 16388.
+
+opclass_ddl  the words of an OWNER TO a role the user cannot act as:
+  PostgreSQL 19's, "must be able to SET ROLE", where Cloudberry's own check
+  of a new owner, which is not PostgreSQL 16's (utils/adt/acl.c, its "mdb
+  admin" patch), says "must be member of role".
 
 partition_indexing  a UNIQUE index or constraint on a partitioned table
   that holds neither the partition key nor the distribution key: both
@@ -253,9 +334,24 @@ qp_functions (planner, orca)  PostgreSQL 19's words for a call no function
   leaves there would be among them, as alter_distribution_policy's tstab was
   before the suite ran in groups.
 
+qp_misc_rio  a PL/Python function whose query reads a table, called in the
+  segments' slice: it runs there, where Cloudberry refuses it ("function
+  cannot execute on a QE slice because it accesses relation"), as
+  qp_functions says of the port's slices.
+
 qp_subquery (orca)  the fallback trace of the queries ORCA's translator
   declines -- subqueries that are not scalar, an inherited table, a
   whole-row variable -- which the planner answers the same.
+
+rangefuncs_cdb (planner, orca)  the planner's settings the test lists,
+  enable_*: PostgreSQL 19's, which has enable_distinct_reordering and four
+  more that PostgreSQL 14 had not, and none of Cloudberry's own --
+  enable_groupagg, enable_lock_optimization, enable_password_profile --
+  with PostgreSQL's defaults, where Cloudberry turns off merge joins,
+  nested loops and incremental sorts.  Under the planner, notice_srf(), a
+  volatile set-returning function the rows of an INSERT come from, is
+  called on the coordinator, where Cloudberry's planner calls it in a slice
+  on one segment, so its NOTICE names segment -1.
 
 resource_queue  SHOW resource_scheduler, whose header is the port's name
   of it, gp.resource_scheduler, three letters wider.  And the NOTICE of the

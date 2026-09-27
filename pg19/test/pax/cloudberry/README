@@ -20,9 +20,7 @@ alter_distributed  ALTER TABLE ... SET DISTRIBUTED BY, which Cloudberry
 
 ddl  psql's \d+ of a table with NOT NULL columns, which PostgreSQL 19's
   psql lists under "Not-null constraints:", as PostgreSQL 18 keeps them in
-  pg_constraint.  And gp_toolkit.gp_size_of_schema_disk: the port's
-  gp_toolkit has gp_ao's functions alone, and not yet Cloudberry's
-  gp_toolkit extension, whose view it is.
+  pg_constraint.
 
 types  a pg_lsn, which PostgreSQL 19 prints with the low half in eight
   digits, 16/00000000, where Cloudberry's printed 16/0.

@@ -98,6 +98,7 @@
 #include "nodes/pg_list.h"
 #include "parser/parser.h"
 #include "parser/scanner.h"
+#include "postmaster/postmaster.h"
 #include "storage/ipc.h"
 #include "storage/latch.h"
 #include "storage/lmgr.h"
@@ -127,6 +128,7 @@
 #include "gp_grammar_int.h"
 #include "gp_label.h"
 #include "gp_loopback.h"
+#include "gp_motion.h"
 #include "gp_settings.h"
 
 /* Where libpq finds the password for the segments; see the file header. */
@@ -248,6 +250,14 @@ static const char *const synced_settings[] = {
 	"gp.interconnect_transmit_timeout",
 	"gp.interconnect_min_rto",
 	"gp.interconnect_default_rtt",
+	"gp.debug_print_slice_table",
+	"gp.interconnect_snd_queue_depth",
+	"gp.interconnect_fc_method",
+	"gp.interconnect_min_retries_before_timeout",
+	"gp.interconnect_debug_retry_interval",
+	"gp.interconnect_cache_future_packets",
+	"gp.interconnect_timer_period",
+	"gp.interconnect_timer_checking_period",
 	"gp.udpic_dropacks_percent",
 	"gp.udpic_dropxmit_percent",
 	/*
@@ -316,6 +326,15 @@ typedef struct GpSegmentConn
 	 * else is sent; see conn_park().
 	 */
 	struct GpGatherSeg *fetching;
+
+	/*
+	 * What is in flight is a statement sent by conn_send_params(), the Close
+	 * of its portal and a Sync, in libpq's pipeline mode; "pipe_step" counts
+	 * the commands whose results have all been read.  See
+	 * conn_pipeline_own().
+	 */
+	bool		pipelined;
+	int			pipe_step;
 
 	/* Where its backend receives a Motion's rows; NULL until asked. */
 	char	   *icaddress;
@@ -399,6 +418,15 @@ static bool dtx_all_prepared = false;
 /* Names the cursors of the gathers of one transaction apart. */
 static uint32 gather_counter = 0;
 
+/*
+ * The fields of a segment's error that name what it was about, which the
+ * error raised here carries as the segment raised them.
+ */
+static const char error_names[] = {
+	PG_DIAG_SCHEMA_NAME, PG_DIAG_TABLE_NAME, PG_DIAG_COLUMN_NAME,
+	PG_DIAG_DATATYPE_NAME, PG_DIAG_CONSTRAINT_NAME
+};
+
 /* What a segment answered when it failed. */
 typedef struct GpSegmentError
 {
@@ -408,6 +436,10 @@ typedef struct GpSegmentError
 	char	   *detail;
 	char	   *hint;
 	char	   *context;
+	char	   *names[lengthof(error_names)];
+	const char *file;			/* where the segment raised it, if it said */
+	int			line;
+	const char *func;
 } GpSegmentError;
 
 /* A statement whose slices run at once: the readers running them. */
@@ -420,8 +452,8 @@ struct GpStream
 /* The ones running; in TopMemoryContext, as the readers point at them. */
 static List *active_streams = NIL;
 
-/* How many readers a segment may have for one session. */
-#define MAX_READERS_PER_SEGMENT	64
+/* How many readers a segment may have for one session (gp_motion.h). */
+#define MAX_READERS_PER_SEGMENT	GP_MAX_READERS_PER_SEGMENT
 
 static void gang_close(void);
 static void gang_build_wes(GpGang *g);
@@ -1172,6 +1204,119 @@ gang_send_all(GpGang *g, const char *sql)
 		conn_send(&g->conns[i], sql);
 }
 
+/*
+ * Send a statement with parameters to one segment, as the extended protocol
+ * sends it, and close the portal it runs in within the same round trip: the
+ * statement, a Close of the unnamed portal and a Sync, in libpq's pipeline
+ * mode.  Left open, a SELECT's portal ends its executor only when it is
+ * dropped -- at the segment's next statement, or its commit -- and what a
+ * table access method writes as a query finishes (ExecutorFinish: an
+ * append-optimized or PAX table's last rows, and the transaction ID they
+ * take) would come after the Sync's answer has told the coordinator what
+ * the segment wrote (gp.dtx_xid, gp_dtx.c).  Closed here, the executor has
+ * ended before that answer is sent.  The results are read as every
+ * connection's are, conn_pipeline_own() taking the pipeline's own.
+ */
+static void
+conn_send_params(GpSegmentConn *c, const char *sql, int nparams,
+				 const Oid *types, const char *const *values,
+				 const int *lengths, const int *formats)
+{
+	/* A gather's batch asked for ahead of need is set aside for it first. */
+	if (c->busy && c->fetching != NULL)
+		conn_park(c);
+	if (c->busy)
+		elog(ERROR, "segment %d is still busy with an earlier statement",
+			 c->content);
+
+	GANG_LOG(GANG_LOG_DEBUG, "to segment %d: %s", c->content, sql);
+	if (!PQenterPipelineMode(c->conn) ||
+		!PQsendQueryParams(c->conn, sql, nparams, types, values, lengths,
+						   formats, 0) ||
+		!PQsendClosePortal(c->conn, "") ||
+		!PQpipelineSync(c->conn))
+	{
+		char	   *msg = pstrdup(PQerrorMessage(c->conn));
+		int			content = c->content;
+
+		gang_close();
+		ereport(ERROR,
+				(errcode(ERRCODE_CONNECTION_FAILURE),
+				 errmsg("could not send a statement to segment %d", content),
+				 errdetail_internal("%s", msg)));
+	}
+	c->busy = true;
+	c->pipelined = true;
+	c->pipe_step = 0;
+}
+
+/*
+ * Whether a result read from a connection is the pipeline's own, which
+ * conn_send_params() sent after its statement, rather than the caller's --
+ * and if so, it is dealt with here: the end of the statement's results or of
+ * the Close's, the Close's answer, the Close skipped because the statement
+ * failed, and the Sync, which ends the pipeline and takes the connection out
+ * of pipeline mode, after which PQgetResult() gives the NULL that ends what
+ * was sent.  A Close that failed is the caller's: the executor ended there,
+ * and its error is the statement's.
+ */
+static bool
+conn_pipeline_own(GpSegmentConn *c, PGresult *res)
+{
+	if (!c->pipelined)
+		return false;
+	if (res == NULL)
+	{
+		c->pipe_step++;
+		return true;
+	}
+	switch (PQresultStatus(res))
+	{
+		case PGRES_PIPELINE_SYNC:
+			PQclear(res);
+			/* with every result read, it cannot fail */
+			(void) PQexitPipelineMode(c->conn);
+			c->pipelined = false;
+			return true;
+		case PGRES_PIPELINE_ABORTED:
+			PQclear(res);
+			return true;
+		case PGRES_COMMAND_OK:
+			if (c->pipe_step == 0)
+				return false;
+			PQclear(res);
+			return true;
+		default:
+			return false;
+	}
+}
+
+/*
+ * A source file's or function's name a segment's error gave, kept for the
+ * backend's life: the error raised here points at it, and so does a copy of
+ * that error (CopyErrorData() copies neither), which a PL/pgSQL handler
+ * keeps past the subtransaction whose memory it was raised in.  The names
+ * are the segment's code's, a few hundred at most.
+ */
+static const char *
+location_name(const char *name)
+{
+	static List *names = NIL;
+	MemoryContext oldcxt;
+	char	   *kept;
+
+	foreach_ptr(char, n, names)
+	{
+		if (strcmp(n, name) == 0)
+			return n;
+	}
+	oldcxt = MemoryContextSwitchTo(TopMemoryContext);
+	kept = pstrdup(name);
+	names = lappend(names, kept);
+	MemoryContextSwitchTo(oldcxt);
+	return kept;
+}
+
 /* Remember why a segment failed, in the caller's context. */
 static void
 collect_error(List **errors, int content, PGresult *res, PGconn *conn,
@@ -1207,6 +1352,22 @@ collect_error(List **errors, int content, PGresult *res, PGconn *conn,
 	field = res ? PQresultErrorField(res, PG_DIAG_CONTEXT) : NULL;
 	err->context = field ? pstrdup(field) : NULL;
 
+	for (int i = 0; i < lengthof(error_names); i++)
+	{
+		field = res ? PQresultErrorField(res, error_names[i]) : NULL;
+		err->names[i] = field ? pstrdup(field) : NULL;
+	}
+	field = res ? PQresultErrorField(res, PG_DIAG_SOURCE_FILE) : NULL;
+	if (field != NULL)
+	{
+		const char *line = PQresultErrorField(res, PG_DIAG_SOURCE_LINE);
+		const char *func = PQresultErrorField(res, PG_DIAG_SOURCE_FUNCTION);
+
+		err->file = location_name(field);
+		err->line = line ? atoi(line) : 0;
+		err->func = func ? location_name(func) : NULL;
+	}
+
 	*errors = lappend(*errors, err);
 }
 
@@ -1228,7 +1389,12 @@ error_is_consequence(GpSegmentError *err)
  * rest are counted, because a statement that fails on one segment usually fails
  * on all of them and repeating it three times helps nobody.  Where it failed
  * there -- an external table's line, a function's -- comes first in the
- * context, before where the statement was here, as Cloudberry's does.
+ * context, before where the statement was here, as Cloudberry's does.  And it
+ * is raised with the objects the segment's error named -- a unique
+ * violation's schema, table and constraint -- and at the segment's location
+ * in its code, as Cloudberry raises it (cdbdisp_get_PQerror()): what a
+ * client reads of the error is the segment's.  A connection that failed,
+ * which says nowhere, fails here.
  */
 static void
 raise_segment_errors(List *errors)
@@ -1285,17 +1451,30 @@ raise_segment_errors(List *errors)
 		appendStringInfo(&detail, "; %d other segments failed too",
 						 list_length(errors) - 1);
 
-	ereport(ERROR,
-			(errcode(first->sqlstate ? MAKE_SQLSTATE(first->sqlstate[0],
-													 first->sqlstate[1],
-													 first->sqlstate[2],
-													 first->sqlstate[3],
-													 first->sqlstate[4])
-			 : ERRCODE_INTERNAL_ERROR),
-			 errmsg("%s", first->message),
-			 errdetail_internal("%s", detail.data),
-			 first->hint ? errhint("%s", first->hint) : 0,
-			 first->context ? errcontext("%s", first->context) : 0));
+	if (!errstart(ERROR, TEXTDOMAIN))
+		pg_unreachable();
+	errcode(first->sqlstate ? MAKE_SQLSTATE(first->sqlstate[0],
+											first->sqlstate[1],
+											first->sqlstate[2],
+											first->sqlstate[3],
+											first->sqlstate[4])
+			: ERRCODE_INTERNAL_ERROR);
+	errmsg("%s", first->message);
+	errdetail_internal("%s", detail.data);
+	if (first->hint)
+		errhint("%s", first->hint);
+	if (first->context)
+		errcontext("%s", first->context);
+	for (int i = 0; i < lengthof(error_names); i++)
+	{
+		if (first->names[i] != NULL)
+			err_generic_string(error_names[i], first->names[i]);
+	}
+	if (first->file != NULL)
+		errfinish(first->file, first->line, first->func);
+	else
+		errfinish(__FILE__, __LINE__, __func__);
+	pg_unreachable();
 }
 
 /*
@@ -1357,6 +1536,8 @@ gang_wait_all_ex(GpGang *g, PGresult **keep, bool commit, bool keep_commands)
 				PGresult   *res = PQgetResult(c->conn);
 				ExecStatusType status;
 
+				if (conn_pipeline_own(c, res))
+					continue;
 				if (res == NULL)
 				{
 					c->busy = false;
@@ -1490,6 +1671,8 @@ gang_drain_quietly(void)
 			{
 				PGresult   *res = PQgetResult(c->conn);
 
+				if (conn_pipeline_own(c, res))
+					continue;
 				if (res == NULL)
 				{
 					c->busy = false;
@@ -2325,6 +2508,25 @@ dtx_wait_for_depends(const GpSegmentConn *c)
 }
 
 /*
+ * A command of the commit's INFO line, when gp.test_print_direct_dispatch_info
+ * asks for one: to the n segments "set" lists, and every segment the
+ * transaction reached when "reached" says so, in the order the transaction
+ * first reached them (gp_settings.c), as Cloudberry names its dtxSegments.
+ */
+static void
+dtx_report(const char *command, const int *set, int nset, bool reached)
+{
+	int		   *contents;
+	int			n;
+
+	if (!gp_test_print_direct_dispatch_info)
+		return;
+	n = GpReportDtxContents(set, nset, reached, &contents);
+	GpReportDtxCommand(command, contents, n);
+	pfree(contents);
+}
+
+/*
  * The first phase, at PRE_COMMIT, while raising still undoes the
  * coordinator's part.  Which segments' parts wrote each has said with its
  * answers (conn_wrote()).  One that did not commits now, having nothing to
@@ -2378,7 +2580,8 @@ gang_commit_first_phase(GpGang *g)
 	{
 		FullTransactionId gxid = GetTopFullTransactionId();
 
-		GpReportDtxCommand("Distributed Commit (one-phase)", writers, 1);
+		/* the others' COMMIT is a one-phase commit of nothing */
+		dtx_report("Distributed Commit (one-phase)", writers, 1, true);
 		notices_quiet++;
 		for (int i = 0; i < g->nconns; i++)
 			conn_send(&g->conns[i],
@@ -2405,8 +2608,10 @@ gang_commit_first_phase(GpGang *g)
 												  g->nconns * sizeof(bool));
 			dtx_prepared_size = g->nconns;
 		}
-		GpReportDtxCommand("Distributed Prepare", writers, nwriters);
+		dtx_report("Distributed Prepare", writers, nwriters, false);
 	}
+	else
+		dtx_report("Distributed Commit (one-phase)", NULL, 0, true);
 
 	for (int i = 0; i < g->nconns; i++)
 	{
@@ -2590,10 +2795,10 @@ gang_finish_prepared(bool commit)
 		for (int i = 0; i < g->nconns && i < dtx_prepared_size; i++)
 			if (dtx_prepared[i])
 				contents[n++] = g->conns[i].content;
-		GpReportDtxCommand(commit ? "Distributed Commit Prepared" :
-						   dtx_all_prepared ? "Distributed Abort Prepared" :
-						   "Distributed Abort (Some Prepared)",
-						   contents, n);
+		dtx_report(commit ? "Distributed Commit Prepared" :
+				   dtx_all_prepared ? "Distributed Abort Prepared" :
+				   "Distributed Abort (Some Prepared)",
+				   contents, n, false);
 		pfree(contents);
 	}
 
@@ -2841,11 +3046,10 @@ dispatch_xact_callback(XactEvent event, void *arg)
 				if (gang != NULL && gang_in_xact)
 				{
 					/*
-					 * Parts that wrote and were never prepared, named as
-					 * Cloudberry names their rollback
-					 * (rollbackDtxTransaction(), cdbtm.c) -- the parts its
-					 * answers said wrote, where Cloudberry names those it sent
-					 * a write to.
+					 * Nothing prepared: the rollback of every segment the
+					 * transaction reached, and of each part that wrote, as
+					 * Cloudberry names it (rollbackDtxTransaction(),
+					 * cdbtm.c).
 					 */
 					if (gp_test_print_direct_dispatch_info)
 					{
@@ -2855,8 +3059,9 @@ dispatch_xact_callback(XactEvent event, void *arg)
 						for (int i = 0; i < gang->nconns; i++)
 							if (conn_wrote(&gang->conns[i]))
 								contents[n++] = gang->conns[i].content;
-						GpReportDtxCommand("Distributed Abort (No Prepared)",
-										   contents, n);
+						dtx_report("Distributed Abort (No Prepared)",
+								   contents, n, true);
+						pfree(contents);
 					}
 					gang_send_all_quietly("ROLLBACK");
 				}
@@ -2893,6 +3098,7 @@ dispatch_xact_callback(XactEvent event, void *arg)
 			gang_forget_settings();
 			gang_forget_snapshot();
 			dtx_forget();
+			GpReportDtxForget();
 			streams_release();
 			labels_pending = NIL;
 			drop_segment_notices();
@@ -2905,6 +3111,11 @@ dispatch_xact_callback(XactEvent event, void *arg)
 			gang_forget_snapshot();
 			/* the second phase is done already (dispatch_commit_recorded()) */
 			Assert(dtx_nprepared == 0);
+			GpReportDtxForget();
+			break;
+
+		case XACT_EVENT_PREPARE:
+			GpReportDtxForget();
 			break;
 
 		default:
@@ -3014,6 +3225,9 @@ GpDispatchUtility(const char *payload, bool own_xact)
 		labels_held = false;
 	}
 	PG_END_TRY();
+	/* as Cloudberry's DDL, sent in two phases to every segment */
+	if (!own_xact)
+		GpReportDtxReached(NULL, NULL, 0);
 	/* the coordinator has said what the statement says, once */
 	notices_quiet++;
 	gang_send_all(g, payload);
@@ -3047,20 +3261,7 @@ GpDispatchCommandParams(const char *sql, int nparams, const Oid *types,
 
 		if (!conn_asked(c, content, nsegments))
 			continue;
-		if (c->busy && c->fetching != NULL)
-			conn_park(c);
-		if (!PQsendQueryParams(c->conn, sql, nparams, types, values, NULL, NULL, 0))
-		{
-			char	   *msg = pstrdup(PQerrorMessage(c->conn));
-			int			failed = c->content;
-
-			gang_close();
-			ereport(ERROR,
-					(errcode(ERRCODE_CONNECTION_FAILURE),
-					 errmsg("could not send a statement to segment %d", failed),
-					 errdetail_internal("%s", msg)));
-		}
-		c->busy = true;
+		conn_send_params(c, sql, nparams, types, values, NULL, NULL);
 	}
 
 	/* The counts come back as command tags, which "keep" does not keep. */
@@ -3090,20 +3291,7 @@ GpDispatchCommandParamsOnContents(const char *sql, int nparams,
 
 		if (!conn_listed(c, contents, ncontents))
 			continue;
-		if (c->busy && c->fetching != NULL)
-			conn_park(c);
-		if (!PQsendQueryParams(c->conn, sql, nparams, types, values, NULL, NULL, 0))
-		{
-			char	   *msg = pstrdup(PQerrorMessage(c->conn));
-			int			failed = c->content;
-
-			gang_close();
-			ereport(ERROR,
-					(errcode(ERRCODE_CONNECTION_FAILURE),
-					 errmsg("could not send a statement to segment %d", failed),
-					 errdetail_internal("%s", msg)));
-		}
-		c->busy = true;
+		conn_send_params(c, sql, nparams, types, values, NULL, NULL);
 	}
 
 	/* The counts come back as command tags, which "keep" does not keep. */
@@ -3145,20 +3333,7 @@ GpDispatchParamsOnContent(int content, const char *sql, int nparams,
 				(errcode(ERRCODE_UNDEFINED_OBJECT),
 				 errmsg("there is no segment with content id %d", content)));
 
-	if (c->busy && c->fetching != NULL)
-		conn_park(c);
-	if (!PQsendQueryParams(c->conn, sql, nparams, NULL, values, lengths,
-						   formats, 0))
-	{
-		char	   *msg = pstrdup(PQerrorMessage(c->conn));
-
-		gang_close();
-		ereport(ERROR,
-				(errcode(ERRCODE_CONNECTION_FAILURE),
-				 errmsg("could not send a statement to segment %d", content),
-				 errdetail_internal("%s", msg)));
-	}
-	c->busy = true;
+	conn_send_params(c, sql, nparams, NULL, values, lengths, formats);
 	gang_wait_all(g, NULL, false);
 }
 
@@ -3192,19 +3367,7 @@ GpDispatchWriteOnContent(int content, const char *sql, int nparams,
 				(errcode(ERRCODE_UNDEFINED_OBJECT),
 				 errmsg("there is no segment with content id %d", content)));
 
-	if (c->busy && c->fetching != NULL)
-		conn_park(c);
-	if (!PQsendQueryParams(c->conn, sql, nparams, NULL, values, NULL, NULL, 0))
-	{
-		char	   *msg = pstrdup(PQerrorMessage(c->conn));
-
-		gang_close();
-		ereport(ERROR,
-				(errcode(ERRCODE_CONNECTION_FAILURE),
-				 errmsg("could not send a statement to segment %d", content),
-				 errdetail_internal("%s", msg)));
-	}
-	c->busy = true;
+	conn_send_params(c, sql, nparams, NULL, values, NULL, NULL);
 
 	results = (PGresult **) palloc0_array(PGresult *, g->nconns);
 	gang_wait_all_keeping_commands(g, results);
@@ -3291,20 +3454,7 @@ GpDispatchWriteReturning(const char *sql, int content, const int *contents,
 		if (contents != NULL ? !conn_listed(c, contents, ncontents)
 			: !conn_asked(c, content, 0))
 			continue;
-		if (c->busy && c->fetching != NULL)
-			conn_park(c);
-		if (!PQsendQueryParams(c->conn, sql, 0, NULL, NULL, NULL, NULL, 0))
-		{
-			char	   *msg = pstrdup(PQerrorMessage(c->conn));
-			int			failed = c->content;
-
-			gang_close();
-			ereport(ERROR,
-					(errcode(ERRCODE_CONNECTION_FAILURE),
-					 errmsg("could not send a statement to segment %d", failed),
-					 errdetail_internal("%s", msg)));
-		}
-		c->busy = true;
+		conn_send_params(c, sql, 0, NULL, NULL, NULL, NULL);
 	}
 
 	results = (PGresult **) palloc0_array(PGresult *, g->nconns);
@@ -3587,7 +3737,9 @@ struct GpGatherState
  * nothing may make one from outside; each is binary-coercible to text or
  * bytea (pg_cast), with the same bytes, so it travels as that and is kept
  * as it arrives.  pg_catalog's pg_class.relpartbound and pg_rewrite.ev_action
- * are among them, which gp.dist_random() of a catalog reads.
+ * are among them, which gp.dist_random() of a catalog reads.  And a record
+ * of no declared type travels as gp_internal.record_wire, which describes
+ * its row type, and is made again on arrival (gp_record.c).
  */
 Oid
 GpTransferType(Oid type)
@@ -3600,6 +3752,17 @@ GpTransferType(Oid type)
 		case PG_DEPENDENCIESOID:
 		case PG_MCV_LISTOID:
 			return BYTEAOID;
+		case RECORDOID:
+			{
+				/*
+				 * A record of no declared type is not kept as it arrives:
+				 * record_wire's input makes it again, of a row type
+				 * registered here.
+				 */
+				Oid			wire = GpRecordWireType();
+
+				return OidIsValid(wire) ? wire : type;
+			}
 		default:
 			return type;
 	}
@@ -3614,6 +3777,11 @@ GpAppendTransferColumn(StringInfo buf, const char *column, Oid type)
 {
 	Oid			transfer = GpTransferType(type);
 
+	if (type == RECORDOID && transfer != type)
+	{
+		appendStringInfo(buf, "gp_internal.record_wire(%s)", column);
+		return;
+	}
 	appendStringInfoString(buf, column);
 	if (transfer != type)
 		appendStringInfo(buf, "::pg_catalog.%s", transfer == TEXTOID ? "text" : "bytea");
@@ -3690,6 +3858,12 @@ type_has_binary_io(Oid typid)
 	if (result && OidIsValid(inner))
 		result = type_has_binary_io(inner);
 	return result;
+}
+
+bool
+GpTypeHasBinaryIO(Oid type)
+{
+	return type_has_binary_io(type);
 }
 
 bool
@@ -3803,8 +3977,15 @@ gather_start(const char *sql, TupleDesc tupdesc, int content, int nsegments,
 			 const int *contents, int ncontents)
 {
 	GpGatherState *gather = (GpGatherState *) palloc0(sizeof(GpGatherState));
-	GpGang	   *g = gang_get();
+	GpGang	   *g;
 	int			n = 0;
+
+	/*
+	 * Where Cloudberry's coordinator sets up the interconnect its slices'
+	 * rows come to it by (SetupInterconnect()): the gather its rows come by.
+	 */
+	GP_FAULT("interconnect_setup_palloc");
+	g = gang_get();
 
 	/*
 	 * Through a cursor, inside the coordinator's transaction.  A gather that
@@ -4293,6 +4474,78 @@ GpDispatchQueryFirstValues(const char *sql, int content, char **values)
 	}
 }
 
+PG_FUNCTION_INFO_V1(gp_backend_info);
+
+/* Cloudberry's SQLSTATE for a command that cannot run where it was asked */
+#define ERRCODE_GP_COMMAND_ERROR	MAKE_SQLSTATE('4','2','M','0','0')
+
+/*
+ * pg_catalog.gp_backend_info()
+ *		The session's backends, as Cloudberry's gp_backend_info() lists them
+ *		(cdbgang.c): this one, the coordinator's, of type 'Q' and id -1; the
+ *		writer on each segment, 'w'; and each reader, 'r' -- each with an id
+ *		of its own, its node's content id, host and port, and its pid.  The
+ *		port has no entry reader, Cloudberry's 'R': the coordinator's own
+ *		slice runs in this backend.
+ */
+Datum
+gp_backend_info(PG_FUNCTION_ARGS)
+{
+	ReturnSetInfo *rsinfo = (ReturnSetInfo *) fcinfo->resultinfo;
+	const GpSegmentConfig *self = GpClusterSelf();
+	Datum		values[6];
+	bool		nulls[6] = {false, false, false, false, false, false};
+	int			id = 0;
+
+	if (GpClusterBackendRole() != GP_ROLE_DISPATCH)
+		ereport(ERROR,
+				(errcode(ERRCODE_GP_COMMAND_ERROR),
+				 errmsg("gp_backend_info() could only be called on QD")));
+
+	InitMaterializedSRF(fcinfo, 0);
+
+	values[0] = Int32GetDatum(-1);
+	values[1] = CharGetDatum('Q');
+	values[2] = Int32GetDatum(-1);
+	values[3] = CStringGetTextDatum(self != NULL ? self->hostname : "localhost");
+	values[4] = Int32GetDatum(self != NULL ? self->port : PostPortNumber);
+	values[5] = Int32GetDatum(MyProcPid);
+	tuplestore_putvalues(rsinfo->setResult, rsinfo->setDesc, values, nulls);
+
+	if (gang == NULL)
+		return (Datum) 0;
+	for (int i = 0; i < gang->nconns; i++)
+	{
+		GpSegmentConn *c = &gang->conns[i];
+
+		values[0] = Int32GetDatum(id++);
+		values[1] = CharGetDatum('w');
+		values[2] = Int32GetDatum(c->content);
+		values[3] = CStringGetTextDatum(c->seg->hostname);
+		values[4] = Int32GetDatum(c->seg->port);
+		values[5] = Int32GetDatum(PQbackendPID(c->conn));
+		tuplestore_putvalues(rsinfo->setResult, rsinfo->setDesc, values, nulls);
+	}
+	foreach_ptr(GpReaderConn, r, gang->readers)
+	{
+		const GpSegmentConfig *seg = NULL;
+
+		if (r->conn == NULL)
+			continue;
+		for (int i = 0; i < gang->nconns; i++)
+			if (gang->conns[i].content == r->content)
+				seg = gang->conns[i].seg;
+		values[0] = Int32GetDatum(id++);
+		values[1] = CharGetDatum('r');
+		values[2] = Int32GetDatum(r->content);
+		values[3] = CStringGetTextDatum(seg != NULL ? seg->hostname : "");
+		values[4] = Int32GetDatum(seg != NULL ? seg->port : 0);
+		values[5] = Int32GetDatum(PQbackendPID(r->conn));
+		tuplestore_putvalues(rsinfo->setResult, rsinfo->setDesc, values, nulls);
+	}
+	return (Datum) 0;
+}
+
 PG_FUNCTION_INFO_V1(gp_exec_on_segments);
 
 /*
@@ -4425,9 +4678,12 @@ gp_dist_random(PG_FUNCTION_ARGS)
 
 /*
  * Is "sql" a query gp_segment.c makes the planner run on the segments: one
- * SELECT, of one gp_dist_random() and nothing else, as ruleutils prints it
- * and O26 reads it -- gp.dist_random(NULL::t), or gp_dist_random('t') where
- * gp_sql does not desugar it?  Nothing more is taken by name.
+ * SELECT and nothing else, as ruleutils prints it and O26 reads it -- of one
+ * gp_dist_random() alone, gp.dist_random(NULL::t) or gp_dist_random('t')
+ * where gp_sql does not desugar it; of one function's rows alone, a function
+ * that runs on all segments; or of no relation, a query that calls one?  A
+ * SELECT is all it runs: nothing that writes but by a function it calls, as
+ * the same query would through the coordinator, and nothing that locks.
  */
 static bool
 is_segment_query(const char *sql)
@@ -4436,16 +4692,17 @@ is_segment_query(const char *sql)
 	SelectStmt *select;
 	RangeFunction *range;
 	List	   *call;
-	FuncCall   *fcall;
-	char	   *name;
 
 	if (list_length(stmts) != 1)
 		return false;
 	select = (SelectStmt *) linitial_node(RawStmt, stmts)->stmt;
 	if (!IsA(select, SelectStmt) || select->op != SETOP_NONE ||
 		select->withClause != NULL || select->intoClause != NULL ||
-		select->lockingClause != NIL || select->valuesLists != NIL ||
-		list_length(select->fromClause) != 1 ||
+		select->lockingClause != NIL || select->valuesLists != NIL)
+		return false;
+	if (select->fromClause == NIL)
+		return true;
+	if (list_length(select->fromClause) != 1 ||
 		!IsA(linitial(select->fromClause), RangeFunction))
 		return false;
 	range = linitial_node(RangeFunction, select->fromClause);
@@ -4453,15 +4710,7 @@ is_segment_query(const char *sql)
 		list_length(range->functions) != 1)
 		return false;
 	call = linitial_node(List, range->functions);
-	if (!IsA(linitial(call), FuncCall))
-		return false;
-	fcall = linitial_node(FuncCall, call);
-	name = strVal(llast(fcall->funcname));
-	if (list_length(fcall->funcname) == 2)
-		return strcmp(strVal(linitial(fcall->funcname)), "gp") == 0 &&
-			strcmp(name, "dist_random") == 0;
-	return list_length(fcall->funcname) == 1 &&
-		strcmp(name, "gp_dist_random") == 0;
+	return IsA(linitial(call), FuncCall);
 }
 
 /*
@@ -4568,7 +4817,7 @@ gp_segment_query(PG_FUNCTION_ARGS)
 	if (PG_ARGISNULL(0))
 		ereport(ERROR,
 				(errcode(ERRCODE_NULL_VALUE_NOT_ALLOWED),
-				 errmsg("gp_internal.segment_query() runs only a query of one gp_dist_random()")));
+				 errmsg("gp_internal.segment_query() runs only a query of one gp_dist_random(), of one function's rows, or of no relation")));
 	sql = text_to_cstring(PG_GETARG_TEXT_PP(0));
 	if (PG_NARGS() > 1)
 		sql = segment_query_values(sql, fcinfo);
@@ -4576,7 +4825,7 @@ gp_segment_query(PG_FUNCTION_ARGS)
 	if (!is_segment_query(sql))
 		ereport(ERROR,
 				(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
-				 errmsg("gp_internal.segment_query() runs only a query of one gp_dist_random()")));
+				 errmsg("gp_internal.segment_query() runs only a query of one gp_dist_random(), of one function's rows, or of no relation")));
 	if (GpDistRandomIsLocal())
 		ereport(ERROR,
 				(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),

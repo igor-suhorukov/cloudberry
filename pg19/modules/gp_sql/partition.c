@@ -109,6 +109,7 @@
 #include "utils/timestamp.h"
 
 #include "gp_grammar_int.h"
+#include "gp_core_api.h"
 #include "gp_label.h"
 #include "gp_grammar.h"
 #include "gp_partition.h"
@@ -3301,6 +3302,49 @@ run_cmd(Oid relid, GpPartParser *p, GpPartCmd *cmd, const char *queryString,
 		case GP_PART_CMD_ALTER:
 			Assert(false);
 			break;
+	}
+
+	/*
+	 * The table's PARTITION row in pg_stat_last_operation, as Cloudberry's
+	 * GpAlterPartMetaTrackUpdObject() writes it (tablecmds_gp.c).
+	 */
+	{
+		const GpCoreApi *core = GpCoreApiLookup();
+		const char *subtype = NULL;
+
+		switch (cmd->kind)
+		{
+			case GP_PART_CMD_ADD:
+				subtype = "ADD";
+				break;
+			case GP_PART_CMD_DROP:
+				subtype = "DROP";
+				break;
+			case GP_PART_CMD_EXCHANGE:
+				subtype = "EXCHANGE";
+				break;
+			case GP_PART_CMD_RENAME:
+				subtype = "RENAME";
+				break;
+			case GP_PART_CMD_SET_TEMPLATE:
+				subtype = "SET TEMPLATE";
+				break;
+			case GP_PART_CMD_SPLIT:
+				subtype = "SPLIT";
+				break;
+			case GP_PART_CMD_TRUNCATE:
+				subtype = "TRUNCATE";
+				break;
+			case GP_PART_CMD_SET_TABLESPACE:
+				subtype = "SET TABLESPACE";
+				break;
+			default:
+				break;
+		}
+		if (subtype != NULL && core != NULL &&
+			core->version_major == GP_CORE_API_VERSION_MAJOR &&
+			core->version_minor >= 12)
+			core->metatrack_partition(relid, subtype);
 	}
 }
 
