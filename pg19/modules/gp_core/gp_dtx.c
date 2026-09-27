@@ -991,8 +991,10 @@ map_load_database(void)
 				Datum	   *elems;
 				int			n;
 
-				deconstruct_array_builtin(DatumGetArrayTypeP(children), XIDOID,
-										  &elems, NULL, &n);
+				/* xid[], which deconstruct_array_builtin() does not take */
+				deconstruct_array(DatumGetArrayTypeP(children), XIDOID,
+								  sizeof(TransactionId), true, TYPALIGN_INT,
+								  &elems, NULL, &n);
 				p->children = palloc_array(TransactionId, Max(n, 1));
 				for (int i = 0; i < n; i++)
 					p->children[i] = DatumGetTransactionId(elems[i]);
