@@ -72,10 +72,10 @@ bfv_dd, direct_dispatch, qp_targeted_dispatch (planner, orca)  the INFO
   rollback before any part is prepared name every segment the transaction's
   statements went to, in the order they first went, as Cloudberry's do --
   so where a statement's slices go elsewhere than Cloudberry's, its commit's
-  line differs with them.  Under ORCA, the slices
-  below a write are numbered one higher than Cloudberry's: its write is its
-  root slice, slice 0, and the port's is slice 1, below the coordinator's
-  own.  The rows the statements return and change are Cloudberry's.
+  line differs with them.  Under ORCA a write is numbered as Cloudberry's,
+  its root slice, slice 0, and the slices below it from 1, though the port's
+  write is slice 1 below the coordinator's own.  The rows the statements
+  return and change are Cloudberry's.
 
 bfv_dd_multicolumn  the INFO lines of test_print_direct_dispatch_info that
   say where a statement goes.  Its INSERT ... SELECT of generate_series()

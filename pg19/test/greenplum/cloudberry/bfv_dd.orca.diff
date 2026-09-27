@@ -106,6 +106,6 @@
 +INFO:  (slice 2) Dispatch command to ALL contents: 0 1 2
 +INFO:  (slice 1) Dispatch command to ALL contents: 0 1 2
 @@
-+INFO:  (slice 2) Dispatch command to ALL contents: 0 1 2
++INFO:  (slice 1) Dispatch command to ALL contents: 0 1 2
 @@
 -INFO:  (slice 1) Dispatch command to SINGLE content

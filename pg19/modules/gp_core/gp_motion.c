@@ -4016,7 +4016,10 @@ is_fragment(PlannedStmt *stmt)
  * gp.test_print_direct_dispatch_info asks for them: read off the slice
  * table, in the order Cloudberry's dispatcher sends the slices
  * (compare_slice_order(), cdb/dispatcher/cdbdisp_query.c) -- the largest
- * gang first, and of two alike the one with fewer slices below it.
+ * gang first, and of two alike the one with fewer slices below it.  A
+ * write on the segments is Cloudberry's root slice, slice 0, where the
+ * port's is slice 1, below the coordinator's own, which is not dispatched:
+ * the slices below it are numbered as Cloudberry numbers them, one lower.
  */
 typedef struct SliceReport
 {
@@ -4050,6 +4053,7 @@ report_slices(PlannedStmt *stmt)
 	int		   *parent;
 	SliceReport *reports;
 	int			nreports = 0;
+	bool		write = false;
 	ListCell   *lc;
 
 	/* the slice table, as Cloudberry's executor logs it (execMain.c) */
@@ -4068,6 +4072,8 @@ report_slices(PlannedStmt *stmt)
 
 		if (index >= 0 && index < n)
 			parent[index] = intVal(lsecond(slice));
+		if (intVal(list_nth(slice, 2)) == 4)
+			write = true;
 	}
 
 	foreach(lc, table)
@@ -4086,7 +4092,7 @@ report_slices(PlannedStmt *stmt)
 			continue;
 		r = &reports[nreports++];
 		/* a write on the segments is Cloudberry's root slice, slice 0 */
-		r->index = gang == 4 ? 0 : index;
+		r->index = gang == 4 ? 0 : write && index > 0 ? index - 1 : index;
 		/* an entry slice, a singleton, and a direct dispatch are one process */
 		r->single = gang == 1 || gang == 2 || direct >= 0 || nsegs == 1;
 		r->size = r->single ? 1 : several != NIL ? list_length(several) : nsegs;
