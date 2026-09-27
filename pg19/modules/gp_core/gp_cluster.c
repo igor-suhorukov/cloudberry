@@ -107,6 +107,7 @@
 #include "gp_cluster.h"
 #include "gp_core_api.h"
 #include "gp_dbcopy.h"
+#include "gp_endpoint.h"
 #include "gp_segadmin.h"
 
 /* The longest line the configuration file may hold. */
@@ -1893,6 +1894,10 @@ GpClusterBackendRole(void)
 	 */
 	if (GpClusterIsDispatched())
 		return GP_ROLE_EXECUTE;
+
+	/* and a retrieve session is a utility one, as Cloudberry makes it */
+	if (GpEndpointIsRetrieveSession())
+		return GP_ROLE_UTILITY;
 
 	if (cluster_self != NULL)
 		return cluster_self->content == -1 ? GP_ROLE_DISPATCH : GP_ROLE_UTILITY;

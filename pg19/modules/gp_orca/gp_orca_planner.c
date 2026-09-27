@@ -42,10 +42,16 @@
  * 0x1000.  Testing those bits here would therefore not mean what it means on
  * Cloudberry: it would turn ORCA off for every statement whose plan was
  * forced to be a custom one, which is a common thing and has nothing to do
- * with cursors.  Neither feature exists on the port yet -- parallel retrieve
- * cursors are Track B and foreign partitions Track D -- and when they arrive
- * each needs a signal of its own rather than a bit in a field PostgreSQL
- * owns.  GP_FALLBACK_cursor_option is the reason they will report.
+ * with cursors.  A parallel retrieve cursor is marked with a bit of gp_core's
+ * own, GP_CURSOR_OPT_PARALLEL_RETRIEVE, above PostgreSQL 19's (gp_core_api.h),
+ * and here it does the opposite of Cloudberry's: ORCA plans every such
+ * cursor, gp.optimizer on or off.  Cloudberry's are planned by its planner,
+ * whose plans have slices, and the port's planner has none; ORCA's plan of
+ * one is given its endpoints by gp_core -- its top slice's segments, or the
+ * coordinator (gp_endpoint.c) -- and a cursor ORCA declines has its endpoint
+ * on the coordinator, as one Cloudberry's planner gathers has.  Foreign
+ * partitions are Track D's, and will need a signal of their own;
+ * GP_FALLBACK_cursor_option is the reason they will report.
  *
  *-------------------------------------------------------------------------
  */
@@ -243,7 +249,8 @@ record_fallback(GpFallbackReason reason, const char *detail)
 static bool
 orca_should_try(Query *parse, int cursorOptions, GpFallbackReason *reason)
 {
-	if (!gp_optimizer)
+	/* a parallel retrieve cursor is ORCA's whatever gp.optimizer says */
+	if (!gp_optimizer && !(cursorOptions & GP_CURSOR_OPT_PARALLEL_RETRIEVE))
 	{
 		*reason = GP_FALLBACK_disabled;
 		return false;
@@ -331,6 +338,12 @@ gp_orca_planner(Query *parse, const char *query_string, int cursorOptions,
 			lappend(result->extension_state,
 					makeDefElem(pstrdup(GP_ORCA_PLAN_MARK),
 								(Node *) makeString(pstrdup("GPORCA")), -1));
+
+		/* a parallel retrieve cursor's endpoints, which gp_core decides */
+		if ((cursorOptions & GP_CURSOR_OPT_PARALLEL_RETRIEVE) &&
+			core != NULL && core->version_minor >= 13 &&
+			core->endpoint_plan != NULL)
+			core->endpoint_plan(result);
 	}
 
 	return result;

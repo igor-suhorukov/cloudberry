@@ -33,13 +33,14 @@
 #include "postgres.h"
 
 #include "access/attnum.h"
+#include "nodes/parsenodes.h"
 
 /*
  * Bump the minor when something is added, the major when anything already
  * here changes meaning or moves.
  */
 #define GP_CORE_API_VERSION_MAJOR	1
-#define GP_CORE_API_VERSION_MINOR	12
+#define GP_CORE_API_VERSION_MINOR	13
 
 struct Node;
 struct List;
@@ -233,7 +234,40 @@ typedef struct GpCoreApi
 	 * "RENAME", "SET TEMPLATE" (gp_metatrack.c).
 	 */
 	void		(*metatrack_partition) (Oid relid, const char *subtype);
+
+	/*
+	 * Since 1.13: parallel retrieve cursors (gp_endpoint.c).  ORCA's plan
+	 * of one, which endpoint_plan() gives its endpoints -- the segments its
+	 * top slice runs on, the Gather above it taken off, or the coordinator
+	 * -- and O26's RETRIEVE { ALL | count }, whose SELECT of the endpoint's
+	 * columns retrieve_sql() writes, in a retrieve session.
+	 */
+	void		(*endpoint_plan) (struct PlannedStmt *stmt);
+	char	   *(*retrieve_sql) (const char *endpoint, bool all, int64 count);
 } GpCoreApi;
+
+/*
+ * A parallel retrieve cursor, as O26 marks DECLARE ... PARALLEL RETRIEVE
+ * CURSOR's DeclareCursorStmt: a bit of its options that no CURSOR_OPT_* flag
+ * of PostgreSQL 19's is.  PostgreSQL hands the options to the planner and to
+ * the portal (PerformCursorOpen(), ExplainOneUtility()) and reads only its
+ * own bits of them, so the bit reaches the planner hooks and the portal
+ * without a patch; nothing of PostgreSQL's reads it after, and it is not
+ * cleared.  Cloudberry's CURSOR_OPT_PARALLEL_RETRIEVE is 0x0400, which is
+ * PostgreSQL 19's CURSOR_OPT_CUSTOM_PLAN.  A PostgreSQL that takes this bit
+ * for a flag of its own fails the assertion below, which names only the
+ * flags there are; each major version's are to be checked against it.
+ */
+#define GP_CURSOR_OPT_PARALLEL_RETRIEVE	0x40000000
+
+StaticAssertDecl(GP_CURSOR_OPT_PARALLEL_RETRIEVE > CURSOR_OPT_PARALLEL_OK &&
+				 (GP_CURSOR_OPT_PARALLEL_RETRIEVE &
+				  (CURSOR_OPT_BINARY | CURSOR_OPT_SCROLL |
+				   CURSOR_OPT_NO_SCROLL | CURSOR_OPT_INSENSITIVE |
+				   CURSOR_OPT_ASENSITIVE | CURSOR_OPT_HOLD |
+				   CURSOR_OPT_FAST_PLAN | CURSOR_OPT_GENERIC_PLAN |
+				   CURSOR_OPT_CUSTOM_PLAN | CURSOR_OPT_PARALLEL_OK)) == 0,
+				 "the parallel retrieve cursor's bit is one of PostgreSQL's cursor options");
 
 /*
  * gp_segment_id's attribute number in ORCA's metadata: Cloudberry's

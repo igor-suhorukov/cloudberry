@@ -1,0 +1,87 @@
+@@
+-   Output: a
++   Output: t1.a
+@@
+-   Output: a
+-   Merge Key: a
++   Output: t1.a
++   Merge Key: t1.a
+@@
+-         Output: a
++         Output: t1.a
+@@
+-               Output: a
++               Output: t1.a
+@@
+-   Output: a
++   Output: t1.a
+@@
+-   Output: a
++   Output: t1.a
+@@
+-   Output: a
++   Output: t2.a
+@@
+-   Output: oid, relname, relnamespace, reltype, reloftype, relowner, relam, relfilenode, reltablespace, relpages, reltuples, relallvisible, reltoastrelid, relhasindex, relisshared, relpersistence, relkind, relnatts, relchecks, relhasrules, relhastriggers, relhassubclass, relrowsecurity, relforcerowsecurity, relispopulated, relreplident, relispartition, relisivm, relisdynamic, relmvrefcount, relrewrite, relfrozenxid, relminmxid, relacl, reloptions, relpartbound
++   Output: oid, relname, relnamespace, reltype, reloftype, relowner, relam, relfilenode, reltablespace, relpages, reltuples, relallvisible, relallfrozen, reltoastrelid, relhasindex, relisshared, relpersistence, relkind, relnatts, relchecks, relhasrules, relhastriggers, relhassubclass, relrowsecurity, relforcerowsecurity, relispopulated, relreplident, relispartition, relrewrite, relfrozenxid, relminmxid, relacl, reloptions, relpartbound
+@@
+-   Output: oid, relname, relnamespace, reltype, reloftype, relowner, relam, relfilenode, reltablespace, relpages, reltuples, relallvisible, reltoastrelid, relhasindex, relisshared, relpersistence, relkind, relnatts, relchecks, relhasrules, relhastriggers, relhassubclass, relrowsecurity, relforcerowsecurity, relispopulated, relreplident, relispartition, relisivm, relisdynamic, relmvrefcount, relrewrite, relfrozenxid, relminmxid, relacl, reloptions, relpartbound
++   Output: oid, relname, relnamespace, reltype, reloftype, relowner, relam, relfilenode, reltablespace, relpages, reltuples, relallvisible, relallfrozen, reltoastrelid, relhasindex, relisshared, relpersistence, relkind, relnatts, relchecks, relhasrules, relhastriggers, relhassubclass, relrowsecurity, relforcerowsecurity, relispopulated, relreplident, relispartition, relrewrite, relfrozenxid, relminmxid, relacl, reloptions, relpartbound
+@@
+-   Output: oid, relname, relnamespace, reltype, reloftype, relowner, relam, relfilenode, reltablespace, relpages, reltuples, relallvisible, reltoastrelid, relhasindex, relisshared, relpersistence, relkind, relnatts, relchecks, relhasrules, relhastriggers, relhassubclass, relrowsecurity, relforcerowsecurity, relispopulated, relreplident, relispartition, relisivm, relisdynamic, relmvrefcount, relrewrite, relfrozenxid, relminmxid, relacl, reloptions, relpartbound
++   Output: oid, relname, relnamespace, reltype, reloftype, relowner, relam, relfilenode, reltablespace, relpages, reltuples, relallvisible, relallfrozen, reltoastrelid, relhasindex, relisshared, relpersistence, relkind, relnatts, relchecks, relhasrules, relhastriggers, relhassubclass, relrowsecurity, relforcerowsecurity, relispopulated, relreplident, relispartition, relrewrite, relfrozenxid, relminmxid, relacl, reloptions, relpartbound
+@@
+-   Output: oid, relname, relnamespace, reltype, reloftype, relowner, relam, relfilenode, reltablespace, relpages, reltuples, relallvisible, reltoastrelid, relhasindex, relisshared, relpersistence, relkind, relnatts, relchecks, relhasrules, relhastriggers, relhassubclass, relrowsecurity, relforcerowsecurity, relispopulated, relreplident, relispartition, relisivm, relisdynamic, relmvrefcount, relrewrite, relfrozenxid, relminmxid, relacl, reloptions, relpartbound
++   Output: oid, relname, relnamespace, reltype, reloftype, relowner, relam, relfilenode, reltablespace, relpages, reltuples, relallvisible, relallfrozen, reltoastrelid, relhasindex, relisshared, relpersistence, relkind, relnatts, relchecks, relhasrules, relhastriggers, relhassubclass, relrowsecurity, relforcerowsecurity, relispopulated, relreplident, relispartition, relrewrite, relfrozenxid, relminmxid, relacl, reloptions, relpartbound
+@@
+-   Output: oid, relname, relnamespace, reltype, reloftype, relowner, relam, relfilenode, reltablespace, relpages, reltuples, relallvisible, reltoastrelid, relhasindex, relisshared, relpersistence, relkind, relnatts, relchecks, relhasrules, relhastriggers, relhassubclass, relrowsecurity, relforcerowsecurity, relispopulated, relreplident, relispartition, relisivm, relisdynamic, relmvrefcount, relrewrite, relfrozenxid, relminmxid, relacl, reloptions, relpartbound
++   Output: oid, relname, relnamespace, reltype, reloftype, relowner, relam, relfilenode, reltablespace, relpages, reltuples, relallvisible, relallfrozen, reltoastrelid, relhasindex, relisshared, relpersistence, relkind, relnatts, relchecks, relhasrules, relhastriggers, relhassubclass, relrowsecurity, relforcerowsecurity, relispopulated, relreplident, relispartition, relrewrite, relfrozenxid, relminmxid, relacl, reloptions, relpartbound
+@@
+- Function Scan on pg_catalog.generate_series f
++ Function Scan on pg_catalog.generate_series
+@@
+-   Output: f
+-   Sort Key: f.f
+-   ->  Function Scan on pg_catalog.generate_series f
+-         Output: f
++   Output: generate_series
++   Sort Key: generate_series.generate_series
++   ->  Function Scan on pg_catalog.generate_series
++         Output: generate_series
+@@
+- Function Scan on pg_catalog.generate_series f
+-   Output: f
+-   Function Call: generate_series(1, 10)
+-   Filter: (f.f = 1)
++ Subquery Scan on filter
++   Output: filter.generate_series
++   Filter: (filter.generate_series = 1)
++   ->  Function Scan on pg_catalog.generate_series
++         Output: generate_series.generate_series
++         Function Call: generate_series(1, 10)
+@@
+- Function Scan on pg_catalog.generate_series f
+-   Output: f
+-   Function Call: generate_series(1, 10)
+-   Filter: ((f.f = 1) OR (f.f = 2))
++ Subquery Scan on filter
++   Output: filter.generate_series
++   Filter: ((filter.generate_series = 1) OR (filter.generate_series = 2))
++   ->  Function Scan on pg_catalog.generate_series
++         Output: generate_series.generate_series
++         Function Call: generate_series(1, 10)
+@@
+-   Output: a
++   Output: rt1.a
+@@
+-   Output: a
++   Output: rt1.a
+@@
+-         Output: a
++         Output: rt1.a
+@@
+-   Output: a
++   Output: rt1.a
+@@
+-   Output: a
++   Output: rt1.a

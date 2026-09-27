@@ -80,6 +80,7 @@
 #include "cb_module.h"
 #include "gp_core_api.h"
 #include "gp_dispatch.h"
+#include "gp_endpoint.h"
 #include "gp_resource.h"
 
 PG_MODULE_MAGIC_EXT(
@@ -342,7 +343,10 @@ define_settings(void)
 /*
  * Where a query takes a queue's slot and a transaction a group's: the
  * coordinator of a cluster, or a single node -- Cloudberry's
- * Gp_role == GP_ROLE_DISPATCH || IS_SINGLENODE().
+ * Gp_role == GP_ROLE_DISPATCH || IS_SINGLENODE().  Not a retrieve session,
+ * whose RETRIEVE reads the rows of a cursor that took its slot, and which is
+ * a utility session in Cloudberry, where it takes none (gp_endpoint.c); on a
+ * cluster its role says so.
  */
 bool
 GpResourceIsDispatcher(void)
@@ -351,7 +355,8 @@ GpResourceIsDispatcher(void)
 
 	if (api->get_role() == GP_ROLE_DISPATCH)
 		return true;
-	return api->get_role() == GP_ROLE_UTILITY && api->is_single_node();
+	return api->get_role() == GP_ROLE_UTILITY && api->is_single_node() &&
+		!GpEndpointIsRetrieveSession();
 }
 
 /* A segment's process, which the coordinator dispatched to */

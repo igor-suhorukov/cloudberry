@@ -5,9 +5,11 @@
 #
 # Every test isolation2_schedule names, in its order -- the ones its "ignore:"
 # lines name as well, where the schedule names a test twice at its "test:"
-# line -- and no other; the lines it has commented out Cloudberry does not
-# run either.  A test is skipped only for what it needs that M1 does
-# not have, and the milestone that brings it is named where there is one.
+# line -- and parallel_retrieve_cursor_schedule's at the end, and no other; the
+# lines it has commented out Cloudberry does not run either.  A test is
+# skipped only for what it needs that M1 does not have, and the milestone that
+# brings it is named where there is one.  A test whose name begins "port/" is
+# the port's own (sql/port and expected/port here).
 skip lockmodes append-optimized tables (M5), and a data directory read from gp_segment_configuration
 skip ao_partition_lock append-optimized tables (M5)
 run  select_dropped_table
@@ -119,3 +121,28 @@ run  setup_startup_memory_accounting
 run  oom_startup_memory
 run  restore_memory_accounting_default
 run  runaway_query
+#
+# And parallel_retrieve_cursor_schedule, the suite's other schedule, each
+# test skipped by design: the schedule is an older copy of isolation2's,
+# which the isolation2 suite runs on a cluster (M8), and its expected output
+# is a cluster's -- three segments' endpoints on a node that has none -- and
+# calls gp_endpoints() and gp_segment_endpoints() as functions, which no
+# catalog of Cloudberry's defines (they are views); neither its Makefile nor
+# Cloudberry's CI runs it.  The port's own test of parallel retrieve cursors
+# on one node runs in its place.
+skip parallel_retrieve_cursor/set a cluster's test (skipped by design; see above)
+skip parallel_retrieve_cursor/extended_query a cluster's test (skipped by design; see above)
+skip parallel_retrieve_cursor/corner a cluster's test (skipped by design; see above)
+skip parallel_retrieve_cursor/explain a cluster's test (skipped by design; see above)
+skip parallel_retrieve_cursor/replicated_table a cluster's test (skipped by design; see above)
+skip parallel_retrieve_cursor/special_query a cluster's test (skipped by design; see above)
+skip parallel_retrieve_cursor/status_check a cluster's test (skipped by design; see above)
+skip parallel_retrieve_cursor/status_wait a cluster's test (skipped by design; see above)
+skip parallel_retrieve_cursor/syntax a cluster's test (skipped by design; see above)
+skip parallel_retrieve_cursor/retrieve_quit_check a cluster's test (skipped by design; see above)
+skip parallel_retrieve_cursor/retrieve_quit_wait a cluster's test (skipped by design; see above)
+skip parallel_retrieve_cursor/fault_inject a cluster's test (skipped by design; see above)
+skip parallel_retrieve_cursor/security a cluster's test (skipped by design; see above)
+skip parallel_retrieve_cursor/privilege a cluster's test (skipped by design; see above)
+skip parallel_retrieve_cursor/unset a cluster's test (skipped by design; see above)
+run  port/parallel_retrieve_cursor

@@ -1,0 +1,19 @@
+-- The port's additions to Cloudberry's init file of its parallel retrieve
+-- cursor schedule, init_file_parallel_retrieve_cursor, read by gpdiff.pl
+-- with it.
+
+-- start_matchsubs
+
+# A retrieve session to a node without the endpoint, which the harness's
+# cluster reaches by a socket, where Cloudberry's is reached by a host and
+# a port: libpq names the socket.
+m/retrieve> connection to server on socket "[^"]*" failed: FATAL:  /
+s/retrieve> connection to server on socket "[^"]*" failed: FATAL:  /retrieve> connection to server at "host_id", port port_id failed: FATAL:  /
+
+# Where Cloudberry's error comes from, which it adds to an internal one --
+# "endpoint is not available because the parallel retrieve cursor was
+# aborted (cdbendpointretrieve.c:245)" -- and the port does not.
+m/ \(cdbendpointretrieve\.c:(\d+|LINE_NUM)\)$/
+s/ \(cdbendpointretrieve\.c:(\d+|LINE_NUM)\)$//
+
+-- end_matchsubs

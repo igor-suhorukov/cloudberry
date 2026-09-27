@@ -21,7 +21,9 @@
 # distributed transactions, snapshots, locks and the global deadlock
 # detector -- M4's, FTS and mirrors, M6's resource queues and memory
 # accounting, and M7's of the tools: a node recovered elsewhere, and the
-# standby coordinator promoted, made again and waited for.
+# standby coordinator promoted, made again and waited for.  And
+# parallel_retrieve_cursor_schedule, M8's: parallel retrieve cursors and the
+# retrieve sessions that read them (1R:, *R:).
 #
 # src/test/isolation2 is Cloudberry's suite of tests that need more than one
 # session at a time, written in its isolation2 syntax (1: ..., 2&: ..., 2<:,
@@ -399,6 +401,33 @@ sed -e 's/given_opt="-c gp_role=utility"/given_opt=None/' \
 	-e 's/("the database system is starting up" in str(e) or/&\n                         ("server closed the connection unexpectedly" in str(e) and "failed:" in str(e)) or\n                         "the database system is not yet accepting connections" in str(e) or/' \
 	"$CB/sql_isolation_testcase.py" > "$EXEC/sql_isolation_testcase.py"
 
+# ... and its shell helpers, a copy whose masks of a value a test found --
+# an endpoint's host, among the retrieve tests' (parse_endpoint_info()) --
+# quote it: a node's host is a socket's directory here, whose slashes end
+# the pattern Cloudberry's helper writes, and whose first character is no
+# word's, where Cloudberry's pattern begins at a word's boundary.
+cp "$CB/global_sh_executor.sh" "$EXEC/global_sh_executor.sh"
+cat >> "$EXEC/global_sh_executor.sh" <<'HELPER'
+
+create_match_sub_with_spaces() {
+    to_replace=""
+    for var in "$@"
+        do
+        if [ -z "$to_replace" ]
+        then
+            to_replace=$var
+        else
+            quoted="$(printf '%s' "$to_replace" | sed 's/[^[:alnum:]_]/\\&/g')"
+            export MATCHSUBS="${MATCHSUBS}${NL}m/(?<!\\w)${quoted}(?!\\w)/${NL}s/(?<!\\w)${quoted} */${var} /${NL}"
+            to_replace=""
+        fi
+    done
+    echo "${RAW_STR}"
+}
+HELPER
+sed -i "s#source global_sh_executor.sh#source $EXEC/global_sh_executor.sh#" \
+	"$EXEC/sql_isolation_testcase.py"
+
 mkdir -p "$WORK/gpdiff"
 cp "$GPDIFF"/gpdiff.pl "$GPDIFF"/atmsort.pm "$GPDIFF"/explain.pm "$WORK/gpdiff/"
 sed 's/##Version: ##/Apache Cloudberry (the PostgreSQL 19 port)/' \
@@ -418,7 +447,19 @@ convert() {
 	    -e "s#@testtablespace@#/tmp/testtablespace#g" \
 	    -e "s#@bindir@#$BINDIR#g" \
 	    -e "s#@libdir@#${PG_REGRESS_SUITE:-/cb/pgregress}#g" \
+	    -e "s#@curusername@#$PGUSER#g" \
 	    -e "s#@DLSUFFIX@#.so#g" "$1"
+}
+
+# The init files of the schedule a test is of, where it is not
+# isolation2_schedule: parallel_retrieve_cursor_schedule's, which its target
+# in Cloudberry's Makefile reads, and the port's for it -- the port's own
+# test of it too.
+schedule_inits() {
+	case "$1" in
+		parallel_retrieve_cursor/*|port/parallel_retrieve_cursor*)
+			echo "--gpd_init $CB/init_file_parallel_retrieve_cursor --gpd_init $HERE/init_file_parallel_retrieve_cursor" ;;
+	esac
 }
 
 # One group's tests, in one pass, on its cluster: a line "ok" or "bad" and
@@ -495,7 +536,7 @@ run_group() {
 
 		# The port's first: what it takes off a segment's error -- which
 		# segment -- leaves the lines Cloudberry's init files mask.
-		inits=(--gpd_init "$HERE/init_file" --gpd_init "$GPDIFF/init_file"
+		inits=($(schedule_inits "$t") --gpd_init "$HERE/init_file" --gpd_init "$GPDIFF/init_file"
 		       --gpd_init "$CB_INIT")
 		[ -n "$EXTRA_INIT" ] && inits+=(--gpd_init "$EXTRA_INIT")
 		[ -s "$res.initfile" ] && inits+=(--gpd_init "$res.initfile")

@@ -3606,3 +3606,93 @@ REVOKE ALL ON FUNCTION pg_catalog.gp_expand_lock_catalog(),
 	pg_catalog.gp_expand_bump_version(),
 	gp.expand_pin_numsegments()
 	FROM PUBLIC;
+
+/*
+ * ------------------------------------------------------------------------
+ * Parallel retrieve cursors (gp_endpoint.c)
+ * ------------------------------------------------------------------------
+ *
+ * Cloudberry's functions and views of the endpoints, by its names and
+ * columns: gp_get_endpoints() the cluster's, from the coordinator,
+ * gp_get_segment_endpoints() a node's own, gp_get_session_endpoints() the
+ * session's, each the user's own unless a superuser's, and
+ * gp_wait_parallel_retrieve_cursor(), which waits for a cursor's endpoints
+ * to be read.  The rest are gp_core's, each the coordinator's to call on a
+ * segment or a retrieve session's: a segment's endpoints for the
+ * coordinator's list, an endpoint opened and released by the reader that
+ * runs its slice, a writer's transaction published for those readers, and
+ * the rows of RETRIEVE.
+ */
+CREATE FUNCTION pg_catalog.gp_get_endpoints(
+	OUT gp_segment_id int4, OUT auth_token text, OUT cursorname text,
+	OUT sessionid int4, OUT hostname varchar, OUT port int4,
+	OUT username text, OUT state text, OUT endpointname text)
+RETURNS SETOF record
+AS 'MODULE_PATHNAME', 'gp_get_endpoints'
+LANGUAGE C VOLATILE;
+
+CREATE FUNCTION pg_catalog.gp_get_segment_endpoints(
+	OUT auth_token text, OUT databaseid oid, OUT senderpid int4,
+	OUT receiverpid int4, OUT state text, OUT gp_segment_id int4,
+	OUT sessionid int4, OUT username text, OUT endpointname text,
+	OUT cursorname text)
+RETURNS SETOF record
+AS 'MODULE_PATHNAME', 'gp_get_segment_endpoints'
+LANGUAGE C VOLATILE;
+
+CREATE FUNCTION pg_catalog.gp_get_session_endpoints(
+	OUT gp_segment_id int4, OUT auth_token text, OUT cursorname text,
+	OUT sessionid int4, OUT hostname varchar, OUT port int4,
+	OUT username text, OUT state text, OUT endpointname text)
+RETURNS SETOF record
+LANGUAGE sql VOLATILE
+AS $$
+	SELECT * FROM pg_catalog.gp_get_endpoints()
+	 WHERE sessionid = pg_catalog.current_setting('gp.session_id')::int4
+$$;
+
+CREATE FUNCTION pg_catalog.gp_wait_parallel_retrieve_cursor(
+	cursorname text, timeout_sec int4, OUT finished bool)
+RETURNS SETOF bool
+AS 'MODULE_PATHNAME', 'gp_wait_parallel_retrieve_cursor'
+LANGUAGE C VOLATILE STRICT;
+
+SET allow_system_table_mods = on;
+CREATE VIEW pg_catalog.gp_endpoints AS
+	SELECT * FROM pg_catalog.gp_get_endpoints();
+CREATE VIEW pg_catalog.gp_segment_endpoints AS
+	SELECT * FROM pg_catalog.gp_get_segment_endpoints();
+CREATE VIEW pg_catalog.gp_session_endpoints AS
+	SELECT * FROM pg_catalog.gp_get_session_endpoints();
+RESET allow_system_table_mods;
+GRANT SELECT ON pg_catalog.gp_endpoints, pg_catalog.gp_segment_endpoints,
+	pg_catalog.gp_session_endpoints TO PUBLIC;
+
+CREATE FUNCTION gp_internal.segment_endpoints(
+	OUT auth_token text, OUT cursorname text, OUT sessionid int4,
+	OUT userid oid, OUT state text, OUT endpointname text,
+	OUT gp_segment_id int4)
+RETURNS SETOF record
+AS 'MODULE_PATHNAME', 'gp_segment_endpoints'
+LANGUAGE C VOLATILE;
+
+CREATE FUNCTION gp_internal.endpoint_open(name text, cursorname text,
+	session int4, userid oid, token text, columns text)
+RETURNS void
+AS 'MODULE_PATHNAME', 'gp_endpoint_open'
+LANGUAGE C VOLATILE STRICT;
+
+CREATE FUNCTION gp_internal.endpoint_release(name text)
+RETURNS void
+AS 'MODULE_PATHNAME', 'gp_endpoint_release'
+LANGUAGE C VOLATILE STRICT;
+
+CREATE FUNCTION gp_internal.share_publish(key text)
+RETURNS void
+AS 'MODULE_PATHNAME', 'gp_share_publish'
+LANGUAGE C VOLATILE STRICT;
+
+CREATE FUNCTION gp_internal.retrieve(endpoint text, count int8)
+RETURNS SETOF record
+AS 'MODULE_PATHNAME', 'gp_retrieve'
+LANGUAGE C VOLATILE STRICT;

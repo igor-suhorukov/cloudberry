@@ -99,6 +99,7 @@
 #include "utils/regproc.h"
 
 #include "cb_module.h"
+#include "gp_core_api.h"
 #include "gp_dispatch.h"
 #include "gp_grammar.h"
 #include "gp_grammar_int.h"
@@ -116,7 +117,7 @@ static const char *const gp_trigger_words[] = {
 	"orientation", "encoding",
 	"reorganize", "external", "reject", "protocol",
 	"createexttable", "nocreateexttable", "newline", "resource", "deny",
-	"rootpartition", "fullscan", "copy",
+	"rootpartition", "fullscan", "copy", "retrieve",
 	NULL
 };
 
@@ -4399,6 +4400,135 @@ rw_analyze_options(GpRewrite *rw)
 }
 
 /* ------------------------------------------------------------------------- */
+/* Parallel retrieve cursors                                                 */
+/* ------------------------------------------------------------------------- */
+
+/*
+ * DECLARE name [options] PARALLEL RETRIEVE [options] CURSOR
+ *		[WITHOUT HOLD] FOR query
+ *	 -> DECLARE name [options] NO SCROLL [options] CURSOR [WITHOUT HOLD]
+ *		FOR query, carrying gp_core.parallel_retrieve
+ *
+ * Cloudberry's PARALLEL RETRIEVE among a cursor's options (gram.y's
+ * cursor_options): PostgreSQL's DECLARE, which cannot scroll, with gp_core's
+ * bit in its options (GP_CURSOR_OPT_PARALLEL_RETRIEVE, gp_core_api.h), put
+ * there once the grammar has built the node (GpAttachCarriers()); the same
+ * under EXPLAIN.  WITH HOLD and SCROLL are refused in Cloudberry's words,
+ * which its parse analysis says (transformDeclareCursorStmt()).
+ */
+static bool
+rw_parallel_retrieve_cursor(GpRewrite *rw)
+{
+	const GpTokens *ts = rw->ts;
+	int			i = rw->first;
+	int			parallel = -1;
+	bool		no_scroll = false;
+	bool		scroll = false;
+
+	if (!tok_is_kw(ts, i, "declare") || !tok_is_name(ts, i + 1))
+		return false;
+	for (i += 2; i < rw->last && !tok_is_kw(ts, i, "cursor"); i++)
+	{
+		if (tok_is_kw(ts, i, "parallel") && tok_is_word(ts, i + 1, "retrieve"))
+			parallel = i++;
+		else if (tok_is_kw(ts, i, "no") && tok_is_kw(ts, i + 1, "scroll"))
+			no_scroll = true, i++;
+		else if (tok_is_kw(ts, i, "scroll"))
+			scroll = true;
+		else if (!tok_is_kw(ts, i, "binary") && !tok_is_kw(ts, i, "insensitive") &&
+				 !tok_is_kw(ts, i, "asensitive"))
+			return false;
+	}
+	if (parallel < 0 || i >= rw->last)
+		return false;
+
+	if (tok_is_kw(ts, i + 1, "with") && tok_is_kw(ts, i + 2, "hold"))
+		ereport(ERROR,
+				(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+				 errmsg("DECLARE PARALLEL RETRIEVE CURSOR WITH HOLD ... is not supported"),
+				 errdetail("Holdable cursors can not be parallel")));
+	if (scroll)
+		ereport(ERROR,
+				(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+				 errmsg("SCROLL is not allowed for the PARALLEL RETRIEVE CURSORs"),
+				 errdetail("Scrollable cursors can not be parallel")));
+
+	rw_edit(rw, ts->toks[parallel].off, tok_end(ts, parallel + 1),
+			no_scroll ? "" : "NO SCROLL ");
+	rw_add_carrier(rw, "gp_core", "parallel_retrieve", "true",
+				   ts->toks[parallel].off);
+	return true;
+}
+
+/*
+ * RETRIEVE { ALL | [+|-]count } FROM ENDPOINT name
+ *	 -> SELECT r.c1 AS a, ... FROM gp_internal.retrieve('name', count)
+ *		AS r(c1 type, ...)
+ *
+ * Cloudberry's statement of a retrieve session (gram.y's RetrieveStmt): a
+ * query of gp_core's function, whose columns are the endpoint's -- which
+ * gp_core writes, in the retrieve session the endpoint is on, the one place
+ * they are known (GpEndpointRetrieveSql()).
+ */
+static bool
+rw_retrieve(GpRewrite *rw)
+{
+	const GpTokens *ts = rw->ts;
+	int			i = rw->first;
+	int64		count = 0;
+	const GpCoreApi *core;
+	char	   *name;
+	int			kwnum;
+
+	if (!tok_is_word(ts, i, "retrieve"))
+		return false;
+	i++;
+	if (tok_is_kw(ts, i, "all"))
+		i++;
+	else
+	{
+		bool		negative = false;
+
+		if (tok_is_char(ts, i, '-') || tok_is_char(ts, i, '+'))
+			negative = tok_is_char(ts, i++, '-');
+		if (i >= rw->last || ts->toks[i].code != GP_ICONST)
+			rw_syntax_error(rw, i);
+		count = negative ? -(int64) ts->toks[i].ival : ts->toks[i].ival;
+		i++;
+	}
+	if (!tok_is_kw(ts, i, "from"))
+		rw_syntax_error(rw, i);
+	if (!tok_is_word(ts, ++i, "endpoint"))
+		rw_syntax_error(rw, i);
+	i++;
+
+	/* its name: an identifier, or a keyword a column may be named */
+	if (i >= rw->last || !tok_is_name(ts, i))
+		rw_syntax_error(rw, i);
+	if (ts->toks[i].kw != NULL &&
+		((kwnum = ScanKeywordLookup(ts->toks[i].kw, &ScanKeywords)) < 0 ||
+		 (ScanKeywordCategories[kwnum] != UNRESERVED_KEYWORD &&
+		  ScanKeywordCategories[kwnum] != COL_NAME_KEYWORD)))
+		rw_syntax_error(rw, i);
+	name = tok_name(ts, i);
+	if (i + 1 < rw->last)
+		rw_syntax_error(rw, i + 1);
+
+	core = GpCoreApiLookup();
+	if (core == NULL || core->version_minor < 13 || core->retrieve_sql == NULL)
+		ereport(ERROR,
+				(errcode(ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE),
+				 errmsg("RETRIEVE needs \"gp_core\""),
+				 errhint("Add \"gp_core\" to \"shared_preload_libraries\".")));
+
+	rw_whole(rw);
+	appendStringInfoString(&rw->body,
+						   core->retrieve_sql(name, tok_is_kw(ts, rw->first + 1, "all"),
+											  count));
+	return true;
+}
+
+/* ------------------------------------------------------------------------- */
 /* The classic partition clauses                                             */
 /* ------------------------------------------------------------------------- */
 
@@ -5971,6 +6101,13 @@ rw_statement_itself(GpRewrite *rw)
 		rw_comment_resource(rw))
 		return;
 
+	/* RETRIEVE: a query of the endpoint's rows */
+	if (rw_retrieve(rw))
+		return;
+
+	/* DECLARE ... PARALLEL RETRIEVE CURSOR, carrying gp_core's bit */
+	(void) rw_parallel_retrieve_cursor(rw);
+
 	/* ALTER USER ... PROFILE and the rest: ALTER USER, carrying it. */
 	if (rw_role_profile(rw))
 		return;
@@ -6328,6 +6465,23 @@ GpAttachCarriers(List *parsetree, List *carried)
 					CopyStmt   *s = (CopyStmt *) target->stmt;
 
 					s->options = list_concat(s->options, c->defs);
+				}
+				break;
+			case T_DeclareCursorStmt:
+			case T_ExplainStmt:
+				{
+					Node	   *stmt = target->stmt;
+
+					/*
+					 * PARALLEL RETRIEVE, the only thing a DECLARE carries:
+					 * gp_core's bit of its options, which PostgreSQL hands
+					 * to the planner and the portal.
+					 */
+					if (IsA(stmt, ExplainStmt))
+						stmt = ((ExplainStmt *) stmt)->query;
+					if (!IsA(stmt, DeclareCursorStmt))
+						elog(ERROR, "O26: PARALLEL RETRIEVE is not on a DECLARE");
+					((DeclareCursorStmt *) stmt)->options |= GP_CURSOR_OPT_PARALLEL_RETRIEVE;
 				}
 				break;
 			default:

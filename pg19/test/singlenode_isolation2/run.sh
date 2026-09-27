@@ -34,7 +34,9 @@
 # ../gpmgmt/tools.sh sets them up, which do on this node, the port's single
 # node, what the tests ask of Cloudberry's.  They connect to template1, which
 # has gp_core too, and the tests' database is made from template0, as it was
-# made before template1 had it.
+# made before template1 had it.  And the driver's retrieve sessions reach the
+# node by its socket (see below), for the port's own test of parallel
+# retrieve cursors (port/, M8), in place of Cloudberry's schedule of them.
 #
 # manifest says of each test the schedule names whether it runs, and why not.
 # A test passes if its result is Cloudberry's expected output, or differs from
@@ -111,9 +113,12 @@ echo
 
 "$BINDIR/pg_ctl" -D "$WORK/data" -l "$WORK/log" -w -t 60 start > /dev/null 2>&1 \
 	|| { echo "server did not start"; tail -20 "$WORK/log"; exit 1; }
-# gp_core where gpMgmt's tools ask about the node
-"$PSQL" -X -q -d template1 -c "CREATE EXTENSION gp_core" > /dev/null ||
-	{ echo "could not create gp_core in template1"; exit 1; }
+# gp_core where gpMgmt's tools ask about the node, and where the driver does
+# as a test opens a retrieve session (-1R:), in postgres
+for db in template1 postgres; do
+	"$PSQL" -X -q -d "$db" -c "CREATE EXTENSION gp_core" > /dev/null ||
+		{ echo "could not create gp_core in $db"; exit 1; }
+done
 
 # The settings the port has, respelled as the isolation2 suite respells them
 # (see there, and ../respell.pl).
@@ -144,6 +149,17 @@ cp "$GPDIFF"/gpdiff.pl "$GPDIFF"/atmsort.pm "$GPDIFF"/explain.pm "$WORK/gpdiff/"
 sed 's/##Version: ##/Apache Cloudberry (the PostgreSQL 19 port)/' \
 	"$GPDIFF/GPTest.pm.in" > "$WORK/gpdiff/GPTest.pm"
 
+# The driver, run from Cloudberry's directory, as it sources
+# global_sh_executor.sh from there, but for two changes to a copy of it, for
+# a retrieve session (-1R:): it finds the node among nodes of which none is
+# a segment, where it divided by their count; and reaches it by its socket, as
+# a session of the node's own does, where gp_segment_configuration names this
+# machine -- the one node lists itself by its host name, and listens on no
+# TCP port here.
+sed -e 's/real_content_id = content_id % max_content_id if content_id >= 0 else/real_content_id = content_id if max_content_id == 0 else content_id % max_content_id if content_id >= 0 else/' \
+	-e '/elif self.mode == "retrieve":/{n;s/$/\n                if hostname == socket.gethostname():\n                    hostname = None/}' \
+	"$CB/sql_isolation_testcase.py" > "$EXEC/sql_isolation_testcase.py"
+
 # Cloudberry's pg_regress compares with these; gpdiff.pl runs diff from PATH.
 gpdiff() {
 	env PATH=/usr/bin:/bin perl "$WORK/gpdiff/gpdiff.pl" \
@@ -173,17 +189,22 @@ for pass in ${PASSES:-planner orca}; do
 		res="$R/results/$t.out"
 		mkdir -p "$(dirname "$res")" "$(dirname "$R/canon/$t")" \
 			"$(dirname "$R/sql/$t")" "$(dirname "$R/expected/$t")"
-		respell "$CB/sql/$t.sql" > "$R/sql/$t.sql"
+		# A test whose name begins "port/" is the port's own, from sql/port
+		# and expected/port beside this file, as Cloudberry's are from its
+		# suite's.
+		src="$CB"
+		[[ "$t" == port/* ]] && src="$HERE"
+		respell "$src/sql/$t.sql" > "$R/sql/$t.sql"
 
 		# As pg_isolation2_regress runs it, from the suite's directory.
 		( cd "$CB" && PGOPTIONS="-c gp.optimizer=$optimizer" \
-			timeout 300 python3 ./sql_isolation_testcase.py \
+			timeout 300 python3 "$EXEC/sql_isolation_testcase.py" \
 				--dbname=isolation2test --initfile_prefix="$res" \
 				< "$R/sql/$t.sql" > "$res" 2>&1 )
 
-		cbexp="$CB/expected/$t.out"
-		[ "$pass" = orca ] && [ -f "$CB/expected/${t}_optimizer.out" ] && cbexp="$CB/expected/${t}_optimizer.out"
-		exp="$R/expected/${cbexp#"$CB"/expected/}"
+		cbexp="$src/expected/$t.out"
+		[ "$pass" = orca ] && [ -f "$src/expected/${t}_optimizer.out" ] && cbexp="$src/expected/${t}_optimizer.out"
+		exp="$R/expected/${cbexp#"$src"/expected/}"
 		mkdir -p "$(dirname "$exp")"
 		respell "$cbexp" > "$exp"
 		inits=(--gpd_init "$GPDIFF/init_file" --gpd_init "$CB/init_file_isolation2"

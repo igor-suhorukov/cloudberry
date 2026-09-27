@@ -51,6 +51,7 @@
 #include "gp_dispatch.h"
 #include "gp_dtm_debug.h"
 #include "gp_dtx.h"
+#include "gp_endpoint.h"
 #include "gp_expand.h"
 #include "gp_explain.h"
 #include "gp_fault.h"
@@ -131,6 +132,8 @@ static const GpCoreApi gp_core_api = {
 	.row_identity_make = GpRowIdentityNodeMake,
 	.explicit_write = GpModifyWriteExplicitly,
 	.metatrack_partition = GpMetaTrackPartition,
+	.endpoint_plan = GpEndpointPlan,
+	.retrieve_sql = GpEndpointRetrieveSql,
 };
 
 /*
@@ -334,12 +337,19 @@ _PG_init(void)
 	/*
 	 * ANALYZE of a partitioned table as Cloudberry does it: the relations a
 	 * statement takes, by its two settings and ROOTPARTITION, in its order.
-	 * After gp_core's other utility hooks but gp_foreign.c's and
-	 * gp_expand.c's, below, which pass an ANALYZE on as it came, so that it
-	 * sees the statement before the rest and they see the list it makes; on
-	 * one node too.
+	 * After gp_core's other utility hooks but gp_endpoint.c's,
+	 * gp_foreign.c's and gp_expand.c's, below, which pass an ANALYZE on as it
+	 * came, so that it sees the statement before the rest and they see the
+	 * list it makes; on one node too.
 	 */
 	GpPartAnalyzeInit();
+
+	/*
+	 * Parallel retrieve cursors: their endpoints, on the segments and on the
+	 * coordinator, and the retrieve sessions that read them (gp_endpoint.c);
+	 * on one node too.
+	 */
+	GpEndpointInit();
 
 	/*
 	 * A foreign table's mpp_execute and num_segments kept from its wrapper's
