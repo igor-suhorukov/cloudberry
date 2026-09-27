@@ -237,11 +237,19 @@ amsub() {
 copy_data_end() {
 	awk '{
 		l = tolower($0)
+		# the blank lines after such a COPY, until what follows them is known
+		if (pending && l ~ /^[ \t]*$/) {
+			blanks = blanks $0 "\n"
+			next
+		}
 		if (pending && (l ~ /^--/ || l ~ /^[ \t]*(abort|begin|commit|copy|create|drop|end|insert|reset|rollback|select|set)([ \t;]|$)/))
 			print "\\."
-		pending = (l ~ /^[ \t]*copy[ \t].*[ \t]from[ \t]+stdin([ \t].*)?;[ \t]*$/)
+		printf "%s", blanks
+		blanks = ""
+		pending = (l ~ /^[ \t]*copy[ \t].*[ \t]from[ \t]+stdin([ \t].*)?;[ \t]*(--.*)?$/)
 		print
-	}'
+	}
+	END { printf "%s", blanks }'
 }
 for t in $run_tests; do
 	f=$(echo "$t" | tr / _)

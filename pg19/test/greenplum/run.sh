@@ -296,9 +296,10 @@ make_suite() {
 			fi
 		done
 		if [ -f "$CB/input/$src.source" ]; then
-			convert "$g" "$CB/input/$src.source" | amsub | respell > "$SN/sql/$f.sql"
+			convert "$g" "$CB/input/$src.source" | amsub | respell |
+				copy_data_end > "$SN/sql/$f.sql"
 		else
-			convert "$g" "$CB/sql/$t.sql" | respell > "$SN/sql/$f.sql"
+			convert "$g" "$CB/sql/$t.sql" | respell | copy_data_end > "$SN/sql/$f.sql"
 		fi
 		if [ -f "$CB/output/$src.source" ]; then
 			convert "$g" "$CB/output/$src.source" | amsub | respell > "$SN/expected/$f.out"
@@ -321,6 +322,30 @@ schedule_add() {
 			echo "test: $2" >> "$1/schedule.$p"
 		fi
 	done
+}
+# psql 19 skips the in-line data of a COPY ... FROM STDIN that fails, up to
+# the next \. (PostgreSQL's d6ab88d374a), where psql 16, which Cloudberry's
+# tests were written for, went on with the next line.  A COPY FROM STDIN a
+# test expects to fail, with no data after it -- the next line a comment or
+# a statement -- is given data that ends at once, which psql reads and does
+# not echo, so that what the test runs next is run, as the singlenode suite
+# gives it (../singlenode/run.sh).
+copy_data_end() {
+	awk '{
+		l = tolower($0)
+		# the blank lines after such a COPY, until what follows them is known
+		if (pending && l ~ /^[ \t]*$/) {
+			blanks = blanks $0 "\n"
+			next
+		}
+		if (pending && (l ~ /^--/ || l ~ /^[ \t]*(abort|begin|commit|copy|create|drop|end|insert|reset|rollback|select|set)([ \t;]|$)/))
+			print "\\."
+		printf "%s", blanks
+		blanks = ""
+		pending = (l ~ /^[ \t]*copy[ \t].*[ \t]from[ \t]+stdin([ \t].*)?;[ \t]*(--.*)?$/)
+		print
+	}
+	END { printf "%s", blanks }'
 }
 amsub() {
 	if [ -n "$am" ]; then
