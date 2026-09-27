@@ -26,7 +26,9 @@
 #ifndef GP_PARTANALYZE_H
 #define GP_PARTANALYZE_H
 
+#include "access/htup.h"
 #include "nodes/pg_list.h"
+#include "utils/relcache.h"
 
 /* Cloudberry's optimizer_analyze_root_partition and _midlevel_partition */
 extern bool gp_optimizer_analyze_root_partition;
@@ -47,6 +49,46 @@ extern bool GpLeafPartsAnalyzed(Oid parent, Oid exclude, List *va_cols,
  */
 extern bool GpPartAnalyzeActive(void);
 
+/*
+ * What the ANALYZE this backend runs asks of a relation it takes, where
+ * gp_partanalyze.c made its list: false for a relation it does not take;
+ * the columns it names of it, NIL for every one.  And whether it is
+ * VERBOSE, and FULLSCAN.
+ */
+extern bool GpPartAnalyzeTarget(Oid relid, List **va_cols);
+extern bool GpPartAnalyzeVerbose(void);
+extern bool GpPartAnalyzeFullscan(void);
+
 extern void GpPartAnalyzeInit(void);
+
+/*
+ * A partitioned table's statistics merged from its leaves' (gp_partmerge.c).
+ *
+ * A leaf's counters, of the sample its ANALYZE took, of the columns the
+ * statement names of it; with FULLSCAN, of a full scan, which say what they
+ * run at elevel and whose numbers of distinct values are the leaf's own too.
+ */
+extern void GpLeafSampleCounters(Relation leaf, HeapTuple *rows, int numrows,
+								 List *va_cols);
+extern List *GpLeafFullScan(Relation leaf, List *va_cols, int elevel);
+extern void GpLeafFullScanNdistinct(Relation leaf, List *counters,
+									HeapTuple *rows, int numrows,
+									double totalrows);
+
+/*
+ * A root's columns that can be merged, in *all whether every one can and
+ * nothing needs a sample; the root's statistics of such columns merged and
+ * written, with the rows of its leaves; or merged over PostgreSQL's once
+ * PostgreSQL has written them.
+ */
+extern List *GpRootMergeableColumns(Relation root, List *va_cols, int elevel,
+									bool *all);
+extern double GpRootMerge(Relation root, List *attnums);
+extern void GpRootMergeLater(Oid root, List *attnums);
+
+/* What is to be written over PostgreSQL's statistics, written now. */
+extern void GpPartMergeFinish(void);
+
+extern void GpPartMergeInit(void);
 
 #endif							/* GP_PARTANALYZE_H */

@@ -231,6 +231,10 @@ Distributed transactions (M3), in `gp_core`:
   table above them and that table after a partition whose siblings all have
   statistics; and an inheritance tree sampled on the segments in one
   dispatch, as Cloudberry's is;
+- the root's statistics merged from its leaves' as Cloudberry merges them,
+  each leaf keeping a HyperLogLog counter of each column
+  (`gp_hyperloglog_estimator`, `gp_hyperloglog_accum()`), ANALYZE FULLSCAN's
+  of every row;
 - Cloudberry's fault injector, `gp_inject_fault`, for the tests: its faults
   at the port's own places under Cloudberry's names, and at PostgreSQL 19's
   injection points, among them O29's in PostgreSQL's commit.

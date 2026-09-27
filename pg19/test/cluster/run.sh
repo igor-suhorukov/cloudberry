@@ -1532,6 +1532,47 @@ a\b|\N' ] && [ "$(cat "$ROOT/ce_prog.txt" 2>&1)" = "to a program" ] \
 		&& ok "a partitioned table is analyzed through its partitions" \
 		|| notok "ANALYZE of a partitioned table" "$out / inherited stats: $out2"
 
+	# ANALYZE of a partitioned table as Cloudberry's (gp_partanalyze.c,
+	# gp_partmerge.c): its leaves, and then the root, whose statistics are
+	# its leaves' merged -- the histograms merged bucket by bucket, the
+	# number of distinct values from each leaf's HyperLogLog counter, no
+	# correlation -- as Cloudberry's are; a partitioned table under another
+	# refused while its setting is off; and FULLSCAN, whose leaves count the
+	# distinct values of every row.
+	q 0 "CREATE TABLE mrg (a int, b int, c int) DISTRIBUTED BY (a) PARTITION BY RANGE (a);
+	     CREATE TABLE mrg1 PARTITION OF mrg FOR VALUES FROM (0) TO (10);
+	     CREATE TABLE mrg2 PARTITION OF mrg FOR VALUES FROM (10) TO (20);
+	     CREATE TABLE mrg3 PARTITION OF mrg FOR VALUES FROM (20) TO (30);
+	     INSERT INTO mrg SELECT i, i % 4, i % 2 FROM generate_series(0, 19) i; ANALYZE mrg;" >/dev/null
+	out=$(q 0 "SELECT histogram_bounds || ' ' || coalesce(correlation::text, 'none') || ' ' || n_distinct
+	             FROM pg_stats WHERE tablename = 'mrg' AND attname = 'a';")
+	out2=$(q 0 "SELECT reltuples || ' ' || relpages FROM pg_class WHERE relname IN ('mrg', 'mrg3') ORDER BY relname;" | tr '\n' ' ')
+	[ "$out" = "{0,1,2,3,4,5,6,7,8,9,11,12,13,14,15,16,17,18,19} none -1" ] && [ "$out2" = "20 -1 0 1 " ] \
+		&& ok "the root's statistics are its leaves' merged, and an empty leaf analyzed has a page" \
+		|| notok "the merge of a root's statistics" "$out / $out2"
+	out=$(q 0 "SELECT n_distinct || ' ' || most_common_vals::text FROM pg_stats WHERE tablename = 'mrg' AND attname = 'c';")
+	out2=$(q 0 "SELECT count(*) FROM gp_internal.leaf_hll WHERE starelid = 'mrg1'::regclass;")
+	[ "$out" = "2 {0,1}" ] && [ "$out2" = "3" ] \
+		&& ok "the most common values merged, from each leaf's counters of its columns" \
+		|| notok "the merged most common values" "$out / counters: $out2"
+	q 0 "CREATE TABLE mrg4 PARTITION OF mrg FOR VALUES FROM (30) TO (40) PARTITION BY LIST (b);
+	     CREATE TABLE mrg41 PARTITION OF mrg4 FOR VALUES IN (1);" >/dev/null
+	out=$(q 0 "ANALYZE mrg4;" 2>&1)
+	out2=$(q 0 "SET gp.optimizer_analyze_midlevel_partition = on; ANALYZE mrg4;
+	            SELECT relpages FROM pg_class WHERE relname = 'mrg4';" 2>&1)
+	case "$out|$out2" in
+		*"cannot analyze a mid-level partition"*"|-1")
+			ok "a mid-level partitioned table is refused, unless its setting says to analyze it" ;;
+		*) notok "ANALYZE of a mid-level partitioned table" "$out / $out2" ;;
+	esac
+	q 0 "INSERT INTO mrg SELECT i % 20, i, i % 50 FROM generate_series(1, 1000) i; ANALYZE FULLSCAN mrg;" >/dev/null
+	out=$(q 0 "SELECT n_distinct FROM pg_stats WHERE tablename = 'mrg1' AND attname = 'c';")
+	out2=$(q 0 "SELECT count(*) = 1 FROM gp_internal.leaf_hll WHERE starelid = 'mrg1'::regclass AND staattnum = 3 AND fullscan;")
+	out3=$(q 0 "SELECT round(gp_hyperloglog_get_estimate(gp_hyperloglog_accum(c))) FROM mrg;")
+	[ "$out" = "50" ] && [ "$out2" = "t" ] && [ "$out3" = "50" ] \
+		&& ok "ANALYZE FULLSCAN counts a leaf's distinct values over every row, with gp_hyperloglog_accum()" \
+		|| notok "ANALYZE FULLSCAN" "$out / $out2 / $out3"
+
 	# The coordinator's own VACUUM of its empty copy counts nothing, and its
 	# own ANALYZE nothing all-visible; Cloudberry's bring back the segments'
 	# counts, and so do these.

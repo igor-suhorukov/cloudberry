@@ -2093,3 +2093,21 @@ CREATE AGGREGATE pg_catalog.gp_hyperloglog_accum(anyelement) (
 	STYPE = pg_catalog.gp_hyperloglog_estimator,
 	FINALFUNC = pg_catalog.gp_hyperloglog_comp,
 	COMBINEFUNC = pg_catalog.gp_hyperloglog_merge);
+
+/*
+ * A leaf partition's HyperLogLog counter of each column ANALYZE took, which
+ * its root's number of distinct values is merged from (gp_partmerge.c).
+ * Cloudberry keeps it in the last slot of the leaf's pg_statistic row,
+ * under kinds 98 and 99, which are in PostgreSQL's range of kinds; here it
+ * goes with that row by the row's xmin, and one whose row has been replaced
+ * since is not read.  Only gp_core reads and writes it.
+ */
+CREATE TABLE gp_internal.leaf_hll (
+	starelid oid NOT NULL,
+	staattnum int2 NOT NULL,
+	staxmin xid NOT NULL,
+	fullscan bool NOT NULL,
+	counter bytea NOT NULL
+);
+CREATE INDEX leaf_hll_attnum ON gp_internal.leaf_hll (starelid, staattnum);
+REVOKE ALL ON gp_internal.leaf_hll FROM PUBLIC;

@@ -97,7 +97,7 @@
 #include "gp_cluster.h"
 #include "gp_core_api.h"
 #include "gp_dispatch.h"
-#include "gp_fault.h"
+#include "gp_partanalyze.h"
 #include "gp_policy.h"
 #include "gp_scan.h"
 
@@ -145,10 +145,11 @@ compare_rows(const void *a, const void *b)
 /*
  * PostgreSQL's acquire_sample_rows(), which is static in analyze.c, written
  * again from the primitives it is made of: the block sampler, the read
- * stream, the table AM's analyze scan and Vitter's reservoir.
+ * stream, the table AM's analyze scan and Vitter's reservoir -- and saying
+ * at elevel what it scanned, in its words.
  */
 static int
-segment_sample_rows(Relation rel, HeapTuple *rows, int targrows,
+segment_sample_rows(Relation rel, int elevel, HeapTuple *rows, int targrows,
 					double *totalrows, double *totaldeadrows)
 {
 	int			numrows = 0;
@@ -217,6 +218,15 @@ segment_sample_rows(Relation rel, HeapTuple *rows, int targrows,
 		*totalrows = 0.0;
 		*totaldeadrows = 0.0;
 	}
+
+	ereport(elevel,
+			(errmsg("\"%s\": scanned %d of %u pages, "
+					"containing %.0f live rows and %.0f dead rows; "
+					"%d rows in sample, %.0f estimated total rows",
+					RelationGetRelationName(rel),
+					bs.m, totalblocks,
+					liverows, deadrows,
+					numrows, *totalrows)));
 	return numrows;
 }
 
@@ -247,7 +257,7 @@ local_sample_rows(Relation rel, AnalyzeSampleRowsFunc func, HeapTuple *rows,
 {
 	if (func != NULL)
 		return func(rel, DEBUG1, rows, targrows, totalrows, totaldeadrows);
-	return segment_sample_rows(rel, rows, targrows, totalrows, totaldeadrows);
+	return segment_sample_rows(rel, DEBUG1, rows, targrows, totalrows, totaldeadrows);
 }
 
 /* The table whose row type is the first argument's, for the SQL functions. */
@@ -640,16 +650,23 @@ gather_sample(Relation rel, GpPolicy *policy, bool tree, int elevel,
 }
 
 /*
- * The sampling function O3 hands ANALYZE for a distributed table analyzed
- * itself.  Cloudberry's do_analyze_rel() looks for the relation's
- * inheritance tree first, and says it skips one there is none of -- and
- * where the catalog said there was, says so no more, as PostgreSQL's own
- * look does, which then has nothing to look for (Cloudberry's issue 14644).
+ * What goes before the sample of a table ANALYZE analyzes itself: with
+ * FULLSCAN, a leaf partition's counters of every row, and Cloudberry's
+ * do_analyze_rel()'s look for the relation's inheritance tree, which says
+ * it skips one there is none of -- and where the catalog said there was,
+ * says so no more, as PostgreSQL's own look does, which then has nothing to
+ * look for (Cloudberry's issue 14644).
  */
-static int
-distributed_sample_rows(Relation rel, int elevel, HeapTuple *rows, int targrows,
-						double *totalrows, double *totaldeadrows)
+static List *
+before_own_sample(Relation rel, int elevel)
 {
+	List	   *va_cols;
+	List	   *fullscan = NIL;
+
+	if (rel->rd_rel->relispartition && GpPartAnalyzeFullscan() &&
+		GpPartAnalyzeTarget(RelationGetRelid(rel), &va_cols))
+		fullscan = GpLeafFullScan(rel, va_cols, elevel);
+
 	if (find_inheritance_children(RelationGetRelid(rel), NoLock) == NIL)
 	{
 		if (rel->rd_rel->relhassubclass)
@@ -662,8 +679,67 @@ distributed_sample_rows(Relation rel, int elevel, HeapTuple *rows, int targrows,
 						get_namespace_name(RelationGetNamespace(rel)),
 						RelationGetRelationName(rel))));
 	}
-	return gather_sample(rel, GpScanDistributedPolicy(RelationGetRelid(rel)),
-						 false, elevel, rows, targrows, totalrows, totaldeadrows);
+	return fullscan;
+}
+
+/*
+ * And after it: a leaf partition's counter of each column's distinct values,
+ * which its root's statistics are merged with (gp_partmerge.c) -- of the
+ * sample, or of the full scan, whose numbers of distinct values are the
+ * leaf's own.
+ */
+static void
+after_own_sample(Relation rel, List *fullscan, HeapTuple *rows, int numrows,
+				 double totalrows)
+{
+	List	   *va_cols;
+
+	if (fullscan != NIL)
+		GpLeafFullScanNdistinct(rel, fullscan, rows, numrows, totalrows);
+	else if (rel->rd_rel->relispartition)
+	{
+		(void) GpPartAnalyzeTarget(RelationGetRelid(rel), &va_cols);
+		GpLeafSampleCounters(rel, rows, numrows, va_cols);
+	}
+}
+
+/* The sampling function O3 hands ANALYZE for a distributed table analyzed itself. */
+static int
+distributed_sample_rows(Relation rel, int elevel, HeapTuple *rows, int targrows,
+						double *totalrows, double *totaldeadrows)
+{
+	List	   *fullscan = before_own_sample(rel, elevel);
+	int			numrows;
+
+	numrows = gather_sample(rel, GpScanDistributedPolicy(RelationGetRelid(rel)),
+							false, elevel, rows, targrows, totalrows, totaldeadrows);
+	after_own_sample(rel, fullscan, rows, numrows, *totalrows);
+	return numrows;
+}
+
+/*
+ * On one node, a leaf partition analyzed itself is sampled as PostgreSQL,
+ * or the hook of its table access method, samples it -- whose function the
+ * hook finds by asking the hooks outside gp_core's -- for its counters.
+ */
+static AnalyzeSampleRowsFunc local_leaf_inner = NULL;
+static bool asking_outer_hooks = false;
+
+static int
+local_leaf_sample_rows(Relation rel, int elevel, HeapTuple *rows, int targrows,
+					   double *totalrows, double *totaldeadrows)
+{
+	List	   *fullscan = before_own_sample(rel, elevel);
+	int			numrows;
+
+	if (local_leaf_inner != NULL)
+		numrows = local_leaf_inner(rel, elevel, rows, targrows, totalrows,
+								   totaldeadrows);
+	else
+		numrows = segment_sample_rows(rel, elevel, rows, targrows, totalrows,
+									  totaldeadrows);
+	after_own_sample(rel, fullscan, rows, numrows, *totalrows);
+	return numrows;
 }
 
 /* The same, for a member of a tree whose members are sampled one by one. */
@@ -693,6 +769,8 @@ member_sample_rows(Relation rel, int elevel, HeapTuple *rows, int targrows,
 static List *walk_members = NIL;	/* not yet asked of, in TopTransactionContext */
 static LocalTransactionId walk_lxid = InvalidLocalTransactionId;
 static GpPolicy *walk_policy = NULL;	/* where the tree is sampled at once */
+static List *walk_merged = NIL; /* a root's columns, merged in place of a sample */
+static bool walk_merging = false;
 
 /* The relation analyze_rel() asked of last, whose next ask is its tree's */
 static Oid	last_asked = InvalidOid;
@@ -736,6 +814,19 @@ tree_sample_rows(Relation rel, int elevel, HeapTuple *rows, int targrows,
 						 totalrows, totaldeadrows);
 }
 
+/*
+ * A root's sampling function where every column it takes is merged from its
+ * leaves' statistics: no rows, and the leaves' rows as the root's.
+ */
+static int
+merged_sample_rows(Relation rel, int elevel, HeapTuple *rows, int targrows,
+				   double *totalrows, double *totaldeadrows)
+{
+	*totalrows = GpRootMerge(rel, walk_merged);
+	*totaldeadrows = 0;
+	return 0;
+}
+
 /* A member's, which is never called: the member has no pages to sample. */
 static int
 no_sample_rows(Relation rel, int elevel, HeapTuple *rows, int targrows,
@@ -751,7 +842,10 @@ no_sample_rows(Relation rel, int elevel, HeapTuple *rows, int targrows,
  * segments' pages together, their bytes rounded up to pages, as Cloudberry's
  * AcquireNumberOfBlocks() rounds them.  An append-optimized or PAX table's
  * files are no whole pages, and a small one rounded down would be counted
- * as none, which the planner takes for a table never analyzed.
+ * as none, which the planner takes for a table never analyzed.  And an
+ * empty table has one, which is what Cloudberry's vac_update_relstats()
+ * writes of it: so its root's merge, later in the same statement, tells it
+ * analyzed from never analyzed (gp_partanalyze.c).
  */
 static bool
 distributed_table(Relation relation, AnalyzeSampleRowsFunc sampler,
@@ -778,9 +872,60 @@ distributed_table(Relation relation, AnalyzeSampleRowsFunc sampler,
 		if (sizes[i] != NULL)
 			bytes += strtod(sizes[i], NULL);
 
-	*totalpages = (BlockNumber) Min(ceil(bytes / BLCKSZ), (double) MaxBlockNumber);
+	*totalpages = (BlockNumber) Min(Max(ceil(bytes / BLCKSZ), 1), (double) MaxBlockNumber);
 	*func = sampler;
 	return true;
+}
+
+/*
+ * On one node: a leaf partition's pages and sampling function, as above; its
+ * pages as its table access method counts them, and one for an empty one,
+ * as a distributed table's are.
+ */
+static bool
+local_leaf(Relation relation, AnalyzeSampleRowsFunc *func, BlockNumber *totalpages)
+{
+	BlockNumber pages = 0;
+	bool		found;
+
+	if (!relation->rd_rel->relispartition ||
+		relation->rd_rel->relkind != RELKIND_RELATION)
+		return prev_analyze_sample_rows
+			? prev_analyze_sample_rows(relation, func, totalpages) : false;
+
+	asking_outer_hooks = true;
+	PG_TRY();
+	{
+		found = analyze_sample_rows_hook(relation, &local_leaf_inner, &pages);
+	}
+	PG_FINALLY();
+	{
+		asking_outer_hooks = false;
+	}
+	PG_END_TRY();
+	if (!found)
+	{
+		local_leaf_inner = NULL;
+		pages = RelationGetNumberOfBlocks(relation);
+	}
+	*totalpages = Max(pages, 1);
+	*func = local_leaf_sample_rows;
+	return true;
+}
+
+/* Has this single node's database gp_core?  Asked once a transaction. */
+static bool
+single_node_active(void)
+{
+	static LocalTransactionId asked = InvalidLocalTransactionId;
+	static bool active = false;
+
+	if (asked != MyProc->vxid.lxid)
+	{
+		active = GpPartAnalyzeActive();
+		asked = MyProc->vxid.lxid;
+	}
+	return active;
 }
 
 /*
@@ -799,8 +944,16 @@ gp_analyze_sample_rows(Relation relation, AnalyzeSampleRowsFunc *func,
 {
 	Oid			relid = RelationGetRelid(relation);
 	LocalTransactionId lxid = MyProc->vxid.lxid;
+	bool		single = GpClusterIsSingleNode();
 
-	if (GpClusterBackendRole() != GP_ROLE_DISPATCH || AmAutoVacuumWorkerProcess())
+	/*
+	 * A cluster's coordinator; and a single node where gp_core is made,
+	 * whose ANALYZE is Cloudberry's for partitioned tables alone
+	 * (gp_partanalyze.c) -- PostgreSQL's tests run where it is not.
+	 */
+	if (asking_outer_hooks || AmAutoVacuumWorkerProcess() ||
+		(single ? !single_node_active()
+		 : GpClusterBackendRole() != GP_ROLE_DISPATCH))
 		return prev_analyze_sample_rows
 			? prev_analyze_sample_rows(relation, func, totalpages) : false;
 
@@ -810,7 +963,7 @@ gp_analyze_sample_rows(Relation relation, AnalyzeSampleRowsFunc *func,
 		while (linitial_oid(walk_members) != relid)
 			walk_members = list_delete_first(walk_members);
 		walk_members = list_delete_first(walk_members);
-		if (walk_policy != NULL)
+		if (walk_policy != NULL || walk_merging)
 		{
 			/* gp_ao's, outside this one, has counted its segment files */
 			*func = no_sample_rows;
@@ -827,15 +980,43 @@ gp_analyze_sample_rows(Relation relation, AnalyzeSampleRowsFunc *func,
 	{
 		MemoryContext old = MemoryContextSwitchTo(TopTransactionContext);
 		List	   *members = find_all_inheritors(relid, NoLock, NULL);
+		List	   *va_cols;
 
 		last_asked = InvalidOid;
 		walk_policy = tree_policy(members);
 		walk_members = list_delete_first(members);
 		walk_lxid = lxid;
+		walk_merging = false;
 		MemoryContextSwitchTo(old);
 
-		if (relation->rd_rel->relkind == RELKIND_PARTITIONED_TABLE)
-			GP_FAULT("merge_leaf_stats_after_find_children");
+		/*
+		 * A root whose columns can be merged from its leaves' statistics,
+		 * as Cloudberry's std_typanalyze() finds them: merged in place of a
+		 * sample where every one can; where some can, merged over
+		 * PostgreSQL's once PostgreSQL has written the sample's.
+		 */
+		if (relation->rd_rel->relkind == RELKIND_PARTITIONED_TABLE &&
+			!relation->rd_rel->relispartition &&
+			GpPartAnalyzeTarget(relid, &va_cols))
+		{
+			bool		all;
+			List	   *mergeable = GpRootMergeableColumns(relation, va_cols,
+														   GpPartAnalyzeVerbose() ? INFO : DEBUG2,
+														   &all);
+
+			if (all)
+			{
+				old = MemoryContextSwitchTo(TopTransactionContext);
+				walk_merged = list_copy(mergeable);
+				walk_merging = true;
+				MemoryContextSwitchTo(old);
+				*func = merged_sample_rows;
+				*totalpages = 1;
+				return true;
+			}
+			if (mergeable != NIL)
+				GpRootMergeLater(relid, mergeable);
+		}
 
 		if (walk_policy != NULL)
 		{
@@ -848,6 +1029,8 @@ gp_analyze_sample_rows(Relation relation, AnalyzeSampleRowsFunc *func,
 
 	last_asked = relid;
 	last_asked_lxid = lxid;
+	if (single)
+		return local_leaf(relation, func, totalpages);
 	return distributed_table(relation, distributed_sample_rows, func, totalpages);
 }
 
@@ -1119,9 +1302,6 @@ GpAnalyzeSegmentCounts(VacuumStmt *stmt)
 void
 GpAnalyzeInit(void)
 {
-	if (GpClusterIsSingleNode())
-		return;
-
 	prev_analyze_sample_rows = analyze_sample_rows_hook;
 	analyze_sample_rows_hook = gp_analyze_sample_rows;
 }

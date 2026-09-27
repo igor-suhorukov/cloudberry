@@ -1,26 +1,4 @@
 @@
-- public     | p3_sales                           | day     | t         |         0 |         4 |       -0.5 | {20}             | {1}               |                  |             |                   |                        | 
-- public     | p3_sales                           | id      | t         |         0 |         4 |       -0.5 | {1}              | {1}               |                  |             |                   |                        | 
-- public     | p3_sales                           | month   | t         |         0 |         4 |       -0.5 | {1}              | {1}               |                  |             |                   |                        | 
-- public     | p3_sales                           | region  | t         |         0 |         4 |       -0.5 | {usa}            | {1}               |                  |             |                   |                        | 
-- public     | p3_sales                           | year    | t         |         0 |         4 |       -0.5 | {2002}           | {1}               |                  |             |                   |                        | 
-+ public     | p3_sales                           | day     | t         |         0 |         4 |       -0.5 | {20}             | {1}               |                  |           1 |                   |                        | 
-+ public     | p3_sales                           | id      | t         |         0 |         4 |       -0.5 | {1}              | {1}               |                  |           1 |                   |                        | 
-+ public     | p3_sales                           | month   | t         |         0 |         4 |       -0.5 | {1}              | {1}               |                  |           1 |                   |                        | 
-+ public     | p3_sales                           | region  | t         |         0 |         4 |       -0.5 | {usa}            | {1}               |                  |           1 |                   |                        | 
-+ public     | p3_sales                           | year    | t         |         0 |         4 |       -0.5 | {2002}           | {1}               |                  |           1 |                   |                        | 
-@@
-- public     | p3_sales                           | day     | t         |         0 |         4 |       -0.5 | {20}             | {1}               |                  |             |                   |                        | 
-- public     | p3_sales                           | id      | t         |         0 |         4 |       -0.5 | {1}              | {1}               |                  |             |                   |                        | 
-- public     | p3_sales                           | month   | t         |         0 |         4 |       -0.5 | {1}              | {1}               |                  |             |                   |                        | 
-- public     | p3_sales                           | region  | t         |         0 |         4 |       -0.5 | {usa}            | {1}               |                  |             |                   |                        | 
-- public     | p3_sales                           | year    | t         |         0 |         4 |       -0.5 | {2002}           | {1}               |                  |             |                   |                        | 
-+ public     | p3_sales                           | day     | t         |         0 |         4 |       -0.5 | {20}             | {1}               |                  |           1 |                   |                        | 
-+ public     | p3_sales                           | id      | t         |         0 |         4 |       -0.5 | {1}              | {1}               |                  |           1 |                   |                        | 
-+ public     | p3_sales                           | month   | t         |         0 |         4 |       -0.5 | {1}              | {1}               |                  |           1 |                   |                        | 
-+ public     | p3_sales                           | region  | t         |         0 |         4 |       -0.5 | {usa}            | {1}               |                  |           1 |                   |                        | 
-+ public     | p3_sales                           | year    | t         |         0 |         4 |       -0.5 | {2002}           | {1}               |                  |           1 |                   |                        | 
-@@
 - public     | foo_stats | a       |         0 |      1504 |      -0.25 |                                     |                   | 
 + public     | foo_stats | a       |         0 |      1504 |      -0.75 | {aaa}                               | {0.5}             | 
 @@

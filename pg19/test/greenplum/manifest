@@ -333,7 +333,7 @@ skip gp_connections  differs: a primary takes a direct connection, where Cloudbe
 skip gp_dump_query_oids  function gp_dump_query_oids(unknown) does not exist
 run  analyze
 skip gp_owner_permission  relation "pg_stat_operations" does not exist
-skip incremental_analyze  differs: a partitioned table's statistics are sampled, where Cloudberry merges its leaves'; type "gp_hyperloglog_estimator" does not exist
+run  incremental_analyze
 run  regex_gp
 skip dispatch_encoding  relation "gp_toolkit.__gp_log_segment_ext" does not exist; raise_error called on "funny char Ä"
 port icudp_on
@@ -407,7 +407,7 @@ skip partition_locking  differs: the locks a statement takes on a partitioned ta
 skip vacuum_gp  relation "gp_toolkit.__gp_log_master_ext" does not exist
 run  vacuum_fsm_nondefault_tablespace
 skip pg_stat  relation "gp_stat_all_tables_summary" does not exist; relation "gp_stat_user_tables_summary" does not exist
-skip bfv_partition  relation "gp_partition_template" does not exist; differs: a partitioned table's statistics are sampled, where Cloudberry merges its leaves'
+skip bfv_partition  relation "gp_partition_template" does not exist; differs: autovacuum on in its group, psql 19's list of a partitioned table's partitions, PostgreSQL 19's DETAIL of an operator it cannot choose, and the MAINTAIN privilege, m, in its ACL
 run  qp_misc_rio
 skip bfv_partition_plans  differs: a count of its plan's partition selections is 0, where Cloudberry's is 2
 run  gp_covering_index

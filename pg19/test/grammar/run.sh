@@ -2036,6 +2036,11 @@ isl "ANALYZE ROOTPARTITION gives the root statistics, and its leaves none" \
       FROM pg_stats WHERE tablename LIKE 'ap%' AND attname = 'a';" "ap:true"
 refused "and a leaf named with it is refused" \
    "ANALYZE ROOTPARTITION ap1;" "cannot analyze a non-root partition using ANALYZE ROOTPARTITION"
+isl "ANALYZE of the table merges the root's statistics from its leaves', on one node too" \
+   "ANALYZE ap;
+    SELECT histogram_bounds::text || ' ' || coalesce(correlation::text, 'none')
+      FROM pg_stats WHERE tablename = 'ap' AND attname = 'a';" \
+   "{0,1,2,3,4,5,6,7,8,9,11,12,13,14,15,16,17,18,19} none"
 refused "as the parenthesized option is, and FULLSCAN is VACUUM's no more than Cloudberry's" \
    "ANALYZE (ROOTPARTITION on) ap2; VACUUM (FULLSCAN) ap;" 'unrecognized VACUUM option "fullscan"'
 

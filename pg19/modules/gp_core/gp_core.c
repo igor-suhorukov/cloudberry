@@ -224,7 +224,10 @@ _PG_init(void)
 	GpScanInit();
 	GpModifyInit();
 
-	/* O3: ANALYZE samples a distributed table on the segments. */
+	/*
+	 * O3: ANALYZE samples a distributed table on the segments; and on one
+	 * node too, a leaf partition, for the merge of its root's statistics.
+	 */
 	GpAnalyzeInit();
 
 	/*

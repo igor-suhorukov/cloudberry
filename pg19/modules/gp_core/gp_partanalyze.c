@@ -93,7 +93,9 @@
 #include "tcop/utility.h"
 #include "utils/fmgroids.h"
 #include "utils/guc.h"
+#include "utils/hsearch.h"
 #include "utils/lsyscache.h"
+#include "utils/memutils.h"
 #include "utils/rel.h"
 #include "utils/syscache.h"
 
@@ -112,8 +114,77 @@ typedef struct VacuumAsk
 {
 	uint32		options;		/* VACOPT_VACUUM, _ANALYZE, _VERBOSE, _SKIP_LOCKED */
 	bool		rootonly;		/* ROOTPARTITION */
+	bool		fullscan;		/* FULLSCAN */
 	List	   *other_options;	/* the rest, left for PostgreSQL */
 } VacuumAsk;
+
+/*
+ * The statement this backend runs, with the list it was given: what O3's
+ * hook and the merge of a root's statistics ask of it (GpPartAnalyzeTarget()).
+ * NIL relations are every relation of the database.
+ */
+typedef struct AnalyzeStatement
+{
+	VacuumAsk	ask;
+	List	   *rels;			/* of VacuumRelation, each by its OID */
+	HTAB	   *byoid;			/* the same, by OID, once asked */
+} AnalyzeStatement;
+
+typedef struct AnalyzeTarget
+{
+	Oid			relid;			/* the hash key */
+	List	   *va_cols;
+} AnalyzeTarget;
+
+static AnalyzeStatement *current = NULL;
+
+bool
+GpPartAnalyzeTarget(Oid relid, List **va_cols)
+{
+	AnalyzeTarget *target;
+
+	*va_cols = NIL;
+	if (current == NULL || !(current->ask.options & VACOPT_ANALYZE))
+		return false;
+	if (current->rels == NIL)
+		return true;
+
+	if (current->byoid == NULL)
+	{
+		HASHCTL		ctl;
+
+		ctl.keysize = sizeof(Oid);
+		ctl.entrysize = sizeof(AnalyzeTarget);
+		ctl.hcxt = GetMemoryChunkContext(current);
+		current->byoid = hash_create("gp_core ANALYZE list", list_length(current->rels),
+									 &ctl, HASH_ELEM | HASH_BLOBS | HASH_CONTEXT);
+		foreach_node(VacuumRelation, vrel, current->rels)
+		{
+			bool		found;
+
+			target = hash_search(current->byoid, &vrel->oid, HASH_ENTER, &found);
+			if (!found)
+				target->va_cols = vrel->va_cols;
+		}
+	}
+	target = hash_search(current->byoid, &relid, HASH_FIND, NULL);
+	if (target == NULL)
+		return false;
+	*va_cols = target->va_cols;
+	return true;
+}
+
+bool
+GpPartAnalyzeVerbose(void)
+{
+	return current != NULL && (current->ask.options & VACOPT_VERBOSE) != 0;
+}
+
+bool
+GpPartAnalyzeFullscan(void)
+{
+	return current != NULL && current->ask.fullscan;
+}
 
 bool
 GpPartAnalyzeActive(void)
@@ -508,6 +579,7 @@ read_options(VacuumStmt *stmt, VacuumAsk *ask)
 
 	ask->options = stmt->is_vacuumcmd ? VACOPT_VACUUM : VACOPT_ANALYZE;
 	ask->rootonly = false;
+	ask->fullscan = false;
 	ask->other_options = NIL;
 
 	foreach_node(DefElem, opt, stmt->options)
@@ -524,7 +596,7 @@ read_options(VacuumStmt *stmt, VacuumAsk *ask)
 		}
 		if (!stmt->is_vacuumcmd && strcmp(opt->defname, "fullscan") == 0)
 		{
-			(void) defGetBoolean(opt);
+			ask->fullscan = defGetBoolean(opt);
 			continue;
 		}
 
@@ -627,6 +699,8 @@ partanalyze_ProcessUtility(PlannedStmt *pstmt, const char *queryString,
 	VacuumAsk	ask;
 	List	   *vacrels = NIL;
 	bool		single = GpClusterIsSingleNode();
+	AnalyzeStatement *statement;
+	AnalyzeStatement *outer;
 
 	if (!IsA(pstmt->utilityStmt, VacuumStmt) ||
 		GpDispatchIsDispatchedStatement(pstmt->utilityStmt) ||
@@ -679,8 +753,28 @@ partanalyze_ProcessUtility(PlannedStmt *pstmt, const char *queryString,
 	newpstmt = copyObject(pstmt);
 	newpstmt->utilityStmt = (Node *) newstmt;
 
-	next_ProcessUtility(newpstmt, queryString, false, context,
-						params, queryEnv, dest, qc);
+	/*
+	 * Run with its list known to what samples and merges -- a statement's
+	 * own, outside which one run by a function's ANALYZE had none -- and
+	 * where it ran in the caller's transaction, what was to be written over
+	 * PostgreSQL's statistics written as it ends (gp_partmerge.c).
+	 */
+	statement = palloc0_object(AnalyzeStatement);
+	statement->ask = ask;
+	statement->rels = newstmt->rels;
+	outer = current;
+	current = statement;
+	PG_TRY();
+	{
+		next_ProcessUtility(newpstmt, queryString, false, context,
+							params, queryEnv, dest, qc);
+		GpPartMergeFinish();
+	}
+	PG_FINALLY();
+	{
+		current = outer;
+	}
+	PG_END_TRY();
 
 	if (single)
 		empty_tables_one_page(newstmt->rels);
@@ -706,4 +800,7 @@ GpPartAnalyzeInit(void)
 
 	prev_ProcessUtility = ProcessUtility_hook;
 	ProcessUtility_hook = partanalyze_ProcessUtility;
+
+	/* the merge of a root's statistics, and what it writes after PostgreSQL */
+	GpPartMergeInit();
 }
