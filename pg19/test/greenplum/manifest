@@ -259,7 +259,7 @@ skip ao_checksum_corruption  unrecognized configuration parameter "gp_appendonly
 skip AOCO_Compression  relation "gp_partition_template" does not exist
 run  AORO_Compression
 run  am_encoding
-skip ao_segfile  unrecognized configuration parameter "gp_appendonly_insert_files"; unrecognized configuration parameter "gp_appendonly_insert_files_tuples_range"
+skip ao_segfile  unrecognized configuration parameter "gp_appendonly_insert_files_tuples_range"
 run  uao_dml/ao_unique_index_build_row
 run  uao_dml/ao_unique_index_build_column
 run  uao_dml/uao_dml_unique_index_delete_row
@@ -488,7 +488,7 @@ skip hooktest  could not access file "hooktest/test_hook.so": No such file or di
 run  tuple_serialization
 skip query_info_hook_test  could not access file "query_info_hook_test/query_info_hook_test.so": No such file or directory
 skip freeze_aux_tables  differs: an append-optimized table's aux tables are not pg_aoseg_<oid>, pg_aoblkdir_<oid> and pg_aovisimap_<oid> of pg_aoseg
-skip cbdb_parallel  unrecognized configuration parameter "gp_appendonly_insert_files"; unrecognized configuration parameter "enable_parallel_semi_join"
+skip cbdb_parallel  unrecognized configuration parameter "enable_parallel_semi_join"; unrecognized EXPLAIN option "locus"
 run  window_parallel
 skip vacuum_full_freeze_heap  differs: a heap's size in 8 kB pages, where Cloudberry's expected output counts its 32 kB blocks
 skip vacuum_full_heap  differs: a heap's size in 8 kB pages, where Cloudberry's expected output counts its 32 kB blocks
