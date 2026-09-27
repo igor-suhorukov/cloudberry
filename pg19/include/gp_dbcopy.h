@@ -26,6 +26,18 @@
 #ifndef GP_DBCOPY_H
 #define GP_DBCOPY_H
 
+/*
+ * gp_core's resource manager, among the custom ones (128-255): not one
+ * PostgreSQL's wiki lists as taken (CustomWALResourceManagers), and none of
+ * the port's others (gp_sql's 198, PAX's 199, gp_ao's 200 and 201).
+ * gp_dbcopy.c registers it; its records are a database's directory copied,
+ * and the nodes' states as the coordinator publishes them (gp_cluster.c).
+ */
+#define GP_CORE_RMGR_ID			197
+
+#define XLOG_GP_CORE_DBCOPY		0x00	/* a database's directory, copied */
+#define XLOG_GP_CORE_CLUSTER	0x10	/* the nodes' states, gpsegconfig_dump */
+
 /* Called from gp_core's _PG_init, before GpDdlInit(). */
 extern void GpDbcopyInit(void);
 
