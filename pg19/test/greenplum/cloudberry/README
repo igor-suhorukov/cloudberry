@@ -283,12 +283,13 @@ oid_wraparound  the OID counters, the coordinator's and each segment's.  A
   apart from its OID, takes one more from the coordinator's counter: after
   CREATE TABLE it is at 16388 where Cloudberry's is at 16387, and after the
   CREATE TABLE AS of the second scenario at neither 16390 nor 16391.  And
-  after that CREATE TABLE AS each segment's counter is at 16389, where
+  after that CREATE TABLE AS each segment's counter is at 16392, where
   Cloudberry's is at 16385: the test's database is template1's copy, and
   the suite makes gp_orca, and gp_core with it, in template1 as each pass
-  begins (run.sh), so on each segment gp_core's tables there were the
-  first files it made -- 16384 to 16387 among them -- which the counter
-  passes over, giving the new table's file 16388.
+  begins (run.sh), so on each segment gp_core's tables there -- among them
+  its loopback journal, with its TOAST table -- were the first files it
+  made, 16384 to 16390 among them, which the counter passes over, giving
+  the new table's file 16391.
 
 opclass_ddl  the words of an OWNER TO a role the user cannot act as:
   PostgreSQL 19's, "must be able to SET ROLE", where Cloudberry's own check
