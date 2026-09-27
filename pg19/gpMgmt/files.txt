@@ -31,17 +31,11 @@
 #   gpexpand, gpshrink  add and remove segments; a cluster's segment count
 #                       is fixed when its coordinator starts, and
 #                       gp_add_segment_primary() is refused
-#   gpcheckcat          checks Cloudberry's catalogs, which the port keeps
-#                       as views, labels and files (gppylib/data, the
-#                       catalog's JSON it reads, is not built either)
-#   gppkg, gpload,      packages, loads through gpfdist, and Cloudberry's
-#   gpdirtableload,     memory, log and support tools: not ported yet
-#   gpmemwatcher,
-#   gpmemreport,
-#   gplogfilter,
-#   gpcheckperf, gpsd,
-#   minirepro, analyzedb,
-#   gpreload, gpdemo
+#
+# Beside Cloudberry's files: gpcheckcat's catalog JSON, which meson makes
+# from PostgreSQL 19's headers (catalog_json.py); gpnetbench and stream,
+# gpcheckperf's programs, which it compiles; and gpdemo's scripts, from
+# gpAux/gpdemo, as Cloudberry's gpMgmt/bin/Makefile installs them.
 
 # The tools
 bin bin/gpstart
@@ -60,6 +54,29 @@ bin bin/gpssh-exkeys
 bin bin/gpsync
 bin bin/gpcheckresgroupimpl
 bin bin/gpcheckresgroupv2impl
+bin bin/gpcheckcat
+bin bin/gppkg
+bin bin/gpload
+bin bin/gpload.py
+bin bin/gpdirtableload
+bin bin/analyzedb
+bin bin/gpsd
+bin bin/minirepro
+bin bin/gplogfilter
+bin bin/gpmemwatcher
+bin bin/gpmemreport
+bin bin/gpcheckperf
+bin bin/gpreload
+bin bin/gpdemo
+
+bin/gpcheckcat_modules bin/gpcheckcat_modules/__init__.py
+bin/gpcheckcat_modules bin/gpcheckcat_modules/foreign_key_check.py
+bin/gpcheckcat_modules bin/gpcheckcat_modules/leaked_schema_dropper.py
+bin/gpcheckcat_modules bin/gpcheckcat_modules/orphan_toast_table_issues.py
+bin/gpcheckcat_modules bin/gpcheckcat_modules/orphaned_toast_tables_check.py
+bin/gpcheckcat_modules bin/gpcheckcat_modules/repair.py
+bin/gpcheckcat_modules bin/gpcheckcat_modules/repair_missing_extraneous.py
+bin/gpcheckcat_modules bin/gpcheckcat_modules/unique_index_violation_check.py
 
 bin/gpconfig_modules bin/gpconfig_modules/__init__.py
 bin/gpconfig_modules bin/gpconfig_modules/compare_segment_guc.py
@@ -81,6 +98,12 @@ bin/lib bin/lib/gpstate.py
 bin/lib bin/lib/multidd
 bin/lib/pexpect bin/lib/pexpect/__init__.py
 bin/lib/pexpect bin/lib/pexpect/pxssh.py
+bin/lib/gpdemo ../gpAux/gpdemo/demo_cluster.sh
+bin/lib/gpdemo ../gpAux/gpdemo/gpdemo-defaults.sh
+bin/lib/gpdemo ../gpAux/gpdemo/generate_certs.sh
+bin/lib/gpdemo ../gpAux/gpdemo/lalshell
+bin/lib/gpdemo ../gpAux/gpdemo/probe_config.sh
+bin/lib/gpdemo ../gpAux/gpdemo/README
 
 # What the tools run on each host
 sbin sbin/gpcleansegmentdir.py
@@ -112,6 +135,7 @@ lib/python/gppylib bin/gppylib/gpresgroup.py
 lib/python/gppylib bin/gppylib/gpsubprocess.py
 lib/python/gppylib bin/gppylib/gpversion.py
 lib/python/gppylib bin/gppylib/heapchecksum.py
+lib/python/gppylib bin/gppylib/leafhll.py
 lib/python/gppylib bin/gppylib/logfilter.py
 lib/python/gppylib bin/gppylib/mainUtils.py
 lib/python/gppylib bin/gppylib/nodecopy.py
@@ -150,6 +174,7 @@ lib/python/gppylib/programs bin/gppylib/programs/clsAddMirrors.py
 lib/python/gppylib/programs bin/gppylib/programs/clsRecoverSegment.py
 lib/python/gppylib/programs bin/gppylib/programs/clsRecoverSegment_triples.py
 lib/python/gppylib/programs bin/gppylib/programs/clsSystemState.py
+lib/python/gppylib/programs bin/gppylib/programs/gppkg.py
 lib/python/gppylib/programs bin/gppylib/programs/programIoUtils.py
 lib/python/gppylib/system bin/gppylib/system/__init__.py
 lib/python/gppylib/system bin/gppylib/system/ComputeCatalogUpdate.py
@@ -171,11 +196,16 @@ lib/python/gppylib/util bin/gppylib/util/ssh_utils.py
 # The tools' help, and the configuration files gpinitsystem's help names
 docs/cli_help doc/gpactivatestandby_help
 docs/cli_help doc/gpaddmirrors_help
+docs/cli_help doc/gpcheckperf_help
 docs/cli_help doc/gpconfig_help
 docs/cli_help doc/gpdeletesystem_help
 docs/cli_help doc/gpinitstandby_help
 docs/cli_help doc/gpinitsystem_help
+docs/cli_help doc/gpload_help
+docs/cli_help doc/gplogfilter_help
+docs/cli_help doc/gppkg_help
 docs/cli_help doc/gprecoverseg_help
+docs/cli_help doc/gpreload_help
 docs/cli_help doc/gpssh-exkeys_help
 docs/cli_help doc/gpssh_help
 docs/cli_help doc/gpstart_help

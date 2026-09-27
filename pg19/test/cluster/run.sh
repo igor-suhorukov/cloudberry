@@ -1322,6 +1322,14 @@ a\b|\N' ] && [ "$(cat "$ROOT/ce_prog.txt" 2>&1)" = "to a program" ] \
 	[ "$out|$out2|$out3|$out5" = "20|2100|0|20|2100|20" ] \
 		&& ok "gp.dist_random() and gp_segment_id of a table with a dropped column; a view of it prints and reloads" \
 		|| notok "gp.dist_random() of a table with a dropped column" "$out / $out2 / $out3 / $out4 / $out5"
+	# Two of them joined on gp_segment_id, which the ON clause names while
+	# the join's columns are being made from theirs, as gpcheckcat's queries
+	# join a catalog's rows on every segment; the dropped column's too.
+	out=$(q 0 "SELECT count(*) FROM gp_dist_random('gs') x JOIN gp_dist_random('gs') y ON x.gp_segment_id = y.gp_segment_id AND x.a = y.a;")
+	out2=$(q 0 "SELECT count(*), sum(x.c) FROM gp_dist_random('gdc') x JOIN gp_dist_random('gdc') y ON x.gp_segment_id = y.gp_segment_id AND x.a = y.a;")
+	[ "$out|$out2" = "$(q 0 "SELECT count(*) FROM gs;")|20|2100" ] \
+		&& ok "two gp_dist_random() joined on gp_segment_id, a table with a dropped column too" \
+		|| notok "a join of two gp_dist_random() on gp_segment_id" "$out / $out2"
 	out=$(q 0 "SELECT DISTINCT gp_segment_id FROM pg_class;")
 	out2=$(q 0 "SELECT DISTINCT gp_segment_id FROM gp.dist_random(NULL::pg_namespace) ORDER BY 1;")
 	[ "$out|$out2" = "-1|0

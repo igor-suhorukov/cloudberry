@@ -22,12 +22,14 @@
 #
 # putversion.sh <GPHOME> <version>: Cloudberry's putversion, over what meson
 # installed of gpMgmt -- each "$Revision...$" a tool's --version prints
-# becomes the version.  Run by "meson install", DESTDIR and all.
+# becomes the version.  Run by "meson install", DESTDIR and all.  A text file
+# alone: a program in bin/lib, stream, has a "$Revision" of its own, which
+# Cloudberry's Makefiles never give putversion.
 set -e
 root="${DESTDIR:-}$1"
 for dir in bin sbin lib/python/gppylib; do
 	[ -d "$root/$dir" ] || continue
-	grep -rl --include='*' '\$Revision' "$root/$dir" 2> /dev/null |
+	grep -rlI --include='*' '\$Revision' "$root/$dir" 2> /dev/null |
 		while read -r f; do
 			sed -i "s/\\\$Revision[^\$]*\\\$/$2/" "$f"
 		done

@@ -450,9 +450,9 @@ run  nested_case_null
 run  sort
 run  aggregate_with_groupingsets
 skip gporca  function disable_xform(unknown) does not exist; under the planner, EXPLAIN of a hash join by an operator declared HASHES without a hash function fails, as PostgreSQL 19's does -- since PostgreSQL 18 the executor looks the function up as it starts (adf97c15623), where Cloudberry's looks it up as it builds the table and fails the SELECT alone, on a segment, with the same error; under ORCA, 21 statements fall back with "Partially Distributed Data"
-skip gpsd  cannot create data/gpsd-with-hll.sql: Permission denied -- the gpsd tool writes into Cloudberry's suite directory, which the harness runs from and cannot write; then relation "gpsd_foo" does not exist
+run  gpsd
 run  catcache
-skip minirepro  relation "minirepro_foo" does not exist; table "minirepro_foo" does not exist
+run  minirepro
 run  gporca_faults
 group m7c
 run  rpt_tpch
@@ -522,7 +522,7 @@ run  oid_wraparound
 skip fts_recovery_in_progress  canceling statement due to user request
 skip gangsize  differs: the gangs its statements are dispatched to, by Cloudberry's INFO lines, are not the sizes Cloudberry makes them
 run  gang_reuse
-skip run_utility_gpexpand_phase1  gpcheckcat and gppkg are not installed (pg19/gpMgmt/files.txt)
+run  run_utility_gpexpand_phase1
 run  create_extension_fail
 skip offload_entry_to_qe  a temporary external table is not supported: CREATE EXTERNAL WEB TEMP TABLE -- an external table is a foreign table, which PostgreSQL makes in no temporary schema; and enable_offload_entry_to_qe, which moves the coordinator's work above a Motion to one segment, has nothing to move on the planner's route, whose gathers are the coordinator's
 port ivm_cluster

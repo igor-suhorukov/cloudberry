@@ -602,11 +602,17 @@ run_group() {
 	# read data/ by relative paths.  Its entries, that is, from a directory of
 	# the group's, whose results/ is the pass's, as the Makefile's results/
 	# is beside them: rowhints writes a plan there that sql/maskout.sh reads
-	# back.  The suite's own directory is not the tests' to write in.
+	# back.  The suite's own directory is not the tests' to write in: data/
+	# is the group's too, of links to Cloudberry's files, where gpsd and
+	# minirepro write the dumps they read back.
 	if [ ! -d "$WORK/$g/cwd" ]; then
 		mkdir -p "$WORK/$g/cwd"
 		for e in "$CB"/*; do
-			[ "$(basename "$e")" = results ] || ln -s "$e" "$WORK/$g/cwd/"
+			case "$(basename "$e")" in
+				results) ;;
+				data) mkdir "$WORK/$g/cwd/data" && ln -s "$e"/* "$WORK/$g/cwd/data/" ;;
+				*) ln -s "$e" "$WORK/$g/cwd/" ;;
+			esac
 		done
 	fi
 	ln -sfn "$R/results" "$WORK/$g/cwd/results"

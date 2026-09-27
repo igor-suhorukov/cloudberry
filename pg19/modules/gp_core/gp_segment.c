@@ -484,6 +484,12 @@ nsitem_has_segment_id(ParseNamespaceItem *nsitem)
  * dist_random_segments() in its place with t's columns and that one as its
  * column definition list.  The column comes last and "*" leaves it out, so
  * every Var already made for the entry keeps its meaning.
+ *
+ * The entry's column names and its namespace columns are made anew, not
+ * changed where they are: a JOIN's ON clause may name gp_segment_id while
+ * the parser is building the join's own columns from the entry's, the lists
+ * and the array it read before the clause (transformFromClauseItem()), whose
+ * length it sized its own by.
  */
 static void
 add_dist_random_segment_column(ParseState *pstate, ParseNamespaceItem *nsitem,
@@ -496,6 +502,8 @@ add_dist_random_segment_column(ParseState *pstate, ParseNamespaceItem *nsitem,
 	Relation	rel;
 	TupleDesc	tupdesc;
 	int			ncols;
+	List	   *colnames;
+	ParseNamespaceColumn *nscolumns;
 	ParseNamespaceColumn *nscol;
 
 	if (rte->funcordinality || !OidIsValid(dist_random_segments_oid) ||
@@ -549,20 +557,25 @@ add_dist_random_segment_column(ParseState *pstate, ParseNamespaceItem *nsitem,
 		list_length(rte->eref->colnames) != ncols - 1)
 		elog(ERROR, "gp.dist_random() entry does not match its relation");
 
+	colnames = list_copy(rte->eref->colnames);
+	nscolumns = palloc_array(ParseNamespaceColumn, ncols);
+	memcpy(nscolumns, nsitem->p_nscolumns,
+		   (ncols - 1) * sizeof(ParseNamespaceColumn));
+
 	/*
 	 * A column definition list's names are the entry's too, which ruleutils
 	 * prints from: a dropped column's is the placeholder's, its namespace
 	 * column the placeholder, which "*" does not expand.
 	 */
-	foreach_node(String, name, rte->eref->colnames)
+	foreach_node(String, name, colnames)
 	{
 		int			i = foreach_current_index(name);
 
 		if (strVal(name)[0] != '\0')
 			continue;
-		lfirst(list_nth_cell(rte->eref->colnames, i)) =
+		lfirst(list_nth_cell(colnames, i)) =
 			makeString(pstrdup(strVal(list_nth(rtfunc->funccolnames, i))));
-		nscol = &nsitem->p_nscolumns[i];
+		nscol = &nscolumns[i];
 		memset(nscol, 0, sizeof(*nscol));
 		nscol->p_varno = nsitem->p_rtindex;
 		nscol->p_varattno = i + 1;
@@ -588,12 +601,10 @@ add_dist_random_segment_column(ParseState *pstate, ParseNamespaceItem *nsitem,
 	fexpr->funcresulttype = RECORDOID;
 	rtfunc->funcexpr = (Node *) fexpr;
 
-	rte->eref->colnames = lappend(rte->eref->colnames,
-								  makeString(pstrdup(GP_SEGMENT_ID)));
+	rte->eref->colnames = lappend(colnames, makeString(pstrdup(GP_SEGMENT_ID)));
 
-	nsitem->p_nscolumns = repalloc_array(nsitem->p_nscolumns,
-										 ParseNamespaceColumn, ncols);
-	nscol = &nsitem->p_nscolumns[ncols - 1];
+	nsitem->p_nscolumns = nscolumns;
+	nscol = &nscolumns[ncols - 1];
 	memset(nscol, 0, sizeof(*nscol));
 	nscol->p_varno = nsitem->p_rtindex;
 	nscol->p_varattno = ncols;
