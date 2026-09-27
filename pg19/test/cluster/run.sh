@@ -1835,6 +1835,16 @@ $((n + 1))" ] && ok "a serial column's values, taken on the segments from the co
 		*"division by zero"*) ok "... an error in a consumer's slice ends the statement, nothing waiting" ;;
 		*) notok "an error with a Shared Scan" "$out" ;;
 	esac
+	# EXPLAIN prints a Sequence's producer before the plan that reads it, in
+	# the order they run, as Cloudberry's does; and EXPLAIN ANALYZE of it
+	# runs the producers on the segments alone, not in the coordinator's
+	# description of the fragment.
+	out=$(q 0 "EXPLAIN (ANALYZE, COSTS OFF, TIMING OFF, SUMMARY OFF) WITH c AS (SELECT a, b FROM sh WHERE b % 3 = 0) SELECT count(*), sum(c1.b) FROM c c1 JOIN c c2 ON c1.b = c2.a;" | tr '\n' '|')
+	case "$out" in
+		*"Sequence"*"|"*"->  Shared Scan (share slice:id "*"|"*"->  Result"*"|"*"Seq Scan on sh"*"Optimizer: GPORCA"*)
+			ok "... EXPLAIN shows its producer first, and EXPLAIN ANALYZE runs" ;;
+		*) notok "EXPLAIN of a shared CTE" "$out" ;;
+	esac
 	left=$(ls -d "$(datadir 1)"/base/pgsql_tmp/*.fileset "$(datadir 2)"/base/pgsql_tmp/*.fileset 2>/dev/null | wc -l)
 	[ "$left" = 0 ] && ok "... and the segments keep none of the shared CTEs' files after" \
 		|| notok "the shared CTEs' files, left on the segments" "$(ls -d "$(datadir 1)"/base/pgsql_tmp/* "$(datadir 2)"/base/pgsql_tmp/* 2>/dev/null | tr '\n' ' ')"
@@ -2220,6 +2230,12 @@ COMMIT;"
 4" ] && ok "the coordinator's slice feeding a reader's: its rows read from the files the writer keeps for it" \
 				|| notok "the coordinator's slice and a reader" "$out / $want" ;;
 		*) notok "the coordinator's slice below a reader's: the plan" "$plan" ;;
+	esac
+	# EXPLAIN ANALYZE shows what it counted, where it ran: here.
+	out=$(q 0 "EXPLAIN (ANALYZE, COSTS OFF, TIMING OFF, SUMMARY OFF) $sql" | grep "Function Scan")
+	case "$out" in
+		*"Function Scan on generate_series (actual rows=300"*) ok "... and EXPLAIN ANALYZE shows what that slice counted" ;;
+		*) notok "EXPLAIN ANALYZE of the coordinator's relayed slice" "$out" ;;
 	esac
 	# One that works only on the rows it receives -- a LIMIT over a
 	# Gather, broadcast back -- runs on the first segment instead, a reader
