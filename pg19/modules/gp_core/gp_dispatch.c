@@ -308,7 +308,17 @@ sync_value(int i)
 	return GetConfigOption(synced_settings[i], true, false);
 }
 
-/* How many rows a segment sends at a time when a relation is read. */
+/*
+ * How many rows a segment sends at a time when a relation is read: one
+ * first, ten times as many each batch after, up to a thousand.  A gather not
+ * read to its end -- a LIMIT above it -- waits for the batches still on
+ * their way before it closes its cursors, and a segment slow to make its
+ * rows, a thousand of them in flight, would hold the statement until it had
+ * made them all, where Cloudberry's senders stop at the next row: the first
+ * rows come as soon as each segment has one, and what is in flight when the
+ * statement stops is small.
+ */
+#define GATHER_FETCH_FIRST	1
 #define GATHER_FETCH_ROWS	1000
 
 /* One segment's connection. */
@@ -3702,6 +3712,7 @@ typedef struct GpGatherSeg
 	bool		whole;			/* the last batch read was all that was asked */
 	bool		declared;		/* the cursor exists there */
 	bool		done;			/* the cursor has nothing more */
+	int			asked;			/* rows the batch in flight asked for */
 } GpGatherSeg;
 
 struct GpGatherState
@@ -4033,10 +4044,11 @@ gather_start(const char *sql, TupleDesc tupdesc, int content, int nsegments,
 		s = &gather->segs[n++];
 		s->gather = gather;
 		s->conn = &g->conns[i];
+		s->asked = GATHER_FETCH_FIRST;
 		conn_send(s->conn,
 				  psprintf("DECLARE %s %sNO SCROLL CURSOR FOR %s; FETCH %d FROM %s",
 						   gather->cursor, gather->binary ? "BINARY " : "",
-						   sql, GATHER_FETCH_ROWS, gather->cursor));
+						   sql, s->asked, gather->cursor));
 		s->conn->fetching = s;
 		s->declared = true;
 	}
@@ -4148,7 +4160,7 @@ gather_poll(GpGatherSeg *s)
 		{
 			Assert(s->arrived == NULL);
 			s->arrived = res;
-			s->whole = PQntuples(res) >= GATHER_FETCH_ROWS;
+			s->whole = PQntuples(res) >= s->asked;
 			continue;
 		}
 		if (status == PGRES_COMMAND_OK)
@@ -4189,11 +4201,12 @@ conn_park(GpSegmentConn *c)
 	}
 }
 
-/* Ask for a segment's next batch. */
+/* Ask for a segment's next batch, ten times the last, up to the most. */
 static void
 gather_fetch(GpGatherSeg *s)
 {
-	conn_send(s->conn, psprintf("FETCH %d FROM %s", GATHER_FETCH_ROWS,
+	s->asked = Min(s->asked * 10, GATHER_FETCH_ROWS);
+	conn_send(s->conn, psprintf("FETCH %d FROM %s", s->asked,
 								s->gather->cursor));
 	s->conn->fetching = s;
 	s->whole = false;

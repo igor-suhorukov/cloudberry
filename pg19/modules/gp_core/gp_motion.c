@@ -4300,6 +4300,20 @@ motion_executor_run(QueryDesc *queryDesc, ScanDirection direction,
 {
 	bool		fragment = is_fragment(queryDesc->plannedstmt);
 
+	/*
+	 * Each of a cursor's FETCHes is a statement of the segment's own, whose
+	 * start PostgreSQL takes for the statement's: the coordinator's is taken
+	 * again, so that statement_timestamp() is the one statement's in every
+	 * batch of rows (adopt_start_times()).
+	 */
+	if (fragment && GpClusterIsDispatched())
+	{
+		Node	   *times = fragment_mark(queryDesc->plannedstmt, GP_TIMES_MARK);
+
+		if (times != NULL)
+			adopt_start_times(strVal(times));
+	}
+
 	if (fragment)
 		fragment_depth++;
 	PG_TRY();

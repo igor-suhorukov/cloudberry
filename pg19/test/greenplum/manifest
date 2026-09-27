@@ -375,7 +375,7 @@ skip gpdtm_plpgsql  unrecognized configuration parameter "gp_enable_slow_writer_
 skip dtm_retry  canceling statement due to user request
 run  rangefuncs_cdb
 skip sirv_functions  differs: a function's DDL in a segment's slice runs, where Cloudberry refuses it: function cannot execute on a QE slice because it issues a non-SELECT statement
-run  query_finish  planner  under ORCA, its LIMIT 1 over a slice that sleeps on segment 0 does not end the statement early, and it runs past the suite's 60 seconds
+run  query_finish
 skip partial_table  differs: a table whose policy spreads it over more segments than the cluster has is refused ("Its distribution policy spreads it over 10 segments, and the cluster has 3"), where Cloudberry reads it
 run  subselect_gp_indexes
 run  partition_indexing
