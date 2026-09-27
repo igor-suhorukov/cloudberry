@@ -638,6 +638,42 @@ is "through a SQL-language function too" \
    "SELECT count(*) FROM pg_seclabels
       WHERE objname = 's10' AND provider = 'gp' AND label = 'incremental';" "1"
 
+###############################################################################
+echo "11. a query answered from an incremental view (AQUMV)"
+###############################################################################
+# An incremental view is kept up to date by its maintenance, so AQUMV answers
+# from it whatever the bookkeeping's status of it says -- a write of its
+# base table leaves an ordinary view stale, and the query to the table.
+q "CREATE TABLE aq (id int, grp int, amt int);
+   INSERT INTO aq SELECT g, g % 10, g FROM generate_series(1, 2000) g;
+   ANALYZE aq;
+   CREATE MATERIALIZED VIEW aq_incr WITH (gp.incremental) AS
+     SELECT grp, count(*) AS n, sum(amt) AS total FROM aq GROUP BY grp;
+   CREATE MATERIALIZED VIEW aq_plain AS
+     SELECT grp, count(*) AS n, sum(amt) AS total FROM aq GROUP BY grp;
+   ANALYZE aq_incr; ANALYZE aq_plain;
+   INSERT INTO aq VALUES (2001, 1, 5);" > /dev/null
+isl "the bookkeeping has the ordinary view stale after the write" \
+    "SELECT string_agg(mvname || '=' || datastatus::text, ' ' ORDER BY mvname)
+       FROM gp_matview_aux WHERE mvname LIKE 'aq\\_%';" "aq_incr=i aq_plain=i"
+isl "the query is answered from the incremental view all the same" \
+    "SET gp.enable_answer_query_using_materialized_views = on;
+     EXPLAIN (COSTS OFF) SELECT grp, sum(amt), count(*) FROM aq GROUP BY grp;" \
+    "Seq Scan on aq_incr"
+isl "with the answer the table gives" \
+    "SET gp.enable_answer_query_using_materialized_views = on;
+     SELECT sum(amt) FROM aq WHERE grp = 1 GROUP BY grp;" "199205"
+isl "and not from the ordinary one, until it is refreshed" \
+    "DROP MATERIALIZED VIEW aq_incr; SET gp.enable_answer_query_using_materialized_views = on;
+     EXPLAIN (COSTS OFF) SELECT grp, sum(amt), count(*) FROM aq GROUP BY grp;" \
+    "  ->  Seq Scan on aq"
+isl "after which it answers" \
+    "REFRESH MATERIALIZED VIEW aq_plain; ANALYZE aq_plain;
+     SET gp.enable_answer_query_using_materialized_views = on;
+     EXPLAIN (COSTS OFF) SELECT grp, sum(amt), count(*) FROM aq GROUP BY grp;" \
+    "Seq Scan on aq_plain"
+q "DROP MATERIALIZED VIEW aq_plain; DROP TABLE aq;" > /dev/null
+
 echo
 echo "  $pass passed, $fail failed"
 [ "$fail" -eq 0 ]

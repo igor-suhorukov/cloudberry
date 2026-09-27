@@ -76,7 +76,14 @@ On one node (M1):
   tables.  A view over one table, over several, or over a table joined to
   itself is maintained by delta, as are `count`, `sum` and `avg`; what the
   delta cannot express — an outer join, `min`, `max`, TRUNCATE — is
-  recomputed.  A dynamic table refreshes itself through `gp_task`.
+  recomputed.  A dynamic table refreshes itself through `gp_task`.  A
+  query is answered from a materialized view that holds what it asks,
+  where that costs less (`gp.enable_answer_query_using_materialized_views`,
+  Cloudberry's AQUMV), under ORCA too unless `gp.aqumv_under_orca` is off:
+  from a view that is up to date, or incremental.  Which views are, from
+  what was done to their base tables since each REFRESH, is kept as
+  Cloudberry's `gp_matview_aux` and `gp_matview_tables` show it, and a
+  REFRESH of a view that is up to date does nothing.
 - `gp_task` — the task scheduler, run by a background worker, its jobs in
   one database (`gp.task_database`), written there from any other and read
   from any other as Cloudberry's `pg_task` and `pg_task_run_history`, a
@@ -391,7 +398,10 @@ tools:
   statement is over, from the transition tables the segments' triggers kept:
   it computes the deltas and sends each segment those of its own rows of the
   view, which the view is distributed by -- its GROUP BY columns, or every
-  segment for one of a single row (`gp_matview`'s `ivm_cluster.c`);
+  segment for one of a single row (`gp_matview`'s `ivm_cluster.c`).  The
+  coordinator keeps which views are up to date, and answers a query from
+  one; a write through a partitioned table, whose rows the segments route,
+  marks the views of every partition;
 - stock PostGIS on a cluster.  An extension's script runs on every node,
   a query in it each node's own, its tables replicated and the
   coordinator's copy of them emptied (`gp_ddl.c`); the same version of an

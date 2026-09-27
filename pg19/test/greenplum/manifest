@@ -510,8 +510,9 @@ skip run_utility_gpexpand_phase1  gpcheckcat and gppkg are not installed (pg19/g
 run  create_extension_fail
 skip offload_entry_to_qe  a temporary external table is not supported: CREATE EXTERNAL WEB TEMP TABLE -- an external table is a foreign table, which PostgreSQL makes in no temporary schema; and enable_offload_entry_to_qe, which moves the coordinator's work above a Motion to one segment, has nothing to move on the planner's route, whose gathers are the coordinator's
 port ivm_cluster
-skip aqumv  unrecognized configuration parameter "enable_answer_query_using_materialized_views"; relation "gp_matview_aux" does not exist
-skip matview_data  relation "gp_matview_aux" does not exist; current transaction is aborted, commands ignored until end of transaction block
+run  aqumv  planner  it turns optimizer off itself, so both passes would plan it alike, and ORCA's pass, on the planner's pass's clusters, would read the rows the planner's wrote into its external table's demoprot file on each segment too
+port aqumv_plan
+run  matview_data
 skip directory_table  relation "gp_storage_server" does not exist; syntax error at or near "DATA"
 skip motion_socket  differs: its check_motion_sockets() looks up each segment's address, which on this suite's clusters is a socket's directory: socket.gaierror: [Errno -2] Name or service not known
 run  ic_proxy_socket

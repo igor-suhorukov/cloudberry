@@ -32,6 +32,7 @@
 #include "utils/rel.h"
 #include "utils/snapshot.h"
 #include "tcop/utility.h"
+#include "catalog/objectaccess.h"
 
 /*
  * The columns the rewrite adds carry this prefix, and O28 keeps them out of
@@ -171,6 +172,27 @@ extern struct Tuplestorestate *GpIvmRunQuery(Query *query,
 											 struct QueryEnvironment *queryEnv,
 											 TupleDesc *tupdesc_out,
 											 double *ntuples_out);
+
+/* mvaux.c */
+struct QueryDesc;
+struct QueryCompletion;
+extern void GpMvauxRegister(Oid mvoid, Query *viewQuery, bool skipdata);
+extern char GpMvauxStatus(Oid mvoid, bool *has_foreign);
+extern List *GpMvauxViewsOver(List *relids);
+extern void GpMvauxStatementEnd(struct QueryDesc *queryDesc);
+extern bool GpMvauxRefreshNeedless(Oid mvoid);
+extern void GpMvauxRefreshing(Oid mvoid, bool skipdata);
+extern void GpMvauxUtilityEnd(Node *parsetree, struct QueryCompletion *qc);
+extern void GpMvauxObjectAccess(ObjectAccessType access, Oid classId,
+								Oid objectId, int subId);
+extern bool GpMvauxBusy(void);
+
+/* aqumv.c */
+extern bool gp_aqumv_enabled;
+extern bool gp_aqumv_allow_foreign_table;
+extern bool gp_aqumv_under_orca;
+extern void GpAqumvInit(void);
+extern void GpAqumvSkip(bool enter);
 
 /* ivm_cluster.c */
 struct PlannedStmt;

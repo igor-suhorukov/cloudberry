@@ -207,7 +207,7 @@ t1=$(date +%s)
 			debug_resource_group|runaway_detector_activation_percent|\
 			vmem_process_interrupt|explain_memory_verbosity|coredump_on_memerror|\
 			debug_print_slice_table|\
-			enable_offload_entry_to_qe)
+			enable_offload_entry_to_qe|enable_answer_query_using_materialized_views|aqumv_allow_foreign_table)
 				cbname="$short" ;;
 			*) cbname="gp_$short" ;;
 		esac
@@ -221,6 +221,12 @@ t1=$(date +%s)
 	# PATH (below); it runs its queries in the database it is named, which is
 	# regression here.
 	echo 'sed s#^[\\]! \$PG_ABS_BUILDDIR/(mem_quota_util\.py) (.*)--dbname=regress #\\! \1 \2--dbname=regression #'
+	# aqumv orders rows by c2 - c1 - 1, which all but one of them have the
+	# same: which of those comes first is the order the segments' rows reach
+	# the coordinator's sort in, which varies from run to run, where
+	# Cloudberry's Gather Motion merges the segments' sorted rows in one
+	# order.  Compared as the rows they are, atmsort's "-- order none".
+	echo 'sed s#^(select c1, c3 from aqumv_t5 where c1 > 90 order by c2 - c1 - 1 asc;)#\1 -- order none#'
 } > "$WORK/respell"
 respell() { perl "$HERE/../respell.pl" "$WORK/respell" "$@"; }
 

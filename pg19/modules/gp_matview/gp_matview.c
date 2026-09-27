@@ -18,15 +18,17 @@
  * under the License.
  *
  * gp_matview.c
- *	  Incremental materialized views, dynamic tables and AQUMV bookkeeping.
+ *	  Incremental materialized views, dynamic tables, and queries answered
+ *	  from materialized views (AQUMV).
  *
  * Cloudberry sources this module is made of:
  *	  src/backend/optimizer/plan/aqumv.c, catalog/gp_matview_aux.c,
  *	  and the incremental-view code of matview.c and createas.c
  *
  * It carries the incremental views -- on one node, and on a cluster, where
- * the coordinator keeps them up to date (ivm_cluster.c) -- and dynamic
- * tables.  The AQUMV bookkeeping follows; see cloudberry.md, "Milestones".
+ * the coordinator keeps them up to date (ivm_cluster.c) -- dynamic tables,
+ * and answering a query from a materialized view (aqumv.c), with the
+ * bookkeeping of which views are up to date that it reads (mvaux.c).
  *
  *-------------------------------------------------------------------------
  */
@@ -38,6 +40,7 @@
 #include "catalog/objectaccess.h"
 #include "catalog/pg_class.h"
 #include "commands/createas.h"
+#include "commands/tablecmds.h"
 #include "executor/executor.h"
 #include "fmgr.h"
 #include "miscadmin.h"
@@ -65,6 +68,12 @@ static ProcessUtility_hook_type prev_ProcessUtility = NULL;
 static star_expansion_filter_hook_type prev_star_filter = NULL;
 static object_access_hook_type prev_object_access = NULL;
 static ExecutorFinish_hook_type prev_ExecutorFinish = NULL;
+
+/* Cloudberry's gp_enable_refresh_fast_path. */
+static bool gp_enable_refresh_fast_path = true;
+
+/* A REFRESH is running, whose own REFRESH WITH NO DATA gp_core sends. */
+static int	refresh_depth = 0;
 
 /*
  * Was gp_sql loaded before this module, so that its ProcessUtility hook runs
@@ -117,6 +126,9 @@ gp_matview_star_filter(Oid relid)
  * gp_task's table rather than a catalog object, so this stands in for that
  * dependency.  The triggers and the label of an incremental view need nothing
  * here: those are real dependencies and PostgreSQL drops them itself.
+ *
+ * And AQUMV's bookkeeping: a view dropped, a partition dropped, a table
+ * truncated (mvaux.c).
  */
 static void
 gp_matview_object_access(ObjectAccessType access, Oid classId, Oid objectId,
@@ -124,6 +136,8 @@ gp_matview_object_access(ObjectAccessType access, Oid classId, Oid objectId,
 {
 	if (prev_object_access)
 		prev_object_access(access, classId, objectId, subId, arg);
+
+	GpMvauxObjectAccess(access, classId, objectId, subId);
 
 	if (access != OAT_DROP || classId != RelationRelationId || subId != 0)
 		return;
@@ -153,14 +167,18 @@ gp_matview_ExecutorFinish(QueryDesc *queryDesc)
 		standard_ExecutorFinish(queryDesc);
 
 	if (!(queryDesc->estate->es_top_eflags & EXEC_FLAG_EXPLAIN_ONLY))
+	{
 		GpIvmClusterStatementEnd(queryDesc->plannedstmt);
+		GpMvauxStatementEnd(queryDesc);
+	}
 }
 
 /*
  * The run of the rest of the chain, and then, on a cluster's coordinator,
  * the incremental views a utility statement changed brought up to date:
  * those over the table a COPY FROM wrote, and those a TRUNCATE's triggers,
- * which fire here too, kept something for.
+ * which fire here too, kept something for; and the status of the views it
+ * changed, AQUMV's bookkeeping (mvaux.c).
  */
 static void
 run_utility(PlannedStmt *pstmt, const char *queryString, bool readOnlyTree,
@@ -169,6 +187,14 @@ run_utility(PlannedStmt *pstmt, const char *queryString, bool readOnlyTree,
 {
 	Node	   *parsetree = pstmt->utilityStmt;
 	Oid			copied = InvalidOid;
+	QueryCompletion local;
+
+	/* COPY's rows are in the completion, which is asked for where not given */
+	if (IsA(parsetree, CopyStmt) && qc == NULL)
+	{
+		InitializeQueryCompletion(&local);
+		qc = &local;
+	}
 
 	if (prev_ProcessUtility)
 		prev_ProcessUtility(pstmt, queryString, readOnlyTree, context,
@@ -177,10 +203,66 @@ run_utility(PlannedStmt *pstmt, const char *queryString, bool readOnlyTree,
 		standard_ProcessUtility(pstmt, queryString, readOnlyTree, context,
 								params, queryEnv, dest, qc);
 
+	/* not after COMMIT or ROLLBACK, which leave no transaction to ask in */
+	if (!IsTransactionState())
+		return;
 	if (IsA(parsetree, CopyStmt) && ((CopyStmt *) parsetree)->is_from &&
 		((CopyStmt *) parsetree)->relation != NULL)
 		copied = RangeVarGetRelid(((CopyStmt *) parsetree)->relation, NoLock, true);
 	GpIvmClusterUtilityEnd(copied);
+	GpMvauxUtilityEnd(parsetree, qc);
+}
+
+/*
+ * REFRESH MATERIALIZED VIEW: the view's events go, and it is up to date --
+ * or it was already, and Cloudberry's fast path does nothing at all.  Locked
+ * and checked as REFRESH locks and checks it, first.  A REFRESH ...
+ * CONCURRENTLY runs whatever the status says, where Cloudberry's fast path
+ * takes it too once it has found the unique index it needs, which is found
+ * here only as it runs.  gp_core's REFRESH on a cluster sends a REFRESH WITH
+ * NO DATA of its own through here, which is part of this one.  The view's
+ * query is its own, which AQUMV does not answer from another view.
+ */
+static void
+refresh_view(PlannedStmt *pstmt, const char *queryString, bool readOnlyTree,
+			 ProcessUtilityContext context, ParamListInfo params,
+			 QueryEnvironment *queryEnv, DestReceiver *dest, QueryCompletion *qc)
+{
+	RefreshMatViewStmt *stmt = (RefreshMatViewStmt *) pstmt->utilityStmt;
+
+	if (refresh_depth == 0)
+	{
+		LOCKMODE	lockmode = stmt->concurrent ? ExclusiveLock : AccessExclusiveLock;
+		Oid			relid = RangeVarGetRelidExtended(stmt->relation, lockmode, 0,
+													 RangeVarCallbackMaintainsTable,
+													 NULL);
+
+		if (get_rel_relkind(relid) == RELKIND_MATVIEW)
+		{
+			if (gp_enable_refresh_fast_path && !stmt->skipData &&
+				!stmt->concurrent && GpMvauxRefreshNeedless(relid))
+				return;
+			GpMvauxRefreshing(relid, stmt->skipData);
+		}
+	}
+
+	refresh_depth++;
+	GpAqumvSkip(true);
+	PG_TRY();
+	{
+		if (prev_ProcessUtility)
+			prev_ProcessUtility(pstmt, queryString, readOnlyTree, context,
+								params, queryEnv, dest, qc);
+		else
+			standard_ProcessUtility(pstmt, queryString, readOnlyTree, context,
+									params, queryEnv, dest, qc);
+	}
+	PG_FINALLY();
+	{
+		refresh_depth--;
+		GpAqumvSkip(false);
+	}
+	PG_END_TRY();
 }
 
 /*
@@ -291,6 +373,9 @@ gp_matview_ProcessUtility(PlannedStmt *pstmt, const char *queryString,
 	bool		dynamic = false;
 	char	   *schedule = NULL;
 	Query	   *rewritten = NULL;
+	Query	   *view_query;
+	bool		skipdata;
+	bool		existed;
 
 	/*
 	 * On a segment, the statement the coordinator dispatched: whatever this
@@ -342,6 +427,13 @@ gp_matview_ProcessUtility(PlannedStmt *pstmt, const char *queryString,
 		return;
 	}
 
+	if (IsA(parsetree, RefreshMatViewStmt))
+	{
+		refresh_view(pstmt, queryString, readOnlyTree, context, params,
+					 queryEnv, dest, qc);
+		return;
+	}
+
 	if (IsA(parsetree, CreateTableAsStmt))
 	{
 		ctas = (CreateTableAsStmt *) parsetree;
@@ -378,12 +470,22 @@ gp_matview_ProcessUtility(PlannedStmt *pstmt, const char *queryString,
 		}
 	}
 
-	if (!incremental && !dynamic)
+	if (ctas == NULL)
 	{
 		run_utility(pstmt, queryString, readOnlyTree, context, params,
 					queryEnv, dest, qc);
 		return;
 	}
+
+	/*
+	 * What AQUMV's bookkeeping registers a view by: its query as written,
+	 * before an incremental view's is rewritten, and whether it was made
+	 * WITH NO DATA -- asked now, since gp_sql's CREATE on a cluster makes it
+	 * WITH NO DATA and fills it after.
+	 */
+	view_query = (Query *) ctas->into->viewQuery;
+	skipdata = ctas->into->skipData;
+	existed = OidIsValid(RangeVarGetRelid(ctas->into->rel, NoLock, true));
 
 	if (incremental)
 	{
@@ -406,16 +508,29 @@ gp_matview_ProcessUtility(PlannedStmt *pstmt, const char *queryString,
 		add_cluster_distribution(ctas->into, rewritten);
 	}
 
-	if (prev_ProcessUtility)
-		prev_ProcessUtility(pstmt, queryString, readOnlyTree, context,
-							params, queryEnv, dest, qc);
-	else
-		standard_ProcessUtility(pstmt, queryString, readOnlyTree, context,
+	/* the query of CREATE ... AS is its own, which AQUMV does not answer */
+	GpAqumvSkip(true);
+	PG_TRY();
+	{
+		if (prev_ProcessUtility)
+			prev_ProcessUtility(pstmt, queryString, readOnlyTree, context,
 								params, queryEnv, dest, qc);
+		else
+			standard_ProcessUtility(pstmt, queryString, readOnlyTree, context,
+									params, queryEnv, dest, qc);
+	}
+	PG_FINALLY();
+	{
+		GpAqumvSkip(false);
+	}
+	PG_END_TRY();
+
+	if (ctas->objtype != OBJECT_MATVIEW || existed)
+		return;
 
 	/*
 	 * The view exists now, so it can be labelled and its base tables given
-	 * the triggers that keep it up to date.
+	 * the triggers that keep it up to date, and AQUMV may answer from it.
 	 */
 	{
 		Oid			matviewOid = RangeVarGetRelid(ctas->into->rel, NoLock, false);
@@ -427,6 +542,8 @@ gp_matview_ProcessUtility(PlannedStmt *pstmt, const char *queryString,
 		}
 		if (dynamic)
 			GpDynAfterCreate(matviewOid, schedule);
+		if (view_query != NULL)
+			GpMvauxRegister(matviewOid, view_query, skipdata);
 	}
 }
 
@@ -454,6 +571,41 @@ _PG_init(void)
 
 	prev_ExecutorFinish = ExecutorFinish_hook;
 	ExecutorFinish_hook = gp_matview_ExecutorFinish;
+
+	GpAqumvInit();
+
+	DefineCustomBoolVariable("gp.enable_answer_query_using_materialized_views",
+							 "Answer a query from a materialized view that holds what it asks, where that costs less.",
+							 "Cloudberry calls this enable_answer_query_using_materialized_views.",
+							 &gp_aqumv_enabled,
+							 false,
+							 PGC_USERSET,
+							 GUC_EXPLAIN,
+							 NULL, NULL, NULL);
+	DefineCustomBoolVariable("gp.aqumv_allow_foreign_table",
+							 "Answer a query of a foreign table from a materialized view, whose data may be older than the table's.",
+							 "Cloudberry calls this aqumv_allow_foreign_table.",
+							 &gp_aqumv_allow_foreign_table,
+							 false,
+							 PGC_USERSET,
+							 GUC_EXPLAIN,
+							 NULL, NULL, NULL);
+	DefineCustomBoolVariable("gp.aqumv_under_orca",
+							 "Answer a query from a materialized view where ORCA plans it too.",
+							 "Cloudberry answers from a view only where its planner plans the query, ORCA having fallen back; off does the same.",
+							 &gp_aqumv_under_orca,
+							 true,
+							 PGC_USERSET,
+							 GUC_EXPLAIN,
+							 NULL, NULL, NULL);
+	DefineCustomBoolVariable("gp.enable_refresh_fast_path",
+							 "Skip the REFRESH of a materialized view whose data is up to date.",
+							 "Cloudberry calls this gp_enable_refresh_fast_path.",
+							 &gp_enable_refresh_fast_path,
+							 true,
+							 PGC_USERSET,
+							 0,
+							 NULL, NULL, NULL);
 
 	/* gp_sql defines its settings as it loads */
 	gp_sql_inside = GetConfigOption("gp.create_table_random_default_distribution",

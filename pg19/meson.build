@@ -535,7 +535,9 @@ modules = [
                      'modules/gp_matview/ivm_delta.c',
                      'modules/gp_matview/ivm_maintain.c',
                      'modules/gp_matview/ivm_state.c',
-                     'modules/gp_matview/ivm_cluster.c'),
+                     'modules/gp_matview/ivm_cluster.c',
+                     'modules/gp_matview/mvaux.c',
+                     'modules/gp_matview/aqumv.c'),
   },
   {
     # Preloaded: it reads CREATE TABLE and its friends before PostgreSQL does,
