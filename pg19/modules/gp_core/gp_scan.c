@@ -59,7 +59,9 @@
  * WHERE CURRENT OF a cursor, whose plan gathers the table: the cursor's
  * gather says which segment its current row came from and where it is
  * there, and the one row is read from that segment (gather_current_of()),
- * as Cloudberry's QD sends the cursor's position to the QEs.
+ * as Cloudberry's QD sends the cursor's position to the QEs -- in the version
+ * the statement's snapshot sees, an update since the cursor read it followed
+ * (gp_current_tid()), as PostgreSQL's TID scan follows it.
  *
  * Cloudberry sources this file stands in for:
  *	  the Gather Motion over a scan that cdbllize.c and cdbpath.c put above a
@@ -75,7 +77,10 @@
 #include "access/htup_details.h"
 #include "access/sysattr.h"
 #include "access/table.h"
+#include "access/tableam.h"
 #include "catalog/heap.h"
+#include "catalog/namespace.h"
+#include "catalog/objectaddress.h"
 #include "catalog/pg_am.h"
 #include "catalog/pg_class.h"
 #include "catalog/pg_opfamily.h"
@@ -98,7 +103,9 @@
 #include "optimizer/restrictinfo.h"
 #include "parser/parsetree.h"
 #include "rewrite/rewriteManip.h"
+#include "storage/bufmgr.h"
 #include "storage/bufpage.h"
+#include "utils/acl.h"
 #include "utils/array.h"
 #include "utils/builtins.h"
 #include "utils/datum.h"
@@ -107,6 +114,7 @@
 #include "utils/portal.h"
 #include "utils/rel.h"
 #include "utils/ruleutils.h"
+#include "utils/snapmgr.h"
 #include "utils/syscache.h"
 #include "utils/tuplestore.h"
 
@@ -1745,6 +1753,50 @@ gather_current_of(GatherScanState *state, int *content, ItemPointer tid)
 	return true;
 }
 
+PG_FUNCTION_INFO_V1(gp_current_tid);
+
+/*
+ * gp_internal.current_tid(rel, ctid)
+ *		WHERE CURRENT OF, on the segment that holds the cursor's row: the ctid
+ *		of the version of the row at ctid that the statement's snapshot sees,
+ *		following its updates since the cursor read it -- as PostgreSQL's TID
+ *		scan finds a cursor's row (TidNext(), table_tuple_get_latest_tid()).
+ *		A cursor without FOR UPDATE leaves its row free to be updated, and
+ *		the old ctid would find the version the update left behind, which
+ *		the statement's snapshot no longer sees, and no row.  The ctid as it
+ *		is for a table that is not heap's.  The coordinator checked the
+ *		statement's privileges where its own connection asks
+ *		(gather_start()); anyone else needs SELECT on the table, as
+ *		currtid2() does.
+ */
+Datum
+gp_current_tid(PG_FUNCTION_ARGS)
+{
+	Oid			relid = PG_GETARG_OID(0);
+	ItemPointer result = palloc_object(ItemPointerData);
+	Relation	rel;
+
+	ItemPointerCopy(PG_GETARG_ITEMPOINTER(1), result);
+	rel = table_open(relid, AccessShareLock);
+	if (!GpClusterDispatchTrusted() &&
+		pg_class_aclcheck(relid, GetUserId(), ACL_SELECT) != ACLCHECK_OK)
+		aclcheck_error(ACLCHECK_NO_PRIV, get_relkind_objtype(rel->rd_rel->relkind),
+					   RelationGetRelationName(rel));
+
+	if (rel->rd_rel->relkind == RELKIND_RELATION &&
+		rel->rd_rel->relam == HEAP_TABLE_AM_OID &&
+		ItemPointerIsValid(result) &&
+		ItemPointerGetBlockNumber(result) < RelationGetNumberOfBlocks(rel))
+	{
+		TableScanDesc scan = table_beginscan_tid(rel, GetActiveSnapshot());
+
+		table_tuple_get_latest_tid(scan, result);
+		table_endscan(scan);
+	}
+	table_close(rel, AccessShareLock);
+	PG_RETURN_ITEMPOINTER(result);
+}
+
 /*
  * A plan's cost less what the planner charges its gathers for starting --
  * the round trip to each segment, which Cloudberry's cost model has no
@@ -1817,9 +1869,23 @@ gather_start(GatherScanState *state)
 
 		if (!gather_current_of(state, &content, &tid))
 			return false;
-		appendStringInfo(&sql, " WHERE ctid = '(%u,%u)'::pg_catalog.tid%s%s%s",
-						 ItemPointerGetBlockNumber(&tid),
-						 ItemPointerGetOffsetNumber(&tid),
+
+		/*
+		 * The row in the version the statement sees, which an update since
+		 * the cursor read it moved (gp_current_tid()) -- where the database
+		 * has gp_core's extension, and the ctid as the cursor read it where
+		 * it has not.
+		 */
+		if (OidIsValid(get_namespace_oid("gp_internal", true)))
+			appendStringInfo(&sql, " WHERE ctid = gp_internal.current_tid(%u::pg_catalog.oid, '(%u,%u)'::pg_catalog.tid)",
+							 RelationGetRelid(state->css.ss.ss_currentRelation),
+							 ItemPointerGetBlockNumber(&tid),
+							 ItemPointerGetOffsetNumber(&tid));
+		else
+			appendStringInfo(&sql, " WHERE ctid = '(%u,%u)'::pg_catalog.tid",
+							 ItemPointerGetBlockNumber(&tid),
+							 ItemPointerGetOffsetNumber(&tid));
+		appendStringInfo(&sql, "%s%s%s",
 						 state->where[0] != '\0' ? " AND " : "",
 						 state->where, state->locking);
 		state->gather = GpGatherStartOn(sql.data, desc, content);

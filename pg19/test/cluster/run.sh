@@ -1320,6 +1320,25 @@ a\b|\N' ] && [ "$(cat "$ROOT/ce_prog.txt" 2>&1)" = "to a program" ] \
 		*) notok "WHERE CURRENT OF" "$out / $out2 / $out3" ;;
 	esac
 
+	# A cursor without FOR UPDATE leaves its row free: another transaction
+	# updates it after the FETCH, and WHERE CURRENT OF finds its new version,
+	# as PostgreSQL's TID scan follows the row's updates -- the old ctid alone
+	# finds the version the update left, which the statement no longer sees.
+	for stmt in "UPDATE cur SET b = b || '+cur' WHERE CURRENT OF c4" "DELETE FROM cur WHERE CURRENT OF c4"; do
+		printf '%s\n' "BEGIN;" "DECLARE c4 CURSOR FOR SELECT a FROM cur WHERE a = 7;" "FETCH 1 FROM c4;" \
+			"SELECT pg_sleep(2);" "$stmt;" "COMMIT;" | qf 0 > "$ROOT/cur4.out" 2>&1 &
+		holder=$!
+		sleep 0.7
+		q 0 "UPDATE cur SET b = b || '+other' WHERE a = 7;" >/dev/null
+		wait "$holder"
+		out=$(q 0 "SELECT coalesce(string_agg(b, ','), 'none') FROM cur WHERE a = 7;")
+		case "$stmt|$out" in
+			UPDATE*"|c+other+cur"|DELETE*"|none")
+				ok "${stmt%% *} WHERE CURRENT OF finds the cursor's row in the version another transaction updated since the FETCH" ;;
+			*) notok "${stmt%% *} WHERE CURRENT OF after a concurrent update" "$(tr '\n' ' ' < "$ROOT/cur4.out") / $out" ;;
+		esac
+	done
+
 	# A partial table: its rows on the first so many segments, as Cloudberry's
 	# gp_debug_numsegments makes one (gp_sql's distribution.c), and read,
 	# written and counted there alone.

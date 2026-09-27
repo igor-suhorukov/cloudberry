@@ -148,6 +148,19 @@ CREATE TABLE gp_internal.distributed_log (
 CREATE INDEX distributed_log_gxid ON gp_internal.distributed_log (gxid);
 
 /*
+ * WHERE CURRENT OF a cursor whose plan gathered the table (gp_scan.c): the
+ * row the cursor is on, at the ctid the cursor read it at, is read again on
+ * its segment under the statement's snapshot -- in the version that snapshot
+ * sees, following the row's updates since, as PostgreSQL's TID scan does
+ * for WHERE CURRENT OF (TidNext()).  The ctid itself for a table that is not
+ * heap.  STABLE, so that the segment's planner scans by the TID it returns.
+ */
+CREATE FUNCTION gp_internal.current_tid(rel oid, ctid tid)
+RETURNS tid
+AS 'MODULE_PATHNAME', 'gp_current_tid'
+LANGUAGE C STRICT STABLE;
+
+/*
  * Whether this node's distributed transaction recovery has reached every node
  * since the server started: Cloudberry's "DTM recovered", which its pg_ctl
  * waits for on a coordinator, and gpstart polls for.  True on a node that
