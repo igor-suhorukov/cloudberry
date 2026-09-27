@@ -1839,21 +1839,26 @@ $((n + 1))" ] && ok "a serial column's values, taken on the segments from the co
 	[ "$left" = 0 ] && ok "... and the segments keep none of the shared CTEs' files after" \
 		|| notok "the shared CTEs' files, left on the segments" "$(ls -d "$(datadir 1)"/base/pgsql_tmp/* "$(datadir 2)"/base/pgsql_tmp/* 2>/dev/null | tr '\n' ' ')"
 	# gp_core relays a slice at a time with gp.interconnect_type = relay, and
-	# a slice that reads a temporary table: such a plan is the planner's.
-	shared_relayed() {			# shared_relayed <what> <setup> <table>
+	# a slice that reads a temporary table but the one its Gather sends,
+	# which the writer runs: a plan whose shared CTE is in a slice it relays
+	# is the planner's; one that reads a temporary table only where the
+	# writer runs is ORCA's.
+	shared_relayed() {			# shared_relayed <what> <setup> <table> <ORCA's or not>
 		local out
 		out=$(printf '%s\n' "$2" "SET gp.optimizer_trace_fallback = on;" \
 			"WITH c AS (SELECT a, b FROM $3 WHERE b % 3 = 0) SELECT count(*), sum(c1.b) FROM c c1 JOIN c c2 ON c1.b = c2.a;" | qf 0 | tr '\n' '|')
-		case "$out" in
-			*"a CTE read in more than one slice, whose slices cannot all run at once"*"1122|57222|"*)
+		case "$4:$out" in
+			relayed:*"a CTE read in more than one slice, whose slices cannot all run at once"*"1122|57222|"*)
 				ok "$1" ;;
+			orca:*"GPORCA failed"*) notok "$1" "$out" ;;
+			orca:*"1122|57222|"*) ok "$1" ;;
 			*) notok "$1" "$out" ;;
 		esac
 	}
 	shared_relayed "... left to the planner with gp.interconnect_type = relay" \
-		"SET gp.interconnect_type = relay;" sh
-	shared_relayed "... and where it reads a temporary table" \
-		"CREATE TEMP TABLE sht AS SELECT * FROM sh DISTRIBUTED BY (a); ANALYZE sht;" sht
+		"SET gp.interconnect_type = relay;" sh relayed
+	shared_relayed "... and ORCA's where it reads a temporary table in the writer's own slice" \
+		"CREATE TEMP TABLE sht AS SELECT * FROM sh DISTRIBUTED BY (a); ANALYZE sht;" sht orca
 
 	# A CTE the coordinator's slice produces -- an aggregate of gathered
 	# rows, a LIMIT of them -- is PostgreSQL's, in the coordinator's process,

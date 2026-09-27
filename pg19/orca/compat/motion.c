@@ -50,6 +50,7 @@
 #include "catalog/pg_class.h"
 #include "catalog/pg_type.h"
 #include "parser/parse_func.h"
+#include "parser/parsetree.h"
 #include "storage/lmgr.h"
 #include "utils/fmgroids.h"
 #include "utils/rel.h"
@@ -92,7 +93,9 @@ typedef struct motion_check_context
 	List	  **callers;		/* each subplan's calling slice; see gp_motion.h */
 	List	  **shares;			/* each shared CTE's id and slices, IntLists */
 	List	  **producers;		/* and each one's producer, a Shared Scan */
-	bool	   *from_coordinator;	/* a fragment the coordinator sends */
+	List	   *rtable;			/* the statement's */
+	Bitmapset **relayed;		/* slices gp_core relays: see relayed_slices() */
+	List	  **parents;		/* (slice, the slice that receives it), IntLists */
 } motion_check_context;
 
 /* A subplan no SubPlan the walk met calls. */
@@ -245,8 +248,6 @@ motion_check_walker(Node *node, void *arg)
 		sub.slice = api->motion_slice(plan);
 		sub.on_coordinator = !gather &&
 			api->motion_segment(plan) == GP_MOTION_FROM_COORDINATOR;
-		if (sub.on_coordinator)
-			*ctx->from_coordinator = true;
 		if (!ctx->in_fragment || gather)
 			sub.top = plan;
 		if (motion_check_walker((Node *) plan->lefttree, &sub))
@@ -302,6 +303,11 @@ motion_check_walker(Node *node, void *arg)
 		 */
 		if (!gather && ctx->in_fragment && api->version_minor >= 5)
 			api->motion_set_parent(plan, ctx->slice);
+		if (!gather && ctx->in_fragment)
+			*ctx->parents = lappend(*ctx->parents,
+									list_make2_int(api->motion_slice(plan), ctx->slice));
+		if (sub.on_coordinator)
+			*ctx->relayed = bms_add_member(*ctx->relayed, api->motion_slice(plan));
 
 		/* Its own expressions are evaluated where it receives. */
 		return motion_check_walker((Node *) plan->targetlist, ctx) ||
@@ -336,6 +342,25 @@ motion_check_walker(Node *node, void *arg)
 	if (IsA(node, SubPlan))
 		note_subplan_caller(ctx, ((SubPlan *) node)->plan_id,
 							ctx->in_fragment ? ctx->slice : GP_SUBPLAN_COORDINATOR);
+
+	/*
+	 * A temporary table only the session's own backend on a segment -- the
+	 * writer -- can read: a slice that scans one is relayed, but for the
+	 * one its Gather sends, which the writer runs (gp_motion.c,
+	 * temp_scan_slices()).
+	 */
+	if (ctx->in_fragment && ctx->top != NULL &&
+		nodeTag(node) >= T_SeqScan && nodeTag(node) <= T_CustomScan &&
+		((Scan *) node)->scanrelid > 0 &&
+		((Scan *) node)->scanrelid <= list_length(ctx->rtable))
+	{
+		RangeTblEntry *rte = rt_fetch(((Scan *) node)->scanrelid, ctx->rtable);
+
+		if (rte->rtekind == RTE_RELATION &&
+			get_rel_persistence(rte->relid) == RELPERSISTENCE_TEMP &&
+			ctx->slice != cb_core_api()->motion_slice(ctx->top))
+			*ctx->relayed = bms_add_member(*ctx->relayed, ctx->slice);
+	}
 
 	if (ctx->in_fragment)
 	{
@@ -544,7 +569,8 @@ gp_orca_check_motions(PlannedStmt *stmt)
 	List	   *callers = NIL;
 	List	   *shares = NIL;
 	List	   *producers = NIL;
-	bool		from_coordinator = false;
+	Bitmapset  *relayed = NULL;
+	List	   *parents = NIL;
 	ListCell   *lc;
 
 	exec_init_plan_tree_base(&ctx.base, stmt);
@@ -564,7 +590,9 @@ gp_orca_check_motions(PlannedStmt *stmt)
 	ctx.callers = &callers;
 	ctx.shares = &shares;
 	ctx.producers = &producers;
-	ctx.from_coordinator = &from_coordinator;
+	ctx.rtable = stmt->rtable;
+	ctx.relayed = &relayed;
+	ctx.parents = &parents;
 
 	(void) motion_check_walker((Node *) stmt->planTree, &ctx);
 	if (ctx.problem != GP_ORCA_MOTION_OK)
@@ -576,24 +604,41 @@ gp_orca_check_motions(PlannedStmt *stmt)
 	 * which the Gathers are told the slices of.  One read in more than one
 	 * slice has them run at once, a consumer waiting for its producer; gp_core
 	 * relays slices one at a time -- every one with gp.interconnect_type =
-	 * relay, and otherwise one that scans a temporary table, one the
-	 * coordinator sends and those below them (gp_motion.c, stream_plan()) --
-	 * so such a plan is left to the planner, and a Gather that would relay
-	 * one all the same refuses rather than wait.
+	 * relay, and otherwise one that scans a temporary table but the one its
+	 * Gather sends, which the writer runs, one the coordinator sends and
+	 * those below them (gp_motion.c, stream_plan()) -- so a plan with such a
+	 * CTE in a slice gp_core would relay is left to the planner, and a
+	 * Gather that would relay one all the same refuses rather than wait.
 	 */
 	if (shares != NIL)
 	{
 		const char *ic = GetConfigOption("gp.interconnect_type", true, false);
-		bool		across = false;
-		bool		temp = false;
+		bool		relay_all = ic != NULL && strcmp(ic, "relay") == 0;
+		bool		more;
 		List	   *slices = NIL;
+
+		/* a slice below a relayed one is relayed before it */
+		do
+		{
+			more = false;
+			foreach_ptr(List, pair, parents)
+				if (bms_is_member(lsecond_int(pair), relayed) &&
+					!bms_is_member(linitial_int(pair), relayed))
+				{
+					relayed = bms_add_member(relayed, linitial_int(pair));
+					more = true;
+				}
+		} while (more);
 
 		foreach(lc, shares)
 		{
 			List	   *share = list_delete_first(list_copy((List *) lfirst(lc)));
 
-			across |= list_length(share) > 1;
 			slices = lappend(slices, share);
+			if (list_length(share) > 1)
+				foreach_int(slice, share)
+					if (relay_all || bms_is_member(slice, relayed))
+						return GP_ORCA_MOTION_SHARE;
 
 			/* its producer runs when its slice is done, if it has not */
 			if (list_length(share) > 1)
@@ -609,17 +654,6 @@ gp_orca_check_motions(PlannedStmt *stmt)
 						gp_orca_set_share_across(producer);
 				}
 		}
-		foreach(lc, stmt->rtable)
-		{
-			RangeTblEntry *rte = lfirst_node(RangeTblEntry, lc);
-
-			if (rte->rtekind == RTE_RELATION &&
-				get_rel_persistence(rte->relid) == RELPERSISTENCE_TEMP)
-				temp = true;
-		}
-		if (across &&
-			(temp || from_coordinator || (ic != NULL && strcmp(ic, "relay") == 0)))
-			return GP_ORCA_MOTION_SHARE;
 		stmt->extension_state = lappend(stmt->extension_state,
 										makeDefElem(pstrdup(GP_SHARE_SLICES),
 													(Node *) slices, -1));
