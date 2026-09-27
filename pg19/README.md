@@ -581,9 +581,14 @@ What Cloudberry's tests asked for next (2026-09-27), in `gp_core`,
   of PostgreSQL's in what it runs for the coordinator, whole at its first
   FETCH, its workers in the writer's lock group — a gather's query of the
   planner's route that the coordinator reads to its end, which the segment
-  plans with parallel plans allowed; a reader's slice runs without them, a
-  member of a lock group leading none of its own; `max_worker_processes` is
-  the cluster's to size (`modules/gp_core/gp_parallel.c`);
+  plans with parallel plans allowed, and ORCA's fragments of the writer,
+  which the ORCA module gives Gathers where PostgreSQL's costs say they pay:
+  over a large sequential scan, a hash join whose outer side's scan the
+  participants share and whose inner side each hashes, or an aggregate in
+  three stages (`orca/parallel.c`); a reader's slice runs without them, a
+  member of a lock group leading none of its own;
+  EXPLAIN ANALYZE says "Workers Launched"; `max_worker_processes` is the
+  cluster's to size (`modules/gp_core/gp_parallel.c`);
 - and the server built with LDAP, for `pg_hba.conf`'s ldap lines.
 
 The transport and encryption modules — `interconnect`, `udp2`, `gp_tde` —

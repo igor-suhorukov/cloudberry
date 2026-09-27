@@ -4831,7 +4831,9 @@ echo "20. parallelism within a segment"
 # gp_parallel.c: with gp.enable_parallel on, a segment's writer runs a Gather
 # of PostgreSQL's in what it runs for the coordinator -- a gather's query of
 # the planner's route that the coordinator reads to its end, planned there
-# with parallel plans allowed -- whole at its first FETCH.  The evidence is each
+# with parallel plans allowed, or a fragment of ORCA's that the ORCA module
+# gave Gathers (orca/parallel.c) -- whole at its first FETCH; and a reader,
+# a member of the writer's lock group, starts none.  The evidence is each
 # segment's own count of the workers it launched (pg_stat_database), which a
 # session's segment backends report as they end with it.
 if [ "$started" -eq 1 ]; then
@@ -4905,6 +4907,42 @@ if [ "$started" -eq 1 ]; then
 		par_same "the planner's route: a gather of $t read whole on each segment, by the writer and its workers" \
 			off "SELECT count(*), sum(b) FROM $t WHERE b % 7 = 0;"
 	done
+	for t in ph pa pc pp; do
+		par_same "ORCA: a Gather over the scan of $t in the writer's slice, below the Gather Motion" \
+			on "SELECT count(*), sum(b) FROM $t WHERE b % 7 = 0;" \
+			"*Gather Motion 2:1  (slice1; segments: 2)*Gather*Workers Planned: 2*Parallel Seq Scan on $t*"
+	done
+	par_same "ORCA: the rows of a scan in the writer's slice, through a Gather" \
+		on "SELECT a, b FROM ph WHERE b % 7 = 0 ORDER BY a;" \
+		"*Gather Motion*Gather*Workers Planned: 2*Parallel Seq Scan on ph*"
+	par_same "ORCA: an aggregate in three stages, each participant's, the segment's and the coordinator's, numeric states serialized between them" \
+		on "SELECT count(*), sum(b::numeric), avg(b::numeric), max(b) FROM ph WHERE b % 7 = 0;" \
+		"*Finalize Aggregate*Gather Motion*Partial Aggregate*Gather*Workers Planned: 2*Partial Aggregate*Parallel Seq Scan on ph*"
+	par_same "ORCA: a join on the distribution key split among the participants, the outer side's scan shared, the inner side's hashed by each" \
+		on "SELECT count(*) FROM ph JOIN pa USING (a) WHERE ph.b % 7 = 0;" \
+		"*Gather*Workers Planned: 2*Partial Aggregate*Hash Join*Parallel Seq Scan on pa*Hash*Seq Scan on ph*"
+
+	out=$(q 0 "$PAR EXPLAIN (ANALYZE, COSTS OFF, TIMING OFF, SUMMARY OFF) SELECT count(*) FROM ph WHERE b % 7 = 0;" |
+		grep -c "Workers Launched: 2")
+	[ "$out" = "1" ] && ok "EXPLAIN ANALYZE says what the segments' Gather launched: Workers Launched: 2" \
+		|| notok "EXPLAIN ANALYZE's Workers Launched" "$out"
+
+	# A reader's slice: the scan below a Redistribute is a reader's, which
+	# is a member of the writer's lock group and starts no workers.
+	want=$(q 0 "SET gp.optimizer = off; SELECT b % 10, count(*) FROM ph GROUP BY 1 ORDER BY 1;")
+	sleep 1
+	before=$(par_launched)
+	got=$(q 0 "$PAR SELECT b % 10, count(*) FROM ph GROUP BY 1 ORDER BY 1;")
+	plan=$(q 0 "$PAR EXPLAIN (COSTS OFF) SELECT b % 10, count(*) FROM ph GROUP BY 1 ORDER BY 1;")
+	sleep 1
+	after=$(par_launched)
+	if [ -n "$want" ] && [ "$got" = "$want" ] && [ "$after" = "$before" ] &&
+		[[ "$plan" == *"Redistribute Motion 2:2"* ]] && [[ "$plan" != *"Workers Planned"* ]]; then
+		ok "ORCA: a scan in a reader's slice, below a Redistribute, has no Gather and starts no workers"
+	else
+		notok "a reader's slice without workers" "[$got] [$want] $before -> $after $plan"
+	fi
+
 	# Not read whole, not run whole: a gather below a LIMIT the segments
 	# are not sent, and a cursor's -- in batches, as before, with no workers.
 	sleep 1
@@ -4919,11 +4957,24 @@ if [ "$started" -eq 1 ]; then
 		&& ok "the planner's route: a gather below a LIMIT not sent, and a cursor's, are fetched in batches, with no workers" \
 		|| notok "gathers not read whole" "$out / $out2 / $before -> $after"
 
+	# A plan made with workers, carried out without them: a prepared
+	# statement's cached plan, gp.enable_parallel turned off since -- the
+	# writer takes its fragment's Gathers out, and launches none.
+	want=$(q 0 "SELECT count(*), sum(b) FROM ph WHERE b % 7 = 0;")
+	out=$(printf '%s\n' "$PAR" "PREPARE pps AS SELECT count(*), sum(b) FROM ph WHERE b % 7 = 0;" \
+		"EXPLAIN (ANALYZE, COSTS OFF, TIMING OFF, SUMMARY OFF) EXECUTE pps;" \
+		"SET gp.enable_parallel = off;" \
+		"EXPLAIN (ANALYZE, COSTS OFF, TIMING OFF, SUMMARY OFF) EXECUTE pps;" \
+		"EXECUTE pps;" | qf 0 | grep -E "Workers Launched|^[0-9]" | tr -s ' ' | tr '\n' '/')
+	[ -n "$want" ] && [ "$out" = " Workers Launched: 2/ Workers Launched: 0/$want/" ] \
+		&& ok "ORCA: a cached plan with Gathers, gp.enable_parallel off since, runs without them" \
+		|| notok "a cached plan's Gathers" "$want / $out"
+
 	# The transaction's own work, seen by the workers: its rows written
 	# earlier, and a combo command id of its own rows it updated -- heap,
 	# AO and PAX, PAX's deletes too -- and gp.dtx_xid reported by the
 	# writer, not its workers, which could set no setting.
-	for opt in off; do
+	for opt in off on; do
 		before=$(par_launched)
 		out=$(printf '%s\n' "SET gp.optimizer = $opt;" "$PAR" "BEGIN;" \
 			"INSERT INTO ph SELECT i, 7 FROM generate_series(300001, 300100) i;" \
@@ -4973,11 +5024,12 @@ if [ "$started" -eq 1 ]; then
 		par_reader=$!
 		par_await ready
 	}
-	# ANALYZE before each: a VACUUM of a distributed table while a snapshot
-	# still sees what it deleted leaves the coordinator's reltuples 0.
+	# ANALYZE before each, for ORCA's costs: a VACUUM of a distributed table
+	# while a snapshot still sees what it deleted leaves the coordinator's
+	# reltuples 0.
 	q 0 "CREATE TABLE pd (a int, b int) WITH (parallel_workers = 2) DISTRIBUTED BY (a);
 		 INSERT INTO pd SELECT i, i FROM generate_series(1, 100000) i;" >/dev/null
-	for opt in off; do
+	for opt in off on; do
 		q 0 "ANALYZE pd;" >/dev/null
 		want=$(q 0 "SELECT count(*), sum(b) FROM pd WHERE b % 7 = 0;")
 		before=$(par_launched)
@@ -5023,7 +5075,7 @@ if [ "$started" -eq 1 ]; then
 	# it has committed, so that the reader's snapshot has it in progress
 	# rather than beyond its xmax.  Without the xmin, an assert-enabled
 	# server's worker fails in SubTransGetTopmostTransaction().
-	for opt in off; do
+	for opt in off on; do
 		q 0 "ANALYZE pd;" >/dev/null
 		want=$(q 0 "SELECT count(*), sum(b) FROM pd WHERE b % 7 = 0;")
 		before=$(par_launched)

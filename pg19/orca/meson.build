@@ -193,6 +193,7 @@ orca_transl_sources = files(
   'lockrows.c',
   'merge.c',
   'orca.c',
+  'parallel.c',
   'orca_api.cpp',
   'orca_probe.cpp',
   'postgis.c',

@@ -66,7 +66,7 @@ gpmgmt                 -        154   MEM=1600
 # they are loaded, in the tmpfs, 10.9 GB at most.
 tpc                    -         90   MEM=12000
 singlenode             planner   26   PASSES=planner MEM=3500
-cluster                -        100   MEM=600
+cluster                -        115   MEM=700
 orca                   -         54   MEM=300
 fts                    -         55   MEM=1000
 postgis_cluster        -         16   MEM=1700

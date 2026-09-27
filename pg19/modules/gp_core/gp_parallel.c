@@ -49,6 +49,15 @@
  *							plans allowed, and PostgreSQL's costs decide
  *							whether a Gather pays.
  *
+ *	 ORCA's					the fragment of a Gather Motion, which the ORCA
+ *							module gave Gathers on the coordinator, where the
+ *							coordinator reads the Motion to its end -- over
+ *							its large scans, the hash joins above them and
+ *							the aggregates it splits in three stages
+ *							(orca/parallel.c): it runs in parallel mode in
+ *							the writer, and in a reader, or for a statement
+ *							that cannot, without its Gathers.
+ *
  * The settings are Cloudberry's: gp.enable_parallel, off by default as
  * Cloudberry's is, says the segments may start workers for this session's
  * statements, and PostgreSQL's own -- max_parallel_workers_per_gather and
@@ -74,6 +83,7 @@
 #include "nodes/makefuncs.h"
 #include "optimizer/cost.h"
 #include "optimizer/planner.h"
+#include "storage/proc.h"
 #include "tcop/pquery.h"
 #include "tcop/tcopprot.h"
 #include "utils/guc.h"
@@ -83,8 +93,10 @@
 
 #include "gp_cluster.h"
 #include "gp_core_api.h"
+#include "gp_motion.h"
 #include "gp_parallel.h"
 #include "gp_scan.h"
+#include "gp_share.h"
 
 /* Cloudberry's enable_parallel */
 static bool enable_parallel = false;
@@ -376,11 +388,79 @@ gather_read_whole(const char *query_string)
 }
 
 /*
+ * A fragment's Gathers taken out: each replaced by what is below it, whose
+ * columns a Gather passes on as they are (orca/parallel.c), run whole by its
+ * one process -- the scan that drove it no longer parallel-aware, and an
+ * aggregate's middle stage combining the one state below it.
+ */
+static Plan *
+strip_gathers(Plan *plan)
+{
+	if (plan == NULL)
+		return NULL;
+	check_stack_depth();
+	if (IsA(plan, Gather))
+	{
+		for (Plan *below = plan->lefttree; below != NULL; below = below->lefttree)
+			below->parallel_aware = false;
+		return strip_gathers(plan->lefttree);
+	}
+	plan->lefttree = strip_gathers(plan->lefttree);
+	plan->righttree = strip_gathers(plan->righttree);
+	switch (nodeTag(plan))
+	{
+		case T_Append:
+			{
+				ListCell   *lc;
+
+				foreach(lc, ((Append *) plan)->appendplans)
+					lfirst(lc) = strip_gathers((Plan *) lfirst(lc));
+				break;
+			}
+		case T_SubqueryScan:
+			((SubqueryScan *) plan)->subplan =
+				strip_gathers(((SubqueryScan *) plan)->subplan);
+			break;
+		default:
+			break;
+	}
+	return plan;
+}
+
+/*
+ * A fragment of ORCA's with Gathers in it (orca/parallel.c).  The writer
+ * runs it in parallel mode, whole at its first FETCH, where the session
+ * still asks for workers: not a lock group's member, which cannot lead a
+ * group of its own, and a SELECT with no data-modifying CTE.  A worker
+ * opens each relation with its range table's lock mode, and asserts that
+ * it holds that lock (execUtils.c): a relation ORCA left without one is
+ * read in AccessShareLock, as the writer locks it (gp_motion.c).  Anywhere
+ * else the Gathers go.
+ */
+static void
+fragment_gathers(PlannedStmt *stmt)
+{
+	if (GpParallelEnabled() && !GpShareIsReader() &&
+		(MyProc->lockGroupLeader == NULL || MyProc->lockGroupLeader == MyProc) &&
+		stmt->commandType == CMD_SELECT && !stmt->hasModifyingCTE)
+	{
+		foreach_node(RangeTblEntry, rte, stmt->rtable)
+			if (rte->rtekind == RTE_RELATION && rte->rellockmode == NoLock)
+				rte->rellockmode = AccessShareLock;
+		stmt->parallelModeNeeded = true;
+		mark_run_whole(stmt);
+	}
+	else
+		stmt->planTree = strip_gathers(stmt->planTree);
+}
+
+/*
  * A gather's query read whole is planned as a statement run whole is:
  * parallel plans allowed, and for all of its rows, not the first ones a
  * cursor is planned for (CURSOR_OPT_FAST_PLAN).  A plan with a Gather runs
  * whole at its first FETCH.  A reader, which plans none (gp_share.c), is
- * never sent one.
+ * never sent one.  And a fragment the coordinator sends (gp_motion.c's
+ * fragment_plan()) keeps its Gathers where it may.
  */
 static PlannedStmt *
 parallel_planner(Query *parse, const char *query_string, int cursorOptions,
@@ -406,6 +486,9 @@ parallel_planner(Query *parse, const char *query_string, int cursorOptions,
 
 	if (whole && stmt->parallelModeNeeded && plan_has_gather(stmt->planTree))
 		mark_run_whole(stmt);
+	else if (GpClusterIsDispatched() && GpMotionIsFragment(stmt) &&
+			 plan_has_gather(stmt->planTree))
+		fragment_gathers(stmt);
 	return stmt;
 }
 

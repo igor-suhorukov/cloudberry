@@ -97,6 +97,7 @@
 #include "gp_orca_guc.h"
 #include "gp_orca_lockrows.h"
 #include "gp_orca_merge.h"
+#include "gp_orca_parallel.h"
 #include "gp_orca_postgis.h"
 #include "optimizer/orca.h"
 #include "optimizer/walkers.h"
@@ -1713,6 +1714,9 @@ optimize_query(Query *parse, int cursorOptions, ParamListInfo boundParams,
 			return NULL;
 		}
 	}
+
+	/* Gathers in the fragments a segment's writer runs (parallel.c) */
+	GpOrcaParallelize(result, parse, cursorOptions);
 
 	/*
 	 * For plan cache invalidation purposes, extract the OIDs of all
