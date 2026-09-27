@@ -1,0 +1,27 @@
+@@
+-                                          QUERY PLAN                                          
+-----------------------------------------------------------------------------------------------
+-                     ->  Seq Scan on t_rand_test_rcte  (cost=0.00..1.01 rows=1 width=4)
+-               ->  Gather Motion 3:1  (slice2; segments: 3)  (cost=0.00..1.05 rows=3 width=4)
+-         ->  Hash  (cost=1.05..1.05 rows=3 width=4)
+-         ->  Seq Scan on t_rep_test_rcte  (cost=0.00..1.01 rows=1 width=4)
+-         ->  WorkTable Scan on the_cte_here  (cost=0.00..0.20 rows=10 width=4)
+-         Hash Cond: (the_cte_here.n = t_rand_test_rcte.c)
+-   ->  Gather Motion 1:1  (slice1; segments: 1)  (cost=1.01..1.01 rows=1 width=4)
+-   ->  Hash Join  (cost=1.09..1.36 rows=3 width=4)
+- Recursive Union  (cost=1.01..14.93 rows=34 width=4)
+-(10 rows)
++                                                           QUERY PLAN                                                           
++--------------------------------------------------------------------------------------------------------------------------------
++                             Segments: 3
++                       ->  Gather Motion 3:1 on t_rand_test_rcte  (slice2; segments: 3)  (cost=1000.00..1000.33 rows=3 width=4)
++                 ->  Hash  (cost=1000.33..1000.33 rows=3 width=4)
++                 ->  WorkTable Scan on the_cte_here the_cte_here_1  (cost=0.00..0.20 rows=10 width=4)
++                 Hash Cond: (the_cte_here_1.n = t_rand_test_rcte.c)
++                 Segment: N
++           ->  Gather Motion 1:1 on t_rep_test_rcte  (slice1; segments: 1)  (cost=1000.00..1000.11 rows=1 width=4)
++           ->  Hash Join  (cost=1000.37..1000.64 rows=3 width=4)
++     ->  Recursive Union  (cost=1000.00..11006.85 rows=31 width=4)
++   CTE the_cte_here
++ CTE Scan on the_cte_here  (cost=11006.85..11007.47 rows=31 width=4)
++(12 rows)

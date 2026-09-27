@@ -79,9 +79,6 @@ The reasons, by what brings them, and then each test:
   Cloudberry's REVOKE says "no privileges could be revoked" when it revokes
   nothing, which PostgreSQL's does not, on any object.
 
-  gp_recursive_cte: a setting the port has no counterpart of.  Recursive CTEs
-  are always on, as in PostgreSQL.
-
   What Cloudberry's tests make with PL/Python -- count_operator(),
   find_operator(), qx_count_operator() -- counts the nodes of a plan, and so
   makes a plan an answer.  The expected output is Cloudberry's single-node
@@ -158,8 +155,7 @@ gp_gin_index  the complex type, which Cloudberry's own earlier tests make;
   and the index wowidx and the rows of test_tsvector that PostgreSQL 19's
   tsearch test, which runs before it here, leaves behind (two counts one and
   three higher).
-gp_recursive_cte  gp_recursive_cte, whose "off" Cloudberry's test expects to
-  refuse a recursive CTE, and a plan gpdiff.pl does not take for one, which is
+gp_recursive_cte  a plan gpdiff.pl does not take for one, which is
   PostgreSQL 19's planner's.
 gpcopy  A backslash before a line's end, which Cloudberry's COPY ends the
   line at and PostgreSQL's reads as an escaped newline; a newline of another

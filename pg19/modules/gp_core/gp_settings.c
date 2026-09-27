@@ -44,6 +44,8 @@
  *	 gp.enable_groupagg					 the planner's sorted grouping
  *	 gp.use_legacy_hashops				 a new key hashed with the legacy
  *										 cdbhash (gp_legacyhash.c)
+ *	 gp.recursive_cte					 WITH RECURSIVE, refused when off
+ *										 (parse_cte.c)
  *
  * And those it accepts and has nothing to apply to yet, each for a reason
  * that says when it will: the planner's own MPP plans (Route B, decided at
@@ -69,8 +71,10 @@
 #include "executor/executor.h"
 #include "miscadmin.h"
 #include "nodes/makefuncs.h"
+#include "nodes/nodeFuncs.h"
 #include "nodes/pathnodes.h"
 #include "optimizer/planner.h"
+#include "parser/analyze.h"
 #include "parser/parse_node.h"
 #include "parser/parsetree.h"
 #include "tcop/dest.h"
@@ -171,6 +175,7 @@ check_statement_mem(int *newval, void **extra, GucSource source)
 #define ROUTE_B		" Accepted for Cloudberry's scripts: the planner here makes none of Cloudberry's multi-phase or motion plans, so it has nothing to apply this to until Route B (M7)."
 
 static create_upper_paths_hook_type prev_create_upper_paths = NULL;
+static post_parse_analyze_hook_type prev_post_parse_analyze = NULL;
 static ExecutorStart_hook_type prev_executor_start = NULL;
 static ExecutorEnd_hook_type prev_executor_end = NULL;
 static ProcessUtility_hook_type prev_ProcessUtility = NULL;
@@ -622,6 +627,62 @@ settings_upper_paths(PlannerInfo *root, UpperRelationKind stage,
 }
 
 /* ------------------------------------------------------------------------- */
+/* gp.recursive_cte                                                          */
+/* ------------------------------------------------------------------------- */
+
+/*
+ * Cloudberry's gp_recursive_cte: on, WITH RECURSIVE is taken; off, it is
+ * refused as the parser analyses it (transformWithClause(), parse_cte.c),
+ * whether or not the CTE recurses.  That is all it switches: Cloudberry's
+ * planning of a recursive CTE is not gated by it, and nor is the port's.
+ */
+static bool gp_recursive_cte = true;
+
+/* Has this query, or one in it -- a CTE, a subquery, a sublink -- WITH RECURSIVE? */
+static bool
+recursive_walker(Node *node, void *context)
+{
+	if (node == NULL)
+		return false;
+	if (IsA(node, Query))
+	{
+		Query	   *query = (Query *) node;
+
+		if (query->hasRecursive)
+			return true;
+		/* the analysed query of a statement that holds one */
+		if (query->utilityStmt != NULL)
+		{
+			Node	   *stmt = query->utilityStmt;
+
+			if (IsA(stmt, ExplainStmt))
+				return recursive_walker(((ExplainStmt *) stmt)->query, context);
+			if (IsA(stmt, CreateTableAsStmt))
+				return recursive_walker(((CreateTableAsStmt *) stmt)->query, context);
+			if (IsA(stmt, DeclareCursorStmt))
+				return recursive_walker(((DeclareCursorStmt *) stmt)->query, context);
+			return false;
+		}
+		return query_tree_walker(query, recursive_walker, context, 0);
+	}
+	return expression_tree_walker(node, recursive_walker, context);
+}
+
+static void
+settings_post_parse_analyze(ParseState *pstate, Query *query,
+							const JumbleState *jstate)
+{
+	if (prev_post_parse_analyze)
+		prev_post_parse_analyze(pstate, query, jstate);
+
+	if (!gp_recursive_cte && recursive_walker((Node *) query, NULL))
+		ereport(ERROR,
+				(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+				 errmsg("RECURSIVE clauses in WITH queries are currently disabled"),
+				 errhint("In order to use recursive CTEs, \"gp.recursive_cte\" must be turned on.")));
+}
+
+/* ------------------------------------------------------------------------- */
 /* Definitions                                                               */
 /* ------------------------------------------------------------------------- */
 
@@ -804,8 +865,22 @@ GpSettingsInit(void)
 						 " Accepted for Cloudberry's scripts: the planner here costs a hash join as PostgreSQL does, which has no such term.",
 						 &gp_cost_hashjoin_chainwalk, false);
 
+	/*
+	 * Cloudberry's is GUC_NO_SHOW_ALL too, which here would hide it from
+	 * pg_settings, where the test harnesses find the names they respell.
+	 */
+	DefineCustomBoolVariable("gp.recursive_cte",
+							 "Enable RECURSIVE clauses in CTE queries.",
+							 "Cloudberry calls this gp_recursive_cte.",
+							 &gp_recursive_cte,
+							 true, PGC_USERSET, GUC_NOT_IN_SAMPLE,
+							 NULL, NULL, NULL);
+
 	prev_create_upper_paths = create_upper_paths_hook;
 	create_upper_paths_hook = settings_upper_paths;
+
+	prev_post_parse_analyze = post_parse_analyze_hook;
+	post_parse_analyze_hook = settings_post_parse_analyze;
 
 	prev_ProcessUtility = ProcessUtility_hook;
 	ProcessUtility_hook = settings_ProcessUtility;

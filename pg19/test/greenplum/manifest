@@ -103,7 +103,7 @@ run  external_table_create_privs
 run  external_table_persistent_error_log
 skip column_compression  relation "gp_partition_template" does not exist; column "i" referenced in more than one COLUMN ENCODING clause
 skip alter_table_aocs  type "gp_fastsequence" does not exist
-skip alter_table_aocs2  unrecognized configuration parameter "gp_recursive_cte"; function descendants_of(unknown) does not exist
+run  alter_table_aocs2
 run  alter_distribution_policy
 run  aoco_privileges
 run  alter_table_ao
@@ -451,7 +451,7 @@ skip bfv_temp  syntax error at or near ")"; relation "n" does not exist
 run  bfv_dml
 run  tpcds_q04
 skip qp_olap_mdqa  differs: GROUP_ID() numbers each grouping set's copies 0, 1, and so on, where Cloudberry's numbers them as its Agg's phases meet them -- in the rollups and hashed sets its planner arranges them into -- and gives some rows 2 and 3 where the port gives 0 and 1
-skip gp_recursive_cte  unrecognized configuration parameter "gp_recursive_cte"
+run  gp_recursive_cte
 run  qp_skew
 run  gp_tsrf
 run  qp_join_universal

@@ -33,6 +33,12 @@ s/^DETAIL:  segment \d+ \([^)]*\): (.*?)(; \d+ other segments failed too)?$/DETA
 m/^ERROR:  fault triggered, fault name:'\w+' fault type:'\w+' $/
 s/ $//
 
+# The segment a gather of a replicated table reads, which EXPLAIN names:
+# the session's backend's (gp_scan.c, GpScanReplicatedContent()), which
+# changes from run to run, in a plan gpdiff.pl compares as rows.
+m/^\s+Segment: \d+\s*$/
+s/Segment: \d+/Segment: N/
+
 # Cloudberry's init_file drops "set enable_parallel = off;" and its reset,
 # which its tests carry and its expected files do not; the harness has
 # respelled them as the port spells the setting (gp_settings.c).

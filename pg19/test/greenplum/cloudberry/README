@@ -18,6 +18,16 @@ alter_distribution_policy  pg_appendonly's segrelid, which is 0: gp_ao keeps
   redistributes as if it were on, where Cloudberry's planner, with it off,
   leaves each row on the segment it was read on.
 
+alter_table_aocs2  ADD COLUMN of an append-optimized table by row with a
+  constant default, which Cloudberry rewrites, as it rewrites every
+  append-optimized table it adds a column to, and the port's gp_ao does not:
+  it keeps the default as PostgreSQL's missing value, which gives the same
+  rows, so the partition's files are the same before and after ("ADD
+  COLUMN optimized for table" where Cloudberry's test reads "full table
+  rewritten").  And the access method of a partitioned table in the middle
+  of a hierarchy, given none: PostgreSQL 19 keeps none (relam 0), where
+  Cloudberry's is heap.
+
 alter_table_set_am  psql's \d+ footers of an append-optimized table, which
   are Cloudberry's psql's and not PostgreSQL 19's.  The segment files of a
   table ALTER TABLE ... SET ACCESS METHOD rewrites into gp_ao: numbered from
@@ -219,6 +229,13 @@ gp_dqa (orca)  ORCA's fallback trace, which the expected output closest to
 gp_metadata  version(), which is PostgreSQL 19's and names no Apache
   Cloudberry: the port is PostgreSQL's server, with its modules.
   gp_opt_version() answers in Cloudberry's words.
+
+gp_recursive_cte  its one EXPLAIN that gpdiff.pl compares as rows, an
+  "explain" alone on its line: the port's plan of the recursive CTE is
+  PostgreSQL 19's, a CTE Scan over the Recursive Union, with a Gather Motion
+  on each table, where Cloudberry's plan has Motions of its own.  The
+  segment the gather of a replicated table reads is the session's (the
+  port's init_file masks it).  Its answers are Cloudberry's.
 
 gp_types  PostgreSQL 19's words for an operator no type takes: a DETAIL
   where Cloudberry's HINT stood.
