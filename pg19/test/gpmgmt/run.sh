@@ -367,6 +367,10 @@ if PGPORT="$SPORT" COORDINATOR_DATA_DIRECTORY="$A/standby" run activate gpactiva
 	[ "$out" = "$(q "$CPORT" "SELECT current_setting('gp.dbid')"):pp" ] && [ "$rows" = 302 ] \
 		&& ok "gpactivatestandby: the standby is the coordinator, and the cluster reads and writes through it" \
 		|| notok "gpactivatestandby" "$out / $rows"
+	grep -q "Distributed transaction recovery has reached every segment" "$LOGDIR/activate.out" &&
+	[ "$(q "$CPORT" "SELECT gp.dtx_recovered()")" = t ] \
+		&& ok "gpactivatestandby waits for the new coordinator's distributed transaction recovery to reach every segment" \
+		|| notok "gpactivatestandby's wait for distributed transaction recovery" "$(tail_of activate)"
 else
 	notok "gpactivatestandby" "$(tail_of activate)"
 fi
