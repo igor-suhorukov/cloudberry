@@ -468,6 +468,11 @@ static List *active_streams = NIL;
 static void gang_close(void);
 static void gang_build_wes(GpGang *g);
 static void segment_notice_receiver(void *arg, const struct pg_result *res);
+static void last_word_forget(const PGconn *conn);
+static void conn_send_failed(GpSegmentConn *c);
+static void collect_error(List **errors, int content, PGresult *res,
+						  PGconn *conn, const char *why);
+static void raise_segment_errors(List *errors);
 static void readers_poll(void);
 static void streams_raise_if_failed(void);
 static void streams_release(void);
@@ -540,6 +545,7 @@ gang_close(void)
 			libpqsrv_disconnect(r->conn);
 		r->conn = NULL;
 	}
+	last_word_forget(NULL);
 	if (gang->wes != NULL)
 		FreeWaitEventSet(gang->wes);
 	for (int i = 0; i < NUM_SYNCED_SETTINGS; i++)
@@ -743,7 +749,8 @@ gang_connect(void)
 		gang->conns[i].seg = &segs[i];
 		gang->conns[i].conn = conn;
 		gang->conns[i].busy = false;
-		PQsetNoticeReceiver(conn, segment_notice_receiver, NULL);
+		last_word_forget(conn);
+		PQsetNoticeReceiver(conn, segment_notice_receiver, conn);
 		GANG_LOG(GANG_LOG_VERBOSE, "connected to segment %d (%s:%d), backend %d",
 				 segs[i].content, segs[i].hostname, segs[i].port,
 				 PQbackendPID(conn));
@@ -876,6 +883,31 @@ static SegmentNotice **notices_tail = &notices_head;
 static int	notices_quiet = 0;
 
 /*
+ * A segment's last word: an error its backend sent while its connection was
+ * idle -- the FATAL of a backend terminated between two batches of a gather,
+ * as it exits.  libpq hands an ErrorResponse that answers no statement to the
+ * notice receiver ("Unexpected message in IDLE state", pqParseInput3()), and
+ * finds the connection closed only at its next statement, saying "server
+ * closed the connection unexpectedly": the error raised then is the one the
+ * segment gave, as Cloudberry's is, whose rows come by the interconnect while
+ * its statement is still running there.  One for each connection, in
+ * malloc'd memory, as a notice is kept; forgotten when it is raised, when a
+ * connection is made at the address, and when the gang closes.
+ */
+typedef struct LastWord
+{
+	struct LastWord *next;
+	const PGconn *conn;
+	char		sqlstate[6];
+	char	   *message;
+	char	   *detail;
+	char	   *hint;
+	char		buf[FLEXIBLE_ARRAY_MEMBER];
+} LastWord;
+
+static LastWord *last_words = NULL;
+
+/*
  * A module's filters of what the segments say: a NOTICE it raises there to
  * tell the coordinator something -- gp_exttable's count of the rows a scan
  * rejected -- which the filter takes, and the client never sees.  Called in
@@ -934,6 +966,53 @@ strip_trailing_space(char *s)
 	return s;
 }
 
+/* Forget a connection's last word, or every connection's (NULL). */
+static void
+last_word_forget(const PGconn *conn)
+{
+	LastWord  **prev = &last_words;
+
+	while (*prev != NULL)
+	{
+		LastWord   *w = *prev;
+
+		if (conn == NULL || w->conn == conn)
+		{
+			*prev = w->next;
+			free(w);
+		}
+		else
+			prev = &w->next;
+	}
+}
+
+/* Whether a connection has a last word. */
+static bool
+last_word_said(const PGconn *conn)
+{
+	for (LastWord *w = last_words; w != NULL; w = w->next)
+		if (w->conn == conn)
+			return true;
+	return false;
+}
+
+/* A connection's last word, now the caller's to free; NULL if none. */
+static LastWord *
+last_word_take(const PGconn *conn)
+{
+	for (LastWord **prev = &last_words; *prev != NULL; prev = &(*prev)->next)
+	{
+		LastWord   *w = *prev;
+
+		if (w->conn == conn)
+		{
+			*prev = w->next;
+			return w;
+		}
+	}
+	return NULL;
+}
+
 /*
  * libpq calls it with its own PGresult, not the wrapper that libpq-be-fe.h's
  * macros put in the name's place, so they are set aside around it, as
@@ -941,6 +1020,51 @@ strip_trailing_space(char *s)
  */
 #undef PGresult
 #undef PQresultErrorField
+
+/* Keep an error a segment's connection received idle, as its last word. */
+static void
+last_word_keep(const PGconn *conn, const struct pg_result *res)
+{
+	const char *sqlstate = PQresultErrorField(res, PG_DIAG_SQLSTATE);
+	const char *fields[3];
+	size_t		size = offsetof(LastWord, buf);
+	LastWord   *w;
+	char	   *p;
+
+	fields[0] = PQresultErrorField(res, PG_DIAG_MESSAGE_PRIMARY);
+	fields[1] = PQresultErrorField(res, PG_DIAG_MESSAGE_DETAIL);
+	fields[2] = PQresultErrorField(res, PG_DIAG_MESSAGE_HINT);
+	if (fields[0] == NULL)
+		return;
+	for (int i = 0; i < 3; i++)
+		if (fields[i] != NULL)
+			size += strlen(fields[i]) + 1;
+
+	/* nothing can be raised here: a last word there is no memory for is lost */
+	w = malloc(size);
+	if (w == NULL)
+		return;
+	last_word_forget(conn);
+	w->conn = conn;
+	strlcpy(w->sqlstate, sqlstate != NULL && strlen(sqlstate) == 5 ? sqlstate : "",
+			sizeof(w->sqlstate));
+	p = w->buf;
+	w->message = w->detail = w->hint = NULL;
+	for (int i = 0; i < 3; i++)
+	{
+		char	  **dest = (i == 0) ? &w->message : (i == 1) ? &w->detail : &w->hint;
+
+		if (fields[i] == NULL)
+			continue;
+		strcpy(p, fields[i]);
+		*dest = p;
+		p += strlen(fields[i]) + 1;
+		strip_trailing_space(*dest);
+	}
+	w->next = last_words;
+	last_words = w;
+}
+
 static void
 segment_notice_receiver(void *arg, const struct pg_result *res)
 {
@@ -951,6 +1075,15 @@ segment_notice_receiver(void *arg, const struct pg_result *res)
 	SegmentNotice *n;
 	char	   *p;
 	int			elevel;
+
+	/* an error no statement was waiting for: the connection's last word */
+	if (arg != NULL && severity != NULL &&
+		(strcmp(severity, "ERROR") == 0 || strcmp(severity, "FATAL") == 0 ||
+		 strcmp(severity, "PANIC") == 0))
+	{
+		last_word_keep((const PGconn *) arg, res);
+		return;
+	}
 
 	if (notices_quiet > 0 || severity == NULL)
 		return;
@@ -1194,17 +1327,33 @@ conn_send(GpSegmentConn *c, const char *sql)
 
 	GANG_LOG(GANG_LOG_DEBUG, "to segment %d: %s", c->content, sql);
 	if (!PQsendQuery(c->conn, sql))
-	{
-		char	   *msg = pstrdup(PQerrorMessage(c->conn));
-		int			content = c->content;
-
-		gang_close();
-		ereport(ERROR,
-				(errcode(ERRCODE_CONNECTION_FAILURE),
-				 errmsg("could not send a statement to segment %d", content),
-				 errdetail_internal("%s", msg)));
-	}
+		conn_send_failed(c);
 	c->busy = true;
+}
+
+/*
+ * A statement that could not be sent: the connection is closed.  What the
+ * segment said as it closed it, if it said anything, is the error.
+ */
+static void
+conn_send_failed(GpSegmentConn *c)
+{
+	char	   *msg = pstrdup(PQerrorMessage(c->conn));
+	int			content = c->content;
+
+	if (last_word_said(c->conn))
+	{
+		List	   *errors = NIL;
+
+		collect_error(&errors, content, NULL, c->conn, NULL);
+		gang_close();
+		raise_segment_errors(errors);
+	}
+	gang_close();
+	ereport(ERROR,
+			(errcode(ERRCODE_CONNECTION_FAILURE),
+			 errmsg("could not send a statement to segment %d", content),
+			 errdetail_internal("%s", msg)));
 }
 
 static void
@@ -1245,16 +1394,7 @@ conn_send_params(GpSegmentConn *c, const char *sql, int nparams,
 						   formats, 0) ||
 		!PQsendClosePortal(c->conn, "") ||
 		!PQpipelineSync(c->conn))
-	{
-		char	   *msg = pstrdup(PQerrorMessage(c->conn));
-		int			content = c->content;
-
-		gang_close();
-		ereport(ERROR,
-				(errcode(ERRCODE_CONNECTION_FAILURE),
-				 errmsg("could not send a statement to segment %d", content),
-				 errdetail_internal("%s", msg)));
-	}
+		conn_send_failed(c);
 	c->busy = true;
 	c->pipelined = true;
 	c->pipe_step = 0;
@@ -1334,8 +1474,27 @@ collect_error(List **errors, int content, PGresult *res, PGconn *conn,
 {
 	GpSegmentError *err = (GpSegmentError *) palloc0(sizeof(GpSegmentError));
 	const char *field;
+	LastWord   *said = NULL;
 
 	err->content = content;
+
+	/*
+	 * A connection that failed with no word of the segment's, which it said
+	 * before, while nothing was asked of it: that is the error.
+	 */
+	if (why == NULL && conn != NULL &&
+		(res == NULL || PQresultErrorField(res, PG_DIAG_MESSAGE_PRIMARY) == NULL))
+		said = last_word_take(conn);
+	if (said != NULL)
+	{
+		err->sqlstate = said->sqlstate[0] ? pstrdup(said->sqlstate) : NULL;
+		err->message = pstrdup(said->message);
+		err->detail = said->detail ? pstrdup(said->detail) : NULL;
+		err->hint = said->hint ? pstrdup(said->hint) : NULL;
+		free(said);
+		*errors = lappend(*errors, err);
+		return;
+	}
 
 	field = res ? PQresultErrorField(res, PG_DIAG_SQLSTATE) : NULL;
 	err->sqlstate = field ? pstrdup(field) : NULL;
@@ -2010,7 +2169,8 @@ reader_connect(GpGang *g, int content)
 	r = MemoryContextAllocZero(TopMemoryContext, sizeof(GpReaderConn));
 	r->content = content;
 	r->conn = conn;
-	PQsetNoticeReceiver(conn, segment_notice_receiver, NULL);
+	last_word_forget(conn);
+	PQsetNoticeReceiver(conn, segment_notice_receiver, conn);
 	{
 		MemoryContext oldcxt = MemoryContextSwitchTo(TopMemoryContext);
 

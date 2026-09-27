@@ -656,6 +656,30 @@ EOF
 		|| notok "a gather's rows past a segment's first thousand" "$out"
 	q 0 "DROP TABLE gat;" >/dev/null
 
+	# A segment's backend that terminates itself as a gather reads it --
+	# gp_sync_lc_gucs's query, which terminates the session's backends on
+	# every segment -- sends its FATAL after the first batch's end, one row,
+	# while its connection is idle: libpq hands such an error to the notice
+	# receiver, and the next batch's FETCH finds the connection closed,
+	# "server closed the connection unexpectedly", unless the dispatcher kept
+	# what the segment said (gp_dispatch.c, last_word_keep()).  With the
+	# servers on one CPU, the segments have sent their FATALs before the
+	# coordinator reads the batch: without it kept, one time in five or
+	# none said so.
+	pms=$(for n in 0 1 2; do head -1 "$(datadir "$n")/postmaster.pid"; done)
+	cpus=$(taskset -pc $$ 2> /dev/null | sed 's/.*: //')
+	if [ -n "$cpus" ]; then
+		for pm in $pms; do taskset -pc "${cpus%%[,-]*}" "$pm" > /dev/null; done
+	fi
+	out=$(for ti in 1 2 3 4 5; do
+			q 0 "SELECT pg_terminate_backend(pid) FROM gp_dist_random('pg_stat_activity') WHERE sess_id IN (SELECT sess_id FROM pg_stat_activity WHERE pid = pg_backend_pid());"
+		done | grep -c "^ERROR:  terminating connection due to administrator command$")
+	if [ -n "$cpus" ]; then
+		for pm in $pms; do taskset -pc "$cpus" "$pm" > /dev/null; done
+	fi
+	[ "$out" = "5" ] && ok "a segment's backend terminated between two batches of a gather: its FATAL is the error, 5 times of 5" \
+		|| notok "a segment's FATAL between two batches" "$out of 5"
+
 	# The rows' system columns, as the segment that holds each has them, and
 	# Cloudberry's word for a ctid read without its gp_segment_id.
 	out=$(q 0 "SELECT count(*) FROM d WHERE gp_segment_id = 0 AND ctid = '(0,1)';")
