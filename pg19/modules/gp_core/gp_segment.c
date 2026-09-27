@@ -189,6 +189,7 @@ static Oid	pg_stat_activity_oid = InvalidOid;
 static Oid	activity_session_oid = InvalidOid;
 static Oid	segment_query_oid = InvalidOid;
 static Oid	segment_query_values_oid = InvalidOid;
+static Oid	record_wire_oid = InvalidOid;
 
 static void
 invalidate_func_oids(Datum arg, SysCacheIdentifier cacheid, uint32 hashvalue)
@@ -234,6 +235,7 @@ lookup_func_oids(void)
 	segment_query_oid = lookup_func("gp_internal", "segment_query", TEXTOID);
 	segment_query_values_oid = lookup_func_args("gp_internal", "segment_query",
 												(Oid[]) {TEXTOID, ANYOID}, 2);
+	record_wire_oid = lookup_func("gp_internal", "record_wire", RECORDOID);
 	pg_locks_oid = get_relname_relid("pg_locks", PG_CATALOG_NAMESPACE);
 	lock_session_oid = lock_writer_oid = InvalidOid;
 	if (OidIsValid(pg_locks_oid))
@@ -1185,13 +1187,18 @@ dist_random_pushable(Query *q)
 		coordinator_only_walker(q->jointree->quals, NULL))
 		return false;
 
-	/* void, what a function called for what it does answers, travels too */
+	/*
+	 * void, what a function called for what it does answers, travels too,
+	 * and so does a record of no declared type, described
+	 * (gp_internal.record_wire)
+	 */
 	foreach_node(TargetEntry, tle, q->targetList)
 	{
 		Oid			type = exprType((Node *) tle->expr);
 
-		if (type == RECORDOID ||
-			(get_typtype(type) == TYPTYPE_PSEUDO && type != VOIDOID) ||
+		if (type == RECORDOID && OidIsValid(record_wire_oid))
+			continue;
+		if ((get_typtype(type) == TYPTYPE_PSEUDO && type != VOIDOID) ||
 			GpTransferType(type) != type)
 			return false;
 	}
@@ -1268,6 +1275,11 @@ dist_random_push(Query *q)
 		tle->ressortgroupref = 0;
 		if (tle->resname == NULL)
 			tle->resname = psprintf("gp_c%d", tle->resno);
+		/* a record of no declared type is sent with its row type described */
+		if (exprType((Node *) tle->expr) == RECORDOID)
+			tle->expr = (Expr *) makeFuncExpr(record_wire_oid, GpRecordWireType(),
+											  list_make1(tle->expr), InvalidOid,
+											  InvalidOid, COERCE_EXPLICIT_CALL);
 	}
 	sql = pg_get_querydef(sent, false);
 

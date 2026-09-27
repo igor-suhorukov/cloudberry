@@ -274,6 +274,16 @@ qp_subquery (orca)  the fallback trace of the queries ORCA's translator
   declines -- subqueries that are not scalar, an inherited table, a
   whole-row variable -- which the planner answers the same.
 
+rangefuncs_cdb (planner, orca)  the planner's settings the test lists,
+  enable_*: PostgreSQL 19's, which has enable_distinct_reordering and four
+  more that PostgreSQL 14 had not, and none of Cloudberry's own --
+  enable_groupagg, enable_lock_optimization, enable_password_profile --
+  with PostgreSQL's defaults, where Cloudberry turns off merge joins,
+  nested loops and incremental sorts.  Under the planner, notice_srf(), a
+  volatile set-returning function the rows of an INSERT come from, is
+  called on the coordinator, where Cloudberry's planner calls it in a slice
+  on one segment, so its NOTICE names segment -1.
+
 resource_queue  SHOW resource_scheduler, whose header is the port's name
   of it, gp.resource_scheduler, three letters wider.  And the NOTICE of the
   SPI memory reservation of the Result node that calls pg_sleep() in the

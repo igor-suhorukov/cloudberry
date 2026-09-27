@@ -157,16 +157,28 @@ extern GpGatherState *GpGatherStartOnContents(const char *sql,
 /*
  * The type a value travels between the nodes as: itself, or text or bytea
  * for the few types that refuse to be read back (pg_node_tree and the
- * extended statistics' values), each binary-coercible to it.  A column of
- * a segment's query cast to it, and a query's select list of a relation's
+ * extended statistics' values), each binary-coercible to it; and a record
+ * of no declared type as gp_internal.record_wire, which describes its row
+ * type (gp_record.c).  A column of a segment's query cast to it -- or given
+ * to gp_internal.record_wire() -- and a query's select list of a relation's
  * columns, as "*" gives them, each so cast.
  */
 extern Oid	GpTransferType(Oid type);
 extern void GpAppendTransferColumn(StringInfo buf, const char *column, Oid type);
 extern char *GpTransferSelectList(TupleDesc tupdesc);
 
-/* Can every column of this descriptor travel in binary? */
+/* Can a value of this type, or every column of this descriptor, travel in binary? */
+extern bool GpTypeHasBinaryIO(Oid type);
 extern bool GpTupleDescHasBinaryIO(TupleDesc tupdesc);
+
+/*
+ * gp_record.c: gp_internal.record_wire's OID in this database, InvalidOid
+ * where there is none; and a record, its row type described, written onto
+ * a buffer and read back as a value of a row type registered here.
+ */
+extern Oid	GpRecordWireType(void);
+extern void GpRecordWireWrite(StringInfo buf, Datum record);
+extern Datum GpRecordWireRead(StringInfo buf);
 
 /*
  * Send a dispatched statement (gp_ddl.c builds it) to every segment and wait.

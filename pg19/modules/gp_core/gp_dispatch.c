@@ -3655,7 +3655,9 @@ struct GpGatherState
  * nothing may make one from outside; each is binary-coercible to text or
  * bytea (pg_cast), with the same bytes, so it travels as that and is kept
  * as it arrives.  pg_catalog's pg_class.relpartbound and pg_rewrite.ev_action
- * are among them, which gp.dist_random() of a catalog reads.
+ * are among them, which gp.dist_random() of a catalog reads.  And a record
+ * of no declared type travels as gp_internal.record_wire, which describes
+ * its row type, and is made again on arrival (gp_record.c).
  */
 Oid
 GpTransferType(Oid type)
@@ -3668,6 +3670,17 @@ GpTransferType(Oid type)
 		case PG_DEPENDENCIESOID:
 		case PG_MCV_LISTOID:
 			return BYTEAOID;
+		case RECORDOID:
+			{
+				/*
+				 * A record of no declared type is not kept as it arrives:
+				 * record_wire's input makes it again, of a row type
+				 * registered here.
+				 */
+				Oid			wire = GpRecordWireType();
+
+				return OidIsValid(wire) ? wire : type;
+			}
 		default:
 			return type;
 	}
@@ -3682,6 +3695,11 @@ GpAppendTransferColumn(StringInfo buf, const char *column, Oid type)
 {
 	Oid			transfer = GpTransferType(type);
 
+	if (type == RECORDOID && transfer != type)
+	{
+		appendStringInfo(buf, "gp_internal.record_wire(%s)", column);
+		return;
+	}
 	appendStringInfoString(buf, column);
 	if (transfer != type)
 		appendStringInfo(buf, "::pg_catalog.%s", transfer == TEXTOID ? "text" : "bytea");
@@ -3758,6 +3776,12 @@ type_has_binary_io(Oid typid)
 	if (result && OidIsValid(inner))
 		result = type_has_binary_io(inner);
 	return result;
+}
+
+bool
+GpTypeHasBinaryIO(Oid type)
+{
+	return type_has_binary_io(type);
 }
 
 bool

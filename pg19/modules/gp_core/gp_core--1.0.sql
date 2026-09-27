@@ -542,6 +542,47 @@ AS 'MODULE_PATHNAME', 'gp_segment_query'
 LANGUAGE C;
 
 /*
+ * A record of no declared type as it travels between the nodes: its row type
+ * described, then its columns, and made again on arrival of a row type
+ * registered there (gp_record.c).  record_wire() gives a record unchanged as
+ * this type, for a segment's query to send it so.
+ */
+CREATE TYPE gp_internal.record_wire;
+CREATE FUNCTION gp_internal.record_wire_in(cstring, oid, int4)
+RETURNS gp_internal.record_wire
+AS 'MODULE_PATHNAME', 'gp_record_wire_in' LANGUAGE C STRICT STABLE;
+CREATE FUNCTION gp_internal.record_wire_out(gp_internal.record_wire)
+RETURNS cstring
+AS 'MODULE_PATHNAME', 'gp_record_wire_out' LANGUAGE C STRICT STABLE;
+CREATE FUNCTION gp_internal.record_wire_recv(internal, oid, int4)
+RETURNS gp_internal.record_wire
+AS 'MODULE_PATHNAME', 'gp_record_wire_recv' LANGUAGE C STRICT STABLE;
+CREATE FUNCTION gp_internal.record_wire_send(gp_internal.record_wire)
+RETURNS bytea
+AS 'MODULE_PATHNAME', 'gp_record_wire_send' LANGUAGE C STRICT STABLE;
+CREATE TYPE gp_internal.record_wire (
+	INPUT = gp_internal.record_wire_in,
+	OUTPUT = gp_internal.record_wire_out,
+	RECEIVE = gp_internal.record_wire_recv,
+	SEND = gp_internal.record_wire_send,
+	INTERNALLENGTH = VARIABLE,
+	ALIGNMENT = double,
+	STORAGE = extended
+);
+CREATE FUNCTION gp_internal.record_wire(record)
+RETURNS gp_internal.record_wire
+AS 'MODULE_PATHNAME', 'gp_record_wire' LANGUAGE C STRICT STABLE;
+
+/*
+ * A record of no declared type made from record_wire's text of it: what
+ * stands in ORCA's plan for a constant of one, which would otherwise reach a
+ * segment with the coordinator's typmod (orca.c).
+ */
+CREATE FUNCTION gp_internal.record_from_wire(text)
+RETURNS record
+AS 'MODULE_PATHNAME', 'gp_record_from_wire' LANGUAGE C STRICT STABLE;
+
+/*
  * The size functions, the cluster's (gp_size.c): each of PostgreSQL's here
  * and every segment's added, as Cloudberry's add them.  A call of
  * PostgreSQL's is made a call of the one here of its name and arguments

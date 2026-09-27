@@ -1558,6 +1558,36 @@ a\b|\N' ] && [ "$(cat "$ROOT/ce_prog.txt" 2>&1)" = "to a program" ] \
 		"SELECT count(*) FROM o o1 JOIN o o2 USING (a) WHERE o2.b = 1;"
 	orca_same "a replicated table, read from one segment" \
 		"SELECT count(*), max(name) FROM ro;" "Gather Motion 1:1"
+
+	# A record of no declared type travels with its row type described
+	# (gp_record.c), where its typmod alone is the number the sending process
+	# gave the row type: made on the segments and gathered; sorted there and
+	# merged; one a query of gp_dist_random() alone gives on every segment;
+	# and a PL/pgSQL record's field, which ORCA's folding makes a constant
+	# the segments evaluate.
+	q 0 "CREATE FUNCTION rec_of(int, OUT int, OUT text) LANGUAGE sql
+	     AS 'SELECT \$1 - 1, \$1::text || ''z''';" >/dev/null
+	orca_same "a record of no declared type, made on the segments and gathered" \
+		"SELECT a, rec_of(a) FROM o WHERE a < 6 ORDER BY a;" "Gather Motion"
+	orca_same "... grouped by, sorted on the segments and merged" \
+		"SELECT r, count(*) FROM (SELECT rec_of(a % 5) AS r FROM o) s GROUP BY r ORDER BY r;" \
+		"Merge Key"
+	out=$(q 0 "SELECT rec_of(gp_execution_segment()) FROM gp_dist_random('gp_id') ORDER BY 1;" | tr '\n' '/')
+	[ "$out" = "(-1,0z)/(0,1z)/" ] \
+		&& ok "... one each segment makes in a query of gp_dist_random('gp_id') alone" \
+		|| notok "a record of no declared type from gp_dist_random('gp_id')" "$out"
+	q 0 "CREATE FUNCTION rec_param() RETURNS bigint LANGUAGE plpgsql AS \$\$
+	     DECLARE r record; n record; c bigint;
+	     BEGIN
+	       SELECT 1 AS i, 2 AS j INTO r;
+	       SELECT r AS rec, 'x' AS f INTO n;
+	       SELECT count(*) INTO c FROM o WHERE a > length(n.rec::text) + 990;
+	       RETURN c;
+	     END \$\$;" >/dev/null
+	out=$(q 0 "SELECT rec_param();")
+	[ "$out" = "5" ] \
+		&& ok "... and a PL/pgSQL record's field, in a condition the segments evaluate" \
+		|| notok "a PL/pgSQL record's field on the segments" "$out"
 	orca_same "a correlated subquery, run on the segments" \
 		"SELECT a, (SELECT name FROM ro WHERE ro.b = o.b) FROM o WHERE a < 4 ORDER BY a;" \
 		"SubPlan"
