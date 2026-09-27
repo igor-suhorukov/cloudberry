@@ -1,0 +1,67 @@
+@@
+-HINT:  No operator matches the given name and argument types. You might need to add explicit type casts.
++DETAIL:  No operator of that name accepts the given argument types.
++HINT:  You might need to add explicit type casts.
+@@
+-HINT:  No function matches the given name and argument types. You might need to add explicit type casts.
++DETAIL:  No function of that name accepts the given argument types.
++HINT:  You might need to add explicit type casts.
+@@
+-HINT:  No operator matches the given name and argument types. You might need to add explicit type casts.
++DETAIL:  No operator of that name accepts the given argument types.
++HINT:  You might need to add explicit type casts.
+@@
+-ERROR:  syntax error at or near "decode"
+-LINE 1: create table decode (a int, b int) distributed by (b);
+-                     ^
+@@
+-ERROR:  syntax error at or near "DECODE"
+-LINE 1: create database DECODE;
+-                        ^
+@@
+-ERROR:  syntax error at or near "decode"
+-LINE 1: create table testdecode (a int, decode int)
+-                                        ^
+@@
+-ERROR:  syntax error at or near "decode"
+-LINE 3:   empid integer CONSTRAINT decode UNIQUE,
+-                                   ^
++ERROR:  relation "decode" already exists
+@@
+-ERROR:  syntax error at or near "decode"
+-LINE 1: create unique index decode ON validt(record_id);
+-                            ^
++ERROR:  relation "decode" already exists
+@@
+-ERROR:  syntax error at or near "decode"
+-LINE 10:    partition decode values ('F'),
+-                      ^
+@@
+-        CASE country_code
+-            WHEN IS NOT DISTINCT FROM 'US'::bpchar THEN 'Americas'::text
+-            WHEN IS NOT DISTINCT FROM 'CA'::bpchar THEN 'Americas'::text
+-            WHEN IS NOT DISTINCT FROM 'MX'::bpchar THEN 'Americas'::text
+-            WHEN IS NOT DISTINCT FROM 'CN'::bpchar THEN 'APJ'::text
+-            WHEN IS NOT DISTINCT FROM 'JP'::bpchar THEN 'APJ'::text
+-            WHEN IS NOT DISTINCT FROM 'RU'::bpchar THEN 'APJ'::text
+-            WHEN IS NOT DISTINCT FROM 'UK'::bpchar THEN 'EMEA'::text
+-            WHEN IS NOT DISTINCT FROM 'FR'::bpchar THEN 'EMEA'::text
+-            WHEN IS NOT DISTINCT FROM 'IL'::bpchar THEN 'EMEA'::text
+-            WHEN IS NOT DISTINCT FROM 'IT'::bpchar THEN 'EMEA'::text
+-            WHEN IS NOT DISTINCT FROM 'IE'::bpchar THEN 'EMEA'::text
++        CASE
++            WHEN NOT country_code IS DISTINCT FROM 'US'::bpchar THEN 'Americas'::text
++            WHEN NOT country_code IS DISTINCT FROM 'CA'::bpchar THEN 'Americas'::text
++            WHEN NOT country_code IS DISTINCT FROM 'MX'::bpchar THEN 'Americas'::text
++            WHEN NOT country_code IS DISTINCT FROM 'CN'::bpchar THEN 'APJ'::text
++            WHEN NOT country_code IS DISTINCT FROM 'JP'::bpchar THEN 'APJ'::text
++            WHEN NOT country_code IS DISTINCT FROM 'RU'::bpchar THEN 'APJ'::text
++            WHEN NOT country_code IS DISTINCT FROM 'UK'::bpchar THEN 'EMEA'::text
++            WHEN NOT country_code IS DISTINCT FROM 'FR'::bpchar THEN 'EMEA'::text
++            WHEN NOT country_code IS DISTINCT FROM 'IL'::bpchar THEN 'EMEA'::text
++            WHEN NOT country_code IS DISTINCT FROM 'IT'::bpchar THEN 'EMEA'::text
++            WHEN NOT country_code IS DISTINCT FROM 'IE'::bpchar THEN 'EMEA'::text
+@@
+- Taing Consulting    | US           | Americas
+@@
++ Taing Consulting    | US           | Americas

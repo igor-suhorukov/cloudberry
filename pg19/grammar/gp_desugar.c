@@ -5092,7 +5092,9 @@ decode_is_call(const GpExprScan *sc, int i, int close)
 /*
  * DECODE(...) at `i`: its closing parenthesis, or -1 if it is not DECODE --
  * decode spelled with quotes or a schema, fewer than three arguments, or a
- * name rather than a call.
+ * name rather than a call.  A call of fewer than two is Cloudberry's syntax
+ * error at its ")": its grammar's DECODE takes three or more, and its
+ * decode(text, text) two.
  */
 static int
 decode_close(const GpExprScan *sc, int i, int limit)
@@ -5127,10 +5129,35 @@ decode_close(const GpExprScan *sc, int i, int limit)
 		}
 	}
 
-	if (nargs < 3 || !decode_is_call(sc, i, close))
+	if (nargs == 2 || !decode_is_call(sc, i, close))
 		return -1;
+	if (nargs < 2)
+		ts_syntax_error(ts, close);
 
 	return close;
+}
+
+/*
+ * The operand x of a DECODE, or of CASE x WHEN IS NOT DISTINCT FROM, as each
+ * arm writes it -- at `at`, where an error in it is reported.  A literal of
+ * no type yet, a quoted string or NULL, has ::text after it: PostgreSQL's
+ * transformCaseExpr() makes a CASE's operand of unknown type text, and so
+ * Cloudberry's did its DECODE's, where written into each arm it would take
+ * the type of what it is compared with -- decode(null, 1, ...) is
+ * Cloudberry's "operator does not exist: text = integer".
+ */
+static void
+emit_operand(GpOut *o, const GpExprScan *sc, int from, int to, int at)
+{
+	const GpTokens *ts = sc->ts;
+
+	out_text(o, "(", at);
+	emit_span(o, sc, from, to);
+	if (to == from + 1 &&
+		(ts->toks[from].code == GP_SCONST || ts->toks[from].code == GP_USCONST ||
+		 tok_is_kw(ts, from, "null")))
+		out_text(o, "::text", at);
+	out_text(o, ")", at);
 }
 
 /*
@@ -5170,9 +5197,9 @@ emit_decode(GpOut *o, const GpExprScan *sc, int i, int close)
 		/* Cloudberry's IS NOT DISTINCT FROM is at the value compared */
 		int			at = ts->toks[from[k]].off;
 
-		out_text(o, " WHEN (", at);
-		emit_span(o, sc, from[0], to[0]);
-		out_text(o, ") IS NOT DISTINCT FROM (", at);
+		out_text(o, " WHEN ", at);
+		emit_operand(o, sc, from[0], to[0], at);
+		out_text(o, " IS NOT DISTINCT FROM (", at);
 		emit_span(o, sc, from[k], to[k]);
 		out_text(o, ") THEN ", ts->toks[from[k + 1]].off);
 		emit_span(o, sc, from[k + 1], to[k + 1]);
@@ -5368,11 +5395,10 @@ emit_case(GpOut *o, const GpExprScan *sc, int i, int end)
 				}
 			}
 
-			out_text(o, "(", not_at);
-			emit_span(o, sc, opfrom, opto);
+			emit_operand(o, sc, opfrom, opto, not_at);
 			if (full)
 			{
-				out_text(o, ") IS NOT DISTINCT FROM (", not_at);
+				out_text(o, " IS NOT DISTINCT FROM (", not_at);
 				emit_span(o, sc, j, cond_to);
 				out_text(o, ")", not_at);
 				rest = cond_to;
@@ -5381,7 +5407,7 @@ emit_case(GpOut *o, const GpExprScan *sc, int i, int end)
 			{
 				/* IS NOT DISTINCT [FROM], less what is missing */
 				out_text(o, tok_is_kw(ts, j - 1, "from") ?
-						 ") IS NOT DISTINCT FROM " : ") IS NOT DISTINCT ",
+						 " IS NOT DISTINCT FROM " : " IS NOT DISTINCT ",
 						 not_at);
 				rest = j;
 			}
@@ -5391,9 +5417,8 @@ emit_case(GpOut *o, const GpExprScan *sc, int i, int end)
 			int			when_at = ts->toks[w].off;
 
 			/* WHEN a -> WHEN (x) = (a), Cloudberry's = at its WHEN */
-			out_text(o, "(", when_at);
-			emit_span(o, sc, opfrom, opto);
-			out_text(o, ") = (", when_at);
+			emit_operand(o, sc, opfrom, opto, when_at);
+			out_text(o, " = (", when_at);
 			emit_span(o, sc, w + 1, cond_to);
 			out_text(o, ")", when_at);
 			rest = cond_to;

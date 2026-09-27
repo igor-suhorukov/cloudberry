@@ -306,7 +306,7 @@ skip temp_tablespaces  the faults sisc_xslice_temp_files and hashagg_spill_temp_
 run  default_tablespace
 run  leastsquares
 run  opr_sanity_gp
-skip decode_expr  function decode(boolean) does not exist; function decode(integer) does not exist
+run  decode_expr
 skip gpcopy_encoding  invalid byte sequence for encoding "UTF8": 0xc4
 run  gp_create_view
 run  window_views

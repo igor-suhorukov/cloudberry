@@ -121,6 +121,14 @@ brin_ao, brin_aocs (planner, orca)  under the planner, the plans the test
 case_gp  IS NOT DISTINCT FROM, and the CASE form, printed as the searched
   CASE the port's rewrite makes of them (see the singlenode suite's README).
 
+decode_expr  DECODE, which is no keyword of the port's: a table, a
+  database, a column, a constraint, an index and a partition named decode
+  are made, where Cloudberry's grammar, which reserves the word, refuses
+  them -- and the constraint and the index then find the table.  A view's
+  DECODE printed as the searched CASE the port makes of it, as case_gp's
+  is.  PostgreSQL 19's words for a call no function or operator takes, and
+  an ORDER BY of text in the C locale, which puts "APJ" before "Americas".
+
 create_extension_fail  the context of the error the fault
   create_function_fail raises: a segment runs the script of the CREATE
   EXTENSION it was sent, so its CREATE FUNCTION fails inside the script,
