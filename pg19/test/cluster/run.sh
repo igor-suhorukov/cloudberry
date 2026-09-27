@@ -2201,19 +2201,34 @@ COMMIT;"
 		*) notok "a temporary table in a subplan: the plan" "$plan" ;;
 	esac
 
-	# The coordinator's own slice -- a LIMIT over a Gather, broadcast back --
-	# feeding a slice that a reader runs: the writer keeps the rows it is
-	# sent in files the reader opens (gp_motion_put_shared()).
+	# The coordinator's own slice -- a function's rows, which it reads
+	# itself, redistributed -- feeding a slice that a reader runs: the
+	# writer keeps the rows it is sent in files the reader opens
+	# (gp_motion_put_shared()).
+	sql="SELECT count(*), sum(p2.x) FROM (SELECT o.b FROM o WHERE o.a IN (SELECT (random() * 0)::int + g FROM generate_series(1, 300) g)) s JOIN po p2 ON s.b = p2.y;"
+	plan=$(q 0 "EXPLAIN (COSTS OFF) $sql")
+	out=$(printf '%s\n' "$sql" "$readers" | qf 0)
+	want=$(q 0 "SET gp.interconnect_type = relay; $sql")
+	case "$plan" in
+		*"Redistribute Motion 2:2"*"Redistribute Motion 1:2"*"Function Scan on generate_series"*)
+			[ "$out" = "$want
+4" ] && ok "the coordinator's slice feeding a reader's: its rows read from the files the writer keeps for it" \
+				|| notok "the coordinator's slice and a reader" "$out / $want" ;;
+		*) notok "the coordinator's slice below a reader's: the plan" "$plan" ;;
+	esac
+	# One that works only on the rows it receives -- a LIMIT over a
+	# Gather, broadcast back -- runs on the first segment instead, a reader
+	# of its own, and streams: the Gather below it is into that segment.
 	sql="SELECT count(*), sum(p2.x) FROM (SELECT o.b FROM o WHERE EXISTS (SELECT 1 FROM po WHERE po.x = 3)) s JOIN po p2 ON s.b = p2.y;"
 	plan=$(q 0 "EXPLAIN (COSTS OFF) $sql")
 	out=$(printf '%s\n' "$sql" "$readers" | qf 0)
 	want=$(q 0 "SET gp.interconnect_type = relay; $sql")
 	case "$plan" in
-		*"Redistribute Motion 2:2"*"Broadcast Motion 1:2"*"Gather Motion 2:1"*)
+		*"Broadcast Motion 1:2  (slice"*"; segments: 1)"*"Limit"*"Gather Motion 2:1  (slice"*"Filter: (x = 3)"*)
 			[ "$out" = "$want
-4" ] && ok "the coordinator's slice feeding a reader's: its rows read from the files the writer keeps for it" \
-				|| notok "the coordinator's slice and a reader" "$out / $want" ;;
-		*) notok "the coordinator's slice below a reader's: the plan" "$plan" ;;
+7" ] && ok "... and one that works on the rows it receives runs on a segment, and streams" \
+				|| notok "the coordinator's slice moved to a segment" "$out / $want" ;;
+		*) notok "the coordinator's slice moved to a segment: the plan" "$plan" ;;
 	esac
 
 	# ORCA's writes, carried out where the rows are.

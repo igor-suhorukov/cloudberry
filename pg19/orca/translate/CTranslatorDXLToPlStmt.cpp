@@ -229,25 +229,6 @@ ReadsCTEBelowMotion(const CDXLNode *dxlnode, ULONG cte_id, BOOL on_segments)
 	return false;
 }
 
-// NOT IN CLOUDBERRY.  Does the plan have a CTE producer?
-static BOOL
-HasCTEProducer(const CDXLNode *dxlnode)
-{
-	if (EdxlopPhysicalCTEProducer == dxlnode->GetOperator()->GetDXLOperator())
-	{
-		return true;
-	}
-	const ULONG arity = dxlnode->Arity();
-	for (ULONG ul = 0; ul < arity; ul++)
-	{
-		if (HasCTEProducer((*dxlnode)[ul]))
-		{
-			return true;
-		}
-	}
-	return false;
-}
-
 // NOT IN CLOUDBERRY.  Does the part of a plan below a Motion, down to the
 // Motions it receives from, read nothing itself -- no table, no function's
 // rows, no CTE -- but work on the rows it receives: an aggregate, a sort, a
@@ -381,7 +362,6 @@ CTranslatorDXLToPlStmt::GetPlannedStmtFromDXL(const CDXLNode *dxlnode,
 	m_dxl_to_plstmt_context->m_orig_query = (Query *) orig_query;
 	m_dxl_to_plstmt_context->AddSlice(topslice);
 	m_dxl_to_plstmt_context->SetCurrentSlice(topslice);
-	m_dxl_to_plstmt_context->m_singletons_on_segment = HasCTEProducer(dxlnode);
 
 	CDXLTranslationContextArray *ctxt_translation_prev_siblings =
 		GPOS_NEW(m_mp) CDXLTranslationContextArray(m_mp);
@@ -3092,13 +3072,15 @@ CTranslatorDXLToPlStmt::TranslateDXLMotion(
 
 		// NOT IN CLOUDBERRY.  The coordinator's own slice runs here, apart
 		// from the rest, which gp_core relays to it and from it a slice at a
-		// time (gp_motion.c).  In a plan that shares a CTE between slices,
-		// which all run at once, such a slice that works only on the rows
-		// it receives -- ORCA's aggregate of gathered rows, sent back to the
-		// segments -- runs on the first segment instead, where it streams as
-		// the others do.
+		// time (gp_motion.c): its rows cross the coordinator, and the slices
+		// below it run to their end before those above it start.  Such a
+		// slice that works only on the rows it receives -- ORCA's aggregate
+		// of gathered rows, sent back to the segments -- runs on the first
+		// segment instead, where it streams as the others do: in a plan that
+		// shares a CTE between slices, which all run at once, as it must, and
+		// in any other.  One that reads anything itself -- a function's rows
+		// -- stays the coordinator's.
 		if (segindex < 0 && GP_MOTION_GATHER != motion_type &&
-			m_dxl_to_plstmt_context->m_singletons_on_segment &&
 			WorksOnReceivedRowsOnly(
 				(*motion_dxlnode)[motion_dxlop->GetRelationChildIdx()]))
 		{
