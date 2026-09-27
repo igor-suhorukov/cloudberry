@@ -229,6 +229,19 @@ GpOrcaPrepareMerge(Query *query, Query **select, OrcaMerge **statep,
 		join->larg = linitial(((FromExpr *) join->larg)->fromlist);
 
 	/*
+	 * An automatically updatable view's conditions, which the rewriter put
+	 * on the target's side of the join (rewriteTargetView()): the view's
+	 * MERGE is the planner's.  So is a source the translator would not
+	 * know how to make the join's columns of.
+	 */
+	if (!IsA(join->larg, RangeTblRef) ||
+		!(IsA(join->rarg, RangeTblRef) || IsA(join->rarg, JoinExpr)))
+	{
+		*why = "a MERGE into a view";
+		return false;
+	}
+
+	/*
 	 * The join's range table entry has no columns (a MERGE's join is the
 	 * planner's, which reads none of them); ORCA's translator makes the
 	 * join's output of them, so they are the target's and then the
@@ -246,7 +259,7 @@ GpOrcaPrepareMerge(Query *query, Query **select, OrcaMerge **statep,
 		{
 			int			rtindex = IsA(sides[side], RangeTblRef)
 				? ((RangeTblRef *) sides[side])->rtindex
-				: castNode(JoinExpr, sides[side])->rtindex;
+				: ((JoinExpr *) sides[side])->rtindex;
 			List	   *names;
 			List	   *colvars;
 

@@ -3276,6 +3276,13 @@ epq "and one whose target row went meanwhile inserts it" \
     "DELETE FROM t2e WHERE a = 2" \
     "SELECT a, b FROM t2e ORDER BY a"
 
+# An automatically updatable view's conditions the rewriter puts beside the
+# target, a FROM list of it rather than the table: the backend stopped here.
+declined "a MERGE into an automatically updatable view" \
+         "MERGE INTO t2mv v USING t2n s ON v.a = s.a WHEN MATCHED THEN DELETE" \
+         "a MERGE into a view" \
+         "$T2M; CREATE TEMP VIEW t2mv AS SELECT * FROM t2m WHERE a > 1"
+
 declined "a MERGE whose source is a subquery, whose rows a row mark would copy" \
          "MERGE INTO t2d USING (SELECT 1 AS a) s ON t2d.a = s.a WHEN MATCHED THEN UPDATE SET c = 'm'" \
          "a MERGE whose source is not tables" "$T2D"
