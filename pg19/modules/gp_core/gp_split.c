@@ -534,6 +534,16 @@ split_changed_concurrently(TM_Result result)
 	GpMotionRefuseRecheck();
 }
 
+/*
+ * The old version of a row a Split moves, deleted as one moved away, as
+ * PostgreSQL deletes a row an UPDATE moves to another partition and
+ * Cloudberry's split update deletes one it moves to another segment: another
+ * transaction that meets it at READ COMMITTED -- a DELETE, an UPDATE, a
+ * locking clause, another Split -- finds it moved, and fails, rather than
+ * passing over a row that still is, elsewhere ("tuple to be locked was
+ * already moved to another partition due to concurrent update", and a
+ * Split's recheck error).
+ */
 static void
 split_delete(SplitModifyState *state, Relation rel, ItemPointer tid)
 {
@@ -541,7 +551,8 @@ split_delete(SplitModifyState *state, Relation rel, ItemPointer tid)
 	TM_FailureData tmfd;
 	TM_Result	result;
 
-	result = table_tuple_delete(rel, tid, estate->es_output_cid, 0,
+	result = table_tuple_delete(rel, tid, estate->es_output_cid,
+								TABLE_DELETE_CHANGING_PARTITION,
 								estate->es_snapshot, estate->es_crosscheck_snapshot,
 								true, &tmfd);
 	switch (result)
@@ -882,7 +893,9 @@ gp_split_delete(PG_FUNCTION_ARGS)
 		CHECK_FOR_INTERRUPTS();
 		if (!table_tuple_fetch_row_version(part->rel, tid, snapshot, part->slot))
 			continue;
-		result = table_tuple_delete(part->rel, tid, cid, 0, snapshot,
+		/* moved away, as split_delete() deletes it */
+		result = table_tuple_delete(part->rel, tid, cid,
+									TABLE_DELETE_CHANGING_PARTITION, snapshot,
 									InvalidSnapshot, true, &tmfd);
 		switch (result)
 		{
