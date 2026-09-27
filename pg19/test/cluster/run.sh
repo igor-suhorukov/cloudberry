@@ -2785,6 +2785,77 @@ COMMIT;"
 		*) notok "a function in a fragment reading a replicated table" "$out" ;;
 	esac
 
+	# Cloudberry's runtime filters (gp_rtfilter.c).  With
+	# gp.enable_runtime_filter on, a hash join of the planner's whose inner
+	# side meets few of its outer rows has a RuntimeFilter above its outer
+	# side: the inner rows' hash values in a Bloom filter, which passes on
+	# only the outer rows that may meet one, and a row with a NULL key.  With
+	# gp.enable_runtime_filter_pushdown on, an integer key's inner values and
+	# range reach the scans below the outer side -- the planner's gathers,
+	# and on the segments the sequential scans of ORCA's slices -- and
+	# EXPLAIN ANALYZE says how many rows each dropped.  A left join's
+	# preserved side gets neither, and every answer is the one without.
+	q 0 "CREATE TABLE rff (id int, d int) DISTRIBUTED BY (id);
+	     INSERT INTO rff SELECT i, CASE WHEN i % 400 = 0 THEN NULL ELSE i % 2000 END FROM generate_series(1, 40000) i;
+	     CREATE TABLE rfd (d int, p int) DISTRIBUTED BY (d);
+	     INSERT INTO rfd SELECT i, i % 10 FROM generate_series(0, 1999) i;
+	     ANALYZE rff; ANALYZE rfd;" >/dev/null
+	rf_join="SELECT count(*), count(DISTINCT d) FROM rff JOIN rfd USING (d) WHERE p = 0;"
+	rf_left="SELECT count(*), count(p) FROM rff LEFT JOIN (SELECT * FROM rfd WHERE p = 0) f USING (d);"
+	rf_explain="EXPLAIN (ANALYZE, COSTS OFF, TIMING OFF, SUMMARY OFF, BUFFERS OFF)"
+	out=$(printf '%s\n' "SET gp.optimizer = off;" "SET gp.enable_runtime_filter = on;" \
+		"$rf_explain $rf_join" "$rf_join" "SET gp.enable_runtime_filter = off;" "$rf_join" | qf 0 | tr '\n' '|')
+	case "$out" in
+		*"->  RuntimeFilter (actual rows=4000.00 loops=1)|"*"Bloom Bits: 1048576|"*"->  Gather Motion 2:1 on rff  (slice1; segments: 2) (actual rows=40000.00 loops=1)|"*"|3900|195|3900|195|")
+			ok "the planner's hash join takes a RuntimeFilter: 40,000 outer rows, 4,000 passed -- 3,900 that meet, 100 with a NULL key -- and the same answer" ;;
+		*) notok "a RuntimeFilter on the planner's route" "$out" ;;
+	esac
+	out=$(printf '%s\n' "SET gp.optimizer = off;" "SET gp.enable_runtime_filter_pushdown = on;" \
+		"$rf_explain $rf_join" "$rf_join" | qf 0 | tr '\n' '|')
+	case "$out" in
+		*"RuntimeFilter"*) notok "pushdown alone" "$out" ;;
+		*"->  Gather Motion 2:1 on rff  (slice1; segments: 2) (actual rows=4000.00 loops=1)|"*"Rows Removed by Pushdown Runtime Filter: 36000|"*"|3900|195|")
+			ok "pushed down, the key's values drop 36,000 rows where the gather reads them, which EXPLAIN ANALYZE says" ;;
+		*) notok "pushdown into the planner's gather" "$out" ;;
+	esac
+	out=$(printf '%s\n' "SET gp.optimizer = off;" "SET gp.enable_runtime_filter = on;" \
+		"SET gp.enable_runtime_filter_pushdown = on;" "$rf_explain $rf_left" "$rf_left" | qf 0 | tr '\n' '|')
+	case "$out" in
+		*"RuntimeFilter"*|*"Pushdown Runtime Filter"*) notok "a left join's preserved side, filtered" "$out" ;;
+		*"Hash Left Join"*"|40000|3900|") ok "a left join's preserved side is filtered by neither" ;;
+		*) notok "a left join under the runtime filters" "$out" ;;
+	esac
+	# A hash join run for each row of a subquery's, its hash table made again
+	# for each: its filters are the table's that it probes, each time.
+	out=$(for on in on off; do
+		printf '%s\n' "SET gp.optimizer = off;" "SET gp.enable_runtime_filter = $on;" \
+			"SET gp.enable_runtime_filter_pushdown = $on;" \
+			"SELECT x.p, (SELECT count(*) FROM rff JOIN rfd USING (d) WHERE rfd.p = x.p) FROM (VALUES (0), (3), (7)) x(p) ORDER BY 1;" | qf 0
+	done | tr '\n' ' ')
+	[ "$out" = "0|3900 3|4000 7|4000 0|3900 3|4000 7|4000 " ] \
+		&& ok "a hash join whose hash table is made again for each row keeps its answers" \
+		|| notok "a filtered hash join made again for each row" "$out"
+	# ORCA's hash joins run on the segments, which are sent the setting, and
+	# its scans there drop what the key rules out, as a segment's own plan
+	# shows; the coordinator's EXPLAIN ANALYZE describes ORCA's fragment
+	# without running it.
+	out=$(for on in on off; do
+		printf '%s\n' "SET gp.enable_runtime_filter_pushdown = $on;" "$rf_join" "$rf_left" | qf 0
+	done | tr '\n' ' ')
+	plan=$(q 0 "EXPLAIN (COSTS OFF) $rf_join")
+	seg=$(q 0 "SET gp.enable_runtime_filter_pushdown = on; SELECT string_agg(DISTINCT current_setting('gp.enable_runtime_filter_pushdown'), ',') FROM gp_dist_random('gp_id');")
+	case "$plan|$out|$seg" in
+		*"Gather Motion"*"Hash Join"*"Optimizer: GPORCA|3900|195 40000|3900 3900|195 40000|3900 |on")
+			ok "ORCA's hash joins run on the segments, sent the setting, and answer as without it" ;;
+		*) notok "pushdown under ORCA" "$plan / $out / $seg" ;;
+	esac
+	out=$(printf '%s\n' "SET gp.enable_runtime_filter_pushdown = on;" "SET enable_mergejoin = off;" \
+		"SET enable_nestloop = off;" "$rf_explain $rf_join" | qf 1 | tr '\n' '|')
+	case "$out" in
+		*"->  Seq Scan on rff (actual rows="*"|"*"Rows Removed by Pushdown Runtime Filter: "[1-9]*) ok "a segment's sequential scan drops the rows the key rules out" ;;
+		*) notok "pushdown into a segment's sequential scan" "$out" ;;
+	esac
+
 	# A segment takes a plan only from a connection with the secret.
 	frag="SELECT gp_internal.exec_fragment('{PLANNEDSTMT :commandType 1}', '');"
 	for opts in "-c gp.qe_identity=seg0/dbid1/sess1" \

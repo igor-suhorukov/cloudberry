@@ -392,7 +392,7 @@ skip dsp  compresstype "zlib" can't be used with compresslevel 0; compresslevel=
 run  not_out_of_shmem_exit_slots
 skip create_am_gp  function ao_row_tableam_handler(internal) does not exist; function ao_column_tableam_handler(internal) does not exist
 skip cbdb_optimizer_test  unrecognized configuration parameter "gp_enable_ao_indexscan"
-skip gp_runtime_filter  unrecognized configuration parameter "gp_enable_runtime_filter"; unrecognized configuration parameter "gp_enable_runtime_filter_pushdown"
+run  gp_runtime_filter
 skip db_size_functions  database with OID 9999 does not exist; tablespace with OID 9999 does not exist
 skip cbdb_db_size_functions  function cbdb_relation_size(regclass[]) does not exist; function cbdb_relation_size(oid[], unknown) does not exist
 run  eagerfree

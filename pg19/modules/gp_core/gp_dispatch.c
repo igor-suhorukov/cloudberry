@@ -286,6 +286,9 @@ static const char *const synced_settings[] = {
 	"pax.default_storage_format",
 	"pax.bloom_filter_work_memory_bytes",
 	"pax.log_filter_tree",
+	/* the runtime filters of a segment's hash joins (gp_rtfilter.c) */
+	"gp.enable_runtime_filter",
+	"gp.enable_runtime_filter_pushdown",
 };
 
 #define NUM_SYNCED_SETTINGS	lengthof(synced_settings)

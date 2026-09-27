@@ -61,6 +61,7 @@
 #include "gp_loopback.h"
 #include "gp_metatrack.h"
 #include "gp_policy.h"
+#include "gp_rtfilter.h"
 #include "gp_scan.h"
 #include "gp_segadmin.h"
 #include "gp_segment.h"
@@ -300,6 +301,13 @@ _PG_init(void)
 	 * of shared memory, where gp.enable_query_metrics is on.
 	 */
 	GpMetricsInit();
+
+	/*
+	 * Cloudberry's runtime filters: a Bloom filter of a hash join's inner
+	 * keys above its outer side, and pushed down into the scans below it
+	 * (gp_rtfilter.c); on one node too.
+	 */
+	GpRtFilterInit();
 
 	/*
 	 * Deliberately no MarkGUCPrefixReserved("gp") here.  It drops every
