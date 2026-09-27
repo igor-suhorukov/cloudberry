@@ -21,7 +21,7 @@ CREATE TABLE gp_security.password_history (
 	rolname		name NOT NULL,
 	verifier	text NOT NULL,
 	set_at		timestamptz NOT NULL DEFAULT now()
-);
+) USING heap;
 
 CREATE INDEX password_history_rolname_index
 	ON gp_security.password_history (rolname, set_at DESC);

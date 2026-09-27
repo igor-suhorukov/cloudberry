@@ -114,7 +114,7 @@ CREATE TABLE gp_exttable.protocol (
 	ptcowner oid NOT NULL,
 	ptctrusted bool NOT NULL,
 	ptcacl aclitem[]
-);
+) USING heap;
 
 CREATE VIEW pg_catalog.pg_extprotocol AS
 	SELECT oid, ptcname, ptcreadfn, ptcwritefn, ptcvalidatorfn, ptcowner,

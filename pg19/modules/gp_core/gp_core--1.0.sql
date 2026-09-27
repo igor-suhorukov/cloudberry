@@ -373,7 +373,7 @@ CREATE TABLE gp_internal.configuration_history (
 	"time" timestamptz NOT NULL,
 	dbid int2 NOT NULL,
 	"desc" text
-);
+) USING heap;
 
 CREATE VIEW pg_catalog.gp_configuration_history AS
 	SELECT * FROM gp_internal.fts_history()
@@ -419,7 +419,7 @@ CREATE TABLE gp_internal.stat_last_operation (
 	stausename name NOT NULL,
 	stasubtype text,
 	statime timestamptz
-);
+) USING heap;
 CREATE UNIQUE INDEX stat_last_operation_key
 	ON gp_internal.stat_last_operation (classid, objid, staactionname);
 
@@ -431,7 +431,7 @@ CREATE TABLE gp_internal.stat_last_shoperation (
 	stausename name NOT NULL,
 	stasubtype text,
 	statime timestamptz
-);
+) USING heap;
 CREATE UNIQUE INDEX stat_last_shoperation_key
 	ON gp_internal.stat_last_shoperation (classid, objid, staactionname);
 

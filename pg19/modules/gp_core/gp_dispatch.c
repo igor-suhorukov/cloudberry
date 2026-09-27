@@ -297,18 +297,49 @@ static const char *const superuser_settings[] = {
 };
 
 /*
+ * Whether the segments have a table access method of this database's: one
+ * made before this transaction, as CREATE EXTENSION pax is sent to them once
+ * the coordinator has run it.
+ */
+static bool
+segments_have_am(const char *amname)
+{
+	HeapTuple	tuple;
+	bool		result;
+
+	tuple = SearchSysCache1(AMNAME, CStringGetDatum(amname));
+	if (!HeapTupleIsValid(tuple))
+		return false;
+	result = !TransactionIdIsCurrentTransactionId(HeapTupleHeaderGetXmin(tuple->t_data));
+	ReleaseSysCache(tuple);
+	return result;
+}
+
+/*
  * A setting's value, to be sent -- or NULL, for one not defined here or one
  * the session user may not set, which its segments take from the cluster's
- * configuration, as the coordinator took it.
+ * configuration, as the coordinator took it.  So is a default table access
+ * method the segments have not: pax, set for every database as Cloudberry's
+ * CI sets it, in a database the extension is not created in, or not yet.  A
+ * segment refuses a SET of it there, where the coordinator took it from its
+ * configuration on faith, as PostgreSQL takes one outside a transaction; and
+ * neither could make a table with it.  Once they have it, it is sent.
  */
 static const char *
 sync_value(int i)
 {
+	const char *value;
+
 	for (int j = 0; j < lengthof(superuser_settings); j++)
 		if (strcmp(synced_settings[i], superuser_settings[j]) == 0 &&
 			!superuser_arg(GetSessionUserId()))
 			return NULL;
-	return GetConfigOption(synced_settings[i], true, false);
+	value = GetConfigOption(synced_settings[i], true, false);
+	if (value != NULL && IsTransactionState() &&
+		strcmp(synced_settings[i], "default_table_access_method") == 0 &&
+		!segments_have_am(value))
+		return NULL;
+	return value;
 }
 
 /* How many rows a segment sends at a time when a relation is read. */
