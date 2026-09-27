@@ -444,6 +444,16 @@ tools:
   call's change is its transaction's: `gp_segment_configuration` shows it
   to the session, a rollback drops it, and the commit writes every change
   at once — the cluster file, `gpsegconfig_dump` and shared memory;
+- segments added to the running cluster after the last, and the last
+  removed, as gpexpand and gpshrink do (M8, `gp_expand.c`): each session
+  takes the new number of segments as its next transaction first asks for
+  it, with a new gang, unless it has a temporary table, and a segment
+  process computes with its coordinator's number, which comes with its
+  identity; room for `gp.max_segments` of them is made as the coordinator
+  starts; every table is first given the number it is on in its label
+  (`gp.expand_pin_numsegments()`), and gpexpand's catalog lock,
+  `gp_expand_lock_catalog()`, which every statement that changes a catalog
+  takes shared, keeps the catalogs from changing while a segment is copied;
 - the coordinator tells the segments a transaction's second phase before
   the transaction ends for the other sessions, as Cloudberry's does, from
   O33, `xact_commit_recorded_hook`, so that no session sees it committed
@@ -500,7 +510,9 @@ Cloudberry's management tools, gpMgmt, are installed beside the server
 (`gpMgmt/`, GPHOME the server's prefix), and run on PostgreSQL 19's own
 initdb, pg_ctl, pg_basebackup and pg_rewind: gpinitsystem, gpstart,
 gpstop, gpstate, gpconfig, gprecoverseg, gpaddmirrors, gpmovemirrors,
-gpinitstandby, gpactivatestandby and gpdeletesystem.  gpinitsystem's
+gpinitstandby, gpactivatestandby, gpdeletesystem, and gpexpand and
+gpshrink (M8), whose new segment is a copy of the coordinator made a
+segment's, with a cluster file of its own.  gpinitsystem's
 `NODE_SSL_DIR` makes a cluster whose nodes authenticate each other by
 certificates, and the lines the tools add to a node's `pg_hba.conf` later
 follow it (`gppylib/nodetls.py`).  What they ask of Cloudberry's
@@ -513,18 +525,19 @@ coordinator's cluster file and change it through `gp_core`'s segment
 administration functions, where Cloudberry's read and write its catalog.
 A file the port changes is a copy under `gpMgmt/src`, headed with what it
 changes; the rest are installed from Cloudberry's tree as they are.
-`gpMgmt/files.txt` lists both, and what is not installed, and why —
-gpexpand and gpshrink, since a cluster's segments are fixed when its
-coordinator starts.  The rest are installed too (M8): gpcheckcat, its checks
-reading each segment's catalog rows through `gp_internal.segment_query()` and
-checking what the port keeps in place of Cloudberry's catalogs — the `gp`
-labels, gp_ao's segment files, PAX's aux tables, directory tables' files —
-against PostgreSQL 19's catalog, its foreign keys made at build time from
-`system_fk_info.h`; gppkg, installing debs on a Debian host; gpload,
-analyzedb (counting AO and PAX tables' changes by gp_ao's and PAX's own),
-gpsd, minirepro, gplogfilter, gpmemwatcher, gpmemreport, gpcheckperf with
-gpnetbench and stream, gpreload, gpdemo and gpdirtableload.  The suites
-whose tests run Cloudberry's tools —
+`gpMgmt/files.txt` lists both.  Every one of Cloudberry's tools is installed:
+gpexpand and gpshrink, which add a segment and its mirror to the running
+cluster and take them away again (M8), and the rest too: gpcheckcat, its
+checks reading each segment's catalog rows through
+`gp_internal.segment_query()` and checking what the port keeps in place of
+Cloudberry's catalogs — the `gp` labels, gp_ao's segment files, PAX's aux
+tables, directory tables' files — against PostgreSQL 19's catalog, its
+foreign keys made at build time from `system_fk_info.h`; gppkg, installing
+debs on a Debian host; gpload, analyzedb (counting AO and PAX tables'
+changes by gp_ao's and PAX's own), gpsd, minirepro, gplogfilter,
+gpmemwatcher, gpmemreport, gpcheckperf with gpnetbench and stream,
+gpreload, gpdemo and gpdirtableload.  The suites whose tests run
+Cloudberry's tools —
 `isolation2`, `singlenode_isolation2`, `diskquota` and `greenplum` — run
 gpMgmt's.
 
@@ -675,10 +688,13 @@ gpinitsystem's, a mirror for each primary, and one of primaries alone that
 gpaddmirrors gives mirrors, its nodes authenticating each other by
 certificates -- each tool checked by what the cluster says after it: a
 primary stopped, failed over from and recovered with pg_rewind and with
-pg_basebackup, a standby made and made the coordinator, a mirror moved;
-and on a third cluster the rest of the tools (M8): gpcheckcat finding what
-one segment alone was given, analyzedb, gpload, gplogfilter, gpmemwatcher
-and gpmemreport, gpcheckperf, gpreload, gppkg, gpdirtableload and gpdemo;
+pg_basebackup, a segment and its mirror added by gpexpand and taken away by
+gpshrink, a standby made and made the coordinator, a mirror moved; and on a
+third cluster the rest of the tools (M8): gpcheckcat finding what one
+segment alone was given, analyzedb, gpload, gplogfilter, gpmemwatcher and
+gpmemreport, gpcheckperf, gpreload, gppkg, gpdirtableload and gpdemo;
+`expandshrink`, M8's, Cloudberry's `isolation2_expandshrink_schedule`, as
+its CI runs it, a job of its own on a cluster of its own with mirrors;
 `dump`, M7's, a cluster's pg_dumpall read back into another cluster, and
 one node's into another node, a directory table's files carried by copying
 each segment's directory to the segment of the same content;

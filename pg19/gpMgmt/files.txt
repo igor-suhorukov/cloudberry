@@ -26,11 +26,7 @@
 # Cloudberry's; a path only src/ has is the port's own.  Anything under bin/
 # or sbin/ is installed executable, and so is a file executable where it is.
 #
-# The tools the port does not install, and why:
-#
-#   gpexpand, gpshrink  add and remove segments; a cluster's segment count
-#                       is fixed when its coordinator starts, and
-#                       gp_add_segment_primary() is refused
+# Every one of Cloudberry's tools is installed.
 #
 # Beside Cloudberry's files: gpcheckcat's catalog JSON, which meson makes
 # from PostgreSQL 19's headers (catalog_json.py); gpnetbench and stream,
@@ -77,6 +73,8 @@ bin/gpcheckcat_modules bin/gpcheckcat_modules/orphaned_toast_tables_check.py
 bin/gpcheckcat_modules bin/gpcheckcat_modules/repair.py
 bin/gpcheckcat_modules bin/gpcheckcat_modules/repair_missing_extraneous.py
 bin/gpcheckcat_modules bin/gpcheckcat_modules/unique_index_violation_check.py
+bin bin/gpexpand
+bin bin/gpshrink
 
 bin/gpconfig_modules bin/gpconfig_modules/__init__.py
 bin/gpconfig_modules bin/gpconfig_modules/compare_segment_guc.py
@@ -198,6 +196,7 @@ docs/cli_help doc/gpactivatestandby_help
 docs/cli_help doc/gpaddmirrors_help
 docs/cli_help doc/gpcheckperf_help
 docs/cli_help doc/gpconfig_help
+docs/cli_help doc/gpexpand_help
 docs/cli_help doc/gpdeletesystem_help
 docs/cli_help doc/gpinitstandby_help
 docs/cli_help doc/gpinitsystem_help

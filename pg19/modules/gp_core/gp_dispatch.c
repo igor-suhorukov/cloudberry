@@ -753,11 +753,17 @@ qe_identity_option(int content)
 {
 	/*
 	 * libpq's "options" splits on whitespace, so the value may hold none; the
-	 * three numbers are joined with characters no shell or parser will take an
-	 * interest in.
+	 * numbers are joined with characters no shell or parser will take an
+	 * interest in.  The last is the number of segments this session computes
+	 * with, which the segment process computes with too, as Cloudberry's QE
+	 * takes it from each statement: a segment that ran before gpexpand added
+	 * one has the old number in its file (gp_cluster.c).  It is fixed for the
+	 * gang's life -- the gang is let go of before the session takes another
+	 * (gp_expand.c) -- so the connection is where it goes.
 	 */
-	char	   *option = psprintf("-c gp.qe_identity=seg%d/dbid%d/sess%d",
-									content, GpClusterDbid(), MyProcPid);
+	char	   *option = psprintf("-c gp.qe_identity=seg%d/dbid%d/sess%d/nseg%d",
+									content, GpClusterDbid(), MyProcPid,
+									GpClusterSegmentCount());
 
 	/* And the secret, which says it is this coordinator; see gp_cluster.c. */
 	if (GpClusterHasSecret())
@@ -1036,6 +1042,9 @@ static GpGang *
 gang_get(void)
 {
 	static LocalTransactionId checked = InvalidLocalTransactionId;
+
+	/* the segments added or removed since, taken before the gang is used */
+	GpClusterDecideSegments();
 
 	if (gang != NULL && GpClusterStale())
 	{

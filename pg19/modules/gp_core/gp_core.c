@@ -51,6 +51,7 @@
 #include "gp_dispatch.h"
 #include "gp_dtm_debug.h"
 #include "gp_dtx.h"
+#include "gp_expand.h"
 #include "gp_explain.h"
 #include "gp_fault.h"
 #include "gp_foreign.h"
@@ -333,8 +334,10 @@ _PG_init(void)
 	/*
 	 * ANALYZE of a partitioned table as Cloudberry does it: the relations a
 	 * statement takes, by its two settings and ROOTPARTITION, in its order.
-	 * Last of gp_core's utility hooks, so that it is the first to see the
-	 * statement and the others see the list it makes; on one node too.
+	 * After gp_core's other utility hooks but gp_foreign.c's and
+	 * gp_expand.c's, below, which pass an ANALYZE on as it came, so that it
+	 * sees the statement before the rest and they see the list it makes; on
+	 * one node too.
 	 */
 	GpPartAnalyzeInit();
 
@@ -345,6 +348,15 @@ _PG_init(void)
 	 * GpPartAnalyzeInit()'s, which passes it every other statement untouched.
 	 */
 	GpForeignInit();
+
+	/*
+	 * gpexpand's catalog lock, which every statement that changes a catalog
+	 * on the coordinator takes (gp_expand.c): last of gp_core's utility
+	 * hooks, so that it is the first to see the statement, before any of
+	 * them has changed anything.  And what decides whether a session takes
+	 * the segments gpexpand added or gpshrink removed.
+	 */
+	GpExpandInit();
 
 	/*
 	 * Deliberately no MarkGUCPrefixReserved("gp") here.  It drops every

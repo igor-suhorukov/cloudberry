@@ -1,0 +1,11 @@
+# Cloudberry's isolation2_expandshrink_schedule (src/test/isolation2), as the
+# port runs it on a coordinator and three segments, with a mirror for each
+# and a standby, through the isolation2 suite's harness: M8's gpexpand and
+# gpshrink.
+#
+#   run   the test runs here, in both passes; cloudberry/ holds a difference
+#         reviewed and kept, where one pass has one.  The third word is the
+#         group, whose name begins "mirrors", so that the harness makes its
+#         cluster with a mirror for each segment, as Cloudberry's demo
+#         cluster has.
+run  gpexpand_gpshrink                             mirrors_expand

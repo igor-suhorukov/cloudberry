@@ -58,9 +58,20 @@
  * started after it, the one added among them, reads it -- then to
  * gpsegconfig_dump and to shared memory, which keeps where each node is
  * beside its state.  The room there is fixed as the server starts: a
- * primary and a mirror for each content, the coordinator and a standby,
- * every node a cluster of these contents can have.  On a cluster of several
- * hosts, Cloudberry's tools would copy the file to the others.
+ * primary and a mirror for each content the cluster may grow to --
+ * gp.max_segments of them, or the file's, if it has more -- the coordinator
+ * and a standby.  On a cluster of several hosts, Cloudberry's tools would
+ * copy the file to the others.
+ *
+ * gpexpand adds segments so, and gpshrink removes the last ones (gp_expand.c):
+ * the number of segments is kept in shared memory beside the nodes, and a
+ * backend takes it with them -- once a transaction, as the transaction first
+ * asks for it, so never while a gang made for the old number is in use -- as
+ * Cloudberry's backend takes gp_segment_configuration's rows as each
+ * transaction starts.  A segment process computes with its coordinator
+ * backend's number, which comes with its identity, where Cloudberry's comes
+ * with each statement: a segment that was running before the change still
+ * has the old number in its file.
  *
  * Cloudberry sources this file stands in for:
  *	  src/backend/cdb/cdbutil.c (the readGpSegConfig half), and
@@ -73,6 +84,7 @@
 #include <ctype.h>
 #include <unistd.h>
 
+#include "access/xact.h"
 #include "access/xlog.h"
 #include "access/xlog_internal.h"
 #include "access/xloginsert.h"
@@ -83,10 +95,12 @@
 #include "storage/fd.h"
 #include "storage/ipc.h"
 #include "storage/lwlock.h"
+#include "storage/proc.h"
 #include "storage/shmem.h"
 #include "storage/spin.h"
 #include "utils/builtins.h"
 #include "utils/guc.h"
+#include "utils/inval.h"
 #include "utils/memutils.h"
 #include "utils/tuplestore.h"
 
@@ -103,6 +117,7 @@ static char *gp_cluster_config = NULL;
 static int	gp_dbid = 1;
 static int	gp_role_setting = GP_ROLE_UTILITY;
 static char *gp_qe_identity = NULL;
+static int	gp_max_segments = 64;
 
 /* gp.session_id, which is shown and never set; see show_session_id(). */
 static int	gp_session_id_shown = -1;
@@ -135,9 +150,30 @@ static int	cluster_nnodes = 0;
 /* An empty place's content id, which no content has. */
 #define GP_CLUSTER_NO_CONTENT	(-2)
 
-/* The primaries with content >= 0, in content order: a slice of the above. */
+/*
+ * The primaries with content >= 0, in content order: a slice of the above,
+ * with room for every content the cluster may grow to, so that it stays
+ * where a gang's connections point.  The number of them is the one this
+ * backend last took from shared memory (GpClusterAdoptSegments()), or the
+ * file's before it first has.
+ */
 static GpSegmentConfig *cluster_segments = NULL;
 static int	cluster_nsegments = 0;
+static int	cluster_max_segments = 0;
+
+/* gpexpand's version the number is of, and whether this backend took it. */
+static uint64 cluster_expand_version = 0;
+static bool cluster_counted = false;
+
+/*
+ * What says whether a backend takes the segments changed since it last took
+ * them (gp_expand.c), and the transaction it last said it for.
+ */
+static GpClusterDecider cluster_decider = NULL;
+static LocalTransactionId cluster_decided = InvalidLocalTransactionId;
+
+/* On a segment process, its coordinator backend's number; -1 not read yet. */
+static int	cluster_qe_nsegments = -1;
 
 /* This node's entry in it. */
 static const GpSegmentConfig *cluster_self = NULL;
@@ -165,9 +201,11 @@ typedef struct GpClusterSlot
  */
 typedef struct GpClusterShared
 {
-	slock_t		mutex;			/* the states, and the two versions */
+	slock_t		mutex;			/* the states, and the versions */
 	uint64		version;		/* bumped at each change of a state or a node */
 	uint64		nodes_version;	/* bumped at each change of a node */
+	uint64		expand_version; /* gpexpand's, 0 as the server starts */
+	int			nsegments;		/* the contents 0..n-1 the primaries hold */
 	LWLock	   *lock;
 	int			nnodes;
 	GpClusterNodeState nodes[FLEXIBLE_ARRAY_MEMBER];
@@ -475,8 +513,9 @@ gp_cluster_read_file(const char *path)
 
 	/*
 	 * And after them the room for what the coordinator may add: a primary
-	 * and a mirror for each content the file's primaries hold, and the
-	 * coordinator and a standby.
+	 * and a mirror for each content the cluster may grow to -- as many as
+	 * gp.max_segments says, or the file's primaries hold, if they hold more
+	 * -- and the coordinator and a standby.
 	 */
 	{
 		int			nsegments = 0;
@@ -485,7 +524,8 @@ gp_cluster_read_file(const char *path)
 		for (int i = 0; i < nnodes; i++)
 			if (nodes[i].content >= 0 && nodes[i].preferred_role == 'p')
 				nsegments++;
-		room = Max(nnodes, 2 * (nsegments + 1));
+		cluster_max_segments = Max(gp_max_segments, nsegments);
+		room = Max(nnodes, 2 * (cluster_max_segments + 1));
 		cluster = palloc_array(GpSegmentConfig, room);
 		memcpy(cluster, nodes, nnodes * sizeof(GpSegmentConfig));
 		for (int i = nnodes; i < room; i++)
@@ -563,7 +603,7 @@ cluster_build_segments(const char *path)
 
 	oldcxt = MemoryContextSwitchTo(TopMemoryContext);
 	cluster_segments = nsegments > 0
-		? (GpSegmentConfig *) palloc0_array(GpSegmentConfig, nsegments)
+		? (GpSegmentConfig *) palloc0_array(GpSegmentConfig, cluster_max_segments)
 		: NULL;
 	MemoryContextSwitchTo(oldcxt);
 	cluster_nsegments = nsegments;
@@ -857,6 +897,21 @@ GpClusterRedo(const char *text, int len)
 /* The live copy                                                             */
 /* ------------------------------------------------------------------------- */
 
+/*
+ * How many segments these nodes are: one more than the greatest content id
+ * any of them has, the coordinator's -1 being none.
+ */
+static int
+count_segments(const GpSegmentConfig *nodes, int nnodes)
+{
+	int			nsegments = 0;
+
+	for (int i = 0; i < nnodes; i++)
+		if (nodes[i].dbid != 0 && nodes[i].content >= nsegments)
+			nsegments = nodes[i].content + 1;
+	return nsegments;
+}
+
 static Size
 cluster_shared_size(void)
 {
@@ -918,6 +973,11 @@ cluster_reread_file(void)
 		for (int i = 0; i < cluster_nnodes; i++)
 			if (cluster[i].dbid == gp_dbid)
 				cluster_self = &cluster[i];
+
+		/* and the segments, which the file holds as the nodes last changed */
+		if (cluster_segments != NULL)
+			cluster_nsegments = Min(count_segments(cluster, cluster_nnodes),
+									cluster_max_segments);
 	}
 	PG_CATCH();
 	{
@@ -968,6 +1028,8 @@ cluster_shmem_startup(void)
 		SpinLockInit(&cluster_shared->mutex);
 		cluster_shared->version = 1;
 		cluster_shared->nodes_version = 1;
+		cluster_shared->expand_version = 0;
+		cluster_shared->nsegments = cluster_nsegments;
 		cluster_shared->lock = &(GetNamedLWLockTranche("gp_core cluster"))->lock;
 		cluster_shared->nnodes = cluster_nnodes;
 		for (int i = 0; i < cluster_nnodes; i++)
@@ -1111,6 +1173,103 @@ GpClusterStale(void)
 }
 
 bool
+GpClusterSegmentsChanged(void)
+{
+	bool		changed;
+
+	if (cluster_shared == NULL)
+		return false;
+	SpinLockAcquire(&cluster_shared->mutex);
+	changed = cluster_shared->nsegments != cluster_nsegments ||
+		cluster_shared->expand_version != cluster_expand_version;
+	SpinLockRelease(&cluster_shared->mutex);
+	return changed;
+}
+
+/*
+ * Take the number of segments from shared memory, gpexpand's version with it,
+ * and the primaries of the contents it counts, as FTS last published them.
+ * The places a content no longer counted had are emptied.
+ */
+bool
+GpClusterAdoptSegments(void)
+{
+	int			nsegments;
+	uint64		expand_version;
+
+	if (cluster_shared == NULL || cluster_segments == NULL)
+		return false;
+	cluster_counted = true;
+	SpinLockAcquire(&cluster_shared->mutex);
+	nsegments = cluster_shared->nsegments;
+	expand_version = cluster_shared->expand_version;
+	SpinLockRelease(&cluster_shared->mutex);
+	if (nsegments == cluster_nsegments &&
+		expand_version == cluster_expand_version)
+		return false;
+
+	cluster_nsegments = nsegments;
+	cluster_expand_version = expand_version;
+	for (int content = nsegments; content < cluster_max_segments; content++)
+		memset(&cluster_segments[content], 0, sizeof(GpSegmentConfig));
+
+	/* every state again, so that each content counted now has its primary */
+	cluster_version = 0;
+	(void) GpClusterRefresh();
+	return true;
+}
+
+uint64
+GpClusterAdoptedExpandVersion(void)
+{
+	GpClusterDecideSegments();
+	return cluster_expand_version;
+}
+
+int
+GpClusterMaxSegments(void)
+{
+	return cluster_segments != NULL ? cluster_max_segments : 0;
+}
+
+void
+GpClusterSetDecider(GpClusterDecider decider)
+{
+	cluster_decider = decider;
+}
+
+/*
+ * A backend of the coordinator's takes the number once before it first asks
+ * for it -- one forked after the segments changed has the postmaster's, the
+ * number the server started with -- and then, once in each transaction, as
+ * it first asks, whether it takes the segments changed since is the
+ * decider's to say: nothing in the transaction has used the number yet.  A
+ * process of no database, which a decider could not look into, takes them
+ * itself (GpClusterAdoptSegments()).
+ */
+void
+GpClusterDecideSegments(void)
+{
+	if (!IsUnderPostmaster || cluster_self == NULL ||
+		cluster_self->content != -1 || GpClusterIsDispatched())
+		return;
+	if (MyProc != NULL && IsTransactionState())
+	{
+		if (cluster_decided == MyProc->vxid.lxid)
+			return;
+		cluster_decided = MyProc->vxid.lxid;
+	}
+	else if (cluster_counted)
+		return;
+
+	if (!cluster_counted)
+		(void) GpClusterAdoptSegments();
+	else if (cluster_decider != NULL && OidIsValid(MyDatabaseId) &&
+			 GpClusterSegmentsChanged())
+		cluster_decider();
+}
+
+bool
 GpClusterIsPrimaryNow(int dbid)
 {
 	bool		primary = false;
@@ -1186,6 +1345,29 @@ GpClusterPublish(const GpClusterNodeState *states)
 	LWLockRelease(cluster_shared->lock);
 	cluster_dump_replicated();
 	return true;
+}
+
+uint64
+GpClusterExpandVersion(void)
+{
+	uint64		version;
+
+	if (cluster_shared == NULL)
+		return 0;
+	SpinLockAcquire(&cluster_shared->mutex);
+	version = cluster_shared->expand_version;
+	SpinLockRelease(&cluster_shared->mutex);
+	return version;
+}
+
+void
+GpClusterBumpExpandVersion(void)
+{
+	if (cluster_shared == NULL)
+		return;
+	SpinLockAcquire(&cluster_shared->mutex);
+	cluster_shared->expand_version++;
+	SpinLockRelease(&cluster_shared->mutex);
 }
 
 /* ------------------------------------------------------------------------- */
@@ -1363,18 +1545,26 @@ cluster_rewrite_file(void)
 }
 
 /*
- * What a node may be, to be written to the file and read back: a host that is
- * one word, a data directory on the rest of a line, neither holding the
- * file's comment sign.
+ * What a node may be, to be written to the file and read back: a content the
+ * room is for, a host that is one word, a data directory on the rest of a
+ * line, neither holding the file's comment sign.  A cluster whose file had no
+ * segment has none to add either: it is a single node.
  */
 static void
 cluster_check_node(const GpSegmentConfig *node)
 {
 	const char *bad = NULL;
+	int			max_segments = cluster_segments != NULL ? cluster_max_segments : 0;
 
 	if (node->dbid <= 0)
 		bad = psprintf("dbid %d is not positive", node->dbid);
-	else if (node->content < -1 || node->content >= cluster_nsegments)
+	else if (node->content >= max_segments)
+		ereport(ERROR,
+				(errcode(ERRCODE_PROGRAM_LIMIT_EXCEEDED),
+				 errmsg("the cluster has no room for content %d", node->content),
+				 errdetail("There is room for %d segments.", max_segments),
+				 errhint("\"gp.max_segments\" says how many segments a cluster may grow to while it runs; it is read as the coordinator starts.")));
+	else if (node->content < -1)
 		bad = psprintf("content id %d is none of this cluster's", node->content);
 	else if ((node->role != 'p' && node->role != 'm') ||
 			 (node->preferred_role != 'p' && node->preferred_role != 'm'))
@@ -1402,11 +1592,14 @@ cluster_check_node(const GpSegmentConfig *node)
 
 /*
  * Nodes that are a cluster: a dbid once each, and one primary for each
- * content, the coordinator's included.
+ * content, the coordinator's included, the contents running from -1 without
+ * a hole.
  */
 static void
 cluster_check_cluster(const GpSegmentConfig *nodes)
 {
+	int			nsegments = count_segments(nodes, cluster_nnodes);
+
 	for (int i = 0; i < cluster_nnodes; i++)
 	{
 		int			nprimaries = 0;
@@ -1430,7 +1623,7 @@ cluster_check_cluster(const GpSegmentConfig *nodes)
 					 errmsg("content %d would have %d primaries", nodes[i].content,
 							nprimaries)));
 	}
-	for (int content = -1; content < cluster_nsegments; content++)
+	for (int content = -1; content < nsegments; content++)
 	{
 		bool		found = false;
 
@@ -1449,6 +1642,7 @@ GpClusterReplaceNodes(const GpSegmentConfig *nodes)
 {
 	GpClusterSlot *saved = palloc_array(GpClusterSlot, cluster_nnodes);
 	GpClusterNodeState *states = palloc_array(GpClusterNodeState, cluster_nnodes);
+	int			nsegments;
 
 	Assert(LWLockHeldByMeInMode(cluster_shared->lock, LW_EXCLUSIVE));
 	for (int i = 0; i < cluster_nnodes; i++)
@@ -1497,11 +1691,27 @@ GpClusterReplaceNodes(const GpSegmentConfig *nodes)
 	}
 	PG_END_TRY();
 
+	/*
+	 * A segment added or removed: the number every backend takes at its next
+	 * transaction, gpexpand's version bumped with it, as gp_expand_bump_version()
+	 * bumps it, and every relation's cache invalidated as this transaction
+	 * commits -- the plans cached for the old number, and ORCA's metadata of
+	 * the tables, whose policies are read again.
+	 */
+	nsegments = count_segments(nodes, cluster_nnodes);
+	if (nsegments != cluster_shared->nsegments)
+		CacheInvalidateRelcacheAll();
+
 	SpinLockAcquire(&cluster_shared->mutex);
 	for (int i = 0; i < cluster_nnodes; i++)
 		cluster_shared->nodes[i] = states[i];
 	cluster_shared->nodes_version++;
 	cluster_shared->version++;
+	if (nsegments != cluster_shared->nsegments)
+	{
+		cluster_shared->nsegments = nsegments;
+		cluster_shared->expand_version++;
+	}
 	SpinLockRelease(&cluster_shared->mutex);
 	pfree(saved);
 	pfree(states);
@@ -1514,6 +1724,7 @@ GpClusterReplaceNodes(const GpSegmentConfig *nodes)
 const GpSegmentConfig *
 GpClusterSegments(int *nsegments)
 {
+	GpClusterDecideSegments();
 	*nsegments = cluster_nsegments;
 	return cluster_segments;
 }
@@ -1521,6 +1732,7 @@ GpClusterSegments(int *nsegments)
 const GpSegmentConfig *
 GpClusterSegmentByContent(int content)
 {
+	GpClusterDecideSegments();
 	if (content < 0 || content >= cluster_nsegments)
 		return NULL;
 	return &cluster_segments[content];
@@ -1584,9 +1796,38 @@ GpClusterSessionId(void)
 	return MyProcPid;
 }
 
+/*
+ * A segment process's coordinator backend's number of segments, from the
+ * identity it was given: "seg0/dbid1/sess42/nseg3".  -1 in one given no
+ * number -- the loopback's, a background process's connection -- which
+ * computes with its node's.
+ */
+static int
+qe_nsegments(void)
+{
+	if (cluster_qe_nsegments == -1)
+	{
+		const char *nseg = strstr(GpClusterQeIdentity(), "/nseg");
+
+		cluster_qe_nsegments = 0;
+		if (nseg != NULL)
+			cluster_qe_nsegments = atoi(nseg + strlen("/nseg"));
+	}
+	return cluster_qe_nsegments;
+}
+
 int
 GpClusterSegmentCount(void)
 {
+	/*
+	 * A segment process computes with its coordinator's number, which is the
+	 * one its node's file gives unless segments were added or removed since
+	 * the node started, as Cloudberry's QE computes with the numsegments its
+	 * QD sends with each statement (getgpsegmentCount()).
+	 */
+	if (GpClusterIsDispatched() && qe_nsegments() > 0)
+		return qe_nsegments();
+
 	/*
 	 * One, not zero, when there are no segments.  This is how many segments to
 	 * *compute with*, and consumers divide by it: ORCA asserts 0 < segments
@@ -1594,7 +1835,22 @@ GpClusterSegmentCount(void)
 	 * model.  Cloudberry answers 1 here for the same reason, and says so: "1
 	 * represents a singleton postgresql in utility mode".
 	 */
+	GpClusterDecideSegments();
 	return cluster_nsegments > 0 ? cluster_nsegments : 1;
+}
+
+int
+GpClusterSegmentCountNow(void)
+{
+	int			nsegments;
+
+	if (GpClusterIsDispatched() || cluster_shared == NULL ||
+		cluster_self == NULL || cluster_self->content != -1)
+		return GpClusterSegmentCount();
+	SpinLockAcquire(&cluster_shared->mutex);
+	nsegments = cluster_shared->nsegments;
+	SpinLockRelease(&cluster_shared->mutex);
+	return nsegments > 0 ? nsegments : 1;
 }
 
 bool
@@ -1852,6 +2108,23 @@ GpClusterInit(void)
 							PGC_INTERNAL,
 							GUC_NOT_IN_SAMPLE | GUC_DISALLOW_IN_FILE,
 							NULL, NULL, show_contentid);
+
+	/*
+	 * The port's own: Cloudberry's catalog grows as it is written, and the
+	 * port's shared memory is made as the server starts.
+	 */
+	DefineCustomIntVariable("gp.max_segments",
+							"How many segments the cluster may grow to while it runs.",
+							"gpexpand adds segments to a running cluster up to this "
+							"many; each costs some 4 kB of shared memory on every "
+							"node.  A cluster whose file lists more has room for "
+							"those.",
+							&gp_max_segments,
+							64,
+							1, PG_INT16_MAX,
+							PGC_POSTMASTER,
+							0,
+							NULL, NULL, NULL);
 
 	if (gp_cluster_config != NULL && gp_cluster_config[0] != '\0')
 	{
