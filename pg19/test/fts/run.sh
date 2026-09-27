@@ -476,7 +476,8 @@ q 0 "CREATE TABLE m (a int, b text) DISTRIBUTED BY (a);
 one=$(q 0 "SELECT min(a) FROM m WHERE gp_segment_id = 0")
 rr_open
 q 0 "UPDATE m SET b = 'two-phase'" > /dev/null
-q 0 "UPDATE m SET b = 'one-phase' WHERE a = $one" > /dev/null
+# committed in one phase, with a subtransaction, whose xid the part logs
+q 0 "BEGIN; SAVEPOINT s; UPDATE m SET b = 'one-phase' WHERE a = $one; RELEASE SAVEPOINT s; COMMIT;" > /dev/null
 out=$(logged 1)
 g2=${out%%:*}
 [[ "$out" == *":false "*":true" ]] \
