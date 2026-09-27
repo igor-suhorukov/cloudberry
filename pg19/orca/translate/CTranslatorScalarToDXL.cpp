@@ -530,6 +530,22 @@ CTranslatorScalarToDXL::TranslateScalarToDXL(
 			return CTranslatorScalarToDXL::TranslateFuncExprToDXL(
 				(Expr *) call, var_colid_mapping);
 		}
+		case T_SQLValueFunction:
+		{
+			// CURRENT_DATE, CURRENT_TIMESTAMP and their kin: the calls of
+			// now() they are, which a segment answers as the coordinator
+			// does, its transaction's start being the coordinator's
+			// (gp_core's gp_motion.c).  Not CURRENT_USER and its kin.
+			Expr *call =
+				gpdb::SQLValueFunctionAsCall((SQLValueFunction *) expr);
+			if (nullptr == call)
+			{
+				GP_UNPORTED(
+					"CURRENT_USER, SESSION_USER, CURRENT_CATALOG or CURRENT_SCHEMA");
+			}
+			return CTranslatorScalarToDXL::TranslateScalarToDXL(
+				call, var_colid_mapping);
+		}
 	}
 }
 

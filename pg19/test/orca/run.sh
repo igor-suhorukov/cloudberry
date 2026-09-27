@@ -2087,6 +2087,21 @@ same "WHERE false, as a Result with no child" \
 has "and EXPLAIN shows it" \
     "EXPLAIN (COSTS OFF) SELECT count(*) FROM t0 WHERE false" "One-Time Filter: false"
 
+# CURRENT_DATE, CURRENT_TIMESTAMP(2), LOCALTIME and their kin are the
+# transaction's start, as the session's time zone gives it: ORCA plans the
+# casts of now() they are, which Cloudberry's translator refuses.
+same "CURRENT_DATE and its kin, planned as the casts of now() they are" \
+     "SELECT a, current_date = now()::date, current_time = now()::timetz,
+             current_timestamp = now(), current_timestamp(2) = now()::timestamptz(2),
+             localtime(1) = now()::time(1), localtimestamp = now()::timestamp
+      FROM t0 WHERE a < 3 ORDER BY a" "SET TimeZone = 'Pacific/Kiritimati'"
+has "... and EXPLAIN shows the casts" \
+    "EXPLAIN (COSTS OFF) SELECT count(*) FROM t0 WHERE d < current_date" \
+    "(d < (now())::date)"
+declined "CURRENT_USER and its kin" \
+         "SELECT a FROM t0 WHERE current_user <> 'nobody' AND a < 3 ORDER BY a" \
+         "CURRENT_USER, SESSION_USER, CURRENT_CATALOG or CURRENT_SCHEMA"
+
 # --- what PostgreSQL 18 put in the query ---------------------------------------
 
 # A grouped expression is a Var of an RTE_GROUP entry now, which ORCA's

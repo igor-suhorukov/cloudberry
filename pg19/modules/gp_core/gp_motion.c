@@ -105,6 +105,7 @@
 #include "executor/nodeSubplan.h"
 #include "nodes/params.h"
 #include "utils/datum.h"
+#include "access/parallel.h"
 #include "access/xact.h"
 #include "common/pg_prng.h"
 #include "lib/binaryheap.h"
@@ -352,6 +353,13 @@ static ExecutorEnd_hook_type prev_executor_end = NULL;
  * track_activity_query_size keeps of it.
  */
 #define GP_SOURCE_MARK	"gp_source"
+
+/*
+ * The coordinator's transaction and statement start times, as
+ * "<transaction> <statement>", which now(), CURRENT_DATE and their kin, and
+ * statement_timestamp(), read on the segment too (adopt_start_times()).
+ */
+#define GP_TIMES_MARK	"gp_times"
 
 /* How many fragments this segment process is running, one inside another. */
 static int	fragment_depth = 0;
@@ -1996,6 +2004,14 @@ fragment_sql_ex(EState *estate, Plan *fragment, CustomScan *motion,
 													(Node *) makeString(pnstrdup(text, len)),
 													-1));
 	}
+
+	frag->extension_state =
+		lappend(frag->extension_state,
+				makeDefElem(pstrdup(GP_TIMES_MARK),
+							(Node *) makeString(psprintf(INT64_FORMAT " " INT64_FORMAT,
+														 (int64) GetCurrentTransactionStartTimestamp(),
+														 (int64) GetCurrentStatementStartTimestamp())),
+							-1));
 
 	params = fragment_params(estate, motion, econtext);
 	if (params != NIL)
@@ -3913,6 +3929,34 @@ gather_was_checked(const char *query_string)
 	return strncmp(p + 22, GP_CHECKED_MARKER, strlen(GP_CHECKED_MARKER)) == 0;
 }
 
+/*
+ * now() is the transaction's start, and CURRENT_DATE and the rest of its kin
+ * are read from it; statement_timestamp() is the statement's.  A segment's
+ * are its own process's, so ORCA's plan, which evaluates them wherever it
+ * has them, gave the rows of a segment's slice a time of that segment's,
+ * none of them the coordinator's (development container, 2026-09-26: two
+ * values for one query's now() across two segments).  Cloudberry's
+ * segments take the coordinator's times, and so does a fragment here: the
+ * coordinator sends them with it (fragment_sql_ex()).  PostgreSQL sets them
+ * from outside a process only in a parallel worker, from its leader's,
+ * through SetParallelStartTimestamps(), whose check is only that it is
+ * called in one; a segment's process is the coordinator's worker as a
+ * parallel worker is its leader's, and is taken for one while it is told.
+ */
+static void
+adopt_start_times(const char *times)
+{
+	int64		xact_ts;
+	int64		stmt_ts;
+	int			worker = ParallelWorkerNumber;
+
+	if (sscanf(times, INT64_FORMAT " " INT64_FORMAT, &xact_ts, &stmt_ts) != 2)
+		elog(ERROR, "a fragment's start times are malformed: \"%s\"", times);
+	ParallelWorkerNumber = 0;
+	SetParallelStartTimestamps((TimestampTz) xact_ts, (TimestampTz) stmt_ts);
+	ParallelWorkerNumber = worker;
+}
+
 static void
 motion_executor_start(QueryDesc *queryDesc, int eflags)
 {
@@ -3948,10 +3992,13 @@ motion_executor_start(QueryDesc *queryDesc, int eflags)
 	if (GpClusterIsDispatched() && is_fragment(queryDesc->plannedstmt))
 	{
 		Node	   *source = fragment_mark(queryDesc->plannedstmt, GP_SOURCE_MARK);
+		Node	   *times = fragment_mark(queryDesc->plannedstmt, GP_TIMES_MARK);
 		ListCell   *lc;
 
 		if (source != NULL)
 			pgstat_report_activity(STATE_RUNNING, strVal(source));
+		if (times != NULL)
+			adopt_start_times(strVal(times));
 
 		if (!(eflags & EXEC_FLAG_EXPLAIN_ONLY))
 		{

@@ -3344,6 +3344,71 @@ gpdb::NextValueFromCall(const FuncExpr *call)
 	return nullptr;
 }
 
+/*
+ * Each of them is the transaction's start as the session's time zone gives
+ * it (GetSQLCurrentDate(), GetSQLCurrentTime() and the rest, date.c and
+ * timestamp.c), which is what the cast of now() to its type computes; and
+ * a precision rounds it as the cast to the type with that typmod does
+ * (AdjustTimestampForTypmod(), AdjustTimeForTypmod()).  ORCA has no scalar
+ * for a SQLValueFunction, and plans the calls.
+ */
+Expr *
+gpdb::SQLValueFunctionAsCall(const SQLValueFunction *svf)
+{
+	GP_WRAP_START;
+	{
+		Oid			cast = InvalidOid;	/* now() to the type */
+		Oid			scale = InvalidOid; /* the type to a precision */
+		Expr	   *expr;
+
+		switch (svf->op)
+		{
+			case SVFOP_CURRENT_DATE:
+				cast = F_DATE_TIMESTAMPTZ;
+				break;
+			case SVFOP_CURRENT_TIME:
+			case SVFOP_CURRENT_TIME_N:
+				cast = F_TIMETZ_TIMESTAMPTZ;
+				scale = F_TIMETZ_TIMETZ_INT4;
+				break;
+			case SVFOP_CURRENT_TIMESTAMP:
+			case SVFOP_CURRENT_TIMESTAMP_N:
+				scale = F_TIMESTAMPTZ_TIMESTAMPTZ_INT4;
+				break;
+			case SVFOP_LOCALTIME:
+			case SVFOP_LOCALTIME_N:
+				cast = F_TIME_TIMESTAMPTZ;
+				scale = F_TIME_TIME_INT4;
+				break;
+			case SVFOP_LOCALTIMESTAMP:
+			case SVFOP_LOCALTIMESTAMP_N:
+				cast = F_TIMESTAMP_TIMESTAMPTZ;
+				scale = F_TIMESTAMP_TIMESTAMP_INT4;
+				break;
+			default:
+				return nullptr;
+		}
+
+		expr = (Expr *) makeFuncExpr(F_NOW, TIMESTAMPTZOID, NIL, InvalidOid,
+									 InvalidOid, COERCE_EXPLICIT_CALL);
+		if (OidIsValid(cast))
+			expr = (Expr *) makeFuncExpr(cast, svf->type, list_make1(expr),
+										 InvalidOid, InvalidOid,
+										 COERCE_EXPLICIT_CAST);
+		if (svf->typmod >= 0 && OidIsValid(scale))
+			expr = (Expr *) makeFuncExpr(
+				scale, svf->type,
+				list_make2(expr, makeConst(INT4OID, -1, InvalidOid,
+										   sizeof(int32),
+										   Int32GetDatum(svf->typmod), false,
+										   true)),
+				InvalidOid, InvalidOid, COERCE_EXPLICIT_CAST);
+		return expr;
+	}
+	GP_WRAP_END;
+	return nullptr;
+}
+
 bool
 gpdb::IsPostgisIndexSupport(Oid supportfn)
 {

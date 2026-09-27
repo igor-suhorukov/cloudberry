@@ -1533,6 +1533,25 @@ a\b|\N' ] && [ "$(cat "$ROOT/ce_prog.txt" 2>&1)" = "to a program" ] \
 	orca_same "one key's rows: direct dispatch to its segment" \
 		"SELECT * FROM o WHERE a = 42;" "Gather Motion 1:1  (slice1; segments: 1)"
 
+	# now() is the transaction's start, and in a segment's slice ORCA's plan
+	# evaluates it there: each segment's process took its own, none of them
+	# the coordinator's.  A fragment is sent with the coordinator's
+	# transaction and statement start times, and the segment takes them, as
+	# Cloudberry's do.  A second's sleep first, so that a segment's own
+	# would differ.
+	out=$(q 0 "BEGIN; SELECT pg_sleep(1.1);
+		SELECT count(DISTINCT x) || ' ' || bool_and(x = now())
+			FROM (SELECT now() AS x FROM o) s;
+		SELECT count(DISTINCT x) || ' ' || bool_and(x = statement_timestamp())
+			FROM (SELECT statement_timestamp() AS x FROM o) s;
+		SELECT count(DISTINCT x) || ' ' || bool_and(x = localtimestamp(3))
+			FROM (SELECT localtimestamp(3) AS x FROM o) s;
+		COMMIT;" | grep -v '^$' | tr '\n' ' ')
+	plan=$(q 0 "EXPLAIN (COSTS OFF) SELECT count(DISTINCT x) FROM (SELECT localtimestamp(3) AS x FROM o) s;")
+	[ "$out" = "1 true 1 true 1 true " ] && [[ "$plan" == *"Redistribute Motion"*"Optimizer: GPORCA"* ]] \
+		&& ok "now(), statement_timestamp() and LOCALTIMESTAMP on the segments are the coordinator's" \
+		|| notok "now() on the segments" "$out / $plan"
+
 	# A BRIN index is ORCA's where Cloudberry's ORCA takes it -- over values
 	# in the order of the table's pages, as Cloudberry's brin test has them --
 	# its statistics from the segments after VACUUM ANALYZE.
