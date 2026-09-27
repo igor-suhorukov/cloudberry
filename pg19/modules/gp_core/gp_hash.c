@@ -215,23 +215,27 @@ GpHashSegment(GpHash *h, const Datum *values, const bool *isnull)
 		return GP_HASH_ALL_SEGMENTS;
 
 	/*
-	 * No key: the segments in turn, from one chosen at random with the first
-	 * row, as the port's Redistribute Motion deals a random one's rows
-	 * (gp_motion.c).  Cloudberry chooses each row's segment at random
-	 * (cdbhashrandomseg()), so that a statement's few rows may miss a
-	 * segment -- ten rows one of three, one statement in nineteen -- which
-	 * its commit does not show, as it prepares every segment its write went
-	 * to, and the port's would: it prepares the parts that wrote.  In turn,
-	 * a statement of as many rows as segments reaches every one.
+	 * No key: a segment chosen at random for each row, as Cloudberry's
+	 * cdbhashrandomseg() chooses it -- so that two layouts of a table's rows
+	 * differ, as alter_distribution_policy's REORGANIZE checks -- but for the
+	 * first rows, one to each segment in turn, from one chosen at random.
+	 * Cloudberry's few rows may miss a segment -- ten rows one of three, one
+	 * statement in nineteen -- which its commit does not show, as it
+	 * prepares every segment its write went to, and the port's would: it
+	 * prepares the parts that wrote.  A statement of as many rows as
+	 * segments reaches every one.
 	 */
 	if (h->nattrs == 0)
 	{
 		int			seg;
 
+		if (h->dealt >= (uint32) h->numsegs)
+			return (int) (pg_prng_uint32(&pg_global_prng_state) % (uint32) h->numsegs);
 		if (h->turn == 0)
 			h->turn = pg_prng_uint32(&pg_global_prng_state) % (uint32) h->numsegs + 1;
 		seg = (int) (h->turn - 1);
 		h->turn = (uint32) (seg + 1) % (uint32) h->numsegs + 1;
+		h->dealt++;
 		return seg;
 	}
 

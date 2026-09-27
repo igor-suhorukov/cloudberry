@@ -1458,19 +1458,24 @@ a\b|\N' ] && [ "$(cat "$ROOT/ce_prog.txt" 2>&1)" = "to a program" ] \
 		&& ok "a key column renamed is renamed in the policy; one dropped leaves the table random, with Cloudberry's NOTICE" \
 		|| notok "the key's columns renamed and dropped" "$out / $out2 / $out3 / $out4 / $out5 / $out6"
 
-	# A randomly distributed table's rows are dealt to the segments in turn,
-	# from one chosen at random: a statement of as many rows as segments
-	# reaches every one (direct_dispatch's ten rows, which a random choice
-	# for each row left a segment of one statement in nineteen).
+	# A randomly distributed table's first rows of a statement are dealt one
+	# to each segment in turn, from one chosen at random: a statement of as
+	# many rows as segments reaches every one (direct_dispatch's ten rows,
+	# which a random choice for each row left a segment of one statement in
+	# nineteen); the rows after them go to a segment chosen at random, as
+	# Cloudberry's do, so that two layouts of a table differ.
 	q 0 "CREATE TABLE rrt (a int) DISTRIBUTED RANDOMLY;" >/dev/null
 	out=""
 	for i in 1 2 3; do
-		out="$out$(q 0 "TRUNCATE rrt; INSERT INTO rrt SELECT generate_series(1, 10);
+		out="$out$(q 0 "TRUNCATE rrt; INSERT INTO rrt SELECT generate_series(1, 2);
 				   SELECT string_agg(n::text, ' ') FROM (SELECT count(*) AS n FROM rrt
 				   GROUP BY gp_segment_id ORDER BY gp_segment_id) c;") "
 	done
-	[ "$out" = "5 5 5 5 5 5 " ] && ok "a random table's rows are dealt to the segments in turn ($out)" \
-		|| notok "the rows of a randomly distributed table" "$out"
+	out2=$(q 0 "TRUNCATE rrt; INSERT INTO rrt SELECT generate_series(1, 1000);
+				SELECT count(*) FILTER (WHERE n BETWEEN 400 AND 600), count(*)
+				FROM (SELECT count(*) AS n FROM rrt GROUP BY gp_segment_id) c;")
+	[ "$out|$out2" = "1 1 1 1 1 1 |2|2" ] && ok "a random table's first rows are dealt one to each segment, the rest at random ($out)" \
+		|| notok "the rows of a randomly distributed table" "$out / $out2"
 
 	# A gather the plan reads again -- the inner side of a Nested Loop --
 	# keeps the rows it read, and the segments run its query once.
