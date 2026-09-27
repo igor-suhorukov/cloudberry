@@ -80,7 +80,7 @@ run  tidscan_gp
 run  agg_pushdown
 skip gp_array_agg  function gp_array_agg(integer) does not exist; function gp_array_agg(text) does not exist
 run  gp_dqa
-skip subselect_gp  unrecognized EXPLAIN option "locus"
+run  subselect_gp
 run  subselect_gp2
 run  gp_transactions
 run  olap_group  planner  under ORCA, the last digit of a stddev() follows the order a Redistribute Motion's rows reach its group's aggregate in, which varies from run to run
@@ -321,7 +321,7 @@ skip table_functions  type anytable does not exist; OUT and INOUT arguments aren
 run  opclass_ddl
 run  information_schema
 run  guc_env_var
-skip gp_explain  unrecognized configuration parameter "gp_enable_explain_allstat"; unrecognized EXPLAIN option "slicetable"
+skip gp_explain  differs: EXPLAIN (ANALYZE, WAL) of a write shows no WAL, and EXPLAIN ANALYZE no Vmem reserved or Executor Memory -- the segments' statistics do not reach the coordinator's EXPLAIN
 skip explain_format  differs: EXPLAIN in each of its formats prints the port's plans, which this test compares
 run  olap_plans
 run  gp_copy_dtx
@@ -488,7 +488,7 @@ skip hooktest  could not access file "hooktest/test_hook.so": No such file or di
 run  tuple_serialization
 skip query_info_hook_test  could not access file "query_info_hook_test/query_info_hook_test.so": No such file or directory
 skip freeze_aux_tables  differs: an append-optimized table's aux tables are not pg_aoseg_<oid>, pg_aoblkdir_<oid> and pg_aovisimap_<oid> of pg_aoseg
-skip cbdb_parallel  unrecognized configuration parameter "enable_parallel_semi_join"; unrecognized EXPLAIN option "locus"
+skip cbdb_parallel  unrecognized configuration parameter "enable_parallel_semi_join"; unrecognized configuration parameter "gp_enable_multiphase_limit" -- Cloudberry's parallelism within a segment, which the port has not (decision 2)
 run  window_parallel
 skip vacuum_full_freeze_heap  differs: a heap's size in 8 kB pages, where Cloudberry's expected output counts its 32 kB blocks
 skip vacuum_full_heap  differs: a heap's size in 8 kB pages, where Cloudberry's expected output counts its 32 kB blocks
@@ -508,7 +508,7 @@ skip gangsize  differs: the gangs its statements are dispatched to, by Cloudberr
 run  gang_reuse
 skip run_utility_gpexpand_phase1  gpcheckcat and gppkg are not installed (pg19/gpMgmt/files.txt)
 run  create_extension_fail
-skip offload_entry_to_qe  unrecognized configuration parameter "enable_offload_entry_to_qe"; unrecognized EXPLAIN option "locus"
+skip offload_entry_to_qe  a temporary external table is not supported: CREATE EXTERNAL WEB TEMP TABLE -- an external table is a foreign table, which PostgreSQL makes in no temporary schema; and enable_offload_entry_to_qe, which moves the coordinator's work above a Motion to one segment, has nothing to move on the planner's route, whose gathers are the coordinator's
 skip aqumv  unrecognized configuration parameter "enable_answer_query_using_materialized_views"; unrecognized parameter namespace "gp"
 skip matview_data  relation "gp_matview_aux" does not exist; current transaction is aborted, commands ignored until end of transaction block
 skip directory_table  relation "gp_storage_server" does not exist; syntax error at or near "DATA"

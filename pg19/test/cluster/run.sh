@@ -2807,6 +2807,17 @@ COMMIT;"
 		*) notok "SHOW gp.cluster_secret" "$out" ;;
 	esac
 
+	# EXPLAIN (SLICETABLE) of ORCA's plan is the slice table it carries --
+	# the Redistribute's slice under the Gather's -- and EXPLAIN (LOCUS)
+	# prints nothing under ORCA, as Cloudberry's (gp_explain.c).
+	out=$(q 0 "EXPLAIN (SLICETABLE, LOCUS, COSTS OFF) SELECT count(*) FROM o JOIN po ON o.a = po.y;")
+	case "$out" in
+		*"Locus:"*) notok "EXPLAIN (LOCUS) under ORCA" "$out" ;;
+		*"Slice 0: Dispatcher; root 0; parent -1; gang size 0"*"Reader; root 0; parent 1; gang size 2"*"Optimizer: GPORCA"*)
+			ok "EXPLAIN (SLICETABLE) prints ORCA's slices, and (LOCUS) nothing under ORCA" ;;
+		*) notok "EXPLAIN (SLICETABLE) of ORCA's plan" "$out" ;;
+	esac
+
 	# No secret on the coordinator: ORCA is told, and the planner gathers.
 	# None on the segments either -- a segment that has one takes the
 	# coordinator's word only with it, and a transaction's two-phase commit
@@ -2903,6 +2914,37 @@ COMMIT;"
 		"SHOW gp.statement_mem;" | qf 0)
 	[ "$out" = "2MB" ] && ok "Cloudberry's other settings are accepted, and say what they do here" \
 		|| notok "Cloudberry's accepted settings" "$out"
+
+	# Cloudberry's EXPLAIN options: the slice table of the planner's route --
+	# slice 0 the coordinator's, a Reader a gather, each gather labelled with
+	# its slice -- a write's Primary Writer, the table in JSON; and where each
+	# node's rows are, Entry above a gather and General for a VALUES list,
+	# with gp.optimizer off, as Cloudberry prints them.
+	q 0 "CREATE TABLE xe (a int, b int) DISTRIBUTED BY (a); CREATE TABLE xe2 (a int, b int) DISTRIBUTED BY (a);" >/dev/null
+	out=$(q 0 "SET enable_hashjoin = off; SET enable_nestloop = off;
+			   EXPLAIN (SLICETABLE, COSTS OFF) SELECT * FROM xe JOIN xe2 USING (a);" | tr '\n' '|')
+	case "$out" in
+		*"on xe  (slice1; segments: 2)"*"on xe2  (slice2; segments: 2)"*"Slice 0: Dispatcher; root 0; parent -1; gang size 0|Slice 1: Reader; root 0; parent 0; gang size 2|Slice 2: Reader; root 0; parent 0; gang size 2"*)
+			ok "EXPLAIN (SLICETABLE): the coordinator's slice and a gather's each, which its label names" ;;
+		*) notok "EXPLAIN (SLICETABLE) under the planner" "$out" ;;
+	esac
+	out=$(q 0 "EXPLAIN (SLICETABLE, COSTS OFF) UPDATE xe SET b = 1;
+			   EXPLAIN (SLICETABLE, COSTS OFF, FORMAT JSON) SELECT * FROM xe;" | tr -d ' \n')
+	case "$out" in
+		*"Slice0:PrimaryWriter;root0;parent-1;gangsize2"*'"SliceTable":[{"SliceID":0,"GangType":"Dispatcher"'*'"GangType":"Reader","Root":0,"Parent":0,"GangSize":2}]'*)
+			ok "and a write's slice 0 a Primary Writer, and the table in JSON" ;;
+		*) notok "EXPLAIN (SLICETABLE) of a write, and in JSON" "$out" ;;
+	esac
+	out=$(q 0 "SET gp.optimizer = off;
+			   EXPLAIN (LOCUS, COSTS OFF) SELECT * FROM xe JOIN (VALUES (1), (2)) v(x) ON v.x = xe.b;" | tr '\n' '|')
+	case "$out" in
+		*"Locus: Entry"*"Gather Motion"*"Locus: Entry"*"Locus: General"*)
+			ok "EXPLAIN (LOCUS): Entry above a gather, General for a VALUES list" ;;
+		*) notok "EXPLAIN (LOCUS)" "$out" ;;
+	esac
+	out=$(q 0 "SET gp.enable_explain_allstat = on; SET gp.enable_offload_entry_to_qe = on; SELECT 1;")
+	[ "$out" = "1" ] && ok "gp.enable_explain_allstat and gp.enable_offload_entry_to_qe are Cloudberry's settings" \
+		|| notok "gp.enable_explain_allstat and gp.enable_offload_entry_to_qe" "$out"
 
 	###########################################################################
 	echo "12. DISTRIBUTED BY as Cloudberry checks it, and what the segments say"

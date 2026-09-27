@@ -142,6 +142,7 @@ static bool gp_enable_fast_sri = true;
 static bool gp_force_random_redistribution = false;
 static bool gp_enable_agg_distinct = true;
 static bool gp_enable_sort_limit = true;
+static bool gp_enable_offload_entry_to_qe = false;
 static bool gp_cost_hashjoin_chainwalk = false;
 static int	gp_cached_gang_threshold = 5;
 
@@ -791,6 +792,9 @@ GpSettingsInit(void)
 	define_accepted_bool("gp.force_random_redistribution",
 						 "Force redistribution of insert for randomly-distributed." ROUTE_B,
 						 &gp_force_random_redistribution, false);
+	define_accepted_bool("gp.enable_offload_entry_to_qe",
+						 "Enable plans with operations on coordinator to be offloaded to QEs." ROUTE_B,
+						 &gp_enable_offload_entry_to_qe, false);
 	define_accepted_bool("gp.enable_sort_limit",
 						 "Enable LIMIT operation to be performed while sorting."
 						 " Accepted for Cloudberry's scripts: PostgreSQL's sort below a LIMIT keeps only the rows the LIMIT can return, whatever this says.",

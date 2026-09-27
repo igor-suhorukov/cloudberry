@@ -391,7 +391,8 @@ modules = [
                      'modules/gp_core/gp_catalog.c',
                      'modules/gp_core/gp_median.c',
                      'modules/gp_core/gp_policy.c',
-                     'modules/gp_core/gp_settings.c'),
+                     'modules/gp_core/gp_settings.c',
+                     'modules/gp_core/gp_explain.c'),
     # The dispatcher is a libpq client of the segments; see gp_dispatch.c.
     'dependencies': [libpq_dep],
     'include_directories': [pg_client_inc],

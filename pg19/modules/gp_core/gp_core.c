@@ -50,6 +50,7 @@
 #include "gp_dbcopy.h"
 #include "gp_dispatch.h"
 #include "gp_dtx.h"
+#include "gp_explain.h"
 #include "gp_fault.h"
 #include "gp_fts.h"
 #include "gp_gdd.h"
@@ -279,6 +280,12 @@ _PG_init(void)
 	 * type anyarray taken as anyarray, as Cloudberry's parser takes it.
 	 */
 	GpCatalogInit();
+
+	/*
+	 * Cloudberry's options of EXPLAIN, SLICETABLE and LOCUS, on one node
+	 * too.
+	 */
+	GpExplainInit();
 
 	/*
 	 * Deliberately no MarkGUCPrefixReserved("gp") here.  It drops every

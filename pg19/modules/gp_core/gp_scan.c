@@ -215,6 +215,7 @@ typedef struct GatherScanState
 	int			current_content;	/* the segment of the scan tuple's row */
 	Tuplestorestate *spool;		/* what it read, when it may be read again */
 	TupleTableSlot *spooled;	/* a row of it, read back */
+	int			slice;			/* its slice, as the executor met it */
 } GatherScanState;
 
 /*
@@ -1574,10 +1575,15 @@ gather_begin(CustomScanState *node, EState *estate, int eflags)
 	state->rownulls = palloc_array(bool, Max(state->natts, 1));
 	state->current_content = -1;
 
-	/* each gather is a slice of its own, numbered as the executor meets it */
+	/*
+	 * Each gather is a slice of its own, numbered as the executor meets it --
+	 * in a plan EXPLAIN only describes too, whose label and slice table say
+	 * it (gp_explain.c).
+	 */
+	state->slice = GpNextGatherSlice();
 	if (!(eflags & EXEC_FLAG_EXPLAIN_ONLY))
 	{
-		int			slice = GpNextGatherSlice();
+		int			slice = state->slice;
 
 		if (gather_is_current_of(state))
 			GpReportDispatch(slice, true, state->nsegments);
@@ -2317,12 +2323,30 @@ gp_scan_explain_label(PlanState *planstate, ExplainState *es,
 			: state->ncontents > 0 ? state->ncontents : state->nsegments;
 
 		*pname = psprintf("Gather Motion %d:1", nsegs);
-		*suffix = psprintf("  (slice1; segments: %d)", nsegs);
+		*suffix = psprintf("  (slice%d; segments: %d)", state->slice, nsegs);
 		return;
 	}
 
 	if (prev_explain_node_label)
 		prev_explain_node_label(planstate, es, pname, suffix);
+}
+
+/*
+ * Is this node a gather?  Its slice, and how many segments it reads, for
+ * EXPLAIN's slice table (gp_explain.c).
+ */
+bool
+GpGatherScanSlice(PlanState *ps, int *slice, int *nsegs)
+{
+	GatherScanState *state = (GatherScanState *) ps;
+
+	if (!IsA(ps, CustomScanState) ||
+		((CustomScanState *) ps)->methods != &gather_exec_methods)
+		return false;
+	*slice = state->slice;
+	*nsegs = gather_is_current_of(state) ? 1
+		: state->ncontents > 0 ? state->ncontents : state->nsegments;
+	return true;
 }
 
 void

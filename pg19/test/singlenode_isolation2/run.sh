@@ -127,7 +127,8 @@ echo
 			resource_scheduler|resource_select_only|resource_cleanup_gangs_on_wait|\
 			max_resource_queues|max_resource_portals_per_transaction|max_statement_mem|\
 			debug_resource_group|runaway_detector_activation_percent|\
-			vmem_process_interrupt|explain_memory_verbosity|coredump_on_memerror)
+			vmem_process_interrupt|explain_memory_verbosity|coredump_on_memerror|\
+			enable_offload_entry_to_qe)
 				cbname="$short" ;;
 			*) cbname="gp_$short" ;;
 		esac

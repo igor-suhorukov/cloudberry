@@ -349,7 +349,8 @@ done
 			max_resource_queues|max_resource_portals_per_transaction|max_statement_mem|\
 			debug_resource_group|runaway_detector_activation_percent|\
 			vmem_process_interrupt|explain_memory_verbosity|coredump_on_memerror|\
-			repl_catchup_within_range)
+			repl_catchup_within_range|\
+			enable_offload_entry_to_qe)
 				cbname="$short" ;;
 			*) cbname="gp_$short" ;;
 		esac
