@@ -90,6 +90,36 @@ typedef struct IvmEntry
 	MemoryContext cxt;
 } IvmEntry;
 
+/*
+ * Where a view is maintained from; see GpIvmSite().  On a cluster the
+ * triggers keep what they are handed, and the coordinator maintains the view
+ * once the statement is over (ivm_cluster.c).
+ */
+typedef enum IvmSite
+{
+	IVM_SITE_ONE_NODE,			/* here, by the statement's triggers */
+	IVM_SITE_CLUSTER,			/* by the coordinator, from what each node kept */
+	IVM_SITE_NONE,				/* not at all: a utility session on a node */
+} IvmSite;
+
+/* What GpIvmAsOwnerBegin() changed, for GpIvmAsOwnerEnd() to put back. */
+typedef struct GpIvmOwnerState
+{
+	Oid			userid;
+	int			sec_context;
+	int			nestlevel;
+} GpIvmOwnerState;
+
+/*
+ * One step of a view's maintenance: the rows it loses and the rows it gains
+ * from one place's change, either NULL where there are none, in the view's
+ * columns, handed to whoever applies them (GpIvmComputeDeltas()).
+ */
+typedef void (*IvmDeltaApplier) (Relation matviewRel,
+								 struct Tuplestorestate *old_rows,
+								 struct Tuplestorestate *new_rows,
+								 TupleDesc desc, void *arg);
+
 /* ivm_create.c */
 extern bool GpIvmTakeOption(List **options);
 extern void GpIvmCheckQuery(Query *query);
@@ -106,17 +136,49 @@ extern void GpDynRestored(Oid matviewOid);
 extern void GpDynDropped(Oid matviewOid);
 
 /* ivm_state.c */
-extern void GpIvmEntryBefore(Oid matviewOid);
+extern void GpIvmEntryBefore(Oid matviewOid, bool kept);
 extern IvmEntry *GpIvmEntryAfter(Oid matviewOid, struct TriggerData *trigdata,
-								 bool *is_last);
+								 bool kept, bool *is_last);
+extern IvmEntry *GpIvmEntryMake(Oid matviewOid);
+extern IvmModifiedTable *GpIvmEntryTable(IvmEntry *entry, Relation rel);
+extern IvmTransition *GpIvmEntryAddTransition(IvmEntry *entry,
+											  IvmModifiedTable *table,
+											  struct Tuplestorestate *store,
+											  bool old, bool owned);
+extern IvmEntry *GpIvmEntryTake(Oid matviewOid);
+extern List *GpIvmEntryViews(void);
 extern IvmModifiedTable *GpIvmFindTable(IvmEntry *entry, Oid relid);
 extern void GpIvmEntryForget(IvmEntry *entry);
 
 /* ivm_maintain.c */
 extern void GpIvmRefresh(Oid matviewOid);
+extern IvmSite GpIvmSite(void);
+extern void GpIvmCount(bool by_delta);
+extern void GpIvmAsOwnerBegin(Oid matviewOid, GpIvmOwnerState *state);
+extern void GpIvmAsOwnerEnd(GpIvmOwnerState *state);
 
 /* ivm_delta.c */
 extern Query *GpIvmGetViewQuery(Relation matviewRel);
 extern bool GpIvmApplyDelta(IvmEntry *entry);
+extern bool GpIvmDeltaSupported(IvmEntry *entry, Relation matviewRel,
+								bool cluster);
+extern bool GpIvmComputeDeltas(IvmEntry *entry, Relation matviewRel,
+							   bool cluster, IvmDeltaApplier apply, void *arg);
+extern void GpIvmApplyStaged(Relation matviewRel,
+							 struct Tuplestorestate *old_rows,
+							 struct Tuplestorestate *new_rows, bool replace);
+extern struct Tuplestorestate *GpIvmRunQuery(Query *query,
+											 struct QueryEnvironment *queryEnv,
+											 TupleDesc *tupdesc_out,
+											 double *ntuples_out);
+
+/* ivm_cluster.c */
+struct PlannedStmt;
+extern void GpIvmClusterStatementEnd(struct PlannedStmt *stmt);
+extern void GpIvmClusterUtilityEnd(Oid relid);
+extern bool GpIvmClusterMaintaining(void);
+extern char *GpIvmClusterDefaultDistribution(Query *rewritten, List *colNames);
+extern void GpIvmClusterCheckDistribution(Oid matviewOid, Query *rewritten);
+extern void GpIvmClusterMakeTriggers(Oid matviewOid);
 
 #endif							/* GP_MATVIEW_H */

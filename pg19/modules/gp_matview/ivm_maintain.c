@@ -37,6 +37,15 @@
  * The counters below are how a test tells which happened, since the contents
  * of a view do not say.
  *
+ * Maintenance runs as the view's owner, as a refresh does and as Cloudberry's
+ * maintenance does: whoever writes a base table need not be able to write
+ * the view, or read the other tables it joins.
+ *
+ * On a cluster these triggers fire where the rows are written -- on each
+ * segment, and on the coordinator for what it writes itself, a TRUNCATE --
+ * and keep what they were handed; the coordinator maintains the view from
+ * all of it once the statement is over (ivm_cluster.c).
+ *
  *-------------------------------------------------------------------------
  */
 #include "postgres.h"
@@ -52,12 +61,14 @@
 #include "lib/stringinfo.h"
 #include "miscadmin.h"
 #include "utils/builtins.h"
+#include "utils/guc.h"
 #include "utils/lsyscache.h"
 #include "utils/memutils.h"
 #include "utils/rel.h"
 #include "utils/snapmgr.h"
 #include "utils/syscache.h"
 
+#include "gp_core_api.h"
 #include "gp_matview.h"
 
 PG_FUNCTION_INFO_V1(gp_ivm_immediate_before);
@@ -92,6 +103,67 @@ Datum
 gp_ivm_stats_recompute(PG_FUNCTION_ARGS)
 {
 	PG_RETURN_INT64(maintained_by_recompute);
+}
+
+/* A cluster's coordinator counts its maintenance too (ivm_cluster.c). */
+void
+GpIvmCount(bool by_delta)
+{
+	if (by_delta)
+		maintained_by_delta++;
+	else
+		maintained_by_recompute++;
+}
+
+/*
+ * Where this backend's triggers maintain a view from: here, on one node; for
+ * the coordinator, on a cluster's coordinator and its segments; and nowhere
+ * in a utility session on a cluster's node, whose statement writes that
+ * node's rows alone, as Cloudberry's triggers do nothing there.
+ */
+IvmSite
+GpIvmSite(void)
+{
+	const GpCoreApi *core = GpCoreApiLookup();
+	int			role;
+
+	if (core == NULL || core->is_single_node())
+		return IVM_SITE_ONE_NODE;
+	role = core->get_role();
+	if (role == GP_ROLE_DISPATCH || role == GP_ROLE_EXECUTE)
+		return IVM_SITE_CLUSTER;
+	return IVM_SITE_NONE;
+}
+
+/*
+ * Maintenance as the view's owner, under the restrictions PostgreSQL's
+ * refresh runs a view's query under: a security-restricted operation, with
+ * a search_path that cannot be made to find another's objects.  The caller
+ * ends it with GpIvmAsOwnerEnd(), or an error does.
+ */
+void
+GpIvmAsOwnerBegin(Oid matviewOid, GpIvmOwnerState *state)
+{
+	HeapTuple	tup = SearchSysCache1(RELOID, ObjectIdGetDatum(matviewOid));
+	Oid			owner;
+
+	if (!HeapTupleIsValid(tup))
+		elog(ERROR, "cache lookup failed for relation %u", matviewOid);
+	owner = ((Form_pg_class) GETSTRUCT(tup))->relowner;
+	ReleaseSysCache(tup);
+
+	GetUserIdAndSecContext(&state->userid, &state->sec_context);
+	SetUserIdAndSecContext(owner,
+						   state->sec_context | SECURITY_RESTRICTED_OPERATION);
+	state->nestlevel = NewGUCNestLevel();
+	RestrictSearchPath();
+}
+
+void
+GpIvmAsOwnerEnd(GpIvmOwnerState *state)
+{
+	AtEOXact_GUC(false, state->nestlevel);
+	SetUserIdAndSecContext(state->userid, state->sec_context);
 }
 
 /*
@@ -194,13 +266,14 @@ gp_ivm_immediate_before(PG_FUNCTION_ARGS)
 {
 	TriggerData *trigdata = (TriggerData *) fcinfo->context;
 	Oid			matviewOid;
+	IvmSite		site = GpIvmSite();
 
 	if (!CALLED_AS_TRIGGER(fcinfo))
 		elog(ERROR, "gp_ivm_immediate_before is a trigger function");
 
 	matviewOid = matview_from_trigger_args(trigdata, "gp_ivm_immediate_before");
-	if (populated(matviewOid))
-		GpIvmEntryBefore(matviewOid);
+	if (site != IVM_SITE_NONE && populated(matviewOid))
+		GpIvmEntryBefore(matviewOid, site == IVM_SITE_CLUSTER);
 
 	return PointerGetDatum(NULL);
 }
@@ -221,16 +294,20 @@ gp_ivm_immediate_maintenance(PG_FUNCTION_ARGS)
 	IvmEntry   *entry;
 	bool		is_last;
 	int			save_depth;
+	IvmSite		site = GpIvmSite();
+	GpIvmOwnerState owner;
 
 	if (!CALLED_AS_TRIGGER(fcinfo))
 		elog(ERROR, "gp_ivm_immediate_maintenance is a trigger function");
 
 	matviewOid = matview_from_trigger_args(trigdata, "gp_ivm_immediate_maintenance");
-	if (!populated(matviewOid))
+	if (site == IVM_SITE_NONE || !populated(matviewOid))
 		return PointerGetDatum(NULL);
 
-	entry = GpIvmEntryAfter(matviewOid, trigdata, &is_last);
-	if (!is_last)
+	/* On a cluster the coordinator maintains it, from what is kept here. */
+	entry = GpIvmEntryAfter(matviewOid, trigdata, site == IVM_SITE_CLUSTER,
+							&is_last);
+	if (!is_last || site == IVM_SITE_CLUSTER)
 		return PointerGetDatum(NULL);
 
 	/*
@@ -252,6 +329,7 @@ gp_ivm_immediate_maintenance(PG_FUNCTION_ARGS)
 
 	PG_TRY();
 	{
+		GpIvmAsOwnerBegin(matviewOid, &owner);
 		OpenMatViewIncrementalMaintenanceExternal();
 
 		/*
@@ -268,6 +346,7 @@ gp_ivm_immediate_maintenance(PG_FUNCTION_ARGS)
 		}
 
 		CloseMatViewIncrementalMaintenanceExternal();
+		GpIvmAsOwnerEnd(&owner);
 	}
 	PG_CATCH();
 	{

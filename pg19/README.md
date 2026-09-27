@@ -386,9 +386,12 @@ tools:
 - a materialized view's rows are on the segments, as a table's are
   (`gp_refresh.c`): CREATE MATERIALIZED VIEW takes its DISTRIBUTED BY, or
   the key CREATE TABLE AS would choose, and REFRESH -- CONCURRENTLY too --
-  fills each segment's copy.  A dynamic table follows; an incremental view
-  is refused on a cluster, where its delta maintenance would have to reach
-  the segments;
+  fills each segment's copy.  A dynamic table follows; so does an
+  incremental view, which the coordinator keeps up to date once each
+  statement is over, from the transition tables the segments' triggers kept:
+  it computes the deltas and sends each segment those of its own rows of the
+  view, which the view is distributed by -- its GROUP BY columns, or every
+  segment for one of a single row (`gp_matview`'s `ivm_cluster.c`);
 - stock PostGIS on a cluster.  An extension's script runs on every node,
   a query in it each node's own, its tables replicated and the
   coordinator's copy of them emptied (`gp_ddl.c`); the same version of an

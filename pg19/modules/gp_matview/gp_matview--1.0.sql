@@ -75,3 +75,44 @@ COMMENT ON VIEW gp_matview.dynamic_tables IS
 	'the materialized views that refresh on a schedule; Cloudberry calls this pg_dynamic_tables';
 
 GRANT SELECT ON gp_matview.dynamic_tables TO PUBLIC;
+
+/*
+ * ---------------------------------------------------------------------------
+ * Incremental views on a cluster (ivm_cluster.c)
+ * ---------------------------------------------------------------------------
+ *
+ * What a cluster's coordinator calls on each segment to keep an incremental
+ * view up to date: the view's triggers made there, what they kept taken, the
+ * deltas brought and applied.  Each refuses any call but the coordinator's
+ * own, the statement it sends on its own connection; they are executable by
+ * everyone, and the schema usable by everyone, because the coordinator sends
+ * them as whoever wrote the base table.
+ */
+GRANT USAGE ON SCHEMA gp_matview TO PUBLIC;
+
+CREATE FUNCTION gp_matview.ivm_make_triggers(matview oid)
+RETURNS void
+AS 'MODULE_PATHNAME', 'gp_ivm_make_triggers'
+LANGUAGE C STRICT;
+
+CREATE FUNCTION gp_matview.ivm_stash(matview oid,
+	OUT relid oid, OUT old_rows bigint, OUT new_rows bigint, OUT truncated boolean)
+RETURNS SETOF record
+AS 'MODULE_PATHNAME', 'gp_ivm_stash'
+LANGUAGE C STRICT;
+
+-- not STRICT: the last argument is a NULL of the table's row type
+CREATE FUNCTION gp_matview.ivm_take(matview oid, relid oid, old boolean, rowtype anyelement)
+RETURNS SETOF anyelement
+AS 'MODULE_PATHNAME', 'gp_ivm_take'
+LANGUAGE C;
+
+CREATE FUNCTION gp_matview.ivm_stage(matview oid, kind "char", rows text)
+RETURNS void
+AS 'MODULE_PATHNAME', 'gp_ivm_stage'
+LANGUAGE C STRICT;
+
+CREATE FUNCTION gp_matview.ivm_apply(matview oid, replace boolean)
+RETURNS void
+AS 'MODULE_PATHNAME', 'gp_ivm_apply'
+LANGUAGE C STRICT;

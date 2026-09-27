@@ -24,24 +24,29 @@
  *	  src/backend/optimizer/plan/aqumv.c, catalog/gp_matview_aux.c,
  *	  and the incremental-view code of matview.c and createas.c
  *
- * At this milestone it carries the incremental views.  Dynamic tables and the
- * AQUMV bookkeeping follow; see cloudberry.md, "Milestones".
+ * It carries the incremental views -- on one node, and on a cluster, where
+ * the coordinator keeps them up to date (ivm_cluster.c) -- and dynamic
+ * tables.  The AQUMV bookkeeping follows; see cloudberry.md, "Milestones".
  *
  *-------------------------------------------------------------------------
  */
 #include "postgres.h"
 
+#include "access/table.h"
 #include "access/xact.h"
 #include "catalog/namespace.h"
 #include "catalog/objectaccess.h"
 #include "catalog/pg_class.h"
 #include "commands/createas.h"
+#include "executor/executor.h"
 #include "fmgr.h"
 #include "miscadmin.h"
+#include "nodes/makefuncs.h"
 #include "nodes/nodeFuncs.h"
 #include "nodes/parsenodes.h"
 #include "parser/parse_relation.h"
 #include "tcop/utility.h"
+#include "utils/guc.h"
 #include "utils/lsyscache.h"
 #include "utils/rel.h"
 #include "utils/syscache.h"
@@ -59,6 +64,14 @@ PG_MODULE_MAGIC_EXT(
 static ProcessUtility_hook_type prev_ProcessUtility = NULL;
 static star_expansion_filter_hook_type prev_star_filter = NULL;
 static object_access_hook_type prev_object_access = NULL;
+static ExecutorFinish_hook_type prev_ExecutorFinish = NULL;
+
+/*
+ * Was gp_sql loaded before this module, so that its ProcessUtility hook runs
+ * inside this one's and reads a CREATE's options after this one has added
+ * to them?  See add_cluster_distribution().
+ */
+static bool gp_sql_inside = false;
 
 /* ------------------------------------------------------------------------- */
 /* O28: the hidden columns stay out of "*"                                   */
@@ -118,6 +131,106 @@ gp_matview_object_access(ObjectAccessType access, Oid classId, Oid objectId,
 		return;
 
 	GpDynDropped(objectId);
+}
+
+/* ------------------------------------------------------------------------- */
+/* A cluster's coordinator keeps its incremental views up to date            */
+/* ------------------------------------------------------------------------- */
+
+/*
+ * Once a statement's executor has finished, the incremental views over the
+ * tables it wrote are brought up to date (ivm_cluster.c): on a cluster the
+ * rows were written on the segments, whose triggers kept what changed for
+ * the coordinator.  On one node the triggers did it themselves, and this
+ * does nothing.
+ */
+static void
+gp_matview_ExecutorFinish(QueryDesc *queryDesc)
+{
+	if (prev_ExecutorFinish)
+		prev_ExecutorFinish(queryDesc);
+	else
+		standard_ExecutorFinish(queryDesc);
+
+	if (!(queryDesc->estate->es_top_eflags & EXEC_FLAG_EXPLAIN_ONLY))
+		GpIvmClusterStatementEnd(queryDesc->plannedstmt);
+}
+
+/*
+ * The run of the rest of the chain, and then, on a cluster's coordinator,
+ * the incremental views a utility statement changed brought up to date:
+ * those over the table a COPY FROM wrote, and those a TRUNCATE's triggers,
+ * which fire here too, kept something for.
+ */
+static void
+run_utility(PlannedStmt *pstmt, const char *queryString, bool readOnlyTree,
+			ProcessUtilityContext context, ParamListInfo params,
+			QueryEnvironment *queryEnv, DestReceiver *dest, QueryCompletion *qc)
+{
+	Node	   *parsetree = pstmt->utilityStmt;
+	Oid			copied = InvalidOid;
+
+	if (prev_ProcessUtility)
+		prev_ProcessUtility(pstmt, queryString, readOnlyTree, context,
+							params, queryEnv, dest, qc);
+	else
+		standard_ProcessUtility(pstmt, queryString, readOnlyTree, context,
+								params, queryEnv, dest, qc);
+
+	if (IsA(parsetree, CopyStmt) && ((CopyStmt *) parsetree)->is_from &&
+		((CopyStmt *) parsetree)->relation != NULL)
+		copied = RangeVarGetRelid(((CopyStmt *) parsetree)->relation, NoLock, true);
+	GpIvmClusterUtilityEnd(copied);
+}
+
+/*
+ * The distribution an incremental view on a cluster is made with, where its
+ * statement names none: added to the statement's options as a DISTRIBUTED
+ * BY would have been, which gp_sql takes out and records once the view is
+ * made (GpIvmClusterDefaultDistribution() says which).  Only where gp_sql
+ * reads the options after this module has, which it does when it was loaded
+ * first; otherwise the view gets gp_sql's own choice, and is refused after
+ * it is made if its rows could not be maintained by it.
+ */
+static void
+add_cluster_distribution(IntoClause *into, Query *rewritten)
+{
+	const GpCoreApi *core = GpCoreApiLookup();
+	ListCell   *lc;
+
+	if (!gp_sql_inside || core == NULL || core->is_single_node() ||
+		core->get_role() != GP_ROLE_DISPATCH)
+		return;
+	foreach(lc, into->options)
+	{
+		DefElem    *def = (DefElem *) lfirst(lc);
+
+		if (def->defnamespace != NULL && strcmp(def->defnamespace, "gp") == 0 &&
+			strcmp(def->defname, "distributed_by") == 0)
+			return;
+	}
+	into->options = lappend(into->options,
+							makeDefElemExtended("gp", "distributed_by",
+												(Node *) makeString(GpIvmClusterDefaultDistribution(rewritten,
+																								  into->colNames)),
+												DEFELEM_UNSPEC, -1));
+}
+
+/*
+ * On a cluster's coordinator, an incremental view just made or restored:
+ * its distribution is one its deltas can be sent by, and the segments' base
+ * tables get its triggers too.
+ */
+static void
+cluster_incremental(Oid matviewOid, Query *rewritten)
+{
+	const GpCoreApi *core = GpCoreApiLookup();
+
+	if (core == NULL || core->is_single_node() ||
+		core->get_role() != GP_ROLE_DISPATCH)
+		return;
+	GpIvmClusterCheckDistribution(matviewOid, rewritten);
+	GpIvmClusterMakeTriggers(matviewOid);
 }
 
 /* ------------------------------------------------------------------------- */
@@ -198,15 +311,14 @@ gp_matview_ProcessUtility(PlannedStmt *pstmt, const char *queryString,
 	/*
 	 * SECURITY LABEL on a materialized view, as a restore of pg_dump's output
 	 * labels one: what the label says the view is, it is made -- an
-	 * incremental view's triggers, a dynamic table's job -- where it is not
-	 * yet.  On a cluster no view is incremental (below).
+	 * incremental view's triggers, on a cluster's segments too, a dynamic
+	 * table's job -- where it is not yet.
 	 */
 	if (IsA(parsetree, SecLabelStmt) &&
 		((SecLabelStmt *) parsetree)->objtype == OBJECT_MATVIEW &&
 		((SecLabelStmt *) parsetree)->provider != NULL &&
 		strcmp(((SecLabelStmt *) parsetree)->provider, "gp") == 0)
 	{
-		const GpCoreApi *core = GpCoreApiLookup();
 		Oid			relid;
 
 		if (prev_ProcessUtility)
@@ -218,12 +330,14 @@ gp_matview_ProcessUtility(PlannedStmt *pstmt, const char *queryString,
 		CommandCounterIncrement();
 		relid = RangeVarGetRelid(makeRangeVarFromNameList(castNode(List, ((SecLabelStmt *) parsetree)->object)),
 								 NoLock, false);
-		if (GpIvmIsIncremental(relid) && core != NULL && !core->is_single_node())
-			ereport(ERROR,
-					(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
-					 errmsg("incremental materialized views are not supported on a cluster"),
-					 errhint("Create it without INCREMENTAL, and refresh it with REFRESH MATERIALIZED VIEW.")));
 		GpIvmRestored(relid);
+		if (GpIvmIsIncremental(relid))
+		{
+			Relation	rel = table_open(relid, AccessShareLock);
+
+			cluster_incremental(relid, GpIvmGetViewQuery(rel));
+			table_close(rel, AccessShareLock);
+		}
 		GpDynRestored(relid);
 		return;
 	}
@@ -266,30 +380,13 @@ gp_matview_ProcessUtility(PlannedStmt *pstmt, const char *queryString,
 
 	if (!incremental && !dynamic)
 	{
-		if (prev_ProcessUtility)
-			prev_ProcessUtility(pstmt, queryString, readOnlyTree, context,
-								params, queryEnv, dest, qc);
-		else
-			standard_ProcessUtility(pstmt, queryString, readOnlyTree, context,
-									params, queryEnv, dest, qc);
+		run_utility(pstmt, queryString, readOnlyTree, context, params,
+					queryEnv, dest, qc);
 		return;
 	}
 
 	if (incremental)
 	{
-		const GpCoreApi *core = GpCoreApiLookup();
-
-		/*
-		 * On a cluster a materialized view's rows are on the segments
-		 * (gp_core's gp_refresh.c), where the delta maintenance of one kept
-		 * up to date would have to reach them: not built.
-		 */
-		if (core != NULL && !core->is_single_node())
-			ereport(ERROR,
-					(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
-					 errmsg("incremental materialized views are not supported on a cluster"),
-					 errhint("Create it without INCREMENTAL, and refresh it with REFRESH MATERIALIZED VIEW.")));
-
 		/* What the view is made of has to be something maintenance can follow. */
 		GpIvmCheckQuery((Query *) ctas->query);
 
@@ -304,6 +401,9 @@ gp_matview_ProcessUtility(PlannedStmt *pstmt, const char *queryString,
 		if (ctas->into->viewQuery != NULL)
 			ctas->into->viewQuery =
 				GpIvmRewriteQuery((Query *) ctas->into->viewQuery, ctas->into->colNames);
+
+		/* on a cluster, rows its deltas can be sent to their segments by */
+		add_cluster_distribution(ctas->into, rewritten);
 	}
 
 	if (prev_ProcessUtility)
@@ -321,7 +421,10 @@ gp_matview_ProcessUtility(PlannedStmt *pstmt, const char *queryString,
 		Oid			matviewOid = RangeVarGetRelid(ctas->into->rel, NoLock, false);
 
 		if (incremental)
+		{
 			GpIvmAfterCreate(matviewOid, rewritten);
+			cluster_incremental(matviewOid, rewritten);
+		}
 		if (dynamic)
 			GpDynAfterCreate(matviewOid, schedule);
 	}
@@ -348,4 +451,11 @@ _PG_init(void)
 
 	prev_object_access = object_access_hook;
 	object_access_hook = gp_matview_object_access;
+
+	prev_ExecutorFinish = ExecutorFinish_hook;
+	ExecutorFinish_hook = gp_matview_ExecutorFinish;
+
+	/* gp_sql defines its settings as it loads */
+	gp_sql_inside = GetConfigOption("gp.create_table_random_default_distribution",
+									true, false) != NULL;
 }

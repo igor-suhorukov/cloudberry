@@ -57,8 +57,8 @@
  * that a reader sees the old rows, or once the transaction commits the new,
  * and a row that did not change is not written.
  *
- * An incremental view is not distributed: gp_matview refuses one on a
- * cluster, whose delta maintenance would have to reach the segments.
+ * An incremental view is distributed as any view is, and refreshed so;
+ * gp_matview keeps it up to date between refreshes (ivm_cluster.c).
  *
  * Cloudberry sources this file stands in for:
  *	  the transient table and its dispatch in src/backend/commands/matview.c

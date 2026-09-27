@@ -509,7 +509,8 @@ run  gang_reuse
 skip run_utility_gpexpand_phase1  gpcheckcat and gppkg are not installed (pg19/gpMgmt/files.txt)
 run  create_extension_fail
 skip offload_entry_to_qe  a temporary external table is not supported: CREATE EXTERNAL WEB TEMP TABLE -- an external table is a foreign table, which PostgreSQL makes in no temporary schema; and enable_offload_entry_to_qe, which moves the coordinator's work above a Motion to one segment, has nothing to move on the planner's route, whose gathers are the coordinator's
-skip aqumv  unrecognized configuration parameter "enable_answer_query_using_materialized_views"; unrecognized parameter namespace "gp"
+port ivm_cluster
+skip aqumv  unrecognized configuration parameter "enable_answer_query_using_materialized_views"; relation "gp_matview_aux" does not exist
 skip matview_data  relation "gp_matview_aux" does not exist; current transaction is aborted, commands ignored until end of transaction block
 skip directory_table  relation "gp_storage_server" does not exist; syntax error at or near "DATA"
 skip motion_socket  differs: its check_motion_sockets() looks up each segment's address, which on this suite's clusters is a socket's directory: socket.gaierror: [Errno -2] Name or service not known
@@ -517,7 +518,7 @@ run  ic_proxy_socket
 skip subtrx_overflow  relation "gp_suboverflowed_backend" does not exist
 run  bfv_meta_track
 skip bfv_copy  segment reject limit reached, aborting operation
-skip dynamic_table  unrecognized parameter namespace "gp"; relation "dt0" does not exist
+skip dynamic_table  a dynamic table needs the task scheduler; relation "pg_task" does not exist
 run  hba_conf
 skip dboptions  differs: the psql its shell commands run connects to /tmp's socket, where this suite's nodes have directories of their own
 skip gp_log_mem_dispatch  function gp_log_backend_memory_contexts(integer) does not exist; function gp_log_backend_memory_contexts(integer, integer) does not exist
