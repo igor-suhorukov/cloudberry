@@ -3571,7 +3571,7 @@ CREATE TABLE gp_internal.leaf_hll (
 	staxmin xid NOT NULL,
 	fullscan bool NOT NULL,
 	counter bytea NOT NULL
-);
+) USING heap;
 CREATE INDEX leaf_hll_attnum ON gp_internal.leaf_hll (starelid, staattnum);
 REVOKE ALL ON gp_internal.leaf_hll FROM PUBLIC;
 

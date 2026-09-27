@@ -90,7 +90,7 @@ CREATE UNIQUE INDEX blkdir_key ON gp_ao.blkdir (storage_id, segno, first_row);
 CREATE TABLE gp_ao.segfilecount (
 	storage_id		bigint NOT NULL,
 	segfilecount	smallint NOT NULL
-);
+) USING heap;
 CREATE UNIQUE INDEX segfilecount_key ON gp_ao.segfilecount (storage_id);
 
 /*

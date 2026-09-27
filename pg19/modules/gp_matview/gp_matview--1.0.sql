@@ -135,19 +135,19 @@ LANGUAGE C STRICT;
 CREATE TABLE gp_matview.matview_aux (
 	mvoid oid PRIMARY KEY,
 	has_foreign boolean NOT NULL
-);
+) USING heap;
 
 CREATE TABLE gp_matview.matview_aux_table (
 	mvoid oid NOT NULL,
 	relid oid NOT NULL,
 	PRIMARY KEY (mvoid, relid)
-);
+) USING heap;
 CREATE INDEX matview_aux_table_relid ON gp_matview.matview_aux_table (relid);
 
 CREATE TABLE gp_matview.matview_aux_event (
 	mvoid oid NOT NULL,
 	kind "char" NOT NULL
-);
+) USING heap;
 CREATE INDEX matview_aux_event_mvoid ON gp_matview.matview_aux_event (mvoid);
 
 REVOKE ALL ON gp_matview.matview_aux, gp_matview.matview_aux_table,
