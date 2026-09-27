@@ -6356,7 +6356,13 @@ CTranslatorDXLToPlStmt::TranslateDXLDml(
 			// (make_splitupdate_path(), cdbpath.c), and so does the
 			// planner's route here (gp_explicit.c).  That route asks a
 			// partitioned table's first result relation, which this plan
-			// does not have (below).
+			// does not have (below).  A table whose triggers are none of
+			// them UPDATE's -- an INSERT's, a DELETE's, a TRUNCATE's -- has
+			// none that an UPDATE fires, and a split update, which fires
+			// none, changes it as an UPDATE would.  A partitioned table's
+			// row moved to another partition fires its DELETE and INSERT
+			// triggers in PostgreSQL, which a split does not: that stays the
+			// planner's.
 			if (!md_rel->IsPartitioned() &&
 				gpdb::HasOwnUpdateTriggers(
 					CMDIdGPDB::CastMdid(mdid_target_table)->Oid()))
@@ -6365,7 +6371,11 @@ CTranslatorDXLToPlStmt::TranslateDXLDml(
 					MAKE_SQLSTATE('0', 'A', 'M', '0', '1'),
 					"UPDATE on distributed key column not allowed on relation with update triggers");
 			}
-			GP_UNPORTED("an UPDATE of a distribution key, on a table with triggers");
+			if (md_rel->IsPartitioned())
+			{
+				GP_UNPORTED(
+					"an UPDATE of a partitioned table's key, where a partition has triggers");
+			}
 		}
 	}
 

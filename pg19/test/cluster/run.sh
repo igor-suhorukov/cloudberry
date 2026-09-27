@@ -2348,15 +2348,16 @@ COMMIT;"
 		*) notok "a split update of a unique key: the plan" "$plan" ;;
 	esac
 
-	q 0 "CREATE TABLE wt (a int, b int) DISTRIBUTED BY (a);" >/dev/null
-	q 0 "CREATE FUNCTION wt_noop() RETURNS trigger LANGUAGE plpgsql AS \$\$ BEGIN RETURN NEW; END \$\$;" >/dev/null
-	q 0 "CREATE TRIGGER wt_t BEFORE INSERT ON wt FOR EACH ROW EXECUTE FUNCTION wt_noop();" >/dev/null
-	out=$(printf '%s\n' "SET gp.optimizer_trace_fallback = on;" \
-		"UPDATE wt SET a = a + 1;" | qf 0)
-	case "$out" in
-		*"on a table with triggers"*) ok "an UPDATE of the key of a table with triggers is refused, and says why" ;;
-		*) notok "a split update with triggers" "$out" ;;
-	esac
+	# A table whose triggers are none of them UPDATE's has none an UPDATE
+	# fires: its key's UPDATE is ORCA's Split, which fires none of them --
+	# here each would fail the statement -- the rows moved as the planner's
+	# route moves them.
+	q 0 "CREATE TABLE wt (a int, b int) DISTRIBUTED BY (a); INSERT INTO wt SELECT i, i FROM generate_series(1, 20) i;" >/dev/null
+	q 0 "CREATE FUNCTION wt_fail() RETURNS trigger LANGUAGE plpgsql AS \$\$ BEGIN RAISE EXCEPTION 'fired'; END \$\$;" >/dev/null
+	q 0 "CREATE TRIGGER wt_t BEFORE INSERT OR DELETE ON wt FOR EACH ROW EXECUTE FUNCTION wt_fail();" >/dev/null
+	orca_write "an UPDATE of the key of a table whose triggers are INSERT's and DELETE's: a Split, firing none, as an UPDATE fires none" \
+		"UPDATE wt SET a = a + 100 WHERE b < 10;" \
+		"SELECT gp_segment_id, count(*), sum(a) FROM wt GROUP BY 1 ORDER BY 1;" "Split Update"
 
 	# The planner's Split, where the cluster has its secret: the segments'
 	# split functions move each row, firing no INSERT or DELETE trigger, as
