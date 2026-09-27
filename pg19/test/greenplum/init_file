@@ -28,6 +28,11 @@ m/^DETAIL:  segment \d+ \([^)]*\)(; \d+ other segments failed too)?$/
 m/^DETAIL:  segment \d+ \([^)]*\): /
 s/^DETAIL:  segment \d+ \([^)]*\): (.*?)(; \d+ other segments failed too)?$/DETAIL:  $1/
 
+# A fault's error, which ends with a space in Cloudberry's words as in the
+# port's (faultinjector.c), and without it in Cloudberry's expected files.
+m/^ERROR:  fault triggered, fault name:'\w+' fault type:'\w+' $/
+s/ $//
+
 # Cloudberry's init_file drops "set enable_parallel = off;" and its reset,
 # which its tests carry and its expected files do not; the harness has
 # respelled them as the port spells the setting (gp_settings.c).

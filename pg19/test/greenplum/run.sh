@@ -181,9 +181,10 @@ t1=$(date +%s)
 # (../respell.pl); the singlenode suite says how.
 {
 	# the column SHOW names, read as a row's field; SET, RESET and SHOW;
-	# current_setting() and set_config(); and SHOW's header, the same width
-	# spelled either way (see the singlenode suite)
-	echo "kinds field set func header"
+	# current_setting() and set_config(); SHOW's header, the same width
+	# spelled either way (see the singlenode suite); and an error's naming
+	# of a setting, parameter "gp_..."
+	echo "kinds field set func header param"
 	PGHOST="$(node_sock "${groups[0]}" 0)" PGPORT="$(node_port 0 0)" \
 	"$PSQL" -X -q -t -A -d postgres -c "SELECT name FROM pg_settings WHERE name LIKE 'gp.%' ORDER BY length(name) DESC" |
 	while read -r name; do

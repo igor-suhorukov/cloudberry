@@ -48,6 +48,27 @@
  * Cloudberry's deadlock check (checkDeadlock) -- and one that hears nothing
  * for gp.interconnect_transmit_timeout gives up, in Cloudberry's words.
  *
+ * How much a sender has in flight is Cloudberry's flow control
+ * (gp.interconnect_fc_method).  Under "capacity" each receiver's room is all
+ * that bounds it, and at most gp.interconnect_snd_queue_depth packets wait to
+ * be acknowledged by each.  Under "loss" -- and its variants loss_advance and
+ * loss_timer, the same here -- a sender has a congestion window over all its
+ * receivers, as Cloudberry's has (snd_control_info): a packet for each
+ * receiver at first, one more for each packet acknowledged below the
+ * threshold and a fraction of one above it, up to
+ * gp.interconnect_snd_queue_depth for each receiver; a packet sent again
+ * because another came before it halves the window, and one whose time ran
+ * out closes it to where it began.  A receiver with nothing in flight may
+ * always have one packet.  Packets whose time has run out are looked for at
+ * most every gp.interconnect_timer_checking_period under the loss methods,
+ * and a sender waiting on acknowledgements wakes at least every
+ * gp.interconnect_timer_period.  A packet sent gp.interconnect_min_retries_
+ * before_timeout times draws Cloudberry's WARNING once, and the transmit
+ * timeout is an error only for a packet sent more times than that.  And
+ * packets that come before the receiver they are for has begun wait for it
+ * only while gp.interconnect_cache_future_packets is on; off, they are
+ * dropped, and their sender sends them again.
+ *
  * A receiver that needs no more rows says STOP, and the sender CLOSE, as it
  * does once its last row is acknowledged.  Cloudberry's receiver has a thread
  * that answers a packet that comes after it has gone; a backend has none, and
@@ -103,6 +124,7 @@
 #include "utils/wait_event.h"
 
 #include "gp_cluster.h"
+#include "gp_fault.h"
 #include "gp_ic.h"
 
 /* What a sender says first. */
@@ -189,6 +211,29 @@ static int	gp_max_packet_size = 8192;
 static int	gp_interconnect_transmit_timeout = 3600;
 static int	gp_interconnect_min_rto = 20;
 static int	gp_interconnect_default_rtt = 20;
+static int	gp_interconnect_snd_queue_depth = 2;
+static int	gp_interconnect_min_retries_before_timeout = 100;
+static int	gp_interconnect_debug_retry_interval = 10;
+static bool gp_interconnect_cache_future_packets = true;
+static int	gp_interconnect_timer_period = 5;
+static int	gp_interconnect_timer_checking_period = 20;
+
+/* Cloudberry's flow control methods, by its numbers (cdbvars.h) */
+#define IC_FC_CAPACITY		0
+#define IC_FC_LOSS			2
+#define IC_FC_LOSS_ADVANCE	3
+#define IC_FC_LOSS_TIMER	4
+static int	gp_interconnect_fc_method = IC_FC_LOSS;
+
+static const struct config_enum_entry fc_methods[] = {
+	{"loss", IC_FC_LOSS, false},
+	{"capacity", IC_FC_CAPACITY, false},
+	{"loss_advance", IC_FC_LOSS_ADVANCE, false},
+	{"loss_timer", IC_FC_LOSS_TIMER, false},
+	{NULL, 0, false}
+};
+
+#define IC_FC_BY_LOSS() (gp_interconnect_fc_method != IC_FC_CAPACITY)
 
 /* and its tests': packets dropped as they would be sent, as lost ones are */
 static int	gp_udpic_dropacks_percent = 0;
@@ -267,6 +312,15 @@ struct GpIcSender
 	IcOut	   *outs;
 	char		token[GP_IC_TOKEN_LEN];
 	int			self;
+
+	/* UDP, under the loss methods: the congestion window, in packets */
+	double		cwnd;
+	double		ssthresh;
+	int			mincwnd;		/* a packet for each UDP receiver */
+	int			maxcwnd;		/* gp.interconnect_snd_queue_depth for each */
+	int			inflight;		/* packets sent, not yet acknowledged */
+	TimestampTz last_check;		/* when the unacknowledged were last looked at */
+	bool		warned;			/* Cloudberry's WARNING of retries given */
 };
 
 static pgsocket listen_sock = PGINVALID_SOCKET;
@@ -849,6 +903,23 @@ udp_on_data(const IcUdpPacket *pkt, const struct sockaddr_storage *from,
 		if (list_length(unclaimed) >= IC_UDP_MAX_UNCLAIMED)
 			return;				/* it will come again */
 
+		/*
+		 * Before its receiver has begun: kept for it, as Cloudberry caches a
+		 * future packet -- or, gp.interconnect_cache_future_packets off,
+		 * dropped, to come again.
+		 */
+		if (!gp_interconnect_cache_future_packets)
+		{
+			bool		begun = false;
+
+			foreach_ptr(GpIcReceiver, rr, receivers)
+				if (rr->slice == (int) pkt->slice &&
+					memcmp(rr->token, pkt->token, GP_IC_TOKEN_LEN) == 0)
+					begun = true;
+			if (!begun)
+				return;
+		}
+
 		oldcxt = MemoryContextSwitchTo(TopMemoryContext);
 		in = palloc0(sizeof(IcIn));
 		in->sock = PGINVALID_SOCKET;
@@ -952,8 +1023,13 @@ udp_on_data(const IcUdpPacket *pkt, const struct sockaddr_storage *from,
 GpIcReceiver *
 GpIcRecvBegin(const char *token, int slice, int nsenders, bool udp)
 {
-	MemoryContext oldcxt = MemoryContextSwitchTo(TopMemoryContext);
-	GpIcReceiver *r = palloc0(sizeof(GpIcReceiver));
+	MemoryContext oldcxt;
+	GpIcReceiver *r;
+
+	/* where Cloudberry's segment sets up its interconnect (SetupInterconnect()) */
+	GP_FAULT("interconnect_setup_palloc");
+	oldcxt = MemoryContextSwitchTo(TopMemoryContext);
+	r = palloc0(sizeof(GpIcReceiver));
 	List	   *mine = NIL;
 	ListCell   *lc;
 
@@ -1523,6 +1599,47 @@ udp_transmit(GpIcSender *s, IcOut *out, IcUdpSent *p)
 			s->self, out->index, p->offset, 0, p->data, p->len);
 	p->sent_at = GetCurrentTimestamp();
 	p->tries++;
+	if (p->tries > 1 && (p->tries - 1) % gp_interconnect_debug_retry_interval == 0)
+		elog(DEBUG1, "resending packet (offset " UINT64_FORMAT ") to %s with %d retries",
+			 p->offset, out->address, p->tries - 1);
+}
+
+/* A packet acknowledged: under the loss methods, the window opened by it. */
+static void
+udp_cwnd_acked(GpIcSender *s)
+{
+	s->inflight--;
+	if (!IC_FC_BY_LOSS())
+		return;
+	s->cwnd += s->cwnd < s->ssthresh ? 1.0 : 1.0 / s->cwnd;
+	s->cwnd = Min(s->cwnd, (double) s->maxcwnd);
+}
+
+/*
+ * A packet lost, under the loss methods: the window halved where another came
+ * before it, and closed to where it began where its time ran out.
+ */
+static void
+udp_cwnd_lost(GpIcSender *s, bool timeout)
+{
+	if (!IC_FC_BY_LOSS())
+		return;
+	s->ssthresh = Max(s->cwnd / 2, (double) s->mincwnd);
+	s->cwnd = timeout ? (double) s->mincwnd : s->ssthresh;
+}
+
+/*
+ * May another packet go to this receiver?  Its room willing: under
+ * "capacity", while fewer than gp.interconnect_snd_queue_depth wait on it;
+ * under the loss methods, while the sender's window has room, or nothing
+ * waits on this receiver at all.
+ */
+static bool
+udp_may_send(GpIcSender *s, IcOut *out)
+{
+	if (!IC_FC_BY_LOSS())
+		return list_length(out->unacked) < gp_interconnect_snd_queue_depth;
+	return out->unacked == NIL || s->inflight < (int) s->cwnd;
 }
 
 /* Cloudberry's round trip and RTO: a smoothed mean and deviation, bounded. */
@@ -1539,8 +1656,9 @@ udp_rtt_sample(IcOut *out, int64 rtt)
 }
 
 static void
-udp_out_forget(IcOut *out)
+udp_out_forget(GpIcSender *s, IcOut *out)
 {
+	s->inflight -= list_length(out->unacked);
 	foreach_ptr(IcUdpSent, p, out->unacked)
 		pfree(p);
 	list_free(out->unacked);
@@ -1569,7 +1687,7 @@ udp_on_ack(const IcUdpPacket *pkt)
 		if (pkt->type == IC_UDP_STOP)
 		{
 			out->wanted = false;
-			udp_out_forget(out);
+			udp_out_forget(s, out);
 			udp_put(&out->addr, out->addrlen, IC_UDP_CLOSE, s->token,
 					(uint32) s->slice, s->self, out->index, out->sent, 0,
 					NULL, 0);
@@ -1588,6 +1706,7 @@ udp_on_ack(const IcUdpPacket *pkt)
 					udp_rtt_sample(out, now - p->sent_at);
 				out->unacked = list_delete_first(out->unacked);
 				pfree(p);
+				udp_cwnd_acked(s);
 			}
 			out->acked = pkt->offset;
 		}
@@ -1602,7 +1721,10 @@ udp_on_ack(const IcUdpPacket *pkt)
 
 			if (p->offset == pkt->offset &&
 				now - p->sent_at > Max(out->srtt, (int64) 1000))
+			{
 				udp_transmit(s, out, p);
+				udp_cwnd_lost(s, false);
+			}
 		}
 		if (pkt->offset >= out->acked)
 			out->window = pkt->window;
@@ -1660,26 +1782,37 @@ udp_sender_wait(GpIcSender *s, IcOut *out)
 {
 	TimestampTz now = GetCurrentTimestamp();
 	int64		next = IC_UDP_DEADLOCK_CHECK_US;
+	int64		checking = (int64) gp_interconnect_timer_checking_period * 1000;
 	bool		resent = false;
 	int			ev;
 
-	foreach_ptr(IcUdpSent, p, out->unacked)
+	/* under the loss methods, looked at every so often; else every time */
+	if (!IC_FC_BY_LOSS() || now - s->last_check >= checking)
 	{
-		int64		waited = now - p->sent_at;
-
-		if (waited >= out->rto)
+		s->last_check = now;
+		foreach_ptr(IcUdpSent, p, out->unacked)
 		{
-			udp_transmit(s, out, p);
-			resent = true;
+			int64		waited = now - p->sent_at;
+
+			if (waited >= out->rto)
+			{
+				udp_transmit(s, out, p);
+				resent = true;
+			}
+			else
+				next = Min(next, out->rto - waited);
 		}
-		else
-			next = Min(next, out->rto - waited);
 	}
+	else if (out->unacked != NIL)
+		next = Min(next, checking - (now - s->last_check));
 	if (resent)
 	{
 		out->rto = Min(out->rto * 2, IC_UDP_MAX_RTO_US);
 		next = Min(next, out->rto);
+		udp_cwnd_lost(s, true);
 	}
+	if (out->unacked != NIL)
+		next = Min(next, (int64) gp_interconnect_timer_period * 1000);
 
 	if (out->unacked == NIL && out->acked + out->window <= out->sent)
 	{
@@ -1693,7 +1826,28 @@ udp_sender_wait(GpIcSender *s, IcOut *out)
 		next = Min(next, IC_UDP_DEADLOCK_CHECK_US - (now - out->last_query));
 	}
 
-	if (now - out->last_heard > (int64) gp_interconnect_transmit_timeout * 1000 * 1000)
+	/*
+	 * A packet sent again and again: Cloudberry's WARNING, once, and its
+	 * error once it has been sent more times than that and nothing has been
+	 * heard for the transmit timeout (checkNetworkTimeout()).  With nothing
+	 * in flight, the silence alone.
+	 */
+	if (out->unacked != NIL)
+	{
+		IcUdpSent  *p = (IcUdpSent *) linitial(out->unacked);
+
+		if (p->tries - 1 >= gp_interconnect_min_retries_before_timeout && !s->warned)
+		{
+			ereport(WARNING,
+					(errmsg("interconnect may encountered a network error, please check your network"),
+					 errdetail("Failed to send packet (offset " UINT64_FORMAT ") to %s after %d retries.",
+							   p->offset, out->address, p->tries - 1)));
+			s->warned = true;
+		}
+	}
+	if (now - out->last_heard > (int64) gp_interconnect_transmit_timeout * 1000 * 1000 &&
+		(out->unacked == NIL ||
+		 ((IcUdpSent *) linitial(out->unacked))->tries - 1 > gp_interconnect_min_retries_before_timeout))
 		ereport(ERROR,
 				(errcode(ERRCODE_GP_INTERCONNECTION_ERROR),
 				 errmsg("interconnect encountered a network error, please check your network"),
@@ -1725,7 +1879,7 @@ udp_out_flush(GpIcSender *s, IcOut *out, bool drain)
 	{
 		int64		room = (int64) (out->acked + out->window) - (int64) out->sent;
 
-		if (off < out->len && room > 0)
+		if (off < out->len && room > 0 && udp_may_send(s, out))
 		{
 			int			n = (int) Min(Min((int64) (out->len - off), (int64) payload), room);
 			IcUdpSent  *p = MemoryContextAlloc(TopMemoryContext,
@@ -1741,6 +1895,7 @@ udp_out_flush(GpIcSender *s, IcOut *out, bool drain)
 			oldcxt = MemoryContextSwitchTo(TopMemoryContext);
 			out->unacked = lappend(out->unacked, p);
 			MemoryContextSwitchTo(oldcxt);
+			s->inflight++;
 			udp_transmit(s, out, p);
 			continue;
 		}
@@ -1828,9 +1983,13 @@ GpIcSender *
 GpIcSendBegin(const char *token, int slice, int self, int nreceivers,
 			  char **addresses)
 {
-	MemoryContext oldcxt = MemoryContextSwitchTo(TopMemoryContext);
-	GpIcSender *s = palloc0(sizeof(GpIcSender));
+	MemoryContext oldcxt;
+	GpIcSender *s;
 	IcHandshake hs;
+
+	GP_FAULT("interconnect_setup_palloc");
+	oldcxt = MemoryContextSwitchTo(TopMemoryContext);
+	s = palloc0(sizeof(GpIcSender));
 
 	Assert(strlen(token) == GP_IC_TOKEN_LEN);
 	s->slice = slice;
@@ -1874,6 +2033,8 @@ GpIcSendBegin(const char *token, int slice, int self, int nreceivers,
 						   IC_UDP_MAX_RTO_US);
 			out->last_heard = out->last_query = GetCurrentTimestamp();
 			out->wanted = true;
+			s->mincwnd++;
+			s->maxcwnd += gp_interconnect_snd_queue_depth;
 			continue;
 		}
 
@@ -1883,6 +2044,9 @@ GpIcSendBegin(const char *token, int slice, int self, int nreceivers,
 		out->len = sizeof(hs);
 		out_flush(out);
 	}
+	s->cwnd = s->mincwnd;
+	s->ssthresh = s->maxcwnd;
+	s->last_check = GetCurrentTimestamp();
 	return s;
 }
 
@@ -1916,7 +2080,7 @@ sender_free(GpIcSender *s)
 		if (s->outs[i].sock != PGINVALID_SOCKET)
 			closesocket(s->outs[i].sock);
 		if (s->outs[i].udp)
-			udp_out_forget(&s->outs[i]);
+			udp_out_forget(s, &s->outs[i]);
 		pfree(s->outs[i].buf);
 	}
 	pfree(s->outs);
@@ -2015,6 +2179,48 @@ GpIcInit(void)
 							NULL,
 							&gp_interconnect_default_rtt,
 							20, 1, 1000, PGC_USERSET, GUC_UNIT_MS,
+							NULL, NULL, NULL);
+	DefineCustomIntVariable("gp.interconnect_snd_queue_depth",
+							"Sets the maximum size of the send queue for each connection in the UDP interconnect",
+							"The packets a sender keeps waiting on each receiver's acknowledgement: under \"capacity\" flow control each receiver's, and under the loss methods, for each receiver, the most the sender's window grows to.",
+							&gp_interconnect_snd_queue_depth,
+							2, 1, 4096, PGC_USERSET, 0,
+							NULL, NULL, NULL);
+	DefineCustomEnumVariable("gp.interconnect_fc_method",
+							 "Sets the flow control method used for UDP interconnect.",
+							 "Valid values are \"capacity\" and \"loss\".",
+							 &gp_interconnect_fc_method,
+							 IC_FC_LOSS, fc_methods, PGC_USERSET, 0,
+							 NULL, NULL, NULL);
+	DefineCustomIntVariable("gp.interconnect_min_retries_before_timeout",
+							"Sets the min retries before reporting a transmit timeout in the interconnect.",
+							NULL,
+							&gp_interconnect_min_retries_before_timeout,
+							100, 1, 4096, PGC_USERSET, 0,
+							NULL, NULL, NULL);
+	DefineCustomIntVariable("gp.interconnect_debug_retry_interval",
+							"Sets the interval by retry times to record a debug message for retry.",
+							NULL,
+							&gp_interconnect_debug_retry_interval,
+							10, 1, 4096, PGC_USERSET, 0,
+							NULL, NULL, NULL);
+	DefineCustomBoolVariable("gp.interconnect_cache_future_packets",
+							 "Control whether future packets are cached.",
+							 "A packet that comes before the receiver it is for has begun waits for it; off, it is dropped, and sent again.",
+							 &gp_interconnect_cache_future_packets,
+							 true, PGC_USERSET, 0,
+							 NULL, NULL, NULL);
+	DefineCustomIntVariable("gp.interconnect_timer_period",
+							"Sets the timer period (in ms) for UDP interconnect",
+							"The longest a sender waiting on acknowledgements sleeps.",
+							&gp_interconnect_timer_period,
+							5, 1, 100, PGC_USERSET, GUC_UNIT_MS,
+							NULL, NULL, NULL);
+	DefineCustomIntVariable("gp.interconnect_timer_checking_period",
+							"Sets the timer checking period (in ms) for UDP interconnect",
+							"How often, under the loss methods, a sender looks for packets whose time has run out.",
+							&gp_interconnect_timer_checking_period,
+							20, 1, 100, PGC_USERSET, GUC_UNIT_MS,
 							NULL, NULL, NULL);
 	DefineCustomIntVariable("gp.udpic_dropacks_percent",
 							"Sets the percentage of correctly-received acknowledgment packets to synthetically drop, for testing.",

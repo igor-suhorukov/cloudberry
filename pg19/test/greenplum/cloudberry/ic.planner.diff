@@ -1,0 +1,9 @@
+@@
+-ERROR:  fault triggered, fault name:'interconnect_setup_palloc' fault type:'error'
++ a | b | a | b 
++---+---+---+---
++(0 rows)
++
+@@
+-ERROR:  fault triggered, fault name:'exec_mpp_query_start' fault type:'error'
++ERROR:  canceling statement due to statement timeout

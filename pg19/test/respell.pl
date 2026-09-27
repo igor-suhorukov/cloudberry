@@ -45,6 +45,7 @@
 #   nameeq    name = 'NAME'
 #   showguc   show_guc('NAME')
 #   like      '%NAME%'
+#   param     parameter "NAME", as an error names it
 #   header    a line of GPNAME between spaces, SHOW's header
 #   header0   the same, the spaces optional
 
@@ -79,6 +80,7 @@ my %kind = (
 	nameeq   => sub { $_[0] =~ s/\b(name\s*=\s*)'($N)'/$1'$map{lc $2}'/gi },
 	showguc  => sub { $_[0] =~ s/\bshow_guc\('($N)'\)/show_guc('$map{$1}')/g },
 	like     => sub { $_[0] =~ s/'%($N)%'/'%$map{$1}%'/g },
+	param    => sub { $_[0] =~ s/\b(parameter )"($N)"/$1"$map{lc $2}"/gi },
 	header   => sub { $_[0] =~ s/^( +)($G)( +)$/$1$map{$2}$3/ },
 	header0  => sub { $_[0] =~ s/^( *)($G)( *)$/$1$map{$2}$3/ },
 );

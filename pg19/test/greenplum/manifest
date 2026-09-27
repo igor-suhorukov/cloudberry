@@ -331,21 +331,23 @@ skip gp_owner_permission  relation "pg_stat_operations" does not exist
 skip incremental_analyze  syntax error at or near "foo"; syntax error at or near "foo_1_prt_2"
 run  regex_gp
 skip dispatch_encoding  relation "gp_toolkit.__gp_log_segment_ext" does not exist; raise_error called on "funny char Ä"
+port icudp_on
 run  icudp/gp_interconnect_queue_depth
 run  icudp/gp_interconnect_queue_depth_longtime
-skip icudp/gp_interconnect_snd_queue_depth  unrecognized configuration parameter "gp_interconnect_snd_queue_depth"
-skip icudp/gp_interconnect_snd_queue_depth_longtime  unrecognized configuration parameter "gp_interconnect_snd_queue_depth"
-skip icudp/gp_interconnect_min_retries_before_timeout  unrecognized configuration parameter "gp_interconnect_min_retries_before_timeout"
+run  icudp/gp_interconnect_snd_queue_depth
+run  icudp/gp_interconnect_snd_queue_depth_longtime
+run  icudp/gp_interconnect_min_retries_before_timeout
 run  icudp/gp_interconnect_transmit_timeout
-skip icudp/gp_interconnect_cache_future_packets  unrecognized configuration parameter "gp_interconnect_cache_future_packets"
+run  icudp/gp_interconnect_cache_future_packets
 run  icudp/gp_interconnect_default_rtt
-skip icudp/gp_interconnect_fc_method  unrecognized configuration parameter "gp_interconnect_fc_method"
+run  icudp/gp_interconnect_fc_method
 run  icudp/gp_interconnect_min_rto
-skip icudp/gp_interconnect_timer_checking_period  unrecognized configuration parameter "gp_interconnect_timer_checking_period"
-skip icudp/gp_interconnect_timer_period  unrecognized configuration parameter "gp_interconnect_timer_period"
-skip icudp/queue_depth_combination_loss  unrecognized configuration parameter "gp_interconnect_snd_queue_depth"
-skip icudp/queue_depth_combination_capacity  unrecognized configuration parameter "gp_interconnect_fc_method"; unrecognized configuration parameter "gp_interconnect_snd_queue_depth"
-skip icudp/queue_depth_combination_loss_advance  unrecognized configuration parameter "gp_interconnect_fc_method"; unrecognized configuration parameter "gp_interconnect_snd_queue_depth"
+run  icudp/gp_interconnect_timer_checking_period
+run  icudp/gp_interconnect_timer_period
+run  icudp/queue_depth_combination_loss
+run  icudp/queue_depth_combination_capacity
+run  icudp/queue_depth_combination_loss_advance
+port icudp_off
 skip event_trigger_gp  event trigger "regress_event_trigger" does not exist
 skip deadlock  canceling statement due to user request; function gp_dist_wait_status() does not exist
 skip deadlock2  differs: Cloudberry's NOTICE that a slice prefetches a join's qual is not the port's
@@ -394,7 +396,7 @@ skip alter_table_gp  differs: Cloudberry refuses to alter a column of a primary 
 run  subtransaction_visibility
 skip oid_consistency  differs: \d of an append-optimized table prints no Compression Type, Level, Block Size or Checksum
 skip udf_exception_blocks  unrecognized configuration parameter "debug_dtm_action_segment"; unrecognized configuration parameter "debug_dtm_action_target"
-skip ic  unrecognized configuration parameter "gp_interconnect_snd_queue_depth"; -1 is outside the valid range for parameter "gp.interconnect_queue_depth" (1 .. 4096)
+run  ic
 skip instr_in_shmem_verify  could not access file "gp_instrument_shmem": No such file or directory; function gp_instrument_shmem_detail_f() does not exist
 skip partition_locking  differs: the locks a statement takes on a partitioned table's parts, and on which nodes
 skip vacuum_gp  relation "gp_toolkit.__gp_log_master_ext" does not exist

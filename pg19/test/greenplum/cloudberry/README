@@ -223,6 +223,16 @@ gpdist_legacy_opclasses  the complex type, Cloudberry's own, which
   complex's place -- takes them, holds a row and finds it; the rows the test
   places on the segments are where Cloudberry places them.
 
+ic (planner)  the interconnect a segment of a join sets up, where
+  Cloudberry's fault interconnect_setup_palloc fails the query on segment
+  0: the planner reads both tables through gathers and joins them here, and
+  no segment has an interconnect to set up.  And a query whose segments,
+  one failing and two asleep in exec_mpp_query_start, the coordinator waits
+  for: the planner's partial aggregate on the segments is a round of every
+  one's answer, as Cloudberry's is under its TCP interconnect, and the
+  statement timeout comes first, where Cloudberry's UDP interconnect reports
+  the failure at once, and ORCA's gather here does too.
+
 join_gp  the NOTICE of test_print_prefetch_joinqual: where a join's outer
   side and its join qual both read through a Motion, Cloudberry reads the
   qual's rows first, against a deadlock between the two, and says so;

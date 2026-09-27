@@ -249,6 +249,13 @@ static const char *const synced_settings[] = {
 	"gp.interconnect_transmit_timeout",
 	"gp.interconnect_min_rto",
 	"gp.interconnect_default_rtt",
+	"gp.interconnect_snd_queue_depth",
+	"gp.interconnect_fc_method",
+	"gp.interconnect_min_retries_before_timeout",
+	"gp.interconnect_debug_retry_interval",
+	"gp.interconnect_cache_future_packets",
+	"gp.interconnect_timer_period",
+	"gp.interconnect_timer_checking_period",
 	"gp.udpic_dropacks_percent",
 	"gp.udpic_dropxmit_percent",
 	/*
@@ -3895,8 +3902,15 @@ gather_start(const char *sql, TupleDesc tupdesc, int content, int nsegments,
 			 const int *contents, int ncontents)
 {
 	GpGatherState *gather = (GpGatherState *) palloc0(sizeof(GpGatherState));
-	GpGang	   *g = gang_get();
+	GpGang	   *g;
 	int			n = 0;
+
+	/*
+	 * Where Cloudberry's coordinator sets up the interconnect its slices'
+	 * rows come to it by (SetupInterconnect()): the gather its rows come by.
+	 */
+	GP_FAULT("interconnect_setup_palloc");
+	g = gang_get();
 
 	/*
 	 * Through a cursor, inside the coordinator's transaction.  A gather that
