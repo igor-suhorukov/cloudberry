@@ -1418,11 +1418,20 @@ gp_set_rel_pathlist(PlannerInfo *root, RelOptInfo *rel, Index rti,
 	cp->path.pathtype = T_CustomScan;
 	cp->path.parent = rel;
 	cp->path.pathtarget = rel->reltarget;
-	cp->path.param_info = NULL;
+	/*
+	 * Parameterized by what the rel reads laterally, as PostgreSQL's own
+	 * scans of it are: a column of another table its target list computes
+	 * (a pulled-up LATERAL subquery's) is that table's nestloop parameter,
+	 * computed here as the rows arrive, and the gather is run again for each
+	 * of that table's rows.
+	 */
+	cp->path.param_info = get_baserel_parampathinfo(root, rel,
+													rel->lateral_relids);
 	cp->path.parallel_aware = false;
 	cp->path.parallel_safe = false;
 	cp->path.parallel_workers = 0;
-	cp->path.rows = rel->rows;
+	cp->path.rows = cp->path.param_info ? cp->path.param_info->ppi_rows :
+		rel->rows;
 	cp->path.startup_cost = GATHER_STARTUP_COST;
 	cp->path.total_cost = GATHER_STARTUP_COST +
 		rel->rows * (GATHER_ROW_COST + cpu_tuple_cost);
