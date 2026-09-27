@@ -616,8 +616,13 @@ catalog_relation_stats(PlannerInfo *root, RangeTblEntry *rte,
 	if (rte->rtekind != RTE_RELATION || attnum <= 0)
 		return false;
 
-	atttype = OidIsValid(vardata->atttype) ? vardata->atttype
-		: get_atttype(rte->relid, attnum);
+	/*
+	 * The column's own type: brincostestimate() calls the hook with a
+	 * VariableStatData it has not filled in.
+	 */
+	atttype = get_atttype(rte->relid, attnum);
+	if (!OidIsValid(atttype))
+		return false;
 	check_relation_stats(rte->relid, attnum, false, atttype);
 	if (rte->inh)
 		check_relation_stats(rte->relid, attnum, true, atttype);
