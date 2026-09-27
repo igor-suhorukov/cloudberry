@@ -87,7 +87,9 @@ typedef struct OrcaRowMark
 	Index		rti;			/* in the query */
 	Oid			relid;
 	int			id;				/* rowmarkId: its ctid's column is "ctid<id>" */
-	AttrNumber	resno;			/* the query's output column holding it */
+	AttrNumber	resno;			/* the query's output column holding it:
+								 * the plan's, which leaves the query's junk
+								 * columns out (CreateDXLOutputCols) */
 	LockClauseStrength strength;
 	LockWaitPolicy waitPolicy;
 } OrcaRowMark;
@@ -150,6 +152,7 @@ GpOrcaPrepareRowMarks(Query *query, List **marks, const char **why)
 	int			nrels = 0;
 	bool		cluster = !IS_SINGLENODE();
 	int			id = 0;
+	int			outputs = 0;
 
 	*marks = NIL;
 	*why = NULL;
@@ -239,6 +242,11 @@ GpOrcaPrepareRowMarks(Query *query, List **marks, const char **why)
 		return false;
 	}
 
+	/* the plan's columns: the query's own, a sort's junk column left out */
+	foreach_node(TargetEntry, tle, query->targetList)
+		if (!tle->resjunk)
+			outputs++;
+
 	foreach(lc, keep)
 	{
 		RowMarkClause *rc = lfirst_node(RowMarkClause, lc);
@@ -261,11 +269,12 @@ GpOrcaPrepareRowMarks(Query *query, List **marks, const char **why)
 		mark->rti = rc->rti;
 		mark->relid = rte->relid;
 		mark->id = ++id;
-		mark->resno = list_length(query->targetList) + 1;
+		mark->resno = ++outputs;
 		mark->strength = rc->strength;
 		mark->waitPolicy = rc->waitPolicy;
 		query->targetList = lappend(query->targetList,
-									makeTargetEntry((Expr *) ctid, mark->resno,
+									makeTargetEntry((Expr *) ctid,
+													list_length(query->targetList) + 1,
 													psprintf("ctid%d", mark->id),
 													false));
 		*marks = lappend(*marks, mark);

@@ -3321,6 +3321,16 @@ SQL
 			ok "ORCA locks the rows below the Gather, above the sort its merge keeps" ;;
 		*) notok "ORCA's plan for FOR UPDATE" "$out" ;;
 	esac
+	# sorted by a column it does not return, a junk column ORCA's plan leaves out
+	out=$(q 0 "SET gp.optimizer = on; EXPLAIN (COSTS OFF) SELECT id FROM gdd WHERE val < 5 ORDER BY -val FOR UPDATE;" | tr '\n' '|')
+	out2=$(q 0 "SET gp.optimizer = on; SELECT id FROM gdd WHERE val < 5 ORDER BY -val FOR UPDATE;" | tr '\n' ',')
+	out3=$(q 0 "SET gp.optimizer = off; SELECT id FROM gdd WHERE val < 5 ORDER BY -val FOR UPDATE;" | tr '\n' ',')
+	case "$out|$out2" in
+		*"LockRows"*"Optimizer: GPORCA"*"|$out3")
+			[ -n "$out3" ] && ok "and sorted by a column it does not return, one column, as the planner's" \
+				|| notok "ORCA's FOR UPDATE sorted by a column it does not return" "no rows" ;;
+		*) notok "ORCA's FOR UPDATE sorted by a column it does not return" "$out / $out2 / $out3" ;;
+	esac
 
 	# With rows locked, an UPDATE that waited for another's update of its row
 	# re-checks the row's new version (EvalPlanQual), running the plan below

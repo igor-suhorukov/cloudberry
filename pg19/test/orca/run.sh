@@ -2331,6 +2331,11 @@ case "$out" in
 	Limit*LockRows*) ok "below a LIMIT, which counts the rows it locks" ;;
 	*) notok "below a LIMIT, which counts the rows it locks" "$out" ;;
 esac
+# A sort by a column the query does not return is a junk column of the
+# query, which ORCA's plan leaves out, so each ctid's column is counted among
+# the query's outputs rather than its target list; the backend stopped here.
+same "FOR UPDATE sorted by a column the query does not return" \
+     "SELECT a FROM t0 WHERE a < 4 ORDER BY b, a FOR UPDATE"
 same "FOR UPDATE of both tables of a join" \
      "SELECT t0.a, t0_lk.c FROM t0 JOIN t0_lk USING (a) WHERE t0.a < 4 ORDER BY 1 FOR UPDATE"
 declined "FOR UPDATE OF one table of a join, which would copy the other's rows" \
