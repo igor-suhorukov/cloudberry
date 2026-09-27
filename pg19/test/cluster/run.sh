@@ -1771,6 +1771,12 @@ $((n + 1))" ] && ok "a serial column's values, taken on the segments from the co
 	orca_same "... grouped by, sorted on the segments and merged" \
 		"SELECT r, count(*) FROM (SELECT rec_of(a % 5) AS r FROM o) s GROUP BY r ORDER BY r;" \
 		"Merge Key"
+	# ... and a set of them a ProjectSet returns on the segments, which a
+	# Result above it relabels: in the ProjectSet the set-returning call has
+	# to stay at the top of its column (a segment's Assert).
+	orca_same "... and a set of them a set-returning function returns for each row, on the segments" \
+		"SELECT count(*), count(DISTINCT kw) FROM (SELECT pg_get_keywords() AS kw FROM o WHERE a < 4) s;" \
+		"ProjectSet"
 	out=$(q 0 "SELECT rec_of(gp_execution_segment()) FROM gp_dist_random('gp_id') ORDER BY 1;" | tr '\n' '/')
 	[ "$out" = "(-1,0z)/(0,1z)/" ] \
 		&& ok "... one each segment makes in a query of gp_dist_random('gp_id') alone" \

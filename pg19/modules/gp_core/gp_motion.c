@@ -3940,6 +3940,32 @@ fragment_payload(Query *parse, char **key)
 	return TextDatumGetCString(arg->constvalue);
 }
 
+/*
+ * A Result above a fragment's top node, returning its columns as they are:
+ * a ProjectSet's, whose set-returning call has to stay at the top of its
+ * column, which ProjectSet evaluates as a set only there.
+ */
+static Plan *
+result_above(Plan *child)
+{
+	Result	   *res = makeNode(Result);
+
+	res->result_type = RESULT_TYPE_GATING;
+	res->plan.startup_cost = child->startup_cost;
+	res->plan.total_cost = child->total_cost;
+	res->plan.plan_rows = child->plan_rows;
+	res->plan.plan_width = child->plan_width;
+	res->plan.parallel_safe = child->parallel_safe;
+	res->plan.plan_node_id = child->plan_node_id;
+	res->plan.lefttree = child;
+	foreach_node(TargetEntry, tle, child->targetlist)
+		res->plan.targetlist =
+			lappend(res->plan.targetlist,
+					makeTargetEntry((Expr *) makeVarFromTargetEntry(OUTER_VAR, tle),
+									tle->resno, tle->resname, tle->resjunk));
+	return (Plan *) res;
+}
+
 static PlannedStmt *
 fragment_plan(const char *payload, const char *key)
 {
@@ -3973,10 +3999,21 @@ fragment_plan(const char *payload, const char *key)
 	 * as gp_internal.record_wire, its row type described, which is what the
 	 * Motion there reads it as (gp_record.c): relabelled, which leaves the
 	 * value as it is and gives the portal that type's send function.  A
-	 * reader's fragment is its Motion, which sends so itself.
+	 * reader's fragment is its Motion, which sends so itself.  A ProjectSet's
+	 * column is relabelled above it, in a Result: its set-returning call --
+	 * ORCA's pg_get_keywords() of a table's rows -- is a set only at the top
+	 * of its column.
 	 */
 	if (stmt->commandType == CMD_SELECT && !GpMotionIs(stmt->planTree) &&
 		OidIsValid(GpRecordWireType()))
+	{
+		if (IsA(stmt->planTree, ProjectSet))
+			foreach_node(TargetEntry, tle, stmt->planTree->targetlist)
+				if (exprType((Node *) tle->expr) == RECORDOID)
+				{
+					stmt->planTree = result_above(stmt->planTree);
+					break;
+				}
 		foreach(lc, stmt->planTree->targetlist)
 		{
 			TargetEntry *tle = lfirst_node(TargetEntry, lc);
@@ -3986,6 +4023,7 @@ fragment_plan(const char *payload, const char *key)
 													 -1, InvalidOid,
 													 COERCE_IMPLICIT_CAST);
 		}
+	}
 
 	/*
 	 * A segment runs a slice in one process.  The fragment is a copy of the
