@@ -24,5 +24,11 @@ comment = 'ORCA, the cost-based optimizer, behind planner_hook'
 default_version = '1.0'
 module_pathname = '$libdir/gp_orca'
 relocatable = false
+# pg_catalog, as gp_core's: the script makes schema gp_orca, a member of the
+# extension, and names a schema for everything else, so that a database the
+# extension is in, template1 and its copies among them, has nothing of it in
+# schema public, as Cloudberry's has nothing of ORCA's there
+# (gp_upgrade_cornercases drops public in a copy of template1)
+schema = pg_catalog
 requires = 'gp_core'
 superuser = true

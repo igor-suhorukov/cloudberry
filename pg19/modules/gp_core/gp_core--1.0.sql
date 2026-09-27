@@ -205,6 +205,15 @@ AS 'MODULE_PATHNAME', 'gp_dtx_wait_mirror'
 LANGUAGE C STRICT VOLATILE;
 
 /*
+ * Wait until every standby streaming from this node has replayed what the
+ * node has written: a test's, force_mirrors_to_catch_up()'s (gp_standby.c).
+ */
+CREATE FUNCTION gp_internal.mirror_replay_wait()
+RETURNS void
+AS 'MODULE_PATHNAME', 'gp_mirror_replay_wait'
+LANGUAGE C STRICT VOLATILE;
+
+/*
  * This node's waiting relations, as the global deadlock detector reads them:
  * each waiting backend and a backend that holds what it waits for, with the
  * coordinator session each works for (0: none), whether the lock lasts to

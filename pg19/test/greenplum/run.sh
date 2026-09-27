@@ -108,6 +108,19 @@ done
 node_dir()  { echo "$WORK/$1/node$2"; }
 node_port() { echo $((BASEPORT + $1 * NODES + $2)); }
 node_sock() { echo "$SOCK/$1/n$2"; }
+# A group whose name begins "mirrors" has Cloudberry's demo cluster whole, as
+# isolation2's groups of the name have it (../isolation2/run.sh): a mirror
+# for each segment, a hot standby streaming from its primary, which FTS on
+# the coordinator watches, and a standby coordinator -- the mirrors dbids 5
+# to 7 and the standby 8, as Cloudberry's are.  Content c's mirror in the
+# gi-th group, and the group's standby.
+has_mirrors()  { [[ "$1" == mirrors* ]]; }
+mirror_dir()   { echo "$WORK/$1/mirror$2"; }
+mirror_port()  { echo $((BASEPORT + 300 + $1 * NODES + $2)); }
+mirror_sock()  { echo "$SOCK/$1/m$2"; }
+standby_dir()  { echo "$WORK/$1/standby"; }
+standby_port() { echo $((BASEPORT + 100 + $1)); }
+standby_sock() { echo "$SOCK/$1/s"; }
 # The superuser is Cloudberry's demo cluster's, gpadmin, as the singlenode
 # suite's is: Cloudberry's expected output names it.
 export PGUSER=gpadmin
@@ -116,10 +129,15 @@ cleanup() {
 	local w g n
 	for w in $(jobs -p); do kill "$w" 2> /dev/null; done
 	for g in "${groups[@]}"; do
-		for n in $(seq 0 $((NODES - 1))); do
+		for n in $(seq 0 $((NODES - 1))) standby $(seq -f 'mirror%g' 0 $((NODES - 2))); do
+			case "$n" in
+				standby|mirror*) d="$WORK/$g/$n" ;;
+				*) d="$(node_dir "$g" "$n")" ;;
+			esac
+			[ -d "$d" ] || continue
 			[ -n "${RESULTS_DIR:-}" ] &&
-				cp "$(node_dir "$g" "$n").log" "$RESULTS_DIR/greenplum-$g-node$n.log" 2> /dev/null
-			"$BINDIR/pg_ctl" -D "$(node_dir "$g" "$n")" -m immediate stop > /dev/null 2>&1
+				cp "$d.log" "$RESULTS_DIR/greenplum-$g-node$n.log" 2> /dev/null
+			"$BINDIR/pg_ctl" -D "$d" -m immediate stop > /dev/null 2>&1
 		done
 	done
 	[ -n "${KEEP:-}" ] && echo "kept: $WORK" || rm -rf "$WORK"
@@ -144,6 +162,12 @@ make_cluster() {
 		for n in $(seq 0 $((NODES - 1))); do
 			echo "$((n + 1)) $((n - 1)) p $(node_sock "$g" "$n") $(node_port "$gi" "$n") $(node_dir "$g" "$n")"
 		done
+		if has_mirrors "$g"; then
+			for n in $(seq 0 $((NODES - 2))); do
+				echo "$((NODES + 1 + n)) $n m $(mirror_sock "$g" "$n") $(mirror_port "$gi" "$n") $(mirror_dir "$g" "$n")"
+			done
+			echo "$((2 * NODES)) -1 m $(standby_sock "$g") $(standby_port "$gi") $(standby_dir "$g")"
+		fi
 	} > "$conf"
 	for n in $(seq 0 $((NODES - 1))); do
 		d="$(node_dir "$g" "$n")"
@@ -172,9 +196,77 @@ make_cluster() {
 		} >> "$d/postgresql.auto.conf"
 	done
 	for n in $(seq 1 $((NODES - 1))) 0; do
+		# the mirrors before the coordinator, as gpinitsystem makes them, so
+		# that FTS's first probe finds them there
+		[ "$n" -eq 0 ] && has_mirrors "$g" && { make_mirrors "$g" "$gi" || return 1; }
 		d="$(node_dir "$g" "$n")"
 		"$BINDIR/pg_ctl" -D "$d" -l "$d.log" -w -t 60 start > /dev/null 2>&1 \
 			|| { echo "node $n of group $g did not start"; tail -20 "$d.log"; return 1; }
+	done
+	has_mirrors "$g" || return 0
+
+	# The standby coordinator, streaming from the coordinator as
+	# gp_walreceiver, as Cloudberry's does (gp_standby.c), a hot standby as
+	# the mirrors are.
+	d="$(standby_dir "$g")"
+	mkdir -p "$(standby_sock "$g")"
+	copy_node "$d" "$(node_sock "$g" 0)" "$(node_port "$gi" 0)" "" \
+		"$(standby_sock "$g")" "$(standby_port "$gi")" $((2 * NODES)) \
+		|| { echo "the standby of group $g could not be made"; return 1; }
+
+	# The pairs in sync, and synchronous replication on, as the tests begin:
+	# as FTS says in gp_segment_configuration, which database postgres has
+	# once it has gp_core, as isolation2's has it.
+	"$PSQL" -X -q -h "$(node_sock "$g" 0)" -p "$(node_port "$gi" 0)" -d postgres \
+		-c "CREATE EXTENSION IF NOT EXISTS gp_core" > /dev/null 2>&1
+	local synced=
+	for _ in $(seq 300); do
+		synced=$("$PSQL" -X -q -t -A -h "$(node_sock "$g" 0)" -p "$(node_port "$gi" 0)" -d postgres \
+			-c "SELECT gp_request_fts_probe_scan(); SELECT count(*) FROM gp_segment_configuration WHERE content >= 0 AND mode <> 's'" \
+			2> /dev/null | tail -1)
+		[ "$synced" = 0 ] && break
+		sleep 0.2
+	done
+	[ "$synced" = 0 ] || { echo "the mirrors of group $g did not come in sync"; return 1; }
+}
+
+# copy_node <dir> <primary's socket> <port> <slot> <socket> <port> <dbid>: a
+# hot standby of a node, copied with pg_basebackup -- from a slot, where one
+# is named -- and streaming from it as gp_walreceiver, as Cloudberry's
+# mirrors and standby are named; its log beside its data directory, as every
+# node's is.
+copy_node() {
+	local d="$1" from_sock="$2" from_port="$3" slot="$4" sock="$5" port="$6" dbid="$7"
+	"$BINDIR/pg_basebackup" -D "$d" -h "$from_sock" -p "$from_port" -X stream -c fast \
+		${slot:+-C -S "$slot"} > "$d.basebackup.log" 2>&1 \
+		|| { tail -5 "$d.basebackup.log"; return 1; }
+	grep -v -E '^(port|unix_socket_directories|gp\.dbid|primary_conninfo|primary_slot_name|hot_standby) ' \
+		"$d/postgresql.auto.conf" > "$d.auto"
+	{
+		cat "$d.auto"
+		echo "port = $port"
+		echo "unix_socket_directories = '$sock'"
+		echo "gp.dbid = $dbid"
+		echo "hot_standby = on"
+		echo "primary_conninfo = 'host=$from_sock port=$from_port application_name=gp_walreceiver'"
+		[ -n "$slot" ] && echo "primary_slot_name = '$slot'"
+	} > "$d/postgresql.auto.conf"
+	rm -f "$d.auto"
+	touch "$d/standby.signal"
+	"$BINDIR/pg_ctl" -D "$d" -l "$d.log" -w -t 60 start > /dev/null 2>&1 \
+		|| { tail -20 "$d.log"; return 1; }
+}
+
+# Each segment's mirror: a copy of its primary, from its slot, as Cloudberry's
+# mirrors stream.
+make_mirrors() {
+	local g="$1" gi="$2" c
+	for c in $(seq 0 $((NODES - 2))); do
+		mkdir -p "$(mirror_sock "$g" "$c")"
+		copy_node "$(mirror_dir "$g" "$c")" "$(node_sock "$g" $((c + 1)))" \
+			"$(node_port "$gi" $((c + 1)))" internal_wal_replication_slot \
+			"$(mirror_sock "$g" "$c")" "$(mirror_port "$gi" "$c")" $((NODES + 1 + c)) \
+			|| { echo "the mirror of content $c of group $g could not be made"; return 1; }
 	done
 }
 t0=$(date +%s)
@@ -295,9 +387,27 @@ make_suite() {
 					> "$SN/expected/$(echo "${e#"$CB"/expected/}" | tr / _)"
 			done
 		fi
+		include_files "$g" "$SN" "$f"
 		schedule_add "$SN" "$f" "${run_pass[$i]}"
 	done
 }
+# include_files <group> <suite dir> <test>: a file the test includes, \i
+# sql/<name>.sql, which psql reads from the directory the tests run in,
+# Cloudberry's, converted and respelled as the test is, into the group's
+# suite, and named there -- in the test and in its expected output, where
+# psql echoes the line (the qp_with_functional tests').
+include_files() {
+	local g="$1" SN="$2" f="$3" inc e
+	for inc in $(sed -n 's#^\\i \(sql/[A-Za-z0-9_./-]*\.sql\)$#\1#p' "$SN/sql/$f.sql" | sort -u); do
+		[ -f "$CB/$inc" ] || continue
+		mkdir -p "$SN/include/$(dirname "$inc")"
+		convert "$g" "$CB/$inc" | respell > "$SN/include/$inc"
+		for e in "$SN/sql/$f.sql" "$SN/expected/$f.out" "$SN"/expected/"$f"_[0-9].out; do
+			[ -f "$e" ] && sed -i "s#^\\\\i $inc\$#\\\\i $SN/include/$inc#" "$e"
+		done
+	done
+}
+
 # schedule_add <suite dir> <test> <pass or ->: the test into the schedule of
 # each pass it runs in.
 schedule_add() {

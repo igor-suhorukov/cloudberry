@@ -72,6 +72,7 @@
 #include "access/xlog.h"
 #include "access/xlog_internal.h"
 #include "access/xlogrecovery.h"
+#include "fmgr.h"
 #include "miscadmin.h"
 #include "nodes/parsenodes.h"
 #include "postmaster/bgworker.h"
@@ -388,6 +389,63 @@ GpStandbyMain(Datum main_arg)
 		ResetLatch(MyLatch);
 	}
 }
+
+/* ------------------------------------------------------------------------- */
+/* A test's wait for this node's copy                                        */
+/* ------------------------------------------------------------------------- */
+
+PG_FUNCTION_INFO_V1(gp_mirror_replay_wait);
+
+/*
+ * gp_internal.mirror_replay_wait()
+ *		Wait until every standby streaming from this node -- a segment's
+ *		mirror, the coordinator's standby -- has replayed what the node has
+ *		written so far: what Cloudberry's force_mirrors_to_catch_up() waits
+ *		for (its no-op record, redone), which a test calls before it looks
+ *		at a mirror's files: all of it flushed first, and then replayed up to
+ *		there.  At once where none streams, and on a node in recovery.
+ */
+Datum
+gp_mirror_replay_wait(PG_FUNCTION_ARGS)
+{
+	XLogRecPtr	target;
+
+	if (RecoveryInProgress())
+		PG_RETURN_VOID();
+	XLogFlush(GetXLogInsertRecPtr());
+	target = GetFlushRecPtr(NULL);
+
+	for (;;)
+	{
+		bool		behind = false;
+
+		for (int i = 0; i < max_wal_senders; i++)
+		{
+			WalSnd	   *walsnd = &WalSndCtl->walsnds[i];
+			pid_t		pid;
+			WalSndState state;
+			XLogRecPtr	apply;
+
+			SpinLockAcquire(&walsnd->mutex);
+			pid = walsnd->pid;
+			state = walsnd->state;
+			apply = walsnd->apply;
+			SpinLockRelease(&walsnd->mutex);
+
+			if (pid != 0 && state >= WALSNDSTATE_CATCHUP && state != WALSNDSTATE_STOPPING &&
+				apply < target)
+				behind = true;
+		}
+		if (!behind)
+			break;
+		(void) WaitLatch(MyLatch, WL_LATCH_SET | WL_TIMEOUT | WL_EXIT_ON_PM_DEATH,
+						 10L, WAIT_EVENT_PG_SLEEP);
+		ResetLatch(MyLatch);
+		CHECK_FOR_INTERRUPTS();
+	}
+	PG_RETURN_VOID();
+}
+
 
 /* ------------------------------------------------------------------------- */
 /* Start-up                                                                  */

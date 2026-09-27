@@ -17,6 +17,8 @@
 #   group the tests after it, to the next such line, are a group: each group
 #         has a cluster of its own, test_setup and gp_setup first, and the
 #         groups of a pass run side by side, each in the schedule's order.
+#         A group whose name begins "mirrors" has Cloudberry's demo cluster
+#         whole: a mirror for each segment, and a standby coordinator.
 #         The groups are cut by time, the ORCA pass's, and a test that reads
 #         what another made is in its group (bb_mpph_heap's tables,
 #         bb_memory_quota's).  rpt_tpch has one of its own, m7c, in the
@@ -285,7 +287,9 @@ run  enable_autovacuum
 skip log_guc  relation "gp_toolkit.__gp_log_master_ext" does not exist; relation "gp_toolkit.__gp_log_segment_ext" does not exist
 skip instr_in_shmem_setup  gp_enable_query_metrics is none of the port's settings: gpconfig refuses it, and instr_in_shmem and instr_in_shmem_verify, which it sets up for, fail without it
 skip instr_in_shmem  unrecognized configuration parameter "gp_enable_query_metrics"; unrecognized configuration parameter "gp_instrument_shmem_size"
-skip createdb  function force_mirrors_to_catch_up() does not exist
+group mirrors1
+skip createdb  in a group with mirrors: the faults create_db_after_file_copy and after_xlog_create_database, in CREATE DATABASE, and end_prepare_two_phase are none of the port's
+group m7a
 run  gp_aggregates_costs
 run  gp_metadata
 run  variadic_parameters
@@ -300,8 +304,10 @@ skip gp_prepared_xacts  differs: its utility-mode session asks for -c gp_role=ut
 run  gp_backend_info
 run  gp_locale
 skip spi_processed64bit  differs: an INSERT's count is the coordinator's own, which the fault executor_run_high_processed makes 2^32 - 11, where Cloudberry's is the sum of each segment's so made -- an UPDATE's and a DELETE's are that sum, as there -- and an INSERT ... SELECT of 10,000 rows reaches the fault's threshold, which no segment's share of it does
-skip gp_tablespace_with_faults  function force_mirrors_to_catch_up() does not exist
-skip gp_tablespace  function force_mirrors_to_catch_up() does not exist; unlogged append-optimized tables are not supported
+group mirrors1
+skip gp_tablespace_with_faults  in a group with mirrors: the faults after_xlog_create_tablespace and after_xlog_tblspc_drop, in CREATE and DROP TABLESPACE, and before_xlog_xact_prepare and after_xlog_xact_prepare_flushed are none of the port's
+skip gp_tablespace  unlogged append-optimized tables are not supported; unrecognized parameter "content1": a tablespace's location of one segment's own is none of the port's
+group m7a
 skip temp_tablespaces  its statement_mem of 1MB leaves the hash aggregate unspilled here, and its CTEs are a shared scan across slices under ORCA alone: gp_wait_until_triggered_fault() of sisc_xslice_temp_files and hashagg_spill_temp_files, faults the port has not, waits out the suite's minute
 run  default_tablespace
 run  leastsquares
@@ -462,8 +468,8 @@ run  qp_executor
 skip qp_olap_windowerr  argument of RANGE must not contain variables; argument of ROWS must not contain variables
 skip qp_olap_window  argument of RANGE must not contain variables; argument of ROWS must not contain variables
 run  qp_dropped_cols
-skip qp_with_functional_inlining  UPDATE is not allowed in a non-volatile function; unrecognized configuration parameter "gp_cte_sharing"
-skip qp_with_functional_noinlining  UPDATE is not allowed in a non-volatile function; unrecognized configuration parameter "gp_cte_sharing"
+skip qp_with_functional_inlining  differs: a function's write in a segment's slice runs, where Cloudberry refuses it (function cannot execute on a QE slice because it issues a non-SELECT statement), and one declared stable PostgreSQL 19 refuses to write at all: UPDATE is not allowed in a non-volatile function
+skip qp_with_functional_noinlining  differs: a function's write in a segment's slice runs, where Cloudberry refuses it (function cannot execute on a QE slice because it issues a non-SELECT statement), and one declared stable PostgreSQL 19 refuses to write at all: UPDATE is not allowed in a non-volatile function
 run  qp_functions_in_contexts_setup
 run  qp_misc_rio_join_small
 group m7b
@@ -499,9 +505,11 @@ skip fts_error  differs: two of its checks that FTS marked a node down answer f,
 skip psql_gp_commands  differs: psql 19's \dx has a Default version column, and Cloudberry's psql describes its storage and external tables in its own way
 skip pg_resetwal  differs: PostgreSQL 19's pg_resetwal has no -k, the data checksum version Cloudberry's sets
 run  dropdb_check_shared_buffer_cache
-skip gp_upgrade_cornercases  cannot drop schema public because other objects depend on it: the database it makes is template1's copy, where gp_setup made gp_orca and gp_inject_fault in schema public
+run  gp_upgrade_cornercases
 skip temp_relation  differs: a temporary table's file is t<proc number>_<relfilenode> in PostgreSQL 19, and the test looks for Cloudberry's t_<relfilenode>, which it finds on no node, before DROP TABLE and after
-skip alter_db_set_tablespace  function force_mirrors_to_catch_up() does not exist; spiexceptions.UndefinedFunction: function get_tablespace_version_directory_name() does not exist
+group mirrors1
+skip alter_db_set_tablespace  in a group with mirrors: the faults inside_move_db_transaction and after_drop_database_directories, in ALTER DATABASE ... SET TABLESPACE, and ckpt_loop_begin and ckpt_loop_end are none of the port's, nor is the move of each segment's database
+group m7b
 run  oid_wraparound
 skip fts_recovery_in_progress  canceling statement due to user request
 skip gangsize  differs: the gangs its statements are dispatched to, by Cloudberry's INFO lines, are not the sizes Cloudberry makes them
