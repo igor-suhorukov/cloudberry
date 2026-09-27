@@ -149,6 +149,7 @@
 #include "gp_policy.h"
 #include "gp_refresh.h"
 #include "gp_scan.h"
+#include "gp_seq.h"
 #include "gp_settings.h"
 #include "gp_share.h"
 
@@ -360,6 +361,12 @@ static ExecutorEnd_hook_type prev_executor_end = NULL;
  * statement_timestamp(), read on the segment too (adopt_start_times()).
  */
 #define GP_TIMES_MARK	"gp_times"
+
+/*
+ * On a fragment's PlannedStmt: that the coordinator's transaction is
+ * read-only, where a sequence's next value is refused (gp_seq.c).
+ */
+#define GP_READ_ONLY_MARK	"gp_read_only"
 
 /* How many fragments this segment process is running, one inside another. */
 static int	fragment_depth = 0;
@@ -2012,6 +2019,12 @@ fragment_sql_ex(EState *estate, Plan *fragment, CustomScan *motion,
 														 (int64) GetCurrentTransactionStartTimestamp(),
 														 (int64) GetCurrentStatementStartTimestamp())),
 							-1));
+
+	if (XactReadOnly)
+		frag->extension_state =
+			lappend(frag->extension_state,
+					makeDefElem(pstrdup(GP_READ_ONLY_MARK),
+								(Node *) makeBoolean(true), -1));
 
 	params = fragment_params(estate, motion, econtext);
 	if (params != NIL)
@@ -3999,6 +4012,8 @@ motion_executor_start(QueryDesc *queryDesc, int eflags)
 			pgstat_report_activity(STATE_RUNNING, strVal(source));
 		if (times != NULL)
 			adopt_start_times(strVal(times));
+		GpSeqSetReadOnly(fragment_mark(queryDesc->plannedstmt,
+									   GP_READ_ONLY_MARK) != NULL);
 
 		if (!(eflags & EXEC_FLAG_EXPLAIN_ONLY))
 		{

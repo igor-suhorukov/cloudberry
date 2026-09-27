@@ -15,8 +15,24 @@
 -explain (costs off) select * from t_hashdist cross join (select random() as k, sum(a) from t_replicate_volatile group by k) x;
 +explain (costs off) select * from t_hashdist cross join (select a, sum(b) as s from t_replicate_volatile group by a having sum(b) > random() order by a) x ;
 @@
--
 -explain (costs off) select * from t_hashdist cross join (select a, sum(b) as s from t_replicate_volatile group by a having sum(b) > random() order by a) x ;
++-- insert
++explain (costs off) insert into t_replicate_volatile select random() from t_replicate_volatile;
+@@
+--- insert
+-explain (costs off) insert into t_replicate_volatile select random() from t_replicate_volatile;
++explain (costs off) insert into t_replicate_volatile select random(), a, a from generate_series(1, 10) a;
+@@
+-explain (costs off) insert into t_replicate_volatile select random(), a, a from generate_series(1, 10) a;
++create sequence seq_for_insert_replicated_table;
++explain (costs off) insert into t_replicate_volatile select nextval('seq_for_insert_replicated_table');
+@@
+-create sequence seq_for_insert_replicated_table;
+-explain (costs off) insert into t_replicate_volatile select nextval('seq_for_insert_replicated_table');
++explain (costs off) select a from t_replicate_volatile union all select * from nextval('seq_for_insert_replicated_table');
+@@
+-
+-explain (costs off) select a from t_replicate_volatile union all select * from nextval('seq_for_insert_replicated_table');
 -QUERY PLAN
 -___________
 @@

@@ -48,7 +48,12 @@
 #include "nodes/nodeFuncs.h"
 #include "nodes/plannodes.h"
 #include "catalog/pg_class.h"
+#include "catalog/pg_type.h"
+#include "parser/parse_func.h"
+#include "storage/lmgr.h"
 #include "utils/fmgroids.h"
+#include "utils/rel.h"
+#include "utils/relcache.h"
 #include "utils/guc.h"
 #include "utils/lsyscache.h"
 
@@ -134,6 +139,45 @@ is_motion(Node *node)
 {
 	return IsA(node, CustomScan) &&
 		strcmp(((CustomScan *) node)->methods->CustomName, GP_MOTION_NAME) == 0;
+}
+
+/*
+ * gp_core's function that stands for a sequence function in a slice the
+ * segments run, gp_internal.<name>(regclass) (gp_seq.c); InvalidOid where
+ * gp_core's extension is not in the database, or is older.
+ */
+static Oid
+segment_sequence_function(const char *name)
+{
+	Oid			argtypes[1] = {REGCLASSOID};
+
+	return LookupFuncName(list_make2(makeString("gp_internal"),
+									 makeString(pstrdup(name))),
+						  1, argtypes, true);
+}
+
+/*
+ * May a segment take this sequence's next values from the coordinator, from
+ * a backend of another transaction there?  Not a temporary sequence, which
+ * is this session's alone; not one this transaction made or reset, which
+ * that backend cannot see as it is; and not one this session holds a lock
+ * on that nextval() would wait for there, until this transaction ends.
+ */
+static bool
+segment_sequence_takable(Oid seqid)
+{
+	Relation	rel;
+	bool		takable;
+
+	if (get_rel_persistence(seqid) != RELPERSISTENCE_PERMANENT)
+		return false;
+	rel = RelationIdGetRelation(seqid);
+	if (!RelationIsValid(rel))
+		return false;
+	takable = rel->rd_createSubid == InvalidSubTransactionId &&
+		rel->rd_firstRelfilelocatorSubid == InvalidSubTransactionId;
+	RelationClose(rel);
+	return takable && !CheckRelationOidLockedByMe(seqid, ShareLock, true);
 }
 
 static Bitmapset *
@@ -351,15 +395,83 @@ motion_check_walker(Node *node, void *arg)
 				 * A sequence is the coordinator's: a segment's copy of it is
 				 * not the one the statement's values come from, and a reader
 				 * may not advance it.  Cloudberry's segments ask the
-				 * coordinator's sequence server; the port's have none.
+				 * coordinator for its next value, and so do the port's:
+				 * nextval() in a slice the segments run is gp_core's
+				 * gp_internal.nextval(), and an identity column's next value,
+				 * as an INSERT's target list has it, its
+				 * gp_internal.identity_nextval() (gp_seq.c) -- of a sequence
+				 * the coordinator's other backend can take them from.  The
+				 * coordinator's own fragment -- a VALUES list, sent to the
+				 * segments -- runs in this session (gp_motion.c), and keeps
+				 * any, as the coordinator's slice does.  currval(), lastval()
+				 * and setval() in a slice the segments run stay the
+				 * planner's, as Cloudberry refuses them on a cluster.
 				 */
+			case T_TargetEntry:
+				{
+					TargetEntry *tle = (TargetEntry *) node;
+					NextValueExpr *nve;
+					Oid			fn;
+					Expr	   *call;
+
+					if (tle->expr == NULL || !IsA(tle->expr, NextValueExpr) ||
+						ctx->on_coordinator)
+						break;
+					nve = (NextValueExpr *) tle->expr;
+					fn = segment_sequence_function("identity_nextval");
+					if (!OidIsValid(fn) || !segment_sequence_takable(nve->seqid))
+					{
+						ctx->problem = GP_ORCA_MOTION_SEQUENCE;
+						return true;
+					}
+					call = (Expr *) makeFuncExpr(fn, INT8OID,
+												 list_make1(makeConst(REGCLASSOID, -1,
+																	  InvalidOid,
+																	  sizeof(Oid),
+																	  ObjectIdGetDatum(nve->seqid),
+																	  false, true)),
+												 InvalidOid, InvalidOid,
+												 COERCE_EXPLICIT_CALL);
+					if (nve->typeId == INT4OID || nve->typeId == INT2OID)
+						call = (Expr *) makeFuncExpr(nve->typeId == INT4OID
+													 ? F_INT4_INT8 : F_INT2_INT8,
+													 nve->typeId,
+													 list_make1(call),
+													 InvalidOid, InvalidOid,
+													 COERCE_IMPLICIT_CAST);
+					else if (nve->typeId != INT8OID)
+					{
+						ctx->problem = GP_ORCA_MOTION_SEQUENCE;
+						return true;
+					}
+					tle->expr = call;
+					break;
+				}
 			case T_NextValueExpr:
+				if (ctx->on_coordinator)
+					break;
 				ctx->problem = GP_ORCA_MOTION_SEQUENCE;
 				return true;
 			case T_FuncExpr:
 				{
-					Oid			f = ((FuncExpr *) node)->funcid;
+					FuncExpr   *fexpr = (FuncExpr *) node;
+					Oid			f = fexpr->funcid;
 
+					if (ctx->on_coordinator)
+						break;
+					if (f == F_NEXTVAL)
+					{
+						Node	   *arg = (Node *) linitial(fexpr->args);
+						Oid			fn = segment_sequence_function("nextval");
+
+						if (OidIsValid(fn) && IsA(arg, Const) &&
+							!((Const *) arg)->constisnull &&
+							segment_sequence_takable(DatumGetObjectId(((Const *) arg)->constvalue)))
+						{
+							fexpr->funcid = fn;
+							break;
+						}
+					}
 					if (f == F_NEXTVAL || f == F_CURRVAL || f == F_LASTVAL ||
 						f == F_SETVAL_REGCLASS_INT8 ||
 						f == F_SETVAL_REGCLASS_INT8_BOOL)

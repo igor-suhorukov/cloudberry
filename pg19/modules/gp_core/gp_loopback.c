@@ -793,6 +793,30 @@ GpLoopbackReadRows(const char *dbname, const char *sql, int ncols)
 }
 
 char *
+GpLoopbackCoordinatorValue(const char *dbname, const char *sql)
+{
+	const GpSegmentConfig *node = GpClusterCoordinator();
+	char	   *context;
+	LoopbackConn *lc;
+	PGresult   *res;
+	char	   *value = NULL;
+
+	if (node == NULL || GpClusterContentId() < 0)
+		ereport(ERROR,
+				(errcode(ERRCODE_CONFIG_FILE_ERROR),
+				 errmsg("this node's cluster has no coordinator to ask in database \"%s\"",
+						dbname)));
+
+	context = psprintf("a statement in database \"%s\" of the coordinator", dbname);
+	lc = loopback_conn(node, dbname, true);
+	res = loopback_exec(lc, sql, context);
+	if (PQntuples(res) > 0 && PQnfields(res) > 0 && !PQgetisnull(res, 0, 0))
+		value = pstrdup(PQgetvalue(res, 0, 0));
+	PQclear(res);
+	return value;
+}
+
+char *
 GpLoopbackRunApart(const char *dbname, const char *sql)
 {
 	MemoryContext oldcxt = CurrentMemoryContext;

@@ -587,6 +587,33 @@ AS 'MODULE_PATHNAME', 'gp_explicit_recheck'
 LANGUAGE C;
 
 /*
+ * A sequence's next value in a slice the segments run (gp_seq.c): ORCA's
+ * plan calls nextval() there as gp_internal.nextval(), and an identity
+ * column's next value as gp_internal.identity_nextval(), and the segment
+ * takes the values of the coordinator's sequence from
+ * gp_internal.sequence_values() there, a block of the sequence's CACHE at a
+ * time, over a connection that carries the cluster secret.  nextval()'s
+ * privileges are checked as nextval() checks them, of the segment's current
+ * user; an identity column's value is taken only for a plan the coordinator
+ * sent.
+ */
+CREATE FUNCTION gp_internal.nextval(regclass)
+RETURNS bigint
+AS 'MODULE_PATHNAME', 'gp_nextval'
+LANGUAGE C VOLATILE STRICT;
+
+CREATE FUNCTION gp_internal.identity_nextval(regclass)
+RETURNS bigint
+AS 'MODULE_PATHNAME', 'gp_identity_nextval'
+LANGUAGE C VOLATILE STRICT;
+
+CREATE FUNCTION gp_internal.sequence_values(seq oid, n int4, identity bool,
+	role oid)
+RETURNS bigint[]
+AS 'MODULE_PATHNAME', 'gp_sequence_values'
+LANGUAGE C VOLATILE STRICT;
+
+/*
  * pg_locks' mppsessionid and mppiswriter, which Cloudberry's pg_locks has as
  * columns and the parser makes of the names the same way (gp_segment.c):
  * the coordinator session the locking process works for, and whether it is

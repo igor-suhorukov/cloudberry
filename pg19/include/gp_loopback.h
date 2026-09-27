@@ -85,6 +85,15 @@ extern List *GpLoopbackReadRows(const char *dbname, const char *sql, int ncols);
  */
 extern char *GpLoopbackRunApart(const char *dbname, const char *sql);
 
+/*
+ * On a segment: a statement run now in the coordinator's database of that
+ * name, in a transaction of its own there, over a connection of the
+ * session's that carries the cluster secret, as this session's user; the
+ * first column of its first row, or NULL.  What it writes is committed at
+ * once, in one round trip.
+ */
+extern char *GpLoopbackCoordinatorValue(const char *dbname, const char *sql);
+
 /* The setting and the transaction callbacks; from gp_core's _PG_init. */
 extern void GpLoopbackInit(void);
 

@@ -379,6 +379,7 @@ modules = [
                      'modules/gp_core/gp_analyze.c',
                      'modules/gp_core/gp_motion.c',
                      'modules/gp_core/gp_split.c',
+                     'modules/gp_core/gp_seq.c',
                      'modules/gp_core/gp_segment.c',
                      'modules/gp_core/gp_segadmin.c',
                      'modules/gp_core/gp_size.c',

@@ -1552,6 +1552,42 @@ a\b|\N' ] && [ "$(cat "$ROOT/ce_prog.txt" 2>&1)" = "to a program" ] \
 		&& ok "now(), statement_timestamp() and LOCALTIMESTAMP on the segments are the coordinator's" \
 		|| notok "now() on the segments" "$out / $plan"
 
+	# A sequence is the coordinator's: nextval() in a slice the segments run
+	# takes the coordinator's sequence's values, a segment asking the
+	# coordinator for a block of its CACHE at a time (gp_core's gp_seq.c) --
+	# a serial column's default, an identity column's next value, which a
+	# role may take without a privilege on the sequence, as an INSERT does,
+	# and nextval() itself, which asks it of the role, in PostgreSQL's words.
+	# A segment's block not all given out is lost, as a session's is.
+	q 0 "CREATE TABLE sqo (id bigserial, x int) DISTRIBUTED BY (x);
+	     CREATE TABLE sqoi (id int GENERATED ALWAYS AS IDENTITY (CACHE 7), x int) DISTRIBUTED BY (x);
+	     CREATE ROLE sqo_user LOGIN; GRANT SELECT ON o TO sqo_user; GRANT INSERT, SELECT ON sqo, sqoi TO sqo_user;" >/dev/null 2>&1
+	n=$(q 0 "SELECT count(*) FROM o;")
+	plan=$(q 0 "EXPLAIN (COSTS OFF) INSERT INTO sqo (x) SELECT a FROM o;")
+	out=$(q 0 "INSERT INTO sqo (x) SELECT a FROM o;
+		SELECT count(*) || ' ' || count(DISTINCT id) || ' ' || min(id) || ' ' || max(id) FROM sqo;
+		SELECT nextval('sqo_id_seq');")
+	[[ "$plan" == *"Insert on sqo"*"Optimizer: GPORCA"* ]] && [ "$out" = "$n $n 1 $n
+$((n + 1))" ] && ok "a serial column's values, taken on the segments from the coordinator's sequence" \
+		|| notok "a serial column under ORCA" "$out / $plan"
+	n=$(q 0 "SELECT count(*) FROM o WHERE a <= 100;")
+	out=$(q 0 "SET ROLE sqo_user; INSERT INTO sqoi (x) SELECT a FROM o WHERE a <= 100;
+		SELECT count(*) || ' ' || count(DISTINCT id) || ' ' || min(id) || ' ' || (max(id) < count(*) + 2 * 7) FROM sqoi;")
+	out2=$(q 0 "SET ROLE sqo_user; INSERT INTO sqo (x) SELECT a FROM o WHERE a < 5;")
+	[ "$out" = "$n $n 1 true" ] && [[ "$out2" == *"permission denied for sequence sqo_id_seq"* ]] \
+		&& ok "an identity column's, a block of its CACHE at a time, for a role with no privilege on it; nextval() of the role's, refused" \
+		|| notok "an identity column under ORCA" "$out / $out2"
+	n=$(q 0 "SELECT count(*) FROM o;")
+	out=$(printf '%s\n' "SET gp.optimizer_trace_fallback = on;" \
+		"BEGIN; CREATE SEQUENCE sqo_new; SELECT count(nextval('sqo_new')) FROM o; ROLLBACK;" \
+		"CREATE TEMP SEQUENCE sqo_temp; SELECT count(nextval('sqo_temp')) FROM o;" \
+		"BEGIN READ ONLY; SELECT count(nextval('sqo_id_seq')) FROM o; ROLLBACK;" | qf 0)
+	case "$out" in
+		*"a sequence's value taken in a slice the segments run"*"$n"*"a sequence's value taken in a slice the segments run"*"$n"*"cannot execute nextval() in a read-only transaction"*)
+			ok "a sequence this transaction made, or a temporary one, is the planner's; a read-only transaction's, refused" ;;
+		*) notok "sequences ORCA leaves to the planner" "$out" ;;
+	esac
+
 	# A BRIN index is ORCA's where Cloudberry's ORCA takes it -- over values
 	# in the order of the table's pages, as Cloudberry's brin test has them --
 	# its statistics from the segments after VACUUM ANALYZE.
