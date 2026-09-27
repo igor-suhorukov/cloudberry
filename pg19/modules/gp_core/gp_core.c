@@ -53,6 +53,7 @@
 #include "gp_dtx.h"
 #include "gp_explain.h"
 #include "gp_fault.h"
+#include "gp_foreign.h"
 #include "gp_fts.h"
 #include "gp_gdd.h"
 #include "gp_motion.h"
@@ -336,6 +337,14 @@ _PG_init(void)
 	 * statement and the others see the list it makes; on one node too.
 	 */
 	GpPartAnalyzeInit();
+
+	/*
+	 * A foreign table's mpp_execute and num_segments kept from its wrapper's
+	 * validator on one node too, where DDL dispatch, which does it on a
+	 * cluster, installs no hook (gp_foreign.c): a hook outside
+	 * GpPartAnalyzeInit()'s, which passes it every other statement untouched.
+	 */
+	GpForeignInit();
 
 	/*
 	 * Deliberately no MarkGUCPrefixReserved("gp") here.  It drops every

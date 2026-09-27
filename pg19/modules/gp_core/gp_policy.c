@@ -69,7 +69,9 @@
 #include "utils/syscache.h"
 #include "utils/typcache.h"
 
+#include "gp_cluster.h"
 #include "gp_core_api.h"
+#include "gp_foreign.h"
 #include "gp_hash.h"
 #include "gp_label.h"
 #include "gp_policy.h"
@@ -552,7 +554,19 @@ policy_read(Oid relid, bool check)
 GpPolicy *
 GpPolicyGet(Oid relid)
 {
-	return policy_read(relid, true);
+	GpPolicy   *policy = policy_read(relid, true);
+	int			numsegments;
+
+	/*
+	 * A foreign table of another server than gp_exttable's has no label: one
+	 * whose mpp_execute is 'all segments' is read on the segments, at random,
+	 * as Cloudberry's GpPolicyFetch() makes its policy (gp_foreign.c).
+	 */
+	if (policy == NULL && !GpClusterIsSingleNode() &&
+		get_rel_relkind(relid) == RELKIND_FOREIGN_TABLE &&
+		GpForeignExecLocation(relid, &numsegments) == GP_FOREIGN_ALL_SEGMENTS)
+		policy = make_policy(POLICYTYPE_PARTITIONED, 0, numsegments);
+	return policy;
 }
 
 /*

@@ -247,7 +247,7 @@ GpScanDistributedPolicy(Oid relid)
 	if (get_rel_relkind(relid) != RELKIND_RELATION &&
 		get_rel_relkind(relid) != RELKIND_PARTITIONED_TABLE &&
 		get_rel_relkind(relid) != RELKIND_MATVIEW &&
-		!GpPolicyIsExternalTable(relid))
+		get_rel_relkind(relid) != RELKIND_FOREIGN_TABLE)
 		return NULL;
 
 	policy = GpPolicyGet(relid);
@@ -1102,8 +1102,8 @@ gp_set_rel_pathlist(PlannerInfo *root, RelOptInfo *rel, Index rti,
 	if (IS_DUMMY_REL(rel))
 		return;
 	/*
-	 * a table's, a materialized view's or an external table's, which the
-	 * segments read
+	 * a table's, a materialized view's, or a foreign table's the segments
+	 * read -- an external table's, or one whose mpp_execute says so
 	 */
 	if (get_rel_relkind(rte->relid) != RELKIND_RELATION &&
 		get_rel_relkind(rte->relid) != RELKIND_MATVIEW &&
@@ -1121,6 +1121,18 @@ gp_set_rel_pathlist(PlannerInfo *root, RelOptInfo *rel, Index rti,
 	 */
 	rel->pathlist = NIL;
 	rel->partial_pathlist = NIL;
+
+	/*
+	 * And a foreign table's wrapper may not take a join or an aggregate over
+	 * it to its server (GetForeignJoinPaths(), GetForeignUpperPaths()),
+	 * which the coordinator would ask for all of the table: its rows are
+	 * what each segment reads.
+	 */
+	if (rel->fdwroutine != NULL)
+	{
+		rel->serverid = InvalidOid;
+		rel->fdwroutine = NULL;
+	}
 
 	cp = makeNode(CustomPath);
 	cp->path.pathtype = T_CustomScan;
