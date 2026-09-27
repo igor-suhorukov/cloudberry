@@ -2292,6 +2292,76 @@ motion_flush(const char *key, int slice, int content, StringInfo buf,
 
 static StreamSlice *stream_slice_find(MotionState *state, int slice);
 
+/* Every PlanState of a tree, in the order planstate_tree_walker() takes them. */
+static bool
+collect_planstates(PlanState *planstate, void *context)
+{
+	List	  **states = (List **) context;
+
+	if (planstate == NULL)
+		return false;
+	*states = lappend(*states, planstate);
+	return planstate_tree_walker(planstate, collect_planstates, context);
+}
+
+typedef struct find_state_context
+{
+	Plan	   *plan;
+	PlanState  *found;
+} find_state_context;
+
+static bool
+find_planstate(PlanState *planstate, void *context)
+{
+	find_state_context *cxt = (find_state_context *) context;
+
+	if (planstate == NULL)
+		return false;
+	if (planstate->plan == cxt->plan)
+	{
+		cxt->found = planstate;
+		return true;
+	}
+	return planstate_tree_walker(planstate, find_planstate, context);
+}
+
+/*
+ * EXPLAIN ANALYZE of a coordinator's slice relayed: it ran here, in a
+ * PlanState of its own (motion_relay()), where EXPLAIN prints the one the
+ * Motion initialised to describe it (motion_begin()), which showed as never
+ * executed, as a segment's slice shows.  What each of its nodes counted is
+ * added to the node EXPLAIN prints.
+ */
+static void
+relay_instrument(MotionState *gather, CustomScan *motion, PlanState *ran)
+{
+	find_state_context cxt = {(Plan *) motion, NULL};
+	List	   *shown = NIL;
+	List	   *run = NIL;
+	ListCell   *ls;
+	ListCell   *lr;
+
+	if (!gather->css.ss.ps.state->es_instrument)
+		return;
+	(void) find_planstate(&gather->css.ss.ps, &cxt);
+	if (cxt.found == NULL || outerPlanState(cxt.found) == NULL)
+		return;
+	(void) collect_planstates(outerPlanState(cxt.found), &shown);
+	(void) collect_planstates(ran, &run);
+	if (list_length(shown) != list_length(run))
+		return;
+	forboth(ls, shown, lr, run)
+	{
+		PlanState  *s = (PlanState *) lfirst(ls);
+		PlanState  *r = (PlanState *) lfirst(lr);
+
+		if (s->plan != r->plan || s->instrument == NULL || r->instrument == NULL)
+			continue;
+		InstrEndLoop(r->instrument);
+		InstrAggNode(s->instrument, r->instrument);
+	}
+}
+
 /*
  * Carry out a Motion between segments: run the slice that sends, and relay
  * each of its rows to the segments that receive it -- a Gather's to segment
@@ -2451,6 +2521,7 @@ motion_relay(MotionState *gather, CustomScan *motion, int to)
 			gather->relayed_states = lappend(gather->relayed_states, ps);
 			MemoryContextSwitchTo(oldcxt);
 		}
+		relay_instrument(gather, motion, ps);
 	}
 	else
 	{
