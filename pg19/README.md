@@ -509,9 +509,16 @@ A file the port changes is a copy under `gpMgmt/src`, headed with what it
 changes; the rest are installed from Cloudberry's tree as they are.
 `gpMgmt/files.txt` lists both, and what is not installed, and why —
 gpexpand and gpshrink, since a cluster's segments are fixed when its
-coordinator starts; gpcheckcat, since the port keeps Cloudberry's catalogs
-as views, labels and files; and the loading, packaging and support tools,
-not ported yet.  The suites whose tests run Cloudberry's tools —
+coordinator starts.  The rest are installed too (M8): gpcheckcat, its checks
+reading each segment's catalog rows through `gp_internal.segment_query()` and
+checking what the port keeps in place of Cloudberry's catalogs — the `gp`
+labels, gp_ao's segment files, PAX's aux tables, directory tables' files —
+against PostgreSQL 19's catalog, its foreign keys made at build time from
+`system_fk_info.h`; gppkg, installing debs on a Debian host; gpload,
+analyzedb (counting AO and PAX tables' changes by gp_ao's and PAX's own),
+gpsd, minirepro, gplogfilter, gpmemwatcher, gpmemreport, gpcheckperf with
+gpnetbench and stream, gpreload, gpdemo and gpdirtableload.  The suites
+whose tests run Cloudberry's tools —
 `isolation2`, `singlenode_isolation2`, `diskquota` and `greenplum` — run
 gpMgmt's.
 
@@ -618,6 +625,9 @@ gpaddmirrors gives mirrors, its nodes authenticating each other by
 certificates -- each tool checked by what the cluster says after it: a
 primary stopped, failed over from and recovered with pg_rewind and with
 pg_basebackup, a standby made and made the coordinator, a mirror moved;
+and on a third cluster the rest of the tools (M8): gpcheckcat finding what
+one segment alone was given, analyzedb, gpload, gplogfilter, gpmemwatcher
+and gpmemreport, gpcheckperf, gpreload, gppkg, gpdirtableload and gpdemo;
 `dump`, M7's, a cluster's pg_dumpall read back into another cluster, and
 one node's into another node; `dbcopy`, a database copied by either
 strategy and moved to another tablespace and back, with PAX tables and

@@ -77,8 +77,11 @@ foreach line : fs.read('files.txt').strip().split('\n')
   dir = words[0]
   path = words[1]
 
-  if fs.is_file('src' / path)
-    source = 'src' / path
+  # A file of Cloudberry's beside gpMgmt/, ../gpAux/gpdemo/<file>, has its
+  # copy at src/gpAux/gpdemo/<file>.
+  copy = path.startswith('../') ? path.substring(3) : path
+  if fs.is_file('src' / copy)
+    source = 'src' / copy
   elif fs.is_file(gpmgmt_root / path)
     source = gpmgmt_root / path
   else
@@ -145,4 +148,41 @@ install_data('share' / 'gucs_disallowed_in_file.txt',
 executable('ifaddrs', files(gpmgmt_root / 'bin' / 'ifaddrs' / 'main.c'),
   install: true,
   install_dir: gphome / 'libexec',
+)
+
+# gpcheckperf's programs, which it copies to each host from bin/lib, as
+# Cloudberry's Makefiles install them: gpnetbench's server and client
+# (src/bin/gpnetbench) for the network test, and stream (gpMgmt/bin/stream)
+# for the memory bandwidth test.  Plain C, compiled where they lie; stream
+# keeps a loop counter it never reads, which the warning would report on
+# every build.
+gpnetbench_root = '..' / '..' / 'src' / 'bin' / 'gpnetbench'
+foreach prog : ['gpnetbenchServer', 'gpnetbenchClient']
+  executable(prog, files(gpnetbench_root / prog + '.c'),
+    install: true,
+    install_dir: gphome / 'bin' / 'lib',
+  )
+endforeach
+executable('stream', files(gpmgmt_root / 'bin' / 'stream' / 'stream.c'),
+  c_args: cc.get_supported_arguments('-Wno-unused-but-set-variable'),
+  dependencies: cc.find_library('m', required: false),
+  install: true,
+  install_dir: gphome / 'bin' / 'lib',
+)
+
+# The catalog's foreign keys, which gpcheckcat checks on every node
+# (gppylib/gpcatalog.py reads data/<major version>.json).  Cloudberry's
+# process_foreign_keys.pl reads them from its catalog headers' FOREIGN_KEY
+# lines; PostgreSQL 19 has none, and genbki.pl writes what its BKI_LOOKUP and
+# DECLARE_FOREIGN_KEY marks declare into catalog/system_fk_info.h, installed
+# with the server's headers, which catalog_json.py reads instead.
+python3 = find_program('python3', required: true)
+custom_target('gpmgmt-catalog-json',
+  input: [pg_includedir_server / 'catalog' / 'system_fk_info.h',
+          pg_includedir_server / 'catalog' / 'catversion.h'],
+  output: meson.project_version().split('.')[0] + '.json',
+  command: [python3, files('catalog_json.py'), '@INPUT0@', '@INPUT1@'],
+  capture: true,
+  install: true,
+  install_dir: gphome / 'lib' / 'python' / 'gppylib' / 'data',
 )

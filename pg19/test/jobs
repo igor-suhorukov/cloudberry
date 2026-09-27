@@ -60,7 +60,7 @@ isolation2             orca     134   PASSES=orca MEM=12500
 postgis_regress        orca     102   PASSES=orca MEM=6000
 isolation2             planner  133   PASSES=planner MEM=12500
 diskquota              isolation2 105   DQ_PARTS=isolation2 MEM=2000
-gpmgmt                 -        154   MEM=1600
+gpmgmt                 -        250   MEM=1800
 singlenode             planner   26   PASSES=planner MEM=3500
 cluster                -        100   MEM=600
 orca                   -         54   MEM=300

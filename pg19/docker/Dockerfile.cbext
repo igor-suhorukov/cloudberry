@@ -164,7 +164,8 @@ USER root
 # libprotobuf and liburing are PAX's.  gpMgmt, the management tools meson
 # installs beside the server, needs psutil, PyYAML and pexpect besides
 # PyGreSQL, and the commands its scripts run on each host: ip and ss, ping,
-# rsync and less.
+# rsync and less; and fakeroot, with which gppkg installs a package's debs
+# into GPHOME by dpkg.
 RUN apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
         libxerces-c3.2 \
         libcurl4t64 libapr1t64 libevent-2.1-7t64 libyaml-0-2 curl \
@@ -173,6 +174,7 @@ RUN apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-ins
         perl diffutils procps \
         python3 python3-pygresql \
         python3-psutil python3-yaml python3-pexpect iproute2 iputils-ping rsync less \
+        fakeroot \
     && rm -rf /var/lib/apt/lists/*
 # One locale beyond C: a function of Cloudberry's AOCO_Compression sets
 # lc_monetary to en_US.utf8, which its test machines have.

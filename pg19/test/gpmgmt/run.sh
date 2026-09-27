@@ -32,7 +32,14 @@
 # coordinator, and gpactivatestandby makes it the coordinator; and
 # gpdeletesystem removes the cluster.  A second cluster, of primaries alone,
 # whose nodes authenticate each other by certificates, is given its mirrors
-# by gpaddmirrors, and gpmovemirrors moves one of them.
+# by gpaddmirrors, and gpmovemirrors moves one of them.  A third, of
+# primaries alone with the modules the rest of the tools read, has them run
+# on it (M8): gpcheckcat finds what a segment alone was given, analyzedb
+# analyzes a table again where it changed, gpload loads through gpfdist,
+# gplogfilter finds an error, gpmemwatcher and gpmemreport measure the nodes,
+# gpcheckperf measures the host, gpreload sorts a table's rows, gppkg installs
+# and removes a package, gpdirtableload puts files into a directory table and
+# takes them back, and gpdemo makes a demo cluster and deletes it.
 #
 # The nodes are on this host, under its name, as the demo cluster's are, and
 # take TCP connections, as a cluster's nodes must: gpinitsystem gives them
@@ -64,8 +71,9 @@ pass=0; fail=0
 ok()   { printf '  ok     %s\n' "$1"; pass=$((pass + 1)); }
 notok(){ printf '  NOT OK %s\n' "$1"; [ -n "${2:-}" ] && printf '%s\n' "$2" | sed 's/^/         /' | head -20; fail=$((fail + 1)); }
 
-# Twelve ports none of which anything listens on: the coordinator's, the
-# standby's, the primaries' and the mirrors', of two clusters.
+# Thirty ports none of which anything listens on: the coordinator's, the
+# standby's, the primaries' and the mirrors', of three clusters, gpfdist's
+# and the demo cluster's.
 free_ports() {				# free_ports <base> <n>
 	local p
 	for p in $(seq "$1" $(($1 + $2 - 1))); do
@@ -75,13 +83,15 @@ free_ports() {				# free_ports <base> <n>
 	return 0
 }
 for _ in $(seq 20); do
-	BASE=$((20000 + (RANDOM % 400) * 20))
-	free_ports "$BASE" 20 && break
+	BASE=$((20000 + (RANDOM % 260) * 30))
+	free_ports "$BASE" 30 && break
 done
 
 # cluster A: the coordinator BASE, the standby BASE+1, the primaries
 # BASE+2..4, the mirrors BASE+12..14; cluster B: the coordinator BASE+5,
-# its primaries BASE+6..8 and its mirrors BASE+16..18.
+# its primaries BASE+6..8 and its mirrors BASE+16..18; cluster C: the
+# coordinator BASE+20 and its primaries BASE+21..23, gpfdist BASE+24; the
+# demo cluster BASE+26..29.
 CPORT=$BASE
 SPORT=$((BASE + 1))
 A="$WORK/a"
@@ -472,6 +482,302 @@ else
 fi
 printf 'y\ny\n' | run delete-b gpdeletesystem -f -d "$COORDINATOR_DATA_DIRECTORY"
 unset PGSSLCERT PGSSLKEY PGSSLROOTCERT PGSSLMODE
+
+###############################################################################
+echo "12. a cluster for the rest of the tools, with the modules they read"
+###############################################################################
+# Primaries alone, as cluster B's, with the modules the tools read:
+# append-optimized tables (gp_ao), external tables and gpfdist (gp_exttable),
+# PAX, and ORCA.
+C="$WORK/c"
+init_config "$C" $((BASE + 20)) $((BASE + 21))
+sed -i 's/^PRELOAD_LIBRARIES=.*/PRELOAD_LIBRARIES=gp_core,gp_orca,gp_sql,gp_ao,gp_exttable,pax/' "$C/gpinitsystem_config"
+export COORDINATOR_DATA_DIRECTORY="$C/qddir/demoDataDir-1" PGPORT=$((BASE + 20))
+CPORT=$((BASE + 20))
+# on the tools' database, and on another
+qt() {						# qt <port> <sql>
+	"$BINDIR/psql" -X -q -t -A -h "$HOST" -p "$1" -d tools -c "$2" 2>&1
+}
+qd() {						# qd <port> <database> <sql>
+	"$BINDIR/psql" -X -q -t -A -h "$HOST" -p "$1" -d "$2" -c "$3" 2>&1
+}
+if run init-c gpinitsystem -a -c "$C/gpinitsystem_config" -l "$LOGDIR" &&
+   [ -z "$(q "$CPORT" "CREATE DATABASE tools")" ]; then
+	ok "gpinitsystem makes a cluster with gp_ao, gp_exttable and PAX"
+	tools=1
+else
+	notok "gpinitsystem makes cluster C" "$(tail_of init-c)"
+	tools=
+fi
+
+if [ -n "$tools" ]; then
+	qt "$CPORT" "CREATE TABLE h (a int, b text) DISTRIBUTED BY (a);
+				 CREATE TABLE ao (a int, b text) WITH (appendonly = true) DISTRIBUTED BY (a);
+				 CREATE TABLE aoc (a int, b text) WITH (appendonly = true, orientation = column) DISTRIBUTED BY (a);
+				 CREATE TABLE px (a int, b text) USING pax DISTRIBUTED BY (a);
+				 CREATE TABLE part (a int, b int) DISTRIBUTED BY (a) PARTITION BY RANGE (b) (START (0) END (30) EVERY (10));
+				 CREATE INDEX h_b ON h (b);
+				 CREATE VIEW v AS SELECT a FROM h;
+				 CREATE DIRECTORY TABLE dt;
+				 INSERT INTO h SELECT g, 'h' || g FROM generate_series(1, 300) g;
+				 INSERT INTO ao SELECT g, 'ao' || g FROM generate_series(1, 300) g;
+				 INSERT INTO aoc SELECT g, 'aoc' || g FROM generate_series(1, 300) g;
+				 INSERT INTO px SELECT g, 'px' || g FROM generate_series(1, 300) g;
+				 INSERT INTO part SELECT g, g % 30 FROM generate_series(1, 300) g" > "$LOGDIR/tools-setup.out"
+	p0=$(q "$CPORT" "SELECT port FROM gp_segment_configuration WHERE content = 0 AND role = 'p'")
+	p0dir=$(q "$CPORT" "SELECT datadir FROM gp_segment_configuration WHERE content = 0 AND role = 'p'")
+
+	###########################################################################
+	echo "13. gpcheckcat checks the catalogs every node has, and the modules' own"
+	###########################################################################
+	# Its details are in its log, of the day, from where it was before.
+	catlog="$HOME/gpAdminLogs/gpcheckcat_$(date +%Y%m%d).log"
+	logat=$(stat -c %s "$catlog" 2> /dev/null || echo 0)
+	if run checkcat gpcheckcat tools && grep -q "Found no catalog issue" "$LOGDIR/checkcat.out"; then
+		ok "gpcheckcat: no issue in a database of heap, append-optimized, PAX and partitioned tables"
+	else
+		notok "gpcheckcat of a sound database" "$(tail_of checkcat; tail -c +$((logat + 1)) "$catlog" | grep -E 'FAIL|ERROR' | head)"
+	fi
+	# What one segment alone was given, over a connection straight to it, in
+	# a database of its own: a table, a distribution policy -- the "gp"
+	# label -- of its own, a row of gp_ao's for no table, a PAX table without
+	# its row, and a file a directory table's row names, emptied.
+	q "$CPORT" "CREATE DATABASE catbad" > /dev/null
+	qd "$CPORT" catbad "CREATE TABLE h (a int, b text) DISTRIBUTED BY (a);
+						CREATE TABLE px (a int, b text) USING pax DISTRIBUTED BY (a);
+						CREATE DIRECTORY TABLE dt" > /dev/null
+	qd "$p0" catbad "CREATE TABLE only_here (a int);
+					 SECURITY LABEL FOR gp ON TABLE h IS 'distributed_by=(b)';
+					 INSERT INTO gp_ao.segfile VALUES (999999, 1, '{0}', '{0}', 0, 0, 0, 1, 3, NULL);
+					 DELETE FROM pax.pg_pax_tables WHERE relid = 'px'::regclass;
+					 SELECT gp_sql.directory_table_put('dt', 'x/y.txt', 'hello'::bytea)" > "$LOGDIR/checkcat-corrupt.out"
+	dtfile="$p0dir/$(qd "$p0" catbad "SELECT gp_sql.directory_table_location('dt')")/x/y.txt"
+	[ -f "$dtfile" ] && : > "$dtfile"
+	logat=$(stat -c %s "$catlog" 2> /dev/null || echo 0)
+	run checkcat-bad gpcheckcat catbad
+	rc=$?
+	details=$(tail -c +$((logat + 1)) "$catlog")
+	if [ "$rc" -ne 0 ] &&
+	   grep -q "missing_extraneous_pg_class" "$LOGDIR/checkcat-bad.out" &&
+	   grep -q "Extra relation metadata .* on content 0" "$LOGDIR/checkcat-bad.out" &&
+	   grep -q "inconsistent_pg_seclabel" "$LOGDIR/checkcat-bad.out" &&
+	   grep -q "label is 'distributed_by=(b)' on content 0" "$LOGDIR/checkcat-bad.out"; then
+		ok "gpcheckcat: a table on one segment alone, and a distribution policy of one segment's own"
+	else
+		notok "gpcheckcat of what one segment alone was given" "$(tail_of checkcat-bad)"
+	fi
+	grep -q "content 0, .*aux_table gp_ao.segfile, storage_id 999999" <<< "$details" &&
+	grep -q "content 0, .*relation public.px, issue has no pax.pg_pax_tables row" <<< "$details" &&
+	grep -q "content 0, .*dirtable public.dt, relative_path x/y.txt, size 5, on_disk 0" <<< "$details" \
+		&& ok "gpcheckcat: gp_ao's row of no table, a PAX table without its row, and a directory table's file of another size, on content 0" \
+		|| notok "gpcheckcat of the modules' own" "$(grep -E 'FAIL|content 0' <<< "$details" | head)"
+
+	###########################################################################
+	echo "14. analyzedb analyzes a table again where it has changed since"
+	###########################################################################
+	# The tables it takes up, from its list of what it analyzes.
+	analyzed() { sed -n 's/.*:-\(public\.[a-z_0-9]*\)$/\1/p' "$LOGDIR/$1.out" | sort -u | tr '\n' ' '; }
+	if run analyzedb1 analyzedb -a -d tools -s public; then
+		first=$(analyzed analyzedb1)
+		qt "$CPORT" "INSERT INTO ao VALUES (301, 'ao301')" > /dev/null
+		run analyzedb2 analyzedb -a -d tools -s public
+		second=$(analyzed analyzedb2)
+		qt "$CPORT" "DELETE FROM px WHERE a < 10" > /dev/null
+		run analyzedb3 analyzedb -a -d tools -s public
+		third=$(analyzed analyzedb3)
+		[[ " $first " == *" public.ao "* && " $first " == *" public.aoc "* && " $first " == *" public.px "* ]] &&
+		[[ " $second " == *" public.ao "* && " $second " != *" public.aoc "* && " $second " != *" public.px "* ]] &&
+		[[ " $third " == *" public.px "* && " $third " != *" public.ao "* && " $third " != *" public.aoc "* ]] &&
+		[[ " $second " == *" public.h "* ]] \
+			&& ok "analyzedb: every table first, then the append-optimized and PAX tables where they changed, and heap tables always" \
+			|| notok "analyzedb" "first: $first"$'\n'"second: $second"$'\n'"third: $third"
+	else
+		notok "analyzedb" "$(tail_of analyzedb1)"
+	fi
+
+	###########################################################################
+	echo "15. gpload loads a file through gpfdist, and merges another"
+	###########################################################################
+	mkdir -p "$WORK/gpload"
+	seq 1 1000 | awk '{ print $1 "|name " $1 }' > "$WORK/gpload/data1.txt"
+	seq 995 1010 | awk '{ print $1 "|new " $1 }' > "$WORK/gpload/data2.txt"
+	qt "$CPORT" "CREATE TABLE gl (id int PRIMARY KEY, name text) DISTRIBUTED BY (id)" > /dev/null
+	for m in 1 2; do
+		{
+			echo "VERSION: 1.0.0.1"
+			echo "DATABASE: tools"
+			echo "USER: $USER"
+			echo "HOST: $HOST"
+			echo "PORT: $CPORT"
+			echo "GPLOAD:"
+			echo "   INPUT:"
+			echo "    - SOURCE:"
+			echo "         LOCAL_HOSTNAME:"
+			echo "           - $HOST"
+			echo "         PORT: $((BASE + 24))"
+			echo "         FILE:"
+			echo "           - $WORK/gpload/data$m.txt"
+			echo "    - FORMAT: text"
+			echo "    - DELIMITER: '|'"
+			echo "    - COLUMNS:"
+			echo "        - id: int"
+			echo "        - name: text"
+			echo "   OUTPUT:"
+			echo "    - TABLE: gl"
+			if [ "$m" = 1 ]; then
+				echo "    - MODE: INSERT"
+			else
+				echo "    - MODE: MERGE"
+				echo "    - MATCH_COLUMNS:"
+				echo "        - id"
+				echo "    - UPDATE_COLUMNS:"
+				echo "        - name"
+			fi
+		} > "$WORK/gpload/load$m.yml"
+	done
+	if run gpload1 gpload -f "$WORK/gpload/load1.yml" &&
+	   [ "$(qt "$CPORT" "SELECT count(*) || ':' || count(DISTINCT gp_segment_id) FROM gl")" = "1000:3" ] &&
+	   run gpload2 gpload -f "$WORK/gpload/load2.yml"; then
+		out=$(qt "$CPORT" "SELECT count(*) || ':' || count(*) FILTER (WHERE name LIKE 'new %') FROM gl")
+		[ "$out" = "1010:16" ] && grep -q "rows Updated *= 6" "$LOGDIR/gpload2.out" \
+			&& ok "gpload: 1000 rows inserted on the three segments, then 6 updated and 10 inserted by MERGE" \
+			|| notok "gpload's MERGE" "$out / $(tail_of gpload2)"
+	else
+		notok "gpload" "$(tail_of gpload1; tail_of gpload2 2> /dev/null)"
+	fi
+
+	###########################################################################
+	echo "16. gplogfilter finds an error in the coordinator's CSV log"
+	###########################################################################
+	qt "$CPORT" "SELECT 1 / 0" > /dev/null
+	if run logfilter gplogfilter -f "division by zero" &&
+	   grep -q "|ERROR: |22012|division by zero|" "$LOGDIR/logfilter.out" &&
+	   grep -q "match: *1 lines" "$LOGDIR/logfilter.out"; then
+		ok "gplogfilter: the error, as the server logged it, one entry of the CSV files"
+	else
+		notok "gplogfilter" "$(tail_of logfilter)"
+	fi
+
+	###########################################################################
+	echo "17. gpmemwatcher watches the host's processes, and gpmemreport reports them"
+	###########################################################################
+	mkdir -p "$WORK/mw"
+	echo "$HOST:$WORK/mw" > "$WORK/mw/hosts"
+	if (cd "$WORK/mw" && run memwatcher gpmemwatcher -f hosts && sleep 2 &&
+		run memwatcher-stop gpmemwatcher -f hosts --stop && run memreport gpmemreport "$HOST.ps.out.gz"); then
+		report=$(ls "$WORK/mw"/[0-9]*-[0-9]* 2> /dev/null | head -1)
+		[ -n "$report" ] && grep -q "^$CPORT " "$report" && grep -q "^$p0 " "$report" \
+			&& ok "gpmemwatcher and gpmemreport: the coordinator's and the segments' memory, by postmaster" \
+			|| notok "gpmemreport" "$(tail -12 "$report" 2> /dev/null)"
+	else
+		notok "gpmemwatcher" "$(tail_of memwatcher; tail_of memwatcher-stop; tail_of memreport)"
+	fi
+
+	###########################################################################
+	echo "18. gpcheckperf measures the host's disk, memory and network"
+	###########################################################################
+	mkdir -p "$WORK/cp"
+	if run checkperf-ds gpcheckperf -h "$HOST" -r ds -d "$WORK/cp" -S 32MB &&
+	   grep -q "disk write tot bytes: 33554432" "$LOGDIR/checkperf-ds.out" &&
+	   grep -q "stream tot bandwidth" "$LOGDIR/checkperf-ds.out"; then
+		ok "gpcheckperf -r ds: the disk written and read, and stream's memory bandwidth"
+	else
+		notok "gpcheckperf -r ds" "$(tail_of checkperf-ds)"
+	fi
+	if run checkperf-n gpcheckperf -h "$HOST" -h localhost -r n -d "$WORK/cp" --duration 5 &&
+	   grep -q "^$HOST -> localhost = [0-9]" "$LOGDIR/checkperf-n.out"; then
+		ok "gpcheckperf -r n: gpnetbench's bandwidth between the host's two names"
+	else
+		notok "gpcheckperf -r n" "$(tail_of checkperf-n)"
+	fi
+
+	###########################################################################
+	echo "19. gpreload reloads a table sorted"
+	###########################################################################
+	qt "$CPORT" "CREATE TABLE rl (a int, b int) DISTRIBUTED BY (a);
+				 INSERT INTO rl SELECT g % 10, (g * 7919) % 1000 FROM generate_series(1, 1000) g" > /dev/null
+	echo "public.rl: b" > "$WORK/rl.txt"
+	sorted_on_seg="SELECT bool_and(b1 <= b2) FROM (SELECT b AS b1, lead(b) OVER (ORDER BY ctid) AS b2 FROM rl) q WHERE b2 IS NOT NULL"
+	if [ "$(qt "$p0" "$sorted_on_seg")" = f ] && run reload gpreload -d tools -t "$WORK/rl.txt" -a; then
+		[ "$(qt "$p0" "$sorted_on_seg")" = t ] && [ "$(qt "$CPORT" "SELECT count(*) FROM rl")" = 1000 ] \
+			&& ok "gpreload: the table's rows, every one, in the order of b on the segment" \
+			|| notok "gpreload" "$(qt "$p0" "$sorted_on_seg") / $(tail_of reload)"
+	else
+		notok "gpreload" "$(tail_of reload)"
+	fi
+
+	###########################################################################
+	echo "20. gppkg builds a package, installs it on every host and removes it"
+	###########################################################################
+	# Into a GPHOME of its own, of links to the server's, which this user may
+	# write where the server's is not: a deb of one file, and gppkg's spec.
+	P="$WORK/gppkg"
+	mkdir -p "$P/deb/DEBIAN" "$P/deb/share/gppkg_demo" "$P/pkg"
+	cp -as "$GPHOME" "$P/gphome"
+	echo hello > "$P/deb/share/gppkg_demo/hello.txt"
+	printf 'Package: gppkgdemo\nVersion: 1.0\nArchitecture: all\nMaintainer: the port\nDescription: gppkg check\n' > "$P/deb/DEBIAN/control"
+	dpkg-deb --build --root-owner-group "$P/deb" "$P/pkg/gppkgdemo-1.0-1.all.deb" > /dev/null
+	version=$(sed 's/.*Cloudberry) //; s/ build.*//' "$GPHOME/share/greenplum/gp_version")
+	printf 'PkgName: gppkgdemo\nVersion: 1.0\nGPDBVersion: %s\nDescription: gppkg check\nOS: debian\nArchitecture: x86_64\n' "$version" > "$P/pkg/gppkg_spec.yml"
+	if (cd "$P" && export GPHOME="$P/gphome" && . "$P/gphome/cloudberry-env.sh" &&
+		run gppkg-build gppkg --build pkg && run gppkg-install gppkg -i gppkgdemo-1.0-debian-x86_64.gppkg &&
+		[ -f "$P/gphome/share/gppkg_demo/hello.txt" ] && run gppkg-query gppkg -q --all &&
+		grep -q "^gppkgdemo-1.0$" "$LOGDIR/gppkg-query.out" &&
+		run gppkg-remove gppkg -r gppkgdemo-1.0 && [ ! -e "$P/gphome/share/gppkg_demo/hello.txt" ]); then
+		ok "gppkg: a package built, installed into GPHOME by dpkg, listed, and removed"
+	else
+		notok "gppkg" "$(for f in build install query remove; do tail_of gppkg-$f 2> /dev/null; done | tail -15)"
+	fi
+
+	###########################################################################
+	echo "21. gpdirtableload puts files into a directory table and takes them back"
+	###########################################################################
+	# By the COPY a directory table takes a file with, which the port's
+	# directory tables on a cluster bring (m8_dirtable_19).
+	mkdir -p "$WORK/dtl/in/sub" "$WORK/dtl/out"
+	echo one > "$WORK/dtl/in/one.txt"
+	head -c 100000 /dev/urandom > "$WORK/dtl/in/sub/two.bin"
+	probe=$(echo x | "$BINDIR/psql" -X -q -h "$HOST" -p "$CPORT" -d tools -c "COPY binary dt FROM STDIN 'probe'" 2>&1)
+	if [[ "$probe" == *"syntax error"* ]]; then
+		echo "  skip   gpdirtableload: this build's directory tables take no COPY ... FROM STDIN '<path>' (directory tables on a cluster, m8_dirtable_19)"
+	elif (cd "$WORK/dtl/in" && run dirtableload-up gpdirtableload -d tools --host "$HOST" -p "$CPORT" -U "$USER" \
+			-t dt --input-file . --dest-path files --tag t1) &&
+		 run dirtableload-down gpdirtableload -d tools --host "$HOST" -p "$CPORT" -U "$USER" --mode download \
+			-t dt --input-file files --match regex --dest-path "$WORK/dtl/out"; then
+		rows=$(qt "$CPORT" "SELECT string_agg(relative_path || ':' || size || ':' || tag, ' ' ORDER BY relative_path) FROM dt WHERE relative_path LIKE 'files/%'")
+		[ "$rows" = "files/one.txt:4:t1 files/sub/two.bin:100000:t1" ] &&
+		cmp -s "$WORK/dtl/in/one.txt" "$WORK/dtl/out/files/one.txt" &&
+		cmp -s "$WORK/dtl/in/sub/two.bin" "$WORK/dtl/out/files/sub/two.bin" \
+			&& ok "gpdirtableload: two files put with their tag, and taken back as they were" \
+			|| notok "gpdirtableload" "$rows"
+	else
+		notok "gpdirtableload" "$(tail_of dirtableload-up; tail_of dirtableload-down 2> /dev/null)"
+	fi
+fi
+printf 'y\ny\n' | run delete-c gpdeletesystem -f -d "$COORDINATOR_DATA_DIRECTORY"
+
+###############################################################################
+echo "22. gpdemo makes a demo cluster, probes it and deletes it"
+###############################################################################
+mkdir -p "$WORK/demo"
+if (cd "$WORK/demo" && unset PGPORT COORDINATOR_DATA_DIRECTORY &&
+	export PORT_BASE=$((BASE + 26)) NUM_PRIMARY_MIRROR_PAIRS=2 WITH_MIRRORS=false &&
+	run demo gpdemo && run demo-probe gpdemo -p); then
+	out=$(q $((BASE + 26)) "SELECT count(*) FROM gp_segment_configuration WHERE role = 'p' AND status = 'u'")
+	[ "$out" = 3 ] && grep -q "gp_segment_configuration" "$LOGDIR/demo-probe.out" &&
+	[ "$(grep -c "Apache Cloudberry" "$LOGDIR/demo-probe.out")" -eq 3 ] \
+		&& ok "gpdemo: a coordinator and two segments, up, each node probed" \
+		|| notok "gpdemo" "$out / $(tail_of demo-probe)"
+else
+	notok "gpdemo" "$(tail_of demo; tail_of demo-probe 2> /dev/null)"
+fi
+if (cd "$WORK/demo" && unset PGPORT COORDINATOR_DATA_DIRECTORY &&
+	export PORT_BASE=$((BASE + 26)) NUM_PRIMARY_MIRROR_PAIRS=2 WITH_MIRRORS=false &&
+	run demo-delete gpdemo -d) && [ ! -e "$WORK/demo/datadirs" ]; then
+	ok "gpdemo -d: the demo cluster stopped and its directories gone"
+else
+	notok "gpdemo -d" "$(tail_of demo-delete)"
+fi
 
 echo
 echo "gpMgmt tests: $pass passed, $fail failed"
