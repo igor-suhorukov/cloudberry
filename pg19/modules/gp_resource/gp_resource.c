@@ -496,7 +496,11 @@ set_statement_setting(int budget_kb)
 	int			weight;
 
 	statement_budget_kb = budget_kb;
-	if (!GpResourceIsCoordinator() || !IsTransactionState())
+	/*
+	 * nor in a parallel operation, where no setting may change: a parallel
+	 * worker's statement, a coordinator's process too, dispatches nothing
+	 */
+	if (!GpResourceIsCoordinator() || !IsTransactionState() || IsInParallelMode())
 		return;
 	initStringInfo(&buf);
 	weight = ResQueueDispatchWeight();
