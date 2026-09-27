@@ -703,6 +703,16 @@ is "a rewrite writes by them still" \
 is "and a table that leaves PAX leaves them" \
    "ALTER TABLE pxr SET ACCESS METHOD heap;
     SELECT count(*) FROM pg_attribute_encoding WHERE attrelid = 'pxr'::regclass;" "0"
+# Cloudberry's delta encoder takes a stream appended once, a text column's
+# offsets; a column's values, appended one at a time, failed at a group's
+# second, and a group of one could not be read back.  They are written as
+# they are, the clause kept (pg19/pax/src/storage/columns/pax_encoding.cc).
+is "a column ENCODING (compresstype=delta) takes groups of many rows, and reads them back" \
+   "CREATE TABLE pxd (a int ENCODING (compresstype=delta), b int8, c date, d text)
+      USING pax WITH (compresstype=delta);
+    INSERT INTO pxd SELECT i, i, date '2020-01-01' + i % 1000, 'v' || i FROM generate_series(1, 200000) i;
+    SELECT count(*) || ' ' || sum(a) || ' ' || sum(b) || ' ' || max(c) || ' ' || count(DISTINCT d) FROM pxd;" \
+   "200000 20000100000 20000100000 2022-09-26 200000"
 
 ###############################################################################
 echo "16. gp_toolkit's views of append-optimized tables, Cloudberry's"
