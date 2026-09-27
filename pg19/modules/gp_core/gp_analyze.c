@@ -1174,7 +1174,7 @@ current_counts(Oid relid, BlockNumber *pages, double *tuples)
  * VACUUM and ANALYZE hold it: taken table by table in OID order, so that two
  * of these never wait for each other.
  */
-static void segment_counts(List *tables, bool vacuumed);
+static void segment_counts(List *tables, bool vacuumed, bool built);
 
 void
 GpAnalyzeSegmentCounts(VacuumStmt *stmt)
@@ -1192,7 +1192,7 @@ GpAnalyzeSegmentCounts(VacuumStmt *stmt)
 	tables = distributed_relids(stmt);
 	if (tables == NIL)
 		return;
-	segment_counts(tables, stmt->is_vacuumcmd);
+	segment_counts(tables, stmt->is_vacuumcmd, false);
 }
 
 /*
@@ -1357,7 +1357,7 @@ GpAnalyzeSegmentCountsAfterBuild(Node *stmt)
 
 	tables = distributed_of(candidates);
 	if (tables != NIL)
-		segment_counts(tables, true);
+		segment_counts(tables, true, true);
 }
 
 /*
@@ -1367,7 +1367,7 @@ GpAnalyzeSegmentCountsAfterBuild(Node *stmt)
  * all-frozen pages alone.
  */
 static void
-segment_counts(List *tables, bool vacuumed)
+segment_counts(List *tables, bool vacuumed, bool built)
 {
 	List	   *order = NIL;
 	HASHCTL		ctl;
@@ -1457,6 +1457,25 @@ segment_counts(List *tables, bool vacuumed)
 		if (c->nsegs < nsegs ||
 			(policy = recorded_policy(c->table)) == NULL)
 			continue;
+
+		/*
+		 * After a statement that may have built an index or rewritten the
+		 * table, only a count it emptied -- the coordinator's empty copy's --
+		 * is the segments' to replace.  Rows counted before it, which a
+		 * statement that rebuilt nothing leaves (ALTER TABLE ... ADD COLUMN),
+		 * stay; and so does a count the segments have none to give for, as
+		 * "never counted" would read as a table ANALYZE never saw
+		 * (gp_partanalyze.c).
+		 */
+		if (built)
+		{
+			BlockNumber cur_pages;
+			double		cur_tuples;
+
+			current_counts(c->relid, &cur_pages, &cur_tuples);
+			if (cur_tuples > 0 || (!c->counted && cur_tuples >= 0))
+				continue;
+		}
 
 		/*
 		 * An index another session holds -- a REINDEX's AccessExclusiveLock --
