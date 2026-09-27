@@ -511,6 +511,6 @@ skip subtrx_overflow  relation "gp_suboverflowed_backend" does not exist
 skip bfv_meta_track  relation "pg_stat_last_operation" does not exist; publication "pub1" does not exist
 skip bfv_copy  segment reject limit reached, aborting operation
 skip dynamic_table  unrecognized parameter namespace "gp"; relation "dt0" does not exist
-skip hba_conf  differs: its pg_hba.conf line asks for LDAP, which the image's server is built without, so pg_hba_file_rules gives the line as an error; it passes on a server built with LDAP
+run  hba_conf
 skip dboptions  differs: the psql its shell commands run connects to /tmp's socket, where this suite's nodes have directories of their own
 skip gp_log_mem_dispatch  function gp_log_backend_memory_contexts(integer) does not exist; function gp_log_backend_memory_contexts(integer, integer) does not exist
