@@ -303,6 +303,9 @@ static const char *const synced_settings[] = {
 	 */
 	"gp.workfile_limit_per_query",
 	"gp.workfile_limit_files_per_query",
+	/* the runtime filters of a segment's hash joins (gp_rtfilter.c) */
+	"gp.enable_runtime_filter",
+	"gp.enable_runtime_filter_pushdown",
 };
 
 #define NUM_SYNCED_SETTINGS	lengthof(synced_settings)

@@ -63,6 +63,7 @@
 #include "gp_metrics.h"
 #include "gp_partanalyze.h"
 #include "gp_policy.h"
+#include "gp_rtfilter.h"
 #include "gp_scan.h"
 #include "gp_segadmin.h"
 #include "gp_segment.h"
@@ -320,6 +321,13 @@ _PG_init(void)
 	 * of them, and a segment's cancel in Cloudberry's words.
 	 */
 	GpWorkfileInit();
+
+	/*
+	 * Cloudberry's runtime filters: a Bloom filter of a hash join's inner
+	 * keys above its outer side, and pushed down into the scans below it
+	 * (gp_rtfilter.c); on one node too.
+	 */
+	GpRtFilterInit();
 
 	/*
 	 * ANALYZE of a partitioned table as Cloudberry does it: the relations a
