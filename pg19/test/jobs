@@ -75,7 +75,7 @@ singlenode_isolation2  orca      17   PASSES=orca MEM=300
 postgis                -         10   MEM=700
 singlenode_isolation2  planner   11   PASSES=planner MEM=300
 security               -         20   MEM=300
-dirtable               -         16   MEM=300
+dirtable               -         32   MEM=900
 memprot                -          9   MEM=600
 grammar                -          3   MEM=300
 dbcopy                 -         10   MEM=500

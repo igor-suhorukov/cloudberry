@@ -179,6 +179,26 @@ DML_over_joins (orca)  the lines ORCA's fallback trace prints and nothing
   as without the global deadlock detector it is; so is one that compares
   with a subquery's aggregate, which ORCA gathers to one segment.
 
+directory_table  what the port keeps a directory table and a storage server
+  as.  psql's \d+ of pg_tablespace, which has no file handler columns, and
+  of pg_directory_table, gp_storage_server and gp_storage_user_mapping,
+  which are views of the tables a label says hold files and of the SERVER
+  and USER MAPPING objects of gp_storage -- relkind 'v', and not shared --
+  and of a directory table, an ordinary table, relkind 'r', whose primary
+  key makes relative_path NOT NULL, with PostgreSQL 19's footers of that
+  constraint and of its tablespace.  A storage server and its mappings are
+  gp.maintenance_database's, where the port's functions and views keep
+  them: CREATE STORAGE SERVER in this database makes one the views do not
+  read, and PostgreSQL's words for a server and a user mapping, where
+  Cloudberry says "storage server".  WITH LOCATION, which the port refuses,
+  a directory table's directory being its OID's in its database's
+  directory; a table that is not there, dropped WITH CONTENT, which the
+  port's DROP DIRECTORY TABLE skips in Cloudberry's words; the DETAIL of
+  an ALTER action a directory table refuses, which Cloudberry's says of
+  partitioned indexes; PostgreSQL 19's DETAIL of a call of too many
+  arguments.  The rows ordered by relative_path in the C collation, where
+  nation.txt comes first.  And psql 19's \!rm, a command it does not know.
+
 distributed_transactions  the INFO lines of two of its transactions.  A
   savepoint's INSERT of two rows, VALUES (2),(1): Cloudberry's planner reads
   the VALUES in a slice of its own on one segment, (slice 1) Dispatch

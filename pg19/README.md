@@ -95,6 +95,12 @@ On one node (M1):
   (`gp.maintenance_database`) for the cluster, a directory table's files
   kept on a storage server through the handler a module registers for the
   server's protocol, given the user's credentials (`include/gp_storage.h`);
+  on a cluster each file and its row on the segment its relative path hashes
+  to, as Cloudberry keeps them, a file following its row through
+  savepoints and two-phase commit, `gp_sql.directory_table_sweep()` for
+  what another backend's second phase or a crash leaves, and Cloudberry's
+  `COPY BINARY t FROM ... 'path'` and `COPY BINARY DIRECTORY TABLE t 'path'
+  TO ...`;
   and Cloudberry's spelling of statements through O26 — classic partition
   clauses, `DISTRIBUTED BY`, `DECODE`, `gp_dist_random('t')`.
 - `gp_security` — password profiles.
@@ -674,7 +680,11 @@ and on a third cluster the rest of the tools (M8): gpcheckcat finding what
 one segment alone was given, analyzedb, gpload, gplogfilter, gpmemwatcher
 and gpmemreport, gpcheckperf, gpreload, gppkg, gpdirtableload and gpdemo;
 `dump`, M7's, a cluster's pg_dumpall read back into another cluster, and
-one node's into another node; `dbcopy`, a database copied by either
+one node's into another node, a directory table's files carried by copying
+each segment's directory to the segment of the same content;
+`dirtable`, directory tables on one node, its standby and a crash, and on a
+coordinator and two primaries with mirrors, through two-phase commit, a
+restart between its phases, a failover and a storage server; `dbcopy`, a database copied by either
 strategy and moved to another tablespace and back, with PAX tables and
 directory tables, on one node and a standby; `postgis_cluster`, M7's, stock PostGIS on a
 coordinator and three segments, its answers checked against one node's;

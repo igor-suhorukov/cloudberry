@@ -41,7 +41,9 @@
 #      tags, an index's too, a protocol of the user's, queues, groups and
 #      profiles, materialized
 #      views populated or not, AO options and encodings, PAX, a bitmap
-#      index;
+#      index; and a directory table's rows, each on the segment its path
+#      hashes to, and its files, which no dump carries, once each segment's
+#      directory is copied to the new cluster's segment of the same content;
 #   6. one node: an incremental view's triggers, which the dump does not
 #      carry and its label makes again, a dynamic table's job, and a
 #      directory table's directory, whose files the dump does not carry;
@@ -276,10 +278,14 @@ ALTER TABLE t_hash TAG (env = 'prod', owner_team = 'geo');
 CREATE TABLE t_tagged (a int) TAG (env = 'dev');
 CREATE INDEX t_hash_b ON t_hash (b);
 ALTER INDEX t_hash_b TAG (owner_team = 'index');
--- a storage server, a mapping, and a directory table
+-- a storage server, a mapping, and a directory table with files, each on
+-- the segment its path hashes to
 CREATE STORAGE SERVER s3 OPTIONS (endpoint 's3.example.com');
 CREATE STORAGE USER MAPPING FOR CURRENT_USER STORAGE SERVER s3 OPTIONS (accesskey 'k', secretkey 's');
 CREATE DIRECTORY TABLE docs;
+SELECT gp_sql.directory_table_put('docs'::regclass, 'f' || g || '.txt', convert_to('file ' || g, 'UTF8'),
+                                  CASE WHEN g % 2 = 0 THEN 'even' END)
+  FROM generate_series(1, 9) g;
 -- roles: a profile, a queue, a group, DENY windows, tags roles own
 CREATE PROFILE strict LIMIT FAILED_LOGIN_ATTEMPTS 3 PASSWORD_LOCK_TIME 1;
 CREATE RESOURCE QUEUE rq1 WITH (active_statements=3);
@@ -437,6 +443,22 @@ out=$(q b src "SELECT gp_sql.directory_table_location('docs'::regclass) = 'base/
                 (SELECT oid FROM pg_database WHERE datname = 'src') || '/' || 'docs'::regclass::oid || '_dirtable'")
 [ "$out" = t ] && ok "a directory table's directory is its new database's and OID's" \
 	|| notok "a directory table's directory" "$out"
+same "a directory table's rows, each on the segment its path hashes to" src \
+     "SELECT gp_segment_id, relative_path, size, md5, tag FROM docs ORDER BY 2"
+is "and not its files, which no dump carries" b src \
+   "SELECT count(*) FROM directory_table('docs') WHERE content IS NULL" "9"
+# Each segment's directory of the table copied to the new cluster's segment
+# of the same content, where its rows are.
+old=$(q a src "SELECT gp_sql.directory_table_location('docs'::regclass)")
+new=$(q b src "SELECT gp_sql.directory_table_location('docs'::regclass)")
+for n in 1 2 3; do
+	if [ -d "$(datadir a "$n")/$old" ]; then
+		mkdir -p "$(datadir b "$n")/$new"
+		cp -r "$(datadir a "$n")/$old/." "$(datadir b "$n")/$new/"
+	fi
+done
+same "until each segment's directory is copied to the segment of the same content" src \
+     "SELECT relative_path, convert_from(content, 'UTF8'), md5(content) = md5 FROM directory_table('docs') ORDER BY 1"
 out=$(q b src "REFRESH MATERIALIZED VIEW CONCURRENTLY mv; SELECT count(*) FROM mv;
                REFRESH MATERIALIZED VIEW mv_empty; SELECT count(*) FROM mv_empty")
 [ "$out" = "100

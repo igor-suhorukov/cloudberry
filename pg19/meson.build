@@ -574,7 +574,9 @@ modules = [
                      # rewrite checks them with, and gp_sql's side, which
                      # makes the partitions they describe.
                      'grammar/gp_partition.c',
-                     'modules/gp_sql/partition.c'),
+                     'modules/gp_sql/partition.c',
+                     # Cloudberry's COPY of a directory table's file.
+                     'modules/gp_sql/dircopy.c'),
     # Cloudberry's gpcontrib extension of that name, whose functions say how
     # many segments a new table is spread over; gp_sql carries them, since it
     # is what distributes a new table.

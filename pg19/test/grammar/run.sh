@@ -650,6 +650,25 @@ isl "DROP STORAGE USER MAPPING and DROP STORAGE SERVER" \
    "DROP STORAGE USER MAPPING FOR CURRENT_USER STORAGE SERVER s3;
     DROP STORAGE SERVER s3;
     SELECT count(*) FROM gp_sql.storage_servers;" "0"
+isl "CREATE STORAGE SERVER with no options, whose clause the rewrite once glued to its name" \
+   "CREATE STORAGE SERVER bare;
+    SELECT count(*) FROM gp_sql.storage_servers WHERE servername = 'bare';" "1"
+is "COPY BINARY ... FROM a file 'path' WITH TAG, the path and the tag carried on the COPY" \
+   "SELECT gp_sql.desugar(\$\$COPY BINARY d FROM '/f' 'a/b' WITH TAG 't'\$\$)
+           ~ '^COPY BINARY d FROM ''/f'' WITH +/\\* and on its parse node: gp_sql\\.directory_path = ''a/b'', gp_sql\\.directory_tag = ''t'' \\*/$';" "t"
+is "COPY BINARY DIRECTORY TABLE ... TO, the path carried" \
+   "SELECT gp_sql.desugar(\$\$COPY BINARY DIRECTORY TABLE d 'a/b' TO STDOUT\$\$)
+           ~ '^COPY BINARY d TO STDOUT /\\* and on its parse node: gp_sql\\.directory_path = ''a/b'' \\*/$';" "t"
+is "DROP DIRECTORY TABLE, which skips a table that is not there whether or not it says so" \
+   "SELECT rtrim(gp_sql.desugar('DROP DIRECTORY TABLE d, e CASCADE WITH CONTENT'));" \
+   "DROP TABLE IF EXISTS d, e CASCADE"
+isl "ALTER DIRECTORY TABLE ... TAG" \
+   "ALTER DIRECTORY TABLE docs2 TAG (env = 'dev');
+    SELECT gp_sql.relation_tags('docs2'::regclass)::text;" '{"env": "dev"}'
+refused "and nothing else, as Cloudberry's grammar has nothing else" \
+        "ALTER DIRECTORY TABLE docs2 ADD COLUMN a int;" 'syntax error at or near "ADD"'
+refused "nor CREATE DIRECTORY TABLE a distribution" \
+        "CREATE DIRECTORY TABLE docs4 DISTRIBUTED RANDOMLY;" 'syntax error at or near "DISTRIBUTED"'
 
 ###############################################################################
 echo "7. tasks"

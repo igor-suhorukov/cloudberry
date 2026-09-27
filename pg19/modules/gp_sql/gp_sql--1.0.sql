@@ -1023,9 +1023,10 @@ COMMENT ON FUNCTION gp_sql.remove_file(regclass, text) IS
 	'remove a file and its row; the file goes when the transaction commits';
 
 /*
- * Cloudberry's directory_table(regclass), column for column.  The content of
- * every file is read, so it is for looking at a small directory table rather
- * than for walking a large one.
+ * Cloudberry's directory_table(regclass), column for column, run as
+ * Cloudberry's is on every segment, each reading its own rows and files.
+ * The content of every file is read, so it is for looking at a small
+ * directory table rather than for walking a large one.
  */
 CREATE FUNCTION gp_sql.directory_table(dirtable regclass)
 RETURNS TABLE (scoped_file_url text,
@@ -1035,32 +1036,8 @@ RETURNS TABLE (scoped_file_url text,
 			   last_modified timestamptz,
 			   md5 text,
 			   content bytea)
-LANGUAGE plpgsql STABLE
-AS $$
-DECLARE
-	loc text;
-	r	record;
-BEGIN
-	loc := gp_sql.directory_table_location(dirtable);
-	IF loc IS NULL THEN
-		RAISE EXCEPTION '"%" is not a directory table', dirtable::text
-			USING ERRCODE = 'wrong_object_type';
-	END IF;
-
-	FOR r IN EXECUTE format('SELECT relative_path, tag, size, last_modified, md5'
-							'  FROM %s ORDER BY relative_path', dirtable::text)
-	LOOP
-		scoped_file_url := loc || '/' || r.relative_path;
-		relative_path := r.relative_path;
-		tag := r.tag;
-		size := r.size;
-		last_modified := r.last_modified;
-		md5 := r.md5;
-		content := gp_sql.directory_table_get(dirtable, r.relative_path);
-		RETURN NEXT;
-	END LOOP;
-END;
-$$;
+AS 'MODULE_PATHNAME', 'gp_sql_dirtable_scan'
+LANGUAGE C STRICT ROWS 1000;
 
 COMMENT ON FUNCTION gp_sql.directory_table(regclass) IS
 	'every file of a directory table, with its contents';
@@ -1380,3 +1357,99 @@ COMMENT ON FUNCTION gp_sql.desugar(text) IS
 CREATE FUNCTION pg_catalog.group_id(int4) RETURNS int4
 LANGUAGE sql IMMUTABLE PARALLEL SAFE
 RETURN $1;
+
+/******************************************************************************
+ * Directory tables on a cluster (M8)
+ *
+ * Each file and its row on the segment its relative path hashes to, as
+ * Cloudberry keeps them: the coordinator sends a put, a get and a removal
+ * there (dirtable.c).  A storage server's file is written by the handler on
+ * the coordinator, and only its row sent, by the function below, which a
+ * segment runs for the coordinator's own connection alone.
+ *****************************************************************************/
+
+CREATE FUNCTION gp_sql.directory_table_row(dirtable regclass,
+										   relative_path text,
+										   size bigint,
+										   md5 text,
+										   tag text)
+RETURNS void
+AS 'MODULE_PATHNAME', 'gp_sql_dirtable_row'
+LANGUAGE C;
+
+COMMENT ON FUNCTION gp_sql.directory_table_row(regclass, text, bigint, text, text) IS
+	'on a segment, the row of a storage server''s file, which the coordinator writes; the coordinator''s call alone';
+
+/*
+ * The garbage of this database, here and on every segment: every file of a
+ * directory table whose row nothing sees -- a put rolled back by another
+ * backend's second phase or by a crash, a removal committed so -- and the
+ * directory of every directory table that is gone.  A superuser's, as the
+ * whole database's maintenance is; gp_task may schedule it.
+ */
+CREATE FUNCTION gp_sql.directory_table_sweep()
+RETURNS bigint
+AS 'MODULE_PATHNAME', 'gp_sql_dirtable_sweep'
+LANGUAGE C;
+
+REVOKE ALL ON FUNCTION gp_sql.directory_table_sweep() FROM PUBLIC;
+
+COMMENT ON FUNCTION gp_sql.directory_table_sweep() IS
+	'remove the files of directory tables no row describes, and the directories of dropped ones; how many';
+
+/* Cloudberry's names for directory_table() and remove_file(), in pg_catalog. */
+CREATE FUNCTION pg_catalog.directory_table(relid regclass)
+RETURNS TABLE (scoped_file_url text,
+			   relative_path text,
+			   tag text,
+			   size bigint,
+			   last_modified timestamptz,
+			   md5 text,
+			   content bytea)
+AS 'MODULE_PATHNAME', 'gp_sql_dirtable_scan'
+LANGUAGE C STRICT ROWS 1000;
+
+CREATE FUNCTION pg_catalog.remove_file(regclass, text)
+RETURNS boolean
+AS 'MODULE_PATHNAME', 'gp_sql_dirtable_remove'
+LANGUAGE C STRICT;
+
+/*
+ * Cloudberry's catalogs of directory tables and storage servers, as views of
+ * what the port keeps: the tables whose label says they hold files, and the
+ * SERVER and USER MAPPING objects of gp_storage in gp.maintenance_database.
+ * A server's and a mapping's OIDs are that database's, and none is given.
+ */
+SET allow_system_table_mods = on;
+
+CREATE VIEW pg_catalog.pg_directory_table AS
+	SELECT c.oid AS dtrelid,
+		   CASE c.reltablespace
+			   WHEN 0 THEN (SELECT d.dattablespace FROM pg_catalog.pg_database d
+							 WHERE d.datname = pg_catalog.current_database())
+			   ELSE c.reltablespace
+		   END AS dttablespace,
+		   l.location AS dtlocation
+	  FROM pg_catalog.pg_class c
+	  CROSS JOIN LATERAL gp_sql.directory_table_location(c.oid) AS l(location)
+	 WHERE c.relkind = 'r' AND l.location IS NOT NULL;
+
+CREATE VIEW pg_catalog.gp_storage_server AS
+	SELECT NULL::pg_catalog.oid AS oid,
+		   s.servername AS srvname,
+		   pg_catalog.to_regrole(s.serverowner::text)::pg_catalog.oid AS srvowner,
+		   NULL::pg_catalog.aclitem[] AS srvacl,
+		   s.options AS srvoptions
+	  FROM gp_sql.storage_server_rows() s;
+
+CREATE VIEW pg_catalog.gp_storage_user_mapping AS
+	SELECT NULL::pg_catalog.oid AS oid,
+		   coalesce(pg_catalog.to_regrole(m.username::text)::pg_catalog.oid, 0) AS umuser,
+		   NULL::pg_catalog.oid AS umserver,
+		   m.options AS umoptions
+	  FROM gp_sql.storage_user_mapping_rows() m;
+
+RESET allow_system_table_mods;
+
+GRANT SELECT ON pg_catalog.pg_directory_table, pg_catalog.gp_storage_server,
+				pg_catalog.gp_storage_user_mapping TO PUBLIC;

@@ -192,8 +192,14 @@ extern void GpDirTableCheckDML(struct QueryDesc *queryDesc);
 /* TRUNCATE would orphan every file a directory table has. */
 extern void GpDirTableCheckTruncate(TruncateStmt *stmt);
 
-/* Nor can one go to another tablespace, whose files would stay behind. */
-extern void GpDirTableCheckMove(Node *parsetree);
+/*
+ * Nor can one go to another tablespace, whose files would stay behind, nor
+ * lose the columns, the primary key or the name its files rely on; nor be
+ * inherited from, nor its rows be moved to other segments than its files.
+ */
+extern void GpDirTableCheckStatement(Node *parsetree);
+extern void GpDirTableCheckInherits(CreateStmt *stmt);
+extern void GpDirTableCheckDistribution(Oid relid, const char *action);
 
 /* A directory table is being dropped: its files follow it at commit. */
 extern void GpDirTableDropped(Oid relid);
@@ -210,6 +216,30 @@ extern void GpDirTableRestored(Oid relid);
 /* Registered during preload; drains the files a transaction leaves behind. */
 extern void GpDirTableRegisterXactCallback(void);
 extern void GpDirTableRegisterRmgr(void);
+
+/*
+ * PREPARE TRANSACTION of this gid, about to run; and COMMIT or ROLLBACK
+ * PREPARED of it, run: its files swept as the transaction went.
+ */
+extern void GpDirTableNotePrepare(const char *gid);
+extern void GpDirTableSecondPhase(const char *gid);
+
+/*
+ * A file put and its row, and a file read -- NULL where there is none --
+ * here, or on a cluster's coordinator on the segment its path hashes to.
+ */
+extern void GpDirTablePut(Oid relid, const char *relative_path,
+						  bytea *content, const char *tag);
+extern bytea *GpDirTableGet(Oid relid, const char *relative_path);
+
+/* dircopy.c */
+
+/*
+ * Cloudberry's COPY of a directory table's file, in or out; false for a COPY
+ * that is not one, which runs as it is.
+ */
+extern bool GpDirTableCopy(CopyStmt *stmt, const char *queryString,
+						   QueryCompletion *qc);
 
 /*
  * During preload too: mark a directory table's directory, <relid>_dirtable,

@@ -77,4 +77,11 @@ s/^(-{15}\+)-+\+/$1---------+/
 m/^ +\d+ \| \(\d+,\d+\) +\| +\d+ \| +\d+ \| +\d+ \| +\d+ \| +\d+ \| +\d+$/
 s/\| \(\d+,\d+\) +\|/| (tid)   |/
 
+# An error's LINE in a statement that names a data file of Cloudberry's by
+# its absolute path, cut short inside the path: what is left of the part
+# before src/test/regress/ is the harness's directory here and Cloudberry's
+# there, which only the length of the line makes the same.
+m/^LINE \d+: \.\.\.\S*\/src\/test\/regress\/data\//
+s/^(LINE \d+: \.\.\.)\S*(\/src\/test\/regress\/data\/)/$1$2/
+
 -- end_matchsubs

@@ -116,7 +116,7 @@ static const char *const gp_trigger_words[] = {
 	"orientation", "encoding",
 	"reorganize", "external", "reject", "protocol",
 	"createexttable", "nocreateexttable", "newline", "resource", "deny",
-	"rootpartition", "fullscan",
+	"rootpartition", "fullscan", "copy",
 	NULL
 };
 
@@ -1889,6 +1889,13 @@ rw_create_directory_table(GpRewrite *rw, char **name, int *after)
 					(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
 					 errmsg("WITH LOCATION is not supported for a directory table"),
 					 errdetail("A directory table keeps its files in a directory of its own in the database's directory.")));
+
+		/*
+		 * Its distribution is its relative path's, which its grammar has no
+		 * clause to change.
+		 */
+		if (tok_is(ts, j, "distributed"))
+			rw_syntax_error(rw, j);
 	}
 
 	/* DIRECTORY is Cloudberry's; the rest is CREATE TABLE's already. */
@@ -1901,6 +1908,68 @@ rw_create_directory_table(GpRewrite *rw, char **name, int *after)
 	rw->object = 't';
 	*name = rw_text(ts, i, nameend);
 	*after = nameend;
+	return true;
+}
+
+/*
+ * ALTER DIRECTORY TABLE name TAG (...) | UNSET TAG (...)
+ *	 -> ALTER TABLE name TAG (...), whose TAG clause is any table's
+ *
+ * Cloudberry's grammar has nothing else to alter of a directory table, and
+ * stops at the word after its name, as this does.  Returns false when this
+ * is not one; otherwise the subject, as rw_create_directory_table() gives it.
+ */
+static bool
+rw_alter_directory_table(GpRewrite *rw, char **name, int *after)
+{
+	const GpTokens *ts = rw->ts;
+	int			i = rw->first;
+	int			nameend;
+
+	if (!tok_is(ts, i, "alter") || !tok_is(ts, i + 1, "directory") ||
+		!tok_is(ts, i + 2, "table"))
+		return false;
+
+	nameend = skip_qualified_name(ts, i + 3);
+	if (nameend == i + 3)
+		rw_syntax_error(rw, nameend);
+	if (!tok_is(ts, nameend, "tag") &&
+		!(tok_is(ts, nameend, "unset") && tok_is(ts, nameend + 1, "tag")))
+		rw_syntax_error(rw, nameend);
+
+	rw_edit(rw, ts->toks[i + 1].off, ts->toks[i + 2].off, "");
+	rw->object = 't';
+	*name = rw_text(ts, i + 3, nameend);
+	*after = nameend;
+	return true;
+}
+
+/*
+ * DROP DIRECTORY TABLE [IF EXISTS] name, ... [CASCADE | RESTRICT] [WITH CONTENT]
+ *	 -> DROP TABLE IF EXISTS name, ... [CASCADE | RESTRICT]
+ *
+ * Cloudberry's drop skips a table that is not there whether or not it says
+ * IF EXISTS, and gp_sql says so in its words, as it refuses a table that is
+ * no directory table (gp_sql.c).  WITH CONTENT asks
+ * Cloudberry to remove the files, which the port's drop always removes.
+ */
+static bool
+rw_drop_directory_table(GpRewrite *rw)
+{
+	const GpTokens *ts = rw->ts;
+	int			i = rw->first;
+	int			last = rw->last;
+
+	if (!tok_is(ts, i, "drop") || !tok_is(ts, i + 1, "directory") ||
+		!tok_is(ts, i + 2, "table"))
+		return false;
+
+	rw_edit(rw, ts->toks[i + 1].off, ts->toks[i + 2].off, "");
+	if (!(tok_is(ts, i + 3, "if") && tok_is(ts, i + 4, "exists")))
+		rw_edit(rw, ts->toks[i + 3].off, ts->toks[i + 3].off, "IF EXISTS ");
+	if (last - 2 > i + 3 && tok_is_kw(ts, last - 2, "with") &&
+		tok_is(ts, last - 1, "content"))
+		rw_edit(rw, ts->toks[last - 2].off, tok_stop(ts, last - 1), "");
 	return true;
 }
 
@@ -2497,6 +2566,81 @@ rw_copy_options(GpRewrite *rw)
 		}
 	}
 	return found;
+}
+
+/*
+ * COPY [BINARY] t FROM {'file' | PROGRAM 'command' | STDIN} 'path'
+ *		[[WITH] TAG 'tag'] ...
+ *	 -> COPY [BINARY] t FROM ... ..., carrying gp_sql.directory_path and
+ *		directory_tag
+ * COPY BINARY DIRECTORY TABLE t 'path' TO [PROGRAM] {'file' | STDOUT}
+ *	 -> COPY BINARY t TO ..., carrying gp_sql.directory_path
+ *
+ * Cloudberry's COPY of a directory table's file, in and out: its relative
+ * path, a string after the source where PostgreSQL's grammar has none, and
+ * its tag, an option of the old list PostgreSQL's has no TAG in.  gp_sql's
+ * COPY takes them out again and carries it out (dircopy.c).  Only the first
+ * TAG is taken: a second is Cloudberry's syntax error, at its WITH, which
+ * PostgreSQL's grammar gives.
+ */
+static bool
+rw_copy_directory_table(GpRewrite *rw)
+{
+	const GpTokens *ts = rw->ts;
+	int			i = rw->first;
+	int			j = i + 1;
+	int			nameend;
+
+	if (!tok_is_kw(ts, i, "copy"))
+		return false;
+
+	if (tok_is_kw(ts, j, "binary") && tok_is(ts, j + 1, "directory") &&
+		tok_is_kw(ts, j + 2, "table"))
+	{
+		nameend = skip_qualified_name(ts, j + 3);
+		if (nameend == j + 3 || !tok_is_string(ts, nameend) ||
+			!tok_is_kw(ts, nameend + 1, "to"))
+			return false;
+		rw_edit(rw, ts->toks[j + 1].off, ts->toks[j + 3].off, "");
+		rw_edit(rw, ts->toks[nameend].off, ts->toks[nameend + 1].off, "");
+		rw_add_carrier(rw, "gp_sql", "directory_path", ts->toks[nameend].str,
+					   ts->toks[nameend].off);
+		return true;
+	}
+
+	if (tok_is_kw(ts, j, "binary"))
+		j++;
+	nameend = skip_qualified_name(ts, j);
+	if (nameend == j)
+		return false;
+	j = nameend;
+	if (tok_is_char(ts, j, '('))
+		j = skip_parens(ts, j);
+	if (!tok_is_kw(ts, j, "from"))
+		return false;
+	j++;
+	if (tok_is_kw(ts, j, "program"))
+		j++;
+	if (!tok_is_string(ts, j) && !tok_is_kw(ts, j, "stdin"))
+		return false;
+	j++;
+	if (!tok_is_string(ts, j))
+		return false;
+
+	rw_edit(rw, ts->toks[j].off, tok_end(ts, j), "");
+	rw_add_carrier(rw, "gp_sql", "directory_path", ts->toks[j].str,
+				   ts->toks[j].off);
+	j++;
+	if (tok_is_kw(ts, j, "with") && tok_is(ts, j + 1, "tag") &&
+		tok_is_string(ts, j + 2))
+		j++;
+	if (tok_is(ts, j, "tag") && tok_is_string(ts, j + 1))
+	{
+		rw_edit(rw, ts->toks[j].off, tok_end(ts, j + 1), "");
+		rw_add_carrier(rw, "gp_sql", "directory_tag", ts->toks[j + 1].str,
+					   ts->toks[j].off);
+	}
+	return true;
 }
 
 /*
@@ -3419,8 +3563,8 @@ rw_storage_and_dynamic(GpRewrite *rw)
 			return false;
 
 		rw_edit(rw, ts->toks[i + 1].off, ts->toks[i + 2].off, "");	/* drop STORAGE */
-		rw_edit(rw, tok_end(ts, e - 1), tok_end(ts, e - 1),
-				"FOREIGN DATA WRAPPER gp_storage ");
+		rw_edit(rw, tok_stop(ts, e - 1), tok_stop(ts, e - 1),
+				" FOREIGN DATA WRAPPER gp_storage");
 		return true;
 	}
 
@@ -5857,8 +6001,11 @@ rw_statement_itself(GpRewrite *rw)
 	(void) rw_function_clauses(rw);
 	(void) rw_external_spelling(rw);
 	(void) rw_copy_options(rw);
+	(void) rw_copy_directory_table(rw);
+	(void) rw_drop_directory_table(rw);
 
 	if (rw_create_directory_table(rw, &name, &after_name) ||
+		rw_alter_directory_table(rw, &name, &after_name) ||
 		rw_create_external_table(rw, &name, &after_name))
 		kind = GP_SUBJ_RELATION;
 	else
