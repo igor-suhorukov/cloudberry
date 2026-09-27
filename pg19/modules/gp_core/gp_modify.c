@@ -1880,11 +1880,22 @@ copy_from_distributed(ParseState *pstate, CopyStmt *stmt, Relation rel,
 	error_context_stack = &errcallback;
 	for (;;)
 	{
+		MemoryContext oldcxt;
+		bool		got;
+
 		CHECK_FOR_INTERRUPTS();
 		ResetPerTupleExprContext(estate);
 		ExecClearTuple(slot);
 
-		if (!NextCopyFrom(cstate, econtext, slot->tts_values, slot->tts_isnull))
+		/*
+		 * The row's values in the per-tuple context, where NextCopyFrom()
+		 * computes a column's DEFAULT, as CopyFrom() calls it: gone with
+		 * the next row, once the router has sent this one on.
+		 */
+		oldcxt = MemoryContextSwitchTo(GetPerTupleMemoryContext(estate));
+		got = NextCopyFrom(cstate, econtext, slot->tts_values, slot->tts_isnull);
+		MemoryContextSwitchTo(oldcxt);
+		if (!got)
 			break;
 		ExecStoreVirtualTuple(slot);
 		router_put(router, slot, cstate->cur_lineno);
