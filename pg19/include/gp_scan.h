@@ -145,7 +145,7 @@ extern const char *GpExplicitCannot(struct PlannedStmt *stmt,
 									struct ModifyTable *mt,
 									const char *on_conflict);
 extern struct Plan *GpExplicitMake(struct ModifyTable *mt,
-								   const char *on_conflict);
+								   const char *on_conflict, bool planned);
 
 /*
  * Over a plan ORCA made, for the explicit write: its column "ctidcol", a
@@ -165,6 +165,22 @@ extern struct Plan *GpModifyWriteExplicitly(struct PlannedStmt *stmt,
  * in, for the explicit write's actions to read (gp_modify.c).
  */
 #define GP_MERGE_TARGET_JUNK	"gp_target"
+
+/*
+ * The junk column an UPDATE's or a DELETE's plan carries the segment of a
+ * row of another distributed table in, beside its row mark's ctid, for the
+ * explicit write's recheck to read the row again by (gp_scan.c): one for
+ * each row mark, by its rowmarkId.
+ */
+#define GP_SEGMENT_JUNK			"gp_segment%u"
+
+/*
+ * Where the row the plan of the statement "estate" runs knows by the ctid
+ * "synthetic" is -- its segment and its ctid there -- as GpRowIdentityMake()
+ * made it; false if nowhere (gp_explicit.c).
+ */
+extern bool GpRowIdentityFind(struct EState *estate, ItemPointer synthetic,
+							  int *content, ItemPointer tid);
 
 /*
  * An INSERT's ON CONFLICT clause as text for the segments, printed before

@@ -125,7 +125,9 @@
 #include "gp_cluster.h"
 #include "gp_core_api.h"
 #include "gp_dispatch.h"
+#include "gp_gdd.h"
 #include "gp_hash.h"
+#include "gp_motion.h"
 #include "gp_policy.h"
 #include "gp_scan.h"
 #include "gp_segment.h"
@@ -239,6 +241,11 @@ typedef struct GatherScanState
 	bool		external;		/* an external table's */
 	Tuplestorestate *spool;		/* what it read, when it may be read again */
 	TupleTableSlot *spooled;	/* a row of it, read back */
+
+	/* A recheck's (gather_epq()) */
+	AttrNumber	epq_segcol;		/* the segment of a row mark's row, in the
+								 * plan's row: 0 not looked for, -1 none */
+	TupleTableSlot *epq_row;	/* a row mark's copy of the row */
 } GatherScanState;
 
 /*
@@ -1109,6 +1116,9 @@ GpScanDirectDispatchContents(Oid relid, Node *quals, Index varno)
 /* Planning                                                                  */
 /* ------------------------------------------------------------------------- */
 
+static void add_segment_junk(PlannerInfo *root, RelOptInfo *rel,
+							 RangeTblEntry *rte);
+
 /*
  * The size of a distributed table.  The planner scales pg_class's reltuples
  * by the pages the table has now, and the coordinator's copy has none, so a
@@ -1126,6 +1136,9 @@ GpScanDirectDispatchContents(Oid relid, Node *quals, Index varno)
  * every distributed table alike (cdb_estimate_rel_size()): not through
  * table_block_relation_estimate_size() itself, which reads a fillfactor
  * from options that are the method's own.
+ *
+ * And the junk column an UPDATE's or a DELETE's plan carries the segment of
+ * another table's row in (add_segment_junk()).
  */
 static void
 gp_build_simple_rel(PlannerInfo *root, RelOptInfo *rel, RangeTblEntry *rte)
@@ -1138,6 +1151,7 @@ gp_build_simple_rel(PlannerInfo *root, RelOptInfo *rel, RangeTblEntry *rte)
 
 	if (GpClusterBackendRole() != GP_ROLE_DISPATCH)
 		return;
+	add_segment_junk(root, rel, rte);
 	if (rte->rtekind != RTE_RELATION ||
 		(rte->relkind != RELKIND_RELATION && rte->relkind != RELKIND_MATVIEW))
 		return;
@@ -1170,6 +1184,109 @@ gp_build_simple_rel(PlannerInfo *root, RelOptInfo *rel, RangeTblEntry *rte)
 		rel->allvisfrac = 0;
 	}
 	ReleaseSysCache(tuple);
+}
+
+/*
+ * The outer joins whose nullable side range table entry "relid" is on, into
+ * *result: those a reference to it in the statement's target list is nulled
+ * by, which a placeholder there says (phnullingrels), as the parser has a
+ * Var there say it (varnullingrels).  False where the join tree has no such
+ * entry.
+ */
+static bool
+nulling_joins(Node *jtnode, Index relid, Relids above, Relids *result)
+{
+	if (jtnode == NULL)
+		return false;
+	if (IsA(jtnode, RangeTblRef))
+	{
+		if (((RangeTblRef *) jtnode)->rtindex != (int) relid)
+			return false;
+		*result = above;
+		return true;
+	}
+	if (IsA(jtnode, FromExpr))
+	{
+		foreach_ptr(Node, item, ((FromExpr *) jtnode)->fromlist)
+			if (nulling_joins(item, relid, above, result))
+				return true;
+		return false;
+	}
+	if (IsA(jtnode, JoinExpr))
+	{
+		JoinExpr   *j = (JoinExpr *) jtnode;
+		Relids		left = above;
+		Relids		right = above;
+
+		if (j->rtindex > 0 && (j->jointype == JOIN_LEFT || j->jointype == JOIN_FULL))
+			right = bms_add_member(bms_copy(above), j->rtindex);
+		if (j->rtindex > 0 && (j->jointype == JOIN_RIGHT || j->jointype == JOIN_FULL))
+			left = bms_add_member(bms_copy(above), j->rtindex);
+		return nulling_joins(j->larg, relid, left, result) ||
+			nulling_joins(j->rarg, relid, right, result);
+	}
+	return false;
+}
+
+/*
+ * An UPDATE or DELETE of a distributed table, with the global deadlock
+ * detector on, rechecks a row another transaction updated between the
+ * plan's read of it and its segment's write, as PostgreSQL's READ COMMITTED
+ * update rechecks it (gp_explicit.c): its plan runs again with the row's
+ * newest version, and with the row of each other table it read by a row
+ * mark that the version it read was joined to -- found by its ctid, which
+ * the planner's row mark carries in a junk column (ROW_MARK_REFERENCE).  A
+ * ctid is one segment's, so each distributed table's row carries its
+ * segment too: gp_internal.row_segment() of its ctid, which the gather
+ * answers (gather_plan()), a placeholder the planner has the gather compute
+ * and carries up as it carries a column.  Added as the planner builds the
+ * relation, before it gives each relation the columns the target list
+ * needs of it.
+ */
+static void
+add_segment_junk(PlannerInfo *root, RelOptInfo *rel, RangeTblEntry *rte)
+{
+	Query	   *parse = root->parse;
+	PlanRowMark *mark = NULL;
+	PlaceHolderVar *phv;
+	Oid			func;
+	Relids		nulled = NULL;
+	char		resname[32];
+
+	if (!gp_enable_global_deadlock_detector ||
+		(parse->commandType != CMD_UPDATE && parse->commandType != CMD_DELETE) ||
+		rel->reloptkind != RELOPT_BASEREL || rte->rtekind != RTE_RELATION ||
+		rel->relid == (Index) parse->resultRelation ||
+		GpScanDistributedPolicy(rte->relid) == NULL ||
+		GpScanDistributedPolicy(rt_fetch(parse->resultRelation,
+										 parse->rtable)->relid) == NULL)
+		return;
+	foreach_node(PlanRowMark, rc, root->rowMarks)
+		if (rc->rti == rel->relid && rc->prti == rc->rti)
+			mark = rc;
+	if (mark == NULL || mark->markType != ROW_MARK_REFERENCE)
+		return;
+	func = GpSegmentRowSegmentFunction();
+	if (!OidIsValid(func) ||
+		!nulling_joins((Node *) parse->jointree, rel->relid, NULL, &nulled))
+		return;
+
+	phv = makeNode(PlaceHolderVar);
+	phv->phexpr = (Expr *) makeFuncExpr(func, INT4OID,
+										list_make1(makeVar(rel->relid,
+														   SelfItemPointerAttributeNumber,
+														   TIDOID, -1, InvalidOid, 0)),
+										InvalidOid, InvalidOid,
+										COERCE_EXPLICIT_CALL);
+	phv->phrels = bms_make_singleton(rel->relid);
+	phv->phnullingrels = nulled;
+	phv->phid = ++(root->glob->lastPHId);
+	phv->phlevelsup = 0;
+	snprintf(resname, sizeof(resname), GP_SEGMENT_JUNK, mark->rowmarkId);
+	root->processed_tlist = lappend(root->processed_tlist,
+									makeTargetEntry((Expr *) phv,
+													list_length(root->processed_tlist) + 1,
+													pstrdup(resname), true));
 }
 
 static Node *find_segment_of(Node *tree, Index relid);
@@ -1735,6 +1852,23 @@ gather_plan(PlannerInfo *root, RelOptInfo *rel, CustomPath *best_path,
 						GATHER_SRC_SEGMENT);
 	}
 
+	/*
+	 * The segment each row came from, where an UPDATE or a DELETE that reads
+	 * this table besides the one it writes carries it up as a junk column
+	 * (add_segment_junk()): the placeholder is a column of the scan tuple,
+	 * which the planner's references to it read, and its call is not made.
+	 */
+	foreach_ptr(Node, expr, rel->reltarget->exprs)
+	{
+		if (IsA(expr, PlaceHolderVar) &&
+			GpSegmentIsRowSegment((Node *) ((PlaceHolderVar *) expr)->phexpr,
+								  rel->relid))
+		{
+			SCAN_COLUMN(copyObject(expr), "gp_segment_id", GATHER_SRC_SEGMENT);
+			break;
+		}
+	}
+
 	/* A row with no column still has to be a row. */
 	if (types == NIL)
 		(void) remote_column(&select, &types, &typmods, "NULL::pg_catalog.bool",
@@ -1889,6 +2023,18 @@ gather_begin(CustomScanState *node, EState *estate, int eflags)
 	state->current_content = -1;
 	state->external = !gather_is_current_of(state) &&
 		GpPolicyIsExternalTable(RelationGetRelid(node->ss.ss_currentRelation));
+
+	/*
+	 * A recheck's copy of the plan (gather_epq()), which reads a row or two,
+	 * is no slice of the statement's, and reaches no segment it has not.
+	 */
+	if (estate->es_epq_active != NULL)
+	{
+		state->epq_row = ExecInitExtraTupleSlot(estate,
+												RelationGetDescr(node->ss.ss_currentRelation),
+												&TTSOpsVirtual);
+		return;
+	}
 
 	/* each gather is a slice of its own, numbered as the executor meets it */
 	if (!(eflags & EXEC_FLAG_EXPLAIN_ONLY))
@@ -2347,7 +2493,11 @@ gather_store(GatherScanState *state, TupleTableSlot *slot, int content)
 				{
 					ItemPointer synthetic = palloc_object(ItemPointerData);
 
-					GpRowIdentityMake(estate, content,
+					/* a recheck's row, in the map of the statement's rows */
+					GpRowIdentityMake(estate->es_epq_active != NULL
+									  ? estate->es_epq_active->parentestate
+									  : estate,
+									  content,
 									  (ItemPointer) DatumGetPointer(remote->tts_values[state->ctid_remote]),
 									  synthetic);
 					slot->tts_values[i] = PointerGetDatum(synthetic);
@@ -2444,9 +2594,223 @@ gather_recheck(ScanState *ss, TupleTableSlot *slot)
 	return true;
 }
 
+/*
+ * A recheck's row, read again from segment "content" at "tid" into the scan
+ * slot, with the conditions the gather sends: under the statement's
+ * snapshot, or -- the newest version of a row the explicit write rechecks,
+ * which that snapshot does not see -- under a snapshot taken now.  False
+ * when the row is not there, or the conditions do not hold for it.
+ */
+static bool
+gather_epq_fetch(GatherScanState *state, int content, ItemPointer tid,
+				 bool latest, TupleTableSlot *slot)
+{
+	TupleDesc	desc = state->remote->tts_tupleDescriptor;
+	char	   *where = gather_where(state);
+	StringInfoData sql;
+	GpGatherState *gather;
+	MemoryContext oldcxt;
+	int			from;
+	bool		got;
+
+	initStringInfo(&sql);
+	appendStringInfoString(&sql, GP_CHECKED_MARKER);
+	appendStringInfo(&sql, GP_TIMES_MARKER INT64_FORMAT " " INT64_FORMAT "*/ ",
+					 (int64) GetCurrentTransactionStartTimestamp(),
+					 (int64) GetCurrentStatementStartTimestamp());
+	appendStringInfo(&sql, "%s WHERE ctid = '(%u,%u)'::pg_catalog.tid%s%s",
+					 state->select, ItemPointerGetBlockNumber(tid),
+					 ItemPointerGetOffsetNumber(tid),
+					 where[0] != '\0' ? " AND " : "", where);
+
+	if (latest)
+		PushActiveSnapshot(GetLatestSnapshot());
+	gather = GpGatherStartOn(sql.data, desc, content);
+	oldcxt = MemoryContextSwitchTo(state->css.ss.ps.ps_ExprContext->ecxt_per_tuple_memory);
+	got = GpGatherNext(gather, state->remote, &from);
+	if (got)
+	{
+		slot_getallattrs(state->remote);
+		gather_store(state, slot, content);
+	}
+	MemoryContextSwitchTo(oldcxt);
+	GpGatherEnd(gather);
+	if (latest)
+		PopActiveSnapshot();
+	pfree(sql.data);
+	return got;
+}
+
+/*
+ * A row mark's copy of its table's row (ROW_MARK_COPY: an external table's,
+ * whose rows have no ctid to be read by again), made the scan tuple as
+ * gather_store() makes one of a row the segments sent.
+ */
+static bool
+gather_epq_copy(GatherScanState *state, EPQState *epq, Index rti,
+				TupleTableSlot *slot)
+{
+	TupleTableSlot *row = state->epq_row;
+	TupleTableSlot *remote = state->remote;
+	MemoryContext oldcxt;
+
+	if (!EvalPlanQualFetchRowMark(epq, rti, row))
+		return false;
+	oldcxt = MemoryContextSwitchTo(state->css.ss.ps.ps_ExprContext->ecxt_per_tuple_memory);
+	slot_getallattrs(row);
+	ExecClearTuple(remote);
+	for (int i = 0; i < remote->tts_tupleDescriptor->natts; i++)
+		remote->tts_isnull[i] = true;
+	for (int a = 0; a < state->natts; a++)
+	{
+		if (state->attrs[a] < 0)
+			continue;
+		remote->tts_values[state->attrs[a]] = row->tts_values[a];
+		remote->tts_isnull[state->attrs[a]] = row->tts_isnull[a];
+	}
+	if (state->ctid_remote >= 0 && ItemPointerIsValid(&row->tts_tid))
+	{
+		ItemPointer tid = palloc_object(ItemPointerData);
+
+		ItemPointerCopy(&row->tts_tid, tid);
+		remote->tts_values[state->ctid_remote] = PointerGetDatum(tid);
+		remote->tts_isnull[state->ctid_remote] = false;
+	}
+	ExecStoreVirtualTuple(remote);
+	gather_store(state, slot, -1);
+	MemoryContextSwitchTo(oldcxt);
+	return true;
+}
+
+/*
+ * EvalPlanQual: the explicit write rechecks a row another transaction
+ * updated since the plan read it (gp_explicit.c) by running its plan again,
+ * each scan giving one row, as PostgreSQL's recheck does
+ * (ExecScanFetch()).  The gather of the table being written gives the
+ * newest version of the row, which the explicit write names by the ctid the
+ * statement's map knows it by, read from its segment under a snapshot that
+ * sees it; the gather of each other table the plan read by a row mark gives
+ * the row the plan joined it to, whose ctid and segment the plan's row
+ * carries (add_segment_junk()), read from that segment under the
+ * statement's snapshot -- or the row a row mark copied.  Either with the
+ * conditions the gather sends, and then those it evaluates here and its
+ * projection, as ExecScan() applies them.  A table the plan reads only in a
+ * subquery is read as always; one the recheck gives no row of, none.
+ */
+static TupleTableSlot *
+gather_epq(GatherScanState *state, EPQState *epq)
+{
+	ScanState  *ss = &state->css.ss;
+	Index		rti = ((Scan *) ss->ps.plan)->scanrelid;
+	ExprContext *econtext = ss->ps.ps_ExprContext;
+	TupleTableSlot *slot = ss->ss_ScanTupleSlot;
+	bool		found;
+
+	if (epq->relsubs_done[rti - 1])
+		return ExecClearTuple(slot);
+	epq->relsubs_done[rti - 1] = true;
+	ResetExprContext(econtext);
+
+	if (epq->relsubs_slot[rti - 1] != NULL)
+	{
+		TupleTableSlot *test = epq->relsubs_slot[rti - 1];
+		int			content;
+		ItemPointerData tid;
+
+		/* the row the explicit write rechecks, by the ctid its map has */
+		if (!state->identity)
+			GpMotionRefuseRecheck();
+		if (TupIsNull(test))
+			return ExecClearTuple(slot);
+		if (!GpRowIdentityFind(epq->parentestate, &test->tts_tid, &content, &tid))
+			elog(ERROR, "a row to recheck was not read from a segment");
+		found = gather_epq_fetch(state, content, &tid, true, slot);
+	}
+	else
+	{
+		ExecAuxRowMark *earm = epq->relsubs_rowmark[rti - 1];
+		ExecRowMark *erm = earm->rowmark;
+		Datum		datum;
+		Datum		segment;
+		bool		isnull;
+
+		/* a child's row mark, for a row another child gave */
+		if (erm->rti != erm->prti)
+		{
+			datum = ExecGetJunkAttribute(epq->origslot, earm->toidAttNo, &isnull);
+			if (isnull || DatumGetObjectId(datum) != erm->relid)
+				return ExecClearTuple(slot);
+		}
+
+		if (erm->markType == ROW_MARK_COPY)
+		{
+			/*
+			 * A copy of the row, as the plan carried it -- a child's as its
+			 * parent's row, which the scan's is not, refused
+			 */
+			datum = ExecGetJunkAttribute(epq->origslot, earm->wholeAttNo, &isnull);
+			if (!isnull &&
+				HeapTupleHeaderGetTypeId(DatumGetHeapTupleHeader(datum)) !=
+				RelationGetDescr(ss->ss_currentRelation)->tdtypeid)
+				GpMotionRefuseRecheck();
+			found = gather_epq_copy(state, epq, rti, slot);
+		}
+		else
+		{
+			/* the row's segment, carried with its ctid */
+			if (state->epq_segcol == 0)
+			{
+				char		resname[32];
+
+				snprintf(resname, sizeof(resname), GP_SEGMENT_JUNK, erm->rowmarkId);
+				state->epq_segcol = ExecFindJunkAttributeInTlist(epq->plan->targetlist,
+																 resname);
+				if (!AttributeNumberIsValid(state->epq_segcol))
+					state->epq_segcol = -1;
+			}
+			if (state->epq_segcol < 0)
+				GpMotionRefuseRecheck();
+
+			/* a row an outer join's null row stood for: none */
+			datum = ExecGetJunkAttribute(epq->origslot, earm->ctidAttNo, &isnull);
+			if (isnull)
+				return ExecClearTuple(slot);
+			segment = ExecGetJunkAttribute(epq->origslot, state->epq_segcol, &isnull);
+			if (isnull)
+				return ExecClearTuple(slot);
+			found = gather_epq_fetch(state, DatumGetInt32(segment),
+									 (ItemPointer) DatumGetPointer(datum), false,
+									 slot);
+		}
+	}
+	if (!found)
+		return ExecClearTuple(slot);
+
+	econtext->ecxt_scantuple = slot;
+	if (ss->ps.qual != NULL && !ExecQual(ss->ps.qual, econtext))
+	{
+		InstrCountFiltered1(ss, 1);
+		return ExecClearTuple(slot);
+	}
+	if (ss->ps.ps_ProjInfo != NULL)
+		return ExecProject(ss->ps.ps_ProjInfo);
+	return slot;
+}
+
 static TupleTableSlot *
 gather_exec(CustomScanState *node)
 {
+	EPQState   *epq = node->ss.ps.state->es_epq_active;
+
+	/* a recheck (gather_epq()), where the table is one it gives a row of */
+	if (epq != NULL)
+	{
+		Index		rti = ((Scan *) node->ss.ps.plan)->scanrelid;
+
+		if (epq->relsubs_done[rti - 1] || epq->relsubs_slot[rti - 1] != NULL ||
+			epq->relsubs_rowmark[rti - 1] != NULL)
+			return gather_epq((GatherScanState *) node, epq);
+	}
 	return ExecScan(&node->ss, gather_next, gather_recheck);
 }
 

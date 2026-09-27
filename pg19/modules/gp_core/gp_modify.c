@@ -1307,10 +1307,13 @@ operation_words(CmdType operation)
 /*
  * The write, by Cloudberry's Explicit Redistribute Motion (gp_explicit.c):
  * the plan runs here, and each row it writes is written on its segment.
- * Refused, with the reason, where that cannot be done.
+ * Refused, with the reason, where that cannot be done.  "planned": the plan
+ * is PostgreSQL's planner's, which a row another transaction updated can be
+ * rechecked by, as its ModifyTable rechecks one; not ORCA's.
  */
 static Plan *
-write_explicitly(PlannedStmt *stmt, ModifyTable *mt, const char *on_conflict)
+write_explicitly(PlannedStmt *stmt, ModifyTable *mt, const char *on_conflict,
+				 bool planned)
 {
 	const char *why = GpExplicitCannot(stmt, mt, on_conflict);
 
@@ -1326,14 +1329,14 @@ write_explicitly(PlannedStmt *stmt, ModifyTable *mt, const char *on_conflict)
 						get_rel_name(rt_fetch(rti, stmt->rtable)->relid)),
 				 errdetail("%s", why)));
 	}
-	return GpExplicitMake(mt, on_conflict);
+	return GpExplicitMake(mt, on_conflict, planned);
 }
 
 /* The explicit write for a ModifyTable ORCA's translator made (merge.c). */
 Plan *
 GpModifyWriteExplicitly(PlannedStmt *stmt, Plan *modify)
 {
-	return write_explicitly(stmt, castNode(ModifyTable, modify), NULL);
+	return write_explicitly(stmt, castNode(ModifyTable, modify), NULL, false);
 }
 
 /*
@@ -1460,7 +1463,8 @@ gp_modify_planner(Query *parse, const char *query_string, int cursorOptions,
 			conflict = lnext(conflicts, conflict);
 		}
 		if (writes_distributed(stmt, (ModifyTable *) sub))
-			lfirst(lc) = write_explicitly(stmt, (ModifyTable *) sub, on_conflict);
+			lfirst(lc) = write_explicitly(stmt, (ModifyTable *) sub, on_conflict,
+										  true);
 	}
 	refuse_local_write(stmt->planTree, stmt);
 	return stmt;
@@ -1558,7 +1562,7 @@ gp_modify_planner_routed(Query *parse, const char *query_string, int cursorOptio
 				return stmt;
 			}
 		}
-		stmt->planTree = write_explicitly(stmt, mt, NULL);
+		stmt->planTree = write_explicitly(stmt, mt, NULL, true);
 		return stmt;
 	}
 	rte = rt_fetch(linitial_int(mt->resultRelations), stmt->rtable);
@@ -1580,7 +1584,7 @@ gp_modify_planner_routed(Query *parse, const char *query_string, int cursorOptio
 		if (mt->returningLists != NIL || mt->onConflictAction != ONCONFLICT_NONE ||
 			mt->withCheckOptionLists != NIL)
 		{
-			stmt->planTree = write_explicitly(stmt, mt, on_conflict);
+			stmt->planTree = write_explicitly(stmt, mt, on_conflict, true);
 			return stmt;
 		}
 
@@ -1629,7 +1633,7 @@ gp_modify_planner_routed(Query *parse, const char *query_string, int cursorOptio
 							get_rel_name(rte->relid))));
 		if (why != NULL)
 		{
-			stmt->planTree = write_explicitly(stmt, mt, NULL);
+			stmt->planTree = write_explicitly(stmt, mt, NULL, true);
 			return stmt;
 		}
 
@@ -1642,7 +1646,7 @@ gp_modify_planner_routed(Query *parse, const char *query_string, int cursorOptio
 	 * written where its row is -- an UPDATE's, a DELETE's, an INSERT's.
 	 */
 	if (mt->operation == CMD_MERGE)
-		stmt->planTree = write_explicitly(stmt, mt, NULL);
+		stmt->planTree = write_explicitly(stmt, mt, NULL, true);
 
 	return stmt;
 }

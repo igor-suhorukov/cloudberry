@@ -606,6 +606,18 @@ RETURNS int
 AS 'MODULE_PATHNAME', 'gp_segment_of'
 LANGUAGE C STABLE STRICT PARALLEL SAFE;
 
+/*
+ * The segment a row a gather read came from, of its ctid there: a junk column
+ * of an UPDATE's or a DELETE's plan for each other distributed table the
+ * statement reads, which that table's gather answers itself (gp_scan.c), so
+ * that the explicit write finds the same rows of it when it rechecks a row
+ * another transaction updated (gp_explicit.c).  A call is refused.
+ */
+CREATE FUNCTION gp_internal.row_segment(tid)
+RETURNS int
+AS 'MODULE_PATHNAME', 'gp_row_segment'
+LANGUAGE C STABLE STRICT;
+
 CREATE FUNCTION gp_internal.dist_random_segments(rel anyelement)
 RETURNS SETOF record
 AS 'MODULE_PATHNAME', 'gp_dist_random_segments'
@@ -741,6 +753,22 @@ CREATE FUNCTION gp_internal.explicit_recheck(rel anyelement, ctids tid[],
 	tables oid[], deleted "char")
 RETURNS void
 AS 'MODULE_PATHNAME', 'gp_explicit_recheck'
+LANGUAGE C;
+
+/*
+ * The newest version of each row a statement of the explicit write came
+ * short of, where another transaction updated it since the coordinator read
+ * it (gp_explicit.c, gp_split.c): its index in the arrays and its ctid, for
+ * the coordinator to recheck as PostgreSQL's READ COMMITTED UPDATE and DELETE
+ * recheck it, and the coordinator transactions to wait for before it sends
+ * the statement again.  Not STRICT, because NULL::t is how it is told which
+ * table; for a user who may update or delete the table's rows.
+ */
+CREATE FUNCTION gp_internal.explicit_latest(rel anyelement, ctids tid[],
+	tables oid[], deleting bool,
+	OUT gp_i int4, OUT gp_ctid tid, OUT gp_after int8[])
+RETURNS SETOF record
+AS 'MODULE_PATHNAME', 'gp_explicit_latest'
 LANGUAGE C;
 
 /*
