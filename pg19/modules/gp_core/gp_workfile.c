@@ -19,8 +19,8 @@
  *
  * gp_workfile.c
  *	  Cloudberry's workfile manager, as far as a module sees it: the limits
- *	  on a statement's temporary files and on the node's, and gp_toolkit's
- *	  views of the files.
+ *	  on a statement's temporary files and on the node's, gp_toolkit's views
+ *	  of the files, and the words of a segment's cancel.
  *
  * Cloudberry's fd.c and buffile.c tell its workfile manager of every
  * temporary file an operator spills to -- a workfile -- as it is made,
@@ -58,11 +58,17 @@
  * A utility statement's files -- a CREATE INDEX's sort -- are held to none
  * of these, as no executor's run is theirs.
  *
+ * Cloudberry's words for a segment's cancel are here too, which segspace
+ * reads of a cancel that interrupts a spill: a segment's backend -- a QE --
+ * says "canceling MPP operation" where PostgreSQL says "canceling statement
+ * due to user request".
+ *
  * Cloudberry sources this file stands in for:
  *	  src/backend/utils/workfile_manager/workfile_mgr.c (RegisterFileWithSet(),
  *	  UpdateWorkFileSize(), WorkfileSegspace_GetSize()),
- *	  gpcontrib/gp_internal_tools/gp_workfile_mgr.c, and the workfile
- *	  settings of src/backend/utils/misc/guc_gp.c
+ *	  gpcontrib/gp_internal_tools/gp_workfile_mgr.c, the workfile settings of
+ *	  src/backend/utils/misc/guc_gp.c, and ProcessInterrupts()'s cancel of a
+ *	  QE in src/backend/tcop/postgres.c
  *
  *-------------------------------------------------------------------------
  */
@@ -92,6 +98,9 @@
 /* fd.c's error for temp_file_limit, as errmsg() is given it */
 #define TEMP_FILE_LIMIT_MSGID	"temporary file size exceeds \"temp_file_limit\" (%dkB)"
 
+/* ProcessInterrupts()'s for a cancel, likewise */
+#define CANCEL_MSGID			"canceling statement due to user request"
+
 /*
  * The FileSets of the rows the coordinator relays to a segment's readers,
  * which gp_motion.c numbers from here up: not workfiles, as Cloudberry's
@@ -111,6 +120,7 @@ static int64 polled_temp_blks = 0;
 
 static ExecutorRun_hook_type prev_ExecutorRun = NULL;
 static ExecutorFinish_hook_type prev_ExecutorFinish = NULL;
+static emit_log_hook_type prev_emit_log_hook = NULL;
 
 /* ------------------------------------------------------------------------- */
 /* The temporary files' directories                                          */
@@ -431,6 +441,29 @@ workfile_ExecutorFinish(QueryDesc *queryDesc)
 }
 
 /* ------------------------------------------------------------------------- */
+/* A segment's cancel                                                        */
+/* ------------------------------------------------------------------------- */
+
+/*
+ * A dispatched backend's cancel in the words of Cloudberry's QE: "canceling
+ * MPP operation" (ProcessInterrupts()).  Its SQLSTATE stays PostgreSQL's
+ * query_canceled, by which the coordinator tells a slice cancelled because
+ * another failed from the failure (gp_dispatch.c).
+ */
+static void
+workfile_emit_log(ErrorData *edata)
+{
+	if (edata->elevel == ERROR && edata->sqlerrcode == ERRCODE_QUERY_CANCELED &&
+		edata->message_id != NULL &&
+		strcmp(edata->message_id, CANCEL_MSGID) == 0 &&
+		GpClusterIsDispatched())
+		edata->message = pstrdup("canceling MPP operation");
+
+	if (prev_emit_log_hook)
+		prev_emit_log_hook(edata);
+}
+
+/* ------------------------------------------------------------------------- */
 /* gp_toolkit's views                                                        */
 /* ------------------------------------------------------------------------- */
 
@@ -541,4 +574,6 @@ GpWorkfileInit(void)
 	ExecutorRun_hook = workfile_ExecutorRun;
 	prev_ExecutorFinish = ExecutorFinish_hook;
 	ExecutorFinish_hook = workfile_ExecutorFinish;
+	prev_emit_log_hook = emit_log_hook;
+	emit_log_hook = workfile_emit_log;
 }

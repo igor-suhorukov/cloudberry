@@ -304,8 +304,8 @@ _PG_init(void)
 
 	/*
 	 * Cloudberry's workfile manager, as far as a module sees it: the limits
-	 * on a statement's temporary files and on the node's, and gp_toolkit's
-	 * views of them.
+	 * on a statement's temporary files and on the node's, gp_toolkit's views
+	 * of them, and a segment's cancel in Cloudberry's words.
 	 */
 	GpWorkfileInit();
 

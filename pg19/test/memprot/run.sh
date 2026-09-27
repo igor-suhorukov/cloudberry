@@ -275,8 +275,8 @@ out=$(q 0 "SELECT eat_slowly(15, 0.15) FROM gp_dist_random('gp_id')")
 wait "$holder" 2> /dev/null
 held=$(cat "$ROOT/holder.out")
 case "$held" in
-	*"ERROR:  canceling statement due to user request"*)
-		ok "A, flagged and asleep, is cancelled" ;;
+	*"ERROR:  canceling MPP operation"*)
+		ok "A, flagged and asleep, is cancelled, in the words of Cloudberry's segment" ;;
 	*) notok "the sleeping runaway" "$held" ;;
 esac
 [ "$out" = "$(printf '15\n15')" ] && ok "and B takes its 15 MB" || notok "B's 15 MB" "$out"

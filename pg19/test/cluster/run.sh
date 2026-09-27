@@ -4064,8 +4064,9 @@ true" ] && ok "gp_size_of_table_disk and gp_size_of_schema_disk, the cluster's s
 
 	# The workfile manager's (gp_workfile.c): gp_toolkit's views of the
 	# temporary files, read where they lie, a row for each and each node's
-	# bytes; and the limits on a statement's files, in Cloudberry's words, on
-	# the coordinator and in a segment's slice.
+	# bytes; the limits on a statement's files, in Cloudberry's words, on the
+	# coordinator and in a segment's slice; and a segment's cancel, in the
+	# words of Cloudberry's QE.
 	out=$(q 0 "SELECT string_agg(segid || ':' || bytes, ' ' ORDER BY segid) FROM gp_toolkit.gp_workfile_mgr_used_diskspace;
 			   SELECT count(*) FROM gp_toolkit.gp_workfile_entries;
 			   SELECT string_agg(segid || ':' || size, ' ' ORDER BY segid) FROM gp_toolkit.gp_workfile_usage_per_segment;")
@@ -4145,6 +4146,14 @@ t
 	[ "$out|$out2" = "ERROR:  workfile per segment size limit exceeded|300000 300000 " ] \
 		&& ok "gp.workfile_limit_per_segment, a node's: past it there, a spill fails in Cloudberry's words" \
 		|| notok "gp.workfile_limit_per_segment" "$out / $out2"
+
+	out=$(q 0 "CREATE TABLE wfc (a int) DISTRIBUTED BY (a); INSERT INTO wfc SELECT generate_series(1, 10);
+			   SELECT gp_inject_fault('exec_mpp_query_start', 'interrupt', $(dbid 1));")
+	out2=$(q 0 "SELECT count(*) FROM wfc;" | grep -o 'ERROR:.*')
+	q 0 "SELECT gp_inject_fault('exec_mpp_query_start', 'reset', $(dbid 1)); DROP TABLE wfc;" >/dev/null
+	[ "$out|$out2" = "Success:|ERROR:  canceling MPP operation" ] \
+		&& ok "a segment's cancel is Cloudberry's QE's: canceling MPP operation" \
+		|| notok "a segment's cancel" "$out / $out2"
 fi
 
 ###############################################################################

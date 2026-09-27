@@ -503,8 +503,9 @@ What Cloudberry's tests asked for next (2026-09-27), in `gp_core`,
   the fault `create_function_fail`;
 - Cloudberry's workfile limits, in its words: `gp.workfile_limit_per_query`
   as a run's `temp_file_limit`, and a statement's files and a node's bytes
-  counted where they lie as a run ends; and gp_toolkit's four workfile
-  views of the same files (`gp_workfile.c`);
+  counted where they lie as a run ends; gp_toolkit's four workfile views of
+  the same files; and a segment's cancel in its QE's words
+  (`gp_workfile.c`);
 - and the server built with LDAP, for `pg_hba.conf`'s ldap lines.
 
 The transport and encryption modules — `interconnect`, `udp2`, `gp_tde` —
