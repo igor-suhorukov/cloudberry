@@ -643,7 +643,8 @@ answer to each from DuckDB (pinned, in the image), each query planned by
 ORCA and answering as DuckDB answers it -- `CB_TPC=check` in the tests
 service -- and each timed under ORCA and under the planner's route, on the
 port built without assertions -- the compose file's `tpc` service,
-`CB_TPC=time`;
+`CB_TPC=time` -- and with as many parallel workers on each segment as
+`TPC_WORKERS` lists, `"0 2 4"` for the speedups;
 `singlenode` and
 `singlenode_isolation2`, Cloudberry's single-node suites with PostgreSQL 19's
 own regression tests; and PostGIS's regression suite.  Each is run under the

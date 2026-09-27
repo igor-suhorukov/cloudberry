@@ -32,6 +32,9 @@
       planner's route, when timed -- against DuckDB's, and what
       <work>/results.tsv says of each run: a line a query, the times when
       timed, and a last line of how many passed.  Exits 1 where one did not.
+      A run with parallel workers on the segments (TPC_WORKERS) is reported
+      as the others, with how many times as fast each planner's queries were
+      than with none and how many of ORCA's plans have a Gather.
 
 DuckDB answers each query over the same data as the reference: the suite
 copies no TPC query or answer, and the reference is right at any scale
@@ -156,17 +159,21 @@ def report(work, mode):
     runs = {}
     with open(os.path.join(work, 'results.tsv')) as f:
         for line in f:
-            rnd, kind, q, planned, reason, oms, ost, pms, pst = line.rstrip('\n').split('\t')
-            e = runs.setdefault((kind, q), {'planned': True, 'reason': '', 'o': [], 'p': [], 'ok': True})
+            fields = line.rstrip('\n').split('\t')
+            rnd, kind, q, planned, reason, oms, ost, pms, pst = fields[:9]
+            w = int(fields[9]) if len(fields) > 9 else 0
+            e = runs.setdefault((kind, q, w), {'planned': True, 'reason': '', 'o': [], 'p': [], 'ok': True,
+                                               'gathers': fields[10] if len(fields) > 10 else '-'})
             if planned != 'yes':
                 e['planned'] = False
                 e['reason'] = reason
             ref = rows(os.path.join(work, kind, 'ref', q + '.out'))
+            suffix = '-w%d' % w if w else ''
             for mode_, ms, st, times in (('orca', oms, ost, e['o']), ('planner', pms, pst, e['p'])):
                 if st == '-':
                     continue
                 times.append((int(ms), st))
-                if st == 'ok' and not same(ref, rows(os.path.join(work, 'out', 'r' + rnd, '%s-%s-%s.out' % (kind, q, mode_)))):
+                if st == 'ok' and not same(ref, rows(os.path.join(work, 'out', 'r' + rnd, '%s-%s%s-%s.out' % (kind, q, suffix, mode_)))):
                     e['ok'] = False
                     e.setdefault('wrong', set()).add(mode_)
 
@@ -174,45 +181,64 @@ def report(work, mode):
         oks = [t for t, s in times if s == 'ok']
         return (min(oks), 'ok') if oks else ((max(t for t, _ in times), times[0][1]) if times else (0, '-'))
 
+    def gmean(xs):
+        return math.exp(sum(math.log(x) for x in xs) / len(xs))
+
     passed = failed = 0
     for kind in ('h', 'ds'):
-        items = sorted((q, e) for (k, q), e in runs.items() if k == kind)
-        if not items:
-            continue
-        for q, e in items:
-            o, ost = best(e['o'])
-            p, pst = best(e['p'])
-            what = '%s %s' % (kinds[kind], q)
-            if not e['planned']:
-                problem = 'not ORCA\'s: %s' % e['reason']
-            elif ost != 'ok':
-                problem = 'under ORCA: %s after %.1f s' % (ost, o / 1000)
-            elif not e['ok']:
-                problem = 'rows not DuckDB\'s, %s' % ' and '.join(sorted(e.get('wrong', ())))
-            else:
-                problem = None
-            timing = ' (ORCA %.2f s%s)' % (o / 1000, (', planner %s' % ('%.2f s' % (p / 1000) if pst == 'ok' else '%s after %.0f s' % (pst, p / 1000))) if e['p'] else '')
-            if problem is None:
-                passed += 1
-                print('  ok     %s: ORCA\'s plan, DuckDB\'s rows%s' % (what, timing))
-            else:
-                failed += 1
-                print('  NOT OK %s: %s%s' % (what, problem, timing))
+        for w in sorted(set(ww for (k, q, ww) in runs if k == kind)):
+            items = sorted((q, e) for (k, q, ww), e in runs.items() if k == kind and ww == w)
+            workers = ' with %d workers a segment' % w if w else ''
+            for q, e in items:
+                o, ost = best(e['o'])
+                p, pst = best(e['p'])
+                what = '%s %s%s' % (kinds[kind], q, workers)
+                if not e['planned']:
+                    problem = 'not ORCA\'s: %s' % e['reason']
+                elif ost != 'ok':
+                    problem = 'under ORCA: %s after %.1f s' % (ost, o / 1000)
+                elif not e['ok']:
+                    problem = 'rows not DuckDB\'s, %s' % ' and '.join(sorted(e.get('wrong', ())))
+                else:
+                    problem = None
+                timing = ' (ORCA %.2f s%s%s)' % (o / 1000, (', planner %s' % ('%.2f s' % (p / 1000) if pst == 'ok' else '%s after %.0f s' % (pst, p / 1000))) if e['p'] else '',
+                                                 ', %s Gathers' % e['gathers'] if w and e['gathers'] != '-' else '')
+                if problem is None:
+                    passed += 1
+                    print('  ok     %s: ORCA\'s plan, DuckDB\'s rows%s' % (what, timing))
+                else:
+                    failed += 1
+                    print('  NOT OK %s: %s%s' % (what, problem, timing))
 
-        if mode == 'time':
-            both = [(q, best(e['p'])[0], best(e['o'])[0]) for q, e in items
-                    if e['planned'] and best(e['o'])[1] == 'ok' and best(e['p'])[1] == 'ok']
-            ratios = [p / max(o, 1) for q, p, o in both]
-            if ratios:
-                gm = math.exp(sum(math.log(x) for x in ratios) / len(ratios))
-                print('  %s: %d of %d ORCA\'s; where both finished, %d: planner %.1f s, ORCA %.1f s, '
-                      'the planner %.2f times ORCA\'s (geometric mean); ORCA faster by a fifth in %d, slower in %d'
-                      % (kinds[kind], sum(1 for q, e in items if e['planned']), len(items), len(both),
-                         sum(p for q, p, o in both) / 1000, sum(o for q, p, o in both) / 1000, gm,
-                         sum(1 for x in ratios if x > 1.2), sum(1 for x in ratios if x < 1 / 1.2)))
-            slow = [q for q, e in items if e['p'] and best(e['p'])[1] != 'ok']
-            if slow:
-                print('  %s: the planner\'s route did not finish %s' % (kinds[kind], ' '.join(slow)))
+            if mode == 'time':
+                both = [(q, best(e['p'])[0], best(e['o'])[0]) for q, e in items
+                        if e['planned'] and best(e['o'])[1] == 'ok' and best(e['p'])[1] == 'ok']
+                ratios = [p / max(o, 1) for q, p, o in both]
+                if ratios:
+                    print('  %s%s: %d of %d ORCA\'s; where both finished, %d: planner %.1f s, ORCA %.1f s, '
+                          'the planner %.2f times ORCA\'s (geometric mean); ORCA faster by a fifth in %d, slower in %d'
+                          % (kinds[kind], workers, sum(1 for q, e in items if e['planned']), len(items), len(both),
+                             sum(p for q, p, o in both) / 1000, sum(o for q, p, o in both) / 1000, gmean(ratios),
+                             sum(1 for x in ratios if x > 1.2), sum(1 for x in ratios if x < 1 / 1.2)))
+                slow = [q for q, e in items if e['p'] and best(e['p'])[1] != 'ok']
+                if slow:
+                    print('  %s%s: the planner\'s route did not finish %s' % (kinds[kind], workers, ' '.join(slow)))
+
+            # against the same queries with no workers: how much faster each planner's are
+            if w and (kind, items[0][0], 0) in runs:
+                for mode_, key in (('ORCA', 'o'), ('the planner', 'p')):
+                    pairs = [(best(runs[(kind, q, 0)][key]), best(e[key])) for q, e in items
+                             if (kind, q, 0) in runs and e[key] and runs[(kind, q, 0)][key]]
+                    pairs = [(a[0], b[0]) for a, b in pairs if a[1] == 'ok' and b[1] == 'ok']
+                    if pairs:
+                        sp = [a / max(b, 1) for a, b in pairs]
+                        print('  %s%s, %s: %d queries in %.1f s, %.1f s with none: %.2f times as fast (geometric mean), '
+                              'faster by a fifth in %d, slower in %d'
+                              % (kinds[kind], workers, mode_, len(pairs), sum(b for a, b in pairs) / 1000,
+                                 sum(a for a, b in pairs) / 1000, gmean(sp),
+                                 sum(1 for x in sp if x > 1.2), sum(1 for x in sp if x < 1 / 1.2)))
+                withg = [q for q, e in items if e['gathers'] not in ('-', '0')]
+                print('  %s%s: ORCA\'s plan has a Gather in %d of %d' % (kinds[kind], workers, len(withg), len(items)))
     print('  %d passed, %d failed' % (passed, failed))
     return 1 if failed else 0
 

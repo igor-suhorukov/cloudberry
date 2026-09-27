@@ -49,6 +49,11 @@
 #   TPC_SEGMENTS       4
 #   TPC_TIMEOUT        each statement's, 120 s
 #   TPC_ROUNDS         each query's runs, least time kept: 1
+#   TPC_WORKERS        the parallel workers per segment each query is run
+#                      with, "0 2 4": 0 (none, gp.enable_parallel off, as
+#                      the measurement of 2026-09-26 had them); more, each
+#                      node given room for them, gp.enable_parallel on and
+#                      max_parallel_workers_per_gather that many
 #   TPC_SHARED_BUFFERS each node's: 256MB checked, 1GB timed
 #   TPC_PYTHON         /opt/duckdb/bin/python, the venv's
 #   TPC_DUCKDB_EXTENSIONS  /opt/duckdb/extensions, the extensions it loads
@@ -82,6 +87,9 @@ KINDS="${TPC_KINDS:-h ds}"
 SEGMENTS="${TPC_SEGMENTS:-4}"
 TIMEOUT="${TPC_TIMEOUT:-120}"
 ROUNDS="${TPC_ROUNDS:-1}"
+WORKERS="${TPC_WORKERS:-0}"
+MAXW=0
+for w in $WORKERS; do [ "$w" -gt "$MAXW" ] && MAXW=$w; done
 if [ "$MODE" = time ]; then
 	SHARED_BUFFERS="${TPC_SHARED_BUFFERS:-1GB}"
 else
@@ -153,6 +161,10 @@ for n in $NODES; do
 		echo "work_mem = 64MB"
 		echo "maintenance_work_mem = 256MB"
 		echo "max_parallel_workers_per_gather = 0"
+		if [ "$MAXW" -gt 0 ]; then
+			echo "max_parallel_workers = $MAXW"
+			echo "max_worker_processes = $((MAXW + 8))"
+		fi
 		echo "jit = off"
 		echo "fsync = off"
 		echo "synchronous_commit = off"
@@ -185,12 +197,18 @@ for kind in $KINDS; do
 done
 echo
 
-# one <db> <sql file> <optimizer on|off> <out>: "ms status" -- ok, timeout,
-# or error -- and the rows in <out>, what psql said besides in <out>.err.
+# The settings of a run with <w> parallel workers per segment.
+parallel() {
+	[ "$1" -gt 0 ] && echo "-c gp.enable_parallel=on -c max_parallel_workers_per_gather=$1"
+}
+
+# one <db> <sql file> <optimizer on|off> <out> <workers>: "ms status" --
+# ok, timeout, or error -- and the rows in <out>, what psql said besides in
+# <out>.err.
 one() {
 	local s e rc st
 	s=$(date +%s%N)
-	PGOPTIONS="-c gp.optimizer=$3 -c gp.optimizer_trace_fallback=on -c gp.optimizer_print_missing_stats=off -c statement_timeout=${TIMEOUT}s" \
+	PGOPTIONS="-c gp.optimizer=$3 -c gp.optimizer_trace_fallback=on -c gp.optimizer_print_missing_stats=off -c statement_timeout=${TIMEOUT}s $(parallel "$5")" \
 		"$PSQL" -X -h "$(sockdir 0)" -p "$(port 0)" -d "$1" -At -v ON_ERROR_STOP=1 -f "$2" > "$4" 2> "$4.err"
 	rc=$?
 	e=$(date +%s%N)
@@ -208,25 +226,35 @@ for round in $(seq 1 "$ROUNDS"); do
 		for f in "$ROOT/$kind/q/"*.sql; do
 			name=$(basename "$f" .sql)
 			[ -n "${TPC_QUERIES:-}" ] && [[ " $TPC_QUERIES " != *" $name "* ]] && continue
-			out="$ROOT/out/r$round/$kind-$name"
-			read -r oms ost <<< "$(one "tpc$kind" "$f" on "$out-orca.out")"
-			# The planner took the query where ORCA's trace says it fell back,
-			# the DETAIL saying why: a feature, or an assertion of ORCA's own
-			# where it checks them (GPOS_DEBUG).
-			reason=$(sed -n '/GPORCA failed to produce a plan/,/^DETAIL:/{s/^DETAIL:  //p}' "$out-orca.out.err" | head -1 |
-				sed 's/^Falling back to Postgres-based planner because GPORCA does not support the following feature: //; s/^Falling back to Postgres-based planner because //' | cut -c1-200)
-			if grep -q 'GPORCA failed to produce a plan' "$out-orca.out.err"; then
-				planned=no; reason="${reason:-no reason given}"
-			else
-				planned=yes; reason=-
-			fi
-			if [ "$MODE" = time ]; then
-				read -r pms pst <<< "$(one "tpc$kind" "$f" off "$out-planner.out")"
-			else
-				pms=0; pst=-
-			fi
-			printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' "$round" "$kind" "$name" "$planned" \
-				"$(echo "$reason" | tr '\t' ' ')" "$oms" "$ost" "$pms" "$pst" >> "$ROOT/results.tsv"
+			for w in $WORKERS; do
+				out="$ROOT/out/r$round/$kind-$name"
+				[ "$w" -gt 0 ] && out="$out-w$w"
+				read -r oms ost <<< "$(one "tpc$kind" "$f" on "$out-orca.out" "$w")"
+				# The planner took the query where ORCA's trace says it fell back,
+				# the DETAIL saying why: a feature, or an assertion of ORCA's own
+				# where it checks them (GPOS_DEBUG).
+				reason=$(sed -n '/GPORCA failed to produce a plan/,/^DETAIL:/{s/^DETAIL:  //p}' "$out-orca.out.err" | head -1 |
+					sed 's/^Falling back to Postgres-based planner because GPORCA does not support the following feature: //; s/^Falling back to Postgres-based planner because //' | cut -c1-200)
+				if grep -q 'GPORCA failed to produce a plan' "$out-orca.out.err"; then
+					planned=no; reason="${reason:-no reason given}"
+				else
+					planned=yes; reason=-
+				fi
+				if [ "$MODE" = time ]; then
+					read -r pms pst <<< "$(one "tpc$kind" "$f" off "$out-planner.out" "$w")"
+				else
+					pms=0; pst=-
+				fi
+				# the Gathers of ORCA's plan, the writers' fragments' (orca/parallel.c)
+				gathers=-
+				if [ "$w" -gt 0 ] && [ "$planned" = yes ]; then
+					gathers=$(PGOPTIONS="-c gp.optimizer=on $(parallel "$w")" "$PSQL" -X -h "$(sockdir 0)" -p "$(port 0)" \
+						-d "tpc$kind" -At -c "EXPLAIN (COSTS OFF) $(sed 's/;[[:space:]]*$//' "$f")" 2> /dev/null |
+						grep -c -E '^[[:space:]]*(->  )?Gather$') || gathers=0
+				fi
+				printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' "$round" "$kind" "$name" "$planned" \
+					"$(echo "$reason" | tr '\t' ' ')" "$oms" "$ost" "$pms" "$pst" "$w" "$gathers" >> "$ROOT/results.tsv"
+			done
 		done
 	done
 	echo "  round $round: $(awk -v r="$round" '$1 == r' "$ROOT/results.tsv" | wc -l) queries in $(( $(date +%s) - start )) s"
