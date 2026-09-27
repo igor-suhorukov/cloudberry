@@ -1980,11 +1980,42 @@ $((n + 1))" ] && ok "a serial column's values, taken on the segments from the co
 		&& ok "the slice table: each slice, the one it sends to, its gang, and direct dispatch's segment" \
 		|| notok "the slice table" "$out / $out2"
 
+	# EXPLAIN ANALYZE: the segments' part as the segment that returned the
+	# most rows ran it, as Cloudberry's winner, where the coordinator only
+	# describes it (gp_explain.c).
+	most=$(q 0 "SELECT max(n) FROM (SELECT gp_segment_id, count(*) n FROM o GROUP BY 1) s;")
 	out=$(q 0 "EXPLAIN (ANALYZE, COSTS OFF, TIMING OFF, SUMMARY OFF, BUFFERS OFF) SELECT count(*) FROM o;")
 	case "$out" in
-		*"Gather Motion 2:1"*"(actual rows=2"*"Seq Scan on o (never executed)"*)
-			ok "EXPLAIN ANALYZE: the segments' part is theirs, not run here" ;;
-		*) notok "EXPLAIN ANALYZE of a Motion" "$out" ;;
+		*"Gather Motion 2:1"*"(actual rows=2"*"Seq Scan on o (actual rows=$most.00 loops=1)"*)
+			ok "EXPLAIN ANALYZE: the segments' part as the segment with the most rows ran it" ;;
+		*) notok "EXPLAIN ANALYZE of a Motion" "$most / $out" ;;
+	esac
+
+	# What the segments' part wrote to the WAL, its slices' memory, and each
+	# segment's run of a node with gp.enable_explain_allstat -- after a
+	# LIMIT above the Motion too, whose segments' part is ended before the
+	# plan is printed -- Cloudberry's words for them all.
+	q 0 "CREATE TABLE ow (a int, b int) DISTRIBUTED BY (a);" >/dev/null
+	out=$(q 0 "EXPLAIN (ANALYZE, WAL, COSTS OFF, TIMING OFF, SUMMARY OFF) INSERT INTO ow SELECT a, b FROM o;
+			   EXPLAIN (ANALYZE, WAL, COSTS OFF, TIMING OFF, SUMMARY OFF) UPDATE ow SET b = b + 1;
+			   EXPLAIN (ANALYZE, WAL, COSTS OFF, TIMING OFF, SUMMARY OFF) DELETE FROM ow;" | tr '\n' '|')
+	case "$out" in
+		*"Insert on ow (actual rows=0.00 loops=1)|        WAL: records="*"Update on ow (actual rows=0.00 loops=1)|        WAL: records="*"Delete on ow (actual rows=0.00 loops=1)|        WAL: records="*)
+			ok "EXPLAIN (ANALYZE, WAL) of ORCA's INSERT, UPDATE and DELETE: what the segments wrote" ;;
+		*) notok "EXPLAIN (ANALYZE, WAL) of ORCA's writes" "$out" ;;
+	esac
+	out=$(q 0 "EXPLAIN (ANALYZE, COSTS OFF, TIMING OFF) SELECT * FROM o;" | tr '\n' '|')
+	case "$out" in
+		*"(slice0)    Executor memory: "*" bytes.|  (slice1)    Executor memory: "*" bytes avg x 2 workers, "*" bytes max (seg"*)
+			ok "EXPLAIN ANALYZE: each slice's memory, the coordinator's and the segments'" ;;
+		*) notok "EXPLAIN ANALYZE's slice statistics under ORCA" "$out" ;;
+	esac
+	out=$(q 0 "SET gp.enable_explain_allstat = on;
+			   EXPLAIN (ANALYZE, COSTS OFF, TIMING OFF, SUMMARY OFF) SELECT * FROM o LIMIT 3;")
+	case "$out" in
+		*"Seq Scan on o (actual rows=3.00 loops=1)"*"allstat: seg_firststart_total_ntuples/seg0_"*"_3/seg1_"*"_3//end"*)
+			ok "gp.enable_explain_allstat: each segment's run, a LIMIT's left open included" ;;
+		*) notok "gp.enable_explain_allstat under ORCA" "$out" ;;
 	esac
 
 	# The Motions between segments.
@@ -2697,16 +2728,17 @@ COMMIT;"
 		*) notok "a parameter in a fragment" "$out" ;;
 	esac
 
-	# EXPLAIN ANALYZE describes a fragment the coordinator never runs; an
-	# index scan in it has searched nothing here, and says so, where it once
-	# stopped the coordinator (qp_join_union_all).  A column the index does
-	# not hold, so that the scan is not an index-only one, which ORCA chooses
-	# now that it knows the segments' all-visible pages.
+	# EXPLAIN ANALYZE describes a fragment the coordinator never runs, with
+	# the segments' figures; an index scan in it, whose count of searches
+	# once stopped the coordinator (qp_join_union_all), counts theirs.  A
+	# column the index does not hold, so that the scan is not an index-only
+	# one, which ORCA chooses now that it knows the segments' all-visible
+	# pages.
 	q 0 "CREATE INDEX o_b ON o (b); ANALYZE o;" >/dev/null
 	out=$(printf '%s\n' "SET enable_seqscan = off;" \
 		"EXPLAIN (ANALYZE, COSTS OFF, TIMING OFF, SUMMARY OFF) SELECT count(c) FROM o WHERE b = 3;" | qf 0)
 	case "$out" in
-		*"Index Scan using o_b on o (never executed)"*"Index Searches: 0"*) ok "EXPLAIN ANALYZE of an index scan in a fragment, which the coordinator never ran" ;;
+		*"Index Scan using o_b on o (actual rows="*"Index Searches: 2"*) ok "EXPLAIN ANALYZE of an index scan in a fragment: the segments' searches, one each" ;;
 		*) notok "EXPLAIN ANALYZE of an index scan in a fragment" "$out" ;;
 	esac
 	q 0 "DROP INDEX o_b;" >/dev/null
@@ -2945,6 +2977,35 @@ COMMIT;"
 	out=$(q 0 "SET gp.enable_explain_allstat = on; SET gp.enable_offload_entry_to_qe = on; SELECT 1;")
 	[ "$out" = "1" ] && ok "gp.enable_explain_allstat and gp.enable_offload_entry_to_qe are Cloudberry's settings" \
 		|| notok "gp.enable_explain_allstat and gp.enable_offload_entry_to_qe" "$out"
+
+	# EXPLAIN ANALYZE of the planner's route: what the statements a write
+	# sends the segments wrote to the WAL -- an INSERT's COPY, an UPDATE and
+	# a DELETE sent as they stand, a key's UPDATE moved by a Split -- each
+	# gather's segments' memory, and their runs with
+	# gp.enable_explain_allstat, a gather a LIMIT left open among them; and
+	# the setting that asked the segments given back after the statement.
+	q 0 "CREATE TABLE xw (a int, b int) DISTRIBUTED BY (a);" >/dev/null
+	out=""
+	for stmt in "INSERT INTO xw SELECT g, g FROM generate_series(1, 100) g" \
+			"UPDATE xw SET b = b + 1" "UPDATE xw SET a = a + 1000 WHERE a = 5" \
+			"DELETE FROM xw WHERE a > 50"; do
+		out="$out$(q 0 "SET gp.optimizer = off;
+			EXPLAIN (ANALYZE, WAL, COSTS OFF, TIMING OFF, SUMMARY OFF, BUFFERS OFF) $stmt;" | head -2 | tr '\n' '|')"
+	done
+	case "$out" in
+		*"(Redistribute Motion) (actual rows=0.00 loops=1)|  WAL: records="*"(Dispatch) (actual rows=0.00 loops=1)|  WAL: records="*"(Explicit Redistribute Motion) (actual rows=0.00 loops=1)|  WAL: records="*"(Dispatch) (actual rows=0.00 loops=1)|  WAL: records="*)
+			ok "EXPLAIN (ANALYZE, WAL) of the planner's writes: what the segments' statements wrote" ;;
+		*) notok "EXPLAIN (ANALYZE, WAL) of the planner's writes" "$out" ;;
+	esac
+	out=$(q 0 "SET gp.optimizer = off; SET gp.enable_explain_allstat = on;
+			   EXPLAIN (ANALYZE, COSTS OFF, TIMING OFF) SELECT * FROM xw;
+			   EXPLAIN (ANALYZE, COSTS OFF, TIMING OFF, SUMMARY OFF) SELECT * FROM xw LIMIT 1;
+			   SHOW gp.explain_instrument;" | tr '\n' '|')
+	case "$out" in
+		*"on xw  (slice1; segments: 2) (actual rows=49.00 loops=1)|  Segments: 2|  allstat: seg_firststart_total_ntuples/seg0_"*"//end|"*"(slice1)    Executor memory: "*" bytes avg x 2 workers"*"Limit (actual rows=1.00 loops=1)"*"allstat: seg_firststart_total_ntuples/seg0_"*"/seg1_"*"//end"*"|0|")
+			ok "a gather's segments' runs and memory, a LIMIT's open gather's too, and the setting given back" ;;
+		*) notok "EXPLAIN ANALYZE of a gather" "$out" ;;
+	esac
 
 	###########################################################################
 	echo "12. DISTRIBUTED BY as Cloudberry checks it, and what the segments say"

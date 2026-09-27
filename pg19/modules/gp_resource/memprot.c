@@ -79,6 +79,7 @@
 #include "utils/tuplestore.h"
 
 #include "gp_cluster.h"
+#include "gp_explain.h"
 #include "gp_resource.h"
 
 /* Cloudberry's own headers, and what they ask of the port, through the overlay */
@@ -172,7 +173,7 @@ define_settings(void)
 							 NULL, NULL, NULL);
 	DefineCustomEnumVariable("gp.explain_memory_verbosity",
 							 "Experimental feature: show memory account usage in EXPLAIN ANALYZE.",
-							 "Accepted for Cloudberry's scripts: EXPLAIN ANALYZE shows PostgreSQL's memory, and no accounts of Cloudberry's.",
+							 "summary adds each slice's Vmem reserved, detail each node's Executor Memory (gp_core's gp_explain.c); Cloudberry's memory accounts are none of the port's.",
 							 &explain_memory_verbosity,
 							 0, explain_memory_verbosity_options,
 							 PGC_USERSET, 0,
@@ -801,11 +802,19 @@ gp_resource_session_state_memory_entries(PG_FUNCTION_ARGS)
 /* Loading                                                                   */
 /* ------------------------------------------------------------------------- */
 
+/* EXPLAIN ANALYZE's "Vmem reserved": the most this process reserved */
+static int64
+memprot_vmem_reserved(void)
+{
+	return gp_mp_inited ? VmemTracker_GetMaxReservedVmemBytes() : 0;
+}
+
 /* From gp_resource's _PG_init(), in the postmaster */
 void
 MemProtInit(void)
 {
 	define_settings();
+	GpExplainSetVmemReserved(memprot_vmem_reserved);
 
 	prev_shmem_request_hook = shmem_request_hook;
 	shmem_request_hook = memprot_shmem_request;

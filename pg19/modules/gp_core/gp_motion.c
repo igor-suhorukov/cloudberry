@@ -142,6 +142,7 @@
 #include "gp_cluster.h"
 #include "gp_core_api.h"
 #include "gp_dispatch.h"
+#include "gp_explain.h"
 #include "gp_fault.h"
 #include "gp_gdd.h"
 #include "gp_hash.h"
@@ -1804,8 +1805,9 @@ motion_begin(CustomScanState *node, EState *estate, int eflags)
 
 	/*
 	 * The fragment is the segments' to run.  Here it is only described: for
-	 * EXPLAIN, and for EXPLAIN ANALYZE, where it shows as never executed --
-	 * not for a statement instrumented for query metrics alone.
+	 * EXPLAIN, and for EXPLAIN ANALYZE, whose nodes the segments' figures
+	 * are given (gp_explain.c) -- not for a statement instrumented for query
+	 * metrics alone.
 	 */
 	if ((eflags & EXEC_FLAG_EXPLAIN_ONLY) ||
 		(estate->es_instrument != 0 &&
@@ -2058,6 +2060,14 @@ fragment_sql_ex(EState *estate, Plan *fragment, CustomScan *motion,
 		frag->rowMarks = whole->rowMarks;
 	frag->extension_state = list_copy(marks);
 	frag->utilityStmt = NULL;
+
+	/* an explained statement's: what the segment measures it with */
+	{
+		DefElem    *explain = GpExplainFragmentMark(estate);
+
+		if (explain != NULL)
+			frag->extension_state = lappend(frag->extension_state, explain);
+	}
 
 	if (estate->es_sourceText != NULL)
 	{
@@ -3077,6 +3087,29 @@ motion_finish(MotionState *state)
 	state->done = true;
 }
 
+bool
+GpMotionIsSender(PlanState *ps)
+{
+	return IsA(ps, CustomScanState) &&
+		((CustomScanState *) ps)->methods == &motion_exec_methods &&
+		((MotionState *) ps)->sending;
+}
+
+/*
+ * EXPLAIN ANALYZE's end of the coordinator's Motion, which a LIMIT above it
+ * left open: its segments' parts end now, and say what they did, before
+ * the plan is printed rather than as the executor ends (gp_explain.c).
+ */
+bool
+GpMotionFinish(PlanState *ps)
+{
+	if (!IsA(ps, CustomScanState) ||
+		((CustomScanState *) ps)->methods != &motion_exec_methods)
+		return false;
+	motion_finish((MotionState *) ps);
+	return true;
+}
+
 /* binaryheap is a max-heap; the least row has to come out first. */
 static int32
 motion_heap_compare(Datum a, Datum b, void *arg)
@@ -3842,6 +3875,12 @@ is_fragment(PlannedStmt *stmt)
 		if (strcmp(lfirst_node(DefElem, lc)->defname, GP_FRAGMENT_MARK) == 0)
 			return true;
 	return false;
+}
+
+bool
+GpMotionIsFragment(PlannedStmt *stmt)
+{
+	return is_fragment(stmt);
 }
 
 /*

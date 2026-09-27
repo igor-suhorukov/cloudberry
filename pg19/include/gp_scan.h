@@ -90,6 +90,12 @@ extern void GpGatherScanMarkRescans(struct PlanState *root);
 extern bool GpGatherScanSlice(struct PlanState *ps, int *slice, int *nsegs);
 
 /*
+ * EXPLAIN ANALYZE's end of a gather a LIMIT left open, before the plan is
+ * printed; false if ps is not a gather.
+ */
+extern bool GpGatherScanFinish(struct PlanState *ps);
+
+/*
  * After planning: a gather a LIMIT reads sends the segments the LIMIT
  * (gp_modify.c).
  */

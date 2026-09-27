@@ -321,7 +321,7 @@ skip table_functions  type anytable does not exist; OUT and INOUT arguments aren
 run  opclass_ddl
 run  information_schema
 run  guc_env_var
-skip gp_explain  differs: EXPLAIN (ANALYZE, WAL) of a write shows no WAL, and EXPLAIN ANALYZE no Vmem reserved or Executor Memory -- the segments' statistics do not reach the coordinator's EXPLAIN
+run  gp_explain
 skip explain_format  differs: EXPLAIN in each of its formats prints the port's plans, which this test compares
 run  olap_plans
 run  gp_copy_dtx

@@ -18,15 +18,40 @@
  * under the License.
  *
  * gp_explain.h
- *	  Cloudberry's options of EXPLAIN, SLICETABLE and LOCUS.
+ *	  Cloudberry's options of EXPLAIN, SLICETABLE and LOCUS, and EXPLAIN
+ *	  ANALYZE's statistics of what the segments ran.
  *
  *-------------------------------------------------------------------------
  */
 #ifndef GP_EXPLAIN_H
 #define GP_EXPLAIN_H
 
+struct DefElem;
+struct EState;
+struct PlanState;
+
 /* Cloudberry's gp_enable_explain_allstat */
 extern bool gp_enable_explain_allstat;
+
+/*
+ * The mark an explained statement's fragment carries, which the segment
+ * measures the fragment by (gp_motion.c); NULL for any other statement's.
+ */
+extern struct DefElem *GpExplainFragmentMark(struct EState *estate);
+
+/*
+ * The node whose segments' statements answer now -- a gather closing its
+ * cursors (gp_scan.c) -- or NULL for none.  Returns the one before, to be
+ * given back.
+ */
+extern struct PlanState *GpExplainAnswerFor(struct PlanState *node);
+
+/*
+ * gp_resource's: the most memory this process has reserved, in bytes,
+ * which EXPLAIN ANALYZE's "Vmem reserved" says of each slice.
+ */
+typedef int64 (*GpExplainVmemReserved) (void);
+extern void GpExplainSetVmemReserved(GpExplainVmemReserved reserved);
 
 extern void GpExplainInit(void);
 
