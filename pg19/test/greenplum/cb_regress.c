@@ -41,6 +41,9 @@
 #include "postgres.h"
 
 #include <stdlib.h>
+#include <netinet/in.h>
+#include <netinet/tcp.h>
+#include <sys/socket.h>
 
 #include "access/commit_ts.h"
 #include "access/htup_details.h"
@@ -53,6 +56,7 @@
 #include "storage/lwlock.h"
 #include "utils/guc.h"
 #include "utils/timestamp.h"
+#include "utils/tuplestore.h"
 
 PG_MODULE_MAGIC_EXT(
 					.name = "cb_regress",
@@ -139,6 +143,76 @@ cleanupAllGangs(PG_FUNCTION_ARGS)
 								   true, NULL);
 	reset();
 	PG_RETURN_BOOL(true);
+}
+
+typedef int (*gang_sockets_fn) (int *contents, bool *writers, int *sockets,
+								int max);
+
+/* One socket option of a connection to a segment, as an int. */
+static int
+socket_option(int fd, int level, int option, const char *name)
+{
+	int			value;
+	socklen_t	size = sizeof(value);
+
+	if (getsockopt(fd, level, option, &value, &size) < 0)
+		elog(ERROR, "getsockopt(%s) failed: %m", name);
+	return value;
+}
+
+PG_FUNCTION_INFO_V1(gp_keepalives_check);
+
+/*
+ * gp_keepalives_check() -> setof (qe_id, is_writer, keepalives_enabled,
+ * keepalives_interval, keepalives_count, keepalives_idle): the TCP
+ * keepalives each of the session's connections to the segments has, as its
+ * socket says -- what gp.dispatch_keepalives_* asked of it.  A connection
+ * over a Unix socket has no TCP options, and fails the call, as
+ * Cloudberry's does.  The connections are gp_core's dispatcher's
+ * (GpDispatchGangSockets()), a writer on each segment and the readers the
+ * session keeps, where Cloudberry's walks its gangs' free lists.
+ */
+Datum
+gp_keepalives_check(PG_FUNCTION_ARGS)
+{
+	static gang_sockets_fn gang_sockets = NULL;
+	ReturnSetInfo *rsinfo = (ReturnSetInfo *) fcinfo->resultinfo;
+	int			max = 1024;
+	int		   *contents = palloc_array(int, max);
+	bool	   *writers = palloc_array(bool, max);
+	int		   *sockets = palloc_array(int, max);
+	int			n;
+
+	if (gang_sockets == NULL)
+		gang_sockets = (gang_sockets_fn)
+			load_external_function("$libdir/gp_core", "GpDispatchGangSockets",
+								   true, NULL);
+	InitMaterializedSRF(fcinfo, 0);
+
+	n = gang_sockets(contents, writers, sockets, max);
+	for (int i = 0; i < n; i++)
+	{
+		Datum		values[6];
+		bool		nulls[6] = {false};
+
+		values[0] = Int16GetDatum(contents[i]);
+		values[1] = BoolGetDatum(writers[i]);
+		values[2] = BoolGetDatum(socket_option(sockets[i], SOL_SOCKET,
+											   SO_KEEPALIVE,
+											   "SO_KEEPALIVE") > 0);
+		values[3] = Int32GetDatum(socket_option(sockets[i], IPPROTO_TCP,
+												TCP_KEEPINTVL,
+												"TCP_KEEPINTVL"));
+		values[4] = Int32GetDatum(socket_option(sockets[i], IPPROTO_TCP,
+												TCP_KEEPCNT,
+												"TCP_KEEPCNT"));
+		values[5] = Int32GetDatum(socket_option(sockets[i], IPPROTO_TCP,
+												TCP_KEEPIDLE,
+												"TCP_KEEPIDLE"));
+		tuplestore_putvalues(rsinfo->setResult, rsinfo->setDesc, values,
+							 nulls);
+	}
+	return (Datum) 0;
 }
 
 PG_FUNCTION_INFO_V1(test_consume_xids);

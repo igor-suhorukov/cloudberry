@@ -121,6 +121,13 @@ mirror_sock()  { echo "$SOCK/$1/m$2"; }
 standby_dir()  { echo "$WORK/$1/standby"; }
 standby_port() { echo $((BASEPORT + 100 + $1)); }
 standby_sock() { echo "$SOCK/$1/s"; }
+# A group whose name begins "tcp" has its nodes reach one another over TCP,
+# on 127.0.0.1, as Cloudberry's nodes do, where the others' use Unix
+# sockets: a test that reads the TCP options of the coordinator's
+# connections to the segments (gp_dispatch_keepalives) has them there.  The
+# tests still connect to the coordinator through its socket.
+over_tcp()     { [[ "$1" == tcp* ]]; }
+node_host()    { if over_tcp "$1"; then echo 127.0.0.1; else node_sock "$1" "$2"; fi; }
 # The superuser is Cloudberry's demo cluster's, gpadmin, as the singlenode
 # suite's is: Cloudberry's expected output names it.
 export PGUSER=gpadmin
@@ -160,7 +167,7 @@ make_cluster() {
 	{
 		echo "# dbid content role host port datadir"
 		for n in $(seq 0 $((NODES - 1))); do
-			echo "$((n + 1)) $((n - 1)) p $(node_sock "$g" "$n") $(node_port "$gi" "$n") $(node_dir "$g" "$n")"
+			echo "$((n + 1)) $((n - 1)) p $(node_host "$g" "$n") $(node_port "$gi" "$n") $(node_dir "$g" "$n")"
 		done
 		if has_mirrors "$g"; then
 			for n in $(seq 0 $((NODES - 2))); do
@@ -177,7 +184,7 @@ make_cluster() {
 		{
 			echo "shared_preload_libraries = '$PRELOAD'"
 			echo "unix_socket_directories = '$(node_sock "$g" "$n")'"
-			echo "listen_addresses = ''"
+			echo "listen_addresses = '$(over_tcp "$g" && echo 127.0.0.1)'"
 			echo "port = $(node_port "$gi" "$n")"
 			echo "fsync = off"
 			echo "gp.cluster_config = '$conf'"
@@ -577,11 +584,14 @@ run_group() {
 	# PG_HOSTNAME and PG_BINDDIR are what Cloudberry's pg_regress sets for
 	# its tests: the host of segment 0, for their file:// and gpfdist://
 	# locations -- here every node's is this one -- and the directory of
-	# the programs, where they start gpfdist from.
+	# the programs, where they start gpfdist from.  The coordinator's data
+	# directory is named by both of its names: MASTER_DATA_DIRECTORY, the
+	# older, is gp_dispatch_keepalives'.
 	PATH="$EXEC/bin:$PATH" CB_DIFF_MODE="$pass" CB_DIFF_DIR="$R" \
 	PGOPTIONS="-c gp.optimizer=$optimizer" \
 	PG_HOSTNAME=localhost PG_BINDDIR="$BINDIR" \
 	PG_BINDIR="$BINDIR" COORDINATOR_DATA_DIRECTORY="$(node_dir "$g" 0)" \
+	MASTER_DATA_DIRECTORY="$(node_dir "$g" 0)" \
 		"$PG_REGRESS" \
 			--bindir="$BINDIR" \
 			--inputdir="$SN" \

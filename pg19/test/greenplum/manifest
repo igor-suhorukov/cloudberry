@@ -18,7 +18,8 @@
 #         has a cluster of its own, test_setup and gp_setup first, and the
 #         groups of a pass run side by side, each in the schedule's order.
 #         A group whose name begins "mirrors" has Cloudberry's demo cluster
-#         whole: a mirror for each segment, and a standby coordinator.
+#         whole: a mirror for each segment, and a standby coordinator.  One
+#         whose name begins "tcp" has its nodes reach one another over TCP.
 #         The groups are cut by time, the ORCA pass's, and a test that reads
 #         what another made is in its group (bb_mpph_heap's tables,
 #         bb_memory_quota's).  rpt_tpch has one of its own, m7c, in the
@@ -277,7 +278,9 @@ run  autovacuum-template0-segment
 skip profile  differs: its \d+ of pg_authid and pg_roles shows Cloudberry's catalog columns, and pg_profile is Cloudberry's catalog: relation "pg_profile" does not exist
 skip pg_ext_aux  schema "pg_ext_aux" does not exist; relation "pg_ext_aux.extaux_t" does not exist
 run  pg_dump_binary_upgrade
-skip gp_dispatch_keepalives  could not find function "gp_keepalives_check" in file "regress.so"; spiexceptions.UndefinedFunction: function gp_keepalives_check() does not exist
+group tcp1
+run  gp_dispatch_keepalives
+group m7a
 skip copy_eol  could not open file "/tmp/copy_lf.file" for reading: No such file or directory; could not open file "/tmp/copy_cr.file" for reading: No such file or directory
 skip copy_encoding_error  segment reject limit reached, aborting operation
 run  dedupset

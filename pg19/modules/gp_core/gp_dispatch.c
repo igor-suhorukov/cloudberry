@@ -149,6 +149,15 @@ static int	gp_gang_creation_retry_count = 5;
 static int	gp_gang_creation_retry_timer = 2000;
 
 /*
+ * The TCP keepalives of the dispatcher's connections to the segments:
+ * Cloudberry's gp_dispatch_keepalives_idle, _interval and _count
+ * (cdbconn.c), 0 the system's default.
+ */
+static int	gp_dispatch_keepalives_idle = 0;
+static int	gp_dispatch_keepalives_interval = 0;
+static int	gp_dispatch_keepalives_count = 0;
+
+/*
  * gp.log_gang: Cloudberry's gp_log_gang, how much the dispatcher says of its
  * gang in the server log -- the gang made and let go, each connection, each
  * statement sent.
@@ -547,6 +556,37 @@ GpDispatchResetGang(void)
 	gang_close();
 }
 
+int
+GpDispatchGangSockets(int *contents, bool *writers, int *sockets, int max)
+{
+	int			n = 0;
+	ListCell   *lc;
+
+	if (gang == NULL)
+		return 0;
+	for (int i = 0; i < gang->nconns && n < max; i++)
+	{
+		if (gang->conns[i].conn == NULL)
+			continue;
+		contents[n] = gang->conns[i].content;
+		writers[n] = true;
+		sockets[n++] = PQsocket(gang->conns[i].conn);
+	}
+	foreach(lc, gang->readers)
+	{
+		GpReaderConn *r = (GpReaderConn *) lfirst(lc);
+
+		if (n >= max)
+			break;
+		if (r->conn == NULL)
+			continue;
+		contents[n] = r->content;
+		writers[n] = false;
+		sockets[n++] = PQsocket(r->conn);
+	}
+	return n;
+}
+
 /*
  * The identity the coordinator gives a segment process.
  *
@@ -570,6 +610,39 @@ qe_identity_option(int content)
 	if (GpClusterHasSecret())
 		option = psprintf("%s -c gp.qe_secret=%s", option, GpClusterSecret());
 	return option;
+}
+
+/*
+ * The keepalives of a connection to a segment, as Cloudberry's dispatcher
+ * asks for them: libpq's keepalives_idle, keepalives_interval and
+ * keepalives_count, each whose setting is not 0.  libpq sets them on a TCP
+ * connection alone.  Up to DISPATCH_KEEPALIVE_OPTIONS entries at n, their
+ * values in buf; returns the new n.
+ */
+#define DISPATCH_KEEPALIVE_OPTIONS	3
+static int
+dispatch_keepalive_options(const char **keywords, const char **values, int n,
+						   char buf[DISPATCH_KEEPALIVE_OPTIONS][16])
+{
+	if (gp_dispatch_keepalives_idle > 0)
+	{
+		snprintf(buf[0], 16, "%d", gp_dispatch_keepalives_idle);
+		keywords[n] = "keepalives_idle";
+		values[n++] = buf[0];
+	}
+	if (gp_dispatch_keepalives_interval > 0)
+	{
+		snprintf(buf[1], 16, "%d", gp_dispatch_keepalives_interval);
+		keywords[n] = "keepalives_interval";
+		values[n++] = buf[1];
+	}
+	if (gp_dispatch_keepalives_count > 0)
+	{
+		snprintf(buf[2], 16, "%d", gp_dispatch_keepalives_count);
+		keywords[n] = "keepalives_count";
+		values[n++] = buf[2];
+	}
+	return n;
 }
 
 /*
@@ -635,9 +708,10 @@ gang_connect(void)
 
 	for (int i = 0; i < nsegs; i++)
 	{
-		const char *keywords[7 + GP_INTERNAL_CONN_OPTIONS];
-		const char *values[7 + GP_INTERNAL_CONN_OPTIONS];
+		const char *keywords[7 + DISPATCH_KEEPALIVE_OPTIONS + GP_INTERNAL_CONN_OPTIONS];
+		const char *values[7 + DISPATCH_KEEPALIVE_OPTIONS + GP_INTERNAL_CONN_OPTIONS];
 		char		portbuf[16];
+		char		keepalive_buf[DISPATCH_KEEPALIVE_OPTIONS][16];
 		int			n = 0;
 		PGconn	   *conn;
 
@@ -657,6 +731,7 @@ gang_connect(void)
 		values[n++] = GetDatabaseEncodingName();
 		keywords[n] = "options";
 		values[n++] = qe_identity_option(segs[i].content);
+		n = dispatch_keepalive_options(keywords, values, n, keepalive_buf);
 		n = GpInternalConnOptions(keywords, values, n);
 
 		/*
@@ -1945,9 +2020,10 @@ static GpReaderConn *
 reader_connect(GpGang *g, int content)
 {
 	const GpSegmentConfig *seg = GpClusterSegmentByContent(content);
-	const char *keywords[7 + GP_INTERNAL_CONN_OPTIONS];
-	const char *values[7 + GP_INTERNAL_CONN_OPTIONS];
+	const char *keywords[7 + DISPATCH_KEEPALIVE_OPTIONS + GP_INTERNAL_CONN_OPTIONS];
+	const char *values[7 + DISPATCH_KEEPALIVE_OPTIONS + GP_INTERNAL_CONN_OPTIONS];
 	char		portbuf[16];
+	char		keepalive_buf[DISPATCH_KEEPALIVE_OPTIONS][16];
 	int			n = 0;
 	PGconn	   *conn;
 	GpReaderConn *r;
@@ -1980,6 +2056,7 @@ reader_connect(GpGang *g, int content)
 	 */
 	values[n++] = psprintf("%s -c max_parallel_workers_per_gather=0",
 						   qe_identity_option(content));
+	n = dispatch_keepalive_options(keywords, values, n, keepalive_buf);
 	n = GpInternalConnOptions(keywords, values, n);
 
 	conn = libpqsrv_connect_params(keywords, values, false,
@@ -5037,6 +5114,35 @@ GpDispatchInit(void)
 							2000, 1, INT_MAX,
 							PGC_USERSET,
 							GUC_UNIT_MS,
+							NULL, NULL, NULL);
+
+	/* Cloudberry's limits, Linux's (cdbvars.h) */
+	DefineCustomIntVariable("gp.dispatch_keepalives_idle",
+							"Time between issuing TCP keepalives from the coordinator to its segments.",
+							"A value of 0 uses the system default.",
+							&gp_dispatch_keepalives_idle,
+							0, 0, 32767,
+							PGC_POSTMASTER,
+							GUC_UNIT_S | GUC_NOT_IN_SAMPLE,
+							NULL, NULL, NULL);
+
+	DefineCustomIntVariable("gp.dispatch_keepalives_interval",
+							"Time between TCP keepalive retransmits from the coordinator to its segments.",
+							"A value of 0 uses the system default.",
+							&gp_dispatch_keepalives_interval,
+							0, 0, 32767,
+							PGC_POSTMASTER,
+							GUC_UNIT_S | GUC_NOT_IN_SAMPLE,
+							NULL, NULL, NULL);
+
+	DefineCustomIntVariable("gp.dispatch_keepalives_count",
+							"Maximum number of TCP keepalive retransmits from the coordinator to its segments.",
+							"How many consecutive keepalives may be lost before a connection to a segment is "
+							"considered dead.  A value of 0 uses the system default.",
+							&gp_dispatch_keepalives_count,
+							0, 0, 127,
+							PGC_POSTMASTER,
+							GUC_NOT_IN_SAMPLE,
 							NULL, NULL, NULL);
 
 	DefineCustomEnumVariable("gp.log_gang",
