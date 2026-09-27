@@ -32,7 +32,9 @@
  * still is fetched by its TID, and drops it, unwritten, where its
  * subtransaction aborts (access/pax_access_handle.cc).  A statement of a
  * trigger's writes into its outer statement's state, and its writer is
- * finished as it ends.
+ * finished as it ends; what it wrote in a subtransaction that aborts is
+ * dropped -- its writer unwritten, the rows it marked deleted unmarked
+ * (access/pax_deleter.cc).
  *-------------------------------------------------------------------------
  */
 
@@ -152,11 +154,28 @@ void CPaxDmlStateLocal::FinishAll() {
 void CPaxDmlStateLocal::Forget(SubTransactionId subid) {
   std::vector<Oid> oids;
 
-  for (auto &it : dml_descriptor_tab_)
-    if (subid == InvalidSubTransactionId || it.second->subid == subid)
+  for (auto &it : dml_descriptor_tab_) {
+    auto state = it.second;
+
+    if (subid == InvalidSubTransactionId || state->subid == subid) {
       oids.push_back(it.first);
-    else if (it.second->inserter && it.second->inserter_subid == subid)
-      it.second->inserter = nullptr;
+      continue;
+    }
+    // what a statement of a trigger's wrote into its outer statement's
+    // state in the aborted subtransaction: its writer, its deleter, or its
+    // marks in the outer statement's
+    if (state->inserter && state->inserter_subid == subid)
+      state->inserter = nullptr;
+    if (state->deleter && state->deleter->BaseSubId() == subid) {
+      state->deleter = nullptr;
+      if (state->deleter_snapshot) {
+        UnregisterSnapshotFromOwner(state->deleter_snapshot,
+                                    TopTransactionResourceOwner);
+        state->deleter_snapshot = nullptr;
+      }
+    } else if (state->deleter)
+      state->deleter->ForgetMarks(subid);
+  }
   for (auto oid : oids) RemoveDmlState(oid);
   if (subid == InvalidSubTransactionId) owners_.clear();
 }
@@ -166,6 +185,7 @@ void CPaxDmlStateLocal::Reparent(SubTransactionId subid,
   for (auto &it : dml_descriptor_tab_) {
     if (it.second->subid == subid) it.second->subid = parent;
     if (it.second->inserter_subid == subid) it.second->inserter_subid = parent;
+    if (it.second->deleter) it.second->deleter->ReparentMarks(subid, parent);
   }
 }
 
