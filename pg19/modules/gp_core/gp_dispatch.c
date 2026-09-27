@@ -1186,15 +1186,17 @@ gang_get(void)
 				 * go on to the new primaries as if they were there, and is
 				 * told so, as Cloudberry's session is -- which also forgets
 				 * the tables here (resetSessionForPrimaryGangLoss(),
-				 * cdbgang.c), where the port leaves the coordinator's to be
-				 * dropped.
+				 * cdbgang.c): the coordinator's are dropped as the next
+				 * statement begins, as for a gang let go of to retry a
+				 * second phase (GpDispatchDropLostTempTables()).
 				 */
 				GetTempNamespaceState(&temp_ns, &temp_toast_ns);
 				if (OidIsValid(temp_ns))
 				{
 					ereport(WARNING,
-							(errmsg("the temporary tables of this session have lost their rows on the segments, whose connections are gone"),
-							 errhint("Drop them, or DISCARD TEMP.")));
+							(errmsg("Any temporary tables for this session have been dropped because the gang was disconnected (session id = %d)",
+									GpClusterSessionId())));
+					temp_tables_lost = true;
 					ereport(ERROR,
 							(errcode(ERRCODE_CONNECTION_FAILURE),
 							 errmsg("gang was lost due to cluster reconfiguration")));

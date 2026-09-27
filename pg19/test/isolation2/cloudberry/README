@@ -42,7 +42,7 @@ export_distributed_snapshot
   the snapshot a distributed session exported, which Cloudberry's utility
   mode refuses.
 
-fts_errors, in each pass (fts_errors.planner.diff, fts_errors.orca.diff)
+fts_errors
   Two of its sessions after content 1 is failed over, where the port's
   dispatch differs, and nothing of FTS's: its name that does not resolve
   (get_dns_cached_address) fails FTS's round and marks no segment down, as
@@ -56,10 +56,13 @@ fts_errors, in each pass (fts_errors.planner.diff, fts_errors.orca.diff)
   reads from the segments as it is fetched from, and its FETCH meets the
   old primary's closed connection.  And the session with temporary tables,
   on its next statement: Cloudberry's forgets them as the gang goes, and
-  the name does not resolve; the port's coordinator keeps them, and the new
-  primaries' backends have none -- "relation "pg_temp.tmp4" does not exist"
-  from the planner's gather, and ORCA's fragment names it by its OID, which
-  the port's init_file masks.
+  the name does not resolve; the port's coordinator drops them as that
+  statement's executor starts, after its name was resolved, and the
+  statement finds no relation by the OID it was planned with, which the
+  port's init_file masks -- in both passes alike, where the segments were
+  asked before: the other primaries' backends had dropped the table as they
+  ended, and the new primary's catalog still had it without its file, and
+  under ORCA whichever answered first was the error.
 
 gdd/concurrent_update, and its _optimizer output, which the orca pass is
 compared with
