@@ -711,26 +711,6 @@ split_tables_close(List *parts, Relation root)
 	}
 }
 
-/*
- * The tables a split function wrote, their rows written out before it
- * returns.  An append-optimized or PAX table's writer holds its rows back
- * until its query finishes (ExecutorFinish), and the query that calls a
- * split function is the coordinator's SELECT, whose portal stays open until
- * the next statement or the commit.  By then this part has told the
- * coordinator it wrote nothing (gp.dtx_xid, gp_dtx.c), for the rows take a
- * transaction ID only as they are written, and the commit it is sent
- * refuses one -- a part moved by half, its other half committed.  So each
- * table is finished as COPY finishes the tables it writes, by
- * table_finish_bulk_insert(), which for those methods writes what their
- * writers hold of the table, deletions too; a heap's writes are done.
- */
-static void
-split_tables_finish(List *wrote)
-{
-	foreach_ptr(RelationData, rel, wrote)
-		table_finish_bulk_insert(rel, 0);
-}
-
 /* A row of the root's, as the composite value a split function returns. */
 static Datum
 split_root_row(TupleTableSlot *slot, TupleConversionMap *toroot,
@@ -767,7 +747,6 @@ gp_split_delete(PG_FUNCTION_ARGS)
 	Relation	root;
 	List	   *tree;
 	List	   *parts = NIL;
-	List	   *wrote = NIL;
 	TupleTableSlot *rootslot;
 	Snapshot	snapshot = GetActiveSnapshot();
 	CommandId	cid = GetCurrentCommandId(true);
@@ -813,7 +792,6 @@ gp_split_delete(PG_FUNCTION_ARGS)
 			default:
 				elog(ERROR, "unexpected table_tuple_delete status: %u", result);
 		}
-		wrote = list_append_unique_ptr(wrote, part->rel);
 
 		values[0] = numbers[i];
 		values[1] = toids[i];
@@ -821,7 +799,6 @@ gp_split_delete(PG_FUNCTION_ARGS)
 		tuplestore_putvalues(rsinfo->setResult, rsinfo->setDesc, values, nulls);
 	}
 
-	split_tables_finish(wrote);
 	split_tables_close(parts, root);
 	ExecDropSingleTupleTableSlot(rootslot);
 	table_close(root, NoLock);
@@ -978,7 +955,6 @@ gp_split_insert(PG_FUNCTION_ARGS)
 	TupleTableSlot *outslot;
 	List	   *tree;
 	List	   *parts = NIL;
-	List	   *wrote = NIL;
 
 	split_array(rowarray, ARR_ELEMTYPE(rowarray), &rows, &n);
 	split_array(PG_GETARG_ARRAYTYPE_P(2), OIDOID, &toids, &n);
@@ -1093,7 +1069,6 @@ gp_split_insert(PG_FUNCTION_ARGS)
 						   0, NULL);
 		if (rri->ri_NumIndices > 0)
 			(void) ExecInsertIndexTuples(rri, estate, 0, slot, NIL, NULL);
-		wrote = list_append_unique_ptr(wrote, rri->ri_RelationDesc);
 
 		/* the row as it was written, as the root has it */
 		values[0] = numbers[i];
@@ -1111,7 +1086,6 @@ gp_split_insert(PG_FUNCTION_ARGS)
 		tuplestore_putvalues(rsinfo->setResult, rsinfo->setDesc, values, nulls);
 	}
 
-	split_tables_finish(wrote);
 	ExecDropSingleTupleTableSlot(outslot);
 	foreach_ptr(SplitTable, p, parts)
 		if (p->rri != NULL)

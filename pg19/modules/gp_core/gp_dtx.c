@@ -1408,8 +1408,10 @@ dtx_is_writer_part(void)
  * gp.dtx_xid, after each statement a writer runs: this part's transaction ID,
  * or empty, so that the answer the coordinator reads carries it and the
  * coordinator knows as it commits which parts wrote, without asking.  After
- * a statement -- and after each executor run, for a portal the extended
- * protocol keeps open -- rather than as the ID is given, which no hook sees;
+ * a statement -- and after each executor run and at the executor's end, for
+ * a portal of the extended protocol, whose end the coordinator's Close of it
+ * brings within the same round trip (conn_send_params(), gp_dispatch.c) --
+ * rather than as the ID is given, which no hook sees;
  * a transaction's first statement, its BEGIN, empties it again.  Set as the
  * server sets in_hot_standby, outside any transaction's undo: it says what is
  * so, not what a statement asked for.

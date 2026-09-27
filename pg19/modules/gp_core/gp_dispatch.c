@@ -317,6 +317,15 @@ typedef struct GpSegmentConn
 	 */
 	struct GpGatherSeg *fetching;
 
+	/*
+	 * What is in flight is a statement sent by conn_send_params(), the Close
+	 * of its portal and a Sync, in libpq's pipeline mode; "pipe_step" counts
+	 * the commands whose results have all been read.  See
+	 * conn_pipeline_own().
+	 */
+	bool		pipelined;
+	int			pipe_step;
+
 	/* Where its backend receives a Motion's rows; NULL until asked. */
 	char	   *icaddress;
 } GpSegmentConn;
@@ -1172,6 +1181,93 @@ gang_send_all(GpGang *g, const char *sql)
 		conn_send(&g->conns[i], sql);
 }
 
+/*
+ * Send a statement with parameters to one segment, as the extended protocol
+ * sends it, and close the portal it runs in within the same round trip: the
+ * statement, a Close of the unnamed portal and a Sync, in libpq's pipeline
+ * mode.  Left open, a SELECT's portal ends its executor only when it is
+ * dropped -- at the segment's next statement, or its commit -- and what a
+ * table access method writes as a query finishes (ExecutorFinish: an
+ * append-optimized or PAX table's last rows, and the transaction ID they
+ * take) would come after the Sync's answer has told the coordinator what
+ * the segment wrote (gp.dtx_xid, gp_dtx.c).  Closed here, the executor has
+ * ended before that answer is sent.  The results are read as every
+ * connection's are, conn_pipeline_own() taking the pipeline's own.
+ */
+static void
+conn_send_params(GpSegmentConn *c, const char *sql, int nparams,
+				 const Oid *types, const char *const *values,
+				 const int *lengths, const int *formats)
+{
+	/* A gather's batch asked for ahead of need is set aside for it first. */
+	if (c->busy && c->fetching != NULL)
+		conn_park(c);
+	if (c->busy)
+		elog(ERROR, "segment %d is still busy with an earlier statement",
+			 c->content);
+
+	GANG_LOG(GANG_LOG_DEBUG, "to segment %d: %s", c->content, sql);
+	if (!PQenterPipelineMode(c->conn) ||
+		!PQsendQueryParams(c->conn, sql, nparams, types, values, lengths,
+						   formats, 0) ||
+		!PQsendClosePortal(c->conn, "") ||
+		!PQpipelineSync(c->conn))
+	{
+		char	   *msg = pstrdup(PQerrorMessage(c->conn));
+		int			content = c->content;
+
+		gang_close();
+		ereport(ERROR,
+				(errcode(ERRCODE_CONNECTION_FAILURE),
+				 errmsg("could not send a statement to segment %d", content),
+				 errdetail_internal("%s", msg)));
+	}
+	c->busy = true;
+	c->pipelined = true;
+	c->pipe_step = 0;
+}
+
+/*
+ * Whether a result read from a connection is the pipeline's own, which
+ * conn_send_params() sent after its statement, rather than the caller's --
+ * and if so, it is dealt with here: the end of the statement's results or of
+ * the Close's, the Close's answer, the Close skipped because the statement
+ * failed, and the Sync, which ends the pipeline and takes the connection out
+ * of pipeline mode, after which PQgetResult() gives the NULL that ends what
+ * was sent.  A Close that failed is the caller's: the executor ended there,
+ * and its error is the statement's.
+ */
+static bool
+conn_pipeline_own(GpSegmentConn *c, PGresult *res)
+{
+	if (!c->pipelined)
+		return false;
+	if (res == NULL)
+	{
+		c->pipe_step++;
+		return true;
+	}
+	switch (PQresultStatus(res))
+	{
+		case PGRES_PIPELINE_SYNC:
+			PQclear(res);
+			/* with every result read, it cannot fail */
+			(void) PQexitPipelineMode(c->conn);
+			c->pipelined = false;
+			return true;
+		case PGRES_PIPELINE_ABORTED:
+			PQclear(res);
+			return true;
+		case PGRES_COMMAND_OK:
+			if (c->pipe_step == 0)
+				return false;
+			PQclear(res);
+			return true;
+		default:
+			return false;
+	}
+}
+
 /* Remember why a segment failed, in the caller's context. */
 static void
 collect_error(List **errors, int content, PGresult *res, PGconn *conn,
@@ -1357,6 +1453,8 @@ gang_wait_all_ex(GpGang *g, PGresult **keep, bool commit, bool keep_commands)
 				PGresult   *res = PQgetResult(c->conn);
 				ExecStatusType status;
 
+				if (conn_pipeline_own(c, res))
+					continue;
 				if (res == NULL)
 				{
 					c->busy = false;
@@ -1490,6 +1588,8 @@ gang_drain_quietly(void)
 			{
 				PGresult   *res = PQgetResult(c->conn);
 
+				if (conn_pipeline_own(c, res))
+					continue;
 				if (res == NULL)
 				{
 					c->busy = false;
@@ -3047,20 +3147,7 @@ GpDispatchCommandParams(const char *sql, int nparams, const Oid *types,
 
 		if (!conn_asked(c, content, nsegments))
 			continue;
-		if (c->busy && c->fetching != NULL)
-			conn_park(c);
-		if (!PQsendQueryParams(c->conn, sql, nparams, types, values, NULL, NULL, 0))
-		{
-			char	   *msg = pstrdup(PQerrorMessage(c->conn));
-			int			failed = c->content;
-
-			gang_close();
-			ereport(ERROR,
-					(errcode(ERRCODE_CONNECTION_FAILURE),
-					 errmsg("could not send a statement to segment %d", failed),
-					 errdetail_internal("%s", msg)));
-		}
-		c->busy = true;
+		conn_send_params(c, sql, nparams, types, values, NULL, NULL);
 	}
 
 	/* The counts come back as command tags, which "keep" does not keep. */
@@ -3090,20 +3177,7 @@ GpDispatchCommandParamsOnContents(const char *sql, int nparams,
 
 		if (!conn_listed(c, contents, ncontents))
 			continue;
-		if (c->busy && c->fetching != NULL)
-			conn_park(c);
-		if (!PQsendQueryParams(c->conn, sql, nparams, types, values, NULL, NULL, 0))
-		{
-			char	   *msg = pstrdup(PQerrorMessage(c->conn));
-			int			failed = c->content;
-
-			gang_close();
-			ereport(ERROR,
-					(errcode(ERRCODE_CONNECTION_FAILURE),
-					 errmsg("could not send a statement to segment %d", failed),
-					 errdetail_internal("%s", msg)));
-		}
-		c->busy = true;
+		conn_send_params(c, sql, nparams, types, values, NULL, NULL);
 	}
 
 	/* The counts come back as command tags, which "keep" does not keep. */
@@ -3145,20 +3219,7 @@ GpDispatchParamsOnContent(int content, const char *sql, int nparams,
 				(errcode(ERRCODE_UNDEFINED_OBJECT),
 				 errmsg("there is no segment with content id %d", content)));
 
-	if (c->busy && c->fetching != NULL)
-		conn_park(c);
-	if (!PQsendQueryParams(c->conn, sql, nparams, NULL, values, lengths,
-						   formats, 0))
-	{
-		char	   *msg = pstrdup(PQerrorMessage(c->conn));
-
-		gang_close();
-		ereport(ERROR,
-				(errcode(ERRCODE_CONNECTION_FAILURE),
-				 errmsg("could not send a statement to segment %d", content),
-				 errdetail_internal("%s", msg)));
-	}
-	c->busy = true;
+	conn_send_params(c, sql, nparams, NULL, values, lengths, formats);
 	gang_wait_all(g, NULL, false);
 }
 
@@ -3192,19 +3253,7 @@ GpDispatchWriteOnContent(int content, const char *sql, int nparams,
 				(errcode(ERRCODE_UNDEFINED_OBJECT),
 				 errmsg("there is no segment with content id %d", content)));
 
-	if (c->busy && c->fetching != NULL)
-		conn_park(c);
-	if (!PQsendQueryParams(c->conn, sql, nparams, NULL, values, NULL, NULL, 0))
-	{
-		char	   *msg = pstrdup(PQerrorMessage(c->conn));
-
-		gang_close();
-		ereport(ERROR,
-				(errcode(ERRCODE_CONNECTION_FAILURE),
-				 errmsg("could not send a statement to segment %d", content),
-				 errdetail_internal("%s", msg)));
-	}
-	c->busy = true;
+	conn_send_params(c, sql, nparams, NULL, values, NULL, NULL);
 
 	results = (PGresult **) palloc0_array(PGresult *, g->nconns);
 	gang_wait_all_keeping_commands(g, results);
@@ -3291,20 +3340,7 @@ GpDispatchWriteReturning(const char *sql, int content, const int *contents,
 		if (contents != NULL ? !conn_listed(c, contents, ncontents)
 			: !conn_asked(c, content, 0))
 			continue;
-		if (c->busy && c->fetching != NULL)
-			conn_park(c);
-		if (!PQsendQueryParams(c->conn, sql, 0, NULL, NULL, NULL, NULL, 0))
-		{
-			char	   *msg = pstrdup(PQerrorMessage(c->conn));
-			int			failed = c->content;
-
-			gang_close();
-			ereport(ERROR,
-					(errcode(ERRCODE_CONNECTION_FAILURE),
-					 errmsg("could not send a statement to segment %d", failed),
-					 errdetail_internal("%s", msg)));
-		}
-		c->busy = true;
+		conn_send_params(c, sql, 0, NULL, NULL, NULL, NULL);
 	}
 
 	results = (PGresult **) palloc0_array(PGresult *, g->nconns);
