@@ -1397,6 +1397,7 @@ gp_ddl_ProcessUtility(PlannedStmt *pstmt, const char *queryString,
 	Node	   *parsetree = pstmt->utilityStmt;
 	GpDispatchClass class;
 	char	   *tree;
+	List	   *kept;
 
 	/*
 	 * Cloudberry's fault at the start of CreateFunction(), on whichever node
@@ -1484,6 +1485,9 @@ gp_ddl_ProcessUtility(PlannedStmt *pstmt, const char *queryString,
 	/* Before running it: PostgreSQL may change a tree it is given. */
 	tree = nodeToString(parsetree);
 
+	/* an index build's tables' counts, which the coordinator's would empty */
+	kept = GpAnalyzeKeepCounts(parsetree);
+
 	MemoryContextReset(ddl_cxt);
 	recorded = NIL;
 	recording = true;
@@ -1530,6 +1534,7 @@ gp_ddl_ProcessUtility(PlannedStmt *pstmt, const char *queryString,
 
 	if (IsA(parsetree, IndexStmt) && !((IndexStmt *) parsetree)->concurrent)
 		sync_indcheckxmin(recorded);
+	GpAnalyzeRestoreCounts(kept);
 
 	/* VACUUM: what it counted is the segments' (gp_analyze.c) */
 	if (IsA(parsetree, VacuumStmt))

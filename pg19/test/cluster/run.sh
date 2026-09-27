@@ -1538,6 +1538,17 @@ a\b|\N' ] && [ "$(cat "$ROOT/ce_prog.txt" 2>&1)" = "to a program" ] \
 	[ "$out" = "$out2" ] && [ "$out" != "0" ] \
 		&& ok "ANALYZE keeps the segments' all-visible pages, where its own count is none" \
 		|| notok "ANALYZE of the all-visible pages" "$out, segments: $out2"
+	# An index build on the coordinator counts its empty copy, and writes
+	# what it counts (index_update_stats()), which Cloudberry's coordinator
+	# never writes: the counts ANALYZE brought back stay, through CREATE
+	# INDEX, REINDEX and ALTER TABLE ... ADD UNIQUE.
+	before=$(q 0 "SELECT relpages || ' ' || reltuples FROM pg_class WHERE relname = 'st';")
+	q 0 "CREATE INDEX st_ag ON st (a, g); REINDEX TABLE st; ALTER TABLE st ADD CONSTRAINT st_u UNIQUE (a, g);" >/dev/null 2>&1
+	out=$(q 0 "SELECT relpages || ' ' || reltuples FROM pg_class WHERE relname = 'st';")
+	q 0 "ALTER TABLE st DROP CONSTRAINT st_u; DROP INDEX st_ag;" >/dev/null 2>&1
+	[ "$out" = "$before" ] && [ "${out%% *}" != "0" ] \
+		&& ok "... and an index build keeps them, where the coordinator's would count its empty copy" \
+		|| notok "a table's counts after an index build" "$out, before: $before"
 	q 0 "VACUUM rst;" >/dev/null
 	out=$(q 0 "SELECT relpages || ' ' || reltuples FROM pg_class WHERE relname = 'rst';")
 	out2=$(q 1 "SELECT relpages || ' ' || reltuples FROM pg_class WHERE relname = 'rst';")

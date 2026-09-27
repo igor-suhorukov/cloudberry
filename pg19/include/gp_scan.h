@@ -121,6 +121,16 @@ struct VacuumStmt;
 extern void GpAnalyzeSegmentCounts(struct VacuumStmt *stmt);
 
 /*
+ * Around a statement that builds an index on the coordinator -- CREATE
+ * INDEX, REINDEX, ALTER TABLE adding a key or an index: the pages, rows and
+ * all-visible pages of the distributed tables it builds them on, kept, and
+ * put back after it, as Cloudberry's coordinator never writes its own
+ * (gp_analyze.c).
+ */
+extern List *GpAnalyzeKeepCounts(Node *parsetree);
+extern void GpAnalyzeRestoreCounts(List *kept);
+
+/*
  * The ctid the coordinator's plan knows a segment's row by -- the row at
  * "tid" on segment "content" -- in the statement "estate" runs: what a
  * gather of a table an UPDATE or DELETE changes gives each row it reads.

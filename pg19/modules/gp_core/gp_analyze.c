@@ -60,6 +60,7 @@
 #include "access/stratnum.h"
 #include "access/table.h"
 #include "access/tableam.h"
+#include "catalog/index.h"
 #include "catalog/indexing.h"
 #include "catalog/namespace.h"
 #include "catalog/pg_class.h"
@@ -83,6 +84,7 @@
 #include "utils/fmgroids.h"
 #include "utils/hsearch.h"
 #include "utils/lsyscache.h"
+#include "utils/syscache.h"
 #include "utils/rel.h"
 #include "utils/relcache.h"
 #include "utils/sampling.h"
@@ -820,6 +822,146 @@ GpAnalyzeSegmentCounts(VacuumStmt *stmt)
 		relation_close(rel, AccessShareLock);
 	}
 	hash_destroy(counts);
+}
+
+/* A table's counts as the coordinator's pg_class has them, kept. */
+typedef struct KeptCounts
+{
+	Oid			relid;
+	int32		pages;
+	float4		tuples;
+	int32		allvisible;
+	int32		allfrozen;
+} KeptCounts;
+
+/* The tables an index build of this statement's reads the rows of. */
+static List *
+index_build_tables(Node *parsetree)
+{
+	RangeVar   *rv = NULL;
+	Oid			relid;
+
+	switch (nodeTag(parsetree))
+	{
+		case T_IndexStmt:
+			rv = ((IndexStmt *) parsetree)->relation;
+			break;
+		case T_ReindexStmt:
+			{
+				ReindexStmt *stmt = (ReindexStmt *) parsetree;
+
+				if (stmt->kind == REINDEX_OBJECT_TABLE)
+					rv = stmt->relation;
+				else if (stmt->kind == REINDEX_OBJECT_INDEX && stmt->relation != NULL)
+				{
+					Oid			index = RangeVarGetRelid(stmt->relation, NoLock, true);
+
+					if (!OidIsValid(index) || get_rel_relkind(index) != RELKIND_INDEX &&
+						get_rel_relkind(index) != RELKIND_PARTITIONED_INDEX)
+						return NIL;
+					relid = IndexGetRelation(index, true);
+					return OidIsValid(relid)
+						? find_all_inheritors(relid, NoLock, NULL) : NIL;
+				}
+			}
+			break;
+		case T_AlterTableStmt:
+			{
+				AlterTableStmt *stmt = (AlterTableStmt *) parsetree;
+				bool		builds = false;
+
+				foreach_node(AlterTableCmd, cmd, stmt->cmds)
+				{
+					if (cmd->subtype == AT_AddIndex ||
+						cmd->subtype == AT_AddIndexConstraint)
+						builds = true;
+					else if (cmd->subtype == AT_AddConstraint &&
+							 IsA(cmd->def, Constraint) &&
+							 (((Constraint *) cmd->def)->contype == CONSTR_PRIMARY ||
+							  ((Constraint *) cmd->def)->contype == CONSTR_UNIQUE ||
+							  ((Constraint *) cmd->def)->contype == CONSTR_EXCLUSION))
+						builds = true;
+				}
+				if (builds && stmt->objtype == OBJECT_TABLE)
+					rv = stmt->relation;
+			}
+			break;
+		default:
+			break;
+	}
+	if (rv == NULL)
+		return NIL;
+	relid = RangeVarGetRelid(rv, NoLock, true);
+	if (!OidIsValid(relid))
+		return NIL;
+	return find_all_inheritors(relid, NoLock, NULL);
+}
+
+/*
+ * Before a statement that builds an index on the coordinator: the counts of
+ * the distributed tables whose rows it indexes.  PostgreSQL's index build
+ * writes the table's pages, rows and all-visible pages as it finds them
+ * (index_update_stats()), and the coordinator's copy of a distributed table
+ * is empty: a table ANALYZE had counted the rows of read as empty after a
+ * CREATE INDEX, which ORCA plans as such -- a query of nested CTEs over one
+ * took minutes to plan.  Cloudberry's coordinator writes none of them
+ * (index.c, "Gp_role != GP_ROLE_DISPATCH").
+ */
+List *
+GpAnalyzeKeepCounts(Node *parsetree)
+{
+	List	   *kept = NIL;
+
+	if (GpClusterBackendRole() != GP_ROLE_DISPATCH)
+		return NIL;
+	foreach_oid(relid, index_build_tables(parsetree))
+	{
+		HeapTuple	tuple;
+		Form_pg_class form;
+		KeptCounts *k;
+
+		if (GpScanDistributedPolicy(relid) == NULL)
+			continue;
+		tuple = SearchSysCache1(RELOID, ObjectIdGetDatum(relid));
+		if (!HeapTupleIsValid(tuple))
+			continue;
+		form = (Form_pg_class) GETSTRUCT(tuple);
+		if (form->relkind == RELKIND_RELATION || form->relkind == RELKIND_MATVIEW)
+		{
+			k = palloc_object(KeptCounts);
+			k->relid = relid;
+			k->pages = form->relpages;
+			k->tuples = form->reltuples;
+			k->allvisible = form->relallvisible;
+			k->allfrozen = form->relallfrozen;
+			kept = lappend(kept, k);
+		}
+		ReleaseSysCache(tuple);
+	}
+	return kept;
+}
+
+/* And after it: the counts kept, where the statement changed them. */
+void
+GpAnalyzeRestoreCounts(List *kept)
+{
+	foreach_ptr(KeptCounts, k, kept)
+	{
+		Relation	rel = try_relation_open(k->relid, AccessShareLock);
+		BlockNumber pages;
+		double		tuples;
+
+		if (rel == NULL)
+			continue;
+		current_counts(k->relid, &pages, &tuples);
+		if ((int32) pages != k->pages || (float4) tuples != k->tuples)
+			vac_update_relstats(rel, (BlockNumber) Max(k->pages, 0), k->tuples,
+								(BlockNumber) Max(k->allvisible, 0),
+								(BlockNumber) Max(k->allfrozen, 0),
+								true, InvalidTransactionId, InvalidMultiXactId,
+								NULL, NULL, true);
+		relation_close(rel, AccessShareLock);
+	}
 }
 
 void
