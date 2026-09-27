@@ -2199,11 +2199,13 @@ same "two-stage aggregation" \
      "SET gp.optimizer_force_multistage_agg = on"
 
 # PostgreSQL 19 runs an Agg in one split mode; Cloudberry's executor finishes
-# each Aggref by its own, and ORCA mixes them in one node here.
-declined "an aggregate that mixes stages in one node" \
-         "SELECT avg(c), stddev(a), count(DISTINCT b) FROM t0" \
-         "mixes aggregation stages" \
-         "SET gp.optimizer_force_multistage_agg = on"
+# each Aggref by its own, and ORCA's split of a DISTINCT aggregate into
+# stages mixes them in one node, beside another aggregate.  Such a query is
+# optimized without that split, the distinct values aggregated where they
+# meet, in one stage.
+same "a DISTINCT aggregate beside others, aggregated in one stage, not in mixed ones" \
+     "SELECT avg(c), stddev(a), count(DISTINCT b) FROM t0" \
+     "SET gp.optimizer_force_multistage_agg = on"
 
 # ORCA's core rewrites percentile_cont into Cloudberry's gp_percentile_cont,
 # by OID (naucrates/dxl/gpdb_types.h), and PostgreSQL 19 has no such function.
@@ -2531,13 +2533,26 @@ shape "an index nested loop, its parameter set for each outer row" "Index Cond: 
 same "three tables" \
      "SELECT count(*) FROM t1a JOIN t1b ON t1a.i = t1b.i JOIN t1a a2 ON a2.j = t1b.k WHERE t1a.j < 2"
 
-# PostgreSQL 19 has no anti-join that answers NOT IN's NULLs, and ORCA's
-# other plan for it -- an apply kept as a SubPlan, when the two transforms
-# that make the join are turned off -- was measured at T1 at 6.8 seconds
-# against the planner's 6 milliseconds.  So it is declined, and counted.
-declined "NOT IN, which ORCA makes an anti-join PostgreSQL 19 cannot run" \
-         "SELECT count(*) FROM t1a WHERE t1a.j NOT IN (SELECT k FROM t1b)" \
-         "NOT IN as an anti-join"
+# NOT IN, which ORCA makes an anti-join that knows NOT IN's NULLs --
+# Cloudberry's executor has one, PostgreSQL 19 has none -- runs as the
+# planner's plan for it does: the outer rows filtered by a hashed SubPlan of
+# the inner ones, which knows whether one of them was NULL (compat/notin.c).
+# ORCA's other plan, an apply kept as a SubPlan, was measured at T1 at 6.8
+# seconds against the planner's 6 milliseconds.  Where the planner's SubPlan
+# would not hash, neither does ORCA's: it is declined.
+shape "NOT IN, ORCA's anti-join, as a hashed SubPlan" "hashed SubPlan" \
+      "SELECT count(*) FROM t1a WHERE t1a.j NOT IN (SELECT k FROM t1b WHERE k IS NOT NULL)"
+same "... an outer NULL no row" \
+     "SELECT count(*), count(j) FROM t1a WHERE t1a.j NOT IN (SELECT k FROM t1b WHERE k IS NOT NULL AND k > 2)"
+same "... nor any, a NULL among the inner rows" \
+     "SELECT count(*) FROM t1a WHERE t1a.j NOT IN (SELECT k FROM t1b)"
+same "... over expressions, beside another condition" \
+     "SELECT count(*), sum(i) FROM t1a WHERE j + 1 NOT IN (SELECT k * 2 FROM t1b WHERE i < 100 AND k IS NOT NULL) AND i > 50"
+same "... over a join" \
+     "SELECT count(*), sum(i) FROM t1b WHERE i + 1000 NOT IN (SELECT t1a.i FROM t1a, (VALUES (1), (2), (3)) v(x) WHERE t1a.i IS NOT NULL)"
+declined "... declined where its hash tables would not fit in hash_mem" \
+         "SELECT count(*), sum(i) FROM t1b WHERE i + 1000 NOT IN (SELECT t1a.i FROM t1a, (VALUES (1), (2), (3)) v(x) WHERE t1a.i IS NOT NULL)" \
+         "NOT IN as an anti-join" "SET work_mem = '64kB'"
 
 # --- IS NOT DISTINCT FROM ------------------------------------------------------
 #

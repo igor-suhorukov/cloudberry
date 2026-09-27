@@ -112,7 +112,11 @@ On a cluster (M2), `gp_core` and `gp_orca`:
 - ORCA's distributed plans — the five Motions, a Gather to the one segment
   a slice runs on among them, Split, direct dispatch, the slice table —
   carried out by gp_core, each slice sent the values of the parameters it
-  reads; RETURNING and ON CONFLICT given to the ModifyTable beside ORCA's
+  reads; a CTE in a slice the segments run, and ROLLUP, CUBE and grouping
+  sets, which ORCA aggregates over one, shared through files each segment
+  keeps, Cloudberry's ShareInputScan, by a producer and consumers in its
+  slice and in others (`orca/compat/sharedscan.c`); NOT IN as the
+  planner's hashed SubPlan; RETURNING and ON CONFLICT given to the ModifyTable beside ORCA's
   plan, and ORCA's UPDATE and DELETE of a join or of a partitioned table
   where the target is held against a re-check, as without the deadlock
   detector it is; and PostgreSQL's own plans gathering from the

@@ -76,6 +76,7 @@ extern "C" {
 #include "catalog/pg_index.h"
 #include "catalog/pg_inherits.h"
 #include "catalog/pg_statistic_ext_data.h"
+#include "commands/extension.h"
 #include "commands/defrem.h"
 #include "foreign/fdwapi.h"
 #include "foreign/foreign.h"
@@ -123,6 +124,15 @@ extern "C" {
 
 /* An identity column's next value, as ORCA carries it; see NextValueCall. */
 #include "cb_nextvalue.h"
+
+/* A table's old row, carried up to its ModifyTable; see CarryWholeRow. */
+#include "cb_wholerow.h"
+
+/* NOT IN's anti-join as a hashed SubPlan; see NotInSubplan. */
+#include "cb_notin.h"
+
+/* A CTE read in more than one slice; see MakeSequence. */
+#include "cb_sharedscan.h"
 
 /* PostGIS's index support function; see IsPostgisIndexSupport. */
 #include "gp_orca_postgis.h"
@@ -740,6 +750,53 @@ gpdb::QueryOrdersPartialCapableAgg(Query *query)
 	{
 		/* catalog tables: pg_aggregate */
 		return OrderedPartialCapableAggWalker((Node *) query, nullptr);
+	}
+	GP_WRAP_END;
+	return false;
+}
+
+namespace
+{
+struct DistinctAggContext
+{
+	bool distinct;
+	bool plain;
+};
+
+bool
+DistinctAggWalker(Node *node, void *context)
+{
+	DistinctAggContext *ctx = (DistinctAggContext *) context;
+
+	if (node == nullptr)
+		return false;
+
+	if (IsA(node, Query))
+		return query_tree_walker((Query *) node, DistinctAggWalker, context,
+								 0);
+
+	if (IsA(node, Aggref))
+	{
+		if (((Aggref *) node)->aggdistinct != NIL)
+			ctx->distinct = true;
+		else
+			ctx->plain = true;
+		if (ctx->distinct && ctx->plain)
+			return true;
+	}
+
+	return expression_tree_walker(node, DistinctAggWalker, context);
+}
+}  // namespace
+
+bool
+gpdb::QueryMixesDistinctAgg(Query *query)
+{
+	GP_WRAP_START;
+	{
+		DistinctAggContext ctx = {false, false};
+
+		return DistinctAggWalker((Node *) query, &ctx);
 	}
 	GP_WRAP_END;
 	return false;
@@ -2547,6 +2604,27 @@ gpdb::HasUpdateTriggers(Oid relid)
 	return false;
 }
 
+bool
+gpdb::HasOwnUpdateTriggers(Oid relid)
+{
+	GP_WRAP_START;
+	{
+		return has_update_triggers(relid, false);
+	}
+	GP_WRAP_END;
+	return false;
+}
+
+void
+gpdb::RefuseStatement(int sqlerrcode, const char *message)
+{
+	GP_WRAP_START;
+	{
+		ereport(ERROR, (errcode(sqlerrcode), errmsg("%s", message)));
+	}
+	GP_WRAP_END;
+}
+
 // get index op family properties
 void
 gpdb::IndexOpProperties(Oid opno, Oid opfamily, StrategyNumber *strategynumber,
@@ -2824,6 +2902,17 @@ gpdb::CanDispatchPlans(void)
 	return false;
 }
 
+bool
+gpdb::HasCoreExtension(void)
+{
+	GP_WRAP_START;
+	{
+		return OidIsValid(get_extension_oid("gp_core", true));
+	}
+	GP_WRAP_END;
+	return false;
+}
+
 Plan *
 gpdb::MakeGatherMotion(Plan *fragment, List *targetlist, List *qual,
 					   int content, int slice, int nkeys,
@@ -2941,6 +3030,76 @@ gpdb::RelOldRowFromPlan(Oid relid)
 	}
 	GP_WRAP_END;
 	return false;
+}
+
+bool
+gpdb::CanShareAcrossSlices(void)
+{
+	GP_WRAP_START;
+	{
+		return gp_orca_can_share_across_slices();
+	}
+	GP_WRAP_END;
+	return false;
+}
+
+Plan *
+gpdb::MakeSequence(Plan *plan, List *producers)
+{
+	GP_WRAP_START;
+	{
+		return gp_orca_make_sequence(plan, producers);
+	}
+	GP_WRAP_END;
+	return nullptr;
+}
+
+Plan *
+gpdb::MakeShareProducer(Plan *child, int share_id, int slice)
+{
+	GP_WRAP_START;
+	{
+		return gp_orca_make_share_producer(child, share_id, slice);
+	}
+	GP_WRAP_END;
+	return nullptr;
+}
+
+Plan *
+gpdb::MakeShareConsumer(int share_id, int slice, List *scan_tlist,
+						List *targetlist)
+{
+	GP_WRAP_START;
+	{
+		return gp_orca_make_share_consumer(share_id, slice, scan_tlist,
+										   targetlist);
+	}
+	GP_WRAP_END;
+	return nullptr;
+}
+
+Plan *
+gpdb::NotInSubplan(List *clauses, Plan *inner, List *paramids, Expr **testexpr,
+				   bool *hashable)
+{
+	GP_WRAP_START;
+	{
+		return gp_orca_not_in_subplan(clauses, inner, paramids, testexpr,
+									  hashable);
+	}
+	GP_WRAP_END;
+	return nullptr;
+}
+
+AttrNumber
+gpdb::CarryWholeRow(Plan *plan, AttrNumber resno, List *rtable)
+{
+	GP_WRAP_START;
+	{
+		return gp_orca_carry_whole_row(plan, resno, rtable);
+	}
+	GP_WRAP_END;
+	return InvalidAttrNumber;
 }
 
 List *

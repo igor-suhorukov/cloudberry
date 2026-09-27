@@ -46,6 +46,8 @@
 #define GP_ORCA_MOTION_EXTERN		3	/* a statement parameter, and an old gp_core */
 #define GP_ORCA_MOTION_WRITE		4	/* a write in a fragment */
 #define GP_ORCA_MOTION_SEQUENCE		5	/* a sequence's value in a fragment */
+#define GP_ORCA_MOTION_SHARE		6	/* a CTE shared between slices that
+										 * might not all run at once */
 
 /*
  * The first of the reasons above that the plan has; GP_ORCA_MOTION_OK if

@@ -1,8 +1,5 @@
 @@
 +INFO:  GPORCA failed to produce a plan, falling back to Postgres-based planner
-+DETAIL:  Falling back to Postgres-based planner because GPORCA does not support the following feature: NOT IN as an anti-join
-@@
-+INFO:  GPORCA failed to produce a plan, falling back to Postgres-based planner
 +DETAIL:  Falling back to Postgres-based planner because no plan has been computed for required properties in GPORCA
 @@
 +INFO:  GPORCA failed to produce a plan, falling back to Postgres-based planner

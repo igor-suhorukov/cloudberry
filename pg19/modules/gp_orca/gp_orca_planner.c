@@ -65,6 +65,7 @@
 #include "cb_assertop.h"
 #include "cb_compat.h"
 #include "cb_dynamicscan.h"
+#include "cb_sharedscan.h"
 #include "gp_orca_api.h"
 #include "gp_orca_planner.h"
 #include "gp_orca_postgis.h"
@@ -381,7 +382,8 @@ gp_orca_explain_node_label(PlanState *planstate, ExplainState *es,
 	Assert(IsA(planstate->plan, CustomScan));
 
 	if (gp_orca_label_assert(planstate, es, pname, suffix) ||
-		gp_orca_label_dynamic_scans(planstate, es, pname, suffix))
+		gp_orca_label_dynamic_scans(planstate, es, pname, suffix) ||
+		gp_orca_label_shared_scans(planstate, es, pname, suffix))
 		return;
 
 	if (prev_explain_node_label_hook)

@@ -162,6 +162,143 @@ using namespace gpmd;
 #define GPDXL_MOTION_ID_START 1
 #define GPDXL_PARAM_ID_START 0
 
+// NOT IN CLOUDBERRY.  A Motion's slices run on the segments through gp_core
+// (gp_motion.c): without the cluster secret they take no plan (gp_cluster.c),
+// and a database without gp_core's extension -- one made from template0,
+// which has none -- has no function to run a slice in.  Cloudberry's slices
+// are its executor's, in every database.
+static void
+CheckCanDispatchPlans()
+{
+	if (gpdb::CanDispatchPlans())
+	{
+		return;
+	}
+	if (!gpdb::HasCoreExtension())
+	{
+		GP_UNPORTED("a Motion, in a database without gp_core's extension");
+	}
+	GP_UNPORTED("a Motion, without gp.cluster_secret");
+}
+
+// NOT IN CLOUDBERRY.  Does "dxlnode" read CTE "cte_id" below a Motion -- in
+// another slice than the one "dxlnode" is in?  A CTE the coordinator's slice
+// produces is PostgreSQL's, one process's, which no other slice can read.
+static BOOL
+ReadsCTEBelowMotion(const CDXLNode *dxlnode, ULONG cte_id, BOOL below_motion)
+{
+	switch (dxlnode->GetOperator()->GetDXLOperator())
+	{
+		case EdxlopPhysicalMotionGather:
+		case EdxlopPhysicalMotionBroadcast:
+		case EdxlopPhysicalMotionRedistribute:
+		case EdxlopPhysicalMotionRoutedDistribute:
+		case EdxlopPhysicalMotionRandom:
+			below_motion = true;
+			break;
+		case EdxlopPhysicalCTEConsumer:
+			if (below_motion &&
+				cte_id ==
+					CDXLPhysicalCTEConsumer::Cast(dxlnode->GetOperator())->Id())
+			{
+				return true;
+			}
+			break;
+		default:
+			break;
+	}
+
+	const ULONG arity = dxlnode->Arity();
+	for (ULONG ul = 0; ul < arity; ul++)
+	{
+		if (ReadsCTEBelowMotion((*dxlnode)[ul], cte_id, below_motion))
+		{
+			return true;
+		}
+	}
+	return false;
+}
+
+// NOT IN CLOUDBERRY.  Does the plan have a CTE producer?
+static BOOL
+HasCTEProducer(const CDXLNode *dxlnode)
+{
+	if (EdxlopPhysicalCTEProducer == dxlnode->GetOperator()->GetDXLOperator())
+	{
+		return true;
+	}
+	const ULONG arity = dxlnode->Arity();
+	for (ULONG ul = 0; ul < arity; ul++)
+	{
+		if (HasCTEProducer((*dxlnode)[ul]))
+		{
+			return true;
+		}
+	}
+	return false;
+}
+
+// NOT IN CLOUDBERRY.  Does the part of a plan below a Motion, down to the
+// Motions it receives from, read nothing itself -- no table, no function's
+// rows, no CTE -- but work on the rows it receives: an aggregate, a sort, a
+// limit, a window, a join of them?  Then it runs on a segment as it would
+// on the coordinator.
+static BOOL
+WorksOnReceivedRowsOnly(const CDXLNode *dxlnode)
+{
+	const CDXLOperator *dxlop = dxlnode->GetOperator();
+	if (EdxloptypePhysical == dxlop->GetDXLOperatorType())
+	{
+		switch (dxlop->GetDXLOperator())
+		{
+			// another slice's work
+			case EdxlopPhysicalMotionGather:
+			case EdxlopPhysicalMotionBroadcast:
+			case EdxlopPhysicalMotionRedistribute:
+			case EdxlopPhysicalMotionRoutedDistribute:
+			case EdxlopPhysicalMotionRandom:
+				return true;
+			case EdxlopPhysicalResult:
+			case EdxlopPhysicalLimit:
+			case EdxlopPhysicalSort:
+			case EdxlopPhysicalAgg:
+			case EdxlopPhysicalWindow:
+			case EdxlopPhysicalMaterialize:
+			case EdxlopPhysicalHashJoin:
+			case EdxlopPhysicalNLJoin:
+			case EdxlopPhysicalMergeJoin:
+			case EdxlopPhysicalAppend:
+			case EdxlopPhysicalValuesScan:
+			case EdxlopPhysicalAssert:
+				break;
+			default:
+				return false;
+		}
+	}
+
+	const ULONG arity = dxlnode->Arity();
+	for (ULONG ul = 0; ul < arity; ul++)
+	{
+		if (!WorksOnReceivedRowsOnly((*dxlnode)[ul]))
+		{
+			return false;
+		}
+	}
+	return true;
+}
+
+// NOT IN CLOUDBERRY.  Does "slice" run on every segment -- a Motion's sending
+// slice there, or a write's -- rather than on the coordinator or on one
+// segment?  A CTE is shared between slices only so: each segment's
+// consumers read the rows its own producer wrote (compat/sharedscan.c).
+static BOOL
+SliceOnAllSegments(const PlanSlice *slice, ULONG num_of_segments)
+{
+	return (GANGTYPE_PRIMARY_READER == slice->gangType ||
+			GANGTYPE_PRIMARY_WRITER == slice->gangType) &&
+		   (INT) num_of_segments == slice->numsegments;
+}
+
 //---------------------------------------------------------------------------
 //	@function:
 //		CTranslatorDXLToPlStmt::CTranslatorDXLToPlStmt
@@ -180,7 +317,6 @@ CTranslatorDXLToPlStmt::CTranslatorDXLToPlStmt(
 	  m_is_tgt_tbl_distributed(false),
 	  m_result_rel_list(nullptr),
 	  m_partition_scans(nullptr),
-	  m_gather_into_segment(false),
 	  m_num_of_segments(num_of_segments),
 	  m_partition_selector_counter(0)
 {
@@ -234,6 +370,7 @@ CTranslatorDXLToPlStmt::GetPlannedStmtFromDXL(const CDXLNode *dxlnode,
 	m_dxl_to_plstmt_context->m_orig_query = (Query *) orig_query;
 	m_dxl_to_plstmt_context->AddSlice(topslice);
 	m_dxl_to_plstmt_context->SetCurrentSlice(topslice);
+	m_dxl_to_plstmt_context->m_singletons_on_segment = HasCTEProducer(dxlnode);
 
 	CDXLTranslationContextArray *ctxt_translation_prev_siblings =
 		GPOS_NEW(m_mp) CDXLTranslationContextArray(m_mp);
@@ -363,7 +500,7 @@ CTranslatorDXLToPlStmt::GetPlannedStmtFromDXL(const CDXLNode *dxlnode,
 				contents = NIL;
 			}
 		}
-		if (m_gather_into_segment)
+		if (m_dxl_to_plstmt_context->m_gather_into_segment)
 		{
 			contents = NIL;
 		}
@@ -400,6 +537,9 @@ CTranslatorDXLToPlStmt::GetPlannedStmtFromDXL(const CDXLNode *dxlnode,
 				GP_UNPORTED("a write on the segments");
 			case GP_ORCA_MOTION_SEQUENCE:
 				GP_UNPORTED("a sequence's value taken in a slice the segments run");
+			case GP_ORCA_MOTION_SHARE:
+				GP_UNPORTED(
+					"a CTE read in more than one slice, whose slices cannot all run at once");
 			default:
 				break;
 		}
@@ -1633,6 +1773,144 @@ CTranslatorDXLToPlStmt::TranslateDXLLimit(
 
 //---------------------------------------------------------------------------
 //	@function:
+//		CTranslatorDXLToPlStmt::TranslateDXLHashJoinNotIn
+//
+//	@doc:
+//		ORCA's anti-join for NOT IN, Cloudberry's JOIN_LASJ_NOTIN, which
+//		PostgreSQL 19 has not: the outer side under a Result that keeps a
+//		row where NOT (its keys = ANY (a hashed SubPlan of the inner side)),
+//		as the planner makes NOT IN (compat/notin.c).  The inner side, as
+//		ORCA planned it, is the SubPlan's plan, which runs where the Result
+//		does, once.  Not a condition beside the equalities, nor inner rows
+//		the SubPlan could not hash: those stay the planner's.
+//
+//---------------------------------------------------------------------------
+Plan *
+CTranslatorDXLToPlStmt::TranslateDXLHashJoinNotIn(
+	const CDXLNode *hj_dxlnode, CDXLTranslateContext *output_context,
+	CDXLTranslationContextArray *ctxt_translation_prev_siblings)
+{
+	Result *result = MakeNode(Result);
+	Plan *plan = &(result->plan);
+	plan->plan_node_id = m_dxl_to_plstmt_context->GetNextPlanId();
+	TranslatePlanCosts(hj_dxlnode, plan);
+
+	CDXLNode *left_tree_dxlnode = (*hj_dxlnode)[EdxlhjIndexHashLeft];
+	CDXLNode *right_tree_dxlnode = (*hj_dxlnode)[EdxlhjIndexHashRight];
+	CDXLNode *project_list_dxlnode = (*hj_dxlnode)[EdxlhjIndexProjList];
+	CDXLNode *filter_dxlnode = (*hj_dxlnode)[EdxlhjIndexFilter];
+	CDXLNode *join_filter_dxlnode = (*hj_dxlnode)[EdxlhjIndexJoinFilter];
+	CDXLNode *hash_cond_list_dxlnode = (*hj_dxlnode)[EdxlhjIndexHashCondList];
+
+	CDXLTranslateContext left_dxl_translate_ctxt(
+		m_mp, false, output_context->GetColIdToParamIdMap());
+	CDXLTranslateContext right_dxl_translate_ctxt(
+		m_mp, false, output_context->GetColIdToParamIdMap());
+
+	Plan *left_plan =
+		TranslateDXLOperatorToPlan(left_tree_dxlnode, &left_dxl_translate_ctxt,
+								   ctxt_translation_prev_siblings);
+
+	CDXLTranslationContextArray *translation_context_arr_with_siblings =
+		GPOS_NEW(m_mp) CDXLTranslationContextArray(m_mp);
+	translation_context_arr_with_siblings->Append(&left_dxl_translate_ctxt);
+	translation_context_arr_with_siblings->AppendArray(
+		ctxt_translation_prev_siblings);
+	Plan *right_plan = TranslateDXLOperatorToPlan(
+		right_tree_dxlnode, &right_dxl_translate_ctxt,
+		translation_context_arr_with_siblings);
+
+	CDXLTranslationContextArray *child_contexts =
+		GPOS_NEW(m_mp) CDXLTranslationContextArray(m_mp);
+	child_contexts->Append(&left_dxl_translate_ctxt);
+	child_contexts->Append(&right_dxl_translate_ctxt);
+	TranslateProjListAndFilter(project_list_dxlnode, filter_dxlnode,
+							   nullptr,	 // translate context for the base table
+							   child_contexts, &plan->targetlist, &plan->qual,
+							   output_context);
+
+	List *join_qual = TranslateDXLFilterToQual(
+		join_filter_dxlnode, nullptr, child_contexts, output_context);
+	if (NIL != join_qual)
+	{
+		GP_UNPORTED("NOT IN as an anti-join");
+	}
+
+	List *clauses = NIL;
+	const ULONG arity = hash_cond_list_dxlnode->Arity();
+	for (ULONG ul = 0; ul < arity; ul++)
+	{
+		clauses = gpdb::ListConcat(
+			clauses, TranslateDXLScCondToQual((*hash_cond_list_dxlnode)[ul],
+											  nullptr, child_contexts,
+											  output_context));
+	}
+
+	// a parameter for each condition's inner expression, of its type
+	List *paramids = NIL;
+	ListCell *lc = nullptr;
+	ForEach(lc, clauses)
+	{
+		Node *clause = (Node *) lfirst(lc);
+		if (!IsA(clause, OpExpr) ||
+			2 != gpdb::ListLength(((OpExpr *) clause)->args))
+		{
+			GP_UNPORTED("NOT IN as an anti-join");
+		}
+		paramids = gpdb::LAppendInt(
+			paramids,
+			(int) m_dxl_to_plstmt_context->GetNextParamId(gpdb::ExprType(
+				(Node *) gpdb::ListNth(((OpExpr *) clause)->args, 1))));
+	}
+
+	Expr *testexpr = nullptr;
+	bool hashable = false;
+	Plan *subplan_plan = gpdb::NotInSubplan(clauses, right_plan, paramids,
+											&testexpr, &hashable);
+	if (nullptr == subplan_plan || !hashable)
+	{
+		GP_UNPORTED("NOT IN as an anti-join");
+	}
+	subplan_plan->plan_node_id = m_dxl_to_plstmt_context->GetNextPlanId();
+	SetParamIds(subplan_plan);
+	m_dxl_to_plstmt_context->AddSubplan(subplan_plan);
+
+	TargetEntry *first =
+		(TargetEntry *) gpdb::ListNth(subplan_plan->targetlist, 0);
+	SubPlan *subplan = MakeNode(SubPlan);
+	subplan->subLinkType = ANY_SUBLINK;
+	subplan->testexpr = (Node *) testexpr;
+	subplan->paramIds = paramids;
+	subplan->plan_id =
+		gpdb::ListLength(m_dxl_to_plstmt_context->GetSubplanEntriesList());
+	CHAR plan_name[32];
+	snprintf(plan_name, sizeof(plan_name), "SubPlan %d", subplan->plan_id);
+	subplan->plan_name = PStrDup(plan_name);
+	subplan->firstColType = gpdb::ExprType((Node *) first->expr);
+	subplan->firstColTypmod = gpdb::ExprTypeMod((Node *) first->expr);
+	subplan->firstColCollation = gpdb::ExprCollation((Node *) first->expr);
+	subplan->useHashTable = true;
+	subplan->unknownEqFalse = false;
+	subplan->parallel_safe = false;
+	subplan->startup_cost = subplan_plan->total_cost;
+	subplan->per_call_cost = 0;
+
+	BoolExpr *not_in = MakeNode(BoolExpr);
+	not_in->boolop = NOT_EXPR;
+	not_in->args = ListMake1(subplan);
+	not_in->location = -1;
+
+	plan->qual = gpdb::LPrepend(not_in, plan->qual);
+	plan->lefttree = left_plan;
+	result->result_type = RESULT_TYPE_GATING;
+	SetParamIds(plan);
+
+	// PostgreSQL 19's Result tests no qual: the filter goes where one is
+	return PlaceResultFilter(result);
+}
+
+//---------------------------------------------------------------------------
+//	@function:
 //		CTranslatorDXLToPlStmt::TranslateDXLHashJoin
 //
 //	@doc:
@@ -1699,6 +1977,12 @@ CTranslatorDXLToPlStmt::TranslateDXLHashJoin(
 
 	CDXLPhysicalHashJoin *hashjoin_dxlop =
 		CDXLPhysicalHashJoin::Cast(hj_dxlnode->GetOperator());
+
+	if (EdxljtLeftAntiSemijoinNotIn == hashjoin_dxlop->GetJoinType())
+	{
+		return TranslateDXLHashJoinNotIn(hj_dxlnode, output_context,
+										 ctxt_translation_prev_siblings);
+	}
 
 	// set join type
 	//
@@ -2734,7 +3018,7 @@ CTranslatorDXLToPlStmt::TranslateDXLMotion(
 		{
 			GP_UNPORTED("a Gather Motion inside a slice the segments run");
 		}
-		m_gather_into_segment = true;
+		m_dxl_to_plstmt_context->m_gather_into_segment = true;
 	}
 	if (GP_MOTION_GATHER != motion_type &&
 		(0 == recvslice->sliceIndex ||
@@ -2743,11 +3027,7 @@ CTranslatorDXLToPlStmt::TranslateDXLMotion(
 		GP_UNPORTED("a Motion to some of the segments");
 	}
 
-	// Without the cluster secret the segments take no plan (gp_cluster.c).
-	if (!gpdb::CanDispatchPlans())
-	{
-		GP_UNPORTED("a Motion, without gp.cluster_secret");
-	}
+	CheckCanDispatchPlans();
 
 	// Cloudberry's order: the Motion's id and costs before the slice changes.
 	int plan_node_id = m_dxl_to_plstmt_context->GetNextPlanId();
@@ -2772,6 +3052,21 @@ CTranslatorDXLToPlStmt::TranslateDXLMotion(
 	if (1 == input_segids_array->Size())
 	{
 		int segindex = *((*input_segids_array)[0]);
+
+		// NOT IN CLOUDBERRY.  The coordinator's own slice runs here, apart
+		// from the rest, which gp_core relays to it and from it a slice at a
+		// time (gp_motion.c).  In a plan that shares a CTE between slices,
+		// which all run at once, such a slice that works only on the rows
+		// it receives -- ORCA's aggregate of gathered rows, sent back to the
+		// segments -- runs on the first segment instead, where it streams as
+		// the others do.
+		if (segindex < 0 && GP_MOTION_GATHER != motion_type &&
+			m_dxl_to_plstmt_context->m_singletons_on_segment &&
+			WorksOnReceivedRowsOnly(
+				(*motion_dxlnode)[motion_dxlop->GetRelationChildIdx()]))
+		{
+			segindex = 0;
+		}
 
 		if (segindex < 0)
 		{
@@ -2969,10 +3264,7 @@ CTranslatorDXLToPlStmt::TranslateDXLRedistributeMotionToResultHashFilters(
 	CDXLPhysicalMotion *motion_dxlop =
 		CDXLPhysicalMotion::Cast(motion_dxlnode->GetOperator());
 
-	if (!gpdb::CanDispatchPlans())
-	{
-		GP_UNPORTED("a Motion, without gp.cluster_secret");
-	}
+	CheckCanDispatchPlans();
 
 	// The filter keeps what hashes to the segment it runs on, and the
 	// coordinator is none of them.
@@ -5013,11 +5305,16 @@ CTranslatorDXLToPlStmt::TranslateDXLMaterialize(
 //
 //		The producer's project list becomes a Result over its child, which
 //		post-processing removes when the child can project it itself.
+//
+//		A CTE produced in a slice the segments run is shared through files
+//		each segment keeps instead (compat/sharedscan.c): the Result is the
+//		plan whose rows TranslateDXLSequence has a Shared Scan write, and no
+//		subplan or initplan is made of it.
 //---------------------------------------------------------------------------
 Plan *
 CTranslatorDXLToPlStmt::TranslateDXLCTEProducerToSharedScan(
 	const CDXLNode *cte_producer_dxlnode, CDXLTranslateContext *output_context,
-	CDXLTranslationContextArray *ctxt_translation_prev_siblings)
+	CDXLTranslationContextArray *ctxt_translation_prev_siblings, BOOL shared)
 {
 	CDXLPhysicalCTEProducer *cte_prod_dxlop =
 		CDXLPhysicalCTEProducer::Cast(cte_producer_dxlnode->GetOperator());
@@ -5057,6 +5354,14 @@ CTranslatorDXLToPlStmt::TranslateDXLCTEProducerToSharedScan(
 
 	// cleanup
 	child_contexts->Release();
+
+	if (shared)
+	{
+		m_dxl_to_plstmt_context->RegisterCTEProducerInfo(
+			cte_id, cte_prod_dxlop->GetOutputColIdxMap(), plan, nullptr, true,
+			m_dxl_to_plstmt_context->GetCurrentSlice());
+		return plan;
+	}
 
 	// The subplan, and the initplan that runs it, as SS_process_ctes() makes
 	// them: CTE_SUBLINK, no inputs, and one output parameter that carries no
@@ -5123,6 +5428,10 @@ CTranslatorDXLToPlStmt::TranslateDXLCTEProducerToSharedScan(
 //		each output column reads is worked out as Cloudberry works it out; only
 //		what reads them changes, from OUTER_VAR of a ShareInputScan's child to
 //		a Var of the CTE's range table entry.
+//
+//		Of a CTE shared through files, a Shared Scan that reads the rows its
+//		segment's producer wrote (compat/sharedscan.c), its target list
+//		reading them as INDEX_VAR.
 //---------------------------------------------------------------------------
 Plan *
 CTranslatorDXLToPlStmt::TranslateDXLCTEConsumerToSharedScan(
@@ -5145,18 +5454,35 @@ CTranslatorDXLToPlStmt::TranslateDXLCTEConsumerToSharedScan(
 	ULongPtrArray *producer_colidx_map = producer_info->m_pidxmap;
 	Plan *producer_plan = producer_info->m_cte_producer_plan;
 	SubPlan *initplan = producer_info->m_initplan;
+	BOOL shared = producer_info->m_shared;
+
+	// A shared CTE is read where its producer is, or in another slice where
+	// both run on every segment, each segment's consumers reading the rows
+	// its own producer wrote.
+	const PlanSlice *slice = m_dxl_to_plstmt_context->GetCurrentSlice();
+	if (shared && slice->sliceIndex != producer_info->m_slice->sliceIndex &&
+		!(SliceOnAllSegments(slice, m_num_of_segments) &&
+		  SliceOnAllSegments(producer_info->m_slice, m_num_of_segments)))
+	{
+		GP_UNPORTED("a CTE read in another slice, not on the same segments");
+	}
 
 	// The range table entry the scan reads, as the parser makes one for a
-	// reference to a CTE.  Its columns are the producer's.
+	// reference to a CTE.  Its columns are the producer's.  A Shared Scan
+	// reads none, and EXPLAIN names its columns by it.  ORCA's DXL does not
+	// carry the query's name for the CTE; the initplan's is "cte<id>".
+	CHAR cte_name[NAMEDATALEN];
+	snprintf(cte_name, sizeof(cte_name), "cte%u", cte_id);
+
 	RangeTblEntry *rte = MakeNode(RangeTblEntry);
 	rte->rtekind = RTE_CTE;
-	rte->ctename = PStrDup(initplan->plan_name);
+	rte->ctename = PStrDup(cte_name);
 	rte->ctelevelsup = 0;
 	rte->self_reference = false;
 	rte->perminfoindex = 0;
 
 	Alias *alias = MakeNode(Alias);
-	alias->aliasname = PStrDup(initplan->plan_name);
+	alias->aliasname = PStrDup(cte_name);
 	alias->colnames = NIL;
 	ListCell *lc = nullptr;
 	ForEach(lc, producer_plan->targetlist)
@@ -5179,12 +5505,45 @@ CTranslatorDXLToPlStmt::TranslateDXLCTEConsumerToSharedScan(
 	Index scanrelid =
 		gpdb::ListLength(m_dxl_to_plstmt_context->GetRTableEntriesList());
 
-	CteScan *cte_scan = MakeNode(CteScan);
-	cte_scan->scan.scanrelid = scanrelid;
-	cte_scan->ctePlanId = initplan->plan_id;
-	cte_scan->cteParam = linitial_int(initplan->setParam);
+	// A shared CTE's consumer reads the producer's columns as its scan
+	// tuple, which its target list reads as INDEX_VAR; they are the range
+	// table entry's, for EXPLAIN.
+	List *scan_tlist = NIL;
+	if (shared)
+	{
+		ULONG attno = 0;
+		ForEach(lc, producer_plan->targetlist)
+		{
+			TargetEntry *te = (TargetEntry *) lfirst(lc);
+			attno++;
+			Var *var = gpdb::MakeVar(scanrelid, (AttrNumber) attno,
+									 gpdb::ExprType((Node *) te->expr),
+									 gpdb::ExprTypeMod((Node *) te->expr),
+									 0 /* varlevelsup */);
+			var->varcollid = gpdb::ExprCollation((Node *) te->expr);
+			scan_tlist = gpdb::LAppend(
+				scan_tlist,
+				gpdb::MakeTargetEntry((Expr *) var, (AttrNumber) attno,
+									  te->resname, false /* resjunk */));
+		}
+	}
+	Index varno = shared ? INDEX_VAR : scanrelid;
 
-	Plan *plan = &(cte_scan->scan.plan);
+	CteScan *cte_scan = nullptr;
+	Plan *plan = nullptr;
+	if (shared)
+	{
+		plan = gpdb::MakeShareConsumer((int) cte_id, slice->sliceIndex,
+									   scan_tlist, NIL);
+	}
+	else
+	{
+		cte_scan = MakeNode(CteScan);
+		cte_scan->scan.scanrelid = scanrelid;
+		cte_scan->ctePlanId = initplan->plan_id;
+		cte_scan->cteParam = linitial_int(initplan->setParam);
+		plan = &(cte_scan->scan.plan);
+	}
 	plan->plan_node_id = m_dxl_to_plstmt_context->GetNextPlanId();
 
 	// translate operator costs
@@ -5225,7 +5584,7 @@ CTranslatorDXLToPlStmt::TranslateDXLCTEConsumerToSharedScan(
 		OID oid_type = CMDIdGPDB::CastMdid(sc_ident_dxlop->MdidType())->Oid();
 
 		Var *var =
-			gpdb::MakeVar(scanrelid, varattno, oid_type,
+			gpdb::MakeVar(varno, varattno, oid_type,
 						  sc_ident_dxlop->TypeModifier(), 0 /* varlevelsup */);
 		// the column's collation is the producer's, which a type's default
 		// is not when the CTE's query wrote COLLATE
@@ -5254,7 +5613,7 @@ CTranslatorDXLToPlStmt::TranslateDXLCTEConsumerToSharedScan(
 	plan->extParam = gpdb::BmsUnion(plan->extParam, producer_plan->extParam);
 	plan->allParam = gpdb::BmsUnion(plan->allParam, producer_plan->extParam);
 
-	return (Plan *) cte_scan;
+	return plan;
 }
 
 //---------------------------------------------------------------------------
@@ -5272,6 +5631,12 @@ CTranslatorDXLToPlStmt::TranslateDXLCTEConsumerToSharedScan(
 //		everything that reads them -- and the Sequence's projection becomes a
 //		Result over that plan, which post-processing removes when the plan
 //		can project it itself.
+//
+//		A CTE produced in a slice the segments run, where a consumer in
+//		another slice reads it too, is not one process's to keep: its
+//		producer is a Shared Scan that writes the rows to files each segment
+//		keeps, and a Sequence of the port's -- a CustomScan -- runs it before
+//		the plan that reads it (compat/sharedscan.c).
 //
 //		Cloudberry's Sequence also ran partition selectors before the dynamic
 //		scans they pruned, and the plan counted that among T3's.  Its ORCA no
@@ -5292,8 +5657,21 @@ CTranslatorDXLToPlStmt::TranslateDXLSequence(
 	CDXLTranslateContext child_context(m_mp, false,
 									   output_context->GetColIdToParamIdMap());
 
-	// every child but the projection list and the last: the producers
+	// every child but the projection list and the last: the producers.  In
+	// a slice the segments run, a CTE is shared through files each segment
+	// keeps, as Cloudberry's cross-slice ShareInputScan shares it
+	// (compat/sharedscan.c): its producer is a Shared Scan that a Sequence
+	// of the port's runs before the plan that reads it, and its consumers,
+	// in that slice or in another below a Motion, read what their segment's
+	// producer wrote.  PostgreSQL's CTE, one process's tuplestore, is the
+	// coordinator's: a fragment carries none, its subplan the coordinator's
+	// to run (compat/motion.c).
+	PlanSlice *slice = m_dxl_to_plstmt_context->GetCurrentSlice();
+	BOOL on_segments = GANGTYPE_PRIMARY_READER == slice->gangType ||
+					   GANGTYPE_PRIMARY_WRITER == slice->gangType ||
+					   GANGTYPE_SINGLETON_READER == slice->gangType;
 	List *initplans = NIL;
+	List *producers = NIL;
 	for (ULONG ul = 1; ul < arity - 1; ul++)
 	{
 		CDXLNode *child_dxlnode = (*sequence_dxlnode)[ul];
@@ -5303,14 +5681,44 @@ CTranslatorDXLToPlStmt::TranslateDXLSequence(
 			GP_UNPORTED("a Sequence that selects partitions");
 		}
 
-		(void) TranslateDXLCTEProducerToSharedScan(
-			child_dxlnode, &child_context, ctxt_translation_prev_siblings);
-
 		ULONG cte_id =
 			CDXLPhysicalCTEProducer::Cast(child_dxlnode->GetOperator())->Id();
-		initplans = gpdb::LAppend(
-			initplans,
-			m_dxl_to_plstmt_context->GetCTEProducerInfo(cte_id)->m_initplan);
+		BOOL shared = on_segments;
+		if (!on_segments)
+		{
+			for (ULONG later = ul + 1; later < arity; later++)
+			{
+				if (ReadsCTEBelowMotion((*sequence_dxlnode)[later], cte_id,
+										false))
+				{
+					GP_UNPORTED(
+						"a CTE read in a slice the segments run, produced in the coordinator's");
+				}
+			}
+		}
+		if (shared && !gpdb::CanShareAcrossSlices())
+		{
+			GP_UNPORTED("a CTE in a slice the segments run, with a gp_core before 1.10");
+		}
+
+		Plan *producer = TranslateDXLCTEProducerToSharedScan(
+			child_dxlnode, &child_context, ctxt_translation_prev_siblings,
+			shared);
+
+		if (shared)
+		{
+			Plan *share = gpdb::MakeShareProducer(producer, (int) cte_id,
+												  slice->sliceIndex);
+			share->plan_node_id = m_dxl_to_plstmt_context->GetNextPlanId();
+			SetParamIds(share);
+			producers = gpdb::LAppend(producers, share);
+		}
+		else
+		{
+			initplans = gpdb::LAppend(
+				initplans,
+				m_dxl_to_plstmt_context->GetCTEProducerInfo(cte_id)->m_initplan);
+		}
 	}
 
 	// the last child, whose rows the Sequence returns
@@ -5320,6 +5728,13 @@ CTranslatorDXLToPlStmt::TranslateDXLSequence(
 	GPOS_ASSERT(nullptr != child_plan && "child plan cannot be NULL");
 
 	child_plan->initPlan = gpdb::ListConcat(child_plan->initPlan, initplans);
+
+	if (NIL != producers)
+	{
+		child_plan = gpdb::MakeSequence(child_plan, producers);
+		child_plan->plan_node_id = m_dxl_to_plstmt_context->GetNextPlanId();
+		SetParamIds(child_plan);
+	}
 
 	// the Sequence's projection
 	Result *result = MakeNode(Result);
@@ -5903,19 +6318,13 @@ CTranslatorDXLToPlStmt::TranslateDXLDml(
 
 	// ORCA marks every INSERT and DELETE split too (CXformUtils,
 	// PexprLogicalDMLOverProject), where it means nothing; for an UPDATE it
-	// means the DMLAction column.  Cloudberry also splits every update of an
-	// append-optimized or PAX table, which ORCA's plan here does not write:
-	// the planner's does, taking the old row from the plan (O20).
+	// means the DMLAction column.
 	// A split update: the row moves to another segment, and gp_core applies
 	// it as a DELETE there and an INSERT where it goes (gp_split.c).  Only on
 	// a cluster, where the table is hash distributed; on one node ORCA plans
 	// none.  Not a table with triggers: they would not fire, as Cloudberry's
 	// do not for a split update, and a foreign key's checks are triggers.
 	BOOL split = CMD_UPDATE == m_cmd_type && phy_dml_dxlop->FSplit();
-	if (CMD_UPDATE == m_cmd_type && md_rel->IsNonBlockTable())
-	{
-		GP_UNPORTED("an UPDATE run as a DELETE and an INSERT");
-	}
 	if (split)
 	{
 		if (IMDRelation::EreldistrHash != md_rel->GetRelDistribution())
@@ -5924,6 +6333,21 @@ CTranslatorDXLToPlStmt::TranslateDXLDml(
 		}
 		if (gpdb::HasAnyTriggers(CMDIdGPDB::CastMdid(mdid_target_table)->Oid()))
 		{
+			// An UPDATE trigger of its own: Cloudberry refuses an UPDATE of
+			// the key of such a table, in its words, under either planner
+			// (make_splitupdate_path(), cdbpath.c), and so does the
+			// planner's route here (gp_explicit.c).  That route asks a
+			// partitioned table's first result relation, which this plan
+			// does not have, since it moves no partitioned table's rows
+			// (below).
+			if (!md_rel->IsPartitioned() &&
+				gpdb::HasOwnUpdateTriggers(
+					CMDIdGPDB::CastMdid(mdid_target_table)->Oid()))
+			{
+				gpdb::RefuseStatement(
+					MAKE_SQLSTATE('0', 'A', 'M', '0', '1'),
+					"UPDATE on distributed key column not allowed on relation with update triggers");
+			}
 			GP_UNPORTED("an UPDATE of a distribution key, on a table with triggers");
 		}
 	}
@@ -5951,10 +6375,7 @@ CTranslatorDXLToPlStmt::TranslateDXLDml(
 		IMDRelation::EreldistrRandom == target_distribution ||
 		IMDRelation::EreldistrReplicated == target_distribution)
 	{
-		if (!gpdb::CanDispatchPlans())
-		{
-			GP_UNPORTED("a Motion, without gp.cluster_secret");
-		}
+		CheckCanDispatchPlans();
 		if (0 != recvslice->sliceIndex)
 		{
 			GP_UNPORTED("a write inside a slice the segments run");
@@ -5983,22 +6404,14 @@ CTranslatorDXLToPlStmt::TranslateDXLDml(
 
 	// RETURNING, which ORCA never saw: the Query's list, which the
 	// ModifyTable evaluates over the row it wrote.  Not a split update's,
-	// whose rows gp_core's node writes as a DELETE and an INSERT.  Not a
-	// DELETE's from a table whose method cannot fetch the deleted row by its
-	// ctid, which it takes from a whole-row column of the plan's instead
-	// (O20): ORCA's DELETE carries the ctid alone.  And on the segments, not
-	// an anonymous record, whose text reads back only where its type is
-	// known, as a Gather's rows are read back (gp_motion.c).
+	// whose rows gp_core's node writes as a DELETE and an INSERT.  And on
+	// the segments, not an anonymous record, whose text reads back only
+	// where its type is known, as a Gather's rows are read back
+	// (gp_motion.c).
 	List *returning = TranslateReturningList(index);
 	if (NIL != returning && split)
 	{
 		GP_UNPORTED("RETURNING from an UPDATE that moves rows");
-	}
-	if (NIL != returning && CMD_DELETE == m_cmd_type &&
-		gpdb::RelOldRowFromPlan(CMDIdGPDB::CastMdid(mdid_target_table)->Oid()))
-	{
-		GP_UNPORTED(
-			"DELETE ... RETURNING of a table whose rows are not fetched by ctid");
 	}
 	if (NIL != returning && nullptr != writeslice)
 	{
@@ -6074,11 +6487,11 @@ CTranslatorDXLToPlStmt::TranslateDXLDml(
 	// and the partition a row is in, by the tableoid ORCA's DML carries in
 	// its second column (GetCtidAndSegmentId) -- which ORCA must then route
 	// no row by.  The partitions are locked as the table is, so that no row
-	// of theirs changes under the statement either.  One whose method takes
-	// a row's old version from the plan (O20) is not written here, as an
-	// append-optimized table is not (above).
+	// of theirs changes under the statement either.
 	List *part_rtis = NIL;
 	List *part_oids = NIL;
+	BOOL old_row_from_plan =
+		gpdb::RelOldRowFromPlan(CMDIdGPDB::CastMdid(mdid_target_table)->Oid());
 	if (partitioned)
 	{
 		ListCell *lc_motion = nullptr;
@@ -6143,8 +6556,7 @@ CTranslatorDXLToPlStmt::TranslateDXLDml(
 			if ((CMD_UPDATE == m_cmd_type || NIL != returning) &&
 				gpdb::RelOldRowFromPlan(part_oid))
 			{
-				GP_UNPORTED(
-					"a partition whose rows are not fetched by ctid, updated or returned");
+				old_row_from_plan = true;
 			}
 			RangeTblEntry *part_rte = m_dxl_to_plstmt_context->GetRTEByIndex(
 				(Index) lfirst_int(lc_rti));
@@ -6169,6 +6581,31 @@ CTranslatorDXLToPlStmt::TranslateDXLDml(
 	result_plan->lefttree = child_plan;
 
 	result_plan->targetlist = dml_target_list;
+
+	// A table whose method takes a changed row's old version from the plan
+	// (O20), an append-optimized or a PAX table, finds it in a whole-row
+	// column beside the ctid, which ORCA's plan does not have: its core
+	// keeps the new values alone.  The scan that read the ctid gives it,
+	// passed up through the plan as the ctid is (compat/wholerow.c) -- for
+	// an update in place, which builds its new row over the old one, and for
+	// DELETE ... RETURNING; a partitioned table's, from each partition's
+	// scan, where one of its partitions is such a table.  A split update's
+	// DELETE takes no old row.
+	if (!split && old_row_from_plan &&
+		(CMD_UPDATE == m_cmd_type ||
+		 (CMD_DELETE == m_cmd_type && NIL != returning)))
+	{
+		AttrNumber wholerow = gpdb::CarryWholeRow(
+			result_plan, ctid_col,
+			m_dxl_to_plstmt_context->GetRTableEntriesList());
+		if (InvalidAttrNumber == wholerow)
+		{
+			GP_UNPORTED(
+				"the old row of a table whose rows are not fetched by ctid, which the plan does not carry");
+		}
+		((TargetEntry *) gpdb::ListNth(result_plan->targetlist, wholerow - 1))
+			->resname = PStrDup("wholerow");
+	}
 	SetParamIds(result_plan);
 
 	dml->operation = m_cmd_type;
@@ -6283,15 +6720,17 @@ CTranslatorDXLToPlStmt::TranslateDXLDml(
 			SetParamIds(write);
 		}
 
-		// Cloudberry sends an INSERT or DELETE whose rows all belong on one
-		// segment -- a row of constants, a DELETE that fixes the key -- to
-		// that segment alone, where the write is the plan's only slice; a
-		// DELETE whose key a few values fix, to their segments.  ORCA's core
-		// finds a single column's values; a key of two columns it does not
-		// look at, and the port finds them: an INSERT's in its one row of
-		// constants, a DELETE's in the Query's conditions.
+		// Cloudberry sends an INSERT, DELETE or UPDATE whose rows all belong
+		// on one segment -- a row of constants, a DELETE or an update in
+		// place that fixes the key -- to that segment alone, where the write
+		// is the plan's only slice; one whose key a few values fix, to their
+		// segments.  ORCA's core finds a single column's values; a key of
+		// two columns it does not look at, and the port finds them: an
+		// INSERT's in its one row of constants, a DELETE's and an UPDATE's in
+		// the Query's conditions.  Not a split update's, whose rows move.
 		List *contents = NIL;
-		if ((CMD_INSERT == m_cmd_type || CMD_DELETE == m_cmd_type) &&
+		if ((CMD_INSERT == m_cmd_type || CMD_DELETE == m_cmd_type ||
+			 (CMD_UPDATE == m_cmd_type && !split)) &&
 			NIL == m_dxl_to_plstmt_context->GetMotions())
 		{
 			contents = TranslateDXLDirectDispatchContents(
@@ -6303,7 +6742,7 @@ CTranslatorDXLToPlStmt::TranslateDXLDml(
 					CMDIdGPDB::CastMdid(mdid_target_table)->Oid(), md_rel,
 					result_plan);
 			}
-			if (NIL == contents && CMD_DELETE == m_cmd_type)
+			if (NIL == contents && CMD_INSERT != m_cmd_type)
 			{
 				contents = QueryDirectDispatchContents();
 			}
@@ -6466,7 +6905,7 @@ CTranslatorDXLToPlStmt::TranslateReturningList(Index index)
 //		checked that they read nothing else (CheckOnConflict).
 //
 //		What Cloudberry's analyze.c refuses of a DO UPDATE on a cluster is
-//		left to the planner's route, which refuses it in the same words
+//		refused here, in the words the planner's route refuses it in too
 //		(GpExplicitOnConflict): a SET of a hash-distributed table's
 //		distribution column, which would leave the row on the wrong segment,
 //		and a volatile function in the update of a replicated table's rows,
@@ -6493,8 +6932,9 @@ CTranslatorDXLToPlStmt::TranslateOnConflict(ModifyTable *dml, Index index,
 				{
 					if (md_rel->GetDistrColAt(ul)->AttrNum() == te->resno)
 					{
-						GP_UNPORTED(
-							"ON CONFLICT DO UPDATE of a distribution column");
+						gpdb::RefuseStatement(
+							ERRCODE_FEATURE_NOT_SUPPORTED,
+							"modification of distribution columns in OnConflictUpdate is not supported");
 					}
 				}
 			}
@@ -6504,8 +6944,9 @@ CTranslatorDXLToPlStmt::TranslateOnConflict(ModifyTable *dml, Index index,
 				 (Node *) on_conflict->onConflictSet) ||
 			 gpdb::ContainsVolatileFunctions(on_conflict->onConflictWhere)))
 		{
-			GP_UNPORTED(
-				"a volatile function in ON CONFLICT DO UPDATE of a replicated table");
+			gpdb::RefuseStatement(
+				ERRCODE_FEATURE_NOT_SUPPORTED,
+				"modification of replicated tables containing volatile functions in OnConflictUpdate is not supported");
 		}
 	}
 

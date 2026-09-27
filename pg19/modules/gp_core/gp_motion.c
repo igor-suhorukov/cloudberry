@@ -89,6 +89,7 @@
 #include "postgres.h"
 
 #include <ctype.h>
+#include <sys/stat.h>
 
 #include "access/detoast.h"
 #include "access/genam.h"
@@ -99,6 +100,7 @@
 #include "catalog/pg_type.h"
 #include "commands/explain.h"
 #include "commands/explain_format.h"
+#include "common/file_utils.h"
 #include "executor/executor.h"
 #include "executor/nodeSubplan.h"
 #include "nodes/params.h"
@@ -117,6 +119,7 @@
 #include "pgstat.h"
 #include "port/pg_bswap.h"
 #include "storage/buffile.h"
+#include "storage/fd.h"
 #include "storage/fileset.h"
 #include "parser/parse_func.h"
 #include "parser/parsetree.h"
@@ -776,6 +779,41 @@ motion_filesets_delete(const char *key)
 	}
 }
 
+/*
+ * The FileSet of a statement's CTEs that ORCA reads in more than one slice
+ * (gp_orca's compat/sharedscan.c): numbered by the key's counter as the
+ * statement's Motions' files are, in a range of its own, and named after the
+ * segment's writer, so that the writer and its readers name it alike.
+ */
+static void
+share_fileset(FileSet *fileset, int writer_pid, const char *key)
+{
+	motion_fileset(fileset, writer_pid, key);
+	fileset->number = 0x40000000U | (fileset->number & 0x3FFFFFFFU);
+}
+
+/*
+ * A statement's shared CTEs' rows on this segment, removed, whichever of its
+ * processes wrote them; only where there are any, which a stat() says, since
+ * FileSetDeleteAll() logs a directory it does not find.
+ */
+static void
+share_filesets_delete(const char *key)
+{
+	FileSet		fileset;
+	char		tempdirpath[MAXPGPATH];
+	char		path[MAXPGPATH];
+	struct stat st;
+
+	share_fileset(&fileset, MyProcPid, key);
+	TempTablespacePath(tempdirpath, fileset.tablespaces[0]);
+	snprintf(path, sizeof(path), "%s/%s%lu.%u.fileset", tempdirpath,
+			 PG_TEMP_FILE_PREFIX, (unsigned long) fileset.creator_pid,
+			 fileset.number);
+	if (stat(path, &st) == 0)
+		FileSetDeleteAll(&fileset);
+}
+
 static void
 motion_xact_callback(XactEvent event, void *arg)
 {
@@ -813,6 +851,18 @@ fragment_key(PlannedStmt *stmt)
 			return strVal(def->arg);
 	}
 	return "";
+}
+
+bool
+GpMotionShareFileSet(PlannedStmt *stmt, FileSet *fileset)
+{
+	const char *key = fragment_key(stmt);
+	int			writer_pid = GpShareWriterPid();
+
+	if (key[0] == '\0')
+		return false;
+	share_fileset(fileset, writer_pid != 0 ? writer_pid : MyProcPid, key);
+	return true;
 }
 
 PG_FUNCTION_INFO_V1(gp_motion_put);
@@ -924,8 +974,8 @@ PG_FUNCTION_INFO_V1(gp_motion_drop);
 /*
  * gp_internal.motion_drop(key)
  *
- * The statement is done with its Motions' rows: the coordinator's word, at
- * the end of the Gather that had them sent.
+ * The statement is done with its Motions' rows, and with its shared CTEs':
+ * the coordinator's word, at the end of the Gather that had them sent.
  */
 Datum
 gp_motion_drop(PG_FUNCTION_ARGS)
@@ -938,6 +988,7 @@ gp_motion_drop(PG_FUNCTION_ARGS)
 				 errmsg("a Motion's rows are dropped only for the coordinator")));
 	motion_files_close(key);
 	motion_filesets_delete(key);
+	share_filesets_delete(key);
 	PG_RETURN_VOID();
 }
 
@@ -2722,7 +2773,21 @@ motion_prepare(MotionState *state)
 
 	state->prepared = true;
 	if (order == NIL)
+	{
+		/*
+		 * No Motion between segments below it, but a CTE ORCA shares in the
+		 * slice it sends, whose rows each segment keeps in files named after
+		 * the key (gp_orca's compat/sharedscan.c), dropped with it.
+		 */
+		foreach_ptr(List, share, (List *) fragment_mark(estate->es_plannedstmt,
+														 GP_SHARE_SLICES))
+			if (list_member_int(share, GpMotionSlice(state->css.ss.ps.plan)) &&
+				state->key == NULL)
+				state->key = MemoryContextStrdup(estate->es_query_cxt,
+												 psprintf("%d_%u", MyProcPid,
+														  ++motion_counter));
 		return;
+	}
 
 	state->key = MemoryContextStrdup(estate->es_query_cxt,
 									 psprintf("%d_%u", MyProcPid,
@@ -2733,6 +2798,30 @@ motion_prepare(MotionState *state)
 		collect_motions((Plan *) lfirst(lc), &motions);
 
 	state->streaming = stream_plan(state, order, motions);
+
+	/*
+	 * A CTE ORCA reads in more than one slice: its slices below this Gather
+	 * all stream, or one of them would wait for a producer relayed after it.
+	 * The translator plans none that would not (gp_orca_check_motions()).
+	 */
+	foreach_ptr(List, share, (List *) fragment_mark(estate->es_plannedstmt,
+													 GP_SHARE_SLICES))
+	{
+		if (list_length(share) < 2)
+			continue;
+		foreach_int(slice, share)
+		{
+			if (slice == GpMotionSlice(state->css.ss.ps.plan) ||
+				!list_member_int(order, slice))
+				continue;
+			if (!state->streaming || stream_slice_find(state, slice) == NULL)
+				ereport(ERROR,
+						(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+						 errmsg("a CTE read in more than one slice cannot be run with its slices relayed"),
+						 errdetail("Slice %d would run before the slice that produces the CTE's rows.",
+								   slice)));
+		}
+	}
 
 	foreach(lc, order)
 	{

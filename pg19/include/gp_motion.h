@@ -61,6 +61,18 @@
 #define GP_SUBPLAN_UNKNOWN			(-2)
 
 /*
+ * Another the translator adds where ORCA shares a CTE in a slice the
+ * segments run (gp_orca's compat/sharedscan.c): for each, the slices its
+ * producer and consumers are in, an IntList, in a List.  Its rows are kept
+ * in files named after the key of the Gather that sends the slices, which
+ * so has one; and where they are more than one slice, each has to run at
+ * the same time as the others -- a consumer waits for its producer -- so a
+ * Gather that would relay one of them, a slice at a time, refuses the
+ * statement instead of waiting for ever.
+ */
+#define GP_SHARE_SLICES				"gp_share_slices"
+
+/*
  * Can ORCA's plans with a Motion be carried out from this backend?  The
  * coordinator, with a cluster secret, in a database gp_core is installed in.
  */
@@ -182,6 +194,14 @@ extern int	GpMotionDirectDispatchSegment(Oid relid, int nvalues,
 										  const Oid *types,
 										  const Datum *values,
 										  const bool *isnull);
+
+/*
+ * The FileSet this segment keeps the rows of a statement's CTEs in, where
+ * ORCA reads one in more than one slice (GpCoreApi.share_fileset); false
+ * where "stmt" is no fragment.
+ */
+struct FileSet;
+extern bool GpMotionShareFileSet(PlannedStmt *stmt, struct FileSet *fileset);
 
 /* The CustomScan, and the segments' planner hook; from gp_core's _PG_init. */
 extern void GpMotionInit(void);

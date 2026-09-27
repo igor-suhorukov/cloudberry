@@ -10,16 +10,6 @@
 + ao_locks_table | ExclusiveLock | relation | 1 segment
 +(1 row)
 @@
--    coalesce    |     mode      | locktype |  node  
------------------+---------------+----------+--------
-- ao_locks_table | ExclusiveLock | relation | master
--(1 row)
-+    coalesce    |      mode       | locktype |  node  
-+----------------+-----------------+----------+--------
-+ ao_locks_table | AccessShareLock | relation | master
-+ ao_locks_table | ExclusiveLock   | relation | master
-+(2 rows)
-@@
 -    coalesce     |       mode       | locktype |   node    
 ------------------+------------------+----------+-----------
 - ao_locks_table  | ExclusiveLock    | relation | 1 segment

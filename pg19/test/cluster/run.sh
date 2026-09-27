@@ -1564,6 +1564,91 @@ a\b|\N' ] && [ "$(cat "$ROOT/ce_prog.txt" 2>&1)" = "to a program" ] \
 	orca_same "two gathers, one slice each" \
 		"SELECT a FROM o WHERE a IN (SELECT b FROM o WHERE a < 20) ORDER BY a;" \
 		"(slice2; segments: 2)"
+	# NOT IN, ORCA's anti-join, which PostgreSQL 19's joins cannot run: the
+	# planner's hashed SubPlan, on the segments, over the inner rows ORCA
+	# broadcasts to each; a NULL among them leaves no row, and a NULL outer
+	# value is no row.
+	orca_same "NOT IN: a hashed SubPlan on the segments, over the rows broadcast to each" \
+		"SELECT count(*), sum(a) FROM o WHERE a NOT IN (SELECT x * 2 FROM po WHERE y < 3);" \
+		"hashed SubPlan"
+	orca_same "... none, a NULL among them" \
+		"SELECT count(*) FROM o WHERE a NOT IN (SELECT CASE WHEN x = 7 THEN NULL ELSE x END FROM po);"
+	orca_same "... and an outer NULL no row" \
+		"SELECT count(*), count(a) FROM (SELECT NULLIF(a, 5) AS a FROM o) s WHERE a NOT IN (SELECT x FROM po WHERE y = 0);"
+
+	# A CTE in a slice the segments run: Cloudberry's cross-slice
+	# ShareInputScan, whose producer writes the CTE's rows to files each
+	# segment keeps, which the consumers in its slice and in others read
+	# once they are all there (compat/sharedscan.c).  In such a plan the
+	# coordinator's aggregate of gathered rows, which ORCA sends back to the
+	# segments, runs on one of them, and every slice streams.
+	q 0 "CREATE TABLE sh (a int, b int) DISTRIBUTED BY (a);
+	     INSERT INTO sh SELECT i % 100, i FROM generate_series(1, 10000) i; ANALYZE sh;" >/dev/null
+	orca_same "a CTE read twice in the slice that produces it: a Shared Scan" \
+		"WITH c AS (SELECT a, count(*) cnt FROM sh GROUP BY a) SELECT count(*), sum(c1.cnt) FROM c c1 JOIN c c2 USING (a) WHERE c1.cnt > 5;" \
+		"Shared Scan (share slice:id"
+	orca_same "... and in another slice, below a Redistribute Motion" \
+		"WITH c AS (SELECT a, b FROM sh WHERE b % 3 = 0) SELECT count(*), sum(c1.b) FROM c c1 JOIN c c2 ON c1.b = c2.a;" \
+		"Redistribute Motion 2:2"
+	orca_same "grouping sets, which ORCA aggregates over a shared CTE, a slice each" \
+		"SELECT a % 3, b % 4, count(*) FROM sh GROUP BY CUBE (a % 3, b % 4) ORDER BY 1, 2;" \
+		"Sequence"
+	orca_same "the aggregate of gathered rows ORCA sends back to the segments, on one of them" \
+		"WITH r AS (SELECT b % 37 AS s, sum(a) AS t FROM sh GROUP BY 1) SELECT s, t FROM r WHERE t = (SELECT max(t) FROM r) ORDER BY 1;" \
+		"Motion 1:2"
+	# ... in a subquery's plan too, which a translator of its own translates:
+	# the aggregate a HAVING compares with, as TPC-DS's query 24 has it.
+	sql="WITH s AS (SELECT a, b % 7 AS k, sum(b) AS paid FROM sh GROUP BY a, b % 7) SELECT a, sum(paid) FROM s WHERE k = 3 GROUP BY a HAVING sum(paid) > (SELECT 0.05 * avg(paid) FROM s) ORDER BY a;"
+	plan=$(q 0 "SET gp.optimizer_enforce_subplans = on; EXPLAIN (COSTS OFF) $sql" | tr '\n' '|')
+	got=$(q 0 "SET gp.optimizer_enforce_subplans = on; $sql")
+	want=$(q 0 "SET gp.optimizer = off; $sql")
+	case "$plan" in
+		*"SubPlan"*"Motion 1:2"*"Shared Scan"*"Optimizer: GPORCA"*)
+			[ -n "$got" ] && [ "$got" = "$want" ] \
+				&& ok "... and in a subquery's plan, which is translated apart" \
+				|| notok "a shared CTE's aggregate in a SubPlan" "ORCA: $got / planner: $want" ;;
+		*) notok "a shared CTE's aggregate in a SubPlan: the plan" "$plan" ;;
+	esac
+	out=$(q 0 "SET gp.optimizer_enable_hashjoin = off; SET gp.optimizer_enable_mergejoin = off;
+		EXPLAIN (COSTS OFF) WITH c AS (SELECT a, b FROM sh WHERE b < 400) SELECT count(*) FROM c c1 JOIN c c2 ON c1.a = c2.a AND c1.b < c2.b;" | tr '\n' '|')
+	got=$(q 0 "SET gp.optimizer_enable_hashjoin = off; SET gp.optimizer_enable_mergejoin = off;
+		WITH c AS (SELECT a, b FROM sh WHERE b < 400) SELECT count(*) FROM c c1 JOIN c c2 ON c1.a = c2.a AND c1.b < c2.b;")
+	want=$(q 0 "SET gp.optimizer = off; WITH c AS (SELECT a, b FROM sh WHERE b < 400) SELECT count(*) FROM c c1 JOIN c c2 ON c1.a = c2.a AND c1.b < c2.b;")
+	case "$out" in
+		*"Nested Loop"*"Shared Scan"*"Optimizer: GPORCA"*)
+			[ "$got" = "$want" ] && ok "... a consumer read again for each row of a nested loop" \
+				|| notok "a Shared Scan read again" "ORCA: $got / planner: $want" ;;
+		*) notok "a Shared Scan on a nested loop's inner side: the plan" "$out" ;;
+	esac
+	got=$(q 0 "SET statement_timeout = '60s'; WITH c AS (SELECT a, b FROM sh) SELECT c1.a FROM c c1 JOIN c c2 ON c1.b = c2.a LIMIT 3;" | grep -c '^[0-9][0-9]*$')
+	after=$(q 0 "SELECT count(*) FROM sh;")
+	[ "$got" = 3 ] && [ "$after" = 10000 ] \
+		&& ok "... a LIMIT that stops the Gather before the consumers have read, and nothing waits" \
+		|| notok "a Shared Scan below a LIMIT" "$got rows, then $after"
+	out=$(q 0 "SET statement_timeout = '60s'; WITH c AS (SELECT a, b FROM sh) SELECT count(*) FROM c c1 JOIN c c2 ON c1.b = c2.a WHERE 1 / (c2.b - 50) > -1;")
+	case "$out" in
+		*"division by zero"*) ok "... an error in a consumer's slice ends the statement, nothing waiting" ;;
+		*) notok "an error with a Shared Scan" "$out" ;;
+	esac
+	left=$(ls -d "$(datadir 1)"/base/pgsql_tmp/*.fileset "$(datadir 2)"/base/pgsql_tmp/*.fileset 2>/dev/null | wc -l)
+	[ "$left" = 0 ] && ok "... and the segments keep none of the shared CTEs' files after" \
+		|| notok "the shared CTEs' files, left on the segments" "$(ls -d "$(datadir 1)"/base/pgsql_tmp/* "$(datadir 2)"/base/pgsql_tmp/* 2>/dev/null | tr '\n' ' ')"
+	# gp_core relays a slice at a time with gp.interconnect_type = relay, and
+	# a slice that reads a temporary table: such a plan is the planner's.
+	shared_relayed() {			# shared_relayed <what> <setup> <table>
+		local out
+		out=$(printf '%s\n' "$2" "SET gp.optimizer_trace_fallback = on;" \
+			"WITH c AS (SELECT a, b FROM $3 WHERE b % 3 = 0) SELECT count(*), sum(c1.b) FROM c c1 JOIN c c2 ON c1.b = c2.a;" | qf 0 | tr '\n' '|')
+		case "$out" in
+			*"a CTE read in more than one slice, whose slices cannot all run at once"*"1122|57222|"*)
+				ok "$1" ;;
+			*) notok "$1" "$out" ;;
+		esac
+	}
+	shared_relayed "... left to the planner with gp.interconnect_type = relay" \
+		"SET gp.interconnect_type = relay;" sh
+	shared_relayed "... and where it reads a temporary table" \
+		"CREATE TEMP TABLE sht AS SELECT * FROM sh DISTRIBUTED BY (a); ANALYZE sht;" sht
 
 	# gp_segment_id is ORCA's system column, which its plan computes where
 	# the row is read: a query naming it is ORCA's, a random table's
@@ -1995,6 +2080,9 @@ COMMIT;"
 	orca_write "UPDATE ... WHERE EXISTS" \
 		"UPDATE wu SET b = -b WHERE EXISTS (SELECT 1 FROM po WHERE po.x = wu.a AND po.y > 4);" \
 		"SELECT count(*), sum(b) FROM wu;" "Update on wu"
+	orca_write "an update in place whose condition fixes the key: to that segment alone" \
+		"UPDATE wu SET b = b + 1 WHERE a = 7;" \
+		"SELECT count(*), sum(b) FROM wu;" "Dispatch  (slice1; segments: 1)"
 	orca_write "an UPDATE of the key joined to another table: a Split, each row moved once" \
 		"UPDATE wu SET a = a + 1000 FROM po WHERE wu.a = po.x AND po.y = 2;" \
 		"SELECT count(*), sum(a), count(*) FILTER (WHERE a > 1000) FROM wu;" "Split Update"
@@ -2103,15 +2191,16 @@ COMMIT;"
 		&& ok "statements that fail on the segments while their slices stream fail with the error, over tcp, UDP and relayed, and every node stays up" \
 		|| notok "a statement failing on the segments" "$failed / crashes: $before before, $(crashes) after"
 
-	# What Cloudberry refuses of a DO UPDATE, the planner's route refuses in
-	# its words, and ORCA leaves to it: a distribution column set, and a
-	# volatile function in a replicated table's update.
+	# What Cloudberry refuses of a DO UPDATE, ORCA refuses in its words, as
+	# the planner's route does, without falling back to it: a distribution
+	# column set, and a volatile function in a replicated table's update.
 	out=$(printf '%s\n' "SET gp.optimizer_trace_fallback = on;" \
 		"INSERT INTO wu VALUES (5, 5, 'k') ON CONFLICT (a) DO UPDATE SET a = 500;" \
 		"INSERT INTO wur VALUES (3, 3) ON CONFLICT (a) DO UPDATE SET b = random()::int;" | qf 0)
 	case "$out" in
-		*"distribution column"*"modification of distribution columns in OnConflictUpdate is not supported"*"replicated table"*"modification of replicated tables containing volatile functions in OnConflictUpdate is not supported"*)
-			ok "a DO UPDATE of the key, or volatile on a replicated table, is the planner's to refuse, in Cloudberry's words" ;;
+		*"falling back"*) notok "ON CONFLICT that Cloudberry refuses" "$out" ;;
+		*"modification of distribution columns in OnConflictUpdate is not supported"*"modification of replicated tables containing volatile functions in OnConflictUpdate is not supported"*)
+			ok "a DO UPDATE of the key, or volatile on a replicated table, is refused by ORCA, in Cloudberry's words" ;;
 		*) notok "ON CONFLICT that Cloudberry refuses" "$out" ;;
 	esac
 
@@ -2133,6 +2222,24 @@ COMMIT;"
 		"SELECT count(*), sum(a) FROM wo;" | qf 0)
 	[ "$out" = "500|50497" ] && ok "a split update rolled back leaves every row where it was" \
 		|| notok "a split update rolled back" "$out"
+
+	# A segment applies a split update's DELETEs before its INSERTs, the
+	# order ORCA sorts its rows into where the update changes a key of the
+	# table's: an UPDATE that sets a unique key to another column that has
+	# the same value deletes each old row before its new one is checked
+	# against it.
+	q 0 "CREATE TABLE wq (a int UNIQUE, b int) DISTRIBUTED BY (a); INSERT INTO wq SELECT i, i FROM generate_series(1, 50) i;" >/dev/null
+	plan=$(q 0 "EXPLAIN (COSTS OFF) UPDATE wq SET a = b WHERE b <= 25;")
+	tag=$("$PSQL" -X -t -A -h "$(sockdir 0)" -p "$(port 0)" -d postgres \
+		-c "UPDATE wq SET a = b WHERE b <= 25;" 2>&1)
+	out=$(q 0 "SELECT count(*), sum(a) FROM wq;")
+	case "$plan" in
+		*"Split Update"*)
+			[ "$tag|$out" = "UPDATE 25|50|1275" ] \
+				&& ok "a split update of a unique key to the value it has: each row's DELETE before its INSERT" \
+				|| notok "a split update of a unique key" "$tag / $out" ;;
+		*) notok "a split update of a unique key: the plan" "$plan" ;;
+	esac
 
 	q 0 "CREATE TABLE wt (a int, b int) DISTRIBUTED BY (a);" >/dev/null
 	q 0 "CREATE FUNCTION wt_noop() RETURNS trigger LANGUAGE plpgsql AS \$\$ BEGIN RETURN NEW; END \$\$;" >/dev/null

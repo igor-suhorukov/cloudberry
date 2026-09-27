@@ -102,15 +102,25 @@ public:
 		Plan *m_cte_producer_plan;
 
 		// the initplan that runs it: its plan_id, and in setParam the
-		// parameter its CteScans share
+		// parameter its CteScans share; nullptr where the CTE is shared
 		SubPlan *m_initplan;
 
+		// produced in a slice a segment runs, its rows kept in files each
+		// segment keeps (compat/sharedscan.c), and the producer's slice
+		BOOL m_shared;
+		const PlanSlice *m_slice;
+
 		// ctor
-		SCTEEntryInfo(ULongPtrArray *idxmap, Plan *plan_cte, SubPlan *initplan)
-			: m_pidxmap(idxmap), m_cte_producer_plan(plan_cte), m_initplan(initplan)
+		SCTEEntryInfo(ULongPtrArray *idxmap, Plan *plan_cte, SubPlan *initplan,
+					  BOOL shared, const PlanSlice *slice)
+			: m_pidxmap(idxmap),
+			  m_cte_producer_plan(plan_cte),
+			  m_initplan(initplan),
+			  m_shared(shared),
+			  m_slice(slice)
 		{
 			GPOS_ASSERT(plan_cte);
-			GPOS_ASSERT(initplan);
+			GPOS_ASSERT(shared || initplan);
 		}
 
 		~SCTEEntryInfo() = default;
@@ -209,10 +219,13 @@ public:
 	// retrieve the next parameter id
 	ULONG GetNextParamId(OID typeoid);
 
-	// register a newly CTE producer
+	// register a newly CTE producer: its initplan, or where it is shared
+	// through files none, and the slice it is in
 	void RegisterCTEProducerInfo(ULONG cte_id,
 								 ULongPtrArray *producer_output_colidx_map,
-								 Plan *producer, SubPlan *initplan);
+								 Plan *producer, SubPlan *initplan,
+								 BOOL shared = false,
+								 const PlanSlice *slice = nullptr);
 
 	// what a CTE producer became, or nullptr for one not translated yet
 	const SCTEEntryInfo *GetCTEProducerInfo(ULONG cte_id) const;
@@ -322,6 +335,18 @@ public:
 
 	// used by internal GPDB functions to build the RelOptInfo when creating foreign scans
 	Query *m_orig_query;
+
+	// NOT IN CLOUDBERRY.  What the whole plan's translation has to know, a
+	// scalar SubPlan's plan being translated by a translator of its own
+	// (CTranslatorDXLToScalar): a Gather Motion into a slice that runs on
+	// one segment, which gp_core carries out as it does a Motion between
+	// segments; and whether the plan has a CTE, which a slice the segments
+	// run shares through files, its slices running at once, so that the
+	// coordinator's own slice below a Motion it would send from runs on a
+	// segment instead, where it reads nothing of its own
+	// (compat/sharedscan.c).
+	BOOL m_gather_into_segment = false;
+	BOOL m_singletons_on_segment = false;
 
 	// get rte from m_rtable_entries_list by given index
 	RangeTblEntry *GetRTEByIndex(Index index);

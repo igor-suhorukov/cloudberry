@@ -90,10 +90,13 @@ bfv_joins  a join of twenty empty tables, which Cloudberry's demo cluster
   rows, in the time the test allows.  Its tables distributed with the legacy
   cdbhash_float4_ops class are joined as Cloudberry joins them.
 
-bfv_subquery (planner)  count_operator() finds no Seq Scan in the plan of
-  a query over distributed tables: the port's planner reads each through a
-  Gather Motion, which scans the table on the segments, and EXPLAIN names
-  the Motion.
+bfv_subquery (planner, orca)  count_operator() finds no Seq Scan in the
+  plan of a query over distributed tables: the port's planner reads each
+  through a Gather Motion, which scans the table on the segments, and
+  EXPLAIN names the Motion.  Under ORCA, the NOTICE of a ctid without its
+  gp_segment_id in NOT IN (SELECT ctid FROM t_inner), which Cloudberry's
+  planner gives and ORCA's plan does not -- Cloudberry's ORCA gives none
+  either (bfv_subquery_optimizer.out).
 
 bitmap_index  PostgreSQL 19's limit on an index row, a third of an 8K page,
   where Cloudberry's 32K pages take a larger one, refused on the segment the
@@ -111,10 +114,9 @@ case_gp  IS NOT DISTINCT FROM, and the CASE form, printed as the searched
 
 qp_misc (orca)  the lines ORCA's fallback trace prints where Cloudberry's
   expected output has none, and nothing else: the test sets
-  optimizer_trace_fallback, and the port's ORCA declines NOT IN as an
-  anti-join, several DISTINCT aggregates, two subqueries that are not
-  scalars, and one plan it finds none for; PostgreSQL's planner plans them,
-  with the same answers.
+  optimizer_trace_fallback, and the port's ORCA declines several DISTINCT
+  aggregates, two subqueries that are not scalars, and one plan it finds
+  none for; PostgreSQL's planner plans them, with the same answers.
 
 DML_over_joins (orca)  the lines ORCA's fallback trace prints and nothing
   else: ORCA declines an UPDATE that moves a row of a partitioned table, a
@@ -162,10 +164,11 @@ gp_create_table  the OID of text's hash operator class in
   gp_distribution_policy.distclass: the same class, which Cloudberry's
   catalog numbers 10039 and PostgreSQL 19's 10037.
 
-gp_dqa (orca)  the fallback trace of two queries of count(DISTINCT) over a
-  table with a primary key of two columns, grouped by it, which ORCA's
-  translator declines -- "No attribute entry found due to incorrect
-  normalization of query" -- and the planner answers the same.
+gp_dqa (orca)  ORCA's fallback trace, which the expected output closest to
+  the pass, the planner's, does not print, for the queries it declines and
+  the planner answers the same: several DISTINCT aggregates, where
+  optimizer_enable_multiple_distinct_aggs is off, as Cloudberry's ORCA
+  declines them; and an aggregate with FILTER.
 
 gp_types  PostgreSQL 19's words for an operator no type takes: a DETAIL
   where Cloudberry's HINT stood.
@@ -251,12 +254,8 @@ qp_functions (planner, orca)  PostgreSQL 19's words for a call no function
   before the suite ran in groups.
 
 qp_subquery (orca)  the fallback trace of the queries ORCA's translator
-  declines -- subqueries that are not scalar, NOT IN as an anti-join, an
-  inherited table, a whole-row variable -- which the planner answers the
-  same; and, as DROP
-  SCHEMA ... CASCADE drops the test's indexes, of gp_sql's query of each
-  index's tags in gp_sql.index_tag, a table of the coordinator's, which ORCA
-  leaves to the planner.
+  declines -- subqueries that are not scalar, an inherited table, a
+  whole-row variable -- which the planner answers the same.
 
 resource_queue  SHOW resource_scheduler, whose header is the port's name
   of it, gp.resource_scheduler, three letters wider.  And the NOTICE of the

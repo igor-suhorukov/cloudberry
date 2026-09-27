@@ -42,15 +42,6 @@
 +DETAIL:  Falling back to Postgres-based planner because GPORCA does not support the following feature: Non-Scalar Subquery
 @@
 +INFO:  GPORCA failed to produce a plan, falling back to Postgres-based planner
-+DETAIL:  Falling back to Postgres-based planner because GPORCA does not support the following feature: NOT IN as an anti-join
-@@
-+INFO:  GPORCA failed to produce a plan, falling back to Postgres-based planner
-+DETAIL:  Falling back to Postgres-based planner because GPORCA does not support the following feature: NOT IN as an anti-join
-@@
-+INFO:  GPORCA failed to produce a plan, falling back to Postgres-based planner
-+DETAIL:  Falling back to Postgres-based planner because GPORCA does not support the following feature: NOT IN as an anti-join
-@@
-+INFO:  GPORCA failed to produce a plan, falling back to Postgres-based planner
 +DETAIL:  Falling back to Postgres-based planner because GPORCA does not support the following feature: Non-Scalar Subquery
 @@
 +INFO:  GPORCA failed to produce a plan, falling back to Postgres-based planner
@@ -64,42 +55,6 @@
 @@
 +INFO:  GPORCA failed to produce a plan, falling back to Postgres-based planner
 +DETAIL:  Falling back to Postgres-based planner because GPORCA does not support the following feature: Non-Scalar Subquery
-@@
-+INFO:  GPORCA failed to produce a plan, falling back to Postgres-based planner
-+DETAIL:  Falling back to Postgres-based planner because GPORCA does not support the following feature: Non-Scalar Subquery
-@@
-+INFO:  GPORCA failed to produce a plan, falling back to Postgres-based planner
-+DETAIL:  Falling back to Postgres-based planner because GPORCA does not support the following feature: Non-Scalar Subquery
-@@
-+INFO:  GPORCA failed to produce a plan, falling back to Postgres-based planner
-+DETAIL:  Falling back to Postgres-based planner because GPORCA does not support the following feature: Non-Scalar Subquery
-@@
-+INFO:  GPORCA failed to produce a plan, falling back to Postgres-based planner
-+DETAIL:  Falling back to Postgres-based planner because GPORCA does not support the following feature: Non-Scalar Subquery
-@@
-+INFO:  GPORCA failed to produce a plan, falling back to Postgres-based planner
-+DETAIL:  Falling back to Postgres-based planner because GPORCA does not support the following feature: Non-Scalar Subquery
-@@
-+INFO:  GPORCA failed to produce a plan, falling back to Postgres-based planner
-+DETAIL:  Falling back to Postgres-based planner because GPORCA does not support the following feature: Non-Scalar Subquery
-@@
-+INFO:  GPORCA failed to produce a plan, falling back to Postgres-based planner
-+DETAIL:  Falling back to Postgres-based planner because GPORCA does not support the following feature: Non-Scalar Subquery
-@@
-+INFO:  GPORCA failed to produce a plan, falling back to Postgres-based planner
-+DETAIL:  Falling back to Postgres-based planner because GPORCA does not support the following feature: Non-Scalar Subquery
-@@
-+INFO:  GPORCA failed to produce a plan, falling back to Postgres-based planner
-+DETAIL:  Falling back to Postgres-based planner because GPORCA does not support the following feature: Non-Scalar Subquery
-@@
-+INFO:  GPORCA failed to produce a plan, falling back to Postgres-based planner
-+DETAIL:  Falling back to Postgres-based planner because GPORCA does not support the following feature: NOT IN as an anti-join
-@@
-+INFO:  GPORCA failed to produce a plan, falling back to Postgres-based planner
-+DETAIL:  Falling back to Postgres-based planner because GPORCA does not support the following feature: NOT IN as an anti-join
-@@
-+INFO:  GPORCA failed to produce a plan, falling back to Postgres-based planner
-+DETAIL:  Falling back to Postgres-based planner because GPORCA does not support the following feature: NOT IN as an anti-join
 @@
 +INFO:  GPORCA failed to produce a plan, falling back to Postgres-based planner
 +DETAIL:  Falling back to Postgres-based planner because GPORCA does not support the following feature: Non-Scalar Subquery
@@ -162,7 +117,13 @@
 +DETAIL:  Falling back to Postgres-based planner because GPORCA does not support the following feature: Non-Scalar Subquery
 @@
 +INFO:  GPORCA failed to produce a plan, falling back to Postgres-based planner
-+DETAIL:  Falling back to Postgres-based planner because GPORCA does not support the following feature: NOT IN as an anti-join
++DETAIL:  Falling back to Postgres-based planner because GPORCA does not support the following feature: Non-Scalar Subquery
+@@
++INFO:  GPORCA failed to produce a plan, falling back to Postgres-based planner
++DETAIL:  Falling back to Postgres-based planner because GPORCA does not support the following feature: Non-Scalar Subquery
+@@
++INFO:  GPORCA failed to produce a plan, falling back to Postgres-based planner
++DETAIL:  Falling back to Postgres-based planner because GPORCA does not support the following feature: Non-Scalar Subquery
 @@
 +INFO:  GPORCA failed to produce a plan, falling back to Postgres-based planner
 +DETAIL:  Falling back to Postgres-based planner because GPORCA does not support the following feature: Non-Scalar Subquery
@@ -174,19 +135,22 @@
 +DETAIL:  Falling back to Postgres-based planner because GPORCA does not support the following feature: Non-Scalar Subquery
 @@
 +INFO:  GPORCA failed to produce a plan, falling back to Postgres-based planner
-+DETAIL:  Falling back to Postgres-based planner because GPORCA does not support the following feature: NOT IN as an anti-join
++DETAIL:  Falling back to Postgres-based planner because GPORCA does not support the following feature: Non-Scalar Subquery
 @@
 +INFO:  GPORCA failed to produce a plan, falling back to Postgres-based planner
-+DETAIL:  Falling back to Postgres-based planner because GPORCA does not support the following feature: NOT IN as an anti-join
++DETAIL:  Falling back to Postgres-based planner because GPORCA does not support the following feature: Non-Scalar Subquery
 @@
 +INFO:  GPORCA failed to produce a plan, falling back to Postgres-based planner
-+DETAIL:  Falling back to Postgres-based planner because GPORCA does not support the following feature: NOT IN as an anti-join
++DETAIL:  Falling back to Postgres-based planner because GPORCA does not support the following feature: Non-Scalar Subquery
 @@
 +INFO:  GPORCA failed to produce a plan, falling back to Postgres-based planner
-+DETAIL:  Falling back to Postgres-based planner because GPORCA does not support the following feature: NOT IN as an anti-join
++DETAIL:  Falling back to Postgres-based planner because GPORCA does not support the following feature: Non-Scalar Subquery
 @@
 +INFO:  GPORCA failed to produce a plan, falling back to Postgres-based planner
-+DETAIL:  Falling back to Postgres-based planner because GPORCA does not support the following feature: NOT IN as an anti-join
++DETAIL:  Falling back to Postgres-based planner because GPORCA does not support the following feature: Non-Scalar Subquery
+@@
++INFO:  GPORCA failed to produce a plan, falling back to Postgres-based planner
++DETAIL:  Falling back to Postgres-based planner because GPORCA does not support the following feature: Non-Scalar Subquery
 @@
 +INFO:  GPORCA failed to produce a plan, falling back to Postgres-based planner
 +DETAIL:  Falling back to Postgres-based planner because GPORCA does not support the following feature: Inherited tables

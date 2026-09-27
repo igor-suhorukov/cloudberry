@@ -173,9 +173,6 @@ private:
 	// result relations, as the planner's are its scans' own
 	List *m_partition_scans;
 
-	// a Gather Motion into a slice that runs on one segment, which gp_core
-	// carries out as it does a Motion between segments
-	BOOL m_gather_into_segment;
 
 	// number of segments
 	ULONG m_num_of_segments;
@@ -280,6 +277,11 @@ private:
 		CDXLTranslationContextArray *
 			ctxt_translation_prev_siblings	// translation contexts of previous siblings
 	);
+
+	// NOT IN's anti-join, as a Result filtered by a hashed SubPlan
+	Plan *TranslateDXLHashJoinNotIn(
+		const CDXLNode *hj_dxlnode, CDXLTranslateContext *output_context,
+		CDXLTranslationContextArray *ctxt_translation_prev_siblings);
 
 	// translate DXL hash join into a HashJoin node
 	Plan *TranslateDXLHashJoin(
@@ -511,7 +513,8 @@ private:
 		const CDXLNode *cte_producer_dxlnode,
 		CDXLTranslateContext *output_context,
 		CDXLTranslationContextArray *
-			ctxt_translation_prev_siblings	// translation contexts of previous siblings
+			ctxt_translation_prev_siblings,	 // translation contexts of previous siblings
+		BOOL shared = false	 // read in another slice too
 	);
 
 	// translate a CTE consumer into a GPDB share input scan

@@ -357,6 +357,10 @@ bool IsAggPartialCapable(Oid aggid);
 // combine function -- not an ordered-set aggregate's WITHIN GROUP?
 bool QueryOrdersPartialCapableAgg(Query *query);
 
+// does the query, or one in it, call a DISTINCT aggregate beside one that is
+// not?
+bool QueryMixesDistinctAgg(Query *query);
+
 // intermediate result type of given aggregate
 Oid GetAggregate(const char *agg, Oid type_oid);
 
@@ -776,6 +780,13 @@ void CheckRTPermissions(List *rtable, List *rteperminfos);
 // throw an error if table has update triggers.
 bool HasUpdateTriggers(Oid relid);
 
+// does the table itself, not its partitions, have an enabled UPDATE trigger?
+bool HasOwnUpdateTriggers(Oid relid);
+
+// refuse the statement with an error of PostgreSQL's: what Cloudberry refuses
+// under either planner, as the planner's route here refuses it too
+void RefuseStatement(int sqlerrcode, const char *message);
+
 // get index operator family properties
 void IndexOpProperties(Oid opno, Oid opfamily, StrategyNumber *strategynumber,
 					   Oid *righttype);
@@ -853,6 +864,8 @@ List *DynamicScanTlist(Plan *scan);
 // (compat/cb_motion.h).  Not in Cloudberry's layer, whose executor has a
 // Motion node and whose dispatcher sends a slice's parameters with it.
 bool CanDispatchPlans(void);
+// Whether the database has gp_core's extension, whose functions run a slice.
+bool HasCoreExtension(void);
 Plan *MakeGatherMotion(Plan *fragment, List *targetlist, List *qual,
 					   int content, int slice, int nkeys,
 					   const AttrNumber *keys, const Oid *sortops,
@@ -873,6 +886,30 @@ bool HasAnyTriggers(Oid relid);
 // Does the relation's access method take a changed row's old version from
 // the plan, as a whole-row column, rather than fetch it by its ctid (O20)?
 bool RelOldRowFromPlan(Oid relid);
+
+// The whole row as the scan that read column "resno" of "plan" -- the row's
+// ctid -- read it, carried up to "plan" as a new column; "rtable" is the
+// plan's range table.  Its resno, or InvalidAttrNumber where a node between
+// cannot pass it on (O20's "wholerow"; compat/wholerow.c).
+AttrNumber CarryWholeRow(Plan *plan, AttrNumber resno, List *rtable);
+
+// A CTE ORCA reads in more than one slice, whose rows each segment keeps in
+// files (compat/sharedscan.c): whether gp_core can name them; the Sequence
+// that runs "producers" before "plan"; a producer, writing the rows of
+// "child" as share "share_id" in slice "slice"; and a consumer, reading
+// them as "scan_tlist" and giving "targetlist" of them.
+bool CanShareAcrossSlices(void);
+Plan *MakeSequence(Plan *plan, List *producers);
+Plan *MakeShareProducer(Plan *child, int share_id, int slice);
+Plan *MakeShareConsumer(int share_id, int slice, List *scan_tlist,
+						List *targetlist);
+
+// The plan of the hashed SubPlan that stands for NOT IN's anti-join over
+// "inner", the join's conditions "clauses", and its test over "paramids";
+// nullptr where a condition is not an outer expression's equality with an
+// inner one (compat/notin.c).
+Plan *NotInSubplan(List *clauses, Plan *inner, List *paramids,
+				   Expr **testexpr, bool *hashable);
 
 // ON CONFLICT, as the planner makes it: the arbiter indexes of the INSERT
 // "query" -- infer_arbiter_indexes(), over its own Query -- an UPDATE's

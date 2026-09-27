@@ -1039,9 +1039,20 @@ COptTasks::OptimizeTask(void *ptr)
 				GPOPT_DISABLE_XFORM_TF(CXform::ExfSplitGbAggDedup),
 				no_split || GPOS_FTRACE(GPOPT_DISABLE_XFORM_TF(
 								CXform::ExfSplitGbAggDedup)));
+			// And a DISTINCT aggregate beside one that is not: the
+			// transform that splits a DISTINCT aggregate into stages
+			// finishes it in the node where the others are combined from
+			// their partial states, and PostgreSQL 19's Agg runs every
+			// aggregate of a node in one mode (the translator refuses such
+			// a node, CTranslatorDXLToPlStmt::TranslateDXLAgg).  Without
+			// it, ORCA aggregates the distinct values where they meet, in
+			// one stage, or dedups them first.
+			BOOL no_split_dqa =
+				no_split ||
+				gpdb::QueryMixesDistinctAgg((Query *) opt_ctxt->m_query);
 			CAutoTraceFlag atf5(
 				GPOPT_DISABLE_XFORM_TF(CXform::ExfSplitDQA),
-				no_split ||
+				no_split_dqa ||
 					GPOS_FTRACE(GPOPT_DISABLE_XFORM_TF(CXform::ExfSplitDQA)));
 			CAutoTraceFlag atf6(
 				GPOPT_DISABLE_XFORM_TF(CXform::ExfEagerAgg),

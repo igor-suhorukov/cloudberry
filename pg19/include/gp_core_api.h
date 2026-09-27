@@ -39,12 +39,14 @@
  * here changes meaning or moves.
  */
 #define GP_CORE_API_VERSION_MAJOR	1
-#define GP_CORE_API_VERSION_MINOR	9
+#define GP_CORE_API_VERSION_MINOR	10
 
 struct Node;
 struct List;
 struct Plan;
+struct PlannedStmt;
 struct Query;
+struct FileSet;
 
 /*
  * What the rendezvous variable points at.  It is the first thing a module
@@ -176,6 +178,19 @@ typedef struct GpCoreApi
 	 * fragment a segment runs -- the slice it is in runs on one -- is
 	 * received there as a Motion between segments is (gp_motion.c).
 	 */
+
+	/*
+	 * Since 1.10: the FileSet a segment keeps the rows of a statement's CTEs
+	 * in, where ORCA reads one in more than one slice -- Cloudberry's
+	 * cross-slice ShareInputScan (gp_orca's compat/sharedscan.c).  Named
+	 * after the segment's writer and the key of the Gather whose fragment
+	 * "stmt" is, so that every process of the statement there, the writer
+	 * and its readers, names it alike; false where "stmt" is no fragment.
+	 * The Gather's end removes it, as it removes the rows its Motions sent
+	 * (gp_internal.motion_drop()).
+	 */
+	bool		(*share_fileset) (struct PlannedStmt *stmt,
+								  struct FileSet *fileset);
 } GpCoreApi;
 
 /*
