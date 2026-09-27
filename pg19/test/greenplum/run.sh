@@ -166,6 +166,10 @@ make_cluster() {
 			# cluster runs with: a statement's memory is its queue's to give
 			echo "gp.resqueue_memory_policy = 'eager_free'"
 			[ "$n" -eq 0 ] && echo "gp.role = 'dispatch'"
+			# every statement in the coordinator's log, as gpinitsystem sets
+			# it on the cluster Cloudberry's tests run on: log_guc reads
+			# them back
+			[ "$n" -eq 0 ] && echo "log_statement = 'all'"
 			# each statement ORCA would not plan, and why, in the log: the
 			# ORCA pass's reasons, totalled below
 			[ "$n" -eq 0 ] && echo "gp.optimizer_log_fallback = on"

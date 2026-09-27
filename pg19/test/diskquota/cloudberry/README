@@ -61,9 +61,3 @@ test_fast_disk_check  (pg_database_size() - dbsize) / dbsize, of
   the relcache's init file (0.16 MB), and it counts the shared catalogs,
   which are no database's (0.39 MB): 1 MB a node, of the 43 MB the four
   nodes' copies of the database hold.
-
-test_dbname_encoding  whether the worker's log names the database, which
-  the test reads through gp_toolkit's __gp_log_master_ext, an external web
-  table of Cloudberry's the port does not have (the manifest skips
-  test_readiness_logged, which reads nothing else).  The worker of the
-  database 数据库1 starts, and the log is not read.

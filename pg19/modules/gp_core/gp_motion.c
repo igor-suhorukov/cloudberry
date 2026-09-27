@@ -146,6 +146,7 @@
 #include "gp_gdd.h"
 #include "gp_hash.h"
 #include "gp_ic.h"
+#include "gp_log.h"
 #include "gp_motion.h"
 #include "gp_policy.h"
 #include "gp_refresh.h"
@@ -2798,11 +2799,11 @@ stream_start(MotionState *state)
 			char	   *sql;
 
 			sql = psprintf("BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY; "
-						   "SET LOCAL %s = %s; %s; COMMIT",
+						   "SET LOCAL %s = %s; %s; COMMIT%s",
 						   GP_SHARE_SETTING,
 						   quote_literal_cstr(psprintf("%d/%s", writer_pid[seg],
 													   sharekey)),
-						   fragment);
+						   fragment, GpLogStatementComment());
 			GpStreamStartReader(stream, ss->readers[i], sql);
 		}
 	}
@@ -4154,6 +4155,15 @@ motion_executor_start(QueryDesc *queryDesc, int eflags)
 
 	/* InitPlan()'s last fault, where its plan is set up */
 	(void) GP_FAULT("func_init_plan_end");
+
+	/*
+	 * Where Cloudberry's segment has its slice's snapshot and interconnect
+	 * (standard_ExecutorStart()): a fragment of the coordinator's plan, or
+	 * a gather's query, on a writer or a reader.
+	 */
+	if (GpClusterIsDispatched() &&
+		(is_fragment(queryDesc->plannedstmt) || gather_was_checked(queryDesc->sourceText)))
+		(void) GP_FAULT("qe_got_snapshot_and_interconnect");
 
 	if (params != NIL)
 		fragment_params_after_start(queryDesc, params);

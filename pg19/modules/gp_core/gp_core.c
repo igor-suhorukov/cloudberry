@@ -56,6 +56,7 @@
 #include "gp_gdd.h"
 #include "gp_motion.h"
 #include "gp_label.h"
+#include "gp_log.h"
 #include "gp_loopback.h"
 #include "gp_metatrack.h"
 #include "gp_policy.h"
@@ -286,6 +287,13 @@ _PG_init(void)
 	 * too.
 	 */
 	GpExplainInit();
+
+	/*
+	 * Cloudberry's own log, the CSV file gp_toolkit's views of the logs
+	 * read, written beside PostgreSQL's log from emit_log_hook (gp_log.c),
+	 * on one node too; its file is every process's, through shared memory.
+	 */
+	GpLogInit();
 
 	/*
 	 * Deliberately no MarkGUCPrefixReserved("gp") here.  It drops every

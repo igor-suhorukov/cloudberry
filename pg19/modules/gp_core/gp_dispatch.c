@@ -127,6 +127,7 @@
 #include "gp_fts.h"
 #include "gp_grammar_int.h"
 #include "gp_label.h"
+#include "gp_log.h"
 #include "gp_loopback.h"
 #include "gp_motion.h"
 #include "gp_settings.h"
@@ -201,6 +202,14 @@ static const char *const synced_settings[] = {
 	"postgis.enable_outdb_rasters",
 	"postgis.gdal_cpl_debug",
 	"postgis.gdal_vsi_options",
+	/*
+	 * what a segment logs, as Cloudberry's segments take it from the
+	 * coordinator: which messages, and a statement with them, and each
+	 * statement's time -- settings only a superuser sets, likewise
+	 */
+	"log_min_messages",
+	"log_min_error_statement",
+	"log_min_duration_statement",
 	"search_path",
 	"role",
 	"DateStyle",
@@ -293,21 +302,61 @@ static const char *const superuser_settings[] = {
 	"postgis.gdal_enabled_drivers",
 	"postgis.enable_outdb_rasters",
 	"postgis.gdal_cpl_debug",
+	"log_min_messages",
+	"log_min_error_statement",
+	"log_min_duration_statement",
 };
 
 /*
  * A setting's value, to be sent -- or NULL, for one not defined here or one
  * the session user may not set, which its segments take from the cluster's
- * configuration, as the coordinator took it.
+ * configuration, as the coordinator took it.  A copy: GetConfigOption()
+ * writes a number in a buffer of its own, which the next one overwrites.
  */
 static const char *
 sync_value(int i)
 {
+	const char *value;
+
 	for (int j = 0; j < lengthof(superuser_settings); j++)
 		if (strcmp(synced_settings[i], superuser_settings[j]) == 0 &&
 			!superuser_arg(GetSessionUserId()))
 			return NULL;
-	return GetConfigOption(synced_settings[i], true, false);
+	value = GetConfigOption(synced_settings[i], true, false);
+	return value != NULL ? pstrdup(value) : NULL;
+}
+
+/*
+ * A setting only a superuser sets, about to be sent to a segment whose role
+ * may be one the session set, which may be no superuser -- it was told one,
+ * or what it was told was forgotten: the role reset first, and sent again
+ * after it, "role" coming after every such setting in synced_settings[].
+ * "sent" is what the segment was told; "reset", that it was reset already.
+ */
+static void
+sync_reset_role(StringInfo sql, char **sent, int i, bool *any, bool *reset)
+{
+	static int	role = -1;
+
+	if (role < 0)
+		for (int j = 0; j < NUM_SYNCED_SETTINGS; j++)
+			if (strcmp(synced_settings[j], "role") == 0)
+				role = j;
+	if (*reset || i > role ||
+		(sent[role] != NULL && strcmp(sent[role], "none") == 0))
+		return;
+	for (int j = 0; j < lengthof(superuser_settings); j++)
+		if (strcmp(synced_settings[i], superuser_settings[j]) == 0)
+		{
+			appendStringInfo(sql, "%spg_catalog.set_config('role', 'none', false)",
+							 *any ? ", " : "");
+			*any = true;
+			*reset = true;
+			if (sent[role] != NULL)
+				pfree(sent[role]);
+			sent[role] = NULL;
+			return;
+		}
 }
 
 /* How many rows a segment sends at a time when a relation is read. */
@@ -2025,6 +2074,7 @@ reader_sync_settings(GpReaderConn *r)
 	StringInfoData sql;
 	const char *values[NUM_SYNCED_SETTINGS];
 	bool		any = false;
+	bool		reset = false;
 
 	run_sync_callbacks();
 	initStringInfo(&sql);
@@ -2035,6 +2085,7 @@ reader_sync_settings(GpReaderConn *r)
 		if (values[i] == NULL ||
 			(r->sent[i] != NULL && strcmp(r->sent[i], values[i]) == 0))
 			continue;
+		sync_reset_role(&sql, r->sent, i, &any, &reset);
 		appendStringInfo(&sql, "%spg_catalog.set_config(%s, %s, false)",
 						 any ? ", " : "",
 						 quote_literal_cstr(synced_settings[i]),
@@ -2203,6 +2254,7 @@ gang_sync_settings(GpGang *g)
 	StringInfoData sql;
 	const char *values[NUM_SYNCED_SETTINGS];
 	bool		any = false;
+	bool		reset = false;
 
 	run_sync_callbacks();
 	initStringInfo(&sql);
@@ -2216,6 +2268,7 @@ gang_sync_settings(GpGang *g)
 		if (g->sent[i] != NULL && strcmp(g->sent[i], values[i]) == 0)
 			continue;
 
+		sync_reset_role(&sql, g->sent, i, &any, &reset);
 		appendStringInfo(&sql, "%spg_catalog.set_config(%s, %s, false)",
 						 any ? ", " : "",
 						 quote_literal_cstr(synced_settings[i]),
@@ -3981,6 +4034,7 @@ gather_start(const char *sql, TupleDesc tupdesc, int content, int nsegments,
 	GpGatherState *gather = (GpGatherState *) palloc0(sizeof(GpGatherState));
 	GpGang	   *g;
 	int			n = 0;
+	const char *statement = GpLogStatementComment();
 
 	/*
 	 * Where Cloudberry's coordinator sets up the interconnect its slices'
@@ -4036,9 +4090,9 @@ gather_start(const char *sql, TupleDesc tupdesc, int content, int nsegments,
 		s->gather = gather;
 		s->conn = &g->conns[i];
 		conn_send(s->conn,
-				  psprintf("DECLARE %s %sNO SCROLL CURSOR FOR %s; FETCH %d FROM %s",
+				  psprintf("DECLARE %s %sNO SCROLL CURSOR FOR %s; FETCH %d FROM %s%s",
 						   gather->cursor, gather->binary ? "BINARY " : "",
-						   sql, GATHER_FETCH_ROWS, gather->cursor));
+						   sql, GATHER_FETCH_ROWS, gather->cursor, statement));
 		s->conn->fetching = s;
 		s->declared = true;
 	}

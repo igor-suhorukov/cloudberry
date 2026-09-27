@@ -1095,14 +1095,15 @@ next_ProcessUtility(PlannedStmt *pstmt, const char *queryString,
 /*
  * The end of the first line of what the segments are sent, and the client's
  * statement after it: what pg_stat_activity shows of it here, as much of it
- * as a segment's shows.
+ * as a segment's shows, and what a segment's log names as its statement
+ * (gp_log.c) -- sent whether activities are tracked or not.
  */
 static void
 payload_text(StringInfo buf)
 {
 	int			len = 0;
 
-	if (pgstat_track_activities && debug_query_string != NULL)
+	if (debug_query_string != NULL)
 		len = pg_mbcliplen(debug_query_string, strlen(debug_query_string),
 						   pgstat_track_activity_query_size - 1);
 	if (len > 0)
@@ -1659,6 +1660,29 @@ bool
 GpDispatchIsTreeText(const char *str)
 {
 	return strncmp(str, GP_TREE_MARKER, strlen(GP_TREE_MARKER)) == 0;
+}
+
+/*
+ * The client's statement a dispatched statement's text carries, the n bytes
+ * after its first line's " text=<n>" (payload_text()), into *len; NULL where
+ * it carries none.  Its first line has no space before that.
+ */
+const char *
+GpDispatchTreeStatement(const char *str, int *len)
+{
+	const char *nl;
+	const char *p;
+	char	   *end;
+	long		n;
+
+	if (!GpDispatchIsTreeText(str) || (nl = strchr(str, '\n')) == NULL ||
+		(p = memchr(str, ' ', nl - str)) == NULL || strncmp(p, " text=", 6) != 0)
+		return NULL;
+	n = strtol(p + 6, &end, 10);
+	if (end != nl || n <= 0 || n > (long) strlen(nl + 1))
+		return NULL;
+	*len = (int) n;
+	return nl + 1;
 }
 
 bool

@@ -19,7 +19,7 @@
 run  config                       *
 run  test_create_extension        *
 run  test_max_monitored_databases
-skip test_readiness_logged    reads the coordinator's log through gp_toolkit's __gp_log_master_ext, an external web table of Cloudberry's the port has not
+run  test_readiness_logged
 run  test_init_table_size_table
 run  test_relation_size
 run  test_relation_cache

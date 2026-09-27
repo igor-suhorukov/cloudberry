@@ -1485,9 +1485,9 @@ REVOKE ALL ON FUNCTION pg_catalog.gp_add_segment_primary(text, text, int4, text)
  * update scripts after it): its views and functions of what gp_core has what
  * they read.  Its append-optimized tables' are gp_ao's, beside gp_ao's own
  * functions there, and its resource managers' gp_resource's.  Not here: the
- * external tables of the servers' logs and the views over them, which read
- * Cloudberry's own log format; the workfile manager's views, whose manager
- * the port has not; and the checks for orphaned and missing files.
+ * workfile manager's views, whose manager the port has not; and the checks
+ * for orphaned and missing files.  The servers' logs and the views over
+ * them are at the end of this file, "gp_toolkit's rest".
  *****************************************************************************/
 
 /*
@@ -2012,3 +2012,86 @@ GRANT SELECT ON gp_toolkit.__gp_is_append_only, gp_toolkit.__gp_fullname,
 	gp_toolkit.gp_size_of_table_and_indexes_disk,
 	gp_toolkit.gp_size_of_schema_disk, gp_toolkit.gp_size_of_database
 	TO PUBLIC;
+
+/******************************************************************************
+ * gp_toolkit's rest: the servers' logs and the views of them, gp_disk_free,
+ * the checks for orphaned and missing files, and the partitions' functions,
+ * as gp_toolkit--1.3.sql and the update scripts after it have them.  The
+ * segment files' history is gp_ao's, beside its __gp_aoseg().
+ *****************************************************************************/
+
+/*
+ * The servers' logs: the records of Cloudberry's own log, which gp_core
+ * writes beside PostgreSQL's (gp_log.c) -- where Cloudberry's external
+ * tables cat each node's CSV files, every segment's and the coordinator's.
+ * The superuser's alone, as Cloudberry's tables are: nothing is granted.
+ */
+CREATE FUNCTION gp_toolkit.__gp_log_segment_rows(
+	OUT logtime timestamptz, OUT loguser text, OUT logdatabase text,
+	OUT logpid text, OUT logthread text, OUT loghost text, OUT logport text,
+	OUT logsessiontime timestamptz, OUT logtransaction int4,
+	OUT logsession text, OUT logcmdcount text, OUT logsegment text,
+	OUT logslice text, OUT logdistxact text, OUT loglocalxact text,
+	OUT logsubxact text, OUT logseverity text, OUT logstate text,
+	OUT logmessage text, OUT logdetail text, OUT loghint text,
+	OUT logquery text, OUT logquerypos int4, OUT logcontext text,
+	OUT logdebug text, OUT logcursorpos int4, OUT logfunction text,
+	OUT logfile text, OUT logline int4, OUT logstack text)
+RETURNS SETOF record
+AS 'MODULE_PATHNAME', 'gp_log_segment_rows'
+LANGUAGE C VOLATILE;
+SECURITY LABEL FOR gp ON FUNCTION gp_toolkit.__gp_log_segment_rows() IS 'execute_on=all_segments';
+
+CREATE FUNCTION gp_toolkit.__gp_log_coordinator_rows(
+	OUT logtime timestamptz, OUT loguser text, OUT logdatabase text,
+	OUT logpid text, OUT logthread text, OUT loghost text, OUT logport text,
+	OUT logsessiontime timestamptz, OUT logtransaction int4,
+	OUT logsession text, OUT logcmdcount text, OUT logsegment text,
+	OUT logslice text, OUT logdistxact text, OUT loglocalxact text,
+	OUT logsubxact text, OUT logseverity text, OUT logstate text,
+	OUT logmessage text, OUT logdetail text, OUT loghint text,
+	OUT logquery text, OUT logquerypos int4, OUT logcontext text,
+	OUT logdebug text, OUT logcursorpos int4, OUT logfunction text,
+	OUT logfile text, OUT logline int4, OUT logstack text)
+RETURNS SETOF record
+AS 'MODULE_PATHNAME', 'gp_log_coordinator_rows'
+LANGUAGE C VOLATILE;
+
+REVOKE ALL ON FUNCTION gp_toolkit.__gp_log_segment_rows(),
+	gp_toolkit.__gp_log_coordinator_rows() FROM PUBLIC;
+
+CREATE VIEW gp_toolkit.__gp_log_segment_ext AS
+	SELECT * FROM gp_toolkit.__gp_log_segment_rows();
+
+CREATE VIEW gp_toolkit.__gp_log_coordinator_ext AS
+	SELECT * FROM gp_toolkit.__gp_log_coordinator_rows();
+
+CREATE VIEW gp_toolkit.__gp_log_master_ext AS
+	SELECT * FROM gp_toolkit.__gp_log_coordinator_ext;
+
+CREATE VIEW gp_toolkit.gp_log_system AS
+	SELECT * FROM gp_toolkit.__gp_log_segment_ext
+	UNION ALL
+	SELECT * FROM gp_toolkit.__gp_log_coordinator_ext
+	ORDER BY logtime;
+
+CREATE VIEW gp_toolkit.gp_log_database AS
+	SELECT * FROM gp_toolkit.gp_log_system
+	WHERE logdatabase = pg_catalog.current_database();
+
+CREATE VIEW gp_toolkit.gp_log_coordinator_concise AS
+	SELECT logtime, logdatabase, logsession, logcmdcount, logseverity, logmessage
+	FROM gp_toolkit.__gp_log_coordinator_ext;
+
+CREATE VIEW gp_toolkit.gp_log_master_concise AS
+	SELECT * FROM gp_toolkit.gp_log_coordinator_concise;
+
+/* Each command of the coordinator's log, and when its records began and ended. */
+CREATE VIEW gp_toolkit.gp_log_command_timings AS
+	SELECT logsession, logcmdcount, logdatabase, loguser, logpid,
+		   min(logtime) AS logtimemin, max(logtime) AS logtimemax,
+		   max(logtime) - min(logtime) AS logduration
+	FROM gp_toolkit.__gp_log_coordinator_ext
+	WHERE logsession IS NOT NULL AND logcmdcount IS NOT NULL
+	  AND logdatabase IS NOT NULL
+	GROUP BY 1, 2, 3, 4, 5;

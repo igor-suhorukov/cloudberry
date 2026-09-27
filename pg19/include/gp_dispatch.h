@@ -212,6 +212,12 @@ extern bool GpDispatchIsDispatchedStatement(Node *utilityStmt);
 extern bool GpDispatchIsTreeText(const char *str);
 
 /*
+ * The client's statement such a text carries, its first *len bytes, or NULL:
+ * what a segment's log names as the statement it runs (gp_log.c).
+ */
+extern const char *GpDispatchTreeStatement(const char *str, int *len);
+
+/*
  * On the coordinator: is it running a statement it dispatches whole once it
  * has run here, as CREATE EXTENSION is?  Each segment runs that statement
  * itself, and with it whatever the statement does inside -- an extension

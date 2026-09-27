@@ -4043,6 +4043,90 @@ true" ] && ok "gp_size_of_table_disk and gp_size_of_schema_disk, the cluster's s
 			   DROP TABLE tk, tkr;")
 	[ "$out" = "0" ] && ok "__gp_is_append_only: no heap table is" \
 		|| notok "__gp_is_append_only" "$out"
+
+	# Cloudberry's own log, which gp_core writes beside PostgreSQL's in each
+	# node's log directory (gp_log.c), and gp_toolkit's views of it.  An
+	# error here, its statement with it and again in the line after it, and
+	# no statement where log_min_error_statement leaves it out.
+	n=0
+	for d in 0 1 2; do
+		ls "$(datadir "$d")/log" 2>/dev/null | grep -q '^gpdb-.*\.csv$' && n=$((n + 1))
+	done
+	printf '%s\n' "SELECT 1 FROM gp_log_nowhere_1;" "SET log_min_error_statement = panic;" \
+		"SELECT 1 FROM gp_log_nowhere_2;" | qf 0 >/dev/null
+	out=$(q 0 "SELECT string_agg(logseverity || '|' || logmessage || '|' || coalesce(logdebug, '') || '|' ||
+								 logsegment || '|' || (logsession ~ '^con[0-9]+$') || (logcmdcount ~ '^cmd[0-9]+$'),
+								 E'\n' ORDER BY logtime)
+			   FROM gp_toolkit.__gp_log_coordinator_ext
+			   WHERE logmessage LIKE '%gp\\_log\\_nowhere\\_%' AND logdatabase = 'postgres';")
+	[ "$n" = "3" ] && [ "$out" = 'ERROR|relation "gp_log_nowhere_1" does not exist|SELECT 1 FROM gp_log_nowhere_1;|seg-1|truetrue
+LOG|An exception was encountered during the execution of statement: SELECT 1 FROM gp_log_nowhere_1;|SELECT 1 FROM gp_log_nowhere_1;|seg-1|truetrue
+ERROR|relation "gp_log_nowhere_2" does not exist||seg-1|truetrue' ] \
+		&& ok "each node's log/gpdb-*.csv: an error's record, its statement's, and none where log_min_error_statement says" \
+		|| notok "Cloudberry's log on the coordinator" "$n files / $out"
+
+	# A segment's error names the client's statement, as Cloudberry's
+	# segment names the statement it was dispatched: the one a gather's
+	# query comes with, its comments' ends and backslashes as they were.
+	q 0 "CREATE TABLE lg (a int, b text) DISTRIBUTED BY (a);
+		 INSERT INTO lg SELECT i, 'x' FROM generate_series(1, 100) i;" >/dev/null
+	seg=$(q 0 "SELECT 'seg' || gp_segment_id FROM lg WHERE a = 5;")
+	stmt="SELECT * /* a */ FROM lg WHERE a = 5 AND 1 / (a - a) = 1 AND b <> E'\\\\*/';"
+	out=$(q 0 "$stmt" 2>&1)
+	out2=$(q 0 "SELECT string_agg(logsegment || '|' || (logdebug = \$s\$$stmt\$s\$), ' ')
+				FROM gp_toolkit.__gp_log_segment_ext
+				WHERE logseverity = 'ERROR' AND logmessage = 'division by zero'
+				  AND logdebug LIKE '%FROM lg WHERE a = 5%';")
+	[[ "$out" == *"division by zero"* ]] && [ "$out2" = "$seg|true" ] \
+		&& ok "a segment's error, read through __gp_log_segment_ext, names the client's statement" \
+		|| notok "a segment's error in Cloudberry's log" "$out / $seg / $out2"
+
+	# And a segment's lines of log_min_duration_statement, which the
+	# segments take from the coordinator, name it: a DDL tree's here.
+	printf '%s\n' "SET log_min_duration_statement = 0;" "CREATE TABLE lg2 (a int) DISTRIBUTED BY (a);" \
+		"RESET log_min_duration_statement;" "SELECT count(*) FROM lg;" | qf 0 >/dev/null
+	out=$(q 0 "SELECT string_agg(DISTINCT logsegment, ' ' ORDER BY logsegment)
+			   FROM gp_toolkit.__gp_log_segment_ext
+			   WHERE logmessage ~ '^duration: [0-9.]+ ms  statement: CREATE TABLE lg2 \\(a int\\) DISTRIBUTED BY \\(a\\);\$';
+			   SELECT count(*) FROM gp_toolkit.__gp_log_segment_ext
+			   WHERE logmessage LIKE 'duration: %SELECT count(*) FROM lg;';")
+	[ "$out" = "seg0 seg1
+0" ] && ok "log_min_duration_statement reaches the segments, whose lines name the client's statement" \
+		|| notok "a segment's duration lines" "$out"
+
+	# A message's whitespace at its end is left out of the record where
+	# the client is sent the message, as Cloudberry leaves it out of both;
+	# and gp_log_command_timings has the commands of this log.
+	q 0 "DO \$\$ BEGIN RAISE EXCEPTION 'gp_log trailing   '; END \$\$;" >/dev/null 2>&1
+	out=$(q 0 "SELECT string_agg(logmessage, '|') FROM gp_toolkit.__gp_log_coordinator_ext
+			   WHERE logmessage LIKE 'gp\\_log trailing%';
+			   SELECT count(*) > 0 FROM gp_toolkit.gp_log_command_timings
+			   WHERE logdatabase = 'postgres' AND logsession ~ '^con' AND logduration >= '0';")
+	[ "$out" = "gp_log trailing
+t" ] && ok "a message's trailing whitespace off, and gp_log_command_timings" \
+		|| notok "a message's trailing whitespace, and gp_log_command_timings" "$out"
+
+	# gp.log_format = text, Cloudberry's gp_log_format, writes nothing of
+	# the kind; and the views are the superuser's.
+	q 0 "ALTER SYSTEM SET gp.log_format = text;" >/dev/null
+	q 0 "SELECT pg_reload_conf();" >/dev/null
+	sleep 1
+	q 0 "SELECT 1 FROM gp_log_nowhere_3;" >/dev/null 2>&1
+	q 0 "ALTER SYSTEM RESET gp.log_format;" >/dev/null
+	q 0 "SELECT pg_reload_conf();" >/dev/null
+	sleep 1
+	q 0 "SELECT 1 FROM gp_log_nowhere_4;" >/dev/null 2>&1
+	out=$(q 0 "SELECT string_agg(substring(logmessage from 'gp_log_nowhere_[0-9]'), ' ' ORDER BY logtime)
+			   FROM gp_toolkit.__gp_log_coordinator_ext
+			   WHERE logseverity = 'ERROR' AND logmessage LIKE '%gp\\_log\\_nowhere\\_%';
+			   CREATE ROLE lg_user LOGIN;")
+	out2=$("$PSQL" -X -q -t -A -h "$(sockdir 0)" -p "$(port 0)" -d postgres -U lg_user \
+		-c "SELECT count(*) FROM gp_toolkit.__gp_log_master_ext;" 2>&1)
+	q 0 "DROP ROLE lg_user; DROP TABLE lg, lg2;" >/dev/null
+	[ "$out" = "gp_log_nowhere_1 gp_log_nowhere_2 gp_log_nowhere_4" ] &&
+	[[ "$out2" == *"permission denied for view __gp_log_master_ext"* ]] \
+		&& ok "gp.log_format = text writes no record, and a user who is no superuser reads none" \
+		|| notok "gp.log_format, and the views' privileges" "$out / $out2"
 fi
 
 ###############################################################################
