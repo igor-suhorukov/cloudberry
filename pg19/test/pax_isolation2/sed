@@ -1,1 +1,2 @@
 s/\bpg_ext_aux\.(pg_pax_tables|pg_pax_fastsequence|paxauxstats)\b/pax.\1/g
+s#[^'\s]*/isolation2/\.\./regress/regress\.so#/cb/src/test/isolation2/../regress/regress.so#g

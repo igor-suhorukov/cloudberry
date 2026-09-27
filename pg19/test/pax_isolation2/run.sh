@@ -31,12 +31,14 @@
 # through its harness (../isolation2/run.sh), in the groups manifest puts the
 # tests in: each node loads gp_ao and pax too and has
 # default_table_access_method = pax, and the tests' database has both
-# extensions (setup.sql, after the isolation2 suite's).  A test the
-# isolation2 suite runs is in the group it has there; each test is compared
-# under Cloudberry's init files, PAX's copies of them and the port's, or
-# exactly a difference in cloudberry/, reviewed and kept.  PAX's catalogs,
-# which Cloudberry's initdb made in pg_ext_aux, are in the schema pax, as the
-# tests are read here (sed).
+# extensions and the helpers PAX's setup adds (setup.sql, after the
+# isolation2 suite's).  A test the isolation2 suite runs is in the group it
+# has there; each test is compared under Cloudberry's init files, PAX's
+# copies of them and the port's, or exactly a difference in cloudberry/,
+# reviewed and kept -- or in the isolation2 suite's, for a test whose copy
+# here answers as Cloudberry's.  PAX's catalogs, which Cloudberry's initdb
+# made in pg_ext_aux, are in the schema pax, as the tests are read here, and
+# a test's regress.so the isolation2 suite's own path (sed).
 
 set -u
 
@@ -54,7 +56,9 @@ inits="$PAX_ISOLATION2/init_file"
 [ -f "$HERE/init_file" ] && inits="$inits $HERE/init_file"
 export ISOLATION2_SUITE=pax_isolation2
 export ISOLATION2_MANIFEST="$HERE/manifest"
-export ISOLATION2_KEPT="$HERE/cloudberry"
+# a difference kept here, or the isolation2 suite's for the same test, where
+# PAX's copy of it answers alike
+export ISOLATION2_KEPT="$HERE/cloudberry $HERE/../isolation2/cloudberry"
 export ISOLATION2_SCHEDULE_NAME="contrib/pax_storage isolation2_schedule"
 export ISOLATION2_TESTS_DIR="$PAX_ISOLATION2"
 export ISOLATION2_CB_INIT="$PAX_ISOLATION2/init_file_isolation2"
