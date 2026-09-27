@@ -533,6 +533,7 @@ run  matview_data
 skip directory_table  relation "gp_storage_server" does not exist; syntax error at or near "DATA"
 skip motion_socket  differs: its check_motion_sockets() looks up each segment's address, which on this suite's clusters is a socket's directory: socket.gaierror: [Errno -2] Name or service not known
 run  ic_proxy_socket
+port ic_proxy_after
 run  subtrx_overflow
 run  bfv_meta_track
 skip bfv_copy  segment reject limit reached, aborting operation

@@ -183,7 +183,11 @@ On a cluster (M2), `gp_core` and `gp_orca`:
   receivers over a Unix socket or a TCP port, or, with
   `gp.interconnect_type = udpifc`, in UDP packets each receiver acknowledges,
   with Cloudberry's flow control, retransmission and deadlock check, a row
-  as a tuple; a sorted Gather into one segment merges its senders' streams
+  as a tuple -- the transports of a table of gp_core's, to which the `udp2`
+  module adds Cloudberry's UDP2, its C++ core compiled where it lies, and
+  the `interconnect` module Cloudberry's ic-proxy, built where libuv is: a
+  background worker on each node carrying every pair of nodes' Motions over
+  one connection, by `gp.interconnect_proxy_addresses`; a sorted Gather into one segment merges its senders' streams
   as they come, and the coordinator's gathers ask each segment for one row
   first and ten times as many each batch after, so that a LIMIT above stops
   them soon.  The earlier relay through the coordinator carries the slices
@@ -577,9 +581,11 @@ What Cloudberry's tests asked for next (2026-09-27), in `gp_core`,
   (`gp_workfile.c`);
 - and the server built with LDAP, for `pg_hba.conf`'s ldap lines.
 
-The transport and encryption modules — `interconnect`, `udp2`, `gp_tde` —
-are still stubs: the streaming transports, tcp and udpifc, live in
-`gp_core`, and TDE waits for a formal requirement.
+The encryption module, `gp_tde`, is still a stub: TDE waits for a formal
+requirement.  The `ic` suite runs every transport over the same Motion
+statements in every run; `ic_greenplum` and `ic_isolation2` run the two
+suites' ORCA passes again over udp2 and the proxy on request
+(`CB_IC=udp2|proxy|all`).
 
 ## Tests
 

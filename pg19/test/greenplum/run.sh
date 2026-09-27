@@ -388,6 +388,9 @@ t1=$(date +%s)
 	# Cloudberry's Gather Motion merges the segments' sorted rows in one
 	# order.  Compared as the rows they are, atmsort's "-- order none".
 	echo 'sed s#^(select c1, c3 from aqumv_t5 where c1 > 90 order by c2 - c1 - 1 asc;)#\1 -- order none#'
+	# ic_proxy_socket's PL/Python reads SHOW's row by the setting's name,
+	# which the port spells gp.interconnect_*.
+	echo 'sed s#\["gp_interconnect_(type|proxy_addresses)"\]#["gp.interconnect_\1"]#g'
 } > "$WORK/respell"
 respell() { perl "$HERE/../respell.pl" "$WORK/respell" "$@"; }
 
