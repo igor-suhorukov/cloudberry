@@ -73,7 +73,7 @@ run  transient_types
 run  gp_rules
 skip motion_gp  row is too big: size 10032, maximum size 8160; syntax error at or near ")"
 run  gp_pullup_expr
-skip cursor  its gp_wait_until_triggered_fault('qe_got_snapshot_and_interconnect') waits out the suite's minute: the fault, which Cloudberry's cursor reader raises once its slice has its snapshot, while the writer goes on to UPDATE, is none of the port's
+skip cursor  the UPDATE after its DECLARE waits out the suite's minute for segment 0's writer, suspended at qe_got_snapshot_and_interconnect in the cursor's gather: Cloudberry reads a cursor's rows on a reader of their own, which suspends while the writer goes on to UPDATE, and the port on the session's writer: canceling statement due to user request
 run  gp_hashagg
 run  sequence_gp
 run  tidscan_gp
@@ -282,7 +282,7 @@ run  dedupset
 run  disable_autovacuum
 skip python_processed64bit  differs: the fault executor_run_high_processed, which has the executor count past 2^32 rows, is none of the port's
 run  enable_autovacuum
-skip log_guc  relation "gp_toolkit.__gp_log_master_ext" does not exist; relation "gp_toolkit.__gp_log_segment_ext" does not exist
+run  log_guc
 run  instr_in_shmem_setup
 run  instr_in_shmem
 skip createdb  function force_mirrors_to_catch_up() does not exist
@@ -307,7 +307,7 @@ run  default_tablespace
 run  leastsquares
 run  opr_sanity_gp
 skip decode_expr  function decode(boolean) does not exist; function decode(integer) does not exist
-skip gpcopy_encoding  invalid byte sequence for encoding "UTF8": 0xc4
+run  gpcopy_encoding
 run  gp_create_view
 run  window_views
 skip replication_slots  differs: pg_get_replication_slots() has PostgreSQL 19's columns, and a slot made on one segment gets no WARNING that it is that segment's alone
@@ -335,7 +335,7 @@ skip analyze  unrecognized configuration parameter "optimizer_analyze_root_parti
 skip gp_owner_permission  relation "pg_stat_operations" does not exist
 skip incremental_analyze  syntax error at or near "foo"; syntax error at or near "foo_1_prt_2"
 run  regex_gp
-skip dispatch_encoding  relation "gp_toolkit.__gp_log_segment_ext" does not exist; raise_error called on "funny char Ä"
+run  dispatch_encoding
 port icudp_on
 run  icudp/gp_interconnect_queue_depth
 run  icudp/gp_interconnect_queue_depth_longtime
@@ -404,7 +404,7 @@ run  udf_exception_blocks
 run  ic
 run  instr_in_shmem_verify
 skip partition_locking  differs: the locks a statement takes on a partitioned table's parts, and on which nodes
-skip vacuum_gp  relation "gp_toolkit.__gp_log_master_ext" does not exist
+run  vacuum_gp
 run  vacuum_fsm_nondefault_tablespace
 skip pg_stat  relation "gp_stat_all_tables_summary" does not exist; relation "gp_stat_user_tables_summary" does not exist
 skip bfv_partition  unrecognized configuration parameter "optimizer_analyze_root_partition"; relation "gp_partition_template" does not exist
@@ -466,6 +466,7 @@ skip qp_with_functional_inlining  UPDATE is not allowed in a non-volatile functi
 skip qp_with_functional_noinlining  UPDATE is not allowed in a non-volatile function; unrecognized configuration parameter "gp_cte_sharing"
 run  qp_functions_in_contexts_setup
 run  qp_misc_rio_join_small
+port gp_partition_maint
 group m7b
 run  qp_gist_indexes2
 run  qp_gist_indexes3

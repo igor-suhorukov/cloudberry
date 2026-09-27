@@ -474,6 +474,19 @@ What Cloudberry's tests asked for next (2026-09-27), in `gp_core`,
 - gp_toolkit's views of the cluster, of skew, statistics, bloat and sizes,
   and `gp_param_setting()` by Cloudberry's names; `gp_backend_info()`,
   `gp_opt_version()`, `gp_execution_segment()` and `gp_execution_dbid()`;
+- Cloudberry's own log, a CSV file of thirty columns in each node's log
+  directory beside PostgreSQL's log, written from `emit_log_hook`
+  (`gp_log.c`, `gp.log_format`), and gp_toolkit's views of it: a
+  segment's records name the coordinator's statement, which what it is
+  sent carries, an error's record is followed by its statement's, and
+  `log_min_messages`, `log_min_error_statement` and
+  `log_min_duration_statement` reach the segments;
+- the rest of gp_toolkit: `gp_disk_free`, each segment's own; the checks
+  for orphaned and missing files and `gp_move_orphaned_files()`, each node
+  locking its `pg_class` and checkpointing for itself; an append-optimized
+  table's segment files' history (`__gp_aoseg_history`); and the functions
+  of a partitioned table, `gp_partitions` among them (`gp_toolkit.c`,
+  `gp_partmaint.c`);
 - a record of no declared type carried between the nodes with its row type
   described (`gp_record.c`) — through a Motion, a gather, a query of
   `gp_dist_random()` alone, and as a fragment's parameter or constant;

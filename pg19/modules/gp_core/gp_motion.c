@@ -147,6 +147,7 @@
 #include "gp_hash.h"
 #include "gp_metrics.h"
 #include "gp_ic.h"
+#include "gp_log.h"
 #include "gp_motion.h"
 #include "gp_policy.h"
 #include "gp_refresh.h"
@@ -1106,9 +1107,9 @@ motion_recv_next(MotionState *state)
 			StringInfoData buf;
 
 			initReadOnlyStringInfo(&buf, data, len);
-			slot->tts_values[i] = ReceiveFunctionCall(&state->inprocs[i], &buf,
-													  state->inparams[i],
-													  TupleDescAttr(tupdesc, i)->atttypmod);
+			slot->tts_values[i] = GpReceiveFunctionCall(&state->inprocs[i], &buf,
+														state->inparams[i],
+														TupleDescAttr(tupdesc, i)->atttypmod);
 		}
 		else
 			slot->tts_values[i] = InputFunctionCall(&state->inprocs[i], data,
@@ -1388,8 +1389,8 @@ motion_send_all(MotionState *state)
 				}
 				else if (state->send_binary)
 				{
-					bytea	   *b = SendFunctionCall(&state->outprocs[i],
-													 slot->tts_values[i]);
+					bytea	   *b = GpSendFunctionCall(&state->outprocs[i],
+													   slot->tts_values[i]);
 
 					values[i] = VARDATA(b);
 					lengths[i] = VARSIZE(b) - VARHDRSZ;
@@ -1517,9 +1518,9 @@ motion_decode_row(MotionState *state, const char *data, int len)
 			StringInfoData buf;
 
 			initReadOnlyStringInfo(&buf, value, vlen);
-			slot->tts_values[i] = ReceiveFunctionCall(&state->inprocs[i], &buf,
-													  state->inparams[i],
-													  TupleDescAttr(tupdesc, i)->atttypmod);
+			slot->tts_values[i] = GpReceiveFunctionCall(&state->inprocs[i], &buf,
+														state->inparams[i],
+														TupleDescAttr(tupdesc, i)->atttypmod);
 		}
 		else
 			slot->tts_values[i] = InputFunctionCall(&state->inprocs[i], value,
@@ -2315,8 +2316,8 @@ motion_relay(MotionState *gather, CustomScan *motion, int to)
 				}
 				else if (binary)
 				{
-					bytea	   *b = SendFunctionCall(&outprocs[i],
-													 slot->tts_values[i]);
+					bytea	   *b = GpSendFunctionCall(&outprocs[i],
+													   slot->tts_values[i]);
 
 					values[i] = VARDATA(b);
 					lengths[i] = VARSIZE(b) - VARHDRSZ;
@@ -2801,11 +2802,11 @@ stream_start(MotionState *state)
 			char	   *sql;
 
 			sql = psprintf("BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY; "
-						   "SET LOCAL %s = %s; %s; COMMIT",
+						   "SET LOCAL %s = %s; %s; COMMIT%s",
 						   GP_SHARE_SETTING,
 						   quote_literal_cstr(psprintf("%d/%s", writer_pid[seg],
 													   sharekey)),
-						   fragment);
+						   fragment, GpLogStatementComment());
 			GpStreamStartReader(stream, ss->readers[i], sql);
 		}
 	}
@@ -4157,6 +4158,15 @@ motion_executor_start(QueryDesc *queryDesc, int eflags)
 
 	/* InitPlan()'s last fault, where its plan is set up */
 	(void) GP_FAULT("func_init_plan_end");
+
+	/*
+	 * Where Cloudberry's segment has its slice's snapshot and interconnect
+	 * (standard_ExecutorStart()): a fragment of the coordinator's plan, or
+	 * a gather's query, on a writer or a reader.
+	 */
+	if (GpClusterIsDispatched() &&
+		(is_fragment(queryDesc->plannedstmt) || gather_was_checked(queryDesc->sourceText)))
+		(void) GP_FAULT("qe_got_snapshot_and_interconnect");
 
 	if (params != NIL)
 		fragment_params_after_start(queryDesc, params);

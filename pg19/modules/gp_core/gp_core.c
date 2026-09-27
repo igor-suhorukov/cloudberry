@@ -53,13 +53,14 @@
 #include "gp_dtx.h"
 #include "gp_explain.h"
 #include "gp_fault.h"
-#include "gp_metrics.h"
 #include "gp_fts.h"
 #include "gp_gdd.h"
 #include "gp_motion.h"
 #include "gp_label.h"
+#include "gp_log.h"
 #include "gp_loopback.h"
 #include "gp_metatrack.h"
+#include "gp_metrics.h"
 #include "gp_policy.h"
 #include "gp_scan.h"
 #include "gp_segadmin.h"
@@ -300,6 +301,13 @@ _PG_init(void)
 	 * of shared memory, where gp.enable_query_metrics is on.
 	 */
 	GpMetricsInit();
+
+	/*
+	 * Cloudberry's own log, the CSV file gp_toolkit's views of the logs
+	 * read, written beside PostgreSQL's log from emit_log_hook (gp_log.c),
+	 * on one node too; its file is every process's, through shared memory.
+	 */
+	GpLogInit();
 
 	/*
 	 * Deliberately no MarkGUCPrefixReserved("gp") here.  It drops every

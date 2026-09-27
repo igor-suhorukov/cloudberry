@@ -788,6 +788,24 @@ mine" ] && ok "a transaction reads its own rows, and a LIMIT leaves the connecti
 702" ] && [ "$out2" = "94" ] && ok "COPY TO, of a query and of the table, gathers" \
 		|| notok "COPY TO" "$out / $out2 lines"
 
+	# A client that asked for another encoding than the database's is sent
+	# a segment's text in its own, and the rows it writes reach the segments
+	# in the database's: a value's binary form between the nodes is the
+	# database's (gp_record.c).  It was read and written as the client's --
+	# an A with diaeresis, 0xC4 in LATIN1, reached such a client as the two
+	# bytes of its UTF-8, and a row it copied in failed on its segment,
+	# "invalid byte sequence for encoding "UTF8": 0xc4".
+	out=$(printf '%s\n' "CREATE TABLE enc (a int, t text) DISTRIBUTED BY (a);" \
+		"SET client_encoding = 'LATIN1';" \
+		"INSERT INTO enc VALUES (1, 'funny char ' || chr(196));" \
+		"COPY enc FROM STDIN;" "$(printf '2\tcopied \304')" '\.' \
+		"SELECT t FROM enc ORDER BY a;" | qf 0 | od -An -tx1 | tr -d ' \n')
+	want=$(printf 'funny char \304\ncopied \304\n' | od -An -tx1 | tr -d ' \n')
+	out2=$(q 0 "SELECT string_agg(octet_length(t)::text, ' ' ORDER BY a) FROM enc;")
+	[ "$out" = "$want" ] && [ "$out2" = "13 9" ] \
+		&& ok "a client's own encoding for a segment's text, and the database's for what it writes there" \
+		|| notok "a client encoding not the database's" "$out / $out2"
+
 	# An error a segment raises in rows routed to it names no COPY of the
 	# segment's -- the rows travel by COPY -- but where the statement was: an
 	# INSERT's none, as Cloudberry's has none, a function's its own lines,
@@ -1693,6 +1711,16 @@ EOF
 		"SELECT (SELECT string_agg(c, ',' ORDER BY a) FROM o WHERE a < 20), (SELECT sum(a) FROM o);"
 	orca_same "one key's rows: direct dispatch to its segment" \
 		"SELECT * FROM o WHERE a = 42;" "Gather Motion 1:1  (slice1; segments: 1)"
+
+	# A Gather Motion's rows reach a client that asked for another encoding
+	# than the database's in its own, as the planner's gathers do (section 8).
+	out=$(printf '%s\n' "SET client_encoding = 'LATIN1';" "SELECT t FROM enc ORDER BY a;" \
+		| qf 0 | od -An -tx1 | tr -d ' \n')
+	want=$(printf 'funny char \304\ncopied \304\n' | od -An -tx1 | tr -d ' \n')
+	plan=$(q 0 "EXPLAIN (COSTS OFF) SELECT t FROM enc ORDER BY a;")
+	[ "$out" = "$want" ] && [[ "$plan" == *"Gather Motion"*"Optimizer: GPORCA"* ]] \
+		&& ok "a client's own encoding for a segment's text, under ORCA" \
+		|| notok "a client encoding not the database's, under ORCA" "$out / $plan"
 
 	# now() is the transaction's start, and in a segment's slice ORCA's plan
 	# evaluates it there: each segment's process took its own, none of them
@@ -4061,6 +4089,138 @@ true" ] && ok "gp_size_of_table_disk and gp_size_of_schema_disk, the cluster's s
 			   DROP TABLE tk, tkr;")
 	[ "$out" = "0" ] && ok "__gp_is_append_only: no heap table is" \
 		|| notok "__gp_is_append_only" "$out"
+
+	# Cloudberry's own log, which gp_core writes beside PostgreSQL's in each
+	# node's log directory (gp_log.c), and gp_toolkit's views of it.  An
+	# error here, its statement with it and again in the line after it, and
+	# no statement where log_min_error_statement leaves it out.
+	n=0
+	for d in 0 1 2; do
+		ls "$(datadir "$d")/log" 2>/dev/null | grep -q '^gpdb-.*\.csv$' && n=$((n + 1))
+	done
+	printf '%s\n' "SELECT 1 FROM gp_log_nowhere_1;" "SET log_min_error_statement = panic;" \
+		"SELECT 1 FROM gp_log_nowhere_2;" | qf 0 >/dev/null
+	out=$(q 0 "SELECT string_agg(logseverity || '|' || logmessage || '|' || coalesce(logdebug, '') || '|' ||
+								 logsegment || '|' || (logsession ~ '^con[0-9]+$') || (logcmdcount ~ '^cmd[0-9]+$'),
+								 E'\n' ORDER BY logtime)
+			   FROM gp_toolkit.__gp_log_coordinator_ext
+			   WHERE logmessage LIKE '%gp\\_log\\_nowhere\\_%' AND logdatabase = 'postgres';")
+	[ "$n" = "3" ] && [ "$out" = 'ERROR|relation "gp_log_nowhere_1" does not exist|SELECT 1 FROM gp_log_nowhere_1;|seg-1|truetrue
+LOG|An exception was encountered during the execution of statement: SELECT 1 FROM gp_log_nowhere_1;|SELECT 1 FROM gp_log_nowhere_1;|seg-1|truetrue
+ERROR|relation "gp_log_nowhere_2" does not exist||seg-1|truetrue' ] \
+		&& ok "each node's log/gpdb-*.csv: an error's record, its statement's, and none where log_min_error_statement says" \
+		|| notok "Cloudberry's log on the coordinator" "$n files / $out"
+
+	# A segment's error names the client's statement, as Cloudberry's
+	# segment names the statement it was dispatched: the one a gather's
+	# query comes with, its comments' ends and backslashes as they were.
+	q 0 "CREATE TABLE lg (a int, b text) DISTRIBUTED BY (a);
+		 INSERT INTO lg SELECT i, 'x' FROM generate_series(1, 100) i;" >/dev/null
+	seg=$(q 0 "SELECT 'seg' || gp_segment_id FROM lg WHERE a = 5;")
+	stmt="SELECT * /* a */ FROM lg WHERE a = 5 AND 1 / (a - a) = 1 AND b <> E'\\\\*/';"
+	out=$(q 0 "$stmt" 2>&1)
+	out2=$(q 0 "SELECT string_agg(logsegment || '|' || (logdebug = \$s\$$stmt\$s\$), ' ')
+				FROM gp_toolkit.__gp_log_segment_ext
+				WHERE logseverity = 'ERROR' AND logmessage = 'division by zero'
+				  AND logdebug LIKE '%FROM lg WHERE a = 5%';")
+	[[ "$out" == *"division by zero"* ]] && [ "$out2" = "$seg|true" ] \
+		&& ok "a segment's error, read through __gp_log_segment_ext, names the client's statement" \
+		|| notok "a segment's error in Cloudberry's log" "$out / $seg / $out2"
+
+	# And a segment's lines of log_min_duration_statement, which the
+	# segments take from the coordinator, name it: a DDL tree's here.
+	printf '%s\n' "SET log_min_duration_statement = 0;" "CREATE TABLE lg2 (a int) DISTRIBUTED BY (a);" \
+		"RESET log_min_duration_statement;" "SELECT count(*) FROM lg;" | qf 0 >/dev/null
+	out=$(q 0 "SELECT string_agg(DISTINCT logsegment, ' ' ORDER BY logsegment)
+			   FROM gp_toolkit.__gp_log_segment_ext
+			   WHERE logmessage ~ '^duration: [0-9.]+ ms  statement: CREATE TABLE lg2 \\(a int\\) DISTRIBUTED BY \\(a\\);\$';
+			   SELECT count(*) FROM gp_toolkit.__gp_log_segment_ext
+			   WHERE logmessage LIKE 'duration: %SELECT count(*) FROM lg;';")
+	[ "$out" = "seg0 seg1
+0" ] && ok "log_min_duration_statement reaches the segments, whose lines name the client's statement" \
+		|| notok "a segment's duration lines" "$out"
+
+	# A message's whitespace at its end is left out of the record where
+	# the client is sent the message, as Cloudberry leaves it out of both;
+	# and gp_log_command_timings has the commands of this log.
+	q 0 "DO \$\$ BEGIN RAISE EXCEPTION 'gp_log trailing   '; END \$\$;" >/dev/null 2>&1
+	out=$(q 0 "SELECT string_agg(logmessage, '|') FROM gp_toolkit.__gp_log_coordinator_ext
+			   WHERE logmessage LIKE 'gp\\_log trailing%';
+			   SELECT count(*) > 0 FROM gp_toolkit.gp_log_command_timings
+			   WHERE logdatabase = 'postgres' AND logsession ~ '^con' AND logduration >= '0';")
+	[ "$out" = "gp_log trailing
+t" ] && ok "a message's trailing whitespace off, and gp_log_command_timings" \
+		|| notok "a message's trailing whitespace, and gp_log_command_timings" "$out"
+
+	# gp.log_format = text, Cloudberry's gp_log_format, writes nothing of
+	# the kind; and the views are the superuser's.
+	q 0 "ALTER SYSTEM SET gp.log_format = text;" >/dev/null
+	q 0 "SELECT pg_reload_conf();" >/dev/null
+	sleep 1
+	q 0 "SELECT 1 FROM gp_log_nowhere_3;" >/dev/null 2>&1
+	q 0 "ALTER SYSTEM RESET gp.log_format;" >/dev/null
+	q 0 "SELECT pg_reload_conf();" >/dev/null
+	sleep 1
+	q 0 "SELECT 1 FROM gp_log_nowhere_4;" >/dev/null 2>&1
+	out=$(q 0 "SELECT string_agg(substring(logmessage from 'gp_log_nowhere_[0-9]'), ' ' ORDER BY logtime)
+			   FROM gp_toolkit.__gp_log_coordinator_ext
+			   WHERE logseverity = 'ERROR' AND logmessage LIKE '%gp\\_log\\_nowhere\\_%';
+			   CREATE ROLE lg_user LOGIN;")
+	out2=$("$PSQL" -X -q -t -A -h "$(sockdir 0)" -p "$(port 0)" -d postgres -U lg_user \
+		-c "SELECT count(*) FROM gp_toolkit.__gp_log_master_ext;" 2>&1)
+	q 0 "DROP ROLE lg_user; DROP TABLE lg, lg2;" >/dev/null
+	[ "$out" = "gp_log_nowhere_1 gp_log_nowhere_2 gp_log_nowhere_4" ] &&
+	[[ "$out2" == *"permission denied for view __gp_log_master_ext"* ]] \
+		&& ok "gp.log_format = text writes no record, and a user who is no superuser reads none" \
+		|| notok "gp.log_format, and the views' privileges" "$out / $out2"
+
+	# gp_disk_free: each segment's space free for its data directory, as df
+	# gives it, which the segment reads itself.
+	out=$(q 0 "SELECT string_agg(dfsegment || ':' || (dfhostname <> '') || ':' || dfdevice || ':' || dfspace,
+								 ' ' ORDER BY dfsegment)
+			   FROM gp_toolkit.gp_disk_free;")
+	read -r dev avail < <(df -Pk "$(datadir 1)" | awk 'NR == 2 { print $1, $4 }')
+	got=$(echo "$out" | sed -n 's/^0:true:\([^:]*\):\([0-9]*\) 1:true:.*/\1 \2/p')
+	isnum "${avail:-x}" && [ "${got% *}" = "$dev" ] && isnum "${got#* }" &&
+	[ $(( ${got#* } - avail )) -lt 102400 ] && [ $(( avail - ${got#* } )) -lt 102400 ] \
+		&& ok "gp_disk_free: each segment's device and kB free, as df -Pk says ($dev)" \
+		|| notok "gp_disk_free" "$out / df: $dev $avail"
+
+	# The checks for orphaned and missing files, which each node answers
+	# of its own directories after locking its pg_class and a checkpoint: a
+	# file of no relation on the coordinator and on segment 0, listed and
+	# moved away as seg<id>_<path>; refused while another session is in a
+	# transaction; and a table's file on a segment gone, listed missing.
+	dboid=$(q 0 "SELECT oid FROM pg_database WHERE datname = 'postgres';")
+	touch "$(datadir 0)/base/$dboid/999999998" "$(datadir 1)/base/$dboid/999999999"
+	out=$(q 0 "SELECT string_agg(gp_segment_id || ':' || filepath, ' ' ORDER BY gp_segment_id)
+			   FROM gp_toolkit.gp_check_orphaned_files WHERE filename LIKE '99999999_';")
+	{ echo "BEGIN; SELECT 1;"; sleep 3; } | "$PSQL" -X -q -h "$(sockdir 0)" -p "$(port 0)" -d postgres >/dev/null 2>&1 &
+	sleep 1
+	out2=$(q 0 "SELECT count(*) FROM gp_toolkit.gp_check_orphaned_files;")
+	wait
+	mkdir -p "$ROOT/orphans"
+	out3=$(q 0 "SELECT string_agg(gp_segment_id || ':' || move_success || ':' || newpath, ' ' ORDER BY gp_segment_id)
+				FROM gp_toolkit.gp_move_orphaned_files('$ROOT/orphans') WHERE oldpath LIKE '%/99999999_';")
+	[ "$out" = "-1:base/$dboid/999999998 0:base/$dboid/999999999" ] &&
+	[[ "$out2" == *"There is a client session running on one or more segment. Aborting..."* ]] &&
+	[ "$out3" = "-1:true:$ROOT/orphans/seg-1_base_${dboid}_999999998 0:true:$ROOT/orphans/seg0_base_${dboid}_999999999" ] &&
+	[ -f "$ROOT/orphans/seg0_base_${dboid}_999999999" ] && [ ! -e "$(datadir 1)/base/$dboid/999999999" ] \
+		&& ok "gp_check_orphaned_files and gp_move_orphaned_files, the coordinator's files and each segment's" \
+		|| notok "the checks for orphaned files" "$out / $out2 / $out3"
+	q 0 "CREATE TABLE mf (a int) DISTRIBUTED BY (a);
+		 INSERT INTO mf SELECT generate_series(1, 10);" >/dev/null
+	q 1 "CHECKPOINT;" >/dev/null
+	fnode=$(q 1 "SELECT pg_relation_filenode('mf');")
+	mv "$(datadir 1)/base/$dboid/$fnode" "$ROOT/mf.file"
+	out=$(q 0 "SELECT string_agg(gp_segment_id || ':' || relname || ':' || (filename = '$fnode'), ' ')
+			   FROM gp_toolkit.gp_check_missing_files WHERE relname = 'mf';")
+	mv "$ROOT/mf.file" "$(datadir 1)/base/$dboid/$fnode"
+	out2=$(q 0 "SELECT count(*) FROM gp_toolkit.gp_check_missing_files WHERE relname = 'mf';
+				SELECT count(*) FROM mf; DROP TABLE mf;")
+	[ "$out" = "0:mf:true" ] && [ "$out2" = "0
+10" ] && ok "gp_check_missing_files lists a table's file a segment has not" \
+		|| notok "gp_check_missing_files" "$out / $out2"
 fi
 
 ###############################################################################

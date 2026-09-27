@@ -644,6 +644,20 @@ ao_file_block(Relation rel, uint32 filenum, uint64 p, bool allocate)
 	}
 }
 
+/*
+ * The block after the one the last of "size" bytes of file filenum is in:
+ * what of the relation a file of that size reaches, 0 for an empty one
+ * (gp_toolkit's __get_ao_segno_list(), ao_toolkit.c).
+ */
+BlockNumber
+ao_file_end(Relation rel, uint32 filenum, int64 size)
+{
+	if (size <= 0)
+		return 0;
+	return ao_file_block(rel, filenum, (uint64) (size - 1) / AO_PAGE_PAYLOAD,
+						 false) + 1;
+}
+
 /* ------------------------------------------------------------------------- */
 /* Row numbers                                                               */
 /* ------------------------------------------------------------------------- */

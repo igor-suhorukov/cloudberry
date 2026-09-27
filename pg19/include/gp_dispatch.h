@@ -181,6 +181,15 @@ extern void GpRecordWireWrite(StringInfo buf, Datum record);
 extern Datum GpRecordWireRead(StringInfo buf);
 
 /*
+ * gp_record.c: a type's send or receive function, called for a value that
+ * travels between the nodes in its binary form, whose text is in the
+ * database's encoding whatever the session's client asked for.
+ */
+extern bytea *GpSendFunctionCall(FmgrInfo *flinfo, Datum val);
+extern Datum GpReceiveFunctionCall(FmgrInfo *flinfo, StringInfo buf,
+								   Oid typioparam, int32 typmod);
+
+/*
  * Send a dispatched statement (gp_ddl.c builds it) to every segment and wait.
  * "own_xact" is for a statement that cannot run inside a transaction block --
  * CREATE DATABASE, VACUUM, CREATE INDEX CONCURRENTLY -- which each segment
@@ -201,6 +210,12 @@ extern bool GpDispatchIsDispatchedStatement(Node *utilityStmt);
 
 /* Is this the text a dispatched statement travels as?  O26 leaves it alone. */
 extern bool GpDispatchIsTreeText(const char *str);
+
+/*
+ * The client's statement such a text carries, its first *len bytes, or NULL:
+ * what a segment's log names as the statement it runs (gp_log.c).
+ */
+extern const char *GpDispatchTreeStatement(const char *str, int *len);
 
 /*
  * On the coordinator: is it running a statement it dispatches whole once it
