@@ -11,6 +11,7 @@
 # brings it is named where there is one.  A test whose name begins "port/" is
 # the port's own (sql/port and expected/port here).
 skip lockmodes append-optimized tables (M5), and a data directory read from gp_segment_configuration
+run  port/metatrack_drop
 skip ao_partition_lock append-optimized tables (M5)
 run  select_dropped_table
 skip prevent_ao_wal append-optimized tables (M5), with gpconfig and a restart

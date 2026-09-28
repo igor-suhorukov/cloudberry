@@ -43,6 +43,19 @@
  * objects.  A shared object's rows are in the database the statement ran
  * in, where Cloudberry's shared catalog shows them in every database.
  *
+ * VACUUM, and ANALYZE of more than one relation, commit a transaction of
+ * each relation, and Cloudberry writes each one's rows in its own
+ * transaction, under the lock VACUUM or ANALYZE holds on it (vacuum_rel(),
+ * analyze_rel_internal()): a DROP of the relation, which removes its rows,
+ * waits for them, and so does the relation's next VACUUM or ANALYZE.  Once
+ * the statement is done those locks have gone, and a row written then can
+ * meet a DROP's removal of it, one of the two failing -- "tuple
+ * concurrently deleted" or "updated", as isolation2's lockmodes met it, an
+ * ANALYZE beside two DROPs.  So what ANALYZE analyzes has its rows written
+ * as Cloudberry's are, from O3's hook in the relation's transaction; what
+ * VACUUM alone vacuumed after the statement, where no hook reaches, under
+ * the same lock taken again.
+ *
  * Cloudberry sources this file stands in for:
  *	  src/backend/catalog/heap.c (MetaTrackAddObject() and the rest), and
  *	  their calls in src/backend/commands/ and src/backend/catalog/
@@ -77,15 +90,19 @@
 #include "commands/defrem.h"
 #include "commands/extension.h"
 #include "commands/tablespace.h"
+#include "commands/vacuum.h"
 #include "miscadmin.h"
 #include "nodes/parsenodes.h"
+#include "storage/lmgr.h"
 #include "tcop/utility.h"
 #include "utils/acl.h"
 #include "utils/builtins.h"
 #include "utils/fmgroids.h"
 #include "utils/formatting.h"
 #include "utils/guc.h"
+#include "utils/hsearch.h"
 #include "utils/lsyscache.h"
+#include "utils/memutils.h"
 #include "utils/rel.h"
 #include "utils/relcache.h"
 #include "utils/snapmgr.h"
@@ -98,6 +115,7 @@
 
 static object_access_hook_type prev_object_access_hook = NULL;
 static ProcessUtility_hook_type prev_ProcessUtility = NULL;
+static analyze_sample_rows_hook_type prev_analyze_sample_rows = NULL;
 
 /* The last time given, so that the rows of one statement keep their order. */
 static TimestampTz last_statime = 0;
@@ -121,6 +139,21 @@ static int	in_extension = 0;
  * as it goes, and drops one index alone.
  */
 static Oid	forget_concurrent = InvalidOid;
+
+/*
+ * The VACUUM or ANALYZE statement this backend runs: the rows it writes --
+ * VACUUM's, of a subtype, and ANALYZE's -- and the relations whose rows it
+ * wrote as it analyzed them.  In a context of its own, which the
+ * transactions the statement commits leave.
+ */
+typedef struct VacuumRows
+{
+	const char *vsubtype;		/* VACUUM's rows' subtype, NULL for none */
+	bool		analyze;		/* ANALYZE's rows */
+	HTAB	   *written;		/* of Oid */
+} VacuumRows;
+
+static VacuumRows *vacuum_rows = NULL;
 
 /* ------------------------------------------------------------------------- */
 /* The rows                                                                  */
@@ -322,6 +355,28 @@ record_processed(Oid relid, const char *action, const char *subtype)
 
 	if (relkind == RELKIND_RELATION || relkind == RELKIND_PARTITIONED_TABLE)
 		record_relation(relid, action, subtype);
+}
+
+/*
+ * May VACUUM's row of a relation be written after the statement, whose
+ * transaction of the relation has committed and taken its lock with it?
+ * The lock VACUUM holds as Cloudberry writes the row,
+ * ShareUpdateExclusiveLock, taken again and held till this transaction
+ * ends: a DROP of the relation then waits for the row, or has removed the
+ * relation already, which record_processed() finds; and so does the
+ * relation's next VACUUM or ANALYZE, whose rows are written under the same
+ * lock.  Taken without waiting -- the statement holds the lock of each
+ * relation whose row it wrote before, which a DROP of both could be
+ * waiting for -- so where another session holds or waits for a lock that
+ * conflicts, the row is not written: a DROP's, which would remove it, a
+ * VACUUM's or ANALYZE's of the same relation, which writes its own, or an
+ * autovacuum worker's, which writes none.
+ */
+static bool
+lock_for_row(Oid relid)
+{
+	return CheckRelationOidLockedByMe(relid, ShareUpdateExclusiveLock, true) ||
+		ConditionalLockRelationOid(relid, ShareUpdateExclusiveLock);
 }
 
 /* ------------------------------------------------------------------------- */
@@ -626,37 +681,115 @@ vacuumed_relations(VacuumStmt *stmt)
 }
 
 /*
- * VACUUM's row for each relation it vacuumed, but a partitioned table, which
- * has nothing to vacuum and none in Cloudberry (vacuum_rel()); ANALYZE's for
- * each it analyzed, a partitioned table's too (analyze_rel_internal()).
+ * An option's Boolean value, as defGetBoolean() reads it, before PostgreSQL
+ * has checked the statement: a value it refuses is false here, and its
+ * error comes as the statement runs.
  */
-static void
-vacuum(VacuumStmt *stmt)
+static bool
+option_is_true(DefElem *opt)
+{
+	if (opt->arg == NULL)
+		return true;
+	if (IsA(opt->arg, Integer))
+		return intVal(opt->arg) == 1;
+	return pg_strcasecmp(defGetString(opt), "true") == 0 ||
+		pg_strcasecmp(defGetString(opt), "on") == 0;
+}
+
+/*
+ * The rows a VACUUM or ANALYZE statement is to write, as its options say, in
+ * "cxt"; NULL for none -- VACUUM (ONLY_DATABASE_STATS), which takes no
+ * relation, or a database without gp_core's tables.
+ */
+static VacuumRows *
+vacuum_rows_of(VacuumStmt *stmt, MemoryContext cxt)
 {
 	bool		full = false;
 	bool		freeze = false;
 	bool		analyze = !stmt->is_vacuumcmd;
-	const char *vsubtype;
+	VacuumRows *rows;
+	HASHCTL		ctl;
 
+	if (!OidIsValid(table_of(RelationRelationId)))
+		return NULL;
 	foreach_node(DefElem, opt, stmt->options)
 	{
 		if (strcmp(opt->defname, "full") == 0)
-			full = defGetBoolean(opt);
+			full = option_is_true(opt);
 		else if (strcmp(opt->defname, "freeze") == 0)
-			freeze = defGetBoolean(opt);
+			freeze = option_is_true(opt);
 		else if (strcmp(opt->defname, "analyze") == 0)
-			analyze = defGetBoolean(opt);
-		else if (strcmp(opt->defname, "only_database_stats") == 0 && defGetBoolean(opt))
-			return;
+			analyze = option_is_true(opt);
+		else if (strcmp(opt->defname, "only_database_stats") == 0 && option_is_true(opt))
+			return NULL;
 	}
-	vsubtype = full && freeze ? "FULL FREEZE" : full ? "FULL" : freeze ? "FREEZE" : "";
 
+	rows = MemoryContextAllocZero(cxt, sizeof(VacuumRows));
+	if (stmt->is_vacuumcmd)
+		rows->vsubtype = full && freeze ? "FULL FREEZE" : full ? "FULL" : freeze ? "FREEZE" : "";
+	rows->analyze = analyze;
+	ctl.keysize = sizeof(Oid);
+	ctl.entrysize = sizeof(Oid);
+	ctl.hcxt = cxt;
+	rows->written = hash_create("gp_core VACUUM and ANALYZE rows", 64, &ctl,
+								HASH_ELEM | HASH_BLOBS | HASH_CONTEXT);
+	return rows;
+}
+
+/*
+ * O3's hook, as analyze_rel() asks it of the relation it analyzes, which it
+ * holds in ShareUpdateExclusiveLock till its transaction ends: the
+ * relation's rows written in that transaction, where Cloudberry's
+ * analyze_rel_internal() writes its ANALYZE row -- a VACUUM ANALYZE's
+ * VACUUM row first, which vacuum_rel()'s transaction before it has no hook
+ * to write, so that the two keep their order.  ANALYZE's row of each
+ * relation it analyzed, a partitioned table's too; VACUUM's but a
+ * partitioned table's, which has nothing to vacuum and none in Cloudberry
+ * (vacuum_rel()).  Not where acquire_inherited_sample_rows() asks it of each
+ * member of the tree it samples, as the table's owner, in a
+ * security-restricted operation.
+ */
+static bool
+metatrack_analyze_sample_rows(Relation relation, AnalyzeSampleRowsFunc *func,
+							  BlockNumber *totalpages)
+{
+	Oid			relid = RelationGetRelid(relation);
+	bool		found;
+
+	if (vacuum_rows != NULL && vacuum_rows->analyze && tracking() &&
+		!InSecurityRestrictedOperation() &&
+		CheckRelationOidLockedByMe(relid, ShareUpdateExclusiveLock, true))
+	{
+		(void) hash_search(vacuum_rows->written, &relid, HASH_ENTER, &found);
+		if (!found)
+		{
+			if (vacuum_rows->vsubtype != NULL &&
+				relation->rd_rel->relkind != RELKIND_PARTITIONED_TABLE)
+				record_processed(relid, "VACUUM", vacuum_rows->vsubtype);
+			record_processed(relid, "ANALYZE", "");
+		}
+	}
+	return prev_analyze_sample_rows
+		? prev_analyze_sample_rows(relation, func, totalpages) : false;
+}
+
+/*
+ * After a VACUUM, its row of each table it vacuumed that has none yet -- a
+ * VACUUM ANALYZE's are written as it analyzes -- under the table's lock
+ * taken again (lock_for_row()).
+ */
+static void
+vacuum_(VacuumStmt *stmt)
+{
+	if (vacuum_rows == NULL || vacuum_rows->vsubtype == NULL)
+		return;
 	foreach_oid(relid, vacuumed_relations(stmt))
 	{
-		if (stmt->is_vacuumcmd && get_rel_relkind(relid) != RELKIND_PARTITIONED_TABLE)
-			record_processed(relid, "VACUUM", vsubtype);
-		if (analyze)
-			record_processed(relid, "ANALYZE", "");
+		if (get_rel_relkind(relid) != RELKIND_RELATION ||
+			hash_search(vacuum_rows->written, &relid, HASH_FIND, NULL) != NULL ||
+			!lock_for_row(relid))
+			continue;
+		record_processed(relid, "VACUUM", vacuum_rows->vsubtype);
 	}
 }
 
@@ -879,7 +1012,7 @@ statement_done(Node *parsetree)
 			}
 			break;
 		case T_VacuumStmt:
-			vacuum((VacuumStmt *) parsetree);
+			vacuum_((VacuumStmt *) parsetree);
 			break;
 		case T_TruncateStmt:
 			truncate_((TruncateStmt *) parsetree);
@@ -992,6 +1125,8 @@ metatrack_ProcessUtility(PlannedStmt *pstmt, const char *queryString,
 	Node	   *parsetree = pstmt->utilityStmt;
 	bool		extension = IsA(parsetree, CreateExtensionStmt) ||
 		IsA(parsetree, AlterExtensionStmt);
+	VacuumRows *outer_rows = vacuum_rows;
+	MemoryContext rows_cxt = NULL;
 
 	/*
 	 * An extension's schema, which CREATE EXTENSION makes before its script
@@ -999,30 +1134,48 @@ metatrack_ProcessUtility(PlannedStmt *pstmt, const char *queryString,
 	 */
 	if (extension)
 		in_extension++;
-	if (prev_ProcessUtility)
-		prev_ProcessUtility(pstmt, queryString, readOnlyTree, context,
-							params, queryEnv, dest, qc);
-	else
-		standard_ProcessUtility(pstmt, queryString, readOnlyTree, context,
+
+	/* A VACUUM or ANALYZE statement writes rows as it goes. */
+	if (IsA(parsetree, VacuumStmt) && tracking())
+		rows_cxt = AllocSetContextCreate(TopMemoryContext, "gp_core VACUUM and ANALYZE rows",
+										 ALLOCSET_SMALL_SIZES);
+
+	PG_TRY();
+	{
+		if (rows_cxt != NULL)
+			vacuum_rows = vacuum_rows_of((VacuumStmt *) parsetree, rows_cxt);
+		if (prev_ProcessUtility)
+			prev_ProcessUtility(pstmt, queryString, readOnlyTree, context,
 								params, queryEnv, dest, qc);
-	if (extension)
-		in_extension--;
+		else
+			standard_ProcessUtility(pstmt, queryString, readOnlyTree, context,
+									params, queryEnv, dest, qc);
+		if (extension)
+			in_extension--;
 
-	if (OidIsValid(forget_concurrent))
-	{
-		Oid			relid = forget_concurrent;
+		if (OidIsValid(forget_concurrent))
+		{
+			Oid			relid = forget_concurrent;
 
-		forget_concurrent = InvalidOid;
+			forget_concurrent = InvalidOid;
+			if (tracking())
+				forget(RelationRelationId, relid);
+		}
+
 		if (tracking())
-			forget(RelationRelationId, relid);
+		{
+			/* what the statement made, seen */
+			CommandCounterIncrement();
+			statement_done(parsetree);
+		}
 	}
-
-	if (tracking())
+	PG_FINALLY();
 	{
-		/* what the statement made, seen */
-		CommandCounterIncrement();
-		statement_done(parsetree);
+		vacuum_rows = outer_rows;
+		if (rows_cxt != NULL)
+			MemoryContextDelete(rows_cxt);
 	}
+	PG_END_TRY();
 }
 
 /* ------------------------------------------------------------------------- */
@@ -1048,5 +1201,7 @@ GpMetaTrackInit(void)
 	object_access_hook = metatrack_object_access;
 	prev_ProcessUtility = ProcessUtility_hook;
 	ProcessUtility_hook = metatrack_ProcessUtility;
+	prev_analyze_sample_rows = analyze_sample_rows_hook;
+	analyze_sample_rows_hook = metatrack_analyze_sample_rows;
 	RegisterXactCallback(metatrack_xact_callback, NULL);
 }

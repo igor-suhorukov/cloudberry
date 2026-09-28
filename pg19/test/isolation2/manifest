@@ -37,6 +37,7 @@
 # gpexpand_catalog_lock, whose sessions hold every other session's catalog
 # changes, is in a group of its own, as the schedule keeps it.
 run  lockmodes                                     lockmodes
+run  port/metatrack_drop                         lockmodes
 run  prepared_xact_deadlock_pg_rewind              mirrors1
 run  port/dirxact_restart                          mirrors1
 run  select_dropped_table
