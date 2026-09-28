@@ -134,7 +134,7 @@ plain_table(RangeTblEntry *rte, bool fetchable)
 	if (!fetchable)
 		return true;
 	rel = table_open(rte->relid, NoLock);
-	from_plan = table_old_row_from_plan(rel);
+	from_plan = false;	/* O20 is gone */
 	table_close(rel, NoLock);
 	return !from_plan;
 }
@@ -175,7 +175,7 @@ partitioned_table(RangeTblEntry *rte, bool fetchable)
 		if (!fetchable)
 			continue;
 		rel = table_open(relid, NoLock);
-		ok = !table_old_row_from_plan(rel);
+		ok = true;	/* O20 is gone */
 		table_close(rel, NoLock);
 		if (!ok)
 			break;

@@ -3009,15 +3009,9 @@ gpdb::RelOldRowFromPlan(Oid relid)
 	GP_WRAP_START;
 	{
 		/* the statement's parser has the table locked */
-		Relation	rel;
-		bool		from_plan;
-
-		if (TableAmExtensionCount == 0)
-			return false;
-		rel = RelationIdGetRelation(relid);
-		from_plan = table_old_row_from_plan(rel);
-		RelationClose(rel);
-		return from_plan;
+		/* O20 is gone: every table's old row is fetched by its ctid */
+		(void) relid;
+		return false;
 	}
 	GP_WRAP_END;
 	return false;

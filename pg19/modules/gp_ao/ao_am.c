@@ -1854,7 +1854,6 @@ ao_register_table_ams(void)
 	ao_row_ext.reloptions = ao_row_reloptions;
 	ao_row_ext.index_unique_check = ao_index_unique_check;
 	ao_row_ext.relation_get_block_sequences = ao_relation_get_block_sequences;
-	ao_row_ext.old_row_from_plan = true;
 
 	ao_column_ext = ao_row_ext;
 	ao_column_ext.reloptions = ao_column_reloptions;
