@@ -63,6 +63,13 @@ extern PGDLLIMPORT volatile int *gp_fault_active;
 extern GpFaultType GpFaultTrigger(const char *name, const char *database,
 								  const char *table);
 
+/*
+ * The same, for the coordinator session given -- a segment process's, which
+ * a connection's start knows before the process has taken it.
+ */
+extern GpFaultType GpFaultTriggerSession(const char *name, const char *database,
+										 const char *table, int session);
+
 #define GP_FAULT(name) \
 	((gp_fault_active == NULL || *gp_fault_active == 0) ? GP_FAULT_NONE \
 	 : GpFaultTrigger((name), "", ""))

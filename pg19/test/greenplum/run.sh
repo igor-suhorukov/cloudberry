@@ -409,6 +409,11 @@ t1=$(date +%s)
 	# ic_proxy_socket's PL/Python reads SHOW's row by the setting's name,
 	# which the port spells gp.interconnect_*.
 	echo 'sed s#\["gp_interconnect_(type|proxy_addresses)"\]#["gp.interconnect_\1"]#g'
+	# A PL/pgSQL handler of a fault's error, "when fault_inject", Cloudberry's
+	# condition of ERRCODE_FAULT_INJECT, which PostgreSQL 19's PL/pgSQL does
+	# not know and no module can add to its list: the code the condition
+	# stands for, XX009, which the port's faults raise (gp_fault.c).
+	echo "sed s#\\bwhen fault_inject then\\b#when sqlstate 'XX009' then#Ig"
 	# and the suite's own, where it has any
 	[ "$SUITE_DIR" = "$HERE" ] || cat "$SUITE_DIR/respell" 2> /dev/null
 } > "$WORK/respell"

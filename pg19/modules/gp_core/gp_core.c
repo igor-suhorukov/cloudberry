@@ -380,9 +380,9 @@ _PG_init(void)
 
 	/*
 	 * A connection's start (gp_dispatch.c): the session id a coordinator's
-	 * client takes as it connects.  After gp_endpoint.c's and gp_fts.c's
-	 * authentication hooks, whose work it follows: a retrieve session is one
-	 * by then.
+	 * client takes as it connects, and the faults of a segment process's
+	 * start.  After gp_endpoint.c's and gp_fts.c's authentication hooks,
+	 * whose work it follows: a retrieve session is one by then.
 	 */
 	GpDispatchConnectionInit();
 

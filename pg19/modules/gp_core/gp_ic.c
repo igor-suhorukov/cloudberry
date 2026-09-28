@@ -2592,6 +2592,18 @@ ic_xact_callback(XactEvent event, void *arg)
 	udp_ended = NIL;
 }
 
+/*
+ * How many of tcp's and udpifc's senders and receivers this backend has
+ * open: what Cloudberry's GetActiveMotionConns() counts of udpifc's (its
+ * regress.so's numActiveMotionConns()), 0 once a statement's Motions have
+ * ended, as an error ends them too.
+ */
+int
+GpIcActiveConnections(void)
+{
+	return list_length(senders) + list_length(receivers);
+}
+
 void
 GpIcInit(void)
 {

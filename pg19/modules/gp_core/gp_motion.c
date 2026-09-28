@@ -2219,6 +2219,7 @@ fragment_sql_ex(EState *estate, Plan *fragment, CustomScan *motion,
 				bool reader)
 {
 	List	   *params;
+	char	   *sql;
 
 	PlannedStmt *whole = estate->es_plannedstmt;
 	PlannedStmt *frag = makeNode(PlannedStmt);
@@ -2337,9 +2338,11 @@ fragment_sql_ex(EState *estate, Plan *fragment, CustomScan *motion,
 		frag->permInfos = NIL;
 	}
 
-	return psprintf("SELECT gp_internal.exec_fragment(%s, %s)",
-					quote_literal_cstr(nodeToString(frag)),
-					quote_literal_cstr(key ? key : ""));
+	sql = psprintf("SELECT gp_internal.exec_fragment(%s, %s)",
+				   quote_literal_cstr(nodeToString(frag)),
+				   quote_literal_cstr(key ? key : ""));
+	GpDispatchCheckPlanSize(sql);
+	return sql;
 }
 
 
@@ -3145,6 +3148,8 @@ stream_start(MotionState *state, GpStream *stream,
 											   state->key,
 											   list_make1(streammark), true);
 
+		/* Cloudberry's faults before and after a slice is sent (gp_dispatch.c) */
+		(void) GP_FAULT("before_one_slice_dispatched");
 		for (int i = 0; i < ss->ncontents; i++)
 		{
 			int			seg = ss->contents[i];
@@ -3158,6 +3163,7 @@ stream_start(MotionState *state, GpStream *stream,
 						   fragment, GpLogStatementComment());
 			GpStreamStartReader(stream, ss->readers[i], sql);
 		}
+		(void) GP_FAULT("after_one_slice_dispatched");
 	}
 
 	return list_make2(streammark,

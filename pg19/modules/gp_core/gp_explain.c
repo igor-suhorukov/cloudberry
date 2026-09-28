@@ -130,6 +130,7 @@
 #include "gp_core_api.h"
 #include "gp_dispatch.h"
 #include "gp_explain.h"
+#include "gp_fault.h"
 #include "gp_metrics.h"
 #include "gp_motion.h"
 #include "gp_policy.h"
@@ -1105,6 +1106,8 @@ send_report(GpReportHeader *hdr, StringInfo buf)
 		elog(ERROR, "could not encode EXPLAIN ANALYZE's statistics");
 	text[len] = '\0';
 
+	/* Cloudberry's fault before the statistics go (cdbexplain_sendExecStats()) */
+	(void) GP_FAULT("send_exec_stats");
 	ereport(INFO,
 			(errcode(ERRCODE_GP_EXPLAIN_STATS),
 			 errmsg_internal("%s", text),
@@ -1945,6 +1948,11 @@ explain_ExecutorRun(QueryDesc *queryDesc, ScanDirection direction,
 	executor_depth++;
 	PG_TRY();
 	{
+		/*
+		 * Cloudberry's fault before a run processes its first row, on every
+		 * node (ExecutePlan(), execMain.c).
+		 */
+		(void) GP_FAULT("executor_pre_tuple_processed");
 		if (prev_ExecutorRun)
 			prev_ExecutorRun(queryDesc, direction, count);
 		else

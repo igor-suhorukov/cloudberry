@@ -34,6 +34,12 @@
 #define GP_WALRECEIVER_APPNAME	"gp_walreceiver"
 
 /*
+ * What the prober's connections are called, on the segments and in their
+ * logs: a connection's start knows them by it (gp_dispatch.c).
+ */
+#define GP_FTS_APPNAME			"cloudberry fts"
+
+/*
  * The slot a primary keeps for its mirror, which a mirror FTS promotes makes
  * for the primary it failed over from; Cloudberry's
  * INTERNAL_WAL_REPLICATION_SLOT_NAME.

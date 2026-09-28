@@ -199,6 +199,31 @@ directory_table  what the port keeps a directory table and a storage server
   arguments.  The rows ordered by relative_path in the C collation, where
   nation.txt comes first.  And psql 19's \!rm, a command it does not know.
 
+dispatch (planner, orca)  run in group tcp1, whose nodes reach one another
+  over TCP, as its matchsubs of libpq's messages have them.  DoCopyToFail,
+  a fault of a segment's COPY TO: the port's COPY of a distributed table to
+  stdout is a query's COPY, whose rows a gather brings to the coordinator,
+  so no segment runs a COPY and the three rows are printed.  A segment's
+  pg_db_role_setting after ALTER DATABASE ... SET FROM CURRENT, which holds
+  the coordinator's value, where Cloudberry's segment quotes it again.  A
+  function whose block has an exception handler, run on a writer busy with
+  the statement's scan: the port sends its savepoint with the block's first
+  statement that goes to the segments, and runs it, where Cloudberry refuses
+  a subtransaction on a busy writer gang.  PostgreSQL 19's words for FETCH
+  BACKWARD in a cursor that cannot scan backward, as aocs has them.  And
+  gp.print_create_gang_time's INFO lines: the port sends a SET to the
+  segments with the next statement that goes to them, so the gang is made
+  at CREATE TABLE, not at the SET of the setting, and the planner route's
+  two gathers are its connections, "(Gang) is reused", where Cloudberry's
+  planner makes a gang of one segment for slice 2.  Under the planner the
+  three tables of case 1.3's join are gathered to the coordinator, whose
+  join needs no second process on a segment: the fault at segment 0's third
+  connection of the session, at its reader gang's in Cloudberry, comes at
+  none, the query answers, and no reader is left on the segments; ORCA's
+  plan of it has readers, and fails there as Cloudberry's.  Under ORCA
+  gp.max_plan_size holds a fragment's plan tree as text, where a constant's
+  bytes are written as numbers: the 11 kB string is 46KB of it.
+
 distributed_transactions  the INFO lines of two of its transactions.  A
   savepoint's INSERT of two rows, VALUES (2),(1): Cloudberry's planner reads
   the VALUES in a slice of its own on one segment, (slice 1) Dispatch

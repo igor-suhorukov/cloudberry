@@ -217,6 +217,9 @@ extern PGDLLIMPORT int gp_log_interconnect;
 #define GP_IC_VERBOSITY_DEBUG		4
 
 /* The settings, gp_core's transports, and the transaction callbacks. */
+/* This backend's open senders and receivers, of tcp and udpifc (gp_ic.c). */
+extern PGDLLEXPORT int GpIcActiveConnections(void);
+
 extern void GpIcInit(void);
 
 #endif							/* GP_IC_H */

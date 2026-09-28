@@ -59,6 +59,9 @@ extern void GpGddNoteSession(void);
  */
 extern bool GpGddBackendIdentity(int pid, int *session, bool *reader);
 
+/* How many other backends of this node work for this backend's session. */
+extern int	GpGddSessionBackends(void);
+
 /* The settings, and the detector's process; from gp_core's _PG_init. */
 extern void GpGddInit(void);
 

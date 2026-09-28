@@ -100,6 +100,7 @@
 #include "nodes/pg_list.h"
 #include "parser/parser.h"
 #include "parser/scanner.h"
+#include "portability/instr_time.h"
 #include "postmaster/postmaster.h"
 #include "replication/walsender.h"
 #include "storage/ipc.h"
@@ -155,6 +156,13 @@ static char *gp_internal_sslcrl = NULL;
  */
 static int	gp_gang_creation_retry_count = 5;
 static int	gp_gang_creation_retry_timer = 2000;
+
+/*
+ * How long a gang's connections may take, in seconds, 0 for ever: Cloudberry's
+ * gp_segment_connect_timeout, the deadline its createGang_async() gives all
+ * of a gang's at once (cdbgang_async.c).
+ */
+static int	gp_segment_connect_timeout = 180;
 
 /*
  * The TCP keepalives of the dispatcher's connections to the segments:
@@ -685,6 +693,7 @@ static List *active_streams = NIL;
 
 static void gang_close(void);
 static void session_reset_if_lost(void);
+static char *strip_trailing_space(char *s);
 static void gang_drain_keeping(List **errors);
 static void forget_kept_errors(void);
 static void gang_build_wes(GpGang *g);
@@ -956,7 +965,427 @@ dispatch_keepalive_options(const char **keywords, const char **values, int n,
 }
 
 /*
- * Open the session's connections, one per segment.
+ * A connection to a segment being made: a gang's writer, or a reader.  Its
+ * options are its own -- the identity names the content -- as is the room
+ * for its port's and keepalives' values, which libpq reads as it connects.
+ */
+#define CONN_ATTEMPT_OPTIONS \
+	(7 + DISPATCH_KEEPALIVE_OPTIONS + GP_INTERNAL_CONN_OPTIONS)
+
+typedef struct GpConnAttempt
+{
+	const GpSegmentConfig *seg;
+	const char *keywords[CONN_ATTEMPT_OPTIONS];
+	const char *values[CONN_ATTEMPT_OPTIONS];
+	char		portbuf[16];
+	char		keepalive_buf[DISPATCH_KEEPALIVE_OPTIONS][16];
+	PGconn	   *conn;			/* NULL until started, and once given up */
+	PostgresPollingStatusType polling;
+	instr_time	start;
+	double		ms;				/* how long it took, once made */
+} GpConnAttempt;
+
+/* The options of a connection to a segment, as the dispatcher makes one. */
+static void
+conn_attempt_init(GpConnAttempt *a, const GpSegmentConfig *seg,
+				  const char *dbname, const char *username, bool reader)
+{
+	int			n = 0;
+
+	memset(a, 0, sizeof(GpConnAttempt));
+	a->seg = seg;
+	snprintf(a->portbuf, sizeof(a->portbuf), "%d", seg->port);
+	a->keywords[n] = "host";
+	a->values[n++] = seg->hostname;
+	a->keywords[n] = "port";
+	a->values[n++] = a->portbuf;
+	a->keywords[n] = "dbname";
+	a->values[n++] = dbname;
+	a->keywords[n] = "user";
+	a->values[n++] = username;
+	a->keywords[n] = "application_name";
+	a->values[n++] = reader ? "cloudberry reader" : "cloudberry dispatcher";
+	a->keywords[n] = "client_encoding";
+	a->values[n++] = GetDatabaseEncodingName();
+	a->keywords[n] = "options";
+
+	/*
+	 * A reader is a member of its writer's lock group, and a member cannot
+	 * lead a group of its own: it starts no parallel workers.  Its planner
+	 * holds to that whatever a function sets (share_planner()); the setting
+	 * spares it the look at each query.
+	 */
+	a->values[n++] = reader ?
+		psprintf("%s -c max_parallel_workers_per_gather=0",
+				 qe_identity_option(seg->content)) :
+		qe_identity_option(seg->content);
+	n = dispatch_keepalive_options(a->keywords, a->values, n, a->keepalive_buf);
+	(void) GpInternalConnOptions(a->keywords, a->values, n);
+}
+
+/* Cloudberry's name of a segment in its messages: "seg0 host:port". */
+static char *
+conn_attempt_whoami(const GpConnAttempt *a)
+{
+	return psprintf("seg%d %s:%d", a->seg->content, a->seg->hostname,
+					a->seg->port);
+}
+
+/* Give a connection up. */
+static void
+conn_attempt_drop(GpConnAttempt *a)
+{
+	if (a->conn != NULL)
+		libpqsrv_disconnect(a->conn);
+	a->conn = NULL;
+}
+
+/*
+ * Start each connection not made yet.  A PGconn that libpq could not make
+ * holds no descriptor, the one reserved for it given back.
+ */
+static void
+conn_attempts_start(GpConnAttempt *attempts, int n)
+{
+	for (int i = 0; i < n; i++)
+	{
+		GpConnAttempt *a = &attempts[i];
+
+		if (a->conn != NULL)
+			continue;
+		INSTR_TIME_SET_CURRENT(a->start);
+		a->conn = libpqsrv_connect_params_start(a->keywords, a->values, false);
+		if (a->conn == NULL)
+		{
+			ReleaseExternalFD();
+			ereport(ERROR,
+					(errcode(ERRCODE_OUT_OF_MEMORY),
+					 errmsg("out of memory")));
+		}
+		a->polling = PQstatus(a->conn) == CONNECTION_BAD ?
+			PGRES_POLLING_FAILED : PGRES_POLLING_WRITING;
+	}
+}
+
+/*
+ * Poll the connections being made until none is, waiting for their sockets
+ * all at once: false when the deadline, where there is one, passed first.
+ * A new wait set each round: a connection's socket may change as libpq
+ * tries the next address of a host.
+ */
+static bool
+conn_attempts_poll(GpConnAttempt *attempts, int n, TimestampTz deadline)
+{
+	WaitEvent  *occurred = palloc_array(WaitEvent, n + 2);
+
+	for (;;)
+	{
+		WaitEventSet *wes;
+		int			npending = 0;
+		long		timeout = -1;
+		int			nready;
+
+		for (int i = 0; i < n; i++)
+			if (attempts[i].polling != PGRES_POLLING_OK &&
+				attempts[i].polling != PGRES_POLLING_FAILED)
+				npending++;
+		if (npending == 0)
+			break;
+		if (deadline != 0)
+		{
+			timeout = TimestampDifferenceMilliseconds(GetCurrentTimestamp(),
+													  deadline);
+			if (timeout <= 0)
+			{
+				pfree(occurred);
+				return false;
+			}
+		}
+
+		wes = CreateWaitEventSet(NULL, npending + 2);
+		AddWaitEventToSet(wes, WL_LATCH_SET, PGINVALID_SOCKET, MyLatch, NULL);
+		if (IsUnderPostmaster)
+			AddWaitEventToSet(wes, WL_EXIT_ON_PM_DEATH, PGINVALID_SOCKET,
+							  NULL, NULL);
+		for (int i = 0; i < n; i++)
+		{
+			GpConnAttempt *a = &attempts[i];
+
+			if (a->polling == PGRES_POLLING_OK ||
+				a->polling == PGRES_POLLING_FAILED)
+				continue;
+			AddWaitEventToSet(wes, a->polling == PGRES_POLLING_READING ?
+							  WL_SOCKET_READABLE : WL_SOCKET_WRITEABLE,
+							  PQsocket(a->conn), NULL, a);
+		}
+		nready = WaitEventSetWait(wes, timeout, occurred, npending + 2,
+								  dispatch_wait_event());
+		FreeWaitEventSet(wes);
+
+		for (int i = 0; i < nready; i++)
+		{
+			GpConnAttempt *a = (GpConnAttempt *) occurred[i].user_data;
+
+			if (occurred[i].events & WL_LATCH_SET)
+				ResetLatch(MyLatch);
+			if (a == NULL ||
+				!(occurred[i].events & (WL_SOCKET_READABLE | WL_SOCKET_WRITEABLE)))
+				continue;
+			a->polling = PQconnectPoll(a->conn);
+			if (a->polling == PGRES_POLLING_OK)
+			{
+				instr_time	now;
+
+				INSTR_TIME_SET_CURRENT(now);
+				INSTR_TIME_SUBTRACT(now, a->start);
+				a->ms = INSTR_TIME_GET_MILLISEC(now);
+			}
+		}
+		CHECK_FOR_INTERRUPTS();
+	}
+	pfree(occurred);
+	return true;
+}
+
+/*
+ * What a segment said as it refused a connection, which says it is starting
+ * up, resetting or in recovery -- one to try again (Cloudberry's
+ * segment_failure_due_to_recovery(), cdbgang.c).  And a connection its
+ * postmaster closed as it ended the backend it had started for it, which
+ * PostgreSQL 19's does as it resets, before the backend says anything.
+ */
+static bool
+conn_refused_in_recovery(const char *msg)
+{
+	return strstr(msg, "the database system is starting up") != NULL ||
+		strstr(msg, "the database system is in recovery mode") != NULL ||
+		strstr(msg, "the database system is not yet accepting connections") != NULL ||
+		strstr(msg, "server closed the connection unexpectedly") != NULL;
+}
+
+/* A fault's FATAL, which Cloudberry's message tells apart. */
+static bool
+conn_refused_by_fault(const char *msg)
+{
+	const char *fatal = strstr(msg, "FATAL:");
+
+	return fatal != NULL && strstr(fatal, "fault triggered") != NULL;
+}
+
+/* Why a gang's connection failed, as Cloudberry's messages tell them apart. */
+typedef enum GpConnFailure
+{
+	CONN_MADE,					/* none: made, or to be tried again */
+	CONN_TIMEOUT,				/* the deadline came first */
+	CONN_NO_DETAILS,			/* its backend is no segment process */
+	CONN_REFUSED_BY_FAULT,		/* a fault's FATAL */
+	CONN_REFUSED,				/* anything else libpq says */
+} GpConnFailure;
+
+/*
+ * A gang's connection failed: FTS is asked to probe and waited for, as
+ * Cloudberry's dispatcher asks it as a gang fails (FtsNotifyProber(),
+ * cdbgang_async.c) -- a segment it finds down is what is said, and the next
+ * transaction connects to its mirror -- and what failed is said otherwise,
+ * in Cloudberry's words.
+ */
+static void
+connect_failed(GpConnAttempt *attempts, int n, GpConnAttempt *failed,
+			   GpConnFailure failure, const char *msg)
+{
+	char	   *whoami = conn_attempt_whoami(failed);
+
+	GpFtsNotifyProber();
+	for (int i = 0; i < n; i++)
+		if (!GpClusterIsPrimaryNow(attempts[i].seg->dbid))
+			ereport(ERROR,
+					(errcode(ERRCODE_CONNECTION_FAILURE),
+					 errmsg("failed to acquire resources on one or more segments"),
+					 errdetail("FTS detected one or more segments are down")));
+
+	switch (failure)
+	{
+		case CONN_TIMEOUT:
+			ereport(ERROR,
+					(errcode(ERRCODE_CONNECTION_FAILURE),
+					 errmsg("failed to acquire resources on one or more segments"),
+					 errdetail("timeout expired\n (%s)", whoami)));
+			break;
+		case CONN_NO_DETAILS:
+			ereport(ERROR,
+					(errcode(ERRCODE_CONNECTION_FAILURE),
+					 errmsg("failed to acquire resources on one or more segments"),
+					 errdetail("Internal error: No motion listener port (%s)", whoami)));
+			break;
+		case CONN_REFUSED_BY_FAULT:
+			ereport(ERROR,
+					(errcode(ERRCODE_CONNECTION_FAILURE),
+					 errmsg("failed to acquire resources on one or more segments: fault injector"),
+					 errdetail("%s\n (%s)", msg, whoami)));
+			break;
+		case CONN_REFUSED:
+		case CONN_MADE:
+			break;
+	}
+	ereport(ERROR,
+			(errcode(ERRCODE_CONNECTION_FAILURE),
+			 errmsg("failed to acquire resources on one or more segments"),
+			 errdetail("%s\n (%s)", msg, whoami)));
+}
+
+/*
+ * Make the connections, all at once, as Cloudberry's createGang_async()
+ * makes a gang's (cdbgang_async.c): each started and polled until all are
+ * made or have failed, under one deadline, gp.segment_connect_timeout.  A
+ * segment in recovery is tried again, gp.gang_creation_retry_count times,
+ * gp.gang_creation_retry_timer apart, the others kept: one restarting
+ * refuses the connection, or closes it, and a mirror FTS promoted, a hot
+ * standby until the promotion takes, takes it and says so (in_hot_standby),
+ * and could not write.  And a connection made whose backend did not say it
+ * is a segment process of this coordinator's (gp.qe_details) is not one.
+ *
+ * Every connection or none: what fails fails them all, in Cloudberry's
+ * words, once FTS has been asked to probe and waited for, as Cloudberry's
+ * dispatcher asks it (FtsNotifyProber()) -- a segment it finds down is what
+ * is said, and the next transaction connects to its mirror.  Then the
+ * cluster's fault: a gang made, gang_created, which fails it too.
+ */
+static void
+connect_segments(GpConnAttempt *attempts, int n)
+{
+	int			retries = 0;
+
+	PG_TRY();
+	{
+		for (;;)
+		{
+			TimestampTz deadline = gp_segment_connect_timeout <= 0 ? 0 :
+				TimestampTzPlusSeconds(GetCurrentTimestamp(),
+									   gp_segment_connect_timeout);
+			GpConnAttempt *failed = NULL;
+			GpConnFailure failure = CONN_MADE;
+			char	   *msg = NULL;
+			bool		in_recovery = false;
+
+			conn_attempts_start(attempts, n);
+			if (!conn_attempts_poll(attempts, n, deadline))
+			{
+				for (int i = 0; i < n && failed == NULL; i++)
+					if (attempts[i].polling != PGRES_POLLING_OK &&
+						attempts[i].polling != PGRES_POLLING_FAILED)
+						failed = &attempts[i];
+				failure = CONN_TIMEOUT;
+			}
+
+			for (int i = 0; i < n && failure == CONN_MADE; i++)
+			{
+				GpConnAttempt *a = &attempts[i];
+
+				if (a->polling == PGRES_POLLING_OK)
+				{
+					const char *hot_standby = PQparameterStatus(a->conn, "in_hot_standby");
+					const char *details = PQparameterStatus(a->conn, "gp.qe_details");
+
+					if (hot_standby != NULL && strcmp(hot_standby, "on") == 0)
+					{
+						conn_attempt_drop(a);
+						in_recovery = true;
+					}
+					else if (details == NULL || details[0] == '\0')
+					{
+						failed = a;
+						failure = CONN_NO_DETAILS;
+					}
+					continue;
+				}
+
+				msg = strip_trailing_space(pstrdup(PQerrorMessage(a->conn)));
+				if (conn_refused_in_recovery(msg))
+				{
+					conn_attempt_drop(a);
+					in_recovery = true;
+					continue;
+				}
+				failed = a;
+				failure = conn_refused_by_fault(msg) ? CONN_REFUSED_BY_FAULT
+					: CONN_REFUSED;
+			}
+
+			if (failure != CONN_MADE)
+				connect_failed(attempts, n, failed, failure, msg);
+			if (!in_recovery)
+				break;
+			if (retries++ >= gp_gang_creation_retry_count)
+				ereport(ERROR,
+						(errcode(ERRCODE_CONNECTION_FAILURE),
+						 errmsg("failed to acquire resources on one or more segments"),
+						 errdetail("Segments are in reset/recovery mode.")));
+			GANG_LOG(GANG_LOG_TERSE, "a segment is in reset/recovery mode: its connection tried again in %d ms",
+					 gp_gang_creation_retry_timer);
+			(void) WaitLatch(MyLatch, WL_LATCH_SET | WL_TIMEOUT | WL_EXIT_ON_PM_DEATH,
+							 gp_gang_creation_retry_timer, dispatch_wait_event());
+			ResetLatch(MyLatch);
+			CHECK_FOR_INTERRUPTS();
+		}
+
+		GP_FAULT("gang_created");
+	}
+	PG_CATCH();
+	{
+		for (int i = 0; i < n; i++)
+			conn_attempt_drop(&attempts[i]);
+		PG_RE_THROW();
+	}
+	PG_END_TRY();
+}
+
+/*
+ * gp.print_create_gang_time: Cloudberry's gp_print_create_gang_time, an INFO
+ * of how long the gang's connections took, the shortest and the longest,
+ * where a statement makes it, and that it is reused where a statement
+ * dispatches through one made before (printCreateGangTime(), cdbgang.c) --
+ * once a statement, which dispatches many times here; of the gang, not of
+ * the readers a statement's slices take.
+ */
+static bool gp_print_create_gang_time = false;
+static TimestampTz gang_time_reported = 0;	/* the statement it was said of */
+
+static void
+gang_made_times(const GpConnAttempt *attempts, int n)
+{
+	int			shortest = 0;
+	int			longest = 0;
+
+	if (!gp_print_create_gang_time)
+		return;
+	for (int i = 1; i < n; i++)
+	{
+		if (attempts[i].ms < attempts[shortest].ms)
+			shortest = i;
+		if (attempts[i].ms > attempts[longest].ms)
+			longest = i;
+	}
+	ereport(INFO,
+			(errmsg("The shortest establish conn time: %.2f ms, segindex: %d,\n"
+					"       The longest  establish conn time: %.2f ms, segindex: %d",
+					attempts[shortest].ms, attempts[shortest].seg->content,
+					attempts[longest].ms, attempts[longest].seg->content)));
+	gang_time_reported = GetCurrentStatementStartTimestamp();
+}
+
+static void
+gang_reused_report(void)
+{
+	if (!gp_print_create_gang_time ||
+		gang_time_reported == GetCurrentStatementStartTimestamp())
+		return;
+	ereport(INFO,
+			(errmsg("(Gang) is reused")));
+	gang_time_reported = GetCurrentStatementStartTimestamp();
+}
+
+/*
+ * Open the session's connections, one per segment, all at once.
  *
  * Every segment or none: a gang that is missing a segment would answer a
  * query with part of the table, which is the one failure that must not be
@@ -970,6 +1399,7 @@ gang_connect(void)
 	MemoryContext oldcxt;
 	const char *dbname;
 	const char *username;
+	GpConnAttempt *attempts;
 
 	Assert(gang == NULL);
 
@@ -1014,6 +1444,11 @@ gang_connect(void)
 		exit_callback_registered = true;
 	}
 
+	attempts = palloc_array(GpConnAttempt, nsegs);
+	for (int i = 0; i < nsegs; i++)
+		conn_attempt_init(&attempts[i], &segs[i], dbname, username, false);
+	connect_segments(attempts, nsegs);
+
 	oldcxt = MemoryContextSwitchTo(TopMemoryContext);
 	gang = (GpGang *) palloc0(sizeof(GpGang));
 	gang->conns = (GpSegmentConn *) palloc0_array(GpSegmentConn, nsegs);
@@ -1022,101 +1457,7 @@ gang_connect(void)
 
 	for (int i = 0; i < nsegs; i++)
 	{
-		const char *keywords[7 + DISPATCH_KEEPALIVE_OPTIONS + GP_INTERNAL_CONN_OPTIONS];
-		const char *values[7 + DISPATCH_KEEPALIVE_OPTIONS + GP_INTERNAL_CONN_OPTIONS];
-		char		portbuf[16];
-		char		keepalive_buf[DISPATCH_KEEPALIVE_OPTIONS][16];
-		int			n = 0;
-		PGconn	   *conn;
-
-		snprintf(portbuf, sizeof(portbuf), "%d", segs[i].port);
-
-		keywords[n] = "host";
-		values[n++] = segs[i].hostname;
-		keywords[n] = "port";
-		values[n++] = portbuf;
-		keywords[n] = "dbname";
-		values[n++] = dbname;
-		keywords[n] = "user";
-		values[n++] = username;
-		keywords[n] = "application_name";
-		values[n++] = "cloudberry dispatcher";
-		keywords[n] = "client_encoding";
-		values[n++] = GetDatabaseEncodingName();
-		keywords[n] = "options";
-		values[n++] = qe_identity_option(segs[i].content);
-		n = dispatch_keepalive_options(keywords, values, n, keepalive_buf);
-		n = GpInternalConnOptions(keywords, values, n);
-
-		/*
-		 * A segment in recovery is tried again, gp.gang_creation_retry_count
-		 * times, gp.gang_creation_retry_timer apart, as Cloudberry's dispatcher
-		 * tries one in reset or recovery: one restarting refuses the
-		 * connection, or closes it as its postmaster ends the backend it had
-		 * started for it, and a mirror FTS promoted, a hot standby until the
-		 * promotion takes, takes it and says so (in_hot_standby), and could
-		 * not write.
-		 */
-		for (int attempt = 0;; attempt++)
-		{
-			const char *hot_standby;
-			char	   *msg;
-			bool		in_recovery;
-
-			conn = libpqsrv_connect_params(keywords, values, false,
-										   dispatch_wait_event());
-			hot_standby = conn != NULL && PQstatus(conn) == CONNECTION_OK
-				? PQparameterStatus(conn, "in_hot_standby") : NULL;
-			if (conn != NULL && PQstatus(conn) == CONNECTION_OK &&
-				(hot_standby == NULL || strcmp(hot_standby, "on") != 0))
-				break;
-
-			msg = conn == NULL ? "out of memory"
-				: PQstatus(conn) == CONNECTION_OK ? "the segment is in recovery"
-				: pstrdup(PQerrorMessage(conn));
-			in_recovery = PQstatus(conn) == CONNECTION_OK ||
-				strstr(msg, "the database system is starting up") != NULL ||
-				strstr(msg, "the database system is in recovery mode") != NULL ||
-				strstr(msg, "the database system is not yet accepting connections") != NULL ||
-				strstr(msg, "server closed the connection unexpectedly") != NULL;
-			if (conn != NULL)
-				libpqsrv_disconnect(conn);
-			conn = NULL;
-
-			if (in_recovery && attempt < gp_gang_creation_retry_count)
-			{
-				(void) WaitLatch(MyLatch, WL_LATCH_SET | WL_TIMEOUT | WL_EXIT_ON_PM_DEATH,
-								 gp_gang_creation_retry_timer, dispatch_wait_event());
-				ResetLatch(MyLatch);
-				CHECK_FOR_INTERRUPTS();
-				continue;
-			}
-
-			/* Take the whole gang down: a partial one answers with part of a table. */
-			gang_close();
-			if (in_recovery)
-				ereport(ERROR,
-						(errcode(ERRCODE_CONNECTION_FAILURE),
-						 errmsg("failed to acquire resources on one or more segments"),
-						 errdetail("Segments are in reset/recovery mode.")));
-
-			/*
-			 * FTS is asked to probe, as Cloudberry's dispatcher asks it; one
-			 * that finds the segment down fails it over, and the next
-			 * transaction connects to its mirror.
-			 */
-			GpFtsNotifyProber();
-			if (!GpClusterIsPrimaryNow(segs[i].dbid))
-				ereport(ERROR,
-						(errcode(ERRCODE_CONNECTION_FAILURE),
-						 errmsg("failed to acquire resources on one or more segments"),
-						 errdetail("FTS detected one or more segments are down")));
-			ereport(ERROR,
-					(errcode(ERRCODE_CONNECTION_FAILURE),
-					 errmsg("could not connect to segment %d (%s:%d)",
-							segs[i].content, segs[i].hostname, segs[i].port),
-					 errdetail_internal("%s", msg)));
-		}
+		PGconn	   *conn = attempts[i].conn;
 
 		gang->conns[i].content = segs[i].content;
 		gang->conns[i].seg = &segs[i];
@@ -1128,6 +1469,8 @@ gang_connect(void)
 				 segs[i].content, segs[i].hostname, segs[i].port,
 				 PQbackendPID(conn));
 	}
+	gang_made_times(attempts, nsegs);
+	pfree(attempts);
 
 	gang_build_wes(gang);
 	GpDtmDebugGangMade();
@@ -1264,6 +1607,8 @@ gang_get(void)
 	}
 	if (gang == NULL)
 		gang_connect();
+	else
+		gang_reused_report();
 	return gang;
 }
 
@@ -2380,6 +2725,17 @@ gang_cancel_and_drain(void)
 	if (gang == NULL)
 		return;
 
+	/*
+	 * Cloudberry's fault as a gang's processes are cleaned up for the next
+	 * statement (cleanupQE(), cdbutil.c): skipped, they are not kept, and the
+	 * gang goes as one found broken does, its transaction's part with it.
+	 */
+	if (GP_FAULT("cleanup_qe") == GP_FAULT_SKIP)
+	{
+		gang_close();
+		return;
+	}
+
 	readers_cancel_and_drain(NULL);
 
 	for (int i = 0; i < gang->nconns; i++)
@@ -2634,64 +2990,24 @@ reader_exec(GpReaderConn *r, const char *sql, char **value)
 	PQclear(res);
 }
 
-/* One more reader on a segment, with the writer's identity. */
+/*
+ * One more reader on a segment, with the writer's identity, made as a gang's
+ * connections are (connect_segments()), as Cloudberry makes a reader gang.
+ * The user its writer connected as, who the writer's session is: the
+ * session's, until a SET SESSION AUTHORIZATION, which leaves the gang as it
+ * is (gp_share.c checks that a reader's is its writer's).
+ */
 static GpReaderConn *
 reader_connect(GpGang *g, int content)
 {
-	const GpSegmentConfig *seg = GpClusterSegmentByContent(content);
-	const char *keywords[7 + DISPATCH_KEEPALIVE_OPTIONS + GP_INTERNAL_CONN_OPTIONS];
-	const char *values[7 + DISPATCH_KEEPALIVE_OPTIONS + GP_INTERNAL_CONN_OPTIONS];
-	char		portbuf[16];
-	char		keepalive_buf[DISPATCH_KEEPALIVE_OPTIONS][16];
-	int			n = 0;
+	GpConnAttempt attempt;
 	PGconn	   *conn;
 	GpReaderConn *r;
 
-	snprintf(portbuf, sizeof(portbuf), "%d", seg->port);
-	keywords[n] = "host";
-	values[n++] = seg->hostname;
-	keywords[n] = "port";
-	values[n++] = portbuf;
-	keywords[n] = "dbname";
-	values[n++] = get_database_name(MyDatabaseId);
-	/*
-	 * The user its writer connected as, who the writer's session is: the
-	 * session's, until a SET SESSION AUTHORIZATION, which leaves the gang
-	 * as it is (gp_share.c checks that a reader's is its writer's).
-	 */
-	keywords[n] = "user";
-	values[n++] = gang_username;
-	keywords[n] = "application_name";
-	values[n++] = "cloudberry reader";
-	keywords[n] = "client_encoding";
-	values[n++] = GetDatabaseEncodingName();
-	keywords[n] = "options";
-
-	/*
-	 * A reader is a member of its writer's lock group, and a member cannot
-	 * lead a group of its own: it starts no parallel workers.  Its planner
-	 * holds to that whatever a function sets (share_planner()); the setting
-	 * spares it the look at each query.
-	 */
-	values[n++] = psprintf("%s -c max_parallel_workers_per_gather=0",
-						   qe_identity_option(content));
-	n = dispatch_keepalive_options(keywords, values, n, keepalive_buf);
-	n = GpInternalConnOptions(keywords, values, n);
-
-	conn = libpqsrv_connect_params(keywords, values, false,
-								   dispatch_wait_event());
-	if (conn == NULL || PQstatus(conn) != CONNECTION_OK)
-	{
-		char	   *msg = conn ? pstrdup(PQerrorMessage(conn)) : "out of memory";
-
-		if (conn != NULL)
-			libpqsrv_disconnect(conn);
-		ereport(ERROR,
-				(errcode(ERRCODE_CONNECTION_FAILURE),
-				 errmsg("could not connect a reader to segment %d (%s:%d)",
-						content, seg->hostname, seg->port),
-				 errdetail_internal("%s", msg)));
-	}
+	conn_attempt_init(&attempt, GpClusterSegmentByContent(content),
+					  get_database_name(MyDatabaseId), gang_username, true);
+	connect_segments(&attempt, 1);
+	conn = attempt.conn;
 
 	r = MemoryContextAllocZero(TopMemoryContext, sizeof(GpReaderConn));
 	r->content = content;
@@ -4004,11 +4320,33 @@ gang_commit_second_phase(void)
 void
 GpDispatchCheckRollbackTo(const char *savepoint)
 {
-	if (gang_xact_lost && savepoint != NULL)
-		ereport(ERROR,
-				(errcode(ERRCODE_CONNECTION_FAILURE),
-				 errmsg("Could not rollback to savepoint (ROLLBACK TO SAVEPOINT %s)",
-						quote_identifier(savepoint))));
+	Oid			temp_ns;
+	Oid			temp_toast_ns;
+
+	if (!gang_xact_lost || savepoint == NULL)
+		return;
+
+	/*
+	 * Cloudberry's warnings before its error: its dispatch of the command
+	 * finds the writer gang lost (dispatchDtxCommand(), cdbtm.c), and the
+	 * session's temporary tables, which went with it, are dropped here too,
+	 * as the next statement begins (resetSessionForPrimaryGangLoss(),
+	 * cdbgang.c).
+	 */
+	ereport(WARNING,
+			(errmsg("writer gang of current global transaction is lost")));
+	GetTempNamespaceState(&temp_ns, &temp_toast_ns);
+	if (OidIsValid(temp_ns))
+	{
+		ereport(WARNING,
+				(errmsg("Any temporary tables for this session have been dropped because the gang was disconnected (session id = %d)",
+						GpClusterSessionId())));
+		temp_tables_lost = true;
+	}
+	ereport(ERROR,
+			(errcode(ERRCODE_CONNECTION_FAILURE),
+			 errmsg("Could not rollback to savepoint (ROLLBACK TO SAVEPOINT %s)",
+					quote_identifier(savepoint))));
 }
 
 /*
@@ -5243,6 +5581,28 @@ GpGatherStartOnContents(const char *sql, TupleDesc tupdesc,
 	return gather_start(sql, tupdesc, -1, 0, contents, ncontents);
 }
 
+/*
+ * gp.max_plan_size: the largest plan the dispatcher sends, in kB, 0 for any
+ * size -- Cloudberry's gp_max_plan_size, which its dispatcher holds a plan's
+ * serialized size to before it sends it (cdbdisp_buildPlanQueryParms(),
+ * cdbdisp_query.c).  The port's plans are what it sends: a gather's query,
+ * and ORCA's fragments, whose plan trees are text (gp_motion.c).
+ */
+static int	gp_max_plan_size = 0;
+
+void
+GpDispatchCheckPlanSize(const char *sql)
+{
+	uint64		kb = (uint64) strlen(sql) / 1024;
+
+	if (gp_max_plan_size > 0 && kb > (uint64) gp_max_plan_size)
+		ereport(ERROR,
+				(errcode(ERRCODE_STATEMENT_TOO_COMPLEX),
+				 errmsg("Query plan size limit exceeded, current size: " UINT64_FORMAT "KB, max allowed size: %dKB",
+						kb, gp_max_plan_size),
+				 errhint("Size controlled by gp.max_plan_size")));
+}
+
 static GpGatherState *
 gather_start(const char *sql, TupleDesc tupdesc, int content, int nsegments,
 			 const int *contents, int ncontents)
@@ -5251,6 +5611,8 @@ gather_start(const char *sql, TupleDesc tupdesc, int content, int nsegments,
 	GpGang	   *g;
 	int			n = 0;
 	const char *statement = GpLogStatementComment();
+
+	GpDispatchCheckPlanSize(sql);
 
 	/*
 	 * Where Cloudberry's coordinator sets up the interconnect its slices'
@@ -5294,6 +5656,11 @@ gather_start(const char *sql, TupleDesc tupdesc, int content, int nsegments,
 		gather->columns[i].typmod = att->atttypmod;
 	}
 
+	/*
+	 * A gather is a slice sent to its segments: Cloudberry's faults before
+	 * and after each is (cdbdisp_dispatchX(), cdbdisp_query.c).
+	 */
+	(void) GP_FAULT("before_one_slice_dispatched");
 	for (int i = 0; i < g->nconns; i++)
 	{
 		GpGatherSeg *s;
@@ -5318,6 +5685,7 @@ gather_start(const char *sql, TupleDesc tupdesc, int content, int nsegments,
 				(errcode(ERRCODE_UNDEFINED_OBJECT),
 				 errmsg("there is no segment with content id %d", content)));
 	gather->nsegs = n;
+	(void) GP_FAULT("after_one_slice_dispatched");
 
 	return gather;
 }
@@ -6299,6 +6667,29 @@ check_internal_sslmode(char **newval, void **extra, GucSource source)
 static ClientAuthentication_hook_type prev_client_auth = NULL;
 
 /*
+ * gp.qe_details: what a segment process reports of itself to the dispatcher
+ * as it starts, as a setting PostgreSQL reports to its client -- its node's
+ * content id -- as Cloudberry's QE reports its motion listener's port
+ * (sendQEDetails(), dest.c).  A connection whose backend reports none is no
+ * segment process of this cluster's (connect_segments()).  Empty in every
+ * other backend, and in one whose report the fault
+ * send_qe_details_init_backend skipped.
+ */
+static char *gp_qe_details = NULL;
+static bool qe_details_skipped = false;
+
+static const char *
+show_qe_details(void)
+{
+	static char buf[16];
+
+	if (!GpClusterIsDispatched() || qe_details_skipped)
+		return "";
+	snprintf(buf, sizeof(buf), "%d", GpClusterContentId());
+	return buf;
+}
+
+/*
  * A setting a connection's startup packet gives -- "-c name=value" in its
  * options, "--name=value", or a parameter of its own -- as it came, before
  * InitPostgres() makes it the setting.  NULL if none.
@@ -6346,8 +6737,16 @@ startup_option(Port *port, const char *name)
  * a WAL sender's.  A client of the coordinator -- no retrieve session, no
  * connection of its own node's loopback -- takes its session id now
  * (GpClusterSessionId()), before a client that connects after it could take
- * one, and says it for pg_stat_activity (GpGddNoteSession()).  The startup
- * packet's options are not the settings yet, and are read as they came.
+ * one, and says it for pg_stat_activity (GpGddNoteSession()).  And two of
+ * Cloudberry's faults are moments of a connection's start: any connection's
+ * but FTS's probe's, as Cloudberry's ProcessStartupPacket() asks it
+ * (postmaster.c), process_startup_packet, which answers that the node is in
+ * recovery where it is skipped, and waits where it is suspended; and a
+ * segment process's as it would report its details (PostgresMain()),
+ * send_qe_details_init_backend, for the session it works for, which leaves
+ * them unreported where it is skipped, and whose error is the process's
+ * FATAL, as Cloudberry's is.  The startup packet's options are not the
+ * settings yet, and are read as they came.
  */
 static void
 dispatch_client_auth(Port *port, int status)
@@ -6366,6 +6765,26 @@ dispatch_client_auth(Port *port, int status)
 		(void) GpClusterSessionId();
 		GpGddNoteSession();
 	}
+
+	if (gp_fault_active == NULL || *gp_fault_active == 0)
+		return;
+	if ((port->application_name == NULL ||
+		 strcmp(port->application_name, GP_FTS_APPNAME) != 0) &&
+		GpFaultTrigger("process_startup_packet",
+					   port->database_name ? port->database_name : "",
+					   "") == GP_FAULT_SKIP)
+		ereport(FATAL,
+				(errcode(ERRCODE_CANNOT_CONNECT_NOW),
+				 errmsg("the database system is in recovery mode")));
+	if (identity != NULL)
+	{
+		const char *sess = strstr(identity, "/sess");
+
+		if (GpFaultTriggerSession("send_qe_details_init_backend", "", "",
+								  sess != NULL ? atoi(sess + strlen("/sess")) : -1) ==
+			GP_FAULT_SKIP)
+			qe_details_skipped = true;
+	}
 }
 
 /*
@@ -6376,6 +6795,18 @@ dispatch_client_auth(Port *port, int status)
 void
 GpDispatchConnectionInit(void)
 {
+	DefineCustomStringVariable("gp.qe_details",
+							   "What a segment process reports of itself to the dispatcher as it starts.",
+							   "Its node's content id, in a process the coordinator started; empty "
+							   "in every other.  Cloudberry's segment process reports its motion "
+							   "listener's port.",
+							   &gp_qe_details,
+							   "",
+							   PGC_INTERNAL,
+							   GUC_REPORT | GUC_NO_SHOW_ALL | GUC_NOT_IN_SAMPLE |
+							   GUC_DISALLOW_IN_FILE,
+							   NULL, NULL, show_qe_details);
+
 	prev_client_auth = ClientAuthentication_hook;
 	ClientAuthentication_hook = dispatch_client_auth;
 }
@@ -6497,6 +6928,33 @@ GpDispatchInit(void)
 							   PGC_SUSET,
 							   0,
 							   NULL, NULL, NULL);
+
+	DefineCustomIntVariable("gp.segment_connect_timeout",
+							"Maximum time (in seconds) allowed for a new worker process to start or a mirror to respond.",
+							"0 indicates 'wait forever'.  Cloudberry calls this gp_segment_connect_timeout.",
+							&gp_segment_connect_timeout,
+							180, 0, INT_MAX,
+							PGC_USERSET,
+							GUC_UNIT_S,
+							NULL, NULL, NULL);
+
+	DefineCustomIntVariable("gp.max_plan_size",
+							"Sets the maximum size of a plan to be dispatched.",
+							"0 for any size.  Cloudberry calls this gp_max_plan_size.",
+							&gp_max_plan_size,
+							0, 0, MAX_KILOBYTES,
+							PGC_SUSET,
+							GUC_UNIT_KB,
+							NULL, NULL, NULL);
+
+	DefineCustomBoolVariable("gp.print_create_gang_time",
+							 "Allow print information about create gang time.",
+							 "Cloudberry calls this gp_print_create_gang_time.",
+							 &gp_print_create_gang_time,
+							 false,
+							 PGC_USERSET,
+							 GUC_NOT_IN_SAMPLE,
+							 NULL, NULL, NULL);
 
 	RegisterXactCallback(dispatch_xact_callback, NULL);
 	RegisterSubXactCallback(dispatch_subxact_callback, NULL);

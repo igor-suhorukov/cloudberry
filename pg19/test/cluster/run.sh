@@ -4548,7 +4548,7 @@ SQL
 	seglog=$(stat -c %s "$ROOT/node1.log")
 	out=$(q 0 "SELECT count(*) FROM gp.exec_on_segments('SELECT 1');")
 	case "$out" in
-		*"could not connect"*)
+		*"failed to acquire resources on one or more segments"*"SSL error"*)
 			if tail -c +"$((seglog + 1))" "$ROOT/node1.log" | grep -q "could not accept SSL connection: certificate verify failed"; then
 				ok "a certificate of another authority is refused, its name though the node's"
 			else

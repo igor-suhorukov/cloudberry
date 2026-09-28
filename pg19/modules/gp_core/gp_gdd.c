@@ -263,6 +263,33 @@ GpGddBackendIdentity(int pid, int *session, bool *reader)
 	return b->pid == pid;
 }
 
+/*
+ * How many backends of this node, this one aside, work for this backend's
+ * session: what Cloudberry's regress.so's hasBackendsExist() counts of its
+ * pg_stat_activity's rows (regress_gp.c).
+ */
+int
+GpGddSessionBackends(void)
+{
+	int			session = GpClusterSessionId();
+	int			n = 0;
+
+	gdd_attach();
+	for (int i = 0; i < gdd_shared->nbackends; i++)
+	{
+		GpGddBackend *b = &gdd_shared->backends[i];
+		int			pid = b->pid;
+		PGPROC	   *proc;
+
+		if (pid == 0 || pid == MyProcPid || b->session != session)
+			continue;
+		proc = BackendPidGetProc(pid);
+		if (proc != NULL && GetNumberFromPGProc(proc) == i)
+			n++;
+	}
+	return n;
+}
+
 /* The session of a backend of this node, or 0 when it is none's. */
 static int
 backend_session(int pid)

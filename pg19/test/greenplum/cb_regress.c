@@ -52,6 +52,7 @@
 #include "catalog/pg_type.h"
 #include "fmgr.h"
 #include "funcapi.h"
+#include "miscadmin.h"
 #include "storage/buf_internals.h"
 #include "storage/lwlock.h"
 #include "utils/guc.h"
@@ -390,4 +391,107 @@ assign_new_record(PG_FUNCTION_ARGS)
 		SRF_RETURN_NEXT(funcctx, HeapTupleGetDatum(tuple));
 	}
 	SRF_RETURN_DONE(funcctx);
+}
+
+/* ------------------------------------------------------------------------- */
+/* The dispatch test's gangs and interconnect                                */
+/* ------------------------------------------------------------------------- */
+
+typedef int (*session_backends_fn) (void);
+typedef int (*active_connections_fn) (void);
+
+PG_FUNCTION_INFO_V1(hasGangsExist);
+
+/*
+ * hasGangsExist() -> bool: whether the session keeps connections to the
+ * segments for its next statement -- Cloudberry's cdbcomponent_qesExist(),
+ * of its gangs -- which gp_core's dispatcher lists (GpDispatchGangSockets()).
+ * On the coordinator alone, as there.
+ */
+Datum
+hasGangsExist(PG_FUNCTION_ARGS)
+{
+	static gang_sockets_fn gang_sockets = NULL;
+	const char *role = GetConfigOption("gp.role", true, false);
+	int			content;
+	bool		writer;
+	int			socket;
+
+	if (role == NULL || strcmp(role, "dispatch") != 0)
+		elog(ERROR, "hasGangsExist can only be executed on master");
+	if (gang_sockets == NULL)
+		gang_sockets = (gang_sockets_fn)
+			load_external_function("$libdir/gp_core", "GpDispatchGangSockets",
+								   true, NULL);
+	PG_RETURN_BOOL(gang_sockets(&content, &writer, &socket, 1) > 0);
+}
+
+PG_FUNCTION_INFO_V1(hasBackendsExist);
+
+/*
+ * hasBackendsExist(timeout) -> bool: on a segment, whether processes of this
+ * session other than this one are there -- those of a gang that should have
+ * gone -- waiting for them to end up to timeout seconds, a second at a time,
+ * as Cloudberry's counts the rows of its pg_stat_activity of the session's
+ * gp_session_id.  The processes are those gp_core's table of the backends
+ * says work for the session (GpGddSessionBackends()).
+ */
+Datum
+hasBackendsExist(PG_FUNCTION_ARGS)
+{
+	static session_backends_fn session_backends = NULL;
+	int			timeout = PG_GETARG_INT32(0);
+	int			n;
+
+	if (timeout < 0)
+		elog(ERROR, "timeout is expected not to be negative");
+	if (session_backends == NULL)
+		session_backends = (session_backends_fn)
+			load_external_function("$libdir/gp_core", "GpGddSessionBackends",
+								   true, NULL);
+	while ((n = session_backends()) > 0 && timeout-- > 0)
+	{
+		CHECK_FOR_INTERRUPTS();
+		pg_usleep(1000000L);
+	}
+	PG_RETURN_BOOL(n > 0);
+}
+
+PG_FUNCTION_INFO_V1(gangRaiseInfo);
+
+/*
+ * gangRaiseInfo() -> bool: an INFO with a detail, a hint and a context, which
+ * a segment raises and the coordinator relays, as Cloudberry's is (its
+ * MPPnoticeReceiver()).
+ */
+Datum
+gangRaiseInfo(PG_FUNCTION_ARGS)
+{
+	ereport(INFO,
+			(errmsg("testing hook function MPPnoticeReceiver"),
+			 errdetail("this test aims at covering code paths not hit before"),
+			 errhint("no special hint"),
+			 errcontext("PL/C function defined in regress.c"),
+			 errposition(0)));
+
+	PG_RETURN_BOOL(true);
+}
+
+PG_FUNCTION_INFO_V1(numActiveMotionConns);
+
+/*
+ * numActiveMotionConns() -> int: how many interconnect connections this
+ * backend has open, gp_core's senders and receivers (GpIcActiveConnections()),
+ * which Cloudberry's counts of its UDP interconnect's.
+ */
+Datum
+numActiveMotionConns(PG_FUNCTION_ARGS)
+{
+	static active_connections_fn active_connections = NULL;
+
+	if (active_connections == NULL)
+		active_connections = (active_connections_fn)
+			load_external_function("$libdir/gp_core", "GpIcActiveConnections",
+								   true, NULL);
+	PG_RETURN_INT32(active_connections());
 }

@@ -482,7 +482,9 @@ skip pg_stat  relation "gp_stat_all_tables_summary" does not exist; relation "gp
 skip bfv_partition  unrecognized configuration parameter "optimizer_analyze_root_partition"; relation "gp_partition_template" does not exist
 skip bfv_partition_plans  differs: a count of its plan's partition selections is 0, where Cloudberry's is 2
 skip pgstat_qd_tabstat  relation "gp_stat_all_tables_summary" does not exist; syntax error at or near "on"
-skip dispatch  unrecognized configuration parameter "gp_max_plan_size"; could not find function "cleanupAllGangs" in file "regress.so"
+group tcp1
+run  dispatch
+group m7a
 skip role  syntax error at or near "only"
 skip plpgsql_cache  differs: how often a function's NOTICE is raised, the segments running it where Cloudberry's coordinator does
 run  pg_stat_last_operation
