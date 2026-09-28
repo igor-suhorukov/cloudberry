@@ -2605,7 +2605,7 @@ _PG_init(void)
 
 	/*
 	 * O23: a directory table's directory in its database's is no relation's
-	 * pages, which pg_checksums and pg_upgrade are told here.
+	 * pages, which pg_checksums and a database's copy are told here.
 	 */
 	GpDirTableMarkFiles();
 

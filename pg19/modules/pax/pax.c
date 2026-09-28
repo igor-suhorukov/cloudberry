@@ -196,7 +196,10 @@ _PG_init(void)
 	pax_init();
 
 	/* O23: a table's directory is PAX's, which pg_checksums leaves alone */
-	ExtensionMarkAdd(PAX_DIRECTORY_SUFFIX);
+	GpCoreApiLookup()->extension_mark_add(PAX_DIRECTORY_SUFFIX);
+
+	/* and what its tables take is in it, which its relation_size measures */
+	GpCoreApiLookup()->size_from_am_register(PaxTableAmRoutine());
 
 	prev_analyze_sample_rows = analyze_sample_rows_hook;
 	analyze_sample_rows_hook = pax_analyze_sample_rows;

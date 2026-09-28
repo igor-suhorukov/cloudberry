@@ -386,8 +386,9 @@ of the core series, O13 to O21, O23 and O32:
   it stands in `contrib/pax_storage`, as ORCA's is, with the port's copies
   of the files that had to change under `pg19/pax/src`.  A table's files,
   its rows in groups by column, are in a directory beside its relation's,
-  removed with it (O22) and marked as PAX's for `pg_checksums` and
-  `pg_upgrade` (O23), logged by PAX's resource manager (ID 199), and
+  removed with it (O21's unlink event) and marked as PAX's for
+  `pg_checksums` (O23, the mark `gp_core`'s to write), logged by PAX's
+  resource manager (ID 199), and
   described by the rows of an aux table of its own.  PostgreSQL 19 asks it
   for its options (O14), the columns a scan reads (O15), a unique index's
   probe (O16), its size (O19) and UPDATE's old row (O20), through the

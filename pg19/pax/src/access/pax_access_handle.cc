@@ -857,8 +857,6 @@ static const TableAmExtRoutine kPaxExtMethods = {
     .index_unique_check = pax::CCPaxAccessMethod::IndexUniqueCheck,
     .relation_add_columns = NULL,
     .relation_get_block_sequences = NULL,
-    .size_from_am = true,
-    .old_row_from_plan = true,
 };
 
 const TableAmRoutine *PaxTableAmRoutine(void) { return &kPaxColumnMethods; }

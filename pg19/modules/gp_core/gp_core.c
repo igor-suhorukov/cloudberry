@@ -54,6 +54,7 @@
 #include "gp_endpoint.h"
 #include "gp_expand.h"
 #include "gp_explain.h"
+#include "gp_extmark.h"
 #include "gp_fault.h"
 #include "gp_foreign.h"
 #include "gp_fts.h"
@@ -73,6 +74,7 @@
 #include "gp_segment.h"
 #include "gp_settings.h"
 #include "gp_share.h"
+#include "gp_size.h"
 #include "gp_standby.h"
 #include "gp_ic.h"
 #include "gp_workfile.h"
@@ -135,6 +137,8 @@ static const GpCoreApi gp_core_api = {
 	.metatrack_partition = GpMetaTrackPartition,
 	.endpoint_plan = GpEndpointPlan,
 	.retrieve_sql = GpEndpointRetrieveSql,
+	.extension_mark_add = GpExtensionMarkAdd,
+	.size_from_am_register = GpSizeFromAmRegister,
 };
 
 /*

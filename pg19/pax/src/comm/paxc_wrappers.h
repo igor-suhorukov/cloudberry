@@ -25,7 +25,7 @@
  *
  * Ported to PostgreSQL 19: without Cloudberry's pending-delete records,
  * which nothing of PAX's used; a relation's PAX directory goes with its
- * files, in md's unlink (O22; modules/pax/pax.c).
+ * files, at O21's unlink event (storage/paxc_smgr.cc).
  *-------------------------------------------------------------------------
  */
 

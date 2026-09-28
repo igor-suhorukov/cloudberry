@@ -36,4 +36,12 @@
  */
 extern void GpSizeRewrite(Query *parse);
 
+/*
+ * A table access method whose tables' files are not their relfilenumber's:
+ * the size functions measure its tables by its relation_size.  Only while
+ * the postmaster loads the module that provides it; through gp_core's API.
+ */
+struct TableAmRoutine;
+extern void GpSizeFromAmRegister(const struct TableAmRoutine *am);
+
 #endif							/* GP_SIZE_H */

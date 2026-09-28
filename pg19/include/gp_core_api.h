@@ -40,7 +40,7 @@
  * here changes meaning or moves.
  */
 #define GP_CORE_API_VERSION_MAJOR	1
-#define GP_CORE_API_VERSION_MINOR	13
+#define GP_CORE_API_VERSION_MINOR	14
 
 struct Node;
 struct List;
@@ -48,6 +48,7 @@ struct Plan;
 struct PlannedStmt;
 struct Query;
 struct FileSet;
+struct TableAmRoutine;
 
 /*
  * What the rendezvous variable points at.  It is the first thing a module
@@ -244,6 +245,21 @@ typedef struct GpCoreApi
 	 */
 	void		(*endpoint_plan) (struct PlannedStmt *stmt);
 	char	   *(*retrieve_sql) (const char *endpoint, bool all, int64 count);
+
+	/*
+	 * Since 1.14: mark the entries of a database directory named by a number
+	 * and "suffix" as a module's own, which pg_checksums passes over (O23)
+	 * and a database copied or moved takes with it (gp_extmark.c).  Only
+	 * while the postmaster loads the module.
+	 */
+	void		(*extension_mark_add) (const char *suffix);
+
+	/*
+	 * Since 1.14: a table access method whose tables' files are not their
+	 * relfilenumber's, which the size functions then measure by its
+	 * relation_size (gp_size.c).  Only while the postmaster loads it.
+	 */
+	void		(*size_from_am_register) (const struct TableAmRoutine *am);
 } GpCoreApi;
 
 /*

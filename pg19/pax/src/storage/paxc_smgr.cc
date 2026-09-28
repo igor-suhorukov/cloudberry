@@ -25,11 +25,12 @@
  *
  * Ported to PostgreSQL 19, whose storage manager is md alone: a PAX
  * relation's storage is md's, and PAX's unlink, which removed the
- * relation's PAX directory with its files, is md's unlink hook (O22).
- * Where Cloudberry's then removed the relation's first segment at once, md
- * keeps it, as it keeps any relation's, until the next checkpoint: until
- * then the relfilenumber is not given again, and PAX's catalog rows, which
- * follow a relation's storage (modules/pax/pax_catalog.c), rely on it.
+ * relation's PAX directory with its files, follows O21's unlink event,
+ * which smgrdounlinkall() raises once a relation's forks are gone.  Where
+ * Cloudberry's then removed the relation's first segment at once, md keeps
+ * it, as it keeps any relation's, until the next checkpoint: until then the
+ * relfilenumber is not given again, and PAX's catalog rows, which follow a
+ * relation's storage (modules/pax/pax_catalog.c), rely on it.
  *-------------------------------------------------------------------------
  */
 
@@ -40,25 +41,26 @@
 
 #include <sys/stat.h>
 
-static mdunlink_hook_type prev_mdunlink_hook = NULL;
+static smgr_file_event_hook_type prev_smgr_file_event_hook = NULL;
 
 namespace paxc {
 
-// After md has removed a relation's files -- as the transaction that drops
-// or truncates it commits, as the one that made it aborts, and as either is
-// replayed -- its PAX directory goes, with what is in it.  Called for every
-// relation md unlinks, with InvalidForkNumber for all of a relation's forks;
-// a relation with no PAX directory costs a stat().  Nothing here may fail
-// the transaction, which has committed: what cannot be removed is a
-// WARNING, or a LOG, and is left.
-static void mdunlink_pax(RelFileLocatorBackend rnode, ForkNumber forkNumber,
-                         bool isRedo) {
+// After the storage manager has removed a relation's files -- as the
+// transaction that drops or truncates it commits, as the one that made it
+// aborts, and as either is replayed -- its PAX directory goes, with what is
+// in it: O21's unlink event, once for all of a relation's forks.  A relation
+// with no PAX directory costs a stat().  Nothing here may fail the
+// transaction, whose end is decided: what cannot be removed is a WARNING, or
+// a LOG, and is left.
+static void smgr_file_event_pax(RelFileLocatorBackend rnode,
+                                ForkNumber forknum, SmgrFileEvent event) {
   struct stat st;
   char *path;
 
-  if (prev_mdunlink_hook) prev_mdunlink_hook(rnode, forkNumber, isRedo);
+  if (prev_smgr_file_event_hook)
+    prev_smgr_file_event_hook(rnode, forknum, event);
 
-  if (forkNumber != MAIN_FORKNUM && forkNumber != InvalidForkNumber) return;
+  if (event != SMGR_FILE_UNLINK) return;
 
   path = paxc::BuildPaxDirectoryPath(rnode.locator, rnode.backend);
   if (stat(path, &st) == 0)
@@ -68,12 +70,13 @@ static void mdunlink_pax(RelFileLocatorBackend rnode, ForkNumber forkNumber,
                       errmsg("could not stat directory \"%s\": %m", path)));
   pfree(path);
 
-  if (isRedo) paxc::XLogForgetRelation(rnode.locator);
+  // redo's unlink (DropRelationFiles()), the one the startup process makes
+  if (InRecovery) paxc::XLogForgetRelation(rnode.locator);
 }
 
 void RegisterPaxSmgr() {
-  prev_mdunlink_hook = mdunlink_hook;
-  mdunlink_hook = mdunlink_pax;
+  prev_smgr_file_event_hook = smgr_file_event_hook;
+  smgr_file_event_hook = smgr_file_event_pax;
 }
 
 }  // namespace paxc

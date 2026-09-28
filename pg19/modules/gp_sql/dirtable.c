@@ -31,7 +31,7 @@
  * The files live where Cloudberry puts them, in a directory per table inside
  * the database directory, so that a base backup and pg_rewind carry them: both
  * treat anything that is not a relation file as a file to copy whole.  O23's
- * mark tells pg_checksums and pg_upgrade the directory is no relation's.
+ * mark tells pg_checksums the directory is no relation's.
  *
  * A file follows its row.  A put writes the row first -- by the executor's
  * own insertion, so that the table's unique index turns away a second put of
@@ -111,7 +111,6 @@
 #include "catalog/pg_type.h"
 #include "commands/tablespace.h"
 #include "commands/trigger.h"
-#include "common/extmarkfile.h"
 #include "common/file_perm.h"
 #include "common/file_utils.h"
 #include "common/hashfn.h"
@@ -524,14 +523,17 @@ GpDirTableRegisterRmgr(void)
  * database directory, in <relid>_dirtable (dirtable_compute_location()), and
  * pg_checksums would read each of them as one: stop at the first whose name
  * is no segment number, or, with --enable, write a checksum into every 8K of
- * one that is whole blocks.  And pg_upgrade would leave them behind.  O23's
- * mark names the directory for both, from the postmaster of every node, so a
- * mirror's data directory and a standby's say so too.
+ * one that is whole blocks.  O23's mark, gp_core's to write
+ * (gp_extmark.c), names the directory for it and for a database's copy
+ * (gp_dbcopy.c), from the postmaster of every node, so a mirror's data
+ * directory and a standby's say so too.  pg_upgrade would leave them behind,
+ * which matters only between two versions of the port, none before a
+ * PostgreSQL 20 one.
  */
 void
 GpDirTableMarkFiles(void)
 {
-	ExtensionMarkAdd(GP_DIRTABLE_SUFFIX);
+	GpCoreApiLookup()->extension_mark_add(GP_DIRTABLE_SUFFIX);
 }
 
 /*

@@ -27,9 +27,9 @@
  *   - a table's row of pg_pax_tables names its storage, which a TRUNCATE
  *     and ALTER TABLE ... SET TABLESPACE change (catalog/pg_pax_tables.cc);
  *   - relation_copy_for_cluster takes the rewrite's snapshot;
- *   - the size is the table's for all its forks, as O19's size functions ask
- *     with InvalidForkNumber, as for its main fork: PAX's files are all it
- *     has;
+ *   - the size is the table's for all its forks, as gp_core's size
+ *     functions ask with InvalidForkNumber (gp_size.c), as for its main
+ *     fork: PAX's files are all it has;
  *   - Cloudberry's swap_relation_files callback is gone, the catalog
  *     following the storage instead, and so are its custom object classes,
  *     which PostgreSQL 19's dependencies do not have: the module's object

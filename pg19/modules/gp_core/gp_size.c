@@ -32,7 +32,20 @@
  * call of the function of the same name and arguments in gp_internal,
  * which is PostgreSQL's here plus the segments'.  The query is changed and
  * not what it was made of, so a view or a rule still says pg_relation_size.
- * On a segment, and on one node, the calls are PostgreSQL's.
+ * On a segment, and on one node, the calls are PostgreSQL's -- but for the
+ * sizes of a relation, where a table access method measures its tables
+ * itself (below).
+ *
+ * A table access method whose tables' files are not their relfilenumber's
+ * -- PAX's, in <relfilenode>_pax -- has its tables measured by its own
+ * relation_size, as Cloudberry's calculate_relation_size() measures what is
+ * no heap (RelationIsNonblockRelation()).  The method registers while the
+ * postmaster loads it (GpSizeFromAmRegister(), through gp_core's API), and
+ * then pg_relation_size(), pg_table_size() and pg_total_relation_size() are
+ * gp_internal's on every node, which ask it.  What calls PostgreSQL's
+ * functions from C, or an SQL function's body the planner inlines, is not
+ * rewritten, and sees such a table's relfilenumber alone.  (A core patch,
+ * O19, did this in dbsize.c until 2026-09-28.)
  *
  * And pg_tablespace_location(), which is no size, but is answered the same
  * way, on every node of a cluster: a node's directory of a tablespace is
@@ -50,6 +63,7 @@
 #include "postgres.h"
 
 #include "access/relation.h"
+#include "access/tableam.h"
 #include "catalog/namespace.h"
 #include "catalog/pg_class.h"
 #include "catalog/pg_proc.h"
@@ -57,7 +71,9 @@
 #include "common/relpath.h"
 #include "fmgr.h"
 #include "funcapi.h"
+#include "miscadmin.h"
 #include "nodes/nodeFuncs.h"
+#include "optimizer/planner.h"
 #include "utils/array.h"
 #include "utils/builtins.h"
 #include "utils/fmgroids.h"
@@ -75,7 +91,8 @@
 /*
  * Each of PostgreSQL's size functions, and gp_internal's of its name; and
  * pg_tablespace_location(), the one called on every node of a cluster, not
- * on its coordinator alone.
+ * on its coordinator alone.  "relation": a size a table access method that
+ * measures its tables itself changes.
  */
 static const struct
 {
@@ -84,12 +101,13 @@ static const struct
 	int			nargs;
 	Oid			argtypes[2];
 	bool		every_node;
+	bool		relation;
 }			size_functions[] = {
-	{F_PG_RELATION_SIZE_REGCLASS, "relation_size", 1, {REGCLASSOID}},
-	{F_PG_RELATION_SIZE_REGCLASS_TEXT, "relation_size", 2, {REGCLASSOID, TEXTOID}},
-	{F_PG_TABLE_SIZE, "table_size", 1, {REGCLASSOID}},
+	{F_PG_RELATION_SIZE_REGCLASS, "relation_size", 1, {REGCLASSOID}, false, true},
+	{F_PG_RELATION_SIZE_REGCLASS_TEXT, "relation_size", 2, {REGCLASSOID, TEXTOID}, false, true},
+	{F_PG_TABLE_SIZE, "table_size", 1, {REGCLASSOID}, false, true},
 	{F_PG_INDEXES_SIZE, "indexes_size", 1, {REGCLASSOID}},
-	{F_PG_TOTAL_RELATION_SIZE, "total_relation_size", 1, {REGCLASSOID}},
+	{F_PG_TOTAL_RELATION_SIZE, "total_relation_size", 1, {REGCLASSOID}, false, true},
 	{F_PG_DATABASE_SIZE_NAME, "database_size", 1, {NAMEOID}},
 	{F_PG_DATABASE_SIZE_OID, "database_size", 1, {OIDOID}},
 	{F_PG_TABLESPACE_SIZE_NAME, "tablespace_size", 1, {NAMEOID}},
@@ -131,10 +149,19 @@ lookup_wrappers(void)
 	wrappers_valid = true;
 }
 
-/* context: whether this is the coordinator, whose sizes are the cluster's */
+/* The calls made gp_internal's: every one, or these */
+typedef struct SizeRewrite
+{
+	bool		all;			/* a cluster's coordinator: the cluster's */
+	bool		every_node;		/* a cluster's node: the location's */
+	bool		relation;		/* a method measures its tables itself */
+} SizeRewrite;
+
 static bool
 size_walker(Node *node, void *context)
 {
+	SizeRewrite *what = (SizeRewrite *) context;
+
 	if (node == NULL)
 		return false;
 	if (IsA(node, Query))
@@ -146,28 +173,122 @@ size_walker(Node *node, void *context)
 		for (int i = 0; i < lengthof(size_functions); i++)
 			if (fexpr->funcid == size_functions[i].builtin &&
 				OidIsValid(wrappers[i]) &&
-				(size_functions[i].every_node || *(bool *) context))
+				(what->all ||
+				 (what->every_node && size_functions[i].every_node) ||
+				 (what->relation && size_functions[i].relation)))
 				fexpr->funcid = wrappers[i];
 	}
 	return expression_tree_walker(node, size_walker, context);
 }
 
 /*
+ * The table access methods that measure their tables themselves, as the
+ * postmaster loaded them.
+ */
+#define MAX_SIZE_FROM_AM	8
+static const TableAmRoutine *size_from_am[MAX_SIZE_FROM_AM];
+static int	n_size_from_am = 0;
+
+static planner_hook_type prev_planner = NULL;
+
+/*
+ * On one node, where no planner of gp_core's prepares the query
+ * (GpPrepareQuery()): the sizes of a relation made gp_internal's before it
+ * is planned.
+ */
+static PlannedStmt *
+size_planner(Query *parse, const char *query_string, int cursorOptions,
+			 ParamListInfo boundParams, ExplainState *es)
+{
+	GpSizeRewrite(parse);
+	if (prev_planner)
+		return prev_planner(parse, query_string, cursorOptions, boundParams,
+							es);
+	return standard_planner(parse, query_string, cursorOptions, boundParams,
+							es);
+}
+
+/*
+ * GpSizeFromAmRegister
+ *		A table access method whose tables' files are not their
+ *		relfilenumber's, measured by its relation_size: only while the
+ *		postmaster loads the module that provides it, so that every backend
+ *		has the same list.
+ */
+void
+GpSizeFromAmRegister(const TableAmRoutine *am)
+{
+	if (!process_shared_preload_libraries_in_progress)
+		elog(ERROR, "a table access method can say it measures its tables only while the postmaster loads it");
+	for (int i = 0; i < n_size_from_am; i++)
+		if (size_from_am[i] == am)
+			return;
+	if (n_size_from_am == MAX_SIZE_FROM_AM)
+		elog(ERROR, "too many table access methods measure their tables themselves");
+	if (n_size_from_am == 0 && GpClusterIsSingleNode())
+	{
+		prev_planner = planner_hook;
+		planner_hook = size_planner;
+	}
+	size_from_am[n_size_from_am++] = am;
+}
+
+/*
+ * What a table of such a method takes beyond what PostgreSQL's size function
+ * counted of it: its method's relation_size, less the files of its
+ * relfilenumber -- of "fork", or of all of them (InvalidForkNumber).  0 for
+ * any other relation, and one that is gone.
+ */
+static int64
+size_from_am_extra(Oid relid, ForkNumber fork)
+{
+	Relation	rel;
+	int64		extra = 0;
+
+	if (n_size_from_am == 0)
+		return 0;
+	rel = try_relation_open(relid, AccessShareLock);
+	if (rel == NULL)
+		return 0;
+	for (int i = 0; i < n_size_from_am; i++)
+	{
+		if (rel->rd_tableam != size_from_am[i])
+			continue;
+		extra = table_relation_size(rel, fork);
+		for (int f = 0; f <= MAX_FORKNUM; f++)
+			if (fork == InvalidForkNumber || f == fork)
+				extra -= DatumGetInt64(DirectFunctionCall2(pg_relation_size,
+														   ObjectIdGetDatum(relid),
+														   CStringGetTextDatum(forkNames[f])));
+		break;
+	}
+	relation_close(rel, AccessShareLock);
+	return extra;
+}
+
+/*
  * GpSizeRewrite
  *		The statement's calls of the size functions, made the cluster's on
  *		its coordinator, and of pg_tablespace_location(), made the
- *		location's on each of its nodes.
+ *		location's on each of its nodes; and where a table access method
+ *		measures its tables itself, the sizes of a relation made
+ *		gp_internal's on every node, one node's too.
  */
 void
 GpSizeRewrite(Query *parse)
 {
-	bool		coordinator;
+	SizeRewrite what = {0};
 
-	if (GpClusterIsSingleNode())
+	what.relation = n_size_from_am > 0;
+	if (!GpClusterIsSingleNode())
+	{
+		what.all = GpClusterBackendRole() == GP_ROLE_DISPATCH;
+		what.every_node = true;
+	}
+	if (!what.all && !what.every_node && !what.relation)
 		return;
-	coordinator = GpClusterBackendRole() == GP_ROLE_DISPATCH;
 	lookup_wrappers();
-	(void) size_walker((Node *) parse, &coordinator);
+	(void) size_walker((Node *) parse, &what);
 }
 
 /* ------------------------------------------------------------------------- */
@@ -193,6 +314,14 @@ cluster_size(FunctionCallInfo fcinfo, PGFunction builtin, int nargs,
 	size = DatumGetInt64(builtin(local));
 	if (local->isnull)
 		PG_RETURN_NULL();
+
+	/* a table a method measures itself: its method's size */
+	if (builtin == pg_relation_size)
+		size += size_from_am_extra(DatumGetObjectId(args[0].value),
+								   forkname_to_number(TextDatumGetCString(args[1].value)));
+	else if (builtin == pg_table_size || builtin == pg_total_relation_size)
+		size += size_from_am_extra(DatumGetObjectId(args[0].value),
+								   InvalidForkNumber);
 
 	if (!GpClusterIsSingleNode() && GpClusterBackendRole() == GP_ROLE_DISPATCH)
 	{

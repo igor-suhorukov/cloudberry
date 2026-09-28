@@ -243,7 +243,7 @@ extern bool GpDirTableCopy(CopyStmt *stmt, const char *queryString,
 
 /*
  * During preload too: mark a directory table's directory, <relid>_dirtable,
- * as no relation's pages, for pg_checksums and pg_upgrade (O23).
+ * as no relation's pages, for pg_checksums (O23) and gp_dbcopy.c.
  */
 extern void GpDirTableMarkFiles(void);
 

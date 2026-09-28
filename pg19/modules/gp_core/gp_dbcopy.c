@@ -71,7 +71,6 @@
 #include "catalog/pg_tablespace.h"
 #include "commands/defrem.h"
 #include "commands/tablespace.h"
-#include "common/extmarkfile.h"
 #include "common/relpath.h"
 #include "miscadmin.h"
 #include "nodes/parsenodes.h"
@@ -85,6 +84,7 @@
 
 #include "gp_cluster.h"
 #include "gp_dbcopy.h"
+#include "gp_extmark.h"
 
 /* A directory copied: its name, with its NUL, follows. */
 typedef struct xl_gp_dbcopy
@@ -135,7 +135,7 @@ dbcopy_log(Oid src_db, Oid src_spc, Oid dst_db, Oid dst_spc, const char *name)
  * in dst_spc, which exists.
  */
 static void
-copy_marked(const ExtensionMarks *marks, Oid src_db, Oid src_spc,
+copy_marked(const GpExtensionMarks *marks, Oid src_db, Oid src_spc,
 			Oid dst_db, Oid dst_spc)
 {
 	char	   *srcpath = GetDatabasePath(src_db, src_spc);
@@ -151,7 +151,7 @@ copy_marked(const ExtensionMarks *marks, Oid src_db, Oid src_spc,
 		char	   *to;
 		struct stat st;
 
-		if (!ExtensionMarkedFileLookup(marks, de->d_name))
+		if (!GpExtensionMarkedFileLookup(marks, de->d_name))
 			continue;
 
 		from = psprintf("%s/%s", srcpath, de->d_name);
@@ -235,7 +235,7 @@ remove_new_database(Oid db, List *spcs)
 static void
 copy_for_createdb(CreatedbStmt *stmt)
 {
-	ExtensionMarks *marks = ExtensionMarksLoad(DataDir);
+	GpExtensionMarks *marks = GpExtensionMarksLoad(DataDir);
 	const char *template = "template1";
 	Oid			src_db;
 	Oid			dst_db;
@@ -359,7 +359,7 @@ note_move(AlterDatabaseStmt *stmt)
 static void
 copy_for_movedb(void)
 {
-	ExtensionMarks *marks = ExtensionMarksLoad(DataDir);
+	GpExtensionMarks *marks = GpExtensionMarksLoad(DataDir);
 
 	if (marks == NULL)
 		return;
