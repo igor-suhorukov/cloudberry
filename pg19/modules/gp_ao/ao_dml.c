@@ -102,7 +102,9 @@ struct AoInsertState
 	StringInfoData out;
 	int64	   *offsets;
 	int64		inserted;
+	int64		first_rownum;	/* of the first row it appended */
 	int64		blocks;
+	bool		unseen;			/* it wrote a block the command has not seen */
 	int			range;			/* rows appended since its group turned to it */
 	AoInsertState *lead;		/* its group's first writer, itself for that one */
 	List	   *files;			/* the first's: the group's writers, as begun */
@@ -557,6 +559,7 @@ ao_flush_block(AoInsertState *st, Relation rel)
 						 st->block_nrows, st->offsets, st->ngroups);
 	st->sf->varblockcount++;
 	st->blocks++;
+	st->unseen = true;
 	st->block_nrows = 0;
 }
 
@@ -652,6 +655,8 @@ ao_insert_slot(AoInsertState *st, Relation rel, TupleTableSlot *slot)
 
 	AoTidSet(&slot->tts_tid, st->segno, st->next_rownum);
 	slot->tts_tableOid = st->relid;
+	if (st->inserted == 0)
+		st->first_rownum = st->next_rownum;
 	st->next_rownum++;
 	st->block_nrows++;
 	st->inserted++;
@@ -698,6 +703,11 @@ ao_pending_fetch(Relation rel, ItemPointer tid, TupleTableSlot *slot)
  * blocks before its triggers fire.  Only a writer of this subtransaction's:
  * what it writes goes with the subtransaction if it aborts, as the writer
  * does.
+ *
+ * And a row of a block the writer wrote already, as each filled, whose
+ * directory row the fetch's snapshot, taken in the same command, would not
+ * see: the command counter goes on, once for the blocks written since it
+ * last did here.
  */
 bool
 ao_pending_flush(Relation rel, ItemPointer tid)
@@ -710,9 +720,10 @@ ao_pending_flush(Relation rel, ItemPointer tid)
 	{
 		AoInsertState *st = lfirst(lc);
 
-		if (st->relid == RelationGetRelid(rel) && st->subid == subid &&
-			AoTidSegno(tid) == st->segno && st->block_nrows > 0 &&
-			rownum >= st->block_first &&
+		if (st->relid != RelationGetRelid(rel) || st->subid != subid ||
+			AoTidSegno(tid) != st->segno)
+			continue;
+		if (st->block_nrows > 0 && rownum >= st->block_first &&
 			rownum < st->block_first + st->block_nrows)
 		{
 			MemoryContext old = MemoryContextSwitchTo(ao_dml_context());
@@ -720,6 +731,14 @@ ao_pending_flush(Relation rel, ItemPointer tid)
 			ao_flush_block(st, rel);
 			MemoryContextSwitchTo(old);
 			CommandCounterIncrement();
+			st->unseen = false;
+			return true;
+		}
+		if (st->unseen && st->inserted > 0 && rownum >= st->first_rownum &&
+			rownum < st->next_rownum)
+		{
+			CommandCounterIncrement();
+			st->unseen = false;
 			return true;
 		}
 	}

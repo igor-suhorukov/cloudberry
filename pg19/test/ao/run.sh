@@ -305,8 +305,9 @@ is "gp.select_invisible shows the rows deleted, as gp_select_invisible does" \
 # the block it decoded, for the query's next row (ao_am.c): over two segment
 # files of many blocks, by row and by column, compressed; a unique index's
 # placeholders; rows reached out of the table's order; a row a function the
-# statement calls deletes, or inserts, meanwhile; and a TID scan's rows,
-# with the query's snapshot.
+# statement calls deletes, or inserts, meanwhile; a TID scan's rows, with
+# the query's snapshot; and an AFTER INSERT trigger's, which COPY fetches
+# before it ends its insert.
 session 3 8
 q "CREATE TABLE fr (a int, b int, c text) USING ao_row WITH (compresstype=zstd);
    CREATE TABLE fc (a int, b int, c text) USING ao_column WITH (compresstype=zlib);" > /dev/null
@@ -365,6 +366,9 @@ is "and rows one inserts are not reached, the old ones each updated once" \
 is "a TID scan fetches each row it names, with the query's snapshot" \
    "SELECT count(*) || ' ' || sum(a) FROM fr WHERE ctid = ANY (ARRAY(SELECT ctid FROM fr WHERE a % 7 = 0));" \
    "2857 28578571"
+is "an AFTER INSERT trigger's rows, 5000 of a COPY, each fetched before the insert ends" \
+   "TRUNCATE trg_t, trg_log; COPY trg_t FROM PROGRAM 'seq 1 5000';
+    SELECT count(*) || ' ' || sum(a) FROM trg_log;" "5000 12502500"
 
 ###############################################################################
 echo "6. transactions: segment files, row numbers and savepoints"
