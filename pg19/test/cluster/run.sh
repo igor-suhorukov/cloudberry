@@ -770,6 +770,21 @@ EOF
 		*) notok "the rows a nearest-neighbour search's segments send" "$out" ;;
 	esac
 
+	# What an index build says of the rows it read is the segments', which
+	# have them: an expression's function that notices each row, run on the
+	# segments' rows -- the coordinator's copy has none -- is heard, each
+	# notice once however many segments give it.  And a CREATE INDEX IF NOT
+	# EXISTS whose index is there says so once, as before (gp_ddl.c's
+	# builds_indexes()).
+	out=$(printf '%s\n' \
+		"CREATE FUNCTION noisy(i int) RETURNS int IMMUTABLE LANGUAGE plpgsql AS \$\$ BEGIN RAISE NOTICE 'a row of parity %', i % 2; RETURN i; END \$\$;" \
+		"CREATE TABLE nz (a int) DISTRIBUTED BY (a);" "INSERT INTO nz SELECT generate_series(1, 20);" \
+		"CREATE INDEX nz_noisy ON nz (noisy(a));" "CREATE INDEX IF NOT EXISTS nz_noisy ON nz (a);" | qf 0 |
+		sed 's/^psql:<stdin>:[0-9]*: //' | grep 'NOTICE' | sort | tr '\n' '|')
+	[ "$out" = 'NOTICE:  a row of parity 0|NOTICE:  a row of parity 1|NOTICE:  relation "nz_noisy" already exists, skipping|' ] \
+		&& ok "an index build's notices are the segments', each once, and IF NOT EXISTS says so once" \
+		|| notok "an index build's notices" "$out"
+
 	# A segment's rows come a thousand at a time, through the gather's
 	# cursor, and the end of a batch's statement can come in a later read
 	# than its rows: the segment was then taken to have no more, its first

@@ -209,8 +209,12 @@ extern Datum GpReceiveFunctionCall(FmgrInfo *flinfo, StringInfo buf,
  * "own_xact" is for a statement that cannot run inside a transaction block --
  * CREATE DATABASE, VACUUM, CREATE INDEX CONCURRENTLY -- which each segment
  * runs in a transaction of its own; everything else joins the coordinator's.
+ * What the segments say is the coordinator's to have said -- but with
+ * "relay_notices", for a statement that builds indexes, whose NOTICEs of the
+ * rows they built from are the segments' to give: each distinct one, once.
  */
-extern void GpDispatchUtility(const char *payload, bool own_xact);
+extern void GpDispatchUtility(const char *payload, bool own_xact,
+							  bool relay_notices);
 
 /*
  * On a segment: is this the statement the coordinator dispatched?

@@ -1701,6 +1701,15 @@ gang_get(void)
  * client's: a DDL statement's NOTICE is the coordinator's to give, once, and
  * it has; settings, labels and the transaction's BEGIN and COMMIT say nothing
  * the user asked about.  Those are sent quietly (notices_quiet).
+ *
+ * But for a statement that builds indexes over the coordinator's copy of a
+ * table, which for a table whose rows are the segments' is empty: what the
+ * build says of the rows it read -- pgvector's IVFFlat, "created with little
+ * data" of a copy it had none of -- is no NOTICE of the table's, and the
+ * coordinator holds its NOTICEs back as it builds (gp_ddl.c).  The segments,
+ * which built from the rows, say it instead: their NOTICEs of the statement
+ * are the client's, a NOTICE several give alike given once (notices_relayed,
+ * the quiet level whose NOTICEs are relayed).
  */
 typedef struct SegmentNotice
 {
@@ -1716,6 +1725,37 @@ typedef struct SegmentNotice
 static SegmentNotice *notices_head = NULL;
 static SegmentNotice **notices_tail = &notices_head;
 static int	notices_quiet = 0;
+static int	notices_relayed = 0;
+static SegmentNotice *notices_relayed_given = NULL;	/* raised, while relayed */
+
+/* Is a notice like this one among these: the same level, code and words? */
+static bool
+notice_among(const SegmentNotice *n, const SegmentNotice *list)
+{
+	for (const SegmentNotice *o = list; o != NULL; o = o->next)
+		if (o->elevel == n->elevel && o->sqlerrcode == n->sqlerrcode &&
+			strcmp(o->message, n->message) == 0 &&
+			(o->detail == NULL ? n->detail == NULL :
+			 n->detail != NULL && strcmp(o->detail, n->detail) == 0) &&
+			(o->hint == NULL ? n->hint == NULL :
+			 n->hint != NULL && strcmp(o->hint, n->hint) == 0))
+			return true;
+	return false;
+}
+
+/* The end of an index build's statement: its notices relayed, forgotten. */
+static void
+forget_relayed_notices(void)
+{
+	while (notices_relayed_given != NULL)
+	{
+		SegmentNotice *n = notices_relayed_given;
+
+		notices_relayed_given = n->next;
+		free(n);
+	}
+	notices_relayed = 0;
+}
 
 /*
  * A segment's last word: an error its backend sent while its connection was
@@ -1921,7 +1961,12 @@ segment_notice_receiver(void *arg, const struct pg_result *res)
 		return;
 	}
 
-	if (notices_quiet > 0 || severity == NULL)
+	if (severity == NULL)
+		return;
+	/* quiet, but for the NOTICEs of an index build's statement */
+	if (notices_quiet > 0 &&
+		!(notices_relayed > 0 && notices_quiet == notices_relayed &&
+		  strcmp(severity, "NOTICE") == 0))
 		return;
 	if (strcmp(severity, "NOTICE") == 0)
 		elevel = NOTICE;
@@ -1989,6 +2034,17 @@ segment_notice_receiver(void *arg, const struct pg_result *res)
 		strip_trailing_space(*dest);
 	}
 
+	/*
+	 * an index build's NOTICE that another segment gave alike, waiting to be
+	 * raised or raised already: given once
+	 */
+	if (notices_relayed > 0 &&
+		(notice_among(n, notices_head) || notice_among(n, notices_relayed_given)))
+	{
+		free(n);
+		return;
+	}
+
 	*notices_tail = n;
 	notices_tail = &n->next;
 }
@@ -2010,7 +2066,14 @@ flush_segment_notices(void)
 		notices_head = n->next;
 		if (notices_head == NULL)
 			notices_tail = &notices_head;
-		free(n);
+		/* an index build's, kept while its statement runs: given once */
+		if (notices_relayed > 0)
+		{
+			n->next = notices_relayed_given;
+			notices_relayed_given = n;
+		}
+		else
+			free(n);
 
 		ereport(copy.elevel,
 				(errcode(copy.sqlerrcode),
@@ -2045,6 +2108,7 @@ drop_segment_notices(void)
 	}
 	notices_tail = &notices_head;
 	notices_quiet = 0;
+	forget_relayed_notices();
 }
 
 /* ------------------------------------------------------------------------- */
@@ -4999,7 +5063,7 @@ GpDispatchCommandOnContent(int content, const char *sql)
 }
 
 void
-GpDispatchUtility(const char *payload, bool own_xact)
+GpDispatchUtility(const char *payload, bool own_xact, bool relay_notices)
 {
 	GpGang	   *g = gang_get();
 
@@ -5021,10 +5085,16 @@ GpDispatchUtility(const char *payload, bool own_xact)
 	/* as Cloudberry's DDL, sent in two phases to every segment */
 	if (!own_xact)
 		GpReportDtxReached(NULL, NULL, 0);
-	/* the coordinator has said what the statement says, once */
+	/*
+	 * the coordinator has said what the statement says, once -- but of an
+	 * index build, whose NOTICEs are the segments' (relay_notices)
+	 */
 	notices_quiet++;
+	if (relay_notices)
+		notices_relayed = notices_quiet;
 	gang_send_all_dtm(g, payload, GP_DTX_NONE, "MPPEXEC UTILITY", 0);
 	gang_wait_all(g, NULL, false);
+	forget_relayed_notices();
 	gang_dtm_end(g);
 	notices_quiet--;
 	if (!own_xact)

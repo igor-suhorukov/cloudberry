@@ -145,7 +145,8 @@ CREATE INDEX items_sparse_hnsw ON items USING hnsw (sparse sparsevec_l1_ops);
 CREATE INDEX items_bits_hnsw ON items USING hnsw (bits bit_hamming_ops);
 CREATE INDEX items_quantized_hnsw ON items USING hnsw ((binary_quantize(embedding)::bit(3)) bit_hamming_ops);
 -- the coordinator's copy of the table, which is empty, builds its IVFFlat
--- index from no rows, and says so; the segments build theirs from theirs
+-- index from no rows, and holds back its "created with little data"; the
+-- segments build theirs from theirs, rows enough for their lists
 CREATE INDEX items_embedding_ivf ON items USING ivfflat (embedding vector_l2_ops) WITH (lists = 4);
 CREATE INDEX items_half_ivf ON items USING ivfflat (half halfvec_cosine_ops) WITH (lists = 2);
 SELECT result AS valid_indexes, count(*) AS segments
@@ -156,6 +157,17 @@ SELECT count(*) AS indexes_with_rows
                               WHERE relnamespace = 'pgvector'::regnamespace AND relkind = 'i'
                                 AND pg_relation_size(oid) > 8192$$)
  WHERE result = '8';
+REINDEX INDEX items_embedding_ivf;
+-- a segment with fewer rows than its IVFFlat index has lists says so, as
+-- one node would: some ten rows on each segment, 20 lists -- each says it,
+-- and the client hears it once -- and 2, which none is short of; and again
+-- as VACUUM FULL builds them anew
+CREATE TABLE few (id int, embedding vector(3)) DISTRIBUTED BY (id);
+INSERT INTO few SELECT g, ARRAY[g, g, g]::vector FROM generate_series(1, 30) g;
+CREATE INDEX few_short ON few USING ivfflat (embedding vector_l2_ops) WITH (lists = 20);
+CREATE INDEX few_enough ON few USING ivfflat (embedding vector_l2_ops) WITH (lists = 2);
+VACUUM FULL few;
+DROP TABLE few;
 -- a nearest neighbour for each of a few rows, a subquery for each whose
 -- distance is to the outer row's, which stays with the coordinator
 SELECT q.id, (SELECT i.id FROM items i WHERE i.id <> q.id ORDER BY i.embedding <-> q.embedding, i.id LIMIT 1) AS nearest

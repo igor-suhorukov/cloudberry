@@ -773,7 +773,12 @@ coordinator sorts the few rows they send and takes its LIMIT, as
 Cloudberry's planner puts a Limit below its Gather Motion.  ORCA gives
 such a query to the planner, and a query on a table with an HNSW or IVFFlat
 index, as Cloudberry's does; a function EXECUTE ON ALL SEGMENTS searches
-each segment's index too.
+each segment's index too.  What an index build says of the rows it read is
+the segments', which have them (`gp_ddl.c`'s `builds_indexes()`): the
+coordinator holds back its NOTICEs as it builds over its copy, which is
+empty -- IVFFlat's "created with little data" of no rows -- and the
+segments' NOTICEs of a CREATE INDEX, REINDEX, REPACK, CLUSTER or VACUUM
+FULL are the client's, each distinct one once.
 
 The encryption module, `gp_tde`, is still a stub: TDE waits for a formal
 requirement.  The `ic` suite runs every transport over the same Motion
