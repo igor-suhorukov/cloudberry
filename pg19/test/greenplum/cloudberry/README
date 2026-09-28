@@ -221,6 +221,14 @@ distributed_transactions  the INFO lines of two of its transactions.  A
   DDL, SAVEPOINT, RELEASE and ROLLBACK TO a segment fails at, and
   twophase_pqexecparams's -- are Cloudberry's.
 
+dynamic_table (planner)  a dynamic table is the materialized view it is, of
+  relkind m, as PostgreSQL 19 describes one: psql's \d+ titles it
+  "Materialized view", which Cloudberry's psql titles "Dynamic table" by its
+  catalog's relisdynamic, and DROP ... CASCADE names the three it drops
+  "materialized view", as PostgreSQL's getObjectDescription() names every
+  view of the kind.  And SHOW optimizer, whose header and rule are the
+  port's name for it, gp.optimizer, three wider.
+
 expand_table_ao  pg_appendonly's compresstype of a table made with
   compresstype=none, which gp_ao records as no compression at all, an empty
   name, where Cloudberry records "none"; and the OID of text's hash operator

@@ -178,3 +178,40 @@ RESET allow_system_table_mods;
 GRANT SELECT ON pg_catalog.gp_matview_aux, pg_catalog.gp_matview_tables TO PUBLIC;
 SECURITY LABEL FOR gp ON VIEW pg_catalog.gp_matview_aux IS 'catalog';
 SECURITY LABEL FOR gp ON VIEW pg_catalog.gp_matview_tables IS 'catalog';
+
+/*
+ * ---------------------------------------------------------------------------
+ * Cloudberry's pg_dynamic_tables and pg_get_dynamic_table_schedule()
+ * ---------------------------------------------------------------------------
+ *
+ * Cloudberry's names for what reads a dynamic table: its view of them, by
+ * Cloudberry's columns, the definition as pg_get_viewdef() gives it; and the
+ * schedule its job refreshes it on (dynamic.c), in pg_catalog as Cloudberry's
+ * are.
+ */
+CREATE FUNCTION pg_catalog.pg_get_dynamic_table_schedule(oid)
+RETURNS text
+AS 'MODULE_PATHNAME', 'gp_get_dynamic_table_schedule'
+LANGUAGE C STABLE STRICT;
+
+COMMENT ON FUNCTION pg_catalog.pg_get_dynamic_table_schedule(oid) IS
+	'the schedule of the job that refreshes a dynamic table; Cloudberry''s';
+
+SET allow_system_table_mods = on;
+
+CREATE VIEW pg_catalog.pg_dynamic_tables AS
+	SELECT n.nspname AS schemaname,
+		   c.relname AS dynamictablename,
+		   pg_catalog.pg_get_userbyid(c.relowner) AS dynamictableowner,
+		   t.spcname AS tablespace,
+		   c.relhasindex AS hasindexes,
+		   c.relispopulated AS ispopulated,
+		   pg_catalog.pg_get_viewdef(c.oid) AS definition
+	  FROM pg_catalog.pg_class c
+	  LEFT JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace
+	  LEFT JOIN pg_catalog.pg_tablespace t ON t.oid = c.reltablespace
+	 WHERE c.relkind = 'm' AND gp_matview.dynamic_schedule(c.oid) IS NOT NULL;
+
+RESET allow_system_table_mods;
+
+GRANT SELECT ON pg_catalog.pg_dynamic_tables TO PUBLIC;

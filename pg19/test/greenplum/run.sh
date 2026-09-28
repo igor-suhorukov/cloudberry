@@ -259,6 +259,10 @@ make_cluster() {
 			# each statement ORCA would not plan, and why, in the log: the
 			# ORCA pass's reasons, totalled below
 			[ "$n" -eq 0 ] && echo "gp.optimizer_log_fallback = on"
+			# a background worker for each of gp_task's jobs at once, as the
+			# task suite has them: at a minute of five dynamic_table's runs
+			# with the jobs of its three views of the default schedule
+			[ "$n" -eq 0 ] && echo "max_worker_processes = 16"
 		} >> "$d/postgresql.auto.conf"
 	done
 	for n in $(seq 1 $((NODES - 1))) 0; do
@@ -640,7 +644,10 @@ chmod +x "$EXEC/bin/diff"
 # says; so is one that waits for ever on a lock a segment holds.  The
 # watchdog does not look while a test runs that counts the coordinator's
 # sessions, or the statements holding its slots of query metrics, where its
-# own would be counted: the test whose results file is the newest.
+# own would be counted: the test whose results file is the newest.  Nor at a
+# statement that is a pg_sleep() alone, which ends when it said it would:
+# dynamic_table's, SELECT pg_sleep(80), waits so for its dynamic table's job,
+# another backend of the database, which is watched.
 TIMEOUT="${STATEMENT_TIMEOUT:-60 seconds}"
 QUIET_TESTS=" instr_in_shmem instr_in_shmem_verify "
 watchdog() {
@@ -653,7 +660,8 @@ watchdog() {
 			SELECT pid, regexp_replace(left(query, 300), '\\s+', ' ', 'g')
 			  FROM pg_stat_activity
 			 WHERE datname = 'regression' AND state = 'active'
-			   AND now() - query_start > interval '$TIMEOUT'" 2> /dev/null |
+			   AND now() - query_start > interval '$TIMEOUT'
+			   AND query !~* '^\\s*select\\s+pg_sleep\\s*\\(\\s*[0-9.]+\\s*\\)\\s*;?\\s*$'" 2> /dev/null |
 		while read -r pid query; do
 			[ -n "$pid" ] || continue
 			PGOPTIONS="-c gp.optimizer=off" "$PSQL" -X -q -t -A -d postgres \

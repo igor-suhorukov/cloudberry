@@ -27,7 +27,9 @@
 #         nodes must come before any test's temporary schema: a node makes
 #         its own, pg_temp_N by its own backend's number, with an OID of its
 #         own, where Cloudberry's coordinator dispatches one name and OID for
-#         a session's.
+#         a session's.  dynamic_table follows it there, which the planner's
+#         pass alone runs: its 80 seconds of waiting for its job take no
+#         longer in a group of seconds than the longest group does
 #
 # Every test of the schedule is listed.  The ones the port had left for M7 --
 # fault injection, FTS, the interconnect's settings, and the rest -- come
@@ -73,6 +75,7 @@ run  distributed_transactions
 run  statement_mem_for_windowagg
 group ns
 run  namespace_gp
+run  dynamic_table  planner  it turns optimizer off itself, so both passes would plan it alike, and ORCA's pass, on the planner's pass's clusters, would read the rows the planner's wrote into its external table's demoprot file on each segment too
 group g1
 run  bitmap_index
 run  truncate_gp
@@ -541,7 +544,6 @@ port ic_proxy_after
 run  subtrx_overflow
 run  bfv_meta_track
 skip bfv_copy  segment reject limit reached, aborting operation
-skip dynamic_table  function pg_catalog.pg_get_dynamic_table_schedule(oid) does not exist; relation "pg_dynamic_tables" does not exist -- and psql 19's \d+ calls a dynamic table a materialized view, as DROP ... CASCADE does, its job runs REFRESH MATERIALIZED VIEW where Cloudberry's runs REFRESH DYNAMIC TABLE, the names of its jobs are not reserved, and its wait of 80 seconds for its job is cancelled after 60
 run  hba_conf
 skip dboptions  differs: the psql its shell commands run connects to /tmp's socket, where this suite's nodes have directories of their own
 run  gp_log_mem_dispatch

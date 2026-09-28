@@ -607,6 +607,22 @@ isl "CREATE INCREMENTAL MATERIALIZED VIEW" \
 isl "CREATE DYNAMIC TABLE ... SCHEDULE" \
    "CREATE DYNAMIC TABLE dt SCHEDULE '0 3 * * *' AS SELECT count(*) AS n FROM base;
     SELECT gp_matview.dynamic_schedule('dt'::regclass);" "0 3 * * *"
+is "its job runs Cloudberry's REFRESH DYNAMIC TABLE, which the scheduler's worker reads here too" \
+   "SELECT command FROM gp_task.job WHERE jobname = 'gp_dynamic_table_refresh_' || 'dt'::regclass::oid;" \
+   "REFRESH DYNAMIC TABLE public.dt"
+dtoid=$(q "SELECT 'dt'::regclass::oid;")
+refused "CREATE TASK of a name Cloudberry keeps for a dynamic table's job" \
+        "CREATE TASK gp_dynamic_table_refresh_xxx SCHEDULE '1 second' AS 'REFRESH DYNAMIC TABLE dt';" \
+        'unacceptable task name "gp_dynamic_table_refresh_xxx"'
+refused "ALTER TASK ... AS of the job" \
+        "ALTER TASK gp_dynamic_table_refresh_$dtoid AS 'SELECT 1';" \
+        "can not alter REFRESH SQL of dynamic tables"
+refused "and DROP TASK of it" \
+        "DROP TASK gp_dynamic_table_refresh_$dtoid;" \
+        "can not drop a internal task \"gp_dynamic_table_refresh_$dtoid\" paried with dynamic table"
+isl "but its schedule may change" \
+   "ALTER TASK gp_dynamic_table_refresh_$dtoid SCHEDULE '0 4 * * *';
+    SELECT pg_get_dynamic_table_schedule('dt'::regclass);" "0 4 * * *"
 isl "REFRESH DYNAMIC TABLE" \
    "INSERT INTO base VALUES (2, 1);
     REFRESH DYNAMIC TABLE dt;

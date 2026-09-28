@@ -76,7 +76,10 @@ On one node (M1):
   tables.  A view over one table, over several, or over a table joined to
   itself is maintained by delta, as are `count`, `sum` and `avg`; what the
   delta cannot express — an outer join, `min`, `max`, TRUNCATE — is
-  recomputed.  A dynamic table refreshes itself through `gp_task`.  A
+  recomputed.  A dynamic table refreshes itself through `gp_task`, by a
+  job of Cloudberry's reserved name that runs Cloudberry's REFRESH DYNAMIC
+  TABLE where `gp_sql` is preloaded, and Cloudberry's `pg_dynamic_tables`
+  and `pg_get_dynamic_table_schedule()` read them.  A
   query is answered from a materialized view that holds what it asks,
   where that costs less (`gp.enable_answer_query_using_materialized_views`,
   Cloudberry's AQUMV), under ORCA too unless `gp.aqumv_under_orca` is off:
