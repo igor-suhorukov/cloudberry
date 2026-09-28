@@ -39,5 +39,5 @@ src/backend/access/transam/xact.c : EstimateTransactionStateSpace : The shortcut
 	unpatched server the only assignment that makes nParallelCurrentXids
 	non-zero is in StartParallelWorkerTransaction(), which runs only in a
 	parallel worker, so the second test is false wherever the first is true and
-	the branch cannot be reached.  The other writer is XactAdoptCurrentXids(),
+	the branch cannot be reached.  The other writer is XactAdoptTransactionState(),
 	which this series adds and which refuses to run in a parallel worker.

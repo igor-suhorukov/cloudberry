@@ -143,7 +143,6 @@ patch_probe = '''
 #include "access/tableamext.h"
 #include "access/xact.h"
 #include "catalog/catalog.h"
-#include "commands/explain.h"
 #include "commands/matview.h"
 #include "commands/tablespace.h"
 #include "commands/vacuum.h"
@@ -151,8 +150,6 @@ patch_probe = '''
 #include "parser/parse_expr.h"
 #include "parser/parse_relation.h"
 #include "parser/parser.h"
-#include "replication/syncrep.h"
-#include "storage/md.h"
 #include "storage/smgr.h"
 #include "utils/combocid.h"
 #include "utils/memutils.h"
@@ -168,12 +165,9 @@ cb_probe(void)
 	new_oid_hook = NULL;					/* R1 */
 	combocid_create_hook = NULL;			/* R2 */
 	combocid_miss_hook = NULL;				/* R2 */
-	SyncRepHoldCancelDuringWait = false;	/* R3 */
 	analyze_sample_rows_hook = NULL;		/* O3 */
-	explain_node_label_hook = NULL;			/* O4 */
 	columnref_fallback_hook = NULL;			/* O10 */
 	deparse_function_as_column_hook = NULL;	/* O10 */
-	mdunlink_hook = NULL;					/* O22 */
 	smgr_file_event_hook = NULL;			/* O21 */
 	memory_block_alloc_hook = NULL;			/* O25 */
 	raw_parser_hook = NULL;					/* O26 */
@@ -183,20 +177,16 @@ cb_probe(void)
 	xact_commit_recorded_hook = NULL;		/* O33 */
 
 	(void) LastNewOidWasPreassigned;					/* R1  */
-	(void) XactAdoptCurrentXids;						/* R2  */
 	(void) XactAdoptTransactionState;					/* R4  */
 	(void) standard_raw_parser;							/* O26 */
 	(void) OpenMatViewIncrementalMaintenanceExternal;	/* O27 */
 	(void) CloseMatViewIncrementalMaintenanceExternal;	/* O27 */
-	(void) ExtensionMarkAdd;							/* O23 */
 	(void) RegisterTableAmExtension;					/* O13 */
 	(void) table_am_reloptions;							/* O14 */
 	(void) table_scan_extractcolumns;					/* O15 */
 	ext.index_unique_check = NULL;						/* O16 */
 	ext.relation_add_columns = NULL;					/* O17 */
 	ext.relation_get_block_sequences = NULL;			/* O18 */
-	ext.size_from_am = false;							/* O19 */
-	ext.old_row_from_plan = false;						/* O20 */
 	(void) ext;
 }
 '''
@@ -220,8 +210,9 @@ have_patched_pg = cc.compiles(patch_probe,
 if not have_patched_pg and get_option('require_patched_pg')
   error('''
     @0@
-    compiles, but does not carry the Cloudberry core patch series (R1-R4, O3,
-    O4, O10, O13-O23, O25-O28, O32).  Build PostgreSQL from github/postgres, branch
+    compiles, but does not carry the Cloudberry core patch series (R1, R2, R4,
+    O3, O10, O13-O18, O21, O25-O28, O32, O33).  Build PostgreSQL from
+    github/postgres, branch
     REL_19_STABLE_CLOUDBERRY, and point -Dpg_config at it.
     Pass -Drequire_patched_pg=false to configure anyway.'''.format(
     pg_config.full_path()))

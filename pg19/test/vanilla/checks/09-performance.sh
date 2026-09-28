@@ -57,10 +57,10 @@
 #   combocid  a transaction that updates its own rows again and reads them:
 #             a combo command ID made and looked up for each (R2)
 #   copy      COPY FROM a file of 200,000 rows, CREATE INDEX and DROP TABLE:
-#             each file extension (O21), each file removed (O22), and the
-#             table access method registry's tests (O13-O19)
-#   plan      EXPLAIN of a six-way join, 300 times: the planner, O15's
-#             physical target list, O4's node labels
+#             each file extension and each file removed (O21), and the
+#             table access method registry's tests (O13-O18)
+#   plan      EXPLAIN of a six-way join, 300 times: the planner and O15's
+#             physical target list
 #   alloc     100,000 values of 8 to 16 kB, each a block of its own in its
 #             context, as every palloc() over 8 kB is; a string grown past
 #             8 kB by realloc(); a sort's tuples in the blocks of a Bump

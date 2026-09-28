@@ -65,9 +65,7 @@
 #include "parser/parse_expr.h"
 #include "parser/parse_relation.h"
 #include "parser/parser.h"
-#include "replication/syncrep.h"
 #include "storage/lock.h"
-#include "storage/md.h"
 #include "storage/smgr.h"
 #include "tcop/utility.h"
 #include "utils/array.h"
@@ -93,8 +91,6 @@ typedef enum ProbeEvent
 	EV_COMBOCID_CREATE,
 	EV_COMBOCID_MISS,
 	EV_ANALYZE_SAMPLE,
-	EV_EXPLAIN_LABEL,
-	EV_MDUNLINK,
 	EV_RAW_PARSER,
 	EV_STAR_FILTER,
 	EV_COLUMNREF,
@@ -109,7 +105,7 @@ typedef enum ProbeEvent
 
 static const char *const event_name[EV_COUNT] = {
 	"new_oid", "combocid_create", "combocid_miss", "analyze_sample",
-	"explain_label", "mdunlink", "raw_parser", "star_filter",
+	"raw_parser", "star_filter",
 	"columnref", "deparse_column", "query_lockmode", "deparse_range",
 	"unique_check", "add_columns", "block_sequences",
 };
@@ -160,8 +156,6 @@ static Oid	arm_lockmode_rel = InvalidOid;
 static LOCKMODE arm_lockmode = NoLock;
 
 static bool arm_parser = false;
-static bool arm_explain = false;
-static bool arm_mdunlink = false;
 static bool arm_combocid = false;
 
 /* Combo CIDs this backend published, so the miss hook can answer for them. */
@@ -174,7 +168,6 @@ static struct
 }			published_combocid[PROBE_COMBOCID_MAX];
 
 /* the previous hook value, so several modules can coexist */
-static planner_hook_type prev_planner_hook = NULL;
 
 /* ------------------------------------------------------------------------- */
 /* R1: new_oid_hook                                                          */
@@ -264,141 +257,6 @@ probe_analyze_sample_rows(Relation relation, AnalyzeSampleRowsFunc *func,
 	record(EV_ANALYZE_SAMPLE, "relation %u: %u pages, %.0f rows",
 		   RelationGetRelid(relation), arm_analyze_pages, arm_analyze_rows);
 	return true;
-}
-
-/* ------------------------------------------------------------------------- */
-/* O4: explain_node_label_hook, over a CustomScan of our own                 */
-/* ------------------------------------------------------------------------- */
-
-static Node *probe_create_custom_scan_state(CustomScan *cscan);
-static void probe_begin_custom_scan(CustomScanState *node, EState *estate,
-									int eflags);
-static TupleTableSlot *probe_exec_custom_scan(CustomScanState *node);
-static void probe_end_custom_scan(CustomScanState *node);
-static void probe_rescan_custom_scan(CustomScanState *node);
-
-static const CustomScanMethods probe_scan_methods = {
-	.CustomName = "GpProbe",
-	.CreateCustomScanState = probe_create_custom_scan_state,
-};
-
-static const CustomExecMethods probe_exec_methods = {
-	.CustomName = "GpProbe",
-	.BeginCustomScan = probe_begin_custom_scan,
-	.ExecCustomScan = probe_exec_custom_scan,
-	.EndCustomScan = probe_end_custom_scan,
-	.ReScanCustomScan = probe_rescan_custom_scan,
-};
-
-static Node *
-probe_create_custom_scan_state(CustomScan *cscan)
-{
-	CustomScanState *css = (CustomScanState *) newNode(sizeof(CustomScanState),
-													   T_CustomScanState);
-
-	css->methods = &probe_exec_methods;
-	return (Node *) css;
-}
-
-static void
-probe_begin_custom_scan(CustomScanState *node, EState *estate, int eflags)
-{
-	CustomScan *cscan = (CustomScan *) node->ss.ps.plan;
-	Plan	   *child = (Plan *) linitial(cscan->custom_plans);
-
-	node->custom_ps = list_make1(ExecInitNode(child, estate, eflags));
-}
-
-static TupleTableSlot *
-probe_exec_custom_scan(CustomScanState *node)
-{
-	/* A pass-through: the point is the node's presence, not what it does. */
-	return ExecProcNode((PlanState *) linitial(node->custom_ps));
-}
-
-static void
-probe_end_custom_scan(CustomScanState *node)
-{
-	ExecEndNode((PlanState *) linitial(node->custom_ps));
-}
-
-static void
-probe_rescan_custom_scan(CustomScanState *node)
-{
-	ExecReScan((PlanState *) linitial(node->custom_ps));
-}
-
-/*
- * Wrap the finished plan in that CustomScan, so that EXPLAIN has one to label.
- * This is the shape the port uses for Motion, which is what O4 exists for.
- */
-static PlannedStmt *
-probe_planner(Query *parse, const char *query_string, int cursorOptions,
-			  ParamListInfo boundParams, ExplainState *es)
-{
-	PlannedStmt *stmt;
-	CustomScan *cscan;
-	Plan	   *top;
-
-	if (prev_planner_hook)
-		stmt = prev_planner_hook(parse, query_string, cursorOptions,
-								 boundParams, es);
-	else
-		stmt = standard_planner(parse, query_string, cursorOptions,
-								boundParams, es);
-
-	if (!arm_explain || stmt->commandType != CMD_SELECT)
-		return stmt;
-
-	top = stmt->planTree;
-
-	cscan = makeNode(CustomScan);
-	cscan->methods = &probe_scan_methods;
-	cscan->custom_plans = list_make1(top);
-	cscan->scan.plan.targetlist = top->targetlist;
-	cscan->scan.plan.qual = NIL;
-	cscan->scan.plan.lefttree = NULL;
-	cscan->scan.plan.righttree = NULL;
-	cscan->scan.plan.plan_rows = top->plan_rows;
-	cscan->scan.plan.plan_width = top->plan_width;
-	cscan->scan.plan.startup_cost = top->startup_cost;
-	cscan->scan.plan.total_cost = top->total_cost;
-	cscan->scan.scanrelid = 0;	/* not a base relation scan */
-
-	stmt->planTree = (Plan *) cscan;
-	return stmt;
-}
-
-static void
-probe_explain_label(PlanState *planstate, ExplainState *es,
-					const char **pname, const char **suffix)
-{
-	CustomScanState *css = (CustomScanState *) planstate;
-
-	if (!IsA(planstate, CustomScanState) || css->methods != &probe_exec_methods)
-		return;
-
-	/*
-	 * The shape Cloudberry prints: a name of its own, then text between the
-	 * name and the costs.
-	 */
-	*pname = "Probe Motion 3:1";
-	*suffix = "  (slice1; segments: 3)";
-	record(EV_EXPLAIN_LABEL, "labelled a CustomScan");
-}
-
-/* ------------------------------------------------------------------------- */
-/* O22: mdunlink_hook                                                        */
-/* ------------------------------------------------------------------------- */
-
-static void
-probe_mdunlink(RelFileLocatorBackend rlocator, ForkNumber forknum, bool isRedo)
-{
-	if (!arm_mdunlink)
-		return;
-
-	record(EV_MDUNLINK, "relfilenumber " UINT64_FORMAT ", fork %d, redo %d",
-		   (uint64) rlocator.locator.relNumber, (int) forknum, (int) isRedo);
 }
 
 /* ------------------------------------------------------------------------- */
@@ -832,50 +690,6 @@ probe_relation_add_columns(Relation rel, int ncolumns,
 }
 
 /*
- * O19: what the probe's method says its tables take.  While armed, the main
- * fork takes arm_size bytes, whatever its files hold; otherwise it answers
- * as heap's files would, 0 for a fork the table does not have.
- */
-static int64 arm_size = -1;
-
-static uint64
-probe_relation_size(Relation rel, ForkNumber forknum)
-{
-	uint64		size = 0;
-
-	for (ForkNumber f = 0; f <= MAX_FORKNUM; f++)
-	{
-		if (forknum != InvalidForkNumber && f != forknum)
-			continue;
-		if (f == MAIN_FORKNUM && arm_size >= 0)
-			size += arm_size;
-		else if (smgrexists(RelationGetSmgr(rel), f))
-			size += (uint64) smgrnblocks(RelationGetSmgr(rel), f) * BLCKSZ;
-	}
-	return size;
-}
-
-/*
- * O20: while armed, the method cannot fetch a row by its TID, as a method
- * that stores no row where its TID says cannot: UPDATE, DELETE ...
- * RETURNING and MERGE have to take the old row from the plan.
- */
-static bool arm_rowfetch_fails = false;
-
-static bool
-probe_tuple_fetch_row_version(Relation rel, ItemPointer tid,
-							  Snapshot snapshot, TupleTableSlot *slot)
-{
-	if (arm_rowfetch_fails)
-		ereport(ERROR,
-				(errmsg("gp_probe: the method was asked to fetch (%u,%u) by its TID",
-						ItemPointerGetBlockNumber(tid),
-						ItemPointerGetOffsetNumber(tid))));
-	return GetHeapamTableAmRoutine()->tuple_fetch_row_version(rel, tid,
-															  snapshot, slot);
-}
-
-/*
  * O18: the runs of block numbers of a table of the probe's method.  Armed
  * for one table, they are what it was told; otherwise one run of every
  * block the table has, which is what BRIN walks for any table.
@@ -1140,8 +954,6 @@ probe_am_init(void)
 	probe_am_routine.index_validate_scan = probe_index_validate_scan;
 	probe_am_routine.relation_toast_am = probe_relation_toast_am;
 	probe_am_routine.index_fetch_tuple = probe_index_fetch_tuple;
-	probe_am_routine.relation_size = probe_relation_size;
-	probe_am_routine.tuple_fetch_row_version = probe_tuple_fetch_row_version;
 
 	memset(&probe_am_ext, 0, sizeof(probe_am_ext));
 	probe_am_ext.size = sizeof(TableAmExtRoutine);
@@ -1150,8 +962,6 @@ probe_am_init(void)
 	probe_am_ext.scan_by_column = true;
 	probe_am_ext.index_unique_check = probe_index_unique_check;
 	probe_am_ext.relation_add_columns = probe_relation_add_columns;
-	probe_am_ext.size_from_am = true;
-	probe_am_ext.old_row_from_plan = true;
 	probe_am_ext.relation_get_block_sequences = probe_relation_get_block_sequences;
 	RegisterTableAmExtension(&probe_am_routine, &probe_am_ext);
 }
@@ -1170,26 +980,18 @@ PG_FUNCTION_INFO_V1(gp_probe_arm_column);
 PG_FUNCTION_INFO_V1(gp_probe_arm_range);
 PG_FUNCTION_INFO_V1(gp_probe_arm_lockmode);
 PG_FUNCTION_INFO_V1(gp_probe_arm_parser);
-PG_FUNCTION_INFO_V1(gp_probe_arm_explain);
-PG_FUNCTION_INFO_V1(gp_probe_arm_mdunlink);
 PG_FUNCTION_INFO_V1(gp_probe_arm_combocid);
 PG_FUNCTION_INFO_V1(gp_probe_published_combocids);
 PG_FUNCTION_INFO_V1(gp_probe_load_combocids);
 PG_FUNCTION_INFO_V1(gp_probe_current_xids);
-PG_FUNCTION_INFO_V1(gp_probe_adopt_xids);
 PG_FUNCTION_INFO_V1(gp_probe_transaction_state);
 PG_FUNCTION_INFO_V1(gp_probe_matview_maintenance);
-PG_FUNCTION_INFO_V1(gp_probe_matview_depth);
-PG_FUNCTION_INFO_V1(gp_probe_matview_restore_depth);
 PG_FUNCTION_INFO_V1(gp_probe_matview_apply_failing);
-PG_FUNCTION_INFO_V1(gp_probe_syncrep_hold);
 PG_FUNCTION_INFO_V1(gp_probe_am_handler);
 PG_FUNCTION_INFO_V1(gp_probe_am_level);
 PG_FUNCTION_INFO_V1(gp_probe_am_fillfactor);
 PG_FUNCTION_INFO_V1(gp_probe_scan_log);
 PG_FUNCTION_INFO_V1(gp_probe_arm_fetch_fails);
-PG_FUNCTION_INFO_V1(gp_probe_arm_size);
-PG_FUNCTION_INFO_V1(gp_probe_arm_rowfetch_fails);
 PG_FUNCTION_INFO_V1(gp_probe_arm_block_sequences);
 PG_FUNCTION_INFO_V1(gp_probe_arm_blocks);
 PG_FUNCTION_INFO_V1(gp_probe_blocks);
@@ -1217,8 +1019,6 @@ gp_probe_reset(PG_FUNCTION_ARGS)
 	if (scan_log)
 		resetStringInfo(scan_log);
 	arm_fetch_fails = false;
-	arm_size = -1;
-	arm_rowfetch_fails = false;
 	arm_star_rel = InvalidOid;
 	if (arm_column_name)
 		pfree(arm_column_name);
@@ -1229,7 +1029,7 @@ gp_probe_reset(PG_FUNCTION_ARGS)
 	arm_range_text = NULL;
 	arm_range_func = InvalidOid;
 	arm_range_alias = false;
-	arm_parser = arm_explain = arm_mdunlink = arm_combocid = false;
+	arm_parser = arm_combocid = false;
 	memset(published_combocid, 0, sizeof(published_combocid));
 	PG_RETURN_VOID();
 }
@@ -1356,20 +1156,6 @@ gp_probe_arm_parser(PG_FUNCTION_ARGS)
 }
 
 Datum
-gp_probe_arm_explain(PG_FUNCTION_ARGS)
-{
-	arm_explain = PG_GETARG_BOOL(0);
-	PG_RETURN_VOID();
-}
-
-Datum
-gp_probe_arm_mdunlink(PG_FUNCTION_ARGS)
-{
-	arm_mdunlink = PG_GETARG_BOOL(0);
-	PG_RETURN_VOID();
-}
-
-Datum
 gp_probe_arm_combocid(PG_FUNCTION_ARGS)
 {
 	arm_combocid = PG_GETARG_BOOL(0);
@@ -1459,29 +1245,6 @@ gp_probe_current_xids(PG_FUNCTION_ARGS)
 
 	PG_RETURN_ARRAYTYPE_P(construct_array(values, nxids, XIDOID,
 										  sizeof(TransactionId), true, TYPALIGN_INT));
-}
-
-/*
- * Adopt them, which is R2's whole purpose: after this, this backend sees that
- * transaction's uncommitted rows as a parallel worker sees its leader's.
- */
-Datum
-gp_probe_adopt_xids(PG_FUNCTION_ARGS)
-{
-	ArrayType  *arr = PG_GETARG_ARRAYTYPE_P(0);
-	Datum	   *elems;
-	int			n;
-	TransactionId *xids;
-
-	deconstruct_array(arr, XIDOID, sizeof(TransactionId), true, TYPALIGN_INT,
-					  &elems, NULL, &n);
-
-	xids = palloc(sizeof(TransactionId) * Max(n, 1));
-	for (int i = 0; i < n; i++)
-		xids[i] = DatumGetTransactionId(elems[i]);
-
-	XactAdoptCurrentXids(n, xids);
-	PG_RETURN_VOID();
 }
 
 /*
@@ -1575,54 +1338,36 @@ gp_probe_matview_maintenance(PG_FUNCTION_ARGS)
 	PG_RETURN_BOOL(MatViewIncrementalMaintenanceIsEnabled());
 }
 
-Datum
-gp_probe_matview_depth(PG_FUNCTION_ARGS)
-{
-	PG_RETURN_INT32(MatViewIncrementalMaintenanceDepthExternal());
-}
-
-Datum
-gp_probe_matview_restore_depth(PG_FUNCTION_ARGS)
-{
-	RestoreMatViewIncrementalMaintenanceDepthExternal(PG_GETARG_INT32(0));
-	PG_RETURN_INT32(MatViewIncrementalMaintenanceDepthExternal());
-}
-
 /*
  * What an extension applying a delta really does: open maintenance mode, run
- * code that may fail, and leave the depth where it found it either way.  This
- * one always fails, which is the case worth testing -- without the restore,
+ * code that may fail, and close what it opened either way.  This one always
+ * fails, which is the case worth testing -- without the close on the way out,
  * maintenance mode would stay open for the rest of the session.
  */
 Datum
 gp_probe_matview_apply_failing(PG_FUNCTION_ARGS)
 {
-	int			save = MatViewIncrementalMaintenanceDepthExternal();
+	volatile bool opened = false;
 
 	PG_TRY();
 	{
 		OpenMatViewIncrementalMaintenanceExternal();
+		opened = true;
 		ereport(ERROR,
 				(errcode(ERRCODE_RAISE_EXCEPTION),
 				 errmsg("gp_probe: pretending the delta failed")));
 		CloseMatViewIncrementalMaintenanceExternal();	/* not reached */
+		opened = false;
 	}
 	PG_CATCH();
 	{
-		RestoreMatViewIncrementalMaintenanceDepthExternal(save);
+		if (opened)
+			CloseMatViewIncrementalMaintenanceExternal();
 		PG_RE_THROW();
 	}
 	PG_END_TRY();
 
 	PG_RETURN_VOID();
-}
-
-/* R3: the flag exists and is settable from an extension. */
-Datum
-gp_probe_syncrep_hold(PG_FUNCTION_ARGS)
-{
-	SyncRepHoldCancelDuringWait = PG_GETARG_BOOL(0);
-	PG_RETURN_BOOL(SyncRepHoldCancelDuringWait);
 }
 
 /* ------------------------------------------------------------------------- */
@@ -1670,22 +1415,6 @@ Datum
 gp_probe_arm_fetch_fails(PG_FUNCTION_ARGS)
 {
 	arm_fetch_fails = PG_GETARG_BOOL(0);
-	PG_RETURN_VOID();
-}
-
-/* O19: what the method says its tables' main fork takes; -1, its files */
-Datum
-gp_probe_arm_size(PG_FUNCTION_ARGS)
-{
-	arm_size = PG_GETARG_INT64(0);
-	PG_RETURN_VOID();
-}
-
-/* O20: make the method's fetch by TID fail, or not */
-Datum
-gp_probe_arm_rowfetch_fails(PG_FUNCTION_ARGS)
-{
-	arm_rowfetch_fails = PG_GETARG_BOOL(0);
 	PG_RETURN_VOID();
 }
 
@@ -1919,8 +1648,6 @@ _PG_init(void)
 	combocid_create_hook = probe_combocid_create;
 	combocid_miss_hook = probe_combocid_miss;
 	analyze_sample_rows_hook = probe_analyze_sample_rows;
-	explain_node_label_hook = probe_explain_label;
-	mdunlink_hook = probe_mdunlink;
 	raw_parser_hook = probe_raw_parser;
 	star_expansion_filter_hook = probe_star_filter;
 	columnref_fallback_hook = probe_columnref_fallback;
@@ -1951,21 +1678,9 @@ _PG_init(void)
 							NULL, NULL, NULL);
 	xact_commit_recorded_hook = probe_commit_recorded;
 
-	/*
-	 * O23: entries of a database directory named by a number and "_probe"
-	 * are this module's, for pg_checksums to pass over and pg_upgrade to
-	 * carry.  The hook tests make one by hand.
-	 */
-	ExtensionMarkAdd("_probe");
-
 	/* O13 and the registry's members: the probe's table access method. */
 	probe_am_init();
 
-	prev_planner_hook = planner_hook;
-	planner_hook = probe_planner;
-
 	prev_process_utility = ProcessUtility_hook;
 	ProcessUtility_hook = probe_process_utility;
-
-	RegisterCustomScanMethods(&probe_scan_methods);
 }

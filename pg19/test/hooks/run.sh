@@ -155,36 +155,6 @@ is "pg_class.relpages is the hook's page count, not the real one" o3 relpages 42
 is "pg_class.reltuples is the hook's row count, not the real one" o3 reltuples 1234567
 
 ###############################################################################
-echo "O4  explain_node_label_hook: a CustomScan prints as its owner names it"
-###############################################################################
-session o4 <<'SQL'
-SELECT gp_probe.reset();
-SELECT gp_probe.arm_explain(true);
-\o /dev/null
-EXPLAIN (COSTS OFF) SELECT 1;
-\o
-SELECT gp_probe.arm_explain(false);
-SELECT 'calls_explain_label=' || gp_probe.calls('explain_label');
-SELECT 'detail_explain_label=' || gp_probe.detail('explain_label');
-SQL
-# The plan text itself is easier to capture outside SQL.
-"$PSQL" -X -q -t -A -d postgres > "$WORK/o4plan.out" 2>&1 <<'SQL'
-SELECT gp_probe.arm_explain(true);
-EXPLAIN (COSTS OFF) SELECT 1;
-SQL
-fired "explain_node_label_hook is called for a CustomScan" o4 explain_label
-if grep -q 'Probe Motion 3:1  (slice1; segments: 3)' "$WORK/o4plan.out"; then
-	ok "the node prints as \"Probe Motion 3:1  (slice1; segments: 3)\""
-else
-	notok "the node should carry the hook's name and suffix" "$(cat "$WORK/o4plan.out")"
-fi
-if grep -q 'Custom Scan' "$WORK/o4plan.out"; then
-	notok "the default label should have been replaced" "$(cat "$WORK/o4plan.out")"
-else
-	ok "\"Custom Scan (GpProbe)\" does not appear"
-fi
-
-###############################################################################
 echo "O10 columnref_fallback_hook, deparse_function_as_column_hook: a name that is a call"
 ###############################################################################
 # The armed name, where no column has it, is a call of the armed function on
@@ -232,28 +202,6 @@ if grep -q 'column "probed" does not exist' "$WORK/o10.out"; then
 	ok "unarmed, the name is a missing column"
 else
 	notok "unarmed, the name should be a missing column" "$(head -5 "$WORK/o10.out")"
-fi
-
-###############################################################################
-echo "O22 mdunlink_hook: an extension sees the files of a dropped relation go"
-###############################################################################
-session o22 <<'SQL'
-SELECT gp_probe.reset();
-CREATE TABLE o22_t (a int);
-INSERT INTO o22_t VALUES (1);
-SELECT 'relfile=' || relfilenode FROM pg_class WHERE relname = 'o22_t';
-SELECT gp_probe.arm_mdunlink(true);
-DROP TABLE o22_t;
-SELECT gp_probe.arm_mdunlink(false);
-SELECT 'calls_mdunlink=' || gp_probe.calls('mdunlink');
-SELECT 'detail_mdunlink=' || gp_probe.detail('mdunlink');
-SQL
-fired "mdunlink_hook is called when a relation is dropped" o22 mdunlink
-relfile=$(val o22 relfile)
-if val o22 detail_mdunlink | grep -q "relfilenumber $relfile,"; then
-	ok "it names the relfilenumber that was removed ($relfile)"
-else
-	notok "the hook should see relfilenumber $relfile" "$(val o22 detail_mdunlink)"
 fi
 
 ###############################################################################
@@ -306,52 +254,34 @@ else
 fi
 
 session o27 <<'SQL'
-SELECT 'depth0=' || gp_probe.matview_depth();
 SELECT 'opened=' || gp_probe.matview_maintenance(true);
-SELECT 'depth1=' || gp_probe.matview_depth();
 INSERT INTO o27_mv VALUES (99);
 SELECT 'applied=' || count(*) FROM o27_mv WHERE a = 99;
 SELECT 'closed=' || gp_probe.matview_maintenance(false);
 SQL
-is "the depth starts at zero" o27 depth0 0
 is "opening maintenance mode reports it is on" o27 opened true
-is "and raises the depth" o27 depth1 1
 is "the delta can now be applied with ordinary DML" o27 applied 1
 is "closing reports it is off again" o27 closed false
 
-# What an extension actually does: open, run code that can fail, and leave the
-# depth where it found it.  Nothing lowers the depth when a transaction aborts,
-# so without the restore maintenance mode would stay open for the session --
+# What an extension actually does: open, run code that can fail, and close
+# what it opened on the way out.  Nothing lowers the depth when a transaction
+# aborts, so without that maintenance mode would stay open for the session --
 # and DML on materialized views with it.
 session o27_recover <<'SQL'
-SELECT 'before=' || gp_probe.matview_depth();
 SELECT gp_probe.matview_apply_failing();
 SQL
 session o27_after <<'SQL'
-SELECT 'after=' || gp_probe.matview_depth();
 INSERT INTO o27_mv VALUES (1234);
 SQL
-is "the depth is zero before a delta is applied" o27_recover before 0
 if grep -q 'pretending the delta failed' "$WORK/o27_recover.out"; then
 	ok "a delta that fails raises its own error"
 else
 	notok "the failing delta should have errored" "$(cat "$WORK/o27_recover.out")"
 fi
-is "and the depth is back where it started" o27_after after 0
 if grep -q 'cannot change materialized view' "$WORK/o27_after.out"; then
-	ok "so DML on the view is refused again afterwards"
+	ok "and DML on the view is refused again afterwards"
 else
 	notok "maintenance mode leaked past the failure" "$(cat "$WORK/o27_after.out")"
-fi
-
-# Restoring may only put the depth back, never raise it.
-session o27_guard <<'SQL'
-SELECT 'raise=' || gp_probe.matview_restore_depth(2);
-SQL
-if grep -q 'cannot restore materialized view maintenance depth' "$WORK/o27_guard.out"; then
-	ok "restoring cannot raise the depth"
-else
-	notok "raising the depth should be refused" "$(cat "$WORK/o27_guard.out")"
 fi
 
 ###############################################################################
@@ -475,22 +405,14 @@ is "another function prints as it did" o31 other ' SELECT g FROM generate_series
 is "unarmed, the call and its column definitions print as they did" o31 viewdef_unarmed ' SELECT a, b FROM o31_f(3) s(a integer, b integer);'
 
 ###############################################################################
-echo "R3  SyncRepHoldCancelDuringWait: the flag is an extension's to set"
-###############################################################################
-session r3 <<'SQL'
-SELECT 'on=' || gp_probe.syncrep_hold(true);
-SELECT 'off=' || gp_probe.syncrep_hold(false);
-SQL
-is "an extension can set the flag" r3 on true
-is "and clear it" r3 off false
-echo "  note   what the flag does needs a standby that is behind and a cancel"
-echo "         during the commit wait; that belongs with the FTS tests at M4."
-
-###############################################################################
-echo "R2  XactAdoptCurrentXids: a second backend reads uncommitted rows"
+echo "R2  combo command ID hooks: a reader of the writer's transaction resolves its combo CIDs"
 ###############################################################################
 # A writer holds a transaction open through a FIFO, the way a writer segment
-# process would; a reader adopts its XIDs and must see its uncommitted work.
+# process would, and hands it over as SerializeTransactionState() writes it
+# for a parallel worker.  A reader adopts it (R4) and must see its
+# uncommitted work -- a row the writer inserted and then updated, whose first
+# version then needs both a cmin and a cmax, which is a combo CID: resolving
+# it is what the miss hook is for.
 session r2_setup <<'SQL'
 CREATE TABLE r2_t (a int, b text);
 SQL
@@ -505,11 +427,11 @@ send_a() { printf '%s\n' "$1" >&3; sleep 0.4; }
 send_a "BEGIN;"
 send_a "SELECT gp_probe.arm_combocid(true);"
 send_a "INSERT INTO r2_t VALUES (1, 'uncommitted');"
-# Insert then update the same row in one transaction: the first version needs
-# both a cmin and a cmax, and that is what makes a combo CID.
 send_a "UPDATE r2_t SET b = 'updated' WHERE a = 1;"
 send_a "\\o $WORK/a.xids"
 send_a "SELECT gp_probe.current_xids();"
+send_a "\\o $WORK/a.state"
+send_a "SELECT gp_probe.transaction_state();"
 send_a "\\o"
 send_a "\\o $WORK/a.combocids"
 send_a "SELECT gp_probe.published_combocids();"
@@ -517,11 +439,11 @@ send_a "\\o"
 sleep 0.6
 
 xids=$(tr -d '\n' < "$WORK/a.xids" 2>/dev/null)
-if [ -n "$xids" ] && [ "$xids" != "{}" ]; then
-	ok "the writer reports its XIDs ($xids)"
+astate=$(tr -d '\n' < "$WORK/a.state" 2>/dev/null)
+if [ -n "$xids" ] && [ "$xids" != "{}" ] && [ -n "$astate" ]; then
+	ok "the writer reports its XIDs ($xids) and hands its transaction over"
 else
-	notok "the writer should report its XIDs" "$(tail -5 "$WORK/writer.out")"
-	xids='{}'
+	notok "the writer should report its XIDs and its state" "$(tail -5 "$WORK/writer.out")"
 fi
 
 combocids=$(tr -d '\n' < "$WORK/a.combocids" 2>/dev/null)
@@ -532,45 +454,30 @@ else
 	notok "the writer should have made a combo CID" "$(tail -5 "$WORK/writer.out")"
 fi
 
-# Adopting the XIDs is necessary but not sufficient.  Once the writer's XID
-# counts as current, MVCC treats its rows as this backend's own work and asks
-# whether they were written before the current command -- so the reader also
-# needs a command id at least as high as the writer's.  That is why
-# Cloudberry's shared snapshot carries the writer's curcid next to its XIDs,
-# and R2 alone does not make a reader see anything.
-#
-# Here a couple of writes stand in for that: only a command that uses the
-# command id advances the counter, so read-only statements would not do.  They
-# go before the adoption, because a backend that has adopted XIDs must not
-# write -- its own subtransactions would then be invisible to it.
 session r2 <<SQL
 SELECT gp_probe.reset();
 SELECT gp_probe.arm_combocid(true);
 -- Without this the miss hook has nothing to answer with, and resolving the
 -- writer's combo CID fails the assertion in GetRealCmax().
 SELECT 'loaded=' || gp_probe.load_combocids('$combocids'::bigint[]);
-CREATE TABLE IF NOT EXISTS r2_scratch (a int);
-BEGIN;
-INSERT INTO r2_scratch VALUES (1);
-INSERT INTO r2_scratch VALUES (2);
 SELECT 'before=' || count(*) FROM r2_t;
-SELECT gp_probe.adopt_xids('$xids'::xid[]);
+BEGIN ISOLATION LEVEL REPEATABLE READ;
+SET LOCAL gp_probe.adopt_state = '$astate';
 SELECT 'after=' || count(*) FROM r2_t;
 SELECT 'value=' || b FROM r2_t;
 SELECT 'calls_combocid_miss=' || gp_probe.calls('combocid_miss');
 SELECT 'detail_combocid_miss=' || gp_probe.detail('combocid_miss');
-SELECT gp_probe.adopt_xids('{}'::xid[]);
-SELECT 'given_back=' || count(*) FROM r2_t;
 COMMIT;
+SELECT 'given_back=' || count(*) FROM r2_t;
 SQL
 is "the reader loaded the writer's combo CID mapping" r2 loaded 1
 is "a second backend cannot see the uncommitted row" r2 before 0
-is "after adopting the writer's XIDs, it can" r2 after 1
+is "after adopting the writer's transaction, it can" r2 after 1
 is "and it reads the updated version of the row" r2 value updated
 # Resolving that row's combo CID is what the miss hook is for: this backend
 # never created it, so without the hook the lookup would fail an assertion.
 fired "combocid_miss_hook resolves a combo CID this backend lacks" r2 combocid_miss
-is "giving the XIDs back restores ordinary visibility" r2 given_back 0
+is "its next transaction sees with its own eyes again" r2 given_back 0
 
 send_a "ROLLBACK;"
 send_a "\\q"
@@ -580,15 +487,14 @@ wait $A_PID 2>/dev/null
 ###############################################################################
 echo "R4  XactAdoptTransactionState: a reader reads as of the writer's command"
 ###############################################################################
-# What R2 left open.  A writer makes a table and fills another inside a
-# transaction it keeps open, and hands over its state as
-# SerializeTransactionState() writes it for a parallel worker.  A reader that
-# adopts that state before its first snapshot sees the new table's catalog
-# row and the rows, and not the row the writer writes after handing its state
-# over.  With R2's XIDs alone it sees neither: it reads as of its own command,
-# 0.  (The reader reads the new table's catalog row rather than the table,
-# whose lock the writer holds: sharing locks is the extension's, with PG's
-# lock groups.)
+# A writer makes a table and fills another inside a transaction it keeps
+# open, and hands over its state as SerializeTransactionState() writes it for
+# a parallel worker.  A reader that adopts that state before its first
+# snapshot sees the new table's catalog row and the rows, and not the row the
+# writer writes after handing its state over: it reads as of the writer's
+# command, not as of its own, 0.  (The reader reads the new table's catalog
+# row rather than the table, whose lock the writer holds: sharing locks is
+# the extension's, with PG's lock groups.)
 session r4_setup <<'SQL'
 CREATE TABLE r4_rows (a int);
 SQL
@@ -603,8 +509,6 @@ send_w() { printf '%s\n' "$1" >&4; sleep 0.4; }
 send_w "BEGIN;"
 send_w "CREATE TABLE r4_new (a int);"
 send_w "INSERT INTO r4_rows VALUES (1), (2);"
-send_w "\\o $WORK/w.xids"
-send_w "SELECT gp_probe.current_xids();"
 send_w "\\o $WORK/w.state"
 send_w "SELECT gp_probe.transaction_state();"
 send_w "\\o"
@@ -616,23 +520,11 @@ sleep 0.6
 
 wstate=$(tr -d '\n' < "$WORK/w.state" 2>/dev/null)
 wstate2=$(tr -d '\n' < "$WORK/w.state2" 2>/dev/null)
-wxids=$(tr -d '\n' < "$WORK/w.xids" 2>/dev/null)
-[ -n "$wxids" ] || wxids='{}'
 if [ -n "$wstate" ] && [ -n "$wstate2" ]; then
 	ok "the writer serializes its transaction's state"
 else
 	notok "the writer should serialize its transaction's state" "$(tail -5 "$WORK/r4writer.out")"
 fi
-
-session r4_r2only <<SQL
-BEGIN;
-SELECT gp_probe.adopt_xids('$wxids'::xid[]);
-SELECT 'table=' || count(*) FROM pg_class WHERE relname = 'r4_new';
-SELECT 'rows=' || count(*) FROM r4_rows;
-ROLLBACK;
-SQL
-is "with R2's XIDs alone, the writer's new table is not in the catalog" r4_r2only table 0
-is "nor are its rows seen" r4_r2only rows 0
 
 session r4 <<SQL
 BEGIN ISOLATION LEVEL REPEATABLE READ;
@@ -878,95 +770,6 @@ else
 	notok "table_rewrite should fire for the heap table alone" "$(grep table_rewrite "$WORK/o17.out")"
 fi
 is "and a heap table is rewritten as before, asking no method" o17 heap_calls 0
-
-###############################################################################
-echo "O19 the size functions ask the method what its table takes"
-###############################################################################
-session o19 <<'SQL'
-CREATE TABLE o19_t (a int) USING gp_probe_am;
-INSERT INTO o19_t SELECT generate_series(1, 1000);
-CREATE TABLE o19_heap (a int);
-INSERT INTO o19_heap SELECT generate_series(1, 1000);
-VACUUM o19_t, o19_heap;
-SELECT gp_probe.arm_size(123456789);
-SELECT 'rel=' || pg_relation_size('o19_t');
-SELECT 'fsm=' || pg_relation_size('o19_t', 'fsm');
-SELECT 'init=' || pg_relation_size('o19_t', 'init');
-SELECT 'table=' || (pg_table_size('o19_t') - 123456789 = pg_relation_size('o19_t', 'fsm') + pg_relation_size('o19_t', 'vm'))::text;
-SELECT 'total=' || (pg_total_relation_size('o19_t') = pg_table_size('o19_t'))::text;
-SELECT 'heap=' || (pg_relation_size('o19_heap') = 8192 * (SELECT relpages FROM pg_class WHERE relname = 'o19_heap'))::text;
-SELECT gp_probe.arm_size(-1);
-SELECT 'files=' || (pg_relation_size('o19_t') = pg_relation_size('o19_heap'))::text;
-SQL
-is "pg_relation_size reports what the method says of the main fork" o19 rel 123456789
-is "and of a fork it asks for, the method's answer too" o19 fsm 24576
-is "a fork the table does not have takes nothing" o19 init 0
-is "pg_table_size adds up what the method says of all the forks" o19 table true
-is "and pg_total_relation_size builds on it" o19 total true
-is "a heap table's size is its files', as before" o19 heap true
-is "disarmed, the method answers with the files it has" o19 files true
-
-###############################################################################
-echo "O20 UPDATE, DELETE ... RETURNING and MERGE take the method's old row from the plan"
-###############################################################################
-# While armed, gp_probe_am cannot fetch a row by its TID: each statement has
-# to take the old row from the whole-row column the planner adds beside the
-# ctid, which stays the row's identity for the update and the delete.
-session o20 <<'SQL'
-CREATE TABLE o20_t (a int, b text, c int) USING gp_probe_am;
-INSERT INTO o20_t SELECT i, 'r' || i, i FROM generate_series(1, 10) i;
-CREATE TABLE o20_heap (a int, b text, c int);
-INSERT INTO o20_heap SELECT * FROM o20_t;
-SELECT gp_probe.arm_rowfetch_fails(true);
-UPDATE o20_t SET c = c + 100 WHERE a <= 5;
-SELECT 'updated=' || count(*) FROM o20_t WHERE c > 100 AND b = 'r' || a;
-SELECT 'versions=' || count(*) FROM o20_t;
-WITH u AS (UPDATE o20_t SET c = -c WHERE a IN (6, 7) RETURNING a, old.b AS ob, old.c AS oc, new.c AS nc)
-SELECT 'returning=' || string_agg(format('%s:%s>%s', ob, oc, nc), ',' ORDER BY a) FROM u;
-WITH d AS (DELETE FROM o20_t WHERE a = 10 RETURNING b)
-SELECT 'deleted=' || string_agg(b, ',') FROM d;
-MERGE INTO o20_t t USING (VALUES (1, 7), (42, 9)) s(a, c) ON t.a = s.a
-  WHEN MATCHED THEN UPDATE SET c = s.c
-  WHEN NOT MATCHED THEN INSERT VALUES (s.a, 'new', s.c);
-SELECT 'merged=' || string_agg(format('%s:%s:%s', a, b, c), ',' ORDER BY a) FROM o20_t WHERE a IN (1, 42);
-DELETE FROM o20_t WHERE a = 9;
-SELECT 'after=' || count(*) FROM o20_t;
-CREATE TEMP TABLE o20_ids AS SELECT a, ctid AS c FROM o20_t WHERE a IN (3, 4, 8);
-WITH d AS (DELETE FROM o20_t WHERE a = 8 RETURNING a, tableoid AS t, ctid AS c)
-SELECT 'delident=' || string_agg(format('%s:%s', d.t = 'o20_t'::regclass, d.c = i.c), ',') FROM d JOIN o20_ids i USING (a);
-WITH u AS (UPDATE o20_t SET c = c WHERE a = 3 RETURNING a, old.tableoid AS t, old.ctid AS c)
-SELECT 'updident=' || string_agg(format('%s:%s', u.t = 'o20_t'::regclass, u.c = i.c), ',') FROM u JOIN o20_ids i USING (a);
-WITH m AS (MERGE INTO o20_t t USING (VALUES (4)) s(a) ON t.a = s.a WHEN MATCHED THEN DELETE
-           RETURNING t.a, old.tableoid AS t, old.ctid AS c)
-SELECT 'mergeident=' || string_agg(format('%s:%s', m.t = 'o20_t'::regclass, m.c = i.c), ',') FROM m JOIN o20_ids i USING (a);
-SELECT gp_probe.arm_rowfetch_fails(false);
-EXPLAIN (VERBOSE, COSTS OFF) UPDATE o20_t SET c = 0;
-EXPLAIN (VERBOSE, COSTS OFF) UPDATE o20_heap SET c = 0;
-UPDATE o20_heap SET c = c + 100 WHERE a <= 5;
-SELECT 'heap=' || count(*) FROM o20_heap WHERE c > 100;
-SQL
-if grep -q "asked to fetch" "$WORK/o20.out"; then
-	notok "no statement should fetch the method's row by its TID" "$(grep "asked to fetch" "$WORK/o20.out" | head -3)"
-else
-	ok "no statement fetched the method's row by its TID"
-fi
-is "UPDATE builds each new row from the whole row: the columns it does not set are kept" o20 updated 5
-is "and the old versions are gone, the ctid having said which" o20 versions 10
-is "RETURNING old and new reads the old row from the plan" o20 returning "r6:6>-6,r7:7>-7"
-is "DELETE ... RETURNING returns the deleted row from it" o20 deleted r10
-is "MERGE updates a matched row from it, and inserts the others" o20 merged "1:r1:7,42:new:9"
-is "a DELETE without RETURNING needs no old row" o20 after 9
-# ExecForceStoreHeapTuple() sets a row's table and CTID in a heap tuple's
-# slot alone, and gp_probe_am's is a buffer slot: the executor sets them.
-is "DELETE ... RETURNING tableoid, ctid: the row's table and the CTID it had" o20 delident "t:t"
-is "and UPDATE's RETURNING old.tableoid, old.ctid" o20 updident "t:t"
-is "and a MERGE's matched row" o20 mergeident "t:t"
-if grep -q "o20_t\.\*" "$WORK/o20.out" && ! grep -q "o20_heap\.\*" "$WORK/o20.out"; then
-	ok "the plan carries the method's table's whole row beside the ctid, and not a heap table's"
-else
-	notok "the whole-row column belongs to the method's table's plan alone" "$(grep -E 'Output' "$WORK/o20.out" | head -6)"
-fi
-is "a heap table's UPDATE fetches its rows as before" o20 heap 5
 
 ###############################################################################
 echo "O18 BRIN walks the ranges of the method's runs of block numbers, not the gaps between"
@@ -1376,19 +1179,14 @@ after=$("$PSQL" -X -q -t -A -d postgres -c "SELECT to_regclass('o33_b') IS NOT N
 	|| notok "another session should see the transaction after the hook" "after [$after]"
 
 ###############################################################################
-echo "O23 extension marks: pg_checksums passes over what an extension marked, pg_upgrade carries it"
+echo "O23 extension marks: pg_checksums passes over what an extension marked"
 ###############################################################################
-# Last, because it stops the server: pg_checksums reads a stopped cluster.
-# gp_probe marks "_probe" while the postmaster loads it, as gp_sql marks a
-# directory table's "_dirtable"; a directory by that name in a database
-# directory holds files that are no relation's pages.
-if grep -qx '_probe' "$WORK/data/extension_marks" 2>/dev/null; then
-	ok "the postmaster that loaded gp_probe wrote its mark"
-else
-	notok "extension_marks should hold _probe" "$(cat "$WORK/data/extension_marks" 2>&1)"
-fi
-
+# Last, because it stops the server: pg_checksums reads a stopped cluster.  An
+# extension lists "_probe" in the data directory's extension_marks, as gp_core
+# does a directory table's "_dirtable" for gp_sql; a directory by that name in
+# a database directory holds files that are no relation's pages.
 "$BINDIR/pg_ctl" -D "$WORK/data" -m fast -w stop > /dev/null 2>&1
+printf '_probe\n' > "$WORK/data/extension_marks"
 
 o23_marked() {							# o23_marked <datadir>: make one
 	local d="$1/base/5/424242_probe"
@@ -1417,58 +1215,26 @@ else
 	notok "pg_checksums --enable should leave the marked files alone" "$(tail -3 "$WORK/o23_enable.log")"
 fi
 
+# A line that is no mark marks nothing: a fork's name, a suffix without its
+# underscore, one too long.
+printf '_fsm\nprobe\n_%s\n' "$(printf 'x%.0s' $(seq 1 40))" > "$WORK/data/extension_marks"
+if "$BINDIR/pg_checksums" --check -D "$WORK/data" > "$WORK/o23_badmarks.log" 2>&1; then
+	notok "a list of no valid mark should mark nothing" "$(tail -3 "$WORK/o23_badmarks.log")"
+elif grep -q "424242_probe" "$WORK/o23_badmarks.log"; then
+	ok "lines that are no valid mark mark nothing"
+else
+	notok "pg_checksums failed, but not on the marked directory" "$(tail -3 "$WORK/o23_badmarks.log")"
+fi
+
 # Without the list, PostgreSQL 19's pg_checksums, unchanged: it reads the
 # directory's files as a relation's, and stops.
-mv "$WORK/data/extension_marks" "$WORK/extension_marks.aside"
+rm -f "$WORK/data/extension_marks"
 if "$BINDIR/pg_checksums" --check -D "$WORK/data" > "$WORK/o23_nomarks.log" 2>&1; then
 	notok "without the list, pg_checksums should fail on the directory's files" "$(tail -3 "$WORK/o23_nomarks.log")"
 elif grep -q "424242_probe" "$WORK/o23_nomarks.log"; then
 	ok "without the list, pg_checksums fails on them, as PostgreSQL 19's does"
 else
 	notok "pg_checksums failed, but not on the marked directory" "$(tail -3 "$WORK/o23_nomarks.log")"
-fi
-mv "$WORK/extension_marks.aside" "$WORK/data/extension_marks"
-
-# pg_upgrade, in copy and link modes, from a small cluster of its own whose
-# postgres database has a table, and so a map, and a marked directory.
-o23_cluster() {							# o23_cluster <datadir> <port>
-	"$BINDIR/initdb" -D "$1" -N --locale=C --encoding=UTF8 > "$1.initdb.log" 2>&1 || return 1
-	{
-		echo "unix_socket_directories = '$SOCK'"
-		echo "listen_addresses = ''"
-		echo "port = $2"
-		echo "shared_preload_libraries = 'gp_probe'"
-	} >> "$1/postgresql.conf"
-}
-o23_upgrade() {							# o23_upgrade <mode> <new datadir>
-	o23_cluster "$2" $((PORT + 3)) || return 1
-	(cd "$WORK" && "$BINDIR/pg_upgrade" -b "$BINDIR" -B "$BINDIR" \
-		-d "$WORK/o23old" -D "$2" -p $((PORT + 2)) -P $((PORT + 3)) -s "$SOCK" \
-		--"$1" > "$2.upgrade.log" 2>&1)
-}
-
-if o23_cluster "$WORK/o23old" $((PORT + 2)) \
-		&& "$BINDIR/pg_ctl" -D "$WORK/o23old" -l "$WORK/o23old.log" -w -t 60 start > /dev/null 2>&1; then
-	"$PSQL" -X -q -p $((PORT + 2)) -d postgres \
-		-c "CREATE TABLE o23_t (a int)" \
-		-c "INSERT INTO o23_t VALUES (1)" > "$WORK/o23old.sql.log" 2>&1
-	"$BINDIR/pg_ctl" -D "$WORK/o23old" -m fast -w stop > /dev/null 2>&1
-	o23_marked "$WORK/o23old"
-	old_sum=$(o23_sum "$WORK/o23old")
-
-	if o23_upgrade copy "$WORK/o23copy" && [ "$(o23_sum "$WORK/o23copy" 2>/dev/null)" = "$old_sum" ]; then
-		ok "pg_upgrade --copy carries a marked directory, what is under it too"
-	else
-		notok "pg_upgrade --copy should carry the marked directory" "$(tail -5 "$WORK/o23copy.upgrade.log")"
-	fi
-	if o23_upgrade link "$WORK/o23link" && [ "$(o23_sum "$WORK/o23link" 2>/dev/null)" = "$old_sum" ] \
-			&& [ "$WORK/o23link/base/5/424242_probe/1" -ef "$WORK/o23old/base/5/424242_probe/1" ]; then
-		ok "pg_upgrade --link carries it, as links"
-	else
-		notok "pg_upgrade --link should carry the marked directory" "$(tail -5 "$WORK/o23link.upgrade.log")"
-	fi
-else
-	notok "the cluster to upgrade from should start" "$(tail -5 "$WORK/o23old.log" 2>/dev/null)"
 fi
 
 echo

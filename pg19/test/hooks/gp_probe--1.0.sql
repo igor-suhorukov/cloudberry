@@ -29,37 +29,26 @@ CREATE FUNCTION gp_probe.arm_lockmode(rel regclass, mode text) RETURNS void
   AS 'MODULE_PATHNAME', 'gp_probe_arm_lockmode' LANGUAGE C STRICT;
 CREATE FUNCTION gp_probe.arm_parser(on_off boolean) RETURNS void
   AS 'MODULE_PATHNAME', 'gp_probe_arm_parser' LANGUAGE C STRICT;
-CREATE FUNCTION gp_probe.arm_explain(on_off boolean) RETURNS void
-  AS 'MODULE_PATHNAME', 'gp_probe_arm_explain' LANGUAGE C STRICT;
-CREATE FUNCTION gp_probe.arm_mdunlink(on_off boolean) RETURNS void
-  AS 'MODULE_PATHNAME', 'gp_probe_arm_mdunlink' LANGUAGE C STRICT;
 CREATE FUNCTION gp_probe.arm_combocid(on_off boolean) RETURNS void
   AS 'MODULE_PATHNAME', 'gp_probe_arm_combocid' LANGUAGE C STRICT;
 
--- R2: one backend hands its XIDs, and its combo CID mapping, to another.
+-- R2 and R4: one backend hands its transaction, and its combo CID mapping,
+-- to another.
 CREATE FUNCTION gp_probe.published_combocids() RETURNS bigint[]
   AS 'MODULE_PATHNAME', 'gp_probe_published_combocids' LANGUAGE C;
 CREATE FUNCTION gp_probe.load_combocids(triples bigint[]) RETURNS int
   AS 'MODULE_PATHNAME', 'gp_probe_load_combocids' LANGUAGE C STRICT;
 CREATE FUNCTION gp_probe.current_xids() RETURNS xid[]
   AS 'MODULE_PATHNAME', 'gp_probe_current_xids' LANGUAGE C;
-CREATE FUNCTION gp_probe.adopt_xids(xids xid[]) RETURNS void
-  AS 'MODULE_PATHNAME', 'gp_probe_adopt_xids' LANGUAGE C STRICT;
 CREATE FUNCTION gp_probe.transaction_state() RETURNS bytea
   AS 'MODULE_PATHNAME', 'gp_probe_transaction_state' LANGUAGE C;
 
--- O27 and R3.
+-- O27.
 CREATE FUNCTION gp_probe.matview_maintenance(open_it boolean) RETURNS boolean
   AS 'MODULE_PATHNAME', 'gp_probe_matview_maintenance' LANGUAGE C STRICT;
-CREATE FUNCTION gp_probe.matview_depth() RETURNS int
-  AS 'MODULE_PATHNAME', 'gp_probe_matview_depth' LANGUAGE C;
-CREATE FUNCTION gp_probe.matview_restore_depth(depth int) RETURNS int
-  AS 'MODULE_PATHNAME', 'gp_probe_matview_restore_depth' LANGUAGE C STRICT;
--- Opens maintenance mode, fails, and restores the depth from PG_CATCH.
+-- Opens maintenance mode, fails, and closes it again from PG_CATCH.
 CREATE FUNCTION gp_probe.matview_apply_failing() RETURNS void
   AS 'MODULE_PATHNAME', 'gp_probe_matview_apply_failing' LANGUAGE C;
-CREATE FUNCTION gp_probe.syncrep_hold(on_off boolean) RETURNS boolean
-  AS 'MODULE_PATHNAME', 'gp_probe_syncrep_hold' LANGUAGE C STRICT;
 
 -- O13 and the registry's members: a table access method of the probe's own,
 -- heap underneath, with a TableAmExtRoutine registered for it.
@@ -79,12 +68,6 @@ CREATE FUNCTION gp_probe.scan_log() RETURNS text
 -- probe that went through it would say so.
 CREATE FUNCTION gp_probe.arm_fetch_fails(on_off boolean) RETURNS void
   AS 'MODULE_PATHNAME', 'gp_probe_arm_fetch_fails' LANGUAGE C STRICT;
--- O19: what the method says a table's main fork takes; -1 for its files.
-CREATE FUNCTION gp_probe.arm_size(bytes bigint) RETURNS void
-  AS 'MODULE_PATHNAME', 'gp_probe_arm_size' LANGUAGE C STRICT;
--- O20: make the method's fetch of a row by its TID fail.
-CREATE FUNCTION gp_probe.arm_rowfetch_fails(on_off boolean) RETURNS void
-  AS 'MODULE_PATHNAME', 'gp_probe_arm_rowfetch_fails' LANGUAGE C STRICT;
 -- O18: the runs of block numbers a table of the method has, as start and
 -- length pairs.
 CREATE FUNCTION gp_probe.arm_block_sequences(rel regclass, seqs bigint[])

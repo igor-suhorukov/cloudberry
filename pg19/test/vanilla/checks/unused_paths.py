@@ -94,6 +94,24 @@ def introduced_names():
         if m:
             names.add(m.group(1))
     names.discard("")
+    # Macros the series defines in a header, whose expansion tests a name it
+    # introduces: a call of one is as dormant as that test.  A macro that
+    # names none is not learnt, and a statement calling it stays unexplained.
+    body, macro = "", None
+    for line in git("diff", f"{BASE}..{HEAD}", "--", "src/include").splitlines():
+        if not line.startswith("+"):
+            macro = None
+            continue
+        text = line[1:]
+        m = re.match(r"#define\s+(\w+)", text)
+        if m:
+            macro, body = m.group(1), text[m.end():]
+        elif macro:
+            body += text
+        if macro and not text.rstrip().endswith("\\"):
+            if any(re.search(r"\b%s\b" % re.escape(n), body) for n in names):
+                names.add(macro)
+            macro = None
     return names
 
 
@@ -122,7 +140,7 @@ def hunks_of(sha):
 NORM = lambda t: re.sub(r"\s+", "", t)
 UNELSE = lambda t: re.sub(r"^\s*else\s+", "", t)
 
-TYPE_ONLY = re.compile(r"^[A-Za-z_][\w \t]*\*?$")
+TYPE_ONLY = re.compile(r"^[A-Za-z_][\w \t]*\**$")
 FUNC_NAME = re.compile(r"^\w+\(")
 CONTROL = re.compile(r"^\s*(?:\}\s*)?(?:else\s+)?(?:if|while|for)\b")
 COMMENT = re.compile(r"^(/\*|\*|//)")
@@ -210,7 +228,7 @@ def classify(hunk, guard_re, counts, unexplained, sha, fresh=None,
             continue
 
         # Classify a whole statement rather than a line: a condition can name
-        # the hook that gates it on its second line, as R3's does.
+        # the hook that gates it on its second line.
         j, stmt = i, text
         while j + 1 < len(lines) and not complete(stmt):
             j += 1
