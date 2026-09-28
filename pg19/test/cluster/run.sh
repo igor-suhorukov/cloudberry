@@ -743,6 +743,33 @@ EOF
 	out=$(q 0 "SELECT count(*) FROM d WHERE a < 10 AND b <> now()::text;")
 	[ "$out" = "9" ] && ok "and the answer is the same ($out)" || notok "a sent condition's answer" "$out"
 
+	# A nearest-neighbour search: its ORDER BY by a distance and its LIMIT go
+	# with the scan, each segment's GiST index answering its own nearest --
+	# four rows from each, where the whole table came before -- which the
+	# coordinator sorts, taking its four (gp_scan.c's bound_nearest()).  The
+	# distance as a function, point_distance(), is no index's: its sort is
+	# the coordinator's, over every row, and the answer the same.
+	q 0 "CREATE TABLE knn (a int, p point) DISTRIBUTED BY (a);
+	     INSERT INTO knn SELECT g, point(g % 37, g % 41) FROM generate_series(1, 2000) g;
+	     CREATE INDEX knn_gist ON knn USING gist (p); ANALYZE knn;" >/dev/null
+	out=$(q 0 "EXPLAIN (VERBOSE, COSTS OFF) SELECT a FROM knn ORDER BY p <-> point(5, 5), a LIMIT 4;")
+	case "$out" in
+		*"Remote SQL: SELECT a, p FROM ONLY public.knn ORDER BY (p <-> '(5,5)'::point) USING OPERATOR(pg_catalog.<) NULLS LAST, a USING OPERATOR(pg_catalog.<) NULLS LAST LIMIT 4"*)
+			ok "a nearest-neighbour search sends the segments its ORDER BY and its LIMIT" ;;
+		*) notok "a nearest-neighbour search's ORDER BY and LIMIT" "$(printf '%s' "$out" | grep 'Remote SQL')" ;;
+	esac
+	out=$(q 0 "EXPLAIN (ANALYZE, COSTS OFF, TIMING OFF, SUMMARY OFF) SELECT a FROM knn ORDER BY p <-> point(5, 5), a LIMIT 4;" |
+		grep -o 'Gather Motion.*actual rows=[0-9.]*')
+	got=$(q 0 "SELECT string_agg(a::text, ',') FROM (SELECT a FROM knn ORDER BY p <-> point(5, 5), a LIMIT 4) s;")
+	want=$(q 0 "SELECT string_agg(a::text, ',') FROM (SELECT a FROM knn ORDER BY point_distance(p, point(5, 5)), a LIMIT 4) s;")
+	case "$out" in
+		*"actual rows=8.00")
+			[ "$got" = "$want" ] && [ -n "$got" ] \
+				&& ok "each segment sends its four, and the answer is the whole table's ($got)" \
+				|| notok "a nearest-neighbour search's answer" "sent [$got], the coordinator's sort [$want]" ;;
+		*) notok "the rows a nearest-neighbour search's segments send" "$out" ;;
+	esac
+
 	# A segment's rows come a thousand at a time, through the gather's
 	# cursor, and the end of a batch's statement can come in a later read
 	# than its rows: the segment was then taken to have no more, its first

@@ -85,7 +85,10 @@
 #include "catalog/pg_namespace.h"
 #include "catalog/objectaddress.h"
 #include "catalog/pg_am.h"
+#include "catalog/pg_amop.h"
 #include "catalog/pg_class.h"
+#include "catalog/pg_collation.h"
+#include "catalog/pg_operator.h"
 #include "catalog/pg_opfamily.h"
 #include "catalog/pg_proc.h"
 #include "catalog/pg_type.h"
@@ -112,6 +115,7 @@
 #include "utils/acl.h"
 #include "utils/array.h"
 #include "utils/builtins.h"
+#include "utils/catcache.h"
 #include "utils/datum.h"
 #include "utils/lsyscache.h"
 #include "utils/memutils.h"
@@ -3680,8 +3684,174 @@ limit_value(Node *expr, int64 *value)
 	return *value >= 0;
 }
 
+/*
+ * A nearest-neighbour search: a LIMIT above a Sort above a gather, the
+ * Sort's first key a distance -- an operator an index answers nearest first
+ * (pg_amop's AMOP_ORDER, amcanorderbyop's): pgvector's <->, <=> and the
+ * rest, GiST's <->.  The segments are sent the Sort's keys with the LIMIT,
+ * "ORDER BY ... LIMIT n", so that each finds its n nearest itself -- through
+ * its HNSW, IVFFlat or GiST index where it has one -- and sends no more; the
+ * coordinator's Sort orders what they send, and the Limit takes its n, as
+ * Cloudberry's planner puts a Limit and the Sort's keys below its Gather
+ * Motion, over each segment's index scan.  The n nearest of all are among
+ * the n nearest of each segment; an index that answers approximately, as
+ * HNSW's and IVFFlat's do, answers so on each segment, as it does on one
+ * node, with the settings the session gave it there (gp_dispatch.c).
+ *
+ * Only where each key is one a segment computes as the coordinator does: of
+ * the table's own columns, with no function that is not immutable, sorted
+ * by its operator, in its collation and with its NULLs where the Sort puts
+ * them -- each said in the query -- and where the gather drops no row here
+ * and is a table's rows as they are: not locked, not a write's, not a
+ * cursor's position nor kept for a nested loop's runs.  A sort by anything
+ * else is left to the coordinator, as it was: which of the rows that tie
+ * the LIMIT keeps would move.
+ */
+typedef struct ScanColumns
+{
+	List	   *scan_tlist;
+	bool		ok;
+} ScanColumns;
+
+/* The gather's scan tuple's columns in an expression, as the table's. */
+static Node *
+scan_columns(Node *node, ScanColumns *cxt)
+{
+	if (node == NULL)
+		return NULL;
+	if (IsA(node, Var) && ((Var *) node)->varno == INDEX_VAR)
+	{
+		TargetEntry *te = get_tle_by_resno(cxt->scan_tlist,
+										   ((Var *) node)->varattno);
+
+		if (te == NULL)
+		{
+			cxt->ok = false;
+			return node;
+		}
+		return copyObject((Node *) te->expr);
+	}
+	return expression_tree_mutator(node, scan_columns, cxt);
+}
+
+/* Anything but a column of the table's own, of relid? */
+static bool
+not_own_column(Node *node, Index *relid)
+{
+	if (node == NULL)
+		return false;
+	if (IsA(node, Var))
+		return ((Var *) node)->varno != *relid ||
+			((Var *) node)->varlevelsup != 0 || ((Var *) node)->varattno <= 0;
+	if (IsA(node, PlaceHolderVar))
+		return true;
+	return expression_tree_walker(node, not_own_column, relid);
+}
+
+static bool
+is_distance(Node *key)
+{
+	CatCList   *catlist;
+	bool		distance = false;
+
+	if (!IsA(key, OpExpr))
+		return false;
+	catlist = SearchSysCacheList1(AMOPOPID,
+								  ObjectIdGetDatum(((OpExpr *) key)->opno));
+	for (int i = 0; i < catlist->n_members && !distance; i++)
+		distance = ((Form_pg_amop) GETSTRUCT(&catlist->members[i]->tuple))->amoppurpose
+			== AMOP_ORDER;
+	ReleaseSysCacheList(catlist);
+	return distance;
+}
+
+/* A sort operator as ORDER BY ... USING names it, qualified. */
+static char *
+sort_operator_name(Oid opno)
+{
+	HeapTuple	tp = SearchSysCache1(OPEROID, ObjectIdGetDatum(opno));
+	Form_pg_operator op;
+	char	   *name;
+
+	if (!HeapTupleIsValid(tp))
+		elog(ERROR, "cache lookup failed for operator %u", opno);
+	op = (Form_pg_operator) GETSTRUCT(tp);
+	name = psprintf("OPERATOR(%s.%s)",
+					quote_identifier(get_namespace_name(op->oprnamespace)),
+					NameStr(op->oprname));
+	ReleaseSysCache(tp);
+	return name;
+}
+
+static bool
+bound_nearest(List *rtable, Sort *sort, int64 bound)
+{
+	CustomScan *cscan = (CustomScan *) sort->plan.lefttree;
+	Index		relid;
+	List	   *priv;
+	List	   *dpcontext;
+	Oid			reloid;
+	StringInfoData order;
+
+	if (cscan == NULL || !IsA(cscan, CustomScan) ||
+		cscan->methods != &gather_scan_methods ||
+		cscan->scan.plan.qual != NIL || sort->numCols < 1)
+		return false;
+	priv = cscan->custom_private;
+	if (list_length(priv) <= GATHER_PRIVATE_KEYED ||
+		strVal(list_nth(priv, GATHER_PRIVATE_LOCKING))[0] != '\0' ||
+		strVal(list_nth(priv, GATHER_PRIVATE_CURSOR))[0] != '\0' ||
+		intVal(list_nth(priv, GATHER_PRIVATE_CURSOR_PARAM)) != 0 ||
+		boolVal(list_nth(priv, GATHER_PRIVATE_IDENTITY)) ||
+		boolVal(list_nth(priv, GATHER_PRIVATE_KEYED)) ||
+		strVal(list_nth(priv, GATHER_PRIVATE_LIMIT))[0] != '\0')
+		return false;
+
+	relid = cscan->scan.scanrelid;
+	reloid = rt_fetch(relid, rtable)->relid;
+	dpcontext = deparse_context_for(get_rel_name(reloid), reloid);
+	initStringInfo(&order);
+	for (int i = 0; i < sort->numCols; i++)
+	{
+		TargetEntry *te = get_tle_by_resno(sort->plan.targetlist,
+										   sort->sortColIdx[i]);
+		TargetEntry *below;
+		ScanColumns cxt = {.scan_tlist = cscan->custom_scan_tlist, .ok = true};
+		Node	   *key;
+		Oid			collation = sort->collations[i];
+
+		/* the Sort's column, as the gather computes it */
+		if (te == NULL || !IsA(te->expr, Var) ||
+			((Var *) te->expr)->varno != OUTER_VAR)
+			return false;
+		below = get_tle_by_resno(cscan->scan.plan.targetlist,
+								 ((Var *) te->expr)->varattno);
+		if (below == NULL)
+			return false;
+		key = scan_columns((Node *) below->expr, &cxt);
+		if (!cxt.ok || (i == 0 && !is_distance(key)) ||
+			not_own_column(key, &relid) || contain_mutable_functions(key) ||
+			!is_shippable((Expr *) key, relid))
+			return false;
+
+		/* deparse_context_for() knows this relation as range table entry 1 */
+		ChangeVarNodes(key, relid, 1, 0);
+		appendStringInfo(&order, "%s%s", i == 0 ? " ORDER BY " : ", ",
+						 deparse_expression(key, dpcontext, false, true));
+		if (OidIsValid(collation) && collation != DEFAULT_COLLATION_OID)
+			appendStringInfo(&order, " COLLATE %s",
+							 generate_collation_name(collation));
+		appendStringInfo(&order, " USING %s NULLS %s",
+						 sort_operator_name(sort->sortOperators[i]),
+						 sort->nullsFirst[i] ? "FIRST" : "LAST");
+	}
+	appendStringInfo(&order, " LIMIT " INT64_FORMAT, bound);
+	list_nth_cell(priv, GATHER_PRIVATE_LIMIT)->ptr_value = makeString(order.data);
+	return true;
+}
+
 static void
-bound_gathers(Plan *plan, int64 bound)
+bound_gathers(List *rtable, Plan *plan, int64 bound)
 {
 	if (plan == NULL)
 		return;
@@ -3700,23 +3870,29 @@ bound_gathers(Plan *plan, int64 bound)
 					limit_value(limit->limitCount, &count) &&
 					limit_value(limit->limitOffset, &offset) &&
 					count <= PG_INT64_MAX - offset)
-					bound_gathers(plan->lefttree, count + offset);
+				{
+					if (IsA(plan->lefttree, Sort) &&
+						bound_nearest(rtable, (Sort *) plan->lefttree,
+									  count + offset))
+						return;
+					bound_gathers(rtable, plan->lefttree, count + offset);
+				}
 				else
-					bound_gathers(plan->lefttree, -1);
+					bound_gathers(rtable, plan->lefttree, -1);
 				return;
 			}
 		case T_Result:
 			/* a projection, or a condition on no row in particular */
-			bound_gathers(plan->lefttree, plan->qual == NIL ? bound : -1);
+			bound_gathers(rtable, plan->lefttree, plan->qual == NIL ? bound : -1);
 			return;
 		case T_SubqueryScan:
-			bound_gathers(((SubqueryScan *) plan)->subplan,
+			bound_gathers(rtable, ((SubqueryScan *) plan)->subplan,
 						  plan->qual == NIL ? bound : -1);
 			return;
 		case T_Append:
 			/* UNION ALL: no branch needs to give more than the whole */
 			foreach_ptr(Plan, child, ((Append *) plan)->appendplans)
-				bound_gathers(child, plan->qual == NIL ? bound : -1);
+				bound_gathers(rtable, child, plan->qual == NIL ? bound : -1);
 			return;
 		case T_CustomScan:
 			{
@@ -3732,34 +3908,34 @@ bound_gathers(Plan *plan, int64 bound)
 					return;
 				}
 				foreach_ptr(Plan, child, cscan->custom_plans)
-					bound_gathers(child, -1);
+					bound_gathers(rtable, child, -1);
 				break;
 			}
 		case T_MergeAppend:
 			foreach_ptr(Plan, child, ((MergeAppend *) plan)->mergeplans)
-				bound_gathers(child, -1);
+				bound_gathers(rtable, child, -1);
 			break;
 		case T_BitmapAnd:
 			foreach_ptr(Plan, child, ((BitmapAnd *) plan)->bitmapplans)
-				bound_gathers(child, -1);
+				bound_gathers(rtable, child, -1);
 			break;
 		case T_BitmapOr:
 			foreach_ptr(Plan, child, ((BitmapOr *) plan)->bitmapplans)
-				bound_gathers(child, -1);
+				bound_gathers(rtable, child, -1);
 			break;
 		default:
 			break;
 	}
-	bound_gathers(plan->lefttree, -1);
-	bound_gathers(plan->righttree, -1);
+	bound_gathers(rtable, plan->lefttree, -1);
+	bound_gathers(rtable, plan->righttree, -1);
 }
 
 void
 GpScanBoundGathers(PlannedStmt *stmt)
 {
-	bound_gathers(stmt->planTree, -1);
+	bound_gathers(stmt->rtable, stmt->planTree, -1);
 	foreach_ptr(Plan, sub, stmt->subplans)
-		bound_gathers(sub, -1);
+		bound_gathers(stmt->rtable, sub, -1);
 }
 
 /*
