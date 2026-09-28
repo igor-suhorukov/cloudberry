@@ -225,7 +225,7 @@ fill(Relation matviewRel)
 	Oid			save_userid;
 	int			save_sec_context;
 	int			save_nestlevel;
-	int			save_depth;
+	volatile bool opened = false;
 	char	   *sql;
 	uint64		processed;
 
@@ -245,16 +245,18 @@ fill(Relation matviewRel)
 											  RelationGetRelationName(matviewRel)),
 				   pg_get_querydef(view_query(matviewRel), false));
 
-	save_depth = MatViewIncrementalMaintenanceDepthExternal();
 	PG_TRY();
 	{
 		OpenMatViewIncrementalMaintenanceExternal();
+		opened = true;
 		processed = run_statement(sql);
 		CloseMatViewIncrementalMaintenanceExternal();
+		opened = false;
 	}
 	PG_CATCH();
 	{
-		RestoreMatViewIncrementalMaintenanceDepthExternal(save_depth);
+		if (opened)
+			CloseMatViewIncrementalMaintenanceExternal();
 		PG_RE_THROW();
 	}
 	PG_END_TRY();
@@ -394,7 +396,7 @@ run_as_owner(Relation rel, const char *sql, int expected, bool maintenance)
 {
 	Oid			save_userid;
 	int			save_sec_context;
-	int			save_depth = MatViewIncrementalMaintenanceDepthExternal();
+	volatile bool opened = false;
 
 	GetUserIdAndSecContext(&save_userid, &save_sec_context);
 	SetUserIdAndSecContext(rel->rd_rel->relowner,
@@ -402,7 +404,10 @@ run_as_owner(Relation rel, const char *sql, int expected, bool maintenance)
 	PG_TRY();
 	{
 		if (maintenance)
+		{
 			OpenMatViewIncrementalMaintenanceExternal();
+			opened = true;
+		}
 		if (SPI_connect() != SPI_OK_CONNECT)
 			elog(ERROR, "SPI_connect failed");
 		if (SPI_execute(sql, false, 0) != expected)
@@ -410,11 +415,15 @@ run_as_owner(Relation rel, const char *sql, int expected, bool maintenance)
 				 RelationGetRelationName(rel), sql);
 		SPI_finish();
 		if (maintenance)
+		{
 			CloseMatViewIncrementalMaintenanceExternal();
+			opened = false;
+		}
 	}
 	PG_CATCH();
 	{
-		RestoreMatViewIncrementalMaintenanceDepthExternal(save_depth);
+		if (opened)
+			CloseMatViewIncrementalMaintenanceExternal();
 		SetUserIdAndSecContext(save_userid, save_sec_context);
 		PG_RE_THROW();
 	}
@@ -461,7 +470,7 @@ merge_changed_rows(Relation rel, const char *view, const char *staging)
 	Oid		   *used = palloc0_array(Oid, desc->natts);
 	Oid			save_userid;
 	int			save_sec_context;
-	int			save_depth = MatViewIncrementalMaintenanceDepthExternal();
+	volatile bool opened = false;
 
 	/* the columns of every unique index a row can be matched by */
 	initStringInfo(&match);
@@ -527,6 +536,7 @@ merge_changed_rows(Relation rel, const char *view, const char *staging)
 							   SPI_getvalue(SPI_tuptable->vals[0], SPI_tuptable->tupdesc, 1))));
 
 		OpenMatViewIncrementalMaintenanceExternal();
+		opened = true;
 		if (SPI_execute(psprintf("DELETE FROM %s mv WHERE NOT EXISTS"
 								 " (SELECT 1 FROM %s newdata WHERE %s)",
 								 view, staging, match.data),
@@ -538,11 +548,13 @@ merge_changed_rows(Relation rel, const char *view, const char *staging)
 			elog(ERROR, "could not refresh materialized view \"%s\" concurrently",
 				 RelationGetRelationName(rel));
 		CloseMatViewIncrementalMaintenanceExternal();
+		opened = false;
 		SPI_finish();
 	}
 	PG_FINALLY();
 	{
-		RestoreMatViewIncrementalMaintenanceDepthExternal(save_depth);
+		if (opened)
+			CloseMatViewIncrementalMaintenanceExternal();
 		SetUserIdAndSecContext(save_userid, save_sec_context);
 	}
 	PG_END_TRY();

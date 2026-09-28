@@ -1207,7 +1207,7 @@ gp_ivm_apply(PG_FUNCTION_ARGS)
 	bool		replace = PG_GETARG_BOOL(1);
 	Relation	rel;
 	GpIvmOwnerState owner;
-	int			save_depth;
+	volatile bool opened = false;
 
 	check_caller(SQL_APPLY);
 
@@ -1217,18 +1217,20 @@ gp_ivm_apply(PG_FUNCTION_ARGS)
 	if (staged_view != matviewOid)
 		forget_staged();
 
-	save_depth = MatViewIncrementalMaintenanceDepthExternal();
 	PG_TRY();
 	{
 		GpIvmAsOwnerBegin(matviewOid, &owner);
 		OpenMatViewIncrementalMaintenanceExternal();
+		opened = true;
 		GpIvmApplyStaged(rel, staged_old, staged_new, replace);
 		CloseMatViewIncrementalMaintenanceExternal();
+		opened = false;
 		GpIvmAsOwnerEnd(&owner);
 	}
 	PG_CATCH();
 	{
-		RestoreMatViewIncrementalMaintenanceDepthExternal(save_depth);
+		if (opened)
+			CloseMatViewIncrementalMaintenanceExternal();
 		PG_RE_THROW();
 	}
 	PG_END_TRY();

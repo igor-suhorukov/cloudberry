@@ -293,7 +293,7 @@ gp_ivm_immediate_maintenance(PG_FUNCTION_ARGS)
 	Oid			matviewOid;
 	IvmEntry   *entry;
 	bool		is_last;
-	int			save_depth;
+	volatile bool opened = false;
 	IvmSite		site = GpIvmSite();
 	GpIvmOwnerState owner;
 
@@ -320,17 +320,16 @@ gp_ivm_immediate_maintenance(PG_FUNCTION_ARGS)
 	UpdateActiveSnapshotCommandId();
 
 	/*
-	 * Writing to a materialized view needs maintenance mode.  Remember the
-	 * depth and put it back on error: closing from the PG_CATCH would be
-	 * wrong if the error came before the open, and nothing lowers the depth
-	 * when the transaction aborts.
+	 * Writing to a materialized view needs maintenance mode.  Close it again
+	 * on error, where it was opened -- not where the error came before the
+	 * open: nothing lowers the depth when the transaction aborts.
 	 */
-	save_depth = MatViewIncrementalMaintenanceDepthExternal();
 
 	PG_TRY();
 	{
 		GpIvmAsOwnerBegin(matviewOid, &owner);
 		OpenMatViewIncrementalMaintenanceExternal();
+		opened = true;
 
 		/*
 		 * A delta if this view's shape allows one, and the whole view
@@ -346,11 +345,13 @@ gp_ivm_immediate_maintenance(PG_FUNCTION_ARGS)
 		}
 
 		CloseMatViewIncrementalMaintenanceExternal();
+		opened = false;
 		GpIvmAsOwnerEnd(&owner);
 	}
 	PG_CATCH();
 	{
-		RestoreMatViewIncrementalMaintenanceDepthExternal(save_depth);
+		if (opened)
+			CloseMatViewIncrementalMaintenanceExternal();
 		PG_RE_THROW();
 	}
 	PG_END_TRY();
@@ -364,17 +365,20 @@ gp_ivm_immediate_maintenance(PG_FUNCTION_ARGS)
 void
 GpIvmRefresh(Oid matviewOid)
 {
-	int			save_depth = MatViewIncrementalMaintenanceDepthExternal();
+	volatile bool opened = false;
 
 	PG_TRY();
 	{
 		OpenMatViewIncrementalMaintenanceExternal();
+		opened = true;
 		gp_ivm_apply(matviewOid);
 		CloseMatViewIncrementalMaintenanceExternal();
+		opened = false;
 	}
 	PG_CATCH();
 	{
-		RestoreMatViewIncrementalMaintenanceDepthExternal(save_depth);
+		if (opened)
+			CloseMatViewIncrementalMaintenanceExternal();
 		PG_RE_THROW();
 	}
 	PG_END_TRY();
