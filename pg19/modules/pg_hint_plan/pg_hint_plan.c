@@ -29,6 +29,12 @@
  *	   distributed table with the gather that reads its segments, and every
  *	   other path reads the coordinator's empty copy.
  *
+ *	 * ORCA's plan_hint_hook is given the hint state this module's planner
+ *	   hook made of the query it has ORCA plan, where Cloudberry's hook finds
+ *	   the hints again: with the hint table on, that is a query, which ORCA,
+ *	   planning the other, cannot plan too, and ORCA failed every statement
+ *	   (plan_with_hints(), external_plan_hint_hook()).
+ *
  *-------------------------------------------------------------------------
  */
 #include <string.h>
@@ -278,6 +284,14 @@ static HintState *hstate = NULL;
  * sometimes harmful hint string retrieval.
  */
 static bool current_hint_retrieved = false;
+
+/*
+ * The hint state pg_hint_plan_planner() made of the query it has the planner
+ * below it plan, NULL where the query has none, and whether it is planning
+ * one: ORCA asks for it as it plans (external_plan_hint_hook()).
+ */
+static HintState *planner_hstate = NULL;
+static int	planner_depth = 0;
 
 /* common data for all hints. */
 struct Hint
@@ -3159,6 +3173,36 @@ planned_by_orca(PlannedStmt *plannedstmt)
 }
 
 /*
+ * The planner below this one, planning a query whose hint state is given --
+ * NULL where it has none -- which ORCA asks for as it plans
+ * (external_plan_hint_hook()).
+ */
+static PlannedStmt *
+plan_with_hints(HintState *state, Query *parse, const char *query_string,
+				int cursorOptions, ParamListInfo boundParams, ExplainState *es)
+{
+	HintState  *save_hstate = planner_hstate;
+	PlannedStmt *result;
+
+	planner_hstate = state;
+	planner_depth++;
+	PG_TRY();
+	{
+		if (prev_planner)
+			result = (*prev_planner) (parse, query_string, cursorOptions, boundParams, es);
+		else
+			result = standard_planner(parse, query_string, cursorOptions, boundParams, es);
+	}
+	PG_FINALLY();
+	{
+		planner_depth--;
+		planner_hstate = save_hstate;
+	}
+	PG_END_TRY();
+	return result;
+}
+
+/*
  * Read and set up hint information
  */
 static PlannedStmt *
@@ -3280,10 +3324,8 @@ pg_hint_plan_planner(Query *parse, const char *query_string,
 			msgqno = qno;
 		}
 
-		if (prev_planner)
-			result = (*prev_planner) (parse, query_string, cursorOptions, boundParams, es);
-		else
-			result = standard_planner(parse, query_string, cursorOptions, boundParams, es);
+		result = plan_with_hints(hstate, parse, query_string, cursorOptions,
+								 boundParams, es);
 
 		current_hint_str = prev_hint_str;
 		recurse_level--;
@@ -3342,10 +3384,8 @@ standard_planner_proc:
 		msgqno = qno;
 	}
 	current_hint_state = NULL;
-	if (prev_planner)
-		result =  (*prev_planner) (parse, query_string, cursorOptions, boundParams, es);
-	else
-		result = standard_planner(parse, query_string, cursorOptions, boundParams, es);
+	result = plan_with_hints(NULL, parse, query_string, cursorOptions,
+							 boundParams, es);
 
 	/* The upper-level planner still needs the current hint state */
 	if (HintStateStack != NIL)
@@ -5348,16 +5388,48 @@ void plpgsql_query_erase_callback(ResourceReleasePhase phase,
 static void *
 external_plan_hint_hook(Query *parse)
 {
+	bool		save_enable_hint_table = pg_hint_plan_enable_hint_table;
+
 	if (parse == NULL)
 		return NULL;
 
-	current_hint_retrieved = false;
-	get_current_hint_string(NULL, parse);
+	/*
+	 * ORCA planning the query pg_hint_plan_planner() has it plan: that
+	 * planner's hint state of it, found already.  The hints are not found
+	 * again here: the hint table's lookup is a query, which ORCA, planning
+	 * this one, cannot plan too -- a second optimization inside the first
+	 * fails both.
+	 */
+	if (planner_depth > 0)
+	{
+		if (planner_hstate)
+			planner_hstate->log_level = debug_level;
+		return planner_hstate;
+	}
 
+	/*
+	 * ORCA's planner hook outside this module's: the hint string the
+	 * statement's analysis found -- the hint table's too -- or, where it was
+	 * not analyzed, its comment's, never a lookup of the table.
+	 */
+	if (!current_hint_retrieved)
+	{
+		pg_hint_plan_enable_hint_table = false;
+		PG_TRY();
+		{
+			get_current_hint_string(NULL, parse);
+		}
+		PG_FINALLY();
+		{
+			pg_hint_plan_enable_hint_table = save_enable_hint_table;
+		}
+		PG_END_TRY();
+	}
 	if (!current_hint_str)
 		return NULL;
 
-	if(hstate)
+	hstate = create_hintstate(parse, pstrdup(current_hint_str));
+	if (hstate)
 		hstate->log_level = debug_level;
 	return hstate;
 }

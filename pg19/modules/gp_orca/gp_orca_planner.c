@@ -108,6 +108,14 @@ typedef struct GpOrcaCounters
 
 static GpOrcaCounters *counters = NULL;
 static planner_hook_type prev_planner_hook = NULL;
+
+/*
+ * Whether ORCA is planning a query in this backend.  A query planned while
+ * it does -- one a callback of its planning runs, as pg_hint_plan's lookup of
+ * its hint table did -- is PostgreSQL's planner's: ORCA's worker is the
+ * backend's one, and an optimization inside another fails them both.
+ */
+static int	orca_depth = 0;
 static explain_per_plan_hook_type prev_explain_per_plan_hook = NULL;
 static explain_node_label_hook_type prev_explain_node_label_hook = NULL;
 
@@ -302,7 +310,9 @@ gp_orca_planner(Query *parse, const char *query_string, int cursorOptions,
 	if (core != NULL && core->version_minor >= 8 && core->prepare_query != NULL)
 		core->prepare_query(parse);
 
-	if (orca_should_try(parse, cursorOptions, &reason))
+	if (orca_depth > 0)
+		reason = GP_FALLBACK_nested;
+	else if (orca_should_try(parse, cursorOptions, &reason))
 	{
 		/*
 		 * What orcaopt.h says the port decides for itself: no vectorised
@@ -311,8 +321,17 @@ gp_orca_planner(Query *parse, const char *query_string, int cursorOptions,
 		 */
 		OptimizerOptions options = {false, false};
 
-		result = optimize_query(parse, cursorOptions, boundParams, &options,
-								&failure);
+		orca_depth++;
+		PG_TRY();
+		{
+			result = optimize_query(parse, cursorOptions, boundParams, &options,
+									&failure);
+		}
+		PG_FINALLY();
+		{
+			orca_depth--;
+		}
+		PG_END_TRY();
 		if (result == NULL)
 			reason = failure.unexpected ? GP_FALLBACK_error
 				: GP_FALLBACK_declined;

@@ -5400,6 +5400,91 @@ if [ "$started" -eq 1 ]; then
 	q 0 "DROP TABLE ph, pa, pc, pp, pd;" >/dev/null
 fi
 
+###############################################################################
+echo "23. pg_hint_plan's hint table, on the cluster and on one node"
+###############################################################################
+# pg_hint_plan's hints from its table, hint_plan.hints, found by a
+# statement's text with its constants made '?' and by the application's
+# name, under pg_hint_plan.enable_hint_table: the table is replicated, as a
+# table an extension's script makes is, and read through a gather.  ORCA is
+# given the hint state the module's planner hook made of the query, where
+# Cloudberry's plan_hint_hook finds the hints again -- a lookup of the table,
+# which ORCA, planning one query, cannot plan too, and which failed every
+# statement ORCA planned while the setting was on (pg_hint_plan.c).
+if [ "$started" -eq 1 ]; then
+	# gp_ao and pax as well, whose records the nodes' WAL has (22.)
+	hint_started=1
+	for n in 1 2 0; do
+		start_node "$n" "shared_preload_libraries = '$PRELOAD,gp_orca,gp_ao,pax,pg_hint_plan'" \
+			"gp.cluster_secret = '$SECRET'" || hint_started=0
+	done
+	out=$(printf '%s\n' "SET client_min_messages = warning;" \
+		"CREATE EXTENSION IF NOT EXISTS gp_orca;" "CREATE EXTENSION pg_hint_plan;" \
+		"CREATE TABLE ht (id int PRIMARY KEY, val int) DISTRIBUTED BY (id);" \
+		"INSERT INTO ht SELECT i, i % 100 FROM generate_series(1, 10000) i;" "ANALYZE ht;" \
+		"INSERT INTO hint_plan.hints (norm_query_string, application_name, hints) VALUES
+			('EXPLAIN (COSTS false) SELECT count(*) FROM ht a JOIN ht b ON a.id = b.val WHERE a.id < ?;', '', 'MergeJoin(a b)'),
+			('EXPLAIN (COSTS false) SELECT count(*) FROM ht a JOIN ht b ON a.id = b.val WHERE a.id < ?;', 'hintapp', 'NestLoop(a b)'),
+			('EXPLAIN (COSTS false) SELECT * FROM ht WHERE ht.id = ?;', '', 'SeqScan(ht)');" \
+		"SELECT policytype FROM gp_distribution_policy WHERE localoid = 'hint_plan.hints'::regclass;" \
+		"SELECT count(*) FROM gp_dist_random('hint_plan.hints');" | qf 0 | tr '\n' ' ')
+	[ "$hint_started" -eq 1 ] && [ "$out" = "r 6 " ] \
+		&& ok "pg_hint_plan's hint table is replicated, as a table an extension's script makes is, its rows on each segment" \
+		|| notok "pg_hint_plan's hint table on the cluster" "$out"
+
+	# the join the coordinator makes of two gathers, under the planner
+	hint_join() {
+		printf '%s\n' "SET gp.optimizer = off;" "SET pg_hint_plan.enable_hint_table = on;" "$@" \
+			"EXPLAIN (COSTS false) SELECT count(*) FROM ht a JOIN ht b ON a.id = b.val WHERE a.id < 10;" |
+			qf 0 | grep -o 'Hash Join\|Merge Join\|Nested Loop' | head -1
+	}
+	out="$(hint_join)|$(hint_join "SET application_name = 'hintapp';")|$(hint_join "SET pg_hint_plan.enable_hint_table = off;")"
+	[ "$out" = "Merge Join|Nested Loop|Hash Join" ] \
+		&& ok "under the planner the table's hint joins the coordinator's gathers, the application's own row before the one of any; none with the setting off" \
+		|| notok "the hint table under the planner" "$out"
+
+	errors=$(q 0 "SELECT count FROM gp_orca.fallbacks() WHERE reason = 'error';")
+	out=$(printf '%s\n' "SET gp.optimizer = on;" "SET pg_hint_plan.enable_hint_table = on;" \
+		"EXPLAIN (COSTS false) SELECT * FROM ht WHERE ht.id = 1;" \
+		"SET pg_hint_plan.enable_hint_table = off;" \
+		"EXPLAIN (COSTS false) SELECT * FROM ht WHERE ht.id = 1;" | qf 0 |
+		grep -o 'Seq Scan on ht\|Index Scan using ht_pkey on ht\|Optimizer: .*' | tr '\n' '|')
+	errors2=$(q 0 "SELECT count FROM gp_orca.fallbacks() WHERE reason = 'error';")
+	[ "$out" = "Seq Scan on ht|Optimizer: GPORCA|Index Scan using ht_pkey on ht|Optimizer: GPORCA|" ] &&
+		[ "$errors" = "$errors2" ] \
+		&& ok "under ORCA the table's hint is ORCA's -- a scan it would not choose -- and ORCA plans it, nothing raised" \
+		|| notok "the hint table under ORCA" "$out / ORCA's errors $errors -> $errors2"
+
+	# and one node, whose own table has its own rows
+	for n in 0 1 2; do
+		"$BINDIR/pg_ctl" -D "$(datadir "$n")" -m fast stop >/dev/null 2>&1
+	done
+	d="$(datadir 0)"
+	{
+		echo "shared_preload_libraries = '$PRELOAD,gp_orca,gp_ao,pax,pg_hint_plan'"
+		echo "unix_socket_directories = '$(sockdir 0)'"
+		echo "listen_addresses = ''"
+		echo "port = $(port 0)"
+	} > "$d/postgresql.auto.conf"
+	if "$BINDIR/pg_ctl" -D "$d" -l "$ROOT/node0.log" -w -t 30 start >/dev/null 2>&1; then
+		out=$(printf '%s\n' "SET client_min_messages = warning;" \
+			"CREATE TABLE sht (id int PRIMARY KEY, val int);" \
+			"INSERT INTO sht SELECT i, i % 100 FROM generate_series(1, 10000) i;" "ANALYZE sht;" \
+			"INSERT INTO hint_plan.hints (norm_query_string, application_name, hints) VALUES ('EXPLAIN (COSTS false) SELECT * FROM sht WHERE sht.id = ?;', '', 'SeqScan(sht)');" \
+			"SET pg_hint_plan.enable_hint_table = on;" \
+			"SET gp.optimizer = off;" "EXPLAIN (COSTS false) SELECT * FROM sht WHERE sht.id = 1;" \
+			"SET gp.optimizer = on;" "EXPLAIN (COSTS false) SELECT * FROM sht WHERE sht.id = 1;" \
+			"SET pg_hint_plan.enable_hint_table = off;" \
+			"EXPLAIN (COSTS false) SELECT * FROM sht WHERE sht.id = 1;" | qf 0 |
+			grep -o 'Seq Scan on sht\|Index Scan using sht_pkey on sht\|Optimizer: .*' | tr '\n' '|')
+		[ "$out" = "Seq Scan on sht|Optimizer: Postgres query optimizer|Seq Scan on sht|Optimizer: GPORCA|Index Scan using sht_pkey on sht|Optimizer: GPORCA|" ] \
+			&& ok "on one node the table's hint is the planner's and ORCA's alike, and neither's with the setting off" \
+			|| notok "the hint table on one node" "$out"
+	else
+		notok "one node with pg_hint_plan starts" "$(tail -5 "$ROOT/node0.log")"
+	fi
+fi
+
 echo
 echo "  $pass passed, $fail failed"
 [ "$fail" -eq 0 ]

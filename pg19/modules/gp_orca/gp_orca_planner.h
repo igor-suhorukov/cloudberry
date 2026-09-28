@@ -44,7 +44,8 @@
 	X(cursor_option,  "a cursor ORCA does not plan") \
 	X(utility,        "not a query ORCA plans") \
 	X(declined,       "ORCA looked and would not plan it") \
-	X(error,          "ORCA raised while planning")
+	X(error,          "ORCA raised while planning") \
+	X(nested,         "a query planned while ORCA plans another")
 
 typedef enum GpFallbackReason
 {

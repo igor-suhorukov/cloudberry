@@ -364,7 +364,12 @@ of the core series, O13 to O21, O23 and O32:
   reach both planners -- ORCA's through gp_orca's `plan_hint_hook` -- with
   PostgreSQL 19's join search copied for it (`core.c`, made by
   `gen_core.py`) and the enable_* settings a hint sets copied into each
-  relation's `pgs_mask`; a session LOADs it, as Cloudberry's tests do;
+  relation's `pgs_mask`; a session LOADs it, as Cloudberry's tests do; its
+  hint table, `hint_plan.hints` under `pg_hint_plan.enable_hint_table`,
+  replicated on a cluster, whose hints reach ORCA as the planner hook found
+  them -- Cloudberry's ORCA finds them again, a query of the table, which
+  failed ORCA's planning of every statement -- and a query planned while
+  ORCA plans another the planner's;
 - tablespaces, every node's: each node's directory of a tablespace is the
   one of its dbid under the location, as Cloudberry's is, which PostgreSQL
   asks `gp_core` for through O32 -- as a node runs CREATE TABLESPACE, and as
