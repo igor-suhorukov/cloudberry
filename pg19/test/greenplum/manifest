@@ -382,6 +382,7 @@ run  workfile/sort_spill
 run  workfile/spilltodisk
 skip zlib  canceling statement due to user request
 run  workfile_limits
+port resource_budget
 skip segspace  differs: the faults exec_hashjoin_new_batch and workfile_write_failure are at injection points only an image built with docker/patches/test-workfile-points.patch has, so the statements they stop run through here -- the SELECT prints its 750000 rows -- and on the planner's route the joins and sorts are the coordinator's, where a fault set on seg0 is never reached; under ORCA an UPDATE of the empty foo from a shared CTE waits past the suite's minute, the senders of its Broadcast Motion held by the slice that ended without reading them; function cleanupallgangs() does not exist
 skip query_finish_pending  differs: gp_inject_fault's report of a finish_pending fault
 run  gpdiffcheck
