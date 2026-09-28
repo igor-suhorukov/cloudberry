@@ -1969,6 +1969,23 @@ is "a writable one's DISTRIBUTED BY is its policy, as a table's is" \
 is "and the reject limit and the error log are among its clauses" \
    "SELECT gp_sql.desugar('CREATE EXTERNAL TABLE e (a int) LOCATION (''file://h/f'') FORMAT ''TEXT'' LOG ERRORS SEGMENT REJECT LIMIT 10 ROWS')
       LIKE '%:defname reject_limit :arg 10 %:defname log_errors :arg \"t\" %';" "t"
+# A temporary one is the foreign table in the session's temporary schema,
+# which PostgreSQL makes temporary as it makes any relation named there.
+is "a temporary external table is the foreign table in pg_temp" \
+   "SELECT gp_sql.desugar('CREATE EXTERNAL WEB TEMP TABLE e (a int) EXECUTE ''echo 1'' ON COORDINATOR FORMAT ''TEXT''')
+      LIKE 'CREATE FOREIGN TABLE pg_temp.e (a int) SERVER gp_exttable_server OPTIONS (%';" "t"
+is "LOCAL TEMPORARY too, and one named in pg_temp keeps its name" \
+   "SELECT gp_sql.desugar('CREATE EXTERNAL LOCAL TEMPORARY TABLE pg_temp.e (a int) LOCATION (''file://h/f'') FORMAT ''TEXT''')
+      LIKE 'CREATE FOREIGN TABLE pg_temp.e (a int) SERVER %';" "t"
+out=$(q "SELECT gp_sql.desugar('CREATE EXTERNAL GLOBAL TEMP TABLE e (a int) LOCATION (''file://h/f'') FORMAT ''TEXT''')
+           LIKE 'CREATE FOREIGN TABLE pg_temp.e (a int) SERVER %';")
+case "$out" in
+	"WARNING:  GLOBAL is deprecated in temporary table creation"*t) ok "GLOBAL TEMP, with PostgreSQL's warning" ;;
+	*) notok "GLOBAL TEMP, with PostgreSQL's warning" "$out" ;;
+esac
+at "and one in another schema is refused, as a temporary table is" \
+   "CREATE EXTERNAL TEMP TABLE public.e (a int) LOCATION ('file://h/f') FORMAT 'TEXT'" \
+   "cannot create temporary relation in non-temporary schema" "public"
 is "DROP and ALTER EXTERNAL TABLE are the foreign table's" \
    "SELECT gp_sql.desugar('DROP EXTERNAL WEB TABLE IF EXISTS e') || ' / ' ||
            gp_sql.desugar('ALTER EXTERNAL TABLE e OWNER TO r');" \

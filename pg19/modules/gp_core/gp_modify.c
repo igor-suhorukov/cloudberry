@@ -1533,8 +1533,8 @@ gp_modify_planner_routed(Query *parse, const char *query_string, int cursorOptio
 
 	/*
 	 * A correlated scalar subquery of an aggregate, whose every run would
-	 * gather a distributed table again, made a join (gp_subselect.c), as
-	 * Cloudberry's planner makes one.
+	 * gather a distributed table again, made a join, and a NOT IN an
+	 * anti-join (gp_subselect.c), as Cloudberry's planner makes them.
 	 */
 	GpSubselectDecorrelate(parse);
 

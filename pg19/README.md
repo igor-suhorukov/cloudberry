@@ -147,7 +147,12 @@ On a cluster (M2), `gp_core` and `gp_orca`:
   Cloudberry's squelch runs it, and a Sequence that prints its producers
   first; and
   PostgreSQL's own plans gathering from the
-  segments where ORCA does not plan, writing a distributed table through an
+  segments where ORCA does not plan, a NOT IN of a distributed table made
+  an anti-join with its NULLs conditions beside it
+  (`modules/gp_core/gp_subselect.c`), a nested loop's inner gather keyed
+  by the join's equality where hash joins are off -- gathered once, each
+  outer row given the rows of its key (`modules/gp_core/gp_scan.c`),
+  writing a distributed table through an
   Explicit Redistribute Motion — each row changed on its segment by its ctid
   there, a row whose key changes moved by a Split that fires no trigger,
   RETURNING (old and new too) and a view's WITH CHECK OPTION and a table's
@@ -355,8 +360,10 @@ of the core series, O13 to O21, O23 and O32:
   -- `file://`, `EXECUTE`, `gpfdist://` and `http://` through libcurl, a
   protocol's own functions, text, CSV and a formatter's custom format,
   writable tables, single-row error handling and its error logs -- read on
-  the segments, or on the one node; Cloudberry's protocols and
-  `CREATEEXTTABLE`; and `COPY ... LOG ERRORS SEGMENT REJECT LIMIT`;
+  the segments, or on the one node; a temporary one (`CREATE EXTERNAL TEMP
+  TABLE`), the foreign table in the session's `pg_temp`; Cloudberry's
+  protocols and `CREATEEXTTABLE`; and `COPY ... LOG ERRORS SEGMENT REJECT
+  LIMIT`;
 - `gpfdist`, Cloudberry's file server, built as a program of the port's;
 - `diskquota`: Cloudberry's diskquota 2.3, as its library `diskquota-2.3`
   -- a launcher, and a worker for each database that has the extension,
