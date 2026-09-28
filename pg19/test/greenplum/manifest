@@ -539,7 +539,7 @@ skip gangsize  differs: the gangs its statements are dispatched to, by Cloudberr
 run  gang_reuse
 run  run_utility_gpexpand_phase1
 run  create_extension_fail
-run  offload_entry_to_qe
+skip offload_entry_to_qe  differs, one run in a few: its join of tst with itself, ORDER BY t1.y alone, gives the three rows of y = 1 in the order the planner's route merges them on the coordinator, which is the order its two segments' gathers answer in, where Cloudberry's plan orders its segments' streams -- the rest, its temporary external table and every other statement, answers as Cloudberry's
 port ivm_cluster
 run  ivm
 run  aqumv  planner  it turns optimizer off itself, so both passes would plan it alike, and ORCA's pass, on the planner's pass's clusters, would read the rows the planner's wrote into its external table's demoprot file on each segment too
