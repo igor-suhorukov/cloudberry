@@ -520,7 +520,7 @@ is "and the view keeps up with its base table" two src \
    "INSERT INTO base VALUES (1000, 1); SELECT n, s FROM imv WHERE b = 1" "21|1970"
 out=$(q two src "SELECT 'gp_dynamic_table_refresh_' || 'dt'::regclass::oid")
 out2=$(q two postgres "SELECT jobname || ' ' || command FROM gp_task.job WHERE jobname LIKE 'gp_dynamic%'")
-[ "$out2" = "$out REFRESH MATERIALIZED VIEW public.dt" ] && ok "the dynamic table's job is made again, under its new OID" \
+[ "$out2" = "$out REFRESH DYNAMIC TABLE public.dt" ] && ok "the dynamic table's job is made again, under its new OID" \
 	|| notok "the dynamic table's job" "$out / $out2"
 old=$(q one src "SELECT gp_sql.directory_table_location('docs'::regclass)")
 new=$(q two src "SELECT gp_sql.directory_table_location('docs'::regclass)")
