@@ -207,6 +207,25 @@ local_oid_init(void *ptr, void *arg)
 }
 
 /*
+ * Is the OID a row's of the catalog: any row, dead or alive, committed or
+ * not, as GetNewOidWithIndex() looks for one?
+ */
+static bool
+oid_taken(Relation relation, Oid indexId, AttrNumber oidcolumn, Oid oid)
+{
+	ScanKeyData key;
+	SysScanDesc scan;
+	bool		used;
+
+	ScanKeyInit(&key, oidcolumn, BTEqualStrategyNumber, F_OIDEQ,
+				ObjectIdGetDatum(oid));
+	scan = systable_beginscan(relation, indexId, true, SnapshotAny, 1, &key);
+	used = HeapTupleIsValid(systable_getnext(scan));
+	systable_endscan(scan);
+	return used;
+}
+
+/*
  * An OID for a catalog row a segment makes for itself: a session's temporary
  * namespace, which each backend makes when it first needs one, or anything
  * made on the segment outside a dispatched statement.
@@ -237,9 +256,6 @@ local_oid(Relation relation, Oid indexId, AttrNumber oidcolumn)
 	for (;;)
 	{
 		Oid			oid = pg_atomic_fetch_sub_u32(local_oid_next, 1);
-		ScanKeyData key;
-		SysScanDesc scan;
-		bool		used;
 
 		/* two billion of them made on this node since it started: again */
 		if (oid < LOCAL_OID_BOTTOM)
@@ -247,18 +263,38 @@ local_oid(Relation relation, Oid indexId, AttrNumber oidcolumn)
 			pg_atomic_write_u32(local_oid_next, LOCAL_OID_TOP);
 			continue;
 		}
-
-		ScanKeyInit(&key, oidcolumn, BTEqualStrategyNumber, F_OIDEQ,
-					ObjectIdGetDatum(oid));
-		scan = systable_beginscan(relation, indexId, true, SnapshotAny, 1,
-								  &key);
-		used = HeapTupleIsValid(systable_getnext(scan));
-		systable_endscan(scan);
-		if (!used)
+		if (!oid_taken(relation, indexId, oidcolumn, oid))
 			return oid;
 
 		CHECK_FOR_INTERRUPTS();
 	}
+}
+
+/*
+ * Cloudberry's fault bump_oid, in its GetNewObjectId() (varsup.c): skipped,
+ * it moves the OID the counter gives past a signed int's, the counter left
+ * where it is, so that a test makes an object of an OID that large without
+ * taking two billion first -- once, as a fault set to skip fires once.  Here
+ * where the coordinator gives a catalog row its OID, which the segments are
+ * handed; one node, which installs no hook of this file's, has none.  One
+ * the catalog has already is passed over, as GetNewOidWithIndex() passes one
+ * over.  InvalidOid where the fault does not fire.
+ */
+static Oid
+bumped_oid(Relation relation, Oid indexId, AttrNumber oidcolumn)
+{
+	Oid			oid;
+
+	if (GP_FAULT("bump_oid") != GP_FAULT_SKIP)
+		return InvalidOid;
+	do
+	{
+		CHECK_FOR_INTERRUPTS();
+		oid = GetNewObjectId();
+		if (oid <= PG_INT32_MAX)
+			oid = PG_INT32_MAX + oid % (PG_UINT32_MAX - PG_INT32_MAX) + 1;
+	} while (oid_taken(relation, indexId, oidcolumn, oid));
+	return oid;
 }
 
 /*
@@ -293,7 +329,9 @@ new_oid(Relation relation, Oid indexId, AttrNumber oidcolumn)
 		new_oid_hook = prev_new_oid_hook;
 		PG_TRY();
 		{
-			oid = GetNewOidWithIndex(relation, indexId, oidcolumn);
+			oid = bumped_oid(relation, indexId, oidcolumn);
+			if (!OidIsValid(oid))
+				oid = GetNewOidWithIndex(relation, indexId, oidcolumn);
 		}
 		PG_FINALLY();
 		{
@@ -359,12 +397,15 @@ new_oid(Relation relation, Oid indexId, AttrNumber oidcolumn)
 	}
 
 	/*
-	 * A row a segment makes for itself.  pg_upgrade gives the OIDs it cares
+	 * A row a segment makes for itself, or the coordinator outside a
+	 * statement the segments are sent.  pg_upgrade gives the OIDs it cares
 	 * about itself, and leaves the rest to the counter.
 	 */
-	if (GpClusterContentId() >= 0 && !IsBinaryUpgrade)
+	if (IsBinaryUpgrade)
+		return InvalidOid;
+	if (GpClusterContentId() >= 0)
 		return local_oid(relation, indexId, oidcolumn);
-	return InvalidOid;
+	return bumped_oid(relation, indexId, oidcolumn);
 }
 
 /*

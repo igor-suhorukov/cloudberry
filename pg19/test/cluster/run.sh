@@ -4147,6 +4147,22 @@ SQL
 		&& ok "a handler on a segment is given the user's credentials, read on the coordinator" \
 		|| notok "credentials on a segment" "$out / $out2"
 
+	# Cloudberry's fault bump_oid, which its tests set on the coordinator to
+	# make an object whose OID is past a signed int's: the next OID a catalog
+	# row is given moved there, once, the counter left where it was -- and the
+	# segments' object is given the same (gp_ddl.c).
+	q 0 "SELECT gp_inject_fault('bump_oid', 'skip', 1);" >/dev/null
+	q 0 "CREATE TABLE bump_big (a int) DISTRIBUTED BY (a);" >/dev/null
+	q 0 "SELECT gp_inject_fault('bump_oid', 'reset', 1);" >/dev/null
+	q 0 "CREATE TABLE bump_small (a int) DISTRIBUTED BY (a);" >/dev/null
+	out=$(q 0 "SELECT string_agg((oid::bigint > x'7FFFFFFF'::bigint)::text, ' ' ORDER BY relname)
+	             FROM pg_class WHERE relname IN ('bump_big', 'bump_small');")
+	out2=$(q 0 "SELECT count(*) FROM gp_dist_random('pg_class') WHERE relname = 'bump_big' AND oid = 'bump_big'::regclass;")
+	out3=$(q 0 "INSERT INTO bump_big SELECT generate_series(1, 10); SELECT count(*) FROM bump_big;")
+	[ "$out|$out2|$out3" = "true false|2|10" ] \
+		&& ok "bump_oid gives the next table an OID past a signed int's, on every node, once" \
+		|| notok "the fault bump_oid" "$out / $out2 / $out3"
+
 	###########################################################################
 	echo "14. the global deadlock detector"
 	###########################################################################
