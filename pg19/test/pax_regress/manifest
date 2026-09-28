@@ -240,7 +240,7 @@ skip matrix  function sum(smallint[]) does not exist; function sum(integer[]) do
 run  sublink
 run  olap_setup
 skip complex  type "complex" does not exist; relation "complex_ttbl" does not exist
-skip distributed_transactions  unrecognized configuration parameter "debug_abort_after_distributed_prepared"; unrecognized configuration parameter "debug_dtm_action_segment"
+run  distributed_transactions
 group ns
 run  namespace_gp
 group g1
@@ -281,7 +281,7 @@ run  external_table_union_all
 run  external_table_persistent_error_log
 skip column_compression  relation "gp_partition_template" does not exist; column "i" referenced in more than one COLUMN ENCODING clause
 skip alter_table_aocs  type "gp_fastsequence" does not exist
-skip alter_table_aocs2  unrecognized configuration parameter "gp_recursive_cte"; function descendants_of(unknown) does not exist
+run  alter_table_aocs2
 run  alter_distribution_policy
 run  alter_table_ao
 run  aocs
@@ -386,8 +386,8 @@ run  disable_autovacuum
 skip python_processed64bit  differs: the fault executor_run_high_processed, which has the executor count past 2^32 rows, is none of the port's
 run  enable_autovacuum
 skip log_guc  relation "gp_toolkit.__gp_log_master_ext" does not exist; relation "gp_toolkit.__gp_log_segment_ext" does not exist
-skip instr_in_shmem_setup  gp_enable_query_metrics is none of the port's settings: gpconfig refuses it, and instr_in_shmem and instr_in_shmem_verify, which it sets up for, fail without it
-skip instr_in_shmem  unrecognized configuration parameter "gp_enable_query_metrics"; unrecognized configuration parameter "gp_instrument_shmem_size"
+run  instr_in_shmem_setup
+run  instr_in_shmem
 skip createdb  function force_mirrors_to_catch_up() does not exist
 run  gp_aggregates_costs
 run  variadic_parameters
@@ -415,7 +415,7 @@ skip table_functions  type anytable does not exist; OUT and INOUT arguments aren
 run  opclass_ddl
 run  information_schema
 run  guc_env_var
-skip gp_explain  unrecognized configuration parameter "gp_enable_explain_allstat"; unrecognized EXPLAIN option "slicetable"
+run  gp_explain  planner  under ORCA, EXPLAIN (ANALYZE, WAL) of a DELETE of a PAX table prints no WAL line, where a heap table's prints one
 skip explain_format  differs: EXPLAIN in each of its formats prints the port's plans, which this test compares
 run  olap_plans
 run  gp_copy_dtx
@@ -466,15 +466,15 @@ skip index_constraint_naming_upgrade  differs: PostgreSQL 19 keeps NOT NULL cons
 run  rle
 skip rle_delta  differs: \d+ of a column-oriented table prints no Compression Type, Compression Level or Block Size column
 skip dsp  compresstype "zlib" can't be used with compresslevel 0; compresslevel=7 is out of range for rle_type (should be in the range 1 to 6)
-skip not_out_of_shmem_exit_slots  unrecognized configuration parameter "debug_dtm_action_segment"; unrecognized configuration parameter "debug_dtm_action_target"
+run  not_out_of_shmem_exit_slots
 skip create_am_gp  function ao_row_tableam_handler(internal) does not exist; function ao_column_tableam_handler(internal) does not exist
-skip gp_runtime_filter  unrecognized configuration parameter "gp_enable_runtime_filter"; unrecognized configuration parameter "gp_enable_runtime_filter_pushdown"
+run  gp_runtime_filter
 run  eagerfree
 skip alter_table_set  syntax error at or near "on"; unrecognized configuration parameter "gp_enable_segment_copy_checking"
 skip alter_table_gp  differs: Cloudberry refuses to alter a column of a primary key, a unique constraint or the distribution key ("cannot alter column with primary key or unique constraint"), which the port alters
 run  subtransaction_visibility
 skip oid_consistency  differs: \d of an append-optimized table prints no Compression Type, Level, Block Size or Checksum
-skip udf_exception_blocks  unrecognized configuration parameter "debug_dtm_action_segment"; unrecognized configuration parameter "debug_dtm_action_target"
+run  udf_exception_blocks
 run  ic
 skip partition_locking  differs: the locks a statement takes on a partitioned table's parts, and on which nodes
 skip vacuum_gp  relation "gp_toolkit.__gp_log_master_ext" does not exist
@@ -501,7 +501,7 @@ run  rpt_tpch
 skip bfv_planner  differs: two counts of what its plans read are 27 and 9, where Cloudberry's are 33 and 11
 run  bfv_legacy
 skip bfv_temp  syntax error at or near ")"; relation "n" does not exist
-skip gp_recursive_cte  unrecognized configuration parameter "gp_recursive_cte"
+run  gp_recursive_cte
 run  qp_dropped_cols
 run  qp_misc_rio_join_small
 group m7b
