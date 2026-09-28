@@ -366,6 +366,12 @@ is "and rows one inserts are not reached, the old ones each updated once" \
 is "a TID scan fetches each row it names, with the query's snapshot" \
    "SELECT count(*) || ' ' || sum(a) FROM fr WHERE ctid = ANY (ARRAY(SELECT ctid FROM fr WHERE a % 7 = 0));" \
    "2857 28578571"
+is "an UPDATE of 200,000 rows, each checked against the ones it deleted already" \
+   "CREATE TABLE fq (a int, b int) USING ao_row;
+    INSERT INTO fq SELECT i, i FROM generate_series(1, 200000) i;
+    SET statement_timeout = '20s';
+    UPDATE fq SET b = b + 1 FROM (VALUES (1), (1), (199999)) v(x) WHERE fq.a <= 200000 AND (v.x = 1 OR fq.a = v.x);
+    SELECT count(*) || ' ' || sum(b) FROM fq;" "200000 20000300000"
 is "an AFTER INSERT trigger's rows, 5000 of a COPY, each fetched before the insert ends" \
    "TRUNCATE trg_t, trg_log; COPY trg_t FROM PROGRAM 'seq 1 5000';
     SELECT count(*) || ' ' || sum(a) FROM trg_log;" "5000 12502500"

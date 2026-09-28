@@ -65,6 +65,7 @@
 #include "executor/tuptable.h"
 #include "miscadmin.h"
 #include "storage/lmgr.h"
+#include "utils/hsearch.h"
 #include "utils/memutils.h"
 #include "utils/rel.h"
 #include "utils/relcache.h"
@@ -112,7 +113,19 @@ struct AoInsertState
 	int			nfiles;			/* the first's: how many the group may have */
 };
 
-/* A statement's deletions from one table, one list a segment file. */
+/*
+ * A statement's deletions from one table: each segment file's row numbers,
+ * in the order they came, written to the visibility map as the statement
+ * ends; and, to say at once whether a row is one of them -- each deletion
+ * asks, an UPDATE of a million rows a million times -- a bitmap of each
+ * range of AO_VISIMAP_ROWS row numbers that has any, as the map has one.
+ */
+typedef struct AoDeleteRange
+{
+	int64		key;			/* segno << 40 | the range's first row / ROWS */
+	uint8		bits[AO_VISIMAP_BYTES];
+} AoDeleteRange;
+
 typedef struct AoDeleteState
 {
 	Oid			relid;
@@ -122,6 +135,8 @@ typedef struct AoDeleteState
 	int			n[AO_MAX_SEGNO + 1];
 	int			max[AO_MAX_SEGNO + 1];
 	int64	   *rownums[AO_MAX_SEGNO + 1];
+	HTAB	   *ranges;			/* AoDeleteRange, by key; NULL before any */
+	AoDeleteRange *last;		/* the range last looked in */
 } AoDeleteState;
 
 static MemoryContext ao_dml_cxt = NULL;
@@ -800,13 +815,45 @@ ao_find_delete(Oid relid, bool create)
 	return ds;
 }
 
+/* The range of ds's bitmaps rownum of segno is in, made if asked; or NULL. */
+static AoDeleteRange *
+ao_delete_range(AoDeleteState *ds, int segno, int64 rownum, bool create)
+{
+	int64		key = ((int64) segno << 40) | (rownum / AO_VISIMAP_ROWS);
+	AoDeleteRange *range;
+	bool		found;
+
+	if (ds->last != NULL && ds->last->key == key)
+		return ds->last;
+	if (ds->ranges == NULL)
+	{
+		HASHCTL		ctl;
+
+		if (!create)
+			return NULL;
+		ctl.keysize = sizeof(int64);
+		ctl.entrysize = sizeof(AoDeleteRange);
+		ctl.hcxt = ao_dml_context();
+		ds->ranges = hash_create("gp_ao deletions", 16, &ctl,
+								 HASH_ELEM | HASH_BLOBS | HASH_CONTEXT);
+	}
+	range = hash_search(ds->ranges, &key, create ? HASH_ENTER : HASH_FIND,
+						&found);
+	if (range == NULL)
+		return NULL;
+	if (!found)
+		memset(range->bits, 0, sizeof(range->bits));
+	ds->last = range;
+	return range;
+}
+
 static bool
 ao_delete_state_has(AoDeleteState *ds, int segno, int64 rownum)
 {
-	for (int i = ds->n[segno] - 1; i >= 0; i--)
-		if (ds->rownums[segno][i] == rownum)
-			return true;
-	return false;
+	AoDeleteRange *range = ao_delete_range(ds, segno, rownum, false);
+	int64		bit = rownum % AO_VISIMAP_ROWS;
+
+	return range != NULL && (range->bits[bit / 8] & (1 << (bit % 8))) != 0;
 }
 
 /*
@@ -853,7 +900,10 @@ bool
 ao_delete_row(Relation rel, ItemPointer tid)
 {
 	AoDeleteState *ds;
+	AoDeleteRange *range;
 	int			segno = AoTidSegno(tid);
+	int64		rownum = AoTidRownum(tid);
+	int64		bit = rownum % AO_VISIMAP_ROWS;
 	MemoryContext old;
 
 	if (segno < 1 || segno > AO_MAX_SEGNO)
@@ -876,7 +926,7 @@ ao_delete_row(Relation rel, ItemPointer tid)
 	{
 		Snapshot	snapshot = RegisterSnapshot(GetLatestSnapshot());
 		AoVisimap  *vm = ao_visimap_load(ao_storage_id(rel), segno, snapshot);
-		bool		deleted = ao_visimap_is_deleted(vm, AoTidRownum(tid));
+		bool		deleted = ao_visimap_is_deleted(vm, rownum);
 
 		UnregisterSnapshot(snapshot);
 		if (deleted)
@@ -894,7 +944,9 @@ ao_delete_row(Relation rel, ItemPointer tid)
 			repalloc_array(ds->rownums[segno], int64, ds->max[segno]) :
 			palloc_array(int64, ds->max[segno]);
 	}
-	ds->rownums[segno][ds->n[segno]++] = AoTidRownum(tid);
+	ds->rownums[segno][ds->n[segno]++] = rownum;
+	range = ao_delete_range(ds, segno, rownum, true);
+	range->bits[bit / 8] |= 1 << (bit % 8);
 	MemoryContextSwitchTo(old);
 	return true;
 }
@@ -934,6 +986,14 @@ ao_finish_delete(AoDeleteState *ds)
 			ao_segfile_update(ds->storage_id, sf);
 		}
 	}
+
+	/* no longer listed, and read no more */
+	if (ds->ranges != NULL)
+		hash_destroy(ds->ranges);
+	for (int segno = 1; segno <= AO_MAX_SEGNO; segno++)
+		if (ds->rownums[segno] != NULL)
+			pfree(ds->rownums[segno]);
+	pfree(ds);
 }
 
 /* ------------------------------------------------------------------------- */
