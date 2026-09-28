@@ -92,6 +92,7 @@
 #include "fmgr.h"
 #include "funcapi.h"
 #include "libpq-fe.h"
+#include "libpq/auth.h"
 #include "libpq/libpq-be.h"
 #include "libpq/libpq-be-fe-helpers.h"
 #include "mb/pg_wchar.h"
@@ -100,6 +101,7 @@
 #include "parser/parser.h"
 #include "parser/scanner.h"
 #include "postmaster/postmaster.h"
+#include "replication/walsender.h"
 #include "storage/ipc.h"
 #include "storage/latch.h"
 #include "storage/lmgr.h"
@@ -125,8 +127,10 @@
 #include "gp_dispatch.h"
 #include "gp_dtm_debug.h"
 #include "gp_dtx.h"
+#include "gp_endpoint.h"
 #include "gp_fault.h"
 #include "gp_fts.h"
+#include "gp_gdd.h"
 #include "gp_grammar_int.h"
 #include "gp_ic.h"
 #include "gp_label.h"
@@ -589,6 +593,9 @@ typedef struct GpGang
 static GpGang *gang = NULL;
 static bool exit_callback_registered = false;
 
+/* A gang closed with the session's part: see session_reset_if_lost(). */
+static bool session_lost = false;
+
 /*
  * The database and the user the gang last connected as: who prepared a part,
  * and who may finish it, which is asked after the commit, where no catalog
@@ -677,6 +684,7 @@ static List *active_streams = NIL;
 #define MAX_READERS_PER_SEGMENT	GP_MAX_READERS_PER_SEGMENT
 
 static void gang_close(void);
+static void session_reset_if_lost(void);
 static void gang_drain_keeping(List **errors);
 static void forget_kept_errors(void);
 static void gang_build_wes(GpGang *g);
@@ -732,6 +740,8 @@ gang_close(void)
 	if (gang == NULL)
 		return;
 
+	/* but for GpDispatchResetGang()'s, the session's part went with it */
+	session_lost = true;
 	GANG_LOG(GANG_LOG_TERSE, "gang of %d segments closed%s", gang->nconns,
 			 gang_in_xact ? ", with a transaction open on it" : "");
 	GpDtmDebugGangClosed();
@@ -774,7 +784,40 @@ gang_close(void)
 void
 GpDispatchResetGang(void)
 {
+	bool		lost = session_lost;
+
 	gang_close();
+	session_lost = lost;
+}
+
+/*
+ * A gang that closed but for GpDispatchResetGang(), which a caller asks for
+ * -- a connection of it broke, FTS failed over from a primary of it, it was
+ * let go of to retry a second phase -- took the session's part on the
+ * segments with it: the session takes a new id, as Cloudberry's takes one
+ * once its writer gang is lost (resetSessionForPrimaryGangLoss() and
+ * GpDropTempTables(), cdbgang.c, before the next command is read), and says
+ * so in its words.  What is left of the old one on the segments is then
+ * none of the new one's -- a retrieve session bound to it, a backend still
+ * ending.  Taken before the next gang is made, and as a statement begins
+ * outside a transaction block; never with a gang, whose processes the old
+ * id names, as Cloudberry's asserts.
+ */
+static void
+session_reset_if_lost(void)
+{
+	int			old;
+
+	if (!session_lost || gang != NULL)
+		return;
+	session_lost = false;
+	old = GpClusterNewSessionId();
+	if (old == GpClusterSessionId())
+		return;
+	GpGddNoteSession();
+	ereport(LOG,
+			(errmsg("The previous session was reset because its gang was disconnected (session id = %d). The new session id = %d",
+					old, GpClusterSessionId())));
 }
 
 int
@@ -839,6 +882,8 @@ gang_release_for_retry(void)
 void
 GpDispatchDropLostTempTables(void)
 {
+	if (!IsTransactionBlock())
+		session_reset_if_lost();
 	if (!temp_tables_lost || temp_tables_dropped || !IsTransactionState())
 		return;
 	/* as DISCARD TEMP drops them; again, should the transaction roll back */
@@ -868,7 +913,7 @@ qe_identity_option(int content)
 	 * (gp_expand.c) -- so the connection is where it goes.
 	 */
 	char	   *option = psprintf("-c gp.qe_identity=seg%d/dbid%d/sess%d/nseg%d",
-									content, GpClusterDbid(), MyProcPid,
+									content, GpClusterDbid(), GpClusterSessionId(),
 									GpClusterSegmentCount());
 
 	/* And the secret, which says it is this coordinator; see gp_cluster.c. */
@@ -927,6 +972,9 @@ gang_connect(void)
 	const char *username;
 
 	Assert(gang == NULL);
+
+	/* the session a lost gang took with it, a new one before this is made */
+	session_reset_if_lost();
 
 	/* The primaries FTS last published: a gang is made to them. */
 	(void) GpClusterRefresh();
@@ -6242,6 +6290,94 @@ check_internal_sslmode(char **newval, void **extra, GucSource source)
 			return true;
 	GUC_check_errdetail("Valid values are \"disable\", \"allow\", \"prefer\", \"require\", \"verify-ca\", \"verify-full\" and \"\", libpq's default.");
 	return false;
+}
+
+/* ------------------------------------------------------------------------- */
+/* A connection's start                                                      */
+/* ------------------------------------------------------------------------- */
+
+static ClientAuthentication_hook_type prev_client_auth = NULL;
+
+/*
+ * A setting a connection's startup packet gives -- "-c name=value" in its
+ * options, "--name=value", or a parameter of its own -- as it came, before
+ * InitPostgres() makes it the setting.  NULL if none.
+ */
+static char *
+startup_option(Port *port, const char *name)
+{
+	size_t		namelen = strlen(name);
+	ListCell   *lc;
+
+	if (port->cmdline_options != NULL)
+	{
+		char	  **av = palloc0_array(char *, 2 + (strlen(port->cmdline_options) + 1) / 2);
+		int			ac = 0;
+
+		pg_split_opts(av, &ac, port->cmdline_options);
+		for (int i = 0; i < ac; i++)
+		{
+			const char *setting = NULL;
+
+			if (strcmp(av[i], "-c") == 0 && i + 1 < ac)
+				setting = av[++i];
+			else if (strncmp(av[i], "-c", 2) == 0 || strncmp(av[i], "--", 2) == 0)
+				setting = av[i] + 2;
+			if (setting != NULL && strncmp(setting, name, namelen) == 0 &&
+				setting[namelen] == '=')
+				return pstrdup(setting + namelen + 1);
+		}
+	}
+	for (lc = list_head(port->guc_options); lc != NULL; lc = lnext(port->guc_options, lc))
+	{
+		const char *option = lfirst(lc);
+
+		lc = lnext(port->guc_options, lc);
+		if (lc == NULL)
+			break;
+		if (strcmp(option, name) == 0)
+			return pstrdup(lfirst(lc));
+	}
+	return NULL;
+}
+
+/*
+ * Every connection passes here once it is authenticated, on every node, but
+ * a WAL sender's.  A client of the coordinator -- no retrieve session, no
+ * connection of its own node's loopback -- takes its session id now
+ * (GpClusterSessionId()), before a client that connects after it could take
+ * one, and says it for pg_stat_activity (GpGddNoteSession()).  The startup
+ * packet's options are not the settings yet, and are read as they came.
+ */
+static void
+dispatch_client_auth(Port *port, int status)
+{
+	char	   *identity;
+
+	if (prev_client_auth)
+		prev_client_auth(port, status);
+	if (status != STATUS_OK || am_walsender)
+		return;
+
+	identity = startup_option(port, "gp.qe_identity");
+	if (identity == NULL && GpClusterBackendRole() == GP_ROLE_DISPATCH &&
+		!GpEndpointIsRetrieveSession())
+	{
+		(void) GpClusterSessionId();
+		GpGddNoteSession();
+	}
+}
+
+/*
+ * A connection's start, from gp_core's _PG_init, after the other modules'
+ * authentication hooks, whose work it follows: a retrieve session is one
+ * once gp_endpoint.c's has seen it.
+ */
+void
+GpDispatchConnectionInit(void)
+{
+	prev_client_auth = ClientAuthentication_hook;
+	ClientAuthentication_hook = dispatch_client_auth;
 }
 
 void

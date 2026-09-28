@@ -111,6 +111,16 @@ On a cluster (M2), `gp_core` and `gp_orca`:
 - the nodes, read from a file (`gp.cluster_config`); the dispatcher, an
   ordinary libpq client authenticated with SCRAM, whose statements run in the
   coordinator's transaction, savepoints included;
+- each session's id, `gp.session_id`, a number of the coordinator's counter
+  taken as the client connects, as Cloudberry's gp_session_id is -- clients
+  that connect one after another have ids one after another, which a
+  replicated table's parallel retrieve cursor picks its segment by -- and a
+  new one once the gang the session had its part on is lost, as Cloudberry's
+  session takes one (resetSessionForPrimaryGangLoss()): what is left of the
+  old one on the segments, a retrieve session bound to it among them, is no
+  part of the new one's.  On one node a backend's id is its process ID, as
+  it was: nothing there says which session another backend works for but
+  its process;
 - DDL on every node with the coordinator's OIDs (R1), and a segment's own
   catalog rows, its temporary namespaces, with OIDs from the top of the OID
   space, which the coordinator's counter does not reach; distribution policies

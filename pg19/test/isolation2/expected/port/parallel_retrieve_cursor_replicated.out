@@ -1,11 +1,9 @@
 -- The port's own: a parallel retrieve cursor of a replicated table, whose
 -- one endpoint is on the segment the session's id picks, as Cloudberry picks
 -- it -- gp_session_id modulo the table's segments -- and sorts there.
--- Cloudberry's replicated_table finds, among six sessions, the one whose
--- gp_session_id modulo 3 is 1, which its session counter always gives, and
--- the port's session ids, the coordinator backends' process ids, may not;
--- this is its test with one session, the endpoint read through
--- gp_retrieve_rows (bin/), wherever it is.
+-- Cloudberry's replicated_table, which needs each content's mirror, runs in
+-- mirrors2; this is its test in the retrieve group, with one session, the
+-- endpoint read through gp_retrieve_rows (bin/), wherever it is.
 CREATE TABLE prc_rt (a int) DISTRIBUTED REPLICATED;
 CREATE
 INSERT INTO prc_rt SELECT generate_series(1, 100);

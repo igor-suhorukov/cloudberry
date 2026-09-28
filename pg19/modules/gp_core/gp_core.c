@@ -379,6 +379,14 @@ _PG_init(void)
 	GpParallelInit();
 
 	/*
+	 * A connection's start (gp_dispatch.c): the session id a coordinator's
+	 * client takes as it connects.  After gp_endpoint.c's and gp_fts.c's
+	 * authentication hooks, whose work it follows: a retrieve session is one
+	 * by then.
+	 */
+	GpDispatchConnectionInit();
+
+	/*
 	 * Deliberately no MarkGUCPrefixReserved("gp") here.  It drops every
 	 * "gp.*" placeholder that is not defined yet, with a warning, and the
 	 * modules that load on demand define their own "gp.*" settings long after

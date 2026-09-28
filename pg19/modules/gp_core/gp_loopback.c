@@ -262,7 +262,7 @@ loopback_conn(const GpSegmentConfig *node, const char *dbname, bool trusted)
 	if (trusted)
 	{
 		options = psprintf("-c gp.qe_identity=seg-1/dbid%d/sess%d",
-						   GpClusterDbid(), MyProcPid);
+						   GpClusterDbid(), GpClusterSessionId());
 		if (GpClusterHasSecret())
 			options = psprintf("%s -c gp.qe_secret=%s", options, GpClusterSecret());
 	}

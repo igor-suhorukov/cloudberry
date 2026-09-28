@@ -255,6 +255,22 @@ if [ "$started" -eq 1 ]; then
 2" ] && ok "the connections are the session's, and there are two of them" \
 		|| notok "the gang's connections" "$out"
 
+	# The session id is the coordinator's number of the session, taken as the
+	# client connects, as Cloudberry's gp_session_id is: three sessions opened
+	# one after another have ids each past the last -- the next, but for a
+	# process of the server's that dispatched in between -- and what a
+	# session's backend on a segment says it works for is its session's.
+	out=$(for i in 1 2 3; do q 0 "SELECT current_setting('gp.session_id')"; done | tr '\n' ' ')
+	read -r s1 s2 s3 <<< "$out"
+	if isnum "$s1" && isnum "$s2" && isnum "$s3" && [ "$s2" -gt "$s1" ] && [ "$s3" -gt "$s2" ]; then
+		ok "the sessions' ids are the coordinator's counter's, each past the last ($out)"
+	else
+		notok "the session ids of three sessions" "$out"
+	fi
+	out=$(q 0 "SELECT DISTINCT result::int = current_setting('gp.session_id')::int FROM gp.exec_on_segments('SELECT current_setting(''gp.session_id'')');")
+	[ "$out" = "t" ] && ok "and a segment's backend of a session works for it" \
+		|| notok "gp.session_id on a segment" "$out"
+
 	# Every node reads the same file, so a segment knows where the other
 	# segments are -- and would dispatch to them, and to itself, if nothing
 	# said otherwise.  Only the coordinator dispatches.
@@ -4782,9 +4798,9 @@ t" ] && ok "a message's trailing whitespace off, and gp_log_command_timings" \
 		"DECLARE wf CURSOR FOR SELECT g FROM generate_series(1, 300000) g ORDER BY g DESC;" \
 		"FETCH 1 FROM wf;" \
 		"SELECT count(*) || ' ' || sum(numfiles) || ' ' || bool_and(size > 0) || ' ' ||
-				bool_and(sess_id = pg_backend_pid() AND pid = pg_backend_pid() AND usename = current_user)
+				bool_and(sess_id = current_setting('gp.session_id')::int AND pid = pg_backend_pid() AND usename = current_user)
 		 FROM gp_toolkit.gp_workfile_entries WHERE segid = -1;" \
-		"SELECT size > 0 FROM gp_toolkit.gp_workfile_usage_per_query WHERE sess_id = pg_backend_pid();" \
+		"SELECT size > 0 FROM gp_toolkit.gp_workfile_usage_per_query WHERE sess_id = current_setting('gp.session_id')::int;" \
 		"SELECT bytes > 0 FROM gp_toolkit.gp_workfile_mgr_used_diskspace WHERE segid = -1;" \
 		"COMMIT;" \
 		"SELECT count(*) FROM gp_toolkit.gp_workfile_entries;" | qf 0)

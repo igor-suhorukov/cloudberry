@@ -47,6 +47,12 @@ extern PGDLLIMPORT bool gp_enable_global_deadlock_detector;
 extern void GpGddNoteBackend(void);
 
 /*
+ * A coordinator's client says its session as it connects, and again as it
+ * takes a new one: see gp_gdd.c.
+ */
+extern void GpGddNoteSession(void);
+
+/*
  * What a backend of this node said of itself: the coordinator session it
  * works for, and whether it is a segment's reader.  False when it said
  * nothing.

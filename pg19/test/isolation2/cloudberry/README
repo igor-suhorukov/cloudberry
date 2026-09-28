@@ -228,12 +228,7 @@ parallel_retrieve_cursor/explain
   one segment a replicated table is read on, on the coordinator.
 
 parallel_retrieve_cursor/status_check, parallel_retrieve_cursor/status_wait
-  Two things of the port's dispatcher, not of the endpoints.  A segment that
+  One thing of the port's dispatcher, not of the endpoints: a segment that
   restarts after its endpoint's sender was killed with SIGQUIT (Test4) fails
   the coordinator's statements in PostgreSQL's words for a connection that
-  closed, where Cloudberry's add "Error on receive from" the segment.  And a
-  session's id is its coordinator backend's process ID for its life, where
-  Cloudberry's session takes a new gp_session_id once a segment it had a
-  gang on was lost: the retrieve session that Test4 bound to the session
-  retrieves Test5's cursor there, rather than finding no endpoint of its own
-  session, and the session opened in its place finds the endpoint read.
+  closed, where Cloudberry's add "Error on receive from" the segment.

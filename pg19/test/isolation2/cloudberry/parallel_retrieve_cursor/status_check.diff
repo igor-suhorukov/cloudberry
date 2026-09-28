@@ -4,13 +4,3 @@
 @@
 -ERROR:  Error on receive from SEG IP:PORT pid=PID: server closed the connection unexpectedly
 +ERROR:  server closed the connection unexpectedly
-@@
--ERROR:  the endpoint endpoint_id5 does not exist for session id xxx
---- Since seg1 retrieve session is bind to Test4 session. And Test4 session get killed. We need to restart it.
--1Rq: ... <quitting>
--1R: @pre_run 'set_endpoint_variable @ENDPOINT5': RETRIEVE ALL FROM ENDPOINT "@ENDPOINT5";
-@@
-+-- Since seg1 retrieve session is bind to Test4 session. And Test4 session get killed. We need to restart it.
-+1Rq: ... <quitting>
-+1R: @pre_run 'set_endpoint_variable @ENDPOINT5': RETRIEVE ALL FROM ENDPOINT "@ENDPOINT5";
-+ERROR:  another session (pid: PID) used the endpoint and completed retrieving

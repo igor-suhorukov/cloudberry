@@ -486,6 +486,13 @@ extern char *GpDdlLabelPayloadOf(const struct ObjectAddress *object,
 /* Defines the settings; called from gp_core's _PG_init. */
 extern void GpDispatchInit(void);
 
+/*
+ * What a connection's start does on every node -- a coordinator's client
+ * takes its session id -- from gp_core's _PG_init, after every other
+ * module's authentication hook.
+ */
+extern void GpDispatchConnectionInit(void);
+
 /* Installs the DDL dispatch hooks, where there is a cluster; see gp_ddl.c. */
 extern void GpDdlInit(void);
 
