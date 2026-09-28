@@ -940,6 +940,14 @@ lost_gang_warn(void)
 	if (!lost_with_temp)
 		return;
 	lost_with_temp = false;
+
+	/*
+	 * Told already, where a retry, the cluster's refresh or a ROLLBACK TO
+	 * found the gang gone and marked the tables to be dropped: once is
+	 * Cloudberry's.
+	 */
+	if (temp_tables_lost)
+		return;
 	ereport(WARNING,
 			(errmsg("Any temporary tables for this session have been dropped because the gang was disconnected (session id = %d)",
 					GpClusterSessionId())));
