@@ -26,7 +26,7 @@ skip gpdispatch  the faults make_dispatch_result_error, cdb_copy_end_internal_st
 skip check_gxid  gp_get_next_gxid(), a function of Cloudberry's core the port has not
 skip checkpoint_dtx_info  the faults after_xlog_xact_distributed_commit and keep_log_seg, in PostgreSQL's commit and checkpoint, which the port has no place for; it waits for them
 skip autovacuum-analyze  the faults gp_pgstat_report_on_master, analyze_after_hold_lock, auto_vac_worker_* and analyze_finished_one_relation, in PostgreSQL's autovacuum and ANALYZE; it waits for them
-skip prepared_xact_deadlock_pg_rewind  CREATE DATABASE commits on each segment in a transaction of its own, which prepares nothing: the fault after_xlog_xact_prepare_flushed it waits for is not reached
+run  prepared_xact_deadlock_pg_rewind                mirrors1
 run  ao_partition_lock                                 misc1
 run  select_dropped_table
 skip update_hash_col_utilitymode  differs: a session of a segment's own (0U) updates a column of the distribution key, UPDATE 0, where Cloudberry refuses it in utility mode

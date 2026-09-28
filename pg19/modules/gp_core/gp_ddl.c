@@ -86,10 +86,12 @@
 #include "catalog/pg_depend.h"
 #include "catalog/pg_extension.h"
 #include "catalog/pg_namespace.h"
+#include "parser/parse_node.h"
 #include "parser/parse_type.h"
 #include "catalog/objectaddress.h"
 #include "catalog/indexing.h"
 #include "catalog/pg_index.h"
+#include "commands/dbcommands.h"
 #include "commands/defrem.h"
 #include "commands/extension.h"
 #include "commands/tablecmds.h"
@@ -122,6 +124,8 @@
 
 #include "gp_cluster.h"
 #include "gp_core_api.h"
+#include "gp_dbcopy.h"
+#include "gp_dirxact.h"
 #include "gp_dispatch.h"
 #include "gp_fault.h"
 #include "gp_foreign.h"
@@ -404,8 +408,6 @@ drop_temp_namespaces(void)
  *     MATERIALIZED VIEW, which carry rows: made on every node WITH NO DATA,
  *     as gp_sql makes each on a cluster, and filled by an INSERT, which puts
  *     each row where it belongs (gp_refresh.c for a materialized view);
- *   - moving a database to another tablespace, whose other connections the
- *     segments cannot see to refuse it;
  *   - publications, subscriptions and event triggers, which are about this
  *     node's own WAL and this node's own DDL -- and dropping, renaming,
  *     giving away or commenting on one.
@@ -452,7 +454,16 @@ dispatch_class(Node *parsetree)
 {
 	switch (nodeTag(parsetree))
 	{
+		/*
+		 * CREATE DATABASE, in the coordinator's transaction on every node,
+		 * prepared on each segment, as Cloudberry dispatches it
+		 * (DF_NEED_TWO_PHASE): every node makes the database or none, its
+		 * directories following the transaction (gp_dirxact.c).  DROP
+		 * DATABASE removes the directories as it runs, as PostgreSQL's
+		 * dropdb() does, and runs on each node in a transaction of its own.
+		 */
 		case T_CreatedbStmt:
+			return GP_DISPATCH_IN_XACT;
 		case T_DropdbStmt:
 			return GP_DISPATCH_OWN_XACT;
 
@@ -549,25 +560,22 @@ dispatch_class(Node *parsetree)
 				return GP_DISPATCH_IN_XACT;
 			}
 
+		/*
+		 * A database's move too, each node moving its own, the old directory
+		 * going as the transaction commits (GpMoveDatabase(), gp_dbcopy.c).
+		 */
 		case T_AlterDatabaseStmt:
-			{
-				ListCell   *lc;
-
-				foreach(lc, ((AlterDatabaseStmt *) parsetree)->options)
-				{
-					if (strcmp(((DefElem *) lfirst(lc))->defname, "tablespace") == 0)
-						return GP_DISPATCH_LOCAL;
-				}
-				return GP_DISPATCH_IN_XACT;
-			}
+			return GP_DISPATCH_IN_XACT;
 
 		/*
 		 * A tablespace is a directory on each machine, and each node's is the
-		 * directory of its dbid under it (node_tablespace_location()).
+		 * directory of its dbid under it (node_tablespace_location()): made
+		 * and dropped in the coordinator's transaction on every node, as
+		 * Cloudberry's are, the directories following the transaction.
 		 */
 		case T_CreateTableSpaceStmt:
 		case T_DropTableSpaceStmt:
-			return GP_DISPATCH_OWN_XACT;
+			return GP_DISPATCH_IN_XACT;
 		case T_AlterTableSpaceOptionsStmt:
 		case T_AlterTableMoveAllStmt:
 			return GP_DISPATCH_IN_XACT;
@@ -979,6 +987,10 @@ node_tablespace_location(const char *location, Oid tablespaceoid)
 		ereport(ERROR,
 				(errcode_for_file_access(),
 				 errmsg("could not create directory \"%s\": %m", dir)));
+
+	/* the statement's, which go if its transaction aborts (gp_dirxact.c) */
+	if (!RecoveryInProgress())
+		GpDirxactTablespace(tablespaceoid, false);
 	return dir;
 }
 
@@ -1091,11 +1103,41 @@ tablespace_own_location(CreateTableSpaceStmt *stmt)
 }
 
 /*
+ * ALTER DATABASE ... SET TABLESPACE, and nothing else: the tablespace it
+ * names, or NULL, where it is another ALTER DATABASE, or one PostgreSQL
+ * refuses for having other options too, in its words.
+ */
+static const char *
+database_move(Node *parsetree)
+{
+	AlterDatabaseStmt *stmt;
+	DefElem    *opt;
+
+	if (!IsA(parsetree, AlterDatabaseStmt))
+		return NULL;
+	stmt = (AlterDatabaseStmt *) parsetree;
+	if (list_length(stmt->options) != 1)
+		return NULL;
+	opt = linitial_node(DefElem, stmt->options);
+	return strcmp(opt->defname, "tablespace") == 0 ? defGetString(opt) : NULL;
+}
+
+/*
  * Run a tablespace's statement here: CREATE TABLESPACE in this node's
  * directory, and, on a segment, an in-place one as the coordinator allowed
  * it.  And a statement that sets a wrapper's, a server's or a foreign
  * table's options, with mpp_execute and num_segments kept from its validator
  * (gp_foreign.c): after the tree to send the segments is made, on each node.
+ *
+ * And the statements that run in the coordinator's distributed transaction
+ * on every node where PostgreSQL runs them outside a transaction block:
+ * CREATE DATABASE and CREATE TABLESPACE, which a segment runs itself inside
+ * its part of the transaction, as Cloudberry's QE runs them there (its
+ * utility.c refuses them inside a transaction block on the QD alone), and
+ * DROP TABLESPACE and a database's move, which every node runs as this
+ * module does them, their directories following the transaction
+ * (gp_dirxact.c, gp_dbcopy.c).  The coordinator refuses the four inside a
+ * user's transaction block, as PostgreSQL does.
  */
 static void
 run_tablespace_statement(PlannedStmt *pstmt, const char *queryString,
@@ -1105,8 +1147,32 @@ run_tablespace_statement(PlannedStmt *pstmt, const char *queryString,
 						 bool dispatched)
 {
 	Node	   *parsetree = pstmt->utilityStmt;
+	bool		in_part = dispatched && IsTransactionBlock();
+	const char *move_to;
 
-	if (IsA(parsetree, CreateTableSpaceStmt))
+	if (IsA(parsetree, CreatedbStmt) && in_part)
+	{
+		ParseState *pstate = make_parsestate(NULL);
+
+		pstate->p_sourcetext = queryString;
+		(void) createdb(pstate, (CreatedbStmt *) parsetree);
+		GpDbcopyCreatedb((CreatedbStmt *) parsetree);
+	}
+	else if (IsA(parsetree, DropTableSpaceStmt))
+	{
+		if (!in_part)
+			PreventInTransactionBlock(context == PROCESS_UTILITY_TOPLEVEL,
+									  "DROP TABLESPACE");
+		GpDropTableSpace((DropTableSpaceStmt *) parsetree);
+	}
+	else if ((move_to = database_move(parsetree)) != NULL)
+	{
+		if (!in_part)
+			PreventInTransactionBlock(context == PROCESS_UTILITY_TOPLEVEL,
+									  "ALTER DATABASE SET TABLESPACE");
+		GpMoveDatabase(((AlterDatabaseStmt *) parsetree)->dbname, move_to);
+	}
+	else if (IsA(parsetree, CreateTableSpaceStmt))
 	{
 		CreateTableSpaceStmt *stmt = (CreateTableSpaceStmt *) parsetree;
 		CreateTableSpaceStmt *own = tablespace_own_location(stmt);
@@ -1126,8 +1192,17 @@ run_tablespace_statement(PlannedStmt *pstmt, const char *queryString,
 									 PGC_SUSET, PGC_S_SESSION,
 									 GUC_ACTION_SAVE, true, 0, false);
 		}
-		next_ProcessUtility(pstmt, queryString, readOnlyTree, context, params,
-							queryEnv, dest, qc);
+		if (in_part)
+		{
+			Oid			spc = CreateTableSpace(stmt);
+
+			/* an in-place one's directory, which the location hook is not asked of */
+			if (stmt->location != NULL && stmt->location[0] == '\0')
+				GpDirxactTablespace(spc, false);
+		}
+		else
+			next_ProcessUtility(pstmt, queryString, readOnlyTree, context,
+								params, queryEnv, dest, qc);
 		if (nestlevel >= 0)
 			AtEOXact_GUC(true, nestlevel);
 	}

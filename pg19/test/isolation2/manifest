@@ -37,7 +37,8 @@
 # gpexpand_catalog_lock, whose sessions hold every other session's catalog
 # changes, is in a group of its own, as the schedule keeps it.
 run  lockmodes                                     lockmodes
-skip prepared_xact_deadlock_pg_rewind  CREATE DATABASE commits on each segment in a transaction of its own, which prepares nothing: the fault after_xlog_xact_prepare_flushed it waits for is not reached
+run  prepared_xact_deadlock_pg_rewind              mirrors1
+run  port/dirxact_restart                          mirrors1
 run  select_dropped_table
 run  resource_queue_self_deadlock                  queues
 run  resource_queue_terminate                      queues
@@ -123,5 +124,6 @@ run  parallel_retrieve_cursor/unset                retrieve
 #
 # And one of Cloudberry's isolation2_crash_schedule, whose other tests are
 # not listed: segments restarted between the two phases, which the
-# coordinator's recovery process ends.
+# coordinator's recovery process ends (port/dirxact_restart does so for
+# CREATE DATABASE and DROP TABLESPACE).
 skip crash_recovery_dtm  unrecognized configuration parameter "dtx_phase2_retry_second"; function wait_till_master_shutsdown() does not exist, of Cloudberry's setup; and the faults before_orphaned_check and after_orphaned_check, of Cloudberry's recovery process, which the port's has no place for; it waits for them

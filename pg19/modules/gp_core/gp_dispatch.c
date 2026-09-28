@@ -847,6 +847,39 @@ GpDispatchDropLostTempTables(void)
 }
 
 /*
+ * A gang a broken connection took -- a segment's panic -- while this session
+ * had temporary tables: their parts went with the segments' backends.  The
+ * session is told so as its transaction aborts, after the error that ended
+ * it, as Cloudberry's is told as its abort resets the gangs
+ * (resetSessionForPrimaryGangLoss(), cdbgang.c), and the coordinator's are
+ * dropped as the next statement begins, as after a retry's.
+ */
+static bool lost_with_temp = false;
+
+static void
+lost_gang_note(void)
+{
+	Oid			temp_namespace;
+	Oid			temp_toast_namespace;
+
+	GetTempNamespaceState(&temp_namespace, &temp_toast_namespace);
+	if (OidIsValid(temp_namespace))
+		lost_with_temp = true;
+}
+
+static void
+lost_gang_warn(void)
+{
+	if (!lost_with_temp)
+		return;
+	lost_with_temp = false;
+	ereport(WARNING,
+			(errmsg("Any temporary tables for this session have been dropped because the gang was disconnected (session id = %d)",
+					GpClusterSessionId())));
+	temp_tables_lost = true;
+}
+
+/*
  * The identity the coordinator gives a segment process.
  *
  * It is what makes the backend on the other end a segment process rather than
@@ -1100,6 +1133,7 @@ gang_close_broken(void)
 {
 	gang_close();
 	GpFtsNotifyProber();
+	lost_gang_note();
 }
 
 /*
@@ -3365,6 +3399,34 @@ dtx_forget(void)
 }
 
 /*
+ * The contents asked to prepare, kept apart from the gang: a connection that
+ * breaks as its part prepares -- its segment's panic -- closes the gang, and
+ * each part is then finished over a connection of its own
+ * (dtx_finish_apart()).
+ */
+static int *dtx_apart = NULL;	/* in TopMemoryContext */
+static int	dtx_apart_size = 0;
+static int	dtx_napart = 0;
+
+static void
+dtx_keep_apart(GpGang *g, const bool *writes)
+{
+	if (dtx_apart_size < g->nconns)
+	{
+		if (dtx_apart != NULL)
+			pfree(dtx_apart);
+		dtx_apart = MemoryContextAlloc(TopMemoryContext, g->nconns * sizeof(int));
+		dtx_apart_size = g->nconns;
+	}
+	dtx_napart = 0;
+	for (int i = 0; i < g->nconns; i++)
+	{
+		if (writes[i])
+			dtx_apart[dtx_napart++] = g->conns[i].content;
+	}
+}
+
+/*
  * Has this segment's part written?  It says so with the answer to every
  * statement it is sent, as the transaction ID its part has (gp_dtx.c): empty
  * while it has none.  A segment that has never said is taken to have
@@ -3546,6 +3608,7 @@ gang_commit_first_phase(GpGang *g)
 			dtx_prepared_size = g->nconns;
 		}
 		dtx_report("Distributed Prepare", writers, nwriters, false);
+		dtx_keep_apart(g, writes);
 	}
 	else
 		dtx_report("Distributed Commit (one-phase)", NULL, 0, true);
@@ -3590,6 +3653,13 @@ gang_commit_first_phase(GpGang *g)
 			ereport(ERROR,
 					(errcode(MAKE_SQLSTATE('X', 'X', '0', '0', '9')),
 					 errmsg("Raise an error as directed by Debug_abort_after_distributed_prepared")));
+
+		/*
+		 * and this one before its distributed commit record, which
+		 * RecordTransactionCommit() writes next (xact.c): the parts are all
+		 * prepared, and an error still aborts every one
+		 */
+		GP_FAULT("before_xlog_xact_distributed_commit");
 	}
 }
 
@@ -3697,6 +3767,32 @@ dtx_finish_again(int content, const char *sql, bool commit)
 }
 
 /*
+ * The second phase, or the abort, of the parts asked to prepare, where the
+ * gang has gone: each over a connection of its own to its content's primary,
+ * which dtx_finish_again() waits for while it restarts, as Cloudberry's
+ * coordinator retries its broadcast over new gangs until it is done
+ * (retryAbortPrepared(), doNotifyingCommitPrepared(), cdbtm.c).  So a part
+ * prepared where a segment went down ends as the statement does, and what
+ * its segment's end of it does with it (gp_dirxact.c), where the recovery
+ * process would end it later.  How many it did not reach.
+ */
+static int
+dtx_finish_apart(bool commit)
+{
+	char	   *sql = psprintf("%s PREPARED '%s'", commit ? "COMMIT" : "ROLLBACK",
+							   dtx_gid);
+	int			nfailed = 0;
+
+	for (int i = 0; i < dtx_napart; i++)
+	{
+		if (!dtx_finish_again(dtx_apart[i], sql, commit))
+			nfailed++;
+	}
+	pfree(sql);
+	return nfailed;
+}
+
+/*
  * COMMIT PREPARED or ROLLBACK PREPARED on the segments asked to prepare, and
  * how many of them it did not reach -- without raising: the second phase
  * and the abort are both past it.  An answer that the part does not exist,
@@ -3725,7 +3821,7 @@ gang_finish_prepared(bool commit)
 	if (dtx_nprepared == 0)
 		return 0;
 	if (g == NULL)
-		return dtx_nprepared;
+		return dtx_finish_apart(commit);
 
 	/* kept apart from the gang, which a broken connection closes */
 	nconns = g->nconns;
@@ -4000,6 +4096,32 @@ dispatch_commit_recorded(TransactionId latestXid)
 							  "");
 }
 
+/*
+ * Cloudberry's fault at the start of an abort, whose error Cloudberry's
+ * client reads after the one that caused the abort, its abort failing too
+ * (AbortTransaction(), xact.c): said to the client here, the abort going on,
+ * as nothing may stop it.
+ */
+static void
+abort_failure_fault(void)
+{
+	MemoryContext cxt = CurrentMemoryContext;
+	uint32		holdoff = InterruptHoldoffCount;
+
+	PG_TRY();
+	{
+		(void) GP_FAULT("transaction_abort_failure");
+	}
+	PG_CATCH();
+	{
+		InterruptHoldoffCount = holdoff;
+		MemoryContextSwitchTo(cxt);
+		EmitErrorReport();
+		FlushErrorState();
+	}
+	PG_END_TRY();
+}
+
 static void
 dispatch_xact_callback(XactEvent event, void *arg)
 {
@@ -4075,7 +4197,7 @@ dispatch_xact_callback(XactEvent event, void *arg)
 				 * The abort record is written already, where Cloudberry's is
 				 * not; either way the transaction did not commit.
 				 */
-				(void) GP_FAULT("transaction_abort_failure");
+				abort_failure_fault();
 
 				gang_cancel_and_drain();
 				if (gang != NULL && gang_in_xact)
@@ -4126,6 +4248,7 @@ dispatch_xact_callback(XactEvent event, void *arg)
 					GpDtxWakeRecovery();
 			}
 			PG_END_TRY();
+			lost_gang_warn();
 
 			gang_in_xact = false;
 			gang_xact_depth = 0;

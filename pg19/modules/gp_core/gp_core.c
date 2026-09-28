@@ -48,6 +48,7 @@
 #include "gp_cluster.h"
 #include "gp_core_api.h"
 #include "gp_dbcopy.h"
+#include "gp_dirxact.h"
 #include "gp_dispatch.h"
 #include "gp_dtm_debug.h"
 #include "gp_dtx.h"
@@ -377,6 +378,15 @@ _PG_init(void)
 	 * one run.
 	 */
 	GpParallelInit();
+
+	/*
+	 * A database's and a tablespace's directories follow the transaction
+	 * that made or dropped them, on every node, a prepared part's ended by
+	 * whoever ends it (gp_dirxact.c): its shared memory, the two phases'
+	 * statements, and the transaction callbacks.  On one node too, where
+	 * CREATE DATABASE's directories go if its transaction aborts.
+	 */
+	GpDirxactInit();
 
 	/*
 	 * Deliberately no MarkGUCPrefixReserved("gp") here.  It drops every

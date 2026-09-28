@@ -48,10 +48,15 @@
  * what the copy has been given since -- PAX's own records are replayed only
  * there too, its files being fsync'ed when they are written.
  *
- * On a cluster each node copies its own: CREATE DATABASE runs on every node,
- * ALTER DATABASE ... SET TABLESPACE on the coordinator alone (gp_ddl.c).
- * gp_core installs this hook before DDL dispatch's, so that it runs inside
- * the statement each node runs, before the coordinator dispatches it.
+ * On a cluster each node copies its own, inside the statement each node runs
+ * in the coordinator's distributed transaction (gp_ddl.c): CREATE DATABASE's
+ * here, gp_core installing this hook before DDL dispatch's, so that it runs
+ * before the coordinator dispatches the statement, and a segment's as it
+ * runs createdb() itself (GpDbcopyCreatedb()); ALTER DATABASE ... SET
+ * TABLESPACE's in the move of this file's own (GpMoveDatabase()), which a
+ * transaction that is prepared can run, where movedb() commits in the middle.
+ * Either way the directories the statement made go if its transaction
+ * aborts, and a move's old one only as it commits (gp_dirxact.c).
  *
  *-------------------------------------------------------------------------
  */
@@ -67,24 +72,35 @@
 #include "access/xlog_internal.h"
 #include "access/xloginsert.h"
 #include "access/xlogreader.h"
+#include "catalog/indexing.h"
+#include "catalog/objectaccess.h"
 #include "catalog/pg_database.h"
 #include "catalog/pg_tablespace.h"
+#include "commands/dbcommands_xlog.h"
 #include "commands/defrem.h"
 #include "commands/tablespace.h"
 #include "common/extmarkfile.h"
 #include "common/relpath.h"
 #include "miscadmin.h"
 #include "nodes/parsenodes.h"
+#include "postmaster/bgwriter.h"
 #include "storage/bufmgr.h"
 #include "storage/copydir.h"
 #include "storage/fd.h"
 #include "storage/lmgr.h"
 #include "storage/md.h"
+#include "storage/procarray.h"
+#include "storage/procsignal.h"
 #include "tcop/utility.h"
+#include "utils/acl.h"
+#include "utils/fmgroids.h"
+#include "utils/rel.h"
 #include "utils/syscache.h"
 
 #include "gp_cluster.h"
 #include "gp_dbcopy.h"
+#include "gp_dirxact.h"
+#include "gp_fault.h"
 
 /* A directory copied: its name, with its NUL, follows. */
 typedef struct xl_gp_dbcopy
@@ -232,8 +248,13 @@ remove_new_database(Oid db, List *spcs)
 	}
 }
 
-static void
-copy_for_createdb(CreatedbStmt *stmt)
+/*
+ * After createdb(): the new database's directories go if the transaction
+ * aborts, which createdb()'s failure callback covers only while it runs, and
+ * each marked directory is copied.
+ */
+void
+GpDbcopyCreatedb(CreatedbStmt *stmt)
 {
 	ExtensionMarks *marks = ExtensionMarksLoad(DataDir);
 	const char *template = "template1";
@@ -247,6 +268,11 @@ copy_for_createdb(CreatedbStmt *stmt)
 	HeapTuple	tup;
 	ListCell   *lc;
 
+	/* The new database's row, which this transaction wrote. */
+	CommandCounterIncrement();
+	dst_db = get_database_oid(stmt->dbname, false);
+	GpDirxactDatabase(dst_db, InvalidOid, false, true);
+
 	/* no module keeps a directory in a database's */
 	if (marks == NULL)
 		return;
@@ -259,10 +285,7 @@ copy_for_createdb(CreatedbStmt *stmt)
 			template = defGetString(opt);
 	}
 
-	/* The new database's row, which this transaction wrote. */
-	CommandCounterIncrement();
 	src_db = get_database_oid(template, false);
-	dst_db = get_database_oid(stmt->dbname, false);
 	src_def = database_tablespace(src_db);
 	dst_def = database_tablespace(dst_db);
 
@@ -398,6 +421,219 @@ dbcopy_xact_callback(XactEvent event, void *arg)
 	}
 }
 
+/*
+ * PostgreSQL's errdetail_busy_db() (dbcommands.c), which is static there.
+ */
+static int
+errdetail_busy_db(int notherbackends, int npreparedxacts)
+{
+	if (notherbackends > 0 && npreparedxacts > 0)
+		errdetail("There are %d other session(s) and %d prepared transaction(s) using the database.",
+				  notherbackends, npreparedxacts);
+	else if (notherbackends > 0)
+		errdetail_plural("There is %d other session using the database.",
+						 "There are %d other sessions using the database.",
+						 notherbackends,
+						 notherbackends);
+	else
+		errdetail_plural("There is %d prepared transaction using the database.",
+						 "There are %d prepared transactions using the database.",
+						 npreparedxacts,
+						 npreparedxacts);
+	return 0;
+}
+
+/*
+ * ALTER DATABASE ... SET TABLESPACE inside a transaction, as Cloudberry's
+ * movedb() runs it on each node of a cluster (dbcommands.c): PostgreSQL 19's
+ * movedb(), which commits the move in the middle and removes the old
+ * directory in a transaction of its own, run to the move's end in the
+ * transaction that asks, whose end does the rest (gp_dirxact.c) -- the copy
+ * removed if it aborts, the old directory if it commits.  So a segment's part
+ * of it can be prepared, as a part of the coordinator's distributed
+ * transaction, and every node moves or none.  The database is locked for the
+ * transaction, which a prepared part keeps, where movedb() takes a session's
+ * lock, which cannot be prepared.  Its checks and their words are
+ * movedb()'s; and the modules' directories are copied as the move copies the
+ * rest, where copy_for_movedb() copies them as movedb()'s first transaction
+ * commits.
+ */
+void
+GpMoveDatabase(const char *dbname, const char *tblspcname)
+{
+	Relation	pgdbrel;
+	Oid			db_id = InvalidOid;
+	Oid			src_tblspcoid = InvalidOid;
+	Oid			dst_tblspcoid;
+	int			notherbackends;
+	int			npreparedxacts;
+	HeapTuple	oldtuple;
+	HeapTuple	newtuple;
+	ScanKeyData scankey;
+	SysScanDesc sysscan;
+	AclResult	aclresult;
+	char	   *src_dbpath;
+	char	   *dst_dbpath;
+	DIR		   *dstdir;
+	struct dirent *xlde;
+	ExtensionMarks *marks;
+	Datum		new_record[Natts_pg_database] = {0};
+	bool		new_record_nulls[Natts_pg_database] = {0};
+	bool		new_record_repl[Natts_pg_database] = {0};
+
+	pgdbrel = table_open(DatabaseRelationId, RowExclusiveLock);
+
+	/*
+	 * The database, locked against a backend starting in it, a copy made of
+	 * it and its drop, as get_db_info() finds and locks it: looked up again
+	 * once locked, in case it was renamed meanwhile.
+	 */
+	for (;;)
+	{
+		HeapTuple	tup;
+
+		db_id = get_database_oid(dbname, true);
+		if (!OidIsValid(db_id))
+			ereport(ERROR,
+					(errcode(ERRCODE_UNDEFINED_DATABASE),
+					 errmsg("database \"%s\" does not exist", dbname)));
+		LockSharedObject(DatabaseRelationId, db_id, 0, AccessExclusiveLock);
+		tup = SearchSysCache1(DATABASEOID, ObjectIdGetDatum(db_id));
+		if (HeapTupleIsValid(tup) &&
+			strcmp(NameStr(((Form_pg_database) GETSTRUCT(tup))->datname), dbname) == 0)
+		{
+			src_tblspcoid = ((Form_pg_database) GETSTRUCT(tup))->dattablespace;
+			ReleaseSysCache(tup);
+			break;
+		}
+		if (HeapTupleIsValid(tup))
+			ReleaseSysCache(tup);
+		UnlockSharedObject(DatabaseRelationId, db_id, 0, AccessExclusiveLock);
+	}
+
+	if (!object_ownercheck(DatabaseRelationId, db_id, GetUserId()))
+		aclcheck_error(ACLCHECK_NOT_OWNER, OBJECT_DATABASE, dbname);
+	if (db_id == MyDatabaseId)
+		ereport(ERROR,
+				(errcode(ERRCODE_OBJECT_IN_USE),
+				 errmsg("cannot change the tablespace of the currently open database")));
+
+	dst_tblspcoid = get_tablespace_oid(tblspcname, false);
+	aclresult = object_aclcheck(TableSpaceRelationId, dst_tblspcoid, GetUserId(),
+								ACL_CREATE);
+	if (aclresult != ACLCHECK_OK)
+		aclcheck_error(aclresult, OBJECT_TABLESPACE, tblspcname);
+	if (dst_tblspcoid == GLOBALTABLESPACE_OID)
+		ereport(ERROR,
+				(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+				 errmsg("pg_global cannot be used as default tablespace")));
+
+	/* no-op if same tablespace */
+	if (src_tblspcoid == dst_tblspcoid)
+	{
+		table_close(pgdbrel, NoLock);
+		return;
+	}
+
+	if (CountOtherDBBackends(db_id, &notherbackends, &npreparedxacts))
+		ereport(ERROR,
+				(errcode(ERRCODE_OBJECT_IN_USE),
+				 errmsg("database \"%s\" is being accessed by other users",
+						dbname),
+				 errdetail_busy_db(notherbackends, npreparedxacts)));
+
+	src_dbpath = GetDatabasePath(db_id, src_tblspcoid);
+	dst_dbpath = GetDatabasePath(db_id, dst_tblspcoid);
+
+	/*
+	 * Everything of the database's on disk, the unlogged tables too, and no
+	 * file of it open in any backend, before its buffers go: movedb()'s
+	 * checkpoint, barrier and DropDatabaseBuffers().
+	 */
+	RequestCheckpoint(CHECKPOINT_FAST | CHECKPOINT_FORCE | CHECKPOINT_WAIT |
+					  CHECKPOINT_FLUSH_UNLOGGED);
+	WaitForProcSignalBarrier(EmitProcSignalBarrier(PROCSIGNAL_BARRIER_SMGRRELEASE));
+	DropDatabaseBuffers(db_id);
+
+	/* nothing of the database's in the target tablespace already */
+	dstdir = AllocateDir(dst_dbpath);
+	if (dstdir != NULL)
+	{
+		while ((xlde = ReadDir(dstdir, dst_dbpath)) != NULL)
+		{
+			if (strcmp(xlde->d_name, ".") == 0 ||
+				strcmp(xlde->d_name, "..") == 0)
+				continue;
+			ereport(ERROR,
+					(errcode(ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE),
+					 errmsg("some relations of database \"%s\" are already in tablespace \"%s\"",
+							dbname, tblspcname),
+					 errhint("You must move them back to the database's default tablespace before using this command.")));
+		}
+		FreeDir(dstdir);
+		if (rmdir(dst_dbpath) != 0)
+			elog(ERROR, "could not remove directory \"%s\": %m",
+				 dst_dbpath);
+	}
+
+	/* The copy goes if the transaction aborts, as it is made. */
+	GpDirxactDatabase(db_id, dst_tblspcoid, false, false);
+	copydir(src_dbpath, dst_dbpath, false);
+	{
+		xl_dbase_create_file_copy_rec xlrec;
+
+		xlrec.db_id = db_id;
+		xlrec.tablespace_id = dst_tblspcoid;
+		xlrec.src_db_id = db_id;
+		xlrec.src_tablespace_id = src_tblspcoid;
+		XLogBeginInsert();
+		XLogRegisterData(&xlrec, sizeof(xl_dbase_create_file_copy_rec));
+		(void) XLogInsert(RM_DBASE_ID,
+						  XLOG_DBASE_CREATE_FILE_COPY | XLR_SPECIAL_REL_UPDATE);
+	}
+	if ((marks = ExtensionMarksLoad(DataDir)) != NULL)
+		copy_marked(marks, db_id, src_tblspcoid, db_id, dst_tblspcoid);
+
+	/* the database's row, as movedb() changes it */
+	ScanKeyInit(&scankey,
+				Anum_pg_database_datname,
+				BTEqualStrategyNumber, F_NAMEEQ,
+				CStringGetDatum(dbname));
+	sysscan = systable_beginscan(pgdbrel, DatabaseNameIndexId, true,
+								 NULL, 1, &scankey);
+	oldtuple = systable_getnext(sysscan);
+	if (!HeapTupleIsValid(oldtuple))
+		ereport(ERROR,
+				(errcode(ERRCODE_UNDEFINED_DATABASE),
+				 errmsg("database \"%s\" does not exist", dbname)));
+	LockTuple(pgdbrel, &oldtuple->t_self, InplaceUpdateTupleLock);
+	new_record[Anum_pg_database_dattablespace - 1] = ObjectIdGetDatum(dst_tblspcoid);
+	new_record_repl[Anum_pg_database_dattablespace - 1] = true;
+	newtuple = heap_modify_tuple(oldtuple, RelationGetDescr(pgdbrel),
+								 new_record, new_record_nulls, new_record_repl);
+	CatalogTupleUpdate(pgdbrel, &oldtuple->t_self, newtuple);
+	UnlockTuple(pgdbrel, &oldtuple->t_self, InplaceUpdateTupleLock);
+	InvokeObjectPostAlterHook(DatabaseRelationId, db_id, 0);
+	systable_endscan(sysscan);
+
+	/*
+	 * As movedb() does, so that a committed copy's record is never replayed
+	 * over what the new database's unlogged operations wrote after it.
+	 */
+	RequestCheckpoint(CHECKPOINT_FAST | CHECKPOINT_FORCE | CHECKPOINT_WAIT);
+	ForceSyncCommit();
+	table_close(pgdbrel, NoLock);
+
+	/* The old directory goes as the transaction commits. */
+	GpDirxactDatabase(db_id, src_tblspcoid, true, false);
+
+	/* Cloudberry's, as its move is done but for its transaction's end */
+	(void) GP_FAULT("inside_move_db_transaction");
+
+	pfree(src_dbpath);
+	pfree(dst_dbpath);
+}
+
 /* ------------------------------------------------------------------------- */
 /* The statements                                                            */
 /* ------------------------------------------------------------------------- */
@@ -430,7 +666,7 @@ dbcopy_ProcessUtility(PlannedStmt *pstmt, const char *queryString,
 	PG_END_TRY();
 
 	if (IsA(parsetree, CreatedbStmt))
-		copy_for_createdb((CreatedbStmt *) parsetree);
+		GpDbcopyCreatedb((CreatedbStmt *) parsetree);
 }
 
 /* ------------------------------------------------------------------------- */
@@ -441,8 +677,9 @@ dbcopy_ProcessUtility(PlannedStmt *pstmt, const char *queryString,
  * The replay, on a mirror, a standby or a server recovering from an archive:
  * the same copy, of this server's own source.  A source that is gone was
  * removed after the copy was made here, by a drop replayed since: what was
- * copied then stays.  The resource manager's other record, the nodes'
- * states, is gp_cluster.c's.
+ * copied then stays.  The resource manager's other records are
+ * gp_cluster.c's, the nodes' states, and gp_dirxact.c's, a prepared part's
+ * file.
  */
 static void
 dbcopy_redo(XLogReaderState *record)
@@ -459,6 +696,11 @@ dbcopy_redo(XLogReaderState *record)
 	if (info == XLOG_GP_CORE_CLUSTER)
 	{
 		GpClusterRedo(XLogRecGetData(record), XLogRecGetDataLen(record));
+		return;
+	}
+	if (info == XLOG_GP_CORE_DIRXACT || info == XLOG_GP_CORE_DIRXACT_END)
+	{
+		GpDirxactRedo(info, XLogRecGetData(record), XLogRecGetDataLen(record));
 		return;
 	}
 	if (info != XLOG_GP_CORE_DBCOPY)
@@ -500,6 +742,13 @@ dbcopy_desc(StringInfo buf, XLogReaderState *record)
 		appendStringInfo(buf, "nodes' states, %u bytes", XLogRecGetDataLen(record));
 		return;
 	}
+	/* the gid, and its NUL, first */
+	if ((XLogRecGetInfo(record) & ~XLR_INFO_MASK) == XLOG_GP_CORE_DIRXACT ||
+		(XLogRecGetInfo(record) & ~XLR_INFO_MASK) == XLOG_GP_CORE_DIRXACT_END)
+	{
+		appendStringInfo(buf, "prepared part's file %s", XLogRecGetData(record));
+		return;
+	}
 	memcpy(&rec, XLogRecGetData(record), sizeof(rec));
 	appendStringInfo(buf, "copy dir %u/%u/%s to %u/%u/%s",
 					 rec.src_spc, rec.src_db, name,
@@ -513,6 +762,10 @@ dbcopy_identify(uint8 info)
 		return "DBCOPY";
 	if ((info & ~XLR_INFO_MASK) == XLOG_GP_CORE_CLUSTER)
 		return "CLUSTER";
+	if ((info & ~XLR_INFO_MASK) == XLOG_GP_CORE_DIRXACT)
+		return "DIRXACT";
+	if ((info & ~XLR_INFO_MASK) == XLOG_GP_CORE_DIRXACT_END)
+		return "DIRXACT_END";
 	return NULL;
 }
 

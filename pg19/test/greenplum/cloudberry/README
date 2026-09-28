@@ -8,6 +8,18 @@ in it (test.orca.diff) holds for that pass alone.  run.sh counts a test as
 passing when gpdiff.pl, under Cloudberry's init_file and the port's, finds no
 difference or exactly the file's.
 
+alter_db_set_tablespace  where segment 0 panics before its PREPARE record,
+  the database's copy in the target tablespace on segment 0 and its mirror,
+  which Cloudberry's leaves there (orphaned, as the test's table says) and
+  the port removes: a part's list of the directories its transaction's end
+  removes is written as its PREPARE begins, before the fault at its start,
+  and the ROLLBACK PREPARED the segment is sent once it is back, finding no
+  prepared transaction, does what the list says (gp_dirxact.c).  So
+  stat_db_objects() says of dbids 2 and 5 that the directory is not there,
+  where Cloudberry's lists files the test's WHERE then leaves out.  And
+  psql 19's refusal of the test's last two \!rm, written with no space
+  after \!, which psql 16 ran (as in directory_table's).
+
 alter_distribution_policy  pg_appendonly's segrelid, which is 0: gp_ao keeps
   every table's segment files in gp_ao.segfile, and makes no relation of
   them for each table.  ALTER TABLE ... ALTER PARTITION FOR (1) SET WITH
@@ -310,6 +322,16 @@ gp_recursive_cte  its one EXPLAIN that gpdiff.pl compares as rows, an
   on each table, where Cloudberry's plan has Motions of its own.  The
   segment the gather of a replicated table reads is the session's (the
   port's init_file masks it).  Its answers are Cloudberry's.
+
+gp_tablespace  gp_toolkit.__gp_aoseg() and __gp_aocsseg() of the unlogged
+  tables CREATE UNLOGGED TABLE ... AS makes: segment file 1, in gp_ao's own
+  format, version 1, with the lengths of its 8K blocks, where Cloudberry's
+  is segment 0 in its own (as in alter_table_set_am's).  And has_init_file()
+  of an unlogged table's aux relations, false: gp_ao keeps its segment
+  files', visibility map's and block directory's rows in unlogged tables of
+  its own that every unlogged table shares, and pg_appendonly names no
+  relation of the table's own for them (segrelid and the rest are 0), where
+  each of Cloudberry's is the table's, with an init fork.
 
 gp_types  PostgreSQL 19's words for an operator no type takes: a DETAIL
   where Cloudberry's HINT stood.

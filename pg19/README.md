@@ -374,7 +374,13 @@ of the core series, O13 to O21, O23 and O32:
   machine it shares with its primary, and removing it again as it runs or
   replays DROP TABLESPACE -- and every node's `pg_tablespace_location()`
   says the location, which `pg_dump` writes; `WITH (contentN = ...)` a
-  location of a content's own.
+  location of a content's own.  CREATE DATABASE, CREATE and DROP TABLESPACE
+  and ALTER DATABASE ... SET TABLESPACE run inside the coordinator's
+  distributed transaction, each segment's part prepared with it, as
+  Cloudberry's two-phase DDL is: the directories they make or remove follow
+  the transaction's end, even after a restart or on a mirror promoted
+  between the phases, through a file of each prepared part's that the
+  mirror replays (`gp_dirxact.c`, logged by `gp_core`'s resource manager).
   ALTER TABLE ... SET TABLESPACE of a partitioned table moves its
   partitions too, as Cloudberry's does, where PostgreSQL 19 moves none and
   sets only the default for new ones, which ALTER TABLE ONLY still does;
