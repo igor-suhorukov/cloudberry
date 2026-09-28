@@ -71,13 +71,16 @@ point nothing attached to runs no callback.
  		/*
  		 * If a wait for synchronous replication is pending, we can neither
  		 * acknowledge the commit nor raise ERROR or FATAL.  The latter would
-@@ -321,6 +325,10 @@
+@@ -321,6 +325,13 @@
  			break;
  		}
  
-+		/* A test may see that a cancel came while the commit waits. */
-+		if (QueryCancelPending)
-+			INJECTION_POINT("sync-rep-query-cancel", NULL);
++		/*
++		 * A test may see that a cancel came while the commit waits: the
++		 * point's callback tells whether one did, pending or kept by an
++		 * extension for the commit's end.
++		 */
++		INJECTION_POINT("sync-rep-query-cancel", NULL);
 +
  		/*
  		 * It's unclear what to do if a query cancel interrupt arrives.  We

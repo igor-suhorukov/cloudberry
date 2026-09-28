@@ -26,7 +26,7 @@
 # is what FTS does of what befalls them (gp_fts.c): that it brings each pair
 # in sync and turns synchronous replication on; that a mirror that stops is
 # marked down and no longer holds its primary's commits, and that until then a
-# commit waits for it whatever cancels it (R3); that a primary that stops is
+# commit waits for it whatever cancels it (gp_fts.c's hold on a cancel); that a primary that stops is
 # failed over from, the dispatcher following, and a transaction that was open
 # across it failing; that the coordinator keeps what FTS found across a
 # restart; that the failed primary comes back as its mirror's mirror, and the
@@ -311,8 +311,8 @@ out=$(q 2 "SELECT pg_cancel_backend($waiter)")
 sleep 1
 out2=$(q 2 "SELECT wait_event FROM pg_stat_activity WHERE pid = $waiter")
 [ "$out" = "t" ] && [ "$out2" = "SyncRep" ] \
-	&& ok "R3: cancelled, it still waits, rather than commit without its mirror ($out2)" \
-	|| notok "R3: a cancel during the commit's wait" "$out / $out2"
+	&& ok "cancelled, it still waits, rather than commit without its mirror ($out2)" \
+	|| notok "a cancel during the commit's wait" "$out / $out2"
 
 out=$(q 0 "SELECT gp_inject_fault('fts_probe', 'reset', 1)")
 q 2 "ALTER SYSTEM SET gp.fts_mark_mirror_down_grace_period = 0" > /dev/null

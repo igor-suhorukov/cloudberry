@@ -55,6 +55,13 @@ extern void GpFtsNotifyProber(void);
 extern int	GpFtsWalreceiverSender(void);
 
 /*
+ * Has a cancel come while this backend's commit waits for its mirror -- one
+ * gp_core keeps for the commit's end, where PostgreSQL would have ended the
+ * wait (gp_fts.c)?
+ */
+extern bool GpFtsCancelKept(void);
+
+/*
  * Settings, shared memory, the prober and what a segment answers it; from
  * gp_core's _PG_init, after the cluster is read.
  */

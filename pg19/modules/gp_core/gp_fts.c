@@ -67,16 +67,17 @@
  * writes a block of a file in the data directory, as Cloudberry's does, so
  * that a primary whose disk hangs is failed over from.
  *
- * R3.  A commit on a primary waits for its mirror to have it.  PostgreSQL
- * ends the wait when the backend is cancelled, with a warning, so the commit
- * can be missing on the mirror, and lost when FTS fails over to it;
- * Cloudberry's commit waits ignore a cancel.  With R3, SyncRepWaitForLSN()
- * keeps waiting while an extension sets SyncRepHoldCancelDuringWait and holds
- * cancel interrupts: gp_core does, on a segment, from the moment a
+ * A commit on a primary waits for its mirror to have it.  PostgreSQL ends
+ * the wait when the backend is cancelled, with a warning, so the commit can
+ * be missing on the mirror, and lost when FTS fails over to it; Cloudberry's
+ * commit waits ignore a cancel.  So on a segment, from the moment a
  * transaction commits or prepares -- or a prepared one is committed or rolled
- * back -- until it has, and then drops the cancel with Cloudberry's warning,
- * since what it would have cancelled is done.  FTS is what ends a wait for a
- * mirror that is not coming back, by turning synchronous replication off.
+ * back -- until it has, SIGINT is gp_core's: a cancel that comes then is kept
+ * rather than let end the wait in SyncRepWaitForLSN(), and dropped with
+ * Cloudberry's warning once the commit is done, since what it would have
+ * cancelled is done.  (A core patch, R3, did this until 2026-09-28.)  FTS is
+ * what ends a wait for a mirror that is not coming back, by turning
+ * synchronous replication off.
  *
  * Cloudberry sources this file stands in for:
  *	  src/backend/fts/fts.c, ftsprobe.c and ftsmessagehandler.c,
@@ -89,6 +90,7 @@
 #include "postgres.h"
 
 #include <fcntl.h>
+#include <signal.h>
 #include <time.h>
 #include <unistd.h>
 
@@ -567,10 +569,71 @@ fts_show_status(void)
 }
 
 /* ------------------------------------------------------------------------- */
-/* R3: a commit waits for the mirror, cancelled or not                       */
+/* A commit waits for the mirror, cancelled or not                           */
 /* ------------------------------------------------------------------------- */
 
+/*
+ * Every cancel is a SIGINT -- a client's, pg_cancel_backend()'s, a statement
+ * or lock timeout's -- and PostgreSQL's handler sets QueryCancelPending,
+ * which SyncRepWaitForLSN() reads to end the wait.  While the commit's window
+ * is open, fts_sigint() keeps the cancel for the window's end instead, and
+ * wakes the wait as PostgreSQL's handler would, so that a wait that looks
+ * sees the cancel came (GpFtsCancelKept(), a test's fault point); outside
+ * it, it hands the signal to the handler it found there.  It takes SIGINT only
+ * where the process has a handler of its own for it, not where it is ignored
+ * or left to its default.  PostgreSQL's pqsignal() installs its handlers
+ * through sigaction(), so the one found is called as it would have been.
+ */
 static bool commit_cancel_held = false;
+static volatile sig_atomic_t commit_window_open = false;
+static volatile sig_atomic_t commit_cancel_kept = false;
+static struct sigaction prev_sigint;
+
+static void
+fts_sigint(int signo, siginfo_t *info, void *context)
+{
+	if (commit_window_open)
+	{
+		int			save_errno = errno;
+
+		commit_cancel_kept = true;
+		SetLatch(MyLatch);
+		errno = save_errno;
+		return;
+	}
+	if (prev_sigint.sa_flags & SA_SIGINFO)
+		prev_sigint.sa_sigaction(signo, info, context);
+	else
+		prev_sigint.sa_handler(signo);
+}
+
+/* Has a cancel come while the commit's window is open, kept for its end? */
+bool
+GpFtsCancelKept(void)
+{
+	return commit_cancel_kept;
+}
+
+/* Is SIGINT fts_sigint() now, taken from the handler the process has? */
+static bool
+fts_take_sigint(void)
+{
+	struct sigaction cur;
+	struct sigaction act;
+
+	if (sigaction(SIGINT, NULL, &cur) != 0)
+		return false;
+	if ((cur.sa_flags & SA_SIGINFO) && cur.sa_sigaction == fts_sigint)
+		return true;
+	if (!(cur.sa_flags & SA_SIGINFO) &&
+		(cur.sa_handler == SIG_IGN || cur.sa_handler == SIG_DFL))
+		return false;
+	prev_sigint = cur;
+	act = cur;
+	act.sa_sigaction = fts_sigint;
+	act.sa_flags |= SA_SIGINFO;
+	return sigaction(SIGINT, &act, NULL) == 0;
+}
 
 static void
 commit_hold_cancel(void)
@@ -579,23 +642,46 @@ commit_hold_cancel(void)
 		return;
 	HOLD_CANCEL_INTERRUPTS();
 	commit_cancel_held = true;
+	if (fts_take_sigint())
+	{
+		commit_window_open = true;
+		/* a cancel that came before the window opened is kept too */
+		if (QueryCancelPending)
+		{
+			QueryCancelPending = false;
+			commit_cancel_kept = true;
+		}
+	}
 }
 
 /*
  * The commit is done: a cancel that came while it waited cancelled nothing,
  * and is dropped, in Cloudberry's words (syncrep.c), rather than left to
  * fail whatever this backend does next.  An error lets go of every hold,
- * ours too (errfinish), and then there is nothing to let go of.
+ * ours too (errfinish): a cancel kept is then PostgreSQL's again, pending as
+ * it would have been.
  */
 static void
 commit_release_cancel(void)
 {
+	bool		kept;
+
 	if (!commit_cancel_held)
 		return;
 	commit_cancel_held = false;
+	commit_window_open = false;
+	kept = commit_cancel_kept;
+	commit_cancel_kept = false;
 	if (QueryCancelHoldoffCount == 0)
+	{
+		if (kept)
+		{
+			QueryCancelPending = true;
+			InterruptPending = true;
+		}
 		return;
-	if (QueryCancelPending)
+	}
+	if (kept || QueryCancelPending)
 	{
 		QueryCancelPending = false;
 		ereport(WARNING,
@@ -2009,12 +2095,11 @@ GpFtsInit(void)
 	self = GpClusterSelf();
 
 	/*
-	 * R3, on a segment: its commits wait for its mirror, and a cancel does not
+	 * On a segment: its commits wait for its mirror, and a cancel does not
 	 * end the wait.
 	 */
 	if (self != NULL && self->content >= 0)
 	{
-		SyncRepHoldCancelDuringWait = true;
 		RegisterXactCallback(fts_xact_callback, NULL);
 		prev_process_utility = ProcessUtility_hook;
 		ProcessUtility_hook = fts_process_utility;

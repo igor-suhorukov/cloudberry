@@ -62,6 +62,7 @@
 #include "gp_cluster.h"
 #include "gp_dispatch.h"
 #include "gp_fault.h"
+#include "gp_fts.h"
 
 #define GP_FAULT_SLOTS		64
 #define GP_FAULT_NAMELEN	64
@@ -107,6 +108,7 @@ typedef enum GpPointArg
 	POINT_ARG_NONE,				/* nothing */
 	POINT_ARG_SKIP,				/* a bool *, set for a "skip" */
 	POINT_ARG_NAMES,			/* a const char *[2]: the database, the table */
+	POINT_ARG_CANCEL,			/* nothing; hit only where a cancel came */
 } GpPointArg;
 
 static const struct
@@ -121,7 +123,7 @@ static const struct
 	{"wal_sender_after_caughtup_within_range", "wal-sender-after-send", POINT_ARG_NONE},
 	{"walrecv_skip_flush", "walrecv-skip-flush", POINT_ARG_SKIP},
 	{"sync_rep_query_die", "sync-rep-query-die", POINT_ARG_NONE},
-	{"sync_rep_query_cancel", "sync-rep-query-cancel", POINT_ARG_NONE},
+	{"sync_rep_query_cancel", "sync-rep-query-cancel", POINT_ARG_CANCEL},
 	{"exec_simple_query_start", "exec-simple-query-start", POINT_ARG_NONE},
 	{"exec_hashjoin_new_batch", "exec-hashjoin-new-batch", POINT_ARG_NONE},
 	{"workfile_creation_failure", "workfile-creation-failure", POINT_ARG_NONE},
@@ -417,6 +419,12 @@ GpFaultTrigger(const char *name, const char *database, const char *table)
  * but for one that gives its callback a bool to set (fault_points).  It may
  * run in a critical section, as the two commits' of fault_points do, where
  * it allocates nothing but its log line, which the error context may.
+ *
+ * The point of a commit's wait for its standby that Cloudberry's
+ * sync_rep_query_cancel is, reached each time the wait wakes, is a hit only
+ * where a cancel came: pending, or kept by gp_core for the commit's end
+ * (gp_fts.c), which is where PostgreSQL's cancel would have ended the wait
+ * and Cloudberry's fault is.
  */
 PGDLLEXPORT void gp_fault_injection_point(const char *name,
 										  const void *private_data, void *arg);
@@ -431,14 +439,21 @@ gp_fault_injection_point(const char *name, const void *private_data,
 	bool		skip_arg = false;
 
 #ifdef USE_INJECTION_POINTS
-	switch (arg != NULL ? fault_point_arg(fault) : POINT_ARG_NONE)
+	switch (fault_point_arg(fault))
 	{
 		case POINT_ARG_SKIP:
-			skip_arg = true;
+			skip_arg = arg != NULL;
 			break;
 		case POINT_ARG_NAMES:
-			database = ((const char *const *) arg)[0];
-			table = ((const char *const *) arg)[1];
+			if (arg != NULL)
+			{
+				database = ((const char *const *) arg)[0];
+				table = ((const char *const *) arg)[1];
+			}
+			break;
+		case POINT_ARG_CANCEL:
+			if (!QueryCancelPending && !GpFtsCancelKept())
+				return;
 			break;
 		case POINT_ARG_NONE:
 			break;

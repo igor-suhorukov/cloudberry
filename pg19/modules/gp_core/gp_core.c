@@ -182,7 +182,7 @@ _PG_init(void)
 	 * FTS: on the coordinator the prober, which keeps what the file's nodes
 	 * are now -- which of a content's two is its primary, whether they are in
 	 * sync, whether each is up -- and on a segment what it answers a probe,
-	 * and the hold on a cancel while a commit waits for the mirror (R3).
+	 * and the hold on a cancel while a commit waits for the mirror.
 	 */
 	GpFtsInit();
 

@@ -311,7 +311,8 @@ from a primary that stops to its mirror.  What it finds is the role, mode
 and status `gp_segment_configuration` shows, kept in `gpsegconfig_dump` in
 the coordinator's data directory, and the dispatcher follows it, ending a
 transaction a failover catches as Cloudberry's does.  A segment's commit
-waits for its mirror whatever cancels it (R3).  A directory table's files
+waits for its mirror whatever cancels it: `gp_core` holds the cancel off
+the wait itself (`gp_fts.c`).  A directory table's files
 are WAL-logged, through `gp_sql`'s own resource manager, `gp_dirtable`
 (ID 198), so that a mirror has them; a server that replays them has to
 preload `gp_sql`.  A database copied (CREATE DATABASE ... TEMPLATE) or moved
