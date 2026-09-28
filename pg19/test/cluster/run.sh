@@ -337,6 +337,19 @@ if [ "$started" -eq 1 ]; then
 	same_everywhere "search_path is the segments' too" \
 		"SELECT 's1.in_s1'::regclass::oid::text"
 
+	# A gang made while the session was a user who is no superuser -- SET
+	# SESSION AUTHORIZATION, a statement, and back -- keeps that user on the
+	# segments, and is sent none of the settings only a superuser sets,
+	# log_min_messages among them, which its sessions would refuse.
+	q 0 "CREATE ROLE sa_u1 LOGIN; CREATE TABLE sa_t (a int) DISTRIBUTED BY (a);
+	     INSERT INTO sa_t VALUES (1), (2), (3); GRANT SELECT ON sa_t TO sa_u1;" >/dev/null
+	out=$(printf '%s\n' "SET SESSION AUTHORIZATION sa_u1;" "BEGIN;" "SELECT count(*) FROM sa_t;" \
+		"RESET SESSION AUTHORIZATION;" "END;" "SELECT count(*) FROM sa_t;" | qf 0 | tr '\n' ' ')
+	[ "$out" = "3 3 " ] \
+		&& ok "a gang made as a user who is no superuser is sent no superuser's setting once the session is a superuser's again" \
+		|| notok "the settings after SET SESSION AUTHORIZATION and back" "$out"
+	q 0 "DROP TABLE sa_t; DROP ROLE sa_u1;" >/dev/null
+
 	# gp_sql makes each partition as a statement of its own, with the
 	# parent's text; what travels is the tree, so each one arrives as itself.
 	q 0 "CREATE EXTENSION gp_sql;" >/dev/null

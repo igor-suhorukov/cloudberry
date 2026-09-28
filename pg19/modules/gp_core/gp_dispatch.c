@@ -431,8 +431,16 @@ segments_have_am(const char *amname)
  * neither could make a table with it.  Once they have it, it is sent.  A
  * copy: GetConfigOption() writes a number in a buffer of its own, which the
  * next one overwrites.
+ *
+ * A setting only a superuser sets goes where the segments' sessions are a
+ * superuser's: the coordinator's session user one, and the user the gang
+ * connected as, which is the segments' session user where it may not take
+ * the coordinator's.  A gang made while the session was a user who is none
+ * -- SET SESSION AUTHORIZATION to one, a dispatch, and back -- is sent none
+ * of them: a segment refused them, "permission denied to set parameter".
  */
 static char *gang_username;
+static bool gang_login_super;
 
 static const char *
 sync_value(int i)
@@ -441,7 +449,7 @@ sync_value(int i)
 
 	for (int j = 0; j < lengthof(superuser_settings); j++)
 		if (strcmp(synced_settings[i], superuser_settings[j]) == 0 &&
-			!superuser_arg(GetSessionUserId()))
+			(!superuser_arg(GetSessionUserId()) || !gang_login_super))
 			return NULL;
 	value = GetConfigOption(synced_settings[i], true, false);
 	if (value != NULL && IsTransactionState() &&
@@ -588,6 +596,7 @@ static bool exit_callback_registered = false;
  */
 static char *gang_dbname = NULL;
 static char *gang_username = NULL;
+static bool gang_login_super = false;	/* gang_username is a superuser */
 
 /* The connection a COPY ... FROM STDIN is going through, if any. */
 static GpSegmentConn *copying = NULL;
@@ -949,6 +958,7 @@ gang_connect(void)
 		pfree(gang_username);
 	gang_dbname = MemoryContextStrdup(TopMemoryContext, dbname);
 	gang_username = MemoryContextStrdup(TopMemoryContext, username);
+	gang_login_super = superuser_arg(GetSessionUserId());
 
 	if (!exit_callback_registered)
 	{
