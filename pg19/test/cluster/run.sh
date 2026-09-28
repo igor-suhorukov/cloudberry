@@ -3410,6 +3410,22 @@ COMMIT;"
 	[ "$out" = "2MB" ] && ok "Cloudberry's other settings are accepted, and say what they do here" \
 		|| notok "Cloudberry's accepted settings" "$out"
 
+	# SERIALIZABLE is REPEATABLE READ on a cluster, as in Cloudberry: no
+	# node's serializable snapshot isolation sees another's rows.
+	out=$(printf '%s\n' "SET SESSION CHARACTERISTICS AS TRANSACTION ISOLATION LEVEL SERIALIZABLE;" \
+		"SHOW default_transaction_isolation;" "RESET default_transaction_isolation;" \
+		"BEGIN ISOLATION LEVEL SERIALIZABLE;" "SHOW transaction_isolation;" \
+		"SELECT DISTINCT result FROM gp.exec_on_segments('SHOW transaction_isolation');" "COMMIT;" | qf 0)
+	[ "$out" = "repeatable read
+repeatable read
+repeatable read" ] && ok "SERIALIZABLE, asked for, is REPEATABLE READ on the coordinator and the segments" \
+		|| notok "SERIALIZABLE on a cluster" "$out"
+	out=$(q 0 "ALTER ROLE CURRENT_USER SET default_transaction_isolation = 'serializable';")
+	out2=$(q 0 "SHOW default_transaction_isolation;")
+	q 0 "ALTER ROLE CURRENT_USER RESET default_transaction_isolation;" >/dev/null
+	[ -z "$out" ] && [ "$out2" = "repeatable read" ] && ok "and so is a role's default of it" \
+		|| notok "a role's default of SERIALIZABLE" "$out / $out2"
+
 	# Cloudberry's EXPLAIN options: the slice table of the planner's route --
 	# slice 0 the coordinator's, a Reader a gather, each gather labelled with
 	# its slice -- a write's Primary Writer, the table in JSON; and where each
@@ -5109,6 +5125,10 @@ if "$BINDIR/pg_ctl" -D "$d" -l "$ROOT/node0.log" -w -t 30 start >/dev/null 2>&1;
 	out=$(q 0 "CREATE TABLE sn (a int); INSERT INTO sn VALUES (1), (2); SELECT DISTINCT gp_segment_id FROM sn;")
 	[ "$out" = "-1" ] && ok "gp_segment_id is -1, as on Cloudberry's single node" \
 		|| notok "gp_segment_id on one node" "$out"
+
+	out=$(q 0 "BEGIN ISOLATION LEVEL SERIALIZABLE; SHOW transaction_isolation; COMMIT;")
+	[ "$out" = "serializable" ] && ok "and SERIALIZABLE is PostgreSQL's, which is serializable on one node" \
+		|| notok "SERIALIZABLE on one node" "$out"
 else
 	notok "a server with no cluster starts" "$(tail -5 "$ROOT/node0.log")"
 fi

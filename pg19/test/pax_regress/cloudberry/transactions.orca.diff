@@ -36,12 +36,3 @@
 -(5 rows)
 -
 +ERROR:  current transaction is aborted, commands ignored until end of transaction block
-@@
-- repeatable read
-+ serializable
-@@
-- repeatable read
-+ serializable
-@@
-- repeatable read
-+ serializable

@@ -170,6 +170,11 @@ On a cluster (M2), `gp_core` and `gp_orca`:
   coordinator writes;
 - Cloudberry's settings of the dispatcher and the planner, as `gp.*`, among
   them direct dispatch's INFO lines and autostats;
+- SERIALIZABLE, on a cluster, is REPEATABLE READ, as in Cloudberry and
+  Greenplum, and as the plan's Track C drops it (the DTM's effort table,
+  "Drop": "SERIALIZABLE (as in Greenplum)"): each node's serializable
+  snapshot isolation sees none of another's rows, so a conflict split over
+  two segments would commit; one node keeps PostgreSQL's;
 - EXPLAIN's `slicetable` and `locus` options, Cloudberry's; **EXPLAIN
   ANALYZE of what the segments ran**, which each segment measures and
   sends the coordinator as an INFO of gp_core's as its part ends: the
