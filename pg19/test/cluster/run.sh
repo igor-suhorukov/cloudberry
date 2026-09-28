@@ -3348,6 +3348,58 @@ COMMIT;"
 		*) notok "a correlated scalar subquery of an aggregate as a join" "$plan" ;;
 	esac
 
+	# A write of a materialized view is refused as PostgreSQL's
+	# CheckValidResultRel() refuses it, before a row is made, in its words and
+	# on the coordinator -- where the segments' COPY refused the routed rows in
+	# its own, "cannot copy to materialized view" -- under EXPLAIN too, and
+	# an unpopulated view's as well; a read of an unpopulated view by a user
+	# who may not read it is refused for that first, as InitPlan() checks.
+	# REFRESH, which writes the view under its maintenance, still fills it.
+	# Here, where the coordinator has the secret a segment fills a view by.
+	# mvw_writes <settings> <filter>: what each write says, one after another
+	mvw_writes() {
+		local stmt
+		for stmt in "INSERT INTO mvw VALUES (2, 2)" "INSERT INTO mvw SELECT * FROM mvw_base" \
+				"INSERT INTO mvw VALUES (2, 2) RETURNING *" "UPDATE mvw SET b = 3" "DELETE FROM mvw" \
+				"UPDATE mvw SET b = 3 FROM mvw_base WHERE mvw.a = mvw_base.a" \
+				"EXPLAIN INSERT INTO mvw VALUES (2, 2)" "INSERT INTO mvw_rep VALUES (2, 2)" \
+				"INSERT INTO mvw_empty VALUES (2, 2)" "INSERT INTO mvw_empty SELECT * FROM mvw_empty"; do
+			q 0 "$1 $stmt;" | $2
+		done
+	}
+	mvw_want='ERROR:  cannot change materialized view "mvw"
+ERROR:  cannot change materialized view "mvw"
+ERROR:  cannot change materialized view "mvw"
+ERROR:  cannot change materialized view "mvw"
+ERROR:  cannot change materialized view "mvw"
+ERROR:  cannot change materialized view "mvw"
+ERROR:  cannot change materialized view "mvw"
+ERROR:  cannot change materialized view "mvw_rep"
+ERROR:  cannot change materialized view "mvw_empty"
+ERROR:  cannot change materialized view "mvw_empty"'
+	setup=$(q 0 "CREATE TABLE mvw_base (a int, b int) DISTRIBUTED BY (a); INSERT INTO mvw_base VALUES (1, 1);"
+			q 0 "CREATE MATERIALIZED VIEW mvw AS SELECT a, b FROM mvw_base DISTRIBUTED BY (a);"
+			q 0 "CREATE MATERIALIZED VIEW mvw_rep AS SELECT a, b FROM mvw_base DISTRIBUTED REPLICATED;"
+			q 0 "CREATE MATERIALIZED VIEW mvw_empty AS SELECT a, b FROM mvw_base WITH NO DATA DISTRIBUTED BY (a);"
+			q 0 "CREATE ROLE mvw_reader LOGIN;")
+	out=$(mvw_writes "SET gp.optimizer = off;" cat)
+	[ "$out" = "$mvw_want" ] && ok "a write of a materialized view is refused in PostgreSQL's words, on the coordinator" \
+		|| notok "a write of a materialized view" "$setup / $out"
+	out=$(q 0 "SET ROLE mvw_reader; SELECT * FROM mvw_empty;")
+	out2=$(q 0 "SELECT * FROM mvw_empty;" | head -1)
+	q 0 "INSERT INTO mvw_base VALUES (2, 2);" >/dev/null
+	out3=$(q 0 "REFRESH MATERIALIZED VIEW mvw;" && q 0 "SELECT count(*) FROM mvw;")
+	[ "$out|$out2|$out3" = 'ERROR:  permission denied for materialized view mvw_empty|ERROR:  materialized view "mvw_empty" has not been populated|2' ] \
+		&& ok "... a read of an unpopulated one checks the privileges first, and REFRESH still writes one" \
+		|| notok "an unpopulated materialized view, and REFRESH" "$out / $out2 / $out3"
+
+	# Under ORCA in the same words, which a segment's ModifyTable says where
+	# ORCA writes there -- an unpopulated view's too, whose write is no scan
+	# of it.
+	out=$(mvw_writes "SET gp.optimizer = on;" "head -1")
+	[ "$out" = "$mvw_want" ] && ok "under ORCA a write of a materialized view is refused in the same words" \
+		|| notok "a write of a materialized view under ORCA" "$out"
+
 	# No secret on the coordinator: ORCA is told, and the planner gathers.
 	# None on the segments either -- a segment that has one takes the
 	# coordinator's word only with it, and a transaction's two-phase commit
