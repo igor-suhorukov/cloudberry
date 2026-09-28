@@ -371,7 +371,7 @@ run  icudp/queue_depth_combination_capacity
 run  icudp/queue_depth_combination_loss_advance
 port icudp_off
 skip event_trigger_gp  differs: CREATE EXTERNAL TABLE fires the event triggers as CREATE FOREIGN TABLE, which the port makes it, and CREATE PROTOCOL and DROP PROTOCOL fire none
-run  deadlock  orca  under the planner, its left join of l and r by a nested loop, which the planner's route runs on the coordinator over both tables gathered, 100,000 rows each, runs past the suite's minute
+run  deadlock
 skip deadlock2  differs: Cloudberry's NOTICE that a slice prefetches a join's qual is not the port's
 run  workfile/hashagg_spill
 run  workfile/hashjoin_spill

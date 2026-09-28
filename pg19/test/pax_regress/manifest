@@ -432,7 +432,7 @@ port icudp_on
 run  icudp/gp_interconnect_fc_method
 run  icudp/queue_depth_combination_capacity
 port icudp_off
-skip deadlock  canceling statement due to user request; function gp_dist_wait_status() does not exist
+run  deadlock
 skip deadlock2  differs: Cloudberry's NOTICE that a slice prefetches a join's qual is not the port's
 run  workfile/hashagg_spill
 run  workfile/hashjoin_spill

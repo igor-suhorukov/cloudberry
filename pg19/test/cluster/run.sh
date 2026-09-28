@@ -3347,6 +3347,48 @@ COMMIT;"
 		*) notok "NOT IN as an anti-join" "$plan / $alone" ;;
 	esac
 
+	# With hash joins off -- a test turns them off to have its nested loop --
+	# the loop's inner gather is keyed by the join's equality (gp_scan.c):
+	# gathered once, its rows kept by their key, and each outer row given
+	# those of its value.  It answers as the hash join does: a left join and
+	# an inner one, NULL keys on both sides, an int against an int8, text,
+	# two keys, a condition beside the key, NOT EXISTS, and a keyed gather
+	# in a subquery run for each row.  With hash joins on the plan is the
+	# hash join, as it was.
+	q 0 "CREATE TABLE kga (i int, k int, t text) DISTRIBUTED BY (i);
+	     CREATE TABLE kgb (i int, k int, k8 int8, t text) DISTRIBUTED BY (i);
+	     INSERT INTO kga SELECT i, CASE WHEN i % 17 = 0 THEN NULL ELSE i % 997 END,
+	                            CASE WHEN i % 19 = 0 THEN NULL ELSE 'v' || (i % 331) END
+	                       FROM generate_series(1, 6000) i;
+	     INSERT INTO kgb SELECT i, CASE WHEN i % 13 = 0 THEN NULL ELSE (i * 7) % 1500 END,
+	                            (i * 7) % 1500, 'v' || (i % 500)
+	                       FROM generate_series(1, 9000) i;
+	     ANALYZE kga; ANALYZE kgb;" >/dev/null
+	same=0; n=0; keyed=0
+	for c in "kga a LEFT JOIN kgb b ON a.k = b.k" "kga a JOIN kgb b ON a.k = b.k" \
+		"kga a LEFT JOIN kgb b ON a.k = b.k8" "kga a LEFT JOIN kgb b ON a.t = b.t" \
+		"kga a LEFT JOIN kgb b ON a.k = b.k AND a.t = b.t" \
+		"kga a LEFT JOIN kgb b ON a.k + 1 = b.k AND b.i > a.i"; do
+		n=$((n + 1))
+		got=$(q 0 "SET gp.optimizer = off; SET enable_hashjoin = off; SET enable_mergejoin = off; SELECT count(*), sum(a.i), sum(b.i) FROM $c;")
+		want=$(q 0 "SET gp.optimizer = off; SELECT count(*), sum(a.i), sum(b.i) FROM $c;")
+		[ -n "$got" ] && [ "$got" = "$want" ] && same=$((same + 1))
+		q 0 "SET gp.optimizer = off; SET enable_hashjoin = off; SET enable_mergejoin = off; EXPLAIN (COSTS OFF) SELECT count(*) FROM $c;" \
+			| grep -q "Lookup Key" && keyed=$((keyed + 1))
+	done
+	for c in "count(*) FROM kga a WHERE NOT EXISTS (SELECT 1 FROM kgb b WHERE b.k = a.k)" \
+		"count(*) FROM kga a WHERE a.i < 200 AND (SELECT count(*) FROM kgb b JOIN kga c ON b.k = c.k WHERE b.i = a.i) > 0"; do
+		n=$((n + 1))
+		got=$(q 0 "SET gp.optimizer = off; SET enable_hashjoin = off; SET enable_mergejoin = off; SELECT $c;")
+		want=$(q 0 "SET gp.optimizer = off; SELECT $c;")
+		[ -n "$got" ] && [ "$got" = "$want" ] && same=$((same + 1))
+	done
+	hashed=$(q 0 "SET gp.optimizer = off; EXPLAIN (COSTS OFF) SELECT count(*) FROM kga a LEFT JOIN kgb b ON a.k = b.k;" | tr '\n' ' ')
+	[ "$same" = "$n" ] && [ "$keyed" = 6 ] && [ "${hashed#*Hash Cond}" != "$hashed" ] &&
+		[ "${hashed#*Lookup Key}" = "$hashed" ] \
+		&& ok "with hash joins off a nested loop's inner gather is keyed by the join's equality, answering as the hash join does -- $n of them; with them on the plan is the hash join" \
+		|| notok "keyed gathers" "$same of $n / $keyed keyed / $hashed"
+
 	# No secret on the coordinator: ORCA is told, and the planner gathers.
 	# None on the segments either -- a segment that has one takes the
 	# coordinator's word only with it, and a transaction's two-phase commit

@@ -170,6 +170,8 @@
 #define GATHER_PRIVATE_LIMIT		13	/* " LIMIT n" a LIMIT above sends, or "" */
 #define GATHER_PRIVATE_FOLDED		14	/* the conditions sent, their stable
 										 * constant parts as $N, or "" */
+#define GATHER_PRIVATE_KEYED		15	/* its rows kept by their key, for
+										 * each run of a nested loop's */
 
 /*
  * The first $N a condition's stable constant part is sent as, until the
@@ -248,7 +250,13 @@ typedef struct GatherScanState
 	AttrNumber	epq_segcol;		/* the segment of a row mark's row, in the
 								 * plan's row: 0 not looked for, -1 none */
 	TupleTableSlot *epq_row;	/* a row mark's copy of the row */
+
+	/* A keyed gather's rows, kept by their key (keyed_init()), or NULL */
+	struct KeyedGather *keyed;
 } GatherScanState;
+
+static void keyed_init(GatherScanState *state, CustomScan *cscan,
+					   EState *estate);
 
 /*
  * The planning in progress is a cursor's (see GpScanSetCursor()): its
@@ -1490,6 +1498,162 @@ GpScanNoticeSublinkCtid(Query *parse)
 	(void) query_tree_walker(parse, sublink_notice_walker, &cxt, 0);
 }
 
+/*
+ * Keyed gathers.  A join the planner may not hash -- enable_hashjoin off, as
+ * a test turns it off to have its nested loop -- runs its inner side for each
+ * outer row, and a gather there gives what it kept each time, every row of it
+ * (mark_rescans()): a nested loop of two tables gathered compares every row
+ * of one with every row of the other, on the coordinator, where Cloudberry's
+ * planner redistributes them so that only the rows that may match meet, on a
+ * segment -- deadlock's left join of 100,000 rows by 100,000 took minutes.
+ * So where hash joins are off a gather is offered parameterized by a join's
+ * equality, as an index scan is: it gathers its table once, keeps the rows by
+ * their key's hash (keyed_init()), and gives each run of the loop the rows
+ * whose key hashes as the outer row's value does; the equality is the scan's
+ * condition still, which checks each of them.  With hash joins on no such
+ * gather is offered: the planner hashes the join itself, and no plan of any
+ * query is other than it was.  Not for a statement that writes or locks rows,
+ * or a cursor's, whose gathers bring each row's ctid; nor for a rel read
+ * laterally, whose gather is parameterized by what it reads already, or a
+ * partition, which its parent's Append gathers: a table read on its own.
+ */
+
+/* A join clause whose one side is the rel's own, the other of rels outside it. */
+static bool
+keyable_clause(RestrictInfo *rinfo, RelOptInfo *rel)
+{
+	if (!OidIsValid(rinfo->hashjoinoperator) || rinfo->pseudoconstant)
+		return false;
+	return (bms_equal(rinfo->left_relids, rel->relids) &&
+			!bms_overlap(rinfo->right_relids, rel->relids)) ||
+		(bms_equal(rinfo->right_relids, rel->relids) &&
+		 !bms_overlap(rinfo->left_relids, rel->relids));
+}
+
+/* The outer rels a keyable clause parameterizes the rel's gather by. */
+static void
+keyed_candidate(PlannerInfo *root, RelOptInfo *rel, RestrictInfo *rinfo,
+				List **ppis)
+{
+	Relids		outer;
+
+	if (!keyable_clause(rinfo, rel) || !join_clause_is_movable_to(rinfo, rel))
+		return;
+	outer = bms_del_member(bms_copy(rinfo->clause_relids), rel->relid);
+	if (bms_is_empty(outer) || !bms_is_subset(outer, root->all_baserels))
+		return;
+	*ppis = list_append_unique_ptr(*ppis, get_baserel_parampathinfo(root, rel, outer));
+}
+
+/* An equivalence class's member of the rel's alone, one at a time. */
+typedef struct KeyedMember
+{
+	Expr	   *current;
+	List	   *used;
+} KeyedMember;
+
+static bool
+keyed_member(PlannerInfo *root, RelOptInfo *rel, EquivalenceClass *ec,
+			 EquivalenceMember *em, void *arg)
+{
+	KeyedMember *member = (KeyedMember *) arg;
+
+	if (member->current != NULL)
+		return equal(em->em_expr, member->current);
+	if (list_member(member->used, em->em_expr))
+		return false;
+	member->current = em->em_expr;
+	return true;
+}
+
+/*
+ * A keyed gather's path for each set of outer rels a join's equality reads,
+ * found as postgres_fdw finds its parameterized paths: in the rel's join
+ * clauses, and in the equivalence classes a join's equalities are made of.
+ * The gather is one, however often the loop runs its inner side: its cost is
+ * spread over the outer rel's rows, each run costing the lookup and the rows
+ * it gives.
+ */
+static void
+add_keyed_gather_paths(PlannerInfo *root, RelOptInfo *rel)
+{
+	List	   *ppis = NIL;
+	Cost		gathered;
+
+	if (enable_hashjoin || rel->reloptkind != RELOPT_BASEREL ||
+		!bms_is_empty(rel->lateral_relids) || planning_cursor ||
+		root->parse->commandType != CMD_SELECT || root->rowMarks != NIL)
+		return;
+
+	/* its rows kept must fit hash_mem, as a hash join's in one batch do */
+	if (rel->rows * (MAXALIGN(rel->reltarget->width) +
+					 MAXALIGN(SizeofMinimalTupleHeader)) > get_hash_memory_limit())
+		return;
+
+	foreach_node(RestrictInfo, rinfo, rel->joininfo)
+		keyed_candidate(root, rel, rinfo, &ppis);
+	if (rel->has_eclass_joins)
+	{
+		KeyedMember member = {NULL, NIL};
+
+		for (;;)
+		{
+			List	   *clauses;
+
+			member.current = NULL;
+			clauses = generate_implied_equalities_for_column(root, rel,
+															 keyed_member,
+															 &member,
+															 rel->lateral_referencers);
+			if (member.current == NULL)
+				break;
+			foreach_node(RestrictInfo, rinfo, clauses)
+				keyed_candidate(root, rel, rinfo, &ppis);
+			member.used = lappend(member.used, member.current);
+		}
+	}
+
+	/* the plain gather's cost (gp_set_rel_pathlist()) */
+	gathered = GATHER_STARTUP_COST + rel->rows * (GATHER_ROW_COST + cpu_tuple_cost);
+
+	foreach_ptr(ParamPathInfo, ppi, ppis)
+	{
+		CustomPath *cp = makeNode(CustomPath);
+		double		runs = 1;
+		int			nkeys = 0;
+		int			relid = -1;
+
+		foreach_node(RestrictInfo, rinfo, ppi->ppi_clauses)
+			if (keyable_clause(rinfo, rel))
+				nkeys++;
+		if (nkeys == 0)
+			continue;
+		while ((relid = bms_next_member(ppi->ppi_req_outer, relid)) >= 0)
+			runs = Max(runs, find_base_rel(root, relid)->rows);
+
+		cp->path.pathtype = T_CustomScan;
+		cp->path.parent = rel;
+		cp->path.pathtarget = rel->reltarget;
+		cp->path.param_info = ppi;
+		cp->path.parallel_aware = false;
+		cp->path.parallel_safe = false;
+		cp->path.parallel_workers = 0;
+		cp->path.rows = ppi->ppi_rows;
+		/* the gather, and each row kept by its key's hash, once in all */
+		cp->path.startup_cost = (gathered + rel->rows *
+								 (nkeys * cpu_operator_cost + cpu_tuple_cost)) / runs;
+		/* and each run's lookup, and the rows it gives */
+		cp->path.total_cost = cp->path.startup_cost +
+			nkeys * cpu_operator_cost + ppi->ppi_rows * cpu_tuple_cost;
+		cp->path.pathkeys = NIL;
+		cp->flags = CUSTOMPATH_SUPPORT_PROJECTION;
+		cp->custom_paths = NIL;
+		cp->custom_private = list_make1(makeBoolean(true));
+		cp->methods = &gather_path_methods;
+		add_path(rel, &cp->path);
+	}
+}
+
 static void
 gp_set_rel_pathlist(PlannerInfo *root, RelOptInfo *rel, Index rti,
 					RangeTblEntry *rte)
@@ -1579,6 +1743,9 @@ gp_set_rel_pathlist(PlannerInfo *root, RelOptInfo *rel, Index rti,
 	cp->methods = &gather_path_methods;
 
 	add_path(rel, &cp->path);
+
+	/* and, where joins are not hashed, keyed gathers of it */
+	add_keyed_gather_paths(root, rel);
 }
 
 /* The locking clause a gather sends the segments; see GpScanSetLocking(). */
@@ -1716,6 +1883,7 @@ gather_plan(PlannerInfo *root, RelOptInfo *rel, CustomPath *best_path,
 	int			ctid_remote = -1;
 	bool		whole_row;
 	bool		identity;
+	bool		keyed;
 	Node	   *segment_of = NULL;
 	static const AttrNumber sysattrs[] = {
 		MinTransactionIdAttributeNumber, MinCommandIdAttributeNumber,
@@ -1954,6 +2122,11 @@ gather_plan(PlannerInfo *root, RelOptInfo *rel, CustomPath *best_path,
 	cscan->custom_private = lappend(cscan->custom_private, makeString(""));
 	cscan->custom_private = lappend(cscan->custom_private,
 									makeString(folds != NIL ? folded.data : ""));
+	/* a keyed gather's path, where no row's ctid is read: it reads them again */
+	keyed = best_path->custom_private != NIL &&
+		boolVal(linitial(best_path->custom_private)) &&
+		ctid_remote < 0 && !identity && locking.len == 0 && current_of == NULL;
+	cscan->custom_private = lappend(cscan->custom_private, makeBoolean(keyed));
 	cscan->methods = &gather_scan_methods;
 
 	return &cscan->scan.plan;
@@ -2072,6 +2245,11 @@ gather_begin(CustomScanState *node, EState *estate, int eflags)
 			GpReportDtxReached(estate->es_plannedstmt, NULL, state->nsegments);
 		}
 	}
+
+	/* a keyed gather's rows, kept by their key (add_keyed_gather_paths()) */
+	if (list_length(cscan->custom_private) > GATHER_PRIVATE_KEYED &&
+		boolVal(list_nth(cscan->custom_private, GATHER_PRIVATE_KEYED)))
+		keyed_init(state, cscan, estate);
 }
 
 /* The name WHERE CURRENT OF gives the cursor by: its own, or a parameter's. */
@@ -2610,6 +2788,298 @@ gather_fetch(GatherScanState *state, TupleTableSlot *slot)
 	return false;
 }
 
+/*
+ * A keyed gather (add_keyed_gather_paths()): the rows it gathered, kept by
+ * the hash of their key, for each run of the nested loop it is the inner side
+ * of -- as a hash join keeps its inner side's rows, which it would be but for
+ * enable_hashjoin.  Its keys are the scan's conditions that are a hash join's
+ * equality of an expression of the row and one of what a run sets, the loop's
+ * parameters.  A row whose key is NULL equals nothing, the operator being
+ * strict, and is not kept.  Past hash_mem the rows are all kept in a
+ * tuplestore that spills, and each run is given them all, the conditions to
+ * choose from: what a gather the loop reads again does without keys.
+ */
+typedef struct KeyedRows
+{
+	uint32		hash;			/* the key's hash, the entry's own key */
+	List	   *rows;			/* the rows whose key hashes so, each a
+								 * MinimalTuple */
+} KeyedRows;
+
+typedef struct KeyedGather
+{
+	int			nkeys;
+	List	   *keys;			/* each key, of the scan tuple, as planned */
+	ExprState **key;			/* and as run */
+	ExprState **probe;			/* what it equals, of what a run sets */
+	FmgrInfo   *key_hash;		/* the hash function of each */
+	FmgrInfo   *probe_hash;
+	Oid		   *collations;
+	MemoryContext cxt;			/* the table and the rows it keeps */
+	HTAB	   *table;			/* hash -> KeyedRows */
+	Size		size;			/* the bytes of the rows kept */
+	Tuplestorestate *all;		/* past hash_mem: every row, or NULL */
+	bool		built;			/* read from the segments to their end */
+	bool		probed;			/* this run's rows looked up */
+	List	   *rows;			/* this run's rows, */
+	ListCell   *next;			/* and the one to give next */
+	TupleTableSlot *row;		/* a row kept, read back */
+} KeyedGather;
+
+/* What an expression reads: 1 a column of the scan tuple, 2 a parameter. */
+static bool
+keyed_reads_walker(Node *node, int *reads)
+{
+	if (node == NULL)
+		return false;
+	if (IsA(node, Var))
+		*reads |= 1;
+	else if (IsA(node, Param))
+		*reads |= 2;
+	return expression_tree_walker(node, keyed_reads_walker, reads);
+}
+
+static int
+keyed_reads(Node *node)
+{
+	int			reads = 0;
+
+	(void) keyed_reads_walker(node, &reads);
+	return reads;
+}
+
+/*
+ * The keys, from the scan's conditions as the executor has them: a column of
+ * the scan tuple's on one side, and on the other what is the same for a whole
+ * run -- the loop's parameters, a constant, an initplan's value.
+ */
+static void
+keyed_init(GatherScanState *state, CustomScan *cscan, EState *estate)
+{
+	KeyedGather *kg = palloc0_object(KeyedGather);
+	List	   *probes = NIL;
+	List	   *key_fns = NIL;
+	List	   *probe_fns = NIL;
+	List	   *collations = NIL;
+	HASHCTL		ctl;
+	int			i = 0;
+
+	foreach_ptr(Expr, clause, cscan->scan.plan.qual)
+	{
+		OpExpr	   *op = (OpExpr *) clause;
+		RegProcedure left_fn;
+		RegProcedure right_fn;
+		Node	   *left;
+		Node	   *right;
+
+		if (!IsA(op, OpExpr) || list_length(op->args) != 2 ||
+			contain_volatile_functions((Node *) op))
+			continue;
+		left = linitial(op->args);
+		right = lsecond(op->args);
+		if (!get_op_hash_functions_ext(op->opno, exprType(left), &left_fn, &right_fn))
+			continue;
+		if (keyed_reads(left) == 1 && (keyed_reads(right) & 1) == 0)
+		{
+			kg->keys = lappend(kg->keys, left);
+			probes = lappend(probes, right);
+			key_fns = lappend_oid(key_fns, left_fn);
+			probe_fns = lappend_oid(probe_fns, right_fn);
+		}
+		else if (keyed_reads(right) == 1 && (keyed_reads(left) & 1) == 0)
+		{
+			kg->keys = lappend(kg->keys, right);
+			probes = lappend(probes, left);
+			key_fns = lappend_oid(key_fns, right_fn);
+			probe_fns = lappend_oid(probe_fns, left_fn);
+		}
+		else
+			continue;
+		collations = lappend_oid(collations, op->inputcollid);
+	}
+
+	/* none: the gather keeps what it read as any the loop reads again does */
+	if (kg->keys == NIL)
+		return;
+
+	kg->nkeys = list_length(kg->keys);
+	kg->key = palloc_array(ExprState *, kg->nkeys);
+	kg->probe = palloc_array(ExprState *, kg->nkeys);
+	kg->key_hash = palloc_array(FmgrInfo, kg->nkeys);
+	kg->probe_hash = palloc_array(FmgrInfo, kg->nkeys);
+	kg->collations = palloc_array(Oid, kg->nkeys);
+	foreach_ptr(Expr, key, kg->keys)
+	{
+		kg->key[i] = ExecInitExpr(key, &state->css.ss.ps);
+		kg->probe[i] = ExecInitExpr((Expr *) list_nth(probes, i), &state->css.ss.ps);
+		fmgr_info(list_nth_oid(key_fns, i), &kg->key_hash[i]);
+		fmgr_info(list_nth_oid(probe_fns, i), &kg->probe_hash[i]);
+		kg->collations[i] = list_nth_oid(collations, i);
+		i++;
+	}
+	kg->cxt = AllocSetContextCreate(estate->es_query_cxt, "keyed gather",
+									ALLOCSET_DEFAULT_SIZES);
+	ctl.keysize = sizeof(uint32);
+	ctl.entrysize = sizeof(KeyedRows);
+	ctl.hcxt = kg->cxt;
+	kg->table = hash_create("keyed gather", 1024, &ctl,
+							HASH_ELEM | HASH_BLOBS | HASH_CONTEXT);
+	kg->row = ExecInitExtraTupleSlot(estate,
+									 state->css.ss.ss_ScanTupleSlot->tts_tupleDescriptor,
+									 &TTSOpsMinimalTuple);
+	state->keyed = kg;
+}
+
+/* The hash of a row's key, or of a run's value; false where one is NULL. */
+static bool
+keyed_hash(KeyedGather *kg, ExprState **exprs, FmgrInfo *fns,
+		   ExprContext *econtext, uint32 *hash)
+{
+	uint32		h = 0;
+
+	for (int i = 0; i < kg->nkeys; i++)
+	{
+		bool		isnull;
+		Datum		value = ExecEvalExprSwitchContext(exprs[i], econtext, &isnull);
+
+		if (isnull)
+			return false;
+		h = hash_combine(h, DatumGetUInt32(FunctionCall1Coll(&fns[i],
+															 kg->collations[i],
+															 value)));
+	}
+	*hash = h;
+	return true;
+}
+
+/* Past hash_mem: every row kept in a tuplestore, the table given up. */
+static void
+keyed_spill(GatherScanState *state)
+{
+	KeyedGather *kg = state->keyed;
+	MemoryContext oldcxt = MemoryContextSwitchTo(state->css.ss.ps.state->es_query_cxt);
+	HASH_SEQ_STATUS seq;
+	KeyedRows  *entry;
+
+	kg->all = tuplestore_begin_heap(false, false, work_mem);
+	MemoryContextSwitchTo(oldcxt);
+	hash_seq_init(&seq, kg->table);
+	while ((entry = (KeyedRows *) hash_seq_search(&seq)) != NULL)
+	{
+		foreach_ptr(MinimalTupleData, tuple, entry->rows)
+		{
+			ExecStoreMinimalTuple(tuple, kg->row, false);
+			tuplestore_puttupleslot(kg->all, kg->row);
+		}
+	}
+	ExecClearTuple(kg->row);
+	kg->table = NULL;
+	MemoryContextReset(kg->cxt);
+}
+
+/* The rows from the segments, to their end, each kept by its key. */
+static void
+keyed_build(GatherScanState *state, TupleTableSlot *slot)
+{
+	KeyedGather *kg = state->keyed;
+	ExprContext *econtext = state->css.ss.ps.ps_ExprContext;
+	Size		limit = get_hash_memory_limit();
+
+	while (gather_fetch(state, slot))
+	{
+		uint32		hash;
+
+		econtext->ecxt_scantuple = slot;
+		if (keyed_hash(kg, kg->key, kg->key_hash, econtext, &hash))
+		{
+			if (kg->all != NULL)
+				tuplestore_puttupleslot(kg->all, slot);
+			else
+			{
+				MemoryContext oldcxt = MemoryContextSwitchTo(kg->cxt);
+				MinimalTuple tuple = ExecCopySlotMinimalTuple(slot);
+				KeyedRows  *entry;
+				bool		found;
+
+				entry = (KeyedRows *) hash_search(kg->table, &hash, HASH_ENTER, &found);
+				if (!found)
+					entry->rows = NIL;
+				entry->rows = lappend(entry->rows, tuple);
+				kg->size += GetMemoryChunkSpace(tuple) + sizeof(ListCell);
+				MemoryContextSwitchTo(oldcxt);
+				if (kg->size > limit)
+					keyed_spill(state);
+			}
+		}
+		ResetExprContext(econtext);
+	}
+	if (kg->all != NULL)
+		tuplestore_rescan(kg->all);
+	kg->built = true;
+}
+
+/*
+ * The next row of this run's key, into the scan slot: the rows of the key
+ * the run's value hashes to, which the scan's conditions check -- or past
+ * hash_mem every row.  False when the run has no more.
+ */
+static bool
+keyed_fetch(GatherScanState *state, TupleTableSlot *slot)
+{
+	KeyedGather *kg = state->keyed;
+
+	if (!kg->built)
+		keyed_build(state, slot);
+
+	if (kg->all != NULL)
+	{
+		if (!tuplestore_gettupleslot(kg->all, true, false, kg->row))
+			return false;
+	}
+	else
+	{
+		if (!kg->probed)
+		{
+			KeyedRows  *entry = NULL;
+			uint32		hash;
+
+			if (keyed_hash(kg, kg->probe, kg->probe_hash,
+						   state->css.ss.ps.ps_ExprContext, &hash))
+				entry = (KeyedRows *) hash_search(kg->table, &hash, HASH_FIND, NULL);
+			kg->rows = entry != NULL ? entry->rows : NIL;
+			kg->next = list_head(kg->rows);
+			kg->probed = true;
+		}
+		if (kg->next == NULL)
+			return false;
+		ExecStoreMinimalTuple((MinimalTuple) lfirst(kg->next), kg->row, false);
+		kg->next = lnext(kg->rows, kg->next);
+	}
+	ExecCopySlot(slot, kg->row);
+	slot->tts_tableOid = RelationGetRelid(state->css.ss.ss_currentRelation);
+	return true;
+}
+
+/* Another run: its rows are looked up again, of the value it sets. */
+static void
+keyed_rescan(KeyedGather *kg)
+{
+	kg->probed = false;
+	kg->rows = NIL;
+	kg->next = NULL;
+	if (kg->all != NULL)
+		tuplestore_rescan(kg->all);
+}
+
+static void
+keyed_end(KeyedGather *kg)
+{
+	if (kg->all != NULL)
+		tuplestore_end(kg->all);
+	kg->all = NULL;
+	MemoryContextDelete(kg->cxt);
+}
+
 static TupleTableSlot *
 gather_next(ScanState *ss)
 {
@@ -2628,7 +3098,8 @@ gather_next(ScanState *ss)
 		return slot;
 	}
 
-	if (gather_fetch(state, slot))
+	/* a keyed gather's, the rows of this run's key (keyed_fetch()) */
+	if (state->keyed != NULL ? keyed_fetch(state, slot) : gather_fetch(state, slot))
 		return slot;
 	return ExecClearTuple(slot);
 }
@@ -2884,18 +3355,28 @@ gather_end(CustomScanState *node)
 	if (state->spool != NULL)
 		tuplestore_end(state->spool);
 	state->spool = NULL;
+	if (state->keyed != NULL)
+		keyed_end(state->keyed);
+	state->keyed = NULL;
 }
 
 /*
- * Read again: what it kept is read again (GpGatherScanMarkRescans()) -- or,
- * where it keeps nothing, the segments run the query again.  The query the
- * segments run has no parameter in it, which is what makes what it read the
- * answer whatever the parameters now are.
+ * Read again: what it kept is read again (GpGatherScanMarkRescans()), a keyed
+ * gather's rows of the key the parameters now give -- or, where it keeps
+ * nothing, the segments run the query again.  The query the segments run has
+ * no parameter in it, which is what makes what it read the answer whatever
+ * the parameters now are.
  */
 static void
 gather_rescan(CustomScanState *node)
 {
 	GatherScanState *state = (GatherScanState *) node;
+
+	if (state->keyed != NULL && state->keyed->built)
+	{
+		keyed_rescan(state->keyed);
+		return;
+	}
 
 	if (state->spool != NULL)
 	{
@@ -2924,7 +3405,8 @@ gather_rescan(CustomScanState *node)
  * gather that brings each row's ctid -- of a table the statement writes, or
  * locks rows of -- is run again, since a row it keeps has none.  A
  * Materialize that already keeps the rows, above a subtree with no parameter
- * to change, reads them once.
+ * to change, reads them once.  A keyed gather keeps its rows by their key
+ * itself (keyed_init()).
  */
 static void mark_rescans(PlanState *ps, bool again);
 
@@ -2954,8 +3436,8 @@ mark_rescans(PlanState *ps, bool again)
 	{
 		GatherScanState *state = (GatherScanState *) ps;
 
-		if (state->spool == NULL && state->ctid_remote < 0 &&
-			!gather_is_current_of(state))
+		if (state->spool == NULL && state->keyed == NULL &&
+			state->ctid_remote < 0 && !gather_is_current_of(state))
 		{
 			EState	   *estate = ps->state;
 			MemoryContext oldcxt = MemoryContextSwitchTo(estate->es_query_cxt);
@@ -3023,8 +3505,9 @@ GpGatherScanMarkRescans(PlanState *root)
  * side of a merge join, any other SubPlan and a CustomScan of another's may
  * stop short; the rest read their input as far as what reads them does.  A
  * gather that sends its LIMIT is read no further than it, and marked where
- * the walk reaches it.  Not a gather of rows being changed or locked or of a
- * cursor's rows, which are read as they are wanted.
+ * the walk reaches it, and a keyed gather keeps all it reads.  Not a gather
+ * of rows being changed or locked or of a cursor's rows, which are read as
+ * they are wanted.
  */
 static void mark_whole(PlanState *ps, bool whole);
 
@@ -3047,7 +3530,7 @@ mark_whole(PlanState *ps, bool whole)
 	{
 		GatherScanState *state = (GatherScanState *) ps;
 
-		state->whole = (whole || state->limit[0] != '\0') &&
+		state->whole = (whole || state->keyed != NULL || state->limit[0] != '\0') &&
 			!state->identity && state->ctid_remote < 0 &&
 			state->locking[0] == '\0' && !gather_is_current_of(state);
 		return;
@@ -3235,6 +3718,18 @@ gather_explain(CustomScanState *node, List *ancestors, ExplainState *es)
 	}
 	else
 		ExplainPropertyInteger("Segments", NULL, state->nsegments, es);
+
+	/* a keyed gather's keys, which its rows are kept by */
+	if (state->keyed != NULL)
+	{
+		List	   *context = set_deparse_context_plan(es->deparse_cxt,
+													   node->ss.ps.plan, ancestors);
+		List	   *keys = NIL;
+
+		foreach_ptr(Node, key, state->keyed->keys)
+			keys = lappend(keys, deparse_expression(key, context, es->verbose, false));
+		ExplainPropertyList("Lookup Key", keys, es);
+	}
 
 	if (es->verbose)
 	{

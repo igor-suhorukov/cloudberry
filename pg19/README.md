@@ -149,7 +149,10 @@ On a cluster (M2), `gp_core` and `gp_orca`:
   PostgreSQL's own plans gathering from the
   segments where ORCA does not plan, a NOT IN of a distributed table made
   an anti-join with its NULLs conditions beside it
-  (`modules/gp_core/gp_subselect.c`), writing a distributed table through an
+  (`modules/gp_core/gp_subselect.c`), a nested loop's inner gather keyed
+  by the join's equality where hash joins are off -- gathered once, each
+  outer row given the rows of its key (`modules/gp_core/gp_scan.c`),
+  writing a distributed table through an
   Explicit Redistribute Motion — each row changed on its segment by its ctid
   there, a row whose key changes moved by a Split that fires no trigger,
   RETURNING (old and new too) and a view's WITH CHECK OPTION and a table's
