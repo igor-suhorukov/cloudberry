@@ -130,8 +130,9 @@ extern bool GpGatherScanSetRuntimeFilter(struct PlanState *ps,
 										 const GpGatherRuntimeFilter *filter);
 
 /*
- * After planning: a gather a LIMIT reads sends the segments the LIMIT
- * (gp_modify.c).
+ * After planning: a gather a LIMIT reads sends the segments the LIMIT, and a
+ * nearest-neighbour search's -- a LIMIT over a Sort by a distance -- the
+ * Sort's keys with it, which each segment's index answers (gp_modify.c).
  */
 struct PlannedStmt;
 extern void GpScanBoundGathers(struct PlannedStmt *stmt);

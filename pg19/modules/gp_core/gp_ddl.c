@@ -1594,6 +1594,189 @@ sync_indcheckxmin(List *assigned)
 	}
 }
 
+/*
+ * Does the statement build indexes over the tables' rows: CREATE INDEX,
+ * REINDEX, and a table rewritten whole -- REPACK, CLUSTER and VACUUM FULL?
+ * The coordinator's copy of a table whose rows are the segments' is empty,
+ * and what an index build says there of the rows it read -- pgvector's
+ * IVFFlat, "ivfflat index created with little data" -- is said of none: the
+ * coordinator's NOTICEs are held back while it runs the statement
+ * (hold_notices_begin()), and the segments', which built from the rows, are
+ * the client's (GpDispatchUtility()).  Not ALTER TABLE, whose NOTICEs the
+ * coordinator alone gives, of its distribution among them.
+ */
+static bool
+builds_indexes(Node *parsetree)
+{
+	switch (nodeTag(parsetree))
+	{
+		case T_IndexStmt:
+		case T_ReindexStmt:
+		case T_RepackStmt:
+			return true;
+		case T_VacuumStmt:
+			if (!((VacuumStmt *) parsetree)->is_vacuumcmd)
+				return false;
+			foreach_node(DefElem, opt, ((VacuumStmt *) parsetree)->options)
+				if (strcmp(opt->defname, "full") == 0)
+					return defGetBoolean(opt);
+			return false;
+		default:
+			return false;
+	}
+}
+
+/*
+ * The coordinator's NOTICEs of such a statement, held as it runs it.
+ * PostgreSQL gives emit_log_hook only what goes to the server's log, so
+ * log_min_messages lets NOTICE through while the statement runs -- the
+ * variable itself, not the setting through a GUC nest level, which the
+ * transactions CREATE INDEX CONCURRENTLY and VACUUM FULL commit as they go
+ * would end -- and the hook keeps each NOTICE from the client, and from the
+ * log where it would not have gone there.  Where the statement ran here, the
+ * segments say what it says (hold_notices_end()); where it failed here,
+ * before any segment ran it, what it said is given back ahead of its error,
+ * as one node would have said it -- CREATE INDEX ... USING rtree's NOTICE,
+ * then the table access method's refusal (hold_notices_fail()).
+ */
+typedef struct HeldNotice
+{
+	struct HeldNotice *next;
+	int			sqlerrcode;
+	char	   *message;
+	char	   *detail;
+	char	   *hint;
+	char		buf[FLEXIBLE_ARRAY_MEMBER];
+} HeldNotice;
+
+static HeldNotice *held_notices = NULL;
+static HeldNotice **held_tail = &held_notices;
+static bool holding_notices = false;
+static int	held_log_min_messages;
+static emit_log_hook_type prev_emit_log_hook = NULL;
+
+/* Would the server's log have had it: elog.c's is_log_level_output(). */
+static bool
+logged_at(int elevel, int log_min_level)
+{
+	if (elevel == LOG || elevel == LOG_SERVER_ONLY)
+		return log_min_level == LOG || log_min_level <= ERROR;
+	if (elevel == WARNING_CLIENT_ONLY || elevel == FATAL_CLIENT_ONLY)
+		return false;
+	if (log_min_level == LOG)
+		return elevel >= FATAL;
+	return elevel >= log_min_level;
+}
+
+/* emit_log_hook: a NOTICE held, in malloc'd memory, as errors are emitted */
+static void
+hold_notice(ErrorData *edata)
+{
+	if (holding_notices && edata->elevel == NOTICE && edata->output_to_client)
+	{
+		const char *fields[3] = {edata->message, edata->detail, edata->hint};
+		size_t		size = offsetof(HeldNotice, buf);
+		HeldNotice *h;
+
+		for (int i = 0; i < 3; i++)
+			if (fields[i] != NULL)
+				size += strlen(fields[i]) + 1;
+		h = malloc(size);
+		if (h != NULL)
+		{
+			char	   *p = h->buf;
+			char	  **dests[3] = {&h->message, &h->detail, &h->hint};
+
+			h->next = NULL;
+			h->sqlerrcode = edata->sqlerrcode;
+			for (int i = 0; i < 3; i++)
+			{
+				*dests[i] = NULL;
+				if (fields[i] == NULL)
+					continue;
+				strcpy(p, fields[i]);
+				*dests[i] = p;
+				p += strlen(fields[i]) + 1;
+			}
+			*held_tail = h;
+			held_tail = &h->next;
+		}
+		edata->output_to_client = false;
+	}
+	if (holding_notices && !logged_at(edata->elevel, held_log_min_messages))
+		edata->output_to_server = false;
+	if (edata->output_to_server && prev_emit_log_hook)
+		prev_emit_log_hook(edata);
+}
+
+static void
+hold_notices_begin(void)
+{
+	held_log_min_messages = log_min_messages[MyBackendType];
+	if (!logged_at(NOTICE, held_log_min_messages))
+		log_min_messages[MyBackendType] = NOTICE;
+	holding_notices = true;
+}
+
+/* No longer held: the list, whose notices are the caller's to free. */
+static HeldNotice *
+hold_notices_stop(void)
+{
+	HeldNotice *list = held_notices;
+
+	holding_notices = false;
+	log_min_messages[MyBackendType] = held_log_min_messages;
+	held_notices = NULL;
+	held_tail = &held_notices;
+	return list;
+}
+
+/* The statement ran here: what it says of the rows, the segments say. */
+static void
+hold_notices_end(void)
+{
+	HeldNotice *list = hold_notices_stop();
+
+	while (list != NULL)
+	{
+		HeldNotice *h = list;
+
+		list = h->next;
+		free(h);
+	}
+}
+
+/* It failed here, and no segment ran it: what it said, ahead of its error. */
+static void
+hold_notices_fail(MemoryContext cxt)
+{
+	HeldNotice *list = hold_notices_stop();
+	ErrorData  *edata;
+
+	if (list == NULL)
+		return;
+	MemoryContextSwitchTo(cxt);
+	edata = CopyErrorData();
+	FlushErrorState();
+	while (list != NULL)
+	{
+		HeldNotice *h = list;
+		int			sqlerrcode = h->sqlerrcode;
+		char	   *message = pstrdup(h->message ? h->message : "");
+		char	   *detail = h->detail ? pstrdup(h->detail) : NULL;
+		char	   *hint = h->hint ? pstrdup(h->hint) : NULL;
+
+		list = h->next;
+		free(h);
+		ereport(NOTICE,
+				(errcode(sqlerrcode),
+				 errmsg_internal("%s", message),
+				 detail ? errdetail_internal("%s", detail) : 0,
+				 hint ? errhint("%s", hint) : 0));
+	}
+	ReThrowError(edata);
+}
+
 static void
 gp_ddl_ProcessUtility(PlannedStmt *pstmt, const char *queryString,
 					  bool readOnlyTree, ProcessUtilityContext context,
@@ -1604,6 +1787,8 @@ gp_ddl_ProcessUtility(PlannedStmt *pstmt, const char *queryString,
 	GpDispatchClass class;
 	char	   *tree;
 	List	   *kept;
+	bool		builds;
+	MemoryContext cxt = CurrentMemoryContext;
 
 	/*
 	 * Cloudberry's fault at the start of CreateFunction(), on whichever node
@@ -1727,17 +1912,33 @@ gp_ddl_ProcessUtility(PlannedStmt *pstmt, const char *queryString,
 	recorded = NIL;
 	recording = true;
 	recording_vacuum = IsA(parsetree, VacuumStmt);
+
+	/*
+	 * An index build's NOTICEs here, of the coordinator's empty copy, held
+	 * back (builds_indexes()): the segments say them, or, where it fails
+	 * here, they are said ahead of its error.
+	 */
+	builds = builds_indexes(parsetree);
+	if (builds)
+		hold_notices_begin();
 	PG_TRY();
 	{
 		run_tablespace_statement(pstmt, queryString, readOnlyTree, context,
 								 params, queryEnv, dest, qc, false);
 	}
-	PG_FINALLY();
+	PG_CATCH();
 	{
 		recording = false;
 		recording_vacuum = false;
+		if (builds)
+			hold_notices_fail(cxt);
+		PG_RE_THROW();
 	}
 	PG_END_TRY();
+	recording = false;
+	recording_vacuum = false;
+	if (builds)
+		hold_notices_end();
 
 	empty_script_tables(parsetree);
 
@@ -1762,7 +1963,7 @@ gp_ddl_ProcessUtility(PlannedStmt *pstmt, const char *queryString,
 	}
 
 	drop_temp_namespaces();
-	GpDispatchUtility(build_payload(tree), class == GP_DISPATCH_OWN_XACT);
+	GpDispatchUtility(build_payload(tree), class == GP_DISPATCH_OWN_XACT, builds);
 	check_extension_everywhere(parsetree);
 	if (IsA(parsetree, CreatedbStmt))
 		create_core_extension(((CreatedbStmt *) parsetree)->dbname);
@@ -1975,6 +2176,9 @@ GpDdlInit(void)
 
 	prev_ProcessUtility = ProcessUtility_hook;
 	ProcessUtility_hook = gp_ddl_ProcessUtility;
+
+	prev_emit_log_hook = emit_log_hook;
+	emit_log_hook = hold_notice;
 
 	prev_raw_parser = raw_parser_hook;
 	raw_parser_hook = gp_ddl_raw_parser;

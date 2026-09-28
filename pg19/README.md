@@ -764,13 +764,21 @@ Stock pgvector, 0.8.6 unpatched (`docker/Dockerfile.cbext`), runs on one
 node and on a cluster: CREATE EXTENSION on every node; its vectors
 distributed by another column, since none of its types hashes; its HNSW
 and IVFFlat indexes built on every segment; and its settings, `hnsw.*` and
-`ivfflat.*`, sent to the segments (`gp_dispatch.c`), where a function
-EXECUTE ON ALL SEGMENTS searches each segment's index.  What the
-coordinator plans reads no segment's index: ORCA gives a query on a table
-with such an index, or one ordered by a distance, to the planner, as
-Cloudberry's does, and the planner's route gathers the table's rows and
-sorts them on the coordinator.  So a nearest-neighbour query answers
-exactly, as a sequential scan does.
+`ivfflat.*`, sent to the segments (`gp_dispatch.c`).  A nearest-neighbour
+search -- a LIMIT over an ORDER BY whose first key is a distance, an
+operator an index answers nearest first, pgvector's or GiST's -- sends the
+segments its ORDER BY and its LIMIT with the table's scan (`gp_scan.c`'s
+`bound_nearest()`): each segment's index finds its own nearest, and the
+coordinator sorts the few rows they send and takes its LIMIT, as
+Cloudberry's planner puts a Limit below its Gather Motion.  ORCA gives
+such a query to the planner, and a query on a table with an HNSW or IVFFlat
+index, as Cloudberry's does; a function EXECUTE ON ALL SEGMENTS searches
+each segment's index too.  What an index build says of the rows it read is
+the segments', which have them (`gp_ddl.c`'s `builds_indexes()`): the
+coordinator holds back its NOTICEs as it builds over its copy, which is
+empty -- IVFFlat's "created with little data" of no rows -- and the
+segments' NOTICEs of a CREATE INDEX, REINDEX, REPACK, CLUSTER or VACUUM
+FULL are the client's, each distinct one once.
 
 The encryption module, `gp_tde`, is still a stub: TDE waits for a formal
 requirement.  The `ic` suite runs every transport over the same Motion

@@ -7,18 +7,31 @@
 -- rows -- the planner's route gathers the rows to the coordinator, and ORCA
 -- reads each segment's -- and the same in both passes.
 --
--- What the coordinator plans reads no segment's index: ORCA gives a query
--- on a table with an HNSW or IVFFlat index to the planner, as Cloudberry's
--- does, and one ordered by a distance ("ORDER BY with ordering operator"),
--- and the planner's route sends each segment the table's scan and its
--- conditions, not its ORDER BY and LIMIT, and sorts the rows it gathers.
--- So a nearest-neighbour query answers exactly, as a sequential scan does.
--- A function EXECUTE ON ALL SEGMENTS runs its query on each segment, where
--- its index answers, as Cloudberry's users search each segment's.
+-- A nearest-neighbour search is the planner's: ORCA gives a query on a table
+-- with an HNSW or IVFFlat index to it, as Cloudberry's does, and one ordered
+-- by a distance ("ORDER BY with ordering operator").  Its route sends each
+-- segment the ORDER BY and the LIMIT with the table's scan (gp_scan.c's
+-- bound_nearest()), and each segment's index answers its nearest, as
+-- Cloudberry's planner puts a Limit below its Gather Motion; the coordinator
+-- sorts what they send, and takes its LIMIT.  A function EXECUTE ON ALL
+-- SEGMENTS runs its query on each segment too, where its index answers.
 --
 CREATE EXTENSION vector;
 CREATE SCHEMA pgvector;
 SET search_path = pgvector, public;
+
+-- What a query's gather sends the segments after its table and conditions:
+-- " ORDER BY ... LIMIT n" for a nearest-neighbour search.
+CREATE FUNCTION sent(query text) RETURNS text LANGUAGE plpgsql AS $$
+DECLARE line text;
+BEGIN
+  FOR line IN EXECUTE 'EXPLAIN (VERBOSE, COSTS OFF) ' || query LOOP
+    IF line ~ 'Remote SQL: ' THEN
+      RETURN regexp_replace(line, '^.*Remote SQL: SELECT .* FROM ONLY \S+ ?', '');
+    END IF;
+  END LOOP;
+  RETURN NULL;
+END $$;
 
 -- the same version on every segment as on the coordinator, each with the
 -- two access methods
@@ -105,7 +118,8 @@ RESET gp.optimizer;
 RESET gp.optimizer_force_multistage_agg;
 
 --
--- The nearest: exact, whatever indexes there are.
+-- The nearest, each segment's first: before any index, each segment sorts
+-- its own rows, and the answers are exact.
 --
 SELECT id, embedding, round((embedding <-> '[3,3,3]')::numeric, 4) AS distance
   FROM items ORDER BY embedding <-> '[3,3,3]', id LIMIT 8;
@@ -113,6 +127,15 @@ SELECT id, embedding FROM items ORDER BY embedding <=> '[1,2,3]', id LIMIT 5;
 SELECT id FROM items ORDER BY half <#> '[1,1,1]', id LIMIT 5;
 SELECT id FROM items ORDER BY sparse <+> '{1:3,5:8}/5', id LIMIT 5;
 SELECT id FROM items ORDER BY bits <~> B'1010', id LIMIT 5;
+-- what the segments are sent: the Sort's keys, each by its operator, and
+-- the LIMIT -- an OFFSET's rows too -- after the conditions they evaluate
+SELECT sent($$SELECT id FROM items ORDER BY embedding <-> '[3,3,3]', id LIMIT 8$$);
+SELECT sent($$SELECT id FROM items WHERE id > 100 ORDER BY sparse <+> '{1:3,5:8}/5' LIMIT 5 OFFSET 2$$);
+SELECT sent($$SELECT id FROM items ORDER BY embedding <-> '[3,3,3]' DESC LIMIT 3$$);
+-- and none where the first key is no distance, or a condition stays here
+SELECT sent($$SELECT id FROM items ORDER BY id LIMIT 3$$);
+SELECT sent($$SELECT id FROM items ORDER BY l2_distance(embedding, '[3,3,3]') LIMIT 3$$);
+SELECT sent($$SELECT id FROM items WHERE id > (random() * 10)::int ORDER BY embedding <-> '[3,3,3]' LIMIT 3$$);
 
 -- an index of each kind, on every node
 CREATE INDEX items_embedding_hnsw ON items USING hnsw (embedding vector_l2_ops);
@@ -122,7 +145,8 @@ CREATE INDEX items_sparse_hnsw ON items USING hnsw (sparse sparsevec_l1_ops);
 CREATE INDEX items_bits_hnsw ON items USING hnsw (bits bit_hamming_ops);
 CREATE INDEX items_quantized_hnsw ON items USING hnsw ((binary_quantize(embedding)::bit(3)) bit_hamming_ops);
 -- the coordinator's copy of the table, which is empty, builds its IVFFlat
--- index from no rows, and says so; the segments build theirs from theirs
+-- index from no rows, and holds back its "created with little data"; the
+-- segments build theirs from theirs, rows enough for their lists
 CREATE INDEX items_embedding_ivf ON items USING ivfflat (embedding vector_l2_ops) WITH (lists = 4);
 CREATE INDEX items_half_ivf ON items USING ivfflat (half halfvec_cosine_ops) WITH (lists = 2);
 SELECT result AS valid_indexes, count(*) AS segments
@@ -133,16 +157,45 @@ SELECT count(*) AS indexes_with_rows
                               WHERE relnamespace = 'pgvector'::regnamespace AND relkind = 'i'
                                 AND pg_relation_size(oid) > 8192$$)
  WHERE result = '8';
--- the same answers, from the coordinator's plans
-SELECT id, embedding, round((embedding <-> '[3,3,3]')::numeric, 4) AS distance
-  FROM items ORDER BY embedding <-> '[3,3,3]', id LIMIT 8;
-SELECT id, embedding FROM items ORDER BY embedding <=> '[1,2,3]', id LIMIT 5;
-SELECT id FROM items ORDER BY half <#> '[1,1,1]', id LIMIT 5;
-SELECT id FROM items ORDER BY sparse <+> '{1:3,5:8}/5', id LIMIT 5;
-SELECT id FROM items ORDER BY bits <~> B'1010', id LIMIT 5;
--- a nearest neighbour for each of a few rows, as a subquery for each
+REINDEX INDEX items_embedding_ivf;
+-- a segment with fewer rows than its IVFFlat index has lists says so, as
+-- one node would: some ten rows on each segment, 20 lists -- each says it,
+-- and the client hears it once -- and 2, which none is short of; and again
+-- as VACUUM FULL builds them anew
+CREATE TABLE few (id int, embedding vector(3)) DISTRIBUTED BY (id);
+INSERT INTO few SELECT g, ARRAY[g, g, g]::vector FROM generate_series(1, 30) g;
+CREATE INDEX few_short ON few USING ivfflat (embedding vector_l2_ops) WITH (lists = 20);
+CREATE INDEX few_enough ON few USING ivfflat (embedding vector_l2_ops) WITH (lists = 2);
+VACUUM FULL few;
+DROP TABLE few;
+-- a nearest neighbour for each of a few rows, a subquery for each whose
+-- distance is to the outer row's, which stays with the coordinator
 SELECT q.id, (SELECT i.id FROM items i WHERE i.id <> q.id ORDER BY i.embedding <-> q.embedding, i.id LIMIT 1) AS nearest
   FROM items q WHERE q.id IN (7, 77, 777) ORDER BY q.id;
+
+--
+-- Each segment's HNSW index, answering the coordinator's plan: with as
+-- many candidates kept (hnsw.ef_search) as a segment has rows, its scan
+-- finds the nearest a sort would, the answer exact; with 3 kept, each
+-- segment sends its 3, where a sort would have sent the 10 asked for; and
+-- an iterative scan goes on past them.  The distance as a function,
+-- l2_distance(), is none an index answers: its sort is the coordinator's.
+--
+CREATE TABLE many (id int, embedding vector(3)) DISTRIBUTED BY (id);
+INSERT INTO many SELECT g, ARRAY[g % 97, g % 89, g % 83]::vector FROM generate_series(1, 2400) g;
+CREATE INDEX many_hnsw ON many USING hnsw (embedding vector_l2_ops);
+ANALYZE many;
+SELECT count(*) < 1000 AS fewer_than_1000 FROM many GROUP BY gp_segment_id;
+SET hnsw.ef_search = 1000;
+SELECT (SELECT array_agg(id) FROM (SELECT id FROM many ORDER BY embedding <-> '[3,3,3]', id LIMIT 10) s) =
+       (SELECT array_agg(id) FROM (SELECT id FROM many ORDER BY l2_distance(embedding, '[3,3,3]'), id LIMIT 10) s)
+       AS exact;
+SET hnsw.ef_search = 3;
+SELECT count(*) FROM (SELECT id FROM many ORDER BY embedding <-> '[3,3,3]' LIMIT 10) s;
+SET hnsw.iterative_scan = relaxed_order;
+SELECT count(*) FROM (SELECT id FROM many ORDER BY embedding <-> '[3,3,3]' LIMIT 10) s;
+RESET hnsw.iterative_scan;
+RESET hnsw.ef_search;
 
 --
 -- Each segment's index, searched on the segment.  Fewer rows than an HNSW
