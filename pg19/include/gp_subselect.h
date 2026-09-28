@@ -19,7 +19,7 @@
  *
  * gp_subselect.h
  *	  The planner's route: a correlated scalar subquery of an aggregate made a
- *	  join (gp_subselect.c).
+ *	  join, and NOT IN an anti-join (gp_subselect.c).
  *
  *-------------------------------------------------------------------------
  */
@@ -31,7 +31,9 @@
 /*
  * Each correlated scalar subquery of an aggregate that reads a distributed
  * table, at every level of the query, made a join with its rows grouped by
- * the correlation, where that gives its answer.  On a cluster's coordinator.
+ * the correlation, where that gives its answer; and each NOT IN of a
+ * subquery that reads one, at a WHERE's top level, an anti-join with its
+ * NULLs conditions beside it.  On a cluster's coordinator.
  */
 extern void GpSubselectDecorrelate(Query *parse);
 

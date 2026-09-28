@@ -69,9 +69,11 @@ The reasons, by what brings them, and then each test:
       "column "partition" of relation "t" does not exist" where Cloudberry's
       is a syntax error, and ADD partition cc a column of type cc where
       Cloudberry's is a partition with no boundary.  Both fail in Cloudberry.
-    - A SUBPARTITION TEMPLATE is kept, as written, in its table's gp label;
-      Cloudberry's catalog gp_partition_template, and the node dump its
-      tests print from it, is not there to query.
+    - A SUBPARTITION TEMPLATE is kept, as written, in its table's gp label,
+      and Cloudberry's catalog gp_partition_template is a view of it, which
+      gives each template's relid and level as Cloudberry's does, and the
+      template as pg_get_expr() prints Cloudberry's -- where a test selects
+      the template itself, Cloudberry prints the dump of a node of its own.
     - An error about a partition an ALTER TABLE made is reported by
       Cloudberry at the 35th character of the statement, the length of the
       text it runs the partition's CREATE as, "(internally generated SQL
@@ -151,6 +153,14 @@ case_gp  The deparse of IS NOT DISTINCT FROM, and of the CASE form, which
   so calls_to_blip has seven rows where it has five and the CASE's answer is
   the same 666; and PostgreSQL 19's DETAIL for "operator does not exist",
   twice.
+createdb  gp_inject_fault('all', 'reset') over gp_segment_configuration,
+  which lists the port's one node where Cloudberry's single node has a
+  standby coordinator too (gpdemo's WITH_STANDBY): one "Success:" where the
+  expected output has two.  gp.select_invisible, which the test sets to
+  find the failed CREATE DATABASE's row and look for its directories, shows
+  an append-optimized table's deleted rows here (gp_ao) and no heap table's
+  aborted ones, so the row is not found, where Cloudberry finds it and no
+  directory; greenplum's createdb looks for them on every node of a cluster.
 gp_gin_index  the complex type, which Cloudberry's own earlier tests make;
   and the index wowidx and the rows of test_tsvector that PostgreSQL 19's
   tsearch test, which runs before it here, leaves behind (two counts one and
@@ -163,8 +173,22 @@ gpcopy  A backslash before a line's end, which Cloudberry's COPY ends the
   PostgreSQL's refuses ("literal newline found in data"); the broken_int4
   type of Cloudberry's regress.so; and GP_DATABASE, one of the variables
   Cloudberry gives a COPY's PROGRAM, which the port's does not.
+incremental_analyze  Its database is made from template1, which has
+  gp_core's extension and the others (../sql/gp_setup.sql), so its ANALYZE
+  is Cloudberry's there, a root's statistics its leaves' merged.  What
+  differs: a column of 400 kB values -- its width 1587, the size PostgreSQL
+  19 stores such a value compressed in, where Cloudberry's is 4591; and the
+  root's number of distinct values of it 0, where Cloudberry's single node
+  says 1: Cloudberry adds every value to a leaf's HyperLogLog counter, as
+  the bytes it is stored in, compressed, before it passes over a value wider
+  than 1 kB (compute_scalar_stats(), analyze.c), and the port leaves such a
+  value out of the counter by its size (gp_partmerge.c), as Cloudberry's
+  segments leave it out on a cluster.  VERBOSE's pages scanned, 8 kB pages
+  where Cloudberry's are 32 kB; and an append-optimized partition's pages,
+  gp_ao's 8 kB pages of its file, as in the greenplum suite's
+  incremental_analyze.
 matview_ao  psql's \dm.
-partition  Most reasons above: its templates and gp_partition_template;
+partition  Most reasons above: its templates, which gp_partition_template shows;
   Cloudberry's REVOKE notice; an exclusion constraint PostgreSQL 19 allows;
   "PRIMARY KEY constraint on partitioned table"; the caret of an error in a
   partition an ALTER TABLE made; psql's \d+ and \dt.
@@ -192,10 +216,11 @@ singlenode_compatibility_cbdb  the warning Cloudberry's single-node mode
   has a file of its own (singlenode_compatibility_cbdb.orca.diff).
 tag  Its catalogs are views here, of the port's labels (gp_sql's script
   makes pg_tag, pg_tag_description and Cloudberry's five *_tag_descriptions
-  in pg_catalog), so \d+ shows a view where Cloudberry's shows a table; and
-  they are the extension's, which other_db, the database the test makes,
-  does not have, so its queries of them there find none.  The definitions
-  are the cluster's, as Cloudberry's are, whichever database makes them.
+  in pg_catalog), so \d+ shows a view where Cloudberry's shows a table.
+  other_db, the database the test makes, has them from template1
+  (../sql/gp_setup.sql), and finds the tags another database made there:
+  the definitions are the cluster's, as Cloudberry's are, whichever
+  database makes them.
   CREATE TAG, ALTER TAG and DROP TAG are CALLs of gp_sql's procedures, and
   an error from one is Cloudberry's message, with a CONTEXT naming gp_sql's
   functions.  A malformed TAG clause (TAG; or TAG ()) is PostgreSQL's error

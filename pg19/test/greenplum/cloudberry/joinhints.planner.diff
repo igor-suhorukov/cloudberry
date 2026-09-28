@@ -7,15 +7,3 @@
 -Leading(((t3 t2) t1))
 @@
 +Leading(((t3 t2) t1))
-@@
--NestLoop(t1 t2)
-@@
-+NestLoop(t1 t2)
-@@
--MergeJoin(t1 t2)
-@@
-+MergeJoin(t1 t2)
-@@
--HashJoin(t1 t2)
-@@
-+HashJoin(t1 t2)

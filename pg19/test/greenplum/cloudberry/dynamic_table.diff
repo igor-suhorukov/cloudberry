@@ -1,0 +1,17 @@
+@@
+-                         Dynamic table "dynamic_table_schema.dt0"
++                       Materialized view "dynamic_table_schema.dt0"
+@@
+-DETAIL:  drop cascades to dynamic table dt1
++DETAIL:  drop cascades to materialized view dt1
+@@
+-drop cascades to dynamic table dt2
++drop cascades to materialized view dt2
+@@
+- optimizer 
+------------
++ gp.optimizer 
++--------------
+@@
+-NOTICE:  drop cascades to dynamic table dt_external
++NOTICE:  drop cascades to materialized view dt_external

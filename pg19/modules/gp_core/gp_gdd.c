@@ -180,13 +180,18 @@ GpGddNoteBackend(void)
 		 */
 		b->reader = GpShareIsReader() || IsParallelWorker();
 	}
-	else if (GpClusterBackendRole() == GP_ROLE_DISPATCH)
+
+	/*
+	 * The coordinator's backend, but a parallel worker's, whose session and
+	 * transaction are its leader's, which says them (GpClusterSessionId()).
+	 */
+	else if (GpClusterBackendRole() == GP_ROLE_DISPATCH && !IsParallelWorker())
 	{
 		if (b->pid != MyProcPid || b->lxid != MyProc->vxid.lxid)
 		{
 			b->pid = 0;
 			pg_write_barrier();
-			b->session = MyProcPid;
+			b->session = GpClusterSessionId();
 			b->lxid = MyProc->vxid.lxid;
 			b->seq = pg_atomic_add_fetch_u64(&gdd_shared->next_seq, 1);
 			b->victim = false;
@@ -195,6 +200,39 @@ GpGddNoteBackend(void)
 			b->pid = MyProcPid;
 		}
 	}
+}
+
+/*
+ * A coordinator's client, as it connects: the session it works for, which
+ * pg_stat_activity's sess_id and pg_locks' mppsessionid say from then on, as
+ * Cloudberry's PGPROC has its gp_session_id from InitProcess(); the number
+ * of the transaction it runs comes with its first statement
+ * (GpGddNoteBackend()).  And again as it takes a new session
+ * (GpClusterNewSessionId()), in its entry as it stands.
+ */
+void
+GpGddNoteSession(void)
+{
+	GpGddBackend *b;
+
+	if (MyProc == NULL || MyProcNumber < 0 || MyProcNumber >= MaxBackends)
+		return;
+	gdd_attach();
+	b = &gdd_shared->backends[MyProcNumber];
+	if (b->pid == MyProcPid)
+	{
+		b->session = GpClusterSessionId();
+		return;
+	}
+	b->pid = 0;
+	pg_write_barrier();
+	b->session = GpClusterSessionId();
+	b->lxid = InvalidLocalTransactionId;
+	b->seq = 0;
+	b->victim = false;
+	b->reader = false;
+	pg_write_barrier();
+	b->pid = MyProcPid;
 }
 
 /*
@@ -223,6 +261,33 @@ GpGddBackendIdentity(int pid, int *session, bool *reader)
 	*session = b->session;
 	*reader = b->reader;
 	return b->pid == pid;
+}
+
+/*
+ * How many backends of this node, this one aside, work for this backend's
+ * session: what Cloudberry's regress.so's hasBackendsExist() counts of its
+ * pg_stat_activity's rows (regress_gp.c).
+ */
+int
+GpGddSessionBackends(void)
+{
+	int			session = GpClusterSessionId();
+	int			n = 0;
+
+	gdd_attach();
+	for (int i = 0; i < gdd_shared->nbackends; i++)
+	{
+		GpGddBackend *b = &gdd_shared->backends[i];
+		int			pid = b->pid;
+		PGPROC	   *proc;
+
+		if (pid == 0 || pid == MyProcPid || b->session != session)
+			continue;
+		proc = BackendPidGetProc(pid);
+		if (proc != NULL && GetNumberFromPGProc(proc) == i)
+			n++;
+	}
+	return n;
 }
 
 /* The session of a backend of this node, or 0 when it is none's. */
@@ -256,7 +321,7 @@ session_seq(int session, int *procno)
 	{
 		GpGddBackend *b = &gdd_shared->backends[i];
 
-		if (b->pid == session && b->seq != 0)
+		if (b->session == session && b->seq != 0 && b->pid != 0)
 		{
 			if (procno != NULL)
 				*procno = i;
@@ -446,18 +511,6 @@ gp_dist_wait_status(PG_FUNCTION_ARGS)
 	return (Datum) 0;
 }
 
-/* The session of a coordinator's backend: its own pid for a client's. */
-static int
-client_session(int pid, int session)
-{
-	PGPROC	   *proc;
-
-	if (session != 0)
-		return session;
-	proc = BackendPidGetProc(pid);
-	return (proc != NULL && proc->backendType == B_BACKEND) ? pid : 0;
-}
-
 /* A row of pg_catalog.gp_dist_wait_status(): a node's edge. */
 static void
 put_cluster_wait_row(ReturnSetInfo *rsinfo, int segid, const GddEdgeRow *e)
@@ -523,23 +576,13 @@ gp_dist_wait_status_cluster(PG_FUNCTION_ARGS)
 		}
 	}
 
+	/*
+	 * A client of the coordinator names its session from its start
+	 * (GpGddNoteSession()): one waiting before its first statement's
+	 * dispatch, for a lock its parse takes, is named too.
+	 */
 	foreach(lc, local_edges())
-	{
-		GddEdgeRow *e = (GddEdgeRow *) lfirst(lc);
-
-		/*
-		 * A client of the coordinator is the session of its own pid, which
-		 * it tells the detector only as it runs a statement's first
-		 * dispatch: one waiting before, for a lock its parse takes, is
-		 * named so (GpClusterSessionId()).
-		 */
-		if (GpClusterContentId() < 0)
-		{
-			e->waiter_session = client_session(e->waiter, e->waiter_session);
-			e->holder_session = client_session(e->holder, e->holder_session);
-		}
-		put_cluster_wait_row(rsinfo, GpClusterContentId(), e);
-	}
+		put_cluster_wait_row(rsinfo, GpClusterContentId(), (GddEdgeRow *) lfirst(lc));
 
 	return (Datum) 0;
 }
@@ -679,11 +722,11 @@ gdd_add_edge(GddCtx *ctx, int segid, GddEdgeRow *row)
 	einfo->locktype = pstrdup(row->locktype);
 	edge->data = einfo;
 	winfo = palloc(sizeof(GddVertInfo));
-	winfo->pid = row->waiter_session;
+	winfo->pid = gdd_shared->backends[wproc].pid;
 	winfo->session = row->waiter_session;
 	edge->from->data = winfo;
 	hinfo = palloc(sizeof(GddVertInfo));
-	hinfo->pid = row->holder_session;
+	hinfo->pid = gdd_shared->backends[hproc].pid;
 	hinfo->session = row->holder_session;
 	edge->to->data = hinfo;
 }

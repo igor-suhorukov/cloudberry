@@ -53,6 +53,7 @@ cleanup() {
 	exec 7>&- 8>&- 2> /dev/null
 	"$BINDIR/pg_ctl" -D "$WORK/data" -m immediate stop > /dev/null 2>&1
 	"$BINDIR/pg_ctl" -D "$WORK/standby" -m immediate stop > /dev/null 2>&1
+	"$BINDIR/pg_ctl" -D "$WORK/standby2" -m immediate stop > /dev/null 2>&1
 	[ -n "${KEEP:-}" ] && echo "kept: $WORK" || rm -rf "$WORK"
 	rm -rf "$SOCK"
 }
@@ -166,8 +167,6 @@ refused "rle_type is for a table by column" \
         "rle_type cannot be used with Append Only relations row orientation"
 refused "an option heap has not either" \
         "CREATE TABLE bad6 (a int) WITH (appendonly=true, nonsense=1);" "unrecognized parameter \"nonsense\""
-refused "an unlogged one is refused: its pages would have no WAL to be rebuilt from" \
-        "CREATE UNLOGGED TABLE bad7 (a int) USING ao_row;" "unlogged append-optimized tables are not supported"
 
 ###############################################################################
 echo "2. rows are appended in blocks, in the table's own pages"
@@ -881,6 +880,69 @@ data=$(q "SELECT dump_pax_file_data(pg_relation_filepath('pxdump') || '_pax/0', 
 	|| notok "dump_pax_file_data()" "$data"
 refused "and a file that is not there is refused" \
         "SELECT dump_pax_file_desc_schema('base/1/no_such_file', 0);" "Fail to open"
+
+###############################################################################
+echo "18. an unlogged table: an init fork, which a crash and a promotion leave it"
+###############################################################################
+# Its storage ID is negative, which puts its rows in gp_ao's unlogged tables,
+# and its init fork holds its metapage: after a crash PostgreSQL copies that
+# over the table and empties the unlogged tables, so the table is empty, as
+# a heap one is, and takes rows again (ao_storage_init()).  A standby has the
+# init fork alone, as it has of any unlogged relation.
+# in the data directory, which the standby's copy of it then has
+"$PSQL" -X -q -d postgres -c "SET allow_in_place_tablespaces = on" \
+	-c "CREATE TABLESPACE ul_ts LOCATION ''" > /dev/null 2>&1
+q "CREATE UNLOGGED TABLE ulr (a int, b text) WITH (appendonly=true);
+   CREATE UNLOGGED TABLE ulc (a int, b text) WITH (appendonly=true, orientation=column);
+   CREATE INDEX ulr_a ON ulr (a);
+   INSERT INTO ulr SELECT i, md5(i::text) FROM generate_series(1, 20000) i;
+   INSERT INTO ulc SELECT * FROM ulr;
+   DELETE FROM ulr WHERE a % 4 = 0;" > /dev/null
+is "unlogged tables by row and by column take rows, and delete them" \
+   "SELECT count(*) || ' ' || (SELECT count(*) FROM ulc) FROM ulr;" "15000 20000"
+init_forks="SELECT count(*) FROM pg_class c,
+				LATERAL pg_stat_file(pg_relation_filepath(c.oid) || '_init', true) f
+			  WHERE c.relname IN ('ulr', 'ulc', 'ulr_a') AND f.size IS NOT NULL"
+is "each has an init fork, as its index has" "$init_forks;" "3"
+is "its storage ID is negative, and its files' rows are in gp_ao's unlogged tables" \
+   "SELECT gp_ao.storage_id('ulr') < 0 AND gp_ao.storage_id('ulc') < 0
+		   AND EXISTS (SELECT FROM gp_ao.segfile_unlogged WHERE storage_id = gp_ao.storage_id('ulr'))
+		   AND NOT EXISTS (SELECT FROM gp_ao.segfile WHERE storage_id = gp_ao.storage_id('ulr'));" "t"
+isl "its index finds a row" "SET enable_seqscan = off; SELECT b FROM ulr WHERE a = 4242;" \
+	"$(q "SELECT md5('4242');")"
+q "ALTER TABLE ulr SET TABLESPACE ul_ts; ALTER TABLE ulc SET TABLESPACE ul_ts;" > /dev/null
+is "moved to another tablespace, each keeps its rows and its init fork" \
+   "SELECT count(*) || ' ' || (SELECT count(*) FROM ulc) || ' ' || ($init_forks) FROM ulr;" \
+   "15000 20000 3"
+
+SB2="$WORK/standby2"
+SB2PORT=$((PORT + 2))
+qs2() { "$PSQL" -X -q -t -A -p "$SB2PORT" -d postgres -c "$1" 2>&1; }
+"$BINDIR/pg_basebackup" -D "$SB2" -X stream -c fast -R > "$WORK/basebackup2.log" 2>&1 &&
+	printf 'port = %s\nallow_in_place_tablespaces = on\n' "$SB2PORT" >> "$SB2/postgresql.conf" &&
+	"$BINDIR/pg_ctl" -D "$SB2" -l "$WORK/standby2.log" -w -t 60 start > /dev/null 2>&1
+ulr=$(q "SELECT pg_relation_filepath('ulr');")
+[ -f "$SB2/${ulr}_init" ] && [ ! -e "$SB2/$ulr" ] \
+	&& ok "a standby has the init fork, and not the table's rows" \
+	|| notok "a standby's unlogged table" "$(ls -l "$SB2/$(dirname "$ulr")" 2>&1 | grep "$(basename "$ulr")")"
+"$BINDIR/pg_ctl" -D "$SB2" -w -t 60 promote > /dev/null 2>&1
+out=$(qs2 "SELECT count(*) || ' ' || (SELECT count(*) FROM ulc) FROM ulr;
+		   INSERT INTO ulr VALUES (1, 'one');
+		   SELECT b FROM ulr;")
+[ "$out" = "$(printf '0 0\none')" ] && ok "promoted, it has them empty, and takes rows" \
+	|| notok "a promoted standby's unlogged tables" "$out"
+"$BINDIR/pg_ctl" -D "$SB2" -m fast -w stop > /dev/null 2>&1
+
+"$BINDIR/pg_ctl" -D "$WORK/data" -m immediate -w stop > /dev/null 2>&1
+"$BINDIR/pg_ctl" -D "$WORK/data" -l "$WORK/log" -w -t 60 start > /dev/null 2>&1
+is "a crash empties them" "SELECT count(*) || ' ' || (SELECT count(*) FROM ulc) FROM ulr;" "0 0"
+q "INSERT INTO ulr SELECT i, 'again' FROM generate_series(1, 300) i;
+   INSERT INTO ulc SELECT i, 'again' FROM generate_series(1, 300) i;" > /dev/null
+is "and they take rows again" "SELECT count(*) || ' ' || (SELECT count(*) FROM ulc) FROM ulr;" "300 300"
+isl "which the index finds" "SET enable_seqscan = off; SELECT b FROM ulr WHERE a = 42;" "again"
+q "ALTER TABLE ulr SET LOGGED;" > /dev/null
+is "ALTER TABLE ... SET LOGGED gives it a storage ID of logged files, with its rows" \
+   "SELECT gp_ao.storage_id('ulr') > 0 AND (SELECT count(*) FROM ulr) = 300;" "t"
 
 echo
 echo "  $pass passed, $fail failed"

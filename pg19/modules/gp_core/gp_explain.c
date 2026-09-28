@@ -130,9 +130,11 @@
 #include "gp_core_api.h"
 #include "gp_dispatch.h"
 #include "gp_explain.h"
+#include "gp_fault.h"
 #include "gp_metrics.h"
 #include "gp_motion.h"
 #include "gp_policy.h"
+#include "gp_rtfilter.h"
 #include "gp_scan.h"
 
 /* What the options asked for, on an ExplainState. */
@@ -598,6 +600,8 @@ typedef struct GpReportNode
 {
 	int32		plan_node_id;
 	bool		spilled;		/* its work_mem ran out, and it wrote to disk */
+	bool		rtf_worked;		/* a runtime filter worked in it: Cloudberry's
+								 * prf_work (gp_rtfilter.c) */
 	double		ntuples;
 	double		ntuples2;
 	double		nloops;
@@ -1044,6 +1048,7 @@ node_figures(PlanState *ps, GpExplainQuery *q, GpReportNode *n)
 	n->nloops = instr->nloops;
 	n->nfiltered1 = instr->nfiltered1;
 	n->nfiltered2 = instr->nfiltered2;
+	n->rtf_worked = GpRtFilterWorked(ps);
 	n->startup_ns = INSTR_TIME_GET_NANOSEC(instr->startup);
 	n->total_ns = INSTR_TIME_GET_NANOSEC(instr->instr.total);
 	n->wal = instr->instr.walusage;
@@ -1105,6 +1110,8 @@ send_report(GpReportHeader *hdr, StringInfo buf)
 		elog(ERROR, "could not encode EXPLAIN ANALYZE's statistics");
 	text[len] = '\0';
 
+	/* Cloudberry's fault before the statistics go (cdbexplain_sendExecStats()) */
+	(void) GP_FAULT("send_exec_stats");
 	ereport(INFO,
 			(errcode(ERRCODE_GP_EXPLAIN_STATS),
 			 errmsg_internal("%s", text),
@@ -1276,6 +1283,7 @@ add_figures(SegFigures *to, const GpReportNode *n)
 		return;
 	}
 	t->spilled |= n->spilled;
+	t->rtf_worked |= n->rtf_worked;
 	t->ntuples += n->ntuples;
 	t->ntuples2 += n->ntuples2;
 	t->nloops += n->nloops;
@@ -1399,7 +1407,8 @@ slice_walker(PlanState *ps, SliceWalk *w)
  * given the figures of the segment that returned the most rows, or ran it
  * the most times where none returned any -- Cloudberry's winner
  * (cdbexplain_depositStatsToNode()) -- and the WAL and index searches of
- * all of them.  A Gather's workers are the winner's.
+ * all of them.  A Gather's workers are the winner's, and so is whether a
+ * runtime filter worked in the node, as Cloudberry's prf_work is.
  */
 static void
 deposit_fragment(PlanState *ps, SegFigures *segs)
@@ -1427,6 +1436,8 @@ deposit_fragment(PlanState *ps, SegFigures *segs)
 	instr->ntuples2 = n->ntuples2;
 	instr->nfiltered1 = n->nfiltered1;
 	instr->nfiltered2 = n->nfiltered2;
+	if (n->rtf_worked)
+		GpRtFilterSetWorked(ps);
 	INSTR_TIME_SET_ZERO(instr->startup);
 	INSTR_TIME_ADD_NANOSEC(instr->startup, n->startup_ns);
 	INSTR_TIME_SET_ZERO(instr->instr.total);
@@ -1945,6 +1956,11 @@ explain_ExecutorRun(QueryDesc *queryDesc, ScanDirection direction,
 	executor_depth++;
 	PG_TRY();
 	{
+		/*
+		 * Cloudberry's fault before a run processes its first row, on every
+		 * node (ExecutePlan(), execMain.c).
+		 */
+		(void) GP_FAULT("executor_pre_tuple_processed");
 		if (prev_ExecutorRun)
 			prev_ExecutorRun(queryDesc, direction, count);
 		else

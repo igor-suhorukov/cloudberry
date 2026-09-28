@@ -810,12 +810,31 @@ memprot_vmem_reserved(void)
 	return gp_mp_inited ? VmemTracker_GetMaxReservedVmemBytes() : 0;
 }
 
+/*
+ * The coordinator's backend took a new session id, its gang lost
+ * (GpClusterNewSessionId()): its session state is the new session's, as
+ * Cloudberry's ProcNewMppSessionId() makes MySessionState the new one's
+ * (proc.c), and so is the runaway cleaner's record of the backend.
+ */
+static void
+memprot_session_changed(int old_session, int new_session)
+{
+	if (!gp_mp_inited || MySessionState == NULL)
+		return;
+#ifdef USE_ASSERT_CHECKING
+	MySessionState->isModifiedSessionId = true;
+#endif
+	MySessionState->sessionId = new_session;
+	memprot_shared->backends[MyProcNumber].session = new_session;
+}
+
 /* From gp_resource's _PG_init(), in the postmaster */
 void
 MemProtInit(void)
 {
 	define_settings();
 	GpExplainSetVmemReserved(memprot_vmem_reserved);
+	GpClusterAddSessionCallback(memprot_session_changed);
 
 	prev_shmem_request_hook = shmem_request_hook;
 	shmem_request_hook = memprot_shmem_request;

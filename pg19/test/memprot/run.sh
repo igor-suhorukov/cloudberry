@@ -118,16 +118,16 @@ restart || exit 1
 out=$(q 0 "CREATE EXTENSION gp_core; CREATE EXTENSION gp_sql; CREATE EXTENSION gp_resource;")
 [ -z "$out" ] && ok "gp_core, gp_sql and gp_resource are created" || notok "the extensions" "$out"
 
-out=$(q 0 "SELECT segid, qe_count, active_qe_count, dirty_qe_count, runaway_status, vmem_mb >= 12 FROM $ENTRIES WHERE sessionid = pg_backend_pid() ORDER BY 1")
+out=$(q 0 "SELECT segid, qe_count, active_qe_count, dirty_qe_count, runaway_status, vmem_mb >= 12 FROM $ENTRIES WHERE sessionid = current_setting('gp.session_id')::int ORDER BY 1")
 [ "$out" = "$(printf '0|1|1|-1|0|t\n1|1|1|-1|0|t')" ] &&
 	ok "on each segment the session's process has its 12 MB and runs a statement ($(echo $out))" ||
 	notok "the session on the segments" "$out"
 
-out=$(q 0 "SELECT segid, qe_count, vmem_mb >= 12 FROM gp_resource.session_state_memory_entries() WHERE sessionid = pg_backend_pid()")
+out=$(q 0 "SELECT segid, qe_count, vmem_mb >= 12 FROM gp_resource.session_state_memory_entries() WHERE sessionid = current_setting('gp.session_id')::int")
 [ "$out" = "-1|1|t" ] && ok "and on the coordinator ($out)" || notok "the session on the coordinator" "$out"
 
 old=$("$PSQL" -X -q -t -A -h "$(sockdir 0)" -p "$(port 0)" -d postgres \
-	-c "SELECT count(*) FROM gp_dist_random('gp_id')" -c "SELECT pg_backend_pid()" 2>&1 | tail -1)
+	-c "SELECT count(*) FROM gp_dist_random('gp_id')" -c "SELECT current_setting('gp.session_id')" 2>&1 | tail -1)
 for _ in $(seq 50); do
 	out=$(q 0 "SELECT count(*) FROM $ENTRIES WHERE sessionid = $old")
 	[ "$out" = "0" ] && break
@@ -228,7 +228,7 @@ out=$(q 0 "CREATE FUNCTION eat(mb int) RETURNS int AS \$\$
 
 out=$("$PSQL" -X -q -t -A -h "$(sockdir 0)" -p "$(port 0)" -d postgres \
 	-c "SELECT eat(40) FROM gp_dist_random('gp_id')" \
-	-c "SELECT runaway_status, dirty_qe_count FROM $ENTRIES WHERE sessionid = pg_backend_pid()" \
+	-c "SELECT runaway_status, dirty_qe_count FROM $ENTRIES WHERE sessionid = current_setting('gp.session_id')::int" \
 	-c "SELECT eat(10) FROM gp_dist_random('gp_id')" 2>&1)
 case "$out" in
 	*"ERROR:  Canceling query because of high VMEM usage. Used: "*"MB, available "*"MB, red zone: 50MB"*)

@@ -27,16 +27,41 @@ file of the source, the dbid in it too, where Cloudberry's keeps the node's
 internal.auto.conf.  So the node's dbid is read before the rewind and
 written back after it, with the slot and, where -R is given, the name its
 WAL receiver streams under (gppylib/nodecopy.py).
+
+And a node that did not shut down cleanly finishes its crash recovery in a
+single-user server connected to database postgres, as Cloudberry's pg_rewind
+runs it (ensureCleanShutdown()), before PostgreSQL 19's, which would run it
+in template1: a CREATE DATABASE prepared on the node, and recovered with its
+locks, holds a lock of template1, which the single-user server would wait
+for forever as it connects.  pg_rewind then finds the node shut down.
 """
 
 import argparse
 import os
+import re
+import subprocess
 import sys
 
 try:
     from gppylib import nodecopy
 except ImportError as e:
     sys.exit('Cannot import modules.  Please check that you have sourced cloudberry-env.sh.  Detail: ' + str(e))
+
+
+def clean_shutdown(target):
+    """
+    The target's crash recovery run to its end, where pg_controldata says it
+    did not shut down cleanly; the single-user server's return code, or 0.
+    """
+    out = subprocess.run(['pg_controldata', '-D', target], capture_output=True, text=True,
+                         env=dict(os.environ, LC_ALL='C')).stdout
+    state = re.search(r'^Database cluster state:\s+(.*)$', out, re.M)
+    if state is None or state.group(1) in ('shut down', 'shut down in recovery'):
+        return 0
+    sys.stdout.flush()
+    with open(os.devnull) as devnull:
+        return subprocess.call(['postgres', '--single', '-F', '-D', target, 'postgres'],
+                               stdin=devnull)
 
 
 def main():
@@ -60,6 +85,9 @@ def main():
         argv += ['--write-recovery-conf']
     if args.progress:
         argv += ['--progress']
+    rc = clean_shutdown(target)
+    if rc != 0:
+        return rc
     sys.stdout.flush()
     rc = nodecopy.run(argv)
     if rc != 0:

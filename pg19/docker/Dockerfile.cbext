@@ -264,6 +264,8 @@ COPY --from=build /cb/src/test/regress/gpdiff.pl /cb/src/test/regress/atmsort.pm
 COPY --from=build /cb/src/test/regress/greenplum_schedule /cb/src/test/regress/
 # and the script bb_memory_quota runs, many sessions at once
 COPY --from=build /cb/src/test/regress/mem_quota_util.py /cb/src/test/regress/
+# and the one dispatch runs, a connection to each segment in turn
+COPY --from=build /cb/src/test/regress/test_dbconn.py /cb/src/test/regress/
 COPY --from=build /cb/src/test/regress/sql /cb/src/test/regress/sql
 COPY --from=build /cb/src/test/regress/expected /cb/src/test/regress/expected
 COPY --from=build /cb/src/test/regress/input /cb/src/test/regress/input

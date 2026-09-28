@@ -550,10 +550,6 @@
 +INFO:  GPORCA failed to produce a plan, falling back to Postgres-based planner
 +DETAIL:  Falling back to Postgres-based planner because no plan has been computed for required properties in GPORCA
 @@
--MergeJoin(t1 t2)
-@@
-+MergeJoin(t1 t2)
-@@
 -LOG:  pg_hint_plan:
 +LOG:  YYYY-MM-DD HH:MM:SS:MSMSMS TMZ,THD000,TRACE,"PlanHint: [
 @@

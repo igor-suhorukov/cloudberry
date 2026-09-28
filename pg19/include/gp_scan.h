@@ -109,6 +109,27 @@ extern bool GpGatherScanSlice(struct PlanState *ps, int *slice, int *nsegs);
 extern bool GpGatherScanFinish(struct PlanState *ps);
 
 /*
+ * A runtime filter a gather is given (gp_rtfilter.c).  Each row the gather
+ * reads is asked of "rows", before the node's own conditions, and dropped
+ * where the answer is false.  As the gather starts, "conditions" may add to
+ * the conditions it sends the segments -- the range of a hash join's key --
+ * as SQL, or "" for none: not for a gather whose rows are kept for a rescan,
+ * locked, changed, bounded by a LIMIT or a cursor's row.  False if ps is not
+ * a gather.
+ */
+struct TupleTableSlot;
+typedef struct GpGatherRuntimeFilter
+{
+	bool		(*rows) (struct PlanState *ps, struct TupleTableSlot *scanslot,
+						 void *arg);
+	char	   *(*conditions) (struct PlanState *ps, void *arg);
+	void	   *arg;
+} GpGatherRuntimeFilter;
+
+extern bool GpGatherScanSetRuntimeFilter(struct PlanState *ps,
+										 const GpGatherRuntimeFilter *filter);
+
+/*
  * After planning: a gather a LIMIT reads sends the segments the LIMIT
  * (gp_modify.c).
  */
@@ -134,6 +155,13 @@ extern void GpModifyInit(void);
  * locks every partition in that mode, as Cloudberry's does (gp_modify.c).
  */
 extern void GpModifyLockPartitions(Oid relid, LOCKMODE lockmode);
+
+/*
+ * A write's target, refused where PostgreSQL's executor refuses it before
+ * any row is written: a materialized view outside its maintenance
+ * (gp_modify.c).
+ */
+extern void GpModifyCheckTarget(Oid relid);
 
 /*
  * ANALYZE of a distributed table through O3, where there is a cluster, and

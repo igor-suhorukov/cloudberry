@@ -255,6 +255,22 @@ if [ "$started" -eq 1 ]; then
 2" ] && ok "the connections are the session's, and there are two of them" \
 		|| notok "the gang's connections" "$out"
 
+	# The session id is the coordinator's number of the session, taken as the
+	# client connects, as Cloudberry's gp_session_id is: three sessions opened
+	# one after another have ids each past the last -- the next, but for a
+	# process of the server's that dispatched in between -- and what a
+	# session's backend on a segment says it works for is its session's.
+	out=$(for i in 1 2 3; do q 0 "SELECT current_setting('gp.session_id')"; done | tr '\n' ' ')
+	read -r s1 s2 s3 <<< "$out"
+	if isnum "$s1" && isnum "$s2" && isnum "$s3" && [ "$s2" -gt "$s1" ] && [ "$s3" -gt "$s2" ]; then
+		ok "the sessions' ids are the coordinator's counter's, each past the last ($out)"
+	else
+		notok "the session ids of three sessions" "$out"
+	fi
+	out=$(q 0 "SELECT DISTINCT result::int = current_setting('gp.session_id')::int FROM gp.exec_on_segments('SELECT current_setting(''gp.session_id'')');")
+	[ "$out" = "t" ] && ok "and a segment's backend of a session works for it" \
+		|| notok "gp.session_id on a segment" "$out"
+
 	# Every node reads the same file, so a segment knows where the other
 	# segments are -- and would dispatch to them, and to itself, if nothing
 	# said otherwise.  Only the coordinator dispatches.
@@ -406,8 +422,8 @@ if [ "$started" -eq 1 ]; then
 	###########################################################################
 	echo "7. databases, roles and temporary tables"
 	###########################################################################
-	# CREATE DATABASE cannot run in a transaction block, so each segment runs
-	# it in one of its own.
+	# CREATE DATABASE runs in the coordinator's transaction on every node, and
+	# each segment's part is prepared with it (13., below).
 	out=$(q 0 "CREATE DATABASE db2;")
 	[ -z "$out" ] && ok "CREATE DATABASE runs" || notok "CREATE DATABASE" "$out"
 	same_everywhere "and the database has one OID everywhere" \
@@ -497,6 +513,27 @@ EOF
 	[ "$out" = "t
 t" ] && ok "temporary tables, two of them, have the coordinator's OIDs" \
 		|| notok "temporary tables" "$out"
+
+	# DISCARD TEMP drops a session's temporary tables on every node, in its
+	# transaction, as Cloudberry's does (discard.c); DISCARD ALL drops the
+	# coordinator's alone, and says so, where it may run at all.
+	tcount="SELECT count(*) FROM gp.exec_on_segments('SELECT count(*) FROM pg_class WHERE relname = ''dtmp'' AND relpersistence = ''t''') WHERE result::int > 0;"
+	out=$(printf '%s\n' "SET client_min_messages = warning;" "CREATE TEMP TABLE dtmp (a int);" \
+		"BEGIN;" "DISCARD TEMP;" "ROLLBACK;" "$tcount" "DISCARD TEMP;" "$tcount" \
+		"CREATE TEMP TABLE dtmp (a int);" "SELECT 'made again';" | qf 0)
+	[ "$out" = "2
+0
+made again" ] && ok "DISCARD TEMP drops the segments' temporary tables too, and a ROLLBACK keeps them" \
+		|| notok "DISCARD TEMP" "$out"
+	out=$(printf '%s\n' "CREATE TEMP TABLE dall (a int);" "DISCARD ALL;" "BEGIN;" "DISCARD ALL;" "ROLLBACK;" \
+		"CREATE TEMP TABLE dall (a int);" | qf 0)
+	case "$out" in
+		*"NOTICE:  command without clusterwide effect"*"HINT:  Consider alternatives as DEALLOCATE ALL, or DISCARD TEMP if a clusterwide effect is desired."*"ERROR:  DISCARD ALL cannot run inside a transaction block"*'relation "dall" already exists'*)
+			[ "$(printf '%s\n' "$out" | grep -c 'without clusterwide effect')" = 1 ] \
+				&& ok "DISCARD ALL is the coordinator's, and says so, as Cloudberry's does" \
+				|| notok "DISCARD ALL's NOTICE, once" "$out" ;;
+		*) notok "DISCARD ALL" "$out" ;;
+	esac
 
 	out=$(q 0 "VACUUM kept;")
 	[ -z "$out" ] && ok "VACUUM, which runs outside a transaction block, reaches the segments too" \
@@ -1829,6 +1866,48 @@ EOF
 	esac
 	q 0 "ANALYZE hst;" >/dev/null
 
+	# What ANALYZE samples of a segment is that segment's count too, as
+	# Cloudberry's gp_acquire_sample_rows() writes it there: the table's
+	# pages and rows, and its index's.  So a VACUUM whose segments scan a
+	# page or none -- a read made the rest all-visible, as PostgreSQL 19's
+	# pruning does -- keeps the rows ANALYZE counted, where the coordinator
+	# once read 0 of them until the next ANALYZE; and an index's pages after
+	# ANALYZE are its files' on the segments, not the empty copy's page.  The
+	# rows are written by the explicit write (RETURNING), a statement of
+	# VALUES a batch, which leaves no page empty behind them: COPY's, a bulk
+	# insert, extends a table by pages it leaves empty at its end, which a
+	# VACUUM scans, and PostgreSQL 19 takes for as full as the pages it did
+	# not scan (vac_estimate_reltuples()), on one node as here.
+	q 0 "CREATE TABLE sgc (a int, b int) DISTRIBUTED BY (a); CREATE INDEX sgc_b ON sgc (b);
+		 INSERT INTO sgc SELECT i, i FROM generate_series(1, 20010) i RETURNING 0; ANALYZE sgc;" >/dev/null
+	out=$(q 0 "SELECT relpages || ' ' || reltuples FROM pg_class WHERE relname = 'sgc';")
+	out2=$(q 0 "SELECT sum(relpages) || ' ' || sum(reltuples) FROM gp_dist_random('pg_class') WHERE relname = 'sgc';")
+	out3=$(q 0 "SELECT relpages || ' ' || reltuples FROM pg_class WHERE relname = 'sgc_b';")
+	seg=0
+	for n in 1 2; do
+		p=$(q "$n" "SELECT pg_relation_size('sgc_b') / current_setting('block_size')::int;")
+		isnum "$p" && seg=$((seg + p))
+	done
+	[ "$out" = "$out2" ] && [ "${out#* }" = "20010" ] && [ "$out3" = "$seg 20010" ] \
+		&& ok "the segments count what ANALYZE samples of them, and an index's pages are the segments' ($seg)" \
+		|| notok "the counts ANALYZE leaves" "$out / segments: $out2 / index: $out3, $seg pages"
+	q 0 "SELECT count(*) FROM sgc;" >/dev/null
+	q 0 "VACUUM sgc;" >/dev/null
+	out=$(q 0 "SELECT reltuples FROM pg_class WHERE relname = 'sgc';")
+	out2=$(q 0 "SELECT reltuples FROM pg_class WHERE relname = 'sgc_b';")
+	[ "$out|$out2" = "20010|20010" ] && ok "... which a VACUUM after a read keeps, the table's and the index's" \
+		|| notok "the rows after a VACUUM that scanned little" "$out / index: $out2"
+
+	# A replicated table's ANALYZE samples one of its segments, and a VACUUM
+	# of the others, read there, counts none: they hold as many rows to a page
+	# as the one that counted, where they once made the table a third of it.
+	q 0 "CREATE TABLE sgr (a int) DISTRIBUTED REPLICATED; INSERT INTO sgr SELECT generate_series(1, 3000) RETURNING 0; ANALYZE sgr;" >/dev/null
+	for n in 1 2; do q "$n" "SELECT count(*) FROM sgr;" >/dev/null; done
+	q 0 "VACUUM sgr;" >/dev/null
+	out=$(q 0 "SELECT reltuples FROM pg_class WHERE relname = 'sgr';")
+	[ "$out" = "3000" ] && ok "a replicated table's rows after a VACUUM of segments that had not counted them" \
+		|| notok "a replicated table's rows after VACUUM" "$out"
+
 	###########################################################################
 	echo "10. ORCA's plans run on the segments, with Cloudberry's Motions"
 	###########################################################################
@@ -3136,6 +3215,29 @@ COMMIT;"
 		*) notok "a function in a fragment reading a replicated table" "$out" ;;
 	esac
 
+	# And writes one only where gp.allow_segment_dml is on, Cloudberry's
+	# allow_segment_DML, which the segments are sent: a function an index
+	# calls, as each segment inserts its copy's row (the trap Cloudberry's
+	# privileges test lays for CVE-2020-25695), writes each segment's copy.
+	q 0 "CREATE TABLE lw (s text) DISTRIBUTED REPLICATED;
+		CREATE TABLE lx (a int) DISTRIBUTED REPLICATED;
+		CREATE FUNCTION lx_f(int) RETURNS int LANGUAGE sql IMMUTABLE AS 'SELECT \$1';
+		CREATE INDEX lx_i ON lx (lx_f(a));
+		CREATE OR REPLACE FUNCTION lx_f(int) RETURNS int LANGUAGE sql AS 'INSERT INTO lw VALUES (current_user); SELECT \$1';" >/dev/null
+	nseg=$(q 0 "SELECT count(*) FROM gp_dist_random('gp_id');")
+	out=$(printf '%s\n' "SET gp.optimizer_trace_fallback = on;" "INSERT INTO lx VALUES (1);" \
+		"SET gp.allow_segment_dml = on;" "INSERT INTO lx VALUES (2);" \
+		"SELECT count(*) FROM gp_dist_random('lw');" | qf 0)
+	case "$out" in
+		*"fallback"*) notok "gp.allow_segment_dml and a function writing in a fragment" "$out" ;;
+		*"function cannot execute on a QE slice because it issues a non-SELECT statement"*)
+			[ "${out##*$'\n'}" = "$nseg" ] \
+				&& ok "a function in a fragment writes a replicated table only where gp.allow_segment_dml is on" \
+				|| notok "gp.allow_segment_dml and a function writing in a fragment" "$out" ;;
+		*) notok "gp.allow_segment_dml and a function writing in a fragment" "$out" ;;
+	esac
+	q 0 "DROP TABLE lx, lw; DROP FUNCTION lx_f(int);" >/dev/null
+
 	# Cloudberry's runtime filters (gp_rtfilter.c).  With
 	# gp.enable_runtime_filter on, a hash join of the planner's whose inner
 	# side meets few of its outer rows has a RuntimeFilter above its outer
@@ -3143,9 +3245,12 @@ COMMIT;"
 	# only the outer rows that may meet one, and a row with a NULL key.  With
 	# gp.enable_runtime_filter_pushdown on, an integer key's inner values and
 	# range reach the scans below the outer side -- the planner's gathers,
-	# and on the segments the sequential scans of ORCA's slices -- and
-	# EXPLAIN ANALYZE says how many rows each dropped.  A left join's
-	# preserved side gets neither, and every answer is the one without.
+	# which send their segments the range, and on the segments the
+	# sequential scans of ORCA's slices -- which test a row as they read it,
+	# before their own conditions, and EXPLAIN ANALYZE says how many rows
+	# each dropped, first of the node's lines, as Cloudberry's does.  A left
+	# join's preserved side gets neither, and every answer is the one
+	# without.
 	q 0 "CREATE TABLE rff (id int, d int) DISTRIBUTED BY (id);
 	     INSERT INTO rff SELECT i, CASE WHEN i % 400 = 0 THEN NULL ELSE i % 2000 END FROM generate_series(1, 40000) i;
 	     CREATE TABLE rfd (d int, p int) DISTRIBUTED BY (d);
@@ -3157,17 +3262,32 @@ COMMIT;"
 	out=$(printf '%s\n' "SET gp.optimizer = off;" "SET gp.enable_runtime_filter = on;" \
 		"$rf_explain $rf_join" "$rf_join" "SET gp.enable_runtime_filter = off;" "$rf_join" | qf 0 | tr '\n' '|')
 	case "$out" in
-		*"->  RuntimeFilter (actual rows=4000.00 loops=1)|"*"Bloom Bits: 1048576|"*"->  Gather Motion 2:1 on rff  (slice1; segments: 2) (actual rows=40000.00 loops=1)|"*"|3900|195|3900|195|")
-			ok "the planner's hash join takes a RuntimeFilter: 40,000 outer rows, 4,000 passed -- 3,900 that meet, 100 with a NULL key -- and the same answer" ;;
+		*"->  RuntimeFilter (actual rows=4000.00 loops=1)|"*"Bloom Bits: 1048576|"*"Extra Text: Inner Processed: 200, Flase Positive Rate: 0.0"*"->  Gather Motion 2:1 on rff  (slice1; segments: 2) (actual rows=40000.00 loops=1)|"*"|3900|195|3900|195|")
+			ok "the planner's hash join takes a RuntimeFilter: 40,000 outer rows, 4,000 passed -- 3,900 that meet, 100 with a NULL key -- the 200 inner rows it holds in Cloudberry's Extra Text, and the same answer" ;;
 		*) notok "a RuntimeFilter on the planner's route" "$out" ;;
 	esac
 	out=$(printf '%s\n' "SET gp.optimizer = off;" "SET gp.enable_runtime_filter_pushdown = on;" \
-		"$rf_explain $rf_join" "$rf_join" | qf 0 | tr '\n' '|')
+		"${rf_explain%)}, VERBOSE) $rf_join" "$rf_join" | qf 0 | tr '\n' '|')
 	case "$out" in
 		*"RuntimeFilter"*) notok "pushdown alone" "$out" ;;
-		*"->  Gather Motion 2:1 on rff  (slice1; segments: 2) (actual rows=4000.00 loops=1)|"*"Rows Removed by Pushdown Runtime Filter: 36000|"*"|3900|195|")
-			ok "pushed down, the key's values drop 36,000 rows where the gather reads them, which EXPLAIN ANALYZE says" ;;
+		*"->  Gather Motion 2:1 on public.rff  (slice1; segments: 2) (actual rows=3900.00 loops=1)|"*"Rows Removed by Pushdown Runtime Filter: 35820|"*"Remote SQL: SELECT d FROM ONLY public.rff WHERE (d >= '0'::integer AND d <= '1990'::integer)|"*"|3900|195|")
+			ok "pushed down, the gather sends its segments the key's range, where 280 rows stay, 100 of them with a NULL key, and the key's values drop 35,820 where it reads them, which EXPLAIN ANALYZE says" ;;
 		*) notok "pushdown into the planner's gather" "$out" ;;
+	esac
+	# A gather tests a row as it reads it, before its own conditions: the
+	# count is of all it read, "Rows Removed by Filter" of what passed.  A
+	# cursor's gathers start as it is declared, before any hash table, and
+	# send no range.
+	q 0 "CREATE FUNCTION rf_even(int) RETURNS bool LANGUAGE plpgsql STABLE AS 'BEGIN RETURN \$1 % 2 = 0; END';" >/dev/null
+	rf_local="SELECT count(*) FROM rff JOIN rfd USING (d) WHERE p = 0 AND rf_even(rff.id / 10);"
+	out=$(printf '%s\n' "SET gp.optimizer = off;" "SET gp.enable_runtime_filter_pushdown = on;" \
+		"$rf_explain $rf_local" "$rf_local" "BEGIN;" "DECLARE rfc CURSOR FOR $rf_join" "FETCH ALL FROM rfc;" "COMMIT;" \
+		"SET gp.enable_runtime_filter_pushdown = off;" "$rf_local" | qf 0 | tr '\n' '|')
+	sp=$(printf '%14s' '')
+	case "$out" in
+		*"->  Gather Motion 2:1 on rff  (slice1; segments: 2) (actual rows=1900.00 loops=1)|${sp}Rows Removed by Pushdown Runtime Filter: 35820|${sp}Filter: rf_even((id / 10))|${sp}Rows Removed by Filter: 2000|"*"|1900|3900|195|1900|")
+			ok "a gather drops what the filter rules out before its own condition, and says so first, as Cloudberry's scan does; a cursor's gathers answer as without" ;;
+		*) notok "a gather's count before its own condition" "$out" ;;
 	esac
 	out=$(printf '%s\n' "SET gp.optimizer = off;" "SET gp.enable_runtime_filter = on;" \
 		"SET gp.enable_runtime_filter_pushdown = on;" "$rf_explain $rf_left" "$rf_left" | qf 0 | tr '\n' '|')
@@ -3186,6 +3306,25 @@ COMMIT;"
 	[ "$out" = "0|3900 3|4000 7|4000 0|3900 3|4000 7|4000 " ] \
 		&& ok "a hash join whose hash table is made again for each row keeps its answers" \
 		|| notok "a filtered hash join made again for each row" "$out"
+	# A join's outer side grouped by its key -- the planner's own, and its
+	# unique path for a semi-join -- is filtered below the grouping, which
+	# only drops groups no inner row meets; not where the join runs again
+	# and a HashAggregate gives it again what it made under another hash
+	# table.
+	rf_grouped="SELECT count(*) FROM (SELECT DISTINCT d FROM rff) f JOIN rfd USING (d) WHERE p = 0;"
+	rf_regrouped="SELECT x.p, (SELECT count(*) FROM (SELECT DISTINCT d FROM rff) f JOIN rfd USING (d) WHERE rfd.p = x.p) FROM (VALUES (0), (3), (7)) x(p) ORDER BY 1;"
+	out=$(printf '%s\n' "SET gp.optimizer = off;" "SET gp.enable_runtime_filter = on;" \
+		"$rf_explain $rf_grouped" "$rf_grouped" | qf 0 | tr '\n' '|')
+	regrouped=$(for on in on off; do
+		printf '%s\n' "SET gp.optimizer = off;" "SET enable_mergejoin = off;" "SET enable_nestloop = off;" \
+			"SET gp.enable_runtime_filter = $on;" "SET gp.enable_runtime_filter_pushdown = $on;" \
+			"$rf_regrouped" | qf 0
+	done | tr '\n' ' ')
+	case "$out|$regrouped" in
+		*"->  HashAggregate (actual rows=196.00 loops=1)|"*"->  RuntimeFilter (actual rows=4000.00 loops=1)|"*"|195||0|195 3|200 7|200 0|195 3|200 7|200 ")
+			ok "a join's outer side grouped by its key is filtered below the grouping, 4,000 of 40,000 rows grouped, and where the join runs again it keeps its answers" ;;
+		*) notok "a filter below a grouping node" "$out / $regrouped" ;;
+	esac
 	# ORCA's hash joins run on the segments, which are sent the setting, and
 	# its scans there drop what the key rules out, as a segment's own plan
 	# shows; the coordinator's EXPLAIN ANALYZE describes ORCA's fragment
@@ -3205,6 +3344,24 @@ COMMIT;"
 	case "$out" in
 		*"->  Seq Scan on rff (actual rows="*"|"*"Rows Removed by Pushdown Runtime Filter: "[1-9]*) ok "a segment's sequential scan drops the rows the key rules out" ;;
 		*) notok "pushdown into a segment's sequential scan" "$out" ;;
+	esac
+	# ORCA's: a segment's scan tests a row as its table gives it, before the
+	# scan's own condition, and the coordinator's EXPLAIN ANALYZE says what
+	# the segment with the most rows said -- 0 too, where the filter worked
+	# and dropped nothing, as Cloudberry prints it (prf_work).
+	q 0 "CREATE TABLE rfr (d int) DISTRIBUTED REPLICATED;
+	     INSERT INTO rfr SELECT generate_series(0, 1999); ANALYZE rfr;" >/dev/null
+	rf_orca="SELECT count(*) FROM rff JOIN rfd USING (d) WHERE p = 0 AND (rff.id / 10) % 2 = 0;"
+	out=$(for on in on off; do
+		printf '%s\n' "SET gp.enable_runtime_filter_pushdown = $on;" "$rf_orca" | qf 0
+	done | tr '\n' ' ')
+	plan=$(printf '%s\n' "SET gp.enable_runtime_filter_pushdown = on;" "$rf_explain $rf_orca" \
+		"$rf_explain SELECT count(*) FROM rff JOIN rfr USING (d);" | qf 0 | tr '\n' '|')
+	sp=$(printf '%26s' '')
+	case "$out|$plan" in
+		"1900 1900 |"*"->  Seq Scan on rff (actual rows=1005.00 loops=1)|${sp}Rows Removed by Pushdown Runtime Filter: 17942|${sp}Filter: (((id / 10) % 2) = 0)|${sp}Rows Removed by Filter: 990|"*"->  Seq Scan on rff (actual rows=20063.00 loops=1)|${sp}Rows Removed by Pushdown Runtime Filter: 0|"*)
+			ok "a segment's scan under ORCA counts the rows it drops before its own condition, first of its lines, and 0 where it drops none" ;;
+		*) notok "a segment's count under ORCA" "$out / $plan" ;;
 	esac
 
 	# A segment takes a plan only from a connection with the secret.
@@ -3305,6 +3462,141 @@ COMMIT;"
 				|| notok "a correlated scalar subquery of an aggregate as a join" "$joined / $perrow / $inner / $inner1 / $counted" ;;
 		*) notok "a correlated scalar subquery of an aggregate as a join" "$plan" ;;
 	esac
+
+	# A write of a materialized view is refused as PostgreSQL's
+	# CheckValidResultRel() refuses it, before a row is made, in its words and
+	# on the coordinator -- where the segments' COPY refused the routed rows in
+	# its own, "cannot copy to materialized view" -- under EXPLAIN too, and
+	# an unpopulated view's as well; a read of an unpopulated view by a user
+	# who may not read it is refused for that first, as InitPlan() checks.
+	# REFRESH, which writes the view under its maintenance, still fills it.
+	# Here, where the coordinator has the secret a segment fills a view by.
+	# mvw_writes <settings> <filter>: what each write says, one after another
+	mvw_writes() {
+		local stmt
+		for stmt in "INSERT INTO mvw VALUES (2, 2)" "INSERT INTO mvw SELECT * FROM mvw_base" \
+				"INSERT INTO mvw VALUES (2, 2) RETURNING *" "UPDATE mvw SET b = 3" "DELETE FROM mvw" \
+				"UPDATE mvw SET b = 3 FROM mvw_base WHERE mvw.a = mvw_base.a" \
+				"EXPLAIN INSERT INTO mvw VALUES (2, 2)" "INSERT INTO mvw_rep VALUES (2, 2)" \
+				"INSERT INTO mvw_empty VALUES (2, 2)" "INSERT INTO mvw_empty SELECT * FROM mvw_empty"; do
+			q 0 "$1 $stmt;" | $2
+		done
+	}
+	mvw_want='ERROR:  cannot change materialized view "mvw"
+ERROR:  cannot change materialized view "mvw"
+ERROR:  cannot change materialized view "mvw"
+ERROR:  cannot change materialized view "mvw"
+ERROR:  cannot change materialized view "mvw"
+ERROR:  cannot change materialized view "mvw"
+ERROR:  cannot change materialized view "mvw"
+ERROR:  cannot change materialized view "mvw_rep"
+ERROR:  cannot change materialized view "mvw_empty"
+ERROR:  cannot change materialized view "mvw_empty"'
+	setup=$(q 0 "CREATE TABLE mvw_base (a int, b int) DISTRIBUTED BY (a); INSERT INTO mvw_base VALUES (1, 1);"
+			q 0 "CREATE MATERIALIZED VIEW mvw AS SELECT a, b FROM mvw_base DISTRIBUTED BY (a);"
+			q 0 "CREATE MATERIALIZED VIEW mvw_rep AS SELECT a, b FROM mvw_base DISTRIBUTED REPLICATED;"
+			q 0 "CREATE MATERIALIZED VIEW mvw_empty AS SELECT a, b FROM mvw_base WITH NO DATA DISTRIBUTED BY (a);"
+			q 0 "CREATE ROLE mvw_reader LOGIN;")
+	out=$(mvw_writes "SET gp.optimizer = off;" cat)
+	[ "$out" = "$mvw_want" ] && ok "a write of a materialized view is refused in PostgreSQL's words, on the coordinator" \
+		|| notok "a write of a materialized view" "$setup / $out"
+	out=$(q 0 "SET ROLE mvw_reader; SELECT * FROM mvw_empty;")
+	out2=$(q 0 "SELECT * FROM mvw_empty;" | head -1)
+	q 0 "INSERT INTO mvw_base VALUES (2, 2);" >/dev/null
+	out3=$(q 0 "REFRESH MATERIALIZED VIEW mvw;" && q 0 "SELECT count(*) FROM mvw;")
+	[ "$out|$out2|$out3" = 'ERROR:  permission denied for materialized view mvw_empty|ERROR:  materialized view "mvw_empty" has not been populated|2' ] \
+		&& ok "... a read of an unpopulated one checks the privileges first, and REFRESH still writes one" \
+		|| notok "an unpopulated materialized view, and REFRESH" "$out / $out2 / $out3"
+
+	# Under ORCA in the same words, which a segment's ModifyTable says where
+	# ORCA writes there -- an unpopulated view's too, whose write is no scan
+	# of it.
+	out=$(mvw_writes "SET gp.optimizer = on;" "head -1")
+	[ "$out" = "$mvw_want" ] && ok "under ORCA a write of a materialized view is refused in the same words" \
+		|| notok "a write of a materialized view under ORCA" "$out"
+
+	# NOT IN of a subquery that reads a distributed table, which the planner
+	# keeps a SubPlan -- where the rows do not fit hash_mem, each outer row
+	# scans them all again -- is an anti-join with its NULLs conditions beside
+	# it (gp_subselect.c), as Cloudberry's planner makes a join of it.  It
+	# answers as the SubPlan does, which (...) IS TRUE keeps one: over a
+	# subquery with a NULL, over none, for an outer NULL, by <> ALL, of text,
+	# over a join read once and a NOT IN nested in another; where neither side
+	# can be NULL it is the anti-join alone, and a two-column NOT IN stays a
+	# SubPlan.
+	q 0 "CREATE TABLE nia (a int, t text) DISTRIBUTED BY (a);
+	     CREATE TABLE nib (a int, t text) DISTRIBUTED BY (a);
+	     CREATE TABLE nin (a int, t text) DISTRIBUTED BY (a);
+	     CREATE TABLE nie (a int, t text) DISTRIBUTED BY (a);
+	     CREATE TABLE nik (a int NOT NULL) DISTRIBUTED BY (a);
+	     INSERT INTO nia SELECT i, 'v' || (i % 13) FROM generate_series(1, 300) i;
+	     INSERT INTO nia VALUES (NULL, NULL);
+	     INSERT INTO nib SELECT i * 2, 'v' || (i % 11) FROM generate_series(1, 100) i;
+	     INSERT INTO nin SELECT * FROM nib; INSERT INTO nin VALUES (NULL, NULL);
+	     INSERT INTO nik SELECT i * 3 FROM generate_series(1, 100) i;
+	     ANALYZE nia; ANALYZE nib; ANALYZE nin; ANALYZE nie; ANALYZE nik;" >/dev/null
+	same=0; n=0
+	for c in "a NOT IN (SELECT a FROM nib)" "a NOT IN (SELECT a FROM nin)" \
+		"a NOT IN (SELECT a FROM nie)" "a <> ALL (SELECT a FROM nib WHERE a > 50)" \
+		"t NOT IN (SELECT t FROM nib)" "a NOT IN (SELECT nib.a FROM nib JOIN nin USING (t))" \
+		"a NOT IN (SELECT a FROM nib WHERE a NOT IN (SELECT a FROM nin WHERE a > 100))"; do
+		n=$((n + 1))
+		got=$(q 0 "SET gp.optimizer = off; SELECT count(*), sum(a) FROM nia WHERE $c;")
+		want=$(q 0 "SET gp.optimizer = off; SELECT count(*), sum(a) FROM nia WHERE ($c) IS TRUE;")
+		[ -n "$got" ] && [ "$got" = "$want" ] && same=$((same + 1))
+	done
+	plan=$(q 0 "SET gp.optimizer = off; EXPLAIN (COSTS OFF) SELECT count(*) FROM nia WHERE a NOT IN (SELECT a FROM nib);" | tr '\n' ' ')
+	alone=$(q 0 "SET gp.optimizer = off; EXPLAIN (COSTS OFF) SELECT count(*) FROM nik WHERE a NOT IN (SELECT a FROM nik WHERE a > 50);" | tr '\n' ' ')
+	kept=$(q 0 "SET gp.optimizer = off; EXPLAIN (COSTS OFF) SELECT count(*) FROM nia WHERE (a, t) NOT IN (SELECT a, t FROM nib);" | grep -c SubPlan)
+	case "$plan / $alone" in
+		*"InitPlan"*"Anti Join"*" / "*"Anti Join"*)
+			[ "$same" = "$n" ] && [ "$kept" -ge 1 ] && [ "${alone#*InitPlan}" = "$alone" ] \
+				&& ok "under the planner NOT IN of a distributed table is an anti-join, its NULLs conditions beside it, answering as the SubPlan does -- $n of them; of two columns it stays a SubPlan" \
+				|| notok "NOT IN as an anti-join" "$same of $n / $kept / $alone" ;;
+		*) notok "NOT IN as an anti-join" "$plan / $alone" ;;
+	esac
+
+	# With hash joins off -- a test turns them off to have its nested loop --
+	# the loop's inner gather is keyed by the join's equality (gp_scan.c):
+	# gathered once, its rows kept by their key, and each outer row given
+	# those of its value.  It answers as the hash join does: a left join and
+	# an inner one, NULL keys on both sides, an int against an int8, text,
+	# two keys, a condition beside the key, NOT EXISTS, and a keyed gather
+	# in a subquery run for each row.  With hash joins on the plan is the
+	# hash join, as it was.
+	q 0 "CREATE TABLE kga (i int, k int, t text) DISTRIBUTED BY (i);
+	     CREATE TABLE kgb (i int, k int, k8 int8, t text) DISTRIBUTED BY (i);
+	     INSERT INTO kga SELECT i, CASE WHEN i % 17 = 0 THEN NULL ELSE i % 997 END,
+	                            CASE WHEN i % 19 = 0 THEN NULL ELSE 'v' || (i % 331) END
+	                       FROM generate_series(1, 6000) i;
+	     INSERT INTO kgb SELECT i, CASE WHEN i % 13 = 0 THEN NULL ELSE (i * 7) % 1500 END,
+	                            (i * 7) % 1500, 'v' || (i % 500)
+	                       FROM generate_series(1, 9000) i;
+	     ANALYZE kga; ANALYZE kgb;" >/dev/null
+	same=0; n=0; keyed=0
+	for c in "kga a LEFT JOIN kgb b ON a.k = b.k" "kga a JOIN kgb b ON a.k = b.k" \
+		"kga a LEFT JOIN kgb b ON a.k = b.k8" "kga a LEFT JOIN kgb b ON a.t = b.t" \
+		"kga a LEFT JOIN kgb b ON a.k = b.k AND a.t = b.t" \
+		"kga a LEFT JOIN kgb b ON a.k + 1 = b.k AND b.i > a.i"; do
+		n=$((n + 1))
+		got=$(q 0 "SET gp.optimizer = off; SET enable_hashjoin = off; SET enable_mergejoin = off; SELECT count(*), sum(a.i), sum(b.i) FROM $c;")
+		want=$(q 0 "SET gp.optimizer = off; SELECT count(*), sum(a.i), sum(b.i) FROM $c;")
+		[ -n "$got" ] && [ "$got" = "$want" ] && same=$((same + 1))
+		q 0 "SET gp.optimizer = off; SET enable_hashjoin = off; SET enable_mergejoin = off; EXPLAIN (COSTS OFF) SELECT count(*) FROM $c;" \
+			| grep -q "Lookup Key" && keyed=$((keyed + 1))
+	done
+	for c in "count(*) FROM kga a WHERE NOT EXISTS (SELECT 1 FROM kgb b WHERE b.k = a.k)" \
+		"count(*) FROM kga a WHERE a.i < 200 AND (SELECT count(*) FROM kgb b JOIN kga c ON b.k = c.k WHERE b.i = a.i) > 0"; do
+		n=$((n + 1))
+		got=$(q 0 "SET gp.optimizer = off; SET enable_hashjoin = off; SET enable_mergejoin = off; SELECT $c;")
+		want=$(q 0 "SET gp.optimizer = off; SELECT $c;")
+		[ -n "$got" ] && [ "$got" = "$want" ] && same=$((same + 1))
+	done
+	hashed=$(q 0 "SET gp.optimizer = off; EXPLAIN (COSTS OFF) SELECT count(*) FROM kga a LEFT JOIN kgb b ON a.k = b.k;" | tr '\n' ' ')
+	[ "$same" = "$n" ] && [ "$keyed" = 6 ] && [ "${hashed#*Hash Cond}" != "$hashed" ] &&
+		[ "${hashed#*Lookup Key}" = "$hashed" ] \
+		&& ok "with hash joins off a nested loop's inner gather is keyed by the join's equality, answering as the hash join does -- $n of them; with them on the plan is the hash join" \
+		|| notok "keyed gathers" "$same of $n / $keyed keyed / $hashed"
 
 	# No secret on the coordinator: ORCA is told, and the planner gathers.
 	# None on the segments either -- a segment that has one takes the
@@ -3409,6 +3701,36 @@ COMMIT;"
 		"SHOW gp.statement_mem;" | qf 0)
 	[ "$out" = "2MB" ] && ok "Cloudberry's other settings are accepted, and say what they do here" \
 		|| notok "Cloudberry's accepted settings" "$out"
+
+	# A SET of the client's, outside a transaction block, reaches the
+	# segments as it runs, as Cloudberry dispatches one: a value a segment
+	# refuses fails the SET, which leaves the session as it was.  Here
+	# temp_buffers, which a segment that has used a temporary table refuses
+	# to change, and the coordinator, whose copy of the table is empty and
+	# unused, does not.
+	out=$(printf '%s\n' "SET client_min_messages = warning;" "SET gp.optimizer = off;" \
+		"CREATE TEMP TABLE tbuf (a int) DISTRIBUTED BY (a);" "INSERT INTO tbuf SELECT generate_series(1, 10);" \
+		"SET temp_buffers = 2000;" "SHOW temp_buffers;" "SELECT count(*) FROM tbuf;" | qf 0)
+	case "$out" in
+		*'invalid value for parameter "temp_buffers": 2000'*"8MB"*"10") ok "a SET a segment refuses fails as it runs, and the session goes on" ;;
+		*) notok "a SET a segment refuses" "$out" ;;
+	esac
+
+	# SERIALIZABLE is REPEATABLE READ on a cluster, as in Cloudberry: no
+	# node's serializable snapshot isolation sees another's rows.
+	out=$(printf '%s\n' "SET SESSION CHARACTERISTICS AS TRANSACTION ISOLATION LEVEL SERIALIZABLE;" \
+		"SHOW default_transaction_isolation;" "RESET default_transaction_isolation;" \
+		"BEGIN ISOLATION LEVEL SERIALIZABLE;" "SHOW transaction_isolation;" \
+		"SELECT DISTINCT result FROM gp.exec_on_segments('SHOW transaction_isolation');" "COMMIT;" | qf 0)
+	[ "$out" = "repeatable read
+repeatable read
+repeatable read" ] && ok "SERIALIZABLE, asked for, is REPEATABLE READ on the coordinator and the segments" \
+		|| notok "SERIALIZABLE on a cluster" "$out"
+	out=$(q 0 "ALTER ROLE CURRENT_USER SET default_transaction_isolation = 'serializable';")
+	out2=$(q 0 "SHOW default_transaction_isolation;")
+	q 0 "ALTER ROLE CURRENT_USER RESET default_transaction_isolation;" >/dev/null
+	[ -z "$out" ] && [ "$out2" = "repeatable read" ] && ok "and so is a role's default of it" \
+		|| notok "a role's default of SERIALIZABLE" "$out / $out2"
 
 	# Cloudberry's EXPLAIN options: the slice table of the planner's route --
 	# slice 0 the coordinator's, a Reader a gather, each gather labelled with
@@ -3651,6 +3973,33 @@ SQL
 	out2=$(q 0 "CREATE TABLE dtx (a int, b int) DISTRIBUTED BY (a); INSERT INTO dtx SELECT i, i FROM generate_series(1, 20) i;")
 	[ -z "$out$out2" ] && ok "gp_inject_fault, Cloudberry's fault injector, is created" \
 		|| notok "CREATE EXTENSION gp_inject_fault" "$out / $out2"
+
+	# Cloudberry's fault of a segment's SET, set_variable_fault, is met as a
+	# SET runs, which it fails: the coordinator's value goes back, and the
+	# segments are told it with the next statement.  A SET in a transaction
+	# block or a DO waits for the next statement sent, as before, and the
+	# fault is met there.
+	out=$(printf '%s\n' "SET datestyle = 'German';" "SELECT count(*) FROM dtx;" \
+		"SELECT gp_inject_fault('set_variable_fault', 'error', $(dbid 1));" \
+		"SET datestyle = 'SQL, MDY';" "SHOW datestyle;" \
+		"SELECT DISTINCT result FROM gp.exec_on_segments('SHOW datestyle');" \
+		"SELECT gp_inject_fault('set_variable_fault', 'reset', $(dbid 1));" | qf 0 | tr '\n' '|')
+	case "$out" in
+		"20|Success:|"*"ERROR:  fault triggered, fault name:'set_variable_fault' fault type:'error'"*"|German, DMY|German, DMY|Success:|")
+			ok "set_variable_fault fails the SET as it runs, and the segments keep the value the coordinator has" ;;
+		*) notok "set_variable_fault at a SET" "$out" ;;
+	esac
+	out=$(printf '%s\n' "SELECT gp_inject_fault('set_variable_fault', 'error', $(dbid 1));" \
+		"BEGIN;" "SET datestyle = 'SQL, MDY';" "SELECT 'set';" "SELECT count(*) FROM dtx;" "ROLLBACK;" \
+		"SELECT gp_inject_fault('set_variable_fault', 'reset', $(dbid 1));" \
+		"SELECT gp_inject_fault('set_variable_fault', 'error', $(dbid 1));" \
+		"DO \$\$ BEGIN SET datestyle = 'Postgres, MDY'; END \$\$;" "SELECT 'done';" "SELECT count(*) FROM dtx;" \
+		"SELECT gp_inject_fault('set_variable_fault', 'reset', $(dbid 1));" | qf 0 | tr '\n' '|')
+	case "$out" in
+		"Success:|set|"*"ERROR:  fault triggered, fault name:'set_variable_fault'"*"|Success:|Success:|done|"*"ERROR:  fault triggered, fault name:'set_variable_fault'"*"|Success:|")
+			ok "and a SET in a transaction block, or in a DO, meets it with the next statement sent" ;;
+		*) notok "set_variable_fault after a SET in a block or a DO" "$out" ;;
+	esac
 
 	out=$(printf '%s\n' "SELECT gp_inject_fault_infinite('dtm_broadcast_prepare', 'skip', 1);" \
 		"SELECT count(*) FROM dtx;" \
@@ -4052,6 +4401,85 @@ SQL
 	[ "$out|$out2" = "secret=sesame,secret=sesame|0" ] \
 		&& ok "a handler on a segment is given the user's credentials, read on the coordinator" \
 		|| notok "credentials on a segment" "$out / $out2"
+
+	# Cloudberry's fault bump_oid, which its tests set on the coordinator to
+	# make an object whose OID is past a signed int's: the next OID a catalog
+	# row is given moved there, once, the counter left where it was -- and the
+	# segments' object is given the same (gp_ddl.c).
+	q 0 "SELECT gp_inject_fault('bump_oid', 'skip', 1);" >/dev/null
+	q 0 "CREATE TABLE bump_big (a int) DISTRIBUTED BY (a);" >/dev/null
+	q 0 "SELECT gp_inject_fault('bump_oid', 'reset', 1);" >/dev/null
+	q 0 "CREATE TABLE bump_small (a int) DISTRIBUTED BY (a);" >/dev/null
+	out=$(q 0 "SELECT string_agg((oid::bigint > x'7FFFFFFF'::bigint)::text, ' ' ORDER BY relname)
+	             FROM pg_class WHERE relname IN ('bump_big', 'bump_small');")
+	out2=$(q 0 "SELECT count(*) FROM gp_dist_random('pg_class') WHERE relname = 'bump_big' AND oid = 'bump_big'::regclass;")
+	out3=$(q 0 "INSERT INTO bump_big SELECT generate_series(1, 10); SELECT count(*) FROM bump_big;")
+	[ "$out|$out2|$out3" = "true false|2|10" ] \
+		&& ok "bump_oid gives the next table an OID past a signed int's, on every node, once" \
+		|| notok "the fault bump_oid" "$out / $out2 / $out3"
+
+	# CREATE DATABASE and CREATE and DROP TABLESPACE are parts of the
+	# coordinator's transaction on the segments, as Cloudberry's two-phase DDL
+	# is (gp_ddl.c): each segment prepares its part with a file, under
+	# gp_dirxact/, of what its directories are to become as the part ends --
+	# the new database's to go if it rolls back -- and COMMIT or ROLLBACK
+	# PREPARED does what the file says (gp_dirxact.c).
+	partfiles() { cat "$(datadir 1)"/gp_dirxact/* "$(datadir 2)"/gp_dirxact/* 2>/dev/null; }
+	q 0 "SELECT gp_inject_fault('dtm_broadcast_commit_prepared', 'suspend', 1);" >/dev/null
+	q 0 "CREATE DATABASE dx1;" >/dev/null 2>&1 &
+	writer=$!
+	q 0 "SELECT gp_wait_until_triggered_fault('dtm_broadcast_commit_prepared', 1, 1);" >/dev/null
+	gid=$(q 1 "SELECT gid FROM pg_prepared_xacts;")
+	held=$(ls "$(datadir 1)/gp_dirxact" "$(datadir 2)/gp_dirxact" | grep -c "^$gid$")
+	lines=$(partfiles | grep -c '^d [0-9]* 0 abort 1$')
+	q 0 "SELECT gp_inject_fault('dtm_broadcast_commit_prepared', 'resume', 1);" >/dev/null
+	wait "$writer"
+	q 0 "SELECT gp_inject_fault('dtm_broadcast_commit_prepared', 'reset', 1);" >/dev/null
+	left=$(partfiles | wc -l)
+	dbs=$(for n in 0 1 2; do q "$n" "SELECT oid FROM pg_database WHERE datname = 'dx1';"; done | sort -u | wc -l)
+	case "$gid|$held|$lines|$left|$dbs" in
+		"gp_dtx_"[0-9]*"|2|2|0|1")
+			ok "CREATE DATABASE's parts are prepared, each with a file of its directory to go if it rolls back, gone once committed" ;;
+		*) notok "CREATE DATABASE's prepared parts" "$gid / $held / $lines / $left / $dbs" ;;
+	esac
+	bases() { for n in 0 1 2; do ls "$(datadir "$n")/base"; done | sort | tr '\n' ' '; }
+	before=$(bases)
+	q 0 "SELECT gp_inject_fault('start_prepare', 'error', $(dbid 2));" >/dev/null
+	out=$(q 0 "CREATE DATABASE dx2;")
+	q 0 "SELECT gp_inject_fault('start_prepare', 'reset', $(dbid 2));" >/dev/null
+	out2=$(for n in 0 1 2; do q "$n" "SELECT count(*) FROM pg_database WHERE datname = 'dx2';"; done | tr '\n' ' ')
+	case "$out|$out2|$(partfiles | wc -l)" in
+		*"fault name:'start_prepare'"*"segment 1"*"|0 0 0 |0")
+			[ "$(bases)" = "$before" ] \
+				&& ok "a CREATE DATABASE a segment fails to prepare leaves no database and no directory on any node" \
+				|| notok "the directories of a failed CREATE DATABASE" "$before / $(bases)" ;;
+		*) notok "a CREATE DATABASE a segment fails to prepare" "$out / $out2" ;;
+	esac
+	q 0 "DROP DATABASE dx1;" >/dev/null
+
+	# A tablespace likewise: a CREATE that fails leaves no directory under the
+	# location, and a DROP that fails leaves them all, where PostgreSQL's
+	# DropTableSpace() removes them as it runs; the DROP that commits takes
+	# them away.
+	links() { for n in 0 1 2; do ls "$(datadir "$n")/pg_tblspc"; done | wc -l; }
+	mkdir -p "$ROOT/tblspc2"
+	nlinks=$(links)
+	q 0 "SELECT gp_inject_fault('start_prepare', 'error', $(dbid 2));" >/dev/null
+	out=$(q 0 "CREATE TABLESPACE ts2 LOCATION '$ROOT/tblspc2';")
+	q 0 "SELECT gp_inject_fault('start_prepare', 'reset', $(dbid 2));" >/dev/null
+	out2="$(ls "$ROOT/tblspc2" | tr '\n' ' ')|$(links)"
+	q 0 "CREATE TABLESPACE ts2 LOCATION '$ROOT/tblspc2';" >/dev/null
+	q 0 "SELECT gp_inject_fault('start_prepare', 'error', $(dbid 2));" >/dev/null
+	out3=$(q 0 "DROP TABLESPACE ts2;")
+	q 0 "SELECT gp_inject_fault('start_prepare', 'reset', $(dbid 2));" >/dev/null
+	out4="$(ls "$ROOT/tblspc2" | tr '\n' ' ')|$(q 0 "CREATE TABLE tsp2 (a int) TABLESPACE ts2 DISTRIBUTED BY (a); INSERT INTO tsp2 SELECT generate_series(1, 10); SELECT count(*) FROM tsp2; DROP TABLE tsp2;")"
+	out5="$(q 0 "DROP TABLESPACE ts2;")$(ls "$ROOT/tblspc2")|$(links)|$(partfiles | wc -l)"
+	case "$out|$out2|$out3|$out4|$out5" in
+		*"fault name:'start_prepare'"*"||$nlinks|"*"fault name:'start_prepare'"*"|1 2 3 |10||$nlinks|0")
+			ok "a CREATE TABLESPACE that fails leaves no directory, a DROP TABLESPACE that fails all of them, and the one that commits none" ;;
+		*) notok "a tablespace's directories and its failures" "$out / $out2 / $out3 / $out4 / $out5" ;;
+	esac
+	rmdir "$ROOT/tblspc2"
 
 	###########################################################################
 	echo "14. the global deadlock detector"
@@ -4532,7 +4960,7 @@ SQL
 	seglog=$(stat -c %s "$ROOT/node1.log")
 	out=$(q 0 "SELECT count(*) FROM gp.exec_on_segments('SELECT 1');")
 	case "$out" in
-		*"could not connect"*)
+		*"failed to acquire resources on one or more segments"*"SSL error"*)
 			if tail -c +"$((seglog + 1))" "$ROOT/node1.log" | grep -q "could not accept SSL connection: certificate verify failed"; then
 				ok "a certificate of another authority is refused, its name though the node's"
 			else
@@ -4782,9 +5210,9 @@ t" ] && ok "a message's trailing whitespace off, and gp_log_command_timings" \
 		"DECLARE wf CURSOR FOR SELECT g FROM generate_series(1, 300000) g ORDER BY g DESC;" \
 		"FETCH 1 FROM wf;" \
 		"SELECT count(*) || ' ' || sum(numfiles) || ' ' || bool_and(size > 0) || ' ' ||
-				bool_and(sess_id = pg_backend_pid() AND pid = pg_backend_pid() AND usename = current_user)
+				bool_and(sess_id = current_setting('gp.session_id')::int AND pid = pg_backend_pid() AND usename = current_user)
 		 FROM gp_toolkit.gp_workfile_entries WHERE segid = -1;" \
-		"SELECT size > 0 FROM gp_toolkit.gp_workfile_usage_per_query WHERE sess_id = pg_backend_pid();" \
+		"SELECT size > 0 FROM gp_toolkit.gp_workfile_usage_per_query WHERE sess_id = current_setting('gp.session_id')::int;" \
 		"SELECT bytes > 0 FROM gp_toolkit.gp_workfile_mgr_used_diskspace WHERE segid = -1;" \
 		"COMMIT;" \
 		"SELECT count(*) FROM gp_toolkit.gp_workfile_entries;" | qf 0)
@@ -5109,6 +5537,10 @@ if "$BINDIR/pg_ctl" -D "$d" -l "$ROOT/node0.log" -w -t 30 start >/dev/null 2>&1;
 	out=$(q 0 "CREATE TABLE sn (a int); INSERT INTO sn VALUES (1), (2); SELECT DISTINCT gp_segment_id FROM sn;")
 	[ "$out" = "-1" ] && ok "gp_segment_id is -1, as on Cloudberry's single node" \
 		|| notok "gp_segment_id on one node" "$out"
+
+	out=$(q 0 "BEGIN ISOLATION LEVEL SERIALIZABLE; SHOW transaction_isolation; COMMIT;")
+	[ "$out" = "serializable" ] && ok "and SERIALIZABLE is PostgreSQL's, which is serializable on one node" \
+		|| notok "SERIALIZABLE on one node" "$out"
 else
 	notok "a server with no cluster starts" "$(tail -5 "$ROOT/node0.log")"
 fi
@@ -5398,6 +5830,166 @@ if [ "$started" -eq 1 ]; then
 		q 0 "DELETE FROM pd WHERE a > 100000;" >/dev/null
 	done
 	q 0 "DROP TABLE ph, pa, pc, pp, pd;" >/dev/null
+fi
+
+###############################################################################
+echo "23. a runtime filter's range and PAX's sparse filter"
+###############################################################################
+# gp_rtfilter.c: a runtime filter's range reaches a PAX table's scan as its
+# keys, and PAX's sparse filter skips the files whose statistics rule the
+# range out, as Cloudberry's PAX, which says SCAN_SUPPORT_RUNTIME_FILTER, is
+# given it -- under ORCA the segments' scans, begun with the keys, and on
+# the planner's route through the SQL the gather sends.  Ten files on each
+# segment, each of a thousand values of its own, and a join on ten values;
+# PAX says what it skipped in its log (pax.enable_debug).
+if [ "${par_started:-0}" -eq 1 ]; then
+	q 0 "CREATE TABLE rfp (c1 int, c2 int) USING pax WITH (minmax_columns = 'c2') DISTRIBUTED BY (c1);
+	     CREATE TABLE rfq (c2 int) DISTRIBUTED REPLICATED;
+	     INSERT INTO rfq SELECT generate_series(5000, 5009);" >/dev/null
+	for k in $(seq 0 9); do
+		q 0 "INSERT INTO rfp SELECT i, i FROM generate_series($((k * 1000)), $((k * 1000 + 999))) i;" >/dev/null
+	done
+	q 0 "ANALYZE rfp; ANALYZE rfq;" >/dev/null
+	rf_pax="SELECT count(*) FROM rfp JOIN rfq USING (c2);"
+	rf_explain="EXPLAIN (ANALYZE, COSTS OFF, TIMING OFF, SUMMARY OFF, BUFFERS OFF)"
+	sp=$(printf '%26s' '')
+	out=$(for sparse in on off; do
+		printf '%s\n' "SET gp.enable_runtime_filter_pushdown = on;" "SET pax.enable_sparse_filter = $sparse;" \
+			"$rf_explain $rf_pax" "$rf_pax" | qf 0
+	done | tr '\n' '|')
+	case "$out" in
+		*"->  Seq Scan on rfp (actual rows=7.00 loops=1)|${sp}Rows Removed by Pushdown Runtime Filter: 521|"*"|10|"*"->  Seq Scan on rfp (actual rows=7.00 loops=1)|${sp}Rows Removed by Pushdown Runtime Filter: 5006|"*"|10|")
+			ok "under ORCA a segment's scan of a PAX table, begun with the range, reads the one file in it: 521 rows dropped where the ten files' are 5,006" ;;
+		*) notok "a PAX scan begun with a runtime filter's range" "$out" ;;
+	esac
+	logged() { cat "$ROOT/node1.log" "$ROOT/node2.log" | grep -c "kind file, filter rate: 9 / 10"; }
+	before=$(logged)
+	out=$(printf '%s\n' "SET gp.optimizer = off;" "SET gp.enable_runtime_filter_pushdown = on;" \
+		"SET pax.enable_debug = on;" "$rf_explain $rf_pax" "$rf_pax" | qf 0 | tr '\n' '|')
+	after=$(logged)
+	case "$out" in
+		*"->  Gather Motion 2:1 on rfp  (slice1; segments: 2) (actual rows=10.00 loops=1)|"*"Rows Removed by Pushdown Runtime Filter: 0|"*"|10|")
+			if [ "$((after - before))" -ge 2 ]; then
+				ok "on the planner's route the segments are sent the range, and each one's PAX scan skips nine of its ten files"
+			else
+				notok "PAX's sparse filter by a gather's range" "the segments logged $before, then $after, files skipped"
+			fi ;;
+		*) notok "a gather's range on a PAX table" "$out" ;;
+	esac
+	# A segment's own plan: a hash join made again for each row of a
+	# subquery's, its scan of a PAX table begun again with each new range --
+	# one file read for each, 995 of its rows dropped -- and every answer the
+	# one without the filter, a LIMIT's that stops the scan short among them.
+	q 1 "CREATE TABLE rfsp (c1 int, c2 int) USING pax WITH (minmax_columns = 'c2');
+	     CREATE TABLE rfsq (c2 int);
+	     INSERT INTO rfsq SELECT generate_series(100, 109) UNION ALL SELECT generate_series(5000, 5009)
+	         UNION ALL SELECT generate_series(7000, 7009);" >/dev/null
+	for k in $(seq 0 9); do
+		q 1 "INSERT INTO rfsp SELECT i, i FROM generate_series($((k * 1000)), $((k * 1000 + 999))) i;" >/dev/null
+	done
+	q 1 "ANALYZE rfsp; ANALYZE rfsq;" >/dev/null
+	rf_each="SELECT x.lo, (SELECT count(*) FROM rfsp JOIN rfsq ON rfsp.c2 = rfsq.c2 WHERE rfsq.c2 BETWEEN x.lo AND x.lo + 4) FROM (VALUES (5000), (7000), (100), (5000), (9999), (7005)) x(lo) ORDER BY 1, 2;"
+	rf_short="SELECT x.lo, (SELECT count(*) FROM (SELECT 1 FROM rfsp JOIN rfsq ON rfsp.c2 = rfsq.c2 WHERE rfsq.c2 BETWEEN x.lo AND x.lo + 4 LIMIT 2) s) FROM (VALUES (5000), (7000), (100), (5000)) x(lo) ORDER BY 1, 2;"
+	out=$(for on in on off; do
+		printf '%s\n' "SET enable_nestloop = off;" "SET enable_mergejoin = off;" \
+			"SET gp.enable_runtime_filter_pushdown = $on;" "$rf_each" "$rf_short" | qf 1
+	done | tr '\n' ' ')
+	plan=$(printf '%s\n' "SET enable_nestloop = off;" "SET enable_mergejoin = off;" \
+		"SET gp.enable_runtime_filter_pushdown = on;" "$rf_explain $rf_each" | qf 1 | tr '\n' '|')
+	want="100|5 5000|5 5000|5 7000|5 7005|5 9999|0 100|2 5000|2 5000|2 7000|2 "
+	case "$out|$plan" in
+		"$want$want|"*"->  Seq Scan on rfsp (actual rows=5.00 loops=5)|"*"Rows Removed by Pushdown Runtime Filter: 4975|"*)
+			ok "a segment's PAX scan under a hash join made again for each row is begun again with each range, and answers as without" ;;
+		*) notok "a PAX scan's range at each rescan" "$out / $plan" ;;
+	esac
+	q 0 "DROP TABLE rfp, rfq;" >/dev/null
+	q 1 "DROP TABLE rfsp, rfsq;" >/dev/null
+fi
+
+
+###############################################################################
+echo "24. pg_hint_plan's hint table, on the cluster and on one node"
+###############################################################################
+# pg_hint_plan's hints from its table, hint_plan.hints, found by a
+# statement's text with its constants made '?' and by the application's
+# name, under pg_hint_plan.enable_hint_table: the table is replicated, as a
+# table an extension's script makes is, and read through a gather.  ORCA is
+# given the hint state the module's planner hook made of the query, where
+# Cloudberry's plan_hint_hook finds the hints again -- a lookup of the table,
+# which ORCA, planning one query, cannot plan too, and which failed every
+# statement ORCA planned while the setting was on (pg_hint_plan.c).
+if [ "$started" -eq 1 ]; then
+	# gp_ao and pax as well, whose records the nodes' WAL has (22.)
+	hint_started=1
+	for n in 1 2 0; do
+		start_node "$n" "shared_preload_libraries = '$PRELOAD,gp_orca,gp_ao,pax,pg_hint_plan'" \
+			"gp.cluster_secret = '$SECRET'" || hint_started=0
+	done
+	out=$(printf '%s\n' "SET client_min_messages = warning;" \
+		"CREATE EXTENSION IF NOT EXISTS gp_orca;" "CREATE EXTENSION pg_hint_plan;" \
+		"CREATE TABLE ht (id int PRIMARY KEY, val int) DISTRIBUTED BY (id);" \
+		"INSERT INTO ht SELECT i, i % 100 FROM generate_series(1, 10000) i;" "ANALYZE ht;" \
+		"INSERT INTO hint_plan.hints (norm_query_string, application_name, hints) VALUES
+			('EXPLAIN (COSTS false) SELECT count(*) FROM ht a JOIN ht b ON a.id = b.val WHERE a.id < ?;', '', 'MergeJoin(a b)'),
+			('EXPLAIN (COSTS false) SELECT count(*) FROM ht a JOIN ht b ON a.id = b.val WHERE a.id < ?;', 'hintapp', 'NestLoop(a b)'),
+			('EXPLAIN (COSTS false) SELECT * FROM ht WHERE ht.id = ?;', '', 'SeqScan(ht)');" \
+		"SELECT policytype FROM gp_distribution_policy WHERE localoid = 'hint_plan.hints'::regclass;" \
+		"SELECT count(*) FROM gp_dist_random('hint_plan.hints');" | qf 0 | tr '\n' ' ')
+	[ "$hint_started" -eq 1 ] && [ "$out" = "r 6 " ] \
+		&& ok "pg_hint_plan's hint table is replicated, as a table an extension's script makes is, its rows on each segment" \
+		|| notok "pg_hint_plan's hint table on the cluster" "$out"
+
+	# the join the coordinator makes of two gathers, under the planner
+	hint_join() {
+		printf '%s\n' "SET gp.optimizer = off;" "SET pg_hint_plan.enable_hint_table = on;" "$@" \
+			"EXPLAIN (COSTS false) SELECT count(*) FROM ht a JOIN ht b ON a.id = b.val WHERE a.id < 10;" |
+			qf 0 | grep -o 'Hash Join\|Merge Join\|Nested Loop' | head -1
+	}
+	out="$(hint_join)|$(hint_join "SET application_name = 'hintapp';")|$(hint_join "SET pg_hint_plan.enable_hint_table = off;")"
+	[ "$out" = "Merge Join|Nested Loop|Hash Join" ] \
+		&& ok "under the planner the table's hint joins the coordinator's gathers, the application's own row before the one of any; none with the setting off" \
+		|| notok "the hint table under the planner" "$out"
+
+	errors=$(q 0 "SELECT count FROM gp_orca.fallbacks() WHERE reason = 'error';")
+	out=$(printf '%s\n' "SET gp.optimizer = on;" "SET pg_hint_plan.enable_hint_table = on;" \
+		"EXPLAIN (COSTS false) SELECT * FROM ht WHERE ht.id = 1;" \
+		"SET pg_hint_plan.enable_hint_table = off;" \
+		"EXPLAIN (COSTS false) SELECT * FROM ht WHERE ht.id = 1;" | qf 0 |
+		grep -o 'Seq Scan on ht\|Index Scan using ht_pkey on ht\|Optimizer: .*' | tr '\n' '|')
+	errors2=$(q 0 "SELECT count FROM gp_orca.fallbacks() WHERE reason = 'error';")
+	[ "$out" = "Seq Scan on ht|Optimizer: GPORCA|Index Scan using ht_pkey on ht|Optimizer: GPORCA|" ] &&
+		[ "$errors" = "$errors2" ] \
+		&& ok "under ORCA the table's hint is ORCA's -- a scan it would not choose -- and ORCA plans it, nothing raised" \
+		|| notok "the hint table under ORCA" "$out / ORCA's errors $errors -> $errors2"
+
+	# and one node, whose own table has its own rows
+	for n in 0 1 2; do
+		"$BINDIR/pg_ctl" -D "$(datadir "$n")" -m fast stop >/dev/null 2>&1
+	done
+	d="$(datadir 0)"
+	{
+		echo "shared_preload_libraries = '$PRELOAD,gp_orca,gp_ao,pax,pg_hint_plan'"
+		echo "unix_socket_directories = '$(sockdir 0)'"
+		echo "listen_addresses = ''"
+		echo "port = $(port 0)"
+	} > "$d/postgresql.auto.conf"
+	if "$BINDIR/pg_ctl" -D "$d" -l "$ROOT/node0.log" -w -t 30 start >/dev/null 2>&1; then
+		out=$(printf '%s\n' "SET client_min_messages = warning;" \
+			"CREATE TABLE sht (id int PRIMARY KEY, val int);" \
+			"INSERT INTO sht SELECT i, i % 100 FROM generate_series(1, 10000) i;" "ANALYZE sht;" \
+			"INSERT INTO hint_plan.hints (norm_query_string, application_name, hints) VALUES ('EXPLAIN (COSTS false) SELECT * FROM sht WHERE sht.id = ?;', '', 'SeqScan(sht)');" \
+			"SET pg_hint_plan.enable_hint_table = on;" \
+			"SET gp.optimizer = off;" "EXPLAIN (COSTS false) SELECT * FROM sht WHERE sht.id = 1;" \
+			"SET gp.optimizer = on;" "EXPLAIN (COSTS false) SELECT * FROM sht WHERE sht.id = 1;" \
+			"SET pg_hint_plan.enable_hint_table = off;" \
+			"EXPLAIN (COSTS false) SELECT * FROM sht WHERE sht.id = 1;" | qf 0 |
+			grep -o 'Seq Scan on sht\|Index Scan using sht_pkey on sht\|Optimizer: .*' | tr '\n' '|')
+		[ "$out" = "Seq Scan on sht|Optimizer: Postgres query optimizer|Seq Scan on sht|Optimizer: GPORCA|Index Scan using sht_pkey on sht|Optimizer: GPORCA|" ] \
+			&& ok "on one node the table's hint is the planner's and ORCA's alike, and neither's with the setting off" \
+			|| notok "the hint table on one node" "$out"
+	else
+		notok "one node with pg_hint_plan starts" "$(tail -5 "$ROOT/node0.log")"
+	fi
 fi
 
 echo

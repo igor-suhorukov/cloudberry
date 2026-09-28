@@ -64,6 +64,14 @@
 #define CB_QUERY_INFO_RENDEZVOUS	"Cloudberry/query_info_collect_hook"
 
 /*
+ * Set by gp_sql while it is preloaded, and so O26 with it in every backend,
+ * a background worker's too: gp_matview then writes a dynamic table's job in
+ * Cloudberry's words, REFRESH DYNAMIC TABLE, which gp_task's worker runs
+ * through O26 as Cloudberry's scheduler runs it.
+ */
+#define CB_SQL_RENDEZVOUS	"Cloudberry/gp_sql"
+
+/*
  * Refuse to load outside shared_preload_libraries.
  *
  * A module that registers a custom WAL resource manager, requests shared

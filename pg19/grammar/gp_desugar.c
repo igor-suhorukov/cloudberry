@@ -2220,7 +2220,7 @@ sreh_clause(GpRewrite *rw, int i, bool persistently_ok, int *after, int *limit,
 }
 
 /*
- * CREATE [READABLE | WRITABLE] EXTERNAL [WEB] TABLE t (...)
+ * CREATE [READABLE | WRITABLE] EXTERNAL [WEB] [TEMP] TABLE t (...)
  *	   LOCATION ('...', ...) [ON ...] | EXECUTE '...' [ON ...]
  *	   FORMAT '...' [(...)] [OPTIONS (...)] [ENCODING ...]
  *	   [[LOG ERRORS [PERSISTENTLY]] SEGMENT REJECT LIMIT n [ROWS | PERCENT]]
@@ -2238,6 +2238,13 @@ sreh_clause(GpRewrite *rw, int i, bool persistently_ok, int *after, int *limit,
  * DISTRIBUTED and TAG are left to the rewrites every foreign table has,
  * which put what they become in the same list.
  *
+ * A temporary one -- TEMP or TEMPORARY, LOCAL or GLOBAL before it, as
+ * Cloudberry's grammar reads them (OptTemp) -- is the foreign table in the
+ * session's temporary schema, which PostgreSQL makes temporary as it makes
+ * any relation named there: the session's own, dropped as it ends, on each
+ * node.  So its name is given pg_temp where it has no schema, and one of
+ * another schema is refused, as PostgreSQL refuses a temporary table's.
+ *
  * Returns false when this is not a CREATE EXTERNAL TABLE; otherwise the
  * subject, *name and *after, is the table, and *after the token after its
  * clauses, where DISTRIBUTED or TAG may follow.
@@ -2254,6 +2261,8 @@ rw_create_external_table(GpRewrite *rw, char **name, int *after)
 	int			stop;
 	bool		writable = false;
 	bool		web = false;
+	bool		temp = false;
+	int			global = -1;
 	bool		command = false;
 	List	   *spec = NIL;
 	List	   *on = NIL;
@@ -2270,19 +2279,46 @@ rw_create_external_table(GpRewrite *rw, char **name, int *after)
 		web = true;
 		i++;
 	}
+	if ((tok_is(ts, i, "local") || tok_is(ts, i, "global")) &&
+		(tok_is(ts, i + 1, "temp") || tok_is(ts, i + 1, "temporary")))
+	{
+		if (tok_is(ts, i, "global"))
+			global = i;
+		i++;
+	}
 	if (tok_is(ts, i, "temp") || tok_is(ts, i, "temporary"))
-		ereport(ERROR,
-				(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
-				 errmsg("a temporary external table is not supported"),
-				 errdetail("An external table is a foreign table, which PostgreSQL makes in no temporary schema."),
-				 errposition(pg_mbstrlen_with_len(ts->src, ts->toks[i].off) + 1)));
+	{
+		temp = true;
+		i++;
+	}
 	if (!tok_is(ts, i, "table"))
 		return false;
 	i++;
+	if (global >= 0)
+		ereport(WARNING,
+				(errmsg("GLOBAL is deprecated in temporary table creation"),
+				 errposition(pg_mbstrlen_with_len(ts->src, ts->toks[global].off) + 1)));
 
 	nameend = skip_qualified_name(ts, i);
 	if (nameend == i)
 		rw_syntax_error(rw, i);
+
+	/*
+	 * A temporary one's schema, where it names one: pg_temp, the session's
+	 * temporary schema, or a pg_temp_N, which PostgreSQL takes as the
+	 * session's or refuses as another's (RangeVarAdjustRelationPersistence())
+	 * -- no other schema's name begins so, "pg_" being the system's.
+	 */
+	if (temp && nameend > i + 1)
+	{
+		const char *schema = tok_name(ts, nameend - 3);
+
+		if (strcmp(schema, "pg_temp") != 0 && strncmp(schema, "pg_temp_", 8) != 0)
+			ereport(ERROR,
+					(errcode(ERRCODE_INVALID_TABLE_DEFINITION),
+					 errmsg("cannot create temporary relation in non-temporary schema"),
+					 errposition(pg_mbstrlen_with_len(ts->src, ts->toks[i].off) + 1)));
+	}
 	if (!tok_is_char(ts, nameend, '('))
 		rw_syntax_error(rw, nameend);
 	close = match_close(ts, nameend, rw->last);
@@ -2482,9 +2518,14 @@ rw_create_external_table(GpRewrite *rw, char **name, int *after)
 	if (j < rw->last && !tok_is(ts, j, "distributed") && !tok_is(ts, j, "tag"))
 		rw_syntax_error(rw, j);
 
-	/* CREATE FOREIGN TABLE t (...) SERVER gp_exttable_server OPTIONS (...) */
+	/*
+	 * CREATE FOREIGN TABLE t (...) SERVER gp_exttable_server OPTIONS (...),
+	 * a temporary one's t in pg_temp
+	 */
 	stop = tok_stop(ts, j - 1);
-	rw_edit(rw, ts->toks[rw->first].off, ts->toks[i].off, "CREATE FOREIGN TABLE ");
+	rw_edit(rw, ts->toks[rw->first].off, ts->toks[i].off,
+			temp && nameend == i + 1 ? "CREATE FOREIGN TABLE pg_temp." :
+			"CREATE FOREIGN TABLE ");
 	rw_edit(rw, ts->toks[start].off, stop, "SERVER gp_exttable_server");
 	rw_add_fdw_option(rw, "gp_exttable.spec", nodeToString(spec));
 	rw->fdw_options_at = stop;

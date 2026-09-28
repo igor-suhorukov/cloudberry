@@ -33,7 +33,7 @@
 # groups manifest puts them in, each on a coordinator and three segments of
 # its own, in two passes.  Each node loads pax too and has
 # default_table_access_method = pax.  A group's pass begins with the port's
-# setup (gp_setup), PAX in the database and in template1 (sql/pax_setup.sql,
+# setup (gp_setup), PAX in every database a test uses (sql/pax_setup.sql,
 # as Cloudberry's initdb makes it in every database), and then PostgreSQL
 # 19's test_setup, whose tables -- onek, tenk1 and the rest the tests read
 # -- are PAX's, as Cloudberry's CI has them.  The extensions' own tables are

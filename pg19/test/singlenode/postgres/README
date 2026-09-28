@@ -6,6 +6,15 @@ it differs from.  run.sh compares every other test of PostgreSQL's line for
 line in this pass; under ORCA, orca/ holds a test's whole difference, this
 one among it.
 
+tablespace  ALTER TABLE testschema.part SET TABLESPACE, of a partitioned
+  table, which moves its partitions too, as Cloudberry's ALTER TABLE does
+  unless ONLY is given (its ATPrepCmd() recurses AT_SetTableSpace; gp_sql's
+  GpPartitionSetTablespace(), partition.c): after the test's second one, to
+  pg_default, part_2, part_3 and part_56 are in pg_default where PostgreSQL
+  19 leaves them in regress_tblspace.  Cloudberry's own copy of the test
+  says ALTER TABLE ONLY there, to keep PostgreSQL's answer
+  (src/test/singlenode_regress/input/tablespace.source).
+
 window  count() with no argument and no star, which PostgreSQL refuses
   ("count(*) must be used to call a parameterless aggregate function") and
   Cloudberry's parse analysis takes for count(*), as the port's grammar does

@@ -342,30 +342,52 @@ GpRefreshMatView(PlannedStmt *pstmt, const char *queryString,
 /*
  * As a plan starts on the coordinator: a view read from the segments that is
  * not populated is refused, as PostgreSQL refuses a scan of it
- * (ExecOpenScanRelation()), and not by each segment in words of its own.
+ * (ExecOpenScanRelation()), and not by each segment in words of its own --
+ * once the statement's privileges are checked, which PostgreSQL's InitPlan()
+ * checks first.  A view the statement writes is no scan of it; and a
+ * statement that writes one outside its maintenance is refused as its write
+ * starts, before any scan (CheckValidResultRel()), so is not refused here.
+ * Its target is asked for by OID: ORCA's range table has an entry of its
+ * own for the table it writes, with no relkind, beside the query's.
  */
 void
 GpRefreshCheckScannable(PlannedStmt *stmt, int eflags)
 {
 	ListCell   *lc;
+	List	   *written = NIL;
+	int			target = -1;
 
 	if ((eflags & (EXEC_FLAG_EXPLAIN_ONLY | EXEC_FLAG_WITH_NO_DATA)) != 0)
 		return;
+	while ((target = bms_next_member(stmt->resultRelationRelids, target)) >= 0)
+	{
+		Oid			relid = rt_fetch(target, stmt->rtable)->relid;
+
+		if (get_rel_relkind(relid) != RELKIND_MATVIEW)
+			continue;
+		if (!MatViewIncrementalMaintenanceIsEnabled())
+			return;
+		written = lappend_oid(written, relid);
+	}
 	foreach(lc, stmt->rtable)
 	{
 		RangeTblEntry *rte = lfirst_node(RangeTblEntry, lc);
 		Relation	rel;
 
 		if (rte->rtekind != RTE_RELATION || rte->relkind != RELKIND_MATVIEW ||
+			list_member_oid(written, rte->relid) ||
 			!GpRefreshIsDistributed(rte->relid))
 			continue;
 		rel = table_open(rte->relid, NoLock);
 		if (!RelationIsScannable(rel))
+		{
+			(void) ExecCheckPermissions(stmt->rtable, stmt->permInfos, true);
 			ereport(ERROR,
 					(errcode(ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE),
 					 errmsg("materialized view \"%s\" has not been populated",
 							RelationGetRelationName(rel)),
 					 errhint("Use the REFRESH MATERIALIZED VIEW command.")));
+		}
 		table_close(rel, NoLock);
 	}
 }

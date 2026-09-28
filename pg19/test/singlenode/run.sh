@@ -43,7 +43,8 @@
 # as Cloudberry's pg_regress converts them, which PostgreSQL 19's no longer
 # does; and a setting the port has is spelled as the port spells it --
 # optimizer is gp.optimizer, and so is the column SHOW names for it --
-# because PostgreSQL 19 defines no custom setting without a dot.  A setting
+# because PostgreSQL 19 defines no custom setting without a dot, and a SELECT
+# * of pg_stats names Cloudberry's columns of it.  A setting
 # the port lacks is left alone, to fail where it would.  Where the port's output still differs for a reason of its own,
 # expected/ holds the port's -- an alternative for one of PostgreSQL's tests,
 # and the output of the port's own setup, sql/gp_setup.sql, which runs
@@ -174,12 +175,18 @@ echo
 			debug_resource_group|runaway_detector_activation_percent|\
 			vmem_process_interrupt|explain_memory_verbosity|coredump_on_memerror|\
 			enable_offload_entry_to_qe|debug_dtm_action*|debug_abort_after_distributed_prepared|\
-			debug_print_full_dtm|enable_answer_query_using_materialized_views|aqumv_allow_foreign_table)
+			debug_print_full_dtm|enable_answer_query_using_materialized_views|aqumv_allow_foreign_table|\
+			allow_segment_dml|pljava_classpath|pljava_vmoptions)
 				cbname="$short" ;;
 			*) cbname="gp_$short" ;;
 		esac
 		echo "map $cbname $name"
 	done
+	# PostgreSQL 19's pg_stats has five columns Cloudberry's has not -- the
+	# table's OID, the column's number, and three of a range's histograms --
+	# so a test's SELECT * of it asks for Cloudberry's fourteen by name, in
+	# the test and its expected output alike, as the greenplum suite's does.
+	echo 'sed s#\b(select) \* (from pg_stats)\b#\1 schemaname, tablename, attname, inherited, null_frac, avg_width, n_distinct, most_common_vals, most_common_freqs, histogram_bounds, correlation, most_common_elems, most_common_elem_freqs, elem_count_histogram \2#Ig'
 } > "$WORK/respell"
 respell() { perl "$HERE/../respell.pl" "$WORK/respell" "$@"; }
 

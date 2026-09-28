@@ -84,6 +84,7 @@
 #include "commands/defrem.h"
 #include "commands/explain.h"
 #include "commands/explain_format.h"
+#include "commands/matview.h"
 #include "commands/trigger.h"
 #include "executor/executor.h"
 #include "executor/tuptable.h"
@@ -559,6 +560,7 @@ insert_begin(CustomScanState *node, EState *estate, int eflags)
 	CustomScan *cscan = (CustomScan *) node->ss.ps.plan;
 	Oid			relid = exec_rt_fetch(state->rti, estate)->relid;
 
+	GpModifyCheckTarget(relid);
 	if (!(eflags & EXEC_FLAG_EXPLAIN_ONLY))
 		GpModifyLockPartitions(relid, RowExclusiveLock);
 	outerPlanState(node) = ExecInitNode(linitial(cscan->custom_plans),
@@ -708,9 +710,30 @@ GpModifyLockPartitions(Oid relid, LOCKMODE lockmode)
 		(void) find_all_inheritors(relid, lockmode, NULL);
 }
 
+/*
+ * A write's target, as PostgreSQL's CheckValidResultRel() checks it where a
+ * ModifyTable starts, before the plan below it makes a row: a materialized
+ * view is written under its maintenance alone -- a REFRESH's, or an
+ * incremental view's own -- and refused in PostgreSQL's words otherwise, and
+ * under EXPLAIN too.  The writes here stand in for the ModifyTable; without
+ * this the segments' COPY refused the view in its own words, once the rows
+ * were made and routed.
+ */
+void
+GpModifyCheckTarget(Oid relid)
+{
+	if (get_rel_relkind(relid) == RELKIND_MATVIEW &&
+		!MatViewIncrementalMaintenanceIsEnabled())
+		ereport(ERROR,
+				(errcode(ERRCODE_WRONG_OBJECT_TYPE),
+				 errmsg("cannot change materialized view \"%s\"",
+						get_rel_name(relid))));
+}
+
 static void
 modify_begin(CustomScanState *node, EState *estate, int eflags)
 {
+	GpModifyCheckTarget(((ModifyState *) node)->relid);
 	if (eflags & EXEC_FLAG_EXPLAIN_ONLY)
 		return;
 
@@ -1510,8 +1533,8 @@ gp_modify_planner_routed(Query *parse, const char *query_string, int cursorOptio
 
 	/*
 	 * A correlated scalar subquery of an aggregate, whose every run would
-	 * gather a distributed table again, made a join (gp_subselect.c), as
-	 * Cloudberry's planner makes one.
+	 * gather a distributed table again, made a join, and a NOT IN an
+	 * anti-join (gp_subselect.c), as Cloudberry's planner makes them.
 	 */
 	GpSubselectDecorrelate(parse);
 

@@ -8,6 +8,18 @@ in it (test.orca.diff) holds for that pass alone.  run.sh counts a test as
 passing when gpdiff.pl, under Cloudberry's init_file and the port's, finds no
 difference or exactly the file's.
 
+alter_db_set_tablespace  where segment 0 panics before its PREPARE record,
+  the database's copy in the target tablespace on segment 0 and its mirror,
+  which Cloudberry's leaves there (orphaned, as the test's table says) and
+  the port removes: a part's list of the directories its transaction's end
+  removes is written as its PREPARE begins, before the fault at its start,
+  and the ROLLBACK PREPARED the segment is sent once it is back, finding no
+  prepared transaction, does what the list says (gp_dirxact.c).  So
+  stat_db_objects() says of dbids 2 and 5 that the directory is not there,
+  where Cloudberry's lists files the test's WHERE then leaves out.  And
+  psql 19's refusal of the test's last two \!rm, written with no space
+  after \!, which psql 16 ran (as in directory_table's).
+
 alter_distribution_policy  pg_appendonly's segrelid, which is 0: gp_ao keeps
   every table's segment files in gp_ao.segfile, and makes no relation of
   them for each table.  ALTER TABLE ... ALTER PARTITION FOR (1) SET WITH
@@ -124,6 +136,14 @@ bfv_joins  a join of twenty empty tables, which Cloudberry's demo cluster
   rows, in the time the test allows.  Its tables distributed with the legacy
   cdbhash_float4_ops class are joined as Cloudberry joins them.
 
+bfv_partition  PostgreSQL 19's own words: psql's list of a partitioned
+  table's partitions, one a line under "Partitions:", where Cloudberry's
+  psql writes them after it, a comma after each; the DETAIL that an
+  operator no best candidate of which could be chosen now has, before a
+  shorter HINT; the place in ALTER TABLE ... ALTER COLUMN ... TYPE of a
+  column the partition has not, which PostgreSQL 19 gives the error; and
+  the MAINTAIN privilege, m, in the owner's privileges \dp shows.
+
 bfv_subquery (planner, orca)  count_operator() finds no Seq Scan in the
   plan of a query over distributed tables: the port's planner reads each
   through a Gather Motion, which scans the table on the segments, and
@@ -199,6 +219,31 @@ directory_table  what the port keeps a directory table and a storage server
   arguments.  The rows ordered by relative_path in the C collation, where
   nation.txt comes first.  And psql 19's \!rm, a command it does not know.
 
+dispatch (planner, orca)  run in group tcp1, whose nodes reach one another
+  over TCP, as its matchsubs of libpq's messages have them.  DoCopyToFail,
+  a fault of a segment's COPY TO: the port's COPY of a distributed table to
+  stdout is a query's COPY, whose rows a gather brings to the coordinator,
+  so no segment runs a COPY and the three rows are printed.  A segment's
+  pg_db_role_setting after ALTER DATABASE ... SET FROM CURRENT, which holds
+  the coordinator's value, where Cloudberry's segment quotes it again.  A
+  function whose block has an exception handler, run on a writer busy with
+  the statement's scan: the port sends its savepoint with the block's first
+  statement that goes to the segments, and runs it, where Cloudberry refuses
+  a subtransaction on a busy writer gang.  PostgreSQL 19's words for FETCH
+  BACKWARD in a cursor that cannot scan backward, as aocs has them.  And
+  gp.print_create_gang_time's INFO lines: the port sends a SET to the
+  segments with the next statement that goes to them, so the gang is made
+  at CREATE TABLE, not at the SET of the setting, and the planner route's
+  two gathers are its connections, "(Gang) is reused", where Cloudberry's
+  planner makes a gang of one segment for slice 2.  Under the planner the
+  three tables of case 1.3's join are gathered to the coordinator, whose
+  join needs no second process on a segment: the fault at segment 0's third
+  connection of the session, at its reader gang's in Cloudberry, comes at
+  none, the query answers, and no reader is left on the segments; ORCA's
+  plan of it has readers, and fails there as Cloudberry's.  Under ORCA
+  gp.max_plan_size holds a fragment's plan tree as text, where a constant's
+  bytes are written as numbers: the 11 kB string is 46KB of it.
+
 distributed_transactions  the INFO lines of two of its transactions.  A
   savepoint's INSERT of two rows, VALUES (2),(1): Cloudberry's planner reads
   the VALUES in a slice of its own on one segment, (slice 1) Dispatch
@@ -212,6 +257,14 @@ distributed_transactions  the INFO lines of two of its transactions.  A
   COMMIT PREPARED retried over a new connection, the ROLLBACK PREPARED, the
   DDL, SAVEPOINT, RELEASE and ROLLBACK TO a segment fails at, and
   twophase_pqexecparams's -- are Cloudberry's.
+
+dynamic_table (planner)  a dynamic table is the materialized view it is, of
+  relkind m, as PostgreSQL 19 describes one: psql's \d+ titles it
+  "Materialized view", which Cloudberry's psql titles "Dynamic table" by its
+  catalog's relisdynamic, and DROP ... CASCADE names the three it drops
+  "materialized view", as PostgreSQL's getObjectDescription() names every
+  view of the kind.  And SHOW optimizer, whose header and rule are the
+  port's name for it, gp.optimizer, three wider.
 
 expand_table_ao  pg_appendonly's compresstype of a table made with
   compresstype=none, which gp_ao records as no compression at all, an empty
@@ -311,6 +364,16 @@ gp_recursive_cte  its one EXPLAIN that gpdiff.pl compares as rows, an
   segment the gather of a replicated table reads is the session's (the
   port's init_file masks it).  Its answers are Cloudberry's.
 
+gp_tablespace  gp_toolkit.__gp_aoseg() and __gp_aocsseg() of the unlogged
+  tables CREATE UNLOGGED TABLE ... AS makes: segment file 1, in gp_ao's own
+  format, version 1, with the lengths of its 8K blocks, where Cloudberry's
+  is segment 0 in its own (as in alter_table_set_am's).  And has_init_file()
+  of an unlogged table's aux relations, false: gp_ao keeps its segment
+  files', visibility map's and block directory's rows in unlogged tables of
+  its own that every unlogged table shares, and pg_appendonly names no
+  relation of the table's own for them (segrelid and the rest are 0), where
+  each of Cloudberry's is the table's, with an init fork.
+
 gp_types  PostgreSQL 19's words for an operator no type takes: a DETAIL
   where Cloudberry's HINT stood.
 
@@ -336,6 +399,11 @@ gpsd  the statistics gpsd dumps and reads back, which are the port's
   gp_internal.leaf_hll and gpsd dumps with it, where Cloudberry's is the
   row's fifth slot, kind 99.  And psql's \d+ of pg_statistic, whose
   not-null constraints PostgreSQL 19's psql lists.
+
+guc_gp  the faults reset on every node of gp_segment_configuration, four
+  here, where Cloudberry's demo cluster has eight: a mirror of each segment
+  and a standby, which only a group named mirrors has, and guc_gp needs
+  nothing else of one.
 
 ic (planner)  the interconnect a segment of a join sets up, where
   Cloudberry's fault interconnect_setup_palloc fails the query on segment
@@ -363,18 +431,16 @@ join_gp  the NOTICE of test_print_prefetch_joinqual: where a join's outer
   which gp_debug_numsegments makes, is read there alone, and answers as
   Cloudberry's does.
 
-joinhints (planner, orca)  a join method hint for the join a NOT IN makes
-  in Cloudberry's planner, a left anti-semi join: PostgreSQL 19's planner
-  keeps NOT IN a subplan, so the hint finds no join and pg_hint_plan
-  reports it not used -- under ORCA too, which falls back for a merge join
-  of one, as Cloudberry's does.  Under the planner the CTE of its query is
+joinhints (planner, orca)  under the planner the CTE of its query is
   inlined, as PostgreSQL has done since 12, so the Leading hint of the
   CTE's joins and the query's are two at one level, which pg_hint_plan
   refuses as conflicting, where Cloudberry's planner plans the CTE as a
   query of its own and uses both.  Under ORCA, ORCA's trace of the hints it
   read, which Cloudberry's expected output for its ORCA,
   joinhints_optimizer.out, prints as the port's ORCA does, where the one
-  the suite compares, the planner's, has pg_hint_plan's report.
+  the suite compares, the planner's, has pg_hint_plan's report.  (A join
+  method hint of a NOT IN's join is used, as Cloudberry's is: the planner's
+  route makes the NOT IN an anti-join, gp_subselect.c.)
 
 matview_ao  psql's \dm, whose title PostgreSQL 19's psql gives as "List of
   materialized views" where Cloudberry's psql says "List of relations".
@@ -676,3 +742,16 @@ vacuum_gp  psql's \d footers of an append-optimized table, which are
 with_clause  three recursive queries Cloudberry refuses -- a join of nested
   RECURSIVE clauses, and window functions in a recursive query's target
   list -- which PostgreSQL 19 answers.
+
+workfile_materialize_spill, workfile_sisc_mat_sort, workfile_sisc_sort_spill
+  what these tests check is no longer checked here: that a Material, a Sort
+  and a hash spilled on the segments, which their functions read from
+  EXPLAIN ANALYZE's "work_mem: ... (segment N) ... Workfile: (N spilling)"
+  line of each segment's node.  They turn ORCA off, and on the planner's
+  route the join, the sort and the aggregate are the coordinator's, above
+  gathers whose segments only scan, so no segment's node spills and the
+  line, which the port prints of the segments' nodes alone (the
+  coordinator's would read "(segment -1)", which the functions' pattern
+  refuses), is printed of none: each function counts no line, and answers
+  no row where Cloudberry's answers 0, or 1 for each node.  Their queries'
+  own answers are Cloudberry's.

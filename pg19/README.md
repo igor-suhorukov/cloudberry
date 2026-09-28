@@ -76,7 +76,10 @@ On one node (M1):
   tables.  A view over one table, over several, or over a table joined to
   itself is maintained by delta, as are `count`, `sum` and `avg`; what the
   delta cannot express — an outer join, `min`, `max`, TRUNCATE — is
-  recomputed.  A dynamic table refreshes itself through `gp_task`.  A
+  recomputed.  A dynamic table refreshes itself through `gp_task`, by a
+  job of Cloudberry's reserved name that runs Cloudberry's REFRESH DYNAMIC
+  TABLE where `gp_sql` is preloaded, and Cloudberry's `pg_dynamic_tables`
+  and `pg_get_dynamic_table_schedule()` read them.  A
   query is answered from a materialized view that holds what it asks,
   where that costs less (`gp.enable_answer_query_using_materialized_views`,
   Cloudberry's AQUMV), under ORCA too unless `gp.aqumv_under_orca` is off:
@@ -102,7 +105,10 @@ On one node (M1):
   `COPY BINARY t FROM ... 'path'` and `COPY BINARY DIRECTORY TABLE t 'path'
   TO ...`;
   and Cloudberry's spelling of statements through O26 — classic partition
-  clauses, `DISTRIBUTED BY`, `DECODE`, `gp_dist_random('t')`.
+  clauses, `DISTRIBUTED BY`, `DECODE`, `gp_dist_random('t')`; a classic
+  partitioned table's SUBPARTITION TEMPLATEs as Cloudberry's
+  `gp_partition_template` shows them, `pg_get_expr(template, relid)`
+  printing each as Cloudberry's does.
 - `gp_security` — password profiles.
 - `gp_orca` — ORCA plans on one node, with the fallback counters.
 
@@ -110,7 +116,22 @@ On a cluster (M2), `gp_core` and `gp_orca`:
 
 - the nodes, read from a file (`gp.cluster_config`); the dispatcher, an
   ordinary libpq client authenticated with SCRAM, whose statements run in the
-  coordinator's transaction, savepoints included;
+  coordinator's transaction, savepoints included; a gang's connections made
+  all at once, as Cloudberry's are, under `gp.segment_connect_timeout` --
+  Cloudberry's gp_segment_connect_timeout and its default, 180 s, where the
+  port waited for ever -- a segment in recovery tried again
+  `gp.gang_creation_retry_count` times, a segment process saying it is one
+  as it starts (`gp.qe_details`), and what fails said in Cloudberry's words;
+- each session's id, `gp.session_id`, a number of the coordinator's counter
+  taken as the client connects, as Cloudberry's gp_session_id is -- clients
+  that connect one after another have ids one after another, which a
+  replicated table's parallel retrieve cursor picks its segment by -- and a
+  new one once the gang the session had its part on is lost, as Cloudberry's
+  session takes one (resetSessionForPrimaryGangLoss()): what is left of the
+  old one on the segments, a retrieve session bound to it among them, is no
+  part of the new one's.  On one node a backend's id is its process ID, as
+  it was: nothing there says which session another backend works for but
+  its process;
 - DDL on every node with the coordinator's OIDs (R1), and a segment's own
   catalog rows, its temporary namespaces, with OIDs from the top of the OID
   space, which the coordinator's counter does not reach; distribution policies
@@ -147,7 +168,12 @@ On a cluster (M2), `gp_core` and `gp_orca`:
   Cloudberry's squelch runs it, and a Sequence that prints its producers
   first; and
   PostgreSQL's own plans gathering from the
-  segments where ORCA does not plan, writing a distributed table through an
+  segments where ORCA does not plan, a NOT IN of a distributed table made
+  an anti-join with its NULLs conditions beside it
+  (`modules/gp_core/gp_subselect.c`), a nested loop's inner gather keyed
+  by the join's equality where hash joins are off -- gathered once, each
+  outer row given the rows of its key (`modules/gp_core/gp_scan.c`),
+  writing a distributed table through an
   Explicit Redistribute Motion — each row changed on its segment by its ctid
   there, a row whose key changes moved by a Split that fires no trigger,
   RETURNING (old and new too) and a view's WITH CHECK OPTION and a table's
@@ -163,7 +189,18 @@ On a cluster (M2), `gp_core` and `gp_orca`:
 - every segment has each table's distribution policy, the `gp` label the
   coordinator writes;
 - Cloudberry's settings of the dispatcher and the planner, as `gp.*`, among
-  them direct dispatch's INFO lines and autostats;
+  them direct dispatch's INFO lines and autostats, `gp.max_plan_size`, and
+  `gp.print_create_gang_time`'s INFO lines of a gang's connections; a SET of
+  the client's, outside a transaction block, told the segments as it runs, as
+  Cloudberry dispatches one, so that a value a segment refuses fails the SET
+  itself; DISCARD TEMP on every node, in the statement's transaction; and
+  `gp.allow_segment_dml`, with which a function a segment runs in its share
+  of a plan may write there, as Cloudberry's allow_segment_DML lets one;
+- SERIALIZABLE, on a cluster, is REPEATABLE READ, as in Cloudberry and
+  Greenplum, and as the plan's Track C drops it (the DTM's effort table,
+  "Drop": "SERIALIZABLE (as in Greenplum)"): each node's serializable
+  snapshot isolation sees none of another's rows, so a conflict split over
+  two segments would commit; one node keeps PostgreSQL's;
 - EXPLAIN's `slicetable` and `locus` options, Cloudberry's; **EXPLAIN
   ANALYZE of what the segments ran**, which each segment measures and
   sends the coordinator as an INFO of gp_core's as its part ends: the
@@ -178,8 +215,12 @@ On a cluster (M2), `gp_core` and `gp_orca`:
 - Cloudberry's **runtime filters** (`gp.enable_runtime_filter`,
   `gp.enable_runtime_filter_pushdown`): a Bloom filter of a hash join's inner
   keys, in a RuntimeFilter node above the outer side of the planner's joins,
-  and pushed down into the gathers and sequential scans below a join's outer
-  side, those of ORCA's slices on the segments among them
+  or below a node grouping it by the join's keys, and pushed down into the
+  gathers and sequential scans below a join's outer side, through such a
+  node too, those of ORCA's slices on the segments among them, which test a
+  row as they read it, before their own conditions; a gather sends its
+  segments each key's range with its SQL, and a PAX scan is begun with the
+  range as its keys, which PAX's sparse filter skips files by
   (`modules/gp_core/gp_rtfilter.c`);
 - **every slice of a query at once**: the writer, the session's backend on a
   segment, runs one slice, and readers — more backends of the session there,
@@ -196,7 +237,10 @@ On a cluster (M2), `gp_core` and `gp_orca`:
   one connection, by `gp.interconnect_proxy_addresses`; a sorted Gather into one segment merges its senders' streams
   as they come, and the coordinator's gathers ask each segment for one row
   first and ten times as many each batch after, so that a LIMIT above stops
-  them soon.  The earlier relay through the coordinator carries the slices
+  them soon; a slice whose plan stops reading a Motion -- a hash join whose
+  hash table is empty on a segment, a nested loop over an empty table --
+  stops its senders there and then, over every transport, as Cloudberry's
+  squelch does.  The earlier relay through the coordinator carries the slices
   that run on the coordinator or have to run in the writer — the
   coordinator's own that reads a function's rows or makes its own, a VALUES
   list, one that scans a temporary table — first, and the rest stream, the
@@ -274,7 +318,11 @@ Distributed transactions (M3), in `gp_core`:
   coordinator's from a segment;
 - the coordinator's `pg_class` counts a distributed table's pages, rows and
   all-visible pages as the segments do, after VACUUM and ANALYZE, as
-  Cloudberry's brings them back, and an empty table's one page;
+  Cloudberry's brings them back, and an empty table's one page; each
+  segment's `pg_class` has the pages and rows ANALYZE sampled of it, as
+  Cloudberry's segments write them, which the segment's VACUUM keeps where it
+  scans too little to count, and an index's pages after ANALYZE are its
+  files' on the segments;
 - ANALYZE of a partitioned table as Cloudberry's takes it, on one node too:
   the root and the mid-levels as `gp.optimizer_analyze_root_partition` and
   `_midlevel_partition` say, ANALYZE ROOTPARTITION, the leaves before the
@@ -287,7 +335,11 @@ Distributed transactions (M3), in `gp_core`:
   of every row;
 - Cloudberry's fault injector, `gp_inject_fault`, for the tests: its faults
   at the port's own places under Cloudberry's names, and at PostgreSQL 19's
-  injection points, among them O29's in PostgreSQL's commit;
+  injection points, among them O29's in PostgreSQL's commit; a fault's error
+  Cloudberry's ERRCODE_FAULT_INJECT, XX009, which a test's PL/pgSQL handler
+  catches, `when fault_inject` -- a condition PostgreSQL 19's PL/pgSQL does
+  not know, which the harness spells `when sqlstate 'XX009'` -- and no fault
+  firing in the fault injector's own connection to a node;
 - Cloudberry's `debug_dtm_action` settings, `gp.debug_dtm_action*`: a
   segment fails the protocol command -- PREPARE, COMMIT PREPARED, a
   subtransaction's begin, release or rollback -- or the SQL command they
@@ -346,13 +398,17 @@ as PAX's O22, done in the modules, and O23 pg_checksums' reader alone):
   and its compaction, an insert's rows spread over several segment files
   (`gp.appendonly_insert_files` and `..._tuples_range`) and
   `pg_appendonly.segfilecount` as ANALYZE counts it, on one node and on the
-  cluster;
+  cluster; and unlogged ones, which a crash empties, with their rows in
+  unlogged twins of `gp_ao`'s tables, as Cloudberry's have unlogged aux
+  tables;
 - `gp_exttable`: external tables, as foreign tables of `gp_exttable_server`
   -- `file://`, `EXECUTE`, `gpfdist://` and `http://` through libcurl, a
   protocol's own functions, text, CSV and a formatter's custom format,
   writable tables, single-row error handling and its error logs -- read on
-  the segments, or on the one node; Cloudberry's protocols and
-  `CREATEEXTTABLE`; and `COPY ... LOG ERRORS SEGMENT REJECT LIMIT`;
+  the segments, or on the one node; a temporary one (`CREATE EXTERNAL TEMP
+  TABLE`), the foreign table in the session's `pg_temp`; Cloudberry's
+  protocols and `CREATEEXTTABLE`; and `COPY ... LOG ERRORS SEGMENT REJECT
+  LIMIT`;
 - `gpfdist`, Cloudberry's file server, built as a program of the port's;
 - `diskquota`: Cloudberry's diskquota 2.3, as its library `diskquota-2.3`
   -- a launcher, and a worker for each database that has the extension,
@@ -368,14 +424,29 @@ as PAX's O22, done in the modules, and O23 pg_checksums' reader alone):
   reach both planners -- ORCA's through gp_orca's `plan_hint_hook` -- with
   PostgreSQL 19's join search copied for it (`core.c`, made by
   `gen_core.py`) and the enable_* settings a hint sets copied into each
-  relation's `pgs_mask`; a session LOADs it, as Cloudberry's tests do;
+  relation's `pgs_mask`; a session LOADs it, as Cloudberry's tests do; its
+  hint table, `hint_plan.hints` under `pg_hint_plan.enable_hint_table`,
+  replicated on a cluster, whose hints reach ORCA as the planner hook found
+  them -- Cloudberry's ORCA finds them again, a query of the table, which
+  failed ORCA's planning of every statement -- and a query planned while
+  ORCA plans another the planner's;
 - tablespaces, every node's: each node's directory of a tablespace is the
   one of its dbid under the location, as Cloudberry's is, which PostgreSQL
   asks `gp_core` for through O32 -- as a node runs CREATE TABLESPACE, and as
   a mirror or a standby replays it, making a directory of its own on a
   machine it shares with its primary, and removing it again as it runs or
   replays DROP TABLESPACE -- and every node's `pg_tablespace_location()`
-  says the location, which `pg_dump` writes;
+  says the location, which `pg_dump` writes; `WITH (contentN = ...)` a
+  location of a content's own.  CREATE DATABASE, CREATE and DROP TABLESPACE
+  and ALTER DATABASE ... SET TABLESPACE run inside the coordinator's
+  distributed transaction, each segment's part prepared with it, as
+  Cloudberry's two-phase DDL is: the directories they make or remove follow
+  the transaction's end, even after a restart or on a mirror promoted
+  between the phases, through a file of each prepared part's that the
+  mirror replays (`gp_dirxact.c`, logged by `gp_core`'s resource manager).
+  ALTER TABLE ... SET TABLESPACE of a partitioned table moves its
+  partitions too, as Cloudberry's does, where PostgreSQL 19 moves none and
+  sets only the default for new ones, which ALTER TABLE ONLY still does;
 - `COPY`: Cloudberry's options of `COPY FROM` -- `FILL MISSING FIELDS`,
   `NEWLINE`, and in text an `ESCAPE` of the user's or `OFF` -- through
   `gp_exttable`'s filter, which reads `SEGMENT REJECT LIMIT`'s lines too and

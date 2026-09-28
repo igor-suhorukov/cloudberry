@@ -48,6 +48,7 @@
 #include "commands/dbcommands.h"
 #include "fmgr.h"
 #include "libpq-fe.h"
+#include "libpq/libpq-be.h"
 #include "libpq/libpq-be-fe-helpers.h"
 #include "miscadmin.h"
 #include "storage/ipc.h"
@@ -66,6 +67,24 @@
 
 #define GP_FAULT_SLOTS		64
 #define GP_FAULT_NAMELEN	64
+
+/*
+ * Cloudberry's ERRCODE_FAULT_INJECT, which a fault's error carries -- a
+ * PL/pgSQL handler of its tests catches it, "when fault_inject" -- as a
+ * fault's FATAL and PANIC do.
+ */
+#define ERRCODE_GP_FAULT_INJECT	MAKE_SQLSTATE('X','X','0','0','9')
+
+/*
+ * The connection gp_inject_fault() of another node's dbid opens there, whose
+ * statement fires no fault: Cloudberry's fault handler runs none, and a fault
+ * the statement's execution reached -- executor_pre_tuple_processed -- would
+ * fail the call that is to reset it.
+ */
+#define GP_FAULT_APPNAME	"cloudberry fault injector"
+
+/* The session a fault's session is compared with: the backend's own. */
+#define FAULT_OWN_SESSION	(-2)
 
 static const char *const fault_type_names[] = {
 	"", "sleep", "fatal", "panic", "error", "infinite_loop", "suspend",
@@ -100,8 +119,14 @@ static const char *const fault_type_names[] = {
  * And the points of the tests' build that are Cloudberry's faults under
  * their own names, whose calls in Cloudberry say more than that they came:
  * an autovacuum worker's before it vacuums a database, and its update of
- * the database's row, which name the database, as a test's fault may; and
- * a count of rows made past 2^32, which a "skip" asks for.
+ * the database's row, which name the database, as a test's fault may; a
+ * count of rows made past 2^32, which a "skip" asks for; and the top of the
+ * checkpointer's loop, where a fault that held the checkpointer in a loop
+ * has it checkpoint once let go (CheckpointerMain(), checkpointer.c).  The
+ * build's other points under Cloudberry's names -- a database's copy and
+ * its drop's replay, a tablespace's directories, a PREPARE's record, the
+ * checkpointer's loop's end -- say only that they came, and need no line
+ * here.
  */
 typedef enum GpPointArg
 {
@@ -109,6 +134,7 @@ typedef enum GpPointArg
 	POINT_ARG_SKIP,				/* a bool *, set for a "skip" */
 	POINT_ARG_NAMES,			/* a const char *[2]: the database, the table */
 	POINT_ARG_CANCEL,			/* nothing; hit only where a cancel came */
+	POINT_ARG_LOOPED,			/* a bool *, set for an "infinite_loop" */
 } GpPointArg;
 
 static const struct
@@ -131,6 +157,7 @@ static const struct
 	{"auto_vac_worker_before_do_autovacuum", "auto_vac_worker_before_do_autovacuum", POINT_ARG_NAMES},
 	{"vacuum_update_dat_frozen_xid", "vacuum_update_dat_frozen_xid", POINT_ARG_NAMES},
 	{"executor_run_high_processed", "executor_run_high_processed", POINT_ARG_SKIP},
+	{"ckpt_loop_begin", "ckpt_loop_begin", POINT_ARG_LOOPED},
 };
 
 /* The injection point a fault is attached to: its own name, or PostgreSQL's. */
@@ -278,13 +305,38 @@ static void
 fault_log(const char *name, GpFaultType type)
 {
 	ereport(LOG,
-			(errcode(ERRCODE_INTERNAL_ERROR),
+			(errcode(ERRCODE_GP_FAULT_INJECT),
 			 errmsg("fault triggered, fault name:'%s' fault type:'%s' ",
 					name, fault_type_names[type])));
 }
 
+/* Is this backend a fault injector's connection (GP_FAULT_APPNAME)? */
+static bool
+fault_injector_connection(void)
+{
+	return MyProcPort != NULL && MyProcPort->application_name != NULL &&
+		strcmp(MyProcPort->application_name, GP_FAULT_APPNAME) == 0;
+}
+
+static GpFaultType fault_trigger(const char *name, const char *database,
+								 const char *table, int session);
+
 GpFaultType
 GpFaultTrigger(const char *name, const char *database, const char *table)
+{
+	return fault_trigger(name, database, table, FAULT_OWN_SESSION);
+}
+
+GpFaultType
+GpFaultTriggerSession(const char *name, const char *database,
+					  const char *table, int session)
+{
+	return fault_trigger(name, database, table, session);
+}
+
+static GpFaultType
+fault_trigger(const char *name, const char *database, const char *table,
+			  int session)
 {
 	GpFaultEntry *e;
 	GpFaultEntry local;
@@ -297,9 +349,9 @@ GpFaultTrigger(const char *name, const char *database, const char *table)
 	 * A fault is the process's that runs its part of a statement, as it is
 	 * Cloudberry's QE's: a parallel worker of a segment's writer, which reads
 	 * a share of a scan for it (gp_parallel.c), fires none, and counts no
-	 * hit twice.
+	 * hit twice.  Nor does a fault injector's connection.
 	 */
-	if (IsParallelWorker())
+	if (IsParallelWorker() || fault_injector_connection())
 		return GP_FAULT_NONE;
 	memset(&local, 0, sizeof(local));
 
@@ -309,7 +361,9 @@ GpFaultTrigger(const char *name, const char *database, const char *table)
 	{
 		if (e == NULL)
 			break;
-		if (e->session != -1 && e->session != GpClusterSessionId())
+		if (e->session != -1 &&
+			e->session != (session == FAULT_OWN_SESSION ?
+						   GpClusterSessionId() : session))
 			break;
 		if (strcmp(e->database, database) != 0)
 			break;
@@ -340,19 +394,19 @@ GpFaultTrigger(const char *name, const char *database, const char *table)
 			break;
 		case GP_FAULT_FATAL:
 			ereport(FATAL,
-					(errcode(ERRCODE_INTERNAL_ERROR),
+					(errcode(ERRCODE_GP_FAULT_INJECT),
 					 errmsg("fault triggered, fault name:'%s' fault type:'%s' ",
 							local.name, fault_type_names[type])));
 			break;
 		case GP_FAULT_PANIC:
 			ereport(PANIC,
-					(errcode(ERRCODE_INTERNAL_ERROR),
+					(errcode(ERRCODE_GP_FAULT_INJECT),
 					 errmsg("fault triggered, fault name:'%s' fault type:'%s' ",
 							local.name, fault_type_names[type])));
 			break;
 		case GP_FAULT_ERROR:
 			ereport(ERROR,
-					(errcode(ERRCODE_INTERNAL_ERROR),
+					(errcode(ERRCODE_GP_FAULT_INJECT),
 					 errmsg("fault triggered, fault name:'%s' fault type:'%s' ",
 							local.name, fault_type_names[type])));
 			break;
@@ -416,7 +470,8 @@ GpFaultTrigger(const char *name, const char *database, const char *table)
  * What an injection point runs, when one of PostgreSQL's own is set by the
  * name of a fault: the fault its private data names.  A point that is
  * skipped cannot say so to its caller, PostgreSQL's points having no answer,
- * but for one that gives its callback a bool to set (fault_points).  It may
+ * but for one that gives its callback a bool to set (fault_points), as one
+ * that held the caller in a loop says so to the checkpointer's.  It may
  * run in a critical section, as the two commits' of fault_points do, where
  * it allocates nothing but its log line, which the error context may.
  *
@@ -436,13 +491,19 @@ gp_fault_injection_point(const char *name, const void *private_data,
 	const char *fault = private_data != NULL ? (const char *) private_data : name;
 	const char *database = "";
 	const char *table = "";
-	bool		skip_arg = false;
+	GpFaultType answer = GP_FAULT_NONE;
+	GpFaultType type;
 
 #ifdef USE_INJECTION_POINTS
 	switch (fault_point_arg(fault))
 	{
 		case POINT_ARG_SKIP:
-			skip_arg = arg != NULL;
+			if (arg != NULL)
+				answer = GP_FAULT_SKIP;
+			break;
+		case POINT_ARG_LOOPED:
+			if (arg != NULL)
+				answer = GP_FAULT_INFINITE_LOOP;
 			break;
 		case POINT_ARG_NAMES:
 			if (arg != NULL)
@@ -460,7 +521,8 @@ gp_fault_injection_point(const char *name, const void *private_data,
 	}
 #endif
 
-	if (GpFaultTrigger(fault, database, table) == GP_FAULT_SKIP && skip_arg)
+	type = GpFaultTrigger(fault, database, table);
+	if (answer != GP_FAULT_NONE && type == answer)
 		*(bool *) arg = true;
 }
 
@@ -757,7 +819,7 @@ gp_inject_fault(PG_FUNCTION_ARGS)
 		keywords[n] = "user";
 		values[n++] = GetUserNameFromId(GetUserId(), false);
 		keywords[n] = "application_name";
-		values[n++] = "cloudberry fault injector";
+		values[n++] = GP_FAULT_APPNAME;
 		n = GpInternalConnOptions(keywords, values, n);
 
 		params[0] = name;

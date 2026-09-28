@@ -28,22 +28,27 @@ columns (type_sanity's attcacheoff), a leakproof function a superuser's
 alone (create_function_sql); privileges' own -- the MAINTAIN privilege
 ("arwdDxtm"), no RULE privilege, a role's grants and "must be able to SET
 ROLE", a security-restricted operation's safe search_path, which finds
-none of the test's functions before the operation refuses them -- and
-psql 19 passes over the data of a COPY FROM STDIN that failed, where 14's
-read each line as a command ("invalid command \.", copy).
+none of the test's functions and tables before the operation refuses what
+they do -- and psql 19 passes over the data of a COPY FROM STDIN that
+failed, where 14's read each line as a command ("invalid command \.",
+copy).
 
 The port's names and settings.  A setting of Cloudberry's core that the
 port has as a module's is shown by its name (resource_queue's SHOW
 gp.resource_scheduler);
 one it has not is unrecognized (gp_statistics_pullup_from_child_partition,
-gp_allow_date_field_width_5digits, planner_work_mem, allow_segment_dml);
+gp_allow_date_field_width_5digits, planner_work_mem);
 a table access method's handler is a function of its module's
 (gp_ao.ao_column_handler); the port's extensions' tables and functions are
 among a catalog's rows, and Cloudberry's own (gp_current_snapshot, the
 complex type type_sanity's tab_core_types is made with, the test helpers
 of regress_gp.c) are not; OIDs
 the port allocates otherwise (oid_wraparound); TOAST tables PostgreSQL 19's
-catalogs have not.
+catalogs have not; a template of gp_partition_template's, which the port
+keeps as the SUBPARTITION TEMPLATE clause Cloudberry's pg_get_expr() prints
+of it, where Cloudberry keeps the clause's node tree, which PAX's copy of
+bfv_partition selects as it is (Cloudberry's own copy prints it with
+pg_get_expr()).
 
 What the port does that Cloudberry's PAX refused.  A row fetched by its TID
 (pax/src/access/pax_access_handle.cc): an AFTER INSERT row trigger fires
@@ -65,6 +70,19 @@ CONCURRENTLY on a PAX table.
 What PAX's expected output was made with.  The LIMIT query of
 workfile/hashagg_spill, whose hash aggregate spills in Cloudberry's run and
 not in the port's, which Cloudberry's own copy of the test ignores.
+
+What the greenplum suite keeps of Cloudberry's own copy of a test, where
+PAX's copy has lines of its own.  distributed_transactions, as the greenplum
+suite's difference has it without the one-phase commit of its BEGIN; SET
+optimizer = false; END, which PAX's copy has not: a savepoint's INSERT of
+two rows routed from the coordinator, where Cloudberry's planner reads the
+VALUES in a slice on one segment, and the two parts that wrote prepared,
+PARTIAL contents: 0 1, where Cloudberry prepares every segment the
+savepoint went to.  alter_table_aocs2, as the greenplum suite's: gp_ao
+keeps ADD COLUMN's constant default as PostgreSQL's missing value where
+Cloudberry rewrites the table, and a partitioned table in the middle of a
+hierarchy, given no access method, has none in PostgreSQL 19, where PAX's
+expected output has pax, the default of the cluster it was made on.
 
 A finding, kept until it is fixed.  A role that has some of a table's
 columns alone -- privileges' atest5, mtarget, t1 and errtst -- is refused

@@ -163,6 +163,7 @@
 #include "utils/dsa.h"
 #include "utils/fmgroids.h"
 #include "utils/guc.h"
+#include "utils/guc_tables.h"
 #include "utils/lsyscache.h"
 #include "utils/memutils.h"
 #include "utils/rel.h"
@@ -3430,6 +3431,78 @@ dtx_register_keeper(void)
 	RegisterBackgroundWorker(&worker);
 }
 
+/* ------------------------------------------------------------------------- */
+/* SERIALIZABLE, which a cluster's transactions do not have                  */
+/* ------------------------------------------------------------------------- */
+
+/*
+ * Each node's serializable snapshot isolation sees the reads and writes of
+ * the rows it has, and none of what a distributed transaction does on
+ * another: two transactions whose conflict is split over two segments -- a
+ * write skew across them -- both commit, so a cluster's transactions are not
+ * serializable, whatever each node's are.  Cloudberry, as Greenplum did,
+ * falls back to REPEATABLE READ, and says so in the log
+ * (check_XactIsoLevel() and check_DefaultXactIsoLevel(), variable.c), and so
+ * does the port on every node of a cluster: the two settings' checks,
+ * PostgreSQL's first, then this.  One node keeps PostgreSQL's, which is
+ * serializable there.
+ */
+static GucEnumCheckHook prev_check_transaction_isolation = NULL;
+static GucEnumCheckHook prev_check_default_isolation = NULL;
+
+static bool
+dtx_check_transaction_isolation(int *newval, void **extra, GucSource source)
+{
+	if (prev_check_transaction_isolation != NULL &&
+		!prev_check_transaction_isolation(newval, extra, source))
+		return false;
+	if (*newval == XACT_SERIALIZABLE)
+	{
+		elog(LOG, "serializable isolation requested, falling back to "
+			 "repeatable read until serializable is supported in Cloudberry");
+		*newval = XACT_REPEATABLE_READ;
+	}
+	return true;
+}
+
+static bool
+dtx_check_default_isolation(int *newval, void **extra, GucSource source)
+{
+	if (prev_check_default_isolation != NULL &&
+		!prev_check_default_isolation(newval, extra, source))
+		return false;
+	if (*newval == XACT_SERIALIZABLE)
+	{
+		elog(LOG, "default serializable isolation requested, falling back to "
+			 "repeatable read until serializable is supported in Cloudberry");
+		*newval = XACT_REPEATABLE_READ;
+	}
+	return true;
+}
+
+static void
+dtx_isolation_install(void)
+{
+	struct config_generic *conf;
+
+	conf = find_option("transaction_isolation", false, false, ERROR);
+	prev_check_transaction_isolation = conf->_enum.check_hook;
+	conf->_enum.check_hook = dtx_check_transaction_isolation;
+
+	conf = find_option("default_transaction_isolation", false, false, ERROR);
+	prev_check_default_isolation = conf->_enum.check_hook;
+	conf->_enum.check_hook = dtx_check_default_isolation;
+
+	/*
+	 * The configuration files were read before this module was loaded, and
+	 * a backend takes what they said without asking the check again: once
+	 * through it here.
+	 */
+	if (DefaultXactIsoLevel == XACT_SERIALIZABLE)
+		SetConfigOption("default_transaction_isolation", "serializable",
+						PGC_POSTMASTER, PGC_S_FILE);
+}
+
 void
 GpDtxInit(void)
 {
@@ -3518,6 +3591,8 @@ GpDtxInit(void)
 							   PGC_USERSET,
 							   GUC_NO_SHOW_ALL | GUC_NOT_IN_SAMPLE | GUC_DISALLOW_IN_FILE,
 							   dtx_one_phase_check, NULL, NULL);
+
+	dtx_isolation_install();
 
 	prev_executor_start = ExecutorStart_hook;
 	ExecutorStart_hook = dtx_executor_start;

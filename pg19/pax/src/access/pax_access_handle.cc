@@ -56,6 +56,10 @@
  *   - a column's ENCODING clause, which gp_ao takes and keeps as the
  *     column's label, PAX checks through what pax_init() registers with it
  *     (gp_encoding.h), where Cloudberry had its encoding callbacks;
+ *   - a runtime filter's range reaches a scan as its keys, which the sparse
+ *     filter reads: pax_init() registers the method with gp_core's runtime
+ *     filters (gp_rtfilter.h), where Cloudberry's scan_flags said
+ *     SCAN_SUPPORT_RUNTIME_FILTER;
  *   - the module's magic block and _PG_init are modules/pax/pax.c's, which
  *     calls pax_init() here.
  *
@@ -92,6 +96,7 @@ extern "C" {
 #include "gp_dispatch.h"
 #include "gp_dtx.h"
 #include "gp_encoding.h"
+#include "gp_rtfilter.h"
 }
 
 #define NOT_IMPLEMENTED_YET                        \
@@ -1435,6 +1440,7 @@ static const GpEncodingMethod kPaxEncodingMethod = {"pax",
 
 void pax_init(void) {  // NOLINT
   GpEncodingRegisterMethod(&kPaxEncodingMethod);
+  GpRtFilterRegisterKeyMethod(&kPaxColumnMethods);
 
   prev_object_access_hook = object_access_hook;
   object_access_hook = PaxObjectAccessHook;

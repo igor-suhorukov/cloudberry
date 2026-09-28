@@ -31,9 +31,10 @@
  *
  * Each segment samples its own rows, with the same block sampler and
  * reservoir PostgreSQL's acquire_sample_rows() uses, through
- * gp_internal.sample_rows(); the coordinator takes from each segment's sample
- * in proportion to how many rows the segment has, chosen at random, so that
- * the whole is a sample of the table.  That is Cloudberry's
+ * gp_internal.sample_rows(), and writes what it counted into its own
+ * pg_class, as Cloudberry's segments do; the coordinator takes from each
+ * segment's sample in proportion to how many rows the segment has, chosen at
+ * random, so that the whole is a sample of the table.  That is Cloudberry's
  * gp_acquire_sample_rows() in shape.  In a database where gp_core's functions
  * are not installed, the coordinator samples the gathered rows itself -- the
  * same answer, at the cost of reading every row.
@@ -64,6 +65,7 @@
 #include "access/table.h"
 #include "access/tableam.h"
 #include "access/tupconvert.h"
+#include "access/visibilitymap.h"
 #include "catalog/index.h"
 #include "catalog/indexing.h"
 #include "catalog/namespace.h"
@@ -310,6 +312,56 @@ put_sample(ReturnSetInfo *rsinfo, TupleDesc rowdesc, HeapTuple *rows,
 	}
 }
 
+/*
+ * What this segment's sample counted of a table, into the segment's own
+ * pg_class, as Cloudberry's gp_acquire_sample_rows() leaves it: its
+ * do_analyze_rel() on the segment writes the segment's pages, rows and
+ * all-visible pages, and its indexes' pages and rows (analyze.c), as
+ * PostgreSQL's ANALYZE does on a node of its own.  A segment's VACUUM counts
+ * the rows of the pages it scans alone -- a page or none, where a read has
+ * made the others all-visible, as PostgreSQL 19's pruning does -- and keeps
+ * the count it had for the rest (vac_estimate_reltuples()): with none, "never
+ * counted", the coordinator could bring back no rows after it.
+ *
+ * Written in place, under the lock PostgreSQL 19 asks of that,
+ * ShareUpdateExclusiveLock on the table, and only if nothing holds it: a
+ * VACUUM or ANALYZE of the segment's own that does counts the table itself.
+ * For a user who may ANALYZE the table, where the sample is anyone's who may
+ * read it.  A partial index keeps its rows, which PostgreSQL counts by its
+ * predicate over the sample.
+ */
+static void
+own_counts(Relation rel, BlockNumber totalpages, double totalrows)
+{
+	Oid			relid = RelationGetRelid(rel);
+	BlockNumber allvisible = 0;
+	BlockNumber allfrozen = 0;
+
+	if (GpClusterBackendRole() != GP_ROLE_EXECUTE ||
+		pg_class_aclcheck(relid, GetUserId(), ACL_MAINTAIN) != ACLCHECK_OK ||
+		!ConditionalLockRelationOid(relid, ShareUpdateExclusiveLock))
+		return;
+
+	if (RELKIND_HAS_STORAGE(rel->rd_rel->relkind))
+		visibilitymap_count(rel, &allvisible, &allfrozen);
+	vac_update_relstats(rel, totalpages, totalrows, allvisible, allfrozen,
+						rel->rd_rel->relhasindex, InvalidTransactionId,
+						InvalidMultiXactId, NULL, NULL, true);
+
+	foreach_oid(indexoid, RelationGetIndexList(rel))
+	{
+		Relation	index = index_open(indexoid, AccessShareLock);
+
+		vac_update_relstats(index, RelationGetNumberOfBlocks(index),
+							RelationGetIndexPredicate(index) != NIL
+							? index->rd_rel->reltuples : totalrows,
+							0, 0, false, InvalidTransactionId,
+							InvalidMultiXactId, NULL, NULL, true);
+		index_close(index, AccessShareLock);
+	}
+	UnlockRelationOid(relid, ShareUpdateExclusiveLock);
+}
+
 PG_FUNCTION_INFO_V1(gp_sample_rows);
 
 /*
@@ -318,7 +370,8 @@ PG_FUNCTION_INFO_V1(gp_sample_rows);
  *
  * The first row says how many rows the segment holds, live and dead, as
  * ANALYZE estimates them; every row after it is a sampled row, as a value of
- * the table's own row type.
+ * the table's own row type.  What it counted is the segment's pg_class's
+ * too (own_counts()).
  */
 Datum
 gp_sample_rows(PG_FUNCTION_ARGS)
@@ -341,6 +394,7 @@ gp_sample_rows(PG_FUNCTION_ARGS)
 	func = local_sampler(rel, &totalpages);
 	numrows = local_sample_rows(rel, func, rows, targrows, &totalrows,
 								&totaldeadrows);
+	own_counts(rel, totalpages, totalrows);
 	put_sample(rsinfo, RelationGetDescr(rel), rows, numrows, totalrows,
 			   totaldeadrows);
 	table_close(rel, AccessShareLock);
@@ -1046,12 +1100,37 @@ typedef struct SegmentCounts
 	Oid			relid;			/* the hash key */
 	Oid			table;			/* the table it is, or whose index */
 	double		pages;
-	double		tuples;
+	double		tuples;			/* of the segments that have counted them */
+	double		counted_pages;	/* those segments' pages */
 	double		allvisible;
 	double		allfrozen;
+	double		bytes;			/* an index's files, after an ANALYZE */
 	int			nsegs;
 	bool		counted;		/* a segment has counted its rows */
 } SegmentCounts;
+
+/*
+ * A relation's rows over the segments: those the segments counted, and for
+ * a segment that has not -- its VACUUM scanned too little of it to count
+ * anew, and nothing had counted it before -- as many to a page as the
+ * others hold, as vac_estimate_reltuples() takes the pages it did not scan
+ * to hold rows as densely as it knew.  A replicated table's ANALYZE samples
+ * one of its segments.  -1, not known, where no segment has counted, or
+ * where those that have have no pages to say how densely.
+ */
+static double
+segment_rows(const SegmentCounts *c)
+{
+	double		uncounted = c->pages - c->counted_pages;
+
+	if (!c->counted)
+		return -1;
+	if (uncounted <= 0)
+		return c->tuples;
+	if (c->counted_pages <= 0)
+		return -1;
+	return c->tuples + floor(uncounted * c->tuples / c->counted_pages + 0.5);
+}
 
 /*
  * The relations a VACUUM or ANALYZE statement took whose rows are on the
@@ -1167,12 +1246,15 @@ current_counts(Oid relid, BlockNumber *pages, double *tuples)
  *
  * After a VACUUM: the pages, rows, all-visible and all-frozen pages of each
  * table, and the pages and rows of its indexes.  After an ANALYZE: the
- * all-visible and all-frozen pages alone.  Summed over the segments -- a
- * replicated table's over one segment's worth -- and written only when every
- * segment answered, as Cloudberry's are.  A pg_class row is written in place,
- * which PostgreSQL 19 allows under ShareUpdateExclusiveLock on the table, as
- * VACUUM and ANALYZE hold it: taken table by table in OID order, so that two
- * of these never wait for each other.
+ * all-visible and all-frozen pages, and the pages of its indexes, which the
+ * coordinator's ANALYZE counts of its empty copy -- from the size of their
+ * files on the segments, as Cloudberry's acquire_index_number_of_blocks()
+ * counts them.  Summed over the segments -- a replicated table's over one
+ * segment's worth -- and written only when every segment answered, as
+ * Cloudberry's are.  A pg_class row is written in place, which PostgreSQL 19
+ * allows under ShareUpdateExclusiveLock on the table, as VACUUM and ANALYZE
+ * hold it: taken table by table in OID order, so that two of these never
+ * wait for each other.
  */
 static void segment_counts(List *tables, bool vacuumed, bool built);
 
@@ -1363,8 +1445,8 @@ GpAnalyzeSegmentCountsAfterBuild(Node *stmt)
 /*
  * "tables"' counts on the segments, into the coordinator's pg_class: after a
  * VACUUM ("vacuumed") their pages, rows, all-visible and all-frozen pages,
- * and their indexes' pages and rows; after an ANALYZE the all-visible and
- * all-frozen pages alone.
+ * and their indexes' pages and rows; after an ANALYZE their all-visible and
+ * all-frozen pages, and their indexes' pages.
  */
 static void
 segment_counts(List *tables, bool vacuumed, bool built)
@@ -1386,24 +1468,30 @@ segment_counts(List *tables, bool vacuumed, bool built)
 	list_sort(tables, list_oid_cmp);
 	foreach_oid(table, tables)
 	{
-		note_relation(counts, &order, table, table, &oids);
-		if (vacuumed)
-		{
-			Relation	rel = try_relation_open(table, AccessShareLock);
+		Relation	rel;
 
-			if (rel == NULL)
-				continue;
-			foreach_oid(index, RelationGetIndexList(rel))
-				note_relation(counts, &order, index, table, &oids);
-			relation_close(rel, AccessShareLock);
-		}
+		note_relation(counts, &order, table, table, &oids);
+		if ((rel = try_relation_open(table, AccessShareLock)) == NULL)
+			continue;
+		foreach_oid(index, RelationGetIndexList(rel))
+			note_relation(counts, &order, index, table, &oids);
+		relation_close(rel, AccessShareLock);
 	}
 
+	/*
+	 * An index's files are measured after an ANALYZE alone: the statement
+	 * holds ShareUpdateExclusiveLock on the table, so no other session's
+	 * index build or REINDEX, whose lock on the index a segment's
+	 * pg_relation_size() would wait for, runs beside it.
+	 */
 	GpClusterSegments(&nsegs);
 	values = palloc0_array(char *, Max(nsegs, 1));
 	GpDispatchQueryFirstValues(psprintf("SELECT pg_catalog.string_agg(oid || ' ' || relpages || ' ' ||"
-										" reltuples || ' ' || relallvisible || ' ' || relallfrozen, ',')"
+										" reltuples || ' ' || relallvisible || ' ' || relallfrozen || ' ' ||"
+										" %s, ',')"
 										"  FROM pg_catalog.pg_class WHERE oid IN (%s)",
+										vacuumed ? "0"
+										: "CASE relkind WHEN 'i' THEN pg_catalog.pg_relation_size(oid) ELSE 0 END",
 										oids.data),
 							   -1, values);
 	for (int i = 0; i < nsegs; i++)
@@ -1419,17 +1507,23 @@ segment_counts(List *tables, bool vacuumed, bool built)
 			double		pages,
 						tuples,
 						allvisible,
-						allfrozen;
+						allfrozen,
+						bytes;
 
-			if (sscanf(tok, "%u %lf %lf %lf %lf", &relid, &pages, &tuples,
-					   &allvisible, &allfrozen) != 5 ||
+			if (sscanf(tok, "%u %lf %lf %lf %lf %lf", &relid, &pages, &tuples,
+					   &allvisible, &allfrozen, &bytes) != 6 ||
 				(c = hash_search(counts, &relid, HASH_FIND, NULL)) == NULL)
 				continue;
 			c->pages += pages;
-			c->tuples += Max(tuples, 0);
-			c->counted |= tuples >= 0;
+			if (tuples >= 0)
+			{
+				c->tuples += tuples;
+				c->counted_pages += pages;
+				c->counted = true;
+			}
 			c->allvisible += allvisible;
 			c->allfrozen += allfrozen;
+			c->bytes += bytes;
 			c->nsegs++;
 		}
 	}
@@ -1501,10 +1595,16 @@ segment_counts(List *tables, bool vacuumed, bool built)
 		{
 			/* a table no segment has counted yet is not known to be empty */
 			pages = (BlockNumber) (c->pages / share);
-			tuples = c->counted ? c->tuples / share : -1;
+			tuples = segment_rows(c);
+			if (tuples > 0)
+				tuples /= share;
 		}
 		else
+		{
 			current_counts(c->relid, &pages, &tuples);
+			if (c->relid != c->table)
+				pages = (BlockNumber) ceil(c->bytes / share / BLCKSZ);
+		}
 
 		/*
 		 * A table that has no rows has a page, as Cloudberry's
@@ -1558,8 +1658,9 @@ index_build_tables(Node *parsetree)
 				{
 					Oid			index = RangeVarGetRelid(stmt->relation, NoLock, true);
 
-					if (!OidIsValid(index) || get_rel_relkind(index) != RELKIND_INDEX &&
-						get_rel_relkind(index) != RELKIND_PARTITIONED_INDEX)
+					if (!OidIsValid(index) ||
+						(get_rel_relkind(index) != RELKIND_INDEX &&
+						 get_rel_relkind(index) != RELKIND_PARTITIONED_INDEX))
 						return NIL;
 					relid = IndexGetRelation(index, true);
 					return OidIsValid(relid)

@@ -84,6 +84,7 @@
 #include <ctype.h>
 #include <unistd.h>
 
+#include "access/parallel.h"
 #include "access/xact.h"
 #include "access/xlog.h"
 #include "access/xlog_internal.h"
@@ -108,6 +109,7 @@
 #include "gp_core_api.h"
 #include "gp_dbcopy.h"
 #include "gp_endpoint.h"
+#include "gp_gdd.h"
 #include "gp_segadmin.h"
 
 /* The longest line the configuration file may hold. */
@@ -122,6 +124,8 @@ static int	gp_max_segments = 64;
 
 /* gp.session_id, which is shown and never set; see show_session_id(). */
 static int	gp_session_id_shown = -1;
+/* The session a coordinator's backend works for, once taken; 0 before. */
+static int	cluster_session_id = 0;
 /* gp.contentid, the same; see show_contentid(). */
 static int	gp_contentid_shown = -1;
 static char *gp_cluster_secret = NULL;
@@ -207,6 +211,7 @@ typedef struct GpClusterShared
 	uint64		nodes_version;	/* bumped at each change of a node */
 	uint64		expand_version; /* gpexpand's, 0 as the server starts */
 	int			nsegments;		/* the contents 0..n-1 the primaries hold */
+	pg_atomic_uint32 last_session;	/* the coordinator's last session id */
 	LWLock	   *lock;
 	int			nnodes;
 	GpClusterNodeState nodes[FLEXIBLE_ARRAY_MEMBER];
@@ -1031,6 +1036,7 @@ cluster_shmem_startup(void)
 		cluster_shared->nodes_version = 1;
 		cluster_shared->expand_version = 0;
 		cluster_shared->nsegments = cluster_nsegments;
+		pg_atomic_init_u32(&cluster_shared->last_session, 0);
 		cluster_shared->lock = &(GetNamedLWLockTranche("gp_core cluster"))->lock;
 		cluster_shared->nnodes = cluster_nnodes;
 		for (int i = 0; i < cluster_nnodes; i++)
@@ -1785,6 +1791,39 @@ GpClusterCoordinator(void)
 	return NULL;
 }
 
+/*
+ * The next session id of the coordinator's counter, as Cloudberry's
+ * InitProcess() takes gp_session_id from ProcGlobal's mppLocalProcessCounter:
+ * the sessions of the clients that connect one after another have ids one
+ * after another.  Positive, and never 0, which says "none taken".
+ */
+static int
+session_id_next(void)
+{
+	uint32		id;
+
+	do
+		id = pg_atomic_add_fetch_u32(&cluster_shared->last_session, 1) & PG_INT32_MAX;
+	while (id == 0);
+	return (int) id;
+}
+
+/*
+ * The session a backend works for, taken the first time it is asked.  A
+ * dispatched backend's is its coordinator backend's, from the identity it
+ * was given: "seg0/dbid1/sess42".  On a cluster's coordinator a backend's is
+ * one of the counter's (session_id_next()) -- a client's taken as it
+ * connects (gp_dispatch.c), before anything else could take one between two
+ * clients' -- but for a parallel worker's, which is its leader's.
+ *
+ * Elsewhere it is the backend's process ID: on one node, where no session
+ * reaches another node, a backend's session is known to the others by its
+ * process ID alone -- no deadlock detector's table of what each backend works
+ * for is kept there (gp_gdd.c), so pg_stat_activity's sess_id and the workfile
+ * views read another backend's session as its pid (gp_segment.c,
+ * gp_workfile.c) -- and in a segment's own session, which works for no
+ * coordinator's and shows -1.
+ */
 int
 GpClusterSessionId(void)
 {
@@ -1794,7 +1833,56 @@ GpClusterSessionId(void)
 	/* a dispatched backend's is its coordinator backend's: "seg0/dbid1/sess42" */
 	if (identity[0] != '\0' && (sess = strstr(identity, "/sess")) != NULL)
 		return atoi(sess + strlen("/sess"));
-	return MyProcPid;
+
+	if (cluster_session_id == 0)
+	{
+		int			session;
+		bool		reader;
+
+		if (cluster_shared == NULL || GpClusterBackendRole() != GP_ROLE_DISPATCH)
+			cluster_session_id = MyProcPid;
+		else if (IsParallelWorker())
+			cluster_session_id =
+				MyProc->lockGroupLeader != NULL &&
+				GpGddBackendIdentity(MyProc->lockGroupLeader->pid, &session, &reader)
+				? session : MyProcPid;
+		else
+			cluster_session_id = session_id_next();
+	}
+	return cluster_session_id;
+}
+
+/*
+ * A new session id for this coordinator backend, as Cloudberry's session
+ * takes one once the gang it had its part on is lost
+ * (resetSessionForPrimaryGangLoss(), GpDropTempTables(), cdbgang.c): the
+ * segments' processes of the old one may still be ending, and a retrieve
+ * session bound to it retrieves nothing of the new one's.  The old id.
+ */
+#define MAX_SESSION_CALLBACKS	4
+static GpClusterSessionCallback session_callbacks[MAX_SESSION_CALLBACKS];
+static int	n_session_callbacks = 0;
+
+void
+GpClusterAddSessionCallback(GpClusterSessionCallback callback)
+{
+	if (n_session_callbacks >= MAX_SESSION_CALLBACKS)
+		elog(ERROR, "too many session id callbacks");
+	session_callbacks[n_session_callbacks++] = callback;
+}
+
+int
+GpClusterNewSessionId(void)
+{
+	int			old = GpClusterSessionId();
+
+	if (cluster_shared == NULL || GpClusterBackendRole() != GP_ROLE_DISPATCH ||
+		IsParallelWorker())
+		return old;
+	cluster_session_id = session_id_next();
+	for (int i = 0; i < n_session_callbacks; i++)
+		session_callbacks[i] (old, cluster_session_id);
+	return old;
 }
 
 /*
@@ -1976,7 +2064,7 @@ check_cluster_secret(char **newval, void **extra, GucSource source)
 /*
  * gp.session_id: Cloudberry's gp_session_id, read-only.  The session a
  * backend works for, which every process of one coordinator session shares
- * -- the coordinator backend's process id (GpClusterSessionId), for it and
+ * -- the coordinator's counter's (GpClusterSessionId), for its backend and
  * for each segment process it dispatched to -- and -1 in a session of a
  * segment's own and on a node with no cluster, as Cloudberry's utility mode
  * says: what such a session holds is no dispatched query's.
@@ -2037,9 +2125,10 @@ GpClusterInit(void)
 
 	DefineCustomIntVariable("gp.session_id",
 							"Session this backend works for, as Cloudberry's gp_session_id.",
-							"The coordinator backend's process id, on it and on every "
-							"segment process it dispatched to; -1 in a session of a "
-							"segment's own.",
+							"The coordinator's number of its backend's session, taken "
+							"as it connected, on it and on every segment process it "
+							"dispatched to; -1 in a session of a segment's own.  "
+							"Cloudberry calls this gp_session_id.",
 							&gp_session_id_shown,
 							-1, -1, INT_MAX,
 							PGC_INTERNAL,

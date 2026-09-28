@@ -86,7 +86,12 @@ COMMENT ON FUNCTION gp_task.validate_schedule(text) IS
  * are procedures for that reason; a job's id is in gp_task.job.
  *
  * Cloudberry's messages where it gives one: IF NOT EXISTS of a task that is
- * there, and IF EXISTS of one that is not, each say so and do nothing.
+ * there, and IF EXISTS of one that is not, each say so and do nothing.  And
+ * Cloudberry's name for a dynamic table's job, gp_dynamic_table_refresh_ and
+ * the view's OID, is reserved as its taskcmds.c reserves it: a job of the name
+ * is made and dropped by gp_matview alone, which says so (system_task), or by
+ * a superuser under allow_system_table_mods, and its command, which refreshes
+ * the view, is not changed.
  *
  * Called in a database other than gp.task_database, where the scheduler
  * reads its jobs, each is called there instead, with the same arguments, as
@@ -106,16 +111,24 @@ CREATE PROCEDURE gp_task.create_task(jobname text,
 									 database text DEFAULT pg_catalog.current_database(),
 									 /* a keyword, not a function, so it takes no schema */
 									 username text DEFAULT CURRENT_USER,
-									 if_not_exists boolean DEFAULT false)
+									 if_not_exists boolean DEFAULT false,
+									 system_task boolean DEFAULT false)
 LANGUAGE plpgsql
 AS $$
 BEGIN
+	IF NOT system_task AND pg_catalog.starts_with(jobname, 'gp_dynamic_table_refresh_') AND
+	   NOT pg_catalog.current_setting('allow_system_table_mods')::boolean THEN
+		RAISE EXCEPTION 'unacceptable task name "%"', jobname
+			USING ERRCODE = 'reserved_name',
+				  DETAIL = 'The prefix "gp_dynamic_table_refresh_" is reserved for system tasks.';
+	END IF;
+
 	PERFORM gp_task.validate_schedule(schedule);
 
 	IF pg_catalog.current_database() <> pg_catalog.current_setting('gp.task_database') THEN
 		PERFORM gp_task.forward('create_task',
 								ARRAY[jobname, schedule, command, database, username,
-									  if_not_exists::text]);
+									  if_not_exists::text, system_task::text]);
 		RETURN;
 	END IF;
 
@@ -131,7 +144,7 @@ BEGIN
 END;
 $$;
 
-COMMENT ON PROCEDURE gp_task.create_task(text, text, text, text, text, boolean) IS
+COMMENT ON PROCEDURE gp_task.create_task(text, text, text, text, text, boolean, boolean) IS
 	'schedule a command; what Cloudberry writes as CREATE TASK';
 
 /*
@@ -150,6 +163,12 @@ AS $$
 DECLARE
 	found_id bigint;
 BEGIN
+	IF command IS NOT NULL AND pg_catalog.starts_with(jobname, 'gp_dynamic_table_refresh_') AND
+	   EXISTS (SELECT 1 FROM gp_task.job_rows() j WHERE j.jobname = alter_task.jobname) THEN
+		RAISE EXCEPTION 'can not alter REFRESH SQL of dynamic tables'
+			USING ERRCODE = 'feature_not_supported';
+	END IF;
+
 	IF schedule IS NOT NULL THEN
 		PERFORM gp_task.validate_schedule(schedule);
 	END IF;
@@ -190,15 +209,28 @@ COMMENT ON PROCEDURE gp_task.alter_task(text, text, text, text, text, boolean, b
  * may be missing -- which gp_matview asks for of every materialized view it
  * sees dropped, so it says nothing.
  */
-CREATE PROCEDURE gp_task.drop_task(jobnames text[], missing_ok boolean DEFAULT false)
+CREATE PROCEDURE gp_task.drop_task(jobnames text[], missing_ok boolean DEFAULT false,
+								   system_task boolean DEFAULT false)
 LANGUAGE plpgsql
 AS $$
 DECLARE
 	one text;
 	found_id bigint;
 BEGIN
+	IF NOT system_task AND NOT pg_catalog.current_setting('allow_system_table_mods')::boolean THEN
+		FOREACH one IN ARRAY jobnames LOOP
+			IF pg_catalog.starts_with(one, 'gp_dynamic_table_refresh_') AND
+			   EXISTS (SELECT 1 FROM gp_task.job_rows() j WHERE j.jobname = one) THEN
+				RAISE EXCEPTION 'can not drop a internal task "%" paried with dynamic table', one
+					USING ERRCODE = 'reserved_name',
+						  DETAIL = 'please drop the dynamic table instead';
+			END IF;
+		END LOOP;
+	END IF;
+
 	IF pg_catalog.current_database() <> pg_catalog.current_setting('gp.task_database') THEN
-		PERFORM gp_task.forward('drop_task', ARRAY[jobnames::text, missing_ok::text]);
+		PERFORM gp_task.forward('drop_task',
+								ARRAY[jobnames::text, missing_ok::text, system_task::text]);
 		RETURN;
 	END IF;
 
@@ -221,7 +253,7 @@ BEGIN
 END;
 $$;
 
-COMMENT ON PROCEDURE gp_task.drop_task(text[], boolean) IS
+COMMENT ON PROCEDURE gp_task.drop_task(text[], boolean, boolean) IS
 	'unschedule commands; what Cloudberry writes as DROP TASK';
 
 /*
@@ -245,9 +277,9 @@ GRANT SELECT ON gp_task.job, gp_task.run_history TO PUBLIC;
 REVOKE ALL ON FUNCTION gp_task.validate_schedule(text) FROM PUBLIC;
 REVOKE ALL ON FUNCTION gp_task.job_changed() FROM PUBLIC;
 REVOKE ALL ON FUNCTION gp_task.forward(text, text[]) FROM PUBLIC;
-REVOKE ALL ON PROCEDURE gp_task.create_task(text, text, text, text, text, boolean) FROM PUBLIC;
+REVOKE ALL ON PROCEDURE gp_task.create_task(text, text, text, text, text, boolean, boolean) FROM PUBLIC;
 REVOKE ALL ON PROCEDURE gp_task.alter_task(text, text, text, text, text, boolean, boolean) FROM PUBLIC;
-REVOKE ALL ON PROCEDURE gp_task.drop_task(text[], boolean) FROM PUBLIC;
+REVOKE ALL ON PROCEDURE gp_task.drop_task(text[], boolean, boolean) FROM PUBLIC;
 
 /*
  * Cloudberry's pg_task and pg_task_run_history are shared catalogs, the same

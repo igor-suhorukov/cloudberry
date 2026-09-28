@@ -27,7 +27,11 @@
 #         nodes must come before any test's temporary schema: a node makes
 #         its own, pg_temp_N by its own backend's number, with an OID of its
 #         own, where Cloudberry's coordinator dispatches one name and OID for
-#         a session's.
+#         a session's.  guc_gp follows it there, whose count of the
+#         segments' pg_temp schemas is one each only before any other
+#         session's temporary tables; and dynamic_table, which the planner's
+#         pass alone runs: its 80 seconds of waiting for its job take no
+#         longer in a group of seconds than the longest group does
 #
 # Every test of the schedule is listed.  The ones the port had left for M7 --
 # fault injection, FTS, the interconnect's settings, and the rest -- come
@@ -73,6 +77,8 @@ run  distributed_transactions
 run  statement_mem_for_windowagg
 group ns
 run  namespace_gp
+run  guc_gp
+run  dynamic_table  planner  it turns optimizer off itself, so both passes would plan it alike, and ORCA's pass, on the planner's pass's clusters, would read the rows the planner's wrote into its external table's demoprot file on each segment too
 group g1
 run  bitmap_index
 run  truncate_gp
@@ -101,7 +107,7 @@ run  create_table_distpol
 group g2
 run  alter_distpol_dropped
 run  gp_distinct_plans
-skip partition  syntax error at or near "only"; relation "gp_partition_template" does not exist
+skip partition  syntax error at or near "only"; relation "parttab_with_excl_constraint" already exists
 skip partition1  type "cc" does not exist; column "partition" of relation "hhh_l1" does not exist
 run  partition_storage
 skip partition_ddl  type "aa" does not exist; cannot specify storage parameters for a partitioned table
@@ -112,7 +118,7 @@ run  external_table
 run  external_table_union_all
 run  external_table_create_privs
 run  external_table_persistent_error_log
-skip column_compression  relation "gp_partition_template" does not exist; column "i" referenced in more than one COLUMN ENCODING clause
+skip column_compression  column "i" referenced in more than one COLUMN ENCODING clause; table "ccddl" does not exist
 skip alter_table_aocs  type "gp_fastsequence" does not exist
 run  alter_table_aocs2
 run  alter_distribution_policy
@@ -266,7 +272,7 @@ run  vacuum_full_ao
 run  vacuum_full_heap_bitmapindex
 skip vacuum_ao_aux_only  syntax error at or near "vac_example_heap": VACUUM AO_AUX_ONLY is none of the port's, nor is the visibility map it vacuums a table's own, pg_appendonly's visimaprelid, which gp_ao keeps in one table of every table's
 skip ao_checksum_corruption  unrecognized configuration parameter "gp_appendonly_verify_block_checksums"
-skip AOCO_Compression  relation "gp_partition_template" does not exist
+skip AOCO_Compression  differs: \d+ of a table by column prints no Compression Type, Compression Level or Block Size column; an empty table by column takes 32 kB, where Cloudberry's takes none, and the sizes its checks allow a tenth off are not met; and ALTER TYPE ... SET DEFAULT ENCODING of an enum is taken, where Cloudberry refuses it: mood_encoded is not a base type
 run  AORO_Compression
 run  am_encoding
 run  ao_segfile
@@ -299,7 +305,9 @@ run  log_guc
 run  instr_in_shmem_setup
 run  instr_in_shmem
 group mirrors1
-skip createdb  in a group with mirrors: the faults create_db_after_file_copy and after_xlog_create_database, in CREATE DATABASE, and end_prepare_two_phase are none of the port's
+port mirrors_setup
+port autovacuum_off
+run  createdb
 group m7a
 run  gp_aggregates_costs
 run  gp_metadata
@@ -316,8 +324,8 @@ run  gp_backend_info
 run  gp_locale
 skip spi_processed64bit  differs: an INSERT's count is the coordinator's own, which the fault executor_run_high_processed makes 2^32 - 11, where Cloudberry's is the sum of each segment's so made -- an UPDATE's and a DELETE's are that sum, as there -- and an INSERT ... SELECT of 10,000 rows reaches the fault's threshold, which no segment's share of it does
 group mirrors1
-skip gp_tablespace_with_faults  in a group with mirrors: the faults after_xlog_create_tablespace and after_xlog_tblspc_drop, in CREATE and DROP TABLESPACE, and before_xlog_xact_prepare and after_xlog_xact_prepare_flushed are none of the port's
-skip gp_tablespace  unlogged append-optimized tables are not supported; unrecognized parameter "content1": a tablespace's location of one segment's own is none of the port's
+run  gp_tablespace_with_faults
+run  gp_tablespace
 group m7a
 skip temp_tablespaces  its statement_mem of 1MB leaves the hash aggregate unspilled here, and its CTEs are a shared scan across slices under ORCA alone: gp_wait_until_triggered_fault() of sisc_xslice_temp_files and hashagg_spill_temp_files, faults the port has not, waits out the suite's minute
 run  default_tablespace
@@ -342,7 +350,6 @@ run  gp_explain
 skip explain_format  differs: EXPLAIN in each of its formats prints the port's plans, which this test compares
 run  olap_plans
 run  gp_copy_dtx
-skip guc_gp  unrecognized configuration parameter "allow_segment_dml"; relation "reset_test" already exists
 skip toast  spiexceptions.UndefinedTable: relation "pg_toast.pg_toast_25090" does not exist; spiexceptions.UndefinedTable: relation "pg_toast.pg_toast_25084" does not exist
 run  misc_jiras
 run  write_gang_idle_in_transaction_session_timeout
@@ -371,18 +378,20 @@ run  icudp/queue_depth_combination_capacity
 run  icudp/queue_depth_combination_loss_advance
 port icudp_off
 skip event_trigger_gp  differs: CREATE EXTERNAL TABLE fires the event triggers as CREATE FOREIGN TABLE, which the port makes it, and CREATE PROTOCOL and DROP PROTOCOL fire none
-run  deadlock  orca  under the planner, its left join of l and r by a nested loop, which the planner's route runs on the coordinator over both tables gathered, 100,000 rows each, runs past the suite's minute
+run  deadlock
 skip deadlock2  differs: Cloudberry's NOTICE that a slice prefetches a join's qual is not the port's
 run  workfile/hashagg_spill
 run  workfile/hashjoin_spill
-skip workfile/materialize_spill  differs: optimizer=off, and the planner's route sorts, materializes and hashes on the coordinator, above its gathers, so that no segment spills: EXPLAIN ANALYZE's "work_mem: ... Workfile: (N spilling)", which is of the nodes the segments run, is printed of none
-skip workfile/sisc_mat_sort  differs: optimizer=off, and the planner's route sorts, materializes and hashes on the coordinator, above its gathers, so that no segment spills: EXPLAIN ANALYZE's "work_mem: ... Workfile: (N spilling)", which is of the nodes the segments run, is printed of none
-skip workfile/sisc_sort_spill  differs: optimizer=off, and the planner's route sorts, materializes and hashes on the coordinator, above its gathers, so that no segment spills: EXPLAIN ANALYZE's "work_mem: ... Workfile: (N spilling)", which is of the nodes the segments run, is printed of none
+run  workfile/materialize_spill
+run  workfile/sisc_mat_sort
+run  workfile/sisc_sort_spill
 run  workfile/sort_spill
 run  workfile/spilltodisk
-skip zlib  canceling statement due to user request
+skip zlib  differs: its first join counts t1.*, a whole-row variable ORCA declines as Cloudberry's does, and the planner's route joins on the coordinator, where seg0's workfile_creation_failure is never reached; the fault left set fails the INSERT into test_zlib_hagg, whose rows ORCA relays from the coordinator's slice into a temporary file on each segment, so its GROUP BY finds no rows; and FuncA's hash join does not spill on seg0 at statement_mem 10MB, gp_resource giving a query its whole budget as work_mem, and PostgreSQL's hash table hash_mem_multiplier times that, where Cloudberry's has its operator's share
 run  workfile_limits
-skip segspace  differs: the faults exec_hashjoin_new_batch and workfile_write_failure are at injection points only an image built with docker/patches/test-workfile-points.patch has, so the statements they stop run through here -- the SELECT prints its 750000 rows -- and on the planner's route the joins and sorts are the coordinator's, where a fault set on seg0 is never reached; under ORCA an UPDATE of the empty foo from a shared CTE waits past the suite's minute, the senders of its Broadcast Motion held by the slice that ended without reading them; function cleanupallgangs() does not exist
+port resource_budget
+port regress_cleanup_gangs
+run  segspace  orca  on the planner's route the joins and sorts are the coordinator's, where the faults it sets on seg0 are never reached: its SELECT prints its 750000 rows, and the faults it leaves set fail the ORCA pass's statements on the same cluster
 skip query_finish_pending  differs: gp_inject_fault's report of a finish_pending fault
 run  gpdiffcheck
 run  gptokencheck
@@ -424,7 +433,8 @@ skip partition_locking  differs: the locks a statement takes on a partitioned ta
 run  vacuum_gp
 run  vacuum_fsm_nondefault_tablespace
 run  pg_stat
-skip bfv_partition  relation "gp_partition_template" does not exist; differs: autovacuum on in its group, psql 19's list of a partitioned table's partitions, PostgreSQL 19's DETAIL of an operator it cannot choose, and the MAINTAIN privilege, m, in its ACL
+port autovacuum_off
+run  bfv_partition
 run  qp_misc_rio
 skip bfv_partition_plans  differs: a count of its plan's partition selections is 0, where Cloudberry's is 2
 run  gp_covering_index
@@ -434,7 +444,10 @@ run  joinhints
 run  qp_indexscan  planner  differs under ORCA: its plans of index scans over partitions
 run  gp_index_costing
 skip pgstat_qd_tabstat  syntax error at or near "on": its COPY ... ON SEGMENT, to and from a file of each segment, is none of the port's
-skip dispatch  the fault DoCopyToFail is none of the port's; unrecognized configuration parameter "gp_max_plan_size"; and its gangs' faults (process_startup_packet, send_qe_details_init_backend), retries (gp_gang_creation_retry_count) and regress.so's hasGangsExist() and hasBackendsExist()
+group tcp1
+run  dispatch
+group m7a
+port autovacuum_on
 run  wrkloadadmin
 run  trig
 skip role  syntax error at or near "only"
@@ -504,7 +517,7 @@ skip hooktest  could not access file "hooktest/test_hook.so": No such file or di
 run  tuple_serialization
 skip query_info_hook_test  could not access file "query_info_hook_test/query_info_hook_test.so": No such file or directory
 skip freeze_aux_tables  differs: an append-optimized table's aux tables are not pg_aoseg_<oid>, pg_aoblkdir_<oid> and pg_aovisimap_<oid> of pg_aoseg
-skip cbdb_parallel  its NOT IN of 500,000 rows (select sum(t1.c1) from t1 where c1 not in (select c2 from t2)), under the planner it sets in both passes, is a SubPlan scanning the other table's rows for each row, which do not fit work_mem for a hashed one, past the suite's 60 seconds, where Cloudberry's planner makes an anti-join: canceling statement due to user request -- the rest of it, run with work_mem raised before that part, is Cloudberry's output, its segments' writers starting PostgreSQL's workers where it turns enable_parallel on
+run  cbdb_parallel
 run  window_parallel
 skip vacuum_full_freeze_heap  differs: a heap's size in 8 kB pages, where Cloudberry's expected output counts its 32 kB blocks
 skip vacuum_full_heap  differs: a heap's size in 8 kB pages, where Cloudberry's expected output counts its 32 kB blocks
@@ -518,7 +531,7 @@ run  dropdb_check_shared_buffer_cache
 run  gp_upgrade_cornercases
 skip temp_relation  differs: a temporary table's file is t<proc number>_<relfilenode> in PostgreSQL 19, and the test looks for Cloudberry's t_<relfilenode>, which it finds on no node, before DROP TABLE and after
 group mirrors1
-skip alter_db_set_tablespace  in a group with mirrors: the faults inside_move_db_transaction and after_drop_database_directories, in ALTER DATABASE ... SET TABLESPACE, and ckpt_loop_begin and ckpt_loop_end are none of the port's, nor is the move of each segment's database
+run  alter_db_set_tablespace
 group m7b
 run  oid_wraparound
 skip fts_recovery_in_progress  canceling statement due to user request
@@ -526,20 +539,19 @@ skip gangsize  differs: the gangs its statements are dispatched to, by Cloudberr
 run  gang_reuse
 run  run_utility_gpexpand_phase1
 run  create_extension_fail
-skip offload_entry_to_qe  a temporary external table is not supported: CREATE EXTERNAL WEB TEMP TABLE -- an external table is a foreign table, which PostgreSQL makes in no temporary schema; and enable_offload_entry_to_qe, which moves the coordinator's work above a Motion to one segment, has nothing to move on the planner's route, whose gathers are the coordinator's
+run  offload_entry_to_qe
 port ivm_cluster
 run  ivm
 run  aqumv  planner  it turns optimizer off itself, so both passes would plan it alike, and ORCA's pass, on the planner's pass's clusters, would read the rows the planner's wrote into its external table's demoprot file on each segment too
 port aqumv_plan
 run  matview_data
 run  directory_table
-skip motion_socket  differs: its check_motion_sockets() looks up each segment's address, which on this suite's clusters is a socket's directory: socket.gaierror: [Errno -2] Name or service not known
+skip motion_socket  differs: its check_motion_sockets() stops at the first backend it checks, the coordinator's, which gathers over libpq and listens on no interconnect socket: Expected 1 motion sockets but found 0 -- in a tcp group, where the segments' addresses resolve, as on this suite's clusters they do not: socket.gaierror: [Errno -2] Name or service not known
 run  ic_proxy_socket
 port ic_proxy_after
 run  subtrx_overflow
 run  bfv_meta_track
 skip bfv_copy  segment reject limit reached, aborting operation
-skip dynamic_table  function pg_catalog.pg_get_dynamic_table_schedule(oid) does not exist; relation "pg_dynamic_tables" does not exist -- and psql 19's \d+ calls a dynamic table a materialized view, as DROP ... CASCADE does, its job runs REFRESH MATERIALIZED VIEW where Cloudberry's runs REFRESH DYNAMIC TABLE, the names of its jobs are not reserved, and its wait of 80 seconds for its job is cancelled after 60
 run  hba_conf
 skip dboptions  differs: the psql its shell commands run connects to /tmp's socket, where this suite's nodes have directories of their own
 run  gp_log_mem_dispatch

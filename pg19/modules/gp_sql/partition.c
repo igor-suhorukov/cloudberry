@@ -56,6 +56,7 @@
 
 #include <ctype.h>
 
+#include "access/genam.h"
 #include "access/htup_details.h"
 #include "access/reloptions.h"
 #include "access/table.h"
@@ -71,12 +72,14 @@
 #include "catalog/pg_opclass.h"
 #include "catalog/pg_attribute.h"
 #include "catalog/pg_partitioned_table.h"
+#include "catalog/pg_seclabel.h"
 #include "catalog/pg_type.h"
 #include "commands/defrem.h"
 #include "commands/tablecmds.h"
 #include "commands/tablespace.h"
 #include "executor/executor.h"
 #include "executor/spi.h"
+#include "funcapi.h"
 #include "miscadmin.h"
 #include "nodes/makefuncs.h"
 #include "nodes/nodeFuncs.h"
@@ -107,6 +110,7 @@
 #include "utils/ruleutils.h"
 #include "utils/syscache.h"
 #include "utils/timestamp.h"
+#include "utils/tuplestore.h"
 
 #include "gp_grammar_int.h"
 #include "gp_core_api.h"
@@ -1056,6 +1060,240 @@ template_set(Oid rootid, int level, const char *text)
 	}
 	templates_write(rootid, result);
 	return found;
+}
+
+/* ------------------------------------------------------------------------- */
+/* gp_partition_template                                                     */
+/* ------------------------------------------------------------------------- */
+
+/*
+ * Cloudberry's gp_partition_template catalog holds each level's template as a
+ * pg_node_tree of a node of its own, GpPartitionDefinition, which its
+ * pg_get_expr() prints back in Cloudberry's syntax (ruleutils.c,
+ * T_GpPartitionDefinition).  The port's view of that name (gp_sql--1.0.sql)
+ * shows each template the root's label keeps as that text, in a type of its
+ * own, so that the pg_get_expr(template, relid) Cloudberry's tests write is
+ * the view's function, which returns it; this is the printing.  The
+ * elements and the column encodings come in the order they were written,
+ * each value as parse analysis makes it and the deparser prints it.  What
+ * Cloudberry's printing does besides is done too, as its tests' expected
+ * output shows it: the separator that goes before an element also goes
+ * before an element's WITH, and before a range bound that has no name; and
+ * WITH (appendonly = true, orientation = ...) is printed as the other
+ * orientation's words -- ao_row's as "orientation=column", any other access
+ * method's as "orientation=row".
+ */
+
+/* A value of a bound, as Cloudberry's printing gives it. */
+static void
+template_value(StringInfo buf, ParseState *pstate, Node *raw)
+{
+	Node	   *value = transformExpr(pstate, raw, EXPR_KIND_VALUES);
+
+	appendStringInfoString(buf, deparse_expression(value, NIL, false, true));
+}
+
+/* One element: a subpartition, the default one, or an unnamed range. */
+static void
+template_elem(StringInfo buf, ParseState *pstate, GpPartParser *p,
+			  GpPartElem *elem, const char **sep)
+{
+	GpPartBound *bound = elem->bound;
+
+	appendStringInfoString(buf, *sep);
+	*sep = ", ";
+	if (elem->name != NULL)
+		appendStringInfo(buf, "%sSUBPARTITION %s",
+						 elem->is_default ? "DEFAULT " : "", elem->name);
+
+	if (bound != NULL && bound->kind == GP_PART_BOUND_RANGE)
+	{
+		/* only the first value of each, as Cloudberry prints them */
+		if (bound->start != NULL)
+		{
+			appendStringInfoString(buf, " START (");
+			template_value(buf, pstate,
+						   linitial(GpPartExprList(p, bound->start->vals, false)));
+			appendStringInfoChar(buf, ')');
+			if (!bound->start->inclusive)
+				appendStringInfoString(buf, " EXCLUSIVE");
+		}
+		if (bound->end != NULL)
+		{
+			appendStringInfoString(buf, " END (");
+			template_value(buf, pstate,
+						   linitial(GpPartExprList(p, bound->end->vals, false)));
+			appendStringInfoChar(buf, ')');
+			if (bound->end->inclusive)
+				appendStringInfoString(buf, " INCLUSIVE");
+		}
+		if (bound->every.from >= 0)
+		{
+			appendStringInfoString(buf, " Every (");
+			template_value(buf, pstate,
+						   linitial(GpPartExprList(p, bound->every, false)));
+			appendStringInfoChar(buf, ')');
+		}
+	}
+	else if (bound != NULL)
+	{
+		appendStringInfoString(buf, " VALUES (");
+		*sep = "";
+		foreach_ptr(Node, value, GpPartExprList(p, bound->values, false))
+		{
+			appendStringInfoString(buf, *sep);
+			template_value(buf, pstate, value);
+			*sep = ", ";
+		}
+		appendStringInfoChar(buf, ')');
+	}
+
+	/* WITH (...), the storage options taken out as the access method they name */
+	if (elem->with.from >= 0)
+	{
+		List	   *options = GpPartWithOptions(p, elem->with);
+		char	   *am = GpPartitionLegacyAccessMethod(NULL, &options);
+
+		if (options == NIL)
+			return;
+		appendStringInfoString(buf, *sep);
+		appendStringInfoString(buf, " WITH (");
+		if (am != NULL)
+		{
+			appendStringInfo(buf, "appendonly=true, orientation=%s",
+							 pg_strcasecmp(am, "ao_row") == 0 ? "column" : "row");
+			*sep = ", ";
+		}
+		foreach_node(DefElem, def, options)
+		{
+			appendStringInfo(buf, "%s%s=%s", *sep, def->defname, defGetString(def));
+			*sep = ", ";
+		}
+		appendStringInfoChar(buf, ')');
+	}
+}
+
+/* COLUMN name ENCODING (...) or DEFAULT COLUMN ENCODING (...) */
+static void
+template_encoding(StringInfo buf, GpPartParser *p, GpPartSpan span,
+				  const char **sep)
+{
+	GpPartParser *ep = text_parser(GpPartSpanText(p, span));
+	const GpTokens *ts = ep->ts;
+	GpPartSpan	opts;
+
+	appendStringInfoString(buf, *sep);
+	if (tok_is_kw(ts, 0, "default"))
+		appendStringInfoString(buf, "DEFAULT COLUMN ENCODING (");
+	else
+		appendStringInfo(buf, "COLUMN %s ENCODING (", tok_name(ts, 1));
+
+	/* its options, the list from the parenthesis after ENCODING */
+	opts.from = ts->toks[3].off;
+	opts.to = ts->srclen;
+	*sep = "";
+	foreach_node(DefElem, def, GpPartWithOptions(ep, opts))
+	{
+		appendStringInfo(buf, "%s%s=%s", *sep, def->defname, defGetString(def));
+		*sep = ", ";
+	}
+	appendStringInfoChar(buf, ')');
+}
+
+/* A template's text, as the label keeps it, as Cloudberry's pg_get_expr() prints it. */
+static char *
+template_deparse(const char *text)
+{
+	GpPartParser *p = text_parser(text);
+	GpPartDef  *def = GpPartParseTemplate(p, 0);
+	ParseState *pstate = make_parsestate(NULL);
+	ListCell   *el = list_head(def->elems);
+	ListCell   *en = list_head(def->encodings);
+	const char *sep = "";
+	StringInfoData buf;
+
+	initStringInfo(&buf);
+	appendStringInfoString(&buf, "SUBPARTITION TEMPLATE(");
+	while (el != NULL || en != NULL)
+	{
+		GpPartElem *elem = el != NULL ? lfirst(el) : NULL;
+		GpPartSpan *enc = en != NULL ? lfirst(en) : NULL;
+
+		if (elem != NULL && (enc == NULL || elem->location < enc->from))
+		{
+			template_elem(&buf, pstate, p, elem, &sep);
+			el = lnext(def->elems, el);
+		}
+		else
+		{
+			template_encoding(&buf, p, *enc, &sep);
+			en = lnext(def->encodings, en);
+		}
+	}
+	appendStringInfoChar(&buf, ')');
+	free_parsestate(pstate);
+	return buf.data;
+}
+
+PG_FUNCTION_INFO_V1(gp_sql_partition_templates);
+PG_FUNCTION_INFO_V1(gp_sql_partition_template_in);
+
+/*
+ * gp_sql.partition_templates(): each level's template of each partitioned
+ * table of this database, from the labels, which a dropped table's go with.
+ */
+Datum
+gp_sql_partition_templates(PG_FUNCTION_ARGS)
+{
+	ReturnSetInfo *rsinfo = (ReturnSetInfo *) fcinfo->resultinfo;
+	Relation	rel;
+	SysScanDesc scan;
+	HeapTuple	tuple;
+
+	InitMaterializedSRF(fcinfo, 0);
+	rel = table_open(SecLabelRelationId, AccessShareLock);
+	scan = systable_beginscan(rel, InvalidOid, false, NULL, 0, NULL);
+	while (HeapTupleIsValid(tuple = systable_getnext(scan)))
+	{
+		FormData_pg_seclabel *form = (FormData_pg_seclabel *) GETSTRUCT(tuple);
+		Datum		provider;
+		bool		isnull;
+
+		if (form->classoid != RelationRelationId || form->objsubid != 0)
+			continue;
+		provider = heap_getattr(tuple, Anum_pg_seclabel_provider,
+								RelationGetDescr(rel), &isnull);
+		if (isnull || strcmp(TextDatumGetCString(provider), GP_LABEL_PROVIDER) != 0)
+			continue;
+
+		foreach_ptr(PartTemplate, t, templates_read(form->objoid))
+		{
+			Datum		values[3];
+			bool		nulls[3] = {false, false, false};
+
+			values[0] = ObjectIdGetDatum(form->objoid);
+			values[1] = Int16GetDatum(t->level);
+			values[2] = CStringGetTextDatum(template_deparse(t->text));
+			tuplestore_putvalues(rsinfo->setResult, rsinfo->setDesc, values, nulls);
+		}
+	}
+	systable_endscan(scan);
+	table_close(rel, AccessShareLock);
+	return (Datum) 0;
+}
+
+/*
+ * The type's input: a template is the view's to give, as a pg_node_tree is
+ * the catalogs', and none is read from text (PostgreSQL's pg_node_tree_in).
+ */
+Datum
+gp_sql_partition_template_in(PG_FUNCTION_ARGS)
+{
+	ereport(ERROR,
+			(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+			 errmsg("cannot accept a value of type %s", "gp_sql.partition_template")));
+
+	PG_RETURN_VOID();			/* keep compiler quiet */
 }
 
 /* The key chain of a clause's SUBPARTITION BYs, from the clause's text. */
@@ -3345,6 +3583,51 @@ run_cmd(Oid relid, GpPartParser *p, GpPartCmd *cmd, const char *queryString,
 			core->version_major == GP_CORE_API_VERSION_MAJOR &&
 			core->version_minor >= 12)
 			core->metatrack_partition(relid, subtype);
+	}
+}
+
+/*
+ * ALTER TABLE ... SET TABLESPACE of a partitioned table, once it has run --
+ * which, as PostgreSQL 19's, set the tablespace of the partitions to come --
+ * moves the partitions the table has, as Cloudberry's recurses
+ * (ATSimpleRecursion() for AT_SetTableSpace in its ATPrepCmd(),
+ * tablecmds.c): each by an ALTER TABLE of its own, run as a subcommand, so
+ * that a partitioned partition moves its own and each is dispatched as the
+ * statement it is.  ALTER TABLE ONLY moves none, as PostgreSQL 19's moves
+ * none.
+ */
+void
+GpPartitionSetTablespace(AlterTableStmt *stmt, const char *queryString,
+						 QueryEnvironment *queryEnv)
+{
+	AlterTableCmd *move = NULL;
+	Oid			relid;
+
+	if (stmt->objtype != OBJECT_TABLE || stmt->relation == NULL ||
+		!stmt->relation->inh)
+		return;
+	foreach_node(AlterTableCmd, cmd, stmt->cmds)
+	{
+		if (cmd->subtype == AT_SetTableSpace)
+			move = cmd;
+	}
+	if (move == NULL)
+		return;
+	relid = RangeVarGetRelid(stmt->relation, NoLock, true);
+	if (!OidIsValid(relid) || get_rel_relkind(relid) != RELKIND_PARTITIONED_TABLE)
+		return;
+
+	foreach_oid(child, find_inheritance_children(relid, NoLock))
+	{
+		AlterTableStmt *at = makeNode(AlterTableStmt);
+		AlterTableCmd *atc = makeNode(AlterTableCmd);
+
+		atc->subtype = AT_SetTableSpace;
+		atc->name = move->name;
+		at->relation = rv_of(child);
+		at->cmds = list_make1(atc);
+		at->objtype = OBJECT_TABLE;
+		run_utility((Node *) at, queryString, queryEnv);
 	}
 }
 

@@ -232,7 +232,7 @@ pg   oidjoins
 pg   fast_default
 pg   stats
 run  tag                                                  cb1
-skip createdb  a cluster's mirrors, whose directories it lists, M4, and the fault injector
+run  createdb                                             cb1
 run  update_gp                                            cb1
 run  returning_gp                                         cb1
 run  cluster_gp                                           cb1
@@ -243,7 +243,7 @@ run  union_gp                                             cb1
 run  create_table_like_gp                                 cb1
 run  matview_ao                                           cb1
 run  gpcopy                                               cb1
-skip incremental_analyze  differs: the database it makes has no gp_core, which one node makes in no new database, so its ANALYZE is PostgreSQL's and samples a partitioned table where Cloudberry merges its leaves' statistics
+run  incremental_analyze                                  cb1
 run  indexjoin                                            cb1
 skip workfile/hashagg_spill  the workfile manager and its views; Track B's spill-file hook is not built
 skip workfile/hashjoin_spill  the workfile manager and its views; Track B's spill-file hook is not built

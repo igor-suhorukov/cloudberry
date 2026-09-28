@@ -16,7 +16,9 @@
 #   port  a test of the port's own -- ../greenplum's sql/ and expected/, or
 #         this suite's -- run where the line is
 #   group the tests after it, to the next such line, are a group, with a
-#         cluster of its own
+#         cluster of its own; one whose name begins "mirrors" has a mirror
+#         for each segment and a standby coordinator, as the greenplum
+#         suite's has
 #
 # PostgreSQL's tests are PostgreSQL 14's as Cloudberry keeps them: where
 # PostgreSQL 19 answers otherwise in a line or a few -- its words, a feature
@@ -240,9 +242,10 @@ skip matrix  function sum(smallint[]) does not exist; function sum(integer[]) do
 run  sublink
 run  olap_setup
 skip complex  type "complex" does not exist; relation "complex_ttbl" does not exist
-skip distributed_transactions  unrecognized configuration parameter "debug_abort_after_distributed_prepared"; unrecognized configuration parameter "debug_dtm_action_segment"
+run  distributed_transactions
 group ns
 run  namespace_gp
+run  guc_gp
 group g1
 run  bitmap_index
 run  truncate_gp
@@ -269,7 +272,7 @@ skip appendonly  type "gp_fastsequence" does not exist; cursor can only scan for
 run  create_table_distpol
 group g2
 run  alter_distpol_dropped
-skip partition  syntax error at or near "only"; relation "gp_partition_template" does not exist
+skip partition  syntax error at or near "only"; relation "parttab_with_excl_constraint" already exists
 skip partition1  type "cc" does not exist; column "partition" of relation "hhh_l1" does not exist
 run  partition_storage
 skip partition_ddl  type "aa" does not exist; cannot specify storage parameters for a partitioned table
@@ -279,9 +282,9 @@ run  sreh
 run  external_table
 run  external_table_union_all
 run  external_table_persistent_error_log
-skip column_compression  relation "gp_partition_template" does not exist; column "i" referenced in more than one COLUMN ENCODING clause
+skip column_compression  column "i" referenced in more than one COLUMN ENCODING clause; table "ccddl" does not exist
 skip alter_table_aocs  type "gp_fastsequence" does not exist
-skip alter_table_aocs2  unrecognized configuration parameter "gp_recursive_cte"; function descendants_of(unknown) does not exist
+run  alter_table_aocs2
 run  alter_distribution_policy
 run  alter_table_ao
 run  aocs
@@ -372,7 +375,7 @@ run  uao_ddl/analyze_ao_table_every_dml_row
 run  uao_ddl/analyze_ao_table_every_dml_column
 run  uao_dml/uao_dml_row
 run  uao_dml/uao_dml_column
-skip AOCO_Compression  relation "gp_partition_template" does not exist
+skip AOCO_Compression  differs: \d+ of a table by column prints no Compression Type, Compression Level or Block Size column; an empty table by column takes 32 kB, where Cloudberry's takes none, and the sizes its checks allow a tenth off are not met; and ALTER TYPE ... SET DEFAULT ENCODING of an enum is taken, where Cloudberry refuses it: mood_encoded is not a base type
 run  AORO_Compression
 run  am_encoding
 run  uao_dml/uao_dml_unique_index_delete_row
@@ -386,9 +389,13 @@ run  disable_autovacuum
 skip python_processed64bit  differs: the fault executor_run_high_processed, which has the executor count past 2^32 rows, is none of the port's
 run  enable_autovacuum
 skip log_guc  relation "gp_toolkit.__gp_log_master_ext" does not exist; relation "gp_toolkit.__gp_log_segment_ext" does not exist
-skip instr_in_shmem_setup  gp_enable_query_metrics is none of the port's settings: gpconfig refuses it, and instr_in_shmem and instr_in_shmem_verify, which it sets up for, fail without it
-skip instr_in_shmem  unrecognized configuration parameter "gp_enable_query_metrics"; unrecognized configuration parameter "gp_instrument_shmem_size"
-skip createdb  function force_mirrors_to_catch_up() does not exist
+run  instr_in_shmem_setup
+run  instr_in_shmem
+group mirrors1
+port mirrors_setup
+port autovacuum_off
+run  createdb
+group m7a
 run  gp_aggregates_costs
 run  variadic_parameters
 run  function_extensions
@@ -397,7 +404,9 @@ run  shared_scan
 run  cluster_gp
 skip combocid_gp  differs: a segment's command ids for the rows a transaction writes count from 0, where Cloudberry's go on from the coordinator's
 skip spi_processed64bit  differs: the fault executor_run_high_processed, which has the executor count past 2^32 rows, is none of the port's
-skip gp_tablespace  function gp_tablespace_location(oid) does not exist; function get_tablespace_version_directory_name() does not exist
+group mirrors1
+run  gp_tablespace
+group m7a
 skip temp_tablespaces  the faults sisc_xslice_temp_files and hashagg_spill_temp_files are none of the port's: canceling statement due to user request
 run  default_tablespace
 run  leastsquares
@@ -415,11 +424,10 @@ skip table_functions  type anytable does not exist; OUT and INOUT arguments aren
 run  opclass_ddl
 run  information_schema
 run  guc_env_var
-skip gp_explain  unrecognized configuration parameter "gp_enable_explain_allstat"; unrecognized EXPLAIN option "slicetable"
+run  gp_explain  planner  under ORCA, EXPLAIN (ANALYZE, WAL) of a DELETE of a PAX table prints no WAL line, where a heap table's prints one
 skip explain_format  differs: EXPLAIN in each of its formats prints the port's plans, which this test compares
 run  olap_plans
 run  gp_copy_dtx
-skip guc_gp  unrecognized configuration parameter "gp_workfile_limit_per_query"; unrecognized configuration parameter "allow_segment_dml"
 run  misc_jiras
 skip gp_connections  differs: a primary takes a direct connection, where Cloudberry refuses it: This database instance is running as a primary segment in a Cloudberry cluster and does not permit direct connections
 skip gp_dump_query_oids  function gp_dump_query_oids(unknown) does not exist
@@ -432,13 +440,13 @@ port icudp_on
 run  icudp/gp_interconnect_fc_method
 run  icudp/queue_depth_combination_capacity
 port icudp_off
-skip deadlock  canceling statement due to user request; function gp_dist_wait_status() does not exist
+run  deadlock
 skip deadlock2  differs: Cloudberry's NOTICE that a slice prefetches a join's qual is not the port's
 run  workfile/hashagg_spill
 run  workfile/hashjoin_spill
-skip workfile/materialize_spill  differs: EXPLAIN ANALYZE says nothing of Cloudberry's "Workfile: (N spilling)" of a node that spilled, which it counts
-skip workfile/sisc_mat_sort  differs: EXPLAIN ANALYZE says nothing of Cloudberry's "Workfile: (N spilling)" of a node that spilled, which it counts
-skip workfile/sisc_sort_spill  differs: EXPLAIN ANALYZE says nothing of Cloudberry's "Workfile: (N spilling)" of a node that spilled, which it counts
+run  workfile/materialize_spill
+run  workfile/sisc_mat_sort
+run  workfile/sisc_sort_spill
 run  workfile/sort_spill
 run  workfile/spilltodisk
 skip zlib  canceling statement due to user request
@@ -466,23 +474,27 @@ skip index_constraint_naming_upgrade  differs: PostgreSQL 19 keeps NOT NULL cons
 run  rle
 skip rle_delta  differs: \d+ of a column-oriented table prints no Compression Type, Compression Level or Block Size column
 skip dsp  compresstype "zlib" can't be used with compresslevel 0; compresslevel=7 is out of range for rle_type (should be in the range 1 to 6)
-skip not_out_of_shmem_exit_slots  unrecognized configuration parameter "debug_dtm_action_segment"; unrecognized configuration parameter "debug_dtm_action_target"
+run  not_out_of_shmem_exit_slots
 skip create_am_gp  function ao_row_tableam_handler(internal) does not exist; function ao_column_tableam_handler(internal) does not exist
-skip gp_runtime_filter  unrecognized configuration parameter "gp_enable_runtime_filter"; unrecognized configuration parameter "gp_enable_runtime_filter_pushdown"
+run  gp_runtime_filter
 run  eagerfree
 skip alter_table_set  syntax error at or near "on"; unrecognized configuration parameter "gp_enable_segment_copy_checking"
 skip alter_table_gp  differs: Cloudberry refuses to alter a column of a primary key, a unique constraint or the distribution key ("cannot alter column with primary key or unique constraint"), which the port alters
 run  subtransaction_visibility
 skip oid_consistency  differs: \d of an append-optimized table prints no Compression Type, Level, Block Size or Checksum
-skip udf_exception_blocks  unrecognized configuration parameter "debug_dtm_action_segment"; unrecognized configuration parameter "debug_dtm_action_target"
+run  udf_exception_blocks
 run  ic
 skip partition_locking  differs: the locks a statement takes on a partitioned table's parts, and on which nodes
 skip vacuum_gp  relation "gp_toolkit.__gp_log_master_ext" does not exist
 skip pg_stat  relation "gp_stat_all_tables_summary" does not exist; relation "gp_stat_user_tables_summary" does not exist
-skip bfv_partition  unrecognized configuration parameter "optimizer_analyze_root_partition"; relation "gp_partition_template" does not exist
+port autovacuum_off
+run  bfv_partition
 skip bfv_partition_plans  differs: a count of its plan's partition selections is 0, where Cloudberry's is 2
 skip pgstat_qd_tabstat  relation "gp_stat_all_tables_summary" does not exist; syntax error at or near "on"
-skip dispatch  unrecognized configuration parameter "gp_max_plan_size"; could not find function "cleanupAllGangs" in file "regress.so"
+group tcp1
+run  dispatch
+group m7a
+port autovacuum_on
 skip role  syntax error at or near "only"
 skip plpgsql_cache  differs: how often a function's NOTICE is raised, the segments running it where Cloudberry's coordinator does
 run  pg_stat_last_operation
@@ -501,7 +513,7 @@ run  rpt_tpch
 skip bfv_planner  differs: two counts of what its plans read are 27 and 9, where Cloudberry's are 33 and 11
 run  bfv_legacy
 skip bfv_temp  syntax error at or near ")"; relation "n" does not exist
-skip gp_recursive_cte  unrecognized configuration parameter "gp_recursive_cte"
+run  gp_recursive_cte
 run  qp_dropped_cols
 run  qp_misc_rio_join_small
 group m7b

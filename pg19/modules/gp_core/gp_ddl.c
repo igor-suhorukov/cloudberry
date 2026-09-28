@@ -70,6 +70,8 @@
  */
 #include "postgres.h"
 
+#include <ctype.h>
+#include <limits.h>
 #include <sys/stat.h>
 #include <unistd.h>
 
@@ -84,10 +86,12 @@
 #include "catalog/pg_depend.h"
 #include "catalog/pg_extension.h"
 #include "catalog/pg_namespace.h"
+#include "parser/parse_node.h"
 #include "parser/parse_type.h"
 #include "catalog/objectaddress.h"
 #include "catalog/indexing.h"
 #include "catalog/pg_index.h"
+#include "commands/dbcommands.h"
 #include "commands/defrem.h"
 #include "commands/extension.h"
 #include "commands/tablecmds.h"
@@ -120,6 +124,8 @@
 
 #include "gp_cluster.h"
 #include "gp_core_api.h"
+#include "gp_dbcopy.h"
+#include "gp_dirxact.h"
 #include "gp_dispatch.h"
 #include "gp_fault.h"
 #include "gp_foreign.h"
@@ -207,6 +213,25 @@ local_oid_init(void *ptr, void *arg)
 }
 
 /*
+ * Is the OID a row's of the catalog: any row, dead or alive, committed or
+ * not, as GetNewOidWithIndex() looks for one?
+ */
+static bool
+oid_taken(Relation relation, Oid indexId, AttrNumber oidcolumn, Oid oid)
+{
+	ScanKeyData key;
+	SysScanDesc scan;
+	bool		used;
+
+	ScanKeyInit(&key, oidcolumn, BTEqualStrategyNumber, F_OIDEQ,
+				ObjectIdGetDatum(oid));
+	scan = systable_beginscan(relation, indexId, true, SnapshotAny, 1, &key);
+	used = HeapTupleIsValid(systable_getnext(scan));
+	systable_endscan(scan);
+	return used;
+}
+
+/*
  * An OID for a catalog row a segment makes for itself: a session's temporary
  * namespace, which each backend makes when it first needs one, or anything
  * made on the segment outside a dispatched statement.
@@ -237,9 +262,6 @@ local_oid(Relation relation, Oid indexId, AttrNumber oidcolumn)
 	for (;;)
 	{
 		Oid			oid = pg_atomic_fetch_sub_u32(local_oid_next, 1);
-		ScanKeyData key;
-		SysScanDesc scan;
-		bool		used;
 
 		/* two billion of them made on this node since it started: again */
 		if (oid < LOCAL_OID_BOTTOM)
@@ -247,18 +269,38 @@ local_oid(Relation relation, Oid indexId, AttrNumber oidcolumn)
 			pg_atomic_write_u32(local_oid_next, LOCAL_OID_TOP);
 			continue;
 		}
-
-		ScanKeyInit(&key, oidcolumn, BTEqualStrategyNumber, F_OIDEQ,
-					ObjectIdGetDatum(oid));
-		scan = systable_beginscan(relation, indexId, true, SnapshotAny, 1,
-								  &key);
-		used = HeapTupleIsValid(systable_getnext(scan));
-		systable_endscan(scan);
-		if (!used)
+		if (!oid_taken(relation, indexId, oidcolumn, oid))
 			return oid;
 
 		CHECK_FOR_INTERRUPTS();
 	}
+}
+
+/*
+ * Cloudberry's fault bump_oid, in its GetNewObjectId() (varsup.c): skipped,
+ * it moves the OID the counter gives past a signed int's, the counter left
+ * where it is, so that a test makes an object of an OID that large without
+ * taking two billion first -- once, as a fault set to skip fires once.  Here
+ * where the coordinator gives a catalog row its OID, which the segments are
+ * handed; one node, which installs no hook of this file's, has none.  One
+ * the catalog has already is passed over, as GetNewOidWithIndex() passes one
+ * over.  InvalidOid where the fault does not fire.
+ */
+static Oid
+bumped_oid(Relation relation, Oid indexId, AttrNumber oidcolumn)
+{
+	Oid			oid;
+
+	if (GP_FAULT("bump_oid") != GP_FAULT_SKIP)
+		return InvalidOid;
+	do
+	{
+		CHECK_FOR_INTERRUPTS();
+		oid = GetNewObjectId();
+		if (oid <= PG_INT32_MAX)
+			oid = PG_INT32_MAX + oid % (PG_UINT32_MAX - PG_INT32_MAX) + 1;
+	} while (oid_taken(relation, indexId, oidcolumn, oid));
+	return oid;
 }
 
 /*
@@ -293,7 +335,9 @@ new_oid(Relation relation, Oid indexId, AttrNumber oidcolumn)
 		new_oid_hook = prev_new_oid_hook;
 		PG_TRY();
 		{
-			oid = GetNewOidWithIndex(relation, indexId, oidcolumn);
+			oid = bumped_oid(relation, indexId, oidcolumn);
+			if (!OidIsValid(oid))
+				oid = GetNewOidWithIndex(relation, indexId, oidcolumn);
 		}
 		PG_FINALLY();
 		{
@@ -359,12 +403,15 @@ new_oid(Relation relation, Oid indexId, AttrNumber oidcolumn)
 	}
 
 	/*
-	 * A row a segment makes for itself.  pg_upgrade gives the OIDs it cares
+	 * A row a segment makes for itself, or the coordinator outside a
+	 * statement the segments are sent.  pg_upgrade gives the OIDs it cares
 	 * about itself, and leaves the rest to the counter.
 	 */
-	if (GpClusterContentId() >= 0 && !IsBinaryUpgrade)
+	if (IsBinaryUpgrade)
+		return InvalidOid;
+	if (GpClusterContentId() >= 0)
 		return local_oid(relation, indexId, oidcolumn);
-	return InvalidOid;
+	return bumped_oid(relation, indexId, oidcolumn);
 }
 
 /*
@@ -402,8 +449,6 @@ drop_temp_namespaces(void)
  *     MATERIALIZED VIEW, which carry rows: made on every node WITH NO DATA,
  *     as gp_sql makes each on a cluster, and filled by an INSERT, which puts
  *     each row where it belongs (gp_refresh.c for a materialized view);
- *   - moving a database to another tablespace, whose other connections the
- *     segments cannot see to refuse it;
  *   - publications, subscriptions and event triggers, which are about this
  *     node's own WAL and this node's own DDL -- and dropping, renaming,
  *     giving away or commenting on one.
@@ -450,7 +495,16 @@ dispatch_class(Node *parsetree)
 {
 	switch (nodeTag(parsetree))
 	{
+		/*
+		 * CREATE DATABASE, in the coordinator's transaction on every node,
+		 * prepared on each segment, as Cloudberry dispatches it
+		 * (DF_NEED_TWO_PHASE): every node makes the database or none, its
+		 * directories following the transaction (gp_dirxact.c).  DROP
+		 * DATABASE removes the directories as it runs, as PostgreSQL's
+		 * dropdb() does, and runs on each node in a transaction of its own.
+		 */
 		case T_CreatedbStmt:
+			return GP_DISPATCH_IN_XACT;
 		case T_DropdbStmt:
 			return GP_DISPATCH_OWN_XACT;
 
@@ -461,6 +515,16 @@ dispatch_class(Node *parsetree)
 		 */
 		case T_AlterSystemStmt:
 			return GP_DISPATCH_OWN_XACT;
+
+		/*
+		 * DISCARD TEMP drops the session's temporary tables, which are every
+		 * node's, in its transaction: Cloudberry dispatches it in two phases,
+		 * so that a ROLLBACK keeps them (discard.c).  DISCARD ALL, PLANS and
+		 * SEQUENCES are this node's.
+		 */
+		case T_DiscardStmt:
+			return ((DiscardStmt *) parsetree)->target == DISCARD_TEMP
+				? GP_DISPATCH_IN_XACT : GP_DISPATCH_LOCAL;
 
 		case T_VacuumStmt:
 			if (((VacuumStmt *) parsetree)->is_vacuumcmd)
@@ -547,25 +611,22 @@ dispatch_class(Node *parsetree)
 				return GP_DISPATCH_IN_XACT;
 			}
 
+		/*
+		 * A database's move too, each node moving its own, the old directory
+		 * going as the transaction commits (GpMoveDatabase(), gp_dbcopy.c).
+		 */
 		case T_AlterDatabaseStmt:
-			{
-				ListCell   *lc;
-
-				foreach(lc, ((AlterDatabaseStmt *) parsetree)->options)
-				{
-					if (strcmp(((DefElem *) lfirst(lc))->defname, "tablespace") == 0)
-						return GP_DISPATCH_LOCAL;
-				}
-				return GP_DISPATCH_IN_XACT;
-			}
+			return GP_DISPATCH_IN_XACT;
 
 		/*
 		 * A tablespace is a directory on each machine, and each node's is the
-		 * directory of its dbid under it (node_tablespace_location()).
+		 * directory of its dbid under it (node_tablespace_location()): made
+		 * and dropped in the coordinator's transaction on every node, as
+		 * Cloudberry's are, the directories following the transaction.
 		 */
 		case T_CreateTableSpaceStmt:
 		case T_DropTableSpaceStmt:
-			return GP_DISPATCH_OWN_XACT;
+			return GP_DISPATCH_IN_XACT;
 		case T_AlterTableSpaceOptionsStmt:
 		case T_AlterTableMoveAllStmt:
 			return GP_DISPATCH_IN_XACT;
@@ -977,6 +1038,10 @@ node_tablespace_location(const char *location, Oid tablespaceoid)
 		ereport(ERROR,
 				(errcode_for_file_access(),
 				 errmsg("could not create directory \"%s\": %m", dir)));
+
+	/* the statement's, which go if its transaction aborts (gp_dirxact.c) */
+	if (!RecoveryInProgress())
+		GpDirxactTablespace(tablespaceoid, false);
 	return dir;
 }
 
@@ -1039,11 +1104,91 @@ run_next(PlannedStmt *pstmt, bool readOnlyTree, void *arg)
 }
 
 /*
+ * CREATE TABLESPACE ... WITH (contentN = '<dir>'): a location of one
+ * segment's own, as Cloudberry's CreateTableSpace() takes it (tablespace.c).
+ * The coordinator refuses a content no segment has, in Cloudberry's words;
+ * a segment takes its own content's location, where the statement names
+ * one, in place of the statement's, so that its WAL record carries it and
+ * its mirror makes its directory there too; and every node takes the
+ * options out, which PostgreSQL's tablespace options do not know.  The
+ * statement to run here, which is the one given where it names no content.
+ * The coordinator sends the segments the one it was given.
+ */
+static CreateTableSpaceStmt *
+tablespace_own_location(CreateTableSpaceStmt *stmt)
+{
+	CreateTableSpaceStmt *own = NULL;
+	List	   *options = NIL;
+	ListCell   *lc;
+
+	foreach(lc, stmt->options)
+	{
+		DefElem    *opt = lfirst_node(DefElem, lc);
+		char	   *end = NULL;
+		long		content = -1;
+
+		if (strncmp(opt->defname, "content", 7) == 0 &&
+			isdigit((unsigned char) opt->defname[7]))
+			content = strtol(opt->defname + 7, &end, 10);
+		if (end == NULL || *end != '\0')
+		{
+			options = lappend(options, opt);
+			continue;
+		}
+
+		if (own == NULL)
+			own = copyObject(stmt);
+		if (GpClusterBackendRole() == GP_ROLE_DISPATCH &&
+			(content > INT_MAX || GpClusterSegmentByContent((int) content) == NULL))
+			ereport(ERROR,
+					(errcode(ERRCODE_SYNTAX_ERROR),
+					 errmsg("segment content ID %ld does not exist", content),
+					 errhint("Segment content IDs can be found in gp_segment_configuration table.")));
+		if (content == GpClusterContentId())
+			own->location = defGetString(opt);
+	}
+	if (own == NULL)
+		return stmt;
+	own->options = options;
+	return own;
+}
+
+/*
+ * ALTER DATABASE ... SET TABLESPACE, and nothing else: the tablespace it
+ * names, or NULL, where it is another ALTER DATABASE, or one PostgreSQL
+ * refuses for having other options too, in its words.
+ */
+static const char *
+database_move(Node *parsetree)
+{
+	AlterDatabaseStmt *stmt;
+	DefElem    *opt;
+
+	if (!IsA(parsetree, AlterDatabaseStmt))
+		return NULL;
+	stmt = (AlterDatabaseStmt *) parsetree;
+	if (list_length(stmt->options) != 1)
+		return NULL;
+	opt = linitial_node(DefElem, stmt->options);
+	return strcmp(opt->defname, "tablespace") == 0 ? defGetString(opt) : NULL;
+}
+
+/*
  * Run a tablespace's statement here: CREATE TABLESPACE in this node's
  * directory, and, on a segment, an in-place one as the coordinator allowed
  * it.  And a statement that sets a wrapper's, a server's or a foreign
  * table's options, with mpp_execute and num_segments kept from its validator
  * (gp_foreign.c): after the tree to send the segments is made, on each node.
+ *
+ * And the statements that run in the coordinator's distributed transaction
+ * on every node where PostgreSQL runs them outside a transaction block:
+ * CREATE DATABASE and CREATE TABLESPACE, which a segment runs itself inside
+ * its part of the transaction, as Cloudberry's QE runs them there (its
+ * utility.c refuses them inside a transaction block on the QD alone), and
+ * DROP TABLESPACE and a database's move, which every node runs as this
+ * module does them, their directories following the transaction
+ * (gp_dirxact.c, gp_dbcopy.c).  The coordinator refuses the four inside a
+ * user's transaction block, as PostgreSQL does.
  */
 static void
 run_tablespace_statement(PlannedStmt *pstmt, const char *queryString,
@@ -1053,12 +1198,44 @@ run_tablespace_statement(PlannedStmt *pstmt, const char *queryString,
 						 bool dispatched)
 {
 	Node	   *parsetree = pstmt->utilityStmt;
+	bool		in_part = dispatched && IsTransactionBlock();
+	const char *move_to;
 
-	if (IsA(parsetree, CreateTableSpaceStmt))
+	if (IsA(parsetree, CreatedbStmt) && in_part)
+	{
+		ParseState *pstate = make_parsestate(NULL);
+
+		pstate->p_sourcetext = queryString;
+		(void) createdb(pstate, (CreatedbStmt *) parsetree);
+		GpDbcopyCreatedb((CreatedbStmt *) parsetree);
+	}
+	else if (IsA(parsetree, DropTableSpaceStmt))
+	{
+		if (!in_part)
+			PreventInTransactionBlock(context == PROCESS_UTILITY_TOPLEVEL,
+									  "DROP TABLESPACE");
+		GpDropTableSpace((DropTableSpaceStmt *) parsetree);
+	}
+	else if ((move_to = database_move(parsetree)) != NULL)
+	{
+		if (!in_part)
+			PreventInTransactionBlock(context == PROCESS_UTILITY_TOPLEVEL,
+									  "ALTER DATABASE SET TABLESPACE");
+		GpMoveDatabase(((AlterDatabaseStmt *) parsetree)->dbname, move_to);
+	}
+	else if (IsA(parsetree, CreateTableSpaceStmt))
 	{
 		CreateTableSpaceStmt *stmt = (CreateTableSpaceStmt *) parsetree;
+		CreateTableSpaceStmt *own = tablespace_own_location(stmt);
 		int			nestlevel = -1;
 
+		if (own != stmt)
+		{
+			pstmt = copyObject(pstmt);
+			pstmt->utilityStmt = (Node *) own;
+			readOnlyTree = false;
+			stmt = own;
+		}
 		if (dispatched && stmt->location != NULL && stmt->location[0] == '\0')
 		{
 			nestlevel = NewGUCNestLevel();
@@ -1066,8 +1243,17 @@ run_tablespace_statement(PlannedStmt *pstmt, const char *queryString,
 									 PGC_SUSET, PGC_S_SESSION,
 									 GUC_ACTION_SAVE, true, 0, false);
 		}
-		next_ProcessUtility(pstmt, queryString, readOnlyTree, context, params,
-							queryEnv, dest, qc);
+		if (in_part)
+		{
+			Oid			spc = CreateTableSpace(stmt);
+
+			/* an in-place one's directory, which the location hook is not asked of */
+			if (stmt->location != NULL && stmt->location[0] == '\0')
+				GpDirxactTablespace(spc, false);
+		}
+		else
+			next_ProcessUtility(pstmt, queryString, readOnlyTree, context,
+								params, queryEnv, dest, qc);
 		if (nestlevel >= 0)
 			AtEOXact_GUC(true, nestlevel);
 	}
@@ -1490,6 +1676,22 @@ gp_ddl_ProcessUtility(PlannedStmt *pstmt, const char *queryString,
 		return;
 	}
 
+	/*
+	 * DISCARD ALL, which resets this session here and nothing of it on the
+	 * segments -- their temporary tables stay -- says so, as Cloudberry's
+	 * does (discard.c): after its refusal inside a transaction block, and
+	 * before what it resets, client_min_messages among it.
+	 */
+	if (IsA(parsetree, DiscardStmt) &&
+		((DiscardStmt *) parsetree)->target == DISCARD_ALL)
+	{
+		PreventInTransactionBlock(context == PROCESS_UTILITY_TOPLEVEL, "DISCARD ALL");
+		ereport(NOTICE,
+				(errcode(MAKE_SQLSTATE('0', 'A', 'M', '0', '1')),
+				 errmsg("command without clusterwide effect"),
+				 errhint("Consider alternatives as DEALLOCATE ALL, or DISCARD TEMP if a clusterwide effect is desired.")));
+	}
+
 	class = dispatch_class(parsetree);
 	if (class == GP_DISPATCH_LOCAL)
 	{
@@ -1499,6 +1701,19 @@ gp_ddl_ProcessUtility(PlannedStmt *pstmt, const char *queryString,
 		/* ANALYZE: the all-visible pages are the segments' (gp_analyze.c) */
 		if (IsA(parsetree, VacuumStmt))
 			GpAnalyzeSegmentCounts((VacuumStmt *) parsetree);
+
+		/*
+		 * A SET of the client's, outside a transaction block: what it set is
+		 * told the segments now, if it is theirs too
+		 * (GpDispatchSyncSettingsNow()).  SET LOCAL, a SET in a block, in a
+		 * function or DO, RESET, SET ... FROM CURRENT and the rest are told
+		 * them with the next statement sent there.
+		 */
+		if (IsA(parsetree, VariableSetStmt) &&
+			((VariableSetStmt *) parsetree)->kind == VAR_SET_VALUE &&
+			!((VariableSetStmt *) parsetree)->is_local &&
+			context == PROCESS_UTILITY_TOPLEVEL && !IsTransactionBlock())
+			GpDispatchSyncSettingsNow(((VariableSetStmt *) parsetree)->name);
 		return;
 	}
 

@@ -78,10 +78,12 @@
  * fragment's plan has run out, every receiver it has is ended, and all of
  * their senders waited for, before the process idles -- each told STOP, again
  * and again, until it closes, and one not heard from yet waited for, as every
- * sender sends at least its end.  A CLOSE lost, the sender is done with once
- * it has been silent for a few times the longest a packet waits to be sent
- * again.  Which of the two transports a Motion uses the coordinator decides
- * (gp.interconnect_type), handing the senders each receiver's address for it.
+ * sender sends at least its end; so are a receiver's the plan stopped in its
+ * middle, as any run of it ends, a FETCH's too (run_end).  A CLOSE lost, the
+ * sender is done with once it has been silent for a few times the longest a
+ * packet waits to be sent again.  Which of the two transports a Motion uses
+ * the coordinator decides (gp.interconnect_type), handing the senders each
+ * receiver's address for it.
  *
  * The listener is where the node's own clients reach it: a socket file
  * beside the node's, when the cluster names nodes by the directory of their
@@ -93,7 +95,15 @@
  *
  * A connection can arrive before the fragment that receives it has started:
  * the coordinator starts every slice at once.  It waits among the unclaimed
- * ones until its receiver asks for it, or its statement ends here.
+ * ones until its receiver asks for it, or its statement ends here.  A TCP
+ * receiver that needs no more rows takes every connection of its senders
+ * before it closes them: one still in the listener's queue -- of a Motion
+ * the plan never read, as a nested loop over an empty table never reads its
+ * inner side -- would fill its socket and wait there for ever, this process
+ * taking no connection once its fragment is done.  One not made yet is
+ * waited for, as every sender connects to all its receivers as its slice
+ * begins, and as Cloudberry's receiver has every connection before its plan
+ * runs (SetupTCPInterconnect()).
  *
  * The two are transports of a table, as Cloudberry's interconnects are
  * MotionIPCLayers of its (cdbmotion.c): a Motion sends and receives through
@@ -1492,6 +1502,22 @@ ic_recv_end(GpIcReceiver *receiver)
 
 	if (!r->udp)
 	{
+		/*
+		 * Every sender's connection taken, and closed: its next send fails,
+		 * and it sends here no more (out_flush()), as Cloudberry's sender stops
+		 * at its receiver's stop message (SendStopMessageTCP()).  One in the
+		 * listener's queue is taken now, and one not made yet waited for (see
+		 * the file's header); another statement's packets are answered
+		 * meanwhile.
+		 */
+		for (;;)
+		{
+			ic_accept();
+			if (list_length(r->conns) >= r->nsenders)
+				break;
+			(void) udp_poll();
+			recv_wait_one(r, NULL);
+		}
 		receivers = list_delete_ptr(receivers, r);
 		receiver_free(r);
 		return;
@@ -2292,6 +2318,33 @@ tcp_stmt_end(GpIcStream *stream, bool error)
 		ic_forget(stream->token);
 }
 
+/*
+ * udpifc: a run of the plan is over, and this process may idle before the
+ * next, deaf, as a cursor's does between the coordinator's FETCHes.  A
+ * receiver its plan stopped in the middle (gp_motion.c) may have senders it
+ * has not heard from, or whose STOP was lost: one that comes while this
+ * process idles would wait on it for ever, and every receiver that waits for
+ * its rows with it.  So they are waited for now, each told STOP until it
+ * closes, as the statement's end waits for them (udp_finish()).  A tcp
+ * receiver has every connection closed at its end, and needs nothing here.
+ */
+static void
+udpifc_run_end(GpIcStream *stream)
+{
+	List	   *done = NIL;
+
+	foreach_ptr(IcReceiver, r, receivers)
+		if (r->udp && r->done &&
+			memcmp(r->token, stream->token, GP_IC_TOKEN_LEN) == 0)
+			done = lappend(done, r);
+	if (done == NIL)
+		return;
+	udp_wait(done);
+	foreach_ptr(IcReceiver, r, done)
+		udp_recv_free(r);
+	list_free(done);
+}
+
 static const GpIcTransport tcp_transport = {
 	.name = "tcp",
 	.address = tcp_address,
@@ -2318,6 +2371,7 @@ static const GpIcTransport udpifc_transport = {
 	.recv_from = ic_recv_from,
 	.recv_end = ic_recv_end,
 	.stmt_end = tcp_stmt_end,
+	.run_end = udpifc_run_end,
 };
 
 /* ------------------------------------------------------------------------- */
@@ -2417,6 +2471,13 @@ GpIcForget(GpIcStream *stream)
 		stream_free(stream);
 	}
 	PG_END_TRY();
+}
+
+void
+GpIcRunEnd(GpIcStream *stream)
+{
+	if (stream->transport->run_end != NULL)
+		stream->transport->run_end(stream);
 }
 
 GpIcSlice *
@@ -2590,6 +2651,18 @@ ic_xact_callback(XactEvent event, void *arg)
 
 	list_free_deep(udp_ended);
 	udp_ended = NIL;
+}
+
+/*
+ * How many of tcp's and udpifc's senders and receivers this backend has
+ * open: what Cloudberry's GetActiveMotionConns() counts of udpifc's (its
+ * regress.so's numActiveMotionConns()), 0 once a statement's Motions have
+ * ended, as an error ends them too.
+ */
+int
+GpIcActiveConnections(void)
+{
+	return list_length(senders) + list_length(receivers);
 }
 
 void

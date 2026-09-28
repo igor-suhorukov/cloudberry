@@ -33,7 +33,11 @@
  * label, which also holds the schedule -- so the label is both the flag and
  * the value Cloudberry keeps in pg_task.  The task is an ordinary gp_task
  * job, named as Cloudberry names it, so a user can see it, change its
- * schedule and read its history with the functions that module already has.
+ * schedule and read its history with the functions that module already has;
+ * its name is reserved, as Cloudberry reserves it, and gp_matview's calls
+ * alone make and drop one (gp_task--1.0.sql).  It runs Cloudberry's REFRESH
+ * DYNAMIC TABLE where gp_sql's O26 is there to read it.  Cloudberry's
+ * pg_dynamic_tables and pg_get_dynamic_table_schedule() read them.
  *
  * Cloudberry makes the task an internal dependency of the view, so that
  * dropping one drops the other.  A job here is a row in another extension's
@@ -63,6 +67,7 @@
 #include "utils/lsyscache.h"
 #include "utils/syscache.h"
 
+#include "cb_module.h"
 #include "gp_core_api.h"
 #include "gp_label.h"
 #include "gp_matview.h"
@@ -72,11 +77,29 @@
 #define GP_DYN_DEFAULT_SCHEDULE	"*/5 * * * *"
 
 PG_FUNCTION_INFO_V1(gp_dynamic_schedule);
+PG_FUNCTION_INFO_V1(gp_get_dynamic_table_schedule);
 
 static char *
 dyn_task_name(Oid matviewOid)
 {
 	return psprintf(GP_DYN_TASK_PREFIX "%u", matviewOid);
+}
+
+/*
+ * What the view's job runs: Cloudberry's REFRESH DYNAMIC TABLE where gp_sql
+ * is preloaded, and so its O26 in the scheduler's worker too, which reads it
+ * as REFRESH MATERIALIZED VIEW; that one where it is not, as this module's
+ * own spelling of a dynamic table needs no gp_sql.
+ */
+static char *
+refresh_command(Oid matviewOid)
+{
+	char	   *viewname = quote_qualified_identifier(get_namespace_name(get_rel_namespace(matviewOid)),
+													  get_rel_name(matviewOid));
+
+	return psprintf(*find_rendezvous_variable(CB_SQL_RENDEZVOUS) != NULL
+					? "REFRESH DYNAMIC TABLE %s" : "REFRESH MATERIALIZED VIEW %s",
+					viewname);
 }
 
 static ObjectAddress
@@ -184,7 +207,6 @@ GpDynAfterCreate(Oid matviewOid, const char *schedule)
 {
 	ObjectAddress addr = matview_address(matviewOid);
 	StringInfoData buf;
-	char	   *viewname;
 
 	check_the_scheduler_is_loaded();
 
@@ -211,23 +233,21 @@ GpDynAfterCreate(Oid matviewOid, const char *schedule)
 	GpLabelSet(&addr, GP_LABEL_dynamic_schedule, schedule);
 	CommandCounterIncrement();
 
-	viewname = quote_qualified_identifier(get_namespace_name(get_rel_namespace(matviewOid)),
-										  get_rel_name(matviewOid));
-
 	if (SPI_connect() != SPI_OK_CONNECT)
 		elog(ERROR, "SPI_connect failed");
 
 	/*
 	 * gp_task.create_task rather than an INSERT: it is what reads the
 	 * schedule, so a schedule nothing can run is refused here rather than
-	 * logged every minute afterwards.
+	 * logged every minute afterwards.  The system's call, which may make a
+	 * job of the name it reserves.
 	 */
 	initStringInfo(&buf);
 	appendStringInfo(&buf,
-					 "CALL gp_task.create_task(%s, %s, %s)",
+					 "CALL gp_task.create_task(%s, %s, %s, system_task => true)",
 					 quote_literal_cstr(dyn_task_name(matviewOid)),
 					 quote_literal_cstr(schedule),
-					 quote_literal_cstr(psprintf("REFRESH MATERIALIZED VIEW %s", viewname)));
+					 quote_literal_cstr(refresh_command(matviewOid)));
 	run(buf.data, SPI_OK_UTILITY);
 	pfree(buf.data);
 
@@ -284,11 +304,9 @@ GpDynRestored(Oid matviewOid)
 	resetStringInfo(&buf);
 	if (current == NULL)
 		appendStringInfo(&buf,
-						 "CALL gp_task.create_task(%s, %s, %s, username => %s)",
+						 "CALL gp_task.create_task(%s, %s, %s, username => %s, system_task => true)",
 						 quote_literal_cstr(name), quote_literal_cstr(schedule),
-						 quote_literal_cstr(psprintf("REFRESH MATERIALIZED VIEW %s",
-													 quote_qualified_identifier(get_namespace_name(get_rel_namespace(matviewOid)),
-																				get_rel_name(matviewOid)))),
+						 quote_literal_cstr(refresh_command(matviewOid)),
 						 quote_literal_cstr(GetUserNameFromId(view_owner(matviewOid), false)));
 	else if (strcmp(current, schedule) != 0)
 		appendStringInfo(&buf, "CALL gp_task.alter_task(%s, schedule => %s)",
@@ -330,7 +348,7 @@ GpDynDropped(Oid matviewOid)
 
 	initStringInfo(&buf);
 	appendStringInfo(&buf,
-					 "CALL gp_task.drop_task(ARRAY[%s], missing_ok => true)",
+					 "CALL gp_task.drop_task(ARRAY[%s], missing_ok => true, system_task => true)",
 					 quote_literal_cstr(dyn_task_name(matviewOid)));
 	run(buf.data, SPI_OK_UTILITY);
 	pfree(buf.data);
@@ -358,5 +376,58 @@ gp_dynamic_schedule(PG_FUNCTION_ARGS)
 	if (schedule == NULL)
 		PG_RETURN_NULL();
 
+	PG_RETURN_TEXT_P(cstring_to_text(schedule));
+}
+
+/*
+ * pg_catalog.pg_get_dynamic_table_schedule(oid) -> text
+ *
+ * Cloudberry's (ruleutils.c): the schedule of the job that refreshes a
+ * dynamic table, as its row of pg_task has it, which ALTER TASK may have
+ * changed since the view was made -- the current user's job of the name --
+ * with a WARNING and '' for a relation that is no dynamic table, or one whose
+ * job is not there.  Where gp_task is not in this database, the schedule the
+ * view's label keeps.
+ */
+Datum
+gp_get_dynamic_table_schedule(PG_FUNCTION_ARGS)
+{
+	Oid			relid = PG_GETARG_OID(0);
+	ObjectAddress addr = matview_address(relid);
+	MemoryContext caller = CurrentMemoryContext;
+	char	   *name = dyn_task_name(relid);
+	char	   *schedule = NULL;
+
+	if (get_rel_relkind(relid) == RELKIND_MATVIEW)
+		schedule = GpLabelGet(&addr, GP_LABEL_dynamic_schedule);
+	if (schedule == NULL)
+	{
+		ereport(WARNING,
+				(errcode(ERRCODE_UNDEFINED_OBJECT),
+				 errmsg("relation of oid \"%u\" is not dynamic table", relid)));
+		PG_RETURN_TEXT_P(cstring_to_text(""));
+	}
+	if (!task_extension_present())
+		PG_RETURN_TEXT_P(cstring_to_text(schedule));
+
+	if (SPI_connect() != SPI_OK_CONNECT)
+		elog(ERROR, "SPI_connect failed");
+	run(psprintf("SELECT schedule FROM gp_task.job_rows()"
+				 " WHERE jobname = %s AND username = CURRENT_USER",
+				 quote_literal_cstr(name)), SPI_OK_SELECT);
+	schedule = NULL;
+	if (SPI_processed > 0)
+		schedule = MemoryContextStrdup(caller,
+									   SPI_getvalue(SPI_tuptable->vals[0],
+													SPI_tuptable->tupdesc, 1));
+	SPI_finish();
+
+	if (schedule == NULL)
+	{
+		ereport(WARNING,
+				(errcode(ERRCODE_UNDEFINED_OBJECT),
+				 errmsg("task \"%s\" does not exist", name)));
+		PG_RETURN_TEXT_P(cstring_to_text(""));
+	}
 	PG_RETURN_TEXT_P(cstring_to_text(schedule));
 }

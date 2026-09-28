@@ -53,6 +53,12 @@
  * singleton reader, an aggregate of the subquery a DELETE compares with --
  * whose senders stream every row to the one process that runs it.
  *
+ * A receiving slice whose plan stops reading a Motion -- a hash join whose
+ * hash table is empty never reads its outer side -- stops the Motion's
+ * senders then and there, as Cloudberry's executor squelches the subtree a
+ * node reads no more (ExecSquelchNode()); see "Stopping the senders in the
+ * middle of a plan" below.
+ *
  * Where a slice cannot stream -- the coordinator's own slice, a temporary
  * table, which only the session's own backend can read -- or with
  * gp.interconnect_type = relay, the Motion is carried out as it was first
@@ -324,6 +330,8 @@ typedef struct MotionState
 	Tuplestorestate *spool;		/* what came, for a rescan */
 	TupleTableSlot *spoolslot;
 	bool		replaying;
+	bool		squelched;		/* its senders stopped mid-plan, and never
+								 * read again (squelch_subtree()) */
 
 	/* On a segment, a sorted Gather into it: what came, sorted. */
 	Tuplesortstate *sort;
@@ -1846,6 +1854,255 @@ motion_end_streams(PlanState *planstate, void *context)
 	return planstate_tree_walker(planstate, motion_end_streams, context);
 }
 
+/* ------------------------------------------------------------------------- */
+/* Stopping the senders in the middle of a plan                              */
+/* ------------------------------------------------------------------------- */
+
+/*
+ * Cloudberry's executor squelches a subtree whose rows a node will read no
+ * more: a nested loop, a hash join, a merge join or a Limit that returns its
+ * last row stops the Motions below it (ExecSquelchNode(), execAmi.c), and
+ * each tells its senders so (ExecSquelchMotion(), nodeMotion.c).  Without
+ * that, a segment whose hash join finds its hash table empty never reads its
+ * outer side's Motion and goes on to the rest of its plan -- an Append's next
+ * branch -- while the Motion's senders wait on it, the other segments waiting
+ * for their rows with them, and the senders of the next branch on those: the
+ * statement never ends, whatever transport carries its rows.  PostgreSQL's
+ * nodes have no such call, and its executor shuts a plan's nodes down only
+ * after a run of it (ExecShutdownNode()).  So in a fragment whose slices
+ * stream, each node of those kinds above a Motion this process receives has
+ * its ExecProcNode wrapped (ExecSetExecProcNode()); when it returns no row,
+ * its subtree is squelched: the nodes below it shut down, as a run's end
+ * shuts them down -- so that a CTE's producer other slices read runs, as
+ * Cloudberry's squelched producer does (ExecSquelchShareInputScan()) -- and
+ * every Motion there that receives is ended (motion_end_stream()).
+ *
+ * Only where no node is run again: below a nested loop's inner side, a
+ * Memoize, a recursive union, or a Gather of PostgreSQL's workers, a node is
+ * run again, and the rows its Motions' senders would not send are rows a
+ * rescan reads (motion_rescan()); so is a subplan, which is not walked at all
+ * -- one subplan may also be called from outside the squelched subtree.
+ * Those end with the run, as they did before.
+ */
+
+typedef bool (*squelch_walker_fn) (PlanState *ps, bool again, void *context);
+
+/*
+ * Each child of a node, as planstate_tree_walker() visits them but for the
+ * subplans of its expressions, with whether it may be run again.
+ */
+static bool
+squelch_children(PlanState *ps, bool again, squelch_walker_fn walker,
+				 void *context)
+{
+	bool		found = false;
+
+	switch (nodeTag(ps))
+	{
+		case T_MemoizeState:
+		case T_RecursiveUnionState:
+		case T_GatherState:
+		case T_GatherMergeState:
+			again = true;
+			break;
+		default:
+			break;
+	}
+	if (outerPlanState(ps) != NULL)
+		found |= walker(outerPlanState(ps), again, context);
+	if (innerPlanState(ps) != NULL)
+		found |= walker(innerPlanState(ps), again || IsA(ps, NestLoopState),
+						context);
+	switch (nodeTag(ps))
+	{
+		case T_AppendState:
+			for (int i = 0; i < ((AppendState *) ps)->as_nplans; i++)
+				found |= walker(((AppendState *) ps)->appendplans[i], again,
+								context);
+			break;
+		case T_MergeAppendState:
+			for (int i = 0; i < ((MergeAppendState *) ps)->ms_nplans; i++)
+				found |= walker(((MergeAppendState *) ps)->mergeplans[i], again,
+								context);
+			break;
+		case T_SubqueryScanState:
+			found |= walker(((SubqueryScanState *) ps)->subplan, again, context);
+			break;
+		case T_CustomScanState:
+			foreach_ptr(PlanState, child, ((CustomScanState *) ps)->custom_ps)
+				found |= walker(child, again, context);
+			break;
+		default:
+			break;
+	}
+	return found;
+}
+
+/* Every Motion of a subtree that receives a streaming slice, ended. */
+static bool
+squelch_motions(PlanState *ps, bool again, void *context)
+{
+	if (ps == NULL)
+		return false;
+	if (IsA(ps, CustomScanState) &&
+		((CustomScanState *) ps)->methods == &motion_exec_methods &&
+		((MotionState *) ps)->streamed)
+	{
+		MotionState *state = (MotionState *) ps;
+
+		if (!state->squelched)
+		{
+			motion_end_stream(state);
+			state->squelched = true;
+			/* what came, kept for a rescan that never comes */
+			if (state->spool != NULL)
+			{
+				tuplestore_end(state->spool);
+				ExecDropSingleTupleTableSlot(state->spoolslot);
+				state->spool = NULL;
+			}
+		}
+		return false;
+	}
+	return squelch_children(ps, again, squelch_motions, context);
+}
+
+/* A child's subtree shut down, as a run's end shuts a plan down. */
+static bool
+squelch_shutdown(PlanState *ps, bool again, void *context)
+{
+	if (ps != NULL)
+		ExecShutdownNode(ps);
+	return false;
+}
+
+/*
+ * A node returned its last row: the subtree it reads no more, squelched --
+ * its children's, the node itself being in the middle of its own run, under
+ * EXPLAIN ANALYZE its instrumentation begun (ExecProcNodeInstr()), which a
+ * shutdown of it would begin again; the run's end shuts it down.
+ */
+static void
+squelch_subtree(PlanState *ps)
+{
+	(void) squelch_children(ps, false, squelch_shutdown, NULL);
+	(void) squelch_motions(ps, false, NULL);
+}
+
+/*
+ * The wrappers: one for each function a squelching node's ExecProcNode was
+ * -- a node function of PostgreSQL's, or another module's wrapper of one --
+ * which each calls, squelching the node's subtree as it returns no row.  A
+ * process meets few such functions; a node whose function finds no wrapper
+ * left stops its Motions' senders at its fragment's end.
+ */
+#define SQUELCH_WRAPPERS	16
+
+static ExecProcNodeMtd squelch_real[SQUELCH_WRAPPERS];
+
+#define SQUELCH_WRAPPER(k) \
+static TupleTableSlot * \
+squelch_wrapper_##k(PlanState *ps) \
+{ \
+	TupleTableSlot *slot = squelch_real[k](ps); \
+\
+	if (TupIsNull(slot)) \
+		squelch_subtree(ps); \
+	return slot; \
+}
+
+SQUELCH_WRAPPER(0)
+SQUELCH_WRAPPER(1)
+SQUELCH_WRAPPER(2)
+SQUELCH_WRAPPER(3)
+SQUELCH_WRAPPER(4)
+SQUELCH_WRAPPER(5)
+SQUELCH_WRAPPER(6)
+SQUELCH_WRAPPER(7)
+SQUELCH_WRAPPER(8)
+SQUELCH_WRAPPER(9)
+SQUELCH_WRAPPER(10)
+SQUELCH_WRAPPER(11)
+SQUELCH_WRAPPER(12)
+SQUELCH_WRAPPER(13)
+SQUELCH_WRAPPER(14)
+SQUELCH_WRAPPER(15)
+
+static const ExecProcNodeMtd squelch_wrappers[SQUELCH_WRAPPERS] = {
+	squelch_wrapper_0, squelch_wrapper_1, squelch_wrapper_2, squelch_wrapper_3,
+	squelch_wrapper_4, squelch_wrapper_5, squelch_wrapper_6, squelch_wrapper_7,
+	squelch_wrapper_8, squelch_wrapper_9, squelch_wrapper_10, squelch_wrapper_11,
+	squelch_wrapper_12, squelch_wrapper_13, squelch_wrapper_14, squelch_wrapper_15
+};
+
+static void
+squelch_wrap(PlanState *ps)
+{
+	for (int k = 0; k < SQUELCH_WRAPPERS; k++)
+	{
+		if (squelch_real[k] == NULL)
+			squelch_real[k] = ps->ExecProcNodeReal;
+		if (squelch_real[k] == ps->ExecProcNodeReal)
+		{
+			ExecSetExecProcNode(ps, squelch_wrappers[k]);
+			return;
+		}
+	}
+	elog(DEBUG1, "a plan node of type %d stops its Motions' senders at its fragment's end: no wrapper is left",
+		 (int) nodeTag(ps));
+}
+
+/*
+ * A node that stops reading as it returns its last row, of the kinds
+ * Cloudberry's executor squelches below there -- and a Result whose constant
+ * condition is false, which reads nothing, and a WindowAgg that stops where
+ * its run condition fails.
+ */
+static bool
+squelch_point(PlanState *ps)
+{
+	switch (nodeTag(ps))
+	{
+		case T_NestLoopState:
+		case T_HashJoinState:
+		case T_MergeJoinState:
+		case T_LimitState:
+			return true;
+		case T_ResultState:
+			return ((ResultState *) ps)->resconstantqual != NULL;
+		case T_WindowAggState:
+			return ((WindowAggState *) ps)->runcondition != NULL;
+		default:
+			return false;
+	}
+}
+
+/*
+ * Does a subtree receive a slice that streams to this process?  And those of
+ * its nodes that squelch below them, where they are not run again, wrapped.
+ */
+static bool
+squelch_arm(PlanState *ps, bool again, void *context)
+{
+	bool		streams;
+
+	if (ps == NULL)
+		return false;
+	check_stack_depth();
+
+	/* a Motion that receives has no plan below it here */
+	if (IsA(ps, CustomScanState) &&
+		((CustomScanState *) ps)->methods == &motion_exec_methods &&
+		!((MotionState *) ps)->sending)
+		return ((MotionState *) ps)->streamed &&
+			((MotionState *) ps)->stream_here;
+
+	streams = squelch_children(ps, again, squelch_arm, context);
+	if (streams && !again && squelch_point(ps))
+		squelch_wrap(ps);
+	return streams;
+}
+
 /*
  * A fragment the coordinator initialised only to describe it, under EXPLAIN
  * ANALYZE.  PostgreSQL 19's index scans allocate the counter of their index
@@ -2219,6 +2476,7 @@ fragment_sql_ex(EState *estate, Plan *fragment, CustomScan *motion,
 				bool reader)
 {
 	List	   *params;
+	char	   *sql;
 
 	PlannedStmt *whole = estate->es_plannedstmt;
 	PlannedStmt *frag = makeNode(PlannedStmt);
@@ -2337,9 +2595,11 @@ fragment_sql_ex(EState *estate, Plan *fragment, CustomScan *motion,
 		frag->permInfos = NIL;
 	}
 
-	return psprintf("SELECT gp_internal.exec_fragment(%s, %s)",
-					quote_literal_cstr(nodeToString(frag)),
-					quote_literal_cstr(key ? key : ""));
+	sql = psprintf("SELECT gp_internal.exec_fragment(%s, %s)",
+				   quote_literal_cstr(nodeToString(frag)),
+				   quote_literal_cstr(key ? key : ""));
+	GpDispatchCheckPlanSize(sql);
+	return sql;
 }
 
 
@@ -3145,6 +3405,8 @@ stream_start(MotionState *state, GpStream *stream,
 											   state->key,
 											   list_make1(streammark), true);
 
+		/* Cloudberry's faults before and after a slice is sent (gp_dispatch.c) */
+		(void) GP_FAULT("before_one_slice_dispatched");
 		for (int i = 0; i < ss->ncontents; i++)
 		{
 			int			seg = ss->contents[i];
@@ -3158,6 +3420,7 @@ stream_start(MotionState *state, GpStream *stream,
 						   fragment, GpLogStatementComment());
 			GpStreamStartReader(stream, ss->readers[i], sql);
 		}
+		(void) GP_FAULT("after_one_slice_dispatched");
 	}
 
 	return list_make2(streammark,
@@ -3713,6 +3976,10 @@ static void
 motion_rescan(CustomScanState *node)
 {
 	MotionState *state = (MotionState *) node;
+
+	/* only a node that is never run again squelches (squelch_arm()) */
+	if (state->squelched)
+		elog(ERROR, "a Motion whose senders were stopped is read again");
 
 	/*
 	 * What a streaming slice sent is read again from what was kept of it,
@@ -4629,6 +4896,17 @@ motion_executor_start(QueryDesc *queryDesc, int eflags)
 	if (params != NIL)
 		fragment_params_after_start(queryDesc, params);
 
+	/*
+	 * A fragment whose slices stream: the nodes that stop reading a subtree
+	 * as they return their last row stop its Motions' senders then -- in a
+	 * plan run once, forward, as a fragment's cursor is (squelch_arm()).
+	 */
+	if (GpClusterIsDispatched() && is_fragment(queryDesc->plannedstmt) &&
+		!(eflags & (EXEC_FLAG_EXPLAIN_ONLY | EXEC_FLAG_BACKWARD |
+					EXEC_FLAG_REWIND)) &&
+		fragment_mark(queryDesc->plannedstmt, GP_STREAM_MARK) != NULL)
+		(void) squelch_arm(queryDesc->planstate, false, NULL);
+
 	if (GpClusterBackendRole() == GP_ROLE_DISPATCH &&
 		!(eflags & EXEC_FLAG_EXPLAIN_ONLY))
 		GpGatherScanMarkRescans(queryDesc->planstate);
@@ -4750,6 +5028,19 @@ motion_executor_run(QueryDesc *queryDesc, ScanDirection direction,
 		if (stream != NULL)
 			GpIcForget(stream);
 	}
+	else if (fragment && GpClusterIsDispatched() &&
+			 fragment_mark(queryDesc->plannedstmt, GP_STREAM_MARK) != NULL)
+	{
+		/*
+		 * A run that did not run out, a FETCH's: the receivers its plan
+		 * stopped in the middle have their senders answered before this
+		 * process idles until the next (GpIcRunEnd()).
+		 */
+		GpIcStream *stream = GpIcStatementFind(stream_token(queryDesc->plannedstmt));
+
+		if (stream != NULL)
+			GpIcRunEnd(stream);
+	}
 
 	/* and the statement ends once they are all read (gp_endpoint.c) */
 	if (endpoint != NULL)
@@ -4765,10 +5056,12 @@ motion_executor_run(QueryDesc *queryDesc, ScanDirection direction,
  * The fragment is one segment's share of the statement, and a query that a
  * function in it plans here would read this segment's share of a table as
  * if it were the table.  Cloudberry refuses such a query on a QE unless it
- * reads only catalogs and replicated tables, and only reads
- * (querytree_safe_for_qe(), executor/functions.c); so does the port, with
- * Cloudberry's words.  A segment knows which tables are replicated from the
- * "gp" label, which the coordinator sends it whenever it changes one
+ * reads only catalogs and replicated tables, and only reads -- or writes
+ * them too, where allow_segment_DML is on (querytree_safe_for_qe(),
+ * executor/functions.c); so does the port, with Cloudberry's words, and
+ * gp.allow_segment_dml, which the segments are sent as the other settings
+ * they read are.  A segment knows which tables are replicated from the "gp"
+ * label, which the coordinator sends it whenever it changes one
  * (gp_dispatch.c).  A statement the coordinator dispatched itself is planned
  * before any fragment runs, and is not affected.
  */
@@ -4791,7 +5084,8 @@ fragment_safe_walker(Node *node, void *context)
 		Query	   *query = (Query *) node;
 		ListCell   *lc;
 
-		if (query->commandType != CMD_SELECT || query->resultRelation > 0)
+		if (!gp_allow_segment_dml &&
+			(query->commandType != CMD_SELECT || query->resultRelation > 0))
 			ereport(ERROR,
 					(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
 					 errmsg("function cannot execute on a QE slice because it issues a non-SELECT statement")));

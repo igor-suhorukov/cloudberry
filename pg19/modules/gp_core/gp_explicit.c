@@ -1215,6 +1215,10 @@ explicit_begin(CustomScanState *node, EState *estate, int eflags)
 		return;
 	}
 
+	/* each table it writes, as ExecInitModifyTable() checks them first */
+	foreach_int(rti, resultrels)
+		GpModifyCheckTarget(exec_rt_fetch(rti, estate)->relid);
+
 	outerPlanState(node) = ExecInitNode(subplan, estate, eflags);
 
 	state->operation = (CmdType) intVal(list_nth(priv, EXPLICIT_OPERATION));
