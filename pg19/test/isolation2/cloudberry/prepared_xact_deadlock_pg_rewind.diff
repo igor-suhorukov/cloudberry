@@ -1,0 +1,3 @@
+@@
+-ERROR:  Error on receive from seg0 : server closed the connection unexpectedly
++ERROR:  server closed the connection unexpectedly

@@ -232,7 +232,7 @@ pg   oidjoins
 pg   fast_default
 pg   stats
 run  tag                                                  cb1
-skip createdb  a cluster's mirrors, whose directories it lists, M4, and the fault injector
+run  createdb                                             cb1
 run  update_gp                                            cb1
 run  returning_gp                                         cb1
 run  cluster_gp                                           cb1

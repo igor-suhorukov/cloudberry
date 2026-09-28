@@ -422,8 +422,8 @@ if [ "$started" -eq 1 ]; then
 	###########################################################################
 	echo "7. databases, roles and temporary tables"
 	###########################################################################
-	# CREATE DATABASE cannot run in a transaction block, so each segment runs
-	# it in one of its own.
+	# CREATE DATABASE runs in the coordinator's transaction on every node, and
+	# each segment's part is prepared with it (13., below).
 	out=$(q 0 "CREATE DATABASE db2;")
 	[ -z "$out" ] && ok "CREATE DATABASE runs" || notok "CREATE DATABASE" "$out"
 	same_everywhere "and the database has one OID everywhere" \
@@ -4417,6 +4417,69 @@ SQL
 	[ "$out|$out2|$out3" = "true false|2|10" ] \
 		&& ok "bump_oid gives the next table an OID past a signed int's, on every node, once" \
 		|| notok "the fault bump_oid" "$out / $out2 / $out3"
+
+	# CREATE DATABASE and CREATE and DROP TABLESPACE are parts of the
+	# coordinator's transaction on the segments, as Cloudberry's two-phase DDL
+	# is (gp_ddl.c): each segment prepares its part with a file, under
+	# gp_dirxact/, of what its directories are to become as the part ends --
+	# the new database's to go if it rolls back -- and COMMIT or ROLLBACK
+	# PREPARED does what the file says (gp_dirxact.c).
+	partfiles() { cat "$(datadir 1)"/gp_dirxact/* "$(datadir 2)"/gp_dirxact/* 2>/dev/null; }
+	q 0 "SELECT gp_inject_fault('dtm_broadcast_commit_prepared', 'suspend', 1);" >/dev/null
+	q 0 "CREATE DATABASE dx1;" >/dev/null 2>&1 &
+	writer=$!
+	q 0 "SELECT gp_wait_until_triggered_fault('dtm_broadcast_commit_prepared', 1, 1);" >/dev/null
+	gid=$(q 1 "SELECT gid FROM pg_prepared_xacts;")
+	held=$(ls "$(datadir 1)/gp_dirxact" "$(datadir 2)/gp_dirxact" | grep -c "^$gid$")
+	lines=$(partfiles | grep -c '^d [0-9]* 0 abort 1$')
+	q 0 "SELECT gp_inject_fault('dtm_broadcast_commit_prepared', 'resume', 1);" >/dev/null
+	wait "$writer"
+	q 0 "SELECT gp_inject_fault('dtm_broadcast_commit_prepared', 'reset', 1);" >/dev/null
+	left=$(partfiles | wc -l)
+	dbs=$(for n in 0 1 2; do q "$n" "SELECT oid FROM pg_database WHERE datname = 'dx1';"; done | sort -u | wc -l)
+	case "$gid|$held|$lines|$left|$dbs" in
+		"gp_dtx_"[0-9]*"|2|2|0|1")
+			ok "CREATE DATABASE's parts are prepared, each with a file of its directory to go if it rolls back, gone once committed" ;;
+		*) notok "CREATE DATABASE's prepared parts" "$gid / $held / $lines / $left / $dbs" ;;
+	esac
+	bases() { for n in 0 1 2; do ls "$(datadir "$n")/base"; done | sort | tr '\n' ' '; }
+	before=$(bases)
+	q 0 "SELECT gp_inject_fault('start_prepare', 'error', $(dbid 2));" >/dev/null
+	out=$(q 0 "CREATE DATABASE dx2;")
+	q 0 "SELECT gp_inject_fault('start_prepare', 'reset', $(dbid 2));" >/dev/null
+	out2=$(for n in 0 1 2; do q "$n" "SELECT count(*) FROM pg_database WHERE datname = 'dx2';"; done | tr '\n' ' ')
+	case "$out|$out2|$(partfiles | wc -l)" in
+		*"fault name:'start_prepare'"*"segment 1"*"|0 0 0 |0")
+			[ "$(bases)" = "$before" ] \
+				&& ok "a CREATE DATABASE a segment fails to prepare leaves no database and no directory on any node" \
+				|| notok "the directories of a failed CREATE DATABASE" "$before / $(bases)" ;;
+		*) notok "a CREATE DATABASE a segment fails to prepare" "$out / $out2" ;;
+	esac
+	q 0 "DROP DATABASE dx1;" >/dev/null
+
+	# A tablespace likewise: a CREATE that fails leaves no directory under the
+	# location, and a DROP that fails leaves them all, where PostgreSQL's
+	# DropTableSpace() removes them as it runs; the DROP that commits takes
+	# them away.
+	links() { for n in 0 1 2; do ls "$(datadir "$n")/pg_tblspc"; done | wc -l; }
+	mkdir -p "$ROOT/tblspc2"
+	nlinks=$(links)
+	q 0 "SELECT gp_inject_fault('start_prepare', 'error', $(dbid 2));" >/dev/null
+	out=$(q 0 "CREATE TABLESPACE ts2 LOCATION '$ROOT/tblspc2';")
+	q 0 "SELECT gp_inject_fault('start_prepare', 'reset', $(dbid 2));" >/dev/null
+	out2="$(ls "$ROOT/tblspc2" | tr '\n' ' ')|$(links)"
+	q 0 "CREATE TABLESPACE ts2 LOCATION '$ROOT/tblspc2';" >/dev/null
+	q 0 "SELECT gp_inject_fault('start_prepare', 'error', $(dbid 2));" >/dev/null
+	out3=$(q 0 "DROP TABLESPACE ts2;")
+	q 0 "SELECT gp_inject_fault('start_prepare', 'reset', $(dbid 2));" >/dev/null
+	out4="$(ls "$ROOT/tblspc2" | tr '\n' ' ')|$(q 0 "CREATE TABLE tsp2 (a int) TABLESPACE ts2 DISTRIBUTED BY (a); INSERT INTO tsp2 SELECT generate_series(1, 10); SELECT count(*) FROM tsp2; DROP TABLE tsp2;")"
+	out5="$(q 0 "DROP TABLESPACE ts2;")$(ls "$ROOT/tblspc2")|$(links)|$(partfiles | wc -l)"
+	case "$out|$out2|$out3|$out4|$out5" in
+		*"fault name:'start_prepare'"*"||$nlinks|"*"fault name:'start_prepare'"*"|1 2 3 |10||$nlinks|0")
+			ok "a CREATE TABLESPACE that fails leaves no directory, a DROP TABLESPACE that fails all of them, and the one that commits none" ;;
+		*) notok "a tablespace's directories and its failures" "$out / $out2 / $out3 / $out4 / $out5" ;;
+	esac
+	rmdir "$ROOT/tblspc2"
 
 	###########################################################################
 	echo "14. the global deadlock detector"

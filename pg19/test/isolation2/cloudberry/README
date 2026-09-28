@@ -169,6 +169,16 @@ oom_startup_memory  what the memory a process starts with -- 12 MB, which
   refusals themselves are Cloudberry's, in its words, and the memory
   protection suite makes them happen (../memprot/run.sh).
 
+prepared_xact_deadlock_pg_rewind
+  The CREATE DATABASE whose part on segment 0 is prepared as the primary
+  goes down fails in PostgreSQL's words for a connection that closed, where
+  Cloudberry's add "Error on receive from" the segment (as in
+  parallel_retrieve_cursor/status_check, below), and nothing else differs:
+  the part is rolled back on the mirror FTS promoted, and gprecoverseg
+  rewinds the old primary, whose crash recovery gpsegrewind.py finishes in
+  database postgres, as Cloudberry's pg_rewind does, where PostgreSQL 19's
+  would wait in template1 for the lock the recovered CREATE DATABASE holds.
+
 reader_waits_for_lock, in the planner pass alone
   No reader waits, because the port's planner has none: it reads each
   distributed table of the join through a gather of its own, on the

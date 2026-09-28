@@ -26,15 +26,15 @@ skip gpdispatch  the faults make_dispatch_result_error, cdb_copy_end_internal_st
 skip check_gxid  gp_get_next_gxid(), a function of Cloudberry's core the port has not
 skip checkpoint_dtx_info  the faults after_xlog_xact_distributed_commit and keep_log_seg, in PostgreSQL's commit and checkpoint, which the port has no place for; it waits for them
 skip autovacuum-analyze  the faults gp_pgstat_report_on_master, analyze_after_hold_lock, auto_vac_worker_* and analyze_finished_one_relation, in PostgreSQL's autovacuum and ANALYZE; it waits for them
-skip prepared_xact_deadlock_pg_rewind  the fault after_xlog_xact_prepare_flushed, in PostgreSQL's PREPARE TRANSACTION; it waits for it
+run  prepared_xact_deadlock_pg_rewind                mirrors1
 run  ao_partition_lock                                 misc1
 run  select_dropped_table
 skip update_hash_col_utilitymode  differs: a session of a segment's own (0U) updates a column of the distribution key, UPDATE 0, where Cloudberry refuses it in utility mode
 skip execute_on_utilitymode  differs: an EXECUTE ON function in a session of the coordinator's own (-1U) answers gp_segment_id 0, where Cloudberry's utility mode answers -1
 skip crash_recovery_redundant_dtx  the fault checkpoint_dtx_info, in PostgreSQL's checkpoint, and mirrors; it waits for it
-skip crash_recovery_dtm  the setting dtx_phase2_retry_second, the faults of Cloudberry's two-phase commit's broadcast and PREPARE's WAL, and a mirror for each segment
+skip crash_recovery_dtm  unrecognized configuration parameter "dtx_phase2_retry_second"; and the faults before_orphaned_check and after_orphaned_check, of Cloudberry's recovery process, which the port's has no place for; it waits for them
 run  unlogged_heap_tables                              misc1
-skip unlogged_appendonly_tables  unlogged append-optimized tables, which gp_ao refuses ("unlogged append-optimized tables are not supported")
+run  unlogged_appendonly_tables                      misc1
 skip udf_exception_blocks_panic_scenarios  the settings debug_dtm_action_segment and debug_dtm_action_target, and a mirror for each segment
 run  ao_same_trans_truncate_crash                      misc1
 skip frozen_insert_crash  the faults appendonly_insert and insert_fastsequence_after_freeze, in the append-optimized insert; it waits for them
@@ -69,7 +69,7 @@ run  bitmap_index_crash                                misc1
 run  bitmap_update_words_backup_block                  misc1
 run  bitmap_union                                      misc1
 skip bitmap_index_inspect  bm_metap(), Cloudberry's pageinspect function of a bitmap index's metapage, which the port has not
-skip fsync_ao  unlogged append-optimized tables, which gp_ao refuses, and the faults ao_fsync_counter and restartpoint_guts
+skip fsync_ao  the faults restartpoint_guts and ao_fsync_counter, of a mirror's restartpoint and the checkpointer's sync of an append-optimized table's files, which the port has no place for, and a mirror for each segment; it waits for them
 run  disable_autovacuum                                misc1
 skip concurrent_index_creation_should_not_deadlock  the fault before_acquire_lock_during_create_ao_blkdir_table, in an append-optimized table's block directory's making; it waits for it
 run  pax/alter_while_vacuum2                           pax
@@ -153,7 +153,7 @@ run  setup_startup_memory_accounting                   memory
 run  restore_memory_accounting_default                 memory
 run  runaway_query                                     memory
 skip distributed_transactions  the fault abort_after_procarray_end, in PostgreSQL's abort; its ABORTs succeed
-skip concurrent_drop_truncate_tablespace  the faults drop_tablespace_after_acquire_lock and after_xlog_tblspc_drop, and Cloudberry's lock of a tablespace a DROP TABLESPACE takes ("could not lock tablespace")
+skip concurrent_drop_truncate_tablespace  tablespace "concurrent_tblspace" is not empty, where Cloudberry's DROP TABLESPACE meets the lock a CREATE TABLE in the tablespace took, "could not lock tablespace" -- taken as a relation's file is made there (TablespaceCreateDbspace()), where PostgreSQL 19 takes none and no hook reaches -- and the fault drop_tablespace_after_acquire_lock; it waits for it
 skip orphan_temp_table  the fault before_exec_scan, a PANIC in the executor's scan
 skip sync_guc  the setting gp_select_invisible and the faults set_variable_fault and reset_variable_fault
 skip stat_activity_extended  pg_stat_activity_extended, Cloudberry's view with a warehouse's id, which the port has not

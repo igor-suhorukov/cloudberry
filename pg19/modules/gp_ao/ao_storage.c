@@ -56,6 +56,7 @@
 #include "access/xlogutils.h"
 #include "catalog/namespace.h"
 #include "catalog/storage.h"
+#include "catalog/storage_xlog.h"
 #include "commands/sequence.h"
 #include "miscadmin.h"
 #include "port/pg_bitutils.h"
@@ -198,10 +199,34 @@ ao_metapage_check(Relation rel, Page page)
 	return meta;
 }
 
+/* A page of a new fork, logged whole, as the core logs a new page. */
+static void
+ao_log_new_page(RelFileLocator rlocator, ForkNumber forknum, BlockNumber blkno,
+				Page page)
+{
+	XLogRecPtr	recptr;
+
+	XLogBeginInsert();
+	XLogRegisterBlock(0, &rlocator, forknum, blkno, page,
+					  REGBUF_FORCE_IMAGE | REGBUF_STANDARD);
+	recptr = XLogInsert(GP_AO_RMGR_ID, XLOG_GP_AO_NEWPAGE);
+	PageSetLSN(page, recptr);
+}
+
 /*
  * The metapage of a new relfilenode, written through smgr, since the
  * relcache still has the relation's old one, and logged whole.  Returns the
  * storage ID it took.
+ *
+ * An unlogged table's storage ID is the sequence's, negated, which puts the
+ * rows of its files in gp_ao's unlogged tables (ao_meta.c), and its init
+ * fork holds the same metapage, logged and synced as every init fork is:
+ * after a crash PostgreSQL copies it over the main fork and empties the
+ * unlogged tables, so that the table is empty, as a heap one is and as
+ * Cloudberry's is, whose aux tables are unlogged with it.  A relfilenode
+ * that has its init fork already -- emptied by a TRUNCATE in the
+ * transaction that made it -- keeps it: whichever storage ID it names, a
+ * crash leaves no rows of it.
  */
 int64
 ao_storage_init(SMgrRelation srel, RelFileLocator rlocator, char persistence,
@@ -211,11 +236,6 @@ ao_storage_init(SMgrRelation srel, RelFileLocator rlocator, char persistence,
 	Page		page = buf.data;
 	AoMetaPageData *meta;
 	Oid			seqid;
-
-	if (persistence == RELPERSISTENCE_UNLOGGED)
-		ereport(ERROR,
-				(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
-				 errmsg("unlogged append-optimized tables are not supported")));
 
 	seqid = get_relname_relid("storage_id_seq",
 							  get_namespace_oid("gp_ao", false));
@@ -228,6 +248,8 @@ ao_storage_init(SMgrRelation srel, RelFileLocator rlocator, char persistence,
 	meta->magic = AO_META_MAGIC;
 	meta->version = AO_META_VERSION;
 	meta->storage_id = nextval_internal(seqid, false);
+	if (persistence == RELPERSISTENCE_UNLOGGED)
+		meta->storage_id = -meta->storage_id;
 	meta->flags = columnar ? AO_META_COLUMNAR : 0;
 	meta->next_free_block = AO_METAPAGE_BLKNO + 1;
 	for (int i = 0; i <= AO_MAX_SEGNO; i++)
@@ -235,18 +257,22 @@ ao_storage_init(SMgrRelation srel, RelFileLocator rlocator, char persistence,
 	ao_page_set_lower(page, sizeof(AoMetaPageData));
 
 	if (persistence == RELPERSISTENCE_PERMANENT && XLogIsNeeded())
-	{
-		XLogRecPtr	recptr;
-
-		XLogBeginInsert();
-		XLogRegisterBlock(0, &rlocator, MAIN_FORKNUM, AO_METAPAGE_BLKNO, page,
-						  REGBUF_FORCE_IMAGE | REGBUF_STANDARD);
-		recptr = XLogInsert(GP_AO_RMGR_ID, XLOG_GP_AO_NEWPAGE);
-		PageSetLSN(page, recptr);
-	}
+		ao_log_new_page(rlocator, MAIN_FORKNUM, AO_METAPAGE_BLKNO, page);
 
 	PageSetChecksum(page, AO_METAPAGE_BLKNO);
 	smgrextend(srel, MAIN_FORKNUM, AO_METAPAGE_BLKNO, page, false);
+
+	if (persistence == RELPERSISTENCE_UNLOGGED &&
+		!smgrexists(srel, INIT_FORKNUM))
+	{
+		smgrcreate(srel, INIT_FORKNUM, false);
+		log_smgrcreate(&rlocator, INIT_FORKNUM);
+		if (XLogIsNeeded())
+			ao_log_new_page(rlocator, INIT_FORKNUM, AO_METAPAGE_BLKNO, page);
+		PageSetChecksum(page, AO_METAPAGE_BLKNO);
+		smgrextend(srel, INIT_FORKNUM, AO_METAPAGE_BLKNO, page, false);
+		smgrimmedsync(srel, INIT_FORKNUM);
+	}
 
 	return meta->storage_id;
 }
@@ -828,6 +854,28 @@ ao_file_read(Relation rel, uint32 filenum, uint64 offset, char *data,
 	}
 }
 
+/* One fork's pages, copied as they are, and logged where use_wal says. */
+static void
+ao_copy_fork(SMgrRelation src, SMgrRelation dst, RelFileLocator dstlocator,
+			 ForkNumber forknum, bool use_wal)
+{
+	BlockNumber nblocks = smgrnblocks(src, forknum);
+	PGIOAlignedBlock buf;
+	Page		page = buf.data;
+
+	for (BlockNumber blkno = 0; blkno < nblocks; blkno++)
+	{
+		CHECK_FOR_INTERRUPTS();
+
+		smgrread(src, forknum, blkno, page);
+		if (!PageIsNew(page) && use_wal)
+			ao_log_new_page(dstlocator, forknum, blkno, page);
+		if (!PageIsNew(page))
+			PageSetChecksum(page, blkno);
+		smgrextend(dst, forknum, blkno, page, true);
+	}
+}
+
 /*
  * ALTER TABLE ... SET TABLESPACE: the relation's pages, copied to its new
  * relfilenode as they are, the storage ID with them, and logged by this
@@ -838,33 +886,10 @@ ao_copy_storage(Relation rel, SMgrRelation dst, RelFileLocator dstlocator,
 				char persistence)
 {
 	SMgrRelation src = RelationGetSmgr(rel);
-	BlockNumber nblocks;
-	PGIOAlignedBlock buf;
-	Page		page = buf.data;
 	bool		use_wal;
 
 	use_wal = XLogIsNeeded() && persistence == RELPERSISTENCE_PERMANENT;
-
-	nblocks = smgrnblocks(src, MAIN_FORKNUM);
-	for (BlockNumber blkno = 0; blkno < nblocks; blkno++)
-	{
-		CHECK_FOR_INTERRUPTS();
-
-		smgrread(src, MAIN_FORKNUM, blkno, page);
-		if (!PageIsNew(page) && use_wal)
-		{
-			XLogRecPtr	recptr;
-
-			XLogBeginInsert();
-			XLogRegisterBlock(0, &dstlocator, MAIN_FORKNUM, blkno, page,
-							  REGBUF_FORCE_IMAGE | REGBUF_STANDARD);
-			recptr = XLogInsert(GP_AO_RMGR_ID, XLOG_GP_AO_NEWPAGE);
-			PageSetLSN(page, recptr);
-		}
-		if (!PageIsNew(page))
-			PageSetChecksum(page, blkno);
-		smgrextend(dst, MAIN_FORKNUM, blkno, page, true);
-	}
+	ao_copy_fork(src, dst, dstlocator, MAIN_FORKNUM, use_wal);
 
 	/*
 	 * The copy went past the buffer manager, and was logged if WAL is kept;
@@ -873,6 +898,18 @@ ao_copy_storage(Relation rel, SMgrRelation dst, RelFileLocator dstlocator,
 	 */
 	if (use_wal)
 		smgrimmedsync(dst, MAIN_FORKNUM);
+
+	/*
+	 * An unlogged table's init fork, logged and synced as every init fork
+	 * is, as heapam's relation_copy_data() copies one.
+	 */
+	if (persistence == RELPERSISTENCE_UNLOGGED && smgrexists(src, INIT_FORKNUM))
+	{
+		smgrcreate(dst, INIT_FORKNUM, false);
+		log_smgrcreate(&dstlocator, INIT_FORKNUM);
+		ao_copy_fork(src, dst, dstlocator, INIT_FORKNUM, XLogIsNeeded());
+		smgrimmedsync(dst, INIT_FORKNUM);
+	}
 }
 
 /* ------------------------------------------------------------------------- */

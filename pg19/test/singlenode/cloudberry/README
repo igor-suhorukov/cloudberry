@@ -153,6 +153,14 @@ case_gp  The deparse of IS NOT DISTINCT FROM, and of the CASE form, which
   so calls_to_blip has seven rows where it has five and the CASE's answer is
   the same 666; and PostgreSQL 19's DETAIL for "operator does not exist",
   twice.
+createdb  gp_inject_fault('all', 'reset') over gp_segment_configuration,
+  which lists the port's one node where Cloudberry's single node has a
+  standby coordinator too (gpdemo's WITH_STANDBY): one "Success:" where the
+  expected output has two.  gp.select_invisible, which the test sets to
+  find the failed CREATE DATABASE's row and look for its directories, shows
+  an append-optimized table's deleted rows here (gp_ao) and no heap table's
+  aborted ones, so the row is not found, where Cloudberry finds it and no
+  directory; greenplum's createdb looks for them on every node of a cluster.
 gp_gin_index  the complex type, which Cloudberry's own earlier tests make;
   and the index wowidx and the rows of test_tsvector that PostgreSQL 19's
   tsearch test, which runs before it here, leaves behind (two counts one and

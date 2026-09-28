@@ -16,7 +16,9 @@
 #   port  a test of the port's own -- ../greenplum's sql/ and expected/, or
 #         this suite's -- run where the line is
 #   group the tests after it, to the next such line, are a group, with a
-#         cluster of its own
+#         cluster of its own; one whose name begins "mirrors" has a mirror
+#         for each segment and a standby coordinator, as the greenplum
+#         suite's has
 #
 # PostgreSQL's tests are PostgreSQL 14's as Cloudberry keeps them: where
 # PostgreSQL 19 answers otherwise in a line or a few -- its words, a feature
@@ -389,7 +391,11 @@ run  enable_autovacuum
 skip log_guc  relation "gp_toolkit.__gp_log_master_ext" does not exist; relation "gp_toolkit.__gp_log_segment_ext" does not exist
 run  instr_in_shmem_setup
 run  instr_in_shmem
-skip createdb  function force_mirrors_to_catch_up() does not exist
+group mirrors1
+port mirrors_setup
+port autovacuum_off
+run  createdb
+group m7a
 run  gp_aggregates_costs
 run  variadic_parameters
 run  function_extensions
@@ -398,7 +404,9 @@ run  shared_scan
 run  cluster_gp
 skip combocid_gp  differs: a segment's command ids for the rows a transaction writes count from 0, where Cloudberry's go on from the coordinator's
 skip spi_processed64bit  differs: the fault executor_run_high_processed, which has the executor count past 2^32 rows, is none of the port's
-skip gp_tablespace  function gp_tablespace_location(oid) does not exist; function get_tablespace_version_directory_name() does not exist
+group mirrors1
+run  gp_tablespace
+group m7a
 skip temp_tablespaces  the faults sisc_xslice_temp_files and hashagg_spill_temp_files are none of the port's: canceling statement due to user request
 run  default_tablespace
 run  leastsquares

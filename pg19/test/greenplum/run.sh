@@ -236,7 +236,10 @@ make_cluster() {
 			echo "unix_socket_directories = '$(node_sock "$g" "$n")'"
 			echo "listen_addresses = '$(over_tcp "$g" && echo 127.0.0.1)'"
 			echo "port = $(node_port "$gi" "$n")"
-			echo "fsync = off"
+			# fsync on in a group with mirrors, as Cloudberry's demo cluster
+			# has it: alter_db_set_tablespace shows it, and has a mirror's
+			# restartpoint sync what a moved database had
+			echo "fsync = $(has_mirrors "$g" && echo on || echo off)"
 			[ -n "${GP_SETTINGS:-}" ] && echo "$GP_SETTINGS"
 			[ -n "${GP_INTERCONNECT:-}" ] && echo "gp.interconnect_type = '$INTERCONNECT'"
 			[ "$INTERCONNECT" = proxy ] &&
@@ -698,6 +701,11 @@ run_group() {
 		testtablespace_mytempsp3 testtablespace_mytempsp4 testtablespace_database_tablespace \
 		testtablespace_1111111111222222222233333333334444444444555555555566666666667777777777888888888899999999990000000000 \
 		$(for i in 1 2 3 4 5 6 7 8; do echo testtablespace_existing_version_dir/$i/GPDB_99_399999991; done))
+	# which Cloudberry's PG_ABS_SRCDIR has too, being the same directory: a
+	# test lists and empties them there (gp_tablespace)
+	for d in testtablespace testtablespace_existing_version_dir; do
+		ln -sfn "$R/$d" "$SN/$d"
+	done
 	# ORCA's counts, from the pass's start (gp_orca.fallbacks()), and where
 	# the coordinator's log was then.  template1 has gp_orca's functions only
 	# once gp_setup, the pass's first test, has made them there, so they are
@@ -736,12 +744,13 @@ run_group() {
 	# PG_HOSTNAME and PG_BINDDIR are what Cloudberry's pg_regress sets for
 	# its tests: the host of segment 0, for their file:// and gpfdist://
 	# locations -- here every node's is this one -- and the directory of
-	# the programs, where they start gpfdist from.  The coordinator's data
+	# the programs, where they start gpfdist from; and PG_CURUSERNAME, the
+	# user the tests are run as (gp_tablespace).  The coordinator's data
 	# directory is named by both of its names: MASTER_DATA_DIRECTORY, the
 	# older, is gp_dispatch_keepalives'.
 	PATH="$EXEC/bin:$PATH" CB_DIFF_MODE="$pass" CB_DIFF_DIR="$R" \
 	PGOPTIONS="-c gp.optimizer=$optimizer" \
-	PG_HOSTNAME=localhost PG_BINDDIR="$BINDIR" \
+	PG_HOSTNAME=localhost PG_BINDDIR="$BINDIR" PG_CURUSERNAME="$PGUSER" \
 	PG_BINDIR="$BINDIR" COORDINATOR_DATA_DIRECTORY="$(node_dir "$g" 0)" \
 	MASTER_DATA_DIRECTORY="$(node_dir "$g" 0)" \
 		"$PG_REGRESS" \

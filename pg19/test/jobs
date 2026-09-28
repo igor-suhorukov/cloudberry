@@ -53,8 +53,8 @@ diskquota              regress  121   DQ_PARTS=regress DQ_GROUP=main MEM=5500
 diskquota              ctas     101   DQ_PARTS=regress DQ_GROUP=ctas MEM=6000
 diskquota              ctas_spc 102   DQ_PARTS=regress DQ_GROUP=ctas_spc MEM=6000
 greenplum              planner  106   PASSES=planner MEM=14000
-pax_regress            orca     200   PASSES=orca MEM=18000
-pax_regress            planner  180   PASSES=planner MEM=16500
+pax_regress            orca     200   PASSES=orca MEM=20000
+pax_regress            planner  180   PASSES=planner MEM=18500
 resgroup_v1            -        571   MEM=1500
 pax_isolation2         orca     160   PASSES=orca MEM=11000
 pax_isolation2         planner  160   PASSES=planner MEM=11000
