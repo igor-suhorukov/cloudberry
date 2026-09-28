@@ -363,18 +363,16 @@ join_gp  the NOTICE of test_print_prefetch_joinqual: where a join's outer
   which gp_debug_numsegments makes, is read there alone, and answers as
   Cloudberry's does.
 
-joinhints (planner, orca)  a join method hint for the join a NOT IN makes
-  in Cloudberry's planner, a left anti-semi join: PostgreSQL 19's planner
-  keeps NOT IN a subplan, so the hint finds no join and pg_hint_plan
-  reports it not used -- under ORCA too, which falls back for a merge join
-  of one, as Cloudberry's does.  Under the planner the CTE of its query is
+joinhints (planner, orca)  under the planner the CTE of its query is
   inlined, as PostgreSQL has done since 12, so the Leading hint of the
   CTE's joins and the query's are two at one level, which pg_hint_plan
   refuses as conflicting, where Cloudberry's planner plans the CTE as a
   query of its own and uses both.  Under ORCA, ORCA's trace of the hints it
   read, which Cloudberry's expected output for its ORCA,
   joinhints_optimizer.out, prints as the port's ORCA does, where the one
-  the suite compares, the planner's, has pg_hint_plan's report.
+  the suite compares, the planner's, has pg_hint_plan's report.  (A join
+  method hint of a NOT IN's join is used, as Cloudberry's is: the planner's
+  route makes the NOT IN an anti-join, gp_subselect.c.)
 
 matview_ao  psql's \dm, whose title PostgreSQL 19's psql gives as "List of
   materialized views" where Cloudberry's psql says "List of relations".

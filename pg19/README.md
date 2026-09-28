@@ -147,7 +147,9 @@ On a cluster (M2), `gp_core` and `gp_orca`:
   Cloudberry's squelch runs it, and a Sequence that prints its producers
   first; and
   PostgreSQL's own plans gathering from the
-  segments where ORCA does not plan, writing a distributed table through an
+  segments where ORCA does not plan, a NOT IN of a distributed table made
+  an anti-join with its NULLs conditions beside it
+  (`modules/gp_core/gp_subselect.c`), writing a distributed table through an
   Explicit Redistribute Motion — each row changed on its segment by its ctid
   there, a row whose key changes moved by a Split that fires no trigger,
   RETURNING (old and new too) and a view's WITH CHECK OPTION and a table's
