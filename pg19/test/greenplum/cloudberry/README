@@ -674,3 +674,16 @@ vacuum_gp  psql's \d footers of an append-optimized table, which are
 with_clause  three recursive queries Cloudberry refuses -- a join of nested
   RECURSIVE clauses, and window functions in a recursive query's target
   list -- which PostgreSQL 19 answers.
+
+workfile_materialize_spill, workfile_sisc_mat_sort, workfile_sisc_sort_spill
+  what these tests check is no longer checked here: that a Material, a Sort
+  and a hash spilled on the segments, which their functions read from
+  EXPLAIN ANALYZE's "work_mem: ... (segment N) ... Workfile: (N spilling)"
+  line of each segment's node.  They turn ORCA off, and on the planner's
+  route the join, the sort and the aggregate are the coordinator's, above
+  gathers whose segments only scan, so no segment's node spills and the
+  line, which the port prints of the segments' nodes alone (the
+  coordinator's would read "(segment -1)", which the functions' pattern
+  refuses), is printed of none: each function counts no line, and answers
+  no row where Cloudberry's answers 0, or 1 for each node.  Their queries'
+  own answers are Cloudberry's.
