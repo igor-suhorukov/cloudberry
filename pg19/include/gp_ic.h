@@ -116,6 +116,10 @@ typedef struct GpIcStream
  *   recv_end     done, whether or not every row came: the senders stop
  *   stmt_end     the statement is over here: with "error", because its
  *                (sub)transaction is aborting, and it must not fail again
+ *   run_end      a run of the statement's plan is over here and did not run
+ *                out -- a cursor's FETCH -- and the process may idle, deaf,
+ *                before the next: what it must answer, answered first
+ *                (NULL: nothing to do)
  *
  * A transport's senders and receivers begin with a GpIcSender and a
  * GpIcReceiver, which say whose they are.
@@ -136,6 +140,7 @@ typedef struct GpIcTransport
 							  int *len);
 	void		(*recv_end) (GpIcReceiver *receiver);
 	void		(*stmt_end) (GpIcStream *stream, bool error);
+	void		(*run_end) (GpIcStream *stream);
 } GpIcTransport;
 
 struct GpIcSender
@@ -170,6 +175,9 @@ extern PGDLLEXPORT const char *GpIcAddress(const GpIcTransport *transport);
 extern PGDLLEXPORT void GpIcStatementBegin(GpIcStream *stream);
 extern PGDLLEXPORT GpIcStream *GpIcStatementFind(const char *token);
 extern PGDLLEXPORT void GpIcForget(GpIcStream *stream);
+
+/* A run of the stream's plan is over here, and did not run out (run_end). */
+extern PGDLLEXPORT void GpIcRunEnd(GpIcStream *stream);
 
 /* A slice of the stream that streams, by its number; NULL if it does not. */
 extern PGDLLEXPORT GpIcSlice *GpIcStreamSlice(GpIcStream *stream, int slice);

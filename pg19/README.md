@@ -196,7 +196,10 @@ On a cluster (M2), `gp_core` and `gp_orca`:
   one connection, by `gp.interconnect_proxy_addresses`; a sorted Gather into one segment merges its senders' streams
   as they come, and the coordinator's gathers ask each segment for one row
   first and ten times as many each batch after, so that a LIMIT above stops
-  them soon.  The earlier relay through the coordinator carries the slices
+  them soon; a slice whose plan stops reading a Motion -- a hash join whose
+  hash table is empty on a segment, a nested loop over an empty table --
+  stops its senders there and then, over every transport, as Cloudberry's
+  squelch does.  The earlier relay through the coordinator carries the slices
   that run on the coordinator or have to run in the writer — the
   coordinator's own that reads a function's rows or makes its own, a VALUES
   list, one that scans a temporary table — first, and the rest stream, the

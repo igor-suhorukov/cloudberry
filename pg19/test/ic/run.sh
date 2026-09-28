@@ -20,8 +20,9 @@
 # ic: the interconnect's transports, each carrying the Motions of the same
 # statements -- a Redistribute, a Broadcast, a Gather to one segment, a
 # merge, sixty thousand rows through a small window, a LIMIT that stops its
-# senders, a cursor fetched across another statement, a slice that fails,
-# and statements cancelled while their rows are on the way -- whose rows
+# senders, a slice whose plan stops reading a Motion in its middle, a cursor
+# fetched across another statement, a slice that fails, and statements
+# cancelled while their rows are on the way -- whose rows
 # must be the planner's, which streams nothing.  So a transport that has
 # regressed shows in every run, where the greenplum and isolation2 suites
 # run over udp2 and the proxy only on request (../ic_udp2, ../ic_proxy).
@@ -172,12 +173,12 @@ echo "2. the same rows over every transport"
 ###############################################################################
 # Each statement: ORCA's plan has the Motion said, and every transport's rows
 # are the planner's.
-same() {					# same <what> <what EXPLAIN says> <sql, several lines>
+same() {					# same <what> <what EXPLAIN says, a pattern> <sql, several lines>
 	local plan want got bad=""
 	plan=$(printf '%s\n' "$3" | sed 's/^\(SELECT\|UPDATE\|DELETE\) /EXPLAIN (COSTS OFF) \1 /' | qf 0)
 	want=$(printf '%s\n' "SET gp.optimizer = off;" "$3" | qf 0)
 	case "$plan" in
-		*"$2"*"Optimizer: GPORCA"*) ;;
+		*$2*"Optimizer: GPORCA"*) ;;
 		*) notok "$1: ORCA's plan" "$plan"; return ;;
 	esac
 	for t in $TRANSPORTS relay; do
@@ -263,6 +264,97 @@ COMMIT;"
 			ok "$t: cancelled while its rows are on the way, either end waiting, and the session goes on" ;;
 		*) notok "$t: a cancel while streaming" "$out" ;;
 	esac
+done
+
+###############################################################################
+echo "3b. a slice that stops reading a Motion stops its senders, in the middle of its plan too"
+###############################################################################
+# A plan that reads no more of a Motion -- a nested loop over an empty table,
+# a hash join whose hash table is empty on a segment, a Limit -- stops the
+# Motion's senders there and then (gp_motion.c), where before they waited on
+# it: a tcp receiver that never read its Motion never took their
+# connections, and a segment that went on to the next branch of its plan
+# left the other segments waiting for rows its senders could not send.  Each
+# statement has ORCA's plan said, answers as the planner does under every
+# transport, and ends well before its timeout.
+q 0 "CREATE TABLE sq_empty (i int, j int) DISTRIBUTED BY (i);
+     CREATE TABLE sq_cte (i1 int, i2 int, i3 int, i4 int) DISTRIBUTED BY (i1);
+     INSERT INTO sq_cte SELECT i, i % 1000, i % 100000, i % 75 FROM generate_series(1, 200000) i;
+     CREATE TABLE sq_big (k int, k2 int, s text) DISTRIBUTED BY (k);
+     INSERT INTO sq_big SELECT i, i % 1000, md5(i::text) || md5((i + 1)::text) FROM generate_series(1, 200000) i;
+     CREATE TABLE sq_b (b int) DISTRIBUTED BY (b);
+     INSERT INTO sq_b SELECT generate_series(1, 40);
+     CREATE TABLE sq_one AS SELECT b AS a, b FROM sq_b WHERE gp_segment_id = 1 DISTRIBUTED BY (a);
+     ANALYZE sq_big; ANALYZE sq_one;
+     CREATE EXTENSION gp_inject_fault;" > /dev/null
+# segspace's UPDATE: the writers' nested loop over the empty table never
+# reads its Broadcast, whose senders make a CTE another slice reads
+broadcast="UPDATE sq_empty SET j = m.cc1 FROM (WITH c AS (SELECT * FROM sq_cte ORDER BY i2) SELECT t1.i1 AS cc1, t1.i2 AS cc2 FROM c t1, c t2 WHERE t1.i1 = t2.i2) m;"
+# sq_one's rows all hash to segment 1: segment 0's first join has an empty
+# hash table, reads nothing of sq_big, and goes on to the Append's second
+# branch, whose senders wait on segment 1
+union="SELECT sq_big.s FROM sq_one JOIN sq_big ON sq_one.b = sq_big.k2
+UNION ALL SELECT b2.s FROM sq_big b2 JOIN po ON b2.k2 % 50 = po.y"
+starve="SELECT count(*), sum(length(s)) FROM ($union) u"
+same "a nested loop over an empty table never reads its Broadcast, below which a CTE another slice reads is made" \
+	"Seq Scan on sq_empty*Broadcast Motion*Shared Scan" \
+	"SET statement_timeout = '20s'; SET gp.cte_sharing = on;
+$broadcast
+SELECT count(*) FROM sq_empty;"
+same "a segment's hash join never reads its outer Redistribute, and the segment goes on to another branch" \
+	"(slice5; segments: 2)" \
+	"SET statement_timeout = '20s'; SET gp.optimizer_enable_motion_broadcast = off;
+$starve;"
+same "a Limit stops reading the merge of a Gather into one segment, in the middle of a write's plan" \
+	"Merge Key" \
+	"SET statement_timeout = '20s';
+BEGIN;
+UPDATE wu SET b = b + 1 WHERE a IN (SELECT k FROM bo ORDER BY k LIMIT 10);
+SELECT count(*), sum(b) FROM wu;
+ROLLBACK;"
+same "a nested loop's inner side, read again for each row, is never stopped before the loop's end" \
+	"Nested Loop Semi Join" \
+	"SET statement_timeout = '20s'; SET gp.optimizer_enable_hashjoin = off;
+SELECT count(*), sum(o.a) FROM o WHERE EXISTS (SELECT 1 FROM po WHERE po.y = o.b AND po.x > o.a);"
+
+rows=$(q 0 "SET gp.optimizer = off; SELECT count(*) FROM ($union) u;")
+seg1=$(q 0 "SELECT dbid FROM gp_segment_configuration WHERE content = 1 AND role = 'p';")
+for t in $TRANSPORTS relay; do
+	# a cursor's FETCHes, a segment's plan stopped in the middle of the first
+	out=$(printf '%s\n' "SET gp.interconnect_type = $t;" "SET statement_timeout = '20s';" \
+		"SET gp.optimizer_enable_motion_broadcast = off;" "BEGIN;" \
+		"DECLARE sq CURSOR FOR SELECT u.s FROM ($union) u;" \
+		'FETCH 5 FROM sq \g /dev/null' '\echo :ROW_COUNT' \
+		"MOVE FORWARD ALL IN sq;" '\echo :ROW_COUNT' "COMMIT;" | qf 0)
+	[ "$out" = "5
+$((rows - 5))" ] && ok "$t: a cursor's FETCHes, the plan of a segment stopped in the middle of the first" \
+		|| notok "$t: a cursor over a plan stopped in the middle" "$out (want 5 and $((rows - 5)))"
+
+	# EXPLAIN ANALYZE of it, timed: a hash join that has returned rows stops
+	# the Motions below it in the middle of its own measured run
+	out=$(printf '%s\n' "SET gp.interconnect_type = $t;" "SET statement_timeout = '20s';" \
+		"SET gp.optimizer_enable_motion_broadcast = off;" \
+		"EXPLAIN (ANALYZE, COSTS OFF, SUMMARY OFF) $starve;" | qf 0)
+	case "$out" in
+		*"Append"*"Hash Join"*"Hash Join"*"Optimizer: GPORCA"*)
+			ok "$t: EXPLAIN ANALYZE of a plan a segment stopped in the middle" ;;
+		*) notok "$t: EXPLAIN ANALYZE of a plan stopped in the middle" "$out" ;;
+	esac
+
+	# a sender that comes late -- the first to set up on segment 1 waits two
+	# seconds -- to a receiver that has ended: it is waited for, and stopped
+	[ "$t" = relay ] && continue
+	out=$(printf '%s\n' "SET gp.interconnect_type = $t;" "SET statement_timeout = '20s';" \
+		"SET gp.cte_sharing = on;" \
+		"SELECT gp_inject_fault('interconnect_setup_palloc', 'reset', $seg1);" \
+		"SELECT gp_inject_fault('interconnect_setup_palloc', 'sleep', '', '', '', 1, 1, 2, $seg1);" \
+		"$broadcast" "SELECT count(*) FROM sq_empty;" \
+		"SELECT gp_inject_fault('interconnect_setup_palloc', 'reset', $seg1);" | qf 0)
+	[ "$out" = "Success:
+Success:
+0
+Success:" ] && ok "$t: a sender two seconds late to a receiver that stopped reading is waited for, and stopped" \
+		|| notok "$t: a late sender to a stopped receiver" "$out"
 done
 ###############################################################################
 echo "4. the proxies"
