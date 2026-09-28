@@ -802,7 +802,13 @@ proxy_recv_from(GpIcReceiver *receiver, int k, char **data, int *len)
 
 /*
  * Done: a sender whose end has not come is told STOP, and its connection
- * kept for the statement's end, which reads it to its end (stmt_end).
+ * kept for the statement's end, which reads it to its end (stmt_end).  The
+ * connection is shut for writing after the STOP: a proxy holds what a
+ * connection sends it until more comes or the connection's end does
+ * (ic_proxy_client.c), so that a STOP alone would stay in the proxy for as
+ * long as the statement runs -- a receiver that stops in the middle of its
+ * plan, the senders waiting on it -- and the end sends it on, with the
+ * proxy's BYE, which ends the connection at the sender's side too.
  */
 static void
 proxy_recv_end(GpIcReceiver *receiver)
@@ -821,6 +827,7 @@ proxy_recv_end(GpIcReceiver *receiver)
 			memcpy(packet, &len, PROXY_HEADER);
 			packet[PROXY_HEADER] = PROXY_STOP;
 			proxy_write_all(in->sock, packet, sizeof(packet));
+			(void) shutdown(in->sock, SHUT_WR);
 		}
 		in->stopped = true;
 		if (in->buf != NULL)

@@ -486,6 +486,20 @@ statement_end(void)
 }
 
 /*
+ * A top-level utility that runs a query of its own -- CREATE TABLE AS,
+ * SELECT INTO and CREATE MATERIALIZED VIEW, and EXPLAIN ANALYZE -- whose
+ * query Cloudberry gives the statement's memory as it gives a query's
+ * (ResourceManagerGetQueryMemoryLimit() in createas.c and explain.c).  The
+ * utility is the outermost statement here, and the segments are told it has
+ * no budget; its first query is taken as the outermost for its budget, which
+ * the segments are told with its fragments (gp_resource_ExecutorStart()).
+ * EXPLAIN without ANALYZE only starts its query, with no budget, as before;
+ * and a query a function runs as the planner folds it would take the budget
+ * first, the CTAS's then running with the node's work_mem, as before.
+ */
+static bool utility_runs_query = false;
+
+/*
  * What the segments are told of the statement the coordinator is about to
  * dispatch, which gp_core sends with it when it has changed
  * (gp_resource.statement): the weight its queue's priority gives it, the
@@ -572,7 +586,19 @@ static void
 gp_resource_ExecutorStart(QueryDesc *queryDesc, int eflags)
 {
 	bool		toplevel = statement_depth == 0;
+	bool		budgeted = toplevel;
 	int			kb = 0;
+
+	/*
+	 * The first query such a utility runs: the INSERT gp_sql fills a CTAS's
+	 * table with on a cluster, PostgreSQL's own query elsewhere, EXPLAIN
+	 * ANALYZE's
+	 */
+	if (statement_depth == 1 && utility_runs_query)
+	{
+		budgeted = true;
+		utility_runs_query = false;
+	}
 
 	ResQueueBackendStart();
 	ResGroupBackendStart();
@@ -610,7 +636,7 @@ gp_resource_ExecutorStart(QueryDesc *queryDesc, int eflags)
 	}
 
 	/* before gp_core's hook dispatches it: what the segments are told */
-	if (toplevel)
+	if (budgeted)
 		set_statement_setting(kb);
 
 	if (prev_ExecutorStart)
@@ -917,6 +943,8 @@ gp_resource_ProcessUtility(PlannedStmt *pstmt, const char *queryString,
 			else
 				ResGroupStatementStart(queryString);
 			set_statement_setting(0);
+			utility_runs_query = IsA(pstmt->utilityStmt, CreateTableAsStmt) ||
+				IsA(pstmt->utilityStmt, ExplainStmt);
 		}
 		resource_process_utility(pstmt, queryString, readOnlyTree, context,
 								 params, queryEnv, dest, qc);
@@ -924,6 +952,8 @@ gp_resource_ProcessUtility(PlannedStmt *pstmt, const char *queryString,
 	PG_FINALLY();
 	{
 		statement_end();
+		if (statement_depth == 0)
+			utility_runs_query = false;
 		call_toplevel = save_call_toplevel;
 	}
 	PG_END_TRY();

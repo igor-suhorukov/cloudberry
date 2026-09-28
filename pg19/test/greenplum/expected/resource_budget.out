@@ -1,0 +1,31 @@
+--
+-- A query gp_resource gives a budget runs on the segments with it as its
+-- work_mem: an INSERT's, and the query of a CREATE TABLE AS and of an
+-- EXPLAIN ANALYZE, as Cloudberry's createas.c and explain.c give their
+-- plans the query's memory.  current_setting() is read where each row is
+-- made, on the segments under ORCA.
+--
+CREATE TABLE resource_budget_src (a int) DISTRIBUTED BY (a);
+INSERT INTO resource_budget_src SELECT generate_series(1, 30);
+CREATE TABLE resource_budget_rows (a int, wm text) DISTRIBUTED BY (a);
+SET gp.statement_mem = 2048;
+INSERT INTO resource_budget_rows
+  SELECT a, 'insert ' || current_setting('work_mem') FROM resource_budget_src;
+CREATE TABLE resource_budget_ctas AS
+  SELECT a, 'create table as ' || current_setting('work_mem') AS wm
+  FROM resource_budget_src DISTRIBUTED BY (a);
+INSERT INTO resource_budget_rows SELECT * FROM resource_budget_ctas;
+\o /dev/null
+EXPLAIN (ANALYZE) INSERT INTO resource_budget_rows
+  SELECT a, 'explain analyze ' || current_setting('work_mem') FROM resource_budget_src;
+\o
+RESET gp.statement_mem;
+SELECT wm, count(*) FROM resource_budget_rows GROUP BY wm ORDER BY wm;
+         wm          | count 
+---------------------+-------
+ create table as 2MB |    30
+ explain analyze 2MB |    30
+ insert 2MB          |    30
+(3 rows)
+
+DROP TABLE resource_budget_src, resource_budget_rows, resource_budget_ctas;
