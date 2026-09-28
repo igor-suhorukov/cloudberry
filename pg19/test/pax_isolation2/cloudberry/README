@@ -34,14 +34,6 @@ pax/snapshot_index_corruption
   table's index answers, where PAX's expected output has no row -- a
   difference PAX's own test marks FIXME.
 
-pax/vacuum_index_stats
-  A segment's pg_class after ANALYZE on the coordinator, and after the
-  VACUUMs that follow: the rows the segment counted as it built the index,
-  11, which PAX's VACUUM does not count again, where Cloudberry's ANALYZE
-  wrote its new count, 10, into the segments' pg_class too.  The port's
-  ANALYZE samples the segments and writes the coordinator's statistics
-  alone.
-
 Tests of Cloudberry's schedule whose copy here is an older one than
 Cloudberry's own, so that the isolation2 suite's difference does not
 apply, for the reason that difference is kept for

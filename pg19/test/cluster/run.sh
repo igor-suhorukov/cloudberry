@@ -1829,6 +1829,48 @@ EOF
 	esac
 	q 0 "ANALYZE hst;" >/dev/null
 
+	# What ANALYZE samples of a segment is that segment's count too, as
+	# Cloudberry's gp_acquire_sample_rows() writes it there: the table's
+	# pages and rows, and its index's.  So a VACUUM whose segments scan a
+	# page or none -- a read made the rest all-visible, as PostgreSQL 19's
+	# pruning does -- keeps the rows ANALYZE counted, where the coordinator
+	# once read 0 of them until the next ANALYZE; and an index's pages after
+	# ANALYZE are its files' on the segments, not the empty copy's page.  The
+	# rows are written by the explicit write (RETURNING), a statement of
+	# VALUES a batch, which leaves no page empty behind them: COPY's, a bulk
+	# insert, extends a table by pages it leaves empty at its end, which a
+	# VACUUM scans, and PostgreSQL 19 takes for as full as the pages it did
+	# not scan (vac_estimate_reltuples()), on one node as here.
+	q 0 "CREATE TABLE sgc (a int, b int) DISTRIBUTED BY (a); CREATE INDEX sgc_b ON sgc (b);
+		 INSERT INTO sgc SELECT i, i FROM generate_series(1, 20010) i RETURNING 0; ANALYZE sgc;" >/dev/null
+	out=$(q 0 "SELECT relpages || ' ' || reltuples FROM pg_class WHERE relname = 'sgc';")
+	out2=$(q 0 "SELECT sum(relpages) || ' ' || sum(reltuples) FROM gp_dist_random('pg_class') WHERE relname = 'sgc';")
+	out3=$(q 0 "SELECT relpages || ' ' || reltuples FROM pg_class WHERE relname = 'sgc_b';")
+	seg=0
+	for n in 1 2; do
+		p=$(q "$n" "SELECT pg_relation_size('sgc_b') / current_setting('block_size')::int;")
+		isnum "$p" && seg=$((seg + p))
+	done
+	[ "$out" = "$out2" ] && [ "${out#* }" = "20010" ] && [ "$out3" = "$seg 20010" ] \
+		&& ok "the segments count what ANALYZE samples of them, and an index's pages are the segments' ($seg)" \
+		|| notok "the counts ANALYZE leaves" "$out / segments: $out2 / index: $out3, $seg pages"
+	q 0 "SELECT count(*) FROM sgc;" >/dev/null
+	q 0 "VACUUM sgc;" >/dev/null
+	out=$(q 0 "SELECT reltuples FROM pg_class WHERE relname = 'sgc';")
+	out2=$(q 0 "SELECT reltuples FROM pg_class WHERE relname = 'sgc_b';")
+	[ "$out|$out2" = "20010|20010" ] && ok "... which a VACUUM after a read keeps, the table's and the index's" \
+		|| notok "the rows after a VACUUM that scanned little" "$out / index: $out2"
+
+	# A replicated table's ANALYZE samples one of its segments, and a VACUUM
+	# of the others, read there, counts none: they hold as many rows to a page
+	# as the one that counted, where they once made the table a third of it.
+	q 0 "CREATE TABLE sgr (a int) DISTRIBUTED REPLICATED; INSERT INTO sgr SELECT generate_series(1, 3000) RETURNING 0; ANALYZE sgr;" >/dev/null
+	for n in 1 2; do q "$n" "SELECT count(*) FROM sgr;" >/dev/null; done
+	q 0 "VACUUM sgr;" >/dev/null
+	out=$(q 0 "SELECT reltuples FROM pg_class WHERE relname = 'sgr';")
+	[ "$out" = "3000" ] && ok "a replicated table's rows after a VACUUM of segments that had not counted them" \
+		|| notok "a replicated table's rows after VACUUM" "$out"
+
 	###########################################################################
 	echo "10. ORCA's plans run on the segments, with Cloudberry's Motions"
 	###########################################################################
