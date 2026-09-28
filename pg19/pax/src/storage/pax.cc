@@ -27,7 +27,9 @@
  * flags, and a TID of the table's layout (pax_tid.h), where a row's is
  * PAX's inside; a writer starts a new file where the table's layout has no
  * more room in this one, whatever pax.max_tuples_per_file says, and a new
- * file's number past the layout's last is refused.
+ * file's number past the layout's last is refused; deletes join the
+ * visibility map a file's row has as they are made, not as the deleter's
+ * snapshot saw it.
  *-------------------------------------------------------------------------
  */
 
@@ -634,8 +636,12 @@ void TableDeleter::DeleteWithVisibilityMap(
     auto it = iterator->Next();
 
     auto block_id = it.GetMicroPartitionId();
+    // the file's row as the transaction has it now, whose visibility map the
+    // deletes join: the deleter's statement's snapshot, taken as the deleter
+    // was made, sees neither a file a later statement of a trigger's wrote
+    // and deleted from with it, nor the map such a statement's deletes made
     auto micro_partition_metadata =
-        cbdb::GetMicroPartitionMetadata(rel_, snapshot_, block_id);
+        cbdb::GetMicroPartitionMetadata(rel_, nullptr, block_id);
     int generate = 0;
     char visimap_file_name[128];
 

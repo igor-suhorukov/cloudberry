@@ -92,9 +92,12 @@
 #include <time.h>
 #include <unistd.h>
 
+#include <netdb.h>
+
 #include "access/xact.h"
 #include "access/xlog.h"
 #include "catalog/pg_authid.h"
+#include "common/ip.h"
 #include "fmgr.h"
 #include "funcapi.h"
 #include "libpq-fe.h"
@@ -120,6 +123,7 @@
 #include "tcop/utility.h"
 #include "utils/builtins.h"
 #include "utils/guc.h"
+#include "utils/hsearch.h"
 #include "utils/memutils.h"
 #include "utils/timestamp.h"
 #include "utils/tuplestore.h"
@@ -778,6 +782,23 @@ static bool fts_nodes_changed = false;
 /* Who the prober connects as: the bootstrap superuser. */
 static char *fts_user = NULL;
 
+/*
+ * The addresses of the nodes' host names, as Cloudberry's prober keeps them
+ * (getDnsCachedAddress(), cdbutil.c): a name looked up once, and its address
+ * kept for the process, so that a primary is still reached, and failed over
+ * from, while the name service is down.  Keyed by the name.
+ */
+typedef struct FtsAddress
+{
+	char		name[NAMEDATALEN];
+	char		address[NI_MAXHOST];
+} FtsAddress;
+
+static HTAB *fts_addresses = NULL;
+
+/* Each node's, in the order of fts_nodes, for the probe to connect to. */
+static const char **fts_node_address = NULL;
+
 static void
 fts_close(FtsPair *p)
 {
@@ -830,19 +851,142 @@ fts_attempt_failed(FtsPair *p, const char *why)
 	}
 }
 
+/*
+ * A node's address, the one its host name had when first looked up: NULL,
+ * with Cloudberry's message, for a name that does not resolve, and the host
+ * as it is for one that is a directory -- a socket's, as a cluster on one
+ * machine names its nodes.  An IPv4 address where the name has one, as
+ * Cloudberry's lookup prefers, and else the first.
+ */
+static const char *
+fts_address(const char *name, int port)
+{
+	FtsAddress *e;
+	struct addrinfo hint;
+	struct addrinfo *addrs = NULL;
+	struct addrinfo *pick = NULL;
+	char		service[16];
+	char		address[NI_MAXHOST];
+	int			ret;
+
+	if (name == NULL || name[0] == '/' || name[0] == '@')
+		return name;
+
+	if (fts_addresses == NULL)
+	{
+		HASHCTL		ctl;
+
+		ctl.keysize = NAMEDATALEN;
+		ctl.entrysize = sizeof(FtsAddress);
+		fts_addresses = hash_create("gp_core fts addresses", 64, &ctl,
+									HASH_ELEM | HASH_STRINGS);
+	}
+	e = (FtsAddress *) hash_search(fts_addresses, name, HASH_FIND, NULL);
+	if (e != NULL)
+		return e->address;
+
+	memset(&hint, 0, sizeof(hint));
+	hint.ai_socktype = SOCK_STREAM;
+	hint.ai_family = AF_UNSPEC;
+	snprintf(service, sizeof(service), "%d", port);
+	ret = pg_getaddrinfo_all(name, service, &hint, &addrs);
+	if (ret != 0 || addrs == NULL)
+	{
+		if (addrs != NULL)
+			pg_freeaddrinfo_all(hint.ai_family, addrs);
+		ereport(LOG,
+				(errmsg("could not translate host name \"%s\", port \"%d\" to address: %s",
+						name, port, gai_strerror(ret))));
+		return NULL;
+	}
+	for (struct addrinfo *a = addrs; a != NULL; a = a->ai_next)
+	{
+		if (a->ai_family == AF_INET)
+		{
+			pick = a;
+			break;
+		}
+		if (pick == NULL && a->ai_family == AF_INET6)
+			pick = a;
+	}
+	if (pick == NULL ||
+		pg_getnameinfo_all((const struct sockaddr_storage *) pick->ai_addr,
+						   pick->ai_addrlen, address, sizeof(address),
+						   NULL, 0, NI_NUMERICHOST) != 0)
+	{
+		pg_freeaddrinfo_all(hint.ai_family, addrs);
+		ereport(LOG,
+				(errmsg("could not translate host name \"%s\", port \"%d\" to address: %s",
+						name, port, "no address of a family this server connects to")));
+		return NULL;
+	}
+	pg_freeaddrinfo_all(hint.ai_family, addrs);
+
+	if (strlen(name) >= NAMEDATALEN)
+		return MemoryContextStrdup(TopMemoryContext, address);
+	e = (FtsAddress *) hash_search(fts_addresses, name, HASH_ENTER, NULL);
+	strlcpy(e->address, address, sizeof(e->address));
+	return e->address;
+}
+
+/*
+ * Every node's address, as Cloudberry's prober reads them with the cluster's
+ * configuration (getAddressesForDBid(), cdbutil.c): false, and nothing
+ * probed, where a primary's name does not resolve -- Cloudberry's "cannot
+ * resolve network address for dbid=%d", which fails its prober's round, so
+ * that no segment is marked down for the name service's fault.  A mirror's
+ * name that does not resolve is its connection's to fail.  Cloudberry's
+ * fault get_dns_cached_address, a skip, gives content 0's preferred primary
+ * a name that does not (fts_errors).
+ */
+static bool
+fts_resolve_nodes(void)
+{
+	if (fts_node_address == NULL)
+		fts_node_address = MemoryContextAllocZero(TopMemoryContext,
+												  Max(fts_nnodes, 1) * sizeof(char *));
+	for (int i = 0; i < fts_nnodes; i++)
+	{
+		const char *name = fts_nodes[i].hostname;
+
+		if (fts_nodes[i].content == 0 && fts_nodes[i].preferred_role == 'p' &&
+			gp_fault_active != NULL && *gp_fault_active > 0 &&
+			GP_FAULT("get_dns_cached_address") == GP_FAULT_SKIP)
+			name = "dnserrordummyaddress";
+		fts_node_address[i] = fts_address(name, fts_nodes[i].port);
+		if (fts_node_address[i] == NULL && fts_states[i].role == 'p')
+		{
+			ereport(LOG,
+					(errcode(ERRCODE_CONNECTION_FAILURE),
+					 errmsg("cannot resolve network address for dbid=%d",
+							fts_nodes[i].dbid),
+					 errdetail("FTS probes no segment this round.")));
+			return false;
+		}
+	}
+	return true;
+}
+
 /* An attempt at the pair's message: a new connection to its target. */
 static void
 fts_attempt_begin(FtsPair *p)
 {
 	const GpSegmentConfig *node = &fts_nodes[p->target];
-	const char *keywords[5 + GP_INTERNAL_CONN_OPTIONS];
-	const char *values[5 + GP_INTERNAL_CONN_OPTIONS];
+	const char *keywords[6 + GP_INTERNAL_CONN_OPTIONS];
+	const char *values[6 + GP_INTERNAL_CONN_OPTIONS];
 	char		portbuf[16];
 	int			n = 0;
 
 	snprintf(portbuf, sizeof(portbuf), "%d", node->port);
 	keywords[n] = "host";
 	values[n++] = node->hostname;
+	/* the address its name had, where it has one (fts_resolve_nodes()) */
+	if (fts_node_address != NULL && fts_node_address[p->target] != NULL &&
+		fts_node_address[p->target] != node->hostname)
+	{
+		keywords[n] = "hostaddr";
+		values[n++] = fts_node_address[p->target];
+	}
 	keywords[n] = "port";
 	values[n++] = portbuf;
 	keywords[n] = "dbname";
@@ -1378,6 +1522,8 @@ fts_cycle(void)
 		}
 	}
 	if (self == NULL || !GpClusterIsPrimaryNow(self->dbid))
+		return;
+	if (!fts_resolve_nodes())
 		return;
 
 	pairs = palloc0_array(FtsPair, fts_nnodes);

@@ -21,7 +21,7 @@ CREATE TABLE gp_security.password_history (
 	rolname		name NOT NULL,
 	verifier	text NOT NULL,
 	set_at		timestamptz NOT NULL DEFAULT now()
-);
+) USING heap;
 
 CREATE INDEX password_history_rolname_index
 	ON gp_security.password_history (rolname, set_at DESC);
@@ -217,6 +217,14 @@ LANGUAGE C;
 COMMENT ON FUNCTION gp_security.assign_profile(name, name) IS
 	'put a role under a profile, as Cloudberry''s ALTER USER ... PROFILE does; a NULL profile takes it away';
 
+CREATE FUNCTION gp_security.enable_profile(rolename name, enable boolean)
+RETURNS void
+AS 'MODULE_PATHNAME', 'gp_security_enable_profile'
+LANGUAGE C STRICT;
+
+COMMENT ON FUNCTION gp_security.enable_profile(name, boolean) IS
+	'switch whether a role''s profile holds it, as Cloudberry''s ALTER USER ... ENABLE PROFILE and DISABLE PROFILE do';
+
 CREATE FUNCTION gp_security.lock_role(rolename name) RETURNS void
 AS 'MODULE_PATHNAME', 'gp_security_lock_role' LANGUAGE C STRICT;
 
@@ -236,6 +244,9 @@ AS 'MODULE_PATHNAME', 'gp_security_role_failed_logins' LANGUAGE C STRICT STABLE;
 
 CREATE FUNCTION gp_security.role_profile(rolename name) RETURNS name
 AS 'MODULE_PATHNAME', 'gp_security_role_profile' LANGUAGE C STRICT STABLE;
+
+CREATE FUNCTION gp_security.role_profile_enabled(rolename name) RETURNS boolean
+AS 'MODULE_PATHNAME', 'gp_security_role_profile_enabled' LANGUAGE C STRICT STABLE;
 
 CREATE FUNCTION gp_security.profile_setting(profile name, setting text) RETURNS integer
 AS 'MODULE_PATHNAME', 'gp_security_profile_setting' LANGUAGE C STRICT STABLE;
@@ -271,12 +282,14 @@ CREATE VIEW gp_security.role_profiles AS
 	SELECT r.rolname,
 		   gp_security.role_profile(r.rolname) AS profile,
 		   gp_security.role_failed_logins(r.rolname) AS failed_logins,
-		   gp_security.role_locked_until(r.rolname) AS locked_until
+		   gp_security.role_locked_until(r.rolname) AS locked_until,
+		   gp_security.role_profile_enabled(r.rolname) AS rolenableprofile
 	  FROM pg_catalog.pg_roles r
-	 WHERE gp_security.role_profile(r.rolname) IS NOT NULL;
+	 WHERE gp_security.role_profile(r.rolname) IS NOT NULL
+		OR gp_security.role_profile_enabled(r.rolname);
 
 COMMENT ON VIEW gp_security.role_profiles IS
-	'which profile each role is under, and the state of its account; Cloudberry keeps these in pg_authid';
+	'which profile each role is under, whether it holds the role, and the state of its account; Cloudberry keeps these in pg_authid';
 
 GRANT SELECT ON gp_security.role_profiles TO PUBLIC;
 

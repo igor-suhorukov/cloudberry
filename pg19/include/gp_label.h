@@ -71,7 +71,8 @@
 	X(partition_templates, true, "a partitioned table's SUBPARTITION TEMPLATEs, per level") \
 	X(catalog,         false, "this view stands for a catalog table of Cloudberry's, whose rows have gp_segment_id") \
 	X(resource_queue,  true,  "the resource queue a role is in, by OID; pg_default where there is none") \
-	X(resource_group,  true,  "the resource group a role is in, by OID; its kind's default where there is none")
+	X(resource_group,  true,  "the resource group a role is in, by OID; its kind's default where there is none") \
+	X(enable_profile,  false, "a role's password profile holds it: Cloudberry's rolenableprofile, ENABLE PROFILE")
 
 typedef enum GpLabelKey
 {

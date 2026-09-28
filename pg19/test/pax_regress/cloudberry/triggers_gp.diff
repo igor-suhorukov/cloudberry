@@ -1,0 +1,26 @@
+@@
+-ERROR:  not implemented yet on pax relations: TupleFetchRowVersion
++NOTICE:  insert trigger fired on trigtest for INSERT
+@@
+-ERROR:  not implemented yet on pax relations: TupleFetchRowVersion
++NOTICE:  insert trigger fired on trigtest for INSERT
+@@
+-ERROR:  not implemented yet on pax relations: TupleFetchRowVersion
++NOTICE:  insert trigger fired on parted_trig1 for INSERT
+@@
+-ERROR:  not implemented yet on pax relations: TupleFetchRowVersion
++NOTICE:  insert trigger fired on parted_trig2 for INSERT
+@@
+-ERROR:  not implemented yet on pax relations: TupleFetchRowVersion
++NOTICE:  insert trigger fired on parted_trig4_2 for INSERT
+@@
++NOTICE:  insert trigger fired on parted_trig3 for INSERT
+@@
++DETAIL:  Partition key of the failing row contains (partkey) = (6).
++ERROR:  no partition of relation "parted_trig" found for row
+@@
+-ERROR:  feature not supported on appendoptimized relations
++NOTICE:  insert trigger fired on trigtest_ao for INSERT
+@@
+-ERROR:  feature not supported on appendoptimized relations
++NOTICE:  insert trigger fired on trigtest_co for INSERT

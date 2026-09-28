@@ -1,0 +1,29 @@
+@@
++DETAIL:  It depends on temporary type compos.
+@@
++NOTICE:  function "fcompos1" will be effectively temporary
+@@
++DETAIL:  It depends on temporary type compos.
++NOTICE:  function "fcompos1" will be effectively temporary
+@@
++DETAIL:  It depends on temporary type compos.
++NOTICE:  function "fcompos2" will be effectively temporary
+@@
++DETAIL:  It depends on temporary type compos.
++NOTICE:  function "fcompos3" will be effectively temporary
+@@
+-HINT:  No function matches the given name and argument types. You might need to add explicit type casts.
++DETAIL:  No function of that name accepts the given argument types.
++HINT:  You might need to add explicit type casts.
+@@
+-HINT:  No function matches the given name and argument types. You might need to add explicit type casts.
++DETAIL:  No function of that name accepts the given argument types.
++HINT:  You might need to add explicit type casts.
+@@
++DETAIL:  It depends on temporary type fullname.
++NOTICE:  function "longname" will be effectively temporary
+@@
+-QUERY PLAN
+-___________
+-
++ERROR:  record type has not been registered

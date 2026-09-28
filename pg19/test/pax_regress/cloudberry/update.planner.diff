@@ -1,0 +1,15 @@
+@@
+-ERROR:  virtual tuple table slot does not have system attributes (execTuples.c:163)
++ERROR:  cannot retrieve a system column in this context
+@@
+-ERROR:  virtual tuple table slot does not have system attributes (execTuples.c:163)
++ERROR:  cannot retrieve a system column in this context
+@@
+-ERROR:  virtual tuple table slot does not have system attributes (execTuples.c:163)
++ERROR:  cannot retrieve a system column in this context
+@@
+-ERROR:  virtual tuple table slot does not have system attributes (execTuples.c:163)
++ERROR:  cannot retrieve a system column in this context
+@@
+-ERROR:  not implemented yet on pax relations: TupleFetchRowVersion
++ERROR:  cannot retrieve a system column in this context

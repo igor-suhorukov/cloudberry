@@ -200,6 +200,7 @@ static object_access_hook_type prev_object_access_hook = NULL;
  */
 static bool func_oids_valid = false;
 static Oid	segment_of_oid = InvalidOid;
+static Oid	row_segment_oid = InvalidOid;
 static Oid	dist_random_oid = InvalidOid;
 static Oid	dist_random_segments_oid = InvalidOid;
 static Oid	pg_locks_oid = InvalidOid;
@@ -252,6 +253,7 @@ lookup_func_oids(void)
 	if (func_oids_valid)
 		return;
 	segment_of_oid = lookup_func("gp_internal", "segment_of", RECORDOID);
+	row_segment_oid = lookup_func("gp_internal", "row_segment", TIDOID);
 	dist_random_oid = lookup_func("gp", "dist_random", ANYELEMENTOID);
 	dist_random_segments_oid = lookup_func("gp_internal",
 										   "dist_random_segments",
@@ -319,6 +321,39 @@ GpSegmentIsSegmentOf(Node *node, Index varno)
 
 	var = (Var *) arg;
 	return var->varno == varno && var->varattno == InvalidAttrNumber &&
+		var->varlevelsup == 0;
+}
+
+/* gp_internal.row_segment(tid), or InvalidOid where it is not installed. */
+Oid
+GpSegmentRowSegmentFunction(void)
+{
+	lookup_func_oids();
+	return row_segment_oid;
+}
+
+/*
+ * GpSegmentIsRowSegment
+ *		Is this expression gp_internal.row_segment() of the ctid of range
+ *		table entry varno's row: the segment the row came from, which only
+ *		the gather that read it knows?
+ */
+bool
+GpSegmentIsRowSegment(Node *node, Index varno)
+{
+	FuncExpr   *fexpr;
+	Var		   *var;
+
+	if (node == NULL || !IsA(node, FuncExpr))
+		return false;
+	fexpr = (FuncExpr *) node;
+	lookup_func_oids();
+	if (!OidIsValid(row_segment_oid) || fexpr->funcid != row_segment_oid ||
+		list_length(fexpr->args) != 1 || !IsA(linitial(fexpr->args), Var))
+		return false;
+	var = linitial_node(Var, fexpr->args);
+	return var->varno == varno &&
+		var->varattno == SelfItemPointerAttributeNumber &&
 		var->varlevelsup == 0;
 }
 
@@ -939,6 +974,26 @@ gp_segment_of(PG_FUNCTION_ARGS)
 	heap_deform_tuple(&tuple, cache->tupdesc, cache->values, cache->isnull);
 
 	PG_RETURN_INT32(GpHashSegment(cache->hash, cache->values, cache->isnull));
+}
+
+PG_FUNCTION_INFO_V1(gp_row_segment);
+
+/*
+ * gp_internal.row_segment(t.ctid)
+ *		The segment a row of t came from: the gather that read the row
+ *		answers it, as a column of its own (gp_scan.c), for a junk column of
+ *		an UPDATE's or a DELETE's plan (gp_explicit.c); a segment answers for
+ *		itself.  Anywhere else a ctid alone does not say.
+ */
+Datum
+gp_row_segment(PG_FUNCTION_ARGS)
+{
+	if (GpClusterContentId() >= 0)
+		PG_RETURN_INT32(GpClusterContentId());
+	ereport(ERROR,
+			(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+			 errmsg("gp_internal.row_segment() is known only to the gather that read the row")));
+	PG_RETURN_NULL();
 }
 
 /* The process id of a pg_locks or pg_stat_activity row, 0 where it has none. */

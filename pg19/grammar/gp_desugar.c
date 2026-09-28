@@ -4034,18 +4034,64 @@ rw_matview_options(GpRewrite *rw)
 }
 
 /*
- * ALTER USER u PROFILE p / NOPROFILE / ACCOUNT LOCK / ACCOUNT UNLOCK
+ * One of the role options below at token i, among the statement's tokens up
+ * to `last`: how many tokens it takes, or 0.  ENABLE PROFILE and DISABLE
+ * PROFILE come first, so that ENABLE PROFILE PROFILE p is the switch and then
+ * the profile, as Cloudberry's grammar reads it.
+ */
+static int
+role_profile_option(const GpTokens *ts, int i, int last)
+{
+	if ((tok_is(ts, i, "enable") || tok_is(ts, i, "disable")) &&
+		i + 1 < last && tok_is(ts, i + 1, "profile"))
+		return 2;
+	if (tok_is(ts, i, "profile") && i + 1 < last && tok_is_name(ts, i + 1))
+		return 2;
+	if (tok_is(ts, i, "noprofile"))
+		return 1;
+	if (tok_is(ts, i, "account") && i + 1 < last &&
+		(tok_is(ts, i + 1, "lock") || tok_is(ts, i + 1, "unlock")))
+		return 2;
+	return 0;
+}
+
+/* The carrier of the role option role_profile_option() found at token i. */
+static void
+role_profile_carry(GpRewrite *rw, int i, int at)
+{
+	const GpTokens *ts = rw->ts;
+
+	if (tok_is(ts, i, "enable"))
+		rw_add_carrier(rw, "gp", "enable_profile", "on", at);
+	else if (tok_is(ts, i, "disable"))
+		rw_add_carrier(rw, "gp", "enable_profile", "off", at);
+	else if (tok_is(ts, i, "profile"))
+		rw_add_carrier(rw, "gp", "profile", tok_name(ts, i + 1), at);
+	else if (tok_is(ts, i, "noprofile"))
+		rw_add_carrier(rw, "gp", "profile", NULL, at);
+	else
+		rw_add_carrier(rw, "gp", "account",
+					   tok_is(ts, i + 1, "lock") ? "lock" : "unlock", at);
+}
+
+/*
+ * ALTER USER u PROFILE p / NOPROFILE / ACCOUNT LOCK / ACCOUNT UNLOCK /
+ * ENABLE PROFILE / DISABLE PROFILE, one or several of them
  *	 -> ALTER USER u, carrying gp.profile = 'p' / gp.profile = DEFAULT /
- *		gp.account = 'lock' / gp.account = 'unlock' (GpAttachCarriers)
+ *		gp.account = 'lock' / gp.account = 'unlock' / gp.enable_profile =
+ *		'on' / 'off' (GpAttachCarriers)
  *
  * These are role options in Cloudberry's grammar, which PostgreSQL's does
  * not have, so the statement is PostgreSQL's ALTER USER with nothing left in
  * it but what it carries: gp_security's ProcessUtility hook takes that out and
  * does it, and the statement answers ALTER ROLE, as Cloudberry's does.
- * NOPROFILE is the port's, for taking a profile away.
+ * NOPROFILE is the port's, for taking a profile away.  ENABLE PROFILE and
+ * DISABLE PROFILE are Cloudberry's switch of whether a role's profile holds
+ * it at all (pg_authid.rolenableprofile), which its tests write beside the
+ * profile, DISABLE PROFILE PROFILE p.
  *
- * Only on its own, as before: one of these mixed with PostgreSQL's own role
- * options is not taken here.
+ * Only these, on their own or together: one of them mixed with PostgreSQL's
+ * own role options is not taken here.
  */
 static bool
 rw_role_profile(GpRewrite *rw)
@@ -4053,6 +4099,8 @@ rw_role_profile(GpRewrite *rw)
 	const GpTokens *ts = rw->ts;
 	int			i = rw->first;
 	int			at;
+	int			j;
+	int			n;
 
 	if (!tok_is(ts, i, "alter") ||
 		!(tok_is(ts, i + 1, "user") || tok_is(ts, i + 1, "role")))
@@ -4061,35 +4109,33 @@ rw_role_profile(GpRewrite *rw)
 		return false;
 
 	i += 3;
-	at = ts->toks[Min(i, ts->ntoks - 1)].off;
-
-	if (tok_is(ts, i, "profile") && tok_is_name(ts, i + 1) && i + 2 == rw->last)
-		rw_add_carrier(rw, "gp", "profile", tok_name(ts, i + 1), at);
-	else if (tok_is(ts, i, "noprofile") && i + 1 == rw->last)
-		rw_add_carrier(rw, "gp", "profile", NULL, at);
-	else if (tok_is(ts, i, "account") && tok_is(ts, i + 1, "lock") && i + 2 == rw->last)
-		rw_add_carrier(rw, "gp", "account", "lock", at);
-	else if (tok_is(ts, i, "account") && tok_is(ts, i + 1, "unlock") && i + 2 == rw->last)
-		rw_add_carrier(rw, "gp", "account", "unlock", at);
-	else
+	if (i >= rw->last)
 		return false;
+	at = ts->toks[i].off;
 
-	/* The option goes; ALTER USER u stays, and PostgreSQL takes it as is. */
+	/* every token to the statement's end one of these options */
+	for (j = i; j < rw->last; j += n)
+		if ((n = role_profile_option(ts, j, rw->last)) == 0)
+			return false;
+	for (j = i; j < rw->last; j += role_profile_option(ts, j, rw->last))
+		role_profile_carry(rw, j, at);
+
+	/* The options go; ALTER USER u stays, and PostgreSQL takes it as is. */
 	rw_edit(rw, at, (rw->last < ts->ntoks) ? ts->toks[rw->last].off : ts->srclen, "");
 	return true;
 }
 
 /*
- * CREATE ROLE ... PROFILE p, ACCOUNT LOCK or ACCOUNT UNLOCK, and CREATE USER
- * and GROUP alike, among the statement's other options
+ * CREATE ROLE ... PROFILE p, ACCOUNT LOCK, ACCOUNT UNLOCK, ENABLE PROFILE or
+ * DISABLE PROFILE, and CREATE USER and GROUP alike, among the statement's
+ * other options
  *	 -> the statement, carrying gp.profile = 'p', gp.account = 'lock' or
- *		'unlock', as ALTER USER's forms carry them (rw_role_profile)
+ *		'unlock', gp.enable_profile = 'on' or 'off', as ALTER USER's forms
+ *		carry them (rw_role_profile)
  *
  * gp_security's hook takes them out and does them once the role is made.
  * A PROFILE or ACCOUNT that is a role's name in a list -- IN ROLE a,
- * profile -- is not one of these.  ENABLE PROFILE and DISABLE PROFILE,
- * Cloudberry's switch of a role's profile on and off, are not taken: the
- * port's profiles apply to every role that has one.
+ * profile -- is not one of these.
  */
 static bool
 rw_create_role_profile(GpRewrite *rw)
@@ -4115,7 +4161,13 @@ rw_create_role_profile(GpRewrite *rw)
 			 tok_is(ts, j - 1, "admin") || tok_is(ts, j - 1, "user") ||
 			 tok_is_char(ts, j - 1, ',')))
 			continue;
-		if (tok_is(ts, j, "profile") && tok_is_name(ts, j + 1))
+		if ((tok_is(ts, j, "enable") || tok_is(ts, j, "disable")) &&
+			tok_is(ts, j + 1, "profile"))
+		{
+			name = "enable_profile";
+			value = tok_is(ts, j, "enable") ? "on" : "off";
+		}
+		else if (tok_is(ts, j, "profile") && tok_is_name(ts, j + 1))
 		{
 			name = "profile";
 			value = tok_name(ts, j + 1);

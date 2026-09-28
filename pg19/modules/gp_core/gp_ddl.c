@@ -1554,11 +1554,22 @@ gp_ddl_ProcessUtility(PlannedStmt *pstmt, const char *queryString,
 
 	if (IsA(parsetree, IndexStmt) && !((IndexStmt *) parsetree)->concurrent)
 		sync_indcheckxmin(recorded);
-	GpAnalyzeRestoreCounts(kept);
 
 	/* VACUUM: what it counted is the segments' (gp_analyze.c) */
 	if (IsA(parsetree, VacuumStmt))
 		GpAnalyzeSegmentCounts((VacuumStmt *) parsetree);
+
+	/* an index built here, of the empty copy: the segments' counts too */
+	if (IsA(parsetree, IndexStmt) || IsA(parsetree, ReindexStmt) ||
+		IsA(parsetree, RepackStmt) || IsA(parsetree, AlterTableStmt))
+		GpAnalyzeSegmentCountsAfterBuild(parsetree);
+
+	/*
+	 * and the counts an index build's tables had before it, which
+	 * Cloudberry's coordinator keeps through it: its indexes' are the
+	 * segments'
+	 */
+	GpAnalyzeRestoreCounts(kept);
 
 	recorded = NIL;
 	MemoryContextReset(ddl_cxt);

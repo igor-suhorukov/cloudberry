@@ -1,0 +1,35 @@
+# Cloudberry's isolation2_resgroup_v1_schedule (src/test/isolation2), as the
+# port runs it on a coordinator and three segments with cgroup v1, through
+# the isolation2 suite's harness, in the schedule's order: in a KVM guest
+# booted with a kernel that has cgroup v1's hierarchies (run.sh,
+# ../../docker/cgroup-v1-vm.sh).
+#
+#   run   the test runs here, in both passes; cloudberry/ holds a difference
+#         reviewed and kept, where one pass has one -- or ../resgroup/cloudberry,
+#         for a test of the v2 schedule's too that answers here alike
+#   skip  it needs what the port does not have yet: the rest of the line says
+#         what
+run  resgroup/resgroup_auxiliary_tools_v1               main
+run  resgroup/resgroup_bypass_catalog                   main
+run  resgroup/resgroup_views                            main
+run  resgroup/resgroup_syntax                           main
+run  resgroup/resgroup_transaction                      main
+run  resgroup/resgroup_name_convention                  main
+run  resgroup/resgroup_bypass                           main
+run  resgroup/resgroup_assign_slot_fail                 main
+run  resgroup/resgroup_unassign_entrydb                 main
+run  resgroup/resgroup_concurrency                      main
+run  resgroup/resgroup_wait_time                        main
+run  resgroup/resgroup_alter_concurrency                main
+run  resgroup/resgroup_cpu_max_percent                  main
+run  resgroup/resgroup_cpuset                           main
+run  resgroup/resgroup_cpuset_empty_default             main
+run  resgroup/resgroup_cancel_terminate_concurrency     main
+run  resgroup/resgroup_memory_limit                     main
+run  resgroup/resgroup_move_query                       main
+run  resgroup/resgroup_recreate                         main
+run  resgroup/resgroup_functions                        main
+run  resgroup/resgroup_pg_manage_resource_groups        main
+run  resgroup/resgroup_dumpinfo                         main
+run  resgroup/resgroup_large_group_id                   main
+run  resgroup/resgroup_disable_resgroup                 main

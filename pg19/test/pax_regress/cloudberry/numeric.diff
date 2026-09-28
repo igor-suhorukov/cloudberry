@@ -1,0 +1,24 @@
+@@
+-ERROR:  operand, lower bound, and upper bound cannot be NaN
++ width_bucket 
++--------------
++          889
++(1 row)
++
+@@
+-ERROR:  operand, lower bound, and upper bound cannot be NaN
++ERROR:  lower and upper bounds cannot be NaN
+@@
+-  pg_lsn   
+------------
+- 0/16AE7F8
++   pg_lsn   
++------------
++ 0/016AE7F8
+@@
+- pg_lsn 
+---------
+- 0/0
++   pg_lsn   
++------------
++ 0/00000000

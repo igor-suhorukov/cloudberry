@@ -1449,6 +1449,25 @@ a\b|\N' ] && [ "$(cat "$ROOT/ce_prog.txt" 2>&1)" = "to a program" ] \
 		*) notok "WHERE CURRENT OF" "$out / $out2 / $out3" ;;
 	esac
 
+	# A cursor without FOR UPDATE leaves its row free: another transaction
+	# updates it after the FETCH, and WHERE CURRENT OF finds its new version,
+	# as PostgreSQL's TID scan follows the row's updates -- the old ctid alone
+	# finds the version the update left, which the statement no longer sees.
+	for stmt in "UPDATE cur SET b = b || '+cur' WHERE CURRENT OF c4" "DELETE FROM cur WHERE CURRENT OF c4"; do
+		printf '%s\n' "BEGIN;" "DECLARE c4 CURSOR FOR SELECT a FROM cur WHERE a = 7;" "FETCH 1 FROM c4;" \
+			"SELECT pg_sleep(2);" "$stmt;" "COMMIT;" | qf 0 > "$ROOT/cur4.out" 2>&1 &
+		holder=$!
+		sleep 0.7
+		q 0 "UPDATE cur SET b = b || '+other' WHERE a = 7;" >/dev/null
+		wait "$holder"
+		out=$(q 0 "SELECT coalesce(string_agg(b, ','), 'none') FROM cur WHERE a = 7;")
+		case "$stmt|$out" in
+			UPDATE*"|c+other+cur"|DELETE*"|none")
+				ok "${stmt%% *} WHERE CURRENT OF finds the cursor's row in the version another transaction updated since the FETCH" ;;
+			*) notok "${stmt%% *} WHERE CURRENT OF after a concurrent update" "$(tr '\n' ' ' < "$ROOT/cur4.out") / $out" ;;
+		esac
+	done
+
 	# A partial table: its rows on the first so many segments, as Cloudberry's
 	# gp_debug_numsegments makes one (gp_sql's distribution.c), and read,
 	# written and counted there alone.
@@ -3208,6 +3227,72 @@ COMMIT;"
 		*) notok "EXPLAIN (SLICETABLE) of ORCA's plan" "$out" ;;
 	esac
 
+	# The planner's route sends a scan's stable conditions to the segments --
+	# the built-in functions that are stable for the settings a statement is
+	# sent with, or for the transaction's start, which the gather brings --
+	# as Cloudberry's segments evaluate them; what a node answers of itself
+	# stays here.  Their answers are the coordinator's, in any time zone.
+	q 0 "CREATE TABLE stc (id int, ts timestamptz, amt numeric, body text) DISTRIBUTED BY (id);
+	     INSERT INTO stc SELECT i, '2026-09-20 00:00:00+00'::timestamptz + (i * 37 || ' minutes')::interval,
+	                           i * 1.5, 'the quick brown fox ' || i FROM generate_series(1, 400) i;" >/dev/null
+	out=$(q 0 "SET gp.optimizer = off; SET TimeZone = 'Asia/Tokyo';
+		EXPLAIN (VERBOSE, COSTS OFF) SELECT id FROM stc WHERE ts > now() - interval '9 days'
+		   AND ts::date < '2026-09-27'::date AND amt::money > '10'::money AND to_tsvector(body) @@ to_tsquery('fox')
+		   AND current_setting('TimeZone') <> '' AND id <> pg_backend_pid();" | grep -E "Remote SQL|Filter")
+	same=0
+	for tz in UTC Asia/Tokyo America/New_York; do
+		sent=$(q 0 "SET gp.optimizer = off; SET TimeZone = '$tz';
+			SELECT count(*) FROM stc WHERE extract(hour FROM ts) < 12 AND ts::date = '2026-09-22'::date;")
+		here=$(q 0 "SET gp.optimizer = off; SET TimeZone = '$tz';
+			SELECT count(*) FROM (SELECT * FROM stc OFFSET 0) s WHERE extract(hour FROM ts) < 12 AND ts::date = '2026-09-22'::date;")
+		[ -n "$sent" ] && [ "$sent" = "$here" ] && same=$((same + 1))
+	done
+	sql=$(printf '%s\n' "$out" | sed -n 's/^ *Remote SQL: //p')
+	sent=1
+	for want in "now()" "::date" "::money" "to_tsvector(body)"; do
+		case "$sql" in *"$want"*) ;; *) sent=0 ;; esac
+	done
+	case "$sql" in *current_setting*|*pg_backend_pid*) sent=0 ;; esac
+	[ "$(printf '%s\n' "$out" | grep -c 'pg_backend_pid\|current_setting')" = 2 ] || sent=0
+	[ "$same" = 3 ] && [ "$sent" = 1 ] \
+		&& ok "under the planner a scan's stable conditions go to the segments -- now(), a date against a time with a zone, a cast to money, to_tsvector() -- and answer as here in three time zones; current_setting() and pg_backend_pid() stay here" \
+		|| notok "a scan's stable conditions under the planner, as here in three time zones" "$same / $out"
+	out=$(printf '%s\n' "SET gp.optimizer = off;" "BEGIN;" \
+		"CREATE TABLE stn (id int, ts timestamptz) DISTRIBUTED BY (id);" \
+		"INSERT INTO stn SELECT i, now() FROM generate_series(1, 30) i;" \
+		"SELECT pg_sleep(1.1);" "SELECT count(*) FROM stn WHERE ts = now() AND ts = CURRENT_TIMESTAMP;" \
+		"COMMIT;" | qf 0 | tail -1)
+	[ "$out" = 30 ] \
+		&& ok "and now() and CURRENT_TIMESTAMP on the segments are the coordinator's transaction start" \
+		|| notok "now() in a condition sent to the segments" "$out"
+
+	# A correlated scalar subquery of an aggregate, which the planner would
+	# run for each row -- a gather of the table at each -- is a join with its
+	# rows grouped by the correlation, as Cloudberry's planner makes it
+	# (gp_subselect.c): TPC-H's query 20.  Where the subquery's value over
+	# no rows is not NULL -- count() -- it stays a subquery.  The answers are
+	# the subquery's own, which OFFSET 0 keeps one.
+	q 0 "CREATE TABLE cps (pk int, sk int, qty int) DISTRIBUTED BY (pk);
+	     CREATE TABLE cli (pk int, sk int, n numeric, d date) DISTRIBUTED BY (pk);
+	     INSERT INTO cps SELECT p, s, (p * 7 + s * 13) % 100 FROM generate_series(1, 200) p, generate_series(1, 4) s;
+	     INSERT INTO cli SELECT (i % 250) + 1, (i / 250) % 4 + 1, i % 3, date '1993-06-01' + (i % 900) FROM generate_series(1, 20000) i;
+	     ANALYZE cps; ANALYZE cli;" >/dev/null
+	sub="SELECT 0.5 * sum(n) FROM cli WHERE cli.pk = cps.pk AND cli.sk = cps.sk AND d >= date '1994-01-01' AND d < date '1995-01-01'"
+	plan=$(q 0 "SET gp.optimizer = off; EXPLAIN (COSTS OFF) SELECT count(*) FROM cps WHERE qty > ($sub);" | tr '\n' ' ')
+	joined=$(q 0 "SET gp.optimizer = off; SELECT count(*), sum(qty) FROM cps WHERE qty > ($sub);")
+	perrow=$(q 0 "SET gp.optimizer = off; SELECT count(*), sum(qty) FROM cps WHERE qty > ($sub OFFSET 0);")
+	inner=$(q 0 "SET gp.optimizer = off; SELECT count(*) FROM cps p1 WHERE p1.sk IN (SELECT sk FROM cps WHERE pk < 50 AND (SELECT max(n) FROM cli WHERE cli.pk = cps.pk) < qty);")
+	inner1=$(q 0 "SET gp.optimizer = off; SELECT count(*) FROM cps p1 WHERE p1.sk IN (SELECT sk FROM cps WHERE pk < 50 AND (SELECT max(n) FROM cli WHERE cli.pk = cps.pk OFFSET 0) < qty);")
+	counted=$(q 0 "SET gp.optimizer = off; EXPLAIN (COSTS OFF) SELECT count(*) FROM cps WHERE qty > (SELECT count(*) FROM cli WHERE cli.pk = cps.pk);" | grep -c SubPlan)
+	case "$plan" in
+		*SubPlan*) notok "a correlated scalar subquery of an aggregate as a join" "$plan" ;;
+		*"Group Key: cli.pk, cli.sk"*)
+			[ "$joined" = "$perrow" ] && [ -n "$joined" ] && [ "$inner" = "$inner1" ] && [ "$counted" -ge 1 ] \
+				&& ok "under the planner a correlated scalar subquery of an aggregate is a join with its rows grouped by the correlation, answering as the subquery does; count()'s stays a subquery" \
+				|| notok "a correlated scalar subquery of an aggregate as a join" "$joined / $perrow / $inner / $inner1 / $counted" ;;
+		*) notok "a correlated scalar subquery of an aggregate as a join" "$plan" ;;
+	esac
+
 	# No secret on the coordinator: ORCA is told, and the planner gathers.
 	# None on the segments either -- a segment that has one takes the
 	# coordinator's word only with it, and a transaction's two-phase commit
@@ -3220,6 +3305,13 @@ COMMIT;"
 	case "$out" in
 		*"a Motion, without gp.cluster_secret"*"100|49800") ok "without a secret nothing is dispatched as a plan, and the answer is the same" ;;
 		*) notok "ORCA without a secret" "$out" ;;
+	esac
+	# ... nor is the coordinator's start taken from a gather: now() stays
+	# here, and a cast to money goes still.
+	out=$(q 0 "SET gp.optimizer = off; EXPLAIN (VERBOSE, COSTS OFF) SELECT id FROM stc WHERE ts > now() - interval '9 days' AND amt::money > '10'::money;" | grep -E "Remote SQL|Filter" | tr '\n' ' ')
+	case "$out" in
+		*"Filter:"*"now()"*"Remote SQL:"*"::money"*) ok "without a secret now() stays here, and a cast to money goes" ;;
+		*) notok "a scan's stable conditions without a secret" "$out" ;;
 	esac
 
 	###########################################################################
@@ -4234,6 +4326,38 @@ SQL
 		*,ExclusiveLock,*) ok "without it, an UPDATE through a view locks the table in ExclusiveLock, as the rewriter brings it in" ;;
 		*) notok "the table under a view without the detector" "$out" ;;
 	esac
+
+	# A MERGE that only inserts changes no row it reads, and locks as an
+	# INSERT does: RowExclusiveLock alone, which the parser took for INSERT
+	# privilege -- not an ExclusiveLock after it, an upgrade two such MERGEs
+	# deadlock on -- and one waits for no other.  A MERGE that updates holds
+	# ExclusiveLock, from the parser.
+	q 0 "CREATE TABLE gddm (id int, val int) DISTRIBUTED BY (id);" >/dev/null
+	for opt in off on; do
+		q 0 "TRUNCATE gddm;" >/dev/null
+		out=$(printf '%s\n' "SET gp.optimizer = $opt;" "BEGIN;" \
+			"MERGE INTO gddm t USING (VALUES (1, 1), (2, 2)) s(id, val) ON t.id = s.id WHEN NOT MATCHED THEN INSERT VALUES (s.id, s.val);" \
+			"SELECT string_agg(mode, ',' ORDER BY mode) FROM pg_locks WHERE relation = 'gddm'::regclass AND pid = pg_backend_pid();" \
+			"COMMIT;" | qf 0 | tail -1)
+		out2=$(printf '%s\n' "SET gp.optimizer = $opt;" "BEGIN;" \
+			"MERGE INTO gddm t USING (VALUES (1, 10), (3, 3)) s(id, val) ON t.id = s.id WHEN MATCHED THEN UPDATE SET val = s.val WHEN NOT MATCHED THEN INSERT VALUES (s.id, s.val);" \
+			"SELECT string_agg(mode, ',' ORDER BY mode) FROM pg_locks WHERE relation = 'gddm'::regclass AND pid = pg_backend_pid();" \
+			"COMMIT;" | qf 0 | tail -1)
+		printf '%s\n' "SET gp.optimizer = $opt;" "BEGIN;" \
+			"MERGE INTO gddm t USING (VALUES (4, 4)) s(id, val) ON t.id = s.id WHEN NOT MATCHED THEN INSERT VALUES (s.id, s.val);" \
+			"SELECT pg_sleep(3);" "COMMIT;" | qf 0 > /dev/null 2>&1 &
+		holder=$!
+		sleep 0.5
+		start=$(date +%s%N)
+		out3=$(q 0 "SET gp.optimizer = $opt; MERGE INTO gddm t USING (VALUES (5, 5)) s(id, val) ON t.id = s.id WHEN NOT MATCHED THEN INSERT VALUES (s.id, s.val);")
+		took=$(( ($(date +%s%N) - start) / 1000000 ))
+		wait "$holder"
+		n=$(q 0 "SELECT string_agg(id || ':' || val, ' ' ORDER BY id) FROM gddm;")
+		[ "$out" = "RowExclusiveLock" ] && [ "$out2" = "ExclusiveLock" ] && [ "$took" -lt 2000 ] &&
+			[ "$n" = "1:10 2:2 3:3 4:4 5:5" ] \
+			&& ok "without it, a MERGE that only inserts locks as an INSERT does, and waits for no other; one that updates holds ExclusiveLock, under gp.optimizer = $opt" \
+			|| notok "a MERGE's table lock without the detector, under gp.optimizer = $opt" "$out / $out2 / $took ms / $n / $out3"
+	done
 
 	for n in 1 2 0; do
 		start_node "$n" "shared_preload_libraries = '$PRELOAD,gp_orca'"

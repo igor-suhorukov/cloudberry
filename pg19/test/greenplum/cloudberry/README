@@ -405,6 +405,17 @@ minirepro  the statistics, as gpsd's (above); the SECURITY LABEL that
   minirepro runs, so the dump has three tablespaces where Cloudberry's has
   two -- in a trial of fewer tests, two.
 
+namespace_gp  the built-in schemas of Cloudberry's catalog: the port has no
+  pg_aoseg, since gp_ao keeps no table's segment files in a schema of their
+  own, and its pg_bitmapindex is gp_ao's extension's schema, with an OID of
+  its own, which the port's init_file makes one (Cloudberry's is 7012).
+  The test's comparison of pg_namespace across the nodes finds nothing, as
+  Cloudberry's does, in a group of its own (manifest, ns): a node makes its
+  own temporary schema, pg_temp_N by the number of its own backend, with an
+  OID of its own, so the tests before it in a group would leave schemas the
+  nodes do not share, where Cloudberry's coordinator dispatches one name and
+  OID for a session's.
+
 part_external_table (orca)  the lines ORCA's fallback trace prints for a
   partitioned table with external partitions: the dynamic foreign scan ORCA
   plans for it the port's ORCA does not translate
@@ -420,12 +431,13 @@ oid_wraparound  the OID counters, the coordinator's and each segment's.  A
   apart from its OID, takes one more from the coordinator's counter: after
   CREATE TABLE it is at 16388 where Cloudberry's is at 16387, and after the
   CREATE TABLE AS of the second scenario at neither 16390 nor 16391.  And
-  after that CREATE TABLE AS each segment's counter is at 16389, where
+  after that CREATE TABLE AS each segment's counter is at 16392, where
   Cloudberry's is at 16385: the test's database is template1's copy, and
   the suite makes gp_orca, and gp_core with it, in template1 as each pass
-  begins (run.sh), so on each segment gp_core's tables there were the
-  first files it made -- 16384 to 16387 among them -- which the counter
-  passes over, giving the new table's file 16388.
+  begins (run.sh), so on each segment gp_core's tables there -- among them
+  its loopback journal, with its TOAST table -- were the first files it
+  made, 16384 to 16390 among them, which the counter passes over, giving
+  the new table's file 16391.
 
 opclass_ddl  the words of an OWNER TO a role the user cannot act as:
   PostgreSQL 19's, "must be able to SET ROLE", where Cloudberry's own check

@@ -120,6 +120,7 @@
 #include "gp_scan.h"
 #include "gp_segment.h"
 #include "gp_settings.h"
+#include "gp_subselect.h"
 
 /* How much of a COPY's data is sent to libpq at a time. */
 #define ROUTE_CHUNK		65536
@@ -467,38 +468,35 @@ router_send(GpRouter *r, Tuplestorestate *store, int content)
 	return GpCopyInEnd();
 }
 
-/* Send every segment its rows; answer how many rows the statement wrote. */
+/*
+ * Send every segment its rows; answer how many rows the statement wrote:
+ * those the segments took, which a BEFORE row trigger that answers NULL
+ * leaves fewer than were sent, as PostgreSQL's INSERT and COPY count them.
+ */
 static uint64
 router_finish(GpRouter *r)
 {
+	uint64		total = 0;
+
 	if (r->replicated)
 	{
 		/* Every segment takes every row; the statement wrote each once. */
 		if (r->stores[0] != NULL)
 			for (int seg = 0; seg < r->nsegs; seg++)
-				(void) router_send(r, r->stores[0], seg);
-		return r->nrows;
+				total = router_send(r, r->stores[0], seg);
+		return total;
 	}
 
 	for (int seg = 0; seg < r->nsegs; seg++)
 	{
 		if (r->stores[seg] != NULL)
 		{
-			uint64		took;
-
 			if (r->reached_stmt != NULL)
 				GpReportDtxReached(r->reached_stmt, &seg, 1);
-			took = router_send(r, r->stores[seg], seg);
-
-			if (took != (uint64) tuplestore_tuple_count(r->stores[seg]))
-				ereport(ERROR,
-						(errcode(ERRCODE_INTERNAL_ERROR),
-						 errmsg("segment %d took %llu of the %lld rows sent to it",
-								seg, (unsigned long long) took,
-								(long long) tuplestore_tuple_count(r->stores[seg]))));
+			total += router_send(r, r->stores[seg], seg);
 		}
 	}
-	return r->nrows;
+	return total;
 }
 
 static void
@@ -939,6 +937,123 @@ named_relations_walker(Node *node, List **relids)
 }
 
 /*
+ * The target entries of one column's assignments the rewriter merged into
+ * one (process_matched_tle()) -- two of a composite's fields, two of an
+ * array's elements -- taken apart again into the parser's, an assignment
+ * each, in order.  pg_get_querydef() prints a column's assignment as the
+ * parser gives it: of a nest, whose input is the assignment before it, it
+ * prints the last alone, and it refuses a FieldStore of several fields.
+ */
+static List *unmerge_assignment(TargetEntry *tle, Expr *expr, List *result);
+
+/* The assignments in an assignment's input, where there are any. */
+static List *
+unmerge_input(TargetEntry *tle, Expr *input, List *result)
+{
+	Expr	   *e = input;
+
+	if (IsA(e, CoerceToDomain) &&
+		((CoerceToDomain *) e)->coercionformat == COERCE_IMPLICIT_CAST)
+		e = ((CoerceToDomain *) e)->arg;
+	if (IsA(e, FieldStore) ||
+		(IsA(e, SubscriptingRef) && ((SubscriptingRef *) e)->refassgnexpr != NULL))
+		return unmerge_assignment(tle, input, result);
+	return result;
+}
+
+/* An entry of the parser's: tle, its expression expr, under coerce's */
+static List *
+unmerged_entry(TargetEntry *tle, CoerceToDomain *coerce, Expr *expr,
+			   List *result)
+{
+	TargetEntry *one = flatCopyTargetEntry(tle);
+
+	if (coerce != NULL)
+	{
+		CoerceToDomain *c = palloc_object(CoerceToDomain);
+
+		memcpy(c, coerce, sizeof(CoerceToDomain));
+		c->arg = expr;
+		expr = (Expr *) c;
+	}
+	one->expr = expr;
+	return lappend(result, one);
+}
+
+static List *
+unmerge_assignment(TargetEntry *tle, Expr *expr, List *result)
+{
+	CoerceToDomain *coerce = NULL;
+
+	if (IsA(expr, CoerceToDomain) &&
+		((CoerceToDomain *) expr)->coercionformat == COERCE_IMPLICIT_CAST)
+	{
+		coerce = (CoerceToDomain *) expr;
+		expr = coerce->arg;
+	}
+	if (IsA(expr, FieldStore))
+	{
+		FieldStore *fs = (FieldStore *) expr;
+		ListCell   *val;
+		ListCell   *num;
+
+		result = unmerge_input(tle, fs->arg, result);
+		forboth(val, fs->newvals, num, fs->fieldnums)
+		{
+			FieldStore *one = makeNode(FieldStore);
+
+			one->arg = fs->arg;
+			one->newvals = list_make1(lfirst(val));
+			one->fieldnums = list_make1_int(lfirst_int(num));
+			one->resulttype = fs->resulttype;
+			result = unmerged_entry(tle, coerce, (Expr *) one, result);
+		}
+		return result;
+	}
+	if (IsA(expr, SubscriptingRef) &&
+		((SubscriptingRef *) expr)->refassgnexpr != NULL)
+	{
+		SubscriptingRef *sbsref = (SubscriptingRef *) expr;
+		SubscriptingRef *one = palloc_object(SubscriptingRef);
+
+		result = unmerge_input(tle, sbsref->refexpr, result);
+		memcpy(one, sbsref, sizeof(SubscriptingRef));
+		return unmerged_entry(tle, coerce, (Expr *) one, result);
+	}
+	return unmerged_entry(tle, coerce, expr, result);
+}
+
+static List *
+unmerge_target_list(List *tlist)
+{
+	List	   *result = NIL;
+
+	foreach_node(TargetEntry, tle, tlist)
+	{
+		if (tle->resjunk)
+			result = lappend(result, tle);
+		else
+			result = unmerge_assignment(tle, tle->expr, result);
+	}
+	return result;
+}
+
+void
+GpUnmergeAssignments(Query *query)
+{
+	if (query->commandType == CMD_UPDATE || query->commandType == CMD_INSERT)
+		query->targetList = unmerge_target_list(query->targetList);
+	if (query->onConflict != NULL)
+		query->onConflict->onConflictSet =
+			unmerge_target_list(query->onConflict->onConflictSet);
+	foreach_node(MergeAction, action, query->mergeActionList)
+		action->targetList = unmerge_target_list(action->targetList);
+	foreach_node(CommonTableExpr, cte, query->cteList)
+		if (IsA(cte->ctequery, Query))
+			GpUnmergeAssignments((Query *) cte->ctequery);
+}
+
+/*
  * The statement, as the segments are sent it.  pg_get_querydef() takes an
  * AccessShareLock on each relation it names and keeps it, as deparsing a
  * view does (AcquireRewriteLocks()); a statement that is run holds its own
@@ -956,6 +1071,8 @@ statement_text(Query *query)
 	foreach_oid(relid, relids)
 		if (!CheckRelationOidLockedByMe(relid, AccessShareLock, false))
 			added = lappend_oid(added, relid);
+	query = copyObject(query);
+	GpUnmergeAssignments(query);
 	sql = pg_get_querydef(query, false);
 	foreach_oid(relid, added)
 		if (CheckRelationOidLockedByMe(relid, AccessShareLock, false))
@@ -1191,10 +1308,13 @@ operation_words(CmdType operation)
 /*
  * The write, by Cloudberry's Explicit Redistribute Motion (gp_explicit.c):
  * the plan runs here, and each row it writes is written on its segment.
- * Refused, with the reason, where that cannot be done.
+ * Refused, with the reason, where that cannot be done.  "planned": the plan
+ * is PostgreSQL's planner's, which a row another transaction updated can be
+ * rechecked by, as its ModifyTable rechecks one; not ORCA's.
  */
 static Plan *
-write_explicitly(PlannedStmt *stmt, ModifyTable *mt, const char *on_conflict)
+write_explicitly(PlannedStmt *stmt, ModifyTable *mt, const char *on_conflict,
+				 bool planned)
 {
 	const char *why = GpExplicitCannot(stmt, mt, on_conflict);
 
@@ -1210,14 +1330,14 @@ write_explicitly(PlannedStmt *stmt, ModifyTable *mt, const char *on_conflict)
 						get_rel_name(rt_fetch(rti, stmt->rtable)->relid)),
 				 errdetail("%s", why)));
 	}
-	return GpExplicitMake(mt, on_conflict);
+	return GpExplicitMake(mt, on_conflict, planned);
 }
 
 /* The explicit write for a ModifyTable ORCA's translator made (merge.c). */
 Plan *
 GpModifyWriteExplicitly(PlannedStmt *stmt, Plan *modify)
 {
-	return write_explicitly(stmt, castNode(ModifyTable, modify), NULL);
+	return write_explicitly(stmt, castNode(ModifyTable, modify), NULL, false);
 }
 
 /*
@@ -1344,7 +1464,8 @@ gp_modify_planner(Query *parse, const char *query_string, int cursorOptions,
 			conflict = lnext(conflicts, conflict);
 		}
 		if (writes_distributed(stmt, (ModifyTable *) sub))
-			lfirst(lc) = write_explicitly(stmt, (ModifyTable *) sub, on_conflict);
+			lfirst(lc) = write_explicitly(stmt, (ModifyTable *) sub, on_conflict,
+										  true);
 	}
 	refuse_local_write(stmt->planTree, stmt);
 	return stmt;
@@ -1386,6 +1507,13 @@ gp_modify_planner_routed(Query *parse, const char *query_string, int cursorOptio
 		if (target != NULL)
 			on_conflict = GpExplicitOnConflict(parse, target);
 	}
+
+	/*
+	 * A correlated scalar subquery of an aggregate, whose every run would
+	 * gather a distributed table again, made a join (gp_subselect.c), as
+	 * Cloudberry's planner makes one.
+	 */
+	GpSubselectDecorrelate(parse);
 
 	/* A cursor's gathers bring each row's ctid, for WHERE CURRENT OF. */
 	was_cursor = GpScanSetCursor((cursorOptions & CURSOR_OPT_FAST_PLAN) != 0);
@@ -1435,7 +1563,7 @@ gp_modify_planner_routed(Query *parse, const char *query_string, int cursorOptio
 				return stmt;
 			}
 		}
-		stmt->planTree = write_explicitly(stmt, mt, NULL);
+		stmt->planTree = write_explicitly(stmt, mt, NULL, true);
 		return stmt;
 	}
 	rte = rt_fetch(linitial_int(mt->resultRelations), stmt->rtable);
@@ -1457,7 +1585,7 @@ gp_modify_planner_routed(Query *parse, const char *query_string, int cursorOptio
 		if (mt->returningLists != NIL || mt->onConflictAction != ONCONFLICT_NONE ||
 			mt->withCheckOptionLists != NIL)
 		{
-			stmt->planTree = write_explicitly(stmt, mt, on_conflict);
+			stmt->planTree = write_explicitly(stmt, mt, on_conflict, true);
 			return stmt;
 		}
 
@@ -1512,7 +1640,7 @@ gp_modify_planner_routed(Query *parse, const char *query_string, int cursorOptio
 							get_rel_name(rte->relid))));
 		if (why != NULL)
 		{
-			stmt->planTree = write_explicitly(stmt, mt, NULL);
+			stmt->planTree = write_explicitly(stmt, mt, NULL, true);
 			return stmt;
 		}
 
@@ -1525,7 +1653,7 @@ gp_modify_planner_routed(Query *parse, const char *query_string, int cursorOptio
 	 * written where its row is -- an UPDATE's, a DELETE's, an INSERT's.
 	 */
 	if (mt->operation == CMD_MERGE)
-		stmt->planTree = write_explicitly(stmt, mt, NULL);
+		stmt->planTree = write_explicitly(stmt, mt, NULL, true);
 
 	return stmt;
 }
@@ -1760,11 +1888,22 @@ copy_from_distributed(ParseState *pstate, CopyStmt *stmt, Relation rel,
 	error_context_stack = &errcallback;
 	for (;;)
 	{
+		MemoryContext oldcxt;
+		bool		got;
+
 		CHECK_FOR_INTERRUPTS();
 		ResetPerTupleExprContext(estate);
 		ExecClearTuple(slot);
 
-		if (!NextCopyFrom(cstate, econtext, slot->tts_values, slot->tts_isnull))
+		/*
+		 * The row's values in the per-tuple context, where NextCopyFrom()
+		 * computes a column's DEFAULT, as CopyFrom() calls it: gone with
+		 * the next row, once the router has sent this one on.
+		 */
+		oldcxt = MemoryContextSwitchTo(GetPerTupleMemoryContext(estate));
+		got = NextCopyFrom(cstate, econtext, slot->tts_values, slot->tts_isnull);
+		MemoryContextSwitchTo(oldcxt);
+		if (!got)
 			break;
 		ExecStoreVirtualTuple(slot);
 		router_put(router, slot, cstate->cur_lineno);

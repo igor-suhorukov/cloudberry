@@ -1,0 +1,33 @@
+@@
+-       name       | ident | parent | level | ?column? 
+-------------------+-------+--------+-------+----------
+- TopMemoryContext |       |        |     0 | t
+-(1 row)
+-
++ERROR:  column "parent" does not exist
++LINE 1: select name, ident, parent, level, total_bytes >= free_bytes
++                            ^
++HINT:  Perhaps you meant to reference the column "pg_backend_memory_contexts.ident".
+@@
++ enable_distinct_reordering     | on
++ enable_eager_aggregate         | on
+@@
+- enable_groupagg                | on
++ enable_group_by_reordering     | on
+@@
+- enable_incremental_sort        | off
++ enable_incremental_sort        | on
+@@
+- enable_lock_optimization       | off
+@@
+- enable_mergejoin               | off
+- enable_nestloop                | off
++ enable_mergejoin               | on
++ enable_nestloop                | on
+@@
+- enable_password_profile        | on
+@@
++ enable_self_join_elimination   | on
+@@
+-(24 rows)
++(25 rows)

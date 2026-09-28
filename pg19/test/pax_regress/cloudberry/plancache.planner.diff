@@ -1,0 +1,10 @@
+@@
+-DETAIL:  resultDesc is not NULL. plansource->resulDesc is not NULL.
+@@
+-DETAIL:  resultDesc is not NULL. plansource->resulDesc is not NULL.
+@@
+- test_mode_pp |             1 |            6
++ test_mode_pp |             2 |            5
+@@
+- test_mode_pp |             1 |            8
++ test_mode_pp |             3 |            6

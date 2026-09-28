@@ -1,0 +1,5 @@
+# PAX's unit tests the pax_gtest suite does not run, and why: none.  A line
+#
+#   skip Suite.Test  why
+#
+# leaves a test out, its name as googletest lists it.

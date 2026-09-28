@@ -1,0 +1,9 @@
+@@
++LINE 1: CREATE DOMAIN testdomain_i AS int COLLATE "POSIX";
++                                      ^
+@@
+-ERROR:  could not determine which collation to use for string comparison
++ERROR:  could not determine which collation to use for string hashing
+@@
++LINE 1: CREATE INDEX collate_test1_idx5 ON collate_test1 (a COLLATE ...
++                                                          ^

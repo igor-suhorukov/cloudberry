@@ -82,13 +82,15 @@ static uint64 statement_count = 0;
 /*
  * A statement that starts on the coordinator is named for the segments'
  * gpfdist sessions (url.c): the coordinator's session and a count of its
- * statements.  gp_core sends the setting with the statement.
+ * statements.  gp_core sends the setting with the statement.  Not a
+ * parallel worker's, a coordinator's process too, where no setting may
+ * change, and which dispatches nothing.
  */
 static void
 gp_exttable_ExecutorStart(QueryDesc *queryDesc, int eflags)
 {
 	if (statement_depth == 0 && !GpClusterIsSingleNode() &&
-		GpClusterBackendRole() == GP_ROLE_DISPATCH)
+		GpClusterBackendRole() == GP_ROLE_DISPATCH && !IsInParallelMode())
 	{
 		char		id[64];
 

@@ -51,6 +51,7 @@
 #include "utils/acl.h"
 #include "utils/builtins.h"
 #include "utils/lsyscache.h"
+#include "utils/memutils.h"
 #include "utils/timestamp.h"
 
 #include "gp_security.h"
@@ -63,6 +64,14 @@ static check_password_hook_type prev_check_password = NULL;
  */
 static bool password_pending = false;
 static bool password_pending_validuntil_given = false;
+
+/*
+ * What the CREATE ROLE now running carries of its profile (gp_security.c):
+ * whether it switches the new role's profile on, and the profile it names,
+ * for the check of its password, which comes before the role exists.
+ */
+static bool new_role_enabled = false;
+static char *new_role_profile = NULL;
 
 /* ------------------------------------------------------------------------- */
 /* Where the history lives                                                   */
@@ -214,15 +223,19 @@ gp_security_check_password(const char *username, const char *shadow_pass,
 	roleid = get_role_oid(username, true);
 
 	/*
-	 * CREATE ROLE reaches here before the role exists, so a new role is held
-	 * to the default profile until it is given one of its own.
+	 * CREATE ROLE reaches here before the role exists: a new role is held to
+	 * a profile -- the one the statement names, or the default one -- only
+	 * where the statement switches its profile on, as Cloudberry's CREATE
+	 * USER ... ENABLE PROFILE does.
 	 */
 	if (OidIsValid(roleid))
 	{
 		if (!GpProfileForRole(roleid, &profile))
 			return;
 	}
-	else if (!GpProfileRead(GP_DEFAULT_PROFILE, &profile))
+	else if (!new_role_enabled ||
+			 !GpProfileNamed(new_role_profile != NULL ? new_role_profile
+							 : GP_DEFAULT_PROFILE, &profile))
 		return;
 
 	/* PASSWORD_ALLOW_HASHED */
@@ -318,6 +331,21 @@ GpPasswordRoleOfStmt(Node *parsetree)
 	}
 
 	return NULL;
+}
+
+/*
+ * A CREATE ROLE is about to run: whether it switches the new role's profile
+ * on, and the profile it names, or NULL.  Each CREATE ROLE says, so what one
+ * left is never the next one's.
+ */
+void
+GpPasswordNewRole(bool enabled, const char *profile)
+{
+	if (new_role_profile != NULL)
+		pfree(new_role_profile);
+	new_role_enabled = enabled;
+	new_role_profile = profile != NULL
+		? MemoryContextStrdup(TopMemoryContext, profile) : NULL;
 }
 
 /*

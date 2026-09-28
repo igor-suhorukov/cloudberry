@@ -52,7 +52,7 @@ CREATE TABLE gp_ao.segfile (
 	state			smallint NOT NULL,
 	formatversion	smallint NOT NULL,
 	compacted_by	xid
-);
+) USING heap;
 CREATE UNIQUE INDEX segfile_key ON gp_ao.segfile (storage_id, segno);
 
 /*
@@ -64,7 +64,7 @@ CREATE TABLE gp_ao.visimap (
 	segno			integer NOT NULL,
 	first_row		bigint NOT NULL,
 	bitmap			bytea NOT NULL
-);
+) USING heap;
 CREATE UNIQUE INDEX visimap_key ON gp_ao.visimap (storage_id, segno, first_row);
 
 /*
@@ -78,7 +78,7 @@ CREATE TABLE gp_ao.blkdir (
 	first_row		bigint NOT NULL,
 	nrows			integer NOT NULL,
 	offsets			bigint[] NOT NULL
-);
+) USING heap;
 CREATE UNIQUE INDEX blkdir_key ON gp_ao.blkdir (storage_id, segno, first_row);
 
 /*

@@ -1,0 +1,25 @@
+@@
+-    conname     
+-----------------
++       conname        
++----------------------
++ clstr_tst_a_not_null
+@@
+-(2 rows)
++(3 rows)
+@@
++WARNING:  permission denied to execute CLUSTER on "clstr_2", skipping it
++WARNING:  permission denied to execute CLUSTER on "pg_toast_826", skipping it
+@@
+-ERROR:  cannot mark index clustered in partitioned table
++DETAIL:  This operation is not supported for partitioned tables.
++ERROR:  ALTER action SET WITHOUT CLUSTER cannot be performed on relation "clstrpart"
+@@
+-ERROR:  cannot mark index clustered in partitioned table
++DETAIL:  This operation is not supported for partitioned tables.
++ERROR:  ALTER action CLUSTER ON cannot be performed on relation "clstrpart"
+@@
++WARNING:  permission denied to execute CLUSTER on "ptnowner2", skipping it
+@@
+- ptnowner2 | f
++ ptnowner2 | t

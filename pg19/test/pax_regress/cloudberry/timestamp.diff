@@ -1,0 +1,18 @@
+@@
++ERROR:  hour "15" is invalid for the 12-hour clock
+@@
+-WARNING:  hour "15" is invalid for the 12-hour clock
+- to_timestamp_6 |         to_timestamp         
+-----------------+------------------------------
+-                | Thu Jan 01 15:54:45 1998 PST
+-(1 row)
+-
+@@
++ERROR:  hour "14" is invalid for the 12-hour clock
+@@
+-WARNING:  hour "14" is invalid for the 12-hour clock
+- to_timestamp_7 |         to_timestamp         
+-----------------+------------------------------
+-                | Fri May 12 14:45:48 2000 PDT
+-(1 row)
+-

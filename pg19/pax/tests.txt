@@ -1,0 +1,27 @@
+# PAX's unit tests, Cloudberry's googletest programs of contrib/pax_storage
+# (cmake/pax.cmake's test_main, with the PAX catalog and without the
+# vectorization engine, whose tests compile to nothing), as the module
+# pax_gtest runs them in a backend (pax_gtest.cc): a path compiles from the
+# port's copy under pg19/pax/src where there is one, as sources.txt's do.
+# Not here: paxformat_test.cc, no test of googletest's but a program that
+# checks libpaxformat.so links (cmake/pax_format.cmake), a library of
+# Cloudberry's the port does not make.
+pax_gtest.cc
+pax_gtest_helper.cc
+clustering/zorder_utils_test.cc
+comm/bitmap_test.cc
+comm/bloomfilter_test.cc
+comm/comm_test.cc
+storage/file_system_test.cc
+storage/micro_partition_file_factory_test.cc
+storage/micro_partition_stats_test.cc
+storage/pax_itemptr_test.cc
+storage/pax_test.cc
+storage/columns/pax_column_test.cc
+storage/columns/pax_compress_test.cc
+storage/columns/pax_delta_encoding_test.cc
+storage/columns/pax_encoding_test.cc
+storage/filter/pax_filter_test.cc
+storage/orc/orc_test.cc
+storage/orc/orc_vec_test.cc
+storage/vec/pax_vec_test.cc

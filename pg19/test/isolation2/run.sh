@@ -78,6 +78,8 @@ HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # resource group tests (ISOLATION2_SUITE names it in what is printed).
 SUITE="${ISOLATION2_SUITE:-isolation2}"
 MANIFEST="${ISOLATION2_MANIFEST:-$HERE/manifest}"
+# (several, the first first, for a schedule whose tests are another's too:
+# ../resgroup_v1's)
 KEPT="${ISOLATION2_KEPT:-$HERE/cloudberry}"
 SCHEDULE_NAME="${ISOLATION2_SCHEDULE_NAME:-isolation2_schedule}"
 # ... and the database it runs in, and the init file of Cloudberry's that its
@@ -92,6 +94,14 @@ EXTRA_SED="${ISOLATION2_EXTRA_SED:-}"
 CB="${CB_ISOLATION2_DIR:-/cb/src/test/isolation2}"
 CB_INIT="${ISOLATION2_CB_INIT:-$CB/init_file_isolation2}"
 GPDIFF="${GPDIFF_DIR:-/cb/src/test/regress}"
+# ... and, for a schedule of another directory's -- PAX's copy of the suite,
+# ../pax_isolation2 -- the directory of its tests, which run from this one's
+# as the driver does; the modules its clusters load and the settings they
+# have besides (ISOLATION2_PRELOAD_MORE, ISOLATION2_SETTINGS); and a file of
+# SQL its setup runs after setup.sql.  ISOLATION2_EXTRA_INIT may name several
+# init files.
+TESTS="${ISOLATION2_TESTS_DIR:-$CB}"
+SETUP_MORE="${ISOLATION2_SETUP_MORE:-}"
 
 if [ ! -f "$CB/sql_isolation_testcase.py" ] || [ ! -f "$GPDIFF/gpdiff.pl" ] ||
    [ ! -f "$GPDIFF/init_file" ] || ! python3 -c 'import pg' 2> /dev/null; then
@@ -481,9 +491,9 @@ gpdiff() {
 # A test's data file, @abs_srcdir@/data/..., is the regression suite's: its
 # Makefile links data to src/test/regress/data.
 convert() {
-	sed -e "s#@abs_srcdir@/data/#$CB/../regress/data/#g" \
-	    -e "s#@abs_srcdir@#$CB#g" \
-	    -e "s#@abs_builddir@#$CB#g" \
+	sed -e "s#@abs_srcdir@/data/#$TESTS/../regress/data/#g" \
+	    -e "s#@abs_srcdir@#$TESTS#g" \
+	    -e "s#@abs_builddir@#$TESTS#g" \
 	    -e "s#@testtablespace@#/tmp/testtablespace#g" \
 	    -e "s#@bindir@#$BINDIR#g" \
 	    -e "s#@libdir@#${PG_REGRESS_SUITE:-/cb/pgregress}#g" \
@@ -506,7 +516,7 @@ schedule_inits() {
 # the test in R/status for each, and what differs in R/regression.diffs.
 run_group() {
 	local g="$1" gi="$2" pass="$3" optimizer="$4"
-	local R="$WORK/$g/$pass" t res exp name dir out i
+	local R="$WORK/$g/$pass" t res exp name dir out i init kept
 	export PGHOST="$(group_sock "$g")" PGPORT="$(node_port "$gi" 0)"
 	export PG_BINDIR="$BINDIR"
 	export COORDINATOR_DATA_DIRECTORY="$(node_dir "$g" 0)"
@@ -524,7 +534,8 @@ run_group() {
 	: > "$R/status"
 	"$PSQL" -X -q -d postgres -c "DROP DATABASE IF EXISTS $DBNAME" > /dev/null 2>&1
 	"$PSQL" -X -q -d postgres -c "CREATE DATABASE $DBNAME TEMPLATE template0" > /dev/null
-	if ! out=$(sed -e "s#@BINDIR@#$BINDIR#g" "$HERE/setup.sql" |
+	if ! out=$({ sed -e "s#@BINDIR@#$BINDIR#g" "$HERE/setup.sql"
+			     [ -z "$SETUP_MORE" ] || cat "$SETUP_MORE"; } |
 			   "$PSQL" -X -q -v ON_ERROR_STOP=1 -d "$DBNAME" -f - 2>&1); then
 		echo "  the setup failed in group $g:" > "$R/setup-failed"
 		printf '%s\n' "$out" | sed 's/^/    /' >> "$R/setup-failed"
@@ -551,7 +562,7 @@ run_group() {
 		# port of the group's (gpexpand_gpshrink's).  A test whose name begins "port/" is the port's own, from sql/port
 		# and expected/port beside this file, as Cloudberry's are from its
 		# suite's.
-		src="$CB"
+		src="$TESTS"
 		[[ "$t" == port/* ]] && src="$HERE"
 		if [ -f "$src/input/$t.source" ]; then
 			convert "$src/input/$t.source" | respell | own_tmp | own_host | own_nodes > "$R/sql/$t.sql"
@@ -569,7 +580,7 @@ run_group() {
 		# long it ran is reported with its result, as pg_regress reports it.
 		t0=$(date +%s%N)
 		( cd "$CB" && PGOPTIONS="-c gp.optimizer=$optimizer" \
-			timeout 600 python3 "$EXEC/sql_isolation_testcase.py" \
+			timeout "${ISOLATION2_TEST_TIMEOUT:-600}" python3 "$EXEC/sql_isolation_testcase.py" \
 				--dbname="$DBNAME" --initfile_prefix="$res" \
 				< "$R/sql/$t.sql" > "$res" 2>&1 )
 		ms=$(( ($(date +%s%N) - t0) / 1000000 ))
@@ -578,7 +589,7 @@ run_group() {
 		# segment -- leaves the lines Cloudberry's init files mask.
 		inits=($(schedule_inits "$t") --gpd_init "$HERE/init_file" --gpd_init "$GPDIFF/init_file"
 		       --gpd_init "$CB_INIT")
-		[ -n "$EXTRA_INIT" ] && inits+=(--gpd_init "$EXTRA_INIT")
+		for init in $EXTRA_INIT; do inits+=(--gpd_init "$init"); done
 		[ -s "$res.initfile" ] && inits+=(--gpd_init "$res.initfile")
 
 		gpdiff -U0 "${inits[@]}" "$R/expected/$t.out" "$res" 2> /dev/null |
@@ -586,10 +597,15 @@ run_group() {
 		# A comparison that could not be made is a difference, never an empty one.
 		st=("${PIPESTATUS[@]}")
 		[ "${st[0]}" -le 1 ] && [ "${st[1]}" -eq 0 ] || echo "no comparison was made" >> "$R/canon/$t.diff"
-		dir="$KEPT/$(dirname "$t")"
-		if [ ! -s "$R/canon/$t.diff" ] ||
-		   cmp -s "$R/canon/$t.diff" "$dir/$name.$pass.diff" ||
-		   cmp -s "$R/canon/$t.diff" "$dir/$name.diff"; then
+		kept=0
+		for dir in $KEPT; do
+			dir="$dir/$(dirname "$t")"
+			if cmp -s "$R/canon/$t.diff" "$dir/$name.$pass.diff" ||
+			   cmp -s "$R/canon/$t.diff" "$dir/$name.diff"; then
+				kept=1
+			fi
+		done
+		if [ ! -s "$R/canon/$t.diff" ] || [ "$kept" -eq 1 ]; then
 			rm -f "$R/canon/$t.diff"
 			echo "ok $t $ms" >> "$R/status"
 		else

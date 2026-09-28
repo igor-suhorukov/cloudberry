@@ -1,0 +1,4 @@
+@@
+-HINT:  Could not choose a best candidate operator. You might need to add explicit type casts.
++DETAIL:  Could not choose a best candidate operator.
++HINT:  You might need to add explicit type casts.

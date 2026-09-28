@@ -1,0 +1,109 @@
+@@
+-             0 | lock_tbl1
+-             0 | lock_view1
+-             1 | lock_tbl1
+-             1 | lock_view1
+-             2 | lock_tbl1
+-             2 | lock_view1
+@@
+-(8 rows)
++(2 rows)
+@@
+-             0 | lock_tbl1
+-             0 | lock_tbl1a
+-             0 | lock_view2
+-             1 | lock_tbl1
+-             1 | lock_tbl1a
+-             1 | lock_view2
+-             2 | lock_tbl1
+-             2 | lock_tbl1a
+-             2 | lock_view2
+@@
+-(12 rows)
++(3 rows)
+@@
+-             0 | lock_tbl1
+-             0 | lock_tbl1a
+-             0 | lock_view2
+-             0 | lock_view3
+-             1 | lock_tbl1
+-             1 | lock_tbl1a
+-             1 | lock_view2
+-             1 | lock_view3
+-             2 | lock_tbl1
+-             2 | lock_tbl1a
+-             2 | lock_view2
+-             2 | lock_view3
+@@
+-(16 rows)
++(4 rows)
+@@
+-             0 | lock_tbl1
+-             0 | lock_tbl1a
+-             0 | lock_view4
+-             1 | lock_tbl1
+-             1 | lock_tbl1a
+-             1 | lock_view4
+-             2 | lock_tbl1
+-             2 | lock_tbl1a
+-             2 | lock_view4
+@@
+-(12 rows)
++(3 rows)
+@@
+-             0 | lock_tbl1
+-             0 | lock_tbl1a
+-             0 | lock_view5
+-             1 | lock_tbl1
+-             1 | lock_tbl1a
+-             1 | lock_view5
+-             2 | lock_tbl1
+-             2 | lock_tbl1a
+-             2 | lock_view5
+@@
+-(12 rows)
++(3 rows)
+@@
+-             0 | lock_tbl1
+-             0 | lock_view6
+-             1 | lock_tbl1
+-             1 | lock_view6
+-             2 | lock_tbl1
+-             2 | lock_view6
+@@
+-(8 rows)
++(2 rows)
+@@
+- lock_tbl1
+- lock_tbl1
+- lock_tbl1
+- lock_tbl2
+- lock_tbl2
+- lock_tbl2
+@@
+- lock_tbl3
+- lock_tbl3
+- lock_tbl3
+- lock_view1
+- lock_view1
+- lock_view1
+@@
+-(16 rows)
++(4 rows)
+@@
+- lock_tbl1
+- lock_tbl1
+- lock_tbl1
+- lock_tbl2
+- lock_tbl2
+- lock_tbl2
+@@
+- lock_tbl3
+- lock_tbl3
+- lock_tbl3
+- lock_view8
+- lock_view8
+- lock_view8
+@@
+-(16 rows)
++(4 rows)

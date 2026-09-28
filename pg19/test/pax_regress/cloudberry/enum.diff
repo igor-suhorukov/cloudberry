@@ -1,0 +1,11 @@
+@@
+-DETAIL:  Key columns "parent" and "i" are of incompatible types: bogus and integer.
++DETAIL:  Key columns "parent" of the referencing table and "i" of the referenced table are of incompatible types: bogus and integer.
+@@
+-ERROR:  unsafe use of new value "bad" of enum type bogon
+-HINT:  New enum values must be committed before they can be used.
++   enum_range    
++-----------------
++ {good,bad,ugly}
++(1 row)
++

@@ -91,11 +91,24 @@ extern char *GpDtxSnapshotString(Snapshot snapshot);
 extern void GpDtxWakeRecovery(void);
 
 /*
+ * A transaction journalled a part of the loopback's (gp_loopback.c) and has
+ * committed: distributed transaction recovery looks at the journals.
+ */
+extern void GpDtxNoteLoopbackJournal(void);
+
+/*
  * A segment: report its part's transaction ID to the coordinator, as
  * gp_core's hooks do after each statement -- for a module's ProcessUtility
  * hook that runs a statement itself rather than passing it on to gp_core's.
  */
 extern void GpDtxReportXid(void);
+
+/*
+ * A segment: the coordinator transactions whose parts have committed here
+ * and that a snapshot the coordinator takes now may still see in progress,
+ * as full transaction IDs, into a palloc'd array; how many.
+ */
+extern int	GpDtxCommittedParts(uint64 **gxids);
 
 /*
  * The settings, the segment's hooks and shared memory, and on the

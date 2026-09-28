@@ -1,0 +1,146 @@
+@@
+-ERROR:  function cannot execute on a QE slice because it accesses relation "public.hobbies_r"
+-CONTEXT:  SQL function "hobbies" during startup
++ name  |    name     
++-------+-------------
++ joe   | basketball
++ mike  | posthacking
++ sally | basketball
++(3 rows)
++
+@@
+-ERROR:  function cannot execute on a QE slice because it accesses relation "public.hobbies_r"
+-CONTEXT:  SQL function "hobbies" during startup
++ name  |    name     
++-------+-------------
++ jeff  | posthacking
++ joe   | basketball
++ mike  | posthacking
++ sally | basketball
++(4 rows)
++
+@@
+-ERROR:  function cannot execute on a QE slice because it accesses relation "public.equipment_r"
+-CONTEXT:  SQL function "equipment" during startup
++    name     |     name      
++-------------+---------------
++ basketball  | hightops
++ posthacking | advil
++ posthacking | peet's coffee
++ skywalking  | guts
++(4 rows)
++
+@@
+-ERROR:  function cannot execute on a QE slice because it accesses relation "public.equipment_r"
+-CONTEXT:  SQL function "equipment" during startup
++    name     |     name      
++-------------+---------------
++ basketball  | hightops
++ basketball  | hightops
++ posthacking | advil
++ posthacking | advil
++ posthacking | peet's coffee
++ posthacking | peet's coffee
++ skywalking  | guts
++(7 rows)
++
+@@
+-ERROR:  function cannot execute on a QE slice because it accesses relation "public.hobbies_r"
+-CONTEXT:  SQL function "hobbies" during startup
++ name  |    name     |     name      
++-------+-------------+---------------
++ joe   | basketball  | hightops
++ mike  | posthacking | advil
++ mike  | posthacking | peet's coffee
++ sally | basketball  | hightops
++(4 rows)
++
+@@
+-ERROR:  function cannot execute on a QE slice because it accesses relation "public.hobbies_r"
+-CONTEXT:  SQL function "hobbies" during startup
++ name  |    name     |     name      
++-------+-------------+---------------
++ jeff  | posthacking | advil
++ jeff  | posthacking | peet's coffee
++ joe   | basketball  | hightops
++ mike  | posthacking | advil
++ mike  | posthacking | peet's coffee
++ sally | basketball  | hightops
++(6 rows)
++
+@@
+-ERROR:  function cannot execute on a QE slice because it accesses relation "public.hobbies_r"
+-CONTEXT:  SQL function "hobbies" during startup
++     name      | name  |    name     
++---------------+-------+-------------
++ advil         | mike  | posthacking
++ hightops      | joe   | basketball
++ hightops      | sally | basketball
++ peet's coffee | mike  | posthacking
++(4 rows)
++
+@@
+-ERROR:  function cannot execute on a QE slice because it accesses relation "public.hobbies_r"
+-CONTEXT:  SQL function "hobbies" during startup
++     name      | name  |    name     
++---------------+-------+-------------
++ advil         | jeff  | posthacking
++ advil         | mike  | posthacking
++ hightops      | joe   | basketball
++ hightops      | sally | basketball
++ peet's coffee | jeff  | posthacking
++ peet's coffee | mike  | posthacking
++(6 rows)
++
+@@
+-ERROR:  function cannot execute on a QE slice because it accesses relation "public.hobbies_r"
+-CONTEXT:  SQL function "hobbies" during startup
++     name      |    name     | name  
++---------------+-------------+-------
++ advil         | posthacking | mike
++ hightops      | basketball  | joe
++ hightops      | basketball  | sally
++ peet's coffee | posthacking | mike
++(4 rows)
++
+@@
+-ERROR:  function cannot execute on a QE slice because it accesses relation "public.hobbies_r"
+-CONTEXT:  SQL function "hobbies" during startup
++     name      |    name     | name  
++---------------+-------------+-------
++ advil         | posthacking | jeff
++ advil         | posthacking | mike
++ hightops      | basketball  | joe
++ hightops      | basketball  | sally
++ peet's coffee | posthacking | jeff
++ peet's coffee | posthacking | mike
++(6 rows)
++
+@@
+-ERROR:  function cannot execute on a QE slice because it accesses relation "public.equipment_r"
+-CONTEXT:  SQL function "equipment" during startup
++    name     | person |     name      
++-------------+--------+---------------
++ basketball  | joe    | hightops
++ basketball  | sally  | hightops
++ posthacking | jeff   | advil
++ posthacking | jeff   | peet's coffee
++ posthacking | mike   | advil
++ posthacking | mike   | peet's coffee
++ skywalking  |        | guts
++(7 rows)
++
+@@
+-ERROR:  function cannot execute on a QE slice because it accesses relation "public.equipment_r"
+-CONTEXT:  SQL function "equipment" during startup
++    name     | person |     name      
++-------------+--------+---------------
++ basketball  | joe    | hightops
++ basketball  | sally  | hightops
++ posthacking | jeff   | advil
++ posthacking | jeff   | peet's coffee
++ posthacking | mike   | advil
++ posthacking | mike   | peet's coffee
++ skywalking  |        | guts
++(7 rows)
++

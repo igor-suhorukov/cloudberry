@@ -1,0 +1,60 @@
+@@
+-ERROR:  identity column type must be smallint, integer, or bigint
++ERROR:  cannot alter type of a column used in a distribution policy
+@@
+-ERROR:  unlogged sequences are not supported
+@@
+-ERROR:  unlogged sequences are not supported
+@@
+-          Unlogged table "public.itest17"
+- Column |  Type   | Collation | Nullable | Default 
+---------+---------+-----------+----------+---------
+- a      | integer |           | not null | 
++                    Unlogged table "public.itest17"
++ Column |  Type   | Collation | Nullable |           Default            
++--------+---------+-----------+----------+------------------------------
++ a      | integer |           | not null | generated always as identity
+@@
++ c      | integer |           | not null | generated always as identity
+@@
++               Unlogged sequence "public.itest17_a_seq"
++  Type   | Start | Minimum |  Maximum   | Increment | Cycles? | Cache 
++---------+-------+---------+------------+-----------+---------+-------
++ integer |     1 |       1 | 2147483647 |         1 | no      |     1
++Sequence for identity column: public.itest17.a
++
+@@
++               Unlogged sequence "public.itest17_c_seq"
++  Type   | Start | Minimum |  Maximum   | Increment | Cycles? | Cache 
++---------+-------+---------+------------+-----------+---------+-------
++ integer |     1 |       1 | 2147483647 |         1 | no      |     1
++Sequence for identity column: public.itest17.c
++
+@@
++Not-null constraints:
++    "itest8_f2_not_null" NOT NULL "f2"
++    "itest8_f3_not_null" NOT NULL "f3"
++    "itest8_f4_not_null" NOT NULL "f4"
+@@
+-  2 | inserted by merge
++  1 | inserted by merge
+@@
+-  2 | inserted by merge
++  1 | inserted by merge
+@@
+-ERROR:  unlogged sequences are not supported
+@@
+-ERROR:  relation "identity_dump_unlogged_a_seq" does not exist
+@@
+-          relname           | relpersistence 
+-----------------------------+----------------
+- identity_dump_logged       | p
+- identity_dump_logged_a_seq | u
+-(2 rows)
++           relname            | relpersistence 
++------------------------------+----------------
++ identity_dump_logged         | p
++ identity_dump_logged_a_seq   | u
++ identity_dump_unlogged       | u
++ identity_dump_unlogged_a_seq | p
++(4 rows)

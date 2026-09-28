@@ -86,6 +86,7 @@
 #include "utils/tuplestore.h"
 
 #include "gp_cluster.h"
+#include "gp_dtx.h"
 #include "gp_motion.h"
 
 /* ------------------------------------------------------------------------- */
@@ -534,6 +535,16 @@ split_changed_concurrently(TM_Result result)
 	GpMotionRefuseRecheck();
 }
 
+/*
+ * The old version of a row a Split moves, deleted as one moved away, as
+ * PostgreSQL deletes a row an UPDATE moves to another partition and
+ * Cloudberry's split update deletes one it moves to another segment: another
+ * transaction that meets it at READ COMMITTED -- a DELETE, an UPDATE, a
+ * locking clause, another Split -- finds it moved, and fails, rather than
+ * passing over a row that still is, elsewhere ("tuple to be locked was
+ * already moved to another partition due to concurrent update", and a
+ * Split's recheck error).
+ */
 static void
 split_delete(SplitModifyState *state, Relation rel, ItemPointer tid)
 {
@@ -541,7 +552,8 @@ split_delete(SplitModifyState *state, Relation rel, ItemPointer tid)
 	TM_FailureData tmfd;
 	TM_Result	result;
 
-	result = table_tuple_delete(rel, tid, estate->es_output_cid, 0,
+	result = table_tuple_delete(rel, tid, estate->es_output_cid,
+								TABLE_DELETE_CHANGING_PARTITION,
 								estate->es_snapshot, estate->es_crosscheck_snapshot,
 								true, &tmfd);
 	switch (result)
@@ -883,7 +895,9 @@ gp_split_delete(PG_FUNCTION_ARGS)
 		CHECK_FOR_INTERRUPTS();
 		if (!table_tuple_fetch_row_version(part->rel, tid, snapshot, part->slot))
 			continue;
-		result = table_tuple_delete(part->rel, tid, cid, 0, snapshot,
+		/* moved away, as split_delete() deletes it */
+		result = table_tuple_delete(part->rel, tid, cid,
+									TABLE_DELETE_CHANGING_PARTITION, snapshot,
 									InvalidSnapshot, true, &tmfd);
 		switch (result)
 		{
@@ -1032,6 +1046,200 @@ gp_explicit_recheck(PG_FUNCTION_ARGS)
 	foreach_ptr(RelationData, r, rels)
 		table_close(r, NoLock);
 	PG_RETURN_VOID();
+}
+
+/*
+ * The newest version of a row a statement of the explicit write came short
+ * of, into "slot", locked in "mode" -- as the statement's own recheck locked
+ * it already, so that this waits for nothing; false where there is none to
+ * recheck: the row was deleted, this transaction wrote it, or it was not
+ * updated at all, a trigger or a policy having kept the statement from it.
+ * A row moved to another partition, and a version pruned since, fail the
+ * statement, as they fail explicit_recheck().
+ */
+static bool
+latest_row(Relation rel, ItemPointer tid, CommandId cid, LockTupleMode mode,
+		   TupleTableSlot *slot)
+{
+	HeapTupleData tuple;
+	Buffer		buffer;
+	TM_Result	result;
+	TM_FailureData tmfd;
+	bool		updated;
+	bool		moved;
+
+	if (!ItemPointerIsValid(tid) ||
+		ItemPointerGetBlockNumber(tid) >= RelationGetNumberOfBlocks(rel))
+		GpMotionRefuseRecheck();
+	tuple.t_self = *tid;
+	if (!heap_fetch(rel, SnapshotAny, &tuple, &buffer, false))
+		GpMotionRefuseRecheck();
+	LockBuffer(buffer, BUFFER_LOCK_SHARE);
+	result = HeapTupleSatisfiesUpdate(&tuple, cid, buffer);
+	moved = HeapTupleHeaderIndicatesMovedPartitions(tuple.t_data);
+	updated = !ItemPointerEquals(&tuple.t_self, &tuple.t_data->t_ctid);
+	UnlockReleaseBuffer(buffer);
+
+	/*
+	 * Not updated: deleted, or this transaction's -- or passed over by the
+	 * statement for a reason of its own, a trigger's or a policy's, which a
+	 * version it could see has.  One it could not see it did not look at,
+	 * and nothing tells what it would have done: a statement sent again
+	 * under a newer snapshot that missed the version another transaction
+	 * made (explicit_requalify(), gp_explicit.c) fails as the recheck below
+	 * Cloudberry's Motion fails.
+	 */
+	if (result != TM_Updated && !(result == TM_BeingModified && updated))
+	{
+		if (result == TM_Ok || result == TM_BeingModified)
+		{
+			tuple.t_self = *tid;
+			if (!heap_fetch(rel, GetActiveSnapshot(), &tuple, &buffer, false))
+				GpMotionRefuseRecheck();
+			ReleaseBuffer(buffer);
+		}
+		return false;
+	}
+	if (moved)
+		ereport(ERROR,
+				(errcode(ERRCODE_T_R_SERIALIZATION_FAILURE),
+				 errmsg("tuple to be locked was already moved to another partition due to concurrent update")));
+
+	result = table_tuple_lock(rel, tid, GetActiveSnapshot(), slot, cid, mode,
+							  LockWaitBlock, TUPLE_LOCK_FLAG_FIND_LAST_VERSION,
+							  &tmfd);
+	switch (result)
+	{
+		case TM_Ok:
+			return true;
+		case TM_Deleted:
+		case TM_SelfModified:
+			return false;
+		case TM_Updated:
+			ereport(ERROR,
+					(errcode(ERRCODE_T_R_SERIALIZATION_FAILURE),
+					 errmsg("tuple to be locked was already moved to another partition due to concurrent update")));
+			break;
+		default:
+			elog(ERROR, "unexpected table_tuple_lock status: %u", result);
+	}
+	return false;
+}
+
+PG_FUNCTION_INFO_V1(gp_explicit_latest);
+
+/*
+ * gp_internal.explicit_latest(NULL::t, ctids, tables, deleting)
+ *		The newest version of each row a statement of the explicit write
+ *		(gp_explicit.c) came short of, for the coordinator to recheck as
+ *		PostgreSQL's READ COMMITTED UPDATE and DELETE recheck a row another
+ *		transaction changed.  The statement found each row by the ctid the
+ *		coordinator read it at; at READ COMMITTED its own recheck of one that
+ *		another transaction updated since locked the newest version, which
+ *		that ctid never matches, and passed it over.  Each such row is
+ *		returned: its index in the arrays and the ctid of its newest version,
+ *		for the coordinator to evaluate its plan over and send the statement
+ *		again with.  A row deleted since, one this transaction wrote, and one
+ *		a trigger or a policy kept the statement from, are passed over, as
+ *		PostgreSQL passes them over; a row moved to another partition, a
+ *		version pruned since, and any row of a table whose rows are not
+ *		heap's, fail the statement, as explicit_recheck() fails it.  With
+ *		each row come the coordinator transactions whose parts have committed
+ *		here and that a snapshot there may still see in progress (gp_dtx.c):
+ *		the coordinator waits for them, so that the newer snapshot it sends
+ *		the statement again under sees the version this returns.  Not STRICT,
+ *		because NULL::t is how it is told which table; for a user who may
+ *		update or delete the table's rows.
+ */
+Datum
+gp_explicit_latest(PG_FUNCTION_ARGS)
+{
+	ReturnSetInfo *rsinfo = (ReturnSetInfo *) fcinfo->resultinfo;
+	Oid			rowtype = get_fn_expr_argtype(fcinfo->flinfo, 0);
+	Oid			relid = OidIsValid(rowtype) ? typeidTypeRelid(rowtype) : InvalidOid;
+	CommandId	cid = GetCurrentCommandId(false);
+	Datum	   *tids;
+	Datum	   *toids;
+	int			n = -1;
+	LockTupleMode mode;
+	List	   *tree;
+	List	   *rels = NIL;
+	List	   *slots = NIL;
+	ArrayType  *after = NULL;
+
+	if (!OidIsValid(relid))
+		elog(ERROR, "gp_internal.explicit_latest() is not given a table's row type");
+	for (int i = 1; i < PG_NARGS(); i++)
+		if (PG_ARGISNULL(i))
+			ereport(ERROR,
+					(errcode(ERRCODE_NULL_VALUE_NOT_ALLOWED),
+					 errmsg("gp_internal.explicit_latest()'s arguments must not be null")));
+	/* who may change the table's rows may ask what became of them */
+	if (pg_class_aclcheck(relid, GetUserId(), ACL_UPDATE | ACL_DELETE) != ACLCHECK_OK)
+		aclcheck_error(ACLCHECK_NO_PRIV, get_relkind_objtype(get_rel_relkind(relid)),
+					   get_rel_name(relid));
+	split_array(PG_GETARG_ARRAYTYPE_P(1), TIDOID, &tids, &n);
+	split_array(PG_GETARG_ARRAYTYPE_P(2), OIDOID, &toids, &n);
+	/* as the statement's ExecDelete() or ExecUpdate() locked the row */
+	mode = PG_GETARG_BOOL(3) ? LockTupleExclusive : LockTupleNoKeyExclusive;
+	InitMaterializedSRF(fcinfo, 0);
+
+	tree = find_all_inheritors(relid, NoLock, NULL);
+	for (int i = 0; i < n; i++)
+	{
+		Oid			toid = DatumGetObjectId(toids[i]);
+		Relation	rel = NULL;
+		TupleTableSlot *slot = NULL;
+		Datum		values[3];
+		bool		nulls[3] = {false, false, false};
+
+		CHECK_FOR_INTERRUPTS();
+		foreach_ptr(RelationData, r, rels)
+		{
+			if (RelationGetRelid(r) != toid)
+				continue;
+			rel = r;
+			slot = list_nth(slots, foreach_current_index(r));
+		}
+		if (rel == NULL)
+		{
+			if (!list_member_oid(tree, toid))
+				elog(ERROR, "relation %u is not \"%s\" or one of its partitions",
+					 toid, get_rel_name(relid));
+			rel = table_open(toid, AccessShareLock);
+			slot = table_slot_create(rel, NULL);
+			rels = lappend(rels, rel);
+			slots = lappend(slots, slot);
+		}
+		if (rel->rd_rel->relam != HEAP_TABLE_AM_OID)
+			GpMotionRefuseRecheck();
+
+		if (!latest_row(rel, DatumGetItemPointer(tids[i]), cid, mode, slot))
+			continue;
+
+		/* what the coordinator waits for, once */
+		if (after == NULL)
+		{
+			uint64	   *gxids;
+			int			ngxids = GpDtxCommittedParts(&gxids);
+			Datum	   *elems = palloc_array(Datum, Max(ngxids, 1));
+
+			for (int k = 0; k < ngxids; k++)
+				elems[k] = Int64GetDatum((int64) gxids[k]);
+			after = construct_array_builtin(elems, ngxids, INT8OID);
+		}
+		values[0] = Int32GetDatum(i);
+		values[1] = ItemPointerGetDatum(&slot->tts_tid);
+		values[2] = PointerGetDatum(after);
+		tuplestore_putvalues(rsinfo->setResult, rsinfo->setDesc, values, nulls);
+		ExecClearTuple(slot);
+	}
+
+	foreach_ptr(TupleTableSlot, s, slots)
+		ExecDropSingleTupleTableSlot(s);
+	foreach_ptr(RelationData, r, rels)
+		table_close(r, NoLock);
+	return (Datum) 0;
 }
 
 PG_FUNCTION_INFO_V1(gp_split_insert);

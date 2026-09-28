@@ -28,8 +28,9 @@
  * belongs to the query running then, or to no query where a utility
  * statement writes -- COPY FROM; the module finishes it as that query
  * finishes, before its AFTER triggers, as a utility statement ends, at
- * finish_bulk_insert, and before a commit, and drops it, unwritten, where
- * its subtransaction aborts (access/pax_access_handle.cc).
+ * finish_bulk_insert, before a commit, and before a row it has in memory
+ * still is fetched by its TID, and drops it, unwritten, where its
+ * subtransaction aborts (access/pax_access_handle.cc).
  *-------------------------------------------------------------------------
  */
 
@@ -70,7 +71,8 @@ class CPaxDmlStateLocal final {
   static void PushOwner(const void *owner);
   static void PopOwner(const void *owner);
 
-  // Finish the states owner's statement made, in this subtransaction.
+  // Finish the states owner's statement made, in this subtransaction, and
+  // the writers it made in another statement's.
   void FinishOwned(const void *owner);
   // Finish every state: a transaction about to commit.
   void FinishAll();
@@ -81,6 +83,9 @@ class CPaxDmlStateLocal final {
   void Reparent(SubTransactionId subid, SubTransactionId parent);
   // A table being dropped: its states go, unwritten.
   void ForgetRelation(Oid relid);
+  // A row of rel's to be fetched by its TID from block: the writer writing
+  // that block now is finished first, where there is one.
+  void FinishWriting(Relation rel, BlockNumber block);
 
   bool IsInitialized() const { return cbdb::pax_memory_context != nullptr; }
   CPaxInserter *GetInserter(Relation rel);
@@ -98,9 +103,23 @@ class CPaxDmlStateLocal final {
     std::unique_ptr<CPaxDeleter> deleter;
     const void *owner = nullptr;
     SubTransactionId subid = InvalidSubTransactionId;
+    // the statement that made the inserter, and its subtransaction -- a
+    // statement of a trigger's, where its outer statement's state had none
+    const void *inserter_owner = nullptr;
+    SubTransactionId inserter_subid = InvalidSubTransactionId;
+    // the deleter's snapshot, kept until the state's deletes are made
+    Snapshot deleter_snapshot = nullptr;
+
+    ~DmlStateValue() {
+      deleter = nullptr;
+      if (deleter_snapshot)
+        UnregisterSnapshotFromOwner(deleter_snapshot,
+                                    TopTransactionResourceOwner);
+    }
   };
 
   void FinishState(Oid oid, std::shared_ptr<DmlStateValue> state);
+  void FinishInserter(DmlStateValue *state);
 
   CPaxDmlStateLocal();
   static void DmlStateResetCallback(void * /*arg*/);

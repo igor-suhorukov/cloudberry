@@ -1,0 +1,36 @@
+@@
++DETAIL:  privileges for table deptest
++ERROR:  role "regress_dep_user" cannot be dropped because some objects depend on it
+@@
+-                                               Access privileges
+- Schema |   Name   | Type  |                 Access privileges                  | Column privileges | Policies 
+---------+----------+-------+----------------------------------------------------+-------------------+----------
+-        |          |       | regress_dep_user1=a*r*w*d*D*x*t*/regress_dep_user0+|                   | 
+-        |          |       | regress_dep_user2=arwdDxt/regress_dep_user1        |                   | 
+- public | deptest1 | table | regress_dep_user0=arwdDxt/regress_dep_user0       +|                   | 
++                                                Access privileges
++ Schema |   Name   | Type  |                  Access privileges                   | Column privileges | Policies 
++--------+----------+-------+------------------------------------------------------+-------------------+----------
++        |          |       | regress_dep_user1=a*r*w*d*D*x*t*m*/regress_dep_user0+|                   | 
++        |          |       | regress_dep_user2=arwdDxtm/regress_dep_user1         |                   | 
++ public | deptest1 | table | regress_dep_user0=arwdDxtm/regress_dep_user0        +|                   | 
+@@
+-                                           Access privileges
+- Schema |   Name   | Type  |              Access privileges              | Column privileges | Policies 
+---------+----------+-------+---------------------------------------------+-------------------+----------
+- public | deptest1 | table | regress_dep_user0=arwdDxt/regress_dep_user0 |                   | 
++                                            Access privileges
++ Schema |   Name   | Type  |              Access privileges               | Column privileges | Policies 
++--------+----------+-------+----------------------------------------------+-------------------+----------
++ public | deptest1 | table | regress_dep_user0=arwdDxtm/regress_dep_user0 |                   | 
+@@
+-                   List of relations
+- Schema |  Name   | Type  |       Owner       | Storage 
+---------+---------+-------+-------------------+---------
+- public | deptest | table | regress_dep_user2 | pax
++                List of tables
++ Schema |  Name   | Type  |       Owner       
++--------+---------+-------+-------------------
++ public | deptest | table | regress_dep_user2
+@@
+-owner of type deptest_multirange

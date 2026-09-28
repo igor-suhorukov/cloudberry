@@ -1,0 +1,9 @@
+@@
+-ERROR:  "mpp_execute" of foreign data wrapper is not allowed to be altered
+@@
+-ERROR:  "a" is not a valid mpp_execute value
+@@
++ERROR:  relation "ft2" already exists
+@@
+-FDW options: (delimiter ',', mpp_execute 'any')
++FDW options: (delimiter ',', mpp_execute 'a')

@@ -1,0 +1,49 @@
+@@
++ERROR:  relation "pg_catalog.gp_stat_user_tables_summary" does not exist
++LINE 6:   FROM pg_catalog.gp_stat_user_tables_summary AS t,
++               ^
+@@
+- wait_for_stats 
+-----------------
+- 
+-(1 row)
+-
++ERROR:  relation "gp_stat_user_tables_summary" does not exist
++LINE 1: ...scan >= pr.seq_scan + 1)                     FROM gp_stat_us...
++                                                             ^
++QUERY:  SELECT (st.seq_scan >= pr.seq_scan + 1)                     FROM gp_stat_user_tables_summary AS st, pg_class AS cl, prevstats AS pr
++     WHERE st.relname='tenk2' AND cl.relname='tenk2'
++CONTEXT:  PL/pgSQL function wait_for_stats() line 18 at SQL statement
+@@
+-      relname      | n_tup_ins | n_tup_upd | n_tup_del | n_live_tup | n_dead_tup 
+--------------------+-----------+-----------+-----------+------------+------------
+- trunc_stats_test  |         3 |         0 |         0 |          0 |          0
+- trunc_stats_test1 |         6 |         0 |         3 |          1 |          0
+- trunc_stats_test2 |         1 |         0 |         0 |          1 |          0
+- trunc_stats_test3 |         4 |         0 |         0 |          2 |          2
+- trunc_stats_test4 |         2 |         0 |         0 |          0 |          2
+-(5 rows)
+-
++ERROR:  relation "gp_stat_user_tables_summary" does not exist
++LINE 2:   FROM gp_stat_user_tables_summary
++               ^
+@@
+- ?column? | ?column? 
+-----------+----------
+- t        | t
+-(1 row)
+-
++ERROR:  relation "gp_stat_user_tables_summary" does not exist
++LINE 5:   FROM gp_stat_user_tables_summary AS st, pg_class AS cl, pr...
++               ^
+@@
+- snapshot_newer 
+-----------------
+- 
+-(1 row)
+-
++ERROR:  relation "prevstats" does not exist
++LINE 2: FROM prevstats AS pr;
++             ^
+@@
++ERROR:  table "prevstats" does not exist

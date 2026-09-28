@@ -1,0 +1,18 @@
+@@
+-ERROR:  virtual tuple table slot does not have system attributes (execTuples.c:163)
++ERROR:  cannot retrieve a system column in this context
+@@
+-ERROR:  virtual tuple table slot does not have system attributes (execTuples.c:163)
++ERROR:  cannot retrieve a system column in this context
+@@
+-ERROR:  virtual tuple table slot does not have system attributes (execTuples.c:163)
++ERROR:  cannot retrieve a system column in this context
+@@
+- repeatable read
++ serializable
+@@
+- repeatable read
++ serializable
+@@
+- repeatable read
++ serializable

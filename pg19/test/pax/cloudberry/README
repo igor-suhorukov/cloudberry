@@ -4,7 +4,7 @@ port's for a reason of its own.
 
 Each file is one test's difference in the form ../../singlenode/canon.pl
 gives it, named for the expected output it differs from, a test in a
-directory with its / as _ (statistics_min_max_time_types.diff).  run.sh
+directory with its / as _ (statistics/x's is statistics_x.diff).  run.sh
 counts a test as passing when gpdiff.pl, under Cloudberry's init_file,
 PAX's and the port's, finds no difference or exactly the file's.
 
@@ -36,13 +36,4 @@ filter_tree  PAX's LOG of the filter it makes of a scan's conditions, on a
   (gp_enable_predicate_propagation, generate_implied_quals() in its
   pathkeys.c) and PostgreSQL 19's planner does not: t1's scan is sent
   v1 > 1 without v1 < 10, which would have skipped its second file.  The
-  counts are the same.
-
-statistics/min_max_time_types, statistics/min_max_other_types  the same
-  LOG, of the files and groups PAX's statistics skip, for conditions whose
-  functions are stable: a date or a timestamp compared with a timestamptz
-  and the other way round, and a time with a timetz and the other way
-  round, whose answers depend on TimeZone, and a money constant
-  cast from an integer, which depends on lc_monetary.  The coordinator
-  evaluates them, and no file or group is skipped on a segment.  The
   counts are the same.

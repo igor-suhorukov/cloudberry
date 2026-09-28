@@ -1,0 +1,14 @@
+@@
+- Finalize Aggregate                                             
+-   ->  Gather Motion 3:1  (slice1; segments: 3)                 
+-         ->  Partial Aggregate                                  
+-               ->  Bitmap Heap Scan on bmunion                  
+-                     Recheck Cond: ((b < 3) AND (a = 53))       
+-                     ->  BitmapAnd                              
+-                           ->  Bitmap Index Scan on i_bmtest2_b 
+-                                 Index Cond: (b < 3)            
+-                           ->  Bitmap Index Scan on i_bmtest2_a 
+-                                 Index Cond: (a = 53)           
++ Aggregate                                                 
++   ->  Gather Motion 1:1 on bmunion  (slice1; segments: 1) 
++         Segment: 0                                        

@@ -1,0 +1,57 @@
+PAX's copy of Cloudberry's isolation2 schedule on the port's cluster: the
+differences from PAX's expected output that have been reviewed, and are the
+port's for a reason of its own, in the form ../../singlenode/canon.pl gives
+them, kept in the test's directory (pax/ for PAX's own tests); a name with a
+pass in it (test.orca.diff) holds for that pass alone.  A test of
+Cloudberry's schedule whose copy here answers as Cloudberry's own copy does
+has its difference in ../../isolation2/cloudberry, which ../run.sh reads
+after this directory.
+
+bitmap_index_ao_sparse, bitmap_index_concurrent, bitmap_union
+  EXPLAIN of the queries the planner's route answers: the port's gather,
+  with the segment it reads, where Cloudberry's plans show the segment's
+  bitmap index, index or sequential scan, or its BitmapAnd.  The rows are
+  Cloudberry's.
+
+bitmap_index_crash
+  The size in pages of a bitmap index of a PAX table on a segment after
+  5,000 rows: 34, where PAX's expected output has 29 -- the port numbers a
+  PAX file's rows in a TID layout of its own (pax/src/pax_tid.h), which the
+  index's words cover more thinly.  The index answers alike after the
+  segment's crash and recovery.
+
+pax/compaction_full_stats
+  The pages and rows of a table and its index on the coordinator after
+  VACUUM FULL: the segments' counts, 85 rows (gp_core's gp_analyze.c brings
+  them back after a VACUUM), where Cloudberry's coordinator wrote those of
+  its own empty copy, 0 and -1.
+
+pax/snapshot_index_corruption
+  EXPLAIN of a query the planner's route answers: the port's gather, with
+  the segment it reads, where Cloudberry's plan shows the segment's bitmap
+  index scan.  And the row the REPEATABLE READ transaction still sees after
+  another transaction updated it and built an index: i = 100, as a heap
+  table's index answers, where PAX's expected output has no row -- a
+  difference PAX's own test marks FIXME.
+
+pax/vacuum_index_stats
+  A segment's pg_class after ANALYZE on the coordinator, and after the
+  VACUUMs that follow: the rows the segment counted as it built the index,
+  11, which PAX's VACUUM does not count again, where Cloudberry's ANALYZE
+  wrote its new count, 10, into the segments' pg_class too.  The port's
+  ANALYZE samples the segments and writes the coordinator's statistics
+  alone.
+
+Tests of Cloudberry's schedule whose copy here is an older one than
+Cloudberry's own, so that the isolation2 suite's difference does not
+apply, for the reason that difference is kept for
+(../../isolation2/cloudberry/README):
+
+resource_queue
+  A backend's wait for a queue's slot is an extension's wait event, of type
+  Extension, and pg_locks lists no queue.
+
+segwalrep/commit_blocking_on_standby
+  SHOW's column of repl_catchup_within_range, the port's
+  gp.repl_catchup_within_range.
+

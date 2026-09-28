@@ -28,8 +28,13 @@
  * belongs to the query running then, or to no query where a utility
  * statement writes -- COPY FROM; the module finishes it as that query
  * finishes, before its AFTER triggers, as a utility statement ends, at
- * finish_bulk_insert, and before a commit, and drops it, unwritten, where
- * its subtransaction aborts (access/pax_access_handle.cc).
+ * finish_bulk_insert, before a commit, and before a row it has in memory
+ * still is fetched by its TID, and drops it, unwritten, where its
+ * subtransaction aborts (access/pax_access_handle.cc).  A statement of a
+ * trigger's writes into its outer statement's state, and its writer is
+ * finished as it ends; what it wrote in a subtransaction that aborts is
+ * dropped -- its writer unwritten, the rows it marked deleted unmarked
+ * (access/pax_deleter.cc).
  *-------------------------------------------------------------------------
  */
 
@@ -94,6 +99,10 @@ void CPaxDmlStateLocal::FinishState(Oid oid,
     state->deleter = nullptr;
   }
 
+  FinishInserter(state.get());
+}
+
+void CPaxDmlStateLocal::FinishInserter(DmlStateValue *state) {
   if (state->inserter) {
     MemoryContext old_ctx;
     Assert(cbdb::pax_memory_context);
@@ -105,13 +114,27 @@ void CPaxDmlStateLocal::FinishState(Oid oid,
   }
 }
 
+// A statement of a trigger's that wrote rows into its outer statement's state
+// -- an AFTER INSERT trigger's UPDATE of the table its COPY writes -- has
+// them written as it ends, as its outer statement's are: a later statement's
+// snapshot sees its file's aux table's row as the writer finished it, where
+// the row the writer made, with no rows yet, is one a scan refuses.  Its
+// deletes are made with its outer statement's (GetDeleter()).
 void CPaxDmlStateLocal::FinishOwned(const void *owner) {
   std::vector<Oid> oids;
+  std::vector<std::shared_ptr<DmlStateValue>> writers;
   SubTransactionId subid = GetCurrentSubTransactionId();
 
-  for (auto &it : dml_descriptor_tab_)
-    if (it.second->owner == owner && it.second->subid == subid)
+  for (auto &it : dml_descriptor_tab_) {
+    auto state = it.second;
+
+    if (state->owner == owner && state->subid == subid)
       oids.push_back(it.first);
+    else if (state->inserter && state->inserter_owner == owner &&
+             state->inserter_subid == subid)
+      writers.push_back(state);
+  }
+  for (auto &state : writers) FinishInserter(state.get());
   for (auto oid : oids) {
     auto state = RemoveDmlState(oid);
     if (state) FinishState(oid, state);
@@ -131,20 +154,62 @@ void CPaxDmlStateLocal::FinishAll() {
 void CPaxDmlStateLocal::Forget(SubTransactionId subid) {
   std::vector<Oid> oids;
 
-  for (auto &it : dml_descriptor_tab_)
-    if (subid == InvalidSubTransactionId || it.second->subid == subid)
+  for (auto &it : dml_descriptor_tab_) {
+    auto state = it.second;
+
+    if (subid == InvalidSubTransactionId || state->subid == subid) {
       oids.push_back(it.first);
+      continue;
+    }
+    // what a statement of a trigger's wrote into its outer statement's
+    // state in the aborted subtransaction: its writer, its deleter, or its
+    // marks in the outer statement's
+    if (state->inserter && state->inserter_subid == subid)
+      state->inserter = nullptr;
+    if (state->deleter && state->deleter->BaseSubId() == subid) {
+      state->deleter = nullptr;
+      if (state->deleter_snapshot) {
+        UnregisterSnapshotFromOwner(state->deleter_snapshot,
+                                    TopTransactionResourceOwner);
+        state->deleter_snapshot = nullptr;
+      }
+    } else if (state->deleter)
+      state->deleter->ForgetMarks(subid);
+  }
   for (auto oid : oids) RemoveDmlState(oid);
   if (subid == InvalidSubTransactionId) owners_.clear();
 }
 
 void CPaxDmlStateLocal::Reparent(SubTransactionId subid,
                                  SubTransactionId parent) {
-  for (auto &it : dml_descriptor_tab_)
+  for (auto &it : dml_descriptor_tab_) {
     if (it.second->subid == subid) it.second->subid = parent;
+    if (it.second->inserter_subid == subid) it.second->inserter_subid = parent;
+    if (it.second->deleter) it.second->deleter->ReparentMarks(subid, parent);
+  }
 }
 
 void CPaxDmlStateLocal::ForgetRelation(Oid relid) { RemoveDmlState(relid); }
+
+// The rows of the micro-partition a writer writes are in memory until it is
+// finished, and its file is written then: an AFTER trigger's row, which COPY
+// FROM fetches before the statement's end, where the writers are finished.
+// The writer alone is finished, the statement's deletes kept for its end; a
+// later row of the statement's has a writer of its own.
+void CPaxDmlStateLocal::FinishWriting(Relation rel, BlockNumber block) {
+  auto state = FindDmlState(cbdb::RelationGetRelationId(rel));
+  MemoryContext old_ctx;
+
+  if (state == nullptr || state->inserter == nullptr ||
+      state->inserter->WritingBlock() != block)
+    return;
+
+  Assert(cbdb::pax_memory_context);
+  old_ctx = MemoryContextSwitchTo(cbdb::pax_memory_context);
+  state->inserter->FinishInsert();
+  MemoryContextSwitchTo(old_ctx);
+  state->inserter = nullptr;
+}
 
 void CPaxDmlStateLocal::FinishDmlState(Relation rel, CmdType /*operation*/) {
   auto oid = cbdb::RelationGetRelationId(rel);
@@ -162,6 +227,8 @@ CPaxInserter *CPaxDmlStateLocal::GetInserter(Relation rel) {
   }
   if (state->inserter == nullptr) {
     state->inserter = std::make_unique<CPaxInserter>(rel);
+    state->inserter_owner = owners_.empty() ? nullptr : owners_.back();
+    state->inserter_subid = GetCurrentSubTransactionId();
   }
   return state->inserter.get();
 }
@@ -174,7 +241,16 @@ CPaxDeleter *CPaxDmlStateLocal::GetDeleter(Relation rel, Snapshot snapshot,
     InitDmlState(rel, CMD_DELETE);
     state = FindDmlState(cbdb::RelationGetRelationId(rel));
   }
+  // Its deletes are made as the state is finished: with the outer
+  // statement, where a statement of a trigger's -- an AFTER INSERT
+  // trigger's UPDATE of the table its COPY writes -- made the deleter.
+  // Its snapshot, that statement's, is kept until then.
   if (state->deleter == nullptr && !missing_null) {
+    if (snapshot != nullptr && IsMVCCSnapshot(snapshot)) {
+      state->deleter_snapshot =
+          RegisterSnapshotOnOwner(snapshot, TopTransactionResourceOwner);
+      snapshot = state->deleter_snapshot;
+    }
     state->deleter = std::make_unique<CPaxDeleter>(rel, snapshot);
   }
   return state->deleter.get();

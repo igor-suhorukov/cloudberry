@@ -240,11 +240,21 @@ amsub() {
 copy_data_end() {
 	awk '{
 		l = tolower($0)
-		if (pending && (l ~ /^--/ || l ~ /^[ \t]*(abort|begin|commit|copy|create|drop|end|insert|reset|rollback|select|set)([ \t;]|$)/))
+		# the blank lines after such a COPY, until what follows them is known
+		if (pending && l ~ /^[ \t]*$/) {
+			blanks = blanks $0 "\n"
+			next
+		}
+		if (pending && (l ~ /^--/ || l ~ /^[ \t]*(abort|alter|analyze|begin|call|checkpoint|close|cluster|comment|commit|copy|create|deallocate|declare|delete|discard|do|drop|end|execute|explain|fetch|grant|insert|listen|lock|merge|notify|prepare|refresh|reindex|release|reset|revoke|rollback|savepoint|select|set|show|start|table|truncate|update|vacuum|values|with)([ \t;(]|$)/))
 			print "\\."
-		pending = (l ~ /^[ \t]*copy[ \t].*[ \t]from[ \t]+stdin([ \t].*)?;[ \t]*$/)
+		printf "%s", blanks
+		blanks = ""
+		# (not a line of a combined query of psql, ended by a backslash and a semicolon)
+		pending = (l ~ /^[ \t]*copy[ \t].*[ \t]from[ \t]+stdin([ \t].*)?;[ \t]*(--.*)?$/ &&
+				   l !~ /\\;[ \t]*(--.*)?$/)
 		print
-	}'
+	}
+	END { printf "%s", blanks }'
 }
 for t in $run_tests; do
 	f=$(echo "$t" | tr / _)

@@ -129,6 +129,25 @@ WORKDIR /cb
 RUN --mount=type=bind,from=cbsrc,target=/cbsrc,ro \
     git -C /cbsrc archive "$CB_REF" | tar -x -C /cb
 
+# tabulate, the header-only library PAX's dump functions print through
+# (pax/meson.build): a git submodule of Cloudberry's tree, which git archive
+# leaves out, cloned at the commit the tree's submodule names.
+RUN --mount=type=bind,from=cbsrc,target=/cbsrc,ro \
+    commit="$(git -C /cbsrc ls-tree "$CB_REF" contrib/pax_storage/src/cpp/contrib/tabulate | awk '{print $3}')" \
+ && test -n "$commit" \
+ && git clone --quiet https://github.com/p-ranav/tabulate.git /cb/contrib/pax_storage/src/cpp/contrib/tabulate \
+ && git -C /cb/contrib/pax_storage/src/cpp/contrib/tabulate checkout --quiet "$commit" \
+ && rm -rf /cb/contrib/pax_storage/src/cpp/contrib/tabulate/.git
+
+# ... and googletest, which PAX's unit tests are written with, the same way:
+# the test-only module pax_gtest runs them (pax/meson.build).
+RUN --mount=type=bind,from=cbsrc,target=/cbsrc,ro \
+    commit="$(git -C /cbsrc ls-tree "$CB_REF" contrib/pax_storage/src/cpp/contrib/googletest | awk '{print $3}')" \
+ && test -n "$commit" \
+ && git clone --quiet https://github.com/google/googletest.git /cb/contrib/pax_storage/src/cpp/contrib/googletest \
+ && git -C /cb/contrib/pax_storage/src/cpp/contrib/googletest checkout --quiet "$commit" \
+ && rm -rf /cb/contrib/pax_storage/src/cpp/contrib/googletest/.git
+
 # The modules are built against the installed PostgreSQL, found through
 # pg_config.  Configuration fails if that PostgreSQL does not carry the core
 # patch series, which is the point: the modules are written against it.
@@ -265,6 +284,10 @@ COPY --from=build /cb/contrib/pax_storage/pax_schedule /cb/contrib/pax_storage/i
                   /cb/contrib/pax_storage/
 COPY --from=build /cb/contrib/pax_storage/sql /cb/contrib/pax_storage/sql
 COPY --from=build /cb/contrib/pax_storage/expected /cb/contrib/pax_storage/expected
+# and PAX's own copies of Cloudberry's regression and isolation2 suites,
+# which the pax_regress and pax_isolation2 suites run
+COPY --from=build /cb/contrib/pax_storage/src/test/regress /cb/contrib/pax_storage/src/test/regress
+COPY --from=build /cb/contrib/pax_storage/src/test/isolation2 /cb/contrib/pax_storage/src/test/isolation2
 # pxf_fdw's tests, which the pxf_fdw suite runs; and gpcloud's, which the
 # gpcloud suite runs: its unit tests' data, its regression schedule, and the
 # server one of its tests starts.

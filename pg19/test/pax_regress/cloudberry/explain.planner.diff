@@ -1,0 +1,382 @@
+@@
+-                              explain_filter                              
+---------------------------------------------------------------------------
++                                     explain_filter                                      
++-----------------------------------------------------------------------------------------
+@@
+-                                                 explain_filter                                                 
+-----------------------------------------------------------------------------------------------------------------
++                                                         explain_filter                                                          
++---------------------------------------------------------------------------------------------------------------------------------
+@@
+-                                                 explain_filter                                                 
+-----------------------------------------------------------------------------------------------------------------
++                                                             explain_filter                                                             
++----------------------------------------------------------------------------------------------------------------------------------------
+@@
+-                                                 explain_filter                                                 
+-----------------------------------------------------------------------------------------------------------------
++                                                         explain_filter                                                          
++---------------------------------------------------------------------------------------------------------------------------------
+@@
+-                       explain_filter                       
+-------------------------------------------------------------
++                          explain_filter                          
++------------------------------------------------------------------
+@@
+-                              explain_filter                              
+---------------------------------------------------------------------------
++                                     explain_filter                                      
++-----------------------------------------------------------------------------------------
+@@
+-                explain_filter                 
+------------------------------------------------
++                 explain_filter                 
++------------------------------------------------
+@@
+-                explain_filter                 
+------------------------------------------------
++                 explain_filter                 
++------------------------------------------------
+@@
+-                                    explain_filter                                     
+----------------------------------------------------------------------------------------
++                                  explain_filter                                   
++-----------------------------------------------------------------------------------
+@@
+-                                 explain_filter                                  
+----------------------------------------------------------------------------------
++                                              explain_filter                                               
++-----------------------------------------------------------------------------------------------------------
+@@
+-                        jsonb_pretty                         
+--------------------------------------------------------------
+- [                                                          +
+-     {                                                      +
+-         "Plan": {                                          +
+-             "Plans": [                                     +
+-                 {                                          +
+-                     "Plans": [                             +
+-                         {                                  +
+-                             "Alias": "tenk1",              +
+-                             "Slice": 0,                    +
+-                             "Output": [                    +
+-                                 "unique1",                 +
+-                                 "unique2",                 +
+-                                 "two",                     +
+-                                 "four",                    +
+-                                 "ten",                     +
+-                                 "twenty",                  +
+-                                 "hundred",                 +
+-                                 "thousand",                +
+-                                 "twothousand",             +
+-                                 "fivethous",               +
+-                                 "tenthous",                +
+-                                 "odd",                     +
+-                                 "even",                    +
+-                                 "stringu1",                +
+-                                 "stringu2",                +
+-                                 "string4"                  +
+-                             ],                             +
+-                             "Schema": "public",            +
+-                             "Segments": 0,                 +
+-                             "Gang Type": "primary reader", +
+-                             "Node Type": "Seq Scan",       +
+-                             "Plan Rows": 0,                +
+-                             "Plan Width": 0,               +
+-                             "Total Cost": 0.0,             +
+-                             "Actual Rows": 0,              +
+-                             "Actual Loops": 0,             +
+-                             "Startup Cost": 0.0,           +
+-                             "Async Capable": false,        +
+-                             "Relation Name": "tenk1",      +
+-                             "Parallel Aware": false,       +
+-                             "Local Hit Blocks": 0,         +
+-                             "Temp Read Blocks": 0,         +
+-                             "Actual Total Time": 0.0,      +
+-                             "Local Read Blocks": 0,        +
+-                             "Shared Hit Blocks": 0,        +
+-                             "Shared Read Blocks": 0,       +
+-                             "Actual Startup Time": 0.0,    +
+-                             "Parent Relationship": "Outer",+
+-                             "Temp Written Blocks": 0,      +
+-                             "Local Dirtied Blocks": 0,     +
+-                             "Local Written Blocks": 0,     +
+-                             "Shared Dirtied Blocks": 0,    +
+-                             "Shared Written Blocks": 0     +
+-                         }                                  +
+-                     ],                                     +
+-                     "Slice": 0,                            +
+-                     "Output": [                            +
+-                         "unique1",                         +
+-                         "unique2",                         +
+-                         "two",                             +
+-                         "four",                            +
+-                         "ten",                             +
+-                         "twenty",                          +
+-                         "hundred",                         +
+-                         "thousand",                        +
+-                         "twothousand",                     +
+-                         "fivethous",                       +
+-                         "tenthous",                        +
+-                         "odd",                             +
+-                         "even",                            +
+-                         "stringu1",                        +
+-                         "stringu2",                        +
+-                         "string4"                          +
+-                     ],                                     +
+-                     "Segments": 0,                         +
+-                     "Sort Key": [                          +
+-                         "tenk1.tenthous"                   +
+-                     ],                                     +
+-                     "Gang Type": "primary reader",         +
+-                     "Node Type": "Sort",                   +
+-                     "Plan Rows": 0,                        +
+-                     "Plan Width": 0,                       +
+-                     "Total Cost": 0.0,                     +
+-                     "Actual Rows": 0,                      +
+-                     "Actual Loops": 0,                     +
+-                     "Startup Cost": 0.0,                   +
+-                     "Async Capable": false,                +
+-                     "Sort Segments": 0,                    +
+-                     "Parallel Aware": false,               +
+-                     "Sort Space Used": 0,                  +
+-                     "Local Hit Blocks": 0,                 +
+-                     "Temp Read Blocks": 0,                 +
+-                     "Actual Total Time": 0.0,              +
+-                     "Local Read Blocks": 0,                +
+-                     "Shared Hit Blocks": 0,                +
+-                     "Shared Read Blocks": 0,               +
+-                     "Actual Startup Time": 0.0,            +
+-                     "Parent Relationship": "Outer",        +
+-                     "Temp Written Blocks": 0,              +
+-                     "Local Dirtied Blocks": 0,             +
+-                     "Local Written Blocks": 0,             +
+-                     "Shared Dirtied Blocks": 0,            +
+-                     "Shared Written Blocks": 0,            +
+-                     "Sort Avg Segment Memory": 0,          +
+-                     "Sort Max Segment Memory": 0           +
+-                 }                                          +
+-             ],                                             +
+-             "Slice": 0,                                    +
+-             "Output": [                                    +
+-                 "unique1",                                 +
+-                 "unique2",                                 +
+-                 "two",                                     +
+-                 "four",                                    +
+-                 "ten",                                     +
+-                 "twenty",                                  +
+-                 "hundred",                                 +
+-                 "thousand",                                +
+-                 "twothousand",                             +
+-                 "fivethous",                               +
+-                 "tenthous",                                +
+-                 "odd",                                     +
+-                 "even",                                    +
+-                 "stringu1",                                +
+-                 "stringu2",                                +
+-                 "string4"                                  +
+-             ],                                             +
+-             "Senders": 0,                                  +
+-             "Segments": 0,                                 +
+-             "Gang Type": "primary reader",                 +
+-             "Merge Key": [                                 +
+-                 "tenthous"                                 +
+-             ],                                             +
+-             "Node Type": "Gather Motion",                  +
+-             "Plan Rows": 0,                                +
+-             "Receivers": 0,                                +
+-             "Plan Width": 0,                               +
+-             "Total Cost": 0.0,                             +
+-             "Actual Rows": 0,                              +
+-             "Actual Loops": 0,                             +
+-             "Startup Cost": 0.0,                           +
+-             "Async Capable": false,                        +
+-             "Parallel Aware": false,                       +
+-             "Local Hit Blocks": 0,                         +
+-             "Temp Read Blocks": 0,                         +
+-             "Actual Total Time": 0.0,                      +
+-             "Local Read Blocks": 0,                        +
+-             "Shared Hit Blocks": 0,                        +
+-             "Shared Read Blocks": 0,                       +
+-             "Actual Startup Time": 0.0,                    +
+-             "Temp Written Blocks": 0,                      +
+-             "Local Dirtied Blocks": 0,                     +
+-             "Local Written Blocks": 0,                     +
+-             "Shared Dirtied Blocks": 0,                    +
+-             "Shared Written Blocks": 0                     +
+-         },                                                 +
+-         "Planning": {                                      +
+-             "Local Hit Blocks": 0,                         +
+-             "Temp Read Blocks": 0,                         +
+-             "Local Read Blocks": 0,                        +
+-             "Shared Hit Blocks": 0,                        +
+-             "Shared Read Blocks": 0,                       +
+-             "Temp Written Blocks": 0,                      +
+-             "Local Dirtied Blocks": 0,                     +
+-             "Local Written Blocks": 0,                     +
+-             "Shared Dirtied Blocks": 0,                    +
+-             "Shared Written Blocks": 0                     +
+-         },                                                 +
+-         "Settings": {                                      +
+-             "jit": "off",                                  +
+-             "Optimizer": "Postgres query optimizer",       +
+-             "optimizer": "off",                            +
+-             "enable_parallel": "off",                      +
+-             "parallel_setup_cost": "0",                    +
+-             "parallel_tuple_cost": "0",                    +
+-             "min_parallel_table_scan_size": "0"            +
+-         },                                                 +
+-         "Triggers": [                                      +
+-         ],                                                 +
+-         "Planning Time": 0.0,                              +
+-         "Execution Time": 0.0,                             +
+-         "Slice statistics": [                              +
+-             {                                              +
+-                 "Slice": 0,                                +
+-                 "Executor Memory": 0                       +
+-             },                                             +
+-             {                                              +
+-                 "Slice": 0,                                +
+-                 "Executor Memory": {                       +
+-                     "Average": 0,                          +
+-                     "Workers": 0,                          +
+-                     "Subworkers": 0,                       +
+-                     "Maximum Memory Used": 0               +
+-                 }                                          +
+-             }                                              +
+-         ],                                                 +
+-         "Statement statistics": {                          +
+-             "Memory used": 0                               +
+-         }                                                  +
+-     }                                                      +
++                                                                                               jsonb_pretty                                                                                               
++----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
++ [                                                                                                                                                                                                       +
++     {                                                                                                                                                                                                   +
++         "Plan": {                                                                                                                                                                                       +
++             "Plans": [                                                                                                                                                                                  +
++                 {                                                                                                                                                                                       +
++                     "Alias": "tenk1",                                                                                                                                                                   +
++                     "Output": [                                                                                                                                                                         +
++                         "unique1",                                                                                                                                                                      +
++                         "unique2",                                                                                                                                                                      +
++                         "two",                                                                                                                                                                          +
++                         "four",                                                                                                                                                                         +
++                         "ten",                                                                                                                                                                          +
++                         "twenty",                                                                                                                                                                       +
++                         "hundred",                                                                                                                                                                      +
++                         "thousand",                                                                                                                                                                     +
++                         "twothousand",                                                                                                                                                                  +
++                         "fivethous",                                                                                                                                                                    +
++                         "tenthous",                                                                                                                                                                     +
++                         "odd",                                                                                                                                                                          +
++                         "even",                                                                                                                                                                         +
++                         "stringu1",                                                                                                                                                                     +
++                         "stringu2",                                                                                                                                                                     +
++                         "string4"                                                                                                                                                                       +
++                     ],                                                                                                                                                                                  +
++                     "Schema": "public",                                                                                                                                                                 +
++                     "Disabled": false,                                                                                                                                                                  +
++                     "Segments": 0,                                                                                                                                                                      +
++                     "Node Type": "Custom Scan",                                                                                                                                                         +
++                     "Plan Rows": 0,                                                                                                                                                                     +
++                     "Plan Width": 0,                                                                                                                                                                    +
++                     "Remote SQL": "SELECT unique1, unique2, two, four, ten, twenty, hundred, thousand, twothousand, fivethous, tenthous, odd, even, stringu1, stringu2, string4 FROM ONLY public.tenk1",+
++                     "Total Cost": 0.0,                                                                                                                                                                  +
++                     "Actual Rows": 0.0,                                                                                                                                                                 +
++                     "Actual Loops": 0,                                                                                                                                                                  +
++                     "Startup Cost": 0.0,                                                                                                                                                                +
++                     "Async Capable": false,                                                                                                                                                             +
++                     "Relation Name": "tenk1",                                                                                                                                                           +
++                     "Parallel Aware": false,                                                                                                                                                            +
++                     "Local Hit Blocks": 0,                                                                                                                                                              +
++                     "Temp Read Blocks": 0,                                                                                                                                                              +
++                     "Actual Total Time": 0.0,                                                                                                                                                           +
++                     "Local Read Blocks": 0,                                                                                                                                                             +
++                     "Shared Hit Blocks": 0,                                                                                                                                                             +
++                     "Shared Read Blocks": 0,                                                                                                                                                            +
++                     "Actual Startup Time": 0.0,                                                                                                                                                         +
++                     "Parent Relationship": "Outer",                                                                                                                                                     +
++                     "Temp Written Blocks": 0,                                                                                                                                                           +
++                     "Custom Plan Provider": "Gather Motion",                                                                                                                                            +
++                     "Local Dirtied Blocks": 0,                                                                                                                                                          +
++                     "Local Written Blocks": 0,                                                                                                                                                          +
++                     "Shared Dirtied Blocks": 0,                                                                                                                                                         +
++                     "Shared Written Blocks": 0                                                                                                                                                          +
++                 }                                                                                                                                                                                       +
++             ],                                                                                                                                                                                          +
++             "Output": [                                                                                                                                                                                 +
++                 "unique1",                                                                                                                                                                              +
++                 "unique2",                                                                                                                                                                              +
++                 "two",                                                                                                                                                                                  +
++                 "four",                                                                                                                                                                                 +
++                 "ten",                                                                                                                                                                                  +
++                 "twenty",                                                                                                                                                                               +
++                 "hundred",                                                                                                                                                                              +
++                 "thousand",                                                                                                                                                                             +
++                 "twothousand",                                                                                                                                                                          +
++                 "fivethous",                                                                                                                                                                            +
++                 "tenthous",                                                                                                                                                                             +
++                 "odd",                                                                                                                                                                                  +
++                 "even",                                                                                                                                                                                 +
++                 "stringu1",                                                                                                                                                                             +
++                 "stringu2",                                                                                                                                                                             +
++                 "string4"                                                                                                                                                                               +
++             ],                                                                                                                                                                                          +
++             "Disabled": false,                                                                                                                                                                          +
++             "Sort Key": [                                                                                                                                                                               +
++                 "tenk1.tenthous"                                                                                                                                                                        +
++             ],                                                                                                                                                                                          +
++             "Node Type": "Sort",                                                                                                                                                                        +
++             "Plan Rows": 0,                                                                                                                                                                             +
++             "Plan Width": 0,                                                                                                                                                                            +
++             "Total Cost": 0.0,                                                                                                                                                                          +
++             "Actual Rows": 0.0,                                                                                                                                                                         +
++             "Sort Method": "quicksort",                                                                                                                                                                 +
++             "Actual Loops": 0,                                                                                                                                                                          +
++             "Startup Cost": 0.0,                                                                                                                                                                        +
++             "Async Capable": false,                                                                                                                                                                     +
++             "Parallel Aware": false,                                                                                                                                                                    +
++             "Sort Space Type": "Memory",                                                                                                                                                                +
++             "Sort Space Used": 0,                                                                                                                                                                       +
++             "Local Hit Blocks": 0,                                                                                                                                                                      +
++             "Temp Read Blocks": 0,                                                                                                                                                                      +
++             "Actual Total Time": 0.0,                                                                                                                                                                   +
++             "Local Read Blocks": 0,                                                                                                                                                                     +
++             "Shared Hit Blocks": 0,                                                                                                                                                                     +
++             "Shared Read Blocks": 0,                                                                                                                                                                    +
++             "Actual Startup Time": 0.0,                                                                                                                                                                 +
++             "Temp Written Blocks": 0,                                                                                                                                                                   +
++             "Local Dirtied Blocks": 0,                                                                                                                                                                  +
++             "Local Written Blocks": 0,                                                                                                                                                                  +
++             "Shared Dirtied Blocks": 0,                                                                                                                                                                 +
++             "Shared Written Blocks": 0                                                                                                                                                                  +
++         },                                                                                                                                                                                              +
++         "Planning": {                                                                                                                                                                                   +
++             "Local Hit Blocks": 0,                                                                                                                                                                      +
++             "Temp Read Blocks": 0,                                                                                                                                                                      +
++             "Local Read Blocks": 0,                                                                                                                                                                     +
++             "Shared Hit Blocks": 0,                                                                                                                                                                     +
++             "Shared Read Blocks": 0,                                                                                                                                                                    +
++             "Temp Written Blocks": 0,                                                                                                                                                                   +
++             "Local Dirtied Blocks": 0,                                                                                                                                                                  +
++             "Local Written Blocks": 0,                                                                                                                                                                  +
++             "Shared Dirtied Blocks": 0,                                                                                                                                                                 +
++             "Shared Written Blocks": 0                                                                                                                                                                  +
++         },                                                                                                                                                                                              +
++         "Triggers": [                                                                                                                                                                                   +
++         ],                                                                                                                                                                                              +
++         "Planning Time": 0.0,                                                                                                                                                                           +
++         "Execution Time": 0.0                                                                                                                                                                           +
++     }                                                                                                                                                                                                   +
+@@
+-                              explain_filter                              
+---------------------------------------------------------------------------
++                                     explain_filter                                     
++----------------------------------------------------------------------------------------
+@@
+-                              explain_filter                              
+---------------------------------------------------------------------------
++                                         explain_filter                                         
++------------------------------------------------------------------------------------------------

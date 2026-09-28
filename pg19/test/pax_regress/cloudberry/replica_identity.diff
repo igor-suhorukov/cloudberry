@@ -1,0 +1,29 @@
+@@
++Not-null constraints:
++    "test_replica_identity_id_not_null" NOT NULL "id"
++    "test_replica_identity_keya_not_null" NOT NULL "keya"
++    "test_replica_identity_keyb_not_null" NOT NULL "keyb"
+@@
+-ERROR:  cannot alter column with primary key or unique constraint
+-HINT:  DROP the constraint first, and recreate it after the ALTER
+@@
+-       Table "public.test_replica_identity2"
+- Column |  Type   | Collation | Nullable | Default 
+---------+---------+-----------+----------+---------
+- id     | integer |           | not null | 
++      Table "public.test_replica_identity2"
++ Column |  Type  | Collation | Nullable | Default 
++--------+--------+-----------+----------+---------
++ id     | bigint |           | not null | 
+@@
+-Partitions: test_replica_identity4_1 FOR VALUES IN (1)
++Not-null constraints:
++    "test_replica_identity4_id_not_null" NOT NULL "id"
++Partitions:
++    test_replica_identity4_1 FOR VALUES IN (1)
+@@
+-Partitions: test_replica_identity4_1 FOR VALUES IN (1)
++Not-null constraints:
++    "test_replica_identity4_id_not_null" NOT NULL "id"
++Partitions:
++    test_replica_identity4_1 FOR VALUES IN (1)

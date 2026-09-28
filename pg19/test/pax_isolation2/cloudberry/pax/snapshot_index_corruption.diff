@@ -1,0 +1,24 @@
+@@
+- Gather Motion 1:1  (slice1; segments: 1)      
+-   ->  Bitmap Heap Scan on test_pax            
+-         Recheck Cond: (i = 101)               
+-         ->  Bitmap Index Scan on test_pax_idx 
+-               Index Cond: (i = 101)           
++ Gather Motion 1:1 on test_pax  (slice1; segments: 1) 
++   Segment: 0                                         
+@@
+- Gather Motion 1:1  (slice1; segments: 1)      
+-   ->  Bitmap Heap Scan on test_pax            
+-         Recheck Cond: (i = 100)               
+-         ->  Bitmap Index Scan on test_pax_idx 
+-               Index Cond: (i = 100)           
++ Gather Motion 1:1 on test_pax  (slice1; segments: 1) 
++   Segment: 2                                         
+@@
+- i 
+----
+-(0 rows)
++ i   
++-----
++ 100 
++(1 row)

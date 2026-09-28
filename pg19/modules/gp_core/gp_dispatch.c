@@ -92,6 +92,7 @@
 #include "fmgr.h"
 #include "funcapi.h"
 #include "libpq-fe.h"
+#include "libpq/libpq-be.h"
 #include "libpq/libpq-be-fe-helpers.h"
 #include "mb/pg_wchar.h"
 #include "miscadmin.h"
@@ -200,6 +201,15 @@ static const struct config_enum_entry gp_log_gang_options[] = {
  */
 static const char *const synced_settings[] = {
 	/*
+	 * the session user, SET SESSION AUTHORIZATION's, first: what a statement
+	 * a segment decides for itself -- CLUSTER and VACUUM of every table the
+	 * user may -- it decides as the coordinator's user, not as the
+	 * connection's, where the connection may take it (sync_value()); and the
+	 * settings only a superuser sets, and "role", are set as the session user
+	 * it sets
+	 */
+	"session_authorization",
+	/*
 	 * PostGIS raster's, which its functions read on a segment as on the
 	 * coordinator: where GDAL finds its data, which drivers it may use and
 	 * whether a raster's file outside the database may be read -- settings
@@ -250,6 +260,8 @@ static const char *const synced_settings[] = {
 	"lc_monetary",
 	"lc_numeric",
 	"lc_time",
+	/* to_tsvector() and its kin of one argument, sent in a scan's conditions */
+	"default_text_search_config",
 	/*
 	 * which messages a segment sends: a LOG one too where the client asks
 	 * for it, as Cloudberry's segments send it (segment_notice_receiver())
@@ -386,11 +398,42 @@ static const char *const superuser_settings[] = {
 };
 
 /*
+ * Whether the segments have a table access method of this database's: one
+ * made before this transaction, as CREATE EXTENSION pax is sent to them once
+ * the coordinator has run it.  Heap, every node's, is not looked up: the
+ * catalog's page a session's first lookup reads would be counted to the
+ * gather whose dispatch asked, in its EXPLAIN ANALYZE's Buffers.
+ */
+static bool
+segments_have_am(const char *amname)
+{
+	HeapTuple	tuple;
+	bool		result;
+
+	if (strcmp(amname, "heap") == 0)
+		return true;
+	tuple = SearchSysCache1(AMNAME, CStringGetDatum(amname));
+	if (!HeapTupleIsValid(tuple))
+		return false;
+	result = !TransactionIdIsCurrentTransactionId(HeapTupleHeaderGetXmin(tuple->t_data));
+	ReleaseSysCache(tuple);
+	return result;
+}
+
+/*
  * A setting's value, to be sent -- or NULL, for one not defined here or one
  * the session user may not set, which its segments take from the cluster's
- * configuration, as the coordinator took it.  A copy: GetConfigOption()
- * writes a number in a buffer of its own, which the next one overwrites.
+ * configuration, as the coordinator took it.  So is a default table access
+ * method the segments have not: pax, set for every database as Cloudberry's
+ * CI sets it, in a database the extension is not created in, or not yet.  A
+ * segment refuses a SET of it there, where the coordinator took it from its
+ * configuration on faith, as PostgreSQL takes one outside a transaction; and
+ * neither could make a table with it.  Once they have it, it is sent.  A
+ * copy: GetConfigOption() writes a number in a buffer of its own, which the
+ * next one overwrites.
  */
+static char *gang_username;
+
 static const char *
 sync_value(int i)
 {
@@ -401,6 +444,32 @@ sync_value(int i)
 			!superuser_arg(GetSessionUserId()))
 			return NULL;
 	value = GetConfigOption(synced_settings[i], true, false);
+	if (value != NULL && IsTransactionState() &&
+		strcmp(synced_settings[i], "default_table_access_method") == 0 &&
+		!segments_have_am(value))
+		return NULL;
+
+	/*
+	 * The session user, where the gang's connection may take it: any, where
+	 * a superuser logged in, and its own always.  A gang made as a user who
+	 * may not -- SET SESSION AUTHORIZATION to another user, since -- keeps
+	 * the one it was made as.  A process that has none of its own -- a
+	 * background worker connected as the bootstrap superuser, diskquota's
+	 * launcher, whose setting is empty -- sends none: a segment takes no
+	 * empty name ("role \"\" does not exist").
+	 */
+	if (value != NULL && value[0] == '\0' &&
+		strcmp(synced_settings[i], "session_authorization") == 0)
+		return NULL;
+	if (value != NULL && IsTransactionState() &&
+		strcmp(synced_settings[i], "session_authorization") == 0 &&
+		gang_username != NULL && strcmp(value, gang_username) != 0)
+	{
+		Oid			login = get_role_oid(gang_username, true);
+
+		if (!OidIsValid(login) || !superuser_arg(login))
+			return NULL;
+	}
 	return value != NULL ? pstrdup(value) : NULL;
 }
 
@@ -1009,6 +1078,21 @@ gang_connect(void)
 }
 
 /*
+ * A connection of the gang broke: the gang goes, and FTS is asked to probe
+ * and waited for, as Cloudberry's dispatcher asks it when a segment's
+ * connection fails (FtsNotifyProber(), cdbdisp_async.c) -- so that a primary
+ * that is down is failed over from before the session's next statement, which
+ * then finds the cluster changed: a transaction on the gang that is gone
+ * fails, and one after it goes to the new primary.
+ */
+static void
+gang_close_broken(void)
+{
+	gang_close();
+	GpFtsNotifyProber();
+}
+
+/*
  * One wait set for the gang, built when its connections change: the sockets
  * do not change while the connections live, and building an epoll set per
  * row would cost more than the rows.  It has no resource owner, because the
@@ -1088,9 +1172,34 @@ gang_get(void)
 		}
 		else if (checked != MyProc->vxid.lxid)
 		{
+			Oid			temp_ns;
+			Oid			temp_toast_ns;
+
 			checked = MyProc->vxid.lxid;
 			if (GpClusterRefresh())
+			{
 				gang_close();
+
+				/*
+				 * A session with temporary tables had their segments' parts
+				 * in the gang's backends, which are gone with it: it cannot
+				 * go on to the new primaries as if they were there, and is
+				 * told so, as Cloudberry's session is -- which also forgets
+				 * the tables here (resetSessionForPrimaryGangLoss(),
+				 * cdbgang.c), where the port leaves the coordinator's to be
+				 * dropped.
+				 */
+				GetTempNamespaceState(&temp_ns, &temp_toast_ns);
+				if (OidIsValid(temp_ns))
+				{
+					ereport(WARNING,
+							(errmsg("the temporary tables of this session have lost their rows on the segments, whose connections are gone"),
+							 errhint("Drop them, or DISCARD TEMP.")));
+					ereport(ERROR,
+							(errcode(ERRCODE_CONNECTION_FAILURE),
+							 errmsg("gang was lost due to cluster reconfiguration")));
+				}
+			}
 		}
 	}
 	if (gang == NULL)
@@ -2100,7 +2209,7 @@ gang_wait_all_ex(GpGang *g, PGresult **keep, bool commit, bool keep_commands)
 	} while (nbusy > 0);
 
 	if (broken)
-		gang_close();
+		gang_close_broken();
 
 	flush_segment_notices();
 	if (errors != NIL)
@@ -3825,6 +3934,24 @@ gang_commit_second_phase(void)
 }
 
 /*
+ * ROLLBACK TO SAVEPOINT in a transaction whose part on the segments went with
+ * a gang that closed: the segments' part cannot be rolled back to the
+ * savepoint, so the statement fails, as Cloudberry's fails where it cannot
+ * send the segments its rollback (DispatchRollbackToSavepoint(), xact.c) --
+ * and the transaction, aborted, ends in a rollback, rather than going on
+ * here to fail as it commits.
+ */
+void
+GpDispatchCheckRollbackTo(const char *savepoint)
+{
+	if (gang_xact_lost && savepoint != NULL)
+		ereport(ERROR,
+				(errcode(ERRCODE_CONNECTION_FAILURE),
+				 errmsg("Could not rollback to savepoint (ROLLBACK TO SAVEPOINT %s)",
+						quote_identifier(savepoint))));
+}
+
+/*
  * O33: the second phase, once the coordinator's commit is recorded and
  * before its transaction ends for the other sessions -- as Cloudberry's
  * coordinator notifies the segments before it ends its own
@@ -3844,6 +3971,21 @@ dispatch_commit_recorded(TransactionId latestXid)
 		prev_commit_recorded_hook(latestXid);
 	if (dtx_nprepared > 0)
 		gang_commit_second_phase();
+
+	/*
+	 * Cloudberry's fault as a transaction ends for the other sessions
+	 * (ProcArrayEndTransaction(), in its procarray.c), after its parts
+	 * committed: a test holds a coordinator here, its transaction still in
+	 * progress for every snapshot, while a transaction that waited for its
+	 * row on a segment goes on there (gdd/concurrent_update).  Only a suspend
+	 * or a sleep belongs here: the transaction is committed, and an error
+	 * would be a PANIC.  In the connection's database, as Cloudberry names
+	 * it, with no catalog read after the commit.
+	 */
+	if (gp_fault_active != NULL && *gp_fault_active > 0)
+		(void) GpFaultTrigger("before_xact_end_procarray",
+							  MyProcPort != NULL ? MyProcPort->database_name : "",
+							  "");
 }
 
 static void
@@ -5234,7 +5376,7 @@ gather_poll(GpGatherSeg *s)
 			collect_error(&errors, c->content, res, c->conn, NULL);
 			PQclear(res);
 			if (PQstatus(c->conn) == CONNECTION_BAD)
-				gang_close();
+				gang_close_broken();
 			raise_segment_errors(errors);
 		}
 	}

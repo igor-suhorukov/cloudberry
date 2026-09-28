@@ -148,6 +148,38 @@ CREATE TABLE gp_internal.distributed_log (
 CREATE INDEX distributed_log_gxid ON gp_internal.distributed_log (gxid);
 
 /*
+ * WHERE CURRENT OF a cursor whose plan gathered the table (gp_scan.c): the
+ * row the cursor is on, at the ctid the cursor read it at, is read again on
+ * its segment under the statement's snapshot -- in the version that snapshot
+ * sees, following the row's updates since, as PostgreSQL's TID scan does
+ * for WHERE CURRENT OF (TidNext()).  The ctid itself for a table that is not
+ * heap.  STABLE, so that the segment's planner scans by the TID it returns.
+ */
+CREATE FUNCTION gp_internal.current_tid(rel oid, ctid tid)
+RETURNS tid
+AS 'MODULE_PATHNAME', 'gp_current_tid'
+LANGUAGE C STRICT STABLE;
+
+/*
+ * The loopback's journal (gp_loopback.c): where this server cannot prepare, a
+ * transaction that writes to another of its databases through the loopback
+ * leaves its part there open until its own commit is recorded, and records
+ * here, with its own commit, the part's statements, the part's transaction
+ * there and who ran them -- so that a part a crash or a lost connection took
+ * before its COMMIT is written there again by distributed transaction
+ * recovery, once (gp_dtx.c).  Written with the heap's own functions, as
+ * gp_internal.distributed_log is.
+ */
+CREATE TABLE gp_internal.loopback_journal (
+	xid			xid8 NOT NULL,		-- the transaction here
+	dbname		name NOT NULL,		-- the database it wrote to
+	part_xid	xid8 NOT NULL,		-- its part's transaction there
+	session_role name NOT NULL,		-- the part's session user
+	current_role_name name,			-- and current user, where another
+	statements	text[] NOT NULL
+) USING heap;
+
+/*
  * Whether this node's distributed transaction recovery has reached every node
  * since the server started: Cloudberry's "DTM recovered", which its pg_ctl
  * waits for on a coordinator, and gpstart polls for.  True on a node that
@@ -350,7 +382,7 @@ CREATE TABLE gp_internal.configuration_history (
 	"time" timestamptz NOT NULL,
 	dbid int2 NOT NULL,
 	"desc" text
-);
+) USING heap;
 
 CREATE VIEW pg_catalog.gp_configuration_history AS
 	SELECT * FROM gp_internal.fts_history()
@@ -396,7 +428,7 @@ CREATE TABLE gp_internal.stat_last_operation (
 	stausename name NOT NULL,
 	stasubtype text,
 	statime timestamptz
-);
+) USING heap;
 CREATE UNIQUE INDEX stat_last_operation_key
 	ON gp_internal.stat_last_operation (classid, objid, staactionname);
 
@@ -408,7 +440,7 @@ CREATE TABLE gp_internal.stat_last_shoperation (
 	stausename name NOT NULL,
 	stasubtype text,
 	statime timestamptz
-);
+) USING heap;
 CREATE UNIQUE INDEX stat_last_shoperation_key
 	ON gp_internal.stat_last_shoperation (classid, objid, staactionname);
 
@@ -583,6 +615,18 @@ RETURNS int
 AS 'MODULE_PATHNAME', 'gp_segment_of'
 LANGUAGE C STABLE STRICT PARALLEL SAFE;
 
+/*
+ * The segment a row a gather read came from, of its ctid there: a junk column
+ * of an UPDATE's or a DELETE's plan for each other distributed table the
+ * statement reads, which that table's gather answers itself (gp_scan.c), so
+ * that the explicit write finds the same rows of it when it rechecks a row
+ * another transaction updated (gp_explicit.c).  A call is refused.
+ */
+CREATE FUNCTION gp_internal.row_segment(tid)
+RETURNS int
+AS 'MODULE_PATHNAME', 'gp_row_segment'
+LANGUAGE C STABLE STRICT;
+
 CREATE FUNCTION gp_internal.dist_random_segments(rel anyelement)
 RETURNS SETOF record
 AS 'MODULE_PATHNAME', 'gp_dist_random_segments'
@@ -719,6 +763,22 @@ CREATE FUNCTION gp_internal.explicit_recheck(rel anyelement, ctids tid[],
 	tables oid[], deleted "char")
 RETURNS void
 AS 'MODULE_PATHNAME', 'gp_explicit_recheck'
+LANGUAGE C;
+
+/*
+ * The newest version of each row a statement of the explicit write came
+ * short of, where another transaction updated it since the coordinator read
+ * it (gp_explicit.c, gp_split.c): its index in the arrays and its ctid, for
+ * the coordinator to recheck as PostgreSQL's READ COMMITTED UPDATE and DELETE
+ * recheck it, and the coordinator transactions to wait for before it sends
+ * the statement again.  Not STRICT, because NULL::t is how it is told which
+ * table; for a user who may update or delete the table's rows.
+ */
+CREATE FUNCTION gp_internal.explicit_latest(rel anyelement, ctids tid[],
+	tables oid[], deleting bool,
+	OUT gp_i int4, OUT gp_ctid tid, OUT gp_after int8[])
+RETURNS SETOF record
+AS 'MODULE_PATHNAME', 'gp_explicit_latest'
 LANGUAGE C;
 
 /*

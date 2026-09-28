@@ -30,7 +30,11 @@
  *     plan node), a unique index's probe (O16), its size (O19) and UPDATE's
  *     old row from the plan (O20);
  *   - a row is fetched by its TID, as gp_core's split update fetches the old
- *     row, where Cloudberry's Split took it from the plan;
+ *     row, where Cloudberry's Split took it from the plan, and as a TID scan
+ *     and an AFTER INSERT trigger fetch it -- its writer finished first, where
+ *     the row is in memory still; a row UPDATE or DELETE trigger is refused
+ *     as Cloudberry's CREATE TRIGGER refuses it, and, one a partition made
+ *     since has from its parent, as the executor starts (O20's contract);
  *   - a TID crosses the method's boundary translated between PAX's layout,
  *     which its own code keeps, and the table's (pax_tid.h);
  *   - Cloudberry's executor called dml_init and dml_fini, and PostgreSQL 19's
@@ -80,6 +84,8 @@
 #include "pax_tid.h"
 
 extern "C" {
+#include "catalog/namespace.h"
+#include "catalog/pg_trigger.h"
 #include "gp_dispatch.h"
 #include "gp_dtx.h"
 #include "gp_encoding.h"
@@ -535,7 +541,10 @@ TM_Result PaxAccessMethod::TupleLock(Relation /*relation*/, ItemPointer /*tid*/,
 
 // A row by its TID, as the DELETE of a split update fetches the old row it
 // sends back to the coordinator (gp_core's gp_split_delete()), where
-// Cloudberry's Split took it from the plan: through the index fetch's path,
+// Cloudberry's Split took it from the plan, a TID scan the row a DELETE or an
+// UPDATE the coordinator's planner route sends a segment names (gp_core's
+// gp_explicit.c), and an AFTER INSERT trigger its row: through the index
+// fetch's path,
 // its descriptor kept while one query fetches from one table with one
 // snapshot, so that a file is opened once for the rows it has.
 struct PaxFetchCache {
@@ -563,6 +572,9 @@ bool PaxAccessMethod::TupleFetchRowVersion(Relation relation, ItemPointer tid,
     ItemPointerData internal =
         PaxTidFromTable(*tid, cbdb::PaxTableFileBits(relation));
 
+    // a row this backend is writing still is read once its writer is done
+    pax::CPaxDmlStateLocal::Instance()->FinishWriting(
+        relation, pax::GetBlockNumber(internal));
     if (fetch_cache.desc == nullptr ||
         fetch_cache.relid != RelationGetRelid(relation) ||
         fetch_cache.snapshot != snapshot) {
@@ -586,10 +598,11 @@ bool PaxAccessMethod::TupleFetchRowVersion(Relation relation, ItemPointer tid,
   return false;
 }
 
-bool PaxAccessMethod::TupleTidValid(TableScanDesc /*scan*/,
-                                    ItemPointer /*tid*/) {
-  NOT_IMPLEMENTED_YET;
-  return false;
+// Any TID of the table's layout may name a row: the fetch says whether one
+// does, as it says for a bitmap scan's lossy page, a micro-partition this
+// snapshot cannot see naming none.
+bool PaxAccessMethod::TupleTidValid(TableScanDesc /*scan*/, ItemPointer tid) {
+  return ItemPointerIsValid(tid);
 }
 
 void PaxAccessMethod::TupleGetLatestTid(TableScanDesc /*sscan*/,
@@ -863,6 +876,8 @@ static ExecutorRun_hook_type prev_ExecutorRun_hook = NULL;
 
 static ExecutorFinish_hook_type prev_ExecutorFinish_hook = NULL;
 
+static ExecutorStart_hook_type prev_ExecutorStart_hook = NULL;
+
 static bool relation_has_cluster_columns_options(Relation rel) {
   auto *options = (paxc::PaxOptions *)(rel->rd_options);
 
@@ -938,6 +953,57 @@ static void cluster_pax_rel_on_nodes(Relation rel) {
   GpDtxReportXid();
 }
 
+// Is relid PAX's, or a partitioned table with a partition of PAX's?
+static bool PaxTableOrPartitions(Oid relid) {
+  bool result = false;
+  List *relids;
+  ListCell *lc;
+
+  if (get_rel_relkind(relid) != RELKIND_PARTITIONED_TABLE) {
+    Relation rel = table_open(relid, AccessShareLock);
+
+    result = RELATION_IS_PAX(rel);
+    table_close(rel, AccessShareLock);
+    return result;
+  }
+  relids = find_all_inheritors(relid, AccessShareLock, NULL);
+  foreach (lc, relids) {
+    Oid child = lfirst_oid(lc);
+    Relation rel;
+
+    if (get_rel_relkind(child) != RELKIND_RELATION) continue;
+    rel = table_open(child, NoLock);
+    result = RELATION_IS_PAX(rel);
+    table_close(rel, NoLock);
+    if (result) break;
+  }
+  list_free(relids);
+  return result;
+}
+
+// A row UPDATE or DELETE trigger, which fetches the old row by its TID,
+// where PAX's UPDATE takes it from the plan (O20, whose contract leaves such
+// triggers the method's to refuse): refused as Cloudberry's CreateTrigger()
+// refuses them on an append-optimized or a PAX table, in its words.
+static void PaxCheckRowTrigger(CreateTrigStmt *stmt) {
+  Oid relid;
+
+  if (!stmt->row || stmt->isconstraint ||
+      !(stmt->events & (TRIGGER_TYPE_UPDATE | TRIGGER_TYPE_DELETE)))
+    return;
+  relid = RangeVarGetRelid(stmt->relation, NoLock, true);
+  if (!OidIsValid(relid) || !PaxTableOrPartitions(relid)) return;
+  if (stmt->events & TRIGGER_TYPE_UPDATE)
+    ereport(ERROR,
+            (errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+             errmsg("ON UPDATE triggers are not supported on append-only "
+                    "tables")));
+  ereport(ERROR,
+          (errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+           errmsg("ON DELETE triggers are not supported on append-only "
+                  "tables")));
+}
+
 static void paxProcessUtility(PlannedStmt *pstmt, const char *queryString,
                               bool readOnlyTree, ProcessUtilityContext context,
                               ParamListInfo params, QueryEnvironment *queryEnv,
@@ -946,6 +1012,9 @@ static void paxProcessUtility(PlannedStmt *pstmt, const char *queryString,
   bool isTopLevel = (context == PROCESS_UTILITY_TOPLEVEL);
   // if is pax table, do something
   switch (nodeTag(pstmt->utilityStmt)) {
+    case T_CreateTrigStmt:
+      PaxCheckRowTrigger((CreateTrigStmt *)pstmt->utilityStmt);
+      break;
     case T_RepackStmt: {
       RepackStmt *stmt = (RepackStmt *)pstmt->utilityStmt;
 
@@ -1057,6 +1126,55 @@ static void paxProcessUtility(PlannedStmt *pstmt, const char *queryString,
   CBDB_END_TRY();
 }
 
+// A row UPDATE or DELETE trigger of a PAX table's that CREATE TRIGGER did not
+// refuse (PaxCheckRowTrigger()) -- one a partitioned table's partition made
+// since has from its parent: the executor gives it the old row by its TID,
+// whatever the plan carries, and PAX takes UPDATE's old row from the plan
+// (O20), whose contract leaves such triggers the method's to refuse
+// (tableamext.h).  Cloudberry's PAX refused them as a trigger fetched a row,
+// with these words.
+static bool PaxRefuseRowTriggers(PlanState *ps, void *context) {
+  if (ps == NULL) return false;
+  if (IsA(ps, ModifyTableState)) {
+    auto mt = (ModifyTableState *)ps;
+    bool update =
+        mt->operation == CMD_UPDATE || mt->operation == CMD_MERGE;
+    bool del = mt->operation == CMD_DELETE || mt->operation == CMD_MERGE;
+
+    for (int i = 0; i < mt->mt_nrels; i++) {
+      ResultRelInfo *rri = &mt->resultRelInfo[i];
+      TriggerDesc *trig = rri->ri_TrigDesc;
+
+      if (trig == NULL || !RELATION_IS_PAX(rri->ri_RelationDesc)) continue;
+      if ((update &&
+           (trig->trig_update_before_row || trig->trig_update_after_row)) ||
+          (del && (trig->trig_delete_before_row || trig->trig_delete_after_row)))
+        ereport(ERROR,
+                (errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+                 errmsg("not implemented yet on pax relations: %s",
+                        "TupleFetchRowVersion")));
+    }
+  }
+  return planstate_tree_walker(ps, PaxRefuseRowTriggers, context);
+}
+
+static void PaxExecutorStart(QueryDesc *queryDesc, int eflags) {
+  ListCell *lc;
+
+  if (prev_ExecutorStart_hook)
+    prev_ExecutorStart_hook(queryDesc, eflags);
+  else
+    standard_ExecutorStart(queryDesc, eflags);
+
+  if ((eflags & EXEC_FLAG_EXPLAIN_ONLY) ||
+      (queryDesc->operation == CMD_SELECT &&
+       !queryDesc->plannedstmt->hasModifyingCTE))
+    return;
+  (void)PaxRefuseRowTriggers(queryDesc->planstate, NULL);
+  foreach (lc, queryDesc->estate->es_subplanstates)
+    (void)PaxRefuseRowTriggers((PlanState *)lfirst(lc), NULL);
+}
+
 // What a query writes to a PAX table is its own, finished as the query
 // finishes, before its AFTER triggers fire.
 static void PaxExecutorRun(QueryDesc *queryDesc, ScanDirection direction,
@@ -1088,6 +1206,13 @@ static void PaxExecutorFinish(QueryDesc *queryDesc) {
     prev_ExecutorFinish_hook(queryDesc);
   else
     standard_ExecutorFinish(queryDesc);
+
+  // and what its AFTER triggers fetched
+  CBDB_TRY();
+  { paxc::PaxFetchCacheReset(); }
+  CBDB_CATCH_DEFAULT();
+  CBDB_FINALLY({});
+  CBDB_END_TRY();
 }
 
 // A transaction's writers: finished before it commits, forgotten, unwritten,
@@ -1316,6 +1441,9 @@ void pax_init(void) {  // NOLINT
 
   prev_ProcessUtilit_hook = ProcessUtility_hook;
   ProcessUtility_hook = paxProcessUtility;
+
+  prev_ExecutorStart_hook = ExecutorStart_hook;
+  ExecutorStart_hook = PaxExecutorStart;
 
   prev_ExecutorRun_hook = ExecutorRun_hook;
   ExecutorRun_hook = PaxExecutorRun;

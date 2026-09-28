@@ -1,0 +1,13 @@
+@@
+-HINT:  No procedure matches the given name and argument types. You might need to add explicit type casts.
++DETAIL:  There is no procedure of that name.
+@@
+-HINT:  No procedure matches the given name and argument types. You might need to add explicit type casts.
++DETAIL:  No procedure of that name accepts the given argument types.
++HINT:  You might need to add explicit type casts.
+@@
++LINE 1: CREATE PROCEDURE ptestx(a VARIADIC int[], b OUT int) LANGUAG...
++                                                  ^
+@@
++LINE 1: CREATE PROCEDURE ptestx(a int DEFAULT 42, b OUT int) LANGUAG...
++                                                  ^

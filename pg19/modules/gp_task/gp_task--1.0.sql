@@ -23,7 +23,7 @@ CREATE TABLE gp_task.job (
 	username	text NOT NULL,
 	active		boolean NOT NULL DEFAULT true,
 	UNIQUE (jobname, username)
-);
+) USING heap;
 
 CREATE TABLE gp_task.run_history (
 	runid		bigint PRIMARY KEY,
@@ -36,7 +36,7 @@ CREATE TABLE gp_task.run_history (
 	return_message text,
 	start_time	timestamptz,
 	end_time	timestamptz
-);
+) USING heap;
 
 CREATE INDEX run_history_jobid_index ON gp_task.run_history (jobid);
 

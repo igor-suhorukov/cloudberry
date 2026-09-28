@@ -168,6 +168,22 @@ check_max_statement_mem(int *newval, void **extra, GucSource source)
 	return true;
 }
 
+/*
+ * gpvars_check_rg_query_fixed_mem(): a query's fixed memory less than a
+ * statement's most, in Cloudberry's words
+ */
+static bool
+check_rg_query_fixed_mem(int *newval, void **extra, GucSource source)
+{
+	if (*newval >= gp_max_statement_mem)
+	{
+		GUC_check_errmsg("Invalid input for gp_resgroup_memory_query_fixed_mem, must be less than max_statement_mem (%d kB)",
+						 gp_max_statement_mem);
+		return false;
+	}
+	return true;
+}
+
 /* gpvars_check_gp_resqueue_priority_default_value(): one of the priorities */
 static bool
 check_priority_default(char **newval, void **extra, GucSource source)
@@ -311,7 +327,8 @@ define_settings(void)
 	DefineCustomIntVariable("gp.resgroup_memory_query_fixed_mem",
 							"Sets the fixed amount of memory reserved for a query.",
 							NULL, &gp_resgroup_memory_query_fixed_mem, 0, 0, INT_MAX,
-							PGC_USERSET, GUC_UNIT_KB, NULL, NULL, NULL);
+							PGC_USERSET, GUC_UNIT_KB, check_rg_query_fixed_mem,
+							NULL, NULL);
 	DefineCustomIntVariable("gp.resgroup_memory_policy_auto_fixed_mem",
 							"Sets the fixed amount of memory reserved for non-memory intensive operators in the AUTO policy.",
 							NULL, &gp_resgroup_memory_policy_auto_fixed_mem,
@@ -484,7 +501,11 @@ set_statement_setting(int budget_kb)
 	int			weight;
 
 	statement_budget_kb = budget_kb;
-	if (!GpResourceIsCoordinator() || !IsTransactionState())
+	/*
+	 * nor in a parallel operation, where no setting may change: a parallel
+	 * worker's statement, a coordinator's process too, dispatches nothing
+	 */
+	if (!GpResourceIsCoordinator() || !IsTransactionState() || IsInParallelMode())
 		return;
 	initStringInfo(&buf);
 	weight = ResQueueDispatchWeight();

@@ -1,0 +1,68 @@
+@@
+-DETAIL:  Failing row contains (a, 9, null, null, null).
+-ERROR:  new row for relation "part_def" violates partition constraint
+@@
+- part_def       | d |  9 |     |    | 
++ part_def       | a |  9 |     |    | 
+@@
+-DETAIL:  Failing row contains (ad, 10, 200, 1, null).
+-ERROR:  new row for relation "part_a_10_a_20" violates partition constraint
+@@
+- partname | a  | b  |  c  | d  | e 
+-----------+----+----+-----+----+---
+- part_def | ad |  1 |   1 |  1 | 
+- part_def | ad | 10 | 200 |  1 | 
+- part_def | bd | 12 |  96 |  1 | 
+- part_def | bd | 13 |  97 |  2 | 
+- part_def | bd | 15 | 105 | 16 | 
+- part_def | bd | 17 | 105 | 19 | 
+- part_def | d  |  9 |     |    | 
++    partname    | a  | b  |  c  | d  | e 
++----------------+----+----+-----+----+---
++ part_a_10_a_20 | ad | 10 | 200 |  1 | 
++ part_def       | ad |  1 |   1 |  1 | 
++ part_def       | ad |  9 |     |    | 
++ part_def       | bd | 12 |  96 |  1 | 
++ part_def       | bd | 13 |  97 |  2 | 
++ part_def       | bd | 15 | 105 | 16 | 
++ part_def       | bd | 17 | 105 | 19 | 
+@@
+-    partname    | a | b  |  c  | d  | e 
+-----------------+---+----+-----+----+---
+- part_a_10_a_20 | a | 10 | 200 |  1 | 
+- part_a_1_a_10  | a |  1 |   1 |  1 | 
+- part_c_1_100   | b | 12 |  96 |  1 | 
+- part_c_1_100   | b | 13 |  97 |  2 | 
+- part_d_15_20   | b | 15 | 105 | 16 | 
+- part_d_15_20   | b | 17 | 105 | 19 | 
+- part_def       | d |  9 |     |    | 
++    partname    | a  | b  |  c  | d  | e 
++----------------+----+----+-----+----+---
++ part_a_10_a_20 | ad | 10 | 200 |  1 | 
++ part_a_1_a_10  | a  |  1 |   1 |  1 | 
++ part_a_1_a_10  | a  |  9 |     |    | 
++ part_c_1_100   | b  | 12 |  96 |  1 | 
++ part_c_1_100   | b  | 13 |  97 |  2 | 
++ part_d_15_20   | b  | 15 | 105 | 16 | 
++ part_d_15_20   | b  | 17 | 105 | 19 | 
+@@
+-DETAIL:  Failing row contains (a, 10).
+-ERROR:  new row for relation "list_default" violates partition constraint
+@@
+-ERROR:  virtual tuple table slot does not have system attributes (execTuples.c:163)
++ERROR:  cannot retrieve a system column in this context
+@@
+-ERROR:  virtual tuple table slot does not have system attributes (execTuples.c:163)
++ERROR:  cannot retrieve a system column in this context
+@@
+-ERROR:  virtual tuple table slot does not have system attributes (execTuples.c:163)
++ERROR:  cannot retrieve a system column in this context
+@@
+-ERROR:  virtual tuple table slot does not have system attributes (execTuples.c:163)
++ERROR:  cannot retrieve a system column in this context
+@@
+-ERROR:  not implemented yet on pax relations: TupleFetchRowVersion
++ERROR:  cannot retrieve a system column in this context
+@@
+-DETAIL:  Failing row contains (3, 4).
+-ERROR:  new row for relation "hpart1" violates partition constraint

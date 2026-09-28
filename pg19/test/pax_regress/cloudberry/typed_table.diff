@@ -1,0 +1,10 @@
+@@
++LINE 1: CREATE TABLE ttable1 OF nothing;
++                                ^
+@@
++LINE 1: ALTER TABLE persons ALTER COLUMN name TYPE varchar;
++                                         ^
+@@
+-ERROR:  type stuff is not a composite type
++DETAIL:  A typed table must use a stand-alone composite type created with CREATE TYPE.
++ERROR:  type stuff is the row type of another table

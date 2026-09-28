@@ -1,0 +1,27 @@
+@@
+-ERROR:  backward scan is not supported in this version of Apache Cloudberry
+@@
+-ERROR:  portal "xc" cannot be run
++                         cursor_to_xml                         
++---------------------------------------------------------------
++ 
++                                                              +
++                                                              +
++                                                              +
++                                                              +
++   <a>-1</a>                                                  +
++   <a>1</a>                                                   +
++   <a>2</a>                                                   +
++   <b xsi:nil="true"/>                                        +
++   <b>one</b>                                                 +
++   <b>two</b>                                                 +
++ </row>                                                       +
++ </row>                                                       +
++ </row>                                                       +
++ </table>                                                     +
++ <row>                                                        +
++ <row>                                                        +
++ <row>                                                        +
++ <table xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance">+
++(1 row)
++

@@ -4,10 +4,10 @@
 # parallel scan.  A path compiles from the port's copy under pg19/pax/src
 # where there is one, and from Cloudberry's tree otherwise (meson.build).
 #
-# Left out: storage/orc/orc_dump_reader.cpp and storage/micro_partition_udf.cc,
-# the dump_pax_file_* functions, which no script of PAX's creates, and which
-# print through tabulate, a git submodule of Cloudberry's that its tree, and
-# so the image, does not carry.
+# Not here: storage/orc/orc_dump_reader.cpp and storage/micro_partition_udf.cc,
+# the dump_pax_file_* functions, which print through tabulate, a git
+# submodule of Cloudberry's: meson.build adds them where tabulate's headers
+# are there, as the image puts them.
 access/pax_access_handle.cc
 access/pax_access_method_internal.cc
 access/paxc_rel_options.cc

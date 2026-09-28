@@ -39,6 +39,14 @@ extern bool GpSegmentIsSegmentOf(Node *node, Index varno);
 extern Oid	GpSegmentOfFunction(void);
 
 /*
+ * gp_internal.row_segment(tid), which a gather answers for a row it read --
+ * the segment the row came from -- and whether an expression is that call on
+ * the ctid of range table entry varno's row (gp_scan.c, gp_explicit.c).
+ */
+extern Oid	GpSegmentRowSegmentFunction(void);
+extern bool GpSegmentIsRowSegment(Node *node, Index varno);
+
+/*
  * The statement's queries of gp_dist_random() alone that call a function that
  * is not immutable, made queries the segments run, before it is planned.
  */

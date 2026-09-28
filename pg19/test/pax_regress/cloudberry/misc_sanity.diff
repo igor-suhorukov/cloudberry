@@ -1,0 +1,88 @@
+@@
+-         relname          |      attname       |   atttypid   
+---------------------------+--------------------+--------------
+- gp_configuration_history | desc               | text
+- gp_matview_aux           | view_query         | pg_node_tree
+- gp_version_at_initdb     | productversion     | text
+- gp_warehouse             | warehouse_name     | text
+- pg_attribute             | attacl             | aclitem[]
+- pg_attribute             | attfdwoptions      | text[]
+- pg_attribute             | attmissingval      | anyarray
+- pg_attribute             | attoptions         | text[]
+- pg_class                 | relacl             | aclitem[]
+- pg_class                 | reloptions         | text[]
+- pg_class                 | relpartbound       | pg_node_tree
+- pg_foreign_table_seg     | ftsoptions         | text[]
+- pg_index                 | indexprs           | pg_node_tree
+- pg_index                 | indpred            | pg_node_tree
+- pg_largeobject           | data               | bytea
+- pg_largeobject_metadata  | lomacl             | aclitem[]
+- pg_resgroupcapability    | value              | text
+- pg_resourcetype          | resdefaultsetting  | text
+- pg_resourcetype          | resdisabledsetting | text
+- pg_resqueuecapability    | ressetting         | text
+- pg_stat_last_operation   | stasubtype         | text
+- pg_stat_last_shoperation | stasubtype         | text
+- pg_tag                   | allowed_values     | text[]
+- pg_tag_description       | tagvalue           | text
+- pg_task                  | command            | text
+- pg_task                  | database           | text
+- pg_task                  | jobname            | text
+- pg_task                  | nodename           | text
+- pg_task                  | schedule           | text
+- pg_task                  | username           | text
+- pg_task_run_history      | command            | text
+- pg_task_run_history      | database           | text
+- pg_task_run_history      | return_message     | text
+- pg_task_run_history      | status             | text
+- pg_task_run_history      | username           | text
+-(35 rows)
++         relname         |    attname    |   atttypid   
++-------------------------+---------------+--------------
++ pg_attribute            | attacl        | aclitem[]
++ pg_attribute            | attfdwoptions | text[]
++ pg_attribute            | attmissingval | anyarray
++ pg_attribute            | attoptions    | text[]
++ pg_authid               | rolpassword   | text
++ pg_class                | relacl        | aclitem[]
++ pg_class                | reloptions    | text[]
++ pg_class                | relpartbound  | pg_node_tree
++ pg_largeobject          | data          | bytea
++ pg_largeobject_metadata | lomacl        | aclitem[]
++ pg_replication_origin   | roname        | text
++(11 rows)
+@@
+-         relname          
+---------------------------
+- gp_configuration_history
+- gp_distribution_policy
+- gp_fastsequence
+- gp_id
+- gp_matview_aux
+- gp_matview_tables
+- gp_partition_template
+- gp_version_at_initdb
+- gp_warehouse
+- pg_appendonly
+- pg_attribute_encoding
+- pg_auth_time_constraint
+- pg_compression
++   relname   
++-------------
+@@
+- pg_extprotocol
+- pg_foreign_table_seg
+- pg_password_history
+- pg_proc_callback
+- pg_profile
+- pg_resgroup
+- pg_resgroupcapability
+- pg_resourcetype
+- pg_resqueue
+- pg_resqueuecapability
+@@
+- pg_stat_last_operation
+- pg_stat_last_shoperation
+- pg_type_encoding
+-(28 rows)
++(2 rows)

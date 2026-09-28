@@ -1,0 +1,132 @@
+@@
++DETAIL:  It depends on temporary table temp_table.
+@@
++DETAIL:  It depends on temporary table temp_table.
+@@
++LINE 2:     CREATE TEMP VIEW testview AS SELECT 1;
++                             ^
+@@
++DETAIL:  It depends on temporary table temp_table.
+@@
++DETAIL:  It depends on temporary table temp_table.
+@@
++DETAIL:  It depends on temporary table temp_table.
+@@
++DETAIL:  It depends on temporary table temp_table.
+@@
++DETAIL:  It depends on temporary table temp_table.
+@@
++DETAIL:  It depends on temporary table temp_table.
+@@
++DETAIL:  It depends on temporary view v7_temp.
+@@
++DETAIL:  It depends on temporary view v10_temp.
+@@
++DETAIL:  It depends on temporary view v11_temp.
+@@
++DETAIL:  It depends on temporary sequence seq1_temp.
+@@
++DETAIL:  It depends on temporary table tt.
+@@
++DETAIL:  It depends on temporary table tt.
+@@
++DETAIL:  It depends on temporary table tt.
+@@
++DETAIL:  It depends on temporary table tt.
+@@
++DETAIL:  It depends on temporary table tmptbl.
+@@
++ERROR:  unrecognized configuration parameter "allow_segment_dml"
+@@
++ERROR:  unrecognized configuration parameter "allow_segment_dml"
+@@
+- delete_dep_on_segs 
+---------------------
+-                  1
+-                  1
+-                  1
+-(3 rows)
+-
++ERROR:  function delete_dep_on_segs(oid, integer) does not exist
++LINE 1: select delete_dep_on_segs(
++               ^
++DETAIL:  There is no function of that name.
+@@
++ERROR:  current transaction is aborted, commands ignored until end of transaction block
+@@
+-        pg_get_viewdef         
+--------------------------------
+-     "?dropped?column?" AS f3,+
+-     f4                       +
+-    FROM tt14f() t(f1, f4);
+-  SELECT f1,                  +
+-(1 row)
+-
++ERROR:  current transaction is aborted, commands ignored until end of transaction block
+@@
+-QUERY PLAN
+-___________
+-
++ERROR:  current transaction is aborted, commands ignored until end of transaction block
+@@
+- f1  | f4 
+------+----
+- foo | 42
+-(1 row)
+-
++ERROR:  current transaction is aborted, commands ignored until end of transaction block
+@@
+-ERROR:  attribute 3 of type record has been dropped
++ERROR:  current transaction is aborted, commands ignored until end of transaction block
+@@
+-DETAIL:  rule _RETURN on view tt14v depends on column "f4"
++DETAIL:  rule _RETURN on view tt14v depends on column "f4".
+@@
+- rule _RETURN on view tt14v | column f4 of table tt14t | n
+-(1 row)
+@@
+- delete_dep_on_segs 
+---------------------
+-                  1
+-                  1
+-                  1
+-(3 rows)
+-
++ERROR:  function delete_dep_on_segs(oid, integer) does not exist
++LINE 1: select delete_dep_on_segs(
++               ^
++DETAIL:  There is no function of that name.
+@@
++ERROR:  current transaction is aborted, commands ignored until end of transaction block
+@@
+-         pg_get_viewdef         
+---------------------------------
+-     f3,                       +
+-     f4                        +
+-    FROM tt14f() t(f1, f3, f4);
+-  SELECT f1,                   +
+-(1 row)
+-
++ERROR:  current transaction is aborted, commands ignored until end of transaction block
+@@
+- f1  | f3  
+------+-----
+- foo | baz
+-(1 row)
+-
++ERROR:  current transaction is aborted, commands ignored until end of transaction block
+@@
+-DETAIL:  Table has type integer, but query expects text.
+-ERROR:  attribute 4 of type record has wrong type
++ERROR:  current transaction is aborted, commands ignored until end of transaction block
+@@
++ERROR:  unrecognized configuration parameter "allow_segment_dml"
+@@
++ERROR:  function delete_dep_on_segs(oid, integer) does not exist
+@@
+-HINT:  No operator matches the given name and argument types. You might need to add explicit type casts.
++DETAIL:  No operator of that name accepts the given argument types.
++HINT:  You might need to add explicit type casts.
+@@
+-     x > y OR (y > z AND NOT x > z) AS c9,         +
++     x > y OR y > z AND NOT x > z AS c9,           +

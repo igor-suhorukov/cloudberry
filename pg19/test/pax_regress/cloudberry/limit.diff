@@ -1,0 +1,12 @@
+@@
++LINE 3:   ORDER BY thousand FETCH FIRST 1 ROW WITH TIES FOR UPDATE S...
++                                              ^
+@@
++LINE 3:   FETCH FIRST 2 ROW WITH TIES;
++                            ^
+@@
+- FETCH FIRST 5 ROWS WITH TIES;
++ FETCH FIRST (5) ROWS WITH TIES;
+@@
+- FETCH FIRST (NULL::integer + 1) ROWS WITH TIES;
++ FETCH FIRST ((NULL::integer + 1)) ROWS WITH TIES;

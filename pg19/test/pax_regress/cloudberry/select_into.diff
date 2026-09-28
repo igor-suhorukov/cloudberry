@@ -1,0 +1,40 @@
+@@
+-INSERT INTO selinto_schema.tbl_withdata1 VALUES (4);
+@@
++INSERT INTO selinto_schema.tbl_withdata1 VALUES (4);
++ERROR:  relation "selinto_schema.tbl_withdata1" does not exist
++LINE 1: INSERT INTO selinto_schema.tbl_withdata1 VALUES (4);
++                    ^
+@@
+-QUERY PLAN
+-___________
+-
++ERROR:  permission denied for table tbl_withdata2
+@@
+-QUERY PLAN
+-___________
+-
++ERROR:  permission denied for table tbl_nodata2
+@@
++ERROR:  permission denied for table tbl_withdata3
+@@
+-DETAIL:  drop cascades to table selinto_schema.tbl_withdata1
+-NOTICE:  drop cascades to 8 other objects
+-drop cascades to table selinto_schema.tbl_withdata2
+-drop cascades to table selinto_schema.tbl_nodata1
+-drop cascades to table selinto_schema.tbl_nodata2
+-drop cascades to table selinto_schema.tbl_withdata3
++DETAIL:  drop cascades to table selinto_schema.tbl_nodata1
++NOTICE:  drop cascades to 4 other objects
+@@
++ERROR:  division by zero
+@@
+-QUERY PLAN
+-___________
+-
+@@
++ERROR:  division by zero
+@@
+-QUERY PLAN
+-___________
+-

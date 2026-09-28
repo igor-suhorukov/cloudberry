@@ -1,0 +1,20 @@
+@@
+- attrelid | attname 
+-----------+---------
+-(0 rows)
+-
++ERROR:  column a1.attcacheoff does not exist
++LINE 4:     a1.attcacheoff != -1 OR a1.attinhcount < 0 OR
++            ^
+@@
++ERROR:  type "complex" does not exist
++LINE 2:   '1 + 2i'::complex,
++                    ^
+@@
+- oid | typname | typtype | typelem | typarray 
+------+---------+---------+---------+----------
+-(0 rows)
+-
++ERROR:  type "gp_hyperloglog_estimator" does not exist
++LINE 18:     oid != 'gp_hyperloglog_estimator'::regtype AND
++                    ^

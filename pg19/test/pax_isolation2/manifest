@@ -1,0 +1,160 @@
+# PAX's copy of Cloudberry's isolation2 schedule (contrib/pax_storage/src/
+# test/isolation2): Cloudberry's tests as PAX keeps them -- some older than
+# Cloudberry's own copies -- and PAX's own, pax/ and reindex/, as the port
+# runs them on a coordinator and three segments with PAX the default table
+# access method (run.sh), in the schedule's order.  The lines are
+# ../isolation2/manifest's:
+#
+#   run   the test runs here, in both passes; cloudberry/ holds a difference
+#         reviewed and kept, where one pass has one, or ../isolation2/
+#         cloudberry, where Cloudberry's own copy of the test answers alike.
+#         A third word names the group it runs in, "main" when there is
+#         none: each group has a cluster of its own, and the groups of a
+#         pass run side by side; a group whose name begins "mirrors" has a
+#         mirror for each segment, and standby a standby coordinator.
+#   skip  it needs what the port does not have yet, or answers otherwise
+#         than PAX's expected output ("differs:"): the rest of the line says
+#         what, as the test met it on a cluster of its own
+#
+# PAX's own tests run in the groups pax and reindex.  Cloudberry's tests run
+# in the group the isolation2 suite gives them where it runs them; the
+# schedule's others, which the isolation2 suite does not list either, are
+# skipped with what each needs: most wait for a fault the port has no place
+# for, a Cloudberry function or setting, or an append-optimized table's
+# segment files as Cloudberry keeps them.
+skip gpdispatch  the faults make_dispatch_result_error, cdb_copy_end_internal_start and shareinput_writer_notifyready, of Cloudberry's dispatcher, which the port's has no place for; it waits for them
+skip check_gxid  gp_get_next_gxid(), a function of Cloudberry's core the port has not
+skip checkpoint_dtx_info  the faults after_xlog_xact_distributed_commit and keep_log_seg, in PostgreSQL's commit and checkpoint, which the port has no place for; it waits for them
+skip autovacuum-analyze  the faults gp_pgstat_report_on_master, analyze_after_hold_lock, auto_vac_worker_* and analyze_finished_one_relation, in PostgreSQL's autovacuum and ANALYZE; it waits for them
+skip prepared_xact_deadlock_pg_rewind  the fault after_xlog_xact_prepare_flushed, in PostgreSQL's PREPARE TRANSACTION; it waits for it
+run  ao_partition_lock                                 misc1
+run  select_dropped_table
+skip update_hash_col_utilitymode  differs: a session of a segment's own (0U) updates a column of the distribution key, UPDATE 0, where Cloudberry refuses it in utility mode
+skip execute_on_utilitymode  differs: an EXECUTE ON function in a session of the coordinator's own (-1U) answers gp_segment_id 0, where Cloudberry's utility mode answers -1
+skip crash_recovery_redundant_dtx  the fault checkpoint_dtx_info, in PostgreSQL's checkpoint, and mirrors; it waits for it
+skip crash_recovery_dtm  the setting dtx_phase2_retry_second, the faults of Cloudberry's two-phase commit's broadcast and PREPARE's WAL, and a mirror for each segment
+run  unlogged_heap_tables                              misc1
+skip unlogged_appendonly_tables  unlogged append-optimized tables, which gp_ao refuses ("unlogged append-optimized tables are not supported")
+skip udf_exception_blocks_panic_scenarios  the settings debug_dtm_action_segment and debug_dtm_action_target, and a mirror for each segment
+run  ao_same_trans_truncate_crash                      misc1
+skip frozen_insert_crash  the faults appendonly_insert and insert_fastsequence_after_freeze, in the append-optimized insert; it waits for them
+skip modify_table_data_corrupt  differs: a row a session of a segment's own put on the wrong segment is updated and deleted, where Cloudberry's ModifyTable refuses it ("distribution key of the tuple doesn't belong to current segment"), and EXPLAIN's plans are the explicit write's
+skip deadlock_under_entry_db_singleton  the fault transaction_start_under_entry_db_singleton, in a transaction's start on the coordinator's singleton reader; it waits for it
+skip misc  differs: a temporary schema is named for a node's own backend (pg_temp_9, where Cloudberry's session's is pg_temp_0), and gp_toolkit.gp_check_orphaned_files
+run  starve_case
+skip pg_views_concurrent_drop  differs: pg_views over a view another session drops meanwhile fails, "could not open relation with OID", as PostgreSQL 19's pg_get_viewdef() does, where Cloudberry's answers no definition
+run  alter_blocks_for_update_and_viceversa
+run  drop_rename                                       misc1
+run  reader_waits_for_lock                             readers
+run  resource_queue                                    queues
+run  bitmap_index_ao_sparse                            misc1
+run  resource_queue_cancel                             queues
+run  resource_queue_multi_portal                       queues
+skip pg_terminate_backend  the fault pax_insert, in PAX's insert; it waits for it
+skip gp_terminate_mpp_backends  gp_terminate_mpp_backends(), a function of Cloudberry's core the port has not
+skip gpexpand_catalog_lock  gp_expand_lock_catalog(), gpexpand's lock of Cloudberry's catalog, which the port has not
+skip reindex  the faults reindex_db and reindex_relation, in REINDEX; it waits for them
+skip reindex_gpfastsequence  Cloudberry's catalog gp_fastsequence, which the port's append-optimized tables keep in gp_ao's schema, and the fault reindex_relation
+run  commit_transaction_block_checkpoint
+run  instr_in_shmem_setup                              misc1
+skip instr_in_shmem_terminate  gp_instrument_shmem_detail, Cloudberry's view of its instrumentation in shared memory, which the port has not
+run  vacuum_recently_dead_tuple_due_to_distributed_snapshot
+skip vacuum_full_interrupt  the fault after_swap_relation_files, in VACUUM FULL's swap; it waits for it
+run  distributedlog-bug
+run  distributed_snapshot
+skip gp_collation  the fault collate_locale_os_lookup, in pg_import_system_collations()
+skip ao_blkdir  differs: an append-optimized table's block directory, whose entries the port's tables make otherwise (gp_ao), at length
+run  bitmap_index_concurrent                           misc1
+run  bitmap_index_crash                                misc1
+run  bitmap_update_words_backup_block                  misc1
+run  bitmap_union                                      misc1
+skip bitmap_index_inspect  bm_metap(), Cloudberry's pageinspect function of a bitmap index's metapage, which the port has not
+skip fsync_ao  unlogged append-optimized tables, which gp_ao refuses, and the faults ao_fsync_counter and restartpoint_guts
+run  disable_autovacuum                                misc1
+skip concurrent_index_creation_should_not_deadlock  the fault before_acquire_lock_during_create_ao_blkdir_table, in an append-optimized table's block directory's making; it waits for it
+run  pax/alter_while_vacuum2                           pax
+run  pax/alter_while_vacuum                            pax
+run  pax/bitmapindex_rescan                            pax
+run  pax/compaction_full_stats                         pax
+run  pax/compaction_utility_insert                     pax
+run  pax/compaction_utility                            pax
+run  pax/cursor_before_delete                          pax
+run  pax/cursor_before_deletevacuum                    pax
+run  pax/cursor_before_update                          pax
+run  pax/cursor_withhold2                              pax
+run  pax/cursor_withhold                               pax
+run  pax/delete_while_vacuum                           pax
+run  pax/index_build_reltuples                         pax
+run  pax/insert_while_vacuum                           pax
+run  pax/phantom_reads_delete_serializable             pax
+run  pax/phantom_reads_delete                          pax
+run  pax/phantom_reads_serializable                    pax
+run  pax/phantom_reads                                 pax
+run  pax/phantom_reads_update_serializable             pax
+run  pax/phantom_reads_update                          pax
+run  pax/select_after_vacuum_serializable              pax
+run  pax/select_after_vacuum                           pax
+run  pax/select_before_vacuum                          pax
+run  pax/selectinsertupdate_while_vacuum               pax
+run  pax/selectinsert_while_vacuum                     pax
+run  pax/selectupdate_while_vacuum                     pax
+run  pax/select_while_delete                           pax
+run  pax/select_while_full_vacuum                      pax
+run  pax/select_while_vacuum_serializable2             pax
+run  pax/select_while_vacuum_serializable              pax
+run  pax/select_while_vacuum                           pax
+run  pax/snapshot_index_corruption                     pax
+run  pax/update_while_vacuum                           pax
+run  pax/vacuum_index_stats                            pax
+run  pax/vacuum_self_function                          pax
+run  pax/vacuum_self_serializable2                     pax
+run  pax/vacuum_self_serializable3                     pax
+run  pax/vacuum_self_serializable                      pax
+run  pax/vacuum_while_vacuum                           pax
+skip reorganize_after_ao_vacuum_skip_drop  differs: the segment files of an append-optimized table a VACUUM could not drop, which the port's gp_ao keeps otherwise
+skip truncate_after_ao_vacuum_skip_drop  differs: the segment files of an append-optimized table a VACUUM could not drop, which the port's gp_ao keeps otherwise
+skip mark_all_aoseg_await_drop  differs: the segment files of an append-optimized table a VACUUM could not drop, which the port's gp_ao keeps otherwise
+skip segwalrep/master_wal_switch  Cloudberry's pg_basebackup() helper, over its pg_basebackup's own options (--target-gp-dbid), and the fault base_backup_post_create_checkpoint; it waits for them
+skip terminate_in_gang_creation  the faults create_gang_in_progress and before_orphaned_check, of Cloudberry's dispatcher; it waits for them
+run  prepare_limit                                     standby
+skip add_column_after_vacuum_skip_drop_column  differs: the segment files of an append-optimized table a VACUUM could not drop, which the port's gp_ao keeps otherwise
+skip vacuum_after_vacuum_skip_drop_column  differs: the segment files of an append-optimized table a VACUUM could not drop, which the port's gp_ao keeps otherwise
+skip workfile_mgr_test  isolation2_regress.so, Cloudberry's library of the suite's C functions (gp_workfile_mgr_test_on_master()), which the port does not build
+skip pg_basebackup  Cloudberry's pg_basebackup() helper, over its pg_basebackup's own options (--target-gp-dbid, --force-overwrite)
+run  enable_autovacuum                                 misc2
+run  segwalrep/die_commit_pending_replication          mirrors3
+run  segwalrep/replication_keeps_crash                 mirrors3
+run  segwalrep/recoverseg_from_file                    mirrors4
+run  segwalrep/mirror_promotion                        mirrors1
+run  segwalrep/cancel_commit_pending_replication       mirrors3
+run  segwalrep/twophase_tolerance_with_mirror_promotion mirrors1
+run  segwalrep/commit_blocking_on_standby              mirrors4
+run  segwalrep/dtx_recovery_wait_lsn                   mirrors5
+run  fts_manual_probe                                  mirrors1
+run  reindex/abort_reindex                             reindex
+run  reindex/createidx_while_reindex_idx_pax_bitmap    reindex
+run  reindex/createidx_while_reindex_idx_pax_btree     reindex
+run  reindex/reindextable_while_addpart_pax_part_btree reindex
+run  reindex/reindextable_while_altertable_pax_part_btree reindex
+run  reindex/reindextable_while_dropindex_pax_part_btree reindex
+run  reindex/reindextable_while_reindex_idx_pax_bitmap reindex
+run  reindex/reindextable_while_reindex_idx_pax_part_btree reindex
+run  reindex/repeatable_read_reindex_with_insert_pax   reindex
+run  reindex/serializable_reindex_with_drop_column_pax reindex
+run  reindex/serializable_reindex_with_drop_index_pax  reindex
+run  reindex/vacuum_analyze_while_reindex_pax_btree    reindex
+run  reindex/vacuum_while_reindex_pax_bitmap           reindex
+run  reindex/vacuum_while_reindex_pax_btree            reindex
+run  reindex/vacuum_while_reindex_pax_btree_toast      reindex
+skip cancel_query  the fault zlib_decompress_after_decompress_fn, in a workfile's decompression; it waits for it
+run  upgrade_numsegments                               misc2
+run  create_memory_accounting_tables                   memory
+run  setup_startup_memory_accounting                   memory
+run  restore_memory_accounting_default                 memory
+run  runaway_query                                     memory
+skip distributed_transactions  the fault abort_after_procarray_end, in PostgreSQL's abort; its ABORTs succeed
+skip concurrent_drop_truncate_tablespace  the faults drop_tablespace_after_acquire_lock and after_xlog_tblspc_drop, and Cloudberry's lock of a tablespace a DROP TABLESPACE takes ("could not lock tablespace")
+skip orphan_temp_table  the fault before_exec_scan, a PANIC in the executor's scan
+skip sync_guc  the setting gp_select_invisible and the faults set_variable_fault and reset_variable_fault
+skip stat_activity_extended  pg_stat_activity_extended, Cloudberry's view with a warehouse's id, which the port has not
+run  sharedsnapshot

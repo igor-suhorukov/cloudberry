@@ -85,7 +85,8 @@
  *	   UPDATE t AS gp_t SET a = gp_s.gp_c1, ...
  *		 FROM (VALUES ($1::text, $2::oid, $3::int8, $4::type, ...), ...)
  *			  AS gp_s (gp_old, gp_toid, gp_n, gp_c1, ...)
- *		WHERE gp_t::text = gp_s.gp_old AND gp_t.tableoid = gp_s.gp_toid
+ *		WHERE ROW(gp_t.a, ...)::text = gp_s.gp_old
+ *		  AND gp_t.tableoid = gp_s.gp_toid
  *
  * Two copies of one row on a segment are changed together, which is right:
  * Cloudberry does not show a replicated table's system columns (gp_segment.c),
@@ -150,6 +151,7 @@
 
 #include "access/htup_details.h"
 #include "access/table.h"
+#include "access/transam.h"
 #include "access/tupconvert.h"
 #include "access/xact.h"
 #include "optimizer/optimizer.h"
@@ -169,6 +171,7 @@
 #include "parser/parsetree.h"
 #include "storage/itemptr.h"
 #include "storage/lmgr.h"
+#include "storage/procarray.h"
 #include "utils/array.h"
 #include "utils/builtins.h"
 #include "utils/fmgroids.h"
@@ -177,12 +180,14 @@
 #include "utils/memutils.h"
 #include "utils/rel.h"
 #include "utils/ruleutils.h"
+#include "utils/snapmgr.h"
 #include "utils/tuplestore.h"
 
 #include "gp_cluster.h"
 #include "gp_dispatch.h"
 #include "gp_gdd.h"
 #include "gp_hash.h"
+#include "gp_motion.h"
 #include "gp_policy.h"
 #include "gp_scan.h"
 #include "gp_settings.h"
@@ -304,8 +309,8 @@ GpRowIdentityMake(EState *estate, int content, ItemPointer tid,
 }
 
 /* Where the row the plan knows by this ctid is; false if nowhere. */
-static bool
-row_identity_find(EState *estate, ItemPointer synthetic, int *content,
+bool
+GpRowIdentityFind(EState *estate, ItemPointer synthetic, int *content,
 				  ItemPointer tid)
 {
 	RowIdentityMap *map = identity_map(estate, false);
@@ -360,6 +365,8 @@ static const CustomExecMethods explicit_exec_methods = {
 #define EXPLICIT_CHECKS			8	/* withCheckOptionLists */
 #define EXPLICIT_MERGE_ACTIONS	9	/* mergeActionLists */
 #define EXPLICIT_MERGE_JOINS	10	/* mergeJoinConditions */
+#define EXPLICIT_ROW_MARKS		11	/* rowMarks, of a plan the planner made */
+#define EXPLICIT_EPQ_PARAM		12	/* epqParam, of such a plan; or -1 */
 
 /*
  * MERGE: the statement each kind of action's rows are written by -- an
@@ -456,6 +463,19 @@ typedef struct ExplicitState
 	int			mfrom;			/* a replicated MERGE target's rows' segment */
 
 	/*
+	 * And at READ COMMITTED a plain UPDATE's or DELETE's, of a plan
+	 * PostgreSQL's planner made, is rechecked as PostgreSQL's ModifyTable
+	 * rechecks it (explicit_requalify()): in the row's newest version, the
+	 * plan run again over it (EvalPlanQual), from the plan's row it came in,
+	 * which is kept (saved).
+	 */
+	bool		epq;
+	EPQState	epqstate;
+	List	   *resultrtis;		/* the result relations' range table indexes */
+	TupleTableSlot *epqorig;	/* a plan's row, the recheck's junk read from */
+	bool		epq_copy;		/* this node is in a recheck's copy of a plan */
+
+	/*
 	 * A Split: an UPDATE of the distribution key.  Each row is deleted where
 	 * it is, returning it, and its new version -- the old one with the SET
 	 * columns' new values -- inserted where it hashes.
@@ -508,6 +528,9 @@ typedef struct ExplicitRecheck
 	char		deleted;
 	int			content;		/* the rows' segment, or -1: the one sent to */
 	const char **ctids;			/* in the rows' order, or NULL: params[0] */
+	struct ExplicitState *requalify;	/* rather rechecked in their newest
+										 * versions, and written
+										 * (explicit_requalify()) */
 } ExplicitRecheck;
 
 /* A row a write changes: its table, and the ctid the plan knows it by. */
@@ -771,6 +794,7 @@ GpExplicitOnConflict(Query *parse, GpPolicy *policy)
 											   exprCollation((Node *) tle->expr));
 	}
 
+	GpUnmergeAssignments(q);
 	sql = pg_get_querydef(q, false);
 	clause = strstr(sql, " ON CONFLICT");
 	if (clause == NULL)
@@ -780,10 +804,11 @@ GpExplicitOnConflict(Query *parse, GpPolicy *policy)
 
 /*
  * The node that writes in "mt"'s place: its plan below, its RETURNING as the
- * node's output.
+ * node's output -- and, of a plan PostgreSQL's planner made ("planned"), its
+ * row marks and the parameter its recheck is run by (explicit_requalify()).
  */
 Plan *
-GpExplicitMake(ModifyTable *mt, const char *on_conflict)
+GpExplicitMake(ModifyTable *mt, const char *on_conflict, bool planned)
 {
 	CustomScan *cscan = makeNode(CustomScan);
 	List	   *tlist = NIL;
@@ -840,6 +865,10 @@ GpExplicitMake(ModifyTable *mt, const char *on_conflict)
 									copyObject(mt->mergeActionLists));
 	cscan->custom_private = lappend(cscan->custom_private,
 									copyObject(mt->mergeJoinConditions));
+	cscan->custom_private = lappend(cscan->custom_private,
+									planned ? copyObject(mt->rowMarks) : NIL);
+	cscan->custom_private = lappend(cscan->custom_private,
+									makeInteger(planned ? mt->epqParam : -1));
 	cscan->methods = &explicit_scan_methods;
 	return &cscan->scan.plan;
 }
@@ -900,6 +929,39 @@ cast_to(Oid type, int32 typmod)
 	return format_type_with_typemod(type, typmod);
 }
 
+/*
+ * What a replicated table's row is found by on a segment: "<its text> =
+ * gp_s.gp_old", its text as a ROW() of its columns, which prints as the row
+ * itself does, gp_t::text, and as the text of it the coordinator read
+ * (explicit_rows_by_content()).  Not the whole-row reference itself: where
+ * the table's access method takes UPDATE's old row from the plan (O20, PAX
+ * and gp_ao), the plan has a whole-row column of RECORD, which setrefs.c
+ * would give a reference of the table's row type too, refused as the join
+ * of two rows or more reads it.
+ */
+static char *
+row_text_match(Relation rel)
+{
+	TupleDesc	desc = RelationGetDescr(rel);
+	StringInfoData buf;
+	bool		first = true;
+
+	initStringInfo(&buf);
+	appendStringInfoString(&buf, "ROW(");
+	for (int i = 0; i < desc->natts; i++)
+	{
+		Form_pg_attribute att = TupleDescAttr(desc, i);
+
+		if (att->attisdropped)
+			continue;
+		appendStringInfo(&buf, "%sgp_t.%s", first ? "" : ", ",
+						 quote_identifier(NameStr(att->attname)));
+		first = false;
+	}
+	appendStringInfoString(&buf, ")::pg_catalog.text = gp_s.gp_old");
+	return buf.data;
+}
+
 
 /* ------------------------------------------------------------------------- */
 /* MERGE                                                                     */
@@ -946,15 +1008,17 @@ merge_shape(ExplicitState *state, CmdType cmd, List *setcols, TupleDesc desc)
 		for (int k = 0; k < i; k++)
 			appendStringInfo(&tail, ", gp_c%d", k + 1);
 		appendStringInfo(&tail, ") WHERE %s AND gp_t.tableoid = gp_s.gp_toid",
-						 state->by_content ? "gp_t::pg_catalog.text = gp_s.gp_old"
+						 state->by_content ? row_text_match(state->target)
 						 : "gp_t.ctid = gp_s.gp_ctid");
 	}
 	else if (cmd == CMD_DELETE)
 	{
 		appendStringInfo(&head, "DELETE FROM %s%s AS gp_t USING (VALUES ", only, name);
-		appendStringInfoString(&tail, state->by_content
-							   ? ") AS gp_s (gp_old, gp_toid, gp_n) WHERE gp_t::pg_catalog.text = gp_s.gp_old AND gp_t.tableoid = gp_s.gp_toid"
-							   : ") AS gp_s (gp_ctid, gp_toid, gp_n) WHERE gp_t.ctid = gp_s.gp_ctid AND gp_t.tableoid = gp_s.gp_toid");
+		if (state->by_content)
+			appendStringInfo(&tail, ") AS gp_s (gp_old, gp_toid, gp_n) WHERE %s AND gp_t.tableoid = gp_s.gp_toid",
+							 row_text_match(state->target));
+		else
+			appendStringInfoString(&tail, ") AS gp_s (gp_ctid, gp_toid, gp_n) WHERE gp_t.ctid = gp_s.gp_ctid AND gp_t.tableoid = gp_s.gp_toid");
 	}
 	else
 	{
@@ -1136,7 +1200,20 @@ explicit_begin(CustomScanState *node, EState *estate, int eflags)
 	StringInfoData head;
 	StringInfoData tail;
 	bool		view_checks = false;
+	bool		merge_inserts;
+	int			epq_param;
 	int			i;
+
+	/*
+	 * A recheck's copy of the plan (explicit_requalify()) has every subplan
+	 * of the statement's, a write in a WITH query among them, which it never
+	 * runs: its scan of the query gives the row the plan carried instead.
+	 */
+	if (estate->es_epq_active != NULL)
+	{
+		state->epq_copy = true;
+		return;
+	}
 
 	outerPlanState(node) = ExecInitNode(subplan, estate, eflags);
 
@@ -1206,7 +1283,7 @@ explicit_begin(CustomScanState *node, EState *estate, int eflags)
 		for (i = 0; i < state->nvals; i++)
 			appendStringInfo(&tail, ", gp_c%d", i + 1);
 		appendStringInfo(&tail, ") WHERE %s AND gp_t.tableoid = gp_s.gp_toid",
-						 state->by_content ? "gp_t::pg_catalog.text = gp_s.gp_old"
+						 state->by_content ? row_text_match(state->target)
 						 : "gp_t.ctid = gp_s.gp_ctid");
 	}
 	else if (state->operation == CMD_DELETE)
@@ -1215,9 +1292,11 @@ explicit_begin(CustomScanState *node, EState *estate, int eflags)
 		appendStringInfo(&head, "DELETE FROM %s%s AS gp_t USING (VALUES ",
 						 state->only ? "ONLY " : "",
 						 GpDispatchRelationName(RelationGetRelid(state->target)));
-		appendStringInfoString(&tail, state->by_content
-							   ? ") AS gp_s (gp_old, gp_toid, gp_n) WHERE gp_t::pg_catalog.text = gp_s.gp_old AND gp_t.tableoid = gp_s.gp_toid"
-							   : ") AS gp_s (gp_ctid, gp_toid, gp_n) WHERE gp_t.ctid = gp_s.gp_ctid AND gp_t.tableoid = gp_s.gp_toid");
+		if (state->by_content)
+			appendStringInfo(&tail, ") AS gp_s (gp_old, gp_toid, gp_n) WHERE %s AND gp_t.tableoid = gp_s.gp_toid",
+							 row_text_match(state->target));
+		else
+			appendStringInfoString(&tail, ") AS gp_s (gp_ctid, gp_toid, gp_n) WHERE gp_t.ctid = gp_s.gp_ctid AND gp_t.tableoid = gp_s.gp_toid");
 	}
 	else if (state->operation == CMD_MERGE)
 		explicit_begin_merge(state, policy);
@@ -1482,9 +1561,21 @@ explicit_begin(CustomScanState *node, EState *estate, int eflags)
 	 * table's partitions it writes are locked as it is, as Cloudberry's
 	 * planner locks them in the table's mode; an INSERT into one locks every
 	 * partition.
+	 *
+	 * A MERGE whose actions only insert, or do nothing, changes no row it
+	 * reads, and locks as an INSERT does.  Cloudberry's parser locks any
+	 * MERGE in ExclusiveLock; the port's parser asks gp_core for a lock by the
+	 * privileges a statement needs (gp_modify_query_lockmode()), and INSERT
+	 * privilege alone is an INSERT's, so it took RowExclusiveLock -- and an
+	 * ExclusiveLock here would be an upgrade, which two such MERGEs deadlock
+	 * on.  Its rows not matched are decided under its snapshot, as
+	 * PostgreSQL's MERGE decides them: a row another transaction inserts
+	 * meanwhile is not seen.
 	 */
+	merge_inserts = state->operation == CMD_MERGE && state->mshapes == NIL &&
+		state->mdelete == NULL && !state->split;
 	if ((state->operation == CMD_UPDATE || state->operation == CMD_DELETE ||
-		 state->operation == CMD_MERGE ||
+		 (state->operation == CMD_MERGE && !merge_inserts) ||
 		 state->on_conflict == ONCONFLICT_UPDATE) &&
 		!gp_enable_global_deadlock_detector)
 	{
@@ -1508,12 +1599,54 @@ explicit_begin(CustomScanState *node, EState *estate, int eflags)
 		 state->operation == CMD_MERGE);
 	state->mfrom = -1;
 
+	/*
+	 * Or rechecks them in their newest versions, as PostgreSQL's ModifyTable
+	 * does (explicit_requalify()): a plain UPDATE's or DELETE's rows, of a
+	 * plan PostgreSQL's planner made, which the recheck runs again -- its
+	 * row marks, as ExecInitModifyTable() finds them.  Not a Split's, whose
+	 * moved row Cloudberry refuses; nor a replicated table's, found by its
+	 * text; nor a MERGE's, which the recheck would have to run its actions
+	 * again for.
+	 */
+	epq_param = intVal(list_nth(priv, EXPLICIT_EPQ_PARAM));
+	state->epq = state->recheck && epq_param >= 0 && !state->split &&
+		!state->by_content &&
+		(state->operation == CMD_UPDATE || state->operation == CMD_DELETE);
+	if (state->epq)
+	{
+		List	   *auxmarks = NIL;
+
+		foreach_node(PlanRowMark, rc, (List *) list_nth(priv, EXPLICIT_ROW_MARKS))
+		{
+			RangeTblEntry *rte = exec_rt_fetch(rc->rti, estate);
+
+			if (rc->isParent ||
+				(rte->rtekind == RTE_RELATION &&
+				 !bms_is_member(rc->rti, estate->es_unpruned_relids)))
+				continue;
+			auxmarks = lappend(auxmarks,
+							   ExecBuildAuxRowMark(ExecFindRowMark(estate, rc->rti, false),
+												   subplan->targetlist));
+		}
+		state->resultrtis = resultrels;
+		EvalPlanQualInit(&state->epqstate, estate, subplan, auxmarks, epq_param,
+						 resultrels);
+		state->epqorig = MakeSingleTupleTableSlot(ExecGetResultType(outerPlanState(node)),
+												  &TTSOpsMinimalTuple);
+		if (state->saved == NULL)
+		{
+			state->maxsaved = 64;
+			state->saved = palloc_array(MinimalTuple, state->maxsaved);
+		}
+	}
+
 	if (state->operation == CMD_INSERT)
 		GpModifyLockPartitions(RelationGetRelid(state->target),
 							   state->on_conflict == ONCONFLICT_UPDATE
 							   ? ExclusiveLock : RowExclusiveLock);
 	if (state->operation == CMD_MERGE)
-		GpModifyLockPartitions(RelationGetRelid(state->target), ExclusiveLock);
+		GpModifyLockPartitions(RelationGetRelid(state->target),
+							   merge_inserts ? RowExclusiveLock : ExclusiveLock);
 
 	GpClusterSegments(&state->nsegs);
 	state->batches = palloc0_array(List *, state->nsegs);
@@ -1610,7 +1743,7 @@ explicit_collect(ExplicitState *state)
 			d = slot_getattr(slot, state->ctidcol, &isnull);
 			if (isnull)
 				elog(ERROR, "a row to write has no ctid");
-			if (!row_identity_find(estate, (ItemPointer) DatumGetPointer(d),
+			if (!GpRowIdentityFind(estate, (ItemPointer) DatumGetPointer(d),
 								   &content, &tid))
 				elog(ERROR, "a row to write was not read from a segment");
 
@@ -1660,7 +1793,7 @@ explicit_collect(ExplicitState *state)
 			state->batches[content] = lappend(state->batches[content], params);
 		MemoryContextSwitchTo(oldcxt);
 
-		if (state->back || state->split)
+		if (state->back || state->split || state->epq)
 		{
 			if (state->nsaved == state->maxsaved)
 			{
@@ -1684,6 +1817,8 @@ static uint64 explicit_send_statements(int content, List *rows, int nparams,
 									   Tuplestorestate *store,
 									   const ExplicitRecheck *recheck);
 static uint64 explicit_send_split(ExplicitState *state);
+static uint64 explicit_requalify(ExplicitState *state, int content, List *rows,
+								 Tuplestorestate *store);
 
 /*
  * A row an action of this MERGE changes, by its table and the ctid the plan
@@ -1758,7 +1893,7 @@ merge_row_params(ExplicitState *state, int nparams, ItemPointer synthetic,
 		 * a statement that comes short of it (explicit_recheck())
 		 */
 		params[0] = OutputFunctionCall(&state->mtextout, target);
-		if (!row_identity_find(state->css.ss.ps.state, synthetic, &state->mfrom, &tid))
+		if (!GpRowIdentityFind(state->css.ss.ps.state, synthetic, &state->mfrom, &tid))
 			elog(ERROR, "a row to write was not read from a segment");
 		params[nparams] = DatumGetCString(DirectFunctionCall1(tidout,
 															  ItemPointerGetDatum(&tid)));
@@ -1768,7 +1903,7 @@ merge_row_params(ExplicitState *state, int nparams, ItemPointer synthetic,
 	{
 		ItemPointerData tid;
 
-		if (!row_identity_find(state->css.ss.ps.state, synthetic, content, &tid))
+		if (!GpRowIdentityFind(state->css.ss.ps.state, synthetic, content, &tid))
 			elog(ERROR, "a row to write was not read from a segment");
 		params[0] = DatumGetCString(DirectFunctionCall1(tidout,
 														ItemPointerGetDatum(&tid)));
@@ -1907,7 +2042,7 @@ merge_matched(ExplicitState *state, TupleTableSlot *slot, ItemPointer synthetic)
 				int			content;
 				const char **params = palloc_array(const char *, 3);
 
-				if (!row_identity_find(estate, synthetic, &content, &tid))
+				if (!GpRowIdentityFind(estate, synthetic, &content, &tid))
 					elog(ERROR, "a row to write was not read from a segment");
 				params[0] = DatumGetCString(DirectFunctionCall1(tidout,
 																ItemPointerGetDatum(&tid)));
@@ -2211,7 +2346,15 @@ explicit_send_statements(int content, List *rows, int nparams,
 		written = GpDispatchWriteOnContent(content, sql.data, n, values,
 										   desc, store);
 		if (recheck != NULL && written < (uint64) nrows)
-			explicit_recheck(recheck, content, rows, first, nrows);
+		{
+			if (recheck->requalify != NULL)
+				written += explicit_requalify(recheck->requalify, content,
+											  list_copy_head(list_copy_tail(rows, first),
+															 nrows),
+											  store);
+			else
+				explicit_recheck(recheck, content, rows, first, nrows);
+		}
 		total += written;
 		first += nrows;
 		pfree(sql.data);
@@ -2229,6 +2372,230 @@ explicit_send_rows(ExplicitState *state, int content, List *rows,
 									state->sql_head, state->sql_tail,
 									state->casts, state->retdesc, store,
 									recheck);
+}
+
+/* Rounds of a recheck a row may take (explicit_requalify()), at most. */
+#define EXPLICIT_REQUALIFY_ROUNDS	10
+
+/*
+ * The newest versions of the rows a statement came short of, of "rows" sent
+ * to segment "content", asked of it (gp_internal.explicit_latest(),
+ * gp_split.c): each one's place among them, into *places, and its ctid,
+ * into *ctids; how many.  The coordinator transactions that segment saw
+ * commit, which a snapshot taken here may still see in progress, are waited
+ * for, so that one taken now sees each version.
+ */
+static int
+explicit_latest(ExplicitState *state, int content, List *rows, int **places,
+				ItemPointer *ctids)
+{
+	TupleDesc	desc = CreateTemplateTupleDesc(3);
+	Tuplestorestate *store = tuplestore_begin_heap(false, false, work_mem);
+	TupleTableSlot *slot;
+	StringInfoData tids;
+	StringInfoData oids;
+	const char *values[2];
+	char	   *sql;
+	ListCell   *lc;
+	int			n = 0;
+
+	TupleDescInitEntry(desc, 1, "gp_i", INT4OID, -1, 0);
+	TupleDescInitEntry(desc, 2, "gp_ctid", TIDOID, -1, 0);
+	TupleDescInitEntry(desc, 3, "gp_after", INT8ARRAYOID, -1, 0);
+	TupleDescFinalize(desc);
+
+	initStringInfo(&tids);
+	initStringInfo(&oids);
+	appendStringInfoChar(&tids, '{');
+	appendStringInfoChar(&oids, '{');
+	foreach(lc, rows)
+	{
+		const char **params = (const char **) lfirst(lc);
+		const char *sep = foreach_current_index(lc) > 0 ? "," : "";
+
+		appendStringInfo(&tids, "%s\"%s\"", sep, params[0]);
+		appendStringInfo(&oids, "%s%s", sep, params[1]);
+	}
+	appendStringInfoChar(&tids, '}');
+	appendStringInfoChar(&oids, '}');
+	values[0] = tids.data;
+	values[1] = oids.data;
+	sql = psprintf("SELECT gp_i, gp_ctid, gp_after FROM gp_internal.explicit_latest(NULL::%s, $1::pg_catalog.tid[], $2::pg_catalog.oid[], %s)",
+				   GpDispatchRelationName(RelationGetRelid(state->target)),
+				   state->operation == CMD_DELETE ? "true" : "false");
+	(void) GpDispatchWriteOnContent(content, sql, 2, values, desc, store);
+
+	*places = palloc_array(int, Max(list_length(rows), 1));
+	*ctids = palloc_array(ItemPointerData, Max(list_length(rows), 1));
+	slot = MakeSingleTupleTableSlot(desc, &TTSOpsMinimalTuple);
+	while (tuplestore_gettupleslot(store, true, false, slot))
+	{
+		bool		isnull;
+		int			place = DatumGetInt32(slot_getattr(slot, 1, &isnull));
+
+		if (place < 0 || place >= list_length(rows) || n >= list_length(rows))
+			elog(ERROR, "segment %d named a row it was not asked about", content);
+		(*places)[n] = place;
+		ItemPointerCopy(DatumGetItemPointer(slot_getattr(slot, 2, &isnull)),
+						&(*ctids)[n]);
+
+		/*
+		 * The coordinator transactions whose parts committed there, which a
+		 * snapshot taken here may still see in progress: each is past its
+		 * commit record, and waits for nothing of this transaction's, as
+		 * dtx_wait_for_depends() (gp_dispatch.c) has it.
+		 */
+		if (n++ == 0)
+		{
+			Datum		after = slot_getattr(slot, 3, &isnull);
+			Datum	   *gxids;
+			int			ngxids = 0;
+			FullTransactionId next = ReadNextFullTransactionId();
+			TransactionId self = GetTopTransactionIdIfAny();
+
+			if (!isnull)
+				deconstruct_array(DatumGetArrayTypeP(after), INT8OID,
+								  sizeof(int64), FLOAT8PASSBYVAL, TYPALIGN_DOUBLE,
+								  &gxids, NULL, &ngxids);
+			for (int k = 0; k < ngxids; k++)
+			{
+				FullTransactionId gxid = FullTransactionIdFromU64((uint64) DatumGetInt64(gxids[k]));
+				TransactionId xid = XidFromFullTransactionId(gxid);
+
+				if (!FullTransactionIdPrecedes(gxid, next) ||
+					!TransactionIdIsNormal(xid) || TransactionIdEquals(xid, self))
+					continue;
+				if (TransactionIdIsInProgress(xid))
+					XactLockTableWait(xid, NULL, NULL, XLTW_None);
+			}
+		}
+	}
+	ExecDropSingleTupleTableSlot(slot);
+	tuplestore_end(store);
+	pfree(sql);
+	return n;
+}
+
+/*
+ * The plan's row for the row its plan row "n" named, in its newest version at
+ * "tid" on segment "content": the plan run again (EvalPlanQual()), its
+ * target's gather reading that version, each other table's the row it
+ * joined (gather_epq(), gp_scan.c); and the statement's parameters for it,
+ * as explicit_collect() makes them -- or NULL, where the plan gives no row
+ * for it now.
+ */
+static const char **
+explicit_requalify_row(ExplicitState *state, uint64 n, Oid relid, int content,
+					   ItemPointer tid)
+{
+	EState	   *estate = state->css.ss.ps.state;
+	int			relidx = result_rel_of(state, relid);
+	Index		rti = list_nth_int(state->resultrtis, relidx);
+	TupleTableSlot *test = EvalPlanQualSlot(&state->epqstate,
+											state->rels[relidx], rti);
+	TupleTableSlot *slot;
+	const char **params;
+	MemoryContext oldcxt;
+	ItemPointerData newtid;
+	Datum		d;
+	bool		isnull;
+	int			newcontent;
+
+	/* the plan's row, the recheck's other rows' marks read from */
+	ExecStoreMinimalTuple(state->saved[n], state->epqorig, false);
+	EvalPlanQualSetSlot(&state->epqstate, state->epqorig);
+
+	/* the row to recheck, by the ctid the map knows it by */
+	ExecClearTuple(test);
+	ExecStoreAllNullTuple(test);
+	GpRowIdentityMake(estate, content, tid, &test->tts_tid);
+	slot = EvalPlanQual(&state->epqstate, state->rels[relidx], rti, test);
+	if (TupIsNull(slot))
+		return NULL;
+
+	oldcxt = MemoryContextSwitchTo(state->rowcxt);
+	params = palloc0_array(const char *, state->nvals + 3);
+	d = slot_getattr(slot, state->ctidcol, &isnull);
+	if (isnull ||
+		!GpRowIdentityFind(estate, (ItemPointer) DatumGetPointer(d), &newcontent,
+						   &newtid) || newcontent != content)
+		elog(ERROR, "a rechecked row is not the one read from segment %d", content);
+	params[0] = DatumGetCString(DirectFunctionCall1(tidout,
+													ItemPointerGetDatum(&newtid)));
+	params[1] = psprintf("%u", relid);
+	params[2] = psprintf(UINT64_FORMAT, n);
+	for (int i = 0; i < state->nvals; i++)
+	{
+		d = slot_getattr(slot, state->valcols[i], &isnull);
+		params[3 + i] = isnull ? NULL : OutputFunctionCall(&state->valout[i], d);
+	}
+	MemoryContextSwitchTo(oldcxt);
+	return params;
+}
+
+/*
+ * PostgreSQL's recheck at READ COMMITTED of a row another transaction
+ * updated since the plan read it (ExecUpdate(), ExecDelete()): where a
+ * statement came short of some of "rows", sent to segment "content", its
+ * segment is asked for the newest version of each row it did not write that
+ * another transaction updated (explicit_latest()) -- the version the
+ * statement's own recheck locked, and passed over -- and the plan run again
+ * over each (explicit_requalify_row()); the rows it still gives are sent in
+ * a statement of their own, their newest versions with the values the plan
+ * computes of them now, under a snapshot that sees those versions.  A row
+ * deleted meanwhile, and one a trigger or a policy kept from being written,
+ * are passed over, as PostgreSQL passes them over.  What the statement
+ * comes short of is asked about again, EXPLICIT_REQUALIFY_ROUNDS times at
+ * most, and then refused as the recheck below Cloudberry's Motion refuses
+ * it.  How many rows it wrote.
+ */
+static uint64
+explicit_requalify(ExplicitState *state, int content, List *rows,
+				   Tuplestorestate *store)
+{
+	uint64		total = 0;
+	bool		pushed = false;
+
+	for (int round = 0; rows != NIL; round++)
+	{
+		List	   *again = NIL;
+		int		   *places;
+		ItemPointer ctids;
+		int			n;
+		uint64		written;
+
+		if (round == EXPLICIT_REQUALIFY_ROUNDS)
+			GpMotionRefuseRecheck();
+		n = explicit_latest(state, content, rows, &places, &ctids);
+		for (int k = 0; k < n; k++)
+		{
+			const char **params = (const char **) list_nth(rows, places[k]);
+			const char **newparams;
+
+			newparams = explicit_requalify_row(state,
+											   strtou64(params[2], NULL, 10),
+											   (Oid) strtoul(params[1], NULL, 10),
+											   content, &ctids[k]);
+			if (newparams != NULL)
+				again = lappend(again, newparams);
+		}
+		if (again == NIL)
+			break;
+
+		/* a snapshot that sees them, taken after they committed everywhere */
+		if (pushed)
+			PopActiveSnapshot();
+		PushActiveSnapshot(GetLatestSnapshot());
+		pushed = true;
+		written = explicit_send_rows(state, content, again, store, NULL);
+		total += written;
+		if (written == (uint64) list_length(again))
+			break;
+		rows = again;
+	}
+	if (pushed)
+		PopActiveSnapshot();
+	return total;
 }
 
 /*
@@ -2607,12 +2974,16 @@ explicit_send(ExplicitState *state)
 	if (state->back)
 		state->returned = tuplestore_begin_heap(false, false, work_mem);
 
-	/* an UPDATE's or a DELETE's rows; a row deleted meanwhile passed over */
+	/*
+	 * an UPDATE's or a DELETE's rows; a row deleted meanwhile passed over,
+	 * and one updated rechecked in its newest version, where it can be
+	 */
 	if (state->recheck)
 	{
 		recheck.target = state->target;
 		recheck.deleted = 'p';
 		recheck.content = -1;
+		recheck.requalify = state->epq ? state : NULL;
 		rc = &recheck;
 	}
 
@@ -2875,6 +3246,9 @@ explicit_exec(CustomScanState *node)
 {
 	ExplicitState *state = (ExplicitState *) node;
 
+	if (state->epq_copy)
+		elog(ERROR, "a recheck's copy of a write of a distributed table cannot be run");
+
 	if (!state->done && state->merge)
 	{
 		explicit_collect_merge(state);
@@ -2907,6 +3281,13 @@ explicit_end(CustomScanState *node)
 {
 	ExplicitState *state = (ExplicitState *) node;
 
+	if (state->epq_copy)
+		return;
+	if (state->epq)
+	{
+		EvalPlanQualEnd(&state->epqstate);
+		ExecDropSingleTupleTableSlot(state->epqorig);
+	}
 	ExecEndNode(outerPlanState(node));
 	if (state->returned != NULL)
 		tuplestore_end(state->returned);

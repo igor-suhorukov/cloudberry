@@ -82,7 +82,7 @@ CREATE TABLE pax.pg_pax_tables (
     reltablespace oid NOT NULL,
     relfilenode   oid NOT NULL,
     filebits      int2 NOT NULL
-);
+) USING heap;
 CREATE UNIQUE INDEX pg_pax_tables_relid_index
     ON pax.pg_pax_tables (relid);
 CREATE INDEX pg_pax_tables_storage_index
@@ -95,7 +95,7 @@ CREATE INDEX pg_pax_tables_storage_index
 CREATE TABLE pax.pg_pax_fastsequence (
     objid oid NOT NULL,
     seq   int NOT NULL
-);
+) USING heap;
 CREATE INDEX pg_pax_fastsequence_objid_idx
     ON pax.pg_pax_fastsequence (objid);
 

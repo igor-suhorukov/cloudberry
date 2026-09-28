@@ -58,10 +58,21 @@ HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 CB="${CB_REGRESS_DIR:-/cb/src/test/regress}"
 PGSUITE="${PG_REGRESS_SUITE:-/cb/pgregress}"
 PG_REGRESS="$("$BINDIR/pg_config" --pkglibdir)/pgxs/src/test/regress/pg_regress"
+# A suite of this form from another directory, CB_REGRESS_DIR -- PAX's copy
+# of Cloudberry's suite, which ../pax_regress runs through this -- has its
+# own manifest, differences kept, init_file and tests of the port's
+# (GP_SUITE_DIR, whose sql/ and expected/ go with this directory's); the
+# Perl that compares the output from Cloudberry's suite (CB_GPDIFF_DIR), whose
+# init_file goes with the suite's; the modules and settings its clusters
+# have besides (GP_PRELOAD_MORE, GP_SETTINGS); and the tests each group's
+# pass begins with (GP_SETUP).
+SUITE_DIR="${GP_SUITE_DIR:-$HERE}"
+GPDIFF="${CB_GPDIFF_DIR:-$CB}"
+SETUP="${GP_SETUP:-test_setup gp_setup}"
 
 if [ ! -f "$CB/greenplum_schedule" ] || [ ! -f "$PGSUITE/sql/test_setup.sql" ] ||
    [ ! -f "$PGSUITE/regress.so" ] || [ ! -x "$PG_REGRESS" ] ||
-   [ ! -f "$CB/gpdiff.pl" ]; then
+   [ ! -f "$GPDIFF/gpdiff.pl" ]; then
 	echo "a test suite, pg_regress or gpdiff.pl is not installed; skipping"
 	exit 77
 fi
@@ -102,7 +113,7 @@ while read -r kind t g p; do
 	run_tests+=("$t"); run_group+=("$g"); run_pass+=("$p")
 done < <(awk '$1 == "group" { g = $2 }
 			  $1 == "run" || $1 == "port" {
-				  print $1, $2, (g == "" ? "main" : g), ($1 == "run" && NF > 2 ? $3 : "-") }' "$HERE/manifest")
+				  print $1, $2, (g == "" ? "main" : g), ($1 == "run" && NF > 2 ? $3 : "-") }' "$SUITE_DIR/manifest")
 for p in "${run_pass[@]}"; do
 	case "$p" in
 		-|planner|orca) ;;
@@ -180,12 +191,18 @@ cleanup() {
 trap cleanup EXIT
 
 # The manifest's lines of the schedule's tests, less the one of Cloudberry's
-# parallel_schedule it runs too.
+# parallel_schedule it runs too -- or every one of another suite's manifest
+# (GP_SUITE_DIR).
 of_schedule() {
-	awk 'NR == FNR { if ($1 == "test:") for (i = 2; i <= NF; i++) s[$i]; next }
-		 ($1 == "run" || $1 == "skip") && ($2 in s)' "$CB/greenplum_schedule" "$HERE/manifest"
+	if [ "$SUITE_DIR" = "$HERE" ]; then
+		awk 'NR == FNR { if ($1 == "test:") for (i = 2; i <= NF; i++) s[$i]; next }
+			 ($1 == "run" || $1 == "skip") && ($2 in s)' "$CB/greenplum_schedule" "$SUITE_DIR/manifest"
+	else
+		awk '$1 == "run" || $1 == "skip"' "$SUITE_DIR/manifest"
+	fi
 }
-echo "greenplum: part of Cloudberry's greenplum_schedule, on a coordinator and three segments"
+TITLE="greenplum: part of Cloudberry's greenplum_schedule"
+echo "${GP_TITLE:-$TITLE}, on a coordinator and three segments"
 printf '  of the %d tests of the schedule the manifest lists: %d run here, %d of them in one pass, in %d groups, %d are skipped\n' \
 	"$(of_schedule | wc -l)" \
 	"$(of_schedule | awk '$1 == "run"' | wc -l)" \
@@ -392,6 +409,8 @@ t1=$(date +%s)
 	# ic_proxy_socket's PL/Python reads SHOW's row by the setting's name,
 	# which the port spells gp.interconnect_*.
 	echo 'sed s#\["gp_interconnect_(type|proxy_addresses)"\]#["gp.interconnect_\1"]#g'
+	# and the suite's own, where it has any
+	[ "$SUITE_DIR" = "$HERE" ] || cat "$SUITE_DIR/respell" 2> /dev/null
 } > "$WORK/respell"
 respell() { perl "$HERE/../respell.pl" "$WORK/respell" "$@"; }
 
@@ -424,11 +443,15 @@ make_suite() {
 	cp -r "$WORK/data" "$SN/data"
 	cp "$HERE"/sql/*.sql "$SN/sql/"
 	cp "$HERE"/expected/*.out "$SN/expected/" 2> /dev/null
+	if [ "$SUITE_DIR" != "$HERE" ]; then
+		cp "$SUITE_DIR"/sql/*.sql "$SN/sql/" 2> /dev/null
+		cp "$SUITE_DIR"/expected/*.out "$SN/expected/" 2> /dev/null
+	fi
 	# a test loads regress.so from PG_ABS_SRCDIR too, the suite's directory
 	ln -sf "$("$BINDIR/pg_config" --pkglibdir)/cb_regress.so" "$SN/regress.so"
 	# a schedule a pass, of the tests that run in it
 	for p in planner orca; do
-		{ echo "test: test_setup"; echo "test: gp_setup"; } > "$SN/schedule.$p"
+		for t in $SETUP; do echo "test: $t"; done > "$SN/schedule.$p"
 	done
 	for i in "${!run_tests[@]}"; do
 		[ "${run_group[$i]}" = "$g" ] || continue
@@ -451,9 +474,10 @@ make_suite() {
 			fi
 		done
 		if [ -f "$CB/input/$src.source" ]; then
-			convert "$g" "$CB/input/$src.source" | amsub | respell > "$SN/sql/$f.sql"
+			convert "$g" "$CB/input/$src.source" | amsub | respell |
+				copy_data_end > "$SN/sql/$f.sql"
 		else
-			convert "$g" "$CB/sql/$t.sql" | respell > "$SN/sql/$f.sql"
+			convert "$g" "$CB/sql/$t.sql" | respell | copy_data_end > "$SN/sql/$f.sql"
 		fi
 		if [ -f "$CB/output/$src.source" ]; then
 			convert "$g" "$CB/output/$src.source" | amsub | respell > "$SN/expected/$f.out"
@@ -495,6 +519,32 @@ schedule_add() {
 		fi
 	done
 }
+# psql 19 skips the in-line data of a COPY ... FROM STDIN that fails, up to
+# the next \. (PostgreSQL's d6ab88d374a), where psql 16, which Cloudberry's
+# tests were written for, went on with the next line.  A COPY FROM STDIN a
+# test expects to fail, with no data after it -- the next line a comment or
+# a statement -- is given data that ends at once, which psql reads and does
+# not echo, so that what the test runs next is run, as the singlenode suite
+# gives it (../singlenode/run.sh).
+copy_data_end() {
+	awk '{
+		l = tolower($0)
+		# the blank lines after such a COPY, until what follows them is known
+		if (pending && l ~ /^[ \t]*$/) {
+			blanks = blanks $0 "\n"
+			next
+		}
+		if (pending && (l ~ /^--/ || l ~ /^[ \t]*(abort|alter|analyze|begin|call|checkpoint|close|cluster|comment|commit|copy|create|deallocate|declare|delete|discard|do|drop|end|execute|explain|fetch|grant|insert|listen|lock|merge|notify|prepare|refresh|reindex|release|reset|revoke|rollback|savepoint|select|set|show|start|table|truncate|update|vacuum|values|with)([ \t;(]|$)/))
+			print "\\."
+		printf "%s", blanks
+		blanks = ""
+		# (not a line of a combined query of psql, ended by a backslash and a semicolon)
+		pending = (l ~ /^[ \t]*copy[ \t].*[ \t]from[ \t]+stdin([ \t].*)?;[ \t]*(--.*)?$/ &&
+				   l !~ /\\;[ \t]*(--.*)?$/)
+		print
+	}
+	END { printf "%s", blanks }'
+}
 amsub() {
 	if [ -n "$am" ]; then
 		sed -e "s/@amname@/$am/g" -e "s/@aoseg@/$aoseg/g"
@@ -509,9 +559,9 @@ echo "  the clusters made in $((t1 - t0)) s, the groups' tests converted in $(( 
 echo
 
 mkdir -p "$WORK/gpdiff"
-cp "$CB"/gpdiff.pl "$CB"/atmsort.pm "$CB"/explain.pm "$WORK/gpdiff/"
+cp "$GPDIFF"/gpdiff.pl "$GPDIFF"/atmsort.pm "$GPDIFF"/explain.pm "$WORK/gpdiff/"
 sed 's/##Version: ##/Apache Cloudberry (the PostgreSQL 19 port)/' \
-	"$CB/GPTest.pm.in" > "$WORK/gpdiff/GPTest.pm"
+	"$GPDIFF/GPTest.pm.in" > "$WORK/gpdiff/GPTest.pm"
 
 # The diff pg_regress runs: gpdiff.pl, for PostgreSQL's test_setup too, whose
 # tables are distributed here and say so; with a difference reviewed and
@@ -547,6 +597,11 @@ cat > "$EXEC/bin/mem_quota_util.py" <<EOF
 PYTHONPATH="$WORK/pylib\${PYTHONPATH:+:\$PYTHONPATH}" exec python3 "$CB/mem_quota_util.py" "\$@"
 EOF
 chmod +x "$EXEC/bin/mem_quota_util.py"
+# Cloudberry's init files, the suite's and the port's: its matchsubs and
+# matchignores.
+inits=("$CB/init_file" "$HERE/init_file")
+[ "$GPDIFF" = "$CB" ] || inits=("$GPDIFF/init_file" "${inits[@]}")
+[ "$SUITE_DIR" = "$HERE" ] || [ ! -f "$SUITE_DIR/init_file" ] || inits+=("$SUITE_DIR/init_file")
 # CB_DIFF_DIR is the group's pass's directory, which keeps what differs;
 # CB_DIFF_MODE the pass, which names a difference kept for it alone.
 cat > "$EXEC/bin/diff" <<EOF
@@ -557,7 +612,7 @@ res="\${@:\$n:1}"
 opts=("\${@:1:\$((n - 2))}")
 name=\$(basename "\$exp" .out)
 cb=(-I HINT: -I CONTEXT: -I GP_IGNORE: --gpd_ignore_plans
-    --gpd_init "$CB/init_file" --gpd_init "$HERE/init_file")
+    $(for f in "${inits[@]}"; do printf -- '--gpd_init "%s" ' "$f"; done))
 canon="\$CB_DIFF_DIR/canon/\$name.diff"
 # the results less the place PostgreSQL 19 gives a shell type (shellpos.pl)
 mkdir -p "\$CB_DIFF_DIR/shellpos"
@@ -568,7 +623,11 @@ env PATH=/usr/bin:/bin perl "$WORK/gpdiff/gpdiff.pl" -U0 "\${cb[@]}" "\$exp" "\$
 # A comparison that could not be made is a difference, never an empty one.
 st=("\${PIPESTATUS[@]}")
 [ "\${st[0]}" -le 1 ] && [ "\${st[1]}" -eq 0 ] || echo "no comparison was made" >> "\$canon"
-if [ ! -s "\$canon" ] || cmp -s "\$canon" "$HERE/cloudberry/\$name.\$CB_DIFF_MODE.diff" ||
+# Kept in the suite's cloudberry/ -- or, for a suite of another directory's,
+# in this one's: the same test answers alike where its copy is Cloudberry's.
+if [ ! -s "\$canon" ] || cmp -s "\$canon" "$SUITE_DIR/cloudberry/\$name.\$CB_DIFF_MODE.diff" ||
+   cmp -s "\$canon" "$SUITE_DIR/cloudberry/\$name.diff" ||
+   cmp -s "\$canon" "$HERE/cloudberry/\$name.\$CB_DIFF_MODE.diff" ||
    cmp -s "\$canon" "$HERE/cloudberry/\$name.diff"; then
 	rm -f "\$canon"
 	exit 0
@@ -724,7 +783,7 @@ for pass in ${PASSES:-planner orca}; do
 			"$WORK/$g/$pass/pg_regress.out" | sed 's/ not ok / not_ok /'
 	done > "$WORK/$pass.results"
 	total=0; bad=0; rc=0
-	pass_tests=(test_setup gp_setup)
+	pass_tests=($SETUP)
 	for i in "${!run_tests[@]}"; do
 		[ "${run_pass[$i]}" = - ] || [ "${run_pass[$i]}" = "$pass" ] &&
 			pass_tests+=("${run_tests[$i]}")
