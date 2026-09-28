@@ -1,0 +1,48 @@
+@@
+-ERROR:  fault triggered, fault name:'DoCopyToFail' fault type:'error'
++1
++2
++5
+@@
+- gp_segment_id |                   setconfig                   
+----------------+-----------------------------------------------
+-             0 | {"search_path=\"\"\"my schema\"\", public\""}
++ gp_segment_id |               setconfig               
++---------------+---------------------------------------
++             0 | {"search_path=\"my schema\", public"}
+@@
+-ERROR:  Query plan size limit exceeded, current size: 
+-HINT:  Size controlled by gp_max_plan_size
++ERROR:  Query plan size limit exceeded, current size: 46KB, max allowed size: 10KB
++HINT:  Size controlled by gp.max_plan_size
+@@
+-ERROR:  query plan with multiple segworker groups is not supported
+-HINT:  likely caused by a function that reads or modifies data in a distributed table
+-CONTEXT:  PL/pgSQL function dtx_dispatch_f(integer) line 2 during statement block entry
++ dtx_dispatch_f 
++----------------
++              2
++(1 row)
++
+@@
+-ERROR:  backward scan is not supported in this version of Apache Cloudberry
++ERROR:  cursor can only scan forward
++HINT:  Declare it with SCROLL option to enable backward scan.
+@@
+-INFO:  The shortest establish conn time: xx.xx ms, segindex: xx,
+-       The longest  establish conn time: xx.xx ms, segindex: xx
+@@
+-INFO:  (Gang) is reused
+@@
+-INFO:  (Gang) is reused
++INFO:  The shortest establish conn time: xx.xx ms, segindex: xx,
++       The longest  establish conn time: xx.xx ms, segindex: xx
+@@
+-INFO:  (Slice1) is reused
+-INFO:  (Slice2) The shortest establish conn time: xx.xx ms, segindex: xx,
+-                The longest  establish conn time: xx.xx ms, segindex: xx
++INFO:  (Gang) is reused
+@@
+-INFO:  (Slice1) is reused
+-INFO:  (Slice2) is reused
++INFO:  (Gang) is reused

@@ -483,8 +483,23 @@ extern char *GpDdlLabelPayload(const struct ObjectAddress *object,
 extern char *GpDdlLabelPayloadOf(const struct ObjectAddress *object,
 								 const char *provider, const char *label);
 
+/*
+ * A plan about to be sent -- a gather's query, an ORCA fragment -- held to
+ * gp.max_plan_size, as Cloudberry's dispatcher holds one to its
+ * gp_max_plan_size: raises where it is larger.
+ */
+extern void GpDispatchCheckPlanSize(const char *sql);
+
 /* Defines the settings; called from gp_core's _PG_init. */
 extern void GpDispatchInit(void);
+
+/*
+ * What a connection's start does on every node -- a coordinator's client
+ * takes its session id, and the faults of a segment process's start fire --
+ * and the setting a segment process reports its details in; from gp_core's
+ * _PG_init, after every other module's authentication hook.
+ */
+extern void GpDispatchConnectionInit(void);
 
 /* Installs the DDL dispatch hooks, where there is a cluster; see gp_ddl.c. */
 extern void GpDdlInit(void);

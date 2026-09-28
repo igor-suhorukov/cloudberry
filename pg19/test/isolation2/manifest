@@ -101,12 +101,15 @@ run  export_distributed_snapshot
 # And Cloudberry's parallel_retrieve_cursor_schedule, M8's, in a group of its
 # own, retrieve: parallel retrieve cursors and their retrieve sessions
 # (1R:, *R:).  Its tests read that schedule's init file, as its target in
-# Cloudberry's Makefile does, and the port's for it (run.sh).
+# Cloudberry's Makefile does, and the port's for it (run.sh).  But for
+# replicated_table, in mirrors2: its first test joins an endpoint to
+# gp_segment_configuration's rows of its content, the primary's and the
+# mirror's.
 run  parallel_retrieve_cursor/set                  retrieve
 run  parallel_retrieve_cursor/extended_query       retrieve
 run  parallel_retrieve_cursor/corner               retrieve
 run  parallel_retrieve_cursor/explain              retrieve
-skip parallel_retrieve_cursor/replicated_table     its second test takes, among six sessions, the one whose gp_session_id modulo 3 is 1, which Cloudberry's session counter always has and the port's session ids, the coordinator's backends' process ids, may all miss; port/parallel_retrieve_cursor_replicated in its place
+run  parallel_retrieve_cursor/replicated_table     mirrors2
 run  port/parallel_retrieve_cursor_replicated     retrieve
 run  parallel_retrieve_cursor/special_query        retrieve
 run  parallel_retrieve_cursor/status_check         retrieve

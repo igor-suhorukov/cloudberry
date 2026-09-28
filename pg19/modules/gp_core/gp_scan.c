@@ -303,9 +303,11 @@ GpScanReplicatedContent(const GpPolicy *policy)
 {
 	/*
 	 * Every segment of the policy has every row; spread the sessions over
-	 * them.  A partial table's are the first numsegments.
+	 * them, as Cloudberry picks gp_session_id modulo them -- the segment a
+	 * parallel retrieve cursor's endpoint is on too (gp_endpoint.c).  A
+	 * partial table's are the first numsegments.
 	 */
-	return MyProcPid % policy->numsegments;
+	return GpClusterSessionId() % policy->numsegments;
 }
 
 /* ------------------------------------------------------------------------- */

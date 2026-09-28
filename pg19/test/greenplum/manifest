@@ -434,7 +434,9 @@ run  joinhints
 run  qp_indexscan  planner  differs under ORCA: its plans of index scans over partitions
 run  gp_index_costing
 skip pgstat_qd_tabstat  syntax error at or near "on": its COPY ... ON SEGMENT, to and from a file of each segment, is none of the port's
-skip dispatch  the fault DoCopyToFail is none of the port's; unrecognized configuration parameter "gp_max_plan_size"; and its gangs' faults (process_startup_packet, send_qe_details_init_backend), retries (gp_gang_creation_retry_count) and regress.so's hasGangsExist() and hasBackendsExist()
+group tcp1
+run  dispatch
+group m7a
 run  wrkloadadmin
 run  trig
 skip role  syntax error at or near "only"

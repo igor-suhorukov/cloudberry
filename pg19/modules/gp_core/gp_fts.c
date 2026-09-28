@@ -136,9 +136,6 @@
 #include "gp_fts.h"
 #include "gp_standby.h"
 
-/* What the prober's connections are called, on the segments and in their logs. */
-#define GP_FTS_APPNAME			"cloudberry fts"
-
 /* The file a probe reads and writes, and what it holds; Cloudberry's. */
 #define FTS_PROBE_FILE_NAME		"fts_probe_file.bak"
 #define FTS_PROBE_MAGIC_STRING	"FtS PrObEr MaGiC StRiNg, pRoBiNg cHeCk......."

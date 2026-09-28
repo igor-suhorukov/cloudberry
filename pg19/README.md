@@ -110,7 +110,22 @@ On a cluster (M2), `gp_core` and `gp_orca`:
 
 - the nodes, read from a file (`gp.cluster_config`); the dispatcher, an
   ordinary libpq client authenticated with SCRAM, whose statements run in the
-  coordinator's transaction, savepoints included;
+  coordinator's transaction, savepoints included; a gang's connections made
+  all at once, as Cloudberry's are, under `gp.segment_connect_timeout` --
+  Cloudberry's gp_segment_connect_timeout and its default, 180 s, where the
+  port waited for ever -- a segment in recovery tried again
+  `gp.gang_creation_retry_count` times, a segment process saying it is one
+  as it starts (`gp.qe_details`), and what fails said in Cloudberry's words;
+- each session's id, `gp.session_id`, a number of the coordinator's counter
+  taken as the client connects, as Cloudberry's gp_session_id is -- clients
+  that connect one after another have ids one after another, which a
+  replicated table's parallel retrieve cursor picks its segment by -- and a
+  new one once the gang the session had its part on is lost, as Cloudberry's
+  session takes one (resetSessionForPrimaryGangLoss()): what is left of the
+  old one on the segments, a retrieve session bound to it among them, is no
+  part of the new one's.  On one node a backend's id is its process ID, as
+  it was: nothing there says which session another backend works for but
+  its process;
 - DDL on every node with the coordinator's OIDs (R1), and a segment's own
   catalog rows, its temporary namespaces, with OIDs from the top of the OID
   space, which the coordinator's counter does not reach; distribution policies
@@ -168,7 +183,8 @@ On a cluster (M2), `gp_core` and `gp_orca`:
 - every segment has each table's distribution policy, the `gp` label the
   coordinator writes;
 - Cloudberry's settings of the dispatcher and the planner, as `gp.*`, among
-  them direct dispatch's INFO lines and autostats;
+  them direct dispatch's INFO lines and autostats, `gp.max_plan_size`, and
+  `gp.print_create_gang_time`'s INFO lines of a gang's connections;
 - EXPLAIN's `slicetable` and `locus` options, Cloudberry's; **EXPLAIN
   ANALYZE of what the segments ran**, which each segment measures and
   sends the coordinator as an INFO of gp_core's as its part ends: the
@@ -300,7 +316,11 @@ Distributed transactions (M3), in `gp_core`:
   of every row;
 - Cloudberry's fault injector, `gp_inject_fault`, for the tests: its faults
   at the port's own places under Cloudberry's names, and at PostgreSQL 19's
-  injection points, among them O29's in PostgreSQL's commit;
+  injection points, among them O29's in PostgreSQL's commit; a fault's error
+  Cloudberry's ERRCODE_FAULT_INJECT, XX009, which a test's PL/pgSQL handler
+  catches, `when fault_inject` -- a condition PostgreSQL 19's PL/pgSQL does
+  not know, which the harness spells `when sqlstate 'XX009'` -- and no fault
+  firing in the fault injector's own connection to a node;
 - Cloudberry's `debug_dtm_action` settings, `gp.debug_dtm_action*`: a
   segment fails the protocol command -- PREPARE, COMMIT PREPARED, a
   subtransaction's begin, release or rollback -- or the SQL command they
@@ -379,7 +399,12 @@ of the core series, O13 to O21, O23 and O32:
   reach both planners -- ORCA's through gp_orca's `plan_hint_hook` -- with
   PostgreSQL 19's join search copied for it (`core.c`, made by
   `gen_core.py`) and the enable_* settings a hint sets copied into each
-  relation's `pgs_mask`; a session LOADs it, as Cloudberry's tests do;
+  relation's `pgs_mask`; a session LOADs it, as Cloudberry's tests do; its
+  hint table, `hint_plan.hints` under `pg_hint_plan.enable_hint_table`,
+  replicated on a cluster, whose hints reach ORCA as the planner hook found
+  them -- Cloudberry's ORCA finds them again, a query of the table, which
+  failed ORCA's planning of every statement -- and a query planned while
+  ORCA plans another the planner's;
 - tablespaces, every node's: each node's directory of a tablespace is the
   one of its dbid under the location, as Cloudberry's is, which PostgreSQL
   asks `gp_core` for through O32 -- as a node runs CREATE TABLESPACE, and as

@@ -211,11 +211,22 @@ extern const GpSegmentConfig *GpClusterNodeByDbid(int dbid);
 extern const GpSegmentConfig *GpClusterCoordinator(void);
 
 /*
- * The session this backend works for: its own process on the coordinator,
- * and on a segment the coordinator's backend the dispatcher works for --
- * what Cloudberry calls gp_session_id, which it shares across the nodes.
+ * The session this backend works for: a number the coordinator gives each of
+ * its backends, and on a segment the coordinator's backend the dispatcher
+ * works for -- what Cloudberry calls gp_session_id, which it shares across
+ * the nodes.  On one node a backend's process ID.
  */
 extern int	GpClusterSessionId(void);
+
+/* A new one for this coordinator backend, whose gang was lost; the old one. */
+extern int	GpClusterNewSessionId(void);
+
+/*
+ * A module's call as a coordinator backend takes a new session id, with the
+ * old one and the new: gp_resource's session state is the session's.
+ */
+typedef void (*GpClusterSessionCallback) (int old_session, int new_session);
+extern void GpClusterAddSessionCallback(GpClusterSessionCallback callback);
 
 /*
  * How many segments to compute with.  Never 0 -- consumers divide by it; see
