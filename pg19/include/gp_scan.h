@@ -109,6 +109,27 @@ extern bool GpGatherScanSlice(struct PlanState *ps, int *slice, int *nsegs);
 extern bool GpGatherScanFinish(struct PlanState *ps);
 
 /*
+ * A runtime filter a gather is given (gp_rtfilter.c).  Each row the gather
+ * reads is asked of "rows", before the node's own conditions, and dropped
+ * where the answer is false.  As the gather starts, "conditions" may add to
+ * the conditions it sends the segments -- the range of a hash join's key --
+ * as SQL, or "" for none: not for a gather whose rows are kept for a rescan,
+ * locked, changed, bounded by a LIMIT or a cursor's row.  False if ps is not
+ * a gather.
+ */
+struct TupleTableSlot;
+typedef struct GpGatherRuntimeFilter
+{
+	bool		(*rows) (struct PlanState *ps, struct TupleTableSlot *scanslot,
+						 void *arg);
+	char	   *(*conditions) (struct PlanState *ps, void *arg);
+	void	   *arg;
+} GpGatherRuntimeFilter;
+
+extern bool GpGatherScanSetRuntimeFilter(struct PlanState *ps,
+										 const GpGatherRuntimeFilter *filter);
+
+/*
  * After planning: a gather a LIMIT reads sends the segments the LIMIT
  * (gp_modify.c).
  */
