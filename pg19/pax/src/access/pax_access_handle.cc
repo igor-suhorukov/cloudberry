@@ -27,7 +27,8 @@
  *     members of TableAmRoutine are gone: what PAX needs of them is the
  *     TableAmExtRoutine the module registers (O13) -- its options (O14), the
  *     columns a scan reads (O15, where Cloudberry began the scan with the
- *     plan node), a unique index's probe (O16) and its size (O19);
+ *     plan node) and a unique index's probe (O16) -- and its size is what
+ *     gp_core asks its relation_size, which pax.c registers;
  *   - a row is fetched by its TID, as UPDATE, DELETE ... RETURNING and MERGE
  *     fetch the old row, where Cloudberry's planner gave UPDATE the row whole
  *     in the plan, as gp_core's split update fetches it, where Cloudberry's

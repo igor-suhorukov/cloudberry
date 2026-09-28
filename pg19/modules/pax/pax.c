@@ -27,10 +27,11 @@
  * bytes logged by PAX's WAL resource manager (199).  The port compiles
  * Cloudberry's C++ where it stands, and the port's copies of the files that
  * had to change (pg19/pax/meson.build); what PostgreSQL 19 does not do for
- * it, the port's core patches do: its options (O14), the columns a scan reads
- * (O15), a unique index's probe (O16), its size (O19), its directory removed
- * with its files (O22), and its files marked for pg_checksums and pg_upgrade
- * (O23).  CREATE EXTENSION pax makes its objects, where Cloudberry's initdb
+ * it, the port's core patches do -- its options (O14), the columns a scan
+ * reads (O15), a unique index's probe (O16), its directory removed with its
+ * files (O21's unlink event) and its files passed over by pg_checksums (O23)
+ * -- and gp_core, where its size is measured and its files marked (API 1.14,
+ * below).  CREATE EXTENSION pax makes its objects, where Cloudberry's initdb
  * made them with fixed OIDs.
  *
  * This file is the module's: its magic block and _PG_init, which calls

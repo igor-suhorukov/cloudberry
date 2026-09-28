@@ -329,7 +329,8 @@ open: six of Cloudberry's FTS tests, each for what the port did not have
 (`cloudberry.md`) -- three of them run since M7's tools (below).
 
 M5 — storage and loading — has begun (2026-09-25), on eleven more patches
-of the core series, O13 to O21, O23 and O32:
+of the core series, O13 to O21, O23 and O32 (since 2026-09-28 O19 and O20,
+as PAX's O22, done in the modules, and O23 pg_checksums' reader alone):
 
 - `gp_ao`: append-optimized tables, by row (`ao_row`) and by column
   (`ao_column`), as table access methods whose blocks are 8K pages of the
@@ -392,15 +393,16 @@ of the core series, O13 to O21, O23 and O32:
   `pg_checksums` (O23, the mark `gp_core`'s to write), logged by PAX's
   resource manager (ID 199), and
   described by the rows of an aux table of its own.  PostgreSQL 19 asks it
-  for its options (O14), the columns a scan reads (O15), a unique index's
-  probe (O16) and its size (O19), through the registry (O13), and UPDATE
-  fetches the old row by its TID.  A row's number, 24 bits of file and 23 of
-  row, is mapped onto TIDs laid out for the table, 20 bits of file by
-  default; statistics of each file and group, min/max and bloom filters,
-  skip those a scan's conditions rule out; `CLUSTER` orders a table by its
-  cluster columns, Z-order or lexical, on every segment; ANALYZE samples it;
-  and the coordinator's planner sizes it, and an append-optimized table, as
-  it sizes a heap table.
+  for its options (O14), the columns a scan reads (O15) and a unique index's
+  probe (O16), through the registry (O13); `gp_core` measures its tables by
+  its `relation_size`, which it registers; and UPDATE fetches the old row by
+  its TID.  A row's number, 24 bits of file and 23 of row, is mapped onto
+  TIDs laid out for the table, 20 bits of file by default; statistics of
+  each file and group, min/max and bloom filters, skip those a scan's
+  conditions rule out; `CLUSTER` orders a table by its cluster columns,
+  Z-order or lexical, on every segment; ANALYZE samples it; and the
+  coordinator's planner sizes it, and an append-optimized table, as it
+  sizes a heap table.
 
 M5's modules are built; what they leave open is in `cloudberry.md`.
 
