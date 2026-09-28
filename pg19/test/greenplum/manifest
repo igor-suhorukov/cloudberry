@@ -101,7 +101,7 @@ run  create_table_distpol
 group g2
 run  alter_distpol_dropped
 run  gp_distinct_plans
-skip partition  syntax error at or near "only"; relation "gp_partition_template" does not exist
+skip partition  syntax error at or near "only"; relation "parttab_with_excl_constraint" already exists
 skip partition1  type "cc" does not exist; column "partition" of relation "hhh_l1" does not exist
 run  partition_storage
 skip partition_ddl  type "aa" does not exist; cannot specify storage parameters for a partitioned table
@@ -112,7 +112,7 @@ run  external_table
 run  external_table_union_all
 run  external_table_create_privs
 run  external_table_persistent_error_log
-skip column_compression  relation "gp_partition_template" does not exist; column "i" referenced in more than one COLUMN ENCODING clause
+skip column_compression  column "i" referenced in more than one COLUMN ENCODING clause; table "ccddl" does not exist
 skip alter_table_aocs  type "gp_fastsequence" does not exist
 run  alter_table_aocs2
 run  alter_distribution_policy
@@ -266,7 +266,7 @@ run  vacuum_full_ao
 run  vacuum_full_heap_bitmapindex
 skip vacuum_ao_aux_only  syntax error at or near "vac_example_heap": VACUUM AO_AUX_ONLY is none of the port's, nor is the visibility map it vacuums a table's own, pg_appendonly's visimaprelid, which gp_ao keeps in one table of every table's
 skip ao_checksum_corruption  unrecognized configuration parameter "gp_appendonly_verify_block_checksums"
-skip AOCO_Compression  relation "gp_partition_template" does not exist
+skip AOCO_Compression  differs: \d+ of a table by column prints no Compression Type, Compression Level or Block Size column; an empty table by column takes 32 kB, where Cloudberry's takes none, and the sizes its checks allow a tenth off are not met; and ALTER TYPE ... SET DEFAULT ENCODING of an enum is taken, where Cloudberry refuses it: mood_encoded is not a base type
 run  AORO_Compression
 run  am_encoding
 run  ao_segfile
@@ -424,7 +424,8 @@ skip partition_locking  differs: the locks a statement takes on a partitioned ta
 run  vacuum_gp
 run  vacuum_fsm_nondefault_tablespace
 run  pg_stat
-skip bfv_partition  relation "gp_partition_template" does not exist; differs: autovacuum on in its group, psql 19's list of a partitioned table's partitions, PostgreSQL 19's DETAIL of an operator it cannot choose, and the MAINTAIN privilege, m, in its ACL
+port autovacuum_off
+run  bfv_partition
 run  qp_misc_rio
 skip bfv_partition_plans  differs: a count of its plan's partition selections is 0, where Cloudberry's is 2
 run  gp_covering_index
@@ -435,6 +436,7 @@ run  qp_indexscan  planner  differs under ORCA: its plans of index scans over pa
 run  gp_index_costing
 skip pgstat_qd_tabstat  syntax error at or near "on": its COPY ... ON SEGMENT, to and from a file of each segment, is none of the port's
 skip dispatch  the fault DoCopyToFail is none of the port's; unrecognized configuration parameter "gp_max_plan_size"; and its gangs' faults (process_startup_packet, send_qe_details_init_backend), retries (gp_gang_creation_retry_count) and regress.so's hasGangsExist() and hasBackendsExist()
+port autovacuum_on
 run  wrkloadadmin
 run  trig
 skip role  syntax error at or near "only"

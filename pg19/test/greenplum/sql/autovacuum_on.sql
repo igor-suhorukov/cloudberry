@@ -1,0 +1,7 @@
+--
+-- Autovacuum on again on every node, as enable_autovacuum turns it on after
+-- the schedule's tests that run without it: in m7a, from autovacuum_off
+-- before bfv_partition, which shows the setting, to this.
+--
+alter system set autovacuum = on;
+select gp_segment_id, pg_reload_conf() from gp_id union select gp_segment_id, pg_reload_conf() from gp_dist_random('gp_id');

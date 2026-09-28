@@ -124,6 +124,14 @@ bfv_joins  a join of twenty empty tables, which Cloudberry's demo cluster
   rows, in the time the test allows.  Its tables distributed with the legacy
   cdbhash_float4_ops class are joined as Cloudberry joins them.
 
+bfv_partition  PostgreSQL 19's own words: psql's list of a partitioned
+  table's partitions, one a line under "Partitions:", where Cloudberry's
+  psql writes them after it, a comma after each; the DETAIL that an
+  operator no best candidate of which could be chosen now has, before a
+  shorter HINT; the place in ALTER TABLE ... ALTER COLUMN ... TYPE of a
+  column the partition has not, which PostgreSQL 19 gives the error; and
+  the MAINTAIN privilege, m, in the owner's privileges \dp shows.
+
 bfv_subquery (planner, orca)  count_operator() finds no Seq Scan in the
   plan of a query over distributed tables: the port's planner reads each
   through a Gather Motion, which scans the table on the segments, and

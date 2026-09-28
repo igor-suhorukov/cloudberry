@@ -102,7 +102,10 @@ On one node (M1):
   `COPY BINARY t FROM ... 'path'` and `COPY BINARY DIRECTORY TABLE t 'path'
   TO ...`;
   and Cloudberry's spelling of statements through O26 — classic partition
-  clauses, `DISTRIBUTED BY`, `DECODE`, `gp_dist_random('t')`.
+  clauses, `DISTRIBUTED BY`, `DECODE`, `gp_dist_random('t')`; a classic
+  partitioned table's SUBPARTITION TEMPLATEs as Cloudberry's
+  `gp_partition_template` shows them, `pg_get_expr(template, relid)`
+  printing each as Cloudberry's does.
 - `gp_security` — password profiles.
 - `gp_orca` — ORCA plans on one node, with the fallback counters.
 
