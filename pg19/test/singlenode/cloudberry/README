@@ -69,9 +69,11 @@ The reasons, by what brings them, and then each test:
       "column "partition" of relation "t" does not exist" where Cloudberry's
       is a syntax error, and ADD partition cc a column of type cc where
       Cloudberry's is a partition with no boundary.  Both fail in Cloudberry.
-    - A SUBPARTITION TEMPLATE is kept, as written, in its table's gp label;
-      Cloudberry's catalog gp_partition_template, and the node dump its
-      tests print from it, is not there to query.
+    - A SUBPARTITION TEMPLATE is kept, as written, in its table's gp label,
+      and Cloudberry's catalog gp_partition_template is a view of it, which
+      gives each template's relid and level as Cloudberry's does, and the
+      template as pg_get_expr() prints Cloudberry's -- where a test selects
+      the template itself, Cloudberry prints the dump of a node of its own.
     - An error about a partition an ALTER TABLE made is reported by
       Cloudberry at the 35th character of the statement, the length of the
       text it runs the partition's CREATE as, "(internally generated SQL
@@ -178,7 +180,7 @@ incremental_analyze  Its database is made from template1, which has
   gp_ao's 8 kB pages of its file, as in the greenplum suite's
   incremental_analyze.
 matview_ao  psql's \dm.
-partition  Most reasons above: its templates and gp_partition_template;
+partition  Most reasons above: its templates, which gp_partition_template shows;
   Cloudberry's REVOKE notice; an exclusion constraint PostgreSQL 19 allows;
   "PRIMARY KEY constraint on partitioned table"; the caret of an error in a
   partition an ALTER TABLE made; psql's \d+ and \dt.

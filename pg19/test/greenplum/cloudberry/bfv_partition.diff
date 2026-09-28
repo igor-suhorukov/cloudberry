@@ -1,0 +1,38 @@
+@@
+-Partitions: t26002_t1_1_prt_2 FOR VALUES FROM (2012) TO (2015), PARTITIONED,
+-            t26002_t1_1_prt_outlying_years DEFAULT, PARTITIONED
++Partitions:
++    t26002_t1_1_prt_2 FOR VALUES FROM (2012) TO (2015), PARTITIONED
++    t26002_t1_1_prt_outlying_years DEFAULT, PARTITIONED
+@@
+-Partitions: t26002_t1_1_prt_2_2_prt_asia FOR VALUES IN ('asia'),
+-            t26002_t1_1_prt_2_2_prt_europe FOR VALUES IN ('europe'),
+-            t26002_t1_1_prt_2_2_prt_usa FOR VALUES IN ('usa'),
+-            t26002_t1_1_prt_2_2_prt_other_regions DEFAULT
++Partitions:
++    t26002_t1_1_prt_2_2_prt_asia FOR VALUES IN ('asia')
++    t26002_t1_1_prt_2_2_prt_europe FOR VALUES IN ('europe')
++    t26002_t1_1_prt_2_2_prt_usa FOR VALUES IN ('usa')
++    t26002_t1_1_prt_2_2_prt_other_regions DEFAULT
+@@
++DETAIL:  Could not choose a best candidate operator.
+@@
++LINE 1: alter table fff_main_1_prt_1 alter column i type bigint;
++                                                  ^
+@@
+-    Schema     |          Name          |       Type        |           Access privileges           | Column privileges | Policies 
+----------------+------------------------+-------------------+---------------------------------------+-------------------+----------
+-               |                        |                   | part_acl_u1=r/part_acl_owner          |                   | 
+-               |                        |                   | part_acl_u1=r/part_acl_owner          |                   | 
+-               |                        |                   | part_acl_u1=r/part_acl_owner          |                   | 
+- bfv_partition | part_acl_test          | partitioned table | part_acl_owner=arwdDxt/part_acl_owner+|                   | 
+- bfv_partition | part_acl_test_1_prt_p1 | table             | part_acl_owner=arwdDxt/part_acl_owner+|                   | 
+- bfv_partition | part_acl_test_1_prt_p2 | table             | part_acl_owner=arwdDxt/part_acl_owner+|                   | 
++    Schema     |          Name          |       Type        |           Access privileges            | Column privileges | Policies 
++---------------+------------------------+-------------------+----------------------------------------+-------------------+----------
++               |                        |                   | part_acl_u1=r/part_acl_owner           |                   | 
++               |                        |                   | part_acl_u1=r/part_acl_owner           |                   | 
++               |                        |                   | part_acl_u1=r/part_acl_owner           |                   | 
++ bfv_partition | part_acl_test          | partitioned table | part_acl_owner=arwdDxtm/part_acl_owner+|                   | 
++ bfv_partition | part_acl_test_1_prt_p1 | table             | part_acl_owner=arwdDxtm/part_acl_owner+|                   | 
++ bfv_partition | part_acl_test_1_prt_p2 | table             | part_acl_owner=arwdDxtm/part_acl_owner+|                   | 

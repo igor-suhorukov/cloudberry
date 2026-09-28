@@ -76,7 +76,10 @@ On one node (M1):
   tables.  A view over one table, over several, or over a table joined to
   itself is maintained by delta, as are `count`, `sum` and `avg`; what the
   delta cannot express — an outer join, `min`, `max`, TRUNCATE — is
-  recomputed.  A dynamic table refreshes itself through `gp_task`.  A
+  recomputed.  A dynamic table refreshes itself through `gp_task`, by a
+  job of Cloudberry's reserved name that runs Cloudberry's REFRESH DYNAMIC
+  TABLE where `gp_sql` is preloaded, and Cloudberry's `pg_dynamic_tables`
+  and `pg_get_dynamic_table_schedule()` read them.  A
   query is answered from a materialized view that holds what it asks,
   where that costs less (`gp.enable_answer_query_using_materialized_views`,
   Cloudberry's AQUMV), under ORCA too unless `gp.aqumv_under_orca` is off:
@@ -102,7 +105,10 @@ On one node (M1):
   `COPY BINARY t FROM ... 'path'` and `COPY BINARY DIRECTORY TABLE t 'path'
   TO ...`;
   and Cloudberry's spelling of statements through O26 — classic partition
-  clauses, `DISTRIBUTED BY`, `DECODE`, `gp_dist_random('t')`.
+  clauses, `DISTRIBUTED BY`, `DECODE`, `gp_dist_random('t')`; a classic
+  partitioned table's SUBPARTITION TEMPLATEs as Cloudberry's
+  `gp_partition_template` shows them, `pg_get_expr(template, relid)`
+  printing each as Cloudberry's does.
 - `gp_security` — password profiles.
 - `gp_orca` — ORCA plans on one node, with the fallback counters.
 
@@ -184,7 +190,17 @@ On a cluster (M2), `gp_core` and `gp_orca`:
   coordinator writes;
 - Cloudberry's settings of the dispatcher and the planner, as `gp.*`, among
   them direct dispatch's INFO lines and autostats, `gp.max_plan_size`, and
-  `gp.print_create_gang_time`'s INFO lines of a gang's connections;
+  `gp.print_create_gang_time`'s INFO lines of a gang's connections; a SET of
+  the client's, outside a transaction block, told the segments as it runs, as
+  Cloudberry dispatches one, so that a value a segment refuses fails the SET
+  itself; DISCARD TEMP on every node, in the statement's transaction; and
+  `gp.allow_segment_dml`, with which a function a segment runs in its share
+  of a plan may write there, as Cloudberry's allow_segment_DML lets one;
+- SERIALIZABLE, on a cluster, is REPEATABLE READ, as in Cloudberry and
+  Greenplum, and as the plan's Track C drops it (the DTM's effort table,
+  "Drop": "SERIALIZABLE (as in Greenplum)"): each node's serializable
+  snapshot isolation sees none of another's rows, so a conflict split over
+  two segments would commit; one node keeps PostgreSQL's;
 - EXPLAIN's `slicetable` and `locus` options, Cloudberry's; **EXPLAIN
   ANALYZE of what the segments ran**, which each segment measures and
   sends the coordinator as an INFO of gp_core's as its part ends: the

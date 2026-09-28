@@ -27,7 +27,11 @@
 #         nodes must come before any test's temporary schema: a node makes
 #         its own, pg_temp_N by its own backend's number, with an OID of its
 #         own, where Cloudberry's coordinator dispatches one name and OID for
-#         a session's.
+#         a session's.  guc_gp follows it there, whose count of the
+#         segments' pg_temp schemas is one each only before any other
+#         session's temporary tables; and dynamic_table, which the planner's
+#         pass alone runs: its 80 seconds of waiting for its job take no
+#         longer in a group of seconds than the longest group does
 #
 # Every test of the schedule is listed.  The ones the port had left for M7 --
 # fault injection, FTS, the interconnect's settings, and the rest -- come
@@ -73,6 +77,8 @@ run  distributed_transactions
 run  statement_mem_for_windowagg
 group ns
 run  namespace_gp
+run  guc_gp
+run  dynamic_table  planner  it turns optimizer off itself, so both passes would plan it alike, and ORCA's pass, on the planner's pass's clusters, would read the rows the planner's wrote into its external table's demoprot file on each segment too
 group g1
 run  bitmap_index
 run  truncate_gp
@@ -101,7 +107,7 @@ run  create_table_distpol
 group g2
 run  alter_distpol_dropped
 run  gp_distinct_plans
-skip partition  syntax error at or near "only"; relation "gp_partition_template" does not exist
+skip partition  syntax error at or near "only"; relation "parttab_with_excl_constraint" already exists
 skip partition1  type "cc" does not exist; column "partition" of relation "hhh_l1" does not exist
 run  partition_storage
 skip partition_ddl  type "aa" does not exist; cannot specify storage parameters for a partitioned table
@@ -112,7 +118,7 @@ run  external_table
 run  external_table_union_all
 run  external_table_create_privs
 run  external_table_persistent_error_log
-skip column_compression  relation "gp_partition_template" does not exist; column "i" referenced in more than one COLUMN ENCODING clause
+skip column_compression  column "i" referenced in more than one COLUMN ENCODING clause; table "ccddl" does not exist
 skip alter_table_aocs  type "gp_fastsequence" does not exist
 run  alter_table_aocs2
 run  alter_distribution_policy
@@ -266,7 +272,7 @@ run  vacuum_full_ao
 run  vacuum_full_heap_bitmapindex
 skip vacuum_ao_aux_only  syntax error at or near "vac_example_heap": VACUUM AO_AUX_ONLY is none of the port's, nor is the visibility map it vacuums a table's own, pg_appendonly's visimaprelid, which gp_ao keeps in one table of every table's
 skip ao_checksum_corruption  unrecognized configuration parameter "gp_appendonly_verify_block_checksums"
-skip AOCO_Compression  relation "gp_partition_template" does not exist
+skip AOCO_Compression  differs: \d+ of a table by column prints no Compression Type, Compression Level or Block Size column; an empty table by column takes 32 kB, where Cloudberry's takes none, and the sizes its checks allow a tenth off are not met; and ALTER TYPE ... SET DEFAULT ENCODING of an enum is taken, where Cloudberry refuses it: mood_encoded is not a base type
 run  AORO_Compression
 run  am_encoding
 run  ao_segfile
@@ -342,7 +348,6 @@ run  gp_explain
 skip explain_format  differs: EXPLAIN in each of its formats prints the port's plans, which this test compares
 run  olap_plans
 run  gp_copy_dtx
-skip guc_gp  unrecognized configuration parameter "allow_segment_dml"; relation "reset_test" already exists
 skip toast  spiexceptions.UndefinedTable: relation "pg_toast.pg_toast_25090" does not exist; spiexceptions.UndefinedTable: relation "pg_toast.pg_toast_25084" does not exist
 run  misc_jiras
 run  write_gang_idle_in_transaction_session_timeout
@@ -424,7 +429,8 @@ skip partition_locking  differs: the locks a statement takes on a partitioned ta
 run  vacuum_gp
 run  vacuum_fsm_nondefault_tablespace
 run  pg_stat
-skip bfv_partition  relation "gp_partition_template" does not exist; differs: autovacuum on in its group, psql 19's list of a partitioned table's partitions, PostgreSQL 19's DETAIL of an operator it cannot choose, and the MAINTAIN privilege, m, in its ACL
+port autovacuum_off
+run  bfv_partition
 run  qp_misc_rio
 skip bfv_partition_plans  differs: a count of its plan's partition selections is 0, where Cloudberry's is 2
 run  gp_covering_index
@@ -437,6 +443,7 @@ skip pgstat_qd_tabstat  syntax error at or near "on": its COPY ... ON SEGMENT, t
 group tcp1
 run  dispatch
 group m7a
+port autovacuum_on
 run  wrkloadadmin
 run  trig
 skip role  syntax error at or near "only"
@@ -541,7 +548,6 @@ port ic_proxy_after
 run  subtrx_overflow
 run  bfv_meta_track
 skip bfv_copy  segment reject limit reached, aborting operation
-skip dynamic_table  function pg_catalog.pg_get_dynamic_table_schedule(oid) does not exist; relation "pg_dynamic_tables" does not exist -- and psql 19's \d+ calls a dynamic table a materialized view, as DROP ... CASCADE does, its job runs REFRESH MATERIALIZED VIEW where Cloudberry's runs REFRESH DYNAMIC TABLE, the names of its jobs are not reserved, and its wait of 80 seconds for its job is cancelled after 60
 run  hba_conf
 skip dboptions  differs: the psql its shell commands run connects to /tmp's socket, where this suite's nodes have directories of their own
 run  gp_log_mem_dispatch

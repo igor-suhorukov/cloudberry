@@ -65,6 +65,13 @@
 #define GP_TIMES_MARKER		"/*gp:times "
 
 /*
+ * What the statement that tells a segment the coordinator's settings starts
+ * with, which the segment passes Cloudberry's fault of a QE's SET at
+ * (gp_settings.c).
+ */
+#define GP_SETTINGS_MARKER	"/*gp:settings*/ "
+
+/*
  * Does a plan go to one segment at most -- a direct dispatch, as Cloudberry
  * calls it -- which a resource group lets run without a slot (gp_motion.c)?
  */
@@ -461,6 +468,12 @@ extern void GpDispatchFlushNotices(void);
  */
 typedef void (*GpDispatchSyncCallback) (void);
 extern void GpDispatchAddSyncCallback(GpDispatchSyncCallback callback);
+
+/*
+ * A SET of the client's has run, of the setting named: the session's gang is
+ * told now, if the segments are told that setting (gp_ddl.c).
+ */
+extern void GpDispatchSyncSettingsNow(const char *name);
 
 /*
  * An object whose "gp" label the coordinator changed: the segments are sent

@@ -138,48 +138,26 @@
 @@
 -NOTICE:  no privileges could be revoked
 @@
-- relid | level | template 
---------+-------+----------
--(0 rows)
--
-+ERROR:  relation "gp_partition_template" does not exist
-+LINE 1: select relid, level, template from gp_partition_template whe...
-+                                           ^
-@@
-- relid | level 
---------+-------
--(0 rows)
--
-+ERROR:  relation "gp_partition_template" does not exist
-+LINE 1: select relid::regclass, level from gp_partition_template whe...
-+                                           ^
+-    relid     | level |                                                                                                                         template                                                                                                                          
+---------------+-------+-----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+- rank_settemp |     1 | {GPPARTITIONDEFINITION :partDefElems ({GPPARTDEFELEM :partName def2 :boundSpec <> :subSpec <> :isDefault true :options <> :accessMethod <> :tablespacename <> :colencs <> :location 52}) :encClauses <> :isTemplate true :fromCatalog false :location 51}
++    relid     | level |                     template                     
++--------------+-------+--------------------------------------------------
++ rank_settemp |     1 | SUBPARTITION TEMPLATE(DEFAULT SUBPARTITION def2)
 @@
 -    relid     | level |                                                                                                                         template                                                                                                                          
 ---------------+-------+-----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
 - rank_settemp |     1 | {GPPARTITIONDEFINITION :partDefElems ({GPPARTDEFELEM :partName def2 :boundSpec <> :subSpec <> :isDefault true :options <> :accessMethod <> :tablespacename <> :colencs <> :location 52}) :encClauses <> :isTemplate true :fromCatalog false :location 51}
--(1 row)
--
-+ERROR:  relation "gp_partition_template" does not exist
-+LINE 1: select relid::regclass, level, template from gp_partition_te...
-+                                                     ^
-@@
--    relid     | level |                                                                                                                         template                                                                                                                          
----------------+-------+-----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
-- rank_settemp |     1 | {GPPARTITIONDEFINITION :partDefElems ({GPPARTDEFELEM :partName def2 :boundSpec <> :subSpec <> :isDefault true :options <> :accessMethod <> :tablespacename <> :colencs <> :location 52}) :encClauses <> :isTemplate true :fromCatalog false :location 51}
--(1 row)
--
-+ERROR:  relation "gp_partition_template" does not exist
-+LINE 1: select relid::regclass, level, template from gp_partition_te...
-+                                                     ^
++    relid     | level |                     template                     
++--------------+-------+--------------------------------------------------
++ rank_settemp |     1 | SUBPARTITION TEMPLATE(DEFAULT SUBPARTITION def2)
 @@
 -    relid     | level |                                                                                                                                                                                                                                                                                                                                     template                                                                                                                                                                                                                                                                                                                                      
 ---------------+-------+-----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
 - rank_settemp |     1 | {GPPARTITIONDEFINITION :partDefElems ({GPPARTDEFELEM :partName <> :boundSpec {GPPARTITIONRANGESPEC :partStart {GPPARTITIONRANGEITEM :val ({TYPECAST :arg {A_CONST :val "\2007-01-01" :location 64} :typeName {TYPENAME :names ("date") :typeOid 0 :setof false :pct_type false :typmods <> :typemod -1 :arrayBounds <> :location 59} :location -1}) :edge 1 :location 52} :partEnd <> :partEvery <> :location 52} :subSpec <> :isDefault false :options ({DEFELEM :defnamespace <> :defname compresslevel :arg 5 :defaction 0 :location 101}) :accessMethod ao_row :tablespacename <> :colencs <> :location 52}) :encClauses <> :isTemplate true :fromCatalog false :location 51}
--(1 row)
--
-+ERROR:  relation "gp_partition_template" does not exist
-+LINE 1: select relid::regclass, level, template from gp_partition_te...
-+                                                     ^
++    relid     | level |                                                     template                                                     
++--------------+-------+------------------------------------------------------------------------------------------------------------------
++ rank_settemp |     1 | SUBPARTITION TEMPLATE( START ('01-01-2007'::date),  WITH (appendonly=true, orientation=column, compresslevel=5))
 @@
 +LINE 1: alter table rank_damage_1_prt_1 alter column i type bigint;
 +                                                     ^
@@ -205,90 +183,6 @@
 +Not-null constraints:
 +    "sg_cal_event_silvertail_hour_caldt_not_null" NOT NULL "caldt" (inherited)
 +    "sg_cal_event_silvertail_hour_calhr_not_null" NOT NULL "calhr" (inherited)
-@@
--  relid  | level 
-----------+-------
-- mpp5941 |     1
-- mpp5941 |     2
-- mpp5941 |     3
--(3 rows)
--
-+ERROR:  relation "gp_partition_template" does not exist
-+LINE 1: select relid::regclass, level from gp_partition_template whe...
-+                                           ^
-@@
--  relid  | level 
-----------+-------
-- mpp5941 |     2
-- mpp5941 |     3
--(2 rows)
--
-+ERROR:  relation "gp_partition_template" does not exist
-+LINE 1: select relid::regclass, level from gp_partition_template whe...
-+                                           ^
-@@
--  relid  | level 
-----------+-------
-- mpp5941 |     3
--(1 row)
--
-+ERROR:  relation "gp_partition_template" does not exist
-+LINE 1: select relid::regclass, level from gp_partition_template whe...
-+                                           ^
-@@
-- relid | level 
---------+-------
--(0 rows)
--
-+ERROR:  relation "gp_partition_template" does not exist
-+LINE 1: select relid::regclass, level from gp_partition_template whe...
-+                                           ^
-@@
-- relid | level 
---------+-------
--(0 rows)
--
-+ERROR:  relation "gp_partition_template" does not exist
-+LINE 1: select relid::regclass, level from gp_partition_template whe...
-+                                           ^
-@@
-- relid | level 
---------+-------
--(0 rows)
--
-+ERROR:  relation "gp_partition_template" does not exist
-+LINE 1: select relid::regclass, level from gp_partition_template whe...
-+                                           ^
-@@
--  relid  | level 
-----------+-------
-- mpp5941 |     3
--(1 row)
--
-+ERROR:  relation "gp_partition_template" does not exist
-+LINE 1: select relid::regclass, level from gp_partition_template whe...
-+                                           ^
-@@
--  relid  | level 
-----------+-------
-- mpp5941 |     2
-- mpp5941 |     3
--(2 rows)
--
-+ERROR:  relation "gp_partition_template" does not exist
-+LINE 1: select relid::regclass, level from gp_partition_template whe...
-+                                           ^
-@@
--  relid  | level 
-----------+-------
-- mpp5941 |     1
-- mpp5941 |     2
-- mpp5941 |     3
--(3 rows)
--
-+ERROR:  relation "gp_partition_template" does not exist
-+LINE 1: select relid::regclass, level from gp_partition_template whe...
-+                                           ^
 @@
 -ERROR:  exclusion constraints are not supported on partitioned tables
 -LINE 4:   CONSTRAINT part_excl EXCLUDE (i WITH =) )
@@ -504,31 +398,29 @@
 - mpp5992 |     1 | {GPPARTITIONDEFINITION :partDefElems ({GPPARTDEFELEM :partName l1 :boundSpec {GPPARTITIONLISTSPEC :partValues (({A_CONST :val 1 :location 72}) ({A_CONST :val 2 :location 74}) ({A_CONST :val 3 :location 76})) :location 64} :subSpec <> :isDefault false :options <> :accessMethod <> :tablespacename <> :colencs <> :location 48} {GPPARTDEFELEM :partName l2 :boundSpec {GPPARTITIONLISTSPEC :partValues (({A_CONST :val 4 :location 105}) ({A_CONST :val 5 :location 107}) ({A_CONST :val 6 :location 109})) :location 97} :subSpec <> :isDefault false :options <> :accessMethod <> :tablespacename <> :colencs <> :location 81} {GPPARTDEFELEM :partName l3 :boundSpec {GPPARTITIONLISTSPEC :partValues (({A_CONST :val 7 :location 137}) ({A_CONST :val 8 :location 139}) ({A_CONST :val 9 :location 141}) ({A_CONST :val 10 :location 143})) :location 129} :subSpec <> :isDefault false :options <> :accessMethod <> :tablespacename <> :colencs <> :location 113}) :encClauses <> :isTemplate true :fromCatalog false :location 47}
 - mpp5992 |     2 | {GPPARTITIONDEFINITION :partDefElems ({GPPARTDEFELEM :partName ll1 :boundSpec {GPPARTITIONLISTSPEC :partValues (({A_CONST :val "Engineering" :location 108})) :location 100} :subSpec <> :isDefault false :options <> :accessMethod <> :tablespacename <> :colencs <> :location 83} {GPPARTDEFELEM :partName ll2 :boundSpec {GPPARTITIONLISTSPEC :partValues (({A_CONST :val "QA" :location 149})) :location 141} :subSpec <> :isDefault false :options <> :accessMethod <> :tablespacename <> :colencs <> :location 124}) :encClauses <> :isTemplate true :fromCatalog false :location 81}
 - mpp5992 |     3 | {GPPARTITIONDEFINITION :partDefElems ({GPPARTDEFELEM :partName lll1 :boundSpec {GPPARTITIONLISTSPEC :partValues (({A_CONST :val "M" :location 133})) :location 125} :subSpec <> :isDefault false :options <> :accessMethod <> :tablespacename <> :colencs <> :location 107} {GPPARTDEFELEM :partName lll2 :boundSpec {GPPARTITIONLISTSPEC :partValues (({A_CONST :val "F" :location 165})) :location 157} :subSpec <> :isDefault false :options <> :accessMethod <> :tablespacename <> :colencs <> :location 139}) :encClauses <> :isTemplate true :fromCatalog false :location 105}
--(3 rows)
--
-+ERROR:  relation "gp_partition_template" does not exist
-+LINE 1: select relid::regclass, level, template from gp_partition_te...
-+                                                     ^
++  relid  | level |                                                            template                                                             
++---------+-------+---------------------------------------------------------------------------------------------------------------------------------
++ mpp5992 |     1 | SUBPARTITION TEMPLATE(SUBPARTITION l1 VALUES (1, 2, 3), SUBPARTITION l2 VALUES (4, 5, 6), SUBPARTITION l3 VALUES (7, 8, 9, 10))
++ mpp5992 |     2 | SUBPARTITION TEMPLATE(SUBPARTITION ll1 VALUES ('Engineering'), SUBPARTITION ll2 VALUES ('QA'))
++ mpp5992 |     3 | SUBPARTITION TEMPLATE(SUBPARTITION lll1 VALUES ('M'), SUBPARTITION lll2 VALUES ('F'))
 @@
 -  relid  | level |                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                    template                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                    
 ----------+-------+------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
 - mpp5992 |     1 | {GPPARTITIONDEFINITION :partDefElems ({GPPARTDEFELEM :partName l1 :boundSpec {GPPARTITIONLISTSPEC :partValues (({A_CONST :val 1 :location 72}) ({A_CONST :val 2 :location 74}) ({A_CONST :val 3 :location 76})) :location 64} :subSpec <> :isDefault false :options <> :accessMethod <> :tablespacename <> :colencs <> :location 48} {GPPARTDEFELEM :partName l2 :boundSpec {GPPARTITIONLISTSPEC :partValues (({A_CONST :val 4 :location 105}) ({A_CONST :val 5 :location 107}) ({A_CONST :val 6 :location 109})) :location 97} :subSpec <> :isDefault false :options <> :accessMethod <> :tablespacename <> :colencs <> :location 81} {GPPARTDEFELEM :partName l3 :boundSpec {GPPARTITIONLISTSPEC :partValues (({A_CONST :val 7 :location 137}) ({A_CONST :val 8 :location 139}) ({A_CONST :val 9 :location 141}) ({A_CONST :val 10 :location 143})) :location 129} :subSpec <> :isDefault false :options <> :accessMethod <> :tablespacename <> :colencs <> :location 113}) :encClauses <> :isTemplate true :fromCatalog false :location 47}
 - mpp5992 |     2 | {GPPARTITIONDEFINITION :partDefElems ({GPPARTDEFELEM :partName ll1 :boundSpec {GPPARTITIONLISTSPEC :partValues (({A_CONST :val "Engineering" :location 108})) :location 100} :subSpec <> :isDefault false :options <> :accessMethod <> :tablespacename <> :colencs <> :location 83} {GPPARTDEFELEM :partName ll2 :boundSpec {GPPARTITIONLISTSPEC :partValues (({A_CONST :val "QA" :location 149})) :location 141} :subSpec <> :isDefault false :options <> :accessMethod <> :tablespacename <> :colencs <> :location 124}) :encClauses <> :isTemplate true :fromCatalog false :location 81}
 - mpp5992 |     3 | {GPPARTITIONDEFINITION :partDefElems ({GPPARTDEFELEM :partName lll1 :boundSpec {GPPARTITIONLISTSPEC :partValues (({A_CONST :val "M" :location 133})) :location 125} :subSpec <> :isDefault false :options <> :accessMethod <> :tablespacename <> :colencs <> :location 107} {GPPARTDEFELEM :partName lll2 :boundSpec {GPPARTITIONLISTSPEC :partValues (({A_CONST :val "F" :location 165})) :location 157} :subSpec <> :isDefault false :options <> :accessMethod <> :tablespacename <> :colencs <> :location 139}) :encClauses <> :isTemplate true :fromCatalog false :location 105}
--(3 rows)
--
-+ERROR:  relation "gp_partition_template" does not exist
-+LINE 1: select relid::regclass, level, template from gp_partition_te...
-+                                                     ^
++  relid  | level |                                                            template                                                             
++---------+-------+---------------------------------------------------------------------------------------------------------------------------------
++ mpp5992 |     1 | SUBPARTITION TEMPLATE(SUBPARTITION l1 VALUES (1, 2, 3), SUBPARTITION l2 VALUES (4, 5, 6), SUBPARTITION l3 VALUES (7, 8, 9, 10))
++ mpp5992 |     2 | SUBPARTITION TEMPLATE(SUBPARTITION ll1 VALUES ('Engineering'), SUBPARTITION ll2 VALUES ('QA'))
++ mpp5992 |     3 | SUBPARTITION TEMPLATE(SUBPARTITION lll1 VALUES ('M'), SUBPARTITION lll2 VALUES ('F'))
 @@
 -  relid   | level |                                                                                                                                                                                                                                                              template                                                                                                                                                                                                                                                               
 -----------+-------+-------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
 - mpp10480 |     1 | {GPPARTITIONDEFINITION :partDefElems ({GPPARTDEFELEM :partName <> :boundSpec {GPPARTITIONRANGESPEC :partStart {GPPARTITIONRANGEITEM :val ({A_CONST :val 1 :location 122}) :edge 1 :location 115} :partEnd {GPPARTITIONRANGEITEM :val ({A_CONST :val 10 :location 130}) :edge 2 :location 125} :partEvery ({A_CONST :val 1 :location 141}) :location 115} :subSpec <> :isDefault false :options <> :accessMethod <> :tablespacename <> :colencs <> :location 115}) :encClauses <> :isTemplate true :fromCatalog false :location 114}
--(1 row)
--
-+ERROR:  relation "gp_partition_template" does not exist
-+LINE 1: select relid::regclass, level, template from gp_partition_te...
-+                                                     ^
++  relid   | level |                       template                       
++----------+-------+------------------------------------------------------
++ mpp10480 |     1 | SUBPARTITION TEMPLATE( START (1) END (10) Every (1))
 @@
 -ERROR:  unique constraint on partitioned table must include all partitioning columns
 +ERROR:  PRIMARY KEY constraint on partitioned table must include all partitioning columns

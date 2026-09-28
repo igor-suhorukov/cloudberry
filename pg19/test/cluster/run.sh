@@ -514,6 +514,27 @@ EOF
 t" ] && ok "temporary tables, two of them, have the coordinator's OIDs" \
 		|| notok "temporary tables" "$out"
 
+	# DISCARD TEMP drops a session's temporary tables on every node, in its
+	# transaction, as Cloudberry's does (discard.c); DISCARD ALL drops the
+	# coordinator's alone, and says so, where it may run at all.
+	tcount="SELECT count(*) FROM gp.exec_on_segments('SELECT count(*) FROM pg_class WHERE relname = ''dtmp'' AND relpersistence = ''t''') WHERE result::int > 0;"
+	out=$(printf '%s\n' "SET client_min_messages = warning;" "CREATE TEMP TABLE dtmp (a int);" \
+		"BEGIN;" "DISCARD TEMP;" "ROLLBACK;" "$tcount" "DISCARD TEMP;" "$tcount" \
+		"CREATE TEMP TABLE dtmp (a int);" "SELECT 'made again';" | qf 0)
+	[ "$out" = "2
+0
+made again" ] && ok "DISCARD TEMP drops the segments' temporary tables too, and a ROLLBACK keeps them" \
+		|| notok "DISCARD TEMP" "$out"
+	out=$(printf '%s\n' "CREATE TEMP TABLE dall (a int);" "DISCARD ALL;" "BEGIN;" "DISCARD ALL;" "ROLLBACK;" \
+		"CREATE TEMP TABLE dall (a int);" | qf 0)
+	case "$out" in
+		*"NOTICE:  command without clusterwide effect"*"HINT:  Consider alternatives as DEALLOCATE ALL, or DISCARD TEMP if a clusterwide effect is desired."*"ERROR:  DISCARD ALL cannot run inside a transaction block"*'relation "dall" already exists'*)
+			[ "$(printf '%s\n' "$out" | grep -c 'without clusterwide effect')" = 1 ] \
+				&& ok "DISCARD ALL is the coordinator's, and says so, as Cloudberry's does" \
+				|| notok "DISCARD ALL's NOTICE, once" "$out" ;;
+		*) notok "DISCARD ALL" "$out" ;;
+	esac
+
 	out=$(q 0 "VACUUM kept;")
 	[ -z "$out" ] && ok "VACUUM, which runs outside a transaction block, reaches the segments too" \
 		|| notok "VACUUM" "$out"
@@ -3194,6 +3215,29 @@ COMMIT;"
 		*) notok "a function in a fragment reading a replicated table" "$out" ;;
 	esac
 
+	# And writes one only where gp.allow_segment_dml is on, Cloudberry's
+	# allow_segment_DML, which the segments are sent: a function an index
+	# calls, as each segment inserts its copy's row (the trap Cloudberry's
+	# privileges test lays for CVE-2020-25695), writes each segment's copy.
+	q 0 "CREATE TABLE lw (s text) DISTRIBUTED REPLICATED;
+		CREATE TABLE lx (a int) DISTRIBUTED REPLICATED;
+		CREATE FUNCTION lx_f(int) RETURNS int LANGUAGE sql IMMUTABLE AS 'SELECT \$1';
+		CREATE INDEX lx_i ON lx (lx_f(a));
+		CREATE OR REPLACE FUNCTION lx_f(int) RETURNS int LANGUAGE sql AS 'INSERT INTO lw VALUES (current_user); SELECT \$1';" >/dev/null
+	nseg=$(q 0 "SELECT count(*) FROM gp_dist_random('gp_id');")
+	out=$(printf '%s\n' "SET gp.optimizer_trace_fallback = on;" "INSERT INTO lx VALUES (1);" \
+		"SET gp.allow_segment_dml = on;" "INSERT INTO lx VALUES (2);" \
+		"SELECT count(*) FROM gp_dist_random('lw');" | qf 0)
+	case "$out" in
+		*"fallback"*) notok "gp.allow_segment_dml and a function writing in a fragment" "$out" ;;
+		*"function cannot execute on a QE slice because it issues a non-SELECT statement"*)
+			[ "${out##*$'\n'}" = "$nseg" ] \
+				&& ok "a function in a fragment writes a replicated table only where gp.allow_segment_dml is on" \
+				|| notok "gp.allow_segment_dml and a function writing in a fragment" "$out" ;;
+		*) notok "gp.allow_segment_dml and a function writing in a fragment" "$out" ;;
+	esac
+	q 0 "DROP TABLE lx, lw; DROP FUNCTION lx_f(int);" >/dev/null
+
 	# Cloudberry's runtime filters (gp_rtfilter.c).  With
 	# gp.enable_runtime_filter on, a hash join of the planner's whose inner
 	# side meets few of its outer rows has a RuntimeFilter above its outer
@@ -3658,6 +3702,36 @@ ERROR:  cannot change materialized view "mvw_empty"'
 	[ "$out" = "2MB" ] && ok "Cloudberry's other settings are accepted, and say what they do here" \
 		|| notok "Cloudberry's accepted settings" "$out"
 
+	# A SET of the client's, outside a transaction block, reaches the
+	# segments as it runs, as Cloudberry dispatches one: a value a segment
+	# refuses fails the SET, which leaves the session as it was.  Here
+	# temp_buffers, which a segment that has used a temporary table refuses
+	# to change, and the coordinator, whose copy of the table is empty and
+	# unused, does not.
+	out=$(printf '%s\n' "SET client_min_messages = warning;" "SET gp.optimizer = off;" \
+		"CREATE TEMP TABLE tbuf (a int) DISTRIBUTED BY (a);" "INSERT INTO tbuf SELECT generate_series(1, 10);" \
+		"SET temp_buffers = 2000;" "SHOW temp_buffers;" "SELECT count(*) FROM tbuf;" | qf 0)
+	case "$out" in
+		*'invalid value for parameter "temp_buffers": 2000'*"8MB"*"10") ok "a SET a segment refuses fails as it runs, and the session goes on" ;;
+		*) notok "a SET a segment refuses" "$out" ;;
+	esac
+
+	# SERIALIZABLE is REPEATABLE READ on a cluster, as in Cloudberry: no
+	# node's serializable snapshot isolation sees another's rows.
+	out=$(printf '%s\n' "SET SESSION CHARACTERISTICS AS TRANSACTION ISOLATION LEVEL SERIALIZABLE;" \
+		"SHOW default_transaction_isolation;" "RESET default_transaction_isolation;" \
+		"BEGIN ISOLATION LEVEL SERIALIZABLE;" "SHOW transaction_isolation;" \
+		"SELECT DISTINCT result FROM gp.exec_on_segments('SHOW transaction_isolation');" "COMMIT;" | qf 0)
+	[ "$out" = "repeatable read
+repeatable read
+repeatable read" ] && ok "SERIALIZABLE, asked for, is REPEATABLE READ on the coordinator and the segments" \
+		|| notok "SERIALIZABLE on a cluster" "$out"
+	out=$(q 0 "ALTER ROLE CURRENT_USER SET default_transaction_isolation = 'serializable';")
+	out2=$(q 0 "SHOW default_transaction_isolation;")
+	q 0 "ALTER ROLE CURRENT_USER RESET default_transaction_isolation;" >/dev/null
+	[ -z "$out" ] && [ "$out2" = "repeatable read" ] && ok "and so is a role's default of it" \
+		|| notok "a role's default of SERIALIZABLE" "$out / $out2"
+
 	# Cloudberry's EXPLAIN options: the slice table of the planner's route --
 	# slice 0 the coordinator's, a Reader a gather, each gather labelled with
 	# its slice -- a write's Primary Writer, the table in JSON; and where each
@@ -3899,6 +3973,33 @@ SQL
 	out2=$(q 0 "CREATE TABLE dtx (a int, b int) DISTRIBUTED BY (a); INSERT INTO dtx SELECT i, i FROM generate_series(1, 20) i;")
 	[ -z "$out$out2" ] && ok "gp_inject_fault, Cloudberry's fault injector, is created" \
 		|| notok "CREATE EXTENSION gp_inject_fault" "$out / $out2"
+
+	# Cloudberry's fault of a segment's SET, set_variable_fault, is met as a
+	# SET runs, which it fails: the coordinator's value goes back, and the
+	# segments are told it with the next statement.  A SET in a transaction
+	# block or a DO waits for the next statement sent, as before, and the
+	# fault is met there.
+	out=$(printf '%s\n' "SET datestyle = 'German';" "SELECT count(*) FROM dtx;" \
+		"SELECT gp_inject_fault('set_variable_fault', 'error', $(dbid 1));" \
+		"SET datestyle = 'SQL, MDY';" "SHOW datestyle;" \
+		"SELECT DISTINCT result FROM gp.exec_on_segments('SHOW datestyle');" \
+		"SELECT gp_inject_fault('set_variable_fault', 'reset', $(dbid 1));" | qf 0 | tr '\n' '|')
+	case "$out" in
+		"20|Success:|"*"ERROR:  fault triggered, fault name:'set_variable_fault' fault type:'error'"*"|German, DMY|German, DMY|Success:|")
+			ok "set_variable_fault fails the SET as it runs, and the segments keep the value the coordinator has" ;;
+		*) notok "set_variable_fault at a SET" "$out" ;;
+	esac
+	out=$(printf '%s\n' "SELECT gp_inject_fault('set_variable_fault', 'error', $(dbid 1));" \
+		"BEGIN;" "SET datestyle = 'SQL, MDY';" "SELECT 'set';" "SELECT count(*) FROM dtx;" "ROLLBACK;" \
+		"SELECT gp_inject_fault('set_variable_fault', 'reset', $(dbid 1));" \
+		"SELECT gp_inject_fault('set_variable_fault', 'error', $(dbid 1));" \
+		"DO \$\$ BEGIN SET datestyle = 'Postgres, MDY'; END \$\$;" "SELECT 'done';" "SELECT count(*) FROM dtx;" \
+		"SELECT gp_inject_fault('set_variable_fault', 'reset', $(dbid 1));" | qf 0 | tr '\n' '|')
+	case "$out" in
+		"Success:|set|"*"ERROR:  fault triggered, fault name:'set_variable_fault'"*"|Success:|Success:|done|"*"ERROR:  fault triggered, fault name:'set_variable_fault'"*"|Success:|")
+			ok "and a SET in a transaction block, or in a DO, meets it with the next statement sent" ;;
+		*) notok "set_variable_fault after a SET in a block or a DO" "$out" ;;
+	esac
 
 	out=$(printf '%s\n' "SELECT gp_inject_fault_infinite('dtm_broadcast_prepare', 'skip', 1);" \
 		"SELECT count(*) FROM dtx;" \
@@ -5373,6 +5474,10 @@ if "$BINDIR/pg_ctl" -D "$d" -l "$ROOT/node0.log" -w -t 30 start >/dev/null 2>&1;
 	out=$(q 0 "CREATE TABLE sn (a int); INSERT INTO sn VALUES (1), (2); SELECT DISTINCT gp_segment_id FROM sn;")
 	[ "$out" = "-1" ] && ok "gp_segment_id is -1, as on Cloudberry's single node" \
 		|| notok "gp_segment_id on one node" "$out"
+
+	out=$(q 0 "BEGIN ISOLATION LEVEL SERIALIZABLE; SHOW transaction_isolation; COMMIT;")
+	[ "$out" = "serializable" ] && ok "and SERIALIZABLE is PostgreSQL's, which is serializable on one node" \
+		|| notok "SERIALIZABLE on one node" "$out"
 else
 	notok "a server with no cluster starts" "$(tail -5 "$ROOT/node0.log")"
 fi

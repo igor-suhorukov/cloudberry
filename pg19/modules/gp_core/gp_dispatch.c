@@ -386,6 +386,19 @@ static const char *const synced_settings[] = {
 	"parallel_leader_participation",
 	"enable_parallel_append",
 	"enable_parallel_hash",
+	/*
+	 * the size of a segment's buffers for its temporary tables, which it
+	 * takes until it has used one and refuses after, as the coordinator does
+	 * -- sent as a SET runs (GpDispatchSyncSettingsNow()), so that the SET is
+	 * what a segment's refusal fails
+	 */
+	"temp_buffers",
+	/*
+	 * whether a function a segment runs in its share of a plan may write,
+	 * which the segment reads as it plans the function's queries
+	 * (gp_motion.c), as Cloudberry syncs allow_segment_DML
+	 */
+	"gp.allow_segment_dml",
 };
 
 #define NUM_SYNCED_SETTINGS	lengthof(synced_settings)
@@ -3035,7 +3048,7 @@ reader_sync_settings(GpReaderConn *r)
 
 	run_sync_callbacks();
 	initStringInfo(&sql);
-	appendStringInfoString(&sql, "SELECT ");
+	appendStringInfoString(&sql, GP_SETTINGS_MARKER "SELECT ");
 	for (int i = 0; i < NUM_SYNCED_SETTINGS; i++)
 	{
 		values[i] = sync_value(i);
@@ -3418,7 +3431,7 @@ gang_sync_settings(GpGang *g)
 
 	run_sync_callbacks();
 	initStringInfo(&sql);
-	appendStringInfoString(&sql, "SELECT ");
+	appendStringInfoString(&sql, GP_SETTINGS_MARKER "SELECT ");
 
 	for (int i = 0; i < NUM_SYNCED_SETTINGS; i++)
 	{
@@ -3466,6 +3479,32 @@ gang_forget_settings(void)
 			pfree(gang->sent[i]);
 		gang->sent[i] = NULL;
 	}
+}
+
+/*
+ * A SET of the client's has run here, of one of the settings above: what it
+ * changed is told the session's gang now, as Cloudberry dispatches a SET to
+ * the session's gangs as it runs it (DispatchSetPGVariable(), guc_funcs.c),
+ * and not only with the next statement sent there -- so that a value a
+ * segment refuses fails the SET, which the coordinator's rollback undoes,
+ * where with the next statement it would fail that one and every one after
+ * it.  Only to a gang there is, and not in the segments' transaction: there
+ * the next statement tells them, as ever, and its failure aborts the
+ * transaction, the SET's with it.  A reader is told before its next slice, as
+ * ever, and a gang in a cluster that changed since is left to the next
+ * statement, which takes the change.
+ */
+void
+GpDispatchSyncSettingsNow(const char *name)
+{
+	bool		synced = false;
+
+	for (int i = 0; i < NUM_SYNCED_SETTINGS && !synced; i++)
+		synced = pg_strcasecmp(synced_settings[i], name) == 0;
+	if (!synced || gang == NULL || gang_in_xact || copying != NULL ||
+		active_streams != NIL || GpClusterStale() || !IsTransactionState())
+		return;
+	gang_sync_settings(gang);
 }
 
 static const char *

@@ -1453,3 +1453,70 @@ RESET allow_system_table_mods;
 
 GRANT SELECT ON pg_catalog.pg_directory_table, pg_catalog.gp_storage_server,
 				pg_catalog.gp_storage_user_mapping TO PUBLIC;
+
+/******************************************************************************
+ * Cloudberry's gp_partition_template catalog
+ *
+ * The SUBPARTITION TEMPLATE of each level of a classic partitioned table,
+ * which Cloudberry keeps as a pg_node_tree of a node of its own, and prints
+ * back in its syntax with pg_get_expr(template, relid).  The root's gp label
+ * keeps them here (partition.c), and the view gives each as that text, in a
+ * type of its own, whose pg_get_expr() returns it.  The type is of
+ * pg_node_tree's category, Z, and its function's second argument a regclass:
+ * a call of PostgreSQL's pg_get_expr(pg_node_tree, oid) -- of a catalog's
+ * column, of a NULL, of NULL and an integer -- still resolves to that one,
+ * an OID being the preferred type of the two, and the view's relid, an oid as
+ * Cloudberry's is, reaches the regclass.  Nothing is read as a template from
+ * text, as nothing is as a pg_node_tree.
+ *****************************************************************************/
+
+CREATE TYPE gp_sql.partition_template;
+
+CREATE FUNCTION gp_sql.partition_template_in(cstring)
+RETURNS gp_sql.partition_template
+AS 'MODULE_PATHNAME', 'gp_sql_partition_template_in'
+LANGUAGE C IMMUTABLE STRICT PARALLEL SAFE;
+
+CREATE FUNCTION gp_sql.partition_template_out(gp_sql.partition_template)
+RETURNS cstring
+AS 'textout'
+LANGUAGE internal IMMUTABLE STRICT PARALLEL SAFE;
+
+CREATE FUNCTION gp_sql.partition_template_send(gp_sql.partition_template)
+RETURNS bytea
+AS 'textsend'
+LANGUAGE internal IMMUTABLE STRICT PARALLEL SAFE;
+
+CREATE TYPE gp_sql.partition_template (
+	INPUT = gp_sql.partition_template_in,
+	OUTPUT = gp_sql.partition_template_out,
+	SEND = gp_sql.partition_template_send,
+	LIKE = pg_catalog.text,
+	CATEGORY = 'Z'
+);
+
+CREATE CAST (gp_sql.partition_template AS pg_catalog.text) WITHOUT FUNCTION AS IMPLICIT;
+
+CREATE FUNCTION pg_catalog.pg_get_expr(template gp_sql.partition_template, relid regclass)
+RETURNS text
+LANGUAGE sql IMMUTABLE STRICT PARALLEL SAFE
+RETURN template::pg_catalog.text;
+
+COMMENT ON FUNCTION pg_catalog.pg_get_expr(gp_sql.partition_template, regclass) IS
+	'a SUBPARTITION TEMPLATE of gp_partition_template, as Cloudberry''s pg_get_expr() prints it';
+
+CREATE FUNCTION gp_sql.partition_templates(OUT relid oid, OUT level int2,
+										   OUT template gp_sql.partition_template)
+RETURNS SETOF record
+AS 'MODULE_PATHNAME', 'gp_sql_partition_templates'
+LANGUAGE C STABLE;
+
+SET allow_system_table_mods = on;
+
+CREATE VIEW pg_catalog.gp_partition_template AS
+	SELECT t.relid, t.level, t.template
+	  FROM gp_sql.partition_templates() t;
+
+RESET allow_system_table_mods;
+
+GRANT SELECT ON pg_catalog.gp_partition_template TO PUBLIC;

@@ -259,6 +259,10 @@ make_cluster() {
 			# each statement ORCA would not plan, and why, in the log: the
 			# ORCA pass's reasons, totalled below
 			[ "$n" -eq 0 ] && echo "gp.optimizer_log_fallback = on"
+			# a background worker for each of gp_task's jobs at once, as the
+			# task suite has them: at a minute of five dynamic_table's runs
+			# with the jobs of its three views of the default schedule
+			[ "$n" -eq 0 ] && echo "max_worker_processes = 16"
 		} >> "$d/postgresql.auto.conf"
 	done
 	for n in $(seq 1 $((NODES - 1))) 0; do
@@ -360,9 +364,10 @@ t1=$(date +%s)
 	# the column SHOW names, read as a row's field; SET, RESET and SHOW;
 	# current_setting() and set_config(); SHOW's header, the same width
 	# spelled either way (see the singlenode suite); an error's naming of a
-	# setting, parameter "gp_..."; and gpconfig's -c, -r and -s, which set,
-	# remove and show a setting in every node's configuration file
-	echo "kinds field set func header param gpconfig"
+	# setting, parameter "gp_..."; gpconfig's -c, -r and -s, which set,
+	# remove and show a setting in every node's configuration file; and a
+	# row of pg_settings by name = '...', as the isolation2 suite has it
+	echo "kinds field set func header param gpconfig nameeq"
 	PGHOST="$(node_sock "${groups[0]}" 0)" PGPORT="$(node_port 0 0)" \
 	"$PSQL" -X -q -t -A -d postgres -c "SELECT name FROM pg_settings WHERE name LIKE 'gp.%' ORDER BY length(name) DESC" |
 	while read -r name; do
@@ -376,7 +381,8 @@ t1=$(date +%s)
 			vmem_process_interrupt|explain_memory_verbosity|coredump_on_memerror|\
 			debug_print_slice_table|\
 			enable_offload_entry_to_qe|debug_dtm_action*|debug_abort_after_distributed_prepared|\
-			debug_print_full_dtm|enable_answer_query_using_materialized_views|aqumv_allow_foreign_table)
+			debug_print_full_dtm|enable_answer_query_using_materialized_views|aqumv_allow_foreign_table|\
+			allow_segment_dml|pljava_classpath|pljava_vmoptions)
 				cbname="$short" ;;
 			*) cbname="gp_$short" ;;
 		esac
@@ -645,7 +651,10 @@ chmod +x "$EXEC/bin/diff"
 # says; so is one that waits for ever on a lock a segment holds.  The
 # watchdog does not look while a test runs that counts the coordinator's
 # sessions, or the statements holding its slots of query metrics, where its
-# own would be counted: the test whose results file is the newest.
+# own would be counted: the test whose results file is the newest.  Nor at a
+# statement that is a pg_sleep() alone, which ends when it said it would:
+# dynamic_table's, SELECT pg_sleep(80), waits so for its dynamic table's job,
+# another backend of the database, which is watched.
 TIMEOUT="${STATEMENT_TIMEOUT:-60 seconds}"
 QUIET_TESTS=" instr_in_shmem instr_in_shmem_verify "
 watchdog() {
@@ -658,7 +667,8 @@ watchdog() {
 			SELECT pid, regexp_replace(left(query, 300), '\\s+', ' ', 'g')
 			  FROM pg_stat_activity
 			 WHERE datname = 'regression' AND state = 'active'
-			   AND now() - query_start > interval '$TIMEOUT'" 2> /dev/null |
+			   AND now() - query_start > interval '$TIMEOUT'
+			   AND query !~* '^\\s*select\\s+pg_sleep\\s*\\(\\s*[0-9.]+\\s*\\)\\s*;?\\s*$'" 2> /dev/null |
 		while read -r pid query; do
 			[ -n "$pid" ] || continue
 			PGOPTIONS="-c gp.optimizer=off" "$PSQL" -X -q -t -A -d postgres \

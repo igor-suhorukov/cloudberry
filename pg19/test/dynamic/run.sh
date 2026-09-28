@@ -244,6 +244,44 @@ out=$(qd elsewhere "CREATE MATERIALIZED VIEW plain_there AS SELECT 1 AS x;
 	&& ok "an ordinary materialized view there reaches for nothing" \
 	|| notok "an ordinary materialized view there reaches for nothing" "$out"
 
+###############################################################################
+echo "7. Cloudberry's names: pg_dynamic_tables, pg_get_dynamic_table_schedule() and the jobs'"
+###############################################################################
+is "pg_dynamic_tables lists them by Cloudberry's columns" \
+   "SELECT string_agg(schemaname || '.' || dynamictablename || ' ' || (dynamictableowner = current_user)
+                      || ' ' || coalesce(tablespace, '-') || ' ' || hasindexes || ' ' || ispopulated
+                      || ' ' || (definition = pg_get_viewdef(schemaname || '.' || dynamictablename)),
+                      '; ' ORDER BY dynamictablename)
+      FROM pg_dynamic_tables;" \
+   "public.dt true - false true true; public.dt_live true - false true true"
+is "pg_get_dynamic_table_schedule() is the job's, which ALTER TASK changed" \
+   "SELECT pg_get_dynamic_table_schedule('dt'::regclass);" "0 4 * * *"
+refused "and of a view that is none, a WARNING and nothing" \
+        "CREATE MATERIALIZED VIEW plain2 AS SELECT 1 AS x;
+         SELECT pg_get_dynamic_table_schedule('plain2'::regclass);" "is not dynamic table"
+refused "a task of a dynamic table's job's name is not made by hand" \
+        "CALL gp_task.create_task('gp_dynamic_table_refresh_1', '@daily', 'SELECT 1');" \
+        'unacceptable task name "gp_dynamic_table_refresh_1"'
+refused "nor is the job's command changed" \
+        "CALL gp_task.alter_task('gp_dynamic_table_refresh_' || 'dt'::regclass::oid, command => 'SELECT 1');" \
+        "can not alter REFRESH SQL of dynamic tables"
+refused "nor is it dropped but with its view" \
+        "CALL gp_task.drop_task(ARRAY['gp_dynamic_table_refresh_' || 'dt'::regclass::oid]);" \
+        "can not drop a internal task"
+isl "which a superuser under allow_system_table_mods may, as in Cloudberry" \
+   "SET allow_system_table_mods = on;
+    CALL gp_task.create_task('gp_dynamic_table_refresh_1', '@daily', 'SELECT 1');
+    CALL gp_task.drop_task('{gp_dynamic_table_refresh_1}');
+    SELECT count(*) FROM gp_task.job WHERE jobname = 'gp_dynamic_table_refresh_1';" "0"
+refused "and of a dynamic table whose job is gone, that it is" \
+        "SET allow_system_table_mods = on;
+         CALL gp_task.drop_task(ARRAY['gp_dynamic_table_refresh_' || 'dt_live'::regclass::oid]);
+         RESET allow_system_table_mods;
+         SELECT pg_get_dynamic_table_schedule('dt_live'::regclass);" "does not exist"
+is "a job of the name is still dropped with its view" \
+   "DROP MATERIALIZED VIEW dt;
+    SELECT count(*) FROM gp_task.job WHERE jobname LIKE 'gp_dynamic_table_refresh_%';" "0"
+
 echo
 echo "  $pass passed, $fail failed"
 [ "$fail" -eq 0 ]

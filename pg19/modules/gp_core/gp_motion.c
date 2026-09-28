@@ -4788,10 +4788,12 @@ motion_executor_run(QueryDesc *queryDesc, ScanDirection direction,
  * The fragment is one segment's share of the statement, and a query that a
  * function in it plans here would read this segment's share of a table as
  * if it were the table.  Cloudberry refuses such a query on a QE unless it
- * reads only catalogs and replicated tables, and only reads
- * (querytree_safe_for_qe(), executor/functions.c); so does the port, with
- * Cloudberry's words.  A segment knows which tables are replicated from the
- * "gp" label, which the coordinator sends it whenever it changes one
+ * reads only catalogs and replicated tables, and only reads -- or writes
+ * them too, where allow_segment_DML is on (querytree_safe_for_qe(),
+ * executor/functions.c); so does the port, with Cloudberry's words, and
+ * gp.allow_segment_dml, which the segments are sent as the other settings
+ * they read are.  A segment knows which tables are replicated from the "gp"
+ * label, which the coordinator sends it whenever it changes one
  * (gp_dispatch.c).  A statement the coordinator dispatched itself is planned
  * before any fragment runs, and is not affected.
  */
@@ -4814,7 +4816,8 @@ fragment_safe_walker(Node *node, void *context)
 		Query	   *query = (Query *) node;
 		ListCell   *lc;
 
-		if (query->commandType != CMD_SELECT || query->resultRelation > 0)
+		if (!gp_allow_segment_dml &&
+			(query->commandType != CMD_SELECT || query->resultRelation > 0))
 			ereport(ERROR,
 					(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
 					 errmsg("function cannot execute on a QE slice because it issues a non-SELECT statement")));

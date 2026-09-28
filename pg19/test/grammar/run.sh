@@ -607,6 +607,22 @@ isl "CREATE INCREMENTAL MATERIALIZED VIEW" \
 isl "CREATE DYNAMIC TABLE ... SCHEDULE" \
    "CREATE DYNAMIC TABLE dt SCHEDULE '0 3 * * *' AS SELECT count(*) AS n FROM base;
     SELECT gp_matview.dynamic_schedule('dt'::regclass);" "0 3 * * *"
+is "its job runs Cloudberry's REFRESH DYNAMIC TABLE, which the scheduler's worker reads here too" \
+   "SELECT command FROM gp_task.job WHERE jobname = 'gp_dynamic_table_refresh_' || 'dt'::regclass::oid;" \
+   "REFRESH DYNAMIC TABLE public.dt"
+dtoid=$(q "SELECT 'dt'::regclass::oid;")
+refused "CREATE TASK of a name Cloudberry keeps for a dynamic table's job" \
+        "CREATE TASK gp_dynamic_table_refresh_xxx SCHEDULE '1 second' AS 'REFRESH DYNAMIC TABLE dt';" \
+        'unacceptable task name "gp_dynamic_table_refresh_xxx"'
+refused "ALTER TASK ... AS of the job" \
+        "ALTER TASK gp_dynamic_table_refresh_$dtoid AS 'SELECT 1';" \
+        "can not alter REFRESH SQL of dynamic tables"
+refused "and DROP TASK of it" \
+        "DROP TASK gp_dynamic_table_refresh_$dtoid;" \
+        "can not drop a internal task \"gp_dynamic_table_refresh_$dtoid\" paried with dynamic table"
+isl "but its schedule may change" \
+   "ALTER TASK gp_dynamic_table_refresh_$dtoid SCHEDULE '0 4 * * *';
+    SELECT pg_get_dynamic_table_schedule('dt'::regclass);" "0 4 * * *"
 isl "REFRESH DYNAMIC TABLE" \
    "INSERT INTO base VALUES (2, 1);
     REFRESH DYNAMIC TABLE dt;
@@ -1784,6 +1800,36 @@ isparts "SUBPARTITION BY and its template, a level at a time" gpp_s \
 is "the template is kept with the table, as written, in its gp label" \
    "SELECT label FROM pg_seclabel WHERE objoid = 'gpp_s'::regclass AND provider = 'gp';" \
    "partition_templates=1:78:(START (date '2020-01-01') END (date '2020-03-01') EVERY (interval '1 month'))"
+is "and gp_partition_template shows it as Cloudberry's pg_get_expr() prints its row" \
+   "SELECT relid::regclass || ' ' || level || ' ' || pg_get_expr(template, relid)
+      FROM gp_partition_template WHERE relid = 'gpp_s'::regclass;" \
+   "gpp_s 1 SUBPARTITION TEMPLATE( START ('2020-01-01'::date) END ('2020-03-01'::date) Every ('1 mon'::interval))"
+q "CREATE TABLE gpp_t (id int, region text, d date) PARTITION BY RANGE (d)
+     SUBPARTITION BY LIST (region) SUBPARTITION TEMPLATE
+       (SUBPARTITION usa VALUES ('usa'), SUBPARTITION asia VALUES ('asia', 'japan') WITH (fillfactor = 70),
+        DEFAULT SUBPARTITION other)
+     (START (date '2020-01-01') END (date '2020-02-01'));" > /dev/null
+is "each element in the order written, a WITH as Cloudberry's printing gives it" \
+   "SELECT pg_get_expr(template, relid) FROM gp_partition_template WHERE relid = 'gpp_t'::regclass;" \
+   "SUBPARTITION TEMPLATE(SUBPARTITION usa VALUES ('usa'), SUBPARTITION asia VALUES ('asia', 'japan'),  WITH (, fillfactor=70), DEFAULT SUBPARTITION other)"
+is "a table dropped leaves no template" \
+   "DROP TABLE gpp_t;
+    SELECT count(*) FROM gp_partition_template t WHERE NOT EXISTS (SELECT 1 FROM pg_class c WHERE c.oid = t.relid);" "0"
+q "CREATE TABLE gpp_ge (x int DEFAULT 42, y int CHECK (y > 0)) PARTITION BY RANGE (x);
+   CREATE TABLE gpp_ge1 PARTITION OF gpp_ge FOR VALUES FROM (0) TO (10);
+   CREATE INDEX gpp_gei ON gpp_ge1 ((x + 1)) WHERE y > 5;" > /dev/null
+is "every other call of pg_get_expr is PostgreSQL's still: of pg_attrdef's, pg_constraint's, pg_index's and pg_class's trees, and of a NULL" \
+   "SELECT concat_ws(' | ',
+      (SELECT pg_get_expr(adbin, adrelid) FROM pg_attrdef WHERE adrelid = 'gpp_ge'::regclass),
+      (SELECT pg_get_expr(conbin, conrelid) FROM pg_constraint WHERE conrelid = 'gpp_ge'::regclass AND contype = 'c'),
+      (SELECT pg_get_expr(indexprs, indrelid) || ' ' || pg_get_expr(indpred, indrelid, true) FROM pg_index WHERE indexrelid = 'gpp_gei'::regclass),
+      (SELECT pg_get_expr(relpartbound, oid) FROM pg_class WHERE relname = 'gpp_ge1'),
+      (pg_get_expr(NULL, 0) IS NULL AND pg_get_expr(NULL, NULL) IS NULL AND pg_get_expr(NULL, NULL, NULL) IS NULL AND
+       pg_get_expr(NULL, 'gpp_ge'::regclass) IS NULL AND pg_get_expr(NULL::pg_node_tree, 0) IS NULL)::text);" \
+   "42 | (y > 0) | (x + 1) y > 5 | FOR VALUES FROM (0) TO (10) | true"
+refused "and text is no pg_node_tree for it" "SELECT pg_get_expr('x', 0);" "cannot accept a value of type pg_node_tree"
+refused "nor a template, which only the view gives" "SELECT 'x'::gp_sql.partition_template;" \
+        "cannot accept a value of type gp_sql.partition_template"
 is "rows go where the bounds say" \
    "INSERT INTO gpp_s VALUES (1, 'japan', '2020-02-15'), (2, 'usa', '2020-01-02'), (3, 'mars', '2020-01-31');
     SELECT string_agg(tableoid::regclass || ':' || id, ' ' ORDER BY id) FROM gpp_s;" \

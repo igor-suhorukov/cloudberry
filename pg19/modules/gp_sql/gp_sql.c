@@ -2611,9 +2611,12 @@ _PG_init(void)
 
 	/*
 	 * O26: Cloudberry's own spelling of a statement is rewritten into
-	 * PostgreSQL's before the grammar sees it.  See pg19/grammar/.
+	 * PostgreSQL's before the grammar sees it.  See pg19/grammar/.  The
+	 * rendezvous says so to a module that writes such a statement for another
+	 * backend to run (cb_module.h).
 	 */
 	GpGrammarInstallHook();
+	*find_rendezvous_variable(CB_SQL_RENDEZVOUS) = (void *) &gp_max_partition_level;
 
 	prev_ExecutorStart = ExecutorStart_hook;
 	ExecutorStart_hook = gp_sql_ExecutorStart;
