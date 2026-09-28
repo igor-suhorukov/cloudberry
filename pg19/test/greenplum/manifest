@@ -526,7 +526,7 @@ skip gangsize  differs: the gangs its statements are dispatched to, by Cloudberr
 run  gang_reuse
 run  run_utility_gpexpand_phase1
 run  create_extension_fail
-skip offload_entry_to_qe  a temporary external table is not supported: CREATE EXTERNAL WEB TEMP TABLE -- an external table is a foreign table, which PostgreSQL makes in no temporary schema; and enable_offload_entry_to_qe, which moves the coordinator's work above a Motion to one segment, has nothing to move on the planner's route, whose gathers are the coordinator's
+run  offload_entry_to_qe
 port ivm_cluster
 run  ivm
 run  aqumv  planner  it turns optimizer off itself, so both passes would plan it alike, and ORCA's pass, on the planner's pass's clusters, would read the rows the planner's wrote into its external table's demoprot file on each segment too

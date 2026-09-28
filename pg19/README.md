@@ -347,8 +347,10 @@ of the core series, O13 to O21, O23 and O32:
   -- `file://`, `EXECUTE`, `gpfdist://` and `http://` through libcurl, a
   protocol's own functions, text, CSV and a formatter's custom format,
   writable tables, single-row error handling and its error logs -- read on
-  the segments, or on the one node; Cloudberry's protocols and
-  `CREATEEXTTABLE`; and `COPY ... LOG ERRORS SEGMENT REJECT LIMIT`;
+  the segments, or on the one node; a temporary one (`CREATE EXTERNAL TEMP
+  TABLE`), the foreign table in the session's `pg_temp`; Cloudberry's
+  protocols and `CREATEEXTTABLE`; and `COPY ... LOG ERRORS SEGMENT REJECT
+  LIMIT`;
 - `gpfdist`, Cloudberry's file server, built as a program of the port's;
 - `diskquota`: Cloudberry's diskquota 2.3, as its library `diskquota-2.3`
   -- a launcher, and a worker for each database that has the extension,
