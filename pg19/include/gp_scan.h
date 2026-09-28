@@ -157,6 +157,13 @@ extern void GpModifyInit(void);
 extern void GpModifyLockPartitions(Oid relid, LOCKMODE lockmode);
 
 /*
+ * A write's target, refused where PostgreSQL's executor refuses it before
+ * any row is written: a materialized view outside its maintenance
+ * (gp_modify.c).
+ */
+extern void GpModifyCheckTarget(Oid relid);
+
+/*
  * ANALYZE of a distributed table through O3, where there is a cluster, and
  * of a partitioned table's leaves, on one node too (gp_analyze.c).
  */

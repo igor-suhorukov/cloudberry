@@ -1829,6 +1829,48 @@ EOF
 	esac
 	q 0 "ANALYZE hst;" >/dev/null
 
+	# What ANALYZE samples of a segment is that segment's count too, as
+	# Cloudberry's gp_acquire_sample_rows() writes it there: the table's
+	# pages and rows, and its index's.  So a VACUUM whose segments scan a
+	# page or none -- a read made the rest all-visible, as PostgreSQL 19's
+	# pruning does -- keeps the rows ANALYZE counted, where the coordinator
+	# once read 0 of them until the next ANALYZE; and an index's pages after
+	# ANALYZE are its files' on the segments, not the empty copy's page.  The
+	# rows are written by the explicit write (RETURNING), a statement of
+	# VALUES a batch, which leaves no page empty behind them: COPY's, a bulk
+	# insert, extends a table by pages it leaves empty at its end, which a
+	# VACUUM scans, and PostgreSQL 19 takes for as full as the pages it did
+	# not scan (vac_estimate_reltuples()), on one node as here.
+	q 0 "CREATE TABLE sgc (a int, b int) DISTRIBUTED BY (a); CREATE INDEX sgc_b ON sgc (b);
+		 INSERT INTO sgc SELECT i, i FROM generate_series(1, 20010) i RETURNING 0; ANALYZE sgc;" >/dev/null
+	out=$(q 0 "SELECT relpages || ' ' || reltuples FROM pg_class WHERE relname = 'sgc';")
+	out2=$(q 0 "SELECT sum(relpages) || ' ' || sum(reltuples) FROM gp_dist_random('pg_class') WHERE relname = 'sgc';")
+	out3=$(q 0 "SELECT relpages || ' ' || reltuples FROM pg_class WHERE relname = 'sgc_b';")
+	seg=0
+	for n in 1 2; do
+		p=$(q "$n" "SELECT pg_relation_size('sgc_b') / current_setting('block_size')::int;")
+		isnum "$p" && seg=$((seg + p))
+	done
+	[ "$out" = "$out2" ] && [ "${out#* }" = "20010" ] && [ "$out3" = "$seg 20010" ] \
+		&& ok "the segments count what ANALYZE samples of them, and an index's pages are the segments' ($seg)" \
+		|| notok "the counts ANALYZE leaves" "$out / segments: $out2 / index: $out3, $seg pages"
+	q 0 "SELECT count(*) FROM sgc;" >/dev/null
+	q 0 "VACUUM sgc;" >/dev/null
+	out=$(q 0 "SELECT reltuples FROM pg_class WHERE relname = 'sgc';")
+	out2=$(q 0 "SELECT reltuples FROM pg_class WHERE relname = 'sgc_b';")
+	[ "$out|$out2" = "20010|20010" ] && ok "... which a VACUUM after a read keeps, the table's and the index's" \
+		|| notok "the rows after a VACUUM that scanned little" "$out / index: $out2"
+
+	# A replicated table's ANALYZE samples one of its segments, and a VACUUM
+	# of the others, read there, counts none: they hold as many rows to a page
+	# as the one that counted, where they once made the table a third of it.
+	q 0 "CREATE TABLE sgr (a int) DISTRIBUTED REPLICATED; INSERT INTO sgr SELECT generate_series(1, 3000) RETURNING 0; ANALYZE sgr;" >/dev/null
+	for n in 1 2; do q "$n" "SELECT count(*) FROM sgr;" >/dev/null; done
+	q 0 "VACUUM sgr;" >/dev/null
+	out=$(q 0 "SELECT reltuples FROM pg_class WHERE relname = 'sgr';")
+	[ "$out" = "3000" ] && ok "a replicated table's rows after a VACUUM of segments that had not counted them" \
+		|| notok "a replicated table's rows after VACUUM" "$out"
+
 	###########################################################################
 	echo "10. ORCA's plans run on the segments, with Cloudberry's Motions"
 	###########################################################################
@@ -3361,6 +3403,58 @@ COMMIT;"
 		*) notok "a correlated scalar subquery of an aggregate as a join" "$plan" ;;
 	esac
 
+	# A write of a materialized view is refused as PostgreSQL's
+	# CheckValidResultRel() refuses it, before a row is made, in its words and
+	# on the coordinator -- where the segments' COPY refused the routed rows in
+	# its own, "cannot copy to materialized view" -- under EXPLAIN too, and
+	# an unpopulated view's as well; a read of an unpopulated view by a user
+	# who may not read it is refused for that first, as InitPlan() checks.
+	# REFRESH, which writes the view under its maintenance, still fills it.
+	# Here, where the coordinator has the secret a segment fills a view by.
+	# mvw_writes <settings> <filter>: what each write says, one after another
+	mvw_writes() {
+		local stmt
+		for stmt in "INSERT INTO mvw VALUES (2, 2)" "INSERT INTO mvw SELECT * FROM mvw_base" \
+				"INSERT INTO mvw VALUES (2, 2) RETURNING *" "UPDATE mvw SET b = 3" "DELETE FROM mvw" \
+				"UPDATE mvw SET b = 3 FROM mvw_base WHERE mvw.a = mvw_base.a" \
+				"EXPLAIN INSERT INTO mvw VALUES (2, 2)" "INSERT INTO mvw_rep VALUES (2, 2)" \
+				"INSERT INTO mvw_empty VALUES (2, 2)" "INSERT INTO mvw_empty SELECT * FROM mvw_empty"; do
+			q 0 "$1 $stmt;" | $2
+		done
+	}
+	mvw_want='ERROR:  cannot change materialized view "mvw"
+ERROR:  cannot change materialized view "mvw"
+ERROR:  cannot change materialized view "mvw"
+ERROR:  cannot change materialized view "mvw"
+ERROR:  cannot change materialized view "mvw"
+ERROR:  cannot change materialized view "mvw"
+ERROR:  cannot change materialized view "mvw"
+ERROR:  cannot change materialized view "mvw_rep"
+ERROR:  cannot change materialized view "mvw_empty"
+ERROR:  cannot change materialized view "mvw_empty"'
+	setup=$(q 0 "CREATE TABLE mvw_base (a int, b int) DISTRIBUTED BY (a); INSERT INTO mvw_base VALUES (1, 1);"
+			q 0 "CREATE MATERIALIZED VIEW mvw AS SELECT a, b FROM mvw_base DISTRIBUTED BY (a);"
+			q 0 "CREATE MATERIALIZED VIEW mvw_rep AS SELECT a, b FROM mvw_base DISTRIBUTED REPLICATED;"
+			q 0 "CREATE MATERIALIZED VIEW mvw_empty AS SELECT a, b FROM mvw_base WITH NO DATA DISTRIBUTED BY (a);"
+			q 0 "CREATE ROLE mvw_reader LOGIN;")
+	out=$(mvw_writes "SET gp.optimizer = off;" cat)
+	[ "$out" = "$mvw_want" ] && ok "a write of a materialized view is refused in PostgreSQL's words, on the coordinator" \
+		|| notok "a write of a materialized view" "$setup / $out"
+	out=$(q 0 "SET ROLE mvw_reader; SELECT * FROM mvw_empty;")
+	out2=$(q 0 "SELECT * FROM mvw_empty;" | head -1)
+	q 0 "INSERT INTO mvw_base VALUES (2, 2);" >/dev/null
+	out3=$(q 0 "REFRESH MATERIALIZED VIEW mvw;" && q 0 "SELECT count(*) FROM mvw;")
+	[ "$out|$out2|$out3" = 'ERROR:  permission denied for materialized view mvw_empty|ERROR:  materialized view "mvw_empty" has not been populated|2' ] \
+		&& ok "... a read of an unpopulated one checks the privileges first, and REFRESH still writes one" \
+		|| notok "an unpopulated materialized view, and REFRESH" "$out / $out2 / $out3"
+
+	# Under ORCA in the same words, which a segment's ModifyTable says where
+	# ORCA writes there -- an unpopulated view's too, whose write is no scan
+	# of it.
+	out=$(mvw_writes "SET gp.optimizer = on;" "head -1")
+	[ "$out" = "$mvw_want" ] && ok "under ORCA a write of a materialized view is refused in the same words" \
+		|| notok "a write of a materialized view under ORCA" "$out"
+
 	# No secret on the coordinator: ORCA is told, and the planner gathers.
 	# None on the segments either -- a segment that has one takes the
 	# coordinator's word only with it, and a transaction's two-phase commit
@@ -4107,6 +4201,22 @@ SQL
 	[ "$out|$out2" = "secret=sesame,secret=sesame|0" ] \
 		&& ok "a handler on a segment is given the user's credentials, read on the coordinator" \
 		|| notok "credentials on a segment" "$out / $out2"
+
+	# Cloudberry's fault bump_oid, which its tests set on the coordinator to
+	# make an object whose OID is past a signed int's: the next OID a catalog
+	# row is given moved there, once, the counter left where it was -- and the
+	# segments' object is given the same (gp_ddl.c).
+	q 0 "SELECT gp_inject_fault('bump_oid', 'skip', 1);" >/dev/null
+	q 0 "CREATE TABLE bump_big (a int) DISTRIBUTED BY (a);" >/dev/null
+	q 0 "SELECT gp_inject_fault('bump_oid', 'reset', 1);" >/dev/null
+	q 0 "CREATE TABLE bump_small (a int) DISTRIBUTED BY (a);" >/dev/null
+	out=$(q 0 "SELECT string_agg((oid::bigint > x'7FFFFFFF'::bigint)::text, ' ' ORDER BY relname)
+	             FROM pg_class WHERE relname IN ('bump_big', 'bump_small');")
+	out2=$(q 0 "SELECT count(*) FROM gp_dist_random('pg_class') WHERE relname = 'bump_big' AND oid = 'bump_big'::regclass;")
+	out3=$(q 0 "INSERT INTO bump_big SELECT generate_series(1, 10); SELECT count(*) FROM bump_big;")
+	[ "$out|$out2|$out3" = "true false|2|10" ] \
+		&& ok "bump_oid gives the next table an OID past a signed int's, on every node, once" \
+		|| notok "the fault bump_oid" "$out / $out2 / $out3"
 
 	###########################################################################
 	echo "14. the global deadlock detector"

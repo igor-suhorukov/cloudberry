@@ -11,7 +11,9 @@ expected output of one of the port's own, in ../sql.
 gp_setup.out
     The port's setup, run after PostgreSQL's tests and before Cloudberry's:
     it creates the extensions of every M1 module and of gp_ao, whose SQL
-    objects Cloudberry's tests use and Cloudberry has built in.
+    objects Cloudberry's tests use and Cloudberry has built in -- in the
+    tests' database, and in template1, which the databases the tests make
+    are made from, as gpinitsystem gives template1 a cluster's.
 
 security_label_9.out
     PostgreSQL's test runs its unqualified SECURITY LABEL statements where

@@ -278,7 +278,11 @@ Distributed transactions (M3), in `gp_core`:
   coordinator's from a segment;
 - the coordinator's `pg_class` counts a distributed table's pages, rows and
   all-visible pages as the segments do, after VACUUM and ANALYZE, as
-  Cloudberry's brings them back, and an empty table's one page;
+  Cloudberry's brings them back, and an empty table's one page; each
+  segment's `pg_class` has the pages and rows ANALYZE sampled of it, as
+  Cloudberry's segments write them, which the segment's VACUUM keeps where it
+  scans too little to count, and an index's pages after ANALYZE are its
+  files' on the segments;
 - ANALYZE of a partitioned table as Cloudberry's takes it, on one node too:
   the root and the mid-levels as `gp.optimizer_analyze_root_partition` and
   `_midlevel_partition` say, ANALYZE ROOTPARTITION, the leaves before the
