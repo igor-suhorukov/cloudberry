@@ -179,7 +179,10 @@ On a cluster (M2), `gp_core` and `gp_orca`:
   `gp.enable_runtime_filter_pushdown`): a Bloom filter of a hash join's inner
   keys, in a RuntimeFilter node above the outer side of the planner's joins,
   and pushed down into the gathers and sequential scans below a join's outer
-  side, those of ORCA's slices on the segments among them
+  side, those of ORCA's slices on the segments among them, which test a row
+  as they read it, before their own conditions; a gather sends its segments
+  each key's range with its SQL, and a PAX scan is begun with the range as
+  its keys, which PAX's sparse filter skips files by
   (`modules/gp_core/gp_rtfilter.c`);
 - **every slice of a query at once**: the writer, the session's backend on a
   segment, runs one slice, and readers — more backends of the session there,

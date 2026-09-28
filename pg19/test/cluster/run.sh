@@ -3143,9 +3143,12 @@ COMMIT;"
 	# only the outer rows that may meet one, and a row with a NULL key.  With
 	# gp.enable_runtime_filter_pushdown on, an integer key's inner values and
 	# range reach the scans below the outer side -- the planner's gathers,
-	# and on the segments the sequential scans of ORCA's slices -- and
-	# EXPLAIN ANALYZE says how many rows each dropped.  A left join's
-	# preserved side gets neither, and every answer is the one without.
+	# which send their segments the range, and on the segments the
+	# sequential scans of ORCA's slices -- which test a row as they read it,
+	# before their own conditions, and EXPLAIN ANALYZE says how many rows
+	# each dropped, first of the node's lines, as Cloudberry's does.  A left
+	# join's preserved side gets neither, and every answer is the one
+	# without.
 	q 0 "CREATE TABLE rff (id int, d int) DISTRIBUTED BY (id);
 	     INSERT INTO rff SELECT i, CASE WHEN i % 400 = 0 THEN NULL ELSE i % 2000 END FROM generate_series(1, 40000) i;
 	     CREATE TABLE rfd (d int, p int) DISTRIBUTED BY (d);
@@ -3157,17 +3160,32 @@ COMMIT;"
 	out=$(printf '%s\n' "SET gp.optimizer = off;" "SET gp.enable_runtime_filter = on;" \
 		"$rf_explain $rf_join" "$rf_join" "SET gp.enable_runtime_filter = off;" "$rf_join" | qf 0 | tr '\n' '|')
 	case "$out" in
-		*"->  RuntimeFilter (actual rows=4000.00 loops=1)|"*"Bloom Bits: 1048576|"*"->  Gather Motion 2:1 on rff  (slice1; segments: 2) (actual rows=40000.00 loops=1)|"*"|3900|195|3900|195|")
-			ok "the planner's hash join takes a RuntimeFilter: 40,000 outer rows, 4,000 passed -- 3,900 that meet, 100 with a NULL key -- and the same answer" ;;
+		*"->  RuntimeFilter (actual rows=4000.00 loops=1)|"*"Bloom Bits: 1048576|"*"Extra Text: Inner Processed: 200, Flase Positive Rate: 0.0"*"->  Gather Motion 2:1 on rff  (slice1; segments: 2) (actual rows=40000.00 loops=1)|"*"|3900|195|3900|195|")
+			ok "the planner's hash join takes a RuntimeFilter: 40,000 outer rows, 4,000 passed -- 3,900 that meet, 100 with a NULL key -- the 200 inner rows it holds in Cloudberry's Extra Text, and the same answer" ;;
 		*) notok "a RuntimeFilter on the planner's route" "$out" ;;
 	esac
 	out=$(printf '%s\n' "SET gp.optimizer = off;" "SET gp.enable_runtime_filter_pushdown = on;" \
-		"$rf_explain $rf_join" "$rf_join" | qf 0 | tr '\n' '|')
+		"${rf_explain%)}, VERBOSE) $rf_join" "$rf_join" | qf 0 | tr '\n' '|')
 	case "$out" in
 		*"RuntimeFilter"*) notok "pushdown alone" "$out" ;;
-		*"->  Gather Motion 2:1 on rff  (slice1; segments: 2) (actual rows=4000.00 loops=1)|"*"Rows Removed by Pushdown Runtime Filter: 36000|"*"|3900|195|")
-			ok "pushed down, the key's values drop 36,000 rows where the gather reads them, which EXPLAIN ANALYZE says" ;;
+		*"->  Gather Motion 2:1 on public.rff  (slice1; segments: 2) (actual rows=3900.00 loops=1)|"*"Rows Removed by Pushdown Runtime Filter: 35820|"*"Remote SQL: SELECT d FROM ONLY public.rff WHERE (d >= '0'::integer AND d <= '1990'::integer)|"*"|3900|195|")
+			ok "pushed down, the gather sends its segments the key's range, where 280 rows stay, 100 of them with a NULL key, and the key's values drop 35,820 where it reads them, which EXPLAIN ANALYZE says" ;;
 		*) notok "pushdown into the planner's gather" "$out" ;;
+	esac
+	# A gather tests a row as it reads it, before its own conditions: the
+	# count is of all it read, "Rows Removed by Filter" of what passed.  A
+	# cursor's gathers start as it is declared, before any hash table, and
+	# send no range.
+	q 0 "CREATE FUNCTION rf_even(int) RETURNS bool LANGUAGE plpgsql STABLE AS 'BEGIN RETURN \$1 % 2 = 0; END';" >/dev/null
+	rf_local="SELECT count(*) FROM rff JOIN rfd USING (d) WHERE p = 0 AND rf_even(rff.id / 10);"
+	out=$(printf '%s\n' "SET gp.optimizer = off;" "SET gp.enable_runtime_filter_pushdown = on;" \
+		"$rf_explain $rf_local" "$rf_local" "BEGIN;" "DECLARE rfc CURSOR FOR $rf_join" "FETCH ALL FROM rfc;" "COMMIT;" \
+		"SET gp.enable_runtime_filter_pushdown = off;" "$rf_local" | qf 0 | tr '\n' '|')
+	sp=$(printf '%14s' '')
+	case "$out" in
+		*"->  Gather Motion 2:1 on rff  (slice1; segments: 2) (actual rows=1900.00 loops=1)|${sp}Rows Removed by Pushdown Runtime Filter: 35820|${sp}Filter: rf_even((id / 10))|${sp}Rows Removed by Filter: 2000|"*"|1900|3900|195|1900|")
+			ok "a gather drops what the filter rules out before its own condition, and says so first, as Cloudberry's scan does; a cursor's gathers answer as without" ;;
+		*) notok "a gather's count before its own condition" "$out" ;;
 	esac
 	out=$(printf '%s\n' "SET gp.optimizer = off;" "SET gp.enable_runtime_filter = on;" \
 		"SET gp.enable_runtime_filter_pushdown = on;" "$rf_explain $rf_left" "$rf_left" | qf 0 | tr '\n' '|')
@@ -3205,6 +3223,24 @@ COMMIT;"
 	case "$out" in
 		*"->  Seq Scan on rff (actual rows="*"|"*"Rows Removed by Pushdown Runtime Filter: "[1-9]*) ok "a segment's sequential scan drops the rows the key rules out" ;;
 		*) notok "pushdown into a segment's sequential scan" "$out" ;;
+	esac
+	# ORCA's: a segment's scan tests a row as its table gives it, before the
+	# scan's own condition, and the coordinator's EXPLAIN ANALYZE says what
+	# the segment with the most rows said -- 0 too, where the filter worked
+	# and dropped nothing, as Cloudberry prints it (prf_work).
+	q 0 "CREATE TABLE rfr (d int) DISTRIBUTED REPLICATED;
+	     INSERT INTO rfr SELECT generate_series(0, 1999); ANALYZE rfr;" >/dev/null
+	rf_orca="SELECT count(*) FROM rff JOIN rfd USING (d) WHERE p = 0 AND (rff.id / 10) % 2 = 0;"
+	out=$(for on in on off; do
+		printf '%s\n' "SET gp.enable_runtime_filter_pushdown = $on;" "$rf_orca" | qf 0
+	done | tr '\n' ' ')
+	plan=$(printf '%s\n' "SET gp.enable_runtime_filter_pushdown = on;" "$rf_explain $rf_orca" \
+		"$rf_explain SELECT count(*) FROM rff JOIN rfr USING (d);" | qf 0 | tr '\n' '|')
+	sp=$(printf '%26s' '')
+	case "$out|$plan" in
+		"1900 1900 |"*"->  Seq Scan on rff (actual rows=1005.00 loops=1)|${sp}Rows Removed by Pushdown Runtime Filter: 17942|${sp}Filter: (((id / 10) % 2) = 0)|${sp}Rows Removed by Filter: 990|"*"->  Seq Scan on rff (actual rows=20063.00 loops=1)|${sp}Rows Removed by Pushdown Runtime Filter: 0|"*)
+			ok "a segment's scan under ORCA counts the rows it drops before its own condition, first of its lines, and 0 where it drops none" ;;
+		*) notok "a segment's count under ORCA" "$out / $plan" ;;
 	esac
 
 	# A segment takes a plan only from a connection with the secret.
@@ -5398,6 +5434,80 @@ if [ "$started" -eq 1 ]; then
 		q 0 "DELETE FROM pd WHERE a > 100000;" >/dev/null
 	done
 	q 0 "DROP TABLE ph, pa, pc, pp, pd;" >/dev/null
+fi
+
+echo
+echo "23. a runtime filter's range and PAX's sparse filter"
+###############################################################################
+# gp_rtfilter.c: a runtime filter's range reaches a PAX table's scan as its
+# keys, and PAX's sparse filter skips the files whose statistics rule the
+# range out, as Cloudberry's PAX, which says SCAN_SUPPORT_RUNTIME_FILTER, is
+# given it -- under ORCA the segments' scans, begun with the keys, and on
+# the planner's route through the SQL the gather sends.  Ten files on each
+# segment, each of a thousand values of its own, and a join on ten values;
+# PAX says what it skipped in its log (pax.enable_debug).
+if [ "${par_started:-0}" -eq 1 ]; then
+	q 0 "CREATE TABLE rfp (c1 int, c2 int) USING pax WITH (minmax_columns = 'c2') DISTRIBUTED BY (c1);
+	     CREATE TABLE rfq (c2 int) DISTRIBUTED REPLICATED;
+	     INSERT INTO rfq SELECT generate_series(5000, 5009);" >/dev/null
+	for k in $(seq 0 9); do
+		q 0 "INSERT INTO rfp SELECT i, i FROM generate_series($((k * 1000)), $((k * 1000 + 999))) i;" >/dev/null
+	done
+	q 0 "ANALYZE rfp; ANALYZE rfq;" >/dev/null
+	rf_pax="SELECT count(*) FROM rfp JOIN rfq USING (c2);"
+	rf_explain="EXPLAIN (ANALYZE, COSTS OFF, TIMING OFF, SUMMARY OFF, BUFFERS OFF)"
+	sp=$(printf '%26s' '')
+	out=$(for sparse in on off; do
+		printf '%s\n' "SET gp.enable_runtime_filter_pushdown = on;" "SET pax.enable_sparse_filter = $sparse;" \
+			"$rf_explain $rf_pax" "$rf_pax" | qf 0
+	done | tr '\n' '|')
+	case "$out" in
+		*"->  Seq Scan on rfp (actual rows=7.00 loops=1)|${sp}Rows Removed by Pushdown Runtime Filter: 521|"*"|10|"*"->  Seq Scan on rfp (actual rows=7.00 loops=1)|${sp}Rows Removed by Pushdown Runtime Filter: 5006|"*"|10|")
+			ok "under ORCA a segment's scan of a PAX table, begun with the range, reads the one file in it: 521 rows dropped where the ten files' are 5,006" ;;
+		*) notok "a PAX scan begun with a runtime filter's range" "$out" ;;
+	esac
+	logged() { cat "$ROOT/node1.log" "$ROOT/node2.log" | grep -c "kind file, filter rate: 9 / 10"; }
+	before=$(logged)
+	out=$(printf '%s\n' "SET gp.optimizer = off;" "SET gp.enable_runtime_filter_pushdown = on;" \
+		"SET pax.enable_debug = on;" "$rf_explain $rf_pax" "$rf_pax" | qf 0 | tr '\n' '|')
+	after=$(logged)
+	case "$out" in
+		*"->  Gather Motion 2:1 on rfp  (slice1; segments: 2) (actual rows=10.00 loops=1)|"*"Rows Removed by Pushdown Runtime Filter: 0|"*"|10|")
+			if [ "$((after - before))" -ge 2 ]; then
+				ok "on the planner's route the segments are sent the range, and each one's PAX scan skips nine of its ten files"
+			else
+				notok "PAX's sparse filter by a gather's range" "the segments logged $before, then $after, files skipped"
+			fi ;;
+		*) notok "a gather's range on a PAX table" "$out" ;;
+	esac
+	# A segment's own plan: a hash join made again for each row of a
+	# subquery's, its scan of a PAX table begun again with each new range --
+	# one file read for each, 995 of its rows dropped -- and every answer the
+	# one without the filter, a LIMIT's that stops the scan short among them.
+	q 1 "CREATE TABLE rfsp (c1 int, c2 int) USING pax WITH (minmax_columns = 'c2');
+	     CREATE TABLE rfsq (c2 int);
+	     INSERT INTO rfsq SELECT generate_series(100, 109) UNION ALL SELECT generate_series(5000, 5009)
+	         UNION ALL SELECT generate_series(7000, 7009);" >/dev/null
+	for k in $(seq 0 9); do
+		q 1 "INSERT INTO rfsp SELECT i, i FROM generate_series($((k * 1000)), $((k * 1000 + 999))) i;" >/dev/null
+	done
+	q 1 "ANALYZE rfsp; ANALYZE rfsq;" >/dev/null
+	rf_each="SELECT x.lo, (SELECT count(*) FROM rfsp JOIN rfsq ON rfsp.c2 = rfsq.c2 WHERE rfsq.c2 BETWEEN x.lo AND x.lo + 4) FROM (VALUES (5000), (7000), (100), (5000), (9999), (7005)) x(lo) ORDER BY 1, 2;"
+	rf_short="SELECT x.lo, (SELECT count(*) FROM (SELECT 1 FROM rfsp JOIN rfsq ON rfsp.c2 = rfsq.c2 WHERE rfsq.c2 BETWEEN x.lo AND x.lo + 4 LIMIT 2) s) FROM (VALUES (5000), (7000), (100), (5000)) x(lo) ORDER BY 1, 2;"
+	out=$(for on in on off; do
+		printf '%s\n' "SET enable_nestloop = off;" "SET enable_mergejoin = off;" \
+			"SET gp.enable_runtime_filter_pushdown = $on;" "$rf_each" "$rf_short" | qf 1
+	done | tr '\n' ' ')
+	plan=$(printf '%s\n' "SET enable_nestloop = off;" "SET enable_mergejoin = off;" \
+		"SET gp.enable_runtime_filter_pushdown = on;" "$rf_explain $rf_each" | qf 1 | tr '\n' '|')
+	want="100|5 5000|5 5000|5 7000|5 7005|5 9999|0 100|2 5000|2 5000|2 7000|2 "
+	case "$out|$plan" in
+		"$want$want|"*"->  Seq Scan on rfsp (actual rows=5.00 loops=5)|"*"Rows Removed by Pushdown Runtime Filter: 4975|"*)
+			ok "a segment's PAX scan under a hash join made again for each row is begun again with each range, and answers as without" ;;
+		*) notok "a PAX scan's range at each rescan" "$out / $plan" ;;
+	esac
+	q 0 "DROP TABLE rfp, rfq;" >/dev/null
+	q 1 "DROP TABLE rfsp, rfsq;" >/dev/null
 fi
 
 echo

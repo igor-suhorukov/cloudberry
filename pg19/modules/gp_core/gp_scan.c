@@ -243,6 +243,9 @@ typedef struct GatherScanState
 	Tuplestorestate *spool;		/* what it read, when it may be read again */
 	TupleTableSlot *spooled;	/* a row of it, read back */
 	int			slice;			/* its slice, as the executor met it */
+	const GpGatherRuntimeFilter *rtf;	/* a runtime filter's, or NULL */
+	char	   *rtf_sent;		/* what it added to the conditions sent as
+								 * the gather last started, or NULL */
 
 	/* A recheck's (gather_epq()) */
 	AttrNumber	epq_segcol;		/* the segment of a row mark's row, in the
@@ -2393,6 +2396,33 @@ gather_where(GatherScanState *state)
 }
 
 /*
+ * The conditions sent, and a runtime filter's, as the hash table whose keys
+ * it holds is now (GpGatherScanSetRuntimeFilter()): the segments send only
+ * the rows the join may meet, which changes nothing but how many cross.  Not
+ * where fewer rows would be seen -- a lock, a write, a LIMIT -- nor where
+ * what the gather reads is kept, to be read again under the filters of a
+ * later hash table.  WHERE CURRENT OF, whose one row the cursor's position
+ * names, never asks.
+ */
+static char *
+gather_where_filtered(GatherScanState *state, char *where)
+{
+	char	   *more;
+
+	state->rtf_sent = NULL;
+	if (state->rtf == NULL || state->rtf->conditions == NULL ||
+		state->identity || state->locking[0] != '\0' ||
+		state->limit[0] != '\0' || state->spool != NULL)
+		return where;
+
+	more = state->rtf->conditions(&state->css.ss.ps, state->rtf->arg);
+	if (more[0] == '\0')
+		return where;
+	state->rtf_sent = more;
+	return where[0] != '\0' ? psprintf("%s AND %s", where, more) : more;
+}
+
+/*
  * Start reading: from the segments the plan names, or the cursor's one.
  *
  * The coordinator checked the statement's privileges before it ran any of
@@ -2452,6 +2482,7 @@ gather_start(GatherScanState *state)
 		return true;
 	}
 
+	where = gather_where_filtered(state, where);
 	if (where[0] != '\0')
 		appendStringInfo(&sql, " WHERE %s", where);
 	appendStringInfoString(&sql, state->limit);
@@ -2631,6 +2662,31 @@ gather_next(ScanState *ss)
 	if (gather_fetch(state, slot))
 		return slot;
 	return ExecClearTuple(slot);
+}
+
+/*
+ * The next row a runtime filter lets pass (GpGatherScanSetRuntimeFilter()):
+ * each row the gather reads, whichever way it reads it, asked before the
+ * node's own conditions, as Cloudberry's scan asks of a row as its table
+ * gives it (PassByBloomFilter()).  The values of a row it drops are in the
+ * per-tuple context, reset before the next row as ExecScan resets it
+ * between rows.
+ */
+static TupleTableSlot *
+gather_next_filtered(ScanState *ss)
+{
+	GatherScanState *state = (GatherScanState *) ss;
+
+	for (;;)
+	{
+		TupleTableSlot *slot = gather_next(ss);
+
+		if (TupIsNull(slot) ||
+			state->rtf->rows(&ss->ps, slot, state->rtf->arg))
+			return slot;
+		ResetExprContext(ss->ps.ps_ExprContext);
+		CHECK_FOR_INTERRUPTS();
+	}
 }
 
 static bool
@@ -2856,6 +2912,9 @@ gather_exec(CustomScanState *node)
 			epq->relsubs_rowmark[rti - 1] != NULL)
 			return gather_epq((GatherScanState *) node, epq);
 	}
+	if (((GatherScanState *) node)->rtf != NULL &&
+		((GatherScanState *) node)->rtf->rows != NULL)
+		return ExecScan(&node->ss, gather_next_filtered, gather_recheck);
 	return ExecScan(&node->ss, gather_next, gather_recheck);
 }
 
@@ -3250,6 +3309,11 @@ gather_explain(CustomScanState *node, List *ancestors, ExplainState *es)
 							 state->where);
 		else if (state->where[0] != '\0')
 			appendStringInfo(&sql, " WHERE %s", state->where);
+		/* and what a runtime filter added as the gather last started */
+		if (state->rtf_sent != NULL)
+			appendStringInfo(&sql, "%s%s",
+							 state->where[0] != '\0' ? " AND " : " WHERE ",
+							 state->rtf_sent);
 		if (!gather_is_current_of(state))
 			appendStringInfoString(&sql, state->limit);
 		appendStringInfoString(&sql, state->locking);
@@ -3303,6 +3367,20 @@ GpGatherScanFinish(PlanState *ps)
 	if (state->gather != NULL)
 		gather_close(state);
 	state->done = true;
+	return true;
+}
+
+/*
+ * A runtime filter for the gather, as the executor starts (gp_rtfilter.c):
+ * it lives as long as the statement's memory, which the gather's does.
+ */
+bool
+GpGatherScanSetRuntimeFilter(PlanState *ps, const GpGatherRuntimeFilter *filter)
+{
+	if (!IsA(ps, CustomScanState) ||
+		((CustomScanState *) ps)->methods != &gather_exec_methods)
+		return false;
+	((GatherScanState *) ps)->rtf = filter;
 	return true;
 }
 
