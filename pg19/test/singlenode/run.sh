@@ -38,6 +38,15 @@
 #     they finished, all of them side by side -- each group still reading
 #     the tables PostgreSQL's tests leave, and in its own order.
 #
+# And between the two halves, a stock extension's own tests, as its "make
+# installcheck" runs them: pgvector's, from the image's build of it
+# (Dockerfile.cbext), in the database PGXS names, contrib_regression, which
+# pg_regress makes with the extension in it, and which is dropped again
+# before the server is copied.  Their names are given a "pgvector_" -- bit,
+# btree, cast and copy are PostgreSQL's tests' names too -- and they are
+# compared as PostgreSQL's tests are, against pgvector's expected output.  A
+# server without pgvector runs the rest.
+#
 # Two changes are made to Cloudberry's files, mechanically, to the test and
 # its expected output alike: input/ and output/ .source files are converted
 # as Cloudberry's pg_regress converts them, which PostgreSQL 19's no longer
@@ -55,7 +64,7 @@
 #
 #                  planner (gp.optimizer = off)     orca (gp.optimizer = on)
 #   PostgreSQL's   line for line, less the          gpdiff.pl, plans not
-#                  Optimizer line gp_orca adds      compared (init_file_pg),
+#   and pgvector's Optimizer line gp_orca adds      compared (init_file_pg),
 #                  to a text-format EXPLAIN         or exactly a difference
 #                                                   in orca/
 #   Cloudberry's   gpdiff.pl as Cloudberry's pg_regress runs it, under its
@@ -80,6 +89,8 @@ CB="${CB_SINGLENODE_DIR:-/cb/src/test/singlenode_regress}"
 GPDIFF="${GPDIFF_DIR:-/cb/src/test/regress}"
 PGSUITE="${PG_REGRESS_SUITE:-/cb/pgregress}"
 PG_REGRESS="$("$BINDIR/pg_config" --pkglibdir)/pgxs/src/test/regress/pg_regress"
+# pgvector's tests, its sql/ and expected/, where the image puts them
+PGVECTOR="${PGVECTOR_TESTS:-/pgvector/test}"
 
 if [ ! -f "$CB/greenplum_schedule" ] || [ ! -f "$PGSUITE/parallel_schedule" ] ||
    [ ! -f "$PGSUITE/regress.so" ] || [ ! -x "$PG_REGRESS" ] ||
@@ -128,6 +139,12 @@ printf '  of the 290 tests Cloudberry schedules: %d of Cloudberry'"'"'s run here
 	"$(echo "$run_tests" | wc -w)" \
 	"$(awk '$1 == "pg"' "$HERE/manifest" | wc -l)" \
 	"$(awk '$1 == "skip"' "$HERE/manifest" | wc -l)"
+if [ -f "$("$BINDIR/pg_config" --sharedir)/extension/vector.control" ] && [ -d "$PGVECTOR/sql" ]; then
+	echo "  pgvector's $(ls "$PGVECTOR"/sql/*.sql | wc -l) tests, from $(cat "$PGVECTOR/../.pgvector_commit" 2>/dev/null || echo '?')"
+else
+	PGVECTOR=
+	echo "  pgvector is not installed: its tests are not run"
+fi
 awk '$1 == "skip" { $1 = ""; sub(/^ /, ""); print "  skip " $0 }' "$HERE/manifest" | cut -c1-150
 echo
 
@@ -225,6 +242,22 @@ cp "$SN/parallel_schedule" "$SN/schedule"
 cp "$HERE"/sql/*.sql "$SN/sql/"
 echo "test: gp_setup" >> "$SN/schedule"
 echo "gp_setup" > "$SN/port_tests"
+# pgvector's, a suite of their own, a test a line: each makes and drops the
+# same table t.
+PV="$WORK/pgvector"
+: > "$SN/pgvector_tests"
+if [ -n "$PGVECTOR" ]; then
+	mkdir -p "$PV/sql" "$PV/expected"
+	for f in "$PGVECTOR"/sql/*.sql; do
+		t=$(basename "$f" .sql)
+		cp "$f" "$PV/sql/pgvector_$t.sql"
+		for e in "$PGVECTOR/expected/$t.out" "$PGVECTOR/expected/$t"_[0-9].out; do
+			[ -f "$e" ] && cp "$e" "$PV/expected/pgvector_$(basename "$e")"
+		done
+		echo "test: pgvector_$t" >> "$PV/schedule"
+		echo "pgvector_$t" >> "$SN/pgvector_tests"
+	done
+fi
 # A test in a directory of Cloudberry's -- uao_compaction/basic -- runs as
 # uao_compaction_basic, its files so named: PostgreSQL 19's pg_regress makes
 # no directory under results/ for it.  One whose .source is in a directory
@@ -426,7 +459,8 @@ start_copy() {
 }
 
 # One pg_regress: its schedule, its output directory, its server.  What it
-# says goes to <outputdir>/pg_regress.out.
+# says goes to <outputdir>/pg_regress.out.  The tests are $SN's, run from
+# Cloudberry's suite's directory, unless PGR_SUITE and PGR_CWD name others.
 regress() {
 	local schedule="$1" out="$2" host="$3"
 	shift 3
@@ -438,12 +472,12 @@ regress() {
 	# expected outputs are named, because pg_regress looks for them in
 	# expected/ of the directory it runs in before the one --inputdir names,
 	# and Cloudberry's directory has its copies of PostgreSQL 14's.
-	( cd "$CB" &&
+	( cd "${PGR_CWD:-$CB}" &&
 	  PATH="$EXEC/bin:$PATH" CB_DIFF_MODE="$pass" PGOPTIONS="-c gp.optimizer=$optimizer" \
 		"$PG_REGRESS" \
 			--bindir="$BINDIR" \
-			--inputdir="$SN" \
-			--expecteddir="$SN" \
+			--inputdir="${PGR_SUITE:-$SN}" \
+			--expecteddir="${PGR_SUITE:-$SN}" \
 			--outputdir="$out" \
 			--dlpath="$PGSUITE" \
 			--schedule="$schedule" \
@@ -491,10 +525,22 @@ for pass in ${PASSES:-planner orca}; do
 	regress "$SN/schedule" "$WORK/$pass/pg" "$SOCK"
 	rc=$?
 	kill "${WATCHDOGS[@]}" 2> /dev/null; wait "${WATCHDOGS[@]}" 2> /dev/null; WATCHDOGS=()
+	outs=("$WORK/$pass/pg")
+
+	# pgvector's, from their output directory, where their \copy writes and
+	# reads results/<type>.bin; and their database dropped, which Cloudberry's
+	# tests would otherwise find among the databases they list.
+	if [ -n "$PGVECTOR" ]; then
+		PGR_SUITE="$PV" PGR_CWD="$WORK/$pass/pgvector" \
+			regress "$PV/schedule" "$WORK/$pass/pgvector" "$SOCK" \
+				--dbname=contrib_regression --load-extension=vector || rc=1
+		"$PSQL" -X -q -d postgres -c "DROP DATABASE contrib_regression" > /dev/null 2>&1 \
+			|| { echo "  pgvector's database could not be dropped"; exit 1; }
+		outs+=("$WORK/$pass/pgvector")
+	fi
 
 	# Then Cloudberry's, a group a server, side by side, each in the database
 	# PostgreSQL's tests left.
-	outs=("$WORK/$pass/pg")
 	"$BINDIR/pg_ctl" -D "$WORK/data" -m fast -w stop > /dev/null 2>&1 \
 		|| { echo "  the server did not stop to be copied"; exit 1; }
 	if [ -n "$(find "$WORK/data/pg_tblspc" -mindepth 1 -type l 2> /dev/null)" ]; then
@@ -550,11 +596,13 @@ for pass in ${PASSES:-planner orca}; do
 		mv "$WORK/$pass/pg_regress.out.n" "$WORK/$pass/pg_regress.out"
 
 	grep -E "^(not )?ok " "$WORK/$pass/pg_regress.out" | sed 's/^/  /'
-	for whose in PostgreSQL Cloudberry port; do
+	for whose in PostgreSQL pgvector Cloudberry port; do
+		[ "$whose" = pgvector ] && [ -z "$PGVECTOR" ] && continue
 		total=0; bad=0
 		while read -r status name; do
 			if grep -qxF "$name" "$SN/cloudberry_tests"; then mine=Cloudberry
 			elif grep -qxF "$name" "$SN/port_tests"; then mine=port
+			elif grep -qxF "$name" "$SN/pgvector_tests"; then mine=pgvector
 			else mine=PostgreSQL; fi
 			[ "$mine" = "$whose" ] || continue
 			total=$((total + 1))

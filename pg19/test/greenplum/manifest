@@ -13,7 +13,9 @@
 #         the first of Cloudberry's statements it refuses, as the port says
 #   port  a test of the port's own, sql/ and expected/ here, run where the
 #         line is: what a skipped test would have left for the tests after it,
-#         or a setting the schedule gives the tests of a group
+#         or a setting the schedule gives the tests of a group -- or a stock
+#         extension on the cluster, passed over where the extension is not
+#         installed (run.sh's port_needs())
 #   group the tests after it, to the next such line, are a group: each group
 #         has a cluster of its own, test_setup and gp_setup first, and the
 #         groups of a pass run side by side, each in the schedule's order.
@@ -43,6 +45,9 @@
 # One test of Cloudberry's parallel_schedule runs here too, ivm, its
 # incremental views on a cluster: Cloudberry runs that schedule on its
 # cluster before this one.
+#
+# And the port's test of a stock extension on a cluster, pgvector, last:
+# pgvector's own tests run on one node, in the singlenode suite.
 group g1
 port aggtest
 run  gp_aggregates
@@ -555,3 +560,4 @@ skip bfv_copy  segment reject limit reached, aborting operation
 run  hba_conf
 skip dboptions  differs: the psql its shell commands run connects to /tmp's socket, where this suite's nodes have directories of their own
 run  gp_log_mem_dispatch
+port pgvector

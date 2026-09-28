@@ -760,6 +760,18 @@ Cloudberry's are its planner's, whose plans have slices, and the port's
 planner of slices is ORCA; a cursor ORCA declines has its endpoint on the
 coordinator.
 
+Stock pgvector, 0.8.6 unpatched (`docker/Dockerfile.cbext`), runs on one
+node and on a cluster: CREATE EXTENSION on every node; its vectors
+distributed by another column, since none of its types hashes; its HNSW
+and IVFFlat indexes built on every segment; and its settings, `hnsw.*` and
+`ivfflat.*`, sent to the segments (`gp_dispatch.c`), where a function
+EXECUTE ON ALL SEGMENTS searches each segment's index.  What the
+coordinator plans reads no segment's index: ORCA gives a query on a table
+with such an index, or one ordered by a distance, to the planner, as
+Cloudberry's does, and the planner's route gathers the table's rows and
+sorts them on the coordinator.  So a nearest-neighbour query answers
+exactly, as a sequential scan does.
+
 The encryption module, `gp_tde`, is still a stub: TDE waits for a formal
 requirement.  The `ic` suite runs every transport over the same Motion
 statements in every run; `ic_greenplum` and `ic_isolation2` run the two
@@ -779,7 +791,8 @@ a coordinator and two segments, and `hooks`, which drives every hook of the
 core series through a test module); `greenplum`, Cloudberry's
 `greenplum_schedule` on a coordinator and three segments -- every test of it
 listed, those that run and those skipped with what stops them, and the
-reasons ORCA would not plan a statement in its ORCA pass totalled; `isolation2`, the
+reasons ORCA would not plan a statement in its ORCA pass totalled, and the
+port's test of stock pgvector on the cluster; `isolation2`, the
 tests of Cloudberry's `isolation2_schedule` that bear on M3 — distributed
 transactions and snapshots, locks and the global deadlock detector — on
 M4, FTS and mirrors, on M6, resource queues and memory accounting, and on
@@ -833,7 +846,8 @@ port built without assertions -- the compose file's `tpc` service,
 `TPC_WORKERS` lists, `"0 2 4"` for the speedups;
 `singlenode` and
 `singlenode_isolation2`, Cloudberry's single-node suites with PostgreSQL 19's
-own regression tests; PostGIS's regression suite; `pxf_fdw`, M8's,
+own regression tests, and in `singlenode` pgvector's, stock, against its own
+expected output; PostGIS's regression suite; `pxf_fdw`, M8's,
 Cloudberry's `pxf_fdw` tests and a stand-in for PXF, on one node and on a
 cluster; and `gpcloud`, gpcloud's unit tests, `gpcheckcloud` and its
 regression schedule against an S3 of the suite's own, moto's server, on a

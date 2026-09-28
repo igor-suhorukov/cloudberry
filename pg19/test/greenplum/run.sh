@@ -103,13 +103,31 @@ INTERCONNECT="${GP_INTERCONNECT:-tcp}"
 IC_PROXY_OFFSET=12000
 SECRET="greenplum-schedule-$RANDOM$RANDOM$RANDOM"
 
+# A test of the port's own of a stock extension, which the image builds
+# (Dockerfile.cbext) and a server built some other way may not have: the
+# extension it needs.
+port_needs() {
+	case "$1" in
+		pgvector) echo vector ;;
+	esac
+}
+
 # The tests the manifest runs -- Cloudberry's, and the port's (port:name)
-# among them where it puts them -- in its order, the group each is in, and
-# the pass it runs in where its line names one ("-" for both); the groups,
-# in the order they first appear.
-run_tests=(); run_group=(); run_pass=()
+# among them where it puts them, but for one whose extension is not
+# installed -- in its order, the group each is in, and the pass it runs in
+# where its line names one ("-" for both); the groups, in the order they
+# first appear.
+run_tests=(); run_group=(); run_pass=(); not_installed=()
 while read -r kind t g p; do
-	[ "$kind" = port ] && t="port:$t"
+	if [ "$kind" = port ]; then
+		ext=$(port_needs "$t")
+		if [ -n "$ext" ] &&
+		   [ ! -f "$("$BINDIR/pg_config" --sharedir)/extension/$ext.control" ]; then
+			not_installed+=("$t")
+			continue
+		fi
+		t="port:$t"
+	fi
 	run_tests+=("$t"); run_group+=("$g"); run_pass+=("$p")
 done < <(awk '$1 == "group" { g = $2 }
 			  $1 == "run" || $1 == "port" {
@@ -208,6 +226,9 @@ printf '  of the %d tests of the schedule the manifest lists: %d run here, %d of
 	"$(of_schedule | awk '$1 == "run"' | wc -l)" \
 	"$(of_schedule | awk '$1 == "run" && NF > 2' | wc -l)" "${#groups[@]}" \
 	"$(of_schedule | awk '$1 == "skip"' | wc -l)"
+for t in "${not_installed[@]}"; do
+	echo "  $t, the port's test of $(port_needs "$t"), is not run: $(port_needs "$t") is not installed"
+done
 echo
 
 # A group's cluster, as run.sh of the cluster suite makes one.

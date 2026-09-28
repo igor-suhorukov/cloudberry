@@ -22,13 +22,13 @@
 
 #
 # The port's modules, built against the patched PostgreSQL 19, and stock
-# PostGIS beside them.
+# PostGIS and pgvector beside them.
 #
 # This tree arrives as a read-only build context named "cbsrc", and the build
 # takes the branch out of it with "git archive", so the build never sees an
 # unclean working tree.  Set CB_REF to build something other than the port
-# branch.  PostGIS is cloned from upstream at a tag, and the commit the tag
-# points at is checked; see POSTGIS_TAG.
+# branch.  PostGIS and pgvector are cloned from upstream at a tag, and the
+# commit the tag points at is checked; see POSTGIS_TAG and PGVECTOR_TAG.
 
 ARG PG_IMAGE=cloudberry/pg19-patched:latest
 ARG CB_REF=extension_postgresql_19
@@ -37,6 +37,10 @@ ARG CB_REF=extension_postgresql_19
 # cloudberry.md cites and not from whatever the tag has been moved to since.
 ARG POSTGIS_TAG=3.7.0rc2
 ARG POSTGIS_COMMIT=e2ea03ad0bfcf4b15ccb748113be3c5741809a08
+# pgvector 0.8.6 is its newest release, and the first with every change it
+# made for PostgreSQL 19 (0.8.1 was 18's); checked as PostGIS's is.
+ARG PGVECTOR_TAG=v0.8.6
+ARG PGVECTOR_COMMIT=8ee86c96f0fd72390f890aa8a336fda6d3ab4c6c
 
 ###############################################################################
 FROM ${PG_IMAGE} AS pg
@@ -90,6 +94,33 @@ RUN make -C topology/test check-regress-deps > /dev/null \
         | make -s -f GNUmakefile -f - print-regress RUNTESTFLAGS=--extension \
         > regress/port-regress.txt \
  && test "$(wc -l < regress/port-regress.txt)" = 3
+
+###############################################################################
+FROM debian:trixie-slim AS pgvector
+###############################################################################
+# Stock pgvector, built as the PostGIS stage builds PostGIS: PGXS against the
+# patched server, no patch to pgvector.  OPTFLAGS empty, as pgvector's README
+# says for a build to run on other machines than the one that made it: the
+# default, -march=native, is the build machine's instructions.
+ARG PGVECTOR_TAG
+ARG PGVECTOR_COMMIT
+USER root
+
+RUN apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+        build-essential git ca-certificates \
+    && rm -rf /var/lib/apt/lists/*
+
+COPY --from=pg /usr/local/pgsql /usr/local/pgsql
+ENV PATH=/usr/local/pgsql/bin:$PATH
+
+RUN git clone --quiet --depth 1 --branch "$PGVECTOR_TAG" \
+        https://github.com/pgvector/pgvector.git /pgvector \
+ && test "$(git -C /pgvector rev-parse HEAD)" = "$PGVECTOR_COMMIT" \
+ && echo "$PGVECTOR_COMMIT" > /pgvector/.pgvector_commit
+
+WORKDIR /pgvector
+RUN make -j"$(nproc)" OPTFLAGS="" > make.log \
+ && make install OPTFLAGS="" DESTDIR=/pgvector-root > install.log
 
 ###############################################################################
 FROM debian:trixie-slim AS build
@@ -246,10 +277,13 @@ RUN python3 -m venv /opt/duckdb \
 # the prefix ends in "pgsql" or "postgres", $prefix/share/postgresql when it
 # does not -- so naming the subdirectories here would tie this file to one
 # prefix.  The build stage installed the modules into the same tree, and
-# PostGIS was installed under the same prefix, beneath a DESTDIR.
+# PostGIS and pgvector were installed under the same prefix, beneath a
+# DESTDIR.
 COPY --from=build /usr/local/pgsql /usr/local/pgsql
 COPY --from=postgis /postgis-root/usr/local/pgsql /usr/local/pgsql
 COPY --from=postgis /postgis/.postgis_commit /usr/local/pgsql/.postgis_commit
+COPY --from=pgvector /pgvector-root/usr/local/pgsql /usr/local/pgsql
+COPY --from=pgvector /pgvector/.pgvector_commit /usr/local/pgsql/.pgvector_commit
 # The test harness is run from the image, so it comes along -- and so do the
 # test suites of Cloudberry's that the port's suites run, with the Perl that
 # compares their output, and PostgreSQL's own regression suite.
@@ -307,7 +341,11 @@ COPY --from=build /cb/gpcontrib/gp_stats_collector/sql /cb/gpcontrib/gp_stats_co
 COPY --from=build /cb/gpcontrib/gp_stats_collector/expected /cb/gpcontrib/gp_stats_collector/expected
 COPY --from=build /pgregress /cb/pgregress
 COPY --from=postgis /postgis /postgis
-RUN chown -R postgres:postgres /cb /postgis
+# pgvector's own regression tests, which the singlenode suite runs
+COPY --from=pgvector /pgvector/test/sql /pgvector/test/sql
+COPY --from=pgvector /pgvector/test/expected /pgvector/test/expected
+COPY --from=pgvector /pgvector/.pgvector_commit /pgvector/
+RUN chown -R postgres:postgres /cb /postgis /pgvector
 USER postgres
 WORKDIR /cb
 CMD ["postgres"]
