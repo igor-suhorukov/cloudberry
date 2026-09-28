@@ -1558,8 +1558,9 @@ index_build_tables(Node *parsetree)
 				{
 					Oid			index = RangeVarGetRelid(stmt->relation, NoLock, true);
 
-					if (!OidIsValid(index) || get_rel_relkind(index) != RELKIND_INDEX &&
-						get_rel_relkind(index) != RELKIND_PARTITIONED_INDEX)
+					if (!OidIsValid(index) ||
+						(get_rel_relkind(index) != RELKIND_INDEX &&
+						 get_rel_relkind(index) != RELKIND_PARTITIONED_INDEX))
 						return NIL;
 					relid = IndexGetRelation(index, true);
 					return OidIsValid(relid)
