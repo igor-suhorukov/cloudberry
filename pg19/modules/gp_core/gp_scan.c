@@ -122,6 +122,7 @@
 #include "utils/syscache.h"
 #include "utils/tuplestore.h"
 
+#include "cb_explain.h"
 #include "gp_cluster.h"
 #include "gp_core_api.h"
 #include "gp_dispatch.h"
@@ -3216,10 +3217,21 @@ GpScanBoundGathers(PlannedStmt *stmt)
 		bound_gathers(sub, -1);
 }
 
+/*
+ * What EXPLAIN calls the node (cb_explain.h).  Cloudberry prints its Gather
+ * Motion over the scan as two lines, "Gather Motion 2:1  (slice1; segments:
+ * 2)" and the scan beneath; the port's node is both, so it is one line that
+ * says both -- the motion, the table it reads, and how many segments.
+ */
 static void
 gather_explain(CustomScanState *node, List *ancestors, ExplainState *es)
 {
 	GatherScanState *state = (GatherScanState *) node;
+	int			nsegs = gather_is_current_of(state) ? 1
+		: state->ncontents > 0 ? state->ncontents : state->nsegments;
+
+	CbExplainRelabel(node, es, psprintf("Gather Motion %d:1", nsegs),
+					 psprintf("  (slice%d; segments: %d)", state->slice, nsegs));
 
 	if (gather_is_current_of(state))
 		ExplainPropertyInteger("Segments", NULL, 1, es);
@@ -3255,35 +3267,6 @@ gather_explain(CustomScanState *node, List *ancestors, ExplainState *es)
 		appendStringInfoString(&sql, state->locking);
 		ExplainPropertyText("Remote SQL", sql.data, es);
 	}
-}
-
-/*
- * What EXPLAIN calls the node, through O4.  Cloudberry prints its Gather
- * Motion over the scan as two lines, "Gather Motion 2:1  (slice1; segments:
- * 2)" and the scan beneath; the port's node is both, so it is one line that
- * says both -- the motion, the table it reads, and how many segments.
- */
-static explain_node_label_hook_type prev_explain_node_label = NULL;
-
-static void
-gp_scan_explain_label(PlanState *planstate, ExplainState *es,
-					  const char **pname, const char **suffix)
-{
-	CustomScanState *node = (CustomScanState *) planstate;
-
-	if (IsA(planstate, CustomScanState) && node->methods == &gather_exec_methods)
-	{
-		GatherScanState *state = (GatherScanState *) node;
-		int			nsegs = gather_is_current_of(state) ? 1
-			: state->ncontents > 0 ? state->ncontents : state->nsegments;
-
-		*pname = psprintf("Gather Motion %d:1", nsegs);
-		*suffix = psprintf("  (slice%d; segments: %d)", state->slice, nsegs);
-		return;
-	}
-
-	if (prev_explain_node_label)
-		prev_explain_node_label(planstate, es, pname, suffix);
 }
 
 /*
@@ -3331,9 +3314,6 @@ GpScanInit(void)
 		return;
 
 	RegisterCustomScanMethods(&gather_scan_methods);
-
-	prev_explain_node_label = explain_node_label_hook;
-	explain_node_label_hook = gp_scan_explain_label;
 
 	prev_set_rel_pathlist = set_rel_pathlist_hook;
 	set_rel_pathlist_hook = gp_set_rel_pathlist;

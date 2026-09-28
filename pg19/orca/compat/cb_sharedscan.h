@@ -79,7 +79,7 @@ extern bool gp_orca_is_shared_scan(Plan *plan, int *share_id, int *slice,
 /* The nodes, for a fragment's plan; from gp_orca's _PG_init. */
 extern void gp_orca_register_shared_scans(void);
 
-/* Their names in EXPLAIN, Cloudberry's; see gp_orca_explain_node_label. */
+/* Their names in EXPLAIN, Cloudberry's (cb_explain.h). */
 extern bool gp_orca_label_shared_scans(PlanState *planstate,
 									   struct ExplainState *es,
 									   const char **pname,

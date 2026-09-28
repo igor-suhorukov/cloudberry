@@ -142,6 +142,7 @@
 #include "utils/tuplesort.h"
 #include "utils/tuplestore.h"
 
+#include "cb_explain.h"
 #include "gp_cluster.h"
 #include "gp_core_api.h"
 #include "gp_dispatch.h"
@@ -367,7 +368,6 @@ static const CustomExecMethods motion_exec_methods = {
 static const CustomExecMethods hash_filter_exec_methods;
 
 static planner_hook_type prev_planner = NULL;
-static explain_node_label_hook_type prev_explain_node_label = NULL;
 static ExecutorRun_hook_type prev_executor_run = NULL;
 static ExecutorStart_hook_type prev_executor_start = NULL;
 static ExecutorEnd_hook_type prev_executor_end = NULL;
@@ -3783,6 +3783,39 @@ motion_type_name(int type)
 	}
 }
 
+/*
+ * What EXPLAIN calls a Motion (cb_explain.h): "Gather Motion 2:1  (slice1;
+ * segments: 2)", as Cloudberry does -- how many segments send, to the one
+ * that receives, which slice they are, and how many run it.
+ */
+static void
+motion_relabel(MotionState *state, ExplainState *es)
+{
+	int			nsegs = motion_segments(state);
+	int			receivers = state->type == GP_MOTION_GATHER ? 1
+		: GpClusterSegmentCount();
+	const char *name = motion_type_name(state->type);
+	char	   *suffix = psprintf("  (slice%d; segments: %d)", state->slice, nsegs);
+
+	/*
+	 * The segments write, and send nothing up but their counts -- or, with
+	 * RETURNING, the rows it gives, as the Gather Motion over the ModifyTable
+	 * of Cloudberry's plan sends them.
+	 */
+	if (state->type == GP_MOTION_DML && state->css.ss.ps.plan->targetlist == NIL)
+	{
+		CbExplainRelabel(&state->css, es, "Dispatch", suffix);
+		return;
+	}
+	if (state->type == GP_MOTION_DML)
+	{
+		name = "Gather";
+		receivers = 1;
+	}
+	CbExplainRelabel(&state->css, es,
+					 psprintf("%s Motion %d:%d", name, nsegs, receivers), suffix);
+}
+
 static void
 motion_explain(CustomScanState *node, List *ancestors, ExplainState *es)
 {
@@ -3791,6 +3824,8 @@ motion_explain(CustomScanState *node, List *ancestors, ExplainState *es)
 	List	   *result = NIL;
 	bool		useprefix;
 	TupleDesc	tupdesc = node->ss.ss_ScanTupleSlot->tts_tupleDescriptor;
+
+	motion_relabel(state, es);
 
 	/* In text the node's name says what it is; other formats need saying. */
 	if (es->format != EXPLAIN_FORMAT_TEXT)
@@ -3832,61 +3867,6 @@ motion_explain(CustomScanState *node, List *ancestors, ExplainState *es)
 											useprefix, true));
 	}
 	ExplainPropertyList("Merge Key", result, es);
-}
-
-/*
- * What EXPLAIN calls it, through O4: "Gather Motion 2:1  (slice1; segments:
- * 2)", as Cloudberry does -- how many segments send, to the one that
- * receives, which slice they are, and how many run it.
- */
-static void
-motion_explain_label(PlanState *planstate, ExplainState *es,
-					 const char **pname, const char **suffix)
-{
-	if (GpSplitExplainLabel(planstate, es, pname, suffix))
-		return;
-
-	if (IsA(planstate, CustomScanState) &&
-		((CustomScanState *) planstate)->methods == &motion_exec_methods)
-	{
-		MotionState *state = (MotionState *) planstate;
-		int			nsegs = motion_segments(state);
-		int			receivers = state->type == GP_MOTION_GATHER ? 1
-			: GpClusterSegmentCount();
-		const char *name = motion_type_name(state->type);
-
-		/*
-		 * The segments write, and send nothing up but their counts -- or,
-		 * with RETURNING, the rows it gives, as the Gather Motion over the
-		 * ModifyTable of Cloudberry's plan sends them.
-		 */
-		if (state->type == GP_MOTION_DML &&
-			planstate->plan->targetlist == NIL)
-		{
-			*pname = "Dispatch";
-			*suffix = psprintf("  (slice%d; segments: %d)", state->slice, nsegs);
-			return;
-		}
-		if (state->type == GP_MOTION_DML)
-		{
-			name = "Gather";
-			receivers = 1;
-		}
-		*pname = psprintf("%s Motion %d:%d", name, nsegs, receivers);
-		*suffix = psprintf("  (slice%d; segments: %d)", state->slice, nsegs);
-		return;
-	}
-
-	/* Cloudberry's Result with hash filters, which this is */
-	if (IsA(planstate, CustomScanState) &&
-		((CustomScanState *) planstate)->methods == &hash_filter_exec_methods)
-	{
-		*pname = "Result";
-		return;
-	}
-
-	if (prev_explain_node_label)
-		prev_explain_node_label(planstate, es, pname, suffix);
 }
 
 /* ------------------------------------------------------------------------- */
@@ -4082,6 +4062,9 @@ hash_filter_explain(CustomScanState *node, List *ancestors, ExplainState *es)
 	HashFilterState *state = (HashFilterState *) node;
 	List	   *context;
 	List	   *result = NIL;
+
+	/* Cloudberry's Result with hash filters, which this is (cb_explain.h) */
+	CbExplainRelabel(node, es, "Result", NULL);
 
 	if (state->nkeys == 0)
 	{
@@ -5213,9 +5196,6 @@ GpMotionInit(void)
 	RegisterCustomScanMethods(&motion_scan_methods);
 	RegisterCustomScanMethods(&hash_filter_scan_methods);
 	GpSplitInit();
-
-	prev_explain_node_label = explain_node_label_hook;
-	explain_node_label_hook = motion_explain_label;
 
 	prev_planner = planner_hook;
 	planner_hook = motion_planner;

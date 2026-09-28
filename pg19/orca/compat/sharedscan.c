@@ -91,6 +91,7 @@
 #include "utils/wait_event.h"
 
 #include "cb_compat.h"
+#include "cb_explain.h"
 #include "cb_sharedscan.h"
 
 /* custom_private of a Shared Scan */
@@ -404,6 +405,7 @@ explain_sequence(CustomScanState *node, List *ancestors, ExplainState *es)
 	SequenceState *state = (SequenceState *) node;
 	PlanState  *outer = outerPlanState(node);
 
+	CbExplainRelabelBy(node, es, gp_orca_label_shared_scans);
 	if (state->explained || outer == NULL || node->custom_ps == NIL)
 		return;
 	outerPlanState(node) = (PlanState *) linitial(node->custom_ps);
@@ -654,6 +656,7 @@ explain_shared_scan(CustomScanState *node, List *ancestors, ExplainState *es)
 {
 	CustomScan *cscan = (CustomScan *) node->ss.ps.plan;
 
+	CbExplainRelabelBy(node, es, gp_orca_label_shared_scans);
 	if (es->format == EXPLAIN_FORMAT_TEXT)
 		return;
 	ExplainPropertyInteger("Share ID", NULL,

@@ -77,8 +77,8 @@ extern const CustomScanMethods gp_orca_partition_selector_methods;
 extern void gp_orca_register_dynamic_scans(void);
 
 /*
- * EXPLAIN's name for either node, through explain_node_label_hook (O4): the
- * name Cloudberry's EXPLAIN gives its own -- "Dynamic Seq Scan on t", "Dynamic
+ * EXPLAIN's name for either node (cb_explain.h): the name Cloudberry's
+ * EXPLAIN gives its own -- "Dynamic Seq Scan on t", "Dynamic
  * Index Scan on i on t", "Partition Selector (selector id: $0)" -- where
  * PostgreSQL would print "Custom Scan (Dynamic Scan)".  False, touching
  * nothing, for a node that is neither.

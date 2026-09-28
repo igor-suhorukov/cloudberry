@@ -47,6 +47,7 @@
 #include "utils/ruleutils.h"
 
 #include "cb_assertop.h"
+#include "cb_explain.h"
 
 typedef struct AssertOpState
 {
@@ -202,6 +203,7 @@ explain_assert(CustomScanState *node, List *ancestors, ExplainState *es)
 	bool		useprefix;
 	char	   *tests;
 
+	CbExplainRelabelBy(node, es, gp_orca_label_assert);
 	if (cscan->custom_exprs == NIL)
 		return;
 

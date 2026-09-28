@@ -24,8 +24,9 @@
  * Motion nodes are CustomScans.  Before it is called, a rewrite adds explicit
  * bounding-box conditions for PostGIS's indexable functions, so those queries
  * stay on ORCA instead of the gather-everything fallback, and a counter
- * records every plan that falls back and why (decision 1).  O4 makes the
- * Motion lines read as they do on Cloudberry.
+ * records every plan that falls back and why (decision 1).  Each node's
+ * ExplainCustomScan makes the Motion lines read as they do on Cloudberry
+ * (cb_explain.h).
  *
  * Where the code comes from, and why it is split the way it is:
  *

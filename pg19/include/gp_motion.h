@@ -154,9 +154,6 @@ extern Plan *GpSplitModifyMake(Plan *child, Index rti, int natts,
 extern void GpSplitModifySetTableOid(Plan *plan, AttrNumber tableoidcol);
 extern bool GpSplitModifyIs(Plan *plan, Index *rti);
 extern void GpMotionRefuseRecheck(void);
-struct ExplainState;
-extern bool GpSplitExplainLabel(PlanState *planstate, struct ExplainState *es,
-								const char **pname, const char **suffix);
 extern void GpSplitInit(void);
 
 /* Its kind, and the slice that sends. */

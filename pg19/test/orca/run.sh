@@ -3864,14 +3864,15 @@ if [ "$(q "SELECT count(*) FROM pg_available_extensions WHERE name = 'file_fdw'"
 fi
 
 echo
-echo "25. what EXPLAIN calls the nodes of ORCA's plans, through O4"
+echo "25. what EXPLAIN calls the nodes of ORCA's plans"
 
 # Assert, the dynamic scans and the Partition Selector are CustomScans here,
 # because PostgreSQL 19 has no such nodes and a module cannot add one, and
 # EXPLAIN prints a CustomScan as "Custom Scan (name)" unless the module that
-# owns it names it.  O4, explain_node_label_hook, lets it; gp_orca names them
-# as Cloudberry's EXPLAIN does, so that its users read the plan they know and
-# its expected test output can carry over.  Each check reads one whole line.
+# owns it names it, as each node's ExplainCustomScan does (cb_explain.h);
+# gp_orca names them as Cloudberry's EXPLAIN does, so that its users read the
+# plan they know and its expected test output can carry over.  Each check
+# reads one whole line.
 
 # explains <name> <query> <line> [setup] [options]: ORCA planned it, and a
 # line of its EXPLAIN reads exactly that, the indentation and arrow aside.
@@ -3915,8 +3916,9 @@ explains "an Assert is an Assert" \
 
 # The table counts as used, as an Append's does, so a condition over its
 # columns names it -- Cloudberry prints "Hash Cond: (pt.ptid = t.tid)" -- and
-# its partitions' scans take the names after it.  Before O4 was used the
-# table had no name in the plan at all, and this line read "(a = t3k.a)".
+# its partitions' scans take the names after it.  Before the nodes were
+# named, the table had no name in the plan at all, and this line read
+# "(a = t3k.a)".
 explains "a condition over the table's columns names the table" \
          "SELECT count(*) FROM t3p JOIN t3k ON t3p.a = t3k.a" "Hash Cond: (t3p.a = t3k.a)"
 
@@ -3972,29 +3974,6 @@ is "an index scan's index is named, as ExplainIndexScanDetails names one" \
       FROM jsonb_path_query(t25_json('SELECT count(*) FROM t3p WHERE c = 3 AND a < 150'),
                             'strict \$.** ? (@.\"Custom Plan Provider\" == \"Dynamic Scan\")') n" \
    "t3p_c_idx"
-
-# A CustomScan that is not ORCA's is its own module's to name.  gp_probe,
-# the hook tests' module, puts one over every plan when armed and names it
-# the way Cloudberry names a Motion; loaded before gp_orca, its label hook is
-# the one gp_orca's has to pass that node on to.  So the server comes back
-# with both, and each module's nodes are called what that module calls them.
-{
-	echo "shared_preload_libraries = 'gp_probe,gp_core,gp_orca,gp_matview'"
-} >> "$WORK/data/postgresql.conf"
-if "$BINDIR/pg_ctl" -D "$WORK/data" -l "$WORK/log" -w -t 60 restart > /dev/null 2>&1; then
-	q "CREATE EXTENSION gp_probe;" > /dev/null
-
-	got=$(q2 "SET gp.optimizer = off; SELECT gp_probe.arm_explain(true)" "EXPLAIN (COSTS OFF) SELECT 1")
-	case "$got" in
-		*"Probe Motion 3:1  (slice1; segments: 3)"*) ok "another module's CustomScan is left to it to name" ;;
-		*) notok "another module's CustomScan is left to it to name" "$(printf '%s' "$got" | tr '\n' '|')" ;;
-	esac
-
-	explains "and ORCA's are still ORCA's to name beside it" \
-	         "SELECT count(*), sum(a) FROM t3p" "Dynamic Seq Scan on t3p"
-else
-	notok "the server comes back with gp_probe loaded beside gp_orca" "$(tail -5 "$WORK/log" | tr '\n' '|')"
-fi
 
 echo
 echo "26. median(), which ORCA plans as it plans any aggregate"

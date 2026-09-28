@@ -85,6 +85,7 @@
 #include "utils/snapmgr.h"
 #include "utils/tuplestore.h"
 
+#include "cb_explain.h"
 #include "gp_cluster.h"
 #include "gp_dtx.h"
 #include "gp_motion.h"
@@ -120,6 +121,8 @@ static void split_begin(CustomScanState *node, EState *estate, int eflags);
 static TupleTableSlot *split_exec(CustomScanState *node);
 static void split_end(CustomScanState *node);
 static void split_rescan(CustomScanState *node);
+static void split_explain(CustomScanState *node, List *ancestors,
+						  ExplainState *es);
 
 static const CustomScanMethods split_scan_methods = {
 	.CustomName = "GpSplitUpdate",
@@ -132,6 +135,7 @@ static const CustomExecMethods split_exec_methods = {
 	.ExecCustomScan = split_exec,
 	.EndCustomScan = split_end,
 	.ReScanCustomScan = split_rescan,
+	.ExplainCustomScan = split_explain,
 };
 
 /* Its expressions read the child's row as the scan tuple, as a scan's do. */
@@ -355,6 +359,8 @@ static void split_modify_begin(CustomScanState *node, EState *estate, int eflags
 static TupleTableSlot *split_modify_exec(CustomScanState *node);
 static void split_modify_end(CustomScanState *node);
 static void split_modify_rescan(CustomScanState *node);
+static void split_modify_explain(CustomScanState *node, List *ancestors,
+								 ExplainState *es);
 
 static const CustomScanMethods split_modify_scan_methods = {
 	.CustomName = "GpSplitModify",
@@ -367,6 +373,7 @@ static const CustomExecMethods split_modify_exec_methods = {
 	.ExecCustomScan = split_modify_exec,
 	.EndCustomScan = split_modify_end,
 	.ReScanCustomScan = split_modify_rescan,
+	.ExplainCustomScan = split_modify_explain,
 };
 
 Plan *
@@ -702,32 +709,23 @@ split_modify_rescan(CustomScanState *node)
 }
 
 /*
- * EXPLAIN's names for them, through O4: Cloudberry's "Split Update", and
+ * EXPLAIN's names for them (cb_explain.h): Cloudberry's "Split Update", and
  * "Update on t" for what applies it, as ModifyTable is printed.
  */
-bool
-GpSplitExplainLabel(PlanState *planstate, ExplainState *es,
-					const char **pname, const char **suffix)
+static void
+split_explain(CustomScanState *node, List *ancestors, ExplainState *es)
 {
-	CustomScanState *css = (CustomScanState *) planstate;
+	CbExplainRelabel(node, es, "Split Update", NULL);
+}
 
-	if (!IsA(planstate, CustomScanState))
-		return false;
-	if (css->methods == &split_exec_methods)
-	{
-		*pname = "Split Update";
-		return true;
-	}
-	if (css->methods == &split_modify_exec_methods)
-	{
-		SplitModifyState *state = (SplitModifyState *) css;
-		RangeTblEntry *rte = rt_fetch(state->rti, es->rtable);
+static void
+split_modify_explain(CustomScanState *node, List *ancestors, ExplainState *es)
+{
+	SplitModifyState *state = (SplitModifyState *) node;
+	RangeTblEntry *rte = rt_fetch(state->rti, es->rtable);
 
-		*pname = "Update";
-		*suffix = psprintf(" on %s", quote_identifier(get_rel_name(rte->relid)));
-		return true;
-	}
-	return false;
+	CbExplainRelabel(node, es, "Update",
+					 psprintf(" on %s", quote_identifier(get_rel_name(rte->relid))));
 }
 
 /* ------------------------------------------------------------------------- */

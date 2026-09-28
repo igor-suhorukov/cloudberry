@@ -78,6 +78,7 @@
 #include "utils/syscache.h"
 
 #include "cb_dynamicscan.h"
+#include "cb_explain.h"
 
 /* ------------------------------------------------------------------------- */
 /* The scan of one partition                                                 */
@@ -924,7 +925,8 @@ explain_dynamic_scan(CustomScanState *node, List *ancestors, ExplainState *es)
 	RangeTblEntry *rte = rt_fetch(dynamic_scan_table(cscan), es->rtable);
 	List	   *paramids = (List *) lsecond(cscan->custom_private);
 
-	/* in text, the node's name says this, through gp_orca_label_dynamic_scans */
+	/* in text, the node's name says this, gp_orca_label_dynamic_scans()'s */
+	CbExplainRelabelBy(node, es, gp_orca_label_dynamic_scans);
 	if (es->format != EXPLAIN_FORMAT_TEXT)
 		explain_dynamic_scan_target(cscan, es, NULL);
 
@@ -1145,10 +1147,10 @@ explain_partition_selector(CustomScanState *node, List *ancestors,
 	CustomScan *cscan = (CustomScan *) node->ss.ps.plan;
 
 	/*
-	 * In text, the node's name says this, through
-	 * gp_orca_label_dynamic_scans; otherwise it is the property Cloudberry
-	 * writes.
+	 * In text, the node's name says this, gp_orca_label_dynamic_scans()'s;
+	 * otherwise it is the property Cloudberry writes.
 	 */
+	CbExplainRelabelBy(node, es, gp_orca_label_dynamic_scans);
 	if (es->format != EXPLAIN_FORMAT_TEXT)
 		ExplainPropertyInteger("Selector ID", NULL,
 							   intVal(linitial(cscan->custom_private)), es);

@@ -97,6 +97,7 @@
 #include "utils/lsyscache.h"
 #include "utils/memutils.h"
 
+#include "cb_explain.h"
 #include "gp_rtfilter.h"
 #include "gp_scan.h"
 
@@ -117,7 +118,6 @@ static bool gp_enable_runtime_filter_pushdown = false;
 static planner_shutdown_hook_type prev_planner_shutdown = NULL;
 static ExecutorStart_hook_type prev_executor_start = NULL;
 static explain_per_node_hook_type prev_explain_per_node = NULL;
-static explain_node_label_hook_type prev_explain_node_label = NULL;
 
 /* ------------------------------------------------------------------------- */
 /* The Bloom filter                                                          */
@@ -678,12 +678,16 @@ rtf_rescan(CustomScanState *node)
 		ExecReScan(outerPlanState(node));
 }
 
-/* Cloudberry's show_runtime_filter_info(): the filter's size, as it ran. */
+/*
+ * The node's name in EXPLAIN, Cloudberry's (cb_explain.h); and Cloudberry's
+ * show_runtime_filter_info(): the filter's size, as it ran.
+ */
 static void
 rtf_explain(CustomScanState *node, List *ancestors, ExplainState *es)
 {
 	RtfState   *state = (RtfState *) node;
 
+	CbExplainRelabel(node, es, "RuntimeFilter", NULL);
 	if (es->analyze && state->build != NULL && state->build->hashes != NULL)
 		ExplainPropertyUInteger("Bloom Bits", NULL,
 								state->build->hashes->nbits, es);
@@ -1285,20 +1289,6 @@ rtf_explain_per_node(PlanState *planstate, List *ancestors,
 							 planstate->instrument->nfiltered2, 0, es);
 }
 
-/* The node's name in EXPLAIN, Cloudberry's, through O4. */
-static void
-rtf_explain_label(PlanState *planstate, ExplainState *es, const char **pname,
-				  const char **suffix)
-{
-	if (rtf_is_node(planstate))
-	{
-		*pname = "RuntimeFilter";
-		return;
-	}
-	if (prev_explain_node_label)
-		prev_explain_node_label(planstate, es, pname, suffix);
-}
-
 /* ------------------------------------------------------------------------- */
 /* Start-up                                                                  */
 /* ------------------------------------------------------------------------- */
@@ -1332,6 +1322,4 @@ GpRtFilterInit(void)
 	ExecutorStart_hook = rtf_executor_start;
 	prev_explain_per_node = explain_per_node_hook;
 	explain_per_node_hook = rtf_explain_per_node;
-	prev_explain_node_label = explain_node_label_hook;
-	explain_node_label_hook = rtf_explain_label;
 }
