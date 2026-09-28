@@ -6574,8 +6574,6 @@ CTranslatorDXLToPlStmt::TranslateDXLDml(
 	List *part_rtis = NIL;
 	List *part_oids = NIL;
 	AttrNumber tableoid_col = InvalidAttrNumber;
-	BOOL old_row_from_plan =
-		gpdb::RelOldRowFromPlan(CMDIdGPDB::CastMdid(mdid_target_table)->Oid());
 	if (partitioned && split)
 	{
 		// A split's INSERT may go to any partition, and its DELETE to any
@@ -6636,11 +6634,6 @@ CTranslatorDXLToPlStmt::TranslateDXLDml(
 		ForBoth(lc_rti, part_rtis, lc_oid, part_oids)
 		{
 			OID part_oid = lfirst_oid(lc_oid);
-			if ((CMD_UPDATE == m_cmd_type || NIL != returning) &&
-				gpdb::RelOldRowFromPlan(part_oid))
-			{
-				old_row_from_plan = true;
-			}
 			RangeTblEntry *part_rte = m_dxl_to_plstmt_context->GetRTEByIndex(
 				(Index) lfirst_int(lc_rti));
 			part_rte->rellockmode = root_rte->rellockmode;
@@ -6691,31 +6684,6 @@ CTranslatorDXLToPlStmt::TranslateDXLDml(
 		((TargetEntry *) gpdb::ListNth(result_plan->targetlist,
 									   tableoid_col - 1))
 			->resname = PStrDup("tableoid");
-	}
-
-	// A table whose method takes a changed row's old version from the plan
-	// (O20), an append-optimized or a PAX table, finds it in a whole-row
-	// column beside the ctid, which ORCA's plan does not have: its core
-	// keeps the new values alone.  The scan that read the ctid gives it,
-	// passed up through the plan as the ctid is (compat/wholerow.c) -- for
-	// an update in place, which builds its new row over the old one, and for
-	// DELETE ... RETURNING; a partitioned table's, from each partition's
-	// scan, where one of its partitions is such a table.  A split update's
-	// DELETE takes no old row.
-	if (!split && old_row_from_plan &&
-		(CMD_UPDATE == m_cmd_type ||
-		 (CMD_DELETE == m_cmd_type && NIL != returning)))
-	{
-		AttrNumber wholerow = gpdb::CarryWholeRow(
-			result_plan, ctid_col,
-			m_dxl_to_plstmt_context->GetRTableEntriesList());
-		if (InvalidAttrNumber == wholerow)
-		{
-			GP_UNPORTED(
-				"the old row of a table whose rows are not fetched by ctid, which the plan does not carry");
-		}
-		((TargetEntry *) gpdb::ListNth(result_plan->targetlist, wholerow - 1))
-			->resname = PStrDup("wholerow");
 	}
 	SetParamIds(result_plan);
 

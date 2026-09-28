@@ -1201,13 +1201,13 @@ CTranslatorQueryToDXL::CheckDMLReadsOnlyTarget() const
 	// planner makes one (preprocess_rowmarks()): ROW_MARK_REFERENCE, which
 	// fetches the row the changed one was joined to again by its ctid, and
 	// DXL to PlannedStmt carries the ctid up to ModifyTable
-	// (AddOtherRowMarks).  So a plain table, whose method fetches a row by
-	// its ctid, read in the FROM or USING clause, or in an EXISTS or IN
-	// (...) the WHERE clause ANDs in, which ORCA makes a semi-join -- whose
-	// inner side's row a semi-join returns, the first it matched, as the
-	// planner's semi-join returns it for its row mark; not what needs its
-	// whole row copied (ROW_MARK_COPY) -- a subquery, a function, a foreign
-	// table -- nor a sublink of another kind or elsewhere.
+	// (AddOtherRowMarks).  So a plain table, of any access method, read in
+	// the FROM or USING clause, or in an EXISTS or IN (...) the WHERE clause
+	// ANDs in, which ORCA makes a semi-join -- whose inner side's row a
+	// semi-join returns, the first it matched, as the planner's semi-join
+	// returns it for its row mark; not what needs its whole row copied
+	// (ROW_MARK_COPY) -- a subquery, a function, a foreign table -- nor a
+	// sublink of another kind or elsewhere.
 	List *sublinks = NIL;
 	if (gpdb::WriteFragmentsKeepRowMarks() && OtherRelationsMarkable() &&
 		CTranslatorUtils::DMLSemiJoinSubLinks(m_query, &sublinks))
@@ -1378,8 +1378,8 @@ CTranslatorQueryToDXL::CheckOnConflict() const
 //		A partitioned table's row is found by its partition as well, whose
 //		tableoid PostgreSQL 19's ModifyTable reads (a "tableoid" junk
 //		column, ExecLookupResultRelByOid()): DXL to PlannedStmt carries it
-//		up from the scan that read the ctid, as it carries an
-//		append-optimized row's whole row (compat/wholerow.c), and the second
+//		up from the scan that read the ctid, as merge.c carries a MERGE
+//		target's whole row on a cluster (compat/wholerow.c), and the second
 //		column is gp_segment_id, as a table's is, which an Explicit
 //		Redistribute Motion routes a row back to its segment by.  Where
 //		gp_core's extension is not, tableoid rides in the second column: a

@@ -893,18 +893,11 @@ Plan *MakeSplitModify(Plan *child, Index rti, int natts, AttrNumber actioncol,
 bool SetSplitModifyTableOid(Plan *modify, AttrNumber tableoidcol);
 bool HasAnyTriggers(Oid relid);
 
-// Does the relation's access method take a changed row's old version from
-// the plan, as a whole-row column, rather than fetch it by its ctid (O20)?
-bool RelOldRowFromPlan(Oid relid);
-
-// The whole row as the scan that read column "resno" of "plan" -- the row's
-// ctid -- read it, carried up to "plan" as a new column; "rtable" is the
-// plan's range table.  Its resno, or InvalidAttrNumber where a node between
-// cannot pass it on (O20's "wholerow"; compat/wholerow.c).
-AttrNumber CarryWholeRow(Plan *plan, AttrNumber resno, List *rtable);
-
-// And the row's tableoid, the same way: the partition a partitioned table's
-// row is in, which its UPDATE and DELETE find it by.
+// The tableoid of the row the scan that read column "resno" of "plan" -- the
+// row's ctid -- read, carried up to "plan" as a new column; "rtable" is the
+// plan's range table: the partition a partitioned table's row is in, which
+// its UPDATE and DELETE find it by.  Its resno, or InvalidAttrNumber where a
+// node between cannot pass it on (compat/wholerow.c).
 AttrNumber CarryTableOid(Plan *plan, AttrNumber resno, List *rtable);
 
 // A column of another relation, from its scan -- range table entry "rti" --

@@ -18,7 +18,7 @@
  * under the License.
  *
  * compat/cb_wholerow.h
- *	  A table's old row, carried up an UPDATE's plan to its ModifyTable.
+ *	  A table's row, carried up a DML's plan to its ModifyTable.
  *
  * See compat/wholerow.c.
  *

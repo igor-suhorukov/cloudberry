@@ -2439,8 +2439,8 @@ CTranslatorUtils::GetAssertErrorMsgs(CDXLNode *assert_constraint_list)
 //
 //	@doc:
 //		NOT IN CLOUDBERRY.  Does a FROM clause's item read only plain tables,
-//		"target" aside, in its joins too -- each a table whose method fetches
-//		a row by its ctid, as a row mark fetches it?
+//		"target" aside, in its joins too -- each a table with no inheritance
+//		children, whose row a row mark fetches again by its ctid?
 //
 //---------------------------------------------------------------------------
 BOOL
@@ -2457,8 +2457,7 @@ CTranslatorUtils::FromReadsPlainTables(Node *node, List *rtable, Index target)
 			(RangeTblEntry *) gpdb::ListNth(rtable, rti - 1);
 		return RTE_RELATION == rte->rtekind &&
 			   RELKIND_RELATION == rte->relkind &&
-			   !gpdb::HasSubclassSlow(rte->relid) &&
-			   !gpdb::RelOldRowFromPlan(rte->relid);
+			   !gpdb::HasSubclassSlow(rte->relid);
 	}
 	if (IsA(node, JoinExpr))
 	{

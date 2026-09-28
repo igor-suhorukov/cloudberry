@@ -18,20 +18,21 @@
  * under the License.
  *
  * compat/wholerow.c
- *	  A table's old row, carried up an UPDATE's plan to its ModifyTable --
+ *	  A table's row, carried up a DML's plan to its ModifyTable, whole --
  *	  and a partitioned table's row's partition, by its tableoid.
  *
- * A table whose method takes UPDATE's old row from the plan -- an
- * append-optimized one, or PAX -- cannot give the executor a row by its
- * ctid, and O20 has the planner give it a whole-row column beside the ctid,
- * named "wholerow", which ExecModifyTable() reads (nodeModifyTable.c,
- * ExecGetOldRowFromPlan()), for an UPDATE and for DELETE ... RETURNING.
- * ORCA's plan has no such column: its core keeps only the columns its DML
- * asks for, and an update in place asks for the new values, the ctid and
- * the segment, not the old values of the columns it sets.  So the translator
- * adds one after ORCA: the whole row of the scan that read the row's ctid,
- * appended to that scan's target list and passed up through each node on
- * the way, as the ctid is.
+ * ORCA's plan has only the columns its core keeps for its DML: an update in
+ * place asks for the new values, the ctid and the segment, not the old
+ * values of the columns it sets.  The target's whole row is what gp_core's
+ * explicit write reads a MERGE's actions' old row from, on a cluster, where
+ * ORCA's join comes up through a Gather to the coordinator (merge.c;
+ * gp_core's gp_modify.c).  So it is added after ORCA: the whole row of the
+ * scan that read the row's ctid, appended to that scan's target list and
+ * passed up through each node on the way, as the ctid is.  Until
+ * 2026-09-28 an UPDATE and a DELETE ... RETURNING of an append-optimized or
+ * a PAX table carried it too, as "wholerow": O20, a core patch then, had
+ * ModifyTable take such a table's old row from the plan, where it now
+ * fetches it by its ctid.
  *
  * The way up is the ctid's, followed down column by column to the scan
  * whose Var it is.  A node that projects -- a Result, a join -- gets a Var

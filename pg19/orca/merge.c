@@ -71,13 +71,11 @@
  * table, the target's row carried up as its partition's.
  *
  * Not yet, and the planner's: an inherited or foreign table or a view as
- * the target, a replicated one or a coordinator's on a cluster, and on one
- * node one whose method takes the old row from the plan (O20), a
- * partition's too; RETURNING on a cluster, whose merge_action() only a
- * MERGE's own node answers, where the explicit write writes; a subquery
- * anywhere in it; and on one
- * node a source that is not plain tables, whose rows a row mark would copy
- * whole, as a ROW() the translator does not take.
+ * the target, and a replicated one or a coordinator's on a cluster;
+ * RETURNING on a cluster, whose merge_action() only a MERGE's own node
+ * answers, where the explicit write writes; a subquery anywhere in it; and
+ * on one node a source that is not plain tables, whose rows a row mark
+ * would copy whole, as a ROW() the translator does not take.
  *
  *-------------------------------------------------------------------------
  */
@@ -85,7 +83,6 @@
 
 #include "access/sysattr.h"
 #include "access/table.h"
-#include "access/tableamext.h"
 #include "catalog/partition.h"
 #include "catalog/pg_class.h"
 #include "catalog/pg_inherits.h"
@@ -121,38 +118,25 @@ struct OrcaMerge
 	bool		partitioned;	/* the target is a partitioned table */
 };
 
-/* Is the relation a plain table -- whose method fetches a row by its ctid? */
+/*
+ * Is the relation a plain table -- no view, no foreign table, none with
+ * inheritance children -- whose row ModifyTable, and a row mark, fetch by
+ * its ctid?
+ */
 static bool
-plain_table(RangeTblEntry *rte, bool fetchable)
+plain_table(RangeTblEntry *rte)
 {
-	Relation	rel;
-	bool		from_plan;
-
-	if (rte->rtekind != RTE_RELATION || rte->relkind != RELKIND_RELATION ||
-		has_subclass(rte->relid))
-		return false;
-	if (!fetchable)
-		return true;
-	rel = table_open(rte->relid, NoLock);
-	from_plan = false;	/* O20 is gone */
-	table_close(rel, NoLock);
-	return !from_plan;
-}
-
-static bool
-fetchable_table(RangeTblEntry *rte)
-{
-	return plain_table(rte, true);
+	return rte->rtekind == RTE_RELATION && rte->relkind == RELKIND_RELATION &&
+		!has_subclass(rte->relid);
 }
 
 /*
  * Is the relation a partitioned table whose partitions are all plain
- * tables -- and, "fetchable", each one's method fetches a row by its ctid?
- * Its partitions are locked as the table is, as the planner's inheritance
- * planning locks them (expand_inherited_rtentry()).
+ * tables?  Its partitions are locked as the table is, as the planner's
+ * inheritance planning locks them (expand_inherited_rtentry()).
  */
 static bool
-partitioned_table(RangeTblEntry *rte, bool fetchable)
+partitioned_table(RangeTblEntry *rte)
 {
 	List	   *tree;
 	bool		ok = true;
@@ -163,7 +147,6 @@ partitioned_table(RangeTblEntry *rte, bool fetchable)
 	foreach_oid(relid, tree)
 	{
 		char		relkind = get_rel_relkind(relid);
-		Relation	rel;
 
 		if (relkind == RELKIND_PARTITIONED_TABLE)
 			continue;
@@ -172,13 +155,6 @@ partitioned_table(RangeTblEntry *rte, bool fetchable)
 			ok = false;
 			break;
 		}
-		if (!fetchable)
-			continue;
-		rel = table_open(relid, NoLock);
-		ok = true;	/* O20 is gone */
-		table_close(rel, NoLock);
-		if (!ok)
-			break;
 	}
 	list_free(tree);
 	return ok;
@@ -192,7 +168,7 @@ source_tables(Node *node, Query *query, List **sources)
 	{
 		Index		rti = ((RangeTblRef *) node)->rtindex;
 
-		if (!fetchable_table(rt_fetch(rti, query->rtable)))
+		if (!plain_table(rt_fetch(rti, query->rtable)))
 			return false;
 		*sources = lappend_int(*sources, rti);
 		return true;
@@ -369,9 +345,9 @@ GpOrcaPrepareMerge(Query *query, Query **select, OrcaMerge **statep,
 	}
 	target = rt_fetch(query->resultRelation, query->rtable);
 	if (query->mergeTargetRelation != query->resultRelation ||
-		!(plain_table(target, !cluster) || partitioned_table(target, !cluster)))
+		!(plain_table(target) || partitioned_table(target)))
 	{
-		*why = "a MERGE into a view, or a table that is not a plain one fetched by its ctid";
+		*why = "a MERGE into a view, or a table that is not a plain one";
 		return false;
 	}
 	if (cluster)

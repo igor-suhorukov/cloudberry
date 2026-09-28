@@ -125,7 +125,7 @@ extern "C" {
 /* An identity column's next value, as ORCA carries it; see NextValueCall. */
 #include "cb_nextvalue.h"
 
-/* A table's old row, carried up to its ModifyTable; see CarryWholeRow. */
+/* A column carried up to a ModifyTable; see CarryTableOid, CarryRteColumn. */
 #include "cb_wholerow.h"
 
 /* NOT IN's anti-join as a hashed SubPlan; see NotInSubplan. */
@@ -3004,20 +3004,6 @@ gpdb::HasAnyTriggers(Oid relid)
 }
 
 bool
-gpdb::RelOldRowFromPlan(Oid relid)
-{
-	GP_WRAP_START;
-	{
-		/* the statement's parser has the table locked */
-		/* O20 is gone: every table's old row is fetched by its ctid */
-		(void) relid;
-		return false;
-	}
-	GP_WRAP_END;
-	return false;
-}
-
-bool
 gpdb::CanShareAcrossSlices(void)
 {
 	GP_WRAP_START;
@@ -3103,17 +3089,6 @@ gpdb::NotInSubplan(List *clauses, Plan *inner, List *paramids, Expr **testexpr,
 	}
 	GP_WRAP_END;
 	return nullptr;
-}
-
-AttrNumber
-gpdb::CarryWholeRow(Plan *plan, AttrNumber resno, List *rtable)
-{
-	GP_WRAP_START;
-	{
-		return gp_orca_carry_whole_row(plan, resno, rtable);
-	}
-	GP_WRAP_END;
-	return InvalidAttrNumber;
 }
 
 AttrNumber
