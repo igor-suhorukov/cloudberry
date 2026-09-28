@@ -24,6 +24,28 @@ CREATE EXTENSION gp_inject_fault;
 GRANT EXECUTE ON FUNCTION gp_inject_fault(text, text, text, text, text, int4, int4, int4, int4, int4) TO PUBLIC;
 SELECT extname FROM pg_extension WHERE extname LIKE 'gp\_%' ORDER BY 1;
 --
+-- A database the tests make is made from template1, which is given the
+-- preloaded modules' extensions too, as gpinitsystem gives a cluster's
+-- (CREATE_GPEXTENSIONS): on one node gp_core makes none in a new database,
+-- and in one without it ANALYZE is PostgreSQL's -- incremental_analyze's
+-- database, whose partitioned tables' statistics are their leaves' merged,
+-- and tag's other_db, which reads the tags.  PostgreSQL's tests of the
+-- second pass make theirs from it too, and answer as PostgreSQL's; their own
+-- database, pg_regress's, is made from template0.
+--
+\c template1
+SET client_min_messages = warning;
+CREATE EXTENSION IF NOT EXISTS gp_core;
+CREATE EXTENSION IF NOT EXISTS gp_orca;
+CREATE EXTENSION IF NOT EXISTS gp_task;
+CREATE EXTENSION IF NOT EXISTS gp_matview;
+CREATE EXTENSION IF NOT EXISTS gp_sql;
+CREATE EXTENSION IF NOT EXISTS gp_security;
+CREATE EXTENSION IF NOT EXISTS gp_ao;
+CREATE EXTENSION IF NOT EXISTS gp_exttable;
+CREATE EXTENSION IF NOT EXISTS gp_resource;
+RESET client_min_messages;
+--
 -- Cloudberry's tag test defines its tags here and goes on in database
 -- postgres, where CREATE TAG and the rest are gp_sql's too.  The definitions
 -- are the cluster's, as Cloudberry's are, whichever database makes them.

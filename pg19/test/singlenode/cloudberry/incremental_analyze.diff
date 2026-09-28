@@ -1,0 +1,19 @@
+@@
+- public     | foo         | c       | t         |         0 |      4591 |          1 |                  |                   |                  |             |                   |                        | 
+- public     | foo_1_prt_1 | c       | f         |         0 |      4591 |         -1 |                  |                   |                  |             |                   |                        | 
+- public     | foo_1_prt_2 | c       | f         |         0 |      4591 |         -1 |                  |                   |                  |             |                   |                        | 
++ public     | foo         | c       | t         |         0 |      1587 |          0 |                  |                   |                  |             |                   |                        | 
++ public     | foo_1_prt_1 | c       | f         |         0 |      1587 |         -1 |                  |                   |                  |             |                   |                        | 
++ public     | foo_1_prt_2 | c       | f         |         0 |      1587 |         -1 |                  |                   |                  |             |                   |                        | 
+@@
+-INFO:  "foo_1_prt_1": scanned 1 of 1 pages, containing 667 live rows and 0 dead rows; 400 rows in sample, 667 estimated total rows
+-INFO:  "foo_1_prt_2": scanned 1 of 1 pages, containing 668 live rows and 0 dead rows; 400 rows in sample, 668 estimated total rows
+-INFO:  "foo_1_prt_new_part": scanned 1 of 1 pages, containing 665 live rows and 0 dead rows; 400 rows in sample, 665 estimated total rows
++INFO:  "foo_1_prt_1": scanned 4 of 4 pages, containing 667 live rows and 0 dead rows; 400 rows in sample, 667 estimated total rows
++INFO:  "foo_1_prt_2": scanned 4 of 4 pages, containing 668 live rows and 0 dead rows; 400 rows in sample, 668 estimated total rows
++INFO:  "foo_1_prt_new_part": scanned 4 of 4 pages, containing 665 live rows and 0 dead rows; 400 rows in sample, 665 estimated total rows
+@@
+- incr_analyze_test_1_prt_1 |        1 |         1
+- incr_analyze_test_1_prt_2 |        2 |      1000
++ incr_analyze_test_1_prt_1 |        5 |         1
++ incr_analyze_test_1_prt_2 |        7 |      1000
