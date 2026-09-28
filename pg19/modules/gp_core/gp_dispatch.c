@@ -352,6 +352,22 @@ static const char *const synced_settings[] = {
 	"pax.bloom_filter_work_memory_bytes",
 	"pax.log_filter_tree",
 	/*
+	 * pgvector's, which a segment's scans of its HNSW and IVFFlat indexes
+	 * read: how many candidates an HNSW scan keeps and how many lists an
+	 * IVFFlat scan probes, and whether and how far either goes on when a
+	 * filter leaves too few -- a stock extension's settings, which Cloudberry
+	 * sends a segment as it sends every SET, and its function EXECUTE ON ALL
+	 * SEGMENTS scans each segment's index with.  Passed over where pgvector's
+	 * library is not loaded, and not set.
+	 */
+	"hnsw.ef_search",
+	"hnsw.iterative_scan",
+	"hnsw.max_scan_tuples",
+	"hnsw.scan_mem_multiplier",
+	"ivfflat.probes",
+	"ivfflat.iterative_scan",
+	"ivfflat.max_probes",
+	/*
 	 * the workfile manager's limits of a statement, which a segment's
 	 * processes hold their temporary files to (gp_workfile.c)
 	 */
