@@ -45,6 +45,9 @@
  * a row whose value no inner row has cannot meet one, whatever the keys'
  * types.  PostgreSQL's Hash node reads its input itself, so the values are
  * taken by a wrapper of that input's ExecProcNode (ExecSetExecProcNode()).
+ * Where the join's outer side is a node that groups it by the join's keys,
+ * as PostgreSQL's planner makes a semi-join's inner side unique before it
+ * joins where Cloudberry's joins first, the node goes below the grouping.
  * Pushdown is set up as the executor starts, as Cloudberry's hash join sets
  * it up: the scans it reaches are sequential scans, and the planner's
  * gathers, which on the coordinator are what reads a distributed table --
@@ -64,10 +67,12 @@
  * Hash node has read all of its input for the hash table the join probes,
  * never while it is reading it; never on a NULL key, which the join passes
  * over itself; and pushed down only for an equality of two integer columns,
- * through nodes that pass each row on, or not, by itself.  A join with a
- * filter builds its hash table before it reads its outer side, as
- * Cloudberry's ORCA has every hash join do (prefetch_inner), so that the
- * filter is there for the first outer row.
+ * through nodes that pass each row on, or not, by itself, or drop a group
+ * whose key's value it has; below a node that keeps what it made for a
+ * rescan, only where the join runs once.  A join with a filter builds its
+ * hash table before it reads its outer side, as Cloudberry's ORCA has every
+ * hash join do (prefetch_inner), so that the filter is there for the first
+ * outer row.
  *
  * Cloudberry sources this file stands in for:
  *	  src/backend/executor/nodeRuntimeFilter.c; the runtime filter parts of
@@ -357,11 +362,15 @@ typedef struct RtfNode
 	RtfTarget  *target;
 } RtfNode;
 
-/* A statement's wrapped nodes. */
+/*
+ * A statement's nodes the filters work in; and those that may run again, by
+ * plan_node_id (rtf_again_walker()).
+ */
 typedef struct RtfQuery
 {
 	List	   *nodes;
 	MemoryContextCallback forget;
+	Bitmapset  *again;
 } RtfQuery;
 
 static HTAB *rtf_nodes = NULL;
@@ -870,6 +879,9 @@ typedef struct RtfState
 {
 	CustomScanState css;
 	RtfBuild   *build;			/* its join's; NULL, and every row passes */
+	ExprState  *hash;			/* below a grouping node, the join's hash
+								 * value of its keys as the node's input has
+								 * them; NULL above the join's outer side */
 } RtfState;
 
 static Node *rtf_create_state(CustomScan *cscan);
@@ -914,17 +926,46 @@ rtf_create_state(CustomScan *cscan)
 static void
 rtf_begin(CustomScanState *node, EState *estate, int eflags)
 {
+	RtfState   *state = (RtfState *) node;
 	CustomScan *cscan = (CustomScan *) node->ss.ps.plan;
+	PlanState  *input;
 
-	outerPlanState(node) = ExecInitNode(outerPlan(cscan), estate, eflags);
+	input = outerPlanState(node) = ExecInitNode(outerPlan(cscan), estate, eflags);
 
 	/*
 	 * Its rows are its input's, in the slots they come in, as Cloudberry's
 	 * RuntimeFilter's are: the join compiles its expressions for them.
 	 */
-	node->ss.ps.resultops = ExecGetResultSlotOps(outerPlanState(node),
+	node->ss.ps.resultops = ExecGetResultSlotOps(input,
 												 &node->ss.ps.resultopsfixed);
 	node->ss.ps.resultopsset = true;
+
+	/*
+	 * Below a grouping node, the hash value the join computes of its keys,
+	 * computed of the columns of the node's input that are its keys, with
+	 * the join's own functions, as ExecInitHashJoin() builds hj_OuterHash.
+	 */
+	if (cscan->custom_exprs != NIL)
+	{
+		List	   *ops = (List *) linitial(cscan->custom_private);
+		List	   *collations = (List *) lsecond(cscan->custom_private);
+		Oid		   *funcs = palloc_array(Oid, list_length(ops));
+		bool	   *strict = palloc_array(bool, list_length(ops));
+		int			i = 0;
+
+		foreach_oid(op, ops)
+		{
+			Oid			inner;
+
+			if (!get_op_hash_functions(op, &funcs[i], &inner))
+				elog(ERROR, "could not find hash function for hash operator %u", op);
+			strict[i++] = op_strict(op);
+		}
+		state->hash = ExecBuildHash32Expr(ExecGetResultType(input),
+										  ExecGetResultSlotOps(input, NULL),
+										  funcs, collations, cscan->custom_exprs,
+										  strict, &node->ss.ps, 0);
+	}
 }
 
 /*
@@ -952,8 +993,9 @@ rtf_exec(CustomScanState *node)
 
 		econtext->ecxt_outertuple = slot;
 		ResetExprContext(econtext);
-		value = ExecEvalExprSwitchContext(build->join->hj_OuterHash, econtext,
-										  &isnull);
+		value = ExecEvalExprSwitchContext(state->hash != NULL ? state->hash :
+										  build->join->hj_OuterHash,
+										  econtext, &isnull);
 		if (isnull || !bloom_lacks(build->hashes, DatumGetUInt32(value)))
 			return slot;
 		CHECK_FOR_INTERRUPTS();
@@ -1010,6 +1052,73 @@ rtf_explain(CustomScanState *node, List *ancestors, ExplainState *es)
 /* ------------------------------------------------------------------------- */
 
 /*
+ * Does the node group its input's rows by its input's column "col" -- a
+ * grouping Agg, of no grouping sets, a Group or a Unique -- so that the rows
+ * of a group share that column's value?  A row dropped below it drops a group
+ * whose value it has, and changes no other: where no inner row has the value,
+ * the join meets none of the group's rows.  Cloudberry's filters stop at
+ * such a node, where Cloudberry's planner joins before it groups; the port's,
+ * whose planner may group a semi-join's inner side first (its unique path),
+ * go below.
+ */
+static bool
+rtf_groups_by(Plan *plan, AttrNumber col)
+{
+	int			ncols;
+	AttrNumber *cols;
+
+	switch (nodeTag(plan))
+	{
+		case T_Agg:
+			if (((Agg *) plan)->aggstrategy == AGG_PLAIN ||
+				((Agg *) plan)->groupingSets != NIL)
+				return false;
+			ncols = ((Agg *) plan)->numCols;
+			cols = ((Agg *) plan)->grpColIdx;
+			break;
+		case T_Group:
+			ncols = ((Group *) plan)->numCols;
+			cols = ((Group *) plan)->grpColIdx;
+			break;
+		case T_Unique:
+			ncols = ((Unique *) plan)->numCols;
+			cols = ((Unique *) plan)->uniqColIdx;
+			break;
+		default:
+			return false;
+	}
+	for (int i = 0; i < ncols; i++)
+	{
+		if (cols[i] == col)
+			return true;
+	}
+	return false;
+}
+
+/*
+ * Does the node give, at a rescan with no changed parameter, what it made of
+ * its input before, without reading it again (ExecReScanAgg() of a hashed
+ * Agg, ExecReScanSort(), ExecReScanMaterial())?  Rows the filters dropped
+ * below it under one hash table would stay dropped under the next one's: so
+ * the filters go below such a node only where the join runs once.
+ */
+static bool
+rtf_keeps_rows(Plan *plan)
+{
+	switch (nodeTag(plan))
+	{
+		case T_Agg:
+			return ((Agg *) plan)->aggstrategy == AGG_HASHED ||
+				((Agg *) plan)->aggstrategy == AGG_MIXED;
+		case T_Sort:
+		case T_Material:
+			return true;
+		default:
+			return false;
+	}
+}
+
+/*
  * Cloudberry's runtime_filter_fp_rate_estimate(): the false positive rate a
  * filter of that many inner rows will have, at most 2MB of it.
  */
@@ -1034,12 +1143,14 @@ rtf_false_positive_rate(double inner_rows)
  * as well -- and a right join's unmatched inner rows, which makes it choose
  * one less often -- where Cloudberry estimates the hash conditions' alone.
  * A right semi join, PostgreSQL 19's, is a semi join whose outer rows are
- * the ones probed, and is taken as one.
+ * the ones probed, and is taken as one.  Below "group", a node grouping the
+ * outer side by the join's keys: over the rows the node reads, the join
+ * keeping of them the share it keeps of the groups.
  */
 static bool
-rtf_worth(HashJoin *join, double *rows)
+rtf_worth(HashJoin *join, Plan *group, double *rows)
 {
-	Plan	   *outer = outerPlan(join);
+	Plan	   *outer = group != NULL ? outerPlan(group) : outerPlan(join);
 	Plan	   *inner = innerPlan(join);
 	double		fp_rate;
 	double		kept;
@@ -1072,7 +1183,10 @@ rtf_worth(HashJoin *join, double *rows)
 	if (fp_rate > 0.5)
 		return false;
 
-	kept = Min(join->join.plan.plan_rows, outer->plan_rows);
+	kept = Min(join->join.plan.plan_rows, outerPlan(join)->plan_rows);
+	if (group != NULL)
+		kept = group->plan_rows > 0 ?
+			outer->plan_rows * kept / group->plan_rows : outer->plan_rows;
 	if (outer->plan_rows - kept < RTF_MIN_DROPPED)
 		return false;
 	passed = kept + (outer->plan_rows - kept) * fp_rate;
@@ -1084,15 +1198,45 @@ rtf_worth(HashJoin *join, double *rows)
 }
 
 /*
+ * The join's outer keys as "group", the node its outer side is, reads them:
+ * each a column of the node's input it groups by (rtf_groups_by()), whose
+ * value is its group's -- or NIL, where one is not.
+ */
+static List *
+rtf_grouped_keys(HashJoin *join, Plan *group)
+{
+	List	   *keys = NIL;
+
+	foreach_ptr(Node, key, join->hashkeys)
+	{
+		TargetEntry *tle;
+
+		if (!IsA(key, Var) || ((Var *) key)->varno != OUTER_VAR)
+			return NIL;
+		tle = get_tle_by_resno(group->targetlist, ((Var *) key)->varattno);
+		if (tle == NULL || !IsA(tle->expr, Var) ||
+			((Var *) tle->expr)->varno != OUTER_VAR ||
+			!rtf_groups_by(group, ((Var *) tle->expr)->varattno))
+			return NIL;
+		keys = lappend(keys, copyObject(tle->expr));
+	}
+	return keys;
+}
+
+/*
  * The RuntimeFilter node above `child`, as the plan has it after
  * set_plan_references(): its scan tuple is the child's row (OUTER_VAR), and
  * its target list passes it on as it is (INDEX_VAR), as a Motion's does.
  * Its costs are Cloudberry's create_runtime_filter_path()'s, the hash
- * conditions taken at an operator's cost each.
+ * conditions taken at an operator's cost each.  Below a grouping node, it
+ * has the join's keys as the child gives them, and the join's hash
+ * operators and collations, to compute the join's hash values of them by.
  */
 static Plan *
-rtf_make_node(Plan *child, PlannerGlobal *glob, double rows, int nkeys)
+rtf_make_node(Plan *child, PlannerGlobal *glob, double rows, HashJoin *join,
+			  List *keys)
 {
+	int			nkeys = list_length(join->hashclauses);
 	CustomScan *cscan = makeNode(CustomScan);
 	Plan	   *plan = &cscan->scan.plan;
 	List	   *scan_tlist = NIL;
@@ -1140,17 +1284,25 @@ rtf_make_node(Plan *child, PlannerGlobal *glob, double rows, int nkeys)
 	cscan->scan.scanrelid = 0;
 	cscan->flags = 0;
 	cscan->custom_plans = NIL;
-	cscan->custom_exprs = NIL;
-	cscan->custom_private = NIL;
+	cscan->custom_exprs = keys;
+	cscan->custom_private = keys != NIL ?
+		list_make2(list_copy(join->hashoperators),
+				   list_copy(join->hashcollations)) : NIL;
 	cscan->custom_scan_tlist = scan_tlist;
 	cscan->custom_relids = NULL;
 	cscan->methods = &rtf_scan_methods;
 	return (Plan *) cscan;
 }
 
-/* Each hash join of the tree that Cloudberry's rule takes, filtered. */
+/*
+ * Each hash join of the tree that Cloudberry's rule takes, filtered: above
+ * its outer side, or below a node grouping it by the join's keys -- one
+ * that keeps its rows for a rescan (rtf_keeps_rows()) only where the join
+ * runs once, which it may not below a NestLoop's inner side, a Memoize or a
+ * RecursiveUnion, or in a subplan ("again").
+ */
 static bool
-rtf_add_filters(Plan *plan, PlannerGlobal *glob)
+rtf_add_filters(Plan *plan, PlannerGlobal *glob, bool again)
 {
 	bool		added = false;
 	double		rows;
@@ -1159,34 +1311,53 @@ rtf_add_filters(Plan *plan, PlannerGlobal *glob)
 		return false;
 	check_stack_depth();
 
-	added |= rtf_add_filters(plan->lefttree, glob);
-	added |= rtf_add_filters(plan->righttree, glob);
+	added |= rtf_add_filters(plan->lefttree, glob,
+							 again || IsA(plan, Memoize) ||
+							 IsA(plan, RecursiveUnion));
+	added |= rtf_add_filters(plan->righttree, glob,
+							 again || IsA(plan, NestLoop) ||
+							 IsA(plan, RecursiveUnion));
 	switch (nodeTag(plan))
 	{
 		case T_Append:
 			foreach_ptr(Plan, child, ((Append *) plan)->appendplans)
-				added |= rtf_add_filters(child, glob);
+				added |= rtf_add_filters(child, glob, again);
 			break;
 		case T_MergeAppend:
 			foreach_ptr(Plan, child, ((MergeAppend *) plan)->mergeplans)
-				added |= rtf_add_filters(child, glob);
+				added |= rtf_add_filters(child, glob, again);
 			break;
 		case T_SubqueryScan:
-			added |= rtf_add_filters(((SubqueryScan *) plan)->subplan, glob);
+			added |= rtf_add_filters(((SubqueryScan *) plan)->subplan, glob,
+									 again);
 			break;
 		case T_CustomScan:
 			foreach_ptr(Plan, child, ((CustomScan *) plan)->custom_plans)
-				added |= rtf_add_filters(child, glob);
+				added |= rtf_add_filters(child, glob, again);
 			break;
 		default:
 			break;
 	}
 
-	if (IsA(plan, HashJoin) && rtf_worth((HashJoin *) plan, &rows))
+	if (IsA(plan, HashJoin))
 	{
-		plan->lefttree = rtf_make_node(plan->lefttree, glob, rows,
-									   list_length(((HashJoin *) plan)->hashclauses));
-		added = true;
+		HashJoin   *join = (HashJoin *) plan;
+		Plan	   *outer = outerPlan(plan);
+		List	   *keys;
+
+		if (rtf_worth(join, NULL, &rows))
+		{
+			plan->lefttree = rtf_make_node(outer, glob, rows, join, NIL);
+			added = true;
+		}
+		else if ((!rtf_keeps_rows(outer) || !again) &&
+				 (keys = rtf_grouped_keys(join, outer)) != NIL &&
+				 rtf_worth(join, outer, &rows))
+		{
+			outer->lefttree = rtf_make_node(outer->lefttree, glob, rows, join,
+											keys);
+			added = true;
+		}
 	}
 	return added;
 }
@@ -1209,9 +1380,9 @@ rtf_planner_shutdown(PlannerGlobal *glob, Query *parse,
 	if (!gp_enable_runtime_filter || pstmt->commandType == CMD_UTILITY)
 		return;
 
-	added = rtf_add_filters(pstmt->planTree, glob);
+	added = rtf_add_filters(pstmt->planTree, glob, false);
 	foreach_ptr(Plan, sub, pstmt->subplans)
-		added |= rtf_add_filters(sub, glob);
+		added |= rtf_add_filters(sub, glob, true);
 	if (added)
 		pstmt->extension_state = lappend(pstmt->extension_state,
 										 makeDefElem(RTF_MARK, NULL, -1));
@@ -1347,11 +1518,14 @@ rtf_add_check(RtfQuery *query, PlanState *ps, RtfKey *key, AttrNumber col,
  * so a row the scan drops is one the join would have met no inner row
  * with, and a lower join's row made of it, NULL where the key is, meets
  * none either.  A Motion is where the key's rows leave for another slice,
- * and the search stops there, as Cloudberry's does.
+ * and the search stops there, as Cloudberry's does.  And through a node that
+ * groups by the key's column (rtf_groups_by()), and a Sort or a Material,
+ * which pass every row on -- of those that keep their rows for a rescan,
+ * only where the join runs once ("once", rtf_keeps_rows()).
  */
 static void
 rtf_find_targets(RtfQuery *query, RtfKey *key, PlanState *ps, AttrNumber col,
-				 Oid type, int *ntargets)
+				 Oid type, bool once, int *ntargets)
 {
 	int			slice;
 	int			nsegs;
@@ -1381,6 +1555,23 @@ rtf_find_targets(RtfQuery *query, RtfKey *key, PlanState *ps, AttrNumber col,
 				ps = outerPlanState(ps);
 				continue;
 
+			case T_AggState:
+			case T_GroupState:
+			case T_UniqueState:
+			case T_SortState:
+			case T_IncrementalSortState:
+			case T_MaterialState:
+				var = rtf_column_var(ps->plan->targetlist, col, OUTER_VAR);
+				if (var == NULL ||
+					(!IsA(ps, SortState) && !IsA(ps, IncrementalSortState) &&
+					 !IsA(ps, MaterialState) &&
+					 !rtf_groups_by(ps->plan, var->varattno)) ||
+					(rtf_keeps_rows(ps->plan) && !once))
+					return;
+				col = var->varattno;
+				ps = outerPlanState(ps);
+				continue;
+
 			case T_AppendState:
 				{
 					AppendState *append = (AppendState *) ps;
@@ -1390,7 +1581,7 @@ rtf_find_targets(RtfQuery *query, RtfKey *key, PlanState *ps, AttrNumber col,
 						return;
 					for (int i = 0; i < append->as_nplans; i++)
 						rtf_find_targets(query, key, append->appendplans[i],
-										 var->varattno, type, ntargets);
+										 var->varattno, type, once, ntargets);
 					return;
 				}
 
@@ -1410,7 +1601,7 @@ rtf_find_targets(RtfQuery *query, RtfKey *key, PlanState *ps, AttrNumber col,
 							return;
 						foreach_ptr(PlanState, child, css->custom_ps)
 							rtf_find_targets(query, key, child, col, type,
-											 ntargets);
+											 once, ntargets);
 						return;
 					}
 
@@ -1476,7 +1667,10 @@ rtf_pushdown_keys(RtfQuery *query, RtfBuild *build)
 		key->min = PG_INT64_MAX;
 		key->max = PG_INT64_MIN;
 		rtf_find_targets(query, key, outerPlanState(build->join),
-						 outer_var->varattno, outer_var->vartype, &ntargets);
+						 outer_var->varattno, outer_var->vartype,
+						 !bms_is_member(build->join->js.ps.plan->plan_node_id,
+										query->again),
+						 &ntargets);
 		if (ntargets > 0)
 			build->keys = lappend(build->keys, key);
 		else
@@ -1498,6 +1692,7 @@ rtf_setup_join(RtfQuery *query, HashJoinState *join)
 	JoinType	type = join->js.jointype;
 	HashState  *hash = (HashState *) innerPlanState(join);
 	PlanState  *input;
+	PlanState  *outer;
 	RtfNode    *node;
 	RtfBuild   *build;
 	RtfState   *filter = NULL;
@@ -1518,8 +1713,12 @@ rtf_setup_join(RtfQuery *query, HashJoinState *join)
 	build->hash = hash;
 	build->rows = hash->ps.plan->plan_rows;
 
-	if (rtf_is_node(outerPlanState(join)))
-		filter = (RtfState *) outerPlanState(join);
+	/* above the outer side, or below the node grouping it */
+	outer = outerPlanState(join);
+	if (IsA(outer, AggState) || IsA(outer, GroupState) || IsA(outer, UniqueState))
+		outer = outerPlanState(outer);
+	if (outer != NULL && rtf_is_node(outer))
+		filter = (RtfState *) outer;
 	if (gp_enable_runtime_filter_pushdown)
 		rtf_pushdown_keys(query, build);
 	if (filter == NULL && build->keys == NIL)
@@ -1557,6 +1756,46 @@ rtf_walker(PlanState *ps, void *context)
 	return planstate_tree_walker(ps, rtf_walker, context);
 }
 
+/*
+ * The nodes that may run again, into *ids by plan_node_id: below a
+ * NestLoop's inner side, a Memoize or a RecursiveUnion, and in a subplan or
+ * an initplan -- as gp_scan.c's mark_rescans() finds the gathers read again.
+ * A node met again another way stays one that may.
+ */
+typedef struct RtfAgain
+{
+	bool		again;
+	Bitmapset **ids;
+} RtfAgain;
+
+static bool
+rtf_again_walker(PlanState *ps, void *context)
+{
+	RtfAgain   *cxt = (RtfAgain *) context;
+	RtfAgain	again = {true, cxt->ids};
+
+	if (ps == NULL)
+		return false;
+	if (cxt->again)
+		*cxt->ids = bms_add_member(*cxt->ids, ps->plan->plan_node_id);
+
+	foreach_node(SubPlanState, sps, ps->initPlan)
+		(void) rtf_again_walker(sps->planstate, &again);
+	foreach_node(SubPlanState, sps, ps->subPlan)
+		(void) rtf_again_walker(sps->planstate, &again);
+	switch (nodeTag(ps))
+	{
+		case T_NestLoopState:
+			(void) rtf_again_walker(outerPlanState(ps), cxt);
+			return rtf_again_walker(innerPlanState(ps), &again);
+		case T_MemoizeState:
+		case T_RecursiveUnionState:
+			return planstate_tree_walker(ps, rtf_again_walker, &again);
+		default:
+			return planstate_tree_walker(ps, rtf_again_walker, cxt);
+	}
+}
+
 static bool
 rtf_marked(PlannedStmt *stmt)
 {
@@ -1570,9 +1809,10 @@ rtf_marked(PlannedStmt *stmt)
 
 /*
  * A statement's filters, as its executor has made its nodes: where the plan
- * has RuntimeFilter nodes, or keys can be pushed down.  The subplans are
- * walked on their own too, a CTE's among them, which no node of the tree
- * leads to.  EXPLAIN without ANALYZE runs nothing, and needs none.
+ * has RuntimeFilter nodes, or keys can be pushed down, with the nodes that
+ * may run again known first.  The subplans are walked on their own too, a
+ * CTE's among them, which no node of the tree leads to.  EXPLAIN without
+ * ANALYZE runs nothing, and needs none.
  */
 static void
 rtf_executor_start(QueryDesc *queryDesc, int eflags)
@@ -1580,6 +1820,8 @@ rtf_executor_start(QueryDesc *queryDesc, int eflags)
 	EState	   *estate;
 	MemoryContext oldcxt;
 	RtfQuery   *query;
+	RtfAgain	once;
+	RtfAgain	again;
 
 	if (prev_executor_start)
 		prev_executor_start(queryDesc, eflags);
@@ -1595,6 +1837,13 @@ rtf_executor_start(QueryDesc *queryDesc, int eflags)
 	estate = queryDesc->estate;
 	oldcxt = MemoryContextSwitchTo(estate->es_query_cxt);
 	query = palloc0_object(RtfQuery);
+	once.again = false;
+	once.ids = &query->again;
+	again.again = true;
+	again.ids = &query->again;
+	(void) rtf_again_walker(queryDesc->planstate, &once);
+	foreach_ptr(PlanState, sub, estate->es_subplanstates)
+		(void) rtf_again_walker(sub, &again);
 	(void) rtf_walker(queryDesc->planstate, query);
 	foreach_ptr(PlanState, sub, estate->es_subplanstates)
 		(void) rtf_walker(sub, query);

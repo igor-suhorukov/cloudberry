@@ -3204,6 +3204,25 @@ COMMIT;"
 	[ "$out" = "0|3900 3|4000 7|4000 0|3900 3|4000 7|4000 " ] \
 		&& ok "a hash join whose hash table is made again for each row keeps its answers" \
 		|| notok "a filtered hash join made again for each row" "$out"
+	# A join's outer side grouped by its key -- the planner's own, and its
+	# unique path for a semi-join -- is filtered below the grouping, which
+	# only drops groups no inner row meets; not where the join runs again
+	# and a HashAggregate gives it again what it made under another hash
+	# table.
+	rf_grouped="SELECT count(*) FROM (SELECT DISTINCT d FROM rff) f JOIN rfd USING (d) WHERE p = 0;"
+	rf_regrouped="SELECT x.p, (SELECT count(*) FROM (SELECT DISTINCT d FROM rff) f JOIN rfd USING (d) WHERE rfd.p = x.p) FROM (VALUES (0), (3), (7)) x(p) ORDER BY 1;"
+	out=$(printf '%s\n' "SET gp.optimizer = off;" "SET gp.enable_runtime_filter = on;" \
+		"$rf_explain $rf_grouped" "$rf_grouped" | qf 0 | tr '\n' '|')
+	regrouped=$(for on in on off; do
+		printf '%s\n' "SET gp.optimizer = off;" "SET enable_mergejoin = off;" "SET enable_nestloop = off;" \
+			"SET gp.enable_runtime_filter = $on;" "SET gp.enable_runtime_filter_pushdown = $on;" \
+			"$rf_regrouped" | qf 0
+	done | tr '\n' ' ')
+	case "$out|$regrouped" in
+		*"->  HashAggregate (actual rows=196.00 loops=1)|"*"->  RuntimeFilter (actual rows=4000.00 loops=1)|"*"|195||0|195 3|200 7|200 0|195 3|200 7|200 ")
+			ok "a join's outer side grouped by its key is filtered below the grouping, 4,000 of 40,000 rows grouped, and where the join runs again it keeps its answers" ;;
+		*) notok "a filter below a grouping node" "$out / $regrouped" ;;
+	esac
 	# ORCA's hash joins run on the segments, which are sent the setting, and
 	# its scans there drop what the key rules out, as a segment's own plan
 	# shows; the coordinator's EXPLAIN ANALYZE describes ORCA's fragment
