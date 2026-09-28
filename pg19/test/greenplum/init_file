@@ -91,4 +91,10 @@ s/^(LINE \d+: \.\.\.)\S*(\/src\/test\/regress\/data\/)/$1$2/
 m/^ +\d+ \| pg_bitmapindex$/
 s/^ +\d+ \|/ OID |/
 
+# minirepro's statistics of pg_tablespace, whose values name the
+# tablespace test_setup makes by its OID, which every object made before
+# it moves.
+m/\{1663,1664,\d+\}/
+s/\{1663,1664,\d+\}/{1663,1664,######}/
+
 -- end_matchsubs
