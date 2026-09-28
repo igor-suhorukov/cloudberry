@@ -361,6 +361,7 @@ extern void ao_dml_flush(Oid relid);
 extern void ao_dml_forget_rel(Oid relid);
 extern void ao_dml_run_begin(void *query);
 extern void ao_dml_run_end(void *query);
+extern void *ao_dml_current_query(void);
 extern void ao_dml_finish_query(void *query);
 extern void ao_dml_init(void);
 extern int	ao_segfile_lock_classid(void);
@@ -425,6 +426,7 @@ extern void bm_init(void);
 
 extern bool ao_is_ao_table(Relation rel);
 extern void ao_register_table_ams(void);
+extern void ao_fetch_cache_reset(void);
 extern void ao_scan_set_segno(TableScanDesc scan, int segno);
 extern void ao_vacuum_rel(Relation rel, const struct VacuumParams *params,
 						  BufferAccessStrategy bstrategy);

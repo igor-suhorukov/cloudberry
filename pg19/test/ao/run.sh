@@ -26,9 +26,9 @@
 # logged by gp_ao's resource manager, so a crash, a standby and pg_checksums
 # see them as any relation's; the metadata is in gp_ao's three tables, keyed
 # by the storage ID the first page holds; row numbers and TIDs are the
-# port's; and the core patches gp_ao asks (O13-O18, O20) are used as they
-# were meant to be.  And a PAX table's ENCODING clauses, which gp_ao takes
-# for it and PAX checks and writes by (section 15).
+# port's; and the core patches gp_ao asks (O13-O18) are used as they were
+# meant to be.  And a PAX table's ENCODING clauses, which gp_ao takes for it
+# and PAX checks and writes by (section 15).
 #
 #   PG_BINDIR=/path/to/patched/pg19/bin pg19/test/ao/run.sh
 #
@@ -253,7 +253,7 @@ is "and summarizes the ones a later insert adds" \
     SELECT brin_summarize_new_values('br_a') > 0;" "t"
 
 ###############################################################################
-echo "5. DELETE marks the visibility map; UPDATE takes the old row from the plan (O20)"
+echo "5. DELETE marks the visibility map; UPDATE fetches the old row by its TID"
 ###############################################################################
 is "a DELETE" "DELETE FROM r1 WHERE a % 10 = 0; SELECT count(*) FROM r1;" "4500"
 is "each deleted row is a bit of the map" \
@@ -265,17 +265,17 @@ is "an UPDATE whose join reaches a row twice updates it once" \
     SELECT count(*) FROM r1 WHERE a = 1;" "1"
 is "RETURNING gives the new rows" \
    "UPDATE c1 SET b = 'c' WHERE a = 3 RETURNING a, b;" "3|c"
-# The old row keeps its table and the CTID a scan gives it, which
-# ExecForceStoreHeapTuple() sets in a heap tuple's slot alone: ao_row's is a
-# minimal tuple's, ao_column's a virtual one.
+# The old row keeps its table and the CTID a scan gives it, which the fetch
+# by TID gives ao_row's slot, a minimal tuple's, and ao_column's, a virtual
+# one.
 is "DELETE ... RETURNING tableoid, ctid gives the row's table and CTID" \
-   "CREATE TEMP TABLE o20_r AS SELECT ctid AS c FROM r1 WHERE a = 21;
+   "CREATE TEMP TABLE old_r AS SELECT ctid AS c FROM r1 WHERE a = 21;
     WITH d AS (DELETE FROM r1 WHERE a = 21 RETURNING tableoid::regclass AS t, ctid AS c)
-    SELECT t || ':' || (d.c = o20_r.c) FROM d, o20_r;" "r1:true"
+    SELECT t || ':' || (d.c = old_r.c) FROM d, old_r;" "r1:true"
 is "and so does UPDATE's RETURNING old.tableoid, old.ctid, of a column table" \
-   "CREATE TEMP TABLE o20_c AS SELECT ctid AS c FROM c1 WHERE a = 6;
+   "CREATE TEMP TABLE old_c AS SELECT ctid AS c FROM c1 WHERE a = 6;
     WITH u AS (UPDATE c1 SET b = b WHERE a = 6 RETURNING old.tableoid::regclass AS t, old.ctid AS c)
-    SELECT t || ':' || (u.c = o20_c.c) FROM u, o20_c;" "c1:true"
+    SELECT t || ':' || (u.c = old_c.c) FROM u, old_c;" "c1:true"
 is "MERGE updates, deletes and inserts" \
    "MERGE INTO c1 USING (VALUES (4, 'u'), (5, 'd'), (9999, 'i')) s(a, b) ON c1.a = s.a
       WHEN MATCHED AND s.b = 'd' THEN DELETE
@@ -300,6 +300,71 @@ refused "ON CONFLICT is refused" \
         "INSERT INTO u VALUES (1, 'x') ON CONFLICT DO NOTHING;" "INSERT ON CONFLICT is not supported for appendoptimized relations"
 is "gp.select_invisible shows the rows deleted, as gp_select_invisible does" \
    "SET gp.select_invisible = on; SELECT count(*) FROM r1;" "5019"
+
+# Each old row is fetched by its TID, and the fetch keeps its descriptor, and
+# the block it decoded, for the query's next row (ao_am.c): over two segment
+# files of many blocks, by row and by column, compressed; a unique index's
+# placeholders; rows reached out of the table's order; a row a function the
+# statement calls deletes, or inserts, meanwhile; and a TID scan's rows,
+# with the query's snapshot.
+session 3 8
+q "CREATE TABLE fr (a int, b int, c text) USING ao_row WITH (compresstype=zstd);
+   CREATE TABLE fc (a int, b int, c text) USING ao_column WITH (compresstype=zlib);" > /dev/null
+echo "BEGIN; INSERT INTO fr SELECT i, i, 'r' || i FROM generate_series(1, 10000) i;
+      INSERT INTO fc SELECT i, i, 'c' || i FROM generate_series(1, 10000) i;" >&8
+settled s3 || notok "the third session began"
+q "INSERT INTO fr SELECT i, i, 'r' || i FROM generate_series(10001, 20000) i;
+   INSERT INTO fc SELECT i, i, 'c' || i FROM generate_series(10001, 20000) i;" > /dev/null
+echo "COMMIT;" >&8
+settled s3
+is "two segment files of many blocks each, by row and by column" \
+   "SELECT count(*) || ' ' || min(n) FROM (SELECT count(*) AS n FROM gp_ao.blkdir
+      WHERE storage_id IN (gp_ao.storage_id('fr'), gp_ao.storage_id('fc'))
+      GROUP BY storage_id, segno) s;" "4 2"
+is "an UPDATE of every row fetches each by its TID, and updates it once" \
+   "UPDATE fr SET b = b + 1; UPDATE fc SET b = b + 1;
+    SELECT (SELECT count(*) || ':' || sum(b) || ':' || sum(length(c)) FROM fr) || ' ' ||
+           (SELECT count(*) || ':' || sum(b) || ':' || sum(length(c)) FROM fc);" \
+   "20000:200030000:108894 20000:200030000:108894"
+is "and its RETURNING reads the old row each new one is built over" \
+   "WITH u AS (UPDATE fc SET b = b * 2 RETURNING old.b AS o, new.b AS n, old.c = new.c AS same)
+    SELECT count(*) || ' ' || sum(n - 2 * o) || ' ' || count(*) FILTER (WHERE same) FROM u;" "20000 0 20000"
+q "CREATE INDEX fr_a ON fr (a);" > /dev/null
+isl "an UPDATE that reaches the rows out of the table's order, through an index" \
+   "SET enable_hashjoin = off; SET enable_mergejoin = off; SET enable_seqscan = off;
+    SET enable_bitmapscan = off;
+    UPDATE fr SET b = fr.b + 1
+      FROM (SELECT g FROM generate_series(1, 20000) g ORDER BY md5(g::text)) s WHERE fr.a = s.g;
+    SELECT count(*) || ' ' || sum(b) FROM fr;" "20000 200050000"
+is "MERGE's matched rows" \
+   "MERGE INTO fr USING (SELECT g FROM generate_series(1, 20000, 2) g) s ON fr.a = s.g
+      WHEN MATCHED THEN UPDATE SET b = fr.b + 1000;
+    SELECT count(*) || ' ' || sum(b) FROM fr;" "20000 210050000"
+is "DELETE ... RETURNING of every third row" \
+   "WITH d AS (DELETE FROM fc WHERE a % 3 = 0 RETURNING a, c, tableoid::regclass AS t)
+    SELECT count(*) || ' ' || sum(a) || ' ' || sum(length(c)) || ' ' || min(t::text) FROM d;" \
+   "6666 66663333 36294 fc"
+is "and the rows it leaves" "SELECT count(*) || ' ' || sum(a) FROM fc;" "13334 133346667"
+q "CREATE TABLE fu (id int PRIMARY KEY, v int, w text) USING ao_column;
+   INSERT INTO fu SELECT i, i, 'w' || i FROM generate_series(1, 20000) i;" > /dev/null
+isl "an UPDATE of a table with a unique index, whose new blocks each have a placeholder" \
+   "UPDATE fu SET v = v + 1;
+    SET enable_seqscan = off; SET enable_bitmapscan = off;
+    SELECT count(*) || ' ' || sum(v) || ' ' || count(DISTINCT w) FROM fu WHERE id BETWEEN 1 AND 20000;" \
+   "20000 200030000 20000"
+q "CREATE TABLE fd (a int, b int) USING ao_row;
+   INSERT INTO fd SELECT i, i FROM generate_series(1, 1000) i;
+   CREATE FUNCTION fd_del(x int) RETURNS int LANGUAGE plpgsql AS \$\$
+     BEGIN IF x = 10 THEN DELETE FROM fd WHERE a = 500; END IF; RETURN x; END \$\$;
+   CREATE FUNCTION fd_ins(x int) RETURNS int LANGUAGE plpgsql AS \$\$
+     BEGIN INSERT INTO fd VALUES (x + 1000, 0); RETURN x + 1; END \$\$;" > /dev/null
+refused "a row a function the UPDATE calls deleted first is not found, as the map says now" \
+        "UPDATE fd SET b = fd_del(a);" "failed to fetch tuple being updated"
+is "and rows one inserts are not reached, the old ones each updated once" \
+   "UPDATE fd SET b = fd_ins(a); SELECT count(*) || ' ' || sum(b) FROM fd;" "2000 501500"
+is "a TID scan fetches each row it names, with the query's snapshot" \
+   "SELECT count(*) || ' ' || sum(a) FROM fr WHERE ctid = ANY (ARRAY(SELECT ctid FROM fr WHERE a % 7 = 0));" \
+   "2857 28578571"
 
 ###############################################################################
 echo "6. transactions: segment files, row numbers and savepoints"

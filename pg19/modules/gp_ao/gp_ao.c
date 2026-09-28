@@ -982,6 +982,13 @@ gp_ao_ProcessUtility(PlannedStmt *pstmt, const char *queryString,
 	OptionsWatch *watch = NULL;
 
 	/*
+	 * A fetch's descriptor kept between rows (ao_am.c) is a query's: gone as
+	 * a utility statement begins, and as it ends -- COPY's AFTER triggers
+	 * fetch their rows by TID, in no query.
+	 */
+	ao_fetch_cache_reset();
+
+	/*
 	 * On a segment, the statement the coordinator dispatched: what this hook
 	 * made of it there -- the access method, the options -- it carries, and
 	 * the labels it wrote there follow it (GpDispatchNoteLabelOf()).  What
@@ -1016,6 +1023,7 @@ gp_ao_ProcessUtility(PlannedStmt *pstmt, const char *queryString,
 		if (IsA(parsetree, VacuumStmt))
 			recycle_compacted();
 		reset_frozen_xids();
+		ao_fetch_cache_reset();
 		return;
 	}
 
@@ -1169,6 +1177,7 @@ gp_ao_ProcessUtility(PlannedStmt *pstmt, const char *queryString,
 	if (IsA(parsetree, VacuumStmt))
 		recycle_compacted();
 	reset_frozen_xids();
+	ao_fetch_cache_reset();
 }
 
 /* ------------------------------------------------------------------------- */
@@ -1272,15 +1281,22 @@ gp_ao_ExecutorRun(QueryDesc *queryDesc, ScanDirection direction, uint64 count)
 	PG_END_TRY();
 }
 
+/*
+ * A query's ExecutorFinish: what it wrote, finished before its AFTER
+ * triggers fire; and the descriptor its fetches by TID kept, dropped as it
+ * finishes, and the one its AFTER triggers' kept after (ao_am.c).
+ */
 static void
 gp_ao_ExecutorFinish(QueryDesc *queryDesc)
 {
+	ao_fetch_cache_reset();
 	ao_dml_finish_query(queryDesc);
 
 	if (prev_ExecutorFinish)
 		prev_ExecutorFinish(queryDesc);
 	else
 		standard_ExecutorFinish(queryDesc);
+	ao_fetch_cache_reset();
 }
 
 /*

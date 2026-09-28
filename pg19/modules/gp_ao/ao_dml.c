@@ -1004,6 +1004,13 @@ ao_dml_run_end(void *query)
 		ao_running = list_delete_first(ao_running);
 }
 
+/* The innermost query running now, which a kept fetch belongs to (ao_am.c). */
+void *
+ao_dml_current_query(void)
+{
+	return ao_current_owner();
+}
+
 /* A query's ExecutorFinish: its writers, before its AFTER triggers. */
 void
 ao_dml_finish_query(void *query)
@@ -1045,6 +1052,8 @@ ao_xact_callback(XactEvent event, void *arg)
 		case XACT_EVENT_ABORT:
 		case XACT_EVENT_PARALLEL_ABORT:
 		case XACT_EVENT_PREPARE:
+			/* a fetch's descriptor, in TopTransactionContext (ao_am.c) */
+			ao_fetch_cache_reset();
 			ao_dml_forget();
 			ao_held_segnos = NIL;
 			list_free(ao_running);
@@ -1076,10 +1085,12 @@ ao_subxact_callback(SubXactEvent event, SubTransactionId mySubid,
 	{
 		/*
 		 * What the aborted writers built in memory goes, and what they wrote
-		 * is past the end their segment files' rows say.  A segment file
-		 * taken in the subtransaction was let go with its lock.  Their memory
-		 * goes with the transaction's.
+		 * is past the end their segment files' rows say, for the next writer
+		 * to write over: a fetch's block may be one of theirs (ao_am.c).  A
+		 * segment file taken in the subtransaction was let go with its lock.
+		 * Their memory goes with the transaction's.
 		 */
+		ao_fetch_cache_reset();
 		foreach(lc, ao_inserts)
 			if (((AoInsertState *) lfirst(lc))->subid >= mySubid)
 				ao_inserts = foreach_delete_current(ao_inserts, lc);

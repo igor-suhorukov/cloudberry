@@ -28,10 +28,12 @@
  * number (gp_ao.h); an index finds it through the directory, and a row is
  * deleted when the visibility map says so.
  *
- * UPDATE takes the old row from the plan (O20), since there is no fetching
- * one here that is cheaper than the scan that found it, and appends the new
- * one; DELETE marks the visibility map.  Both hold the table in
- * ExclusiveLock, as Cloudberry's do.
+ * UPDATE fetches the old row by its TID, as it fetches a heap's, and appends
+ * the new one; DELETE marks the visibility map.  Both hold the table in
+ * ExclusiveLock, as Cloudberry's do.  A fetch keeps its descriptor, and the
+ * block it decoded, for the query's next row, which is most likely in the
+ * same block (ao_tuple_fetch_row_version()): O20, a core patch until
+ * 2026-09-28, gave UPDATE the old row from the plan instead.
  *
  *-------------------------------------------------------------------------
  */
@@ -134,6 +136,8 @@ ao_reader_load(Relation rel, AoBlockReader *rd, uint64 offset,
 	if (rd->loaded && rd->offset == offset && rd->loaded_filenum == rd->filenum)
 		return;
 
+	/* what the buffers held goes as they are read into, error or not */
+	rd->loaded = false;
 	ao_file_read(rel, rd->filenum, offset, (char *) &hdr, sizeof(hdr), strategy);
 	ao_block_check_header(rel, rd->filenum, offset, &hdr);
 
@@ -254,7 +258,13 @@ typedef struct AoFetchDescData
 	bool		sf_loaded;
 	Snapshot	sf_snapshot;
 	bool		sf_live[AO_MAX_SEGNO + 1];
+	/* the kept fetch's: the metadata above may be kept, as of this command */
+	bool		meta_kept;
+	CommandId	meta_cid;
 	MemoryContext cxt;
+	/* what the directory's entry, and the map, were read into: made at need */
+	MemoryContext entry_cxt;
+	MemoryContext vm_cxt;
 } AoFetchDescData;
 
 typedef AoFetchDescData *AoFetchDesc;
@@ -292,6 +302,27 @@ ao_fetch_end(AoFetchDesc fd)
 }
 
 /*
+ * The context the next directory entry, or visibility map, is read into,
+ * emptied of the last: a descriptor that fetches rows all through a scan,
+ * or a query, reads many, and keeps one of each.
+ */
+static MemoryContext
+ao_fetch_meta_context(AoFetchDesc fd, bool map)
+{
+	MemoryContext *cxt = map ? &fd->vm_cxt : &fd->entry_cxt;
+
+	if (*cxt != NULL)
+		MemoryContextReset(*cxt);
+	else if (map)
+		*cxt = AllocSetContextCreate(fd->cxt, "gp_ao fetch map",
+									 ALLOCSET_SMALL_SIZES);
+	else
+		*cxt = AllocSetContextCreate(fd->cxt, "gp_ao fetch entry",
+									 ALLOCSET_SMALL_SIZES);
+	return *cxt;
+}
+
+/*
  * Is row rownum of segment file segno visible to snapshot, and where is its
  * block: fd->entry, on true.  A placeholder is a block a writer is building:
  * *placeholder says so, and there is nothing to read in it yet.
@@ -303,12 +334,17 @@ ao_fetch_end(AoFetchDesc fd)
  * with it sets and clears that, so it is taken where the block's row is
  * found and set again at the end; nothing is kept between calls, since a
  * dirty snapshot's answer changes as others commit.
+ *
+ * The metadata is read with ao_meta_snapshot(snapshot), taken where the
+ * call first reads any: a fetch that finds all it needs in the descriptor
+ * takes none, which for SnapshotAny, the latest snapshot, is no small part
+ * of a fetch.
  */
 static bool
 ao_fetch_locate(AoFetchDesc fd, int segno, int64 rownum, Snapshot snapshot,
 				bool *placeholder)
 {
-	Snapshot	msnap = ao_meta_snapshot(snapshot);
+	Snapshot	msnap = NULL;
 	bool		dirty = (snapshot != NULL &&
 						 snapshot->snapshot_type == SNAPSHOT_DIRTY);
 	TransactionId xwait = InvalidTransactionId;
@@ -321,19 +357,26 @@ ao_fetch_locate(AoFetchDesc fd, int segno, int64 rownum, Snapshot snapshot,
 	 * the VACUUM: its rows are in another, under TIDs of their own, until the
 	 * next VACUUM removes the index entries that still name them here.  A
 	 * snapshot that sees two versions of its row, a dirty one while the
-	 * VACUUM is at work, sees it in use where either says so.
+	 * VACUUM is at work, sees it in use where either says so.  They are read
+	 * into the entry's context, which the entry is read into again after
+	 * them.
 	 */
 	if (dirty || !fd->sf_loaded || fd->sf_snapshot != snapshot)
 	{
+		MemoryContext old;
 		AoSegfile  *segfiles;
 		int			nsegfiles;
 
+		fd->sf_loaded = false;
+		fd->has_entry = false;
+		msnap = ao_meta_snapshot(snapshot);
+		old = MemoryContextSwitchTo(ao_fetch_meta_context(fd, false));
 		segfiles = ao_segfiles_read(fd->storage_id, msnap, &nsegfiles);
+		MemoryContextSwitchTo(old);
 		memset(fd->sf_live, 0, sizeof(fd->sf_live));
 		for (int i = 0; i < nsegfiles; i++)
 			if (segfiles[i].state == AO_SEGFILE_DEFAULT)
 				fd->sf_live[segfiles[i].segno] = true;
-		pfree(segfiles);
 		fd->sf_loaded = true;
 		fd->sf_snapshot = snapshot;
 	}
@@ -349,10 +392,13 @@ ao_fetch_locate(AoFetchDesc fd, int segno, int64 rownum, Snapshot snapshot,
 		  rownum >= fd->entry.first_row &&
 		  rownum < fd->entry.first_row + fd->entry.nrows))
 	{
-		MemoryContext old = MemoryContextSwitchTo(fd->cxt);
+		MemoryContext old;
 		bool		found;
 
 		fd->has_entry = false;
+		if (msnap == NULL)
+			msnap = ao_meta_snapshot(snapshot);
+		old = MemoryContextSwitchTo(ao_fetch_meta_context(fd, false));
 		found = ao_blkdir_lookup(fd->storage_id, segno, rownum, msnap,
 								 &fd->entry);
 		MemoryContextSwitchTo(old);
@@ -376,12 +422,16 @@ ao_fetch_locate(AoFetchDesc fd, int segno, int64 rownum, Snapshot snapshot,
 
 	if (dirty || fd->vm_segno != segno || fd->vm_snapshot != snapshot)
 	{
-		MemoryContext old = MemoryContextSwitchTo(fd->cxt);
+		MemoryContext old;
 
+		fd->vm_segno = -1;
+		if (msnap == NULL)
+			msnap = ao_meta_snapshot(snapshot);
+		old = MemoryContextSwitchTo(ao_fetch_meta_context(fd, true));
 		fd->vm = ao_visimap_load(fd->storage_id, segno, msnap);
+		MemoryContextSwitchTo(old);
 		fd->vm_segno = segno;
 		fd->vm_snapshot = snapshot;
-		MemoryContextSwitchTo(old);
 	}
 	live = gp_select_invisible || !ao_visimap_is_deleted(fd->vm, rownum);
 
@@ -1025,21 +1075,147 @@ ao_index_unique_check(Relation rel, ItemPointer tid, Snapshot snapshot,
 	return live;
 }
 
+/*
+ * A row by its TID, for the executor: the old version of each row an
+ * UPDATE, a DELETE ... RETURNING or a MERGE changes, which it fetches with
+ * SnapshotAny as it fetches a heap's; an AFTER INSERT trigger's row, a TID
+ * scan's, EvalPlanQual's, gp_core's split update's.  Found alone, each row
+ * would read which segment files hold rows, the block directory and the
+ * visibility map, and read and decode its block: an UPDATE of a whole table
+ * would decode each block once for each of its rows.  So the descriptor is
+ * kept while one query fetches from one relation with one snapshot, and with
+ * it the block last decoded, the one the next row a scan found is in; it
+ * goes when any of them changes, as the query and the utility statement
+ * end (gp_ao.c), and as a transaction or subtransaction ends or aborts
+ * (ao_dml.c).
+ *
+ * The block is what its file holds where its directory entry says, which is
+ * written once: only a writer that rolls back leaves a place the next one
+ * writes over, and an abort, of the transaction or a subtransaction, drops
+ * the descriptor.  What the descriptor knows of the metadata -- the
+ * segment files that hold rows, the block's entry, the visibility map -- is
+ * what its snapshot saw, ao_fetch_keep_meta()'s to keep or read again.
+ */
+typedef struct AoFetchCache
+{
+	AoFetchDesc fd;				/* NULL when none is kept */
+	Oid			relid;
+	RelFileNumber relnumber;	/* a TRUNCATE's new files are another's */
+	int			natts;
+	void	   *query;			/* ao_dml_current_query()'s, as it was made */
+	Snapshot	snapshot;
+	/* an MVCC snapshot's, which its address alone may not name */
+	TransactionId xmin;
+	TransactionId xmax;
+	CommandId	curcid;
+	uint64		completions;
+} AoFetchCache;
+
+static AoFetchCache ao_fetch_cache;
+
+void
+ao_fetch_cache_reset(void)
+{
+	AoFetchDesc fd = ao_fetch_cache.fd;
+
+	memset(&ao_fetch_cache, 0, sizeof(ao_fetch_cache));
+	if (fd != NULL)
+		ao_fetch_end(fd);
+}
+
+static bool
+ao_fetch_cache_matches(Relation rel, Snapshot snapshot)
+{
+	AoFetchCache *c = &ao_fetch_cache;
+
+	if (c->fd == NULL || c->relid != RelationGetRelid(rel) ||
+		c->relnumber != rel->rd_locator.relNumber ||
+		c->natts != RelationGetDescr(rel)->natts ||
+		c->query != ao_dml_current_query() || c->snapshot != snapshot)
+		return false;
+	return snapshot == NULL || snapshot->snapshot_type != SNAPSHOT_MVCC ||
+		(c->xmin == snapshot->xmin && c->xmax == snapshot->xmax &&
+		 c->curcid == snapshot->curcid &&
+		 c->completions == snapshot->snapXactCompletionCount);
+}
+
+/*
+ * Keep the kept descriptor's metadata for this fetch, or forget it, to be
+ * read again: the metadata is read with ao_meta_snapshot(snapshot), and
+ * kept only while that sees what it saw.  An MVCC snapshot sees the same
+ * all through a query.  SnapshotAny, and NULL, read it with the latest
+ * snapshot, which sees what this transaction's earlier commands wrote, and
+ * what others commit: the first changes only as the command counter goes
+ * on, and a writer of the table's metadata -- INSERT and COPY, an UPDATE or
+ * a DELETE, VACUUM, a TRUNCATE or an ALTER -- takes a lock ShareLock
+ * conflicts with, so while this backend holds the table in ShareLock or
+ * more, as an UPDATE, a DELETE and a MERGE hold theirs (gp_ao.c), no other
+ * commits a change to it.  Otherwise -- an AFTER INSERT trigger's fetch,
+ * EvalPlanQual's of a table the statement only reads -- the metadata is
+ * read again for each row, as a descriptor of its own would read it, and
+ * only the block, if it is the same one, is not.  Any other snapshot, a
+ * dirty one above all, reads it again each time too.
+ */
+static void
+ao_fetch_keep_meta(AoFetchDesc fd, Snapshot snapshot)
+{
+	CommandId	cid = GetCurrentCommandId(false);
+
+	if (fd->meta_kept && fd->meta_cid == cid)
+		return;
+	fd->sf_loaded = false;
+	fd->has_entry = false;
+	fd->vm_segno = -1;
+	fd->meta_cid = cid;
+	if (snapshot != NULL && snapshot->snapshot_type == SNAPSHOT_MVCC)
+		fd->meta_kept = true;
+	else if (snapshot == NULL || snapshot->snapshot_type == SNAPSHOT_ANY ||
+			 snapshot->snapshot_type == SNAPSHOT_NON_VACUUMABLE)
+		fd->meta_kept = CheckRelationLockedByMe(fd->base.rel, ShareLock, true);
+	else
+		fd->meta_kept = false;
+}
+
 static bool
 ao_tuple_fetch_row_version(Relation rel, ItemPointer tid, Snapshot snapshot,
 						   TupleTableSlot *slot)
 {
+	AoFetchCache *c = &ao_fetch_cache;
 	AoFetchDesc fd;
 	bool		found;
 
 	(void) ao_pending_flush(rel, tid);
-	fd = ao_fetch_begin(rel);
+	if (!ao_fetch_cache_matches(rel, snapshot))
+	{
+		MemoryContext old;
+
+		ao_fetch_cache_reset();
+		old = MemoryContextSwitchTo(TopTransactionContext);
+		fd = ao_fetch_begin(rel);
+		MemoryContextSwitchTo(old);
+		c->relid = RelationGetRelid(rel);
+		c->relnumber = rel->rd_locator.relNumber;
+		c->natts = RelationGetDescr(rel)->natts;
+		c->query = ao_dml_current_query();
+		c->snapshot = snapshot;
+		if (snapshot != NULL && snapshot->snapshot_type == SNAPSHOT_MVCC)
+		{
+			c->xmin = snapshot->xmin;
+			c->xmax = snapshot->xmax;
+			c->curcid = snapshot->curcid;
+			c->completions = snapshot->snapXactCompletionCount;
+		}
+		c->fd = fd;
+	}
+	fd = c->fd;
+	/* the caller's relcache entry, open for this call */
+	fd->base.rel = rel;
+	ao_fetch_keep_meta(fd, snapshot);
 	found = ao_fetch_row(fd, tid, snapshot, slot);
 
 	/* The slot's values point into the fetch's memory: keep a copy. */
 	if (found)
 		ExecMaterializeSlot(slot);
-	ao_fetch_end(fd);
 	return found;
 }
 
@@ -1252,6 +1428,8 @@ ao_relation_set_new_filelocator(Relation rel, const RelFileLocator *newrlocator,
 static void
 ao_relation_nontransactional_truncate(Relation rel)
 {
+	/* its files are written again from their start, under the same number */
+	ao_fetch_cache_reset();
 	ao_dml_flush(RelationGetRelid(rel));
 	ao_meta_delete_storage(ao_storage_id(rel));
 	RelationTruncate(rel, 0);
