@@ -50,10 +50,10 @@
 #   select    pgbench -S's point query, 20,000 statements: each one's
 #             parse (O26), its lock (O30), plan and execution
 #   tpcb      pgbench -N's transaction, 2,000 of them: UPDATE, SELECT and
-#             INSERT, each row updated asking O20, the history growing (O21)
+#             INSERT, the history growing (O21)
 #   update    an UPDATE of a unique column, which no HOT update is, over
 #             50,000 rows, and UPDATE ... RETURNING, DELETE ... RETURNING and
-#             MERGE: O16 for each row and unique index, O20 for each row
+#             MERGE: O16 for each row and unique index
 #   combocid  a transaction that updates its own rows again and reads them:
 #             a combo command ID made and looked up for each (R2)
 #   copy      COPY FROM a file of 200,000 rows, CREATE INDEX and DROP TABLE:

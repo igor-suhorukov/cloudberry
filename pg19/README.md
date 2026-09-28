@@ -338,8 +338,10 @@ of the core series, O13 to O21, O23 and O32:
   `pg_checksums` see them as any relation's pages.  What Cloudberry keeps in
   `pg_aoseg`, `pg_aovisimap` and `pg_aoblkdir` is in three tables of
   `gp_ao`'s.  Compression (zlib, zstd, rle_type), column `ENCODING`, the
-  columns `ALTER TABLE` adds without a rewrite, UPDATE through the plan's
-  old row (O20), unique indexes, BRIN and Cloudberry's bitmap index, VACUUM
+  columns `ALTER TABLE` adds without a rewrite, UPDATE, which fetches each
+  old row by its TID, a block read and decoded once for the rows it changes
+  in it (O20, a core patch until 2026-09-28, gave it the old row from the
+  plan), unique indexes, BRIN and Cloudberry's bitmap index, VACUUM
   and its compaction, an insert's rows spread over several segment files
   (`gp.appendonly_insert_files` and `..._tuples_range`) and
   `pg_appendonly.segfilecount` as ANALYZE counts it, on one node and on the
@@ -391,14 +393,14 @@ of the core series, O13 to O21, O23 and O32:
   resource manager (ID 199), and
   described by the rows of an aux table of its own.  PostgreSQL 19 asks it
   for its options (O14), the columns a scan reads (O15), a unique index's
-  probe (O16), its size (O19) and UPDATE's old row (O20), through the
-  registry (O13).  A row's number, 24 bits of file and 23 of row, is mapped
-  onto TIDs laid out for the table, 20 bits of file by default; statistics
-  of each file and group, min/max and bloom filters, skip those a scan's
-  conditions rule out; `CLUSTER` orders a table by its cluster columns,
-  Z-order or lexical, on every segment; ANALYZE samples it; and the
-  coordinator's planner sizes it, and an append-optimized table, as it
-  sizes a heap table.
+  probe (O16) and its size (O19), through the registry (O13), and UPDATE
+  fetches the old row by its TID.  A row's number, 24 bits of file and 23 of
+  row, is mapped onto TIDs laid out for the table, 20 bits of file by
+  default; statistics of each file and group, min/max and bloom filters,
+  skip those a scan's conditions rule out; `CLUSTER` orders a table by its
+  cluster columns, Z-order or lexical, on every segment; ANALYZE samples it;
+  and the coordinator's planner sizes it, and an append-optimized table, as
+  it sizes a heap table.
 
 M5's modules are built; what they leave open is in `cloudberry.md`.
 

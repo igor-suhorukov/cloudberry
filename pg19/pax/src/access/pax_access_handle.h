@@ -25,7 +25,7 @@
  *
  * Ported to PostgreSQL 19: the callbacks take PostgreSQL 19's arguments;
  * Cloudberry's own members of TableAmRoutine are gone, the ones PAX needs
- * becoming the TableAmExtRoutine the module registers (O13 to O20); and a
+ * becoming the TableAmExtRoutine the module registers (O13 to O19); and a
  * TID crosses the table access method's boundary translated between PAX's
  * layout and the table's (see pax_access_handle.cc).
  *-------------------------------------------------------------------------

@@ -28,10 +28,10 @@
  * tables (ao_meta.c).  What the core does not ask a table access method,
  * the registry asks (O13): the options (O14), the columns a scan reads
  * (O15), a unique index's probe (O16), the columns ALTER TABLE adds to a
- * table by column (O17), BRIN's runs of blocks (O18) and UPDATE's old row
- * (O20).  What Cloudberry shows of such a table -- pg_appendonly, gp_toolkit's
- * functions of it -- is in ao_toolkit.c, a column's own options in
- * ao_encoding.c, and VACUUM in ao_vacuum.c.
+ * table by column (O17) and BRIN's runs of blocks (O18).  What Cloudberry
+ * shows of such a table -- pg_appendonly, gp_toolkit's functions of it -- is
+ * in ao_toolkit.c, a column's own options in ao_encoding.c, and VACUUM in
+ * ao_vacuum.c.
  *
  * This file is what the module hooks: Cloudberry's spelling of the storage
  * options, the triggers Cloudberry refuses, the last phase of VACUUM, a
@@ -230,9 +230,10 @@ choose_access_method(char **accessMethod, List **options)
 
 /*
  * The row UPDATE and DELETE triggers Cloudberry refuses on an
- * append-optimized table: they fetch the old row by its TID, which a table
- * whose rows are in blocks cannot give (O20 gives UPDATE its old row from
- * the plan instead).
+ * append-optimized table, whose access method there fetched no row by its
+ * TID for them to be given the old row.  gp_ao's fetches one, as UPDATE
+ * fetches its old row (ao_am.c); the triggers are refused as Cloudberry
+ * refuses them, in its words, which its tests expect.
  */
 static void
 check_trigger(CreateTrigStmt *stmt)

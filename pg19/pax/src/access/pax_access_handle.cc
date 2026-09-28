@@ -27,14 +27,16 @@
  *     members of TableAmRoutine are gone: what PAX needs of them is the
  *     TableAmExtRoutine the module registers (O13) -- its options (O14), the
  *     columns a scan reads (O15, where Cloudberry began the scan with the
- *     plan node), a unique index's probe (O16), its size (O19) and UPDATE's
- *     old row from the plan (O20);
- *   - a row is fetched by its TID, as gp_core's split update fetches the old
- *     row, where Cloudberry's Split took it from the plan, and as a TID scan
- *     and an AFTER INSERT trigger fetch it -- its writer finished first, where
- *     the row is in memory still; a row UPDATE or DELETE trigger is refused
- *     as Cloudberry's CREATE TRIGGER refuses it, and, one a partition made
- *     since has from its parent, as the executor starts (O20's contract);
+ *     plan node), a unique index's probe (O16) and its size (O19);
+ *   - a row is fetched by its TID, as UPDATE, DELETE ... RETURNING and MERGE
+ *     fetch the old row, where Cloudberry's planner gave UPDATE the row whole
+ *     in the plan, as gp_core's split update fetches it, where Cloudberry's
+ *     Split took it from the plan, and as a TID scan and an AFTER INSERT
+ *     trigger fetch it -- its writer finished first, where the row is in
+ *     memory still; a row UPDATE or DELETE trigger is refused as Cloudberry's
+ *     CREATE TRIGGER refuses it, and, one a partition made since has from its
+ *     parent, as the executor starts, as Cloudberry's PAX refused it as it
+ *     fetched its row;
  *   - a TID crosses the method's boundary translated between PAX's layout,
  *     which its own code keeps, and the table's (pax_tid.h);
  *   - Cloudberry's executor called dml_init and dml_fini, and PostgreSQL 19's
@@ -979,10 +981,10 @@ static bool PaxTableOrPartitions(Oid relid) {
   return result;
 }
 
-// A row UPDATE or DELETE trigger, which fetches the old row by its TID,
-// where PAX's UPDATE takes it from the plan (O20, whose contract leaves such
-// triggers the method's to refuse): refused as Cloudberry's CreateTrigger()
-// refuses them on an append-optimized or a PAX table, in its words.
+// A row UPDATE or DELETE trigger, which is given the old row fetched by its
+// TID: refused as Cloudberry's CreateTrigger() refuses them on an
+// append-optimized or a PAX table, in its words, though PAX here fetches a
+// row by its TID as UPDATE fetches its old one.
 static void PaxCheckRowTrigger(CreateTrigStmt *stmt) {
   Oid relid;
 
@@ -1127,10 +1129,9 @@ static void paxProcessUtility(PlannedStmt *pstmt, const char *queryString,
 // A row UPDATE or DELETE trigger of a PAX table's that CREATE TRIGGER did not
 // refuse (PaxCheckRowTrigger()) -- one a partitioned table's partition made
 // since has from its parent: the executor gives it the old row by its TID,
-// whatever the plan carries, and PAX takes UPDATE's old row from the plan
-// (O20), whose contract leaves such triggers the method's to refuse
-// (tableamext.h).  Cloudberry's PAX refused them as a trigger fetched a row,
-// with these words.
+// which Cloudberry's PAX refused to fetch, with these words, as the trigger
+// fetched it.  PAX here fetches one, as UPDATE fetches its old row, and
+// refuses the trigger as the executor starts, as Cloudberry's did.
 static bool PaxRefuseRowTriggers(PlanState *ps, void *context) {
   if (ps == NULL) return false;
   if (IsA(ps, ModifyTableState)) {

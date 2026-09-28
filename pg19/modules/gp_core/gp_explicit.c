@@ -934,10 +934,10 @@ cast_to(Oid type, int32 typmod)
  * gp_s.gp_old", its text as a ROW() of its columns, which prints as the row
  * itself does, gp_t::text, and as the text of it the coordinator read
  * (explicit_rows_by_content()).  Not the whole-row reference itself: where
- * the table's access method takes UPDATE's old row from the plan (O20, PAX
- * and gp_ao), the plan has a whole-row column of RECORD, which setrefs.c
- * would give a reference of the table's row type too, refused as the join
- * of two rows or more reads it.
+ * the plan has a whole-row column of RECORD -- as a PAX or gp_ao table's
+ * UPDATE had, while O20, a core patch until 2026-09-28, took its old row
+ * from the plan -- setrefs.c would give a reference of the table's row type
+ * that column too, refused as the join of two rows or more reads it.
  */
 static char *
 row_text_match(Relation rel)

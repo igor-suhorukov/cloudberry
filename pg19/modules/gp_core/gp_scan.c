@@ -1639,13 +1639,14 @@ find_segment_of(Node *tree, Index relid)
 /*
  * The whole-row Var of varno's row the plan reads, first in the target the
  * rel gives the plan above it: of the table's row type, or of RECORD, as the
- * planner makes the one a foreign table's UPDATE reads, and O20's for a
- * table whose access method takes its old row from the plan.  The scan
- * tuple's column has the type the plan's Var expects, or the executor
- * refuses it; and one column serves every whole-row Var of the rel, which
- * setrefs.c matches by column number alone.  So RECORD's, where the plan
- * has one: the other is gp_segment_id's argument, segment_of(t.*), whose
- * call is a column of the scan tuple of its own and reads no whole row.
+ * planner makes the one a foreign table's UPDATE reads (and made one for a
+ * table whose access method took its old row from the plan, while O20 was a
+ * core patch, until 2026-09-28).  The scan tuple's column has the type the
+ * plan's Var expects, or the executor refuses it; and one column serves
+ * every whole-row Var of the rel, which setrefs.c matches by column number
+ * alone.  So RECORD's, where the plan has one: the other is gp_segment_id's
+ * argument, segment_of(t.*), whose call is a column of the scan tuple of its
+ * own and reads no whole row.
  */
 static bool
 find_whole_row_walker(Node *node, void *context)
