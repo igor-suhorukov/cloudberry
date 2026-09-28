@@ -70,6 +70,8 @@
  */
 #include "postgres.h"
 
+#include <ctype.h>
+#include <limits.h>
 #include <sys/stat.h>
 #include <unistd.h>
 
@@ -1039,6 +1041,56 @@ run_next(PlannedStmt *pstmt, bool readOnlyTree, void *arg)
 }
 
 /*
+ * CREATE TABLESPACE ... WITH (contentN = '<dir>'): a location of one
+ * segment's own, as Cloudberry's CreateTableSpace() takes it (tablespace.c).
+ * The coordinator refuses a content no segment has, in Cloudberry's words;
+ * a segment takes its own content's location, where the statement names
+ * one, in place of the statement's, so that its WAL record carries it and
+ * its mirror makes its directory there too; and every node takes the
+ * options out, which PostgreSQL's tablespace options do not know.  The
+ * statement to run here, which is the one given where it names no content.
+ * The coordinator sends the segments the one it was given.
+ */
+static CreateTableSpaceStmt *
+tablespace_own_location(CreateTableSpaceStmt *stmt)
+{
+	CreateTableSpaceStmt *own = NULL;
+	List	   *options = NIL;
+	ListCell   *lc;
+
+	foreach(lc, stmt->options)
+	{
+		DefElem    *opt = lfirst_node(DefElem, lc);
+		char	   *end = NULL;
+		long		content = -1;
+
+		if (strncmp(opt->defname, "content", 7) == 0 &&
+			isdigit((unsigned char) opt->defname[7]))
+			content = strtol(opt->defname + 7, &end, 10);
+		if (end == NULL || *end != '\0')
+		{
+			options = lappend(options, opt);
+			continue;
+		}
+
+		if (own == NULL)
+			own = copyObject(stmt);
+		if (GpClusterBackendRole() == GP_ROLE_DISPATCH &&
+			(content > INT_MAX || GpClusterSegmentByContent((int) content) == NULL))
+			ereport(ERROR,
+					(errcode(ERRCODE_SYNTAX_ERROR),
+					 errmsg("segment content ID %ld does not exist", content),
+					 errhint("Segment content IDs can be found in gp_segment_configuration table.")));
+		if (content == GpClusterContentId())
+			own->location = defGetString(opt);
+	}
+	if (own == NULL)
+		return stmt;
+	own->options = options;
+	return own;
+}
+
+/*
  * Run a tablespace's statement here: CREATE TABLESPACE in this node's
  * directory, and, on a segment, an in-place one as the coordinator allowed
  * it.  And a statement that sets a wrapper's, a server's or a foreign
@@ -1057,8 +1109,16 @@ run_tablespace_statement(PlannedStmt *pstmt, const char *queryString,
 	if (IsA(parsetree, CreateTableSpaceStmt))
 	{
 		CreateTableSpaceStmt *stmt = (CreateTableSpaceStmt *) parsetree;
+		CreateTableSpaceStmt *own = tablespace_own_location(stmt);
 		int			nestlevel = -1;
 
+		if (own != stmt)
+		{
+			pstmt = copyObject(pstmt);
+			pstmt->utilityStmt = (Node *) own;
+			readOnlyTree = false;
+			stmt = own;
+		}
 		if (dispatched && stmt->location != NULL && stmt->location[0] == '\0')
 		{
 			nestlevel = NewGUCNestLevel();

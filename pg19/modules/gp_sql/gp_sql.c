@@ -2337,6 +2337,8 @@ gp_sql_ProcessUtility(PlannedStmt *pstmt, const char *queryString,
 			GpDistributionAlterTableDone((AlterTableStmt *) parsetree, changed);
 			if (GpDistributionMakesUniqueIndex(parsetree))
 				GpDistributionCheckNewIndex(parsetree);
+			GpPartitionSetTablespace((AlterTableStmt *) parsetree, queryString,
+									 queryEnv);
 		}
 		else if (on_cluster_coordinator() && GpDistributionMakesUniqueIndex(parsetree))
 		{
@@ -2350,8 +2352,13 @@ gp_sql_ProcessUtility(PlannedStmt *pstmt, const char *queryString,
 			GpDistributionCheckNewIndex(parsetree);
 		}
 		else
+		{
 			GpSqlProcessUtilityNext(pstmt, queryString, readOnlyTree, context,
 									params, queryEnv, dest, qc);
+			if (IsA(parsetree, AlterTableStmt))
+				GpPartitionSetTablespace((AlterTableStmt *) parsetree,
+										 queryString, queryEnv);
+		}
 
 		if (IsA(parsetree, CreateStmt))
 			GpPartitionMade((CreateStmt *) parsetree);
@@ -2429,6 +2436,9 @@ gp_sql_ProcessUtility(PlannedStmt *pstmt, const char *queryString,
 				GpPartitionCreate(relid, partition_by, queryString, queryEnv);
 		}
 
+		if (is_alter)
+			GpPartitionSetTablespace((AlterTableStmt *) parsetree, queryString,
+									 queryEnv);
 		if (partition_cmds != NIL)
 			GpPartitionAlter((AlterTableStmt *) parsetree, partition_cmds,
 							 queryString, queryEnv);

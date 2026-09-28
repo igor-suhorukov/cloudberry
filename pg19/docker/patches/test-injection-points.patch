@@ -42,9 +42,34 @@ Cloudberry's does (the processed64bit tests):
   executor_run_high_processed           execMain.c, standard_ExecutorRun()
                                         and ExecutePlan(); spi.c, _SPI_pquery()
 
+And ten more under their own names, which the mirrors groups' tests of
+greenplum_schedule set around a database's and a tablespace's directories
+and a two-phase commit (createdb, gp_tablespace_with_faults and
+alter_db_set_tablespace): a database's directory copied from its template,
+and every tablespace's copy logged; a standby's removal of a database's
+directories as it replays their drop; a tablespace's directories made, and
+their record written; a PREPARE before its record, once the record is
+flushed -- in the critical section, run from the cache it is loaded into
+before it -- and done but for the wait for its standby; and the
+checkpointer's loop, at its top, where a fault that held it in a loop has it
+checkpoint once let go, as Cloudberry's does, and at once, where a test
+waits for it, and at its end:
+
+  create_db_after_file_copy        dbcommands.c, CreateDatabaseUsingFileCopy()
+  after_xlog_create_database       dbcommands.c, CreateDatabaseUsingFileCopy()
+  after_drop_database_directories  dbcommands.c, dbase_redo()
+  before_xlog_create_tablespace    tablespace.c, CreateTableSpace()
+  after_xlog_create_tablespace     tablespace.c, CreateTableSpace()
+  before_xlog_xact_prepare         twophase.c, EndPrepare()
+  after_xlog_xact_prepare_flushed  twophase.c, EndPrepare()
+  end_prepare_two_phase            twophase.c, EndPrepare()
+  ckpt_loop_begin                  checkpointer.c, CheckpointerMain()
+  ckpt_loop_end                    checkpointer.c, CheckpointerMain()
+
 gp_core's fault injector attaches a fault of Cloudberry's name to the point
 (gp_fault.c); walrecv-skip-flush is given a bool its callback sets to skip
-the flush.  They serve tests alone, so they are not in the core series:
+the flush, and ckpt_loop_begin one it sets when the fault held it in a
+loop.  They serve tests alone, so they are not in the core series:
 Dockerfile.pg applies this to the tree of either ref, vanilla or patched,
 so that the two images still differ only in the ref.  Dormant, as any
 point is: without injection points the macro is empty, and with them a
@@ -259,3 +284,148 @@ point nothing attached to runs no callback.
  			elog(ERROR, "consistency check on SPI tuple count failed");
  	}
  
+
+--- a/src/backend/commands/dbcommands.c
++++ b/src/backend/commands/dbcommands.c
+@@ -620,6 +620,9 @@
+ 		 */
+ 		copydir(srcpath, dstpath, false);
+ 
++		/* A test may fail the statement here, the directory copied. */
++		INJECTION_POINT("create_db_after_file_copy", NULL);
++
+ 		/* Record the filesystem change in XLOG */
+ 		{
+ 			xl_dbase_create_file_copy_rec xlrec;
+@@ -639,6 +642,10 @@
+ 		pfree(srcpath);
+ 		pfree(dstpath);
+ 	}
++
++	/* and here, every tablespace's copy logged */
++	INJECTION_POINT("after_xlog_create_database", NULL);
++
+ 	table_endscan(scan);
+ 	table_close(rel, AccessShareLock);
+ 
+@@ -3449,6 +3456,9 @@
+ 			pfree(dst_path);
+ 		}
+ 
++		/* A test may see that a standby removed the directories. */
++		INJECTION_POINT("after_drop_database_directories", NULL);
++
+ 		if (InHotStandby)
+ 		{
+ 			/*
+--- a/src/backend/commands/tablespace.c
++++ b/src/backend/commands/tablespace.c
+@@ -78,6 +78,7 @@
+ #include "utils/builtins.h"
+ #include "utils/fmgroids.h"
+ #include "utils/guc_hooks.h"
++#include "utils/injection_point.h"
+ #include "utils/memutils.h"
+ #include "utils/rel.h"
+ #include "utils/varlena.h"
+@@ -371,6 +372,9 @@
+ 
+ 	create_tablespace_directories(location, tablespaceoid);
+ 
++	/* A test may fail the statement here, the directories made. */
++	INJECTION_POINT("before_xlog_create_tablespace", NULL);
++
+ 	/* Record the filesystem change in XLOG */
+ 	{
+ 		xl_tblspc_create_rec xlrec;
+@@ -385,6 +389,9 @@
+ 		(void) XLogInsert(RM_TBLSPC_ID, XLOG_TBLSPC_CREATE);
+ 	}
+ 
++	/* and here, their record written */
++	INJECTION_POINT("after_xlog_create_tablespace", NULL);
++
+ 	/*
+ 	 * Force synchronous commit, to minimize the window between creating the
+ 	 * symlink on-disk and marking the transaction committed.  It's not great
+--- a/src/backend/access/transam/twophase.c
++++ b/src/backend/access/transam/twophase.c
+@@ -1201,6 +1201,14 @@
+ 	 */
+ 	XLogEnsureRecordSpace(0, records.num_chunks);
+ 
++	/*
++	 * A test may fail the prepare here, before its record is written.  The
++	 * point after the record's flush is in the critical section, where it
++	 * could not be loaded: it is loaded now.
++	 */
++	INJECTION_POINT("before_xlog_xact_prepare", NULL);
++	INJECTION_POINT_LOAD("after_xlog_xact_prepare_flushed");
++
+ 	START_CRIT_SECTION();
+ 
+ 	Assert((MyProc->delayChkptFlags & DELAY_CHKPT_START) == 0);
+@@ -1242,6 +1250,9 @@
+ 	 */
+ 	MarkAsPrepared(gxact, false);
+ 
++	/* A test may stop the server here, the prepare recorded and flushed. */
++	INJECTION_POINT_CACHED("after_xlog_xact_prepare_flushed", NULL);
++
+ 	/*
+ 	 * Now we can mark ourselves as out of the commit critical section: a
+ 	 * checkpoint starting after this will certainly see the gxact as a
+@@ -1258,6 +1269,9 @@
+ 
+ 	END_CRIT_SECTION();
+ 
++	/* A test may stop the server here, before the standby is waited for. */
++	INJECTION_POINT("end_prepare_two_phase", NULL);
++
+ 	/*
+ 	 * Wait for synchronous replication, if required.
+ 	 *
+--- a/src/backend/postmaster/checkpointer.c
++++ b/src/backend/postmaster/checkpointer.c
+@@ -66,6 +66,7 @@
+ #include "storage/subsystems.h"
+ #include "utils/acl.h"
+ #include "utils/guc.h"
++#include "utils/injection_point.h"
+ #include "utils/memutils.h"
+ #include "utils/resowner.h"
+ #include "utils/wait_event.h"
+@@ -382,6 +383,23 @@
+ 		ResetLatch(MyLatch);
+ 
+ 		/*
++		 * A test may hold the checkpointer here, before it takes in the
++		 * requests sent it; one held in a loop checkpoints once let go, at
++		 * once, as the test waits for it, the point's callback setting
++		 * "looped".
++		 */
++		{
++			bool		looped = false;
++
++			INJECTION_POINT("ckpt_loop_begin", &looped);
++			if (looped)
++			{
++				do_checkpoint = true;
++				flags |= CHECKPOINT_FAST;
++			}
++		}
++
++		/*
+ 		 * Process any requests or signals received recently.
+ 		 */
+ 		AbsorbSyncRequests();
+@@ -581,6 +599,9 @@
+ 		pgstat_report_checkpointer();
+ 		pgstat_report_wal(true);
+ 
++		/* A test may see that the checkpointer went round its loop. */
++		INJECTION_POINT("ckpt_loop_end", NULL);
++
+ 		/*
+ 		 * If any checkpoint flags have been set, redo the loop to handle the
+ 		 * checkpoint without sleeping.

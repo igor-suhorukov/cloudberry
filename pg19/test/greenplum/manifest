@@ -299,7 +299,7 @@ run  log_guc
 run  instr_in_shmem_setup
 run  instr_in_shmem
 group mirrors1
-skip createdb  in a group with mirrors: the faults create_db_after_file_copy and after_xlog_create_database, in CREATE DATABASE, and end_prepare_two_phase are none of the port's
+skip createdb  in a group with mirrors: differs: CREATE DATABASE commits on each segment in a transaction of its own, which prepares nothing, so the panic of end_prepare_two_phase is not reached, and the nodes that made the database keep its directories, which db_dirs() lists
 group m7a
 run  gp_aggregates_costs
 run  gp_metadata
@@ -316,8 +316,8 @@ run  gp_backend_info
 run  gp_locale
 skip spi_processed64bit  differs: an INSERT's count is the coordinator's own, which the fault executor_run_high_processed makes 2^32 - 11, where Cloudberry's is the sum of each segment's so made -- an UPDATE's and a DELETE's are that sum, as there -- and an INSERT ... SELECT of 10,000 rows reaches the fault's threshold, which no segment's share of it does
 group mirrors1
-skip gp_tablespace_with_faults  in a group with mirrors: the faults after_xlog_create_tablespace and after_xlog_tblspc_drop, in CREATE and DROP TABLESPACE, and before_xlog_xact_prepare and after_xlog_xact_prepare_flushed are none of the port's
-skip gp_tablespace  unlogged append-optimized tables are not supported; unrecognized parameter "content1": a tablespace's location of one segment's own is none of the port's
+skip gp_tablespace_with_faults  in a group with mirrors: differs: CREATE TABLESPACE runs on each node in a transaction of its own, so one a segment fails leaves the coordinator's directory and its standby's, which list_tablespace_dbid_dirs() finds
+skip gp_tablespace  in a group with mirrors: differs: __gp_aoseg() and __gp_aocsseg() of its unlogged tables, in gp_ao's format, and has_init_file() of their aux relations; and its DROP TABLESPACE, of a tablespace whose directories it removed first, warns as PostgreSQL's DropTableSpace() does: could not open directory "pg_tblspc/<oid>/PG_19_...": No such file or directory
 group m7a
 skip temp_tablespaces  its statement_mem of 1MB leaves the hash aggregate unspilled here, and its CTEs are a shared scan across slices under ORCA alone: gp_wait_until_triggered_fault() of sisc_xslice_temp_files and hashagg_spill_temp_files, faults the port has not, waits out the suite's minute
 run  default_tablespace
@@ -518,7 +518,7 @@ run  dropdb_check_shared_buffer_cache
 run  gp_upgrade_cornercases
 skip temp_relation  differs: a temporary table's file is t<proc number>_<relfilenode> in PostgreSQL 19, and the test looks for Cloudberry's t_<relfilenode>, which it finds on no node, before DROP TABLE and after
 group mirrors1
-skip alter_db_set_tablespace  in a group with mirrors: the faults inside_move_db_transaction and after_drop_database_directories, in ALTER DATABASE ... SET TABLESPACE, and ckpt_loop_begin and ckpt_loop_end are none of the port's, nor is the move of each segment's database
+skip alter_db_set_tablespace  in a group with mirrors: differs: ALTER DATABASE ... SET TABLESPACE moves the coordinator's database alone, the segments' staying where they were, and gp_wait_until_triggered_fault() of after_drop_database_directories on the mirrors waits out the suite's minute
 group m7b
 run  oid_wraparound
 skip fts_recovery_in_progress  canceling statement due to user request

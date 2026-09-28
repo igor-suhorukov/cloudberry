@@ -26,4 +26,9 @@ s/.//gs
 m/reset gp\.enable_parallel;/
 s/.//gs
 
+# A fault's error, which ends with a space in Cloudberry's words as in the
+# port's (faultinjector.c), and without it in Cloudberry's expected files.
+m/^ERROR:  fault triggered, fault name:'\w+' fault type:'\w+' $/
+s/ $//
+
 -- end_matchsubs

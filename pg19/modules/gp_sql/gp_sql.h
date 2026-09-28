@@ -371,6 +371,10 @@ extern List *GpPartitionTakeCmds(AlterTableStmt *stmt);
 extern void GpPartitionAlter(AlterTableStmt *stmt, List *options,
 							 const char *queryString, QueryEnvironment *queryEnv);
 
+/* ALTER TABLE ... SET TABLESPACE of a partitioned table, into its partitions. */
+extern void GpPartitionSetTablespace(AlterTableStmt *stmt, const char *queryString,
+									 QueryEnvironment *queryEnv);
+
 /*
  * WITH (appendonly = ..., orientation = ...) taken out of an option list, and
  * the access method it names returned: Cloudberry's greenplumLegacyAOoptions.

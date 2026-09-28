@@ -342,7 +342,9 @@ of the core series, O13 to O21, O23 and O32:
   and its compaction, an insert's rows spread over several segment files
   (`gp.appendonly_insert_files` and `..._tuples_range`) and
   `pg_appendonly.segfilecount` as ANALYZE counts it, on one node and on the
-  cluster;
+  cluster; and unlogged ones, which a crash empties, with their rows in
+  unlogged twins of `gp_ao`'s tables, as Cloudberry's have unlogged aux
+  tables;
 - `gp_exttable`: external tables, as foreign tables of `gp_exttable_server`
   -- `file://`, `EXECUTE`, `gpfdist://` and `http://` through libcurl, a
   protocol's own functions, text, CSV and a formatter's custom format,
@@ -371,7 +373,11 @@ of the core series, O13 to O21, O23 and O32:
   a mirror or a standby replays it, making a directory of its own on a
   machine it shares with its primary, and removing it again as it runs or
   replays DROP TABLESPACE -- and every node's `pg_tablespace_location()`
-  says the location, which `pg_dump` writes;
+  says the location, which `pg_dump` writes; `WITH (contentN = ...)` a
+  location of a content's own.
+  ALTER TABLE ... SET TABLESPACE of a partitioned table moves its
+  partitions too, as Cloudberry's does, where PostgreSQL 19 moves none and
+  sets only the default for new ones, which ALTER TABLE ONLY still does;
 - `COPY`: Cloudberry's options of `COPY FROM` -- `FILL MISSING FIELDS`,
   `NEWLINE`, and in text an `ESCAPE` of the user's or `OFF` -- through
   `gp_exttable`'s filter, which reads `SEGMENT REJECT LIMIT`'s lines too and

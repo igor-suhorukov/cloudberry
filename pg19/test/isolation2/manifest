@@ -37,6 +37,7 @@
 # gpexpand_catalog_lock, whose sessions hold every other session's catalog
 # changes, is in a group of its own, as the schedule keeps it.
 run  lockmodes                                     lockmodes
+skip prepared_xact_deadlock_pg_rewind  CREATE DATABASE commits on each segment in a transaction of its own, which prepares nothing: the fault after_xlog_xact_prepare_flushed it waits for is not reached
 run  select_dropped_table
 run  resource_queue_self_deadlock                  queues
 run  resource_queue_terminate                      queues
@@ -94,6 +95,7 @@ run  setup_startup_memory_accounting               memory
 run  oom_startup_memory                            memory
 run  restore_memory_accounting_default             memory
 run  runaway_query                                 memory
+skip concurrent_drop_truncate_tablespace       tablespace "concurrent_tblspace" is not empty, where Cloudberry's DROP TABLESPACE meets the lock a CREATE TABLE in the tablespace took, "could not lock tablespace" -- taken as a relation's file is made there (TablespaceCreateDbspace()), where PostgreSQL 19 takes none and no hook reaches -- and the fault drop_tablespace_after_acquire_lock; it waits for it
 run  local_directory_table_mixed
 run  sharedsnapshot
 run  export_distributed_snapshot
@@ -118,3 +120,8 @@ run  parallel_retrieve_cursor/fault_inject         retrieve
 run  parallel_retrieve_cursor/security             retrieve
 skip parallel_retrieve_cursor/privilege            CREATE USER by a user with CREATEROLE: "segment used 1 of the 2 OIDs the coordinator allocated for this statement", the segments running it as the gang's login user, which grants the new role to nobody
 run  parallel_retrieve_cursor/unset                retrieve
+#
+# And one of Cloudberry's isolation2_crash_schedule, whose other tests are
+# not listed: segments restarted between the two phases, which the
+# coordinator's recovery process ends.
+skip crash_recovery_dtm  unrecognized configuration parameter "dtx_phase2_retry_second"; function wait_till_master_shutsdown() does not exist, of Cloudberry's setup; and the faults before_orphaned_check and after_orphaned_check, of Cloudberry's recovery process, which the port's has no place for; it waits for them

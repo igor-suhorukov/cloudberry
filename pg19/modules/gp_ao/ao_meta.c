@@ -33,7 +33,8 @@
  *
  * They are ordinary tables, read and written here as the catalogs are, and
  * as MVCC as any: a reader sees the segment files, the deletions and the
- * blocks its snapshot sees.
+ * blocks its snapshot sees.  An unlogged table's rows are in unlogged twins
+ * of them, which a crash empties with the table (meta_relid()).
  *
  *-------------------------------------------------------------------------
  */
@@ -107,6 +108,22 @@ ao_meta_relid(const char *name, bool missing_ok)
 				 errmsg("gp_ao.%s does not exist", name),
 				 errhint("CREATE EXTENSION gp_ao in this database.")));
 	return relid;
+}
+
+/*
+ * One of the tables, or one of their indexes, the rows of storage_id's files
+ * are in.  An unlogged table's storage ID is negative (ao_storage_init()),
+ * and its rows are in the unlogged tables of the same name with "_unlogged"
+ * after it, which a crash empties as it empties the table, PostgreSQL
+ * resetting both from their init forks: Cloudberry's unlogged table has
+ * unlogged aux tables of its own.
+ */
+static Oid
+meta_relid(const char *name, int64 storage_id, bool missing_ok)
+{
+	if (storage_id < 0)
+		return ao_meta_relid(psprintf("%s_unlogged", name), missing_ok);
+	return ao_meta_relid(name, missing_ok);
 }
 
 /*
@@ -195,7 +212,7 @@ segfile_cmp(const void *a, const void *b)
 AoSegfile *
 ao_segfiles_read(int64 storage_id, Snapshot snapshot, int *nsegfiles)
 {
-	Relation	rel = table_open(ao_meta_relid("segfile", false), AccessShareLock);
+	Relation	rel = table_open(meta_relid("segfile", storage_id, false), AccessShareLock);
 	ScanKeyData key;
 	SysScanDesc scan;
 	HeapTuple	tup;
@@ -205,7 +222,7 @@ ao_segfiles_read(int64 storage_id, Snapshot snapshot, int *nsegfiles)
 	snapshot = meta_snapshot_begin(snapshot);
 	ScanKeyInit(&key, Anum_segfile_storage_id, BTEqualStrategyNumber,
 				F_INT8EQ, Int64GetDatum(storage_id));
-	scan = systable_beginscan(rel, ao_meta_relid("segfile_key", false), true,
+	scan = systable_beginscan(rel, meta_relid("segfile_key", storage_id, false), true,
 							  snapshot, 1, &key);
 	while ((tup = systable_getnext(scan)) != NULL)
 	{
@@ -244,7 +261,7 @@ segfile_version_cmp(const void *a, const void *b)
 AoSegfile *
 ao_segfiles_history(int64 storage_id, int *nsegfiles)
 {
-	Relation	rel = table_open(ao_meta_relid("segfile", false), AccessShareLock);
+	Relation	rel = table_open(meta_relid("segfile", storage_id, false), AccessShareLock);
 	ScanKeyData key;
 	SysScanDesc scan;
 	HeapTuple	tup;
@@ -254,7 +271,7 @@ ao_segfiles_history(int64 storage_id, int *nsegfiles)
 
 	ScanKeyInit(&key, Anum_segfile_storage_id, BTEqualStrategyNumber,
 				F_INT8EQ, Int64GetDatum(storage_id));
-	scan = systable_beginscan(rel, ao_meta_relid("segfile_key", false), true,
+	scan = systable_beginscan(rel, meta_relid("segfile_key", storage_id, false), true,
 							  SnapshotAny, 1, &key);
 	while ((tup = systable_getnext(scan)) != NULL)
 	{
@@ -277,7 +294,7 @@ ao_segfiles_history(int64 storage_id, int *nsegfiles)
 AoSegfile *
 ao_segfile_read(int64 storage_id, int segno, Snapshot snapshot)
 {
-	Relation	rel = table_open(ao_meta_relid("segfile", false), AccessShareLock);
+	Relation	rel = table_open(meta_relid("segfile", storage_id, false), AccessShareLock);
 	ScanKeyData key[2];
 	SysScanDesc scan;
 	HeapTuple	tup;
@@ -288,7 +305,7 @@ ao_segfile_read(int64 storage_id, int segno, Snapshot snapshot)
 				F_INT8EQ, Int64GetDatum(storage_id));
 	ScanKeyInit(&key[1], Anum_segfile_segno, BTEqualStrategyNumber,
 				F_INT4EQ, Int32GetDatum(segno));
-	scan = systable_beginscan(rel, ao_meta_relid("segfile_key", false), true,
+	scan = systable_beginscan(rel, meta_relid("segfile_key", storage_id, false), true,
 							  snapshot, 2, key);
 	if ((tup = systable_getnext(scan)) != NULL)
 	{
@@ -329,7 +346,7 @@ segfile_to_tuple(TupleDesc desc, int64 storage_id, const AoSegfile *sf)
 void
 ao_segfile_insert(int64 storage_id, int segno, int ngroups)
 {
-	Relation	rel = table_open(ao_meta_relid("segfile", false), RowExclusiveLock);
+	Relation	rel = table_open(meta_relid("segfile", storage_id, false), RowExclusiveLock);
 	AoSegfile	sf = {0};
 
 	sf.segno = segno;
@@ -349,7 +366,7 @@ ao_segfile_insert(int64 storage_id, int segno, int ngroups)
 void
 ao_segfile_update(int64 storage_id, AoSegfile *sf)
 {
-	Relation	rel = table_open(ao_meta_relid("segfile", false), RowExclusiveLock);
+	Relation	rel = table_open(meta_relid("segfile", storage_id, false), RowExclusiveLock);
 	HeapTuple	tup = segfile_to_tuple(RelationGetDescr(rel), storage_id, sf);
 
 	CatalogTupleUpdate(rel, &sf->tid, tup);
@@ -364,7 +381,7 @@ ao_segfile_delete(int64 storage_id, int segno)
 
 	if (sf != NULL)
 	{
-		Relation	rel = table_open(ao_meta_relid("segfile", false),
+		Relation	rel = table_open(meta_relid("segfile", storage_id, false),
 									 RowExclusiveLock);
 
 		CatalogTupleDelete(rel, &sf->tid);
@@ -376,7 +393,7 @@ ao_segfile_delete(int64 storage_id, int segno)
 static void
 delete_storage_rows(const char *table, const char *index, int64 storage_id)
 {
-	Relation	rel = table_open(ao_meta_relid(table, false), RowExclusiveLock);
+	Relation	rel = table_open(meta_relid(table, storage_id, false), RowExclusiveLock);
 	ScanKeyData key;
 	SysScanDesc scan;
 	HeapTuple	tup;
@@ -385,7 +402,7 @@ delete_storage_rows(const char *table, const char *index, int64 storage_id)
 
 	ScanKeyInit(&key, 1, BTEqualStrategyNumber, F_INT8EQ,
 				Int64GetDatum(storage_id));
-	scan = systable_beginscan(rel, ao_meta_relid(index, false), true,
+	scan = systable_beginscan(rel, meta_relid(index, storage_id, false), true,
 							  snapshot, 1, &key);
 	while ((tup = systable_getnext(scan)) != NULL)
 		CatalogTupleDelete(rel, &tup->t_self);
@@ -420,7 +437,7 @@ segfilecount_row(Relation rel, int64 storage_id)
 
 	ScanKeyInit(&key, Anum_segfilecount_storage_id, BTEqualStrategyNumber,
 				F_INT8EQ, Int64GetDatum(storage_id));
-	scan = systable_beginscan(rel, ao_meta_relid("segfilecount_key", false),
+	scan = systable_beginscan(rel, meta_relid("segfilecount_key", storage_id, false),
 							  true, snapshot, 1, &key);
 	tup = systable_getnext(scan);
 	if (tup != NULL)
@@ -434,7 +451,7 @@ segfilecount_row(Relation rel, int64 storage_id)
 int
 ao_segfilecount_get(int64 storage_id)
 {
-	Oid			relid = ao_meta_relid("segfilecount", true);
+	Oid			relid = meta_relid("segfilecount", storage_id, true);
 	Relation	rel;
 	HeapTuple	tup;
 	int			result = 0;
@@ -458,7 +475,7 @@ ao_segfilecount_get(int64 storage_id)
 void
 ao_segfilecount_set(int64 storage_id, int segfilecount)
 {
-	Relation	rel = table_open(ao_meta_relid("segfilecount", false),
+	Relation	rel = table_open(meta_relid("segfilecount", storage_id, false),
 								 RowExclusiveLock);
 	HeapTuple	old = segfilecount_row(rel, storage_id);
 	Datum		values[Natts_segfilecount];
@@ -484,7 +501,7 @@ void
 ao_blkdir_insert(int64 storage_id, int segno, int64 first_row, int nrows,
 				 const int64 *offsets, int noffsets)
 {
-	Relation	rel = table_open(ao_meta_relid("blkdir", false), RowExclusiveLock);
+	Relation	rel = table_open(meta_relid("blkdir", storage_id, false), RowExclusiveLock);
 	Datum		values[Natts_blkdir];
 	bool		nulls[Natts_blkdir] = {0};
 
@@ -506,8 +523,8 @@ bool
 ao_blkdir_lookup(int64 storage_id, int segno, int64 rownum, Snapshot snapshot,
 				 AoBlkdirEntry *entry)
 {
-	Relation	rel = table_open(ao_meta_relid("blkdir", false), AccessShareLock);
-	Relation	idx = index_open(ao_meta_relid("blkdir_key", false), AccessShareLock);
+	Relation	rel = table_open(meta_relid("blkdir", storage_id, false), AccessShareLock);
+	Relation	idx = index_open(meta_relid("blkdir_key", storage_id, false), AccessShareLock);
 	ScanKeyData key[3];
 	SysScanDesc scan;
 	HeapTuple	tup;
@@ -563,7 +580,7 @@ void
 ao_blkdir_insert_placeholder(int64 storage_id, int segno, int64 first_row,
 							 ItemPointer tid)
 {
-	Relation	rel = table_open(ao_meta_relid("blkdir", false), RowExclusiveLock);
+	Relation	rel = table_open(meta_relid("blkdir", storage_id, false), RowExclusiveLock);
 	Datum		values[Natts_blkdir];
 	bool		nulls[Natts_blkdir] = {0};
 	int64		none = -1;
@@ -586,7 +603,7 @@ ao_blkdir_replace(ItemPointer tid, int64 storage_id, int segno,
 				  int64 first_row, int nrows, const int64 *offsets,
 				  int noffsets)
 {
-	Relation	rel = table_open(ao_meta_relid("blkdir", false), RowExclusiveLock);
+	Relation	rel = table_open(meta_relid("blkdir", storage_id, false), RowExclusiveLock);
 	Datum		values[Natts_blkdir];
 	bool		nulls[Natts_blkdir] = {0};
 
@@ -614,8 +631,8 @@ ao_blkdir_scan_begin(int64 storage_id, int segno, Snapshot snapshot)
 {
 	AoBlkdirScan *bs = palloc0_object(AoBlkdirScan);
 
-	bs->rel = table_open(ao_meta_relid("blkdir", false), AccessShareLock);
-	bs->idx = index_open(ao_meta_relid("blkdir_key", false), AccessShareLock);
+	bs->rel = table_open(meta_relid("blkdir", storage_id, false), AccessShareLock);
+	bs->idx = index_open(meta_relid("blkdir_key", storage_id, false), AccessShareLock);
 	ScanKeyInit(&bs->key[0], Anum_blkdir_storage_id, BTEqualStrategyNumber,
 				F_INT8EQ, Int64GetDatum(storage_id));
 	ScanKeyInit(&bs->key[1], Anum_blkdir_segno, BTEqualStrategyNumber,
@@ -665,7 +682,7 @@ static void
 delete_segfile_rows(const char *table, const char *index, int64 storage_id,
 					int segno)
 {
-	Relation	rel = table_open(ao_meta_relid(table, false), RowExclusiveLock);
+	Relation	rel = table_open(meta_relid(table, storage_id, false), RowExclusiveLock);
 	ScanKeyData key[2];
 	SysScanDesc scan;
 	HeapTuple	tup;
@@ -676,7 +693,7 @@ delete_segfile_rows(const char *table, const char *index, int64 storage_id,
 	ScanKeyInit(&key[1], 2, BTEqualStrategyNumber, F_INT4EQ,
 				Int32GetDatum(segno));
 	snapshot = meta_snapshot_begin(GetLatestSnapshot());
-	scan = systable_beginscan(rel, ao_meta_relid(index, false), true,
+	scan = systable_beginscan(rel, meta_relid(index, storage_id, false), true,
 							  snapshot, 2, key);
 	while ((tup = systable_getnext(scan)) != NULL)
 		CatalogTupleDelete(rel, &tup->t_self);
@@ -705,8 +722,8 @@ visimap_first_row(int64 rownum)
 AoVisimap *
 ao_visimap_load(int64 storage_id, int segno, Snapshot snapshot)
 {
-	Relation	rel = table_open(ao_meta_relid("visimap", false), AccessShareLock);
-	Relation	idx = index_open(ao_meta_relid("visimap_key", false), AccessShareLock);
+	Relation	rel = table_open(meta_relid("visimap", storage_id, false), AccessShareLock);
+	Relation	idx = index_open(meta_relid("visimap_key", storage_id, false), AccessShareLock);
 	ScanKeyData key[2];
 	SysScanDesc scan;
 	HeapTuple	tup;
@@ -825,8 +842,8 @@ void
 ao_visimap_delete_rows(int64 storage_id, int segno, const int64 *rownums,
 					   int nrows)
 {
-	Relation	rel = table_open(ao_meta_relid("visimap", false), RowExclusiveLock);
-	Relation	idx = index_open(ao_meta_relid("visimap_key", false), AccessShareLock);
+	Relation	rel = table_open(meta_relid("visimap", storage_id, false), RowExclusiveLock);
+	Relation	idx = index_open(meta_relid("visimap_key", storage_id, false), AccessShareLock);
 	int			i = 0;
 
 	while (i < nrows)

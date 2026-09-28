@@ -8,7 +8,8 @@ plan lines -- named for the expected output it differs from.  In the orca
 pass, run.sh counts a test as passing when gpdiff.pl finds no difference, or
 exactly the file's; any other difference fails it, and is left in canon/.
 None of these tests differs in the planner pass, where PostgreSQL's tests are
-compared line for line.
+compared line for line, but by a statement of PostgreSQL's that is
+Cloudberry's SQL too (../postgres/README).
 
 The differences that were wrong answers or crashes were fixed rather than
 kept: see cloudberry.md, "The singlenode suites", for the seven the ORCA pass
@@ -86,3 +87,11 @@ The one query Cloudberry runs with the planner (subselect, one hunk)
   watchdog knows the statement and cancels it within seconds, where it
   cancels any other after 60.  The third hunk of subselect is EXPLAIN
   through a function.
+
+A statement of PostgreSQL's that is Cloudberry's SQL too (1)
+
+    tablespace
+
+  ALTER TABLE of a partitioned table SET TABLESPACE moves its partitions
+  too, as Cloudberry's does: the planner pass's difference, in both passes
+  (see ../postgres/README).

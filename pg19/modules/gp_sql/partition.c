@@ -3349,6 +3349,51 @@ run_cmd(Oid relid, GpPartParser *p, GpPartCmd *cmd, const char *queryString,
 }
 
 /*
+ * ALTER TABLE ... SET TABLESPACE of a partitioned table, once it has run --
+ * which, as PostgreSQL 19's, set the tablespace of the partitions to come --
+ * moves the partitions the table has, as Cloudberry's recurses
+ * (ATSimpleRecursion() for AT_SetTableSpace in its ATPrepCmd(),
+ * tablecmds.c): each by an ALTER TABLE of its own, run as a subcommand, so
+ * that a partitioned partition moves its own and each is dispatched as the
+ * statement it is.  ALTER TABLE ONLY moves none, as PostgreSQL 19's moves
+ * none.
+ */
+void
+GpPartitionSetTablespace(AlterTableStmt *stmt, const char *queryString,
+						 QueryEnvironment *queryEnv)
+{
+	AlterTableCmd *move = NULL;
+	Oid			relid;
+
+	if (stmt->objtype != OBJECT_TABLE || stmt->relation == NULL ||
+		!stmt->relation->inh)
+		return;
+	foreach_node(AlterTableCmd, cmd, stmt->cmds)
+	{
+		if (cmd->subtype == AT_SetTableSpace)
+			move = cmd;
+	}
+	if (move == NULL)
+		return;
+	relid = RangeVarGetRelid(stmt->relation, NoLock, true);
+	if (!OidIsValid(relid) || get_rel_relkind(relid) != RELKIND_PARTITIONED_TABLE)
+		return;
+
+	foreach_oid(child, find_inheritance_children(relid, NoLock))
+	{
+		AlterTableStmt *at = makeNode(AlterTableStmt);
+		AlterTableCmd *atc = makeNode(AlterTableCmd);
+
+		atc->subtype = AT_SetTableSpace;
+		atc->name = move->name;
+		at->relation = rv_of(child);
+		at->cmds = list_make1(atc);
+		at->objtype = OBJECT_TABLE;
+		run_utility((Node *) at, queryString, queryEnv);
+	}
+}
+
+/*
  * The partition commands of an ALTER TABLE, its gp.partition_cmd options, in
  * the order they were written, once the rest of the statement has run.
  */

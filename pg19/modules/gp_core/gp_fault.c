@@ -99,14 +99,21 @@ static const char *const fault_type_names[] = {
  * And the points of the tests' build that are Cloudberry's faults under
  * their own names, whose calls in Cloudberry say more than that they came:
  * an autovacuum worker's before it vacuums a database, and its update of
- * the database's row, which name the database, as a test's fault may; and
- * a count of rows made past 2^32, which a "skip" asks for.
+ * the database's row, which name the database, as a test's fault may; a
+ * count of rows made past 2^32, which a "skip" asks for; and the top of the
+ * checkpointer's loop, where a fault that held the checkpointer in a loop
+ * has it checkpoint once let go (CheckpointerMain(), checkpointer.c).  The
+ * build's other points under Cloudberry's names -- a database's copy and
+ * its drop's replay, a tablespace's directories, a PREPARE's record, the
+ * checkpointer's loop's end -- say only that they came, and need no line
+ * here.
  */
 typedef enum GpPointArg
 {
 	POINT_ARG_NONE,				/* nothing */
 	POINT_ARG_SKIP,				/* a bool *, set for a "skip" */
 	POINT_ARG_NAMES,			/* a const char *[2]: the database, the table */
+	POINT_ARG_LOOPED,			/* a bool *, set for an "infinite_loop" */
 } GpPointArg;
 
 static const struct
@@ -129,6 +136,7 @@ static const struct
 	{"auto_vac_worker_before_do_autovacuum", "auto_vac_worker_before_do_autovacuum", POINT_ARG_NAMES},
 	{"vacuum_update_dat_frozen_xid", "vacuum_update_dat_frozen_xid", POINT_ARG_NAMES},
 	{"executor_run_high_processed", "executor_run_high_processed", POINT_ARG_SKIP},
+	{"ckpt_loop_begin", "ckpt_loop_begin", POINT_ARG_LOOPED},
 };
 
 /* The injection point a fault is attached to: its own name, or PostgreSQL's. */
@@ -414,7 +422,8 @@ GpFaultTrigger(const char *name, const char *database, const char *table)
  * What an injection point runs, when one of PostgreSQL's own is set by the
  * name of a fault: the fault its private data names.  A point that is
  * skipped cannot say so to its caller, PostgreSQL's points having no answer,
- * but for one that gives its callback a bool to set (fault_points).  It may
+ * but for one that gives its callback a bool to set (fault_points), as one
+ * that held the caller in a loop says so to the checkpointer's.  It may
  * run in a critical section, as the two commits' of fault_points do, where
  * it allocates nothing but its log line, which the error context may.
  */
@@ -428,13 +437,17 @@ gp_fault_injection_point(const char *name, const void *private_data,
 	const char *fault = private_data != NULL ? (const char *) private_data : name;
 	const char *database = "";
 	const char *table = "";
-	bool		skip_arg = false;
+	GpFaultType answer = GP_FAULT_NONE;
+	GpFaultType type;
 
 #ifdef USE_INJECTION_POINTS
 	switch (arg != NULL ? fault_point_arg(fault) : POINT_ARG_NONE)
 	{
 		case POINT_ARG_SKIP:
-			skip_arg = true;
+			answer = GP_FAULT_SKIP;
+			break;
+		case POINT_ARG_LOOPED:
+			answer = GP_FAULT_INFINITE_LOOP;
 			break;
 		case POINT_ARG_NAMES:
 			database = ((const char *const *) arg)[0];
@@ -445,7 +458,8 @@ gp_fault_injection_point(const char *name, const void *private_data,
 	}
 #endif
 
-	if (GpFaultTrigger(fault, database, table) == GP_FAULT_SKIP && skip_arg)
+	type = GpFaultTrigger(fault, database, table);
+	if (answer != GP_FAULT_NONE && type == answer)
 		*(bool *) arg = true;
 }
 

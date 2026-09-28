@@ -412,7 +412,13 @@ gp_mirror_replay_wait(PG_FUNCTION_ARGS)
 
 	if (RecoveryInProgress())
 		PG_RETURN_VOID();
-	XLogFlush(GetXLogInsertRecPtr());
+
+	/*
+	 * The end of the last record, not the insert position, which after a
+	 * page's header is beyond anything written: a flush asked there fails,
+	 * "not satisfied".
+	 */
+	XLogFlush(GetXLogInsertEndRecPtr());
 	target = GetFlushRecPtr(NULL);
 
 	for (;;)

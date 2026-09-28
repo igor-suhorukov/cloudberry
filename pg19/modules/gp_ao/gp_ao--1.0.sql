@@ -633,3 +633,28 @@ FROM gp_toolkit.__check_missing_files;
 GRANT SELECT ON gp_toolkit.__get_expect_files_ext,
 	gp_toolkit.__check_missing_files_ext,
 	gp_toolkit.gp_check_missing_files_ext TO PUBLIC;
+
+/* ------------------------------------------------------------------------- */
+/* Unlogged append-optimized tables                                          */
+/* ------------------------------------------------------------------------- */
+
+/*
+ * An unlogged table's files have a negative storage ID, and their rows are
+ * in these, unlogged twins of the four tables above, which a crash empties
+ * as it empties the table -- PostgreSQL resets both from their init forks --
+ * as Cloudberry's unlogged table has unlogged aux tables of its own
+ * (ao_meta.c, meta_relid()).
+ */
+CREATE UNLOGGED TABLE gp_ao.segfile_unlogged (LIKE gp_ao.segfile) USING heap;
+CREATE UNIQUE INDEX segfile_key_unlogged ON gp_ao.segfile_unlogged (storage_id, segno);
+CREATE UNLOGGED TABLE gp_ao.visimap_unlogged (LIKE gp_ao.visimap) USING heap;
+CREATE UNIQUE INDEX visimap_key_unlogged ON gp_ao.visimap_unlogged (storage_id, segno, first_row);
+CREATE UNLOGGED TABLE gp_ao.blkdir_unlogged (LIKE gp_ao.blkdir) USING heap;
+CREATE UNIQUE INDEX blkdir_key_unlogged ON gp_ao.blkdir_unlogged (storage_id, segno, first_row);
+CREATE UNLOGGED TABLE gp_ao.segfilecount_unlogged (LIKE gp_ao.segfilecount) USING heap;
+CREATE UNIQUE INDEX segfilecount_key_unlogged ON gp_ao.segfilecount_unlogged (storage_id);
+
+REVOKE ALL ON gp_ao.segfile_unlogged, gp_ao.visimap_unlogged, gp_ao.blkdir_unlogged,
+	gp_ao.segfilecount_unlogged FROM PUBLIC;
+GRANT SELECT ON gp_ao.segfile_unlogged, gp_ao.visimap_unlogged, gp_ao.blkdir_unlogged,
+	gp_ao.segfilecount_unlogged TO PUBLIC;
