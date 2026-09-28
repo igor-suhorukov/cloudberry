@@ -462,6 +462,16 @@ dispatch_class(Node *parsetree)
 		case T_AlterSystemStmt:
 			return GP_DISPATCH_OWN_XACT;
 
+		/*
+		 * DISCARD TEMP drops the session's temporary tables, which are every
+		 * node's, in its transaction: Cloudberry dispatches it in two phases,
+		 * so that a ROLLBACK keeps them (discard.c).  DISCARD ALL, PLANS and
+		 * SEQUENCES are this node's.
+		 */
+		case T_DiscardStmt:
+			return ((DiscardStmt *) parsetree)->target == DISCARD_TEMP
+				? GP_DISPATCH_IN_XACT : GP_DISPATCH_LOCAL;
+
 		case T_VacuumStmt:
 			if (((VacuumStmt *) parsetree)->is_vacuumcmd)
 				return GP_DISPATCH_OWN_XACT;
@@ -1490,6 +1500,22 @@ gp_ddl_ProcessUtility(PlannedStmt *pstmt, const char *queryString,
 		return;
 	}
 
+	/*
+	 * DISCARD ALL, which resets this session here and nothing of it on the
+	 * segments -- their temporary tables stay -- says so, as Cloudberry's
+	 * does (discard.c): after its refusal inside a transaction block, and
+	 * before what it resets, client_min_messages among it.
+	 */
+	if (IsA(parsetree, DiscardStmt) &&
+		((DiscardStmt *) parsetree)->target == DISCARD_ALL)
+	{
+		PreventInTransactionBlock(context == PROCESS_UTILITY_TOPLEVEL, "DISCARD ALL");
+		ereport(NOTICE,
+				(errcode(MAKE_SQLSTATE('0', 'A', 'M', '0', '1')),
+				 errmsg("command without clusterwide effect"),
+				 errhint("Consider alternatives as DEALLOCATE ALL, or DISCARD TEMP if a clusterwide effect is desired.")));
+	}
+
 	class = dispatch_class(parsetree);
 	if (class == GP_DISPATCH_LOCAL)
 	{
@@ -1499,6 +1525,19 @@ gp_ddl_ProcessUtility(PlannedStmt *pstmt, const char *queryString,
 		/* ANALYZE: the all-visible pages are the segments' (gp_analyze.c) */
 		if (IsA(parsetree, VacuumStmt))
 			GpAnalyzeSegmentCounts((VacuumStmt *) parsetree);
+
+		/*
+		 * A SET of the client's, outside a transaction block: what it set is
+		 * told the segments now, if it is theirs too
+		 * (GpDispatchSyncSettingsNow()).  SET LOCAL, a SET in a block, in a
+		 * function or DO, RESET, SET ... FROM CURRENT and the rest are told
+		 * them with the next statement sent there.
+		 */
+		if (IsA(parsetree, VariableSetStmt) &&
+			((VariableSetStmt *) parsetree)->kind == VAR_SET_VALUE &&
+			!((VariableSetStmt *) parsetree)->is_local &&
+			context == PROCESS_UTILITY_TOPLEVEL && !IsTransactionBlock())
+			GpDispatchSyncSettingsNow(((VariableSetStmt *) parsetree)->name);
 		return;
 	}
 

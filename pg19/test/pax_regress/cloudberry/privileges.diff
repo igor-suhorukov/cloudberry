@@ -92,8 +92,11 @@
 +CONTEXT:  SQL function "mv_action" statement 1
 @@
 -ERROR:  not implemented yet on pax relations: TupleFetchRowVersion
-+ERROR:  current transaction is aborted, commands ignored until end of transaction block
-+ERROR:  unrecognized configuration parameter "allow_segment_dml"
++ERROR:  relation "sro_trojan_table" does not exist
++LINE 1: INSERT INTO sro_trojan_table DEFAULT VALUES; SELECT true
++                    ^
++QUERY:  INSERT INTO sro_trojan_table DEFAULT VALUES; SELECT true
++CONTEXT:  SQL function "mv_action" statement 1
 @@
 +NOTICE:  role "regress_sro_user" has already been granted membership in role "regress_priv_group2" by role "gpadmin"
 +WARNING:  owned
@@ -187,15 +190,16 @@
 +CONTEXT:  SQL function "mv_action" statement 1
 @@
 -ERROR:  not implemented yet on pax relations: TupleFetchRowVersion
-+ERROR:  current transaction is aborted, commands ignored until end of transaction block
-+ERROR:  unrecognized configuration parameter "allow_segment_dml"
-@@
-+ERROR:  unrecognized configuration parameter "allow_segment_dml"
-@@
-+ERROR:  unrecognized configuration parameter "allow_segment_dml"
-+CONTEXT:  SQL function "trap_sfunc" statement 1
++ERROR:  relation "sro_trojan_table" does not exist
++LINE 1: INSERT INTO sro_trojan_table DEFAULT VALUES; SELECT true
++                    ^
++QUERY:  INSERT INTO sro_trojan_table DEFAULT VALUES; SELECT true
++CONTEXT:  SQL function "mv_action" statement 1
 @@
 -ERROR:  cannot fire deferred trigger within security-restricted operation
--CONTEXT:  SQL function "trap_sfunc" statement 2
++ERROR:  relation "executor" does not exist
++LINE 1: SET gp.allow_segment_dml = ON; INSERT INTO executor VALUES (...
++                                                   ^
++QUERY:  SET gp.allow_segment_dml = ON; INSERT INTO executor VALUES (current_user); SELECT $1
 @@
 +ERROR:  must be able to SET ROLE "regress_roleoption_donor"

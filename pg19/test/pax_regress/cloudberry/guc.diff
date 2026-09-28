@@ -2,9 +2,6 @@
 -ERROR:  10000 ms is outside the valid range for parameter "vacuum_cost_delay" (0 .. 100)
 +ERROR:  10000 ms is outside the valid range for parameter "vacuum_cost_delay" (0 ms .. 100 ms)
 @@
--HINT:  Consider alternatives as DEALLOCATE ALL, or DISCARD TEMP if a clusterwide effect is desired.
--NOTICE:  command without clusterwide effect
-@@
 - 1MB        | 3MB
 + 125MB      | 125MB
 @@

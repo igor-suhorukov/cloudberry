@@ -353,6 +353,11 @@ gpsd  the statistics gpsd dumps and reads back, which are the port's
   row's fifth slot, kind 99.  And psql's \d+ of pg_statistic, whose
   not-null constraints PostgreSQL 19's psql lists.
 
+guc_gp  the faults reset on every node of gp_segment_configuration, four
+  here, where Cloudberry's demo cluster has eight: a mirror of each segment
+  and a standby, which only a group named mirrors has, and guc_gp needs
+  nothing else of one.
+
 ic (planner)  the interconnect a segment of a join sets up, where
   Cloudberry's fault interconnect_setup_palloc fails the query on segment
   0: the planner reads both tables through gathers and joins them here, and

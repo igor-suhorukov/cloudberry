@@ -27,7 +27,9 @@
 #         nodes must come before any test's temporary schema: a node makes
 #         its own, pg_temp_N by its own backend's number, with an OID of its
 #         own, where Cloudberry's coordinator dispatches one name and OID for
-#         a session's.  dynamic_table follows it there, which the planner's
+#         a session's.  guc_gp follows it there, whose count of the
+#         segments' pg_temp schemas is one each only before any other
+#         session's temporary tables; and dynamic_table, which the planner's
 #         pass alone runs: its 80 seconds of waiting for its job take no
 #         longer in a group of seconds than the longest group does
 #
@@ -75,6 +77,7 @@ run  distributed_transactions
 run  statement_mem_for_windowagg
 group ns
 run  namespace_gp
+run  guc_gp
 run  dynamic_table  planner  it turns optimizer off itself, so both passes would plan it alike, and ORCA's pass, on the planner's pass's clusters, would read the rows the planner's wrote into its external table's demoprot file on each segment too
 group g1
 run  bitmap_index
@@ -345,7 +348,6 @@ run  gp_explain
 skip explain_format  differs: EXPLAIN in each of its formats prints the port's plans, which this test compares
 run  olap_plans
 run  gp_copy_dtx
-skip guc_gp  unrecognized configuration parameter "allow_segment_dml"; relation "reset_test" already exists
 skip toast  spiexceptions.UndefinedTable: relation "pg_toast.pg_toast_25090" does not exist; spiexceptions.UndefinedTable: relation "pg_toast.pg_toast_25084" does not exist
 run  misc_jiras
 run  write_gang_idle_in_transaction_session_timeout

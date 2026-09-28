@@ -28,15 +28,16 @@ columns (type_sanity's attcacheoff), a leakproof function a superuser's
 alone (create_function_sql); privileges' own -- the MAINTAIN privilege
 ("arwdDxtm"), no RULE privilege, a role's grants and "must be able to SET
 ROLE", a security-restricted operation's safe search_path, which finds
-none of the test's functions before the operation refuses them -- and
-psql 19 passes over the data of a COPY FROM STDIN that failed, where 14's
-read each line as a command ("invalid command \.", copy).
+none of the test's functions and tables before the operation refuses what
+they do -- and psql 19 passes over the data of a COPY FROM STDIN that
+failed, where 14's read each line as a command ("invalid command \.",
+copy).
 
 The port's names and settings.  A setting of Cloudberry's core that the
 port has as a module's is shown by its name (resource_queue's SHOW
 gp.resource_scheduler);
 one it has not is unrecognized (gp_statistics_pullup_from_child_partition,
-gp_allow_date_field_width_5digits, planner_work_mem, allow_segment_dml);
+gp_allow_date_field_width_5digits, planner_work_mem);
 a table access method's handler is a function of its module's
 (gp_ao.ao_column_handler); the port's extensions' tables and functions are
 among a catalog's rows, and Cloudberry's own (gp_current_snapshot, the

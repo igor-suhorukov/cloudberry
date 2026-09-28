@@ -169,7 +169,13 @@ On a cluster (M2), `gp_core` and `gp_orca`:
 - every segment has each table's distribution policy, the `gp` label the
   coordinator writes;
 - Cloudberry's settings of the dispatcher and the planner, as `gp.*`, among
-  them direct dispatch's INFO lines and autostats;
+  them direct dispatch's INFO lines and autostats; a SET of the client's,
+  outside a transaction block, told the segments as it runs, as Cloudberry
+  dispatches one, so that a value a segment refuses fails the SET itself;
+  DISCARD TEMP on every node, in the statement's transaction; and
+  `gp.allow_segment_dml`, with which a function a segment runs in its
+  share of a plan may write there, as Cloudberry's allow_segment_DML lets
+  one;
 - SERIALIZABLE, on a cluster, is REPEATABLE READ, as in Cloudberry and
   Greenplum, and as the plan's Track C drops it (the DTM's effort table,
   "Drop": "SERIALIZABLE (as in Greenplum)"): each node's serializable

@@ -243,6 +243,7 @@ skip complex  type "complex" does not exist; relation "complex_ttbl" does not ex
 skip distributed_transactions  unrecognized configuration parameter "debug_abort_after_distributed_prepared"; unrecognized configuration parameter "debug_dtm_action_segment"
 group ns
 run  namespace_gp
+run  guc_gp
 group g1
 run  bitmap_index
 run  truncate_gp
@@ -419,7 +420,6 @@ skip gp_explain  unrecognized configuration parameter "gp_enable_explain_allstat
 skip explain_format  differs: EXPLAIN in each of its formats prints the port's plans, which this test compares
 run  olap_plans
 run  gp_copy_dtx
-skip guc_gp  unrecognized configuration parameter "gp_workfile_limit_per_query"; unrecognized configuration parameter "allow_segment_dml"
 run  misc_jiras
 skip gp_connections  differs: a primary takes a direct connection, where Cloudberry refuses it: This database instance is running as a primary segment in a Cloudberry cluster and does not permit direct connections
 skip gp_dump_query_oids  function gp_dump_query_oids(unknown) does not exist

@@ -89,6 +89,7 @@
 
 #include "gp_cluster.h"
 #include "gp_core_api.h"
+#include "gp_dispatch.h"
 #include "gp_fault.h"
 #include "gp_scan.h"
 #include "gp_settings.h"
@@ -102,6 +103,7 @@ bool		gp_debug_print_slice_table = false;
 bool		gp_enable_direct_dispatch = true;
 double		gp_motion_cost_per_row = 0;
 bool		gp_use_legacy_hashops = false;
+bool		gp_allow_segment_dml = false;
 
 static bool gp_enable_groupagg = true;
 
@@ -151,6 +153,8 @@ static bool gp_enable_sort_limit = true;
 static bool gp_enable_offload_entry_to_qe = false;
 static bool gp_cost_hashjoin_chainwalk = false;
 static int	gp_cached_gang_threshold = 5;
+static char *gp_pljava_classpath = NULL;
+static char *gp_pljava_vmoptions = NULL;
 
 /*
  * Cloudberry's gpvars_check_statement_mem(): statement_mem is less than
@@ -398,6 +402,16 @@ static void
 settings_executor_start(QueryDesc *queryDesc, int eflags)
 {
 	gather_slices = 0;
+
+	/*
+	 * The coordinator's settings, told a segment as its client's SET runs or
+	 * with the next statement (gp_dispatch.c): Cloudberry's fault at a QE's
+	 * SET (ExecSetVariableStmt(), guc_funcs.c).
+	 */
+	if (GpClusterIsDispatched() && queryDesc->sourceText != NULL &&
+		strncmp(queryDesc->sourceText, GP_SETTINGS_MARKER,
+				strlen(GP_SETTINGS_MARKER)) == 0)
+		(void) GP_FAULT("set_variable_fault");
 
 	if (prev_executor_start)
 		prev_executor_start(queryDesc, eflags);
@@ -746,6 +760,13 @@ GpSettingsInit(void)
 							 false, PGC_USERSET, GUC_NOT_IN_SAMPLE,
 							 NULL, NULL, NULL);
 
+	DefineCustomBoolVariable("gp.allow_segment_dml",
+							 "Allow DML on segments.",
+							 "A function that a segment runs in its share of a statement's plan may write, as Cloudberry lets a function on a QE write (querytree_safe_for_qe()); without it, such a function may only read.  Cloudberry calls this allow_segment_DML.",
+							 &gp_allow_segment_dml,
+							 false, PGC_USERSET, GUC_NOT_IN_SAMPLE,
+							 NULL, NULL, NULL);
+
 	DefineCustomEnumVariable("gp.autostats_mode",
 							 "Sets the autostats mode.",
 							 "Valid values are NONE, ON_CHANGE, ON_NO_STATS. ON_CHANGE requires setting gp.autostats_on_change_threshold.",
@@ -870,6 +891,18 @@ GpSettingsInit(void)
 						 "Enable the cost for walking the chain in the hash join."
 						 " Accepted for Cloudberry's scripts: the planner here costs a hash join as PostgreSQL does, which has no such term.",
 						 &gp_cost_hashjoin_chainwalk, false);
+	DefineCustomStringVariable("gp.pljava_classpath",
+							   "classpath used by the JVM",
+							   "Accepted for Cloudberry's scripts: PL/Java, which reads it, is none of the port's.  Cloudberry calls this pljava_classpath.",
+							   &gp_pljava_classpath,
+							   "", PGC_SUSET, GUC_NOT_IN_SAMPLE,
+							   NULL, NULL, NULL);
+	DefineCustomStringVariable("gp.pljava_vmoptions",
+							   "Options sent to the JVM when it is created",
+							   "Accepted for Cloudberry's scripts: PL/Java, which reads it, is none of the port's.  Cloudberry calls this pljava_vmoptions.",
+							   &gp_pljava_vmoptions,
+							   "", PGC_SUSET, GUC_NOT_IN_SAMPLE | GUC_SUPERUSER_ONLY,
+							   NULL, NULL, NULL);
 
 	/*
 	 * Cloudberry's is GUC_NO_SHOW_ALL too, which here would hide it from

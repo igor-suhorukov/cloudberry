@@ -157,7 +157,8 @@ done
 			debug_resource_group|runaway_detector_activation_percent|\
 			vmem_process_interrupt|explain_memory_verbosity|coredump_on_memerror|\
 			enable_offload_entry_to_qe|debug_dtm_action*|debug_abort_after_distributed_prepared|\
-			debug_print_full_dtm|enable_answer_query_using_materialized_views|aqumv_allow_foreign_table)
+			debug_print_full_dtm|enable_answer_query_using_materialized_views|aqumv_allow_foreign_table|\
+			allow_segment_dml|pljava_classpath|pljava_vmoptions)
 				cbname="$short" ;;
 			*) cbname="gp_$short" ;;
 		esac

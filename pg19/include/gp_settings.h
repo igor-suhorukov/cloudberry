@@ -44,6 +44,9 @@ extern double gp_motion_cost_per_row;
 /* gp.use_legacy_hashops: a new key's legacy operator classes (GpPolicyColumnOpclass) */
 extern bool gp_use_legacy_hashops;
 
+/* gp.allow_segment_dml: a function in a segment's share of a plan may write (gp_motion.c) */
+extern bool gp_allow_segment_dml;
+
 /* gp.statement_mem, in kB: what gp_resource budgets a query by */
 extern PGDLLIMPORT int gp_statement_mem;
 

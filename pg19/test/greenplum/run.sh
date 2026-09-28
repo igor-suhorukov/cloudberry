@@ -364,9 +364,10 @@ t1=$(date +%s)
 	# the column SHOW names, read as a row's field; SET, RESET and SHOW;
 	# current_setting() and set_config(); SHOW's header, the same width
 	# spelled either way (see the singlenode suite); an error's naming of a
-	# setting, parameter "gp_..."; and gpconfig's -c, -r and -s, which set,
-	# remove and show a setting in every node's configuration file
-	echo "kinds field set func header param gpconfig"
+	# setting, parameter "gp_..."; gpconfig's -c, -r and -s, which set,
+	# remove and show a setting in every node's configuration file; and a
+	# row of pg_settings by name = '...', as the isolation2 suite has it
+	echo "kinds field set func header param gpconfig nameeq"
 	PGHOST="$(node_sock "${groups[0]}" 0)" PGPORT="$(node_port 0 0)" \
 	"$PSQL" -X -q -t -A -d postgres -c "SELECT name FROM pg_settings WHERE name LIKE 'gp.%' ORDER BY length(name) DESC" |
 	while read -r name; do
@@ -380,7 +381,8 @@ t1=$(date +%s)
 			vmem_process_interrupt|explain_memory_verbosity|coredump_on_memerror|\
 			debug_print_slice_table|\
 			enable_offload_entry_to_qe|debug_dtm_action*|debug_abort_after_distributed_prepared|\
-			debug_print_full_dtm|enable_answer_query_using_materialized_views|aqumv_allow_foreign_table)
+			debug_print_full_dtm|enable_answer_query_using_materialized_views|aqumv_allow_foreign_table|\
+			allow_segment_dml|pljava_classpath|pljava_vmoptions)
 				cbname="$short" ;;
 			*) cbname="gp_$short" ;;
 		esac
