@@ -53,14 +53,109 @@ modules look for, which is how they detect that they were listed before it.
 
 ## Building
 
-    meson setup build -Dpg_config=/path/to/patched/pg19/bin/pg_config
+The modules build only against PostgreSQL 19 with the core patch series,
+and run only in that server: configured against any other `pg_config`, the
+build stops with an error saying so (`-Drequire_patched_pg=false`
+configures anyway).
+
+### The patched PostgreSQL 19
+
+The series is 22 commits on `REL_19_STABLE`, branch
+[`REL_19_STABLE_CLOUDBERRY`](https://github.com/igor-suhorukov/postgres/tree/REL_19_STABLE_CLOUDBERRY)
+of `igor-suhorukov/postgres`, and it builds as any PostgreSQL 19 does. The
+options below are those of `docker/Dockerfile.pg`, the build the port is
+tested against; any prefix will do, and `$HOME/pg19` needs no root. On
+Debian or Ubuntu:
+
+    sudo apt-get install build-essential meson ninja-build pkg-config bison flex \
+        perl python3 python3-dev git gettext libreadline-dev zlib1g-dev \
+        libicu-dev libssl-dev liblz4-dev libzstd-dev libxml2-dev libxslt1-dev \
+        libldap-dev
+
+    git clone --depth 1 --branch REL_19_STABLE_CLOUDBERRY \
+        https://github.com/igor-suhorukov/postgres.git
+    cd postgres
+    meson setup build --prefix=$HOME/pg19 --buildtype=debugoptimized \
+        -Dcassert=true -Dinjection_points=true \
+        -Dssl=openssl -Dicu=enabled -Dlz4=enabled -Dzstd=enabled \
+        -Dplpython=enabled -Dldap=enabled
     ninja -C build
     ninja -C build install
+    export PATH=$HOME/pg19/bin:$PATH
+
+Some of these options serve testing rather than running. `-Dcassert=true`
+turns on the server's assertions, which are what catch a hook that breaks
+an invariant, and ORCA's own debug checks follow them (the port's
+`-Dorca_debug`); measurements are taken with `-Dcassert=false`.
+`-Dinjection_points=true` lets `gp_inject_fault()` reach the faults
+Cloudberry's tests set inside PostgreSQL's own code, and PL/Python and LDAP
+serve the tests that write functions in `plpython3u` or read `ldap` lines
+of `pg_hba.conf`. A server built without them runs the modules; only those
+tests stop.
+
+The port's own tests want more injection points than PostgreSQL has, at
+Cloudberry's faults in replication, vacuum, two-phase commit, a spill and
+elsewhere. They are not part of the series: to run those tests, apply them
+before `meson setup`.
+
+    for p in /path/to/cloudberry/pg19/docker/patches/*.patch; do
+        patch -p1 < "$p"
+    done
+
+### The modules
+
+They take the server's packages and these besides: xerces-c for ORCA,
+protocol buffers for PAX and `gp_stats_collector`, liburing for PAX,
+libcurl for external tables, PXF, S3 and `gpfts`, APR and libevent for
+`gpfdist` and libyaml for its transforms, jansson for `gpfts`, and libuv
+for the interconnect's proxy.
+
+    sudo apt-get install libxerces-c-dev protobuf-compiler libprotobuf-dev \
+        liburing-dev libcurl4-openssl-dev libapr1-dev libevent-dev \
+        libyaml-dev libjansson-dev libuv1-dev
+
+Of this tree's git submodules the build uses two, both PAX's and both
+optional: tabulate, which its dump functions (`dump_pax_file_desc()` and
+the rest) print through, and googletest, which its unit tests, the
+test-only module `pax_gtest`, are written with.
+
+    git clone --depth 1 --branch extension_postgresql_19 \
+        https://github.com/igor-suhorukov/cloudberry.git
+    cd cloudberry
+    git submodule update --init contrib/pax_storage/src/cpp/contrib/tabulate \
+        contrib/pax_storage/src/cpp/contrib/googletest
+    cd pg19
+    meson setup build -Dpg_config=$HOME/pg19/bin/pg_config
+    ninja -C build
+    ninja -C build install
+    PG_BINDIR=$HOME/pg19/bin test/load/run.sh
+
+The modules install into that server's own directories, gpMgmt's tools
+beside its programs, and find its libpq through their run path, so nothing
+needs `LD_LIBRARY_PATH`. `test/load/run.sh` then starts servers with them
+and checks that every module loads, and that the ones which may only be
+preloaded refuse to load any other way.
+
+A part whose libraries are missing is left out rather than failing the
+build: `gpfdist` without APR or libevent, `gpfts` without libcurl or
+jansson, the proxy without libuv, and PXF and the `http://` and
+`gpfdist://` locations of external tables without libcurl. ORCA, PAX and
+gpcloud fail the build without theirs, and so does `gp_stats_collector`,
+which has no switch, without protocol buffers; `-Dorca=false`,
+`-Dpax=false` and `-Dgpcloud=false` leave the first three out. gpMgmt's
+tools run on Python 3 with PyGreSQL and psutil (`python3-pygresql`,
+`python3-psutil`).
+
+### In Docker
 
 Or, without installing anything on the host:
 
     docker compose -f pg19/docker/compose.yml build
     docker compose -f pg19/docker/compose.yml run --rm tests load
+
+Compose builds the patched server itself, with `docker/Dockerfile.pg`, from
+a clone of the fork, made as above, that lies beside this repository's
+checkout (`../postgres`); `PG_SRC=/path/to/postgres` points it elsewhere.
 
 ## Status
 
