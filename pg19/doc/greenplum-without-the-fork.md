@@ -1,5 +1,7 @@
 # Greenplum Without the Fork: Apache Cloudberry as PostgreSQL 19 Extensions
 
+> This is my personal experiment, not an official Apache Cloudberry release.
+
 Greenplum has always lagged PostgreSQL by a few releases. Greenplum 6 shipped on PostgreSQL 9.4, Greenplum 7 on 12, and Apache Cloudberry 2.x on 14; Cloudberry's main branch reached 16.9 only in May 2026. The cause is structural: this MPP database is a fork. Cloudberry edits 882 PostgreSQL backend and header files (+132,680/−12,980 lines) and adds 646 more (+328,227), before counting the 1.66 million lines of the ORCA optimizer, test data included. Each new PostgreSQL major means months of merging, and by the time a merge lands, upstream has moved on.
 
 In September 2026 I tried the opposite direction. Instead of pulling PostgreSQL into Cloudberry, I put Cloudberry on top of PostgreSQL 19 as a set of extensions. One rule was non-negotiable: a server with my core patches but without Cloudberry loaded must be indistinguishable from vanilla PostgreSQL 19, down to catalog bytes and executed instructions. Claude Code wrote the code, in dozens of sessions and agents working in parallel git worktrees. I set the goals, made the calls and checked the results.
@@ -18,7 +20,7 @@ It took 12 days and 629 commits. The result is a real Greenplum-style MPP engine
 | TPC-H + TPC-DS, scale factor 1 | ORCA plans all 121 queries; answers match DuckDB's; 3.1× and 4.0× faster than the non-ORCA fallback |
 | Cost of the dormant hooks | −0.005% to +0.155% executed instructions |
 
-Code: [core series](https://github.com/igor-suhorukov/postgres/tree/REL_19_STABLE_CLOUDBERRY), [port](https://github.com/igor-suhorukov/cloudberry/tree/extension_postgresql_19/pg19).
+Code: [core series](https://github.com/igor-suhorukov/postgres/tree/REL_19_STABLE_CLOUDBERRY), [port](https://github.com/igor-suhorukov/cloudberry/tree/extension_postgresql_19/pg19), [build instructions](https://github.com/igor-suhorukov/cloudberry/tree/extension_postgresql_19/pg19#building).
 
 ## Why an extension
 
@@ -423,4 +425,4 @@ Only 691 of Cloudberry's 1,180 test files run so far, and that sets the goal. Th
 
 As for the process, it worked not because an AI types faster, but because it ran like a good engineering team. Research came with verifiable citations, invariants were checked by machines, "done" meant "run and tested", agents worked in isolated worktrees, and a human signed off every change to the core. The Greenplum fork took years to move from PostgreSQL 9.4 to 12. The extension's next major-version move is 22 small patches and a compatibility layer.
 
-Project result: [core series](https://github.com/igor-suhorukov/postgres/tree/REL_19_STABLE_CLOUDBERRY), [port](https://github.com/igor-suhorukov/cloudberry/tree/extension_postgresql_19/pg19).
+Project result: [core series](https://github.com/igor-suhorukov/postgres/tree/REL_19_STABLE_CLOUDBERRY), [port](https://github.com/igor-suhorukov/cloudberry/tree/extension_postgresql_19/pg19), [build instructions](https://github.com/igor-suhorukov/cloudberry/tree/extension_postgresql_19/pg19#building).
