@@ -1,5 +1,7 @@
 # Greenplum Without the Fork: Apache Cloudberry as PostgreSQL 19 Extensions
 
+> This is my personal experiment, not an official Apache Cloudberry release.
+
 Since 2017 I have been keeping an eye on the PostgreSQL ecosystem for analytics and data warehousing. At work I had used AWS Redshift, with all the drawbacks and inconveniences a developer gets from a fork of an old PostgreSQL. To my mind, the ideal PostgreSQL-based solution should run on the latest PostgreSQL release, be built as an extension, be easy to start locally in a container for tests, and work with the latest versions of existing extensions such as PostGIS and pgvector.
 
 Citus came closest to what I wanted, but I wouldn't call it a full-fledged massively parallel processing (MPP) system. It is more about sharding data for OLTP workloads.
