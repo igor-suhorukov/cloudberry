@@ -2787,6 +2787,51 @@ same "a custom plan's is a constant by then, and ORCA's" \
      "EXECUTE w2(2)" \
      "PREPARE w2(int) AS SELECT i, sum(i) OVER (ORDER BY i ROWS \$1 PRECEDING) FROM t1a WHERE i < 10 ORDER BY 1; SET plan_cache_mode = force_custom_plan"
 
+# ORCA's hashed window, which gp.optimizer_force_window_hash_agg offers it
+# beside every sorted one, asks its input for no order and is costed as the
+# sorted one is, so it wins wherever the sorted one needs a Sort.  Cloudberry
+# makes it a WindowHashAgg, a node PostgreSQL 19 does not have, and the
+# translator refused it: with the setting on, those windows went to the
+# planner.  It is lowered to the sorted window it stands for, a WindowAgg
+# over a Sort by the partition columns and then the window's order.
+hw="SET gp.optimizer_force_window_hash_agg = on"
+shape "the hashed window, a WindowAgg over a Sort by its partition and then its order" \
+      "Sort Key: t1a.j, t1a.i DESC" \
+      "SELECT i, j, rank() OVER (PARTITION BY j ORDER BY i DESC) FROM t1a ORDER BY 1, 2" "$hw"
+same "... NULLS FIRST, in a ROWS frame" \
+     "SELECT i, j, sum(i) OVER (PARTITION BY j ORDER BY i NULLS FIRST ROWS BETWEEN 2 PRECEDING AND CURRENT ROW) FROM t1a ORDER BY 1, 2" "$hw"
+got=$(q2 "$hw" "EXPLAIN (COSTS OFF) SELECT i, rank() OVER (PARTITION BY j ORDER BY i), count(*) OVER (PARTITION BY t ORDER BY j, i) FROM t1a")
+case "$got" in
+	*WindowAgg*"->  Sort"*WindowAgg*"->  Sort"*"Seq Scan"*"Optimizer: GPORCA"*) ok "... two windows, each over a Sort of its own" ;;
+	*) notok "... two windows, each over a Sort of its own" "$got" ;;
+esac
+same "... which answer as the planner's do" \
+     "SELECT i, rank() OVER (PARTITION BY j ORDER BY i), count(*) OVER (PARTITION BY t ORDER BY j, i) FROM t1a ORDER BY 1, 2, 3" "$hw"
+same "... over a join and a grouping" \
+     "SELECT t1a.j, count(*), rank() OVER (ORDER BY count(*) DESC, t1a.j) FROM t1a JOIN t1b ON t1a.j = t1b.k GROUP BY t1a.j ORDER BY 1" "$hw"
+got=$(q2 "$hw" "EXPLAIN (COSTS OFF) SELECT count(*) OVER () FROM t1a")
+case "$got" in
+	*Sort*) notok "... OVER (), with no Sort to add" "$got" ;;
+	*WindowAgg*"Optimizer: GPORCA"*) ok "... OVER (), with no Sort to add" ;;
+	*) notok "... OVER (), with no Sort to add" "$got" ;;
+esac
+# A subquery's plan run again for each outer row: the Sort sorts again when
+# the outer row changes, which the parameters it is given say it depends on.
+same "... in a subquery run again for each outer row" \
+     "SELECT k, (SELECT max(r) || '/' || sum(r) FROM (SELECT rank() OVER (PARTITION BY t ORDER BY i) r FROM t1a WHERE t1a.j + 0 = t1b.k) s) FROM t1b WHERE i < 40 ORDER BY 1, 2" \
+     "$hw; SET gp.optimizer_enforce_subplans = on"
+# ORCA takes the window to pass its input's order up, and the Sort reorders
+# the input.  An order asked of the window is safe: ORCA puts a Sort above
+# it.  A CTE's reader is not: it takes its producer's order and asks for
+# none, and below, the first LIMIT would keep the first seven rows the index
+# scan returned -- after the Sort, seven others, as a build without this
+# refusal answered.  So over rows ORCA takes to be in order, the window is
+# refused, and the planner plans it.
+declined "... but not over rows ORCA takes to be in order, which a CTE's reader keeps" \
+         "WITH c AS (SELECT i, j, count(*) OVER (PARTITION BY j) n FROM t1a WHERE i < 40)
+          (SELECT i, n FROM c ORDER BY i LIMIT 7) UNION ALL (SELECT i, n FROM c ORDER BY i DESC LIMIT 3)" \
+         "a hashed window over rows ORCA takes to be in order" "$hw"
+
 # --- CTEs ------------------------------------------------------------------------------
 #
 # A CTE producer is a subplan run by an initplan, and each consumer a CTE Scan

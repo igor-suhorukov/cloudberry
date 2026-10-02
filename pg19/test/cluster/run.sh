@@ -2455,6 +2455,19 @@ $((n + 1))" ] && ok "a serial column's values, taken on the segments from the co
 	orca_same "a window partitioned off the key, merged in order" \
 		"SELECT a, rank() OVER (PARTITION BY b ORDER BY a DESC) FROM o WHERE a > 990 ORDER BY b, a;" \
 		"Merge Key"
+	# ORCA's hashed window, which the translator lowers to a WindowAgg over a
+	# Sort (the orca suite's section 22): the Sort is local, above the
+	# Redistribute Motion that brings each partition to one segment, and the
+	# window runs on the segments.  Refused, it went to the planner, which
+	# gathered every row and ran the window on the coordinator.
+	sql="SELECT a, rank() OVER (PARTITION BY b ORDER BY a DESC) FROM o WHERE a > 990"
+	plan=$(q 0 "SET gp.optimizer_force_window_hash_agg = on; EXPLAIN (COSTS OFF) $sql;")
+	want=$(q 0 "SET gp.optimizer = off; $sql ORDER BY b, a;")
+	got=$(q 0 "SET gp.optimizer_force_window_hash_agg = on; $sql ORDER BY b, a;")
+	[[ "$plan" == *"Gather Motion"*"WindowAgg"*"Sort Key: o.b, o.a DESC"*"Redistribute Motion"*"Optimizer: GPORCA"* ]] \
+		&& [ "$got" = "$want" ] && [ -n "$got" ] \
+		&& ok "the hashed window: sorted on the segments, after the Redistribute Motion, and run there" \
+		|| notok "the hashed window on the segments" "$plan / ORCA: $got / planner: $want"
 
 	# A Gather in the coordinator's own slice -- Cloudberry's entry DB --
 	# below a Motion the coordinator sends from: the coordinator runs it as

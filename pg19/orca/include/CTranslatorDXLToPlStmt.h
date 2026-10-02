@@ -339,19 +339,24 @@ private:
 			ctxt_translation_prev_siblings	// translation contexts of previous siblings
 	);
 
-	// translate DXL window node into GPDB window node
+	// translate DXL window node into GPDB window node, over a Sort of its
+	// input where sort_input says so
 	Plan *TranslateDXLWindowAgg(
 		const CDXLNode *motion_dxlnode, CDXLTranslateContext *output_context,
 		CDXLTranslationContextArray *
-			ctxt_translation_prev_siblings	// translation contexts of previous siblings
-	);
+			ctxt_translation_prev_siblings,	// translation contexts of previous siblings
+		BOOL sort_input = false);
 
-	// translate DXL window node into window hash agg node
+	// translate DXL hashed window node into a WindowAgg over a Sort
 	Plan *TranslateDXLWindowHashAgg(
 		const CDXLNode *window_dxlnode, CDXLTranslateContext *output_context,
 		CDXLTranslationContextArray 
 			*ctxt_translation_prev_siblings	// translation contexts of previous siblings
 	);
+
+	// a Sort of a window's input by its partition and order columns
+	Plan *MakeWindowInputSort(const WindowAgg *window, const Oid *ord_sort_ops,
+							  const bool *ord_nulls_first, Plan *child_plan);
 
 	// translate DXL sort node into GPDB Sort plan node
 	Plan *TranslateDXLSort(

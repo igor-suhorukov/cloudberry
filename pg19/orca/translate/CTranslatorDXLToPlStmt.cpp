@@ -3872,13 +3872,16 @@ int WindowFrameEndBoundaryToOptions(const EdxlFrameBoundary &dxlFB) {
 //		CTranslatorDXLToPlStmt::TranslateDXLWindowAgg
 //
 //	@doc:
-//		Translate DXL window node into GPDB window plan node
+//		Translate DXL window node into GPDB window plan node.  With
+//		sort_input, a Sort of the window's input goes between the two, for
+//		a hashed window (TranslateDXLWindowHashAgg).
 //
 //---------------------------------------------------------------------------
 Plan *
 CTranslatorDXLToPlStmt::TranslateDXLWindowAgg(
 	const CDXLNode *window_dxlnode, CDXLTranslateContext *output_context,
-	CDXLTranslationContextArray *ctxt_translation_prev_siblings)
+	CDXLTranslationContextArray *ctxt_translation_prev_siblings,
+	BOOL sort_input)
 {
 	// create a WindowAgg plan node
 	WindowAgg *window = MakeNode(WindowAgg);
@@ -3987,6 +3990,11 @@ CTranslatorDXLToPlStmt::TranslateDXLWindowAgg(
 			gpdb::ExprCollation((Node *) te_part_colid->expr);
 	}
 
+	// the window key's ordering operators and where its nulls go, which a
+	// Sort of the input needs after ordOperators become equality operators
+	Oid *ord_sort_ops = nullptr;
+	bool *ord_nulls_first = nullptr;
+
 	// translate window keys
 	const ULONG size = window_dxlop->WindowKeysCount();
 	if (size > 1)
@@ -4021,8 +4029,20 @@ CTranslatorDXLToPlStmt::TranslateDXLWindowAgg(
 
 		// Not Cloudberry's firstOrderCol, firstOrderCmpOperator and
 		// firstOrderNullsFirst, WindowAgg fields of its own that PostgreSQL
-		// 19's executor finds from the window frame instead.
-		gpdb::GPDBFree(is_nulls_first);
+		// 19's executor finds from the window frame instead.  The ordering
+		// operators and where the nulls go are kept for a Sort of the input
+		// alone.
+		if (sort_input)
+		{
+			ord_sort_ops = (Oid *) gpdb::GPDBAlloc(num_of_cols * sizeof(Oid));
+			memcpy(ord_sort_ops, window->ordOperators,
+				   num_of_cols * sizeof(Oid));
+			ord_nulls_first = is_nulls_first;
+		}
+		else
+		{
+			gpdb::GPDBFree(is_nulls_first);
+		}
 
 		// The ordOperators array is actually supposed to contain equality operators,
 		// not ordering operators (< or >). So look up the corresponding equality
@@ -4117,6 +4137,17 @@ CTranslatorDXLToPlStmt::TranslateDXLWindowAgg(
 		}
 	}
 
+	if (sort_input)
+	{
+		plan->lefttree = MakeWindowInputSort(window, ord_sort_ops,
+											 ord_nulls_first, child_plan);
+		if (nullptr != ord_sort_ops)
+		{
+			gpdb::GPDBFree(ord_sort_ops);
+			gpdb::GPDBFree(ord_nulls_first);
+		}
+	}
+
 	SetParamIds(plan);
 
 	// cleanup
@@ -4127,10 +4158,127 @@ CTranslatorDXLToPlStmt::TranslateDXLWindowAgg(
 
 //---------------------------------------------------------------------------
 //	@function:
+//		OrcaMayDeriveOrder
+//
+//	@doc:
+//		Whether ORCA may take a plan's rows to arrive in an order, as the
+//		PosDerive() of each of its physical operators derives one.  The walk
+//		goes down the operators that pass an order up from a child -- a
+//		join's outer side, a Sequence's last child, the one child of the
+//		rest -- to the first that sets an order or none.  A Limit's order is
+//		its own, but one ORCA asked its child for, so the walk goes on below
+//		it.  A CTE consumer's order is its producer's.  What the walk does
+//		not know, it takes to be ordered.
+//
+//---------------------------------------------------------------------------
+static BOOL
+OrcaMayDeriveOrder(const CDXLNode *dxlnode)
+{
+	while (true)
+	{
+		CDXLOperator *dxlop = dxlnode->GetOperator();
+		switch (dxlop->GetDXLOperator())
+		{
+			case EdxlopPhysicalResult:
+				// a Result of constants has no child, and no order
+				if (dxlnode->Arity() - 1 != EdxlresultIndexChild)
+				{
+					return false;
+				}
+				dxlnode = (*dxlnode)[EdxlresultIndexChild];
+				break;
+			case EdxlopPhysicalAssert:
+				dxlnode = (*dxlnode)[CDXLPhysicalAssert::EdxlassertIndexChild];
+				break;
+			case EdxlopPhysicalMaterialize:
+				dxlnode = (*dxlnode)[EdxlmatIndexChild];
+				break;
+			case EdxlopPhysicalPartitionSelector:
+				dxlnode = (*dxlnode)[2];
+				break;
+			case EdxlopPhysicalSplit:
+			case EdxlopPhysicalCTEProducer:
+				dxlnode = (*dxlnode)[1];
+				break;
+			case EdxlopPhysicalLimit:
+				dxlnode = (*dxlnode)[EdxllimitIndexChildPlan];
+				break;
+			case EdxlopPhysicalWindow:
+				dxlnode = (*dxlnode)[EdxlwindowIndexChild];
+				break;
+			case EdxlopPhysicalNLJoin:
+				dxlnode = (*dxlnode)[EdxlnljIndexLeftChild];
+				break;
+			case EdxlopPhysicalMergeJoin:
+				dxlnode = (*dxlnode)[EdxlmjIndexLeftChild];
+				break;
+			case EdxlopPhysicalSequence:
+				dxlnode = (*dxlnode)[dxlnode->Arity() - 1];
+				break;
+			case EdxlopPhysicalAgg:
+				// a sorted aggregate passes its input's order up, and a hashed
+				// or a plain one sets none
+				if (EdxlaggstrategySorted !=
+					CDXLPhysicalAgg::Cast(dxlop)->GetAggStrategy())
+				{
+					return false;
+				}
+				dxlnode = (*dxlnode)[EdxlaggIndexChild];
+				break;
+			case EdxlopPhysicalMotionGather:
+				// the order it merges by, if it merges
+				return 0 < (*dxlnode)[EdxlgmIndexSortColList]->Arity();
+			case EdxlopPhysicalTableScan:
+			case EdxlopPhysicalParallelTableScan:
+			case EdxlopPhysicalForeignScan:
+			case EdxlopPhysicalBitmapTableScan:
+			case EdxlopPhysicalDynamicTableScan:
+			case EdxlopPhysicalDynamicBitmapTableScan:
+			case EdxlopPhysicalDynamicForeignScan:
+			case EdxlopPhysicalValuesScan:
+			case EdxlopPhysicalTVF:
+			case EdxlopPhysicalHashJoin:
+			case EdxlopPhysicalAppend:
+			case EdxlopPhysicalMotionBroadcast:
+			case EdxlopPhysicalMotionRedistribute:
+			case EdxlopPhysicalMotionRoutedDistribute:
+			case EdxlopPhysicalMotionRandom:
+				return false;
+			default:
+				// a Sort, an index or index-only scan, a CTE consumer
+				return true;
+		}
+	}
+}
+
+//---------------------------------------------------------------------------
+//	@function:
 //		CTranslatorDXLToPlStmt::TranslateDXLWindowHashAgg
 //
 //	@doc:
-//		Translate DXL window node into GPDB window hash plan node
+//		Translate DXL hashed window node into a WindowAgg over a Sort.
+//
+//		ORCA's hashed window (CPhysicalHashSequenceProject, offered under
+//		gp.optimizer_force_window_hash_agg) asks its input for no order, and
+//		Cloudberry makes it a WindowHashAgg, a node for a vectorized
+//		executor to hash rows into their partitions with; its open-source
+//		tree has no executor for it, and PostgreSQL 19 has no such node.  So
+//		it is lowered to the sorted window it stands for: a WindowAgg over a
+//		Sort of the input by the partition columns and then the window's
+//		order.  ORCA asks the hashed window's input for the distribution it
+//		asks the sorted window's, so the Sort is local.
+//
+//		ORCA thinks the hashed window passes its input's order up
+//		(CPhysicalSequenceProject::PosDerive()), and the Sort reorders that
+//		input.  An order asked of the window itself is safe: the hashed
+//		window's EpetOrder() answers that an order needs a Sort above it,
+//		and Cloudberry's CEnfdOrder::Epet() asks the operator before it
+//		looks at what the operator derives.  A CTE consumer is not: it takes
+//		its producer's order, and an operator above it that needs that order
+//		puts no Sort there.  So the window is lowered only where ORCA takes
+//		its input to have no order, and refused elsewhere, which the planner
+//		then plans: an input an index scan, a Sort or a merging Gather
+//		ordered.  A window with no partition and no order needs no Sort.
 //
 //---------------------------------------------------------------------------
 Plan *
@@ -4138,10 +4286,127 @@ CTranslatorDXLToPlStmt::TranslateDXLWindowHashAgg(
 	const CDXLNode *window_dxlnode, CDXLTranslateContext *output_context,
 	CDXLTranslationContextArray *ctxt_translation_prev_siblings)
 {
-	// after M7, with a vectorized executor: hashed window aggregation.  This body refuses until then, and Cloudberry's is
-	// in github/cloudberry/src/backend/gpopt/translate/CTranslatorDXLToPlStmt.cpp,
-	// unchanged, for the step that brings it back.
-	GP_UNPORTED("hashed window aggregation");
+	CDXLPhysicalWindow *window_dxlop =
+		CDXLPhysicalWindow::Cast(window_dxlnode->GetOperator());
+
+	BOOL sorts = 0 < window_dxlop->GetPartByColsArray()->Size();
+	for (ULONG ul = 0; ul < window_dxlop->WindowKeysCount(); ul++)
+	{
+		sorts = sorts ||
+				0 < window_dxlop->GetDXLWindowKeyAt(ul)->GetSortColListDXL()->Arity();
+	}
+
+	if (sorts &&
+		OrcaMayDeriveOrder((*window_dxlnode)[EdxlwindowIndexChild]))
+	{
+		GPOS_RAISE(gpdxl::ExmaDXL, gpdxl::ExmiQuery2DXLUnsupportedFeature,
+				   GPOS_WSZ_LIT("a hashed window over rows ORCA takes to be in order"));
+	}
+
+	return TranslateDXLWindowAgg(window_dxlnode, output_context,
+								 ctxt_translation_prev_siblings,
+								 true /* sort_input */);
+}
+
+//---------------------------------------------------------------------------
+//	@function:
+//		AddSortKey
+//
+//	@doc:
+//		Add a key to a Sort, unless it has that key already: a window
+//		partitioned and ordered by one column is sorted by it once.
+//
+//---------------------------------------------------------------------------
+static void
+AddSortKey(Sort *sort, AttrNumber colidx, Oid sort_op, Oid collation,
+		   bool nulls_first)
+{
+	for (int i = 0; i < sort->numCols; i++)
+	{
+		if (sort->sortColIdx[i] == colidx && sort->sortOperators[i] == sort_op &&
+			sort->collations[i] == collation &&
+			sort->nullsFirst[i] == nulls_first)
+		{
+			return;
+		}
+	}
+
+	sort->sortColIdx[sort->numCols] = colidx;
+	sort->sortOperators[sort->numCols] = sort_op;
+	sort->collations[sort->numCols] = collation;
+	sort->nullsFirst[sort->numCols] = nulls_first;
+	sort->numCols++;
+}
+
+//---------------------------------------------------------------------------
+//	@function:
+//		CTranslatorDXLToPlStmt::MakeWindowInputSort
+//
+//	@doc:
+//		A Sort of a window's input, as PostgreSQL's planner sorts it for a
+//		WindowAgg: by the partition columns -- each by the ordering operator
+//		of the equality operator the WindowAgg compares it with -- and then
+//		by the window key's columns.  It passes its input's columns through,
+//		so the WindowAgg's Vars, numbered by the input's target list, find
+//		them in it.  ORCA costed the window without it, and it is given its
+//		input's costs: the plan shows it adds none.  With no column to sort
+//		by, the input is returned as it is.
+//
+//---------------------------------------------------------------------------
+Plan *
+CTranslatorDXLToPlStmt::MakeWindowInputSort(const WindowAgg *window,
+											const Oid *ord_sort_ops,
+											const bool *ord_nulls_first,
+											Plan *child_plan)
+{
+	const int max_cols = window->partNumCols + window->ordNumCols;
+	if (0 == max_cols)
+	{
+		return child_plan;
+	}
+
+	Sort *sort = MakeNode(Sort);
+	sort->sortColIdx =
+		(AttrNumber *) gpdb::GPDBAlloc(max_cols * sizeof(AttrNumber));
+	sort->sortOperators = (Oid *) gpdb::GPDBAlloc(max_cols * sizeof(Oid));
+	sort->collations = (Oid *) gpdb::GPDBAlloc(max_cols * sizeof(Oid));
+	sort->nullsFirst = (bool *) gpdb::GPDBAlloc(max_cols * sizeof(bool));
+
+	for (int i = 0; i < window->partNumCols; i++)
+	{
+		// A type with an equality and no ordering, such as xid: its equal
+		// values cannot be brought together by sorting, and PostgreSQL's
+		// planner refuses such a window too.
+		Oid sort_op = gpdb::GetOrderingOpForEqualityOp(
+			window->partOperators[i], false /* use_lhs_type */);
+		if (InvalidOid == sort_op)
+		{
+			GPOS_RAISE(
+				gpdxl::ExmaDXL, gpdxl::ExmiQuery2DXLUnsupportedFeature,
+				GPOS_WSZ_LIT("a hashed window partitioned by a type with no ordering"));
+		}
+		AddSortKey(sort, window->partColIdx[i], sort_op,
+				   window->partCollations[i], false);
+	}
+	for (int i = 0; i < window->ordNumCols; i++)
+	{
+		AddSortKey(sort, window->ordColIdx[i], ord_sort_ops[i],
+				   window->ordCollations[i], ord_nulls_first[i]);
+	}
+
+	Plan *plan = &(sort->plan);
+	plan->plan_node_id = m_dxl_to_plstmt_context->GetNextPlanId();
+	plan->targetlist = CreateDirectCopyTargetList(child_plan->targetlist);
+	plan->qual = NIL;
+	plan->lefttree = child_plan;
+	plan->startup_cost = child_plan->total_cost;
+	plan->total_cost = child_plan->total_cost;
+	plan->plan_rows = child_plan->plan_rows;
+	plan->plan_width = child_plan->plan_width;
+
+	SetParamIds(plan);
+
+	return plan;
 }
 
 //---------------------------------------------------------------------------

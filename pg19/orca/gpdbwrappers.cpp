@@ -1044,12 +1044,12 @@ gpdb::GetEqualityOpForOrderingOp(Oid opno, bool *reverse)
 }
 
 Oid
-gpdb::GetOrderingOpForEqualityOp(Oid opno, bool *reverse)
+gpdb::GetOrderingOpForEqualityOp(Oid opno, bool use_lhs_type)
 {
 	GP_WRAP_START;
 	{
 		/* catalog tables: pg_amop */
-		return get_ordering_op_for_equality_op(opno, reverse);
+		return get_ordering_op_for_equality_op(opno, use_lhs_type);
 	}
 	GP_WRAP_END;
 	return InvalidOid;

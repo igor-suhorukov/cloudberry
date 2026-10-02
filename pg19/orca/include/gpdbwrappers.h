@@ -444,8 +444,9 @@ Oid GetEqualityOp(Oid type_oid);
 // get equality operator for given ordering op (i.e. < or >)
 Oid GetEqualityOpForOrderingOp(Oid opno, bool *reverse);
 
-// get ordering operator for given equality op (i.e. =)
-Oid GetOrderingOpForEqualityOp(Oid opno, bool *reverse);
+// get ordering operator for given equality op (i.e. =), of the equality
+// op's left or right input type
+Oid GetOrderingOpForEqualityOp(Oid opno, bool use_lhs_type);
 
 // function name
 char *GetFuncName(Oid funcid);
