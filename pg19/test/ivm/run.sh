@@ -60,9 +60,11 @@ is() {
 # isl <label> <sql> <expected>
 #		The same, for a script whose answer is its last line.  The counters
 #		below live in the backend, so resetting them, changing a table and
-#		reading them back all have to be one session.
+#		reading them back all have to be one session.  An EXPLAIN's last
+#		line is its plan's, not the "Optimizer:" line gp_orca adds when the
+#		suite runs with it loaded.
 isl() {
-	local got; got=$(q "$2" | grep -v '^$' | tail -1)
+	local got; got=$(q "$2" | grep -v -e '^$' -e '^Optimizer: ' | tail -1)
 	[ "$got" = "$3" ] && ok "$1" || notok "$1" "want [$3], got [$got]"
 }
 
