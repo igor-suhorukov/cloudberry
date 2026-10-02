@@ -323,7 +323,8 @@ skip spi  differs: a function's query of a table in a segment's slice runs, wher
 run  gp_xml
 run  shared_scan
 run  cluster_gp
-skip combocid_gp  differs: a segment's command ids for the rows a transaction writes count from 0, where Cloudberry's go on from the coordinator's
+skip combocid_gp  differs: under the planner, a segment's command ids for the rows a transaction writes count from 0, where Cloudberry's go on from the coordinator's; under ORCA, the rows its cursor's MOVE 9900 passes over are the first a redistributed join gives, which come in no fixed order -- combocid_readers, after it, counts what it lists
+port combocid_readers
 skip gp_prepared_xacts  differs: its utility-mode session asks for -c gp_role=utility, a setting PostgreSQL 19 refuses a connection for
 run  gp_backend_info
 run  gp_locale
