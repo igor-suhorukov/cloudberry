@@ -1,0 +1,59 @@
+-- The port's own: gp_dtx_horizon, the replication slot by which a segment
+-- holds back the rows a transaction it hides deleted (gp_dtx.c), on which
+-- vacuum_recently_dead_tuple_due_to_distributed_snapshot, Cloudberry's test
+-- of what it is for, leans.  A REPEATABLE READ transaction's snapshot is
+-- taken on the coordinator alone until a statement of it reads a
+-- distributed table, and a DELETE that commits after that is hidden from it
+-- on every segment.  On segment 0 no snapshot older than the DELETE is in
+-- use then, and VACUUM there has the slot's word alone for what the older
+-- distributed snapshot still reads.  So the same reads twice: with the
+-- slot, as Cloudberry's test has them, and with it dropped on segment 0
+-- before that segment's VACUUM, its keeper held at a fault meanwhile -- the
+-- keeper makes the slot again within a second of its going -- where segment
+-- 0's rows are gone for the older snapshot, and the other segments' are not.
+
+-- Until this node has the slot, for at most secs seconds.
+CREATE FUNCTION dtx_horizon_slot(secs int) RETURNS bool AS $$
+BEGIN	/* in func */
+	FOR i IN 1..secs * 10 LOOP	/* in func */
+		IF EXISTS (SELECT FROM pg_replication_slots WHERE slot_name = 'gp_dtx_horizon') THEN	/* in func */
+			RETURN true;	/* in func */
+		END IF;	/* in func */
+		PERFORM pg_sleep(0.1);	/* in func */
+	END LOOP;	/* in func */
+	RETURN false;	/* in func */
+END;	/* in func */
+$$ LANGUAGE plpgsql;
+
+CREATE TABLE dtx_horizon (a int) DISTRIBUTED BY (a);
+INSERT INTO dtx_horizon SELECT generate_series(1, 100);
+SELECT gp_segment_id, count(*) FROM dtx_horizon GROUP BY 1 ORDER BY 1;
+
+-- With the slot: the older snapshot reads every row, segment 0's VACUUM
+-- notwithstanding.
+1: BEGIN ISOLATION LEVEL REPEATABLE READ;
+1: SELECT 'snapshot' FROM pg_class LIMIT 1;
+2: DELETE FROM dtx_horizon;
+0U: VACUUM dtx_horizon;
+1: SELECT gp_segment_id, count(*) FROM dtx_horizon GROUP BY 1 ORDER BY 1;
+1: COMMIT;
+
+-- Without it on segment 0: the rows the DELETE took there are gone for the
+-- older snapshot, which the other segments' slots kept.
+INSERT INTO dtx_horizon SELECT generate_series(1, 100);
+SELECT gp_inject_fault_infinite('dtx_keeper_round', 'suspend', dbid) FROM gp_segment_configuration WHERE role = 'p' AND content = 0;
+SELECT gp_wait_until_triggered_fault('dtx_keeper_round', 1, dbid) FROM gp_segment_configuration WHERE role = 'p' AND content = 0;
+1: BEGIN ISOLATION LEVEL REPEATABLE READ;
+1: SELECT 'snapshot' FROM pg_class LIMIT 1;
+2: DELETE FROM dtx_horizon;
+0U: SELECT pg_drop_replication_slot('gp_dtx_horizon');
+0U: VACUUM dtx_horizon;
+1: SELECT gp_segment_id, count(*) FROM dtx_horizon GROUP BY 1 ORDER BY 1;
+1: COMMIT;
+
+-- Its keeper let go makes it again.
+SELECT gp_inject_fault('dtx_keeper_round', 'reset', dbid) FROM gp_segment_configuration WHERE role = 'p' AND content = 0;
+0U: SELECT dtx_horizon_slot(30);
+
+DROP TABLE dtx_horizon;
+DROP FUNCTION dtx_horizon_slot(int);

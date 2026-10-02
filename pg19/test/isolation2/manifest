@@ -74,6 +74,7 @@ run  resource_queue_deadlock                       queues
 run  resource_queue_cancel                         queues
 run  resource_queue_multi_portal                   queues
 run  vacuum_recently_dead_tuple_due_to_distributed_snapshot
+run  port/dtx_horizon
 run  distributedlog-bug
 run  distributed_snapshot
 run  port/dtx_wait_prepared

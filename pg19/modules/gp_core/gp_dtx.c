@@ -3258,6 +3258,13 @@ GpDtxKeeperMain(Datum main_arg)
 			ProcessConfigFile(PGC_SIGHUP);
 		}
 
+		/*
+		 * Where a test holds the keeper, which makes the slot again within
+		 * a second of its going: port/dtx_horizon drops it, to show what
+		 * VACUUM does without it.
+		 */
+		GP_FAULT("dtx_keeper_round");
+
 		LWLockAcquire(&dtx_shared->lock, LW_SHARED);
 		complete = dtx_shared->complete;
 		LWLockRelease(&dtx_shared->lock);
