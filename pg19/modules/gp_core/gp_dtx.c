@@ -509,6 +509,14 @@ typedef struct GpDtxShared
 	int			recovery_pid;
 
 	/*
+	 * How many times a backend has woken it to take everything
+	 * (GpDtxWakeRecovery()): the latch alone is lost to any wait of its own
+	 * that resets it first -- a round's connection to a node, a fault's
+	 * suspend -- and the round after would leave a young part alone.
+	 */
+	pg_atomic_uint32 recovery_wakes;
+
+	/*
 	 * A round of it has reached every node since the server started:
 	 * Cloudberry's "DTM Started" (shmDtmStarted), which its pg_ctl waits
 	 * for, and gpstart waits for here (gp.dtx_recovered()).
@@ -548,6 +556,7 @@ dtx_init_shared(void *ptr, void *arg)
 	s->held = InvalidTransactionId;
 	s->dbs = InvalidDsaPointer;
 	s->recovery_proc = INVALID_PROC_NUMBER;
+	pg_atomic_init_u32(&s->recovery_wakes, 0);
 	pg_atomic_init_u32(&s->loopback_journals, 0);
 }
 
@@ -2226,6 +2235,7 @@ GpDtxWakeRecovery(void)
 	ProcNumber	proc;
 
 	dtx_attach();
+	pg_atomic_fetch_add_u32(&dtx_shared->recovery_wakes, 1);
 	proc = dtx_shared->recovery_proc;
 	if (proc != INVALID_PROC_NUMBER)
 		SetLatch(&GetPGProcByNumber(proc)->procLatch);
@@ -2946,6 +2956,7 @@ GpDtxRecoveryMain(Datum main_arg)
 	bool		everything = true;
 	bool		journals_due = true;	/* every database's, at start */
 	uint32		journals_seen = 0;
+	uint32		wakes_seen;
 
 	pqsignal(SIGHUP, SignalHandlerForConfigReload);
 	pqsignal(SIGTERM, die);
@@ -2963,10 +2974,12 @@ GpDtxRecoveryMain(Datum main_arg)
 	dtx_shared->recovery_proc = MyProcNumber;
 	dtx_shared->recovery_pid = MyProcPid;
 	LWLockRelease(&dtx_shared->lock);
+	wakes_seen = pg_atomic_read_u32(&dtx_shared->recovery_wakes);
 
 	for (;;)
 	{
 		int			rc;
+		uint32		wakes;
 
 		CHECK_FOR_INTERRUPTS();
 		if (ConfigReloadPending)
@@ -2976,6 +2989,20 @@ GpDtxRecoveryMain(Datum main_arg)
 		}
 
 		GP_FAULT("dtx_recovery_round");
+
+		/*
+		 * A round a backend asked for takes everything, whatever reset the
+		 * latch it set: a part its second phase did not reach is young, and
+		 * a periodic round would leave it alone for
+		 * gp.dtx_recovery_prepared_period, while a segment's statements
+		 * whose snapshots say it committed wait for it there.
+		 */
+		wakes = pg_atomic_read_u32(&dtx_shared->recovery_wakes);
+		if (wakes != wakes_seen)
+		{
+			wakes_seen = wakes;
+			everything = true;
+		}
 
 		/*
 		 * Until a round reaches every segment, each takes everything.  One
