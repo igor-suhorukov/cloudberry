@@ -76,6 +76,7 @@ run  resource_queue_multi_portal                   queues
 run  vacuum_recently_dead_tuple_due_to_distributed_snapshot
 run  distributedlog-bug
 run  distributed_snapshot
+run  port/dtx_wait_prepared
 run  segwalrep/die_commit_pending_replication      mirrors3
 run  fts_errors                                    mirrors6
 run  segwalrep/replication_keeps_crash             mirrors3

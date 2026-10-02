@@ -1,0 +1,136 @@
+-- The port's own: a segment's statement waits for a part the segment holds
+-- prepared when its distributed snapshot says the transaction committed
+-- (gp_dtx.c, dtx_snapshot_arrived()).  The coordinator sends COMMIT
+-- PREPARED before its transaction ends for the other sessions (O33), so no
+-- snapshot sees one committed while a segment still holds its part -- but
+-- for a part its second phase did not reach: one a segment refuses for the
+-- half minute the coordinator tries it again, which the coordinator leaves
+-- to its recovery process, its commit standing.  Cloudberry's distributed
+-- snapshot shows such a transaction in progress until every segment has
+-- answered, so none of Cloudberry's tests meets the wait.
+--
+-- And the recovery process, which the coordinator wakes as it gives up,
+-- finishes that part at once, though its latch was reset before it looked:
+-- here it is held at a fault, which resets it, after a round of its own --
+-- one that leaves a part younger than gp.dtx_recovery_prepared_period
+-- alone, as the round after it would, were the wake lost.
+
+-- Until a backend of this node waits for a transaction's lock.
+CREATE FUNCTION dtx_wait_transactionid() RETURNS bool AS $$ BEGIN	/* in func */ FOR i IN 1..600 LOOP	/* in func */ IF EXISTS (SELECT FROM pg_stat_activity WHERE wait_event_type = 'Lock' AND wait_event = 'transactionid') THEN	/* in func */ RETURN true;	/* in func */ END IF;	/* in func */ PERFORM pg_sleep(0.1);	/* in func */ PERFORM pg_stat_clear_snapshot();	/* in func */ END LOOP;	/* in func */ RETURN false;	/* in func */ END;	/* in func */ $$ LANGUAGE plpgsql;
+CREATE
+
+-- Until this node holds no prepared part, for at most secs seconds.
+CREATE FUNCTION dtx_wait_no_prepared(secs int) RETURNS bool AS $$ BEGIN	/* in func */ FOR i IN 1..secs * 10 LOOP	/* in func */ IF NOT EXISTS (SELECT FROM pg_prepared_xacts) THEN	/* in func */ RETURN true;	/* in func */ END IF;	/* in func */ PERFORM pg_sleep(0.1);	/* in func */ END LOOP;	/* in func */ RETURN false;	/* in func */ END;	/* in func */ $$ LANGUAGE plpgsql;
+CREATE
+
+CREATE TABLE dtx_wait_prepared (a int, b int) DISTRIBUTED BY (a);
+CREATE
+
+-- The recovery process rounds every second while the test sets it up, and
+-- is held at its fault as one of its own rounds begins -- after a timeout,
+-- not a wake, which would have it take everything.
+ALTER SYSTEM SET gp.dtx_recovery_interval = 1;
+ALTER
+SELECT pg_reload_conf();
+ pg_reload_conf 
+----------------
+ t              
+(1 row)
+SELECT gp_inject_fault_infinite('dtx_recovery_round', 'skip', dbid) FROM gp_segment_configuration WHERE role = 'p' AND content = -1;
+ gp_inject_fault_infinite 
+--------------------------
+ Success:                 
+(1 row)
+SELECT gp_wait_until_triggered_fault('dtx_recovery_round', 3, dbid) FROM gp_segment_configuration WHERE role = 'p' AND content = -1;
+ gp_wait_until_triggered_fault 
+-------------------------------
+ Success:                      
+(1 row)
+SELECT gp_inject_fault('dtx_recovery_round', 'reset', dbid) FROM gp_segment_configuration WHERE role = 'p' AND content = -1;
+ gp_inject_fault 
+-----------------
+ Success:        
+(1 row)
+SELECT gp_inject_fault('dtx_recovery_round', 'suspend', dbid) FROM gp_segment_configuration WHERE role = 'p' AND content = -1;
+ gp_inject_fault 
+-----------------
+ Success:        
+(1 row)
+SELECT gp_wait_until_triggered_fault('dtx_recovery_round', 1, dbid) FROM gp_segment_configuration WHERE role = 'p' AND content = -1;
+ gp_wait_until_triggered_fault 
+-------------------------------
+ Success:                      
+(1 row)
+ALTER SYSTEM RESET gp.dtx_recovery_interval;
+ALTER
+SELECT pg_reload_conf();
+ pg_reload_conf 
+----------------
+ t              
+(1 row)
+
+-- Segment 0 refuses every COMMIT PREPARED.  The INSERT commits: its second
+-- phase there is tried again for half a minute, and left to the recovery
+-- process.  Segment 0 holds the part prepared; segment 1 has committed its
+-- own.
+SELECT gp_inject_fault_infinite('finish_prepared_start_of_function', 'error', dbid) FROM gp_segment_configuration WHERE role = 'p' AND content = 0;
+ gp_inject_fault_infinite 
+--------------------------
+ Success:                 
+(1 row)
+1: INSERT INTO dtx_wait_prepared SELECT i, i FROM generate_series(1, 20) i;
+INSERT 20
+0U: SELECT count(*) FROM pg_prepared_xacts;
+ count 
+-------
+ 1     
+(1 row)
+1U: SELECT count(*) FROM pg_prepared_xacts;
+ count 
+-------
+ 0     
+(1 row)
+
+-- A statement after it sees it committed, and on segment 0 waits for the
+-- part, by its transaction's lock.
+2&: SELECT count(*), sum(b) FROM dtx_wait_prepared;  <waiting ...>
+0U: SELECT dtx_wait_transactionid();
+ dtx_wait_transactionid 
+------------------------
+ t                      
+(1 row)
+0U: SELECT l.transactionid = p.transaction AS waits_for_the_part FROM pg_locks l, pg_prepared_xacts p WHERE l.locktype = 'transactionid' AND NOT l.granted;
+ waits_for_the_part 
+--------------------
+ t                  
+(1 row)
+
+-- Segment 0 takes it again, and the recovery process goes on: the part is
+-- committed at once, and the statement reads all twenty rows.
+SELECT gp_inject_fault('finish_prepared_start_of_function', 'reset', dbid) FROM gp_segment_configuration WHERE role = 'p' AND content = 0;
+ gp_inject_fault 
+-----------------
+ Success:        
+(1 row)
+SELECT gp_inject_fault('dtx_recovery_round', 'reset', dbid) FROM gp_segment_configuration WHERE role = 'p' AND content = -1;
+ gp_inject_fault 
+-----------------
+ Success:        
+(1 row)
+0U: SELECT dtx_wait_no_prepared(30);
+ dtx_wait_no_prepared 
+----------------------
+ t                    
+(1 row)
+2<:  <... completed>
+ count | sum 
+-------+-----
+ 20    | 210 
+(1 row)
+
+DROP TABLE dtx_wait_prepared;
+DROP
+DROP FUNCTION dtx_wait_transactionid();
+DROP
+DROP FUNCTION dtx_wait_no_prepared(int);
+DROP
