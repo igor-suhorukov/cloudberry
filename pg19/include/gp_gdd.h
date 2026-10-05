@@ -65,4 +65,10 @@ extern int	GpGddSessionBackends(void);
 /* The settings, and the detector's process; from gp_core's _PG_init. */
 extern void GpGddInit(void);
 
+/*
+ * Signal every backend of this node that works for a coordinator session
+ * but this one; how many were signalled (gp_terminate_mpp_backends()).
+ */
+extern int	GpGddSignalSessionBackends(int sig);
+
 #endif							/* GP_GDD_H */

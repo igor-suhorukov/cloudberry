@@ -987,3 +987,43 @@ GpGddInit(void)
 		RegisterBackgroundWorker(&worker);
 	}
 }
+
+/*
+ * Signal every backend of this node that works for a coordinator session,
+ * this one aside -- on a segment, every process a coordinator dispatched
+ * to, writer and reader -- as Cloudberry's SignalMppBackends() signals each
+ * process whose PGPROC has a session (procarray.c); a backend says its
+ * session as it runs its first statement (GpGddNoteBackend()), and the
+ * dispatcher's first is the settings it syncs.  The process group, where
+ * the backend leads one, as pg_signal_backend() signals it.  Answers how
+ * many were signalled.
+ */
+int
+GpGddSignalSessionBackends(int sig)
+{
+	int			n = 0;
+
+	gdd_attach();
+	for (int i = 0; i < gdd_shared->nbackends; i++)
+	{
+		GpGddBackend *b = &gdd_shared->backends[i];
+		int			pid = b->pid;
+		PGPROC	   *proc;
+
+		if (pid == 0 || pid == MyProcPid || b->session <= 0)
+			continue;
+		proc = BackendPidGetProc(pid);
+		if (proc == NULL || GetNumberFromPGProc(proc) != i)
+			continue;
+#ifdef HAVE_SETSID
+		if (kill(-pid, sig))
+#else
+		if (kill(pid, sig))
+#endif
+			ereport(WARNING,
+					(errmsg("could not send signal to process %d: %m", pid)));
+		else
+			n++;
+	}
+	return n;
+}

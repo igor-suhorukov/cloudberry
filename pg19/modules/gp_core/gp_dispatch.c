@@ -7217,3 +7217,35 @@ GpDispatchInit(void)
 	prev_commit_recorded_hook = xact_commit_recorded_hook;
 	xact_commit_recorded_hook = dispatch_commit_recorded;
 }
+
+/* ------------------------------------------------------------------------- */
+/* Ending a node's segment processes                                         */
+/* ------------------------------------------------------------------------- */
+
+PG_FUNCTION_INFO_V1(gp_terminate_mpp_backends);
+
+/*
+ * pg_catalog.gp_terminate_mpp_backends()
+ *		End every segment process of this node but the caller's, as
+ *		Cloudberry's does (signalfuncs.c): a superuser's call, on a segment,
+ *		in a process the coordinator dispatched to -- a query of
+ *		gp_dist_random('gp_id') runs it on each.  A session whose processes
+ *		it ended finds its gang gone at its next statement.
+ */
+Datum
+gp_terminate_mpp_backends(PG_FUNCTION_ARGS)
+{
+	if (GpClusterBackendRole() != GP_ROLE_EXECUTE)
+		ereport(ERROR,
+				(errcode(ERRCODE_INSUFFICIENT_PRIVILEGE),
+				 errmsg("terminate mpp backends on segments only")));
+	if (!superuser())
+		ereport(ERROR,
+				(errcode(ERRCODE_INSUFFICIENT_PRIVILEGE),
+				 errmsg("Superuser only to execute it")));
+
+	elog(LOG, "tried to terminate all (%d) mpp backends except self",
+		 GpGddSignalSessionBackends(SIGTERM));
+
+	PG_RETURN_NULL();
+}

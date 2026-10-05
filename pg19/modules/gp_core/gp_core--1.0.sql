@@ -3756,3 +3756,13 @@ CREATE FUNCTION gp_internal.retrieve(endpoint text, count int8)
 RETURNS SETOF record
 AS 'MODULE_PATHNAME', 'gp_retrieve'
 LANGUAGE C VOLATILE STRICT;
+
+/*
+ * gp_terminate_mpp_backends(): Cloudberry's, which ends every segment
+ * process of the node it runs on but the caller's -- a superuser's call,
+ * on each segment, as a query of gp_dist_random('gp_id') runs it there.
+ */
+CREATE FUNCTION pg_catalog.gp_terminate_mpp_backends()
+RETURNS void
+AS 'MODULE_PATHNAME', 'gp_terminate_mpp_backends'
+LANGUAGE C VOLATILE;
