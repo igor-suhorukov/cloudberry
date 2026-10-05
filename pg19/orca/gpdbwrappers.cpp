@@ -4096,6 +4096,31 @@ gpdb::GetRTEPermissionInfo(List *rteperminfos, const RangeTblEntry *rte)
 	GP_WRAP_END;
 }
 
+Expr *
+gpdb::MakeRowSegmentCheck(Expr *ctid, Expr *segid, Expr *action)
+{
+	// gp_core's function, by name: a database without gp_core's extension
+	// has none, and its plans carry tableoid where gp_segment_id would be
+	// (CTranslatorQueryToDXL::GetCtidAndSegmentId).
+	GP_WRAP_START;
+	{
+		Oid			argtypes[3] = {TIDOID, INT4OID, INT4OID};
+		Oid			fn = LookupFuncName(list_make2(makeString((char *) "gp_internal"),
+												   makeString((char *) "check_row_segment")),
+										3, argtypes, true);
+
+		if (!OidIsValid(fn))
+			return nullptr;
+		if (action == nullptr)
+			action = (Expr *) makeNullConst(INT4OID, -1, InvalidOid);
+		return (Expr *) makeFuncExpr(fn, INT4OID, list_make3(ctid, segid, action),
+									 InvalidOid, InvalidOid,
+									 COERCE_EXPLICIT_CALL);
+	}
+	GP_WRAP_END;
+	return nullptr;
+}
+
 //---------------------------------------------------------------------------
 //	May ORCA consider an intra-segment parallel plan?
 //

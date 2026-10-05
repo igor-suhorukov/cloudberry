@@ -3756,3 +3756,14 @@ CREATE FUNCTION gp_internal.retrieve(endpoint text, count int8)
 RETURNS SETOF record
 AS 'MODULE_PATHNAME', 'gp_retrieve'
 LANGUAGE C VOLATILE STRICT;
+
+/*
+ * Cloudberry's check, as a segment's ModifyTable changes a row, that the row
+ * was read on that segment, which ORCA's UPDATE and DELETE plans make in a
+ * junk column of the ModifyTable's input, gp_segment_id, of the row's ctid,
+ * its gp_segment_id and a split update's action (gp_segment.c).
+ */
+CREATE FUNCTION gp_internal.check_row_segment(ctid tid, segid int4, action int4)
+RETURNS int4
+AS 'MODULE_PATHNAME', 'gp_check_row_segment'
+LANGUAGE C STABLE PARALLEL SAFE;
