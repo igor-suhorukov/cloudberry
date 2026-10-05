@@ -1161,6 +1161,16 @@ conn_attempts_poll(GpConnAttempt *attempts, int n, TimestampTz deadline)
 				npending++;
 		if (npending == 0)
 			break;
+
+		/*
+		 * Cloudberry's, before it waits for a gang's connections, writer's or
+		 * reader's, that are still being made (createGang_async(),
+		 * cdbgang_async.c): a test holds the backend here and terminates it,
+		 * which ends it with no gang to free -- the gang is made once its
+		 * connections all are -- and the connections with the process.
+		 */
+		GP_FAULT("create_gang_in_progress");
+
 		if (deadline != 0)
 		{
 			timeout = TimestampDifferenceMilliseconds(GetCurrentTimestamp(),

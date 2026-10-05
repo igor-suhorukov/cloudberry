@@ -230,6 +230,16 @@ starve_case
   the test is for, holds, each session found waiting by its gp_session_id
   in pg_locks.mppsessionid.
 
+terminate_in_gang_creation
+  The first INSERT of a session after every primary restarted, which fails,
+  and the next succeeds, as Cloudberry's: in PostgreSQL's words for the
+  session's connection the restart closed, which the coordinator meets as it
+  sends the INSERT's rows to the segments over it -- the planner's VALUES are
+  the coordinator's own, and there is no reader to make -- where Cloudberry's
+  makes a reader gang for its VALUES, whose new process does not find its
+  writer.  The backend terminated while its gang is made ends with nothing
+  to free, as the test is for.
+
 
 Cloudberry's parallel_retrieve_cursor_schedule, in the group retrieve.  Its
 cursors are ORCA's in both passes (gp_endpoint.c), so each difference holds

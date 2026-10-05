@@ -2964,6 +2964,8 @@ recovery_journals(void)
 
 PGDLLEXPORT void GpDtxRecoveryMain(Datum main_arg);
 
+static bool recovery_orphan_check(bool after);
+
 void
 GpDtxRecoveryMain(Datum main_arg)
 {
@@ -2971,6 +2973,7 @@ GpDtxRecoveryMain(Datum main_arg)
 	bool		journals_due = true;	/* every database's, at start */
 	uint32		journals_seen = 0;
 	uint32		wakes_seen;
+	bool		periodic;
 
 	pqsignal(SIGHUP, SignalHandlerForConfigReload);
 	pqsignal(SIGTERM, die);
@@ -3020,11 +3023,18 @@ GpDtxRecoveryMain(Datum main_arg)
 
 		/*
 		 * Until a round reaches every segment, each takes everything.  One
-		 * node that cannot prepare has nothing prepared to finish.
+		 * node that cannot prepare has nothing prepared to finish.  A round
+		 * after those is Cloudberry's periodic check of orphaned prepared
+		 * transactions, which its faults mark, and one skips
+		 * (recovery_orphan_check()): a round skipped leaves what it would
+		 * have taken to the next.
 		 */
-		if ((GpClusterIsSingleNode() && max_prepared_xacts == 0) ||
-			recovery_round(everything ? 0 : dtx_recovery_prepared_period,
-						   !dtx_shared->recovered))
+		periodic = dtx_shared->recovered;
+		if (periodic && recovery_orphan_check(false))
+			;
+		else if ((GpClusterIsSingleNode() && max_prepared_xacts == 0) ||
+				 recovery_round(everything ? 0 : dtx_recovery_prepared_period,
+								!periodic))
 		{
 			everything = false;
 			if (!dtx_shared->recovered)
@@ -3036,7 +3046,11 @@ GpDtxRecoveryMain(Datum main_arg)
 						(errmsg("DTM Started"),
 						 errdetail("Distributed transaction recovery has reached every node.")));
 			}
+			if (periodic)
+				(void) recovery_orphan_check(true);
 		}
+		else if (periodic)
+			(void) recovery_orphan_check(true);
 
 		/*
 		 * The loopback's journals: as the server starts, and whenever a
@@ -3688,4 +3702,24 @@ void
 GpDtxNoteStatement(void)
 {
 	dtx_note_statement();
+}
+
+/*
+ * Cloudberry's faults of its recovery process's periodic check of orphaned
+ * prepared transactions (AbortOrphanedPreparedTransactions(),
+ * cdbdtxrecovery.c), the port's periodic rounds: before_orphaned_check as
+ * one begins, which a "skip" skips -- whether it was skipped is the answer
+ * -- and after_orphaned_check once it is done.  A test skips the rounds to
+ * keep the recovery process's connections out of what it holds; the port's
+ * are its own, made with libpq, and no gang's.
+ */
+static bool
+recovery_orphan_check(bool after)
+{
+	if (after)
+	{
+		(void) GP_FAULT("after_orphaned_check");
+		return false;
+	}
+	return GP_FAULT("before_orphaned_check") == GP_FAULT_SKIP;
 }
