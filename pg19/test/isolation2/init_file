@@ -56,4 +56,16 @@ s/^( \w+ +\| \w+ +\| )\d+( +\| \w+ +\| \d+ +\| [tf] +\| )/$1######$2/
 m/^ERROR:  relation with OID \d+ does not exist$/
 s/OID \d+/OID ######/
 
+# A TOAST relation whose index a test made invalid (invalidated_toast_index):
+# its OID, which Cloudberry's init file masks only before the source location
+# Cloudberry's error ends in, "(toasting.c:...)", where PostgreSQL 19's ends.
+m/^ERROR:  no valid index found for toast relation with Oid \d+$/
+s/with Oid \d+$/with Oid OID/
+
+# An OID in PostgreSQL 19's error for a view dropped while its definition was
+# being read (cloudberry/README, pg_views_concurrent_drop): it changes from
+# run to run.
+m/^ERROR:  could not open relation with OID \d+$/
+s/OID \d+/OID NNNN/
+
 -- end_matchsubs

@@ -8,6 +8,20 @@ in it (test.orca.diff) holds for that pass alone.  run.sh counts a test as
 passing when gpdiff.pl, under Cloudberry's init_file and the port's, finds no
 difference or exactly the file's.
 
+add_column_after_vacuum_skip_drop_column, vacuum_after_vacuum_skip_drop_column
+  A column table's segment file that a VACUUM compacted while another
+  session held the table: Cloudberry's VACUUM drops such a file in a phase
+  that needs the table's AccessExclusiveLock and, failing to take it, leaves
+  the file awaiting drop (state 2) beside the one it compacted into, for an
+  ADD COLUMN or the next VACUUM to clean up -- what the two tests are for.
+  gp_ao recycles a compacted file once no snapshot can see what it held,
+  under no lock of the table's (ao_vacuum.c, ao_recycle()), and session 1,
+  whose SELECT has ended, holds the table but no snapshot: the file is
+  recycled as the VACUUM ends, back in state 1 and empty, so none awaits
+  drop.  And the file it compacts into is taken only when a live row moves,
+  so a file whose rows are all deleted leaves no second one.  The INSERT
+  after goes into segment file 1, as both tests want.
+
 concurrent_partition_table_operations_should_not_deadlock, and its
 _optimizer output, which the orca pass is compared with
   EXPLAIN's plans and nothing else: the operations the test runs side by
@@ -168,6 +182,14 @@ oom_startup_memory  what the memory a process starts with -- 12 MB, which
   session's processes on the segments and the sixth is refused.  The
   refusals themselves are Cloudberry's, in its words, and the memory
   protection suite makes them happen (../memprot/run.sh).
+
+pg_views_concurrent_drop  a view dropped in one session while another
+  reads its definition from pg_views: Greenplum made the definition come
+  back NULL (MPP-25160, try_relation_open in ruleutils.c's make_viewdef),
+  and PostgreSQL raises "could not open relation with OID ...", which the
+  test's own comment says.  The port runs PostgreSQL 19's ruleutils.c, which
+  no extension can change, so the second session gets PostgreSQL's error, as
+  singlenode_isolation2's does.  The OID is masked by ../init_file.
 
 prepared_xact_deadlock_pg_rewind
   The CREATE DATABASE whose part on segment 0 is prepared as the primary

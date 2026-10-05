@@ -1,0 +1,6 @@
+@@
+- viewname             | definition 
+-----------------------+------------
+- concurrent_drop_view |            
+-(1 row)
++ERROR:  could not open relation with OID NNNN
