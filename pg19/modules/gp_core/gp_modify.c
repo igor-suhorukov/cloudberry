@@ -859,8 +859,9 @@ modify_explain(CustomScanState *node, List *ancestors, ExplainState *es)
 
 /*
  * Can every row this statement reads be found on the segment of the row it
- * changes?  Only if every table it reads is the one it changes or one that
- * every segment holds whole.  Returns NULL if so, or why not.
+ * changes?  Only if every table it reads is the one it changes, as the row
+ * it changes, or one that every segment holds whole.  Returns NULL if so, or
+ * why not.
  */
 static const char current_of_reason[] =
 	"WHERE CURRENT OF names a row by the cursor that read it, which is here.";
@@ -868,8 +869,12 @@ static const char current_of_reason[] =
 typedef struct PushContext
 {
 	Oid			target;
+	RangeTblEntry *target_rte;	/* the statement's own entry of it */
+	bool		target_whole;	/* replicated: every segment holds it whole */
 	const char *why;
 } PushContext;
+
+static const char *push_reads_target_again(Oid relid);
 
 static bool
 push_walker(Node *node, PushContext *cxt)
@@ -889,6 +894,19 @@ push_walker(Node *node, PushContext *cxt)
 		if (rte->securityQuals != NIL)
 		{
 			cxt->why = "It reads through row-level security or a security-barrier view, whose conditions do not travel with the statement.";
+			return false;
+		}
+
+		/*
+		 * The table it changes, read again -- in a subquery, a join, a
+		 * scalar subquery's max() -- is each segment's share of it there,
+		 * not the table: SET d = (SELECT max(d) FROM t) would be each
+		 * segment's own maximum (push_reads_target_again()).
+		 */
+		if (rte->rtekind == RTE_RELATION && rte->relid == cxt->target &&
+			rte != cxt->target_rte && !cxt->target_whole)
+		{
+			cxt->why = push_reads_target_again(rte->relid);
 			return false;
 		}
 
@@ -1135,6 +1153,10 @@ static const char *
 cannot_push_reason(Query *query, Oid target, GpPolicy *policy)
 {
 	PushContext cxt = {.target = target,.why = NULL};
+
+	cxt.target_rte = query->resultRelation > 0
+		? rt_fetch(query->resultRelation, query->rtable) : NULL;
+	cxt.target_whole = GpPolicyIsReplicated(policy);
 
 	if (query->returningList != NIL)
 		return "RETURNING from a distributed table waits for the rows to come back through a Motion.";
@@ -2379,4 +2401,19 @@ GpModifyInit(void)
 
 	prev_query_lockmode = query_lockmode_hook;
 	query_lockmode_hook = gp_modify_query_lockmode;
+}
+
+/*
+ * Why a statement that reads the table it changes again, elsewhere than as
+ * the row it changes, is not sent to the segments as it stands: what each
+ * segment would read of it there is its own share.  Cloudberry's plan reads
+ * the whole table there, through a Motion, as the coordinator's explicit
+ * write does here (gp_explicit.c).  A replicated table is whole on every
+ * segment, and is sent so still.
+ */
+static const char *
+push_reads_target_again(Oid relid)
+{
+	return psprintf("It reads \"%s\", the table it changes, again, of which a segment holds its share.",
+					get_rel_name(relid));
 }
