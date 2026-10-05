@@ -4894,8 +4894,8 @@ motion_executor_start(QueryDesc *queryDesc, int eflags)
 	 * InitPlan()'s last fault, where its plan is set up -- but for the
 	 * statement that tells a segment the coordinator's settings, which a
 	 * Cloudberry QE is sent as a SET and plans nothing for: a fault set for a
-	 * session's processes on a segment is the first plan of the client's
-	 * statement's there (gdd/insert_root_partition_truncate_deadlock).
+	 * session's processes on a segment fires in the first plan of the
+	 * client's statement there (gdd/insert_root_partition_truncate_deadlock).
 	 */
 	if (!(GpClusterIsDispatched() && queryDesc->sourceText != NULL &&
 		  strncmp(queryDesc->sourceText, GP_SETTINGS_MARKER,
