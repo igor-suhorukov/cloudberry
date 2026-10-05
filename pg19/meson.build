@@ -514,6 +514,7 @@ modules = [
                      'modules/gp_ao/bitmap/bitmap.c',
                      'modules/gp_ao/bitmap/bitmapattutil.c',
                      'modules/gp_ao/bitmap/bitmapinsert.c',
+                     'modules/gp_ao/bitmap/bitmapinspect.c',
                      'modules/gp_ao/bitmap/bitmappages.c',
                      'modules/gp_ao/bitmap/bitmapsearch.c',
                      'modules/gp_ao/bitmap/bitmaputil.c',

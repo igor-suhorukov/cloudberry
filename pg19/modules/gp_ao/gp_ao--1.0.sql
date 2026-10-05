@@ -658,3 +658,64 @@ REVOKE ALL ON gp_ao.segfile_unlogged, gp_ao.visimap_unlogged, gp_ao.blkdir_unlog
 	gp_ao.segfilecount_unlogged FROM PUBLIC;
 GRANT SELECT ON gp_ao.segfile_unlogged, gp_ao.visimap_unlogged, gp_ao.blkdir_unlogged,
 	gp_ao.segfilecount_unlogged TO PUBLIC;
+
+/* ------------------------------------------------------------------------- */
+/* The bitmap index's pages, for a look at them                              */
+/* ------------------------------------------------------------------------- */
+
+/*
+ * Cloudberry's pageinspect functions of the bitmap index, in its words
+ * (pageinspect--1.7--1.8.sql): PostgreSQL 19's pageinspect knows no bitmap
+ * index, so they are here, beside the index, and in pg_catalog, where a test
+ * that calls them unqualified in a node's own session finds them as it finds
+ * pageinspect's (bitmap_index_inspect).  Each checks that its caller is a
+ * superuser, as pageinspect's do (bitmapinspect.c).
+ */
+CREATE FUNCTION pg_catalog.bm_metap(IN relname text,
+	OUT magic int4,
+	OUT version int4,
+	OUT auxrelid oid,
+	OUT auxindexrelid oid,
+	OUT lovlastblknum bigint)
+AS 'MODULE_PATHNAME', 'bm_metap'
+LANGUAGE C STRICT PARALLEL SAFE;
+
+CREATE FUNCTION pg_catalog.bm_lov_page_items(IN relname text,
+	IN blkno int4,
+	OUT itemoffset smallint,
+	OUT lov_head_blkno bigint,
+	OUT lov_tail_blkno bigint,
+	OUT last_complete_word text,
+	OUT last_word text,
+	OUT last_tid numeric,
+	OUT last_setbit_tid numeric,
+	OUT is_last_complete_word_fill bool,
+	OUT is_last_word_fill bool)
+RETURNS SETOF record
+AS 'MODULE_PATHNAME', 'bm_lov_page_items'
+LANGUAGE C STRICT PARALLEL SAFE;
+
+CREATE FUNCTION pg_catalog.bm_bitmap_page_header(IN relname text,
+	IN blkno int4,
+	OUT num_words bigint,
+	OUT next_blkno bigint,
+	OUT last_tid numeric)
+AS 'MODULE_PATHNAME', 'bm_bitmap_page_header'
+LANGUAGE C STRICT PARALLEL SAFE;
+
+CREATE FUNCTION pg_catalog.bm_bitmap_page_items(IN relname text,
+	IN blkno int4,
+	OUT word_num bigint,
+	OUT compressed bool,
+	OUT content_word text)
+RETURNS SETOF record
+AS 'MODULE_PATHNAME', 'bm_bitmap_page_items'
+LANGUAGE C STRICT PARALLEL SAFE;
+
+CREATE FUNCTION pg_catalog.bm_bitmap_page_items(IN page bytea,
+	OUT word_num bigint,
+	OUT compressed bool,
+	OUT content_word text)
+RETURNS SETOF record
+AS 'MODULE_PATHNAME', 'bm_bitmap_page_items_bytea'
+LANGUAGE C STRICT PARALLEL SAFE;

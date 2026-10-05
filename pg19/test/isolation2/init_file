@@ -56,4 +56,11 @@ s/^( \w+ +\| \w+ +\| )\d+( +\| \w+ +\| \d+ +\| [tf] +\| )/$1######$2/
 m/^ERROR:  relation with OID \d+ does not exist$/
 s/OID \d+/OID ######/
 
+# Where Cloudberry's internal error comes from, which its test's own
+# matchsubs leave as "(bmfuncs.c:XXX)" and the port's errors do not say:
+# the bitmap index's pageinspect functions, gp_ao's here
+# (bitmap_index_inspect).
+m/ \(bmfuncs\.c:(\d+|XXX)\)$/
+s/ \(bmfuncs\.c:(\d+|XXX)\)$//
+
 -- end_matchsubs
