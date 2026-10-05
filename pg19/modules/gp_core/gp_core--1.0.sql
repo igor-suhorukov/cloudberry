@@ -3797,3 +3797,46 @@ CREATE FUNCTION gp_internal.brin_summarize_range(regclass, bigint)
 RETURNS integer AS 'MODULE_PATHNAME', 'gp_brin_summarize_range' LANGUAGE C STRICT;
 CREATE FUNCTION gp_internal.pg_import_system_collations(regnamespace)
 RETURNS integer AS 'MODULE_PATHNAME', 'gp_import_system_collations' LANGUAGE C STRICT;
+
+/*
+ * gp_stat_progress_analyze: pg_stat_progress_analyze of every node, with
+ * the node's content id first, as Cloudberry's view of that name gives it --
+ * the coordinator's ANALYZE, and each segment's sample of its rows
+ * (gp_analyze.c); and Cloudberry's summary of it, a distributed table's
+ * blocks added up over its segments, a replicated table's divided by them,
+ * as it writes it (system_views_gp_summary.sql).
+ */
+SET allow_system_table_mods = on;
+CREATE VIEW pg_catalog.gp_stat_progress_analyze AS
+	SELECT -1 AS gp_segment_id, a.*
+	FROM pg_catalog.pg_stat_progress_analyze a
+	UNION ALL
+	SELECT d.gp_segment_id, d.pid, d.datid, d.datname, d.relid, d.phase,
+		   d.sample_blks_total, d.sample_blks_scanned, d.ext_stats_total,
+		   d.ext_stats_computed, d.child_tables_total, d.child_tables_done,
+		   d.current_child_table_relid, d.delay_time, d.started_by
+	FROM gp.dist_random(NULL::pg_catalog.pg_stat_progress_analyze) d;
+
+CREATE VIEW pg_catalog.gp_stat_progress_analyze_summary AS
+SELECT
+	max(coalesce(a1.pid, 0)) AS pid,
+	a.datid,
+	a.datname,
+	a.relid,
+	a.phase,
+	CASE WHEN d.policytype = 'r' THEN (sum(a.sample_blks_total) / d.numsegments)::bigint ELSE sum(a.sample_blks_total) END AS sample_blks_total,
+	CASE WHEN d.policytype = 'r' THEN (sum(a.sample_blks_scanned) / d.numsegments)::bigint ELSE sum(a.sample_blks_scanned) END AS sample_blks_scanned,
+	CASE WHEN d.policytype = 'r' THEN (sum(a.ext_stats_total) / d.numsegments)::bigint ELSE sum(a.ext_stats_total) END AS ext_stats_total,
+	CASE WHEN d.policytype = 'r' THEN (sum(a.ext_stats_computed) / d.numsegments)::bigint ELSE sum(a.ext_stats_computed) END AS ext_stats_computed,
+	CASE WHEN d.policytype = 'r' THEN (sum(a.child_tables_total) / d.numsegments)::bigint ELSE sum(a.child_tables_total) END AS child_tables_total,
+	CASE WHEN d.policytype = 'r' THEN (sum(a.child_tables_done) / d.numsegments)::bigint ELSE sum(a.child_tables_done) END AS child_tables_done
+FROM pg_catalog.gp_stat_progress_analyze a
+	JOIN pg_catalog.pg_class c ON a.relid = c.oid
+	LEFT JOIN pg_catalog.gp_distribution_policy d ON c.oid = d.localoid
+	LEFT JOIN pg_catalog.gp_stat_progress_analyze a1 ON a.pid = a1.pid AND a1.gp_segment_id = -1
+WHERE a.gp_segment_id > -1
+GROUP BY a.datid, a.datname, a.relid, a.phase, d.policytype, d.numsegments;
+RESET allow_system_table_mods;
+
+GRANT SELECT ON pg_catalog.gp_stat_progress_analyze,
+	pg_catalog.gp_stat_progress_analyze_summary TO PUBLIC;

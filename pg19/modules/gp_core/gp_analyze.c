@@ -73,6 +73,7 @@
 #include "catalog/pg_inherits.h"
 #include "catalog/pg_type.h"
 #include "commands/defrem.h"
+#include "commands/progress.h"
 #include "commands/tablecmds.h"
 #include "commands/vacuum.h"
 #include "common/pg_prng.h"
@@ -87,6 +88,8 @@
 #include "storage/proc.h"
 #include "storage/read_stream.h"
 #include "utils/acl.h"
+#include "utils/backend_progress.h"
+#include "utils/backend_status.h"
 #include "utils/builtins.h"
 #include "utils/fmgroids.h"
 #include "utils/hsearch.h"
@@ -101,6 +104,7 @@
 #include "gp_cluster.h"
 #include "gp_core_api.h"
 #include "gp_dispatch.h"
+#include "gp_fault.h"
 #include "gp_partanalyze.h"
 #include "gp_policy.h"
 #include "gp_scan.h"
@@ -162,15 +166,20 @@ segment_sample_rows(Relation rel, int elevel, HeapTuple *rows, int targrows,
 	double		deadrows = 0;
 	double		rowstoskip = -1;
 	BlockNumber totalblocks = RelationGetNumberOfBlocks(rel);
+	BlockNumber nblocks;
+	BlockNumber blksdone = 0;
 	BlockSamplerData bs;
 	ReservoirStateData rstate;
 	TupleTableSlot *slot;
 	TableScanDesc scan;
 	ReadStream *stream;
 
-	(void) BlockSampler_Init(&bs, totalblocks, targrows,
-							 pg_prng_uint32(&pg_global_prng_state));
+	nblocks = BlockSampler_Init(&bs, totalblocks, targrows,
+								pg_prng_uint32(&pg_global_prng_state));
 	reservoir_init_selection_state(&rstate, targrows);
+
+	/* the blocks to sample, as acquire_sample_rows() reports them */
+	pgstat_progress_update_param(PROGRESS_ANALYZE_BLOCKS_TOTAL, nblocks);
 
 	scan = table_beginscan_analyze(rel);
 	slot = table_slot_create(rel, NULL);
@@ -202,6 +211,13 @@ segment_sample_rows(Relation rel, int elevel, HeapTuple *rows, int targrows,
 			}
 			samplerows += 1;
 		}
+
+		/*
+		 * and each one sampled; Cloudberry's fault is here, after each block
+		 * (acquire_sample_rows())
+		 */
+		pgstat_progress_update_param(PROGRESS_ANALYZE_BLOCKS_DONE, ++blksdone);
+		(void) GP_FAULT("analyze_block");
 	}
 
 	read_stream_end(stream);
@@ -362,6 +378,27 @@ own_counts(Relation rel, BlockNumber totalpages, double totalrows)
 	UnlockRelationOid(relid, ShareUpdateExclusiveLock);
 }
 
+/*
+ * A segment's sample as the progress of an ANALYZE of the table, as
+ * Cloudberry's segment reports it as its gp_acquire_sample_rows() runs
+ * acquire_sample_rows(): pg_stat_progress_analyze's row, which
+ * gp_stat_progress_analyze gathers from the segments -- acquiring sample
+ * rows, or inherited ones for a tree.  Not where this backend reports a
+ * command of its own already.
+ */
+static bool
+sample_progress_begin(Oid relid, bool tree)
+{
+	if (MyBEEntry == NULL ||
+		MyBEEntry->st_progress_command != PROGRESS_COMMAND_INVALID)
+		return false;
+	pgstat_progress_start_command(PROGRESS_COMMAND_ANALYZE, relid);
+	pgstat_progress_update_param(PROGRESS_ANALYZE_PHASE,
+								 tree ? PROGRESS_ANALYZE_PHASE_ACQUIRE_SAMPLE_ROWS_INH
+								 : PROGRESS_ANALYZE_PHASE_ACQUIRE_SAMPLE_ROWS);
+	return true;
+}
+
 PG_FUNCTION_INFO_V1(gp_sample_rows);
 
 /*
@@ -387,9 +424,12 @@ gp_sample_rows(PG_FUNCTION_ARGS)
 	AnalyzeSampleRowsFunc func;
 	BlockNumber totalpages;
 
+	bool		progress;
+
 	InitMaterializedSRF(fcinfo, MAT_SRF_USE_EXPECTED_DESC);
 
 	rel = table_open(relid, AccessShareLock);
+	progress = sample_progress_begin(relid, false);
 	rows = (HeapTuple *) palloc(targrows * sizeof(HeapTuple));
 	func = local_sampler(rel, &totalpages);
 	numrows = local_sample_rows(rel, func, rows, targrows, &totalrows,
@@ -398,6 +438,8 @@ gp_sample_rows(PG_FUNCTION_ARGS)
 	put_sample(rsinfo, RelationGetDescr(rel), rows, numrows, totalrows,
 			   totaldeadrows);
 	table_close(rel, AccessShareLock);
+	if (progress)
+		pgstat_progress_end_command();
 	return (Datum) 0;
 }
 
@@ -432,9 +474,12 @@ gp_sample_tree(PG_FUNCTION_ARGS)
 	double		totaldeadrows = 0;
 	int			n = 0;
 
+	bool		progress;
+
 	InitMaterializedSRF(fcinfo, MAT_SRF_USE_EXPECTED_DESC);
 
 	parent = table_open(relid, AccessShareLock);
+	progress = sample_progress_begin(relid, true);
 	members = find_all_inheritors(relid, AccessShareLock, NULL);
 	nmembers = list_length(members);
 	rels = palloc_array(Relation, nmembers);
@@ -460,6 +505,7 @@ gp_sample_tree(PG_FUNCTION_ARGS)
 	}
 
 	rows = (HeapTuple *) palloc(targrows * sizeof(HeapTuple));
+	pgstat_progress_update_param(PROGRESS_ANALYZE_CHILD_TABLES_TOTAL, n);
 	for (int i = 0; i < n; i++)
 	{
 		int			childtargrows;
@@ -467,12 +513,21 @@ gp_sample_tree(PG_FUNCTION_ARGS)
 		double		trows,
 					tdrows;
 
+		/* each member, as acquire_inherited_sample_rows() reports it */
+		pgstat_progress_update_param(PROGRESS_ANALYZE_CURRENT_CHILD_TABLE_RELID,
+									 RelationGetRelid(rels[i]));
 		if (pages[i] <= 0)
+		{
+			pgstat_progress_update_param(PROGRESS_ANALYZE_CHILD_TABLES_DONE, i + 1);
 			continue;
+		}
 		childtargrows = Min((int) rint(targrows * pages[i] / totalpages),
 							targrows - numrows);
 		if (childtargrows <= 0)
+		{
+			pgstat_progress_update_param(PROGRESS_ANALYZE_CHILD_TABLES_DONE, i + 1);
 			continue;
+		}
 		childrows = local_sample_rows(rels[i], funcs[i], rows + numrows,
 									  childtargrows, &trows, &tdrows);
 
@@ -493,6 +548,7 @@ gp_sample_tree(PG_FUNCTION_ARGS)
 		numrows += childrows;
 		totalrows += trows;
 		totaldeadrows += tdrows;
+		pgstat_progress_update_param(PROGRESS_ANALYZE_CHILD_TABLES_DONE, i + 1);
 	}
 
 	put_sample(rsinfo, RelationGetDescr(parent), rows, numrows, totalrows,
@@ -500,6 +556,8 @@ gp_sample_tree(PG_FUNCTION_ARGS)
 	for (int i = 0; i < n; i++)
 		table_close(rels[i], NoLock);
 	table_close(parent, AccessShareLock);
+	if (progress)
+		pgstat_progress_end_command();
 	return (Datum) 0;
 }
 
