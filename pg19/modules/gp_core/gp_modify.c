@@ -117,6 +117,7 @@
 #include "gp_dispatch.h"
 #include "gp_gdd.h"
 #include "gp_hash.h"
+#include "gp_log.h"
 #include "gp_policy.h"
 #include "gp_scan.h"
 #include "gp_segment.h"
@@ -230,6 +231,12 @@ router_begin(Relation rel, GpPolicy *policy, bool lines)
 	}
 	appendStringInfo(&sql, "%s FROM STDIN%s", first ? "" : ")",
 					 r->binary ? " (FORMAT binary)" : "");
+	/*
+	 * And the client's statement, in the comment a gather's cursor ends
+	 * with, which the segment's log names and its part's phases show
+	 * (gp_log.c, gp_dtx.c).
+	 */
+	appendStringInfoString(&sql, GpLogStatementComment());
 	r->copy_sql = sql.data;
 
 	return r;
@@ -1270,6 +1277,7 @@ make_custom_scan(Plan *replaced, const CustomScanMethods *methods)
 	return cscan;
 }
 
+static void refuse_utility_key_update(Query *parse);
 static PlannedStmt *gp_modify_planner_routed(Query *parse,
 											 const char *query_string,
 											 int cursorOptions,
@@ -1441,6 +1449,8 @@ gp_modify_planner(Query *parse, const char *query_string, int cursorOptions,
 	 * itself (gp_segment.c, gp_size.c).
 	 */
 	GpPrepareQuery(parse);
+
+	refuse_utility_key_update(parse);
 
 	if (GpClusterBackendRole() != GP_ROLE_DISPATCH)
 		return gp_modify_planner_routed(parse, query_string, cursorOptions,
@@ -2298,6 +2308,51 @@ gp_modify_query_lockmode(Oid relid, LOCKMODE lockmode, AclMode requiredPerms)
 		get_rel_relkind(relid) != RELKIND_RELATION || has_subclass(relid))
 		return ExclusiveLock;
 	return AccessShareLock;
+}
+
+/*
+ * An UPDATE of a hash-distributed table's distribution key, in a session of
+ * a segment's own: refused, as Cloudberry's utility mode refuses it
+ * (create_modifytable_path(), pathnode.c) -- a row whose key changes may
+ * belong on another segment, and only the coordinator's Split moves it
+ * there.  A key column changes, as Cloudberry's check_splitupdate()
+ * (preptlist.c) decides, where its new value is anything but the column
+ * itself.  Cloudberry decides it once the UPDATE is planned, and lets one
+ * whose every path is a dummy -- of no row, WHERE false -- go; here it is
+ * decided before planning, and such an UPDATE is refused too.
+ */
+static void
+refuse_utility_key_update(Query *parse)
+{
+	RangeTblEntry *rte;
+	GpPolicy   *policy;
+	ListCell   *lc;
+
+	if (parse->commandType != CMD_UPDATE || parse->resultRelation <= 0 ||
+		GpClusterContentId() < 0 ||
+		GpClusterBackendRole() != GP_ROLE_UTILITY)
+		return;
+	rte = rt_fetch(parse->resultRelation, parse->rtable);
+	policy = GpPolicyGet(rte->relid);
+	if (!GpPolicyIsHashPartitioned(policy))
+		return;
+
+	foreach(lc, parse->targetList)
+	{
+		TargetEntry *tle = lfirst_node(TargetEntry, lc);
+		Var		   *var = (Var *) tle->expr;
+
+		if (tle->resjunk)
+			continue;
+		if (IsA(var, Var) && var->varno == parse->resultRelation &&
+			var->varattno == tle->resno && var->varlevelsup == 0)
+			continue;
+		for (int i = 0; i < policy->nattrs; i++)
+			if (policy->attrs[i] == tle->resno)
+				ereport(ERROR,
+						(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+						 errmsg("cannot update distribution key columns in utility mode")));
+	}
 }
 
 void
