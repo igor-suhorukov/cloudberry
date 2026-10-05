@@ -50,12 +50,15 @@ s/^( \w+ +\| \w+ +\| )\d+( +\| \w+ +\| \d+ +\| [tf] +\| )/$1######$2/
 m/^ERROR:  relation with OID \d+ does not exist$/
 s/OID \d+/OID ######/
 
-# A fault's PANIC, when it reaches the client before the connection closes:
-# its message ends in a space, as Cloudberry's does, where Cloudberry's
-# expected output has none -- the line check_gxid expects, and the one the
-# matchsubs of dtx_recovery_wait_lsn take away, written without the space,
-# which the port's init file's rules come before.
-m/^PANIC:  fault triggered, fault name:'\w+' fault type:'panic' $/
-s/ $//
+# A fault's PANIC: whether its message reaches the client before the
+# connection closes is a race -- the client's next query may find the
+# connection closed first, and libpq then says that alone -- as Cloudberry's
+# own tests of a PANIC say, which take the line away themselves ("The PANIC
+# message does not emit sometimes", dtx_recovery_wait_lsn): it goes from the
+# expected output and the result alike, check_gxid's too.  Its message ends
+# in a space, as Cloudberry's does, where Cloudberry's expected output has
+# none.
+m/^PANIC:  fault triggered, fault name:'\w+' fault type:'panic' ?$/
+s/^PANIC:  fault triggered, fault name:'\w+' fault type:'panic' ?\n//
 
 -- end_matchsubs
