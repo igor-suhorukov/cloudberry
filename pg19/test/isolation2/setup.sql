@@ -26,6 +26,10 @@ CREATE EXTENSION gp_resource;
 CREATE EXTENSION gp_matview;
 CREATE EXTENSION gp_task;
 CREATE EXTENSION gp_inject_fault;
+-- PostgreSQL's pageinspect, which Cloudberry's tests of what a page holds
+-- call without making it (brin_heap's get_raw_page() and brin_page_items()),
+-- as its test clusters have it
+CREATE EXTENSION pageinspect;
 
 --
 -- PL/Python, in which some of Cloudberry's tests write helpers of their own
