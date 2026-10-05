@@ -180,7 +180,10 @@ for db in template1 postgres; do
 done
 
 # Each kind's database: its tables, loaded in parallel, the files dropped
-# as each is loaded, and analyzed.
+# as each is loaded, and analyzed.  A VACUUM ANALYZE that fails -- a
+# segment crashed sampling a table, say -- fails the run at its end; the
+# kind's queries still run, without statistics, to show what else it took.
+not_analyzed=
 for kind in $KINDS; do
 	start=$(date +%s)
 	db="tpc$kind"
@@ -192,8 +195,12 @@ for kind in $KINDS; do
 		out=$("$0" -X -q -h "$1" -p "$2" -d "$3" -c "\\copy $t FROM '"'"'{}'"'"' WITH (FORMAT csv, DELIMITER '"'"'|'"'"', NULL '"''"')" 2>&1)
 		[ -n "$out" ] && echo "loading $t: $out"
 		rm -f {}' "$PSQL" "$(sockdir 0)" "$(port 0)" "$db"
-	q "$db" "VACUUM ANALYZE" > /dev/null
-	echo "  $kind: loaded and analyzed in $(( $(date +%s) - start )) s"
+	if out=$(q "$db" "VACUUM ANALYZE"); then
+		echo "  $kind: loaded and analyzed in $(( $(date +%s) - start )) s"
+	else
+		echo "  NOT OK $kind: loaded in $(( $(date +%s) - start )) s, but VACUUM ANALYZE failed, so its queries run without statistics: $(echo "$out" | head -1)"
+		not_analyzed="$not_analyzed $kind"
+	fi
 done
 echo
 
@@ -262,3 +269,9 @@ done
 echo
 
 "$TPC_PYTHON" "$here/tpc.py" report "$ROOT" "$MODE"
+rc=$?
+if [ -n "$not_analyzed" ]; then
+	echo "  FAILED: VACUUM ANALYZE failed for$not_analyzed (above), whose queries ran without statistics"
+	rc=1
+fi
+exit $rc
