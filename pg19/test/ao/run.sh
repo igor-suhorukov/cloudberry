@@ -787,6 +787,20 @@ is "a column ENCODING (compresstype=delta) takes groups of many rows, and reads 
     INSERT INTO pxd SELECT i, i, date '2020-01-01' + i % 1000, 'v' || i FROM generate_series(1, 200000) i;
     SELECT count(*) || ' ' || sum(a) || ' ' || sum(b) || ' ' || max(c) || ' ' || count(DISTINCT d) FROM pxd;" \
    "200000 20000100000 20000100000 2022-09-26 200000"
+# porc_vec keeps a string without its header and a char(n) without its
+# trailing blanks, so a group whose values are all '' has no data, and rows
+# that are not null: a build with assertions took such a group for a broken
+# one, reading it and sampling it (TPC-DS's customer.c_login).  Its check
+# asks now that the group's values span no data
+# (pg19/pax/src/storage/orc/orc_reader.cc).
+is "a porc_vec group whose strings and char(n) are all '' reads back, and is analyzed" \
+   "CREATE TABLE pxe (a int, b text, c varchar, d char(3)) USING pax WITH (storage_format=porc_vec);
+    INSERT INTO pxe SELECT i, '', CASE WHEN i % 4 > 0 THEN '' END, CASE WHEN i % 5 > 0 THEN '' END
+      FROM generate_series(1, 1000) i;
+    ANALYZE pxe;
+    SELECT count(*) || ' ' || count(b) || ' ' || count(c) || ' ' || count(d) || ' ' ||
+           count(*) FILTER (WHERE b = '' AND c = '' AND d = '') FROM pxe;" \
+   "1000 1000 750 800 600"
 
 ###############################################################################
 echo "16. gp_toolkit's views of append-optimized tables, Cloudberry's"
