@@ -33,7 +33,7 @@ partial range, which it holds while the table grows; and a base backup
 once its checkpoint is made, which master_wal_switch holds while the
 coordinator switches to a new WAL file and checkpoints:
 
-  heap_insert                         heapam.c, heap_insert()
+  heap_insert                         heapam.c, heap_insert() and heap_multi_insert()
   before_read_command                 postgres.c, ReadCommand()
   collate_locale_os_lookup            pg_locale.c, pg_newlocale_from_collation()
   before_exec_scan                    execProcnode.c, ExecProcNodeFirst()
@@ -47,15 +47,18 @@ coordinator switches to a new WAL file and checkpoints:
 
 Most are where Cloudberry's are.  heap_insert gives its callback the
 table's name, as Cloudberry's call does, for a test sets the fault for one
-table.  Cloudberry asks for before_exec_scan at each row its ExecScan()
-fetches, which PostgreSQL 19 inlines in every scan (ExecScanExtended());
-this point is a scan node's first execution, once for each, so that the
-tests' build looks for no attached point at each row a scan returns.
-PostgreSQL 19 rebuilds a relation's TOAST table's indexes before its own,
-where Cloudberry's REINDEX rebuilt them after, its fault between the two:
-reindex_relation is after the relation's own.  And the base backup's point
-is inside its error cleanup, so that a backup a test fails there is ended
-as any other failed one is.
+table; and it is at each row heap_multi_insert() inserts too, where the
+port's segments insert the rows the coordinator routes them, by COPY,
+which Cloudberry's insert one by one.  Cloudberry asks for
+before_exec_scan at each row its ExecScan() fetches, which PostgreSQL 19
+inlines in every scan (ExecScanExtended()); this point is a scan node's
+first execution, once for each, so that the tests' build looks for no
+attached point at each row a scan returns.  PostgreSQL 19 rebuilds a
+relation's TOAST table's indexes before its own, where Cloudberry's
+REINDEX rebuilt them after, its fault between the two: reindex_relation
+is after the relation's own.  And the base backup's point is inside its
+error cleanup, so that a backup a test fails there is ended as any other
+failed one is.
 
 gp_core's fault injector attaches a fault of Cloudberry's name to the point
 (gp_fault.c), heap_insert's with a line in its fault_points that says the
@@ -120,6 +123,17 @@ point nothing attached to runs no callback.
  	/* Cheap, simplistic check that the tuple matches the rel's rowtype. */
  	Assert(HeapTupleHeaderGetNatts(tup->t_data) <=
  		   RelationGetNumberOfAttributes(relation));
+@@ -2337,6 +2347,10 @@
+ 	for (i = 0; i < ntuples; i++)
+ 	{
+ 		HeapTuple	tuple;
++		const char *names[2] = {"", RelationGetRelationName(relation)};
++
++		/* and here, at each row, as heap_insert() for one */
++		INJECTION_POINT("heap_insert", (void *) names);
+ 
+ 		tuple = ExecFetchSlotHeapTuple(slots[i], true, NULL);
+ 		slots[i]->tts_tableOid = RelationGetRelid(relation);
 
 --- a/src/backend/backup/basebackup.c
 +++ b/src/backend/backup/basebackup.c
