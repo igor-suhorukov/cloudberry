@@ -34,6 +34,14 @@ bitmap_index_concurrent
   words onto the next (rearrange_word_to_next_bitmap_page), and the counts
   it then gives, which the test is for, are Cloudberry's.
 
+bitmap_index_crash
+  The size of the bitmap index on segment 1 after the insert whose WAL the
+  crash recovery replays: 33 of PostgreSQL's 8 kB pages, where Cloudberry's
+  is 29 of its 32 kB ones.  The replay is Cloudberry's: segment 1, restarted
+  with shared_buffers small enough to evict the index's metapage, answers
+  the index scan as before, and so does the cluster gpstop restarts after
+  the larger table's index was built.
+
 bitmap_index_inspect
   What the index's pages hold, and nothing else.  The port's pages are
   PostgreSQL's 8 kB, where Cloudberry builds with 32 kB (configure's
@@ -45,6 +53,20 @@ bitmap_index_inspect
   are those of 8 kB pages.  The functions are Cloudberry's pageinspect's,
   gp_ao's here (bitmap/bitmapinspect.c): the meta page, which pages are
   which, and the errors are Cloudberry's.
+
+brin_heap, and brin_heap.planner for the planner pass
+  A page of 8 kB, PostgreSQL's, where Cloudberry's is 32 kB: the block
+  populate_pages() fills with the committed rows holds 226 of them, where
+  Cloudberry's holds 909, which the count of the rows says.  The pages,
+  ranges and summaries pageinspect shows are Cloudberry's: the summary of
+  the last, partial range taken while another session extends the table
+  (summarize_last_partial_range) covers what the session added, and the
+  ranges over aborted rows are summarized empty.  In the planner pass the
+  segments plan the gather's scan themselves, without the session's
+  enable_seqscan, which no gang is sent, and read the table whole: no
+  bitmap is built there, and brin_bitmap_page_added is set and never hit,
+  where Cloudberry's -- and the ORCA pass's, whose fragments the segments
+  run as planned -- adds the one page and the two pages the scans want.
 
 concurrent_partition_table_operations_should_not_deadlock, and its
 _optimizer output, which the orca pass is compared with
@@ -94,26 +116,20 @@ export_distributed_snapshot
   mode refuses.
 
 fts_errors
-  Two of its sessions after content 1 is failed over, where the port's
+  One of its sessions after content 1 is failed over, where the port's
   dispatch differs, and nothing of FTS's: its name that does not resolve
   (get_dns_cached_address) fails FTS's round and marks no segment down, as
   Cloudberry's; the transaction that ends on the old primary fails and asks
   FTS to probe, which fails content 1 over; a session outside a
   transaction goes to the new primary; one with temporary tables is told
-  its gang was lost; and one in a subtransaction fails its statement and
+  its gang was lost, and its next statement finds them gone, the name not
+  resolving -- the coordinator drops them before it parses the statement
+  (gp_dtm_debug.c); and one in a subtransaction fails its statement and
   its ROLLBACK TO SAVEPOINT, as Cloudberry's do.  The session whose cursor
   is open: Cloudberry's FETCH returns what its segments sent as the cursor
   was declared, none, and its END finds the gang lost; the port's cursor
   reads from the segments as it is fetched from, and its FETCH meets the
-  old primary's closed connection.  And the session with temporary tables,
-  on its next statement: Cloudberry's forgets them as the gang goes, and
-  the name does not resolve; the port's coordinator drops them as that
-  statement's executor starts, after its name was resolved, and the
-  statement finds no relation by the OID it was planned with, which the
-  port's init_file masks -- in both passes alike, where the segments were
-  asked before: the other primaries' backends had dropped the table as they
-  ended, and the new primary's catalog still had it without its file, and
-  under ORCA whichever answered first was the error.
+  old primary's closed connection.
 
 gdd/concurrent_update, and its _optimizer output, which the orca pass is
 compared with
@@ -151,6 +167,33 @@ gdd/insert_root_partition_truncate_deadlock, in the planner pass alone
   leaf, the INSERT waits on segment 0 for the TRUNCATE that waits for it on
   the others, and the global deadlock detector cancels the TRUNCATE, as
   Cloudberry's does.
+
+gp_collation
+  Two statements, and nothing of the collations: a session of the
+  coordinator's own (-1U), an ordinary one here, sends its DROP COLLATION
+  to the segments, where segment 2 has dropped the collation already; and
+  the ORDER BY of a column of the collation segment 0 can no longer load is
+  sorted by the coordinator, the segments sending its rows unsorted -- in
+  either pass, ORCA leaving a column of a collation not the default to the
+  planner -- so segment 0 loads no collation and fails nothing.  What the
+  test is for holds: pg_import_system_collations() and CREATE COLLATION fail
+  whole when segment 0 cannot load a locale, and make each collation on
+  every node, with one OID, when it can (gp_builtins.c).
+
+instr_in_shmem_terminate
+  The plans of the three statements whose sessions set the planner, in
+  either pass, and nothing of the slots: each is the port's planner's.  The
+  INSERT ... SELECT runs on the coordinator, its rows sent to the segments
+  by COPY, which plans no node there, so no segment has a node of it in a
+  slot, and the coordinator's plan has fewer than Cloudberry's three; the
+  UNION ALL's table is gathered from the segments, whose short scans are
+  over before its pg_sleep() is, so no segment has one either; and the
+  coordinator's own backend reads pg_class, where Cloudberry's reads it in
+  an entry-db reader, a second process of the coordinator's in the slots.
+  What the test is for holds: after each statement is terminated or
+  cancelled, with its message (gp_signal.c), the slots hold the current
+  query's alone; and the segments' processes of the terminated one end
+  with it.
 
 lockmodes, and its _optimizer output, which the orca pass is compared with
   Three things, none of them a lock of Cloudberry's the port does not take,
@@ -255,6 +298,19 @@ oom_startup_memory  what the memory a process starts with -- 12 MB, which
   refusals themselves are Cloudberry's, in its words, and the memory
   protection suite makes them happen (../memprot/run.sh).
 
+orphan_temp_table
+  The session's temporary namespaces, which PostgreSQL 19 keeps: segment
+  0's panic loses the session's gang, and with it the parts of its
+  temporary table on the segments, and the coordinator drops the table
+  before it parses the session's next statement, which does not see it, as
+  Cloudberry's does (gp_dispatch.c, gp_dtm_debug.c); but a backend's
+  pg_temp_N and pg_toast_temp_N stay in pg_namespace, empty, for the next
+  backend of that number, where Cloudberry drops them as it resets the
+  session (DropTempTableNamespaceEntryForResetSession()), and an extension
+  cannot have PostgreSQL forget the namespace it uses.  So 2, the session's
+  two, where Cloudberry's count is 0 -- in a group whose database no other
+  session made temporary tables in.
+
 pg_views_concurrent_drop  a view dropped in one session while another
   reads its definition from pg_views: Greenplum made the definition come
   back NULL (MPP-25160, try_relation_open in ruleutils.c's make_viewdef),
@@ -334,6 +390,18 @@ terminate_in_gang_creation
   makes a reader gang for its VALUES, whose new process does not find its
   writer.  The backend terminated while its gang is made ends with nothing
   to free, as the test is for.
+
+vacuum_full_interrupt
+  EXPLAIN's plan, which the session makes with the planner in either pass:
+  the port's planner gathers the table from the segments with a query of
+  its own, which each segment plans for itself -- with the session's
+  enable_* settings or not, which are not among those the port sends the
+  segments (gp_dispatch.c) -- and the coordinator's EXPLAIN shows no scan
+  beneath its Gather Motion, where Cloudberry's shows the Index Scan its
+  segments run.  The rest is Cloudberry's: segment 0's VACUUM FULL,
+  cancelled once its relation's files are swapped, leaves its pg_class row
+  as it was, relfrozenxid and relhasindex with it, and the rows inserted
+  after it are read back.
 
 
 Cloudberry's parallel_retrieve_cursor_schedule, in the group retrieve.  Its

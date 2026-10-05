@@ -1,0 +1,17 @@
+@@
+- ro | isok 
+-----+------
+- m  | ok   
+- s  | ok   
+-(2 rows)
++ ro | isok  
++----+-------
++ m  | wrong 
++(1 row)
+@@
+- s  | ok   
+-(2 rows)
++(1 row)
+@@
+- 2     
++ 0     

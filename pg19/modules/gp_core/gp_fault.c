@@ -122,11 +122,13 @@ static const char *const fault_type_names[] = {
  * the database's row, which name the database, as a test's fault may; a
  * count of rows made past 2^32, which a "skip" asks for; and the top of the
  * checkpointer's loop, where a fault that held the checkpointer in a loop
- * has it checkpoint once let go (CheckpointerMain(), checkpointer.c).  The
- * build's other points under Cloudberry's names -- a database's copy and
- * its drop's replay, a tablespace's directories, a PREPARE's record, the
- * checkpointer's loop's end -- say only that they came, and need no line
- * here.
+ * has it checkpoint once let go (CheckpointerMain(), checkpointer.c); and an
+ * insert into a table, which names the table, as a test's fault may
+ * (heap_insert(), heapam.c).  The build's other points under Cloudberry's
+ * names -- a database's copy and its drop's replay, a tablespace's
+ * directories, a PREPARE's record, the checkpointer's loop's end, and the
+ * rest of isolation2's (test-iso2-*.patch) -- say only that they came, and
+ * need no line here.
  *
  * And two of the tests' build's points under Cloudberry's names that
  * checkpoint_dtx_info sets (test-iso2-locks.patch): a commit with its record
@@ -172,6 +174,7 @@ static const struct
 	{"ckpt_loop_begin", "ckpt_loop_begin", POINT_ARG_LOOPED},
 	{"start_insertedDistributedCommitted", "start_insertedDistributedCommitted", POINT_ARG_PREPARED},
 	{"keep_log_seg", "keep_log_seg", POINT_ARG_SKIP},
+	{"heap_insert", "heap_insert", POINT_ARG_NAMES},
 };
 
 /* The injection point a fault is attached to: its own name, or PostgreSQL's. */

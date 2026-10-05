@@ -423,6 +423,9 @@ extern void GpDispatchRaiseKeptError(void);
  */
 extern void GpDispatchDropLostTempTables(void);
 
+/* Are they still to be dropped?  (Before a statement is parsed.) */
+extern bool GpDispatchLostTempTablesPending(void);
+
 /*
  * The session's connections to the segments, for a test to look at what
  * the dispatcher set on them: each one's content, whether it is its
@@ -499,6 +502,13 @@ extern char *GpDdlLabelPayload(const struct ObjectAddress *object,
 							   const char *label);
 extern char *GpDdlLabelPayloadOf(const struct ObjectAddress *object,
 								 const char *provider, const char *label);
+
+/*
+ * A statement the coordinator has done already, sent to the segments to do
+ * with the OID it gave the one object the statement makes; see gp_ddl.c.
+ */
+struct Node;
+extern void GpDdlDispatchDone(struct Node *stmt, Oid catalog, Oid oid);
 
 /*
  * A plan about to be sent -- a gather's query, an ORCA fragment -- held to

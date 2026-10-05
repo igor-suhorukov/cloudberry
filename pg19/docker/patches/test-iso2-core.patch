@@ -1,0 +1,310 @@
+Licensed to the Apache Software Foundation (ASF) under one
+or more contributor license agreements.  See the NOTICE file
+distributed with this work for additional information
+regarding copyright ownership.  The ASF licenses this file
+to you under the Apache License, Version 2.0 (the
+"License"); you may not use this file except in compliance
+with the License.  You may obtain a copy of the License at
+
+  http://www.apache.org/licenses/LICENSE-2.0
+
+Unless required by applicable law or agreed to in writing,
+software distributed under the License is distributed on an
+"AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+KIND, either express or implied.  See the License for the
+specific language governing permissions and limitations
+under the License.
+
+Injection points for the port's tests, at eleven of Apache Cloudberry's
+faults inside PostgreSQL's own code, under their own names, which its
+isolation2 tests set (src/test/isolation2/sql): an insert into a table,
+which pg_terminate_backend holds in a loop; a backend about to read its
+next command, which check_gxid fails the coordinator at; the lookup of a
+collation's locale, which gp_collation fails on a segment, as of a locale
+it lacks; a scan, which orphan_temp_table fails a segment in; REINDEX
+DATABASE before it looks for its tables, and a relation's REINDEX once its
+indexes are rebuilt, which reindex holds while another session drops a
+table or makes an index; CREATE INDEX before it locks its table, which
+concurrent_index_creation_should_not_deadlock holds two sessions at;
+VACUUM FULL once the relation's files are swapped, which
+vacuum_full_interrupt cancels it at; a BRIN scan's page added to its
+bitmap, which brin_heap counts, and the summary of a BRIN index's last,
+partial range, which it holds while the table grows; and a base backup
+once its checkpoint is made, which master_wal_switch holds while the
+coordinator switches to a new WAL file and checkpoints:
+
+  heap_insert                         heapam.c, heap_insert() and heap_multi_insert()
+  before_read_command                 postgres.c, ReadCommand()
+  collate_locale_os_lookup            pg_locale.c, pg_newlocale_from_collation()
+  before_exec_scan                    execProcnode.c, ExecProcNodeFirst()
+  reindex_db                          indexcmds.c, ReindexMultipleTables()
+  reindex_relation                    index.c, reindex_relation()
+  defineindex_before_acquire_lock     indexcmds.c, DefineIndex()
+  after_swap_relation_files           repack.c, finish_heap_swap()
+  brin_bitmap_page_added              brin.c, bringetbitmap()
+  summarize_last_partial_range        brin.c, summarize_range()
+  base_backup_post_create_checkpoint  basebackup.c, perform_base_backup()
+
+Most are where Cloudberry's are.  heap_insert gives its callback the
+table's name, as Cloudberry's call does, for a test sets the fault for one
+table; and it is at each row heap_multi_insert() inserts too, where the
+port's segments insert the rows the coordinator routes them, by COPY,
+which Cloudberry's insert one by one.  Cloudberry asks for
+before_exec_scan at each row its ExecScan() fetches, which PostgreSQL 19
+inlines in every scan (ExecScanExtended()); this point is a scan node's
+first execution, once for each, so that the tests' build looks for no
+attached point at each row a scan returns.  PostgreSQL 19 rebuilds a
+relation's TOAST table's indexes before its own, where Cloudberry's
+REINDEX rebuilt them after, its fault between the two: reindex_relation
+is after the relation's own.  And the base backup's point is inside its
+error cleanup, so that a backup a test fails there is ended as any other
+failed one is.
+
+gp_core's fault injector attaches a fault of Cloudberry's name to the point
+(gp_fault.c), heap_insert's with a line in its fault_points that says the
+point gives the table's name.  They serve tests alone, so they are not in
+the core series: Dockerfile.pg applies this after
+test-injection-points.patch, to the tree of either ref, vanilla or
+patched, so that the two images still differ only in the ref.  Dormant, as
+any point is: without injection points the macro is empty, and with them a
+point nothing attached to runs no callback.
+
+--- a/src/backend/access/brin/brin.c
++++ b/src/backend/access/brin/brin.c
+@@ -43,6 +43,7 @@
+ #include "utils/fmgrprotos.h"
+ #include "utils/guc.h"
+ #include "utils/index_selfuncs.h"
++#include "utils/injection_point.h"
+ #include "utils/memutils.h"
+ #include "utils/rel.h"
+ #include "utils/tuplesort.h"
+@@ -1052,6 +1053,9 @@
+ 				tbm_add_page(tbm, pageno);
+ 				totalpages++;
+ 				MemoryContextSwitchTo(perRangeCxt);
++
++				/* A test may count the pages a scan adds to its bitmap. */
++				INJECTION_POINT("brin_bitmap_page_added", NULL);
+ 			}
+ 		}
+ 	}
+@@ -1915,6 +1919,13 @@
+ 		likely(!brin_heap_sequenced))
+ 	{
+ 		/*
++		 * A test may hold the summary of the last, partial range here, its
++		 * placeholder tuple inserted, while another session extends the
++		 * table.
++		 */
++		INJECTION_POINT("summarize_last_partial_range", NULL);
++
++		/*
+ 		 * If we're asked to scan what we believe to be the final range on the
+ 		 * table (i.e. a range that might be partial) we need to recompute our
+ 		 * idea of what the latest page is after inserting the placeholder
+
+--- a/src/backend/access/heap/heapam.c
++++ b/src/backend/access/heap/heapam.c
+@@ -2013,6 +2013,16 @@
+ 	bool		clear_all_visible = false;
+ 	bool		vmbuffer_modified = false;
+ 
++	/*
++	 * A test may hold or fail an insert into a table here, the point's
++	 * callback given the table's name.
++	 */
++	{
++		const char *names[2] = {"", RelationGetRelationName(relation)};
++
++		INJECTION_POINT("heap_insert", (void *) names);
++	}
++
+ 	/* Cheap, simplistic check that the tuple matches the rel's rowtype. */
+ 	Assert(HeapTupleHeaderGetNatts(tup->t_data) <=
+ 		   RelationGetNumberOfAttributes(relation));
+@@ -2337,6 +2347,10 @@
+ 	for (i = 0; i < ntuples; i++)
+ 	{
+ 		HeapTuple	tuple;
++		const char *names[2] = {"", RelationGetRelationName(relation)};
++
++		/* and here, at each row, as heap_insert() for one */
++		INJECTION_POINT("heap_insert", (void *) names);
+ 
+ 		tuple = ExecFetchSlotHeapTuple(slots[i], true, NULL);
+ 		slots[i]->tts_tableOid = RelationGetRelid(relation);
+
+--- a/src/backend/backup/basebackup.c
++++ b/src/backend/backup/basebackup.c
+@@ -45,6 +45,7 @@
+ #include "storage/reinit.h"
+ #include "utils/builtins.h"
+ #include "utils/guc.h"
++#include "utils/injection_point.h"
+ #include "utils/ps_status.h"
+ #include "utils/relcache.h"
+ #include "utils/resowner.h"
+@@ -290,6 +291,12 @@
+ 		ListCell   *lc;
+ 		tablespaceinfo *newti;
+ 
++		/*
++		 * A test may hold the backup here, its checkpoint made and no file
++		 * sent yet.
++		 */
++		INJECTION_POINT("base_backup_post_create_checkpoint", NULL);
++
+ 		/* If this is an incremental backup, execute preparatory steps. */
+ 		if (ib != NULL)
+ 			PrepareForIncrementalBackup(ib, backup_state);
+
+--- a/src/backend/catalog/index.c
++++ b/src/backend/catalog/index.c
+@@ -73,6 +73,7 @@
+ #include "utils/builtins.h"
+ #include "utils/fmgroids.h"
+ #include "utils/guc.h"
++#include "utils/injection_point.h"
+ #include "utils/inval.h"
+ #include "utils/lsyscache.h"
+ #include "utils/memutils.h"
+@@ -4147,6 +4148,12 @@
+ 
+ 	result |= (indexIds != NIL);
+ 
++	/*
++	 * A test may hold the statement here, the indexes the relation had
++	 * rebuilt and its lock still held.
++	 */
++	INJECTION_POINT("reindex_relation", NULL);
++
+ 	return result;
+ }
+ 
+
+--- a/src/backend/commands/indexcmds.c
++++ b/src/backend/commands/indexcmds.c
+@@ -668,6 +668,12 @@
+ 						INDEX_MAX_KEYS)));
+ 
+ 	/*
++	 * A test may hold the statement here, before it locks the table for the
++	 * build (the caller's lock, if any, taken).
++	 */
++	INJECTION_POINT("defineindex_before_acquire_lock", NULL);
++
++	/*
+ 	 * Only SELECT ... FOR UPDATE/SHARE are allowed while doing a standard
+ 	 * index build; but for concurrent builds we allow INSERT/UPDATE/DELETE
+ 	 * (but not VACUUM).
+@@ -3182,6 +3188,9 @@
+ 				(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+ 				 errmsg("cannot reindex system catalogs concurrently")));
+ 
++	/* A test may hold the statement here, before it looks for the tables. */
++	INJECTION_POINT("reindex_db", NULL);
++
+ 	/*
+ 	 * Get OID of object to reindex, being the database currently being used
+ 	 * by session for a database or for system catalogs, or the schema defined
+
+--- a/src/backend/commands/repack.c
++++ b/src/backend/commands/repack.c
+@@ -2035,6 +2035,9 @@
+ 						swap_toast_by_content, is_internal,
+ 						frozenXid, cutoffMulti, mapped_tables);
+ 
++	/* A test may hold or cancel the statement here, the files swapped. */
++	INJECTION_POINT("after_swap_relation_files", NULL);
++
+ 	/*
+ 	 * If it's a system catalog, queue a sinval message to flush all catcaches
+ 	 * on the catalog when we reach CommandCounterIncrement.
+
+--- a/src/backend/executor/execProcnode.c
++++ b/src/backend/executor/execProcnode.c
+@@ -119,6 +119,7 @@
+ #include "executor/nodeWorktablescan.h"
+ #include "miscadmin.h"
+ #include "nodes/nodeFuncs.h"
++#include "utils/injection_point.h"
+ 
+ static TupleTableSlot *ExecProcNodeFirst(PlanState *node);
+ static bool ExecShutdownNode_walker(PlanState *node, void *context);
+@@ -457,6 +458,34 @@
+ 	check_stack_depth();
+ 
+ 	/*
++	 * A test may fail a scan here, before its first row: once for each scan
++	 * node, so that the tests' build looks for no attached point at each row
++	 * a scan returns.
++	 */
++	switch (nodeTag(node))
++	{
++		case T_SeqScanState:
++		case T_SampleScanState:
++		case T_IndexScanState:
++		case T_IndexOnlyScanState:
++		case T_BitmapHeapScanState:
++		case T_TidScanState:
++		case T_TidRangeScanState:
++		case T_SubqueryScanState:
++		case T_FunctionScanState:
++		case T_TableFuncScanState:
++		case T_ValuesScanState:
++		case T_CteScanState:
++		case T_NamedTuplestoreScanState:
++		case T_WorkTableScanState:
++		case T_ForeignScanState:
++			INJECTION_POINT("before_exec_scan", NULL);
++			break;
++		default:
++			break;
++	}
++
++	/*
+ 	 * If instrumentation is required, change the wrapper to one that just
+ 	 * does instrumentation.  Otherwise we can dispense with all wrappers and
+ 	 * have ExecProcNode() directly call the relevant function from now on.
+
+--- a/src/backend/tcop/postgres.c
++++ b/src/backend/tcop/postgres.c
+@@ -494,6 +494,12 @@
+ {
+ 	int			result;
+ 
++	/*
++	 * A test may fail the backend here, as it waits for its next command:
++	 * any backend's, the one that set the fault too.
++	 */
++	INJECTION_POINT("before_read_command", NULL);
++
+ 	if (whereToSendOutput == DestRemote)
+ 		result = SocketBackend(inBuf);
+ 	else
+
+--- a/src/backend/utils/adt/pg_locale.c
++++ b/src/backend/utils/adt/pg_locale.c
+@@ -45,6 +45,7 @@
+ #include "miscadmin.h"
+ #include "utils/builtins.h"
+ #include "utils/guc_hooks.h"
++#include "utils/injection_point.h"
+ #include "utils/lsyscache.h"
+ #include "utils/memutils.h"
+ #include "utils/pg_locale.h"
+@@ -1212,6 +1213,13 @@
+ 
+ 	AssertCouldGetRelation();
+ 
++	/*
++	 * A test may fail the lookup of a collation's locale here, as of a locale
++	 * the operating system does not have: at every call, the locale made
++	 * already or not.
++	 */
++	INJECTION_POINT("collate_locale_os_lookup", NULL);
++
+ 	if (last_collation_cache_oid == collid)
+ 		return last_collation_cache_locale;
+ 

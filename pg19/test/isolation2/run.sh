@@ -281,6 +281,12 @@ make_cluster() {
 			# and its postgresql.conf.sample: a statement's memory is its
 			# resource queue's to give
 			echo "gp.resqueue_memory_policy = 'eager_free'"
+			# and, where a node has a standby or a mirror, the WAL Cloudberry
+			# keeps for one by default, 320 MB (guc_tables.c), where
+			# PostgreSQL's keeps none: a base backup's -X fetch finds the
+			# WAL its checkpoint began in after two switches and a
+			# checkpoint (segwalrep/master_wal_switch)
+			has_standby "$g" && echo "wal_keep_size = '320MB'"
 			[ "$n" -eq 0 ] && echo "gp.role = 'dispatch'"
 		} >> "$(node_dir "$g" "$n")/postgresql.auto.conf"
 	done

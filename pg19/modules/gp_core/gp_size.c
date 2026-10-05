@@ -58,6 +58,12 @@
  * at once, the segments asked once for them all; and
  * gp_tablespace_location(), each node's location of a tablespace.
  *
+ * And three of PostgreSQL's that are no sizes, made the cluster's on its
+ * coordinator the same way: brin_summarize_new_values() and
+ * brin_summarize_range(), which Cloudberry runs on all segments, and
+ * pg_import_system_collations(), whose collations it dispatches
+ * (gp_builtins.c).
+ *
  *-------------------------------------------------------------------------
  */
 #include "postgres.h"
@@ -113,6 +119,10 @@ static const struct
 	{F_PG_TABLESPACE_SIZE_NAME, "tablespace_size", 1, {NAMEOID}},
 	{F_PG_TABLESPACE_SIZE_OID, "tablespace_size", 1, {OIDOID}},
 	{F_PG_TABLESPACE_LOCATION, "tablespace_location", 1, {OIDOID}, true},
+	/* and three that are no sizes either, which run on every segment too */
+	{F_BRIN_SUMMARIZE_NEW_VALUES, "brin_summarize_new_values", 1, {REGCLASSOID}},
+	{F_BRIN_SUMMARIZE_RANGE, "brin_summarize_range", 2, {REGCLASSOID, INT8OID}},
+	{F_PG_IMPORT_SYSTEM_COLLATIONS, "pg_import_system_collations", 1, {REGNAMESPACEOID}},
 };
 
 /* Looked up on first use and again whenever pg_proc changes. */

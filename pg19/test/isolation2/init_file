@@ -16,12 +16,6 @@ m/^while inserting index tuple \(\d+,\d+\) in relation /
 # masks it.
 m/^DETAIL:  segment \d+ \([^)]*\)(; \d+ other segments failed too)?$/
 
-# A fault's PANIC, when it reaches the client before the connection closes:
-# its message ends in a space, as Cloudberry's does, which the matchsubs of
-# the test that expects it (dtx_recovery_wait_lsn), written without the
-# space, do not take away.
-m/^PANIC:  fault triggered, fault name:'\w+' fault type:'panic' $/
-
 -- end_matchignore
 
 -- start_matchsubs
@@ -75,5 +69,16 @@ s/OID \d+/OID NNNN/
 # read on, gp_core's (modify_table_data_corrupt).
 m/ \((bmfuncs|nodeModifyTable)\.c:(\d+|XXX)\)$/
 s/ \((bmfuncs|nodeModifyTable)\.c:(\d+|XXX)\)$//
+
+# A fault's PANIC: whether its message reaches the client before the
+# connection closes is a race -- the client's next query may find the
+# connection closed first, and libpq then says that alone -- as Cloudberry's
+# own tests of a PANIC say, which take the line away themselves ("The PANIC
+# message does not emit sometimes", dtx_recovery_wait_lsn): it goes from the
+# expected output and the result alike, check_gxid's too.  Its message ends
+# in a space, as Cloudberry's does, where Cloudberry's expected output has
+# none.
+m/^PANIC:  fault triggered, fault name:'\w+' fault type:'panic' ?$/
+s/^PANIC:  fault triggered, fault name:'\w+' fault type:'panic' ?\n//
 
 -- end_matchsubs

@@ -3797,3 +3797,87 @@ CREATE VIEW pg_catalog.pg_stat_activity_extended AS
 	FROM pg_catalog.pg_stat_activity a;
 RESET allow_system_table_mods;
 GRANT SELECT ON pg_catalog.pg_stat_activity_extended TO PUBLIC;
+
+/*
+ * pg_terminate_backend(pid, message) and pg_cancel_backend(pid, message):
+ * Cloudberry's, which signal as PostgreSQL's do, the backend saying the
+ * message after its error (gp_signal.c).  PostgreSQL 19's
+ * pg_terminate_backend(integer, bigint) takes a timeout second; a quoted
+ * message, an unknown literal, is text, and takes this one.
+ */
+CREATE FUNCTION pg_catalog.pg_terminate_backend(integer, text)
+RETURNS boolean
+AS 'MODULE_PATHNAME', 'gp_terminate_backend_msg'
+LANGUAGE C VOLATILE STRICT PARALLEL SAFE;
+
+CREATE FUNCTION pg_catalog.pg_cancel_backend(integer, text)
+RETURNS boolean
+AS 'MODULE_PATHNAME', 'gp_cancel_backend_msg'
+LANGUAGE C VOLATILE STRICT PARALLEL SAFE;
+
+/*
+ * gp_get_next_gxid(): Cloudberry's next distributed transaction ID -- on
+ * the coordinator its next transaction ID, which a distributed transaction
+ * takes as its gxid; on a segment the newest a part there was prepared or
+ * committed in one phase under (gp_dtx.c).
+ */
+CREATE FUNCTION pg_catalog.gp_get_next_gxid()
+RETURNS int8
+AS 'MODULE_PATHNAME', 'gp_get_next_gxid'
+LANGUAGE C VOLATILE PARALLEL UNSAFE;
+
+/*
+ * PostgreSQL's BRIN summarization and import of the system's collations, the
+ * cluster's, as Cloudberry's are: a call of PostgreSQL's on a cluster's
+ * coordinator is made a call of the one here of its name and arguments, as
+ * the size functions' are (gp_size.c, gp_builtins.c).
+ */
+CREATE FUNCTION gp_internal.brin_summarize_new_values(regclass)
+RETURNS integer AS 'MODULE_PATHNAME', 'gp_brin_summarize_new_values' LANGUAGE C STRICT;
+CREATE FUNCTION gp_internal.brin_summarize_range(regclass, bigint)
+RETURNS integer AS 'MODULE_PATHNAME', 'gp_brin_summarize_range' LANGUAGE C STRICT;
+CREATE FUNCTION gp_internal.pg_import_system_collations(regnamespace)
+RETURNS integer AS 'MODULE_PATHNAME', 'gp_import_system_collations' LANGUAGE C STRICT;
+
+/*
+ * gp_stat_progress_analyze: pg_stat_progress_analyze of every node, with
+ * the node's content id first, as Cloudberry's view of that name gives it --
+ * the coordinator's ANALYZE, and each segment's sample of its rows
+ * (gp_analyze.c); and Cloudberry's summary of it, a distributed table's
+ * blocks added up over its segments, a replicated table's divided by them,
+ * as it writes it (system_views_gp_summary.sql).
+ */
+SET allow_system_table_mods = on;
+CREATE VIEW pg_catalog.gp_stat_progress_analyze AS
+	SELECT -1 AS gp_segment_id, a.*
+	FROM pg_catalog.pg_stat_progress_analyze a
+	UNION ALL
+	SELECT d.gp_segment_id, d.pid, d.datid, d.datname, d.relid, d.phase,
+		   d.sample_blks_total, d.sample_blks_scanned, d.ext_stats_total,
+		   d.ext_stats_computed, d.child_tables_total, d.child_tables_done,
+		   d.current_child_table_relid, d.delay_time, d.started_by
+	FROM gp.dist_random(NULL::pg_catalog.pg_stat_progress_analyze) d;
+
+CREATE VIEW pg_catalog.gp_stat_progress_analyze_summary AS
+SELECT
+	max(coalesce(a1.pid, 0)) AS pid,
+	a.datid,
+	a.datname,
+	a.relid,
+	a.phase,
+	CASE WHEN d.policytype = 'r' THEN (sum(a.sample_blks_total) / d.numsegments)::bigint ELSE sum(a.sample_blks_total) END AS sample_blks_total,
+	CASE WHEN d.policytype = 'r' THEN (sum(a.sample_blks_scanned) / d.numsegments)::bigint ELSE sum(a.sample_blks_scanned) END AS sample_blks_scanned,
+	CASE WHEN d.policytype = 'r' THEN (sum(a.ext_stats_total) / d.numsegments)::bigint ELSE sum(a.ext_stats_total) END AS ext_stats_total,
+	CASE WHEN d.policytype = 'r' THEN (sum(a.ext_stats_computed) / d.numsegments)::bigint ELSE sum(a.ext_stats_computed) END AS ext_stats_computed,
+	CASE WHEN d.policytype = 'r' THEN (sum(a.child_tables_total) / d.numsegments)::bigint ELSE sum(a.child_tables_total) END AS child_tables_total,
+	CASE WHEN d.policytype = 'r' THEN (sum(a.child_tables_done) / d.numsegments)::bigint ELSE sum(a.child_tables_done) END AS child_tables_done
+FROM pg_catalog.gp_stat_progress_analyze a
+	JOIN pg_catalog.pg_class c ON a.relid = c.oid
+	LEFT JOIN pg_catalog.gp_distribution_policy d ON c.oid = d.localoid
+	LEFT JOIN pg_catalog.gp_stat_progress_analyze a1 ON a.pid = a1.pid AND a1.gp_segment_id = -1
+WHERE a.gp_segment_id > -1
+GROUP BY a.datid, a.datname, a.relid, a.phase, d.policytype, d.numsegments;
+RESET allow_system_table_mods;
+
+GRANT SELECT ON pg_catalog.gp_stat_progress_analyze,
+	pg_catalog.gp_stat_progress_analyze_summary TO PUBLIC;

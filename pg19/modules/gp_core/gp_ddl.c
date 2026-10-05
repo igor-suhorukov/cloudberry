@@ -2234,3 +2234,25 @@ GpDdlInit(void)
 
 	RegisterXactCallback(gp_ddl_xact_callback, NULL);
 }
+
+/*
+ * A statement the coordinator has done already, sent to the segments to do
+ * with the OID the coordinator gave the object: the CREATE COLLATION of a
+ * collation pg_import_system_collations() made (gp_builtins.c), as
+ * Cloudberry's import dispatches one for each (DispatchCollationCreate(),
+ * collationcmds.c).  The segments run it in the coordinator's transaction,
+ * as any statement dispatched here is, each checking the OID against the
+ * catalog that asks for it.
+ */
+void
+GpDdlDispatchDone(Node *stmt, Oid catalog, Oid oid)
+{
+	StringInfoData buf;
+
+	initStringInfo(&buf);
+	appendStringInfo(&buf, GP_TREE_MARKER "oids=%u:%u", catalog, oid);
+	payload_text(&buf);
+	appendStringInfoString(&buf, nodeToString(stmt));
+	GpDispatchUtility(buf.data, false, false);
+	pfree(buf.data);
+}

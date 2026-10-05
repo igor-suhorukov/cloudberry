@@ -75,6 +75,7 @@
 #include "gp_segment.h"
 #include "gp_settings.h"
 #include "gp_share.h"
+#include "gp_signal.h"
 #include "gp_size.h"
 #include "gp_standby.h"
 #include "gp_ic.h"
@@ -406,6 +407,13 @@ _PG_init(void)
 	 * schema named as Cloudberry's is (gp_utilmode.c).
 	 */
 	GpUtilmodeInit();
+
+	/*
+	 * pg_terminate_backend() and pg_cancel_backend() with a message, which
+	 * the backend says as it ends or cancels (gp_signal.c): its slot of
+	 * shared memory, requested now, and its words, on one node too.
+	 */
+	GpSignalInit();
 
 	/*
 	 * Deliberately no MarkGUCPrefixReserved("gp") here.  It drops every
