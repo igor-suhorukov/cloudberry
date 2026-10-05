@@ -8,6 +8,30 @@ in it (test.orca.diff) holds for that pass alone.  run.sh counts a test as
 passing when gpdiff.pl, under Cloudberry's init_file and the port's, finds no
 difference or exactly the file's.
 
+bitmap_index_concurrent
+  EXPLAIN's four plans and nothing else.  Session 1 plans with PostgreSQL's
+  planner in either pass, whose route reads the table's rows through a
+  Gather Motion of the table -- of segment 0 alone, where the key or
+  gp_segment_id = 0 fixes it -- and each segment plans its own scan of them,
+  where Cloudberry's plan shows its Bitmap Heap Scan or Index Scan under the
+  Motion.  The segment's scan is the bitmap index's, as Cloudberry's is: the
+  test's faults hold it after it read a bitmap page
+  (after_read_one_bitmap_idx_page) while an INSERT rearranges the page's
+  words onto the next (rearrange_word_to_next_bitmap_page), and the counts
+  it then gives, which the test is for, are Cloudberry's.
+
+bitmap_index_inspect
+  What the index's pages hold, and nothing else.  The port's pages are
+  PostgreSQL's 8 kB, where Cloudberry builds with 32 kB (configure's
+  --with-blocksize), so each value's 1000 rows of the table fill heap pages
+  of 226 rows where Cloudberry's fill pages of 909: each value's last TIDs
+  in its list-of-values item (bm_lov_page_items()), and its bitmap page --
+  for each heap page a fill word of ones, the literal word of the rest and
+  a fill word of zeros (bm_bitmap_page_header(), bm_bitmap_page_items()) --
+  are those of 8 kB pages.  The functions are Cloudberry's pageinspect's,
+  gp_ao's here (bitmap/bitmapinspect.c): the meta page, which pages are
+  which, and the errors are Cloudberry's.
+
 concurrent_partition_table_operations_should_not_deadlock, and its
 _optimizer output, which the orca pass is compared with
   EXPLAIN's plans and nothing else: the operations the test runs side by
@@ -86,6 +110,21 @@ compared with
   transactions of the local ones it may wait for, in its map
   (before_get_distributed_xid, gp_dtx.c).
 
+gdd/insert_root_partition_truncate_deadlock, in the planner pass alone
+  No deadlock forms for the detector to break.  The planner's route writes
+  an INSERT's rows from the coordinator, which makes them all and then
+  sends each segment its share as a COPY, one segment after another
+  (gp_modify.c), where Cloudberry's segments run the INSERT's slice at
+  once: segment 0's COPY is held where its part begins (func_init_plan_end),
+  before it routes a row to a partition, and segments 1 and 2 have not
+  begun theirs, so the TRUNCATE of the leaf takes its lock on every node at
+  once and ends -- the driver finds it not blocking, and has nothing to
+  wait for after -- and the INSERT then writes its 30 rows.  Under ORCA,
+  whose INSERT runs on every segment at once, segments 1 and 2 hold the
+  leaf, the INSERT waits on segment 0 for the TRUNCATE that waits for it on
+  the others, and the global deadlock detector cancels the TRUNCATE, as
+  Cloudberry's does.
+
 lockmodes, and its _optimizer output, which the orca pass is compared with
   Four things, none of them a lock of Cloudberry's the port does not take.
   Half the test is append-optimized tables, which are M5's: their CREATE
@@ -112,6 +151,24 @@ lockmodes, and its _optimizer output, which the orca pass is compared with
   from its leaves' as the test's fault waits (gp_partmerge.c), and the
   leaf's correlation is the port's, over the sample as it arrived, where
   Cloudberry's is the mean of each segment's.
+
+modify_table_data_corrupt, and its _optimizer output, which the orca pass
+is compared with
+  The plans, and the outcome of the two statements the test expects the
+  planner to fail.  The planner's route gathers the join's tables to the
+  coordinator and sends each row's DELETE or UPDATE back to the segment it
+  was read on, by its gp_segment_id (Custom Scan (Explicit Redistribute
+  Motion), gp_explicit.c), where Cloudberry's planner redistributes the
+  rows by the table's key: the row segment 0 holds where its key does not
+  hash is changed where it is, with the other, DELETE 2 and UPDATE 2.
+  Under ORCA, whose plans are Cloudberry's, each row reaches the segment
+  its key hashes to, and the check of the segment it was read on fails the
+  three statements the test expects ORCA to fail, in Cloudberry's words
+  (gp_internal.check_row_segment(), CTranslatorDXLToPlStmt.cpp).  ORCA's
+  plans show the port's Dispatch above the ModifyTable, which it runs on
+  the segments, the slices numbered from it, no Result of a One-Time Filter
+  above the split update, and a hash key qualified with its table, as an
+  ORCA plan's EXPLAIN qualifies its columns here (see spilling_hashagg).
 
 segwalrep/commit_blocking_on_standby
   SHOW's column of repl_catchup_within_range, which is the setting's name:
@@ -207,6 +264,20 @@ runaway_query, in the planner pass alone  EXPLAIN's plan of the query ORCA
   relation and the segment, where Cloudberry's shows a Seq Scan and its
   Filter under the Motion.  Under ORCA the fault fails the query, as
   Cloudberry's does.
+
+spilling_hashagg, and its _optimizer output, which the orca pass is
+compared with
+  EXPLAIN's plans alone; what the aggregates answer is Cloudberry's.  The
+  planner's route gathers the table and aggregates on the coordinator, a
+  GroupAggregate over a Sort, where Cloudberry's planner aggregates on the
+  segments, hashed in two stages.  ORCA's plans are Cloudberry's, but
+  EXPLAIN qualifies each column with its table -- "Group Key:
+  test_src_tbl.a" -- because an ORCA plan's range table has the query's own
+  entries beside its scans', for the executor's privilege checks
+  (add_query_permissions_walker(), orca.c), and PostgreSQL's EXPLAIN
+  qualifies the columns of a plan of more than one entry.  The fault the
+  test sets, force_hashagg_stream_hashtable, is in no code of Cloudberry's
+  either, and is never hit.
 
 starve_case
   PostgreSQL's words for the error of function_starve_volatile(): it runs in

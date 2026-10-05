@@ -1,0 +1,30 @@
+@@
+- Gather Motion 1:1  (slice1; segments: 1)          
+-   ->  Bitmap Heap Scan on bmupdate                
+-         Recheck Cond: (id = 97)                   
+-         ->  Bitmap Index Scan on idx_bmupdate__id 
+-               Index Cond: (id = 97)               
++ Gather Motion 1:1 on bmupdate  (slice1; segments: 1) 
++   Segment: 0                                         
+@@
+- Gather Motion 1:1  (slice1; segments: 1)            
+-   ->  Index Scan using idx_bmupdate__id on bmupdate 
+-         Index Cond: (id = 97)                       
++ Gather Motion 1:1 on bmupdate  (slice1; segments: 1) 
++   Segment: 0                                         
+@@
+- Gather Motion 3:1  (slice1; segments: 3)            
+-   ->  Index Scan using idx_bmupdate__id on bmupdate 
+-         Index Cond: ((id >= 97) AND (id <= 99))     
+-         Filter: (gp_segment_id = 0)                 
++ Gather Motion 1:1 on bmupdate  (slice1; segments: 1) 
++   Segment: 0                                         
+@@
+- Gather Motion 3:1  (slice1; segments: 3)              
+-   ->  Bitmap Heap Scan on bmupdate                    
+-         Recheck Cond: ((id >= 97) AND (id <= 99))     
+-         Filter: (gp_segment_id = 0)                   
+-         ->  Bitmap Index Scan on idx_bmupdate__id     
+-               Index Cond: ((id >= 97) AND (id <= 99)) 
++ Gather Motion 1:1 on bmupdate  (slice1; segments: 1) 
++   Segment: 0                                         
