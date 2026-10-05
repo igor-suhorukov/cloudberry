@@ -99,7 +99,9 @@ fi
 ROOT="$(mktemp -d "${TMPDIR:-/tmp}/cb-tpc-XXXXXX")"
 SOCK="$(mktemp -d /tmp/cbtpc-XXXXXX)"
 BASEPORT="${PGPORT:-$((8100 + RANDOM % 200))}"
-SECRET="tpc-$RANDOM$RANDOM$RANDOM"
+# gp_core refuses a secret under 16 characters (gp_cluster.c), and ORCA
+# then plans no Motion: the prefix is long enough whatever $RANDOM gives
+SECRET="tpc-h-and-tpc-ds-$RANDOM$RANDOM$RANDOM"
 NODES="$(seq 0 "$SEGMENTS")"
 
 datadir() { echo "$ROOT/node$1"; }
