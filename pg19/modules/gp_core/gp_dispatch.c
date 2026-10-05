@@ -7334,6 +7334,16 @@ GpDispatchInit(void)
 	RegisterSubXactCallback(dispatch_subxact_callback, NULL);
 	prev_commit_recorded_hook = xact_commit_recorded_hook;
 	xact_commit_recorded_hook = dispatch_commit_recorded;
+
+	/*
+	 * O37: an error raised in an abort once the transaction has ended for
+	 * the other backends -- by an abort callback, or by a test's fault,
+	 * abort_after_procarray_end (test-iso2-recovery.patch) -- runs
+	 * AbortTransaction() again, which then records the abort no second
+	 * time, as Cloudberry's xact.c guards it (its b5c4fdc0098).  This file's
+	 * own abort callback raises nothing; others may.
+	 */
+	XactAbortAgainAfterEnd = true;
 }
 
 /*

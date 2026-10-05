@@ -79,11 +79,20 @@
  * what ends a wait for a mirror that is not coming back, by turning
  * synchronous replication off.
  *
+ * And a primary keeps its WAL for the mirror from the redo point of its last
+ * checkpoint, rather than from what the mirror has flushed, as Cloudberry's
+ * walsender keeps a replication slot: a primary FTS has failed over from is
+ * rewound by gprecoverseg's pg_rewind, which reads its WAL back to the last
+ * checkpoint before the two diverged -- WAL the checkpoints it runs after the
+ * failover would otherwise remove (fts_slot_restart_lsn(), through the core
+ * series' O36).
+ *
  * Cloudberry sources this file stands in for:
  *	  src/backend/fts/fts.c, ftsprobe.c and ftsmessagehandler.c,
  *	  src/backend/cdb/cdbfts.c, the mirror half of
- *	  src/backend/replication/gp_replication.c, and the commit wait of
- *	  src/backend/replication/syncrep.c
+ *	  src/backend/replication/gp_replication.c, the commit wait of
+ *	  src/backend/replication/syncrep.c, and the replication slot's restart
+ *	  point of src/backend/replication/walsender.c
  *
  *-------------------------------------------------------------------------
  */
@@ -109,6 +118,7 @@
 #include "miscadmin.h"
 #include "postmaster/bgworker.h"
 #include "postmaster/interrupt.h"
+#include "replication/slot.h"
 #include "replication/syncrep.h"
 #include "replication/walsender.h"
 #include "replication/walsender_private.h"
@@ -214,6 +224,7 @@ static shmem_request_hook_type prev_shmem_request = NULL;
 static shmem_startup_hook_type prev_shmem_startup = NULL;
 static ClientAuthentication_hook_type prev_client_auth = NULL;
 static ProcessUtility_hook_type prev_process_utility = NULL;
+static physical_slot_restart_lsn_hook_type prev_slot_restart_lsn = NULL;
 
 static void
 fts_shmem_request(void)
@@ -2000,6 +2011,36 @@ gp_segment_replication(PG_FUNCTION_ARGS)
 }
 
 /* ------------------------------------------------------------------------- */
+/* The mirror's WAL, kept for pg_rewind                                      */
+/* ------------------------------------------------------------------------- */
+
+/*
+ * Where a standby's reply moves its replication slot (O36), in the WAL
+ * sender: the slot stays where it is until the redo point of a checkpoint
+ * has passed it, and then moves to that redo point, or to what the standby
+ * has flushed if that is earlier -- Cloudberry's
+ * PhysicalConfirmReceivedLocation() (walsender.c).  So the primary keeps
+ * the WAL from its last checkpoint before the mirror's flush on, which
+ * pg_rewind reads back from if FTS fails over to the mirror.  The redo point
+ * is a running checkpoint's once it has one (GetRedoRecPtr()), as in
+ * Cloudberry.  The coordinator's standby's slot is kept the same way, as
+ * Cloudberry keeps every physical slot.
+ */
+static XLogRecPtr
+fts_slot_restart_lsn(XLogRecPtr flushed)
+{
+	XLogRecPtr	restart = MyReplicationSlot->data.restart_lsn;
+	XLogRecPtr	redo = GetRedoRecPtr();
+
+	if (prev_slot_restart_lsn)
+		flushed = prev_slot_restart_lsn(flushed);
+
+	if (restart >= redo)
+		return restart;
+	return Min(redo, flushed);
+}
+
+/* ------------------------------------------------------------------------- */
 /* Start-up                                                                  */
 /* ------------------------------------------------------------------------- */
 
@@ -2088,6 +2129,10 @@ GpFtsInit(void)
 
 	prev_client_auth = ClientAuthentication_hook;
 	ClientAuthentication_hook = fts_client_auth;
+
+	/* On every node: its replication slots keep the WAL pg_rewind reads. */
+	prev_slot_restart_lsn = physical_slot_restart_lsn_hook;
+	physical_slot_restart_lsn_hook = fts_slot_restart_lsn;
 
 	self = GpClusterSelf();
 
