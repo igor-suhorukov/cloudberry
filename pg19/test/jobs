@@ -61,9 +61,9 @@ pax_isolation2         planner  160   PASSES=planner MEM=14500
 singlenode             orca     165   PASSES=orca MEM=5500
 pax                    toast     78   PAX_GROUP=toast MEM=5000
 pax                    -         20   PAX_GROUP=main MEM=2200
-isolation2             orca     153   PASSES=orca MEM=26500
+isolation2             orca     149   PASSES=orca MEM=28000
 postgis_regress        orca     102   PASSES=orca MEM=6000
-isolation2             planner  149   PASSES=planner MEM=26500
+isolation2             planner  146   PASSES=planner MEM=28000
 diskquota              isolation2 105   DQ_PARTS=isolation2 MEM=2000
 gpmgmt                 -        270   MEM=2000
 expandshrink           orca      85   PASSES=orca MEM=2500
@@ -80,8 +80,8 @@ ic                     -         30   MEM=900
 # proxy, which every full run's ic checks; skipped at once otherwise.
 ic_greenplum           udp2     140   IC=udp2 PASSES=orca MEM=20000
 ic_greenplum           proxy    140   IC=proxy PASSES=orca MEM=20000
-ic_isolation2          udp2     140   IC=udp2 PASSES=orca MEM=26500
-ic_isolation2          proxy    140   IC=proxy PASSES=orca MEM=26500
+ic_isolation2          udp2     140   IC=udp2 PASSES=orca MEM=28000
+ic_isolation2          proxy    140   IC=proxy PASSES=orca MEM=28000
 orca                   -         54   MEM=300
 fts                    -         55   MEM=1000
 gpfts                  -         73   MEM=1300
