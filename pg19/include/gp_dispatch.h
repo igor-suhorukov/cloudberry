@@ -521,4 +521,10 @@ extern void GpDispatchConnectionInit(void);
 /* Installs the DDL dispatch hooks, where there is a cluster; see gp_ddl.c. */
 extern void GpDdlInit(void);
 
+/*
+ * Has the transaction prepared parts on the segments, its commit on the
+ * coordinator the distributed transaction's decision?
+ */
+extern bool GpDispatchDtxPrepared(void);
+
 #endif							/* GP_DISPATCH_H */

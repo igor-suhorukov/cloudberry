@@ -115,6 +115,7 @@
 #include "gp_cluster.h"
 #include "gp_core_api.h"
 #include "gp_dispatch.h"
+#include "gp_fault.h"
 #include "gp_gdd.h"
 #include "gp_hash.h"
 #include "gp_policy.h"
@@ -2323,6 +2324,33 @@ gp_modify_query_lockmode(Oid relid, LOCKMODE lockmode, AclMode requiredPerms)
 	return AccessShareLock;
 }
 
+/*
+ * The hook as it is set: the mode above, and then Cloudberry's fault at the
+ * moment its parser or rewriter has locked a relation it opens, in that mode
+ * (CdbTryOpenTable(), table.c, which parserOpenTable() and
+ * AcquireRewriteLocks() call): a test sleeps there, holding an UPDATE's
+ * RowExclusiveLock with the global deadlock detector on, while another
+ * session's UPDATE of the table goes on beside it (gdd/avoid-qd-deadlock).
+ * The core takes the lock as the hook returns, so it is taken here first,
+ * where a fault is set, in the mode the core will take (queryLockMode(),
+ * parse_relation.c): the parser's own where the hook chose a weaker one for
+ * a relation the query writes.
+ */
+static LOCKMODE
+gp_modify_query_lockmode_fault(Oid relid, LOCKMODE lockmode,
+							   AclMode requiredPerms)
+{
+	LOCKMODE	chosen = gp_modify_query_lockmode(relid, lockmode, requiredPerms);
+
+	if (gp_fault_active != NULL && *gp_fault_active > 0)
+	{
+		LockRelationOid(relid, lockmode >= RowExclusiveLock && chosen < lockmode
+						? lockmode : chosen);
+		(void) GP_FAULT("upgrade_row_lock");
+	}
+	return chosen;
+}
+
 void
 GpModifyInit(void)
 {
@@ -2346,5 +2374,5 @@ GpModifyInit(void)
 	planner_hook = gp_modify_planner;
 
 	prev_query_lockmode = query_lockmode_hook;
-	query_lockmode_hook = gp_modify_query_lockmode;
+	query_lockmode_hook = gp_modify_query_lockmode_fault;
 }

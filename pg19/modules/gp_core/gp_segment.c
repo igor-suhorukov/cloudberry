@@ -1861,3 +1861,44 @@ GpSegmentInit(void)
 
 	CacheRegisterSyscacheCallback(PROCOID, invalidate_func_oids, (Datum) 0);
 }
+
+PG_FUNCTION_INFO_V1(gp_check_row_segment);
+
+/*
+ * gp_internal.check_row_segment(ctid, segid, action)
+ *		Cloudberry's check, as a segment's ModifyTable deletes or updates a
+ *		row, that the row was read on this segment (ExecDelete() and
+ *		ExecUpdate(), nodeModifyTable.c): a row on a segment its key does not
+ *		hash to -- put there in a session of the segment's own -- reaches
+ *		another segment through a Motion that routes rows by their key, and
+ *		its ctid there is another row's.  ORCA's UPDATE and DELETE plans give
+ *		it the row's gp_segment_id beside its ctid, in a junk column the
+ *		ModifyTable's input computes with this (CTranslatorDXLToPlStmt.cpp),
+ *		which answers the segment and fails the statement before the row is
+ *		touched where it is another's.  A split update's INSERT, "action"
+ *		1, goes where its new key hashes and is not checked; a DELETE's, 0,
+ *		is, and an UPDATE's or DELETE's of no split, NULL.
+ */
+Datum
+gp_check_row_segment(PG_FUNCTION_ARGS)
+{
+	ItemPointer tid;
+	int32		segid;
+
+	if (!PG_ARGISNULL(2) && PG_GETARG_INT32(2) != 0)
+		PG_RETURN_DATUM(PG_ARGISNULL(1) ? (Datum) 0 : PG_GETARG_DATUM(1));
+	if (PG_ARGISNULL(1))
+		elog(ERROR, "gp_segment_id is NULL");
+	segid = PG_GETARG_INT32(1);
+	if (segid != GpClusterContentId() && !PG_ARGISNULL(0))
+	{
+		tid = PG_GETARG_ITEMPOINTER(0);
+		elog(ERROR,
+			 "distribution key of the tuple (%u, %u) doesn't belong to "
+			 "current segment (actually from seg%d)",
+			 ItemPointerGetBlockNumberNoCheck(tid),
+			 ItemPointerGetOffsetNumberNoCheck(tid),
+			 segid);
+	}
+	PG_RETURN_INT32(segid);
+}

@@ -1256,12 +1256,14 @@ current_counts(Oid relid, BlockNumber *pages, double *tuples)
  * hold it: taken table by table in OID order, so that two of these never
  * wait for each other.
  */
-static void segment_counts(List *tables, bool vacuumed, bool built);
+static void segment_counts(List *tables, bool vacuumed, bool built,
+						   bool skip_locked);
 
 void
 GpAnalyzeSegmentCounts(VacuumStmt *stmt)
 {
 	List	   *tables;
+	bool		skip_locked = false;
 
 	if (GpClusterBackendRole() != GP_ROLE_DISPATCH)
 		return;
@@ -1270,11 +1272,13 @@ GpAnalyzeSegmentCounts(VacuumStmt *stmt)
 		/* VACUUM (ONLY_DATABASE_STATS) takes no relation */
 		if (strcmp(opt->defname, "only_database_stats") == 0 && defGetBoolean(opt))
 			return;
+		if (strcmp(opt->defname, "skip_locked") == 0)
+			skip_locked = defGetBoolean(opt);
 	}
 	tables = distributed_relids(stmt);
 	if (tables == NIL)
 		return;
-	segment_counts(tables, stmt->is_vacuumcmd, false);
+	segment_counts(tables, stmt->is_vacuumcmd, false, skip_locked);
 }
 
 /*
@@ -1439,7 +1443,7 @@ GpAnalyzeSegmentCountsAfterBuild(Node *stmt)
 
 	tables = distributed_of(candidates);
 	if (tables != NIL)
-		segment_counts(tables, true, true);
+		segment_counts(tables, true, true, false);
 }
 
 /*
@@ -1447,10 +1451,19 @@ GpAnalyzeSegmentCountsAfterBuild(Node *stmt)
  * VACUUM ("vacuumed") their pages, rows, all-visible and all-frozen pages,
  * and their indexes' pages and rows; after an ANALYZE their all-visible and
  * all-frozen pages, and their indexes' pages.
+ *
+ * After a statement with SKIP_LOCKED, a table whose lock another session
+ * holds is passed over, with its indexes, as the statement passed it over:
+ * the counts are the statement's, and waiting here for the lock would hold
+ * the statement that was not to wait -- an auto-stats ANALYZE after an
+ * INSERT, which Cloudberry's ExecVacuum() runs with SKIP_LOCKED unless
+ * gp_autostats_lock_wait says to wait (vacuum.c), as gp_settings.c's
+ * issue_analyze() does (autostats_locking).
  */
 static void
-segment_counts(List *tables, bool vacuumed, bool built)
+segment_counts(List *tables, bool vacuumed, bool built, bool skip_locked)
 {
+	List	   *skipped = NIL;
 	List	   *order = NIL;
 	HASHCTL		ctl;
 	HTAB	   *counts;
@@ -1547,7 +1560,14 @@ segment_counts(List *tables, bool vacuumed, bool built)
 		 */
 		if (c->relid == c->table &&
 			!CheckRelationOidLockedByMe(c->table, ShareLock, true))
-			LockRelationOid(c->table, ShareUpdateExclusiveLock);
+		{
+			if (!skip_locked)
+				LockRelationOid(c->table, ShareUpdateExclusiveLock);
+			else if (!ConditionalLockRelationOid(c->table, ShareUpdateExclusiveLock))
+				skipped = lappend_oid(skipped, c->table);
+		}
+		if (list_member_oid(skipped, c->table))
+			continue;
 		if (c->nsegs < nsegs ||
 			(policy = recorded_policy(c->table)) == NULL)
 			continue;

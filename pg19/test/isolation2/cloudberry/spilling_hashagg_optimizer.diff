@@ -1,0 +1,19 @@
+@@
+- Gather Motion 3:1  (slice1; segments: 3)   
+-   ->  HashAggregate                        
+-         Group Key: a                       
+-         ->  HashAggregate                  
+-               Group Key: a, b              
+-               ->  Seq Scan on test_src_tbl 
++ Gather Motion 3:1  (slice1; segments: 3)                
++   ->  HashAggregate                                     
++         Group Key: test_src_tbl.a                       
++         ->  HashAggregate                               
++               Group Key: test_src_tbl.a, test_src_tbl.b 
++               ->  Seq Scan on test_src_tbl              
+@@
+-         Group Key: a                       
++         Group Key: test_src_tbl.a          
+@@
+-               Sort Key: a                  
++               Sort Key: test_src_tbl.a     

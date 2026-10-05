@@ -906,6 +906,13 @@ AttrNumber CarryTableOid(Plan *plan, AttrNumber resno, List *rtable);
 // ... USING reads of it.
 AttrNumber CarryRteColumn(Plan *plan, Index rti, Var *proto);
 
+// Cloudberry's check, as a segment changes a row, that the row was read on
+// that segment: a call of gp_core's gp_internal.check_row_segment() of the
+// row's ctid, its gp_segment_id and a split update's action (NULL for none),
+// which answers the segment; nullptr where the database has no such
+// function.
+Expr *MakeRowSegmentCheck(Expr *ctid, Expr *segid, Expr *action);
+
 // A CTE ORCA reads in more than one slice, whose rows each segment keeps in
 // files (compat/sharedscan.c): whether gp_core can name them; the Sequence
 // that runs "producers" before "plan"; a producer, writing the rows of

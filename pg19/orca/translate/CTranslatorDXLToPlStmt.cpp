@@ -6574,8 +6574,11 @@ CTranslatorDXLToPlStmt::TranslateDXLDynForeignScan(
 //		  as the planner gives them to it (TranslateReturningList,
 //		  TranslateOnConflict).
 //		- The row is found by "ctid" alone.  Cloudberry adds "gp_segment_id"
-//		  beside it, a system column PostgreSQL 19 does not have; the Query
-//		  translator gives ORCA tableoid in its place, and it stops here.
+//		  beside it, which its ModifyTable checks is the segment's own; here
+//		  the column is gp_core's check of it, which PostgreSQL 19's
+//		  ModifyTable computes with its input and reads no further.  Where
+//		  the database has no gp_core, the Query translator gives ORCA
+//		  tableoid in its place, and it stops here.
 //		- An UPDATE names in updateColnos the columns it sets, as the
 //		  planner's does, not every column; see CreateUpdateTargetList.
 //		- ORCA's permission entry for the table is completed from the
@@ -6949,6 +6952,47 @@ CTranslatorDXLToPlStmt::TranslateDXLDml(
 		((TargetEntry *) gpdb::ListNth(result_plan->targetlist,
 									   tableoid_col - 1))
 			->resname = PStrDup("tableoid");
+	}
+
+	// Cloudberry's check that the row a segment changes was read there: a
+	// junk column "gp_segment_id", which its ModifyTable compares with the
+	// segment's own (ExecDelete() and ExecUpdate(), nodeModifyTable.c).  A
+	// row a session of a segment's own put on a segment its key does not
+	// hash to reaches another segment through a Motion that routes rows by
+	// their key, where its ctid is another row's; PostgreSQL 19's
+	// ModifyTable reads no such column, so the column is gp_core's check of
+	// it, computed here, on the segment, before the row is changed -- and a
+	// split update's INSERT, which goes where its new key hashes, passes it.
+	if ((CMD_UPDATE == m_cmd_type || CMD_DELETE == m_cmd_type) &&
+		nullptr != writeslice)
+	{
+		List *segid_list = NIL;
+		AddJunkTargetEntryForColId(&segid_list, &child_context,
+								   phy_dml_dxlop->GetSegmentIdColId(),
+								   "gp_segment_id");
+		TargetEntry *te_segid = (TargetEntry *) gpdb::ListNth(segid_list, 0);
+		TargetEntry *te_ctid = (TargetEntry *) gpdb::ListNth(
+			result_plan->targetlist, ctid_col - 1);
+		Expr *action = nullptr;
+		if (split)
+		{
+			action = (Expr *) gpdb::CopyObject(
+				((TargetEntry *) gpdb::ListNth(result_plan->targetlist,
+											   action_col - 1))
+					->expr);
+		}
+
+		// none where the database has no gp_core, nor gp_segment_id then
+		Expr *check = gpdb::MakeRowSegmentCheck(
+			(Expr *) gpdb::CopyObject(te_ctid->expr), te_segid->expr, action);
+		if (nullptr != check)
+		{
+			te_segid->expr = check;
+			te_segid->resno =
+				(AttrNumber) (gpdb::ListLength(result_plan->targetlist) + 1);
+			result_plan->targetlist =
+				gpdb::LAppend(result_plan->targetlist, te_segid);
+		}
 	}
 	SetParamIds(result_plan);
 

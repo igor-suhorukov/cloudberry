@@ -1,0 +1,122 @@
+@@
+- Delete on tab1                                                                     
+-   ->  Hash Join                                                                    
+-         Hash Cond: (tab3.b = tab1.b)                                               
+-         ->  Seq Scan on tab3                                                       
+-         ->  Hash                                                                   
+-               ->  Redistribute Motion 3:3  (slice1; segments: 3)                   
+-                     Hash Key: tab1.b                                               
+-                     ->  Hash Join                                                  
+-                           Hash Cond: (tab2.a = tab1.a)                             
+-                           ->  Seq Scan on tab2                                     
+-                           ->  Hash                                                 
+-                                 ->  Redistribute Motion 3:3  (slice2; segments: 3) 
+-                                       Hash Key: tab1.a                             
+-                                       ->  Seq Scan on tab1                         
++ Custom Scan (Explicit Redistribute Motion)                               
++   ->  Nested Loop                                                        
++         Join Filter: (tab1.b = tab3.b)                                   
++         ->  Hash Join                                                    
++               Hash Cond: (tab2.a = tab1.a)                               
++               ->  Gather Motion 3:1 on tab2  (slice1; segments: 3)       
++                     Segments: 3                                          
++               ->  Hash                                                   
++                     ->  Gather Motion 3:1 on tab1  (slice2; segments: 3) 
++                           Segments: 3                                    
++         ->  Gather Motion 3:1 on tab3  (slice3; segments: 3)             
++               Segments: 3                                                
+@@
+-ERROR:  distribution key of the tuple (0, 1) doesn't belong to current segment (actually from seg0)
++DELETE 2
+@@
+- Update on tab1                                                                     
+-   ->  Hash Join                                                                    
+-         Hash Cond: (tab3.b = tab1.b)                                               
+-         ->  Seq Scan on tab3                                                       
+-         ->  Hash                                                                   
+-               ->  Redistribute Motion 3:3  (slice1; segments: 3)                   
+-                     Hash Key: tab1.b                                               
+-                     ->  Hash Join                                                  
+-                           Hash Cond: (tab2.a = tab1.a)                             
+-                           ->  Seq Scan on tab2                                     
+-                           ->  Hash                                                 
+-                                 ->  Redistribute Motion 3:3  (slice2; segments: 3) 
+-                                       Hash Key: tab1.a                             
+-                                       ->  Seq Scan on tab1                         
++ Custom Scan (Explicit Redistribute Motion)                               
++   ->  Nested Loop                                                        
++         Join Filter: (tab1.b = tab3.b)                                   
++         ->  Hash Join                                                    
++               Hash Cond: (tab2.a = tab1.a)                               
++               ->  Gather Motion 3:1 on tab2  (slice1; segments: 3)       
++                     Segments: 3                                          
++               ->  Hash                                                   
++                     ->  Gather Motion 3:1 on tab1  (slice2; segments: 3) 
++                           Segments: 3                                    
++         ->  Gather Motion 3:1 on tab3  (slice3; segments: 3)             
++               Segments: 3                                                
+@@
+-ERROR:  distribution key of the tuple (0, 1) doesn't belong to current segment (actually from seg0)
++UPDATE 2
+@@
+- Delete on tab1                                                                           
+-   ->  Explicit Redistribute Motion 3:3  (slice1; segments: 3)                            
+-         ->  Hash Join                                                                    
+-               Hash Cond: (tab3.a = tab1.b)                                               
+-               ->  Seq Scan on tab3                                                       
+-               ->  Hash                                                                   
+-                     ->  Broadcast Motion 3:3  (slice2; segments: 3)                      
+-                           ->  Hash Join                                                  
+-                                 Hash Cond: (tab2.a = tab1.a)                             
+-                                 ->  Seq Scan on tab2                                     
+-                                 ->  Hash                                                 
+-                                       ->  Redistribute Motion 3:3  (slice3; segments: 3) 
+-                                             Hash Key: tab1.a                             
+-                                             ->  Seq Scan on tab1                         
++ Custom Scan (Explicit Redistribute Motion)                               
++   ->  Nested Loop                                                        
++         Join Filter: (tab1.b = tab3.a)                                   
++         ->  Hash Join                                                    
++               Hash Cond: (tab2.a = tab1.a)                               
++               ->  Gather Motion 3:1 on tab2  (slice1; segments: 3)       
++                     Segments: 3                                          
++               ->  Hash                                                   
++                     ->  Gather Motion 3:1 on tab1  (slice2; segments: 3) 
++                           Segments: 3                                    
++         ->  Gather Motion 3:1 on tab3  (slice3; segments: 3)             
++               Segments: 3                                                
+@@
+- Update on tab1                                                                           
+-   ->  Explicit Redistribute Motion 3:3  (slice1; segments: 3)                            
+-         ->  Hash Join                                                                    
+-               Hash Cond: (tab3.a = tab1.b)                                               
+-               ->  Seq Scan on tab3                                                       
+-               ->  Hash                                                                   
+-                     ->  Broadcast Motion 3:3  (slice2; segments: 3)                      
+-                           ->  Hash Join                                                  
+-                                 Hash Cond: (tab2.a = tab1.a)                             
+-                                 ->  Seq Scan on tab2                                     
+-                                 ->  Hash                                                 
+-                                       ->  Redistribute Motion 3:3  (slice3; segments: 3) 
+-                                             Hash Key: tab1.a                             
+-                                             ->  Seq Scan on tab1                         
++ Custom Scan (Explicit Redistribute Motion)                               
++   ->  Nested Loop                                                        
++         Join Filter: (tab1.b = tab3.a)                                   
++         ->  Hash Join                                                    
++               Hash Cond: (tab2.a = tab1.a)                               
++               ->  Gather Motion 3:1 on tab2  (slice1; segments: 3)       
++                     Segments: 3                                          
++               ->  Hash                                                   
++                     ->  Gather Motion 3:1 on tab1  (slice2; segments: 3) 
++                           Segments: 3                                    
++         ->  Gather Motion 3:1 on tab3  (slice3; segments: 3)             
++               Segments: 3                                                
+@@
+- Update on tab1                                                
+-   ->  Explicit Redistribute Motion 3:3  (slice1; segments: 3) 
+-         ->  Split Update                                      
+-               ->  Seq Scan on tab1                            
++ Custom Scan (Explicit Redistribute Motion)             
++   ->  Gather Motion 3:1 on tab1  (slice1; segments: 3) 
++         Segments: 3                                    

@@ -4591,7 +4591,17 @@ dispatch_commit_recorded(TransactionId latestXid)
 	if (prev_commit_recorded_hook)
 		prev_commit_recorded_hook(latestXid);
 	if (dtx_nprepared > 0)
+	{
+		/*
+		 * Cloudberry's fault once its distributed commit is recorded and
+		 * its commit's critical section is over, before the second phase
+		 * (RecordTransactionCommit(), xact.c): a test loops a coordinator
+		 * here while a checkpoint it held goes on and fails the node
+		 * (checkpoint_dtx_info).
+		 */
+		GP_FAULT("after_xlog_xact_distributed_commit");
 		gang_commit_second_phase();
+	}
 
 	/*
 	 * Cloudberry's fault as a transaction ends for the other sessions
@@ -7216,4 +7226,15 @@ GpDispatchInit(void)
 	RegisterSubXactCallback(dispatch_subxact_callback, NULL);
 	prev_commit_recorded_hook = xact_commit_recorded_hook;
 	xact_commit_recorded_hook = dispatch_commit_recorded;
+}
+
+/*
+ * Has this transaction prepared parts on the segments, so that its commit
+ * on the coordinator is the distributed transaction's decision?  Asked as it
+ * commits, by a fault of Cloudberry's distributed commit alone (gp_fault.c).
+ */
+bool
+GpDispatchDtxPrepared(void)
+{
+	return dtx_nprepared > 0;
 }

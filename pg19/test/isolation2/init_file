@@ -68,4 +68,12 @@ s/with Oid \d+$/with Oid OID/
 m/^ERROR:  could not open relation with OID \d+$/
 s/OID \d+/OID NNNN/
 
+# Where Cloudberry's internal error comes from, which its test's own
+# matchsubs leave as "(bmfuncs.c:XXX)" and the port's errors do not say:
+# the bitmap index's pageinspect functions, gp_ao's here
+# (bitmap_index_inspect), and ModifyTable's check of the segment a row was
+# read on, gp_core's (modify_table_data_corrupt).
+m/ \((bmfuncs|nodeModifyTable)\.c:(\d+|XXX)\)$/
+s/ \((bmfuncs|nodeModifyTable)\.c:(\d+|XXX)\)$//
+
 -- end_matchsubs
