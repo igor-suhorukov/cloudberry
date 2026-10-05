@@ -35,7 +35,10 @@ makes a checkpoint wait, run from the cache it is loaded into before it,
 and gp_core fires the fault there only for a transaction whose parts it
 prepared on the segments (gp_fault.c).  keep_log_seg's point gives its
 callback a bool to set where a "skip" asks, which has the slots keep
-nothing, as Cloudberry's skip does.
+nothing, as Cloudberry's skip does.  xact.c is given utils/injection_point.h
+after its other headers: vanilla PostgreSQL 19's has not got it, where the
+core series' O29 includes it among them, and it guards itself against a
+second include.
 
 gp_core's fault injector attaches a fault of Cloudberry's name to the point
 (gp_fault.c).  They serve tests alone, so they are not in the core series:
@@ -48,15 +51,25 @@ callback.
 
 --- a/src/backend/access/transam/xact.c
 +++ b/src/backend/access/transam/xact.c
-@@ -1451,6 +1451,7 @@
+@@ -73,6 +73,7 @@
+ #include "utils/timestamp.h"
+ #include "utils/typcache.h"
+ #include "utils/wait_event.h"
++#include "utils/injection_point.h"
  
- 		/* Load the injection point before entering the critical section */
- 		INJECTION_POINT_LOAD("transaction-commit-after-delay-checkpoint");
+ /*
+  *	User-tweakable parameters
+@@ -1438,6 +1439,9 @@
+ 	{
+ 		bool		replorigin;
+ 
++		/* Loaded before the commit's critical section, where a test stops */
 +		INJECTION_POINT_LOAD("start_insertedDistributedCommitted");
- 
++
  		/*
- 		 * Mark ourselves as within our "commit critical section".  This
-@@ -1498,6 +1499,12 @@
+ 		 * Are we using the replication origins feature?  Or, in other words,
+ 		 * are we replaying remote actions?
+@@ -1489,6 +1493,12 @@
  							MyXactFlags,
  							InvalidTransactionId, NULL /* plain commit */ );
  

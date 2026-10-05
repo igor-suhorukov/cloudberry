@@ -1,0 +1,83 @@
+Licensed to the Apache Software Foundation (ASF) under one
+or more contributor license agreements.  See the NOTICE file
+distributed with this work for additional information
+regarding copyright ownership.  The ASF licenses this file
+to you under the Apache License, Version 2.0 (the
+"License"); you may not use this file except in compliance
+with the License.  You may obtain a copy of the License at
+
+  http://www.apache.org/licenses/LICENSE-2.0
+
+Unless required by applicable law or agreed to in writing,
+software distributed under the License is distributed on an
+"AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+KIND, either express or implied.  See the License for the
+specific language governing permissions and limitations
+under the License.
+
+Injection points for the port's tests, under the names of three of Apache
+Cloudberry's faults inside PostgreSQL's own abort and checkpoint, which
+distributed_transactions and pg_rewind_fail_missing_xlog in its isolation2
+schedule set: an error in an abort once the transaction has ended for the
+other backends, which has AbortTransaction() run again -- the core series'
+XactAbortAgainAfterEnd (O37) keeps the second run from recording the abort
+again; a checkpoint held with its redo point reckoned and its buffers
+written, its record not yet, so that a node stopped there never completes
+it; and a checkpoint held once its record is written and the control file
+updated, before the WAL it no longer needs is removed:
+
+  abort_after_procarray_end          xact.c, AbortTransaction()
+  checkpoint_after_redo_calculated   xlog.c, CreateCheckPoint()
+  checkpoint_control_file_updated    xlog.c, CreateCheckPoint()
+
+gp_core's fault injector attaches a fault of Cloudberry's name to the point
+(gp_fault.c).  They serve tests alone, so they are not in the core series:
+Dockerfile.pg applies this after test-iso2-locks.patch, to the tree of
+either ref, vanilla or patched, so that the two images still differ only in
+the ref.  Dormant, as any point is: without injection points the macro is
+empty, and with them a point nothing attached to runs no callback.
+
+
+--- a/src/backend/access/transam/xact.c
++++ b/src/backend/access/transam/xact.c
+@@ -3038,6 +3038,12 @@
+ 	 */
+ 	ProcArrayEndTransaction(MyProc, latestXid);
+ 
++	/*
++	 * A test may raise an error here, the transaction ended for the other
++	 * backends, which has AbortTransaction() run again.
++	 */
++	INJECTION_POINT("abort_after_procarray_end", NULL);
++
+ 	/*
+ 	 * Post-abort cleanup.  See notes in CommitTransaction() concerning
+ 	 * ordering.  We can skip all of it if the transaction failed before
+--- a/src/backend/access/transam/xlog.c
++++ b/src/backend/access/transam/xlog.c
+@@ -7372,6 +7372,12 @@
+ 	if (!shutdown && XLogStandbyInfoActive())
+ 		LogStandbySnapshot();
+ 
++	/*
++	 * A test may hold the checkpoint here, its redo point reckoned and the
++	 * buffers written, the checkpoint record not yet.
++	 */
++	INJECTION_POINT("checkpoint_after_redo_calculated", NULL);
++
+ 	START_CRIT_SECTION();
+ 
+ 	/*
+@@ -7442,6 +7448,12 @@
+ 	 */
+ 	END_CRIT_SECTION();
+ 
++	/*
++	 * A test may hold the checkpoint here, its record written and the control
++	 * file updated, before the old WAL is removed.
++	 */
++	INJECTION_POINT("checkpoint_control_file_updated", NULL);
++
+ 	/*
+ 	 * WAL summaries end when the next XLOG_CHECKPOINT_REDO or
+ 	 * XLOG_CHECKPOINT_SHUTDOWN record is reached. This is the first point
