@@ -3756,3 +3756,20 @@ CREATE FUNCTION gp_internal.retrieve(endpoint text, count int8)
 RETURNS SETOF record
 AS 'MODULE_PATHNAME', 'gp_retrieve'
 LANGUAGE C VOLATILE STRICT;
+
+/*
+ * pg_terminate_backend(pid, message) and pg_cancel_backend(pid, message):
+ * Cloudberry's, which signal as PostgreSQL's do, the backend saying the
+ * message after its error (gp_signal.c).  PostgreSQL 19's
+ * pg_terminate_backend(integer, bigint) takes a timeout second; a quoted
+ * message, an unknown literal, is text, and takes this one.
+ */
+CREATE FUNCTION pg_catalog.pg_terminate_backend(integer, text)
+RETURNS boolean
+AS 'MODULE_PATHNAME', 'gp_terminate_backend_msg'
+LANGUAGE C VOLATILE STRICT PARALLEL SAFE;
+
+CREATE FUNCTION pg_catalog.pg_cancel_backend(integer, text)
+RETURNS boolean
+AS 'MODULE_PATHNAME', 'gp_cancel_backend_msg'
+LANGUAGE C VOLATILE STRICT PARALLEL SAFE;
