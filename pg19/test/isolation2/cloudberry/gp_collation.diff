@@ -1,0 +1,10 @@
+@@
+-DROP
++ERROR:  collation "missing_on_one_segment" for encoding "UTF8" does not exist
+@@
+-ERROR:  fault triggered, fault name:'collate_locale_os_lookup' fault type:'error'
++ a   
++-----
++ 012 
++ abc 
++(2 rows)

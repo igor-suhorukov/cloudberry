@@ -1,0 +1,30 @@
+@@
+- gp_inject_fault                                                                                                                                                                                                              
+-------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
++ gp_inject_fault                                                                                                                                                                                                        
++------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+@@
+- Success: fault name:'brin_bitmap_page_added' fault type:'skip' ddl statement:'' database name:'' table name:'' start occurrence:'1' end occurrence:'-1' extra arg:'0' fault injection state:'triggered'  num times hit:'1' 
++ Success: fault name:'brin_bitmap_page_added' fault type:'skip' ddl statement:'' database name:'' table name:'' start occurrence:'1' end occurrence:'-1' extra arg:'0' fault injection state:'set'  num times hit:'0' 
+@@
+- 909   
++ 226   
+@@
+- gp_inject_fault                                                                                                                                                                                                              
+-------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
++ gp_inject_fault                                                                                                                                                                                                        
++------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+@@
+- Success: fault name:'brin_bitmap_page_added' fault type:'skip' ddl statement:'' database name:'' table name:'' start occurrence:'1' end occurrence:'-1' extra arg:'0' fault injection state:'triggered'  num times hit:'2' 
++ Success: fault name:'brin_bitmap_page_added' fault type:'skip' ddl statement:'' database name:'' table name:'' start occurrence:'1' end occurrence:'-1' extra arg:'0' fault injection state:'set'  num times hit:'0' 
+@@
+- 909   
++ 226   
+@@
+- gp_inject_fault                                                                                                                                                                                                              
+-------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
++ gp_inject_fault                                                                                                                                                                                                        
++------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+@@
+- Success: fault name:'brin_bitmap_page_added' fault type:'skip' ddl statement:'' database name:'' table name:'' start occurrence:'1' end occurrence:'-1' extra arg:'0' fault injection state:'triggered'  num times hit:'2' 
++ Success: fault name:'brin_bitmap_page_added' fault type:'skip' ddl statement:'' database name:'' table name:'' start occurrence:'1' end occurrence:'-1' extra arg:'0' fault injection state:'set'  num times hit:'0' 

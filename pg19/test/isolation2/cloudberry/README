@@ -8,6 +8,28 @@ in it (test.orca.diff) holds for that pass alone.  run.sh counts a test as
 passing when gpdiff.pl, under Cloudberry's init_file and the port's, finds no
 difference or exactly the file's.
 
+bitmap_index_crash
+  The size of the bitmap index on segment 1 after the insert whose WAL the
+  crash recovery replays: 33 of PostgreSQL's 8 kB pages, where Cloudberry's
+  is 29 of its 32 kB ones.  The replay is Cloudberry's: segment 1, restarted
+  with shared_buffers small enough to evict the index's metapage, answers
+  the index scan as before, and so does the cluster gpstop restarts after
+  the larger table's index was built.
+
+brin_heap, and brin_heap.planner for the planner pass
+  A page of 8 kB, PostgreSQL's, where Cloudberry's is 32 kB: the block
+  populate_pages() fills with the committed rows holds 226 of them, where
+  Cloudberry's holds 909, which the count of the rows says.  The pages,
+  ranges and summaries pageinspect shows are Cloudberry's: the summary of
+  the last, partial range taken while another session extends the table
+  (summarize_last_partial_range) covers what the session added, and the
+  ranges over aborted rows are summarized empty.  In the planner pass the
+  segments plan the gather's scan themselves, without the session's
+  enable_seqscan, which no gang is sent, and read the table whole: no
+  bitmap is built there, and brin_bitmap_page_added is set and never hit,
+  where Cloudberry's -- and the ORCA pass's, whose fragments the segments
+  run as planned -- adds the one page and the two pages the scans want.
+
 concurrent_partition_table_operations_should_not_deadlock, and its
 _optimizer output, which the orca pass is compared with
   EXPLAIN's plans and nothing else: the operations the test runs side by
@@ -79,6 +101,18 @@ compared with
   O33 hook), and a segment's writer as it looks up the distributed
   transactions of the local ones it may wait for, in its map
   (before_get_distributed_xid, gp_dtx.c).
+
+gp_collation
+  Two statements, and nothing of the collations: a session of the
+  coordinator's own (-1U), an ordinary one here, sends its DROP COLLATION
+  to the segments, where segment 2 has dropped the collation already; and
+  the ORDER BY of a column of the collation segment 0 can no longer load is
+  sorted by the coordinator, the segments sending its rows unsorted -- in
+  either pass, ORCA leaving a column of a collation not the default to the
+  planner -- so segment 0 loads no collation and fails nothing.  What the
+  test is for holds: pg_import_system_collations() and CREATE COLLATION fail
+  whole when segment 0 cannot load a locale, and make each collation on
+  every node, with one OID, when it can (gp_builtins.c).
 
 instr_in_shmem_terminate
   The plans of the three statements whose sessions set the planner, in
