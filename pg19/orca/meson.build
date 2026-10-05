@@ -194,6 +194,7 @@ orca_transl_sources = files(
   'merge.c',
   'orca.c',
   'parallel.c',
+  'vector.c',
   'orca_api.cpp',
   'orca_probe.cpp',
   'postgis.c',

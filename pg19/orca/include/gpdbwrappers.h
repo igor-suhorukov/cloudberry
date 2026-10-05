@@ -970,6 +970,11 @@ Expr *MakeSegmentOfCall(Index varno, Oid relid);
 int CheckMotions(PlannedStmt *stmt);
 Node *SliceTable(List *slices, List *motions);
 
+// NOT IN CLOUDBERRY: a vectorized executor's nodes in the translated plan,
+// where one has registered with gp_orca's API (vector.c, gp_orca_vec.h):
+// the plan's new top, its subplans replaced in place.
+Plan *VectorizePlan(Plan *plan, List *subplans, List *rtable);
+
 // An identity column's next value: the call of gp_orca's function ORCA is
 // handed for a NextValueExpr (NULL where gp_orca's extension is not
 // installed), whether a function is one of those, and the NextValueExpr a

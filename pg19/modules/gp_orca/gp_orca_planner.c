@@ -75,6 +75,7 @@
 #include "gp_orca_api.h"
 #include "gp_orca_planner.h"
 #include "gp_orca_postgis.h"
+#include "gp_orca_vector.h"
 #include "optimizer/orca.h"
 
 /* gp.optimizer, and gp.optimizer_trace_fallback. */
@@ -320,6 +321,11 @@ gp_orca_planner(Query *parse, const char *query_string, int cursorOptions,
 		 */
 		OptimizerOptions options = {false, false};
 
+		/*
+		 * A vectorized executor registered with gp_orca's API is told of the
+		 * statement, and offered the translated plan's nodes (vector.c).
+		 */
+		gp_orca_vector_begin(parse, cursorOptions, es);
 		orca_depth++;
 		PG_TRY();
 		{
@@ -331,6 +337,7 @@ gp_orca_planner(Query *parse, const char *query_string, int cursorOptions,
 			orca_depth--;
 		}
 		PG_END_TRY();
+		gp_orca_vector_end(result);
 		if (result == NULL)
 			reason = failure.unexpected ? GP_FALLBACK_error
 				: GP_FALLBACK_declined;
