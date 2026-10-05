@@ -80,6 +80,21 @@ compared with
   transactions of the local ones it may wait for, in its map
   (before_get_distributed_xid, gp_dtx.c).
 
+instr_in_shmem_terminate
+  The plans of the three statements whose sessions set the planner, in
+  either pass, and nothing of the slots: each is the port's planner's.  The
+  INSERT ... SELECT runs on the coordinator, its rows sent to the segments
+  by COPY, which plans no node there, so no segment has a node of it in a
+  slot, and the coordinator's plan has fewer than Cloudberry's three; the
+  UNION ALL's table is gathered from the segments, whose short scans are
+  over before its pg_sleep() is, so no segment has one either; and the
+  coordinator's own backend reads pg_class, where Cloudberry's reads it in
+  an entry-db reader, a second process of the coordinator's in the slots.
+  What the test is for holds: after each statement is terminated or
+  cancelled, with its message (gp_signal.c), the slots hold the current
+  query's alone; and the segments' processes of the terminated one end
+  with it.
+
 lockmodes, and its _optimizer output, which the orca pass is compared with
   Four things, none of them a lock of Cloudberry's the port does not take.
   Half the test is append-optimized tables, which are M5's: their CREATE
