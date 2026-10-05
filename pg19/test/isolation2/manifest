@@ -1,11 +1,15 @@
 # Part of Cloudberry's isolation2_schedule (src/test/isolation2), as the port
-# runs it on a coordinator and three segments: the tests of the schedule
-# that bear on M3 -- distributed transactions, distributed snapshots, locks
-# and the global deadlock detector -- on M4, FTS and mirrors, on M6's
-# resource queues and memory accounting, on M7's tools -- a node
-# recovered elsewhere, and the standby coordinator promoted, removed, made
-# again and waited for -- and on M8's directory tables on a cluster, in the
-# schedule's order.
+# runs it on a coordinator and three segments: every test of the schedule
+# but those of append-optimized tables' own (below), in the schedule's order
+# -- distributed transactions, distributed snapshots, locks and the global
+# deadlock detector (M3), FTS and mirrors (M4), resource queues and memory
+# accounting (M6), the tools -- a node recovered elsewhere, the standby
+# coordinator promoted, removed, made again and waited for, a node copied
+# with pg_basebackup (M7) -- directory tables on a cluster (M8), and the
+# rest: a session of a node's own, the dispatcher and its gangs, indexes,
+# VACUUM and ANALYZE, the bitmap index, and Cloudberry's faults in
+# PostgreSQL's own code, which the tests' build has as injection points
+# (../../docker/patches).
 #
 #   run   the test runs here, in both passes; cloudberry/ holds a difference
 #         reviewed and kept, where one pass has one.  A third word names the
@@ -25,9 +29,10 @@
 # (sql/port and expected/port here): what the port does in a place of
 # Cloudberry's the schedule's tests do not reach.
 #
-# The schedule's other tests -- append-optimized tables, bitmap indexes,
-# the rest of the fault injector's places in PostgreSQL's own code -- need
-# M5 to M7, and are not listed.  Its FTS tests
+# The schedule's tests of append-optimized tables' own -- uao/, the ao_ and
+# aocs_ tests, fsync_ao, mark_all_aoseg_await_drop, bitmap_index_ao_sparse,
+# the reindex/ tests of ao and aoco tables and the rest of the 133 a count of
+# 2026-10-02 called append-optimized -- are not listed yet.  Its FTS tests
 # are M4's, and are: the ones that run are in the groups mirrors1 to
 # mirrors3, whose clusters have a mirror for each segment -- three, so that
 # they run side by side -- M7's in mirrors4, whose standby they change, and
@@ -35,21 +40,46 @@
 # for FTS to let a mirror go, and fts_errors in mirrors6, which fails two
 # contents over and recovers both, a minute and a half on its own.
 # gpexpand_catalog_lock, whose sessions hold every other session's catalog
-# changes, is in a group of its own, as the schedule keeps it.
+# changes, is in a group of its own, as the schedule keeps it; so are
+# instr_in_shmem_setup and instr_in_shmem_terminate, metrics, the first of
+# which restarts the cluster to turn query metrics on, and the tests that
+# PANIC a node, crash.  And the rest of the tests that restart nodes or copy
+# one: terminate_in_gang_creation in mirrors2, the pg_basebackup tests in
+# mirrors3, segwalrep/master_wal_switch in standby, and the bitmap index's
+# crash recovery in mirrors7.
+skip gpdispatch                             gp_cte_sharing, Cloudberry's planner's sharing of a CTE (the test turns ORCA off): its ShareInputScan on segment 0, whose writer the fault shareinput_writer_notifyready holds, the port's planner route has not (Route B); it waits for the fault
+run  check_gxid                                         crash
+run  checkpoint_dtx_info                                crash
+run  orphan_temp_table                                  crash
+skip sync_guc                               its third case waits for set_variable_fault and reset_variable_fault twice on every node, a SET and a RESET reaching two processes of the session on each -- on the coordinator its own and its entry-db reader, on a segment the writer and a reader of a join of two temporary tables -- where the port's coordinator runs the statement in the session's backend and only the writer reads a temporary table, one process of the session a node; and a RESET is told the segments with the next statement sent there
+skip autovacuum-analyze                     the coordinator's autovacuum ANALYZE of distributed tables, which the port does not have: Cloudberry's segments report each statement's row changes to the coordinator's statistics (gp_pgstat_report_on_master, pgstat_relation.c), whose autovacuum workers ANALYZE as dispatchers, sampling the segments; the port's coordinator counts no change a segment makes, and gp_analyze.c leaves an autovacuum worker to PostgreSQL's sampling of the coordinator's empty copy; it waits for gp_pgstat_report_on_master
 run  lockmodes                                     lockmodes
 run  port/metatrack_drop                         lockmodes
+skip pg_rewind_fail_missing_xlog            Cloudberry's walsender keeps a mirror's replication slot at the redo point of the last checkpoint, not at what the mirror has flushed (PhysicalConfirmReceivedLocation()), so that pg_rewind finds the checkpoint before a failover's divergence; PostgreSQL 19's keeps it at the flush, which no hook reaches, and gprecoverseg -a after the failover fails, "could not find previous WAL record"
 run  prepared_xact_deadlock_pg_rewind              mirrors1
 run  port/dirxact_restart                          mirrors1
+run  vacuum_skip_locked_onseg                           main
 run  select_dropped_table
 run  resource_queue_self_deadlock                  queues
 run  resource_queue_terminate                      queues
 run  concurrent_partition_table_operations_should_not_deadlock
+run  update_hash_col_utilitymode                        main
+run  execute_on_utilitymode                             main
+run  insert_root_partition_truncate_deadlock_without_gdd main
+run  modify_table_data_corrupt                          main
+run  misc                                               main
+skip deadlock_under_entry_db_singleton      the fault transaction_start_under_entry_db_singleton, at the transaction start of the coordinator's entry-db reader that runs a volatile function's slice: the port's coordinator runs the function in the session's own backend, so there is no reader to deadlock with its writer; it waits for it
 run  starve_case
+run  pg_views_concurrent_drop                           main
 run  create_index_deadlock
 run  gpexpand_catalog_lock                         catalog_lock
 run  commit_transaction_block_checkpoint
+run  instr_in_shmem_setup                               metrics
+run  instr_in_shmem_terminate                           metrics
+run  segwalrep/master_wal_switch                        standby
 run  prepare_limit                                 standby
 run  gdd/prepare                                   gdd*
+run  gdd/insert_root_partition_truncate_deadlock        gdd1
 run  gdd/concurrent_update                         gdd3
 run  gdd/dist-deadlock-01                          gdd1
 run  gdd/dist-deadlock-04                          gdd1
@@ -60,6 +90,8 @@ run  gdd/dist-deadlock-102                         gdd1
 run  gdd/dist-deadlock-103                         gdd2
 run  gdd/dist-deadlock-104                         gdd2
 run  gdd/dist-deadlock-106                         gdd2
+run  gdd/extended_protocol_test                         gdd2
+run  gdd/avoid-qd-deadlock                              gdd2
 run  gdd/non-lock-105                              gdd3
 run  gdd/dist-deadlock-upsert                      gdd1
 run  gdd/delete-deadlock-root-leaf-concurrent-op   gdd2
@@ -68,6 +100,11 @@ run  gdd/local-deadlock-03                         gdd2
 run  port/explicit_concurrent_update               gdd3
 run  gdd/end                                       gdd*
 run  alter_blocks_for_update_and_viceversa
+run  drop_rename                                        main
+run  pg_terminate_backend                               main
+run  gp_terminate_mpp_backends                          main
+run  reindex                                            main
+skip reindex_gpfastsequence                 gp_fastsequence, Cloudberry's catalog of the row numbers an append-optimized table's segment files take, which gp_ao keeps in its own segment table (ao_meta.c): its REINDEX, and the INSERT that waits behind it, are append-optimized storage's own
 run  reader_waits_for_lock                         readers
 run  resource_queue                                queues
 run  resource_queue_deadlock                       queues
@@ -75,9 +112,47 @@ run  resource_queue_cancel                         queues
 run  resource_queue_multi_portal                   queues
 run  vacuum_recently_dead_tuple_due_to_distributed_snapshot
 run  port/dtx_horizon
+run  vacuum_full_interrupt                              main
 run  distributedlog-bug
+run  invalidated_toast_index                            main
 run  distributed_snapshot
 run  port/dtx_wait_prepared
+run  gp_collation                                       main
+run  bitmap_index_concurrent                            main
+run  bitmap_index_inspect                               main
+run  disable_autovacuum                                 main
+run  concurrent_index_creation_should_not_deadlock      main
+run  add_column_after_vacuum_skip_drop_column           main
+run  vacuum_after_vacuum_skip_drop_column               main
+run  autostats_locking                                  main
+run  enable_autovacuum                                  main
+run  reindex/abort_reindex                              main
+run  reindex/createidx_while_reindex_idx_heap_btree     main
+run  reindex/createidx_while_reindex_idx_heap_bitmap    main
+run  reindex/reindextable_while_addpart_heap_part_btree main
+run  reindex/reindextable_while_altertable_heap_part_btree main
+run  reindex/serializable_reindex_with_drop_column_heap main
+run  port/anyarray_wire                                 main
+run  reindex/serializable_reindex_with_drop_index_heap  main
+run  reindex/repeatable_read_reindex_with_insert_heap   main
+run  reindex/vacuum_while_reindex_heap_btree            main
+run  reindex/vacuum_while_reindex_heap_btree_toast      main
+run  upgrade_numsegments                                main
+run  spilling_hashagg                                   main
+skip cancel_plpython                        a cancel that stops Python code (Cloudberry's cancel_pending_hook in PL/Python), which PostgreSQL 19's PL/Python has not: its busy loop and time.sleep() run on to the driver's timeout, in each pass
+skip cancel_query                           the fault zlib_decompress_after_decompress_fn, which the ANALYZE of the zlib-compressed partition never reaches: its one row's column blocks gp_ao stores uncompressed, zlib not shortening blocks of gp_ao's format so small, where it shortens Cloudberry's longer datum stream blocks; it waits for it
+skip idle_gang_cleaner                      gp.vmem_idle_resource_timeout, after which Cloudberry's coordinator ends a session's idle readers and keeps its writer, which the port accepts and does not carry out, and the fault proc_kill, in ProcKill(), at which the test waits for segment 0's reader to end -- in the planner pass the join has no reader, PostgreSQL's planner gathering each table over the writer; and gp_snapshotadd_timeout
+skip analyze_progress                       the ANALYZE of its replicated table samples the one segment that answers for the table, which holds all its rows (gp_analyze.c), where Cloudberry's gp_acquire_sample_rows() samples every segment, and the test waits for analyze_block on all three; its hash-distributed half runs as port/analyze_progress
+run  port/analyze_progress                              main
+skip workfile_mgr_test                      Cloudberry's workfile manager's own C test harness (gp_workfile_mgr_test() and the workset functions of isolation2_regress.so) and its cache of workfile sets (gp_workfile_mgr_cache_entries(), gp_workfile_max_entries); the port's workfile manager is module-only, its files read from pgsql_tmp (gp_workfile.c)
+skip external_table                         the fault interconnect_setup_palloc holds the coordinator as it begins a gather of the cursor, while the test waits for content 0 to fail its scan of the external table (transaction_abort_failure): a segment reads an external table as rows are fetched from it -- one, then batches -- where Cloudberry's slice runs on once dispatched, so no segment reaches the reject limit while the coordinator is held; it waits for it
+run  bitmap_index_crash                                 mirrors7
+run  bitmap_update_words_backup_block                   mirrors7
+run  pg_basebackup                                      mirrors3
+run  pg_basebackup_with_tablespaces                     mirrors3
+run  pg_basebackup_large_database_oid                   mirrors3
+skip vacuum_progress_row                    pg_stat_progress_vacuum's phases of an append-optimized table's VACUUM (pre-cleanup, compact, post-cleanup), which gp_ao's VACUUM does not report, Cloudberry's gp_stat_progress_vacuum and Debug_appendonly_print_compaction, and the faults of those phases: append-optimized storage's own
+skip vacuum_progress_column                 as vacuum_progress_row, of a column table
 run  segwalrep/die_commit_pending_replication      mirrors3
 run  fts_errors                                    mirrors6
 run  segwalrep/replication_keeps_crash             mirrors3
@@ -91,6 +166,7 @@ run  segwalrep/dtm_recovery_on_standby             mirrors4
 run  segwalrep/commit_blocking_on_standby          mirrors4
 run  segwalrep/dtx_recovery_wait_lsn               mirrors5
 skip segwalrep/select_throttle                     wait_for_replication_threshold, Cloudberry's throttling of a backend's WAL until the mirror has it, and gp_disable_tuple_hints, which PostgreSQL does not have
+run  terminate_in_gang_creation                         mirrors2
 run  segwalrep/startup_rename_prepared_xlog        mirrors2
 run  fts_manual_probe                              mirrors1
 run  fts_session_reset                             mirrors2
@@ -99,10 +175,14 @@ run  setup_startup_memory_accounting               memory
 run  oom_startup_memory                            memory
 run  restore_memory_accounting_default             memory
 run  runaway_query                                 memory
+skip distributed_transactions               an error after ProcArrayEndTransaction() -- the fault abort_after_procarray_end -- runs AbortTransaction() again, whose ProcArrayEndTransaction() fails Assert(TransactionIdIsValid(proc->xid)) on PostgreSQL 19 and crashes the coordinator; Cloudberry's xact.c records nothing again for a transaction aborted already (b5c4fdc0098), a change of the core
 skip concurrent_drop_truncate_tablespace       tablespace "concurrent_tblspace" is not empty, where Cloudberry's DROP TABLESPACE meets the lock a CREATE TABLE in the tablespace took, "could not lock tablespace" -- taken as a relation's file is made there (TablespaceCreateDbspace()), where PostgreSQL 19 takes none and no hook reaches -- and the fault drop_tablespace_after_acquire_lock; it waits for it
 run  local_directory_table_mixed
+run  stat_activity_extended                             main
 run  sharedsnapshot
 run  export_distributed_snapshot
+run  brin_heap                                          main
+skip tcp_ic_teardown                        the coordinator's Gather Motion of a LIMIT, whose receiver Cloudberry holds before its stop message (doSendStopMessageTCP) while a sender's teardown waits gp_interconnect_transmit_timeout for the receiver's last word (waitOnOutbound): the port's coordinator gathers over each segment's libpq connection, closing the cursor, and its TCP interconnect, between segments, has no stop message -- a receiver closes its connections, and its senders stop at their next send; it waits for the faults
 #
 # And Cloudberry's parallel_retrieve_cursor_schedule, M8's, in a group of its
 # own, retrieve: parallel retrieve cursors and their retrieve sessions
@@ -132,4 +212,4 @@ run  parallel_retrieve_cursor/unset                retrieve
 # not listed: segments restarted between the two phases, which the
 # coordinator's recovery process ends (port/dirxact_restart does so for
 # CREATE DATABASE and DROP TABLESPACE).
-skip crash_recovery_dtm  unrecognized configuration parameter "dtx_phase2_retry_second"; function wait_till_master_shutsdown() does not exist, of Cloudberry's setup; and the faults before_orphaned_check and after_orphaned_check, of Cloudberry's recovery process, which the port's has no place for; it waits for them
+skip crash_recovery_dtm  unrecognized configuration parameter "dtx_phase2_retry_second", the seconds Cloudberry's coordinator retries a failed second phase before it PANICs, its recovery then ending the parts, which the test waits for (wait_till_master_shutsdown()): the port's coordinator retries over a new connection and leaves a part it did not reach to the recovery process, and does not PANIC
