@@ -16,12 +16,6 @@ m/^while inserting index tuple \(\d+,\d+\) in relation /
 # masks it.
 m/^DETAIL:  segment \d+ \([^)]*\)(; \d+ other segments failed too)?$/
 
-# A fault's PANIC, when it reaches the client before the connection closes:
-# its message ends in a space, as Cloudberry's does, which the matchsubs of
-# the test that expects it (dtx_recovery_wait_lsn), written without the
-# space, do not take away.
-m/^PANIC:  fault triggered, fault name:'\w+' fault type:'panic' $/
-
 -- end_matchignore
 
 -- start_matchsubs
@@ -55,5 +49,13 @@ s/^( \w+ +\| \w+ +\| )\d+( +\| \w+ +\| \d+ +\| [tf] +\| )/$1######$2/
 # (fts_errors) -- whose OID depends on what ran before it.
 m/^ERROR:  relation with OID \d+ does not exist$/
 s/OID \d+/OID ######/
+
+# A fault's PANIC, when it reaches the client before the connection closes:
+# its message ends in a space, as Cloudberry's does, where Cloudberry's
+# expected output has none -- the line check_gxid expects, and the one the
+# matchsubs of dtx_recovery_wait_lsn take away, written without the space,
+# which the port's init file's rules come before.
+m/^PANIC:  fault triggered, fault name:'\w+' fault type:'panic' $/
+s/ $//
 
 -- end_matchsubs
