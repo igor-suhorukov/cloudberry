@@ -45,8 +45,10 @@
 # which restarts the cluster to turn query metrics on, and the tests that
 # PANIC a node, crash.  And the rest of the tests that restart nodes or copy
 # one: terminate_in_gang_creation in mirrors2, the pg_basebackup tests in
-# mirrors3, segwalrep/master_wal_switch in standby, and the bitmap index's
-# crash recovery in mirrors7.
+# mirrors3, segwalrep/master_wal_switch in standby, the bitmap index's
+# crash recovery in mirrors7, and pg_rewind_fail_missing_xlog in mirrors8,
+# which sets wal_keep_size and wal_recycle, restarts the cluster, and fails
+# two contents over and recovers them twice each.
 skip gpdispatch                             gp_cte_sharing, Cloudberry's planner's sharing of a CTE (the test turns ORCA off): its ShareInputScan on segment 0, whose writer the fault shareinput_writer_notifyready holds, the port's planner route has not (Route B); it waits for the fault
 run  check_gxid                                         crash
 run  checkpoint_dtx_info                                crash
@@ -55,7 +57,7 @@ skip sync_guc                               its third case waits for set_variabl
 skip autovacuum-analyze                     the coordinator's autovacuum ANALYZE of distributed tables, which the port does not have: Cloudberry's segments report each statement's row changes to the coordinator's statistics (gp_pgstat_report_on_master, pgstat_relation.c), whose autovacuum workers ANALYZE as dispatchers, sampling the segments; the port's coordinator counts no change a segment makes, and gp_analyze.c leaves an autovacuum worker to PostgreSQL's sampling of the coordinator's empty copy; it waits for gp_pgstat_report_on_master
 run  lockmodes                                     lockmodes
 run  port/metatrack_drop                         lockmodes
-skip pg_rewind_fail_missing_xlog            Cloudberry's walsender keeps a mirror's replication slot at the redo point of the last checkpoint, not at what the mirror has flushed (PhysicalConfirmReceivedLocation()), so that pg_rewind finds the checkpoint before a failover's divergence; PostgreSQL 19's keeps it at the flush, which no hook reaches, and gprecoverseg -a after the failover fails, "could not find previous WAL record"
+run  pg_rewind_fail_missing_xlog                   mirrors8
 run  prepared_xact_deadlock_pg_rewind              mirrors1
 run  port/dirxact_restart                          mirrors1
 run  vacuum_skip_locked_onseg                           main
@@ -175,7 +177,7 @@ run  setup_startup_memory_accounting               memory
 run  oom_startup_memory                            memory
 run  restore_memory_accounting_default             memory
 run  runaway_query                                 memory
-skip distributed_transactions               an error after ProcArrayEndTransaction() -- the fault abort_after_procarray_end -- runs AbortTransaction() again, whose ProcArrayEndTransaction() fails Assert(TransactionIdIsValid(proc->xid)) on PostgreSQL 19 and crashes the coordinator; Cloudberry's xact.c records nothing again for a transaction aborted already (b5c4fdc0098), a change of the core
+run  distributed_transactions
 skip concurrent_drop_truncate_tablespace       tablespace "concurrent_tblspace" is not empty, where Cloudberry's DROP TABLESPACE meets the lock a CREATE TABLE in the tablespace took, "could not lock tablespace" -- taken as a relation's file is made there (TablespaceCreateDbspace()), where PostgreSQL 19 takes none and no hook reaches -- and the fault drop_tablespace_after_acquire_lock; it waits for it
 run  local_directory_table_mixed
 run  stat_activity_extended                             main

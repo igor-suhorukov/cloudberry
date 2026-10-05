@@ -152,7 +152,7 @@ run  create_memory_accounting_tables                   memory
 run  setup_startup_memory_accounting                   memory
 run  restore_memory_accounting_default                 memory
 run  runaway_query                                     memory
-skip distributed_transactions  the fault abort_after_procarray_end, in PostgreSQL's abort; its ABORTs succeed
+run  distributed_transactions
 skip concurrent_drop_truncate_tablespace  tablespace "concurrent_tblspace" is not empty, where Cloudberry's DROP TABLESPACE meets the lock a CREATE TABLE in the tablespace took, "could not lock tablespace" -- taken as a relation's file is made there (TablespaceCreateDbspace()), where PostgreSQL 19 takes none and no hook reaches -- and the fault drop_tablespace_after_acquire_lock; it waits for it
 skip orphan_temp_table  the fault before_exec_scan, a PANIC in the executor's scan
 skip sync_guc  the setting gp_select_invisible and the faults set_variable_fault and reset_variable_fault

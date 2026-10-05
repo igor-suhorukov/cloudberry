@@ -441,6 +441,11 @@ done
 	# ... and no utility mode but a node's own connection, in a shell command
 	# too
 	echo "sed s/-c gp_role=utility//g"
+	# A PL/Python helper that runs psql in an environment of its own making
+	# (pg_rewind_fail_missing_xlog's connectSeg()) is given the server's
+	# PGUSER in it: the superuser of Cloudberry's demo cluster is its system
+	# user, whom psql connects as without one, and here it is gpadmin.
+	echo 'sed s/"PATH": os\.getenv\("PATH"\)/"PATH": os.getenv("PATH"), "PGUSER": os.getenv("PGUSER", "gpadmin")/'
 	# A tablespace's directory of a node's files is PostgreSQL's,
 	# PG_<version>_<catalog version>, where Cloudberry's is GPDB_...: a test
 	# that counts what a copy of a node has there names it by a pattern.
