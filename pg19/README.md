@@ -14,6 +14,7 @@ applying to them; this directory is the only new top-level directory.
     docker/      the Compose project: patched PG19, the modules, a cluster
     gpMgmt/      Cloudberry's management tools on PostgreSQL 19's own: what
                  is installed, and the port's copies of the files it changes
+    release/     the binary release: its packages and their smoke test
     test/        the port's test harness
 
 ## ORCA
@@ -156,6 +157,46 @@ Or, without installing anything on the host:
 Compose builds the patched server itself, with `docker/Dockerfile.pg`, from
 a clone of the fork, made as above, that lies beside this repository's
 checkout (`../postgres`); `PG_SRC=/path/to/postgres` points it elsewhere.
+
+### Binary releases
+
+The fork's GitHub releases carry the server and the modules built, for
+Debian 13 and Ubuntu 24.04 on amd64 and arm64, as three packages, each as a
+`.deb` and as a `.tar.gz` of the same files, installed in `/usr/local/pgsql`:
+
+    cloudberry-pg19-postgresql   the patched PostgreSQL 19
+    cloudberry-pg19-extension    the modules, and gpMgmt beside the server
+    cloudberry-pg19-dbgsym       the debug information of both
+
+    sudo apt install ./cloudberry-pg19-postgresql_<version>-debian13_amd64.deb \
+                     ./cloudberry-pg19-extension_<version>-debian13_amd64.deb
+
+They are built to run, not to be tested: the server without assertions or
+injection points, and without the test-only modules (`-Dhook_tests=false`),
+so the test suites run on the Docker build above instead. Their options are
+otherwise that build's, named rather than detected, so that a distribution
+which lacks a library fails the build instead of releasing a server without
+it; and the libraries are in `/usr/local/pgsql/lib` on every architecture.
+
+`.github/workflows/pg19-release.yml` makes a release of what a tag
+`pg19-<version>` points at, and PostgreSQL's
+`REL_19_STABLE_CLOUDBERRY` as it is then; a version with a `-`, or a
+PostgreSQL that is still a beta, makes a pre-release:
+
+    git tag pg19-0.1.0 && git push origin pg19-0.1.0
+
+`docker/Dockerfile.release` builds the packages, `release/package.sh`
+packs them, and `release/smoke.sh` installs them on a clean system of the
+distribution and runs `test/load/run.sh` on them before anything is
+released. A push to the port's branch that changes these builds and
+tests them without releasing them (a run by hand would too, but GitHub
+offers one only for a workflow on the default branch, and `main` mirrors
+apache/cloudberry). The same build on the host, for one distribution
+(`RELEASE_BASE`, Debian 13 unless it says otherwise):
+
+    docker compose -f pg19/docker/compose.yml --profile release build release
+    docker run --rm -u "$(id -u)" -v "$PWD/dist:/out" cloudberry/pg19-release:latest cp -r /dist/. /out/
+    docker run --rm -v "$PWD/dist:/dist:ro" -v "$PWD/pg19:/pg19:ro" debian:trixie-slim bash /pg19/release/smoke.sh
 
 ## Status
 

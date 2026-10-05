@@ -241,6 +241,30 @@ services:
     shm_size: 4gb
     profiles: ["meson"]
 
+  # The binary release, as .github/workflows/pg19-release.yml builds it
+  # (Dockerfile.release): the build stage, whose /dist holds the packages,
+  # for RELEASE_BASE's distribution.  Out of the image, then installed on a
+  # clean system of that distribution and every module loaded:
+  #
+  #   docker compose -f pg19/docker/compose.yml --profile release build release
+  #   docker run --rm -u "$(id -u)" -v "$PWD/dist:/out" cloudberry/pg19-release:latest cp -r /dist/. /out/
+  #   docker run --rm -v "$PWD/dist:/dist:ro" -v "$PWD/pg19:/pg19:ro" debian:trixie-slim bash /pg19/release/smoke.sh
+  release:
+    image: cloudberry/pg19-release:latest
+    build:
+      context: .
+      dockerfile: Dockerfile.release
+      target: build
+      additional_contexts:
+        pgsrc: ${PG_SRC:-../../../postgres}
+        cbsrc: ${CB_SRC:-../..}
+      args:
+        BASE_IMAGE: ${RELEASE_BASE:-debian:trixie-slim}
+        PG_REF: ${PG_PATCHED_REF:-REL_19_STABLE_CLOUDBERRY}
+        CB_REF: ${CB_REF:-extension_postgresql_19}
+        VERSION: ${RELEASE_VERSION:-}
+    profiles: ["release"]
+
   # A coordinator, a standby coordinator and two segment hosts with mirrors --
   # the topology of Cloudberry's own sandbox.  It arrives with M2, which is the
   # first milestone that has anything to dispatch; see cloudberry.md,

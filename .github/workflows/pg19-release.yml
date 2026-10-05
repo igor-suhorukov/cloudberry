@@ -1,0 +1,257 @@
+# --------------------------------------------------------------------
+#
+# Licensed to the Apache Software Foundation (ASF) under one or more
+# contributor license agreements. See the NOTICE file distributed
+# with this work for additional information regarding copyright
+# ownership. The ASF licenses this file to You under the Apache
+# License, Version 2.0 (the "License"); you may not use this file
+# except in compliance with the License. You may obtain a copy of the
+# License at
+#
+#    http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or
+# implied. See the License for the specific language governing
+# permissions and limitations under the License.
+#
+# --------------------------------------------------------------------
+# Binary releases of Apache Cloudberry on PostgreSQL 19 (pg19/)
+#
+# The patched PostgreSQL 19 and the port's modules, as Debian packages
+# and tarballs, for Debian 13 and Ubuntu 24.04 on amd64 and arm64:
+# pg19/docker/Dockerfile.release builds them, pg19/release/package.sh
+# packs them, and pg19/release/smoke.sh installs them on a clean system
+# and starts a server with every module before anything is released.
+#
+# A tag pg19-<version> releases what it points at:
+#
+#   git tag pg19-0.1.0 && git push origin pg19-0.1.0
+#
+# A version with a "-" (pg19-0.1.0-rc.1), or a PostgreSQL that is not a
+# release yet (19beta3), makes a pre-release.  A push to the port's
+# branch that changes these files builds and tests the packages and
+# keeps them as the run's artifacts, released nowhere; so does a run by
+# hand, which GitHub offers only once the repository's default branch
+# has this file too -- main, which mirrors apache/cloudberry, has not.
+# --------------------------------------------------------------------
+
+name: Cloudberry on PostgreSQL 19 Binary Release
+
+on:
+  push:
+    tags: ['pg19-*']
+    branches: [extension_postgresql_19]
+    paths:
+      - .github/workflows/pg19-release.yml
+      - pg19/docker/Dockerfile.release
+      - pg19/release/**
+  workflow_dispatch:
+    inputs:
+      pg_repository:
+        description: 'Repository of the patched PostgreSQL 19'
+        required: false
+        default: igor-suhorukov/postgres
+        type: string
+      pg_ref:
+        description: 'Its branch, tag or full commit hash to build'
+        required: false
+        default: REL_19_STABLE_CLOUDBERRY
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.ref_type == 'branch' }}
+
+env:
+  PG_REPOSITORY: ${{ inputs.pg_repository || 'igor-suhorukov/postgres' }}
+  PG_REF: ${{ inputs.pg_ref || 'REL_19_STABLE_CLOUDBERRY' }}
+
+jobs:
+  # The commit of PostgreSQL every build takes, resolved once, so that a
+  # job re-run after the branch moved builds what the others built; and
+  # the release's version.
+  prepare:
+    name: Version and sources
+    runs-on: ubuntu-24.04
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+      prerelease: ${{ steps.version.outputs.prerelease }}
+      pg_commit: ${{ steps.pg.outputs.commit }}
+      pg_version: ${{ steps.pg.outputs.version }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          sparse-checkout: pg19/meson.build
+          sparse-checkout-cone-mode: false
+
+      - name: Resolve PostgreSQL's commit
+        id: pg
+        run: |
+          git init -q "$RUNNER_TEMP/pg"
+          git -C "$RUNNER_TEMP/pg" fetch -q --depth 1 "https://github.com/$PG_REPOSITORY.git" "$PG_REF"
+          commit="$(git -C "$RUNNER_TEMP/pg" rev-parse FETCH_HEAD)"
+          version="$(git -C "$RUNNER_TEMP/pg" show FETCH_HEAD:meson.build | sed -n "s/^  version: '\(.*\)',$/\1/p")"
+          echo "PostgreSQL $version: $PG_REPOSITORY $PG_REF is $commit"
+          echo "commit=$commit" >> "$GITHUB_OUTPUT"
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+
+      - name: The release's version
+        id: version
+        env:
+          PG_VERSION: ${{ steps.pg.outputs.version }}
+        run: |
+          if [ "$GITHUB_REF_TYPE" = tag ]; then
+            version="${GITHUB_REF_NAME#pg19-}"
+          else
+            port="$(sed -n "s/^  version: '\(.*\)',$/\1/p" pg19/meson.build)"
+            version="${port%-devel}-dev.$(date -u +%Y%m%d).${GITHUB_SHA::7}"
+          fi
+          if ! [[ "$version" =~ ^[0-9][0-9A-Za-z.]*(-[0-9A-Za-z.]+)*$ ]]; then
+            echo "::error::\"$version\" is not a version; tag pg19-<version>, as pg19-0.1.0 or pg19-0.1.0-rc.1"
+            exit 1
+          fi
+          if [[ "$version" == *-* || "$PG_VERSION" =~ (devel|alpha|beta|rc) ]]; then
+            prerelease=true
+          else
+            prerelease=false
+          fi
+          echo "version $version, pre-release $prerelease"
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "prerelease=$prerelease" >> "$GITHUB_OUTPUT"
+
+  build:
+    name: ${{ matrix.distro }} ${{ matrix.arch }}
+    needs: prepare
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 120
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { distro: debian13,    image: 'debian:trixie-slim', arch: amd64, runner: ubuntu-24.04 }
+          - { distro: debian13,    image: 'debian:trixie-slim', arch: arm64, runner: ubuntu-24.04-arm }
+          - { distro: ubuntu24.04, image: 'ubuntu:24.04',       arch: amd64, runner: ubuntu-24.04 }
+          - { distro: ubuntu24.04, image: 'ubuntu:24.04',       arch: arm64, runner: ubuntu-24.04-arm }
+    env:
+      IMAGE: ${{ matrix.image }}
+      PG_COMMIT: ${{ needs.prepare.outputs.pg_commit }}
+      VERSION: ${{ needs.prepare.outputs.version }}
+      MAINTAINER: ${{ github.repository_owner }} <${{ github.repository_owner }}@users.noreply.github.com>
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          path: cloudberry
+          persist-credentials: false
+
+      - uses: actions/checkout@v7
+        with:
+          repository: ${{ env.PG_REPOSITORY }}
+          ref: ${{ needs.prepare.outputs.pg_commit }}
+          path: postgres
+          persist-credentials: false
+
+      - name: Build the packages
+        run: |
+          docker buildx build --progress plain \
+            -f cloudberry/pg19/docker/Dockerfile.release \
+            --build-context pgsrc=postgres --build-context cbsrc=cloudberry \
+            --build-arg BASE_IMAGE="$IMAGE" \
+            --build-arg PG_REF="$PG_COMMIT" --build-arg CB_REF="$GITHUB_SHA" \
+            --build-arg VERSION="$VERSION" --build-arg MAINTAINER="$MAINTAINER" \
+            --output type=local,dest=dist cloudberry/pg19/docker
+          ls -l dist
+
+      - name: Install them on a clean ${{ matrix.distro }} and load every module
+        run: |
+          docker run --rm -v "$PWD/dist:/dist:ro" -v "$PWD/cloudberry/pg19:/pg19:ro" \
+            "$IMAGE" bash /pg19/release/smoke.sh
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: pg19-${{ matrix.distro }}-${{ matrix.arch }}
+          path: dist/*
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 14
+
+  release:
+    name: Release
+    needs: [prepare, build]
+    if: github.ref_type == 'tag'
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+      GH_REPO: ${{ github.repository }}
+      VERSION: ${{ needs.prepare.outputs.version }}
+      PRERELEASE: ${{ needs.prepare.outputs.prerelease }}
+      PG_COMMIT: ${{ needs.prepare.outputs.pg_commit }}
+      PG_VERSION: ${{ needs.prepare.outputs.pg_version }}
+    steps:
+      - uses: actions/download-artifact@v8
+        with:
+          pattern: pg19-*
+          path: dist
+          merge-multiple: true
+
+      - name: Checksums
+        working-directory: dist
+        run: sha256sum -- * > SHA256SUMS && cat SHA256SUMS
+
+      - name: Release notes
+        run: |
+          tree="https://github.com/$GITHUB_REPOSITORY/tree/$GITHUB_SHA"
+          cat > notes.md <<EOF
+          Apache Cloudberry on PostgreSQL 19, $VERSION, as binary packages.
+
+          | | |
+          |---|---|
+          | PostgreSQL | $PG_VERSION with Cloudberry's core patch series: [$PG_REPOSITORY@${PG_COMMIT::11}](https://github.com/$PG_REPOSITORY/commit/$PG_COMMIT) ($PG_REF) |
+          | The port | [$GITHUB_REPOSITORY@${GITHUB_SHA::11}](https://github.com/$GITHUB_REPOSITORY/commit/$GITHUB_SHA) |
+          | Built for | Debian 13 and Ubuntu 24.04, amd64 and arm64; installed in \`/usr/local/pgsql\` |
+
+          For each distribution and architecture:
+
+          - \`cloudberry-pg19-postgresql\`: the patched PostgreSQL 19 -- server, client programs, contrib, PL/Python, headers;
+          - \`cloudberry-pg19-extension\`: the port's modules and Cloudberry's management tools, gpMgmt;
+          - \`cloudberry-pg19-dbgsym\`: the debug symbols of both;
+
+          each as a \`.deb\` and as a \`.tar.gz\` of the same files.  They are release builds -- no assertions, no injection points, no test-only modules -- so the port's test suites run on the test build instead ([pg19/docker]($tree/pg19/docker)).
+
+          ### Install
+
+              sudo apt install ./cloudberry-pg19-postgresql_$VERSION-debian13_amd64.deb \\
+                               ./cloudberry-pg19-extension_$VERSION-debian13_amd64.deb
+
+          apt brings the libraries they need.  A tarball unpacks into \`/\` (\`sudo tar -xzf <file> -C /\`) and needs the libraries its package depends on (\`dpkg-deb -f <package>.deb Depends\`).
+
+          ### A server with the modules
+
+              export PATH=/usr/local/pgsql/bin:\$PATH
+              initdb -D ~/cb19
+              echo "shared_preload_libraries = 'gp_core,interconnect,gp_orca,gp_ao,pax,gp_matview,gp_task,gp_sql,gp_security,gp_resource'" >> ~/cb19/postgresql.conf
+              pg_ctl -D ~/cb19 -l ~/cb19/log start
+              psql -d postgres -c 'CREATE EXTENSION gp_core' -c 'SELECT gp.version()'
+
+          A cluster is made with gpMgmt, as Cloudberry's is: \`source /usr/local/pgsql/cloudberry-env.sh\`, then gpinitsystem or gpdemo, which want the Python modules the extension package recommends and ssh to each host.  [pg19/README.md]($tree/pg19/README.md) says what the port does and what it does not do yet.
+
+          \`sha256sum -c --ignore-missing SHA256SUMS\` checks what was downloaded.
+          EOF
+          cat notes.md
+
+      - name: Publish
+        run: |
+          if gh release view "$GITHUB_REF_NAME" > /dev/null 2>&1; then
+            gh release upload "$GITHUB_REF_NAME" dist/* --clobber
+            gh release edit "$GITHUB_REF_NAME" --notes-file notes.md --prerelease="$PRERELEASE"
+          else
+            gh release create "$GITHUB_REF_NAME" dist/* --verify-tag \
+              --title "Cloudberry on PostgreSQL 19 $VERSION" --notes-file notes.md \
+              --prerelease="$PRERELEASE"
+          fi
