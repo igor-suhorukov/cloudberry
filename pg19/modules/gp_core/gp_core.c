@@ -78,6 +78,7 @@
 #include "gp_size.h"
 #include "gp_standby.h"
 #include "gp_ic.h"
+#include "gp_utilmode.h"
 #include "gp_workfile.h"
 
 PG_MODULE_MAGIC_EXT(
@@ -399,6 +400,12 @@ _PG_init(void)
 	 * CREATE DATABASE's directories go if its transaction aborts.
 	 */
 	GpDirxactInit();
+
+	/*
+	 * A session of a segment's own, Cloudberry's utility mode: its temporary
+	 * schema named as Cloudberry's is (gp_utilmode.c).
+	 */
+	GpUtilmodeInit();
 
 	/*
 	 * Deliberately no MarkGUCPrefixReserved("gp") here.  It drops every
