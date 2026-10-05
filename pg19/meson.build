@@ -456,7 +456,8 @@ modules = [
                      'modules/gp_core/gp_endpoint.c',
                      'modules/gp_core/gp_parallel.c',
                      'modules/gp_core/gp_dirxact.c',
-                     'modules/gp_core/gp_signal.c'),
+                     'modules/gp_core/gp_signal.c',
+                     'modules/gp_core/gp_builtins.c'),
     # The dispatcher is a libpq client of the segments; see gp_dispatch.c.
     'dependencies': [libpq_dep],
     'include_directories': [pg_client_inc],

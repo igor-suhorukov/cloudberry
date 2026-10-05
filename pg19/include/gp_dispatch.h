@@ -504,6 +504,13 @@ extern char *GpDdlLabelPayloadOf(const struct ObjectAddress *object,
 								 const char *provider, const char *label);
 
 /*
+ * A statement the coordinator has done already, sent to the segments to do
+ * with the OID it gave the one object the statement makes; see gp_ddl.c.
+ */
+struct Node;
+extern void GpDdlDispatchDone(struct Node *stmt, Oid catalog, Oid oid);
+
+/*
  * A plan about to be sent -- a gather's query, an ORCA fragment -- held to
  * gp.max_plan_size, as Cloudberry's dispatcher holds one to its
  * gp_max_plan_size: raises where it is larger.

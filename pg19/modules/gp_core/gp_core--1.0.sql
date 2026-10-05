@@ -3784,3 +3784,16 @@ CREATE FUNCTION pg_catalog.gp_get_next_gxid()
 RETURNS int8
 AS 'MODULE_PATHNAME', 'gp_get_next_gxid'
 LANGUAGE C VOLATILE PARALLEL UNSAFE;
+
+/*
+ * PostgreSQL's BRIN summarization and import of the system's collations, the
+ * cluster's, as Cloudberry's are: a call of PostgreSQL's on a cluster's
+ * coordinator is made a call of the one here of its name and arguments, as
+ * the size functions' are (gp_size.c, gp_builtins.c).
+ */
+CREATE FUNCTION gp_internal.brin_summarize_new_values(regclass)
+RETURNS integer AS 'MODULE_PATHNAME', 'gp_brin_summarize_new_values' LANGUAGE C STRICT;
+CREATE FUNCTION gp_internal.brin_summarize_range(regclass, bigint)
+RETURNS integer AS 'MODULE_PATHNAME', 'gp_brin_summarize_range' LANGUAGE C STRICT;
+CREATE FUNCTION gp_internal.pg_import_system_collations(regnamespace)
+RETURNS integer AS 'MODULE_PATHNAME', 'gp_import_system_collations' LANGUAGE C STRICT;
