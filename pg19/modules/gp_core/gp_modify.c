@@ -1163,6 +1163,27 @@ cannot_push_reason(Query *query, Oid target, GpPolicy *policy)
 /* ------------------------------------------------------------------------- */
 
 /*
+ * Is the table append-optimized -- of gp_ao's access methods, which gp_core
+ * knows by name, as it loads without gp_ao?
+ */
+static bool
+relation_is_append_optimized(Oid relid)
+{
+	Oid			relam = get_rel_relam(relid);
+	char	   *amname;
+	bool		result;
+
+	if (!OidIsValid(relam))
+		return false;
+	amname = get_am_name(relam);
+	result = amname != NULL &&
+		(strcmp(amname, "ao_row") == 0 || strcmp(amname, "ao_column") == 0);
+	if (amname != NULL)
+		pfree(amname);
+	return result;
+}
+
+/*
  * SELECT ... FOR UPDATE of a distributed table: Cloudberry's table lock, and
  * no row marks, which would have a LockRows node lock rows on the coordinator
  * that are not there -- a gathered row has no place in its empty copy.  Every
@@ -1172,8 +1193,10 @@ cannot_push_reason(Query *query, Oid target, GpPolicy *policy)
  * With the global deadlock detector on, Cloudberry's planner locks rows
  * instead for the query it can (checkCanOptSelectLockingClause, analyze.c):
  * one table in FROM, no subquery, no set operation -- a table whose rows
- * are each on one segment.  The segments lock them, the gather sending its
- * locking clause with its query (gp_scan.c).
+ * are each on one segment, and no append-optimized table, whose rows no
+ * one can lock (parse_relation.c, RelationIsAppendOptimized()).  The
+ * segments lock them, the gather sending its locking clause with its query
+ * (gp_scan.c).
  */
 static bool
 segments_lock_rows(Query *q)
@@ -1196,7 +1219,7 @@ segments_lock_rows(Query *q)
 		return false;
 	rte = rt_fetch(rc->rti, q->rtable);
 	if (rte->rtekind != RTE_RELATION || rte->relkind != RELKIND_RELATION ||
-		has_subclass(rte->relid))
+		has_subclass(rte->relid) || relation_is_append_optimized(rte->relid))
 		return false;
 	policy = GpScanDistributedPolicy(rte->relid);
 	if (policy == NULL ||

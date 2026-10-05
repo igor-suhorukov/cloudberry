@@ -344,23 +344,6 @@
 + relation | RowExclusiveLock | t       | t_lockmods_upsert 
 +(3 rows)
 @@
--CREATE
-+ERROR:  unrecognized parameter "appendonly"
-@@
--INSERT 8
-+ERROR:  relation "t_lockmods_ao" does not exist
-+LINE 1: insert into t_lockmods_ao select * from generate_series(1, 8...
-+                    ^
-@@
--ANALYZE
-+ERROR:  relation "t_lockmods_ao" does not exist
-@@
--CREATE
-+ERROR:  unrecognized parameter "appendonly"
-@@
--QUERY PLAN
--___________
--{
 -  'child' => [
 -    {
 -      'id' => 2,
@@ -368,41 +351,17 @@
 -      'short' => 'Seq Scan on t_lockmods_ao'
 -    }
 -  ],
--  'id' => 1,
--  'recvsize' => 1,
--  'segments' => 3,
--  'sendsize' => 3,
--  'short' => 'Gather Motion'
--}
-+ERROR:  relation "t_lockmods_ao" does not exist
-+LINE 1: explain select * from t_lockmods_ao for update;
-+                              ^
 @@
-- c 
-----
-- 1 
-- 2 
-- 3 
-- 4 
-- 5 
-- 6 
-- 7 
-- 8 
--(8 rows)
--2: select * from show_locks_lockmodes;
 - locktype | mode            | granted | relation      
 -----------+-----------------+---------+---------------
 - relation | AccessShareLock | t       | t_lockmods_ao 
 - relation | ExclusiveLock   | t       | t_lockmods_ao 
 -(2 rows)
-+ERROR:  current transaction is aborted, commands ignored until end of transaction block
-+2: select * from show_locks_lockmodes;
-+ locktype | mode | granted | relation 
-+----------+------+---------+----------
++ locktype | mode          | granted | relation      
++----------+---------------+---------+---------------
++ relation | ExclusiveLock | t       | t_lockmods_ao 
++(1 row)
 @@
--QUERY PLAN
--___________
--{
 -  'child' => [
 -    {
 -      'id' => 2,
@@ -410,41 +369,17 @@
 -      'short' => 'Seq Scan on t_lockmods_ao'
 -    }
 -  ],
--  'id' => 1,
--  'recvsize' => 1,
--  'segments' => 3,
--  'sendsize' => 3,
--  'short' => 'Gather Motion'
--}
-+ERROR:  relation "t_lockmods_ao" does not exist
-+LINE 1: explain select * from t_lockmods_ao for no key update;
-+                              ^
 @@
-- c 
-----
-- 1 
-- 2 
-- 3 
-- 4 
-- 5 
-- 6 
-- 7 
-- 8 
--(8 rows)
--2: select * from show_locks_lockmodes;
 - locktype | mode            | granted | relation      
 -----------+-----------------+---------+---------------
 - relation | AccessShareLock | t       | t_lockmods_ao 
 - relation | ExclusiveLock   | t       | t_lockmods_ao 
 -(2 rows)
-+ERROR:  current transaction is aborted, commands ignored until end of transaction block
-+2: select * from show_locks_lockmodes;
-+ locktype | mode | granted | relation 
-+----------+------+---------+----------
++ locktype | mode          | granted | relation      
++----------+---------------+---------+---------------
++ relation | ExclusiveLock | t       | t_lockmods_ao 
++(1 row)
 @@
--QUERY PLAN
--___________
--{
 -  'child' => [
 -    {
 -      'id' => 2,
@@ -452,41 +387,17 @@
 -      'short' => 'Seq Scan on t_lockmods_ao'
 -    }
 -  ],
--  'id' => 1,
--  'recvsize' => 1,
--  'segments' => 3,
--  'sendsize' => 3,
--  'short' => 'Gather Motion'
--}
-+ERROR:  relation "t_lockmods_ao" does not exist
-+LINE 1: explain select * from t_lockmods_ao for share;
-+                              ^
 @@
-- c 
-----
-- 1 
-- 2 
-- 3 
-- 4 
-- 5 
-- 6 
-- 7 
-- 8 
--(8 rows)
--2: select * from show_locks_lockmodes;
 - locktype | mode            | granted | relation      
 -----------+-----------------+---------+---------------
 - relation | AccessShareLock | t       | t_lockmods_ao 
 - relation | ExclusiveLock   | t       | t_lockmods_ao 
 -(2 rows)
-+ERROR:  current transaction is aborted, commands ignored until end of transaction block
-+2: select * from show_locks_lockmodes;
-+ locktype | mode | granted | relation 
-+----------+------+---------+----------
++ locktype | mode          | granted | relation      
++----------+---------------+---------+---------------
++ relation | ExclusiveLock | t       | t_lockmods_ao 
++(1 row)
 @@
--QUERY PLAN
--___________
--{
 -  'child' => [
 -    {
 -      'id' => 2,
@@ -494,45 +405,26 @@
 -      'short' => 'Seq Scan on t_lockmods_ao'
 -    }
 -  ],
--  'id' => 1,
--  'recvsize' => 1,
--  'segments' => 3,
--  'sendsize' => 3,
--  'short' => 'Gather Motion'
--}
-+ERROR:  relation "t_lockmods_ao" does not exist
-+LINE 1: explain select * from t_lockmods_ao for key share;
-+                              ^
 @@
-- c 
-----
-- 1 
-- 2 
-- 3 
-- 4 
-- 5 
-- 6 
-- 7 
-- 8 
--(8 rows)
--2: select * from show_locks_lockmodes;
 - locktype | mode            | granted | relation      
 -----------+-----------------+---------+---------------
 - relation | AccessShareLock | t       | t_lockmods_ao 
 - relation | ExclusiveLock   | t       | t_lockmods_ao 
 -(2 rows)
-+ERROR:  current transaction is aborted, commands ignored until end of transaction block
-+2: select * from show_locks_lockmodes;
-+ locktype | mode | granted | relation 
-+----------+------+---------+----------
++ locktype | mode          | granted | relation      
++----------+---------------+---------+---------------
++ relation | ExclusiveLock | t       | t_lockmods_ao 
++(1 row)
 @@
--QUERY PLAN
--___________
--{
--  'child' => [
--    {
--      'child' => [
--        {
++      'id' => 2,
++      'parent' => 1,
++      'recvsize' => 1,
++      'segments' => 3,
++      'sendsize' => 3,
++      'short' => 'Gather Motion'
++    },
++    {
+@@
 -          'child' => [
 -            {
 -              'id' => 4,
@@ -543,8 +435,10 @@
 -          'id' => 3,
 -          'parent' => 2,
 -          'recvsize' => 3,
--          'segments' => 3,
--          'sendsize' => 3,
++          'id' => 4,
++          'parent' => 3,
++          'recvsize' => 1,
+@@
 -          'short' => 'Broadcast Motion'
 -        },
 -        {
@@ -558,27 +452,19 @@
 -          'id' => 5,
 -          'parent' => 2,
 -          'short' => 'Materialize'
--        }
--      ],
++          'short' => 'Gather Motion'
+@@
 -      'id' => 2,
--      'parent' => 1,
++      'id' => 3,
+@@
 -      'short' => 'Nested Loop'
--    }
--  ],
--  'id' => 1,
++      'short' => 'Materialize'
+@@
 -  'recvsize' => 1,
 -  'segments' => 3,
 -  'sendsize' => 3,
 -  'short' => 'Gather Motion'
--}
-+ERROR:  relation "t_lockmods_ao" does not exist
-+LINE 1: explain select * from t_lockmods_ao, t_lockmods_ao1 for upda...
-+                              ^
-@@
-- c | c 
-----+---
--(0 rows)
-+ERROR:  current transaction is aborted, commands ignored until end of transaction block
++  'short' => 'Nested Loop'
 @@
 - locktype | mode            | granted | relation       
 -----------+-----------------+---------+----------------
@@ -587,16 +473,21 @@
 - relation | ExclusiveLock   | t       | t_lockmods_ao  
 - relation | ExclusiveLock   | t       | t_lockmods_ao1 
 -(4 rows)
-+ locktype | mode | granted | relation 
-+----------+------+---------+----------
++ locktype | mode          | granted | relation       
++----------+---------------+---------+----------------
++ relation | ExclusiveLock | t       | t_lockmods_ao  
++ relation | ExclusiveLock | t       | t_lockmods_ao1 
++(2 rows)
 @@
--QUERY PLAN
--___________
--{
--  'child' => [
--    {
--      'child' => [
--        {
++      'id' => 2,
++      'parent' => 1,
++      'recvsize' => 1,
++      'segments' => 3,
++      'sendsize' => 3,
++      'short' => 'Gather Motion'
++    },
++    {
+@@
 -          'child' => [
 -            {
 -              'id' => 4,
@@ -607,8 +498,10 @@
 -          'id' => 3,
 -          'parent' => 2,
 -          'recvsize' => 3,
--          'segments' => 3,
--          'sendsize' => 3,
++          'id' => 4,
++          'parent' => 3,
++          'recvsize' => 1,
+@@
 -          'short' => 'Broadcast Motion'
 -        },
 -        {
@@ -622,27 +515,19 @@
 -          'id' => 5,
 -          'parent' => 2,
 -          'short' => 'Materialize'
--        }
--      ],
++          'short' => 'Gather Motion'
+@@
 -      'id' => 2,
--      'parent' => 1,
++      'id' => 3,
+@@
 -      'short' => 'Nested Loop'
--    }
--  ],
--  'id' => 1,
++      'short' => 'Materialize'
+@@
 -  'recvsize' => 1,
 -  'segments' => 3,
 -  'sendsize' => 3,
 -  'short' => 'Gather Motion'
--}
-+ERROR:  relation "t_lockmods_ao" does not exist
-+LINE 1: explain select * from t_lockmods_ao, t_lockmods_ao1 for no k...
-+                              ^
-@@
-- c | c 
-----+---
--(0 rows)
-+ERROR:  current transaction is aborted, commands ignored until end of transaction block
++  'short' => 'Nested Loop'
 @@
 - locktype | mode            | granted | relation       
 -----------+-----------------+---------+----------------
@@ -651,16 +536,21 @@
 - relation | ExclusiveLock   | t       | t_lockmods_ao  
 - relation | ExclusiveLock   | t       | t_lockmods_ao1 
 -(4 rows)
-+ locktype | mode | granted | relation 
-+----------+------+---------+----------
++ locktype | mode          | granted | relation       
++----------+---------------+---------+----------------
++ relation | ExclusiveLock | t       | t_lockmods_ao  
++ relation | ExclusiveLock | t       | t_lockmods_ao1 
++(2 rows)
 @@
--QUERY PLAN
--___________
--{
--  'child' => [
--    {
--      'child' => [
--        {
++      'id' => 2,
++      'parent' => 1,
++      'recvsize' => 1,
++      'segments' => 3,
++      'sendsize' => 3,
++      'short' => 'Gather Motion'
++    },
++    {
+@@
 -          'child' => [
 -            {
 -              'id' => 4,
@@ -671,8 +561,10 @@
 -          'id' => 3,
 -          'parent' => 2,
 -          'recvsize' => 3,
--          'segments' => 3,
--          'sendsize' => 3,
++          'id' => 4,
++          'parent' => 3,
++          'recvsize' => 1,
+@@
 -          'short' => 'Broadcast Motion'
 -        },
 -        {
@@ -686,27 +578,19 @@
 -          'id' => 5,
 -          'parent' => 2,
 -          'short' => 'Materialize'
--        }
--      ],
++          'short' => 'Gather Motion'
+@@
 -      'id' => 2,
--      'parent' => 1,
++      'id' => 3,
+@@
 -      'short' => 'Nested Loop'
--    }
--  ],
--  'id' => 1,
++      'short' => 'Materialize'
+@@
 -  'recvsize' => 1,
 -  'segments' => 3,
 -  'sendsize' => 3,
 -  'short' => 'Gather Motion'
--}
-+ERROR:  relation "t_lockmods_ao" does not exist
-+LINE 1: explain select * from t_lockmods_ao, t_lockmods_ao1 for shar...
-+                              ^
-@@
-- c | c 
-----+---
--(0 rows)
-+ERROR:  current transaction is aborted, commands ignored until end of transaction block
++  'short' => 'Nested Loop'
 @@
 - locktype | mode            | granted | relation       
 -----------+-----------------+---------+----------------
@@ -715,16 +599,21 @@
 - relation | ExclusiveLock   | t       | t_lockmods_ao  
 - relation | ExclusiveLock   | t       | t_lockmods_ao1 
 -(4 rows)
-+ locktype | mode | granted | relation 
-+----------+------+---------+----------
++ locktype | mode          | granted | relation       
++----------+---------------+---------+----------------
++ relation | ExclusiveLock | t       | t_lockmods_ao  
++ relation | ExclusiveLock | t       | t_lockmods_ao1 
++(2 rows)
 @@
--QUERY PLAN
--___________
--{
--  'child' => [
--    {
--      'child' => [
--        {
++      'id' => 2,
++      'parent' => 1,
++      'recvsize' => 1,
++      'segments' => 3,
++      'sendsize' => 3,
++      'short' => 'Gather Motion'
++    },
++    {
+@@
 -          'child' => [
 -            {
 -              'id' => 4,
@@ -735,8 +624,10 @@
 -          'id' => 3,
 -          'parent' => 2,
 -          'recvsize' => 3,
--          'segments' => 3,
--          'sendsize' => 3,
++          'id' => 4,
++          'parent' => 3,
++          'recvsize' => 1,
+@@
 -          'short' => 'Broadcast Motion'
 -        },
 -        {
@@ -750,27 +641,19 @@
 -          'id' => 5,
 -          'parent' => 2,
 -          'short' => 'Materialize'
--        }
--      ],
++          'short' => 'Gather Motion'
+@@
 -      'id' => 2,
--      'parent' => 1,
++      'id' => 3,
+@@
 -      'short' => 'Nested Loop'
--    }
--  ],
--  'id' => 1,
++      'short' => 'Materialize'
+@@
 -  'recvsize' => 1,
 -  'segments' => 3,
 -  'sendsize' => 3,
 -  'short' => 'Gather Motion'
--}
-+ERROR:  relation "t_lockmods_ao" does not exist
-+LINE 1: explain select * from t_lockmods_ao, t_lockmods_ao1 for key ...
-+                              ^
-@@
-- c | c 
-----+---
--(0 rows)
-+ERROR:  current transaction is aborted, commands ignored until end of transaction block
++  'short' => 'Nested Loop'
 @@
 - locktype | mode            | granted | relation       
 -----------+-----------------+---------+----------------
@@ -779,203 +662,11 @@
 - relation | ExclusiveLock   | t       | t_lockmods_ao  
 - relation | ExclusiveLock   | t       | t_lockmods_ao1 
 -(4 rows)
-+ locktype | mode | granted | relation 
-+----------+------+---------+----------
-@@
--UPDATE 8
-+ERROR:  relation "t_lockmods_ao" does not exist
-+LINE 1: update t_lockmods_ao set c = c + 0;
-+               ^
-@@
-- locktype | mode          | granted | relation      
------------+---------------+---------+---------------
-- relation | ExclusiveLock | t       | t_lockmods_ao 
--(1 row)
-+ locktype | mode | granted | relation 
-+----------+------+---------+----------
-+(0 rows)
-@@
--DELETE 8
-+ERROR:  relation "t_lockmods_ao" does not exist
-+LINE 1: delete from t_lockmods_ao;
-+                    ^
-@@
-- locktype | mode          | granted | relation      
------------+---------------+---------+---------------
-- relation | ExclusiveLock | t       | t_lockmods_ao 
--(1 row)
-+ locktype | mode | granted | relation 
-+----------+------+---------+----------
-+(0 rows)
-@@
--INSERT 5
-+ERROR:  relation "t_lockmods_ao" does not exist
-+LINE 1: insert into t_lockmods_ao select * from generate_series(1, 5...
-+                    ^
-@@
-- locktype | mode             | granted | relation      
------------+------------------+---------+---------------
-- relation | RowExclusiveLock | t       | t_lockmods_ao 
--(1 row)
-+ locktype | mode | granted | relation 
-+----------+------+---------+----------
-+(0 rows)
-@@
--PREPARE
-+ERROR:  relation "t_lockmods_ao" does not exist
-+LINE 1: prepare select_for_update_ao as select * from t_lockmods_ao ...
-+                                                      ^
-@@
--PREPARE
-+ERROR:  relation "t_lockmods_ao" does not exist
-+LINE 1: ...repare select_for_nokeyupdate_ao as select * from t_lockmods...
-+                                                             ^
-@@
--PREPARE
-+ERROR:  relation "t_lockmods_ao" does not exist
-+LINE 1: prepare select_for_share_ao as select * from t_lockmods_ao f...
-+                                                     ^
-@@
--PREPARE
-+ERROR:  relation "t_lockmods_ao" does not exist
-+LINE 1: prepare select_for_keyshare_ao as select * from t_lockmods_a...
-+                                                        ^
-@@
--PREPARE
-+ERROR:  relation "t_lockmods_ao" does not exist
-+LINE 1: prepare update_tlockmods_ao as update t_lockmods_ao set c = ...
-+                                              ^
-@@
--PREPARE
-+ERROR:  relation "t_lockmods_ao" does not exist
-+LINE 1: prepare delete_tlockmods_ao as delete from t_lockmods_ao;
-+                                                   ^
-@@
--PREPARE
-+ERROR:  relation "t_lockmods_ao" does not exist
-+LINE 1: prepare insert_tlockmods_ao as insert into t_lockmods_ao sel...
-+                                                   ^
-@@
-- c 
-----
-- 1 
-- 2 
-- 3 
-- 4 
-- 5 
-- 6 
-- 7 
-- 8 
--(8 rows)
--2: select * from show_locks_lockmodes;
-- locktype | mode          | granted | relation      
------------+---------------+---------+---------------
-- relation | ExclusiveLock | t       | t_lockmods_ao 
--(1 row)
-+ERROR:  prepared statement "select_for_update_ao" does not exist
-+2: select * from show_locks_lockmodes;
-+ locktype | mode | granted | relation 
-+----------+------+---------+----------
-+(0 rows)
-@@
-- c 
-----
-- 1 
-- 2 
-- 3 
-- 4 
-- 5 
-- 6 
-- 7 
-- 8 
--(8 rows)
--2: select * from show_locks_lockmodes;
-- locktype | mode          | granted | relation      
------------+---------------+---------+---------------
-- relation | ExclusiveLock | t       | t_lockmods_ao 
--(1 row)
-+ERROR:  prepared statement "select_for_nokeyupdate_ao" does not exist
-+2: select * from show_locks_lockmodes;
-+ locktype | mode | granted | relation 
-+----------+------+---------+----------
-+(0 rows)
-@@
-- c 
-----
-- 1 
-- 2 
-- 3 
-- 4 
-- 5 
-- 6 
-- 7 
-- 8 
--(8 rows)
--2: select * from show_locks_lockmodes;
-- locktype | mode          | granted | relation      
------------+---------------+---------+---------------
-- relation | ExclusiveLock | t       | t_lockmods_ao 
--(1 row)
-+ERROR:  prepared statement "select_for_share_ao" does not exist
-+2: select * from show_locks_lockmodes;
-+ locktype | mode | granted | relation 
-+----------+------+---------+----------
-+(0 rows)
-@@
-- c 
-----
-- 1 
-- 2 
-- 3 
-- 4 
-- 5 
-- 6 
-- 7 
-- 8 
--(8 rows)
--2: select * from show_locks_lockmodes;
-- locktype | mode          | granted | relation      
------------+---------------+---------+---------------
-- relation | ExclusiveLock | t       | t_lockmods_ao 
--(1 row)
-+ERROR:  prepared statement "select_for_keyshare_ao" does not exist
-+2: select * from show_locks_lockmodes;
-+ locktype | mode | granted | relation 
-+----------+------+---------+----------
-+(0 rows)
-@@
--EXECUTE 8
-+ERROR:  prepared statement "update_tlockmods_ao" does not exist
-@@
-- locktype | mode          | granted | relation      
------------+---------------+---------+---------------
-- relation | ExclusiveLock | t       | t_lockmods_ao 
--(1 row)
-+ locktype | mode | granted | relation 
-+----------+------+---------+----------
-+(0 rows)
-@@
--EXECUTE 8
-+ERROR:  prepared statement "delete_tlockmods_ao" does not exist
-@@
-- locktype | mode          | granted | relation      
------------+---------------+---------+---------------
-- relation | ExclusiveLock | t       | t_lockmods_ao 
--(1 row)
-+ locktype | mode | granted | relation 
-+----------+------+---------+----------
-+(0 rows)
-@@
--EXECUTE 5
-+ERROR:  prepared statement "insert_tlockmods_ao" does not exist
-@@
-- locktype | mode             | granted | relation      
------------+------------------+---------+---------------
-- relation | RowExclusiveLock | t       | t_lockmods_ao 
--(1 row)
-+ locktype | mode | granted | relation 
-+----------+------+---------+----------
-+(0 rows)
++ locktype | mode          | granted | relation       
++----------+---------------+---------+----------------
++ relation | ExclusiveLock | t       | t_lockmods_ao  
++ relation | ExclusiveLock | t       | t_lockmods_ao1 
++(2 rows)
 @@
 -          'child' => [
 -            {
@@ -1382,9 +1073,6 @@
 -(1 row)
 +(2 rows)
 @@
--QUERY PLAN
--___________
--{
 -  'child' => [
 -    {
 -      'id' => 2,
@@ -1392,41 +1080,7 @@
 -      'short' => 'Seq Scan on t_lockmods_ao'
 -    }
 -  ],
--  'id' => 1,
--  'recvsize' => 1,
--  'segments' => 3,
--  'sendsize' => 3,
--  'short' => 'Gather Motion'
--}
-+ERROR:  relation "t_lockmods_ao" does not exist
-+LINE 1: explain select * from t_lockmods_ao for update;
-+                              ^
 @@
-- c 
-----
-- 1 
-- 2 
-- 3 
-- 4 
-- 5 
-- 6 
-- 7 
-- 8 
--(8 rows)
--2: select * from show_locks_lockmodes;
-- locktype | mode            | granted | relation      
------------+-----------------+---------+---------------
-- relation | AccessShareLock | t       | t_lockmods_ao 
-- relation | ExclusiveLock   | t       | t_lockmods_ao 
--(2 rows)
-+ERROR:  current transaction is aborted, commands ignored until end of transaction block
-+2: select * from show_locks_lockmodes;
-+ locktype | mode | granted | relation 
-+----------+------+---------+----------
-@@
--QUERY PLAN
--___________
--{
 -  'child' => [
 -    {
 -      'id' => 2,
@@ -1434,41 +1088,7 @@
 -      'short' => 'Seq Scan on t_lockmods_ao'
 -    }
 -  ],
--  'id' => 1,
--  'recvsize' => 1,
--  'segments' => 3,
--  'sendsize' => 3,
--  'short' => 'Gather Motion'
--}
-+ERROR:  relation "t_lockmods_ao" does not exist
-+LINE 1: explain select * from t_lockmods_ao for no key update;
-+                              ^
 @@
-- c 
-----
-- 1 
-- 2 
-- 3 
-- 4 
-- 5 
-- 6 
-- 7 
-- 8 
--(8 rows)
--2: select * from show_locks_lockmodes;
-- locktype | mode            | granted | relation      
------------+-----------------+---------+---------------
-- relation | AccessShareLock | t       | t_lockmods_ao 
-- relation | ExclusiveLock   | t       | t_lockmods_ao 
--(2 rows)
-+ERROR:  current transaction is aborted, commands ignored until end of transaction block
-+2: select * from show_locks_lockmodes;
-+ locktype | mode | granted | relation 
-+----------+------+---------+----------
-@@
--QUERY PLAN
--___________
--{
 -  'child' => [
 -    {
 -      'id' => 2,
@@ -1476,41 +1096,7 @@
 -      'short' => 'Seq Scan on t_lockmods_ao'
 -    }
 -  ],
--  'id' => 1,
--  'recvsize' => 1,
--  'segments' => 3,
--  'sendsize' => 3,
--  'short' => 'Gather Motion'
--}
-+ERROR:  relation "t_lockmods_ao" does not exist
-+LINE 1: explain select * from t_lockmods_ao for share;
-+                              ^
 @@
-- c 
-----
-- 1 
-- 2 
-- 3 
-- 4 
-- 5 
-- 6 
-- 7 
-- 8 
--(8 rows)
--2: select * from show_locks_lockmodes;
-- locktype | mode            | granted | relation      
------------+-----------------+---------+---------------
-- relation | AccessShareLock | t       | t_lockmods_ao 
-- relation | ExclusiveLock   | t       | t_lockmods_ao 
--(2 rows)
-+ERROR:  current transaction is aborted, commands ignored until end of transaction block
-+2: select * from show_locks_lockmodes;
-+ locktype | mode | granted | relation 
-+----------+------+---------+----------
-@@
--QUERY PLAN
--___________
--{
 -  'child' => [
 -    {
 -      'id' => 2,
@@ -1518,45 +1104,16 @@
 -      'short' => 'Seq Scan on t_lockmods_ao'
 -    }
 -  ],
--  'id' => 1,
--  'recvsize' => 1,
--  'segments' => 3,
--  'sendsize' => 3,
--  'short' => 'Gather Motion'
--}
-+ERROR:  relation "t_lockmods_ao" does not exist
-+LINE 1: explain select * from t_lockmods_ao for key share;
-+                              ^
 @@
-- c 
-----
-- 1 
-- 2 
-- 3 
-- 4 
-- 5 
-- 6 
-- 7 
-- 8 
--(8 rows)
--2: select * from show_locks_lockmodes;
-- locktype | mode            | granted | relation      
------------+-----------------+---------+---------------
-- relation | AccessShareLock | t       | t_lockmods_ao 
-- relation | ExclusiveLock   | t       | t_lockmods_ao 
--(2 rows)
-+ERROR:  current transaction is aborted, commands ignored until end of transaction block
-+2: select * from show_locks_lockmodes;
-+ locktype | mode | granted | relation 
-+----------+------+---------+----------
++      'id' => 2,
++      'parent' => 1,
++      'recvsize' => 1,
++      'segments' => 3,
++      'sendsize' => 3,
++      'short' => 'Gather Motion'
++    },
++    {
 @@
--QUERY PLAN
--___________
--{
--  'child' => [
--    {
--      'child' => [
--        {
 -          'child' => [
 -            {
 -              'id' => 4,
@@ -1567,8 +1124,10 @@
 -          'id' => 3,
 -          'parent' => 2,
 -          'recvsize' => 3,
--          'segments' => 3,
--          'sendsize' => 3,
++          'id' => 4,
++          'parent' => 3,
++          'recvsize' => 1,
+@@
 -          'short' => 'Broadcast Motion'
 -        },
 -        {
@@ -1582,45 +1141,29 @@
 -          'id' => 5,
 -          'parent' => 2,
 -          'short' => 'Materialize'
--        }
--      ],
++          'short' => 'Gather Motion'
+@@
 -      'id' => 2,
--      'parent' => 1,
++      'id' => 3,
+@@
 -      'short' => 'Nested Loop'
--    }
--  ],
--  'id' => 1,
++      'short' => 'Materialize'
+@@
 -  'recvsize' => 1,
 -  'segments' => 3,
 -  'sendsize' => 3,
 -  'short' => 'Gather Motion'
--}
-+ERROR:  relation "t_lockmods_ao" does not exist
-+LINE 1: explain select * from t_lockmods_ao, t_lockmods_ao1 for upda...
-+                              ^
++  'short' => 'Nested Loop'
 @@
-- c | c 
-----+---
--(0 rows)
-+ERROR:  current transaction is aborted, commands ignored until end of transaction block
++      'id' => 2,
++      'parent' => 1,
++      'recvsize' => 1,
++      'segments' => 3,
++      'sendsize' => 3,
++      'short' => 'Gather Motion'
++    },
++    {
 @@
-- locktype | mode            | granted | relation       
------------+-----------------+---------+----------------
-- relation | AccessShareLock | t       | t_lockmods_ao  
-- relation | AccessShareLock | t       | t_lockmods_ao1 
-- relation | ExclusiveLock   | t       | t_lockmods_ao  
-- relation | ExclusiveLock   | t       | t_lockmods_ao1 
--(4 rows)
-+ locktype | mode | granted | relation 
-+----------+------+---------+----------
-@@
--QUERY PLAN
--___________
--{
--  'child' => [
--    {
--      'child' => [
--        {
 -          'child' => [
 -            {
 -              'id' => 4,
@@ -1631,8 +1174,10 @@
 -          'id' => 3,
 -          'parent' => 2,
 -          'recvsize' => 3,
--          'segments' => 3,
--          'sendsize' => 3,
++          'id' => 4,
++          'parent' => 3,
++          'recvsize' => 1,
+@@
 -          'short' => 'Broadcast Motion'
 -        },
 -        {
@@ -1646,45 +1191,29 @@
 -          'id' => 5,
 -          'parent' => 2,
 -          'short' => 'Materialize'
--        }
--      ],
++          'short' => 'Gather Motion'
+@@
 -      'id' => 2,
--      'parent' => 1,
++      'id' => 3,
+@@
 -      'short' => 'Nested Loop'
--    }
--  ],
--  'id' => 1,
++      'short' => 'Materialize'
+@@
 -  'recvsize' => 1,
 -  'segments' => 3,
 -  'sendsize' => 3,
 -  'short' => 'Gather Motion'
--}
-+ERROR:  relation "t_lockmods_ao" does not exist
-+LINE 1: explain select * from t_lockmods_ao, t_lockmods_ao1 for no k...
-+                              ^
++  'short' => 'Nested Loop'
 @@
-- c | c 
-----+---
--(0 rows)
-+ERROR:  current transaction is aborted, commands ignored until end of transaction block
++      'id' => 2,
++      'parent' => 1,
++      'recvsize' => 1,
++      'segments' => 3,
++      'sendsize' => 3,
++      'short' => 'Gather Motion'
++    },
++    {
 @@
-- locktype | mode            | granted | relation       
------------+-----------------+---------+----------------
-- relation | AccessShareLock | t       | t_lockmods_ao  
-- relation | AccessShareLock | t       | t_lockmods_ao1 
-- relation | ExclusiveLock   | t       | t_lockmods_ao  
-- relation | ExclusiveLock   | t       | t_lockmods_ao1 
--(4 rows)
-+ locktype | mode | granted | relation 
-+----------+------+---------+----------
-@@
--QUERY PLAN
--___________
--{
--  'child' => [
--    {
--      'child' => [
--        {
 -          'child' => [
 -            {
 -              'id' => 4,
@@ -1695,8 +1224,10 @@
 -          'id' => 3,
 -          'parent' => 2,
 -          'recvsize' => 3,
--          'segments' => 3,
--          'sendsize' => 3,
++          'id' => 4,
++          'parent' => 3,
++          'recvsize' => 1,
+@@
 -          'short' => 'Broadcast Motion'
 -        },
 -        {
@@ -1710,45 +1241,29 @@
 -          'id' => 5,
 -          'parent' => 2,
 -          'short' => 'Materialize'
--        }
--      ],
++          'short' => 'Gather Motion'
+@@
 -      'id' => 2,
--      'parent' => 1,
++      'id' => 3,
+@@
 -      'short' => 'Nested Loop'
--    }
--  ],
--  'id' => 1,
++      'short' => 'Materialize'
+@@
 -  'recvsize' => 1,
 -  'segments' => 3,
 -  'sendsize' => 3,
 -  'short' => 'Gather Motion'
--}
-+ERROR:  relation "t_lockmods_ao" does not exist
-+LINE 1: explain select * from t_lockmods_ao, t_lockmods_ao1 for shar...
-+                              ^
++  'short' => 'Nested Loop'
 @@
-- c | c 
-----+---
--(0 rows)
-+ERROR:  current transaction is aborted, commands ignored until end of transaction block
++      'id' => 2,
++      'parent' => 1,
++      'recvsize' => 1,
++      'segments' => 3,
++      'sendsize' => 3,
++      'short' => 'Gather Motion'
++    },
++    {
 @@
-- locktype | mode            | granted | relation       
------------+-----------------+---------+----------------
-- relation | AccessShareLock | t       | t_lockmods_ao  
-- relation | AccessShareLock | t       | t_lockmods_ao1 
-- relation | ExclusiveLock   | t       | t_lockmods_ao  
-- relation | ExclusiveLock   | t       | t_lockmods_ao1 
--(4 rows)
-+ locktype | mode | granted | relation 
-+----------+------+---------+----------
-@@
--QUERY PLAN
--___________
--{
--  'child' => [
--    {
--      'child' => [
--        {
 -          'child' => [
 -            {
 -              'id' => 4,
@@ -1759,8 +1274,10 @@
 -          'id' => 3,
 -          'parent' => 2,
 -          'recvsize' => 3,
--          'segments' => 3,
--          'sendsize' => 3,
++          'id' => 4,
++          'parent' => 3,
++          'recvsize' => 1,
+@@
 -          'short' => 'Broadcast Motion'
 -        },
 -        {
@@ -1774,232 +1291,59 @@
 -          'id' => 5,
 -          'parent' => 2,
 -          'short' => 'Materialize'
--        }
--      ],
++          'short' => 'Gather Motion'
+@@
 -      'id' => 2,
--      'parent' => 1,
++      'id' => 3,
+@@
 -      'short' => 'Nested Loop'
--    }
--  ],
--  'id' => 1,
++      'short' => 'Materialize'
+@@
 -  'recvsize' => 1,
 -  'segments' => 3,
 -  'sendsize' => 3,
 -  'short' => 'Gather Motion'
--}
-+ERROR:  relation "t_lockmods_ao" does not exist
-+LINE 1: explain select * from t_lockmods_ao, t_lockmods_ao1 for key ...
-+                              ^
-@@
-- c | c 
-----+---
--(0 rows)
-+ERROR:  current transaction is aborted, commands ignored until end of transaction block
-@@
-- locktype | mode            | granted | relation       
------------+-----------------+---------+----------------
-- relation | AccessShareLock | t       | t_lockmods_ao  
-- relation | AccessShareLock | t       | t_lockmods_ao1 
-- relation | ExclusiveLock   | t       | t_lockmods_ao  
-- relation | ExclusiveLock   | t       | t_lockmods_ao1 
--(4 rows)
-+ locktype | mode | granted | relation 
-+----------+------+---------+----------
-@@
--UPDATE 8
-+ERROR:  relation "t_lockmods_ao" does not exist
-+LINE 1: update t_lockmods_ao set c = c + 0;
-+               ^
++  'short' => 'Nested Loop'
 @@
 - locktype | mode          | granted | relation      
 -----------+---------------+---------+---------------
 - relation | ExclusiveLock | t       | t_lockmods_ao 
 -(1 row)
-+ locktype | mode | granted | relation 
-+----------+------+---------+----------
-+(0 rows)
-@@
--DELETE 8
-+ERROR:  relation "t_lockmods_ao" does not exist
-+LINE 1: delete from t_lockmods_ao;
-+                    ^
++ locktype | mode            | granted | relation      
++----------+-----------------+---------+---------------
++ relation | AccessShareLock | t       | t_lockmods_ao 
++ relation | ExclusiveLock   | t       | t_lockmods_ao 
++(2 rows)
 @@
 - locktype | mode          | granted | relation      
 -----------+---------------+---------+---------------
 - relation | ExclusiveLock | t       | t_lockmods_ao 
 -(1 row)
-+ locktype | mode | granted | relation 
-+----------+------+---------+----------
-+(0 rows)
-@@
--INSERT 5
-+ERROR:  relation "t_lockmods_ao" does not exist
-+LINE 1: insert into t_lockmods_ao select * from generate_series(1, 5...
-+                    ^
-@@
-- locktype | mode             | granted | relation      
------------+------------------+---------+---------------
-- relation | RowExclusiveLock | t       | t_lockmods_ao 
--(1 row)
-+ locktype | mode | granted | relation 
-+----------+------+---------+----------
-+(0 rows)
-@@
--PREPARE
-+ERROR:  relation "t_lockmods_ao" does not exist
-+LINE 1: prepare select_for_update_ao as select * from t_lockmods_ao ...
-+                                                      ^
-@@
--PREPARE
-+ERROR:  relation "t_lockmods_ao" does not exist
-+LINE 1: ...repare select_for_nokeyupdate_ao as select * from t_lockmods...
-+                                                             ^
-@@
--PREPARE
-+ERROR:  relation "t_lockmods_ao" does not exist
-+LINE 1: prepare select_for_share_ao as select * from t_lockmods_ao f...
-+                                                     ^
-@@
--PREPARE
-+ERROR:  relation "t_lockmods_ao" does not exist
-+LINE 1: prepare select_for_keyshare_ao as select * from t_lockmods_a...
-+                                                        ^
-@@
--PREPARE
-+ERROR:  relation "t_lockmods_ao" does not exist
-+LINE 1: prepare update_tlockmods_ao as update t_lockmods_ao set c = ...
-+                                              ^
-@@
--PREPARE
-+ERROR:  relation "t_lockmods_ao" does not exist
-+LINE 1: prepare delete_tlockmods_ao as delete from t_lockmods_ao;
-+                                                   ^
-@@
--PREPARE
-+ERROR:  relation "t_lockmods_ao" does not exist
-+LINE 1: prepare insert_tlockmods_ao as insert into t_lockmods_ao sel...
-+                                                   ^
-@@
-- c 
-----
-- 1 
-- 2 
-- 3 
-- 4 
-- 5 
-- 6 
-- 7 
-- 8 
--(8 rows)
--2: select * from show_locks_lockmodes;
-- locktype | mode          | granted | relation      
------------+---------------+---------+---------------
-- relation | ExclusiveLock | t       | t_lockmods_ao 
--(1 row)
-+ERROR:  prepared statement "select_for_update_ao" does not exist
-+2: select * from show_locks_lockmodes;
-+ locktype | mode | granted | relation 
-+----------+------+---------+----------
-+(0 rows)
-@@
-- c 
-----
-- 1 
-- 2 
-- 3 
-- 4 
-- 5 
-- 6 
-- 7 
-- 8 
--(8 rows)
--2: select * from show_locks_lockmodes;
-- locktype | mode          | granted | relation      
------------+---------------+---------+---------------
-- relation | ExclusiveLock | t       | t_lockmods_ao 
--(1 row)
-+ERROR:  prepared statement "select_for_nokeyupdate_ao" does not exist
-+2: select * from show_locks_lockmodes;
-+ locktype | mode | granted | relation 
-+----------+------+---------+----------
-+(0 rows)
-@@
-- c 
-----
-- 1 
-- 2 
-- 3 
-- 4 
-- 5 
-- 6 
-- 7 
-- 8 
--(8 rows)
--2: select * from show_locks_lockmodes;
-- locktype | mode          | granted | relation      
------------+---------------+---------+---------------
-- relation | ExclusiveLock | t       | t_lockmods_ao 
--(1 row)
-+ERROR:  prepared statement "select_for_share_ao" does not exist
-+2: select * from show_locks_lockmodes;
-+ locktype | mode | granted | relation 
-+----------+------+---------+----------
-+(0 rows)
-@@
-- c 
-----
-- 1 
-- 2 
-- 3 
-- 4 
-- 5 
-- 6 
-- 7 
-- 8 
--(8 rows)
--2: select * from show_locks_lockmodes;
-- locktype | mode          | granted | relation      
------------+---------------+---------+---------------
-- relation | ExclusiveLock | t       | t_lockmods_ao 
--(1 row)
-+ERROR:  prepared statement "select_for_keyshare_ao" does not exist
-+2: select * from show_locks_lockmodes;
-+ locktype | mode | granted | relation 
-+----------+------+---------+----------
-+(0 rows)
-@@
--EXECUTE 8
-+ERROR:  prepared statement "update_tlockmods_ao" does not exist
++ locktype | mode            | granted | relation      
++----------+-----------------+---------+---------------
++ relation | AccessShareLock | t       | t_lockmods_ao 
++ relation | ExclusiveLock   | t       | t_lockmods_ao 
++(2 rows)
 @@
 - locktype | mode          | granted | relation      
 -----------+---------------+---------+---------------
 - relation | ExclusiveLock | t       | t_lockmods_ao 
 -(1 row)
-+ locktype | mode | granted | relation 
-+----------+------+---------+----------
-+(0 rows)
-@@
--EXECUTE 8
-+ERROR:  prepared statement "delete_tlockmods_ao" does not exist
++ locktype | mode            | granted | relation      
++----------+-----------------+---------+---------------
++ relation | AccessShareLock | t       | t_lockmods_ao 
++ relation | ExclusiveLock   | t       | t_lockmods_ao 
++(2 rows)
 @@
 - locktype | mode          | granted | relation      
 -----------+---------------+---------+---------------
 - relation | ExclusiveLock | t       | t_lockmods_ao 
 -(1 row)
-+ locktype | mode | granted | relation 
-+----------+------+---------+----------
-+(0 rows)
-@@
--EXECUTE 5
-+ERROR:  prepared statement "insert_tlockmods_ao" does not exist
-@@
-- locktype | mode             | granted | relation      
------------+------------------+---------+---------------
-- relation | RowExclusiveLock | t       | t_lockmods_ao 
--(1 row)
-+ locktype | mode | granted | relation 
-+----------+------+---------+----------
-+(0 rows)
++ locktype | mode            | granted | relation      
++----------+-----------------+---------+---------------
++ relation | AccessShareLock | t       | t_lockmods_ao 
++ relation | ExclusiveLock   | t       | t_lockmods_ao 
++(2 rows)
 @@
 -          'child' => [
 -            {

@@ -101,9 +101,11 @@ compared with
   (before_get_distributed_xid, gp_dtx.c).
 
 lockmodes, and its _optimizer output, which the orca pass is compared with
-  Four things, none of them a lock of Cloudberry's the port does not take.
-  Half the test is append-optimized tables, which are M5's: their CREATE
-  fails, and the cases after it with it.  Every lock Cloudberry holds on the
+  Three things, none of them a lock of Cloudberry's the port does not take,
+  on heap and append-optimized tables alike -- on the latter, with the
+  detector on too, the ExclusiveLock a locking clause takes where no row of
+  theirs can be locked, as Cloudberry's parser takes it (gp_modify.c,
+  segments_lock_rows()).  Every lock Cloudberry holds on the
   coordinator is held, as it takes them (O30): without the global deadlock
   detector the ExclusiveLock as the parser opens the table, and with it,
   for a locking clause, AccessShareLock from the parser and then
