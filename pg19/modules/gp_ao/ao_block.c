@@ -194,9 +194,20 @@ ao_block_decode(const char *stored, const AoBlockHeader *hdr, char *raw)
 			{
 				uLongf		destlen = hdr->raw_len;
 
-				if (uncompress((Bytef *) raw, &destlen, (const Bytef *) stored,
-							   hdr->stored_len) != Z_OK ||
-					destlen != hdr->raw_len)
+				int			zresult;
+
+				zresult = uncompress((Bytef *) raw, &destlen,
+									 (const Bytef *) stored, hdr->stored_len);
+
+				/*
+				 * Cloudberry's, once zlib has decompressed (zlib_decompress(),
+				 * pg_compression.c), whatever it answered: a test holds a
+				 * scan or an ANALYZE's sample here, and cancels it.
+				 */
+				if ((AoCompressType) (hdr->flags & 0xFF) == AO_COMPRESS_ZLIB)
+					(void) GP_FAULT("zlib_decompress_after_decompress_fn");
+
+				if (zresult != Z_OK || destlen != hdr->raw_len)
 					ereport(ERROR,
 							(errcode(ERRCODE_DATA_CORRUPTED),
 							 errmsg("zlib could not decompress a block of an append-optimized table")));

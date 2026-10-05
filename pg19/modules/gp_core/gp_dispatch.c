@@ -1161,6 +1161,16 @@ conn_attempts_poll(GpConnAttempt *attempts, int n, TimestampTz deadline)
 				npending++;
 		if (npending == 0)
 			break;
+
+		/*
+		 * Cloudberry's, before it waits for a gang's connections, writer's or
+		 * reader's, that are still being made (createGang_async(),
+		 * cdbgang_async.c): a test holds the backend here and terminates it,
+		 * which ends it with no gang to free -- the gang is made once its
+		 * connections all are -- and the connections with the process.
+		 */
+		GP_FAULT("create_gang_in_progress");
+
 		if (deadline != 0)
 		{
 			timeout = TimestampDifferenceMilliseconds(GetCurrentTimestamp(),
@@ -2214,10 +2224,14 @@ conn_listed(const GpSegmentConn *c, const int *contents, int ncontents)
 	return false;
 }
 
+static void dispatch_result_fault(void);
+
 /* Send a statement to one segment, as the simple protocol sends it. */
 static void
 conn_send(GpSegmentConn *c, const char *sql)
 {
+	dispatch_result_fault();
+
 	/* A gather's batch asked for ahead of need is set aside for it first. */
 	if (c->busy && c->fetching != NULL)
 		conn_park(c);
@@ -2339,6 +2353,8 @@ conn_send_params(GpSegmentConn *c, const char *sql, int nparams,
 				 const Oid *types, const char *const *values,
 				 const int *lengths, const int *formats)
 {
+	dispatch_result_fault();
+
 	/* A gather's batch asked for ahead of need is set aside for it first. */
 	if (c->busy && c->fetching != NULL)
 		conn_park(c);
@@ -5528,6 +5544,12 @@ GpCopyInEnd(void)
 	Assert(c != NULL);
 	copying = NULL;
 
+	/*
+	 * Cloudberry's, as it begins to end a COPY to the segments
+	 * (cdbCopyEndInternal(), cdbcopy.c): here as each segment's COPY ends.
+	 */
+	(void) GP_FAULT("cdb_copy_end_internal_start");
+
 	if (PQputCopyEnd(c->conn, NULL) != 1)
 	{
 		char	   *msg = pstrdup(PQerrorMessage(c->conn));
@@ -7237,4 +7259,50 @@ bool
 GpDispatchDtxPrepared(void)
 {
 	return dtx_nprepared > 0;
+}
+
+/* ------------------------------------------------------------------------- */
+/* Ending a node's segment processes                                         */
+/* ------------------------------------------------------------------------- */
+
+PG_FUNCTION_INFO_V1(gp_terminate_mpp_backends);
+
+/*
+ * pg_catalog.gp_terminate_mpp_backends()
+ *		End every segment process of this node but the caller's, as
+ *		Cloudberry's does (signalfuncs.c): a superuser's call, on a segment,
+ *		in a process the coordinator dispatched to -- a query of
+ *		gp_dist_random('gp_id') runs it on each.  A session whose processes
+ *		it ended finds its gang gone at its next statement.
+ */
+Datum
+gp_terminate_mpp_backends(PG_FUNCTION_ARGS)
+{
+	if (GpClusterBackendRole() != GP_ROLE_EXECUTE)
+		ereport(ERROR,
+				(errcode(ERRCODE_INSUFFICIENT_PRIVILEGE),
+				 errmsg("terminate mpp backends on segments only")));
+	if (!superuser())
+		ereport(ERROR,
+				(errcode(ERRCODE_INSUFFICIENT_PRIVILEGE),
+				 errmsg("Superuser only to execute it")));
+
+	elog(LOG, "tried to terminate all (%d) mpp backends except self",
+		 GpGddSignalSessionBackends(SIGTERM));
+
+	PG_RETURN_NULL();
+}
+
+/*
+ * Cloudberry's fault as it makes the result of a statement it dispatches to
+ * one of a gang's processes, which a "skip" fails as an allocation that
+ * failed would (cdbdisp_makeResult(), cdbdispatchresult.c), ending the
+ * session (cdbdisp_dispatchToGang_async(), cdbdisp_async.c): here as a
+ * statement is sent to one of the gang's connections.
+ */
+static void
+dispatch_result_fault(void)
+{
+	if (GP_FAULT("make_dispatch_result_error") == GP_FAULT_SKIP)
+		elog(FATAL, "could not allocate resources for segworker communication");
 }

@@ -181,6 +181,7 @@
 #include "gp_settings.h"
 #include "gp_fault.h"
 #include "gp_gdd.h"
+#include "gp_log.h"
 #include "gp_share.h"
 
 /* The replication slot whose xmin holds back what a hidden transaction deleted. */
@@ -1250,16 +1251,28 @@ static ExecutorEnd_hook_type prev_executor_end = NULL;
  */
 static char *dtx_part_statement = NULL;
 
+static bool dtx_is_settings_sync(const char *text);
+
 static void
 dtx_note_statement(void)
 {
+	const char *statement;
+
 	if (!GpClusterIsDispatched() || !pgstat_track_activities ||
 		MyBEEntry == NULL || MyBEEntry->st_activity_raw == NULL)
 		return;
 	if (dtx_part_statement == NULL)
 		dtx_part_statement = MemoryContextAlloc(TopMemoryContext,
 												pgstat_track_activity_query_size);
-	strlcpy(dtx_part_statement, MyBEEntry->st_activity_raw,
+
+	/*
+	 * The client's statement, where what the part was sent names it -- a
+	 * gather's cursor, a COPY of the rows of an INSERT (gp_log.c) -- as
+	 * Cloudberry's QE shows the statement it was dispatched.
+	 */
+	statement = GpLogCoordinatorStatement();
+	strlcpy(dtx_part_statement,
+			statement != NULL ? statement : MyBEEntry->st_activity_raw,
 			pgstat_track_activity_query_size);
 }
 
@@ -1285,7 +1298,8 @@ dtx_executor_start(QueryDesc *queryDesc, int eflags)
 	GpGddNoteBackend();
 
 	/* the client's statement, not one a function or a setting runs */
-	if (queryDesc->sourceText == debug_query_string)
+	if (queryDesc->sourceText == debug_query_string &&
+		!dtx_is_settings_sync(queryDesc->sourceText))
 		dtx_note_statement();
 
 	/*
@@ -2950,6 +2964,8 @@ recovery_journals(void)
 
 PGDLLEXPORT void GpDtxRecoveryMain(Datum main_arg);
 
+static bool recovery_orphan_check(bool after);
+
 void
 GpDtxRecoveryMain(Datum main_arg)
 {
@@ -2957,6 +2973,7 @@ GpDtxRecoveryMain(Datum main_arg)
 	bool		journals_due = true;	/* every database's, at start */
 	uint32		journals_seen = 0;
 	uint32		wakes_seen;
+	bool		periodic;
 
 	pqsignal(SIGHUP, SignalHandlerForConfigReload);
 	pqsignal(SIGTERM, die);
@@ -3006,11 +3023,18 @@ GpDtxRecoveryMain(Datum main_arg)
 
 		/*
 		 * Until a round reaches every segment, each takes everything.  One
-		 * node that cannot prepare has nothing prepared to finish.
+		 * node that cannot prepare has nothing prepared to finish.  A round
+		 * after those is Cloudberry's periodic check of orphaned prepared
+		 * transactions, which its faults mark, and one skips
+		 * (recovery_orphan_check()): a round skipped leaves what it would
+		 * have taken to the next.
 		 */
-		if ((GpClusterIsSingleNode() && max_prepared_xacts == 0) ||
-			recovery_round(everything ? 0 : dtx_recovery_prepared_period,
-						   !dtx_shared->recovered))
+		periodic = dtx_shared->recovered;
+		if (periodic && recovery_orphan_check(false))
+			;
+		else if ((GpClusterIsSingleNode() && max_prepared_xacts == 0) ||
+				 recovery_round(everything ? 0 : dtx_recovery_prepared_period,
+								!periodic))
 		{
 			everything = false;
 			if (!dtx_shared->recovered)
@@ -3022,7 +3046,11 @@ GpDtxRecoveryMain(Datum main_arg)
 						(errmsg("DTM Started"),
 						 errdetail("Distributed transaction recovery has reached every node.")));
 			}
+			if (periodic)
+				(void) recovery_orphan_check(true);
 		}
+		else if (periodic)
+			(void) recovery_orphan_check(true);
 
 		/*
 		 * The loopback's journals: as the server starts, and whenever a
@@ -3650,4 +3678,48 @@ GpDtxInit(void)
 		dtx_register_recovery();
 	else if (self != NULL && self->content >= 0)
 		dtx_register_keeper();
+}
+
+/*
+ * The settings the coordinator syncs a segment's process with, before a
+ * statement it sends (gp_dispatch.c): no statement of the client's, which a
+ * part's phases show, but the settings the client's statements run under.
+ */
+static bool
+dtx_is_settings_sync(const char *text)
+{
+	return text != NULL &&
+		strncmp(text, GP_SETTINGS_MARKER, strlen(GP_SETTINGS_MARKER)) == 0;
+}
+
+/*
+ * A fragment's start, on a segment, once it shows the coordinator's
+ * statement it is a part of (gp_motion.c): that statement is what the
+ * part's PREPARE and second phase go on showing, as Cloudberry's protocol
+ * commands leave a QE's activity at the statement it was dispatched.
+ */
+void
+GpDtxNoteStatement(void)
+{
+	dtx_note_statement();
+}
+
+/*
+ * Cloudberry's faults of its recovery process's periodic check of orphaned
+ * prepared transactions (AbortOrphanedPreparedTransactions(),
+ * cdbdtxrecovery.c), the port's periodic rounds: before_orphaned_check as
+ * one begins, which a "skip" skips -- whether it was skipped is the answer
+ * -- and after_orphaned_check once it is done.  A test skips the rounds to
+ * keep the recovery process's connections out of what it holds; the port's
+ * are its own, made with libpq, and no gang's.
+ */
+static bool
+recovery_orphan_check(bool after)
+{
+	if (after)
+	{
+		(void) GP_FAULT("after_orphaned_check");
+		return false;
+	}
+	return GP_FAULT("before_orphaned_check") == GP_FAULT_SKIP;
 }

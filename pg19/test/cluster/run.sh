@@ -910,6 +910,17 @@ EOF
 	[ "$out|$out2" = "UPDATE $want|$want" ] && ok "an UPDATE that joins another distributed table changes each row where it is ($want)" \
 		|| notok "an UPDATE joining a distributed table" "$out / $out2, want $want"
 
+	# So does one that reads the table it changes again -- a scalar subquery
+	# of it, which is the whole table's, every segment's rows: a segment that
+	# ran it as it stands would read its own share there, its own max().
+	q 0 "CREATE TABLE dself (a int, b int) DISTRIBUTED BY (a); INSERT INTO dself SELECT g, g FROM generate_series(1, 30) g;" >/dev/null
+	out=$(printf '%s\n' "UPDATE dself SET b = (SELECT max(b) FROM dself);" | "$PSQL" -X -h "$(sockdir 0)" -p "$(port 0)" -d postgres 2>&1)
+	out2=$(q 0 "SELECT count(DISTINCT b) || ':' || max(b) FROM dself;")
+	out3=$(printf '%s\n' "DELETE FROM dself WHERE a < (SELECT max(a) FROM dself);" | "$PSQL" -X -h "$(sockdir 0)" -p "$(port 0)" -d postgres 2>&1)
+	[ "$out|$out2|$out3" = "UPDATE 30|1:30|DELETE 29" ] \
+		&& ok "an UPDATE or DELETE that reads the table it changes again reads the whole table, not a segment's share" \
+		|| notok "an UPDATE or DELETE reading its own table again" "$out / $out2 / $out3"
+
 	out=$(printf '%s\n' "DELETE FROM d WHERE a > 90;" | "$PSQL" -X -h "$(sockdir 0)" -p "$(port 0)" -d postgres 2>&1)
 	out2=$(q 0 "SELECT count(*) FROM d;")
 	[ "$out|$out2" = "DELETE 10|90" ] && ok "DELETE" || notok "DELETE" "$out / $out2"

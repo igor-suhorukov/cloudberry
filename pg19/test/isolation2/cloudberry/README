@@ -69,6 +69,19 @@ distributed_snapshot  four things of Cloudberry's that the port does not
   shows them there.  And Debug_print_full_dtm is a setting of Cloudberry's,
   whose LOG lines the port does not print.
 
+execute_on_utilitymode, in each pass a file of its own
+  A session of the coordinator's own (-1U), an ordinary one here, as the
+  port's coordinator has no utility mode: a function EXECUTE ON ALL SEGMENTS
+  runs on the segments, foo and bar of each, where Cloudberry's utility mode
+  runs it on the node it is connected to, foo -1 and bar -1.  And in the
+  orca pass, the function EXECUTE ON ANY IMMUTABLE: ORCA runs it where its
+  plan of the join puts it, on each segment, which keeps the rows that hash
+  to it (a Result's Hash Filter), as for any immutable function -- this one
+  reads gp_contentid, whose value an immutable function may not depend on,
+  so bar 0 and bar 1 come back.  Its other cases, and every case in a
+  session of a segment's own (1U), run on the node connected to, as
+  Cloudberry's.
+
 export_distributed_snapshot
   The distributed fields of an exported snapshot, which the port's file has
   none of: the coordinator's snapshot is the distributed one, sent with each
@@ -311,6 +324,16 @@ starve_case
   reader's lock waits behind the waiting AccessExclusiveLock, which is what
   the test is for, holds, each session found waiting by its gp_session_id
   in pg_locks.mppsessionid.
+
+terminate_in_gang_creation
+  The first INSERT of a session after every primary restarted, which fails,
+  and the next succeeds, as Cloudberry's: in PostgreSQL's words for the
+  session's connection the restart closed, which the coordinator meets as it
+  sends the INSERT's rows to the segments over it -- the planner's VALUES are
+  the coordinator's own, and there is no reader to make -- where Cloudberry's
+  makes a reader gang for its VALUES, whose new process does not find its
+  writer.  The backend terminated while its gang is made ends with nothing
+  to free, as the test is for.
 
 
 Cloudberry's parallel_retrieve_cursor_schedule, in the group retrieve.  Its

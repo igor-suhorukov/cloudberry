@@ -153,6 +153,7 @@
 #include "gp_cluster.h"
 #include "gp_core_api.h"
 #include "gp_dispatch.h"
+#include "gp_dtx.h"
 #include "gp_endpoint.h"
 #include "gp_explain.h"
 #include "gp_fault.h"
@@ -4840,7 +4841,10 @@ motion_executor_start(QueryDesc *queryDesc, int eflags)
 		ListCell   *lc;
 
 		if (source != NULL)
+		{
 			pgstat_report_activity(STATE_RUNNING, strVal(source));
+			GpDtxNoteStatement();
+		}
 		if (times != NULL)
 			adopt_start_times(strVal(times));
 		GpSeqSetReadOnly(fragment_mark(queryDesc->plannedstmt,

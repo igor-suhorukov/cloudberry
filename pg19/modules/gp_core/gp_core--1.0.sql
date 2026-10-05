@@ -3767,3 +3767,33 @@ CREATE FUNCTION gp_internal.check_row_segment(ctid tid, segid int4, action int4)
 RETURNS int4
 AS 'MODULE_PATHNAME', 'gp_check_row_segment'
 LANGUAGE C STABLE PARALLEL SAFE;
+
+/*
+ * gp_terminate_mpp_backends(): Cloudberry's, which ends every segment
+ * process of the node it runs on but the caller's -- a superuser's call,
+ * on each segment, as a query of gp_dist_random('gp_id') runs it there.
+ */
+CREATE FUNCTION pg_catalog.gp_terminate_mpp_backends()
+RETURNS void
+AS 'MODULE_PATHNAME', 'gp_terminate_mpp_backends'
+LANGUAGE C VOLATILE;
+
+/*
+ * pg_stat_activity_extended: Cloudberry's pg_stat_activity with the id of
+ * the warehouse a backend runs for, which its cloud service's warehouses set
+ * and Cloudberry itself leaves NULL, as the port, which has none, does.  Its
+ * columns are Cloudberry's, in its order, but for rsgid and rsgname, which
+ * gp_resource gives a row of pg_stat_activity (gp_resource.rsgid()).
+ */
+SET allow_system_table_mods = on;
+CREATE VIEW pg_catalog.pg_stat_activity_extended AS
+	SELECT NULL::oid AS warehouse_id, a.datid, a.datname, a.pid,
+		   gp_internal.activity_session(a) AS sess_id, a.leader_pid,
+		   a.usesysid, a.usename, a.application_name, a.client_addr,
+		   a.client_hostname, a.client_port, a.backend_start, a.xact_start,
+		   a.query_start, a.state_change, a.wait_event_type, a.wait_event,
+		   a.state, a.backend_xid, a.backend_xmin, a.query_id, a.query,
+		   a.backend_type
+	FROM pg_catalog.pg_stat_activity a;
+RESET allow_system_table_mods;
+GRANT SELECT ON pg_catalog.pg_stat_activity_extended TO PUBLIC;

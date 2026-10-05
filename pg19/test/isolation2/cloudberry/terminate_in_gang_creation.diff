@@ -1,0 +1,8 @@
+@@
+-DETAIL:   AccessShareLock 0. Probably because writer gang is gone somehow. Maybe try rerunning.
+-DETAIL: FATAL:  reader could not find writer proc entry
+-ERROR:  failed to acquire resources on one or more segments
+- (segN IP:PORT)
++ERROR:  server closed the connection unexpectedly
++	This probably means the server terminated abnormally
++	before or while processing the request.
