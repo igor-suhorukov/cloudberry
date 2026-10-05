@@ -3773,3 +3773,14 @@ CREATE FUNCTION pg_catalog.pg_cancel_backend(integer, text)
 RETURNS boolean
 AS 'MODULE_PATHNAME', 'gp_cancel_backend_msg'
 LANGUAGE C VOLATILE STRICT PARALLEL SAFE;
+
+/*
+ * gp_get_next_gxid(): Cloudberry's next distributed transaction ID -- on
+ * the coordinator its next transaction ID, which a distributed transaction
+ * takes as its gxid; on a segment the newest a part there was prepared or
+ * committed in one phase under (gp_dtx.c).
+ */
+CREATE FUNCTION pg_catalog.gp_get_next_gxid()
+RETURNS int8
+AS 'MODULE_PATHNAME', 'gp_get_next_gxid'
+LANGUAGE C VOLATILE PARALLEL UNSAFE;

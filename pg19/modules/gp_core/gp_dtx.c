@@ -537,6 +537,13 @@ typedef struct GpDtxShared
 	 * journals when it changes.
 	 */
 	pg_atomic_uint32 loopback_journals;
+
+	/*
+	 * The newest coordinator ID a part here was prepared or committed in one
+	 * phase under since the node started, or read back with the map:
+	 * gp_get_next_gxid() on a segment.
+	 */
+	FullTransactionId newest;
 } GpDtxShared;
 
 static GpDtxShared *dtx_shared = NULL;
@@ -624,6 +631,9 @@ map_put(FullTransactionId gxid, TransactionId xid,
 		memcpy(dsa_get_address(dtx_area, cp), children,
 			   nchildren * sizeof(TransactionId));
 	}
+
+	if (FullTransactionIdFollows(gxid, dtx_shared->newest))
+		dtx_shared->newest = gxid;
 
 	pos = map_lower_bound(gxid);
 	e = map_entries();
@@ -3419,6 +3429,42 @@ gp_dtx_map(PG_FUNCTION_ARGS)
 	}
 	LWLockRelease(&dtx_shared->lock);
 	return (Datum) 0;
+}
+
+PG_FUNCTION_INFO_V1(gp_get_next_gxid);
+
+/*
+ * pg_catalog.gp_get_next_gxid()
+ *		Cloudberry's next distributed transaction ID (cdbtm.c), a
+ *		superuser's to ask, as Cloudberry's.  On the coordinator, the next of
+ *		its own transaction IDs: a distributed transaction takes one as its
+ *		gxid as it commits, so none it has given is as new, a restart's
+ *		recovery having brought the counter back past every one its WAL has.
+ *		On a segment, the newest a part here was prepared or committed in
+ *		one phase under since the node started, as Cloudberry's segment keeps
+ *		the newest it was sent (postgres.c) -- below the coordinator's next
+ *		unless the coordinator gave one out twice.
+ */
+Datum
+gp_get_next_gxid(PG_FUNCTION_ARGS)
+{
+	FullTransactionId next;
+
+	if (!superuser())
+		ereport(ERROR,
+				(errcode(ERRCODE_INSUFFICIENT_PRIVILEGE),
+				 errmsg("Superuser only to execute it")));
+
+	if (GpClusterContentId() < 0)
+		next = ReadNextFullTransactionId();
+	else
+	{
+		dtx_attach();
+		LWLockAcquire(&dtx_shared->lock, LW_SHARED);
+		next = dtx_shared->newest;
+		LWLockRelease(&dtx_shared->lock);
+	}
+	PG_RETURN_INT64((int64) U64FromFullTransactionId(next));
 }
 
 /* ------------------------------------------------------------------------- */
