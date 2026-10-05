@@ -44,6 +44,7 @@
 #include "access/table.h"
 #include "access/tableamext.h"
 #include "access/xact.h"
+#include "access/xlog.h"
 #include "access/xlogutils.h"
 #include "catalog/catalog.h"
 #include "catalog/pg_am.h"
@@ -65,6 +66,8 @@
 #include "parser/parse_expr.h"
 #include "parser/parse_relation.h"
 #include "parser/parser.h"
+#include "replication/slot.h"
+#include "replication/walsender.h"
 #include "storage/lock.h"
 #include "storage/smgr.h"
 #include "tcop/utility.h"
@@ -871,6 +874,84 @@ probe_commit_recorded(TransactionId latestXid)
 }
 
 /* ------------------------------------------------------------------------- */
+/* O36: physical_slot_restart_lsn_hook                                       */
+/* ------------------------------------------------------------------------- */
+
+/*
+ * gp_probe.slot_restart_lsn, which the WAL sender of a physical slot reads
+ * as its standby replies -- a setting of the server's, since the sender is
+ * no session that could arm it: "flushed" passes on what the standby has
+ * flushed; "hold" returns the slot's restart_lsn, which leaves the slot
+ * where it was; "redo" keeps it at the last checkpoint's redo point once it
+ * is behind it, as gp_core does (gp_fts.c).
+ */
+typedef enum ProbeSlotMode
+{
+	PROBE_SLOT_FLUSHED,
+	PROBE_SLOT_HOLD,
+	PROBE_SLOT_REDO,
+} ProbeSlotMode;
+
+static int	probe_slot_mode = PROBE_SLOT_FLUSHED;
+
+static const struct config_enum_entry probe_slot_modes[] = {
+	{"flushed", PROBE_SLOT_FLUSHED, false},
+	{"hold", PROBE_SLOT_HOLD, false},
+	{"redo", PROBE_SLOT_REDO, false},
+	{NULL, 0, false}
+};
+
+static XLogRecPtr
+probe_slot_restart_lsn(XLogRecPtr flushed)
+{
+	XLogRecPtr	restart = MyReplicationSlot->data.restart_lsn;
+	XLogRecPtr	redo;
+
+	switch ((ProbeSlotMode) probe_slot_mode)
+	{
+		case PROBE_SLOT_FLUSHED:
+			break;
+		case PROBE_SLOT_HOLD:
+			if (XLogRecPtrIsValid(restart))
+				return restart;
+			break;
+		case PROBE_SLOT_REDO:
+			redo = GetRedoRecPtr();
+			if (restart >= redo)
+				return restart;
+			return Min(redo, flushed);
+	}
+	return flushed;
+}
+
+/* ------------------------------------------------------------------------- */
+/* O37: XactAbortAgainAfterEnd                                               */
+/* ------------------------------------------------------------------------- */
+
+/*
+ * Armed, the probe sets the flag in this backend and raises an error once,
+ * in its abort callback, which runs after ProcArrayEndTransaction(): the
+ * error has AbortTransaction() run again, and the callback with it, which
+ * counts the calls.
+ */
+static bool arm_abort_error = false;
+static int64 abort_calls = 0;
+
+static void
+probe_xact_callback(XactEvent event, void *arg)
+{
+	if (event != XACT_EVENT_ABORT)
+		return;
+	abort_calls++;
+	if (arm_abort_error)
+	{
+		arm_abort_error = false;
+		ereport(ERROR,
+				(errmsg("gp_probe: an error in an abort, the transaction ended")));
+	}
+}
+
+/* ------------------------------------------------------------------------- */
 /* O25: memory_block_alloc_hook                                              */
 /* ------------------------------------------------------------------------- */
 
@@ -1001,6 +1082,8 @@ PG_FUNCTION_INFO_V1(gp_probe_arm_extend_fails);
 PG_FUNCTION_INFO_V1(gp_probe_file_events);
 PG_FUNCTION_INFO_V1(gp_probe_arm_commits);
 PG_FUNCTION_INFO_V1(gp_probe_commits);
+PG_FUNCTION_INFO_V1(gp_probe_arm_abort_again);
+PG_FUNCTION_INFO_V1(gp_probe_abort_calls);
 
 Datum
 gp_probe_reset(PG_FUNCTION_ARGS)
@@ -1590,6 +1673,26 @@ gp_probe_commits(PG_FUNCTION_ARGS)
 	elog(ERROR, "unknown commit count \"%s\"", kind);
 }
 
+/*
+ * O37: set XactAbortAgainAfterEnd in this backend and raise an error in the
+ * next abort's callback, or neither; and count the callback's calls anew
+ */
+Datum
+gp_probe_arm_abort_again(PG_FUNCTION_ARGS)
+{
+	XactAbortAgainAfterEnd = PG_GETARG_BOOL(0);
+	arm_abort_error = XactAbortAgainAfterEnd;
+	abort_calls = 0;
+	PG_RETURN_VOID();
+}
+
+/* O37: the abort callback's calls since it was armed */
+Datum
+gp_probe_abort_calls(PG_FUNCTION_ARGS)
+{
+	PG_RETURN_INT64(abort_calls);
+}
+
 /* O21: count relations' file events, or stop counting and forget them */
 Datum
 gp_probe_arm_file_events(PG_FUNCTION_ARGS)
@@ -1677,6 +1780,21 @@ _PG_init(void)
 							GUC_UNIT_MS,
 							NULL, NULL, NULL);
 	xact_commit_recorded_hook = probe_commit_recorded;
+
+	DefineCustomEnumVariable("gp_probe.slot_restart_lsn",
+							 "O36: where a standby's reply moves its physical slot.",
+							 "flushed: to what the standby flushed; hold: nowhere; "
+							 "redo: to the last checkpoint's redo point, once behind it.",
+							 &probe_slot_mode,
+							 PROBE_SLOT_FLUSHED,
+							 probe_slot_modes,
+							 PGC_SIGHUP,
+							 0,
+							 NULL, NULL, NULL);
+	physical_slot_restart_lsn_hook = probe_slot_restart_lsn;
+
+	/* O37: the abort callback, which raises an error once armed */
+	RegisterXactCallback(probe_xact_callback, NULL);
 
 	/* O13 and the registry's members: the probe's table access method. */
 	probe_am_init();

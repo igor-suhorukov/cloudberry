@@ -1179,6 +1179,123 @@ after=$("$PSQL" -X -q -t -A -d postgres -c "SELECT to_regclass('o33_b') IS NOT N
 	|| notok "another session should see the transaction after the hook" "after [$after]"
 
 ###############################################################################
+echo "O36 physical_slot_restart_lsn_hook: where a standby's reply moves its slot"
+###############################################################################
+# pg_receivewal streams through a physical slot and reports each flush, as a
+# standby does, and the slot's restart_lsn is what the hook returns: in the
+# WAL sender, which reads the mode from the server's settings, so each mode
+# gets a receiver, and a sender, of its own.
+sq() { "$PSQL" -X -q -t -A -d postgres -c "$1" 2>&1; }
+o36_pid=
+o36_stop() {								# and its sender gone
+	[ -n "$o36_pid" ] && { kill "$o36_pid" 2>/dev/null; wait "$o36_pid" 2>/dev/null; }
+	o36_pid=
+	for _ in $(seq 200); do
+		[ "$(sq "SELECT count(*) FROM pg_stat_replication")" = 0 ] && break
+		sleep 0.1
+	done
+}
+o36_receive() {							# o36_receive <mode>
+	o36_stop
+	sq "ALTER SYSTEM SET gp_probe.slot_restart_lsn = '$1'" > /dev/null
+	sq "SELECT pg_reload_conf()" > /dev/null
+	"$BINDIR/pg_receivewal" -D "$WORK/o36_wal" -S o36 --synchronous -n \
+		>> "$WORK/o36_receivewal.log" 2>&1 &
+	o36_pid=$!
+	for _ in $(seq 200); do
+		[ "$(sq "SELECT count(*) FROM pg_stat_replication WHERE state = 'streaming'")" = 1 ] && break
+		sleep 0.1
+	done
+	sleep 1							# the sender has taken the reload
+}
+o36_write() {							# o36_write: WAL, flushed; prints its end
+	sq "INSERT INTO o36_t SELECT generate_series(1, 1000)" > /dev/null
+	sq "SELECT pg_current_wal_insert_lsn()"
+}
+o36_flushed() {							# o36_flushed <lsn>: the standby has it
+	for _ in $(seq 200); do
+		[ "$(sq "SELECT flush_lsn >= '$1' FROM pg_stat_replication")" = t ] && { sleep 1; return 0; }
+		sleep 0.1
+	done
+	return 1
+}
+o36_restart() { sq "SELECT restart_lsn FROM pg_replication_slots WHERE slot_name = 'o36'"; }
+o36_until() {							# o36_until <condition on restart_lsn>
+	for _ in $(seq 200); do
+		[ "$(sq "SELECT $1 FROM pg_replication_slots WHERE slot_name = 'o36'")" = t ] && return 0
+		sleep 0.1
+	done
+	return 1
+}
+mkdir -p "$WORK/o36_wal"
+sq "CREATE TABLE o36_t (a int)" > /dev/null
+sq "SELECT pg_create_physical_replication_slot('o36', true)" > /dev/null
+
+o36_receive flushed
+end=$(o36_write)
+o36_until "restart_lsn >= '$end'" \
+	&& ok "passed on, what the standby flushed moves the slot" \
+	|| notok "what the standby flushed should move the slot" "restart_lsn [$(o36_restart)], wrote to [$end]
+$(tail -3 "$WORK/o36_receivewal.log")"
+
+o36_receive hold
+held=$(o36_restart)
+end=$(o36_write)
+o36_flushed "$end" && [ "$(o36_restart)" = "$held" ] \
+	&& ok "the slot's own restart_lsn returned leaves it where it was" \
+	|| notok "the slot's restart_lsn returned should leave it where it was" "held [$held], restart_lsn [$(o36_restart)], wrote to [$end]"
+
+o36_receive redo
+sq "CHECKPOINT" > /dev/null
+redo=$(sq "SELECT redo_lsn FROM pg_control_checkpoint()")
+end=$(o36_write)
+o36_until "restart_lsn = '$redo'" \
+	&& ok "a slot behind the last checkpoint's redo point moves to it" \
+	|| notok "a slot behind the last checkpoint's redo point should move to it" "redo [$redo], restart_lsn [$(o36_restart)], held at [$held]"
+end=$(o36_write)
+o36_flushed "$end" && [ "$(o36_restart)" = "$redo" ] \
+	&& ok "and stays there while the standby flushes more" \
+	|| notok "the slot should stay at the redo point" "redo [$redo], restart_lsn [$(o36_restart)], wrote to [$end]"
+o36_stop
+sq "SELECT pg_drop_replication_slot('o36')" > /dev/null
+sq "ALTER SYSTEM RESET gp_probe.slot_restart_lsn" > /dev/null
+sq "SELECT pg_reload_conf()" > /dev/null
+
+###############################################################################
+echo "O37 XactAbortAgainAfterEnd: an abort run again after its end records nothing"
+###############################################################################
+# The probe's abort callback, which runs after ProcArrayEndTransaction(),
+# raises an error once: the error has AbortTransaction() run again, the
+# callback with it.  With the flag set the server goes on, and the
+# transaction has one abort record.  (Without it an assertion fails, which
+# would stop the server: not tried.)
+session o37 <<'SQL'
+SELECT 'start=' || pg_current_wal_insert_lsn();
+SELECT gp_probe.arm_abort_again(true);
+BEGIN;
+CREATE TABLE o37_a (a int);
+SELECT 'xid=' || pg_current_xact_id();
+ROLLBACK;
+SELECT 'alive=' || 1;
+SELECT 'calls=' || gp_probe.abort_calls();
+SELECT 'gone=' || (to_regclass('o37_a') IS NULL)::text;
+SELECT gp_probe.arm_abort_again(false);
+SELECT 'end=' || pg_current_wal_insert_lsn();
+-- its commit flushes the WAL before it, for pg_waldump
+CREATE TABLE o37_flush (a int);
+SQL
+grep -q "gp_probe: an error in an abort, the transaction ended" "$WORK/o37.out" \
+	&& ok "the error after the transaction's end reaches the client" \
+	|| notok "the error after the transaction's end should reach the client" "$(head -5 "$WORK/o37.out")"
+is "the backend goes on" o37 alive 1
+is "AbortTransaction() runs again, the callback with it" o37 calls 2
+is "the transaction is aborted" o37 gone true
+o37_aborts=$("$BINDIR/pg_waldump" -p "$WORK/data/pg_wal" -s "$(val o37 start)" -e "$(val o37 end)" \
+	-r Transaction 2>/dev/null | grep -c "tx: *$(val o37 xid), .*desc: ABORT")
+[ "$o37_aborts" = 1 ] && ok "and its abort is recorded once" \
+	|| notok "its abort should be recorded once" "xid [$(val o37 xid)], abort records [$o37_aborts]"
+
+###############################################################################
 echo "O23 extension marks: pg_checksums passes over what an extension marked"
 ###############################################################################
 # Last, because it stops the server: pg_checksums reads a stopped cluster.  An

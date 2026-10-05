@@ -101,3 +101,10 @@ CREATE FUNCTION gp_probe.arm_commits(on_off boolean) RETURNS void
   AS 'MODULE_PATHNAME', 'gp_probe_arm_commits' LANGUAGE C STRICT;
 CREATE FUNCTION gp_probe.commits(kind text) RETURNS bigint
   AS 'MODULE_PATHNAME', 'gp_probe_commits' LANGUAGE C STRICT;
+-- O37: set XactAbortAgainAfterEnd in this backend and raise an error once in
+-- the next abort's callback, after ProcArrayEndTransaction(), or neither;
+-- and read how many times the callback was called since.
+CREATE FUNCTION gp_probe.arm_abort_again(on_off boolean) RETURNS void
+  AS 'MODULE_PATHNAME', 'gp_probe_arm_abort_again' LANGUAGE C STRICT;
+CREATE FUNCTION gp_probe.abort_calls() RETURNS bigint
+  AS 'MODULE_PATHNAME', 'gp_probe_abort_calls' LANGUAGE C STRICT;
