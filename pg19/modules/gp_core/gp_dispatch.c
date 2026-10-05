@@ -5708,7 +5708,9 @@ struct GpGatherState
  * as it arrives.  pg_catalog's pg_class.relpartbound and pg_rewrite.ev_action
  * are among them, which gp.dist_random() of a catalog reads.  And a record
  * of no declared type travels as gp_internal.record_wire, which describes
- * its row type, and is made again on arrival (gp_record.c).
+ * its row type, and is made again on arrival; and a value of type anyarray
+ * -- pg_attribute's attmissingval, pg_statistic's stavalues -- as
+ * gp_internal.anyarray_wire, which names its element type (gp_record.c).
  */
 Oid
 GpTransferType(Oid type)
@@ -5732,6 +5734,13 @@ GpTransferType(Oid type)
 
 				return OidIsValid(wire) ? wire : type;
 			}
+		case ANYARRAYOID:
+			{
+				/* nor an anyarray: anyarray_wire's input makes the array */
+				Oid			wire = GpAnyarrayWireType();
+
+				return OidIsValid(wire) ? wire : type;
+			}
 		default:
 			return type;
 	}
@@ -5749,6 +5758,11 @@ GpAppendTransferColumn(StringInfo buf, const char *column, Oid type)
 	if (type == RECORDOID && transfer != type)
 	{
 		appendStringInfo(buf, "gp_internal.record_wire(%s)", column);
+		return;
+	}
+	if (type == ANYARRAYOID && transfer != type)
+	{
+		appendStringInfo(buf, "gp_internal.anyarray_wire(%s)", column);
 		return;
 	}
 	appendStringInfoString(buf, column);

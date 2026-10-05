@@ -1,0 +1,42 @@
+-- The port's own: a value of type anyarray read from the segments
+-- (gp_record.c, gp_internal.anyarray_wire).
+--
+-- A catalog's column of an array of any type -- pg_attribute's
+-- attmissingval, pg_statistic's stavalues -- is of type anyarray, which no
+-- input or receive function reads back, so a row of it a segment sent the
+-- coordinator failed, "cannot accept a value of type anyarray": a query of
+-- gp_dist_random('pg_attribute') once any table had a column added with a
+-- default (reindex/serializable_reindex_with_drop_column_heap, after
+-- add_column_after_vacuum_skip_drop_column in the same cluster), and any
+-- query of gp_dist_random('pg_statistic').  It travels with its element type
+-- named, and is made again here of that type.
+
+CREATE TABLE aw_t (a int, b text) DISTRIBUTED BY (a);
+INSERT INTO aw_t SELECT i, 'b' || i FROM generate_series(1, 30) i;
+ALTER TABLE aw_t ADD COLUMN c int DEFAULT 7;
+ALTER TABLE aw_t ADD COLUMN d text DEFAULT 'dee';
+
+-- the missing values of the columns added, as each segment has them
+SELECT gp_segment_id, attname, attmissingval
+  FROM gp_dist_random('pg_attribute')
+ WHERE attrelid = 'aw_t'::regclass AND atthasmissing
+ ORDER BY 1, 2;
+
+-- every column of the rows, as the reindex test reads them
+SELECT count(*) FROM (SELECT * FROM pg_attribute UNION ALL
+					  SELECT * FROM gp_dist_random('pg_attribute')) t
+ WHERE t.attrelid = 'aw_t'::regclass AND t.attname IN ('c', 'd');
+
+-- the segments' statistics of their catalogs, which initdb makes: arrays of
+-- names and of text, which travel in their binary form; of aclitem[]s, whose
+-- elements have none, which travel as text; and of pg_node_trees, which no
+-- input reads back, which travel as the text they are binary-coercible to
+SELECT bool_or(a.atttypid = 'name'::regtype) AS names,
+	   bool_or(a.atttypid = 'text[]'::regtype) AS text_arrays,
+	   bool_or(a.atttypid = 'aclitem[]'::regtype) AS acl_arrays,
+	   bool_or(a.atttypid = 'pg_node_tree'::regtype) AS node_trees
+  FROM gp_dist_random('pg_statistic') s
+  JOIN pg_attribute a ON a.attrelid = s.starelid AND a.attnum = s.staattnum
+ WHERE s.stavalues1 IS NOT NULL;
+
+DROP TABLE aw_t;

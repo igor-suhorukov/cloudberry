@@ -195,6 +195,9 @@ extern Oid	GpRecordWireType(void);
 extern void GpRecordWireWrite(StringInfo buf, Datum record);
 extern Datum GpRecordWireRead(StringInfo buf);
 
+/* gp_record.c: gp_internal.anyarray_wire's OID, as GpRecordWireType()'s */
+extern Oid	GpAnyarrayWireType(void);
+
 /*
  * gp_record.c: a type's send or receive function, called for a value that
  * travels between the nodes in its binary form, whose text is in the

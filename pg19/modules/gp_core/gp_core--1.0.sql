@@ -686,6 +686,39 @@ RETURNS gp_internal.record_wire
 AS 'MODULE_PATHNAME', 'gp_record_wire' LANGUAGE C STRICT STABLE;
 
 /*
+ * A value of type anyarray as it travels between the nodes: its element
+ * type, and the array in its binary form or, for an element type with none,
+ * its text, made again on arrival of that type (gp_record.c).
+ * anyarray_wire() gives an anyarray unchanged as this type, for a segment's
+ * query to send it so.
+ */
+CREATE TYPE gp_internal.anyarray_wire;
+CREATE FUNCTION gp_internal.anyarray_wire_in(cstring, oid, int4)
+RETURNS gp_internal.anyarray_wire
+AS 'MODULE_PATHNAME', 'gp_anyarray_wire_in' LANGUAGE C STRICT STABLE;
+CREATE FUNCTION gp_internal.anyarray_wire_out(gp_internal.anyarray_wire)
+RETURNS cstring
+AS 'MODULE_PATHNAME', 'gp_anyarray_wire_out' LANGUAGE C STRICT STABLE;
+CREATE FUNCTION gp_internal.anyarray_wire_recv(internal, oid, int4)
+RETURNS gp_internal.anyarray_wire
+AS 'MODULE_PATHNAME', 'gp_anyarray_wire_recv' LANGUAGE C STRICT STABLE;
+CREATE FUNCTION gp_internal.anyarray_wire_send(gp_internal.anyarray_wire)
+RETURNS bytea
+AS 'MODULE_PATHNAME', 'gp_anyarray_wire_send' LANGUAGE C STRICT STABLE;
+CREATE TYPE gp_internal.anyarray_wire (
+	INPUT = gp_internal.anyarray_wire_in,
+	OUTPUT = gp_internal.anyarray_wire_out,
+	RECEIVE = gp_internal.anyarray_wire_recv,
+	SEND = gp_internal.anyarray_wire_send,
+	INTERNALLENGTH = VARIABLE,
+	ALIGNMENT = double,
+	STORAGE = extended
+);
+CREATE FUNCTION gp_internal.anyarray_wire(anyarray)
+RETURNS gp_internal.anyarray_wire
+AS 'MODULE_PATHNAME', 'gp_anyarray_wire' LANGUAGE C STRICT STABLE;
+
+/*
  * A record of no declared type made from record_wire's text of it: what
  * stands in ORCA's plan for a constant of one, which would otherwise reach a
  * segment with the coordinator's typmod (orca.c).

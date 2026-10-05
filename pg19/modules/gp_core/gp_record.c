@@ -52,6 +52,20 @@
  * a Motion's rows are all of one type, most often -- and the receiver
  * compares a description as it arrives with the last one's bytes.
  *
+ * A value of type anyarray -- a catalog's column of an array of any type,
+ * pg_attribute's attmissingval and pg_statistic's stavalues -- cannot be read
+ * back either: anyarray_in() and anyarray_recv() refuse one, as nothing may
+ * make one of a type the caller does not name.  Cloudberry's interconnect
+ * carries its bytes as they are; here it travels as
+ * gp_internal.anyarray_wire: its element type's OID, the same on every node,
+ * and then the array in its binary form, array_send()'s, or, for an element
+ * type that has none -- aclitem, whose pg_statistic rows a catalog's ACLs
+ * give -- in its text, the receiver making the array again of that type.  An
+ * element type that refuses to be read back, pg_node_tree, travels as the
+ * text it is binary-coercible to, as one value of it does, and is labelled
+ * so again on arrival.  Its text form is its binary one in hex, as
+ * record_wire's.
+ *
  * And any value's binary form, as it travels: a type's send and receive
  * functions write and read text in the encoding of the client the backend
  * serves (pq_sendtext(), pq_getmsgtext()), which between the nodes is the
@@ -76,8 +90,10 @@
 #include "funcapi.h"
 #include "libpq/pqformat.h"
 #include "mb/pg_wchar.h"
+#include "utils/array.h"
 #include "utils/builtins.h"
 #include "utils/datum.h"
+#include "utils/fmgroids.h"
 #include "utils/lsyscache.h"
 #include "utils/memutils.h"
 #include "utils/syscache.h"
@@ -603,6 +619,182 @@ gp_record_from_wire(PG_FUNCTION_ARGS)
  */
 Datum
 gp_record_wire(PG_FUNCTION_ARGS)
+{
+	PG_RETURN_DATUM(PG_GETARG_DATUM(0));
+}
+
+/* ------------------------------------------------------------------------- */
+/* anyarray                                                                  */
+/* ------------------------------------------------------------------------- */
+
+/*
+ * The OID of gp_internal.anyarray_wire in this database, InvalidOid where
+ * gp_core is not installed.
+ */
+Oid
+GpAnyarrayWireType(void)
+{
+	Oid			nsp = get_namespace_oid("gp_internal", true);
+
+	if (!OidIsValid(nsp))
+		return InvalidOid;
+	return GetSysCacheOid2(TYPENAMENSP, Anum_pg_type_oid,
+						   CStringGetDatum("anyarray_wire"),
+						   ObjectIdGetDatum(nsp));
+}
+
+/*
+ * What an array's elements travel as: their own type, or, for a type that
+ * refuses to be read back -- pg_node_tree, whose pg_statistic rows a
+ * catalog's expressions give -- the text or bytea it is binary-coercible to,
+ * as one value of it travels (GpTransferType()).
+ */
+static Oid
+anyarray_wire_element(Oid elemtype)
+{
+	Oid			wire = GpTransferType(elemtype);
+
+	return wire == TEXTOID || wire == BYTEAOID ? wire : elemtype;
+}
+
+/*
+ * An array onto "buf" as it travels: its element type's OID, the type its
+ * elements travel as, and then the array in its binary form, array_send()'s,
+ * where that type has one all the way down, or else in its text,
+ * array_out()'s -- aclitem has none, and pg_statistic's stavalues of a column
+ * of aclitem[] is an array whose elements are aclitem[]s.
+ */
+static void
+anyarray_wire_write(StringInfo buf, Datum value)
+{
+	ArrayType  *array = DatumGetArrayTypeP(value);
+	Oid			elemtype = ARR_ELEMTYPE(array);
+	Oid			wire = anyarray_wire_element(elemtype);
+	bool		binary = GpTypeHasBinaryIO(wire);
+
+	if (wire != elemtype)
+	{
+		/* the same bytes, labelled as what they travel as */
+		array = DatumGetArrayTypePCopy(value);
+		ARR_ELEMTYPE(array) = wire;
+	}
+	pq_sendint32(buf, elemtype);
+	pq_sendint32(buf, wire);
+	pq_sendbyte(buf, binary ? 'b' : 't');
+	if (binary)
+	{
+		bytea	   *bin = OidSendFunctionCall(F_ARRAY_SEND, PointerGetDatum(array));
+
+		pq_sendbytes(buf, VARDATA_ANY(bin), VARSIZE_ANY_EXHDR(bin));
+	}
+	else
+	{
+		char	   *text = OidOutputFunctionCall(F_ARRAY_OUT, PointerGetDatum(array));
+
+		pq_sendtext(buf, text, strlen(text));
+	}
+}
+
+/* And made again here, of the element type it names. */
+static Datum
+anyarray_wire_read(StringInfo buf)
+{
+	Oid			elemtype = pq_getmsgint(buf, 4);
+	Oid			wire = pq_getmsgint(buf, 4);
+	int			kind = pq_getmsgbyte(buf);
+	Datum		result;
+
+	if (kind == 'b')
+		result = OidFunctionCall3(F_ARRAY_RECV, PointerGetDatum(buf),
+								  ObjectIdGetDatum(wire), Int32GetDatum(-1));
+	else if (kind == 't')
+	{
+		int			nbytes;
+		char	   *text = pq_getmsgtext(buf, buf->len - buf->cursor, &nbytes);
+
+		result = OidFunctionCall3(F_ARRAY_IN, CStringGetDatum(text),
+								  ObjectIdGetDatum(wire), Int32GetDatum(-1));
+	}
+	else
+		ereport(ERROR,
+				(errcode(ERRCODE_INVALID_BINARY_REPRESENTATION),
+				 errmsg("invalid binary representation of type %s",
+						"gp_internal.anyarray_wire")));
+	if (wire != elemtype)
+		ARR_ELEMTYPE(DatumGetArrayTypeP(result)) = elemtype;
+	return result;
+}
+
+PG_FUNCTION_INFO_V1(gp_anyarray_wire_in);
+PG_FUNCTION_INFO_V1(gp_anyarray_wire_out);
+PG_FUNCTION_INFO_V1(gp_anyarray_wire_recv);
+PG_FUNCTION_INFO_V1(gp_anyarray_wire_send);
+PG_FUNCTION_INFO_V1(gp_anyarray_wire);
+
+/* gp_internal.anyarray_wire_in(cstring, oid, int4): the hex of the binary form */
+Datum
+gp_anyarray_wire_in(PG_FUNCTION_ARGS)
+{
+	char	   *s = PG_GETARG_CSTRING(0);
+	size_t		len = strlen(s);
+	StringInfoData buf;
+	Datum		result;
+
+	if (len % 2 != 0)
+		ereport(ERROR,
+				(errcode(ERRCODE_INVALID_TEXT_REPRESENTATION),
+				 errmsg("invalid input syntax for type %s", "gp_internal.anyarray_wire")));
+	initStringInfo(&buf);
+	enlargeStringInfo(&buf, len / 2);
+	buf.len = hex_decode(s, len, buf.data);
+	buf.data[buf.len] = '\0';
+	result = anyarray_wire_read(&buf);
+	if (buf.cursor != buf.len)
+		ereport(ERROR,
+				(errcode(ERRCODE_INVALID_TEXT_REPRESENTATION),
+				 errmsg("invalid input syntax for type %s", "gp_internal.anyarray_wire")));
+	PG_RETURN_DATUM(result);
+}
+
+/* gp_internal.anyarray_wire_out(anyarray_wire) */
+Datum
+gp_anyarray_wire_out(PG_FUNCTION_ARGS)
+{
+	StringInfoData buf;
+	char	   *hex;
+
+	initStringInfo(&buf);
+	anyarray_wire_write(&buf, PG_GETARG_DATUM(0));
+	hex = palloc(buf.len * 2 + 1);
+	hex[hex_encode(buf.data, buf.len, hex)] = '\0';
+	PG_RETURN_CSTRING(hex);
+}
+
+/* gp_internal.anyarray_wire_recv(internal, oid, int4) */
+Datum
+gp_anyarray_wire_recv(PG_FUNCTION_ARGS)
+{
+	PG_RETURN_DATUM(anyarray_wire_read((StringInfo) PG_GETARG_POINTER(0)));
+}
+
+/* gp_internal.anyarray_wire_send(anyarray_wire) */
+Datum
+gp_anyarray_wire_send(PG_FUNCTION_ARGS)
+{
+	StringInfoData buf;
+
+	pq_begintypsend(&buf);
+	anyarray_wire_write(&buf, PG_GETARG_DATUM(0));
+	PG_RETURN_BYTEA_P(pq_endtypsend(&buf));
+}
+
+/*
+ * gp_internal.anyarray_wire(anyarray) -> anyarray_wire: the value as it is,
+ * which a segment's query calls of a column of type anyarray, to send it as
+ * anyarray_wire.
+ */
+Datum
+gp_anyarray_wire(PG_FUNCTION_ARGS)
 {
 	PG_RETURN_DATUM(PG_GETARG_DATUM(0));
 }
