@@ -43,6 +43,7 @@
 #include "postgres.h"
 
 #include "fmgr.h"
+#include "mb/pg_wchar.h"
 #include "miscadmin.h"
 #include "storage/ipc.h"
 #include "storage/proc.h"
@@ -121,22 +122,25 @@ slot_of(int pid)
 
 /*
  * The message for the backend of that pid, before it is signalled; as
- * Cloudberry's, one that does not fit is cut, and said so.
+ * Cloudberry's, one that does not fit is cut, and said so -- at a
+ * character's end, so that what the backend says is still text.
  */
 static GpSignalSlot *
 message_set(int pid, const char *message)
 {
 	GpSignalSlot *slot = slot_of(pid);
 	int			len = strlen(message);
+	int			fits = pg_mbcliplen(message, len, GP_SIGNAL_MESSAGE_LEN - 1);
 
 	if (slot == NULL)
 		return NULL;
 	SpinLockAcquire(&slot->mutex);
 	slot->pid = pid;
-	strlcpy(slot->message, message, GP_SIGNAL_MESSAGE_LEN);
+	memcpy(slot->message, message, fits);
+	slot->message[fits] = '\0';
 	SpinLockRelease(&slot->mutex);
 
-	if (len >= GP_SIGNAL_MESSAGE_LEN)
+	if (fits < len)
 		ereport(NOTICE,
 				(errmsg("message is too long and has been truncated")));
 	return slot;
