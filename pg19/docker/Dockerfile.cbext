@@ -212,10 +212,13 @@ RUN --mount=type=bind,from=pgsrc,target=/pgsrc,ro \
 # test runs them from.  The second opens its sessions of the segments with
 # "-c gp_role=utility", which PostgreSQL 19 has no such setting for, and
 # which a connection to a segment is here anyway: without it, as the
-# isolation2 harness runs the tests' own commands.
+# isolation2 harness runs the tests' own commands.  And the one
+# isolation2_schedule's gdd/extended_protocol_test runs, a cursor's rows
+# fetched over the same protocol while the global deadlock detector is on.
 RUN cd /cb/src/test/isolation2 \
  && for p in test_parallel_retrieve_cursor_extended_query \
-             test_parallel_retrieve_cursor_extended_query_error; do \
+             test_parallel_retrieve_cursor_extended_query_error \
+             extended_protocol_test; do \
         sed 's/"-c gp_role=utility"/NULL/' "$p.c" > "/tmp/$p.c" \
      && cc -I"$(pg_config --includedir)" -o "$p" "/tmp/$p.c" \
            -L"$(pg_config --libdir)" -Wl,-rpath,"$(pg_config --libdir)" -lpq \

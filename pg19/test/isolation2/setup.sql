@@ -11,12 +11,20 @@
 --
 -- gp_core's own the database has already: a cluster's coordinator makes it
 -- in every database a superuser makes (gp_ddl.c, create_core_extension()).
+-- The planner plans the setup, as the greenplum suite's: its statements are
+-- the extensions' scripts', which ORCA would try one by one.
+SET gp.optimizer = off;
 SET client_min_messages = warning;
 CREATE EXTENSION IF NOT EXISTS gp_core;
 RESET client_min_messages;
 CREATE EXTENSION gp_orca;
 CREATE EXTENSION gp_sql;
+CREATE EXTENSION gp_ao;
+CREATE EXTENSION gp_exttable;
+CREATE EXTENSION gp_security;
 CREATE EXTENSION gp_resource;
+CREATE EXTENSION gp_matview;
+CREATE EXTENSION gp_task;
 CREATE EXTENSION gp_inject_fault;
 
 --
@@ -232,5 +240,147 @@ BEGIN
 		i := i + 1;
 	END LOOP;
 	RETURN replstate;
+END;
+$$ LANGUAGE plpgsql;
+
+--
+-- The rest of Cloudberry's helpers that the schedule's tests call, as its
+-- setup makes them, but for pg_basebackup().
+--
+
+-- pg_basebackup(host, dbid, port, create_slot, slotname, datadir,
+-- force_overwrite, xlog_method): a copy of the node at that address, made as
+-- Cloudberry's helper makes it with its pg_basebackup's own options --
+-- --target-gp-dbid, each tablespace laid out under the copy's dbid, and
+-- --force-overwrite -- which gpMgmt's gpsegbasebackup.py gives PostgreSQL
+-- 19's, as the port's tools take a copy.  It answers what the tool said,
+-- less its dots, as Cloudberry's does.
+CREATE FUNCTION pg_basebackup(host text, dbid int, port bigint, create_slot boolean,
+							  slotname text, datadir text, force_overwrite boolean,
+							  xlog_method text)
+RETURNS text AS $$
+    import os
+    import subprocess
+    gphome = os.path.dirname('@BINDIR@')
+    cmd = [os.path.join(gphome, 'sbin', 'gpsegbasebackup.py'), '--checkpoint=fast',
+           '-h', host, '-p', str(port), '-R', '-D', datadir, '--target-gp-dbid', str(dbid)]
+    if create_slot:
+        cmd.append('--create-slot')
+    if slotname is not None:
+        cmd += ['--slot', slotname]
+    if force_overwrite:
+        cmd.append('--force-overwrite')
+    if xlog_method in ('stream', 'fetch'):
+        cmd += ['--wal-method', xlog_method]
+    else:
+        plpy.error('invalid xlog method')
+    cmd.append('--no-verify-checksums')
+    env = dict(os.environ)
+    # PGAPPNAME unset, so that pg_stat_replication's application_name is the tool's
+    env.pop('PGAPPNAME', None)
+    env['PYTHONPATH'] = os.path.join(gphome, 'lib', 'python')
+    env['PATH'] = '@BINDIR@' + os.pathsep + env.get('PATH', '')
+    try:
+        results = subprocess.check_output(cmd, stderr=subprocess.STDOUT, env=env).replace(b'.', b'').decode()
+    except subprocess.CalledProcessError as e:
+        results = str(e) + "\ncommand output: " + (e.output.decode())
+    return results
+$$ LANGUAGE plpython3u;
+
+CREATE FUNCTION count_of_items_in_directory(user_path text) RETURNS text AS $$
+    import subprocess
+    cmd = 'ls {user_path}'.format(user_path=user_path)
+    results = subprocess.check_output(cmd, stderr=subprocess.STDOUT, shell=True).replace(b'.', b'').decode()
+    return len([result for result in results.splitlines() if result != ''])
+$$ LANGUAGE plpython3u;
+
+CREATE FUNCTION count_of_items_in_database_directory(user_path text, database_oid oid) RETURNS int AS $$
+    import os
+    import subprocess
+    directory = os.path.join(user_path, str(database_oid))
+    cmd = 'ls ' + directory
+    results = subprocess.check_output(cmd, stderr=subprocess.STDOUT, shell=True).replace(b'.', b'').decode()
+    return len([result for result in results.splitlines() if result != ''])
+$$ LANGUAGE plpython3u;
+
+CREATE FUNCTION validate_tablespace_symlink(datadir text, tablespacedir text, dbid int, tablespace_oid oid) RETURNS boolean AS $$
+    import os
+    return os.readlink('%s/pg_tblspc/%d' % (datadir, tablespace_oid)) == ('%s/%d' % (tablespacedir, dbid))
+$$ LANGUAGE plpython3u;
+
+-- wait_till_master_shutsdown(): a minute, in which a coordinator that is to
+-- PANIC goes down, as Cloudberry's waits.
+CREATE FUNCTION wait_till_master_shutsdown()
+RETURNS void AS $$
+DECLARE
+	i int;
+BEGIN
+	i := 0;
+	WHILE i < 120 LOOP
+		i := i + 1;
+		PERFORM pg_sleep(.5);
+	END LOOP;
+END;
+$$ LANGUAGE plpgsql;
+
+-- wait_until_dead_tup_change_to(relid, n) and wait_until_vacuum_count_change_to(relid, n):
+-- until this node's statistics say so.
+CREATE FUNCTION wait_until_dead_tup_change_to(relid oid, stat_val_expected bigint)
+RETURNS text AS $$
+DECLARE
+	stat_val int;
+	i int;
+BEGIN
+	i := 0;
+	WHILE i < 1200 LOOP
+		SELECT pg_stat_get_dead_tuples(relid) INTO stat_val;
+		IF stat_val = stat_val_expected THEN
+			RETURN 'OK';
+		END IF;
+		PERFORM pg_sleep(0.1);
+		PERFORM pg_stat_clear_snapshot();
+		i := i + 1;
+	END LOOP;
+	RETURN 'Fail';
+END;
+$$ LANGUAGE plpgsql;
+
+CREATE FUNCTION wait_until_vacuum_count_change_to(relid oid, stat_val_expected bigint)
+RETURNS text AS $$
+DECLARE
+	stat_val int;
+	i int;
+BEGIN
+	i := 0;
+	WHILE i < 1200 LOOP
+		SELECT pg_stat_get_vacuum_count(relid) INTO stat_val;
+		IF stat_val = stat_val_expected THEN
+			RETURN 'OK';
+		END IF;
+		PERFORM pg_sleep(0.1);
+		PERFORM pg_stat_clear_snapshot();
+		i := i + 1;
+	END LOOP;
+	RETURN 'Fail';
+END;
+$$ LANGUAGE plpgsql;
+
+-- nblocks(rel): the relation's blocks.
+CREATE FUNCTION nblocks(rel regclass) RETURNS int AS $$
+BEGIN
+	RETURN pg_relation_size(rel) / current_setting('block_size')::int;
+END;
+$$ LANGUAGE plpgsql;
+
+-- populate_pages(relname, value, upto): rows of that value into the table
+-- until one lands past upto, in the blocks the session's inserts fill.
+CREATE FUNCTION populate_pages(relname text, value int, upto tid) RETURNS void AS $$
+DECLARE
+	curtid tid;
+BEGIN
+	LOOP
+		EXECUTE format('INSERT INTO %I VALUES($1) RETURNING ctid', relname) INTO curtid USING value;
+		EXIT WHEN curtid > upto;
+	END LOOP;
 END;
 $$ LANGUAGE plpgsql;

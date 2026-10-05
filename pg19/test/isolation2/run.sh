@@ -120,7 +120,11 @@ if ! . "$HERE/../gpmgmt/tools.sh" "$EXEC"; then
 fi
 BASEPORT="${PGPORT:-$((7500 + RANDOM % 200))}"
 NODES=4					# a coordinator and Cloudberry's three segments
-PRELOAD="gp_core,gp_orca,gp_sql,gp_resource${ISOLATION2_PRELOAD_MORE:+,$ISOLATION2_PRELOAD_MORE}"
+# The modules the greenplum suite's clusters have, in its order: Cloudberry's
+# cluster has all of them built in, and its isolation2 tests use what they
+# give beside what they test -- an append-optimized table and a bitmap index
+# (gp_ao), an external web table (gp_exttable).
+PRELOAD="gp_core,gp_orca,gp_sql,gp_ao,gp_exttable,gp_security,gp_resource,gp_matview,gp_task${ISOLATION2_PRELOAD_MORE:+,$ISOLATION2_PRELOAD_MORE}"
 # The modules and settings the clusters have besides
 # (ISOLATION2_PRELOAD_MORE, ISOLATION2_SETTINGS); and the interconnect every
 # node has, ISOLATION2_INTERCONNECT, tcp by default, which each node is
@@ -292,10 +296,18 @@ make_cluster() {
 	# runs a shell command with one's address, and some tests run there: it
 	# has gp_core too, and so its gp_segment_configuration; and gp_resource,
 	# whose procedures a resource group test's helper, running psql there,
-	# makes a group with.  gpMgmt's tools ask template1, which has gp_core.
+	# makes a group with.  gpMgmt's tools ask template1, which has gp_core;
+	# and a database a test makes is template1's copy, which has every
+	# module's extension, as the greenplum suite's template1 has them: every
+	# database of Cloudberry's has what they give (reindex's makes
+	# append-optimized tables in one).
 	"$PSQL" -X -q -d postgres -c "CREATE EXTENSION gp_core" \
 		-c "CREATE EXTENSION gp_resource" > /dev/null 2>&1
-	"$PSQL" -X -q -d template1 -c "CREATE EXTENSION gp_core" > /dev/null 2>&1
+	"$PSQL" -X -q -d template1 -c "SET gp.optimizer = off" -c "CREATE EXTENSION gp_core" \
+		-c "CREATE EXTENSION gp_orca" -c "CREATE EXTENSION gp_sql" -c "CREATE EXTENSION gp_ao" \
+		-c "CREATE EXTENSION gp_exttable" -c "CREATE EXTENSION gp_security" \
+		-c "CREATE EXTENSION gp_resource" -c "CREATE EXTENSION gp_matview" \
+		-c "CREATE EXTENSION gp_task" > /dev/null 2>&1
 
 	# A standby coordinator: the coordinator's copy, streaming from it as
 	# gp_walreceiver, as Cloudberry's standby does, so that the coordinator's
@@ -421,6 +433,10 @@ done
 	# ... and no utility mode but a node's own connection, in a shell command
 	# too
 	echo "sed s/-c gp_role=utility//g"
+	# A tablespace's directory of a node's files is PostgreSQL's,
+	# PG_<version>_<catalog version>, where Cloudberry's is GPDB_...: a test
+	# that counts what a copy of a node has there names it by a pattern.
+	echo "sed s#/GPDB_\\*/#/PG_*/#g"
 	# A backend waiting for a resource group's slot waits on the Extension
 	# wait event ResourceGroup, where Cloudberry's wait event has a type of
 	# its own, ResourceGroup: a test that finds the waiter by its type finds
@@ -490,7 +506,12 @@ gpdiff() {
 }
 
 # A test's data file, @abs_srcdir@/data/..., is the regression suite's: its
-# Makefile links data to src/test/regress/data.
+# Makefile links data to src/test/regress/data.  The host of content 0,
+# which Cloudberry's pg_regress gives @hostname@, a file:// location's: a
+# node's host here is its socket's directory, which gp_exttable takes to be
+# on localhost (external.c).  And a locale of the system's, @gp_syslocale@,
+# which nothing of Cloudberry's gives a value: the one besides C the image
+# has (Dockerfile.cbext).
 convert() {
 	sed -e "s#@abs_srcdir@/data/#$TESTS/../regress/data/#g" \
 	    -e "s#@abs_srcdir@#$TESTS#g" \
@@ -499,6 +520,8 @@ convert() {
 	    -e "s#@bindir@#$BINDIR#g" \
 	    -e "s#@libdir@#${PG_REGRESS_SUITE:-/cb/pgregress}#g" \
 	    -e "s#@curusername@#$PGUSER#g" \
+	    -e "s#@hostname@#localhost#g" \
+	    -e "s#@gp_syslocale@#en_US.utf8#g" \
 	    -e "s#@DLSUFFIX@#.so#g" "$1"
 }
 
