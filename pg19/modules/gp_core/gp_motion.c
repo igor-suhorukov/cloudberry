@@ -136,6 +136,7 @@
 #include "parser/parsetree.h"
 #include "storage/lmgr.h"
 #include "tcop/pquery.h"
+#include "tcop/utility.h"
 #include "utils/builtins.h"
 #include "utils/guc.h"
 #include "varatt.h"
@@ -379,6 +380,14 @@ static planner_hook_type prev_planner = NULL;
 static ExecutorRun_hook_type prev_executor_run = NULL;
 static ExecutorStart_hook_type prev_executor_start = NULL;
 static ExecutorEnd_hook_type prev_executor_end = NULL;
+static ProcessUtility_hook_type prev_motion_utility = NULL;
+
+static void motion_copy_fault_utility(PlannedStmt *pstmt, const char *queryString,
+									  bool readOnlyTree,
+									  ProcessUtilityContext context,
+									  ParamListInfo params,
+									  QueryEnvironment *queryEnv,
+									  DestReceiver *dest, QueryCompletion *qc);
 
 /* How a fragment's PlannedStmt says it is one, on the segment that runs it. */
 #define GP_FRAGMENT_MARK	"gp_fragment"
@@ -4881,8 +4890,17 @@ motion_executor_start(QueryDesc *queryDesc, int eflags)
 			SetUserIdAndSecContext(save_userid, save_sec_context);
 	}
 
-	/* InitPlan()'s last fault, where its plan is set up */
-	(void) GP_FAULT("func_init_plan_end");
+	/*
+	 * InitPlan()'s last fault, where its plan is set up -- but for the
+	 * statement that tells a segment the coordinator's settings, which a
+	 * Cloudberry QE is sent as a SET and plans nothing for: a fault set for a
+	 * session's processes on a segment is the first plan of the client's
+	 * statement's there (gdd/insert_root_partition_truncate_deadlock).
+	 */
+	if (!(GpClusterIsDispatched() && queryDesc->sourceText != NULL &&
+		  strncmp(queryDesc->sourceText, GP_SETTINGS_MARKER,
+				  strlen(GP_SETTINGS_MARKER)) == 0))
+		(void) GP_FAULT("func_init_plan_end");
 
 	/*
 	 * Where Cloudberry's segment has its slice's snapshot and interconnect
@@ -5502,9 +5520,44 @@ GpMotionInit(void)
 	prev_executor_end = ExecutorEnd_hook;
 	ExecutorEnd_hook = motion_executor_end;
 
+	prev_motion_utility = ProcessUtility_hook;
+	ProcessUtility_hook = motion_copy_fault_utility;
+
 	if (!motion_xact_callback_registered)
 	{
 		RegisterXactCallback(motion_xact_callback, NULL);
 		motion_xact_callback_registered = true;
 	}
+}
+
+/*
+ * A segment's part of a write whose rows the coordinator routes to it, as
+ * the planner's route writes an INSERT's (gp_modify.c): a COPY FROM STDIN the
+ * coordinator sends, where Cloudberry's segment runs its slice of the
+ * INSERT's plan.  So Cloudberry's fault where that slice's plan is set up
+ * (InitPlan(), execMain.c) is here too, before the segment begins its part,
+ * as motion_executor_start() has it for a fragment: a test holds one
+ * segment's part of an INSERT into a partitioned table there, its rows
+ * routed to no partition yet (insert_root_partition_truncate_deadlock and
+ * its gdd/ twin).
+ */
+static void
+motion_copy_fault_utility(PlannedStmt *pstmt, const char *queryString,
+						  bool readOnlyTree, ProcessUtilityContext context,
+						  ParamListInfo params, QueryEnvironment *queryEnv,
+						  DestReceiver *dest, QueryCompletion *qc)
+{
+	Node	   *parsetree = pstmt->utilityStmt;
+
+	if (GpClusterIsDispatched() && IsA(parsetree, CopyStmt) &&
+		((CopyStmt *) parsetree)->is_from &&
+		((CopyStmt *) parsetree)->filename == NULL)
+		(void) GP_FAULT("func_init_plan_end");
+
+	if (prev_motion_utility)
+		prev_motion_utility(pstmt, queryString, readOnlyTree, context,
+							params, queryEnv, dest, qc);
+	else
+		standard_ProcessUtility(pstmt, queryString, readOnlyTree, context,
+								params, queryEnv, dest, qc);
 }
