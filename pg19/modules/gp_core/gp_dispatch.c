@@ -721,6 +721,7 @@ static List *active_streams = NIL;
 #define MAX_READERS_PER_SEGMENT	GP_MAX_READERS_PER_SEGMENT
 
 static void gang_close(void);
+static void gang_cancel_and_drain(void);
 static void session_reset_if_lost(void);
 static void session_reset_temp_tables(int old_session);
 static char *strip_trailing_space(char *s);
@@ -759,9 +760,28 @@ dispatch_wait_event(void)
 /* The gang                                                                  */
 /* ------------------------------------------------------------------------- */
 
+/*
+ * The session's end.  A backend ended in the middle of a statement --
+ * terminated, as pg_terminate_backend() ends one -- gets here before its
+ * transaction's abort (ShutdownPostgres(), registered before this), which
+ * would cancel what the segments run for it: cancelled here first, as
+ * Cloudberry's abort cancels its dispatch before its gangs go, so that a
+ * segment's process does not run the statement on, holding its locks, for a
+ * coordinator that is gone.
+ */
 static void
 gang_atexit(int code, Datum arg)
 {
+	/* as the abort does, nothing raised: the cancel can fail to allocate */
+	PG_TRY();
+	{
+		gang_cancel_and_drain();
+	}
+	PG_CATCH();
+	{
+		FlushErrorState();
+	}
+	PG_END_TRY();
 	gang_close();
 }
 
