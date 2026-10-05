@@ -801,6 +801,73 @@ is "a porc_vec group whose strings and char(n) are all '' reads back, and is ana
     SELECT count(*) || ' ' || count(b) || ' ' || count(c) || ' ' || count(d) || ' ' ||
            count(*) FILTER (WHERE b = '' AND c = '' AND d = '') FROM pxe;" \
    "1000 1000 750 800 600"
+# A DELETE writes anew the statistics of a file it deletes from, which the
+# scans' sparse filter skips files by: of a group it deletes rows from, read,
+# and of another, what the file keeps of it.  Cloudberry's took what a file
+# keeps also where it is not the group's rows' -- of a column added since
+# the file was written (the DELETE failed, "ERROR: PaxExecutorFinish"), a
+# minmax column all null in the group (a crash) or made one since (an
+# assertion), a bloom filter column (an IN found none of the group's values)
+# -- and read a group for its minmax and bloom filter columns alone,
+# counting every other column not null (an IS NULL found none of the
+# file's).  A group is read now, whole, wherever what the file keeps is not
+# its rows' (pg19/pax/src/storage/micro_partition_stats_updater.cc).  Each
+# table here is one file of four groups, the DELETE's row in the first.
+q "SET pax.max_tuples_per_group = 5;
+   CREATE TABLE pxa (id int, v int) USING pax;
+   INSERT INTO pxa SELECT i, i FROM generate_series(1, 20) i;
+   ALTER TABLE pxa ADD COLUMN later int DEFAULT 7, ADD COLUMN none int;
+   ALTER TABLE pxa SET (minmax_columns='later');" > /dev/null
+is "a DELETE from a file written before ADD COLUMN, the added columns' rows found by their statistics" \
+   "DELETE FROM pxa WHERE id = 1;
+    SELECT (SELECT count(*) FROM pxa WHERE later = 7) || ' ' || (SELECT count(*) FROM pxa WHERE later = 8) || ' ' ||
+           (SELECT count(*) FROM pxa WHERE none IS NULL) || ' ' || (SELECT count(*) FROM pxa WHERE later IS NULL);" \
+   "19 0 19 0"
+is "and from a porc_vec file, its nulls and the added column's rows found the same way" \
+   "SET pax.max_tuples_per_group = 5;
+    CREATE TABLE pxv (id int, v int) USING pax WITH (storage_format=porc_vec);
+    INSERT INTO pxv SELECT i, CASE WHEN i > 5 THEN i END FROM generate_series(1, 20) i;
+    ALTER TABLE pxv ADD COLUMN later int DEFAULT 7;
+    DELETE FROM pxv WHERE id = 1;
+    SELECT (SELECT count(*) FROM pxv WHERE v IS NULL) || ' ' || (SELECT count(*) FROM pxv WHERE later = 7);" \
+   "4 19"
+is "an IS NULL finds the nulls a DELETE left, of a column with no statistics but its nulls" \
+   "SET pax.max_tuples_per_group = 5;
+    CREATE TABLE pxu (id int, v int) USING pax;
+    INSERT INTO pxu SELECT i, CASE WHEN i > 5 THEN i END FROM generate_series(1, 20) i;
+    DELETE FROM pxu WHERE id = 1;
+    SELECT (SELECT count(*) FROM pxu WHERE v IS NULL) || ' ' || (SELECT count(*) FROM pxu WHERE v IS NOT NULL);" \
+   "4 15"
+is "an IN of a bloom filter column finds the values of the groups a DELETE left" \
+   "SET pax.max_tuples_per_group = 5;
+    CREATE TABLE pxf (id int, v int) USING pax WITH (bloomfilter_columns='v');
+    INSERT INTO pxf SELECT i, i FROM generate_series(1, 20) i;
+    DELETE FROM pxf WHERE id = 1;
+    SELECT count(*) FROM pxf WHERE v IN (7, 16);" \
+   "2"
+is "a DELETE from a file whose minmax column is all null in a group it leaves" \
+   "SET pax.max_tuples_per_group = 5;
+    CREATE TABLE pxt (id int, t text) USING pax WITH (minmax_columns='t');
+    INSERT INTO pxt SELECT i, CASE WHEN i <= 5 THEN 'x' || i END FROM generate_series(1, 20) i;
+    DELETE FROM pxt WHERE id = 1;
+    SELECT (SELECT count(*) FROM pxt WHERE t = 'x2') || ' ' || (SELECT count(*) FROM pxt WHERE t IS NULL);" \
+   "1 15"
+is "a DELETE from a file written before its column became a minmax column" \
+   "SET pax.max_tuples_per_group = 5;
+    CREATE TABLE pxs (id int, t text) USING pax;
+    INSERT INTO pxs SELECT i, 'x' || i FROM generate_series(1, 20) i;
+    ALTER TABLE pxs SET (minmax_columns='t');
+    DELETE FROM pxs WHERE id = 1;
+    SELECT (SELECT count(*) FROM pxs WHERE t = 'x17') || ' ' || (SELECT count(*) FROM pxs WHERE t = 'x1');" \
+   "1 0"
+q "SET pax.max_tuples_per_group = 5;
+   CREATE TABLE pxk (id int, v int) USING pax WITH (minmax_columns='v');
+   INSERT INTO pxk SELECT i, i FROM generate_series(1, 20) i;
+   DELETE FROM pxk WHERE id = 1;" > /dev/null
+aux=$(q "SELECT auxrelid::regclass FROM pax.pg_pax_tables WHERE relid = 'pxk'::regclass;")
+is "and a group a DELETE leaves gives the minimum, maximum and sum the file keeps of it" \
+   "SELECT ptstatistics FROM $aux;" \
+   "[(false,false),(19),None,None],[(false,false),(19),(2,20),(209)]"
 
 ###############################################################################
 echo "16. gp_toolkit's views of append-optimized tables, Cloudberry's"

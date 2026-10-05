@@ -30,6 +30,11 @@
  * file's number past the layout's last is refused; deletes join the
  * visibility map a file's row has as they are made, not as the deleter's
  * snapshot saw it.
+ *
+ * And a fix of Cloudberry's own: the statistics a DELETE writes for a file
+ * read every column of the groups they are read from, not the minmax and
+ * bloom filter columns alone -- they are every column's, and a column left
+ * unread was counted not null in each row (micro_partition_stats_updater.cc).
  *-------------------------------------------------------------------------
  */
 
@@ -614,8 +619,6 @@ void TableDeleter::DeleteWithVisibilityMap(
   }
   std::vector<int> min_max_col_idxs;
   std::vector<int> bf_col_idxs;
-  std::vector<int> stats_proj_col_idxs;
-  auto stats_updater_projection = std::make_shared<PaxFilter>();
 
   std::unique_ptr<Bitmap8> visi_bitmap;
   auto catalog_update = pax::PaxCatalogUpdater::Begin(rel_);
@@ -625,13 +628,11 @@ void TableDeleter::DeleteWithVisibilityMap(
   min_max_col_idxs = cbdb::GetMinMaxColumnIndexes(rel_);
   bf_col_idxs = cbdb::GetBloomFilterColumnIndexes(rel_);
 
-  // Projection must cover minmax ∪ bloomfilter columns; otherwise
-  // AddRow reads uninitialized slot values for bf columns (issue #1749).
-  std::set_union(min_max_col_idxs.begin(), min_max_col_idxs.end(),
-                 bf_col_idxs.begin(), bf_col_idxs.end(),
-                 std::back_inserter(stats_proj_col_idxs));
-  stats_updater_projection->SetColumnProjection(stats_proj_col_idxs,
-                                                rel_->rd_att->natts);
+  // The groups the statistics are read from are read whole, with no
+  // projection: AddRow() counts every column's nulls, and a column a
+  // projection leaves out keeps the slot's last value, not null.  Cloudberry
+  // projected the minmax and bloom filter columns (issue #1749), and an IS
+  // NULL found none of the file's rows after a DELETE.
   do {
     auto it = iterator->Next();
 
@@ -707,7 +708,7 @@ void TableDeleter::DeleteWithVisibilityMap(
     UpdateStatsInAuxTable(
         catalog_update, micro_partition_metadata,
         std::make_shared<Bitmap8>(visi_bitmap->Raw()), min_max_col_idxs,
-        bf_col_idxs, stats_updater_projection);
+        bf_col_idxs, nullptr);
 
     // write pg_pax_blocks_oid
     catalog_update.UpdateVisimap(block_id, visimap_file_name);
