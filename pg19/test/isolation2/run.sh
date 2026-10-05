@@ -17,11 +17,13 @@
 # specific language governing permissions and limitations
 # under the License.
 #
-# Part of Cloudberry's isolation2_schedule, on a cluster: M3's tests --
-# distributed transactions, snapshots, locks and the global deadlock
-# detector -- M4's, FTS and mirrors, M6's resource queues and memory
-# accounting, and M7's of the tools: a node recovered elsewhere, and the
-# standby coordinator promoted, made again and waited for.  And
+# Cloudberry's isolation2_schedule, on a cluster, but for its append-optimized
+# tables' own tests (manifest): M3's tests -- distributed transactions,
+# snapshots, locks and the global deadlock detector -- M4's, FTS and mirrors,
+# M6's resource queues and memory accounting, M7's of the tools: a node
+# recovered elsewhere, and the standby coordinator promoted, made again and
+# waited for; and the rest, a session of a node's own, the dispatcher's
+# gangs, indexes, VACUUM and ANALYZE, and the bitmap index.  And
 # parallel_retrieve_cursor_schedule, M8's: parallel retrieve cursors and the
 # retrieve sessions that read them (1R:, *R:).
 #

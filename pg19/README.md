@@ -936,12 +936,16 @@ core series through a test module); `greenplum`, Cloudberry's
 `greenplum_schedule` on a coordinator and three segments -- every test of it
 listed, those that run and those skipped with what stops them, and the
 reasons ORCA would not plan a statement in its ORCA pass totalled, and the
-port's test of stock pgvector on the cluster; `isolation2`, the
-tests of Cloudberry's `isolation2_schedule` that bear on M3 — distributed
-transactions and snapshots, locks and the global deadlock detector — on
-M4, FTS and mirrors, on M6, resource queues and memory accounting, and on
-M7's tools, a node recovered elsewhere and the standby promoted and made
-again, and its `parallel_retrieve_cursor_schedule`, M8's parallel retrieve
+port's test of stock pgvector on the cluster; `isolation2`, every test
+of Cloudberry's `isolation2_schedule` but its append-optimized tables' own
+-- those that run and those skipped with what stops them: distributed
+transactions and snapshots, locks and the global deadlock detector (M3),
+FTS and mirrors (M4), resource queues and memory accounting (M6), the
+tools, a node recovered elsewhere and the standby promoted and made again
+(M7), and the rest, a session of a node's own, the dispatcher's gangs,
+indexes, VACUUM and ANALYZE, the bitmap index, and Cloudberry's faults in
+PostgreSQL's own code as the tests' build's injection points -- and its
+`parallel_retrieve_cursor_schedule`, M8's parallel retrieve
 cursors and their retrieve sessions, run by Cloudberry's own driver on the
 same cluster, with a standby
 coordinator for the tests that ask for one, and mirrors for the FTS tests; `fts`, M4's, a coordinator and three primaries
