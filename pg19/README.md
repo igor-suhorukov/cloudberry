@@ -61,7 +61,7 @@ configures anyway).
 
 ### The patched PostgreSQL 19
 
-The series is 22 commits on `REL_19_STABLE`, branch
+The series is 24 commits on `REL_19_STABLE`, branch
 [`REL_19_STABLE_CLOUDBERRY`](https://github.com/igor-suhorukov/postgres/tree/REL_19_STABLE_CLOUDBERRY)
 of `igor-suhorukov/postgres`, and it builds as any PostgreSQL 19 does. The
 options below are those of `docker/Dockerfile.pg`, the build the port is
@@ -416,7 +416,10 @@ Distributed transactions (M3), in `gp_core`:
   answer whether its part wrote, so nobody is asked as the transaction
   commits, and a part that wrote alone, the coordinator writing nothing,
   commits in one phase, as Cloudberry's does -- ordered after the one-phase
-  commits it may have seen, as Cloudberry orders them;
+  commits it may have seen, as Cloudberry orders them; and an error raised
+  in an abort once the transaction has ended for the other sessions -- in
+  an abort callback -- runs the abort again, which records nothing again,
+  as Cloudberry's does (O37);
 - **distributed snapshots**: each statement is sent the coordinator's
   snapshot of it, and a segment makes its own agree — it waits for a
   transaction the snapshot says committed and it holds only prepared, and
@@ -740,6 +743,10 @@ connection's `gp_role=utility` — the port's copies do around them
 sets the port's, `gp.*`; and the tools read the cluster from the
 coordinator's cluster file and change it through `gp_core`'s segment
 administration functions, where Cloudberry's read and write its catalog.
+A primary keeps the WAL for its mirror from the redo point of its last
+checkpoint, as Cloudberry's does (O36, `gp_fts.c`), so that gprecoverseg's
+pg_rewind of a primary failed over from finds the checkpoint before the two
+diverged.
 A file the port changes is a copy under `gpMgmt/src`, headed with what it
 changes; the rest are installed from Cloudberry's tree as they are.
 `gpMgmt/files.txt` lists both.  Every one of Cloudberry's tools is installed:
