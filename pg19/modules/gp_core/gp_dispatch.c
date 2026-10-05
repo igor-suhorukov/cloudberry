@@ -2224,10 +2224,14 @@ conn_listed(const GpSegmentConn *c, const int *contents, int ncontents)
 	return false;
 }
 
+static void dispatch_result_fault(void);
+
 /* Send a statement to one segment, as the simple protocol sends it. */
 static void
 conn_send(GpSegmentConn *c, const char *sql)
 {
+	dispatch_result_fault();
+
 	/* A gather's batch asked for ahead of need is set aside for it first. */
 	if (c->busy && c->fetching != NULL)
 		conn_park(c);
@@ -2349,6 +2353,8 @@ conn_send_params(GpSegmentConn *c, const char *sql, int nparams,
 				 const Oid *types, const char *const *values,
 				 const int *lengths, const int *formats)
 {
+	dispatch_result_fault();
+
 	/* A gather's batch asked for ahead of need is set aside for it first. */
 	if (c->busy && c->fetching != NULL)
 		conn_park(c);
@@ -5528,6 +5534,12 @@ GpCopyInEnd(void)
 	Assert(c != NULL);
 	copying = NULL;
 
+	/*
+	 * Cloudberry's, as it begins to end a COPY to the segments
+	 * (cdbCopyEndInternal(), cdbcopy.c): here as each segment's COPY ends.
+	 */
+	(void) GP_FAULT("cdb_copy_end_internal_start");
+
 	if (PQputCopyEnd(c->conn, NULL) != 1)
 	{
 		char	   *msg = pstrdup(PQerrorMessage(c->conn));
@@ -7258,4 +7270,18 @@ gp_terminate_mpp_backends(PG_FUNCTION_ARGS)
 		 GpGddSignalSessionBackends(SIGTERM));
 
 	PG_RETURN_NULL();
+}
+
+/*
+ * Cloudberry's fault as it makes the result of a statement it dispatches to
+ * one of a gang's processes, which a "skip" fails as an allocation that
+ * failed would (cdbdisp_makeResult(), cdbdispatchresult.c), ending the
+ * session (cdbdisp_dispatchToGang_async(), cdbdisp_async.c): here as a
+ * statement is sent to one of the gang's connections.
+ */
+static void
+dispatch_result_fault(void)
+{
+	if (GP_FAULT("make_dispatch_result_error") == GP_FAULT_SKIP)
+		elog(FATAL, "could not allocate resources for segworker communication");
 }
