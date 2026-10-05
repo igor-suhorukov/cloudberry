@@ -182,6 +182,8 @@ static GpOidAssignment *preassigned = NULL;
 static int	npreassigned = 0;
 static int	next_preassigned = 0;
 static bool preassigning = false;
+static bool preassigning_skip_locked = false;	/* and it is a VACUUM
+												 * (SKIP_LOCKED); see new_oid() */
 
 /*
  * A segment's own catalog OIDs, from the top of the OID space down: the next
@@ -203,7 +205,31 @@ preassigned_clear(void)
 	npreassigned = 0;
 	next_preassigned = 0;
 	preassigning = false;
+	preassigning_skip_locked = false;
 	dispatched_tree = NULL;
+}
+
+/*
+ * A VACUUM that skips a relation it cannot lock at once: a segment may skip
+ * one the coordinator vacuumed, where a session of that segment's own holds a
+ * lock on it (vacuum_skip_locked_onseg), or vacuum one the coordinator
+ * skipped.
+ */
+static bool
+vacuum_skips_locked(Node *stmt)
+{
+	ListCell   *lc;
+
+	if (stmt == NULL || !IsA(stmt, VacuumStmt))
+		return false;
+	foreach(lc, ((VacuumStmt *) stmt)->options)
+	{
+		DefElem    *opt = lfirst_node(DefElem, lc);
+
+		if (strcmp(opt->defname, "skip_locked") == 0)
+			return defGetBoolean(opt);
+	}
+	return false;
 }
 
 static void
@@ -372,6 +398,18 @@ new_oid(Relation relation, Oid indexId, AttrNumber oidcolumn)
 			 * by OID in anything dispatched, so nothing is lost.
 			 */
 			if (catalog == NamespaceRelationId)
+				return local_oid(relation, indexId, oidcolumn);
+
+			/*
+			 * A VACUUM (SKIP_LOCKED) that went its own way here: the rows it
+			 * makes are a VACUUM FULL's transient relation's -- its pg_class
+			 * row and rowtype, and a TOAST table's -- which it drops before
+			 * it ends, or a new TOAST table that takes the place of one the
+			 * relation had, which nothing dispatched names by OID.  Each
+			 * node may take its own, as Cloudberry's segment takes an OID
+			 * its coordinator did not send where it has no preassigned one.
+			 */
+			if (preassigning_skip_locked)
 				return local_oid(relation, indexId, oidcolumn);
 
 			if (next_preassigned >= npreassigned)
@@ -1802,7 +1840,9 @@ gp_ddl_ProcessUtility(PlannedStmt *pstmt, const char *queryString,
 	 * A segment, running what the coordinator sent.  It is run as the
 	 * coordinator ran it, and then every OID the coordinator sent has to have
 	 * been used: fewer means the segment made fewer objects, which is as much
-	 * a divergence as making different ones.
+	 * a divergence as making different ones -- but for a VACUUM (SKIP_LOCKED),
+	 * which skips here a relation a session of this segment's own holds a
+	 * lock on, as Cloudberry's does (see new_oid()).
 	 */
 	if (preassigning && parsetree == dispatched_tree)
 	{
@@ -1811,7 +1851,7 @@ gp_ddl_ProcessUtility(PlannedStmt *pstmt, const char *queryString,
 			run_tablespace_statement(pstmt, queryString, readOnlyTree, context,
 									 params, queryEnv, dest, qc, true);
 
-			if (next_preassigned < npreassigned)
+			if (next_preassigned < npreassigned && !preassigning_skip_locked)
 				ereport(ERROR,
 						(errcode(ERRCODE_INTERNAL_ERROR),
 						 errmsg("segment used %d of the %d OIDs the coordinator allocated for this statement",
@@ -2080,6 +2120,7 @@ gp_ddl_raw_parser(const char *str, RawParseMode mode)
 
 		dispatched_tree = stmt;
 		preassigning = true;
+		preassigning_skip_locked = vacuum_skips_locked(stmt);
 
 		return list_make1(raw);
 	}
