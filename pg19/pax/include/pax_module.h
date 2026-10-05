@@ -20,7 +20,9 @@
  * pax_module.h
  *	  The port's side of PAX's catalog: the OIDs of the extension's objects
  *	  (modules/pax/pax_catalog.c), whose names PAX's code gives through
- *	  comm/pax_rel.h, and the module's C entry points into PAX's C++.
+ *	  comm/pax_rel.h, and the module's C entry points into PAX's C++: its
+ *	  catalog's, and the batch source it registers with vexec
+ *	  (access/pax_vexec_source.cc).
  *
  *-------------------------------------------------------------------------
  */
@@ -41,6 +43,13 @@ extern "C" {
 
 extern void PaxCatalogInit(void);
 extern bool PaxCatalogReady(void);
+
+/*
+ * PAX's batch reader for vexec, the routine _PG_init registers
+ * (vexec_source.h; pg_vector_executor.md §3.5.3).
+ */
+struct VexecSourceRoutine;
+extern const struct VexecSourceRoutine *PaxVexecSource(void);
 
 #ifdef __cplusplus
 }
