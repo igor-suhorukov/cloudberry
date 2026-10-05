@@ -1095,6 +1095,10 @@ if gpfts_curl_dep.found() and jansson_dep.found()
                           pg_inc, pg_client_inc],
     dependencies: [libpq_dep, gpfts_curl_dep, jansson_dep],
     link_args: [pg_libdir / 'libpgcommon.a', pg_libdir / 'libpgport.a', '-lm'],
+    # The server's libpq through the run path, as the modules find it, and
+    # not only where LD_LIBRARY_PATH names the server's library directory.
+    build_rpath: pg_libdir,
+    install_rpath: pg_libdir,
     install: true,
     install_dir: pg['bindir'],
   )
