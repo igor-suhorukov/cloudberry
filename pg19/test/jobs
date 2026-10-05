@@ -52,18 +52,18 @@ greenplum              orca     136   PASSES=orca MEM=19500
 diskquota              regress  121   DQ_PARTS=regress DQ_GROUP=main MEM=5500
 diskquota              ctas     101   DQ_PARTS=regress DQ_GROUP=ctas MEM=6000
 diskquota              ctas_spc 102   DQ_PARTS=regress DQ_GROUP=ctas_spc MEM=6000
-greenplum              planner  106   PASSES=planner MEM=14000
+greenplum              planner  106   PASSES=planner MEM=17500
 pax_regress            orca     200   PASSES=orca MEM=20000
 pax_regress            planner  180   PASSES=planner MEM=18500
 resgroup_v1            -        571   MEM=1500
-pax_isolation2         orca     160   PASSES=orca MEM=11000
-pax_isolation2         planner  160   PASSES=planner MEM=11000
+pax_isolation2         orca     160   PASSES=orca MEM=14500
+pax_isolation2         planner  160   PASSES=planner MEM=14500
 singlenode             orca     165   PASSES=orca MEM=5500
 pax                    toast     78   PAX_GROUP=toast MEM=5000
 pax                    -         20   PAX_GROUP=main MEM=2200
-isolation2             orca     134   PASSES=orca MEM=14000
+isolation2             orca     153   PASSES=orca MEM=26500
 postgis_regress        orca     102   PASSES=orca MEM=6000
-isolation2             planner  133   PASSES=planner MEM=14000
+isolation2             planner  149   PASSES=planner MEM=26500
 diskquota              isolation2 105   DQ_PARTS=isolation2 MEM=2000
 gpmgmt                 -        270   MEM=2000
 expandshrink           orca      85   PASSES=orca MEM=2500
@@ -80,8 +80,8 @@ ic                     -         30   MEM=900
 # proxy, which every full run's ic checks; skipped at once otherwise.
 ic_greenplum           udp2     140   IC=udp2 PASSES=orca MEM=20000
 ic_greenplum           proxy    140   IC=proxy PASSES=orca MEM=20000
-ic_isolation2          udp2     140   IC=udp2 PASSES=orca MEM=14000
-ic_isolation2          proxy    140   IC=proxy PASSES=orca MEM=14000
+ic_isolation2          udp2     140   IC=udp2 PASSES=orca MEM=26500
+ic_isolation2          proxy    140   IC=proxy PASSES=orca MEM=26500
 orca                   -         54   MEM=300
 fts                    -         55   MEM=1000
 gpfts                  -         73   MEM=1300
