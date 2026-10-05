@@ -118,4 +118,10 @@ extern int	GpDtxCommittedParts(uint64 **gxids);
  */
 extern void GpDtxInit(void);
 
+/*
+ * On a segment: the activity this backend shows now is the client's
+ * statement the part's phases show, a fragment's (gp_motion.c).
+ */
+extern void GpDtxNoteStatement(void);
+
 #endif							/* GP_DTX_H */

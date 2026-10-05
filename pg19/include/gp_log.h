@@ -38,4 +38,11 @@ extern const char *GpLogStatementComment(void);
 /* Defines gp.log_format and installs the hooks; from gp_core's _PG_init. */
 extern void GpLogInit(void);
 
+/*
+ * On a segment, the coordinator's statement this backend runs a part of, as
+ * what it was sent carries it -- a DDL tree's text, or the comment above --
+ * or NULL: what the part's phases show (gp_dtx.c).
+ */
+extern const char *GpLogCoordinatorStatement(void);
+
 #endif							/* GP_LOG_H */

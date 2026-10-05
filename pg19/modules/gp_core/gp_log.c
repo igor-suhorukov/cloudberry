@@ -1016,3 +1016,9 @@ GpLogInit(void)
 	prev_emit_log_hook = emit_log_hook;
 	emit_log_hook = log_emit;
 }
+
+const char *
+GpLogCoordinatorStatement(void)
+{
+	return coordinator_statement();
+}
