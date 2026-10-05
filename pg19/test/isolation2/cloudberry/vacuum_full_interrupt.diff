@@ -1,0 +1,8 @@
+@@
+-  'child' => [
+-    {
+-      'id' => 2,
+-      'parent' => 1,
+-      'short' => 'Index Scan using vacuum_full_interrupt_idx on vacuum_full_interrupt'
+-    }
+-  ],

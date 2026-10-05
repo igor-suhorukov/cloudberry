@@ -224,6 +224,18 @@ starve_case
   the test is for, holds, each session found waiting by its gp_session_id
   in pg_locks.mppsessionid.
 
+vacuum_full_interrupt
+  EXPLAIN's plan, which the session makes with the planner in either pass:
+  the port's planner gathers the table from the segments with a query of
+  its own, which each segment plans for itself -- with the session's
+  enable_* settings or not, which are not among those the port sends the
+  segments (gp_dispatch.c) -- and the coordinator's EXPLAIN shows no scan
+  beneath its Gather Motion, where Cloudberry's shows the Index Scan its
+  segments run.  The rest is Cloudberry's: segment 0's VACUUM FULL,
+  cancelled once its relation's files are swapped, leaves its pg_class row
+  as it was, relfrozenxid and relhasindex with it, and the rows inserted
+  after it are read back.
+
 
 Cloudberry's parallel_retrieve_cursor_schedule, in the group retrieve.  Its
 cursors are ORCA's in both passes (gp_endpoint.c), so each difference holds
