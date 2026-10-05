@@ -1,0 +1,103 @@
+Licensed to the Apache Software Foundation (ASF) under one
+or more contributor license agreements.  See the NOTICE file
+distributed with this work for additional information
+regarding copyright ownership.  The ASF licenses this file
+to you under the Apache License, Version 2.0 (the
+"License"); you may not use this file except in compliance
+with the License.  You may obtain a copy of the License at
+
+  http://www.apache.org/licenses/LICENSE-2.0
+
+Unless required by applicable law or agreed to in writing,
+software distributed under the License is distributed on an
+"AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+KIND, either express or implied.  See the License for the
+specific language governing permissions and limitations
+under the License.
+
+Injection points for the port's tests, under the names of three of Apache
+Cloudberry's faults inside PostgreSQL's own commit and checkpoint, which
+checkpoint_dtx_info in its isolation2 schedule sets: a commit held with
+its record written and pg_xact not yet updated, so that a checkpoint
+waits for it; the checkpoint come to that wait; and the checkpoint's
+reckoning of the WAL its replication slots keep, where the test fails the
+node, once the checkpoint is written:
+
+  start_insertedDistributedCommitted    xact.c, RecordTransactionCommit()
+  before_wait_VirtualXIDsDelayingChkpt  xlog.c, CreateCheckPoint()
+  keep_log_seg                          xlog.c, KeepLogSeg()
+
+Cloudberry's first is in its distributed commit alone, after the record it
+writes for one (insertedDistributedCommitted(), cdbtm.c); the port's
+distributed commit is the coordinator's own, an ordinary commit record
+(gp_dtx.c), so the point is after that record in the critical section that
+makes a checkpoint wait, run from the cache it is loaded into before it,
+and gp_core fires the fault there only for a transaction whose parts it
+prepared on the segments (gp_fault.c).  keep_log_seg's point gives its
+callback a bool to set where a "skip" asks, which has the slots keep
+nothing, as Cloudberry's skip does.
+
+gp_core's fault injector attaches a fault of Cloudberry's name to the point
+(gp_fault.c).  They serve tests alone, so they are not in the core series:
+Dockerfile.pg applies this after test-injection-points.patch, to the tree
+of either ref, vanilla or patched, so that the two images still differ
+only in the ref.  Dormant, as any point is: without injection points the
+macro is empty, and with them a point nothing attached to runs no
+callback.
+
+
+--- a/src/backend/access/transam/xact.c
++++ b/src/backend/access/transam/xact.c
+@@ -1451,6 +1451,7 @@
+ 
+ 		/* Load the injection point before entering the critical section */
+ 		INJECTION_POINT_LOAD("transaction-commit-after-delay-checkpoint");
++		INJECTION_POINT_LOAD("start_insertedDistributedCommitted");
+ 
+ 		/*
+ 		 * Mark ourselves as within our "commit critical section".  This
+@@ -1498,6 +1499,12 @@
+ 							MyXactFlags,
+ 							InvalidTransactionId, NULL /* plain commit */ );
+ 
++		/*
++		 * A test may hold a commit here, its record written and pg_xact not
++		 * yet updated, so that a checkpoint waits for it.
++		 */
++		INJECTION_POINT_CACHED("start_insertedDistributedCommitted", NULL);
++
+ 		if (replorigin)
+ 			/* Move LSNs forward for this replication origin */
+ 			replorigin_session_advance(replorigin_xact_state.origin_lsn,
+--- a/src/backend/access/transam/xlog.c
++++ b/src/backend/access/transam/xlog.c
+@@ -7292,6 +7292,9 @@
+ 	 */
+ 	END_CRIT_SECTION();
+ 
++	/* A test may see the checkpoint come here, before it waits. */
++	INJECTION_POINT("before_wait_VirtualXIDsDelayingChkpt", NULL);
++
+ 	/*
+ 	 * In some cases there are groups of actions that must all occur on one
+ 	 * side or the other of a checkpoint record. Before flushing the
+@@ -8124,6 +8127,19 @@
+ 
+ 	/* Calculate how many segments are kept by slots. */
+ 	keep = XLogGetReplicationSlotMinimumLSN();
++
++	/*
++	 * A test may have the slots kept nothing, so that a standby asks for WAL
++	 * that is gone: the point's callback sets the bool where it asks.
++	 */
++	{
++		bool		ignore_slots = false;
++
++		INJECTION_POINT("keep_log_seg", &ignore_slots);
++		if (ignore_slots)
++			keep = GetXLogWriteRecPtr();
++	}
++
+ 	if (XLogRecPtrIsValid(keep) && keep < recptr)
+ 	{
+ 		XLByteToSeg(keep, segno, wal_segment_size);

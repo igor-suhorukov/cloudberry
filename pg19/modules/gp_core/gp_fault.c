@@ -127,6 +127,16 @@ static const char *const fault_type_names[] = {
  * its drop's replay, a tablespace's directories, a PREPARE's record, the
  * checkpointer's loop's end -- say only that they came, and need no line
  * here.
+ *
+ * And two of the tests' build's points under Cloudberry's names that
+ * checkpoint_dtx_info sets (test-iso2-locks.patch): a commit with its record
+ * written, in the critical section that makes a checkpoint wait, which is
+ * Cloudberry's fault only in a distributed commit, after the record it
+ * writes for one (insertedDistributedCommitted(), cdbtm.c) -- so a hit only
+ * where the coordinator's transaction prepared parts on the segments, its
+ * commit record the distributed one's decision (gp_dtx.c); and the
+ * checkpoint's reckoning of what its replication slots keep, which a "skip"
+ * has keep nothing, as Cloudberry's does.
  */
 typedef enum GpPointArg
 {
@@ -135,6 +145,8 @@ typedef enum GpPointArg
 	POINT_ARG_NAMES,			/* a const char *[2]: the database, the table */
 	POINT_ARG_CANCEL,			/* nothing; hit only where a cancel came */
 	POINT_ARG_LOOPED,			/* a bool *, set for an "infinite_loop" */
+	POINT_ARG_PREPARED,			/* nothing; hit only in a commit of prepared
+								 * parts */
 } GpPointArg;
 
 static const struct
@@ -158,6 +170,8 @@ static const struct
 	{"vacuum_update_dat_frozen_xid", "vacuum_update_dat_frozen_xid", POINT_ARG_NAMES},
 	{"executor_run_high_processed", "executor_run_high_processed", POINT_ARG_SKIP},
 	{"ckpt_loop_begin", "ckpt_loop_begin", POINT_ARG_LOOPED},
+	{"start_insertedDistributedCommitted", "start_insertedDistributedCommitted", POINT_ARG_PREPARED},
+	{"keep_log_seg", "keep_log_seg", POINT_ARG_SKIP},
 };
 
 /* The injection point a fault is attached to: its own name, or PostgreSQL's. */
@@ -514,6 +528,10 @@ gp_fault_injection_point(const char *name, const void *private_data,
 			break;
 		case POINT_ARG_CANCEL:
 			if (!QueryCancelPending && !GpFtsCancelKept())
+				return;
+			break;
+		case POINT_ARG_PREPARED:
+			if (!GpDispatchDtxPrepared())
 				return;
 			break;
 		case POINT_ARG_NONE:
