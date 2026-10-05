@@ -423,6 +423,9 @@ extern void GpDispatchRaiseKeptError(void);
  */
 extern void GpDispatchDropLostTempTables(void);
 
+/* Are they still to be dropped?  (Before a statement is parsed.) */
+extern bool GpDispatchLostTempTablesPending(void);
+
 /*
  * The session's connections to the segments, for a test to look at what
  * the dispatcher set on them: each one's content, whether it is its

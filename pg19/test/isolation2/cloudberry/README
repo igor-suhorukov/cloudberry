@@ -43,26 +43,20 @@ export_distributed_snapshot
   mode refuses.
 
 fts_errors
-  Two of its sessions after content 1 is failed over, where the port's
+  One of its sessions after content 1 is failed over, where the port's
   dispatch differs, and nothing of FTS's: its name that does not resolve
   (get_dns_cached_address) fails FTS's round and marks no segment down, as
   Cloudberry's; the transaction that ends on the old primary fails and asks
   FTS to probe, which fails content 1 over; a session outside a
   transaction goes to the new primary; one with temporary tables is told
-  its gang was lost; and one in a subtransaction fails its statement and
+  its gang was lost, and its next statement finds them gone, the name not
+  resolving -- the coordinator drops them before it parses the statement
+  (gp_dtm_debug.c); and one in a subtransaction fails its statement and
   its ROLLBACK TO SAVEPOINT, as Cloudberry's do.  The session whose cursor
   is open: Cloudberry's FETCH returns what its segments sent as the cursor
   was declared, none, and its END finds the gang lost; the port's cursor
   reads from the segments as it is fetched from, and its FETCH meets the
-  old primary's closed connection.  And the session with temporary tables,
-  on its next statement: Cloudberry's forgets them as the gang goes, and
-  the name does not resolve; the port's coordinator drops them as that
-  statement's executor starts, after its name was resolved, and the
-  statement finds no relation by the OID it was planned with, which the
-  port's init_file masks -- in both passes alike, where the segments were
-  asked before: the other primaries' backends had dropped the table as they
-  ended, and the new primary's catalog still had it without its file, and
-  under ORCA whichever answered first was the error.
+  old primary's closed connection.
 
 gdd/concurrent_update, and its _optimizer output, which the orca pass is
 compared with
@@ -168,6 +162,19 @@ oom_startup_memory  what the memory a process starts with -- 12 MB, which
   session's processes on the segments and the sixth is refused.  The
   refusals themselves are Cloudberry's, in its words, and the memory
   protection suite makes them happen (../memprot/run.sh).
+
+orphan_temp_table
+  The session's temporary namespaces, which PostgreSQL 19 keeps: segment
+  0's panic loses the session's gang, and with it the parts of its
+  temporary table on the segments, and the coordinator drops the table
+  before it parses the session's next statement, which does not see it, as
+  Cloudberry's does (gp_dispatch.c, gp_dtm_debug.c); but a backend's
+  pg_temp_N and pg_toast_temp_N stay in pg_namespace, empty, for the next
+  backend of that number, where Cloudberry drops them as it resets the
+  session (DropTempTableNamespaceEntryForResetSession()), and an extension
+  cannot have PostgreSQL forget the namespace it uses.  So 2, the session's
+  two, where Cloudberry's count is 0 -- in a group whose database no other
+  session made temporary tables in.
 
 prepared_xact_deadlock_pg_rewind
   The CREATE DATABASE whose part on segment 0 is prepared as the primary

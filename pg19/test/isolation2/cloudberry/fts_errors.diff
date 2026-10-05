@@ -8,8 +8,3 @@
 @@
 -ERROR:  gang was lost due to cluster reconfiguration
 +END
-@@
--ERROR:  relation "tmp4" does not exist
--LINE 1: select * from tmp4;
--                      ^
-+ERROR:  relation with OID ###### does not exist

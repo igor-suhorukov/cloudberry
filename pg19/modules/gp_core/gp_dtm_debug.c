@@ -65,11 +65,16 @@
 #include "executor/executor.h"
 #include "fmgr.h"
 #include "nodes/parsenodes.h"
+#include "parser/analyze.h"
+#include "parser/parser.h"
 #include "tcop/utility.h"
 #include "utils/builtins.h"
 #include "utils/guc.h"
 #include "utils/memutils.h"
+#include "utils/snapmgr.h"
 
+#include "gp_cluster.h"
+#include "gp_core_api.h"
 #include "gp_dispatch.h"
 #include "gp_dtm_debug.h"
 #include "gp_dtx.h"
@@ -596,6 +601,43 @@ dtm_ExecutorStart(QueryDesc *queryDesc, int eflags)
 		standard_ExecutorStart(queryDesc, eflags);
 }
 
+/*
+ * A statement, parsed and not yet analyzed: the temporary tables a lost gang
+ * took with it, dropped on the coordinator before the statement resolves a
+ * name or takes the snapshot it runs with, as Cloudberry's session drops
+ * them before it reads its next command (GpDropTempTables(), in
+ * PostgresMain()) -- so that the statement after a segment's panic neither
+ * finds them nor sees their rows in the catalog.  Under the snapshot its
+ * analysis would take next, for a statement that takes one; one that takes
+ * none -- BEGIN, SET -- leaves them to the next, as ProcessUtility and
+ * ExecutorStart above leave them, which drop them for a statement that is not
+ * parsed here, a prepared one's.  Only on a cluster's coordinator, which has
+ * the gang.
+ */
+static raw_parser_hook_type prev_raw_parser = NULL;
+
+static List *
+dtm_raw_parser(const char *str, RawParseMode mode)
+{
+	List	   *raw;
+
+	raw = prev_raw_parser ? prev_raw_parser(str, mode)
+		: standard_raw_parser(str, mode);
+
+	if (mode == RAW_PARSE_DEFAULT && raw != NIL &&
+		GpClusterBackendRole() == GP_ROLE_DISPATCH &&
+		GpDispatchLostTempTablesPending())
+	{
+		foreach_node(RawStmt, stmt, raw)
+			if (!analyze_requires_snapshot(stmt))
+				return raw;
+		PushActiveSnapshot(GetTransactionSnapshot());
+		GpDispatchDropLostTempTables();
+		PopActiveSnapshot();
+	}
+	return raw;
+}
+
 /* ------------------------------------------------------------------------- */
 /* The segment's side                                                        */
 /* ------------------------------------------------------------------------- */
@@ -750,4 +792,6 @@ GpDtmDebugInit(void)
 	ProcessUtility_hook = dtm_ProcessUtility;
 	prev_ExecutorStart = ExecutorStart_hook;
 	ExecutorStart_hook = dtm_ExecutorStart;
+	prev_raw_parser = raw_parser_hook;
+	raw_parser_hook = dtm_raw_parser;
 }

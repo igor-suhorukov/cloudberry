@@ -722,6 +722,7 @@ static List *active_streams = NIL;
 
 static void gang_close(void);
 static void session_reset_if_lost(void);
+static void session_reset_temp_tables(int old_session);
 static char *strip_trailing_space(char *s);
 static void gang_drain_keeping(List **errors);
 static void forget_kept_errors(void);
@@ -856,6 +857,7 @@ session_reset_if_lost(void)
 	ereport(LOG,
 			(errmsg("The previous session was reset because its gang was disconnected (session id = %d). The new session id = %d",
 					old, GpClusterSessionId())));
+	session_reset_temp_tables(old);
 }
 
 int
@@ -924,9 +926,31 @@ GpDispatchDropLostTempTables(void)
 		session_reset_if_lost();
 	if (!temp_tables_lost || temp_tables_dropped || !IsTransactionState())
 		return;
+
+	/*
+	 * Not under a statement that takes no snapshot -- BEGIN, SET, SHOW --
+	 * whose catalog rows' deletion would have none, and which taking one
+	 * would turn into one after "any query" (SET TRANSACTION ISOLATION
+	 * LEVEL): the next statement that has one drops them.
+	 */
+	if (!ActiveSnapshotSet())
+		return;
 	/* as DISCARD TEMP drops them; again, should the transaction roll back */
 	ResetTempTableNamespace();
 	temp_tables_dropped = true;
+}
+
+/*
+ * Are a lost gang's temporary tables still to be dropped on the
+ * coordinator, the session reset first as GpDispatchDropLostTempTables()
+ * resets it?  Asked before a statement is parsed (gp_dtm_debug.c).
+ */
+bool
+GpDispatchLostTempTablesPending(void)
+{
+	if (!IsTransactionBlock())
+		session_reset_if_lost();
+	return temp_tables_lost && !temp_tables_dropped && IsTransactionState();
 }
 
 /*
@@ -967,6 +991,34 @@ lost_gang_warn(void)
 	ereport(WARNING,
 			(errmsg("Any temporary tables for this session have been dropped because the gang was disconnected (session id = %d)",
 					GpClusterSessionId())));
+	temp_tables_lost = true;
+}
+
+/*
+ * A session reset because its gang closed with its part on the segments
+ * (session_reset_if_lost()): the parts of its temporary tables there went
+ * with the segments' backends, whatever closed the gang -- a segment's
+ * panic too, which the abort after its error finds as a connection the
+ * segment closed (gang_drain_quietly()), where nothing noted the tables --
+ * so the coordinator's are dropped too, as Cloudberry's session drops them
+ * as it is reset (resetSessionForPrimaryGangLoss() and GpDropTempTables(),
+ * cdbgang.c), saying so once.
+ */
+static void
+session_reset_temp_tables(int old_session)
+{
+	Oid			temp_namespace;
+	Oid			temp_toast_namespace;
+
+	lost_with_temp = false;
+	if (temp_tables_lost)
+		return;
+	GetTempNamespaceState(&temp_namespace, &temp_toast_namespace);
+	if (!OidIsValid(temp_namespace))
+		return;
+	ereport(WARNING,
+			(errmsg("Any temporary tables for this session have been dropped because the gang was disconnected (session id = %d)",
+					old_session)));
 	temp_tables_lost = true;
 }
 
