@@ -367,6 +367,35 @@ ao_column_finish(AoColumnBuilder *cb, StringInfo raw)
 }
 
 /*
+ * Where the parts of a column block of nrows rows are: its bitmap of NULLs,
+ * a bit a row, 1 where NULL, or NULL where it has none; and its values, laid
+ * out from a MAXALIGNed start, a NULL keeping no place.  ao_column_decode()
+ * takes the values one by one; vexec's batches take them as they lie
+ * (ao_batch.c).
+ */
+void
+ao_column_block_parts(const char *raw, Size rawlen, int nrows,
+					  const uint8 **nulls, const char **values)
+{
+	AoColumnHeader hdr;
+
+	if (rawlen < sizeof(hdr))
+		ereport(ERROR,
+				(errcode(ERRCODE_DATA_CORRUPTED),
+				 errmsg("column block of an append-optimized table ends before its values do")));
+	memcpy(&hdr, raw, sizeof(hdr));
+	if (hdr.nrows != (uint32) nrows)
+		ereport(ERROR,
+				(errcode(ERRCODE_DATA_CORRUPTED),
+				 errmsg("column block of an append-optimized table holds %u rows where its block says %d",
+						hdr.nrows, nrows)));
+	*nulls = NULL;
+	if (hdr.flags & AO_COLUMN_HASNULLS)
+		*nulls = (const uint8 *) raw + sizeof(hdr);
+	*values = raw + MAXALIGN(sizeof(hdr) + (*nulls ? (nrows + 7) / 8 : 0));
+}
+
+/*
  * The nrows values of a column block, the values pointing into raw, which
  * begins MAXALIGNed and outlives them.
  */
@@ -374,20 +403,11 @@ void
 ao_column_decode(const char *raw, Size rawlen, Form_pg_attribute att,
 				 int nrows, Datum *values, bool *isnull)
 {
-	AoColumnHeader hdr;
-	const uint8 *nulls = NULL;
+	const uint8 *nulls;
 	const char *data;
 	uintptr_t	off = 0;
 
-	memcpy(&hdr, raw, sizeof(hdr));
-	if (hdr.nrows != (uint32) nrows)
-		ereport(ERROR,
-				(errcode(ERRCODE_DATA_CORRUPTED),
-				 errmsg("column block of an append-optimized table holds %u rows where its block says %d",
-						hdr.nrows, nrows)));
-	if (hdr.flags & AO_COLUMN_HASNULLS)
-		nulls = (const uint8 *) raw + sizeof(hdr);
-	data = raw + MAXALIGN(sizeof(hdr) + (nulls ? (nrows + 7) / 8 : 0));
+	ao_column_block_parts(raw, rawlen, nrows, &nulls, &data);
 
 	for (int i = 0; i < nrows; i++)
 	{

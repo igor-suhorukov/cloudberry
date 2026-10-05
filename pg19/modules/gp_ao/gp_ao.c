@@ -1627,6 +1627,8 @@ _PG_init(void)
 	ao_encoding_init();
 	ao_register_rmgr();
 	ao_register_table_ams();
+	/* vexec's batch sources for both, an unused entry without vexec */
+	ao_batch_register();
 	ao_dml_init();
 	bm_init();
 	RegisterXactCallback(pending_parents_xact, NULL);

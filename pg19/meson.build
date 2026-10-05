@@ -509,6 +509,7 @@ modules = [
     'name': 'gp_ao', 'preload': true, 'extension': true, 'build': true,
     'sources': files('modules/gp_ao/gp_ao.c',
                      'modules/gp_ao/ao_am.c',
+                     'modules/gp_ao/ao_batch.c',
                      'modules/gp_ao/ao_block.c',
                      'modules/gp_ao/ao_dml.c',
                      'modules/gp_ao/ao_encoding.c',
