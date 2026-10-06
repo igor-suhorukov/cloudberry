@@ -256,6 +256,14 @@ static const char *const synced_settings[] = {
 	"gpsc.uds_path",
 	"gpsc.max_text_size",
 	"gpsc.max_plan_size",
+	/*
+	 * vexec's debug settings, which only a superuser sets: a statement that
+	 * fails where no vector node was built, the plan check, and the layouts
+	 * drawn at random (pg_vector_executor.md §3.12) -- likewise
+	 */
+	"vexec.debug_require_vector",
+	"vexec.debug_check_plans",
+	"vexec.debug_layout_seed",
 	"search_path",
 	"role",
 	"DateStyle",
@@ -415,6 +423,47 @@ static const char *const synced_settings[] = {
 	 * (gp_motion.c), as Cloudberry syncs allow_segment_DML
 	 */
 	"gp.allow_segment_dml",
+	/*
+	 * vexec's, the vectorized executor's (pg_vector_executor.md §3.10,
+	 * §3.12), which a segment reads where it plans for itself -- the gather
+	 * route's SQL, through PostgreSQL's planner and vexec's path hooks -- and
+	 * where its vector nodes begin: whether and how vector plans are made,
+	 * their prices, the in-memory format of batches, and whether a GPU is
+	 * used.  A fragment ORCA planned carries its decisions in its plan; these
+	 * are what a segment decides itself.  Passed over where vexec is not
+	 * loaded.  Not vexec.gpu_segments, the coordinator's alone, nor the
+	 * GPU's postmaster settings, each server's own.  Its debug settings, a
+	 * superuser's, are with the others above "role".
+	 */
+	"vexec.mode",
+	"vexec.cpu_tuple_factor",
+	"vexec.cpu_operator_factor",
+	"vexec.convert_cost",
+	"vexec.batch_setup_cost",
+	"vexec.min_rows",
+	"vexec.enable_scan",
+	"vexec.heap_page_reader",
+	"vexec.enable_bitmapscan",
+	"vexec.enable_agg",
+	"vexec.aggregate_statistics",
+	"vexec.enable_repartition",
+	"vexec.enable_hashjoin",
+	"vexec.enable_sort",
+	"vexec.enable_running_bound",
+	"vexec.enable_window",
+	"vexec.enable_insert",
+	"vexec.orca",
+	"vexec.compact_threshold",
+	"vexec.batch_format",
+	"vexec.batch_varlena_layout",
+	"vexec.batch_bool_layout",
+	"vexec.batch_temporal_layout",
+	"vexec.batch_numeric_layout",
+	"vexec.batch_dictionary",
+	"vexec.gpu",
+	"vexec.gpu_setup_cost",
+	"vexec.gpu_transfer_cost",
+	"vexec.gpu_operator_factor",
 };
 
 #define NUM_SYNCED_SETTINGS	lengthof(synced_settings)
@@ -436,6 +485,9 @@ static const char *const superuser_settings[] = {
 	"gpsc.uds_path",
 	"gpsc.max_text_size",
 	"gpsc.max_plan_size",
+	"vexec.debug_require_vector",
+	"vexec.debug_check_plans",
+	"vexec.debug_layout_seed",
 };
 
 /*

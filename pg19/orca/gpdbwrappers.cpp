@@ -120,6 +120,7 @@ extern "C" {
 
 /* ORCA's Gather Motion, and what stage A can carry out; see CheckMotions. */
 #include "cb_motion.h"
+#include "gp_orca_vector.h"
 
 /* An identity column's next value, as ORCA carries it; see NextValueCall. */
 #include "cb_nextvalue.h"
@@ -3305,6 +3306,17 @@ gpdb::SliceTable(List *slices, List *motions)
 	}
 	GP_WRAP_END;
 	return nullptr;
+}
+
+Plan *
+gpdb::VectorizePlan(Plan *plan, List *subplans, List *rtable)
+{
+	GP_WRAP_START;
+	{
+		return gp_orca_vector_plan(plan, subplans, rtable);
+	}
+	GP_WRAP_END;
+	return plan;
 }
 
 int

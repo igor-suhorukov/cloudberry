@@ -304,6 +304,8 @@ extern void ao_blkdir_scan_end(AoBlkdirScan *bs);
 extern AoVisimap *ao_visimap_load(int64 storage_id, int segno,
 								  Snapshot snapshot);
 extern bool ao_visimap_is_deleted(AoVisimap *vm, int64 rownum);
+extern int	ao_visimap_visible_words(AoVisimap *vm, int64 rownum, int nrows,
+									 uint64 *words);
 extern void ao_visimap_delete_rows(int64 storage_id, int segno,
 								   const int64 *rownums, int nrows);
 extern void ao_visimap_delete_segfile(int64 storage_id, int segno);
@@ -332,6 +334,8 @@ extern void ao_column_builder_reset(AoColumnBuilder *cb);
 extern void ao_column_append(AoColumnBuilder *cb, Form_pg_attribute att,
 							 Datum value, bool isnull);
 extern void ao_column_finish(AoColumnBuilder *cb, StringInfo raw);
+extern void ao_column_block_parts(const char *raw, Size rawlen, int nrows,
+								  const uint8 **nulls, const char **values);
 extern void ao_column_decode(const char *raw, Size rawlen, Form_pg_attribute att,
 							 int nrows, Datum *values, bool *isnull);
 extern Datum ao_detoast_value(Form_pg_attribute att, Datum value);
@@ -425,6 +429,7 @@ extern PGDLLIMPORT bool gp_select_invisible;
 extern void bm_init(void);
 
 extern bool ao_is_ao_table(Relation rel);
+extern const TableAmRoutine *ao_table_am_routine(bool columnar);
 extern void ao_register_table_ams(void);
 extern void ao_fetch_cache_reset(void);
 extern void ao_scan_set_segno(TableScanDesc scan, int segno);
@@ -432,5 +437,100 @@ extern void ao_vacuum_rel(Relation rel, const struct VacuumParams *params,
 						  BufferAccessStrategy bstrategy);
 extern List *ao_vacuum_take_compacted(void);
 extern void ao_vacuum_recycle_rel(Oid relid);
+
+/* ------------------------------------------------------------------------- */
+/* Scans (ao_am.c), and vexec's batches of them (ao_batch.c)                 */
+/* ------------------------------------------------------------------------- */
+
+/*
+ * A reader of one file's blocks: the block it read last, decompressed, and
+ * what ao_reader_load() parses out of it -- where each row's MinimalTuple
+ * is, for a table by row; a column's values, for a table by column.
+ */
+typedef struct AoBlockReader
+{
+	MemoryContext cxt;			/* what its buffers are allocated in */
+	uint32		filenum;
+	bool		loaded;
+	uint32		loaded_filenum;	/* of the loaded block */
+	uint64		offset;			/* of the loaded block */
+	uint64		next;			/* of the one after it */
+	AoBlockHeader hdr;
+	char	   *raw;
+	Size		rawcap;
+	char	   *stored;
+	Size		storedcap;
+	/* a table by row: where each row's MinimalTuple is in raw */
+	uint32	   *rowoffs;
+	int			rowcap;
+	/* a table by column: the values */
+	Datum	   *values;
+	bool	   *isnull;
+	int			valcap;
+} AoBlockReader;
+
+extern void ao_reader_init(AoBlockReader *rd, MemoryContext cxt);
+extern void ao_reader_reset(AoBlockReader *rd);
+extern void ao_reader_read(Relation rel, AoBlockReader *rd, uint64 offset,
+						   BufferAccessStrategy strategy);
+extern void ao_reader_load(Relation rel, AoBlockReader *rd, uint64 offset,
+						   Form_pg_attribute att,
+						   BufferAccessStrategy strategy);
+
+/*
+ * A scan of ao_row or ao_column, as table_beginscan() makes it.  The
+ * segment files are read once the scan is asked for its first row
+ * (ao_scan_start()); each in turn then gives its visibility map and, for a
+ * table by column, its block directory (ao_scan_next_segfile()).  The rows
+ * come from getnextslot one at a time, or from vexec's batch source a batch
+ * of columns at a time (ao_batch.c), over the same segment files, map and
+ * directory.
+ */
+typedef struct AoScanDescData
+{
+	TableScanDescData rs_base;
+	MemoryContext cxt;
+	int64		storage_id;
+	bool		columnar;
+	int			natts;
+	BufferAccessStrategy strategy;
+	/* the segment files the snapshot sees, and the one being read */
+	bool		started;
+	AoSegfile  *segfiles;
+	int			nsegfiles;
+	int			cursf;
+	AoVisimap  *vm;
+	/* a table by row */
+	AoBlockReader row;
+	uint64		eof;
+	uint32		rowidx;
+	/* a table by column */
+	AoBlkdirScan *bds;
+	AoBlkdirEntry entry;
+	bool		entry_valid;
+	int			colidx;
+	AoBlockReader *cols;
+	bool	   *needed;
+	/* the one segment file to read, for VACUUM; 0 for all */
+	int			only_segno;
+	/* TABLESAMPLE: a row is a block, numbered as the scan reaches it */
+	int64		sample_total;	/* rows the segment files hold; -1 unknown */
+	int64		sample_next;	/* the number of the row the scan reads next */
+	int64		sample_target;	/* the row sampled */
+	bool		sample_done;	/* the scan has read every row */
+	BlockNumber sample_hash_next;	/* BERNOULLI's next row to hash */
+	/* a bitmap scan */
+	struct AoFetchDescData *fetch;
+	BlockNumber bm_block;
+	OffsetNumber bm_offsets[TBM_MAX_TUPLES_PER_PAGE];
+	int			bm_noffsets;
+	int			bm_idx;
+} AoScanDescData;
+
+typedef AoScanDescData *AoScanDesc;
+
+extern void ao_scan_start(AoScanDesc scan);
+extern bool ao_scan_next_segfile(AoScanDesc scan);
+extern void ao_batch_register(void);
 
 #endif							/* GP_AO_H */

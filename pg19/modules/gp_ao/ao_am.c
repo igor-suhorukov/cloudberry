@@ -83,33 +83,18 @@ ao_is_ao_table(Relation rel)
 		rel->rd_tableam == &ao_column_methods;
 }
 
+/* ao_column's routines, or ao_row's: what vexec keys their batch sources by. */
+const TableAmRoutine *
+ao_table_am_routine(bool columnar)
+{
+	return columnar ? &ao_column_methods : &ao_row_methods;
+}
+
 /* ------------------------------------------------------------------------- */
 /* Reading blocks                                                            */
 /* ------------------------------------------------------------------------- */
 
-typedef struct AoBlockReader
-{
-	MemoryContext cxt;			/* what its buffers are allocated in */
-	uint32		filenum;
-	bool		loaded;
-	uint32		loaded_filenum;	/* of the loaded block */
-	uint64		offset;			/* of the loaded block */
-	uint64		next;			/* of the one after it */
-	AoBlockHeader hdr;
-	char	   *raw;
-	Size		rawcap;
-	char	   *stored;
-	Size		storedcap;
-	/* a table by row: where each row's MinimalTuple is in raw */
-	uint32	   *rowoffs;
-	int			rowcap;
-	/* a table by column: the values */
-	Datum	   *values;
-	bool	   *isnull;
-	int			valcap;
-} AoBlockReader;
-
-static void
+void
 ao_reader_init(AoBlockReader *rd, MemoryContext cxt)
 {
 	memset(rd, 0, sizeof(AoBlockReader));
@@ -117,24 +102,24 @@ ao_reader_init(AoBlockReader *rd, MemoryContext cxt)
 	rd->filenum = UINT32_MAX;
 }
 
-static void
+void
 ao_reader_reset(AoBlockReader *rd)
 {
 	rd->loaded = false;
 }
 
 /*
- * Read the block at offset of rd's file; att is the column it holds, or NULL
- * for a table by row.
+ * Read the block at offset of rd's file into rd->raw, checked and
+ * decompressed, and its header into rd->hdr: what ao_reader_load() parses,
+ * and what vexec's batches of a table by column take as it lies
+ * (ao_batch.c).  rd->loaded is left false, for the caller to set once it has
+ * made what it needs of the block.
  */
-static void
-ao_reader_load(Relation rel, AoBlockReader *rd, uint64 offset,
-			   Form_pg_attribute att, BufferAccessStrategy strategy)
+void
+ao_reader_read(Relation rel, AoBlockReader *rd, uint64 offset,
+			   BufferAccessStrategy strategy)
 {
 	AoBlockHeader hdr;
-
-	if (rd->loaded && rd->offset == offset && rd->loaded_filenum == rd->filenum)
-		return;
 
 	/* what the buffers held goes as they are read into, error or not */
 	rd->loaded = false;
@@ -158,6 +143,28 @@ ao_reader_load(Relation rel, AoBlockReader *rd, uint64 offset,
 	ao_file_read(rel, rd->filenum, offset + AO_BLOCK_HEADER_SIZE, rd->stored,
 				 hdr.stored_len, strategy);
 	ao_block_decode(rd->stored, &hdr, rd->raw);
+
+	rd->hdr = hdr;
+	rd->loaded_filenum = rd->filenum;
+	rd->offset = offset;
+	rd->next = offset + AO_BLOCK_HEADER_SIZE + hdr.stored_len;
+}
+
+/*
+ * Read the block at offset of rd's file; att is the column it holds, or NULL
+ * for a table by row.
+ */
+void
+ao_reader_load(Relation rel, AoBlockReader *rd, uint64 offset,
+			   Form_pg_attribute att, BufferAccessStrategy strategy)
+{
+	AoBlockHeader hdr;
+
+	if (rd->loaded && rd->offset == offset && rd->loaded_filenum == rd->filenum)
+		return;
+
+	ao_reader_read(rel, rd, offset, strategy);
+	hdr = rd->hdr;
 
 	if (att == NULL)
 	{
@@ -204,10 +211,6 @@ ao_reader_load(Relation rel, AoBlockReader *rd, uint64 offset,
 						 rd->isnull);
 	}
 
-	rd->hdr = hdr;
-	rd->loaded_filenum = rd->filenum;
-	rd->offset = offset;
-	rd->next = offset + AO_BLOCK_HEADER_SIZE + hdr.stored_len;
 	rd->loaded = true;
 }
 
@@ -518,48 +521,7 @@ typedef struct AoParallelScanDescData
 	pg_atomic_uint32 next_segfile;
 } AoParallelScanDescData;
 
-typedef struct AoScanDescData
-{
-	TableScanDescData rs_base;
-	MemoryContext cxt;
-	int64		storage_id;
-	bool		columnar;
-	int			natts;
-	BufferAccessStrategy strategy;
-	/* the segment files the snapshot sees, and the one being read */
-	bool		started;
-	AoSegfile  *segfiles;
-	int			nsegfiles;
-	int			cursf;
-	AoVisimap  *vm;
-	/* a table by row */
-	AoBlockReader row;
-	uint64		eof;
-	uint32		rowidx;
-	/* a table by column */
-	AoBlkdirScan *bds;
-	AoBlkdirEntry entry;
-	bool		entry_valid;
-	int			colidx;
-	AoBlockReader *cols;
-	bool	   *needed;
-	/* the one segment file to read, for VACUUM; 0 for all */
-	int			only_segno;
-	/* TABLESAMPLE: a row is a block, numbered as the scan reaches it */
-	int64		sample_total;	/* rows the segment files hold; -1 unknown */
-	int64		sample_next;	/* the number of the row the scan reads next */
-	int64		sample_target;	/* the row sampled */
-	bool		sample_done;	/* the scan has read every row */
-	BlockNumber sample_hash_next;	/* BERNOULLI's next row to hash */
-	/* a bitmap scan */
-	AoFetchDesc fetch;
-	BlockNumber bm_block;
-	OffsetNumber bm_offsets[TBM_MAX_TUPLES_PER_PAGE];
-	int			bm_noffsets;
-	int			bm_idx;
-} AoScanDescData;
-
-typedef AoScanDescData *AoScanDesc;
+/* AoScanDescData is in gp_ao.h, which vexec's batches of a scan read too. */
 
 static TableScanDesc
 ao_scan_begin(Relation rel, Snapshot snapshot, int nkeys, ScanKeyData *key,
@@ -606,7 +568,7 @@ ao_scan_begin(Relation rel, Snapshot snapshot, int nkeys, ScanKeyData *key,
 }
 
 /* The segment files, read once the scan is asked for its first row. */
-static void
+void
 ao_scan_start(AoScanDesc scan)
 {
 	MemoryContext old = MemoryContextSwitchTo(scan->cxt);
@@ -635,8 +597,11 @@ ao_scan_close_segfile(AoScanDesc scan)
 			ao_reader_reset(&scan->cols[i]);
 }
 
-/* On to the next segment file this scan reads; false when there is none. */
-static bool
+/*
+ * On to the next segment file this scan reads, its visibility map and, for a
+ * table by column, its block directory; false when there is none.
+ */
+bool
 ao_scan_next_segfile(AoScanDesc scan)
 {
 	MemoryContext old;

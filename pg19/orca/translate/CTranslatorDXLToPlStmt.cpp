@@ -408,6 +408,16 @@ CTranslatorDXLToPlStmt::GetPlannedStmtFromDXL(const CDXLNode *dxlnode,
 
 	GPOS_ASSERT(nullptr != plan);
 
+	// NOT IN CLOUDBERRY.  A vectorized executor's nodes, where one has
+	// registered with gp_orca's API: each node of the tree and of its
+	// subplans offered to it, children first, before the Motions are checked
+	// and the slice table made below, and before the port's passes over the
+	// finished plan (orca.c) -- so that each of those sees the final tree.
+	// See vector.c.
+	plan = gpdb::VectorizePlan(plan,
+							   m_dxl_to_plstmt_context->GetSubplanEntriesList(),
+							   m_dxl_to_plstmt_context->GetRTableEntriesList());
+
 	// collect oids from rtable
 	//
 	// Cloudberry's loop also picks out the one relation in the FROM clause

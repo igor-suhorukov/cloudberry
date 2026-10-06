@@ -61,7 +61,17 @@
  *   inner side of a NestLoop in the fragment, which runs again for each
  *   outer row, nor into a Motion, a SubPlan or another CustomScan: the
  *   writer runs a fragment with a Gather whole at its first FETCH, and
- *   only nodes that read their input whole or pass it on are above one.
+ *   only nodes that read their input whole or pass it on are above one;
+ *
+ *   NOT IN CLOUDBERRY: a vectorized executor's nodes, which its node
+ *   builders put in place of ORCA's before this pass runs (vector.c), taken
+ *   for the nodes they stand for, as the engine describes each
+ *   (gp_orca_vec.h, describe_node): its sequential scan a scan that can
+ *   drive a split subtree, made parallel-aware as a SeqScan is, its hash
+ *   join, projection, aggregation and sort as PostgreSQL's -- so that a
+ *   plan of vector nodes gets the Gathers ORCA's plan of row nodes would,
+ *   and the engine's scans below them share their tables among the
+ *   Gather's participants (pg_vector_executor.md §3.10, V4).
  *
  * Only a SELECT that may run in parallel mode, as PostgreSQL's planner asks
  * (standard_planner()): CURSOR_OPT_PARALLEL_OK, which a cursor lacks, no
@@ -106,6 +116,7 @@
 #include "gp_core_api.h"
 #include "gp_motion.h"
 #include "gp_orca_parallel.h"
+#include "gp_orca_vec.h"
 
 typedef struct OrcaParallel
 {
@@ -120,6 +131,37 @@ is_motion(Plan *plan)
 {
 	return IsA(plan, CustomScan) &&
 		strcmp(((CustomScan *) plan)->methods->CustomName, GP_MOTION_NAME) == 0;
+}
+
+/*
+ * What a node of the vectorized executor registered with gp_orca stands
+ * for (gp_orca_vec.h, describe_node, from its minor version 1), filled in
+ * *vn; GP_ORCA_VEC_OTHER for any other node, a Motion among them.
+ */
+static int
+vec_kind(Plan *plan, GpOrcaVecNode *vn)
+{
+	const GpOrcaVecRoutine *engine;
+
+	memset(vn, 0, sizeof(GpOrcaVecNode));
+	vn->kind = GP_ORCA_VEC_OTHER;
+	if (!IsA(plan, CustomScan) || is_motion(plan))
+		return vn->kind;
+	engine = gp_orca_vec_find();
+	if (engine == NULL || !GP_ORCA_VEC_HAS(engine, describe_node) ||
+		!engine->describe_node(plan, vn))
+		vn->kind = GP_ORCA_VEC_OTHER;
+	return vn->kind;
+}
+
+/* A sequential scan: a SeqScan, or a vector engine's. */
+static bool
+is_seqscan(Plan *plan)
+{
+	GpOrcaVecNode vn;
+
+	return IsA(plan, SeqScan) ||
+		(IsA(plan, CustomScan) && vec_kind(plan, &vn) == GP_ORCA_VEC_SEQSCAN);
 }
 
 /* The largest plan node id of a tree, with its fragments and subqueries. */
@@ -188,7 +230,7 @@ shares_scan(Oid amoid)
  */
 typedef struct Share
 {
-	SeqScan    *driver;
+	Scan	   *driver;			/* a SeqScan, or a vector engine's scan */
 	double		pages;
 	double		tuples;
 	int			workers;
@@ -217,13 +259,13 @@ worker_reads(OrcaParallel *op, Scan *scan)
 
 /* A sequential scan that can drive a split subtree, and its share. */
 static bool
-scan_share(OrcaParallel *op, SeqScan *scan, Share *share)
+scan_share(OrcaParallel *op, Scan *scan, Share *share)
 {
-	RangeTblEntry *rte = rt_fetch(scan->scan.scanrelid, op->stmt->rtable);
+	RangeTblEntry *rte = rt_fetch(scan->scanrelid, op->stmt->rtable);
 	Relation	rel;
 	RelOptInfo *dummy;
 
-	if (!worker_reads(op, &scan->scan))
+	if (!worker_reads(op, scan))
 		return false;
 	rel = table_open(rte->relid, AccessShareLock);
 	if (!shares_scan(rel->rd_rel->relam) || rel->rd_rel->reltuples < 0)
@@ -254,6 +296,8 @@ scan_share(OrcaParallel *op, SeqScan *scan, Share *share)
 static bool
 whole_in_each(OrcaParallel *op, Plan *plan)
 {
+	GpOrcaVecNode vn;
+
 	if (plan == NULL)
 		return true;
 	check_stack_depth();
@@ -263,6 +307,21 @@ whole_in_each(OrcaParallel *op, Plan *plan)
 	{
 		case T_SeqScan:
 			return worker_reads(op, (Scan *) plan);
+		case T_CustomScan:
+			/* a vector engine's: its scan, hash join or projection */
+			switch (vec_kind(plan, &vn))
+			{
+				case GP_ORCA_VEC_SEQSCAN:
+					return worker_reads(op, (Scan *) plan);
+				case GP_ORCA_VEC_HASHJOIN:
+				case GP_ORCA_VEC_RESULT:
+					if (!is_parallel_safe(op->root, (Node *) vn.exprs))
+						return false;
+					break;
+				default:
+					return false;
+			}
+			break;
 		case T_Hash:
 			if (!is_parallel_safe(op->root, (Node *) ((Hash *) plan)->hashkeys))
 				return false;
@@ -294,13 +353,35 @@ whole_in_each(OrcaParallel *op, Plan *plan)
 static bool
 splits(OrcaParallel *op, Plan *plan, Share *share)
 {
+	GpOrcaVecNode vn;
+
 	if (plan == NULL || !node_safe(op, plan))
 		return false;
 	check_stack_depth();
 	switch (nodeTag(plan))
 	{
 		case T_SeqScan:
-			return scan_share(op, (SeqScan *) plan, share);
+			return scan_share(op, (Scan *) plan, share);
+		case T_CustomScan:
+			/* a vector engine's: its scan, hash join or projection */
+			switch (vec_kind(plan, &vn))
+			{
+				case GP_ORCA_VEC_SEQSCAN:
+					return scan_share(op, (Scan *) plan, share);
+				case GP_ORCA_VEC_HASHJOIN:
+					if ((vn.jointype != JOIN_INNER && vn.jointype != JOIN_LEFT &&
+						 vn.jointype != JOIN_SEMI && vn.jointype != JOIN_ANTI) ||
+						!is_parallel_safe(op->root, (Node *) vn.exprs))
+						return false;
+					return whole_in_each(op, plan->righttree) &&
+						splits(op, plan->lefttree, share);
+				case GP_ORCA_VEC_RESULT:
+					return plan->lefttree != NULL &&
+						is_parallel_safe(op->root, (Node *) vn.exprs) &&
+						splits(op, plan->lefttree, share);
+				default:
+					return false;
+			}
 		case T_HashJoin:
 			{
 				HashJoin   *hj = (HashJoin *) plan;
@@ -332,12 +413,18 @@ static double
 split_cpu(Plan *plan)
 {
 	double		cpu = 0;
+	GpOrcaVecNode vn;
 
-	for (; plan != NULL && !IsA(plan, SeqScan); plan = plan->lefttree)
+	for (; plan != NULL && !is_seqscan(plan); plan = plan->lefttree)
+	{
 		if (IsA(plan, HashJoin))
 			cpu += plan->lefttree->plan_rows *
 				(cpu_operator_cost * list_length(((HashJoin *) plan)->hashclauses) +
 				 cpu_tuple_cost);
+		else if (IsA(plan, CustomScan) && vec_kind(plan, &vn) == GP_ORCA_VEC_HASHJOIN)
+			cpu += plan->lefttree->plan_rows *
+				(cpu_operator_cost * vn.nhashclauses + cpu_tuple_cost);
+	}
 	return cpu;
 }
 
@@ -354,7 +441,7 @@ pays(OrcaParallel *op, Share *share, double cpu, double rows)
 	double		serial;
 	double		parallel;
 
-	cost_qual_eval(&qual, share->driver->scan.plan.qual, op->root);
+	cost_qual_eval(&qual, share->driver->plan.qual, op->root);
 	cpu += share->tuples * (cpu_tuple_cost + qual.per_tuple);
 	serial = disk + cpu;
 	parallel = disk + cpu / share->divisor + parallel_setup_cost +
@@ -376,7 +463,7 @@ mark_split(Plan *plan, Share *share)
 		plan->plan_rows = clamp_row_est(plan->plan_rows / share->divisor);
 		if (plan->righttree != NULL)
 			plan->righttree->parallel_safe = true;
-		if (plan == &share->driver->scan.plan)
+		if (plan == &share->driver->plan)
 		{
 			plan->parallel_aware = true;
 			break;
@@ -435,7 +522,9 @@ combinable(Aggref *aggref)
 
 /*
  * ORCA's first stage of an aggregate on a segment (AGGSPLIT_INITIAL_SERIAL),
- * over a subtree a Gather's participants split, done in three: that stage
+ * lower, which agg is -- or which a vector engine's node, lower, stands for,
+ * as it describes it -- over a subtree a Gather's participants split, done
+ * in three: that stage
  * in each participant, below the Gather, and above it one more that
  * combines theirs into the segment's, and passes it on serialized, as the
  * first stage did, to the coordinator's last (Cloudberry's three-stage
@@ -444,9 +533,9 @@ combinable(Aggref *aggref)
  * only, the Gather's rows being in no order.
  */
 static Plan *
-three_stage(OrcaParallel *op, Agg *agg)
+three_stage(OrcaParallel *op, Plan *lower, Agg *agg)
 {
-	Plan	   *below = agg->plan.lefttree;
+	Plan	   *below = lower->lefttree;
 	Share		share;
 	Agg		   *upper;
 	int			naggs = 0;
@@ -532,8 +621,8 @@ three_stage(OrcaParallel *op, Agg *agg)
 	upper->plan.plan_node_id = op->next_node_id++;
 
 	mark_split(below, &share);
-	agg->plan.parallel_safe = true;
-	upper->plan.lefttree = make_gather(op, &agg->plan, share.workers);
+	lower->parallel_safe = true;
+	upper->plan.lefttree = make_gather(op, lower, share.workers);
 	return &upper->plan;
 }
 
@@ -565,11 +654,38 @@ fragment_walk(OrcaParallel *op, Plan *plan)
 	{
 		case T_Agg:
 			{
-				Plan	   *upper = three_stage(op, (Agg *) plan);
+				Plan	   *upper = three_stage(op, plan, (Agg *) plan);
 
 				if (upper != NULL)
 					return upper;
 				plan->lefttree = fragment_walk(op, plan->lefttree);
+				break;
+			}
+		case T_CustomScan:
+			{
+				GpOrcaVecNode vn;
+
+				/* a vector engine's, as the node it stands for */
+				switch (vec_kind(plan, &vn))
+				{
+					case GP_ORCA_VEC_AGG:
+						{
+							Plan	   *upper = three_stage(op, plan, vn.agg);
+
+							if (upper != NULL)
+								return upper;
+							plan->lefttree = fragment_walk(op, plan->lefttree);
+							break;
+						}
+					case GP_ORCA_VEC_HASHJOIN:
+					case GP_ORCA_VEC_RESULT:
+					case GP_ORCA_VEC_SORT:
+						plan->lefttree = fragment_walk(op, plan->lefttree);
+						plan->righttree = fragment_walk(op, plan->righttree);
+						break;
+					default:
+						break;
+				}
 				break;
 			}
 		case T_HashJoin:
@@ -664,7 +780,28 @@ coordinator_walk(OrcaParallel *op, Plan *plan, bool whole)
 			coordinator_walk(op, ((SubqueryScan *) plan)->subplan, whole);
 			break;
 		case T_CustomScan:
-			return;
+			{
+				GpOrcaVecNode vn;
+
+				/* a vector engine's, as the node it stands for */
+				switch (vec_kind(plan, &vn))
+				{
+					case GP_ORCA_VEC_SORT:
+						whole = true;
+						break;
+					case GP_ORCA_VEC_AGG:
+						if (vn.agg->aggstrategy == AGG_PLAIN ||
+							vn.agg->aggstrategy == AGG_HASHED)
+							whole = true;
+						break;
+					case GP_ORCA_VEC_HASHJOIN:
+					case GP_ORCA_VEC_RESULT:
+						break;
+					default:
+						return;
+				}
+				break;
+			}
 		default:
 			break;
 	}

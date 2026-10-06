@@ -17,42 +17,42 @@
  * specific language governing permissions and limitations
  * under the License.
  *
- * pax_module.h
- *	  The port's side of PAX's catalog: the OIDs of the extension's objects
- *	  (modules/pax/pax_catalog.c), whose names PAX's code gives through
- *	  comm/pax_rel.h, and the module's C entry points into PAX's C++: its
- *	  catalog's, and the batch source it registers with vexec
- *	  (access/pax_vexec_source.cc).
+ * gp_orca_vector.h
+ *	  See vector.c.  Called from gp_orca's planner_hook, around ORCA's
+ *	  planning of a statement, and from the translator, once it has built
+ *	  the plan.
  *
  *-------------------------------------------------------------------------
  */
-#ifndef PAX_MODULE_H
-#define PAX_MODULE_H
+#ifndef GP_ORCA_VECTOR_H
+#define GP_ORCA_VECTOR_H
 
-#include "comm/pax_rel.h"
-
-/* The extension's schema, where Cloudberry's initdb made PAX's catalogs. */
-#define PAX_NAMESPACE_NAME "pax"
-
-/* Each table's aux table's, Cloudberry's own, which pg_dump passes over. */
-#define PAX_AUX_NAMESPACE_NAME "pg_ext_aux"
+#include "nodes/parsenodes.h"
+#include "nodes/plannodes.h"
 
 #ifdef __cplusplus
 extern "C" {
 #endif
 
-extern void PaxCatalogInit(void);
-extern bool PaxCatalogReady(void);
+struct ExplainState;
 
 /*
- * PAX's batch reader for vexec, the routine _PG_init registers
- * (vexec_source.h; pg_vector_executor.md §3.5.3).
+ * Around ORCA's planning of one statement: whether a vector engine wants
+ * it, and its state while it is translated.  gp_orca_vector_end() is
+ * called whether ORCA made a plan (stmt) or not (NULL).
  */
-struct VexecSourceRoutine;
-extern const struct VexecSourceRoutine *PaxVexecSource(void);
+extern void gp_orca_vector_begin(Query *parse, int cursorOptions,
+								 struct ExplainState *es);
+extern void gp_orca_vector_end(PlannedStmt *stmt);
+
+/*
+ * The translated plan and its subplans, each node offered to the engine,
+ * children first, in place; the plan's new top.
+ */
+extern Plan *gp_orca_vector_plan(Plan *plan, List *subplans, List *rtable);
 
 #ifdef __cplusplus
 }
 #endif
 
-#endif							/* PAX_MODULE_H */
+#endif							/* GP_ORCA_VECTOR_H */

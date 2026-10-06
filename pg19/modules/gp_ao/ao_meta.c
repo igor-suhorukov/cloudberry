@@ -788,10 +788,10 @@ ao_visimap_load(int64 storage_id, int segno, Snapshot snapshot)
 	return vm;
 }
 
-bool
-ao_visimap_is_deleted(AoVisimap *vm, int64 rownum)
+/* The entry of the map for the rows from first, a multiple of its size; -1. */
+static int
+visimap_entry(AoVisimap *vm, int64 first)
 {
-	int64		first = visimap_first_row(rownum);
 	int			lo = 0,
 				hi = vm->nentries - 1;
 
@@ -800,17 +800,77 @@ ao_visimap_is_deleted(AoVisimap *vm, int64 rownum)
 		int			mid = (lo + hi) / 2;
 
 		if (vm->first_rows[mid] == first)
-		{
-			int64		bit = rownum - first;
-
-			return (vm->bitmaps[mid][bit / 8] & (1 << (bit % 8))) != 0;
-		}
+			return mid;
 		if (vm->first_rows[mid] < first)
 			lo = mid + 1;
 		else
 			hi = mid - 1;
 	}
-	return false;
+	return -1;
+}
+
+bool
+ao_visimap_is_deleted(AoVisimap *vm, int64 rownum)
+{
+	int64		first = visimap_first_row(rownum);
+	int			e = visimap_entry(vm, first);
+	int64		bit = rownum - first;
+
+	return e >= 0 && (vm->bitmaps[e][bit / 8] & (1 << (bit % 8))) != 0;
+}
+
+/*
+ * Which of the nrows rows from rownum the map leaves visible, into words of
+ * 64 rows, least significant bit first, 1 = visible, the bits past nrows
+ * clear: how a batch of vexec's says which of its rows it selects
+ * (ao_batch.c).  Returns how many of them the map has deleted.  The rows may
+ * span two of the map's entries, or more; an entry the map lacks deletes
+ * none.
+ */
+int
+ao_visimap_visible_words(AoVisimap *vm, int64 rownum, int nrows,
+						 uint64 *words)
+{
+	int			nwords = (nrows + 63) / 64;
+	int			ndeleted = 0;
+	int			i = 0;
+
+	for (int w = 0; w < nwords; w++)
+		words[w] = ~UINT64CONST(0);
+	if (nrows % 64 != 0)
+		words[nwords - 1] = (UINT64CONST(1) << (nrows % 64)) - 1;
+
+	while (i < nrows)
+	{
+		int64		first = visimap_first_row(rownum + i);
+		int			n = (int) Min((int64) (nrows - i),
+								  first + AO_VISIMAP_ROWS - (rownum + i));
+		int			e = visimap_entry(vm, first);
+
+		if (e >= 0)
+		{
+			const uint8 *bits = vm->bitmaps[e];
+			int64		bit = rownum + i - first;
+
+			for (int k = 0; k < n; k++, bit++)
+			{
+				/* eight rows none of which is deleted, at once */
+				if ((bit & 7) == 0 && k + 8 <= n && bits[bit >> 3] == 0)
+				{
+					k += 7;
+					bit += 7;
+					continue;
+				}
+				if (bits[bit >> 3] & (1 << (bit & 7)))
+				{
+					words[(i + k) >> 6] &= ~(UINT64CONST(1) << ((i + k) & 63));
+					ndeleted++;
+				}
+			}
+		}
+		i += n;
+	}
+	return ndeleted;
 }
 
 /* How many rows the map says are deleted. */

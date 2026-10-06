@@ -36,8 +36,9 @@
  *
  * This file is the module's: its magic block and _PG_init, which calls
  * PAX's own (pax_init(), access/pax_access_handle.cc), a setting of
- * Cloudberry's core that PAX reads, and ANALYZE's sample of a PAX table,
- * whose blocks are no pages ANALYZE could read.
+ * Cloudberry's core that PAX reads, ANALYZE's sample of a PAX table,
+ * whose blocks are no pages ANALYZE could read, and the registration of
+ * PAX's batch reader with vexec (access/pax_vexec_source.cc).
  *
  * Cloudberry sources this module is made of:
  *	  contrib/pax_storage/
@@ -60,6 +61,7 @@
 #include "cb_module.h"
 #include "gp_core_api.h"
 #include "pax_module.h"
+#include "vexec_source.h"
 
 PG_MODULE_MAGIC_EXT(
 					.name = "pax",
@@ -204,4 +206,13 @@ _PG_init(void)
 
 	prev_analyze_sample_rows = analyze_sample_rows_hook;
 	analyze_sample_rows_hook = pax_analyze_sample_rows;
+
+	/*
+	 * PAX's batch reader, for vexec's vector scans of PAX tables
+	 * (pg_vector_executor.md §3.5.3): registered whether or not vexec is
+	 * loaded, which finds it by the table access method through a
+	 * rendezvous variable, in whatever order the two modules are preloaded.
+	 * Without vexec the registration is an unused entry.
+	 */
+	vexec_register_source(PaxVexecSource());
 }
