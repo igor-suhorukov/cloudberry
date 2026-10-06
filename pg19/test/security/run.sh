@@ -421,6 +421,9 @@ case "$("$BINDIR/pg_dumpall" -U postgres --roles-only 2>&1 | grep "ON ROLE dora"
 	*) notok "pg_dumpall should write dora's window" \
 	         "$("$BINDIR/pg_dumpall" -U postgres --roles-only 2>&1 | grep dora)" ;;
 esac
+# Kept, the Tuesday window would hold for the rest of the run on a Tuesday,
+# the time override gone: section 11 logs dora in again.
+q "ALTER ROLE dora DROP DENY FOR DAY 2;" > /dev/null
 
 ###############################################################################
 echo "10. what is not a failed login"
