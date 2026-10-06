@@ -69,7 +69,6 @@ extern "C" {
 #include "access/genam.h"
 #include "access/htup_details.h"
 #include "access/parallel.h"
-#include "access/tableamext.h"
 #include "access/transam.h"
 #include "catalog/pg_aggregate.h"
 #include "catalog/pg_am.h"
