@@ -3690,6 +3690,8 @@ motion_start(MotionState *state)
 			? GpGatherStartOnContents(sql, slot->tts_tupleDescriptor,
 									  state->contents, state->ncontents)
 			: GpGatherStartOn(sql, slot->tts_tupleDescriptor, state->content);
+		if (state->streaming)
+			GpGatherSetStreaming(state->gather);
 	}
 	MemoryContextSwitchTo(oldcxt);
 }

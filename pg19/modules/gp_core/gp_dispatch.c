@@ -116,6 +116,7 @@
 #include "utils/lsyscache.h"
 #include "utils/memutils.h"
 #include "utils/rel.h"
+#include "utils/resowner.h"
 #include "utils/snapmgr.h"
 #include "utils/syscache.h"
 #include "utils/timestamp.h"
@@ -619,6 +620,13 @@ sync_reset_role(StringInfo sql, char **sent, int i, bool *any, bool *reset)
  */
 #define GATHER_FETCH_FIRST	1
 #define GATHER_FETCH_ROWS	1000
+
+/*
+ * How long a merge of a streaming gather waits on one segment's batch,
+ * nothing heard from it, before it reads the other segments too
+ * (GpGatherNextFrom()).
+ */
+#define GATHER_STALL_MS		1000
 
 /* One segment's connection. */
 typedef struct GpSegmentConn
@@ -5722,7 +5730,20 @@ typedef struct GpGatherSeg
 	bool		whole;			/* the last batch read was all that was asked */
 	bool		declared;		/* the cursor exists there */
 	bool		done;			/* the cursor has nothing more */
+	bool		closed;			/* the cursor is closed (GpGatherEnd()) */
 	int			asked;			/* rows the batch in flight asked for */
+
+	/*
+	 * Batches that came while "arrived" was taken, read while the gather
+	 * waited on another segment (gather_keep_reading()): their rows, held
+	 * behind it in the order they came (gather_hold()), "nheld" of them not
+	 * yet handed out.  The one being handed out is in "heldslot" when
+	 * "from_held".
+	 */
+	Tuplestorestate *held;
+	int64		nheld;
+	TupleTableSlot *heldslot;
+	bool		from_held;
 } GpGatherSeg;
 
 struct GpGatherState
@@ -5735,6 +5756,14 @@ struct GpGatherState
 	 * still being taken from it.
 	 */
 	MemoryContext cxt;
+
+	/*
+	 * Whose its held rows' file is (gather_hold()): a batch is read whenever
+	 * anything waits on the gang, in another statement's too -- a PL/pgSQL
+	 * loop's INSERT, its block's subtransaction released as the loop goes
+	 * on -- and a file goes with the resource owner it was made under.
+	 */
+	ResourceOwner owner;
 	GpGang	   *gang;
 	TupleDesc	tupdesc;
 	bool		binary;
@@ -5743,6 +5772,14 @@ struct GpGatherState
 	GpGatherSeg *segs;
 	char	   *cursor;
 	int			next;			/* which segment to look at first */
+
+	/*
+	 * The slices its segments run send each other rows, through a streaming
+	 * Motion (GpGatherSetStreaming()): one segment's next batch may wait for
+	 * the others' cursors to be read.
+	 */
+	bool		streaming;
+	TupleDesc	helddesc;		/* a held row: each column's value, as bytea */
 };
 
 /*
@@ -6058,6 +6095,7 @@ gather_start(const char *sql, TupleDesc tupdesc, int content, int nsegments,
 	gang_prepare(g, true);
 
 	gather->cxt = CurrentMemoryContext;
+	gather->owner = CurrentResourceOwner;
 	gather->gang = g;
 	gather->tupdesc = tupdesc;
 	gather->binary = GpTupleDescHasBinaryIO(tupdesc);
@@ -6116,24 +6154,55 @@ gather_start(const char *sql, TupleDesc tupdesc, int content, int nsegments,
 	return gather;
 }
 
-/* One row of a segment's answer, into the slot. */
+/*
+ * A column of the row a segment is handing out -- its batch's row "row", or
+ * the row held for it -- as it arrived, text or binary, NUL-terminated as
+ * libpq leaves it; false for a null.
+ */
+static bool
+gather_value(GpGatherSeg *s, int row, int col, const char **value, int *length)
+{
+	if (s->from_held)
+	{
+		bytea	   *b;
+
+		if (s->heldslot->tts_isnull[col])
+			return false;
+		b = DatumGetByteaPP(s->heldslot->tts_values[col]);
+		*value = VARDATA_ANY(b);
+		*length = VARSIZE_ANY_EXHDR(b) - 1; /* the NUL kept after it */
+		return true;
+	}
+	if (PQgetisnull(s->batch, row, col))
+		return false;
+	*value = PQgetvalue(s->batch, row, col);
+	*length = PQgetlength(s->batch, row, col);
+	return true;
+}
+
+/* The row a segment is handing out, into the slot. */
 static void
-gather_store_row(GpGatherState *gather, PGresult *res, int row,
+gather_store_row(GpGatherState *gather, GpGatherSeg *s, int row,
 				 TupleTableSlot *slot)
 {
 	TupleDesc	tupdesc = gather->tupdesc;
 
-	if (PQnfields(res) != tupdesc->natts)
+	/* a held row's columns were counted as it came (gather_hold()) */
+	if (!s->from_held && PQnfields(s->batch) != tupdesc->natts)
 		ereport(ERROR,
 				(errcode(ERRCODE_DATATYPE_MISMATCH),
 				 errmsg("a segment answered with %d columns, not %d",
-						PQnfields(res), tupdesc->natts)));
+						PQnfields(s->batch), tupdesc->natts)));
 
 	ExecClearTuple(slot);
 
 	for (int i = 0; i < tupdesc->natts; i++)
 	{
-		if (PQgetisnull(res, row, i) || TupleDescAttr(tupdesc, i)->attisdropped)
+		const char *value;
+		int			length;
+
+		if (TupleDescAttr(tupdesc, i)->attisdropped ||
+			!gather_value(s, row, i, &value, &length))
 		{
 			slot->tts_isnull[i] = true;
 			slot->tts_values[i] = (Datum) 0;
@@ -6146,8 +6215,7 @@ gather_store_row(GpGatherState *gather, PGresult *res, int row,
 		{
 			StringInfoData buf;
 
-			initReadOnlyStringInfo(&buf, PQgetvalue(res, row, i),
-								   PQgetlength(res, row, i));
+			initReadOnlyStringInfo(&buf, (char *) value, length);
 			slot->tts_values[i] = GpReceiveFunctionCall(&gather->columns[i].proc,
 														&buf,
 														gather->columns[i].ioparam,
@@ -6155,7 +6223,7 @@ gather_store_row(GpGatherState *gather, PGresult *res, int row,
 		}
 		else
 			slot->tts_values[i] = InputFunctionCall(&gather->columns[i].proc,
-												   PQgetvalue(res, row, i),
+												   (char *) value,
 												   gather->columns[i].ioparam,
 												   gather->columns[i].typmod);
 	}
@@ -6164,9 +6232,85 @@ gather_store_row(GpGatherState *gather, PGresult *res, int row,
 }
 
 /*
+ * A batch that came while the segment had one in hand already, behind it:
+ * its rows held in the order they came, each column's value as it arrived,
+ * with the NUL libpq ends it with, to be handed out as a batch's would be
+ * (gather_value()).  In a tuplestore, which moves to a file past work_mem: a
+ * wait that keeps a gather read may hold much of what its other segments
+ * make (gather_keep_reading()).
+ */
+static void
+gather_hold(GpGatherSeg *s, PGresult *res)
+{
+	GpGatherState *gather = s->gather;
+	int			natts = gather->tupdesc->natts;
+	Datum	   *values;
+	bool	   *nulls;
+	MemoryContext oldcxt;
+	ResourceOwner oldowner;
+
+	if (PQnfields(res) != natts)
+		ereport(ERROR,
+				(errcode(ERRCODE_DATATYPE_MISMATCH),
+				 errmsg("a segment answered with %d columns, not %d",
+						PQnfields(res), natts)));
+
+	oldcxt = MemoryContextSwitchTo(gather->cxt);
+	if (gather->helddesc == NULL)
+	{
+		gather->helddesc = CreateTemplateTupleDesc(natts);
+		for (int i = 0; i < natts; i++)
+			TupleDescInitEntry(gather->helddesc, (AttrNumber) (i + 1), NULL,
+							   BYTEAOID, -1, 0);
+		TupleDescFinalize(gather->helddesc);
+	}
+	if (s->held == NULL)
+	{
+		/* the store makes its file under the owner it was begun under */
+		oldowner = CurrentResourceOwner;
+		CurrentResourceOwner = gather->owner;
+		s->held = tuplestore_begin_heap(false, false, work_mem);
+		CurrentResourceOwner = oldowner;
+		s->heldslot = MakeSingleTupleTableSlot(gather->helddesc,
+											   &TTSOpsMinimalTuple);
+	}
+	else if (s->nheld == 0)
+		tuplestore_clear(s->held);
+	values = palloc_array(Datum, natts);
+	nulls = palloc_array(bool, natts);
+	MemoryContextSwitchTo(oldcxt);
+
+	for (int r = 0; r < PQntuples(res); r++)
+	{
+		for (int i = 0; i < natts; i++)
+		{
+			nulls[i] = PQgetisnull(res, r, i);
+			if (!nulls[i])
+			{
+				int			len = PQgetlength(res, r, i);
+				bytea	   *b = (bytea *) palloc(VARHDRSZ + len + 1);
+
+				SET_VARSIZE(b, VARHDRSZ + len + 1);
+				memcpy(VARDATA(b), PQgetvalue(res, r, i), len + 1);
+				values[i] = PointerGetDatum(b);
+			}
+		}
+		tuplestore_putvalues(s->held, gather->helddesc, values, nulls);
+		for (int i = 0; i < natts; i++)
+			if (!nulls[i])
+				pfree(DatumGetPointer(values[i]));
+		s->nheld++;
+	}
+
+	pfree(values);
+	pfree(nulls);
+	PQclear(res);
+}
+
+/*
  * Read whatever has arrived of a gather segment's batch, without waiting.
- * When the whole answer is in, the batch becomes the segment's "arrived" one.
- * Returns whether anything was read.
+ * When the whole answer is in, the batch becomes the segment's "arrived" one,
+ * or, with that taken, is held behind it.  Returns whether anything was read.
  */
 static bool
 gather_poll(GpGatherSeg *s)
@@ -6213,9 +6357,11 @@ gather_poll(GpGatherSeg *s)
 		status = PQresultStatus(res);
 		if (status == PGRES_TUPLES_OK)
 		{
-			Assert(s->arrived == NULL);
-			s->arrived = res;
 			s->whole = PQntuples(res) >= s->asked;
+			if (s->arrived == NULL && s->nheld == 0)
+				s->arrived = res;
+			else
+				gather_hold(s, res);
 			continue;
 		}
 		if (status == PGRES_COMMAND_OK)
@@ -6240,22 +6386,6 @@ gather_poll(GpGatherSeg *s)
 	return progress;
 }
 
-/*
- * Set a gather's batch aside so that the connection can be used for something
- * else: read it to the end, into the gather segment it was asked for.
- */
-static void
-conn_park(GpSegmentConn *c)
-{
-	GpGatherSeg *s = c->fetching;
-
-	while (c->busy && c->fetching == s)
-	{
-		if (!gather_poll(s))
-			gang_wait(gang);
-	}
-}
-
 /* Ask for a segment's next batch, ten times the last, up to the most. */
 static void
 gather_fetch(GpGatherSeg *s)
@@ -6268,8 +6398,113 @@ gather_fetch(GpGatherSeg *s)
 }
 
 /*
- * The next row from any segment: the segment's side of the gather, whose
- * batch holds it at *row; NULL when every segment has finished.
+ * A streaming gather waited on for one segment's batch: each of its other
+ * segments with nothing on its way is asked for its next batch, which is held
+ * for it (gather_hold()).  A slice runs on a segment only while its cursor
+ * there is FETCHed, and a Motion's senders send to every segment's slice in
+ * turn: one segment's batch may need rows the senders send only after rows
+ * for a segment whose cursor is not being read, which they wait to send --
+ * a hash join's first outer row taken from one segment's batch, the others'
+ * still on their way, and its inner side's Gather begun.  Cloudberry's
+ * coordinator, whose slices are not cursors on shared connections, takes
+ * their rows as they come.
+ *
+ * What it cannot untangle: a segment whose connection another streaming
+ * gather's FETCH holds, which waits on this one's.  Two gathers whose slices
+ * stream, both read at once -- a merge join of them, here -- can each wait
+ * for the other's.
+ */
+static void
+gather_keep_reading(GpGatherState *gather, GpGatherSeg *waited)
+{
+	for (int i = 0; i < gather->nsegs; i++)
+	{
+		GpGatherSeg *t = &gather->segs[i];
+
+		if (t != waited && !t->done && !t->closed && !t->conn->busy)
+			gather_fetch(t);
+	}
+}
+
+/*
+ * Set a gather's batch aside so that the connection can be used for something
+ * else: read it to the end, into the gather segment it was asked for -- the
+ * gather's other segments read meanwhile, if its slices stream.
+ */
+static void
+conn_park(GpSegmentConn *c)
+{
+	GpGatherSeg *s = c->fetching;
+
+	while (c->busy && c->fetching == s)
+	{
+		if (s->gather->streaming)
+			gather_keep_reading(s->gather, s);
+		if (!gather_poll(s))
+			gang_wait(gang);
+	}
+}
+
+/*
+ * The segment's next row, if it has one in hand: its batch's next, then
+ * "arrived"'s, then the rows held for it.  As a batch begins to be handed
+ * out, the next is asked for, unless the cursor has no more or the
+ * connection is busy with somebody else's statement; as the held rows run
+ * out, too.  A batch's row is "*row"; a held one, "heldslot".
+ */
+static bool
+gather_take(GpGatherSeg *s, int *row)
+{
+	for (;;)
+	{
+		if (s->batch != NULL && s->row < PQntuples(s->batch))
+		{
+			*row = s->row++;
+			s->from_held = false;
+			return true;
+		}
+
+		if (s->batch != NULL)
+		{
+			PQclear(s->batch);
+			s->batch = NULL;
+		}
+
+		if (s->arrived != NULL)
+		{
+			s->batch = s->arrived;
+			s->arrived = NULL;
+			s->row = 0;
+			if (!s->done && !s->conn->busy)
+				gather_fetch(s);
+			continue;
+		}
+
+		if (s->nheld > 0)
+		{
+			MemoryContext oldcxt = MemoryContextSwitchTo(s->gather->cxt);
+
+			/* a copy, which the slot frees: the store is cleared when emptied */
+			if (!tuplestore_gettupleslot(s->held, true, true, s->heldslot))
+				elog(ERROR, "a gather's held rows ran out early");
+			MemoryContextSwitchTo(oldcxt);
+			slot_getallattrs(s->heldslot);
+			s->nheld--;
+			s->from_held = true;
+			*row = -1;
+			if (s->nheld == 0 && !s->done && !s->conn->busy)
+				gather_fetch(s);
+			return true;
+		}
+
+		return false;
+	}
+}
+
+/*
+ * The next row from any segment: the segment's side of the gather, which
+ * holds it -- at *row of its batch, or held (gather_take()); NULL when every
+ * segment has finished.
  */
 static GpGatherSeg *
 gather_next_row(GpGatherState *gather, int *row)
@@ -6288,41 +6523,18 @@ gather_next_row(GpGatherState *gather, int *row)
 		{
 			int			i = (gather->next + n) % gather->nsegs;
 			GpGatherSeg *s = &gather->segs[i];
+			bool		got = gather_take(s, row);
 
-			if (s->batch != NULL && s->row < PQntuples(s->batch))
+			if (!got && gather_poll(s))
 			{
-				*row = s->row++;
+				progress = true;
+				got = gather_take(s, row);
+			}
+			if (got)
+			{
 				/* The next row from the next segment: they take turns. */
 				gather->next = (i + 1) % gather->nsegs;
 				return s;
-			}
-
-			if (s->batch != NULL)
-			{
-				PQclear(s->batch);
-				s->batch = NULL;
-			}
-
-			if (gather_poll(s))
-				progress = true;
-
-			if (s->arrived != NULL)
-			{
-				s->batch = s->arrived;
-				s->arrived = NULL;
-				s->row = 0;
-				progress = true;
-
-				/*
-				 * Ask for the next batch while this one is handed out, unless
-				 * this was the last, or the connection is busy with somebody
-				 * else's statement.
-				 */
-				if (!s->done && !s->conn->busy)
-					gather_fetch(s);
-
-				n--;			/* look at this segment again */
-				continue;
 			}
 
 			if (s->done)
@@ -6353,7 +6565,7 @@ GpGatherNext(GpGatherState *gather, TupleTableSlot *slot, int *content)
 
 	if (s == NULL)
 		return false;
-	gather_store_row(gather, s->batch, row, slot);
+	gather_store_row(gather, s, row, slot);
 	if (content != NULL)
 		*content = s->conn->content;
 	return true;
@@ -6368,7 +6580,7 @@ GpGatherNextRaw(GpGatherState *gather, const char **values, int *lengths)
 
 	if (s == NULL)
 		return false;
-	if (PQnfields(s->batch) != natts)
+	if (!s->from_held && PQnfields(s->batch) != natts)
 		ereport(ERROR,
 				(errcode(ERRCODE_DATATYPE_MISMATCH),
 				 errmsg("a segment answered with %d columns, not %d",
@@ -6376,15 +6588,10 @@ GpGatherNextRaw(GpGatherState *gather, const char **values, int *lengths)
 
 	for (int i = 0; i < natts; i++)
 	{
-		if (PQgetisnull(s->batch, row, i))
+		if (!gather_value(s, row, i, &values[i], &lengths[i]))
 		{
 			values[i] = NULL;
 			lengths[i] = -1;
-		}
-		else
-		{
-			values[i] = PQgetvalue(s->batch, row, i);
-			lengths[i] = PQgetlength(s->batch, row, i);
 		}
 	}
 	return true;
@@ -6394,6 +6601,12 @@ bool
 GpGatherIsBinary(GpGatherState *gather)
 {
 	return gather->binary;
+}
+
+void
+GpGatherSetStreaming(GpGatherState *gather)
+{
+	gather->streaming = true;
 }
 
 Datum
@@ -6429,6 +6642,7 @@ bool
 GpGatherNextFrom(GpGatherState *gather, int seg, TupleTableSlot *slot)
 {
 	GpGatherSeg *s;
+	TimestampTz waiting = 0;	/* since when nothing has come from it */
 
 	if (gather->gang != gang)
 		ereport(ERROR,
@@ -6439,27 +6653,17 @@ GpGatherNextFrom(GpGatherState *gather, int seg, TupleTableSlot *slot)
 
 	for (;;)
 	{
-		if (s->batch != NULL && s->row < PQntuples(s->batch))
+		int			row;
+
+		if (gather_take(s, &row))
 		{
-			gather_store_row(gather, s->batch, s->row++, slot);
+			gather_store_row(gather, s, row, slot);
 			return true;
 		}
 
-		if (s->batch != NULL)
+		if (gather_poll(s))
 		{
-			PQclear(s->batch);
-			s->batch = NULL;
-		}
-
-		(void) gather_poll(s);
-
-		if (s->arrived != NULL)
-		{
-			s->batch = s->arrived;
-			s->arrived = NULL;
-			s->row = 0;
-			if (!s->done && !s->conn->busy)
-				gather_fetch(s);
+			waiting = 0;
 			continue;
 		}
 
@@ -6472,6 +6676,22 @@ GpGatherNextFrom(GpGatherState *gather, int seg, TupleTableSlot *slot)
 			continue;
 		}
 
+		/*
+		 * The segment's batch may wait on the other segments' cursors, as a
+		 * parked one may (gather_keep_reading()) -- but a merge waits on one
+		 * segment at a time as it goes, and reading the others meanwhile
+		 * would hold most of what they have whenever their rows sort after
+		 * this one's: only once it has been heard nothing from for a while.
+		 */
+		if (gather->streaming)
+		{
+			TimestampTz now = GetCurrentTimestamp();
+
+			if (waiting == 0)
+				waiting = now;
+			else if (TimestampDifferenceExceeds(waiting, now, GATHER_STALL_MS))
+				gather_keep_reading(gather, s);
+		}
 		gang_wait(gather->gang);
 	}
 }
@@ -6485,24 +6705,49 @@ GpGatherEnd(GpGatherState *gather)
 		return;					/* the gang was lost, and its cursors with it */
 
 	/*
-	 * Read what is still on its way, which is at most a batch, and close the
-	 * cursors: the segments' transaction goes on, and may gather again.
+	 * Close the cursors that have nothing on its way first: a batch still on
+	 * its way may need rows a Motion's senders send only after rows for their
+	 * slices, which their close stops the senders waiting to send (gp_ic.c).
+	 * Then read what is still on its way, which is at most a batch a segment,
+	 * and close the rest: the segments' transaction goes on, and may gather
+	 * again.
 	 */
+	for (int i = 0; i < gather->nsegs; i++)
+	{
+		GpGatherSeg *s = &gather->segs[i];
+
+		if (s->conn->fetching != s)
+		{
+			conn_send(s->conn, psprintf("CLOSE %s", gather->cursor));
+			s->closed = true;
+		}
+	}
+
 	for (int i = 0; i < gather->nsegs; i++)
 	{
 		GpGatherSeg *s = &gather->segs[i];
 
 		if (s->conn->fetching == s)
 			conn_park(s->conn);
+		if (!s->closed)
+		{
+			conn_send(s->conn, psprintf("CLOSE %s", gather->cursor));
+			s->closed = true;
+		}
 		if (s->arrived != NULL)
 			PQclear(s->arrived);
 		if (s->batch != NULL)
 			PQclear(s->batch);
 		s->arrived = s->batch = NULL;
+		if (s->held != NULL)
+		{
+			tuplestore_end(s->held);
+			ExecDropSingleTupleTableSlot(s->heldslot);
+			s->held = NULL;
+			s->heldslot = NULL;
+			s->nheld = 0;
+		}
 	}
-
-	for (int i = 0; i < gather->nsegs; i++)
-		conn_send(gather->segs[i].conn, psprintf("CLOSE %s", gather->cursor));
 	gang_wait_all(g, NULL, false);
 }
 

@@ -151,6 +151,13 @@ extern bool GpGatherIsBinary(GpGatherState *gather);
 extern Datum GpGatherDecodeValue(GpGatherState *gather, int col,
 								 const char *value, int length);
 
+/*
+ * The slices its segments run send each other rows, through a streaming
+ * Motion: one segment's next batch may wait for the others' cursors to be
+ * read, which a wait for it then reads too, holding their rows.
+ */
+extern void GpGatherSetStreaming(GpGatherState *gather);
+
 /* Done with it, whether or not it was read to the end. */
 extern void GpGatherEnd(GpGatherState *gather);
 

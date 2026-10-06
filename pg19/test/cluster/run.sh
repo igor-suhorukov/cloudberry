@@ -3664,6 +3664,77 @@ ERROR:  cannot change materialized view "mvw_empty"'
 		&& ok "with hash joins off a nested loop's inner gather is keyed by the join's equality, answering as the hash join does -- $n of them; with them on the plan is the hash join" \
 		|| notok "keyed gathers" "$same of $n / $keyed keyed / $hashed"
 
+	# A hash join here reads its first outer row before it builds its hash
+	# table, so its inner side's Gather begins while the outer one's first
+	# batches are still on their way, and what is sent a segment then waits
+	# for that segment's batch (gp_dispatch.c's conn_park()).  The outer
+	# Gather's slice joins a Redistribute Motion's rows, which the senders
+	# send to both segments in turn: segment 1's first rows come at once,
+	# segment 0 has none until the senders have sent 100,000 rows for
+	# segment 1, which its slice takes only while its cursor is read -- so
+	# that cursor is read while segment 0's batch is waited for
+	# (gather_keep_reading()), or the statement waits for ever.  gsb stays
+	# under a quarter of shared_buffers on a segment, and a scan of it
+	# begins at its first page: the order is the same every time.
+	q 0 "CREATE TABLE gsa (x int, k int) DISTRIBUTED BY (x);
+	     INSERT INTO gsa SELECT i, i % 50 FROM generate_series(1, 400) i;
+	     CREATE TABLE gseg AS SELECT x, gp_segment_id AS seg FROM gsa DISTRIBUTED BY (x);
+	     CREATE TABLE gsb (id int, x int, pad text) DISTRIBUTED BY (id);
+	     INSERT INTO gsb SELECT row_number() OVER (), x, repeat('p', 100)
+	                       FROM gseg, generate_series(1, 20) r WHERE seg = 1;
+	     INSERT INTO gsb SELECT 100000 + i, 10000000 + i, repeat('p', 100)
+	                       FROM generate_series(1, 200000) i;
+	     CREATE TABLE gsc (k int, w int) DISTRIBUTED BY (k);
+	     INSERT INTO gsc SELECT i % 10, i FROM generate_series(1, 10) i;
+	     ANALYZE gsa; ANALYZE gsb; ANALYZE gsc;" >/dev/null
+	sql="SELECT count(*), sum(length(s.pad)) FROM (SELECT gsa.k, gsb.pad FROM gsa JOIN gsb ON gsa.x = gsb.x LIMIT 100000000) s JOIN (SELECT k FROM gsc LIMIT 100000000) t ON s.k = t.k;"
+	sets="SET gp.optimizer_segments = 1; SET gp.optimizer_enable_motion_broadcast = off;"
+	plan=$(q 0 "$sets EXPLAIN (COSTS OFF) $sql" | tr '\n' ' ')
+	want=$(q 0 "SET gp.optimizer = off; $sql")
+	got=$(q 0 "$sets SET statement_timeout = '30s'; $sql")
+	udp=$(q 0 "$sets SET gp.interconnect_type = udpifc; SET statement_timeout = '30s'; $sql")
+	case "$plan" in
+		*"Hash Join"*"Limit"*"Gather Motion 2:1  (slice1"*"Hash Join"*"Redistribute Motion 2:2"*"Hash"*"Limit"*"Gather Motion 2:1  (slice3"*"Optimizer: GPORCA"*)
+			[ -n "$want" ] && [ "$got" = "$want" ] && [ "$udp" = "$want" ] \
+				&& ok "a hash join's inner Gather begun while a segment of its outer one, whose slice receives a Motion, has its first batch on the way: the others are read meanwhile ($got), over tcp and udpifc" \
+				|| notok "a Gather begun while another's batch waits on its other segments" "tcp: $got / udpifc: $udp / planner: $want" ;;
+		*) notok "a Gather begun while another's batch waits on its other segments: the plan" "$plan" ;;
+	esac
+	# ... and a Limit here that the plan cannot take below the Gather, a
+	# volatile filter between them, ends the Gather at its first row, from
+	# segment 1, segment 0's batch on its way: the cursors with nothing on
+	# the way are closed first, and the senders wait on them no more
+	# (GpGatherEnd()).
+	lim="SELECT s.id FROM (SELECT gsb.id FROM gsa JOIN gsb ON gsa.x = gsb.x LIMIT 100000000) s WHERE random() >= 0 LIMIT 1;"
+	plan=$(q 0 "$sets EXPLAIN (COSTS OFF) $lim" | tr '\n' ' ')
+	got=$(q 0 "$sets SET statement_timeout = '30s'; $lim" | grep -c '^[0-9][0-9]*$')
+	udp=$(q 0 "$sets SET gp.interconnect_type = udpifc; SET statement_timeout = '30s'; $lim" | grep -c '^[0-9][0-9]*$')
+	case "$plan" in
+		*"Limit"*"Filter: (random()"*"Limit"*"Gather Motion 2:1  (slice1"*"Redistribute Motion 2:2"*"Optimizer: GPORCA"*)
+			[ "$got" = 1 ] && [ "$udp" = 1 ] \
+				&& ok "... and a Limit above that Gather, which ends it at its first row while segment 0's batch is on the way, over tcp and udpifc" \
+				|| notok "a Gather ended while a batch waits on its other segments" "tcp: $got / udpifc: $udp rows" ;;
+		*) notok "a Gather ended while a batch waits on its other segments: the plan" "$plan" ;;
+	esac
+	# ... and the rows held while a PL/pgSQL loop's INSERT, in a block with
+	# an EXCEPTION clause, waits on the loop's Gather: the block's
+	# subtransaction ends at each turn of the loop, and the file the held
+	# rows moved to past work_mem is the gather's, not the subtransaction's
+	# (gather_hold()) -- the loop read rows from a file closed under it.
+	out=$(q 0 "$sets SET work_mem = '64kB'; SET statement_timeout = '30s';
+		CREATE TABLE gsl (n int) DISTRIBUTED BY (n);
+		DO \$do\$ DECLARE r record; BEGIN
+		  FOR r IN SELECT gsa.k, gsb.pad FROM gsa JOIN gsb ON gsa.x = gsb.x LIMIT 100000000 LOOP
+		    BEGIN INSERT INTO gsl VALUES (length(r.pad));
+		    EXCEPTION WHEN others THEN RAISE; END;
+		  END LOOP; END \$do\$;
+		SELECT count(*), sum(n) FROM gsl;")
+	want=$(q 0 "SET gp.optimizer = off; SELECT count(*), sum(length(gsb.pad)) FROM gsa JOIN gsb ON gsa.x = gsb.x;")
+	[ -n "$want" ] && [ "$out" = "$want" ] \
+		&& ok "... and rows held past work_mem while a PL/pgSQL loop's INSERT in a block with an EXCEPTION clause waits on its Gather ($out)" \
+		|| notok "rows held while a subtransaction's statement waits on a Gather" "$out / planner: $want"
+	q 0 "DROP TABLE gsa, gseg, gsb, gsc, gsl;" >/dev/null
+
 	# No secret on the coordinator: ORCA is told, and the planner gathers.
 	# None on the segments either -- a segment that has one takes the
 	# coordinator's word only with it, and a transaction's two-phase commit
