@@ -19,8 +19,8 @@
  *
  * gp_orca_vector.h
  *	  See vector.c.  Called from gp_orca's planner_hook, around ORCA's
- *	  planning of a statement, and from the translator, once it has built
- *	  the plan.
+ *	  planning of a statement; from ORCA's cost model, CCostModelVec, during
+ *	  its search; and from the translator, once it has built the plan.
  *
  *-------------------------------------------------------------------------
  */
@@ -29,6 +29,8 @@
 
 #include "nodes/parsenodes.h"
 #include "nodes/plannodes.h"
+
+#include "gp_orca_vec.h"
 
 #ifdef __cplusplus
 extern "C" {
@@ -45,11 +47,29 @@ extern void gp_orca_vector_begin(Query *parse, int cursorOptions,
 								 struct ExplainState *es);
 extern void gp_orca_vector_end(PlannedStmt *stmt);
 
+/* ORCA's options for the statement, as the engine wants them. */
+extern void gp_orca_vector_options(GpOrcaVecOptions *options);
+
+/*
+ * During ORCA's search: the engine's prices for the statement, false for
+ * none, and its oracle (gp_orca_vec.h).
+ */
+extern bool gp_orca_vector_costs(GpOrcaVecCosts *costs);
+extern int	gp_orca_vector_cost_call(Oid funcid, Oid opno, int nargs,
+									 const Oid *argtypes, Oid collation);
+extern int	gp_orca_vector_cost_aggregate(Oid aggfnoid, int nargs,
+										  const Oid *argtypes, bool distinct,
+										  bool ordered);
+extern int	gp_orca_vector_cost_relation(Oid relid);
+extern bool gp_orca_vector_cost_hash_key(Oid eqop, Oid collation);
+
 /*
  * The translated plan and its subplans, each node offered to the engine,
- * children first, in place; the plan's new top.
+ * children first, in place, and each hashed window the translator lowered
+ * (windows, its WindowAggs) offered whole; the plan's new top.
  */
-extern Plan *gp_orca_vector_plan(Plan *plan, List *subplans, List *rtable);
+extern Plan *gp_orca_vector_plan(Plan *plan, List *subplans, List *rtable,
+								 List *windows);
 
 #ifdef __cplusplus
 }

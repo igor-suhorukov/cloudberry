@@ -3310,14 +3310,73 @@ gpdb::SliceTable(List *slices, List *motions)
 }
 
 Plan *
-gpdb::VectorizePlan(Plan *plan, List *subplans, List *rtable)
+gpdb::VectorizePlan(Plan *plan, List *subplans, List *rtable, List *windows)
 {
 	GP_WRAP_START;
 	{
-		return gp_orca_vector_plan(plan, subplans, rtable);
+		return gp_orca_vector_plan(plan, subplans, rtable, windows);
 	}
 	GP_WRAP_END;
 	return plan;
+}
+
+bool
+gpdb::VectorCosts(GpOrcaVecCosts *costs)
+{
+	GP_WRAP_START;
+	{
+		return gp_orca_vector_costs(costs);
+	}
+	GP_WRAP_END;
+	return false;
+}
+
+int
+gpdb::VectorCostCall(Oid funcid, Oid opno, int nargs, const Oid *argtypes,
+					 Oid collation)
+{
+	GP_WRAP_START;
+	{
+		return gp_orca_vector_cost_call(funcid, opno, nargs, argtypes,
+										collation);
+	}
+	GP_WRAP_END;
+	return GP_ORCA_VEC_STEP_REFUSED;
+}
+
+int
+gpdb::VectorCostAggregate(Oid aggfnoid, int nargs, const Oid *argtypes,
+						  bool distinct, bool ordered)
+{
+	GP_WRAP_START;
+	{
+		return gp_orca_vector_cost_aggregate(aggfnoid, nargs, argtypes,
+											 distinct, ordered);
+	}
+	GP_WRAP_END;
+	return GP_ORCA_VEC_STEP_REFUSED;
+}
+
+int
+gpdb::VectorCostRelation(Oid relid)
+{
+	GP_WRAP_START;
+	{
+		return gp_orca_vector_cost_relation(relid);
+	}
+	GP_WRAP_END;
+	return GP_ORCA_VEC_REL_NONE;
+}
+
+bool
+gpdb::VectorCostHashKey(Oid eqop, Oid collation)
+{
+	GP_WRAP_START;
+	{
+		return gp_orca_vector_cost_hash_key(eqop, collation);
+	}
+	GP_WRAP_END;
+	return false;
 }
 
 int

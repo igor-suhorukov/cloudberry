@@ -40,6 +40,16 @@
  * Result's filter into a SeqScan below it (CTranslatorDXLToPlStmt.cpp),
  * which a node replaced too early would change.
  *
+ * From the API's minor version 2, the engine also prices ORCA's search
+ * and builds what only it runs.  Before ORCA is asked, the engine sets the
+ * statement's options (gp_orca_vector_options(), gp_orca_planner.c);
+ * during ORCA's search, CCostModelVec (cost/CCostModelVec.cpp) asks it for
+ * its prices and its oracle through the functions below, which the
+ * translator's wrappers call (gpdbwrappers.cpp); and a hashed window the
+ * translator lowered -- a WindowAgg over the Sort that brings its
+ * partitions together -- is offered to it whole, once its input's nodes
+ * have been offered, before its Sort and its WindowAgg would be (walk()).
+ *
  * The statement's engine state lives from gp_orca's planner_hook to the
  * plan it returns; ORCA plans one statement at a time in a backend
  * (gp_orca_planner.c, orca_depth).
@@ -76,57 +86,151 @@ gp_orca_vector_end(PlannedStmt *stmt)
 		engine->end_statement(state, stmt);
 }
 
-static Plan *walk(Plan *plan, List *rtable);
+/*
+ * ORCA's options for the statement: what gp_orca uses without the engine
+ * in *options, which the engine changes for its plans (set_options).
+ */
+void
+gp_orca_vector_options(GpOrcaVecOptions *options)
+{
+	if (engine_state != NULL && GP_ORCA_VEC_HAS(engine, set_options))
+		engine->set_options(engine_state, options);
+}
+
+/* The engine's prices for the statement, for CCostModelVec; false: none. */
+bool
+gp_orca_vector_costs(GpOrcaVecCosts *costs)
+{
+	memset(costs, 0, sizeof(GpOrcaVecCosts));
+	if (engine_state == NULL || !GP_ORCA_VEC_HAS(engine, cost_factors) ||
+		!GP_ORCA_VEC_HAS(engine, cost_call) ||
+		!GP_ORCA_VEC_HAS(engine, cost_aggregate) ||
+		!GP_ORCA_VEC_HAS(engine, cost_relation) ||
+		!GP_ORCA_VEC_HAS(engine, cost_hash_key))
+		return false;
+	return engine->cost_factors(engine_state, costs);
+}
+
+/* The engine's oracle, which CCostModelVec asks during ORCA's search. */
+int
+gp_orca_vector_cost_call(Oid funcid, Oid opno, int nargs, const Oid *argtypes,
+						 Oid collation)
+{
+	if (engine_state == NULL || !GP_ORCA_VEC_HAS(engine, cost_call))
+		return GP_ORCA_VEC_STEP_REFUSED;
+	return engine->cost_call(engine_state, funcid, opno, nargs, argtypes, collation);
+}
+
+int
+gp_orca_vector_cost_aggregate(Oid aggfnoid, int nargs, const Oid *argtypes,
+							  bool distinct, bool ordered)
+{
+	if (engine_state == NULL || !GP_ORCA_VEC_HAS(engine, cost_aggregate))
+		return GP_ORCA_VEC_STEP_REFUSED;
+	return engine->cost_aggregate(engine_state, aggfnoid, nargs, argtypes,
+								  distinct, ordered);
+}
+
+int
+gp_orca_vector_cost_relation(Oid relid)
+{
+	if (engine_state == NULL || !GP_ORCA_VEC_HAS(engine, cost_relation))
+		return GP_ORCA_VEC_REL_NONE;
+	return engine->cost_relation(engine_state, relid);
+}
+
+bool
+gp_orca_vector_cost_hash_key(Oid eqop, Oid collation)
+{
+	if (engine_state == NULL || !GP_ORCA_VEC_HAS(engine, cost_hash_key))
+		return false;
+	return engine->cost_hash_key(engine_state, eqop, collation);
+}
+
+static Plan *walk(Plan *plan, List *rtable, List *windows);
 
 /* Each plan of a list, walked in place. */
 static void
-walk_list(List *plans, List *rtable)
+walk_list(List *plans, List *rtable, List *windows)
 {
 	ListCell   *lc;
 
 	foreach(lc, plans)
-		lfirst(lc) = walk((Plan *) lfirst(lc), rtable);
+		lfirst(lc) = walk((Plan *) lfirst(lc), rtable, windows);
 }
 
-/* A node's children first, then the node itself, offered to the engine. */
-static Plan *
-walk(Plan *plan, List *rtable)
+/* A node's children, each walked in place. */
+static void
+walk_children(Plan *plan, List *rtable, List *windows)
 {
-	Plan	   *built;
-
-	if (plan == NULL)
-		return NULL;
-	check_stack_depth();
-
 	switch (nodeTag(plan))
 	{
 		case T_Append:
-			walk_list(((Append *) plan)->appendplans, rtable);
+			walk_list(((Append *) plan)->appendplans, rtable, windows);
 			break;
 		case T_MergeAppend:
-			walk_list(((MergeAppend *) plan)->mergeplans, rtable);
+			walk_list(((MergeAppend *) plan)->mergeplans, rtable, windows);
 			break;
 		case T_SubqueryScan:
-			((SubqueryScan *) plan)->subplan = walk(((SubqueryScan *) plan)->subplan, rtable);
+			((SubqueryScan *) plan)->subplan =
+				walk(((SubqueryScan *) plan)->subplan, rtable, windows);
 			break;
 		case T_CustomScan:
-			walk_list(((CustomScan *) plan)->custom_plans, rtable);
+			walk_list(((CustomScan *) plan)->custom_plans, rtable, windows);
 			break;
 		default:
 			break;
 	}
-	plan->lefttree = walk(plan->lefttree, rtable);
-	plan->righttree = walk(plan->righttree, rtable);
+	plan->lefttree = walk(plan->lefttree, rtable, windows);
+	plan->righttree = walk(plan->righttree, rtable, windows);
+}
 
-	built = engine->build_node(engine_state, plan, rtable);
+/* A node, its children walked, offered to the engine. */
+static Plan *
+offer(Plan *plan, List *rtable)
+{
+	Plan	   *built = engine->build_node(engine_state, plan, rtable);
+
 	return built != NULL ? built : plan;
 }
 
+/*
+ * A node's children first, then the node itself, offered to the engine.  A
+ * hashed window the translator lowered (windows) is offered whole once its
+ * input's nodes are, and where the engine keeps the lowering, its Sort and
+ * its WindowAgg are offered in turn, as other nodes are.
+ */
+static Plan *
+walk(Plan *plan, List *rtable, List *windows)
+{
+	if (plan == NULL)
+		return NULL;
+	check_stack_depth();
+
+	if (IsA(plan, WindowAgg) && list_member_ptr(windows, plan) &&
+		plan->lefttree != NULL && IsA(plan->lefttree, Sort) &&
+		GP_ORCA_VEC_HAS(engine, build_window))
+	{
+		Plan	   *sort = plan->lefttree;
+		Plan	   *built;
+
+		walk_children(sort, rtable, windows);
+		built = engine->build_window(engine_state, (WindowAgg *) plan, rtable);
+		if (built != NULL)
+			return built;
+		plan->lefttree = offer(sort, rtable);
+		return offer(plan, rtable);
+	}
+
+	walk_children(plan, rtable, windows);
+	return offer(plan, rtable);
+}
+
 Plan *
-gp_orca_vector_plan(Plan *plan, List *subplans, List *rtable)
+gp_orca_vector_plan(Plan *plan, List *subplans, List *rtable, List *windows)
 {
 	if (engine_state == NULL || !GP_ORCA_VEC_HAS(engine, build_node))
 		return plan;
-	walk_list(subplans, rtable);
-	return walk(plan, rtable);
+	walk_list(subplans, rtable, windows);
+	return walk(plan, rtable, windows);
 }

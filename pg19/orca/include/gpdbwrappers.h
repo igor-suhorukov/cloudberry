@@ -100,6 +100,7 @@ using StringInfo = StringInfoData *;
 struct LogicalIndexes;
 struct ParseState;
 struct DefElem;
+struct GpOrcaVecCosts;
 struct GpPolicy;
 struct PartitionSelector;
 struct Motion;
@@ -972,8 +973,19 @@ Node *SliceTable(List *slices, List *motions);
 
 // NOT IN CLOUDBERRY: a vectorized executor's nodes in the translated plan,
 // where one has registered with gp_orca's API (vector.c, gp_orca_vec.h):
-// the plan's new top, its subplans replaced in place.
-Plan *VectorizePlan(Plan *plan, List *subplans, List *rtable);
+// the plan's new top, its subplans replaced in place, and the hashed
+// windows the translator lowered (windows, their WindowAggs) offered whole.
+Plan *VectorizePlan(Plan *plan, List *subplans, List *rtable, List *windows);
+
+// NOT IN CLOUDBERRY: the executor's prices and oracle, for ORCA's search
+// under CCostModelVec (vector.c, gp_orca_vec.h, cost/CCostModelVec.cpp).
+bool VectorCosts(struct GpOrcaVecCosts *costs);
+int VectorCostCall(Oid funcid, Oid opno, int nargs, const Oid *argtypes,
+				   Oid collation);
+int VectorCostAggregate(Oid aggfnoid, int nargs, const Oid *argtypes,
+						bool distinct, bool ordered);
+int VectorCostRelation(Oid relid);
+bool VectorCostHashKey(Oid eqop, Oid collation);
 
 // An identity column's next value: the call of gp_orca's function ORCA is
 // handed for a NextValueExpr (NULL where gp_orca's extension is not
