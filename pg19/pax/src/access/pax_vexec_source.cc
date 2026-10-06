@@ -60,6 +60,19 @@
  * drops whole files and groups by their statistics, never rows; PAX's row
  * filter is not made.
  *
+ * Aggregates from the statistics (aggregate(), the contract's minor 1;
+ * pg_vector_executor.md H2).  Between batches, vexec may ask for the next
+ * unit's answers to count(*), count(x), min(x), max(x) and sum(x) in place
+ * of its rows, for a scan with no qual: a file's from the statistics the
+ * aux table keeps of it, before the file is opened, where it has no
+ * visibility map; else, the file opened, a group's from those its footer
+ * keeps, where none of its rows is deleted (micro_partition_stats.proto:
+ * the sum and the count stop being exact at the first delete).  min and
+ * max are answered where the statistics were kept for the column's own
+ * type; sum where they were kept as the type's sum() returns it -- PAX
+ * keeps them through that aggregate's own functions -- and a column with
+ * no value but NULLs answers NULL.  Any other unit is left to next().
+ *
  * Layouts.  A column is handed in the layout PAX holds it in, named as
  * vexec's batch/types.c names its shapes, and copied only where vexec's
  * layout needs the bytes moved:
@@ -339,6 +352,8 @@ class VexecPaxReader final {
 
   void Begin();
   bool Next(VexecSourceBatch *out, size_t *nvisible);
+  bool Aggregate(int nreqs, const VexecSourceAgg *reqs,
+                 VexecSourceAggAnswer *answers, int64 *nrows);
   void Retain(void *owner);
   void Release(void *owner);
   void Rescan();
@@ -348,6 +363,10 @@ class VexecPaxReader final {
  private:
   bool OpenNextGroup();
   bool OpenNextFile();
+  bool TakeNextFile();
+  void OpenFile();
+  bool Answer(const ColumnStatsProvider &stats, size_t rows, int nreqs,
+              const VexecSourceAgg *reqs, VexecSourceAggAnswer *answers);
   void CloseGroup();
   void CloseFile();
   void PrepareGroupColumn(int i);
@@ -402,6 +421,11 @@ class VexecPaxReader final {
 
   std::shared_ptr<PaxFilter> filter_;
   std::unique_ptr<IteratorBase<MicroPartitionMetadata>> iterator_;
+
+  // the next file, taken from the iterator and not yet opened: aggregate()
+  // looks at its statistics first
+  bool pending_ = false;
+  MicroPartitionMetadata pending_meta_;
 
   // the file being read
   std::unique_ptr<OrcReader> reader_;
@@ -577,12 +601,27 @@ void *VexecPaxReader::Alloc0(size_t size) {
   return p;
 }
 
-bool VexecPaxReader::OpenNextFile() {
-  auto file_system = Singleton<LocalFileSystem>::GetInstance();
-
+// The next file's metadata, from the iterator; false when there is none.
+bool VexecPaxReader::TakeNextFile() {
+  if (pending_) return true;
   if (!iterator_->HasNext()) return false;
+  pending_meta_ = iterator_->Next();
+  pending_ = true;
+  return true;
+}
 
-  auto meta = iterator_->Next();
+bool VexecPaxReader::OpenNextFile() {
+  if (!TakeNextFile()) return false;
+  OpenFile();
+  return true;
+}
+
+// The file taken, opened.
+void VexecPaxReader::OpenFile() {
+  auto file_system = Singleton<LocalFileSystem>::GetInstance();
+  MicroPartitionMetadata meta = std::move(pending_meta_);
+
+  pending_ = false;
   file_id_ = meta.GetMicroPartitionId();
 
   // the file's deletes, as TableReader::OpenFile() reads them
@@ -619,7 +658,6 @@ bool VexecPaxReader::OpenNextFile() {
   next_group_ = 0;
   next_group_row_ = 0;
   reader_ = std::move(reader);
-  return true;
 }
 
 void VexecPaxReader::CloseFile() {
@@ -828,6 +866,126 @@ void VexecPaxReader::SkipSlice(size_t s, size_t n) {
     if (!gc.column || gc.vec) continue;
     gc.nonnull +=
         gc.has_nulls ? CountBitsAt(gc.nulls, gc.nulls_len, s, n) : n;
+  }
+}
+
+// The answers to vexec's requests from one unit's statistics, where they
+// are exact for every request: false where one is not kept.
+bool VexecPaxReader::Answer(const ColumnStatsProvider &stats, size_t rows,
+                            int nreqs, const VexecSourceAgg *reqs,
+                            VexecSourceAggAnswer *answers) {
+  for (int i = 0; i < nreqs; i++) {
+    const VexecSourceAgg &r = reqs[i];
+    VexecSourceAggAnswer &a = answers[i];
+    int col = r.attnum - 1;
+
+    a.value = 0;
+    a.isnull = false;
+    if (r.kind == VEXEC_SRC_AGG_ROWS) {
+      a.value = Int64GetDatum((int64)rows);
+      continue;
+    }
+    // a column added since the file was written, which it keeps nothing of
+    if (col < 0 || col >= stats.ColumnSize()) return false;
+    if (r.kind == VEXEC_SRC_AGG_COUNT) {
+      a.value = Int64GetDatum((int64)stats.NonNullRows(col));
+      continue;
+    }
+    if (stats.AllNull(col)) {
+      a.isnull = true;
+      continue;
+    }
+
+    const auto &info = stats.ColumnInfo(col);
+    const auto &data = stats.DataStats(col);
+
+    switch (r.kind) {
+      case VEXEC_SRC_AGG_MIN:
+      case VEXEC_SRC_AGG_MAX: {
+        bool min = r.kind == VEXEC_SRC_AGG_MIN;
+        Form_pg_attribute att = TupleDescAttr(RelationGetDescr(rel_), col);
+
+        // kept for this type, by value: vexec asks for no other
+        if (!info.has_typid() || info.typid() != r.type ||
+            att->atttypid != r.type || !att->attbyval)
+          return false;
+        if (min ? !data.has_minimal() : !data.has_maximum()) return false;
+        a.value = MicroPartitionStats::FromValue(
+            min ? data.minimal() : data.maximum(), att->attlen, true, col);
+        break;
+      }
+      case VEXEC_SRC_AGG_SUM: {
+        if (!info.has_prorettype() || info.prorettype() != r.type ||
+            !data.has_sum())
+          return false;
+        if (r.type == INT8OID)
+          a.value = MicroPartitionStats::FromValue(data.sum(), 8, true, col);
+        else if (r.type == NUMERICOID)
+          a.value = MicroPartitionStats::FromValue(data.sum(), -1, false, col);
+        else
+          return false;
+        break;
+      }
+      default:
+        return false;
+    }
+  }
+  return true;
+}
+
+// The next unit answered from its statistics, and passed over: a file not
+// yet opened, from the aux table's, where it has no visibility map; else
+// the file's next group, from its footer's, where none of the group's rows
+// is deleted.  Only between groups: inside one, its slices come first.
+bool VexecPaxReader::Aggregate(int nreqs, const VexecSourceAgg *reqs,
+                               VexecSourceAggAnswer *answers, int64 *nrows) {
+  ContextScope scope(cxt_);
+
+  if (filter_->SparseFilterEnabled()) return false;
+  // A group whose slices are all handed out is done with; the batch handed
+  // out last keeps the group, and its own memory, until next().
+  if (group_open_) {
+    if (slice_ < group_rows_) return false;
+    CloseGroup();
+  }
+  for (;;) {
+    if (!reader_) {
+      if (!TakeNextFile()) return false;
+      if (pending_meta_.GetVisibilityBitmapFile().empty()) {
+        MicroPartitionStatsProvider stats(pending_meta_.GetStats());
+        size_t rows = pending_meta_.GetTupleCount();
+
+        if (Answer(stats, rows, nreqs, reqs, answers)) {
+          pending_ = false;
+          *nrows = (int64)rows;
+          return true;
+        }
+      }
+      OpenFile();
+    }
+    if (next_group_ >= ngroups_) {
+      CloseFile();
+      continue;
+    }
+
+    size_t g = next_group_;
+    size_t rows = reader_->GetTupleCountsInGroup(g);
+    size_t first = next_group_row_;
+
+    if (rows > 0) {
+      if (visimap_ && CountBitsAt(visimap_->Raw().bitmap,
+                                  visimap_->Raw().size, first, rows) > 0)
+        return false;
+
+      auto stats = reader_->GetGroupStatsInfo(g);
+
+      if (!Answer(*stats, rows, nreqs, reqs, answers)) return false;
+    }
+    next_group_++;
+    next_group_row_ += rows;
+    if (rows == 0) continue;
+    *nrows = (int64)rows;
+    return true;
   }
 }
 
@@ -1482,6 +1640,8 @@ void VexecPaxReader::Rescan() {
 
   CloseFile();
   ResetHold();
+  pending_ = false;
+  pending_meta_ = MicroPartitionMetadata();
   iterator_->Rewind();
 }
 
@@ -1527,6 +1687,9 @@ static void PaxVexecRetain(void *state, void *owner);
 static void PaxVexecRelease(void *state, void *owner);
 static void PaxVexecRescan(void *state);
 static void PaxVexecEnd(void *state);
+static bool PaxVexecAggregate(void *state, int nreqs,
+                              const VexecSourceAgg *reqs,
+                              VexecSourceAggAnswer *answers, int64 *nrows);
 
 /*
  * Every attribute PAX stores: by-value, fixed-length by-reference and
@@ -1600,6 +1763,29 @@ static bool PaxVexecNext(void *state, VexecSourceBatch *out) {
   return found;
 }
 
+static bool PaxVexecAggregate(void *state, int nreqs,
+                              const VexecSourceAgg *reqs,
+                              VexecSourceAggAnswer *answers, int64 *nrows) {
+  auto reader = static_cast<pax::VexecPaxReader *>(state);
+  bool found = false;
+
+  CHECK_FOR_INTERRUPTS();
+  CBDB_TRY();
+  { found = reader->Aggregate(nreqs, reqs, answers, nrows); }
+  CBDB_CATCH_DEFAULT();
+  CBDB_FINALLY({});
+  CBDB_END_TRY();
+
+  // the unit's rows, as next() would have counted them: none is deleted
+  if (found && *nrows > 0) {
+    Relation rel = reader->GetRelation();
+
+    if (pgstat_should_count_relation(rel))
+      rel->pgstat_info->counts.tuples_returned += *nrows;
+  }
+  return found;
+}
+
 static void PaxVexecRetain(void *state, void *owner) {
   CBDB_TRY();
   { static_cast<pax::VexecPaxReader *>(state)->Retain(owner); }
@@ -1660,6 +1846,7 @@ const VexecSourceRoutine *PaxVexecSource(void) {
     pax_vexec_source.rescan = PaxVexecRescan;
     pax_vexec_source.end = PaxVexecEnd;
     pax_vexec_source.estimate = nullptr;
+    pax_vexec_source.aggregate = PaxVexecAggregate;
   }
   return &pax_vexec_source;
 }
