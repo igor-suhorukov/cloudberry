@@ -134,6 +134,7 @@
 #include "gp_gdd.h"
 #include "gp_hash.h"
 #include "gp_motion.h"
+#include "gp_orca_vec.h"
 #include "gp_policy.h"
 #include "gp_scan.h"
 #include "gp_segment.h"
@@ -3850,9 +3851,32 @@ bound_nearest(List *rtable, Sort *sort, int64 bound)
 	return true;
 }
 
+/*
+ * A vector engine's node, as gp_orca's API describes it (gp_orca_vec.h,
+ * describe_node): what the node stands for -- a sort as the Sort of its keys
+ * over its own child, a projection as one.  The engine is found by the
+ * API's rendezvous variable, with no link to it.  False for any other node,
+ * or with no engine that describes nodes.
+ */
+static bool
+vector_node(Plan *plan, GpOrcaVecNode *vn)
+{
+	const GpOrcaVecRoutine *routine;
+
+	if (plan == NULL || !IsA(plan, CustomScan))
+		return false;
+	routine = gp_orca_vec_find();
+	if (routine == NULL || !GP_ORCA_VEC_HAS(routine, describe_node))
+		return false;
+	memset(vn, 0, sizeof(GpOrcaVecNode));
+	return routine->describe_node(plan, vn);
+}
+
 static void
 bound_gathers(List *rtable, Plan *plan, int64 bound)
 {
+	GpOrcaVecNode vn;
+
 	if (plan == NULL)
 		return;
 	check_stack_depth();
@@ -3874,6 +3898,12 @@ bound_gathers(List *rtable, Plan *plan, int64 bound)
 					if (IsA(plan->lefttree, Sort) &&
 						bound_nearest(rtable, (Sort *) plan->lefttree,
 									  count + offset))
+						return;
+					/* a vector engine's sort, as the Sort it stands for */
+					if (vector_node(plan->lefttree, &vn) &&
+						vn.kind == GP_ORCA_VEC_SORT && vn.sort != NULL &&
+						plan->lefttree->qual == NIL &&
+						bound_nearest(rtable, vn.sort, count + offset))
 						return;
 					bound_gathers(rtable, plan->lefttree, count + offset);
 				}
@@ -3905,6 +3935,12 @@ bound_gathers(List *rtable, Plan *plan, int64 bound)
 						list_nth_cell(cscan->custom_private,
 									  GATHER_PRIVATE_LIMIT)->ptr_value =
 							makeString(psprintf(" LIMIT " INT64_FORMAT, bound));
+					return;
+				}
+				/* a vector engine's projection, as a Result */
+				if (vector_node(plan, &vn) && vn.kind == GP_ORCA_VEC_RESULT)
+				{
+					bound_gathers(rtable, plan->lefttree, plan->qual == NIL ? bound : -1);
 					return;
 				}
 				foreach_ptr(Plan, child, cscan->custom_plans)
