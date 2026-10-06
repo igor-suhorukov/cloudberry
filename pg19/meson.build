@@ -210,7 +210,8 @@ have_patched_pg = cc.compiles(patch_probe,
   include_directories: pg_inc,
   name: 'PostgreSQL carries the Cloudberry core patch series')
 
-if not have_patched_pg and get_option('require_patched_pg')
+if not have_patched_pg and get_option('require_patched_pg') and \
+   not get_option('orca_single_node')
   error('''
     @0@
     compiles, but does not carry the Cloudberry core patch series (R1, R2, R4,
@@ -238,6 +239,61 @@ orca_cpp_args = []
 
 if get_option('orca')
   subdir('orca')
+endif
+
+###############################################################################
+# gp_orca alone, for one node of a server without gp_core
+#
+# -Dorca_single_node=true builds gp_orca and nothing else, against a
+# PostgreSQL 19 with the core series or without it: ORCA's plans on one node
+# have no Motions, and what gp_orca asks of gp_core there it answers itself
+# (modules/gp_orca/gp_orca_single_node.c), so the core series' header it does
+# not use is all that tied it to the patched server.  Its control file
+# requires no gp_core (modules/gp_orca/single_node/).  Every other module
+# needs gp_core or the core series, so the build stops here.
+# pg_vector_executor.md §3.3.5: ORCA, and a vectorized planner within it, on
+# vanilla PostgreSQL 19.
+###############################################################################
+
+if get_option('orca_single_node')
+  if not get_option('orca')
+    error('-Dorca_single_node=true builds gp_orca, which -Dorca=false leaves out')
+  endif
+
+  shared_module('gp_orca',
+    files('modules/gp_orca/gp_orca.c',
+          'modules/gp_orca/gp_orca_planner.c',
+          'modules/gp_orca/gp_orca_single_node.c') + orca_transl_sources,
+    c_args: mod_c_args + ['-DGP_ORCA_SINGLE_NODE'],
+    cpp_args: orca_cpp_args + ['-DGP_ORCA_SINGLE_NODE'],
+    link_args: mod_link_args,
+    build_rpath: pg_libdir,
+    install_rpath: pg_libdir,
+    link_with: orca_core,
+    dependencies: orca_deps,
+    include_directories: [pg_inc, include_directories('include', 'compat', 'grammar')] + orca_inc,
+    name_prefix: '',
+    install: true,
+    install_dir: pg_pkglibdir,
+  )
+  install_data('modules/gp_orca/single_node/gp_orca.control',
+               'modules/gp_orca/gp_orca--1.0.sql',
+               install_dir: pg_extensiondir)
+
+  summary({
+    'pg_config':    pg_config.full_path(),
+    'PostgreSQL':   pg['version'],
+    'core patches': have_patched_pg,
+    'assertions':   pg_cassert,
+    'pkglibdir':    pg_pkglibdir,
+    'extensiondir': pg_extensiondir,
+  }, section: 'PostgreSQL')
+  summary({
+    'built': 'gp_orca alone, for one node without gp_core',
+    'build type': get_option('buildtype'),
+    'ORCA debug checks (GPOS_DEBUG)': orca_debug,
+  }, section: 'Modules')
+  subdir_done()
 endif
 
 ###############################################################################

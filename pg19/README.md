@@ -147,6 +147,27 @@ which has no switch, without protocol buffers; `-Dorca=false`,
 tools run on Python 3 with PyGreSQL and psutil (`python3-pygresql`,
 `python3-psutil`).
 
+### gp_orca alone, for one node
+
+`-Dorca_single_node=true` builds `gp_orca` and nothing else, for one node
+of a PostgreSQL 19 without `gp_core` — vanilla `REL_19_STABLE` as well as
+the patched server, since `gp_orca` uses nothing of the core patch series.
+On one node ORCA's plans have no Motions, and what `gp_orca` asks of
+`gp_core` there it answers itself, as `gp_core` answers on a server of no
+segments (`modules/gp_orca/gp_orca_single_node.c`): every relation is the
+node's, no object has a `"gp"` label, and a type's distribution class and a
+family's hash function come from the catalog. Its extension requires no
+`gp_core`, and the module refuses to start beside one, which it would plan
+as one node.
+
+    meson setup build-orca -Dpg_config=/usr/local/pgsql/bin/pg_config \
+        -Dorca_single_node=true
+    ninja -C build-orca install
+
+and in `postgresql.conf`, with no `gp_core`:
+
+    shared_preload_libraries = 'gp_orca'
+
 ### In Docker
 
 Or, without installing anything on the host:

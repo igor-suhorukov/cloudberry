@@ -26,6 +26,8 @@ option('orca', type: 'boolean', value: true,
        description: 'Build gp_orca (the ORCA optimizer module)')
 option('orca_debug', type: 'feature', value: 'auto',
        description: 'ORCA\'s own debug checks, GPOS_DEBUG; auto: where the server checks its assertions, as Cloudberry\'s --enable-cassert')
+option('orca_single_node', type: 'boolean', value: false,
+       description: 'Build gp_orca alone, for one node of a PostgreSQL 19 without gp_core, vanilla or patched: gp_orca answers what it asks of gp_core there itself (modules/gp_orca/gp_orca_single_node.c), and nothing else is built')
 
 option('pax', type: 'boolean', value: true,
        description: 'Build pax, Cloudberry\'s PAX table access method (C++; needs protobuf and liburing)')

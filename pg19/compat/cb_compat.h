@@ -49,7 +49,21 @@
  * only ask after gp_core is loaded, which CB_REQUIRE_CORE has checked by
  * then; find_rendezvous_variable() creates an empty slot if it has not been,
  * so the lookup is retried rather than cached as NULL.
+ *
+ * gp_orca built alone, for one node of a server without gp_core
+ * (-Dorca_single_node), answers with an API of its own instead, which says
+ * what gp_core says on a node of no segments
+ * (modules/gp_orca/gp_orca_single_node.c).
  */
+#ifdef GP_ORCA_SINGLE_NODE
+extern const GpCoreApi *GpOrcaSingleNodeCoreApi(void);
+
+static inline const GpCoreApi *
+cb_core_api(void)
+{
+	return GpOrcaSingleNodeCoreApi();
+}
+#else
 static inline const GpCoreApi *
 cb_core_api(void)
 {
@@ -64,6 +78,7 @@ cb_core_api(void)
 
 	return cached;
 }
+#endif
 
 #define Gp_role					(cb_core_api()->get_role())
 #define GpIdentity_segindex		(cb_core_api()->get_content_id())

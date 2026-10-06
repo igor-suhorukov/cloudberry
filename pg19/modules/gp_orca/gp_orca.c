@@ -85,6 +85,9 @@
 #include "gp_orca_api.h"
 #include "gp_orca_guc.h"
 #include "gp_orca_planner.h"
+#ifdef GP_ORCA_SINGLE_NODE
+#include "gp_orca_single_node.h"
+#endif
 
 PG_MODULE_MAGIC_EXT(
 					.name = "gp_orca",
@@ -1407,7 +1410,15 @@ void
 _PG_init(void)
 {
 	CB_REQUIRE_PRELOAD("gp_orca");
+#ifdef GP_ORCA_SINGLE_NODE
+	/*
+	 * Built alone, for one node: gp_core's answers are this module's own
+	 * (gp_orca_single_node.c), and gp_core may not be loaded beside it.
+	 */
+	GpOrcaSingleNodeInit();
+#else
 	CB_REQUIRE_CORE("gp_orca");
+#endif
 
 	/*
 	 * Cloudberry's gp_enable_relsize_collection, which on a cluster means
