@@ -354,6 +354,7 @@ class VexecPaxReader final {
   bool Next(VexecSourceBatch *out, size_t *nvisible);
   bool Aggregate(int nreqs, const VexecSourceAgg *reqs,
                  VexecSourceAggAnswer *answers, int64 *nrows);
+  void SetKeys(int nkeys, const ScanKeyData *keys);
   void Retain(void *owner);
   void Release(void *owner);
   void Rescan();
@@ -422,9 +423,15 @@ class VexecPaxReader final {
   std::shared_ptr<PaxFilter> filter_;
   std::unique_ptr<IteratorBase<MicroPartitionMetadata>> iterator_;
 
+  // a VecSort's running bound (set_keys): its keys as a sparse filter of
+  // their own, their arguments copied into keys_cxt_
+  std::shared_ptr<PaxFilter> bound_filter_;
+  MemoryContext keys_cxt_ = nullptr;
+
   // the next file, taken from the iterator and not yet opened: aggregate()
   // looks at its statistics first
   bool pending_ = false;
+  bool exhausted_ = false;  // the iterator has no more files
   MicroPartitionMetadata pending_meta_;
 
   // the file being read
@@ -602,18 +609,41 @@ void *VexecPaxReader::Alloc0(size_t size) {
 }
 
 // The next file's metadata, from the iterator; false when there is none.
+// The iterator is not asked again once it has said so: a parallel scan's
+// (MicroPartitionInfoParallelIterator) walks the aux table's index, and an
+// index scan asked past its end starts over -- aggregate(), which saw the
+// end, then next() would take every file again, for ever.
 bool VexecPaxReader::TakeNextFile() {
   if (pending_) return true;
-  if (!iterator_->HasNext()) return false;
+  if (exhausted_) return false;
+  if (!iterator_->HasNext()) {
+    exhausted_ = true;
+    return false;
+  }
   pending_meta_ = iterator_->Next();
   pending_ = true;
   return true;
 }
 
 bool VexecPaxReader::OpenNextFile() {
-  if (!TakeNextFile()) return false;
-  OpenFile();
-  return true;
+  for (;;) {
+    if (!TakeNextFile()) return false;
+
+    // a file none of whose rows is within a VecSort's running bound
+    if (bound_filter_ && bound_filter_->SparseFilterEnabled()) {
+      MicroPartitionStatsProvider provider(pending_meta_.GetStats());
+
+      if (!bound_filter_->ExecSparseFilter(
+              provider, RelationGetDescr(rel_),
+              PaxSparseFilter::StatisticsKind::kFile)) {
+        pending_ = false;
+        pending_meta_ = MicroPartitionMetadata();
+        continue;
+      }
+    }
+    OpenFile();
+    return true;
+  }
 }
 
 // The file taken, opened.
@@ -701,6 +731,16 @@ bool VexecPaxReader::OpenNextGroup() {
 
       if (!filter_->ExecSparseFilter(*info, RelationGetDescr(rel_),
                                      PaxSparseFilter::StatisticsKind::kGroup))
+        continue;
+    }
+
+    // a group none of whose rows is within a VecSort's running bound
+    if (bound_filter_ && bound_filter_->SparseFilterEnabled()) {
+      auto info = reader_->GetGroupStatsInfo(g);
+
+      if (!bound_filter_->ExecSparseFilter(
+              *info, RelationGetDescr(rel_),
+              PaxSparseFilter::StatisticsKind::kGroup))
         continue;
     }
 
@@ -1641,8 +1681,41 @@ void VexecPaxReader::Rescan() {
   CloseFile();
   ResetHold();
   pending_ = false;
+  exhausted_ = false;
   pending_meta_ = MicroPartitionMetadata();
   iterator_->Rewind();
+  bound_filter_ = nullptr;  // the sort's bound begins again
+}
+
+// A VecSort's running bound (vexec_source.h, set_keys; pg_vector_executor.md
+// §3.14, H6): its keys, which replace the last given, as a sparse filter of
+// their own over the files' and the groups' statistics, from the next file
+// and group begun -- pruning only, as the scan's own keys prune.  The keys
+// come copied, in a context of their own that the filter keeps.
+void VexecPaxReader::SetKeys(int nkeys, const ScanKeyData *keys) {
+  MemoryContext old_keys = keys_cxt_;
+
+  if (!pax_enable_sparse_filter || nkeys <= 0) return;
+  keys_cxt_ = cbdb::AllocSetCtxCreate(cxt_, "PAX vexec running bound",
+                                      ALLOCSET_SMALL_SIZES);
+  {
+    ContextScope scope(keys_cxt_);
+    auto copy = static_cast<ScanKey>(
+        cbdb::MemCtxAlloc(keys_cxt_, sizeof(ScanKeyData) * nkeys));
+    auto filter = std::make_shared<PaxFilter>();
+
+    memcpy(copy, keys, sizeof(ScanKeyData) * nkeys);
+    for (int i = 0; i < nkeys; i++) {
+      if (copy[i].sk_flags & SK_ISNULL) continue;
+      auto att = TupleDescAttr(RelationGetDescr(rel_), copy[i].sk_attno - 1);
+
+      copy[i].sk_argument =
+          cbdb::datumCopy(copy[i].sk_argument, att->attbyval, att->attlen);
+    }
+    filter->InitSparseFilter(rel_, NIL, copy, nkeys);
+    bound_filter_ = std::move(filter);
+  }
+  if (old_keys) cbdb::MemoryCtxDelete(old_keys);
 }
 
 // The files closed, the aux table's scan ended, the snapshot unregistered,
@@ -1668,6 +1741,8 @@ void VexecPaxReader::End() {
     hold_ = nullptr;
   }
   filter_ = nullptr;
+  bound_filter_ = nullptr;
+  keys_cxt_ = nullptr;  // under cxt_
   cbdb::MemoryCtxDelete(cxt_);
   cxt_ = nullptr;
 }
@@ -1786,6 +1861,14 @@ static bool PaxVexecAggregate(void *state, int nreqs,
   return found;
 }
 
+static void PaxVexecSetKeys(void *state, int nkeys, const ScanKeyData *keys) {
+  CBDB_TRY();
+  { static_cast<pax::VexecPaxReader *>(state)->SetKeys(nkeys, keys); }
+  CBDB_CATCH_DEFAULT();
+  CBDB_FINALLY({});
+  CBDB_END_TRY();
+}
+
 static void PaxVexecRetain(void *state, void *owner) {
   CBDB_TRY();
   { static_cast<pax::VexecPaxReader *>(state)->Retain(owner); }
@@ -1847,6 +1930,7 @@ const VexecSourceRoutine *PaxVexecSource(void) {
     pax_vexec_source.end = PaxVexecEnd;
     pax_vexec_source.estimate = nullptr;
     pax_vexec_source.aggregate = PaxVexecAggregate;
+    pax_vexec_source.set_keys = PaxVexecSetKeys;
   }
   return &pax_vexec_source;
 }
