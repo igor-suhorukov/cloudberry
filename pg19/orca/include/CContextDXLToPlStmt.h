@@ -175,6 +175,12 @@ private:
 	// translated by a translator of its own, with this context shared.
 	List *m_motions;
 
+	// NOT IN CLOUDBERRY.  The hashed windows lowered to a WindowAgg over a
+	// Sort (TranslateDXLWindowHashAgg), their WindowAggs, a SubPlan's among
+	// them, which a vectorized executor registered with gp_orca's API is
+	// offered whole (vector.c).
+	List *m_hashed_windows;
+
 	PlanSlice *m_current_slice;
 
 	// index of the target relation in the rtable or 0 if not a DML statement
@@ -280,6 +286,19 @@ public:
 	AddMotion(Plan *motion)
 	{
 		m_motions = gpdb::LAppend(m_motions, motion);
+	}
+
+	// the hashed windows lowered so far, in every translator of the statement
+	List *
+	GetHashedWindows() const
+	{
+		return m_hashed_windows;
+	}
+
+	void
+	AddHashedWindow(Plan *window)
+	{
+		m_hashed_windows = gpdb::LAppend(m_hashed_windows, window);
 	}
 
 	// add a range table entry

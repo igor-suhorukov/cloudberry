@@ -44,6 +44,8 @@
 extern "C" {
 #include "miscadmin.h"
 
+#include "gp_orca_vec.h"
+
 #include "cdb/cdbvars.h"
 #include "optimizer/hints.h"
 #include "optimizer/orca.h"
@@ -61,6 +63,7 @@ extern "C" {
 #include "gpos/task/CAutoTraceFlag.h"
 
 #include "gpdbcost/CCostModelGPDB.h"
+#include "CCostModelVec.h"
 #include "gpopt/base/CAutoOptCtxt.h"
 #include "CConfigParamMapping.h"
 #include "gpopt/engine/CCTEConfig.h"
@@ -528,6 +531,25 @@ COptTasks::SetCostModelParams(ICostModel *cost_model)
 ICostModel *
 COptTasks::GetCostModel(CMemoryPool *mp, ULONG num_segments)
 {
+	// NOT IN CLOUDBERRY.  A vectorized executor registered with gp_orca's
+	// API, which takes the statement, prices its nodes in ORCA's search
+	// (CCostModelVec, gp_orca_vec.h): ORCA's cost model with them, its
+	// parameters set from ORCA's settings as for CCostModelGPDB.
+	GpOrcaVecCosts costs;
+	if (gpdb::VectorCosts(&costs))
+	{
+		CCostModelVec::SFactors factors = {
+			costs.tuple_factor, costs.operator_factor, costs.convert_factor,
+			costs.setup_rows,	costs.min_rows,		   (ULONG) costs.kinds};
+		CCostModelVec *vec_model =
+			GPOS_NEW(mp) CCostModelVec(mp, num_segments, factors);
+
+		SetCostModelParams(vec_model);
+		vec_model->PrepareKernelParams();
+
+		return vec_model;
+	}
+
 	ICostModel *cost_model = GPOS_NEW(mp) CCostModelGPDB(mp, num_segments);
 
 	SetCostModelParams(cost_model);

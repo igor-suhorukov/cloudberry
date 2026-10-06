@@ -290,6 +290,34 @@ orca_should_try(Query *parse, int cursorOptions, GpFallbackReason *reason)
 }
 
 /*
+ * The settings of ORCA's a vectorized executor asks for the statement
+ * (gp_orca_vec.h, set_options), set in a GUC nest of their own, whose level
+ * is returned: AtEOXact_GUC() with it puts the session's back.  Only
+ * gp_orca's own "gp.optimizer" settings.
+ */
+static int
+vector_settings_set(List *settings)
+{
+	int			nestlevel = NewGUCNestLevel();
+	ListCell   *lc;
+
+	foreach(lc, settings)
+	{
+		DefElem    *d = lfirst_node(DefElem, lc);
+
+		if (strncmp(d->defname, "gp.optimizer", strlen("gp.optimizer")) != 0)
+			ereport(ERROR,
+					(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+					 errmsg("a vector engine asked gp_orca to set \"%s\", which is not one of ORCA's settings",
+							d->defname)));
+		(void) set_config_option(d->defname, strVal(d->arg), PGC_USERSET,
+								 PGC_S_SESSION, GUC_ACTION_SAVE, true, 0,
+								 false);
+	}
+	return nestlevel;
+}
+
+/*
  * planner_hook.
  *
  * PostgreSQL 19 passes an ExplainState the hook did not use to get: an
@@ -320,12 +348,22 @@ gp_orca_planner(Query *parse, const char *query_string, int cursorOptions,
 		 * and no parallel one, which decision 2 defers until after M7.
 		 */
 		OptimizerOptions options = {false, false};
+		GpOrcaVecOptions vector_options = {false, NIL};
+		int			nestlevel = -1;
 
 		/*
 		 * A vectorized executor registered with gp_orca's API is told of the
-		 * statement, and offered the translated plan's nodes (vector.c).
+		 * statement, sets ORCA's options for it -- the vectorised plan, its
+		 * hashed window, which only such an executor runs, and settings of
+		 * ORCA's for the statement alone -- prices ORCA's search
+		 * (CCostModelVec), and is offered the translated plan's nodes
+		 * (vector.c).
 		 */
 		gp_orca_vector_begin(parse, cursorOptions, es);
+		gp_orca_vector_options(&vector_options);
+		options.create_vectorization_plan = vector_options.create_vectorization_plan;
+		if (vector_options.settings != NIL)
+			nestlevel = vector_settings_set(vector_options.settings);
 		orca_depth++;
 		PG_TRY();
 		{
@@ -337,6 +375,14 @@ gp_orca_planner(Query *parse, const char *query_string, int cursorOptions,
 			orca_depth--;
 		}
 		PG_END_TRY();
+
+		/*
+		 * The session's settings back, before the planner plans what ORCA
+		 * declined; after an error the transaction's abort puts them back,
+		 * as it does a function's SET clause.
+		 */
+		if (nestlevel >= 0)
+			AtEOXact_GUC(true, nestlevel);
 		gp_orca_vector_end(result);
 		if (result == NULL)
 			reason = failure.unexpected ? GP_FALLBACK_error

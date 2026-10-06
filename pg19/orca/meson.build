@@ -160,6 +160,7 @@ orca_compat_sources = files(
 # files are Cloudberry's, unchanged but for include paths; the head of each
 # says whether it is.
 orca_translate_sources = files(
+  'cost/CCostModelVec.cpp',
   'relcache/CMDProviderRelcache.cpp',
   'translate/CCTEListEntry.cpp',
   'translate/CContextDXLToPlStmt.cpp',
