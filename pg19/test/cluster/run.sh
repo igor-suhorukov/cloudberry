@@ -6164,6 +6164,69 @@ if [ "$started" -eq 1 ]; then
 	fi
 fi
 
+###############################################################################
+echo "25. a segment's process killed in the middle of a statement: the rest of it cancelled"
+###############################################################################
+# A gather's FETCH killed on one segment breaks the coordinator's connection
+# to it, and the gang goes: what the statement's processes on the other
+# segments still run is cancelled first, as Cloudberry's dispatcher cancels
+# the rest of a statement one of whose QEs failed (gp_dispatch.c,
+# gang_cancel_running()).  A segment's process whose connection is closed
+# under it does not notice while its statement runs --
+# client_connection_check_interval is 0 -- and ran on to its end, here two
+# hundred rows of a twentieth of a second each, holding its locks.  The
+# last section: the kill takes segment 1 through crash recovery.
+if [ "$started" -eq 1 ]; then
+	# the modules section 24's cluster had, whose extensions the database has
+	kill_started=1
+	for n in 1 2 0; do
+		start_node "$n" "shared_preload_libraries = '$PRELOAD,gp_orca,gp_ao,pax,pg_hint_plan'" \
+			"gp.cluster_secret = '$SECRET'" || kill_started=0
+	done
+	q 0 "SET client_min_messages = warning; CREATE EXTENSION IF NOT EXISTS gp_orca;
+	     CREATE TABLE kq (a int) DISTRIBUTED BY (a);
+	     INSERT INTO kq SELECT generate_series(1, 400); ANALYZE kq;" >/dev/null
+	kq_sql="SELECT count(*) FROM kq WHERE pg_sleep(0.05) IS NOT NULL;"
+	kq_running() {				# kq_running <node>: its processes running kq_sql
+		q "$1" "SELECT count(*) FROM pg_stat_activity
+				WHERE query LIKE '%pg_sleep(0.05)%' AND state = 'active' AND pid <> pg_backend_pid();"
+	}
+	plan=$(q 0 "SET gp.optimizer = on; EXPLAIN (COSTS OFF) $kq_sql")
+	"$PSQL" -X -q -t -A -h "$(sockdir 0)" -p "$(port 0)" -d postgres \
+		-c "SET gp.optimizer = on; SET statement_timeout = '60s'; $kq_sql" > "$ROOT/kq.out" 2>&1 &
+	kq_client=$!
+	pid=""
+	for _ in $(seq 100); do
+		pid=$(q 2 "SELECT pid FROM pg_stat_activity
+				   WHERE query LIKE '%pg_sleep(0.05)%' AND state = 'active' AND pid <> pg_backend_pid()
+				   ORDER BY backend_start LIMIT 1;")
+		[ -n "$pid" ] && break
+		sleep 0.1
+	done
+	before=$(kq_running 1)
+	[ -n "$pid" ] && kill -9 "$pid"
+	wait "$kq_client"
+	for _ in $(seq 50); do
+		after=$(kq_running 1)
+		[ "$after" = "0" ] && break
+		sleep 0.1
+	done
+	[ "$kill_started" -eq 1 ] && [[ "$plan" == *"Gather Motion 2:1"*"Optimizer: GPORCA"* ]] &&
+		[ "$before" = "1" ] && [ "$after" = "0" ] &&
+		grep -q "server closed the connection unexpectedly" "$ROOT/kq.out" \
+		&& ok "a gather's FETCH killed on segment 1: the client has the broken connection's error, and segment 0's FETCH is cancelled, not left to run" \
+		|| notok "the rest of a statement whose segment process was killed" \
+			"$plan / pid $pid / running on segment 0 before $before, after $after / $(cat "$ROOT/kq.out")"
+	# and, segment 1 back, the session's next statement takes a new gang
+	for _ in $(seq 300); do
+		out=$(q 0 "SELECT count(*) FROM kq;")
+		[ "$out" = "400" ] && break
+		sleep 0.2
+	done
+	[ "$out" = "400" ] && ok "and once segment 1 is back from its recovery, the next statement answers" \
+		|| notok "the cluster after a segment's process was killed" "$out"
+fi
+
 echo
 echo "  $pass passed, $fail failed"
 [ "$fail" -eq 0 ]

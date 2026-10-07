@@ -1690,9 +1690,70 @@ gang_connect(void)
 			 nsegs, dbname, username);
 }
 
+/* Whether the gang's connection to a segment still works. */
+static bool
+gang_segment_reachable(int content)
+{
+	for (int i = 0; i < gang->nconns; i++)
+		if (gang->conns[i].content == content)
+			return gang->conns[i].conn != NULL &&
+				PQstatus(gang->conns[i].conn) == CONNECTION_OK;
+	return false;
+}
+
 /*
- * A connection of the gang broke: the gang goes, and FTS is asked to probe
- * and waited for, as Cloudberry's dispatcher asks it when a segment's
+ * A connection of the gang broke, or its segment was failed over from,
+ * while a statement runs: what the gang's other processes still run of it
+ * is cancelled before the gang goes, as Cloudberry's dispatcher cancels the
+ * rest of a statement one of whose QEs failed (cdbdisp_cancelDispatch(),
+ * checkDispatchResult(), cdbdisp_async.c).  A segment's process whose
+ * connection is closed under it does not notice while its statement runs --
+ * PostgreSQL's client_connection_check_interval is 0 -- and would run on,
+ * holding its locks, until an interconnect error reached it: a gather's
+ * FETCH on the other segments, which the gather that failed no longer reads,
+ * and the readers running the statement's other slices.  Nothing is sent to
+ * a segment whose connection broke: its processes are gone, or it may not
+ * answer, and a cancel would wait for it until the deadline.
+ */
+static void
+gang_cancel_running(void)
+{
+	TimestampTz deadline;
+
+	if (gang == NULL)
+		return;
+	deadline = GetCurrentTimestamp() + 30 * USECS_PER_SEC;
+	for (int i = 0; i < gang->nconns; i++)
+	{
+		GpSegmentConn *c = &gang->conns[i];
+		const char *err;
+
+		if (!c->busy || !gang_segment_reachable(c->content))
+			continue;
+		err = libpqsrv_cancel(c->conn, deadline);
+		if (err != NULL)
+			elog(DEBUG1, "could not cancel the query on segment %d: %s",
+				 c->content, err);
+	}
+	foreach_ptr(GpReaderConn, r, gang->readers)
+	{
+		const char *err;
+
+		if (!r->busy || r->conn == NULL ||
+			PQstatus(r->conn) != CONNECTION_OK ||
+			!gang_segment_reachable(r->content))
+			continue;
+		err = libpqsrv_cancel(r->conn, deadline);
+		if (err != NULL)
+			elog(DEBUG1, "could not cancel the slice on segment %d: %s",
+				 r->content, err);
+	}
+}
+
+/*
+ * A connection of the gang broke: the rest of the statement is cancelled
+ * (gang_cancel_running()), the gang goes, and FTS is asked to probe and
+ * waited for, as Cloudberry's dispatcher asks it when a segment's
  * connection fails (FtsNotifyProber(), cdbdisp_async.c) -- so that a primary
  * that is down is failed over from before the session's next statement, which
  * then finds the cluster changed: a transaction on the gang that is gone
@@ -1701,6 +1762,7 @@ gang_connect(void)
 static void
 gang_close_broken(void)
 {
+	gang_cancel_running();
 	gang_close();
 	GpFtsNotifyProber();
 	lost_gang_note();
@@ -2277,6 +2339,10 @@ gang_check_moved(GpGang *g)
 			continue;
 		who = psprintf("seg%d %s:%d pid=%d", c->content, c->seg->hostname,
 					   c->seg->port, PQbackendPID(c->conn));
+		/* the rest cancelled, and nothing sent to the node FTS gave up on */
+		libpqsrv_disconnect(c->conn);
+		c->conn = NULL;
+		gang_cancel_running();
 		gang_close();
 		ereport(ERROR,
 				(errcode(ERRCODE_CONNECTION_FAILURE),
@@ -2379,23 +2445,25 @@ conn_send(GpSegmentConn *c, const char *sql)
 
 /*
  * A statement that could not be sent: the connection is closed.  What the
- * segment said as it closed it, if it said anything, is the error.
+ * segment said as it closed it, if it said anything, is the error.  What the
+ * other segments run of the statement is cancelled, a gather's FETCH there
+ * among it (gang_cancel_running()).
  */
 static void
 conn_send_failed(GpSegmentConn *c)
 {
 	char	   *msg = pstrdup(PQerrorMessage(c->conn));
 	int			content = c->content;
+	List	   *errors = NIL;
 
 	if (last_word_said(c->conn))
-	{
-		List	   *errors = NIL;
-
 		collect_error(&errors, content, NULL, c->conn, NULL);
-		gang_close();
-		raise_segment_errors(errors);
-	}
+	libpqsrv_disconnect(c->conn);
+	c->conn = NULL;
+	gang_cancel_running();
 	gang_close();
+	if (errors != NIL)
+		raise_segment_errors(errors);
 	ereport(ERROR,
 			(errcode(ERRCODE_CONNECTION_FAILURE),
 			 errmsg("could not send a statement to segment %d", content),
@@ -6326,6 +6394,7 @@ gather_poll(GpGatherSeg *s)
 		List	   *errors = NIL;
 
 		collect_error(&errors, c->content, NULL, c->conn, NULL);
+		gang_cancel_running();
 		gang_close();
 		raise_segment_errors(errors);
 	}
