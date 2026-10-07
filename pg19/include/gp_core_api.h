@@ -40,15 +40,17 @@
  * here changes meaning or moves.
  */
 #define GP_CORE_API_VERSION_MAJOR	1
-#define GP_CORE_API_VERSION_MINOR	14
+#define GP_CORE_API_VERSION_MINOR	15
 
 struct Node;
 struct List;
 struct Plan;
+struct PlanState;
 struct PlannedStmt;
 struct Query;
 struct FileSet;
 struct TableAmRoutine;
+struct StringInfoData;
 
 /*
  * What the rendezvous variable points at.  It is the first thing a module
@@ -260,6 +262,61 @@ typedef struct GpCoreApi
 	 * relation_size (gp_size.c).  Only while the postmaster loads it.
 	 */
 	void		(*size_from_am_register) (const struct TableAmRoutine *am);
+
+	/*
+	 * Since 1.15, for a vectorized executor that sends its batches across
+	 * ORCA's Motions as frames, building its own nodes around them
+	 * (pg_vector_executor.md §3.10): a Redistribute's hash functions, one
+	 * for each of its hash expressions (custom_exprs), with which cdbhash
+	 * hashes its rows, and whether one is a legacy function, which hashes
+	 * the whole key as the legacy cdbhash does (gp_hash.h) -- NIL for a
+	 * Motion of another kind; and how many sort keys a Gather merges its
+	 * senders' streams by, 0 where it merges none.
+	 */
+	struct List *(*motion_hash_functions) (struct Plan *plan, bool *legacy);
+	int			(*motion_merge_keys) (struct Plan *plan);
+
+	/*
+	 * Since 1.15: cdbhash, a row at a time -- for a key whose columns the
+	 * caller cannot hash itself, a legacy one or one of a type it has no
+	 * hash of its own for, and for its tests: the hash of "nkeys" columns
+	 * with these hash functions over "nsegs" segments, made in the current
+	 * memory context, and the segment of a row whose key columns are
+	 * values[]/isnull[], in the key's order, as GpHashSegment() gives it.
+	 */
+	void	   *(*hash_make) (int nsegs, int nkeys, const Oid *hashfuncs);
+	int			(*hash_segment) (void *hash, const Datum *values,
+								 const bool *isnull);
+
+	/*
+	 * Since 1.15: the subtree a node of another module's reads no more,
+	 * squelched as gp_core squelches a hash join's or a Limit's (gp_motion.c,
+	 * "Stopping the senders in the middle of a plan"): its children shut
+	 * down, and every Motion in it that receives a streaming slice ended, so
+	 * that the senders stop waiting for it -- in place of gp_core's
+	 * wrappers, which know PostgreSQL's nodes alone.  True where it did;
+	 * false where the node may be run again -- below a nested loop's inner
+	 * side, a Memoize, a Gather -- or no Motion below it streams, and then
+	 * the caller reads what it must to the end itself.
+	 */
+	bool		(*squelch_subtree) (struct PlanState *ps);
+
+	/*
+	 * Since 1.15: EXPLAIN ANALYZE's figures of a module's own nodes, which
+	 * the segments ran and the coordinator prints (gp_explain.c).  On a
+	 * segment, "collect" is asked of each node of the fragment it explains
+	 * that ran, and appends to "buf" what it keeps of the node's, or
+	 * nothing; on the coordinator, "deposit" is handed each segment's bytes
+	 * for the node of the same plan node id, before the plan is printed --
+	 * as many times as that segment reported the node.  One module
+	 * registers them; a second registration replaces the first.
+	 */
+	void		(*explain_register) (bool (*collect) (struct PlanState *ps,
+													  struct StringInfoData *buf),
+									 void (*deposit) (struct PlanState *ps,
+													  int content,
+													  const char *data,
+													  int len));
 } GpCoreApi;
 
 /*
