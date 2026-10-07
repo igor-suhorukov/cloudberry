@@ -2504,6 +2504,41 @@ $((n + 1))" ] && ok "a serial column's values, taken on the segments from the co
 	orca_same "a legacy-hashed table's join: the other side redistributed by the legacy hash" \
 		"SELECT count(*), sum(lo2.k) FROM lo JOIN lo2 USING (a);" "Redistribute Motion"
 
+	# What a GROUP BY, a DISTINCT, a set operation or a window asks of such a
+	# table's int2, int4, int8, bool or oid column: its rows hashed by the
+	# type's legacy family, which ORCA's own classes for the five types named
+	# by Cloudberry's catalog OIDs (7100, 7109, 7124), and gp_core's script
+	# makes with OIDs of its own -- no key met it, and the Redistribute Motion
+	# planned instead failed: "could not find hash function for type 23 in
+	# operator family 7100".  Grouped by its key, the table's rows stay where
+	# they are; by another column, they move by that type's legacy hash.
+	q 0 "CREATE TABLE lt (s int2, b int8, f bool, o oid) DISTRIBUTED BY (s cdbhash_int2_ops);
+	     INSERT INTO lt SELECT i % 9, i % 13, i % 3 = 0, (i % 11)::oid FROM generate_series(1, 300) i;
+	     ANALYZE lt;" >/dev/null
+	plan=$(q 0 "EXPLAIN (COSTS OFF) SELECT k, count(*) FROM lo2 GROUP BY k;")
+	[[ "$plan" == *"Optimizer: GPORCA"* && "$plan" != *"Redistribute"* ]] \
+		&& ok "a legacy-hashed table grouped by its key: its rows where they are" \
+		|| notok "a legacy-hashed table grouped by its key, under ORCA" "$plan"
+	orca_same "... and answers so" "SELECT k, count(*) FROM lo2 GROUP BY k ORDER BY k;"
+	orca_same "grouped by another column: redistributed by the legacy hash" \
+		"SELECT a, count(*) FROM lo2 GROUP BY a ORDER BY a;" "Redistribute Motion"
+	orca_same "DISTINCT over a legacy-hashed table's column" \
+		"SELECT DISTINCT a FROM lo2 ORDER BY a;"
+	orca_same "UNION of legacy-hashed tables' columns" \
+		"SELECT k FROM lo2 UNION SELECT a FROM lo ORDER BY 1;"
+	orca_same "a window partitioned by a legacy-hashed table's column" \
+		"SELECT a, k, rank() OVER (PARTITION BY a ORDER BY k) FROM lo2 ORDER BY a, k;"
+	for ct in s:int2 b:int8 f:bool o:oid; do
+		orca_same "a legacy-hashed table grouped by its ${ct#*:} column" \
+			"SELECT ${ct%%:*}, count(*) FROM lt GROUP BY 1 ORDER BY 1;"
+	done
+	# The integers' legacy family holds the equalities between them, as
+	# Cloudberry's does: an int2 key joined to an int4 one is cast to int4,
+	# as it is under the default family, where the family that was none had
+	# ORCA fail its assertion that a cast exists, and leave it to the planner.
+	orca_same "an int2 key joined to an int4 one: cast, and redistributed by the legacy hash" \
+		"SELECT count(*), sum(lo2.a) FROM lt JOIN lo2 ON lt.s = lo2.k;" "Redistribute Motion"
+
 	# The slices of a query run at once: the writer on each segment runs the
 	# Gather's, and readers -- more backends of the session there, reading as
 	# a part of the writer's transaction -- run the others, streaming their

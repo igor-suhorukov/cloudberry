@@ -109,6 +109,7 @@ extern "C" {
 #include "naucrates/md/CMDTypeInt4GPDB.h"
 #include "naucrates/md/CMDTypeInt8GPDB.h"
 #include "naucrates/md/CMDTypeOidGPDB.h"
+#include "naucrates/traceflags/traceflags.h"
 
 using namespace gpdxl;
 using namespace gpopt;
@@ -1285,6 +1286,79 @@ CTranslatorRelcacheToDXL::PopulateAttnoPositionMap(CMemoryPool *mp,
 }
 
 
+// The hash family of a type's legacy cdbhash_*_ops class, which a table
+// keyed with that class is distributed by, or nullptr for a type Greenplum 5
+// could not hash, or in a database gp_core's script has not made the classes
+// in (gpdb::GetLegacyCdbHashOpclassForBaseType).
+static IMDId *
+RetrieveLegacyDistrOpfamily(CMemoryPool *mp, OID oid_type)
+{
+	OID legacy_opclass = gpdb::GetLegacyCdbHashOpclassForBaseType(oid_type);
+	if (InvalidOid == legacy_opclass)
+	{
+		return nullptr;
+	}
+	return GPOS_NEW(mp) CMDIdGPDB(IMDId::EmdidGeneral,
+								  gpdb::GetOpclassFamily(legacy_opclass));
+}
+
+// One of ORCA's own classes for int2, int4, int8, bool and oid, with the
+// legacy hash family the type has in this database.  Those classes name it
+// by the OID Cloudberry's catalog gives it -- 7100, cdbhash_integer_ops, for
+// the three integers, 7109 for oid's, 7124 for bool's -- and gp_core's
+// script makes the families at CREATE EXTENSION, with OIDs of their own.
+// Where a query reads a table keyed with a legacy class, COptTasks has ORCA
+// hash by the legacy families (EopttraceUseLegacyOpfamilies), and what a
+// GROUP BY, a DISTINCT, a set operation or a window's PARTITION BY asked of
+// such a column was its rows hashed in a family that does not exist: no
+// table's key satisfied it, and the Redistribute Motion planned instead
+// found no hash function there ("could not find hash function for type 23
+// in operator family 7100"); and a join of an int2 to an int4, whose
+// equality is in gp_core's family and not in that one, failed ORCA's
+// assertion that a cast exists.  The other types are CMDTypeGenericGPDB,
+// given the family looked up the same way.
+template <class T>
+class CMDTypeLegacyFamily : public T
+{
+private:
+	// the type's legacy hash family, or nullptr where it has none
+	IMDId *m_legacy_distr_opfamily;
+
+	CMDTypeLegacyFamily(CMemoryPool *mp, IMDId *legacy_distr_opfamily)
+		: T(mp), m_legacy_distr_opfamily(legacy_distr_opfamily)
+	{
+	}
+
+public:
+	~CMDTypeLegacyFamily() override
+	{
+		CRefCount::SafeRelease(m_legacy_distr_opfamily);
+	}
+
+	// The family is looked up first, and only where ORCA considers families
+	// for distribution, as ORCA's own classes have one only then.
+	static IMDType *
+	Make(CMemoryPool *mp, OID oid_type)
+	{
+		IMDId *legacy_distr_opfamily = nullptr;
+		if (GPOS_FTRACE(EopttraceConsiderOpfamiliesForDistribution))
+		{
+			legacy_distr_opfamily = RetrieveLegacyDistrOpfamily(mp, oid_type);
+		}
+		return GPOS_NEW(mp) CMDTypeLegacyFamily<T>(mp, legacy_distr_opfamily);
+	}
+
+	IMDId *
+	GetDistrOpfamilyMdid() const override
+	{
+		if (GPOS_FTRACE(EopttraceUseLegacyOpfamilies))
+		{
+			return m_legacy_distr_opfamily;
+		}
+		return T::GetDistrOpfamilyMdid();
+	}
+};
+
 //---------------------------------------------------------------------------
 //	@function:
 //		CTranslatorRelcacheToDXL::RetrieveType
@@ -1299,23 +1373,24 @@ CTranslatorRelcacheToDXL::RetrieveType(CMemoryPool *mp, IMDId *mdid)
 	OID oid_type = CMDIdGPDB::CastMdid(mdid)->Oid();
 	GPOS_ASSERT(InvalidOid != oid_type);
 
-	// check for supported base types
+	// check for supported base types: ORCA's own classes, with the legacy
+	// hash family gp_core's script made for the type (CMDTypeLegacyFamily)
 	switch (oid_type)
 	{
 		case GPDB_INT2_OID:
-			return GPOS_NEW(mp) CMDTypeInt2GPDB(mp);
+			return CMDTypeLegacyFamily<CMDTypeInt2GPDB>::Make(mp, oid_type);
 
 		case GPDB_INT4_OID:
-			return GPOS_NEW(mp) CMDTypeInt4GPDB(mp);
+			return CMDTypeLegacyFamily<CMDTypeInt4GPDB>::Make(mp, oid_type);
 
 		case GPDB_INT8_OID:
-			return GPOS_NEW(mp) CMDTypeInt8GPDB(mp);
+			return CMDTypeLegacyFamily<CMDTypeInt8GPDB>::Make(mp, oid_type);
 
 		case GPDB_BOOL:
-			return GPOS_NEW(mp) CMDTypeBoolGPDB(mp);
+			return CMDTypeLegacyFamily<CMDTypeBoolGPDB>::Make(mp, oid_type);
 
 		case GPDB_OID_OID:
-			return GPOS_NEW(mp) CMDTypeOidGPDB(mp);
+			return CMDTypeLegacyFamily<CMDTypeOidGPDB>::Make(mp, oid_type);
 	}
 
 	// continue to construct a generic type
@@ -1414,14 +1489,8 @@ CTranslatorRelcacheToDXL::RetrieveType(CMemoryPool *mp, IMDId *mdid)
 		is_redistributable = true;
 	}
 
-	CMDIdGPDB *mdid_legacy_distr_opfamily = nullptr;
-	OID legacy_opclass = gpdb::GetLegacyCdbHashOpclassForBaseType(oid_type);
-	if (legacy_opclass != InvalidOid)
-	{
-		OID legacy_opfamily = gpdb::GetOpclassFamily(legacy_opclass);
-		mdid_legacy_distr_opfamily =
-			GPOS_NEW(mp) CMDIdGPDB(IMDId::EmdidGeneral, legacy_opfamily);
-	}
+	IMDId *mdid_legacy_distr_opfamily =
+		RetrieveLegacyDistrOpfamily(mp, oid_type);
 
 	OID part_opfamily = gpdb::GetDefaultPartitionOpfamilyForType(oid_type);
 	CMDIdGPDB *mdid_part_opfamily = nullptr;
