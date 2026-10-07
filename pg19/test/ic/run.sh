@@ -28,9 +28,10 @@
 # run over udp2 and the proxy only on request (../ic_udp2, ../ic_proxy).
 #
 # A coordinator and two segments, with gp_orca, whose plans alone stream,
-# and the modules of the transports built: udp2, and interconnect, the
-# proxy's, whose proxies listen on TCP at their nodes' ports and
-# IC_PROXY_OFFSET more.  The coordinator's gp.interconnect_type decides
+# and the modules of the transports built: udp2; interconnect, the proxy's,
+# whose proxies listen on TCP at their nodes' ports and IC_PROXY_OFFSET
+# more; and shm, which carries the rows of the segments of one host through
+# memory they share.  The coordinator's gp.interconnect_type decides
 # which transport carries a statement's Motions on every node
 # (gp_motion.c), so a session's SET makes it every node's.
 #
@@ -59,6 +60,7 @@ SECRET="ic-secret-$RANDOM$RANDOM$RANDOM"
 PRELOAD='gp_core,gp_sql,gp_orca'
 [ -f "$PKGLIB/udp2.so" ] && PRELOAD="$PRELOAD,udp2"
 [ -f "$PKGLIB/interconnect.so" ] && PRELOAD="$PRELOAD,interconnect"
+[ -f "$PKGLIB/shm.so" ] && PRELOAD="$PRELOAD,shm"
 
 pass=0; fail=0
 ok()   { printf '  ok     %s\n' "$1"; pass=$((pass + 1)); }
@@ -142,10 +144,10 @@ if [ "$started" -eq 0 ] || [ -n "$out" ]; then
 fi
 ok "the cluster starts, with $PRELOAD"
 
-# tcp, udpifc and relay are gp_core's; udp2 and the proxy their modules',
-# where they are built.
+# tcp, udpifc and relay are gp_core's; udp2, the proxy and shm their
+# modules', where they are built.
 TRANSPORTS="tcp udpifc"
-for t in udp2 proxy; do
+for t in udp2 proxy shm; do
 	out=$(q 0 "SET gp.interconnect_type = $t; SHOW gp.interconnect_type;")
 	if [ "$out" = "$t" ]; then
 		TRANSPORTS="$TRANSPORTS $t"

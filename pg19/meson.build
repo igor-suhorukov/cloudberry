@@ -459,6 +459,15 @@ if libuv_dep.found()
   )
 endif
 
+# The shm transport's channels: memfd_create() where the C library has it,
+# POSIX shared memory otherwise, which an older C library has in librt
+# (modules/shm/shm.c).
+shm_c_args = ['-D_GNU_SOURCE']
+if cc.has_function('memfd_create', prefix: '#define _GNU_SOURCE\n#include <sys/mman.h>')
+  shm_c_args += '-DHAVE_MEMFD_CREATE'
+endif
+shm_rt_dep = cc.find_library('rt', required: false)
+
 modules = [
   {
     'name': 'gp_core', 'preload': true, 'extension': true, 'build': true,
@@ -545,6 +554,16 @@ modules = [
     'link_with': udp2_core,
     'include_directories': udp2_inc,
     'dependencies': [dependency('threads')],
+  },
+  {
+    # The shared-memory transport, not in Cloudberry: rings a sender and its
+    # receivers on one host share, waited on through eventfd(2), where the
+    # system has it.
+    'name': 'shm', 'preload': true, 'extension': false,
+    'build': cc.has_header('sys/eventfd.h'),
+    'sources': files('modules/shm/shm.c'),
+    'c_args': shm_c_args,
+    'dependencies': [shm_rt_dep],
   },
   {
     # ORCA, which is C++: the module is its four core libraries from

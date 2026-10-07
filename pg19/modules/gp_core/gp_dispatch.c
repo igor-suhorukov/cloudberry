@@ -340,6 +340,14 @@ static const char *const synced_settings[] = {
 	"gp.udpic_fault_inject_bitmap",
 	"gp.udpic_network_disable_ipv6",
 	/*
+	 * shm's, which a sender reads as it makes its rings, and both ends of a
+	 * pair as they decide whether it goes through them, as their statement
+	 * begins: passed over where not loaded
+	 */
+	"gp.shm_ring_size",
+	"gp.shm_debug_remote",
+	"gp.shm_debug_shm_open",
+	/*
 	 * gp_resource's, what the coordinator's resource manager says of the
 	 * statement: the weight its queue's priority gives it, the group it runs
 	 * in, and the memory it is given

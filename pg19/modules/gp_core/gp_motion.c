@@ -199,16 +199,19 @@
  * (gp_ic.c's table) -- over TCP (tcp), in UDP packets acknowledged as
  * Cloudberry's udpifc sends them (udpifc), through UDP2's C++ core (udp2,
  * the udp2 module), through a proxy on each node that carries every pair of
- * nodes' Motions over one connection (proxy, the interconnect module) -- or
- * a slice at a time, the rows relayed through the coordinator (relay).  An
- * enum rather than Cloudberry's string, whose check takes udp2 and proxy
- * only where their module has registered them.
+ * nodes' Motions over one connection (proxy, the interconnect module),
+ * through memory the segment processes of one host share (shm, the shm
+ * module, not in Cloudberry) -- or a slice at a time, the rows relayed
+ * through the coordinator (relay).  An enum rather than Cloudberry's string,
+ * whose check takes udp2, proxy and shm only where their module has
+ * registered them.
  */
 #define GP_INTERCONNECT_RELAY	0
 #define GP_INTERCONNECT_TCP		1
 #define GP_INTERCONNECT_UDPIFC	2
 #define GP_INTERCONNECT_UDP2	3
 #define GP_INTERCONNECT_PROXY	4
+#define GP_INTERCONNECT_SHM		5
 
 static const struct config_enum_entry interconnect_type_options[] = {
 	{"relay", GP_INTERCONNECT_RELAY, false},
@@ -216,6 +219,7 @@ static const struct config_enum_entry interconnect_type_options[] = {
 	{"udpifc", GP_INTERCONNECT_UDPIFC, false},
 	{"udp2", GP_INTERCONNECT_UDP2, false},
 	{"proxy", GP_INTERCONNECT_PROXY, false},
+	{"shm", GP_INTERCONNECT_SHM, false},
 	{NULL, 0, false}
 };
 
@@ -5580,7 +5584,10 @@ GpMotionInit(void)
 							 "where the udp2 module is loaded.  \"proxy\": "
 							 "through a proxy on each node, which carries every "
 							 "pair of nodes' rows over one connection, where the "
-							 "interconnect module is loaded.  \"relay\": a "
+							 "interconnect module is loaded.  \"shm\": the "
+							 "same, through memory the segment processes of one "
+							 "host share, and over tcp between hosts, where the "
+							 "shm module is loaded.  \"relay\": a "
 							 "slice at a time, its rows relayed through the "
 							 "coordinator to files the receiving segments keep.  "
 							 "Cloudberry calls this gp_interconnect_type.",
