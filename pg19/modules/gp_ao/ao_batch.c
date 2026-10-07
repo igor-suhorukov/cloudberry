@@ -20,7 +20,8 @@
  * ao_batch.c
  *	  vexec's batch source for ao_row and ao_column: a scan's rows a batch
  *	  of columns at a time (pg_vector_executor.md §3.5.4; the contract is
- *	  vexec_source.h).
+ *	  vexec_source.h); and its batch sink for ao_column: an INSERT's rows a
+ *	  batch of columns at a time (§3.16; vexec_sink.h), at the end.
  *
  * vexec begins the scan itself, through table_beginscan(), and hands its
  * descriptor to begin(): the batches come from gp_ao's own scan, over the
@@ -94,6 +95,7 @@
 #include "utils/rel.h"
 #include "varatt.h"
 
+#include "vexec_sink.h"
 #include "vexec_source.h"
 
 #include "gp_ao.h"
@@ -1300,11 +1302,91 @@ ao_batch_end(void *arg)
 }
 
 /* ------------------------------------------------------------------------- */
+/* The sink, for ao_column                                                   */
+/* ------------------------------------------------------------------------- */
+
+/*
+ * vexec's VecInsert writes an INSERT's batches into a table by column
+ * through the sink (vexec_sink.h) where it would form rows for
+ * table_multi_insert(): each column's values go into its block as
+ * ao_column_append() lays a row's out (ao_column_append_batch()), a run of
+ * rows at a time, through the statement's writer of the table, which
+ * ao_multi_insert() appends to (ao_insert_batch(), ao_dml.c).  The layouts,
+ * as a column block holds the values:
+ *
+ *	by-value, and		FIXED, the type's width, at its stride in an array;
+ *	fixed-length		bool BYTE_BOOL, a byte a row
+ *	by-reference
+ *	text, varchar,		OFFSETS: the bytes, to which the block's header,
+ *	bpchar, bytea		short where heap_fill_tuple() makes it short, is
+ *						added as they are appended
+ *	any other varlena	DATUM, headered, as a row's
+ *	cstring				none: VecInsert forms rows
+ *
+ * A table by row takes rows: it has no sink.
+ */
+static bool
+ao_sink_supports(Relation rel, AttrNumber attnum, VexecSinkLayout *layout)
+{
+	Form_pg_attribute att = TupleDescAttr(RelationGetDescr(rel), attnum - 1);
+
+	memset(layout, 0, sizeof(VexecSinkLayout));
+	if (att->attbyval)
+	{
+		layout->layout = att->atttypid == BOOLOID ? VEXEC_BYTE_BOOL : VEXEC_FIXED;
+		layout->width = att->attlen;
+		layout->stride = att->attlen;
+		return true;
+	}
+	if (att->attlen > 0)
+	{
+		layout->layout = VEXEC_FIXED;
+		layout->width = att->attlen;
+		layout->stride = att_align_nominal(att->attlen, att->attalign);
+		return true;
+	}
+	if (att->attlen != -1)
+		return false;
+	if (att->atttypid == TEXTOID || att->atttypid == VARCHAROID ||
+		att->atttypid == BPCHAROID || att->atttypid == BYTEAOID)
+		layout->layout = VEXEC_OFFSETS;
+	else
+		layout->layout = VEXEC_DATUM;
+	return true;
+}
+
+/* The statement's writer of the table is ao_insert_state()'s: no state of its own. */
+static void *
+ao_sink_begin(Relation rel, const VexecSinkSpec *spec)
+{
+	(void) spec;
+	return rel;
+}
+
+static void
+ao_sink_put(void *state, VexecSinkBatch *batch)
+{
+	Relation	rel = (Relation) state;
+
+	CHECK_FOR_INTERRUPTS();
+	ao_insert_batch(rel, batch->columns, batch->nrows, batch->tids);
+	pgstat_count_heap_insert(rel, batch->nrows);
+}
+
+/* The statement's blocks written, as finish_bulk_insert writes them. */
+static void
+ao_sink_end(void *state)
+{
+	ao_dml_flush(RelationGetRelid((Relation) state));
+}
+
+/* ------------------------------------------------------------------------- */
 /* Registration                                                              */
 /* ------------------------------------------------------------------------- */
 
 static VexecSourceRoutine ao_row_source;
 static VexecSourceRoutine ao_column_source;
+static VexecSinkRoutine ao_column_sink;
 
 static void
 ao_batch_routine(VexecSourceRoutine *r, bool columnar)
@@ -1325,9 +1407,10 @@ ao_batch_routine(VexecSourceRoutine *r, bool columnar)
 }
 
 /*
- * vexec's batch sources for ao_row and ao_column, keyed by their routines,
- * from _PG_init while the postmaster preloads libraries.  Without vexec they
- * are unused entries of the registry (vexec_source.h).
+ * vexec's batch sources for ao_row and ao_column, and its sink for
+ * ao_column, keyed by their routines, from _PG_init while the postmaster
+ * preloads libraries.  Without vexec they are unused entries of the
+ * registries (vexec_source.h, vexec_sink.h).
  */
 void
 ao_batch_register(void)
@@ -1336,4 +1419,15 @@ ao_batch_register(void)
 	ao_batch_routine(&ao_column_source, true);
 	vexec_register_source(&ao_row_source);
 	vexec_register_source(&ao_column_source);
+
+	memset(&ao_column_sink, 0, sizeof(VexecSinkRoutine));
+	ao_column_sink.size = sizeof(VexecSinkRoutine);
+	ao_column_sink.minor = VEXEC_SINK_MINOR;
+	ao_column_sink.am = ao_table_am_routine(true);
+	ao_column_sink.name = "gp_ao";
+	ao_column_sink.supports = ao_sink_supports;
+	ao_column_sink.begin = ao_sink_begin;
+	ao_column_sink.put = ao_sink_put;
+	ao_column_sink.end = ao_sink_end;
+	vexec_register_sink(&ao_column_sink);
 }

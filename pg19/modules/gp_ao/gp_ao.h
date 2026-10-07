@@ -340,6 +340,14 @@ extern void ao_column_decode(const char *raw, Size rawlen, Form_pg_attribute att
 							 int nrows, Datum *values, bool *isnull);
 extern Datum ao_detoast_value(Form_pg_attribute att, Datum value);
 
+/* vexec's sink (ao_batch.c): a batch's column a run of rows at a time */
+struct VexecColumn;
+extern int	ao_column_batch_fit(const AoColumnBuilder *cb, Form_pg_attribute att,
+								const struct VexecColumn *col, int start, int n,
+								Size blocksize);
+extern void ao_column_append_batch(AoColumnBuilder *cb, Form_pg_attribute att,
+								   const struct VexecColumn *col, int start, int n);
+
 /* ------------------------------------------------------------------------- */
 /* Writing (ao_dml.c)                                                        */
 /* ------------------------------------------------------------------------- */
@@ -355,6 +363,8 @@ extern AoInsertState *ao_insert_turn(AoInsertState *st, Relation rel);
 extern void ao_dml_set_compaction_writer(bool on);
 extern void ao_insert_slot(AoInsertState *st, Relation rel,
 						   TupleTableSlot *slot);
+extern void ao_insert_batch(Relation rel, const struct VexecColumn *columns,
+							int nrows, ItemPointer tids);
 extern bool ao_pending_fetch(Relation rel, ItemPointer tid,
 							 TupleTableSlot *slot);
 extern bool ao_pending_flush(Relation rel, ItemPointer tid);

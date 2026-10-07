@@ -53,6 +53,13 @@
  * compaction, or for a table this transaction made or rewrote, as
  * Cloudberry's ShouldUseReservedSegno() says.
  *
+ * vexec's sink (ao_batch.c) appends a batch's rows to a table by column a
+ * run at a time (ao_insert_batch()), each run as many rows as a row at a
+ * time would append before the next thing ao_insert_slot() does between
+ * rows -- reserving row numbers, beginning or ending a block, the group
+ * turning to its next writer -- so that blocks, row numbers and files are
+ * the same as rows appended one by one would make them.
+ *
  *-------------------------------------------------------------------------
  */
 #include "postgres.h"
@@ -71,6 +78,8 @@
 #include "utils/relcache.h"
 #include "utils/snapmgr.h"
 #include "utils/syscache.h"
+
+#include "vexec_source.h"
 
 #include "gp_ao.h"
 #include "gp_core_api.h"
@@ -682,6 +691,91 @@ ao_insert_slot(AoInsertState *st, Relation rel, TupleTableSlot *slot)
 		st->block_nrows >= AO_MAX_ROWS_PER_BLOCK)
 		ao_flush_block(st, rel);
 
+	MemoryContextSwitchTo(old);
+}
+
+/*
+ * A batch's rows from vexec's sink, into a table by column, as
+ * ao_multi_insert() appends rows one by one: each run of rows as long as
+ * the writer takes before it would do anything between rows -- its row
+ * numbers reserved, its group turned to another writer, its block full by
+ * rows or by a column's size -- appended a column at a time; then the run's
+ * TIDs, and the block written where it is full.  Each row's TID goes into
+ * tids[] where given.
+ */
+void
+ao_insert_batch(Relation rel, const VexecColumn *columns, int nrows,
+				ItemPointer tids)
+{
+	TupleDesc	desc = RelationGetDescr(rel);
+	AoInsertState *st = ao_insert_state(rel);
+	MemoryContext old = MemoryContextSwitchTo(ao_dml_context());
+	int			done = 0;
+
+	Assert(st->columnar);
+	while (done < nrows)
+	{
+		int			n = nrows - done;
+		bool		full = false;
+
+		st = ao_insert_turn(st, rel);
+		if (st->lead->nfiles > 1 && st->range < gp_appendonly_insert_files_tuples_range)
+			n = Min(n, gp_appendonly_insert_files_tuples_range - st->range);
+		(void) AO_FAULT("appendonly_insert", rel);
+
+		if (st->next_rownum == st->reserved_end)
+		{
+			int64		first = ao_reserve_rownums(rel, st->segno,
+												   st->reserve_chunk);
+
+			/* A block's rows are numbered one after another. */
+			if (first != st->reserved_end && st->block_nrows > 0)
+				ao_flush_block(st, rel);
+			st->next_rownum = first;
+			st->reserved_end = first + st->reserve_chunk;
+			st->reserve_chunk = Min(st->reserve_chunk * 2, 65536);
+		}
+		if (st->block_nrows == 0)
+		{
+			st->block_first = st->next_rownum;
+			if (st->has_unique)
+			{
+				/* See ao_blkdir_insert_placeholder(). */
+				ao_blkdir_insert_placeholder(st->storage_id, st->segno,
+											 st->block_first, &st->placeholder);
+				CommandCounterIncrement();
+			}
+		}
+		n = (int) Min((int64) n, st->reserved_end - st->next_rownum);
+		n = Min(n, AO_MAX_ROWS_PER_BLOCK - st->block_nrows);
+		for (int i = 0; i < desc->natts; i++)
+			if (!TupleDescAttr(desc, i)->attisdropped)
+				n = ao_column_batch_fit(&st->cols[i], TupleDescAttr(desc, i),
+										&columns[i], done, n,
+										(Size) st->colopts[i].blocksize);
+
+		for (int i = 0; i < desc->natts; i++)
+		{
+			ao_column_append_batch(&st->cols[i], TupleDescAttr(desc, i),
+								   &columns[i], done, n);
+			if (st->cols[i].values.len >= st->colopts[i].blocksize)
+				full = true;
+		}
+		if (tids != NULL)
+			for (int k = 0; k < n; k++)
+				AoTidSet(&tids[done + k], st->segno, st->next_rownum + k);
+		if (st->inserted == 0)
+			st->first_rownum = st->next_rownum;
+		st->next_rownum += n;
+		st->block_nrows += n;
+		st->inserted += n;
+		st->range += n;
+		st->sf->tupcount += n;
+		done += n;
+
+		if (full || st->block_nrows >= AO_MAX_ROWS_PER_BLOCK)
+			ao_flush_block(st, rel);
+	}
 	MemoryContextSwitchTo(old);
 }
 

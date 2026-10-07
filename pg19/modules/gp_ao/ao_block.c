@@ -35,6 +35,10 @@
  * laid out one after another (below), so runs are runs of bytes, which
  * zlib's deflate encodes.
  *
+ * A column block is built a row at a time (ao_column_append()), or, for
+ * vexec's sink, a run of a batch's rows at a time
+ * (ao_column_append_batch()), into the same layout.
+ *
  *-------------------------------------------------------------------------
  */
 #include "postgres.h"
@@ -51,6 +55,8 @@
 #include "port/pg_crc32c.h"
 #include "utils/memutils.h"
 #include "varatt.h"
+
+#include "vexec_source.h"
 
 #include "gp_ao.h"
 
@@ -283,6 +289,9 @@ pad_to(StringInfo buf, Size offset)
 		appendStringInfoChar(buf, '\0');
 }
 
+static void ao_column_append_value(AoColumnBuilder *cb, Form_pg_attribute att,
+								   Datum value);
+
 /* One more row's value of a column, as heap_fill_tuple() would store it. */
 void
 ao_column_append(AoColumnBuilder *cb, Form_pg_attribute att, Datum value,
@@ -299,7 +308,13 @@ ao_column_append(AoColumnBuilder *cb, Form_pg_attribute att, Datum value,
 		cb->hasnulls = true;
 		return;
 	}
+	ao_column_append_value(cb, att, value);
+}
 
+/* A value not NULL, laid out after the column's others. */
+static void
+ao_column_append_value(AoColumnBuilder *cb, Form_pg_attribute att, Datum value)
+{
 	if (att->attbyval)
 	{
 		pad_to(&cb->values, att_align_nominal(cb->values.len, att->attalign));
@@ -345,6 +360,170 @@ ao_column_append(AoColumnBuilder *cb, Form_pg_attribute att, Datum value,
 	{
 		pad_to(&cb->values, att_align_nominal(cb->values.len, att->attalign));
 		appendBinaryStringInfo(&cb->values, DatumGetPointer(value), att->attlen);
+	}
+}
+
+/* Whether a batch's row r is NULL in col; a dropped column's always is. */
+static inline bool
+batch_isnull(Form_pg_attribute att, const VexecColumn *col, int r)
+{
+	return att->attisdropped ||
+		(col->validity != NULL && !((col->validity[r >> 6] >> (r & 63)) & 1));
+}
+
+/*
+ * Where a batch's value of row r ends, appended after len bytes of the
+ * column's values as ao_column_append() would append it: its alignment's
+ * padding and its bytes.  The layouts are those gp_ao's sink asks for
+ * (ao_batch.c): FIXED and BYTE_BOOL the type's bytes, OFFSETS a varlena's
+ * bytes without a header, DATUM a varlena with one.
+ */
+static inline Size
+batch_value_end(Form_pg_attribute att, const VexecColumn *col, int r, Size len)
+{
+	if (att->attbyval || att->attlen > 0)
+		return att_align_nominal(len, att->attalign) + att->attlen;
+	if (col->layout == VEXEC_OFFSETS)
+	{
+		const int32 *offsets = (const int32 *) col->values;
+		Size		payload = offsets[r + 1] - offsets[r];
+
+		if (att->attstorage != TYPSTORAGE_PLAIN &&
+			payload + VARHDRSZ_SHORT <= VARATT_SHORT_MAX)
+			return len + payload + VARHDRSZ_SHORT;
+		return att_align_nominal(len, att->attalign) + payload + VARHDRSZ;
+	}
+	else
+	{
+		varlena    *v = (varlena *) DatumGetPointer(((const Datum *) col->values)[r]);
+
+		if (VARATT_IS_SHORT(v))
+			return len + VARSIZE_SHORT(v);
+		if (att->attstorage != TYPSTORAGE_PLAIN && VARATT_CAN_MAKE_SHORT(v))
+			return len + VARATT_CONVERTED_SHORT_SIZE(v);
+		return att_align_nominal(len, att->attalign) + VARSIZE_ANY(v);
+	}
+}
+
+/*
+ * How many of a batch's rows [start, start + n) the column's block takes
+ * before its values reach blocksize: the row a row at a time would end the
+ * block after (ao_insert_slot()) is the last, so that a block built a batch
+ * at a time ends where one built a row at a time ends.
+ */
+int
+ao_column_batch_fit(const AoColumnBuilder *cb, Form_pg_attribute att,
+					const VexecColumn *col, int start, int n, Size blocksize)
+{
+	Size		len = cb->values.len;
+
+	for (int r = start; r < start + n; r++)
+	{
+		if (batch_isnull(att, col, r))
+			continue;
+		len = batch_value_end(att, col, r, len);
+		if (len >= blocksize)
+			return r - start + 1;
+	}
+	return n;
+}
+
+/*
+ * A batch's rows [start, start + n) of the column, as ao_column_append()
+ * appends a row's: the bitmap of NULLs, 1 = NULL, the batch's validity
+ * inverted and shifted to the block's next row; the values not NULL, each
+ * as heap_fill_tuple() lays it out -- a run of fixed-width values without a
+ * NULL whose width keeps their alignment copied at once, a varlena's short
+ * header made where heap_fill_tuple() makes one.  The values are never
+ * external or compressed (vexec_sink.h).
+ */
+void
+ao_column_append_batch(AoColumnBuilder *cb, Form_pg_attribute att,
+					   const VexecColumn *col, int start, int n)
+{
+	int			first = cb->nrows;
+	int			need = (first + n + 7) / 8;
+	bool		anynull = false;
+
+	/* the bitmap's bytes for the rows, zero, as ao_column_append() adds them */
+	while (cb->nulls.len < need)
+		appendStringInfoChar(&cb->nulls, 0);
+	for (int k = 0; k < n; k++)
+		if (batch_isnull(att, col, start + k))
+		{
+			int			bit = first + k;
+
+			cb->nulls.data[bit / 8] |= (char) (1 << (bit % 8));
+			anynull = true;
+		}
+	if (anynull)
+		cb->hasnulls = true;
+	cb->nrows += n;
+	if (att->attisdropped)
+		return;
+
+	if (att->attbyval || att->attlen > 0)
+	{
+		const char *values = (const char *) col->values;
+		int			stride = col->stride;
+
+		if (!anynull && stride == att->attlen &&
+			att_align_nominal(att->attlen, att->attalign) == att->attlen)
+		{
+			/* one value after another, each where the last left off */
+			pad_to(&cb->values, att_align_nominal(cb->values.len, att->attalign));
+			appendBinaryStringInfo(&cb->values, values + (Size) start * stride,
+								   (int) ((Size) n * att->attlen));
+			return;
+		}
+		for (int r = start; r < start + n; r++)
+		{
+			if (batch_isnull(att, col, r))
+				continue;
+			pad_to(&cb->values, att_align_nominal(cb->values.len, att->attalign));
+			appendBinaryStringInfo(&cb->values, values + (Size) r * stride, att->attlen);
+		}
+		return;
+	}
+
+	if (col->layout == VEXEC_OFFSETS)
+	{
+		const int32 *offsets = (const int32 *) col->values;
+		const char *data = (const char *) col->buffers[0];
+
+		for (int r = start; r < start + n; r++)
+		{
+			Size		payload;
+
+			if (batch_isnull(att, col, r))
+				continue;
+			payload = offsets[r + 1] - offsets[r];
+			if (att->attstorage != TYPSTORAGE_PLAIN &&
+				payload + VARHDRSZ_SHORT <= VARATT_SHORT_MAX)
+			{
+				char		hdr;
+
+				SET_VARSIZE_1B(&hdr, payload + VARHDRSZ_SHORT);
+				appendStringInfoChar(&cb->values, hdr);
+			}
+			else
+			{
+				/* the 4-byte header written in place, as heap_fill_tuple() writes it */
+				pad_to(&cb->values, att_align_nominal(cb->values.len, att->attalign));
+				enlargeStringInfo(&cb->values, VARHDRSZ);
+				SET_VARSIZE(cb->values.data + cb->values.len, payload + VARHDRSZ);
+				cb->values.len += VARHDRSZ;
+			}
+			appendBinaryStringInfo(&cb->values, data + offsets[r], (int) payload);
+		}
+		return;
+	}
+
+	for (int r = start; r < start + n; r++)
+	{
+		if (batch_isnull(att, col, r))
+			continue;
+		ao_column_append_value(cb, att, ((const Datum *) col->values)[r]);
 	}
 }
 
