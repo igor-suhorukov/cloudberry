@@ -161,6 +161,14 @@ extern int	GpMotionType(Plan *plan);
 extern int	GpMotionSlice(Plan *plan);
 
 /*
+ * A Redistribute's hash functions, one for each hash expression, and
+ * whether one is a legacy function (GpCoreApi.motion_hash_functions); and
+ * how many sort keys a Gather merges by, 0 for none.
+ */
+extern List *GpMotionHashFunctions(Plan *plan, bool *legacy);
+extern int	GpMotionMergeKeys(Plan *plan);
+
+/*
  * The slice that receives a Motion between segments, or a Gather into one
  * -- the slice of the fragment it is in, which the translator knows -- so
  * that its senders can stream to the processes running that slice.
@@ -229,6 +237,13 @@ extern bool GpMotionIsFragment(PlannedStmt *stmt);
 extern bool GpMotionEndpointsCanRun(PlannedStmt *stmt, Plan *gather);
 extern bool GpMotionIsSender(PlanState *ps);
 extern bool GpMotionFinish(PlanState *ps);
+
+/*
+ * The subtree a node of another module's reads no more, squelched as a
+ * hash join's or a Limit's is, where the node is never run again
+ * (GpCoreApi.squelch_subtree).
+ */
+extern bool GpMotionSquelch(PlanState *ps);
 
 /* The CustomScan, and the segments' planner hook; from gp_core's _PG_init. */
 extern void GpMotionInit(void);

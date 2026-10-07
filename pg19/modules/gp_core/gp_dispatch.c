@@ -453,6 +453,7 @@ static const char *const synced_settings[] = {
 	"vexec.enable_running_bound",
 	"vexec.enable_window",
 	"vexec.enable_insert",
+	"vexec.enable_motion_frames",
 	"vexec.orca",
 	"vexec.compact_threshold",
 	"vexec.batch_format",
@@ -620,6 +621,15 @@ sync_reset_role(StringInfo sql, char **sent, int i, bool *any, bool *reset)
  */
 #define GATHER_FETCH_FIRST	1
 #define GATHER_FETCH_ROWS	1000
+
+/*
+ * NOT IN CLOUDBERRY.  And no more rows than this many bytes' worth, at the
+ * size of the last batch's rows: a vectorized executor's frames are rows of
+ * a whole batch each (pg_vector_executor.md §3.10), tens of kilobytes to
+ * megabytes, of which a thousand in flight from each segment would hold the
+ * coordinator's memory -- the count of frames, bounded by their bytes.
+ */
+#define GATHER_FETCH_BYTES	(8 * 1024 * 1024)
 
 /*
  * How long a merge of a streaming gather waits on one segment's batch,
@@ -5800,6 +5810,7 @@ typedef struct GpGatherSeg
 	bool		done;			/* the cursor has nothing more */
 	bool		closed;			/* the cursor is closed (GpGatherEnd()) */
 	int			asked;			/* rows the batch in flight asked for */
+	int64		row_bytes;		/* the last batch's bytes a row, 0 before */
 
 	/*
 	 * Batches that came while "arrived" was taken, read while the gather
@@ -6427,6 +6438,9 @@ gather_poll(GpGatherSeg *s)
 		if (status == PGRES_TUPLES_OK)
 		{
 			s->whole = PQntuples(res) >= s->asked;
+			/* the batch's memory a row: libpq's, under the backend's wrapper */
+			if (PQntuples(res) > 0)
+				s->row_bytes = (int64) PQresultMemorySize(res->res) / PQntuples(res);
 			if (s->arrived == NULL && s->nheld == 0)
 				s->arrived = res;
 			else
@@ -6455,11 +6469,16 @@ gather_poll(GpGatherSeg *s)
 	return progress;
 }
 
-/* Ask for a segment's next batch, ten times the last, up to the most. */
+/*
+ * Ask for a segment's next batch, ten times the last, up to the most, and
+ * no more of them than GATHER_FETCH_BYTES' worth at the last batch's size.
+ */
 static void
 gather_fetch(GpGatherSeg *s)
 {
 	s->asked = Min(s->asked * 10, GATHER_FETCH_ROWS);
+	if (s->row_bytes > 0 && (int64) s->asked * s->row_bytes > GATHER_FETCH_BYTES)
+		s->asked = (int) Max(GATHER_FETCH_BYTES / s->row_bytes, 1);
 	conn_send(s->conn, psprintf("FETCH %d FROM %s", s->asked,
 								s->gather->cursor));
 	s->conn->fetching = s;

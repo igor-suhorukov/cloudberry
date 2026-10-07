@@ -97,6 +97,16 @@ extern int	GpHashSegmentForKey(const GpPolicy *policy, const Oid *types,
 /* Cloudberry's reduction of a 32-bit hash to one of n segments. */
 extern int	GpJumpConsistentHash(uint64 key, int32 num_segments);
 
+/*
+ * The hash of "nkeys" columns hashed with these functions, over "nsegs"
+ * segments, and a row's segment, its key columns in the key's order --
+ * GpCoreApi.hash_make and hash_segment, for another module's cdbhash a row
+ * at a time.
+ */
+extern void *GpHashMakeForFunctions(int nsegs, int nkeys, const Oid *hashfuncs);
+extern int	GpHashSegmentOfKey(void *hash, const Datum *values,
+							   const bool *isnull);
+
 /* ------------------------------------------------------------------------- */
 /* The legacy cdbhash (gp_legacyhash.c)                                      */
 /* ------------------------------------------------------------------------- */

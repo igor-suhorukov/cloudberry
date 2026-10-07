@@ -654,6 +654,40 @@ GpMotionSlice(Plan *plan)
 						   MOTION_PRIVATE_SLICE));
 }
 
+/*
+ * A Redistribute's hash functions, as its senders hash its rows
+ * (motion_begin_sending()) -- for a vectorized executor that hashes a
+ * batch's keys itself and sends its rows to the segments they hash to
+ * through an Explicit Redistribute of its own (pg_vector_executor.md
+ * §3.10).  A legacy one makes the whole key hash as the legacy cdbhash
+ * does (GpHashSetFunction()).
+ */
+List *
+GpMotionHashFunctions(Plan *plan, bool *legacy)
+{
+	List	   *hashfuncs;
+
+	Assert(GpMotionIs(plan));
+	*legacy = false;
+	if (GpMotionType(plan) != GP_MOTION_HASH)
+		return NIL;
+	hashfuncs = (List *) list_nth(((CustomScan *) plan)->custom_private,
+								  MOTION_PRIVATE_HASHFUNCS);
+	foreach_oid(funcid, hashfuncs)
+		if (OidIsValid(funcid) && GpHashIsLegacyFunction(funcid))
+			*legacy = true;
+	return list_copy(hashfuncs);
+}
+
+/* How many sort keys a Gather merges its senders' streams by. */
+int
+GpMotionMergeKeys(Plan *plan)
+{
+	Assert(GpMotionIs(plan));
+	return list_length((List *) list_nth(((CustomScan *) plan)->custom_private,
+										 MOTION_PRIVATE_KEYS));
+}
+
 void
 GpMotionSetPrepare(Plan *plan, List *slices)
 {
@@ -2088,8 +2122,28 @@ squelch_point(PlanState *ps)
 }
 
 /*
+ * NOT IN CLOUDBERRY.  Another module's nodes of the fragment running here
+ * that are never run again, above a Motion that streams to this process, as
+ * squelch_arm() finds them: a vectorized executor's hash join, which stops
+ * reading its sides as PostgreSQL's does, and asks gp_core to squelch them
+ * (GpMotionSquelch(), GpCoreApi.squelch_subtree) rather than read them to
+ * their end.  It cannot be wrapped as PostgreSQL's nodes are: a vector
+ * parent takes its batches without ExecProcNode.  In the fragment's memory,
+ * and forgotten with it.
+ */
+static List *squelch_others = NIL;
+static MemoryContextCallback squelch_others_reset;
+
+static void
+squelch_others_forget(void *arg)
+{
+	squelch_others = NIL;
+}
+
+/*
  * Does a subtree receive a slice that streams to this process?  And those of
- * its nodes that squelch below them, where they are not run again, wrapped.
+ * its nodes that squelch below them, where they are not run again, wrapped
+ * -- or, another module's, noted.
  */
 static bool
 squelch_arm(PlanState *ps, bool again, void *context)
@@ -2110,7 +2164,36 @@ squelch_arm(PlanState *ps, bool again, void *context)
 	streams = squelch_children(ps, again, squelch_arm, context);
 	if (streams && !again && squelch_point(ps))
 		squelch_wrap(ps);
+	else if (streams && !again && IsA(ps, CustomScanState))
+	{
+		MemoryContext cxt = ps->state->es_query_cxt;
+		MemoryContext oldcxt;
+
+		if (squelch_others == NIL)
+		{
+			squelch_others_reset.func = squelch_others_forget;
+			squelch_others_reset.arg = NULL;
+			MemoryContextRegisterResetCallback(cxt, &squelch_others_reset);
+		}
+		oldcxt = MemoryContextSwitchTo(cxt);
+		squelch_others = lappend(squelch_others, ps);
+		MemoryContextSwitchTo(oldcxt);
+	}
 	return streams;
+}
+
+/*
+ * A node of another module's that reads no more of its children: its
+ * subtree squelched, where squelch_arm() found it never run again with a
+ * Motion streaming below it; false, and nothing done, anywhere else.
+ */
+bool
+GpMotionSquelch(PlanState *ps)
+{
+	if (!list_member_ptr(squelch_others, ps))
+		return false;
+	squelch_subtree(ps);
+	return true;
 }
 
 /*

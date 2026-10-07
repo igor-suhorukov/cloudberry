@@ -60,6 +60,7 @@
 #include "gp_foreign.h"
 #include "gp_fts.h"
 #include "gp_gdd.h"
+#include "gp_hash.h"
 #include "gp_motion.h"
 #include "gp_label.h"
 #include "gp_log.h"
@@ -142,6 +143,12 @@ static const GpCoreApi gp_core_api = {
 	.retrieve_sql = GpEndpointRetrieveSql,
 	.extension_mark_add = GpExtensionMarkAdd,
 	.size_from_am_register = GpSizeFromAmRegister,
+	.motion_hash_functions = GpMotionHashFunctions,
+	.motion_merge_keys = GpMotionMergeKeys,
+	.hash_make = GpHashMakeForFunctions,
+	.hash_segment = GpHashSegmentOfKey,
+	.squelch_subtree = GpMotionSquelch,
+	.explain_register = GpExplainRegister,
 };
 
 /*

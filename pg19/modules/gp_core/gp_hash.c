@@ -148,6 +148,38 @@ GpHashSegmentForKey(const GpPolicy *policy, const Oid *types,
 	return GpHashSegment(&h, values, isnull);
 }
 
+/*
+ * NOT IN CLOUDBERRY.  A key of "nkeys" columns hashed with these functions,
+ * over "nsegs" segments, as a Redistribute's senders hash it
+ * (gp_motion.c, motion_begin_sending()), for another module that hashes
+ * rows a row at a time where it cannot hash them itself -- a vectorized
+ * executor's frames across Motions (pg_vector_executor.md §3.10).  Its
+ * columns are its rows' own, 1 to nkeys.
+ */
+void *
+GpHashMakeForFunctions(int nsegs, int nkeys, const Oid *hashfuncs)
+{
+	GpHash	   *h = (GpHash *) palloc0(sizeof(GpHash));
+
+	h->ptype = POLICYTYPE_PARTITIONED;
+	h->numsegs = nsegs;
+	h->nattrs = nkeys;
+	h->attrs = palloc_array(AttrNumber, Max(nkeys, 1));
+	h->hashfuncs = palloc_array(FmgrInfo, Max(nkeys, 1));
+	for (int i = 0; i < nkeys; i++)
+	{
+		h->attrs[i] = i + 1;
+		GpHashSetFunction(h, i, hashfuncs[i]);
+	}
+	return h;
+}
+
+int
+GpHashSegmentOfKey(void *hash, const Datum *values, const bool *isnull)
+{
+	return GpHashSegment((GpHash *) hash, values, isnull);
+}
+
 void
 GpHashSetFunction(GpHash *h, int i, Oid funcid)
 {

@@ -53,6 +53,21 @@ extern struct PlanState *GpExplainAnswerFor(struct PlanState *node);
 typedef int64 (*GpExplainVmemReserved) (void);
 extern void GpExplainSetVmemReserved(GpExplainVmemReserved reserved);
 
+/*
+ * Another module's figures of its own nodes, which EXPLAIN ANALYZE prints
+ * on the coordinator from what the segments that ran them kept
+ * (GpCoreApi.explain_register): "collect" appends a node's bytes, or
+ * nothing, and says whether it did; "deposit" is given a segment's bytes
+ * for the coordinator's node.
+ */
+struct StringInfoData;
+typedef bool (*GpExplainCollect) (struct PlanState *ps,
+								  struct StringInfoData *buf);
+typedef void (*GpExplainDeposit) (struct PlanState *ps, int content,
+								  const char *data, int len);
+extern void GpExplainRegister(GpExplainCollect collect,
+							  GpExplainDeposit deposit);
+
 extern void GpExplainInit(void);
 
 #endif							/* GP_EXPLAIN_H */

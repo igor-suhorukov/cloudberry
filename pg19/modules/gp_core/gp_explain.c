@@ -626,7 +626,27 @@ typedef struct GpReportHeader
 	int64		execmem;		/* the executor's memory at the end */
 	int64		vmem;			/* the most vmem the process reserved */
 	WalUsage	wal;			/* all the part wrote */
+	int32		blob_bytes;		/* the GpReportBlobs after the nodes */
 } GpReportHeader;
+
+/*
+ * NOT IN CLOUDBERRY.  What another module keeps of a node of its own that
+ * a segment ran (GpCoreApi.explain_register): its bytes, after the
+ * GpReportNodes, each behind this.
+ */
+typedef struct GpReportBlob
+{
+	int32		plan_node_id;
+	int32		len;			/* the bytes that follow */
+} GpReportBlob;
+
+/* And as the coordinator keeps them, for the node's deposit. */
+typedef struct NodeBlob
+{
+	int			content;
+	int			len;
+	char	   *data;
+} NodeBlob;
 
 /* A report as the notice filter keeps it, untouched, until it is read. */
 typedef struct RawReport
@@ -649,6 +669,7 @@ typedef struct NodeStats
 {
 	SegFigures *frag;			/* by content: the node, as the segments ran it */
 	SegFigures *stmt;			/* by content: the statements the node sent */
+	List	   *blobs;			/* NodeBlob: another module's, as they came */
 } NodeStats;
 
 typedef struct SliceStats
@@ -701,6 +722,16 @@ static List *queries = NIL;		/* GpExplainQuery, innermost first */
 static int	explain_serial = 0;
 static int	executor_depth = 0;	/* in an ExecutorRun or ExecutorFinish */
 static GpExplainVmemReserved vmem_reserved = NULL;
+
+/*
+ * NOT IN CLOUDBERRY.  Another module's figures of its own nodes, which
+ * PostgreSQL's instrumentation does not hold -- a vectorized executor's
+ * batches (pg_vector_executor.md §3.10, "EXPLAIN ANALYZE") -- kept by
+ * "node_collect" on a segment and handed to "node_deposit" on the
+ * coordinator (GpExplainRegister()).
+ */
+static GpExplainCollect node_collect = NULL;
+static GpExplainDeposit node_deposit = NULL;
 
 /*
  * The coordinator's node whose segments' statements answer now, and its
@@ -1069,7 +1100,31 @@ typedef struct ReportWalk
 	GpExplainQuery *q;
 	StringInfo	buf;
 	int			nnodes;
+	StringInfo	blobs;			/* another module's, GpReportBlobs */
 } ReportWalk;
+
+/*
+ * Another module's bytes for a node that ran, where it keeps any: behind a
+ * GpReportBlob, its length filled once they are appended.
+ */
+static void
+node_blob(PlanState *ps, StringInfo blobs)
+{
+	GpReportBlob b;
+	int			at = blobs->len;
+
+	b.plan_node_id = ps->plan->plan_node_id;
+	b.len = 0;
+	appendBinaryStringInfo(blobs, &b, sizeof(b));
+	if (!node_collect(ps, blobs))
+	{
+		blobs->len = at;
+		blobs->data[at] = '\0';
+		return;
+	}
+	b.len = blobs->len - at - (int) sizeof(b);
+	memcpy(blobs->data + at, &b, sizeof(b));
+}
 
 /*
  * Each node of the fragment that ran, subplans it ran included; not a
@@ -1088,6 +1143,8 @@ report_walker(PlanState *ps, ReportWalk *w)
 		{
 			appendBinaryStringInfo(w->buf, &n, sizeof(n));
 			w->nnodes++;
+			if (node_collect != NULL)
+				node_blob(ps, w->blobs);
 		}
 	}
 	return planstate_tree_walker(ps, report_walker, w);
@@ -1131,15 +1188,18 @@ segment_report(GpExplainQuery *q)
 {
 	GpReportHeader hdr;
 	StringInfoData buf;
+	StringInfoData blobs;
 	ReportWalk	w;
 
 	memset(&hdr, 0, sizeof(hdr));
 	initStringInfo(&buf);
+	initStringInfo(&blobs);
 	appendBinaryStringInfo(&buf, &hdr, sizeof(hdr));
 
 	w.q = q;
 	w.buf = &buf;
 	w.nnodes = 0;
+	w.blobs = &blobs;
 	if (q->kind == GP_REPORT_FRAGMENT)
 		(void) report_walker(q->queryDesc->planstate, &w);
 	else if (q->queryDesc->planstate->instrument != NULL)
@@ -1156,8 +1216,11 @@ segment_report(GpExplainQuery *q)
 	hdr.nnodes = w.nnodes;
 	hdr.execmem = MemoryContextMemAllocated(q->estate->es_query_cxt, true);
 	WalUsageAccumDiff(&hdr.wal, &pgWalUsage, &q->wal_start);
+	hdr.blob_bytes = blobs.len;
+	appendBinaryStringInfo(&buf, blobs.data, blobs.len);
 	send_report(&hdr, &buf);
 	pfree(buf.data);
+	pfree(blobs.data);
 }
 
 /* ------------------------------------------------------------------------- */
@@ -1312,7 +1375,9 @@ take_report(GpExplainQuery *q, RawReport *r)
 
 	memcpy(&hdr, r->data, sizeof(hdr));
 	if (hdr.content < 0 || hdr.content >= nsegs || hdr.nnodes < 0 ||
-		r->len != (int) (sizeof(GpReportHeader) + hdr.nnodes * sizeof(GpReportNode)) ||
+		hdr.blob_bytes < 0 ||
+		r->len != (int) (sizeof(GpReportHeader) + hdr.nnodes * sizeof(GpReportNode)) +
+		hdr.blob_bytes ||
 		(hdr.kind == GP_REPORT_FRAGMENT && hdr.nnodes == 0))
 		return;
 	nodes = palloc_array(GpReportNode, Max(hdr.nnodes, 1));
@@ -1320,6 +1385,10 @@ take_report(GpExplainQuery *q, RawReport *r)
 
 	if (hdr.kind == GP_REPORT_FRAGMENT)
 	{
+		const uint8 *p = r->data + sizeof(GpReportHeader) +
+			hdr.nnodes * sizeof(GpReportNode);
+		const uint8 *end = p + hdr.blob_bytes;
+
 		for (int i = 0; i < hdr.nnodes; i++)
 		{
 			int			id = nodes[i].plan_node_id;
@@ -1330,6 +1399,29 @@ take_report(GpExplainQuery *q, RawReport *r)
 		}
 		if (nodes[0].plan_node_id >= 0 && nodes[0].plan_node_id < q->nnodes)
 			slice = q->slice_of[nodes[0].plan_node_id];
+
+		/* another module's bytes of its nodes, for their deposit */
+		while (end - p >= (int) sizeof(GpReportBlob))
+		{
+			GpReportBlob b;
+			NodeBlob   *nb;
+
+			memcpy(&b, p, sizeof(b));
+			p += sizeof(b);
+			if (b.len < 0 || end - p < b.len)
+				break;
+			if (b.plan_node_id >= 0 && b.plan_node_id < q->nnodes)
+			{
+				nb = palloc_object(NodeBlob);
+				nb->content = hdr.content;
+				nb->len = b.len;
+				nb->data = palloc(Max(b.len, 1));
+				memcpy(nb->data, p, b.len);
+				q->stats[b.plan_node_id].blobs =
+					lappend(q->stats[b.plan_node_id].blobs, nb);
+			}
+			p += b.len;
+		}
 	}
 	else
 	{
@@ -1506,6 +1598,11 @@ deposit_walker(PlanState *ps, DepositWalk *w)
 		if (instr != NULL && ns->frag != NULL && instr->nloops == 0 &&
 			!instr->running)
 			deposit_fragment(ps, ns->frag);
+
+		/* and what another module kept of its own node there */
+		if (node_deposit != NULL)
+			foreach_ptr(NodeBlob, nb, ns->blobs)
+				node_deposit(ps, nb->content, nb->data, nb->len);
 
 		/* a node whose statements the segments ran: their WAL */
 		if (instr != NULL && ns->stmt != NULL && instr->instr.need_walusage)
@@ -2096,6 +2193,13 @@ void
 GpExplainSetVmemReserved(GpExplainVmemReserved reserved)
 {
 	vmem_reserved = reserved;
+}
+
+void
+GpExplainRegister(GpExplainCollect collect, GpExplainDeposit deposit)
+{
+	node_collect = collect;
+	node_deposit = deposit;
 }
 
 static void
