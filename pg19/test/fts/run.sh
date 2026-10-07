@@ -339,6 +339,54 @@ out=$(q 0 "INSERT INTO t SELECT i, 'alone' FROM generate_series(201, 300) i; SEL
 [ "$out" = "300" ] && ok "a write commits without the mirror, now that FTS has let its primary go on" \
 	|| notok "a write with a mirror down" "$out"
 
+# A read-only commit waits for no mirror -- PostgreSQL waits only for one
+# whose transaction has an XID -- and is not held: a cancel that comes as it
+# commits is PostgreSQL's, not dropped with Cloudberry's warning, which the
+# coordinator relays to the client from a reader it drains as it aborts --
+# a reader's commit met the abort's cancel so in a full run.  The warning
+# is in the node's log, which the check reads.  Each commit's end held on
+# content 0's primary (fts_commit_done, for this session alone, set inside
+# its transaction so that no other commit of the session's comes first),
+# its process there cancelled, and let go: a write's prepare keeps the
+# cancel and warns; a read's commit does not, and commits.
+q 0 "CREATE TABLE cc (a int) DISTRIBUTED BY (a); INSERT INTO cc SELECT generate_series(1, 30)" > /dev/null
+commit_cancelled() {			# commit_cancelled <statement>: the pid of its commit on content 0's primary
+	local pid cc
+	rm -f "$ROOT/cc.sid"
+	{
+		echo "SELECT current_setting('gp.session_id') AS sid \\gset"
+		echo "BEGIN;"
+		echo "SELECT count(*) > 0 FROM cc;"
+		echo "SELECT gp_inject_fault('fts_commit_done', 'suspend', '', '', '', 1, 1, 0, $(dbid 1), :sid);"
+		echo "\\o $ROOT/cc.sid"
+		echo "SELECT :sid;"
+		echo "\\o"
+		echo "$1"
+		echo "COMMIT;"
+	} | "$PSQL" -X -q -t -A -h "$(sockdir 0)" -p "$(port 0)" -d postgres > "$ROOT/cc.out" 2>&1 &
+	cc=$!
+	for _ in $(seq 150); do [ -s "$ROOT/cc.sid" ] && break; sleep 0.2; done
+	q 0 "SET statement_timeout = '60s'; SELECT gp_wait_until_triggered_fault('fts_commit_done', 1, $(dbid 1))" > /dev/null
+	pid=$(grep "fault name:'fts_commit_done' fault type:'suspend'" "$(logfile 1)" | tail -1 |
+		  sed 's/^[^[]*\[\([0-9]*\)\].*/\1/')
+	q 1 "SELECT pg_cancel_backend(${pid:-0})" > /dev/null
+	q 0 "SELECT gp_inject_fault('fts_commit_done', 'resume', $(dbid 1))" > /dev/null
+	wait "$cc"
+	q 0 "SELECT gp_inject_fault('fts_commit_done', 'reset', $(dbid 1))" > /dev/null
+	echo "$pid"
+}
+warned() { grep -c "\[$1\] WARNING:  ignoring query cancel request for synchronous replication" "$(logfile 1)"; }
+wpid=$(commit_cancelled "INSERT INTO cc SELECT generate_series(31, 60);")
+rpid=$(commit_cancelled "SELECT count(*) FROM cc;")
+read_out=$(cat "$ROOT/cc.out")
+out=$(q 0 "SELECT count(*) FROM cc; DROP TABLE cc")
+[ -n "$wpid" ] && [ -n "$rpid" ] && [ "$wpid" != "$rpid" ] &&
+	[ "$(warned "$wpid")" = 1 ] && [ "$(warned "$rpid")" = 0 ] &&
+	[[ "$read_out" == *60* ]] && [ "$out" = 60 ] \
+	&& ok "a write's prepare cancelled on its primary keeps the cancel and warns; a read-only commit's is PostgreSQL's, not held" \
+	|| notok "a cancel as a write's and as a read's commit ends" \
+		"write $wpid warned $(warned "${wpid:-0}"), read $rpid warned $(warned "${rpid:-0}") / $read_out / $out"
+
 ###############################################################################
 echo "4. the mirror comes back: FTS marks it up, the pair in sync, synchronous replication on"
 ###############################################################################

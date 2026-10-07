@@ -699,17 +699,36 @@ commit_release_cancel(void)
 	RESUME_CANCEL_INTERRUPTS();
 }
 
+/*
+ * A commit is held only where the transaction has an XID: PostgreSQL waits
+ * for synchronous replication only for a commit whose record it writes
+ * (RecordTransactionCommit()), and Cloudberry warns of a cancel only inside
+ * that wait (SyncRepWaitForLSN()).  A read-only commit -- a reader's, which
+ * the abort's cancel of the readers often meets as it commits -- takes a
+ * cancel as PostgreSQL takes it, rather than holding it to drop it with the
+ * warning, which the coordinator relays to the client.  A prepare always has
+ * its XID by now (PrepareTransaction()).  NOTIFY alone gives a commit its XID
+ * after this (PreCommit_Notify()): such a commit wrote no data, and waits
+ * unheld, as PostgreSQL's would.
+ */
 static void
 fts_xact_callback(XactEvent event, void *arg)
 {
 	switch (event)
 	{
 		case XACT_EVENT_PRE_COMMIT:
+			if (TransactionIdIsValid(GetTopTransactionIdIfAny()))
+				commit_hold_cancel();
+			break;
 		case XACT_EVENT_PRE_PREPARE:
 			commit_hold_cancel();
 			break;
 		case XACT_EVENT_COMMIT:
 		case XACT_EVENT_PREPARE:
+			/* the commit done, a cancel the hold kept not yet dropped */
+			(void) GP_FAULT("fts_commit_done");
+			commit_release_cancel();
+			break;
 		case XACT_EVENT_ABORT:
 			commit_release_cancel();
 			break;
