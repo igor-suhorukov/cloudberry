@@ -51,6 +51,13 @@ extern bool PaxCatalogReady(void);
 struct VexecSourceRoutine;
 extern const struct VexecSourceRoutine *PaxVexecSource(void);
 
+/*
+ * PAX's batch sink for vexec's VecInsert, the routine _PG_init registers
+ * (vexec_sink.h; pg_vector_executor.md §3.16).
+ */
+struct VexecSinkRoutine;
+extern const struct VexecSinkRoutine *PaxVexecSink(void);
+
 #ifdef __cplusplus
 }
 #endif

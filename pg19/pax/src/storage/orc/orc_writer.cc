@@ -26,17 +26,29 @@
  * Ported to PostgreSQL 19: a tuple descriptor's attributes are reached
  * through TupleDescAttr(), PostgreSQL 19's TupleDescData having no attrs[]
  * array.
+ *
+ * From the port: WriteBatch(), a batch's columns from vexec's sink
+ * (access/pax_vexec_sink.cc, pg_vector_executor.md §3.16) written a column
+ * at a time into the group's columns, each value as WriteTuple() and
+ * PrepareWriteTuple() write a row's -- PAX's toasts made of the values
+ * their storage and size ask one of -- and the group's statistics kept a
+ * column at a time (micro_partition_stats.h).
  *-------------------------------------------------------------------------
  */
 
 #include "comm/cbdb_api.h"
+
+#include <algorithm>
+#include <tuple>
 
 #include "comm/cbdb_wrappers.h"
 #include "comm/fmt.h"
 #include "comm/guc.h"
 #include "comm/log.h"
 #include "comm/pax_memory.h"
+#include "comm/vec_numeric.h"
 #include "storage/columns/pax_column_traits.h"
+#include "storage/columns/pax_vec_numeric_column.h"
 #include "storage/local_file_system.h"
 #include "storage/micro_partition_stats.h"
 #include "storage/orc/orc_defined.h"
@@ -47,6 +59,10 @@
 #include "storage/toast/pax_toast.h"
 #include "storage/wal/pax_wal.h"
 #include "storage/wal/paxc_wal.h"
+
+extern "C" {
+#include "vexec_source.h"
+}
 
 namespace pax {
 
@@ -538,6 +554,229 @@ void OrcWriter::WriteTuple(TupleTableSlot *table_slot) {
   group_stats_.AddRow(table_slot);
 
   EndWriteTuple(table_slot);
+}
+
+// A batch's rows, a group's room at a time: each column's values appended
+// into the group's columns, then the rows counted, numbered and flushed
+// with the group where it fills, as EndWriteTuple() flushes it.
+void OrcWriter::WriteBatch(const VexecColumn *columns, size_t start,
+                           size_t nrows, ItemPointerData *tids) {
+  TupleDesc tuple_desc = writer_options_.rel_tuple_desc;
+  size_t done = 0;
+
+  CBDB_CHECK(
+      pax_columns_->GetColumns() == static_cast<size_t>(tuple_desc->natts),
+      cbdb::CException::ExType::kExTypeSchemaNotMatch,
+      fmt("The number of column in memory not match the in TupleDesc, "
+          "[in mem=%lu, in desc=%d], \n %s",
+          pax_columns_->GetColumns(), tuple_desc->natts,
+          file_->DebugString().c_str()));
+
+  while (done < nrows) {
+    size_t in_group = pax_columns_->GetRows();
+    size_t n;
+
+    if (in_group >= writer_options_.group_limit) {
+      Flush();
+      continue;
+    }
+    n = std::min(writer_options_.group_limit - in_group, nrows - done);
+    for (int i = 0; i < tuple_desc->natts; i++)
+      WriteBatchColumn(i, columns[i], start + done, n);
+    for (size_t k = 0; k < n; k++) {
+      if (tids) SetTupleOffset(&tids[done + k], row_index_);
+      row_index_++;
+    }
+    summary_.num_tuples += n;
+    pax_columns_->AddRows(n);
+    done += n;
+    if (pax_columns_->GetRows() >= writer_options_.group_limit) Flush();
+  }
+}
+
+// A varlena value, with its header, as PrepareWriteTuple() and WriteTuple()
+// write a row's: PAX's toast made of it where its storage asks for one and
+// it is large enough, else the value -- without its header in porc_vec,
+// with it in porc.  The sink's values are never external or compressed.
+void OrcWriter::AppendBatchVarlena(int column_index, PaxColumn *column,
+                                   varlena *value, bool header_stripped) {
+  auto attr = TupleDescAttr(writer_options_.rel_tuple_desc, column_index);
+
+  if (pax_enable_toast && attr->attstorage != TYPSTORAGE_PLAIN) {
+    Datum toast;
+    std::shared_ptr<MemoryObject> mobj;
+
+    std::tie(toast, mobj) =
+        pax_make_toast(PointerGetDatum(value), attr->attstorage);
+    if (mobj) {
+      // the toast's bytes, and an external one's data, are copied in
+      auto toast_vl = reinterpret_cast<varlena *>(DatumGetPointer(toast));
+      column->AppendToast(reinterpret_cast<char *>(toast_vl),
+                          PAX_VARSIZE_ANY(toast_vl));
+      return;
+    }
+  }
+  if (header_stripped)
+    column->Append(VARDATA_ANY(value), VARSIZE_ANY_EXHDR(value));
+  else
+    column->Append(reinterpret_cast<char *>(value), VARSIZE_ANY(value));
+}
+
+static inline Datum BatchFixedDatum(const char *p, int16 typlen) {
+  switch (typlen) {
+    case 1:
+      return CharGetDatum(*p);
+    case 2: {
+      int16 v;
+      memcpy(&v, p, sizeof(v));
+      return Int16GetDatum(v);
+    }
+    case 4: {
+      int32 v;
+      memcpy(&v, p, sizeof(v));
+      return Int32GetDatum(v);
+    }
+    default: {
+      int64 v;
+      memcpy(&v, p, sizeof(v));
+      return Int64GetDatum(v);
+    }
+  }
+}
+
+// One column's rows [start, start + nrows) of a batch, in the layout the
+// sink asked for (access/pax_vexec_sink.cc, SinkLayout()):
+//
+//   FIXED      a by-value type's values, or a fixed-length by-reference
+//              type's at PostgreSQL's array stride: Append() of the type's
+//              bytes, as WriteTuple() appends a row's
+//   BYTE_BOOL  bool, a byte a row
+//   SCALED     porc_vec's numeric of a typmod: the integer at the typmod's
+//              scale, written as the 16 bytes the column holds
+//              (pg_short_numeric_to_vec_short_numeric(), comm/vec_numeric.cc)
+//   OFFSETS    porc_vec's text, varchar, bpchar and bytea: the bytes
+//              without a header, which a porc_vec column holds; a value
+//              large enough for a PAX toast is made a varlena first
+//   DATUM      any other varlena, with its header
+//
+// A NULL is AppendNull().  The statistics are counts alone for a column
+// that keeps no values; else each value goes to them as a Datum, a
+// payload's made a varlena.
+void OrcWriter::WriteBatchColumn(int column_index, const VexecColumn &column,
+                                 size_t start, size_t nrows) {
+  auto attr = TupleDescAttr(writer_options_.rel_tuple_desc, column_index);
+  PaxColumn *pax_column = (*pax_columns_)[column_index].get();
+  bool is_vec = COLUMN_STORAGE_FORMAT_IS_VEC(pax_columns_);
+  bool keeps = group_stats_.KeepsValues(column_index);
+  size_t nulls = 0;
+  std::vector<char> made;  // a payload made a varlena
+
+  for (size_t r = start; r < start + nrows; r++) {
+    Datum value = 0;
+
+    if (attr->attisdropped ||
+        (column.validity && !((column.validity[r >> 6] >> (r & 63)) & 1))) {
+      pax_column->AppendNull();
+      nulls++;
+      continue;
+    }
+    switch (column.layout) {
+      case VEXEC_FIXED: {
+        auto p = static_cast<const char *>(column.values) +
+                 r * static_cast<size_t>(column.stride);
+
+        pax_column->Append(const_cast<char *>(p), attr->attlen);
+        if (keeps)
+          value = attr->attbyval ? BatchFixedDatum(p, attr->attlen)
+                                 : PointerGetDatum(p);
+        break;
+      }
+      case VEXEC_BYTE_BOOL: {
+        char b = static_cast<const uint8 *>(column.values)[r] != 0;
+
+        pax_column->Append(&b, 1);
+        value = BoolGetDatum(b);
+        break;
+      }
+      case VEXEC_SCALED: {
+        auto numeric_column = static_cast<PaxShortNumericColumn *>(pax_column);
+        auto data = numeric_column->GetDataBuffer();
+        int128 v;
+        int64 lo, hi;
+
+        if (column.width == 8) {
+          int64 v64;
+
+          memcpy(&v64, static_cast<const char *>(column.values) + r * 8,
+                 sizeof(v64));
+          v = v64;
+        } else {
+          memcpy(&v, static_cast<const char *>(column.values) + r * 16,
+                 sizeof(v));
+        }
+        lo = static_cast<int64>(static_cast<uint64>(v));
+        hi = static_cast<int64>(
+            (static_cast<uint64>(column.scale)
+             << VEC_SHORT_NUMERIC_HIGH_DATA_WIDTH) |
+            (static_cast<uint64>(static_cast<int64>(v >> 64)) &
+             ((1ULL << VEC_SHORT_NUMERIC_HIGH_DATA_WIDTH) - 1)));
+        if (data->Available() < VEC_SHORT_NUMERIC_STORE_BYTES)
+          data->ReSize(data->Used() + VEC_SHORT_NUMERIC_STORE_BYTES, 2);
+        memcpy(data->GetAvailableBuffer(), &lo, sizeof(lo));
+        memcpy(data->GetAvailableBuffer() + sizeof(lo), &hi, sizeof(hi));
+        data->Brush(VEC_SHORT_NUMERIC_STORE_BYTES);
+        // the counts PaxShortNumericColumn::Append() keeps
+        pax_column->PaxColumn::Append(nullptr, 0);
+        if (keeps) value = vec_short_numeric_to_datum(&lo, &hi);
+        break;
+      }
+      case VEXEC_OFFSETS: {
+        auto offsets = static_cast<const int32 *>(column.values);
+        auto p = static_cast<const char *>(column.buffers[0]) + offsets[r];
+        size_t len = offsets[r + 1] - offsets[r];
+        bool toast = VARATT_CAN_MAKE_PAX_COMPRESSED_TOAST_BY_SIZE(len) ||
+                     VARATT_CAN_MAKE_PAX_EXTERNAL_TOAST_BY_SIZE(len);
+
+        if (!keeps && !toast) {
+          pax_column->Append(const_cast<char *>(p), len);
+          break;
+        }
+        made.resize(len + VARHDRSZ);
+        SET_VARSIZE(made.data(), len + VARHDRSZ);
+        memcpy(made.data() + VARHDRSZ, p, len);
+        if (toast)
+          AppendBatchVarlena(column_index, pax_column,
+                             reinterpret_cast<varlena *>(made.data()), true);
+        else
+          pax_column->Append(const_cast<char *>(p), len);
+        value = PointerGetDatum(made.data());
+        break;
+      }
+      case VEXEC_DATUM: {
+        auto vl = reinterpret_cast<varlena *>(
+            DatumGetPointer(static_cast<const Datum *>(column.values)[r]));
+
+        if (attr->attlen > 0)
+          pax_column->Append(reinterpret_cast<char *>(vl), attr->attlen);
+        else if (is_vec && attr->atttypid == NUMERICOID)
+          pax_column->Append(reinterpret_cast<char *>(vl), VARSIZE_ANY(vl));
+        else
+          AppendBatchVarlena(column_index, pax_column, vl, is_vec);
+        value = PointerGetDatum(vl);
+        break;
+      }
+      default:
+        CBDB_RAISE(cbdb::CException::ExType::kExTypeLogicError,
+                   fmt("PAX's sink was given a layout it did not ask for "
+                       "[column=%d, layout=%d]",
+                       column_index, column.layout));
+    }
+    if (keeps) group_stats_.AddColumnValue(column_index, value);
+  }
+  if (!keeps)
+    group_stats_.AddColumnCounts(column_index, nrows - nulls, nulls);
+  else if (nulls > 0)
+    group_stats_.AddColumnCounts(column_index, 0, nulls);
 }
 
 void OrcWriter::EndWriteTuple(TupleTableSlot *table_slot) {
