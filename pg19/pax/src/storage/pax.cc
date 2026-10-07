@@ -31,6 +31,10 @@
  * visibility map a file's row has as they are made, not as the deleter's
  * snapshot saw it.
  *
+ * From the port: WriteBatch(), a batch's rows from vexec's sink
+ * (access/pax_vexec_sink.cc, pg_vector_executor.md §3.16), split where
+ * WriteTuple() would split them.
+ *
  * And a fix of Cloudberry's own: the statistics a DELETE writes for a file
  * read every column of the groups they are read from, not the minmax and
  * bloom filter columns alone -- they are every column's, and a column left
@@ -332,6 +336,46 @@ void TableWriter::WriteTuple(TupleTableSlot *slot) {
   writer_->WriteTuple(slot);
   SetBlockNumber(&slot->tts_tid, current_blockno_);
   ++num_tuples_;
+}
+
+// As WriteTuple() splits rows among files, a run of rows at a time: the
+// split strategy asked before each run, as WriteTuple() asks before each
+// row -- the file's size measured at the run's start -- and a run never
+// past the file's last row its TIDs can number, nor past the strategy's
+// tuple count.  The writer is PAX's OrcWriter, the only one
+// MicroPartitionFileFactory makes for porc and porc_vec, which the sink
+// alone writes (access/pax_vexec_sink.cc).
+void TableWriter::WriteBatch(const VexecColumn *columns, size_t nrows,
+                             ItemPointerData *tids) {
+  size_t done = 0;
+  size_t rows_per_file = PaxTidRowsPerFile(cbdb::PaxTableFileBits(relation_));
+
+  Assert(writer_);
+  Assert(strategy_);
+  while (done < nrows) {
+    size_t limit = std::min(rows_per_file, strategy_->SplitTupleNumbers());
+    size_t n;
+    OrcWriter *orc;
+
+    cur_physical_size_ = writer_->PhysicalSize();
+    if (strategy_->ShouldSplit(cur_physical_size_, num_tuples_) ||
+        num_tuples_ >= limit) {
+      writer_->Close();
+      writer_ = nullptr;
+      Open();
+      continue;
+    }
+    orc = dynamic_cast<OrcWriter *>(writer_.get());
+    CBDB_CHECK(orc != nullptr, cbdb::CException::ExType::kExTypeLogicError,
+               "PAX's sink writes through an ORC writer");
+    n = std::min(limit - num_tuples_, nrows - done);
+    orc->WriteBatch(columns, done, n, tids ? tids + done : nullptr);
+    if (tids)
+      for (size_t k = done; k < done + n; k++)
+        SetBlockNumber(&tids[k], current_blockno_);
+    num_tuples_ += n;
+    done += n;
+  }
 }
 
 void TableWriter::Close() {

@@ -26,6 +26,9 @@
  * Ported to PostgreSQL 19: the micro-partition the writer writes now, whose
  * rows are in memory still until it is finished, for a fetch of one of them
  * by its TID (access/pax_dml_state.cc).
+ *
+ * From the port: InsertBatch(), a batch's rows from vexec's sink
+ * (access/pax_vexec_sink.cc, pg_vector_executor.md §3.16).
  *-------------------------------------------------------------------------
  */
 
@@ -53,6 +56,12 @@ class CPaxInserter {
 
   void InsertTuple(Relation relation, TupleTableSlot *slot, CommandId cid,
                    int options, BulkInsertState bistate);
+
+  // The port's, for vexec's sink: a batch's rows, a VexecColumn an
+  // attribute, written as InsertTuple() writes rows; each row's TID, PAX's
+  // inside, into tids[] where it is given.
+  void InsertBatch(Relation relation, const VexecColumn *columns, int nrows,
+                   ItemPointerData *tids);
   void FinishInsert();
 
   // the micro-partition the writer is writing, InvalidBlockNumber if none

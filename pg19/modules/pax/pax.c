@@ -61,6 +61,7 @@
 #include "cb_module.h"
 #include "gp_core_api.h"
 #include "pax_module.h"
+#include "vexec_sink.h"
 #include "vexec_source.h"
 
 PG_MODULE_MAGIC_EXT(
@@ -215,4 +216,10 @@ _PG_init(void)
 	 * Without vexec the registration is an unused entry.
 	 */
 	vexec_register_source(PaxVexecSource());
+
+	/*
+	 * And its batch sink, for vexec's VecInsert into PAX tables
+	 * (pg_vector_executor.md §3.16), in the same way.
+	 */
+	vexec_register_sink(PaxVexecSink());
 }

@@ -3,9 +3,10 @@
 # catalog and without the manifest API and the vectorization engine's
 # parallel scan.  A path compiles from the port's copy under pg19/pax/src
 # where there is one, and from Cloudberry's tree otherwise (meson.build).
-# One is the port's own, which only pg19/pax/src has:
+# Two are the port's own, which only pg19/pax/src has:
 # access/pax_vexec_source.cc, PAX's batch reader for vexec
-# (pg_vector_executor.md §3.5.3).
+# (pg_vector_executor.md §3.5.3), and access/pax_vexec_sink.cc, its batch
+# sink (§3.16).
 #
 # Not here: storage/orc/orc_dump_reader.cpp and storage/micro_partition_udf.cc,
 # the dump_pax_file_* functions, which print through tabulate, a git
@@ -20,6 +21,7 @@ access/pax_inserter.cc
 access/pax_scanner.cc
 access/pax_table_cluster.cc
 access/pax_updater.cc
+access/pax_vexec_sink.cc
 access/pax_vexec_source.cc
 access/pax_visimap.cc
 catalog/pax_aux_table.cc
