@@ -30,8 +30,20 @@
  * never descends into a CustomScan, and the dependency walk (orca.c).  So
  * every later step sees the final tree, and the rules those passes keep
  * hold of it: no Motion is crossed, added or removed -- the engine replaces
- * nodes one for one and never a Motion -- plan node ids stay the
- * translator's, and a fragment's target list keeps its resnos and types.
+ * nodes one for one, and a Motion only where it stands -- plan node ids
+ * stay the translator's, and a fragment's target list keeps its resnos and
+ * types.
+ *
+ * A Motion the engine is offered it may rebuild where it stands, through
+ * gp_core's API, with nodes of its own above and below it -- vexec's
+ * frames, a vector node's batches across the Motion as Arrow IPC frames
+ * (pg_vector_executor.md §3.10, V7): the Motion's rows become its
+ * fragment's columns, all NULL, a frame's segment and the frame.  It is
+ * the same node, which the translator's own list of the plan's Motions
+ * still names for direct dispatch and the slice table; the check of the
+ * Motions, which walks the tree, sees the new fragment below it and the
+ * engine's node above it, and the engine numbers the nodes it added once
+ * the plan is made.
  *
  * The engine decides each node from the node alone, children first, so
  * that a node over a vector child can take its batches.  It is offered the
