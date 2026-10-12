@@ -1,7 +1,6 @@
 # Part of Cloudberry's isolation2_schedule (src/test/isolation2), as the port
-# runs it on a coordinator and three segments: every test of the schedule
-# but four of append-optimized tables' own (below), in the schedule's
-# order -- distributed transactions, distributed snapshots, locks
+# runs it on a coordinator and three segments: every test of the schedule,
+# in the schedule's order -- distributed transactions, distributed snapshots, locks
 # and the global deadlock detector (M3), FTS and mirrors (M4), resource
 # queues and memory accounting (M6), the tools -- a node recovered
 # elsewhere, the standby coordinator promoted, removed, made again and
@@ -47,15 +46,16 @@
 # append-optimized table's auxiliary relations.  Nine of them run, with what
 # gp_ao and gp_core have of those since: uao/alter_while_vacuum2,
 # ao_unique_index_vacuum, fast_analyze and max_concurrency2, of a row and of
-# a column table, and ao_index_build_progress.  Ten are skipped for the
-# layout they read, five of them with a test of the port's own beside them
+# a column table, and ao_index_build_progress.  Fourteen are skipped for the
+# layout they read, seven of them with a test of the port's own beside them
 # that is Cloudberry's test for gp_ao's layout: port/ao_blkdir,
-# port/ao_unique_index, port/aocs_unique_index and
-# port/uao/vacuum_cleanup_row and _column, the last two one file made a row
-# table's test and a column table's, as Cloudberry's are (run.sh, input/port
-# and output/port here).  And four are not listed yet: uao/brin and
-# uao/brin_chain, of a row and of a column table, which read BRIN's revmap
-# page by page.  Its FTS tests are M4's, and are: the ones
+# port/ao_unique_index, port/aocs_unique_index, port/uao/vacuum_cleanup_row
+# and _column, and port/uao/brin_row and _column, which stand for uao/brin
+# and uao/brin_chain, of a row and of a column table -- tests that read a
+# BRIN index's map page by page, Cloudberry's chain of pages a segment
+# file.  Each pair under port/uao is one file made a row table's test and a
+# column table's, as Cloudberry's are (run.sh, input/port and output/port
+# here).  Its FTS tests are M4's, and are: the ones
 # that run are in the groups mirrors1 to
 # mirrors3, whose clusters have a mirror for each segment -- three, so that
 # they run side by side -- M7's in mirrors4, whose standby they change, and
@@ -154,6 +154,8 @@ run  disable_autovacuum                                 main,uao_row,uao_column
 run  concurrent_index_creation_should_not_deadlock      main
 run  uao/alter_while_vacuum_row                         uao_row
 run  uao/alter_while_vacuum2_row                        uao_row
+skip uao/brin_row                           it reads the index's map page by page -- Cloudberry's chain of revmap pages a segment file, at the block numbers a TID page of 32,768 rows gives -- and updates gp_fastsequence: the port's index is PostgreSQL 19's, one map from block 0 that BRIN walks by each segment file's run of blocks (O18), a TID page is 291 rows, and gp_ao has no gp_fastsequence; and its summaries beside an INSERT stop at the fault summarize_last_partial_range, in a branch of PostgreSQL's that such a table does not take; it runs as port/uao/brin_row, which lists an index's summaries wherever they are and counts the pages a scan is given, at 128 pages a range and at the 16,384 an index gets where none is given
+run  port/uao/brin_row                                  uao_row
 run  uao/compaction_full_stats_row                      uao_row
 run  uao/compaction_utility_row                         uao_row
 run  uao/compaction_utility_insert_row                  uao_row
@@ -212,6 +214,8 @@ run  mark_all_aoseg_await_drop                          uao_row
 run  port/ao_vacuum_snapshot                            uao_row
 run  uao/alter_while_vacuum_column                      uao_column
 run  uao/alter_while_vacuum2_column                     uao_column
+skip uao/brin_column                        as uao/brin_row, of a column table; it runs as port/uao/brin_column
+run  port/uao/brin_column                               uao_column
 run  uao/compaction_full_stats_column                   uao_column
 run  uao/compaction_utility_column                      uao_column
 run  uao/compaction_utility_insert_column               uao_column
@@ -343,6 +347,8 @@ run  stat_activity_extended                             main
 run  sharedsnapshot
 run  export_distributed_snapshot
 run  brin_heap                                          main
+skip uao/brin_chain_row                     brin_revmap_chain() and the chain fields of the index's metapage, Cloudberry's chain of revmap pages a segment file, which the port's index, PostgreSQL 19's, has not; and 180 million rows to make one segment file's chain two pages long: what it then asks -- the rows through the index of a table with several segment files, one of rolled-back rows alone and one whose first range was rolled back -- port/uao/brin_row asks of a few thousand rows
+skip uao/brin_chain_column                  as uao/brin_chain_row, of a column table; port/uao/brin_column
 skip tcp_ic_teardown                        the coordinator's Gather Motion of a LIMIT, whose receiver Cloudberry holds before its stop message (doSendStopMessageTCP) while a sender's teardown waits gp_interconnect_transmit_timeout for the receiver's last word (waitOnOutbound): the port's coordinator gathers over each segment's libpq connection, closing the cursor, and its TCP interconnect, between segments, has no stop message -- a receiver closes its connections, and its senders stop at their next send; it waits for the faults
 #
 # And Cloudberry's parallel_retrieve_cursor_schedule, M8's, in a group of its

@@ -1,0 +1,369 @@
+-- The port's own: what Cloudberry's uao/brin and uao/brin_chain test of a
+-- BRIN index on an append-optimized table, for gp_ao's layout.
+--
+-- Cloudberry's tests read the index's map page by page: its chain of
+-- revmap pages a segment file, the metapage's chain fields, and
+-- gp_fastsequence.  The port's index is PostgreSQL 19's, whose map is one
+-- array from block 0, and BRIN is given each segment file's run of blocks
+-- to walk (O18); a page of a row's TID is 291 rows here and 32,768 there.
+-- So nothing is read by page number: what an index holds is its summaries,
+-- which brin_@amname@_summaries() lists wherever they are; what a scan reads
+-- is the pages BRIN gives it; and every answer through the index is given
+-- beside the table's own.
+--
+-- A range here is 128 pages, 37,248 rows, where the test fills ranges, and
+-- 100 where a range is to lie across the first block of a segment file.
+-- The default is the first thing tested: 16,384 pages, 4,767,744 rows, for
+-- an index on an append-optimized table whose statement gives none
+-- (gp_ao.c), which is Cloudberry's range in rows.
+--
+-- All rows are on content 1: a is 1 in every one.  What the index answers
+-- is asked there, in a session of the segment's own (1U): a segment plans
+-- its part of a statement for itself on the planner's route, with its own
+-- enable_seqscan, and the answers are to be the index's.
+
+-- The summaries of an index on this node: the range's segment file, its
+-- first block within the file, and what PostgreSQL's page items say of it.
+CREATE FUNCTION brin_@amname@_summaries(idx regclass, OUT file int, OUT block int, OUT placeholder bool, OUT empty bool, OUT value text) RETURNS SETOF record AS $$
+DECLARE
+	p int;	/* in func */
+BEGIN	/* in func */
+	FOR p IN 0 .. nblocks(idx) - 1 LOOP	/* in func */
+		IF brin_page_type(get_raw_page(idx::text, p)) = 'regular' THEN	/* in func */
+			RETURN QUERY SELECT (i.blknum >> 25)::int, (i.blknum & 33554431)::int, i.placeholder, i.empty, i.value FROM brin_page_items(get_raw_page(idx::text, p), idx) i WHERE i.blknum IS NOT NULL;	/* in func */
+		END IF;	/* in func */
+	END LOOP;	/* in func */
+END;	/* in func */
+$$ LANGUAGE plpgsql;
+
+-- The rows of "<table> WHERE <condition>" on this node through the index,
+-- the pages BRIN gave the scan to read for them -- none where the plan is
+-- no bitmap scan -- and the rows by a scan of the table.
+CREATE FUNCTION brin_@amname@_check(what text, OUT by_index bigint, OUT pages bigint, OUT by_scan bigint) AS $$
+DECLARE
+	plan json;	/* in func */
+BEGIN	/* in func */
+	PERFORM set_config('enable_seqscan', 'off', true), set_config('enable_bitmapscan', 'on', true);	/* in func */
+	EXECUTE 'SELECT count(*) FROM ' || what INTO by_index;	/* in func */
+	EXECUTE 'EXPLAIN (ANALYZE, COSTS OFF, TIMING OFF, SUMMARY OFF, BUFFERS OFF, FORMAT JSON) SELECT count(*) FROM ' || what INTO plan;	/* in func */
+	pages := jsonb_path_query_first(plan::jsonb, '$.**."Lossy Heap Blocks"')::bigint;	/* in func */
+	PERFORM set_config('enable_seqscan', 'on', true), set_config('enable_bitmapscan', 'off', true);	/* in func */
+	EXECUTE 'SELECT count(*) FROM ' || what INTO by_scan;	/* in func */
+	PERFORM set_config('enable_seqscan', 'on', true), set_config('enable_bitmapscan', 'on', true);	/* in func */
+END;	/* in func */
+$$ LANGUAGE plpgsql;
+
+-- The blocks of the table's files content 1 reads for a statement
+-- (Cloudberry's fault AppendOnlyStorageRead_ReadNextBlock_success).
+CREATE FUNCTION brin_@amname@_blocks_read(stmt text) RETURNS int AS $$
+DECLARE
+	d int;	/* in func */
+	s text;	/* in func */
+BEGIN	/* in func */
+	SELECT dbid INTO d FROM gp_segment_configuration WHERE content = 1 AND role = 'p';	/* in func */
+	PERFORM gp_inject_fault_infinite('AppendOnlyStorageRead_ReadNextBlock_success', 'skip', d);	/* in func */
+	EXECUTE stmt;	/* in func */
+	s := gp_inject_fault('AppendOnlyStorageRead_ReadNextBlock_success', 'status', d);	/* in func */
+	PERFORM gp_inject_fault('AppendOnlyStorageRead_ReadNextBlock_success', 'reset', d);	/* in func */
+	RETURN coalesce(substring(s from 'num times hit:''([0-9]+)''')::int, 0);	/* in func */
+END;	/* in func */
+$$ LANGUAGE plpgsql;
+
+--------------------------------------------------------------------------------
+-- The default range
+--------------------------------------------------------------------------------
+
+CREATE TABLE brin_@amname@_default (a int, b int) USING @amname@ DISTRIBUTED BY (a);
+CREATE INDEX brin_@amname@_default_b ON brin_@amname@_default USING brin (b);
+CREATE INDEX brin_@amname@_default_given ON brin_@amname@_default USING brin (b) WITH (pages_per_range = 128);
+CREATE TABLE brin_@amname@_heap (a int, b int) USING heap DISTRIBUTED BY (a);
+CREATE INDEX brin_@amname@_heap_b ON brin_@amname@_heap USING brin (b);
+CREATE TABLE brin_@amname@_part (a int, b int) USING @amname@ DISTRIBUTED BY (a) PARTITION BY RANGE (b);
+CREATE TABLE brin_@amname@_part_1 PARTITION OF brin_@amname@_part FOR VALUES FROM (0) TO (1000);
+CREATE INDEX brin_@amname@_part_b ON brin_@amname@_part USING brin (b);
+CREATE TABLE brin_@amname@_part_2 PARTITION OF brin_@amname@_part FOR VALUES FROM (1000) TO (2000);
+CREATE TABLE brin_@amname@_mixed (a int, b int) USING heap DISTRIBUTED BY (a) PARTITION BY RANGE (b);
+CREATE TABLE brin_@amname@_mixed_1 PARTITION OF brin_@amname@_mixed FOR VALUES FROM (0) TO (1000) USING @amname@;
+CREATE INDEX brin_@amname@_mixed_all ON brin_@amname@_mixed USING brin (b);
+CREATE TABLE brin_@amname@_mixed_2 PARTITION OF brin_@amname@_mixed FOR VALUES FROM (1000) TO (2000) USING heap;
+CREATE INDEX brin_@amname@_mixed_some ON brin_@amname@_mixed USING brin (a);
+
+-- On the coordinator and on every segment: the append-optimized table's
+-- index has the range, the one given keeps its own, and a heap table's has
+-- PostgreSQL's.  A partitioned table's index has it where every partition
+-- that holds rows is append-optimized as the index is made, and the
+-- partitions' indexes have what the table's has: the first of
+-- brin_@amname@_mixed, made while its one partition was append-optimized,
+-- and not the second, made beside a heap partition.
+SELECT replace(c.relname, 'brin_@amname@_', '') AS index, c.reloptions FROM pg_class c WHERE c.relname LIKE 'brin\_@amname@\_%' AND c.relkind IN ('i', 'I') ORDER BY 1;
+SELECT replace(c.relname, 'brin_@amname@_', '') AS index, c.reloptions, count(*) FROM gp_dist_random('pg_class') c WHERE c.relname LIKE 'brin\_@amname@\_%' AND c.relkind IN ('i', 'I') GROUP BY 1, 2 ORDER BY 1;
+SELECT replace(pg_get_indexdef('brin_@amname@_default_b'::regclass), '@amname@', 'am') AS indexdef;
+DROP INDEX brin_@amname@_default_given;
+
+-- One summary for the table's rows, and an index of four pages: its
+-- metapage, two of the map and one of summaries.  (The empty summary at
+-- block 0, of no segment file, is PostgreSQL's for an index built on a
+-- table that has no rows yet.)
+INSERT INTO brin_@amname@_default SELECT 1, i FROM generate_series(1, 1000) i;
+SELECT brin_summarize_new_values('brin_@amname@_default_b');
+1U: SELECT * FROM brin_@amname@_summaries('brin_@amname@_default_b') ORDER BY 1, 2;
+1U: SELECT nblocks('brin_@amname@_default_b');
+1U: SELECT * FROM brin_@amname@_check('brin_@amname@_default WHERE b = 5');
+1U: SELECT * FROM brin_@amname@_check('brin_@amname@_default WHERE b = 5000');
+
+--------------------------------------------------------------------------------
+-- A build, an INSERT, a summary of the new ranges, and what a scan reads
+--------------------------------------------------------------------------------
+
+-- Two ranges full and a third begun: rows 1 to 37,247 of segment file 1
+-- are its first range, there being no row 0.
+CREATE TABLE brin_@amname@ (a int, b int) USING @amname@ DISTRIBUTED BY (a);
+INSERT INTO brin_@amname@ SELECT 1, i FROM generate_series(1, 90000) i;
+CREATE INDEX brin_@amname@_b ON brin_@amname@ USING brin (b) WITH (pages_per_range = 128);
+
+-- The build summarized all three, the last as far as it goes.
+1U: SELECT * FROM brin_@amname@_summaries('brin_@amname@_b') ORDER BY 1, 2;
+SELECT brin_summarize_new_values('brin_@amname@_b');
+
+-- A scan reads the one range that may hold the value, and none for a value
+-- no range holds.
+1U: SELECT * FROM brin_@amname@_check('brin_@amname@ WHERE b = 5');
+1U: SELECT * FROM brin_@amname@_check('brin_@amname@ WHERE b = 80000');
+1U: SELECT * FROM brin_@amname@_check('brin_@amname@ WHERE b > 100000');
+
+-- An INSERT adds its values to the summary of the range it begins in, and
+-- leaves the ranges it goes on to without one: a scan reads those whatever
+-- it looks for, the fourth range's 128 pages and the four the fifth has.
+INSERT INTO brin_@amname@ SELECT 1, 200000 + i FROM generate_series(1, 60000) i;
+1U: SELECT * FROM brin_@amname@_summaries('brin_@amname@_b') ORDER BY 1, 2;
+1U: SELECT * FROM brin_@amname@_check('brin_@amname@ WHERE b = 5');
+1U: SELECT * FROM brin_@amname@_check('brin_@amname@ WHERE b = 250000');
+
+-- Summarized, they are passed by again.
+SELECT brin_summarize_new_values('brin_@amname@_b');
+1U: SELECT * FROM brin_@amname@_summaries('brin_@amname@_b') ORDER BY 1, 2;
+1U: SELECT * FROM brin_@amname@_check('brin_@amname@ WHERE b = 5');
+1U: SELECT * FROM brin_@amname@_check('brin_@amname@ WHERE b = 250000');
+
+--------------------------------------------------------------------------------
+-- One range summarized and desummarized
+--------------------------------------------------------------------------------
+
+-- brin_desummarize_range() is a node's own, as Cloudberry's is.  Without
+-- its summary the second range is read by every scan.
+1U: SELECT brin_desummarize_range('brin_@amname@_b', 33554432 + 128);
+1U: SELECT * FROM brin_@amname@_summaries('brin_@amname@_b') ORDER BY 1, 2;
+1U: SELECT * FROM brin_@amname@_check('brin_@amname@ WHERE b = 5');
+
+-- The summary of one range reads that range's blocks of the table, not
+-- the table: under a third of what a scan of the table reads, of five
+-- ranges.
+SELECT brin_@amname@_blocks_read('SELECT sum(a + b) FROM brin_@amname@') > 3 * brin_@amname@_blocks_read('SELECT brin_summarize_range(''brin_@amname@_b'', 33554432 + 128)') AS one_range_alone;
+1U: SELECT * FROM brin_@amname@_summaries('brin_@amname@_b') ORDER BY 1, 2;
+1U: SELECT * FROM brin_@amname@_check('brin_@amname@ WHERE b = 5');
+
+-- Nothing to do: a range summarized already, a block past the segment
+-- file's rows, a block before any segment file's, and a block of a segment
+-- file the table has not.
+SELECT brin_summarize_range('brin_@amname@_b', 33554432 + 128);
+SELECT brin_summarize_range('brin_@amname@_b', 33554432 + 100000);
+SELECT brin_summarize_range('brin_@amname@_b', 1);
+SELECT brin_summarize_range('brin_@amname@_b', 100663296);
+1U: SELECT brin_desummarize_range('brin_@amname@_b', 33554432 + 100000);
+1U: SELECT brin_desummarize_range('brin_@amname@_b', 1);
+1U: SELECT brin_desummarize_range('brin_@amname@_b', 100663296);
+1U: SELECT * FROM brin_@amname@_summaries('brin_@amname@_b') ORDER BY 1, 2;
+
+--------------------------------------------------------------------------------
+-- DELETE and VACUUM's compaction
+--------------------------------------------------------------------------------
+
+-- The rows a DELETE leaves are moved to segment file 2, with index entries
+-- of their own, and file 1 is emptied for the next writer.  VACUUM
+-- summarizes every range that is whole, so the two whole ones of the new
+-- file, and not the third.  The old file's summaries stay: a scan is still
+-- given the pages of those that match, and finds no row there.
+DELETE FROM brin_@amname@ WHERE b > 200000;
+VACUUM brin_@amname@;
+SELECT segno, state, tupcount FROM gp_ao_or_aocs_seg('brin_@amname@') WHERE segment_id = 1 ORDER BY 1;
+1U: SELECT * FROM brin_@amname@_summaries('brin_@amname@_b') ORDER BY 1, 2;
+1U: SELECT * FROM brin_@amname@_check('brin_@amname@ WHERE b = 5');
+1U: SELECT * FROM brin_@amname@_check('brin_@amname@ WHERE b = 80000');
+SELECT brin_summarize_new_values('brin_@amname@_b');
+1U: SELECT * FROM brin_@amname@_summaries('brin_@amname@_b') ORDER BY 1, 2;
+1U: SELECT * FROM brin_@amname@_check('brin_@amname@ WHERE b = 80000');
+
+--------------------------------------------------------------------------------
+-- Several segment files, rows that were rolled back, a table rewritten
+--------------------------------------------------------------------------------
+
+-- Cloudberry's uao/brin_chain in small.  A heap table made append-optimized
+-- has its rows in segment file 1; three sessions at once write a file
+-- each: the first 1,000 rows more to file 1, the second 2,000 to file 2
+-- that it rolls back, and the third a range's worth to file 3 that it rolls
+-- back and then 3,000 that it keeps.
+CREATE TABLE brin_@amname@_files (a int, b int) USING heap DISTRIBUTED BY (a);
+INSERT INTO brin_@amname@_files SELECT 1, i FROM generate_series(1, 1000) i;
+ALTER TABLE brin_@amname@_files SET ACCESS METHOD @amname@;
+1: BEGIN;
+2: BEGIN;
+3: BEGIN;
+1: INSERT INTO brin_@amname@_files SELECT 1, 10000 + i FROM generate_series(1, 1000) i;
+2: INSERT INTO brin_@amname@_files SELECT 1, 20000 + i FROM generate_series(1, 2000) i;
+3: INSERT INTO brin_@amname@_files SELECT 1, 30000 + i FROM generate_series(1, 37248) i;
+3: ABORT;
+3: BEGIN;
+3: INSERT INTO brin_@amname@_files SELECT 1, 40000 + i FROM generate_series(1, 3000) i;
+1: COMMIT;
+2: ABORT;
+3: COMMIT;
+SELECT segno, state, tupcount FROM gp_ao_or_aocs_seg('brin_@amname@_files') WHERE segment_id = 1 ORDER BY 1;
+
+-- A build gives every range of every segment file's run a summary: an
+-- empty one where the rows were rolled back.
+CREATE INDEX brin_@amname@_files_b ON brin_@amname@_files USING brin (b) WITH (pages_per_range = 128);
+1U: SELECT * FROM brin_@amname@_summaries('brin_@amname@_files_b') ORDER BY 1, 2;
+1U: SELECT * FROM brin_@amname@_check('brin_@amname@_files WHERE b > 0');
+1U: SELECT * FROM brin_@amname@_check('brin_@amname@_files WHERE b = 10500');
+1U: SELECT * FROM brin_@amname@_check('brin_@amname@_files WHERE b = 20500');
+1U: SELECT * FROM brin_@amname@_check('brin_@amname@_files WHERE b = 30500');
+1U: SELECT * FROM brin_@amname@_check('brin_@amname@_files WHERE b = 40500');
+
+-- And so does a summary of the ranges an index made before the rows has
+-- none of.
+DROP INDEX brin_@amname@_files_b;
+TRUNCATE brin_@amname@_files;
+CREATE INDEX brin_@amname@_files_b ON brin_@amname@_files USING brin (b) WITH (pages_per_range = 128);
+1: BEGIN;
+2: BEGIN;
+1: INSERT INTO brin_@amname@_files SELECT 1, 10000 + i FROM generate_series(1, 1000) i;
+2: INSERT INTO brin_@amname@_files SELECT 1, 20000 + i FROM generate_series(1, 37248) i;
+2: ABORT;
+2: BEGIN;
+2: INSERT INTO brin_@amname@_files SELECT 1, 40000 + i FROM generate_series(1, 3000) i;
+1: COMMIT;
+2: COMMIT;
+1U: SELECT * FROM brin_@amname@_check('brin_@amname@_files WHERE b = 40500');
+SELECT brin_summarize_new_values('brin_@amname@_files_b');
+1U: SELECT * FROM brin_@amname@_summaries('brin_@amname@_files_b') ORDER BY 1, 2;
+1U: SELECT * FROM brin_@amname@_check('brin_@amname@_files WHERE b = 10500');
+1U: SELECT * FROM brin_@amname@_check('brin_@amname@_files WHERE b = 20500');
+1U: SELECT * FROM brin_@amname@_check('brin_@amname@_files WHERE b = 40500');
+
+--------------------------------------------------------------------------------
+-- A range that lies across a segment file's first block
+--------------------------------------------------------------------------------
+
+-- A segment file's blocks begin at a multiple of 2^25, which 100 pages a
+-- range do not divide: the first range of file 1 begins at block
+-- 33,554,400, 32 blocks before the file's first, and holds 68 blocks of it,
+-- rows 1 to 19,787.  A scan is given the range's 100 pages, and the 18 the
+-- second has.
+CREATE TABLE brin_@amname@_across (a int, b int) USING @amname@ DISTRIBUTED BY (a);
+CREATE INDEX brin_@amname@_across_b ON brin_@amname@_across USING brin (b) WITH (pages_per_range = 100);
+INSERT INTO brin_@amname@_across SELECT 1, i FROM generate_series(1, 25000) i;
+SELECT brin_summarize_new_values('brin_@amname@_across_b');
+1U: SELECT * FROM brin_@amname@_summaries('brin_@amname@_across_b') ORDER BY 1, 2;
+1U: SELECT * FROM brin_@amname@_check('brin_@amname@_across WHERE b = 19787');
+1U: SELECT * FROM brin_@amname@_check('brin_@amname@_across WHERE b = 19788');
+
+--------------------------------------------------------------------------------
+-- A summary beside a transaction that writes the table
+--------------------------------------------------------------------------------
+
+-- PostgreSQL summarizes a range with every row a transaction still at work
+-- may have put there.  Such a row is in no length of a file that gp_ao can
+-- read yet, so the summary waits for the writer of the range's segment
+-- file, and has its rows once it has committed.  A summary made without
+-- them would have every scan pass the range by: no row through the index
+-- where the table has one.
+CREATE TABLE brin_@amname@_open (a int, b int) USING @amname@ DISTRIBUTED BY (a);
+CREATE INDEX brin_@amname@_open_b ON brin_@amname@_open USING brin (b) WITH (pages_per_range = 128);
+1: BEGIN;
+1: INSERT INTO brin_@amname@_open SELECT 1, 1000 + i FROM generate_series(1, 100) i;
+2&: SELECT brin_summarize_new_values('brin_@amname@_open_b');
+1: COMMIT;
+2<:
+1U: SELECT * FROM brin_@amname@_summaries('brin_@amname@_open_b') ORDER BY 1, 2;
+1U: SELECT * FROM brin_@amname@_check('brin_@amname@_open WHERE b = 1050');
+
+-- The transaction that wrote the range summarizes it without a wait, its
+-- own rows in the summary.
+CREATE TABLE brin_@amname@_own (a int, b int) USING @amname@ DISTRIBUTED BY (a);
+CREATE INDEX brin_@amname@_own_b ON brin_@amname@_own USING brin (b) WITH (pages_per_range = 128);
+1: BEGIN;
+1: INSERT INTO brin_@amname@_own SELECT 1, 7000 + i FROM generate_series(1, 100) i;
+1: SELECT brin_summarize_new_values('brin_@amname@_own_b');
+1: COMMIT;
+1U: SELECT * FROM brin_@amname@_summaries('brin_@amname@_own_b') ORDER BY 1, 2;
+1U: SELECT * FROM brin_@amname@_check('brin_@amname@_own WHERE b = 7050');
+
+-- A writer that rolls back: the range it began in keeps the values it
+-- added to that summary, and the range it went on to is summarized empty,
+-- its rows' numbers not being given again.
+1: BEGIN;
+1: INSERT INTO brin_@amname@_open SELECT 1, 2000 + i FROM generate_series(1, 40000) i;
+2&: SELECT brin_summarize_new_values('brin_@amname@_open_b');
+1: ABORT;
+2<:
+1U: SELECT * FROM brin_@amname@_summaries('brin_@amname@_open_b') ORDER BY 1, 2;
+1U: SELECT * FROM brin_@amname@_check('brin_@amname@_open WHERE b = 2050');
+
+-- VACUUM does not wait.  It leaves the ranges of a segment file that is
+-- being written as they are -- here the third, which the INSERT fills,
+-- without a summary -- and a scan reads them; the next VACUUM summarizes
+-- those that are whole.  Summarized empty beside the INSERT, the range
+-- would lose the INSERT's rows to every scan.
+1: BEGIN;
+1: INSERT INTO brin_@amname@_open SELECT 1, 3000 + i FROM generate_series(1, 80000) i;
+2: VACUUM brin_@amname@_open;
+1U: SELECT * FROM brin_@amname@_summaries('brin_@amname@_open_b') ORDER BY 1, 2;
+1: COMMIT;
+1U: SELECT * FROM brin_@amname@_check('brin_@amname@_open WHERE b = 50000');
+2: VACUUM brin_@amname@_open;
+1U: SELECT * FROM brin_@amname@_summaries('brin_@amname@_open_b') ORDER BY 1, 2;
+1U: SELECT * FROM brin_@amname@_check('brin_@amname@_open WHERE b = 50000');
+
+--------------------------------------------------------------------------------
+-- A summary of rows an older snapshot still reads
+--------------------------------------------------------------------------------
+
+-- A range summarized after a DELETE has the deleted rows' values too: a
+-- snapshot older than the DELETE reads them, and its scan must not pass
+-- the range by.  Here the row deleted has the range's greatest value, and
+-- the older snapshot is the segment's session's own.
+CREATE TABLE brin_@amname@_old (a int, b int) USING @amname@ DISTRIBUTED BY (a);
+INSERT INTO brin_@amname@_old SELECT 1, i FROM generate_series(1, 37247) i;
+CREATE INDEX brin_@amname@_old_b ON brin_@amname@_old USING brin (b) WITH (pages_per_range = 128);
+INSERT INTO brin_@amname@_old SELECT 1, 900000 + i FROM generate_series(1, 1000) i;
+1U: BEGIN ISOLATION LEVEL REPEATABLE READ;
+1U: SELECT count(*) FROM brin_@amname@_old;
+DELETE FROM brin_@amname@_old WHERE b = 901000;
+SELECT brin_summarize_new_values('brin_@amname@_old_b');
+1U: SELECT * FROM brin_@amname@_summaries('brin_@amname@_old_b') ORDER BY 1, 2;
+1U: SELECT * FROM brin_@amname@_check('brin_@amname@_old WHERE b = 901000');
+1U: COMMIT;
+1U: SELECT * FROM brin_@amname@_check('brin_@amname@_old WHERE b = 901000');
+
+-- And so has a range of a segment file that a VACUUM has compacted, which
+-- that snapshot reads on until the file is recycled.  The VACUUM summarizes
+-- the old file's third range, which had no summary, after it has moved the
+-- range's rows away, and the file awaits its drop.
+INSERT INTO brin_@amname@_old SELECT 1, 800000 + i FROM generate_series(1, 40000) i;
+1U: BEGIN ISOLATION LEVEL REPEATABLE READ;
+1U: SELECT count(*) FROM brin_@amname@_old;
+DELETE FROM brin_@amname@_old WHERE b <= 20000;
+VACUUM brin_@amname@_old;
+SELECT segno, state, tupcount FROM gp_ao_or_aocs_seg('brin_@amname@_old') WHERE segment_id = 1 ORDER BY 1;
+1U: SELECT * FROM brin_@amname@_summaries('brin_@amname@_old_b') ORDER BY 1, 2;
+1U: SELECT * FROM brin_@amname@_check('brin_@amname@_old WHERE b = 800005');
+1U: SELECT * FROM brin_@amname@_check('brin_@amname@_old WHERE b = 839000');
+1U: SELECT * FROM brin_@amname@_check('brin_@amname@_old WHERE b = 5');
+1U: COMMIT;
+1U: SELECT * FROM brin_@amname@_check('brin_@amname@_old WHERE b = 800005');
+1U: SELECT * FROM brin_@amname@_check('brin_@amname@_old WHERE b = 5');
+
+DROP TABLE brin_@amname@_default, brin_@amname@_heap, brin_@amname@_part, brin_@amname@_mixed, brin_@amname@, brin_@amname@_files, brin_@amname@_across, brin_@amname@_open, brin_@amname@_own, brin_@amname@_old;
+DROP FUNCTION brin_@amname@_summaries(regclass);
+DROP FUNCTION brin_@amname@_check(text);
+DROP FUNCTION brin_@amname@_blocks_read(text);

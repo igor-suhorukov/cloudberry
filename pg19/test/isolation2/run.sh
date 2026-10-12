@@ -17,9 +17,9 @@
 # specific language governing permissions and limitations
 # under the License.
 #
-# Cloudberry's isolation2_schedule, on a cluster, but for some of its
-# append-optimized tables' own tests (manifest): M3's tests -- distributed
-# transactions, snapshots, locks and the global deadlock detector -- M4's,
+# Cloudberry's isolation2_schedule, on a cluster (manifest): M3's tests --
+# distributed transactions, snapshots, locks and the global deadlock
+# detector -- M4's,
 # FTS and mirrors, M5's of append-optimized tables under sessions side by
 # side, M6's resource queues and memory accounting, M7's of the tools: a
 # node recovered elsewhere, and the standby coordinator promoted, made again
