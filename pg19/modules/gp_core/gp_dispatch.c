@@ -265,6 +265,14 @@ static const char *const synced_settings[] = {
 	"vexec.debug_require_vector",
 	"vexec.debug_check_plans",
 	"vexec.debug_layout_seed",
+	/*
+	 * gp_ao's, which only a superuser sets too: what a segment's log says of
+	 * a VACUUM's compaction, a writer's segment file and the visibility map,
+	 * as Cloudberry syncs its Debug_appendonly_print_* -- likewise
+	 */
+	"gp.debug_appendonly_print_compaction",
+	"gp.debug_appendonly_print_segfile_choice",
+	"gp.debug_appendonly_print_visimap",
 	"search_path",
 	"role",
 	"DateStyle",
@@ -295,6 +303,7 @@ static const char *const synced_settings[] = {
 	"gp.select_invisible",
 	"gp.appendonly_compaction",
 	"gp.appendonly_compaction_threshold",
+	"gp.appendonly_compaction_segfile_limit",
 	"gp.appendonly_insert_files",
 	"gp.appendonly_insert_files_tuples_range",
 	/*
@@ -498,6 +507,9 @@ static const char *const superuser_settings[] = {
 	"vexec.debug_require_vector",
 	"vexec.debug_check_plans",
 	"vexec.debug_layout_seed",
+	"gp.debug_appendonly_print_compaction",
+	"gp.debug_appendonly_print_segfile_choice",
+	"gp.debug_appendonly_print_visimap",
 };
 
 /*

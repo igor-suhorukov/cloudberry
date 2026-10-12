@@ -325,6 +325,8 @@ put_sample(ReturnSetInfo *rsinfo, TupleDesc rowdesc, HeapTuple *rows,
 	{
 		values[2] = heap_copy_tuple_as_datum(rows[i], rowdesc);
 		tuplestore_putvalues(rsinfo->setResult, rsinfo->setDesc, values, nulls);
+		/* Cloudberry's fault at each row gp_acquire_sample_rows() returns */
+		(void) GP_FAULT("returned_sample_row");
 	}
 }
 

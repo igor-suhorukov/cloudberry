@@ -3915,3 +3915,50 @@ RESET allow_system_table_mods;
 
 GRANT SELECT ON pg_catalog.gp_stat_progress_analyze,
 	pg_catalog.gp_stat_progress_analyze_summary TO PUBLIC;
+
+/*
+ * gp_stat_progress_create_index: pg_stat_progress_create_index of every
+ * node, the same way -- the coordinator's CREATE INDEX or REINDEX, and each
+ * segment's build of its index, whose scan of the table counts the blocks;
+ * and Cloudberry's summary of it (system_views_gp_summary.sql).
+ */
+SET allow_system_table_mods = on;
+CREATE VIEW pg_catalog.gp_stat_progress_create_index AS
+	SELECT -1 AS gp_segment_id, a.*
+	FROM pg_catalog.pg_stat_progress_create_index a
+	UNION ALL
+	SELECT d.gp_segment_id, d.pid, d.datid, d.datname, d.relid, d.index_relid,
+		   d.command, d.phase, d.lockers_total, d.lockers_done,
+		   d.current_locker_pid, d.blocks_total, d.blocks_done,
+		   d.tuples_total, d.tuples_done, d.partitions_total,
+		   d.partitions_done
+	FROM gp.dist_random(NULL::pg_catalog.pg_stat_progress_create_index) d;
+
+CREATE VIEW pg_catalog.gp_stat_progress_create_index_summary AS
+SELECT
+	max(coalesce(a1.pid, 0)) AS pid,
+	a.datid,
+	a.datname,
+	a.relid,
+	a.index_relid,
+	a.command,
+	a.phase,
+	CASE WHEN d.policytype = 'r' THEN (sum(a.lockers_total) / d.numsegments)::bigint ELSE sum(a.lockers_total) END AS lockers_total,
+	CASE WHEN d.policytype = 'r' THEN (sum(a.lockers_done) / d.numsegments)::bigint ELSE sum(a.lockers_done) END AS lockers_done,
+	max(a.current_locker_pid) AS current_locker_pid,
+	CASE WHEN d.policytype = 'r' THEN (sum(a.blocks_total) / d.numsegments)::bigint ELSE sum(a.blocks_total) END AS blocks_total,
+	CASE WHEN d.policytype = 'r' THEN (sum(a.blocks_done) / d.numsegments)::bigint ELSE sum(a.blocks_done) END AS blocks_done,
+	CASE WHEN d.policytype = 'r' THEN (sum(a.tuples_total) / d.numsegments)::bigint ELSE sum(a.tuples_total) END AS tuples_total,
+	CASE WHEN d.policytype = 'r' THEN (sum(a.tuples_done) / d.numsegments)::bigint ELSE sum(a.tuples_done) END AS tuples_done,
+	CASE WHEN d.policytype = 'r' THEN (sum(a.partitions_total) / d.numsegments)::bigint ELSE sum(a.partitions_total) END AS partitions_total,
+	CASE WHEN d.policytype = 'r' THEN (sum(a.partitions_done) / d.numsegments)::bigint ELSE sum(a.partitions_done) END AS partitions_done
+FROM pg_catalog.gp_stat_progress_create_index a
+	JOIN pg_catalog.pg_class c ON a.relid = c.oid
+	LEFT JOIN pg_catalog.gp_distribution_policy d ON c.oid = d.localoid
+	LEFT JOIN pg_catalog.gp_stat_progress_create_index a1 ON a.pid = a1.pid AND a1.gp_segment_id = -1
+WHERE a.gp_segment_id > -1
+GROUP BY a.datid, a.datname, a.relid, a.index_relid, a.command, a.phase, d.policytype, d.numsegments;
+RESET allow_system_table_mods;
+
+GRANT SELECT ON pg_catalog.gp_stat_progress_create_index,
+	pg_catalog.gp_stat_progress_create_index_summary TO PUBLIC;
