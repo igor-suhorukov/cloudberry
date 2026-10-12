@@ -306,6 +306,11 @@ extern void ao_blkdir_replace(ItemPointer tid, int64 storage_id, int segno,
 typedef struct AoBlkdirScan AoBlkdirScan;
 extern AoBlkdirScan *ao_blkdir_scan_begin(int64 storage_id, int segno,
 										  Snapshot snapshot);
+extern AoBlkdirScan *ao_blkdir_scan_begin_from(int64 storage_id, int segno,
+											   int64 from_row,
+											   Snapshot snapshot);
+extern bool ao_blkdir_first_from(int64 storage_id, int segno, int64 rownum,
+								 Snapshot snapshot, AoBlkdirEntry *entry);
 extern AoBlkdirScan *ao_blkdir_scan_begin_any(int64 storage_id);
 extern bool ao_blkdir_scan_next(AoBlkdirScan *bs, AoBlkdirEntry *entry);
 extern void ao_blkdir_scan_end(AoBlkdirScan *bs);
@@ -464,6 +469,7 @@ extern const TableAmRoutine *ao_table_am_routine(bool columnar);
 extern void ao_register_table_ams(void);
 extern void ao_fetch_cache_reset(void);
 extern void ao_scan_set_segno(TableScanDesc scan, int segno);
+extern void ao_brin_leave_written(bool on);
 extern void ao_vacuum_rel(Relation rel, const struct VacuumParams *params,
 						  BufferAccessStrategy bstrategy);
 extern List *ao_vacuum_take_compacted(void);
@@ -545,6 +551,15 @@ typedef struct AoScanDescData
 	bool	   *needed;
 	/* the one segment file to read, for VACUUM; 0 for all */
 	int			only_segno;
+
+	/*
+	 * BRIN's summary of a range: the rows of only_segno numbered from
+	 * range_first to before range_end, whatever was deleted of them and
+	 * whether or not a VACUUM has moved them elsewhere; range_end 0 for any
+	 * other scan.
+	 */
+	int64		range_first;
+	int64		range_end;
 	/* the bytes of its files' blocks read so far, for an index build's progress */
 	uint64		bytes_read;
 	/* TABLESAMPLE: a row is a block, numbered as the scan reaches it */

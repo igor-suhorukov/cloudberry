@@ -627,8 +627,14 @@ ao_scan_next_segfile(AoScanDesc scan)
 		if (scan->cursf >= scan->nsegfiles)
 			return false;
 		sf = &scan->segfiles[scan->cursf];
-		/* Its rows were moved elsewhere by a VACUUM this snapshot sees. */
-		if (sf->state == AO_SEGFILE_AWAITING_DROP || sf->tupcount == 0)
+
+		/*
+		 * Its rows were moved elsewhere by a VACUUM this snapshot sees --
+		 * which a range's scan reads all the same, an older snapshot still
+		 * reading them here (ao_scan_set_range()).
+		 */
+		if ((sf->state == AO_SEGFILE_AWAITING_DROP && scan->range_end == 0) ||
+			sf->tupcount == 0)
 			continue;
 		if (scan->only_segno != 0 && sf->segno != scan->only_segno)
 			continue;
@@ -638,7 +644,30 @@ ao_scan_next_segfile(AoScanDesc scan)
 	old = MemoryContextSwitchTo(scan->cxt);
 	scan->vm = ao_visimap_load(scan->storage_id, sf->segno,
 							   ao_meta_snapshot(scan->rs_base.rs_snapshot));
-	if (scan->columnar)
+	if (scan->range_end > 0)
+	{
+		/* From the block the range's first row is in, or the next. */
+		AoBlkdirEntry first;
+		bool		any = ao_blkdir_first_from(scan->storage_id, sf->segno,
+											   scan->range_first,
+											   ao_meta_snapshot(scan->rs_base.rs_snapshot),
+											   &first);
+
+		any = any && first.first_row < scan->range_end;
+		if (scan->columnar)
+			scan->bds = ao_blkdir_scan_begin_from(scan->storage_id, sf->segno,
+												  any ? first.first_row : scan->range_end,
+												  ao_meta_snapshot(scan->rs_base.rs_snapshot));
+		else
+		{
+			scan->row.filenum = AoFileNum(sf->segno, 0);
+			scan->eof = sf->eof[0];
+			scan->row.next = any && first.noffsets > 0 && first.offsets[0] >= 0 ?
+				(uint64) first.offsets[0] : scan->eof;
+			scan->rowidx = 0;
+		}
+	}
+	else if (scan->columnar)
 		scan->bds = ao_blkdir_scan_begin(scan->storage_id, sf->segno,
 										 ao_meta_snapshot(scan->rs_base.rs_snapshot));
 	else
@@ -682,7 +711,8 @@ ao_row_getnextslot(AoScanDesc scan, TupleTableSlot *slot)
 			int64		rownum = scan->row.hdr.first_rownum + i;
 			int			segno = scan->segfiles[scan->cursf].segno;
 
-			if (!gp_select_invisible && ao_visimap_is_deleted(scan->vm, rownum))
+			if (!gp_select_invisible && scan->range_end == 0 &&
+				ao_visimap_is_deleted(scan->vm, rownum))
 				continue;
 			ExecStoreMinimalTuple((MinimalTuple) (scan->row.raw + scan->row.rowoffs[i]),
 								  slot, false);
@@ -697,6 +727,13 @@ ao_row_getnextslot(AoScanDesc scan, TupleTableSlot *slot)
 		{
 			ao_reader_load(rel, &scan->row, scan->row.next, NULL, scan->strategy);
 			scan->rowidx = 0;
+			/* a range's scan ends with the first block past the range */
+			if (scan->range_end > 0 &&
+				scan->row.hdr.first_rownum >= scan->range_end)
+			{
+				scan->rowidx = scan->row.hdr.nrows;
+				scan->row.next = scan->eof;
+			}
 			continue;
 		}
 		if (!ao_scan_next_segfile(scan))
@@ -725,7 +762,8 @@ ao_column_getnextslot(AoScanDesc scan, TupleTableSlot *slot)
 			int64		rownum = scan->entry.first_row + i;
 			int			segno = scan->segfiles[scan->cursf].segno;
 
-			if (!gp_select_invisible && ao_visimap_is_deleted(scan->vm, rownum))
+			if (!gp_select_invisible && scan->range_end == 0 &&
+				ao_visimap_is_deleted(scan->vm, rownum))
 				continue;
 			ExecClearTuple(slot);
 			for (int a = natts; a < desc->natts; a++)
@@ -760,6 +798,10 @@ ao_column_getnextslot(AoScanDesc scan, TupleTableSlot *slot)
 			bool		more = ao_blkdir_scan_next(scan->bds, &scan->entry);
 
 			MemoryContextSwitchTo(old);
+			/* a range's scan ends with the first block past the range */
+			if (more && scan->range_end > 0 &&
+				scan->entry.first_row >= scan->range_end)
+				more = false;
 			if (more)
 			{
 				int			segno = scan->segfiles[scan->cursf].segno;
@@ -845,6 +887,29 @@ void
 ao_scan_set_segno(TableScanDesc sscan, int segno)
 {
 	((AoScanDesc) sscan)->only_segno = segno;
+}
+
+/*
+ * The scan BRIN summarizes a range with: of segment file segno, the blocks
+ * that have a row numbered from first_row to before end_row, found through
+ * the block directory -- not the table from its start, once a range.  It
+ * gives every row of those blocks, the caller keeping the range's: one a
+ * committed DELETE removed, and the rows of a file a VACUUM has compacted
+ * and not yet recycled, are still read by a snapshot older than the DELETE
+ * or the VACUUM, whose scan of the index must not pass the range by for a
+ * summary made without them.  A summary that covers more than its range's
+ * live rows only has a scan read the range.
+ */
+static void
+ao_scan_set_range(TableScanDesc sscan, int segno, int64 first_row,
+				  int64 end_row)
+{
+	AoScanDesc	scan = (AoScanDesc) sscan;
+
+	Assert(end_row > 0 && !scan->started);
+	scan->only_segno = segno;
+	scan->range_first = first_row;
+	scan->range_end = end_row;
 }
 
 /*
@@ -1521,9 +1586,54 @@ ao_scan_total_bytes(AoScanDesc scan)
 #define AoBlocksOfBytes(bytes)	((int64) (((bytes) + BLCKSZ - 1) / BLCKSZ))
 
 /*
+ * Wait until no other transaction writes segment file segno of rel: take
+ * the lock its writer holds to the end of its transaction, and let it go.
+ */
+static void
+ao_wait_for_writer(Relation rel, int segno)
+{
+	Oid			classid = (Oid) ao_segfile_lock_classid();
+
+	LockDatabaseObject(classid, RelationGetRelid(rel), (uint16) segno,
+					   ShareLock);
+	UnlockDatabaseObject(classid, RelationGetRelid(rel), (uint16) segno,
+						 ShareLock);
+}
+
+/* Is segment file segno of relid no other transaction's to write just now? */
+static bool
+ao_segfile_unwritten(Oid relid, int segno)
+{
+	Oid			classid = (Oid) ao_segfile_lock_classid();
+
+	if (!ConditionalLockDatabaseObject(classid, relid, (uint16) segno,
+									   ShareLock))
+		return false;
+	UnlockDatabaseObject(classid, relid, (uint16) segno, ShareLock);
+	return true;
+}
+
+/*
  * The rows of an index's build: every row the latest snapshot sees, in row
- * order, those of blocks start_blockno to start_blockno + numblocks - 1 of
- * their TIDs where BRIN asks for a range.
+ * order.
+ *
+ * And of BRIN's summary of a range, blocks start_blockno to start_blockno +
+ * numblocks - 1 of the rows' TIDs, which it asks for "any visible": every
+ * row a transaction still at work may have put there, and every row some
+ * snapshot may still see.  PostgreSQL has put a placeholder for the range in
+ * the index by now, which an INSERT that comes after it adds its values to;
+ * what this scan owes is the rows that were there before.  A row another
+ * transaction has appended and not committed is in no file's length a
+ * snapshot can read, so the scan first waits for the writer of each segment
+ * file the range lies in (ao_wait_for_writer()) and takes its snapshot
+ * after: a writer that had appended to the range before the placeholder has
+ * ended by then, its rows read or rolled back, and one that takes the file
+ * afterwards finds the placeholder.  So a summary is made beside an open
+ * transaction that wrote the table only once that transaction ends; gp_ao's
+ * own VACUUM, which is not to wait, leaves such a file's ranges
+ * unsummarized instead (ao_brin_leave_written()).  Then it reads the
+ * range's blocks alone, through the block directory, deleted rows and a
+ * compacted file's with them (ao_scan_set_range()).
  *
  * Its progress, where it is asked to report it, is Cloudberry's for an
  * append-optimized table (appendonly_index_build_range_scan()): the blocks
@@ -1550,61 +1660,89 @@ ao_index_build_range_scan(Relation table_rel, Relation index_rel,
 	Snapshot	snapshot = NULL;
 	bool		own_scan = (scan == NULL);
 	uint64		end_blockno = (uint64) start_blockno + numblocks;
+	bool		ranged = (own_scan && numblocks != InvalidBlockNumber);
+	int			segno_first = 0;
+	int			segno_last = 0;
 	int64		blocks_total = 0;
 	int64		blocks_done = 0;
 
 	econtext->ecxt_scantuple = slot;
 	predicate = ExecPrepareQual(index_info->ii_Predicate, estate);
 
+	if (ranged)
+	{
+		/* The segment files the range lies in: one, but at a file's end. */
+		segno_first = Max((int) (start_blockno >> AO_SEGNO_SHIFT), 1);
+		segno_last = Min((int) ((end_blockno - 1) >> AO_SEGNO_SHIFT),
+						 AO_MAX_SEGNO);
+		for (int segno = segno_first; anyvisible && segno <= segno_last; segno++)
+			ao_wait_for_writer(table_rel, segno);
+	}
 	if (own_scan)
-	{
 		snapshot = RegisterSnapshot(GetLatestSnapshot());
-		scan = table_beginscan(table_rel, snapshot, 0, NULL, SO_NONE);
-	}
-	/* a scan in parallel is several processes', none of which reports */
-	if (scan->rs_parallel != NULL)
-		progress = false;
-	if (progress)
-	{
-		blocks_total = AoBlocksOfBytes(ao_scan_total_bytes((AoScanDesc) scan));
-		pgstat_progress_update_param(PROGRESS_SCAN_BLOCKS_TOTAL, blocks_total);
-	}
 
-	while (table_scan_getnextslot(scan, ForwardScanDirection, slot))
+	/* One scan, or one of each of the range's segment files. */
+	for (int segno = segno_first; segno <= segno_last; segno++)
 	{
-		BlockNumber blk = ItemPointerGetBlockNumber(&slot->tts_tid);
+		if (own_scan)
+			scan = table_beginscan(table_rel, snapshot, 0, NULL, SO_NONE);
+		if (ranged)
+		{
+			uint64		base = (uint64) segno << AO_SEGNO_SHIFT;
+			uint64		first = Max((uint64) start_blockno, base) - base;
+			uint64		end = Min(end_blockno,
+								  base + ((uint64) 1 << AO_SEGNO_SHIFT)) - base;
 
-		CHECK_FOR_INTERRUPTS();
+			ao_scan_set_range(scan, segno,
+							  (int64) first * AO_ROWS_PER_TIDBLOCK,
+							  (int64) end * AO_ROWS_PER_TIDBLOCK);
+		}
+		/* a scan in parallel is several processes', none of which reports */
+		if (scan->rs_parallel != NULL)
+			progress = false;
 		if (progress)
 		{
-			int64		done = AoBlocksOfBytes(((AoScanDesc) scan)->bytes_read);
-
-			if (done != blocks_done)
-			{
-				blocks_done = done;
-				pgstat_progress_update_param(PROGRESS_SCAN_BLOCKS_DONE, blocks_done);
-			}
+			blocks_total = AoBlocksOfBytes(ao_scan_total_bytes((AoScanDesc) scan));
+			pgstat_progress_update_param(PROGRESS_SCAN_BLOCKS_TOTAL, blocks_total);
 		}
-		if (numblocks != InvalidBlockNumber &&
-			(blk < start_blockno || (uint64) blk >= end_blockno))
-			continue;
 
-		reltuples += 1;
-		MemoryContextReset(econtext->ecxt_per_tuple_memory);
+		while (table_scan_getnextslot(scan, ForwardScanDirection, slot))
+		{
+			BlockNumber blk = ItemPointerGetBlockNumber(&slot->tts_tid);
 
-		if (predicate != NULL && !ExecQual(predicate, econtext))
-			continue;
+			CHECK_FOR_INTERRUPTS();
+			if (progress)
+			{
+				int64		done = AoBlocksOfBytes(((AoScanDesc) scan)->bytes_read);
 
-		FormIndexDatum(index_info, slot, estate, values, isnull);
-		callback(index_rel, &slot->tts_tid, values, isnull, true,
-				 callback_state);
+				if (done != blocks_done)
+				{
+					blocks_done = done;
+					pgstat_progress_update_param(PROGRESS_SCAN_BLOCKS_DONE, blocks_done);
+				}
+			}
+			if (numblocks != InvalidBlockNumber &&
+				(blk < start_blockno || (uint64) blk >= end_blockno))
+				continue;
+
+			reltuples += 1;
+			MemoryContextReset(econtext->ecxt_per_tuple_memory);
+
+			if (predicate != NULL && !ExecQual(predicate, econtext))
+				continue;
+
+			FormIndexDatum(index_info, slot, estate, values, isnull);
+			callback(index_rel, &slot->tts_tid, values, isnull, true,
+					 callback_state);
+		}
+
+		if (progress)
+			pgstat_progress_update_param(PROGRESS_SCAN_BLOCKS_DONE, blocks_total);
+
+		/* A scan given, a parallel build's, is ours to end too, as heap's is. */
+		table_endscan(scan);
 	}
 
-	if (progress)
-		pgstat_progress_update_param(PROGRESS_SCAN_BLOCKS_DONE, blocks_total);
-
-	/* A scan given, a parallel build's, is ours to end too, as heap's is. */
-	table_endscan(scan);
 	if (own_scan)
 		UnregisterSnapshot(snapshot);
 	ExecDropSingleTupleTableSlot(slot);
@@ -1852,6 +1990,23 @@ gp_ao_column_handler(PG_FUNCTION_ARGS)
 /* What the core asks of the registry (O13)                                  */
 /* ------------------------------------------------------------------------- */
 
+/*
+ * While gp_ao's VACUUM cleans up a table's indexes, BRIN is given the runs
+ * of the segment files no other transaction writes, and of no other: the
+ * ranges of a file being written stay as they are, the unsummarized ones for
+ * a later VACUUM, and the VACUUM does not wait for the file's writer as a
+ * summary of one of them would (ao_index_build_range_scan()).  A range BRIN
+ * has no summary of, a scan reads.  Only then: a scan of the index asks for
+ * the runs too, and is to have them all.
+ */
+static bool ao_brin_leaves_written = false;
+
+void
+ao_brin_leave_written(bool on)
+{
+	ao_brin_leaves_written = on;
+}
+
 /* O18: each segment file's run of TID blocks, as far as it has numbered rows. */
 static TableAmBlockSequence *
 ao_relation_get_block_sequences(Relation rel, int *nseqs)
@@ -1864,6 +2019,9 @@ ao_relation_get_block_sequences(Relation rel, int *nseqs)
 		int64		next = ao_next_rownum(rel, segno);
 
 		if (next <= 1)
+			continue;
+		if (ao_brin_leaves_written &&
+			!ao_segfile_unwritten(RelationGetRelid(rel), segno))
 			continue;
 		seqs[*nseqs].startblknum = (BlockNumber) segno << AO_SEGNO_SHIFT;
 		seqs[*nseqs].nblocks = (BlockNumber) ((next - 1) / AO_ROWS_PER_TIDBLOCK) + 1;

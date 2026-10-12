@@ -34,7 +34,8 @@
  * ao_vacuum.c.
  *
  * This file is what the module hooks: Cloudberry's spelling of the storage
- * options, the triggers Cloudberry refuses, the last phase of VACUUM, a
+ * options, the triggers Cloudberry refuses, the range of a BRIN index made
+ * with none, the last phase of VACUUM, a
  * dropped table's rows in gp_ao's tables, ANALYZE's sample, and where
  * statements end.
  *
@@ -289,6 +290,87 @@ static bool
 am_name_is_ao(const char *am)
 {
 	return am != NULL && (strcmp(am, "ao_row") == 0 || strcmp(am, "ao_column") == 0);
+}
+
+/* ------------------------------------------------------------------------- */
+/* A BRIN index's range                                                      */
+/* ------------------------------------------------------------------------- */
+
+/*
+ * A BRIN index made on an append-optimized table with no pages_per_range
+ * gets this many, not PostgreSQL's 128.  A page of such a table's row IDs is
+ * 291 rows (gp_ao.h), where Cloudberry's is 32,768: 128 of them are 37,248
+ * rows a range, against Cloudberry's 4.2 million, and this is 4.8 million.
+ * And BRIN's map has an entry for every range from block 0 to the last it
+ * has summarized, whose block number begins with the segment file's number:
+ * at 128 pages a range that is 1.5 MB an index for each segment file up to
+ * the highest it has a summary of, 191 MB at file 127, whatever the table
+ * holds; at this, three pages for every two files.
+ *
+ * It is written into the statement, so the index has it as an option given:
+ * \d and a dump show it, and an index made from this one -- a partition's,
+ * a LIKE's -- has it too.
+ */
+#define AO_BRIN_PAGES_PER_RANGE	16384
+
+/*
+ * Are relid's rows in append-optimized tables?  A partitioned table's are
+ * where every partition that holds rows is one; with no such partition yet,
+ * where the partitions it gets will be.
+ */
+static bool
+rows_are_ao(Oid relid)
+{
+	List	   *all;
+	ListCell   *lc;
+	bool		any = false;
+	Oid			relam;
+
+	if (get_rel_relkind(relid) != RELKIND_PARTITIONED_TABLE)
+		return relid_is_ao(relid);
+
+	all = find_all_inheritors(relid, NoLock, NULL);
+	foreach(lc, all)
+	{
+		Oid			child = lfirst_oid(lc);
+
+		if (get_rel_relkind(child) == RELKIND_PARTITIONED_TABLE)
+			continue;
+		if (!relid_is_ao(child))
+			return false;
+		any = true;
+	}
+	if (any)
+		return true;
+	relam = get_rel_relam(relid);
+	return OidIsValid(relam) ? am_is_ao(relam) :
+		am_name_is_ao(default_table_access_method);
+}
+
+static void
+brin_default_range(IndexStmt *stmt)
+{
+	ListCell   *lc;
+	Oid			relid;
+
+	if (stmt->accessMethod == NULL || strcmp(stmt->accessMethod, "brin") != 0 ||
+		stmt->relation == NULL)
+		return;
+	foreach(lc, stmt->options)
+	{
+		DefElem    *def = lfirst(lc);
+
+		if (def->defnamespace == NULL &&
+			strcmp(def->defname, "pages_per_range") == 0)
+			return;
+	}
+	relid = RangeVarGetRelid(stmt->relation, NoLock, true);
+	if (!OidIsValid(relid) || !rows_are_ao(relid))
+		return;
+	stmt->options = lappend(stmt->options,
+							makeDefElem("pages_per_range",
+										(Node *) makeInteger(AO_BRIN_PAGES_PER_RANGE),
+										-1));
 }
 
 /*
@@ -1048,7 +1130,7 @@ gp_ao_ProcessUtility(PlannedStmt *pstmt, const char *queryString,
 	if (readOnlyTree &&
 		(IsA(parsetree, CreateStmt) || IsA(parsetree, CreateTableAsStmt) ||
 		 IsA(parsetree, AlterTableStmt) || IsA(parsetree, SecLabelStmt) ||
-		 IsA(parsetree, DefineStmt)))
+		 IsA(parsetree, DefineStmt) || IsA(parsetree, IndexStmt)))
 	{
 		pstmt = copyObject(pstmt);
 		parsetree = pstmt->utilityStmt;
@@ -1145,6 +1227,9 @@ gp_ao_ProcessUtility(PlannedStmt *pstmt, const char *queryString,
 			}
 		case T_CreateTrigStmt:
 			check_trigger((CreateTrigStmt *) parsetree);
+			break;
+		case T_IndexStmt:
+			brin_default_range((IndexStmt *) parsetree);
 			break;
 		case T_VacuumStmt:
 			/* What a VACUUM that failed compacted, the next one recycles. */

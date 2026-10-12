@@ -623,14 +623,17 @@ struct AoBlkdirScan
 	Relation	idx;
 	Snapshot	snapshot;
 	SysScanDesc scan;
-	ScanKeyData key[2];
+	ScanKeyData key[3];
 	bool		placeholders;	/* given too, nrows -1 */
 };
 
+/* Those of them whose first row is from_row or past it; all of them from 0. */
 AoBlkdirScan *
-ao_blkdir_scan_begin(int64 storage_id, int segno, Snapshot snapshot)
+ao_blkdir_scan_begin_from(int64 storage_id, int segno, int64 from_row,
+						  Snapshot snapshot)
 {
 	AoBlkdirScan *bs = palloc0_object(AoBlkdirScan);
+	int			nkeys = 2;
 
 	bs->rel = table_open(meta_relid("blkdir", storage_id, false), AccessShareLock);
 	bs->idx = index_open(meta_relid("blkdir_key", storage_id, false), AccessShareLock);
@@ -638,10 +641,42 @@ ao_blkdir_scan_begin(int64 storage_id, int segno, Snapshot snapshot)
 				F_INT8EQ, Int64GetDatum(storage_id));
 	ScanKeyInit(&bs->key[1], Anum_blkdir_segno, BTEqualStrategyNumber,
 				F_INT4EQ, Int32GetDatum(segno));
+	if (from_row > 0)
+		ScanKeyInit(&bs->key[nkeys++], Anum_blkdir_first_row,
+					BTGreaterEqualStrategyNumber, F_INT8GE,
+					Int64GetDatum(from_row));
 	bs->snapshot = meta_snapshot_begin(snapshot);
-	bs->scan = systable_beginscan_ordered(bs->rel, bs->idx, bs->snapshot, 2,
-										  bs->key);
+	bs->scan = systable_beginscan_ordered(bs->rel, bs->idx, bs->snapshot,
+										  nkeys, bs->key);
 	return bs;
+}
+
+AoBlkdirScan *
+ao_blkdir_scan_begin(int64 storage_id, int segno, Snapshot snapshot)
+{
+	return ao_blkdir_scan_begin_from(storage_id, segno, 0, snapshot);
+}
+
+/*
+ * The first block of segment file segno, as snapshot sees the directory,
+ * that has row rownum or a later one: the block rownum is in, or, where it
+ * is in none -- a number an aborted writer took, or one past the file's
+ * rows -- the next after it.  False when there is none.
+ */
+bool
+ao_blkdir_first_from(int64 storage_id, int segno, int64 rownum,
+					 Snapshot snapshot, AoBlkdirEntry *entry)
+{
+	AoBlkdirScan *bs;
+	bool		found;
+
+	if (ao_blkdir_lookup(storage_id, segno, rownum, snapshot, entry) &&
+		entry->nrows >= 0)
+		return true;
+	bs = ao_blkdir_scan_begin_from(storage_id, segno, rownum, snapshot);
+	found = ao_blkdir_scan_next(bs, entry);
+	ao_blkdir_scan_end(bs);
+	return found;
 }
 
 /*

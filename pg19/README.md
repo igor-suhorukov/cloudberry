@@ -554,7 +554,10 @@ as PAX's O22, done in the modules, and O23 pg_checksums' reader alone):
   columns `ALTER TABLE` adds without a rewrite, UPDATE, which fetches each
   old row by its TID, a block read and decoded once for the rows it changes
   in it (O20, a core patch until 2026-09-28, gave it the old row from the
-  plan), unique indexes, BRIN and Cloudberry's bitmap index, VACUUM
+  plan), unique indexes, BRIN -- 16,384 pages a range where an index's
+  statement gives none, Cloudberry's range in rows, and a range summarized
+  beside a transaction that writes the table only once that has ended --
+  and Cloudberry's bitmap index, VACUUM
   and its compaction, an insert's rows spread over several segment files
   (`gp.appendonly_insert_files` and `..._tuples_range`) and
   `pg_appendonly.segfilecount` as ANALYZE counts it, on one node and on the

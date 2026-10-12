@@ -133,7 +133,22 @@ ao_vacuum_indexes(Relation rel, IndexBulkDeleteCallback callback, void *state,
 		ivinfo.strategy = bstrategy;
 		if (callback)
 			stats = index_bulk_delete(&ivinfo, stats, callback, state);
-		stats = index_vacuum_cleanup(&ivinfo, stats);
+
+		/*
+		 * BRIN's cleanup summarizes the ranges that have no summary, and is
+		 * not to wait for a transaction that writes the table: the files
+		 * such a one holds are left to a later VACUUM (ao_am.c).
+		 */
+		ao_brin_leave_written(true);
+		PG_TRY();
+		{
+			stats = index_vacuum_cleanup(&ivinfo, stats);
+		}
+		PG_FINALLY();
+		{
+			ao_brin_leave_written(false);
+		}
+		PG_END_TRY();
 		if (stats && update_stats && !stats->estimated_count)
 			vac_update_relstats(indrels[i], stats->num_pages,
 								stats->num_index_tuples, 0, 0, false,
