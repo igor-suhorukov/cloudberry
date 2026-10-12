@@ -1,0 +1,21 @@
+@@
+- CREATE INDEX | building index: scanning table | 10                  | 10                    | 2                    
++ CREATE INDEX | building index: scanning table | 52                  | 14                    | 2                    
+@@
+- CREATE INDEX | building index: scanning table | 30           | 6           
++ CREATE INDEX | building index: scanning table | 42           | 6           
+@@
+- CREATE INDEX | building index: scanning table | 20                  | 20                    | 4                    
++ CREATE INDEX | building index: scanning table | 289                 | 79                    | 13                   
+@@
+- CREATE INDEX | building index: scanning table | 60           | 12          
++ CREATE INDEX | building index: scanning table | 237          | 39          
+@@
+- command      | phase                          | col_j_blocks | blocks_total_reported | blocks_done_reported 
+---------------+--------------------------------+--------------+-----------------------+----------------------
+- CREATE INDEX | building index: scanning table | 8            | 20                    | 4                    
+-(1 row)
++ERROR:  could not stat file "base/DB/REL.129": No such file or directory
+@@
+- CREATE INDEX | building index: scanning table | 60           | 12          
++ CREATE INDEX | building index: scanning table | 237          | 39          

@@ -16,6 +16,11 @@ m/^while inserting index tuple \(\d+,\d+\) in relation /
 # masks it.
 m/^DETAIL:  segment \d+ \([^)]*\)(; \d+ other segments failed too)?$/
 
+# The port's detail of the error of an insert that found every segment file
+# of its table another transaction's, which Cloudberry's error has not
+# (uao/max_concurrency2).
+m/^DETAIL:  All \d+ segment files are written by other transactions\.$/
+
 -- end_matchignore
 
 -- start_matchsubs
@@ -80,5 +85,25 @@ s/ \((bmfuncs|nodeModifyTable)\.c:(\d+|XXX)\)$//
 # none.
 m/^PANIC:  fault triggered, fault name:'\w+' fault type:'panic' ?$/
 s/^PANIC:  fault triggered, fault name:'\w+' fault type:'panic' ?\n//
+
+# The TID of a block directory's row, the first column of the seven of
+# gp_toolkit.__gp_aoblkdir(): gp_ao's directory is one table for every
+# table's, so where a row is in it depends on what every table wrote before,
+# and how wide the column is with it (uao/ao_unique_index_vacuum).
+m/^ \(\d+,\d+\)\s+\| \d+\s+\| \d+\s+\| \d+\s+\| \d+\s+\| \d+\s+\| \d+\s*$/
+s/^ \(\d+,\d+\)\s+\|/ (TID) |/
+
+m/^ tupleid\s+\| segno \| columngroup_no \| entry_no \| first_row_no \| file_offset \| row_count\s*$/
+s/^ tupleid\s+\|/ tupleid |/
+
+m/^-+\+-{7}\+-{16}\+-{10}\+-{14}\+-{13}\+-+$/
+s/^-+\+/---------+/
+
+# A file of Cloudberry's layout a test asks the size of -- column j's of
+# segment file 1, "<relfilenode>.129" (ao_index_build_progress) -- which
+# gp_ao, whose table is one relation's file, has not: its path, whose
+# database's and table's numbers depend on what ran before.
+m/^ERROR:  could not stat file "base\/\d+\/\d+\.\d+": No such file or directory$/
+s/base\/\d+\/\d+\./base\/DB\/REL./
 
 -- end_matchsubs

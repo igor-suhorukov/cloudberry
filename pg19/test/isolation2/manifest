@@ -1,7 +1,7 @@
 # Part of Cloudberry's isolation2_schedule (src/test/isolation2), as the port
 # runs it on a coordinator and three segments: every test of the schedule
-# but twenty-three of append-optimized tables' own (below), in the
-# schedule's order -- distributed transactions, distributed snapshots, locks
+# but four of append-optimized tables' own (below), in the schedule's
+# order -- distributed transactions, distributed snapshots, locks
 # and the global deadlock detector (M3), FTS and mirrors (M4), resource
 # queues and memory accounting (M6), the tools -- a node recovered
 # elsewhere, the standby coordinator promoted, removed, made again and
@@ -42,14 +42,20 @@
 # files, in the groups uao_row and uao_column, after disable_autovacuum as
 # the schedule has them, with the three tests the schedule runs between the
 # two; ao_partition_lock, bitmap_index_ao_sparse and the reindex/ tests of
-# ao and aoco tables in main, beside their heap twins.  The other 23 are not
-# listed yet -- uao/alter_while_vacuum2, ao_unique_index_vacuum, brin,
-# brin_chain, fast_analyze, limit_indexscan_inits, max_concurrency2,
-# test_pg_appendonly_version and vacuum_cleanup, each of a row and of a
-# column table, and ao_blkdir, ao_index_build_progress, ao_unique_index,
-# aocs_unique_index and fsync_ao: each wants a fault, a setting or a view
-# gp_ao has not, or reads Cloudberry's own layout of an append-optimized
-# table's auxiliary relations.  Its FTS tests are M4's, and are: the ones
+# ao and aoco tables in main, beside their heap twins.  The other 23 want a
+# fault, a setting or a view of Cloudberry's, or read its own layout of an
+# append-optimized table's auxiliary relations.  Nine of them run, with what
+# gp_ao and gp_core have of those since: uao/alter_while_vacuum2,
+# ao_unique_index_vacuum, fast_analyze and max_concurrency2, of a row and of
+# a column table, and ao_index_build_progress.  Ten are skipped for the
+# layout they read, five of them with a test of the port's own beside them
+# that is Cloudberry's test for gp_ao's layout: port/ao_blkdir,
+# port/ao_unique_index, port/aocs_unique_index and
+# port/uao/vacuum_cleanup_row and _column, the last two one file made a row
+# table's test and a column table's, as Cloudberry's are (run.sh, input/port
+# and output/port here).  And four are not listed yet: uao/brin and
+# uao/brin_chain, of a row and of a column table, which read BRIN's revmap
+# page by page.  Its FTS tests are M4's, and are: the ones
 # that run are in the groups mirrors1 to
 # mirrors3, whose clusters have a mirror for each segment -- three, so that
 # they run side by side -- M7's in mirrors4, whose standby they change, and
@@ -139,11 +145,15 @@ run  invalidated_toast_index                            main
 run  distributed_snapshot
 run  port/dtx_wait_prepared
 run  gp_collation                                       main
+skip ao_blkdir                              Cloudberry's white-box test of its block directory, every dump of which is its layout's: a directory row is a minipage of up to 161 entries, a block each, rewritten as entries are added, the rows numbered a hundred an insert, and the test's 292,700 and 1,317,143 rows overflow a minipage by two; gp_ao's directory, one table for every table's, has a row a block, written once; it runs as port/ao_blkdir, the dumps without the directory row's own TID and the overflow a block's
+run  port/ao_blkdir                                     main
 run  bitmap_index_concurrent                            main
 run  bitmap_index_inspect                               main
+skip fsync_ao                              the faults restartpoint_guts and ao_fsync_counter in a mirror's checkpointer, and create_restartpoint_on_ckpt_record_replay: that a mirror's replay hands its checkpointer the fsync of an append-optimized table's segment files, which Cloudberry writes outside the buffer manager; gp_ao's files are pages of the table's relation in shared buffers, written and synced as any relation's (ao_storage.c), and there is no request of their own to count
 run  disable_autovacuum                                 main,uao_row,uao_column
 run  concurrent_index_creation_should_not_deadlock      main
 run  uao/alter_while_vacuum_row                         uao_row
+run  uao/alter_while_vacuum2_row                        uao_row
 run  uao/compaction_full_stats_row                      uao_row
 run  uao/compaction_utility_row                         uao_row
 run  uao/compaction_utility_insert_row                  uao_row
@@ -157,6 +167,7 @@ run  uao/index_build_reltuples_row                      uao_row
 run  uao/insert_policy_row                              uao_row
 run  uao/insert_while_vacuum_row                        uao_row
 run  uao/max_concurrency_row                            uao_row
+run  uao/max_concurrency2_row                           uao_row
 run  uao/modcount_row                                   uao_row
 run  uao/modcount_vacuum_row                            uao_row
 run  uao/parallel_delete_row                            uao_row
@@ -187,14 +198,20 @@ run  uao/vacuum_self_serializable3_row                  uao_row
 run  uao/vacuum_self_function_row                       uao_row
 run  uao/vacuum_while_insert_row                        uao_row
 run  uao/vacuum_while_vacuum_row                        uao_row
+skip uao/vacuum_cleanup_row                 the age of relfrozenxid of the table's auxiliary relations, found by relkind and by the table's OID in their names, and its segment files read through pg_appendonly.segrelid: gp_ao keeps every table's segment files, visibility map and block directory in tables all tables share; and the fault vacuum_relation_open_relation_during_drop_phase on the coordinator, which sends each phase of Cloudberry's VACUUM, where the port's segments compact and recycle within the one statement; it runs as port/uao/vacuum_cleanup_row, the fault on the segments and the files read with gp_toolkit's functions
+run  port/uao/vacuum_cleanup_row                        uao_row
 run  uao/vacuum_index_stats_row                         uao_row
 run  uao/bitmapindex_rescan_row                         uao_row
+skip uao/limit_indexscan_inits_row          it counts the scans of gp_fastsequence's index that a bitmap scan's start makes, one a segment file: gp_fastsequence, Cloudberry's catalog of the row numbers a table's segment files have taken, gp_ao has not -- a segment file's next row number is in the table's own first page (ao_storage.c) -- and a scan's start reads no catalog for it
+skip uao/test_pg_appendonly_version_row     it UPDATEs pg_appendonly.version to 1 and expects a unique index refused on a table of that version: pg_appendonly is a view here, and gp_ao writes one format of table, which takes unique indexes, and reads no older one
+run  uao/fast_analyze_row                               uao_row
 run  uao/create_index_allows_readonly_row               uao_row
 run  reorganize_after_ao_vacuum_skip_drop               uao_row
 run  truncate_after_ao_vacuum_skip_drop                 uao_row
 run  mark_all_aoseg_await_drop                          uao_row
 run  port/ao_vacuum_snapshot                            uao_row
 run  uao/alter_while_vacuum_column                      uao_column
+run  uao/alter_while_vacuum2_column                     uao_column
 run  uao/compaction_full_stats_column                   uao_column
 run  uao/compaction_utility_column                      uao_column
 run  uao/compaction_utility_insert_column               uao_column
@@ -208,6 +225,7 @@ run  uao/index_build_reltuples_column                   uao_column
 run  uao/insert_policy_column                           uao_column
 run  uao/insert_while_vacuum_column                     uao_column
 run  uao/max_concurrency_column                         uao_column
+run  uao/max_concurrency2_column                        uao_column
 run  uao/modcount_column                                uao_column
 run  uao/modcount_vacuum_column                         uao_column
 run  uao/parallel_delete_column                         uao_column
@@ -238,9 +256,14 @@ run  uao/vacuum_self_serializable3_column               uao_column
 run  uao/vacuum_self_function_column                    uao_column
 run  uao/vacuum_while_insert_column                     uao_column
 run  uao/vacuum_while_vacuum_column                     uao_column
+skip uao/vacuum_cleanup_column              as uao/vacuum_cleanup_row, of a column table; it runs as port/uao/vacuum_cleanup_column
+run  port/uao/vacuum_cleanup_column                     uao_column
 run  uao/vacuum_index_stats_column                      uao_column
 run  uao/bitmapindex_rescan_column                      uao_column
+skip uao/limit_indexscan_inits_column       as uao/limit_indexscan_inits_row, of a column table
+skip uao/test_pg_appendonly_version_column  as uao/test_pg_appendonly_version_row, of a column table
 run  uao/create_index_allows_readonly_column            uao_column
+run  uao/fast_analyze_column                            uao_column
 run  add_column_after_vacuum_skip_drop_column           main
 run  vacuum_after_vacuum_skip_drop_column               main
 run  autostats_locking                                  main
@@ -268,10 +291,17 @@ run  reindex/vacuum_while_reindex_ao_bitmap             main
 run  reindex/vacuum_while_reindex_heap_btree            main
 run  reindex/vacuum_while_reindex_heap_btree_toast      main
 run  upgrade_numsegments                                main
+skip ao_unique_index                        its cases 7 and 8 hold an INSERT between two of its rows on every segment at once, each row so far in the unique index, which the planner's route cannot: the coordinator sends the rows to a segment at a time by COPY, and a segment's COPY appends a batch of rows before the index has any of them; and case 8 counts the rows of two of Cloudberry's block directory minipages, its fault insert_new_entry_curr_minipage_full a full minipage's; it runs as port/ao_unique_index, those two INSERTs under ORCA in either pass and case 8 of two of gp_ao's blocks
+run  port/ao_unique_index                               main
+skip aocs_unique_index                      as ao_unique_index, of a column table; it runs as port/aocs_unique_index
+run  port/aocs_unique_index                             main
+run  uao/ao_unique_index_vacuum_row                     main
+run  uao/ao_unique_index_vacuum_column                  main
 run  spilling_hashagg                                   main
 skip cancel_plpython                        a cancel that stops Python code (Cloudberry's cancel_pending_hook in PL/Python), which PostgreSQL 19's PL/Python has not: its busy loop and time.sleep() run on to the driver's timeout, in each pass
 skip cancel_query                           the fault zlib_decompress_after_decompress_fn, which the ANALYZE of the zlib-compressed partition never reaches: its one row's column blocks gp_ao stores uncompressed, zlib not shortening blocks of gp_ao's format so small, where it shortens Cloudberry's longer datum stream blocks; it waits for it
 skip idle_gang_cleaner                      gp.vmem_idle_resource_timeout, after which Cloudberry's coordinator ends a session's idle readers and keeps its writer, which the port accepts and does not carry out, and the fault proc_kill, in ProcKill(), at which the test waits for segment 0's reader to end -- in the planner pass the join has no reader, PostgreSQL's planner gathering each table over the writer; and gp_snapshotadd_timeout
+run  ao_index_build_progress                            main
 skip analyze_progress                       the ANALYZE of its replicated table samples the one segment that answers for the table, which holds all its rows (gp_analyze.c), where Cloudberry's gp_acquire_sample_rows() samples every segment, and the test waits for analyze_block on all three; its hash-distributed half runs as port/analyze_progress
 run  port/analyze_progress                              main
 skip workfile_mgr_test                      Cloudberry's workfile manager's own C test harness (gp_workfile_mgr_test() and the workset functions of isolation2_regress.so) and its cache of workfile sets (gp_workfile_mgr_cache_entries(), gp_workfile_max_entries); the port's workfile manager is module-only, its files read from pgsql_tmp (gp_workfile.c)

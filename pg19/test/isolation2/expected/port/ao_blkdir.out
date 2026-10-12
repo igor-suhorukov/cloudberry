@@ -1,0 +1,684 @@
+-- The port's own: Cloudberry's ao_blkdir, its white-box test of what an
+-- append-optimized table's block directory holds, for gp_ao's directory.
+-- Cloudberry's is a relation of each table's own whose row is a minipage of
+-- up to 161 entries, a block each, rewritten as entries are added; gp_ao's
+-- is one table for every table's (gp_ao.blkdir), a row a block, written once
+-- -- and for a table by column one row for all its columns' blocks of the
+-- same rows, which gp_toolkit.__gp_aoblkdir() gives a column at a time.  So
+-- every dump of Cloudberry's test differs: the entry numbers, the row
+-- numbers, which Cloudberry hands out a hundred at a time, the offsets, and
+-- the directory row's own TID, which here depends on what every other table
+-- wrote before.  This is that test with the TID left out of what it prints,
+-- and with the two inserts that overflow a minipage by two rows made inserts
+-- that overflow a block by two.  What Cloudberry's test asserts beyond the
+-- layout holds as it is: a row of a transaction in progress is another's to
+-- see only once it commits; a table with a unique index has a placeholder
+-- for the block being built, which gp.select_invisible shows and no MVCC
+-- snapshot does; and a segment file's rows are the sum of its directory
+-- rows' counts, after commits, aborts, deletes and VACUUM.
+--
+-- All tuples are directed to seg0 and each INSERT has an increasing row count
+-- to make their identification easy.
+
+--------------------------------------------------------------------------------
+-- AO tables
+--------------------------------------------------------------------------------
+
+CREATE TABLE ao_blkdir_test(i int, j int) USING ao_row DISTRIBUTED BY (j);
+CREATE
+CREATE INDEX ao_blkdir_test_idx ON ao_blkdir_test(i);
+CREATE
+
+1: INSERT INTO ao_blkdir_test SELECT i, 2 FROM generate_series(1, 10) i;
+INSERT 10
+-- There should be 1 block directory row covering 10 rows
+SELECT segno, columngroup_no, entry_no, first_row_no, file_offset, row_count FROM (SELECT (gp_toolkit.__gp_aoblkdir('ao_blkdir_test')).* FROM gp_dist_random('gp_id') WHERE gp_segment_id = 0) d ORDER BY 1,2,3,4,5;
+ segno | columngroup_no | entry_no | first_row_no | file_offset | row_count 
+-------+----------------+----------+--------------+-------------+-----------
+ 1     | 0              | 0        | 1            | 0           | 10        
+(1 row)
+
+1: INSERT INTO ao_blkdir_test SELECT i, 2 FROM generate_series(11, 30) i;
+INSERT 20
+-- There should be 2 block directory rows, one for each INSERT's block. The row
+-- from the first INSERT should remain unchanged.
+SELECT segno, columngroup_no, entry_no, first_row_no, file_offset, row_count FROM (SELECT (gp_toolkit.__gp_aoblkdir('ao_blkdir_test')).* FROM gp_dist_random('gp_id') WHERE gp_segment_id = 0) d ORDER BY 1,2,3,4,5;
+ segno | columngroup_no | entry_no | first_row_no | file_offset | row_count 
+-------+----------------+----------+--------------+-------------+-----------
+ 1     | 0              | 0        | 1            | 0           | 10        
+ 1     | 0              | 0        | 11           | 272         | 20        
+(2 rows)
+
+1: BEGIN;
+BEGIN
+1: INSERT INTO ao_blkdir_test SELECT i, 2 FROM generate_series(31, 60) i;
+INSERT 30
+2: BEGIN;
+BEGIN
+2: INSERT INTO ao_blkdir_test SELECT i, 2 FROM generate_series(71, 110) i;
+INSERT 40
+1: COMMIT;
+COMMIT
+2: COMMIT;
+COMMIT
+-- The second INSERT of 40 rows above would have landed in segfile 2 (unlike
+-- segfile 1, like the first INSERT of 30 rows above). This should be reflected
+-- in the block directory rows for these rows.
+SELECT segno, columngroup_no, entry_no, first_row_no, file_offset, row_count FROM (SELECT (gp_toolkit.__gp_aoblkdir('ao_blkdir_test')).* FROM gp_dist_random('gp_id') WHERE gp_segment_id = 0) d ORDER BY 1,2,3,4,5;
+ segno | columngroup_no | entry_no | first_row_no | file_offset | row_count 
+-------+----------------+----------+--------------+-------------+-----------
+ 1     | 0              | 0        | 1            | 0           | 10        
+ 1     | 0              | 0        | 11           | 272         | 20        
+ 1     | 0              | 0        | 31           | 784         | 30        
+ 2     | 0              | 0        | 1            | 0           | 40        
+(4 rows)
+
+TRUNCATE ao_blkdir_test;
+TRUNCATE
+set gp.appendonly_insert_files = 0;
+SET
+-- Insert enough rows to overflow the first block by 2: a row of two integers
+-- is 24 bytes of a block of 32768, which is full with the 1366th.
+INSERT INTO ao_blkdir_test SELECT i, 2 FROM generate_series(1, 1368) i;
+INSERT 1368
+reset gp.appendonly_insert_files;
+RESET
+-- There should be 2 block directory rows, one covering 1366 rows and the
+-- other the 2 overflow rows.
+SELECT segno, columngroup_no, entry_no, first_row_no, file_offset, row_count FROM (SELECT (gp_toolkit.__gp_aoblkdir('ao_blkdir_test')).* FROM gp_dist_random('gp_id') WHERE gp_segment_id = 0) d ORDER BY 1,2,3,4,5;
+ segno | columngroup_no | entry_no | first_row_no | file_offset | row_count 
+-------+----------------+----------+--------------+-------------+-----------
+ 1     | 0              | 0        | 1            | 0           | 1366      
+ 1     | 0              | 0        | 1367         | 32816       | 2         
+(2 rows)
+
+-- Unique index white box tests
+DROP TABLE ao_blkdir_test;
+DROP
+CREATE TABLE ao_blkdir_test(i int UNIQUE, j int) USING ao_row DISTRIBUTED BY (i);
+CREATE
+
+SELECT gp_inject_fault('appendonly_insert', 'suspend', '', '', 'ao_blkdir_test', 1, 1, 0, dbid) FROM gp_segment_configuration WHERE role = 'p' AND content = 0;
+ gp_inject_fault 
+-----------------
+ Success:        
+(1 row)
+1: BEGIN;
+BEGIN
+1&: INSERT INTO ao_blkdir_test VALUES (2, 2);  <waiting ...>
+
+-- There should be a placeholder row inserted to cover the rows of the block
+-- the INSERT builds, before we insert its 1st row, that is only visible to
+-- SNAPSHOT_DIRTY -- and to gp.select_invisible, which reads every version of
+-- every row: it covers every row number its segment file may have from the
+-- block's first.
+SELECT gp_wait_until_triggered_fault('appendonly_insert', 1, dbid) FROM gp_segment_configuration WHERE role = 'p' AND content = 0;
+ gp_wait_until_triggered_fault 
+-------------------------------
+ Success:                      
+(1 row)
+SELECT segno, columngroup_no, entry_no, first_row_no, file_offset, row_count FROM (SELECT (gp_toolkit.__gp_aoblkdir('ao_blkdir_test')).* FROM gp_dist_random('gp_id') WHERE gp_segment_id = 0) d ORDER BY 1,2,3,4,5;
+ segno | columngroup_no | entry_no | first_row_no | file_offset | row_count 
+-------+----------------+----------+--------------+-------------+-----------
+(0 rows)
+SET gp.select_invisible TO ON;
+SET
+SELECT segno, columngroup_no, entry_no, first_row_no, file_offset, row_count FROM (SELECT (gp_toolkit.__gp_aoblkdir('ao_blkdir_test')).* FROM gp_dist_random('gp_id') WHERE gp_segment_id = 0) d ORDER BY 1,2,3,4,5;
+ segno | columngroup_no | entry_no | first_row_no | file_offset | row_count  
+-------+----------------+----------+--------------+-------------+------------
+ 1     | 0              | 0        | 1            | 0           | 9764339420 
+(1 row)
+RESET gp.select_invisible;
+RESET
+
+-- The placeholder row is invisible to other transactions (that don't perform a
+-- uniqueness check) while the INSERT is in progress.
+2: SELECT segno, columngroup_no, entry_no, first_row_no, file_offset, row_count FROM (SELECT (gp_toolkit.__gp_aoblkdir('ao_blkdir_test')).* FROM gp_dist_random('gp_id') WHERE gp_segment_id = 0) d ORDER BY 1,2,3,4,5;
+ segno | columngroup_no | entry_no | first_row_no | file_offset | row_count 
+-------+----------------+----------+--------------+-------------+-----------
+(0 rows)
+
+SELECT gp_inject_fault('appendonly_insert', 'reset', dbid) FROM gp_segment_configuration WHERE role = 'p' AND content = 0;
+ gp_inject_fault 
+-----------------
+ Success:        
+(1 row)
+1<:  <... completed>
+INSERT 1
+
+-- The placeholder row is invisible to the INSERTing transaction. Since the
+-- INSERT finished, there should be 1 visible blkdir row representing the INSERT.
+1: SELECT segno, columngroup_no, entry_no, first_row_no, file_offset, row_count FROM (SELECT (gp_toolkit.__gp_aoblkdir('ao_blkdir_test')).* FROM gp_dist_random('gp_id') WHERE gp_segment_id = 0) d ORDER BY 1,2,3,4,5;
+ segno | columngroup_no | entry_no | first_row_no | file_offset | row_count 
+-------+----------------+----------+--------------+-------------+-----------
+ 1     | 0              | 0        | 1            | 0           | 1         
+(1 row)
+
+-- The placeholder row is invisible to other transactions (that don't perform a
+-- uniqueness check) even after the INSERT finishes. The blkdir row representing
+-- the INSERT should not be visible as the INSERTing transaction hasn't
+-- committed yet.
+2: SELECT segno, columngroup_no, entry_no, first_row_no, file_offset, row_count FROM (SELECT (gp_toolkit.__gp_aoblkdir('ao_blkdir_test')).* FROM gp_dist_random('gp_id') WHERE gp_segment_id = 0) d ORDER BY 1,2,3,4,5;
+ segno | columngroup_no | entry_no | first_row_no | file_offset | row_count 
+-------+----------------+----------+--------------+-------------+-----------
+(0 rows)
+
+1: COMMIT;
+COMMIT
+
+-- The placeholder row is invisible to other transactions (that don't perform a
+-- uniqueness check) even after the INSERTing transaction commits. Since the
+-- INSERTing transaction has committed, the blkdir row representing the INSERT
+-- should be visible now.
+2: SELECT segno, columngroup_no, entry_no, first_row_no, file_offset, row_count FROM (SELECT (gp_toolkit.__gp_aoblkdir('ao_blkdir_test')).* FROM gp_dist_random('gp_id') WHERE gp_segment_id = 0) d ORDER BY 1,2,3,4,5;
+ segno | columngroup_no | entry_no | first_row_no | file_offset | row_count 
+-------+----------------+----------+--------------+-------------+-----------
+ 1     | 0              | 0        | 1            | 0           | 1         
+(1 row)
+
+DROP TABLE ao_blkdir_test;
+DROP
+
+-- Test `tupcount` in pg_aoseg == sum of number of `row_count` across all
+-- aoblkdir entries for each segno. Test with commits, aborts and deletes.
+
+-- Case1: without VACUUM ANALYZE
+CREATE TABLE ao_blkdir_test_rowcount(i int, j int) USING ao_row DISTRIBUTED BY (j);
+CREATE
+1: BEGIN;
+BEGIN
+2: BEGIN;
+BEGIN
+3: BEGIN;
+BEGIN
+4: BEGIN;
+BEGIN
+1: INSERT INTO ao_blkdir_test_rowcount SELECT i, 2 FROM generate_series(1, 10) i;
+INSERT 10
+2: INSERT INTO ao_blkdir_test_rowcount SELECT i, 3 FROM generate_series(1, 20) i;
+INSERT 20
+3: INSERT INTO ao_blkdir_test_rowcount SELECT i, 4 FROM generate_series(1, 30) i;
+INSERT 30
+3: ABORT;
+ABORT
+3: BEGIN;
+BEGIN
+3: INSERT INTO ao_blkdir_test_rowcount SELECT i, 4 FROM generate_series(1, 40) i;
+INSERT 40
+4: INSERT INTO ao_blkdir_test_rowcount SELECT i, 7 FROM generate_series(1, 50) i;
+INSERT 50
+1: COMMIT;
+COMMIT
+2: COMMIT;
+COMMIT
+3: COMMIT;
+COMMIT
+4: COMMIT;
+COMMIT
+DELETE FROM ao_blkdir_test_rowcount WHERE j = 7;
+DELETE 50
+
+CREATE INDEX ao_blkdir_test_rowcount_idx ON ao_blkdir_test_rowcount(i);
+CREATE
+
+SELECT segno, sum(row_count) AS totalrows FROM (SELECT (gp_toolkit.__gp_aoblkdir('ao_blkdir_test_rowcount')).* FROM gp_dist_random('gp_id') WHERE gp_segment_id = 0)s GROUP BY segno, columngroup_no ORDER BY segno;
+ segno | totalrows 
+-------+-----------
+ 1     | 10        
+ 2     | 20        
+ 3     | 40        
+ 4     | 50        
+(4 rows)
+SELECT segno, sum(tupcount) AS totalrows FROM gp_toolkit.__gp_aoseg('ao_blkdir_test_rowcount') WHERE segment_id = 0 GROUP BY segno;
+ segno | totalrows 
+-------+-----------
+ 1     | 10        
+ 2     | 20        
+ 3     | 40        
+ 4     | 50        
+(4 rows)
+
+-- Case2: with VACUUM ANALYZE
+DROP TABLE ao_blkdir_test_rowcount;
+DROP
+CREATE TABLE ao_blkdir_test_rowcount(i int, j int) USING ao_row DISTRIBUTED BY (j);
+CREATE
+CREATE INDEX ao_blkdir_test_rowcount_idx ON ao_blkdir_test_rowcount(i);
+CREATE
+1: BEGIN;
+BEGIN
+2: BEGIN;
+BEGIN
+3: BEGIN;
+BEGIN
+4: BEGIN;
+BEGIN
+1: INSERT INTO ao_blkdir_test_rowcount SELECT i, 2 FROM generate_series(1, 10) i;
+INSERT 10
+1: INSERT INTO ao_blkdir_test_rowcount SELECT i, 2 FROM ao_blkdir_test_rowcount;
+INSERT 10
+1: INSERT INTO ao_blkdir_test_rowcount SELECT i, 2 FROM ao_blkdir_test_rowcount;
+INSERT 20
+2: INSERT INTO ao_blkdir_test_rowcount SELECT i, 3 FROM generate_series(1, 20) i;
+INSERT 20
+2: INSERT INTO ao_blkdir_test_rowcount SELECT i, 3 FROM ao_blkdir_test_rowcount;
+INSERT 20
+2: INSERT INTO ao_blkdir_test_rowcount SELECT i, 3 FROM ao_blkdir_test_rowcount;
+INSERT 40
+3: INSERT INTO ao_blkdir_test_rowcount SELECT i, 4 FROM generate_series(1, 30) i;
+INSERT 30
+3: INSERT INTO ao_blkdir_test_rowcount SELECT i, 4 FROM ao_blkdir_test_rowcount;
+INSERT 30
+3: INSERT INTO ao_blkdir_test_rowcount SELECT i, 4 FROM ao_blkdir_test_rowcount;
+INSERT 60
+4: INSERT INTO ao_blkdir_test_rowcount SELECT i, 7 FROM generate_series(1, 50) i;
+INSERT 50
+4: INSERT INTO ao_blkdir_test_rowcount SELECT i, 7 FROM ao_blkdir_test_rowcount;
+INSERT 50
+4: INSERT INTO ao_blkdir_test_rowcount SELECT i, 7 FROM ao_blkdir_test_rowcount;
+INSERT 100
+1: COMMIT;
+COMMIT
+2: COMMIT;
+COMMIT
+3: ABORT;
+ABORT
+4: COMMIT;
+COMMIT
+
+DELETE FROM ao_blkdir_test_rowcount WHERE j = 7;
+DELETE 200
+VACUUM ANALYZE ao_blkdir_test_rowcount;
+VACUUM
+
+SELECT segno, sum(row_count) AS totalrows FROM (SELECT (gp_toolkit.__gp_aoblkdir('ao_blkdir_test_rowcount')).* FROM gp_dist_random('gp_id') WHERE gp_segment_id = 0)s GROUP BY segno, columngroup_no ORDER BY segno;
+ segno | totalrows 
+-------+-----------
+ 1     | 40        
+ 2     | 80        
+(2 rows)
+SELECT segno, sum(tupcount) AS totalrows FROM gp_toolkit.__gp_aoseg('ao_blkdir_test_rowcount') WHERE segment_id = 0 GROUP BY segno;
+ segno | totalrows 
+-------+-----------
+ 1     | 40        
+ 2     | 80        
+ 3     | 0         
+ 4     | 0         
+(4 rows)
+
+UPDATE ao_blkdir_test_rowcount SET i = i + 1;
+UPDATE 120
+VACUUM ANALYZE ao_blkdir_test_rowcount;
+VACUUM
+
+SELECT segno, sum(row_count) AS totalrows FROM (SELECT (gp_toolkit.__gp_aoblkdir('ao_blkdir_test_rowcount')).* FROM gp_dist_random('gp_id') WHERE gp_segment_id = 0)s GROUP BY segno, columngroup_no ORDER BY segno;
+ segno | totalrows 
+-------+-----------
+ 3     | 120       
+(1 row)
+SELECT segno, sum(tupcount) AS totalrows FROM gp_toolkit.__gp_aoseg('ao_blkdir_test_rowcount') WHERE segment_id = 0 GROUP BY segno;
+ segno | totalrows 
+-------+-----------
+ 1     | 0         
+ 2     | 0         
+ 3     | 120       
+ 4     | 0         
+(4 rows)
+
+DROP TABLE ao_blkdir_test_rowcount;
+DROP
+
+--------------------------------------------------------------------------------
+-- AOCO tables
+--------------------------------------------------------------------------------
+
+CREATE TABLE aoco_blkdir_test(i int, j int) USING ao_column DISTRIBUTED BY (j);
+CREATE
+CREATE INDEX aoco_blkdir_test_idx ON aoco_blkdir_test(i);
+CREATE
+
+1: INSERT INTO aoco_blkdir_test SELECT i, 2 FROM generate_series(1, 10) i;
+INSERT 10
+-- There should be 1 block directory row covering 10 rows, given once for each
+-- column.
+SELECT segno, columngroup_no, entry_no, first_row_no, file_offset, row_count FROM (SELECT (gp_toolkit.__gp_aoblkdir('aoco_blkdir_test')).* FROM gp_dist_random('gp_id') WHERE gp_segment_id = 0) d ORDER BY 1,2,3,4,5;
+ segno | columngroup_no | entry_no | first_row_no | file_offset | row_count 
+-------+----------------+----------+--------------+-------------+-----------
+ 1     | 0              | 0        | 1            | 0           | 10        
+ 1     | 1              | 0        | 1            | 0           | 10        
+(2 rows)
+
+1: INSERT INTO aoco_blkdir_test SELECT i, 2 FROM generate_series(11, 30) i;
+INSERT 20
+-- There should be 2 block directory rows, one for each INSERT's blocks. The
+-- row from the first INSERT should remain unchanged.
+SELECT segno, columngroup_no, entry_no, first_row_no, file_offset, row_count FROM (SELECT (gp_toolkit.__gp_aoblkdir('aoco_blkdir_test')).* FROM gp_dist_random('gp_id') WHERE gp_segment_id = 0) d ORDER BY 1,2,3,4,5;
+ segno | columngroup_no | entry_no | first_row_no | file_offset | row_count 
+-------+----------------+----------+--------------+-------------+-----------
+ 1     | 0              | 0        | 1            | 0           | 10        
+ 1     | 0              | 0        | 11           | 80          | 20        
+ 1     | 1              | 0        | 1            | 0           | 10        
+ 1     | 1              | 0        | 11           | 80          | 20        
+(4 rows)
+
+1: BEGIN;
+BEGIN
+1: INSERT INTO aoco_blkdir_test SELECT i, 2 FROM generate_series(31, 60) i;
+INSERT 30
+2: BEGIN;
+BEGIN
+2: INSERT INTO aoco_blkdir_test SELECT i, 2 FROM generate_series(71, 110) i;
+INSERT 40
+1: COMMIT;
+COMMIT
+2: COMMIT;
+COMMIT
+-- The second INSERT of 40 rows above would have landed in segfile 2 (unlike
+-- segfile 1, like the first INSERT of 30 rows above). This should be reflected
+-- in the block directory rows for these rows.
+SELECT segno, columngroup_no, entry_no, first_row_no, file_offset, row_count FROM (SELECT (gp_toolkit.__gp_aoblkdir('aoco_blkdir_test')).* FROM gp_dist_random('gp_id') WHERE gp_segment_id = 0) d ORDER BY 1,2,3,4,5;
+ segno | columngroup_no | entry_no | first_row_no | file_offset | row_count 
+-------+----------------+----------+--------------+-------------+-----------
+ 1     | 0              | 0        | 1            | 0           | 10        
+ 1     | 0              | 0        | 11           | 80          | 20        
+ 1     | 0              | 0        | 31           | 200         | 30        
+ 1     | 1              | 0        | 1            | 0           | 10        
+ 1     | 1              | 0        | 11           | 80          | 20        
+ 1     | 1              | 0        | 31           | 200         | 30        
+ 2     | 0              | 0        | 1            | 0           | 40        
+ 2     | 1              | 0        | 1            | 0           | 40        
+(8 rows)
+
+TRUNCATE aoco_blkdir_test;
+TRUNCATE
+-- Insert enough rows to overflow the first block by 2: a column of integers
+-- fills a block of 32768 bytes with its 8192nd.
+set gp.appendonly_insert_files = 0;
+SET
+INSERT INTO aoco_blkdir_test SELECT i, 2 FROM generate_series(1, 8194) i;
+INSERT 8194
+reset gp.appendonly_insert_files;
+RESET
+-- There should be 2 block directory rows, each given for both columns, one
+-- covering 8192 rows and the other the 2 overflow rows.
+SELECT segno, columngroup_no, entry_no, first_row_no, file_offset, row_count FROM (SELECT (gp_toolkit.__gp_aoblkdir('aoco_blkdir_test')).* FROM gp_dist_random('gp_id') WHERE gp_segment_id = 0) d ORDER BY 1,2,3,4,5;
+ segno | columngroup_no | entry_no | first_row_no | file_offset | row_count 
+-------+----------------+----------+--------------+-------------+-----------
+ 1     | 0              | 0        | 1            | 0           | 8192      
+ 1     | 0              | 0        | 8193         | 32808       | 2         
+ 1     | 1              | 0        | 1            | 0           | 8192      
+ 1     | 1              | 0        | 8193         | 32808       | 2         
+(4 rows)
+
+-- Unique index white box tests
+DROP TABLE aoco_blkdir_test;
+DROP
+CREATE TABLE aoco_blkdir_test(h int, i int UNIQUE, j int) USING ao_column DISTRIBUTED BY (i);
+CREATE
+
+SELECT gp_inject_fault('appendonly_insert', 'suspend', '', '', 'aoco_blkdir_test', 1, 1, 0, dbid) FROM gp_segment_configuration WHERE role = 'p' AND content = 0;
+ gp_inject_fault 
+-----------------
+ Success:        
+(1 row)
+1: BEGIN;
+BEGIN
+1&: INSERT INTO aoco_blkdir_test VALUES (2, 2, 2);  <waiting ...>
+
+-- There should be a placeholder row inserted to cover the rows of the block
+-- the INSERT builds, one for all its columns, before we insert its 1st row,
+-- that is only visible to SNAPSHOT_DIRTY and to gp.select_invisible.
+SELECT gp_wait_until_triggered_fault('appendonly_insert', 1, dbid) FROM gp_segment_configuration WHERE role = 'p' AND content = 0;
+ gp_wait_until_triggered_fault 
+-------------------------------
+ Success:                      
+(1 row)
+SELECT segno, columngroup_no, entry_no, first_row_no, file_offset, row_count FROM (SELECT (gp_toolkit.__gp_aoblkdir('aoco_blkdir_test')).* FROM gp_dist_random('gp_id') WHERE gp_segment_id = 0) d ORDER BY 1,2,3,4,5;
+ segno | columngroup_no | entry_no | first_row_no | file_offset | row_count 
+-------+----------------+----------+--------------+-------------+-----------
+(0 rows)
+SET gp.select_invisible TO ON;
+SET
+SELECT segno, columngroup_no, entry_no, first_row_no, file_offset, row_count FROM (SELECT (gp_toolkit.__gp_aoblkdir('aoco_blkdir_test')).* FROM gp_dist_random('gp_id') WHERE gp_segment_id = 0) d ORDER BY 1,2,3,4,5;
+ segno | columngroup_no | entry_no | first_row_no | file_offset | row_count  
+-------+----------------+----------+--------------+-------------+------------
+ 1     | 0              | 0        | 1            | 0           | 9764339420 
+(1 row)
+RESET gp.select_invisible;
+RESET
+
+-- The placeholder row is invisible to other transactions (that don't perform a
+-- uniqueness check) while the INSERT is in progress.
+2: SELECT segno, columngroup_no, entry_no, first_row_no, file_offset, row_count FROM (SELECT (gp_toolkit.__gp_aoblkdir('aoco_blkdir_test')).* FROM gp_dist_random('gp_id') WHERE gp_segment_id = 0) d ORDER BY 1,2,3,4,5;
+ segno | columngroup_no | entry_no | first_row_no | file_offset | row_count 
+-------+----------------+----------+--------------+-------------+-----------
+(0 rows)
+
+-- Before the INSERT commits, if we try to drop column 'h', the session will
+-- block (locking). So it is perfectly safe to use 1 placeholder row (and not
+-- have 1 placeholder/column)
+3&: ALTER TABLE aoco_blkdir_test DROP COLUMN h;  <waiting ...>
+
+SELECT gp_inject_fault('appendonly_insert', 'reset', dbid) FROM gp_segment_configuration WHERE role = 'p' AND content = 0;
+ gp_inject_fault 
+-----------------
+ Success:        
+(1 row)
+1<:  <... completed>
+INSERT 1
+
+-- The placeholder row is invisible to the INSERTing transaction. Since the
+-- INSERT finished, there should be 1 visible blkdir row representing the
+-- INSERT, given for each column.
+1: SELECT segno, columngroup_no, entry_no, first_row_no, file_offset, row_count FROM (SELECT (gp_toolkit.__gp_aoblkdir('aoco_blkdir_test')).* FROM gp_dist_random('gp_id') WHERE gp_segment_id = 0) d ORDER BY 1,2,3,4,5;
+ segno | columngroup_no | entry_no | first_row_no | file_offset | row_count 
+-------+----------------+----------+--------------+-------------+-----------
+ 1     | 0              | 0        | 1            | 0           | 1         
+ 1     | 1              | 0        | 1            | 0           | 1         
+ 1     | 2              | 0        | 1            | 0           | 1         
+(3 rows)
+
+-- The placeholder row is invisible to other transactions (that don't perform a
+-- uniqueness check) even after the INSERT finishes. The blkdir rows representing
+-- the INSERT should not be visible as the INSERTing transaction hasn't
+-- committed yet.
+2: SELECT segno, columngroup_no, entry_no, first_row_no, file_offset, row_count FROM (SELECT (gp_toolkit.__gp_aoblkdir('aoco_blkdir_test')).* FROM gp_dist_random('gp_id') WHERE gp_segment_id = 0) d ORDER BY 1,2,3,4,5;
+ segno | columngroup_no | entry_no | first_row_no | file_offset | row_count 
+-------+----------------+----------+--------------+-------------+-----------
+(0 rows)
+
+1: COMMIT;
+COMMIT
+
+-- The placeholder row is invisible to other transactions (that don't perform a
+-- uniqueness check) even after the INSERTing transaction commits. Since the
+-- INSERTing transaction has committed, the blkdir rows representing the INSERT
+-- should be visible now.
+2: SELECT segno, columngroup_no, entry_no, first_row_no, file_offset, row_count FROM (SELECT (gp_toolkit.__gp_aoblkdir('aoco_blkdir_test')).* FROM gp_dist_random('gp_id') WHERE gp_segment_id = 0) d ORDER BY 1,2,3,4,5;
+ segno | columngroup_no | entry_no | first_row_no | file_offset | row_count 
+-------+----------------+----------+--------------+-------------+-----------
+ 1     | 0              | 0        | 1            | 0           | 1         
+ 1     | 1              | 0        | 1            | 0           | 1         
+ 1     | 2              | 0        | 1            | 0           | 1         
+(3 rows)
+
+-- Now even though the DROP COLUMN has finished, we would still be able to
+-- properly resolve uniqueness checks (the block's directory row is every
+-- column's).
+3<:  <... completed>
+ALTER
+4: INSERT INTO aoco_blkdir_test VALUES (2, 2);
+ERROR:  duplicate key value violates unique constraint "aoco_blkdir_test_i_key"
+DETAIL:  Key (i)=(2) already exists.
+
+DROP TABLE aoco_blkdir_test;
+DROP
+
+-- Test `tupcount` in pg_ao(cs)seg == sum of number of `row_count` across all
+-- aoblkdir entries for each <segno, columngroup_no>. Test with commits, aborts
+-- and deletes.
+
+-- Case1: without VACUUM ANALYZE
+CREATE TABLE aoco_blkdir_test_rowcount(i int, j int) USING ao_column DISTRIBUTED BY (j);
+CREATE
+1: BEGIN;
+BEGIN
+2: BEGIN;
+BEGIN
+3: BEGIN;
+BEGIN
+4: BEGIN;
+BEGIN
+1: INSERT INTO aoco_blkdir_test_rowcount SELECT i, 2 FROM generate_series(1, 10) i;
+INSERT 10
+2: INSERT INTO aoco_blkdir_test_rowcount SELECT i, 3 FROM generate_series(1, 20) i;
+INSERT 20
+3: INSERT INTO aoco_blkdir_test_rowcount SELECT i, 4 FROM generate_series(1, 30) i;
+INSERT 30
+3: ABORT;
+ABORT
+3: BEGIN;
+BEGIN
+3: INSERT INTO aoco_blkdir_test_rowcount SELECT i, 4 FROM generate_series(1, 40) i;
+INSERT 40
+4: INSERT INTO aoco_blkdir_test_rowcount SELECT i, 7 FROM generate_series(1, 50) i;
+INSERT 50
+1: COMMIT;
+COMMIT
+2: COMMIT;
+COMMIT
+3: COMMIT;
+COMMIT
+4: COMMIT;
+COMMIT
+DELETE FROM aoco_blkdir_test_rowcount WHERE j = 7;
+DELETE 50
+
+CREATE INDEX aoco_blkdir_test_rowcount_idx ON aoco_blkdir_test_rowcount(i);
+CREATE
+
+SELECT segno, columngroup_no, sum(row_count) AS totalrows FROM (SELECT (gp_toolkit.__gp_aoblkdir('aoco_blkdir_test_rowcount')).* FROM gp_dist_random('gp_id') WHERE gp_segment_id = 0)s GROUP BY segno, columngroup_no ORDER BY segno, columngroup_no;
+ segno | columngroup_no | totalrows 
+-------+----------------+-----------
+ 1     | 0              | 10        
+ 1     | 1              | 10        
+ 2     | 0              | 20        
+ 2     | 1              | 20        
+ 3     | 0              | 40        
+ 3     | 1              | 40        
+ 4     | 0              | 50        
+ 4     | 1              | 50        
+(8 rows)
+SELECT segno, column_num, sum(tupcount) AS totalrows FROM gp_toolkit.__gp_aocsseg('aoco_blkdir_test_rowcount') WHERE segment_id = 0 GROUP BY segno, column_num;
+ segno | column_num | totalrows 
+-------+------------+-----------
+ 1     | 0          | 10        
+ 1     | 1          | 10        
+ 2     | 0          | 20        
+ 2     | 1          | 20        
+ 3     | 0          | 40        
+ 3     | 1          | 40        
+ 4     | 0          | 50        
+ 4     | 1          | 50        
+(8 rows)
+
+-- Case2: with VACUUM ANALYZE
+DROP TABLE aoco_blkdir_test_rowcount;
+DROP
+CREATE TABLE aoco_blkdir_test_rowcount(i int, j int) USING ao_column DISTRIBUTED BY (j);
+CREATE
+CREATE INDEX aoco_blkdir_test_rowcount_idx ON aoco_blkdir_test_rowcount(i);
+CREATE
+1: BEGIN;
+BEGIN
+2: BEGIN;
+BEGIN
+3: BEGIN;
+BEGIN
+4: BEGIN;
+BEGIN
+1: INSERT INTO aoco_blkdir_test_rowcount SELECT i, 2 FROM generate_series(1, 10) i;
+INSERT 10
+1: INSERT INTO aoco_blkdir_test_rowcount SELECT i, 2 FROM aoco_blkdir_test_rowcount;
+INSERT 10
+1: INSERT INTO aoco_blkdir_test_rowcount SELECT i, 2 FROM aoco_blkdir_test_rowcount;
+INSERT 20
+2: INSERT INTO aoco_blkdir_test_rowcount SELECT i, 3 FROM generate_series(1, 20) i;
+INSERT 20
+2: INSERT INTO aoco_blkdir_test_rowcount SELECT i, 3 FROM aoco_blkdir_test_rowcount;
+INSERT 20
+2: INSERT INTO aoco_blkdir_test_rowcount SELECT i, 3 FROM aoco_blkdir_test_rowcount;
+INSERT 40
+3: INSERT INTO aoco_blkdir_test_rowcount SELECT i, 4 FROM generate_series(1, 30) i;
+INSERT 30
+3: INSERT INTO aoco_blkdir_test_rowcount SELECT i, 4 FROM aoco_blkdir_test_rowcount;
+INSERT 30
+3: INSERT INTO aoco_blkdir_test_rowcount SELECT i, 4 FROM aoco_blkdir_test_rowcount;
+INSERT 60
+4: INSERT INTO aoco_blkdir_test_rowcount SELECT i, 7 FROM generate_series(1, 50) i;
+INSERT 50
+4: INSERT INTO aoco_blkdir_test_rowcount SELECT i, 7 FROM aoco_blkdir_test_rowcount;
+INSERT 50
+4: INSERT INTO aoco_blkdir_test_rowcount SELECT i, 7 FROM aoco_blkdir_test_rowcount;
+INSERT 100
+1: COMMIT;
+COMMIT
+2: COMMIT;
+COMMIT
+3: ABORT;
+ABORT
+4: COMMIT;
+COMMIT
+
+DELETE FROM aoco_blkdir_test_rowcount WHERE j = 7;
+DELETE 200
+VACUUM ANALYZE aoco_blkdir_test_rowcount;
+VACUUM
+
+SELECT segno, columngroup_no, sum(row_count) AS totalrows FROM (SELECT (gp_toolkit.__gp_aoblkdir('aoco_blkdir_test_rowcount')).* FROM gp_dist_random('gp_id') WHERE gp_segment_id = 0)s GROUP BY segno, columngroup_no ORDER BY segno, columngroup_no;
+ segno | columngroup_no | totalrows 
+-------+----------------+-----------
+ 1     | 0              | 40        
+ 1     | 1              | 40        
+ 2     | 0              | 80        
+ 2     | 1              | 80        
+(4 rows)
+SELECT segno, column_num, sum(tupcount) AS totalrows FROM gp_toolkit.__gp_aocsseg('aoco_blkdir_test_rowcount') WHERE segment_id = 0 GROUP BY segno, column_num;
+ segno | column_num | totalrows 
+-------+------------+-----------
+ 1     | 0          | 40        
+ 1     | 1          | 40        
+ 2     | 0          | 80        
+ 2     | 1          | 80        
+ 3     | 0          | 0         
+ 3     | 1          | 0         
+ 4     | 0          | 0         
+ 4     | 1          | 0         
+(8 rows)
+
+UPDATE aoco_blkdir_test_rowcount SET i = i + 1;
+UPDATE 120
+VACUUM ANALYZE aoco_blkdir_test_rowcount;
+VACUUM
+
+SELECT segno, columngroup_no, sum(row_count) AS totalrows FROM (SELECT (gp_toolkit.__gp_aoblkdir('aoco_blkdir_test_rowcount')).* FROM gp_dist_random('gp_id') WHERE gp_segment_id = 0)s GROUP BY segno, columngroup_no ORDER BY segno, columngroup_no;
+ segno | columngroup_no | totalrows 
+-------+----------------+-----------
+ 3     | 0              | 120       
+ 3     | 1              | 120       
+(2 rows)
+SELECT segno, column_num, sum(tupcount) AS totalrows FROM gp_toolkit.__gp_aocsseg('aoco_blkdir_test_rowcount') WHERE segment_id = 0 GROUP BY segno, column_num;
+ segno | column_num | totalrows 
+-------+------------+-----------
+ 1     | 0          | 0         
+ 1     | 1          | 0         
+ 2     | 0          | 0         
+ 2     | 1          | 0         
+ 3     | 0          | 120       
+ 3     | 1          | 120       
+ 4     | 0          | 0         
+ 4     | 1          | 0         
+(8 rows)
+
+DROP TABLE aoco_blkdir_test_rowcount;
+DROP

@@ -11,7 +11,8 @@ difference or exactly the file's.
 add_column_after_vacuum_skip_drop_column, vacuum_after_vacuum_skip_drop_column,
 mark_all_aoseg_await_drop, reorganize_after_ao_vacuum_skip_drop,
 truncate_after_ao_vacuum_skip_drop, uao/select_after_vacuum_row and
-_column, uao/vacuum_self_serializable2_row and _column
+_column, uao/vacuum_self_serializable2_row and _column,
+uao/max_concurrency2_row and _column
   A segment file that a VACUUM compacted while another session was inside
   a transaction that had read, and was idle: Cloudberry leaves such a file
   awaiting drop (state 2), for a later VACUUM -- or what the test then runs
@@ -36,6 +37,44 @@ _column, uao/vacuum_self_serializable2_row and _column
   snapshot in use does still need is kept awaiting drop, as Cloudberry
   keeps it: uao/vacuum_self_function, where a function reads the table
   under a snapshot older than the DELETE and the VACUUM, passes as it is.
+  In uao/max_concurrency2 the VACUUM is of a table of 127 segment files
+  with a row each, all deleted: it compacts 117 of them and stops, ten
+  left for inserts, as gp.appendonly_compaction_segfile_limit says and
+  Cloudberry's does -- files 1 and 3 to 118, file 2 the one compacted
+  into -- and the 117 are recycled at once, empty and in state 1, where
+  Cloudberry's await drop with their row until the session ends its
+  transaction.  The VACUUM after that leaves the same in both: 127 files,
+  empty.
+
+ao_index_build_progress
+  The numbers of blocks and nothing else.  A segment's CREATE INDEX reports
+  the blocks its scan of the table is to read and has read, as Cloudberry's
+  does (ao_am.c), and gp_stat_progress_create_index and its summary gather
+  them; but a block of the count is 8K of gp_ao's files of the table, whose
+  blocks of rows and compression are its own: 14 to read and 2 read at the
+  tenth block of rows of the row table where Cloudberry's has 10 and 2, 79
+  and 13 at the fifth of the column table's for 20 and 4, and three times
+  each in the summary.  The size the test compares the first with,
+  pg_relation_size() of the table, is on the coordinator the three
+  segments' together here, where Cloudberry's view runs it on each -- and
+  is the table's relation whole, whose files' extents are longer than
+  what they hold: 52 and 289.  The third query asks the size of column j's
+  own file of segment file 1, "<relfilenode>.129", which a table that is
+  one relation's file has not: "could not stat file".
+
+uao/fast_analyze_row and _column
+  Two things.  attstattarget of a column whose statistics target was never
+  set is NULL in PostgreSQL 19, where Cloudberry's is -1.  And the first
+  scenario's count of the sample rows each segment returned, of 10,500 it
+  has: 10,500, where Cloudberry's is 10,000.  Cloudberry's coordinator
+  asks each segment for a third of the 30,000 rows ANALYZE wants and keeps
+  all it gets; the port's asks each for all 30,000 and keeps of each
+  segment's sample a share in proportion to the rows the segment has
+  (gp_analyze.c, merge_segment_samples()), so that a table most of whose
+  rows are on one segment is sampled as a whole.  A segment with fewer
+  rows than the target returns them all.  The other scenarios -- fewer
+  rows than the target, every row aborted, every row deleted, with and
+  without a block directory -- count as Cloudberry's do: 10, 0 and 0.
 
 bitmap_index_ao_sparse, uao/snapshot_index_corruption_row and _column
   EXPLAIN's plans and nothing else.  The tests turn ORCA off, so
