@@ -8,19 +8,46 @@ in it (test.orca.diff) holds for that pass alone.  run.sh counts a test as
 passing when gpdiff.pl, under Cloudberry's init_file and the port's, finds no
 difference or exactly the file's.
 
-add_column_after_vacuum_skip_drop_column, vacuum_after_vacuum_skip_drop_column
-  A column table's segment file that a VACUUM compacted while another
-  session held the table: Cloudberry's VACUUM drops such a file in a phase
-  that needs the table's AccessExclusiveLock and, failing to take it, leaves
-  the file awaiting drop (state 2) beside the one it compacted into, for an
-  ADD COLUMN or the next VACUUM to clean up -- what the two tests are for.
-  gp_ao recycles a compacted file once no snapshot can see what it held,
-  under no lock of the table's (ao_vacuum.c, ao_recycle()), and session 1,
-  whose SELECT has ended, holds the table but no snapshot: the file is
-  recycled as the VACUUM ends, back in state 1 and empty, so none awaits
-  drop.  And the file it compacts into is taken only when a live row moves,
-  so a file whose rows are all deleted leaves no second one.  The INSERT
-  after goes into segment file 1, as both tests want.
+add_column_after_vacuum_skip_drop_column, vacuum_after_vacuum_skip_drop_column,
+mark_all_aoseg_await_drop, reorganize_after_ao_vacuum_skip_drop,
+truncate_after_ao_vacuum_skip_drop, uao/select_after_vacuum_row and
+_column, uao/vacuum_self_serializable2_row and _column
+  A segment file that a VACUUM compacted while another session was inside
+  a transaction that had read, and was idle: Cloudberry leaves such a file
+  awaiting drop (state 2), for a later VACUUM -- or what the test then runs
+  -- to clean up.  It drops a compacted file once the compaction is older
+  than every snapshot in use (AppendOptimizedCollectDeadSegments()), and
+  counts an open transaction of the coordinator's as using the snapshot its
+  first statement took, to its end (the distributed xmin, procarray.c).
+  PostgreSQL's READ COMMITTED transaction holds no snapshot between its
+  statements, and gp_ao recycles a compacted file once no snapshot in use
+  can still see the compaction in progress -- none here, and on a segment
+  none of the coordinator's that it would be hidden from (ao_vacuum.c,
+  ao_recycle()): the session's next statement takes a snapshot that sees
+  the compaction, and reads the rows where they went.  So the file is
+  recycled as the VACUUM ends, back in state 1 and empty, and none awaits
+  drop.  The row counts are Cloudberry's -- and the file compacted into is
+  there, as Cloudberry's is, where every row of the first was deleted and
+  none moved.  An INSERT after takes the file with the fewest rows, the one
+  recycled, where Cloudberry's, which cannot take a file awaiting drop,
+  takes the other: add_column_after_vacuum_skip_drop_column's last query,
+  and in uao/select_after_vacuum the row that file 1 has and file 2 lacks
+  on the segment it went to (its modcount with it).  A file that a
+  snapshot in use does still need is kept awaiting drop, as Cloudberry
+  keeps it: uao/vacuum_self_function, where a function reads the table
+  under a snapshot older than the DELETE and the VACUUM, passes as it is.
+
+bitmap_index_ao_sparse, uao/snapshot_index_corruption_row and _column
+  EXPLAIN's plans and nothing else.  The tests turn ORCA off, so
+  PostgreSQL's planner plans in either pass, whose route reads a table's
+  rows through a Gather Motion of the table -- of the one segment that the
+  key, or gp_segment_id = 0, fixes -- and each segment plans its own scan
+  of them, where Cloudberry's plan shows its Bitmap Heap Scan or Seq Scan
+  under the Motion (see bitmap_index_concurrent).  The counts and rows the
+  tests are for are Cloudberry's: a bitmap index over an append-optimized
+  table's blocks far apart; and an index built while a transaction that
+  inserted a row was open, and one built after an UPDATE that a REPEATABLE
+  READ transaction's snapshot is older than, each read through.
 
 bitmap_index_concurrent
   EXPLAIN's four plans and nothing else.  Session 1 plans with PostgreSQL's
@@ -390,6 +417,62 @@ terminate_in_gang_creation
   makes a reader gang for its VALUES, whose new process does not find its
   writer.  The backend terminated while its gang is made ends with nothing
   to free, as the test is for.
+
+uao/compaction_full_stats_row and _column
+  Which segment file holds the rows after VACUUM FULL, and nothing else: 1,
+  where Cloudberry's has 2.  Cloudberry's VACUUM FULL of an
+  append-optimized table is its lazy VACUUM's compaction without the
+  threshold -- the rows go into another file of the same table.  gp_ao's is
+  PostgreSQL's, which writes the rows the snapshot sees into new files, the
+  first of which is 1 (ao_am.c, ao_relation_copy_for_cluster()).  The
+  counts of the table and of its index, which the test is for, are
+  Cloudberry's.
+
+uao/compaction_utility_row and _column, uao/compaction_utility_insert_row
+and _column
+  The numbers of the segment files a session of a segment's own writes and
+  compacts into, and what a VACUUM there leaves of the file it compacted.
+  Cloudberry keeps segment file 0 for a session in utility mode, which no
+  session of the coordinator's writes: its INSERTs go there, and so do the
+  rows its VACUUM moves.  gp_ao has no such file -- a session of a
+  segment's own takes a file as any other writer does, from 1, and a file
+  is one writer's at a time by its lock (ao_dml.c) -- so the rows inserted
+  there are in file 1, and those a VACUUM moved out of file 1 are in file
+  2.  And Cloudberry's VACUUM in utility mode leaves the file it compacted
+  awaiting drop, having no distributed snapshot to say that no one reads it
+  still, where gp_ao's recycles it as the VACUUM ends: no snapshot on the
+  segment sees the compaction in progress, and no part of a distributed
+  transaction that a snapshot of the coordinator's might still see in
+  progress had committed there as it compacted -- the SELECT before it
+  brought the segment a snapshot that says so -- so none reads the table
+  as it was before (ao_vacuum.c).  The rows each file holds, and what the
+  table reads as, are Cloudberry's.
+
+uao/index_build_reltuples_row and _column
+  What a segment's pg_class says of the table after CREATE INDEX, and of
+  the index where rows were deleted.  PostgreSQL 19's CREATE INDEX leaves a
+  table's counts as they are where autovacuum is off (index_update_stats():
+  one who turned it off may not expect them to change, a restored dump's
+  statistics among them), and the schedule turns it off before these tests
+  (disable_autovacuum): reltuples stays -1, where Cloudberry's, PostgreSQL
+  14's, is the rows the build read.  And an index's own count is of the
+  entries the build made: gp_ao builds from the rows the latest snapshot
+  sees, and tells PostgreSQL that an older snapshot may not use the index
+  (ao_am.c, ao_index_build_range_scan()), where Cloudberry's makes an entry
+  for a deleted row too, not knowing whether a snapshot still sees it.  The
+  counts of an index over rows none of which is deleted, and after aborted
+  rows, are Cloudberry's.
+
+uao/insert_policy_row and _column
+  The segment files a third session sees while two transactions that are
+  each writing a new one are open: none, where Cloudberry's shows file 1 and
+  then file 2.  Cloudberry inserts a new file's row into the aoseg relation
+  frozen, visible to every session at once and empty until its writer
+  commits.  A row of gp_ao.segfile is its writer's until it commits, as any
+  row is; another writer passes the file by through its lock, which the
+  first holds (ao_dml.c, ao_new_segfile()).  Which file each transaction
+  wrote, and each file's rows after -- what the policy is -- are
+  Cloudberry's.
 
 vacuum_full_interrupt
   EXPLAIN's plan, which the session makes with the planner in either pass:

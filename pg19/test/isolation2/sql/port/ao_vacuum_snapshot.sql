@@ -1,0 +1,73 @@
+-- The port's own: a snapshot of the coordinator's older than a DELETE reads
+-- an append-optimized table as it was, whatever a VACUUM has compacted
+-- since.  A REPEATABLE READ transaction's snapshot is taken on the
+-- coordinator alone until a statement of it reads a distributed table; a
+-- DELETE that commits after that is hidden from it on every segment, and so
+-- has to be the VACUUM that then moves the rows the DELETE left into another
+-- segment file -- a transaction of the segment's own, no part of a
+-- distributed one, which a snapshot there would see committed (gp_dtx.c, A
+-- LOCAL TRANSACTION THAT FOLLOWS THE PARTS; gp_ao's ao_vacuum.c).  Seen, the
+-- rows moved would be read twice, and after the file was recycled the rows
+-- deleted not at all.  Cloudberry's uao/vacuum_self_function reads so from a
+-- function that sleeps; this reads after segment 0 has restarted too, which
+-- has what to hide from its log alone, and after a VACUUM of a session of
+-- segment 0's own, which the coordinator told nothing.
+
+CREATE TABLE ao_vacuum_snapshot_row (a int, b int) USING ao_row DISTRIBUTED BY (a);
+CREATE TABLE ao_vacuum_snapshot_column (a int, b int) USING ao_column DISTRIBUTED BY (a);
+INSERT INTO ao_vacuum_snapshot_row SELECT i, i FROM generate_series(1, 100) i;
+INSERT INTO ao_vacuum_snapshot_column SELECT i, i FROM generate_series(1, 100) i;
+
+1: BEGIN ISOLATION LEVEL REPEATABLE READ;
+1: SELECT 'snapshot' FROM pg_class LIMIT 1;
+
+2: DELETE FROM ao_vacuum_snapshot_row WHERE a <= 60;
+2: DELETE FROM ao_vacuum_snapshot_column WHERE a <= 60;
+2: VACUUM ao_vacuum_snapshot_row;
+2: VACUUM ao_vacuum_snapshot_column;
+
+-- Each file compacted awaits drop, with the rows session 1 still reads, and
+-- the forty the DELETEs left are in the file compacted into.
+2: SELECT segno, state, sum(tupcount) FROM gp_toolkit.__gp_aoseg('ao_vacuum_snapshot_row') GROUP BY 1, 2 ORDER BY 1;
+2: SELECT segno, state, sum(tupcount) FROM gp_toolkit.__gp_aocsseg('ao_vacuum_snapshot_column') WHERE column_num = 0 GROUP BY 1, 2 ORDER BY 1;
+
+-- A VACUUM again recycles neither: session 1's snapshot is in use still.
+2: VACUUM ao_vacuum_snapshot_row;
+2: SELECT segno, state, sum(tupcount) FROM gp_toolkit.__gp_aoseg('ao_vacuum_snapshot_row') GROUP BY 1, 2 ORDER BY 1;
+
+-- The compactions are logged with the DELETEs' parts they are hidden with.
+0U: SELECT count(*) > 0 AS logged FROM gp_internal.distributed_log WHERE follows;
+0Uq:
+
+-- Segment 0 restarts, and reads its map back from the log.
+2: SELECT pg_ctl(datadir, 'restart') FROM gp_segment_configuration WHERE content = 0 AND role = 'p';
+2q:
+
+1: SELECT count(*) FROM ao_vacuum_snapshot_row;
+1: SELECT count(*) FROM ao_vacuum_snapshot_column;
+1: SELECT count(*) FROM ao_vacuum_snapshot_row WHERE a <= 60;
+1: COMMIT;
+
+-- A snapshot of now reads what the DELETEs left, and with session 1's gone
+-- a VACUUM recycles the files.
+3: SELECT count(*) FROM ao_vacuum_snapshot_row;
+3: SELECT count(*) FROM ao_vacuum_snapshot_column;
+3: VACUUM ao_vacuum_snapshot_row;
+3: VACUUM ao_vacuum_snapshot_column;
+3: SELECT segno, state, sum(tupcount) FROM gp_toolkit.__gp_aoseg('ao_vacuum_snapshot_row') GROUP BY 1, 2 ORDER BY 1;
+3: SELECT segno, state, sum(tupcount) FROM gp_toolkit.__gp_aocsseg('ao_vacuum_snapshot_column') WHERE column_num = 0 GROUP BY 1, 2 ORDER BY 1;
+
+-- The same of a VACUUM by a session of segment 0's own, which no
+-- coordinator's snapshot comes with: the DELETE's part is in the segment's
+-- map still, and the compaction is hidden with it.
+4: BEGIN ISOLATION LEVEL REPEATABLE READ;
+4: SELECT 'snapshot' FROM pg_class LIMIT 1;
+3: DELETE FROM ao_vacuum_snapshot_row WHERE a <= 80;
+0U: VACUUM ao_vacuum_snapshot_row;
+0U: SELECT state, count(*) FROM gp_toolkit.__gp_aoseg('ao_vacuum_snapshot_row') WHERE tupcount > 0 GROUP BY 1 ORDER BY 1;
+4: SELECT count(*) FROM ao_vacuum_snapshot_row;
+4: COMMIT;
+3: SELECT count(*) FROM ao_vacuum_snapshot_row;
+
+3: DROP TABLE ao_vacuum_snapshot_row;
+3: DROP TABLE ao_vacuum_snapshot_column;

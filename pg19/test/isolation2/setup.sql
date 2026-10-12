@@ -53,6 +53,107 @@ GRANT EXECUTE ON FUNCTION gp_inject_fault(text, text, text, text, text,
 GRANT CREATE ON SCHEMA public TO PUBLIC;
 
 --
+-- What Cloudberry's tests of append-optimized tables ask of its setup, as
+-- it makes them.
+--
+
+-- gp_ao_or_aocs_seg(rel): the table's segment files on every segment, of a
+-- row table (gp_toolkit.__gp_aoseg) or a column table (__gp_aocsseg, a row
+-- a file there, not one a column), so that one test reads both.
+CREATE FUNCTION gp_ao_or_aocs_seg(rel regclass,
+	segment_id OUT integer,
+	segno OUT integer,
+	tupcount OUT bigint,
+	modcount OUT bigint,
+	formatversion OUT smallint,
+	state OUT smallint)
+RETURNS SETOF record AS $$
+DECLARE
+	amname_var text;
+BEGIN
+	SELECT amname INTO amname_var FROM pg_class c, pg_am am WHERE c.relam = am.oid AND c.oid = rel;
+	IF amname_var = 'ao_column' THEN
+		FOR segment_id, segno, tupcount, modcount, formatversion, state IN
+			SELECT DISTINCT x.segment_id, x.segno, x.tupcount, x.modcount, x.formatversion, x.state
+			  FROM gp_toolkit.__gp_aocsseg(rel) x
+		LOOP
+			RETURN NEXT;
+		END LOOP;
+	ELSIF amname_var = 'ao_row' THEN
+		FOR segment_id, segno, tupcount, modcount, formatversion, state IN
+			SELECT x.segment_id, x.segno, x.tupcount, x.modcount, x.formatversion, x.state
+			  FROM gp_toolkit.__gp_aoseg(rel) x
+		LOOP
+			RETURN NEXT;
+		END LOOP;
+	ELSE
+		RAISE '% is not an AO_ROW or AO_COLUMN table', rel::text;
+	END IF;
+END;
+$$ LANGUAGE plpgsql;
+
+-- locktest_master, locktest_segments_dist and locktest_segments: the locks
+-- held in this database, on the coordinator and, in summary, on the
+-- segments -- "1 segment" or "n segments" a relation, as the number of
+-- segments is the cluster's.  Cloudberry's, as they are: its names of an
+-- append-optimized table's auxiliary relations and its lock on a segment
+-- file match nothing here, where gp_ao keeps a table's segment files,
+-- visibility map and block directory in tables of its own, every
+-- append-optimized table's (gp_ao--1.0.sql).
+CREATE VIEW locktest_master AS
+SELECT coalesce(
+  CASE WHEN relname LIKE 'pg_toast%index' THEN 'toast index'
+       WHEN relname LIKE 'pg_toast%' THEN 'toast table'
+       WHEN relname LIKE 'pg_aoseg%' THEN 'aoseg table'
+       WHEN relname LIKE 'pg_aovisimap%index' THEN 'aovisimap index'
+       WHEN relname LIKE 'pg_aovisimap%' THEN 'aovisimap table'
+       ELSE relname END, 'dropped table'),
+  mode,
+  locktype,
+  'master'::text AS node
+FROM pg_locks l
+LEFT OUTER JOIN pg_class c ON ((l.locktype = 'append-only segment file' AND l.relation = c.relfilenode) OR (l.locktype != 'append-only segment file' AND l.relation = c.oid)),
+pg_database d
+WHERE relation IS NOT NULL
+AND l.database = d.oid
+AND (relname <> 'gp_fault_strategy' AND relname != 'locktest_master' OR relname IS NULL)
+AND d.datname = current_database()
+AND l.gp_segment_id = -1
+GROUP BY l.gp_segment_id, relation, relname, locktype, mode
+ORDER BY 1, 3, 2;
+
+CREATE VIEW locktest_segments_dist AS
+SELECT relname,
+  mode,
+  locktype,
+  l.gp_segment_id AS node,
+  relation
+FROM pg_locks l
+LEFT OUTER JOIN pg_class c ON ((l.locktype = 'append-only segment file' AND l.relation = c.relfilenode) OR (l.locktype != 'append-only segment file' AND l.relation = c.oid)),
+pg_database d
+WHERE relation IS NOT NULL
+AND l.database = d.oid
+AND (relname <> 'gp_fault_strategy' AND relname != 'locktest_segments_dist' OR relname IS NULL)
+AND d.datname = current_database()
+AND l.gp_segment_id > -1
+GROUP BY l.gp_segment_id, relation, relname, locktype, mode;
+
+CREATE VIEW locktest_segments AS
+SELECT coalesce(
+  CASE WHEN relname LIKE 'pg_toast%index' THEN 'toast index'
+       WHEN relname LIKE 'pg_toast%' THEN 'toast table'
+       WHEN relname LIKE 'pg_aoseg%' THEN 'aoseg table'
+       WHEN relname LIKE 'pg_aovisimap%index' THEN 'aovisimap index'
+       WHEN relname LIKE 'pg_aovisimap%' THEN 'aovisimap table'
+       ELSE relname END, 'dropped table'),
+  mode,
+  locktype,
+  CASE WHEN count(*) = 1 THEN '1 segment'
+       ELSE 'n segments' END AS node
+  FROM gp_dist_random('locktest_segments_dist')
+  GROUP BY relname, relation, mode, locktype;
+
+--
 -- pg_ctl(datadir, command, command_mode): stop, restart or promote the node
 -- whose data directory that is, waiting for it, as Cloudberry's does.  The
 -- harness keeps each node's log beside its data directory.

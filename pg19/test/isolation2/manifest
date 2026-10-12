@@ -1,13 +1,15 @@
 # Part of Cloudberry's isolation2_schedule (src/test/isolation2), as the port
 # runs it on a coordinator and three segments: every test of the schedule
-# but those of append-optimized tables' own (below), in the schedule's order
-# -- distributed transactions, distributed snapshots, locks and the global
-# deadlock detector (M3), FTS and mirrors (M4), resource queues and memory
-# accounting (M6), the tools -- a node recovered elsewhere, the standby
-# coordinator promoted, removed, made again and waited for, a node copied
-# with pg_basebackup (M7) -- directory tables on a cluster (M8), and the
-# rest: a session of a node's own, the dispatcher and its gangs, indexes,
-# VACUUM and ANALYZE, the bitmap index, and Cloudberry's faults in
+# but twenty-three of append-optimized tables' own (below), in the
+# schedule's order -- distributed transactions, distributed snapshots, locks
+# and the global deadlock detector (M3), FTS and mirrors (M4), resource
+# queues and memory accounting (M6), the tools -- a node recovered
+# elsewhere, the standby coordinator promoted, removed, made again and
+# waited for, a node copied with pg_basebackup (M7) -- directory tables on a
+# cluster (M8), append-optimized tables under sessions side by side -- their
+# segment files, VACUUM's compaction, cursors, snapshots and indexes (M5) --
+# and the rest: a session of a node's own, the dispatcher and its gangs,
+# indexes, VACUUM and ANALYZE, the bitmap index, and Cloudberry's faults in
 # PostgreSQL's own code, which the tests' build has as injection points
 # (../../docker/patches).
 #
@@ -18,10 +20,14 @@
 #         in the schedule's order.  A group name ending in "*" is every group
 #         that name begins, so gdd/prepare, which turns the global deadlock
 #         detector on, and gdd/end, which turns it off, run first and last in
-#         each group of GDD tests.  The groups are cut by time: each GDD test
-#         waits out the detector's five-second period at least once.  The
-#         group named standby has a standby coordinator too, and the group
-#         whose name begins "mirrors" a mirror for each segment besides.
+#         each group of GDD tests; and several names with commas between
+#         them are each of them, so disable_autovacuum runs in main and
+#         first in the two groups of append-optimized tables' tests.  The
+#         groups are cut by time: each GDD test waits out the detector's
+#         five-second period at least once.  The group named standby has a
+#         standby coordinator too, the group whose name begins "mirrors" a
+#         mirror for each segment besides, and one whose name begins "uao"
+#         the connections of Cloudberry's demo cluster.
 #   skip  it needs what the port does not have yet: the rest of the line says
 #         what
 #
@@ -29,11 +35,22 @@
 # (sql/port and expected/port here): what the port does in a place of
 # Cloudberry's the schedule's tests do not reach.
 #
-# The schedule's tests of append-optimized tables' own -- uao/, the ao_ and
-# aocs_ tests, fsync_ao, mark_all_aoseg_await_drop, bitmap_index_ao_sparse,
-# the reindex/ tests of ao and aoco tables and the rest of the 133 a count of
-# 2026-10-02 called append-optimized -- are not listed yet.  Its FTS tests
-# are M4's, and are: the ones that run are in the groups mirrors1 to
+# The schedule's tests of append-optimized tables' own are 133: uao/, each
+# of whose 56 files Cloudberry's pg_regress makes a test of a row table and
+# one of a column table, x_row and x_column (run.sh), and 21 others.  The
+# 110 of them that ask nothing the port lacks are listed: 47 of uao/'s
+# files, in the groups uao_row and uao_column, after disable_autovacuum as
+# the schedule has them, with the three tests the schedule runs between the
+# two; ao_partition_lock, bitmap_index_ao_sparse and the reindex/ tests of
+# ao and aoco tables in main, beside their heap twins.  The other 23 are not
+# listed yet -- uao/alter_while_vacuum2, ao_unique_index_vacuum, brin,
+# brin_chain, fast_analyze, limit_indexscan_inits, max_concurrency2,
+# test_pg_appendonly_version and vacuum_cleanup, each of a row and of a
+# column table, and ao_blkdir, ao_index_build_progress, ao_unique_index,
+# aocs_unique_index and fsync_ao: each wants a fault, a setting or a view
+# gp_ao has not, or reads Cloudberry's own layout of an append-optimized
+# table's auxiliary relations.  Its FTS tests are M4's, and are: the ones
+# that run are in the groups mirrors1 to
 # mirrors3, whose clusters have a mirror for each segment -- three, so that
 # they run side by side -- M7's in mirrors4, whose standby they change, and
 # dtx_recovery_wait_lsn in mirrors5, whose recovery process waits a minute
@@ -59,6 +76,7 @@ run  lockmodes                                     lockmodes
 run  port/metatrack_drop                         lockmodes
 run  pg_rewind_fail_missing_xlog                   mirrors8
 run  prepared_xact_deadlock_pg_rewind              mirrors1
+run  ao_partition_lock                                  main
 run  port/dirxact_restart                          mirrors1
 run  vacuum_skip_locked_onseg                           main
 run  select_dropped_table
@@ -109,6 +127,7 @@ run  reindex                                            main
 skip reindex_gpfastsequence                 gp_fastsequence, Cloudberry's catalog of the row numbers an append-optimized table's segment files take, which gp_ao keeps in its own segment table (ao_meta.c): its REINDEX, and the INSERT that waits behind it, are append-optimized storage's own
 run  reader_waits_for_lock                         readers
 run  resource_queue                                queues
+run  bitmap_index_ao_sparse                             main
 run  resource_queue_deadlock                       queues
 run  resource_queue_cancel                         queues
 run  resource_queue_multi_portal                   queues
@@ -122,21 +141,130 @@ run  port/dtx_wait_prepared
 run  gp_collation                                       main
 run  bitmap_index_concurrent                            main
 run  bitmap_index_inspect                               main
-run  disable_autovacuum                                 main
+run  disable_autovacuum                                 main,uao_row,uao_column
 run  concurrent_index_creation_should_not_deadlock      main
+run  uao/alter_while_vacuum_row                         uao_row
+run  uao/compaction_full_stats_row                      uao_row
+run  uao/compaction_utility_row                         uao_row
+run  uao/compaction_utility_insert_row                  uao_row
+run  uao/cursor_before_delete_row                       uao_row
+run  uao/cursor_before_deletevacuum_row                 uao_row
+run  uao/cursor_before_update_row                       uao_row
+run  uao/cursor_withhold_row                            uao_row
+run  uao/cursor_withhold2_row                           uao_row
+run  uao/delete_while_vacuum_row                        uao_row
+run  uao/index_build_reltuples_row                      uao_row
+run  uao/insert_policy_row                              uao_row
+run  uao/insert_while_vacuum_row                        uao_row
+run  uao/max_concurrency_row                            uao_row
+run  uao/modcount_row                                   uao_row
+run  uao/modcount_vacuum_row                            uao_row
+run  uao/parallel_delete_row                            uao_row
+run  uao/parallel_update_row                            uao_row
+run  uao/parallel_update_readcommitted_row              uao_row
+run  uao/phantom_reads_row                              uao_row
+run  uao/phantom_reads_serializable_row                 uao_row
+run  uao/phantom_reads_delete_row                       uao_row
+run  uao/phantom_reads_delete_serializable_row          uao_row
+run  uao/phantom_reads_update_row                       uao_row
+run  uao/phantom_reads_update_serializable_row          uao_row
+run  uao/select_after_vacuum_row                        uao_row
+run  uao/select_after_vacuum_serializable_row           uao_row
+run  uao/select_before_vacuum_row                       uao_row
+run  uao/select_while_delete_row                        uao_row
+run  uao/select_while_full_vacuum_row                   uao_row
+run  uao/select_while_vacuum_row                        uao_row
+run  uao/select_while_vacuum_serializable_row           uao_row
+run  uao/select_while_vacuum_serializable2_row          uao_row
+run  uao/selectinsert_while_vacuum_row                  uao_row
+run  uao/selectinsertupdate_while_vacuum_row            uao_row
+run  uao/selectupdate_while_vacuum_row                  uao_row
+run  uao/snapshot_index_corruption_row                  uao_row
+run  uao/update_while_vacuum_row                        uao_row
+run  uao/vacuum_self_serializable_row                   uao_row
+run  uao/vacuum_self_serializable2_row                  uao_row
+run  uao/vacuum_self_serializable3_row                  uao_row
+run  uao/vacuum_self_function_row                       uao_row
+run  uao/vacuum_while_insert_row                        uao_row
+run  uao/vacuum_while_vacuum_row                        uao_row
+run  uao/vacuum_index_stats_row                         uao_row
+run  uao/bitmapindex_rescan_row                         uao_row
+run  uao/create_index_allows_readonly_row               uao_row
+run  reorganize_after_ao_vacuum_skip_drop               uao_row
+run  truncate_after_ao_vacuum_skip_drop                 uao_row
+run  mark_all_aoseg_await_drop                          uao_row
+run  port/ao_vacuum_snapshot                            uao_row
+run  uao/alter_while_vacuum_column                      uao_column
+run  uao/compaction_full_stats_column                   uao_column
+run  uao/compaction_utility_column                      uao_column
+run  uao/compaction_utility_insert_column               uao_column
+run  uao/cursor_before_delete_column                    uao_column
+run  uao/cursor_before_deletevacuum_column              uao_column
+run  uao/cursor_before_update_column                    uao_column
+run  uao/cursor_withhold_column                         uao_column
+run  uao/cursor_withhold2_column                        uao_column
+run  uao/delete_while_vacuum_column                     uao_column
+run  uao/index_build_reltuples_column                   uao_column
+run  uao/insert_policy_column                           uao_column
+run  uao/insert_while_vacuum_column                     uao_column
+run  uao/max_concurrency_column                         uao_column
+run  uao/modcount_column                                uao_column
+run  uao/modcount_vacuum_column                         uao_column
+run  uao/parallel_delete_column                         uao_column
+run  uao/parallel_update_column                         uao_column
+run  uao/parallel_update_readcommitted_column           uao_column
+run  uao/phantom_reads_column                           uao_column
+run  uao/phantom_reads_serializable_column              uao_column
+run  uao/phantom_reads_delete_column                    uao_column
+run  uao/phantom_reads_delete_serializable_column       uao_column
+run  uao/phantom_reads_update_column                    uao_column
+run  uao/phantom_reads_update_serializable_column       uao_column
+run  uao/select_after_vacuum_column                     uao_column
+run  uao/select_after_vacuum_serializable_column        uao_column
+run  uao/select_before_vacuum_column                    uao_column
+run  uao/select_while_delete_column                     uao_column
+run  uao/select_while_full_vacuum_column                uao_column
+run  uao/select_while_vacuum_column                     uao_column
+run  uao/select_while_vacuum_serializable_column        uao_column
+run  uao/select_while_vacuum_serializable2_column       uao_column
+run  uao/selectinsert_while_vacuum_column               uao_column
+run  uao/selectinsertupdate_while_vacuum_column         uao_column
+run  uao/selectupdate_while_vacuum_column               uao_column
+run  uao/snapshot_index_corruption_column               uao_column
+run  uao/update_while_vacuum_column                     uao_column
+run  uao/vacuum_self_serializable_column                uao_column
+run  uao/vacuum_self_serializable2_column               uao_column
+run  uao/vacuum_self_serializable3_column               uao_column
+run  uao/vacuum_self_function_column                    uao_column
+run  uao/vacuum_while_insert_column                     uao_column
+run  uao/vacuum_while_vacuum_column                     uao_column
+run  uao/vacuum_index_stats_column                      uao_column
+run  uao/bitmapindex_rescan_column                      uao_column
+run  uao/create_index_allows_readonly_column            uao_column
 run  add_column_after_vacuum_skip_drop_column           main
 run  vacuum_after_vacuum_skip_drop_column               main
 run  autostats_locking                                  main
 run  enable_autovacuum                                  main
 run  reindex/abort_reindex                              main
+run  reindex/createidx_while_reindex_idx_ao_btree       main
 run  reindex/createidx_while_reindex_idx_heap_btree     main
+run  reindex/createidx_while_reindex_idx_aoco_btree     main
+run  reindex/createidx_while_reindex_idx_ao_bitmap      main
 run  reindex/createidx_while_reindex_idx_heap_bitmap    main
+run  reindex/createidx_while_reindex_idx_aoco_bitmap    main
+run  reindex/reindextable_while_addpart_ao_part_btree   main
 run  reindex/reindextable_while_addpart_heap_part_btree main
+run  reindex/reindextable_while_addpart_aoco_part_btree main
+run  reindex/reindextable_while_altertable_ao_part_btree main
 run  reindex/reindextable_while_altertable_heap_part_btree main
+run  reindex/reindextable_while_altertable_aoco_part_btree main
 run  reindex/serializable_reindex_with_drop_column_heap main
 run  port/anyarray_wire                                 main
+run  reindex/serializable_reindex_with_drop_index_ao    main
 run  reindex/serializable_reindex_with_drop_index_heap  main
 run  reindex/repeatable_read_reindex_with_insert_heap   main
+run  reindex/vacuum_analyze_while_reindex_ao_btree      main
+run  reindex/vacuum_while_reindex_ao_bitmap             main
 run  reindex/vacuum_while_reindex_heap_btree            main
 run  reindex/vacuum_while_reindex_heap_btree_toast      main
 run  upgrade_numsegments                                main

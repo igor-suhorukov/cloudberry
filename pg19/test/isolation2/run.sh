@@ -17,12 +17,13 @@
 # specific language governing permissions and limitations
 # under the License.
 #
-# Cloudberry's isolation2_schedule, on a cluster, but for its append-optimized
-# tables' own tests (manifest): M3's tests -- distributed transactions,
-# snapshots, locks and the global deadlock detector -- M4's, FTS and mirrors,
-# M6's resource queues and memory accounting, M7's of the tools: a node
-# recovered elsewhere, and the standby coordinator promoted, made again and
-# waited for; and the rest, a session of a node's own, the dispatcher's
+# Cloudberry's isolation2_schedule, on a cluster, but for some of its
+# append-optimized tables' own tests (manifest): M3's tests -- distributed
+# transactions, snapshots, locks and the global deadlock detector -- M4's,
+# FTS and mirrors, M5's of append-optimized tables under sessions side by
+# side, M6's resource queues and memory accounting, M7's of the tools: a
+# node recovered elsewhere, and the standby coordinator promoted, made again
+# and waited for; and the rest, a session of a node's own, the dispatcher's
 # gangs, indexes, VACUUM and ANALYZE, and the bitmap index.  And
 # parallel_retrieve_cursor_schedule, M8's: parallel retrieve cursors and the
 # retrieve sessions that read them (1R:, *R:).
@@ -143,18 +144,28 @@ SECRET="isolation2-schedule-$RANDOM$RANDOM$RANDOM"
 
 # The tests the manifest runs, in its order, and the group each is in; the
 # groups, in the order they first appear.  A group name ending in "*" is
-# every group that name begins.
+# every group that name begins, and several names with commas between them
+# are each of them.
 run_tests=(); run_group=()
 while read -r t g; do
 	run_tests+=("$t"); run_group+=("${g:-main}")
 done < <(awk '$1 == "run" { print $2, $3 }' "$MANIFEST")
 groups=()
-for g in "${run_group[@]}"; do
-	[[ "$g" == *"*" ]] && continue
-	[[ " ${groups[*]} " == *" $g "* ]] || groups+=("$g")
+for gs in "${run_group[@]}"; do
+	IFS=, read -ra names <<< "$gs"
+	for g in "${names[@]}"; do
+		[[ "$g" == *"*" ]] && continue
+		[[ " ${groups[*]} " == *" $g "* ]] || groups+=("$g")
+	done
 done
-in_group() {					# in_group <test's group> <group>
-	[ "$1" = "$2" ] || { [[ "$1" == *"*" ]] && [[ "$2" == "${1%\*}"* ]]; }
+in_group() {					# in_group <test's groups> <group>
+	local w names
+	IFS=, read -ra names <<< "$1"
+	for w in "${names[@]}"; do
+		[ "$w" = "$2" ] && return 0
+		[[ "$w" == *"*" ]] && [[ "$2" == "${w%\*}"* ]] && return 0
+	done
+	return 1
 }
 for i in "${!run_tests[@]}"; do
 	found=0
@@ -171,6 +182,10 @@ node_port() { echo $((BASEPORT + $1 * NODES + $2)); }
 group_sock() { echo "$SOCK/$1"; }
 standby_port() { echo $((BASEPORT + 100 + $1)); }
 has_mirrors() { [[ "$1" == mirrors* ]]; }
+# A group of the append-optimized tables' own tests, whose name begins "uao":
+# a test of theirs has 127 sessions write a table at once, one for each
+# segment file it may have (uao/max_concurrency).
+has_many_sessions() { [[ "$1" == uao* ]]; }
 has_standby() { [ "$1" = standby ] || has_mirrors "$1"; }
 # Content c's mirror in the gi-th group, and the standby's dbid: Cloudberry's
 # demo cluster's, the mirrors 5..7 and the standby 8, where there are mirrors.
@@ -289,6 +304,13 @@ make_cluster() {
 			# WAL its checkpoint began in after two switches and a
 			# checkpoint (segwalrep/master_wal_switch)
 			has_standby "$g" && echo "wal_keep_size = '320MB'"
+			# and the connections of Cloudberry's demo cluster, 150 on the
+			# coordinator and five times as many on a segment
+			# (gpdemo-defaults.sh), where a test opens more sessions at once
+			# than PostgreSQL's hundred
+			if has_many_sessions "$g"; then
+				if [ "$n" -eq 0 ]; then echo "max_connections = 150"; else echo "max_connections = 750"; fi
+			fi
 			[ "$n" -eq 0 ] && echo "gp.role = 'dispatch'"
 		} >> "$(node_dir "$g" "$n")/postgresql.auto.conf"
 	done
@@ -538,6 +560,15 @@ convert() {
 	    -e "s#@DLSUFFIX@#.so#g" "$1"
 }
 
+# A row table's or a column table's, in a file of both (run_group).
+amsub() {
+	if [ -n "$am" ]; then
+		sed -e "s/@amname@/$am/g" -e "s/@aoseg@/$aoseg/g"
+	else
+		cat
+	fi
+}
+
 # The init files of the schedule a test is of, where it is not
 # isolation2_schedule: parallel_retrieve_cursor_schedule's, which its target
 # in Cloudberry's Makefile reads, and the port's for it -- the port's own
@@ -601,17 +632,41 @@ run_group() {
 		# suite's.
 		src="$TESTS"
 		[[ "$t" == port/* ]] && src="$HERE"
-		if [ -f "$src/input/$t.source" ]; then
-			convert "$src/input/$t.source" | respell | own_tmp | own_host | own_nodes > "$R/sql/$t.sql"
+		# A test Cloudberry's pg_regress makes twice of one file, where its
+		# directory says so (GENERATE_ROW_AND_COLUMN_FILES): uao/x_row and
+		# uao/x_column of input/uao/x.source, an append-optimized table's
+		# test of a row table and of a column table, as the greenplum suite
+		# makes them (../greenplum/run.sh).
+		tmpl="$t" am= aoseg=
+		for v in row:ao_row:aoseg column:ao_column:aocsseg; do
+			IFS=: read -r suffix a s <<< "$v"
+			if [ "${t%_$suffix}" != "$t" ] &&
+			   [ -f "$src/input/$(dirname "$t")/GENERATE_ROW_AND_COLUMN_FILES" ]; then
+				tmpl="${t%_$suffix}" am="$a" aoseg="$s"
+			fi
+		done
+		if [ -f "$src/input/$tmpl.source" ]; then
+			convert "$src/input/$tmpl.source" | amsub | respell | own_tmp | own_host | own_nodes > "$R/sql/$t.sql"
 		else
 			respell "$src/sql/$t.sql" | own_tmp | own_host | own_nodes > "$R/sql/$t.sql"
 		fi
+		# What it is compared with, and the name a difference kept is filed
+		# under: the expected output's, which for such a test of two is its
+		# own, x_row or x_column -- and x_row_optimizer under ORCA, where
+		# the file has an output of ORCA's (output/uao/x_optimizer.source).
 		exp="$src/expected/$t.out"
 		[ "$pass" = orca ] && [ -f "$src/expected/${t}_optimizer.out" ] && exp="$src/expected/${t}_optimizer.out"
-		[ -f "$src/output/$t.source" ] && exp="$src/output/$t.source"
+		[ -f "$src/output/$tmpl.source" ] && exp="$src/output/$tmpl.source"
 		name="$(basename "$exp" .out)"
 		name="${name%.source}"
-		convert "$exp" | respell | own_tmp | own_host | own_nodes > "$R/expected/$t.out"
+		if [ -n "$am" ]; then
+			name="$(basename "$t")"
+			if [ "$pass" = orca ] && [ -f "$src/output/${tmpl}_optimizer.source" ]; then
+				exp="$src/output/${tmpl}_optimizer.source"
+				name="${name}_optimizer"
+			fi
+		fi
+		convert "$exp" | amsub | respell | own_tmp | own_host | own_nodes > "$R/expected/$t.out"
 
 		# As pg_isolation2_regress runs it, from the suite's directory; how
 		# long it ran is reported with its result, as pg_regress reports it.

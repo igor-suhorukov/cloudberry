@@ -965,10 +965,13 @@ core series through a test module); `greenplum`, Cloudberry's
 listed, those that run and those skipped with what stops them, and the
 reasons ORCA would not plan a statement in its ORCA pass totalled, and the
 port's test of stock pgvector on the cluster; `isolation2`, every test
-of Cloudberry's `isolation2_schedule` but its append-optimized tables' own
+of Cloudberry's `isolation2_schedule` but twenty-three of its
+append-optimized tables' own, which are not listed yet
 -- those that run and those skipped with what stops them: distributed
 transactions and snapshots, locks and the global deadlock detector (M3),
-FTS and mirrors (M4), resource queues and memory accounting (M6), the
+FTS and mirrors (M4), append-optimized tables under sessions side by side,
+a row table's and a column table's test of each of `uao/`'s files (M5),
+resource queues and memory accounting (M6), the
 tools, a node recovered elsewhere and the standby promoted and made again
 (M7), and the rest, a session of a node's own, the dispatcher's gangs,
 indexes, VACUUM and ANALYZE, the bitmap index, and Cloudberry's faults in

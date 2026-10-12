@@ -1,0 +1,15 @@
+@@
+- Gather Motion 3:1  (slice1; segments: 3)              
+-   ->  Bitmap Heap Scan on ao_sparse                   
+-         Recheck Cond: ((id >= 97) AND (id <= 99))     
+-         Filter: (gp_segment_id = 0)                   
+-         ->  Bitmap Index Scan on idx_ao_sparse_id     
+-               Index Cond: ((id >= 97) AND (id <= 99)) 
++ Gather Motion 1:1 on ao_sparse  (slice1; segments: 1) 
++   Segment: 0                                          
+@@
+- Gather Motion 1:1  (slice1; segments: 1)                            
+-   ->  Seq Scan on aocs_sparse                                       
+-         Filter: ((id >= 97) AND (id <= 99) AND (gp_segment_id = 0)) 
++ Gather Motion 1:1 on aocs_sparse  (slice1; segments: 1) 
++   Segment: 0                                            
