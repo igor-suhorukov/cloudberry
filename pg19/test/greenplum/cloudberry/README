@@ -43,8 +43,8 @@ alter_table_aocs2  ADD COLUMN of an append-optimized table by row with a
 alter_table_set_am  psql's \d+ footers of an append-optimized table, which
   are Cloudberry's psql's and not PostgreSQL 19's.  The segment files of a
   table ALTER TABLE ... SET ACCESS METHOD rewrites into gp_ao: numbered from
-  1, where Cloudberry's rewrite writes segment 0, in gp_ao's own format,
-  version 1, with the lengths of its 8K blocks.  And each segment's
+  1, where Cloudberry's rewrite writes segment 0, and in gp_ao's own format,
+  with the lengths of its 8K blocks.  And each segment's
   gp_toolkit.__gp_aoblkdir(): a directory row's segment file is the
   rewrite's, 1, and its tupleid, which the port's init_file masks, is its
   place in gp_ao.blkdir, one table of every table's directory rows, where
@@ -366,8 +366,8 @@ gp_recursive_cte  its one EXPLAIN that gpdiff.pl compares as rows, an
 
 gp_tablespace  gp_toolkit.__gp_aoseg() and __gp_aocsseg() of the unlogged
   tables CREATE UNLOGGED TABLE ... AS makes: segment file 1, in gp_ao's own
-  format, version 1, with the lengths of its 8K blocks, where Cloudberry's
-  is segment 0 in its own (as in alter_table_set_am's).  And has_init_file()
+  format, with the lengths of its 8K blocks, where Cloudberry's is segment
+  0 in its own (as in alter_table_set_am's).  And has_init_file()
   of an unlogged table's aux relations, false: gp_ao keeps its segment
   files', visibility map's and block directory's rows in unlogged tables of
   its own that every unlogged table shares, and pg_appendonly names no

@@ -33,6 +33,28 @@
  * and again in a transaction of its own as a VACUUM statement ends
  * (gp_ao.c), for its own, as Cloudberry's post-cleanup phase does.
  *
+ * On a segment, every snapshot is also every distributed one.  The
+ * compacting transaction is the segment's own, which a snapshot taken here
+ * afterwards sees committed -- one a statement arrives with later too, whose
+ * distributed snapshot was taken on the coordinator before the DELETE that
+ * left the file worth compacting had ended there.  That statement reads the
+ * table as it was before the DELETE, the deleted rows still in the file; if
+ * it saw the compaction as well, it would read the rows that were moved a
+ * second time where they went, and after a recycling would not find the
+ * file's rows at all.  So the compacting transaction follows the parts that
+ * have committed here (gp_core's GpDtxFollowCommitted()): a distributed
+ * snapshot that hides one of them hides it, and the file is not recycled
+ * while any snapshot in use may (GpDtxIsFollowed()) -- which a VACUUM
+ * knows afresh, the coordinator telling every segment as it sends one what
+ * no snapshot of its can see in progress any more.  The file stays awaiting
+ * drop meanwhile, as Cloudberry's does while a distributed snapshot is older
+ * than its compaction.
+ *
+ * A VACUUM changes no segment file's modcount, Cloudberry's count of the
+ * statements that changed a file's rows, by which an incremental backup
+ * tells a table that changed: neither the file compacted, nor the file its
+ * rows went to, nor the file recycled.
+ *
  *-------------------------------------------------------------------------
  */
 #include "postgres.h"
@@ -57,6 +79,7 @@
 #include "utils/timestamp.h"
 
 #include "gp_ao.h"
+#include "gp_dtx.h"
 
 /* The tables this backend's VACUUM compacted, for its last phase. */
 static List *ao_compacted = NIL;
@@ -134,8 +157,38 @@ compaction_may_be_seen_running(TransactionId xid)
 }
 
 /*
+ * The rows of the table's segment files that are in use, as the latest
+ * snapshot sees them: those not deleted, and into *dead those that are.
+ */
+static double
+ao_live_tuples(int64 storage_id, double *dead)
+{
+	AoSegfile  *segfiles;
+	int			nsegfiles;
+	double		live = 0;
+
+	*dead = 0;
+	segfiles = ao_segfiles_read(storage_id, GetLatestSnapshot(), &nsegfiles);
+	for (int i = 0; i < nsegfiles; i++)
+	{
+		AoSegfile  *sf = &segfiles[i];
+		double		deleted;
+
+		if (sf->state != AO_SEGFILE_DEFAULT)
+			continue;
+		deleted = ao_visimap_count(ao_visimap_load(storage_id, sf->segno,
+												   GetLatestSnapshot()));
+		live += sf->tupcount - deleted;
+		*dead += deleted;
+	}
+	return live;
+}
+
+/*
  * Recycle the segment files of rel a VACUUM compacted, whose compacting
- * transaction every snapshot now sees committed.  Returns how many.
+ * transaction every snapshot now sees committed: none here that began
+ * before it ended, and on a segment no distributed one that hides it with a
+ * part it followed.  Returns how many.
  */
 static int
 ao_recycle(Relation rel, int64 storage_id, BufferAccessStrategy bstrategy)
@@ -144,6 +197,7 @@ ao_recycle(Relation rel, int64 storage_id, BufferAccessStrategy bstrategy)
 	int			nsegfiles;
 	AoRecycleState rs = {0};
 	int			n = 0;
+	double		dead;
 
 	segfiles = ao_segfiles_read(storage_id, GetLatestSnapshot(), &nsegfiles);
 	for (int i = 0; i < nsegfiles; i++)
@@ -153,6 +207,7 @@ ao_recycle(Relation rel, int64 storage_id, BufferAccessStrategy bstrategy)
 		if (sf->state != AO_SEGFILE_AWAITING_DROP ||
 			!TransactionIdIsValid(sf->compacted_by) ||
 			compaction_may_be_seen_running(sf->compacted_by) ||
+			GpDtxIsFollowed(sf->compacted_by) ||
 			!ao_segfile_try_lock(RelationGetRelid(rel), sf->segno))
 			continue;
 		rs.recycle[sf->segno] = true;
@@ -162,7 +217,14 @@ ao_recycle(Relation rel, int64 storage_id, BufferAccessStrategy bstrategy)
 	if (n == 0)
 		return 0;
 
-	ao_vacuum_indexes(rel, ao_recycle_callback, &rs, 0, bstrategy, false);
+	/*
+	 * The entries of the files' rows go, and each index is left with those
+	 * of the rows in use, which it then says it has: Cloudberry's VACUUM
+	 * counts an index's entries again where it dropped a file, and only
+	 * there (uao/vacuum_index_stats).
+	 */
+	ao_vacuum_indexes(rel, ao_recycle_callback, &rs,
+					  ao_live_tuples(storage_id, &dead), bstrategy, true);
 	(void) AO_FAULT("vacuum_ao_after_index_delete", rel);
 
 	for (int i = 0; i < nsegfiles; i++)
@@ -180,7 +242,6 @@ ao_recycle(Relation rel, int64 storage_id, BufferAccessStrategy bstrategy)
 			sf->eof[g] = sf->eof_uncompressed[g] = 0;
 		sf->tupcount = 0;
 		sf->varblockcount = 0;
-		sf->modcount++;
 		sf->state = AO_SEGFILE_DEFAULT;
 		sf->compacted_by = InvalidTransactionId;
 		ao_segfile_update(storage_id, sf);
@@ -226,7 +287,7 @@ ao_compact(Relation rel, int64 storage_id, AoSegfile *sf)
 	TableScanDesc scan;
 	TupleTableSlot *src;
 	TupleTableSlot *dst;
-	AoInsertState *st = NULL;
+	AoInsertState *st;
 	Relation   *indrels;
 	IndexInfo **indinfos;
 	ExprState **preds;
@@ -238,7 +299,6 @@ ao_compact(Relation rel, int64 storage_id, AoSegfile *sf)
 	mine = ao_segfile_read(storage_id, sf->segno, SnapshotSelf);
 	mine->state = AO_SEGFILE_AWAITING_DROP;
 	mine->compacted_by = GetCurrentTransactionId();
-	mine->modcount++;
 	ao_segfile_update(storage_id, mine);
 	CommandCounterIncrement();
 
@@ -252,6 +312,23 @@ ao_compact(Relation rel, int64 storage_id, AoSegfile *sf)
 			ExecPrepareQual(indinfos[i]->ii_Predicate, estate) : NULL;
 	}
 
+	/*
+	 * The file its rows go to, taken before any is found to move, as
+	 * Cloudberry's is (AppendOnlyCompact()): a file whose rows are all
+	 * deleted leaves an empty one beside it.  The one an earlier file of
+	 * this VACUUM went to, where there is one.
+	 */
+	ao_dml_set_compaction_writer(true);
+	PG_TRY();
+	{
+		st = ao_insert_state(rel);
+	}
+	PG_FINALLY();
+	{
+		ao_dml_set_compaction_writer(false);
+	}
+	PG_END_TRY();
+
 	src = table_slot_create(rel, NULL);
 	dst = table_slot_create(rel, NULL);
 	scan = table_beginscan(rel, snapshot, 0, NULL, SO_NONE);
@@ -260,19 +337,6 @@ ao_compact(Relation rel, int64 storage_id, AoSegfile *sf)
 	{
 		CHECK_FOR_INTERRUPTS();
 		ExecCopySlot(dst, src);
-		if (st == NULL)
-		{
-			ao_dml_set_compaction_writer(true);
-			PG_TRY();
-			{
-				st = ao_insert_state(rel);
-			}
-			PG_FINALLY();
-			{
-				ao_dml_set_compaction_writer(false);
-			}
-			PG_END_TRY();
-		}
 		ao_insert_slot(st, rel, dst);
 		ao_index_moved_row(indrels, indinfos, preds, nindexes, rel, dst,
 						   estate);
@@ -331,8 +395,9 @@ ao_vacuum_rel(Relation rel, const VacuumParams *params,
 	int64		storage_id;
 	AoSegfile  *segfiles;
 	int			nsegfiles;
-	double		livetuples = 0;
-	double		deadtuples = 0;
+	double		livetuples;
+	double		deadtuples;
+	bool		compacted = false;
 	TimestampTz starttime = GetCurrentTimestamp();
 
 	ao_vacuum_unhide();
@@ -359,22 +424,18 @@ ao_vacuum_rel(Relation rel, const VacuumParams *params,
 		if (!ao_segfile_try_lock(RelationGetRelid(rel), sf->segno))
 			continue;
 		ao_compact(rel, storage_id, sf);
+		compacted = true;
 	}
+
+	/*
+	 * What it compacted, a distributed snapshot that reads the table as it
+	 * was before a part that has committed here must not see.
+	 */
+	if (compacted)
+		GpDtxFollowCommitted();
 
 	/* The statistics, of what is left. */
-	segfiles = ao_segfiles_read(storage_id, GetLatestSnapshot(), &nsegfiles);
-	for (int i = 0; i < nsegfiles; i++)
-	{
-		AoSegfile  *sf = &segfiles[i];
-		double		deleted;
-
-		if (sf->state != AO_SEGFILE_DEFAULT)
-			continue;
-		deleted = ao_visimap_count(ao_visimap_load(storage_id, sf->segno,
-												   GetLatestSnapshot()));
-		livetuples += sf->tupcount - deleted;
-		deadtuples += deleted;
-	}
+	livetuples = ao_live_tuples(storage_id, &deadtuples);
 
 	ao_vacuum_indexes(rel, NULL, NULL, livetuples, bstrategy, true);
 	vac_update_relstats(rel, RelationGetNumberOfBlocks(rel), livetuples, 0, 0,

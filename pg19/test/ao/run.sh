@@ -459,9 +459,9 @@ is "a recycled segment file is written again, after the row numbers it had" \
 q "CREATE TABLE vd (a int) USING ao_row; INSERT INTO vd SELECT generate_series(1, 1000);
    DELETE FROM vd;" > /dev/null
 q "VACUUM vd;" > /dev/null
-is "VACUUM ends by recycling what it compacted, when nothing older runs beside it" \
+is "VACUUM ends by recycling what it compacted, when nothing older runs beside it, the file it took to compact into beside it" \
    "SELECT string_agg(segno || ':' || tupcount || ':' || state, ' ' ORDER BY segno)
-      FROM gp_ao.segfile WHERE storage_id = gp_ao.storage_id('vd');" "1:0:1"
+      FROM gp_ao.segfile WHERE storage_id = gp_ao.storage_id('vd');" "1:0:1 2:0:1"
 q "INSERT INTO vd SELECT generate_series(1, 10); DELETE FROM vd;" > /dev/null
 "$PSQL" -X -q -d postgres -c "SET gp.appendonly_compaction = off" -c "VACUUM vd" > /dev/null 2>&1
 is "gp.appendonly_compaction turns compaction off" \

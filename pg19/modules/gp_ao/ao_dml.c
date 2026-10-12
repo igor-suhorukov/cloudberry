@@ -115,6 +115,7 @@ struct AoInsertState
 	int64		first_rownum;	/* of the first row it appended */
 	int64		blocks;
 	bool		unseen;			/* it wrote a block the command has not seen */
+	bool		compaction;		/* VACUUM's, moving a compacted file's rows */
 	int			range;			/* rows appended since its group turned to it */
 	AoInsertState *lead;		/* its group's first writer, itself for that one */
 	List	   *files;			/* the first's: the group's writers, as begun */
@@ -437,6 +438,7 @@ ao_insert_begin(Relation rel, void *owner, SubTransactionId subid)
 	st->owner = owner;
 	st->subid = subid;
 	st->lead = st;
+	st->compaction = ao_compaction_writer;
 	st->storage_id = ao_storage_id(rel);
 	st->columnar = ao_storage_is_columnar(rel);
 	st->natts = RelationGetDescr(rel)->natts;
@@ -870,7 +872,9 @@ ao_finish_insert(AoInsertState *st)
 
 	if (st->inserted > 0)
 	{
-		st->sf->modcount++;
+		/* a statement's rows, not the ones a VACUUM moved (ao_vacuum.c) */
+		if (!st->compaction)
+			st->sf->modcount++;
 		ao_segfile_update(st->storage_id, st->sf);
 	}
 	table_close(rel, NoLock);
@@ -1058,10 +1062,13 @@ int64_cmp(const void *a, const void *b)
  * Write a statement's deletions to the visibility map, and count each
  * segment file they touched as modified, as Cloudberry's modcount counts a
  * DELETE for an incremental backup to find: after the writers' own updates
- * of the rows, which the same statement's UPDATE may have made.
+ * of the rows, which the same statement's UPDATE may have made.  Not
+ * counted ("count" false) where the statement appended rows to the table
+ * too, an UPDATE, whose writer counted it already: once a statement, as
+ * Cloudberry counts one (appendonly_dml_finish()).
  */
 static void
-ao_finish_delete(AoDeleteState *ds)
+ao_finish_delete(AoDeleteState *ds, bool count)
 {
 	CommandCounterIncrement();
 	for (int segno = 1; segno <= AO_MAX_SEGNO; segno++)
@@ -1073,6 +1080,8 @@ ao_finish_delete(AoDeleteState *ds)
 		qsort(ds->rownums[segno], ds->n[segno], sizeof(int64), int64_cmp);
 		ao_visimap_delete_rows(ds->storage_id, segno, ds->rownums[segno],
 							   ds->n[segno]);
+		if (!count)
+			continue;
 		sf = ao_segfile_read(ds->storage_id, segno, SnapshotSelf);
 		if (sf != NULL)
 		{
@@ -1107,6 +1116,7 @@ ao_dml_finish(void *owner, Oid relid)
 	SubTransactionId subid = GetCurrentSubTransactionId();
 	ListCell   *lc;
 	bool		any = false;
+	List	   *appended = NIL; /* the tables these writers appended rows to */
 
 	foreach(lc, ao_inserts)
 	{
@@ -1117,6 +1127,8 @@ ao_dml_finish(void *owner, Oid relid)
 			 (relid != InvalidOid && st->relid != relid)))
 			continue;
 		ao_inserts = foreach_delete_current(ao_inserts, lc);
+		if (st->inserted > 0 && !st->compaction)
+			appended = list_append_unique_oid(appended, st->relid);
 		ao_finish_insert(st);
 		any = true;
 	}
@@ -1129,9 +1141,10 @@ ao_dml_finish(void *owner, Oid relid)
 			 (relid != InvalidOid && ds->relid != relid)))
 			continue;
 		ao_deletes = foreach_delete_current(ao_deletes, lc);
-		ao_finish_delete(ds);
+		ao_finish_delete(ds, !list_member_oid(appended, ds->relid));
 		any = true;
 	}
+	list_free(appended);
 	if (any)
 		CommandCounterIncrement();
 }

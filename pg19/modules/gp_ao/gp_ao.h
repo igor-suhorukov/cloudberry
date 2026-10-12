@@ -227,7 +227,15 @@ extern void ao_block_check_header(Relation rel, uint32 filenum, uint64 offset,
 
 #define AO_SEGFILE_DEFAULT			1
 #define AO_SEGFILE_AWAITING_DROP	2
-#define AO_FORMAT_VERSION			1
+
+/*
+ * The format of a segment file, as gp_toolkit's functions say it of one:
+ * Cloudberry's number of its newest (AOSegfileFormatVersion_GP5, 3), which
+ * is what they say of every file a Cloudberry of today wrote, and what a
+ * tool that reads the number takes for a file that needs no conversion.
+ * gp_ao writes one format, and it is its newest; a later one would be 4.
+ */
+#define AO_FORMAT_VERSION			3
 
 /* A row of gp_ao.segfile: a segment file, as a snapshot sees it. */
 typedef struct AoSegfile
